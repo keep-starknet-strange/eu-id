@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/stwo-p256"]
+resolver = "2"

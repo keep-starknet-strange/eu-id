@@ -1,0 +1,22 @@
+[package]
+name = "stwo-p256"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["std"]
+std = ["stwo/std", "stwo-constraint-framework/std"]
+
+[dependencies]
+stwo = { git = "https://github.com/starkware-libs/stwo.git", features = ["prover"] }
+stwo-constraint-framework = { git = "https://github.com/starkware-libs/stwo.git", features = ["prover"] }
+itertools = { version = "0.12", default-features = false, features = ["use_alloc"] }
+num-traits = "0.2"
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+p256 = { version = "0.13", features = ["ecdsa"] }
+ecdsa = { version = "0.16", features = ["signing", "verifying"] }
+rand = "0.8"
+hex = "0.4"
+sha2 = "0.10"
