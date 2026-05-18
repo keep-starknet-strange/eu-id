@@ -1,6 +1,6 @@
 use stwo::core::fields::m31::M31;
 
-use crate::types::{N_LIMBS, LIMB_BITS, U256};
+use crate::types::{LIMB_BITS, N_LIMBS, U256};
 
 pub const LIMB_MAX: u32 = (1 << LIMB_BITS) - 1; // 8191
 
@@ -19,7 +19,7 @@ impl LimbsM31 {
         let mut limbs = [M31::from_u32_unchecked(0); N_LIMBS];
         let mut bit_pos = 0usize;
 
-        for i in 0..N_LIMBS {
+        for limb in limbs.iter_mut() {
             let mut limb_val = 0u32;
             for bit in 0..LIMB_BITS {
                 if bit_pos + bit >= 256 {
@@ -32,7 +32,7 @@ impl LimbsM31 {
                     limb_val |= 1 << bit;
                 }
             }
-            limbs[i] = M31::from_u32_unchecked(limb_val);
+            *limb = M31::from_u32_unchecked(limb_val);
             bit_pos += LIMB_BITS;
         }
 
@@ -148,7 +148,12 @@ mod tests {
         let val = U256::from_le_u64s(&[u64::MAX, u64::MAX, u64::MAX, u64::MAX]);
         let limbs = LimbsM31::from_u256(&val);
         for limb in &limbs.0 {
-            assert!(limb.0 <= LIMB_MAX, "Limb {} exceeds max {}", limb.0, LIMB_MAX);
+            assert!(
+                limb.0 <= LIMB_MAX,
+                "Limb {} exceeds max {}",
+                limb.0,
+                LIMB_MAX
+            );
         }
     }
 }

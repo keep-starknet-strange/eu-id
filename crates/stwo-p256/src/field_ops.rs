@@ -1,5 +1,5 @@
 use crate::limbs::{schoolbook_mul_raw, LimbsM31};
-use crate::types::{N_LIMBS, LIMB_BITS, U256};
+use crate::types::{LIMB_BITS, N_LIMBS, U256};
 
 /// Result of a modular multiplication, with all intermediate witness values
 /// needed for trace generation and constraint verification.
@@ -65,9 +65,21 @@ pub fn mul_mod_witness(a: &U256, b: &U256, modulus: &U256) -> MulModWitness {
     let mut carry: i64 = 0;
 
     for i in 0..n_out {
-        let ab_val = if i < ab_raw.len() { ab_raw[i] as i64 } else { 0 };
-        let qp_val = if i < qp_raw.len() { qp_raw[i] as i64 } else { 0 };
-        let r_val = if i < N_LIMBS { r_limbs.0[i].0 as i64 } else { 0 };
+        let ab_val = if i < ab_raw.len() {
+            ab_raw[i] as i64
+        } else {
+            0
+        };
+        let qp_val = if i < qp_raw.len() {
+            qp_raw[i] as i64
+        } else {
+            0
+        };
+        let r_val = if i < N_LIMBS {
+            r_limbs.0[i].0 as i64
+        } else {
+            0
+        };
 
         // ab = qp + r, so ab - qp - r should be 0 with carries
         let diff = ab_val - qp_val - r_val + carry;
@@ -105,16 +117,32 @@ pub fn add_mod_witness(a: &U256, b: &U256, modulus: &U256) -> AddModWitness {
     // Carry computation for: a + b - reduced*p - r = 0
     let mut carries = vec![0i64; N_LIMBS + 1];
     let mut carry: i64 = 0;
-    for i in 0..=N_LIMBS {
-        let a_val = if i < N_LIMBS { a_limbs.0[i].0 as i64 } else { 0 };
-        let b_val = if i < N_LIMBS { b_limbs.0[i].0 as i64 } else { 0 };
-        let p_val = if i < N_LIMBS { p_limbs.0[i].0 as i64 } else { 0 };
-        let r_val = if i < N_LIMBS { r_limbs.0[i].0 as i64 } else { 0 };
+    for (i, carry_slot) in carries.iter_mut().enumerate() {
+        let a_val = if i < N_LIMBS {
+            a_limbs.0[i].0 as i64
+        } else {
+            0
+        };
+        let b_val = if i < N_LIMBS {
+            b_limbs.0[i].0 as i64
+        } else {
+            0
+        };
+        let p_val = if i < N_LIMBS {
+            p_limbs.0[i].0 as i64
+        } else {
+            0
+        };
+        let r_val = if i < N_LIMBS {
+            r_limbs.0[i].0 as i64
+        } else {
+            0
+        };
 
         let diff = a_val + b_val - (reduced as i64) * p_val - r_val + carry;
         let limb_modulus = 1i64 << LIMB_BITS;
         carry = diff / limb_modulus;
-        carries[i] = carry;
+        *carry_slot = carry;
     }
 
     AddModWitness {
@@ -149,16 +177,32 @@ pub fn sub_mod_witness(a: &U256, b: &U256, modulus: &U256) -> SubModWitness {
 
     let mut carries = vec![0i64; N_LIMBS + 1];
     let mut carry: i64 = 0;
-    for i in 0..=N_LIMBS {
-        let a_val = if i < N_LIMBS { a_limbs.0[i].0 as i64 } else { 0 };
-        let b_val = if i < N_LIMBS { b_limbs.0[i].0 as i64 } else { 0 };
-        let p_val = if i < N_LIMBS { p_limbs.0[i].0 as i64 } else { 0 };
-        let r_val = if i < N_LIMBS { r_limbs.0[i].0 as i64 } else { 0 };
+    for (i, carry_slot) in carries.iter_mut().enumerate() {
+        let a_val = if i < N_LIMBS {
+            a_limbs.0[i].0 as i64
+        } else {
+            0
+        };
+        let b_val = if i < N_LIMBS {
+            b_limbs.0[i].0 as i64
+        } else {
+            0
+        };
+        let p_val = if i < N_LIMBS {
+            p_limbs.0[i].0 as i64
+        } else {
+            0
+        };
+        let r_val = if i < N_LIMBS {
+            r_limbs.0[i].0 as i64
+        } else {
+            0
+        };
 
         let diff = a_val - b_val + (borrowed as i64) * p_val - r_val + carry;
         let limb_modulus = 1i64 << LIMB_BITS;
         carry = diff / limb_modulus;
-        carries[i] = carry;
+        *carry_slot = carry;
     }
 
     SubModWitness {
@@ -223,19 +267,19 @@ fn cmp_512(a: &U512, b: &U512) -> i32 {
 fn mul_512(a: &U512, b: &U512) -> U512 {
     let mut out = [0u64; 8];
     let mut carry = 0u128;
-    for k in 0..8 {
+    for (k, out_k) in out.iter_mut().enumerate() {
         let mut acc = carry;
         carry = 0;
         let j_start = if k >= 4 { k - 3 } else { 0 };
         let j_end = if k < 4 { k + 1 } else { 4 };
-        for j in j_start..j_end {
+        for (j, &b_j) in b.iter().enumerate().take(j_end).skip(j_start) {
             let i = k - j;
-            let prod = (a[i] as u128) * (b[j] as u128);
+            let prod = (a[i] as u128) * (b_j as u128);
             acc += prod & 0xFFFF_FFFF_FFFF_FFFF;
             carry += prod >> 64;
         }
         carry += acc >> 64;
-        out[k] = acc as u64;
+        *out_k = acc as u64;
     }
     out
 }

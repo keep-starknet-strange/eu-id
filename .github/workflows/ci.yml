@@ -1,0 +1,123 @@
+name: CI
+
+# Continuous integration for the eu-id workspace.
+#
+# Build, test, and lint run on every push and pull request so regressions in
+# this multi-component cryptographic codebase are caught immediately. Proof
+# generation is slow, so the end-to-end proof test is kept off the per-push
+# path and runs on a daily schedule instead.
+#
+# The `lint` job runs `make check` — the exact target contributors run
+# locally — so local and CI lint results can never diverge (see the Makefile).
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  schedule:
+    # 06:00 UTC daily. Exercises the slow end-to-end proof test (the `e2e`
+    # job) without slowing down per-push feedback.
+    - cron: '0 6 * * *'
+
+# Cancel superseded in-progress runs for the same ref (e.g. rapid successive
+# pushes). The event name is part of the key so a push never cancels an
+# in-progress scheduled e2e run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# CI only needs to read the repository.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Surface panic backtraces so failing tests are diagnosable from the log.
+  RUST_BACKTRACE: 1
+
+jobs:
+  # clippy + rustfmt. The `-D warnings` inside `make check` fails the build on
+  # any warning; it is scoped to the workspace crates, so warnings from the
+  # stwo git dependency never break our CI.
+  lint:
+    name: Lint
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned nightly — must match the channel in rust-toolchain.toml.
+      - name: Install pinned Rust nightly
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2025-07-14
+          components: rustfmt, clippy
+
+      # Caches ~/.cargo/registry, ~/.cargo/git (the stwo git-dependency
+      # source), and target/ (compiled artifacts, including stwo). Keyed on
+      # Cargo.lock, so the heavy stwo build is reused until a dependency bump
+      # invalidates the cache.
+      - name: Cache cargo + build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      # Identical to running `make check` locally:
+      #   cargo clippy -- -D warnings && cargo fmt -- --check
+      - name: make check
+        run: make check
+
+  # cargo build + cargo test --workspace, in a single job so the heavy stwo
+  # dependency compiles once and is shared between the two steps.
+  build-test:
+    name: Build & test
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned nightly — must match the channel in rust-toolchain.toml.
+      - name: Install pinned Rust nightly
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2025-07-14
+
+      - name: Cache cargo + build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: make build
+        run: make build
+
+      # `cargo test --workspace` covers every workspace member, so new
+      # component crates are picked up automatically once registered. Heavy
+      # proof-generation tests are marked `#[ignore]` and run in the scheduled
+      # `e2e` job rather than here.
+      - name: make test
+        run: make test
+
+  # Scheduled-only: the slow full-pipeline proof-generation test. Runs the
+  # `#[ignore]`-marked tests in release mode (proving in debug is far too
+  # slow). With no ignored tests present yet this is a fast no-op; it starts
+  # doing real work once the integration crate ships an end-to-end test.
+  e2e:
+    name: End-to-end proof generation
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned nightly — must match the channel in rust-toolchain.toml.
+      - name: Install pinned Rust nightly
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2025-07-14
+
+      - name: Cache cargo + build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Run end-to-end proof tests (release, ignored tests only)
+        run: cargo test --workspace --release -- --ignored
