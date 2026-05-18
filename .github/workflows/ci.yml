@@ -2,17 +2,20 @@ name: CI
 
 # Continuous integration for the eu-id workspace.
 #
-# Build, test, and lint run on every push and pull request so regressions in
-# this multi-component cryptographic codebase are caught immediately. Proof
-# generation is slow, so the end-to-end proof test is kept off the per-push
-# path and runs on a daily schedule instead.
+# Build, test, and lint run on every pull request and on pushes to `main`, so
+# regressions in this multi-component cryptographic codebase are caught
+# immediately. Proof generation is slow, so the end-to-end proof test is kept
+# off the per-push path and runs on a daily schedule instead.
 #
 # The `lint` job runs `make check` — the exact target contributors run
 # locally — so local and CI lint results can never diverge (see the Makefile).
 
 on:
+  # `pull_request` covers all feature-branch work. `push` is scoped to `main`
+  # so CI re-validates the trunk after a merge without re-running every job a
+  # second time on branches that already have an open PR.
   push:
-    branches: ['**']
+    branches: [main]
   pull_request:
   schedule:
     # 06:00 UTC daily. Exercises the slow end-to-end proof test (the `e2e`
