@@ -1,7 +1,8 @@
 # eu-id — workspace build & developer-tooling entry point.
 #
-# A single interface shared by contributors and CI. `make check` is kept
-# byte-for-byte identical to the CI lint step so local and CI never diverge.
+# A single interface shared by contributors and CI. `make check` delegates to
+# scripts/check.sh — the single definition of the lint gate, also run by the
+# pre-commit hook — so local and CI lint results never diverge.
 #
 # Some targets drive code that is scaffolded incrementally (the demo CLI in
 # bin/, the mobile harness in mobile/). Those targets detect whether the
@@ -59,7 +60,7 @@ test:
 	cargo test --workspace
 
 check:
-	cargo clippy -- -D warnings && cargo fmt -- --check
+	@bash scripts/check.sh
 
 fmt:
 	cargo fmt

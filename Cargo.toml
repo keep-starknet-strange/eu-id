@@ -1,3 +1,10 @@
 [workspace]
 members = ["crates/stwo-p256", "crates/stwo-sha256"]
 resolver = "2"
+
+# Workspace-wide lint configuration. Every crate opts in with `[lints]
+# workspace = true`, so the whole workspace shares one clippy baseline and a
+# single place to tighten it. `make check` runs clippy with `-D warnings`,
+# which escalates every lint below to a hard error in CI.
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }

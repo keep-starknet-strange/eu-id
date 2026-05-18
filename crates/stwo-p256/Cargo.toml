@@ -20,3 +20,6 @@ ecdsa = { version = "0.16", features = ["signing", "verifying"] }
 rand = "0.8"
 hex = "0.4"
 sha2 = "0.10"
+
+[lints]
+workspace = true

@@ -10,3 +10,6 @@ std = ["stwo/std", "stwo-constraint-framework/std"]
 [dependencies]
 stwo = { git = "https://github.com/starkware-libs/stwo.git", features = ["prover"] }
 stwo-constraint-framework = { git = "https://github.com/starkware-libs/stwo.git", features = ["prover"] }
+
+[lints]
+workspace = true
