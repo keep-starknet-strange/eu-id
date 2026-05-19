@@ -21,9 +21,6 @@ belong in that comparison: an in-circuit pipeline — SHA-256 hashing, ECDSA
 P-256 signature verification, and ISO mdoc credential parsing — that proves an
 age predicate over a real ISO/IEC 18013-5 credential.
 
-See [`docs/SPEC.md`](docs/SPEC.md) for the architecture and
-[`docs/ROADMAP.md`](docs/ROADMAP.md) for the development plan.
-
 ## Requirements
 
 - **Rust nightly**, pinned by [`rust-toolchain.toml`](rust-toolchain.toml) to
@@ -77,13 +74,9 @@ Style and lint are enforced consistently across the workspace:
 crates/
   stwo-p256/     ECDSA P-256 verification AIR + native reference
   stwo-sha256/   SHA-256 AIR (M31 lookup-table design)
-docs/            specification, roadmap, and design notes
 scripts/         developer tooling
 .githooks/       version-controlled git hooks
 ```
-
-Further component crates — mdoc parsing and the integration "Big AIR" — and the
-demo CLI land as the roadmap progresses.
 
 ## License
 
