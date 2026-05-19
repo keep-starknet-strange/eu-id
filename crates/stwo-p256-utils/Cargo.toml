@@ -1,0 +1,9 @@
+[package]
+name = "stwo-p256-utils"
+version = "0.1.0"
+edition = "2021"
+description = "Verification utilities for the P-256 STARK AIR: M31 headroom audits, Solinas reduction matrix, carry-range derivation, RCB formula analyzer, selector tables, and curve constants. No prover dependencies."
+
+[dependencies]
+
+[dev-dependencies]

@@ -1,7 +1,8 @@
 use stwo::core::fields::m31::BaseField;
 
+use stwo_p256_utils::constants::N_LIMBS;
+
 use crate::ecdsa::EcdsaVerifyWitness;
-use crate::types::N_LIMBS;
 
 /// Number of columns for a single modular multiplication witness in the trace.
 /// Layout: a (N_LIMBS) + b (N_LIMBS) + result (N_LIMBS) + quotient (N_LIMBS) + carries (2*N_LIMBS)

@@ -1,8 +1,7 @@
 use stwo::core::fields::m31::M31;
+use stwo_p256_utils::constants::{LIMB_BITS, LIMB_MAX, N_LIMBS};
 
-use crate::types::{LIMB_BITS, N_LIMBS, U256};
-
-pub const LIMB_MAX: u32 = (1 << LIMB_BITS) - 1; // 8191
+use crate::types::U256;
 
 /// A 256-bit integer decomposed into N_LIMBS limbs of LIMB_BITS each, stored as M31 values.
 /// Limb 0 is the least significant.

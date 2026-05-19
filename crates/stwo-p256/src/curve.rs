@@ -1,5 +1,7 @@
+use stwo_p256_utils::constants::P256_MODULUS;
+
 use crate::field_ops::{add_mod_witness, mul_mod_witness, sub_mod_witness};
-use crate::types::{AffinePoint, P256_MODULUS, U256};
+use crate::types::{AffinePoint, U256};
 
 /// Witness data for a point doubling operation on P-256.
 /// 2P = R where P = (x1, y1), R = (x3, y3)
@@ -348,7 +350,7 @@ fn sub_512_u256(a: &U256, b: &U256) -> U256 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{P256_GX, P256_GY};
+    use stwo_p256_utils::constants::{P256_GX, P256_GY};
 
     fn gen_point() -> AffinePoint {
         AffinePoint {

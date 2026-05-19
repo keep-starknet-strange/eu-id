@@ -1,5 +1,7 @@
+use stwo_p256_utils::constants::{LIMB_BITS, N_LIMBS};
+
 use crate::limbs::{schoolbook_mul_raw, LimbsM31};
-use crate::types::{LIMB_BITS, N_LIMBS, U256};
+use crate::types::U256;
 
 /// Result of a modular multiplication, with all intermediate witness values
 /// needed for trace generation and constraint verification.
@@ -117,7 +119,7 @@ pub fn add_mod_witness(a: &U256, b: &U256, modulus: &U256) -> AddModWitness {
     // Carry computation for: a + b - reduced*p - r = 0
     let mut carries = vec![0i64; N_LIMBS + 1];
     let mut carry: i64 = 0;
-    for (i, carry_slot) in carries.iter_mut().enumerate() {
+    for i in 0..=N_LIMBS {
         let a_val = if i < N_LIMBS {
             a_limbs.0[i].0 as i64
         } else {
@@ -177,7 +179,7 @@ pub fn sub_mod_witness(a: &U256, b: &U256, modulus: &U256) -> SubModWitness {
 
     let mut carries = vec![0i64; N_LIMBS + 1];
     let mut carry: i64 = 0;
-    for (i, carry_slot) in carries.iter_mut().enumerate() {
+    for i in 0..=N_LIMBS {
         let a_val = if i < N_LIMBS {
             a_limbs.0[i].0 as i64
         } else {
@@ -339,7 +341,7 @@ fn shl_512(a: &U512, shift: usize) -> U512 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::P256_MODULUS;
+    use stwo_p256_utils::constants::P256_MODULUS;
 
     #[test]
     fn test_mul_mod_small() {

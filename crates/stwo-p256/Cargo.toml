@@ -10,6 +10,7 @@ std = ["stwo/std", "stwo-constraint-framework/std"]
 [dependencies]
 stwo = { workspace = true }
 stwo-constraint-framework = { workspace = true }
+stwo-p256-utils = { path = "../stwo-p256-utils" }
 itertools = { version = "0.12", default-features = false, features = ["use_alloc"] }
 num-traits = { workspace = true }
 serde = { workspace = true }

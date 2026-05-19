@@ -1323,15 +1323,12 @@ dependencies = [
  "sha2",
  "stwo",
  "stwo-constraint-framework",
+ "stwo-p256-utils",
 ]
 
 [[package]]
-name = "stwo-sha256"
+name = "stwo-p256-utils"
 version = "0.1.0"
-dependencies = [
- "stwo",
- "stwo-constraint-framework",
-]
 
 [[package]]
 name = "stwo-std-shims"

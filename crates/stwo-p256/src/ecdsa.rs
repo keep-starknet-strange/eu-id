@@ -1,6 +1,8 @@
+use stwo_p256_utils::constants::{P256_GX, P256_GY, P256_ORDER};
+
 use crate::curve::{mod_inverse, point_add, point_double, scalar_mul};
 use crate::field_ops::mul_mod_witness;
-use crate::types::{AffinePoint, EcdsaVerifyInput, P256_GX, P256_GY, P256_ORDER, U256};
+use crate::types::{AffinePoint, EcdsaVerifyInput, U256};
 
 /// Verify an ECDSA P-256 signature natively (outside the circuit).
 ///

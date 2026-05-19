@@ -49,6 +49,7 @@ a  = -3 mod p
 b  = 0x5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b
 Gx = 0x6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296
 Gy = 0x4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5
+M31_MOD = 2^31 - 1
 ```
 
 Representation:
@@ -68,23 +69,29 @@ Key inequality: `p < 2n`, so `x(R) mod n` requires at most one subtraction of `n
 Required tuple:
 
 ```text
-(z, r, s, pub_x, pub_y)
+(sig_id, z, r, s, pub_x, pub_y)
 ```
 
 Optional extension with recovery id:
 
 ```text
-(z, r, s, pub_x, pub_y, recovery_id)
+(sig_id, z, r, s, pub_x, pub_y, recovery_id)
 ```
 
 Bound through `PublicEcdsaInstance` relation:
 
 ```text
-PublicData yields:    -1 * PublicEcdsaInstance(...)     in initial_logup_sum  (provider: negative)
-EcdsaVm uses:        +sig_active * PublicEcdsaInstance(...) in the PUBLIC_BIND row  (consumer: positive)
+PublicData yields:    -1 * PublicEcdsaInstance(sig_id, ...)        in initial_logup_sum  (provider: negative)
+EcdsaVm uses:        +sig_active * PublicEcdsaInstance(sig_id, ...) in the PUBLIC_BIND row  (consumer: positive)
 ```
 
-Use distinct relation tags for the 5-field and 6-field variants to prevent collisions.
+`sig_id` is schedule-determined and preprocessed. Public inputs are an ordered
+batch, not an unordered multiset. Including `sig_id` permits two signatures in
+the same batch to have identical `(z, r, s, pub_x, pub_y[, v])` values without
+colliding in the public-input relation, while still preventing a row for one
+signature from consuming another signature's public tuple.
+
+Use distinct relation tags for the base and recovery variants to prevent collisions.
 
 If `recovery_id` is bound, it represents the full two-bit value:
 
@@ -197,6 +204,7 @@ is_public_bind(row)
 is_scalar_setup(row)
 is_fake_glv_scalar(row)
 is_selector_recon(row)
+is_cert_bind(row)
 is_on_curve(row)
 is_state_load(row)
 is_ec_double(row)
@@ -216,6 +224,7 @@ PUBLIC_BIND
 SCALAR_SETUP
 FAKE_GLV_SCALAR
 SELECTOR_RECON
+CERT_BIND
 ON_CURVE
 STATE_LOAD
 EC_DOUBLE
@@ -263,7 +272,14 @@ Schedule-determined identifiers (`sig_id`, `cert_id`, `step_id`) are preprocesse
 
 ### Active gate definitions
 
-The branch flags must depend on `enabler`:
+The branch flags are certificate-wide values sourced from that certificate's
+`CERT_BIND` row. Every row belonging to the certificate must copy
+`scalar_is_zero` and `scalar_is_nonzero` from the schedule-fixed `CERT_BIND`
+row via fixed-schedule offset constraints before using them in gate equations,
+LogUp numerators, disabled-row constraints, or EC transition gates. This copy
+is mandatory: branch flags are not independent row-local witnesses.
+
+The branch flags must depend on `enabler` on every certificate row:
 
 ```text
 scalar_is_zero + scalar_is_nonzero = enabler
@@ -289,6 +305,20 @@ cert_zero_active = enabler * scalar_is_zero
 ```
 
 Each gate is a materialized witness column constrained by its defining equation. Do not use inline products in LogUp numerators or high-degree gates. Use the gate columns linearly everywhere.
+
+Certificate-wide branch binding:
+
+```text
+For each row in certificate (sig_id, cert_id):
+    scalar_is_zero(row)    = scalar_is_zero(CERT_BIND(sig_id, cert_id))
+    scalar_is_nonzero(row) = scalar_is_nonzero(CERT_BIND(sig_id, cert_id))
+```
+
+The implementation may enforce this with fixed-schedule offset masks because
+the row schedule and the `CERT_BIND` row for each certificate are circuit-fixed.
+Do not replace this with unconstrained witness reuse. Without this binding, a
+malicious prover could make `CERT_BIND` take one branch while disabling the
+fake-GLV prep/chain/final-cert rows with different branch flags.
 
 This keeps numerator degree at 1, which is critical for LogUp batching: stwo's `finalize_logup_in_pairs` doubles the number of fractions per interaction column, but the batched degree grows with numerator degree. Keeping numerators linear ensures paired degree stays at 2, well under D <= 4.
 
@@ -394,19 +424,54 @@ Including `sig_id` prevents cross-signature table reuse bugs when batching multi
 All dataflow mechanisms are frozen; no implementation-choice alternatives remain.
 
 ```text
-PUBLIC_BIND.z/r/s/pub  -> SCALAR_SETUP rows           (fixed-schedule offset)
-SCALAR_SETUP.u1/u2     -> FAKE_GLV_SCALAR rows         (fixed-schedule offset)
-FAKE_GLV_SCALAR.s1/s2  -> SELECTOR_RECON rows          (fixed-schedule offset)
-H1/H2 coordinates      -> final H1+H2 add              (STATE_LOAD + previous-row)
+PUBLIC_BIND.z/r/s/pub  -> SCALAR_SETUP rows             (fixed-schedule offset)
+PUBLIC_BIND.pub_x/y    -> cert 1 prep first STATE_LOAD   (fixed-schedule offset; loads Pub
+                                                          as the initial projective state for
+                                                          the [2]Pub/[3]Pub computation; cert 0
+                                                          uses preprocessed G constants instead)
+SCALAR_SETUP.u1/u2     -> FAKE_GLV_SCALAR rows           (fixed-schedule offset)
+SCALAR_SETUP.u1/u2     -> CERT_BIND branch constraints   (fixed-schedule offset)
+CERT_BIND branch flags -> every row in that certificate  (fixed-schedule offset)
+CERT_BIND.H_x/H_y      -> FAKE_GLV_SCALAR.R_x/R_y         (fixed-schedule offset + sign-
+                                                          conditional negation by s2_sign_bit;
+                                                          see "R = H_signed materialization")
+FAKE_GLV_SCALAR.s1/s2  -> SELECTOR_RECON rows            (fixed-schedule offset)
+FAKE_GLV_SCALAR.R      -> prep STATE_LOADs for [2]R/[3]R  (fixed-schedule offsets; R is the
+                          and Base[i] EC_ADD operand slots second operand for all 9 prep ADDs
+                          that combine P-factors with R)   plus the 1-2 prep doublings)
+H1/H2 coordinates      -> final H1+H2 add                (STATE_LOAD + previous-row)
 Prep EC outputs        -> AFFINE_EXPORT -> PreparedPoint bus (affine, copy bus)
-PreparedPoint bus      -> chain operands                (copy bus consumption)
-R3 affine              -> Table[16] ADD operand          (fixed-schedule offset from R3's AFFINE_EXPORT row)
-R3 affine              -> cert final projective eq check (fixed-schedule offset from R3's AFFINE_EXPORT row)
-H1/H2 affine witness   -> final H1+H2 addition          (fixed-schedule offset from H1/H2's CERT_BIND rows)
-H1/H2 CERT_BIND coords -> ON_CURVE check                (fixed-schedule offset, nonzero branch only)
-selector chunks        -> chain ADD row selection        (fixed-schedule offset)
-selector_0             -> Table[16] construction         (fixed-schedule offset)
+PreparedPoint bus      -> chain operands                  (copy bus consumption)
+R3 affine              -> Table[16] ADD operand            (fixed-schedule offset from R3's AFFINE_EXPORT row)
+R3 affine              -> cert final projective eq check   (fixed-schedule offset from R3's AFFINE_EXPORT row)
+H1/H2 affine witness   -> final H1+H2 addition            (fixed-schedule offset from H1/H2's CERT_BIND rows)
+H1/H2 CERT_BIND coords -> ON_CURVE check                  (fixed-schedule offset, nonzero branch only)
+selector chunks        -> chain ADD row selection          (fixed-schedule offset)
+selector_0             -> Table[16] construction           (fixed-schedule offset)
 ```
+
+### R = H_signed materialization
+
+R is the sign-adjusted base point used by every prep EC operation that combines
+a P-factor with an R-factor. It is a derived witness, not a hint:
+
+```text
+R_x = H_x                                             (always)
+R_y = (1 - s2_sign_bit) * H_y + s2_sign_bit * (p - H_y)
+R_inf = H_inf                                         (negation of O is O)
+```
+
+The witness columns `R_x[20], R_y[20], R_inf` live in the FAKE_GLV_SCALAR row
+(co-located with `s2_sign_bit`). H limbs are copied in from that certificate's
+CERT_BIND row by fixed-schedule offset. The conditional negation is enforced
+per-limb against a witnessed `H_y_neg[20]` that satisfies `H_y + H_y_neg = p`
+(carry-checked, with `H_y_neg` zero when `H_inf = 1` to preserve canonical
+infinity). On the zero branch (`scalar_is_zero = 1`), all R limbs are forced
+to zero and `R_inf = 1`, gated by `cert_zero_active`.
+
+Every downstream prep STATE_LOAD or EC_ADD operand slot that needs R reads its
+limbs by fixed-schedule offset from this row. R does NOT enter the PreparedPoint
+bus.
 
 R3 dataflow: R3 is used in exactly two places per certificate: (1) as the EC_ADD operand during Table[16] construction, and (2) as the reference for the certificate final projective-affine equivalence check. Both access R3 via fixed-schedule offsets from the R3 AFFINE_EXPORT row. R3 does NOT enter the PreparedPoint bus.
 
@@ -452,7 +517,7 @@ Pub.inf = 0                                         (direct constraint)
 Relation consumption (consumer: positive sign):
 
 ```text
-+sig_active * PublicEcdsaInstance(z, r, s, pub_x, pub_y[, v])
++sig_active * PublicEcdsaInstance(sig_id, z, r, s, pub_x, pub_y[, v])
 ```
 
 If the arithmetic exceeds a single row's width, split into PUBLIC_BIND (relation emission + top-limb check) and INPUT_VALIDATE (reduction + range checks). The exact split is an implementation decision; the constraints above must all be enforced.
@@ -539,15 +604,25 @@ H_x[20], H_y[20], H_inf, scalar_is_zero, scalar_is_nonzero
 Constraints:
 
 ```text
+scalar_is_zero and scalar_is_nonzero are copied from this row to every
+row in the certificate via fixed-schedule offset constraints.
+
 Nonzero branch (scalar_is_nonzero = 1):
     H_inf = 0                                (H is finite)
     H_x < p, H_y < p                        (canonical)
 
 Zero branch (scalar_is_zero = 1):
+    S_limb[i] = 0 for all i                  (S loaded by fixed-schedule offset)
     H_inf = 1
     H_x[i] = 0   for all i
     H_y[i] = 0   for all i
 ```
+
+`CERT_BIND` must receive the certificate scalar `S` (`u1` for cert 0, `u2` for
+cert 1) from `SCALAR_SETUP` via fixed-schedule offset. The zero branch is valid
+only when that scalar is exactly zero. The nonzero branch does not need a
+separate `S != 0` inverse: with branch binding, the fake-GLV scalar equation and
+`s1 > 0` make `S = 0` unsatisfiable.
 
 The final `H1 + H2` addition loads H1 and H2 from their CERT_BIND rows via fixed-schedule offset (not from ON_CURVE rows). This is necessary because the zero branch (e.g., `u1 = 0`, `H1 = O`) has no active ON_CURVE row for H, but the `H1 + H2` addition still needs to know whether H is infinity. CERT_BIND is always present and always binds H, regardless of branch.
 
@@ -612,7 +687,49 @@ Uses previous-row transition: row `i` reads `state` from row `i-1` and writes th
 
 The first row of a segment must be gated by a boundary indicator to prevent reading the previous segment's last row. In practice, STATE_LOAD rows serve as these boundaries.
 
-**DOUBLE(O) = O**: **Implementation must verify** that substituting `(X, Y, Z) = (0, 1, 0)` into Algorithm 6 produces a valid projective infinity — specifically, an output with `Z_out = 0` and `Y_out != 0` (not the forbidden `(0, 0, 0)`). If Algorithm 6 produces `(0, 0, 0)` for this input, then DOUBLE(O) must be handled by an explicit conditional or by using Algorithm 4 with `P = Q = O` instead. This must be checked against the concrete formula before implementation proceeds.
+**Algorithm 6 (dbl-2015-rcb-3) explicit steps.** Renes-Costello-Batina exception-free doubling, specialized for `a = -3`. Cost: 8M + 3S + 2 multiplications-by-`b` + 21 additions. Each line is a Fp operation (mul, add, sub, or subtract a constant); each is enforced by a Solinas reduction equation per the M31 headroom audit, with degree-2 intermediates if a single line exceeds the centered M31 limit.
+
+```text
+Input:  (X1, Y1, Z1)
+Output: (X3, Y3, Z3) = [2](X1, Y1, Z1)
+
+t0 = X1 * X1
+t1 = Y1 * Y1
+t2 = Z1 * Z1
+t3 = X1 * Y1
+t3 = t3 + t3
+Z3 = X1 * Z1
+Z3 = Z3 + Z3
+Y3 = b  * t2
+Y3 = Y3 - Z3
+X3 = Y3 + Y3
+Y3 = X3 + Y3
+X3 = t1 - Y3
+Y3 = t1 + Y3
+Y3 = X3 * Y3
+X3 = X3 * t3
+t3 = t2 + t2
+t2 = t2 + t3
+Z3 = b  * Z3
+Z3 = Z3 - t2
+Z3 = Z3 - t0
+t3 = Z3 + Z3
+Z3 = Z3 + t3
+t3 = t0 + t0
+t0 = t3 + t0
+t0 = t0 - t2
+t0 = t0 * Z3
+Y3 = Y3 + t0
+t0 = Y1 * Z1
+t0 = t0 + t0
+Z3 = t0 * Z3
+X3 = X3 - Z3
+Z3 = t0 * t1
+Z3 = Z3 + Z3
+Z3 = Z3 + Z3
+```
+
+**DOUBLE(O) is sound.** Substituting `(X1, Y1, Z1) = (0, 1, 0)` and tracing the schedule symbolically: `t0 = t2 = t3 = Z3 = 0`, `t1 = 1`, so `Y3 = 1 - 0 = 1` after the early `X3, Y3 ← (t1 − ..., t1 + ...)` lines and remains `1` after all later additions of `0 · _` terms; `X3` and `Z3` stay `0` throughout (every multiplicative term has a 0 factor). Output `(0, 1, 0)` — the canonical projective infinity, never the forbidden `(0, 0, 0)`. **No explicit conditional needed** for DOUBLE(O).
 
 Columns: state point (X, Y, Z) + formula intermediates in bigint/carry slots.
 
@@ -655,7 +772,63 @@ There is no `inf_out` flag. The output is pure homogeneous projective `(X, Y, Z)
 
 **Critical**: The fake-GLV table intentionally has edge cases where `P + R = O` (e.g., S = 1 gives R = -P, so Base[2] = P + (-P) = O), and the chain may encounter accumulator/operand coincidences. Algorithm 5 handles these without branches.
 
-**Implementation must verify**: substitute concrete inputs for all five cases into Algorithm 5 and confirm correct output. For each case, verify the output satisfies the projective invariant (not `(0, 0, 0)`).
+**Algorithm 5 (madd-2015-rcb-3) explicit steps.** Renes-Costello-Batina complete mixed addition with `Z2 = 1`, specialized for `a = -3`. Cost: 11M + 2 multiplications-by-`b` + 23 additions. Inputs: projective `(X1, Y1, Z1)`, affine operand `(X2, Y2)` (with `Z2 = 1` implicit).
+
+```text
+Input:  (X1, Y1, Z1), (X2, Y2)         ; Z2 = 1 implicit
+Output: (X3, Y3, Z3) = (X1,Y1,Z1) + (X2,Y2,1)
+
+t0 = X1 * X2
+t1 = Y1 * Y2
+t3 = X2 + Y2
+t4 = X1 + Y1
+t3 = t3 * t4
+t4 = t0 + t1
+t3 = t3 - t4
+t4 = Y2 * Z1
+t4 = t4 + Y1
+Y3 = X2 * Z1
+Y3 = Y3 + X1
+Z3 = b  * Z1
+X3 = Y3 - Z3
+Z3 = X3 + X3
+X3 = X3 + Z3
+Z3 = t1 - X3
+X3 = t1 + X3
+Y3 = b  * Y3
+t1 = Z1 + Z1
+t2 = t1 + Z1
+Y3 = Y3 - t2
+Y3 = Y3 - t0
+t1 = Y3 + Y3
+Y3 = t1 + Y3
+t1 = t0 + t0
+t0 = t1 + t0
+t0 = t0 - t2
+t1 = t4 * Y3
+t2 = t0 * Y3
+Y3 = X3 * Z3
+Y3 = Y3 + t2
+X3 = t3 * X3
+X3 = X3 - t1
+Z3 = t4 * Z3
+t1 = t3 * t0
+Z3 = Z3 + t1
+```
+
+**Completeness verification per case** (RCB Theorem 4):
+
+```text
+Case        State_prev (proj)    Operand (affine)   Algorithm 5 output         OK
+----------------------------------------------------------------------------
+O + P       (0, 1, 0)            (X2, Y2)           (X2*Y2, Y2^2, Y2)         yes (= P projectively)
+P + P       (X, Y, Z)            (X/Z, Y/Z)         doubled point             yes (matches Alg 6)
+P + (-P)    (X, Y, Z)            (X/Z, -Y/Z)        (0, c, 0) with c != 0      yes (canonical proj O)
+P + Q       generic              generic            (X1+Q via formula)         yes
+P + O       handled by conditional below                                       — (Alg 5 skipped)
+```
+
+`O + P` works because `Z1 = 0` collapses all `*Z1` terms; the surviving products evaluate to a projective representative of `(X2, Y2)`. `P + (-P)` produces `Z3 = 0` with `Y3 != 0` (RCB paper Theorem 4); the AIR rejects the forbidden `(0, 0, 0)` only at boundary rows via the existing inverse checks.
 
 Do NOT fall back to an incomplete formula without explicit sign-off and negative tests for P+P and P+(-P).
 
@@ -727,7 +900,7 @@ out = (0, 0, 1)
 
 The `state_is_inf` witness is sound because: if `state_is_inf = 0`, the Z inverse proves Z != 0 (finite point). If `state_is_inf = 1`, the Z = 0 and X = 0 constraints plus Y != 0 inverse prove the point is a valid projective infinity (not the forbidden `(0, 0, 0)`). The prover cannot lie in either direction.
 
-Note: this uses **homogeneous** affine recovery `x = X/Z, y = Y/Z`, not Jacobian `x = X/Z^2, y = Y/Z^3`. This saves one Fp multiplication compared to Jacobian export (2 muls instead of 3, excluding the Z inverse).
+Note: this uses **homogeneous** affine recovery `x = X/Z, y = Y/Z`, not Jacobian `x = X/Z^2, y = Y/Z^3`. Finite export still proves three multiplication equations (`Z*Z_inv`, `X*Z_inv`, `Y*Z_inv`), but homogeneous recovery avoids the extra squaring/cubing needed for Jacobian denominators and keeps the equations degree-2.
 
 Relation emission (PreparedPoint provider):
 
@@ -759,7 +932,7 @@ cert_active = 0 => use_count_i = 0        (direct constraint)
 
 Do not rely solely on logup imbalance to catch inactive provider emissions; enforce `use_count = 0` explicitly.
 
-AFFINE_EXPORT requires ~2 Fp multiplications (Z*Z_inv, X*Z_inv, Y*Z_inv — where Z_inv is reused) plus canonicalization. If these do not fit in a single row, split across 2 rows. The PreparedPoint emission occurs on the final row of the split.
+AFFINE_EXPORT requires 3 Fp multiplication equations (`Z*Z_inv`, `X*Z_inv`, `Y*Z_inv`) plus canonicalization. If these do not fit in a single row, split across 2 rows. The PreparedPoint emission occurs on the final row of the split.
 
 ### LSB_CORRECT (split into LSB_SELECT + EC_ADD)
 
@@ -839,7 +1012,7 @@ recovery_id = odd_y + 2 * x_ge_n
 recovery_id = v                              (bound via public input)
 ```
 
-FINAL_CHECK requires ~2 Fp multiplications (Z_R * Z_R_inv, X_R * Z_R_inv, optionally Y_R * Z_R_inv — reusing Z_R_inv) plus canonicalization and comparison. If these do not fit in a single row, split across 2-3 rows.
+FINAL_CHECK requires 2 Fp multiplication equations without recovery data (`Z_R * Z_R_inv`, `X_R * Z_R_inv`) or 3 with recovery parity (`Y_R * Z_R_inv` as well), plus canonicalization and comparison. If these do not fit in a single row, split across 2-3 rows.
 
 ## Fake-GLV Certificate Protocol
 
@@ -1048,7 +1221,7 @@ cert 1 (Pub): 2 DOUBLE (P) + 2 DOUBLE (R) + 9 ADD = 13 EC rows
 
 Valid edge cases produce infinity. When `S = 1`: `H = P`, `R = -P`, so `Base[2] = P + (-P) = O`. When `S = 3` or `S = 3^(-1) mod n`, other entries hit infinity.
 
-All table entries and selected affine points carry `inf` flags. Internal projective accumulators use Z = 0 for infinity (no `inf` flag). Complete projective formulas handle infinity automatically. When affine `inf = 1`: coordinates must be canonical `(0, 0, 1)`, not `(p - 0, ...)`. When projective infinity: `(0, 1, 0)` or `(0, 0, 0)` (see EC_DOUBLE note).
+All table entries and selected affine points carry `inf` flags. Internal projective accumulators use Z = 0 for infinity (no `inf` flag). Complete projective formulas handle infinity automatically. When affine `inf = 1`: coordinates must be canonical `(0, 0, 1)`, not `(p - 0, ...)`. When projective infinity appears at a boundary load, use canonical `(0, 1, 0)`. EC formula outputs may be any valid homogeneous representative with `X = 0`, `Z = 0`, and `Y != 0`; `(0, 0, 0)` is never valid and must be rejected or avoided by the formula implementation.
 
 Required completeness tests for: `S = 1, n-1, 3, n-3, 3^(-1) mod n, -3^(-1) mod n`.
 
@@ -1220,7 +1393,55 @@ Two rows per certificate (LSB_SELECT + EC_ADD). See LSB_CORRECT row type above.
 
 After LSB correction, the chain accumulator `Acc` is projective `(X_acc, Y_acc, Z_acc)`. `R3 = [3]R_signed` is affine `(x_r3, y_r3, inf_r3)` from its AFFINE_EXPORT.
 
-**Chain invariant**: the Garaga recoding/chain structure — with the exact selector stream, MSB initialization, Table[16] correction, and LSB corrections — is designed so that the expected final invariant is `Acc = R3 = [3]R_signed`. This is a property of the Garaga fake-GLV recoding, not a direct consequence of the scalar equation alone. The scalar equation `s1 + S*s2_signed = 0 mod n` combined with the chain structure ensures that when all selector values are correctly decoded and all EC operations are correctly performed, the accumulator converges to `R3`.
+**Chain invariant derivation**. The chain enforces `Acc_final = R3` where `R3 = [3]·H_signed`. The chain structure, selector decoding, MSB encoding, Table[16] correction, and LSB correction are jointly designed so this equality is equivalent to `[s1]·P + [s2_abs]·H_signed = O`. Derivation:
+
+For each chunk `a_c ∈ {0,1,2,3}`, the signed digit is `d(a_c) = 2·a_c − 3 ∈ {−3, −1, +1, +3}`. The Selector16Decode table (16 entries) implements `selector_i = a_i + 4·b_i  →  signed_point = d(a_i)·P + d(b_i)·R` (where `R = H_signed`). For the single-bit MSBs, the FinalSelector table loads `Base[init_base_index]` directly, giving `Acc_0 = (1 + 2·s1_msb)·P + (1 + 2·s2_msb)·R` (e.g., `(s1_msb, s2_msb) = (1, 0) → Acc_0 = 3P + R`).
+
+The chain runs 63 steps `Acc ← [4]·Acc + B_step`:
+
+```text
+step k=1..62:  B_k = d(a_{63-k})·P + d(b_{63-k})·R     (Selector16Decode)
+step k=63:     B_63 = d(a_0)·P + d(b_0)·R + [3]·R     (Table[16] = Ts[selector_0] + R3)
+```
+
+Horner-expanding and re-indexing by chunk `c = 63 − k`:
+
+```text
+Acc_after_chain = 4^63·Acc_0
+                + Σ_{c=0..62} 4^c · (d(a_c)·P + d(b_c)·R)
+                + [3]·R
+```
+
+The LSB correction adds `C = −(1 − s1_lsb)·P − (1 − s2_lsb)·R`:
+
+```text
+Acc_final = Acc_after_chain + C
+```
+
+Collect the P-coefficient using `d(a) = 2a − 3` and `Σ_{c=0..62} 4^c = (4^63 − 1)/3`:
+
+```text
+coef_P = 4^63·(1 + 2·s1_msb) + Σ 4^c·(2·a_c − 3) − (1 − s1_lsb)
+       = 4^63·(1 + 2·s1_msb) + 2·Σ a_c·4^c − (4^63 − 1) − 1 + s1_lsb
+       = s1_lsb + 2·Σ a_c·4^c + 2·4^63·s1_msb
+       = s1                                  (by the SELECTOR_RECON identity)
+```
+
+Identical algebra gives `coef_R = s2_abs + 3`. Therefore:
+
+```text
+Acc_final = [s1]·P + [s2_abs]·H_signed + [3]·H_signed
+```
+
+Equating to `R3 = [3]·H_signed` and using that P-256 has prime order:
+
+```text
+[s1]·P + [s2_abs]·H_signed = O
+```
+
+Combined with the FAKE_GLV_SCALAR equation `s1 + S·s2_signed ≡ 0 (mod n)`, the `s2_abs nonzero lemma`, and the canonical sign convention for `H_signed`, this implies `H = [S]·P`, completing the fake-GLV certificate.
+
+This identity is what fixes the otherwise arbitrary-looking constants: the 16-entry Selector16Decode mapping, the four MSB entries `{5, 6, 9, 10} → init_base_index ∈ {2, 3, 6, 7}`, the LSB correction set `{O, −P, −R, −(P+R)}`, and the `+R3` offset baked into Table[16]. Any deviation breaks the identity.
 
 **R3 must be finite**: R3 = [3]R and R is a hinted non-infinity on-curve point. Since P-256 has prime order, `[3]R = O` only if `R = O`, which is excluded by the ON_CURVE `R.inf = 0` check. Constrain:
 
@@ -1246,8 +1467,6 @@ Y_acc = y_r3 * Z_acc mod p
 This requires 3 Fp multiplications (`Z_acc * Z_acc_inv`, `x_r3 * Z_acc`, `y_r3 * Z_acc`). Still cheaper than Jacobian equivalence (4 muls).
 
 May be implemented as 1-2 rows depending on Fp row width.
-
-**s2_abs nonzero lemma**: for a nonzero-branch certificate, `s2_abs > 0`. Proof: the scalar equation is `s1 + S * s2_signed = 0 mod n`. If `s2_abs = 0`, then `s2_signed = 0`, so `s1 = 0 mod n`. But `0 < s1 < 2^128 < n`, so `s1 = 0`, contradicting `s1 > 0` (enforced by `s1_minus_one >= 0` range check). Therefore `s2_abs > 0`, which means the chain has at least one non-trivial scalar component.
 
 **s2_abs nonzero lemma**: for a nonzero-branch certificate, `s2_abs > 0`. Proof: the scalar equation is `s1 + S * s2_signed = 0 mod n`. If `s2_abs = 0`, then `s2_signed = 0`, so `s1 = 0 mod n`. But `0 < s1 < 2^128 < n`, so `s1 = 0`, contradicting `s1 > 0` (enforced by `s1_minus_one >= 0` range check). Therefore `s2_abs > 0`, which means the chain has at least one non-trivial scalar component.
 
@@ -1282,9 +1501,12 @@ Do not include: public inputs, public key, hints, prepared table points, selecto
 Sign convention: providers yield with **negative** multiplicity, consumers use with **positive**. This matches the stwo logup convention where the global sum must be zero.
 
 ```text
-PublicEcdsaInstance(z[20], r[20], s[20], pub_x[20], pub_y[20][, v])
+PublicEcdsaInstance(sig_id, z[20], r[20], s[20], pub_x[20], pub_y[20][, v])
   Provider: PublicData, -1 in initial_logup_sum       (yield: negative)
   Consumer: EcdsaVm PUBLIC_BIND row, +sig_active       (use: positive)
+  Note: sig_id is preprocessed and part of the relation key, so public
+        inputs are bound as an ordered batch. Duplicate public tuples are valid
+        when they occur at different sig_id values.
 
 Range13(value)
   Provider: Range13 component, -multiplicity (witness column)
@@ -1313,6 +1535,14 @@ FinalSelector(msb1, msb2, selector_final, init_base_index)
 SignedCarryRange(value)
   Provider: SignedCarryRange component, -multiplicity (witness column)
   Consumer: carry columns in arithmetic rows, +enabler (or +cert_active)
+  Encoding: carries use centered representatives in M31. For a bound C with
+            C < 2^30, the preprocessed table contains every integer
+            c in [-C, C] encoded as:
+                enc(c) = c              if c >= 0
+                enc(c) = M31_MOD + c    if c < 0
+            Each arithmetic row interprets the field element through this
+            unique centered encoding. The concrete C is per equation family
+            and comes from the machine-checked headroom artifact.
 
 PreparedPoint(sig_id, cert_id, table_index, x[20], y[20], inf)
   Provider: AFFINE_EXPORT rows, -use_count (dynamic witness multiplicity,
@@ -1441,21 +1671,48 @@ ensuring the entire integer expression cannot alias to zero in M31 while being n
 
 **This audit is a blocker**: no arithmetic row type (EC_DOUBLE, EC_ADD, AFFINE_EXPORT, FINAL_CHECK, certificate equivalence, FnMul, Fp Solinas, scalar equation) can be considered sound until its combined carry equation is machine-checked against M31. The RCB complete formula has large intermediate expressions; the Solinas reduction has signed coefficients from misaligned exponents; the homogeneous projective-affine equivalence has `x * Z` and `y * Z` products. Each must be individually bounded.
 
+The audit must be a checked artifact, not a hand calculation in prose. Before
+an arithmetic row type is enabled in the prover, add a deterministic test or
+build-time generated table that records, for each equation family:
+
+```text
+equation_name
+limb_index
+coefficient_bound_before_carry
+carry_bound_in
+carry_bound_out
+max_abs_combined_expression
+signed_carry_bound_C
+fits_m31_centered = max_abs_combined_expression < 2^30
+```
+
+The implementation must fail tests if any row family exceeds the centered M31
+limit. The `SignedCarryRange` table for that row family must then use exactly
+the audited `C` bound with the centered encoding defined in Relation Contracts.
+Do not reuse one global loose carry bound unless the audit proves it remains
+below `2^30` for every equation family and every limb.
+
 For each equation type, produce a concrete bound:
 
 ```text
-Equation type              Max |combined_coeff[i]|    Fits M31?
-FnMul (256x256)            ?                          ?
-Fp Solinas mul             ?                          ?
-RCB Algorithm 6 (DOUBLE)   ?                          ?
-RCB Algorithm 5 (ADD)      ?                          ?
-AFFINE_EXPORT (X*Z_inv)    ?                          ?
-Cert equivalence (x*Z)     ?                          ?
-FINAL_CHECK (X_R*Z_R_inv)  ?                          ?
-Scalar eq (256x128)        ?                          ?
+Equation type                 Max |combined_expr|   Direct fit?     Status
+Mod add/sub limb equation     65,536                yes             usable as one equation
+FnMul (256x256)               5,368,045,569         no              split required
+Scalar eq (256x128)           2,482,700,288         no              split required
+Fp Solinas mul                pending               pending         formula not implemented
+RCB Algorithm 6 (DOUBLE)      pending               pending         formula not implemented
+RCB Algorithm 5 (ADD)         pending               pending         formula not implemented
+AFFINE_EXPORT (X*Z_inv)       pending               pending         depends on Fp mul split
+Cert equivalence (x*Z)        pending               pending         depends on Fp mul split
+FINAL_CHECK (X_R*Z_R_inv)     pending               pending         depends on Fp mul split
 ```
 
-Fill this table with actual values during implementation. If any entry exceeds `(2^31 - 2) / 2 = 2^30 - 1`, split the equation.
+The concrete values above are produced by `src/headroom.rs`. They intentionally
+do not bless the current generic multiplication shape: both the full 256x256
+quotient multiplication and the fake-GLV 256x128 scalar equation are too wide
+as a single M31 limb equation and must be split before becoming AIR rows. The
+pending rows must be filled when their concrete formulas are implemented. If any
+entry exceeds `(2^31 - 2) / 2 = 2^30 - 1`, split the equation.
 
 **Warning**: All large-limb equalities (scalar equations, Fp equations, final comparison, projective equivalence) must be enforced as integer equations with explicit carry propagation. A limb-by-limb equality without carries only proves equality mod `2^13` per limb, not as integers. Every `A - B = 0` over 20+ limbs needs a carry chain.
 
@@ -1484,8 +1741,9 @@ The product `S * s2_abs` has at most 30 limb positions (20 + 10 - 1 = 29). The q
 The verifier must reject if any of the following fails:
 
 ```text
-Public inputs are bound exactly once via PublicEcdsaInstance
-  (provider: -1 in initial_logup_sum; consumer: +sig_active in PUBLIC_BIND)
+Public inputs are bound exactly once via PublicEcdsaInstance(sig_id, ...)
+  (provider: -1 in initial_logup_sum; consumer: +sig_active in PUBLIC_BIND;
+   sig_id is part of the relation key for ordered batches)
 z < 2^256 (limb[19] < 2^9 via Range9)
 z_red is the canonical reduction of z modulo n
   (integer equation z - z_red - z_ge_n*n = 0 with carries)
@@ -1494,6 +1752,8 @@ r and s are in [1, n-1]
 pub_x < p, pub_y < p, Pub.inf = 0
 s*u1 = z_red mod n and s*u2 = r mod n
 Pub is on the P-256 curve
+Every row in a certificate copies scalar_is_zero/scalar_is_nonzero from that
+  certificate's CERT_BIND row; branch flags are not row-local choices
 Each nonzero fake-GLV branch has 0 < s1, with s1_minus_one range-checked
   (implies s2_abs > 0 via scalar equation — see s2_abs nonzero lemma)
 Each nonzero fake-GLV scalar equation holds as an integer equation
@@ -1520,7 +1780,7 @@ Each nonzero fake-GLV final accumulator equals R3 via:
 R3 is finite: cert_active * inf_r3 = 0 (enforced at certificate final check)
 H1, H2 bound via CERT_BIND rows (always present, both branches)
   nonzero: H.inf = 0, H on curve (ON_CURVE check via cert_active)
-  zero: H.inf = 1, H.x = 0, H.y = 0
+  zero: S = 0, H.inf = 1, H.x = 0, H.y = 0
   final H1+H2 loads from CERT_BIND, not ON_CURVE
 R = H1 + H2 via complete projective addition
 R is not infinity: Z_R * Z_R_inv = 1 mod p (no separate inf flag)
@@ -1536,6 +1796,7 @@ Projective infinity: X=0, Z=0, Y!=0 (canonical load: (0,1,0))
   AFFINE_EXPORT: state_is_inf=0 proves Z!=0 (via Z*Z_inv=1)
 Point negation uses canonical p-y, not field arithmetic on limbs
 Row-type selectors are preprocessed (not malleable by prover)
+CERT_BIND is included in the preprocessed row-type selector schedule
 sig_id, cert_id, step_id are preprocessed (not malleable by prover)
 sig_active, cert_active, cert_zero_active are materialized witnesses,
   not inline products; constrained by their defining equations
@@ -1551,6 +1812,7 @@ LSB Base[2] consumption gated by lsb00_active, not just cert_active
 Full FnMul quotient Q bounded by Q < n via borrow witness
 M31 headroom: every bigint equation audited for non-aliasing in M31
   (blocker — must be machine-checked before any arithmetic row is sound)
+SignedCarryRange uses the audited centered M31 encoding and per-family bound
 ```
 
 ## Negative Tests
@@ -1587,9 +1849,9 @@ FINAL_CHECK uses X_R * Z_R_inv^2
 2^13 in any limb                       -> Range13 lookup failure
 2^9 in z_limb[19]                      -> Range9 lookup failure
 Relation emitted on padding row        -> logup imbalance
-Duplicate public tuple: two sigs
-  share same public input              -> logup imbalance (provider emits -1
-                                          once, two consumers emit +sig_active)
+Public tuple with wrong sig_id          -> PublicEcdsaInstance logup imbalance
+Duplicate public tuple at two sig_ids   -> valid when PublicData emits both
+                                          ordered tuples with distinct sig_id
 Point negation emits (x, p) instead
   of (0, 0, 1) for infinity           -> infinity canonicalization failure
 Mixed-add with infinity operand
@@ -1626,6 +1888,11 @@ PreparedPoint use_count_16 != 1        -> logup imbalance
 cert_active gating bug:
   zero branch emits selector or
   PreparedPoint relation               -> logup imbalance or constraint failure
+Branch flag mismatch:
+  CERT_BIND says zero branch but a
+  chain row uses nonzero branch flags   -> fixed-schedule branch copy failure
+  CERT_BIND says nonzero branch but a
+  prep row sets cert_active = 0         -> cert_active defining/copy failure
 Disabled EC row in zero branch has
   nonzero witness values               -> cert_zero_active * limb constraints fail
 R3 dataflow mutation: correct R3
@@ -1689,22 +1956,23 @@ Per signature (packed shape):
 1    EC_ADD for H1+H2
 1-3  FINAL_CHECK (Z_inv, affine x = X*Z_inv, comparison; may split)
 ---
-~472-504 active rows per signature
+~480-520 active rows per signature before final Fp row packing
 ```
 
 Row budget with splitting scenarios:
 
 ```text
-Best case (1-row AFFINE_EXPORT, 1-row cert-eq):  ~470-480 rows
-2-row AFFINE_EXPORT:                               ~490-500 rows  (+20)
-2-row AFFINE_EXPORT + split EC rows:               ~500-520 rows  (+10-20 more)
+Best case (1-row AFFINE_EXPORT, 1-row cert-eq):  ~480-490 rows
+2-row AFFINE_EXPORT:                               ~500-510 rows  (+20)
+2-row AFFINE_EXPORT + split EC rows:               ~510-540 rows  (+10-30 more)
 ```
 
-The homogeneous coordinate model saves rows compared to Jacobian: AFFINE_EXPORT needs 2 Fp muls instead of 3, certificate equivalence needs 2 instead of 4, FINAL_CHECK needs 2 instead of 3. This may save 20-30 rows total if the narrower operations fit in single rows.
+The homogeneous coordinate model saves degree and intermediate work compared to Jacobian: AFFINE_EXPORT and FINAL_CHECK avoid `Z^2`/`Z^3` denominator construction, certificate equivalence uses linear-in-`Z` cross-products, and all boundary equations remain degree-2 before gating. Row savings depend on the final packed Fp row shape and must be measured after the M31 headroom audit.
 
-Target: `log_size = 9` (512 rows). Fallback: `log_size = 10` (1024 rows) if splitting exceeds 512 rows.
+Target: `log_size = 9` (512 rows) only after packing proves the row count fits.
+Fallback: `log_size = 10` (1024 rows) if splitting exceeds 512 rows.
 
-Padding to `2^9 = 512`. Utilization at best case: `470/512 = 92%`.
+Padding to `2^9 = 512`. Utilization at best case: approximately `480/512 = 94%`.
 
 If implementation pushes above 512, the next natural log size is `2^10 = 1024` with ~50% utilization. Not catastrophic if column count is low, but worth optimizing the row layout to stay in 512. The implementation should have a fallback schedule for `2^10` rows.
 
@@ -1714,7 +1982,7 @@ Estimated sizing:
 dynamic committed columns:         ~350-500 (with PreparedPoint copy bus,
                                      sig_id/cert_id/step_id preprocessed)
 interaction columns:               depends on relation count and batching
-active rows per signature:         ~470-500
+active rows per signature:         ~480-520
 log_size for 1 signature:          9 (target), 10 (fallback)
 global log with Range13/logup:     ~14-15
 ```
@@ -1728,7 +1996,8 @@ global log with Range13/logup:     ~14-15
     Bound quotient Q < n via borrow witness.
 3.  Implement Fp Solinas arithmetic with signed reduction matrix
     and carry analysis. Machine-check M31 headroom per equation type
-    (see M31 headroom audit BLOCKER). Fill the headroom table.
+    (see M31 headroom audit BLOCKER). Fill the headroom table and derive
+    the centered SignedCarryRange bound for each equation family.
 4.  Implement RCB exception-free EC_DOUBLE (Algorithm 6) and
     complete mixed EC_ADD (Algorithm 5) for short Weierstrass a=-3.
     EC_ADD handles all 5 cases via RCB + Uinf-conditional.
@@ -1746,8 +2015,10 @@ global log with Range13/logup:     ~14-15
     Constrain use_count = 0 on inactive rows via (1-cert_active)*use_count.
 6.  Implement CERT_BIND row type (binds H point + zero/nonzero branch).
     Always present for both branches. Defines scalar_is_zero, H coords,
-    h_inf. Constraints: scalar_is_zero*(1-scalar_is_zero)=0,
-    cert_zero_active * (H_x/H_y/H_z non-O constraints).
+    h_inf, and receives S via fixed-schedule offset. Constraints:
+    branch flags are boolean and sum to enabler; every row in the certificate
+    copies these flags from CERT_BIND; zero branch forces S = 0, H_inf = 1,
+    H_x = 0, and H_y = 0; nonzero branch forces H_inf = 0 and canonical H.
     H1/H2 final addition loads from CERT_BIND rows, not ON_CURVE.
 7.  Implement ON_CURVE check (gated by cert_active, not cert_zero_active).
     H coordinates must match corresponding CERT_BIND row.
@@ -1779,13 +2050,16 @@ global log with Range13/logup:     ~14-15
 15. Wire previous-row transitions, boundary indicators,
     preprocessed row-type selectors, preprocessed sig_id/cert_id/step_id,
     and materialized sig_active/cert_active/cert_zero_active/lsb00_active
-    columns with their defining constraints.
+    columns with their defining constraints. Include `is_cert_bind` in the
+    fixed row-type schedule and enforce certificate-wide branch flag copies.
 16. Wire PUBLIC_BIND (expanded with all input validation) and FINAL_CHECK
     (Z_R inverse for R!=O, homogeneous affine x = X_R*Z_R_inv, comparison).
     Include exact parity extraction for recovery_id if needed.
     H1/H2 loaded via fixed-schedule offsets from their CERT_BIND rows.
 17. Add public data binding and initial_logup_sum.
-    Provider: -1 * PublicEcdsaInstance. Consumer: +sig_active.
+    Provider: -1 * PublicEcdsaInstance(sig_id, ...). Consumer: +sig_active.
+    `sig_id` is part of the relation key so duplicate public tuples at
+    different positions are valid and unambiguous.
 18. Implement zero-scalar branch with cert_active/cert_zero_active gating,
     explicit disabled-row constraints per row family (cert_zero_active * limb = 0),
     and explicit use_count = 0 constraints.
@@ -1811,7 +2085,7 @@ Do not batch chain steps into wide rows (QuadAdd9) until the baseline DOUBLE/DOU
 - Replace the placeholder `MulModEval` with separate `FnMulEval` (generic quotient for scalar field) and `FpSolinasEval` (Solinas reduction for base field). The current generic `MulModWitness` shape is useful for tests but should not be the hot base-field AIR path.
 - Add a `PublicData` layer before proving APIs are finalized. `EcdsaProof` currently stores public fields but has no binding mechanism.
 - Use RCB Algorithm 6 (exception-free doubling) and Algorithm 5 (complete mixed addition) for all EC operations. Both use homogeneous projective coordinates `(X, Y, Z)` with affine recovery `x = X/Z, y = Y/Z`. Do not mix Jacobian formulas. Verify that Algorithm 6 applied to `(0,1,0)` does not produce `(0,0,0)`.
-- Verify RCB formula correctness for degenerate inputs `(0, 1, 0)` and `(0, 0, 0)` before integration.
+- Verify RCB formula correctness for degenerate valid inputs such as `(0, 1, 0)`, and verify that `(0, 0, 0)` is either unreachable or explicitly rejected before integration.
 - Gate all nonzero-branch logic by `cert_active`, not inline `enabler * scalar_is_nonzero`.
 
 ## Deterministic Fallback: Shamir/Horner
