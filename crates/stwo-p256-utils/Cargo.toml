@@ -7,3 +7,4 @@ description = "Verification utilities for the P-256 STARK AIR: M31 headroom audi
 [dependencies]
 
 [dev-dependencies]
+p256 = { version = "0.13", features = ["arithmetic"] }

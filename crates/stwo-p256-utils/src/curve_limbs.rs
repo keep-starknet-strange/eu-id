@@ -11,6 +11,34 @@
 
 use crate::constants::{LIMB_BITS, N_LIMBS, P256_GX, P256_GY, P256_MODULUS, P256_ORDER};
 
+const P256_G2X: [u64; 4] = [
+    0xA60B_48FC_4766_9978,
+    0xC089_69E2_77F2_1B35,
+    0x8A52_3803_04B5_1AC3,
+    0x7CF2_7B18_8D03_4F7E,
+];
+
+const P256_G2Y: [u64; 4] = [
+    0x9E04_B79D_2278_73D1,
+    0xBA7D_ADE6_3CE9_8229,
+    0x293D_9AC6_9F74_30DB,
+    0x0777_5510_DB8E_D040,
+];
+
+const P256_G3X: [u64; 4] = [
+    0xFB41_661B_C6E7_FD6C,
+    0xE6C6_B721_EFAD_A985,
+    0xC8F7_EF95_1D4B_F165,
+    0x5ECB_E4D1_A633_0A44,
+];
+
+const P256_G3Y: [u64; 4] = [
+    0x9A79_B127_A27D_5032,
+    0xD82A_B036_384F_B83D,
+    0x374B_06CE_1A64_A2EC,
+    0x8734_640C_4998_FF7E,
+];
+
 /// Decompose a little-endian `u64` array into `N_LIMBS` 13-bit limbs.
 ///
 /// Bits beyond position 256 are discarded; the canonical P-256 field elements
@@ -56,25 +84,24 @@ pub fn gy_limbs() -> [i64; N_LIMBS] {
     decompose_256_to_limbs(&P256_GY)
 }
 
-/// `[2]G` x-coordinate in 20×13-bit limb form. Computed once at startup from
-/// `G` via a reference Fp arithmetic implementation.
+/// `[2]G` x-coordinate in 20×13-bit limb form.
 pub fn g2x_limbs() -> [i64; N_LIMBS] {
-    todo!("Compute [2]G via affine doubling on P-256 using a big-int reference, then decompose.")
+    decompose_256_to_limbs(&P256_G2X)
 }
 
 /// `[2]G` y-coordinate in 20×13-bit limb form.
 pub fn g2y_limbs() -> [i64; N_LIMBS] {
-    todo!("Compute [2]G via affine doubling on P-256 using a big-int reference, then decompose.")
+    decompose_256_to_limbs(&P256_G2Y)
 }
 
 /// `[3]G` x-coordinate in 20×13-bit limb form.
 pub fn g3x_limbs() -> [i64; N_LIMBS] {
-    todo!("Compute [3]G = G + [2]G via affine addition using a big-int reference, then decompose.")
+    decompose_256_to_limbs(&P256_G3X)
 }
 
 /// `[3]G` y-coordinate in 20×13-bit limb form.
 pub fn g3y_limbs() -> [i64; N_LIMBS] {
-    todo!("Compute [3]G = G + [2]G via affine addition using a big-int reference, then decompose.")
+    decompose_256_to_limbs(&P256_G3Y)
 }
 
 /// P-256 curve parameter `b`. Hex from the AIR spec:
@@ -94,26 +121,13 @@ pub fn b_limbs() -> [i64; N_LIMBS] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use p256::elliptic_curve::group::Group;
+    use p256::elliptic_curve::sec1::ToEncodedPoint;
+    use p256::{AffinePoint, ProjectivePoint};
 
     #[test]
     fn limb_decomposition_roundtrips_for_p() {
-        let limbs = p_limbs();
-        // Recompose and check we recover P256_MODULUS up to 256 bits.
-        let mut recomposed = [0u64; 4];
-        for (i, &limb) in limbs.iter().enumerate() {
-            let limb_u = limb as u64;
-            let bit_pos = i * LIMB_BITS;
-            for bit in 0..LIMB_BITS {
-                let g = bit_pos + bit;
-                if g >= 256 {
-                    break;
-                }
-                if (limb_u >> bit) & 1 == 1 {
-                    recomposed[g / 64] |= 1u64 << (g % 64);
-                }
-            }
-        }
-        assert_eq!(recomposed, P256_MODULUS);
+        assert_eq!(limbs_to_le_u64s(&p_limbs()), P256_MODULUS);
     }
 
     #[test]
@@ -125,7 +139,17 @@ mod tests {
 
     #[test]
     fn each_limb_within_13_bits() {
-        for arr in [p_limbs(), n_limbs(), gx_limbs(), gy_limbs(), b_limbs()] {
+        for arr in [
+            p_limbs(),
+            n_limbs(),
+            gx_limbs(),
+            gy_limbs(),
+            g2x_limbs(),
+            g2y_limbs(),
+            g3x_limbs(),
+            g3y_limbs(),
+            b_limbs(),
+        ] {
             for limb in arr {
                 assert!(
                     limb >= 0 && limb < (1i64 << LIMB_BITS),
@@ -133,5 +157,67 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn generator_multiples_match_rustcrypto_reference() {
+        let g = ProjectivePoint::generator();
+        assert_eq!(le_u64s_to_be_bytes(&P256_G2X), affine_x_bytes(g + g));
+        assert_eq!(le_u64s_to_be_bytes(&P256_G2Y), affine_y_bytes(g + g));
+        assert_eq!(le_u64s_to_be_bytes(&P256_G3X), affine_x_bytes(g + g + g));
+        assert_eq!(le_u64s_to_be_bytes(&P256_G3Y), affine_y_bytes(g + g + g));
+    }
+
+    #[test]
+    fn generator_multiple_limbs_roundtrip_to_raw_constants() {
+        for (limbs, raw) in [
+            (g2x_limbs(), P256_G2X),
+            (g2y_limbs(), P256_G2Y),
+            (g3x_limbs(), P256_G3X),
+            (g3y_limbs(), P256_G3Y),
+        ] {
+            assert_eq!(limbs_to_le_u64s(&limbs), raw);
+        }
+    }
+
+    fn affine_x_bytes(point: ProjectivePoint) -> [u8; 32] {
+        let encoded = AffinePoint::from(point).to_encoded_point(false);
+        field_bytes_to_array(encoded.x().expect("uncompressed point has x"))
+    }
+
+    fn affine_y_bytes(point: ProjectivePoint) -> [u8; 32] {
+        let encoded = AffinePoint::from(point).to_encoded_point(false);
+        field_bytes_to_array(encoded.y().expect("uncompressed point has y"))
+    }
+
+    fn field_bytes_to_array(bytes: &[u8]) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        out.copy_from_slice(bytes);
+        out
+    }
+
+    fn le_u64s_to_be_bytes(words: &[u64; 4]) -> [u8; 32] {
+        let mut bytes = [0u8; 32];
+        for (i, word) in words.iter().enumerate() {
+            bytes[24 - 8 * i..32 - 8 * i].copy_from_slice(&word.to_be_bytes());
+        }
+        bytes
+    }
+
+    fn limbs_to_le_u64s(limbs: &[i64; N_LIMBS]) -> [u64; 4] {
+        let mut words = [0u64; 4];
+        for (i, &limb) in limbs.iter().enumerate() {
+            let bit_pos = i * LIMB_BITS;
+            for bit in 0..LIMB_BITS {
+                let global_bit = bit_pos + bit;
+                if global_bit >= 256 {
+                    break;
+                }
+                if ((limb as u64) >> bit) & 1 == 1 {
+                    words[global_bit / 64] |= 1u64 << (global_bit % 64);
+                }
+            }
+        }
+        words
     }
 }
