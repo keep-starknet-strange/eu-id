@@ -1,0 +1,6 @@
+[alias]
+# Run all predicate benchmarks
+bench-predicates = "bench -p predicates"
+
+# Compile benchmarks without running (fast check that they build)
+bench-check = "bench -p predicates --no-run"
