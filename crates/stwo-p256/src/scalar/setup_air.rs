@@ -3,9 +3,10 @@ use stwo_constraint_framework::EvalAtRow;
 use stwo_p256_utils::constants::{LIMB_BITS, N_LIMBS};
 use stwo_p256_utils::scalar_arithmetic::{words_to_limbs, BigIntLimbs, P256_ORDER};
 
-use crate::canonical_lt::{add_canonical_lt_fixed_bound, CanonicalLtRelations};
 use crate::limbs::P256EvalBigInt;
 use crate::range_checks::{add_range_check, RangeCheckRelation};
+
+use super::canonical_lt::{add_canonical_lt_fixed_bound, CanonicalLtRelations};
 
 pub const DIGEST_TOP_LIMB_BITS: u32 = 9;
 pub const DIGEST_REDUCTION_CARRY_BOUND: i64 = 1;
