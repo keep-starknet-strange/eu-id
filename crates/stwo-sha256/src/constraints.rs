@@ -4,12 +4,12 @@
 //! [`crate::trace`]. The **linear** constraints — IV binding on the first
 //! block, every mod-2³² limb-add identity (schedule recurrence, round adds,
 //! finalization), and the state-chain that ties round outputs back to the
-//! next round's inputs — are emitted here. The **lookup** relations for
-//! `Σ`/`σ`/`Maj`/`Ch`/`xor_8` are stubbed with comments pointing at the
-//! shared range-check / LogUp foundation that lives upstream of this stream
-//! (see §9.4 of the validated design). Once that foundation lands, this
-//! module imports its `RelationEntry` helpers and inserts the
-//! `add_to_relation` calls in the sites marked below.
+//! next round's inputs — are emitted here. The **`Σ`/`σ` decode-table LogUp
+//! lookups** (§9.3 of the validated design) and the matching σ-output
+//! reassembly + `O2` chunk-bind constraints are wired below; the chunk-wise
+//! `xor_8` lookups that close `o2_combined = o2_partial_s ⊕ o2_partial_s'`,
+//! the `Maj`/`Ch` lookups, the split-and-pack key pin, and the carry
+//! range-checks land in the follow-on lookup-wiring work.
 //!
 //! Read-order invariant: every `next_trace_mask` call here happens in the
 //! same order as the writes in [`crate::trace::write_block_row`]. Layout
@@ -18,9 +18,10 @@
 
 use num_traits::One;
 use stwo::core::fields::m31::M31;
-use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
+use stwo_constraint_framework::{EvalAtRow, FrameworkEval, RelationEntry};
 
 use crate::constants::{IV, K, N_ROUNDS, N_STATE_WORDS};
+use crate::relations::SigmaDecodeRelations;
 use crate::types::LIMB_BITS;
 
 /// AIR evaluator over the wide one-row-per-block layout.
@@ -28,6 +29,8 @@ use crate::types::LIMB_BITS;
 pub struct Sha256Eval {
     /// `log2` of the row count (i.e. the smallest power-of-two ≥ block count).
     pub log_size: u32,
+    /// LogUp channels for the eight `Σ`/`σ` decode tables.
+    pub relations: SigmaDecodeRelations,
 }
 
 impl FrameworkEval for Sha256Eval {
@@ -67,15 +70,15 @@ impl FrameworkEval for Sha256Eval {
         let w: [(E::F, E::F); N_ROUNDS] =
             std::array::from_fn(|_| (eval.next_trace_mask(), eval.next_trace_mask()));
 
-        // ---- schedule entries: 48 × (σ0, σ1, carries) ----
+        // ---- schedule entries: 48 × (σ0, σ1 limbs + carries + decode blocks) ----
         //
-        // The σ-output values are not free — they are the *result* of a
-        // lookup keyed on `W[t-15]` (for σ0) and `W[t-2]` (for σ1). Each
-        // such lookup is two decode-table reads plus an `xor_8` chunk-wise
-        // combination of the two `O2` partials (§9 of the design). The
-        // LogUp `add_to_relation` calls hook in at the marker below; for
-        // now we read the σ outputs as columns and emit the *linear* add
-        // identity that ties them to `W[t]`.
+        // The σ-output values are not free — each is enforced via two
+        // decode-table lookups (one per `S`/`S′` half) on the input word's
+        // 16-bit packed halves, plus a chunk-wise `xor_8` combine of the two
+        // `O2` partials (§9.3). This loop emits the decode-side
+        // `add_to_relation` calls and the σ-output reassembly identity that
+        // ties the decoded intermediates to the σ-output limbs; the
+        // chunk-wise XOR lookups land in the follow-on wiring task.
         for j in 0..(N_ROUNDS - 16) {
             let t = j + 16;
             let s0 = (eval.next_trace_mask(), eval.next_trace_mask());
@@ -83,11 +86,30 @@ impl FrameworkEval for Sha256Eval {
             let carry_lo = eval.next_trace_mask();
             let carry_hi = eval.next_trace_mask();
 
-            // TODO(shared-foundation): lookup constraints
-            //   σ1(W[t-2]) -> s1   via Σ/σ decode + xor_8 combine
-            //   σ0(W[t-15]) -> s0  via Σ/σ decode + xor_8 combine
-            //   carry_lo, carry_hi ∈ [0, 4)   via range-check table
-            //   s0.lo, s0.hi, s1.lo, s1.hi ∈ [0, 2¹⁶)  (implicit via lookup).
+            // σ-decode blocks (read in the order written by
+            // `trace::write_sigma_decode_block`).
+            let sigma0_decode = read_sigma_decode::<E>(&mut eval);
+            let sigma1_decode = read_sigma_decode::<E>(&mut eval);
+
+            // σ0(W[t-15]) → s0 — emit S-side and S′-side decode lookups,
+            // the linear reassembly identity, and the O2 chunk-bind.
+            wire_sigma_decode::<E>(
+                &mut eval,
+                enabler.clone(),
+                &sigma0_decode,
+                &s0,
+                &self.relations.lower_sigma0_s,
+                &self.relations.lower_sigma0_s_complement,
+            );
+            // σ1(W[t-2]) → s1.
+            wire_sigma_decode::<E>(
+                &mut eval,
+                enabler.clone(),
+                &sigma1_decode,
+                &s1,
+                &self.relations.lower_sigma1_s,
+                &self.relations.lower_sigma1_s_complement,
+            );
 
             // W[t] = σ1(W[t-2]) + W[t-7] + σ0(W[t-15]) + W[t-16]  (mod 2³²)
             //
@@ -97,13 +119,12 @@ impl FrameworkEval for Sha256Eval {
             //   hi: s1.hi + W[t-7].hi + s0.hi + W[t-16].hi + carry_lo
             //         = W[t].hi + 2¹⁶ · carry_hi
             let w_t = w[t].clone();
-            let w_t_minus_2 = w[t - 2].clone();
             let w_t_minus_7 = w[t - 7].clone();
-            let w_t_minus_15 = w[t - 15].clone();
             let w_t_minus_16 = w[t - 16].clone();
-            let _ = (w_t_minus_2, w_t_minus_15); // these are inputs to the σ lookups, used by the
-                                                 // (currently stubbed) LogUp constraints above; in the linear add identity below the
-                                                 // σ outputs already represent their contribution.
+            // `W[t-2]` and `W[t-15]` are the inputs to σ1 and σ0; the
+            // decode-table key-pin (split-and-pack lookup, §9.3) lands in a
+            // follow-on task, at which point `key_s + key_s_complement` is
+            // tied back to `W[t-2]` / `W[t-15]`.
 
             emit_mod_2_32_add_linear(
                 &mut eval,
@@ -140,13 +161,39 @@ impl FrameworkEval for Sha256Eval {
             let e_new_carry = (eval.next_trace_mask(), eval.next_trace_mask());
             let a_new_carry = (eval.next_trace_mask(), eval.next_trace_mask());
 
-            // TODO(shared-foundation): lookup constraints
-            //   σ0(a)  -> sigma0   via Σ/σ decode + xor_8
-            //   σ1(e)  -> sigma1   via Σ/σ decode + xor_8
+            // σ-decode blocks for Σ0(a) and Σ1(e), in the order written by
+            // `trace::write_block_row`.
+            let sigma0_decode = read_sigma_decode::<E>(&mut eval);
+            let sigma1_decode = read_sigma_decode::<E>(&mut eval);
+
+            // Σ0(a) → sigma0 — S/S′ decode lookups, σ-output reassembly,
+            // and `O2` chunk-bind constraints (chunk-wise `xor_8` lookups
+            // land in the follow-on task).
+            wire_sigma_decode::<E>(
+                &mut eval,
+                enabler.clone(),
+                &sigma0_decode,
+                &sigma0,
+                &self.relations.sigma0_s,
+                &self.relations.sigma0_s_complement,
+            );
+            // Σ1(e) → sigma1.
+            wire_sigma_decode::<E>(
+                &mut eval,
+                enabler.clone(),
+                &sigma1_decode,
+                &sigma1,
+                &self.relations.sigma1_s,
+                &self.relations.sigma1_s_complement,
+            );
+
+            // Lookups still to be wired by follow-on tasks:
             //   Maj(a,b,c) -> maj  via packed Maj/Ch table at width W
             //   Ch(e,f,g)  -> ch   via packed Maj/Ch table
-            //   carry_*.lo, carry_*.hi ∈ [0, k)  via range-check table
-            //   every limb output ∈ [0, 2¹⁶)    (implicit via lookup).
+            //   o2_combined.* via chunk-wise xor_8 on the matched triple
+            //   carry_*.lo, carry_*.hi ∈ [0, k)  via range-check tables
+            //   key_s / key_s_complement pinned to the input word via
+            //     split-and-pack lookup.
 
             // K[t] is a circuit constant, never a free column.
             let k_lo = E::F::from(M31::from(k_t & 0xFFFF));
@@ -246,11 +293,160 @@ impl FrameworkEval for Sha256Eval {
         //   mask helpers (`next_trace_mask_at_offset` or similar), which are
         //   part of the shared foundation work.
 
-        // TODO(shared-foundation): `eval.finalize_logup_in_pairs()` once the
-        // lookup relations above are populated.
+        // `eval.finalize_logup_in_pairs()` is deferred until *all* LogUp
+        // channels are populated — the `Σ`/`σ` decode lookups above account
+        // for ~half the entries; the chunk-wise `xor_8`, the `Maj`/`Ch`
+        // lookups, the split-and-pack key pin, and the carry range checks
+        // join in follow-on tasks. Calling `finalize_*` before then would
+        // emit a cumulative-sum constraint inconsistent with the (yet-to-
+        // land) remaining `add_to_relation` calls.
 
         eval
     }
+}
+
+/// One σ-application's worth of decoded intermediates, read from the trace
+/// in the column order written by [`crate::trace::write_sigma_decode_block`].
+/// `s_values` and `s_complement_values` are kept as 5-element arrays so they
+/// can be passed straight to `add_to_relation` (matching the decode-table row
+/// shape `(key, o_main_lo, o_main_hi, o2_partial_lo, o2_partial_hi)`).
+struct SigmaDecodeMasks<F: Clone> {
+    /// `[key_s, o_main_s.lo, o_main_s.hi, o2_partial_s.lo, o2_partial_s.hi]`.
+    s_values: [F; 5],
+    /// `[key_s_complement, o_main_s_complement.lo, o_main_s_complement.hi,
+    /// o2_partial_s_complement.lo, o2_partial_s_complement.hi]`.
+    s_complement_values: [F; 5],
+    /// `(o2_combined.lo, o2_combined.hi)` — the field sum the σ-output
+    /// reassembly identity reads.
+    o2_combined: (F, F),
+    /// Byte chunks of `o2_partial_s` — `(lo.b0, lo.b1, hi.b0, hi.b1)`.
+    o2_chunks_s: [F; 4],
+    /// Byte chunks of `o2_partial_s_complement`.
+    o2_chunks_s_complement: [F; 4],
+    /// Byte chunks of `o2_combined`.
+    o2_chunks_combined: [F; 4],
+}
+
+/// Pull one σ-decode block off the `EvalAtRow` mask iterator. The reads
+/// happen in trace-write order — keeping `wire_sigma_decode` independent of
+/// the actual column layout.
+fn read_sigma_decode<E: EvalAtRow>(eval: &mut E) -> SigmaDecodeMasks<E::F> {
+    let s_values = std::array::from_fn::<E::F, 5, _>(|_| eval.next_trace_mask());
+    let s_complement_values = std::array::from_fn::<E::F, 5, _>(|_| eval.next_trace_mask());
+    let o2_combined = (eval.next_trace_mask(), eval.next_trace_mask());
+    let o2_chunks_s = std::array::from_fn::<E::F, 4, _>(|_| eval.next_trace_mask());
+    let o2_chunks_s_complement = std::array::from_fn::<E::F, 4, _>(|_| eval.next_trace_mask());
+    let o2_chunks_combined = std::array::from_fn::<E::F, 4, _>(|_| eval.next_trace_mask());
+    SigmaDecodeMasks {
+        s_values,
+        s_complement_values,
+        o2_combined,
+        o2_chunks_s,
+        o2_chunks_s_complement,
+        o2_chunks_combined,
+    }
+}
+
+/// Emit all the constraints + LogUp lookups one σ-application contributes:
+///
+/// 1. **`S`-side decode lookup** — `(key_s, o_main_s.lo, o_main_s.hi,
+///    o2_partial_s.lo, o2_partial_s.hi) ∈ table(rel_s)`.
+/// 2. **`S′`-side decode lookup** — analogous, against `rel_s_complement`.
+/// 3. **σ-output reassembly identity** — `σ.lo = o_main_s.lo +
+///    o_main_s_complement.lo + o2_combined.lo` (`.hi` analogous). Field
+///    addition matches XOR because the spread `O0`/`O1`/`O2` bits are
+///    disjoint.
+/// 4. **`O2` chunk-bind identities** — `o2_partial_s.lo = b0 + 256·b1`
+///    (and the `.hi` and `s_complement` and `combined` analogues). These
+///    are what the follow-on chunk-wise `xor_8` lookups will key on.
+///
+/// The chunks themselves are *not* range-checked here — the `xor_8` lookup
+/// pins them to `[0, 256)`; the chunk-bind constraint above then pins each
+/// 16-bit limb to `[0, 2¹⁶)` (one of the design's §11 L1 lookup ⇒ implicit
+/// range checks). Until that lookup lands, the prover is trusted on the
+/// chunks; this is the soundness gap the follow-on task closes.
+fn wire_sigma_decode<E: EvalAtRow>(
+    eval: &mut E,
+    enabler: E::F,
+    decode: &SigmaDecodeMasks<E::F>,
+    sigma_out: &(E::F, E::F),
+    rel_s: &impl stwo_constraint_framework::Relation<E::F, E::EF>,
+    rel_s_complement: &impl stwo_constraint_framework::Relation<E::F, E::EF>,
+) {
+    // (1) S-side decode-table lookup — "use" the row at multiplicity +1.
+    eval.add_to_relation(RelationEntry::new(rel_s, E::EF::one(), &decode.s_values));
+    // (2) S′-side decode-table lookup.
+    eval.add_to_relation(RelationEntry::new(
+        rel_s_complement,
+        E::EF::one(),
+        &decode.s_complement_values,
+    ));
+
+    // (3) σ-output reassembly: σ = o_main_s + o_main_s_complement + o2_combined,
+    // limb by limb, gated by `enabler`.
+    let o_main_s_lo = decode.s_values[1].clone();
+    let o_main_s_hi = decode.s_values[2].clone();
+    let o_main_s_complement_lo = decode.s_complement_values[1].clone();
+    let o_main_s_complement_hi = decode.s_complement_values[2].clone();
+    let o2_combined_lo = decode.o2_combined.0.clone();
+    let o2_combined_hi = decode.o2_combined.1.clone();
+
+    eval.add_constraint(
+        enabler.clone()
+            * (sigma_out.0.clone() - o_main_s_lo - o_main_s_complement_lo - o2_combined_lo),
+    );
+    eval.add_constraint(
+        enabler.clone()
+            * (sigma_out.1.clone() - o_main_s_hi - o_main_s_complement_hi - o2_combined_hi),
+    );
+
+    // (4) O2 chunk-bind: each 16-bit limb equals `b0 + 256·b1`. We do this
+    // for the S-side partial, the S′-side partial, and the combined value —
+    // three matched chunk sets that the chunk-wise `xor_8` lookup will tie
+    // together as `chunks_combined[i] = chunks_s[i] ⊕ chunks_s_complement[i]`.
+    let o2_partial_s_lo = decode.s_values[3].clone();
+    let o2_partial_s_hi = decode.s_values[4].clone();
+    let o2_partial_s_complement_lo = decode.s_complement_values[3].clone();
+    let o2_partial_s_complement_hi = decode.s_complement_values[4].clone();
+    emit_chunk_bind::<E>(
+        eval,
+        enabler.clone(),
+        o2_partial_s_lo,
+        o2_partial_s_hi,
+        &decode.o2_chunks_s,
+    );
+    emit_chunk_bind::<E>(
+        eval,
+        enabler.clone(),
+        o2_partial_s_complement_lo,
+        o2_partial_s_complement_hi,
+        &decode.o2_chunks_s_complement,
+    );
+    emit_chunk_bind::<E>(
+        eval,
+        enabler,
+        decode.o2_combined.0.clone(),
+        decode.o2_combined.1.clone(),
+        &decode.o2_chunks_combined,
+    );
+}
+
+/// Emit the two linear chunk-bind constraints: `limb_lo = b0_lo + 256·b1_lo`
+/// and `limb_hi = b0_hi + 256·b1_hi`, gated by `enabler`. `chunks` is in the
+/// trace order `(lo.b0, lo.b1, hi.b0, hi.b1)` matching
+/// [`crate::trace::write_chunk_quad`].
+fn emit_chunk_bind<E: EvalAtRow>(
+    eval: &mut E,
+    enabler: E::F,
+    limb_lo: E::F,
+    limb_hi: E::F,
+    chunks: &[E::F; 4],
+) {
+    let byte_base = E::F::from(M31::from(1u32 << 8));
+    eval.add_constraint(
+        enabler.clone() * (limb_lo - chunks[0].clone() - byte_base.clone() * chunks[1].clone()),
+    );
+    eval.add_constraint(enabler * (limb_hi - chunks[2].clone() - byte_base * chunks[3].clone()));
 }
 
 /// Emit the two linear constraints of one limb-grouped mod-2³² add.
@@ -262,7 +458,9 @@ impl FrameworkEval for Sha256Eval {
 /// `Σ aᵢ.hi + carry_lo = r.hi + 2¹⁶ · carry_hi`
 ///
 /// `carry_hi` is the discarded mod-2³² wraparound; the AIR range-checks both
-/// carries via a lookup (stubbed, see TODO markers in callers).
+/// carries via a `Range_k` lookup (one of `Range_2`/`4`/`5` per add family,
+/// see [`crate::headroom`]) — that wiring lands with the shared-foundation
+/// roll-out.
 ///
 /// The constraint is multiplied by `enabler` so padding rows (`enabler = 0`)
 /// remain unconstrained.
@@ -482,5 +680,140 @@ mod tests {
     #[test]
     fn linear_identities_hold_for_multi_block() {
         check_linear_constraints_on_message(&[0xABu8; 200]);
+    }
+
+    /// Each σ-application's decoded intermediates round-trip the σ-output
+    /// reassembly identity and the `O2` chunk-bind that the AIR emits in
+    /// [`wire_sigma_decode`]. A failure here means the witness or the
+    /// reassembly algebra is off — not just a missing lookup.
+    fn check_decode_reassembly_in_row(
+        trace: &[Vec<stwo::core::fields::m31::BaseField>],
+        row: usize,
+    ) {
+        let v = |col: usize| trace[col][row].0;
+        let two_pow_8 = 1u32 << 8;
+
+        let check_block = |base: usize, label: &str| -> (u32, u32) {
+            // Layout per `crate::trace::SIGMA_DECODE_COLS`:
+            //   0..5   S-side tuple   (key, o_main.lo, .hi, o2_partial.lo, .hi)
+            //   5..10  S′-side tuple
+            //   10,11  o2_combined.lo, .hi
+            //   12..16 o2_chunks_s             (lo.b0, lo.b1, hi.b0, hi.b1)
+            //   16..20 o2_chunks_s_complement
+            //   20..24 o2_chunks_combined
+            // Chunk-bind: `limb == b0 + 256·b1` for each of the six limbs.
+            assert_eq!(
+                v(base + 3),
+                v(base + 12) + two_pow_8 * v(base + 13),
+                "{label}: chunk-bind o2_partial_s.lo"
+            );
+            assert_eq!(
+                v(base + 4),
+                v(base + 14) + two_pow_8 * v(base + 15),
+                "{label}: chunk-bind o2_partial_s.hi"
+            );
+            assert_eq!(
+                v(base + 8),
+                v(base + 16) + two_pow_8 * v(base + 17),
+                "{label}: chunk-bind o2_partial_s_complement.lo"
+            );
+            assert_eq!(
+                v(base + 9),
+                v(base + 18) + two_pow_8 * v(base + 19),
+                "{label}: chunk-bind o2_partial_s_complement.hi"
+            );
+            assert_eq!(
+                v(base + 10),
+                v(base + 20) + two_pow_8 * v(base + 21),
+                "{label}: chunk-bind o2_combined.lo"
+            );
+            assert_eq!(
+                v(base + 11),
+                v(base + 22) + two_pow_8 * v(base + 23),
+                "{label}: chunk-bind o2_combined.hi"
+            );
+            // Reassembly: σ = o_main_s + o_main_s_complement + o2_combined
+            // — limb by limb. Returned so the caller compares against the
+            // σ-output limbs committed elsewhere in the row.
+            (
+                v(base + 1) + v(base + 6) + v(base + 10),
+                v(base + 2) + v(base + 7) + v(base + 11),
+            )
+        };
+
+        for j in 0..(N_ROUNDS - 16) {
+            let [s0_lo, s0_hi, s1_lo, s1_hi, _, _] = Layout::schedule_entry(j);
+            let s0 = (v(s0_lo), v(s0_hi));
+            let s1 = (v(s1_lo), v(s1_hi));
+            let sigma0_sum = check_block(Layout::schedule_entry_decode(j, 0), "schedule σ0");
+            assert_eq!(s0, sigma0_sum, "schedule[{j}]: σ0 reassembly");
+            let sigma1_sum = check_block(Layout::schedule_entry_decode(j, 1), "schedule σ1");
+            assert_eq!(s1, sigma1_sum, "schedule[{j}]: σ1 reassembly");
+        }
+
+        for t in 0..N_ROUNDS {
+            let cols = Layout::round_col(t);
+            let sigma0 = (v(cols[0]), v(cols[1]));
+            let sigma1 = (v(cols[2]), v(cols[3]));
+            let sigma0_sum = check_block(Layout::round_decode(t, 0), "round Σ0");
+            assert_eq!(sigma0, sigma0_sum, "round[{t}]: Σ0 reassembly");
+            let sigma1_sum = check_block(Layout::round_decode(t, 1), "round Σ1");
+            assert_eq!(sigma1, sigma1_sum, "round[{t}]: Σ1 reassembly");
+        }
+    }
+
+    #[test]
+    fn decode_reassembly_holds_for_abc() {
+        let witness = compute_sha256_witness(b"abc");
+        let trace = generate_trace(&witness, min_log_size(witness.blocks.len()));
+        for row in 0..witness.blocks.len() {
+            check_decode_reassembly_in_row(&trace, row);
+        }
+    }
+
+    #[test]
+    fn decode_reassembly_holds_for_multi_block() {
+        let witness = compute_sha256_witness(&[0xABu8; 200]);
+        let trace = generate_trace(&witness, min_log_size(witness.blocks.len()));
+        for row in 0..witness.blocks.len() {
+            check_decode_reassembly_in_row(&trace, row);
+        }
+    }
+
+    /// Per-block decode-lookup multiplicities equal the static per-block
+    /// counts dictated by the trace shape — 64 round σ-applications (per
+    /// side per function), 48 schedule σ-applications likewise. Sanity:
+    /// the wiring fires the expected number of times.
+    #[test]
+    fn decode_lookup_multiplicities_match_per_block_totals() {
+        use crate::witness::{decode_multiplicities_for_block, decode_multiplicities_for_witness};
+
+        // Single block (`b"abc"` is one padded block).
+        let witness = compute_sha256_witness(b"abc");
+        assert_eq!(witness.blocks.len(), 1);
+        let m = decode_multiplicities_for_block(&witness.blocks[0]);
+        assert_eq!(m.sigma0_s, N_ROUNDS as u32);
+        assert_eq!(m.sigma0_s_complement, N_ROUNDS as u32);
+        assert_eq!(m.sigma1_s, N_ROUNDS as u32);
+        assert_eq!(m.sigma1_s_complement, N_ROUNDS as u32);
+        assert_eq!(m.lower_sigma0_s, (N_ROUNDS - 16) as u32);
+        assert_eq!(m.lower_sigma0_s_complement, (N_ROUNDS - 16) as u32);
+        assert_eq!(m.lower_sigma1_s, (N_ROUNDS - 16) as u32);
+        assert_eq!(m.lower_sigma1_s_complement, (N_ROUNDS - 16) as u32);
+        // Total = 4·64 (rounds) + 4·48 (schedule) = 448 decode lookups per block.
+        assert_eq!(
+            m.total(),
+            4 * (N_ROUNDS as u32) + 4 * ((N_ROUNDS - 16) as u32)
+        );
+        assert_eq!(m.total(), 448);
+
+        // Multi-block scaling is exactly linear in `n_blocks`.
+        let multi = compute_sha256_witness(&[0xABu8; 200]);
+        let n = multi.blocks.len() as u32;
+        assert!(n >= 2, "expected the multi-block case to exceed one block");
+        let agg = decode_multiplicities_for_witness(&multi);
+        assert_eq!(agg.total(), n * 448);
+        assert_eq!(agg.sigma0_s, n * N_ROUNDS as u32);
+        assert_eq!(agg.lower_sigma1_s_complement, n * (N_ROUNDS - 16) as u32);
     }
 }

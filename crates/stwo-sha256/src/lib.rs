@@ -20,6 +20,8 @@
 //!   migration.
 //! - [`native`] — pure SHA-256 reference (padding, schedule, compression,
 //!   multi-block) tested against the `sha2` crate. The out-of-circuit oracle.
+//! - [`relations`] — LogUp relation tags (`Σ`/`σ` decode, with the
+//!   `Maj`/`Ch` / `xor_8` channels arriving in follow-on lookup-wiring work).
 //! - [`tables`] — preprocessed lookup-table content: `Σ`/`σ` decode tables,
 //!   packed `Maj`/`Ch` table, `xor_8` table, split-and-pack tables.
 //! - [`tables_local`] — local fallback for the workspace-shared range-check
@@ -39,6 +41,7 @@ pub mod constraints;
 pub mod headroom;
 pub mod native;
 pub mod partitions;
+pub mod relations;
 pub mod stark;
 pub mod tables;
 pub mod tables_local;

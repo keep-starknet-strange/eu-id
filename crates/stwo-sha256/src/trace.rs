@@ -12,32 +12,63 @@
 //!   force `h_in == IV` only there.
 //! - `h_in` (16 cols) — 8 words × 2 limbs each, little-endian limb order.
 //! - schedule words `W[0..63]` (128 cols) — 64 words × 2 limbs.
-//! - schedule witnesses for `W[16..63]` (`σ0`/`σ1` outputs and add carries):
-//!   `48 × (2 + 2 + 2) = 288 cols`. Inputs (`W[t-2]`, `W[t-7]`, `W[t-15]`,
-//!   `W[t-16]`) are *not* duplicated here — they live in the `W` columns
-//!   above and are read by index in the AIR.
-//! - per-round witnesses for `t ∈ [0, 64)` (`64 × ROUND_COLS_PER_ROUND` cols).
+//! - schedule witnesses for `W[16..63]`: per entry, the `σ0`/`σ1` output
+//!   limbs and add carries (`2 + 2 + 2 = 6` cols), then the decoded
+//!   intermediates of `σ0` and `σ1` (2 × `SIGMA_DECODE_COLS`). Inputs
+//!   (`W[t-2]`, `W[t-7]`, `W[t-15]`, `W[t-16]`) are *not* duplicated here —
+//!   they live in the `W` columns above and are read by index in the AIR.
+//!   ⇒ `48 × SCHEDULE_ENTRY_COLS` cells.
+//! - per-round witnesses for `t ∈ [0, 64)` (`64 × ROUND_COLS` cols).
 //!   See [`Layout::round_col`] for the per-round shape.
 //! - finalization carries (16 cols) — 8 words × `(lo, hi)`.
 //! - `h_out` (16 cols).
 //!
-//! Total: `1 + 1 + 16 + 128 + 288 + 64 × 24 + 16 + 16 = 2 002` columns/row.
-//! (We avoid storing the per-round `state_in`: the AIR enforces the state
-//! chain via the previous round's `a_new`/`e_new`/`state_in[...]` cells.)
+//! Per-round cells (`ROUND_COLS`): `σ0`, `σ1`, `ch`, `maj`, `t1`, `t2`,
+//! `a_new`, `e_new` (each `(lo, hi)` ⇒ 16 cells) plus 4 add carry pairs
+//! (⇒ 8 cells), then the decoded intermediates of `Σ0(a)` and `Σ1(e)`
+//! (2 × `SIGMA_DECODE_COLS`). The decode intermediates are appended after
+//! the existing limb-add columns so the existing constraint reads stay in
+//! place and the new decode-table `add_to_relation` calls / reassembly /
+//! chunk-bind constraints read from a single contiguous range.
 //!
-//! Per-round cells (24): `σ0`, `σ1`, `ch`, `maj`, `t1`, `t2`, `a_new`,
-//! `e_new` (each `(lo, hi)` ⇒ 16 cells) plus 4 add carry pairs ⇒ 8 cells.
+//! Per σ-application (`SIGMA_DECODE_COLS = 24`):
+//! `key_s, o_main_s.lo, o_main_s.hi, o2_partial_s.lo, o2_partial_s.hi,
+//!  key_s_complement, o_main_s_complement.lo, o_main_s_complement.hi,
+//!  o2_partial_s_complement.lo, o2_partial_s_complement.hi,
+//!  o2_combined.lo, o2_combined.hi,
+//!  o2_chunks_s (4 bytes),
+//!  o2_chunks_s_complement (4 bytes),
+//!  o2_chunks_combined (4 bytes)`.
+//! The two 5-tuples `[key, o_main_lo, o_main_hi, o2_partial_lo, o2_partial_hi]`
+//! at offsets 0 and 5 are the decode-table lookup keys for the S-side and
+//! S′-side respectively — sharing the read order with the lookup tuple
+//! keeps the AIR `add_to_relation` calls trivially aligned.
 
 use stwo::core::fields::m31::{BaseField, M31};
 
 use crate::constants::{N_ROUNDS, N_STATE_WORDS};
-use crate::types::{AddCarries, BlockWitness, Sha256Witness, WordLimbs};
+use crate::types::{
+    AddCarries, BlockWitness, LimbPairBytes, Sha256Witness, SigmaDecodeWitness, WordLimbs,
+};
 
-/// Columns per round: 8 word-results × 2 limbs + 4 carry pairs × 2 ends = 24.
-pub const ROUND_COLS: usize = 8 * 2 + 4 * 2;
+/// Columns per σ-application's decoded intermediates (§9.3 of the design):
+/// `key_s, o_main_s (lo, hi), o2_partial_s (lo, hi), key_s_complement,
+///  o_main_s_complement (lo, hi), o2_partial_s_complement (lo, hi),
+///  o2_combined (lo, hi), 3 × 4-byte chunk sets`.
+///
+/// The leading 5 cells (`key_s + o_main_s + o2_partial_s`) match the row
+/// shape of the `S`-side decode table and the trailing 5 cells of the first
+/// half (`key_s_complement + …`) match the `S′`-side table — so the
+/// constraint loop's `add_to_relation` keys read in column order without
+/// re-permutation.
+pub const SIGMA_DECODE_COLS: usize = 5 + 5 + 2 + 4 + 4 + 4;
+/// Columns per round: 8 word-results × 2 limbs + 4 carry pairs × 2 ends = 24,
+/// then two σ-decodes (one for `Σ0(a)`, one for `Σ1(e)`).
+pub const ROUND_COLS: usize = 8 * 2 + 4 * 2 + 2 * SIGMA_DECODE_COLS;
 /// Columns per schedule entry (`W[t]` for `t ≥ 16`):
-/// `σ0`, `σ1`, carries → `2 + 2 + 2 = 6`.
-pub const SCHEDULE_ENTRY_COLS: usize = 6;
+/// `σ0`, `σ1`, carries (= 6), then two σ-decodes (one for `σ0(W[t-15])`,
+/// one for `σ1(W[t-2])`).
+pub const SCHEDULE_ENTRY_COLS: usize = 6 + 2 * SIGMA_DECODE_COLS;
 /// Number of schedule entries: `W[16..64]` ⇒ 48.
 pub const N_SCHEDULE_ENTRIES: usize = N_ROUNDS - 16;
 
@@ -81,11 +112,33 @@ impl Layout {
     }
 
     /// Columns of one schedule entry, in order: `σ0_lo, σ0_hi, σ1_lo, σ1_hi,
-    /// carry_lo, carry_hi`. Entry index `j ∈ [0, 48)` corresponds to `W[16+j]`.
+    /// carry_lo, carry_hi`, then two σ-decode blocks.
+    /// Entry index `j ∈ [0, 48)` corresponds to `W[16+j]`. Only the leading
+    /// 6 cells are returned here — the decode blocks are addressed by
+    /// [`Self::schedule_entry_decode`] since their offset is fixed.
     #[inline]
-    pub const fn schedule_entry(j: usize) -> [usize; SCHEDULE_ENTRY_COLS] {
+    pub const fn schedule_entry(j: usize) -> [usize; 6] {
         let base = Self::COL_SCHED_ENTRY_START + j * SCHEDULE_ENTRY_COLS;
         [base, base + 1, base + 2, base + 3, base + 4, base + 5]
+    }
+
+    /// Start column of one σ-decode block of one schedule entry. `which` is
+    /// `0` for `σ0(W[t-15])`, `1` for `σ1(W[t-2])` — the order written by
+    /// [`write_block_row`] and read by `constraints::Sha256Eval`.
+    #[inline]
+    pub const fn schedule_entry_decode(j: usize, which: usize) -> usize {
+        let base = Self::COL_SCHED_ENTRY_START + j * SCHEDULE_ENTRY_COLS;
+        base + 6 + which * SIGMA_DECODE_COLS
+    }
+
+    /// Start column of one σ-decode block of one round. `which` is `0` for
+    /// `Σ0(a)`, `1` for `Σ1(e)` — matching the witness field order and the
+    /// AIR read order. The 24 cells starting here are a single
+    /// `SigmaDecodeWitness`, laid out per [`SIGMA_DECODE_COLS`] above.
+    #[inline]
+    pub const fn round_decode(t: usize, which: usize) -> usize {
+        let base = Self::COL_ROUND_START + t * ROUND_COLS;
+        base + 24 + which * SIGMA_DECODE_COLS
     }
 
     /// One round's columns, in order:
@@ -179,6 +232,19 @@ fn write_block_row(
         cols[s1_hi][row] = m31(entry.lower_sigma1.hi);
         cols[c_lo][row] = m31(entry.carries.lo);
         cols[c_hi][row] = m31(entry.carries.hi);
+
+        write_sigma_decode_block(
+            cols,
+            row,
+            Layout::schedule_entry_decode(j, 0),
+            &entry.lower_sigma0_decode,
+        );
+        write_sigma_decode_block(
+            cols,
+            row,
+            Layout::schedule_entry_decode(j, 1),
+            &entry.lower_sigma1_decode,
+        );
     }
 
     // 64 rounds
@@ -208,6 +274,9 @@ fn write_block_row(
             cols[r[16 + 2 * i]][row] = m31(c.lo);
             cols[r[16 + 2 * i + 1]][row] = m31(c.hi);
         }
+
+        write_sigma_decode_block(cols, row, Layout::round_decode(t, 0), &round.sigma0_decode);
+        write_sigma_decode_block(cols, row, Layout::round_decode(t, 1), &round.sigma1_decode);
     }
 
     // finalization carries
@@ -230,6 +299,49 @@ fn m31(x: u32) -> BaseField {
     // The witness emitter guarantees x ∈ [0, 2¹⁶) for limbs and small bounds
     // for carries — both are well within M31 = [0, 2³¹ − 1).
     M31::from(x)
+}
+
+/// Lay out one [`SigmaDecodeWitness`] into `SIGMA_DECODE_COLS` contiguous
+/// columns starting at `base`. The order matches the per-σ-application read
+/// order documented on [`SIGMA_DECODE_COLS`] above and the lookup-tuple
+/// shape used by the AIR's `add_to_relation` calls.
+fn write_sigma_decode_block(
+    cols: &mut [Vec<BaseField>],
+    row: usize,
+    base: usize,
+    d: &SigmaDecodeWitness,
+) {
+    // S-side decode-table lookup tuple (5 cells, read as one slice).
+    cols[base][row] = m31(d.key_s);
+    cols[base + 1][row] = m31(d.o_main_s.lo);
+    cols[base + 2][row] = m31(d.o_main_s.hi);
+    cols[base + 3][row] = m31(d.o2_partial_s.lo);
+    cols[base + 4][row] = m31(d.o2_partial_s.hi);
+    // S′-side decode-table lookup tuple (5 cells).
+    cols[base + 5][row] = m31(d.key_s_complement);
+    cols[base + 6][row] = m31(d.o_main_s_complement.lo);
+    cols[base + 7][row] = m31(d.o_main_s_complement.hi);
+    cols[base + 8][row] = m31(d.o2_partial_s_complement.lo);
+    cols[base + 9][row] = m31(d.o2_partial_s_complement.hi);
+    // O2-combined limbs.
+    cols[base + 10][row] = m31(d.o2_combined.lo);
+    cols[base + 11][row] = m31(d.o2_combined.hi);
+    // Byte chunks of the three O2 values — input to the `xor_8` chunk-wise
+    // lookup wired in the follow-on task. The chunk-bind linear constraints
+    // pin each `(b0, b1)` pair to its limb.
+    write_chunk_quad(cols, row, base + 12, d.o2_chunks_s);
+    write_chunk_quad(cols, row, base + 16, d.o2_chunks_s_complement);
+    write_chunk_quad(cols, row, base + 20, d.o2_chunks_combined);
+}
+
+/// Write one [`LimbPairBytes`] (4 byte cells: `lo.b0, lo.b1, hi.b0, hi.b1`)
+/// starting at `base`.
+#[inline]
+fn write_chunk_quad(cols: &mut [Vec<BaseField>], row: usize, base: usize, chunks: LimbPairBytes) {
+    cols[base][row] = m31(chunks.lo.b0);
+    cols[base + 1][row] = m31(chunks.lo.b1);
+    cols[base + 2][row] = m31(chunks.hi.b0);
+    cols[base + 3][row] = m31(chunks.hi.b1);
 }
 
 /// Required `log_size` for `n_blocks` blocks (smallest power of two
@@ -349,7 +461,64 @@ mod tests {
             + 2 * N_STATE_WORDS                // finalization carries
             + 2 * N_STATE_WORDS; // h_out
         assert_eq!(Layout::TOTAL_COLS, expected);
-        // And the breakdown matches the doc comment's tally.
-        assert_eq!(expected, 1 + 1 + 16 + 128 + 48 * 6 + 64 * 24 + 16 + 16);
+        // And the breakdown matches the explicit tally: the schedule and
+        // round blocks each carry a base limb-add column set plus two
+        // 24-cell σ-decode blocks (one per σ-application).
+        let base_sched = 6;
+        let base_round = 24;
+        assert_eq!(SCHEDULE_ENTRY_COLS, base_sched + 2 * SIGMA_DECODE_COLS);
+        assert_eq!(ROUND_COLS, base_round + 2 * SIGMA_DECODE_COLS);
+        assert_eq!(
+            expected,
+            1 + 1
+                + 16
+                + 128
+                + 48 * (base_sched + 2 * SIGMA_DECODE_COLS)
+                + 64 * (base_round + 2 * SIGMA_DECODE_COLS)
+                + 16
+                + 16
+        );
+    }
+
+    #[test]
+    fn sigma_decode_cell_count_matches_witness_struct() {
+        // SIGMA_DECODE_COLS must equal the cell count `write_sigma_decode_block`
+        // writes — a regression here would corrupt the AIR's read order and
+        // shift the lookup-tuple slices.
+        // Cell layout: 5 (S-side tuple) + 5 (S′-side tuple) + 2 (o2_combined)
+        // + 3 × 4 (three byte-chunk quads) = 24.
+        assert_eq!(SIGMA_DECODE_COLS, 5 + 5 + 2 + 3 * 4);
+    }
+
+    #[test]
+    fn sigma_decode_block_round_trips_through_trace() {
+        // For one block, every σ-decode-block cell read from the trace must
+        // match the corresponding `SigmaDecodeWitness` field. This pins
+        // `write_sigma_decode_block`'s order against the on-disk layout the
+        // AIR reads.
+        let witness = compute_sha256_witness(b"abc");
+        let trace = generate_trace(&witness, min_log_size(witness.blocks.len()));
+        let block = &witness.blocks[0];
+
+        // Schedule σ0 decode of entry j=0 (corresponds to W[16] = σ1(W[14]) + … + σ0(W[1]) + W[0]).
+        let entry = &block.schedule_entries[0];
+        let base = Layout::schedule_entry_decode(0, 0);
+        let d = &entry.lower_sigma0_decode;
+        assert_eq!(trace[base][0].0, d.key_s);
+        assert_eq!(trace[base + 1][0].0, d.o_main_s.lo);
+        assert_eq!(trace[base + 4][0].0, d.o2_partial_s.hi);
+        assert_eq!(trace[base + 5][0].0, d.key_s_complement);
+        assert_eq!(trace[base + 10][0].0, d.o2_combined.lo);
+        assert_eq!(trace[base + 12][0].0, d.o2_chunks_s.lo.b0);
+        assert_eq!(trace[base + 15][0].0, d.o2_chunks_s.hi.b1);
+        assert_eq!(trace[base + 23][0].0, d.o2_chunks_combined.hi.b1);
+
+        // Round Σ0 decode of round 0 (operating on a = IV[0]).
+        let round = &block.rounds[0];
+        let base = Layout::round_decode(0, 0);
+        let d = &round.sigma0_decode;
+        assert_eq!(trace[base][0].0, d.key_s);
+        assert_eq!(trace[base + 5][0].0, d.key_s_complement);
+        assert_eq!(trace[base + 11][0].0, d.o2_combined.hi);
     }
 }
