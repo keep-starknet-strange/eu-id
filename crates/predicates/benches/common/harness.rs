@@ -14,7 +14,7 @@ pub trait BenchCase {
 pub fn run_bench<C>(c: &mut Criterion, case: &C)
 where
     C: BenchCase,
-    <C::P as Predicate>::Proof: Serialize,
+    <C::P as StarkPredicate>::Proof: Serialize,
     <C::P as Predicate>::Error: std::fmt::Debug,
 {
     let mut group = c.benchmark_group(case.name());

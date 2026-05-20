@@ -7,8 +7,6 @@ pub trait Predicate {
     type PublicInput;
     type PrivateInput;
     type Witness;
-
-    type Proof;
     type Error;
 
     fn validate(&self, public: &Self::PublicInput) -> Result<(), Self::Error>;
@@ -18,11 +16,13 @@ pub trait Predicate {
         public: &Self::PublicInput,
         private: &Self::PrivateInput,
     ) -> Result<Self::Witness, Self::Error>;
-
-    fn trace(&self, witness: &Self::Witness) -> Vec<CircleEvaluation<SimdBackend, M31, BitReversedOrder>>;
 }
 
 pub trait StarkPredicate: Predicate {
+    type Proof;
+    
+    fn trace(&self, witness: &Self::Witness) -> Vec<CircleEvaluation<SimdBackend, M31, BitReversedOrder>>;
+
     fn prove(
         &self,
         public: &Self::PublicInput,
