@@ -36,7 +36,7 @@
 //!   subtraction, no signed coefficient mixing. The bound shape is just
 //!   `Σ addends − result − 2¹⁶ · carry` per limb.
 //! - **Carries are non-negative.** Every carry lives in `[0, k)` for a
-//!   k-addend add; the range-check table is unsigned. Lucas's
+//!   k-addend add; the range-check table is unsigned. The P-256 stream's
 //!   `SignedCarryRange` spec is therefore overkill here — see
 //!   [`EquationHeadroom::signed_carry_bound`] for how we recycle that
 //!   field name without changing its meaning.
@@ -93,7 +93,7 @@ pub enum HeadroomStatus {
     /// `M31_CENTER_LIMIT`. The equation must be split before its AIR row
     /// type is enabled. Not expected for any SHA-256 family — appears in
     /// P-256 for 256×256 multiplication. Retained here so the API matches
-    /// Lucas's verbatim.
+    /// the P-256 stream's headroom audit verbatim.
     RequiresSplit,
     /// The audit formula for this equation is not yet derived. The AIR
     /// must refuse to enable a row family in this state; the tests below
@@ -132,8 +132,8 @@ pub struct EquationHeadroom {
     /// Upper bound on the carry magnitude across every limb. For SHA-256
     /// the carries are **non-negative** (`∈ [0, RANGE_k)`), so the value
     /// is `k − 1` — the inclusive maximum carry. The field name is the
-    /// same as Lucas's signed P-256 audit so the eventual generalisation
-    /// is a rename, not a redesign.
+    /// same as the signed P-256 audit's so the eventual generalisation is
+    /// a rename, not a redesign.
     pub signed_carry_bound: Option<i128>,
     /// Worst-case `|combined_expression|` across every limb of this
     /// equation. Must be `< M31_CENTER_LIMIT` for `status == Fits`.
@@ -241,8 +241,8 @@ pub fn audit_finalization() -> EquationHeadroom {
 /// |combined| ≤ (k + 1) · LIMB_MAX + carry_in + LIMB_BASE · carry_out
 /// ```
 ///
-/// — Lucas's `audit_direct_limb_equation` shape, instantiated for two
-/// 16-bit limbs and `+1`-only addend coefficients. The loose bound
+/// — the P-256 stream's `audit_direct_limb_equation` shape, instantiated
+/// for two 16-bit limbs and `+1`-only addend coefficients. The loose bound
 /// sums magnitudes (it does *not* claim cancellation between "addends
 /// are large" and "result is small"), so the audit is conservative by
 /// design — any tighter sign-aware bound is still ≤ this loose one.
@@ -375,7 +375,7 @@ mod tests {
         let max = widest
             .max_abs_combined_expression
             .expect("audit produces a bound");
-        // 2²⁰ = 1_048_576. The Lucas-style loose bound is
+        // 2²⁰ = 1_048_576. The loose bound (P-256-style) is
         //   (k+1)·(2¹⁶ − 1) + (k − 1) + 2¹⁶·(k − 1)
         // = 6·65535 + 4 + 65536·4 = 655_358 < 2²⁰.
         assert!(max < 1i128 << 20, "T1 bound {max} not < 2²⁰");

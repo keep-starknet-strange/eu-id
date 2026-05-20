@@ -22,6 +22,11 @@
 //!   multi-block) tested against the `sha2` crate. The out-of-circuit oracle.
 //! - [`tables`] — preprocessed lookup-table content: `Σ`/`σ` decode tables,
 //!   packed `Maj`/`Ch` table, `xor_8` table, split-and-pack tables.
+//! - [`tables_local`] — local fallback for the workspace-shared range-check
+//!   tables (`Range_2`, `Range_4`, `Range_5`, `Range_16`). Shipped until the
+//!   ECDSA stream's shared foundation crate is available; mirrors that
+//!   crate's API so migration is a one-import swap (see the module-level
+//!   docs for the upstream-context survey and API-shape rationale).
 //! - [`witness`] — full witness emitter — every value the trace stores per row.
 //! - [`trace`] — column layout and materialisation from a witness.
 //! - [`constraints`] — `FrameworkEval` AIR: linear constraints (IV binding,
@@ -36,6 +41,7 @@ pub mod native;
 pub mod partitions;
 pub mod stark;
 pub mod tables;
+pub mod tables_local;
 pub mod trace;
 pub mod types;
 pub mod witness;
