@@ -327,6 +327,51 @@ pub fn sigma_parts_consistent(parts: &SigmaParts, expected_s: u32) -> bool {
 /// Sanity: every group must fit a 16-bit half (`Maj`/`Ch` packed table cap).
 pub const MAX_ROUND_GROUP_BITS: u32 = 7;
 
+/// Number of groups per round-function partition (3 `S`-side + 3 `S'`-side).
+/// The constraint layer enumerates them in this order — `S[0..3]` then
+/// `S'[0..3]` — and the Maj/Ch lookup fires once per group position.
+pub const GROUPS_PER_ROUND_PARTITION: usize = 6;
+
+impl RoundGroups {
+    /// Six groups in fixed enumeration order: `S[0..3]` then `S'[0..3]`.
+    /// Used by the Maj/Ch witness emitter and the AIR's packed-group read
+    /// loop to agree on which packed value corresponds to which set of
+    /// natural bit-positions.
+    pub fn groups_in_order(&self) -> [&'static [u32]; GROUPS_PER_ROUND_PARTITION] {
+        [
+            self.s[0],
+            self.s[1],
+            self.s[2],
+            self.s_complement[0],
+            self.s_complement[1],
+            self.s_complement[2],
+        ]
+    }
+}
+
+/// Pack the bits of `w` at each of the partition's six group positions into
+/// the low bits of a packed value. Output `[i]` is the bits of `w` at
+/// `groups_in_order()[i]`, compressed contiguously from bit 0. Each value
+/// lies in `[0, 2^|group_i|) ⊆ [0, 2^MAX_ROUND_GROUP_BITS)`.
+///
+/// The packed-group representation is what the `Maj`/`Ch` lookup keys on —
+/// because `Maj` and `Ch` are bitwise, the same packed-table row pattern
+/// applies at every group position; the natural-position spread is what
+/// the split-and-pack lookup (3.9.5) reconstructs.
+pub fn pack_round_groups(w: u32, groups: &RoundGroups) -> [u32; GROUPS_PER_ROUND_PARTITION] {
+    let mut out = [0u32; GROUPS_PER_ROUND_PARTITION];
+    for (i, g) in groups.groups_in_order().iter().enumerate() {
+        let mut p = 0u32;
+        for (j, &bit) in g.iter().enumerate() {
+            if (w >> bit) & 1 == 1 {
+                p |= 1u32 << j;
+            }
+        }
+        out[i] = p;
+    }
+    out
+}
+
 /// Smoke check that constant `IV` length matches state width.
 const _: () = assert!(crate::constants::IV.len() == N_STATE_WORDS);
 
@@ -420,6 +465,68 @@ mod tests {
                     g.len() as u32 <= MAX_ROUND_GROUP_BITS,
                     "group too wide: {g:?}"
                 );
+            }
+        }
+    }
+
+    /// `groups_in_order` enumerates `S[0..3]` then `S'[0..3]` and matches
+    /// what `pack_round_groups` reads — a regression on either would
+    /// silently rotate the Maj/Ch lookup keys against the table content.
+    #[test]
+    fn groups_in_order_lists_six_groups_s_then_s_complement() {
+        for groups in [&SIGMA0_GROUPS, &SIGMA1_GROUPS] {
+            let order = groups.groups_in_order();
+            assert_eq!(order.len(), GROUPS_PER_ROUND_PARTITION);
+            assert!(std::ptr::eq(order[0], groups.s[0]));
+            assert!(std::ptr::eq(order[1], groups.s[1]));
+            assert!(std::ptr::eq(order[2], groups.s[2]));
+            assert!(std::ptr::eq(order[3], groups.s_complement[0]));
+            assert!(std::ptr::eq(order[4], groups.s_complement[1]));
+            assert!(std::ptr::eq(order[5], groups.s_complement[2]));
+        }
+    }
+
+    /// `pack_round_groups` round-trips: spreading each packed group back to
+    /// its natural-position bits and OR-ing across all 6 groups recovers the
+    /// input word exactly (since `S ⊎ S'` partitions all 32 bits).
+    #[test]
+    fn pack_round_groups_round_trips_via_natural_positions() {
+        for w in [
+            0u32,
+            1,
+            0xFFFF,
+            0x1_0000,
+            0xDEAD_BEEF,
+            0xCAFE_BABE,
+            u32::MAX,
+        ] {
+            for groups in [&SIGMA0_GROUPS, &SIGMA1_GROUPS] {
+                let packed = pack_round_groups(w, groups);
+                let mut spread = 0u32;
+                for (g, &p) in groups.groups_in_order().iter().zip(packed.iter()) {
+                    for (j, &bit) in g.iter().enumerate() {
+                        if (p >> j) & 1 == 1 {
+                            spread |= 1u32 << bit;
+                        }
+                    }
+                }
+                assert_eq!(spread, w, "round-trip failed for word {w:#x}");
+            }
+        }
+    }
+
+    /// Every group value `pack_round_groups` emits fits in
+    /// `MAX_ROUND_GROUP_BITS` — the upper bound the Maj/Ch table size
+    /// `2^(3·W)` is dimensioned against (`W ≥ MAX_ROUND_GROUP_BITS`).
+    #[test]
+    fn pack_round_groups_values_fit_max_width() {
+        let cap = 1u32 << MAX_ROUND_GROUP_BITS;
+        for w in [0u32, 0xDEAD_BEEF, u32::MAX] {
+            for groups in [&SIGMA0_GROUPS, &SIGMA1_GROUPS] {
+                let packed = pack_round_groups(w, groups);
+                for (i, &p) in packed.iter().enumerate() {
+                    assert!(p < cap, "group {i} value {p} ≥ {cap}");
+                }
             }
         }
     }

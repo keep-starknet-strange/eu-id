@@ -20,8 +20,9 @@
 //!   migration.
 //! - [`native`] — pure SHA-256 reference (padding, schedule, compression,
 //!   multi-block) tested against the `sha2` crate. The out-of-circuit oracle.
-//! - [`relations`] — LogUp relation tags (`Σ`/`σ` decode, with the
-//!   `Maj`/`Ch` / `xor_8` channels arriving in follow-on lookup-wiring work).
+//! - [`relations`] — LogUp relation tags: `Σ`/`σ` decode (8), packed Maj/Ch
+//!   (2), chunk-wise `xor_8` (1), bundled as `Sha256Relations`. The
+//!   `Range_*` channels join in the shared-foundation rollout.
 //! - [`tables`] — preprocessed lookup-table content: `Σ`/`σ` decode tables,
 //!   packed `Maj`/`Ch` table, `xor_8` table, split-and-pack tables.
 //! - [`tables_local`] — local fallback for the workspace-shared range-check

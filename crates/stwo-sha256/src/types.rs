@@ -150,6 +150,59 @@ pub struct PaddingWitness {
     pub bit_length: u64,
 }
 
+/// Packed-group decomposition of one 32-bit value under a 6-group
+/// round-function partition (`Σ0`/`Maj` a-side or `Σ1`/`Ch` e-side).
+///
+/// The Maj/Ch packed table at width `W ≥ MAX_ROUND_GROUP_BITS` is keyed on
+/// these packed values: bit `j` of `vals[i]` is the bit of the source word
+/// at the partition's `groups_in_order()[i][j]` position. Each value lies
+/// in `[0, 2^|group_i|) ⊆ [0, 2^W)`, range-checked implicitly by being a
+/// lookup-table input. Six values per word per partition — three `S`-side
+/// groups followed by three `S'`-side groups.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoundPackedGroups {
+    /// 6 packed values in `partitions::RoundGroups::groups_in_order()` order.
+    pub vals: [u32; 6],
+}
+
+impl RoundPackedGroups {
+    /// Pack the 6 group values of `w` against the given partition. Mirrors
+    /// `partitions::pack_round_groups` but typed at the witness layer so
+    /// every consumer reads the same field order.
+    #[inline]
+    pub fn pack(w: u32, groups: &crate::partitions::RoundGroups) -> Self {
+        Self {
+            vals: crate::partitions::pack_round_groups(w, groups),
+        }
+    }
+}
+
+/// Per-round Maj/Ch packed-group witness — the inputs and outputs of the
+/// 6 Maj lookups and the 6 Ch lookups the AIR fires per round.
+///
+/// `a`/`b`/`c` and `maj_out` use the **a-side** partition (`SIGMA0_GROUPS`);
+/// `e`/`f`/`g` and `ch_out` use the **e-side** partition (`SIGMA1_GROUPS`).
+/// The lookup-key shape is `(a_grp[i], b_grp[i], c_grp[i], maj_grp[i])` for
+/// Maj, `(e_grp[i], f_grp[i], g_grp[i], ch_grp[i])` for Ch — one entry per
+/// group `i ∈ 0..6`.
+///
+/// Until 3.9.5 wires the split-and-pack lookup, the packed-group columns
+/// are *free* in the trace: nothing forces `a_grp[i]` to actually come from
+/// the bits of `a` committed elsewhere in the row. The Maj/Ch lookup pins
+/// `(a, b, c) → maj` to a valid table row but not to the row's word values
+/// — that tie-back is interface-contract item 4 of 3.9.5.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoundMajChWitness {
+    pub a_grp: RoundPackedGroups,
+    pub b_grp: RoundPackedGroups,
+    pub c_grp: RoundPackedGroups,
+    pub maj_grp: RoundPackedGroups,
+    pub e_grp: RoundPackedGroups,
+    pub f_grp: RoundPackedGroups,
+    pub g_grp: RoundPackedGroups,
+    pub ch_grp: RoundPackedGroups,
+}
+
 /// One row of the per-round witness, holding every value the AIR refers to
 /// inside that round. Limb-level fields are `u32` because the trace converts
 /// them to M31 just before commitment — and so this struct is testable
@@ -191,6 +244,9 @@ pub struct RoundWitness {
     pub t2_carries: AddCarries,
     pub a_new_carries: AddCarries,
     pub e_new_carries: AddCarries,
+    /// Packed-group decomposition of every operand the per-round Maj/Ch
+    /// lookups consume. See [`RoundMajChWitness`].
+    pub maj_ch: RoundMajChWitness,
 }
 
 /// Carry chain of a single mod-2³² limb-add. `lo` carries from the low-limb

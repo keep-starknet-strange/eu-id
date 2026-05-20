@@ -150,10 +150,25 @@ pub struct MajChRow {
 }
 
 /// Build the `(2^W)³` row packed `Maj`/`Ch` table.
+///
+/// `group_width` must be at least
+/// [`crate::partitions::MAX_ROUND_GROUP_BITS`] — every packed-group value
+/// the witness emits is in `[0, 2^|group|) ⊆ [0, 2^MAX_ROUND_GROUP_BITS)`,
+/// so a smaller `W` would not cover the witness's lookup keys. Subdividing
+/// 7-bit groups into smaller sub-groups (the `W = 6` design path, §9.2) is
+/// a future micro-optimisation pinned by 3.9.12's benchmark.
 pub fn build_maj_ch_table(group_width: u32) -> Vec<MajChRow> {
     assert!(
         group_width <= 8,
         "group_width > 8 generates an oversized table; tune W down"
+    );
+    assert!(
+        group_width >= crate::partitions::MAX_ROUND_GROUP_BITS,
+        "group_width {} below the partitions' max group width ({}); \
+         smaller widths require subdividing 7-bit groups, which the AIR \
+         does not implement yet",
+        group_width,
+        crate::partitions::MAX_ROUND_GROUP_BITS,
     );
     let n = 1u32 << group_width;
     let mut rows = Vec::with_capacity((n as usize).pow(3));

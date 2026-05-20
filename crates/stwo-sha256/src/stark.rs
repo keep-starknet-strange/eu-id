@@ -31,10 +31,12 @@ pub struct ProverConfig {
     /// minimum legal value; pass a larger value to absorb future blocks
     /// into the same component without re-generating preprocessed tables.
     pub log_n_rows: u32,
-    /// Group width `W` for the packed `Maj`/`Ch` table. `6` minimises
-    /// preprocessed memory for our partitions (with one-bit padding for
-    /// the smallest groups); `7` is the minimum that needs no padding.
-    /// Pinned by the mobile benchmark.
+    /// Group width `W` for the packed `Maj`/`Ch` table. `7` is the minimum
+    /// without subdividing the existing partitions' 7-bit groups; smaller
+    /// `W` values require a partition rework (design §9.2 sketches the
+    /// `W = 6` "subdivide 7-bit groups" path as a future micro-optimisation
+    /// the laptop/mobile benchmark — 3.9.12 — can pin). The packed-table
+    /// size is `2^(3W)` rows; at `W = 7` that is `2²¹ ≈ 2.1 M` rows.
     pub group_width: u32,
 }
 
@@ -42,7 +44,7 @@ impl Default for ProverConfig {
     fn default() -> Self {
         Self {
             log_n_rows: 4,
-            group_width: 6,
+            group_width: crate::partitions::MAX_ROUND_GROUP_BITS,
         }
     }
 }

@@ -20,11 +20,12 @@ use crate::constants::{BLOCK_BYTES, IV, K, N_INPUT_WORDS, N_ROUNDS, N_STATE_WORD
 use crate::native::{
     big_sigma0, big_sigma1, ch, lower_sigma0, lower_sigma1, maj, pad_message, parse_blocks,
 };
-use crate::partitions::{apply, bits_to_mask, SigmaFn};
+use crate::partitions::{apply, bits_to_mask, SigmaFn, SIGMA0_GROUPS, SIGMA1_GROUPS};
 use crate::tables::pack_half_key;
 use crate::types::{
-    AddCarries, BlockWitness, Digest, HashState, LimbPairBytes, PaddingWitness, RoundWitness,
-    Schedule, ScheduleEntryWitness, Sha256Witness, SigmaDecodeWitness, WordLimbs, LIMB_BITS,
+    AddCarries, BlockWitness, Digest, HashState, LimbPairBytes, PaddingWitness, RoundMajChWitness,
+    RoundPackedGroups, RoundWitness, Schedule, ScheduleEntryWitness, Sha256Witness,
+    SigmaDecodeWitness, WordLimbs, LIMB_BITS,
 };
 
 /// Pad the message and assemble the padding witness used by the AIR.
@@ -174,6 +175,23 @@ fn compute_round_witness(
     let (e_new, e_new_carries) = add_words_with_carries(&[d, t1]);
     let (a_new, a_new_carries) = add_words_with_carries(&[t1, t2]);
 
+    // Packed-group decomposition for the per-round Maj/Ch lookups:
+    // `Maj(a,b,c)` keys on the a-side (Σ0) partition, `Ch(e,f,g)` on the
+    // e-side (Σ1) partition. The output values (`maj_val`, `ch_val`) are
+    // packed against the same partition as their inputs — `Maj`/`Ch` are
+    // bitwise so the lookup table row `(a, b, c, maj_val)` is shape-shared
+    // across all six group positions of the partition.
+    let maj_ch = RoundMajChWitness {
+        a_grp: RoundPackedGroups::pack(a, &SIGMA0_GROUPS),
+        b_grp: RoundPackedGroups::pack(b, &SIGMA0_GROUPS),
+        c_grp: RoundPackedGroups::pack(c, &SIGMA0_GROUPS),
+        maj_grp: RoundPackedGroups::pack(maj_val, &SIGMA0_GROUPS),
+        e_grp: RoundPackedGroups::pack(e, &SIGMA1_GROUPS),
+        f_grp: RoundPackedGroups::pack(f, &SIGMA1_GROUPS),
+        g_grp: RoundPackedGroups::pack(g, &SIGMA1_GROUPS),
+        ch_grp: RoundPackedGroups::pack(ch_val, &SIGMA1_GROUPS),
+    };
+
     let wit = RoundWitness {
         t,
         state_in: limbify_state(&state),
@@ -193,6 +211,7 @@ fn compute_round_witness(
         t2_carries,
         a_new_carries,
         e_new_carries,
+        maj_ch,
     };
     // State rotation: (a, b, c, d, e, f, g, h) ← (a_new, a, b, c, e_new, e, f, g)
     let next = [a_new, a, b, c, e_new, e, f, g];
@@ -334,6 +353,27 @@ impl DecodeLookupMultiplicities {
     }
 }
 
+/// Per-block lookup-multiplicity totals for the Maj/Ch packed-group channels
+/// and the chunk-wise `xor_8` channel — the lookups 3.9.4 wires.
+///
+/// `maj` counts `add_to_relation(MajRelation, +1, …)` firings: one per group
+/// position per round ⇒ `N_ROUNDS · GROUPS_PER_ROUND_PARTITION` per block.
+/// `ch` is symmetric. `xor_8` counts chunk-wise σ-combine lookups: four per
+/// σ-application, with `2 · N_ROUNDS + 2 · N_SCHEDULE_ENTRIES`
+/// σ-applications per block (two per round, two per schedule entry).
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct MajChXorMultiplicities {
+    pub maj: u32,
+    pub ch: u32,
+    pub xor_8: u32,
+}
+
+impl MajChXorMultiplicities {
+    pub fn total(&self) -> u32 {
+        self.maj + self.ch + self.xor_8
+    }
+}
+
 /// Count the number of `add_to_relation` "uses" each decode-table channel
 /// would receive from one block. Derived entirely from the witness — does
 /// not depend on the LogUp framework being plumbed end-to-end. Used as a
@@ -362,6 +402,40 @@ pub fn decode_multiplicities_for_block(block: &BlockWitness) -> DecodeLookupMult
         m.sigma1_s_complement += 1;
     }
     m
+}
+
+/// Count the number of Maj / Ch / `xor_8` "uses" each channel would receive
+/// from one block — the lookups 3.9.4 wires. Derived entirely from the
+/// witness; mirrors [`decode_multiplicities_for_block`] for the new
+/// channels. The constraint-side sanity test asserts these against the
+/// static per-block totals expected from the trace shape.
+pub fn maj_ch_xor_multiplicities_for_block(block: &BlockWitness) -> MajChXorMultiplicities {
+    let groups = crate::partitions::GROUPS_PER_ROUND_PARTITION as u32;
+    let rounds = block.rounds.len() as u32;
+    let entries = block.schedule_entries.len() as u32;
+    // One Maj lookup per a-side group per round, one Ch lookup per e-side
+    // group per round. Four chunk-wise `xor_8` lookups per σ-application,
+    // with two σ-applications per round (Σ0, Σ1) and two per schedule
+    // entry (σ0, σ1).
+    MajChXorMultiplicities {
+        maj: rounds * groups,
+        ch: rounds * groups,
+        xor_8: 4 * (2 * rounds + 2 * entries),
+    }
+}
+
+/// Aggregate [`maj_ch_xor_multiplicities_for_block`] across every block.
+pub fn maj_ch_xor_multiplicities_for_witness(witness: &Sha256Witness) -> MajChXorMultiplicities {
+    witness
+        .blocks
+        .iter()
+        .map(maj_ch_xor_multiplicities_for_block)
+        .fold(MajChXorMultiplicities::default(), |mut acc, m| {
+            acc.maj += m.maj;
+            acc.ch += m.ch;
+            acc.xor_8 += m.xor_8;
+            acc
+        })
 }
 
 /// Aggregate [`decode_multiplicities_for_block`] across every block of a

@@ -26,10 +26,18 @@
 //! Per-round cells (`ROUND_COLS`): `σ0`, `σ1`, `ch`, `maj`, `t1`, `t2`,
 //! `a_new`, `e_new` (each `(lo, hi)` ⇒ 16 cells) plus 4 add carry pairs
 //! (⇒ 8 cells), then the decoded intermediates of `Σ0(a)` and `Σ1(e)`
-//! (2 × `SIGMA_DECODE_COLS`). The decode intermediates are appended after
+//! (2 × `SIGMA_DECODE_COLS`), then the Maj/Ch packed-group block
+//! (`ROUND_MAJ_CH_COLS`). The decode intermediates are appended after
 //! the existing limb-add columns so the existing constraint reads stay in
-//! place and the new decode-table `add_to_relation` calls / reassembly /
-//! chunk-bind constraints read from a single contiguous range.
+//! place; the Maj/Ch packed groups are appended at the tail so neither
+//! the limb-add nor the σ-decode read order shifts.
+//!
+//! Per-round Maj/Ch block (`ROUND_MAJ_CH_COLS = 8 · 6 = 48`): packed-group
+//! values of each operand in the partition-enumeration order
+//! (`groups_in_order` — `S[0..3]` then `S'[0..3]`). Operand order is
+//! `a, b, c, maj_out` (a-side / `SIGMA0_GROUPS`) followed by
+//! `e, f, g, ch_out` (e-side / `SIGMA1_GROUPS`). Each cell is one packed
+//! group value in `[0, 2^|group|) ⊆ [0, 2^MAX_ROUND_GROUP_BITS)`.
 //!
 //! Per σ-application (`SIGMA_DECODE_COLS = 24`):
 //! `key_s, o_main_s.lo, o_main_s.hi, o2_partial_s.lo, o2_partial_s.hi,
@@ -47,8 +55,10 @@
 use stwo::core::fields::m31::{BaseField, M31};
 
 use crate::constants::{N_ROUNDS, N_STATE_WORDS};
+use crate::partitions::GROUPS_PER_ROUND_PARTITION;
 use crate::types::{
-    AddCarries, BlockWitness, LimbPairBytes, Sha256Witness, SigmaDecodeWitness, WordLimbs,
+    AddCarries, BlockWitness, LimbPairBytes, RoundMajChWitness, RoundPackedGroups, Sha256Witness,
+    SigmaDecodeWitness, WordLimbs,
 };
 
 /// Columns per σ-application's decoded intermediates (§9.3 of the design):
@@ -62,9 +72,18 @@ use crate::types::{
 /// constraint loop's `add_to_relation` keys read in column order without
 /// re-permutation.
 pub const SIGMA_DECODE_COLS: usize = 5 + 5 + 2 + 4 + 4 + 4;
+/// Operands committed by the per-round Maj/Ch packed-group block:
+/// `a, b, c, maj_out, e, f, g, ch_out` (in this fixed order — the AIR's
+/// read loop relies on it).
+pub const ROUND_MAJ_CH_OPERANDS: usize = 8;
+/// Columns per round dedicated to the Maj/Ch packed-group lookup
+/// inputs/outputs. `8 operands · 6 groups = 48`. Each cell is one packed
+/// value in `[0, 2^|group|) ⊆ [0, 2^MAX_ROUND_GROUP_BITS)`.
+pub const ROUND_MAJ_CH_COLS: usize = ROUND_MAJ_CH_OPERANDS * GROUPS_PER_ROUND_PARTITION;
 /// Columns per round: 8 word-results × 2 limbs + 4 carry pairs × 2 ends = 24,
-/// then two σ-decodes (one for `Σ0(a)`, one for `Σ1(e)`).
-pub const ROUND_COLS: usize = 8 * 2 + 4 * 2 + 2 * SIGMA_DECODE_COLS;
+/// then two σ-decodes (one for `Σ0(a)`, one for `Σ1(e)`), then the
+/// Maj/Ch packed-group block.
+pub const ROUND_COLS: usize = 8 * 2 + 4 * 2 + 2 * SIGMA_DECODE_COLS + ROUND_MAJ_CH_COLS;
 /// Columns per schedule entry (`W[t]` for `t ≥ 16`):
 /// `σ0`, `σ1`, carries (= 6), then two σ-decodes (one for `σ0(W[t-15])`,
 /// one for `σ1(W[t-2])`).
@@ -139,6 +158,24 @@ impl Layout {
     pub const fn round_decode(t: usize, which: usize) -> usize {
         let base = Self::COL_ROUND_START + t * ROUND_COLS;
         base + 24 + which * SIGMA_DECODE_COLS
+    }
+
+    /// Start column of one round's Maj/Ch packed-group block — 48 cells
+    /// laid out as 8 operands × 6 groups, in `write_round_maj_ch` order.
+    #[inline]
+    pub const fn round_maj_ch_base(t: usize) -> usize {
+        let base = Self::COL_ROUND_START + t * ROUND_COLS;
+        base + 24 + 2 * SIGMA_DECODE_COLS
+    }
+
+    /// Column of one operand's packed-group cell within round `t`.
+    ///
+    /// `operand_idx ∈ [0, 8)` indexes the operands in the fixed order
+    /// `[a, b, c, maj_out, e, f, g, ch_out]`. `group_idx ∈ [0, 6)` indexes
+    /// the groups in the partition's `groups_in_order` enumeration.
+    #[inline]
+    pub const fn round_packed_group(t: usize, operand_idx: usize, group_idx: usize) -> usize {
+        Self::round_maj_ch_base(t) + operand_idx * GROUPS_PER_ROUND_PARTITION + group_idx
     }
 
     /// One round's columns, in order:
@@ -277,6 +314,7 @@ fn write_block_row(
 
         write_sigma_decode_block(cols, row, Layout::round_decode(t, 0), &round.sigma0_decode);
         write_sigma_decode_block(cols, row, Layout::round_decode(t, 1), &round.sigma1_decode);
+        write_round_maj_ch(cols, row, t, &round.maj_ch);
     }
 
     // finalization carries
@@ -342,6 +380,33 @@ fn write_chunk_quad(cols: &mut [Vec<BaseField>], row: usize, base: usize, chunks
     cols[base + 1][row] = m31(chunks.lo.b1);
     cols[base + 2][row] = m31(chunks.hi.b0);
     cols[base + 3][row] = m31(chunks.hi.b1);
+}
+
+/// Write one round's Maj/Ch packed-group block — 8 operands × 6 cells each,
+/// in the fixed operand order `[a, b, c, maj_out, e, f, g, ch_out]` and the
+/// partition's `groups_in_order` enumeration. The AIR's read loop walks the
+/// columns in exactly this order.
+fn write_round_maj_ch(
+    cols: &mut [Vec<BaseField>],
+    row: usize,
+    t: usize,
+    maj_ch: &RoundMajChWitness,
+) {
+    let operands: [&RoundPackedGroups; ROUND_MAJ_CH_OPERANDS] = [
+        &maj_ch.a_grp,
+        &maj_ch.b_grp,
+        &maj_ch.c_grp,
+        &maj_ch.maj_grp,
+        &maj_ch.e_grp,
+        &maj_ch.f_grp,
+        &maj_ch.g_grp,
+        &maj_ch.ch_grp,
+    ];
+    for (operand_idx, operand) in operands.iter().enumerate() {
+        for (group_idx, &v) in operand.vals.iter().enumerate() {
+            cols[Layout::round_packed_group(t, operand_idx, group_idx)][row] = m31(v);
+        }
+    }
 }
 
 /// Required `log_size` for `n_blocks` blocks (smallest power of two
@@ -461,20 +526,25 @@ mod tests {
             + 2 * N_STATE_WORDS                // finalization carries
             + 2 * N_STATE_WORDS; // h_out
         assert_eq!(Layout::TOTAL_COLS, expected);
-        // And the breakdown matches the explicit tally: the schedule and
-        // round blocks each carry a base limb-add column set plus two
-        // 24-cell σ-decode blocks (one per σ-application).
+        // And the breakdown matches the explicit tally: the schedule entry
+        // carries a base limb-add column set plus two 24-cell σ-decode
+        // blocks (one per σ-application); the round adds its Maj/Ch
+        // packed-group block (8 operands × 6 groups) on top of those.
         let base_sched = 6;
         let base_round = 24;
         assert_eq!(SCHEDULE_ENTRY_COLS, base_sched + 2 * SIGMA_DECODE_COLS);
-        assert_eq!(ROUND_COLS, base_round + 2 * SIGMA_DECODE_COLS);
+        assert_eq!(
+            ROUND_COLS,
+            base_round + 2 * SIGMA_DECODE_COLS + ROUND_MAJ_CH_COLS
+        );
+        assert_eq!(ROUND_MAJ_CH_COLS, 8 * 6);
         assert_eq!(
             expected,
             1 + 1
                 + 16
                 + 128
                 + 48 * (base_sched + 2 * SIGMA_DECODE_COLS)
-                + 64 * (base_round + 2 * SIGMA_DECODE_COLS)
+                + 64 * (base_round + 2 * SIGMA_DECODE_COLS + ROUND_MAJ_CH_COLS)
                 + 16
                 + 16
         );
@@ -488,6 +558,40 @@ mod tests {
         // Cell layout: 5 (S-side tuple) + 5 (S′-side tuple) + 2 (o2_combined)
         // + 3 × 4 (three byte-chunk quads) = 24.
         assert_eq!(SIGMA_DECODE_COLS, 5 + 5 + 2 + 3 * 4);
+    }
+
+    #[test]
+    fn round_maj_ch_block_round_trips_through_trace() {
+        // For a real block, every Maj/Ch packed-group cell read from the
+        // trace at the layout's `(t, operand_idx, group_idx)` coordinate
+        // must equal the corresponding `RoundMajChWitness` value. This
+        // pins the operand & group enumeration order — the AIR's read
+        // loop relies on it.
+        let witness = crate::witness::compute_sha256_witness(b"abc");
+        let trace = generate_trace(&witness, min_log_size(witness.blocks.len()));
+        let block = &witness.blocks[0];
+
+        for (t, round) in block.rounds.iter().enumerate() {
+            let operand_values: [[u32; 6]; 8] = [
+                round.maj_ch.a_grp.vals,
+                round.maj_ch.b_grp.vals,
+                round.maj_ch.c_grp.vals,
+                round.maj_ch.maj_grp.vals,
+                round.maj_ch.e_grp.vals,
+                round.maj_ch.f_grp.vals,
+                round.maj_ch.g_grp.vals,
+                round.maj_ch.ch_grp.vals,
+            ];
+            for (operand_idx, expected) in operand_values.iter().enumerate() {
+                for (group_idx, &v) in expected.iter().enumerate() {
+                    let col = Layout::round_packed_group(t, operand_idx, group_idx);
+                    assert_eq!(
+                        trace[col][0].0, v,
+                        "round[{t}] operand[{operand_idx}] group[{group_idx}]",
+                    );
+                }
+            }
+        }
     }
 
     #[test]
