@@ -7,4 +7,5 @@
 //! The crate intentionally has no dependency on `stwo` or any prover library.
 
 pub mod constants;
+pub mod scalar_arithmetic;
 pub mod solinas;
