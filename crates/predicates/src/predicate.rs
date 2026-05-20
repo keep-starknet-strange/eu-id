@@ -1,7 +1,4 @@
-use stwo::core::fields::m31::M31;
-use stwo::prover::backend::simd::SimdBackend;
-use stwo::prover::poly::BitReversedOrder;
-use stwo::prover::poly::circle::CircleEvaluation;
+use crate::age::types::Trace;
 
 pub trait Predicate {
     type PublicInput;
@@ -21,7 +18,7 @@ pub trait Predicate {
 pub trait StarkPredicate: Predicate {
     type Proof;
     
-    fn trace(&self, witness: &Self::Witness) -> Vec<CircleEvaluation<SimdBackend, M31, BitReversedOrder>>;
+    fn trace(&self, witness: &Self::Witness) -> Trace;
 
     fn prove(
         &self,

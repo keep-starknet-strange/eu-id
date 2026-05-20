@@ -1,10 +1,10 @@
 use crate::harness::BenchCase;
-use predicates::{AgeBitDecomposition, AgeRangeCheck, Date, DateOfBirth, Setup};
+use predicates::{AgeBitDecomposition, AgeRangeCheck, Date, DateOfBirth, PublicInput};
 use stwo::core::pcs::PcsConfig;
 
 pub struct AgeBitsCase {
     predicate: AgeBitDecomposition,
-    setup: Setup,
+    public: PublicInput,
     dob: DateOfBirth,
 }
 
@@ -12,7 +12,7 @@ impl AgeBitsCase {
     pub fn new() -> Self {
         Self {
             predicate: AgeBitDecomposition::new(PcsConfig::default()),
-            setup: Setup::new(Date { year: 2026, month: 5, day: 19 }, 18),
+            public: PublicInput::new(Date { year: 2026, month: 5, day: 19 }, 18),
             dob: DateOfBirth(Date { year: 2000, month: 1, day: 1 }),
         }
     }
@@ -29,8 +29,8 @@ impl BenchCase for AgeBitsCase {
         &self.predicate
     }
 
-    fn public_input(&self) -> &Setup {
-        &self.setup
+    fn public_input(&self) -> &PublicInput {
+        &self.public
     }
 
     fn private_input(&self) -> &DateOfBirth {
@@ -40,7 +40,7 @@ impl BenchCase for AgeBitsCase {
 
 pub struct AgeRangeCase {
     predicate: AgeRangeCheck,
-    setup: Setup,
+    public: PublicInput,
     dob: DateOfBirth,
 }
 
@@ -48,7 +48,7 @@ impl AgeRangeCase {
     pub fn new() -> Self {
         Self {
             predicate: AgeRangeCheck::new(PcsConfig::default()),
-            setup: Setup::new(Date { year: 2026, month: 5, day: 19 }, 18),
+            public: PublicInput::new(Date { year: 2026, month: 5, day: 19 }, 18),
             dob: DateOfBirth(Date { year: 2000, month: 1, day: 1 }),
         }
     }
@@ -65,8 +65,8 @@ impl BenchCase for AgeRangeCase {
         &self.predicate
     }
 
-    fn public_input(&self) -> &Setup {
-        &self.setup
+    fn public_input(&self) -> &PublicInput {
+        &self.public
     }
 
     fn private_input(&self) -> &DateOfBirth {

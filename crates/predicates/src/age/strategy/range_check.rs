@@ -1,8 +1,5 @@
 use crate::age::predicate::AgePredicate;
-use crate::age::types::{
-    AgeBounds, AgeRangeCheckProof, AgeWitness, DateOfBirth, Error, Setup, DATE_MONTH_BASE,
-    DATE_YEAR_BASE,
-};
+use crate::age::types::{AgeBounds, AgeRangeCheckProof, DateOfBirth, Error, PublicInput, Trace, Witness, DATE_MONTH_BASE, DATE_YEAR_BASE};
 use crate::predicate::{Predicate, StarkPredicate};
 use crate::utils::{field_const, push_repeated_column};
 use num_traits::{One, Zero};
@@ -18,7 +15,6 @@ use stwo::prover::backend::simd::m31::{PackedM31, LOG_N_LANES};
 use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::poly::circle::{CircleEvaluation, PolyOps};
-use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::{prove, CommitmentSchemeProver, ComponentProver};
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{
@@ -42,77 +38,6 @@ fn slack_range_col_id(bounds: &AgeBounds) -> PreProcessedColumnId {
             bounds.min_supported_year, bounds.max_supported_year, bounds.max_supported_age_years
         ),
     }
-}
-
-fn mix_setup(setup: &Setup, channel: &mut impl Channel) {
-    channel.mix_u64(setup.current.year as u64);
-    channel.mix_u64(setup.current.month as u64);
-    channel.mix_u64(setup.current.day as u64);
-    channel.mix_u64(setup.min_age_years as u64);
-    channel.mix_u64(setup.bounds.min_supported_year as u64);
-    channel.mix_u64(setup.bounds.max_supported_year as u64);
-    channel.mix_u64(setup.bounds.max_supported_age_years as u64);
-}
-
-fn gen_preprocessed_trace(
-    bounds: &AgeBounds,
-) -> Vec<CircleEvaluation<SimdBackend, M31, BitReversedOrder>> {
-    let log_size = slack_log_size(bounds);
-    let domain = CanonicCoset::new(log_size).circle_domain();
-    let col = BaseColumn::from_iter((0u32..1 << log_size).map(M31::from_u32_unchecked));
-    vec![CircleEvaluation::new(domain, col)]
-}
-
-fn gen_table_trace(
-    witness: &AgeWitness,
-) -> Vec<CircleEvaluation<SimdBackend, M31, BitReversedOrder>> {
-    let log_size = slack_log_size(&witness.setup.bounds);
-    let n_rows = 1usize << log_size;
-    let mut mult = vec![M31::zero(); n_rows];
-    mult[witness.age_slack as usize] = M31::from_u32_unchecked(1 << AGE_LOG_SIZE);
-    let domain = CanonicCoset::new(log_size).circle_domain();
-    vec![CircleEvaluation::new(
-        domain,
-        BaseColumn::from_iter(mult.into_iter()),
-    )]
-}
-
-fn gen_age_interaction_trace(
-    age_trace: &[CircleEvaluation<SimdBackend, M31, BitReversedOrder>],
-    lookup_elements: &SlackRangeElements,
-) -> (Vec<CircleEvaluation<SimdBackend, M31, BitReversedOrder>>, QM31) {
-    let log_size = AGE_LOG_SIZE;
-    let mut logup_gen = LogupTraceGenerator::new(log_size);
-    let mut col_gen = logup_gen.new_col();
-    let slack_col = &age_trace[4];
-    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
-        let slack_val: PackedM31 = slack_col.values.data[vec_row];
-        let denom: PackedQM31 = lookup_elements.combine(&[slack_val]);
-        col_gen.write_frac(vec_row, PackedQM31::one(), denom);
-    }
-    col_gen.finalize_col();
-    logup_gen.finalize_last()
-}
-
-fn gen_table_interaction_trace(
-    preproc: &[CircleEvaluation<SimdBackend, M31, BitReversedOrder>],
-    table_trace: &[CircleEvaluation<SimdBackend, M31, BitReversedOrder>],
-    bounds: &AgeBounds,
-    lookup_elements: &SlackRangeElements,
-) -> (Vec<CircleEvaluation<SimdBackend, M31, BitReversedOrder>>, QM31) {
-    let log_size = slack_log_size(bounds);
-    let mut logup_gen = LogupTraceGenerator::new(log_size);
-    let mut col_gen = logup_gen.new_col();
-    let value_col = &preproc[0];
-    let mult_col = &table_trace[0];
-    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
-        let value: PackedM31 = value_col.values.data[vec_row];
-        let mult: PackedM31 = mult_col.values.data[vec_row];
-        let denom: PackedQM31 = lookup_elements.combine(&[value]);
-        col_gen.write_frac(vec_row, PackedQM31::from(-mult), denom);
-    }
-    col_gen.finalize_col();
-    logup_gen.finalize_last()
 }
 
 #[derive(Clone)]
@@ -147,7 +72,7 @@ type SlackRangeTableComponent = FrameworkComponent<SlackRangeTableEval>;
 
 #[derive(Clone)]
 struct AgeRangeCheckEval {
-    setup: Setup,
+    public: PublicInput,
     lookup_elements: SlackRangeElements,
 }
 
@@ -174,7 +99,7 @@ impl FrameworkEval for AgeRangeCheckEval {
                 - birth_day.clone(),
         );
 
-        let cutoff_key = self.setup.cutoff_date().key();
+        let cutoff_key = self.public.cutoff_date().key();
         eval.add_constraint(slack.clone() - (field_const::<E>(cutoff_key) - birth_packed));
 
         eval.add_to_relation(RelationEntry::new(
@@ -195,7 +120,7 @@ fn make_allocator(bounds: &AgeBounds) -> TraceLocationAllocator {
 
 fn make_components(
     allocator: &mut TraceLocationAllocator,
-    setup: &Setup,
+    public: &PublicInput,
     lookup_elements: SlackRangeElements,
     age_claimed_sum: QM31,
     table_claimed_sum: QM31,
@@ -203,7 +128,7 @@ fn make_components(
     let age_component = AgeRangeCheckComponent::new(
         allocator,
         AgeRangeCheckEval {
-            setup: *setup,
+            public: *public,
             lookup_elements: lookup_elements.clone(),
         },
         age_claimed_sum,
@@ -211,7 +136,7 @@ fn make_components(
     let table_component = SlackRangeTableComponent::new(
         allocator,
         SlackRangeTableEval {
-            bounds: setup.bounds,
+            bounds: public.bounds,
             lookup_elements,
         },
         table_claimed_sum,
@@ -226,15 +151,16 @@ impl AgeRangeCheck {
         Self(AgePredicate::new(pcs_config))
     }
 
+    #[cfg(test)]
     pub(crate) fn new_with_input_validation(pcs_config: PcsConfig, validate_input: bool) -> Self {
         Self(AgePredicate::new_with_input_validation(pcs_config, validate_input))
     }
 }
 
 impl Predicate for AgeRangeCheck {
-    type PublicInput = Setup;
+    type PublicInput = PublicInput;
     type PrivateInput = DateOfBirth;
-    type Witness = AgeWitness;
+    type Witness = Witness;
     type Error = Error;
 
     fn validate(&self, public: &Self::PublicInput) -> Result<(), Self::Error> {
@@ -256,7 +182,7 @@ impl StarkPredicate for AgeRangeCheck {
     fn trace(
         &self,
         witness: &Self::Witness,
-    ) -> Vec<CircleEvaluation<SimdBackend, M31, BitReversedOrder>> {
+    ) -> Trace {
         let mut cols = Vec::with_capacity(5);
         push_repeated_column(&mut cols, witness.dob.day, AGE_LOG_SIZE);
         push_repeated_column(&mut cols, witness.dob.month, AGE_LOG_SIZE);
@@ -272,13 +198,31 @@ impl StarkPredicate for AgeRangeCheck {
         private: &Self::PrivateInput,
     ) -> Result<Self::Proof, Self::Error> {
         self.validate(public)?;
-        let witness = self.witness(public, private)?;
-        let preproc = gen_preprocessed_trace(&public.bounds);
-        let age_trace = self.trace(&witness);
-        let table_trace = gen_table_trace(&witness);
 
-        let tbl_log_size = slack_log_size(&public.bounds);
-        let max_log_size = tbl_log_size.max(AGE_LOG_SIZE);
+        // Organize the witness from public and private inputs
+        let witness = self.witness(public, private)?;
+        let slack_possible_values_log_size = slack_log_size(&witness.public.bounds);
+        let slack_rows = 1 << slack_possible_values_log_size;
+
+        // Generate all possible slack values [0, 2^age_slack_log_size) in a trace col
+        let domain = CanonicCoset::new(slack_possible_values_log_size).circle_domain();
+        let col = BaseColumn::from_iter((0..slack_rows).map(M31::from_u32_unchecked));
+        let slack_values_trace: Trace = vec![CircleEvaluation::new(domain, col)];
+
+        // Accumulate all original witness trace (In this case every row is the same)
+        let witness_trace: Trace = self.trace(&witness);
+
+        // Multiplicity table. Since witness trace is repeated over AGE_TRACE_SIZE (32) rows, then slack
+        // is "multiplied" 32 times. Thus, mult[slack] = 32; where `mult` is a column of size `slack_rows`
+        let mut mult = vec![M31::zero(); slack_rows as usize];
+        mult[witness.age_slack as usize] = M31::from_u32_unchecked(1 << AGE_LOG_SIZE);
+        let domain = CanonicCoset::new(slack_possible_values_log_size).circle_domain();
+        let slack_multiplicity_trace: Trace = vec![CircleEvaluation::new(
+            domain,
+            BaseColumn::from_iter(mult.into_iter()),
+        )];
+
+        let max_log_size = slack_possible_values_log_size.max(AGE_LOG_SIZE);
         let twiddles = SimdBackend::precompute_twiddles(
             CanonicCoset::new(
                 max_log_size
@@ -298,23 +242,54 @@ impl StarkPredicate for AgeRangeCheck {
                 &twiddles,
             );
 
+        // 1. Commit the preprocessed table of all possible slack values
         let mut tb = commitment_scheme.tree_builder();
-        tb.extend_evals(preproc.clone());
+        tb.extend_evals(slack_values_trace.clone());
         tb.commit(channel);
 
-        mix_setup(public, channel);
+        // 2. Mix public input
+        public.mix_into(channel);
 
+        // 3. Commit the witness and slack multiplicity traces
         let mut tb = commitment_scheme.tree_builder();
-        tb.extend_evals(age_trace.clone());
-        tb.extend_evals(table_trace.clone());
+        tb.extend_evals(witness_trace.clone());
+        tb.extend_evals(slack_multiplicity_trace.clone());
         tb.commit(channel);
 
+        // 4. Interaction traces
         let lookup_elements = SlackRangeElements::draw(channel);
 
-        let (age_interaction, age_claimed_sum) =
-            gen_age_interaction_trace(&age_trace, &lookup_elements);
-        let (table_interaction, table_claimed_sum) =
-            gen_table_interaction_trace(&preproc, &table_trace, &public.bounds, &lookup_elements);
+        // - Interaction for slack appearing once in all trace rows
+        let mut logup_gen = LogupTraceGenerator::new(AGE_LOG_SIZE);
+        let mut col_gen = logup_gen.new_col();
+        let slack_col = &witness_trace[4]; // Get the slack column
+        for packed_row_index in 0..(1 << (AGE_LOG_SIZE - LOG_N_LANES)) { // Iterate over 2 packed fields of slack witness
+            let slack_val: PackedM31 = slack_col.values.data[packed_row_index];
+            col_gen.write_frac(
+                packed_row_index,
+                PackedQM31::one(),
+                lookup_elements.combine(&[slack_val])
+            );
+        }
+        col_gen.finalize_col();
+        let (age_interaction, age_claimed_sum) = logup_gen.finalize_last();
+
+        // - Interaction of what slack appearing in the range of possible values
+        let mut logup_gen = LogupTraceGenerator::new(slack_possible_values_log_size);
+        let mut col_gen = logup_gen.new_col();
+        let value_col = &slack_values_trace[0];
+        let mult_col = &slack_multiplicity_trace[0];
+        for vec_row in 0..(1 << (slack_possible_values_log_size - LOG_N_LANES)) {
+            let value: PackedM31 = value_col.values.data[vec_row];
+            let mult: PackedM31 = mult_col.values.data[vec_row];
+            col_gen.write_frac(
+                vec_row,
+                PackedQM31::from(-mult),
+                lookup_elements.combine(&[value])
+            );
+        }
+        col_gen.finalize_col();
+        let (table_interaction, table_claimed_sum) = logup_gen.finalize_last();
 
         channel.mix_felts(&[age_claimed_sum, table_claimed_sum]);
 
@@ -323,6 +298,7 @@ impl StarkPredicate for AgeRangeCheck {
         tb.extend_evals(table_interaction);
         tb.commit(channel);
 
+        // 5. Prove
         let mut allocator = make_allocator(&public.bounds);
         let (age_component, table_component) = make_components(
             &mut allocator,
@@ -341,7 +317,7 @@ impl StarkPredicate for AgeRangeCheck {
         )?;
 
         Ok(AgeRangeCheckProof {
-            setup: *public,
+            public: *public,
             age_claimed_sum,
             table_claimed_sum,
             stark_proof,
@@ -349,7 +325,7 @@ impl StarkPredicate for AgeRangeCheck {
     }
 
     fn verify(&self, proof: &Self::Proof) -> Result<(), Self::Error> {
-        self.validate(&proof.setup)?;
+        self.validate(&proof.public)?;
 
         let pcs_config = proof.stark_proof.config;
         let channel = &mut Blake2sChannel::default();
@@ -358,11 +334,11 @@ impl StarkPredicate for AgeRangeCheck {
         let commitment_scheme =
             &mut CommitmentSchemeVerifier::<Blake2sMerkleChannel>::new(pcs_config);
 
-        let tbl_log_size = slack_log_size(&proof.setup.bounds);
+        let tbl_log_size = slack_log_size(&proof.public.bounds);
 
         commitment_scheme.commit(proof.stark_proof.commitments[0], &[tbl_log_size], channel);
 
-        mix_setup(&proof.setup, channel);
+        proof.public.mix_into(channel);
 
         let main_sizes: Vec<u32> = std::iter::repeat(AGE_LOG_SIZE)
             .take(5)
@@ -386,10 +362,10 @@ impl StarkPredicate for AgeRangeCheck {
             .collect();
         commitment_scheme.commit(proof.stark_proof.commitments[2], &tree2_sizes, channel);
 
-        let mut allocator = make_allocator(&proof.setup.bounds);
+        let mut allocator = make_allocator(&proof.public.bounds);
         let (age_component, table_component) = make_components(
             &mut allocator,
-            &proof.setup,
+            &proof.public,
             lookup_elements,
             proof.age_claimed_sum,
             proof.table_claimed_sum,
@@ -403,86 +379,5 @@ impl StarkPredicate for AgeRangeCheck {
         )?;
 
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::age::types::{AgeBounds, Date};
-    use crate::AgeInputError;
-    use stwo::core::pcs::PcsConfig;
-
-    fn setup_today(min_age_years: u32) -> Setup {
-        Setup::new(Date { year: 2026, month: 5, day: 19 }, min_age_years)
-    }
-
-    fn dob(year: u32, month: u32, day: u32) -> DateOfBirth {
-        DateOfBirth(Date { year, month, day })
-    }
-
-    fn validating_predicate() -> AgeRangeCheck {
-        AgeRangeCheck::new(PcsConfig::default())
-    }
-
-    fn non_validating_predicate() -> AgeRangeCheck {
-        AgeRangeCheck::new_with_input_validation(PcsConfig::default(), false)
-    }
-
-    #[test]
-    fn proves_and_verifies_exactly_minimum_age() {
-        let predicate = validating_predicate();
-        let proof = predicate.prove(&setup_today(18), &dob(2008, 5, 19)).unwrap();
-        predicate.verify(&proof).unwrap();
-    }
-
-    #[test]
-    fn proves_and_verifies_older_than_minimum_age() {
-        let predicate = validating_predicate();
-        let proof = predicate.prove(&setup_today(18), &dob(2008, 5, 18)).unwrap();
-        predicate.verify(&proof).unwrap();
-    }
-
-    #[test]
-    fn proves_and_verifies_with_custom_bounds() {
-        let predicate = validating_predicate();
-        let bounds = AgeBounds {
-            min_supported_year: 1990,
-            max_supported_year: 2030,
-            max_supported_age_years: 40,
-        };
-        let proof = predicate
-            .prove(
-                &Setup::new_with_bounds(
-                    Date { year: 2026, month: 5, day: 19 },
-                    18,
-                    bounds,
-                ),
-                &dob(2008, 5, 19),
-            )
-            .unwrap();
-        predicate.verify(&proof).unwrap();
-    }
-
-    #[test]
-    fn validate_rejects_underage() {
-        let predicate = validating_predicate();
-        let error = predicate.prove(&setup_today(18), &dob(2008, 5, 20)).unwrap_err();
-        assert!(matches!(error, Error::Input(AgeInputError::UnderAge)));
-    }
-
-    #[test]
-    fn no_validation_underage_always_fails_capacity_check() {
-        let predicate = non_validating_predicate();
-        let error = predicate.prove(&setup_today(18), &dob(2008, 5, 20)).unwrap_err();
-        assert!(matches!(error, Error::Input(AgeInputError::Invalid(_))));
-    }
-
-    #[test]
-    fn verification_fails_on_mutated_setup() {
-        let predicate = validating_predicate();
-        let mut proof = predicate.prove(&setup_today(18), &dob(2000, 1, 1)).unwrap();
-        proof.setup.min_age_years = 21;
-        assert!(matches!(predicate.verify(&proof), Err(Error::Verification(_))));
     }
 }

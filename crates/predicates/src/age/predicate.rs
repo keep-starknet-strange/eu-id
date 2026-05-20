@@ -1,4 +1,4 @@
-use crate::age::types::{AgeInputError, AgeWitness, DateOfBirth, Error, Setup};
+use crate::age::types::{AgeInputError, Witness, DateOfBirth, Error, PublicInput};
 use stwo::core::pcs::PcsConfig;
 
 pub struct AgePredicate {
@@ -14,6 +14,7 @@ impl AgePredicate {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn new_with_input_validation(pcs_config: PcsConfig, validate_input: bool) -> Self {
         Self {
             pcs_config,
@@ -21,7 +22,7 @@ impl AgePredicate {
         }
     }
 
-    pub(crate) fn validate(&self, public: &Setup) -> Result<(), Error> {
+    pub(crate) fn validate(&self, public: &PublicInput) -> Result<(), Error> {
         public.bounds.validate()?;
 
         if !self.validate_input {
@@ -59,9 +60,9 @@ impl AgePredicate {
 
     pub(crate) fn witness(
         &self,
-        public: &Setup,
+        public: &PublicInput,
         private: &DateOfBirth,
-    ) -> Result<AgeWitness, Error> {
+    ) -> Result<Witness, Error> {
         let dob = private.0;
 
         if self.validate_input {
@@ -90,8 +91,8 @@ impl AgePredicate {
             .into());
         }
 
-        Ok(AgeWitness {
-            setup: public.clone(),
+        Ok(Witness {
+            public: public.clone(),
             dob,
             cutoff,
             age_slack: slack,

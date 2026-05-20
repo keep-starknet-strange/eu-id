@@ -1,24 +1,18 @@
 use crate::age::predicate::AgePredicate;
-use crate::age::types::{
-    AgeBounds, AgeProof, AgeWitness, DateOfBirth, Error, Setup,
-    DATE_MONTH_BASE, DATE_YEAR_BASE,
-};
+use crate::age::types::{AgeBounds, AgeBitDecompositionProof, Witness, DateOfBirth, Error, PublicInput, Trace, DATE_MONTH_BASE, DATE_YEAR_BASE};
 use crate::predicate::{Predicate, StarkPredicate};
-use crate::utils::{
-    bit_sum, constrain_bits, field_const, push_repeated_bits, push_repeated_column, read_bits,
-    read_bits_dynamic,
-};
+use crate::utils::{bit_sum, constrain_bits, field_const, push_repeated_bits, push_repeated_column, read_bits, read_bits_dynamic};
 use num_traits::Zero;
-use stwo::core::channel::{Blake2sChannel, Channel};
-use stwo::core::fields::m31::{BaseField, M31};
+use stwo::core::channel::Blake2sChannel;
+use stwo::core::fields::m31::BaseField;
 use stwo::core::fields::qm31::QM31;
 use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
 use stwo::core::verifier::verify;
+use stwo::prover::backend::simd::m31::LOG_N_LANES;
 use stwo::prover::backend::simd::SimdBackend;
-use stwo::prover::poly::circle::{CircleEvaluation, PolyOps};
-use stwo::prover::poly::BitReversedOrder;
+use stwo::prover::poly::circle::PolyOps;
 use stwo::prover::{prove, CommitmentSchemeProver, ComponentProver};
 use stwo_constraint_framework::{EvalAtRow, FrameworkComponent, FrameworkEval, TraceLocationAllocator};
 
@@ -26,7 +20,7 @@ pub(crate) const MONTH_OFFSET_BITS: usize = 4;
 pub(crate) const DAY_OFFSET_BITS: usize = 5;
 pub(crate) const DATE_VALUE_COLUMNS: usize = 4;
 pub(crate) const AGE_CONSTRAINT_LOG_DEGREE: u32 = 1;
-pub(crate) const MIN_AGE_TRACE_LOG_SIZE: u32 = 5;
+pub(crate) const LOG_SIZE: u32 = LOG_N_LANES;
 
 pub(crate) fn trace_columns(bounds: &AgeBounds) -> usize {
     DATE_VALUE_COLUMNS
@@ -39,55 +33,17 @@ pub(crate) fn trace_columns(bounds: &AgeBounds) -> usize {
         + bounds.age_slack_bits()
 }
 
-pub(crate) fn trace_log_size() -> u32 {
-    MIN_AGE_TRACE_LOG_SIZE
+struct BitDecompositionEval {
+    public: PublicInput,
 }
 
-// ---------------------------------------------------------------------------
-// AgeClaim — the AIR component for bit-decomposition age proofs
-// ---------------------------------------------------------------------------
-
-#[derive(Clone)]
-pub(crate) struct AgeClaim {
-    pub(crate) setup: Setup,
-    pub(crate) log_size: u32,
-}
-
-impl AgeClaim {
-    pub(crate) fn new(setup: Setup) -> Self {
-        Self {
-            log_size: trace_log_size(),
-            setup,
-        }
-    }
-
-    pub(crate) fn mix_into(&self, channel: &mut impl Channel) {
-        channel.mix_u64(self.setup.current.year as u64);
-        channel.mix_u64(self.setup.current.month as u64);
-        channel.mix_u64(self.setup.current.day as u64);
-        channel.mix_u64(self.setup.min_age_years as u64);
-        channel.mix_u64(self.setup.bounds.min_supported_year as u64);
-        channel.mix_u64(self.setup.bounds.max_supported_year as u64);
-        channel.mix_u64(self.setup.bounds.max_supported_age_years as u64);
-        channel.mix_u64(self.log_size as u64);
-    }
-
-    pub(crate) fn into_component(self) -> AgeComponent {
-        AgeComponent::new(
-            &mut TraceLocationAllocator::default(),
-            self.clone(),
-            QM31::zero(),
-        )
-    }
-}
-
-impl FrameworkEval for AgeClaim {
+impl FrameworkEval for BitDecompositionEval {
     fn log_size(&self) -> u32 {
-        self.log_size
+            LOG_SIZE
     }
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + AGE_CONSTRAINT_LOG_DEGREE
+        LOG_SIZE + AGE_CONSTRAINT_LOG_DEGREE
     }
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
@@ -96,7 +52,7 @@ impl FrameworkEval for AgeClaim {
         let dob_day = eval.next_trace_mask();
         let age_slack = eval.next_trace_mask();
 
-        let bounds = self.setup.bounds;
+        let bounds = self.public.bounds;
         let year_offset_bits = read_bits_dynamic::<E>(&mut eval, bounds.year_offset_bits());
         let year_bound_slack_bits = read_bits_dynamic::<E>(&mut eval, bounds.year_offset_bits());
         let month_offset_bits = read_bits::<E, MONTH_OFFSET_BITS>(&mut eval);
@@ -131,7 +87,7 @@ impl FrameworkEval for AgeClaim {
         eval.add_constraint(field_const::<E>(30) - day_offset - day_bound_slack);
         eval.add_constraint(age_slack.clone() - age_slack_from_bits);
 
-        let cutoff_key = self.setup.cutoff_date().key();
+        let cutoff_key = self.public.cutoff_date().key();
         let dob_key = dob_year * BaseField::from_u32_unchecked(DATE_YEAR_BASE)
             + dob_month * BaseField::from_u32_unchecked(DATE_MONTH_BASE)
             + dob_day;
@@ -142,7 +98,7 @@ impl FrameworkEval for AgeClaim {
     }
 }
 
-type AgeComponent = FrameworkComponent<AgeClaim>;
+type AgeComponent = FrameworkComponent<BitDecompositionEval>;
 
 pub struct AgeBitDecomposition(pub AgePredicate);
 
@@ -151,15 +107,16 @@ impl AgeBitDecomposition {
         Self(AgePredicate::new(pcs_config))
     }
 
+    #[cfg(test)]
     pub(crate) fn new_with_input_validation(pcs_config: PcsConfig, validate_input: bool) -> Self {
         Self(AgePredicate::new_with_input_validation(pcs_config, validate_input))
     }
 }
 
 impl Predicate for AgeBitDecomposition {
-    type PublicInput = Setup;
+    type PublicInput = PublicInput;
     type PrivateInput = DateOfBirth;
-    type Witness = AgeWitness;
+    type Witness = Witness;
     type Error = Error;
 
     fn validate(&self, public: &Self::PublicInput) -> Result<(), Self::Error> {
@@ -176,14 +133,14 @@ impl Predicate for AgeBitDecomposition {
 }
 
 impl StarkPredicate for AgeBitDecomposition {
-    type Proof = AgeProof;
+    type Proof = AgeBitDecompositionProof;
 
     fn trace(
         &self,
         witness: &Self::Witness,
-    ) -> Vec<CircleEvaluation<SimdBackend, M31, BitReversedOrder>> {
-        let bounds = witness.setup.bounds;
-        let log_size = trace_log_size();
+    ) -> Trace {
+        let bounds = witness.public.bounds;
+        let log_size = LOG_SIZE;
         let mut columns = Vec::with_capacity(trace_columns(&bounds));
 
         push_repeated_column(&mut columns, witness.dob.year, log_size);
@@ -219,14 +176,13 @@ impl StarkPredicate for AgeBitDecomposition {
 
         let witness = self.witness(public, private)?;
         let trace = self.trace(&witness);
-        let statement = AgeClaim::new(public.clone());
 
         let channel = &mut Blake2sChannel::default();
         self.0.pcs_config.mix_into(channel);
 
         let twiddles = SimdBackend::precompute_twiddles(
             CanonicCoset::new(
-                trace_log_size()
+                LOG_SIZE
                     + AGE_CONSTRAINT_LOG_DEGREE
                     + self.0.pcs_config.fri_config.log_blowup_factor,
             )
@@ -243,13 +199,17 @@ impl StarkPredicate for AgeBitDecomposition {
         let preprocessed_tree_builder = commitment_scheme.tree_builder();
         preprocessed_tree_builder.commit(channel);
 
-        statement.mix_into(channel);
+        public.mix_into(channel);
 
         let mut tree_builder = commitment_scheme.tree_builder();
         tree_builder.extend_evals(trace);
         tree_builder.commit(channel);
 
-        let component = statement.into_component();
+        let component = AgeComponent::new(
+            &mut TraceLocationAllocator::default(),
+            BitDecompositionEval { public: public.clone() },
+            QM31::zero(),
+        );
         let components: Vec<&dyn ComponentProver<SimdBackend>> = vec![&component];
         let stark_proof = prove::<SimdBackend, Blake2sMerkleChannel>(
             components.as_slice(),
@@ -257,17 +217,16 @@ impl StarkPredicate for AgeBitDecomposition {
             commitment_scheme,
         )?;
 
-        Ok(AgeProof {
-            setup: public.clone(),
+        Ok(AgeBitDecompositionProof {
+            public: public.clone(),
             stark_proof,
         })
     }
 
     fn verify(&self, proof: &Self::Proof) -> Result<(), Self::Error> {
-        self.validate(&proof.setup)?;
+        self.validate(&proof.public)?;
 
         let pcs_config = proof.stark_proof.config;
-        let claim = AgeClaim::new(proof.setup.clone());
         let channel = &mut Blake2sChannel::default();
         pcs_config.mix_into(channel);
 
@@ -276,14 +235,19 @@ impl StarkPredicate for AgeBitDecomposition {
 
         commitment_scheme.commit(proof.stark_proof.commitments[0], &[], channel);
 
-        claim.mix_into(channel);
+        proof.public.mix_into(channel);
+
         commitment_scheme.commit(
             proof.stark_proof.commitments[1],
-            &vec![claim.log_size; trace_columns(&proof.setup.bounds)],
+            &vec![LOG_SIZE; trace_columns(&proof.public.bounds)],
             channel,
         );
 
-        let component = claim.into_component();
+        let component = AgeComponent::new(
+            &mut TraceLocationAllocator::default(),
+            BitDecompositionEval { public: proof.public.clone() },
+            QM31::zero(),
+        );
         verify(
             &[&component],
             channel,
@@ -292,193 +256,5 @@ impl StarkPredicate for AgeBitDecomposition {
         )?;
 
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::age::types::{AgeBounds, Date};
-    use stwo::core::pcs::PcsConfig;
-    use stwo::prover::ProvingError;
-    use crate::AgeInputError;
-
-    fn setup_today(min_age_years: u32) -> Setup {
-        Setup::new(
-            Date { year: 2026, month: 5, day: 19 },
-            min_age_years,
-        )
-    }
-
-    fn setup_today_with_bounds(min_age_years: u32, bounds: AgeBounds) -> Setup {
-        Setup::new_with_bounds(
-            Date { year: 2026, month: 5, day: 19 },
-            min_age_years,
-            bounds,
-        )
-    }
-
-    fn dob(year: u32, month: u32, day: u32) -> DateOfBirth {
-        DateOfBirth(Date { year, month, day })
-    }
-
-    fn validating_predicate() -> AgeBitDecomposition {
-        AgeBitDecomposition::new(PcsConfig::default())
-    }
-
-    fn non_validating_predicate() -> AgeBitDecomposition {
-        AgeBitDecomposition::new_with_input_validation(PcsConfig::default(), false)
-    }
-
-    fn assert_input_error(error: Error, expected: impl FnOnce(AgeInputError) -> bool) {
-        match error {
-            Error::Input(input_error) => assert!(expected(input_error)),
-            other => panic!("expected input error, got {other:?}"),
-        }
-    }
-
-    fn assert_proving_constraints_error(error: Error) {
-        match error {
-            Error::Proving(ProvingError::ConstraintsNotSatisfied) => {}
-            other => panic!("expected proving constraint failure, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn validate_input_rejects_invalid_current_month() {
-        let predicate = validating_predicate();
-        let setup = Setup::new(Date { year: 2026, month: 13, day: 19 }, 18);
-
-        let error = predicate.prove(&setup, &dob(2000, 1, 1)).unwrap_err();
-
-        assert_input_error(error, |e| matches!(e, AgeInputError::InvalidMonth(13)));
-    }
-
-    #[test]
-    fn validate_input_rejects_min_age_above_supported_bound() {
-        let predicate = validating_predicate();
-        let bounds = AgeBounds::new(Date { year: 2026, month: 12, day: 19 }, 18);
-        let setup = Setup::new_with_bounds(
-            Date { year: 2026, month: 5, day: 19 },
-            bounds.max_supported_age_years + 1,
-            bounds,
-        );
-
-        let error = predicate.prove(&setup, &dob(2000, 1, 1)).unwrap_err();
-
-        assert_input_error(
-            error,
-            |e| matches!(e, AgeInputError::Invalid(m) if m.contains("over 18")),
-        );
-    }
-
-    #[test]
-    fn bounds_derive_air_width_from_supported_year_range() {
-        let bounds = AgeBounds {
-            min_supported_year: 2000,
-            max_supported_year: 2031,
-            max_supported_age_years: 31,
-        };
-
-        assert_eq!(bounds.year_offset_bits(), 5);
-        assert_eq!(bounds.age_slack_bits(), 14);
-        assert_eq!(trace_columns(&bounds), 46);
-        assert_eq!(trace_log_size(), MIN_AGE_TRACE_LOG_SIZE);
-    }
-
-    #[test]
-    fn proves_and_verifies_with_custom_supported_bounds() {
-        let predicate = validating_predicate();
-        let bounds = AgeBounds {
-            min_supported_year: 1990,
-            max_supported_year: 2030,
-            max_supported_age_years: 40,
-        };
-
-        let proof = predicate
-            .prove(&setup_today_with_bounds(18, bounds), &dob(2008, 5, 19))
-            .unwrap();
-
-        predicate.verify(&proof).unwrap();
-    }
-
-    #[test]
-    fn validate_input_rejects_invalid_supported_bounds() {
-        let predicate = validating_predicate();
-        let bounds = AgeBounds {
-            min_supported_year: 2030,
-            max_supported_year: 2020,
-            max_supported_age_years: 18,
-        };
-
-        let error = predicate
-            .prove(&setup_today_with_bounds(18, bounds), &dob(2000, 1, 1))
-            .unwrap_err();
-
-        assert_input_error(
-            error,
-            |e| matches!(e, AgeInputError::Invalid(m) if m.contains("exceeds max")),
-        );
-    }
-
-    #[test]
-    fn validate_input_rejects_invalid_private_day() {
-        let predicate = validating_predicate();
-
-        let error = predicate.prove(&setup_today(18), &dob(2000, 1, 32)).unwrap_err();
-
-        assert_input_error(error, |e| matches!(e, AgeInputError::InvalidDay(32)));
-    }
-
-    #[test]
-    fn proves_and_verifies_exactly_minimum_age_today_with_validation() {
-        let predicate = validating_predicate();
-        let proof = predicate.prove(&setup_today(18), &dob(2008, 5, 19)).unwrap();
-        predicate.verify(&proof).unwrap();
-    }
-
-    #[test]
-    fn proves_and_verifies_older_than_minimum_age_today_with_validation() {
-        let predicate = validating_predicate();
-        let proof = predicate.prove(&setup_today(18), &dob(2008, 5, 18)).unwrap();
-        predicate.verify(&proof).unwrap();
-    }
-
-    #[test]
-    fn validate_input_rejects_under_minimum_age_today() {
-        let predicate = validating_predicate();
-
-        let error = predicate.prove(&setup_today(18), &dob(2008, 5, 20)).unwrap_err();
-
-        assert_input_error(error, |e| matches!(e, AgeInputError::UnderAge));
-    }
-
-    #[test]
-    fn no_validation_invalid_month_reaches_prover_and_fails_constraints() {
-        let predicate = non_validating_predicate();
-
-        let error = predicate.prove(&setup_today(18), &dob(2000, 13, 1)).unwrap_err();
-
-        assert_proving_constraints_error(error);
-    }
-
-    #[test]
-    fn no_validation_invalid_day_reaches_prover_and_fails_constraints() {
-        let predicate = non_validating_predicate();
-
-        let error = predicate.prove(&setup_today(18), &dob(2000, 1, 32)).unwrap_err();
-
-        assert_proving_constraints_error(error);
-    }
-
-    #[test]
-    fn verification_fails_when_public_input_is_mutated() {
-        let predicate = validating_predicate();
-        let mut proof = predicate.prove(&setup_today(18), &dob(2000, 1, 1)).unwrap();
-        proof.setup.min_age_years = 21;
-
-        let error = predicate.verify(&proof).unwrap_err();
-
-        assert!(matches!(error, Error::Verification(_)));
     }
 }

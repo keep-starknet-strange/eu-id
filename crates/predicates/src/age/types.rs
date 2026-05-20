@@ -1,9 +1,13 @@
 use crate::utils;
 use serde::{Deserialize, Serialize};
-use stwo::core::fields::m31::P as M31_MODULUS;
+use stwo::core::channel::Channel;
+use stwo::core::fields::m31::{M31, P as M31_MODULUS};
 use stwo::core::proof::StarkProof;
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleHasher;
 use stwo::core::verifier::VerificationError;
+use stwo::prover::backend::simd::SimdBackend;
+use stwo::prover::poly::circle::CircleEvaluation;
+use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::ProvingError;
 
 pub(crate) const DATE_MONTH_BASE: u32 = 32;
@@ -11,6 +15,8 @@ pub(crate) const DATE_YEAR_BASE: u32 = 512;
 pub(crate) const MAX_FIELD_DATE_KEY: u32 = M31_MODULUS - 1;
 
 pub(crate) const MAX_SUPPORTED_YEARS: u32 = 120;
+
+pub(crate) type Trace = Vec<CircleEvaluation<SimdBackend, M31, BitReversedOrder>>;
 
 /// Bounds that define the age predicate's accepted input domain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,13 +96,13 @@ impl AgeBounds {
 /// The prover proves knowledge of a private date of birth whose age is at least
 /// `min_age_years` on `current_date`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Setup {
+pub struct PublicInput {
     pub current: Date,
     pub min_age_years: u32,
     pub bounds: AgeBounds,
 }
 
-impl Setup {
+impl PublicInput {
     pub fn new(current: Date, min_age_years: u32) -> Self {
         Self {
             current,
@@ -119,6 +125,16 @@ impl Setup {
             month: self.current.month,
             day: self.current.day,
         }
+    }
+
+    pub(crate) fn mix_into(&self, channel: &mut impl Channel) {
+        channel.mix_u64(self.current.year as u64);
+        channel.mix_u64(self.current.month as u64);
+        channel.mix_u64(self.current.day as u64);
+        channel.mix_u64(self.min_age_years as u64);
+        channel.mix_u64(self.bounds.min_supported_year as u64);
+        channel.mix_u64(self.bounds.max_supported_year as u64);
+        channel.mix_u64(self.bounds.max_supported_age_years as u64);
     }
 }
 
@@ -157,22 +173,22 @@ impl Date {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AgeWitness {
-    pub setup: Setup,
+pub struct Witness {
+    pub public: PublicInput,
     pub dob: Date,
     pub cutoff: Date,
     pub age_slack: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct AgeProof {
-    pub setup: Setup,
+pub struct AgeBitDecompositionProof {
+    pub public: PublicInput,
     pub stark_proof: StarkProof<Blake2sMerkleHasher>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgeRangeCheckProof {
-    pub setup: Setup,
+    pub public: PublicInput,
     pub age_claimed_sum: stwo::core::fields::qm31::QM31,
     pub table_claimed_sum: stwo::core::fields::qm31::QM31,
     pub stark_proof: StarkProof<Blake2sMerkleHasher>,
