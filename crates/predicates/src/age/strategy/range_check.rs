@@ -1,3 +1,4 @@
+use crate::age::calendar::{calendar_log_size, generate_max_days_per_month, valid_date_ranges};
 use crate::age::predicate::AgePredicate;
 use crate::age::types::{AgeBounds, AgeRangeCheckProof, DateOfBirth, Error, PublicInput, Trace, Witness, DATE_MONTH_BASE, DATE_YEAR_BASE};
 use crate::predicate::{Predicate, StarkPredicate};
@@ -222,7 +223,8 @@ impl StarkPredicate for AgeRangeCheck {
             BaseColumn::from_iter(mult.into_iter()),
         )];
 
-        let max_log_size = slack_possible_values_log_size.max(AGE_LOG_SIZE);
+        let cal_log_size = calendar_log_size(&public.bounds);
+        let max_log_size = slack_possible_values_log_size.max(AGE_LOG_SIZE).max(cal_log_size);
         let twiddles = SimdBackend::precompute_twiddles(
             CanonicCoset::new(
                 max_log_size
@@ -242,9 +244,11 @@ impl StarkPredicate for AgeRangeCheck {
                 &twiddles,
             );
 
-        // 1. Commit the preprocessed table of all possible slack values
+        // 1. Commit the preprocessed table of all possible slack values + calendar tables
         let mut tb = commitment_scheme.tree_builder();
         tb.extend_evals(slack_values_trace.clone());
+        tb.extend_evals(generate_max_days_per_month(public.bounds));
+        tb.extend_evals(valid_date_ranges());
         tb.commit(channel);
 
         // 2. Mix public input
@@ -336,7 +340,13 @@ impl StarkPredicate for AgeRangeCheck {
 
         let tbl_log_size = slack_log_size(&proof.public.bounds);
 
-        commitment_scheme.commit(proof.stark_proof.commitments[0], &[tbl_log_size], channel);
+        let cal_log_size = calendar_log_size(&proof.public.bounds);
+        let vdr_log_size = valid_date_ranges()[0].domain.log_size();
+        commitment_scheme.commit(
+            proof.stark_proof.commitments[0],
+            &[tbl_log_size, cal_log_size, vdr_log_size, vdr_log_size],
+            channel,
+        );
 
         proof.public.mix_into(channel);
 

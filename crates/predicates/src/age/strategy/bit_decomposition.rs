@@ -1,3 +1,4 @@
+use crate::age::calendar::{calendar_log_size, generate_max_days_per_month, valid_date_ranges};
 use crate::age::predicate::AgePredicate;
 use crate::age::types::{AgeBounds, AgeBitDecompositionProof, Witness, DateOfBirth, Error, PublicInput, Trace, DATE_MONTH_BASE, DATE_YEAR_BASE};
 use crate::predicate::{Predicate, StarkPredicate};
@@ -180,9 +181,11 @@ impl StarkPredicate for AgeBitDecomposition {
         let channel = &mut Blake2sChannel::default();
         self.0.pcs_config.mix_into(channel);
 
+        let cal_log_size = calendar_log_size(&public.bounds);
+        let max_log_size = LOG_SIZE.max(cal_log_size);
         let twiddles = SimdBackend::precompute_twiddles(
             CanonicCoset::new(
-                LOG_SIZE
+                max_log_size
                     + AGE_CONSTRAINT_LOG_DEGREE
                     + self.0.pcs_config.fri_config.log_blowup_factor,
             )
@@ -196,7 +199,9 @@ impl StarkPredicate for AgeBitDecomposition {
                 &twiddles,
             );
 
-        let preprocessed_tree_builder = commitment_scheme.tree_builder();
+        let mut preprocessed_tree_builder = commitment_scheme.tree_builder();
+        preprocessed_tree_builder.extend_evals(generate_max_days_per_month(public.bounds));
+        preprocessed_tree_builder.extend_evals(valid_date_ranges());
         preprocessed_tree_builder.commit(channel);
 
         public.mix_into(channel);
@@ -233,7 +238,13 @@ impl StarkPredicate for AgeBitDecomposition {
         let commitment_scheme =
             &mut CommitmentSchemeVerifier::<Blake2sMerkleChannel>::new(pcs_config);
 
-        commitment_scheme.commit(proof.stark_proof.commitments[0], &[], channel);
+        let cal_log_size = calendar_log_size(&proof.public.bounds);
+        let vdr_log_size = valid_date_ranges()[0].domain.log_size();
+        commitment_scheme.commit(
+            proof.stark_proof.commitments[0],
+            &[cal_log_size, vdr_log_size, vdr_log_size],
+            channel,
+        );
 
         proof.public.mix_into(channel);
 
