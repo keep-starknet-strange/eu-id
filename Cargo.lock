@@ -1329,9 +1329,6 @@ dependencies = [
 [[package]]
 name = "stwo-p256-utils"
 version = "0.1.0"
-dependencies = [
- "p256",
-]
 
 [[package]]
 name = "stwo-std-shims"

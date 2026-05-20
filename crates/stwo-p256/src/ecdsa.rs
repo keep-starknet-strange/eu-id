@@ -1,4 +1,4 @@
-use stwo_p256_utils::constants::{P256_GX, P256_GY, P256_ORDER};
+use crate::constants::{P256_GX, P256_GY, P256_ORDER};
 
 use crate::curve::{mod_inverse, point_add, point_double, scalar_mul};
 use crate::field_ops::mul_mod_witness;

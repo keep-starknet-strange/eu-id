@@ -1,17 +1,17 @@
 use stwo_p256_utils::constants::{LIMB_BITS, N_LIMBS};
 
-use crate::limbs::{schoolbook_mul_raw, LimbsM31};
+use crate::limbs::{schoolbook_mul_raw, P256M31BigInt};
 use crate::types::U256;
 
 /// Result of a modular multiplication, with all intermediate witness values
 /// needed for trace generation and constraint verification.
 #[derive(Clone, Debug)]
 pub struct MulModWitness {
-    pub a: LimbsM31,
-    pub b: LimbsM31,
-    pub modulus: LimbsM31,
-    pub result: LimbsM31,
-    pub quotient: LimbsM31,
+    pub a: P256M31BigInt,
+    pub b: P256M31BigInt,
+    pub modulus: P256M31BigInt,
+    pub result: P256M31BigInt,
+    pub quotient: P256M31BigInt,
     /// Carries from the verification equation: a*b - q*p - r = 0 (limb by limb with carries)
     pub carries: Vec<i64>,
 }
@@ -19,10 +19,10 @@ pub struct MulModWitness {
 /// Result of a modular addition.
 #[derive(Clone, Debug)]
 pub struct AddModWitness {
-    pub a: LimbsM31,
-    pub b: LimbsM31,
-    pub modulus: LimbsM31,
-    pub result: LimbsM31,
+    pub a: P256M31BigInt,
+    pub b: P256M31BigInt,
+    pub modulus: P256M31BigInt,
+    pub result: P256M31BigInt,
     /// Whether a borrow/reduction was needed (0 or 1).
     pub reduced: u32,
     pub carries: Vec<i64>,
@@ -31,10 +31,10 @@ pub struct AddModWitness {
 /// Result of a modular subtraction.
 #[derive(Clone, Debug)]
 pub struct SubModWitness {
-    pub a: LimbsM31,
-    pub b: LimbsM31,
-    pub modulus: LimbsM31,
-    pub result: LimbsM31,
+    pub a: P256M31BigInt,
+    pub b: P256M31BigInt,
+    pub modulus: P256M31BigInt,
+    pub result: P256M31BigInt,
     /// Whether a borrow was needed (0 or 1).
     pub borrowed: u32,
     pub carries: Vec<i64>,
@@ -49,13 +49,13 @@ pub fn mul_mod_witness(a: &U256, b: &U256, modulus: &U256) -> MulModWitness {
     let product = mul_512(&a_big, &b_big);
     let (quotient_big, remainder_big) = divmod_512(&product, &p_big);
 
-    let a_limbs = LimbsM31::from_u256(a);
-    let b_limbs = LimbsM31::from_u256(b);
-    let p_limbs = LimbsM31::from_u256(modulus);
+    let a_limbs = P256M31BigInt::from_u256(a);
+    let b_limbs = P256M31BigInt::from_u256(b);
+    let p_limbs = P256M31BigInt::from_u256(modulus);
     let result = u512_to_u256_low(&remainder_big);
-    let r_limbs = LimbsM31::from_u256(&result);
+    let r_limbs = P256M31BigInt::from_u256(&result);
     let quotient = u512_to_u256_low(&quotient_big);
-    let q_limbs = LimbsM31::from_u256(&quotient);
+    let q_limbs = P256M31BigInt::from_u256(&quotient);
 
     // Compute carries for the relation: a*b = q*p + r
     // Limb-by-limb: sum(a[j]*b[i-j]) = sum(q[j]*p[i-j]) + r[i] + carry[i]*2^LIMB_BITS - carry[i-1]
@@ -110,11 +110,11 @@ pub fn add_mod_witness(a: &U256, b: &U256, modulus: &U256) -> AddModWitness {
     let reduced = cmp_512(&sum, &p_big) >= 0;
     let result_big = if reduced { sub_512(&sum, &p_big) } else { sum };
 
-    let a_limbs = LimbsM31::from_u256(a);
-    let b_limbs = LimbsM31::from_u256(b);
-    let p_limbs = LimbsM31::from_u256(modulus);
+    let a_limbs = P256M31BigInt::from_u256(a);
+    let b_limbs = P256M31BigInt::from_u256(b);
+    let p_limbs = P256M31BigInt::from_u256(modulus);
     let result = u512_to_u256_low(&result_big);
-    let r_limbs = LimbsM31::from_u256(&result);
+    let r_limbs = P256M31BigInt::from_u256(&result);
 
     // Carry computation for: a + b - reduced*p - r = 0
     let mut carries = vec![0i64; N_LIMBS + 1];
@@ -171,11 +171,11 @@ pub fn sub_mod_witness(a: &U256, b: &U256, modulus: &U256) -> SubModWitness {
         sub_512(&a_big, &b_big)
     };
 
-    let a_limbs = LimbsM31::from_u256(a);
-    let b_limbs = LimbsM31::from_u256(b);
-    let p_limbs = LimbsM31::from_u256(modulus);
+    let a_limbs = P256M31BigInt::from_u256(a);
+    let b_limbs = P256M31BigInt::from_u256(b);
+    let p_limbs = P256M31BigInt::from_u256(modulus);
     let result = u512_to_u256_low(&result_big);
-    let r_limbs = LimbsM31::from_u256(&result);
+    let r_limbs = P256M31BigInt::from_u256(&result);
 
     let mut carries = vec![0i64; N_LIMBS + 1];
     let mut carry: i64 = 0;
@@ -341,7 +341,7 @@ fn shl_512(a: &U512, shift: usize) -> U512 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use stwo_p256_utils::constants::P256_MODULUS;
+    use crate::constants::P256_MODULUS;
 
     #[test]
     fn test_mul_mod_small() {

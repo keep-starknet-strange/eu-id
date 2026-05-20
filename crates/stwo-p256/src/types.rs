@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use stwo_p256_utils::constants::{P256_GX, P256_GY, P256_MODULUS, P256_ORDER};
+use crate::constants::{P256_GX, P256_GY, P256_MODULUS, P256_ORDER};
 
 /// A 256-bit unsigned integer stored as big-endian bytes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

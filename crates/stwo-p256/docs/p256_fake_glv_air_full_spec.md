@@ -184,7 +184,7 @@ EcdsaVm             dynamic, all signature logic
 Range13              preprocessed values, witness multiplicity column, 2^13 rows
 Range9               preprocessed values, witness multiplicity column, 2^9 rows
 Range11               preprocessed values, witness multiplicity column, 2^11 rows (top limb of 128-bit values)
-Range128              preprocessed values, witness multiplicity column, 2^7 = 128 rows (use_count bounds, valid 0..127)
+Range7              preprocessed values, witness multiplicity column, 2^7 = 128 rows (use_count bounds, valid 0..127)
 Selector4x4          preprocessed values, witness multiplicity column, 16 rows
 Selector16Decode     preprocessed values, witness multiplicity column, 16 rows
 FinalSelector        preprocessed values, witness multiplicity column, 4 rows
@@ -926,7 +926,7 @@ cert_active * (use_count_16 - 1) = 0     (active => use_count = 1)
 For Base[i]:
 
 ```text
-cert_active = 1 => use_count_i in 0..127  (Range128 lookup)
+cert_active = 1 => use_count_i in 0..127  (Range7 lookup)
 cert_active = 0 => use_count_i = 0        (direct constraint)
 ```
 
@@ -1278,13 +1278,13 @@ Provider multiplicities must be range-bounded, not arbitrary field values. The m
 Constrain:
 
 ```text
-0 <= use_count_i <= 127   for Base[i], i in 0..7  (Range128 lookup)
+0 <= use_count_i <= 127   for Base[i], i in 0..7  (Range7 lookup)
 use_count_16 = 1          for Table[16] (exactly one final chain step)
 ```
 
-The `Range128` lookup table has physical 2^7 = 128 rows (values 0..127). This enforces `use_count < 128`, not `use_count <= 65`. The tighter logical bound 0..65 is guaranteed by logup balance: there are at most 65 consumer sites per base index (62 chain + 1 MSB + 1 Table[16] + 1 LSB), so the total positive multiplicity cannot exceed 65. The provider's negative multiplicity must match exactly for the logup sum to be zero.
+The `Range7` lookup table has physical 2^7 = 128 rows (values 0..127). This enforces `use_count < 128`, not `use_count <= 65`. The tighter logical bound 0..65 is guaranteed by logup balance: there are at most 65 consumer sites per base index (62 chain + 1 MSB + 1 Table[16] + 1 LSB), so the total positive multiplicity cannot exceed 65. The provider's negative multiplicity must match exactly for the logup sum to be zero.
 
-Range128's role is to prevent **field-valued multiplicities** (e.g., `use_count = 2^31 - 2` in M31, which could cancel a legitimate provider entry). It does not enforce the exact 65 bound — that comes from the count of consumer sites. If a tighter bound is desired (e.g., for defense in depth), implement a dedicated `UseCountRange(0..65)` table with 2^7 = 128 physical rows (pad 66..127 with zero-multiplicity entries).
+Range7's role is to prevent **field-valued multiplicities** (e.g., `use_count = 2^31 - 2` in M31, which could cancel a legitimate provider entry). It does not enforce the exact 65 bound — that comes from the count of consumer sites. If a tighter bound is desired (e.g., for defense in depth), implement a dedicated `UseCountRange(0..65)` table with 2^7 = 128 physical rows (pad 66..127 with zero-multiplicity entries).
 
 Do not carry all 8 base point coordinates through every chain row. That would cost 8 * (20 + 20 + 1) = 328 extra columns per row, blowing the column budget far beyond 500. The copy-bus approach adds only interaction columns (from the logup fractions), keeping original trace columns near ~350-500.
 
@@ -1478,7 +1478,7 @@ Include (row-deterministic, circuit-fixed):
 Range13(value)                     2^13 rows
 Range9(value)                      2^9 rows
 Range11(value)                      2^11 rows (top limb of 128-bit witnesses)
-Range128(value)                     2^7 rows (values 0..127, use_count bounds)
+Range7(value)                     2^7 rows (values 0..127, use_count bounds)
 Selector4x4(a, b, selector)       16 rows, a + 4*b = selector
 Selector16Decode(selector,
   base_index, neg_bit)             16 rows, decode mapping
@@ -1546,24 +1546,24 @@ SignedCarryRange(value)
 
 PreparedPoint(sig_id, cert_id, table_index, x[20], y[20], inf)
   Provider: AFFINE_EXPORT rows, -use_count (dynamic witness multiplicity,
-            range-bounded: 0 <= use_count <= 127 via Range128 lookup,
+            range-bounded: 0 <= use_count <= 127 via Range7 lookup,
             logical max 65 for Base[i]; use_count = 1 for Table[16])
   Consumer: chain ADD rows (+cert_active), MSB init (+cert_active),
             Table[16] construction (+cert_active),
             LSB correction Base[2] use (+lsb00_active, conditional on (s1_lsb,s2_lsb)=(0,0))
   Note: sig_id and cert_id are preprocessed columns, preventing
         cross-signature/cross-certificate table reuse.
-        Range128 enforces 0..127, not 0..65. The logical max 65
+        Range7 enforces 0..127, not 0..65. The logical max 65
         is guaranteed by logup balance (at most 65 consumers exist
-        per base index). Range128 prevents field-valued multiplicities
+        per base index). Range7 prevents field-valued multiplicities
         but does not enforce the tight 65 bound directly.
 
-Range128(value)
-  Provider: Range128 component, -multiplicity (witness column), 128 rows (0..127)
+Range7(value)
+  Provider: Range7 component, -multiplicity (witness column), 128 rows (0..127)
   Consumer: AFFINE_EXPORT use_count columns, +cert_active
-  Note: physical table has 2^7 = 128 rows (values 0..127). Range128 only
+  Note: physical table has 2^7 = 128 rows (values 0..127). Range7 only
         prevents field-valued multiplicities. A malicious use_count = 100
-        would pass Range128 but fail PreparedPoint logup balance (only
+        would pass Range7 but fail PreparedPoint logup balance (only
         65 consumer sites exist). The 0..65 effective bound comes from
         the fixed number of consumer sites, not from the table.
 ```
@@ -1801,7 +1801,7 @@ sig_id, cert_id, step_id are preprocessed (not malleable by prover)
 sig_active, cert_active, cert_zero_active are materialized witnesses,
   not inline products; constrained by their defining equations
 MSB init uses init_base_index from FinalSelector (not just selector_final)
-PreparedPoint use_count is range-bounded (0..127 via Range128)
+PreparedPoint use_count is range-bounded (0..127 via Range7)
   Logical max 65 guaranteed by logup balance (consumer count)
 use_count = 0 explicitly constrained on inactive rows (not just logup)
 R3 dataflow uses fixed-schedule offsets from its AFFINE_EXPORT row
@@ -1883,7 +1883,7 @@ Wrong MSB base index: selector_final
   correct but Acc0 loads wrong Base[i] -> FinalSelector init_base_index mismatch
 PreparedPoint wrong sig/cert: correct
   coords but wrong sig_id or cert_id  -> PreparedPoint bus imbalance
-PreparedPoint use_count > 127          -> Range128 lookup failure
+PreparedPoint use_count > 127          -> Range7 lookup failure
 PreparedPoint use_count_16 != 1        -> logup imbalance
 cert_active gating bug:
   zero branch emits selector or
@@ -1991,7 +1991,7 @@ global log with Range13/logup:     ~14-15
 
 ```text
 1.  Implement limb range helpers and canonical < n, < p comparisons.
-    Include Range13, Range9, Range11, and Range128 lookup providers.
+    Include Range13, Range9, Range11, and Range7 lookup providers.
 2.  Implement full FnMul (scalar setup) and digest reduction.
     Bound quotient Q < n via borrow witness.
 3.  Implement Fp Solinas arithmetic with signed reduction matrix
@@ -2011,7 +2011,7 @@ global log with Range13/logup:     ~14-15
     inf=1 proves Z=0 via per-limb constraints AND X_limb[i]=0 AND
     Y*Y_inv = 1 mod p (proves Y!=0, preventing forbidden (0,0,0)).
     Affine recovery: x = X*Z_inv, y = Y*Z_inv (NOT Jacobian).
-    Include use_count range bound via Range128.
+    Include use_count range bound via Range7.
     Constrain use_count = 0 on inactive rows via (1-cert_active)*use_count.
 6.  Implement CERT_BIND row type (binds H point + zero/nonzero branch).
     Always present for both branches. Defines scalar_is_zero, H coords,

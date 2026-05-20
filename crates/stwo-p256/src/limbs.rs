@@ -1,14 +1,54 @@
 use stwo::core::fields::m31::M31;
-use stwo_p256_utils::constants::{LIMB_BITS, LIMB_MAX, N_LIMBS};
+use stwo_constraint_framework::EvalAtRow;
+use stwo_p256_utils::constants::{LIMB_BITS, N_LIMBS};
+
+use crate::constants::LIMB_MAX;
 
 use crate::types::U256;
 
-/// A 256-bit integer decomposed into N_LIMBS limbs of LIMB_BITS each, stored as M31 values.
+/// A P-256-sized integer decomposed into N_LIMBS limbs of LIMB_BITS each.
+///
 /// Limb 0 is the least significant.
-#[derive(Clone, Debug)]
-pub struct LimbsM31(pub [M31; N_LIMBS]);
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct P256BigInt<F>(pub [F; N_LIMBS]);
 
-impl LimbsM31 {
+/// A P-256 bigint whose limbs are values read by an AIR evaluator.
+pub type P256EvalBigInt<E> = P256BigInt<<E as EvalAtRow>::F>;
+
+/// A P-256 bigint whose limbs are concrete M31 values.
+pub type P256M31BigInt = P256BigInt<M31>;
+
+impl<F> P256BigInt<F> {
+    pub const fn from_limbs(limbs: [F; N_LIMBS]) -> Self {
+        Self(limbs)
+    }
+
+    pub fn into_limbs(self) -> [F; N_LIMBS] {
+        self.0
+    }
+
+    pub const fn limbs(&self) -> &[F; N_LIMBS] {
+        &self.0
+    }
+
+    pub fn limbs_mut(&mut self) -> &mut [F; N_LIMBS] {
+        &mut self.0
+    }
+
+    pub fn map<G>(self, mut f: impl FnMut(F) -> G) -> P256BigInt<G> {
+        P256BigInt(self.0.map(&mut f))
+    }
+}
+
+pub trait EvalP256BigIntExt: EvalAtRow {
+    fn next_p256_bigint(&mut self) -> P256EvalBigInt<Self> {
+        P256BigInt(core::array::from_fn(|_| self.next_trace_mask()))
+    }
+}
+
+impl<E: EvalAtRow> EvalP256BigIntExt for E {}
+
+impl P256M31BigInt {
     pub const fn zero() -> Self {
         Self([M31::from_u32_unchecked(0); N_LIMBS])
     }
@@ -65,7 +105,7 @@ impl LimbsM31 {
 
 /// Schoolbook multiplication of two limbed numbers.
 /// Returns the raw convolution (2*N_LIMBS - 1 limbs) as u64 values before reduction.
-pub fn schoolbook_mul_raw(a: &LimbsM31, b: &LimbsM31) -> Vec<u64> {
+pub fn schoolbook_mul_raw(a: &P256M31BigInt, b: &P256M31BigInt) -> Vec<u64> {
     let n = N_LIMBS;
     let mut result = vec![0u64; 2 * n - 1];
 
@@ -107,7 +147,7 @@ mod tests {
             0xFFFF_FFFF_0000_0001,
             0x0000_0001_FFFF_FFFE,
         ]);
-        let limbs = LimbsM31::from_u256(&val);
+        let limbs = P256M31BigInt::from_u256(&val);
         let recovered = limbs.to_u256();
         assert_eq!(val, recovered);
     }
@@ -115,7 +155,7 @@ mod tests {
     #[test]
     fn test_zero_roundtrip() {
         let val = U256::ZERO;
-        let limbs = LimbsM31::from_u256(&val);
+        let limbs = P256M31BigInt::from_u256(&val);
         let recovered = limbs.to_u256();
         assert_eq!(val, recovered);
     }
@@ -123,7 +163,7 @@ mod tests {
     #[test]
     fn test_max_roundtrip() {
         let val = U256::from_le_u64s(&[u64::MAX, u64::MAX, u64::MAX, u64::MAX]);
-        let limbs = LimbsM31::from_u256(&val);
+        let limbs = P256M31BigInt::from_u256(&val);
         let recovered = limbs.to_u256();
         assert_eq!(val, recovered);
     }
@@ -132,8 +172,8 @@ mod tests {
     fn test_schoolbook_mul_small() {
         let a = U256::from_le_u64s(&[3, 0, 0, 0]);
         let b = U256::from_le_u64s(&[7, 0, 0, 0]);
-        let la = LimbsM31::from_u256(&a);
-        let lb = LimbsM31::from_u256(&b);
+        let la = P256M31BigInt::from_u256(&a);
+        let lb = P256M31BigInt::from_u256(&b);
         let raw = schoolbook_mul_raw(&la, &lb);
         let (output, _carries) = propagate_carries(&raw, 2 * N_LIMBS);
         assert_eq!(output[0], 21);
@@ -145,7 +185,7 @@ mod tests {
     #[test]
     fn test_limb_values_in_range() {
         let val = U256::from_le_u64s(&[u64::MAX, u64::MAX, u64::MAX, u64::MAX]);
-        let limbs = LimbsM31::from_u256(&val);
+        let limbs = P256M31BigInt::from_u256(&val);
         for limb in &limbs.0 {
             assert!(
                 limb.0 <= LIMB_MAX,
@@ -154,5 +194,38 @@ mod tests {
                 LIMB_MAX
             );
         }
+    }
+
+    #[test]
+    fn p256_bigint_helpers_preserve_limb_order() {
+        let raw = core::array::from_fn(|i| M31::from_u32_unchecked(i as u32));
+        let bigint = P256M31BigInt::from_limbs(raw);
+
+        assert_eq!(bigint.limbs()[0], M31::from_u32_unchecked(0));
+        assert_eq!(
+            bigint.limbs()[N_LIMBS - 1],
+            M31::from_u32_unchecked((N_LIMBS - 1) as u32)
+        );
+        assert_eq!(bigint.into_limbs(), raw);
+    }
+
+    #[test]
+    fn p256_bigint_mutation_is_explicit() {
+        let mut bigint = P256M31BigInt::zero();
+
+        bigint.limbs_mut()[3] = M31::from_u32_unchecked(17);
+
+        assert_eq!(bigint.limbs()[3], M31::from_u32_unchecked(17));
+        assert_eq!(bigint.limbs()[2], M31::from_u32_unchecked(0));
+    }
+
+    #[test]
+    fn p256_bigint_map_transforms_each_limb() {
+        let raw = core::array::from_fn(|i| M31::from_u32_unchecked(i as u32));
+        let mapped = P256M31BigInt::from_limbs(raw).map(|limb| limb.0 as u64);
+
+        assert_eq!(mapped.limbs()[0], 0);
+        assert_eq!(mapped.limbs()[7], 7);
+        assert_eq!(mapped.limbs()[N_LIMBS - 1], (N_LIMBS - 1) as u64);
     }
 }
