@@ -12,6 +12,12 @@
 //! - [`partitions`] — the validated bit-index partitions for `Σ0`/`Σ1`/`σ0`/`σ1`.
 //! - [`types`] — 32-bit-word ↔ M31 limb representation, working state, block
 //!   bytes, and the witness records the trace generator consumes.
+//! - [`headroom`] — M31 headroom audit for every mod-2³² limb-add family the
+//!   AIR emits (schedule recurrence, `T1`, round short adds, finalization),
+//!   plus the per-family carry-range bounds (`RANGE_2`, `RANGE_4`, `RANGE_5`)
+//!   that downstream lookup wiring consumes. Mirrors the
+//!   `stwo-p256-utils::headroom` API for the eventual shared-crate
+//!   migration.
 //! - [`native`] — pure SHA-256 reference (padding, schedule, compression,
 //!   multi-block) tested against the `sha2` crate. The out-of-circuit oracle.
 //! - [`tables`] — preprocessed lookup-table content: `Σ`/`σ` decode tables,
@@ -25,6 +31,7 @@
 
 pub mod constants;
 pub mod constraints;
+pub mod headroom;
 pub mod native;
 pub mod partitions;
 pub mod stark;

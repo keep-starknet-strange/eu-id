@@ -21,7 +21,7 @@
 //! - finalization carries (16 cols) — 8 words × `(lo, hi)`.
 //! - `h_out` (16 cols).
 //!
-//! Total: `1 + 1 + 16 + 128 + 288 + 64 × 24 + 16 + 16 = 1 002` columns/row.
+//! Total: `1 + 1 + 16 + 128 + 288 + 64 × 24 + 16 + 16 = 2 002` columns/row.
 //! (We avoid storing the per-round `state_in`: the AIR enforces the state
 //! chain via the previous round's `a_new`/`e_new`/`state_in[...]` cells.)
 //!
