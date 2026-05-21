@@ -1,0 +1,439 @@
+//! Per-key (per-row) multiplicity counting for every preprocessed lookup
+//! table the SHA-256 component consumes.
+//!
+//! For each table produced in [`crate::tables`], this module walks a
+//! [`Sha256Witness`] and returns a `Vec<u32>` of length equal to the table's
+//! row count — the i-th entry holds the number of times the AIR fires a
+//! `add_to_relation(rel, +1, …)` keyed on table row `i`.
+//!
+//! Why this lives in its own module:
+//!
+//! - [`crate::witness`] already exposes *totals* per relation
+//!   (`DecodeLookupMultiplicities`, `MajChXorMultiplicities`,
+//!   `SplitPackMultiplicities`) — those are the sanity-check view. For the
+//!   LogUp interaction trace the prover needs the **per-row vector**
+//!   instead: it is what gets committed as the multiplicity column the
+//!   producer-side `Sha256Eval`-cousin reads via `next_trace_mask`.
+//! - The mapping from "a witness value" to "the table row it keys" is
+//!   table-specific (e.g. the σ-decode keys come from `pack_half_key` on
+//!   the input word at the partition's `S` mask; the Maj/Ch row index is
+//!   `(a · 2^W + b) · 2^W + c` from the packed groups; …). Concentrating
+//!   that mapping here keeps the trace generator, the witness emitter and
+//!   the AIR consumer-side wiring decoupled from one another.
+//!
+//! Every counter starts at 0; the witness walk increments by 1 per
+//! `add_to_relation` site documented in `crate::constraints`. The total
+//! over each vector matches the corresponding `witness::*_multiplicities_*`
+//! helper exactly — `total_sanity_*` tests in this module check that.
+
+use crate::constants::{N_ROUNDS, N_STATE_WORDS};
+use crate::partitions::{
+    pack_round_groups, SigmaFn, GROUPS_PER_ROUND_PARTITION, LOWER_SIGMA0_PARTS, LOWER_SIGMA1_PARTS,
+    SIGMA0_GROUPS, SIGMA1_GROUPS,
+};
+use crate::tables::{pack_half_key, Half, Half16, LowerSigmaPartition, RoundPartition};
+use crate::types::Sha256Witness;
+
+/// Number of rows in every 2¹⁶-row table (decode, xor_8, split-pack).
+pub const ROWS_16: usize = 1 << 16;
+
+/// Build the per-row multiplicity vector for one σ/Σ decode table.
+///
+/// `f` chooses the function (`Σ0`/`Σ1`/`σ0`/`σ1`) and `half` picks the
+/// S-side or S′-side table. The table is keyed on the 16-bit
+/// `pack_half_key(input_word, side_mask)`.
+///
+/// **AIR firing rule (from `crate::constraints::wire_sigma_decode`):**
+/// - Round-side: every round `t` fires `Σ0(a[t])` and `Σ1(e[t])` — two
+///   decode S-side + two decode S′-side lookups per round. The input
+///   word is `a[t]` for `Σ0`, `e[t]` for `Σ1`.
+/// - Schedule-side: every schedule entry `j ∈ [0, 48)` fires
+///   `σ0(W[t-15])` and `σ1(W[t-2])` (where `t = j + 16`) — two decode
+///   S-side + two decode S′-side lookups per entry. The input word is
+///   `W[t-15]` for `σ0`, `W[t-2]` for `σ1`.
+pub fn decode_multiplicities(witness: &Sha256Witness, f: SigmaFn, half: Half) -> Vec<u32> {
+    let mut mults = vec![0u32; ROWS_16];
+    let s_mask = f.s_mask();
+    let side_mask = match half {
+        Half::S => s_mask,
+        Half::SComplement => !s_mask,
+    };
+
+    for block in &witness.blocks {
+        // Round-side fires Σ0 / Σ1 only.
+        if matches!(f, SigmaFn::Sigma0 | SigmaFn::Sigma1) {
+            for round in &block.rounds {
+                let input_word = match f {
+                    SigmaFn::Sigma0 => round.state_in[0].to_u32(), // a
+                    SigmaFn::Sigma1 => round.state_in[4].to_u32(), // e
+                    _ => unreachable!(),
+                };
+                let key = pack_half_key(input_word, side_mask);
+                mults[key as usize] += 1;
+            }
+        }
+        // Schedule-side fires σ0 / σ1 only.
+        if matches!(f, SigmaFn::LowerSigma0 | SigmaFn::LowerSigma1) {
+            for entry in &block.schedule_entries {
+                let input_word = match f {
+                    SigmaFn::LowerSigma0 => entry.w_t_minus_15.to_u32(),
+                    SigmaFn::LowerSigma1 => entry.w_t_minus_2.to_u32(),
+                    _ => unreachable!(),
+                };
+                let key = pack_half_key(input_word, side_mask);
+                mults[key as usize] += 1;
+            }
+        }
+    }
+    mults
+}
+
+/// Build the per-row multiplicity vectors for the packed `Maj`/`Ch` table.
+///
+/// One physical table shared by two relations (`MajRelation`, `ChRelation`);
+/// each gets its own multiplicity column. The table has `2^(3·group_width)`
+/// rows in `(a, b, c)`-major order: row `r = (a · 2^W + b) · 2^W + c`.
+///
+/// Firing rule:
+/// - Per round, per group position `i ∈ [0, 6)`:
+///   - one `Maj` lookup on `(a_grp[i], b_grp[i], c_grp[i])` (a-side, `Σ0` partition)
+///   - one `Ch` lookup on `(e_grp[i], f_grp[i], g_grp[i])` (e-side, `Σ1` partition)
+///
+/// The `b_grp` / `c_grp` / `f_grp` / `g_grp` values come from the §8.1
+/// reuse chain — `b[t] = a[t−1]`, `c[t] = a[t−2]` etc., seeded from the
+/// per-block `b_init` / `c_init` / `f_init` / `g_init` for `t ∈ {0, 1}`.
+pub fn maj_ch_multiplicities(witness: &Sha256Witness, group_width: u32) -> MajChMultiplicities {
+    let n = 1u32 << group_width;
+    let rows = (n as usize).pow(3);
+    let mut maj = vec![0u32; rows];
+    let mut ch = vec![0u32; rows];
+
+    for block in &witness.blocks {
+        // Replay the §8.1 reuse chain across the 64 rounds, mirroring
+        // `constraints.rs`'s loop. Each round emits one Maj and one Ch
+        // lookup per group position.
+        let aux = &block.aux_split_pack;
+        let mut b_grp = aux.b_init.vals;
+        let mut c_grp = aux.c_init.vals;
+        let mut f_grp = aux.f_init.vals;
+        let mut g_grp = aux.g_init.vals;
+
+        for round in &block.rounds {
+            let a_grp = round.maj_ch.a_grp.vals;
+            let maj_grp = round.maj_ch.maj_grp.vals;
+            let e_grp = round.maj_ch.e_grp.vals;
+            let ch_grp = round.maj_ch.ch_grp.vals;
+
+            for i in 0..GROUPS_PER_ROUND_PARTITION {
+                let maj_row = ((a_grp[i] * n + b_grp[i]) * n + c_grp[i]) as usize;
+                maj[maj_row] += 1;
+                let ch_row = ((e_grp[i] * n + f_grp[i]) * n + g_grp[i]) as usize;
+                ch[ch_row] += 1;
+            }
+
+            // §8.1 chain advance: `b ← a`, `c ← b` (a-side); `f ← e`, `g ← f` (e-side).
+            // Compute new values before overwriting the old `b`/`f`.
+            let prev_b = b_grp;
+            b_grp = a_grp;
+            c_grp = prev_b;
+            // `maj_grp` is the output, not part of the reuse chain.
+            let _ = maj_grp;
+            let prev_f = f_grp;
+            f_grp = e_grp;
+            g_grp = prev_f;
+            let _ = ch_grp;
+        }
+    }
+    MajChMultiplicities { maj, ch }
+}
+
+/// Per-row multiplicity vectors for the two relations the packed `Maj`/`Ch`
+/// table serves. Same number of rows in each vector (`2^(3·W)`); the table
+/// component commits both columns alongside the shared preprocessed rows.
+pub struct MajChMultiplicities {
+    pub maj: Vec<u32>,
+    pub ch: Vec<u32>,
+}
+
+/// Build the per-row multiplicity vector for the generic `xor_8` table.
+///
+/// The table has 2¹⁶ rows indexed by `(y, x) → y · 256 + x` (matching
+/// `crate::tables::build_xor_8_table`). The AIR keys it on `(x, y, z)` with
+/// `z = x ⊕ y`; the row index depends on `(x, y)` only.
+///
+/// Firing rule: every σ-application — `Σ0`/`Σ1` per round and `σ0`/`σ1`
+/// per schedule entry — fires four chunk-wise `xor_8` lookups (the four
+/// O2-partial byte chunks: `(lo.b0, lo.b1, hi.b0, hi.b1)`). The chunks
+/// of the S-side and S′-side partials are the keys.
+pub fn xor_8_multiplicities(witness: &Sha256Witness) -> Vec<u32> {
+    let mut mults = vec![0u32; ROWS_16];
+    let bump = |m: &mut [u32], x: u32, y: u32| {
+        let key = (y as usize) * 256 + (x as usize);
+        m[key] += 1;
+    };
+
+    for block in &witness.blocks {
+        for entry in &block.schedule_entries {
+            for d in [&entry.lower_sigma0_decode, &entry.lower_sigma1_decode] {
+                bump(
+                    &mut mults,
+                    d.o2_chunks_s.lo.b0,
+                    d.o2_chunks_s_complement.lo.b0,
+                );
+                bump(
+                    &mut mults,
+                    d.o2_chunks_s.lo.b1,
+                    d.o2_chunks_s_complement.lo.b1,
+                );
+                bump(
+                    &mut mults,
+                    d.o2_chunks_s.hi.b0,
+                    d.o2_chunks_s_complement.hi.b0,
+                );
+                bump(
+                    &mut mults,
+                    d.o2_chunks_s.hi.b1,
+                    d.o2_chunks_s_complement.hi.b1,
+                );
+            }
+        }
+        for round in &block.rounds {
+            for d in [&round.sigma0_decode, &round.sigma1_decode] {
+                bump(
+                    &mut mults,
+                    d.o2_chunks_s.lo.b0,
+                    d.o2_chunks_s_complement.lo.b0,
+                );
+                bump(
+                    &mut mults,
+                    d.o2_chunks_s.lo.b1,
+                    d.o2_chunks_s_complement.lo.b1,
+                );
+                bump(
+                    &mut mults,
+                    d.o2_chunks_s.hi.b0,
+                    d.o2_chunks_s_complement.hi.b0,
+                );
+                bump(
+                    &mut mults,
+                    d.o2_chunks_s.hi.b1,
+                    d.o2_chunks_s_complement.hi.b1,
+                );
+            }
+        }
+    }
+    mults
+}
+
+/// Build the per-row multiplicity vector for one round-side split-and-pack
+/// table (one of: `Σ0 lo/hi`, `Σ1 lo/hi`).
+///
+/// The table is keyed by the 16-bit half-limb of the input word.
+///
+/// Firing rule (from `constraints.rs::wire_round_split_pack`):
+/// - Per block: 4 lookups against each (partition, half) — one per §8.1
+///   aux operand. `Σ0` partition gets `h_in[1]` and `h_in[2]`; `Σ1` gets
+///   `h_in[5]` and `h_in[6]`.
+/// - Per round: 4 lookups against the partition's pair — `a` and `maj_out`
+///   (a-side / `Σ0`); `e` and `ch_out` (e-side / `Σ1`). Each splits into
+///   one lo-half and one hi-half lookup.
+pub fn round_split_pack_multiplicities(
+    witness: &Sha256Witness,
+    partition: RoundPartition,
+    half: Half16,
+) -> Vec<u32> {
+    let mut mults = vec![0u32; ROWS_16];
+    let bump = |m: &mut [u32], word: u32| {
+        let key = match half {
+            Half16::Lo => word & 0xFFFF,
+            Half16::Hi => (word >> 16) & 0xFFFF,
+        };
+        m[key as usize] += 1;
+    };
+
+    for block in &witness.blocks {
+        // §8.1 aux operands for this partition.
+        match partition {
+            RoundPartition::Sigma0AndMaj => {
+                bump(&mut mults, block.h_in[1].to_u32());
+                bump(&mut mults, block.h_in[2].to_u32());
+            }
+            RoundPartition::Sigma1AndCh => {
+                bump(&mut mults, block.h_in[5].to_u32());
+                bump(&mut mults, block.h_in[6].to_u32());
+            }
+        }
+        // Round-side: 2 operands per round per partition.
+        for round in &block.rounds {
+            match partition {
+                RoundPartition::Sigma0AndMaj => {
+                    bump(&mut mults, round.state_in[0].to_u32()); // a
+                    bump(&mut mults, round.maj.to_u32()); // maj_out
+                }
+                RoundPartition::Sigma1AndCh => {
+                    bump(&mut mults, round.state_in[4].to_u32()); // e
+                    bump(&mut mults, round.ch.to_u32()); // ch_out
+                }
+            }
+        }
+    }
+    mults
+}
+
+/// Build the per-row multiplicity vector for one σ-side split-and-pack
+/// table (`σ0 lo/hi` or `σ1 lo/hi`).
+///
+/// Firing rule (from `constraints.rs::wire_sigma_input_split`):
+/// - Per schedule entry: one lo lookup + one hi lookup per partition. `σ0`
+///   takes `W[t-15]`; `σ1` takes `W[t-2]`.
+pub fn sigma_split_pack_multiplicities(
+    witness: &Sha256Witness,
+    partition: LowerSigmaPartition,
+    half: Half16,
+) -> Vec<u32> {
+    let mut mults = vec![0u32; ROWS_16];
+    let bump = |m: &mut [u32], word: u32| {
+        let key = match half {
+            Half16::Lo => word & 0xFFFF,
+            Half16::Hi => (word >> 16) & 0xFFFF,
+        };
+        m[key as usize] += 1;
+    };
+
+    for block in &witness.blocks {
+        for entry in &block.schedule_entries {
+            let word = match partition {
+                LowerSigmaPartition::LowerSigma0 => entry.w_t_minus_15.to_u32(),
+                LowerSigmaPartition::LowerSigma1 => entry.w_t_minus_2.to_u32(),
+            };
+            bump(&mut mults, word);
+        }
+    }
+    mults
+}
+
+// Compile-time sanity: no callers should accidentally use deprecated APIs.
+#[allow(dead_code)]
+const _: () = {
+    assert!(N_ROUNDS == 64);
+    assert!(N_STATE_WORDS == 8);
+};
+
+// Re-export so call sites can name partitions/half without re-importing.
+pub use crate::tables::{Half as DecodeHalf, Half16 as SplitHalf};
+
+// Reference to keep `pack_round_groups` import live for future helpers.
+#[allow(dead_code)]
+fn _keep_imports_live() {
+    let _ = pack_round_groups(0, &SIGMA0_GROUPS);
+    let _ = &SIGMA1_GROUPS;
+    let _ = &LOWER_SIGMA0_PARTS;
+    let _ = &LOWER_SIGMA1_PARTS;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::witness::{
+        compute_sha256_witness, decode_multiplicities_for_witness,
+        maj_ch_xor_multiplicities_for_witness, split_pack_multiplicities_for_witness,
+    };
+
+    /// Per-key vectors sum to the per-witness totals reported by the
+    /// existing `witness::*_multiplicities_*` helpers. Any drift caught
+    /// closed.
+    #[test]
+    fn decode_per_row_totals_match_witness_totals() {
+        let w = compute_sha256_witness(b"abc");
+        let totals = decode_multiplicities_for_witness(&w);
+        let m = |f, h| decode_multiplicities(&w, f, h).iter().sum::<u32>();
+
+        assert_eq!(m(SigmaFn::Sigma0, Half::S), totals.sigma0_s);
+        assert_eq!(
+            m(SigmaFn::Sigma0, Half::SComplement),
+            totals.sigma0_s_complement
+        );
+        assert_eq!(m(SigmaFn::Sigma1, Half::S), totals.sigma1_s);
+        assert_eq!(
+            m(SigmaFn::Sigma1, Half::SComplement),
+            totals.sigma1_s_complement
+        );
+        assert_eq!(m(SigmaFn::LowerSigma0, Half::S), totals.lower_sigma0_s);
+        assert_eq!(
+            m(SigmaFn::LowerSigma0, Half::SComplement),
+            totals.lower_sigma0_s_complement
+        );
+        assert_eq!(m(SigmaFn::LowerSigma1, Half::S), totals.lower_sigma1_s);
+        assert_eq!(
+            m(SigmaFn::LowerSigma1, Half::SComplement),
+            totals.lower_sigma1_s_complement
+        );
+    }
+
+    #[test]
+    fn xor_8_per_row_totals_match_witness_totals() {
+        let w = compute_sha256_witness(b"abc");
+        let totals = maj_ch_xor_multiplicities_for_witness(&w);
+        let v = xor_8_multiplicities(&w);
+        assert_eq!(v.iter().sum::<u32>(), totals.xor_8);
+    }
+
+    #[test]
+    fn maj_ch_per_row_totals_match_witness_totals() {
+        let w = compute_sha256_witness(b"abc");
+        let totals = maj_ch_xor_multiplicities_for_witness(&w);
+        let m = maj_ch_multiplicities(&w, crate::partitions::MAX_ROUND_GROUP_BITS);
+        assert_eq!(m.maj.iter().sum::<u32>(), totals.maj);
+        assert_eq!(m.ch.iter().sum::<u32>(), totals.ch);
+    }
+
+    #[test]
+    fn split_pack_per_row_totals_match_witness_totals() {
+        let w = compute_sha256_witness(b"abc");
+        let totals = split_pack_multiplicities_for_witness(&w);
+
+        let half_sum = |p, h| {
+            round_split_pack_multiplicities(&w, p, h)
+                .iter()
+                .sum::<u32>()
+        };
+        assert_eq!(
+            half_sum(RoundPartition::Sigma0AndMaj, Half16::Lo),
+            totals.sigma0_lo
+        );
+        assert_eq!(
+            half_sum(RoundPartition::Sigma0AndMaj, Half16::Hi),
+            totals.sigma0_hi
+        );
+        assert_eq!(
+            half_sum(RoundPartition::Sigma1AndCh, Half16::Lo),
+            totals.sigma1_lo
+        );
+        assert_eq!(
+            half_sum(RoundPartition::Sigma1AndCh, Half16::Hi),
+            totals.sigma1_hi
+        );
+
+        let sigma_sum = |p, h| {
+            sigma_split_pack_multiplicities(&w, p, h)
+                .iter()
+                .sum::<u32>()
+        };
+        assert_eq!(
+            sigma_sum(LowerSigmaPartition::LowerSigma0, Half16::Lo),
+            totals.lower_sigma0_lo
+        );
+        assert_eq!(
+            sigma_sum(LowerSigmaPartition::LowerSigma0, Half16::Hi),
+            totals.lower_sigma0_hi
+        );
+        assert_eq!(
+            sigma_sum(LowerSigmaPartition::LowerSigma1, Half16::Lo),
+            totals.lower_sigma1_lo
+        );
+        assert_eq!(
+            sigma_sum(LowerSigmaPartition::LowerSigma1, Half16::Hi),
+            totals.lower_sigma1_hi
+        );
+    }
+}

@@ -118,6 +118,7 @@ impl FrameworkEval for Sha256Eval {
         // Pins each limb to `[0, 2¹⁶)` implicitly via the lookup input.
         wire_round_split_pack::<E>(
             &mut eval,
+            enabler.clone(),
             &h_in[1],
             &b_init,
             &self.relations.split_pack.sigma0_lo,
@@ -125,6 +126,7 @@ impl FrameworkEval for Sha256Eval {
         );
         wire_round_split_pack::<E>(
             &mut eval,
+            enabler.clone(),
             &h_in[2],
             &c_init,
             &self.relations.split_pack.sigma0_lo,
@@ -132,6 +134,7 @@ impl FrameworkEval for Sha256Eval {
         );
         wire_round_split_pack::<E>(
             &mut eval,
+            enabler.clone(),
             &h_in[5],
             &f_init,
             &self.relations.split_pack.sigma1_lo,
@@ -139,6 +142,7 @@ impl FrameworkEval for Sha256Eval {
         );
         wire_round_split_pack::<E>(
             &mut eval,
+            enabler.clone(),
             &h_in[6],
             &g_init,
             &self.relations.split_pack.sigma1_lo,
@@ -208,6 +212,7 @@ impl FrameworkEval for Sha256Eval {
             let w_t_minus_2 = w[t - 2].clone();
             wire_sigma_input_split::<E>(
                 &mut eval,
+                enabler.clone(),
                 &w_t_minus_15,
                 &sigma0_input_split,
                 &self.relations.split_pack.lower_sigma0_lo,
@@ -215,6 +220,7 @@ impl FrameworkEval for Sha256Eval {
             );
             wire_sigma_input_split::<E>(
                 &mut eval,
+                enabler.clone(),
                 &w_t_minus_2,
                 &sigma1_input_split,
                 &self.relations.split_pack.lower_sigma1_lo,
@@ -349,10 +355,15 @@ impl FrameworkEval for Sha256Eval {
             // lookups below in place, `a_grp` is pinned to `a.(lo, hi)`,
             // `b_grp` (= `a_grp[t-1]` or aux `b_init`) is pinned to its
             // originating limb, and similarly for `c_grp` and `maj_grp`.
+            //
+            // Multiplicity is `enabler` (1 on real-block rows, 0 on
+            // padding) so padding rows — every cell zero — don't pollute
+            // the producer's LogUp balance with all-zero keys.
+            let maj_ch_mult = E::EF::from(enabler.clone());
             for i in 0..GROUPS_PER_ROUND_PARTITION {
                 eval.add_to_relation(RelationEntry::new(
                     &self.relations.maj,
-                    E::EF::one(),
+                    maj_ch_mult.clone(),
                     &[
                         a_grp[i].clone(),
                         b_grp[i].clone(),
@@ -366,7 +377,7 @@ impl FrameworkEval for Sha256Eval {
             for i in 0..GROUPS_PER_ROUND_PARTITION {
                 eval.add_to_relation(RelationEntry::new(
                     &self.relations.ch,
-                    E::EF::one(),
+                    maj_ch_mult.clone(),
                     &[
                         e_grp[i].clone(),
                         f_grp[i].clone(),
@@ -383,6 +394,7 @@ impl FrameworkEval for Sha256Eval {
             // the limb to `[0, 2¹⁶)` (design §11 L1).
             wire_round_split_pack::<E>(
                 &mut eval,
+                enabler.clone(),
                 a,
                 &a_grp,
                 &self.relations.split_pack.sigma0_lo,
@@ -390,6 +402,7 @@ impl FrameworkEval for Sha256Eval {
             );
             wire_round_split_pack::<E>(
                 &mut eval,
+                enabler.clone(),
                 &maj,
                 &maj_grp,
                 &self.relations.split_pack.sigma0_lo,
@@ -397,6 +410,7 @@ impl FrameworkEval for Sha256Eval {
             );
             wire_round_split_pack::<E>(
                 &mut eval,
+                enabler.clone(),
                 e,
                 &e_grp,
                 &self.relations.split_pack.sigma1_lo,
@@ -404,6 +418,7 @@ impl FrameworkEval for Sha256Eval {
             );
             wire_round_split_pack::<E>(
                 &mut eval,
+                enabler.clone(),
                 &ch,
                 &ch_grp,
                 &self.relations.split_pack.sigma1_lo,
@@ -792,15 +807,23 @@ impl FrameworkEval for Sha256Eval {
         // to the mdoc/COSE-parser stream lands with roadmap 2.4 and is
         // explicitly out of scope here (per 3.9.7's implementation note).
 
-        // `eval.finalize_logup_in_pairs()` is deferred until *all* LogUp
-        // channels are populated — the `Σ`/`σ` decode lookups, the
-        // chunk-wise `xor_8`, the `Maj`/`Ch` lookups, and the
-        // split-and-pack lookups above cover the SHA-256-specific
-        // channels; the carry range checks (`Range_2`/`Range_4`/`Range_5`
-        // from `crate::tables_local`) drop in with the shared-foundation
-        // rollout (3.9.2). Calling `finalize_*` before then would emit a
-        // cumulative-sum constraint inconsistent with the (yet-to-land)
-        // carry-range `add_to_relation` calls.
+        // Close the LogUp loop over every SHA-256-specific channel: the
+        // eight `Σ`/`σ` decode lookups, the packed `Maj`/`Ch` pair, the
+        // chunk-wise `xor_8`, and the eight split-and-pack channels. Each
+        // pair of fractions batches into one interaction column (pairs
+        // share a denominator) for proof-size economy.
+        //
+        // The shared-foundation rollout (roadmap 3.9.2) will add the
+        // mod-2³² carry range checks (`Range_2`/`Range_4`/`Range_5`/
+        // `Range_16`). When it lands its `add_to_relation` calls slot in
+        // **above** this `finalize_*` call; no rewiring needed here. Until
+        // then carries are unsound — the LogUp loop is still closed and
+        // the prover/verifier round-trip works because the
+        // consumer ⇄ producer balance for every wired channel sums to
+        // zero (the table component evaluators in `crate::components`
+        // yield at `-multiplicity` against the same relation tags this
+        // evaluator consumes at `+1`).
+        eval.finalize_logup_in_pairs();
 
         eval
     }
@@ -849,14 +872,22 @@ fn read_sigma_input_split<E: EvalAtRow>(eval: &mut E) -> SigmaInputSplitMasks<E:
 /// the limb to `[0, 2¹⁶)` (design §11 L1).
 fn wire_round_split_pack<E: EvalAtRow>(
     eval: &mut E,
+    enabler: E::F,
     word: &(E::F, E::F),
     grp: &[E::F; GROUPS_PER_ROUND_PARTITION],
     rel_lo: &impl Relation<E::F, E::EF>,
     rel_hi: &impl Relation<E::F, E::EF>,
 ) {
+    // Gate by `enabler` so padding rows (every cell zero, so denominator
+    // collapses to `-z` for every lookup) contribute a zero fraction
+    // instead of `+1/(-z)`. Without this, every padding row would emit
+    // 130-or-so consumer lookups all keyed on the all-zero row of the
+    // table — which the producer's multiplicity column doesn't account
+    // for, breaking the LogUp sum-to-zero balance.
+    let mult = E::EF::from(enabler);
     eval.add_to_relation(RelationEntry::new(
         rel_lo,
-        E::EF::one(),
+        mult.clone(),
         &[
             word.0.clone(),
             grp[0].clone(),
@@ -866,7 +897,7 @@ fn wire_round_split_pack<E: EvalAtRow>(
     ));
     eval.add_to_relation(RelationEntry::new(
         rel_hi,
-        E::EF::one(),
+        mult,
         &[
             word.1.clone(),
             grp[1].clone(),
@@ -885,14 +916,16 @@ fn wire_round_split_pack<E: EvalAtRow>(
 /// half-limb and implicitly range-checks the limb to `[0, 2¹⁶)`.
 fn wire_sigma_input_split<E: EvalAtRow>(
     eval: &mut E,
+    enabler: E::F,
     word: &(E::F, E::F),
     split: &SigmaInputSplitMasks<E::F>,
     rel_lo: &impl Relation<E::F, E::EF>,
     rel_hi: &impl Relation<E::F, E::EF>,
 ) {
+    let mult = E::EF::from(enabler);
     eval.add_to_relation(RelationEntry::new(
         rel_lo,
-        E::EF::one(),
+        mult.clone(),
         &[
             word.0.clone(),
             split.packed_s_lo.clone(),
@@ -901,7 +934,7 @@ fn wire_sigma_input_split<E: EvalAtRow>(
     ));
     eval.add_to_relation(RelationEntry::new(
         rel_hi,
-        E::EF::one(),
+        mult,
         &[
             word.1.clone(),
             split.packed_s_hi.clone(),
@@ -1052,12 +1085,19 @@ fn wire_sigma_decode<E: EvalAtRow>(
     rel_s_complement: &impl Relation<E::F, E::EF>,
     rel_xor_8: &impl Relation<E::F, E::EF>,
 ) {
-    // (1) S-side decode-table lookup — "use" the row at multiplicity +1.
-    eval.add_to_relation(RelationEntry::new(rel_s, E::EF::one(), &decode.s_values));
+    // (1) S-side decode-table lookup — "use" the row at multiplicity
+    // `enabler` (1 on real rows, 0 on padding so the all-zero key on a
+    // padding row doesn't pollute the producer's LogUp balance).
+    let lookup_mult = E::EF::from(enabler.clone());
+    eval.add_to_relation(RelationEntry::new(
+        rel_s,
+        lookup_mult.clone(),
+        &decode.s_values,
+    ));
     // (2) S′-side decode-table lookup.
     eval.add_to_relation(RelationEntry::new(
         rel_s_complement,
-        E::EF::one(),
+        lookup_mult.clone(),
         &decode.s_complement_values,
     ));
 
@@ -1117,7 +1157,7 @@ fn wire_sigma_decode<E: EvalAtRow>(
     for i in 0..4 {
         eval.add_to_relation(RelationEntry::new(
             rel_xor_8,
-            E::EF::one(),
+            lookup_mult.clone(),
             &[
                 decode.o2_chunks_s[i].clone(),
                 decode.o2_chunks_s_complement[i].clone(),
@@ -1631,21 +1671,17 @@ mod tests {
         assert_eq!(total_lookups, expected_total);
     }
 
-    /// Wrap an `InfoEvaluator` pass with a forced finalize so the
-    /// `LogupAtRow` Drop assertion is satisfied. The captured `info`
-    /// can still be inspected afterwards.
+    /// Drive one `InfoEvaluator` pass through `Sha256Eval::evaluate`.
+    /// `evaluate` ends with `finalize_logup_in_pairs()` (so the
+    /// `LogupAtRow` Drop guard passes) — this helper just exposes the
+    /// captured info to the test assertions.
     fn run_evaluate_with_finalized_info(
         eval: &Sha256Eval,
         log_size: u32,
     ) -> stwo_constraint_framework::InfoEvaluator {
         use stwo::core::fields::qm31::SecureField;
-        use stwo_constraint_framework::{EvalAtRow, FrameworkEval, InfoEvaluator};
-        let mut info = eval.evaluate(InfoEvaluator::new(log_size, vec![], SecureField::default()));
-        // `evaluate` doesn't call `finalize_logup_in_pairs` (deferred
-        // until 3.9.2 carry range checks land). Manually finalize the
-        // captured `logup` so its Drop assertion passes for this test.
-        EvalAtRow::finalize_logup(&mut info);
-        info
+        use stwo_constraint_framework::{FrameworkEval, InfoEvaluator};
+        eval.evaluate(InfoEvaluator::new(log_size, vec![], SecureField::default()))
     }
 
     /// Per-block decode-lookup multiplicities equal the static per-block

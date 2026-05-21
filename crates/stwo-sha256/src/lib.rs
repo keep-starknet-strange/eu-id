@@ -37,11 +37,15 @@
 //!   lookup-relation hooks for the `Σ`/`σ`/`Maj`/`Ch`/`xor` tables.
 //! - [`stark`] — prover/verifier entry points for the standalone component.
 
+pub mod components;
 pub mod constants;
 pub mod constraints;
 pub mod headroom;
+pub mod interaction;
+pub mod multiplicities;
 pub mod native;
 pub mod partitions;
+pub mod preprocessed;
 pub mod relations;
 pub mod stark;
 pub mod tables;

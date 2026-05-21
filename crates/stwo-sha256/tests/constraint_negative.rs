@@ -167,10 +167,19 @@ impl EvalAtRow for LinearConstraintCollector<'_> {
     ) {
         // Lookup soundness is the job of the shared range-check tables
         // (roadmap 3.9.2) plus the digest-binding LogUp surface (3.9.11).
-        // Neither is wired today; the linear constraints this evaluator
-        // does record already catch every mutation class the roadmap
-        // enumerates for 3.9.8.
+        // Both lookup-yielding components are wired in `crate::components`
+        // today; the linear constraints this evaluator records already
+        // catch every mutation class the roadmap enumerates for 3.9.8
+        // without exercising the LogUp interaction layer.
     }
+
+    /// `Sha256Eval::evaluate` ends with `finalize_logup_in_pairs()` so
+    /// that real prover/verifier evaluators batch the lookup fractions
+    /// into interaction columns. This linear-only collector does **not**
+    /// model the LogUp interaction trace, so the finalize step is a
+    /// no-op here — the recorded `non_zero` residuals stay scoped to the
+    /// linear identities `add_constraint` saw.
+    fn finalize_logup_in_pairs(&mut self) {}
 }
 
 /// Run `Sha256Eval::evaluate` against `trace` at every row and return every
