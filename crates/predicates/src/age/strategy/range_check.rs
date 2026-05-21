@@ -1,6 +1,13 @@
-use crate::age::calendar::{calendar_log_size, generate_max_days_per_month, valid_date_ranges};
+use crate::age::calendar::{
+    calendar_index_col_id, calendar_log_size, calendar_max_days_col_id, generate_max_days_per_month,
+    max_days_at, valid_date_ranges, valid_day_day_col_id, valid_day_max_days_col_id,
+    valid_day_row_index, CalendarElements, CalendarTableEval, ValidDayElements, ValidDayTableEval,
+};
 use crate::age::predicate::AgePredicate;
-use crate::age::types::{AgeBounds, AgeRangeCheckProof, DateOfBirth, Error, PublicInput, Trace, Witness, DATE_MONTH_BASE, DATE_YEAR_BASE};
+use crate::age::types::{
+    AgeBounds, AgeRangeCheckProof, DateOfBirth, Error, PublicInput, Trace, Witness,
+    DATE_MONTH_BASE, DATE_YEAR_BASE,
+};
 use crate::predicate::{Predicate, StarkPredicate};
 use crate::utils::{field_const, push_repeated_column};
 use num_traits::{One, Zero};
@@ -70,11 +77,15 @@ impl FrameworkEval for SlackRangeTableEval {
 }
 
 type SlackRangeTableComponent = FrameworkComponent<SlackRangeTableEval>;
+type CalendarTableComponent = FrameworkComponent<CalendarTableEval>;
+type ValidDayTableComponent = FrameworkComponent<ValidDayTableEval>;
 
 #[derive(Clone)]
 struct AgeRangeCheckEval {
     public: PublicInput,
-    lookup_elements: SlackRangeElements,
+    slack_elements: SlackRangeElements,
+    calendar_elements: CalendarElements,
+    valid_day_elements: ValidDayElements,
 }
 
 impl FrameworkEval for AgeRangeCheckEval {
@@ -92,6 +103,7 @@ impl FrameworkEval for AgeRangeCheckEval {
         let birth_year = eval.next_trace_mask();
         let birth_packed = eval.next_trace_mask();
         let slack = eval.next_trace_mask();
+        let max_days = eval.next_trace_mask();
 
         eval.add_constraint(
             birth_packed.clone()
@@ -104,10 +116,27 @@ impl FrameworkEval for AgeRangeCheckEval {
         eval.add_constraint(slack.clone() - (field_const::<E>(cutoff_key) - birth_packed));
 
         eval.add_to_relation(RelationEntry::new(
-            &self.lookup_elements,
+            &self.slack_elements,
             E::EF::one(),
             &[slack],
         ));
+
+        let bounds = self.public.bounds;
+        let table_index = (birth_year - field_const::<E>(bounds.min_supported_year))
+            * BaseField::from_u32_unchecked(12)
+            + birth_month
+            - field_const::<E>(1);
+        eval.add_to_relation(RelationEntry::new(
+            &self.calendar_elements,
+            E::EF::one(),
+            &[table_index, max_days.clone()],
+        ));
+        eval.add_to_relation(RelationEntry::new(
+            &self.valid_day_elements,
+            E::EF::one(),
+            &[max_days, birth_day],
+        ));
+
         eval.finalize_logup();
         eval
     }
@@ -116,33 +145,52 @@ impl FrameworkEval for AgeRangeCheckEval {
 type AgeRangeCheckComponent = FrameworkComponent<AgeRangeCheckEval>;
 
 fn make_allocator(bounds: &AgeBounds) -> TraceLocationAllocator {
-    TraceLocationAllocator::new_with_preprocessed_columns(&[slack_range_col_id(bounds)])
+    TraceLocationAllocator::new_with_preprocessed_columns(&[
+        slack_range_col_id(bounds),
+        calendar_max_days_col_id(bounds),
+        calendar_index_col_id(bounds),
+        valid_day_max_days_col_id(),
+        valid_day_day_col_id(),
+    ])
 }
 
 fn make_components(
     allocator: &mut TraceLocationAllocator,
     public: &PublicInput,
-    lookup_elements: SlackRangeElements,
+    slack_elements: SlackRangeElements,
+    calendar_elements: CalendarElements,
+    valid_day_elements: ValidDayElements,
     age_claimed_sum: QM31,
-    table_claimed_sum: QM31,
-) -> (AgeRangeCheckComponent, SlackRangeTableComponent) {
+    slack_claimed_sum: QM31,
+    cal_claimed_sum: QM31,
+    valid_day_claimed_sum: QM31,
+) -> (AgeRangeCheckComponent, SlackRangeTableComponent, CalendarTableComponent, ValidDayTableComponent) {
     let age_component = AgeRangeCheckComponent::new(
         allocator,
         AgeRangeCheckEval {
             public: *public,
-            lookup_elements: lookup_elements.clone(),
+            slack_elements: slack_elements.clone(),
+            calendar_elements: calendar_elements.clone(),
+            valid_day_elements: valid_day_elements.clone(),
         },
         age_claimed_sum,
     );
-    let table_component = SlackRangeTableComponent::new(
+    let slack_component = SlackRangeTableComponent::new(
         allocator,
-        SlackRangeTableEval {
-            bounds: public.bounds,
-            lookup_elements,
-        },
-        table_claimed_sum,
+        SlackRangeTableEval { bounds: public.bounds, lookup_elements: slack_elements },
+        slack_claimed_sum,
     );
-    (age_component, table_component)
+    let cal_component = CalendarTableComponent::new(
+        allocator,
+        CalendarTableEval { bounds: public.bounds, lookup_elements: calendar_elements },
+        cal_claimed_sum,
+    );
+    let valid_day_component = ValidDayTableComponent::new(
+        allocator,
+        ValidDayTableEval { lookup_elements: valid_day_elements },
+        valid_day_claimed_sum,
+    );
+    (age_component, slack_component, cal_component, valid_day_component)
 }
 
 pub struct AgeRangeCheck(pub AgePredicate);
@@ -180,16 +228,14 @@ impl Predicate for AgeRangeCheck {
 impl StarkPredicate for AgeRangeCheck {
     type Proof = AgeRangeCheckProof;
 
-    fn trace(
-        &self,
-        witness: &Self::Witness,
-    ) -> Trace {
-        let mut cols = Vec::with_capacity(5);
+    fn trace(&self, witness: &Self::Witness) -> Trace {
+        let mut cols = Vec::with_capacity(6);
         push_repeated_column(&mut cols, witness.dob.day, AGE_LOG_SIZE);
         push_repeated_column(&mut cols, witness.dob.month, AGE_LOG_SIZE);
         push_repeated_column(&mut cols, witness.dob.year, AGE_LOG_SIZE);
         push_repeated_column(&mut cols, witness.dob.key(), AGE_LOG_SIZE);
         push_repeated_column(&mut cols, witness.age_slack, AGE_LOG_SIZE);
+        push_repeated_column(&mut cols, max_days_at(witness.dob.month, witness.dob.year), AGE_LOG_SIZE);
         cols
     }
 
@@ -200,31 +246,56 @@ impl StarkPredicate for AgeRangeCheck {
     ) -> Result<Self::Proof, Self::Error> {
         self.validate(public)?;
 
-        // Organize the witness from public and private inputs
         let witness = self.witness(public, private)?;
-        let slack_possible_values_log_size = slack_log_size(&witness.public.bounds);
-        let slack_rows = 1 << slack_possible_values_log_size;
+        let bounds = public.bounds;
 
-        // Generate all possible slack values [0, 2^age_slack_log_size) in a trace col
-        let domain = CanonicCoset::new(slack_possible_values_log_size).circle_domain();
-        let col = BaseColumn::from_iter((0..slack_rows).map(M31::from_u32_unchecked));
-        let slack_values_trace: Trace = vec![CircleEvaluation::new(domain, col)];
+        let dob_max_days = max_days_at(witness.dob.month, witness.dob.year);
+        let table_index = (witness.dob.year - bounds.min_supported_year) * 12 + witness.dob.month - 1;
+        let valid_day_row = valid_day_row_index(dob_max_days, witness.dob.day);
 
-        // Accumulate all original witness trace (In this case every row is the same)
-        let witness_trace: Trace = self.trace(&witness);
+        let slack_log_size = slack_log_size(&bounds);
+        let slack_rows = 1 << slack_log_size;
+        let cal_trace = generate_max_days_per_month(bounds);
+        let valid_day_trace = valid_date_ranges();
+        let cal_log_size = calendar_log_size(&bounds);
+        let valid_day_log_size = valid_day_trace[0].domain.log_size();
 
-        // Multiplicity table. Since witness trace is repeated over AGE_TRACE_SIZE (32) rows, then slack
-        // is "multiplied" 32 times. Thus, mult[slack] = 32; where `mult` is a column of size `slack_rows`
-        let mut mult = vec![M31::zero(); slack_rows as usize];
-        mult[witness.age_slack as usize] = M31::from_u32_unchecked(1 << AGE_LOG_SIZE);
-        let domain = CanonicCoset::new(slack_possible_values_log_size).circle_domain();
-        let slack_multiplicity_trace: Trace = vec![CircleEvaluation::new(
+        // All possible slack values
+        let domain = CanonicCoset::new(slack_log_size).circle_domain();
+        let slack_values_trace: Trace = vec![CircleEvaluation::new(
             domain,
-            BaseColumn::from_iter(mult.into_iter()),
+            BaseColumn::from_iter((0..slack_rows).map(M31::from_u32_unchecked)),
         )];
 
-        let cal_log_size = calendar_log_size(&public.bounds);
-        let max_log_size = slack_possible_values_log_size.max(AGE_LOG_SIZE).max(cal_log_size);
+        let witness_trace = self.trace(&witness);
+
+        // Multiplicity for slack table
+        let mut slack_mult = vec![M31::zero(); slack_rows as usize];
+        slack_mult[witness.age_slack as usize] = M31::from_u32_unchecked(1 << AGE_LOG_SIZE);
+        let slack_mult_trace: Trace = vec![CircleEvaluation::new(
+            CanonicCoset::new(slack_log_size).circle_domain(),
+            BaseColumn::from_iter(slack_mult.into_iter()),
+        )];
+
+        // Multiplicity for calendar table
+        let cal_total = 1 << cal_log_size;
+        let mut cal_mult_data = vec![M31::zero(); cal_total];
+        cal_mult_data[table_index as usize] = M31::from_u32_unchecked(1 << AGE_LOG_SIZE);
+        let cal_mult_trace: Trace = vec![CircleEvaluation::new(
+            CanonicCoset::new(cal_log_size).circle_domain(),
+            BaseColumn::from_iter(cal_mult_data.into_iter()),
+        )];
+
+        // Multiplicity for valid-day table
+        let valid_day_total = 1 << valid_day_log_size;
+        let mut valid_day_mult_data = vec![M31::zero(); valid_day_total];
+        valid_day_mult_data[valid_day_row] = M31::from_u32_unchecked(1 << AGE_LOG_SIZE);
+        let valid_day_mult_trace: Trace = vec![CircleEvaluation::new(
+            CanonicCoset::new(valid_day_log_size).circle_domain(),
+            BaseColumn::from_iter(valid_day_mult_data.into_iter()),
+        )];
+
+        let max_log_size = slack_log_size.max(AGE_LOG_SIZE).max(cal_log_size);
         let twiddles = SimdBackend::precompute_twiddles(
             CanonicCoset::new(
                 max_log_size
@@ -244,76 +315,133 @@ impl StarkPredicate for AgeRangeCheck {
                 &twiddles,
             );
 
-        // 1. Commit the preprocessed table of all possible slack values + calendar tables
+        // Preprocessed (slack values, calendar (2 cols), valid-day (2 cols))
         let mut tb = commitment_scheme.tree_builder();
         tb.extend_evals(slack_values_trace.clone());
-        tb.extend_evals(generate_max_days_per_month(public.bounds));
-        tb.extend_evals(valid_date_ranges());
+        tb.extend_evals(cal_trace.clone());
+        tb.extend_evals(valid_day_trace.clone());
         tb.commit(channel);
 
-        // 2. Mix public input
         public.mix_into(channel);
 
-        // 3. Commit the witness and slack multiplicity traces
+        // Witness (Original + multiplicity cols for slack, calendar, valid day)
         let mut tb = commitment_scheme.tree_builder();
         tb.extend_evals(witness_trace.clone());
-        tb.extend_evals(slack_multiplicity_trace.clone());
+        tb.extend_evals(slack_mult_trace.clone());
+        tb.extend_evals(cal_mult_trace.clone());
+        tb.extend_evals(valid_day_mult_trace.clone());
         tb.commit(channel);
 
-        // 4. Interaction traces
-        let lookup_elements = SlackRangeElements::draw(channel);
+        let slack_elements = SlackRangeElements::draw(channel);
+        let calendar_elements = CalendarElements::draw(channel);
+        let valid_day_elements = ValidDayElements::draw(channel);
 
-        // - Interaction for slack appearing once in all trace rows
+        // Age component interaction: 3 logup fractions (slack, calendar, valid-day)
         let mut logup_gen = LogupTraceGenerator::new(AGE_LOG_SIZE);
+
         let mut col_gen = logup_gen.new_col();
-        let slack_col = &witness_trace[4]; // Get the slack column
-        for packed_row_index in 0..(1 << (AGE_LOG_SIZE - LOG_N_LANES)) { // Iterate over 2 packed fields of slack witness
-            let slack_val: PackedM31 = slack_col.values.data[packed_row_index];
+        let slack_col = &witness_trace[4];
+        for packed_row in 0..(1 << (AGE_LOG_SIZE - LOG_N_LANES)) {
+            let slack_val: PackedM31 = slack_col.values.data[packed_row];
+            col_gen.write_frac(packed_row, PackedQM31::one(), slack_elements.combine(&[slack_val]));
+        }
+        col_gen.finalize_col();
+
+        let mut col_gen = logup_gen.new_col();
+        for packed_row in 0..(1 << (AGE_LOG_SIZE - LOG_N_LANES)) {
             col_gen.write_frac(
-                packed_row_index,
+                packed_row,
                 PackedQM31::one(),
-                lookup_elements.combine(&[slack_val])
+                calendar_elements.combine(&[
+                    PackedM31::broadcast(M31::from_u32_unchecked(table_index)),
+                    PackedM31::broadcast(M31::from_u32_unchecked(dob_max_days)),
+                ]),
+            );
+        }
+        col_gen.finalize_col();
+
+        let mut col_gen = logup_gen.new_col();
+        for packed_row in 0..(1 << (AGE_LOG_SIZE - LOG_N_LANES)) {
+            col_gen.write_frac(
+                packed_row,
+                PackedQM31::one(),
+                valid_day_elements.combine(&[
+                    PackedM31::broadcast(M31::from_u32_unchecked(dob_max_days)),
+                    PackedM31::broadcast(M31::from_u32_unchecked(witness.dob.day)),
+                ]),
             );
         }
         col_gen.finalize_col();
         let (age_interaction, age_claimed_sum) = logup_gen.finalize_last();
 
-        // - Interaction of what slack appearing in the range of possible values
-        let mut logup_gen = LogupTraceGenerator::new(slack_possible_values_log_size);
+        // Slack table interaction
+        let mut logup_gen = LogupTraceGenerator::new(slack_log_size);
         let mut col_gen = logup_gen.new_col();
-        let value_col = &slack_values_trace[0];
-        let mult_col = &slack_multiplicity_trace[0];
-        for vec_row in 0..(1 << (slack_possible_values_log_size - LOG_N_LANES)) {
-            let value: PackedM31 = value_col.values.data[vec_row];
-            let mult: PackedM31 = mult_col.values.data[vec_row];
+        for vec_row in 0..(1 << (slack_log_size - LOG_N_LANES)) {
+            let value: PackedM31 = slack_values_trace[0].values.data[vec_row];
+            let mult: PackedM31 = slack_mult_trace[0].values.data[vec_row];
+            col_gen.write_frac(vec_row, PackedQM31::from(-mult), slack_elements.combine(&[value]));
+        }
+        col_gen.finalize_col();
+        let (slack_interaction, slack_claimed_sum) = logup_gen.finalize_last();
+
+        // Calendar table interaction
+        let mut logup_gen = LogupTraceGenerator::new(cal_log_size);
+        let mut col_gen = logup_gen.new_col();
+        for vec_row in 0..(1 << (cal_log_size - LOG_N_LANES)) {
+            let max_days_val: PackedM31 = cal_trace[0].values.data[vec_row];
+            let index_val: PackedM31 = cal_trace[1].values.data[vec_row];
+            let mult_val: PackedM31 = cal_mult_trace[0].values.data[vec_row];
             col_gen.write_frac(
                 vec_row,
-                PackedQM31::from(-mult),
-                lookup_elements.combine(&[value])
+                PackedQM31::from(-mult_val),
+                calendar_elements.combine(&[index_val, max_days_val]),
             );
         }
         col_gen.finalize_col();
-        let (table_interaction, table_claimed_sum) = logup_gen.finalize_last();
+        let (cal_interaction, cal_claimed_sum) = logup_gen.finalize_last();
 
-        channel.mix_felts(&[age_claimed_sum, table_claimed_sum]);
+        // Valid-day table interaction
+        let mut logup_gen = LogupTraceGenerator::new(valid_day_log_size);
+        let mut col_gen = logup_gen.new_col();
+        for vec_row in 0..(1 << (valid_day_log_size - LOG_N_LANES)) {
+            let max_days_val: PackedM31 = valid_day_trace[0].values.data[vec_row];
+            let day_val: PackedM31 = valid_day_trace[1].values.data[vec_row];
+            let mult_val: PackedM31 = valid_day_mult_trace[0].values.data[vec_row];
+            col_gen.write_frac(
+                vec_row,
+                PackedQM31::from(-mult_val),
+                valid_day_elements.combine(&[max_days_val, day_val]),
+            );
+        }
+        col_gen.finalize_col();
+        let (valid_day_interaction, valid_day_claimed_sum) = logup_gen.finalize_last();
 
+        channel.mix_felts(&[age_claimed_sum, slack_claimed_sum, cal_claimed_sum, valid_day_claimed_sum]);
+
+        // Interaction traces
         let mut tb = commitment_scheme.tree_builder();
         tb.extend_evals(age_interaction);
-        tb.extend_evals(table_interaction);
+        tb.extend_evals(slack_interaction);
+        tb.extend_evals(cal_interaction);
+        tb.extend_evals(valid_day_interaction);
         tb.commit(channel);
 
-        // 5. Prove
-        let mut allocator = make_allocator(&public.bounds);
-        let (age_component, table_component) = make_components(
+        let mut allocator = make_allocator(&bounds);
+        let (age_component, slack_component, cal_component, valid_day_component) = make_components(
             &mut allocator,
             public,
-            lookup_elements,
+            slack_elements,
+            calendar_elements,
+            valid_day_elements,
             age_claimed_sum,
-            table_claimed_sum,
+            slack_claimed_sum,
+            cal_claimed_sum,
+            valid_day_claimed_sum,
         );
 
         let components: Vec<&dyn ComponentProver<SimdBackend>> =
-            vec![&age_component, &table_component];
+            vec![&age_component, &slack_component, &cal_component, &valid_day_component];
         let stark_proof = prove::<SimdBackend, Blake2sMerkleChannel>(
             components.as_slice(),
             channel,
@@ -323,13 +451,20 @@ impl StarkPredicate for AgeRangeCheck {
         Ok(AgeRangeCheckProof {
             public: *public,
             age_claimed_sum,
-            table_claimed_sum,
+            slack_table_claimed_sum: slack_claimed_sum,
+            calendar_table_claimed_sum: cal_claimed_sum,
+            valid_day_table_claimed_sum: valid_day_claimed_sum,
             stark_proof,
         })
     }
 
     fn verify(&self, proof: &Self::Proof) -> Result<(), Self::Error> {
         self.validate(&proof.public)?;
+
+        let bounds = proof.public.bounds;
+        let tbl_log_size = slack_log_size(&bounds);
+        let cal_log_size = calendar_log_size(&bounds);
+        let valid_day_log_size = valid_date_ranges()[0].domain.log_size();
 
         let pcs_config = proof.stark_proof.config;
         let channel = &mut Blake2sChannel::default();
@@ -338,51 +473,68 @@ impl StarkPredicate for AgeRangeCheck {
         let commitment_scheme =
             &mut CommitmentSchemeVerifier::<Blake2sMerkleChannel>::new(pcs_config);
 
-        let tbl_log_size = slack_log_size(&proof.public.bounds);
-
-        let cal_log_size = calendar_log_size(&proof.public.bounds);
-        let vdr_log_size = valid_date_ranges()[0].domain.log_size();
+        // Tree 0: slack values (1), calendar (2), valid-day (2)
         commitment_scheme.commit(
             proof.stark_proof.commitments[0],
-            &[tbl_log_size, cal_log_size, vdr_log_size, vdr_log_size],
+            &[tbl_log_size, cal_log_size, cal_log_size, valid_day_log_size, valid_day_log_size],
             channel,
         );
 
         proof.public.mix_into(channel);
 
+        // Tree 1: 6 witness cols + slack mult + cal mult + vdr mult
         let main_sizes: Vec<u32> = std::iter::repeat(AGE_LOG_SIZE)
-            .take(5)
-            .chain(std::iter::once(tbl_log_size))
+            .take(6)
+            .chain([tbl_log_size, cal_log_size, valid_day_log_size])
             .collect();
         commitment_scheme.commit(proof.stark_proof.commitments[1], &main_sizes, channel);
 
-        let lookup_elements = SlackRangeElements::draw(channel);
+        let slack_elements = SlackRangeElements::draw(channel);
+        let calendar_elements = CalendarElements::draw(channel);
+        let valid_day_elements = ValidDayElements::draw(channel);
 
-        channel.mix_felts(&[proof.age_claimed_sum, proof.table_claimed_sum]);
+        channel.mix_felts(&[
+            proof.age_claimed_sum,
+            proof.slack_table_claimed_sum,
+            proof.calendar_table_claimed_sum,
+            proof.valid_day_table_claimed_sum,
+        ]);
 
-        if proof.age_claimed_sum + proof.table_claimed_sum != QM31::zero() {
+        if proof.age_claimed_sum
+            + proof.slack_table_claimed_sum
+            + proof.calendar_table_claimed_sum
+            + proof.valid_day_table_claimed_sum
+            != QM31::zero()
+        {
             return Err(Error::Input(crate::age::types::AgeInputError::Invalid(
                 "LogUp claimed sums do not cancel".into(),
             )));
         }
 
+        // Tree 2: age (3 logup cols = 12 M31) + slack table (1 col = 4 M31) + cal (1 col = 4 M31) + vdr (1 col = 4 M31)
         let tree2_sizes: Vec<u32> = std::iter::repeat(AGE_LOG_SIZE)
-            .take(4)
+            .take(12)
             .chain(std::iter::repeat(tbl_log_size).take(4))
+            .chain(std::iter::repeat(cal_log_size).take(4))
+            .chain(std::iter::repeat(valid_day_log_size).take(4))
             .collect();
         commitment_scheme.commit(proof.stark_proof.commitments[2], &tree2_sizes, channel);
 
-        let mut allocator = make_allocator(&proof.public.bounds);
-        let (age_component, table_component) = make_components(
+        let mut allocator = make_allocator(&bounds);
+        let (age_component, slack_component, cal_component, valid_day_component) = make_components(
             &mut allocator,
             &proof.public,
-            lookup_elements,
+            slack_elements,
+            calendar_elements,
+            valid_day_elements,
             proof.age_claimed_sum,
-            proof.table_claimed_sum,
+            proof.slack_table_claimed_sum,
+            proof.calendar_table_claimed_sum,
+            proof.valid_day_table_claimed_sum,
         );
 
         verify(
-            &[&age_component, &table_component],
+            &[&age_component, &slack_component, &cal_component, &valid_day_component],
             channel,
             commitment_scheme,
             proof.stark_proof.clone(),

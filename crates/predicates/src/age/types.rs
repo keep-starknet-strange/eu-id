@@ -2,6 +2,7 @@ use crate::utils;
 use serde::{Deserialize, Serialize};
 use stwo::core::channel::Channel;
 use stwo::core::fields::m31::{M31, P as M31_MODULUS};
+use stwo::core::fields::qm31::QM31;
 use stwo::core::proof::StarkProof;
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleHasher;
 use stwo::core::verifier::VerificationError;
@@ -183,14 +184,19 @@ pub struct Witness {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgeBitDecompositionProof {
     pub public: PublicInput,
+    pub age_claimed_sum: QM31,
+    pub calendar_table_claimed_sum: QM31,
+    pub valid_day_table_claimed_sum: QM31,
     pub stark_proof: StarkProof<Blake2sMerkleHasher>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgeRangeCheckProof {
     pub public: PublicInput,
-    pub age_claimed_sum: stwo::core::fields::qm31::QM31,
-    pub table_claimed_sum: stwo::core::fields::qm31::QM31,
+    pub age_claimed_sum: QM31,
+    pub slack_table_claimed_sum: QM31,
+    pub calendar_table_claimed_sum: QM31,
+    pub valid_day_table_claimed_sum: QM31,
     pub stark_proof: StarkProof<Blake2sMerkleHasher>,
 }
 
