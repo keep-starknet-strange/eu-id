@@ -1,6 +1,19 @@
 pub(crate) mod bit_decomposition;
 pub(crate) mod range_check;
 
+use crate::age::types::{AgeBitDecompositionProof, AgeRangeCheckProof};
+
+#[derive(Clone, Copy)]
+pub enum AgeCheckStrategy {
+    BitDecomposition,
+    RangeCheck,
+}
+
+pub enum AgeProof {
+    BitDecomposition(AgeBitDecompositionProof),
+    RangeCheck(AgeRangeCheckProof),
+}
+
 #[cfg(test)]
 mod tests {
     use super::bit_decomposition::AgeBitDecomposition;
@@ -122,6 +135,86 @@ mod tests {
                     let mut proof = predicate.prove(&setup_today(18), &dob(2000, 1, 1)).unwrap();
                     proof.public.min_age_years = 21;
                     assert!(matches!(predicate.verify(&proof), Err(Error::Verification(_))));
+                }
+
+                // --- Calendar validity ---
+
+                #[test]
+                fn proves_and_verifies_feb29_in_leap_year() {
+                    // Feb 29 is valid in a leap year; this also exercises the leap-year branch
+                    // of the calendar lookup
+                    let predicate = validating_predicate();
+                    let proof = predicate.prove(&setup_today(18), &dob(2000, 2, 29)).unwrap();
+                    predicate.verify(&proof).unwrap();
+                }
+
+                #[test]
+                fn circuit_rejects_day_exceeding_month_maximum() {
+                    // April has 30 days. Day 31 passes Date::validate (accepts 1..=31 blindly)
+                    // but the valid-day lookup in the circuit must reject it. The mismatched
+                    // logup sums only manifest at verify time, not during proving.
+                    let predicate = non_validating_predicate();
+                    let proof = predicate.prove(&setup_today(18), &dob(1990, 4, 31)).unwrap();
+                    assert!(matches!(predicate.verify(&proof), Err(_)));
+                }
+
+                #[test]
+                fn circuit_rejects_feb29_in_non_leap_year() {
+                    // 2005 is not a leap year so Feb 29 does not exist. Day 29 passes
+                    // Date::validate but the calendar lookup maps Feb 2005 to max_days=28,
+                    // so (28, 29) is not in the valid-day table. Logup sums detected at verify.
+                    let predicate = non_validating_predicate();
+                    let proof = predicate.prove(&setup_today(18), &dob(2005, 2, 29)).unwrap();
+                    assert!(matches!(predicate.verify(&proof), Err(_)));
+                }
+
+                // --- Boundary cases ---
+
+                #[test]
+                fn proves_and_verifies_dob_at_min_supported_year() {
+                    // year_offset = 0, year_bound_slack = year_span: lower bound of the year range
+                    let predicate = validating_predicate();
+                    let proof = predicate.prove(&setup_today(18), &dob(1906, 1, 1)).unwrap();
+                    predicate.verify(&proof).unwrap();
+                }
+
+                #[test]
+                fn proves_and_verifies_with_zero_min_age() {
+                    // min_age = 0 and DOB = current_date: age_slack = 0, year_offset = year_span
+                    let predicate = validating_predicate();
+                    let public = PublicInput::new(Date { year: 2026, month: 5, day: 19 }, 0);
+                    let proof = predicate.prove(&public, &dob(2026, 5, 19)).unwrap();
+                    predicate.verify(&proof).unwrap();
+                }
+
+                // --- Proof mutation ---
+
+                #[test]
+                fn verification_fails_on_mutated_current_date() {
+                    // Shifting the current date forward changes the cutoff constraint
+                    let predicate = validating_predicate();
+                    let mut proof = predicate.prove(&setup_today(18), &dob(2000, 1, 1)).unwrap();
+                    proof.public.current.year += 1;
+                    assert!(matches!(predicate.verify(&proof), Err(_)));
+                }
+
+                #[test]
+                fn verification_fails_on_mutated_bounds() {
+                    // Changing min_supported_year changes the table_index computation in the
+                    // circuit constraint, so the committed witness no longer satisfies the AIR
+                    let predicate = validating_predicate();
+                    let mut proof = predicate.prove(&setup_today(18), &dob(2000, 1, 1)).unwrap();
+                    proof.public.bounds.min_supported_year -= 1;
+                    assert!(matches!(predicate.verify(&proof), Err(_)));
+                }
+
+                #[test]
+                fn verification_fails_on_mutated_claimed_sum() {
+                    // Negating age_claimed_sum breaks the global logup balance check
+                    let predicate = validating_predicate();
+                    let mut proof = predicate.prove(&setup_today(18), &dob(2000, 1, 1)).unwrap();
+                    proof.age_claimed_sum = -proof.age_claimed_sum;
+                    assert!(matches!(predicate.verify(&proof), Err(_)));
                 }
             }
         };

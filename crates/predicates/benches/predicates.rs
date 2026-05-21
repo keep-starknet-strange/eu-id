@@ -6,13 +6,9 @@ mod harness;
 #[path = "common/age.rs"]
 mod age;
 
-use crate::age::AgeRangeCase;
-use age::AgeBitsCase;
-use harness::run_bench;
-
 fn bench_all(c: &mut Criterion) {
-    run_bench(c, &AgeBitsCase::new());
-    run_bench(c, &AgeRangeCase::new());
+    harness::run_bench(c, &age::bit_decomposition_case());
+    harness::run_bench(c, &age::range_check_case());
 }
 
 criterion_group!(benches, bench_all);

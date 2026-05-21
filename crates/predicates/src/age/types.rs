@@ -1,3 +1,4 @@
+use crate::age::calendar::max_days_at;
 use crate::utils;
 use serde::{Deserialize, Serialize};
 use stwo::core::channel::Channel;
@@ -162,7 +163,8 @@ impl Date {
         if !(1..=12).contains(&self.month) {
             return Err(AgeInputError::InvalidMonth(self.month));
         }
-        if !(1..=31).contains(&self.day) {
+        let max_days = max_days_at(self.month, self.year);
+        if !(1..=max_days).contains(&self.day) {
             return Err(AgeInputError::InvalidDay(self.day));
         }
         Ok(())

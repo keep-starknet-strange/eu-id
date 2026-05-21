@@ -1,45 +1,33 @@
 use criterion::Criterion;
-use predicates::{Predicate, StarkPredicate};
-use serde::Serialize;
+use predicates::{age, AgeCheckStrategy, AgeProof, DateOfBirth, PublicInput};
 
-pub trait BenchCase {
-    type P: StarkPredicate;
-
-    fn name(&self) -> &'static str;
-    fn predicate(&self) -> &Self::P;
-    fn public_input(&self) -> &<Self::P as Predicate>::PublicInput;
-    fn private_input(&self) -> &<Self::P as Predicate>::PrivateInput;
+pub struct BenchCase {
+    pub name: &'static str,
+    pub strategy: AgeCheckStrategy,
+    pub public: PublicInput,
+    pub dob: DateOfBirth,
 }
 
-pub fn run_bench<C>(c: &mut Criterion, case: &C)
-where
-    C: BenchCase,
-    <C::P as StarkPredicate>::Proof: Serialize,
-    <C::P as Predicate>::Error: std::fmt::Debug,
-{
-    let mut group = c.benchmark_group(case.name());
+pub fn run_bench(c: &mut Criterion, case: &BenchCase) {
+    let mut group = c.benchmark_group(case.name);
 
     group.bench_function("prove", |b| {
-        b.iter(|| {
-            case.predicate()
-                .prove(case.public_input(), case.private_input())
-                .unwrap()
-        })
+        b.iter(|| age::prove(&case.public, &case.dob, case.strategy).unwrap())
     });
 
-    let proof = case
-        .predicate()
-        .prove(case.public_input(), case.private_input())
-        .unwrap();
+    let proof = age::prove(&case.public, &case.dob, case.strategy).unwrap();
 
     group.bench_function("verify", |b| {
-        b.iter(|| case.predicate().verify(&proof).unwrap())
+        b.iter(|| age::verify(&proof).unwrap())
     });
 
-    let proof_bytes = bincode::serialize(&proof).unwrap();
+    let proof_bytes = match &proof {
+        AgeProof::BitDecomposition(p) => bincode::serialize(p).unwrap(),
+        AgeProof::RangeCheck(p) => bincode::serialize(p).unwrap(),
+    };
     println!(
         "\n[{}] proof size: {} bytes ({:.1} KB)\n",
-        case.name(),
+        case.name,
         proof_bytes.len(),
         proof_bytes.len() as f64 / 1024.0,
     );
