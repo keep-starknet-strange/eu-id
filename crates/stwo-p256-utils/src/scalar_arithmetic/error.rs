@@ -42,6 +42,13 @@ pub enum ScalarArithmeticError {
     UnexpectedProductRemainder {
         equation: &'static str,
     },
+    ProductChunkMismatch {
+        equation: &'static str,
+        coeff: usize,
+        chunk: usize,
+        expected: u64,
+        actual: u64,
+    },
 }
 
 impl fmt::Display for ScalarArithmeticError {
@@ -92,6 +99,16 @@ impl fmt::Display for ScalarArithmeticError {
                     "{equation} product remainder does not match expected result"
                 )
             }
+            Self::ProductChunkMismatch {
+                equation,
+                coeff,
+                chunk,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "{equation} coeff {coeff} chunk {chunk} mismatch: expected {expected}, got {actual}"
+            ),
         }
     }
 }
