@@ -3,8 +3,10 @@
 //! Implements [`FrameworkEval`] for the one-row-per-block layout defined in
 //! [`crate::trace`]. The **linear** constraints — IV binding on the first
 //! block, every mod-2³² limb-add identity (schedule recurrence, round adds,
-//! finalization), and the state-chain that ties round outputs back to the
-//! next round's inputs — are emitted here. The **`Σ`/`σ` decode-table
+//! finalization), the within-row state-chain that ties round outputs back
+//! to the next round's inputs, and the §10.3 **cross-row block-chain copy
+//! constraint** that pins block `b+1`'s `h_in` to block `b`'s `h_out` via a
+//! `[0, -1]` interaction mask — are emitted here. The **`Σ`/`σ` decode-table
 //! LogUp lookups** (§9.3 of the validated design), the matching σ-output
 //! reassembly + `O2` chunk-bind constraints, the chunk-wise `xor_8`
 //! lookups that close `o2_combined = o2_partial_s ⊕ o2_partial_s'`, the
@@ -25,7 +27,9 @@
 
 use num_traits::One;
 use stwo::core::fields::m31::M31;
-use stwo_constraint_framework::{EvalAtRow, FrameworkEval, Relation, RelationEntry};
+use stwo_constraint_framework::{
+    EvalAtRow, FrameworkEval, Relation, RelationEntry, ORIGINAL_TRACE_IDX,
+};
 
 use crate::constants::{IV, K, N_ROUNDS, N_STATE_WORDS};
 use crate::partitions::{
@@ -503,9 +507,27 @@ impl FrameworkEval for Sha256Eval {
         let final_carries: [(E::F, E::F); N_STATE_WORDS] =
             std::array::from_fn(|_| (eval.next_trace_mask(), eval.next_trace_mask()));
 
-        // ---- h_out: 8 words × (lo, hi) ----
-        let h_out: [(E::F, E::F); N_STATE_WORDS] =
-            std::array::from_fn(|_| (eval.next_trace_mask(), eval.next_trace_mask()));
+        // ---- h_out: 8 words × (lo, hi), each read at offsets [0, -1] ----
+        //
+        // The cross-row offset gives us this row's `h_out` *and* the
+        // previous (coset-predecessor) row's `h_out` in one mask call. The
+        // previous row's values feed the §10.3 block-chain constraint
+        // below; this row's values feed the finalization adds.
+        //
+        // `Layout::block_slot` ensures block `b` lives at coset index `b`,
+        // so offset `-1` resolves to block `b − 1`'s row (with cyclic
+        // wraparound on row 0 / first block — which is shielded by the
+        // chain gate below).
+        let mut h_out: [(E::F, E::F); N_STATE_WORDS] =
+            std::array::from_fn(|_| (E::F::from(M31::from(0u32)), E::F::from(M31::from(0u32))));
+        let mut h_out_prev: [(E::F, E::F); N_STATE_WORDS] =
+            std::array::from_fn(|_| (E::F::from(M31::from(0u32)), E::F::from(M31::from(0u32))));
+        for j in 0..N_STATE_WORDS {
+            let [lo_cur, lo_prev] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1]);
+            let [hi_cur, hi_prev] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1]);
+            h_out[j] = (lo_cur, hi_cur);
+            h_out_prev[j] = (lo_prev, hi_prev);
+        }
 
         // Finalization: h_out[j] = h_in[j] + working_var[j]  (mod 2³²).
         for (j, working) in state.iter().enumerate().take(N_STATE_WORDS) {
@@ -519,18 +541,33 @@ impl FrameworkEval for Sha256Eval {
             );
         }
 
+        // §10.3 multi-block chain: on every *continuation* row (a real
+        // block other than the first), `h_in[j] == h_out_prev[j]` for both
+        // limbs. The roadmap calls for the constraint to be vacuous on
+        // first-block rows (constrained to IV instead) and on padding rows
+        // (kept untouched by `enabler = 0`).
+        //
+        // Per design-lesson L5 ("keep all constraints degree ≤ 2") we
+        // combine the two gates into a single linear factor
+        // `(enabler − is_first_block)` rather than multiplying both:
+        //   - first-block real row (enabler=1, is_first_block=1): factor 0
+        //   - continuation real row  (enabler=1, is_first_block=0): factor 1
+        //   - padding row            (enabler=0, is_first_block=0): factor 0
+        // The product with the limb-difference stays degree 2, so the
+        // existing `max_constraint_log_degree_bound = log_size + 1`
+        // headroom is preserved.
+        let chain_gate = enabler.clone() - is_first_block.clone();
+        for j in 0..N_STATE_WORDS {
+            eval.add_constraint(chain_gate.clone() * (h_in[j].0.clone() - h_out_prev[j].0.clone()));
+            eval.add_constraint(chain_gate.clone() * (h_in[j].1.clone() - h_out_prev[j].1.clone()));
+        }
+
         // TODO(integration): digest binding. Expose `h_out` to the integration
         // layer via two LogUp relations (interface contract item 1):
         //   - `valueDigests` membership uses the IssuerSignedItem hash output;
         //   - ECDSA `z` consumes the COSE Sig_structure hash output.
         // The relation tag names (interface contract item 2) get agreed with
         // the mdoc and integration stream owners before wiring.
-
-        // TODO(shared-foundation): block-chain copy constraint.
-        //   For every row r > 0 (a non-first block row), h_in[r] == h_out[r-1]
-        //   limb-by-limb. Implementing this requires `EvalAtRow`'s cross-row
-        //   mask helpers (`next_trace_mask_at_offset` or similar), which are
-        //   part of the shared foundation work.
 
         // `eval.finalize_logup_in_pairs()` is deferred until *all* LogUp
         // channels are populated — the `Σ`/`σ` decode lookups, the
@@ -943,10 +980,20 @@ mod tests {
         let witness = compute_sha256_witness(msg);
         let log_size = min_log_size(witness.blocks.len());
         let trace = generate_trace(&witness, log_size);
-        for row in 0..witness.blocks.len() {
-            check_add_identities_in_row(&trace, row);
-            check_iv_binding_first_row(&trace, row);
-            check_h_out_finalization(&trace, row, &witness);
+        for block_idx in 0..witness.blocks.len() {
+            let slot = Layout::block_slot(block_idx, log_size);
+            check_add_identities_in_row(&trace, slot);
+            if block_idx == 0 {
+                check_iv_binding_first_row(&trace, slot);
+            }
+            check_h_out_finalization(&trace, slot, &witness, block_idx);
+        }
+        // §10.3 chain constraint: block `b+1`'s `h_in` equals block `b`'s
+        // `h_out`. Verified row-by-row in the witness via `block_slot`.
+        for block_idx in 1..witness.blocks.len() {
+            let cur = Layout::block_slot(block_idx, log_size);
+            let prev = Layout::block_slot(block_idx - 1, log_size);
+            check_block_chain_link(&trace, cur, prev);
         }
     }
 
@@ -1073,13 +1120,10 @@ mod tests {
     }
 
     fn check_iv_binding_first_row(trace: &[Vec<stwo::core::fields::m31::BaseField>], row: usize) {
-        if row != 0 {
-            return;
-        }
         for (j, &iv_j) in IV.iter().enumerate().take(N_STATE_WORDS) {
             let (lo, hi) = Layout::h_in_word(j);
             let word = trace[lo][row].0 | (trace[hi][row].0 << 16);
-            assert_eq!(word, iv_j, "h_in[{j}] not bound to IV on row 0");
+            assert_eq!(word, iv_j, "h_in[{j}] not bound to IV on first-block row");
         }
     }
 
@@ -1087,11 +1131,34 @@ mod tests {
         trace: &[Vec<stwo::core::fields::m31::BaseField>],
         row: usize,
         witness: &crate::types::Sha256Witness,
+        block_idx: usize,
     ) {
         for j in 0..N_STATE_WORDS {
             let (lo, hi) = Layout::h_out_word(j);
             let word = trace[lo][row].0 | (trace[hi][row].0 << 16);
-            assert_eq!(word, witness.blocks[row].h_out[j].to_u32());
+            assert_eq!(word, witness.blocks[block_idx].h_out[j].to_u32());
+        }
+    }
+
+    /// §10.3 chain check on the trace: every limb of `h_in` at row `cur`
+    /// equals the corresponding limb of `h_out` at row `prev`. Mirrors the
+    /// AIR's cross-row copy constraint (3.9.6) at the trace level.
+    fn check_block_chain_link(
+        trace: &[Vec<stwo::core::fields::m31::BaseField>],
+        cur: usize,
+        prev: usize,
+    ) {
+        for j in 0..N_STATE_WORDS {
+            let (h_in_lo, h_in_hi) = Layout::h_in_word(j);
+            let (h_out_lo, h_out_hi) = Layout::h_out_word(j);
+            assert_eq!(
+                trace[h_in_lo][cur].0, trace[h_out_lo][prev].0,
+                "chain mismatch: h_in[{j}].lo @ {cur} != h_out[{j}].lo @ {prev}"
+            );
+            assert_eq!(
+                trace[h_in_hi][cur].0, trace[h_out_hi][prev].0,
+                "chain mismatch: h_in[{j}].hi @ {cur} != h_out[{j}].hi @ {prev}"
+            );
         }
     }
 
@@ -1201,18 +1268,20 @@ mod tests {
     #[test]
     fn decode_reassembly_holds_for_abc() {
         let witness = compute_sha256_witness(b"abc");
-        let trace = generate_trace(&witness, min_log_size(witness.blocks.len()));
-        for row in 0..witness.blocks.len() {
-            check_decode_reassembly_in_row(&trace, row);
+        let log_size = min_log_size(witness.blocks.len());
+        let trace = generate_trace(&witness, log_size);
+        for block_idx in 0..witness.blocks.len() {
+            check_decode_reassembly_in_row(&trace, Layout::block_slot(block_idx, log_size));
         }
     }
 
     #[test]
     fn decode_reassembly_holds_for_multi_block() {
         let witness = compute_sha256_witness(&[0xABu8; 200]);
-        let trace = generate_trace(&witness, min_log_size(witness.blocks.len()));
-        for row in 0..witness.blocks.len() {
-            check_decode_reassembly_in_row(&trace, row);
+        let log_size = min_log_size(witness.blocks.len());
+        let trace = generate_trace(&witness, log_size);
+        for block_idx in 0..witness.blocks.len() {
+            check_decode_reassembly_in_row(&trace, Layout::block_slot(block_idx, log_size));
         }
     }
 
@@ -1391,5 +1460,149 @@ mod tests {
         assert_eq!(agg.total(), n * 448);
         assert_eq!(agg.sigma0_s, n * N_ROUNDS as u32);
         assert_eq!(agg.lower_sigma1_s_complement, n * (N_ROUNDS - 16) as u32);
+    }
+
+    // ------------------------------------------------------------------
+    // §10.3 cross-row block-chain copy constraint (roadmap 3.9.6)
+    //
+    // The constraint is `(enabler − is_first_block) · (h_in − h_out_prev) = 0`.
+    // We evaluate it directly on the trace data (the same style as
+    // `linear_identities_hold_for_*` above) rather than driving Stwo's
+    // `AssertEvaluator` — the latter would require a finalized
+    // interaction trace, which depends on 3.9.2's shared-foundation
+    // carry range-checks. The roadmap-mandated mutation case (an `h_in`
+    // mutation on a non-first block row triggering rejection) is exactly
+    // what this formula catches, so the test is structurally faithful to
+    // the AIR even though it doesn't route through `Sha256Eval::evaluate`.
+    // 3.9.8 wires the AssertEvaluator-based suite once the interaction
+    // trace is available.
+    // ------------------------------------------------------------------
+
+    /// Coset-order predecessor of `slot` in a bit-reversed circle-domain
+    /// trace of size `2^log_size`. Mirrors `AssertEvaluator`'s `off = -1`
+    /// path so a trace-level residual computation lines up with the
+    /// constraint values the AIR would emit on the same data.
+    fn coset_predecessor_slot(slot: usize, log_size: u32) -> usize {
+        use stwo::core::utils::{
+            bit_reverse_index, circle_domain_index_to_coset_index,
+            coset_index_to_circle_domain_index,
+        };
+        let domain_size = 1isize << log_size;
+        let coset_index =
+            circle_domain_index_to_coset_index(bit_reverse_index(slot, log_size), log_size)
+                as isize;
+        let prev_coset = (coset_index - 1).rem_euclid(domain_size) as usize;
+        bit_reverse_index(
+            coset_index_to_circle_domain_index(prev_coset, log_size),
+            log_size,
+        )
+    }
+
+    /// For one row `slot` of `trace`, compute every block-chain limb
+    /// residual the AIR emits at that point:
+    ///
+    /// ```text
+    /// resid[j].lo = (enabler[slot] − is_first_block[slot])
+    ///                 · (h_in[j].lo[slot] − h_out[j].lo[slot − 1 coset])
+    /// resid[j].hi = …  (analogous)
+    /// ```
+    ///
+    /// Returns a `Vec<(i64, i64)>` of length `N_STATE_WORDS` so callers
+    /// can either assert all-zero (honest) or assert at least one
+    /// non-zero (mutated).
+    fn block_chain_residuals(
+        trace: &[Vec<stwo::core::fields::m31::BaseField>],
+        slot: usize,
+        log_size: u32,
+    ) -> Vec<(i64, i64)> {
+        let prev_slot = coset_predecessor_slot(slot, log_size);
+        let enabler = trace[Layout::COL_ENABLER][slot].0 as i64;
+        let is_first = trace[Layout::COL_IS_FIRST_BLOCK][slot].0 as i64;
+        let gate = enabler - is_first;
+        (0..N_STATE_WORDS)
+            .map(|j| {
+                let (h_in_lo, h_in_hi) = Layout::h_in_word(j);
+                let (h_out_lo, h_out_hi) = Layout::h_out_word(j);
+                let lo_diff = trace[h_in_lo][slot].0 as i64 - trace[h_out_lo][prev_slot].0 as i64;
+                let hi_diff = trace[h_in_hi][slot].0 as i64 - trace[h_out_hi][prev_slot].0 as i64;
+                (gate * lo_diff, gate * hi_diff)
+            })
+            .collect()
+    }
+
+    /// Honest multi-block trace: every slot — first-block, continuation,
+    /// padding — yields all-zero chain residuals. Covers the gating
+    /// truth-table the constraint relies on (first-block vacuous via
+    /// `is_first_block`, padding vacuous via `enabler`, chain active
+    /// in-between).
+    #[test]
+    fn chain_constraint_is_zero_on_honest_multi_block_trace() {
+        let witness = compute_sha256_witness(&[0xABu8; 200]);
+        assert!(witness.blocks.len() >= 2, "need ≥2 blocks for the chain");
+        let log_size = min_log_size(witness.blocks.len());
+        let trace = generate_trace(&witness, log_size);
+        let n_rows = 1usize << log_size;
+        for slot in 0..n_rows {
+            let residuals = block_chain_residuals(&trace, slot, log_size);
+            for (j, (lo, hi)) in residuals.iter().enumerate() {
+                assert_eq!(
+                    *lo, 0,
+                    "chain residual nonzero on honest trace: slot {slot}, h[{j}].lo"
+                );
+                assert_eq!(
+                    *hi, 0,
+                    "chain residual nonzero on honest trace: slot {slot}, h[{j}].hi"
+                );
+            }
+        }
+    }
+
+    /// Mutating block 1's `h_in[0].lo` must break the chain constraint
+    /// at block 1's row (and only there — block 0's row stays vacuous
+    /// because `is_first_block = 1`). This is the roadmap-mandated 3.9.6
+    /// negative case and the seed for 3.9.8's broader mutation suite.
+    #[test]
+    fn chain_constraint_rejects_h_in_mutation_on_block_1() {
+        let witness = compute_sha256_witness(&[0xABu8; 200]);
+        assert!(witness.blocks.len() >= 2, "need multi-block message");
+        let log_size = min_log_size(witness.blocks.len());
+        let mut trace = generate_trace(&witness, log_size);
+
+        // Mutate `h_in[0].lo` of block 1 to a value that cannot equal
+        // block 0's `h_out[0].lo`. Block 0's h_out is a SHA-256
+        // compression from `IV` over an all-`0xAB` block — not `0xFFFF`,
+        // so the assert_ne below is defensive but expected to hold.
+        let block_1_slot = Layout::block_slot(1, log_size);
+        let block_0_slot = Layout::block_slot(0, log_size);
+        let (h_in_lo, _) = Layout::h_in_word(0);
+        let (h_out_lo, _) = Layout::h_out_word(0);
+        assert_ne!(
+            trace[h_in_lo][block_1_slot].0, 0xFFFFu32,
+            "mutation target must change the cell",
+        );
+        trace[h_in_lo][block_1_slot] = stwo::core::fields::m31::BaseField::from(0xFFFFu32);
+
+        // Block 1's chain residual is now non-zero: the gate is
+        // `enabler(1) − is_first_block(0) = 1` and the limb difference
+        // is `0xFFFF − h_out[0].lo @ block_0_slot ≠ 0`.
+        let residuals = block_chain_residuals(&trace, block_1_slot, log_size);
+        let expected_diff = 0xFFFFi64 - trace[h_out_lo][block_0_slot].0 as i64;
+        assert_eq!(
+            residuals[0].0, expected_diff,
+            "chain residual at block 1, H[0].lo should reflect the mutation",
+        );
+        assert_ne!(
+            residuals[0].0, 0,
+            "AIR rejects the mutated trace via the chain constraint"
+        );
+
+        // Block 0's chain residual stays zero — the `is_first_block` gate
+        // makes the constraint vacuous on the first-block row, so the
+        // mutation at block 1 does not falsely poison block 0.
+        let block_0_residuals = block_chain_residuals(&trace, block_0_slot, log_size);
+        for (lo, hi) in block_0_residuals {
+            assert_eq!(lo, 0, "first-block row must remain vacuous after mutation");
+            assert_eq!(hi, 0, "first-block row must remain vacuous after mutation");
+        }
     }
 }

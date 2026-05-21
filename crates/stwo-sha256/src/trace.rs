@@ -2,7 +2,14 @@
 //! Stwo prover can commit to.
 //!
 //! Layout: **one row per padded block**, wide. With `n` blocks the trace has
-//! `next_power_of_two(n)` rows; everything past row `n − 1` is padding.
+//! `next_power_of_two(n)` *slots* per column. Block `r` is written at the slot
+//! returned by [`Layout::block_slot(r, log_size)`] — i.e., in **bit-reversed
+//! circle-domain order with coset index = block index**, matching Stwo's
+//! standard SIMD/CPU trace convention. Iterating coset indices `0..n` walks
+//! the blocks in order, which makes the cross-row mask read at offset `-1`
+//! resolve to "the previous block's row" — the basis of the block-chain
+//! constraint `h_in[r] == h_out[r-1]` for `r > 0` in [`crate::constraints`].
+//! Slots past the last real block remain zeroed and are padding.
 //!
 //! A row of the trace carries (in this order):
 //!
@@ -70,6 +77,7 @@
 //! keeps the AIR `add_to_relation` calls trivially aligned.
 
 use stwo::core::fields::m31::{BaseField, M31};
+use stwo::core::utils::{bit_reverse_index, coset_index_to_circle_domain_index};
 
 use crate::constants::{N_ROUNDS, N_STATE_WORDS};
 use crate::partitions::GROUPS_PER_ROUND_PARTITION;
@@ -270,6 +278,28 @@ impl Layout {
         let base = Self::COL_FINAL_CARRIES_START + 2 * j;
         (base, base + 1)
     }
+
+    /// Row slot the `block_idx`-th block is written to, for a trace of size
+    /// `2^log_size`.
+    ///
+    /// Block `r` lives at coset index `r`, which maps to circle-domain index
+    /// `coset_index_to_circle_domain_index(r, log_size)`, stored at slot
+    /// `bit_reverse_index(·, log_size)` to match Stwo's bit-reversed
+    /// circle-domain convention. The result is the index callers should use
+    /// to look the block up in the returned `Vec<Vec<BaseField>>`.
+    ///
+    /// The mapping `r ↔ coset_index` matters for the AIR's cross-row reads:
+    /// `next_interaction_mask(_, [0, -1])` walks coset indices, so offset `-1`
+    /// at the slot for block `r` returns the slot for block `r − 1` — exactly
+    /// the chain link [`crate::constraints::Sha256Eval`] needs for
+    /// `h_in[r] == h_out[r-1]`.
+    #[inline]
+    pub fn block_slot(block_idx: usize, log_size: u32) -> usize {
+        bit_reverse_index(
+            coset_index_to_circle_domain_index(block_idx, log_size),
+            log_size,
+        )
+    }
 }
 
 /// Materialise the trace for a `Sha256Witness`.
@@ -292,7 +322,8 @@ pub fn generate_trace(witness: &Sha256Witness, log_size: u32) -> Vec<Vec<BaseFie
     let mut cols = vec![vec![BaseField::from(0u32); n_rows]; Layout::TOTAL_COLS];
 
     for (block_idx, block) in witness.blocks.iter().enumerate() {
-        write_block_row(&mut cols, block_idx, block, block_idx == 0);
+        let slot = Layout::block_slot(block_idx, log_size);
+        write_block_row(&mut cols, slot, block, block_idx == 0);
     }
 
     cols
@@ -550,12 +581,14 @@ mod tests {
         }
 
         // Decode the last block's h_out from the trace, recompose the digest.
-        let last = witness.blocks.len() - 1;
+        // Each block lives at its coset-indexed bit-reversed slot, so use
+        // `Layout::block_slot` rather than the block index directly.
+        let last_slot = Layout::block_slot(witness.blocks.len() - 1, log_size);
         let mut digest_bytes = [0u8; 32];
         for j in 0..N_STATE_WORDS {
             let (lo, hi) = Layout::h_out_word(j);
-            let lo_val = trace[lo][last].0;
-            let hi_val = trace[hi][last].0;
+            let lo_val = trace[lo][last_slot].0;
+            let hi_val = trace[hi][last_slot].0;
             let word = lo_val | (hi_val << 16);
             digest_bytes[j * 4..(j + 1) * 4].copy_from_slice(&word.to_be_bytes());
         }
@@ -585,9 +618,18 @@ mod tests {
         let trace = generate_trace(&witness, log_size);
         let n_rows = 1usize << log_size;
 
+        // Real-block slots: every `Layout::block_slot(block_idx, log_size)`
+        // for `block_idx ∈ [0, n_real)`, with the first block's slot tagged
+        // by `is_first_block = 1`.
+        let real_slots: std::collections::HashSet<usize> = (0..n_real)
+            .map(|b| Layout::block_slot(b, log_size))
+            .collect();
+        let first_block_slot = Layout::block_slot(0, log_size);
+        assert_eq!(real_slots.len(), n_real, "block slots must be distinct");
+
         for row in 0..n_rows {
-            let expected_enabler = if row < n_real { 1u32 } else { 0 };
-            let expected_first = if row == 0 { 1u32 } else { 0 };
+            let expected_enabler = if real_slots.contains(&row) { 1u32 } else { 0 };
+            let expected_first = if row == first_block_slot { 1u32 } else { 0 };
             assert_eq!(trace[Layout::COL_ENABLER][row].0, expected_enabler);
             assert_eq!(trace[Layout::COL_IS_FIRST_BLOCK][row].0, expected_first);
         }
@@ -597,11 +639,13 @@ mod tests {
     fn h_in_of_first_block_is_iv() {
         use crate::constants::IV;
         let witness = compute_sha256_witness(b"");
-        let trace = generate_trace(&witness, min_log_size(witness.blocks.len()));
+        let log_size = min_log_size(witness.blocks.len());
+        let trace = generate_trace(&witness, log_size);
+        let slot = Layout::block_slot(0, log_size);
         for (j, &iv_j) in IV.iter().enumerate().take(N_STATE_WORDS) {
             let (lo, hi) = Layout::h_in_word(j);
-            let lo_val = trace[lo][0].0;
-            let hi_val = trace[hi][0].0;
+            let lo_val = trace[lo][slot].0;
+            let hi_val = trace[hi][slot].0;
             let word = lo_val | (hi_val << 16);
             assert_eq!(word, iv_j, "h_in[{j}] != IV[{j}]");
         }
@@ -609,14 +653,21 @@ mod tests {
 
     #[test]
     fn block_chain_h_out_to_h_in_continuity() {
+        // Witness-level chain check — independent of the AIR. Block `b+1`'s
+        // `h_in` should equal block `b`'s `h_out` limb-by-limb. The AIR's
+        // cross-row copy constraint (3.9.6) enforces the same condition on
+        // the polynomial; this test confirms the trace generator agrees.
         let witness = compute_sha256_witness(&[0xAB; 200]);
-        let trace = generate_trace(&witness, min_log_size(witness.blocks.len()));
-        for row in 1..witness.blocks.len() {
+        let log_size = min_log_size(witness.blocks.len());
+        let trace = generate_trace(&witness, log_size);
+        for block_idx in 1..witness.blocks.len() {
+            let cur = Layout::block_slot(block_idx, log_size);
+            let prev = Layout::block_slot(block_idx - 1, log_size);
             for j in 0..N_STATE_WORDS {
                 let (h_in_lo, h_in_hi) = Layout::h_in_word(j);
                 let (h_out_lo, h_out_hi) = Layout::h_out_word(j);
-                assert_eq!(trace[h_in_lo][row].0, trace[h_out_lo][row - 1].0);
-                assert_eq!(trace[h_in_hi][row].0, trace[h_out_hi][row - 1].0);
+                assert_eq!(trace[h_in_lo][cur].0, trace[h_out_lo][prev].0);
+                assert_eq!(trace[h_in_hi][cur].0, trace[h_out_hi][prev].0);
             }
         }
     }
@@ -683,8 +734,10 @@ mod tests {
         // pins the operand & group enumeration order — the AIR's read
         // loop relies on it.
         let witness = crate::witness::compute_sha256_witness(b"abc");
-        let trace = generate_trace(&witness, min_log_size(witness.blocks.len()));
+        let log_size = min_log_size(witness.blocks.len());
+        let trace = generate_trace(&witness, log_size);
         let block = &witness.blocks[0];
+        let slot = Layout::block_slot(0, log_size);
 
         for (t, round) in block.rounds.iter().enumerate() {
             // §8.1 reuse: only the four fresh operands are committed.
@@ -698,7 +751,7 @@ mod tests {
                 for (group_idx, &v) in expected.iter().enumerate() {
                     let col = Layout::round_packed_group(t, operand_idx, group_idx);
                     assert_eq!(
-                        trace[col][0].0, v,
+                        trace[col][slot].0, v,
                         "round[{t}] operand[{operand_idx}] group[{group_idx}]",
                     );
                 }
@@ -714,8 +767,10 @@ mod tests {
     #[test]
     fn h_in_aux_grp_round_trips_through_trace() {
         let witness = crate::witness::compute_sha256_witness(b"abc");
-        let trace = generate_trace(&witness, min_log_size(witness.blocks.len()));
+        let log_size = min_log_size(witness.blocks.len());
+        let trace = generate_trace(&witness, log_size);
         let block = &witness.blocks[0];
+        let slot = Layout::block_slot(0, log_size);
 
         let operands: [[u32; 6]; H_IN_AUX_OPERANDS] = [
             block.aux_split_pack.b_init.vals,
@@ -727,7 +782,7 @@ mod tests {
             for (group_idx, &v) in expected.iter().enumerate() {
                 let col = Layout::h_in_aux_grp(aux_idx, group_idx);
                 assert_eq!(
-                    trace[col][0].0, v,
+                    trace[col][slot].0, v,
                     "aux operand[{aux_idx}] group[{group_idx}]"
                 );
             }
@@ -741,24 +796,38 @@ mod tests {
     #[test]
     fn schedule_input_split_blocks_round_trip_through_trace() {
         let witness = crate::witness::compute_sha256_witness(b"abc");
-        let trace = generate_trace(&witness, min_log_size(witness.blocks.len()));
+        let log_size = min_log_size(witness.blocks.len());
+        let trace = generate_trace(&witness, log_size);
         let block = &witness.blocks[0];
+        let slot = Layout::block_slot(0, log_size);
 
         // First schedule entry (`j = 0`, i.e. derivation of `W[16]`).
         let entry = &block.schedule_entries[0];
         let base_lower_sigma0 = Layout::schedule_entry_input_split(0, 0);
         let w0 = &entry.lower_sigma0_input_split;
-        assert_eq!(trace[base_lower_sigma0][0].0, w0.packed_s_lo);
-        assert_eq!(trace[base_lower_sigma0 + 1][0].0, w0.packed_s_complement_lo);
-        assert_eq!(trace[base_lower_sigma0 + 2][0].0, w0.packed_s_hi);
-        assert_eq!(trace[base_lower_sigma0 + 3][0].0, w0.packed_s_complement_hi);
+        assert_eq!(trace[base_lower_sigma0][slot].0, w0.packed_s_lo);
+        assert_eq!(
+            trace[base_lower_sigma0 + 1][slot].0,
+            w0.packed_s_complement_lo
+        );
+        assert_eq!(trace[base_lower_sigma0 + 2][slot].0, w0.packed_s_hi);
+        assert_eq!(
+            trace[base_lower_sigma0 + 3][slot].0,
+            w0.packed_s_complement_hi
+        );
 
         let base_lower_sigma1 = Layout::schedule_entry_input_split(0, 1);
         let w1 = &entry.lower_sigma1_input_split;
-        assert_eq!(trace[base_lower_sigma1][0].0, w1.packed_s_lo);
-        assert_eq!(trace[base_lower_sigma1 + 1][0].0, w1.packed_s_complement_lo);
-        assert_eq!(trace[base_lower_sigma1 + 2][0].0, w1.packed_s_hi);
-        assert_eq!(trace[base_lower_sigma1 + 3][0].0, w1.packed_s_complement_hi);
+        assert_eq!(trace[base_lower_sigma1][slot].0, w1.packed_s_lo);
+        assert_eq!(
+            trace[base_lower_sigma1 + 1][slot].0,
+            w1.packed_s_complement_lo
+        );
+        assert_eq!(trace[base_lower_sigma1 + 2][slot].0, w1.packed_s_hi);
+        assert_eq!(
+            trace[base_lower_sigma1 + 3][slot].0,
+            w1.packed_s_complement_hi
+        );
     }
 
     #[test]
@@ -768,28 +837,30 @@ mod tests {
         // `write_sigma_decode_block`'s order against the on-disk layout the
         // AIR reads.
         let witness = compute_sha256_witness(b"abc");
-        let trace = generate_trace(&witness, min_log_size(witness.blocks.len()));
+        let log_size = min_log_size(witness.blocks.len());
+        let trace = generate_trace(&witness, log_size);
         let block = &witness.blocks[0];
+        let slot = Layout::block_slot(0, log_size);
 
         // Schedule σ0 decode of entry j=0 (corresponds to W[16] = σ1(W[14]) + … + σ0(W[1]) + W[0]).
         let entry = &block.schedule_entries[0];
         let base = Layout::schedule_entry_decode(0, 0);
         let d = &entry.lower_sigma0_decode;
-        assert_eq!(trace[base][0].0, d.key_s);
-        assert_eq!(trace[base + 1][0].0, d.o_main_s.lo);
-        assert_eq!(trace[base + 4][0].0, d.o2_partial_s.hi);
-        assert_eq!(trace[base + 5][0].0, d.key_s_complement);
-        assert_eq!(trace[base + 10][0].0, d.o2_combined.lo);
-        assert_eq!(trace[base + 12][0].0, d.o2_chunks_s.lo.b0);
-        assert_eq!(trace[base + 15][0].0, d.o2_chunks_s.hi.b1);
-        assert_eq!(trace[base + 23][0].0, d.o2_chunks_combined.hi.b1);
+        assert_eq!(trace[base][slot].0, d.key_s);
+        assert_eq!(trace[base + 1][slot].0, d.o_main_s.lo);
+        assert_eq!(trace[base + 4][slot].0, d.o2_partial_s.hi);
+        assert_eq!(trace[base + 5][slot].0, d.key_s_complement);
+        assert_eq!(trace[base + 10][slot].0, d.o2_combined.lo);
+        assert_eq!(trace[base + 12][slot].0, d.o2_chunks_s.lo.b0);
+        assert_eq!(trace[base + 15][slot].0, d.o2_chunks_s.hi.b1);
+        assert_eq!(trace[base + 23][slot].0, d.o2_chunks_combined.hi.b1);
 
         // Round Σ0 decode of round 0 (operating on a = IV[0]).
         let round = &block.rounds[0];
         let base = Layout::round_decode(0, 0);
         let d = &round.sigma0_decode;
-        assert_eq!(trace[base][0].0, d.key_s);
-        assert_eq!(trace[base + 5][0].0, d.key_s_complement);
-        assert_eq!(trace[base + 11][0].0, d.o2_combined.hi);
+        assert_eq!(trace[base][slot].0, d.key_s);
+        assert_eq!(trace[base + 5][slot].0, d.key_s_complement);
+        assert_eq!(trace[base + 11][slot].0, d.o2_combined.hi);
     }
 }
