@@ -6,23 +6,38 @@ use crate::limbs::P256EvalBigInt;
 use crate::range_checks::{add_range_check, RangeCheckRelation};
 
 use super::{
-    consume_product_digit, consume_scalar_value, FnMulRelationIds, ROLE_RESULT, SIDE_AB, SIDE_QN,
+    consume_product_digit, consume_scalar_value, FnMulLinkRelations, ROLE_RESULT, SIDE_AB, SIDE_QN,
 };
 
+/// Reduction row for `A * B - Q * n - result = 0`.
+///
+/// Product digits are consumed through LogUp rather than recomputed locally.
+/// This keeps the row narrow relative to the product helper and makes the
+/// copy boundary explicit.
 pub struct ScalarReductionColumns<E: EvalAtRow> {
+    /// Canonical result scalar consumed under role `RESULT`.
     pub result: P256EvalBigInt<E>,
+    /// Product digits consumed from the `A * B` side.
     pub ab_digits: [E::F; PRODUCT_EQUATION_LIMBS],
+    /// Product digits consumed from the `Q * n` side.
     pub qn_digits: [E::F; PRODUCT_EQUATION_LIMBS],
+    /// Signed carry chain for the normalized product equation.
     pub carries: [E::F; PRODUCT_EQUATION_LIMBS],
 }
 
 #[derive(Clone, Copy)]
 pub struct ScalarReductionRelations<'a> {
+    /// Signed carry table configured with `FNMUL_SPLIT_CARRY_BOUND`.
     pub signed_carry: &'a RangeCheckRelation,
-    pub links: FnMulRelationIds<'a>,
+    /// LogUp links to canonical scalar providers and product digit providers.
+    pub links: FnMulLinkRelations<'a>,
 }
 
 /// Consume product digits and prove `AB - QN - result = 0` with signed carries.
+///
+/// The final carry is constrained to zero, so the recurrence proves integer
+/// equality over the full 40-limb product width, not only equality modulo
+/// `B^40`.
 pub fn add_scalar_reduction_consumer<E: EvalAtRow>(
     eval: &mut E,
     relations: ScalarReductionRelations<'_>,

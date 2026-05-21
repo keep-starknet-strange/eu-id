@@ -20,6 +20,11 @@ pub use reduction::{
 relation!(ScalarValueRelation, 22);
 relation!(ScalarProductDigitRelation, 4);
 
+/// Relation key shape: `(mul_id, role, limb_0, ..., limb_19)`.
+pub const SCALAR_VALUE_RELATION_ARITY: usize = 2 + N_LIMBS;
+/// Relation key shape: `(mul_id, side, digit_index, digit_value)`.
+pub const PRODUCT_DIGIT_RELATION_ARITY: usize = 4;
+
 pub const FNMUL_SPLIT_CHUNK_TERMS: usize = FNMUL_CHUNK_TERMS;
 pub const FNMUL_SPLIT_PRODUCT_CHUNKS: usize = PRODUCT_CHUNKS;
 pub const FNMUL_SPLIT_CHUNK_DIGITS: usize = 3;
@@ -38,12 +43,16 @@ pub const SIDE_QN: u32 = 1;
 const LIMB_BOUND: i64 = 1i64 << LIMB_BITS;
 
 pub struct SplitChunkColumns<E: EvalAtRow> {
+    /// Little-endian base-`B` decomposition of one split product chunk:
+    /// `digits[0] + B * digits[1] + B^2 * digits[2]`.
     pub digits: [E::F; FNMUL_SPLIT_CHUNK_DIGITS],
 }
 
 #[derive(Clone, Copy)]
-pub struct FnMulRelationIds<'a> {
+pub struct FnMulLinkRelations<'a> {
+    /// Links canonical scalar providers to product/reduction consumers.
     pub scalar_value: &'a ScalarValueRelation,
+    /// Links split product digit providers to reduction consumers.
     pub product_digit: &'a ScalarProductDigitRelation,
 }
 
@@ -165,7 +174,7 @@ fn add_scalar_value_relation<E: EvalAtRow>(
     role: u32,
     value: &P256EvalBigInt<E>,
 ) {
-    let values: [E::F; 2 + N_LIMBS] = core::array::from_fn(|i| match i {
+    let values: [E::F; SCALAR_VALUE_RELATION_ARITY] = core::array::from_fn(|i| match i {
         0 => mul_id.clone(),
         1 => E::F::from(M31::from_u32_unchecked(role)),
         _ => value.limbs()[i - 2].clone(),
@@ -182,7 +191,7 @@ fn add_product_digit_relation<E: EvalAtRow>(
     digit_index: usize,
     digit_value: E::F,
 ) {
-    let values = [
+    let values: [E::F; PRODUCT_DIGIT_RELATION_ARITY] = [
         mul_id,
         E::F::from(M31::from_u32_unchecked(side)),
         E::F::from(M31::from_u32_unchecked(digit_index as u32)),

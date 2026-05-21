@@ -1,33 +1,51 @@
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::EvalAtRow;
-use stwo_p256_utils::scalar_arithmetic::{words_to_limbs, P256_ORDER};
+use stwo_p256_utils::scalar_arithmetic::{words_to_limbs, BigIntLimbs, P256_ORDER};
 
 use crate::limbs::P256EvalBigInt;
 use crate::range_checks::RangeCheckRelation;
 
 use super::{
     add_chunk_decomposition, add_chunk_digit_constraints, consume_scalar_value,
-    for_each_product_chunk, provide_product_digit, split_digit_expr, FnMulRelationIds,
+    for_each_product_chunk, provide_product_digit, split_digit_expr, FnMulLinkRelations,
     SplitChunkColumns, FNMUL_SPLIT_PRODUCT_CHUNKS, PRODUCT_EQUATION_LIMBS, ROLE_A, ROLE_B,
     ROLE_QUOTIENT, SIDE_AB, SIDE_QN,
 };
 
+/// Aggregate split-product row.
+///
+/// This is intentionally separated from canonicality and reduction rows, but
+/// it is still a wide aggregate helper: it proves all `A*B` and `Q*n` chunks
+/// for one multiplication instance. A narrower physical component can later
+/// split this shape by coefficient/chunk while preserving the same relation
+/// contract.
 pub struct ScalarProductColumns<E: EvalAtRow> {
+    /// Multiplicand consumed from the canonical scalar relation as role `A`.
     pub a: P256EvalBigInt<E>,
+    /// Multiplier consumed from the canonical scalar relation as role `B`.
     pub b: P256EvalBigInt<E>,
+    /// Quotient consumed from the canonical scalar relation as role `QUOTIENT`.
     pub quotient: P256EvalBigInt<E>,
+    /// Split chunks for `A * B`.
     pub ab_chunks: [SplitChunkColumns<E>; FNMUL_SPLIT_PRODUCT_CHUNKS],
+    /// Split chunks for `quotient * n`.
     pub qn_chunks: [SplitChunkColumns<E>; FNMUL_SPLIT_PRODUCT_CHUNKS],
 }
 
 #[derive(Clone, Copy)]
 pub struct ScalarProductRelations<'a> {
+    /// 13-bit range table for low and middle split-chunk digits.
     pub range13: &'a RangeCheckRelation,
-    pub links: FnMulRelationIds<'a>,
+    /// LogUp links to canonical scalar providers and reduction consumers.
+    pub links: FnMulLinkRelations<'a>,
 }
 
 /// Prove split product chunks for `A*B` and `Q*n`, then provide normalized
 /// product digits keyed by `(mul_id, side, digit_index)`.
+///
+/// The helper consumes canonical `A`, `B`, and `quotient` values under the
+/// same `mul_id`. It does not range-check those columns locally; their range
+/// and canonicality come from matching scalar providers.
 pub fn add_scalar_product_provider<E: EvalAtRow>(
     eval: &mut E,
     relations: ScalarProductRelations<'_>,
@@ -125,7 +143,7 @@ fn add_fixed_rhs_product_chunks<E: EvalAtRow>(
     range13: &RangeCheckRelation,
     gate: E::F,
     lhs: &P256EvalBigInt<E>,
-    rhs: &[u32; stwo_p256_utils::constants::N_LIMBS],
+    rhs: &BigIntLimbs,
     chunks: &[SplitChunkColumns<E>; FNMUL_SPLIT_PRODUCT_CHUNKS],
 ) {
     for_each_product_chunk(|chunk_index, _coeff, pairs| {
