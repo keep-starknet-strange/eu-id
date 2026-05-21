@@ -1,6 +1,6 @@
 use crate::constants::{LIMB_BITS, N_LIMBS};
 
-use super::carries::verify_product_equation;
+use super::carries::{build_product_carries, verify_product_equation};
 use super::error::ScalarArithmeticError;
 use super::limbs::{check_limbs_range, result_limb_i64};
 use super::mul::FnMulTrace;
@@ -57,10 +57,14 @@ pub struct SplitProductTrace {
 
 impl SplitProductTrace {
     pub fn new(mul: &FnMulTrace) -> Self {
+        let ab_chunks = split_product_chunks(&mul.a, &mul.b);
+        let qn_chunks = split_product_chunks(&mul.quotient, &mul.modulus);
+        let carries = build_split_carries(&ab_chunks, &qn_chunks, &mul.result);
+
         Self {
-            ab_chunks: split_product_chunks(&mul.a, &mul.b),
-            qn_chunks: split_product_chunks(&mul.quotient, &mul.modulus),
-            carries: mul.carries,
+            ab_chunks,
+            qn_chunks,
+            carries,
         }
     }
 
@@ -85,6 +89,19 @@ impl SplitProductTrace {
                 + carry_in
         })
     }
+}
+
+fn build_split_carries(
+    ab_chunks: &[ProductChunk],
+    qn_chunks: &[ProductChunk],
+    result: &BigIntLimbs,
+) -> ProductCarries {
+    build_product_carries(|limb, carry_in| {
+        split_digit_i64(ab_chunks, limb)
+            - split_digit_i64(qn_chunks, limb)
+            - result_limb_i64(result, limb)
+            + carry_in
+    })
 }
 
 fn split_product_chunks(a: &BigIntLimbs, b: &BigIntLimbs) -> Vec<ProductChunk> {
@@ -213,14 +230,35 @@ mod tests {
     }
 
     #[test]
-    fn split_trace_carries_match_unsplit_trace() {
-        let mul = FnMulTrace::new(&P256_ORDER, &scalar(17), &P256_ORDER)
+    fn split_trace_recomputes_normalized_carries() {
+        let mut max_scalar = P256_ORDER;
+        max_scalar[0] -= 1;
+        let mul = FnMulTrace::new(&max_scalar, &max_scalar, &P256_ORDER)
             .expect("valid multiplication trace");
         let split = SplitProductTrace::new(&mul);
 
-        assert_eq!(split.carries, mul.carries);
+        assert_ne!(split.carries, mul.carries);
         split
             .verify("split_mul", &mul)
             .expect("split trace verifies");
+    }
+
+    #[test]
+    fn split_trace_detects_mutated_carry() {
+        let mut max_scalar = P256_ORDER;
+        max_scalar[0] -= 1;
+        let mul = FnMulTrace::new(&max_scalar, &max_scalar, &P256_ORDER)
+            .expect("valid multiplication trace");
+        let mut split = SplitProductTrace::new(&mul);
+        split.carries[0] += 1;
+
+        let err = split
+            .verify("split_mul", &mul)
+            .expect_err("mutated split carry must fail");
+        assert!(matches!(
+            err,
+            ScalarArithmeticError::CarryMismatch { .. }
+                | ScalarArithmeticError::LimbEquationRemainder { .. }
+        ));
     }
 }
