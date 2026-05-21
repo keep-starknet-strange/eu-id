@@ -508,6 +508,178 @@ pub struct ScheduleEntryWitness {
     pub w_t: WordLimbs,
 }
 
+/// Number of 32-bit words in one padded block (= `N_INPUT_WORDS = 16`).
+/// Exposed as a witness-layer constant so [`PaddingRowWitness`]'s one-hot
+/// marker-word indicator vector has a stable size.
+pub const WORDS_PER_BLOCK: usize = 16;
+
+/// Number of bytes in a 32-bit word — the marker-byte selector vector's
+/// length. Mirrors [`crate::constants::WORD_BYTES`] at the witness layer.
+pub const BYTES_PER_WORD: usize = 4;
+
+/// Per-block padding-role witness (§10.4 of the validated design).
+///
+/// One [`BlockWitness`] carries one of these. It pins:
+/// 1. Which structural slot in the padded stream the block occupies —
+///    pure message, marker-only (Case B penult), length-only (Case B last),
+///    or marker-and-length (Case A trailing block).
+/// 2. Where the `0x80` marker sits within the marker block: a 16-entry
+///    one-hot vector for the word index and a 4-entry one-hot vector for
+///    the byte position within that word, plus the marker word's 4-byte
+///    big-endian decomposition.
+/// 3. The four 16-bit limbs of the FIPS bit-length field (`W[14]`/`W[15]`
+///    of the length block). Committed regardless of row so the
+///    cross-component LogUp binding (deferred to Phase 2, item 2.4) can
+///    expose them to the mdoc-parser stream uniformly.
+///
+/// Three small auxiliary booleans (`is_length_only_block`,
+/// `is_marker_only_block`, `marker_word_post_strict_15`) are committed
+/// rather than re-derived in the AIR so the [`crate::constraints`]
+/// reformulation keeps each row constraint at degree ≤ 2 (per design
+/// lesson L5). The witness generator pins them from the primary fields.
+///
+/// **Note on the asymmetric `_15`-only aux.** A symmetric `..._14`
+/// auxiliary would express "force `W[14]` to zero on marker-only blocks
+/// whose marker is strictly before `W[14]`." But the marker-only block
+/// only appears in overflow Case B (`msg.len() % 64 ∈ [56, 64)`), where
+/// the marker sits in `W[14]` or `W[15]` — never before `W[14]`. So
+/// the aux would be identically zero and its W[14]-zero constraints
+/// vacuous; we omit it.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaddingRowWitness {
+    /// 1 iff this block contains the `0x80` padding marker.
+    pub is_marker_block: u32,
+    /// 1 iff this block is the final block (carries the bit-length in its
+    /// last 8 bytes / `W[14]` / `W[15]`).
+    pub is_length_block: u32,
+    /// Aux: `(1 − is_marker_block) · is_length_block`. 1 on a pure
+    /// length-only block (Case B's last block).
+    pub is_length_only_block: u32,
+    /// Aux: `is_marker_block · (1 − is_length_block)`. 1 on a pure
+    /// marker-only block (Case B's penultimate block).
+    pub is_marker_only_block: u32,
+    /// One-hot indicator: `is_marker_word[j] == 1` iff word index `j` holds
+    /// the `0x80` byte. All-zero on non-marker rows; sums to
+    /// `is_marker_block`.
+    pub is_marker_word: [u32; WORDS_PER_BLOCK],
+    /// One-hot indicator: `marker_byte_sel[b] == 1` iff byte position `b`
+    /// within the marker word holds `0x80`. BE order — `b = 0` is the MSB
+    /// of `W[k]`. All-zero on non-marker rows; sums to `is_marker_block`.
+    pub marker_byte_sel: [u32; BYTES_PER_WORD],
+    /// Big-endian byte decomposition of the marker word, in MSB-first
+    /// order. All-zero on non-marker rows. The constraint layer binds
+    /// these to `W[marker_word_idx]` via the `is_marker_word` selector.
+    pub marker_word_byte: [u32; BYTES_PER_WORD],
+    /// Aux: `cumulative_marker_word_sel[15] · (1 − is_length_block)`.
+    /// 1 iff this row is a marker-only block whose marker sits strictly
+    /// before `W[15]` — i.e., marker at `W[14]` (overflow Case B with
+    /// `msg.len() % 64 ∈ [56, 60)`). Then `W[15]` of this block must be
+    /// 0, which the AIR enforces. Committed as a separate column so the
+    /// `W[15]`-zero gate is degree 2 instead of the degree-3 triple
+    /// product `cum[15] · (1 − is_length_block) · W[15]`.
+    pub marker_word_post_strict_15: u32,
+    /// Lo 16-bit limb of `W[14]` of the length block — the low half of
+    /// the 32-bit high word of the bit-length. 0 on non-length-block rows.
+    pub bit_length_w14_lo: u32,
+    /// Hi 16-bit limb of `W[14]` of the length block.
+    pub bit_length_w14_hi: u32,
+    /// Lo 16-bit limb of `W[15]` of the length block — the low 16 bits of
+    /// the 32-bit low word of the bit-length.
+    pub bit_length_w15_lo: u32,
+    /// Hi 16-bit limb of `W[15]` of the length block.
+    pub bit_length_w15_hi: u32,
+}
+
+impl PaddingRowWitness {
+    /// Build the padding-row witness for block `block_idx` of a message
+    /// whose FIPS-padded form is `padded`, given the raw message byte
+    /// length `message_byte_length` and the total `n_blocks` in the
+    /// padded stream.
+    ///
+    /// The marker sits at byte offset `message_byte_length` in the padded
+    /// stream (FIPS §5.1.1). Its containing block is therefore
+    /// `message_byte_length / BLOCK_BYTES`; its byte-within-block offset is
+    /// `message_byte_length % BLOCK_BYTES`; from there the word index and
+    /// byte-in-word fall out by dividing / modding by `BYTES_PER_WORD`.
+    /// The length block is always the final block (`n_blocks − 1`); the
+    /// two coincide in Case A (when `message_byte_length % 64 ∈ [0, 56)`)
+    /// and differ in Case B (overflow into a separate length-only block).
+    pub fn for_block(
+        block_idx: usize,
+        padded: &[u8],
+        message_byte_length: u64,
+        n_blocks: usize,
+    ) -> Self {
+        assert!(n_blocks >= 1, "padded message has at least one block");
+        assert_eq!(
+            padded.len(),
+            n_blocks * crate::constants::BLOCK_BYTES,
+            "padded length must be n_blocks · BLOCK_BYTES",
+        );
+        let block_bytes = crate::constants::BLOCK_BYTES;
+        let marker_byte_offset = message_byte_length as usize;
+        let marker_block_idx = marker_byte_offset / block_bytes;
+        let length_block_idx = n_blocks - 1;
+
+        let is_marker_block = u32::from(block_idx == marker_block_idx);
+        let is_length_block = u32::from(block_idx == length_block_idx);
+        let is_length_only_block = (1 - is_marker_block) * is_length_block;
+        let is_marker_only_block = is_marker_block * (1 - is_length_block);
+
+        let mut is_marker_word = [0u32; WORDS_PER_BLOCK];
+        let mut marker_byte_sel = [0u32; BYTES_PER_WORD];
+        let mut marker_word_byte = [0u32; BYTES_PER_WORD];
+
+        if is_marker_block == 1 {
+            let off = marker_byte_offset % block_bytes;
+            let word_idx = off / BYTES_PER_WORD;
+            let byte_in_word = off % BYTES_PER_WORD;
+            is_marker_word[word_idx] = 1;
+            marker_byte_sel[byte_in_word] = 1;
+            // Marker word bytes in BE order (byte 0 = MSB). Bytes before
+            // the marker come from the tail of the message; the marker
+            // byte is 0x80; bytes after are 0 (per FIPS §5.1.1).
+            let word_start = block_idx * block_bytes + word_idx * BYTES_PER_WORD;
+            for p in 0..BYTES_PER_WORD {
+                marker_word_byte[p] = padded[word_start + p] as u32;
+            }
+        }
+
+        let cumulative = |upto: usize| -> u32 { is_marker_word[..upto].iter().sum() };
+        let marker_word_post_strict_15 = cumulative(15) * (1 - is_length_block);
+
+        let (bit_length_w14_lo, bit_length_w14_hi, bit_length_w15_lo, bit_length_w15_hi) =
+            if is_length_block == 1 {
+                let bit_length = message_byte_length.wrapping_mul(8);
+                let w14 = (bit_length >> 32) as u32;
+                let w15 = bit_length as u32;
+                (
+                    w14 & 0xFFFF,
+                    (w14 >> LIMB_BITS) & 0xFFFF,
+                    w15 & 0xFFFF,
+                    (w15 >> LIMB_BITS) & 0xFFFF,
+                )
+            } else {
+                (0, 0, 0, 0)
+            };
+
+        Self {
+            is_marker_block,
+            is_length_block,
+            is_length_only_block,
+            is_marker_only_block,
+            is_marker_word,
+            marker_byte_sel,
+            marker_word_byte,
+            marker_word_post_strict_15,
+            bit_length_w14_lo,
+            bit_length_w14_hi,
+            bit_length_w15_lo,
+            bit_length_w15_hi,
+        }
+    }
+}
+
 /// Witness for one block: schedule, 64-round state evolution, IV-in/out.
 ///
 /// `schedule` is a `Vec` rather than `[WordLimbs; N_ROUNDS]` so that this
@@ -532,6 +704,10 @@ pub struct BlockWitness {
     pub aux_split_pack: BlockAuxSplitPackWitness,
     /// Finalization carries: 8 mod-2³² adds `H⁽ᵗ⁺¹⁾ⱼ = H⁽ᵗ⁾ⱼ + working[j]`.
     pub finalization_carries: [AddCarries; N_STATE_WORDS],
+    /// Padding-role witness: which structural slot this block plays in the
+    /// padded stream, the marker location, and the bit-length limbs. See
+    /// [`PaddingRowWitness`].
+    pub padding_row: PaddingRowWitness,
 }
 
 /// Top-level witness for an arbitrary-length SHA-256 hash.

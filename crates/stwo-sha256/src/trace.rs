@@ -82,8 +82,9 @@ use stwo::core::utils::{bit_reverse_index, coset_index_to_circle_domain_index};
 use crate::constants::{N_ROUNDS, N_STATE_WORDS};
 use crate::partitions::GROUPS_PER_ROUND_PARTITION;
 use crate::types::{
-    AddCarries, BlockAuxSplitPackWitness, BlockWitness, LimbPairBytes, RoundMajChWitness,
-    RoundPackedGroups, Sha256Witness, SigmaDecodeWitness, SigmaInputSplitPackWitness, WordLimbs,
+    AddCarries, BlockAuxSplitPackWitness, BlockWitness, LimbPairBytes, PaddingRowWitness,
+    RoundMajChWitness, RoundPackedGroups, Sha256Witness, SigmaDecodeWitness,
+    SigmaInputSplitPackWitness, WordLimbs, BYTES_PER_WORD, WORDS_PER_BLOCK,
 };
 
 /// Columns per σ-application's decoded intermediates (§9.3 of the design):
@@ -132,6 +133,31 @@ pub const H_IN_AUX_GRP_COLS: usize = H_IN_AUX_OPERANDS * GROUPS_PER_ROUND_PARTIT
 /// Number of schedule entries: `W[16..64]` ⇒ 48.
 pub const N_SCHEDULE_ENTRIES: usize = N_ROUNDS - 16;
 
+/// Columns dedicated to the per-block padding-role witness (§10.4 of the
+/// validated design). Laid out in the order
+/// [`write_padding_row`] writes them:
+///
+/// 1. `is_marker_block` (1)
+/// 2. `is_length_block` (1)
+/// 3. `is_length_only_block` (1)  — aux, `(1 − is_marker) · is_length`
+/// 4. `is_marker_only_block` (1)  — aux, `is_marker · (1 − is_length)`
+/// 5. `is_marker_word[16]` (16)   — one-hot for the marker's word index
+/// 6. `marker_byte_sel[4]` (4)    — one-hot for byte-in-word, BE order
+/// 7. `marker_word_byte[4]` (4)   — BE byte decomposition of `W[marker_word_idx]`
+/// 8. `marker_word_post_strict_15` (1) — aux, cum(15) · (1 − is_length)
+/// 9. `bit_length_w14_lo` (1)
+/// 10. `bit_length_w14_hi` (1)
+/// 11. `bit_length_w15_lo` (1)
+/// 12. `bit_length_w15_hi` (1)
+///
+/// `4 flags + 16 one-hot word selectors + 4 byte selectors + 4 marker bytes
+///     + 1 post-strict aux + 4 bit-length limbs = 33` cells per block row.
+///     The symmetric `marker_word_post_strict_14` aux was considered but
+///     is identically zero on every valid trace (no marker block ever
+///     places the marker before `W[14]`); see
+///     [`crate::types::PaddingRowWitness`] for the asymmetry rationale.
+pub const PADDING_ROW_COLS: usize = 4 + WORDS_PER_BLOCK + BYTES_PER_WORD + BYTES_PER_WORD + 1 + 4;
+
 /// Named column-range layout. Every range is in `[start, end)`; the column
 /// index in `Vec<Vec<BaseField>>` equals the start-of-range offset plus any
 /// per-element offset.
@@ -156,8 +182,30 @@ impl Layout {
     pub const COL_H_OUT_START: usize = Self::COL_FINAL_CARRIES_END;
     pub const COL_H_OUT_END: usize = Self::COL_H_OUT_START + 2 * N_STATE_WORDS;
 
+    /// Per-block padding-role region. Appended after `h_out` so the
+    /// existing read order in [`crate::constraints::Sha256Eval`] stays
+    /// intact — the AIR's `next_trace_mask` walk simply continues into
+    /// these columns at the end of the row.
+    pub const COL_PADDING_START: usize = Self::COL_H_OUT_END;
+    pub const COL_IS_MARKER_BLOCK: usize = Self::COL_PADDING_START;
+    pub const COL_IS_LENGTH_BLOCK: usize = Self::COL_PADDING_START + 1;
+    pub const COL_IS_LENGTH_ONLY_BLOCK: usize = Self::COL_PADDING_START + 2;
+    pub const COL_IS_MARKER_ONLY_BLOCK: usize = Self::COL_PADDING_START + 3;
+    pub const COL_IS_MARKER_WORD_START: usize = Self::COL_PADDING_START + 4;
+    pub const COL_IS_MARKER_WORD_END: usize = Self::COL_IS_MARKER_WORD_START + WORDS_PER_BLOCK;
+    pub const COL_MARKER_BYTE_SEL_START: usize = Self::COL_IS_MARKER_WORD_END;
+    pub const COL_MARKER_BYTE_SEL_END: usize = Self::COL_MARKER_BYTE_SEL_START + BYTES_PER_WORD;
+    pub const COL_MARKER_WORD_BYTE_START: usize = Self::COL_MARKER_BYTE_SEL_END;
+    pub const COL_MARKER_WORD_BYTE_END: usize = Self::COL_MARKER_WORD_BYTE_START + BYTES_PER_WORD;
+    pub const COL_MARKER_WORD_POST_STRICT_15: usize = Self::COL_MARKER_WORD_BYTE_END;
+    pub const COL_BIT_LENGTH_W14_LO: usize = Self::COL_MARKER_WORD_BYTE_END + 1;
+    pub const COL_BIT_LENGTH_W14_HI: usize = Self::COL_MARKER_WORD_BYTE_END + 2;
+    pub const COL_BIT_LENGTH_W15_LO: usize = Self::COL_MARKER_WORD_BYTE_END + 3;
+    pub const COL_BIT_LENGTH_W15_HI: usize = Self::COL_MARKER_WORD_BYTE_END + 4;
+    pub const COL_PADDING_END: usize = Self::COL_PADDING_START + PADDING_ROW_COLS;
+
     /// Total number of columns in the trace.
-    pub const TOTAL_COLS: usize = Self::COL_H_OUT_END;
+    pub const TOTAL_COLS: usize = Self::COL_PADDING_END;
 
     /// `(lo, hi)` slot for the `j`-th word of `h_in`.
     #[inline]
@@ -277,6 +325,25 @@ impl Layout {
     pub const fn final_carry(j: usize) -> (usize, usize) {
         let base = Self::COL_FINAL_CARRIES_START + 2 * j;
         (base, base + 1)
+    }
+
+    /// Column of the `j`-th one-hot marker-word indicator (`j ∈ [0, 16)`).
+    #[inline]
+    pub const fn is_marker_word(j: usize) -> usize {
+        Self::COL_IS_MARKER_WORD_START + j
+    }
+
+    /// Column of the `b`-th marker-byte selector (`b ∈ [0, 4)`, BE order).
+    #[inline]
+    pub const fn marker_byte_sel(b: usize) -> usize {
+        Self::COL_MARKER_BYTE_SEL_START + b
+    }
+
+    /// Column of the `b`-th marker-word byte cell (`b ∈ [0, 4)`, BE order
+    /// matching FIPS 180-4 §5.2.1's big-endian word parse).
+    #[inline]
+    pub const fn marker_word_byte(b: usize) -> usize {
+        Self::COL_MARKER_WORD_BYTE_START + b
     }
 
     /// Row slot the `block_idx`-th block is written to, for a trace of size
@@ -439,6 +506,9 @@ fn write_block_row(
         cols[lo][row] = m31(block.h_out[j].lo);
         cols[hi][row] = m31(block.h_out[j].hi);
     }
+
+    // padding-role witness — laid out per `PADDING_ROW_COLS` above.
+    write_padding_row(cols, row, &block.padding_row);
 }
 
 #[inline]
@@ -545,6 +615,31 @@ fn write_sigma_input_split_block(
     cols[base + 1][row] = m31(w.packed_s_complement_lo);
     cols[base + 2][row] = m31(w.packed_s_hi);
     cols[base + 3][row] = m31(w.packed_s_complement_hi);
+}
+
+/// Write the per-block padding-role witness — `PADDING_ROW_COLS` cells in
+/// the column order documented on [`PADDING_ROW_COLS`]. The AIR reads
+/// them in the same order, so this writer's cell sequence is the
+/// load-bearing layout contract.
+fn write_padding_row(cols: &mut [Vec<BaseField>], row: usize, p: &PaddingRowWitness) {
+    cols[Layout::COL_IS_MARKER_BLOCK][row] = m31(p.is_marker_block);
+    cols[Layout::COL_IS_LENGTH_BLOCK][row] = m31(p.is_length_block);
+    cols[Layout::COL_IS_LENGTH_ONLY_BLOCK][row] = m31(p.is_length_only_block);
+    cols[Layout::COL_IS_MARKER_ONLY_BLOCK][row] = m31(p.is_marker_only_block);
+    for (j, &v) in p.is_marker_word.iter().enumerate() {
+        cols[Layout::is_marker_word(j)][row] = m31(v);
+    }
+    for (b, &v) in p.marker_byte_sel.iter().enumerate() {
+        cols[Layout::marker_byte_sel(b)][row] = m31(v);
+    }
+    for (b, &v) in p.marker_word_byte.iter().enumerate() {
+        cols[Layout::marker_word_byte(b)][row] = m31(v);
+    }
+    cols[Layout::COL_MARKER_WORD_POST_STRICT_15][row] = m31(p.marker_word_post_strict_15);
+    cols[Layout::COL_BIT_LENGTH_W14_LO][row] = m31(p.bit_length_w14_lo);
+    cols[Layout::COL_BIT_LENGTH_W14_HI][row] = m31(p.bit_length_w14_hi);
+    cols[Layout::COL_BIT_LENGTH_W15_LO][row] = m31(p.bit_length_w15_lo);
+    cols[Layout::COL_BIT_LENGTH_W15_HI][row] = m31(p.bit_length_w15_hi);
 }
 
 /// Required `log_size` for `n_blocks` blocks (smallest power of two
@@ -683,7 +778,8 @@ mod tests {
             + N_SCHEDULE_ENTRIES * SCHEDULE_ENTRY_COLS
             + N_ROUNDS * ROUND_COLS
             + 2 * N_STATE_WORDS                // finalization carries
-            + 2 * N_STATE_WORDS; // h_out
+            + 2 * N_STATE_WORDS                // h_out
+            + PADDING_ROW_COLS; // §10.4 padding-role witness
         assert_eq!(Layout::TOTAL_COLS, expected);
         // Breakdown: the schedule entry carries the base limb-add column
         // set, two 24-cell σ-decode blocks, and two 4-cell σ-input
@@ -703,6 +799,10 @@ mod tests {
         assert_eq!(ROUND_MAJ_CH_COLS, 4 * 6);
         assert_eq!(H_IN_AUX_GRP_COLS, 4 * 6);
         assert_eq!(SIGMA_INPUT_SPLIT_COLS, 4);
+        // 4 flags + 16 word-selector + 4 byte-selector + 4 byte cells
+        // + 1 post-strict aux + 4 bit-length limbs = 33 padding cells.
+        assert_eq!(PADDING_ROW_COLS, 4 + WORDS_PER_BLOCK + 4 + 4 + 1 + 4);
+        assert_eq!(PADDING_ROW_COLS, 33);
         assert_eq!(
             expected,
             1 + 1
@@ -713,6 +813,7 @@ mod tests {
                 + 64 * (base_round + 2 * SIGMA_DECODE_COLS + ROUND_MAJ_CH_COLS)
                 + 16
                 + 16
+                + PADDING_ROW_COLS
         );
     }
 

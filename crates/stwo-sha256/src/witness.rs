@@ -293,6 +293,9 @@ pub fn compute_block_witness(
         rounds,
         aux_split_pack,
         finalization_carries,
+        // Padding-role witness is populated at the top-level emitter,
+        // where the message length and total block count are known.
+        padding_row: crate::types::PaddingRowWitness::default(),
     }
 }
 
@@ -303,16 +306,24 @@ pub fn compute_block_witness(
 pub fn compute_sha256_witness(msg: &[u8]) -> Sha256Witness {
     let padding = compute_padding_witness(msg);
     let blocks_parsed = parse_blocks(&padding.padded);
+    let n_blocks = blocks_parsed.len();
+    let message_byte_length = padding.message.len() as u64;
 
     let mut h_state = HashState(IV);
-    let mut blocks = Vec::with_capacity(blocks_parsed.len());
+    let mut blocks = Vec::with_capacity(n_blocks);
     for (idx, _block) in blocks_parsed.iter().enumerate() {
         // Re-extract the raw bytes for this block — the parsed `Block`
         // value's bytes are an internal detail.
         let raw: [u8; BLOCK_BYTES] = padding.padded[idx * BLOCK_BYTES..(idx + 1) * BLOCK_BYTES]
             .try_into()
             .unwrap();
-        let bw = compute_block_witness(&h_state, &raw);
+        let mut bw = compute_block_witness(&h_state, &raw);
+        bw.padding_row = crate::types::PaddingRowWitness::for_block(
+            idx,
+            &padding.padded,
+            message_byte_length,
+            n_blocks,
+        );
         // Re-derive the next H from limbs (round-trips through (lo, hi)).
         for (i, slot) in h_state.0.iter_mut().enumerate() {
             *slot = bw.h_out[i].to_u32();

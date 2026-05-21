@@ -20,6 +20,19 @@
 //! once. The remaining lookup-wiring task is the carry range-checks
 //! (shared-foundation, 3.9.2).
 //!
+//! Beyond the compression-loop constraints, the §10.4 **padding-role**
+//! block — appended after `h_out` per [`crate::trace::PADDING_ROW_COLS`]
+//! — emits the constraints that pin the FIPS 180-4 §5.1.1 padding
+//! structure: the `0x80` marker sits at the right byte (one-hot word /
+//! byte selectors → byte-decomposition of the marker word), the bytes
+//! after the marker are zero (cumulative-selector gates), the words after
+//! the marker word are zero (with the length-block exception), and the
+//! length block's `W[14]`/`W[15]` carry the bit-length limbs. Block-
+//! alignment (`padded.len() % 64 == 0`) is structural — one trace row
+//! IS one 64-byte block — and so no per-row constraint expresses it. The
+//! cross-component binding of the bit-length and the marker position to
+//! the mdoc-parser stream lands with roadmap 2.4.
+//!
 //! Read-order invariant: every `next_trace_mask` call here happens in the
 //! same order as the writes in [`crate::trace::write_block_row`]. Layout
 //! offsets are not used directly here — they are documented in
@@ -39,7 +52,7 @@ use crate::partitions::{
 };
 use crate::relations::Sha256Relations;
 use crate::trace::ROUND_MAJ_CH_OPERANDS;
-use crate::types::LIMB_BITS;
+use crate::types::{BYTES_PER_WORD, LIMB_BITS, WORDS_PER_BLOCK};
 
 /// AIR evaluator over the wide one-row-per-block layout.
 #[derive(Clone)]
@@ -568,6 +581,216 @@ impl FrameworkEval for Sha256Eval {
         //   - ECDSA `z` consumes the COSE Sig_structure hash output.
         // The relation tag names (interface contract item 2) get agreed with
         // the mdoc and integration stream owners before wiring.
+
+        // ---- §10.4 padding-role constraints (roadmap 3.9.7) ----
+        //
+        // Read order mirrors `crate::trace::write_padding_row`; offsets
+        // are documented on `Layout::COL_PADDING_*`.
+        let is_marker_block = eval.next_trace_mask();
+        let is_length_block = eval.next_trace_mask();
+        let is_length_only_block = eval.next_trace_mask();
+        let is_marker_only_block = eval.next_trace_mask();
+        let is_marker_word: [E::F; WORDS_PER_BLOCK] =
+            std::array::from_fn(|_| eval.next_trace_mask());
+        let marker_byte_sel: [E::F; BYTES_PER_WORD] =
+            std::array::from_fn(|_| eval.next_trace_mask());
+        let marker_word_byte: [E::F; BYTES_PER_WORD] =
+            std::array::from_fn(|_| eval.next_trace_mask());
+        let marker_word_post_strict_15 = eval.next_trace_mask();
+        let bit_length_w14_lo = eval.next_trace_mask();
+        let bit_length_w14_hi = eval.next_trace_mask();
+        let bit_length_w15_lo = eval.next_trace_mask();
+        let bit_length_w15_hi = eval.next_trace_mask();
+
+        // (P.A) Binary checks. Every padding-role flag and one-hot bit
+        // satisfies `x · (1 − x) = 0`. Not gated by `enabler`: on padding
+        // rows every cell is 0 and the identity holds trivially.
+        for flag in [
+            &is_marker_block,
+            &is_length_block,
+            &is_length_only_block,
+            &is_marker_only_block,
+            &marker_word_post_strict_15,
+        ] {
+            eval.add_constraint(flag.clone() * (E::F::one() - flag.clone()));
+        }
+        for bit in is_marker_word.iter() {
+            eval.add_constraint(bit.clone() * (E::F::one() - bit.clone()));
+        }
+        for bit in marker_byte_sel.iter() {
+            eval.add_constraint(bit.clone() * (E::F::one() - bit.clone()));
+        }
+
+        // (P.B) One-hot sums match the block role. Marker-word selectors
+        // sum to `is_marker_block` (1 on a marker block, 0 elsewhere);
+        // marker-byte selectors do the same. Degree 1.
+        let sum_is_marker_word: E::F = is_marker_word
+            .iter()
+            .cloned()
+            .fold(E::F::from(M31::from(0u32)), |acc, b| acc + b);
+        eval.add_constraint(sum_is_marker_word - is_marker_block.clone());
+        let sum_marker_byte_sel: E::F = marker_byte_sel
+            .iter()
+            .cloned()
+            .fold(E::F::from(M31::from(0u32)), |acc, b| acc + b);
+        eval.add_constraint(sum_marker_byte_sel - is_marker_block.clone());
+
+        // (P.C) Aux-flag definitions. Each is the product of two role
+        // flags — committed as standalone columns so downstream
+        // constraints stay degree ≤ 2 instead of degree 3. Constraint
+        // form `aux − product = 0` is degree 2.
+        eval.add_constraint(
+            is_length_only_block.clone()
+                - (E::F::one() - is_marker_block.clone()) * is_length_block.clone(),
+        );
+        eval.add_constraint(
+            is_marker_only_block.clone()
+                - is_marker_block.clone() * (E::F::one() - is_length_block.clone()),
+        );
+
+        // Cumulative one-hot sums: `cumulative_marker_word_sel[j] =
+        // Σ_{j' < j} is_marker_word[j']`. With `is_marker_word` one-hot,
+        // this is `0` for `j ≤ marker_word_idx` and `1` for
+        // `j > marker_word_idx` (i.e., "strictly after marker"). Built
+        // up in-place by accumulating each prefix.
+        let mut cum_marker_word: [E::F; WORDS_PER_BLOCK] =
+            std::array::from_fn(|_| E::F::from(M31::from(0u32)));
+        for j in 1..WORDS_PER_BLOCK {
+            cum_marker_word[j] = cum_marker_word[j - 1].clone() + is_marker_word[j - 1].clone();
+        }
+        let cum_marker_word_at_end = cum_marker_word[WORDS_PER_BLOCK - 1].clone()
+            + is_marker_word[WORDS_PER_BLOCK - 1].clone();
+        // Sanity: the total marker-word cumulative equals is_marker_block
+        // (drops out of (P.B), restated here for the constraint loop's
+        // self-documentation; not a separate identity).
+        let _ = cum_marker_word_at_end;
+
+        // (P.C') marker-word post-strict aux for the `W[15]` slot.
+        // `marker_word_post_strict_15 = cum_marker_word[15] · (1 −
+        // is_length_block)`. On a marker-only block (Case B's penult,
+        // marker at `W[14]` or `W[15]`) this fires only when the marker
+        // is at `W[14]` (cum[15] = 1) — forcing `W[15]` to zero. On
+        // length-bearing blocks the `(1 − is_length_block) = 0` factor
+        // zeros it. The symmetric `_14` aux would be identically zero
+        // (no valid trace places the marker strictly before `W[14]`) and
+        // is omitted; see `crate::types::PaddingRowWitness`.
+        eval.add_constraint(
+            marker_word_post_strict_15.clone()
+                - cum_marker_word[15].clone() * (E::F::one() - is_length_block.clone()),
+        );
+
+        // (P.D) Marker-word byte assembly. The marker word `W[k]` (where
+        // `k = marker_word_idx`) selected via the one-hot vector matches
+        // the BE byte decomposition `(byte_0, byte_1, byte_2, byte_3)`.
+        // Reads of the schedule words happen at offsets fixed by
+        // `Layout::schedule_word(j)`; we already pulled those into the
+        // local `w: [(E::F, E::F); N_ROUNDS]` array at the top of
+        // `evaluate`, so they're in scope here.
+        //
+        // `W[k].hi = byte_0 · 256 + byte_1`, `W[k].lo = byte_2 · 256 + byte_3`.
+        // On non-marker rows every is_marker_word[j] = 0 and the bytes
+        // are 0 too (default trace fill), so both identities hold
+        // vacuously. Degree 2 — sum-of-products of two degree-1 cells.
+        let byte_base = E::F::from(M31::from(1u32 << 8));
+        let mut sum_w_hi = E::F::from(M31::from(0u32));
+        let mut sum_w_lo = E::F::from(M31::from(0u32));
+        for j in 0..WORDS_PER_BLOCK {
+            sum_w_hi += is_marker_word[j].clone() * w[j].1.clone();
+            sum_w_lo += is_marker_word[j].clone() * w[j].0.clone();
+        }
+        eval.add_constraint(
+            sum_w_hi
+                - byte_base.clone() * marker_word_byte[0].clone()
+                - marker_word_byte[1].clone(),
+        );
+        eval.add_constraint(
+            sum_w_lo
+                - byte_base.clone() * marker_word_byte[2].clone()
+                - marker_word_byte[3].clone(),
+        );
+
+        // (P.E) The marker byte is `0x80`. Per byte position `b`, the
+        // one-hot selector pins `byte[b] = 0x80` exactly when this is
+        // the marker byte. On non-marker rows every selector is 0 and
+        // the constraint is vacuous. Degree 2.
+        let marker_value = E::F::from(M31::from(0x80u32));
+        for b in 0..BYTES_PER_WORD {
+            eval.add_constraint(
+                marker_byte_sel[b].clone() * (marker_word_byte[b].clone() - marker_value.clone()),
+            );
+        }
+
+        // (P.F) Bytes strictly after the marker byte (within the marker
+        // word) are zero. `cumulative_byte_sel_before[b] = Σ_{b' < b}
+        // marker_byte_sel[b']` selects "the marker is at some earlier
+        // byte position than `b`". For `b = 0` it's identically 0
+        // (constraint vacuous); for `b = 1, 2, 3` it's the cumulative
+        // sum. Degree 2.
+        let mut cum_byte_sel = E::F::from(M31::from(0u32));
+        for b in 0..BYTES_PER_WORD {
+            // Constraint uses the cumulative *before* b, so emit before
+            // accumulating b's own selector.
+            eval.add_constraint(cum_byte_sel.clone() * marker_word_byte[b].clone());
+            cum_byte_sel += marker_byte_sel[b].clone();
+        }
+
+        // (P.G) Words strictly after the marker word are zero — with the
+        // length-field exception. The "must be zero" indicator for each
+        // word index `j ∈ [0, 14)` is the sum of two mutually exclusive
+        // sources:
+        //   - `cum_marker_word[j]`: marker block with marker before j.
+        //   - `is_length_only_block`: pure length block (W[0..14] all zero).
+        // For `W[15]` only the marker-only-block contribution applies
+        // (in length-bearing blocks `W[14]`/`W[15]` are the length
+        // field); we use the pre-committed `marker_word_post_strict_15`
+        // aux to express it without a degree-3 product. `W[14]` gets no
+        // (P.G) constraint: the only way it would need one is a marker
+        // block with marker strictly before `W[14]`, which never happens
+        // (in Case A `is_length_block = 1` zeros the gate; in Case B
+        // penult the marker is always at `W[14]` or `W[15]`, and when
+        // it's at `W[14]` the byte-level (P.D)/(P.E)/(P.F) already pin
+        // `W[14]` to `0x80000000`).
+        for j in 0..14 {
+            let gate = cum_marker_word[j].clone() + is_length_only_block.clone();
+            eval.add_constraint(gate.clone() * w[j].0.clone());
+            eval.add_constraint(gate * w[j].1.clone());
+        }
+        eval.add_constraint(marker_word_post_strict_15.clone() * w[15].0.clone());
+        eval.add_constraint(marker_word_post_strict_15.clone() * w[15].1.clone());
+
+        // (P.H) Length-field encoding. On a length-bearing block,
+        // `W[14]` and `W[15]` equal the committed bit-length limbs. The
+        // 64-bit bit-length stored as four 16-bit limbs:
+        //   bit_length_w14_hi : bits 48..63 (W[14].hi)
+        //   bit_length_w14_lo : bits 32..47 (W[14].lo)
+        //   bit_length_w15_hi : bits 16..31 (W[15].hi)
+        //   bit_length_w15_lo : bits  0..15 (W[15].lo)
+        // The cross-component LogUp binding to the mdoc parser (post 2.4)
+        // exposes these four limbs uniformly — that's why we keep the
+        // limb commitment separate from `W[14]`/`W[15]` themselves
+        // rather than relying on the schedule cells alone. Degree 2.
+        eval.add_constraint(
+            is_length_block.clone() * (w[14].0.clone() - bit_length_w14_lo.clone()),
+        );
+        eval.add_constraint(
+            is_length_block.clone() * (w[14].1.clone() - bit_length_w14_hi.clone()),
+        );
+        eval.add_constraint(
+            is_length_block.clone() * (w[15].0.clone() - bit_length_w15_lo.clone()),
+        );
+        eval.add_constraint(
+            is_length_block.clone() * (w[15].1.clone() - bit_length_w15_hi.clone()),
+        );
+
+        // Note: block-alignment (padded.len() % 64 == 0) is structural —
+        // one trace row IS one 64-byte block — and the AIR cannot
+        // represent a partial block. So no per-row constraint is needed
+        // for that requirement (roadmap 3.9.7's "total padded length is a
+        // multiple of BLOCK_BYTES").
+        //
+        // Note: cross-component binding of bit_length and marker position
+        // to the mdoc/COSE-parser stream lands with roadmap 2.4 and is
+        // explicitly out of scope here (per 3.9.7's implementation note).
 
         // `eval.finalize_logup_in_pairs()` is deferred until *all* LogUp
         // channels are populated — the `Σ`/`σ` decode lookups, the
@@ -1603,6 +1826,336 @@ mod tests {
         for (lo, hi) in block_0_residuals {
             assert_eq!(lo, 0, "first-block row must remain vacuous after mutation");
             assert_eq!(hi, 0, "first-block row must remain vacuous after mutation");
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // §10.4 padding-role constraints (roadmap 3.9.7)
+    //
+    // Each constraint is evaluated directly on the trace data, mirroring
+    // the algebraic expression `Sha256Eval::evaluate` emits. The format
+    // matches the §10.3 chain tests above: a positive case (honest trace
+    // ⇒ every residual is zero) plus per-class mutation cases (one
+    // constraint goes non-zero per mutation). 3.9.8 wires the same suite
+    // through `AssertEvaluator` once the interaction trace is available.
+    // ------------------------------------------------------------------
+
+    /// Read trace cell `(col, row)` as `i64`. M31 values are non-negative
+    /// integers `< 2³¹`, well inside `i64`.
+    fn cell(trace: &[Vec<stwo::core::fields::m31::BaseField>], col: usize, row: usize) -> i64 {
+        trace[col][row].0 as i64
+    }
+
+    /// All padding-row residuals for one slot. The AIR emits these as
+    /// individual constraints; the test asserts each one is zero on an
+    /// honest trace. A negative-test mutation flips at least one entry
+    /// to non-zero.
+    ///
+    /// Order matches the constraint emission order in
+    /// `Sha256Eval::evaluate` so a residual index here can be traced back
+    /// to a specific algebraic identity.
+    fn padding_residuals(
+        trace: &[Vec<stwo::core::fields::m31::BaseField>],
+        slot: usize,
+    ) -> Vec<i64> {
+        let v = |col: usize| cell(trace, col, slot);
+        let is_marker_block = v(Layout::COL_IS_MARKER_BLOCK);
+        let is_length_block = v(Layout::COL_IS_LENGTH_BLOCK);
+        let is_length_only_block = v(Layout::COL_IS_LENGTH_ONLY_BLOCK);
+        let is_marker_only_block = v(Layout::COL_IS_MARKER_ONLY_BLOCK);
+        let is_marker_word: [i64; 16] = std::array::from_fn(|j| v(Layout::is_marker_word(j)));
+        let marker_byte_sel: [i64; 4] = std::array::from_fn(|b| v(Layout::marker_byte_sel(b)));
+        let marker_word_byte: [i64; 4] = std::array::from_fn(|b| v(Layout::marker_word_byte(b)));
+        let marker_word_post_strict_15 = v(Layout::COL_MARKER_WORD_POST_STRICT_15);
+        let bit_length_w14_lo = v(Layout::COL_BIT_LENGTH_W14_LO);
+        let bit_length_w14_hi = v(Layout::COL_BIT_LENGTH_W14_HI);
+        let bit_length_w15_lo = v(Layout::COL_BIT_LENGTH_W15_LO);
+        let bit_length_w15_hi = v(Layout::COL_BIT_LENGTH_W15_HI);
+
+        let w_lo = |j: usize| v(Layout::schedule_word(j).0);
+        let w_hi = |j: usize| v(Layout::schedule_word(j).1);
+
+        let mut out = Vec::new();
+
+        // (P.A) binary flags
+        for &x in &[
+            is_marker_block,
+            is_length_block,
+            is_length_only_block,
+            is_marker_only_block,
+            marker_word_post_strict_15,
+        ] {
+            out.push(x * (1 - x));
+        }
+        for &x in is_marker_word.iter() {
+            out.push(x * (1 - x));
+        }
+        for &x in marker_byte_sel.iter() {
+            out.push(x * (1 - x));
+        }
+
+        // (P.B) one-hot sums
+        let sum_imw: i64 = is_marker_word.iter().sum();
+        out.push(sum_imw - is_marker_block);
+        let sum_mbs: i64 = marker_byte_sel.iter().sum();
+        out.push(sum_mbs - is_marker_block);
+
+        // (P.C) aux flag definitions
+        out.push(is_length_only_block - (1 - is_marker_block) * is_length_block);
+        out.push(is_marker_only_block - is_marker_block * (1 - is_length_block));
+
+        // Cumulative marker-word selector (strictly-before-j).
+        let mut cum = [0i64; 16];
+        for j in 1..16 {
+            cum[j] = cum[j - 1] + is_marker_word[j - 1];
+        }
+
+        // (P.C') post-strict aux for j = 15. (The symmetric `_14` aux
+        // was dropped — see the constraint-emit site for the rationale.)
+        out.push(marker_word_post_strict_15 - cum[15] * (1 - is_length_block));
+
+        // (P.D) marker-word byte assembly.
+        let sum_w_hi: i64 = (0..16).map(|j| is_marker_word[j] * w_hi(j)).sum();
+        let sum_w_lo: i64 = (0..16).map(|j| is_marker_word[j] * w_lo(j)).sum();
+        out.push(sum_w_hi - 256 * marker_word_byte[0] - marker_word_byte[1]);
+        out.push(sum_w_lo - 256 * marker_word_byte[2] - marker_word_byte[3]);
+
+        // (P.E) marker byte = 0x80.
+        for b in 0..4 {
+            out.push(marker_byte_sel[b] * (marker_word_byte[b] - 0x80));
+        }
+
+        // (P.F) bytes after marker = 0.
+        let mut cum_bs = 0i64;
+        for b in 0..4 {
+            out.push(cum_bs * marker_word_byte[b]);
+            cum_bs += marker_byte_sel[b];
+        }
+
+        // (P.G) words after marker = 0 (with length-block exception).
+        // Range loop mirrors the AIR's constraint emission order; the
+        // body calls `w_lo(j)`/`w_hi(j)` closures, so an iterator form
+        // over `cum` would read worse than the index loop.
+        #[allow(clippy::needless_range_loop)]
+        for j in 0..14 {
+            let gate = cum[j] + is_length_only_block;
+            out.push(gate * w_lo(j));
+            out.push(gate * w_hi(j));
+        }
+        out.push(marker_word_post_strict_15 * w_lo(15));
+        out.push(marker_word_post_strict_15 * w_hi(15));
+
+        // (P.H) length-field encoding.
+        out.push(is_length_block * (w_lo(14) - bit_length_w14_lo));
+        out.push(is_length_block * (w_hi(14) - bit_length_w14_hi));
+        out.push(is_length_block * (w_lo(15) - bit_length_w15_lo));
+        out.push(is_length_block * (w_hi(15) - bit_length_w15_hi));
+
+        out
+    }
+
+    /// Assert every padding residual at every real-block slot is zero.
+    /// Padding rows (`enabler = 0`) are *not* exempt because the padding
+    /// constraints are emitted without an explicit `enabler` factor —
+    /// they instead rely on every padding-region cell being 0 by default
+    /// trace fill, which makes each algebraic identity trivially satisfied
+    /// there. This test covers both invariants in one pass.
+    fn assert_padding_holds_for_message(msg: &[u8]) {
+        let witness = compute_sha256_witness(msg);
+        let log_size = min_log_size(witness.blocks.len());
+        let trace = generate_trace(&witness, log_size);
+        let n_rows = 1usize << log_size;
+        for slot in 0..n_rows {
+            for (i, &r) in padding_residuals(&trace, slot).iter().enumerate() {
+                assert_eq!(
+                    r,
+                    0,
+                    "padding residual #{i} non-zero on honest trace at slot {slot} (msg.len()={})",
+                    msg.len(),
+                );
+            }
+        }
+    }
+
+    /// Case A (single trailing block, msg.len() % 64 ∈ [0, 56)):
+    /// the empty message ⇒ one block with marker at byte 0 and length
+    /// at bytes [56, 64). Smallest possible padded trace.
+    #[test]
+    fn padding_constraints_hold_for_empty_message() {
+        assert_padding_holds_for_message(b"");
+    }
+
+    /// Case A, marker in middle of a word: "abc" puts the marker at
+    /// byte 3 of `W[0]` (the LSB byte), with bytes 0..3 carrying the
+    /// message tail. Exercises every (P.D)/(P.E)/(P.F) byte-position
+    /// branch on a marker word with non-zero pre-marker bytes.
+    #[test]
+    fn padding_constraints_hold_for_abc() {
+        assert_padding_holds_for_message(b"abc");
+    }
+
+    /// Case B (overflow, marker in penultimate block): `msg.len() = 56`
+    /// pushes the length into a second padding-only block. Exercises the
+    /// `is_marker_only_block` and `is_length_only_block` aux flags and
+    /// the (P.G) "all of W[0..14] is zero in the length-only block" path.
+    #[test]
+    fn padding_constraints_hold_for_56_byte_message() {
+        let msg: Vec<u8> = (0..56u8).collect();
+        assert_padding_holds_for_message(&msg);
+    }
+
+    /// Larger multi-block example to triple-check `is_marker_block = 0`
+    /// pure-message blocks emit no constraint violation. 200 bytes ⇒
+    /// 4 blocks: blocks 0–2 are pure message, block 3 is the marker
+    /// and length block (Case A).
+    #[test]
+    fn padding_constraints_hold_for_multi_block_message() {
+        assert_padding_holds_for_message(&[0xABu8; 200]);
+    }
+
+    /// Marker-offset mutation: shift the `marker_byte_sel` one-hot so
+    /// the AIR thinks the marker is at a different byte position than
+    /// the actual `0x80` in `W[k]`. Covers roadmap 3.9.7's "wrong marker
+    /// offset" negative case (and is the marker-byte direct analogue of
+    /// 3.9.8's marker-position-shift mutation class).
+    #[test]
+    fn padding_rejects_marker_byte_sel_mutation() {
+        let witness = compute_sha256_witness(b"abc");
+        let log_size = min_log_size(witness.blocks.len());
+        let mut trace = generate_trace(&witness, log_size);
+        let slot = Layout::block_slot(0, log_size);
+
+        // Honest: marker at byte 3 of W[0]; marker_byte_sel[3] == 1,
+        // others 0.
+        assert_eq!(cell(&trace, Layout::marker_byte_sel(3), slot), 1);
+        // Move the selector to byte 0 — claiming the 0x80 is the MSB.
+        trace[Layout::marker_byte_sel(3)][slot] = stwo::core::fields::m31::BaseField::from(0u32);
+        trace[Layout::marker_byte_sel(0)][slot] = stwo::core::fields::m31::BaseField::from(1u32);
+
+        let residuals = padding_residuals(&trace, slot);
+        assert!(
+            residuals.iter().any(|&r| r != 0),
+            "AIR must reject a marker_byte_sel mutation"
+        );
+    }
+
+    /// Length-field mutation: bump `W[15]` of the length block while
+    /// leaving `bit_length_w15_*` untouched. The (P.H) identity goes
+    /// non-zero.
+    #[test]
+    fn padding_rejects_length_field_mutation() {
+        let witness = compute_sha256_witness(b"abc");
+        let log_size = min_log_size(witness.blocks.len());
+        let mut trace = generate_trace(&witness, log_size);
+        let slot = Layout::block_slot(0, log_size);
+        assert_eq!(cell(&trace, Layout::COL_IS_LENGTH_BLOCK, slot), 1);
+
+        // Honest: W[15] = bit length 24 (0x18) ⇒ W[15].lo = 0x18.
+        let (w15_lo, _) = Layout::schedule_word(15);
+        assert_eq!(cell(&trace, w15_lo, slot), 0x18);
+        trace[w15_lo][slot] = stwo::core::fields::m31::BaseField::from(0x99u32);
+
+        let residuals = padding_residuals(&trace, slot);
+        assert!(
+            residuals.iter().any(|&r| r != 0),
+            "AIR must reject a length-field mutation"
+        );
+    }
+
+    /// Non-zero fill-byte mutation: a real "abc" trace has `W[1..14]`
+    /// all zero (the zero-fill between the marker and the length).
+    /// Setting `W[5]` to a non-zero value violates the (P.G) "words
+    /// after marker are zero" identity.
+    #[test]
+    fn padding_rejects_non_zero_fill_word_mutation() {
+        let witness = compute_sha256_witness(b"abc");
+        let log_size = min_log_size(witness.blocks.len());
+        let mut trace = generate_trace(&witness, log_size);
+        let slot = Layout::block_slot(0, log_size);
+
+        // Honest: W[5] is in the zero-fill region.
+        let (w5_lo, _) = Layout::schedule_word(5);
+        assert_eq!(cell(&trace, w5_lo, slot), 0);
+        trace[w5_lo][slot] = stwo::core::fields::m31::BaseField::from(0x42u32);
+
+        let residuals = padding_residuals(&trace, slot);
+        assert!(
+            residuals.iter().any(|&r| r != 0),
+            "AIR must reject a non-zero fill word mutation"
+        );
+    }
+
+    /// Marker-word-index mutation: shift the `is_marker_word` one-hot
+    /// to a different word. The (P.D) byte-assembly identity goes
+    /// non-zero — the bytes committed for the marker word are still the
+    /// real `W[0]`'s bytes, but the AIR now reads `W[j]` for the
+    /// new `j`.
+    #[test]
+    fn padding_rejects_marker_word_index_mutation() {
+        let witness = compute_sha256_witness(b"abc");
+        let log_size = min_log_size(witness.blocks.len());
+        let mut trace = generate_trace(&witness, log_size);
+        let slot = Layout::block_slot(0, log_size);
+
+        // Honest: marker at W[0].
+        assert_eq!(cell(&trace, Layout::is_marker_word(0), slot), 1);
+        trace[Layout::is_marker_word(0)][slot] = stwo::core::fields::m31::BaseField::from(0u32);
+        trace[Layout::is_marker_word(5)][slot] = stwo::core::fields::m31::BaseField::from(1u32);
+
+        let residuals = padding_residuals(&trace, slot);
+        assert!(
+            residuals.iter().any(|&r| r != 0),
+            "AIR must reject a marker-word-index mutation"
+        );
+    }
+
+    /// Bit-length-limb mutation: the prover claims a different
+    /// `bit_length_w15_lo` than what `W[15]` actually holds. (P.H)
+    /// catches this. This is the direct analogue of the "wrong message
+    /// length claim" attack the post-2.4 cross-component binding closes;
+    /// today it surfaces as the on-row inconsistency the AIR rejects.
+    #[test]
+    fn padding_rejects_bit_length_limb_mutation() {
+        let witness = compute_sha256_witness(b"abc");
+        let log_size = min_log_size(witness.blocks.len());
+        let mut trace = generate_trace(&witness, log_size);
+        let slot = Layout::block_slot(0, log_size);
+
+        // Honest: bit_length_w15_lo = 0x18 (bit length for "abc" is 24).
+        assert_eq!(cell(&trace, Layout::COL_BIT_LENGTH_W15_LO, slot), 0x18);
+        trace[Layout::COL_BIT_LENGTH_W15_LO][slot] =
+            stwo::core::fields::m31::BaseField::from(0x42u32);
+
+        let residuals = padding_residuals(&trace, slot);
+        assert!(
+            residuals.iter().any(|&r| r != 0),
+            "AIR must reject a bit-length limb mutation"
+        );
+    }
+
+    /// Block-alignment (`padded.len() % 64 == 0`) is structural — one
+    /// trace row IS one 64-byte block — so the AIR cannot represent a
+    /// partial block. No per-row constraint expresses this requirement;
+    /// the trace shape itself does. This test documents that invariant
+    /// at the structural level by asserting every honest message yields
+    /// `padded.len() % BLOCK_BYTES == 0`, exercising the natural
+    /// `n_blocks · BLOCK_BYTES = padded.len()` identity FIPS §5.1.1
+    /// implies and which the witness layer assumes.
+    #[test]
+    fn padded_length_is_always_block_aligned() {
+        use crate::constants::BLOCK_BYTES;
+        for n in [0usize, 1, 3, 55, 56, 57, 63, 64, 65, 127, 128, 200, 511] {
+            let witness = compute_sha256_witness(&vec![0xABu8; n]);
+            assert_eq!(
+                witness.padding.padded.len() % BLOCK_BYTES,
+                0,
+                "padded length not block-aligned for msg.len()={n}",
+            );
+            assert_eq!(
+                witness.padding.padded.len(),
+                witness.padding.n_blocks * BLOCK_BYTES,
+                "n_blocks · BLOCK_BYTES != padded.len() for msg.len()={n}",
+            );
         }
     }
 }
