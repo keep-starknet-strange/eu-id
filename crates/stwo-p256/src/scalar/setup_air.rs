@@ -24,10 +24,6 @@ pub struct DigestReductionRelations<'a> {
     ///
     /// Must be configured with [`DIGEST_REDUCTION_CARRY_BOUND`].
     pub signed_carry: &'a RangeCheckRelation,
-    /// Carry table used by the nested `z_red < n` comparison.
-    ///
-    /// The comparison helper additionally constrains these carries to boolean.
-    pub comparison_carry: &'a RangeCheckRelation,
 }
 
 pub struct DigestReductionColumns<E: EvalAtRow> {
@@ -98,7 +94,6 @@ pub fn add_digest_reduction<E: EvalAtRow>(
         eval,
         CanonicalLtRelations {
             limb_range: relations.range13,
-            carry_range: relations.comparison_carry,
         },
         gate,
         &columns.z_red,

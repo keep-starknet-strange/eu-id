@@ -6,16 +6,11 @@ use stwo_p256_utils::scalar_arithmetic::BigIntLimbs;
 use crate::limbs::P256EvalBigInt;
 use crate::range_checks::{add_range_check, RangeCheckRelation};
 
-/// Lookup relations consumed by [`add_canonical_lt_fixed_bound`] and
-/// [`add_canonical_lt_witness_bound`].
-///
-/// `limb_range` is the 13-bit limb table. `carry_range` may be a small
-/// unsigned range table such as Range7; the gadget also constrains each carry
-/// to be boolean, so the effective carry set is exactly `{0, 1}`.
+/// Lookup relations consumed by [`add_canonical_lt_fixed_bound`].
 #[derive(Clone, Copy)]
 pub struct CanonicalLtRelations<'a> {
+    /// 13-bit range table for value and slack limbs.
     pub limb_range: &'a RangeCheckRelation,
-    pub carry_range: &'a RangeCheckRelation,
 }
 
 /// Enforce `value < bound` using `value + slack + 1 = bound`.
@@ -35,51 +30,6 @@ pub fn add_canonical_lt_fixed_bound<E: EvalAtRow>(
     carries: &[E::F; N_LIMBS],
 ) {
     assert!(bound.iter().all(|&limb| limb < (1u32 << LIMB_BITS)));
-    add_canonical_lt_constraints(
-        eval,
-        relations,
-        gate,
-        value,
-        FixedBound { limbs: bound },
-        slack,
-        carries,
-    );
-}
-
-/// Enforce `value < bound` where the bound is also witness-provided.
-///
-/// Use this only when the bound limbs are separately bound to public or
-/// preprocessed data. Otherwise the prover can choose an easier bound. The
-/// `gate` must be the same 0/1 selector that guards downstream consumption.
-pub fn add_canonical_lt_witness_bound<E: EvalAtRow>(
-    eval: &mut E,
-    relations: CanonicalLtRelations<'_>,
-    gate: E::F,
-    value: &P256EvalBigInt<E>,
-    bound: &P256EvalBigInt<E>,
-    slack: &P256EvalBigInt<E>,
-    carries: &[E::F; N_LIMBS],
-) {
-    add_canonical_lt_constraints(
-        eval,
-        relations,
-        gate,
-        value,
-        WitnessBound { limbs: bound },
-        slack,
-        carries,
-    );
-}
-
-fn add_canonical_lt_constraints<E: EvalAtRow, B: BoundLimbs<E>>(
-    eval: &mut E,
-    relations: CanonicalLtRelations<'_>,
-    gate: E::F,
-    value: &P256EvalBigInt<E>,
-    bound: B,
-    slack: &P256EvalBigInt<E>,
-    carries: &[E::F; N_LIMBS],
-) {
     let one = E::F::from(M31::from_u32_unchecked(1));
     let limb_base = E::F::from(M31::from_u32_unchecked(1u32 << LIMB_BITS));
 
@@ -96,16 +46,7 @@ fn add_canonical_lt_constraints<E: EvalAtRow, B: BoundLimbs<E>>(
             gate.clone(),
             slack.limbs()[i].clone(),
         );
-        if bound.is_witness() {
-            add_range_check(eval, relations.limb_range, gate.clone(), bound.limb(i));
-        }
 
-        add_range_check(
-            eval,
-            relations.carry_range,
-            gate.clone(),
-            carries[i].clone(),
-        );
         eval.add_constraint(gate.clone() * carries[i].clone() * (carries[i].clone() - one.clone()));
 
         let prev_carry = if i == 0 {
@@ -119,7 +60,7 @@ fn add_canonical_lt_constraints<E: EvalAtRow, B: BoundLimbs<E>>(
             E::F::from(M31::from_u32_unchecked(0))
         };
         let recurrence = value.limbs()[i].clone() + slack.limbs()[i].clone() + prev_carry + delta
-            - bound.limb(i)
+            - fixed_limb::<E>(bound, i)
             - limb_base.clone() * carries[i].clone();
         eval.add_constraint(gate.clone() * recurrence);
     }
@@ -127,37 +68,8 @@ fn add_canonical_lt_constraints<E: EvalAtRow, B: BoundLimbs<E>>(
     eval.add_constraint(gate * carries[N_LIMBS - 1].clone());
 }
 
-trait BoundLimbs<E: EvalAtRow> {
-    fn limb(&self, index: usize) -> E::F;
-    fn is_witness(&self) -> bool;
-}
-
-struct FixedBound<'a> {
-    limbs: &'a BigIntLimbs,
-}
-
-impl<E: EvalAtRow> BoundLimbs<E> for FixedBound<'_> {
-    fn limb(&self, index: usize) -> E::F {
-        E::F::from(M31::from_u32_unchecked(self.limbs[index]))
-    }
-
-    fn is_witness(&self) -> bool {
-        false
-    }
-}
-
-struct WitnessBound<'a, E: EvalAtRow> {
-    limbs: &'a P256EvalBigInt<E>,
-}
-
-impl<E: EvalAtRow> BoundLimbs<E> for WitnessBound<'_, E> {
-    fn limb(&self, index: usize) -> E::F {
-        self.limbs.limbs()[index].clone()
-    }
-
-    fn is_witness(&self) -> bool {
-        true
-    }
+fn fixed_limb<E: EvalAtRow>(limbs: &BigIntLimbs, index: usize) -> E::F {
+    E::F::from(M31::from_u32_unchecked(limbs[index]))
 }
 
 #[cfg(test)]
