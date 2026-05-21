@@ -372,6 +372,52 @@ pub fn pack_round_groups(w: u32, groups: &RoundGroups) -> [u32; GROUPS_PER_ROUND
     out
 }
 
+/// Coefficients linking the partition's 6 packed-group values to the
+/// `(key_s, key_s_complement)` of the decode table, in `groups_in_order()`
+/// ordering — `[c(s[0]), c(s[1]), c(s[2]), c(s'[0]), c(s'[1]), c(s'[2])]`.
+///
+/// The decode-table key is `pack_half_key(w, side_mask)` — bits at the
+/// side's positions packed contiguously into the low bits in **ascending
+/// source-position order** (per [`crate::tables::pack_half_key`]). Because
+/// every group's bits are contiguous in the source-position order within
+/// its side (`s[0]` covers the lowest |s[0]| key positions, `s[1]` covers
+/// the next |s[1]|, etc.), each group contributes its packed value to
+/// `key_s` (or `key_s_complement`) at the power-of-two offset equal to
+/// the count of S-side bits that precede it.
+///
+/// So:
+///   `key_s            = c[0] · g[0] + c[1] · g[1] + c[2] · g[2]`
+///   `key_s_complement = c[3] · g[3] + c[4] · g[4] + c[5] · g[5]`
+///
+/// where `g[i] = packed value of groups_in_order()[i]` and `c[i]` is this
+/// function's `i`-th return.
+pub const fn round_key_coeffs(groups: &RoundGroups) -> [u32; GROUPS_PER_ROUND_PARTITION] {
+    [
+        1,
+        1u32 << groups.s[0].len() as u32,
+        1u32 << (groups.s[0].len() + groups.s[1].len()) as u32,
+        1,
+        1u32 << groups.s_complement[0].len() as u32,
+        1u32 << (groups.s_complement[0].len() + groups.s_complement[1].len()) as u32,
+    ]
+}
+
+/// Pack-key coefficient for the **hi-half** packed `S`-value of a `σ`
+/// partition. The lo-half value's coefficient is always `1` (it sits at
+/// the low end of the packed key). The hi-half value's coefficient equals
+/// `2^|S∩lo|` because the lo-side bits fill the low `|S∩lo|` positions of
+/// `key_s` first.
+pub const fn lower_sigma_key_hi_coeff_s(parts: &SigmaParts) -> u32 {
+    1u32 << parts.s_lo.len() as u32
+}
+
+/// Pack-key coefficient for the **hi-half** packed `S'`-value of a `σ`
+/// partition. Mirrors [`lower_sigma_key_hi_coeff_s`] for the complementary
+/// side.
+pub const fn lower_sigma_key_hi_coeff_s_complement(parts: &SigmaParts) -> u32 {
+    1u32 << parts.s_complement_lo.len() as u32
+}
+
 /// Smoke check that constant `IV` length matches state width.
 const _: () = assert!(crate::constants::IV.len() == N_STATE_WORDS);
 
@@ -527,6 +573,125 @@ mod tests {
                 for (i, &p) in packed.iter().enumerate() {
                     assert!(p < cap, "group {i} value {p} ≥ {cap}");
                 }
+            }
+        }
+    }
+
+    /// Linear assembly of the 6 packed groups via `round_key_coeffs`
+    /// reproduces `pack_half_key(w, side_mask)` for both sides. This is
+    /// the soundness property the AIR's σ-decode-key-pin constraint
+    /// depends on: a row with the right packed groups must algebraically
+    /// reassemble to the row's committed `key_s` / `key_s_complement`.
+    #[test]
+    fn round_key_coeffs_reassemble_pack_half_key() {
+        use crate::tables::pack_half_key;
+        for (groups, s_mask) in [
+            (&SIGMA0_GROUPS, s_mask::SIGMA0),
+            (&SIGMA1_GROUPS, s_mask::SIGMA1),
+        ] {
+            let coeffs = round_key_coeffs(groups);
+            for w in [
+                0u32,
+                1,
+                0xFFFF,
+                0x1_0000,
+                0xDEAD_BEEF,
+                0xCAFE_BABE,
+                0x6A09_E667,
+                0xBB67_AE85,
+                u32::MAX,
+            ] {
+                let packed = pack_round_groups(w, groups);
+                // S-side reassembly: c[0]·g[0] + c[1]·g[1] + c[2]·g[2].
+                let key_s_built =
+                    coeffs[0] * packed[0] + coeffs[1] * packed[1] + coeffs[2] * packed[2];
+                assert_eq!(key_s_built, pack_half_key(w, s_mask), "{w:#x} S-side");
+                // S'-side reassembly.
+                let key_s_complement_built =
+                    coeffs[3] * packed[3] + coeffs[4] * packed[4] + coeffs[5] * packed[5];
+                assert_eq!(
+                    key_s_complement_built,
+                    pack_half_key(w, !s_mask),
+                    "{w:#x} S'-side"
+                );
+            }
+        }
+    }
+
+    /// σ-partition equivalent: `(packed_s_lo + hi_coeff_s · packed_s_hi,
+    /// packed_s_complement_lo + hi_coeff_s_complement · packed_s_complement_hi)`
+    /// equals `pack_half_key(x, ±s_mask)`. The packed-{lo,hi} values come
+    /// from the σ split-and-pack lookups; this test pins the coefficients
+    /// to the value `pack_half_key` would produce.
+    #[test]
+    fn lower_sigma_key_coeffs_reassemble_pack_half_key() {
+        use crate::tables::pack_half_key;
+        for (parts, s_mask, f) in [
+            (
+                &LOWER_SIGMA0_PARTS,
+                s_mask::LOWER_SIGMA0,
+                SigmaFn::LowerSigma0,
+            ),
+            (
+                &LOWER_SIGMA1_PARTS,
+                s_mask::LOWER_SIGMA1,
+                SigmaFn::LowerSigma1,
+            ),
+        ] {
+            let _ = f; // not used here; only the partition shapes matter.
+            let coeff_hi_s = lower_sigma_key_hi_coeff_s(parts);
+            let coeff_hi_s_complement = lower_sigma_key_hi_coeff_s_complement(parts);
+            for x in [
+                0u32,
+                1,
+                0xFFFF,
+                0x1_0000,
+                0xDEAD_BEEF,
+                0xCAFE_BABE,
+                0x6A09_E667,
+                0xBB67_AE85,
+                u32::MAX,
+            ] {
+                // Lo-half packed S and S' values.
+                let lo = x & 0xFFFF;
+                let mut packed_s_lo = 0u32;
+                for (i, &pos) in parts.s_lo.iter().enumerate() {
+                    if (lo >> pos) & 1 == 1 {
+                        packed_s_lo |= 1u32 << i;
+                    }
+                }
+                let mut packed_s_complement_lo = 0u32;
+                for (i, &pos) in parts.s_complement_lo.iter().enumerate() {
+                    if (lo >> pos) & 1 == 1 {
+                        packed_s_complement_lo |= 1u32 << i;
+                    }
+                }
+                // Hi-half packed S and S' values — positions are shifted
+                // by 16 (so we read the hi limb as a 0..2¹⁶ value).
+                let hi = (x >> 16) & 0xFFFF;
+                let mut packed_s_hi = 0u32;
+                for (i, &pos) in parts.s_hi.iter().enumerate() {
+                    let pos_in_hi = pos - 16;
+                    if (hi >> pos_in_hi) & 1 == 1 {
+                        packed_s_hi |= 1u32 << i;
+                    }
+                }
+                let mut packed_s_complement_hi = 0u32;
+                for (i, &pos) in parts.s_complement_hi.iter().enumerate() {
+                    let pos_in_hi = pos - 16;
+                    if (hi >> pos_in_hi) & 1 == 1 {
+                        packed_s_complement_hi |= 1u32 << i;
+                    }
+                }
+                let key_s_built = packed_s_lo + coeff_hi_s * packed_s_hi;
+                assert_eq!(key_s_built, pack_half_key(x, s_mask), "{x:#x} S-side");
+                let key_s_complement_built =
+                    packed_s_complement_lo + coeff_hi_s_complement * packed_s_complement_hi;
+                assert_eq!(
+                    key_s_complement_built,
+                    pack_half_key(x, !s_mask),
+                    "{x:#x} S'-side"
+                );
             }
         }
     }

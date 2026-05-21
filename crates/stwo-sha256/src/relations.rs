@@ -8,7 +8,7 @@
 //! component (committed separately at prover-setup time); the relations
 //! here are the contract between the two.
 //!
-//! Three channel families are wired into the constraint layer today:
+//! Four channel families are wired into the constraint layer today:
 //!   - [`SigmaDecodeRelations`] — the eight `Σ`/`σ` decode tables.
 //!   - [`MajRelation`] / [`ChRelation`] — the packed Maj/Ch lookup,
 //!     sharing one underlying table at width `W ≥ MAX_ROUND_GROUP_BITS`.
@@ -18,6 +18,13 @@
 //!   - [`Xor8Relation`] — the single 2¹⁶-row `(x, y, z = x ⊕ y)` table,
 //!     fired chunk-wise to combine the two `O2` partials of every
 //!     σ-application.
+//!   - [`SplitPackRelations`] — the eight split-and-pack tables (one per
+//!     partition × `{lo, hi}` half) that map a 16-bit half-word to its
+//!     packed-group decomposition. Round-side rows are width 4 (`key + 3
+//!     packed groups`); σ-side rows are width 3 (`key + packed_s +
+//!     packed_s_complement`). Firing each lookup implicitly range-checks
+//!     the input limb to `[0, 2¹⁶)` and supplies the packed values the
+//!     Maj/Ch and `Σ`/`σ` decode-key reconstruction read.
 //!
 //! The matching shared range-check channels (`Range_2`/`4`/`5`/`16`) follow
 //! the same pattern and join in the shared-foundation rollout (`Range_*`
@@ -125,31 +132,111 @@ pub const XOR_8_REL_SIZE: usize = 3;
 
 relation!(Xor8Relation, XOR_8_REL_SIZE);
 
+/// Row width of a **round-partition** split-and-pack table: `(key,
+/// packed_group_0, packed_group_1, packed_group_2)`. Three packed groups
+/// because the `Σ0`/`Maj` and `Σ1`/`Ch` partitions each place exactly
+/// three of their six groups in each 16-bit half (see
+/// [`crate::partitions::SIGMA0_GROUPS`] / [`crate::partitions::SIGMA1_GROUPS`]).
+/// `key` is the 16-bit half-word the partition's groups live in; matching
+/// this row pins the half-word to `[0, 2¹⁶)` implicitly (design §11 L1).
+pub const ROUND_SPLIT_PACK_REL_SIZE: usize = 4;
+
+relation!(Sigma0SplitPackLo, ROUND_SPLIT_PACK_REL_SIZE);
+relation!(Sigma0SplitPackHi, ROUND_SPLIT_PACK_REL_SIZE);
+relation!(Sigma1SplitPackLo, ROUND_SPLIT_PACK_REL_SIZE);
+relation!(Sigma1SplitPackHi, ROUND_SPLIT_PACK_REL_SIZE);
+
+/// Row width of a **σ-partition** split-and-pack table: `(key,
+/// packed_s, packed_s_complement)`. Each `σ` partition is just
+/// `{S∩lo / S∩hi / S'∩lo / S'∩hi}` (no `Maj`/`Ch` co-service), so per
+/// half the table emits one packed `S`-side value and one packed
+/// `S'`-side value. The two halves' packed `S` values combine linearly
+/// to the σ-decode-table key `key_s` (and analogously for `key_s'`).
+pub const SIGMA_SPLIT_PACK_REL_SIZE: usize = 3;
+
+relation!(LowerSigma0SplitPackLo, SIGMA_SPLIT_PACK_REL_SIZE);
+relation!(LowerSigma0SplitPackHi, SIGMA_SPLIT_PACK_REL_SIZE);
+relation!(LowerSigma1SplitPackLo, SIGMA_SPLIT_PACK_REL_SIZE);
+relation!(LowerSigma1SplitPackHi, SIGMA_SPLIT_PACK_REL_SIZE);
+
+/// All eight split-and-pack channels grouped for `Sha256Eval`. Round-side
+/// channels (Σ0/Maj a-side, Σ1/Ch e-side) feed both the packed Maj/Ch
+/// lookups and the `Σ` decode-key reconstruction. σ-side channels feed
+/// only the σ decode-key reconstruction (`σ` partitions do not co-serve
+/// Maj/Ch).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SplitPackRelations {
+    pub sigma0_lo: Sigma0SplitPackLo,
+    pub sigma0_hi: Sigma0SplitPackHi,
+    pub sigma1_lo: Sigma1SplitPackLo,
+    pub sigma1_hi: Sigma1SplitPackHi,
+    pub lower_sigma0_lo: LowerSigma0SplitPackLo,
+    pub lower_sigma0_hi: LowerSigma0SplitPackHi,
+    pub lower_sigma1_lo: LowerSigma1SplitPackLo,
+    pub lower_sigma1_hi: LowerSigma1SplitPackHi,
+}
+
+impl SplitPackRelations {
+    pub fn draw(channel: &mut impl Channel) -> Self {
+        Self {
+            sigma0_lo: Sigma0SplitPackLo::draw(channel),
+            sigma0_hi: Sigma0SplitPackHi::draw(channel),
+            sigma1_lo: Sigma1SplitPackLo::draw(channel),
+            sigma1_hi: Sigma1SplitPackHi::draw(channel),
+            lower_sigma0_lo: LowerSigma0SplitPackLo::draw(channel),
+            lower_sigma0_hi: LowerSigma0SplitPackHi::draw(channel),
+            lower_sigma1_lo: LowerSigma1SplitPackLo::draw(channel),
+            lower_sigma1_hi: LowerSigma1SplitPackHi::draw(channel),
+        }
+    }
+
+    pub fn dummy() -> Self {
+        Self {
+            sigma0_lo: Sigma0SplitPackLo::dummy(),
+            sigma0_hi: Sigma0SplitPackHi::dummy(),
+            sigma1_lo: Sigma1SplitPackLo::dummy(),
+            sigma1_hi: Sigma1SplitPackHi::dummy(),
+            lower_sigma0_lo: LowerSigma0SplitPackLo::dummy(),
+            lower_sigma0_hi: LowerSigma0SplitPackHi::dummy(),
+            lower_sigma1_lo: LowerSigma1SplitPackLo::dummy(),
+            lower_sigma1_hi: LowerSigma1SplitPackHi::dummy(),
+        }
+    }
+}
+
+impl Default for SplitPackRelations {
+    fn default() -> Self {
+        Self::dummy()
+    }
+}
+
 /// All LogUp channels the SHA-256 AIR consumes today: the eight `Σ`/`σ`
-/// decode-table channels, the packed Maj/Ch pair, and the chunk-wise
-/// `xor_8` channel. Aggregated so `Sha256Eval` holds a single relations
-/// bundle and the prover-side `draw` walks the transcript once per
-/// component.
+/// decode-table channels, the packed Maj/Ch pair, the chunk-wise `xor_8`
+/// channel, and the eight split-and-pack channels. Aggregated so
+/// `Sha256Eval` holds a single relations bundle and the prover-side
+/// `draw` walks the transcript once per component.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Sha256Relations {
     pub sigma_decode: SigmaDecodeRelations,
     pub maj: MajRelation,
     pub ch: ChRelation,
     pub xor_8: Xor8Relation,
+    pub split_pack: SplitPackRelations,
 }
 
 impl Sha256Relations {
     /// Draw fresh `LookupElements` for every channel from a transcript.
     /// The draw order is fixed — decode channels first (matching the
-    /// existing 3.9.3 pattern), then Maj, then Ch, then `xor_8`. Changing
-    /// the order rotates the verifier-side challenges and breaks proof
-    /// portability.
+    /// existing 3.9.3 pattern), then Maj, then Ch, then `xor_8`, then the
+    /// split-and-pack channels. Changing the order rotates the
+    /// verifier-side challenges and breaks proof portability.
     pub fn draw(channel: &mut impl Channel) -> Self {
         Self {
             sigma_decode: SigmaDecodeRelations::draw(channel),
             maj: MajRelation::draw(channel),
             ch: ChRelation::draw(channel),
             xor_8: Xor8Relation::draw(channel),
+            split_pack: SplitPackRelations::draw(channel),
         }
     }
 
@@ -161,6 +248,7 @@ impl Sha256Relations {
             maj: MajRelation::dummy(),
             ch: ChRelation::dummy(),
             xor_8: Xor8Relation::dummy(),
+            split_pack: SplitPackRelations::dummy(),
         }
     }
 }
@@ -221,5 +309,59 @@ mod tests {
             XOR_8_REL_SIZE
         );
         assert_eq!(XOR_8_REL_SIZE, 3);
+    }
+
+    /// The four round-side split-and-pack channels expose row width 4.
+    /// Cross-checked through the `Relation` trait so an off-by-one in the
+    /// macro declaration would fail closed.
+    #[test]
+    fn round_split_pack_relations_have_row_width_4() {
+        use stwo::core::fields::m31::BaseField;
+        use stwo::core::fields::qm31::SecureField;
+        use stwo_constraint_framework::Relation;
+        let r = Sha256Relations::dummy();
+        for size in [
+            <Sigma0SplitPackLo as Relation<BaseField, SecureField>>::get_size(
+                &r.split_pack.sigma0_lo,
+            ),
+            <Sigma0SplitPackHi as Relation<BaseField, SecureField>>::get_size(
+                &r.split_pack.sigma0_hi,
+            ),
+            <Sigma1SplitPackLo as Relation<BaseField, SecureField>>::get_size(
+                &r.split_pack.sigma1_lo,
+            ),
+            <Sigma1SplitPackHi as Relation<BaseField, SecureField>>::get_size(
+                &r.split_pack.sigma1_hi,
+            ),
+        ] {
+            assert_eq!(size, ROUND_SPLIT_PACK_REL_SIZE);
+        }
+        assert_eq!(ROUND_SPLIT_PACK_REL_SIZE, 4);
+    }
+
+    /// The four σ-side split-and-pack channels expose row width 3.
+    #[test]
+    fn sigma_split_pack_relations_have_row_width_3() {
+        use stwo::core::fields::m31::BaseField;
+        use stwo::core::fields::qm31::SecureField;
+        use stwo_constraint_framework::Relation;
+        let r = Sha256Relations::dummy();
+        for size in [
+            <LowerSigma0SplitPackLo as Relation<BaseField, SecureField>>::get_size(
+                &r.split_pack.lower_sigma0_lo,
+            ),
+            <LowerSigma0SplitPackHi as Relation<BaseField, SecureField>>::get_size(
+                &r.split_pack.lower_sigma0_hi,
+            ),
+            <LowerSigma1SplitPackLo as Relation<BaseField, SecureField>>::get_size(
+                &r.split_pack.lower_sigma1_lo,
+            ),
+            <LowerSigma1SplitPackHi as Relation<BaseField, SecureField>>::get_size(
+                &r.split_pack.lower_sigma1_hi,
+            ),
+        ] {
+            assert_eq!(size, SIGMA_SPLIT_PACK_REL_SIZE);
+        }
+        assert_eq!(SIGMA_SPLIT_PACK_REL_SIZE, 3);
     }
 }

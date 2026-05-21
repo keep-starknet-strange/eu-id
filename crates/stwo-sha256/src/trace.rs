@@ -11,12 +11,19 @@
 //! - `is_first_block` (1 col) — `1` on the first block, used by the AIR to
 //!   force `h_in == IV` only there.
 //! - `h_in` (16 cols) — 8 words × 2 limbs each, little-endian limb order.
+//! - `H_IN_AUX_GRP_COLS` (24 cols) — per-block split-and-pack of `h_in[1]`,
+//!   `h_in[2]`, `h_in[5]`, `h_in[6]` (the §8.1 reuse chain's initial
+//!   `b`/`c`/`f`/`g` values that no prior round can supply). 4 operands
+//!   × `GROUPS_PER_ROUND_PARTITION` = 24 cells, in the fixed operand
+//!   order `[b_init, c_init, f_init, g_init]`.
 //! - schedule words `W[0..63]` (128 cols) — 64 words × 2 limbs.
 //! - schedule witnesses for `W[16..63]`: per entry, the `σ0`/`σ1` output
 //!   limbs and add carries (`2 + 2 + 2 = 6` cols), then the decoded
-//!   intermediates of `σ0` and `σ1` (2 × `SIGMA_DECODE_COLS`). Inputs
-//!   (`W[t-2]`, `W[t-7]`, `W[t-15]`, `W[t-16]`) are *not* duplicated here —
-//!   they live in the `W` columns above and are read by index in the AIR.
+//!   intermediates of `σ0` and `σ1` (2 × `SIGMA_DECODE_COLS`), then the
+//!   σ-input split-and-pack outputs for `σ0(W[t-15])` and `σ1(W[t-2])`
+//!   (2 × `SIGMA_INPUT_SPLIT_COLS`). Inputs (`W[t-2]`, `W[t-7]`,
+//!   `W[t-15]`, `W[t-16]`) are *not* duplicated here — they live in the
+//!   `W` columns above and are read by index in the AIR.
 //!   ⇒ `48 × SCHEDULE_ENTRY_COLS` cells.
 //! - per-round witnesses for `t ∈ [0, 64)` (`64 × ROUND_COLS` cols).
 //!   See [`Layout::round_col`] for the per-round shape.
@@ -32,12 +39,22 @@
 //! place; the Maj/Ch packed groups are appended at the tail so neither
 //! the limb-add nor the σ-decode read order shifts.
 //!
-//! Per-round Maj/Ch block (`ROUND_MAJ_CH_COLS = 8 · 6 = 48`): packed-group
-//! values of each operand in the partition-enumeration order
+//! Per-round Maj/Ch block (`ROUND_MAJ_CH_COLS = 4 · 6 = 24`): packed-group
+//! values of each *fresh* operand in the partition-enumeration order
 //! (`groups_in_order` — `S[0..3]` then `S'[0..3]`). Operand order is
-//! `a, b, c, maj_out` (a-side / `SIGMA0_GROUPS`) followed by
-//! `e, f, g, ch_out` (e-side / `SIGMA1_GROUPS`). Each cell is one packed
-//! group value in `[0, 2^|group|) ⊆ [0, 2^MAX_ROUND_GROUP_BITS)`.
+//! `a, maj_out` (a-side / `SIGMA0_GROUPS`) followed by `e, ch_out`
+//! (e-side / `SIGMA1_GROUPS`). `b`, `c`, `f`, `g` are not committed — the
+//! §8.1 reuse chain aliases them back to prior-round `a`/`e` columns
+//! (and to the per-block `H_IN_AUX_GRP` columns for `t ∈ {0, 1}`). Each
+//! cell is one packed group value in
+//! `[0, 2^|group|) ⊆ [0, 2^MAX_ROUND_GROUP_BITS)`.
+//!
+//! Per-schedule-entry σ-input split block (`SIGMA_INPUT_SPLIT_COLS = 4`):
+//! `(packed_s_lo, packed_s_complement_lo, packed_s_hi, packed_s_complement_hi)`
+//! — the four split-and-pack outputs the σ partition emits per input word.
+//! The AIR fires one σ-input split-and-pack lookup per half against the
+//! corresponding partition's table, then linearly assembles the σ-decode
+//! `key_s` / `key_s_complement` from these four values.
 //!
 //! Per σ-application (`SIGMA_DECODE_COLS = 24`):
 //! `key_s, o_main_s.lo, o_main_s.hi, o2_partial_s.lo, o2_partial_s.hi,
@@ -57,8 +74,8 @@ use stwo::core::fields::m31::{BaseField, M31};
 use crate::constants::{N_ROUNDS, N_STATE_WORDS};
 use crate::partitions::GROUPS_PER_ROUND_PARTITION;
 use crate::types::{
-    AddCarries, BlockWitness, LimbPairBytes, RoundMajChWitness, RoundPackedGroups, Sha256Witness,
-    SigmaDecodeWitness, WordLimbs,
+    AddCarries, BlockAuxSplitPackWitness, BlockWitness, LimbPairBytes, RoundMajChWitness,
+    RoundPackedGroups, Sha256Witness, SigmaDecodeWitness, SigmaInputSplitPackWitness, WordLimbs,
 };
 
 /// Columns per σ-application's decoded intermediates (§9.3 of the design):
@@ -72,22 +89,38 @@ use crate::types::{
 /// constraint loop's `add_to_relation` keys read in column order without
 /// re-permutation.
 pub const SIGMA_DECODE_COLS: usize = 5 + 5 + 2 + 4 + 4 + 4;
-/// Operands committed by the per-round Maj/Ch packed-group block:
-/// `a, b, c, maj_out, e, f, g, ch_out` (in this fixed order — the AIR's
-/// read loop relies on it).
-pub const ROUND_MAJ_CH_OPERANDS: usize = 8;
+/// Operands committed by the per-round Maj/Ch packed-group block, post
+/// §8.1 reuse: `a, maj_out, e, ch_out` (the four *fresh* operands; the
+/// `b`/`c`/`f`/`g` slots of the Maj/Ch lookup keys read from prior rounds'
+/// `a`/`e` columns via in-row aliasing).
+pub const ROUND_MAJ_CH_OPERANDS: usize = 4;
 /// Columns per round dedicated to the Maj/Ch packed-group lookup
-/// inputs/outputs. `8 operands · 6 groups = 48`. Each cell is one packed
+/// inputs/outputs. `4 operands · 6 groups = 24`. Each cell is one packed
 /// value in `[0, 2^|group|) ⊆ [0, 2^MAX_ROUND_GROUP_BITS)`.
 pub const ROUND_MAJ_CH_COLS: usize = ROUND_MAJ_CH_OPERANDS * GROUPS_PER_ROUND_PARTITION;
+/// Columns per σ-input split-and-pack block: four packed values
+/// `(packed_s_lo, packed_s_complement_lo, packed_s_hi, packed_s_complement_hi)`.
+/// The AIR fires one σ split-and-pack lookup per half against the
+/// partition's table (rows `(key=word.lo|hi, packed_s, packed_s')`).
+pub const SIGMA_INPUT_SPLIT_COLS: usize = 4;
 /// Columns per round: 8 word-results × 2 limbs + 4 carry pairs × 2 ends = 24,
 /// then two σ-decodes (one for `Σ0(a)`, one for `Σ1(e)`), then the
 /// Maj/Ch packed-group block.
 pub const ROUND_COLS: usize = 8 * 2 + 4 * 2 + 2 * SIGMA_DECODE_COLS + ROUND_MAJ_CH_COLS;
 /// Columns per schedule entry (`W[t]` for `t ≥ 16`):
 /// `σ0`, `σ1`, carries (= 6), then two σ-decodes (one for `σ0(W[t-15])`,
-/// one for `σ1(W[t-2])`).
-pub const SCHEDULE_ENTRY_COLS: usize = 6 + 2 * SIGMA_DECODE_COLS;
+/// one for `σ1(W[t-2])`), then two σ-input split-and-pack blocks.
+pub const SCHEDULE_ENTRY_COLS: usize = 6 + 2 * SIGMA_DECODE_COLS + 2 * SIGMA_INPUT_SPLIT_COLS;
+/// Per-block auxiliary split-and-pack operands for the §8.1 reuse chain:
+/// `[b_init = h_in[1]_a-side, c_init = h_in[2]_a-side, f_init = h_in[5]_e-side,
+///   g_init = h_in[6]_e-side]`. `h_in[0]`/`h_in[4]` are covered by
+/// `a_grp[round 0]`/`e_grp[round 0]` (`a[0]=h_in[0]`, `e[0]=h_in[4]`);
+/// `h_in[3]`/`h_in[7]` never enter Σ/Maj/Ch directly.
+pub const H_IN_AUX_OPERANDS: usize = 4;
+/// Columns dedicated to the per-block auxiliary split-and-pack of the
+/// §8.1 reuse chain's initial values. `4 operands · 6 groups = 24` cells
+/// per block.
+pub const H_IN_AUX_GRP_COLS: usize = H_IN_AUX_OPERANDS * GROUPS_PER_ROUND_PARTITION;
 /// Number of schedule entries: `W[16..64]` ⇒ 48.
 pub const N_SCHEDULE_ENTRIES: usize = N_ROUNDS - 16;
 
@@ -101,7 +134,9 @@ impl Layout {
     pub const COL_IS_FIRST_BLOCK: usize = 1;
     pub const COL_H_IN_START: usize = 2;
     pub const COL_H_IN_END: usize = Self::COL_H_IN_START + 2 * N_STATE_WORDS;
-    pub const COL_SCHED_START: usize = Self::COL_H_IN_END;
+    pub const COL_H_IN_AUX_GRP_START: usize = Self::COL_H_IN_END;
+    pub const COL_H_IN_AUX_GRP_END: usize = Self::COL_H_IN_AUX_GRP_START + H_IN_AUX_GRP_COLS;
+    pub const COL_SCHED_START: usize = Self::COL_H_IN_AUX_GRP_END;
     pub const COL_SCHED_END: usize = Self::COL_SCHED_START + 2 * N_ROUNDS;
     pub const COL_SCHED_ENTRY_START: usize = Self::COL_SCHED_END;
     pub const COL_SCHED_ENTRY_END: usize =
@@ -160,8 +195,10 @@ impl Layout {
         base + 24 + which * SIGMA_DECODE_COLS
     }
 
-    /// Start column of one round's Maj/Ch packed-group block — 48 cells
-    /// laid out as 8 operands × 6 groups, in `write_round_maj_ch` order.
+    /// Start column of one round's Maj/Ch packed-group block — 24 cells
+    /// laid out as 4 operands × 6 groups, in `write_round_maj_ch` order.
+    /// `b`/`c`/`f`/`g` are not present here; the AIR aliases them via the
+    /// §8.1 reuse chain.
     #[inline]
     pub const fn round_maj_ch_base(t: usize) -> usize {
         let base = Self::COL_ROUND_START + t * ROUND_COLS;
@@ -170,12 +207,37 @@ impl Layout {
 
     /// Column of one operand's packed-group cell within round `t`.
     ///
-    /// `operand_idx ∈ [0, 8)` indexes the operands in the fixed order
-    /// `[a, b, c, maj_out, e, f, g, ch_out]`. `group_idx ∈ [0, 6)` indexes
-    /// the groups in the partition's `groups_in_order` enumeration.
+    /// `operand_idx ∈ [0, 4)` indexes the operands in the fixed order
+    /// `[a, maj_out, e, ch_out]`. `group_idx ∈ [0, 6)` indexes the groups
+    /// in the partition's `groups_in_order` enumeration.
     #[inline]
     pub const fn round_packed_group(t: usize, operand_idx: usize, group_idx: usize) -> usize {
         Self::round_maj_ch_base(t) + operand_idx * GROUPS_PER_ROUND_PARTITION + group_idx
+    }
+
+    /// Column of one packed-group cell within the per-block auxiliary
+    /// split-and-pack region (`h_in[1]`/`h_in[2]`/`h_in[5]`/`h_in[6]`).
+    ///
+    /// `aux_idx ∈ [0, H_IN_AUX_OPERANDS)` indexes the four auxiliary
+    /// operands in the fixed order `[b_init, c_init, f_init, g_init]`.
+    /// `group_idx ∈ [0, GROUPS_PER_ROUND_PARTITION)` indexes the groups
+    /// in the operand's partition (`SIGMA0_GROUPS` for the `b_init`/
+    /// `c_init` slots, `SIGMA1_GROUPS` for `f_init`/`g_init`).
+    #[inline]
+    pub const fn h_in_aux_grp(aux_idx: usize, group_idx: usize) -> usize {
+        Self::COL_H_IN_AUX_GRP_START + aux_idx * GROUPS_PER_ROUND_PARTITION + group_idx
+    }
+
+    /// Start column of the σ-input split-and-pack block of one schedule
+    /// entry. `which` is `0` for the `σ0(W[t-15])` input and `1` for the
+    /// `σ1(W[t-2])` input — the order written by [`write_block_row`].
+    ///
+    /// The 4 cells starting here are
+    /// `(packed_s_lo, packed_s_complement_lo, packed_s_hi, packed_s_complement_hi)`.
+    #[inline]
+    pub const fn schedule_entry_input_split(j: usize, which: usize) -> usize {
+        let base = Self::COL_SCHED_ENTRY_START + j * SCHEDULE_ENTRY_COLS;
+        base + 6 + 2 * SIGMA_DECODE_COLS + which * SIGMA_INPUT_SPLIT_COLS
     }
 
     /// One round's columns, in order:
@@ -253,6 +315,9 @@ fn write_block_row(
         cols[hi][row] = m31(block.h_in[j].hi);
     }
 
+    // Per-block §8.1 reuse chain initial packed groups
+    write_h_in_aux_grp(cols, row, &block.aux_split_pack);
+
     // schedule W[0..63]
     for t in 0..N_ROUNDS {
         let (lo, hi) = Layout::schedule_word(t);
@@ -281,6 +346,19 @@ fn write_block_row(
             row,
             Layout::schedule_entry_decode(j, 1),
             &entry.lower_sigma1_decode,
+        );
+
+        write_sigma_input_split_block(
+            cols,
+            row,
+            Layout::schedule_entry_input_split(j, 0),
+            &entry.lower_sigma0_input_split,
+        );
+        write_sigma_input_split_block(
+            cols,
+            row,
+            Layout::schedule_entry_input_split(j, 1),
+            &entry.lower_sigma1_input_split,
         );
     }
 
@@ -382,10 +460,12 @@ fn write_chunk_quad(cols: &mut [Vec<BaseField>], row: usize, base: usize, chunks
     cols[base + 3][row] = m31(chunks.hi.b1);
 }
 
-/// Write one round's Maj/Ch packed-group block — 8 operands × 6 cells each,
-/// in the fixed operand order `[a, b, c, maj_out, e, f, g, ch_out]` and the
-/// partition's `groups_in_order` enumeration. The AIR's read loop walks the
-/// columns in exactly this order.
+/// Write one round's Maj/Ch packed-group block — 4 operands × 6 cells each,
+/// in the fixed operand order `[a, maj_out, e, ch_out]` and the partition's
+/// `groups_in_order` enumeration. The §8.1 reuse chain handles `b`/`c`/
+/// `f`/`g` via in-row aliasing to prior rounds' `a`/`e` columns (and to
+/// the per-block `H_IN_AUX_GRP` region for `t ∈ {0, 1}`). The AIR's read
+/// loop walks the columns in exactly this order.
 fn write_round_maj_ch(
     cols: &mut [Vec<BaseField>],
     row: usize,
@@ -394,12 +474,8 @@ fn write_round_maj_ch(
 ) {
     let operands: [&RoundPackedGroups; ROUND_MAJ_CH_OPERANDS] = [
         &maj_ch.a_grp,
-        &maj_ch.b_grp,
-        &maj_ch.c_grp,
         &maj_ch.maj_grp,
         &maj_ch.e_grp,
-        &maj_ch.f_grp,
-        &maj_ch.g_grp,
         &maj_ch.ch_grp,
     ];
     for (operand_idx, operand) in operands.iter().enumerate() {
@@ -407,6 +483,37 @@ fn write_round_maj_ch(
             cols[Layout::round_packed_group(t, operand_idx, group_idx)][row] = m31(v);
         }
     }
+}
+
+/// Write the per-block auxiliary split-and-pack block — the §8.1 reuse
+/// chain's initial values for `b`, `c`, `f`, `g`. Operand order is fixed:
+/// `[b_init = h_in[1]_a-side, c_init = h_in[2]_a-side, f_init =
+/// h_in[5]_e-side, g_init = h_in[6]_e-side]`, matching
+/// [`Layout::h_in_aux_grp`].
+fn write_h_in_aux_grp(cols: &mut [Vec<BaseField>], row: usize, aux: &BlockAuxSplitPackWitness) {
+    let operands: [&RoundPackedGroups; H_IN_AUX_OPERANDS] =
+        [&aux.b_init, &aux.c_init, &aux.f_init, &aux.g_init];
+    for (aux_idx, operand) in operands.iter().enumerate() {
+        for (group_idx, &v) in operand.vals.iter().enumerate() {
+            cols[Layout::h_in_aux_grp(aux_idx, group_idx)][row] = m31(v);
+        }
+    }
+}
+
+/// Write one σ-input split-and-pack block — the 4 packed values
+/// `(packed_s_lo, packed_s_complement_lo, packed_s_hi, packed_s_complement_hi)`.
+/// The AIR reads them in this order and fires two σ split-and-pack
+/// lookups (one per half) keyed on the word's `(lo, hi)` limbs.
+fn write_sigma_input_split_block(
+    cols: &mut [Vec<BaseField>],
+    row: usize,
+    base: usize,
+    w: &SigmaInputSplitPackWitness,
+) {
+    cols[base][row] = m31(w.packed_s_lo);
+    cols[base + 1][row] = m31(w.packed_s_complement_lo);
+    cols[base + 2][row] = m31(w.packed_s_hi);
+    cols[base + 3][row] = m31(w.packed_s_complement_hi);
 }
 
 /// Required `log_size` for `n_blocks` blocks (smallest power of two
@@ -520,30 +627,38 @@ mod tests {
         let expected = 1                       // enabler
             + 1                                // is_first_block
             + 2 * N_STATE_WORDS                // h_in
+            + H_IN_AUX_GRP_COLS                // §8.1 reuse-chain initial splits
             + 2 * N_ROUNDS                     // schedule
             + N_SCHEDULE_ENTRIES * SCHEDULE_ENTRY_COLS
             + N_ROUNDS * ROUND_COLS
             + 2 * N_STATE_WORDS                // finalization carries
             + 2 * N_STATE_WORDS; // h_out
         assert_eq!(Layout::TOTAL_COLS, expected);
-        // And the breakdown matches the explicit tally: the schedule entry
-        // carries a base limb-add column set plus two 24-cell σ-decode
-        // blocks (one per σ-application); the round adds its Maj/Ch
-        // packed-group block (8 operands × 6 groups) on top of those.
+        // Breakdown: the schedule entry carries the base limb-add column
+        // set, two 24-cell σ-decode blocks, and two 4-cell σ-input
+        // split-and-pack blocks (the §8.1 chain's σ-side reuse).
+        // The round adds two σ-decode blocks and a Maj/Ch packed-group
+        // block whose §8.1 reuse cuts the operand count from 8 to 4.
         let base_sched = 6;
         let base_round = 24;
-        assert_eq!(SCHEDULE_ENTRY_COLS, base_sched + 2 * SIGMA_DECODE_COLS);
+        assert_eq!(
+            SCHEDULE_ENTRY_COLS,
+            base_sched + 2 * SIGMA_DECODE_COLS + 2 * SIGMA_INPUT_SPLIT_COLS
+        );
         assert_eq!(
             ROUND_COLS,
             base_round + 2 * SIGMA_DECODE_COLS + ROUND_MAJ_CH_COLS
         );
-        assert_eq!(ROUND_MAJ_CH_COLS, 8 * 6);
+        assert_eq!(ROUND_MAJ_CH_COLS, 4 * 6);
+        assert_eq!(H_IN_AUX_GRP_COLS, 4 * 6);
+        assert_eq!(SIGMA_INPUT_SPLIT_COLS, 4);
         assert_eq!(
             expected,
             1 + 1
                 + 16
+                + H_IN_AUX_GRP_COLS
                 + 128
-                + 48 * (base_sched + 2 * SIGMA_DECODE_COLS)
+                + 48 * (base_sched + 2 * SIGMA_DECODE_COLS + 2 * SIGMA_INPUT_SPLIT_COLS)
                 + 64 * (base_round + 2 * SIGMA_DECODE_COLS + ROUND_MAJ_CH_COLS)
                 + 16
                 + 16
@@ -572,14 +687,11 @@ mod tests {
         let block = &witness.blocks[0];
 
         for (t, round) in block.rounds.iter().enumerate() {
-            let operand_values: [[u32; 6]; 8] = [
+            // §8.1 reuse: only the four fresh operands are committed.
+            let operand_values: [[u32; 6]; 4] = [
                 round.maj_ch.a_grp.vals,
-                round.maj_ch.b_grp.vals,
-                round.maj_ch.c_grp.vals,
                 round.maj_ch.maj_grp.vals,
                 round.maj_ch.e_grp.vals,
-                round.maj_ch.f_grp.vals,
-                round.maj_ch.g_grp.vals,
                 round.maj_ch.ch_grp.vals,
             ];
             for (operand_idx, expected) in operand_values.iter().enumerate() {
@@ -592,6 +704,61 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Per-block aux split-and-pack region round-trips: each
+    /// `[b_init, c_init, f_init, g_init]` operand's packed-group vector
+    /// equals what `Layout::h_in_aux_grp` reads back from the trace.
+    /// Regression here means the §8.1 reuse chain would alias to wrong
+    /// initial values for rounds `t ∈ {0, 1, 2}`.
+    #[test]
+    fn h_in_aux_grp_round_trips_through_trace() {
+        let witness = crate::witness::compute_sha256_witness(b"abc");
+        let trace = generate_trace(&witness, min_log_size(witness.blocks.len()));
+        let block = &witness.blocks[0];
+
+        let operands: [[u32; 6]; H_IN_AUX_OPERANDS] = [
+            block.aux_split_pack.b_init.vals,
+            block.aux_split_pack.c_init.vals,
+            block.aux_split_pack.f_init.vals,
+            block.aux_split_pack.g_init.vals,
+        ];
+        for (aux_idx, expected) in operands.iter().enumerate() {
+            for (group_idx, &v) in expected.iter().enumerate() {
+                let col = Layout::h_in_aux_grp(aux_idx, group_idx);
+                assert_eq!(
+                    trace[col][0].0, v,
+                    "aux operand[{aux_idx}] group[{group_idx}]"
+                );
+            }
+        }
+    }
+
+    /// Per-schedule-entry σ-input split-and-pack block round-trips for one
+    /// entry on each σ side. The lookup-tuple alignment depends on this
+    /// per-cell ordering, so a regression would silently shift the AIR's
+    /// reads against the witness layout.
+    #[test]
+    fn schedule_input_split_blocks_round_trip_through_trace() {
+        let witness = crate::witness::compute_sha256_witness(b"abc");
+        let trace = generate_trace(&witness, min_log_size(witness.blocks.len()));
+        let block = &witness.blocks[0];
+
+        // First schedule entry (`j = 0`, i.e. derivation of `W[16]`).
+        let entry = &block.schedule_entries[0];
+        let base_lower_sigma0 = Layout::schedule_entry_input_split(0, 0);
+        let w0 = &entry.lower_sigma0_input_split;
+        assert_eq!(trace[base_lower_sigma0][0].0, w0.packed_s_lo);
+        assert_eq!(trace[base_lower_sigma0 + 1][0].0, w0.packed_s_complement_lo);
+        assert_eq!(trace[base_lower_sigma0 + 2][0].0, w0.packed_s_hi);
+        assert_eq!(trace[base_lower_sigma0 + 3][0].0, w0.packed_s_complement_hi);
+
+        let base_lower_sigma1 = Layout::schedule_entry_input_split(0, 1);
+        let w1 = &entry.lower_sigma1_input_split;
+        assert_eq!(trace[base_lower_sigma1][0].0, w1.packed_s_lo);
+        assert_eq!(trace[base_lower_sigma1 + 1][0].0, w1.packed_s_complement_lo);
+        assert_eq!(trace[base_lower_sigma1 + 2][0].0, w1.packed_s_hi);
+        assert_eq!(trace[base_lower_sigma1 + 3][0].0, w1.packed_s_complement_hi);
     }
 
     #[test]

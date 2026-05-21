@@ -20,12 +20,16 @@ use crate::constants::{BLOCK_BYTES, IV, K, N_INPUT_WORDS, N_ROUNDS, N_STATE_WORD
 use crate::native::{
     big_sigma0, big_sigma1, ch, lower_sigma0, lower_sigma1, maj, pad_message, parse_blocks,
 };
-use crate::partitions::{apply, bits_to_mask, SigmaFn, SIGMA0_GROUPS, SIGMA1_GROUPS};
+use crate::partitions::{
+    apply, bits_to_mask, SigmaFn, LOWER_SIGMA0_PARTS, LOWER_SIGMA1_PARTS, SIGMA0_GROUPS,
+    SIGMA1_GROUPS,
+};
 use crate::tables::pack_half_key;
 use crate::types::{
-    AddCarries, BlockWitness, Digest, HashState, LimbPairBytes, PaddingWitness, RoundMajChWitness,
-    RoundPackedGroups, RoundWitness, Schedule, ScheduleEntryWitness, Sha256Witness,
-    SigmaDecodeWitness, WordLimbs, LIMB_BITS,
+    AddCarries, BlockAuxSplitPackWitness, BlockWitness, Digest, HashState, LimbPairBytes,
+    PaddingWitness, RoundMajChWitness, RoundPackedGroups, RoundWitness, Schedule,
+    ScheduleEntryWitness, Sha256Witness, SigmaDecodeWitness, SigmaInputSplitPackWitness, WordLimbs,
+    LIMB_BITS,
 };
 
 /// Pad the message and assemble the padding witness used by the AIR.
@@ -151,6 +155,14 @@ fn compute_schedule_entry_witness(
         lower_sigma1: WordLimbs::from_u32(s1),
         lower_sigma0_decode: compute_sigma_decode_witness(SigmaFn::LowerSigma0, w_t_minus_15),
         lower_sigma1_decode: compute_sigma_decode_witness(SigmaFn::LowerSigma1, w_t_minus_2),
+        lower_sigma0_input_split: SigmaInputSplitPackWitness::from_word(
+            w_t_minus_15,
+            &LOWER_SIGMA0_PARTS,
+        ),
+        lower_sigma1_input_split: SigmaInputSplitPackWitness::from_word(
+            w_t_minus_2,
+            &LOWER_SIGMA1_PARTS,
+        ),
         carries,
         w_t: WordLimbs::from_u32(w_t),
     }
@@ -175,20 +187,18 @@ fn compute_round_witness(
     let (e_new, e_new_carries) = add_words_with_carries(&[d, t1]);
     let (a_new, a_new_carries) = add_words_with_carries(&[t1, t2]);
 
-    // Packed-group decomposition for the per-round Maj/Ch lookups:
-    // `Maj(a,b,c)` keys on the a-side (Σ0) partition, `Ch(e,f,g)` on the
-    // e-side (Σ1) partition. The output values (`maj_val`, `ch_val`) are
-    // packed against the same partition as their inputs — `Maj`/`Ch` are
-    // bitwise so the lookup table row `(a, b, c, maj_val)` is shape-shared
-    // across all six group positions of the partition.
+    // Packed-group decomposition for the per-round Maj/Ch lookups —
+    // §8.1 reuse: only the *fresh* operands per round get committed
+    // splits. `b[t]` and `c[t]` (Maj inputs) reuse the prior rounds'
+    // a-side splits via in-row aliasing (`b[t]=a[t-1]`, `c[t]=a[t-2]`);
+    // `f[t]` and `g[t]` mirror the chain on the e-side. The chain's
+    // early rounds reach past `t=0` — those slots live on the per-block
+    // [`BlockAuxSplitPackWitness`] (`h_in[1]`, `h_in[2]`, `h_in[5]`,
+    // `h_in[6]` splits).
     let maj_ch = RoundMajChWitness {
         a_grp: RoundPackedGroups::pack(a, &SIGMA0_GROUPS),
-        b_grp: RoundPackedGroups::pack(b, &SIGMA0_GROUPS),
-        c_grp: RoundPackedGroups::pack(c, &SIGMA0_GROUPS),
         maj_grp: RoundPackedGroups::pack(maj_val, &SIGMA0_GROUPS),
         e_grp: RoundPackedGroups::pack(e, &SIGMA1_GROUPS),
-        f_grp: RoundPackedGroups::pack(f, &SIGMA1_GROUPS),
-        g_grp: RoundPackedGroups::pack(g, &SIGMA1_GROUPS),
         ch_grp: RoundPackedGroups::pack(ch_val, &SIGMA1_GROUPS),
     };
 
@@ -263,12 +273,25 @@ pub fn compute_block_witness(
         finalization_carries[j] = carries;
     }
 
+    // §8.1 reuse-chain initial values: `h_in[1]`/`h_in[2]` enter the
+    // Maj a-side as `b[0]`/`c[0]`; `h_in[5]`/`h_in[6]` enter the Ch
+    // e-side as `f[0]`/`g[0]`. `h_in[0]`/`h_in[4]` need no entry here —
+    // the per-round `a_grp[round 0]`/`e_grp[round 0]` already commit
+    // their split-and-pack (since `a[0]=h_in[0]`, `e[0]=h_in[4]`).
+    let aux_split_pack = BlockAuxSplitPackWitness {
+        b_init: RoundPackedGroups::pack(h_in_state.0[1], &SIGMA0_GROUPS),
+        c_init: RoundPackedGroups::pack(h_in_state.0[2], &SIGMA0_GROUPS),
+        f_init: RoundPackedGroups::pack(h_in_state.0[5], &SIGMA1_GROUPS),
+        g_init: RoundPackedGroups::pack(h_in_state.0[6], &SIGMA1_GROUPS),
+    };
+
     BlockWitness {
         h_in: limbify_state(&h_in_state.0),
         h_out: limbify_state(&h_out_state),
         schedule: schedule_limbs,
         schedule_entries,
         rounds,
+        aux_split_pack,
         finalization_carries,
     }
 }
@@ -374,6 +397,47 @@ impl MajChXorMultiplicities {
     }
 }
 
+/// Per-block lookup-multiplicity totals for the eight split-and-pack
+/// channels — the lookups 3.9.5 wires.
+///
+/// Round-side counts: per round the AIR fires four split-and-pack
+/// lookups (`a`, `maj`, `e`, `ch`), each splitting into one lo-half and
+/// one hi-half lookup. The lo halves of the a-side operands (`a.lo`,
+/// `maj.lo`) hit `sigma0_lo`; the hi halves hit `sigma0_hi`. Mirrored
+/// on the e-side against `sigma1_lo` / `sigma1_hi`. Plus, per block,
+/// the four §8.1 reuse-chain initial values (`b_init = h_in[1]`,
+/// `c_init = h_in[2]`, `f_init = h_in[5]`, `g_init = h_in[6]`) each
+/// fire one lo and one hi lookup against their side's tables.
+///
+/// σ-side counts: per schedule entry the AIR fires one σ-input
+/// split-and-pack lookup per side × half. `σ0(W[t-15])` hits
+/// `lower_sigma0_lo` (and `_hi`); `σ1(W[t-2])` hits `lower_sigma1_lo`
+/// (and `_hi`).
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct SplitPackMultiplicities {
+    pub sigma0_lo: u32,
+    pub sigma0_hi: u32,
+    pub sigma1_lo: u32,
+    pub sigma1_hi: u32,
+    pub lower_sigma0_lo: u32,
+    pub lower_sigma0_hi: u32,
+    pub lower_sigma1_lo: u32,
+    pub lower_sigma1_hi: u32,
+}
+
+impl SplitPackMultiplicities {
+    pub fn total(&self) -> u32 {
+        self.sigma0_lo
+            + self.sigma0_hi
+            + self.sigma1_lo
+            + self.sigma1_hi
+            + self.lower_sigma0_lo
+            + self.lower_sigma0_hi
+            + self.lower_sigma1_lo
+            + self.lower_sigma1_hi
+    }
+}
+
 /// Count the number of `add_to_relation` "uses" each decode-table channel
 /// would receive from one block. Derived entirely from the witness — does
 /// not depend on the LogUp framework being plumbed end-to-end. Used as a
@@ -434,6 +498,48 @@ pub fn maj_ch_xor_multiplicities_for_witness(witness: &Sha256Witness) -> MajChXo
             acc.maj += m.maj;
             acc.ch += m.ch;
             acc.xor_8 += m.xor_8;
+            acc
+        })
+}
+
+/// Count the number of split-and-pack "uses" each of the eight channels
+/// receives from one block — the lookups 3.9.5 wires. See
+/// [`SplitPackMultiplicities`] for the per-channel breakdown.
+pub fn split_pack_multiplicities_for_block(block: &BlockWitness) -> SplitPackMultiplicities {
+    let _ = block; // counts are a function of the static trace shape.
+    let rounds = block.rounds.len() as u32;
+    let entries = block.schedule_entries.len() as u32;
+    // Round-side: 2 lookups per round (a, maj for lo; same for hi) per side,
+    // plus 2 per block for h_in aux (b_init/c_init for a-side, f_init/g_init
+    // for e-side).
+    let round_side_per_block = 2 * rounds + 2;
+    SplitPackMultiplicities {
+        sigma0_lo: round_side_per_block,
+        sigma0_hi: round_side_per_block,
+        sigma1_lo: round_side_per_block,
+        sigma1_hi: round_side_per_block,
+        lower_sigma0_lo: entries,
+        lower_sigma0_hi: entries,
+        lower_sigma1_lo: entries,
+        lower_sigma1_hi: entries,
+    }
+}
+
+/// Aggregate [`split_pack_multiplicities_for_block`] across every block.
+pub fn split_pack_multiplicities_for_witness(witness: &Sha256Witness) -> SplitPackMultiplicities {
+    witness
+        .blocks
+        .iter()
+        .map(split_pack_multiplicities_for_block)
+        .fold(SplitPackMultiplicities::default(), |mut acc, m| {
+            acc.sigma0_lo += m.sigma0_lo;
+            acc.sigma0_hi += m.sigma0_hi;
+            acc.sigma1_lo += m.sigma1_lo;
+            acc.sigma1_hi += m.sigma1_hi;
+            acc.lower_sigma0_lo += m.lower_sigma0_lo;
+            acc.lower_sigma0_hi += m.lower_sigma0_hi;
+            acc.lower_sigma1_lo += m.lower_sigma1_lo;
+            acc.lower_sigma1_hi += m.lower_sigma1_hi;
             acc
         })
 }

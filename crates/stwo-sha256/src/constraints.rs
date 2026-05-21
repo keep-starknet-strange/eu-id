@@ -7,12 +7,16 @@
 //! next round's inputs — are emitted here. The **`Σ`/`σ` decode-table
 //! LogUp lookups** (§9.3 of the validated design), the matching σ-output
 //! reassembly + `O2` chunk-bind constraints, the chunk-wise `xor_8`
-//! lookups that close `o2_combined = o2_partial_s ⊕ o2_partial_s'`, and
-//! the **packed `Maj`/`Ch` lookups** keyed on the per-round packed-group
-//! decompositions are all wired below. The split-and-pack key pin
-//! (3.9.5 — ties `a_grp`/`e_grp`/etc. and the σ-decode keys back to the
-//! `(lo, hi)` word limbs) and the carry range-checks (shared-foundation)
-//! are the remaining lookup-wiring tasks.
+//! lookups that close `o2_combined = o2_partial_s ⊕ o2_partial_s'`, the
+//! **packed `Maj`/`Ch` lookups** keyed on the per-round packed-group
+//! decompositions, and the **split-and-pack lookups** (3.9.5) that pin
+//! every packed-group / decode-key column back to a `(lo, hi)` word
+//! limb — all wired below. The §8.1 reuse chain lets `b`/`c`/`f`/`g` of
+//! the Maj/Ch lookups alias prior rounds' `a`/`e` columns (and the
+//! per-block `h_in[1]`/`h_in[2]`/`h_in[5]`/`h_in[6]` aux splits for the
+//! chain's first two rounds), so the trace commits each value's split
+//! once. The remaining lookup-wiring task is the carry range-checks
+//! (shared-foundation, 3.9.2).
 //!
 //! Read-order invariant: every `next_trace_mask` call here happens in the
 //! same order as the writes in [`crate::trace::write_block_row`]. Layout
@@ -24,7 +28,11 @@ use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval, Relation, RelationEntry};
 
 use crate::constants::{IV, K, N_ROUNDS, N_STATE_WORDS};
-use crate::partitions::GROUPS_PER_ROUND_PARTITION;
+use crate::partitions::{
+    lower_sigma_key_hi_coeff_s, lower_sigma_key_hi_coeff_s_complement, round_key_coeffs,
+    GROUPS_PER_ROUND_PARTITION, LOWER_SIGMA0_PARTS, LOWER_SIGMA1_PARTS, SIGMA0_GROUPS,
+    SIGMA1_GROUPS,
+};
 use crate::relations::Sha256Relations;
 use crate::trace::ROUND_MAJ_CH_OPERANDS;
 use crate::types::LIMB_BITS;
@@ -72,6 +80,54 @@ impl FrameworkEval for Sha256Eval {
             eval.add_constraint(is_first_block.clone() * (hi.clone() - iv_hi));
         }
 
+        // ---- §8.1 reuse chain initial splits ----
+        //
+        // 4 operands × 6 groups, in the fixed `[b_init, c_init, f_init,
+        // g_init]` order matching [`crate::trace::write_h_in_aux_grp`].
+        // Each operand is the a-side / e-side split-and-pack of a specific
+        // `h_in[j]` and gets pinned to that limb pair by the corresponding
+        // split-and-pack lookup below.
+        let b_init: [E::F; GROUPS_PER_ROUND_PARTITION] =
+            std::array::from_fn(|_| eval.next_trace_mask());
+        let c_init: [E::F; GROUPS_PER_ROUND_PARTITION] =
+            std::array::from_fn(|_| eval.next_trace_mask());
+        let f_init: [E::F; GROUPS_PER_ROUND_PARTITION] =
+            std::array::from_fn(|_| eval.next_trace_mask());
+        let g_init: [E::F; GROUPS_PER_ROUND_PARTITION] =
+            std::array::from_fn(|_| eval.next_trace_mask());
+
+        // a-side split-and-pack lookups for `h_in[1]` (→ `b_init`) and
+        // `h_in[2]` (→ `c_init`); e-side for `h_in[5]` / `h_in[6]`.
+        // Pins each limb to `[0, 2¹⁶)` implicitly via the lookup input.
+        wire_round_split_pack::<E>(
+            &mut eval,
+            &h_in[1],
+            &b_init,
+            &self.relations.split_pack.sigma0_lo,
+            &self.relations.split_pack.sigma0_hi,
+        );
+        wire_round_split_pack::<E>(
+            &mut eval,
+            &h_in[2],
+            &c_init,
+            &self.relations.split_pack.sigma0_lo,
+            &self.relations.split_pack.sigma0_hi,
+        );
+        wire_round_split_pack::<E>(
+            &mut eval,
+            &h_in[5],
+            &f_init,
+            &self.relations.split_pack.sigma1_lo,
+            &self.relations.split_pack.sigma1_hi,
+        );
+        wire_round_split_pack::<E>(
+            &mut eval,
+            &h_in[6],
+            &g_init,
+            &self.relations.split_pack.sigma1_lo,
+            &self.relations.split_pack.sigma1_hi,
+        );
+
         // ---- W[0..63]: 64 words × (lo, hi) ----
         let w: [(E::F, E::F); N_ROUNDS] =
             std::array::from_fn(|_| (eval.next_trace_mask(), eval.next_trace_mask()));
@@ -97,6 +153,11 @@ impl FrameworkEval for Sha256Eval {
             let sigma0_decode = read_sigma_decode::<E>(&mut eval);
             let sigma1_decode = read_sigma_decode::<E>(&mut eval);
 
+            // σ-input split-and-pack blocks (read in the order written by
+            // `trace::write_sigma_input_split_block`). One per σ-application.
+            let sigma0_input_split = read_sigma_input_split::<E>(&mut eval);
+            let sigma1_input_split = read_sigma_input_split::<E>(&mut eval);
+
             // σ0(W[t-15]) → s0 — emit S-side and S′-side decode lookups,
             // the linear reassembly identity, the O2 chunk-bind, and the
             // chunk-wise `xor_8` lookup that closes
@@ -121,6 +182,51 @@ impl FrameworkEval for Sha256Eval {
                 &self.relations.xor_8,
             );
 
+            // σ-input split-and-pack lookups — one per half. Pin
+            // `W[t-15].(lo, hi)` to the `σ0` partition's split-and-pack
+            // tables, and `W[t-2].(lo, hi)` to the `σ1` partition's. As
+            // with the round side, this implicitly range-checks each
+            // input limb to `[0, 2¹⁶)`.
+            let w_t_minus_15 = w[t - 15].clone();
+            let w_t_minus_2 = w[t - 2].clone();
+            wire_sigma_input_split::<E>(
+                &mut eval,
+                &w_t_minus_15,
+                &sigma0_input_split,
+                &self.relations.split_pack.lower_sigma0_lo,
+                &self.relations.split_pack.lower_sigma0_hi,
+            );
+            wire_sigma_input_split::<E>(
+                &mut eval,
+                &w_t_minus_2,
+                &sigma1_input_split,
+                &self.relations.split_pack.lower_sigma1_lo,
+                &self.relations.split_pack.lower_sigma1_hi,
+            );
+
+            // Tie each σ-decode block's `key_s` / `key_s_complement` to
+            // the σ-input split-and-pack outputs by linear assembly
+            // (§9.3 / partitions::lower_sigma_key_hi_coeff_s). Without
+            // this pin, a prover supplies arbitrary `key_s` to the
+            // decode-table lookup; with the pin, the decode key must
+            // come from the bits of `W[t-15]` / `W[t-2]`.
+            emit_sigma_input_decode_key_reassembly::<E>(
+                &mut eval,
+                enabler.clone(),
+                &sigma0_decode,
+                &sigma0_input_split,
+                lower_sigma_key_hi_coeff_s(&LOWER_SIGMA0_PARTS),
+                lower_sigma_key_hi_coeff_s_complement(&LOWER_SIGMA0_PARTS),
+            );
+            emit_sigma_input_decode_key_reassembly::<E>(
+                &mut eval,
+                enabler.clone(),
+                &sigma1_decode,
+                &sigma1_input_split,
+                lower_sigma_key_hi_coeff_s(&LOWER_SIGMA1_PARTS),
+                lower_sigma_key_hi_coeff_s_complement(&LOWER_SIGMA1_PARTS),
+            );
+
             // W[t] = σ1(W[t-2]) + W[t-7] + σ0(W[t-15]) + W[t-16]  (mod 2³²)
             //
             // Limb-add identity, 4 addends:
@@ -131,10 +237,6 @@ impl FrameworkEval for Sha256Eval {
             let w_t = w[t].clone();
             let w_t_minus_7 = w[t - 7].clone();
             let w_t_minus_16 = w[t - 16].clone();
-            // `W[t-2]` and `W[t-15]` are the inputs to σ1 and σ0; the
-            // decode-table key-pin (split-and-pack lookup, §9.3) lands in a
-            // follow-on task, at which point `key_s + key_s_complement` is
-            // tied back to `W[t-2]` / `W[t-15]`.
 
             emit_mod_2_32_add_linear(
                 &mut eval,
@@ -148,8 +250,20 @@ impl FrameworkEval for Sha256Eval {
 
         // ---- 64 rounds ----
         //
-        // Track `(a, b, c, d, e, f, g, h)` symbolically across rounds.
+        // Track `(a, b, c, d, e, f, g, h)` symbolically across rounds, plus
+        // the §8.1 reuse chain for the a-side and e-side packed-group
+        // splits: `b_grp[t] = a_grp[t-1]`, `c_grp[t] = a_grp[t-2]`, with
+        // the first two rounds seeded from the per-block aux splits
+        // (`b_init = h_in[1]`, `c_init = h_in[2]`, `f_init = h_in[5]`,
+        // `g_init = h_in[6]`).
         let mut state: [(E::F, E::F); N_STATE_WORDS] = h_in.clone();
+        let mut b_grp = b_init.clone();
+        let mut c_grp = c_init.clone();
+        let mut f_grp = f_init.clone();
+        let mut g_grp = g_init.clone();
+
+        let sigma0_coeffs = round_key_coeffs(&SIGMA0_GROUPS);
+        let sigma1_coeffs = round_key_coeffs(&SIGMA1_GROUPS);
 
         for (t, &k_t) in K.iter().enumerate().take(N_ROUNDS) {
             let [ref a, ref b, ref c, ref d, ref e, ref f, ref g, ref h_state] = state;
@@ -199,23 +313,25 @@ impl FrameworkEval for Sha256Eval {
                 &self.relations.xor_8,
             );
 
-            // Maj/Ch packed-group block — 48 cells, one packed value per
-            // (operand, group). Operand order is fixed: `a, b, c, maj_out`
-            // (a-side / Σ0 partition) then `e, f, g, ch_out` (e-side / Σ1).
+            // Maj/Ch packed-group block — 24 cells (post §8.1 reuse).
+            // Operand order is fixed: `[a, maj_out]` (a-side / Σ0
+            // partition) followed by `[e, ch_out]` (e-side / Σ1). The
+            // `b`/`c`/`f`/`g` lookup keys come from the §8.1 chain
+            // (`b_grp`, `c_grp`, `f_grp`, `g_grp` updated at end of loop).
             let packed_groups: [[E::F; GROUPS_PER_ROUND_PARTITION]; ROUND_MAJ_CH_OPERANDS] =
                 std::array::from_fn(|_| {
                     std::array::from_fn::<E::F, GROUPS_PER_ROUND_PARTITION, _>(|_| {
                         eval.next_trace_mask()
                     })
                 });
-            let [a_grp, b_grp, c_grp, maj_grp, e_grp, f_grp, g_grp, ch_grp] = packed_groups;
+            let [a_grp, maj_grp, e_grp, ch_grp] = packed_groups;
 
             // 6 Maj lookups — one per a-side group position. The row
             // shape is `(a_grp[i], b_grp[i], c_grp[i], maj_grp[i])`,
-            // matching `MajRelation` (size 4). The packed values are
-            // *free* in the trace until 3.9.5's split-and-pack lookup
-            // pins them to `a.(lo, hi)`/`b.(lo, hi)`/`c.(lo, hi)` and
-            // `maj.(lo, hi)`.
+            // matching `MajRelation` (size 4). With the split-and-pack
+            // lookups below in place, `a_grp` is pinned to `a.(lo, hi)`,
+            // `b_grp` (= `a_grp[t-1]` or aux `b_init`) is pinned to its
+            // originating limb, and similarly for `c_grp` and `maj_grp`.
             for i in 0..GROUPS_PER_ROUND_PARTITION {
                 eval.add_to_relation(RelationEntry::new(
                     &self.relations.maj,
@@ -243,19 +359,64 @@ impl FrameworkEval for Sha256Eval {
                 ));
             }
 
-            // TODO(3.9.5 split-and-pack): tie the packed-group columns to
-            // the existing `(lo, hi)` word commitments:
-            //   - `a_grp` / `b_grp` / `c_grp` ⇐ split-and-pack(a / b / c)
-            //   - `maj_grp` ⇒ split-and-pack(maj.lo) + split-and-pack(maj.hi)
-            //   - mirror for the e-side.
-            // Without that lookup, a prover can commit arbitrary packed
-            // groups; the Maj/Ch lookup only forces them to be a valid
-            // `(a, b, c, maj(a,b,c))` triple.
+            // Round-side split-and-pack lookups — one per half per fresh
+            // operand (a-side: `a`, `maj`; e-side: `e`, `ch`). Each
+            // lookup pins three packed-group columns to the table row
+            // determined by the input limb, and implicitly range-checks
+            // the limb to `[0, 2¹⁶)` (design §11 L1).
+            wire_round_split_pack::<E>(
+                &mut eval,
+                a,
+                &a_grp,
+                &self.relations.split_pack.sigma0_lo,
+                &self.relations.split_pack.sigma0_hi,
+            );
+            wire_round_split_pack::<E>(
+                &mut eval,
+                &maj,
+                &maj_grp,
+                &self.relations.split_pack.sigma0_lo,
+                &self.relations.split_pack.sigma0_hi,
+            );
+            wire_round_split_pack::<E>(
+                &mut eval,
+                e,
+                &e_grp,
+                &self.relations.split_pack.sigma1_lo,
+                &self.relations.split_pack.sigma1_hi,
+            );
+            wire_round_split_pack::<E>(
+                &mut eval,
+                &ch,
+                &ch_grp,
+                &self.relations.split_pack.sigma1_lo,
+                &self.relations.split_pack.sigma1_hi,
+            );
+
+            // Tie each round σ-decode block's `key_s` / `key_s_complement`
+            // to the just-pinned `a_grp` / `e_grp` packed values via
+            // linear assembly (partitions::round_key_coeffs). This is
+            // what closes the Σ0/Σ1 decode lookups against the actual
+            // input word's bits — without it, a prover supplies arbitrary
+            // `key_s` to the decode lookup.
+            emit_round_decode_key_reassembly::<E>(
+                &mut eval,
+                enabler.clone(),
+                &sigma0_decode,
+                &a_grp,
+                sigma0_coeffs,
+            );
+            emit_round_decode_key_reassembly::<E>(
+                &mut eval,
+                enabler.clone(),
+                &sigma1_decode,
+                &e_grp,
+                sigma1_coeffs,
+            );
 
             // Remaining lookups (follow-on tasks):
-            //   carry_*.lo, carry_*.hi ∈ [0, k)  via range-check tables.
-            //   key_s / key_s_complement pinned to the input word via the
-            //     same split-and-pack lookup.
+            //   carry_*.lo, carry_*.hi ∈ [0, k)  via range-check tables
+            //   (shared foundation 3.9.2 / Range_2/4/5).
 
             // K[t] is a circuit constant, never a free column.
             let k_lo = E::F::from(M31::from(k_t & 0xFFFF));
@@ -320,6 +481,22 @@ impl FrameworkEval for Sha256Eval {
                 f.clone(),
                 g.clone(),
             ];
+
+            // §8.1 reuse-chain advance, mirroring the working-state
+            // rotation on the packed-group side. After round `t` we
+            // have:
+            //   b_grp_next = a_grp[t]   (because b[t+1] = a[t])
+            //   c_grp_next = b_grp[t]   (because c[t+1] = b[t])
+            //   f_grp_next = e_grp[t]
+            //   g_grp_next = f_grp[t]
+            // Compute the *next* values before overwriting `b_grp` /
+            // `f_grp` so the chain stays consistent.
+            let prev_b_grp = b_grp.clone();
+            b_grp = a_grp.clone();
+            c_grp = prev_b_grp;
+            let prev_f_grp = f_grp.clone();
+            f_grp = e_grp.clone();
+            g_grp = prev_f_grp;
         }
 
         // ---- finalization carries: 8 × (lo, hi) ----
@@ -356,15 +533,193 @@ impl FrameworkEval for Sha256Eval {
         //   part of the shared foundation work.
 
         // `eval.finalize_logup_in_pairs()` is deferred until *all* LogUp
-        // channels are populated — the `Σ`/`σ` decode lookups above account
-        // for ~half the entries; the chunk-wise `xor_8`, the `Maj`/`Ch`
-        // lookups, the split-and-pack key pin, and the carry range checks
-        // join in follow-on tasks. Calling `finalize_*` before then would
-        // emit a cumulative-sum constraint inconsistent with the (yet-to-
-        // land) remaining `add_to_relation` calls.
+        // channels are populated — the `Σ`/`σ` decode lookups, the
+        // chunk-wise `xor_8`, the `Maj`/`Ch` lookups, and the
+        // split-and-pack lookups above cover the SHA-256-specific
+        // channels; the carry range checks (`Range_2`/`Range_4`/`Range_5`
+        // from `crate::tables_local`) drop in with the shared-foundation
+        // rollout (3.9.2). Calling `finalize_*` before then would emit a
+        // cumulative-sum constraint inconsistent with the (yet-to-land)
+        // carry-range `add_to_relation` calls.
 
         eval
     }
+}
+
+/// One σ-input's split-and-pack outputs, in the column order written by
+/// [`crate::trace::write_sigma_input_split_block`]:
+/// `(packed_s_lo, packed_s_complement_lo, packed_s_hi, packed_s_complement_hi)`.
+/// The two `_lo` cells feed the σ-partition lo-half split-and-pack lookup
+/// `(word.lo, packed_s_lo, packed_s_complement_lo)`; the two `_hi` cells feed
+/// the hi-half twin. Linear assembly of the four cells, weighted by
+/// `lower_sigma_key_hi_coeff_s` (and the `_s_complement` twin), equals the
+/// σ-decode block's `(key_s, key_s_complement)`.
+struct SigmaInputSplitMasks<F: Clone> {
+    packed_s_lo: F,
+    packed_s_complement_lo: F,
+    packed_s_hi: F,
+    packed_s_complement_hi: F,
+}
+
+/// Pull one σ-input split-and-pack block off the `EvalAtRow` mask iterator.
+fn read_sigma_input_split<E: EvalAtRow>(eval: &mut E) -> SigmaInputSplitMasks<E::F> {
+    SigmaInputSplitMasks {
+        packed_s_lo: eval.next_trace_mask(),
+        packed_s_complement_lo: eval.next_trace_mask(),
+        packed_s_hi: eval.next_trace_mask(),
+        packed_s_complement_hi: eval.next_trace_mask(),
+    }
+}
+
+/// Fire a pair of round-side split-and-pack lookups (lo half, hi half) on
+/// `word` against its partition's tables.
+///
+/// `grp` is the 6-element packed-group commitment in `groups_in_order`
+/// ordering — `[L0, H0, H1, L1, L2, H2]` for the Σ0/Maj partition (or the
+/// analogous Σ1/Ch e-side ordering). The lo-half table content carries
+/// the three groups that live in the lo limb (`L0`, `L1`, `L2` for Σ0)
+/// in `s` order then `s_complement` order, which projects to trace cells
+/// `grp[0]`, `grp[3]`, `grp[4]`. The hi half analogously projects to
+/// `grp[1]`, `grp[2]`, `grp[5]`. Each lookup row matches the
+/// `(key, packed_group_0, packed_group_1, packed_group_2)` shape of
+/// [`crate::relations::ROUND_SPLIT_PACK_REL_SIZE`].
+///
+/// Firing the lookup pins the three packed-group cells to the table row
+/// determined by `word.lo` (resp. `word.hi`) and implicitly range-checks
+/// the limb to `[0, 2¹⁶)` (design §11 L1).
+fn wire_round_split_pack<E: EvalAtRow>(
+    eval: &mut E,
+    word: &(E::F, E::F),
+    grp: &[E::F; GROUPS_PER_ROUND_PARTITION],
+    rel_lo: &impl Relation<E::F, E::EF>,
+    rel_hi: &impl Relation<E::F, E::EF>,
+) {
+    eval.add_to_relation(RelationEntry::new(
+        rel_lo,
+        E::EF::one(),
+        &[
+            word.0.clone(),
+            grp[0].clone(),
+            grp[3].clone(),
+            grp[4].clone(),
+        ],
+    ));
+    eval.add_to_relation(RelationEntry::new(
+        rel_hi,
+        E::EF::one(),
+        &[
+            word.1.clone(),
+            grp[1].clone(),
+            grp[2].clone(),
+            grp[5].clone(),
+        ],
+    ));
+}
+
+/// Fire a pair of σ-side split-and-pack lookups (lo half, hi half) on
+/// `word` against its `σ` partition's tables.
+///
+/// Each row matches `(key, packed_s, packed_s_complement)`, the width-3
+/// shape of [`crate::relations::SIGMA_SPLIT_PACK_REL_SIZE`]. The lookup
+/// pins the two packed values to the table row determined by the
+/// half-limb and implicitly range-checks the limb to `[0, 2¹⁶)`.
+fn wire_sigma_input_split<E: EvalAtRow>(
+    eval: &mut E,
+    word: &(E::F, E::F),
+    split: &SigmaInputSplitMasks<E::F>,
+    rel_lo: &impl Relation<E::F, E::EF>,
+    rel_hi: &impl Relation<E::F, E::EF>,
+) {
+    eval.add_to_relation(RelationEntry::new(
+        rel_lo,
+        E::EF::one(),
+        &[
+            word.0.clone(),
+            split.packed_s_lo.clone(),
+            split.packed_s_complement_lo.clone(),
+        ],
+    ));
+    eval.add_to_relation(RelationEntry::new(
+        rel_hi,
+        E::EF::one(),
+        &[
+            word.1.clone(),
+            split.packed_s_hi.clone(),
+            split.packed_s_complement_hi.clone(),
+        ],
+    ));
+}
+
+/// Tie a round σ-decode block's `key_s` and `key_s_complement` to the
+/// packed-group cells of the corresponding operand (`a` for Σ0, `e` for
+/// Σ1) via linear assembly with the partition-specific coefficients
+/// (`partitions::round_key_coeffs`).
+///
+///   `key_s            = c[0]·g[0] + c[1]·g[1] + c[2]·g[2]`
+///   `key_s_complement = c[3]·g[3] + c[4]·g[4] + c[5]·g[5]`
+///
+/// where `g[i] = grp[i]` (the i-th packed group of the operand) and
+/// `c[i]` is the i-th coefficient. This closes the soundness loop on the
+/// Σ-decode lookups: the lookup's `key_s` must come from the bits of the
+/// operand committed elsewhere in the row. Gated by `enabler` so the
+/// constraint is vacuous on padding rows.
+fn emit_round_decode_key_reassembly<E: EvalAtRow>(
+    eval: &mut E,
+    enabler: E::F,
+    decode: &SigmaDecodeMasks<E::F>,
+    grp: &[E::F; GROUPS_PER_ROUND_PARTITION],
+    coeffs: [u32; GROUPS_PER_ROUND_PARTITION],
+) {
+    let c = coeffs.map(|v| E::F::from(M31::from(v)));
+    eval.add_constraint(
+        enabler.clone()
+            * (decode.s_values[0].clone()
+                - c[0].clone() * grp[0].clone()
+                - c[1].clone() * grp[1].clone()
+                - c[2].clone() * grp[2].clone()),
+    );
+    eval.add_constraint(
+        enabler
+            * (decode.s_complement_values[0].clone()
+                - c[3].clone() * grp[3].clone()
+                - c[4].clone() * grp[4].clone()
+                - c[5].clone() * grp[5].clone()),
+    );
+}
+
+/// Tie a σ-input decode block's `key_s` and `key_s_complement` to the
+/// σ-input split-and-pack outputs by linear assembly with the partition's
+/// hi-coefficient constants
+/// (`partitions::lower_sigma_key_hi_coeff_s` / `..._s_complement`).
+///
+///   `key_s            = packed_s_lo + hi_coeff_s · packed_s_hi`
+///   `key_s_complement = packed_s_complement_lo
+///                        + hi_coeff_s_complement · packed_s_complement_hi`
+///
+/// Closes the soundness loop on the `σ0`/`σ1` decode lookups against the
+/// schedule-word input. Gated by `enabler`.
+fn emit_sigma_input_decode_key_reassembly<E: EvalAtRow>(
+    eval: &mut E,
+    enabler: E::F,
+    decode: &SigmaDecodeMasks<E::F>,
+    split: &SigmaInputSplitMasks<E::F>,
+    hi_coeff_s: u32,
+    hi_coeff_s_complement: u32,
+) {
+    let c_hi_s = E::F::from(M31::from(hi_coeff_s));
+    let c_hi_s_complement = E::F::from(M31::from(hi_coeff_s_complement));
+    eval.add_constraint(
+        enabler.clone()
+            * (decode.s_values[0].clone()
+                - split.packed_s_lo.clone()
+                - c_hi_s * split.packed_s_hi.clone()),
+    );
+    eval.add_constraint(
+        enabler
+            * (decode.s_complement_values[0].clone()
+                - split.packed_s_complement_lo.clone()
+                - c_hi_s_complement * split.packed_s_complement_hi.clone()),
+    );
 }
 
 /// One σ-application's worth of decoded intermediates, read from the trace
@@ -896,6 +1251,109 @@ mod tests {
         assert_eq!(agg.maj, n * m.maj);
         assert_eq!(agg.ch, n * m.ch);
         assert_eq!(agg.xor_8, n * m.xor_8);
+    }
+
+    /// Drives [`Sha256Eval::evaluate`] through Stwo's `InfoEvaluator` and
+    /// asserts every observable count lines up:
+    ///
+    ///   - The number of `next_trace_mask` calls equals `Layout::TOTAL_COLS`
+    ///     — a drift here silently shifts every constraint and lookup
+    ///     against the column it reads.
+    ///   - Per-relation lookup firings (one entry per `relation!` tag)
+    ///     equal the per-block static counts from
+    ///     `crate::witness::*_multiplicities_for_block`. This covers
+    ///     decode (3.9.3), Maj/Ch + xor_8 (3.9.4), and the eight
+    ///     split-and-pack channels (3.9.5).
+    ///   - The total lookup count equals the sum across all per-channel
+    ///     witness-side totals.
+    #[test]
+    fn evaluate_mask_and_lookup_counts_agree_with_witness() {
+        use stwo_constraint_framework::ORIGINAL_TRACE_IDX;
+
+        let log_size = 4;
+        let eval = Sha256Eval {
+            log_size,
+            relations: Sha256Relations::dummy(),
+        };
+        let info = run_evaluate_with_finalized_info(&eval, log_size);
+
+        // The AIR fires one row's worth of lookups (i.e. per-block totals
+        // — every row of the trace runs one block's evaluator pass).
+        let witness = compute_sha256_witness(b"abc");
+        let decode = crate::witness::decode_multiplicities_for_block(&witness.blocks[0]);
+        let maj_ch_xor = crate::witness::maj_ch_xor_multiplicities_for_block(&witness.blocks[0]);
+        let split_pack = crate::witness::split_pack_multiplicities_for_block(&witness.blocks[0]);
+
+        // The `relation!` macro derives the relation tag's name as the
+        // struct name string. These must agree with what
+        // `crate::relations` declares.
+        let get = |name: &str| -> u32 {
+            info.logup_counts
+                .iter()
+                .find_map(|(k, v)| if k == name { Some(*v as u32) } else { None })
+                .unwrap_or(0)
+        };
+
+        // Decode (3.9.3).
+        assert_eq!(get("Sigma0DecodeS"), decode.sigma0_s);
+        assert_eq!(get("Sigma0DecodeSPrime"), decode.sigma0_s_complement);
+        assert_eq!(get("Sigma1DecodeS"), decode.sigma1_s);
+        assert_eq!(get("Sigma1DecodeSPrime"), decode.sigma1_s_complement);
+        assert_eq!(get("LowerSigma0DecodeS"), decode.lower_sigma0_s);
+        assert_eq!(
+            get("LowerSigma0DecodeSPrime"),
+            decode.lower_sigma0_s_complement
+        );
+        assert_eq!(get("LowerSigma1DecodeS"), decode.lower_sigma1_s);
+        assert_eq!(
+            get("LowerSigma1DecodeSPrime"),
+            decode.lower_sigma1_s_complement
+        );
+
+        // Maj/Ch/xor_8 (3.9.4).
+        assert_eq!(get("MajRelation"), maj_ch_xor.maj);
+        assert_eq!(get("ChRelation"), maj_ch_xor.ch);
+        assert_eq!(get("Xor8Relation"), maj_ch_xor.xor_8);
+
+        // Split-and-pack (3.9.5).
+        assert_eq!(get("Sigma0SplitPackLo"), split_pack.sigma0_lo);
+        assert_eq!(get("Sigma0SplitPackHi"), split_pack.sigma0_hi);
+        assert_eq!(get("Sigma1SplitPackLo"), split_pack.sigma1_lo);
+        assert_eq!(get("Sigma1SplitPackHi"), split_pack.sigma1_hi);
+        assert_eq!(get("LowerSigma0SplitPackLo"), split_pack.lower_sigma0_lo);
+        assert_eq!(get("LowerSigma0SplitPackHi"), split_pack.lower_sigma0_hi);
+        assert_eq!(get("LowerSigma1SplitPackLo"), split_pack.lower_sigma1_lo);
+        assert_eq!(get("LowerSigma1SplitPackHi"), split_pack.lower_sigma1_hi);
+
+        // Mask count — `info.mask_offsets[ORIGINAL_TRACE_IDX]` is the
+        // main trace (the list pushed by every `next_trace_mask` call).
+        assert_eq!(
+            info.mask_offsets[ORIGINAL_TRACE_IDX].len(),
+            Layout::TOTAL_COLS,
+            "AIR's `next_trace_mask` count diverged from `Layout::TOTAL_COLS`",
+        );
+
+        // Verify the witness-side total firings = sum across channels.
+        let total_lookups: u32 = info.logup_counts.iter().map(|(_, &v)| v as u32).sum();
+        let expected_total = decode.total() + maj_ch_xor.total() + split_pack.total();
+        assert_eq!(total_lookups, expected_total);
+    }
+
+    /// Wrap an `InfoEvaluator` pass with a forced finalize so the
+    /// `LogupAtRow` Drop assertion is satisfied. The captured `info`
+    /// can still be inspected afterwards.
+    fn run_evaluate_with_finalized_info(
+        eval: &Sha256Eval,
+        log_size: u32,
+    ) -> stwo_constraint_framework::InfoEvaluator {
+        use stwo::core::fields::qm31::SecureField;
+        use stwo_constraint_framework::{EvalAtRow, FrameworkEval, InfoEvaluator};
+        let mut info = eval.evaluate(InfoEvaluator::new(log_size, vec![], SecureField::default()));
+        // `evaluate` doesn't call `finalize_logup_in_pairs` (deferred
+        // until 3.9.2 carry range checks land). Manually finalize the
+        // captured `logup` so its Drop assertion passes for this test.
+        EvalAtRow::finalize_logup(&mut info);
+        info
     }
 
     /// Per-block decode-lookup multiplicities equal the static per-block
