@@ -196,9 +196,11 @@ pub struct AgeBitDecompositionProof {
 pub struct AgeRangeCheckProof {
     pub public: PublicInput,
     pub age_claimed_sum: QM31,
-    pub slack_table_claimed_sum: QM31,
     pub calendar_table_claimed_sum: QM31,
     pub valid_day_table_claimed_sum: QM31,
+    pub day_delta_claimed_sum: QM31,
+    pub month_delta_claimed_sum: QM31,
+    pub year_delta_claimed_sum: QM31,
     pub stark_proof: StarkProof<Blake2sMerkleHasher>,
 }
 
