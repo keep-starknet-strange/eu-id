@@ -13,10 +13,10 @@ stwo-constraint-framework = { workspace = true }
 serde = { workspace = true }
 num-traits = { workspace = true }
 thiserror = "2.0.18"
+bincode = "1"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
-bincode = "1"
 stwo = { workspace = true }
 
 [[bench]]
