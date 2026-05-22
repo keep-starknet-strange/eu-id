@@ -6,6 +6,9 @@ members = [
 ]
 resolver = "2"
 
+[profile.release]
+debug = true
+
 [workspace.dependencies]
 stwo = { git = "https://github.com/starkware-libs/stwo.git", features = ["prover"] }
 stwo-constraint-framework = { git = "https://github.com/starkware-libs/stwo.git", features = ["prover"] }

@@ -4,3 +4,15 @@ bench-predicates = "bench -p predicates"
 
 # Compile benchmarks without running (fast check that they build)
 bench-check = "bench -p predicates --no-run"
+
+prove = "run -p predicates --bin prove --"
+verify = "run -p predicates --bin verify --"
+
+##### Profiling
+# Age predicate — range check
+profile-prove-age-rc = "instruments -t Allocations -p predicates --bin prove --release --output target/instruments/prove-age-rc.trace -- age --dob 1990-01-01 --output target/instruments/age-rc.bin"
+profile-verify-age-rc = "instruments -t Allocations -p predicates --bin verify --release --output target/instruments/verify-age-rc.trace -- age --input target/instruments/age-rc.bin"
+
+# Age predicate — bit decomposition
+profile-prove-age-bd = "instruments -t Allocations -p predicates --bin prove --release --output target/instruments/prove-age-bd.trace -- age --dob 1990-01-01 --strategy bd --output target/instruments/age-bd.bin"
+profile-verify-age-bd = "instruments -t Allocations -p predicates --bin verify --release --output target/instruments/verify-age-bd.trace -- age --strategy bd --input target/instruments/age-bd.bin"
