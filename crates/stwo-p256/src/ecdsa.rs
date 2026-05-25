@@ -1,6 +1,6 @@
 use crate::curve::{mod_inverse, point_add, point_double, scalar_mul};
 use crate::field_ops::mul_mod_witness;
-use crate::types::{AffinePoint, EcdsaVerifyInput, U256, P256_GX, P256_GY, P256_ORDER};
+use crate::types::{AffinePoint, EcdsaVerifyInput, P256_GX, P256_GY, P256_ORDER, U256};
 
 /// Verify an ECDSA P-256 signature natively (outside the circuit).
 ///
@@ -19,8 +19,12 @@ pub fn ecdsa_verify(input: &EcdsaVerifyInput) -> bool {
     };
 
     let s_inv = mod_inverse(&input.signature.s, &n);
-    let u1 = mul_mod_witness(&input.message_hash, &s_inv, &n).result.to_u256();
-    let u2 = mul_mod_witness(&input.signature.r, &s_inv, &n).result.to_u256();
+    let u1 = mul_mod_witness(&input.message_hash, &s_inv, &n)
+        .result
+        .to_u256();
+    let u2 = mul_mod_witness(&input.signature.r, &s_inv, &n)
+        .result
+        .to_u256();
 
     let r1 = scalar_mul(&u1, &g);
     let r2 = scalar_mul(&u2, &input.public_key);
@@ -73,8 +77,12 @@ pub fn ecdsa_verify_witness(input: &EcdsaVerifyInput) -> EcdsaVerifyWitness {
     };
 
     let s_inv = mod_inverse(&input.signature.s, &n);
-    let u1 = mul_mod_witness(&input.message_hash, &s_inv, &n).result.to_u256();
-    let u2 = mul_mod_witness(&input.signature.r, &s_inv, &n).result.to_u256();
+    let u1 = mul_mod_witness(&input.message_hash, &s_inv, &n)
+        .result
+        .to_u256();
+    let u2 = mul_mod_witness(&input.signature.r, &s_inv, &n)
+        .result
+        .to_u256();
 
     let r1 = scalar_mul(&u1, &g);
     let r2 = scalar_mul(&u2, &input.public_key);
@@ -152,6 +160,9 @@ mod tests {
         };
 
         let result = ecdsa_verify(&input);
-        assert!(result, "ECDSA verification must succeed for a valid signature");
+        assert!(
+            result,
+            "ECDSA verification must succeed for a valid signature"
+        );
     }
 }

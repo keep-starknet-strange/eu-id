@@ -1019,6 +1019,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "stwo-sha256"
+version = "0.1.0"
+dependencies = [
+ "stwo",
+ "stwo-constraint-framework",
+]
+
+[[package]]
 name = "stwo-std-shims"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

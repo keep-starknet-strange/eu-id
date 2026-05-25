@@ -53,9 +53,9 @@ impl U256 {
 
     pub fn to_le_u64s(&self) -> [u64; 4] {
         let mut limbs = [0u64; 4];
-        for i in 0..4 {
+        for (i, limb) in limbs.iter_mut().enumerate() {
             let start = 24 - i * 8;
-            limbs[i] = u64::from_be_bytes(self.0[start..start + 8].try_into().unwrap());
+            *limb = u64::from_be_bytes(self.0[start..start + 8].try_into().unwrap());
         }
         limbs
     }

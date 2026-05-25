@@ -1,5 +1,5 @@
 use crate::field_ops::{add_mod_witness, mul_mod_witness, sub_mod_witness};
-use crate::types::{AffinePoint, U256, P256_MODULUS};
+use crate::types::{AffinePoint, P256_MODULUS, U256};
 
 /// Witness data for a point doubling operation on P-256.
 /// 2P = R where P = (x1, y1), R = (x3, y3)
@@ -64,15 +64,14 @@ pub fn mod_inverse(a: &U256, p: &U256) -> U256 {
     }
 
     // old_s is the inverse (mod p). Normalize to [0, p).
-    let result = if old_s.0 {
+
+    if old_s.0 {
         // Negative: add p
         let neg_val = U256::from_le_u64s(&[old_s.1[0], old_s.1[1], old_s.1[2], old_s.1[3]]);
         sub_512_u256(p, &neg_val)
     } else {
         U256::from_le_u64s(&[old_s.1[0], old_s.1[1], old_s.1[2], old_s.1[3]])
-    };
-
-    result
+    }
 }
 
 /// Double a point on P-256.
@@ -167,7 +166,10 @@ pub fn point_add(p: &AffinePoint, q: &AffinePoint) -> PointAddWitness {
 pub fn scalar_mul(k: &U256, p: &AffinePoint) -> AffinePoint {
     let k_bits = u256_to_bits(k);
 
-    let first_one = k_bits.iter().rposition(|&b| b).expect("scalar must be nonzero");
+    let first_one = k_bits
+        .iter()
+        .rposition(|&b| b)
+        .expect("scalar must be nonzero");
 
     let mut acc = p.clone();
     for i in (0..first_one).rev() {
@@ -220,8 +222,12 @@ fn sub_i512(a: &I512, b: &I512) -> I512 {
 
 fn cmp_abs(a: &[u64; 8], b: &[u64; 8]) -> i32 {
     for i in (0..8).rev() {
-        if a[i] > b[i] { return 1; }
-        if a[i] < b[i] { return -1; }
+        if a[i] > b[i] {
+            return 1;
+        }
+        if a[i] < b[i] {
+            return -1;
+        }
     }
     0
 }
@@ -253,9 +259,13 @@ fn sub_abs(a: &[u64; 8], b: &[u64; 8]) -> [u64; 8] {
 fn mul_i512_abs(a: &[u64; 8], b: &[u64; 8]) -> [u64; 8] {
     let mut result = [0u128; 8];
     for i in 0..8 {
-        if a[i] == 0 { continue; }
+        if a[i] == 0 {
+            continue;
+        }
         for j in 0..8 {
-            if i + j >= 8 { break; }
+            if i + j >= 8 {
+                break;
+            }
             result[i + j] += (a[i] as u128) * (b[j] as u128);
         }
     }
@@ -306,7 +316,9 @@ fn leading_zeros(a: &[u64; 8]) -> usize {
 }
 
 fn shl(a: &[u64; 8], shift: usize) -> [u64; 8] {
-    if shift >= 512 { return [0; 8]; }
+    if shift >= 512 {
+        return [0; 8];
+    }
     let word_shift = shift / 64;
     let bit_shift = shift % 64;
     let mut result = [0u64; 8];
@@ -373,8 +385,12 @@ mod tests {
         let p = modulus();
 
         // Verify 2G is on the curve
-        let y2 = mul_mod_witness(&w.output.y, &w.output.y, &p).result.to_u256();
-        let x2 = mul_mod_witness(&w.output.x, &w.output.x, &p).result.to_u256();
+        let y2 = mul_mod_witness(&w.output.y, &w.output.y, &p)
+            .result
+            .to_u256();
+        let x2 = mul_mod_witness(&w.output.x, &w.output.x, &p)
+            .result
+            .to_u256();
         let x3 = mul_mod_witness(&x2, &w.output.x, &p).result.to_u256();
         let a = sub_512_u256(&p, &U256::from_le_u64s(&[3, 0, 0, 0]));
         let ax = mul_mod_witness(&a, &w.output.x, &p).result.to_u256();
@@ -397,8 +413,12 @@ mod tests {
         let p = modulus();
 
         // Verify 3G is on the curve
-        let y2 = mul_mod_witness(&w.output.y, &w.output.y, &p).result.to_u256();
-        let x2 = mul_mod_witness(&w.output.x, &w.output.x, &p).result.to_u256();
+        let y2 = mul_mod_witness(&w.output.y, &w.output.y, &p)
+            .result
+            .to_u256();
+        let x2 = mul_mod_witness(&w.output.x, &w.output.x, &p)
+            .result
+            .to_u256();
         let x3 = mul_mod_witness(&x2, &w.output.x, &p).result.to_u256();
         let a = sub_512_u256(&p, &U256::from_le_u64s(&[3, 0, 0, 0]));
         let ax = mul_mod_witness(&a, &w.output.x, &p).result.to_u256();

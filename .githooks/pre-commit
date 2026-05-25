@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+#
+# Pre-commit lint gate — runs the same clippy + rustfmt check as CI before a
+# commit is created.
+#
+# Enable it once with:
+#     ./scripts/install-hooks.sh        (sets git config core.hooksPath)
+#
+# Bypass it for a single commit with:
+#     git commit --no-verify
+#
+exec "$(git rev-parse --show-toplevel)/scripts/check.sh"
