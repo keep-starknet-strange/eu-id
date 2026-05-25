@@ -4,15 +4,14 @@
 //! (`crate::preprocessed`), base-trace commitment of the Sha256Eval trace
 //! plus the producer-side multiplicity columns, interaction trace per
 //! component (`crate::interaction`), and finally Stwo's `prove<SimdBackend>`
-//! over the 19 components in `crate::components`.
+//! over the 23 components in `crate::components` (1 consumer + 8 σ/Σ
+//! decode + 1 packed Maj/Ch + 1 `xor_8` + 8 split-and-pack + 4 `Range_k`).
 //!
 //! Component composition pattern matches `../sha256-air/src/lib.rs`
 //! (structural reference) and the Blake example in
-//! `stwo/examples/blake/air.rs`. The constraint layer is sound for the
-//! Σ/σ/Maj/Ch/xor_8/split-pack lookups; carry range-checks are still
-//! deferred to roadmap 3.9.2 — they will slot into `Sha256Eval` above the
-//! existing `finalize_logup_in_pairs()` call without disturbing this
-//! pipeline.
+//! `stwo/examples/blake/air.rs`. Constraint-layer soundness covers
+//! every lookup the AIR consumes: Σ/σ decode, packed Maj/Ch, `xor_8`,
+//! split-and-pack, and the four `Range_k` carry / terminal-limb channels.
 //!
 //! Order discipline: every `mix_into` on the channel **must** happen in
 //! the same order on the prover and verifier sides — drift silently
@@ -37,15 +36,16 @@ use stwo::prover::{prove, CommitmentSchemeProver, ComponentProver};
 use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 
 use crate::components::{
-    all_preprocessed_column_ids, MajChEval, RoundSplitPackEval, Sha256Relations, SigmaDecodeEval,
-    SigmaSplitPackEval, Xor8Eval, DECODE_TABLES, ROUND_SPLIT_TABLES, SIGMA_SPLIT_TABLES,
+    all_preprocessed_column_ids, range_log_size, MajChEval, RangeKEval, RoundSplitPackEval,
+    Sha256Relations, SigmaDecodeEval, SigmaSplitPackEval, Xor8Eval, DECODE_TABLES, RANGE_TABLES,
+    ROUND_SPLIT_TABLES, SIGMA_SPLIT_TABLES,
 };
 use crate::constants::DIGEST_BYTES;
 use crate::constraints::Sha256Eval;
 use crate::interaction::{generate_interaction_trace, InteractionClaim};
 use crate::multiplicities::{
-    decode_multiplicities, maj_ch_multiplicities, round_split_pack_multiplicities,
-    sigma_split_pack_multiplicities, xor_8_multiplicities,
+    decode_multiplicities, maj_ch_multiplicities, range_k_multiplicities,
+    round_split_pack_multiplicities, sigma_split_pack_multiplicities, xor_8_multiplicities,
 };
 use crate::preprocessed::{generate_preprocessed_trace, maj_ch_log_size, LOG_SIZE_16};
 use crate::trace::Layout;
@@ -86,16 +86,28 @@ impl Default for ProverConfig {
     }
 }
 
-/// A STARK proof that a private message hashes to the public `digest`.
+/// A STARK proof that a private message produces a SHA-256 trace whose
+/// last-block `h_out` columns form a valid digest.
 ///
-/// `digest` and `n_blocks` are the public-input surface; the integration
-/// stream binds the digest into the Big AIR via LogUp.
+/// **Note on `digest` and `n_blocks`.** Both are surfaced on the proof
+/// struct as witness-derived metadata so callers can read what the prover
+/// claims, but neither is cryptographically bound to the AIR by this
+/// standalone component: the verifier does not mix `digest`/`n_blocks`
+/// into its channel and does not compare them to the trace's `h_out`
+/// columns. Binding the digest to a verifier-checked public input lands
+/// with the integration-layer LogUp surface in roadmap 3.9.11
+/// (`elementDigest ↔ valueDigests`, `Sig_structure digest ↔ ECDSA z`).
+/// Until then, treat `digest` as informational: it is only as trustworthy
+/// as the prover.
 #[derive(Clone, Debug)]
 pub struct Sha256Proof {
-    /// The 32-byte digest that the prover claims the (private) message
-    /// hashes to. Exposed as a public input.
+    /// The 32-byte digest the prover claims the (private) message hashes
+    /// to. Witness-derived metadata; not a cryptographic public input in
+    /// this standalone component — see the type-level doc-comment for the
+    /// binding plan (roadmap 3.9.11).
     pub digest: [u8; DIGEST_BYTES],
-    /// Number of blocks in the padded preimage.
+    /// Number of blocks in the padded preimage. Witness-derived metadata;
+    /// not verifier-checked in this standalone component.
     pub n_blocks: usize,
     /// `log2` of the SHA-256 trace's row count.
     pub log_n_rows: u32,
@@ -185,6 +197,20 @@ pub fn prove_sha256(
     config: &ProverConfig,
 ) -> Result<Sha256Proof, Sha256ProveError> {
     let witness = compute_sha256_witness(message);
+    prove_sha256_from_witness(&witness, config)
+}
+
+/// Generate a proof directly from a pre-built [`Sha256Witness`].
+///
+/// Same pipeline as [`prove_sha256`] but lets callers supply the witness
+/// directly — useful for integration-stream pipelines (where the witness
+/// comes from the credential builder rather than a raw message) and for
+/// negative tests that mutate the witness before proving to exercise the
+/// soundness gates.
+pub fn prove_sha256_from_witness(
+    witness: &Sha256Witness,
+    config: &ProverConfig,
+) -> Result<Sha256Proof, Sha256ProveError> {
     let required = crate::trace::min_log_size(witness.blocks.len());
     if config.log_n_rows < required {
         return Err(Sha256ProveError::TraceTooSmall {
@@ -199,7 +225,7 @@ pub fn prove_sha256(
         });
     }
 
-    prove_sha256_inner(&witness, config)
+    prove_sha256_inner(witness, config)
         .map_err(|e| Sha256ProveError::StwoProveFailed(format!("{e:?}")))
 }
 
@@ -283,6 +309,10 @@ fn prove_sha256_inner(
     for &(p, h) in SIGMA_SPLIT_TABLES {
         let mults = sigma_split_pack_multiplicities(witness, p, h);
         base_trace.push(mult_col_to_eval(&mults, LOG_SIZE_16));
+    }
+    for &kind in RANGE_TABLES {
+        let mults = range_k_multiplicities(witness, kind);
+        base_trace.push(mult_col_to_eval(&mults, range_log_size(kind)));
     }
 
     let mut tree_builder = commitment_scheme.tree_builder();
@@ -485,6 +515,10 @@ fn base_trace_log_sizes(log_n_rows: u32, group_width: u32) -> Vec<u32> {
     // 4 round + 4 σ split-pack mults.
     out.extend(std::iter::repeat_n(LOG_SIZE_16, ROUND_SPLIT_TABLES.len()));
     out.extend(std::iter::repeat_n(LOG_SIZE_16, SIGMA_SPLIT_TABLES.len()));
+    // 4 range mults, each at its own `range_log_size(kind)`.
+    for &kind in RANGE_TABLES {
+        out.push(range_log_size(kind));
+    }
     out
 }
 
@@ -503,9 +537,10 @@ fn interaction_trace_log_sizes(
     // base-field columns at the same log_size.
     const EXT: usize = stwo::core::fields::qm31::SECURE_EXTENSION_DEGREE;
 
-    // Sha256Eval consumer: 2824 lookups per block → 1412 paired columns.
-    // Sized at log_n_rows.
-    let sha_cols = num_paired_cols(2824);
+    // Sha256Eval consumer: 3464 lookups per block → 1732 paired columns.
+    // Sized at log_n_rows. See `interaction::sha256_interaction` for the
+    // per-block lookup-count breakdown.
+    let sha_cols = num_paired_cols(3464);
     out.extend(std::iter::repeat_n(log_n_rows, sha_cols * EXT));
     // 8 decode producers: 1 lookup each → 1 column each at log_size 16.
     for _ in DECODE_TABLES {
@@ -526,6 +561,13 @@ fn interaction_trace_log_sizes(
     for _ in SIGMA_SPLIT_TABLES {
         out.extend(std::iter::repeat_n(LOG_SIZE_16, num_paired_cols(1) * EXT));
     }
+    // 4 Range_k producers: 1 lookup each, at the kind's own log_size.
+    for &kind in RANGE_TABLES {
+        out.extend(std::iter::repeat_n(
+            range_log_size(kind),
+            num_paired_cols(1) * EXT,
+        ));
+    }
     out
 }
 
@@ -544,6 +586,7 @@ struct Sha256Components {
     xor_8: FrameworkComponent<Xor8Eval>,
     round_split_pack: Vec<FrameworkComponent<RoundSplitPackEval>>, // 4
     sigma_split_pack: Vec<FrameworkComponent<SigmaSplitPackEval>>, // 4
+    range: Vec<FrameworkComponent<RangeKEval>>,                    // 4
 }
 
 impl Sha256Components {
@@ -627,6 +670,18 @@ impl Sha256Components {
                 claim.sigma_split_pack[i].claimed_sum,
             ));
         }
+        let mut range = Vec::with_capacity(4);
+        for (i, &kind) in RANGE_TABLES.iter().enumerate() {
+            range.push(FrameworkComponent::new(
+                allocator,
+                RangeKEval {
+                    log_size: range_log_size(kind),
+                    kind,
+                    relations: relations.clone(),
+                },
+                claim.range[i].claimed_sum,
+            ));
+        }
 
         Self {
             sha256,
@@ -635,6 +690,7 @@ impl Sha256Components {
             xor_8,
             round_split_pack,
             sigma_split_pack,
+            range,
         }
     }
 
@@ -652,6 +708,9 @@ impl Sha256Components {
         for c in &self.sigma_split_pack {
             out.push(c);
         }
+        for c in &self.range {
+            out.push(c);
+        }
         out
     }
 
@@ -667,6 +726,9 @@ impl Sha256Components {
             out.push(c);
         }
         for c in &self.sigma_split_pack {
+            out.push(c);
+        }
+        for c in &self.range {
             out.push(c);
         }
         out

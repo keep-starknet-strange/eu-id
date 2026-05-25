@@ -26,6 +26,7 @@
 //! over each vector matches the corresponding `witness::*_multiplicities_*`
 //! helper exactly — `total_sanity_*` tests in this module check that.
 
+use crate::components::{range_log_size, RangeKind};
 use crate::constants::{N_ROUNDS, N_STATE_WORDS};
 use crate::partitions::{
     pack_round_groups, SigmaFn, GROUPS_PER_ROUND_PARTITION, LOWER_SIGMA0_PARTS, LOWER_SIGMA1_PARTS,
@@ -312,6 +313,69 @@ pub fn sigma_split_pack_multiplicities(
     mults
 }
 
+/// Build the per-row multiplicity vector for one `Range_k` table.
+///
+/// The vector's length is `2^range_log_size(kind)`. For `k < 2^LOG_N_LANES`
+/// the producer is padded with leading zero-valued rows; consumer-side
+/// lookups on carry values `c ∈ [0, k)` increment the row indexed by `c`.
+///
+/// Firing rule (mirrors `crate::constraints::emit_mod_2_32_add_linear` and
+/// the terminal `Range_16` wiring in `Sha256Eval::evaluate`):
+///   - One `Range_4` increment per schedule-recurrence carry-limb pair (2
+///     limbs × 48 entries per block).
+///   - One `Range_5` increment per `T1` carry-limb pair (2 limbs × 64
+///     rounds per block).
+///   - One `Range_2` increment per `T2`/`e_new`/`a_new` carry-limb pair (2
+///     limbs × 3 families × 64 rounds per block) plus per finalization
+///     carry-limb pair (2 limbs × 8 words per block).
+///   - One `Range_16` increment per terminal `h_out` limb (2 limbs × 8
+///     words per block).
+pub fn range_k_multiplicities(witness: &Sha256Witness, kind: RangeKind) -> Vec<u32> {
+    let log_size = range_log_size(kind);
+    let mut mults = vec![0u32; 1usize << log_size];
+    let bump = |m: &mut [u32], value: u32| {
+        m[value as usize] += 1;
+    };
+
+    for block in &witness.blocks {
+        match kind {
+            RangeKind::Range4 => {
+                for entry in &block.schedule_entries {
+                    bump(&mut mults, entry.carries.lo);
+                    bump(&mut mults, entry.carries.hi);
+                }
+            }
+            RangeKind::Range5 => {
+                for round in &block.rounds {
+                    bump(&mut mults, round.t1_carries.lo);
+                    bump(&mut mults, round.t1_carries.hi);
+                }
+            }
+            RangeKind::Range2 => {
+                for round in &block.rounds {
+                    bump(&mut mults, round.t2_carries.lo);
+                    bump(&mut mults, round.t2_carries.hi);
+                    bump(&mut mults, round.e_new_carries.lo);
+                    bump(&mut mults, round.e_new_carries.hi);
+                    bump(&mut mults, round.a_new_carries.lo);
+                    bump(&mut mults, round.a_new_carries.hi);
+                }
+                for c in &block.finalization_carries {
+                    bump(&mut mults, c.lo);
+                    bump(&mut mults, c.hi);
+                }
+            }
+            RangeKind::Range16 => {
+                for j in 0..N_STATE_WORDS {
+                    bump(&mut mults, block.h_out[j].lo);
+                    bump(&mut mults, block.h_out[j].hi);
+                }
+            }
+        }
+    }
+    mults
+}
+
 // Compile-time sanity: no callers should accidentally use deprecated APIs.
 #[allow(dead_code)]
 const _: () = {
@@ -385,6 +449,74 @@ mod tests {
         let m = maj_ch_multiplicities(&w, crate::partitions::MAX_ROUND_GROUP_BITS);
         assert_eq!(m.maj.iter().sum::<u32>(), totals.maj);
         assert_eq!(m.ch.iter().sum::<u32>(), totals.ch);
+    }
+
+    /// Per-block totals for each `Range_k` multiplicity vector match the
+    /// structural per-block lookup counts the AIR's `Sha256Eval` fires.
+    /// Drift between this and the consumer-side wiring is the same kind
+    /// of soundness-relevant gap the existing `*_per_row_totals_*` tests
+    /// guard against — kept here so a future edit to either side fails
+    /// closed at unit-test time, not at integration-test time.
+    #[test]
+    fn range_k_per_block_totals_match_structural_counts() {
+        use crate::components::RangeKind;
+        let w = compute_sha256_witness(b"abc");
+        let n_entries = (N_ROUNDS - 16) as u32; // 48 schedule entries
+        let n_rounds = N_ROUNDS as u32;
+        let n_words = N_STATE_WORDS as u32;
+
+        // Range_4: schedule-recurrence carries — 2 limbs × 48 entries.
+        let total = range_k_multiplicities(&w, RangeKind::Range4)
+            .iter()
+            .sum::<u32>();
+        assert_eq!(total, 2 * n_entries);
+
+        // Range_5: T1 carries — 2 limbs × 64 rounds.
+        let total = range_k_multiplicities(&w, RangeKind::Range5)
+            .iter()
+            .sum::<u32>();
+        assert_eq!(total, 2 * n_rounds);
+
+        // Range_2: T2 + e_new + a_new (3 × 64) round carries + 8
+        // finalization carries, ×2 limbs each.
+        let total = range_k_multiplicities(&w, RangeKind::Range2)
+            .iter()
+            .sum::<u32>();
+        assert_eq!(total, 2 * (3 * n_rounds + n_words));
+
+        // Range_16: 2 limbs × 8 terminal h_out words.
+        let total = range_k_multiplicities(&w, RangeKind::Range16)
+            .iter()
+            .sum::<u32>();
+        assert_eq!(total, 2 * n_words);
+    }
+
+    /// Honest `Range_k` carry counts never fall outside `[0, k)` — the
+    /// witness layer's `add_words_with_carries` already guarantees this,
+    /// and the multiplicity helper bumps `mults[value]`, so an
+    /// out-of-bound carry would either panic (index out of bounds) or
+    /// silently land in a padding slot. This test pins the property at
+    /// the multiplicity layer.
+    #[test]
+    fn range_k_honest_counts_live_within_table_bounds() {
+        use crate::components::RangeKind;
+        let w = compute_sha256_witness(&[0x42u8; 200]); // multi-block, mixed bytes
+        for kind in [
+            RangeKind::Range2,
+            RangeKind::Range4,
+            RangeKind::Range5,
+            RangeKind::Range16,
+        ] {
+            let mults = range_k_multiplicities(&w, kind);
+            let k = kind.bound() as usize;
+            // Any multiplicity past row k-1 means an out-of-range carry
+            // got counted — the witness is malformed.
+            for (i, &m) in mults.iter().enumerate() {
+                if i >= k {
+                    assert_eq!(m, 0, "{kind:?}: row {i} > k-1 = {} has m = {m}", k - 1);
+                }
+            }
+        }
     }
 
     #[test]

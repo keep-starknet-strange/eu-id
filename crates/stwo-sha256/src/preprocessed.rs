@@ -28,9 +28,10 @@
 //! - 1 xor_8
 //! - 4 round-side split-and-pack
 //! - 4 σ-side split-and-pack
+//! - 4 range tables (`Range_2`, `Range_4`, `Range_5`, `Range_16`)
 //!
 //! Total committed columns:
-//! `8·5 + 5 + 3 + 4·4 + 4·3 = 40 + 5 + 3 + 16 + 12 = 76`.
+//! `8·5 + 5 + 3 + 4·4 + 4·3 + 4·1 = 40 + 5 + 3 + 16 + 12 + 4 = 80`.
 
 use stwo::core::fields::m31::BaseField;
 use stwo::core::poly::circle::CanonicCoset;
@@ -41,12 +42,14 @@ use stwo::prover::poly::BitReversedOrder;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 
 use crate::components::{
-    all_preprocessed_column_ids, DECODE_TABLES, ROUND_SPLIT_TABLES, SIGMA_SPLIT_TABLES,
+    all_preprocessed_column_ids, range_log_size, DECODE_TABLES, RANGE_TABLES, ROUND_SPLIT_TABLES,
+    SIGMA_SPLIT_TABLES,
 };
 use crate::tables::{
     build_decode_table, build_maj_ch_table, build_round_split_pack_table,
     build_sigma_split_pack_table, build_xor_8_table, RoundPartition,
 };
+use crate::tables_local::{range_16, range_2, range_4, range_5};
 
 /// `log2` of the row count for every 2¹⁶-row table.
 pub const LOG_SIZE_16: u32 = 16;
@@ -165,6 +168,26 @@ pub fn generate_preprocessed_trace(group_width: u32) -> PreprocessedTrace {
         }
     }
 
+    // ---- 4 range tables (Range_2, Range_4, Range_5, Range_16) ----
+    //
+    // Each `Range_k` has row content `[0, 1, …, k-1]`. Producers `< 2^4`
+    // are padded with leading value `0` up to `2^LOG_N_LANES = 16` rows;
+    // the consumer never fires lookups on those padding slots, so they
+    // do not perturb the LogUp balance (the matching multiplicity column
+    // holds zeros for the padded suffix — see `range_k_multiplicities`).
+    for &kind in RANGE_TABLES {
+        let log_size = range_log_size(kind);
+        let domain = CanonicCoset::new(log_size).circle_domain();
+        let rows = range_rows(kind);
+        let n_rows = 1usize << log_size;
+        debug_assert!(rows.len() <= n_rows);
+        let col: BaseColumn = (0..n_rows)
+            .map(|i| BaseField::from(rows.get(i).copied().unwrap_or(0)))
+            .collect();
+        evals.push(CircleEvaluation::new(domain, col));
+        log_sizes.push(log_size);
+    }
+
     let ids = all_preprocessed_column_ids(group_width);
     debug_assert_eq!(
         ids.len(),
@@ -176,29 +199,52 @@ pub fn generate_preprocessed_trace(group_width: u32) -> PreprocessedTrace {
     (evals, ids, log_sizes)
 }
 
+/// Row content of one `Range_k` preprocessed table — the values `[0, k)`
+/// from `crate::tables_local`. Returned in canonical order so the
+/// preprocessed trace and the multiplicity column line up by index.
+fn range_rows(kind: crate::components::RangeKind) -> Vec<u32> {
+    use crate::components::RangeKind;
+    match kind {
+        RangeKind::Range2 => range_2(),
+        RangeKind::Range4 => range_4(),
+        RangeKind::Range5 => range_5(),
+        RangeKind::Range16 => range_16(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::partitions::MAX_ROUND_GROUP_BITS;
 
-    /// Total column count: 8·5 + 5 + 3 + 4·4 + 4·3 = 76. Catches any
+    /// Total column count: 8·5 + 5 + 3 + 4·4 + 4·3 + 4·1 = 80. Catches any
     /// regression in the per-table layout.
     #[test]
-    fn total_preprocessed_columns_is_76() {
+    fn total_preprocessed_columns_is_80() {
         let (evals, ids, log_sizes) = generate_preprocessed_trace(MAX_ROUND_GROUP_BITS);
-        assert_eq!(evals.len(), 76);
-        assert_eq!(ids.len(), 76);
-        assert_eq!(log_sizes.len(), 76);
+        assert_eq!(evals.len(), 80);
+        assert_eq!(ids.len(), 80);
+        assert_eq!(log_sizes.len(), 80);
     }
 
     /// First eight tables (40 columns) are decode tables at log_size = 16.
-    /// Next 5 columns are Maj/Ch at log_size = 3W. The rest are at 16.
+    /// Next 5 columns are Maj/Ch at log_size = 3W. The next 33 columns are
+    /// xor_8 + round/σ split-pack at log_size 16. The final 4 columns are
+    /// `Range_k` — three at `LOG_N_LANES = 4` (for Range_2/4/5, padded to
+    /// 16 rows) and one at log_size 16 (Range_16, 2¹⁶ rows).
     #[test]
     fn log_sizes_lay_out_correctly() {
+        use stwo::prover::backend::simd::m31::LOG_N_LANES;
         let w = MAX_ROUND_GROUP_BITS;
         let (_, _, log_sizes) = generate_preprocessed_trace(w);
         for (i, &ls) in log_sizes.iter().enumerate() {
-            let expected = if (40..45).contains(&i) { 3 * w } else { 16 };
+            let expected = if (40..45).contains(&i) {
+                3 * w
+            } else if (76..79).contains(&i) {
+                LOG_N_LANES
+            } else {
+                16
+            };
             assert_eq!(ls, expected, "column {i} log_size mismatch");
         }
     }

@@ -369,8 +369,7 @@ pub struct AddCarries {
 /// chunk-wise through the single generic `xor_8` table. This struct holds
 /// the byte chunks of one limb so the witness can carry the values the
 /// chunk-bind constraint (lo + 256·hi == limb) range-checks, and the
-/// follow-on `xor_8` wiring (3.9.4) can look up `(b0_s, b0_s', b0_combined)`
-/// directly.
+/// `xor_8` lookup can read `(b0_s, b0_s', b0_combined)` directly.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LimbBytes {
     /// Low byte of the limb (`limb & 0xFF`).
@@ -474,7 +473,7 @@ pub struct SigmaDecodeWitness {
     pub o2_chunks_s_complement: LimbPairBytes,
     /// Byte chunks of `o2_combined`. The matched triple
     /// `(o2_chunks_s, o2_chunks_s_complement, o2_chunks_combined)` is what
-    /// the chunk-wise `xor_8` lookup wired in the follow-on task reads.
+    /// the chunk-wise `xor_8` lookup reads.
     pub o2_chunks_combined: LimbPairBytes,
 }
 

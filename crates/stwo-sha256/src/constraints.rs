@@ -17,8 +17,10 @@
 //! the Maj/Ch lookups alias prior rounds' `a`/`e` columns (and the
 //! per-block `h_in[1]`/`h_in[2]`/`h_in[5]`/`h_in[6]` aux splits for the
 //! chain's first two rounds), so the trace commits each value's split
-//! once. The remaining lookup-wiring task is the carry range-checks
-//! (shared-foundation, 3.9.2).
+//! once. The mod-2³² limb-add carries are range-checked through
+//! `Range_{2,4,5}` lookups (one family per add per
+//! [`emit_mod_2_32_add_linear`] call) and the final-block `h_out` digest
+//! limbs through `Range_16` (per design §10.2 / §11 L1).
 //!
 //! Beyond the compression-loop constraints, the §10.4 **padding-role**
 //! block — appended after `h_out` per [`crate::trace::PADDING_ROW_COLS`]
@@ -157,11 +159,11 @@ impl FrameworkEval for Sha256Eval {
         //
         // The σ-output values are not free — each is enforced via two
         // decode-table lookups (one per `S`/`S′` half) on the input word's
-        // 16-bit packed halves, plus a chunk-wise `xor_8` combine of the two
-        // `O2` partials (§9.3). This loop emits the decode-side
-        // `add_to_relation` calls and the σ-output reassembly identity that
-        // ties the decoded intermediates to the σ-output limbs; the
-        // chunk-wise XOR lookups land in the follow-on wiring task.
+        // 16-bit packed halves, plus a chunk-wise `xor_8` combine of the
+        // two `O2` partials (§9.3). This loop emits the decode-side
+        // `add_to_relation` calls, the σ-output reassembly identity that
+        // ties the decoded intermediates to the σ-output limbs, and the
+        // chunk-wise `xor_8` lookups that bind the `O2` combine.
         for j in 0..(N_ROUNDS - 16) {
             let t = j + 16;
             let s0 = (eval.next_trace_mask(), eval.next_trace_mask());
@@ -268,6 +270,8 @@ impl FrameworkEval for Sha256Eval {
                 &w_t,
                 &carry_lo,
                 &carry_hi,
+                crate::components::RangeKind::Range4,
+                &self.relations,
             );
         }
 
@@ -446,9 +450,9 @@ impl FrameworkEval for Sha256Eval {
                 sigma1_coeffs,
             );
 
-            // Remaining lookups (follow-on tasks):
-            //   carry_*.lo, carry_*.hi ∈ [0, k)  via range-check tables
-            //   (shared foundation 3.9.2 / Range_2/4/5).
+            // Carry range-checks fire inside each `emit_mod_2_32_add_linear`
+            // call below (`Range_5` for `T1`, `Range_2` for `T2`/`e_new`/
+            // `a_new` per the headroom audit).
 
             // K[t] is a circuit constant, never a free column.
             let k_lo = E::F::from(M31::from(k_t & 0xFFFF));
@@ -469,6 +473,8 @@ impl FrameworkEval for Sha256Eval {
                 &t1,
                 &t1_carry.0,
                 &t1_carry.1,
+                crate::components::RangeKind::Range5,
+                &self.relations,
             );
 
             // T2 = Σ0 + Maj  (2-addend add).
@@ -479,6 +485,8 @@ impl FrameworkEval for Sha256Eval {
                 &t2,
                 &t2_carry.0,
                 &t2_carry.1,
+                crate::components::RangeKind::Range2,
+                &self.relations,
             );
 
             // e_new = d + T1.
@@ -489,6 +497,8 @@ impl FrameworkEval for Sha256Eval {
                 &e_new,
                 &e_new_carry.0,
                 &e_new_carry.1,
+                crate::components::RangeKind::Range2,
+                &self.relations,
             );
 
             // a_new = T1 + T2.
@@ -499,6 +509,8 @@ impl FrameworkEval for Sha256Eval {
                 &a_new,
                 &a_new_carry.0,
                 &a_new_carry.1,
+                crate::components::RangeKind::Range2,
+                &self.relations,
             );
 
             // State rotation for the next round:
@@ -566,6 +578,35 @@ impl FrameworkEval for Sha256Eval {
                 &h_out[j],
                 &final_carries[j].0,
                 &final_carries[j].1,
+                crate::components::RangeKind::Range2,
+                &self.relations,
+            );
+        }
+
+        // Terminal `Range_16` on every real-block `h_out` limb. Most
+        // intermediate limbs are transitively pinned to `[0, 2¹⁶)` via the
+        // next block's split-and-pack lookups, but the final block's
+        // `h_out` (the digest output) has no downstream consumer in this
+        // standalone component — without these lookups a prover could
+        // present out-of-range M31 values that still satisfy the linear
+        // finalization identity (research/sha256-air-design.md §10.2 / §11
+        // L1). Firing on every real block costs 16 lookups per row and
+        // simplifies the gating (just `enabler`) without changing
+        // soundness for intermediate blocks.
+        for h_out_word in h_out.iter().take(N_STATE_WORDS) {
+            wire_carry_range_check::<E>(
+                &mut eval,
+                enabler.clone(),
+                h_out_word.0.clone(),
+                crate::components::RangeKind::Range16,
+                &self.relations,
+            );
+            wire_carry_range_check::<E>(
+                &mut eval,
+                enabler.clone(),
+                h_out_word.1.clone(),
+                crate::components::RangeKind::Range16,
+                &self.relations,
             );
         }
 
@@ -809,20 +850,11 @@ impl FrameworkEval for Sha256Eval {
 
         // Close the LogUp loop over every SHA-256-specific channel: the
         // eight `Σ`/`σ` decode lookups, the packed `Maj`/`Ch` pair, the
-        // chunk-wise `xor_8`, and the eight split-and-pack channels. Each
-        // pair of fractions batches into one interaction column (pairs
-        // share a denominator) for proof-size economy.
-        //
-        // The shared-foundation rollout (roadmap 3.9.2) will add the
-        // mod-2³² carry range checks (`Range_2`/`Range_4`/`Range_5`/
-        // `Range_16`). When it lands its `add_to_relation` calls slot in
-        // **above** this `finalize_*` call; no rewiring needed here. Until
-        // then carries are unsound — the LogUp loop is still closed and
-        // the prover/verifier round-trip works because the
-        // consumer ⇄ producer balance for every wired channel sums to
-        // zero (the table component evaluators in `crate::components`
-        // yield at `-multiplicity` against the same relation tags this
-        // evaluator consumes at `+1`).
+        // chunk-wise `xor_8`, the eight split-and-pack channels, and the
+        // four `Range_k` channels (`Range_2`/`4`/`5` for mod-2³² carries
+        // per family; `Range_16` for terminal `h_out` limbs). Each pair of
+        // fractions batches into one interaction column (pairs share a
+        // denominator) for proof-size economy.
         eval.finalize_logup_in_pairs();
 
         eval
@@ -1193,13 +1225,17 @@ fn emit_chunk_bind<E: EvalAtRow>(
 /// `Σ aᵢ.lo = r.lo + 2¹⁶ · carry_lo`
 /// `Σ aᵢ.hi + carry_lo = r.hi + 2¹⁶ · carry_hi`
 ///
-/// `carry_hi` is the discarded mod-2³² wraparound; the AIR range-checks both
-/// carries via a `Range_k` lookup (one of `Range_2`/`4`/`5` per add family,
-/// see [`crate::headroom`]) — that wiring lands with the shared-foundation
-/// roll-out.
+/// `carry_hi` is the discarded mod-2³² wraparound. Both carry limbs are
+/// pinned to `[0, k)` by an `add_to_relation` lookup against the family's
+/// `Range_k` channel — `Range_2` for 2-addend adds, `Range_4` for the
+/// 4-addend schedule recurrence, `Range_5` for the 5-addend `T1`. See
+/// [`crate::headroom`] for the audited family bounds.
 ///
-/// The constraint is multiplied by `enabler` so padding rows (`enabler = 0`)
-/// remain unconstrained.
+/// The linear constraints are multiplied by `enabler` so padding rows
+/// (`enabler = 0`) remain unconstrained. The carry lookups are also gated
+/// by `enabler` (passed as the multiplicity) so the producer-side
+/// LogUp balance is not perturbed by zero-valued padding-row carries.
+#[allow(clippy::too_many_arguments)]
 fn emit_mod_2_32_add_linear<E: EvalAtRow>(
     eval: &mut E,
     enabler: E::F,
@@ -1207,6 +1243,8 @@ fn emit_mod_2_32_add_linear<E: EvalAtRow>(
     result: &(E::F, E::F),
     carry_lo: &E::F,
     carry_hi: &E::F,
+    range_kind: crate::components::RangeKind,
+    relations: &Sha256Relations,
 ) {
     let two_pow_16 = E::F::from(M31::from(1u32 << LIMB_BITS));
 
@@ -1223,8 +1261,50 @@ fn emit_mod_2_32_add_linear<E: EvalAtRow>(
     );
     // sum_hi + carry_lo - result.hi - 2¹⁶·carry_hi == 0
     eval.add_constraint(
-        enabler * (sum_hi + carry_lo.clone() - result.1.clone() - two_pow_16 * carry_hi.clone()),
+        enabler.clone()
+            * (sum_hi + carry_lo.clone() - result.1.clone() - two_pow_16 * carry_hi.clone()),
     );
+
+    // Carry range-checks via the family's `Range_k` channel. Multiplicity
+    // is `enabler` so padding rows (every cell zero) don't bump the row-0
+    // producer count.
+    wire_carry_range_check::<E>(
+        eval,
+        enabler.clone(),
+        carry_lo.clone(),
+        range_kind,
+        relations,
+    );
+    wire_carry_range_check::<E>(eval, enabler, carry_hi.clone(), range_kind, relations);
+}
+
+/// Fire one `add_to_relation(rel, +enabler, &[value])` against the chosen
+/// `Range_k` channel. Inlined helper so call sites stay short.
+fn wire_carry_range_check<E: EvalAtRow>(
+    eval: &mut E,
+    enabler: E::F,
+    value: E::F,
+    kind: crate::components::RangeKind,
+    relations: &Sha256Relations,
+) {
+    use crate::components::RangeKind;
+    let mult = E::EF::from(enabler);
+    match kind {
+        RangeKind::Range2 => {
+            eval.add_to_relation(RelationEntry::new(&relations.range.range_2, mult, &[value]))
+        }
+        RangeKind::Range4 => {
+            eval.add_to_relation(RelationEntry::new(&relations.range.range_4, mult, &[value]))
+        }
+        RangeKind::Range5 => {
+            eval.add_to_relation(RelationEntry::new(&relations.range.range_5, mult, &[value]))
+        }
+        RangeKind::Range16 => eval.add_to_relation(RelationEntry::new(
+            &relations.range.range_16,
+            mult,
+            &[value],
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -1657,6 +1737,23 @@ mod tests {
         assert_eq!(get("LowerSigma1SplitPackLo"), split_pack.lower_sigma1_lo);
         assert_eq!(get("LowerSigma1SplitPackHi"), split_pack.lower_sigma1_hi);
 
+        // Range_k carry / terminal lookups (3.9.2 wiring of the
+        // shared-foundation `Range_*` channels). Per block, structurally:
+        //   Range_4  : 2 carries × 48 schedule entries        = 96
+        //   Range_5  : 2 carries × 64 rounds (T1 only)        = 128
+        //   Range_2  : 2 carries × (3 round-side adds × 64
+        //                          + 8 finalization adds)     = 400
+        //   Range_16 : 2 limbs × 8 h_out words                = 16
+        let n_entries = (N_ROUNDS as u32) - 16; // schedule entries per block
+        let range_4_per_block: u32 = 2 * n_entries;
+        let range_5_per_block: u32 = 2 * (N_ROUNDS as u32);
+        let range_2_per_block: u32 = 2 * (3 * (N_ROUNDS as u32) + (N_STATE_WORDS as u32));
+        let range_16_per_block: u32 = 2 * (N_STATE_WORDS as u32);
+        assert_eq!(get("Range2Relation"), range_2_per_block);
+        assert_eq!(get("Range4Relation"), range_4_per_block);
+        assert_eq!(get("Range5Relation"), range_5_per_block);
+        assert_eq!(get("Range16Relation"), range_16_per_block);
+
         // Mask count — `info.mask_offsets[ORIGINAL_TRACE_IDX]` is the
         // main trace (the list pushed by every `next_trace_mask` call).
         assert_eq!(
@@ -1667,7 +1764,9 @@ mod tests {
 
         // Verify the witness-side total firings = sum across channels.
         let total_lookups: u32 = info.logup_counts.iter().map(|(_, &v)| v as u32).sum();
-        let expected_total = decode.total() + maj_ch_xor.total() + split_pack.total();
+        let range_total =
+            range_2_per_block + range_4_per_block + range_5_per_block + range_16_per_block;
+        let expected_total = decode.total() + maj_ch_xor.total() + split_pack.total() + range_total;
         assert_eq!(total_lookups, expected_total);
     }
 

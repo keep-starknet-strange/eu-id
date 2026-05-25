@@ -8,7 +8,7 @@
 //! component (committed separately at prover-setup time); the relations
 //! here are the contract between the two.
 //!
-//! Four channel families are wired into the constraint layer today:
+//! Five channel families are wired into the constraint layer today:
 //!   - [`SigmaDecodeRelations`] — the eight `Σ`/`σ` decode tables.
 //!   - [`MajRelation`] / [`ChRelation`] — the packed Maj/Ch lookup,
 //!     sharing one underlying table at width `W ≥ MAX_ROUND_GROUP_BITS`.
@@ -25,20 +25,23 @@
 //!     packed_s_complement`). Firing each lookup implicitly range-checks
 //!     the input limb to `[0, 2¹⁶)` and supplies the packed values the
 //!     Maj/Ch and `Σ`/`σ` decode-key reconstruction read.
-//!
-//! The matching shared range-check channels (`Range_2`/`4`/`5`/`16`) follow
-//! the same pattern and join in the shared-foundation rollout (`Range_*`
-//! row content already lives in [`crate::tables_local`]).
+//!   - [`RangeRelations`] — the four width-1 range-check channels
+//!     `Range_2`/`Range_4`/`Range_5`/`Range_16`. `Range_k` pins a single
+//!     base-field value into `[0, k)`. The mod-2³² limb-add carries are
+//!     range-checked through `Range_{2,4,5}` per the headroom audit
+//!     (`crate::headroom`); terminal 16-bit limbs (the final block's
+//!     `h_out`, per design §10.2) are range-checked through `Range_16`.
+//!     Row content for each `Range_k` is the table `crate::tables_local::range_k()`.
 //!
 //! Each `relation!(_, N)` declares a struct holding a `LookupElements<N>`
 //! channel — `N` is the row width of the matched table (number of base-field
 //! values per lookup tuple). The decode tables have row shape
 //! `(key, o_main_lo, o_main_hi, o2_partial_lo, o2_partial_hi)` ⇒ `N = 5`;
-//! the Maj/Ch table projects to row shape `(a, b, c, out)` ⇒ `N = 4`; and
-//! `xor_8` is `(x, y, z)` ⇒ `N = 3`. Stwo's macro implements
-//! `Relation<F, EF>::combine` so `add_to_relation` can collapse a `&[F]`
-//! slice of `N` cells into the extension-field key the LogUp interaction
-//! column reads.
+//! the Maj/Ch table projects to row shape `(a, b, c, out)` ⇒ `N = 4`;
+//! `xor_8` is `(x, y, z)` ⇒ `N = 3`; the range channels are `(value)` ⇒
+//! `N = 1`. Stwo's macro implements `Relation<F, EF>::combine` so
+//! `add_to_relation` can collapse a `&[F]` slice of `N` cells into the
+//! extension-field key the LogUp interaction column reads.
 
 use stwo::core::channel::Channel;
 use stwo_constraint_framework::relation;
@@ -210,11 +213,68 @@ impl Default for SplitPackRelations {
     }
 }
 
+/// Row width of every `Range_k` channel: a single base-field value pinned
+/// to `[0, k)`. The lookup tuple passed to `add_to_relation` is a 1-cell
+/// slice — the carry limb (for mod-2³² adds) or the terminal 16-bit limb
+/// (for `Range_16` on `h_out`).
+pub const RANGE_REL_SIZE: usize = 1;
+
+relation!(Range2Relation, RANGE_REL_SIZE);
+relation!(Range4Relation, RANGE_REL_SIZE);
+relation!(Range5Relation, RANGE_REL_SIZE);
+relation!(Range16Relation, RANGE_REL_SIZE);
+
+/// The four range-check channels grouped for `Sha256Eval`.
+///
+/// - `range_2` / `range_4` / `range_5` pin the `(carry_lo, carry_hi)`
+///   pair of each mod-2³² limb-add (per the headroom audit's family
+///   bound: `k=4` for the schedule recurrence, `k=5` for `T1`, `k=2`
+///   everywhere else).
+/// - `range_16` pins terminal 16-bit limbs that are not transitively
+///   pinned by a downstream split-and-pack / σ-decode lookup — most
+///   importantly the final block's `h_out` digest limbs.
+///
+/// Each channel produces one preprocessed-column row per value and has its
+/// own multiplicity column committed by the matching producer component.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RangeRelations {
+    pub range_2: Range2Relation,
+    pub range_4: Range4Relation,
+    pub range_5: Range5Relation,
+    pub range_16: Range16Relation,
+}
+
+impl RangeRelations {
+    pub fn draw(channel: &mut impl Channel) -> Self {
+        Self {
+            range_2: Range2Relation::draw(channel),
+            range_4: Range4Relation::draw(channel),
+            range_5: Range5Relation::draw(channel),
+            range_16: Range16Relation::draw(channel),
+        }
+    }
+
+    pub fn dummy() -> Self {
+        Self {
+            range_2: Range2Relation::dummy(),
+            range_4: Range4Relation::dummy(),
+            range_5: Range5Relation::dummy(),
+            range_16: Range16Relation::dummy(),
+        }
+    }
+}
+
+impl Default for RangeRelations {
+    fn default() -> Self {
+        Self::dummy()
+    }
+}
+
 /// All LogUp channels the SHA-256 AIR consumes today: the eight `Σ`/`σ`
 /// decode-table channels, the packed Maj/Ch pair, the chunk-wise `xor_8`
-/// channel, and the eight split-and-pack channels. Aggregated so
-/// `Sha256Eval` holds a single relations bundle and the prover-side
-/// `draw` walks the transcript once per component.
+/// channel, the eight split-and-pack channels, and the four range-check
+/// channels. Aggregated so `Sha256Eval` holds a single relations bundle
+/// and the prover-side `draw` walks the transcript once per component.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Sha256Relations {
     pub sigma_decode: SigmaDecodeRelations,
@@ -222,14 +282,16 @@ pub struct Sha256Relations {
     pub ch: ChRelation,
     pub xor_8: Xor8Relation,
     pub split_pack: SplitPackRelations,
+    pub range: RangeRelations,
 }
 
 impl Sha256Relations {
     /// Draw fresh `LookupElements` for every channel from a transcript.
     /// The draw order is fixed — decode channels first (matching the
     /// existing 3.9.3 pattern), then Maj, then Ch, then `xor_8`, then the
-    /// split-and-pack channels. Changing the order rotates the
-    /// verifier-side challenges and breaks proof portability.
+    /// split-and-pack channels, then the range channels. Changing the
+    /// order rotates the verifier-side challenges and breaks proof
+    /// portability.
     pub fn draw(channel: &mut impl Channel) -> Self {
         Self {
             sigma_decode: SigmaDecodeRelations::draw(channel),
@@ -237,6 +299,7 @@ impl Sha256Relations {
             ch: ChRelation::draw(channel),
             xor_8: Xor8Relation::draw(channel),
             split_pack: SplitPackRelations::draw(channel),
+            range: RangeRelations::draw(channel),
         }
     }
 
@@ -249,6 +312,7 @@ impl Sha256Relations {
             ch: ChRelation::dummy(),
             xor_8: Xor8Relation::dummy(),
             split_pack: SplitPackRelations::dummy(),
+            range: RangeRelations::dummy(),
         }
     }
 }
@@ -337,6 +401,25 @@ mod tests {
             assert_eq!(size, ROUND_SPLIT_PACK_REL_SIZE);
         }
         assert_eq!(ROUND_SPLIT_PACK_REL_SIZE, 4);
+    }
+
+    /// Every `Range_k` channel exposes row width 1. The lookup tuple
+    /// passed to `add_to_relation` is a single carry / terminal-limb cell.
+    #[test]
+    fn range_relations_have_row_width_1() {
+        use stwo::core::fields::m31::BaseField;
+        use stwo::core::fields::qm31::SecureField;
+        use stwo_constraint_framework::Relation;
+        let r = Sha256Relations::dummy();
+        for size in [
+            <Range2Relation as Relation<BaseField, SecureField>>::get_size(&r.range.range_2),
+            <Range4Relation as Relation<BaseField, SecureField>>::get_size(&r.range.range_4),
+            <Range5Relation as Relation<BaseField, SecureField>>::get_size(&r.range.range_5),
+            <Range16Relation as Relation<BaseField, SecureField>>::get_size(&r.range.range_16),
+        ] {
+            assert_eq!(size, RANGE_REL_SIZE);
+        }
+        assert_eq!(RANGE_REL_SIZE, 1);
     }
 
     /// The four σ-side split-and-pack channels expose row width 3.

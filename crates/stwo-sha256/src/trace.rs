@@ -543,9 +543,9 @@ fn write_sigma_decode_block(
     // O2-combined limbs.
     cols[base + 10][row] = m31(d.o2_combined.lo);
     cols[base + 11][row] = m31(d.o2_combined.hi);
-    // Byte chunks of the three O2 values — input to the `xor_8` chunk-wise
-    // lookup wired in the follow-on task. The chunk-bind linear constraints
-    // pin each `(b0, b1)` pair to its limb.
+    // Byte chunks of the three O2 values — input to the chunk-wise `xor_8`
+    // lookup. The chunk-bind linear constraints pin each `(b0, b1)` pair to
+    // its limb.
     write_chunk_quad(cols, row, base + 12, d.o2_chunks_s);
     write_chunk_quad(cols, row, base + 16, d.o2_chunks_s_complement);
     write_chunk_quad(cols, row, base + 20, d.o2_chunks_combined);

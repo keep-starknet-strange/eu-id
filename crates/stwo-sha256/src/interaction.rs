@@ -1,8 +1,9 @@
 //! LogUp interaction-trace generator for every SHA-256 component.
 //!
-//! The main `Sha256Eval` (consumer) and the 18 producer table components
-//! each emit their own interaction trace. Each is built by walking that
-//! component's fractions row-by-row through
+//! The main `Sha256Eval` (consumer) and the 22 producer table components
+//! (8 σ/Σ decode + 1 packed Maj/Ch + 1 `xor_8` + 8 split-and-pack + 4
+//! `Range_k`) each emit their own interaction trace. Each is built by
+//! walking that component's fractions row-by-row through
 //! [`stwo_constraint_framework::LogupTraceGenerator`] — pairs of
 //! consecutive fractions share an interaction column (matching
 //! `eval.finalize_logup_in_pairs()`).
@@ -37,10 +38,13 @@ use stwo::prover::poly::circle::CircleEvaluation;
 use stwo::prover::poly::BitReversedOrder;
 use stwo_constraint_framework::{LogupTraceGenerator, Relation};
 
-use crate::components::{DECODE_TABLES, ROUND_SPLIT_TABLES, SIGMA_SPLIT_TABLES};
+use crate::components::{
+    range_log_size, RangeKind, DECODE_TABLES, RANGE_TABLES, ROUND_SPLIT_TABLES, SIGMA_SPLIT_TABLES,
+};
 use crate::multiplicities::{
-    decode_multiplicities, maj_ch_multiplicities, round_split_pack_multiplicities,
-    sigma_split_pack_multiplicities, xor_8_multiplicities, MajChMultiplicities,
+    decode_multiplicities, maj_ch_multiplicities, range_k_multiplicities,
+    round_split_pack_multiplicities, sigma_split_pack_multiplicities, xor_8_multiplicities,
+    MajChMultiplicities,
 };
 use crate::partitions::{
     pack_round_groups, GROUPS_PER_ROUND_PARTITION, LOWER_SIGMA0_PARTS, LOWER_SIGMA1_PARTS,
@@ -85,6 +89,7 @@ pub struct InteractionClaim {
     pub xor_8: ComponentClaim,
     pub round_split_pack: Vec<ComponentClaim>, // 4
     pub sigma_split_pack: Vec<ComponentClaim>, // 4
+    pub range: Vec<ComponentClaim>,            // 4: Range_2, Range_4, Range_5, Range_16
 }
 
 impl InteractionClaim {
@@ -104,6 +109,9 @@ impl InteractionClaim {
         for c in &self.sigma_split_pack {
             s += c.claimed_sum;
         }
+        for c in &self.range {
+            s += c.claimed_sum;
+        }
         s
     }
 
@@ -121,6 +129,9 @@ impl InteractionClaim {
             c.mix_into(channel);
         }
         for c in &self.sigma_split_pack {
+            c.mix_into(channel);
+        }
+        for c in &self.range {
             c.mix_into(channel);
         }
     }
@@ -419,6 +430,36 @@ fn round_split_pack_interaction(
     build_interaction_columns(log_size, vec![frac])
 }
 
+/// Build the interaction trace for one `Range_k` producer.
+fn range_k_interaction(
+    relations: &Sha256Relations,
+    witness: &Sha256Witness,
+    kind: RangeKind,
+) -> (
+    ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
+    SecureField,
+) {
+    let log_size = range_log_size(kind);
+    let mults = range_k_multiplicities(witness, kind);
+    let n_rows = 1usize << log_size;
+    let k = kind.bound() as usize;
+    // Producer rows are `[0, 1, …, k-1, 0, 0, …]` — leading `k` real values
+    // then zero padding up to `n_rows`. The matching multiplicity for any
+    // padding slot is `0` (see `range_k_multiplicities`), so they do not
+    // contribute to the LogUp balance.
+    let row_iter = (0..n_rows).map(|i| {
+        let value = if i < k { i as u32 } else { 0u32 };
+        [BaseField::from(value)]
+    });
+    let frac = match kind {
+        RangeKind::Range2 => producer_frac_column(&relations.range.range_2, &mults, row_iter),
+        RangeKind::Range4 => producer_frac_column(&relations.range.range_4, &mults, row_iter),
+        RangeKind::Range5 => producer_frac_column(&relations.range.range_5, &mults, row_iter),
+        RangeKind::Range16 => producer_frac_column(&relations.range.range_16, &mults, row_iter),
+    };
+    build_interaction_columns(log_size, vec![frac])
+}
+
 fn sigma_split_pack_interaction(
     relations: &Sha256Relations,
     witness: &Sha256Witness,
@@ -483,21 +524,28 @@ fn sha256_interaction(
     // Pre-allocate per-lookup fraction vectors. Each filled with `(0, 1)`
     // for padding rows up front; real-block rows overwrite below.
     //
-    // Count of lookups per block:
+    // Count of lookups per block (matches `Sha256Eval::evaluate` exactly):
     //   - 4 round-side split-pack on h_in aux (1 per b_init/c_init/f_init/g_init, lo+hi each = 8 lookups)
     //   - per schedule entry (48):
     //       2 σ-decode (each = 2 decode lookups + 4 xor_8 lookups = 6 lookups per σ) ⇒ 12
     //       2 σ-input split-pack (lo+hi each = 4 lookups) ⇒ 4
+    //       2 carry-range lookups on `(carry_lo, carry_hi)` against `Range_4` ⇒ 2
+    //     ⇒ 18 per entry
     //   - per round (64):
     //       2 Σ-decode ⇒ 12
     //       6 Maj + 6 Ch ⇒ 12
     //       4 round-side split-pack (a, maj_out, e, ch_out — lo+hi each = 8) ⇒ 8
+    //       4 carry-range lookups (2 × `Range_5` for T1; 2 × `Range_2` × 3 families) ⇒ 8
+    //     ⇒ 40 per round
+    //   - finalization: 8 mod-2³² adds × 2 carries × 1 `Range_2` lookup each ⇒ 16
+    //   - terminal `Range_16` on `h_out`: 8 words × 2 limbs ⇒ 16
     //
-    // Total per block = 8 + 48·16 + 64·32 = 8 + 768 + 2048 = 2824.
+    // Total per block = 8 + 48·18 + 64·40 + 16 + 16
+    //                 = 8 + 864 + 2560 + 16 + 16 = 3464.
     //
     // We allocate one Vec<Frac> per lookup index (`lookup_idx`) of length
     // `n_rows`, default-filled, then fill real-block rows below.
-    let lookups_per_block = 2824usize;
+    let lookups_per_block = 3464usize;
     let mut all_lookups: Vec<Vec<Frac>> = (0..lookups_per_block)
         .map(|_| vec![(SecureField::zero(), SecureField::one()); n_rows])
         .collect();
@@ -606,6 +654,18 @@ fn write_block_lookups(
             RelTag::LowerSigma1SplitLo,
             RelTag::LowerSigma1SplitHi,
         );
+
+        // Schedule-recurrence carry range-check (4-addend add → `Range_4`).
+        // Matches `emit_mod_2_32_add_linear` in `Sha256Eval` for the
+        // `W[t] = σ1 + W[t-7] + σ0 + W[t-16]` recurrence.
+        write_carry_range_pair(
+            all,
+            cursor,
+            slot,
+            relations,
+            RangeKind::Range4,
+            entry.carries,
+        );
     }
 
     // ---- 3. Rounds (64 × 32 lookups) ----
@@ -712,6 +772,43 @@ fn write_block_lookups(
             ch_packed,
         );
 
+        // Carry range-checks for the four mod-2³² adds of this round.
+        // Order matches `Sha256Eval::evaluate`'s `emit_mod_2_32_add_linear`
+        // sequence: T1 (5-addend, `Range_5`), T2/e_new/a_new (2-addend each,
+        // `Range_2`).
+        write_carry_range_pair(
+            all,
+            cursor,
+            slot,
+            relations,
+            RangeKind::Range5,
+            round.t1_carries,
+        );
+        write_carry_range_pair(
+            all,
+            cursor,
+            slot,
+            relations,
+            RangeKind::Range2,
+            round.t2_carries,
+        );
+        write_carry_range_pair(
+            all,
+            cursor,
+            slot,
+            relations,
+            RangeKind::Range2,
+            round.e_new_carries,
+        );
+        write_carry_range_pair(
+            all,
+            cursor,
+            slot,
+            relations,
+            RangeKind::Range2,
+            round.a_new_carries,
+        );
+
         // §8.1 chain advance: b ← a, c ← b, f ← e, g ← f.
         let prev_b = b_grp;
         b_grp = a_grp;
@@ -719,6 +816,17 @@ fn write_block_lookups(
         let prev_f = f_grp;
         f_grp = e_grp;
         g_grp = prev_f;
+    }
+
+    // ---- 4. Finalization carry range-checks (8 × Range_2 pairs) ----
+    for c in &block.finalization_carries {
+        write_carry_range_pair(all, cursor, slot, relations, RangeKind::Range2, *c);
+    }
+
+    // ---- 5. Terminal `Range_16` on every `h_out` limb (8 × 2) ----
+    for h in &block.h_out {
+        write_range_check(all, cursor, slot, relations, RangeKind::Range16, h.lo);
+        write_range_check(all, cursor, slot, relations, RangeKind::Range16, h.hi);
     }
 }
 
@@ -768,6 +876,46 @@ fn combine_with_tag(relations: &Sha256Relations, tag: RelTag, values: &[BaseFiel
         RelTag::LowerSigma1SplitLo => relations.split_pack.lower_sigma1_lo.combine(values),
         RelTag::LowerSigma1SplitHi => relations.split_pack.lower_sigma1_hi.combine(values),
     }
+}
+
+/// Combine a single-value lookup against the `Range_k` channel for `kind`.
+fn combine_range(relations: &Sha256Relations, kind: RangeKind, value: u32) -> SecureField {
+    let v = [BaseField::from(value)];
+    match kind {
+        RangeKind::Range2 => relations.range.range_2.combine(&v),
+        RangeKind::Range4 => relations.range.range_4.combine(&v),
+        RangeKind::Range5 => relations.range.range_5.combine(&v),
+        RangeKind::Range16 => relations.range.range_16.combine(&v),
+    }
+}
+
+/// Emit one consumer-side range-check fraction at the trace slot.
+fn write_range_check(
+    all: &mut [Vec<Frac>],
+    cursor: &mut usize,
+    slot: usize,
+    relations: &Sha256Relations,
+    kind: RangeKind,
+    value: u32,
+) {
+    let denom = combine_range(relations, kind, value);
+    all[*cursor][slot] = (SecureField::one(), denom);
+    *cursor += 1;
+}
+
+/// Emit the `(carry_lo, carry_hi)` pair of one mod-2³² add as two
+/// consumer-side `Range_k` fractions (matches
+/// `crate::constraints::emit_mod_2_32_add_linear`).
+fn write_carry_range_pair(
+    all: &mut [Vec<Frac>],
+    cursor: &mut usize,
+    slot: usize,
+    relations: &Sha256Relations,
+    kind: RangeKind,
+    carries: crate::types::AddCarries,
+) {
+    write_range_check(all, cursor, slot, relations, kind, carries.lo);
+    write_range_check(all, cursor, slot, relations, kind, carries.hi);
 }
 
 fn write_sigma_decode_lookups(
@@ -972,6 +1120,13 @@ pub fn generate_interaction_trace(
         combined.extend(t);
         sigma_split_pack.push(ComponentClaim { claimed_sum: s });
     }
+    // 4 range producers (Range_2, Range_4, Range_5, Range_16).
+    let mut range = Vec::with_capacity(4);
+    for &kind in RANGE_TABLES {
+        let (t, s) = range_k_interaction(relations, witness, kind);
+        combined.extend(t);
+        range.push(ComponentClaim { claimed_sum: s });
+    }
 
     let claim = InteractionClaim {
         sha256,
@@ -980,6 +1135,7 @@ pub fn generate_interaction_trace(
         xor_8,
         round_split_pack,
         sigma_split_pack,
+        range,
     };
     (combined, claim)
 }

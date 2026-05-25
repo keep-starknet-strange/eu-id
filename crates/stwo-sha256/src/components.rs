@@ -11,7 +11,7 @@
 //! column per relation it serves. It emits `add_to_relation(rel,
 //! −multiplicity_cell, &row_cells)`, then `finalize_logup_in_pairs()`.
 //!
-//! Wired components (19 total, one `Sha256Eval` consumer + 18 producers):
+//! Wired components (23 total, one `Sha256Eval` consumer + 22 producers):
 //!
 //! - [`SigmaDecodeEval`] × 8 — one per (function, side) of the σ/Σ decode
 //!   tables; each has 2¹⁶ rows × 5 preprocessed columns + 1 multiplicity.
@@ -25,6 +25,11 @@
 //!   packed groups) + 1 multiplicity.
 //! - [`SigmaSplitPackEval`] × 4 — one per (σ-partition, half); 2¹⁶ rows
 //!   × 3 preprocessed (key + 2 packed) + 1 multiplicity.
+//! - [`RangeKEval`] × 4 — one per `Range_k` channel (`k ∈ {2, 4, 5, 16}`);
+//!   `k` rows × 1 preprocessed column (the value) + 1 multiplicity. Each
+//!   producer's `log_size = ceil(log2(k))`, padded with row-`0`
+//!   repetition for `k ∉ {1, 2, 4, 16}`; see [`range_log_size`] and
+//!   [`crate::preprocessed`].
 //!
 //! Every preprocessed-column ID is namespaced under the `"sha256_"` prefix
 //! so it cannot collide with the ECDSA-stream tables in a future combined
@@ -35,6 +40,7 @@
 use num_traits::One;
 use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::SecureField;
+use stwo::prover::backend::simd::m31::LOG_N_LANES;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{
     EvalAtRow, FrameworkComponent, FrameworkEval, Relation, RelationEntry,
@@ -42,6 +48,7 @@ use stwo_constraint_framework::{
 
 use crate::partitions::SigmaFn;
 use crate::tables::{Half, Half16, LowerSigmaPartition, RoundPartition};
+use crate::tables_local::RANGE_16;
 
 // Re-export shorthand so the `stark` module imports types from one place.
 pub use crate::relations::Sha256Relations;
@@ -91,6 +98,63 @@ fn sigma_split_tag(p: LowerSigmaPartition, h: Half16) -> &'static str {
         (LowerSigmaPartition::LowerSigma1, Half16::Lo) => "sp_lsigma1_lo",
         (LowerSigmaPartition::LowerSigma1, Half16::Hi) => "sp_lsigma1_hi",
     }
+}
+
+/// Which `Range_k` table a producer or consumer fires against. The lookup
+/// pins one value into `[0, k)`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum RangeKind {
+    /// Carries from 2-addend mod-2³² adds (`T2`, `e_new`, `a_new`, finalization).
+    Range2,
+    /// Carries from the 4-addend message-schedule recurrence.
+    Range4,
+    /// Carries from the 5-addend `T1` round add.
+    Range5,
+    /// Terminal 16-bit limbs (notably the final block's `h_out` digest).
+    Range16,
+}
+
+impl RangeKind {
+    /// The exclusive upper bound `k` of the range `[0, k)`.
+    #[inline]
+    pub const fn bound(self) -> u32 {
+        match self {
+            RangeKind::Range2 => crate::headroom::RANGE_2,
+            RangeKind::Range4 => crate::headroom::RANGE_4,
+            RangeKind::Range5 => crate::headroom::RANGE_5,
+            RangeKind::Range16 => RANGE_16,
+        }
+    }
+
+    /// Short tag used in preprocessed-column IDs (`"range_2"`, etc.).
+    #[inline]
+    pub const fn tag(self) -> &'static str {
+        match self {
+            RangeKind::Range2 => "range_2",
+            RangeKind::Range4 => "range_4",
+            RangeKind::Range5 => "range_5",
+            RangeKind::Range16 => "range_16",
+        }
+    }
+}
+
+/// `log2` of the row count committed for a `Range_k` producer.
+///
+/// Stwo's SIMD backend requires `log_size ≥ LOG_N_LANES` (one packed lane
+/// minimum), so the small `Range_2`/`Range_4`/`Range_5` tables are padded
+/// up to `2^LOG_N_LANES = 16` rows. Padding rows hold value `0` with
+/// multiplicity `0`; they do not contribute to the LogUp balance because
+/// the consumer only fires lookups on real carries.
+#[inline]
+pub fn range_log_size(kind: RangeKind) -> u32 {
+    let k = kind.bound();
+    let needed = k.next_power_of_two().trailing_zeros();
+    needed.max(LOG_N_LANES)
+}
+
+/// Preprocessed-column ID of one `Range_k` table (the single value column).
+pub fn range_column_id(kind: RangeKind) -> PreProcessedColumnId {
+    id(kind.tag())
 }
 
 /// IDs of the 5 preprocessed columns of one decode table.
@@ -476,6 +540,69 @@ impl FrameworkEval for SigmaSplitPackEval {
 pub type SigmaSplitPackComponent = FrameworkComponent<SigmaSplitPackEval>;
 
 // ---------------------------------------------------------------------------
+// Range_k component
+// ---------------------------------------------------------------------------
+
+/// Producer for one `Range_k` lookup table (`k ∈ {2, 4, 5, 16}`).
+///
+/// Reads one preprocessed value column (the row content
+/// `crate::tables_local::range_k()`, padded with value `0` up to
+/// `2^range_log_size(kind)` rows for `k < 2^LOG_N_LANES`) and one
+/// multiplicity column. Yields each row at `-multiplicity` against the
+/// matching range relation.
+///
+/// **Soundness role.** Together with the consumer-side
+/// `add_to_relation(rel, +1, &[carry])` calls inside
+/// `crate::constraints::emit_mod_2_32_add_linear` and the terminal
+/// `Range_16` lookups on every real-block `h_out` limb (inlined in
+/// `Sha256Eval::evaluate` via `wire_carry_range_check`), this component
+/// completes the LogUp loop that pins each carry into `[0, k)` and the
+/// digest limbs into `[0, 2¹⁶)` — closing the soundness gap the headroom
+/// audit (`crate::headroom`) reduces to.
+#[derive(Clone)]
+pub struct RangeKEval {
+    pub log_size: u32,
+    pub kind: RangeKind,
+    pub relations: Sha256Relations,
+}
+
+impl FrameworkEval for RangeKEval {
+    fn log_size(&self) -> u32 {
+        self.log_size
+    }
+    fn max_constraint_log_degree_bound(&self) -> u32 {
+        self.log_size + 1
+    }
+    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+        let value = eval.get_preprocessed_column(range_column_id(self.kind));
+        let mult = eval.next_trace_mask();
+        let neg = -E::EF::from(mult);
+
+        use crate::relations::*;
+        let values = [value];
+        match self.kind {
+            RangeKind::Range2 => {
+                emit::<E, Range2Relation>(&mut eval, &self.relations.range.range_2, neg, &values)
+            }
+            RangeKind::Range4 => {
+                emit::<E, Range4Relation>(&mut eval, &self.relations.range.range_4, neg, &values)
+            }
+            RangeKind::Range5 => {
+                emit::<E, Range5Relation>(&mut eval, &self.relations.range.range_5, neg, &values)
+            }
+            RangeKind::Range16 => {
+                emit::<E, Range16Relation>(&mut eval, &self.relations.range.range_16, neg, &values)
+            }
+        }
+
+        eval.finalize_logup_in_pairs();
+        eval
+    }
+}
+
+pub type RangeKComponent = FrameworkComponent<RangeKEval>;
+
+// ---------------------------------------------------------------------------
 // Aggregate IDs
 // ---------------------------------------------------------------------------
 
@@ -501,6 +628,10 @@ pub fn all_preprocessed_column_ids(group_width: u32) -> Vec<PreProcessedColumnId
     }
     for (p, h) in SIGMA_SPLIT_TABLES {
         out.extend(sigma_split_pack_column_ids(*p, *h));
+    }
+    // 4 range tables, in `RANGE_TABLES` order.
+    for &kind in RANGE_TABLES {
+        out.push(range_column_id(kind));
     }
     out
 }
@@ -532,6 +663,16 @@ pub const SIGMA_SPLIT_TABLES: &[(LowerSigmaPartition, Half16)] = &[
     (LowerSigmaPartition::LowerSigma0, Half16::Hi),
     (LowerSigmaPartition::LowerSigma1, Half16::Lo),
     (LowerSigmaPartition::LowerSigma1, Half16::Hi),
+];
+
+/// The 4 range-check tables in canonical order. Shared across `components`,
+/// `preprocessed`, `multiplicities`, and `interaction` so an enum drift is
+/// caught at one site.
+pub const RANGE_TABLES: &[RangeKind] = &[
+    RangeKind::Range2,
+    RangeKind::Range4,
+    RangeKind::Range5,
+    RangeKind::Range16,
 ];
 
 #[allow(dead_code)]
