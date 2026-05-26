@@ -17,14 +17,16 @@ use stwo_sha256::witness::{
 ///
 /// 9 322 was the pre-padding total after the split-and-pack refactor.
 /// Adding the §10.4 padding-role witness tacks `PADDING_ROW_COLS = 33`
-/// cells onto each row, bumping the total to 9 355.
+/// cells onto each row, then the C1-fix aux column `enabler_step` adds
+/// 1 more — final total 9 356.
 #[test]
-fn total_cols_equals_9355_after_padding_witness() {
+fn total_cols_equals_9356_after_c1_aux_column() {
     println!("Layout::TOTAL_COLS = {}", Layout::TOTAL_COLS);
-    assert_eq!(Layout::TOTAL_COLS, 9_355);
-    // The 33-cell delta corresponds exactly to the padding-role region.
+    assert_eq!(Layout::TOTAL_COLS, 9_356);
+    // The 33-cell padding delta and the trailing `enabler_step` cell add
+    // up to the post-padding delta over the 9 322-column refactor baseline.
     assert_eq!(PADDING_ROW_COLS, 33);
-    assert_eq!(Layout::TOTAL_COLS, 9_322 + PADDING_ROW_COLS);
+    assert_eq!(Layout::TOTAL_COLS, 9_322 + PADDING_ROW_COLS + 1);
 }
 
 /// Print per-block lookup multiplicities for the `b"abc"` single-block

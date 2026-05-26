@@ -507,6 +507,75 @@ mod tests {
         }
     }
 
+    /// Negative complement of [`range_k_honest_counts_live_within_table_bounds`]
+    /// — pins the `Range_k` LogUp soundness gate from the multiplicity side
+    /// without paying for a real proof.
+    ///
+    /// The end-to-end equivalent is
+    /// `tests/prove_verify_round_trip.rs::rejects_out_of_range_carry_witness_mutation`,
+    /// but that test is `#[ignore]`d (release-only) because a real proof
+    /// dominates wall time. This debug-mode test exercises the same
+    /// soundness invariant by checking the *necessary condition* the
+    /// LogUp argument enforces: a witness carry outside `[0, k)` shows
+    /// up as a consumer-side multiplicity bump at an index the producer
+    /// `Range_k` table has no row for, so the consumer/producer claimed
+    /// sums cannot balance. Together with the producer-side parity
+    /// invariants further up this module, this closes audit lesson L4
+    /// (research/sha256-air-design.md §11) on the LogUp side at debug
+    /// cadence.
+    #[test]
+    fn out_of_range_carry_mutation_shifts_multiplicity_outside_table() {
+        use crate::components::RangeKind;
+        let mut w = compute_sha256_witness(b"abc");
+
+        let baseline = range_k_multiplicities(&w, RangeKind::Range2);
+        let k = RangeKind::Range2.bound() as usize;
+
+        // Mirror the witness mutation that
+        // `rejects_out_of_range_carry_witness_mutation` runs end-to-end:
+        // bump finalization carry word 7 lo from its honest `< 2` value
+        // to `5` — outside the `Range_2` producer table.
+        let last = w.blocks.last_mut().expect("at least one block");
+        let original = last.finalization_carries[7].lo;
+        assert!(
+            (original as usize) < k,
+            "honest carry must live within [0, k); got {original}",
+        );
+        last.finalization_carries[7].lo = 5;
+
+        let mutated = range_k_multiplicities(&w, RangeKind::Range2);
+
+        // Bucket 5 is outside `[0, k = 2)`, so the producer Range_2 table
+        // has no row for it. The mutation moves exactly one count from
+        // `mults[original]` to `mults[5]`; every other bucket is unchanged.
+        assert_eq!(
+            mutated[5],
+            baseline[5] + 1,
+            "out-of-range carry value 5 must bump the multiplicity at bucket 5",
+        );
+        assert_eq!(
+            mutated[original as usize] + 1,
+            baseline[original as usize],
+            "original honest bucket should lose one count",
+        );
+        for i in 0..mutated.len() {
+            if i != 5 && i != original as usize {
+                assert_eq!(
+                    mutated[i], baseline[i],
+                    "bucket {i} should be unchanged by a single-cell carry mutation",
+                );
+            }
+        }
+
+        // The LogUp soundness condition the gate enforces: the consumer's
+        // claimed sum cannot balance the producer's if any multiplicity
+        // outside `[0, k)` is non-zero.
+        assert!(
+            mutated[k..].iter().any(|m| *m > 0),
+            "mutation must place at least one multiplicity outside the producer range",
+        );
+    }
+
     #[test]
     fn split_pack_per_row_totals_match_witness_totals() {
         let w = compute_sha256_witness(b"abc");

@@ -99,6 +99,15 @@ fn sigma_split_tag(p: LowerSigmaPartition, h: Half16) -> &'static str {
 
 /// Which `Range_k` table a producer or consumer fires against. The lookup
 /// pins one value into `[0, k)`.
+///
+/// **N1 — `Range16` is reserved for terminal-limb checks.**
+/// `Range2`/`Range4`/`Range5` size mod-2³² add-carry checks (per the
+/// `crate::headroom` audit, the carry of a `k`-addend add lives in
+/// `[0, k)`). `Range16`, by contrast, is the 2¹⁶-row table used only for
+/// terminal 16-bit limb checks — the final block's `h_out` digest limbs
+/// today (`crate::constraints::Sha256Eval::evaluate`). Passing `Range16`
+/// to `crate::constraints::emit_mod_2_32_add_linear` is rejected by an
+/// explicit `panic!` because no mod-2³² add carry needs a 16-bit range.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum RangeKind {
     /// Carries from 2-addend mod-2³² adds (`T2`, `e_new`, `a_new`, finalization).
@@ -108,6 +117,9 @@ pub enum RangeKind {
     /// Carries from the 5-addend `T1` round add.
     Range5,
     /// Terminal 16-bit limbs (notably the final block's `h_out` digest).
+    /// **Not** used for mod-2³² add carries — those land in
+    /// `Range2`/`Range4`/`Range5` per the headroom audit. See the enum
+    /// doc-comment for the rationale.
     Range16,
 }
 
@@ -152,6 +164,16 @@ pub fn range_log_size(kind: RangeKind) -> u32 {
 /// Preprocessed-column ID of one `Range_k` table (the single value column).
 pub fn range_column_id(kind: RangeKind) -> PreProcessedColumnId {
     id(kind.tag())
+}
+
+/// Preprocessed-column ID of the single-cell `is_first_row` selector
+/// committed at the main `Sha256Eval` trace's `log_n_rows`. The selector
+/// is `1` at storage index `Layout::block_slot(0, log_n_rows) = 0` and
+/// `0` elsewhere. `Sha256Eval` reads it via `eval.get_preprocessed_column`
+/// and pins `is_first_block ≡ is_first_row`, anchoring the §10.3 chain
+/// on block 0's IV binding (research/sha256-air-design.md §11 L2).
+pub fn is_first_row_column_id() -> PreProcessedColumnId {
+    id("is_first_row")
 }
 
 /// IDs of the 5 preprocessed columns of one decode table.
@@ -608,14 +630,14 @@ pub type RangeKComponent = FrameworkComponent<RangeKEval>;
 /// matching `CircleEvaluation`s. The list mirrors the per-component
 /// `*_column_ids` getters concatenated in **table-major** order — keep
 /// both sides in sync or the verifier will read the wrong column.
-pub fn all_preprocessed_column_ids(group_width: u32) -> Vec<PreProcessedColumnId> {
+pub fn all_preprocessed_column_ids() -> Vec<PreProcessedColumnId> {
     let mut out = Vec::new();
     // 8 decode tables in the order `Sha256Relations::draw`/`SigmaDecodeRelations::draw` uses.
     for (f, h) in DECODE_TABLES {
         out.extend(decode_column_ids(*f, *h));
     }
-    // 1 Maj/Ch table (always at `group_width >= MAX_ROUND_GROUP_BITS`).
-    let _ = group_width;
+    // 1 Maj/Ch table — column IDs depend only on table identity, not on
+    // `group_width` (which sets the table's row count, not its columns).
     out.extend(maj_ch_column_ids());
     // 1 xor_8 table.
     out.extend(xor_8_column_ids());
@@ -630,6 +652,11 @@ pub fn all_preprocessed_column_ids(group_width: u32) -> Vec<PreProcessedColumnId
     for &kind in RANGE_TABLES {
         out.push(range_column_id(kind));
     }
+    // 1 `is_first_row` selector sized to the main `Sha256Eval` trace. Read
+    // by the consumer eval via `get_preprocessed_column` (not by any
+    // producer component), so it lives at the tail of the ID list and is
+    // not allocated to any of the 22 producer components.
+    out.push(is_first_row_column_id());
     out
 }
 

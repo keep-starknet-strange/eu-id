@@ -245,13 +245,29 @@ pub struct RangeRelations {
 }
 
 impl RangeRelations {
+    /// Draw one challenge per `Range_k` channel in the canonical
+    /// `crate::components::RANGE_TABLES` order.
+    ///
+    /// **Mn3 — single source of truth.** Both the preprocessed-trace
+    /// generator (`crate::preprocessed`), the multiplicity assembly
+    /// (`crate::multiplicities` / `crate::interaction`), and this
+    /// challenge-draw side iterate the same `RANGE_TABLES` slice, so a
+    /// future refactor that reorders the canonical list automatically
+    /// keeps the consumer ⇄ producer LogUp balance intact. A drift
+    /// between the two used to be a hidden coupling — `draw` now
+    /// re-derives its order from `RANGE_TABLES` directly.
     pub fn draw(channel: &mut impl Channel) -> Self {
-        Self {
-            range_2: Range2Relation::draw(channel),
-            range_4: Range4Relation::draw(channel),
-            range_5: Range5Relation::draw(channel),
-            range_16: Range16Relation::draw(channel),
+        use crate::components::{RangeKind, RANGE_TABLES};
+        let mut out = Self::dummy();
+        for &kind in RANGE_TABLES {
+            match kind {
+                RangeKind::Range2 => out.range_2 = Range2Relation::draw(channel),
+                RangeKind::Range4 => out.range_4 = Range4Relation::draw(channel),
+                RangeKind::Range5 => out.range_5 = Range5Relation::draw(channel),
+                RangeKind::Range16 => out.range_16 = Range16Relation::draw(channel),
+            }
         }
+        out
     }
 
     pub fn dummy() -> Self {

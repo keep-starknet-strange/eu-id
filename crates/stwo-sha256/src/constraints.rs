@@ -46,6 +46,7 @@ use stwo_constraint_framework::{
     EvalAtRow, FrameworkEval, Relation, RelationEntry, ORIGINAL_TRACE_IDX,
 };
 
+use crate::components::is_first_row_column_id;
 use crate::constants::{IV, K, N_ROUNDS, N_STATE_WORDS};
 use crate::partitions::{
     lower_sigma_key_hi_coeff_s, lower_sigma_key_hi_coeff_s_complement, round_key_coeffs,
@@ -72,19 +73,62 @@ impl FrameworkEval for Sha256Eval {
     }
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        // Every constraint here is degree ≤ 2 (most are linear; the binary
-        // checks `x · (1 − x) = 0` are degree 2). The `+1` is the standard
-        // FRI commitment headroom.
+        // Every constraint here is degree ≤ 2. The §10.3 chain factor and
+        // the C1 contiguity constraint both stay degree 2 by using an aux
+        // column `enabler_step` committed in the main trace (the
+        // alternative — `(1 − is_first_row) · enabler · (1 − enabler_prev)`
+        // — would be degree 3, which Stwo's `EvaluationMode::infer` cannot
+        // unify with the degree-2 producer components without a global
+        // log-blowup bump). The `+1` is the standard FRI headroom.
         self.log_size + 1
     }
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         // ---- header ----
-        let enabler = eval.next_trace_mask();
+        //
+        // Reads `enabler` with a `[0, -1]` cross-row mask so the contiguity
+        // constraint below can pin `enabler_prev`. The single
+        // `next_interaction_mask` call still consumes one trace column slot
+        // (per Stwo's mask-consumption rule); the read order vs. the trace
+        // layout is unchanged.
+        let [enabler, enabler_prev] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1]);
         eval.add_constraint(enabler.clone() * (E::F::one() - enabler.clone()));
 
         let is_first_block = eval.next_trace_mask();
-        eval.add_constraint(is_first_block.clone() * (E::F::one() - is_first_block.clone()));
+        // `is_first_row` is the preprocessed selector that pins exactly
+        // one anchor row for IV binding — `1` at storage index
+        // `Layout::block_slot(0, log_n_rows) = 0`, `0` elsewhere. See
+        // `crate::preprocessed::generate_preprocessed_trace`.
+        let is_first_row = eval.get_preprocessed_column(is_first_row_column_id());
+
+        // C1 anchor (research/sha256-air-design.md §11 L2): pin
+        // `is_first_block ≡ is_first_row`. The verifier trusts
+        // `is_first_row` as preprocessed, so this single linear identity
+        // forces `is_first_block = 1` at block 0's slot and `= 0`
+        // everywhere else — which in turn forces IV binding to fire at
+        // exactly that one slot and the chain gate to be `1` (active) at
+        // every other real row. Subsumes the old `x · (1 − x) = 0`
+        // binary check on `is_first_block`.
+        eval.add_constraint(is_first_block.clone() - is_first_row.clone());
+
+        // C1 anchor (continued): force `enabler = 1` at block 0's slot so
+        // the IV-bound row is committed as a real row. Without this, a
+        // prover could set `enabler = 0` at the anchor slot, leaving the
+        // is_first_block-driven IV binding vacuously satisfied via the
+        // degenerate (-1) chain-gate case while disabling every other
+        // real-row constraint at that slot.
+        eval.add_constraint(is_first_row.clone() * (E::F::one() - enabler.clone()));
+
+        // C1 contiguity (degree 2 via aux column): `enabler_prev` is read
+        // here as the cross-row signal that the aux column `enabler_step`
+        // (committed at the tail of the trace; see
+        // [`crate::trace::Layout::COL_ENABLER_STEP`]) pins to
+        // `enabler · (1 − enabler_prev)`. The two constraints —
+        //   • `enabler_step − enabler · (1 − enabler_prev) = 0` (defines the
+        //     aux column, degree 2)
+        //   • `(1 − is_first_row) · enabler_step = 0` (contiguity, degree 2)
+        // — are emitted at the bottom of `evaluate`, after `enabler_step`
+        // is read in trace-layout order.
 
         // ---- h_in: 8 words × (lo, hi) ----
         let h_in: [(E::F, E::F); N_STATE_WORDS] =
@@ -92,14 +136,11 @@ impl FrameworkEval for Sha256Eval {
 
         // IV binding: on the first block row, `h_in == IV`. We multiply by
         // `is_first_block` so the constraint is vacuous on every other row.
-        //
-        // The AIR does **not** enforce `Σ is_first_block ≥ 1` over the
-        // trace. A prover who clears `is_first_block` everywhere produces
-        // a trace where the §10.3 chain forms a closed cycle with no IV
-        // anchor; satisfying that requires an n-block fixed-point of
-        // SHA-256 compression, which is computationally infeasible. So
-        // the standalone digest claim is cryptographically (not
-        // structurally) bound to `IV`.
+        // `is_first_block` is pinned to the `is_first_row` preprocessed
+        // selector above, so IV binding fires at exactly one slot
+        // (block 0's). Together with the contiguity constraint and the
+        // existing §10.3 chain, this enforces `h_in[block_r] = IV` at
+        // `r = 0` and `h_in[block_r] = h_out[block_{r-1}]` for `r > 0`.
         for ((lo, hi), &iv_word) in h_in.iter().zip(IV.iter()) {
             let iv_lo = E::F::from(M31::from(iv_word & 0xFFFF));
             let iv_hi = E::F::from(M31::from(iv_word >> LIMB_BITS));
@@ -620,26 +661,23 @@ impl FrameworkEval for Sha256Eval {
 
         // §10.3 multi-block chain: on every *continuation* row (a real
         // block other than the first), `h_in[j] == h_out_prev[j]` for both
-        // limbs. The roadmap calls for the constraint to be vacuous on
-        // first-block rows (constrained to IV instead) and on padding rows
-        // (kept untouched by `enabler = 0`).
+        // limbs. The constraint is vacuous on the first-block row (where
+        // IV binding takes over) and on padding rows (where `enabler = 0`
+        // by contiguity).
         //
-        // Per design-lesson L5 ("keep all constraints degree ≤ 2") we
-        // combine the two gates into a single linear factor
-        // `(enabler − is_first_block)` rather than multiplying both:
-        //   - first-block real row (enabler=1, is_first_block=1): factor 0
-        //   - continuation real row  (enabler=1, is_first_block=0): factor 1
-        //   - padding row            (enabler=0, is_first_block=0): factor 0
-        //   - degenerate            (enabler=0, is_first_block=1): factor −1
-        //     — sign-reversed equality still forces `h_in = h_out_prev`,
-        //     and IV binding (which only gates on `is_first_block`) also
-        //     fires `h_in = IV`. Together this forces `h_out_prev = IV`;
-        //     on padding predecessors (cells all zero) that fails
-        //     immediately, and on real predecessors it demands a SHA-256
-        //     fixed-point — computationally unreachable.
-        // The product with the limb-difference stays degree 2, so the
-        // existing `max_constraint_log_degree_bound = log_size + 1`
-        // headroom is preserved.
+        // The chain gate `(enabler − is_first_block)` resolves as follows
+        // under the C1 anchor constraints above
+        // (`is_first_block ≡ is_first_row`, `is_first_row · (1 − enabler) = 0`,
+        // and contiguity):
+        //   - block 0 slot (enabler=1, is_first_block=1): factor 0 — vacuous.
+        //     IV binding pins `h_in = IV` instead.
+        //   - real continuation (enabler=1, is_first_block=0): factor 1 —
+        //     chain fires. Predecessor is real by contiguity, so
+        //     `h_out_prev` is `Range_16`-pinned.
+        //   - padding row (enabler=0, is_first_block=0): factor 0 — vacuous.
+        //   - degenerate (enabler=0, is_first_block=1): ruled out by the
+        //     anchor constraint `is_first_row · (1 − enabler) = 0` combined
+        //     with `is_first_block ≡ is_first_row`.
         let chain_gate = enabler.clone() - is_first_block.clone();
         for j in 0..N_STATE_WORDS {
             eval.add_constraint(chain_gate.clone() * (h_in[j].0.clone() - h_out_prev[j].0.clone()));
@@ -690,6 +728,30 @@ impl FrameworkEval for Sha256Eval {
         }
         for bit in marker_byte_sel.iter() {
             eval.add_constraint(bit.clone() * (E::F::one() - bit.clone()));
+        }
+
+        // (P.A') Mn1: pin every padding-role flag to `0` on disabled rows.
+        // Without these, P.B–P.H are internally consistent algebraically
+        // for an attacker-controlled disabled row (e.g.,
+        // `is_marker_block = 1` accompanied by self-consistent
+        // `is_marker_word` / `marker_byte_sel` / `marker_word_byte` cells),
+        // which is harmless in isolation but undesirable as defense in
+        // depth — disabled rows should carry no padding metadata.
+        //
+        // The four single-cell flags suffice: `marker_byte_sel`,
+        // `is_marker_word`, and `marker_word_post_strict_15` collapse to
+        // zero via the sum identities (P.B) and aux definition (P.C') once
+        // `is_marker_block` and `is_length_block` are pinned. `(1 − enabler)`
+        // is degree 1 and each flag is degree 1, so each constraint is
+        // degree 2.
+        let one_minus_enabler = E::F::one() - enabler.clone();
+        for flag in [
+            &is_marker_block,
+            &is_length_block,
+            &is_length_only_block,
+            &is_marker_only_block,
+        ] {
+            eval.add_constraint(one_minus_enabler.clone() * flag.clone());
         }
 
         // (P.B) One-hot sums match the block role. Marker-word selectors
@@ -862,6 +924,27 @@ impl FrameworkEval for Sha256Eval {
         // Note: cross-component binding of bit_length and marker position
         // to the mdoc/COSE-parser stream is the integration layer's job
         // and is intentionally out of scope here.
+
+        // ---- C1 contiguity (aux column `enabler_step`) ----
+        //
+        // `enabler_step` is the *last* column of the trace per
+        // [`crate::trace::Layout::COL_ENABLER_STEP`]. It is committed by the
+        // prover to satisfy `enabler_step = enabler · (1 − enabler_prev)`
+        // — `1` only at the first real row following a padding predecessor
+        // in coset order, `0` everywhere else. The contiguity constraint
+        // `(1 − is_first_row) · enabler_step = 0` then forces that
+        // "first real row" to live exclusively at block 0's slot
+        // (`is_first_row = 1`), so the trace's real-row run is a contiguous
+        // prefix starting from block 0 (the IV-bound anchor). Together
+        // with the §10.3 chain and the IV-binding constraints, this
+        // closes the block-skip / state-injection variant of C1 and
+        // discharges Mj1 (every continuation row's `h_in` chains from a
+        // `Range_16`-checked predecessor `h_out`).
+        let enabler_step = eval.next_trace_mask();
+        eval.add_constraint(
+            enabler_step.clone() - enabler.clone() * (E::F::one() - enabler_prev.clone()),
+        );
+        eval.add_constraint((E::F::one() - is_first_row.clone()) * enabler_step.clone());
 
         // Close the LogUp loop over every SHA-256-specific channel: the
         // eight `Σ`/`σ` decode lookups, the packed `Maj`/`Ch` pair, the
@@ -1276,7 +1359,11 @@ fn emit_mod_2_32_add_linear<E: EvalAtRow>(
             "Range16 is the terminal 16-bit limb check; do not use it for mod-2³² add carries"
         ),
     };
-    debug_assert_eq!(
+    // Mn2: hard assert so release builds (round-trip prove/verify, the
+    // end-to-end tests) also catch a mis-paired addend count vs.
+    // `RangeKind`. The guard runs once per emit, so the cost is
+    // negligible compared to the constraint emission itself.
+    assert_eq!(
         addends.len(),
         expected_addends,
         "addend count {} mismatches RangeKind::{:?} (expected {} per crate::headroom audit)",

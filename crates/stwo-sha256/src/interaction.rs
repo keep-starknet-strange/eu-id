@@ -582,7 +582,6 @@ fn write_block_lookups(
             3 => (block.h_in[6].to_u32(), RelTag::Sigma1Lo, RelTag::Sigma1Hi),
             _ => unreachable!(),
         };
-        let aux_idx = op_idx;
         write_round_split_pack_pair(
             all,
             cursor,
@@ -600,7 +599,6 @@ fn write_block_lookups(
                 _ => unreachable!(),
             },
         );
-        let _ = aux_idx;
     }
 
     // ---- 2. Schedule entries (48 × 16 lookups) ----

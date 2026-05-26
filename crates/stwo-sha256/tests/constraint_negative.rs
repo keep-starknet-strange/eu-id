@@ -47,10 +47,12 @@ use stwo::core::fields::qm31::{SecureField, SECURE_EXTENSION_DEGREE};
 use stwo::core::utils::{
     bit_reverse_index, circle_domain_index_to_coset_index, coset_index_to_circle_domain_index,
 };
+use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{
     EvalAtRow, FrameworkEval, Relation, RelationEntry, ORIGINAL_TRACE_IDX,
 };
 
+use stwo_sha256::components::is_first_row_column_id;
 use stwo_sha256::constraints::Sha256Eval;
 use stwo_sha256::relations::Sha256Relations;
 use stwo_sha256::trace::{generate_trace, min_log_size, Layout};
@@ -118,11 +120,13 @@ impl EvalAtRow for LinearConstraintCollector<'_> {
         interaction: usize,
         offsets: [isize; N],
     ) -> [Self::F; N] {
-        // The SHA-256 AIR only reads from the main (original) trace; the
-        // preprocessed table columns are matched via `add_to_relation`
-        // (which this evaluator no-ops). A non-`ORIGINAL_TRACE_IDX`
-        // interaction here would mean the AIR has grown a read this
-        // evaluator doesn't model — fail loudly rather than silently.
+        // The SHA-256 AIR's main-trace reads land here; preprocessed-table
+        // cells are matched via `add_to_relation` (which this evaluator
+        // no-ops) and the `is_first_row` selector is served via the
+        // dedicated `get_preprocessed_column` override below. A non-
+        // `ORIGINAL_TRACE_IDX` interaction here would mean the AIR has
+        // grown a read this evaluator doesn't model — fail loudly rather
+        // than silently.
         assert_eq!(
             interaction, ORIGINAL_TRACE_IDX,
             "LinearConstraintCollector only reads from the main trace",
@@ -149,6 +153,22 @@ impl EvalAtRow for LinearConstraintCollector<'_> {
             );
             self.trace[col_index][next_index]
         })
+    }
+
+    fn get_preprocessed_column(&mut self, column: PreProcessedColumnId) -> Self::F {
+        // Serve `is_first_row` directly: `1` at storage index 0,
+        // `0` elsewhere, mirroring `crate::preprocessed`'s emission. This
+        // does **not** advance `col_index` (preprocessed columns live in
+        // a separate commitment tree from the main trace).
+        if column == is_first_row_column_id() {
+            if self.row == 0 {
+                BaseField::from(1u32)
+            } else {
+                BaseField::from(0u32)
+            }
+        } else {
+            panic!("LinearConstraintCollector has no fixture for preprocessed column {column:?}");
+        }
     }
 
     fn add_constraint<G>(&mut self, constraint: G)
@@ -340,17 +360,14 @@ fn rejects_swapped_carry_within_row() {
 /// Mutation class: flip the `is_first_block` flag (set on a continuation
 /// row, unset on the first-block row).
 ///
-/// - On block 0's row, `is_first_block = 1` (honest) ⇒ IV-binding fires
-///   correctly. Clearing it to `0` removes the IV pin AND triggers the
-///   `(enabler − is_first_block)` chain gate, which then catches that
-///   block 0's `h_in` does not match the previous-coset `h_out` (cyclic
-///   wraparound from padding row 0).
-/// - On a non-first-block row, `is_first_block = 0` (honest). Setting it
-///   to `1` activates IV-binding, which catches that the row's `h_in` is
-///   the chain value, not `IV`.
-///
-/// Doing both flips simultaneously exercises both rejection paths in one
-/// test; either alone would also reject.
+/// Post-C1-fix, the rejection path is a single linear identity:
+/// `is_first_block − is_first_row = 0` (`constraints.rs`). The
+/// `is_first_row` preprocessed selector is `1` only at storage index 0
+/// (block 0's slot) and `0` elsewhere, so any cell-level flip on
+/// `is_first_block` immediately produces a non-zero residual at that row.
+/// The IV-binding / chain-gate consequences the pre-fix version relied on
+/// are still present — they just fire downstream of this anchor
+/// constraint.
 #[test]
 fn rejects_flipped_is_first_block_flag() {
     let witness = compute_sha256_witness(&[0xABu8; 200]);
@@ -491,5 +508,144 @@ fn rejects_shifted_marker_byte_sel() {
     assert!(
         !residuals.is_empty(),
         "AIR must reject a shifted `0x80` marker selector",
+    );
+}
+
+/// Mutation class: C1 IV-anchor exploit — clear `is_first_block` on block 0
+/// **and** plant an attacker-chosen `h_out` on the wraparound padding row.
+///
+/// Pre-fix soundness gap (`research/sha256-air-design.md` §11 L2): with
+/// `is_first_block = 0` on the real row, IV binding was vacuous. With the
+/// padding-row `h_out` cells unconstrained (Range_16/finalization both
+/// gated by `enabler`), the prover could inject any state `X` into block
+/// 0's `h_in` via the chain's `[0, -1]` mask wraparound — yielding a
+/// "digest" of `compression(X, W)` instead of `SHA-256(W) = compression(IV, W)`.
+///
+/// Post-fix rejection path: the preprocessed `is_first_row` selector is
+/// `1` at storage index 0, so the anchor constraint
+/// `is_first_block − is_first_row = 0` fails immediately when the mutator
+/// clears `is_first_block`. The mutation that *would* have completed the
+/// exploit (setting padding-row `h_out` to a chosen `X`) is preserved here
+/// to document the threat model, but the AIR rejects on the anchor before
+/// the chain ever reads the planted `h_out`.
+#[test]
+fn rejects_iv_anchor_exploit_via_padding_h_out_injection() {
+    let witness = compute_sha256_witness(b"abc");
+    // Single-block message; min_log_size = 4 (the SIMD floor) gives one
+    // real slot and 15 padding slots — exactly the layout an attacker
+    // would target. The cyclic predecessor of slot 0 wraps to slot N-1.
+    let log_size = min_log_size(witness.blocks.len()).max(4);
+    let mut trace = generate_trace(&witness, log_size);
+
+    assert!(
+        collect_constraint_residuals(&trace, log_size).is_empty(),
+        "baseline should be clean before mutation",
+    );
+
+    // (1) Clear `is_first_block` on block 0's slot to disable IV binding.
+    let first_slot = Layout::block_slot(0, log_size);
+    assert_eq!(first_slot, 0, "block 0 must live at storage index 0");
+    assert_eq!(trace[Layout::COL_IS_FIRST_BLOCK][first_slot].0, 1);
+    trace[Layout::COL_IS_FIRST_BLOCK][first_slot] = BaseField::from(0u32);
+
+    // (2) Plant an attacker-chosen `h_out` on the wraparound padding row
+    //     (coset N-1 in the chain's [0, -1] mask). Any non-zero pattern
+    //     suffices to demonstrate the threat surface.
+    let n_rows = 1usize << log_size;
+    let wraparound_slot = bit_reverse_index(
+        coset_index_to_circle_domain_index(n_rows - 1, log_size),
+        log_size,
+    );
+    for j in 0..8usize {
+        let (lo_col, hi_col) = Layout::h_out_word(j);
+        trace[lo_col][wraparound_slot] = BaseField::from(0xCAFEu32 + j as u32);
+        trace[hi_col][wraparound_slot] = BaseField::from(0xBABEu32 + j as u32);
+    }
+
+    let residuals = collect_constraint_residuals(&trace, log_size);
+    assert!(
+        !residuals.is_empty(),
+        "AIR must reject the C1 IV-anchor exploit",
+    );
+}
+
+/// Mutation class: C1 block-skip exploit — set `enabler = 0` on a real
+/// continuation row to splice in a padding-row `h_out` as the next block's
+/// `h_in`.
+///
+/// Pre-fix surface: even with `is_first_block = 1` correctly anchored at
+/// block 0, a prover could disable an interior block (`enabler = 0`) so
+/// the next real block's chain reads its `h_out_prev` from a now-padding
+/// predecessor (`h_out` unconstrained). Compression at that row runs from
+/// the planted state — not an honestly chained SHA-256 state.
+///
+/// Post-fix rejection path: the contiguity constraint
+/// `(1 − is_first_row) · enabler · (1 − enabler_prev) = 0` rejects the
+/// transition from a disabled predecessor (`enabler_prev = 0`) to a real
+/// row (`enabler = 1`). Only block 0's slot is exempt (via
+/// `is_first_row = 1`).
+#[test]
+fn rejects_block_skip_via_disabled_interior_row() {
+    // Use enough blocks that we have at least three contiguous real slots
+    // — disable the middle one to create a padding-to-real transition at
+    // the third.
+    let witness = compute_sha256_witness(&[0xABu8; 200]);
+    assert!(witness.blocks.len() >= 3, "need ≥3 blocks for block-skip");
+    let log_size = min_log_size(witness.blocks.len());
+    let mut trace = generate_trace(&witness, log_size);
+
+    assert!(
+        collect_constraint_residuals(&trace, log_size).is_empty(),
+        "baseline should be clean before mutation",
+    );
+
+    // Disable block 1's enabler — block 2 then sees a padding predecessor.
+    let interior_slot = Layout::block_slot(1, log_size);
+    assert_eq!(trace[Layout::COL_ENABLER][interior_slot].0, 1);
+    trace[Layout::COL_ENABLER][interior_slot] = BaseField::from(0u32);
+
+    let residuals = collect_constraint_residuals(&trace, log_size);
+    assert!(
+        !residuals.is_empty(),
+        "AIR must reject a block-skip (disabled-interior) trace",
+    );
+}
+
+/// Mutation class: Mn1 padding-flag injection — set `is_marker_block = 1`
+/// on a disabled (padding) row.
+///
+/// Pre-fix: padding-role flags fired unconditionally (no `enabler` gate),
+/// so a malicious prover could mark a disabled row as a marker block.
+/// While not a direct soundness break in isolation, it interacts with C1
+/// and is undesirable defense-in-depth: disabled rows should carry no
+/// padding metadata.
+///
+/// Post-fix rejection path: the gate `(1 − enabler) · is_marker_block = 0`
+/// (Mn1) fails immediately on a disabled row with `is_marker_block ≠ 0`.
+#[test]
+fn rejects_padding_role_flag_on_disabled_row() {
+    let witness = compute_sha256_witness(b"abc");
+    let log_size = min_log_size(witness.blocks.len()).max(4);
+    let mut trace = generate_trace(&witness, log_size);
+
+    assert!(
+        collect_constraint_residuals(&trace, log_size).is_empty(),
+        "baseline should be clean before mutation",
+    );
+
+    // Pick a padding slot — anything past block 0's row in coset order.
+    // Slot 1 (coset 1) is padding by construction for a single-block trace.
+    let n_rows = 1usize << log_size;
+    let padding_slot = bit_reverse_index(coset_index_to_circle_domain_index(1, log_size), log_size);
+    assert!(padding_slot < n_rows);
+    assert_eq!(trace[Layout::COL_ENABLER][padding_slot].0, 0);
+
+    // Plant `is_marker_block = 1` on the padding row.
+    trace[Layout::COL_IS_MARKER_BLOCK][padding_slot] = BaseField::from(1u32);
+
+    let residuals = collect_constraint_residuals(&trace, log_size);
+    assert!(
+        !residuals.is_empty(),
+        "AIR must reject a padding-role flag set on a disabled row",
     );
 }

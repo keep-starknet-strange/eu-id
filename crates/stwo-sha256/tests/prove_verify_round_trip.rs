@@ -70,6 +70,33 @@ fn prove_and_verify_multi_block() {
     assert!(n_blocks >= 2, "test message must span multiple blocks");
 }
 
+/// Long-message round-trip — the only end-to-end test whose SHA-256
+/// component trace exceeds the SIMD floor (`log_n_rows > LOG_N_LANES`).
+///
+/// All other round-trip tests fit inside `2^LOG_N_LANES = 16` rows so they
+/// run at the SIMD minimum. A regression that only fires past the floor
+/// — for example, a cross-row mask computation that mis-handles the
+/// `bit_reverse_index` walk when `log_n_rows ≠ LOG_N_LANES`, or a
+/// component allocator that mis-orders preprocessed IDs when the SHA-256
+/// component is larger than the smaller producer tables — would slip
+/// through the other coverage. A 4 096-byte message produces ~65 padded
+/// blocks ⇒ `log_n_rows = 7`, three bits above the floor.
+#[ignore = "slow: 2^21-row Maj/Ch preprocessed trace dominates; run in release with --ignored"]
+#[test]
+fn prove_and_verify_long_message() {
+    // 4 096 bytes ⇒ 4 096 + 9 = 4 105 padding bytes ⇒ ceil(4 105 / 64) =
+    // 65 padded blocks ⇒ min_log_size = 7 (next power of two ≥ 65 is 128).
+    let n_blocks = prove_and_verify(&[0x55u8; 4096]);
+    // SIMD floor is `LOG_N_LANES = 4`. `min_log_size` clamps to that
+    // floor, so a strict inequality pins that this message genuinely
+    // exceeds the floor rather than being clamped up to it.
+    const SIMD_FLOOR_LOG: u32 = 4;
+    assert!(
+        min_log_size(n_blocks) > SIMD_FLOOR_LOG,
+        "long-message test must exceed the SIMD-floor log size (n_blocks = {n_blocks})",
+    );
+}
+
 /// Padding-boundary round-trips — every FIPS 180-4 §5.1.1 edge case that
 /// changes the marker/length layout exercises a different P.* family of
 /// padding constraints. These boundaries are covered at the witness and

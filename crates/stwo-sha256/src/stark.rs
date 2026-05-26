@@ -51,16 +51,40 @@ use crate::trace::Layout;
 use crate::types::{Digest, Sha256Witness};
 use crate::witness::compute_sha256_witness;
 
-/// Tuning knobs for the prover. Defaults pick a sensible starting point;
-/// the laptop benchmark (the post-week-2 go/no-go gate in the roadmap)
-/// is what pins the final values.
+/// Tuning knobs for the prover.
+///
+/// `Default` picks the *smallest* legal value for each knob — enough to
+/// prove a single padded block on the SIMD backend. Callers proving
+/// anything longer **must** override `log_n_rows`; see its field doc for
+/// the canonical recipe. The laptop benchmark (the post-week-2 go/no-go
+/// gate in the roadmap) pins the production values.
 #[derive(Clone, Debug)]
 pub struct ProverConfig {
     /// `log2` of the SHA-256 component's trace row count. Each row is one
-    /// padded block. `log_n_rows = trace::min_log_size(witness.blocks.len())`
-    /// is the minimum legal value; pass a larger value to absorb future
-    /// blocks into the same component without re-generating preprocessed
-    /// tables. Must be `≥ LOG_N_LANES = 4` for the SIMD backend.
+    /// padded block.
+    ///
+    /// **Must satisfy `log_n_rows ≥ trace::min_log_size(witness.blocks.len())`**
+    /// or [`prove_sha256`] returns [`Sha256ProveError::TraceTooSmall`]. The
+    /// SIMD backend additionally requires `log_n_rows ≥ LOG_N_LANES = 4`
+    /// (one packed lane of rows); below that, [`prove_sha256`] returns
+    /// [`Sha256ProveError::LogSizeBelowSimdMin`].
+    ///
+    /// Caller recipe for any non-trivial message:
+    /// ```ignore
+    /// let witness = compute_sha256_witness(&message);
+    /// let config = ProverConfig {
+    ///     log_n_rows: trace::min_log_size(witness.blocks.len()),
+    ///     ..ProverConfig::default()
+    /// };
+    /// ```
+    /// `examples/prove_demo.rs` shows this pattern end-to-end. Passing a
+    /// value larger than `min_log_size` absorbs additional padding rows
+    /// without re-generating the preprocessed tables — useful when
+    /// batching variable-length messages into a single component.
+    ///
+    /// **`Default` sets this to `LOG_N_LANES = 4`** — the SIMD floor,
+    /// fitting at most 16 padded blocks (~1 KiB of message). Larger
+    /// messages must override; see the recipe above.
     pub log_n_rows: u32,
     /// Group width `W` for the packed `Maj`/`Ch` table. `7` is the minimum
     /// without subdividing the existing partitions' 7-bit groups; smaller
@@ -259,7 +283,7 @@ fn prove_sha256_inner(
 
     // ---- tree[0]: preprocessed trace ----
     let (preprocessed_evals, preprocessed_ids, _log_sizes) =
-        generate_preprocessed_trace(group_width);
+        generate_preprocessed_trace(group_width, log_n_rows);
     let mut tree_builder = commitment_scheme.tree_builder();
     tree_builder.extend_evals(preprocessed_evals);
     tree_builder.commit(channel);
@@ -374,7 +398,7 @@ pub fn verify_sha256_proof(proof: &Sha256Proof) -> Result<(), Sha256VerifyError>
 
     // ---- tree[0]: preprocessed (re-derive log sizes from the proof) ----
     let (_, preprocessed_ids, preprocessed_log_sizes) =
-        generate_preprocessed_trace(proof.group_width);
+        generate_preprocessed_trace(proof.group_width, proof.log_n_rows);
     commitment_scheme_verifier.commit(
         proof.stark_proof.commitments[0],
         &preprocessed_log_sizes,
@@ -629,7 +653,7 @@ impl Sha256Components {
         // with the static list from `crate::components::all_preprocessed_column_ids`
         // and let each FrameworkComponent claim its slice.
         let _ = preprocessed_ids; // pinned by `all_preprocessed_column_ids` call below
-        let alloc_ids = all_preprocessed_column_ids(group_width);
+        let alloc_ids = all_preprocessed_column_ids();
         let allocator = &mut TraceLocationAllocator::new_with_preprocessed_columns(&alloc_ids);
 
         let sha256 = FrameworkComponent::new(
@@ -797,6 +821,38 @@ mod tests {
         assert_eq!(pubs.n_blocks, 2);
         let pubs = public_inputs_for(&[0u8; 55]);
         assert_eq!(pubs.n_blocks, 1);
+    }
+
+    /// `prove_sha256_from_witness` is publicly exposed for integration
+    /// callers that already hold a [`Sha256Witness`] (e.g. from the
+    /// credential builder); its happy path requires a real proof and so
+    /// lives in `#[ignore]`d tests. This fast test pins the validation
+    /// gate without paying for proof generation, and exercises the
+    /// witness-direct entry point so it has at least one debug-mode
+    /// caller outside of `prove_sha256` itself.
+    #[test]
+    fn prove_sha256_from_witness_rejects_too_small_log_n_rows() {
+        // 5 000-byte message ⇒ well above the `1 << LOG_N_LANES` row
+        // budget, so the `LOG_N_LANES`-sized default cannot fit it.
+        let witness = compute_sha256_witness(&[0u8; 5000]);
+        assert!(
+            witness.blocks.len() > (1usize << LOG_N_LANES),
+            "test premise: message must exceed the LOG_N_LANES = 4 row budget",
+        );
+        let config = ProverConfig {
+            log_n_rows: LOG_N_LANES,
+            ..ProverConfig::default()
+        };
+        match prove_sha256_from_witness(&witness, &config) {
+            Err(Sha256ProveError::TraceTooSmall {
+                requested_log_n_rows,
+                required_log_n_rows,
+            }) => {
+                assert_eq!(requested_log_n_rows, LOG_N_LANES);
+                assert!(required_log_n_rows > LOG_N_LANES);
+            }
+            other => panic!("expected TraceTooSmall, got {other:?}"),
+        }
     }
 
     /// Pins the `public_inputs_for(msg) == Sha256Proof::public_inputs()`

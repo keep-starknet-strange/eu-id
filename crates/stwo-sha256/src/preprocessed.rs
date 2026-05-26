@@ -29,9 +29,13 @@
 //! - 4 round-side split-and-pack
 //! - 4 σ-side split-and-pack
 //! - 4 range tables (`Range_2`, `Range_4`, `Range_5`, `Range_16`)
+//! - 1 `is_first_row` selector at the main `Sha256Eval` trace's `log_n_rows`
+//!   — value `1` at storage index `Layout::block_slot(0, log_n_rows) = 0`,
+//!   zero elsewhere. The AIR pins `is_first_block ≡ is_first_row`, which
+//!   anchors the §10.3 chain at block 0's IV binding (research/sha256-air-design.md §11 L2).
 //!
 //! Total committed columns:
-//! `8·5 + 5 + 3 + 4·4 + 4·3 + 4·1 = 40 + 5 + 3 + 16 + 12 + 4 = 80`.
+//! `8·5 + 5 + 3 + 4·4 + 4·3 + 4·1 + 1 = 40 + 5 + 3 + 16 + 12 + 4 + 1 = 81`.
 
 use stwo::core::fields::m31::BaseField;
 use stwo::core::poly::circle::CanonicCoset;
@@ -50,6 +54,7 @@ use crate::tables::{
     build_sigma_split_pack_table, build_xor_8_table, RoundPartition,
 };
 use crate::tables_local::{range_16, range_2, range_4, range_5};
+use crate::trace::Layout;
 
 /// `log2` of the row count for every 2¹⁶-row table.
 pub const LOG_SIZE_16: u32 = 16;
@@ -75,7 +80,11 @@ pub type PreprocessedTrace = (
 ///
 /// The returned `Vec`s line up index-for-index:
 /// `trace[i]`'s column ID is `ids[i]` and its log size is `log_sizes[i]`.
-pub fn generate_preprocessed_trace(group_width: u32) -> PreprocessedTrace {
+///
+/// `log_n_rows` is the main `Sha256Eval` trace's `log_size`; the
+/// `is_first_row` selector column is sized to it and is `1` at storage
+/// index `Layout::block_slot(0, log_n_rows) = 0`, `0` elsewhere.
+pub fn generate_preprocessed_trace(group_width: u32, log_n_rows: u32) -> PreprocessedTrace {
     let mut evals = Vec::new();
     let mut log_sizes = Vec::new();
 
@@ -99,8 +108,6 @@ pub fn generate_preprocessed_trace(group_width: u32) -> PreprocessedTrace {
             evals.push(CircleEvaluation::new(domain, col));
             log_sizes.push(LOG_SIZE_16);
         }
-        let _ = f;
-        let _ = h;
     }
 
     // ---- 1 packed Maj/Ch table ----
@@ -188,7 +195,32 @@ pub fn generate_preprocessed_trace(group_width: u32) -> PreprocessedTrace {
         log_sizes.push(log_size);
     }
 
-    let ids = all_preprocessed_column_ids(group_width);
+    // ---- 1 `is_first_row` selector at the main trace's log_size ----
+    //
+    // Value `1` at the storage index that block 0 occupies (which is `0`
+    // by `Layout::block_slot(0, log_n_rows)`), `0` elsewhere. The AIR
+    // consumes this in `Sha256Eval::evaluate` to pin
+    // `is_first_block ≡ is_first_row`, anchoring the §10.3 chain on
+    // block 0's IV binding (closes design §11 L2).
+    {
+        let domain = CanonicCoset::new(log_n_rows).circle_domain();
+        let n_rows = 1usize << log_n_rows;
+        let first_slot = Layout::block_slot(0, log_n_rows);
+        debug_assert_eq!(first_slot, 0);
+        let col: BaseColumn = (0..n_rows)
+            .map(|i| {
+                if i == first_slot {
+                    BaseField::from(1u32)
+                } else {
+                    BaseField::from(0u32)
+                }
+            })
+            .collect();
+        evals.push(CircleEvaluation::new(domain, col));
+        log_sizes.push(log_n_rows);
+    }
+
+    let ids = all_preprocessed_column_ids();
     debug_assert_eq!(
         ids.len(),
         evals.len(),
@@ -216,36 +248,64 @@ fn range_rows(kind: crate::components::RangeKind) -> Vec<u32> {
 mod tests {
     use super::*;
     use crate::partitions::MAX_ROUND_GROUP_BITS;
+    use stwo::prover::backend::simd::m31::LOG_N_LANES;
+    use stwo::prover::backend::Column;
 
-    /// Total column count: 8·5 + 5 + 3 + 4·4 + 4·3 + 4·1 = 80. Catches any
-    /// regression in the per-table layout.
+    /// Total column count: 8·5 + 5 + 3 + 4·4 + 4·3 + 4·1 + 1 = 81. Catches
+    /// any regression in the per-table layout. The trailing `+ 1` is the
+    /// `is_first_row` selector emitted at the main trace's `log_n_rows`.
     #[test]
-    fn total_preprocessed_columns_is_80() {
-        let (evals, ids, log_sizes) = generate_preprocessed_trace(MAX_ROUND_GROUP_BITS);
-        assert_eq!(evals.len(), 80);
-        assert_eq!(ids.len(), 80);
-        assert_eq!(log_sizes.len(), 80);
+    fn total_preprocessed_columns_is_81() {
+        let log_n_rows = LOG_N_LANES;
+        let (evals, ids, log_sizes) = generate_preprocessed_trace(MAX_ROUND_GROUP_BITS, log_n_rows);
+        assert_eq!(evals.len(), 81);
+        assert_eq!(ids.len(), 81);
+        assert_eq!(log_sizes.len(), 81);
     }
 
     /// First eight tables (40 columns) are decode tables at log_size = 16.
     /// Next 5 columns are Maj/Ch at log_size = 3W. The next 33 columns are
-    /// xor_8 + round/σ split-pack at log_size 16. The final 4 columns are
-    /// `Range_k` — three at `LOG_N_LANES = 4` (for Range_2/4/5, padded to
-    /// 16 rows) and one at log_size 16 (Range_16, 2¹⁶ rows).
+    /// xor_8 + round/σ split-pack at log_size 16. Then 4 `Range_k` columns
+    /// — three at `LOG_N_LANES = 4` (for Range_2/4/5, padded to 16 rows)
+    /// and one at log_size 16 (Range_16, 2¹⁶ rows). The trailing column
+    /// (index 80) is `is_first_row` at the main trace's `log_n_rows`.
     #[test]
     fn log_sizes_lay_out_correctly() {
-        use stwo::prover::backend::simd::m31::LOG_N_LANES;
         let w = MAX_ROUND_GROUP_BITS;
-        let (_, _, log_sizes) = generate_preprocessed_trace(w);
+        let log_n_rows = LOG_N_LANES;
+        let (_, _, log_sizes) = generate_preprocessed_trace(w, log_n_rows);
         for (i, &ls) in log_sizes.iter().enumerate() {
             let expected = if (40..45).contains(&i) {
                 3 * w
             } else if (76..79).contains(&i) {
                 LOG_N_LANES
+            } else if i == 80 {
+                log_n_rows
             } else {
                 16
             };
             assert_eq!(ls, expected, "column {i} log_size mismatch");
+        }
+    }
+
+    /// The `is_first_row` selector is `1` at storage index 0 and `0`
+    /// elsewhere. This pins the `is_first_block ≡ is_first_row` constraint
+    /// in `Sha256Eval` to a single anchor at block 0's slot (which
+    /// `Layout::block_slot(0, log_n_rows)` resolves to index 0).
+    #[test]
+    fn is_first_row_selector_is_one_at_index_zero() {
+        let log_n_rows = LOG_N_LANES;
+        let (evals, _, _) = generate_preprocessed_trace(MAX_ROUND_GROUP_BITS, log_n_rows);
+        // The selector is the last column (index 80).
+        let selector = evals.last().expect("at least one preprocessed column");
+        let n_rows = 1usize << log_n_rows;
+        for i in 0..n_rows {
+            let expected = if i == 0 { 1u32 } else { 0u32 };
+            assert_eq!(
+                selector.values.at(i),
+                BaseField::from(expected),
+                "is_first_row[{i}] mismatch",
+            );
         }
     }
 }

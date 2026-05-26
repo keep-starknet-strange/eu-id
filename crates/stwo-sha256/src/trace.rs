@@ -204,8 +204,22 @@ impl Layout {
     pub const COL_BIT_LENGTH_W15_HI: usize = Self::COL_MARKER_WORD_BYTE_END + 4;
     pub const COL_PADDING_END: usize = Self::COL_PADDING_START + PADDING_ROW_COLS;
 
+    /// C1-fix aux column: `enabler_step[r] = enabler[r] · (1 − enabler_prev[r])`.
+    /// This is `1` at the *first* real row in coset order (after a padding
+    /// predecessor) and `0` everywhere else. Committed at the tail of the
+    /// trace so existing column offsets stay unchanged. The constraint
+    /// `(1 − is_first_row) · enabler_step = 0` (emitted in
+    /// `crate::constraints::Sha256Eval`) then forces this "first real row"
+    /// to be exactly block 0's slot — eliminating the block-skip /
+    /// state-injection variant of the C1 exploit. Using an aux column
+    /// keeps the constraint family degree ≤ 2 (the direct degree-3
+    /// formulation `(1 − is_first_row) · enabler · (1 − enabler_prev) = 0`
+    /// would force Stwo into the `ExtendToEvalDomain` evaluation mode,
+    /// which doesn't unify cleanly with the degree-2 producer components).
+    pub const COL_ENABLER_STEP: usize = Self::COL_PADDING_END;
+
     /// Total number of columns in the trace.
-    pub const TOTAL_COLS: usize = Self::COL_PADDING_END;
+    pub const TOTAL_COLS: usize = Self::COL_ENABLER_STEP + 1;
 
     /// `(lo, hi)` slot for the `j`-th word of `h_in`.
     #[inline]
@@ -391,6 +405,20 @@ pub fn generate_trace(witness: &Sha256Witness, log_size: u32) -> Vec<Vec<BaseFie
     for (block_idx, block) in witness.blocks.iter().enumerate() {
         let slot = Layout::block_slot(block_idx, log_size);
         write_block_row(&mut cols, slot, block, block_idx == 0);
+    }
+
+    // C1-fix aux column: `enabler_step` is `1` only at the slot whose
+    // cyclic predecessor (coset offset −1) is a padding row. With block 0
+    // at coset 0, that predecessor wraps to coset `N − 1`. If
+    // `n_blocks < n_rows` there is at least one padding row in the trace,
+    // so coset `N − 1` is padding (`enabler = 0`) and `enabler_step[0] = 1`.
+    // If `n_blocks = n_rows` (no padding), coset `N − 1` is the last real
+    // block (`enabler = 1`) and `enabler_step[0] = 0`. Every other storage
+    // index is `0` either because the row is padding (`enabler = 0`) or
+    // because its coset predecessor is also real (`enabler_prev = 1`).
+    if witness.blocks.len() < n_rows {
+        let first_slot = Layout::block_slot(0, log_size);
+        cols[Layout::COL_ENABLER_STEP][first_slot] = BaseField::from(1u32);
     }
 
     cols
@@ -779,7 +807,8 @@ mod tests {
             + N_ROUNDS * ROUND_COLS
             + 2 * N_STATE_WORDS                // finalization carries
             + 2 * N_STATE_WORDS                // h_out
-            + PADDING_ROW_COLS; // §10.4 padding-role witness
+            + PADDING_ROW_COLS                 // §10.4 padding-role witness
+            + 1; // C1-fix `enabler_step` aux column at the tail
         assert_eq!(Layout::TOTAL_COLS, expected);
         // Breakdown: the schedule entry carries the base limb-add column
         // set, two 24-cell σ-decode blocks, and two 4-cell σ-input
@@ -814,6 +843,7 @@ mod tests {
                 + 16
                 + 16
                 + PADDING_ROW_COLS
+                + 1 // C1-fix `enabler_step` aux column
         );
     }
 
