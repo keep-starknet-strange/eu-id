@@ -750,8 +750,8 @@ mod tests {
     fn block_chain_h_out_to_h_in_continuity() {
         // Witness-level chain check — independent of the AIR. Block `b+1`'s
         // `h_in` should equal block `b`'s `h_out` limb-by-limb. The AIR's
-        // cross-row copy constraint (3.9.6) enforces the same condition on
-        // the polynomial; this test confirms the trace generator agrees.
+        // cross-row copy constraint enforces the same condition on the
+        // polynomial; this test confirms the trace generator agrees.
         let witness = compute_sha256_witness(&[0xAB; 200]);
         let log_size = min_log_size(witness.blocks.len());
         let trace = generate_trace(&witness, log_size);

@@ -11,7 +11,7 @@
 //! reassembly + `O2` chunk-bind constraints, the chunk-wise `xor_8`
 //! lookups that close `o2_combined = o2_partial_s ⊕ o2_partial_s'`, the
 //! **packed `Maj`/`Ch` lookups** keyed on the per-round packed-group
-//! decompositions, and the **split-and-pack lookups** (3.9.5) that pin
+//! decompositions, and the **split-and-pack lookups** that pin
 //! every packed-group / decode-key column back to a `(lo, hi)` word
 //! limb — all wired below. The §8.1 reuse chain lets `b`/`c`/`f`/`g` of
 //! the Maj/Ch lookups alias prior rounds' `a`/`e` columns (and the
@@ -92,6 +92,14 @@ impl FrameworkEval for Sha256Eval {
 
         // IV binding: on the first block row, `h_in == IV`. We multiply by
         // `is_first_block` so the constraint is vacuous on every other row.
+        //
+        // The AIR does **not** enforce `Σ is_first_block ≥ 1` over the
+        // trace. A prover who clears `is_first_block` everywhere produces
+        // a trace where the §10.3 chain forms a closed cycle with no IV
+        // anchor; satisfying that requires an n-block fixed-point of
+        // SHA-256 compression, which is computationally infeasible. So
+        // the standalone digest claim is cryptographically (not
+        // structurally) bound to `IV`.
         for ((lo, hi), &iv_word) in h_in.iter().zip(IV.iter()) {
             let iv_lo = E::F::from(M31::from(iv_word & 0xFFFF));
             let iv_hi = E::F::from(M31::from(iv_word >> LIMB_BITS));
@@ -594,14 +602,14 @@ impl FrameworkEval for Sha256Eval {
         // simplifies the gating (just `enabler`) without changing
         // soundness for intermediate blocks.
         for h_out_word in h_out.iter().take(N_STATE_WORDS) {
-            wire_carry_range_check::<E>(
+            wire_range_check::<E>(
                 &mut eval,
                 enabler.clone(),
                 h_out_word.0.clone(),
                 crate::components::RangeKind::Range16,
                 &self.relations,
             );
-            wire_carry_range_check::<E>(
+            wire_range_check::<E>(
                 &mut eval,
                 enabler.clone(),
                 h_out_word.1.clone(),
@@ -622,6 +630,13 @@ impl FrameworkEval for Sha256Eval {
         //   - first-block real row (enabler=1, is_first_block=1): factor 0
         //   - continuation real row  (enabler=1, is_first_block=0): factor 1
         //   - padding row            (enabler=0, is_first_block=0): factor 0
+        //   - degenerate            (enabler=0, is_first_block=1): factor −1
+        //     — sign-reversed equality still forces `h_in = h_out_prev`,
+        //     and IV binding (which only gates on `is_first_block`) also
+        //     fires `h_in = IV`. Together this forces `h_out_prev = IV`;
+        //     on padding predecessors (cells all zero) that fails
+        //     immediately, and on real predecessors it demands a SHA-256
+        //     fixed-point — computationally unreachable.
         // The product with the limb-difference stays degree 2, so the
         // existing `max_constraint_log_degree_bound = log_size + 1`
         // headroom is preserved.
@@ -638,7 +653,7 @@ impl FrameworkEval for Sha256Eval {
         // The relation tag names (interface contract item 2) get agreed with
         // the mdoc and integration stream owners before wiring.
 
-        // ---- §10.4 padding-role constraints (roadmap 3.9.7) ----
+        // ---- §10.4 padding-role constraints ----
         //
         // Read order mirrors `crate::trace::write_padding_row`; offsets
         // are documented on `Layout::COL_PADDING_*`.
@@ -840,13 +855,13 @@ impl FrameworkEval for Sha256Eval {
 
         // Note: block-alignment (padded.len() % 64 == 0) is structural —
         // one trace row IS one 64-byte block — and the AIR cannot
-        // represent a partial block. So no per-row constraint is needed
-        // for that requirement (roadmap 3.9.7's "total padded length is a
-        // multiple of BLOCK_BYTES").
+        // represent a partial block, so no per-row constraint is needed
+        // for the "total padded length is a multiple of BLOCK_BYTES"
+        // requirement.
         //
         // Note: cross-component binding of bit_length and marker position
-        // to the mdoc/COSE-parser stream lands with roadmap 2.4 and is
-        // explicitly out of scope here (per 3.9.7's implementation note).
+        // to the mdoc/COSE-parser stream is the integration layer's job
+        // and is intentionally out of scope here.
 
         // Close the LogUp loop over every SHA-256-specific channel: the
         // eight `Σ`/`σ` decode lookups, the packed `Maj`/`Ch` pair, the
@@ -1246,6 +1261,30 @@ fn emit_mod_2_32_add_linear<E: EvalAtRow>(
     range_kind: crate::components::RangeKind,
     relations: &Sha256Relations,
 ) {
+    // Drift guard: the `RangeKind` must match the addend count published
+    // by `crate::headroom`. If a future edit grows or shrinks an add at
+    // a call site without bumping the audit (and hence `RangeKind`), the
+    // mismatch is caught here in debug builds rather than silently
+    // changing the carry range a downstream lookup pins. `Range_16` is a
+    // terminal-limb check, never an add-carry, so we reject it outright.
+    use crate::components::RangeKind;
+    let expected_addends = match range_kind {
+        RangeKind::Range2 => 2,
+        RangeKind::Range4 => 4,
+        RangeKind::Range5 => 5,
+        RangeKind::Range16 => panic!(
+            "Range16 is the terminal 16-bit limb check; do not use it for mod-2³² add carries"
+        ),
+    };
+    debug_assert_eq!(
+        addends.len(),
+        expected_addends,
+        "addend count {} mismatches RangeKind::{:?} (expected {} per crate::headroom audit)",
+        addends.len(),
+        range_kind,
+        expected_addends,
+    );
+
     let two_pow_16 = E::F::from(M31::from(1u32 << LIMB_BITS));
 
     let mut sum_lo = E::F::from(M31::from(0u32));
@@ -1268,19 +1307,22 @@ fn emit_mod_2_32_add_linear<E: EvalAtRow>(
     // Carry range-checks via the family's `Range_k` channel. Multiplicity
     // is `enabler` so padding rows (every cell zero) don't bump the row-0
     // producer count.
-    wire_carry_range_check::<E>(
+    wire_range_check::<E>(
         eval,
         enabler.clone(),
         carry_lo.clone(),
         range_kind,
         relations,
     );
-    wire_carry_range_check::<E>(eval, enabler, carry_hi.clone(), range_kind, relations);
+    wire_range_check::<E>(eval, enabler, carry_hi.clone(), range_kind, relations);
 }
 
 /// Fire one `add_to_relation(rel, +enabler, &[value])` against the chosen
-/// `Range_k` channel. Inlined helper so call sites stay short.
-fn wire_carry_range_check<E: EvalAtRow>(
+/// `Range_k` channel. Used for both mod-2³² add carries
+/// (`Range_2`/`4`/`5`, via [`emit_mod_2_32_add_linear`]) and terminal
+/// `h_out` digest limbs (`Range_16`, fired directly from
+/// [`Sha256Eval::evaluate`]). Inlined helper so call sites stay short.
+fn wire_range_check<E: EvalAtRow>(
     eval: &mut E,
     enabler: E::F,
     value: E::F,
@@ -1485,7 +1527,7 @@ mod tests {
 
     /// §10.3 chain check on the trace: every limb of `h_in` at row `cur`
     /// equals the corresponding limb of `h_out` at row `prev`. Mirrors the
-    /// AIR's cross-row copy constraint (3.9.6) at the trace level.
+    /// AIR's cross-row copy constraint at the trace level.
     fn check_block_chain_link(
         trace: &[Vec<stwo::core::fields::m31::BaseField>],
         cur: usize,
@@ -1674,8 +1716,8 @@ mod tests {
     ///   - Per-relation lookup firings (one entry per `relation!` tag)
     ///     equal the per-block static counts from
     ///     `crate::witness::*_multiplicities_for_block`. This covers
-    ///     decode (3.9.3), Maj/Ch + xor_8 (3.9.4), and the eight
-    ///     split-and-pack channels (3.9.5).
+    ///     decode, Maj/Ch + xor_8, and the eight split-and-pack
+    ///     channels.
     ///   - The total lookup count equals the sum across all per-channel
     ///     witness-side totals.
     #[test]
@@ -1706,7 +1748,7 @@ mod tests {
                 .unwrap_or(0)
         };
 
-        // Decode (3.9.3).
+        // Decode.
         assert_eq!(get("Sigma0DecodeS"), decode.sigma0_s);
         assert_eq!(get("Sigma0DecodeSPrime"), decode.sigma0_s_complement);
         assert_eq!(get("Sigma1DecodeS"), decode.sigma1_s);
@@ -1722,12 +1764,12 @@ mod tests {
             decode.lower_sigma1_s_complement
         );
 
-        // Maj/Ch/xor_8 (3.9.4).
+        // Maj/Ch/xor_8.
         assert_eq!(get("MajRelation"), maj_ch_xor.maj);
         assert_eq!(get("ChRelation"), maj_ch_xor.ch);
         assert_eq!(get("Xor8Relation"), maj_ch_xor.xor_8);
 
-        // Split-and-pack (3.9.5).
+        // Split-and-pack.
         assert_eq!(get("Sigma0SplitPackLo"), split_pack.sigma0_lo);
         assert_eq!(get("Sigma0SplitPackHi"), split_pack.sigma0_hi);
         assert_eq!(get("Sigma1SplitPackLo"), split_pack.sigma1_lo);
@@ -1737,8 +1779,7 @@ mod tests {
         assert_eq!(get("LowerSigma1SplitPackLo"), split_pack.lower_sigma1_lo);
         assert_eq!(get("LowerSigma1SplitPackHi"), split_pack.lower_sigma1_hi);
 
-        // Range_k carry / terminal lookups (3.9.2 wiring of the
-        // shared-foundation `Range_*` channels). Per block, structurally:
+        // Range_k carry / terminal lookups. Per block, structurally:
         //   Range_4  : 2 carries × 48 schedule entries        = 96
         //   Range_5  : 2 carries × 64 rounds (T1 only)        = 128
         //   Range_2  : 2 carries × (3 round-side adds × 64
@@ -1821,19 +1862,20 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // §10.3 cross-row block-chain copy constraint (roadmap 3.9.6)
+    // §10.3 cross-row block-chain copy constraint.
     //
     // The constraint is `(enabler − is_first_block) · (h_in − h_out_prev) = 0`.
     // We evaluate it directly on the trace data (the same style as
     // `linear_identities_hold_for_*` above) rather than driving Stwo's
-    // `AssertEvaluator` — the latter would require a finalized
-    // interaction trace, which depends on 3.9.2's shared-foundation
-    // carry range-checks. The roadmap-mandated mutation case (an `h_in`
-    // mutation on a non-first block row triggering rejection) is exactly
-    // what this formula catches, so the test is structurally faithful to
-    // the AIR even though it doesn't route through `Sha256Eval::evaluate`.
-    // 3.9.8 wires the AssertEvaluator-based suite once the interaction
-    // trace is available.
+    // `AssertEvaluator`, because this is the linear path: the mutation
+    // case (an `h_in` mutation on a non-first block row triggering
+    // rejection) is exactly what this formula catches without needing
+    // the interaction trace. The LogUp side of the SHA-256 AIR is
+    // covered by `tests/prove_verify_round_trip.rs` (specifically
+    // `verify_rejects_range_k_claimed_sum_mutations` for the four new
+    // `Range_k` channels). Unifying the two paths under one
+    // `AssertEvaluator` driver is a follow-up tracked in
+    // `research/sha256-initial-build-research-pt3.md` Phase C #9.
     // ------------------------------------------------------------------
 
     /// Coset-order predecessor of `slot` in a bit-reversed circle-domain
@@ -1917,8 +1959,9 @@ mod tests {
 
     /// Mutating block 1's `h_in[0].lo` must break the chain constraint
     /// at block 1's row (and only there — block 0's row stays vacuous
-    /// because `is_first_block = 1`). This is the roadmap-mandated 3.9.6
-    /// negative case and the seed for 3.9.8's broader mutation suite.
+    /// because `is_first_block = 1`). Anchors the chain-constraint
+    /// rejection class for the broader mutation suite in
+    /// `tests/constraint_negative.rs`.
     #[test]
     fn chain_constraint_rejects_h_in_mutation_on_block_1() {
         let witness = compute_sha256_witness(&[0xABu8; 200]);
@@ -1965,14 +2008,16 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // §10.4 padding-role constraints (roadmap 3.9.7)
+    // §10.4 padding-role constraints.
     //
     // Each constraint is evaluated directly on the trace data, mirroring
     // the algebraic expression `Sha256Eval::evaluate` emits. The format
     // matches the §10.3 chain tests above: a positive case (honest trace
     // ⇒ every residual is zero) plus per-class mutation cases (one
-    // constraint goes non-zero per mutation). 3.9.8 wires the same suite
-    // through `AssertEvaluator` once the interaction trace is available.
+    // constraint goes non-zero per mutation). All padding constraints
+    // are linear, so this direct evaluation path is sufficient; the
+    // `AssertEvaluator` unification follow-up referenced from the §10.3
+    // block above also covers these once it lands.
     // ------------------------------------------------------------------
 
     /// Read trace cell `(col, row)` as `i64`. M31 values are non-negative
@@ -2150,9 +2195,10 @@ mod tests {
 
     /// Marker-offset mutation: shift the `marker_byte_sel` one-hot so
     /// the AIR thinks the marker is at a different byte position than
-    /// the actual `0x80` in `W[k]`. Covers roadmap 3.9.7's "wrong marker
-    /// offset" negative case (and is the marker-byte direct analogue of
-    /// 3.9.8's marker-position-shift mutation class).
+    /// the actual `0x80` in `W[k]`. Covers the "wrong marker offset"
+    /// padding-rejection class and is the marker-byte direct analogue
+    /// of the marker-position-shift mutation in
+    /// `tests/constraint_negative.rs`.
     #[test]
     fn padding_rejects_marker_byte_sel_mutation() {
         let witness = compute_sha256_witness(b"abc");

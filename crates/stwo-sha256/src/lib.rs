@@ -33,9 +33,17 @@
 //!   docs for the upstream-context survey and API-shape rationale).
 //! - [`witness`] — full witness emitter — every value the trace stores per row.
 //! - [`trace`] — column layout and materialisation from a witness.
+//! - [`multiplicities`] — per-row LogUp multiplicity vectors keyed against
+//!   every preprocessed lookup table the AIR consumes.
+//! - [`preprocessed`] — `CircleEvaluation`s for every preprocessed lookup
+//!   table column (tree[0] of the proof's commitment scheme).
+//! - [`components`] — producer-side `FrameworkEval` components, one per
+//!   preprocessed lookup table.
 //! - [`constraints`] — `FrameworkEval` AIR: linear constraints (IV binding,
 //!   mod-2³² adds, schedule recurrence, multi-block chaining, padding) plus the
-//!   lookup-relation hooks for the `Σ`/`σ`/`Maj`/`Ch`/`xor` tables.
+//!   lookup-relation hooks for the `Σ`/`σ`/`Maj`/`Ch`/`xor`/`Range_k` tables.
+//! - [`interaction`] — LogUp interaction-trace generator + `InteractionClaim`
+//!   aggregator across the consumer and every producer component.
 //! - [`stark`] — prover/verifier entry points for the standalone component.
 
 pub mod components;

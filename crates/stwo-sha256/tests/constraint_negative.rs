@@ -14,9 +14,10 @@
 //! `EvalAtRow` directly against the main trace. The motivation:
 //!
 //! - `AssertEvaluator` would be the obvious fit, but it `panic!`s on the
-//!   first non-zero constraint and requires a finalized interaction trace,
-//!   which depends on roadmap 3.9.2's shared range-check foundation.
-//!   Switching to it is a clean migration once 3.9.2 lands.
+//!   first non-zero constraint and requires a finalized interaction trace.
+//!   Building one here would duplicate `crate::interaction`'s walk over
+//!   the entire trace; the linear collector keeps the negative-test driver
+//!   self-contained and fast.
 //! - `InfoEvaluator` only counts constraints; it doesn't actually evaluate
 //!   them against trace data.
 //!
@@ -24,13 +25,21 @@
 //! `next_interaction_mask` (including the circle-domain coset bit-reverse
 //! arithmetic for the `[0, -1]` cross-row reads used by the §10.3
 //! block-chain copy constraint) but records non-zero residuals instead of
-//! panicking, and no-ops `add_to_relation` (lookup soundness is wired by
-//! roadmap 3.9.11 once the shared range-check tables exist). The recorded
-//! residuals cover every linear constraint `Sha256Eval::evaluate` emits:
-//! IV binding, schedule recurrence, T1/T2/e_new/a_new adds, σ-output
-//! reassembly, O2 chunk-bind, finalization, multi-block chain, and the
-//! whole §10.4 padding-role family — exactly the classes the mutations
-//! below break.
+//! panicking, and no-ops `add_to_relation`. The recorded residuals cover
+//! every linear constraint `Sha256Eval::evaluate` emits: IV binding,
+//! schedule recurrence, T1/T2/e_new/a_new adds, σ-output reassembly,
+//! O2 chunk-bind, finalization, multi-block chain, and the whole §10.4
+//! padding-role family — exactly the classes the mutations below break.
+//!
+//! **Lookup-side rejection (the complement of this file).** This driver
+//! deliberately ignores `add_to_relation` calls, so the four `Range_k`
+//! channels, the σ/Σ decode tables, the packed Maj/Ch lookup, the
+//! `xor_8` chunk-combine, and the eight split-and-pack lookups are not
+//! exercised here. End-to-end coverage of those — including a
+//! carry-out-of-range witness mutation that closes L4 from the lookup
+//! side — lives in `tests/prove_verify_round_trip.rs`
+//! (`rejects_out_of_range_carry_witness_mutation`,
+//! `verify_rejects_range_k_claimed_sum_mutations`).
 
 use num_traits::Zero;
 use stwo::core::fields::m31::BaseField;
@@ -165,12 +174,23 @@ impl EvalAtRow for LinearConstraintCollector<'_> {
         &mut self,
         _entry: RelationEntry<'_, Self::F, Self::EF, R>,
     ) {
-        // Lookup soundness is the job of the shared range-check tables
-        // (roadmap 3.9.2) plus the digest-binding LogUp surface (3.9.11).
-        // Both lookup-yielding components are wired in `crate::components`
-        // today; the linear constraints this evaluator records already
-        // catch every mutation class the roadmap enumerates for 3.9.8
-        // without exercising the LogUp interaction layer.
+        // **This collector deliberately no-ops every lookup.** It only
+        // records non-zero residuals from `add_constraint`, i.e. the
+        // *linear* identities the AIR emits — IV binding, schedule
+        // recurrence, T1/T2/e_new/a_new adds, σ-output reassembly, O2
+        // chunk-bind, finalization, multi-block chain, and the §10.4
+        // padding-role block. Every mutation class in the 3.9.8 roadmap
+        // is caught by exactly those identities.
+        //
+        // Carry range-check lookups (`Range_2`/`4`/`5` per family) and
+        // the terminal `Range_16` on `h_out` *are* wired in
+        // `crate::constraints` today, but their soundness lives in the
+        // LogUp interaction layer this evaluator does not model. The
+        // `prove_verify_round_trip` suite exercises that path end-to-end.
+        // The follow-up that migrates this driver to `AssertEvaluator`
+        // — once the assert backend's interaction-trace setup is wired
+        // in — should add a "carry-set-to-out-of-range" mutation class
+        // to close L4 on the LogUp side too.
     }
 
     /// `Sha256Eval::evaluate` ends with `finalize_logup_in_pairs()` so

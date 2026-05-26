@@ -37,9 +37,6 @@
 //! so the matching trace generator (`crate::preprocessed`) and the
 //! evaluator stay in lock-step.
 
-use num_traits::One;
-use stwo::core::fields::m31::M31;
-use stwo::core::fields::qm31::SecureField;
 use stwo::prover::backend::simd::m31::LOG_N_LANES;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{
@@ -555,7 +552,7 @@ pub type SigmaSplitPackComponent = FrameworkComponent<SigmaSplitPackEval>;
 /// `add_to_relation(rel, +1, &[carry])` calls inside
 /// `crate::constraints::emit_mod_2_32_add_linear` and the terminal
 /// `Range_16` lookups on every real-block `h_out` limb (inlined in
-/// `Sha256Eval::evaluate` via `wire_carry_range_check`), this component
+/// `Sha256Eval::evaluate` via `wire_range_check`), this component
 /// completes the LogUp loop that pins each carry into `[0, k)` and the
 /// digest limbs into `[0, 2¹⁶)` — closing the soundness gap the headroom
 /// audit (`crate::headroom`) reduces to.
@@ -674,12 +671,3 @@ pub const RANGE_TABLES: &[RangeKind] = &[
     RangeKind::Range5,
     RangeKind::Range16,
 ];
-
-#[allow(dead_code)]
-fn _ensure_imports_in_scope() {
-    // Touch `One` / `SecureField` / `M31` so an aggressive unused-imports
-    // pass doesn't strip them — they're hot when the FrameworkEval
-    // implementations expand the relation macros.
-    let _ = SecureField::from(M31::from(0u32));
-    let _ = <SecureField as One>::one();
-}

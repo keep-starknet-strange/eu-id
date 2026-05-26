@@ -22,9 +22,8 @@
 //! Performance choice: this implementation uses the **scalar**
 //! `write_frac` path one row at a time. The reference `xor_8_8` example
 //! does SIMD packing for its 2¹⁶-row tables; we follow the simpler
-//! single-row path here because correctness is what 3.9.9 needs and the
-//! benchmark task (3.9.12) is where SIMD-packing the producers gets
-//! attention.
+//! single-row path here for correctness; SIMD-packing the producers is
+//! a benchmark-driven future micro-optimisation.
 
 use num_traits::{One, Zero};
 use stwo::core::channel::Channel;
@@ -47,17 +46,16 @@ use crate::multiplicities::{
     MajChMultiplicities,
 };
 use crate::partitions::{
-    pack_round_groups, GROUPS_PER_ROUND_PARTITION, LOWER_SIGMA0_PARTS, LOWER_SIGMA1_PARTS,
-    SIGMA0_GROUPS, SIGMA1_GROUPS,
+    pack_round_groups, GROUPS_PER_ROUND_PARTITION, SIGMA0_GROUPS, SIGMA1_GROUPS,
 };
 use crate::relations::Sha256Relations;
 use crate::tables::{
     build_decode_table, build_maj_ch_table, build_round_split_pack_table,
-    build_sigma_split_pack_table, build_xor_8_table, pack_half_key, Half, Half16,
-    LowerSigmaPartition, RoundPartition,
+    build_sigma_split_pack_table, build_xor_8_table, Half, Half16, LowerSigmaPartition,
+    RoundPartition,
 };
 use crate::trace::Layout;
-use crate::types::{Sha256Witness, LIMB_BITS};
+use crate::types::Sha256Witness;
 
 // ---------------------------------------------------------------------------
 // Per-component claim
@@ -1138,16 +1136,4 @@ pub fn generate_interaction_trace(
         range,
     };
     (combined, claim)
-}
-
-// Compile-time imports keep-alive: silence dead_code warnings on a few
-// helpers borrowed from `partitions` and `tables` that the body
-// references through trait methods only.
-#[allow(dead_code)]
-fn _imports_used() {
-    let _ = pack_half_key(0, 0);
-    let _ = &LOWER_SIGMA0_PARTS;
-    let _ = &LOWER_SIGMA1_PARTS;
-    let _: u32 = LIMB_BITS;
-    let _: u32 = 1 << LOG_N_LANES;
 }

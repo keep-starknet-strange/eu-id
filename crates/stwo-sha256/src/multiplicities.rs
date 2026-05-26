@@ -28,10 +28,7 @@
 
 use crate::components::{range_log_size, RangeKind};
 use crate::constants::{N_ROUNDS, N_STATE_WORDS};
-use crate::partitions::{
-    pack_round_groups, SigmaFn, GROUPS_PER_ROUND_PARTITION, LOWER_SIGMA0_PARTS, LOWER_SIGMA1_PARTS,
-    SIGMA0_GROUPS, SIGMA1_GROUPS,
-};
+use crate::partitions::{SigmaFn, GROUPS_PER_ROUND_PARTITION};
 use crate::tables::{pack_half_key, Half, Half16, LowerSigmaPartition, RoundPartition};
 use crate::types::Sha256Witness;
 
@@ -385,15 +382,6 @@ const _: () = {
 
 // Re-export so call sites can name partitions/half without re-importing.
 pub use crate::tables::{Half as DecodeHalf, Half16 as SplitHalf};
-
-// Reference to keep `pack_round_groups` import live for future helpers.
-#[allow(dead_code)]
-fn _keep_imports_live() {
-    let _ = pack_round_groups(0, &SIGMA0_GROUPS);
-    let _ = &SIGMA1_GROUPS;
-    let _ = &LOWER_SIGMA0_PARTS;
-    let _ = &LOWER_SIGMA1_PARTS;
-}
 
 #[cfg(test)]
 mod tests {

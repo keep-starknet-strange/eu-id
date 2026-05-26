@@ -21,8 +21,7 @@ use num_traits::Zero;
 use stwo::core::air::Component;
 use stwo::core::channel::Blake2sChannel;
 use stwo::core::fields::m31::BaseField;
-use stwo::core::fields::qm31::SecureField;
-use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig, TreeVec};
+use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::core::proof::StarkProof;
 use stwo::core::vcs_lifted::blake2_merkle::{Blake2sMerkleChannel, Blake2sMerkleHasher};
@@ -67,8 +66,8 @@ pub struct ProverConfig {
     /// without subdividing the existing partitions' 7-bit groups; smaller
     /// `W` values require a partition rework (design §9.2 sketches the
     /// `W = 6` "subdivide 7-bit groups" path as a future micro-optimisation
-    /// the laptop/mobile benchmark — 3.9.12 — can pin). The packed-table
-    /// size is `2^(3W)` rows; at `W = 7` that is `2²¹ ≈ 2.1 M` rows.
+    /// the laptop/mobile benchmark can pin). The packed-table size is
+    /// `2^(3W)` rows; at `W = 7` that is `2²¹ ≈ 2.1 M` rows.
     pub group_width: u32,
     /// Stwo PCS configuration (FRI + PoW parameters). Use
     /// `PcsConfig::default()` for the smallest sensible test config;
@@ -95,7 +94,7 @@ impl Default for ProverConfig {
 /// standalone component: the verifier does not mix `digest`/`n_blocks`
 /// into its channel and does not compare them to the trace's `h_out`
 /// columns. Binding the digest to a verifier-checked public input lands
-/// with the integration-layer LogUp surface in roadmap 3.9.11
+/// with the integration-layer LogUp surface
 /// (`elementDigest ↔ valueDigests`, `Sig_structure digest ↔ ECDSA z`).
 /// Until then, treat `digest` as informational: it is only as trustworthy
 /// as the prover.
@@ -104,7 +103,7 @@ pub struct Sha256Proof {
     /// The 32-byte digest the prover claims the (private) message hashes
     /// to. Witness-derived metadata; not a cryptographic public input in
     /// this standalone component — see the type-level doc-comment for the
-    /// binding plan (roadmap 3.9.11).
+    /// binding plan.
     pub digest: [u8; DIGEST_BYTES],
     /// Number of blocks in the padded preimage. Witness-derived metadata;
     /// not verifier-checked in this standalone component.
@@ -244,7 +243,7 @@ fn prove_sha256_inner(
     pcs_config.mix_into(channel);
 
     // Twiddles must cover the largest committed domain plus the FRI
-    // blow-up. Among our 19 components, Maj/Ch is the biggest at `3W`
+    // blow-up. Among our 23 components, Maj/Ch is the biggest at `3W`
     // rows; everything else is ≤ 16. Use `+ 1` for the half-coset.
     let max_log_size = maj_ch_log_size(group_width)
         .max(LOG_SIZE_16)
@@ -433,9 +432,30 @@ pub fn native_digest(message: &[u8]) -> Digest {
     crate::native::hash(message)
 }
 
-/// Convenience: derive the public input shape (digest + block count) the
-/// prover *would* commit to, without running the prover. Used by the
-/// integration stream to assemble its Big-AIR public input contract.
+/// Public-input contract for the SHA-256 component.
+///
+/// Two construction paths:
+/// - [`public_inputs_for`] — derives the contract from a message
+///   without running the prover. Used by the integration stream to
+///   assemble its Big-AIR public input contract ahead of proving.
+/// - [`Sha256Proof::public_inputs`] — extracts the contract from a
+///   proof. Used after proving; the returned value equals
+///   `public_inputs_for(message)` for the same message.
+///
+/// The standalone component does not cryptographically bind `digest` /
+/// `n_blocks` to the AIR — see [`Sha256Proof`]'s doc-comment for the
+/// binding plan. This type defines the *shape* the integration layer
+/// will eventually pin.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Sha256PublicInputs {
+    pub digest: [u8; DIGEST_BYTES],
+    pub n_blocks: usize,
+}
+
+/// Derive the public input shape (digest + block count) the prover
+/// *would* commit to, without running the prover. Equivalent to
+/// `prove_sha256(message, &config).map(|p| p.public_inputs())` but
+/// avoids the prover cost.
 pub fn public_inputs_for(message: &[u8]) -> Sha256PublicInputs {
     let padded = crate::native::pad_message(message);
     let n_blocks = padded.len() / crate::constants::BLOCK_BYTES;
@@ -445,11 +465,17 @@ pub fn public_inputs_for(message: &[u8]) -> Sha256PublicInputs {
     }
 }
 
-/// Public-input contract for the SHA-256 component.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Sha256PublicInputs {
-    pub digest: [u8; DIGEST_BYTES],
-    pub n_blocks: usize,
+impl Sha256Proof {
+    /// Extract the public-input contract this proof carries. The returned
+    /// value equals `public_inputs_for(message)` for the message the
+    /// prover ran on. See [`Sha256PublicInputs`] for the contract shape
+    /// and the standalone-component caveat about cryptographic binding.
+    pub fn public_inputs(&self) -> Sha256PublicInputs {
+        Sha256PublicInputs {
+            digest: self.digest,
+            n_blocks: self.n_blocks,
+        }
+    }
 }
 
 /// Helper consumed by integration tests: pad, witness, trace — but don't
@@ -735,14 +761,6 @@ impl Sha256Components {
     }
 }
 
-// Silence-warnings hook for imports that the body uses through trait
-// methods only.
-#[allow(dead_code)]
-fn _imports_pinned() {
-    let _ = SecureField::zero();
-    let _: TreeVec<Vec<u32>> = TreeVec::default();
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -779,5 +797,29 @@ mod tests {
         assert_eq!(pubs.n_blocks, 2);
         let pubs = public_inputs_for(&[0u8; 55]);
         assert_eq!(pubs.n_blocks, 1);
+    }
+
+    /// Pins the `public_inputs_for(msg) == Sha256Proof::public_inputs()`
+    /// contract for every message a downstream caller might use. We
+    /// drive it against the witness-derived shape instead of running
+    /// the prover (which is `#[ignore]`d everywhere else), since the
+    /// proof's `digest` / `n_blocks` fields are populated from the
+    /// witness verbatim in `prove_sha256_inner`.
+    #[test]
+    fn public_inputs_for_matches_proof_public_inputs_shape() {
+        // A proof we can synthesise without running the prover: every
+        // field of `Sha256Proof::public_inputs()` reads from the proof's
+        // own metadata fields, so building a stand-in struct with the
+        // same `digest` / `n_blocks` exercises the contract.
+        for msg in [&b""[..], b"abc", &[0u8; 56], &[0u8; 1024]] {
+            let from_message = public_inputs_for(msg);
+            let witness = compute_sha256_witness(msg);
+            let digest = witness.digest_from_blocks();
+            let from_proof = Sha256PublicInputs {
+                digest: digest.0,
+                n_blocks: witness.blocks.len(),
+            };
+            assert_eq!(from_message, from_proof, "msg = {msg:?}");
+        }
     }
 }

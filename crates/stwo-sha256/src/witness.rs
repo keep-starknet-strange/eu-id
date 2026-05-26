@@ -388,7 +388,7 @@ impl DecodeLookupMultiplicities {
 }
 
 /// Per-block lookup-multiplicity totals for the Maj/Ch packed-group channels
-/// and the chunk-wise `xor_8` channel — the lookups 3.9.4 wires.
+/// and the chunk-wise `xor_8` channel.
 ///
 /// `maj` counts `add_to_relation(MajRelation, +1, …)` firings: one per group
 /// position per round ⇒ `N_ROUNDS · GROUPS_PER_ROUND_PARTITION` per block.
@@ -409,7 +409,7 @@ impl MajChXorMultiplicities {
 }
 
 /// Per-block lookup-multiplicity totals for the eight split-and-pack
-/// channels — the lookups 3.9.5 wires.
+/// channels.
 ///
 /// Round-side counts: per round the AIR fires four split-and-pack
 /// lookups (`a`, `maj`, `e`, `ch`), each splitting into one lo-half and
@@ -480,10 +480,10 @@ pub fn decode_multiplicities_for_block(block: &BlockWitness) -> DecodeLookupMult
 }
 
 /// Count the number of Maj / Ch / `xor_8` "uses" each channel would receive
-/// from one block — the lookups 3.9.4 wires. Derived entirely from the
-/// witness; mirrors [`decode_multiplicities_for_block`] for the new
-/// channels. The constraint-side sanity test asserts these against the
-/// static per-block totals expected from the trace shape.
+/// from one block. Derived entirely from the witness; mirrors
+/// [`decode_multiplicities_for_block`] for these channels. The
+/// constraint-side sanity test asserts these against the static per-block
+/// totals expected from the trace shape.
 pub fn maj_ch_xor_multiplicities_for_block(block: &BlockWitness) -> MajChXorMultiplicities {
     let groups = crate::partitions::GROUPS_PER_ROUND_PARTITION as u32;
     let rounds = block.rounds.len() as u32;
@@ -514,8 +514,8 @@ pub fn maj_ch_xor_multiplicities_for_witness(witness: &Sha256Witness) -> MajChXo
 }
 
 /// Count the number of split-and-pack "uses" each of the eight channels
-/// receives from one block — the lookups 3.9.5 wires. See
-/// [`SplitPackMultiplicities`] for the per-channel breakdown.
+/// receives from one block. See [`SplitPackMultiplicities`] for the
+/// per-channel breakdown.
 pub fn split_pack_multiplicities_for_block(block: &BlockWitness) -> SplitPackMultiplicities {
     let _ = block; // counts are a function of the static trace shape.
     let rounds = block.rounds.len() as u32;

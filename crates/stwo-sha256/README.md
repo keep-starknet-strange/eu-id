@@ -16,9 +16,8 @@ words `W[t]`, every round's working state, every block's `h_in` / `h_out`,
 the FIPS 180-4 §5.1.1 padding, and the multi-block chain) enforced by the
 AIR's constraint layer. Cross-component binding of the digest output to
 external public inputs (the mdoc `valueDigests` membership and the COSE
-`Sig_structure` digest → ECDSA `z`) is the integration layer's job
-(roadmap 3.9.11) and is intentionally outside the scope of this standalone
-component.
+`Sig_structure` digest → ECDSA `z`) is the integration layer's job and is
+intentionally outside the scope of this standalone component.
 
 ## Quick start
 
@@ -59,8 +58,8 @@ The constraint degree stays at 2 throughout (`max_constraint_log_degree_bound
   is witness-derived metadata, **not** a verifier-checked input. The
   standalone verifier never mixes `digest` into its channel and never
   compares it to the trace's `h_out` columns. Digest binding via two
-  LogUp relations (`valueDigests`, ECDSA `z`) lands with roadmap 3.9.11
-  (integration stream).
+  LogUp relations (`valueDigests`, ECDSA `z`) lands with the integration
+  layer.
 - **Tie the bit-length / marker position to the mdoc parser.** The padding
   layer constrains `W[14]`/`W[15]` to a length value committed in dedicated
   aux columns, but binding that length to the mdoc preimage waits for
@@ -68,7 +67,7 @@ The constraint degree stays at 2 throughout (`max_constraint_log_degree_bound
 - **Hide the witness.** This crate produces *succinct* proofs, not
   zero-knowledge ones. ZK masking is roadmap 4.1.
 - **Ship a CLI.** `examples/prove_demo.rs` is the shortest path today; the
-  real `bin/eu-id` is roadmap 3.13 (integration stream).
+  real `bin/eu-id` is owned by the integration stream.
 - **Use the workspace-shared range-check tables directly.** Until
   `stwo-p256-utils` (branch `origin/lucas/p256`) lands on `main`, the four
   `Range_k` tables live in [`src/tables_local.rs`](src/tables_local.rs)
