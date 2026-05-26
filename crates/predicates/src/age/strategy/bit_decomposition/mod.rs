@@ -179,10 +179,10 @@ impl StandalonePredicate for AgeBitDecomposition {
 
         proof.public.mix_into(channel);
 
-        let main_sizes: Vec<u32> = std::iter::repeat(WitnessData::log_size())
-            .take(WitnessData::trace_columns(&bounds))
-            .chain([cal_log_size, valid_day_log_size])
-            .collect();
+        let main_sizes: Vec<u32> =
+            std::iter::repeat_n(WitnessData::log_size(), WitnessData::trace_columns(&bounds))
+                .chain([cal_log_size, valid_day_log_size])
+                .collect();
         commitment_scheme.commit(proof.stark_proof.commitments[1], &main_sizes, channel);
 
         let calendar_elements = CalendarElements::draw(channel);
@@ -204,10 +204,9 @@ impl StandalonePredicate for AgeBitDecomposition {
             )));
         }
 
-        let tree2_sizes: Vec<u32> = std::iter::repeat(WitnessData::log_size())
-            .take(8)
-            .chain(std::iter::repeat(cal_log_size).take(4))
-            .chain(std::iter::repeat(valid_day_log_size).take(4))
+        let tree2_sizes: Vec<u32> = std::iter::repeat_n(WitnessData::log_size(), 8)
+            .chain(std::iter::repeat_n(cal_log_size, 4))
+            .chain(std::iter::repeat_n(valid_day_log_size, 4))
             .collect();
         commitment_scheme.commit(proof.stark_proof.commitments[2], &tree2_sizes, channel);
 

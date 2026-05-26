@@ -227,8 +227,7 @@ impl StandalonePredicate for AgeRangeCheck {
         year_delta_range_check.claim().mix_into(channel);
 
         // Tree 1: 9 witness + 5 multiplicity columns
-        let main_sizes: Vec<u32> = std::iter::repeat(WitnessData::log_size())
-            .take(9)
+        let main_sizes: Vec<u32> = std::iter::repeat_n(WitnessData::log_size(), 9)
             .chain([
                 cal_log_size,
                 valid_day_log_size,
@@ -268,13 +267,12 @@ impl StandalonePredicate for AgeRangeCheck {
         }
 
         // Tree 2: age (5 logup cols = 20 M31) + cal (4) + valid_day (4) + day_delta (4) + month_delta (4) + year_delta (4)
-        let tree2_sizes: Vec<u32> = std::iter::repeat(WitnessData::log_size())
-            .take(20)
-            .chain(std::iter::repeat(cal_log_size).take(4))
-            .chain(std::iter::repeat(valid_day_log_size).take(4))
-            .chain(std::iter::repeat(day_delta_range_check.log_size()).take(4))
-            .chain(std::iter::repeat(month_delta_range_check.log_size()).take(4))
-            .chain(std::iter::repeat(year_delta_range_check.log_size()).take(4))
+        let tree2_sizes: Vec<u32> = std::iter::repeat_n(WitnessData::log_size(), 20)
+            .chain(std::iter::repeat_n(cal_log_size, 4))
+            .chain(std::iter::repeat_n(valid_day_log_size, 4))
+            .chain(std::iter::repeat_n(day_delta_range_check.log_size(), 4))
+            .chain(std::iter::repeat_n(month_delta_range_check.log_size(), 4))
+            .chain(std::iter::repeat_n(year_delta_range_check.log_size(), 4))
             .collect();
         commitment_scheme.commit(proof.stark_proof.commitments[2], &tree2_sizes, channel);
 

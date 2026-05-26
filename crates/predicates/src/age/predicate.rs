@@ -92,7 +92,7 @@ impl AgePredicate {
         }
 
         Ok(Witness {
-            public: public.clone(),
+            public: *public,
             dob,
             cutoff,
             age_slack: slack,

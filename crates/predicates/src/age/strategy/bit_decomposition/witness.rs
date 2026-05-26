@@ -53,7 +53,7 @@ impl WitnessData {
         )];
 
         WitnessData {
-            witness_trace: gen_trace(&witness),
+            witness_trace: gen_trace(witness),
             cal_mult_trace,
             valid_day_mult_trace,
             table_index,

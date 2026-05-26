@@ -6,25 +6,25 @@ use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::TreeBuilder;
 
-//// Day Range Delta
-//// Constraint: range = cutoff - day + 32 * day_borrow
-//// Worst case:
-////     Cutoff: 1, day: 31 => 1 - 31 + C * day_borrow = -30 + C * day_borrow => C >= 31
-////     Field Size => 32 (power of 2)
+/// Day Range Delta
+/// Constraint: range = cutoff - day + 32 * day_borrow
+/// Worst case:
+///     Cutoff: 1, day: 31 => 1 - 31 + C * day_borrow = -30 + C * day_borrow => C >= 31
+///     Field Size => 32 (power of 2)
 pub fn day_delta_range_check() -> RangeCheck {
     RangeCheck(31)
 }
 
 pub type DayDeltaTableComponent = range_check::Component;
 
-//// Month Range Delta
-//// Constraint: range = cutoff - month - day_borrow + 16 * month_borrow
-//// Worst case:
-////     Cutoff: 1, month: 12, day_borrow: 1 => 1 - 12 - day_borrow + C * month_borrow =
-////                                           -11 - 1 + C * month_borrow =
-////                                           -12 + C * month_borrow =>
-////                                            C >= 13
-////     Field Size => 16 (power of 2)
+/// Month Range Delta
+/// Constraint: range = cutoff - month - day_borrow + 16 * month_borrow
+/// Worst case:
+///     Cutoff: 1, month: 12, day_borrow: 1 => 1 - 12 - day_borrow + C * month_borrow =
+///                                           -11 - 1 + C * month_borrow =
+///                                           -12 + C * month_borrow =>
+///                                            C >= 13
+///     Field Size => 16 (power of 2)
 pub fn month_delta_range_check() -> RangeCheck {
     RangeCheck(13)
 }
