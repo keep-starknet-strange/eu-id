@@ -17,8 +17,18 @@ ISSUER_KEY   ?= scripts/sample/issuer-key.pub
 PROOF        ?= proof.bin
 CURRENT_DATE ?= $(shell date +%Y-%m-%d)
 
+# Predicates CLI overrides
+DOB      ?=
+DATE     ?= $(shell date +%Y-%m-%d)
+MIN_AGE  ?= 18
+STRATEGY ?= rc
+
 .DEFAULT_GOAL := help
-.PHONY: help dev build run test check fmt bench bench-mobile prove verify clean
+.PHONY: help dev build run test check fmt bench bench-predicates bench-mobile prove verify \
+        prove-age verify-age \
+        profile-prove-age-rc profile-verify-age-rc \
+        profile-prove-age-bd profile-verify-age-bd \
+        clean
 
 help:
 	@echo "eu-id — workspace make targets"
@@ -29,13 +39,25 @@ help:
 	@echo "  make test          run the workspace test suite"
 	@echo "  make check         clippy + rustfmt — identical to the CI lint step"
 	@echo "  make fmt           apply rustfmt across the workspace"
-	@echo "  make bench         laptop criterion benchmark suite"
-	@echo "  make bench-mobile  mobile (iOS/Android) benchmark harness"
+	@echo "  make bench             laptop criterion benchmark suite"
+	@echo "  make bench-predicates  run predicates benchmarks only"
+	@echo "  make bench-mobile      mobile (iOS/Android) benchmark harness"
 	@echo "  make prove         prove age-over-18 from a sample credential"
 	@echo "  make verify        verify a generated proof"
 	@echo "  make clean         remove build artifacts"
 	@echo ""
 	@echo "  prove/verify accept overrides: CREDENTIAL= ISSUER_KEY= PROOF= CURRENT_DATE="
+	@echo ""
+	@echo "  make prove-age     run the age predicate prover  (DOB= required)"
+	@echo "  make verify-age    run the age predicate verifier"
+	@echo ""
+	@echo "  prove-age overrides: DOB= DATE= MIN_AGE= STRATEGY=bd|rc PROOF="
+	@echo "  verify-age overrides: STRATEGY=bd|rc PROOF="
+	@echo ""
+	@echo "  make profile-prove-age-rc    profile age prove (range check)"
+	@echo "  make profile-verify-age-rc   profile age verify (range check)"
+	@echo "  make profile-prove-age-bd    profile age prove (bit decomposition)"
+	@echo "  make profile-verify-age-bd   profile age verify (bit decomposition)"
 
 dev:
 	@if command -v cargo-watch >/dev/null 2>&1; then \
@@ -68,6 +90,9 @@ fmt:
 bench:
 	cargo bench
 
+bench-predicates:
+	cargo bench -p predicates
+
 bench-mobile:
 	@if [ -d mobile ]; then \
 		$(MAKE) -C mobile bench; \
@@ -88,6 +113,27 @@ verify:
 	else \
 		echo "verify: demo CLI not implemented yet (bin/ not found)"; \
 	fi
+
+prove-age:
+ifndef DOB
+	$(error DOB is required, e.g. make prove-age DOB=1990-01-01)
+endif
+	cargo run --bin prove -- age --dob $(DOB) --date $(DATE) --min-age $(MIN_AGE) --strategy $(STRATEGY) --output $(PROOF)
+
+verify-age:
+	cargo run --bin verify -- age --strategy $(STRATEGY) --input $(PROOF)
+
+profile-prove-age-rc:
+	cargo instruments -t Allocations --manifest-path crates/predicates/Cargo.toml --bin prove --release -- age --dob 1990-01-01 --output target/instruments/age-rc.bin
+
+profile-verify-age-rc:
+	cargo instruments -t Allocations --manifest-path crates/predicates/Cargo.toml --bin verify --release -- age --input target/instruments/age-rc.bin
+
+profile-prove-age-bd:
+	cargo instruments -t Allocations --manifest-path crates/predicates/Cargo.toml --bin prove --release -- age --dob 1990-01-01 --strategy bd --output target/instruments/age-bd.bin
+
+profile-verify-age-bd:
+	cargo instruments -t Allocations --manifest-path crates/predicates/Cargo.toml --bin verify --release -- age --strategy bd --input target/instruments/age-bd.bin
 
 clean:
 	cargo clean
