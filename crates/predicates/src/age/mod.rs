@@ -13,7 +13,7 @@ pub fn prove(
 ) -> Result<AgeProof, Error> {
     use self::strategy::bit_decomposition::AgeBitDecomposition;
     use self::strategy::range_check::AgeRangeCheck;
-    use crate::predicate::StarkPredicate;
+    use crate::predicate::StandalonePredicate;
     use stwo::core::pcs::PcsConfig;
 
     match selected {
@@ -29,7 +29,7 @@ pub fn prove(
 pub fn verify(proof: &AgeProof) -> Result<(), Error> {
     use self::strategy::bit_decomposition::AgeBitDecomposition;
     use self::strategy::range_check::AgeRangeCheck;
-    use crate::predicate::StarkPredicate;
+    use crate::predicate::StandalonePredicate;
     use stwo::core::pcs::PcsConfig;
 
     match proof {

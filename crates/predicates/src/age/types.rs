@@ -2,14 +2,11 @@ use crate::age::calendar::max_days_at;
 use crate::utils;
 use serde::{Deserialize, Serialize};
 use stwo::core::channel::Channel;
-use stwo::core::fields::m31::{M31, P as M31_MODULUS};
+use stwo::core::fields::m31::P as M31_MODULUS;
 use stwo::core::fields::qm31::QM31;
 use stwo::core::proof::StarkProof;
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleHasher;
 use stwo::core::verifier::VerificationError;
-use stwo::prover::backend::simd::SimdBackend;
-use stwo::prover::poly::circle::CircleEvaluation;
-use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::ProvingError;
 
 pub(crate) const DATE_MONTH_BASE: u32 = 32;
@@ -18,7 +15,6 @@ pub(crate) const MAX_FIELD_DATE_KEY: u32 = M31_MODULUS - 1;
 
 pub(crate) const MAX_SUPPORTED_YEARS: u32 = 120;
 
-pub(crate) type Trace = Vec<CircleEvaluation<SimdBackend, M31, BitReversedOrder>>;
 
 /// Bounds that define the age predicate's accepted input domain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -1,5 +1,3 @@
-use crate::age::types::Trace;
-
 pub trait Predicate {
     type PublicInput;
     type PrivateInput;
@@ -15,10 +13,8 @@ pub trait Predicate {
     ) -> Result<Self::Witness, Self::Error>;
 }
 
-pub trait StarkPredicate: Predicate {
+pub trait StandalonePredicate: Predicate {
     type Proof;
-    
-    fn trace(&self, witness: &Self::Witness) -> Trace;
 
     fn prove(
         &self,

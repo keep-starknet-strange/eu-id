@@ -4,8 +4,8 @@ use stwo::prover::backend::Column;
 use stwo::prover::backend::simd::column::BaseColumn;
 use stwo::prover::poly::circle::CircleEvaluation;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
-use stwo_constraint_framework::{relation, EvalAtRow, FrameworkEval, RelationEntry};
-use crate::age::types::Trace;
+use stwo_constraint_framework::{relation, EvalAtRow, FrameworkComponent, FrameworkEval, RelationEntry};
+use crate::types::Trace;
 use crate::AgeBounds;
 use crate::utils::bits_needed;
 
@@ -43,8 +43,8 @@ pub(crate) fn valid_day_row_index(max_days: u32, day: u32) -> usize {
     (start + day - 1) as usize
 }
 
-pub(crate) fn generate_max_days_per_month(age_bounds: AgeBounds) -> Trace {
-    let log_size = calendar_log_size(&age_bounds);
+pub(crate) fn generate_max_days_per_month(age_bounds: &AgeBounds) -> Trace {
+    let log_size = calendar_log_size(age_bounds);
 
     let domain = CanonicCoset::new(log_size).circle_domain();
     let total_size = 1 << log_size;
@@ -126,6 +126,8 @@ pub(crate) struct CalendarTableEval {
     pub lookup_elements: CalendarElements,
 }
 
+pub type CalendarTableComponent = FrameworkComponent<CalendarTableEval>;
+
 impl FrameworkEval for CalendarTableEval {
     fn log_size(&self) -> u32 {
         calendar_log_size(&self.bounds)
@@ -153,6 +155,8 @@ impl FrameworkEval for CalendarTableEval {
 pub(crate) struct ValidDayTableEval {
     pub lookup_elements: ValidDayElements,
 }
+
+pub type ValidDayTableComponent = FrameworkComponent<ValidDayTableEval>;
 
 impl FrameworkEval for ValidDayTableEval {
     fn log_size(&self) -> u32 {
@@ -197,7 +201,7 @@ mod tests {
     #[test]
     fn log_size_is_ceil_log2_of_year_span_times_12() {
         let b = bounds(1900, 2024);
-        let trace = generate_max_days_per_month(b);
+        let trace = generate_max_days_per_month(&b);
         let rows = (2024 - 1900 + 1) * 12; // 125 years * 12 = 1500
         let expected_log = (rows as f64).log2().ceil() as u32; // 11
         assert_eq!(trace[0].domain.log_size(), expected_log);
@@ -206,7 +210,7 @@ mod tests {
     #[test]
     fn january_march_december_have_31_days() {
         let b = bounds(2000, 2024);
-        let trace = generate_max_days_per_month(b);
+        let trace = generate_max_days_per_month(&b);
         for month in [1u32, 3, 5, 7, 8, 10, 12] {
             assert_eq!(read_days(&trace, month, 2020, 2000), 31, "month {month}");
         }
@@ -215,7 +219,7 @@ mod tests {
     #[test]
     fn april_june_september_november_have_30_days() {
         let b = bounds(2000, 2024);
-        let trace = generate_max_days_per_month(b);
+        let trace = generate_max_days_per_month(&b);
         for month in [4u32, 6, 9, 11] {
             assert_eq!(read_days(&trace, month, 2020, 2000), 30, "month {month}");
         }
@@ -224,7 +228,7 @@ mod tests {
     #[test]
     fn february_in_leap_year_has_29_days() {
         let b = bounds(1996, 2024);
-        let trace = generate_max_days_per_month(b);
+        let trace = generate_max_days_per_month(&b);
         // divisible by 4, not 100
         assert_eq!(read_days(&trace, 2, 2024, 1996), 29);
         // divisible by 400
@@ -234,7 +238,7 @@ mod tests {
     #[test]
     fn february_in_non_leap_year_has_28_days() {
         let b = bounds(1897, 2024);
-        let trace = generate_max_days_per_month(b);
+        let trace = generate_max_days_per_month(&b);
         // divisible by 100 but not 400
         assert_eq!(read_days(&trace, 2, 1900, 1897), 28);
         // plain non-leap
@@ -280,14 +284,14 @@ mod tests {
 
     #[test]
     fn generate_max_days_has_two_columns() {
-        let trace = generate_max_days_per_month(bounds(2000, 2024));
+        let trace = generate_max_days_per_month(&bounds(2000, 2024));
         assert_eq!(trace.len(), 2);
     }
 
     #[test]
     fn calendar_index_col_stores_row_indices() {
         let b = bounds(2000, 2024);
-        let trace = generate_max_days_per_month(b);
+        let trace = generate_max_days_per_month(&b);
         for year in 2000..=2024 {
             for month in 1..=12u32 {
                 let idx = month_index(month, year, 2000);
@@ -311,7 +315,7 @@ mod tests {
     #[test]
     fn single_year_span_has_correct_entries() {
         let b = bounds(2024, 2024);
-        let trace = generate_max_days_per_month(b);
+        let trace = generate_max_days_per_month(&b);
         // 2024 is a leap year
         assert_eq!(read_days(&trace, 2, 2024, 2024), 29);
         assert_eq!(read_days(&trace, 1, 2024, 2024), 31);
