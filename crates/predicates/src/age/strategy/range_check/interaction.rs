@@ -1,3 +1,8 @@
+use crate::age::calendar::{CalendarElements, ValidDayElements};
+use crate::age::strategy::range_check::preprocessed::Preprocessed;
+use crate::age::strategy::range_check::witness::WitnessData;
+use crate::range_check::RangeCheckLookupElements;
+use crate::types::Trace;
 use num_traits::One;
 use stwo::core::channel::Channel;
 use stwo::core::fields::m31::M31;
@@ -8,11 +13,6 @@ use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::TreeBuilder;
 use stwo_constraint_framework::{LogupTraceGenerator, Relation};
-use crate::age::calendar::{CalendarElements, ValidDayElements};
-use crate::age::strategy::range_check::preprocessed::Preprocessed;
-use crate::age::strategy::range_check::witness::WitnessData;
-use crate::range_check::RangeCheckLookupElements;
-use crate::types::Trace;
 
 pub struct InteractionTraces {
     pub age_interaction: Trace,
@@ -78,8 +78,9 @@ impl InteractionTraces {
             col_gen.write_frac(
                 packed_row,
                 PackedQM31::one(),
-                day_delta_elements
-                    .combine(&[PackedM31::broadcast(M31::from_u32_unchecked(witness_data.day_delta_val))]),
+                day_delta_elements.combine(&[PackedM31::broadcast(M31::from_u32_unchecked(
+                    witness_data.day_delta_val,
+                ))]),
             );
         }
         col_gen.finalize_col();
@@ -89,8 +90,9 @@ impl InteractionTraces {
             col_gen.write_frac(
                 packed_row,
                 PackedQM31::one(),
-                month_delta_elements
-                    .combine(&[PackedM31::broadcast(M31::from_u32_unchecked(witness_data.month_delta_val))]),
+                month_delta_elements.combine(&[PackedM31::broadcast(M31::from_u32_unchecked(
+                    witness_data.month_delta_val,
+                ))]),
             );
         }
         col_gen.finalize_col();
@@ -100,8 +102,9 @@ impl InteractionTraces {
             col_gen.write_frac(
                 packed_row,
                 PackedQM31::one(),
-                year_delta_elements
-                    .combine(&[PackedM31::broadcast(M31::from_u32_unchecked(witness_data.year_delta_val))]),
+                year_delta_elements.combine(&[PackedM31::broadcast(M31::from_u32_unchecked(
+                    witness_data.year_delta_val,
+                ))]),
             );
         }
         col_gen.finalize_col();
@@ -216,7 +219,7 @@ impl InteractionTraces {
 
     pub fn extend_evals(
         &self,
-        interaction_tree_builder: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>
+        interaction_tree_builder: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>,
     ) {
         interaction_tree_builder.extend_evals(self.age_interaction.clone());
         interaction_tree_builder.extend_evals(self.cal_interaction.clone());

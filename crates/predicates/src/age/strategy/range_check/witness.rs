@@ -1,3 +1,8 @@
+use crate::age::calendar::{max_days_at, valid_day_row_index};
+use crate::age::strategy::range_check::preprocessed::Preprocessed;
+use crate::types::Trace;
+use crate::utils::push_repeated_column;
+use crate::Witness;
 use num_traits::Zero;
 use stwo::core::fields::m31::M31;
 use stwo::core::poly::circle::CanonicCoset;
@@ -6,11 +11,6 @@ use stwo::prover::backend::simd::column::BaseColumn;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::poly::circle::CircleEvaluation;
 use stwo::prover::TreeBuilder;
-use crate::types::Trace;
-use crate::Witness;
-use crate::age::calendar::{max_days_at, valid_day_row_index};
-use crate::age::strategy::range_check::preprocessed::Preprocessed;
-use crate::utils::push_repeated_column;
 
 const LOG_SIZE: u32 = 5;
 
@@ -31,12 +31,11 @@ pub struct WitnessData {
 }
 
 impl WitnessData {
-    pub fn new(
-        witness: &Witness,
-        preprocessed: &Preprocessed,
-    ) -> Self {
+    pub fn new(witness: &Witness, preprocessed: &Preprocessed) -> Self {
         let dob_max_days = max_days_at(witness.dob.month, witness.dob.year);
-        let table_index = (witness.dob.year - witness.public.bounds.min_supported_year) * 12 + witness.dob.month - 1;
+        let table_index = (witness.dob.year - witness.public.bounds.min_supported_year) * 12
+            + witness.dob.month
+            - 1;
         let valid_day_row = valid_day_row_index(dob_max_days, witness.dob.day);
 
         let day_borrow = u32::from(witness.cutoff.day < witness.dob.day);
@@ -65,12 +64,15 @@ impl WitnessData {
         )];
 
         let repeated = |val: u32| vec![M31::from_u32_unchecked(val); 1 << LOG_SIZE];
-        let day_delta_mult_trace =
-            vec![Preprocessed::day_range().claim().gen_multiplicity_col(&[repeated(day_delta_val)])];
-        let month_delta_mult_trace =
-            vec![Preprocessed::month_range().claim().gen_multiplicity_col(&[repeated(month_delta_val)])];
-        let year_delta_mult_trace =
-            vec![Preprocessed::year_range(&witness.public.bounds).claim().gen_multiplicity_col(&[repeated(year_delta_val)])];
+        let day_delta_mult_trace = vec![Preprocessed::day_range()
+            .claim()
+            .gen_multiplicity_col(&[repeated(day_delta_val)])];
+        let month_delta_mult_trace = vec![Preprocessed::month_range()
+            .claim()
+            .gen_multiplicity_col(&[repeated(month_delta_val)])];
+        let year_delta_mult_trace = vec![Preprocessed::year_range(&witness.public.bounds)
+            .claim()
+            .gen_multiplicity_col(&[repeated(year_delta_val)])];
 
         Self {
             witness_trace: gen_trace(witness),
@@ -94,7 +96,7 @@ impl WitnessData {
 
     pub fn extend_evals(
         &self,
-        witness_tree_builder: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>
+        witness_tree_builder: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>,
     ) {
         witness_tree_builder.extend_evals(self.witness_trace.clone());
         witness_tree_builder.extend_evals(self.cal_mult_trace.clone());
@@ -110,7 +112,11 @@ fn gen_trace(witness: &Witness) -> Trace {
     push_repeated_column(&mut cols, witness.dob.day, LOG_SIZE);
     push_repeated_column(&mut cols, witness.dob.month, LOG_SIZE);
     push_repeated_column(&mut cols, witness.dob.year, LOG_SIZE);
-    push_repeated_column(&mut cols, max_days_at(witness.dob.month, witness.dob.year), LOG_SIZE);
+    push_repeated_column(
+        &mut cols,
+        max_days_at(witness.dob.month, witness.dob.year),
+        LOG_SIZE,
+    );
 
     let day_borrow = u32::from(witness.cutoff.day < witness.dob.day);
     let day_delta = witness.cutoff.day + 32 * day_borrow - witness.dob.day;

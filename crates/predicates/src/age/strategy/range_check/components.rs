@@ -1,6 +1,12 @@
-use crate::age::calendar::{calendar_index_col_id, calendar_max_days_col_id, valid_day_day_col_id, valid_day_max_days_col_id, CalendarElements, CalendarTableComponent, CalendarTableEval, ValidDayElements, ValidDayTableComponent, ValidDayTableEval};
+use crate::age::calendar::{
+    calendar_index_col_id, calendar_max_days_col_id, valid_day_day_col_id,
+    valid_day_max_days_col_id, CalendarElements, CalendarTableComponent, CalendarTableEval,
+    ValidDayElements, ValidDayTableComponent, ValidDayTableEval,
+};
 use crate::age::strategy::range_check::eval::{AgeRangeCheckComponent, AgeRangeCheckEval};
-use crate::age::strategy::range_check::preprocessed::{DayDeltaTableComponent, MonthDeltaTableComponent, Preprocessed, YearDeltaTableComponent};
+use crate::age::strategy::range_check::preprocessed::{
+    DayDeltaTableComponent, MonthDeltaTableComponent, Preprocessed, YearDeltaTableComponent,
+};
 use crate::range_check::RangeCheckLookupElements;
 use crate::{AgeBounds, PublicInput};
 use stwo::core::fields::qm31::QM31;
@@ -54,12 +60,17 @@ pub fn components(
     );
     let cal_component = CalendarTableComponent::new(
         &mut allocator,
-        CalendarTableEval { bounds: public.bounds, lookup_elements: calendar_elements },
+        CalendarTableEval {
+            bounds: public.bounds,
+            lookup_elements: calendar_elements,
+        },
         cal_claimed_sum,
     );
     let valid_day_component = ValidDayTableComponent::new(
         &mut allocator,
-        ValidDayTableEval { lookup_elements: valid_day_elements },
+        ValidDayTableEval {
+            lookup_elements: valid_day_elements,
+        },
         valid_day_claimed_sum,
     );
     let day_delta_component = DayDeltaTableComponent::new(

@@ -20,7 +20,7 @@ impl Preprocessed {
 
     pub fn extend_evals(
         &self,
-        preprocessed_tree_builder: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>
+        preprocessed_tree_builder: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>,
     ) {
         preprocessed_tree_builder.extend_evals(self.cal_trace.clone());
         preprocessed_tree_builder.extend_evals(self.valid_day_trace.clone());

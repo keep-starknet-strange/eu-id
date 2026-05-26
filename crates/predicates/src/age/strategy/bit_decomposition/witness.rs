@@ -28,12 +28,11 @@ pub struct WitnessData {
 }
 
 impl WitnessData {
-    pub fn new(
-        witness: &Witness,
-        preprocessed: &Preprocessed
-    ) -> Self{
+    pub fn new(witness: &Witness, preprocessed: &Preprocessed) -> Self {
         let dob_max_days = max_days_at(witness.dob.month, witness.dob.year);
-        let table_index = (witness.dob.year - witness.public.bounds.min_supported_year) * 12 + witness.dob.month - 1;
+        let table_index = (witness.dob.year - witness.public.bounds.min_supported_year) * 12
+            + witness.dob.month
+            - 1;
         let valid_day_row = valid_day_row_index(dob_max_days, witness.dob.day);
 
         let cal_log_size = preprocessed.cal_trace[0].domain.log_size();
@@ -65,7 +64,7 @@ impl WitnessData {
 
     pub fn extend_evals(
         &self,
-        witness_tree_builder: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>
+        witness_tree_builder: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>,
     ) {
         witness_tree_builder.extend_evals(self.witness_trace.clone());
         witness_tree_builder.extend_evals(self.cal_mult_trace.clone());
@@ -95,20 +94,49 @@ fn gen_trace(witness: &Witness) -> Trace {
     push_repeated_column(&mut columns, witness.dob.month, log_size);
     push_repeated_column(&mut columns, witness.dob.day, log_size);
     push_repeated_column(&mut columns, witness.age_slack, log_size);
-    push_repeated_column(&mut columns, max_days_at(witness.dob.month, witness.dob.year), log_size);
+    push_repeated_column(
+        &mut columns,
+        max_days_at(witness.dob.month, witness.dob.year),
+        log_size,
+    );
 
     let year_offset = witness.dob.year.wrapping_sub(bounds.min_supported_year);
-    push_repeated_bits(&mut columns, year_offset, log_size, bounds.year_offset_bits());
+    push_repeated_bits(
+        &mut columns,
+        year_offset,
+        log_size,
+        bounds.year_offset_bits(),
+    );
     push_repeated_bits(
         &mut columns,
         bounds.year_span().wrapping_sub(year_offset),
         log_size,
         bounds.year_offset_bits(),
     );
-    push_repeated_bits(&mut columns, witness.dob.month.wrapping_sub(1), log_size, MONTH_OFFSET_BITS);
-    push_repeated_bits(&mut columns, 12u32.wrapping_sub(witness.dob.month), log_size, MONTH_OFFSET_BITS);
-    push_repeated_bits(&mut columns, witness.dob.day.wrapping_sub(1), log_size, DAY_OFFSET_BITS);
-    push_repeated_bits(&mut columns, witness.age_slack, log_size, bounds.age_slack_bits());
+    push_repeated_bits(
+        &mut columns,
+        witness.dob.month.wrapping_sub(1),
+        log_size,
+        MONTH_OFFSET_BITS,
+    );
+    push_repeated_bits(
+        &mut columns,
+        12u32.wrapping_sub(witness.dob.month),
+        log_size,
+        MONTH_OFFSET_BITS,
+    );
+    push_repeated_bits(
+        &mut columns,
+        witness.dob.day.wrapping_sub(1),
+        log_size,
+        DAY_OFFSET_BITS,
+    );
+    push_repeated_bits(
+        &mut columns,
+        witness.age_slack,
+        log_size,
+        bounds.age_slack_bits(),
+    );
 
     debug_assert_eq!(columns.len(), WitnessData::trace_columns(&bounds));
     columns

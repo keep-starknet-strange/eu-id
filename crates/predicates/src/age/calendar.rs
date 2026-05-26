@@ -1,13 +1,15 @@
+use crate::types::Trace;
+use crate::utils::bits_needed;
+use crate::AgeBounds;
 use stwo::core::fields::m31::M31;
 use stwo::core::poly::circle::CanonicCoset;
-use stwo::prover::backend::Column;
 use stwo::prover::backend::simd::column::BaseColumn;
+use stwo::prover::backend::Column;
 use stwo::prover::poly::circle::CircleEvaluation;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
-use stwo_constraint_framework::{relation, EvalAtRow, FrameworkComponent, FrameworkEval, RelationEntry};
-use crate::types::Trace;
-use crate::AgeBounds;
-use crate::utils::bits_needed;
+use stwo_constraint_framework::{
+    relation, EvalAtRow, FrameworkComponent, FrameworkEval, RelationEntry,
+};
 
 fn month_index(month: u32, year: u32, min_year: u32) -> usize {
     ((year - min_year) * 12 + month - 1) as usize
@@ -23,7 +25,7 @@ pub(crate) fn max_days_at(month: u32, year: u32) -> u32 {
             } else {
                 28
             }
-        } ,
+        }
         _ => panic!("invalid month"),
     }
 }
@@ -48,7 +50,13 @@ pub(crate) fn generate_max_days_per_month(age_bounds: &AgeBounds) -> Trace {
 
     let domain = CanonicCoset::new(log_size).circle_domain();
     let total_size = 1 << log_size;
-    assert!(month_index(12, age_bounds.max_supported_year, age_bounds.min_supported_year) < total_size);
+    assert!(
+        month_index(
+            12,
+            age_bounds.max_supported_year,
+            age_bounds.min_supported_year
+        ) < total_size
+    );
 
     let mut max_days_col = BaseColumn::zeros(total_size);
     let mut index_col = BaseColumn::zeros(total_size);
@@ -113,11 +121,15 @@ pub(crate) fn calendar_index_col_id(bounds: &AgeBounds) -> PreProcessedColumnId 
 }
 
 pub(crate) fn valid_day_max_days_col_id() -> PreProcessedColumnId {
-    PreProcessedColumnId { id: "age/valid_day/max_days".to_string() }
+    PreProcessedColumnId {
+        id: "age/valid_day/max_days".to_string(),
+    }
 }
 
 pub(crate) fn valid_day_day_col_id() -> PreProcessedColumnId {
-    PreProcessedColumnId { id: "age/valid_day/day".to_string() }
+    PreProcessedColumnId {
+        id: "age/valid_day/day".to_string(),
+    }
 }
 
 #[derive(Clone)]
@@ -265,7 +277,11 @@ mod tests {
         let mut index = 0;
         for max_day in [28u32, 29, 30, 31] {
             for day in 1..=max_day {
-                assert_eq!(trace[0].values.at(index).0, max_day, "max_days col at index {index}");
+                assert_eq!(
+                    trace[0].values.at(index).0,
+                    max_day,
+                    "max_days col at index {index}"
+                );
                 assert_eq!(trace[1].values.at(index).0, day, "day col at index {index}");
                 index += 1;
             }
@@ -277,7 +293,11 @@ mod tests {
     fn valid_date_ranges_padding_rows_are_zero() {
         let trace = valid_date_ranges();
         for index in 118..128 {
-            assert_eq!(trace[0].values.at(index).0, 0, "max_days padding at {index}");
+            assert_eq!(
+                trace[0].values.at(index).0,
+                0,
+                "max_days padding at {index}"
+            );
             assert_eq!(trace[1].values.at(index).0, 0, "day padding at {index}");
         }
     }
@@ -295,7 +315,11 @@ mod tests {
         for year in 2000..=2024 {
             for month in 1..=12u32 {
                 let idx = month_index(month, year, 2000);
-                assert_eq!(trace[1].values.at(idx).0, idx as u32, "index col at ({year}, {month})");
+                assert_eq!(
+                    trace[1].values.at(idx).0,
+                    idx as u32,
+                    "index col at ({year}, {month})"
+                );
             }
         }
     }

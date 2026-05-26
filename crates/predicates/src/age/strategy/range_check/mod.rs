@@ -1,13 +1,11 @@
+mod components;
 mod eval;
+mod interaction;
 mod preprocessed;
 mod witness;
-mod interaction;
-mod components;
 
 use crate::age::calendar::{
-    calendar_log_size,
-    valid_date_ranges,
-    CalendarElements, ValidDayElements,
+    calendar_log_size, valid_date_ranges, CalendarElements, ValidDayElements,
 };
 use crate::age::predicate::AgePredicate;
 use crate::age::strategy::range_check::components::components;
@@ -37,7 +35,10 @@ impl AgeRangeCheck {
 
     #[cfg(test)]
     pub(crate) fn new_with_input_validation(pcs_config: PcsConfig, validate_input: bool) -> Self {
-        Self(AgePredicate::new_with_input_validation(pcs_config, validate_input))
+        Self(AgePredicate::new_with_input_validation(
+            pcs_config,
+            validate_input,
+        ))
     }
 }
 
@@ -82,13 +83,9 @@ impl StandalonePredicate for AgeRangeCheck {
         let cal_log_size = preprocessed.cal_trace[0].domain.log_size();
 
         let twiddles = SimdBackend::precompute_twiddles(
-            CanonicCoset::new(
-                cal_log_size
-                    + 1
-                    + self.0.pcs_config.fri_config.log_blowup_factor,
-            )
-            .circle_domain()
-            .half_coset,
+            CanonicCoset::new(cal_log_size + 1 + self.0.pcs_config.fri_config.log_blowup_factor)
+                .circle_domain()
+                .half_coset,
         );
 
         let channel = &mut Blake2sChannel::default();

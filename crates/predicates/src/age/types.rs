@@ -15,7 +15,6 @@ pub(crate) const MAX_FIELD_DATE_KEY: u32 = M31_MODULUS - 1;
 
 pub(crate) const MAX_SUPPORTED_YEARS: u32 = 120;
 
-
 /// Bounds that define the age predicate's accepted input domain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgeBounds {
@@ -25,7 +24,6 @@ pub struct AgeBounds {
 }
 
 impl AgeBounds {
-
     pub(crate) fn new(from_current: Date, max_supported_years_diff: u32) -> Self {
         Self {
             min_supported_year: from_current.year - max_supported_years_diff,

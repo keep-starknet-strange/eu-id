@@ -1,5 +1,11 @@
-use crate::age::calendar::{calendar_index_col_id, calendar_max_days_col_id, valid_day_day_col_id, valid_day_max_days_col_id, CalendarElements, CalendarTableComponent, CalendarTableEval, ValidDayElements, ValidDayTableComponent, ValidDayTableEval};
-use crate::age::strategy::bit_decomposition::eval::{AgeBitDecompositionComponent, BitDecompositionEval};
+use crate::age::calendar::{
+    calendar_index_col_id, calendar_max_days_col_id, valid_day_day_col_id,
+    valid_day_max_days_col_id, CalendarElements, CalendarTableComponent, CalendarTableEval,
+    ValidDayElements, ValidDayTableComponent, ValidDayTableEval,
+};
+use crate::age::strategy::bit_decomposition::eval::{
+    AgeBitDecompositionComponent, BitDecompositionEval,
+};
 use crate::{AgeBounds, PublicInput};
 use stwo::core::fields::qm31::QM31;
 use stwo_constraint_framework::TraceLocationAllocator;
@@ -20,7 +26,11 @@ pub fn components(
     age_claimed_sum: QM31,
     cal_claimed_sum: QM31,
     valid_day_claimed_sum: QM31,
-) -> (AgeBitDecompositionComponent, CalendarTableComponent, ValidDayTableComponent) {
+) -> (
+    AgeBitDecompositionComponent,
+    CalendarTableComponent,
+    ValidDayTableComponent,
+) {
     let mut allocator = make_allocator(&public.bounds);
     let age_component = AgeBitDecompositionComponent::new(
         &mut allocator,
@@ -33,12 +43,17 @@ pub fn components(
     );
     let cal_component = CalendarTableComponent::new(
         &mut allocator,
-        CalendarTableEval { bounds: public.bounds, lookup_elements: calendar_elements },
+        CalendarTableEval {
+            bounds: public.bounds,
+            lookup_elements: calendar_elements,
+        },
         cal_claimed_sum,
     );
     let valid_day_component = ValidDayTableComponent::new(
         &mut allocator,
-        ValidDayTableEval { lookup_elements: valid_day_elements },
+        ValidDayTableEval {
+            lookup_elements: valid_day_elements,
+        },
         valid_day_claimed_sum,
     );
     (age_component, cal_component, valid_day_component)

@@ -23,7 +23,6 @@ pub struct InteractionTraces {
 }
 
 impl InteractionTraces {
-
     pub fn new(
         witness_data: &WitnessData,
         preprocessed: &Preprocessed,
@@ -115,7 +114,7 @@ impl InteractionTraces {
 
     pub fn extend_evals(
         &self,
-        interaction_tree_builder: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>
+        interaction_tree_builder: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>,
     ) {
         interaction_tree_builder.extend_evals(self.age_interaction.clone());
         interaction_tree_builder.extend_evals(self.cal_interaction.clone());

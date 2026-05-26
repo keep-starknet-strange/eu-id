@@ -17,9 +17,7 @@ pub fn run_bench(c: &mut Criterion, case: &BenchCase) {
 
     let proof = age::prove(&case.public, &case.dob, case.strategy).unwrap();
 
-    group.bench_function("verify", |b| {
-        b.iter(|| age::verify(&proof).unwrap())
-    });
+    group.bench_function("verify", |b| b.iter(|| age::verify(&proof).unwrap()));
 
     let proof_bytes = match &proof {
         AgeProof::BitDecomposition(p) => bincode::serialize(p).unwrap(),

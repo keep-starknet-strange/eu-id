@@ -1,11 +1,11 @@
 use crate::age::calendar::{CalendarElements, ValidDayElements};
+use crate::age::strategy::range_check::witness::WitnessData;
 use crate::age::types::PublicInput;
 use crate::range_check::RangeCheckLookupElements;
 use crate::utils::field_const;
 use num_traits::One;
 use stwo::core::fields::m31::BaseField;
 use stwo_constraint_framework::{EvalAtRow, FrameworkComponent, FrameworkEval, RelationEntry};
-use crate::age::strategy::range_check::witness::WitnessData;
 
 #[derive(Clone)]
 pub(super) struct AgeRangeCheckEval {
@@ -49,13 +49,13 @@ impl FrameworkEval for AgeRangeCheckEval {
                 - day_delta.clone(),
         );
         eval.add_constraint(
-            field_const::<E>(cutoff.month) - birth_month.clone()
-                - day_borrow.clone()
+            field_const::<E>(cutoff.month) - birth_month.clone() - day_borrow.clone()
                 + field_const::<E>(16) * month_borrow.clone()
                 - month_delta.clone(),
         );
         eval.add_constraint(
-            field_const::<E>(cutoff.year) - birth_year.clone()
+            field_const::<E>(cutoff.year)
+                - birth_year.clone()
                 - month_borrow.clone()
                 - year_delta.clone(),
         );

@@ -1,10 +1,10 @@
+use crate::age::calendar::{generate_max_days_per_month, valid_date_ranges};
+use crate::range_check::RangeCheck;
+use crate::types::Trace;
+use crate::{range_check, AgeBounds};
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::TreeBuilder;
-use crate::age::calendar::{generate_max_days_per_month, valid_date_ranges};
-use crate::{range_check, AgeBounds};
-use crate::range_check::RangeCheck;
-use crate::types::Trace;
 
 //// Day Range Delta
 //// Constraint: range = cutoff - day + 32 * day_borrow
@@ -57,10 +57,10 @@ impl Preprocessed {
             year_delta_table: vec![Self::year_range(bounds).preprocessed_column()],
         }
     }
-    
+
     pub fn extend_evals(
-        &self, 
-        preprocessed_tree_builder: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>
+        &self,
+        preprocessed_tree_builder: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>,
     ) {
         preprocessed_tree_builder.extend_evals(self.cal_trace.clone());
         preprocessed_tree_builder.extend_evals(self.valid_day_trace.clone());

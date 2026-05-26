@@ -1,7 +1,7 @@
-pub(crate) mod predicate;
-pub(crate) mod types;
-pub(crate) mod strategy;
 mod calendar;
+pub(crate) mod predicate;
+pub(crate) mod strategy;
+pub(crate) mod types;
 
 use strategy::{AgeCheckStrategy, AgeProof};
 use types::{DateOfBirth, Error, PublicInput};

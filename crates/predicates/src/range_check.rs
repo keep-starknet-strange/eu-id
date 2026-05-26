@@ -6,7 +6,9 @@ use stwo::core::poly::circle::CanonicCoset;
 use stwo::prover::backend::simd::column::BaseColumn;
 use stwo::prover::poly::circle::CircleEvaluation;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
-use stwo_constraint_framework::{relation, EvalAtRow, FrameworkComponent, FrameworkEval, RelationEntry};
+use stwo_constraint_framework::{
+    relation, EvalAtRow, FrameworkComponent, FrameworkEval, RelationEntry,
+};
 
 relation!(RangeCheckLookupElements, 1);
 
@@ -14,7 +16,6 @@ relation!(RangeCheckLookupElements, 1);
 pub struct RangeCheck(pub u32);
 
 impl RangeCheck {
-
     pub fn field_size(&self) -> u32 {
         (self.0 + 1).next_power_of_two()
     }
@@ -42,7 +43,9 @@ impl RangeCheck {
     }
 
     pub fn claim(&self) -> Claim {
-        Claim { log_size: self.log_size() }
+        Claim {
+            log_size: self.log_size(),
+        }
     }
 
     pub fn eval(&self, relation: RangeCheckLookupElements) -> Eval {
@@ -102,7 +105,7 @@ impl FrameworkEval for Eval {
         eval.add_to_relation(RelationEntry::new(
             &self.relation,
             -E::EF::from(multiplicity),
-            &[preprocessed]
+            &[preprocessed],
         ));
 
         eval.finalize_logup();

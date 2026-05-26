@@ -1,4 +1,4 @@
-use crate::age::types::{AgeInputError, Witness, DateOfBirth, Error, PublicInput};
+use crate::age::types::{AgeInputError, DateOfBirth, Error, PublicInput, Witness};
 use stwo::core::pcs::PcsConfig;
 
 pub struct AgePredicate {

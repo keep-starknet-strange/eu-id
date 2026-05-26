@@ -1,22 +1,18 @@
+mod components;
 mod eval;
+mod interaction;
 mod preprocessed;
 mod witness;
-mod interaction;
-mod components;
 
 use crate::age::calendar::{
-    calendar_log_size
-    , valid_date_ranges
-    , CalendarElements, ValidDayElements,
+    calendar_log_size, valid_date_ranges, CalendarElements, ValidDayElements,
 };
 use crate::age::predicate::AgePredicate;
 use crate::age::strategy::bit_decomposition::components::components;
 use crate::age::strategy::bit_decomposition::interaction::InteractionTraces;
 use crate::age::strategy::bit_decomposition::preprocessed::Preprocessed;
 use crate::age::strategy::bit_decomposition::witness::WitnessData;
-use crate::age::types::{
-    AgeBitDecompositionProof, DateOfBirth, Error, PublicInput, Witness,
-};
+use crate::age::types::{AgeBitDecompositionProof, DateOfBirth, Error, PublicInput, Witness};
 use crate::predicate::{Predicate, StandalonePredicate};
 use num_traits::Zero;
 use stwo::core::channel::{Blake2sChannel, Channel};
@@ -38,7 +34,10 @@ impl AgeBitDecomposition {
 
     #[cfg(test)]
     pub(crate) fn new_with_input_validation(pcs_config: PcsConfig, validate_input: bool) -> Self {
-        Self(AgePredicate::new_with_input_validation(pcs_config, validate_input))
+        Self(AgePredicate::new_with_input_validation(
+            pcs_config,
+            validate_input,
+        ))
     }
 }
 
@@ -80,13 +79,9 @@ impl StandalonePredicate for AgeBitDecomposition {
 
         let max_log_size = WitnessData::log_size().max(cal_log_size);
         let twiddles = SimdBackend::precompute_twiddles(
-            CanonicCoset::new(
-                max_log_size
-                    + 1
-                    + self.0.pcs_config.fri_config.log_blowup_factor,
-            )
-            .circle_domain()
-            .half_coset,
+            CanonicCoset::new(max_log_size + 1 + self.0.pcs_config.fri_config.log_blowup_factor)
+                .circle_domain()
+                .half_coset,
         );
 
         let channel = &mut Blake2sChannel::default();
@@ -173,7 +168,12 @@ impl StandalonePredicate for AgeBitDecomposition {
 
         commitment_scheme.commit(
             proof.stark_proof.commitments[0],
-            &[cal_log_size, cal_log_size, valid_day_log_size, valid_day_log_size],
+            &[
+                cal_log_size,
+                cal_log_size,
+                valid_day_log_size,
+                valid_day_log_size,
+            ],
             channel,
         );
 

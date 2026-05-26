@@ -1,7 +1,7 @@
 use crate::age::calendar::{CalendarElements, ValidDayElements};
 use crate::age::strategy::bit_decomposition::witness::WitnessData;
+use crate::age::strategy::bit_decomposition::witness::{DAY_OFFSET_BITS, MONTH_OFFSET_BITS};
 use crate::age::types::{PublicInput, DATE_MONTH_BASE, DATE_YEAR_BASE};
-use crate::age::strategy::bit_decomposition::witness::{MONTH_OFFSET_BITS, DAY_OFFSET_BITS};
 use crate::utils::{bit_sum, constrain_bits, field_const, read_bits, read_bits_dynamic};
 use num_traits::One;
 use stwo::core::fields::m31::BaseField;
