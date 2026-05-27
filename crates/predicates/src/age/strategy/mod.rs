@@ -155,7 +155,7 @@ mod tests {
                     // logup sums only manifest at verify time, not during proving.
                     let predicate = non_validating_predicate();
                     let proof = predicate.prove(&setup_today(18), &dob(1990, 4, 31)).unwrap();
-                    assert!(matches!(predicate.verify(&proof), Err(_)));
+                    assert!(predicate.verify(&proof).is_err());
                 }
 
                 #[test]
@@ -165,7 +165,7 @@ mod tests {
                     // so (28, 29) is not in the valid-day table. Logup sums detected at verify.
                     let predicate = non_validating_predicate();
                     let proof = predicate.prove(&setup_today(18), &dob(2005, 2, 29)).unwrap();
-                    assert!(matches!(predicate.verify(&proof), Err(_)));
+                    assert!(predicate.verify(&proof).is_err());
                 }
 
                 // --- Boundary cases ---
@@ -195,7 +195,7 @@ mod tests {
                     let predicate = validating_predicate();
                     let mut proof = predicate.prove(&setup_today(18), &dob(2000, 1, 1)).unwrap();
                     proof.public.current.year += 1;
-                    assert!(matches!(predicate.verify(&proof), Err(_)));
+                    assert!(predicate.verify(&proof).is_err());
                 }
 
                 #[test]
@@ -205,7 +205,7 @@ mod tests {
                     let predicate = validating_predicate();
                     let mut proof = predicate.prove(&setup_today(18), &dob(2000, 1, 1)).unwrap();
                     proof.public.bounds.min_supported_year -= 1;
-                    assert!(matches!(predicate.verify(&proof), Err(_)));
+                    assert!(predicate.verify(&proof).is_err());
                 }
 
                 #[test]
@@ -214,7 +214,7 @@ mod tests {
                     let predicate = validating_predicate();
                     let mut proof = predicate.prove(&setup_today(18), &dob(2000, 1, 1)).unwrap();
                     proof.age_claimed_sum = -proof.age_claimed_sum;
-                    assert!(matches!(predicate.verify(&proof), Err(_)));
+                    assert!(predicate.verify(&proof).is_err());
                 }
             }
         };

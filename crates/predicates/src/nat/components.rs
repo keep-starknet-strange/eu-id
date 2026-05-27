@@ -5,9 +5,7 @@ use stwo::core::fields::qm31::QM31;
 use stwo_constraint_framework::TraceLocationAllocator;
 
 fn make_allocator(public: &PublicInput) -> TraceLocationAllocator {
-    TraceLocationAllocator::new_with_preprocessed_columns(&[acceptable_col_id(
-        &public.acceptable,
-    )])
+    TraceLocationAllocator::new_with_preprocessed_columns(&[acceptable_col_id(&public.acceptable)])
 }
 
 pub(super) fn components(

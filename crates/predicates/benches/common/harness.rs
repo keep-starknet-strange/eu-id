@@ -1,6 +1,7 @@
 use criterion::Criterion;
-use predicates::{age, nat, AgeCheckStrategy, AgeProof, DateOfBirth, NatPrivateInput,
-                 NatPublicInput, PublicInput};
+use predicates::{
+    age, nat, AgeCheckStrategy, AgeProof, DateOfBirth, NatPrivateInput, NatPublicInput, PublicInput,
+};
 
 pub struct BenchCase {
     pub name: &'static str,
