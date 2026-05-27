@@ -1,7 +1,7 @@
-use crate::constants::{P256_GX, P256_GY, P256_ORDER};
+use crate::constants::{P256_B, P256_GX, P256_GY, P256_MODULUS, P256_ORDER};
 
 use crate::curve::{mod_inverse, point_add, point_double, scalar_mul};
-use crate::field_ops::mul_mod_witness;
+use crate::field_ops::{add_mod_witness, mul_mod_witness, sub_mod_witness};
 use crate::types::{AffinePoint, EcdsaVerifyInput, U256};
 
 /// Verify an ECDSA P-256 signature natively (outside the circuit).
@@ -20,6 +20,13 @@ pub fn ecdsa_verify(input: &EcdsaVerifyInput) -> bool {
         y: U256::from_le_u64s(&P256_GY),
     };
 
+    if !is_scalar_nonzero_and_below_order(&input.signature.r)
+        || !is_scalar_nonzero_and_below_order(&input.signature.s)
+        || !is_point_on_curve(&input.public_key)
+    {
+        return false;
+    }
+
     let s_inv = mod_inverse(&input.signature.s, &n);
     let u1 = mul_mod_witness(&input.message_hash, &s_inv, &n)
         .result
@@ -31,10 +38,8 @@ pub fn ecdsa_verify(input: &EcdsaVerifyInput) -> bool {
     let r1 = scalar_mul(&u1, &g);
     let r2 = scalar_mul(&u2, &input.public_key);
 
-    let r_point = if r1 == r2 {
-        point_double(&r1).output
-    } else {
-        point_add(&r1, &r2).output
+    let Some(r_point) = add_optional_points(r1, r2) else {
+        return false;
     };
 
     // Check R.x mod n == r
@@ -56,6 +61,63 @@ pub fn ecdsa_verify(input: &EcdsaVerifyInput) -> bool {
     }
 }
 
+fn is_scalar_nonzero_and_below_order(value: &U256) -> bool {
+    *value != U256::ZERO && cmp_u256(value, &U256::from_le_u64s(&P256_ORDER)).is_lt()
+}
+
+fn is_field_element(value: &U256) -> bool {
+    cmp_u256(value, &U256::from_le_u64s(&P256_MODULUS)).is_lt()
+}
+
+fn is_point_on_curve(point: &AffinePoint) -> bool {
+    if !is_field_element(&point.x) || !is_field_element(&point.y) {
+        return false;
+    }
+
+    let p = U256::from_le_u64s(&P256_MODULUS);
+    let y2 = mul_mod_witness(&point.y, &point.y, &p).result.to_u256();
+    let x2 = mul_mod_witness(&point.x, &point.x, &p).result.to_u256();
+    let x3 = mul_mod_witness(&x2, &point.x, &p).result.to_u256();
+    let three = U256::from_le_u64s(&[3, 0, 0, 0]);
+    let three_x = mul_mod_witness(&three, &point.x, &p).result.to_u256();
+    let x3_minus_3x = sub_mod_witness(&x3, &three_x, &p).result.to_u256();
+    let rhs = add_mod_witness(&x3_minus_3x, &U256::from_le_u64s(&P256_B), &p)
+        .result
+        .to_u256();
+
+    y2 == rhs
+}
+
+fn add_optional_points(lhs: Option<AffinePoint>, rhs: Option<AffinePoint>) -> Option<AffinePoint> {
+    match (lhs, rhs) {
+        (None, None) => None,
+        (Some(point), None) | (None, Some(point)) => Some(point),
+        (Some(lhs), Some(rhs)) if lhs == rhs => Some(point_double(&lhs).output),
+        (Some(lhs), Some(rhs)) if is_additive_inverse(&lhs, &rhs) => None,
+        (Some(lhs), Some(rhs)) => Some(point_add(&lhs, &rhs).output),
+    }
+}
+
+fn is_additive_inverse(lhs: &AffinePoint, rhs: &AffinePoint) -> bool {
+    lhs.x == rhs.x
+        && add_mod_witness(&lhs.y, &rhs.y, &U256::from_le_u64s(&P256_MODULUS))
+            .result
+            .to_u256()
+            == U256::ZERO
+}
+
+fn cmp_u256(lhs: &U256, rhs: &U256) -> core::cmp::Ordering {
+    let lhs = lhs.to_le_u64s();
+    let rhs = rhs.to_le_u64s();
+    for i in (0..4).rev() {
+        match lhs[i].cmp(&rhs[i]) {
+            core::cmp::Ordering::Equal => {}
+            ordering => return ordering,
+        }
+    }
+    core::cmp::Ordering::Equal
+}
+
 /// Full witness for ECDSA verification, capturing all intermediate values
 /// needed for trace generation.
 #[derive(Clone, Debug)]
@@ -64,9 +126,9 @@ pub struct EcdsaVerifyWitness {
     pub s_inv: U256,
     pub u1: U256,
     pub u2: U256,
-    pub r1: AffinePoint, // u1*G
-    pub r2: AffinePoint, // u2*Q
-    pub r_point: AffinePoint,
+    pub r1: Option<AffinePoint>, // u1*G, or infinity for u1 = 0
+    pub r2: Option<AffinePoint>, // u2*Q, or infinity for u2 = 0
+    pub r_point: Option<AffinePoint>,
     pub valid: bool,
 }
 
@@ -89,11 +151,7 @@ pub fn ecdsa_verify_witness(input: &EcdsaVerifyInput) -> EcdsaVerifyWitness {
     let r1 = scalar_mul(&u1, &g);
     let r2 = scalar_mul(&u2, &input.public_key);
 
-    let r_point = if r1 == r2 {
-        point_double(&r1).output
-    } else {
-        point_add(&r1, &r2).output
-    };
+    let r_point = add_optional_points(r1.clone(), r2.clone());
 
     let valid = ecdsa_verify(input);
 
@@ -166,5 +224,60 @@ mod tests {
             result,
             "ECDSA verification must succeed for a valid signature"
         );
+    }
+
+    #[test]
+    fn ecdsa_verify_rejects_zero_r_without_panicking() {
+        let input = EcdsaVerifyInput {
+            message_hash: scalar(42),
+            signature: Signature {
+                r: U256::ZERO,
+                s: scalar(11),
+            },
+            public_key: generator_point(),
+        };
+
+        assert!(!ecdsa_verify(&input));
+    }
+
+    #[test]
+    fn ecdsa_verify_rejects_zero_s_without_panicking() {
+        let input = EcdsaVerifyInput {
+            message_hash: scalar(42),
+            signature: Signature {
+                r: scalar(77),
+                s: U256::ZERO,
+            },
+            public_key: generator_point(),
+        };
+
+        assert!(!ecdsa_verify(&input));
+    }
+
+    #[test]
+    fn ecdsa_verify_rejects_public_key_off_curve() {
+        let mut public_key = generator_point();
+        public_key.y = scalar(1);
+        let input = EcdsaVerifyInput {
+            message_hash: scalar(42),
+            signature: Signature {
+                r: scalar(77),
+                s: scalar(11),
+            },
+            public_key,
+        };
+
+        assert!(!ecdsa_verify(&input));
+    }
+
+    fn scalar(value: u64) -> U256 {
+        U256::from_le_u64s(&[value, 0, 0, 0])
+    }
+
+    fn generator_point() -> AffinePoint {
+        AffinePoint {
+            x: U256::from_le_u64s(&P256_GX),
+            y: U256::from_le_u64s(&P256_GY),
+        }
     }
 }

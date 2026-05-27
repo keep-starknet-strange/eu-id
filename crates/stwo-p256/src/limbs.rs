@@ -2,8 +2,8 @@ use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::EvalAtRow;
 use stwo_p256_utils::constants::{LIMB_BITS, N_LIMBS};
 
+#[cfg(test)]
 use crate::constants::LIMB_MAX;
-
 use crate::types::U256;
 
 /// A P-256-sized integer decomposed into N_LIMBS limbs of LIMB_BITS each.
@@ -58,7 +58,7 @@ impl P256M31BigInt {
         let mut limbs = [M31::from_u32_unchecked(0); N_LIMBS];
         let mut bit_pos = 0usize;
 
-        for limb in limbs.iter_mut() {
+        for limb in &mut limbs {
             let mut limb_val = 0u32;
             for bit in 0..LIMB_BITS {
                 if bit_pos + bit >= 256 {
@@ -83,8 +83,8 @@ impl P256M31BigInt {
         let mut bytes = [0u8; 32];
         let mut bit_pos = 0usize;
 
-        for i in 0..N_LIMBS {
-            let limb_val = self.0[i].0;
+        for limb in &self.0 {
+            let limb_val = limb.0;
             for bit in 0..LIMB_BITS {
                 if bit_pos + bit >= 256 {
                     break;
@@ -105,6 +105,7 @@ impl P256M31BigInt {
 
 /// Schoolbook multiplication of two limbed numbers.
 /// Returns the raw convolution (2*N_LIMBS - 1 limbs) as u64 values before reduction.
+#[cfg(test)]
 pub fn schoolbook_mul_raw(a: &P256M31BigInt, b: &P256M31BigInt) -> Vec<u64> {
     let n = N_LIMBS;
     let mut result = vec![0u64; 2 * n - 1];
@@ -120,6 +121,7 @@ pub fn schoolbook_mul_raw(a: &P256M31BigInt, b: &P256M31BigInt) -> Vec<u64> {
 
 /// Propagate carries through a raw convolution, producing limbs with values in [0, LIMB_MAX].
 /// Returns (output_limbs, carries) for constraint generation.
+#[cfg(test)]
 pub fn propagate_carries(raw: &[u64], n_output: usize) -> (Vec<u32>, Vec<u64>) {
     let mut output = vec![0u32; n_output];
     let mut carries = vec![0u64; n_output];
@@ -177,8 +179,8 @@ mod tests {
         let raw = schoolbook_mul_raw(&la, &lb);
         let (output, _carries) = propagate_carries(&raw, 2 * N_LIMBS);
         assert_eq!(output[0], 21);
-        for i in 1..output.len() {
-            assert_eq!(output[i], 0);
+        for value in output.iter().skip(1) {
+            assert_eq!(*value, 0);
         }
     }
 

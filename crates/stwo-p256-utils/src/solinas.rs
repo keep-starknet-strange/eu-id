@@ -25,7 +25,7 @@ const SHIFT_TO_224: usize = P256_FIELD_BITS - 224;
 const SHIFT_TO_192: usize = P256_FIELD_BITS - 192;
 const SHIFT_TO_96: usize = P256_FIELD_BITS - 96;
 const SHIFT_TO_0: usize = P256_FIELD_BITS;
-const MAX_ABS_REDUCTION_COEFFICIENT: i64 = 1 << 12;
+pub const MAX_ABS_REDUCTION_COEFFICIENT: i64 = 1 << 12;
 
 type TermBag = [i64; TERM_BITS];
 
@@ -185,13 +185,13 @@ mod tests {
 
     #[test]
     fn every_row_is_congruent_to_its_high_limb() {
-        for high_limb in 0..HIGH_LIMB_COUNT {
+        for (high_limb, row) in REDUCTION_MATRIX.iter().enumerate() {
             let limb_index = N_LIMBS + high_limb;
             let mut terms = [0i128; TERM_BITS];
             terms[LIMB_BITS * limb_index] = 1;
 
-            for low_limb in 0..N_LIMBS {
-                let coeff = REDUCTION_MATRIX[high_limb][low_limb] as i128;
+            for (low_limb, coeff) in row.iter().copied().enumerate() {
+                let coeff = coeff as i128;
                 add_scaled_limb_term(&mut terms, LIMB_BITS * low_limb, -coeff);
             }
 

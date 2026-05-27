@@ -41,6 +41,8 @@ fn modulus() -> U256 {
 /// Compute modular inverse: a^(-1) mod p using extended Euclidean algorithm.
 /// Panics if a is zero.
 pub fn mod_inverse(a: &U256, p: &U256) -> U256 {
+    assert_ne!(*a, U256::ZERO, "cannot invert zero modulo modulus");
+
     let a_big = a.to_le_u64s();
     let p_big = p.to_le_u64s();
 
@@ -66,7 +68,6 @@ pub fn mod_inverse(a: &U256, p: &U256) -> U256 {
     }
 
     // old_s is the inverse (mod p). Normalize to [0, p).
-
     if old_s.0 {
         // Negative: add p
         let neg_val = U256::from_le_u64s(&[old_s.1[0], old_s.1[1], old_s.1[2], old_s.1[3]]);
@@ -165,13 +166,12 @@ pub fn point_add(p: &AffinePoint, q: &AffinePoint) -> PointAddWitness {
 }
 
 /// Scalar multiplication: k * P using double-and-add.
-pub fn scalar_mul(k: &U256, p: &AffinePoint) -> AffinePoint {
+///
+/// Returns `None` for the point at infinity, which occurs when `k = 0`.
+pub fn scalar_mul(k: &U256, p: &AffinePoint) -> Option<AffinePoint> {
     let k_bits = u256_to_bits(k);
 
-    let first_one = k_bits
-        .iter()
-        .rposition(|&b| b)
-        .expect("scalar must be nonzero");
+    let first_one = k_bits.iter().rposition(|&b| b)?;
 
     let mut acc = p.clone();
     for i in (0..first_one).rev() {
@@ -183,7 +183,7 @@ pub fn scalar_mul(k: &U256, p: &AffinePoint) -> AffinePoint {
         }
     }
 
-    acc
+    Some(acc)
 }
 
 fn u256_to_bits(val: &U256) -> Vec<bool> {

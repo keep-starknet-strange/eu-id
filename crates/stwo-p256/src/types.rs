@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+
 use crate::constants::{P256_GX, P256_GY, P256_MODULUS, P256_ORDER};
 
 /// A 256-bit unsigned integer stored as big-endian bytes.

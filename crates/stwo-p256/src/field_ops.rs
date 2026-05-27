@@ -80,7 +80,7 @@ pub fn add_mod_witness(a: &U256, b: &U256, modulus: &U256) -> AddModWitness {
     // Carry computation for: a + b - reduced*p - r = 0
     let mut carries = vec![0i64; N_LIMBS + 1];
     let mut carry: i64 = 0;
-    for i in 0..=N_LIMBS {
+    for (i, carry_slot) in carries.iter_mut().enumerate() {
         let a_val = if i < N_LIMBS {
             a_limbs.0[i].0 as i64
         } else {
@@ -140,7 +140,7 @@ pub fn sub_mod_witness(a: &U256, b: &U256, modulus: &U256) -> SubModWitness {
 
     let mut carries = vec![0i64; N_LIMBS + 1];
     let mut carry: i64 = 0;
-    for i in 0..=N_LIMBS {
+    for (i, carry_slot) in carries.iter_mut().enumerate() {
         let a_val = if i < N_LIMBS {
             a_limbs.0[i].0 as i64
         } else {

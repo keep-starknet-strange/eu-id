@@ -35,3 +35,11 @@ pub const P256_GY: [u64; 4] = [
     0x8EE7_EB4A_7C0F_9E16,
     0x4FE3_42E2_FE1A_7F9B,
 ];
+
+/// P-256 curve coefficient `b`, little-endian u64 limbs.
+pub const P256_B: [u64; 4] = [
+    0x3BCE_3C3E_27D2_604B,
+    0x651D_06B0_CC53_B0F6,
+    0xB3EB_BD55_7698_86BC,
+    0x5AC6_35D8_AA3A_93E7,
+];
