@@ -1,5 +1,6 @@
 use criterion::Criterion;
-use predicates::{age, AgeCheckStrategy, AgeProof, DateOfBirth, PublicInput};
+use predicates::{age, nat, AgeCheckStrategy, AgeProof, DateOfBirth, NatPrivateInput,
+                 NatPublicInput, PublicInput};
 
 pub struct BenchCase {
     pub name: &'static str,
@@ -23,6 +24,36 @@ pub fn run_bench(c: &mut Criterion, case: &BenchCase) {
         AgeProof::BitDecomposition(p) => bincode::serialize(p).unwrap(),
         AgeProof::RangeCheck(p) => bincode::serialize(p).unwrap(),
     };
+    println!(
+        "\n[{}] proof size: {} bytes ({:.1} KB)\n",
+        case.name,
+        proof_bytes.len(),
+        proof_bytes.len() as f64 / 1024.0,
+    );
+
+    group.finish();
+}
+
+pub struct NatBenchCase {
+    pub name: &'static str,
+    pub public: NatPublicInput,
+    pub private: NatPrivateInput,
+}
+
+pub fn run_nat_bench(c: &mut Criterion, case: &NatBenchCase) {
+    let mut group = c.benchmark_group(case.name);
+
+    group.bench_function("prove", |b| {
+        b.iter(|| nat::prove_nationality(&case.public, &case.private).unwrap())
+    });
+
+    let proof = nat::prove_nationality(&case.public, &case.private).unwrap();
+
+    group.bench_function("verify", |b| {
+        b.iter(|| nat::verify_nationality(&proof).unwrap())
+    });
+
+    let proof_bytes = bincode::serialize(&proof).unwrap();
     println!(
         "\n[{}] proof size: {} bytes ({:.1} KB)\n",
         case.name,
