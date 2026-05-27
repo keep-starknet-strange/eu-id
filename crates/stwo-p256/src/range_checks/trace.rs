@@ -2,7 +2,12 @@
 
 use num_traits::{One, Zero};
 use stwo::{
-    core::{channel::Channel, fields::m31::M31, poly::circle::CanonicCoset},
+    core::{
+        channel::Channel,
+        fields::m31::M31,
+        poly::circle::CanonicCoset,
+        utils::{bit_reverse_index, coset_index_to_circle_domain_index},
+    },
     prover::{
         backend::simd::{column::BaseColumn, SimdBackend},
         poly::{circle::CircleEvaluation, BitReversedOrder},
@@ -18,10 +23,26 @@ pub type ColumnEval = CircleEvaluation<SimdBackend, M31, BitReversedOrder>;
 /// `CanonicCoset`/`BaseColumn` boilerplate and rules out domain/order
 /// drift between providers.
 fn column_eval(log_size: u32, values: impl IntoIterator<Item = M31>) -> ColumnEval {
+    let values = coset_order_to_circle_domain_order(log_size, values);
     CircleEvaluation::new(
         CanonicCoset::new(log_size).circle_domain(),
         BaseColumn::from_iter(values),
     )
+}
+
+fn coset_order_to_circle_domain_order(
+    log_size: u32,
+    values: impl IntoIterator<Item = M31>,
+) -> Vec<M31> {
+    let mut ordered = vec![M31::from_u32_unchecked(0); 1usize << log_size];
+    for (coset_index, value) in values.into_iter().enumerate() {
+        let row = bit_reverse_index(
+            coset_index_to_circle_domain_index(coset_index, log_size),
+            log_size,
+        );
+        ordered[row] = value;
+    }
+    ordered
 }
 
 /// Prover-side claim for a [`super::RangeCheckEval`] provider.
@@ -171,8 +192,8 @@ mod tests {
 
     #[test]
     fn range_check_multiplicity_trace_has_2_pow_log_size_rows() {
-        let trace = RangeCheckClaim::new(4)
-            .gen_multiplicity_trace((0..3).map(M31::from_u32_unchecked));
+        let trace =
+            RangeCheckClaim::new(4).gen_multiplicity_trace((0..3).map(M31::from_u32_unchecked));
         assert_eq!(trace.domain.size(), 1 << 4);
     }
 
