@@ -55,11 +55,9 @@ impl StandalonePredicate for NationalityPredicate {
 
         let max_log_size = WitnessData::log_size().max(t_log_size);
         let twiddles = SimdBackend::precompute_twiddles(
-            CanonicCoset::new(
-                max_log_size + 1 + self.pcs_config.fri_config.log_blowup_factor,
-            )
-            .circle_domain()
-            .half_coset,
+            CanonicCoset::new(max_log_size + 1 + self.pcs_config.fri_config.log_blowup_factor)
+                .circle_domain()
+                .half_coset,
         );
 
         let channel = &mut Blake2sChannel::default();
@@ -128,15 +126,10 @@ impl StandalonePredicate for NationalityPredicate {
         let channel = &mut Blake2sChannel::default();
         config.mix_into(channel);
 
-        let commitment_scheme =
-            &mut CommitmentSchemeVerifier::<Blake2sMerkleChannel>::new(config);
+        let commitment_scheme = &mut CommitmentSchemeVerifier::<Blake2sMerkleChannel>::new(config);
 
         // Tree 0: acceptable nationality table (1 column).
-        commitment_scheme.commit(
-            proof.stark_proof.commitments[0],
-            &[t_log_size],
-            channel,
-        );
+        commitment_scheme.commit(proof.stark_proof.commitments[0], &[t_log_size], channel);
 
         proof.public.mix_into(channel);
 
@@ -205,7 +198,9 @@ mod tests {
     }
 
     fn private(codes: &[u32]) -> PrivateInput {
-        PrivateInput { nationalities: codes.to_vec() }
+        PrivateInput {
+            nationalities: codes.to_vec(),
+        }
     }
 
     // --- Happy paths ---
@@ -265,23 +260,38 @@ mod tests {
     #[test]
     fn validate_rejects_singleton_acceptable_set() {
         let p = predicate();
-        let err = p.prove(&PublicInput::new(vec![276]), &private(&[276])).unwrap_err();
-        assert!(matches!(err, Error::Input(InputError::AcceptableSetTooSmall)));
+        let err = p
+            .prove(&PublicInput::new(vec![276]), &private(&[276]))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            Error::Input(InputError::AcceptableSetTooSmall)
+        ));
     }
 
     #[test]
     fn validate_rejects_empty_acceptable_set() {
         let p = predicate();
-        let err = p.prove(&PublicInput::new(vec![]), &private(&[276])).unwrap_err();
-        assert!(matches!(err, Error::Input(InputError::AcceptableSetTooSmall)));
+        let err = p
+            .prove(&PublicInput::new(vec![]), &private(&[276]))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            Error::Input(InputError::AcceptableSetTooSmall)
+        ));
     }
 
     #[test]
     fn validate_rejects_non_iso_code_in_acceptable_set() {
         let p = predicate();
         // 1 is not an assigned ISO 3166-1 numeric code
-        let err = p.prove(&PublicInput::new(vec![276, 1]), &private(&[276])).unwrap_err();
-        assert!(matches!(err, Error::Input(InputError::InvalidNationalityCode(1))));
+        let err = p
+            .prove(&PublicInput::new(vec![276, 1]), &private(&[276]))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            Error::Input(InputError::InvalidNationalityCode(1))
+        ));
     }
 
     #[test]
@@ -306,7 +316,7 @@ mod tests {
         let p = predicate();
         let mut proof = p.prove(&eu_set(), &private(&[276])).unwrap();
         proof.nat_claimed_sum = -proof.nat_claimed_sum;
-        assert!(matches!(p.verify(&proof), Err(_)));
+        assert!(p.verify(&proof).is_err());
     }
 
     #[test]
@@ -314,7 +324,7 @@ mod tests {
         let p = predicate();
         let mut proof = p.prove(&eu_set(), &private(&[276])).unwrap();
         proof.table_claimed_sum = -proof.table_claimed_sum;
-        assert!(matches!(p.verify(&proof), Err(_)));
+        assert!(p.verify(&proof).is_err());
     }
 
     #[test]
@@ -323,6 +333,6 @@ mod tests {
         let p = predicate();
         let mut proof = p.prove(&eu_set(), &private(&[276])).unwrap();
         proof.public.acceptable[0] = 840; // swap FR(250) → US(840)
-        assert!(matches!(p.verify(&proof), Err(_)));
+        assert!(p.verify(&proof).is_err());
     }
 }

@@ -5,7 +5,9 @@ use predicates::{nat as nat_predicate, NatPrivateInput, NatProof, NatPublicInput
 use super::common::{get_flag, DEFAULT_PROOF_PATH};
 
 pub fn prove_usage() -> ! {
-    eprintln!("usage: prove nat --nationality CODE[,CODE...] --acceptable CODE[,CODE...] [--output PATH]");
+    eprintln!(
+        "usage: prove nat --nationality CODE[,CODE...] --acceptable CODE[,CODE...] [--output PATH]"
+    );
     eprintln!("  --nationality  prover's ISO 3166-1 numeric codes (comma-separated, required)");
     eprintln!("  --acceptable   acceptable nationality codes (comma-separated, required)");
     eprintln!("  --output       proof output path, default {DEFAULT_PROOF_PATH}");
@@ -24,21 +26,23 @@ pub fn prove(args: &[String], output: &str) {
     }
 
     let nationality = get_flag(args, "--nationality")
-        .map(|s| parse_codes(s))
+        .map(parse_codes)
         .unwrap_or_else(|| {
             eprintln!("--nationality is required");
             prove_usage()
         });
 
     let acceptable = get_flag(args, "--acceptable")
-        .map(|s| parse_codes(s))
+        .map(parse_codes)
         .unwrap_or_else(|| {
             eprintln!("--acceptable is required");
             prove_usage()
         });
 
     let public = NatPublicInput::new(acceptable);
-    let private = NatPrivateInput { nationalities: nationality };
+    let private = NatPrivateInput {
+        nationalities: nationality,
+    };
 
     let proof = nat_predicate::prove_nationality(&public, &private).unwrap_or_else(|e| {
         eprintln!("prove failed: {e}");
