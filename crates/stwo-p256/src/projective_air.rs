@@ -1,14 +1,203 @@
 use stwo::core::fields::m31::M31;
+use stwo_constraint_framework::{
+    relation, EvalAtRow, FrameworkComponent, FrameworkEval, RelationEntry,
+};
+use stwo_p256_utils::constants::N_LIMBS;
 
 use crate::constants::{P256_B, P256_MODULUS};
 use crate::field_ops::{add_mod_witness, sub_mod_witness};
 use crate::fp_solinas::{FpSolinasError, FpSolinasMulTrace};
-use crate::fp_solinas_air::{FpSolinasReductionTraceClaim, FpSolinasReductionTraceError};
+use crate::fp_solinas_air::{
+    add_fp_solinas_reduction_digit, FpSolinasReductionDigitColumns, FpSolinasReductionRelations,
+    FpSolinasReductionTraceClaim, FpSolinasReductionTraceError, FP_SOLINAS_REDUCTION_DIGITS,
+    FP_SOLINAS_REDUCTION_DIGIT_TRACE_COLUMNS,
+};
+use crate::limbs::{EvalP256BigIntExt, P256EvalBigInt};
 use crate::prepared_table::PreparedAffinePoint;
 use crate::projective::{
     ProjectiveEcError, ProjectiveEcOp, ProjectiveEcRow, ProjectiveEcTraceClaim, ProjectivePoint,
 };
+use crate::range_checks::{add_range_check, RangeCheckRelation};
 use crate::types::U256;
+
+pub type ProjectiveRcbMulComponent = FrameworkComponent<ProjectiveRcbMulEval>;
+
+pub const PROJECTIVE_RCB_MUL_LIMB_RELATION_ARITY: usize = 5;
+pub const PROJECTIVE_RCB_MUL_ROLE_LHS: u32 = 0;
+pub const PROJECTIVE_RCB_MUL_ROLE_RHS: u32 = 1;
+pub const PROJECTIVE_RCB_MUL_ROLE_RESULT: u32 = 2;
+pub const PROJECTIVE_RCB_MUL_ID_TRACE_COLUMNS: usize = 2;
+pub const PROJECTIVE_RCB_MUL_ACTIVE_TRACE_COLUMNS: usize = 1;
+pub const PROJECTIVE_RCB_MUL_LIMB_TRACE_COLUMNS: usize = 3 * N_LIMBS;
+pub const PROJECTIVE_RCB_MUL_REDUCTION_TRACE_COLUMNS: usize =
+    FP_SOLINAS_REDUCTION_DIGITS * FP_SOLINAS_REDUCTION_DIGIT_TRACE_COLUMNS + 1;
+pub const PROJECTIVE_RCB_MUL_TRACE_COLUMNS: usize = PROJECTIVE_RCB_MUL_ACTIVE_TRACE_COLUMNS
+    + PROJECTIVE_RCB_MUL_ID_TRACE_COLUMNS
+    + PROJECTIVE_RCB_MUL_LIMB_TRACE_COLUMNS
+    + PROJECTIVE_RCB_MUL_REDUCTION_TRACE_COLUMNS;
+
+relation!(
+    ProjectiveRcbMulLimbRelation,
+    PROJECTIVE_RCB_MUL_LIMB_RELATION_ARITY
+);
+
+#[derive(Clone)]
+pub struct ProjectiveRcbMulEval {
+    pub log_size: u32,
+    pub relations: ProjectiveRcbMulComponentRelations,
+}
+
+impl FrameworkEval for ProjectiveRcbMulEval {
+    fn log_size(&self) -> u32 {
+        self.log_size
+    }
+
+    fn max_constraint_log_degree_bound(&self) -> u32 {
+        self.log_size + 2
+    }
+
+    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+        let active = eval.next_trace_mask();
+        let source_index = eval.next_trace_mask();
+        let mul_index = eval.next_trace_mask();
+        let columns = ProjectiveRcbMulColumns::read(&mut eval);
+
+        eval.add_constraint(active.clone() * (one::<E>() - active.clone()));
+        add_projective_rcb_mul_row(
+            &mut eval,
+            self.relations.as_refs(),
+            active,
+            source_index,
+            mul_index,
+            &columns,
+        );
+        eval.finalize_logup_in_pairs();
+        eval
+    }
+}
+
+#[derive(Clone)]
+pub struct ProjectiveRcbMulComponentRelations {
+    pub range13: RangeCheckRelation,
+    pub signed_carry: RangeCheckRelation,
+    pub mul_limb: ProjectiveRcbMulLimbRelation,
+}
+
+impl ProjectiveRcbMulComponentRelations {
+    pub fn dummy() -> Self {
+        Self {
+            range13: RangeCheckRelation::dummy(),
+            signed_carry: RangeCheckRelation::dummy(),
+            mul_limb: ProjectiveRcbMulLimbRelation::dummy(),
+        }
+    }
+
+    pub fn as_refs(&self) -> ProjectiveRcbMulRelations<'_> {
+        ProjectiveRcbMulRelations {
+            range13: &self.range13,
+            signed_carry: &self.signed_carry,
+            mul_limb: &self.mul_limb,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct ProjectiveRcbMulRelations<'a> {
+    pub range13: &'a RangeCheckRelation,
+    pub signed_carry: &'a RangeCheckRelation,
+    pub mul_limb: &'a ProjectiveRcbMulLimbRelation,
+}
+
+pub struct ProjectiveRcbMulColumns<E: EvalAtRow> {
+    pub lhs: P256EvalBigInt<E>,
+    pub rhs: P256EvalBigInt<E>,
+    pub result: P256EvalBigInt<E>,
+    pub folded_final_carry: E::F,
+    pub reduction: [FpSolinasReductionDigitColumns<E>; FP_SOLINAS_REDUCTION_DIGITS],
+}
+
+impl<E: EvalAtRow> ProjectiveRcbMulColumns<E> {
+    fn read(eval: &mut E) -> Self {
+        Self {
+            lhs: eval.next_p256_bigint(),
+            rhs: eval.next_p256_bigint(),
+            result: eval.next_p256_bigint(),
+            folded_final_carry: eval.next_trace_mask(),
+            reduction: core::array::from_fn(|_| FpSolinasReductionDigitColumns {
+                folded_digit: eval.next_trace_mask(),
+                correction_product_digit: eval.next_trace_mask(),
+                result_limb: eval.next_trace_mask(),
+                prev_carry: eval.next_trace_mask(),
+                carry: eval.next_trace_mask(),
+            }),
+        }
+    }
+}
+
+pub fn add_projective_rcb_mul_row<E: EvalAtRow>(
+    eval: &mut E,
+    relations: ProjectiveRcbMulRelations<'_>,
+    gate: E::F,
+    source_index: E::F,
+    mul_index: E::F,
+    columns: &ProjectiveRcbMulColumns<E>,
+) {
+    add_mul_limb_group(
+        eval,
+        relations,
+        gate.clone(),
+        source_index.clone(),
+        mul_index.clone(),
+        PROJECTIVE_RCB_MUL_ROLE_LHS,
+        &columns.lhs,
+    );
+    add_mul_limb_group(
+        eval,
+        relations,
+        gate.clone(),
+        source_index.clone(),
+        mul_index.clone(),
+        PROJECTIVE_RCB_MUL_ROLE_RHS,
+        &columns.rhs,
+    );
+    add_mul_limb_group(
+        eval,
+        relations,
+        gate.clone(),
+        source_index,
+        mul_index,
+        PROJECTIVE_RCB_MUL_ROLE_RESULT,
+        &columns.result,
+    );
+
+    let reduction_relations = FpSolinasReductionRelations {
+        range13: relations.range13,
+        signed_carry: relations.signed_carry,
+    };
+    for row in &columns.reduction {
+        add_fp_solinas_reduction_digit(eval, reduction_relations, gate.clone(), row);
+    }
+
+    eval.add_constraint(gate.clone() * columns.reduction[0].prev_carry.clone());
+    for digit_index in 1..FP_SOLINAS_REDUCTION_DIGITS {
+        eval.add_constraint(
+            gate.clone()
+                * (columns.reduction[digit_index].prev_carry.clone()
+                    - columns.reduction[digit_index - 1].carry.clone()),
+        );
+    }
+    eval.add_constraint(
+        gate.clone()
+            * columns.folded_final_carry.clone()
+            * (columns.folded_final_carry.clone() + one::<E>()),
+    );
+    eval.add_constraint(
+        gate * (columns.reduction[FP_SOLINAS_REDUCTION_DIGITS - 1]
+            .carry
+            .clone()
+            + columns.folded_final_carry.clone()),
+    );
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectiveRcbAirTraceClaim {
@@ -214,6 +403,39 @@ impl From<FpSolinasReductionTraceError> for ProjectiveRcbAirError {
     }
 }
 
+fn add_mul_limb_group<E: EvalAtRow>(
+    eval: &mut E,
+    relations: ProjectiveRcbMulRelations<'_>,
+    gate: E::F,
+    source_index: E::F,
+    mul_index: E::F,
+    role: u32,
+    value: &P256EvalBigInt<E>,
+) {
+    for (limb_index, limb) in value.limbs().iter().enumerate() {
+        add_range_check(eval, relations.range13, gate.clone(), limb.clone());
+        eval.add_to_relation(RelationEntry::new(
+            relations.mul_limb,
+            -E::EF::from(gate.clone()),
+            &[
+                source_index.clone(),
+                mul_index.clone(),
+                constant(role),
+                constant(limb_index as u32),
+                limb.clone(),
+            ],
+        ));
+    }
+}
+
+fn constant<F: From<M31>>(value: u32) -> F {
+    F::from(M31::from_u32_unchecked(value))
+}
+
+fn one<E: EvalAtRow>() -> E::F {
+    constant(1)
+}
+
 fn rcb_double_with_mul_rows(
     input: &ProjectivePoint,
     muls: &mut Vec<ProjectiveRcbMulRow>,
@@ -357,6 +579,10 @@ mod tests {
     use crate::constants::{P256_GX, P256_GY};
     use crate::curve::point_double;
     use crate::types::AffinePoint;
+    use num_traits::Zero;
+    use stwo::core::air::Component;
+    use stwo::core::fields::qm31::SecureField;
+    use stwo_constraint_framework::TraceLocationAllocator;
 
     fn generator() -> PreparedAffinePoint {
         PreparedAffinePoint::from_affine(AffinePoint {
@@ -401,6 +627,10 @@ mod tests {
             .expect("claim verifies");
         assert_eq!(claim.active_row_count(), 1);
         assert_eq!(claim.mul_row_count(), PROJECTIVE_RCB_MAX_MUL_ROWS_PER_OP);
+        assert_eq!(
+            claim.reduction_row_count(),
+            PROJECTIVE_RCB_MAX_MUL_ROWS_PER_OP * FP_SOLINAS_REDUCTION_DIGITS
+        );
     }
 
     #[test]
@@ -477,5 +707,36 @@ mod tests {
             ProjectiveRcbAirError::TraceRowsMismatch { .. }
                 | ProjectiveRcbAirError::Projective(ProjectiveEcError::InvalidProjectiveInfinity)
         ));
+    }
+
+    #[test]
+    fn projective_rcb_mul_eval_allocates_expected_width() {
+        let mut allocator = TraceLocationAllocator::default();
+        let component = ProjectiveRcbMulComponent::new(
+            &mut allocator,
+            ProjectiveRcbMulEval {
+                log_size: 6,
+                relations: ProjectiveRcbMulComponentRelations::dummy(),
+            },
+            SecureField::zero(),
+        );
+
+        assert_eq!(
+            PROJECTIVE_RCB_MUL_TRACE_COLUMNS,
+            1 + 2 + 3 * N_LIMBS + 1 + 5 * FP_SOLINAS_REDUCTION_DIGITS
+        );
+        assert_eq!(
+            component.trace_log_degree_bounds()[1].len(),
+            PROJECTIVE_RCB_MUL_TRACE_COLUMNS
+        );
+        assert_eq!(PROJECTIVE_RCB_MUL_LIMB_RELATION_ARITY, 5);
+        assert_eq!(
+            ProjectiveRcbMulEval {
+                log_size: 6,
+                relations: ProjectiveRcbMulComponentRelations::dummy(),
+            }
+            .max_constraint_log_degree_bound(),
+            8
+        );
     }
 }

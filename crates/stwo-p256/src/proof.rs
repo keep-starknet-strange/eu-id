@@ -438,7 +438,7 @@ pub const P256_PROOF_COMPONENT_SLOTS: &[P256ProofComponentSlot] = &[
     P256ProofComponentSlot {
         name: "ProjectiveRcbAirRows",
         status: P256ProofComponentStatus::Implemented,
-        note: "Projective RCB formula multiplications are expanded into AIR-facing Solinas multiplication and reduction witness rows.",
+        note: "Projective RCB formula multiplications are expanded into AIR-facing Solinas multiplication/reduction witness rows with an EvalAtRow row-shape helper.",
     },
     P256ProofComponentSlot {
         name: "FakeGlvEcChainRows",
@@ -557,6 +557,7 @@ mod tests {
     use crate::constants::{P256_GX, P256_GY, P256_ORDER};
     use crate::curve::{mod_inverse, scalar_mul};
     use crate::field_ops::mul_mod_witness;
+    use crate::fp_solinas_air::FP_SOLINAS_REDUCTION_DIGITS;
     use crate::limbs::P256M31BigInt;
     use crate::prepared_table::PreparedAffinePoint;
     use crate::types::{AffinePoint, Signature, U256};
@@ -664,6 +665,10 @@ mod tests {
             proof.claim.projective_rcb_air_trace.mul_row_count(),
             804 * 13
         );
+        assert_eq!(
+            proof.claim.projective_rcb_air_trace.reduction_row_count(),
+            proof.claim.projective_rcb_air_trace.mul_row_count() * FP_SOLINAS_REDUCTION_DIGITS
+        );
         assert_eq!(proof.claim.final_check.rows.len(), 2);
         assert_eq!(proof.claim.prepared_use_counts.certs.len(), 4);
         for provider in &proof.claim.prepared_trace.providers {
@@ -708,6 +713,10 @@ mod tests {
         assert_eq!(
             proof.claim.projective_rcb_air_trace.mul_row_count(),
             402 * 13
+        );
+        assert_eq!(
+            proof.claim.projective_rcb_air_trace.reduction_row_count(),
+            proof.claim.projective_rcb_air_trace.mul_row_count() * FP_SOLINAS_REDUCTION_DIGITS
         );
         assert_eq!(
             proof.claim.public_key_check.solinas_reduction_row_count(),
