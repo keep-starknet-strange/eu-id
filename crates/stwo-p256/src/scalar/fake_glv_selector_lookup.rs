@@ -1,7 +1,28 @@
 use std::collections::BTreeMap;
 
-use stwo::core::fields::{m31::M31, qm31::SecureField};
-use stwo_constraint_framework::{relation, EvalAtRow, Relation, RelationEntry};
+use num_traits::{One, Zero};
+use stwo::{
+    core::{
+        fields::{m31::M31, qm31::SecureField},
+        poly::circle::CanonicCoset,
+        utils::{bit_reverse_index, coset_index_to_circle_domain_index},
+        ColumnVec,
+    },
+    prover::{
+        backend::simd::{
+            column::BaseColumn,
+            m31::{PackedM31, LOG_N_LANES},
+            qm31::{PackedQM31, PackedSecureField},
+            SimdBackend,
+        },
+        poly::{circle::CircleEvaluation, BitReversedOrder},
+    },
+};
+use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
+use stwo_constraint_framework::{
+    relation, EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation,
+    RelationEntry,
+};
 
 use super::fake_glv_selector::{FakeGlvSelectorClaim, FAKE_GLV_SELECTOR_CHUNKS};
 
@@ -9,11 +30,294 @@ relation!(Selector4x4Relation, 3);
 relation!(Selector16DecodeRelation, 3);
 relation!(FinalSelectorRelation, 4);
 
+pub type SelectorColumnEval = CircleEvaluation<SimdBackend, M31, BitReversedOrder>;
+
+pub const SELECTOR4X4_LOG_SIZE: u32 = 4;
+pub const SELECTOR16_DECODE_LOG_SIZE: u32 = 4;
+/// Four real final-selector rows, padded to one SIMD vector for LogUp trace generation.
+pub const FINAL_SELECTOR_LOG_SIZE: u32 = LOG_N_LANES;
+
+const SELECTOR4X4_A_COLUMN: &str = "p256_selector4x4_a";
+const SELECTOR4X4_B_COLUMN: &str = "p256_selector4x4_b";
+const SELECTOR4X4_SELECTOR_COLUMN: &str = "p256_selector4x4_selector";
+const SELECTOR16_SELECTOR_COLUMN: &str = "p256_selector16_selector";
+const SELECTOR16_BASE_INDEX_COLUMN: &str = "p256_selector16_base_index";
+const SELECTOR16_NEG_BIT_COLUMN: &str = "p256_selector16_neg_bit";
+const FINAL_SELECTOR_S1_MSB_COLUMN: &str = "p256_final_selector_s1_msb";
+const FINAL_SELECTOR_S2_MSB_COLUMN: &str = "p256_final_selector_s2_msb";
+const FINAL_SELECTOR_VALUE_COLUMN: &str = "p256_final_selector_value";
+const FINAL_SELECTOR_INIT_BASE_COLUMN: &str = "p256_final_selector_init_base";
+
 #[derive(Clone, Debug)]
 pub struct FakeGlvSelectorLookupRelations {
     pub selector4x4: Selector4x4Relation,
     pub selector16_decode: Selector16DecodeRelation,
     pub final_selector: FinalSelectorRelation,
+}
+
+#[derive(Clone, Debug)]
+pub struct Selector4x4ProviderClaim;
+
+impl Selector4x4ProviderClaim {
+    pub fn log_size(&self) -> u32 {
+        SELECTOR4X4_LOG_SIZE
+    }
+
+    pub fn preprocessed_column_ids(&self) -> [PreProcessedColumnId; 3] {
+        selector4x4_column_ids()
+    }
+
+    pub fn gen_preprocessed_columns(&self) -> [SelectorColumnEval; 3] {
+        let table = selector4x4_table();
+        [
+            selector_column(SELECTOR4X4_LOG_SIZE, table.map(|entry| entry.a)),
+            selector_column(SELECTOR4X4_LOG_SIZE, table.map(|entry| entry.b)),
+            selector_column(SELECTOR4X4_LOG_SIZE, table.map(|entry| entry.selector)),
+        ]
+    }
+
+    pub fn gen_multiplicity_trace(&self, requests: &SelectorLookupRequests) -> SelectorColumnEval {
+        let mut multiplicity = [M31::zero(); 16];
+        for entry in &requests.selector4x4 {
+            entry.verify().expect("selector4x4 request must be valid");
+            multiplicity[entry.selector.0 as usize] += M31::one();
+        }
+        selector_column(SELECTOR4X4_LOG_SIZE, multiplicity)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Selector16DecodeProviderClaim;
+
+impl Selector16DecodeProviderClaim {
+    pub fn log_size(&self) -> u32 {
+        SELECTOR16_DECODE_LOG_SIZE
+    }
+
+    pub fn preprocessed_column_ids(&self) -> [PreProcessedColumnId; 3] {
+        selector16_decode_column_ids()
+    }
+
+    pub fn gen_preprocessed_columns(&self) -> [SelectorColumnEval; 3] {
+        let table = selector16_decode_table();
+        [
+            selector_column(
+                SELECTOR16_DECODE_LOG_SIZE,
+                table.map(|entry| entry.selector),
+            ),
+            selector_column(
+                SELECTOR16_DECODE_LOG_SIZE,
+                table.map(|entry| entry.base_index),
+            ),
+            selector_column(SELECTOR16_DECODE_LOG_SIZE, table.map(|entry| entry.neg_bit)),
+        ]
+    }
+
+    pub fn gen_multiplicity_trace(&self, requests: &SelectorLookupRequests) -> SelectorColumnEval {
+        let mut multiplicity = [M31::zero(); 16];
+        for entry in &requests.selector16_decode {
+            entry
+                .verify()
+                .expect("selector16 decode request must be valid");
+            multiplicity[entry.selector.0 as usize] += M31::one();
+        }
+        selector_column(SELECTOR16_DECODE_LOG_SIZE, multiplicity)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct FinalSelectorProviderClaim;
+
+impl FinalSelectorProviderClaim {
+    pub fn log_size(&self) -> u32 {
+        FINAL_SELECTOR_LOG_SIZE
+    }
+
+    pub fn preprocessed_column_ids(&self) -> [PreProcessedColumnId; 4] {
+        final_selector_column_ids()
+    }
+
+    pub fn gen_preprocessed_columns(&self) -> [SelectorColumnEval; 4] {
+        let table = padded_final_selector_table();
+        [
+            selector_column(FINAL_SELECTOR_LOG_SIZE, table.map(|entry| entry.s1_msb)),
+            selector_column(FINAL_SELECTOR_LOG_SIZE, table.map(|entry| entry.s2_msb)),
+            selector_column(
+                FINAL_SELECTOR_LOG_SIZE,
+                table.map(|entry| entry.selector_final),
+            ),
+            selector_column(
+                FINAL_SELECTOR_LOG_SIZE,
+                table.map(|entry| entry.init_base_index),
+            ),
+        ]
+    }
+
+    pub fn gen_multiplicity_trace(&self, requests: &SelectorLookupRequests) -> SelectorColumnEval {
+        let mut multiplicity = [M31::zero(); 1usize << FINAL_SELECTOR_LOG_SIZE];
+        for entry in &requests.final_selector {
+            entry
+                .verify()
+                .expect("final selector request must be valid");
+            multiplicity[final_selector_row_index(*entry)] += M31::one();
+        }
+        selector_column(FINAL_SELECTOR_LOG_SIZE, multiplicity)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Selector4x4Eval {
+    pub relation: Selector4x4Relation,
+}
+
+impl FrameworkEval for Selector4x4Eval {
+    fn log_size(&self) -> u32 {
+        SELECTOR4X4_LOG_SIZE
+    }
+
+    fn max_constraint_log_degree_bound(&self) -> u32 {
+        SELECTOR4X4_LOG_SIZE + 1
+    }
+
+    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+        let [a_id, b_id, selector_id] = selector4x4_column_ids();
+        let a = eval.get_preprocessed_column(a_id);
+        let b = eval.get_preprocessed_column(b_id);
+        let selector = eval.get_preprocessed_column(selector_id);
+        let multiplicity = eval.next_trace_mask();
+        eval.add_to_relation(RelationEntry::new(
+            &self.relation,
+            -E::EF::from(multiplicity),
+            &[a, b, selector],
+        ));
+        eval.finalize_logup_in_pairs();
+        eval
+    }
+}
+
+pub type Selector4x4Component = FrameworkComponent<Selector4x4Eval>;
+
+#[derive(Clone, Debug)]
+pub struct Selector16DecodeEval {
+    pub relation: Selector16DecodeRelation,
+}
+
+impl FrameworkEval for Selector16DecodeEval {
+    fn log_size(&self) -> u32 {
+        SELECTOR16_DECODE_LOG_SIZE
+    }
+
+    fn max_constraint_log_degree_bound(&self) -> u32 {
+        SELECTOR16_DECODE_LOG_SIZE + 1
+    }
+
+    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+        let [selector_id, base_index_id, neg_bit_id] = selector16_decode_column_ids();
+        let selector = eval.get_preprocessed_column(selector_id);
+        let base_index = eval.get_preprocessed_column(base_index_id);
+        let neg_bit = eval.get_preprocessed_column(neg_bit_id);
+        let multiplicity = eval.next_trace_mask();
+        eval.add_to_relation(RelationEntry::new(
+            &self.relation,
+            -E::EF::from(multiplicity),
+            &[selector, base_index, neg_bit],
+        ));
+        eval.finalize_logup_in_pairs();
+        eval
+    }
+}
+
+pub type Selector16DecodeComponent = FrameworkComponent<Selector16DecodeEval>;
+
+#[derive(Clone, Debug)]
+pub struct FinalSelectorEval {
+    pub relation: FinalSelectorRelation,
+}
+
+impl FrameworkEval for FinalSelectorEval {
+    fn log_size(&self) -> u32 {
+        FINAL_SELECTOR_LOG_SIZE
+    }
+
+    fn max_constraint_log_degree_bound(&self) -> u32 {
+        FINAL_SELECTOR_LOG_SIZE + 1
+    }
+
+    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+        let [s1_msb_id, s2_msb_id, selector_id, init_base_id] = final_selector_column_ids();
+        let s1_msb = eval.get_preprocessed_column(s1_msb_id);
+        let s2_msb = eval.get_preprocessed_column(s2_msb_id);
+        let selector_final = eval.get_preprocessed_column(selector_id);
+        let init_base_index = eval.get_preprocessed_column(init_base_id);
+        let multiplicity = eval.next_trace_mask();
+        eval.add_to_relation(RelationEntry::new(
+            &self.relation,
+            -E::EF::from(multiplicity),
+            &[s1_msb, s2_msb, selector_final, init_base_index],
+        ));
+        eval.finalize_logup_in_pairs();
+        eval
+    }
+}
+
+pub type FinalSelectorComponent = FrameworkComponent<FinalSelectorEval>;
+
+#[derive(Clone, Debug, Default)]
+pub struct SelectorProviderInteractionClaim {
+    pub selector4x4: SelectorLookupInteractionClaim,
+    pub selector16_decode: SelectorLookupInteractionClaim,
+    pub final_selector: SelectorLookupInteractionClaim,
+}
+
+impl SelectorProviderInteractionClaim {
+    pub fn claimed_sum(&self) -> SecureField {
+        self.selector4x4.claimed_sum
+            + self.selector16_decode.claimed_sum
+            + self.final_selector.claimed_sum
+    }
+
+    pub fn gen_interaction_traces(
+        requests: &SelectorLookupRequests,
+        relations: &FakeGlvSelectorLookupRelations,
+    ) -> (ColumnVec<SelectorColumnEval>, Self) {
+        let selector4x4_claim = Selector4x4ProviderClaim;
+        let selector16_claim = Selector16DecodeProviderClaim;
+        let final_selector_claim = FinalSelectorProviderClaim;
+
+        let selector4x4_preprocessed = selector4x4_claim.gen_preprocessed_columns();
+        let selector16_preprocessed = selector16_claim.gen_preprocessed_columns();
+        let final_selector_preprocessed = final_selector_claim.gen_preprocessed_columns();
+
+        let (selector4x4_trace, selector4x4_interaction) = gen_provider_interaction_trace_3(
+            &selector4x4_claim.gen_multiplicity_trace(requests),
+            &selector4x4_preprocessed,
+            &relations.selector4x4,
+        );
+        let (selector16_trace, selector16_interaction) = gen_provider_interaction_trace_3(
+            &selector16_claim.gen_multiplicity_trace(requests),
+            &selector16_preprocessed,
+            &relations.selector16_decode,
+        );
+        let (final_selector_trace, final_selector_interaction) = gen_provider_interaction_trace_4(
+            &final_selector_claim.gen_multiplicity_trace(requests),
+            &final_selector_preprocessed,
+            &relations.final_selector,
+        );
+
+        let mut trace = Vec::new();
+        trace.extend(selector4x4_trace);
+        trace.extend(selector16_trace);
+        trace.extend(final_selector_trace);
+
+        (
+            trace,
+            Self {
+                selector4x4: selector4x4_interaction,
+                selector16_decode: selector16_interaction,
+                final_selector: final_selector_interaction,
+            },
+        )
+    }
 }
 
 impl FakeGlvSelectorLookupRelations {
@@ -259,6 +563,14 @@ pub struct SelectorLookupInteractionClaim {
     pub claimed_sum: SecureField,
 }
 
+impl Default for SelectorLookupInteractionClaim {
+    fn default() -> Self {
+        Self {
+            claimed_sum: SecureField::from(M31::from_u32_unchecked(0)),
+        }
+    }
+}
+
 pub fn selector_lookup_consumer_claimed_sum(
     requests: &SelectorLookupRequests,
     relations: &FakeGlvSelectorLookupRelations,
@@ -309,6 +621,72 @@ where
     secure_from_i64(numerator) / denominator
 }
 
+fn gen_provider_interaction_trace_3<R: Relation<PackedM31, PackedSecureField>>(
+    multiplicity: &SelectorColumnEval,
+    values: &[SelectorColumnEval; 3],
+    relation: &R,
+) -> (
+    ColumnVec<SelectorColumnEval>,
+    SelectorLookupInteractionClaim,
+) {
+    assert_provider_domains(multiplicity, values);
+    let log_size = multiplicity.domain.log_size();
+    let mut logup = LogupTraceGenerator::new(log_size);
+    let mut col = logup.new_col();
+    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+        let denominator: PackedQM31 = relation.combine(&[
+            values[0].data[vec_row],
+            values[1].data[vec_row],
+            values[2].data[vec_row],
+        ]);
+        let numerator = -PackedQM31::from(multiplicity.data[vec_row]);
+        col.write_frac(vec_row, numerator, denominator);
+    }
+    col.finalize_col();
+    let (trace, claimed_sum) = logup.finalize_last();
+    (trace, SelectorLookupInteractionClaim { claimed_sum })
+}
+
+fn gen_provider_interaction_trace_4<R: Relation<PackedM31, PackedSecureField>>(
+    multiplicity: &SelectorColumnEval,
+    values: &[SelectorColumnEval; 4],
+    relation: &R,
+) -> (
+    ColumnVec<SelectorColumnEval>,
+    SelectorLookupInteractionClaim,
+) {
+    assert_provider_domains(multiplicity, values);
+    let log_size = multiplicity.domain.log_size();
+    let mut logup = LogupTraceGenerator::new(log_size);
+    let mut col = logup.new_col();
+    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+        let denominator: PackedQM31 = relation.combine(&[
+            values[0].data[vec_row],
+            values[1].data[vec_row],
+            values[2].data[vec_row],
+            values[3].data[vec_row],
+        ]);
+        let numerator = -PackedQM31::from(multiplicity.data[vec_row]);
+        col.write_frac(vec_row, numerator, denominator);
+    }
+    col.finalize_col();
+    let (trace, claimed_sum) = logup.finalize_last();
+    (trace, SelectorLookupInteractionClaim { claimed_sum })
+}
+
+fn assert_provider_domains<const N: usize>(
+    multiplicity: &SelectorColumnEval,
+    values: &[SelectorColumnEval; N],
+) {
+    for value in values {
+        assert_eq!(
+            multiplicity.domain.log_size(),
+            value.domain.log_size(),
+            "selector provider columns must share log_size",
+        );
+    }
+}
+
 pub fn add_selector4x4_consumer<E: EvalAtRow>(
     eval: &mut E,
     relation: &Selector4x4Relation,
@@ -347,11 +725,27 @@ pub fn selector4x4_table() -> [Selector4x4Entry; 16] {
     })
 }
 
+pub fn selector4x4_column_ids() -> [PreProcessedColumnId; 3] {
+    [
+        column_id(SELECTOR4X4_A_COLUMN),
+        column_id(SELECTOR4X4_B_COLUMN),
+        column_id(SELECTOR4X4_SELECTOR_COLUMN),
+    ]
+}
+
 pub fn selector16_decode_table() -> [Selector16DecodeEntry; 16] {
     core::array::from_fn(|selector| {
         Selector16DecodeEntry::from_selector(M31::from_u32_unchecked(selector as u32))
             .expect("selector table entry is valid")
     })
+}
+
+pub fn selector16_decode_column_ids() -> [PreProcessedColumnId; 3] {
+    [
+        column_id(SELECTOR16_SELECTOR_COLUMN),
+        column_id(SELECTOR16_BASE_INDEX_COLUMN),
+        column_id(SELECTOR16_NEG_BIT_COLUMN),
+    ]
 }
 
 pub fn final_selector_table() -> [FinalSelectorEntry; 4] {
@@ -361,6 +755,55 @@ pub fn final_selector_table() -> [FinalSelectorEntry; 4] {
         FinalSelectorEntry::new(M31::from_u32_unchecked(0), M31::from_u32_unchecked(1)),
         FinalSelectorEntry::new(M31::from_u32_unchecked(1), M31::from_u32_unchecked(1)),
     ]
+}
+
+fn padded_final_selector_table() -> [FinalSelectorEntry; 1usize << FINAL_SELECTOR_LOG_SIZE] {
+    let real = final_selector_table();
+    core::array::from_fn(|index| {
+        if index < real.len() {
+            real[index]
+        } else {
+            FinalSelectorEntry {
+                s1_msb: M31::zero(),
+                s2_msb: M31::zero(),
+                selector_final: M31::zero(),
+                init_base_index: M31::zero(),
+            }
+        }
+    })
+}
+
+pub fn final_selector_column_ids() -> [PreProcessedColumnId; 4] {
+    [
+        column_id(FINAL_SELECTOR_S1_MSB_COLUMN),
+        column_id(FINAL_SELECTOR_S2_MSB_COLUMN),
+        column_id(FINAL_SELECTOR_VALUE_COLUMN),
+        column_id(FINAL_SELECTOR_INIT_BASE_COLUMN),
+    ]
+}
+
+fn column_id(id: &str) -> PreProcessedColumnId {
+    PreProcessedColumnId { id: id.into() }
+}
+
+fn selector_column<const N: usize>(log_size: u32, values: [M31; N]) -> SelectorColumnEval {
+    assert_eq!(N, 1usize << log_size, "selector table size mismatch");
+    let mut ordered = vec![M31::zero(); N];
+    for (coset_index, value) in values.into_iter().enumerate() {
+        let row = bit_reverse_index(
+            coset_index_to_circle_domain_index(coset_index, log_size),
+            log_size,
+        );
+        ordered[row] = value;
+    }
+    CircleEvaluation::new(
+        CanonicCoset::new(log_size).circle_domain(),
+        BaseColumn::from_iter(ordered),
+    )
+}
+
+fn final_selector_row_index(entry: FinalSelectorEntry) -> usize {
+    (entry.s1_msb.0 + 2 * entry.s2_msb.0) as usize
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -415,6 +858,7 @@ mod tests {
     use crate::scalar::fake_glv_selector::FakeGlvSelectorClaim;
     use crate::scalar::setup_air::ScalarSetupClaim;
     use crate::types::{AffinePoint, EcdsaVerifyInput, Signature, U256};
+    use stwo_constraint_framework::TraceLocationAllocator;
 
     fn test_input(message_hash: u64, r: u64, s: u64) -> EcdsaVerifyInput {
         EcdsaVerifyInput {
@@ -456,6 +900,15 @@ mod tests {
         (public_claim, scalar_setup, selectors)
     }
 
+    fn column_sum(column: &SelectorColumnEval) -> u32 {
+        column
+            .data
+            .iter()
+            .flat_map(|packed| packed.to_array())
+            .map(|value| value.0)
+            .sum()
+    }
+
     #[test]
     fn selector_tables_have_expected_shapes() {
         assert_eq!(selector4x4_table().len(), 16);
@@ -490,6 +943,74 @@ mod tests {
     }
 
     #[test]
+    fn selector_provider_claims_generate_preprocessed_and_multiplicity_columns() {
+        let (_, _, selectors) = build_selectors();
+        let requests =
+            SelectorLookupRequests::from_selector_claim(&selectors).expect("valid requests");
+        let selector4x4 = Selector4x4ProviderClaim;
+        let selector16 = Selector16DecodeProviderClaim;
+        let final_selector = FinalSelectorProviderClaim;
+
+        assert_eq!(selector4x4.gen_preprocessed_columns()[0].domain.size(), 16);
+        assert_eq!(selector16.gen_preprocessed_columns()[0].domain.size(), 16);
+        assert_eq!(
+            final_selector.gen_preprocessed_columns()[0].domain.size(),
+            16
+        );
+        assert_eq!(
+            column_sum(&selector4x4.gen_multiplicity_trace(&requests)),
+            requests.selector4x4.len() as u32
+        );
+        assert_eq!(
+            column_sum(&selector16.gen_multiplicity_trace(&requests)),
+            requests.selector16_decode.len() as u32
+        );
+        assert_eq!(
+            column_sum(&final_selector.gen_multiplicity_trace(&requests)),
+            requests.final_selector.len() as u32
+        );
+    }
+
+    #[test]
+    fn selector_provider_components_allocate_expected_columns() {
+        let relations = FakeGlvSelectorLookupRelations::dummy();
+        let mut ids = Vec::new();
+        ids.extend(selector4x4_column_ids());
+        ids.extend(selector16_decode_column_ids());
+        ids.extend(final_selector_column_ids());
+        let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
+
+        let selector4x4 = Selector4x4Component::new(
+            &mut allocator,
+            Selector4x4Eval {
+                relation: relations.selector4x4,
+            },
+            SecureField::from(M31::from_u32_unchecked(0)),
+        );
+        let selector16 = Selector16DecodeComponent::new(
+            &mut allocator,
+            Selector16DecodeEval {
+                relation: relations.selector16_decode,
+            },
+            SecureField::from(M31::from_u32_unchecked(0)),
+        );
+        let final_selector = FinalSelectorComponent::new(
+            &mut allocator,
+            FinalSelectorEval {
+                relation: relations.final_selector,
+            },
+            SecureField::from(M31::from_u32_unchecked(0)),
+        );
+
+        assert_eq!(selector4x4.preprocessed_column_indices().len(), 3);
+        assert_eq!(selector16.preprocessed_column_indices().len(), 3);
+        assert_eq!(final_selector.preprocessed_column_indices().len(), 4);
+        assert_eq!(selector4x4.trace_locations().len(), 3);
+        assert_eq!(selector16.trace_locations().len(), 3);
+        assert_eq!(final_selector.trace_locations().len(), 3);
+    }
+
+    #[test]
     fn selector_lookup_logup_sums_balance() {
         let (_, _, selectors) = build_selectors();
         let requests =
@@ -501,6 +1022,22 @@ mod tests {
         assert_eq!(
             providers + consumers,
             SecureField::from(M31::from_u32_unchecked(0))
+        );
+    }
+
+    #[test]
+    fn selector_provider_interaction_claim_matches_direct_provider_sum() {
+        let (_, _, selectors) = build_selectors();
+        let requests =
+            SelectorLookupRequests::from_selector_claim(&selectors).expect("valid requests");
+        let relations = FakeGlvSelectorLookupRelations::dummy();
+        let (trace, claim) =
+            SelectorProviderInteractionClaim::gen_interaction_traces(&requests, &relations);
+
+        assert!(!trace.is_empty());
+        assert_eq!(
+            claim.claimed_sum(),
+            selector_lookup_provider_claimed_sum(&requests, &relations)
         );
     }
 
