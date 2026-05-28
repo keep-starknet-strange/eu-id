@@ -369,6 +369,11 @@ pub const P256_PROOF_COMPONENT_SLOTS: &[P256ProofComponentSlot] = &[
         note: "Public key curve equation is checked with Solinas base-field multiplication traces.",
     },
     P256ProofComponentSlot {
+        name: "SolinasReductionTraceRows",
+        status: P256ProofComponentStatus::Implemented,
+        note: "Public-key on-curve field multiplications include split Solinas reduction rows tied back to each multiplication trace.",
+    },
+    P256ProofComponentSlot {
         name: "ScalarSetup",
         status: P256ProofComponentStatus::Implemented,
         note: "Native witness and AIR-facing scalar setup claim are linked.",
@@ -621,6 +626,10 @@ mod tests {
         proof.verify_current_e2e().expect("current e2e verifies");
         assert_eq!(proof.claim.public_inputs.instances.len(), 2);
         assert_eq!(proof.claim.public_key_check.rows.len(), 2);
+        assert_eq!(
+            proof.claim.public_key_check.solinas_reduction_row_count(),
+            224
+        );
         assert_eq!(proof.claim.scalar_setup.rows.len(), 2);
         assert_eq!(proof.claim.cert_inputs.rows.len(), 4);
         assert_eq!(proof.claim.fake_glv_scalars.rows.len(), 4);
@@ -671,6 +680,10 @@ mod tests {
         assert_eq!(proof.claim.fake_glv_chain.active_row_count(), 130);
         assert_eq!(proof.claim.fake_glv_ec_trace.active_row_count(), 380);
         assert_eq!(proof.claim.projective_ec_trace.active_row_count(), 404);
+        assert_eq!(
+            proof.claim.public_key_check.solinas_reduction_row_count(),
+            112
+        );
         assert_eq!(proof.interaction_claim.public_inputs.total(), zero());
         assert_eq!(proof.interaction_claim.selector_lookups.total(), zero());
         assert_eq!(proof.interaction_claim.prepared_points.total(), zero());
@@ -755,6 +768,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(implemented.contains(&"PublicKeyOnCurve"));
+        assert!(implemented.contains(&"SolinasReductionTraceRows"));
         assert!(implemented.contains(&"PreparedTablePoints"));
         assert!(implemented.contains(&"PreparedTableEcTrace"));
         assert!(implemented.contains(&"FakeGlvChainTrace"));

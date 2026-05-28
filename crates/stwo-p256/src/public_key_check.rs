@@ -3,6 +3,9 @@ use stwo::core::fields::m31::M31;
 use crate::constants::{P256_B, P256_MODULUS};
 use crate::field_ops::{add_mod_witness, sub_mod_witness};
 use crate::fp_solinas::{FpSolinasError, FpSolinasMulTrace};
+use crate::fp_solinas_air::{
+    FpSolinasReductionTraceClaim, FpSolinasReductionTraceError, FP_SOLINAS_REDUCTION_DIGITS,
+};
 use crate::limbs::P256M31BigInt;
 use crate::public_inputs::{PublicEcdsaInputClaim, PublicEcdsaInstance};
 use crate::types::U256;
@@ -32,6 +35,13 @@ impl PublicKeyOnCurveClaim {
         }
         Ok(())
     }
+
+    pub fn solinas_reduction_row_count(&self) -> usize {
+        self.rows
+            .iter()
+            .map(PublicKeyOnCurveRow::solinas_reduction_row_count)
+            .sum()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,6 +53,10 @@ pub struct PublicKeyOnCurveRow {
     pub x_squared: FpSolinasMulTrace,
     pub x_cubed: FpSolinasMulTrace,
     pub three_x: FpSolinasMulTrace,
+    pub y_squared_reduction: FpSolinasReductionTraceClaim,
+    pub x_squared_reduction: FpSolinasReductionTraceClaim,
+    pub x_cubed_reduction: FpSolinasReductionTraceClaim,
+    pub three_x_reduction: FpSolinasReductionTraceClaim,
     pub rhs: P256M31BigInt,
 }
 
@@ -56,6 +70,10 @@ impl PublicKeyOnCurveRow {
         let x_squared = FpSolinasMulTrace::new(&x, &x)?;
         let x_cubed = FpSolinasMulTrace::new(&x_squared.result.to_u256(), &x)?;
         let three_x = FpSolinasMulTrace::new(&U256::from_le_u64s(&[3, 0, 0, 0]), &x)?;
+        let y_squared_reduction = FpSolinasReductionTraceClaim::from_mul_trace(&y_squared)?;
+        let x_squared_reduction = FpSolinasReductionTraceClaim::from_mul_trace(&x_squared)?;
+        let x_cubed_reduction = FpSolinasReductionTraceClaim::from_mul_trace(&x_cubed)?;
+        let three_x_reduction = FpSolinasReductionTraceClaim::from_mul_trace(&three_x)?;
         let modulus = U256::from_le_u64s(&P256_MODULUS);
         let x3_minus_3x = sub_mod_witness(
             &x_cubed.result.to_u256(),
@@ -81,6 +99,10 @@ impl PublicKeyOnCurveRow {
             x_squared,
             x_cubed,
             three_x,
+            y_squared_reduction,
+            x_squared_reduction,
+            x_cubed_reduction,
+            three_x_reduction,
             rhs: P256M31BigInt::from_u256(&rhs),
         })
     }
@@ -92,6 +114,14 @@ impl PublicKeyOnCurveRow {
         self.x_squared.verify()?;
         self.x_cubed.verify()?;
         self.three_x.verify()?;
+        self.y_squared_reduction
+            .verify_against_mul_trace(&self.y_squared)?;
+        self.x_squared_reduction
+            .verify_against_mul_trace(&self.x_squared)?;
+        self.x_cubed_reduction
+            .verify_against_mul_trace(&self.x_cubed)?;
+        self.three_x_reduction
+            .verify_against_mul_trace(&self.three_x)?;
 
         if self.y_squared.lhs != self.y || self.y_squared.rhs != self.y {
             return Err(PublicKeyOnCurveError::TraceInputMismatch {
@@ -143,12 +173,17 @@ impl PublicKeyOnCurveRow {
         }
         Ok(())
     }
+
+    pub fn solinas_reduction_row_count(&self) -> usize {
+        4 * FP_SOLINAS_REDUCTION_DIGITS
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PublicKeyOnCurveError {
     FieldElementOutOfRange { field: &'static str },
     FpSolinas(FpSolinasError),
+    FpSolinasReduction(FpSolinasReductionTraceError),
     TraceInputMismatch { sig_id: u32, trace: &'static str },
     RhsMismatch { sig_id: u32 },
     PointOffCurve { sig_id: u32 },
@@ -157,6 +192,12 @@ pub enum PublicKeyOnCurveError {
 impl From<FpSolinasError> for PublicKeyOnCurveError {
     fn from(value: FpSolinasError) -> Self {
         Self::FpSolinas(value)
+    }
+}
+
+impl From<FpSolinasReductionTraceError> for PublicKeyOnCurveError {
+    fn from(value: FpSolinasReductionTraceError) -> Self {
+        Self::FpSolinasReduction(value)
     }
 }
 
@@ -214,6 +255,10 @@ mod tests {
 
         claim.verify().expect("claim verifies");
         assert_eq!(claim.rows.len(), 1);
+        assert_eq!(
+            claim.solinas_reduction_row_count(),
+            4 * FP_SOLINAS_REDUCTION_DIGITS
+        );
     }
 
     #[test]
@@ -251,5 +296,22 @@ mod tests {
         let err = claim.verify().expect_err("mutated rhs must fail");
 
         assert!(matches!(err, PublicKeyOnCurveError::RhsMismatch { .. }));
+    }
+
+    #[test]
+    fn public_key_on_curve_claim_detects_mutated_reduction_row() {
+        let mut claim =
+            PublicKeyOnCurveClaim::from_public_inputs(&public_claim()).expect("valid public key");
+        claim.rows[0].x_squared_reduction.rows[0].folded_digit ^= 1;
+
+        let err = claim.verify().expect_err("mutated reduction row must fail");
+
+        assert!(matches!(
+            err,
+            PublicKeyOnCurveError::FpSolinasReduction(
+                FpSolinasReductionTraceError::TraceRowsMismatch
+                    | FpSolinasReductionTraceError::ReductionEquationMismatch { .. }
+            )
+        ));
     }
 }
