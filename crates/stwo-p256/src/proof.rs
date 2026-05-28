@@ -9,6 +9,7 @@ use crate::prepared_point::{
     PreparedPointUseCountClaim,
 };
 use crate::prepared_table::{PreparedTableClaim, PreparedTableEcTraceClaim, PreparedTableError};
+use crate::projective::{ProjectiveEcError, ProjectiveEcTraceClaim};
 use crate::public_inputs::{
     public_ecdsa_consumer_claimed_sum, PublicEcdsaInputClaim, PublicEcdsaInstanceRelation,
 };
@@ -41,6 +42,7 @@ pub struct P256ProofClaim {
     pub prepared_table_ec_trace: PreparedTableEcTraceClaim,
     pub fake_glv_chain: FakeGlvChainClaim,
     pub fake_glv_ec_trace: FakeGlvPrimitiveEcTraceClaim,
+    pub projective_ec_trace: ProjectiveEcTraceClaim,
     pub final_check: FinalEcdsaCheckClaim,
     pub prepared_use_counts: PreparedPointUseCountClaim,
     pub prepared_trace: PreparedPointTraceClaim,
@@ -74,6 +76,10 @@ impl P256ProofClaim {
             &prepared_table,
         )?;
         let fake_glv_ec_trace = FakeGlvPrimitiveEcTraceClaim::from_chain(&fake_glv_chain)?;
+        let projective_ec_trace = ProjectiveEcTraceClaim::from_native_traces(
+            &prepared_table_ec_trace,
+            &fake_glv_ec_trace,
+        )?;
         let final_check = FinalEcdsaCheckClaim::from_claims(
             &public_inputs,
             &cert_inputs,
@@ -96,6 +102,7 @@ impl P256ProofClaim {
             prepared_table_ec_trace,
             fake_glv_chain,
             fake_glv_ec_trace,
+            projective_ec_trace,
             final_check,
             prepared_use_counts,
             prepared_trace,
@@ -128,6 +135,7 @@ impl P256ProofClaim {
         self.fake_glv_chain.verify()?;
         self.fake_glv_ec_trace
             .verify_against_chain(&self.fake_glv_chain)?;
+        self.projective_ec_trace.verify()?;
         self.final_check.verify()?;
         self.prepared_use_counts.verify()?;
         Ok(())
@@ -411,6 +419,11 @@ pub const P256_PROOF_COMPONENT_SLOTS: &[P256ProofComponentSlot] = &[
         note: "Compressed fake-GLV chain steps are expanded into primitive DOUBLE/DOUBLE/ADD rows and verified against native EC formulas.",
     },
     P256ProofComponentSlot {
+        name: "ProjectiveRcbEcTrace",
+        status: P256ProofComponentStatus::Implemented,
+        note: "Prepared-table and fake-GLV primitive EC rows are replayed through homogeneous projective RCB double/mixed-add formulas and exported back to affine outputs.",
+    },
+    P256ProofComponentSlot {
         name: "FakeGlvEcChainRows",
         status: P256ProofComponentStatus::Pending,
         note: "Stwo AIR constraints for MSB init, primitive chain DOUBLE/ADD rows, Table[16] final step, and LSB correction are not implemented yet.",
@@ -438,6 +451,7 @@ pub enum P256ProofError {
     SelectorLookup(SelectorLookupError),
     PreparedPoint(PreparedPointError),
     PreparedTable(PreparedTableError),
+    ProjectiveEc(ProjectiveEcError),
     PublicKeyOnCurve(PublicKeyOnCurveError),
     InvalidNativeEcdsaInput { index: usize },
     RelationImbalance { relation: &'static str },
@@ -494,6 +508,12 @@ impl From<PreparedPointError> for P256ProofError {
 impl From<PreparedTableError> for P256ProofError {
     fn from(value: PreparedTableError) -> Self {
         Self::PreparedTable(value)
+    }
+}
+
+impl From<ProjectiveEcError> for P256ProofError {
+    fn from(value: ProjectiveEcError) -> Self {
+        Self::ProjectiveEc(value)
     }
 }
 
@@ -610,6 +630,7 @@ mod tests {
         assert_eq!(proof.claim.prepared_table_ec_trace.active_row_count(), 48);
         assert_eq!(proof.claim.fake_glv_chain.active_row_count(), 260);
         assert_eq!(proof.claim.fake_glv_ec_trace.active_row_count(), 760);
+        assert_eq!(proof.claim.projective_ec_trace.active_row_count(), 808);
         assert_eq!(proof.claim.final_check.rows.len(), 2);
         assert_eq!(proof.claim.prepared_use_counts.certs.len(), 4);
         for provider in &proof.claim.prepared_trace.providers {
@@ -649,6 +670,7 @@ mod tests {
         );
         assert_eq!(proof.claim.fake_glv_chain.active_row_count(), 130);
         assert_eq!(proof.claim.fake_glv_ec_trace.active_row_count(), 380);
+        assert_eq!(proof.claim.projective_ec_trace.active_row_count(), 404);
         assert_eq!(proof.interaction_claim.public_inputs.total(), zero());
         assert_eq!(proof.interaction_claim.selector_lookups.total(), zero());
         assert_eq!(proof.interaction_claim.prepared_points.total(), zero());
@@ -712,6 +734,7 @@ mod tests {
         );
         assert_eq!(proof.claim.fake_glv_chain.active_row_count(), 65);
         assert_eq!(proof.claim.fake_glv_ec_trace.active_row_count(), 190);
+        assert_eq!(proof.claim.projective_ec_trace.active_row_count(), 203);
         assert_eq!(
             proof.claim.final_check.rows[0].h1,
             PreparedAffinePoint::infinity()
@@ -736,6 +759,7 @@ mod tests {
         assert!(implemented.contains(&"PreparedTableEcTrace"));
         assert!(implemented.contains(&"FakeGlvChainTrace"));
         assert!(implemented.contains(&"FakeGlvPrimitiveEcTrace"));
+        assert!(implemented.contains(&"ProjectiveRcbEcTrace"));
         assert!(implemented.contains(&"FinalEcdsaCheck"));
         assert!(pending.contains(&"PreparedTableEcRows"));
         assert!(pending.contains(&"FakeGlvEcChainRows"));

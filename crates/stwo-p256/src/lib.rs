@@ -7,6 +7,7 @@ pub mod ecdsa;
 pub mod field_ops;
 pub mod fp_solinas;
 pub mod limbs;
+pub mod projective;
 pub mod proof;
 pub mod public_inputs;
 pub mod public_key_check;
