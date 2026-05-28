@@ -6,6 +6,7 @@ pub mod debug;
 pub mod ecdsa;
 pub mod field_ops;
 pub mod fp_solinas;
+pub mod fp_solinas_air;
 pub mod limbs;
 pub mod projective;
 pub mod proof;
