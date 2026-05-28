@@ -4,6 +4,7 @@ use stwo::core::fields::qm31::QM31;
 use stwo::core::proof::StarkProof;
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleHasher;
 use stwo::core::verifier::VerificationError;
+use stwo::prover::backend::simd::m31::LOG_N_LANES;
 use stwo::prover::ProvingError;
 
 /// Public statement for a nationality proof.
@@ -20,6 +21,11 @@ impl PublicInput {
         acceptable.sort_unstable();
         acceptable.dedup();
         Self { acceptable }
+    }
+
+    pub(crate) fn log_size(&self) -> u32 {
+        let padded = (self.acceptable.len() as u32).next_power_of_two();
+        padded.ilog2().max(LOG_N_LANES)
     }
 
     pub(crate) fn mix_into(&self, channel: &mut impl Channel) {

@@ -2,7 +2,6 @@ mod components;
 mod eval;
 mod interaction;
 pub mod nationalities;
-pub mod predicate;
 mod preprocessed;
 pub mod table;
 pub mod types;
@@ -10,14 +9,15 @@ mod witness;
 
 use components::components;
 use interaction::InteractionTraces;
-use predicate::NationalityPredicate;
 use preprocessed::Preprocessed;
-use table::{table_log_size, NatTableElements};
+use table::NatTableElements;
 use types::{Error, InputError, PrivateInput, Proof, PublicInput, Witness};
 use witness::WitnessData;
 
+use crate::nat::nationalities::Nationality;
 use crate::predicate::{Predicate, StandalonePredicate};
 use num_traits::Zero;
+use strum::IntoEnumIterator;
 use stwo::core::channel::{Blake2sChannel, Channel};
 use stwo::core::fields::qm31::QM31;
 use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
@@ -28,6 +28,16 @@ use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::poly::circle::PolyOps;
 use stwo::prover::{prove, CommitmentSchemeProver, ComponentProver};
 
+pub struct NationalityPredicate {
+    pub pcs_config: PcsConfig,
+}
+
+impl NationalityPredicate {
+    pub fn new(pcs_config: PcsConfig) -> Self {
+        Self { pcs_config }
+    }
+}
+
 impl Predicate for NationalityPredicate {
     type PublicInput = PublicInput;
     type PrivateInput = PrivateInput;
@@ -35,11 +45,30 @@ impl Predicate for NationalityPredicate {
     type Error = Error;
 
     fn validate(&self, public: &PublicInput) -> Result<(), Error> {
-        NationalityPredicate::validate(self, public)
+        if public.acceptable.len() < 2 {
+            return Err(InputError::AcceptableSetTooSmall.into());
+        }
+        // Nationality enum variants are ordered by numeric code (iso-preset sorts by code).
+        let valid_codes: Vec<u32> = Nationality::iter().map(|n| n as u32).collect();
+        for &code in &public.acceptable {
+            if valid_codes.binary_search(&code).is_err() {
+                return Err(InputError::InvalidNationalityCode(code).into());
+            }
+        }
+        Ok(())
     }
 
     fn witness(&self, public: &PublicInput, private: &PrivateInput) -> Result<Witness, Error> {
-        NationalityPredicate::witness(self, public, private)
+        for &nat in &private.nationalities {
+            if let Ok(row_index) = public.acceptable.binary_search(&nat) {
+                return Ok(Witness {
+                    public: public.clone(),
+                    nationality: nat,
+                    nat_index: row_index,
+                });
+            }
+        }
+        Err(InputError::NoMatch.into())
     }
 }
 
@@ -50,10 +79,10 @@ impl StandalonePredicate for NationalityPredicate {
         self.validate(public)?;
         let witness = self.witness(public, private)?;
 
-        let t_log_size = table_log_size(&public.acceptable);
+        let preprocessed_log_size = public.log_size();
         let preprocessed = Preprocessed::new(public);
 
-        let max_log_size = WitnessData::log_size().max(t_log_size);
+        let max_log_size = WitnessData::log_size().max(preprocessed_log_size);
         let twiddles = SimdBackend::precompute_twiddles(
             CanonicCoset::new(max_log_size + 1 + self.pcs_config.fri_config.log_blowup_factor)
                 .circle_domain()
@@ -119,7 +148,7 @@ impl StandalonePredicate for NationalityPredicate {
     fn verify(&self, proof: &Proof) -> Result<(), Error> {
         self.validate(&proof.public)?;
 
-        let t_log_size = table_log_size(&proof.public.acceptable);
+        let t_log_size = proof.public.log_size();
         let nat_log_size = WitnessData::log_size();
 
         let config = proof.stark_proof.config;
