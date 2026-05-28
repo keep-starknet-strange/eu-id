@@ -10,7 +10,10 @@ use crate::prepared_point::{
 };
 use crate::prepared_table::{PreparedTableClaim, PreparedTableEcTraceClaim, PreparedTableError};
 use crate::projective::{ProjectiveEcError, ProjectiveEcTraceClaim};
-use crate::projective_air::{ProjectiveRcbAirError, ProjectiveRcbAirTraceClaim};
+use crate::projective_air::{
+    ProjectiveRcbAirError, ProjectiveRcbAirInteractionClaim, ProjectiveRcbAirTraceClaim,
+    ProjectiveRcbMulComponentRelations,
+};
 use crate::public_inputs::{
     public_ecdsa_consumer_claimed_sum, PublicEcdsaInputClaim, PublicEcdsaInstanceRelation,
 };
@@ -155,6 +158,7 @@ pub struct P256ProofRelations {
     pub selector_lookups: FakeGlvSelectorLookupRelations,
     pub prepared_points: PreparedPointRelation,
     pub range7: RangeCheckRelation,
+    pub projective_rcb: ProjectiveRcbMulComponentRelations,
 }
 
 impl P256ProofRelations {
@@ -164,16 +168,18 @@ impl P256ProofRelations {
             selector_lookups: FakeGlvSelectorLookupRelations::dummy(),
             prepared_points: PreparedPointRelation::dummy(),
             range7: RangeCheckRelation::dummy(),
+            projective_rcb: ProjectiveRcbMulComponentRelations::dummy(),
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct P256ProofInteractionClaim {
     pub public_inputs: RelationBalanceClaim,
     pub selector_lookups: RelationBalanceClaim,
     pub prepared_points: RelationBalanceClaim,
     pub range7: RelationBalanceClaim,
+    pub projective_rcb: ProjectiveRcbAirInteractionClaim,
 }
 
 impl P256ProofInteractionClaim {
@@ -220,6 +226,9 @@ impl P256ProofInteractionClaim {
             &claim.prepared_use_counts,
             &relations.range7,
         );
+        let projective_rcb = claim
+            .projective_rcb_air_trace
+            .internal_interaction_claim(&relations.projective_rcb);
 
         Self {
             public_inputs: RelationBalanceClaim::new(public_provider, public_consumer),
@@ -229,6 +238,7 @@ impl P256ProofInteractionClaim {
                 range7_provider_interaction.claimed_sum,
                 range7_consumer,
             ),
+            projective_rcb,
         }
     }
 
@@ -237,6 +247,7 @@ impl P256ProofInteractionClaim {
         self.selector_lookups.verify("SelectorLookups")?;
         self.prepared_points.verify("PreparedPoint")?;
         self.range7.verify("Range7")?;
+        self.projective_rcb.verify_balanced()?;
         Ok(())
     }
 }
@@ -711,6 +722,11 @@ mod tests {
         assert_eq!(proof.interaction_claim.selector_lookups.total(), zero());
         assert_eq!(proof.interaction_claim.prepared_points.total(), zero());
         assert_eq!(proof.interaction_claim.range7.total(), zero());
+        proof
+            .interaction_claim
+            .projective_rcb
+            .verify_balanced()
+            .expect("projective RCB internal relations balance");
     }
 
     #[test]
@@ -775,6 +791,11 @@ mod tests {
         assert_eq!(proof.interaction_claim.selector_lookups.total(), zero());
         assert_eq!(proof.interaction_claim.prepared_points.total(), zero());
         assert_eq!(proof.interaction_claim.range7.total(), zero());
+        proof
+            .interaction_claim
+            .projective_rcb
+            .verify_balanced()
+            .expect("projective RCB internal relations balance");
     }
 
     #[test]
@@ -846,6 +867,30 @@ mod tests {
                 ProjectiveRcbAirError::RawProductChunkDigitMismatch { .. }
                     | ProjectiveRcbAirError::RawProductChunkMismatch { .. }
             )
+        ));
+    }
+
+    #[test]
+    fn current_p256_proof_pipeline_detects_projective_rcb_relation_imbalance() {
+        let mut proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+            valid_real_input_with_small_u_scalars(7, 11),
+        ])
+        .expect("current pipeline builds");
+        proof
+            .interaction_claim
+            .projective_rcb
+            .raw_product_chunk_digit += SecureField::from(M31::from_u32_unchecked(1));
+
+        let err = proof
+            .interaction_claim
+            .verify_balanced()
+            .expect_err("mutated projective RCB relation sum must fail");
+
+        assert!(matches!(
+            err,
+            P256ProofError::ProjectiveRcbAir(ProjectiveRcbAirError::RelationImbalance {
+                relation: "ProjectiveRcbRawProductChunkDigit"
+            })
         ));
     }
 

@@ -1,6 +1,6 @@
-use stwo::core::fields::m31::M31;
+use stwo::core::fields::{m31::M31, qm31::SecureField};
 use stwo_constraint_framework::{
-    relation, EvalAtRow, FrameworkComponent, FrameworkEval, RelationEntry,
+    relation, EvalAtRow, FrameworkComponent, FrameworkEval, Relation, RelationEntry,
 };
 use stwo_p256_utils::constants::{LIMB_BITS, N_LIMBS};
 use stwo_p256_utils::solinas::REDUCTION_MATRIX;
@@ -62,6 +62,7 @@ pub const PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TRACE_COLUMNS: usize = 1
     + 2
     + 2
     + PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS * PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERM_TRACE_COLUMNS
+    + PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS
     + PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS;
 pub const PROJECTIVE_RCB_MUL_ID_TRACE_COLUMNS: usize = 2;
 pub const PROJECTIVE_RCB_MUL_ACTIVE_TRACE_COLUMNS: usize = 1;
@@ -204,7 +205,7 @@ impl FrameworkEval for ProjectiveRcbRawProductChunkEval {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ProjectiveRcbMulComponentRelations {
     pub range13: RangeCheckRelation,
     pub signed_carry: RangeCheckRelation,
@@ -293,6 +294,7 @@ pub fn add_projective_rcb_mul_row<E: EvalAtRow>(
         source_index.clone(),
         mul_index.clone(),
         PROJECTIVE_RCB_MUL_ROLE_LHS,
+        N_LIMBS as u32,
         &columns.lhs,
     );
     add_mul_limb_group(
@@ -302,6 +304,7 @@ pub fn add_projective_rcb_mul_row<E: EvalAtRow>(
         source_index.clone(),
         mul_index.clone(),
         PROJECTIVE_RCB_MUL_ROLE_RHS,
+        N_LIMBS as u32,
         &columns.rhs,
     );
     add_mul_limb_group(
@@ -311,6 +314,7 @@ pub fn add_projective_rcb_mul_row<E: EvalAtRow>(
         source_index.clone(),
         mul_index.clone(),
         PROJECTIVE_RCB_MUL_ROLE_RESULT,
+        0,
         &columns.result,
     );
 
@@ -383,6 +387,7 @@ pub struct ProjectiveRcbRawProductChunkColumns<E: EvalAtRow> {
     pub chunk: E::F,
     pub terms: [ProjectiveRcbRawProductTermColumns<E>; PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS],
     pub digits: [E::F; PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS],
+    pub digit_use_counts: [E::F; PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS],
 }
 
 impl<E: EvalAtRow> ProjectiveRcbRawProductChunkColumns<E> {
@@ -401,6 +406,7 @@ impl<E: EvalAtRow> ProjectiveRcbRawProductChunkColumns<E> {
                 rhs_limb: eval.next_trace_mask(),
             }),
             digits: core::array::from_fn(|_| eval.next_trace_mask()),
+            digit_use_counts: core::array::from_fn(|_| eval.next_trace_mask()),
         }
     }
 }
@@ -489,7 +495,7 @@ pub fn add_projective_rcb_raw_product_chunk<E: EvalAtRow>(
     for (offset, digit) in columns.digits.iter().enumerate() {
         eval.add_to_relation(RelationEntry::new(
             relations.raw_product_chunk_digit,
-            -E::EF::from(columns.active.clone()),
+            -E::EF::from(columns.active.clone() * columns.digit_use_counts[offset].clone()),
             &[
                 columns.source_index.clone(),
                 columns.mul_index.clone(),
@@ -836,6 +842,283 @@ impl ProjectiveRcbAirTraceClaim {
             .flat_map(|row| &row.muls)
             .map(|mul| mul.folded_contributions.rows.len())
             .sum()
+    }
+
+    pub fn internal_interaction_claim(
+        &self,
+        relations: &ProjectiveRcbMulComponentRelations,
+    ) -> ProjectiveRcbAirInteractionClaim {
+        ProjectiveRcbAirInteractionClaim::from_trace(self, relations)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectiveRcbAirInteractionClaim {
+    pub mul_limb: SecureField,
+    pub raw_product_chunk_digit: SecureField,
+    pub folded_contribution: SecureField,
+    pub folded_digit: SecureField,
+    pub folded_carry: SecureField,
+}
+
+impl ProjectiveRcbAirInteractionClaim {
+    pub fn from_trace(
+        trace: &ProjectiveRcbAirTraceClaim,
+        relations: &ProjectiveRcbMulComponentRelations,
+    ) -> Self {
+        let mut claim = Self::zero();
+        for row in &trace.rows {
+            for (mul_index, mul) in row.muls.iter().enumerate() {
+                claim.add_mul_limb_fractions(row.source_index, mul_index, mul, relations);
+                claim.add_raw_product_fractions(mul, relations);
+                claim.add_folded_contribution_fractions(mul, relations);
+                claim.add_folded_digit_fractions(row.source_index, mul_index, mul, relations);
+                claim.add_folded_carry_fractions(row.source_index, mul_index, mul, relations);
+            }
+        }
+        claim
+    }
+
+    pub fn zero() -> Self {
+        let zero = secure_zero();
+        Self {
+            mul_limb: zero,
+            raw_product_chunk_digit: zero,
+            folded_contribution: zero,
+            folded_digit: zero,
+            folded_carry: zero,
+        }
+    }
+
+    pub fn verify_balanced(&self) -> Result<(), ProjectiveRcbAirError> {
+        verify_relation_zero("ProjectiveRcbMulLimb", self.mul_limb)?;
+        verify_relation_zero(
+            "ProjectiveRcbRawProductChunkDigit",
+            self.raw_product_chunk_digit,
+        )?;
+        verify_relation_zero("ProjectiveRcbFoldedContribution", self.folded_contribution)?;
+        verify_relation_zero("ProjectiveRcbFoldedDigit", self.folded_digit)?;
+        verify_relation_zero("ProjectiveRcbFoldedCarry", self.folded_carry)
+    }
+
+    fn add_mul_limb_fractions(
+        &mut self,
+        source_index: usize,
+        mul_index: usize,
+        mul: &ProjectiveRcbMulRow,
+        relations: &ProjectiveRcbMulComponentRelations,
+    ) {
+        for (role, limbs) in [
+            (PROJECTIVE_RCB_MUL_ROLE_LHS, mul.trace.lhs.limbs()),
+            (PROJECTIVE_RCB_MUL_ROLE_RHS, mul.trace.rhs.limbs()),
+        ] {
+            for (limb_index, limb) in limbs.iter().enumerate() {
+                self.mul_limb += relation_fraction(
+                    &relations.mul_limb,
+                    -(N_LIMBS as i64),
+                    &[
+                        m31_usize(source_index),
+                        m31_usize(mul_index),
+                        m31(role),
+                        m31_usize(limb_index),
+                        *limb,
+                    ],
+                );
+            }
+        }
+        for chunk in &mul.raw_product_chunks {
+            for term in &chunk.terms {
+                if term.active {
+                    self.mul_limb += relation_fraction(
+                        &relations.mul_limb,
+                        1,
+                        &[
+                            m31_usize(chunk.source_index),
+                            m31_usize(chunk.mul_index),
+                            m31(PROJECTIVE_RCB_MUL_ROLE_LHS),
+                            m31_usize(term.lhs_index),
+                            m31(term.lhs_limb),
+                        ],
+                    );
+                    self.mul_limb += relation_fraction(
+                        &relations.mul_limb,
+                        1,
+                        &[
+                            m31_usize(chunk.source_index),
+                            m31_usize(chunk.mul_index),
+                            m31(PROJECTIVE_RCB_MUL_ROLE_RHS),
+                            m31_usize(term.rhs_index),
+                            m31(term.rhs_limb),
+                        ],
+                    );
+                }
+            }
+        }
+    }
+
+    fn add_raw_product_fractions(
+        &mut self,
+        mul: &ProjectiveRcbMulRow,
+        relations: &ProjectiveRcbMulComponentRelations,
+    ) {
+        for chunk in &mul.raw_product_chunks {
+            for (offset, digit) in chunk.digits.iter().enumerate() {
+                let use_count = chunk.digit_use_counts[offset] as i64;
+                if use_count != 0 {
+                    self.raw_product_chunk_digit += relation_fraction(
+                        &relations.raw_product_chunk_digit,
+                        -use_count,
+                        &[
+                            m31_usize(chunk.source_index),
+                            m31_usize(chunk.mul_index),
+                            m31_usize(chunk.coeff),
+                            m31_usize(chunk.chunk),
+                            m31_usize(offset),
+                            m31(*digit),
+                        ],
+                    );
+                }
+            }
+        }
+        for row in &mul.folded_contributions.rows {
+            for term in &row.terms {
+                if term.active {
+                    self.raw_product_chunk_digit += relation_fraction(
+                        &relations.raw_product_chunk_digit,
+                        1,
+                        &[
+                            m31_usize(row.source_index),
+                            m31_usize(row.mul_index),
+                            m31_usize(term.raw_coeff),
+                            m31_usize(term.raw_chunk),
+                            m31_usize(term.raw_offset),
+                            m31(term.raw_digit),
+                        ],
+                    );
+                }
+            }
+        }
+    }
+
+    fn add_folded_contribution_fractions(
+        &mut self,
+        mul: &ProjectiveRcbMulRow,
+        relations: &ProjectiveRcbMulComponentRelations,
+    ) {
+        for row in &mul.folded_contributions.rows {
+            self.folded_contribution += relation_fraction(
+                &relations.folded_contribution,
+                -1,
+                &[
+                    m31_usize(row.source_index),
+                    m31_usize(row.mul_index),
+                    m31_usize(row.digit_index),
+                    m31_usize(row.group_index),
+                    m31_i128(row.contribution_sum),
+                ],
+            );
+        }
+        for row in &mul.folded_digits.rows {
+            for group in &row.contribution_groups {
+                if group.active {
+                    self.folded_contribution += relation_fraction(
+                        &relations.folded_contribution,
+                        1,
+                        &[
+                            m31_usize(row.source_index),
+                            m31_usize(row.mul_index),
+                            m31_usize(row.digit_index),
+                            m31_usize(group.group_index),
+                            m31_i128(group.contribution_sum),
+                        ],
+                    );
+                }
+            }
+        }
+    }
+
+    fn add_folded_digit_fractions(
+        &mut self,
+        source_index: usize,
+        mul_index: usize,
+        mul: &ProjectiveRcbMulRow,
+        relations: &ProjectiveRcbMulComponentRelations,
+    ) {
+        for row in &mul.folded_digits.rows {
+            self.folded_digit += relation_fraction(
+                &relations.folded_digit,
+                -1,
+                &[
+                    m31_usize(row.source_index),
+                    m31_usize(row.mul_index),
+                    m31_usize(row.digit_index),
+                    m31(row.folded_digit),
+                ],
+            );
+        }
+        for row in &mul.reduction.rows {
+            self.folded_digit += relation_fraction(
+                &relations.folded_digit,
+                1,
+                &[
+                    m31_usize(source_index),
+                    m31_usize(mul_index),
+                    m31_usize(row.digit_index),
+                    m31(row.folded_digit),
+                ],
+            );
+        }
+    }
+
+    fn add_folded_carry_fractions(
+        &mut self,
+        source_index: usize,
+        mul_index: usize,
+        mul: &ProjectiveRcbMulRow,
+        relations: &ProjectiveRcbMulComponentRelations,
+    ) {
+        self.folded_carry += relation_fraction(
+            &relations.folded_carry,
+            -1,
+            &[
+                m31_usize(source_index),
+                m31_usize(mul_index),
+                m31(0),
+                m31(0),
+            ],
+        );
+        self.folded_carry += relation_fraction(
+            &relations.folded_carry,
+            1,
+            &[
+                m31_usize(source_index),
+                m31_usize(mul_index),
+                m31_usize(FP_SOLINAS_REDUCTION_DIGITS),
+                m31_i128(mul.folded_digits.final_carry),
+            ],
+        );
+        for row in &mul.folded_digits.rows {
+            self.folded_carry += relation_fraction(
+                &relations.folded_carry,
+                1,
+                &[
+                    m31_usize(row.source_index),
+                    m31_usize(row.mul_index),
+                    m31_usize(row.digit_index),
+                    m31_i128(row.prev_carry),
+                ],
+            );
+            self.folded_carry += relation_fraction(
+                &relations.folded_carry,
+                -1,
+                &[
+                    m31_usize(row.source_index),
+                    m31_usize(row.mul_index),
+                    m31_usize(row.digit_index + 1),
+                    m31_i128(row.carry),
+                ],
+            );
+        }
     }
 }
 
@@ -1397,6 +1680,7 @@ pub struct ProjectiveRcbRawProductChunkRow {
     pub chunk: usize,
     pub terms: [ProjectiveRcbRawProductTermRow; PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS],
     pub digits: [u32; PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS],
+    pub digit_use_counts: [u32; PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS],
 }
 
 impl ProjectiveRcbRawProductChunkRow {
@@ -1432,6 +1716,9 @@ impl ProjectiveRcbRawProductChunkRow {
             chunk,
             terms,
             digits: split_raw_product_chunk(product_sum)?,
+            digit_use_counts: core::array::from_fn(|offset| {
+                raw_product_chunk_digit_use_count_const(coeff, offset) as u32
+            }),
         })
     }
 
@@ -1467,13 +1754,22 @@ impl ProjectiveRcbRawProductChunkRow {
             }
         }
         let digits = split_raw_product_chunk(self.product_sum())?;
-        if self.digits == digits {
-            Ok(())
-        } else {
+        if self.digits != digits {
             Err(ProjectiveRcbAirError::RawProductChunkDigitMismatch {
                 coeff: self.coeff,
                 chunk: self.chunk,
             })
+        } else if self.digit_use_counts
+            != core::array::from_fn(|offset| {
+                raw_product_chunk_digit_use_count_const(self.coeff, offset) as u32
+            })
+        {
+            Err(ProjectiveRcbAirError::RawProductChunkUseCountMismatch {
+                coeff: self.coeff,
+                chunk: self.chunk,
+            })
+        } else {
+            Ok(())
         }
     }
 
@@ -1567,6 +1863,10 @@ pub enum ProjectiveRcbAirError {
         coeff: usize,
         chunk: usize,
     },
+    RawProductChunkUseCountMismatch {
+        coeff: usize,
+        chunk: usize,
+    },
     RawProductChunkMismatch {
         coeff: usize,
         chunk: usize,
@@ -1616,6 +1916,9 @@ pub enum ProjectiveRcbAirError {
     FoldedReductionDigitMismatch {
         digit_index: usize,
     },
+    RelationImbalance {
+        relation: &'static str,
+    },
     ProjectiveOutputMismatch {
         source_index: usize,
     },
@@ -1642,6 +1945,7 @@ impl From<FpSolinasReductionTraceError> for ProjectiveRcbAirError {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn add_mul_limb_group<E: EvalAtRow>(
     eval: &mut E,
     relations: ProjectiveRcbMulRelations<'_>,
@@ -1649,20 +1953,23 @@ fn add_mul_limb_group<E: EvalAtRow>(
     source_index: E::F,
     mul_index: E::F,
     role: u32,
+    relation_multiplicity: u32,
     value: &P256EvalBigInt<E>,
 ) {
     for (limb_index, limb) in value.limbs().iter().enumerate() {
         add_range_check(eval, relations.range13, gate.clone(), limb.clone());
-        add_projective_rcb_mul_limb_relation(
-            eval,
-            relations.mul_limb,
-            -E::EF::from(gate.clone()),
-            source_index.clone(),
-            mul_index.clone(),
-            constant(role),
-            constant(limb_index as u32),
-            limb.clone(),
-        );
+        if relation_multiplicity != 0 {
+            add_projective_rcb_mul_limb_relation(
+                eval,
+                relations.mul_limb,
+                -E::EF::from(gate.clone() * constant::<E::F>(relation_multiplicity)),
+                source_index.clone(),
+                mul_index.clone(),
+                constant(role),
+                constant(limb_index as u32),
+                limb.clone(),
+            );
+        }
     }
 }
 
@@ -1698,6 +2005,46 @@ fn zero<E: EvalAtRow>() -> E::F {
 
 fn one<E: EvalAtRow>() -> E::F {
     constant(1)
+}
+
+fn relation_fraction<R: Relation<M31, SecureField>>(
+    relation: &R,
+    numerator: i64,
+    values: &[M31],
+) -> SecureField {
+    secure_from_i64(numerator) / relation.combine(values)
+}
+
+fn verify_relation_zero(
+    relation: &'static str,
+    value: SecureField,
+) -> Result<(), ProjectiveRcbAirError> {
+    if value == secure_zero() {
+        Ok(())
+    } else {
+        Err(ProjectiveRcbAirError::RelationImbalance { relation })
+    }
+}
+
+fn secure_zero() -> SecureField {
+    SecureField::from(m31(0))
+}
+
+fn secure_from_i64(value: i64) -> SecureField {
+    SecureField::from(m31_i128(i128::from(value)))
+}
+
+fn m31(value: u32) -> M31 {
+    M31::from_u32_unchecked(value)
+}
+
+fn m31_usize(value: usize) -> M31 {
+    m31(value as u32)
+}
+
+fn m31_i128(value: i128) -> M31 {
+    const M31_MODULUS: i128 = (1i128 << 31) - 1;
+    M31::from_u32_unchecked(value.rem_euclid(M31_MODULUS) as u32)
 }
 
 const fn raw_product_chunk_count() -> usize {
@@ -1819,6 +2166,27 @@ const fn folded_contribution_abs_digit_sum_const(digit_index: usize) -> i128 {
         coeff += 1;
     }
     sum
+}
+
+const fn raw_product_chunk_digit_use_count_const(coeff: usize, offset: usize) -> usize {
+    if coeff < N_LIMBS {
+        if coeff + offset < FP_SOLINAS_REDUCTION_DIGITS {
+            1
+        } else {
+            0
+        }
+    } else {
+        let high = coeff - N_LIMBS;
+        let mut low = 0usize;
+        let mut count = 0usize;
+        while low < N_LIMBS {
+            if low + offset < FP_SOLINAS_REDUCTION_DIGITS && REDUCTION_MATRIX[high][low] != 0 {
+                count += 1;
+            }
+            low += 1;
+        }
+        count
+    }
 }
 
 const fn abs_i64(value: i64) -> i64 {
@@ -2359,6 +2727,10 @@ mod tests {
             claim.reduction_row_count(),
             PROJECTIVE_RCB_MAX_MUL_ROWS_PER_OP * FP_SOLINAS_REDUCTION_DIGITS
         );
+        claim
+            .internal_interaction_claim(&ProjectiveRcbMulComponentRelations::dummy())
+            .verify_balanced()
+            .expect("internal relations balance");
     }
 
     #[test]
@@ -2434,6 +2806,15 @@ mod tests {
             err,
             ProjectiveRcbAirError::RawProductChunkDigitMismatch { .. }
                 | ProjectiveRcbAirError::RawProductChunkMismatch { .. }
+        ));
+        assert!(matches!(
+            claim
+                .internal_interaction_claim(&ProjectiveRcbMulComponentRelations::dummy())
+                .verify_balanced()
+                .expect_err("mutated relation tuple must imbalance"),
+            ProjectiveRcbAirError::RelationImbalance {
+                relation: "ProjectiveRcbRawProductChunkDigit"
+            }
         ));
     }
 
@@ -2560,7 +2941,7 @@ mod tests {
         assert_eq!(PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS, 210);
         assert_eq!(
             PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TRACE_COLUMNS,
-            1 + 2 + 2 + 2 * 5 + 3
+            1 + 2 + 2 + 2 * 5 + 3 + 3
         );
         assert_eq!(
             component.trace_log_degree_bounds()[1].len(),
