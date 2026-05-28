@@ -560,6 +560,7 @@ mod tests {
     use crate::fp_solinas_air::FP_SOLINAS_REDUCTION_DIGITS;
     use crate::limbs::P256M31BigInt;
     use crate::prepared_table::PreparedAffinePoint;
+    use crate::projective_air::PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS;
     use crate::types::{AffinePoint, Signature, U256};
     use core::cmp::Ordering;
 
@@ -669,6 +670,14 @@ mod tests {
             proof.claim.projective_rcb_air_trace.reduction_row_count(),
             proof.claim.projective_rcb_air_trace.mul_row_count() * FP_SOLINAS_REDUCTION_DIGITS
         );
+        assert_eq!(
+            proof
+                .claim
+                .projective_rcb_air_trace
+                .raw_product_chunk_count(),
+            proof.claim.projective_rcb_air_trace.mul_row_count()
+                * PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS
+        );
         assert_eq!(proof.claim.final_check.rows.len(), 2);
         assert_eq!(proof.claim.prepared_use_counts.certs.len(), 4);
         for provider in &proof.claim.prepared_trace.providers {
@@ -717,6 +726,14 @@ mod tests {
         assert_eq!(
             proof.claim.projective_rcb_air_trace.reduction_row_count(),
             proof.claim.projective_rcb_air_trace.mul_row_count() * FP_SOLINAS_REDUCTION_DIGITS
+        );
+        assert_eq!(
+            proof
+                .claim
+                .projective_rcb_air_trace
+                .raw_product_chunk_count(),
+            proof.claim.projective_rcb_air_trace.mul_row_count()
+                * PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS
         );
         assert_eq!(
             proof.claim.public_key_check.solinas_reduction_row_count(),
@@ -773,6 +790,27 @@ mod tests {
                 crate::fp_solinas_air::FpSolinasReductionTraceError::TraceRowsMismatch
                     | crate::fp_solinas_air::FpSolinasReductionTraceError::ReductionEquationMismatch { .. }
             ))
+        ));
+    }
+
+    #[test]
+    fn current_p256_proof_pipeline_detects_mutated_projective_rcb_raw_product_row() {
+        let mut proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+            valid_real_input_with_small_u_scalars(7, 11),
+        ])
+        .expect("current pipeline builds");
+        proof.claim.projective_rcb_air_trace.rows[0].muls[0].raw_product_chunks[0].digits[0] ^= 1;
+
+        let err = proof
+            .verify_current_e2e()
+            .expect_err("mutated projective RCB raw product row must fail");
+
+        assert!(matches!(
+            err,
+            P256ProofError::ProjectiveRcbAir(
+                ProjectiveRcbAirError::RawProductChunkDigitMismatch { .. }
+                    | ProjectiveRcbAirError::RawProductChunkMismatch { .. }
+            )
         ));
     }
 
