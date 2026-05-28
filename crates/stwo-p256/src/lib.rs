@@ -15,6 +15,10 @@ pub mod canonical_lt {
     pub use crate::scalar::canonical_lt::*;
 }
 
+pub mod cert_bind {
+    pub use crate::scalar::cert_bind::*;
+}
+
 pub mod scalar_setup_air {
     pub use crate::scalar::setup_air::*;
 }
