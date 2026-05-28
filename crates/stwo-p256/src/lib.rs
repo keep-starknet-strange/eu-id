@@ -20,6 +20,10 @@ pub mod cert_bind {
     pub use crate::scalar::cert_bind::*;
 }
 
+pub mod fake_glv_chain {
+    pub use crate::scalar::fake_glv_chain::*;
+}
+
 pub mod fake_glv_scalar {
     pub use crate::scalar::fake_glv_scalar::*;
 }

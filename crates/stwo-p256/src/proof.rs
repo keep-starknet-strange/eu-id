@@ -1,10 +1,11 @@
 use stwo::core::fields::{m31::M31, qm31::SecureField};
 
 use crate::ecdsa::ecdsa_verify;
+use crate::fake_glv_chain::{FakeGlvChainClaim, FakeGlvChainError};
 use crate::prepared_point::{
-    prepared_point_consumer_claimed_sum, prepared_point_provider_claimed_sum,
-    prepared_point_range7_consumer_claimed_sum, PreparedPointAudit, PreparedPointError,
-    PreparedPointRelation, PreparedPointTraceClaim, PreparedPointUseCountClaim,
+    prepared_point_provider_claimed_sum, prepared_point_range7_consumer_claimed_sum,
+    PreparedPointAudit, PreparedPointError, PreparedPointRelation, PreparedPointTraceClaim,
+    PreparedPointUseCountClaim,
 };
 use crate::prepared_table::{PreparedTableClaim, PreparedTableEcTraceClaim, PreparedTableError};
 use crate::public_inputs::{
@@ -35,6 +36,7 @@ pub struct P256ProofClaim {
     pub selector_requests: SelectorLookupRequests,
     pub prepared_table: PreparedTableClaim,
     pub prepared_table_ec_trace: PreparedTableEcTraceClaim,
+    pub fake_glv_chain: FakeGlvChainClaim,
     pub prepared_use_counts: PreparedPointUseCountClaim,
     pub prepared_trace: PreparedPointTraceClaim,
 }
@@ -59,6 +61,12 @@ impl P256ProofClaim {
             &fake_glv_selectors,
             &prepared_table,
         )?;
+        let fake_glv_chain = FakeGlvChainClaim::from_claims(
+            &cert_inputs,
+            &fake_glv_scalars,
+            &fake_glv_selectors,
+            &prepared_table,
+        )?;
         let prepared_use_counts =
             PreparedPointUseCountClaim::from_selector_claim(&fake_glv_selectors)?;
         let prepared_trace = prepared_table.prepared_point_trace(&prepared_use_counts)?;
@@ -72,6 +80,7 @@ impl P256ProofClaim {
             selector_requests,
             prepared_table,
             prepared_table_ec_trace,
+            fake_glv_chain,
             prepared_use_counts,
             prepared_trace,
         })
@@ -99,6 +108,7 @@ impl P256ProofClaim {
         self.selector_requests.verify()?;
         self.prepared_table.verify()?;
         self.prepared_table_ec_trace.verify()?;
+        self.fake_glv_chain.verify()?;
         self.prepared_use_counts.verify()?;
         Ok(())
     }
@@ -157,8 +167,8 @@ impl P256ProofInteractionClaim {
             &claim.prepared_trace.providers,
             &relations.prepared_points,
         );
-        let prepared_consumer = prepared_point_consumer_claimed_sum(
-            &claim.prepared_trace.consumer_instances(),
+        let prepared_consumer = crate::prepared_point::prepared_point_consumer_claimed_sum(
+            &claim.fake_glv_chain.prepared_point_consumers(),
             &relations.prepared_points,
         );
 
@@ -289,7 +299,13 @@ impl P256ProofDraft {
             });
         }
 
-        let prepared_audit = PreparedPointAudit::balanced_for_claim(&self.claim.prepared_trace);
+        let mut prepared_audit = PreparedPointAudit::default();
+        for provider in &self.claim.prepared_trace.providers {
+            prepared_audit.add_provider(provider);
+        }
+        for consumer in self.claim.fake_glv_chain.prepared_point_consumers() {
+            prepared_audit.add_consumer(&consumer);
+        }
         if !prepared_audit.is_balanced() {
             return Err(P256ProofError::RelationImbalance {
                 relation: "PreparedPointAudit",
@@ -360,6 +376,11 @@ pub const P256_PROOF_COMPONENT_SLOTS: &[P256ProofComponentSlot] = &[
         note: "AIR constraints for STATE_LOAD, table construction EC rows, R3 fixed-offset use, and AFFINE_EXPORT are not implemented yet.",
     },
     P256ProofComponentSlot {
+        name: "FakeGlvChainTrace",
+        status: P256ProofComponentStatus::Implemented,
+        note: "Native chain trace consumes PreparedPoint entries, runs MSB init, 62 selector steps, Table[16], LSB correction, and checks final accumulator equals R3.",
+    },
+    P256ProofComponentSlot {
         name: "FakeGlvEcChainRows",
         status: P256ProofComponentStatus::Pending,
         note: "MSB init, chain ADD rows, Table[16] final step, and LSB correction EC constraints are not implemented yet.",
@@ -380,6 +401,7 @@ pub const P256_PROOF_COMPONENT_SLOTS: &[P256ProofComponentSlot] = &[
 pub enum P256ProofError {
     ScalarSetup(ScalarSetupClaimError),
     CertScalarInput(CertScalarInputError),
+    FakeGlvChain(FakeGlvChainError),
     FakeGlvScalar(FakeGlvScalarHintError),
     FakeGlvSelector(FakeGlvSelectorError),
     SelectorLookup(SelectorLookupError),
@@ -398,6 +420,12 @@ impl From<ScalarSetupClaimError> for P256ProofError {
 impl From<CertScalarInputError> for P256ProofError {
     fn from(value: CertScalarInputError) -> Self {
         Self::CertScalarInput(value)
+    }
+}
+
+impl From<FakeGlvChainError> for P256ProofError {
+    fn from(value: FakeGlvChainError) -> Self {
+        Self::FakeGlvChain(value)
     }
 }
 
@@ -535,6 +563,7 @@ mod tests {
         assert_eq!(proof.claim.selector_requests.final_selector.len(), 4);
         assert_eq!(proof.claim.prepared_table.certs.len(), 4);
         assert_eq!(proof.claim.prepared_table_ec_trace.active_row_count(), 48);
+        assert_eq!(proof.claim.fake_glv_chain.active_row_count(), 260);
         assert_eq!(proof.claim.prepared_use_counts.certs.len(), 4);
         for provider in &proof.claim.prepared_trace.providers {
             assert_eq!(
@@ -571,6 +600,7 @@ mod tests {
             proof.claim.scalar_setup.rows[0].output.u2,
             P256M31BigInt::from_u256(&scalar(11))
         );
+        assert_eq!(proof.claim.fake_glv_chain.active_row_count(), 130);
         assert_eq!(proof.interaction_claim.public_inputs.total(), zero());
         assert_eq!(proof.interaction_claim.selector_lookups.total(), zero());
         assert_eq!(proof.interaction_claim.prepared_points.total(), zero());
@@ -605,6 +635,7 @@ mod tests {
             proof.claim.prepared_use_counts.certs[1].total_use_count(),
             65
         );
+        assert_eq!(proof.claim.fake_glv_chain.active_row_count(), 65);
     }
 
     #[test]
@@ -622,6 +653,7 @@ mod tests {
 
         assert!(implemented.contains(&"PreparedTablePoints"));
         assert!(implemented.contains(&"PreparedTableEcTrace"));
+        assert!(implemented.contains(&"FakeGlvChainTrace"));
         assert!(pending.contains(&"PreparedTableEcRows"));
         assert!(pending.contains(&"FakeGlvEcChainRows"));
         assert!(pending.contains(&"FinalEcdsaCheck"));
