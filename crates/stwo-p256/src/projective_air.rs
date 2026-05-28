@@ -1,4 +1,5 @@
 use stwo::core::fields::{m31::M31, qm31::SecureField};
+use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{
     relation, EvalAtRow, FrameworkComponent, FrameworkEval, Relation, RelationEntry,
 };
@@ -22,6 +23,7 @@ use crate::projective::{
     ProjectiveEcError, ProjectiveEcOp, ProjectiveEcRow, ProjectiveEcTraceClaim, ProjectivePoint,
 };
 use crate::range_checks::{add_range_check, RangeCheckRelation};
+use crate::scalar::scalar_mod_mul::columns::{m31_column_eval, padded_log_size, M31ColumnEval};
 use crate::types::U256;
 
 pub type ProjectiveRcbMulComponent = FrameworkComponent<ProjectiveRcbMulEval>;
@@ -42,7 +44,7 @@ pub const PROJECTIVE_RCB_MUL_ROLE_RESULT: u32 = 2;
 pub const PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS: usize = 2;
 pub const PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS: usize = 3;
 pub const PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS: usize = raw_product_chunk_count();
-pub const PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERM_TRACE_COLUMNS: usize = 5;
+pub const PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERM_TRACE_COLUMNS: usize = 2;
 pub const PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERMS: usize = 4;
 pub const PROJECTIVE_RCB_FOLDED_CONTRIBUTION_ROWS: usize = folded_contribution_row_count_const();
 pub const PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERM_TRACE_COLUMNS: usize = 6;
@@ -58,11 +60,8 @@ pub const PROJECTIVE_RCB_FOLDED_DIGIT_TRACE_COLUMNS: usize = 1
     + 3
     + PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS * PROJECTIVE_RCB_FOLDED_DIGIT_GROUP_TRACE_COLUMNS
     + 3;
-pub const PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TRACE_COLUMNS: usize = 1
-    + 2
-    + 2
+pub const PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TRACE_COLUMNS: usize = 2
     + PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS * PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERM_TRACE_COLUMNS
-    + PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS
     + PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS;
 pub const PROJECTIVE_RCB_MUL_ID_TRACE_COLUMNS: usize = 2;
 pub const PROJECTIVE_RCB_MUL_ACTIVE_TRACE_COLUMNS: usize = 1;
@@ -94,6 +93,44 @@ relation!(
     ProjectiveRcbFoldedCarryRelation,
     PROJECTIVE_RCB_FOLDED_CARRY_RELATION_ARITY
 );
+
+pub struct ProjectiveRcbRawProductChunkScheduleColumnIds;
+
+impl ProjectiveRcbRawProductChunkScheduleColumnIds {
+    pub fn active() -> PreProcessedColumnId {
+        raw_product_chunk_schedule_id("active")
+    }
+
+    pub fn coeff() -> PreProcessedColumnId {
+        raw_product_chunk_schedule_id("coeff")
+    }
+
+    pub fn chunk() -> PreProcessedColumnId {
+        raw_product_chunk_schedule_id("chunk")
+    }
+
+    pub fn term_active(term: usize) -> PreProcessedColumnId {
+        raw_product_chunk_schedule_id(format!("term_active_{term}"))
+    }
+
+    pub fn lhs_index(term: usize) -> PreProcessedColumnId {
+        raw_product_chunk_schedule_id(format!("lhs_index_{term}"))
+    }
+
+    pub fn rhs_index(term: usize) -> PreProcessedColumnId {
+        raw_product_chunk_schedule_id(format!("rhs_index_{term}"))
+    }
+
+    pub fn digit_use_count(offset: usize) -> PreProcessedColumnId {
+        raw_product_chunk_schedule_id(format!("digit_use_count_{offset}"))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectiveRcbRawProductChunkScheduleColumn {
+    pub id: PreProcessedColumnId,
+    pub values: Vec<M31>,
+}
 
 #[derive(Clone)]
 pub struct ProjectiveRcbMulEval {
@@ -393,20 +430,33 @@ pub struct ProjectiveRcbRawProductChunkColumns<E: EvalAtRow> {
 impl<E: EvalAtRow> ProjectiveRcbRawProductChunkColumns<E> {
     fn read(eval: &mut E) -> Self {
         Self {
-            active: eval.next_trace_mask(),
+            active: eval
+                .get_preprocessed_column(ProjectiveRcbRawProductChunkScheduleColumnIds::active()),
             source_index: eval.next_trace_mask(),
             mul_index: eval.next_trace_mask(),
-            coeff: eval.next_trace_mask(),
-            chunk: eval.next_trace_mask(),
-            terms: core::array::from_fn(|_| ProjectiveRcbRawProductTermColumns {
-                term_active: eval.next_trace_mask(),
-                lhs_index: eval.next_trace_mask(),
-                rhs_index: eval.next_trace_mask(),
+            coeff: eval
+                .get_preprocessed_column(ProjectiveRcbRawProductChunkScheduleColumnIds::coeff()),
+            chunk: eval
+                .get_preprocessed_column(ProjectiveRcbRawProductChunkScheduleColumnIds::chunk()),
+            terms: core::array::from_fn(|term| ProjectiveRcbRawProductTermColumns {
+                term_active: eval.get_preprocessed_column(
+                    ProjectiveRcbRawProductChunkScheduleColumnIds::term_active(term),
+                ),
+                lhs_index: eval.get_preprocessed_column(
+                    ProjectiveRcbRawProductChunkScheduleColumnIds::lhs_index(term),
+                ),
+                rhs_index: eval.get_preprocessed_column(
+                    ProjectiveRcbRawProductChunkScheduleColumnIds::rhs_index(term),
+                ),
                 lhs_limb: eval.next_trace_mask(),
                 rhs_limb: eval.next_trace_mask(),
             }),
             digits: core::array::from_fn(|_| eval.next_trace_mask()),
-            digit_use_counts: core::array::from_fn(|_| eval.next_trace_mask()),
+            digit_use_counts: core::array::from_fn(|offset| {
+                eval.get_preprocessed_column(
+                    ProjectiveRcbRawProductChunkScheduleColumnIds::digit_use_count(offset),
+                )
+            }),
         }
     }
 }
@@ -850,6 +900,90 @@ impl ProjectiveRcbAirTraceClaim {
     ) -> ProjectiveRcbAirInteractionClaim {
         ProjectiveRcbAirInteractionClaim::from_trace(self, relations)
     }
+}
+
+pub fn projective_rcb_raw_product_chunk_schedule_columns(
+) -> Vec<ProjectiveRcbRawProductChunkScheduleColumn> {
+    let padded_rows = 1usize << padded_log_size(PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS);
+    let mut active = vec![m31(0); padded_rows];
+    let mut coeff = vec![m31(0); padded_rows];
+    let mut chunk = vec![m31(0); padded_rows];
+    let mut term_active = vec![vec![m31(0); padded_rows]; PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS];
+    let mut lhs_index = vec![vec![m31(0); padded_rows]; PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS];
+    let mut rhs_index = vec![vec![m31(0); padded_rows]; PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS];
+    let mut digit_use_count =
+        vec![vec![m31(0); padded_rows]; PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS];
+
+    let mut row = 0usize;
+    for row_coeff in 0..FP_SOLINAS_RAW_LIMBS {
+        for row_chunk in 0..coefficient_chunk_count(row_coeff) {
+            let pairs =
+                product_chunk_pairs(row_coeff, row_chunk).expect("valid fixed chunk schedule");
+            active[row] = m31(1);
+            coeff[row] = m31_usize(row_coeff);
+            chunk[row] = m31_usize(row_chunk);
+            for (term, pair) in pairs.into_iter().enumerate() {
+                if let Some((lhs, rhs)) = pair {
+                    term_active[term][row] = m31(1);
+                    lhs_index[term][row] = m31_usize(lhs);
+                    rhs_index[term][row] = m31_usize(rhs);
+                }
+            }
+            for (offset, column) in digit_use_count.iter_mut().enumerate() {
+                column[row] = m31_usize(raw_product_chunk_digit_use_count_const(row_coeff, offset));
+            }
+            row += 1;
+        }
+    }
+    debug_assert_eq!(row, PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS);
+
+    let mut columns = vec![
+        raw_product_chunk_schedule_column(
+            ProjectiveRcbRawProductChunkScheduleColumnIds::active(),
+            active,
+        ),
+        raw_product_chunk_schedule_column(
+            ProjectiveRcbRawProductChunkScheduleColumnIds::coeff(),
+            coeff,
+        ),
+        raw_product_chunk_schedule_column(
+            ProjectiveRcbRawProductChunkScheduleColumnIds::chunk(),
+            chunk,
+        ),
+    ];
+    for term in 0..PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS {
+        columns.push(raw_product_chunk_schedule_column(
+            ProjectiveRcbRawProductChunkScheduleColumnIds::term_active(term),
+            term_active[term].clone(),
+        ));
+        columns.push(raw_product_chunk_schedule_column(
+            ProjectiveRcbRawProductChunkScheduleColumnIds::lhs_index(term),
+            lhs_index[term].clone(),
+        ));
+        columns.push(raw_product_chunk_schedule_column(
+            ProjectiveRcbRawProductChunkScheduleColumnIds::rhs_index(term),
+            rhs_index[term].clone(),
+        ));
+    }
+    for (offset, values) in digit_use_count.into_iter().enumerate() {
+        columns.push(raw_product_chunk_schedule_column(
+            ProjectiveRcbRawProductChunkScheduleColumnIds::digit_use_count(offset),
+            values,
+        ));
+    }
+    columns
+}
+
+pub fn projective_rcb_raw_product_chunk_schedule_evals() -> Vec<M31ColumnEval> {
+    projective_rcb_raw_product_chunk_schedule_columns()
+        .into_iter()
+        .map(|column| {
+            m31_column_eval(
+                padded_log_size(PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS),
+                column.values,
+            )
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2047,6 +2181,19 @@ fn m31_i128(value: i128) -> M31 {
     M31::from_u32_unchecked(value.rem_euclid(M31_MODULUS) as u32)
 }
 
+fn raw_product_chunk_schedule_id(name: impl Into<String>) -> PreProcessedColumnId {
+    PreProcessedColumnId {
+        id: format!("p256_projective_rcb_raw_product_chunk_{}", name.into()),
+    }
+}
+
+fn raw_product_chunk_schedule_column(
+    id: PreProcessedColumnId,
+    values: Vec<M31>,
+) -> ProjectiveRcbRawProductChunkScheduleColumn {
+    ProjectiveRcbRawProductChunkScheduleColumn { id, values }
+}
+
 const fn raw_product_chunk_count() -> usize {
     let mut coeff = 0usize;
     let mut count = 0usize;
@@ -2819,6 +2966,24 @@ mod tests {
     }
 
     #[test]
+    fn projective_rcb_air_rows_detect_mutated_raw_product_schedule_metadata() {
+        let trace = one_row_trace(ProjectiveEcOp::Double, PreparedAffinePoint::infinity());
+        let mut claim =
+            ProjectiveRcbAirTraceClaim::from_projective_trace(&trace).expect("valid RCB AIR trace");
+        claim.rows[0].muls[0].raw_product_chunks[0].digit_use_counts[0] += 1;
+
+        let err = claim
+            .verify_against_projective_trace(&trace)
+            .expect_err("mutated raw product schedule metadata must fail");
+
+        assert!(matches!(
+            err,
+            ProjectiveRcbAirError::RawProductChunkUseCountMismatch { .. }
+                | ProjectiveRcbAirError::RawProductChunkMismatch { .. }
+        ));
+    }
+
+    #[test]
     fn projective_rcb_air_rows_detect_mutated_folded_digit() {
         let trace = one_row_trace(ProjectiveEcOp::Double, PreparedAffinePoint::infinity());
         let mut claim =
@@ -2941,14 +3106,52 @@ mod tests {
         assert_eq!(PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS, 210);
         assert_eq!(
             PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TRACE_COLUMNS,
-            1 + 2 + 2 + 2 * 5 + 3 + 3
+            2 + 2 * 2 + 3
         );
         assert_eq!(
             component.trace_log_degree_bounds()[1].len(),
             PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TRACE_COLUMNS
         );
+        assert!(allocator
+            .preprocessed_columns()
+            .contains(&ProjectiveRcbRawProductChunkScheduleColumnIds::coeff()));
+        assert!(allocator
+            .preprocessed_columns()
+            .contains(&ProjectiveRcbRawProductChunkScheduleColumnIds::digit_use_count(2)));
         assert_eq!(PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGIT_RELATION_ARITY, 6);
         assert!(projective_rcb_raw_product_chunk_fits_m31());
+    }
+
+    #[test]
+    fn projective_rcb_raw_product_chunk_schedule_columns_match_fixed_rows() {
+        let columns = projective_rcb_raw_product_chunk_schedule_columns();
+        let log_size = padded_log_size(PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS);
+        let row_count = 1usize << log_size;
+
+        assert_eq!(
+            columns.len(),
+            3 + 3 * PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS + 3
+        );
+        assert!(columns
+            .iter()
+            .all(|column| column.values.len() == row_count));
+        assert_eq!(
+            columns[0].values[..PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS]
+                .iter()
+                .filter(|&&value| value == m31(1))
+                .count(),
+            PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS
+        );
+        assert_eq!(columns[1].values[0], m31(0));
+        assert_eq!(columns[2].values[0], m31(0));
+        assert_eq!(
+            columns[1].values[PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS - 1],
+            m31_usize(FP_SOLINAS_RAW_LIMBS - 1)
+        );
+        assert_eq!(
+            projective_rcb_raw_product_chunk_schedule_evals().len(),
+            columns.len()
+        );
     }
 
     #[test]
