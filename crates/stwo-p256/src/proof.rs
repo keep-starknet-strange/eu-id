@@ -10,6 +10,7 @@ use crate::prepared_point::{
 };
 use crate::prepared_table::{PreparedTableClaim, PreparedTableEcTraceClaim, PreparedTableError};
 use crate::projective::{ProjectiveEcError, ProjectiveEcTraceClaim};
+use crate::projective_air::{ProjectiveRcbAirError, ProjectiveRcbAirTraceClaim};
 use crate::public_inputs::{
     public_ecdsa_consumer_claimed_sum, PublicEcdsaInputClaim, PublicEcdsaInstanceRelation,
 };
@@ -43,6 +44,7 @@ pub struct P256ProofClaim {
     pub fake_glv_chain: FakeGlvChainClaim,
     pub fake_glv_ec_trace: FakeGlvPrimitiveEcTraceClaim,
     pub projective_ec_trace: ProjectiveEcTraceClaim,
+    pub projective_rcb_air_trace: ProjectiveRcbAirTraceClaim,
     pub final_check: FinalEcdsaCheckClaim,
     pub prepared_use_counts: PreparedPointUseCountClaim,
     pub prepared_trace: PreparedPointTraceClaim,
@@ -80,6 +82,8 @@ impl P256ProofClaim {
             &prepared_table_ec_trace,
             &fake_glv_ec_trace,
         )?;
+        let projective_rcb_air_trace =
+            ProjectiveRcbAirTraceClaim::from_projective_trace(&projective_ec_trace)?;
         let final_check = FinalEcdsaCheckClaim::from_claims(
             &public_inputs,
             &cert_inputs,
@@ -103,6 +107,7 @@ impl P256ProofClaim {
             fake_glv_chain,
             fake_glv_ec_trace,
             projective_ec_trace,
+            projective_rcb_air_trace,
             final_check,
             prepared_use_counts,
             prepared_trace,
@@ -136,6 +141,8 @@ impl P256ProofClaim {
         self.fake_glv_ec_trace
             .verify_against_chain(&self.fake_glv_chain)?;
         self.projective_ec_trace.verify()?;
+        self.projective_rcb_air_trace
+            .verify_against_projective_trace(&self.projective_ec_trace)?;
         self.final_check.verify()?;
         self.prepared_use_counts.verify()?;
         Ok(())
@@ -429,6 +436,11 @@ pub const P256_PROOF_COMPONENT_SLOTS: &[P256ProofComponentSlot] = &[
         note: "Prepared-table and fake-GLV primitive EC rows are replayed through homogeneous projective RCB double/mixed-add formulas and exported back to affine outputs.",
     },
     P256ProofComponentSlot {
+        name: "ProjectiveRcbAirRows",
+        status: P256ProofComponentStatus::Implemented,
+        note: "Projective RCB formula multiplications are expanded into AIR-facing Solinas multiplication and reduction witness rows.",
+    },
+    P256ProofComponentSlot {
         name: "FakeGlvEcChainRows",
         status: P256ProofComponentStatus::Pending,
         note: "Stwo AIR constraints for MSB init, primitive chain DOUBLE/ADD rows, Table[16] final step, and LSB correction are not implemented yet.",
@@ -457,6 +469,7 @@ pub enum P256ProofError {
     PreparedPoint(PreparedPointError),
     PreparedTable(PreparedTableError),
     ProjectiveEc(ProjectiveEcError),
+    ProjectiveRcbAir(ProjectiveRcbAirError),
     PublicKeyOnCurve(PublicKeyOnCurveError),
     InvalidNativeEcdsaInput { index: usize },
     RelationImbalance { relation: &'static str },
@@ -519,6 +532,12 @@ impl From<PreparedTableError> for P256ProofError {
 impl From<ProjectiveEcError> for P256ProofError {
     fn from(value: ProjectiveEcError) -> Self {
         Self::ProjectiveEc(value)
+    }
+}
+
+impl From<ProjectiveRcbAirError> for P256ProofError {
+    fn from(value: ProjectiveRcbAirError) -> Self {
+        Self::ProjectiveRcbAir(value)
     }
 }
 
@@ -640,6 +659,11 @@ mod tests {
         assert_eq!(proof.claim.fake_glv_chain.active_row_count(), 260);
         assert_eq!(proof.claim.fake_glv_ec_trace.active_row_count(), 760);
         assert_eq!(proof.claim.projective_ec_trace.active_row_count(), 808);
+        assert_eq!(proof.claim.projective_rcb_air_trace.active_row_count(), 808);
+        assert_eq!(
+            proof.claim.projective_rcb_air_trace.mul_row_count(),
+            804 * 13
+        );
         assert_eq!(proof.claim.final_check.rows.len(), 2);
         assert_eq!(proof.claim.prepared_use_counts.certs.len(), 4);
         for provider in &proof.claim.prepared_trace.providers {
@@ -680,6 +704,11 @@ mod tests {
         assert_eq!(proof.claim.fake_glv_chain.active_row_count(), 130);
         assert_eq!(proof.claim.fake_glv_ec_trace.active_row_count(), 380);
         assert_eq!(proof.claim.projective_ec_trace.active_row_count(), 404);
+        assert_eq!(proof.claim.projective_rcb_air_trace.active_row_count(), 404);
+        assert_eq!(
+            proof.claim.projective_rcb_air_trace.mul_row_count(),
+            402 * 13
+        );
         assert_eq!(
             proof.claim.public_key_check.solinas_reduction_row_count(),
             112
@@ -711,6 +740,30 @@ mod tests {
         assert!(matches!(
             err,
             P256ProofError::FinalEcdsaCheck(FinalEcdsaCheckError::SignatureRMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn current_p256_proof_pipeline_detects_mutated_projective_rcb_air_row() {
+        let mut proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+            valid_real_input_with_small_u_scalars(7, 11),
+        ])
+        .expect("current pipeline builds");
+        proof.claim.projective_rcb_air_trace.rows[0].muls[0]
+            .reduction
+            .rows[0]
+            .folded_digit ^= 1;
+
+        let err = proof
+            .verify_current_e2e()
+            .expect_err("mutated projective RCB AIR row must fail");
+
+        assert!(matches!(
+            err,
+            P256ProofError::ProjectiveRcbAir(ProjectiveRcbAirError::FpSolinasReduction(
+                crate::fp_solinas_air::FpSolinasReductionTraceError::TraceRowsMismatch
+                    | crate::fp_solinas_air::FpSolinasReductionTraceError::ReductionEquationMismatch { .. }
+            ))
         ));
     }
 
@@ -774,6 +827,7 @@ mod tests {
         assert!(implemented.contains(&"FakeGlvChainTrace"));
         assert!(implemented.contains(&"FakeGlvPrimitiveEcTrace"));
         assert!(implemented.contains(&"ProjectiveRcbEcTrace"));
+        assert!(implemented.contains(&"ProjectiveRcbAirRows"));
         assert!(implemented.contains(&"FinalEcdsaCheck"));
         assert!(pending.contains(&"PreparedTableEcRows"));
         assert!(pending.contains(&"FakeGlvEcChainRows"));

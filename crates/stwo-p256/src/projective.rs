@@ -70,7 +70,7 @@ pub struct ProjectiveEcRow {
 }
 
 impl ProjectiveEcRow {
-    fn new(
+    pub(crate) fn new(
         sig_id: M31,
         cert_id: M31,
         op: ProjectiveEcOp,

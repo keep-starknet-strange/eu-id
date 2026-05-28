@@ -9,6 +9,7 @@ pub mod fp_solinas;
 pub mod fp_solinas_air;
 pub mod limbs;
 pub mod projective;
+pub mod projective_air;
 pub mod proof;
 pub mod public_inputs;
 pub mod public_key_check;
