@@ -36,6 +36,10 @@ pub mod prepared_point {
     pub use crate::scalar::prepared_point::*;
 }
 
+pub mod prepared_table {
+    pub use crate::scalar::prepared_table::*;
+}
+
 pub mod scalar_setup_air {
     pub use crate::scalar::setup_air::*;
 }
