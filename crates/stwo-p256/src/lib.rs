@@ -6,6 +6,7 @@ pub mod debug;
 pub mod ecdsa;
 pub mod field_ops;
 pub mod limbs;
+pub mod public_inputs;
 pub mod range_checks;
 pub mod scalar;
 pub mod types;
