@@ -27,6 +27,10 @@ pub mod fake_glv_selector {
     pub use crate::scalar::fake_glv_selector::*;
 }
 
+pub mod fake_glv_selector_lookup {
+    pub use crate::scalar::fake_glv_selector_lookup::*;
+}
+
 pub mod scalar_setup_air {
     pub use crate::scalar::setup_air::*;
 }
