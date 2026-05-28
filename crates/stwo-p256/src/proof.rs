@@ -674,6 +674,13 @@ mod tests {
             proof
                 .claim
                 .projective_rcb_air_trace
+                .folded_digit_row_count(),
+            proof.claim.projective_rcb_air_trace.mul_row_count() * FP_SOLINAS_REDUCTION_DIGITS
+        );
+        assert_eq!(
+            proof
+                .claim
+                .projective_rcb_air_trace
                 .raw_product_chunk_count(),
             proof.claim.projective_rcb_air_trace.mul_row_count()
                 * PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS
@@ -725,6 +732,13 @@ mod tests {
         );
         assert_eq!(
             proof.claim.projective_rcb_air_trace.reduction_row_count(),
+            proof.claim.projective_rcb_air_trace.mul_row_count() * FP_SOLINAS_REDUCTION_DIGITS
+        );
+        assert_eq!(
+            proof
+                .claim
+                .projective_rcb_air_trace
+                .folded_digit_row_count(),
             proof.claim.projective_rcb_air_trace.mul_row_count() * FP_SOLINAS_REDUCTION_DIGITS
         );
         assert_eq!(
@@ -786,10 +800,13 @@ mod tests {
 
         assert!(matches!(
             err,
-            P256ProofError::ProjectiveRcbAir(ProjectiveRcbAirError::FpSolinasReduction(
-                crate::fp_solinas_air::FpSolinasReductionTraceError::TraceRowsMismatch
-                    | crate::fp_solinas_air::FpSolinasReductionTraceError::ReductionEquationMismatch { .. }
-            ))
+            P256ProofError::ProjectiveRcbAir(
+                ProjectiveRcbAirError::FpSolinasReduction(
+                    crate::fp_solinas_air::FpSolinasReductionTraceError::TraceRowsMismatch
+                        | crate::fp_solinas_air::FpSolinasReductionTraceError::ReductionEquationMismatch { .. }
+                )
+                | ProjectiveRcbAirError::FoldedReductionDigitMismatch { .. }
+            )
         ));
     }
 
@@ -810,6 +827,31 @@ mod tests {
             P256ProofError::ProjectiveRcbAir(
                 ProjectiveRcbAirError::RawProductChunkDigitMismatch { .. }
                     | ProjectiveRcbAirError::RawProductChunkMismatch { .. }
+            )
+        ));
+    }
+
+    #[test]
+    fn current_p256_proof_pipeline_detects_mutated_projective_rcb_folded_row() {
+        let mut proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+            valid_real_input_with_small_u_scalars(7, 11),
+        ])
+        .expect("current pipeline builds");
+        proof.claim.projective_rcb_air_trace.rows[0].muls[0]
+            .folded_digits
+            .rows[0]
+            .folded_digit ^= 1;
+
+        let err = proof
+            .verify_current_e2e()
+            .expect_err("mutated projective RCB folded row must fail");
+
+        assert!(matches!(
+            err,
+            P256ProofError::ProjectiveRcbAir(
+                ProjectiveRcbAirError::FoldedDigitMismatch
+                    | ProjectiveRcbAirError::FoldedDigitEquationMismatch { .. }
+                    | ProjectiveRcbAirError::FoldedReductionDigitMismatch { .. }
             )
         ));
     }
