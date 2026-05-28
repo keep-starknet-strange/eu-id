@@ -26,7 +26,7 @@ impl InteractionTraces {
         preprocessed: &Preprocessed,
         lookup_elements: &NatTableElements,
     ) -> Self {
-        let table_log_size = preprocessed.nat_table[0].domain.log_size();
+        let acceptable_nat_log_size = preprocessed.acceptable[0].domain.log_size();
         let n_packed = 1 << (WitnessData::log_size() - LOG_N_LANES);
 
         let mut logup_gen = LogupTraceGenerator::new(WitnessData::log_size());
@@ -43,10 +43,10 @@ impl InteractionTraces {
         col_gen.finalize_col();
         let (nat_interaction, nat_claimed_sum) = logup_gen.finalize_last();
 
-        let mut logup_gen = LogupTraceGenerator::new(table_log_size);
+        let mut logup_gen = LogupTraceGenerator::new(acceptable_nat_log_size);
         let mut col_gen = logup_gen.new_col();
-        for vec_row in 0..(1 << (table_log_size - LOG_N_LANES)) {
-            let nat_val: PackedM31 = preprocessed.nat_table[0].values.data[vec_row];
+        for vec_row in 0..(1 << (acceptable_nat_log_size - LOG_N_LANES)) {
+            let nat_val: PackedM31 = preprocessed.acceptable[0].values.data[vec_row];
             let mult_val: PackedM31 = witness_data.table_mult_trace[0].values.data[vec_row];
             col_gen.write_frac(
                 vec_row,

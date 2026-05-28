@@ -27,7 +27,7 @@ pub(super) fn components(
     let table_component = NatTableComponent::new(
         &mut allocator,
         NatTableEval {
-            acceptable: public.acceptable.clone(),
+            public: public.clone(),
             lookup_elements,
         },
         table_claimed_sum,
