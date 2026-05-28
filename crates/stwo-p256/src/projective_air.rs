@@ -47,9 +47,8 @@ pub const PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS: usize = raw_product_chunk_count();
 pub const PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERM_TRACE_COLUMNS: usize = 2;
 pub const PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERMS: usize = 4;
 pub const PROJECTIVE_RCB_FOLDED_CONTRIBUTION_ROWS: usize = folded_contribution_row_count_const();
-pub const PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERM_TRACE_COLUMNS: usize = 6;
-pub const PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TRACE_COLUMNS: usize = 1
-    + 4
+pub const PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERM_TRACE_COLUMNS: usize = 1;
+pub const PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TRACE_COLUMNS: usize = 2
     + PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERMS
         * PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERM_TRACE_COLUMNS
     + 1;
@@ -132,6 +131,48 @@ pub struct ProjectiveRcbRawProductChunkScheduleColumn {
     pub values: Vec<M31>,
 }
 
+pub struct ProjectiveRcbFoldedContributionScheduleColumnIds;
+
+impl ProjectiveRcbFoldedContributionScheduleColumnIds {
+    pub fn active() -> PreProcessedColumnId {
+        folded_contribution_schedule_id("active")
+    }
+
+    pub fn digit_index() -> PreProcessedColumnId {
+        folded_contribution_schedule_id("digit_index")
+    }
+
+    pub fn group_index() -> PreProcessedColumnId {
+        folded_contribution_schedule_id("group_index")
+    }
+
+    pub fn term_active(term: usize) -> PreProcessedColumnId {
+        folded_contribution_schedule_id(format!("term_active_{term}"))
+    }
+
+    pub fn raw_coeff(term: usize) -> PreProcessedColumnId {
+        folded_contribution_schedule_id(format!("raw_coeff_{term}"))
+    }
+
+    pub fn raw_chunk(term: usize) -> PreProcessedColumnId {
+        folded_contribution_schedule_id(format!("raw_chunk_{term}"))
+    }
+
+    pub fn raw_offset(term: usize) -> PreProcessedColumnId {
+        folded_contribution_schedule_id(format!("raw_offset_{term}"))
+    }
+
+    pub fn matrix_coeff(term: usize) -> PreProcessedColumnId {
+        folded_contribution_schedule_id(format!("matrix_coeff_{term}"))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectiveRcbFoldedContributionScheduleColumn {
+    pub id: PreProcessedColumnId,
+    pub values: Vec<M31>,
+}
+
 #[derive(Clone)]
 pub struct ProjectiveRcbMulEval {
     pub log_size: u32,
@@ -197,7 +238,6 @@ impl FrameworkEval for ProjectiveRcbFoldedContributionEval {
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         let columns = ProjectiveRcbFoldedContributionColumns::read(&mut eval);
 
-        eval.add_constraint(columns.active.clone() * (one::<E>() - columns.active.clone()));
         add_projective_rcb_folded_contribution(&mut eval, self.relations.as_refs(), &columns);
         eval.finalize_logup_in_pairs();
         eval
@@ -572,17 +612,34 @@ pub struct ProjectiveRcbFoldedContributionColumns<E: EvalAtRow> {
 impl<E: EvalAtRow> ProjectiveRcbFoldedContributionColumns<E> {
     fn read(eval: &mut E) -> Self {
         Self {
-            active: eval.next_trace_mask(),
+            active:
+                eval.get_preprocessed_column(
+                    ProjectiveRcbFoldedContributionScheduleColumnIds::active(),
+                ),
             source_index: eval.next_trace_mask(),
             mul_index: eval.next_trace_mask(),
-            digit_index: eval.next_trace_mask(),
-            group_index: eval.next_trace_mask(),
-            terms: core::array::from_fn(|_| ProjectiveRcbFoldedContributionTermColumns {
-                term_active: eval.next_trace_mask(),
-                raw_coeff: eval.next_trace_mask(),
-                raw_chunk: eval.next_trace_mask(),
-                raw_offset: eval.next_trace_mask(),
-                matrix_coeff: eval.next_trace_mask(),
+            digit_index: eval.get_preprocessed_column(
+                ProjectiveRcbFoldedContributionScheduleColumnIds::digit_index(),
+            ),
+            group_index: eval.get_preprocessed_column(
+                ProjectiveRcbFoldedContributionScheduleColumnIds::group_index(),
+            ),
+            terms: core::array::from_fn(|term| ProjectiveRcbFoldedContributionTermColumns {
+                term_active: eval.get_preprocessed_column(
+                    ProjectiveRcbFoldedContributionScheduleColumnIds::term_active(term),
+                ),
+                raw_coeff: eval.get_preprocessed_column(
+                    ProjectiveRcbFoldedContributionScheduleColumnIds::raw_coeff(term),
+                ),
+                raw_chunk: eval.get_preprocessed_column(
+                    ProjectiveRcbFoldedContributionScheduleColumnIds::raw_chunk(term),
+                ),
+                raw_offset: eval.get_preprocessed_column(
+                    ProjectiveRcbFoldedContributionScheduleColumnIds::raw_offset(term),
+                ),
+                matrix_coeff: eval.get_preprocessed_column(
+                    ProjectiveRcbFoldedContributionScheduleColumnIds::matrix_coeff(term),
+                ),
                 raw_digit: eval.next_trace_mask(),
             }),
             contribution_sum: eval.next_trace_mask(),
@@ -642,11 +699,6 @@ pub fn add_projective_rcb_folded_contribution<E: EvalAtRow>(
 ) {
     let mut sum = zero::<E>();
     for term in &columns.terms {
-        eval.add_constraint(
-            columns.active.clone()
-                * term.term_active.clone()
-                * (one::<E>() - term.term_active.clone()),
-        );
         sum += term.term_active.clone() * term.matrix_coeff.clone() * term.raw_digit.clone();
         constrain_unused(
             eval,
@@ -980,6 +1032,102 @@ pub fn projective_rcb_raw_product_chunk_schedule_evals() -> Vec<M31ColumnEval> {
         .map(|column| {
             m31_column_eval(
                 padded_log_size(PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS),
+                column.values,
+            )
+        })
+        .collect()
+}
+
+pub fn projective_rcb_folded_contribution_schedule_columns(
+) -> Vec<ProjectiveRcbFoldedContributionScheduleColumn> {
+    let padded_rows = 1usize << padded_log_size(PROJECTIVE_RCB_FOLDED_CONTRIBUTION_ROWS);
+    let mut active = vec![m31(0); padded_rows];
+    let mut digit_index = vec![m31(0); padded_rows];
+    let mut group_index = vec![m31(0); padded_rows];
+    let mut term_active = vec![vec![m31(0); padded_rows]; PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERMS];
+    let mut raw_coeff = vec![vec![m31(0); padded_rows]; PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERMS];
+    let mut raw_chunk = vec![vec![m31(0); padded_rows]; PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERMS];
+    let mut raw_offset = vec![vec![m31(0); padded_rows]; PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERMS];
+    let mut matrix_coeff =
+        vec![vec![m31(0); padded_rows]; PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERMS];
+
+    let terms = folded_contribution_schedule_terms();
+    let mut row = 0usize;
+    for row_digit_index in 0..FP_SOLINAS_REDUCTION_DIGITS {
+        let digit_terms = terms
+            .iter()
+            .copied()
+            .filter(|term| term.digit_index == row_digit_index)
+            .collect::<Vec<_>>();
+        for (row_group_index, chunk) in digit_terms
+            .chunks(PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERMS)
+            .enumerate()
+        {
+            active[row] = m31(1);
+            digit_index[row] = m31_usize(row_digit_index);
+            group_index[row] = m31_usize(row_group_index);
+            for (term_index, term) in chunk.iter().copied().enumerate() {
+                term_active[term_index][row] = m31(1);
+                raw_coeff[term_index][row] = m31_usize(term.raw_coeff);
+                raw_chunk[term_index][row] = m31_usize(term.raw_chunk);
+                raw_offset[term_index][row] = m31_usize(term.raw_offset);
+                matrix_coeff[term_index][row] = m31_i128(i128::from(term.matrix_coeff));
+            }
+            row += 1;
+        }
+        if digit_terms.is_empty() {
+            active[row] = m31(1);
+            digit_index[row] = m31_usize(row_digit_index);
+            row += 1;
+        }
+    }
+    debug_assert_eq!(row, PROJECTIVE_RCB_FOLDED_CONTRIBUTION_ROWS);
+
+    let mut columns = vec![
+        folded_contribution_schedule_column(
+            ProjectiveRcbFoldedContributionScheduleColumnIds::active(),
+            active,
+        ),
+        folded_contribution_schedule_column(
+            ProjectiveRcbFoldedContributionScheduleColumnIds::digit_index(),
+            digit_index,
+        ),
+        folded_contribution_schedule_column(
+            ProjectiveRcbFoldedContributionScheduleColumnIds::group_index(),
+            group_index,
+        ),
+    ];
+    for term in 0..PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERMS {
+        columns.push(folded_contribution_schedule_column(
+            ProjectiveRcbFoldedContributionScheduleColumnIds::term_active(term),
+            term_active[term].clone(),
+        ));
+        columns.push(folded_contribution_schedule_column(
+            ProjectiveRcbFoldedContributionScheduleColumnIds::raw_coeff(term),
+            raw_coeff[term].clone(),
+        ));
+        columns.push(folded_contribution_schedule_column(
+            ProjectiveRcbFoldedContributionScheduleColumnIds::raw_chunk(term),
+            raw_chunk[term].clone(),
+        ));
+        columns.push(folded_contribution_schedule_column(
+            ProjectiveRcbFoldedContributionScheduleColumnIds::raw_offset(term),
+            raw_offset[term].clone(),
+        ));
+        columns.push(folded_contribution_schedule_column(
+            ProjectiveRcbFoldedContributionScheduleColumnIds::matrix_coeff(term),
+            matrix_coeff[term].clone(),
+        ));
+    }
+    columns
+}
+
+pub fn projective_rcb_folded_contribution_schedule_evals() -> Vec<M31ColumnEval> {
+    projective_rcb_folded_contribution_schedule_columns()
+        .into_iter()
+        .map(|column| {
+            m31_column_eval(
+                padded_log_size(PROJECTIVE_RCB_FOLDED_CONTRIBUTION_ROWS),
                 column.values,
             )
         })
@@ -2187,11 +2335,24 @@ fn raw_product_chunk_schedule_id(name: impl Into<String>) -> PreProcessedColumnI
     }
 }
 
+fn folded_contribution_schedule_id(name: impl Into<String>) -> PreProcessedColumnId {
+    PreProcessedColumnId {
+        id: format!("p256_projective_rcb_folded_contribution_{}", name.into()),
+    }
+}
+
 fn raw_product_chunk_schedule_column(
     id: PreProcessedColumnId,
     values: Vec<M31>,
 ) -> ProjectiveRcbRawProductChunkScheduleColumn {
     ProjectiveRcbRawProductChunkScheduleColumn { id, values }
+}
+
+fn folded_contribution_schedule_column(
+    id: PreProcessedColumnId,
+    values: Vec<M31>,
+) -> ProjectiveRcbFoldedContributionScheduleColumn {
+    ProjectiveRcbFoldedContributionScheduleColumn { id, values }
 }
 
 const fn raw_product_chunk_count() -> usize {
@@ -2494,6 +2655,51 @@ fn folded_contribution_terms(
         }
     }
     Ok(terms)
+}
+
+fn folded_contribution_schedule_terms() -> Vec<ProjectiveRcbFoldedContributionTermRow> {
+    let mut terms = Vec::new();
+    for coeff in 0..FP_SOLINAS_RAW_LIMBS {
+        for chunk in 0..coefficient_chunk_count(coeff) {
+            for raw_offset in 0..PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS {
+                if coeff < N_LIMBS {
+                    let digit_index = coeff + raw_offset;
+                    if digit_index < FP_SOLINAS_REDUCTION_DIGITS {
+                        terms.push(ProjectiveRcbFoldedContributionTermRow {
+                            active: true,
+                            digit_index,
+                            raw_coeff: coeff,
+                            raw_chunk: chunk,
+                            raw_offset,
+                            matrix_coeff: 1,
+                            raw_digit: 0,
+                        });
+                    }
+                } else {
+                    let high = coeff - N_LIMBS;
+                    for low in 0..N_LIMBS {
+                        let matrix_coeff = REDUCTION_MATRIX[high][low];
+                        if matrix_coeff == 0 {
+                            continue;
+                        }
+                        let digit_index = low + raw_offset;
+                        if digit_index < FP_SOLINAS_REDUCTION_DIGITS {
+                            terms.push(ProjectiveRcbFoldedContributionTermRow {
+                                active: true,
+                                digit_index,
+                                raw_coeff: coeff,
+                                raw_chunk: chunk,
+                                raw_offset,
+                                matrix_coeff,
+                                raw_digit: 0,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    terms
 }
 
 fn fold_raw_coefficients(raw: &[i128; FP_SOLINAS_RAW_LIMBS]) -> [i128; N_LIMBS] {
@@ -3041,6 +3247,26 @@ mod tests {
     }
 
     #[test]
+    fn projective_rcb_air_rows_detect_mutated_folded_contribution_schedule_metadata() {
+        let trace = one_row_trace(ProjectiveEcOp::Double, PreparedAffinePoint::infinity());
+        let mut claim =
+            ProjectiveRcbAirTraceClaim::from_projective_trace(&trace).expect("valid RCB AIR trace");
+        claim.rows[0].muls[0].folded_contributions.rows[0].terms[0].matrix_coeff += 1;
+
+        let err = claim
+            .verify_against_projective_trace(&trace)
+            .expect_err("mutated folded contribution schedule metadata must fail");
+
+        assert!(matches!(
+            err,
+            ProjectiveRcbAirError::FoldedContributionMismatch
+                | ProjectiveRcbAirError::FoldedContributionSumMismatch { .. }
+                | ProjectiveRcbAirError::FoldedDigitMismatch
+                | ProjectiveRcbAirError::FoldedDigitEquationMismatch { .. }
+        ));
+    }
+
+    #[test]
     fn projective_rcb_air_rows_detect_mutated_projective_output() {
         let trace = one_row_trace(ProjectiveEcOp::Double, PreparedAffinePoint::infinity());
         let mut claim =
@@ -3166,14 +3392,17 @@ mod tests {
             SecureField::zero(),
         );
 
-        assert_eq!(
-            PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TRACE_COLUMNS,
-            1 + 4 + 4 * 6 + 1
-        );
+        assert_eq!(PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TRACE_COLUMNS, 2 + 4 + 1);
         assert_eq!(
             component.trace_log_degree_bounds()[1].len(),
             PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TRACE_COLUMNS
         );
+        assert!(allocator
+            .preprocessed_columns()
+            .contains(&ProjectiveRcbFoldedContributionScheduleColumnIds::active()));
+        assert!(allocator
+            .preprocessed_columns()
+            .contains(&ProjectiveRcbFoldedContributionScheduleColumnIds::matrix_coeff(3)));
         assert_eq!(PROJECTIVE_RCB_FOLDED_CONTRIBUTION_RELATION_ARITY, 5);
         assert!(projective_rcb_folded_contribution_fits_m31());
         assert_eq!(
@@ -3183,6 +3412,68 @@ mod tests {
             }
             .max_constraint_log_degree_bound(),
             12
+        );
+    }
+
+    #[test]
+    fn projective_rcb_folded_contribution_schedule_columns_match_fixed_rows() {
+        let columns = projective_rcb_folded_contribution_schedule_columns();
+        let log_size = padded_log_size(PROJECTIVE_RCB_FOLDED_CONTRIBUTION_ROWS);
+        let row_count = 1usize << log_size;
+        let trace = one_row_trace(ProjectiveEcOp::Double, PreparedAffinePoint::infinity());
+        let claim =
+            ProjectiveRcbAirTraceClaim::from_projective_trace(&trace).expect("valid RCB AIR trace");
+        let fixed_rows = &claim.rows[0].muls[0].folded_contributions.rows;
+
+        assert_eq!(
+            columns.len(),
+            3 + 5 * PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERMS
+        );
+        assert!(columns
+            .iter()
+            .all(|column| column.values.len() == row_count));
+        assert_eq!(
+            columns[0].values[..PROJECTIVE_RCB_FOLDED_CONTRIBUTION_ROWS]
+                .iter()
+                .filter(|&&value| value == m31(1))
+                .count(),
+            PROJECTIVE_RCB_FOLDED_CONTRIBUTION_ROWS
+        );
+        assert_eq!(columns[1].values[0], m31(0));
+        assert_eq!(columns[2].values[0], m31(0));
+        assert_eq!(
+            columns[1].values[PROJECTIVE_RCB_FOLDED_CONTRIBUTION_ROWS - 1],
+            m31_usize(FP_SOLINAS_REDUCTION_DIGITS - 1)
+        );
+        assert_eq!(fixed_rows.len(), PROJECTIVE_RCB_FOLDED_CONTRIBUTION_ROWS);
+        for (row_index, row) in fixed_rows.iter().enumerate() {
+            assert_eq!(columns[0].values[row_index], m31(1));
+            assert_eq!(columns[1].values[row_index], m31_usize(row.digit_index));
+            assert_eq!(columns[2].values[row_index], m31_usize(row.group_index));
+            for (term_index, term) in row.terms.iter().enumerate() {
+                let base = 3 + 5 * term_index;
+                assert_eq!(columns[base].values[row_index], m31(u32::from(term.active)));
+                assert_eq!(
+                    columns[base + 1].values[row_index],
+                    m31_usize(term.raw_coeff)
+                );
+                assert_eq!(
+                    columns[base + 2].values[row_index],
+                    m31_usize(term.raw_chunk)
+                );
+                assert_eq!(
+                    columns[base + 3].values[row_index],
+                    m31_usize(term.raw_offset)
+                );
+                assert_eq!(
+                    columns[base + 4].values[row_index],
+                    m31_i128(i128::from(term.matrix_coeff))
+                );
+            }
+        }
+        assert_eq!(
+            projective_rcb_folded_contribution_schedule_evals().len(),
+            columns.len()
         );
     }
 
