@@ -29,11 +29,13 @@ pub type ProjectiveRcbRawProductChunkComponent =
     FrameworkComponent<ProjectiveRcbRawProductChunkEval>;
 pub type ProjectiveRcbFoldedContributionComponent =
     FrameworkComponent<ProjectiveRcbFoldedContributionEval>;
+pub type ProjectiveRcbFoldedDigitComponent = FrameworkComponent<ProjectiveRcbFoldedDigitEval>;
 
 pub const PROJECTIVE_RCB_MUL_LIMB_RELATION_ARITY: usize = 5;
 pub const PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGIT_RELATION_ARITY: usize = 6;
 pub const PROJECTIVE_RCB_FOLDED_CONTRIBUTION_RELATION_ARITY: usize = 5;
 pub const PROJECTIVE_RCB_FOLDED_DIGIT_RELATION_ARITY: usize = 4;
+pub const PROJECTIVE_RCB_FOLDED_CARRY_RELATION_ARITY: usize = 4;
 pub const PROJECTIVE_RCB_MUL_ROLE_LHS: u32 = 0;
 pub const PROJECTIVE_RCB_MUL_ROLE_RHS: u32 = 1;
 pub const PROJECTIVE_RCB_MUL_ROLE_RESULT: u32 = 2;
@@ -49,6 +51,13 @@ pub const PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TRACE_COLUMNS: usize = 1
     + PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERMS
         * PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERM_TRACE_COLUMNS
     + 1;
+pub const PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS: usize =
+    folded_contribution_max_groups_per_digit_const();
+pub const PROJECTIVE_RCB_FOLDED_DIGIT_GROUP_TRACE_COLUMNS: usize = 3;
+pub const PROJECTIVE_RCB_FOLDED_DIGIT_TRACE_COLUMNS: usize = 1
+    + 3
+    + PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS * PROJECTIVE_RCB_FOLDED_DIGIT_GROUP_TRACE_COLUMNS
+    + 3;
 pub const PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TRACE_COLUMNS: usize = 1
     + 2
     + 2
@@ -79,6 +88,10 @@ relation!(
 relation!(
     ProjectiveRcbFoldedDigitRelation,
     PROJECTIVE_RCB_FOLDED_DIGIT_RELATION_ARITY
+);
+relation!(
+    ProjectiveRcbFoldedCarryRelation,
+    PROJECTIVE_RCB_FOLDED_CARRY_RELATION_ARITY
 );
 
 #[derive(Clone)]
@@ -128,6 +141,12 @@ pub struct ProjectiveRcbFoldedContributionEval {
     pub relations: ProjectiveRcbMulComponentRelations,
 }
 
+#[derive(Clone)]
+pub struct ProjectiveRcbFoldedDigitEval {
+    pub log_size: u32,
+    pub relations: ProjectiveRcbMulComponentRelations,
+}
+
 impl FrameworkEval for ProjectiveRcbFoldedContributionEval {
     fn log_size(&self) -> u32 {
         self.log_size
@@ -142,6 +161,25 @@ impl FrameworkEval for ProjectiveRcbFoldedContributionEval {
 
         eval.add_constraint(columns.active.clone() * (one::<E>() - columns.active.clone()));
         add_projective_rcb_folded_contribution(&mut eval, self.relations.as_refs(), &columns);
+        eval.finalize_logup_in_pairs();
+        eval
+    }
+}
+
+impl FrameworkEval for ProjectiveRcbFoldedDigitEval {
+    fn log_size(&self) -> u32 {
+        self.log_size
+    }
+
+    fn max_constraint_log_degree_bound(&self) -> u32 {
+        self.log_size + 2
+    }
+
+    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+        let columns = ProjectiveRcbFoldedDigitColumns::read(&mut eval);
+
+        eval.add_constraint(columns.active.clone() * (one::<E>() - columns.active.clone()));
+        add_projective_rcb_folded_digit(&mut eval, self.relations.as_refs(), &columns);
         eval.finalize_logup_in_pairs();
         eval
     }
@@ -174,6 +212,7 @@ pub struct ProjectiveRcbMulComponentRelations {
     pub raw_product_chunk_digit: ProjectiveRcbRawProductChunkDigitRelation,
     pub folded_contribution: ProjectiveRcbFoldedContributionRelation,
     pub folded_digit: ProjectiveRcbFoldedDigitRelation,
+    pub folded_carry: ProjectiveRcbFoldedCarryRelation,
 }
 
 impl ProjectiveRcbMulComponentRelations {
@@ -185,6 +224,7 @@ impl ProjectiveRcbMulComponentRelations {
             raw_product_chunk_digit: ProjectiveRcbRawProductChunkDigitRelation::dummy(),
             folded_contribution: ProjectiveRcbFoldedContributionRelation::dummy(),
             folded_digit: ProjectiveRcbFoldedDigitRelation::dummy(),
+            folded_carry: ProjectiveRcbFoldedCarryRelation::dummy(),
         }
     }
 
@@ -196,6 +236,7 @@ impl ProjectiveRcbMulComponentRelations {
             raw_product_chunk_digit: &self.raw_product_chunk_digit,
             folded_contribution: &self.folded_contribution,
             folded_digit: &self.folded_digit,
+            folded_carry: &self.folded_carry,
         }
     }
 }
@@ -208,6 +249,7 @@ pub struct ProjectiveRcbMulRelations<'a> {
     pub raw_product_chunk_digit: &'a ProjectiveRcbRawProductChunkDigitRelation,
     pub folded_contribution: &'a ProjectiveRcbFoldedContributionRelation,
     pub folded_digit: &'a ProjectiveRcbFoldedDigitRelation,
+    pub folded_carry: &'a ProjectiveRcbFoldedCarryRelation,
 }
 
 pub struct ProjectiveRcbMulColumns<E: EvalAtRow> {
@@ -291,6 +333,26 @@ pub fn add_projective_rcb_mul_row<E: EvalAtRow>(
             ],
         ));
     }
+    eval.add_to_relation(RelationEntry::new(
+        relations.folded_carry,
+        -E::EF::from(gate.clone()),
+        &[
+            source_index.clone(),
+            mul_index.clone(),
+            constant(0),
+            zero::<E>(),
+        ],
+    ));
+    eval.add_to_relation(RelationEntry::new(
+        relations.folded_carry,
+        E::EF::from(gate.clone()),
+        &[
+            source_index.clone(),
+            mul_index.clone(),
+            constant(FP_SOLINAS_REDUCTION_DIGITS as u32),
+            columns.folded_final_carry.clone(),
+        ],
+    ));
 
     eval.add_constraint(gate.clone() * columns.reduction[0].prev_carry.clone());
     for digit_index in 1..FP_SOLINAS_REDUCTION_DIGITS {
@@ -481,6 +543,42 @@ pub struct ProjectiveRcbFoldedContributionTermColumns<E: EvalAtRow> {
     pub raw_digit: E::F,
 }
 
+pub struct ProjectiveRcbFoldedDigitColumns<E: EvalAtRow> {
+    pub active: E::F,
+    pub source_index: E::F,
+    pub mul_index: E::F,
+    pub digit_index: E::F,
+    pub groups: [ProjectiveRcbFoldedDigitGroupColumns<E>; PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS],
+    pub prev_carry: E::F,
+    pub folded_digit: E::F,
+    pub carry: E::F,
+}
+
+impl<E: EvalAtRow> ProjectiveRcbFoldedDigitColumns<E> {
+    fn read(eval: &mut E) -> Self {
+        Self {
+            active: eval.next_trace_mask(),
+            source_index: eval.next_trace_mask(),
+            mul_index: eval.next_trace_mask(),
+            digit_index: eval.next_trace_mask(),
+            groups: core::array::from_fn(|_| ProjectiveRcbFoldedDigitGroupColumns {
+                group_active: eval.next_trace_mask(),
+                group_index: eval.next_trace_mask(),
+                contribution_sum: eval.next_trace_mask(),
+            }),
+            prev_carry: eval.next_trace_mask(),
+            folded_digit: eval.next_trace_mask(),
+            carry: eval.next_trace_mask(),
+        }
+    }
+}
+
+pub struct ProjectiveRcbFoldedDigitGroupColumns<E: EvalAtRow> {
+    pub group_active: E::F,
+    pub group_index: E::F,
+    pub contribution_sum: E::F,
+}
+
 pub fn add_projective_rcb_folded_contribution<E: EvalAtRow>(
     eval: &mut E,
     relations: ProjectiveRcbMulRelations<'_>,
@@ -533,6 +631,103 @@ pub fn add_projective_rcb_folded_contribution<E: EvalAtRow>(
     ));
 }
 
+pub fn add_projective_rcb_folded_digit<E: EvalAtRow>(
+    eval: &mut E,
+    relations: ProjectiveRcbMulRelations<'_>,
+    columns: &ProjectiveRcbFoldedDigitColumns<E>,
+) {
+    let mut contribution_sum = zero::<E>();
+    for group in &columns.groups {
+        eval.add_constraint(
+            columns.active.clone()
+                * group.group_active.clone()
+                * (one::<E>() - group.group_active.clone()),
+        );
+        contribution_sum += group.group_active.clone() * group.contribution_sum.clone();
+        constrain_unused(
+            eval,
+            columns.active.clone(),
+            group.group_active.clone(),
+            group.group_index.clone(),
+        );
+        constrain_unused(
+            eval,
+            columns.active.clone(),
+            group.group_active.clone(),
+            group.contribution_sum.clone(),
+        );
+        eval.add_to_relation(RelationEntry::new(
+            relations.folded_contribution,
+            E::EF::from(columns.active.clone() * group.group_active.clone()),
+            &[
+                columns.source_index.clone(),
+                columns.mul_index.clone(),
+                columns.digit_index.clone(),
+                group.group_index.clone(),
+                group.contribution_sum.clone(),
+            ],
+        ));
+    }
+
+    add_range_check(
+        eval,
+        relations.range13,
+        columns.active.clone(),
+        columns.folded_digit.clone(),
+    );
+    add_range_check(
+        eval,
+        relations.signed_carry,
+        columns.active.clone(),
+        columns.prev_carry.clone(),
+    );
+    add_range_check(
+        eval,
+        relations.signed_carry,
+        columns.active.clone(),
+        columns.carry.clone(),
+    );
+
+    let limb_base = E::F::from(M31::from_u32_unchecked(1u32 << LIMB_BITS));
+    eval.add_constraint(
+        columns.active.clone()
+            * (contribution_sum + columns.prev_carry.clone()
+                - columns.folded_digit.clone()
+                - limb_base * columns.carry.clone()),
+    );
+
+    eval.add_to_relation(RelationEntry::new(
+        relations.folded_carry,
+        E::EF::from(columns.active.clone()),
+        &[
+            columns.source_index.clone(),
+            columns.mul_index.clone(),
+            columns.digit_index.clone(),
+            columns.prev_carry.clone(),
+        ],
+    ));
+    eval.add_to_relation(RelationEntry::new(
+        relations.folded_carry,
+        -E::EF::from(columns.active.clone()),
+        &[
+            columns.source_index.clone(),
+            columns.mul_index.clone(),
+            columns.digit_index.clone() + one::<E>(),
+            columns.carry.clone(),
+        ],
+    ));
+    eval.add_to_relation(RelationEntry::new(
+        relations.folded_digit,
+        -E::EF::from(columns.active.clone()),
+        &[
+            columns.source_index.clone(),
+            columns.mul_index.clone(),
+            columns.digit_index.clone(),
+            columns.folded_digit.clone(),
+        ],
+    ));
+}
+
 pub const fn projective_rcb_raw_product_chunk_max_abs_expr() -> i128 {
     let product_sum =
         PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS as i128 * (FP_SOLINAS_LIMB_BASE - 1).pow(2);
@@ -555,6 +750,14 @@ pub const fn projective_rcb_folded_contribution_max_abs_expr() -> i128 {
 
 pub fn projective_rcb_folded_contribution_fits_m31() -> bool {
     projective_rcb_folded_contribution_max_abs_expr() < M31_CENTERED_BOUND
+}
+
+pub const fn projective_rcb_folded_digit_max_abs_contribution_sum() -> i128 {
+    folded_contribution_max_abs_digit_sum_const()
+}
+
+pub fn projective_rcb_folded_digit_contribution_sum_fits_m31() -> bool {
+    projective_rcb_folded_digit_max_abs_contribution_sum() < M31_CENTERED_BOUND
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -831,20 +1034,41 @@ impl ProjectiveRcbFoldedContributionTraceClaim {
         }
     }
 
-    fn digit_sums(&self) -> Result<[i128; FP_SOLINAS_REDUCTION_DIGITS], ProjectiveRcbAirError> {
-        let mut sums = [0i128; FP_SOLINAS_REDUCTION_DIGITS];
-        for row in &self.rows {
-            row.verify()?;
-            sums[row.digit_index] += row.contribution_sum;
-        }
-        Ok(sums)
-    }
-
     fn verify_rows(&self) -> Result<(), ProjectiveRcbAirError> {
         for row in &self.rows {
             row.verify()?;
         }
         Ok(())
+    }
+
+    fn digit_groups(
+        &self,
+        digit_index: usize,
+    ) -> Result<
+        [ProjectiveRcbFoldedDigitContributionGroup; PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS],
+        ProjectiveRcbAirError,
+    > {
+        let mut groups = [ProjectiveRcbFoldedDigitContributionGroup::inactive();
+            PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS];
+        for (count, row) in self
+            .rows
+            .iter()
+            .filter(|row| row.digit_index == digit_index)
+            .enumerate()
+        {
+            row.verify()?;
+            if count >= PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS {
+                return Err(
+                    ProjectiveRcbAirError::FoldedDigitContributionGroupOverflow { digit_index },
+                );
+            }
+            groups[count] = ProjectiveRcbFoldedDigitContributionGroup {
+                active: true,
+                group_index: row.group_index,
+                contribution_sum: row.contribution_sum,
+            };
+        }
+        Ok(groups)
     }
 }
 
@@ -930,11 +1154,15 @@ impl ProjectiveRcbFoldedDigitTraceClaim {
         if folded_coefficients != trace.folded_coefficients {
             return Err(ProjectiveRcbAirError::FoldedCoefficientMismatch);
         }
-        let digit_contributions = folded_contributions.digit_sums()?;
-
         let mut rows = Vec::with_capacity(FP_SOLINAS_REDUCTION_DIGITS);
         let mut carry = 0i128;
-        for (digit_index, folded_coefficient) in digit_contributions.iter().copied().enumerate() {
+        for digit_index in 0..FP_SOLINAS_REDUCTION_DIGITS {
+            let contribution_groups = folded_contributions.digit_groups(digit_index)?;
+            let folded_coefficient = contribution_groups
+                .iter()
+                .filter(|group| group.active)
+                .map(|group| group.contribution_sum)
+                .sum::<i128>();
             let total = folded_coefficient + carry;
             let folded_digit = total.rem_euclid(FP_SOLINAS_LIMB_BASE);
             let next_carry = total.div_euclid(FP_SOLINAS_LIMB_BASE);
@@ -942,6 +1170,7 @@ impl ProjectiveRcbFoldedDigitTraceClaim {
                 source_index,
                 mul_index,
                 digit_index,
+                contribution_groups,
                 folded_coefficient,
                 folded_digit: folded_digit as u32,
                 prev_carry: carry,
@@ -1005,6 +1234,17 @@ impl ProjectiveRcbFoldedDigitTraceClaim {
                     digit_index: row.digit_index,
                 });
             }
+            let contribution_sum = row
+                .contribution_groups
+                .iter()
+                .filter(|group| group.active)
+                .map(|group| group.contribution_sum)
+                .sum::<i128>();
+            if contribution_sum != row.folded_coefficient {
+                return Err(ProjectiveRcbAirError::FoldedDigitContributionSumMismatch {
+                    digit_index: row.digit_index,
+                });
+            }
             let total = row.folded_coefficient + row.prev_carry
                 - i128::from(row.folded_digit)
                 - FP_SOLINAS_LIMB_BASE * row.carry;
@@ -1060,10 +1300,29 @@ pub struct ProjectiveRcbFoldedDigitRow {
     pub source_index: usize,
     pub mul_index: usize,
     pub digit_index: usize,
+    pub contribution_groups:
+        [ProjectiveRcbFoldedDigitContributionGroup; PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS],
     pub folded_coefficient: i128,
     pub folded_digit: u32,
     pub prev_carry: i128,
     pub carry: i128,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProjectiveRcbFoldedDigitContributionGroup {
+    pub active: bool,
+    pub group_index: usize,
+    pub contribution_sum: i128,
+}
+
+impl ProjectiveRcbFoldedDigitContributionGroup {
+    const fn inactive() -> Self {
+        Self {
+            active: false,
+            group_index: 0,
+            contribution_sum: 0,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1339,6 +1598,12 @@ pub enum ProjectiveRcbAirError {
         digit_index: usize,
         value: i128,
     },
+    FoldedDigitContributionGroupOverflow {
+        digit_index: usize,
+    },
+    FoldedDigitContributionSumMismatch {
+        digit_index: usize,
+    },
     FoldedCoefficientMismatch,
     FoldedDigitMismatch,
     FoldedFinalCarryOutOfRange {
@@ -1460,6 +1725,24 @@ const fn folded_contribution_row_count_const() -> usize {
     rows
 }
 
+const fn folded_contribution_max_groups_per_digit_const() -> usize {
+    let mut digit_index = 0usize;
+    let mut max_groups = 0usize;
+    while digit_index < FP_SOLINAS_REDUCTION_DIGITS {
+        let terms = folded_contribution_term_count_for_digit_const(digit_index);
+        let groups = if terms == 0 {
+            1
+        } else {
+            terms.div_ceil(PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERMS)
+        };
+        if groups > max_groups {
+            max_groups = groups;
+        }
+        digit_index += 1;
+    }
+    max_groups
+}
+
 const fn folded_contribution_term_count_for_digit_const(digit_index: usize) -> usize {
     let mut coeff = 0usize;
     let mut count = 0usize;
@@ -1490,6 +1773,60 @@ const fn folded_contribution_term_count_for_digit_const(digit_index: usize) -> u
         coeff += 1;
     }
     count
+}
+
+const fn folded_contribution_max_abs_digit_sum_const() -> i128 {
+    let mut digit_index = 0usize;
+    let mut max_abs_sum = 0i128;
+    while digit_index < FP_SOLINAS_REDUCTION_DIGITS {
+        let digit_sum = folded_contribution_abs_digit_sum_const(digit_index);
+        if digit_sum > max_abs_sum {
+            max_abs_sum = digit_sum;
+        }
+        digit_index += 1;
+    }
+    max_abs_sum
+}
+
+const fn folded_contribution_abs_digit_sum_const(digit_index: usize) -> i128 {
+    let mut coeff = 0usize;
+    let mut sum = 0i128;
+    while coeff < FP_SOLINAS_RAW_LIMBS {
+        let chunks = coefficient_chunk_count_const(coeff);
+        let mut chunk = 0usize;
+        while chunk < chunks {
+            let mut raw_offset = 0usize;
+            while raw_offset < PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS {
+                if coeff < N_LIMBS {
+                    if coeff + raw_offset == digit_index {
+                        sum += FP_SOLINAS_LIMB_BASE - 1;
+                    }
+                } else {
+                    let high = coeff - N_LIMBS;
+                    let mut low = 0usize;
+                    while low < N_LIMBS {
+                        let matrix_coeff = REDUCTION_MATRIX[high][low];
+                        if low + raw_offset == digit_index && matrix_coeff != 0 {
+                            sum += abs_i64(matrix_coeff) as i128 * (FP_SOLINAS_LIMB_BASE - 1);
+                        }
+                        low += 1;
+                    }
+                }
+                raw_offset += 1;
+            }
+            chunk += 1;
+        }
+        coeff += 1;
+    }
+    sum
+}
+
+const fn abs_i64(value: i64) -> i64 {
+    if value < 0 {
+        -value
+    } else {
+        value
+    }
 }
 
 const fn coefficient_chunk_count_const(coeff: usize) -> usize {
@@ -2120,6 +2457,24 @@ mod tests {
     }
 
     #[test]
+    fn projective_rcb_air_rows_detect_mutated_folded_digit_contribution_group() {
+        let trace = one_row_trace(ProjectiveEcOp::Double, PreparedAffinePoint::infinity());
+        let mut claim =
+            ProjectiveRcbAirTraceClaim::from_projective_trace(&trace).expect("valid RCB AIR trace");
+        claim.rows[0].muls[0].folded_digits.rows[0].contribution_groups[0].contribution_sum += 1;
+
+        let err = claim
+            .verify_against_projective_trace(&trace)
+            .expect_err("mutated folded digit contribution group must fail");
+
+        assert!(matches!(
+            err,
+            ProjectiveRcbAirError::FoldedDigitContributionSumMismatch { .. }
+                | ProjectiveRcbAirError::FoldedDigitMismatch
+        ));
+    }
+
+    #[test]
     fn projective_rcb_air_rows_detect_mutated_folded_contribution() {
         let trace = one_row_trace(ProjectiveEcOp::Double, PreparedAffinePoint::infinity());
         let mut claim =
@@ -2179,6 +2534,7 @@ mod tests {
         );
         assert_eq!(PROJECTIVE_RCB_MUL_LIMB_RELATION_ARITY, 5);
         assert_eq!(PROJECTIVE_RCB_FOLDED_DIGIT_RELATION_ARITY, 4);
+        assert_eq!(PROJECTIVE_RCB_FOLDED_CARRY_RELATION_ARITY, 4);
         assert_eq!(
             ProjectiveRcbMulEval {
                 log_size: 6,
@@ -2243,6 +2599,40 @@ mod tests {
             }
             .max_constraint_log_degree_bound(),
             12
+        );
+    }
+
+    #[test]
+    fn projective_rcb_folded_digit_eval_allocates_expected_width() {
+        let mut allocator = TraceLocationAllocator::default();
+        let component = ProjectiveRcbFoldedDigitComponent::new(
+            &mut allocator,
+            ProjectiveRcbFoldedDigitEval {
+                log_size: 9,
+                relations: ProjectiveRcbMulComponentRelations::dummy(),
+            },
+            SecureField::zero(),
+        );
+
+        assert_eq!(PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS, 30);
+        assert_eq!(
+            PROJECTIVE_RCB_FOLDED_DIGIT_TRACE_COLUMNS,
+            1 + 3 + 30 * 3 + 3
+        );
+        assert_eq!(
+            component.trace_log_degree_bounds()[1].len(),
+            PROJECTIVE_RCB_FOLDED_DIGIT_TRACE_COLUMNS
+        );
+        assert_eq!(PROJECTIVE_RCB_FOLDED_DIGIT_RELATION_ARITY, 4);
+        assert_eq!(PROJECTIVE_RCB_FOLDED_CARRY_RELATION_ARITY, 4);
+        assert!(projective_rcb_folded_digit_contribution_sum_fits_m31());
+        assert_eq!(
+            ProjectiveRcbFoldedDigitEval {
+                log_size: 9,
+                relations: ProjectiveRcbMulComponentRelations::dummy(),
+            }
+            .max_constraint_log_degree_bound(),
+            11
         );
     }
 }

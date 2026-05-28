@@ -438,7 +438,7 @@ pub const P256_PROOF_COMPONENT_SLOTS: &[P256ProofComponentSlot] = &[
     P256ProofComponentSlot {
         name: "ProjectiveRcbAirRows",
         status: P256ProofComponentStatus::Implemented,
-        note: "Projective RCB formula multiplications are expanded into AIR-facing Solinas multiplication/reduction rows, raw-product chunks, and folded-contribution/digit rows.",
+        note: "Projective RCB formula multiplications are expanded into AIR-facing Solinas multiplication/reduction rows, raw-product chunks, folded contributions, folded digits, and folded carry links.",
     },
     P256ProofComponentSlot {
         name: "FakeGlvEcChainRows",
@@ -870,6 +870,31 @@ mod tests {
                 ProjectiveRcbAirError::FoldedDigitMismatch
                     | ProjectiveRcbAirError::FoldedDigitEquationMismatch { .. }
                     | ProjectiveRcbAirError::FoldedReductionDigitMismatch { .. }
+            )
+        ));
+    }
+
+    #[test]
+    fn current_p256_proof_pipeline_detects_mutated_projective_rcb_folded_digit_group() {
+        let mut proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+            valid_real_input_with_small_u_scalars(7, 11),
+        ])
+        .expect("current pipeline builds");
+        proof.claim.projective_rcb_air_trace.rows[0].muls[0]
+            .folded_digits
+            .rows[0]
+            .contribution_groups[0]
+            .contribution_sum += 1;
+
+        let err = proof
+            .verify_current_e2e()
+            .expect_err("mutated projective RCB folded digit group must fail");
+
+        assert!(matches!(
+            err,
+            P256ProofError::ProjectiveRcbAir(
+                ProjectiveRcbAirError::FoldedDigitContributionSumMismatch { .. }
+                    | ProjectiveRcbAirError::FoldedDigitMismatch
             )
         ));
     }
