@@ -12,6 +12,7 @@ use crate::prepared_table::{PreparedTableClaim, PreparedTableEcTraceClaim, Prepa
 use crate::public_inputs::{
     public_ecdsa_consumer_claimed_sum, PublicEcdsaInputClaim, PublicEcdsaInstanceRelation,
 };
+use crate::public_key_check::{PublicKeyOnCurveClaim, PublicKeyOnCurveError};
 use crate::range_checks::{
     RangeCheckClaim, RangeCheckInteractionClaim, RangeCheckRelation, RANGE7_BITS,
 };
@@ -30,6 +31,7 @@ use crate::types::EcdsaVerifyInput;
 #[derive(Clone, Debug)]
 pub struct P256ProofClaim {
     pub public_inputs: PublicEcdsaInputClaim,
+    pub public_key_check: PublicKeyOnCurveClaim,
     pub scalar_setup: ScalarSetupClaim,
     pub cert_inputs: CertScalarInputClaim,
     pub fake_glv_scalars: FakeGlvScalarHintClaim,
@@ -50,6 +52,7 @@ impl P256ProofClaim {
         fake_glv_hints: Vec<FakeGlvScalarHint>,
     ) -> Result<Self, P256ProofError> {
         let public_inputs = PublicEcdsaInputClaim::from_inputs(inputs);
+        let public_key_check = PublicKeyOnCurveClaim::from_public_inputs(&public_inputs)?;
         let scalar_setup = ScalarSetupClaim::from_public_inputs(&public_inputs)?;
         let cert_inputs = CertScalarInputClaim::from_scalar_setup(&scalar_setup)?;
         let fake_glv_scalars =
@@ -83,6 +86,7 @@ impl P256ProofClaim {
 
         Ok(Self {
             public_inputs,
+            public_key_check,
             scalar_setup,
             cert_inputs,
             fake_glv_scalars,
@@ -113,6 +117,7 @@ impl P256ProofClaim {
     }
 
     pub fn verify_current_components(&self) -> Result<(), P256ProofError> {
+        self.public_key_check.verify()?;
         self.scalar_setup.verify()?;
         self.cert_inputs.verify()?;
         self.fake_glv_scalars.verify()?;
@@ -351,6 +356,11 @@ pub const P256_PROOF_COMPONENT_SLOTS: &[P256ProofComponentSlot] = &[
         note: "Public relation provider and scalar-setup consumer are linked.",
     },
     P256ProofComponentSlot {
+        name: "PublicKeyOnCurve",
+        status: P256ProofComponentStatus::Implemented,
+        note: "Public key curve equation is checked with Solinas base-field multiplication traces.",
+    },
+    P256ProofComponentSlot {
         name: "ScalarSetup",
         status: P256ProofComponentStatus::Implemented,
         note: "Native witness and AIR-facing scalar setup claim are linked.",
@@ -428,6 +438,7 @@ pub enum P256ProofError {
     SelectorLookup(SelectorLookupError),
     PreparedPoint(PreparedPointError),
     PreparedTable(PreparedTableError),
+    PublicKeyOnCurve(PublicKeyOnCurveError),
     InvalidNativeEcdsaInput { index: usize },
     RelationImbalance { relation: &'static str },
 }
@@ -483,6 +494,12 @@ impl From<PreparedPointError> for P256ProofError {
 impl From<PreparedTableError> for P256ProofError {
     fn from(value: PreparedTableError) -> Self {
         Self::PreparedTable(value)
+    }
+}
+
+impl From<PublicKeyOnCurveError> for P256ProofError {
+    fn from(value: PublicKeyOnCurveError) -> Self {
+        Self::PublicKeyOnCurve(value)
     }
 }
 
@@ -583,6 +600,7 @@ mod tests {
 
         proof.verify_current_e2e().expect("current e2e verifies");
         assert_eq!(proof.claim.public_inputs.instances.len(), 2);
+        assert_eq!(proof.claim.public_key_check.rows.len(), 2);
         assert_eq!(proof.claim.scalar_setup.rows.len(), 2);
         assert_eq!(proof.claim.cert_inputs.rows.len(), 4);
         assert_eq!(proof.claim.fake_glv_scalars.rows.len(), 4);
@@ -662,6 +680,20 @@ mod tests {
     }
 
     #[test]
+    fn current_p256_proof_pipeline_rejects_public_key_off_curve() {
+        let mut input = valid_real_input_with_small_u_scalars(7, 11);
+        input.public_key.y = scalar(1);
+
+        let err = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![input])
+            .expect_err("off-curve public key must fail");
+
+        assert!(matches!(
+            err,
+            P256ProofError::PublicKeyOnCurve(PublicKeyOnCurveError::PointOffCurve { .. })
+        ));
+    }
+
+    #[test]
     fn current_p256_proof_pipeline_allows_zero_u1_branch() {
         let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
             valid_real_input_with_small_u_scalars(0, 11),
@@ -699,6 +731,7 @@ mod tests {
             .map(|slot| slot.name)
             .collect::<Vec<_>>();
 
+        assert!(implemented.contains(&"PublicKeyOnCurve"));
         assert!(implemented.contains(&"PreparedTablePoints"));
         assert!(implemented.contains(&"PreparedTableEcTrace"));
         assert!(implemented.contains(&"FakeGlvChainTrace"));
