@@ -24,6 +24,7 @@ pub mod fake_glv_chain {
     pub use crate::scalar::fake_glv_chain::*;
 }
 
+pub mod final_check;
 pub mod fake_glv_scalar {
     pub use crate::scalar::fake_glv_scalar::*;
 }

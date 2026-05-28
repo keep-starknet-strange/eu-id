@@ -2,6 +2,7 @@ use stwo::core::fields::{m31::M31, qm31::SecureField};
 
 use crate::ecdsa::ecdsa_verify;
 use crate::fake_glv_chain::{FakeGlvChainClaim, FakeGlvChainError};
+use crate::final_check::{FinalEcdsaCheckClaim, FinalEcdsaCheckError};
 use crate::prepared_point::{
     prepared_point_provider_claimed_sum, prepared_point_range7_consumer_claimed_sum,
     PreparedPointAudit, PreparedPointError, PreparedPointRelation, PreparedPointTraceClaim,
@@ -37,6 +38,7 @@ pub struct P256ProofClaim {
     pub prepared_table: PreparedTableClaim,
     pub prepared_table_ec_trace: PreparedTableEcTraceClaim,
     pub fake_glv_chain: FakeGlvChainClaim,
+    pub final_check: FinalEcdsaCheckClaim,
     pub prepared_use_counts: PreparedPointUseCountClaim,
     pub prepared_trace: PreparedPointTraceClaim,
 }
@@ -67,6 +69,12 @@ impl P256ProofClaim {
             &fake_glv_selectors,
             &prepared_table,
         )?;
+        let final_check = FinalEcdsaCheckClaim::from_claims(
+            &public_inputs,
+            &cert_inputs,
+            &fake_glv_scalars,
+            &fake_glv_chain,
+        )?;
         let prepared_use_counts =
             PreparedPointUseCountClaim::from_selector_claim(&fake_glv_selectors)?;
         let prepared_trace = prepared_table.prepared_point_trace(&prepared_use_counts)?;
@@ -81,6 +89,7 @@ impl P256ProofClaim {
             prepared_table,
             prepared_table_ec_trace,
             fake_glv_chain,
+            final_check,
             prepared_use_counts,
             prepared_trace,
         })
@@ -109,6 +118,7 @@ impl P256ProofClaim {
         self.prepared_table.verify()?;
         self.prepared_table_ec_trace.verify()?;
         self.fake_glv_chain.verify()?;
+        self.final_check.verify()?;
         self.prepared_use_counts.verify()?;
         Ok(())
     }
@@ -387,8 +397,8 @@ pub const P256_PROOF_COMPONENT_SLOTS: &[P256ProofComponentSlot] = &[
     },
     P256ProofComponentSlot {
         name: "FinalEcdsaCheck",
-        status: P256ProofComponentStatus::Pending,
-        note: "H1+H2, R != infinity, x(R) mod n = r, and optional recovery checks are not implemented yet.",
+        status: P256ProofComponentStatus::Implemented,
+        note: "Native final check links H1/H2 to fake-GLV chain R3 values, enforces finite R = H1 + H2, and checks x(R) mod n = r.",
     },
     P256ProofComponentSlot {
         name: "StarkProveVerify",
@@ -404,6 +414,7 @@ pub enum P256ProofError {
     FakeGlvChain(FakeGlvChainError),
     FakeGlvScalar(FakeGlvScalarHintError),
     FakeGlvSelector(FakeGlvSelectorError),
+    FinalEcdsaCheck(FinalEcdsaCheckError),
     SelectorLookup(SelectorLookupError),
     PreparedPoint(PreparedPointError),
     PreparedTable(PreparedTableError),
@@ -441,6 +452,12 @@ impl From<FakeGlvSelectorError> for P256ProofError {
     }
 }
 
+impl From<FinalEcdsaCheckError> for P256ProofError {
+    fn from(value: FinalEcdsaCheckError) -> Self {
+        Self::FinalEcdsaCheck(value)
+    }
+}
+
 impl From<SelectorLookupError> for P256ProofError {
     fn from(value: SelectorLookupError) -> Self {
         Self::SelectorLookup(value)
@@ -470,6 +487,7 @@ mod tests {
     use crate::curve::{mod_inverse, scalar_mul};
     use crate::field_ops::mul_mod_witness;
     use crate::limbs::P256M31BigInt;
+    use crate::prepared_table::PreparedAffinePoint;
     use crate::types::{AffinePoint, Signature, U256};
     use core::cmp::Ordering;
 
@@ -499,7 +517,6 @@ mod tests {
     }
 
     fn valid_real_input_with_small_u_scalars(u1: u64, u2: u64) -> EcdsaVerifyInput {
-        assert_ne!(u1, 0, "u1 must use the active fake-GLV branch");
         assert_ne!(u2, 0, "u2 must use the active fake-GLV branch");
         let n = U256::from_le_u64s(&P256_ORDER);
         let public_key = generator_point();
@@ -549,8 +566,8 @@ mod tests {
     #[test]
     fn current_p256_proof_pipeline_links_all_implemented_components() {
         let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
-            test_input(42, 77, 1),
-            test_input(43, 78, 1),
+            valid_real_input_with_small_u_scalars(7, 11),
+            valid_real_input_with_small_u_scalars(13, 17),
         ])
         .expect("current pipeline builds");
 
@@ -564,6 +581,7 @@ mod tests {
         assert_eq!(proof.claim.prepared_table.certs.len(), 4);
         assert_eq!(proof.claim.prepared_table_ec_trace.active_row_count(), 48);
         assert_eq!(proof.claim.fake_glv_chain.active_row_count(), 260);
+        assert_eq!(proof.claim.final_check.rows.len(), 2);
         assert_eq!(proof.claim.prepared_use_counts.certs.len(), 4);
         for provider in &proof.claim.prepared_trace.providers {
             assert_eq!(
@@ -620,10 +638,23 @@ mod tests {
     }
 
     #[test]
+    fn current_p256_proof_pipeline_rejects_invalid_final_signature_linkage() {
+        let err =
+            P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![test_input(42, 77, 1)])
+                .expect_err("invalid final signature linkage must fail");
+
+        assert!(matches!(
+            err,
+            P256ProofError::FinalEcdsaCheck(FinalEcdsaCheckError::SignatureRMismatch { .. })
+        ));
+    }
+
+    #[test]
     fn current_p256_proof_pipeline_allows_zero_u1_branch() {
-        let proof =
-            P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![test_input(0, 77, 1)])
-                .expect("zero branch pipeline builds");
+        let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+            valid_real_input_with_small_u_scalars(0, 11),
+        ])
+        .expect("zero branch pipeline builds");
 
         proof.verify_current_e2e().expect("zero branch verifies");
         assert_eq!(proof.claim.cert_inputs.rows[0].cert_active.0, 0);
@@ -636,6 +667,10 @@ mod tests {
             65
         );
         assert_eq!(proof.claim.fake_glv_chain.active_row_count(), 65);
+        assert_eq!(
+            proof.claim.final_check.rows[0].h1,
+            PreparedAffinePoint::infinity()
+        );
     }
 
     #[test]
@@ -654,17 +689,18 @@ mod tests {
         assert!(implemented.contains(&"PreparedTablePoints"));
         assert!(implemented.contains(&"PreparedTableEcTrace"));
         assert!(implemented.contains(&"FakeGlvChainTrace"));
+        assert!(implemented.contains(&"FinalEcdsaCheck"));
         assert!(pending.contains(&"PreparedTableEcRows"));
         assert!(pending.contains(&"FakeGlvEcChainRows"));
-        assert!(pending.contains(&"FinalEcdsaCheck"));
         assert!(pending.contains(&"StarkProveVerify"));
     }
 
     #[test]
     fn current_p256_proof_pipeline_detects_public_relation_imbalance() {
-        let mut proof =
-            P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![test_input(42, 77, 1)])
-                .expect("current pipeline builds");
+        let mut proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+            valid_real_input_with_small_u_scalars(7, 11),
+        ])
+        .expect("current pipeline builds");
         proof.interaction_claim.public_inputs.consumer_claimed_sum = zero();
 
         let err = proof
@@ -682,9 +718,10 @@ mod tests {
 
     #[test]
     fn current_p256_proof_pipeline_detects_selector_lookup_imbalance() {
-        let mut proof =
-            P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![test_input(42, 77, 1)])
-                .expect("current pipeline builds");
+        let mut proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+            valid_real_input_with_small_u_scalars(7, 11),
+        ])
+        .expect("current pipeline builds");
         proof
             .interaction_claim
             .selector_lookups
@@ -705,9 +742,10 @@ mod tests {
 
     #[test]
     fn current_p256_proof_pipeline_detects_prepared_point_imbalance() {
-        let mut proof =
-            P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![test_input(42, 77, 1)])
-                .expect("current pipeline builds");
+        let mut proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+            valid_real_input_with_small_u_scalars(7, 11),
+        ])
+        .expect("current pipeline builds");
         proof.interaction_claim.prepared_points.consumer_claimed_sum = zero();
 
         let err = proof
