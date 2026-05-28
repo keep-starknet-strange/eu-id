@@ -438,7 +438,7 @@ pub const P256_PROOF_COMPONENT_SLOTS: &[P256ProofComponentSlot] = &[
     P256ProofComponentSlot {
         name: "ProjectiveRcbAirRows",
         status: P256ProofComponentStatus::Implemented,
-        note: "Projective RCB formula multiplications are expanded into AIR-facing Solinas multiplication/reduction witness rows with an EvalAtRow row-shape helper.",
+        note: "Projective RCB formula multiplications are expanded into AIR-facing Solinas multiplication/reduction rows, raw-product chunks, and folded-contribution/digit rows.",
     },
     P256ProofComponentSlot {
         name: "FakeGlvEcChainRows",
@@ -560,7 +560,9 @@ mod tests {
     use crate::fp_solinas_air::FP_SOLINAS_REDUCTION_DIGITS;
     use crate::limbs::P256M31BigInt;
     use crate::prepared_table::PreparedAffinePoint;
-    use crate::projective_air::PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS;
+    use crate::projective_air::{
+        PROJECTIVE_RCB_FOLDED_CONTRIBUTION_ROWS, PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS,
+    };
     use crate::types::{AffinePoint, Signature, U256};
     use core::cmp::Ordering;
 
@@ -681,6 +683,14 @@ mod tests {
             proof
                 .claim
                 .projective_rcb_air_trace
+                .folded_contribution_row_count(),
+            proof.claim.projective_rcb_air_trace.mul_row_count()
+                * PROJECTIVE_RCB_FOLDED_CONTRIBUTION_ROWS
+        );
+        assert_eq!(
+            proof
+                .claim
+                .projective_rcb_air_trace
                 .raw_product_chunk_count(),
             proof.claim.projective_rcb_air_trace.mul_row_count()
                 * PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS
@@ -740,6 +750,14 @@ mod tests {
                 .projective_rcb_air_trace
                 .folded_digit_row_count(),
             proof.claim.projective_rcb_air_trace.mul_row_count() * FP_SOLINAS_REDUCTION_DIGITS
+        );
+        assert_eq!(
+            proof
+                .claim
+                .projective_rcb_air_trace
+                .folded_contribution_row_count(),
+            proof.claim.projective_rcb_air_trace.mul_row_count()
+                * PROJECTIVE_RCB_FOLDED_CONTRIBUTION_ROWS
         );
         assert_eq!(
             proof
@@ -852,6 +870,32 @@ mod tests {
                 ProjectiveRcbAirError::FoldedDigitMismatch
                     | ProjectiveRcbAirError::FoldedDigitEquationMismatch { .. }
                     | ProjectiveRcbAirError::FoldedReductionDigitMismatch { .. }
+            )
+        ));
+    }
+
+    #[test]
+    fn current_p256_proof_pipeline_detects_mutated_projective_rcb_folded_contribution() {
+        let mut proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+            valid_real_input_with_small_u_scalars(7, 11),
+        ])
+        .expect("current pipeline builds");
+        proof.claim.projective_rcb_air_trace.rows[0].muls[0]
+            .folded_contributions
+            .rows[0]
+            .contribution_sum += 1;
+
+        let err = proof
+            .verify_current_e2e()
+            .expect_err("mutated projective RCB folded contribution must fail");
+
+        assert!(matches!(
+            err,
+            P256ProofError::ProjectiveRcbAir(
+                ProjectiveRcbAirError::FoldedContributionMismatch
+                    | ProjectiveRcbAirError::FoldedContributionSumMismatch { .. }
+                    | ProjectiveRcbAirError::FoldedDigitMismatch
+                    | ProjectiveRcbAirError::FoldedDigitEquationMismatch { .. }
             )
         ));
     }
