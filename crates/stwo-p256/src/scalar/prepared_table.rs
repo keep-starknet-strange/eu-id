@@ -10,7 +10,7 @@ use crate::prepared_point::{
 };
 use crate::types::{AffinePoint, U256};
 
-use super::cert_bind::{CertScalarInputClaim, CertScalarInputRow};
+use super::cert_bind::{CertScalarInputClaim, CertScalarInputRow, CERT_ID_U1_GENERATOR};
 use super::fake_glv_scalar::{FakeGlvScalarHintClaim, FakeGlvScalarHintRow};
 use super::fake_glv_selector::{FakeGlvSelectorClaim, FakeGlvSelectorRow};
 use super::fake_glv_selector_lookup::Selector16DecodeEntry;
@@ -84,6 +84,143 @@ impl PreparedTableClaim {
             .find(|cert| cert.sig_id == sig_id && cert.cert_id == cert_id)
             .and_then(|cert| cert.instance(table_index))
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedTableEcTraceClaim {
+    pub rows: Vec<PreparedTableEcRow>,
+}
+
+impl PreparedTableEcTraceClaim {
+    pub fn from_claims(
+        cert_inputs: &CertScalarInputClaim,
+        fake_glv_scalars: &FakeGlvScalarHintClaim,
+        selectors: &FakeGlvSelectorClaim,
+        table: &PreparedTableClaim,
+    ) -> Result<Self, PreparedTableError> {
+        if cert_inputs.rows.len() != fake_glv_scalars.rows.len()
+            || cert_inputs.rows.len() != selectors.rows.len()
+            || cert_inputs.rows.len() != table.certs.len()
+        {
+            return Err(PreparedTableError::EcTraceCountMismatch {
+                certs: cert_inputs.rows.len(),
+                fake_glv: fake_glv_scalars.rows.len(),
+                selectors: selectors.rows.len(),
+                tables: table.certs.len(),
+            });
+        }
+
+        let mut rows = Vec::new();
+        for (((cert, fake_glv), selector), table_cert) in cert_inputs
+            .rows
+            .iter()
+            .zip(&fake_glv_scalars.rows)
+            .zip(&selectors.rows)
+            .zip(&table.certs)
+        {
+            rows.extend(prepared_table_ec_rows_for_cert(
+                cert, fake_glv, selector, table_cert,
+            )?);
+        }
+        let claim = Self { rows };
+        claim.verify()?;
+        Ok(claim)
+    }
+
+    pub fn verify(&self) -> Result<(), PreparedTableError> {
+        for row in &self.rows {
+            row.verify()?;
+        }
+        Ok(())
+    }
+
+    pub fn active_row_count(&self) -> usize {
+        self.rows.len()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedTableEcRow {
+    pub sig_id: M31,
+    pub cert_id: M31,
+    pub kind: PreparedTableEcRowKind,
+    pub lhs: PreparedAffinePoint,
+    pub rhs: PreparedAffinePoint,
+    pub output: PreparedAffinePoint,
+}
+
+impl PreparedTableEcRow {
+    fn double(
+        sig_id: M31,
+        cert_id: M31,
+        kind: PreparedTableEcRowKind,
+        input: PreparedAffinePoint,
+        output: PreparedAffinePoint,
+    ) -> Self {
+        Self {
+            sig_id,
+            cert_id,
+            kind,
+            lhs: input,
+            rhs: PreparedAffinePoint::infinity(),
+            output,
+        }
+    }
+
+    fn add(
+        sig_id: M31,
+        cert_id: M31,
+        kind: PreparedTableEcRowKind,
+        lhs: PreparedAffinePoint,
+        rhs: PreparedAffinePoint,
+        output: PreparedAffinePoint,
+    ) -> Self {
+        Self {
+            sig_id,
+            cert_id,
+            kind,
+            lhs,
+            rhs,
+            output,
+        }
+    }
+
+    pub fn verify(&self) -> Result<(), PreparedTableError> {
+        self.lhs.verify()?;
+        self.rhs.verify()?;
+        self.output.verify()?;
+        let expected = match self.kind {
+            PreparedTableEcRowKind::DoubleP | PreparedTableEcRowKind::DoubleR => {
+                double_optional(self.lhs.to_option())
+            }
+            PreparedTableEcRowKind::AddP2P
+            | PreparedTableEcRowKind::AddR2R
+            | PreparedTableEcRowKind::Base(_)
+            | PreparedTableEcRowKind::Table16 => {
+                add_optional_points(self.lhs.to_option(), self.rhs.to_option())
+            }
+        };
+        let expected = prepared(expected);
+        if self.output == expected {
+            Ok(())
+        } else {
+            Err(PreparedTableError::EcTraceOutputMismatch {
+                sig_id: self.sig_id.0,
+                cert_id: self.cert_id.0,
+                kind: self.kind,
+            })
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PreparedTableEcRowKind {
+    DoubleP,
+    AddP2P,
+    DoubleR,
+    AddR2R,
+    Base(u32),
+    Table16,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -280,6 +417,12 @@ pub enum PreparedTableError {
         tables: usize,
         use_counts: usize,
     },
+    EcTraceCountMismatch {
+        certs: usize,
+        fake_glv: usize,
+        selectors: usize,
+        tables: usize,
+    },
     IdMismatch {
         source: &'static str,
         cert_sig_id: u32,
@@ -303,7 +446,163 @@ pub enum PreparedTableError {
         sig_id: u32,
         cert_id: u32,
     },
+    EcTraceOutputMismatch {
+        sig_id: u32,
+        cert_id: u32,
+        kind: PreparedTableEcRowKind,
+    },
+    PreparedTableOutputMismatch {
+        sig_id: u32,
+        cert_id: u32,
+        table_index: u32,
+    },
     NonCanonicalInfinity,
+}
+
+fn prepared_table_ec_rows_for_cert(
+    cert: &CertScalarInputRow,
+    fake_glv: &FakeGlvScalarHintRow,
+    selector: &FakeGlvSelectorRow,
+    table: &PreparedTableCert,
+) -> Result<Vec<PreparedTableEcRow>, PreparedTableError> {
+    require_same_id("fake_glv", cert, fake_glv.sig_id, fake_glv.cert_id)?;
+    require_same_id("selector", cert, selector.sig_id, selector.cert_id)?;
+    if cert.sig_id != table.sig_id || cert.cert_id != table.cert_id {
+        return Err(PreparedTableError::IdMismatch {
+            source: "prepared_table",
+            cert_sig_id: cert.sig_id.0,
+            cert_cert_id: cert.cert_id.0,
+            other_sig_id: table.sig_id.0,
+            other_cert_id: table.cert_id.0,
+        });
+    }
+    if cert.cert_active.0 == 0 {
+        return Ok(Vec::new());
+    }
+
+    let sig_id = cert.sig_id;
+    let cert_id = cert.cert_id;
+    let p = PreparedAffinePoint::from_affine(AffinePoint {
+        x: cert.base_x.to_u256(),
+        y: cert.base_y.to_u256(),
+    });
+    let h = scalar_mul(
+        &cert.scalar.to_u256(),
+        &p.to_option().expect("base point finite"),
+    )
+    .ok_or(PreparedTableError::MissingHintPoint {
+        sig_id: cert.sig_id.0,
+        cert_id: cert.cert_id.0,
+    })?;
+    let r = PreparedAffinePoint::from_affine(signed_hint_point(&h, fake_glv.hint.s2_sign_bit)?);
+
+    let mut rows = Vec::new();
+    let p3 = if cert.cert_id.0 == CERT_ID_U1_GENERATOR {
+        PreparedAffinePoint::from_affine(
+            scalar_mul(&U256::from_le_u64s(&[3, 0, 0, 0]), &p.to_option().unwrap()).ok_or(
+                PreparedTableError::MissingTriplePoint {
+                    point: "P",
+                    sig_id: cert.sig_id.0,
+                    cert_id: cert.cert_id.0,
+                },
+            )?,
+        )
+    } else {
+        let p2 = prepared(double_optional(p.to_option()));
+        rows.push(PreparedTableEcRow::double(
+            sig_id,
+            cert_id,
+            PreparedTableEcRowKind::DoubleP,
+            p.clone(),
+            p2.clone(),
+        ));
+        let p3 = prepared(add_optional_points(p2.to_option(), p.to_option()));
+        rows.push(PreparedTableEcRow::add(
+            sig_id,
+            cert_id,
+            PreparedTableEcRowKind::AddP2P,
+            p2,
+            p.clone(),
+            p3.clone(),
+        ));
+        p3
+    };
+
+    let r2 = prepared(double_optional(r.to_option()));
+    rows.push(PreparedTableEcRow::double(
+        sig_id,
+        cert_id,
+        PreparedTableEcRowKind::DoubleR,
+        r.clone(),
+        r2.clone(),
+    ));
+    rows.push(PreparedTableEcRow::add(
+        sig_id,
+        cert_id,
+        PreparedTableEcRowKind::AddR2R,
+        r2.clone(),
+        r.clone(),
+        table.r3.clone(),
+    ));
+
+    let base_operands = [
+        (p3.clone(), prepared(negate_optional(r.to_option()))),
+        (p.clone(), prepared(negate_optional(r.to_option()))),
+        (p.clone(), r.clone()),
+        (p3.clone(), r.clone()),
+        (p3.clone(), prepared(negate_optional(table.r3.to_option()))),
+        (p.clone(), prepared(negate_optional(table.r3.to_option()))),
+        (p.clone(), table.r3.clone()),
+        (p3.clone(), table.r3.clone()),
+    ];
+
+    for (index, (lhs, rhs)) in base_operands.into_iter().enumerate() {
+        let output = table.base[index].clone();
+        rows.push(PreparedTableEcRow::add(
+            sig_id,
+            cert_id,
+            PreparedTableEcRowKind::Base(index as u32),
+            lhs.clone(),
+            rhs.clone(),
+            output.clone(),
+        ));
+        let expected = prepared(add_optional_points(lhs.to_option(), rhs.to_option()));
+        if output != expected {
+            return Err(PreparedTableError::PreparedTableOutputMismatch {
+                sig_id: sig_id.0,
+                cert_id: cert_id.0,
+                table_index: index as u32,
+            });
+        }
+    }
+
+    let selector0 = Selector16DecodeEntry::from_selector(selector.selectors[0]).map_err(|_| {
+        PreparedTableError::InvalidSelector {
+            selector: selector.selectors[0].0,
+        }
+    })?;
+    let selected = apply_selector(&table.base, selector0)?;
+    rows.push(PreparedTableEcRow::add(
+        sig_id,
+        cert_id,
+        PreparedTableEcRowKind::Table16,
+        selected.clone(),
+        table.r3.clone(),
+        table.table16.clone(),
+    ));
+    let expected_table16 = prepared(add_optional_points(
+        selected.to_option(),
+        table.r3.to_option(),
+    ));
+    if table.table16 != expected_table16 {
+        return Err(PreparedTableError::PreparedTableOutputMismatch {
+            sig_id: sig_id.0,
+            cert_id: cert_id.0,
+            table_index: TABLE16_INDEX,
+        });
+    }
+
+    Ok(rows)
 }
 
 fn require_same_id(
@@ -374,6 +673,10 @@ fn add_optional_points(lhs: Option<AffinePoint>, rhs: Option<AffinePoint>) -> Op
         (Some(lhs), Some(rhs)) if is_additive_inverse(&lhs, &rhs) => None,
         (Some(lhs), Some(rhs)) => Some(point_add(&lhs, &rhs).output),
     }
+}
+
+fn double_optional(point: Option<AffinePoint>) -> Option<AffinePoint> {
+    point.map(|point| point_double(&point).output)
 }
 
 fn negate_optional(point: Option<AffinePoint>) -> Option<AffinePoint> {
@@ -500,5 +803,53 @@ mod tests {
         assert_eq!(table.certs[0].r3, PreparedAffinePoint::infinity());
         assert_eq!(table.certs[0].table16, PreparedAffinePoint::infinity());
         assert_eq!(table.certs[1].cert_active.0, 1);
+    }
+
+    #[test]
+    fn prepared_table_ec_trace_records_expected_active_rows() {
+        let (certs, fake_glv, selectors, table) = build_table(42);
+        let trace = PreparedTableEcTraceClaim::from_claims(&certs, &fake_glv, &selectors, &table)
+            .expect("valid ec trace");
+
+        trace.verify().expect("ec trace verifies");
+        assert_eq!(trace.active_row_count(), 24);
+        assert!(trace
+            .rows
+            .iter()
+            .any(|row| row.kind == PreparedTableEcRowKind::Base(0)));
+        assert!(trace
+            .rows
+            .iter()
+            .any(|row| row.kind == PreparedTableEcRowKind::Table16));
+    }
+
+    #[test]
+    fn prepared_table_ec_trace_skips_inactive_zero_branch() {
+        let (certs, fake_glv, selectors, table) = build_table(0);
+        let trace = PreparedTableEcTraceClaim::from_claims(&certs, &fake_glv, &selectors, &table)
+            .expect("valid ec trace");
+
+        assert_eq!(table.certs[0].cert_active.0, 0);
+        assert_eq!(trace.active_row_count(), 13);
+        assert!(trace
+            .rows
+            .iter()
+            .all(|row| row.cert_id == table.certs[1].cert_id));
+    }
+
+    #[test]
+    fn prepared_table_ec_trace_detects_mutated_output() {
+        let (certs, fake_glv, selectors, table) = build_table(42);
+        let mut trace =
+            PreparedTableEcTraceClaim::from_claims(&certs, &fake_glv, &selectors, &table)
+                .expect("valid ec trace");
+        trace.rows[0].output = PreparedAffinePoint::infinity();
+
+        let err = trace.verify().expect_err("mutated output must fail");
+
+        assert!(matches!(
+            err,
+            PreparedTableError::EcTraceOutputMismatch { .. }
+        ));
     }
 }
