@@ -31,6 +31,10 @@ pub mod fake_glv_selector_lookup {
     pub use crate::scalar::fake_glv_selector_lookup::*;
 }
 
+pub mod prepared_point {
+    pub use crate::scalar::prepared_point::*;
+}
+
 pub mod scalar_setup_air {
     pub use crate::scalar::setup_air::*;
 }
