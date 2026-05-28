@@ -1,5 +1,6 @@
 use stwo::core::fields::{m31::M31, qm31::SecureField};
 
+use crate::ecdsa::ecdsa_verify;
 use crate::prepared_point::{
     prepared_point_consumer_claimed_sum, prepared_point_provider_claimed_sum,
     prepared_point_range7_consumer_claimed_sum, PreparedPointAudit, PreparedPointError,
@@ -217,6 +218,17 @@ pub struct P256ProofDraft {
 }
 
 impl P256ProofDraft {
+    pub fn from_verified_inputs_with_trivial_fake_glv_hints(
+        inputs: Vec<EcdsaVerifyInput>,
+    ) -> Result<Self, P256ProofError> {
+        for (index, input) in inputs.iter().enumerate() {
+            if !ecdsa_verify(input) {
+                return Err(P256ProofError::InvalidNativeEcdsaInput { index });
+            }
+        }
+        Self::from_inputs_with_trivial_fake_glv_hints(inputs)
+    }
+
     pub fn from_inputs_with_hints(
         inputs: Vec<EcdsaVerifyInput>,
         fake_glv_hints: Vec<FakeGlvScalarHint>,
@@ -348,6 +360,7 @@ pub enum P256ProofError {
     FakeGlvSelector(FakeGlvSelectorError),
     SelectorLookup(SelectorLookupError),
     PreparedPoint(PreparedPointError),
+    InvalidNativeEcdsaInput { index: usize },
     RelationImbalance { relation: &'static str },
 }
 
@@ -394,8 +407,12 @@ fn zero() -> SecureField {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constants::{P256_GX, P256_GY};
+    use crate::constants::{P256_GX, P256_GY, P256_ORDER};
+    use crate::curve::{mod_inverse, scalar_mul};
+    use crate::field_ops::mul_mod_witness;
+    use crate::limbs::P256M31BigInt;
     use crate::types::{AffinePoint, Signature, U256};
+    use core::cmp::Ordering;
 
     fn test_input(message_hash: u64, r: u64, s: u64) -> EcdsaVerifyInput {
         EcdsaVerifyInput {
@@ -413,6 +430,61 @@ mod tests {
 
     fn scalar(value: u64) -> U256 {
         U256::from_le_u64s(&[value, 0, 0, 0])
+    }
+
+    fn generator_point() -> AffinePoint {
+        AffinePoint {
+            x: U256::from_le_u64s(&P256_GX),
+            y: U256::from_le_u64s(&P256_GY),
+        }
+    }
+
+    fn valid_real_input_with_small_u_scalars(u1: u64, u2: u64) -> EcdsaVerifyInput {
+        assert_ne!(u1, 0, "u1 must use the active fake-GLV branch");
+        assert_ne!(u2, 0, "u2 must use the active fake-GLV branch");
+        let n = U256::from_le_u64s(&P256_ORDER);
+        let public_key = generator_point();
+        let r_point = scalar_mul(&scalar(u1 + u2), &public_key).expect("nonzero R");
+        let r = x_mod_order(&r_point.x);
+        let u2_inv = mod_inverse(&scalar(u2), &n);
+        let s = mul_mod_witness(&r, &u2_inv, &n).result.to_u256();
+        let message_hash = mul_mod_witness(&scalar(u1), &s, &n).result.to_u256();
+
+        EcdsaVerifyInput {
+            message_hash,
+            signature: Signature { r, s },
+            public_key,
+        }
+    }
+
+    fn x_mod_order(x: &U256) -> U256 {
+        let n = U256::from_le_u64s(&P256_ORDER);
+        if cmp_u256(x, &n).is_lt() {
+            return x.clone();
+        }
+        let x_words = x.to_le_u64s();
+        let n_words = P256_ORDER;
+        let mut diff = [0u64; 4];
+        let mut borrow = 0u64;
+        for i in 0..4 {
+            let (s1, c1) = x_words[i].overflowing_sub(n_words[i]);
+            let (s2, c2) = s1.overflowing_sub(borrow);
+            diff[i] = s2;
+            borrow = (c1 as u64) + (c2 as u64);
+        }
+        U256::from_le_u64s(&diff)
+    }
+
+    fn cmp_u256(lhs: &U256, rhs: &U256) -> Ordering {
+        let lhs = lhs.to_le_u64s();
+        let rhs = rhs.to_le_u64s();
+        for i in (0..4).rev() {
+            match lhs[i].cmp(&rhs[i]) {
+                Ordering::Equal => {}
+                ordering => return ordering,
+            }
+        }
+        Ordering::Equal
     }
 
     #[test]
@@ -435,6 +507,43 @@ mod tests {
         assert_eq!(proof.interaction_claim.selector_lookups.total(), zero());
         assert_eq!(proof.interaction_claim.prepared_points.total(), zero());
         assert_eq!(proof.interaction_claim.range7.total(), zero());
+    }
+
+    #[test]
+    fn current_p256_proof_pipeline_accepts_real_valid_signature_input() {
+        let input = valid_real_input_with_small_u_scalars(7, 11);
+
+        assert!(ecdsa_verify(&input));
+        let proof = P256ProofDraft::from_verified_inputs_with_trivial_fake_glv_hints(vec![input])
+            .expect("real valid input feeds current AIR pipeline");
+
+        proof
+            .verify_current_e2e()
+            .expect("real input current e2e verifies");
+        assert_eq!(
+            proof.claim.scalar_setup.rows[0].output.u1,
+            P256M31BigInt::from_u256(&scalar(7))
+        );
+        assert_eq!(
+            proof.claim.scalar_setup.rows[0].output.u2,
+            P256M31BigInt::from_u256(&scalar(11))
+        );
+        assert_eq!(proof.interaction_claim.public_inputs.total(), zero());
+        assert_eq!(proof.interaction_claim.selector_lookups.total(), zero());
+        assert_eq!(proof.interaction_claim.prepared_points.total(), zero());
+        assert_eq!(proof.interaction_claim.range7.total(), zero());
+    }
+
+    #[test]
+    fn current_p256_proof_pipeline_rejects_invalid_real_signature_input() {
+        let mut input = valid_real_input_with_small_u_scalars(7, 11);
+        input.message_hash = scalar(123);
+
+        assert!(!ecdsa_verify(&input));
+        let err = P256ProofDraft::from_verified_inputs_with_trivial_fake_glv_hints(vec![input])
+            .expect_err("invalid native signature must not enter current AIR pipeline");
+
+        assert_eq!(err, P256ProofError::InvalidNativeEcdsaInput { index: 0 });
     }
 
     #[test]
