@@ -1,7 +1,7 @@
 use stwo::core::fields::{m31::M31, qm31::SecureField};
 
 use crate::ecdsa::ecdsa_verify;
-use crate::fake_glv_chain::{FakeGlvChainClaim, FakeGlvChainError};
+use crate::fake_glv_chain::{FakeGlvChainClaim, FakeGlvChainError, FakeGlvPrimitiveEcTraceClaim};
 use crate::final_check::{FinalEcdsaCheckClaim, FinalEcdsaCheckError};
 use crate::prepared_point::{
     prepared_point_provider_claimed_sum, prepared_point_range7_consumer_claimed_sum,
@@ -38,6 +38,7 @@ pub struct P256ProofClaim {
     pub prepared_table: PreparedTableClaim,
     pub prepared_table_ec_trace: PreparedTableEcTraceClaim,
     pub fake_glv_chain: FakeGlvChainClaim,
+    pub fake_glv_ec_trace: FakeGlvPrimitiveEcTraceClaim,
     pub final_check: FinalEcdsaCheckClaim,
     pub prepared_use_counts: PreparedPointUseCountClaim,
     pub prepared_trace: PreparedPointTraceClaim,
@@ -69,6 +70,7 @@ impl P256ProofClaim {
             &fake_glv_selectors,
             &prepared_table,
         )?;
+        let fake_glv_ec_trace = FakeGlvPrimitiveEcTraceClaim::from_chain(&fake_glv_chain)?;
         let final_check = FinalEcdsaCheckClaim::from_claims(
             &public_inputs,
             &cert_inputs,
@@ -89,6 +91,7 @@ impl P256ProofClaim {
             prepared_table,
             prepared_table_ec_trace,
             fake_glv_chain,
+            fake_glv_ec_trace,
             final_check,
             prepared_use_counts,
             prepared_trace,
@@ -118,6 +121,8 @@ impl P256ProofClaim {
         self.prepared_table.verify()?;
         self.prepared_table_ec_trace.verify()?;
         self.fake_glv_chain.verify()?;
+        self.fake_glv_ec_trace
+            .verify_against_chain(&self.fake_glv_chain)?;
         self.final_check.verify()?;
         self.prepared_use_counts.verify()?;
         Ok(())
@@ -391,9 +396,14 @@ pub const P256_PROOF_COMPONENT_SLOTS: &[P256ProofComponentSlot] = &[
         note: "Native chain trace consumes PreparedPoint entries, runs MSB init, 62 selector steps, Table[16], LSB correction, and checks final accumulator equals R3.",
     },
     P256ProofComponentSlot {
+        name: "FakeGlvPrimitiveEcTrace",
+        status: P256ProofComponentStatus::Implemented,
+        note: "Compressed fake-GLV chain steps are expanded into primitive DOUBLE/DOUBLE/ADD rows and verified against native EC formulas.",
+    },
+    P256ProofComponentSlot {
         name: "FakeGlvEcChainRows",
         status: P256ProofComponentStatus::Pending,
-        note: "MSB init, chain ADD rows, Table[16] final step, and LSB correction EC constraints are not implemented yet.",
+        note: "Stwo AIR constraints for MSB init, primitive chain DOUBLE/ADD rows, Table[16] final step, and LSB correction are not implemented yet.",
     },
     P256ProofComponentSlot {
         name: "FinalEcdsaCheck",
@@ -581,6 +591,7 @@ mod tests {
         assert_eq!(proof.claim.prepared_table.certs.len(), 4);
         assert_eq!(proof.claim.prepared_table_ec_trace.active_row_count(), 48);
         assert_eq!(proof.claim.fake_glv_chain.active_row_count(), 260);
+        assert_eq!(proof.claim.fake_glv_ec_trace.active_row_count(), 760);
         assert_eq!(proof.claim.final_check.rows.len(), 2);
         assert_eq!(proof.claim.prepared_use_counts.certs.len(), 4);
         for provider in &proof.claim.prepared_trace.providers {
@@ -619,6 +630,7 @@ mod tests {
             P256M31BigInt::from_u256(&scalar(11))
         );
         assert_eq!(proof.claim.fake_glv_chain.active_row_count(), 130);
+        assert_eq!(proof.claim.fake_glv_ec_trace.active_row_count(), 380);
         assert_eq!(proof.interaction_claim.public_inputs.total(), zero());
         assert_eq!(proof.interaction_claim.selector_lookups.total(), zero());
         assert_eq!(proof.interaction_claim.prepared_points.total(), zero());
@@ -667,6 +679,7 @@ mod tests {
             65
         );
         assert_eq!(proof.claim.fake_glv_chain.active_row_count(), 65);
+        assert_eq!(proof.claim.fake_glv_ec_trace.active_row_count(), 190);
         assert_eq!(
             proof.claim.final_check.rows[0].h1,
             PreparedAffinePoint::infinity()
@@ -689,6 +702,7 @@ mod tests {
         assert!(implemented.contains(&"PreparedTablePoints"));
         assert!(implemented.contains(&"PreparedTableEcTrace"));
         assert!(implemented.contains(&"FakeGlvChainTrace"));
+        assert!(implemented.contains(&"FakeGlvPrimitiveEcTrace"));
         assert!(implemented.contains(&"FinalEcdsaCheck"));
         assert!(pending.contains(&"PreparedTableEcRows"));
         assert!(pending.contains(&"FakeGlvEcChainRows"));

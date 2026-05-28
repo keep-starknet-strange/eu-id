@@ -71,6 +71,125 @@ impl FakeGlvChainClaim {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FakeGlvPrimitiveEcTraceClaim {
+    pub rows: Vec<FakeGlvPrimitiveEcRow>,
+}
+
+impl FakeGlvPrimitiveEcTraceClaim {
+    pub fn from_chain(chain: &FakeGlvChainClaim) -> Result<Self, FakeGlvChainError> {
+        let rows = primitive_ec_rows_for_chain(chain)?;
+        let claim = Self { rows };
+        claim.verify_against_chain(chain)?;
+        Ok(claim)
+    }
+
+    pub fn verify(&self) -> Result<(), FakeGlvChainError> {
+        for row in &self.rows {
+            row.verify()?;
+        }
+        Ok(())
+    }
+
+    pub fn verify_against_chain(&self, chain: &FakeGlvChainClaim) -> Result<(), FakeGlvChainError> {
+        self.verify()?;
+        let expected = primitive_ec_rows_for_chain(chain)?;
+        if self.rows == expected {
+            Ok(())
+        } else {
+            Err(FakeGlvChainError::PrimitiveTraceMismatch {
+                expected: expected.len(),
+                actual: self.rows.len(),
+            })
+        }
+    }
+
+    pub fn active_row_count(&self) -> usize {
+        self.rows.len()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FakeGlvPrimitiveEcRow {
+    pub sig_id: M31,
+    pub cert_id: M31,
+    pub chain_kind: FakeGlvChainRowKind,
+    pub op: FakeGlvPrimitiveEcOp,
+    pub lhs: PreparedAffinePoint,
+    pub rhs: PreparedAffinePoint,
+    pub output: PreparedAffinePoint,
+}
+
+impl FakeGlvPrimitiveEcRow {
+    fn double(
+        source: &FakeGlvChainRow,
+        lhs: PreparedAffinePoint,
+        output: PreparedAffinePoint,
+    ) -> Self {
+        Self {
+            sig_id: source.sig_id,
+            cert_id: source.cert_id,
+            chain_kind: source.kind,
+            op: FakeGlvPrimitiveEcOp::Double,
+            lhs,
+            rhs: PreparedAffinePoint::infinity(),
+            output,
+        }
+    }
+
+    fn add(
+        source: &FakeGlvChainRow,
+        lhs: PreparedAffinePoint,
+        rhs: PreparedAffinePoint,
+        output: PreparedAffinePoint,
+    ) -> Self {
+        Self {
+            sig_id: source.sig_id,
+            cert_id: source.cert_id,
+            chain_kind: source.kind,
+            op: FakeGlvPrimitiveEcOp::Add,
+            lhs,
+            rhs,
+            output,
+        }
+    }
+
+    pub fn verify(&self) -> Result<(), FakeGlvChainError> {
+        self.lhs
+            .verify()
+            .map_err(FakeGlvChainError::PreparedPoint)?;
+        self.rhs
+            .verify()
+            .map_err(FakeGlvChainError::PreparedPoint)?;
+        self.output
+            .verify()
+            .map_err(FakeGlvChainError::PreparedPoint)?;
+        let expected = match self.op {
+            FakeGlvPrimitiveEcOp::Double => prepared(double_optional(self.lhs.to_option())),
+            FakeGlvPrimitiveEcOp::Add => prepared(add_optional_points(
+                self.lhs.to_option(),
+                self.rhs.to_option(),
+            )),
+        };
+        if self.output == expected {
+            Ok(())
+        } else {
+            Err(FakeGlvChainError::PrimitiveRowOutputMismatch {
+                sig_id: self.sig_id.0,
+                cert_id: self.cert_id.0,
+                chain_kind: self.chain_kind,
+                op: self.op,
+            })
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FakeGlvPrimitiveEcOp {
+    Double,
+    Add,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FakeGlvChainCert {
     pub sig_id: M31,
     pub cert_id: M31,
@@ -322,6 +441,16 @@ pub enum FakeGlvChainError {
         cert_id: u32,
         kind: FakeGlvChainRowKind,
     },
+    PrimitiveRowOutputMismatch {
+        sig_id: u32,
+        cert_id: u32,
+        chain_kind: FakeGlvChainRowKind,
+        op: FakeGlvPrimitiveEcOp,
+    },
+    PrimitiveTraceMismatch {
+        expected: usize,
+        actual: usize,
+    },
     FinalAccumulatorMismatch {
         sig_id: u32,
         cert_id: u32,
@@ -330,6 +459,51 @@ pub enum FakeGlvChainError {
         table_index: u32,
     },
     PreparedPoint(crate::prepared_table::PreparedTableError),
+}
+
+fn primitive_ec_rows_for_chain(
+    chain: &FakeGlvChainClaim,
+) -> Result<Vec<FakeGlvPrimitiveEcRow>, FakeGlvChainError> {
+    let mut rows = Vec::new();
+    for cert in &chain.certs {
+        for row in &cert.rows {
+            match row.kind {
+                FakeGlvChainRowKind::MsbInit => {}
+                FakeGlvChainRowKind::ChainStep(_) | FakeGlvChainRowKind::Table16Step => {
+                    let doubled = prepared(double_optional(row.acc_before.to_option()));
+                    rows.push(FakeGlvPrimitiveEcRow::double(
+                        row,
+                        row.acc_before.clone(),
+                        doubled.clone(),
+                    ));
+                    let quadrupled = prepared(double_optional(doubled.to_option()));
+                    rows.push(FakeGlvPrimitiveEcRow::double(
+                        row,
+                        doubled,
+                        quadrupled.clone(),
+                    ));
+                    rows.push(FakeGlvPrimitiveEcRow::add(
+                        row,
+                        quadrupled,
+                        row.operand.clone(),
+                        row.acc_after.clone(),
+                    ));
+                }
+                FakeGlvChainRowKind::LsbCorrection => {
+                    rows.push(FakeGlvPrimitiveEcRow::add(
+                        row,
+                        row.acc_before.clone(),
+                        row.operand.clone(),
+                        row.acc_after.clone(),
+                    ));
+                }
+            }
+        }
+    }
+    for row in &rows {
+        row.verify()?;
+    }
+    Ok(rows)
 }
 
 fn table_point(
@@ -567,5 +741,69 @@ mod tests {
         let err = chain.verify().expect_err("mutated row must fail");
 
         assert!(matches!(err, FakeGlvChainError::RowOutputMismatch { .. }));
+    }
+
+    #[test]
+    fn fake_glv_primitive_ec_trace_expands_chain_steps() {
+        let (_, _, chain) = build_chain(42);
+        let trace =
+            FakeGlvPrimitiveEcTraceClaim::from_chain(&chain).expect("primitive ec trace builds");
+
+        trace
+            .verify_against_chain(&chain)
+            .expect("primitive ec trace links to chain");
+        assert_eq!(trace.active_row_count(), 380);
+        assert!(matches!(trace.rows[0].op, FakeGlvPrimitiveEcOp::Double));
+        assert!(trace
+            .rows
+            .iter()
+            .any(|row| row.chain_kind == FakeGlvChainRowKind::LsbCorrection));
+    }
+
+    #[test]
+    fn fake_glv_primitive_ec_trace_skips_inactive_zero_branch() {
+        let (_, _, chain) = build_chain(0);
+        let trace =
+            FakeGlvPrimitiveEcTraceClaim::from_chain(&chain).expect("primitive ec trace builds");
+
+        assert_eq!(trace.active_row_count(), 190);
+        assert!(trace
+            .rows
+            .iter()
+            .all(|row| row.cert_id == chain.certs[1].cert_id));
+    }
+
+    #[test]
+    fn fake_glv_primitive_ec_trace_detects_mutated_output() {
+        let (_, _, chain) = build_chain(42);
+        let mut trace =
+            FakeGlvPrimitiveEcTraceClaim::from_chain(&chain).expect("primitive ec trace builds");
+        trace.rows[0].output = PreparedAffinePoint::infinity();
+
+        let err = trace
+            .verify_against_chain(&chain)
+            .expect_err("mutated primitive row must fail");
+
+        assert!(matches!(
+            err,
+            FakeGlvChainError::PrimitiveRowOutputMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn fake_glv_primitive_ec_trace_detects_missing_row() {
+        let (_, _, chain) = build_chain(42);
+        let mut trace =
+            FakeGlvPrimitiveEcTraceClaim::from_chain(&chain).expect("primitive ec trace builds");
+        trace.rows.pop();
+
+        let err = trace
+            .verify_against_chain(&chain)
+            .expect_err("missing primitive row must fail");
+
+        assert!(matches!(
+            err,
+            FakeGlvChainError::PrimitiveTraceMismatch { .. }
+        ));
     }
 }
