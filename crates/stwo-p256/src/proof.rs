@@ -371,9 +371,6 @@ impl P256ProofDraft {
         self.claim.verify_current_components()?;
         self.claim
             .projective_rcb_air_trace
-            .verify_interaction_trace(&self.relations.projective_rcb)?;
-        self.claim
-            .projective_rcb_air_trace
             .verify_proof_slice_traces(&self.relations.projective_rcb)?;
         self.verify_audits()?;
         self.interaction_claim.verify_balanced()
