@@ -349,7 +349,7 @@ impl FrameworkEval for ProjectiveRcbMulEval {
     }
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 2
+        self.log_size + 1
     }
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
@@ -4768,7 +4768,7 @@ mod tests {
                 relations: ProjectiveRcbMulComponentRelations::dummy(),
             }
             .max_constraint_log_degree_bound(),
-            8
+            7
         );
     }
 
