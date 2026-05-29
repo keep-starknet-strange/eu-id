@@ -17,6 +17,17 @@ use stwo_constraint_framework::{
 #[cfg(test)]
 use stwo_p256_utils::scalar_arithmetic::{ScalarFieldMulTrace, P256_ORDER};
 
+#[cfg(test)]
+use crate::constants::{P256_GX, P256_GY};
+#[cfg(test)]
+use crate::curve::point_double;
+#[cfg(test)]
+use crate::prepared_table::PreparedAffinePoint;
+#[cfg(test)]
+use crate::projective::{ProjectiveEcOp, ProjectiveEcRow, ProjectiveEcTraceClaim};
+use crate::projective_air::{
+    ProjectiveRcbAirComponents, ProjectiveRcbAirTraceClaim, ProjectiveRcbMulComponentRelations,
+};
 use crate::scalar::scalar_mod_mul::claim::{
     gen_base_trace, gen_interaction_trace, gen_preprocessed_trace, preprocessed_column_ids,
     ScalarModMulComponents,
@@ -26,6 +37,8 @@ use crate::scalar::scalar_mod_mul::layout::ScalarModMulRelationAudit;
 use crate::scalar::scalar_mod_mul::providers::LookupProviderClaims;
 use crate::scalar::scalar_mod_mul::relation::ScalarModMulLookupRelations;
 use crate::scalar::scalar_mod_mul::{ScalarModMulClaim, ScalarModMulTraceRows};
+#[cfg(test)]
+use crate::types::{AffinePoint, U256};
 
 #[cfg(test)]
 const TEST_MUL_ID: u32 = 3;
@@ -68,12 +81,55 @@ pub fn assert_scalar_mod_mul_constraints(rows: &ScalarModMulTraceRows) {
         &lookup_claims,
         &relations,
     );
-    assert_components(commitment_scheme.trace_domain_evaluations(), &components);
+    assert_scalar_components(commitment_scheme.trace_domain_evaluations(), &components);
 
     assert_eq!(
         interaction_claim.claimed_sum(),
         SecureField::zero(),
         "invalid logup sum"
+    );
+}
+
+/// Assert the complete projective RCB proof slice on trace-domain rows.
+///
+/// This uses the same preprocessed, base, interaction, relation, component,
+/// and allocator paths as the proof draft. It only swaps PCS commitment and FRI
+/// for a direct trace-domain constraint check.
+pub fn assert_projective_rcb_air_constraints(claim: &ProjectiveRcbAirTraceClaim) {
+    let relations = ProjectiveRcbMulComponentRelations::dummy();
+    let preprocessed_ids = claim.proof_slice_preprocessed_column_ids(&relations);
+    let preprocessed = claim
+        .gen_proof_slice_preprocessed_trace(&preprocessed_ids)
+        .expect("projective RCB preprocessed trace generates");
+    let base = claim
+        .gen_proof_slice_base_trace()
+        .expect("projective RCB base trace generates");
+    let (interaction, interaction_claim) = claim
+        .gen_proof_slice_interaction_trace(&relations)
+        .expect("projective RCB interaction trace generates");
+
+    let mut commitment_scheme = MockCommitmentScheme::default();
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(preprocessed);
+    tree_builder.finalize_interaction();
+
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(base);
+    tree_builder.finalize_interaction();
+
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(interaction);
+    tree_builder.finalize_interaction();
+
+    let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&preprocessed_ids);
+    let components =
+        ProjectiveRcbAirComponents::new(&mut allocator, claim, &interaction_claim, &relations);
+    assert_projective_components(commitment_scheme.trace_domain_evaluations(), &components);
+
+    assert_eq!(
+        interaction_claim.total(),
+        SecureField::zero(),
+        "invalid projective RCB logup sum"
     );
 }
 
@@ -127,7 +183,7 @@ impl MockTreeBuilder<'_> {
     }
 }
 
-fn assert_components(trace: TreeVec<Vec<&Vec<M31>>>, components: &ScalarModMulComponents) {
+fn assert_scalar_components(trace: TreeVec<Vec<&Vec<M31>>>, components: &ScalarModMulComponents) {
     println!("canonical");
     assert_component(&components.canonical, &trace);
 
@@ -147,6 +203,29 @@ fn assert_components(trace: TreeVec<Vec<&Vec<M31>>>, components: &ScalarModMulCo
     assert_component(&components.range13, &trace);
 
     println!("signed_carry");
+    assert_component(&components.signed_carry, &trace);
+}
+
+fn assert_projective_components(
+    trace: TreeVec<Vec<&Vec<M31>>>,
+    components: &ProjectiveRcbAirComponents,
+) {
+    println!("projective_rcb_mul");
+    assert_component(&components.mul, &trace);
+
+    println!("projective_rcb_raw_product_chunk");
+    assert_component(&components.raw_product_chunk, &trace);
+
+    println!("projective_rcb_folded_contribution");
+    assert_component(&components.folded_contribution, &trace);
+
+    println!("projective_rcb_folded_digit");
+    assert_component(&components.folded_digit, &trace);
+
+    println!("projective_rcb_range13");
+    assert_component(&components.range13, &trace);
+
+    println!("projective_rcb_signed_carry");
     assert_component(&components.signed_carry, &trace);
 }
 
@@ -186,11 +265,41 @@ fn honest_scalar_mod_mul_rows() -> ScalarModMulTraceRows {
     ScalarModMulTraceRows::new(TEST_MUL_ID, &trace).expect("trace rows generate")
 }
 
+#[cfg(test)]
+fn honest_projective_rcb_claim() -> ProjectiveRcbAirTraceClaim {
+    let generator = PreparedAffinePoint::from_affine(AffinePoint {
+        x: U256::from_le_u64s(&P256_GX),
+        y: U256::from_le_u64s(&P256_GY),
+    });
+    let output = PreparedAffinePoint::from_affine(
+        point_double(&generator.to_option().expect("generator is finite")).output,
+    );
+    let row = ProjectiveEcRow::new(
+        M31::from_u32_unchecked(0),
+        M31::from_u32_unchecked(0),
+        ProjectiveEcOp::Double,
+        &generator,
+        &PreparedAffinePoint::infinity(),
+        &output,
+    );
+    ProjectiveRcbAirTraceClaim::from_projective_trace(&ProjectiveEcTraceClaim { rows: vec![row] })
+        .expect("projective RCB trace generates")
+}
+
 #[test]
 fn scalar_mod_mul_debug_assert_constraints_pass_for_honest_trace() {
     let rows = honest_scalar_mod_mul_rows();
     assert!(ScalarModMulRelationAudit::from_rows(&rows).is_balanced());
     assert_scalar_mod_mul_constraints(&rows);
+}
+
+#[test]
+fn projective_rcb_debug_assert_constraints_pass_for_honest_trace() {
+    let claim = honest_projective_rcb_claim();
+    claim
+        .verify_proof_slice_traces(&ProjectiveRcbMulComponentRelations::dummy())
+        .expect("projective RCB proof-slice traces verify");
+    assert_projective_rcb_air_constraints(&claim);
 }
 
 #[test]
