@@ -23,7 +23,8 @@ use crate::fp_solinas::{
 };
 use crate::fp_solinas_air::{
     add_fp_solinas_reduction_digit, FpSolinasReductionDigitColumns, FpSolinasReductionRelations,
-    FpSolinasReductionTraceClaim, FpSolinasReductionTraceError, FP_SOLINAS_REDUCTION_DIGITS,
+    FpSolinasReductionTraceClaim, FpSolinasReductionTraceError,
+    FP_SOLINAS_CORRECTION_PRODUCT_MAX_ABS_DIGIT, FP_SOLINAS_REDUCTION_DIGITS,
     FP_SOLINAS_REDUCTION_DIGIT_TRACE_COLUMNS,
 };
 use crate::limbs::{EvalP256BigIntExt, P256EvalBigInt};
@@ -48,6 +49,8 @@ pub const PROJECTIVE_RCB_FOLDED_CONTRIBUTION_RELATION_ARITY: usize = 5;
 pub const PROJECTIVE_RCB_FOLDED_DIGIT_RELATION_ARITY: usize = 4;
 pub const PROJECTIVE_RCB_FOLDED_CARRY_RELATION_ARITY: usize = 4;
 const QM31_TRACE_COLUMNS: usize = 4;
+pub const PROJECTIVE_RCB_SIGNED_CARRY_EQUATION: &str = "projective_rcb_reduction";
+pub const PROJECTIVE_RCB_SIGNED_CARRY_BOUND: i64 = projective_rcb_signed_carry_bound();
 pub const PROJECTIVE_RCB_MUL_ROLE_LHS: u32 = 0;
 pub const PROJECTIVE_RCB_MUL_ROLE_RHS: u32 = 1;
 pub const PROJECTIVE_RCB_MUL_ROLE_RESULT: u32 = 2;
@@ -937,6 +940,19 @@ pub fn projective_rcb_folded_digit_contribution_sum_fits_m31() -> bool {
     projective_rcb_folded_digit_max_abs_contribution_sum() < M31_CENTERED_BOUND
 }
 
+pub const fn projective_rcb_signed_carry_bound() -> i64 {
+    max_i64(
+        folded_digit_carry_bound(),
+        fp_solinas_reduction_digit_carry_bound(),
+    )
+}
+
+pub const fn projective_rcb_signed_carry_log_size() -> u32 {
+    (2 * PROJECTIVE_RCB_SIGNED_CARRY_BOUND as u64 + 1)
+        .next_power_of_two()
+        .ilog2()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectiveRcbAirTraceClaim {
     pub rows: Vec<ProjectiveRcbAirRow>,
@@ -1210,6 +1226,60 @@ impl ProjectiveRcbAirTraceClaim {
         }
         let _ = claim;
         Ok(())
+    }
+
+    pub fn range13_lookup_values(&self) -> Vec<M31> {
+        let mut values = Vec::new();
+        for (_, _, mul) in self.mul_rows() {
+            values.extend(mul.trace.lhs.limbs().iter().copied());
+            values.extend(mul.trace.rhs.limbs().iter().copied());
+            values.extend(mul.trace.result.limbs().iter().copied());
+            for row in &mul.reduction.rows {
+                values.push(m31(row.folded_digit));
+                values.push(m31(row.result_limb));
+            }
+            for chunk in &mul.raw_product_chunks {
+                values.push(m31(chunk.digits[0]));
+                values.push(m31(chunk.digits[1]));
+            }
+            for row in &mul.folded_digits.rows {
+                values.push(m31(row.folded_digit));
+            }
+        }
+        values
+    }
+
+    pub fn signed_carry_lookup_values(&self) -> Result<Vec<i64>, ProjectiveRcbAirError> {
+        let mut values = Vec::new();
+        for (_, _, mul) in self.mul_rows() {
+            for row in &mul.reduction.rows {
+                push_signed_carry_lookup(&mut values, row.prev_carry)?;
+                push_signed_carry_lookup(&mut values, row.carry)?;
+            }
+            for row in &mul.folded_digits.rows {
+                push_signed_carry_lookup(&mut values, row.prev_carry)?;
+                push_signed_carry_lookup(&mut values, row.carry)?;
+            }
+        }
+        Ok(values)
+    }
+
+    pub fn range13_consumer_claimed_sum(&self, relation: &RangeCheckRelation) -> SecureField {
+        self.range13_lookup_values()
+            .into_iter()
+            .map(|value| relation_fraction(relation, 1, &[value]))
+            .sum()
+    }
+
+    pub fn signed_carry_consumer_claimed_sum(
+        &self,
+        relation: &RangeCheckRelation,
+    ) -> Result<SecureField, ProjectiveRcbAirError> {
+        Ok(self
+            .signed_carry_lookup_values()?
+            .into_iter()
+            .map(|value| relation_fraction(relation, 1, &[m31_i128(i128::from(value))]))
+            .sum())
     }
 
     fn mul_rows(&self) -> impl Iterator<Item = (usize, usize, &ProjectiveRcbMulRow)> {
@@ -3256,6 +3326,10 @@ pub enum ProjectiveRcbAirError {
         expected: usize,
         actual: usize,
     },
+    SignedCarryLookupOutOfRange {
+        value: i128,
+        bound: i64,
+    },
     ProjectiveOutputMismatch {
         source_index: usize,
     },
@@ -3550,6 +3624,49 @@ const fn folded_contribution_abs_digit_sum_const(digit_index: usize) -> i128 {
         coeff += 1;
     }
     sum
+}
+
+const fn folded_digit_carry_bound() -> i64 {
+    carry_bound_from_abs_terms(folded_contribution_max_abs_digit_sum_const())
+}
+
+const fn fp_solinas_reduction_digit_carry_bound() -> i64 {
+    let abs_terms = FP_SOLINAS_LIMB_BASE - 1
+        + FP_SOLINAS_CORRECTION_PRODUCT_MAX_ABS_DIGIT
+        + FP_SOLINAS_LIMB_BASE
+        - 1;
+    carry_bound_from_abs_terms(abs_terms)
+}
+
+const fn carry_bound_from_abs_terms(abs_terms: i128) -> i64 {
+    ceil_div_i128(abs_terms, FP_SOLINAS_LIMB_BASE - 1) as i64
+}
+
+const fn ceil_div_i128(value: i128, divisor: i128) -> i128 {
+    (value + divisor - 1) / divisor
+}
+
+const fn max_i64(lhs: i64, rhs: i64) -> i64 {
+    if lhs > rhs {
+        lhs
+    } else {
+        rhs
+    }
+}
+
+fn push_signed_carry_lookup(
+    values: &mut Vec<i64>,
+    value: i128,
+) -> Result<(), ProjectiveRcbAirError> {
+    if value.abs() <= i128::from(PROJECTIVE_RCB_SIGNED_CARRY_BOUND) {
+        values.push(value as i64);
+        Ok(())
+    } else {
+        Err(ProjectiveRcbAirError::SignedCarryLookupOutOfRange {
+            value,
+            bound: PROJECTIVE_RCB_SIGNED_CARRY_BOUND,
+        })
+    }
 }
 
 const fn raw_product_chunk_digit_use_count_const(coeff: usize, offset: usize) -> usize {
@@ -4091,6 +4208,7 @@ mod tests {
     use super::*;
     use crate::constants::{P256_GX, P256_GY};
     use crate::curve::point_double;
+    use crate::range_checks::{RangeCheckClaim, SignedCarryRangeClaim, RANGE13_BITS};
     use crate::types::AffinePoint;
     use num_traits::Zero;
     use stwo::core::air::Component;
@@ -4803,5 +4921,70 @@ mod tests {
         claim
             .verify_interaction_trace(&relations)
             .expect("interaction trace shape verifies");
+    }
+
+    #[test]
+    fn projective_rcb_air_range_lookup_consumers_balance_with_providers() {
+        let trace = one_row_trace(ProjectiveEcOp::Double, PreparedAffinePoint::infinity());
+        let claim =
+            ProjectiveRcbAirTraceClaim::from_projective_trace(&trace).expect("valid RCB AIR trace");
+        let relations = ProjectiveRcbMulComponentRelations::dummy();
+
+        let range13_values = claim.range13_lookup_values();
+        assert_eq!(
+            range13_values.len(),
+            claim.mul_row_count()
+                * (3 * N_LIMBS
+                    + 2 * FP_SOLINAS_REDUCTION_DIGITS
+                    + 2 * PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS
+                    + FP_SOLINAS_REDUCTION_DIGITS)
+        );
+        let range13 = RangeCheckClaim::new(RANGE13_BITS);
+        let range13_preprocessed = range13.gen_preprocessed_column();
+        let range13_multiplicity = range13.gen_multiplicity_trace(range13_values);
+        let (_, range13_provider) =
+            crate::range_checks::RangeCheckInteractionClaim::gen_interaction_trace(
+                &range13_multiplicity,
+                &range13_preprocessed,
+                &relations.range13,
+            );
+        assert_eq!(
+            range13_provider.claimed_sum + claim.range13_consumer_claimed_sum(&relations.range13),
+            secure_zero()
+        );
+
+        let signed_carry_values = claim
+            .signed_carry_lookup_values()
+            .expect("signed carries fit fixed bound");
+        assert_eq!(
+            signed_carry_values.len(),
+            claim.mul_row_count() * 4 * FP_SOLINAS_REDUCTION_DIGITS
+        );
+        let max_abs = signed_carry_values
+            .iter()
+            .map(|value| value.abs())
+            .max()
+            .unwrap_or_default();
+        assert!(max_abs <= PROJECTIVE_RCB_SIGNED_CARRY_BOUND);
+        let signed_carry = SignedCarryRangeClaim::new(
+            projective_rcb_signed_carry_log_size(),
+            PROJECTIVE_RCB_SIGNED_CARRY_BOUND,
+            PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
+        );
+        let signed_carry_preprocessed = signed_carry.gen_value_column();
+        let signed_carry_multiplicity = signed_carry.gen_multiplicity_trace(signed_carry_values);
+        let (_, signed_carry_provider) =
+            crate::range_checks::RangeCheckInteractionClaim::gen_interaction_trace(
+                &signed_carry_multiplicity,
+                &signed_carry_preprocessed,
+                &relations.signed_carry,
+            );
+        assert_eq!(
+            signed_carry_provider.claimed_sum
+                + claim
+                    .signed_carry_consumer_claimed_sum(&relations.signed_carry)
+                    .expect("signed carry consumer sum generates"),
+            secure_zero()
+        );
     }
 }
