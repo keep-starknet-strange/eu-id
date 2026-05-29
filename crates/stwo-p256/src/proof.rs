@@ -142,6 +142,8 @@ impl P256ProofClaim {
         self.selector_requests.verify()?;
         self.prepared_table.verify()?;
         self.prepared_table_ec_trace.verify()?;
+        self.prepared_table_ec_trace
+            .verify_against_table(&self.prepared_table)?;
         self.fake_glv_chain.verify()?;
         self.fake_glv_ec_trace
             .verify_against_chain(&self.fake_glv_chain)?;
@@ -152,6 +154,8 @@ impl P256ProofClaim {
         self.projective_rcb_air_trace.verify_base_trace()?;
         self.final_check.verify()?;
         self.prepared_use_counts.verify()?;
+        self.prepared_table
+            .verify_prepared_point_trace(&self.prepared_use_counts, &self.prepared_trace)?;
         Ok(())
     }
 }

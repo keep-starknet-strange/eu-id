@@ -73,6 +73,19 @@ impl PreparedTableClaim {
         ))
     }
 
+    pub fn verify_prepared_point_trace(
+        &self,
+        use_counts: &PreparedPointUseCountClaim,
+        trace: &PreparedPointTraceClaim,
+    ) -> Result<(), PreparedTableError> {
+        let expected = self.prepared_point_trace(use_counts)?;
+        if &expected == trace {
+            Ok(())
+        } else {
+            Err(PreparedTableError::PreparedPointTraceMismatch)
+        }
+    }
+
     pub fn instance(
         &self,
         sig_id: M31,
@@ -136,6 +149,70 @@ impl PreparedTableEcTraceClaim {
 
     pub fn active_row_count(&self) -> usize {
         self.rows.len()
+    }
+
+    pub fn verify_against_table(
+        &self,
+        table: &PreparedTableClaim,
+    ) -> Result<(), PreparedTableError> {
+        for cert in &table.certs {
+            let cert_rows = self
+                .rows
+                .iter()
+                .filter(|row| row.sig_id == cert.sig_id && row.cert_id == cert.cert_id)
+                .collect::<Vec<_>>();
+            if cert.cert_active.0 == 0 {
+                if cert_rows.is_empty() {
+                    continue;
+                }
+                return Err(PreparedTableError::InactiveEcTraceRows {
+                    sig_id: cert.sig_id.0,
+                    cert_id: cert.cert_id.0,
+                });
+            }
+
+            let expected_rows = if cert.cert_id.0 == CERT_ID_U1_GENERATOR {
+                PREPARED_BASE_COUNT + 3
+            } else {
+                PREPARED_BASE_COUNT + 5
+            };
+            if cert_rows.len() != expected_rows {
+                return Err(PreparedTableError::EcTraceCertRowCountMismatch {
+                    sig_id: cert.sig_id.0,
+                    cert_id: cert.cert_id.0,
+                    expected: expected_rows,
+                    actual: cert_rows.len(),
+                });
+            }
+
+            require_unique_output(
+                &cert_rows,
+                cert.sig_id,
+                cert.cert_id,
+                PreparedTableEcRowKind::AddR2R,
+                "R3",
+                &cert.r3,
+            )?;
+            for (index, point) in cert.base.iter().enumerate() {
+                require_unique_output(
+                    &cert_rows,
+                    cert.sig_id,
+                    cert.cert_id,
+                    PreparedTableEcRowKind::Base(index as u32),
+                    "Base",
+                    point,
+                )?;
+            }
+            require_unique_output(
+                &cert_rows,
+                cert.sig_id,
+                cert.cert_id,
+                PreparedTableEcRowKind::Table16,
+                "Table16",
+                &cert.table16,
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -456,7 +533,66 @@ pub enum PreparedTableError {
         cert_id: u32,
         table_index: u32,
     },
+    PreparedPointTraceMismatch,
+    InactiveEcTraceRows {
+        sig_id: u32,
+        cert_id: u32,
+    },
+    EcTraceCertRowCountMismatch {
+        sig_id: u32,
+        cert_id: u32,
+        expected: usize,
+        actual: usize,
+    },
+    EcTraceExpectedOutputMissing {
+        sig_id: u32,
+        cert_id: u32,
+        label: &'static str,
+    },
+    EcTraceExpectedOutputDuplicate {
+        sig_id: u32,
+        cert_id: u32,
+        label: &'static str,
+    },
+    EcTraceExpectedOutputMismatch {
+        sig_id: u32,
+        cert_id: u32,
+        label: &'static str,
+    },
     NonCanonicalInfinity,
+}
+
+fn require_unique_output(
+    rows: &[&PreparedTableEcRow],
+    sig_id: M31,
+    cert_id: M31,
+    kind: PreparedTableEcRowKind,
+    label: &'static str,
+    expected: &PreparedAffinePoint,
+) -> Result<(), PreparedTableError> {
+    let matches = rows
+        .iter()
+        .copied()
+        .filter(|row| row.kind == kind)
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [] => Err(PreparedTableError::EcTraceExpectedOutputMissing {
+            sig_id: sig_id.0,
+            cert_id: cert_id.0,
+            label,
+        }),
+        [row] if &row.output == expected => Ok(()),
+        [_row] => Err(PreparedTableError::EcTraceExpectedOutputMismatch {
+            sig_id: sig_id.0,
+            cert_id: cert_id.0,
+            label,
+        }),
+        _ => Err(PreparedTableError::EcTraceExpectedOutputDuplicate {
+            sig_id: sig_id.0,
+            cert_id: cert_id.0,
+            label,
+        }),
+    }
 }
 
 fn prepared_table_ec_rows_for_cert(
@@ -851,5 +987,64 @@ mod tests {
             err,
             PreparedTableError::EcTraceOutputMismatch { .. }
         ));
+    }
+
+    #[test]
+    fn prepared_table_ec_trace_links_outputs_to_table_points() {
+        let (certs, fake_glv, selectors, table) = build_table(42);
+        let trace = PreparedTableEcTraceClaim::from_claims(&certs, &fake_glv, &selectors, &table)
+            .expect("valid ec trace");
+
+        trace
+            .verify_against_table(&table)
+            .expect("ec trace outputs match table points");
+    }
+
+    #[test]
+    fn prepared_table_ec_trace_detects_mutated_table_output_link() {
+        let (certs, fake_glv, selectors, mut table) = build_table(42);
+        let trace = PreparedTableEcTraceClaim::from_claims(&certs, &fake_glv, &selectors, &table)
+            .expect("valid ec trace");
+        table.certs[0].base[0] = PreparedAffinePoint::infinity();
+
+        let err = trace
+            .verify_against_table(&table)
+            .expect_err("mutated table output link must fail");
+
+        assert!(matches!(
+            err,
+            PreparedTableError::EcTraceExpectedOutputMismatch { label: "Base", .. }
+        ));
+    }
+
+    #[test]
+    fn prepared_table_prepared_point_trace_matches_table_and_use_counts() {
+        let (_, _, selectors, table) = build_table(42);
+        let use_counts =
+            PreparedPointUseCountClaim::from_selector_claim(&selectors).expect("valid counts");
+        let prepared_trace = table
+            .prepared_point_trace(&use_counts)
+            .expect("prepared trace generates");
+
+        table
+            .verify_prepared_point_trace(&use_counts, &prepared_trace)
+            .expect("prepared providers match table");
+    }
+
+    #[test]
+    fn prepared_table_prepared_point_trace_detects_mutated_provider() {
+        let (_, _, selectors, table) = build_table(42);
+        let use_counts =
+            PreparedPointUseCountClaim::from_selector_claim(&selectors).expect("valid counts");
+        let mut prepared_trace = table
+            .prepared_point_trace(&use_counts)
+            .expect("prepared trace generates");
+        prepared_trace.providers[0].instance.x = P256M31BigInt::zero();
+
+        let err = table
+            .verify_prepared_point_trace(&use_counts, &prepared_trace)
+            .expect_err("mutated provider must fail");
+
+        assert_eq!(err, PreparedTableError::PreparedPointTraceMismatch);
     }
 }
