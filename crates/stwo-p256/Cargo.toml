@@ -10,6 +10,8 @@ std = ["stwo/std", "stwo-constraint-framework/std"]
 [dependencies]
 stwo = { git = "https://github.com/starkware-libs/stwo.git", features = ["prover"] }
 stwo-constraint-framework = { git = "https://github.com/starkware-libs/stwo.git", features = ["prover"] }
+crypto-bigint = { version = "0.7.3", features = ["serde", "subtle"] }
+subtle = "2.6.1"
 itertools = { version = "0.12", default-features = false, features = ["use_alloc"] }
 num-traits = "0.2"
 serde = { version = "1", features = ["derive"] }
