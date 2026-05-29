@@ -1,4 +1,5 @@
 use stwo::core::{
+    channel::Channel,
     fields::{m31::M31, qm31::SecureField},
     utils::{bit_reverse_index, coset_index_to_circle_domain_index},
     ColumnVec,
@@ -395,7 +396,7 @@ impl FrameworkEval for ProjectiveRcbFoldedContributionEval {
     }
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 3
+        self.log_size + 4
     }
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
@@ -413,7 +414,7 @@ impl FrameworkEval for ProjectiveRcbFoldedDigitEval {
     }
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 2
+        self.log_size + 3
     }
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
@@ -431,7 +432,7 @@ impl FrameworkEval for ProjectiveRcbRawProductChunkEval {
     }
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 2
+        self.log_size + 4
     }
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
@@ -456,6 +457,18 @@ pub struct ProjectiveRcbMulComponentRelations {
 }
 
 impl ProjectiveRcbMulComponentRelations {
+    pub fn draw(channel: &mut impl Channel) -> Self {
+        Self {
+            range13: RangeCheckRelation::draw(channel),
+            signed_carry: RangeCheckRelation::draw(channel),
+            mul_limb: ProjectiveRcbMulLimbRelation::draw(channel),
+            raw_product_chunk_digit: ProjectiveRcbRawProductChunkDigitRelation::draw(channel),
+            folded_contribution: ProjectiveRcbFoldedContributionRelation::draw(channel),
+            folded_digit: ProjectiveRcbFoldedDigitRelation::draw(channel),
+            folded_carry: ProjectiveRcbFoldedCarryRelation::draw(channel),
+        }
+    }
+
     pub fn dummy() -> Self {
         Self {
             range13: RangeCheckRelation::dummy(),
@@ -4788,6 +4801,14 @@ mod tests {
             .contains(&ProjectiveRcbRawProductChunkScheduleColumnIds::digit_use_count(2)));
         assert_eq!(PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGIT_RELATION_ARITY, 6);
         assert!(projective_rcb_raw_product_chunk_fits_m31());
+        assert_eq!(
+            ProjectiveRcbRawProductChunkEval {
+                log_size: 8,
+                relations: ProjectiveRcbMulComponentRelations::dummy(),
+            }
+            .max_constraint_log_degree_bound(),
+            12
+        );
     }
 
     #[test]
@@ -4853,7 +4874,7 @@ mod tests {
                 relations: ProjectiveRcbMulComponentRelations::dummy(),
             }
             .max_constraint_log_degree_bound(),
-            12
+            13
         );
     }
 
@@ -4952,7 +4973,7 @@ mod tests {
                 relations: ProjectiveRcbMulComponentRelations::dummy(),
             }
             .max_constraint_log_degree_bound(),
-            11
+            12
         );
     }
 

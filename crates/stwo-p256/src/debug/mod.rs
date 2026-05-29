@@ -96,7 +96,8 @@ pub fn assert_scalar_mod_mul_constraints(rows: &ScalarModMulTraceRows) {
 /// and allocator paths as the proof draft. It only swaps PCS commitment and FRI
 /// for a direct trace-domain constraint check.
 pub fn assert_projective_rcb_air_constraints(claim: &ProjectiveRcbAirTraceClaim) {
-    let relations = ProjectiveRcbMulComponentRelations::dummy();
+    let mut dummy_channel = Blake2sM31Channel::default();
+    let relations = ProjectiveRcbMulComponentRelations::draw(&mut dummy_channel);
     let preprocessed_ids = claim.proof_slice_preprocessed_column_ids(&relations);
     let preprocessed = claim
         .gen_proof_slice_preprocessed_trace(&preprocessed_ids)
