@@ -1058,6 +1058,41 @@ impl ProjectiveRcbAirTraceClaim {
             })
         }
     }
+
+    pub fn gen_base_trace(&self) -> Result<Vec<M31ColumnEval>, ProjectiveRcbAirError> {
+        let log_sizes = self.component_log_sizes();
+        let mut columns = Vec::new();
+        columns.extend(gen_projective_rcb_mul_base_trace(self, log_sizes.mul)?);
+        columns.extend(gen_projective_rcb_raw_product_chunk_base_trace(
+            self,
+            log_sizes.raw_product_chunk,
+        )?);
+        columns.extend(gen_projective_rcb_folded_contribution_base_trace(
+            self,
+            log_sizes.folded_contribution,
+        )?);
+        columns.extend(gen_projective_rcb_folded_digit_base_trace(
+            self,
+            log_sizes.folded_digit,
+        )?);
+        Ok(columns)
+    }
+
+    pub fn verify_base_trace(&self) -> Result<(), ProjectiveRcbAirError> {
+        let base = self.gen_base_trace()?;
+        let expected = PROJECTIVE_RCB_MUL_TRACE_COLUMNS
+            + PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TRACE_COLUMNS
+            + PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TRACE_COLUMNS
+            + PROJECTIVE_RCB_FOLDED_DIGIT_TRACE_COLUMNS;
+        if base.len() == expected {
+            Ok(())
+        } else {
+            Err(ProjectiveRcbAirError::BaseTraceColumnCountMismatch {
+                expected,
+                actual: base.len(),
+            })
+        }
+    }
 }
 
 pub fn projective_rcb_raw_product_chunk_schedule_columns(
@@ -1318,6 +1353,145 @@ fn projective_rcb_air_schedule_preprocessed_columns(
             .map(|column| column_to_eval(column.id, column.values)),
     );
     columns
+}
+
+fn gen_projective_rcb_mul_base_trace(
+    trace: &ProjectiveRcbAirTraceClaim,
+    log_size: u32,
+) -> Result<Vec<M31ColumnEval>, ProjectiveRcbAirError> {
+    let rows = trace.rows.iter().flat_map(|air_row| {
+        air_row
+            .muls
+            .iter()
+            .enumerate()
+            .map(move |(mul_index, mul)| {
+                let mut row = Vec::with_capacity(PROJECTIVE_RCB_MUL_TRACE_COLUMNS);
+                row.push(m31(1));
+                row.push(m31_usize(air_row.source_index));
+                row.push(m31_usize(mul_index));
+                row.extend(mul.trace.lhs.limbs().iter().copied());
+                row.extend(mul.trace.rhs.limbs().iter().copied());
+                row.extend(mul.trace.result.limbs().iter().copied());
+                row.push(m31_i128(mul.folded_digits.final_carry));
+                for reduction in &mul.reduction.rows {
+                    row.push(m31(reduction.folded_digit));
+                    row.push(m31_i128(reduction.correction_product_digit));
+                    row.push(m31(reduction.result_limb));
+                    row.push(m31_i128(reduction.prev_carry));
+                    row.push(m31_i128(reduction.carry));
+                }
+                row
+            })
+    });
+    rows_to_base_trace(rows, PROJECTIVE_RCB_MUL_TRACE_COLUMNS, log_size)
+}
+
+fn gen_projective_rcb_raw_product_chunk_base_trace(
+    trace: &ProjectiveRcbAirTraceClaim,
+    log_size: u32,
+) -> Result<Vec<M31ColumnEval>, ProjectiveRcbAirError> {
+    let rows = trace.rows.iter().flat_map(|air_row| {
+        air_row.muls.iter().flat_map(|mul| {
+            mul.raw_product_chunks.iter().map(|chunk| {
+                let mut row = Vec::with_capacity(PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TRACE_COLUMNS);
+                row.push(m31_usize(chunk.source_index));
+                row.push(m31_usize(chunk.mul_index));
+                for term in &chunk.terms {
+                    row.push(m31(term.lhs_limb));
+                    row.push(m31(term.rhs_limb));
+                }
+                row.extend(chunk.digits.iter().copied().map(m31));
+                row
+            })
+        })
+    });
+    rows_to_base_trace(
+        rows,
+        PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TRACE_COLUMNS,
+        log_size,
+    )
+}
+
+fn gen_projective_rcb_folded_contribution_base_trace(
+    trace: &ProjectiveRcbAirTraceClaim,
+    log_size: u32,
+) -> Result<Vec<M31ColumnEval>, ProjectiveRcbAirError> {
+    let rows = trace.rows.iter().flat_map(|air_row| {
+        air_row.muls.iter().flat_map(|mul| {
+            mul.folded_contributions.rows.iter().map(|contribution| {
+                let mut row = Vec::with_capacity(PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TRACE_COLUMNS);
+                row.push(m31_usize(contribution.source_index));
+                row.push(m31_usize(contribution.mul_index));
+                row.extend(contribution.terms.iter().map(|term| m31(term.raw_digit)));
+                row.push(m31_i128(contribution.contribution_sum));
+                row
+            })
+        })
+    });
+    rows_to_base_trace(
+        rows,
+        PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TRACE_COLUMNS,
+        log_size,
+    )
+}
+
+fn gen_projective_rcb_folded_digit_base_trace(
+    trace: &ProjectiveRcbAirTraceClaim,
+    log_size: u32,
+) -> Result<Vec<M31ColumnEval>, ProjectiveRcbAirError> {
+    let rows = trace.rows.iter().flat_map(|air_row| {
+        air_row.muls.iter().flat_map(|mul| {
+            mul.folded_digits.rows.iter().map(|digit| {
+                let mut row = Vec::with_capacity(PROJECTIVE_RCB_FOLDED_DIGIT_TRACE_COLUMNS);
+                row.push(m31_usize(digit.source_index));
+                row.push(m31_usize(digit.mul_index));
+                row.extend(
+                    digit
+                        .contribution_groups
+                        .iter()
+                        .map(|group| m31_i128(group.contribution_sum)),
+                );
+                row.push(m31_i128(digit.prev_carry));
+                row.push(m31(digit.folded_digit));
+                row.push(m31_i128(digit.carry));
+                row
+            })
+        })
+    });
+    rows_to_base_trace(rows, PROJECTIVE_RCB_FOLDED_DIGIT_TRACE_COLUMNS, log_size)
+}
+
+fn rows_to_base_trace(
+    rows: impl IntoIterator<Item = Vec<M31>>,
+    width: usize,
+    log_size: u32,
+) -> Result<Vec<M31ColumnEval>, ProjectiveRcbAirError> {
+    let row_count = 1usize << log_size;
+    let mut columns = vec![vec![m31(0); row_count]; width];
+    let mut actual_rows = 0usize;
+    for (row_index, row) in rows.into_iter().enumerate() {
+        if row.len() != width {
+            return Err(ProjectiveRcbAirError::BaseTraceRowWidthMismatch {
+                expected: width,
+                actual: row.len(),
+            });
+        }
+        if row_index >= row_count {
+            return Err(ProjectiveRcbAirError::BaseTraceRowCountMismatch {
+                max: row_count,
+                actual: row_index + 1,
+            });
+        }
+        for (column, value) in columns.iter_mut().zip(row) {
+            column[row_index] = value;
+        }
+        actual_rows = row_index + 1;
+    }
+    debug_assert!(actual_rows <= row_count);
+    Ok(columns
+        .into_iter()
+        .map(|values| m31_column_eval(log_size, values))
+        .collect())
 }
 
 fn schedule_columns_to_evals<C, I>(columns: I) -> Vec<M31ColumnEval>
@@ -2450,6 +2624,18 @@ pub enum ProjectiveRcbAirError {
     },
     PreprocessedColumnCountMismatch {
         expected: usize,
+        actual: usize,
+    },
+    BaseTraceColumnCountMismatch {
+        expected: usize,
+        actual: usize,
+    },
+    BaseTraceRowWidthMismatch {
+        expected: usize,
+        actual: usize,
+    },
+    BaseTraceRowCountMismatch {
+        max: usize,
         actual: usize,
     },
     ProjectiveOutputMismatch {
@@ -3906,5 +4092,50 @@ mod tests {
             err,
             ProjectiveRcbAirError::PreprocessedColumnMissing { .. }
         ));
+    }
+
+    #[test]
+    fn projective_rcb_air_base_trace_materializes_component_columns() {
+        let trace = one_row_trace(ProjectiveEcOp::Double, PreparedAffinePoint::infinity());
+        let claim =
+            ProjectiveRcbAirTraceClaim::from_projective_trace(&trace).expect("valid RCB AIR trace");
+        let base = claim.gen_base_trace().expect("base trace materializes");
+        let log_sizes = claim.component_log_sizes();
+        let raw_start = PROJECTIVE_RCB_MUL_TRACE_COLUMNS;
+        let folded_contribution_start = raw_start + PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TRACE_COLUMNS;
+        let folded_digit_start =
+            folded_contribution_start + PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TRACE_COLUMNS;
+
+        assert_eq!(
+            base.len(),
+            PROJECTIVE_RCB_MUL_TRACE_COLUMNS
+                + PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TRACE_COLUMNS
+                + PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TRACE_COLUMNS
+                + PROJECTIVE_RCB_FOLDED_DIGIT_TRACE_COLUMNS
+        );
+        assert_eq!(base[0].domain.log_size(), log_sizes.mul);
+        assert_eq!(
+            base[raw_start].domain.log_size(),
+            log_sizes.raw_product_chunk
+        );
+        assert_eq!(
+            base[folded_contribution_start].domain.log_size(),
+            log_sizes.folded_contribution
+        );
+        assert_eq!(
+            base[folded_digit_start].domain.log_size(),
+            log_sizes.folded_digit
+        );
+        assert_eq!(
+            base[0]
+                .to_cpu()
+                .iter()
+                .filter(|&&value| value == m31(1))
+                .count(),
+            claim.mul_row_count()
+        );
+        claim
+            .verify_base_trace()
+            .expect("base trace shape verifies");
     }
 }

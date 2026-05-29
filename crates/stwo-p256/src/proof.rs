@@ -147,6 +147,7 @@ impl P256ProofClaim {
         self.projective_rcb_air_trace
             .verify_against_projective_trace(&self.projective_ec_trace)?;
         self.projective_rcb_air_trace.verify_preprocessed_trace()?;
+        self.projective_rcb_air_trace.verify_base_trace()?;
         self.final_check.verify()?;
         self.prepared_use_counts.verify()?;
         Ok(())
@@ -574,8 +575,10 @@ mod tests {
     use crate::prepared_table::PreparedAffinePoint;
     use crate::projective_air::{
         PROJECTIVE_RCB_FOLDED_CONTRIBUTION_ROWS, PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERMS,
-        PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS, PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS,
-        PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS,
+        PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TRACE_COLUMNS, PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS,
+        PROJECTIVE_RCB_FOLDED_DIGIT_TRACE_COLUMNS, PROJECTIVE_RCB_MUL_TRACE_COLUMNS,
+        PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS, PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS,
+        PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TRACE_COLUMNS,
     };
     use crate::types::{AffinePoint, Signature, U256};
     use core::cmp::Ordering;
@@ -727,6 +730,18 @@ mod tests {
         assert_eq!(
             projective_rcb_preprocessed.len(),
             projective_rcb_preprocessed_ids.len()
+        );
+        let projective_rcb_base = proof
+            .claim
+            .projective_rcb_air_trace
+            .gen_base_trace()
+            .expect("projective RCB base trace generates");
+        assert_eq!(
+            projective_rcb_base.len(),
+            PROJECTIVE_RCB_MUL_TRACE_COLUMNS
+                + PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TRACE_COLUMNS
+                + PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TRACE_COLUMNS
+                + PROJECTIVE_RCB_FOLDED_DIGIT_TRACE_COLUMNS
         );
         assert_eq!(proof.claim.final_check.rows.len(), 2);
         assert_eq!(proof.claim.prepared_use_counts.certs.len(), 4);
