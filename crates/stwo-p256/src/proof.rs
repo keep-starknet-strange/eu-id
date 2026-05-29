@@ -148,6 +148,8 @@ impl P256ProofClaim {
         self.fake_glv_ec_trace
             .verify_against_chain(&self.fake_glv_chain)?;
         self.projective_ec_trace.verify()?;
+        self.projective_ec_trace
+            .verify_against_native_traces(&self.prepared_table_ec_trace, &self.fake_glv_ec_trace)?;
         self.projective_rcb_air_trace
             .verify_against_projective_trace(&self.projective_ec_trace)?;
         self.projective_rcb_air_trace.verify_preprocessed_trace()?;

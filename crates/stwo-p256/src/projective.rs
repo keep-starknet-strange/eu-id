@@ -53,6 +53,22 @@ impl ProjectiveEcTraceClaim {
         Ok(())
     }
 
+    pub fn verify_against_native_traces(
+        &self,
+        prepared: &PreparedTableEcTraceClaim,
+        fake_glv: &FakeGlvPrimitiveEcTraceClaim,
+    ) -> Result<(), ProjectiveEcError> {
+        let expected = Self::from_native_traces(prepared, fake_glv)?;
+        if self == &expected {
+            Ok(())
+        } else {
+            Err(ProjectiveEcError::NativeTraceMismatch {
+                expected: expected.rows.len(),
+                actual: self.rows.len(),
+            })
+        }
+    }
+
     pub fn active_row_count(&self) -> usize {
         self.rows.len()
     }
@@ -217,6 +233,10 @@ pub enum ProjectiveEcError {
         cert_id: u32,
         op: ProjectiveEcOp,
     },
+    NativeTraceMismatch {
+        expected: usize,
+        actual: usize,
+    },
 }
 
 pub fn rcb_double(input: &ProjectivePoint) -> ProjectivePoint {
@@ -370,6 +390,7 @@ mod tests {
     use crate::constants::{P256_GX, P256_GY};
     use crate::curve::{point_add, point_double};
     use crate::field_ops::sub_mod_witness;
+    use crate::prepared_table::{PreparedTableEcRow, PreparedTableEcRowKind};
 
     fn generator() -> PreparedAffinePoint {
         PreparedAffinePoint::from_affine(AffinePoint {
@@ -450,5 +471,54 @@ mod tests {
             projective.to_prepared().unwrap(),
             PreparedAffinePoint::infinity()
         );
+    }
+
+    #[test]
+    fn projective_ec_trace_links_back_to_native_ec_rows() {
+        let g = generator();
+        let g2 = PreparedAffinePoint::from_affine(point_double(&g.to_option().unwrap()).output);
+        let prepared = PreparedTableEcTraceClaim {
+            rows: vec![PreparedTableEcRow {
+                sig_id: M31::from_u32_unchecked(0),
+                cert_id: M31::from_u32_unchecked(0),
+                kind: PreparedTableEcRowKind::DoubleR,
+                lhs: g.clone(),
+                rhs: PreparedAffinePoint::infinity(),
+                output: g2,
+            }],
+        };
+        let fake_glv = FakeGlvPrimitiveEcTraceClaim { rows: Vec::new() };
+        let trace = ProjectiveEcTraceClaim::from_native_traces(&prepared, &fake_glv)
+            .expect("projective trace generates");
+
+        trace
+            .verify_against_native_traces(&prepared, &fake_glv)
+            .expect("native source linkage verifies");
+    }
+
+    #[test]
+    fn projective_ec_trace_detects_mutated_native_source_link() {
+        let g = generator();
+        let g2 = PreparedAffinePoint::from_affine(point_double(&g.to_option().unwrap()).output);
+        let prepared = PreparedTableEcTraceClaim {
+            rows: vec![PreparedTableEcRow {
+                sig_id: M31::from_u32_unchecked(0),
+                cert_id: M31::from_u32_unchecked(0),
+                kind: PreparedTableEcRowKind::DoubleR,
+                lhs: g.clone(),
+                rhs: PreparedAffinePoint::infinity(),
+                output: g2.clone(),
+            }],
+        };
+        let fake_glv = FakeGlvPrimitiveEcTraceClaim { rows: Vec::new() };
+        let mut trace = ProjectiveEcTraceClaim::from_native_traces(&prepared, &fake_glv)
+            .expect("projective trace generates");
+        trace.rows[0].output_affine = g;
+
+        let err = trace
+            .verify_against_native_traces(&prepared, &fake_glv)
+            .expect_err("mutated projective source link must fail");
+
+        assert!(matches!(err, ProjectiveEcError::NativeTraceMismatch { .. }));
     }
 }
