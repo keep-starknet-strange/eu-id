@@ -32,7 +32,11 @@ use crate::prepared_table::PreparedAffinePoint;
 use crate::projective::{
     ProjectiveEcError, ProjectiveEcOp, ProjectiveEcRow, ProjectiveEcTraceClaim, ProjectivePoint,
 };
-use crate::range_checks::{add_range_check, RangeCheckRelation};
+use crate::range_checks::{
+    add_range_check, RangeCheckClaim, RangeCheckComponent, RangeCheckEval,
+    RangeCheckInteractionClaim, RangeCheckRelation, SignedCarryRangeClaim,
+    SignedCarryRangeComponent, SignedCarryRangeEval, RANGE13_BITS,
+};
 use crate::scalar::scalar_mod_mul::columns::{m31_column_eval, padded_log_size, M31ColumnEval};
 use crate::types::U256;
 
@@ -248,6 +252,87 @@ impl ProjectiveRcbAirInteractionTraces {
         columns.extend(self.folded_contribution);
         columns.extend(self.folded_digit);
         columns
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ProjectiveRcbAirProofInteractionClaim {
+    pub components: ProjectiveRcbAirComponentInteractionClaim,
+    pub range13: RangeCheckInteractionClaim,
+    pub signed_carry: RangeCheckInteractionClaim,
+}
+
+impl ProjectiveRcbAirProofInteractionClaim {
+    pub fn total(&self) -> SecureField {
+        self.components.total() + self.range13.claimed_sum + self.signed_carry.claimed_sum
+    }
+}
+
+pub struct ProjectiveRcbAirComponents {
+    pub mul: ProjectiveRcbMulComponent,
+    pub raw_product_chunk: ProjectiveRcbRawProductChunkComponent,
+    pub folded_contribution: ProjectiveRcbFoldedContributionComponent,
+    pub folded_digit: ProjectiveRcbFoldedDigitComponent,
+    pub range13: RangeCheckComponent,
+    pub signed_carry: SignedCarryRangeComponent,
+}
+
+impl ProjectiveRcbAirComponents {
+    pub fn new(
+        allocator: &mut TraceLocationAllocator,
+        claim: &ProjectiveRcbAirTraceClaim,
+        interaction_claim: &ProjectiveRcbAirProofInteractionClaim,
+        relations: &ProjectiveRcbMulComponentRelations,
+    ) -> Self {
+        let log_sizes = claim.component_log_sizes();
+        Self {
+            mul: ProjectiveRcbMulComponent::new(
+                allocator,
+                ProjectiveRcbMulEval {
+                    log_size: log_sizes.mul,
+                    relations: relations.clone(),
+                },
+                interaction_claim.components.mul,
+            ),
+            raw_product_chunk: ProjectiveRcbRawProductChunkComponent::new(
+                allocator,
+                ProjectiveRcbRawProductChunkEval {
+                    log_size: log_sizes.raw_product_chunk,
+                    relations: relations.clone(),
+                },
+                interaction_claim.components.raw_product_chunk,
+            ),
+            folded_contribution: ProjectiveRcbFoldedContributionComponent::new(
+                allocator,
+                ProjectiveRcbFoldedContributionEval {
+                    log_size: log_sizes.folded_contribution,
+                    relations: relations.clone(),
+                },
+                interaction_claim.components.folded_contribution,
+            ),
+            folded_digit: ProjectiveRcbFoldedDigitComponent::new(
+                allocator,
+                ProjectiveRcbFoldedDigitEval {
+                    log_size: log_sizes.folded_digit,
+                    relations: relations.clone(),
+                },
+                interaction_claim.components.folded_digit,
+            ),
+            range13: RangeCheckComponent::new(
+                allocator,
+                RangeCheckEval::new(relations.range13.clone(), RANGE13_BITS),
+                interaction_claim.range13.claimed_sum,
+            ),
+            signed_carry: SignedCarryRangeComponent::new(
+                allocator,
+                SignedCarryRangeEval::new(
+                    relations.signed_carry.clone(),
+                    projective_rcb_signed_carry_log_size(),
+                    PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
+                ),
+                interaction_claim.signed_carry.claimed_sum,
+            ),
+        }
     }
 }
 
@@ -953,6 +1038,14 @@ pub const fn projective_rcb_signed_carry_log_size() -> u32 {
         .ilog2()
 }
 
+fn projective_rcb_signed_carry_claim() -> SignedCarryRangeClaim {
+    SignedCarryRangeClaim::new(
+        projective_rcb_signed_carry_log_size(),
+        PROJECTIVE_RCB_SIGNED_CARRY_BOUND,
+        PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
+    )
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectiveRcbAirTraceClaim {
     pub rows: Vec<ProjectiveRcbAirRow>,
@@ -1206,6 +1299,143 @@ impl ProjectiveRcbAirTraceClaim {
                 folded_digit: folded_digit_claim,
             },
         )
+    }
+
+    pub fn proof_slice_preprocessed_column_ids(
+        &self,
+        relations: &ProjectiveRcbMulComponentRelations,
+    ) -> Vec<PreProcessedColumnId> {
+        let mut allocator = TraceLocationAllocator::default();
+        let interaction_claim = ProjectiveRcbAirProofInteractionClaim {
+            components: ProjectiveRcbAirComponentInteractionClaim {
+                mul: secure_zero(),
+                raw_product_chunk: secure_zero(),
+                folded_contribution: secure_zero(),
+                folded_digit: secure_zero(),
+            },
+            range13: RangeCheckInteractionClaim {
+                claimed_sum: secure_zero(),
+            },
+            signed_carry: RangeCheckInteractionClaim {
+                claimed_sum: secure_zero(),
+            },
+        };
+        let _ =
+            ProjectiveRcbAirComponents::new(&mut allocator, self, &interaction_claim, relations);
+        allocator.preprocessed_columns().clone()
+    }
+
+    pub fn gen_proof_slice_preprocessed_trace(
+        &self,
+        ids: &[PreProcessedColumnId],
+    ) -> Result<Vec<M31ColumnEval>, ProjectiveRcbAirError> {
+        let mut columns = projective_rcb_air_schedule_preprocessed_columns(self);
+        let range13 = RangeCheckClaim::new(RANGE13_BITS);
+        columns.push((
+            crate::range_checks::range_check_value_column_id(RANGE13_BITS),
+            range13.gen_preprocessed_column(),
+        ));
+        let signed_carry = projective_rcb_signed_carry_claim();
+        columns.push((
+            crate::range_checks::signed_carry_value_column_id(PROJECTIVE_RCB_SIGNED_CARRY_EQUATION),
+            signed_carry.gen_value_column(),
+        ));
+        columns.push((
+            crate::range_checks::signed_carry_active_column_id(
+                PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
+            ),
+            signed_carry.gen_active_column(),
+        ));
+
+        ids.iter()
+            .map(|id| {
+                columns
+                    .iter()
+                    .find_map(|(column_id, eval)| (column_id == id).then(|| eval.clone()))
+                    .ok_or_else(|| ProjectiveRcbAirError::PreprocessedColumnMissing {
+                        id: id.id.clone(),
+                    })
+            })
+            .collect()
+    }
+
+    pub fn gen_proof_slice_base_trace(&self) -> Result<Vec<M31ColumnEval>, ProjectiveRcbAirError> {
+        let mut trace = self.gen_base_trace()?;
+        let range13 = RangeCheckClaim::new(RANGE13_BITS);
+        trace.push(range13.gen_multiplicity_trace(self.range13_lookup_values()));
+        trace.push(
+            projective_rcb_signed_carry_claim()
+                .gen_multiplicity_trace(self.signed_carry_lookup_values()?),
+        );
+        Ok(trace)
+    }
+
+    pub fn gen_proof_slice_interaction_trace(
+        &self,
+        relations: &ProjectiveRcbMulComponentRelations,
+    ) -> Result<(Vec<M31ColumnEval>, ProjectiveRcbAirProofInteractionClaim), ProjectiveRcbAirError>
+    {
+        let (component_traces, component_claim) = self.gen_interaction_trace(relations);
+        let mut trace = component_traces.into_columns();
+
+        let range13 = RangeCheckClaim::new(RANGE13_BITS);
+        let range13_values = range13.gen_preprocessed_column();
+        let range13_multiplicity = range13.gen_multiplicity_trace(self.range13_lookup_values());
+        let (range13_trace, range13_claim) = RangeCheckInteractionClaim::gen_interaction_trace(
+            &range13_multiplicity,
+            &range13_values,
+            &relations.range13,
+        );
+        trace.extend(range13_trace);
+
+        let signed_carry = projective_rcb_signed_carry_claim();
+        let signed_carry_values = signed_carry.gen_value_column();
+        let signed_carry_multiplicity =
+            signed_carry.gen_multiplicity_trace(self.signed_carry_lookup_values()?);
+        let (signed_carry_trace, signed_carry_claim) =
+            RangeCheckInteractionClaim::gen_interaction_trace(
+                &signed_carry_multiplicity,
+                &signed_carry_values,
+                &relations.signed_carry,
+            );
+        trace.extend(signed_carry_trace);
+
+        Ok((
+            trace,
+            ProjectiveRcbAirProofInteractionClaim {
+                components: component_claim,
+                range13: range13_claim,
+                signed_carry: signed_carry_claim,
+            },
+        ))
+    }
+
+    pub fn verify_proof_slice_traces(
+        &self,
+        relations: &ProjectiveRcbMulComponentRelations,
+    ) -> Result<(), ProjectiveRcbAirError> {
+        let ids = self.proof_slice_preprocessed_column_ids(relations);
+        let preprocessed = self.gen_proof_slice_preprocessed_trace(&ids)?;
+        let base = self.gen_proof_slice_base_trace()?;
+        let (_, interaction_claim) = self.gen_proof_slice_interaction_trace(relations)?;
+        if preprocessed.len() != ids.len() {
+            return Err(ProjectiveRcbAirError::PreprocessedColumnCountMismatch {
+                expected: ids.len(),
+                actual: preprocessed.len(),
+            });
+        }
+        let expected_base = PROJECTIVE_RCB_MUL_TRACE_COLUMNS
+            + PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TRACE_COLUMNS
+            + PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TRACE_COLUMNS
+            + PROJECTIVE_RCB_FOLDED_DIGIT_TRACE_COLUMNS
+            + 2;
+        if base.len() != expected_base {
+            return Err(ProjectiveRcbAirError::BaseTraceColumnCountMismatch {
+                expected: expected_base,
+                actual: base.len(),
+            });
+        }
+        verify_relation_zero("ProjectiveRcbAirProofSlice", interaction_claim.total())
     }
 
     pub fn verify_interaction_trace(
@@ -4986,5 +5216,66 @@ mod tests {
                     .expect("signed carry consumer sum generates"),
             secure_zero()
         );
+    }
+
+    #[test]
+    fn projective_rcb_air_proof_slice_materializes_registered_traces() {
+        let trace = one_row_trace(ProjectiveEcOp::Double, PreparedAffinePoint::infinity());
+        let claim =
+            ProjectiveRcbAirTraceClaim::from_projective_trace(&trace).expect("valid RCB AIR trace");
+        let relations = ProjectiveRcbMulComponentRelations::dummy();
+        let ids = claim.proof_slice_preprocessed_column_ids(&relations);
+        let preprocessed = claim
+            .gen_proof_slice_preprocessed_trace(&ids)
+            .expect("proof preprocessed trace generates");
+        let base = claim
+            .gen_proof_slice_base_trace()
+            .expect("proof base trace generates");
+        let (interaction, interaction_claim) = claim
+            .gen_proof_slice_interaction_trace(&relations)
+            .expect("proof interaction trace generates");
+        let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
+        let components =
+            ProjectiveRcbAirComponents::new(&mut allocator, &claim, &interaction_claim, &relations);
+
+        assert!(
+            ids.contains(&crate::range_checks::range_check_value_column_id(
+                RANGE13_BITS
+            ))
+        );
+        assert!(
+            ids.contains(&crate::range_checks::signed_carry_value_column_id(
+                PROJECTIVE_RCB_SIGNED_CARRY_EQUATION
+            ))
+        );
+        assert!(
+            ids.contains(&crate::range_checks::signed_carry_active_column_id(
+                PROJECTIVE_RCB_SIGNED_CARRY_EQUATION
+            ))
+        );
+        assert_eq!(preprocessed.len(), ids.len());
+        assert_eq!(
+            base.len(),
+            PROJECTIVE_RCB_MUL_TRACE_COLUMNS
+                + PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TRACE_COLUMNS
+                + PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TRACE_COLUMNS
+                + PROJECTIVE_RCB_FOLDED_DIGIT_TRACE_COLUMNS
+                + 2
+        );
+        assert_eq!(interaction_claim.total(), secure_zero());
+        assert!(!interaction.is_empty());
+        assert_eq!(components.mul.log_size(), claim.component_log_sizes().mul);
+        assert_eq!(
+            components.raw_product_chunk.log_size(),
+            claim.component_log_sizes().raw_product_chunk
+        );
+        assert_eq!(components.range13.log_size(), RANGE13_BITS);
+        assert_eq!(
+            components.signed_carry.log_size(),
+            projective_rcb_signed_carry_log_size()
+        );
+        claim
+            .verify_proof_slice_traces(&relations)
+            .expect("proof slice trace shape verifies");
     }
 }
