@@ -2,6 +2,7 @@ use stwo::core::fields::{m31::M31, qm31::SecureField};
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{
     relation, EvalAtRow, FrameworkComponent, FrameworkEval, Relation, RelationEntry,
+    TraceLocationAllocator,
 };
 use stwo_p256_utils::constants::{LIMB_BITS, N_LIMBS};
 use stwo_p256_utils::solinas::REDUCTION_MATRIX;
@@ -195,6 +196,14 @@ impl ProjectiveRcbFoldedDigitScheduleColumnIds {
 pub struct ProjectiveRcbFoldedDigitScheduleColumn {
     pub id: PreProcessedColumnId,
     pub values: Vec<M31>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProjectiveRcbAirComponentLogSizes {
+    pub mul: u32,
+    pub raw_product_chunk: u32,
+    pub folded_contribution: u32,
+    pub folded_digit: u32,
 }
 
 #[derive(Clone)]
@@ -970,11 +979,97 @@ impl ProjectiveRcbAirTraceClaim {
     ) -> ProjectiveRcbAirInteractionClaim {
         ProjectiveRcbAirInteractionClaim::from_trace(self, relations)
     }
+
+    pub fn component_log_sizes(&self) -> ProjectiveRcbAirComponentLogSizes {
+        ProjectiveRcbAirComponentLogSizes {
+            mul: padded_log_size(self.mul_row_count()),
+            raw_product_chunk: padded_log_size(self.raw_product_chunk_count()),
+            folded_contribution: padded_log_size(self.folded_contribution_row_count()),
+            folded_digit: padded_log_size(self.folded_digit_row_count()),
+        }
+    }
+
+    pub fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
+        let log_sizes = self.component_log_sizes();
+        let mut allocator = TraceLocationAllocator::default();
+        let relations = ProjectiveRcbMulComponentRelations::dummy();
+        let zero = secure_zero();
+        let _ = ProjectiveRcbMulComponent::new(
+            &mut allocator,
+            ProjectiveRcbMulEval {
+                log_size: log_sizes.mul,
+                relations: relations.clone(),
+            },
+            zero,
+        );
+        let _ = ProjectiveRcbRawProductChunkComponent::new(
+            &mut allocator,
+            ProjectiveRcbRawProductChunkEval {
+                log_size: log_sizes.raw_product_chunk,
+                relations: relations.clone(),
+            },
+            zero,
+        );
+        let _ = ProjectiveRcbFoldedContributionComponent::new(
+            &mut allocator,
+            ProjectiveRcbFoldedContributionEval {
+                log_size: log_sizes.folded_contribution,
+                relations: relations.clone(),
+            },
+            zero,
+        );
+        let _ = ProjectiveRcbFoldedDigitComponent::new(
+            &mut allocator,
+            ProjectiveRcbFoldedDigitEval {
+                log_size: log_sizes.folded_digit,
+                relations,
+            },
+            zero,
+        );
+        allocator.preprocessed_columns().clone()
+    }
+
+    pub fn gen_preprocessed_trace(
+        &self,
+        ids: &[PreProcessedColumnId],
+    ) -> Result<Vec<M31ColumnEval>, ProjectiveRcbAirError> {
+        let columns = projective_rcb_air_schedule_preprocessed_columns(self);
+        ids.iter()
+            .map(|id| {
+                columns
+                    .iter()
+                    .find_map(|(column_id, eval)| (column_id == id).then(|| eval.clone()))
+                    .ok_or_else(|| ProjectiveRcbAirError::PreprocessedColumnMissing {
+                        id: id.id.clone(),
+                    })
+            })
+            .collect()
+    }
+
+    pub fn verify_preprocessed_trace(&self) -> Result<(), ProjectiveRcbAirError> {
+        let ids = self.preprocessed_column_ids();
+        let preprocessed = self.gen_preprocessed_trace(&ids)?;
+        if ids.len() == preprocessed.len() {
+            Ok(())
+        } else {
+            Err(ProjectiveRcbAirError::PreprocessedColumnCountMismatch {
+                expected: ids.len(),
+                actual: preprocessed.len(),
+            })
+        }
+    }
 }
 
 pub fn projective_rcb_raw_product_chunk_schedule_columns(
 ) -> Vec<ProjectiveRcbRawProductChunkScheduleColumn> {
-    let padded_rows = 1usize << padded_log_size(PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS);
+    projective_rcb_raw_product_chunk_schedule_columns_for_mul_count(1)
+}
+
+fn projective_rcb_raw_product_chunk_schedule_columns_for_mul_count(
+    mul_count: usize,
+) -> Vec<ProjectiveRcbRawProductChunkScheduleColumn> {
+    let active_rows = mul_count * PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS;
+    let padded_rows = 1usize << padded_log_size(active_rows);
     let mut active = vec![m31(0); padded_rows];
     let mut coeff = vec![m31(0); padded_rows];
     let mut chunk = vec![m31(0); padded_rows];
@@ -985,27 +1080,30 @@ pub fn projective_rcb_raw_product_chunk_schedule_columns(
         vec![vec![m31(0); padded_rows]; PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS];
 
     let mut row = 0usize;
-    for row_coeff in 0..FP_SOLINAS_RAW_LIMBS {
-        for row_chunk in 0..coefficient_chunk_count(row_coeff) {
-            let pairs =
-                product_chunk_pairs(row_coeff, row_chunk).expect("valid fixed chunk schedule");
-            active[row] = m31(1);
-            coeff[row] = m31_usize(row_coeff);
-            chunk[row] = m31_usize(row_chunk);
-            for (term, pair) in pairs.into_iter().enumerate() {
-                if let Some((lhs, rhs)) = pair {
-                    term_active[term][row] = m31(1);
-                    lhs_index[term][row] = m31_usize(lhs);
-                    rhs_index[term][row] = m31_usize(rhs);
+    for _ in 0..mul_count {
+        for row_coeff in 0..FP_SOLINAS_RAW_LIMBS {
+            for row_chunk in 0..coefficient_chunk_count(row_coeff) {
+                let pairs =
+                    product_chunk_pairs(row_coeff, row_chunk).expect("valid fixed chunk schedule");
+                active[row] = m31(1);
+                coeff[row] = m31_usize(row_coeff);
+                chunk[row] = m31_usize(row_chunk);
+                for (term, pair) in pairs.into_iter().enumerate() {
+                    if let Some((lhs, rhs)) = pair {
+                        term_active[term][row] = m31(1);
+                        lhs_index[term][row] = m31_usize(lhs);
+                        rhs_index[term][row] = m31_usize(rhs);
+                    }
                 }
+                for (offset, column) in digit_use_count.iter_mut().enumerate() {
+                    column[row] =
+                        m31_usize(raw_product_chunk_digit_use_count_const(row_coeff, offset));
+                }
+                row += 1;
             }
-            for (offset, column) in digit_use_count.iter_mut().enumerate() {
-                column[row] = m31_usize(raw_product_chunk_digit_use_count_const(row_coeff, offset));
-            }
-            row += 1;
         }
     }
-    debug_assert_eq!(row, PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS);
+    debug_assert_eq!(row, active_rows);
 
     let mut columns = vec![
         raw_product_chunk_schedule_column(
@@ -1045,20 +1143,19 @@ pub fn projective_rcb_raw_product_chunk_schedule_columns(
 }
 
 pub fn projective_rcb_raw_product_chunk_schedule_evals() -> Vec<M31ColumnEval> {
-    projective_rcb_raw_product_chunk_schedule_columns()
-        .into_iter()
-        .map(|column| {
-            m31_column_eval(
-                padded_log_size(PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS),
-                column.values,
-            )
-        })
-        .collect()
+    schedule_columns_to_evals(projective_rcb_raw_product_chunk_schedule_columns())
 }
 
 pub fn projective_rcb_folded_contribution_schedule_columns(
 ) -> Vec<ProjectiveRcbFoldedContributionScheduleColumn> {
-    let padded_rows = 1usize << padded_log_size(PROJECTIVE_RCB_FOLDED_CONTRIBUTION_ROWS);
+    projective_rcb_folded_contribution_schedule_columns_for_mul_count(1)
+}
+
+fn projective_rcb_folded_contribution_schedule_columns_for_mul_count(
+    mul_count: usize,
+) -> Vec<ProjectiveRcbFoldedContributionScheduleColumn> {
+    let active_rows = mul_count * PROJECTIVE_RCB_FOLDED_CONTRIBUTION_ROWS;
+    let padded_rows = 1usize << padded_log_size(active_rows);
     let mut active = vec![m31(0); padded_rows];
     let mut digit_index = vec![m31(0); padded_rows];
     let mut group_index = vec![m31(0); padded_rows];
@@ -1071,35 +1168,37 @@ pub fn projective_rcb_folded_contribution_schedule_columns(
 
     let terms = folded_contribution_schedule_terms();
     let mut row = 0usize;
-    for row_digit_index in 0..FP_SOLINAS_REDUCTION_DIGITS {
-        let digit_terms = terms
-            .iter()
-            .copied()
-            .filter(|term| term.digit_index == row_digit_index)
-            .collect::<Vec<_>>();
-        for (row_group_index, chunk) in digit_terms
-            .chunks(PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERMS)
-            .enumerate()
-        {
-            active[row] = m31(1);
-            digit_index[row] = m31_usize(row_digit_index);
-            group_index[row] = m31_usize(row_group_index);
-            for (term_index, term) in chunk.iter().copied().enumerate() {
-                term_active[term_index][row] = m31(1);
-                raw_coeff[term_index][row] = m31_usize(term.raw_coeff);
-                raw_chunk[term_index][row] = m31_usize(term.raw_chunk);
-                raw_offset[term_index][row] = m31_usize(term.raw_offset);
-                matrix_coeff[term_index][row] = m31_i128(i128::from(term.matrix_coeff));
+    for _ in 0..mul_count {
+        for row_digit_index in 0..FP_SOLINAS_REDUCTION_DIGITS {
+            let digit_terms = terms
+                .iter()
+                .copied()
+                .filter(|term| term.digit_index == row_digit_index)
+                .collect::<Vec<_>>();
+            for (row_group_index, chunk) in digit_terms
+                .chunks(PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERMS)
+                .enumerate()
+            {
+                active[row] = m31(1);
+                digit_index[row] = m31_usize(row_digit_index);
+                group_index[row] = m31_usize(row_group_index);
+                for (term_index, term) in chunk.iter().copied().enumerate() {
+                    term_active[term_index][row] = m31(1);
+                    raw_coeff[term_index][row] = m31_usize(term.raw_coeff);
+                    raw_chunk[term_index][row] = m31_usize(term.raw_chunk);
+                    raw_offset[term_index][row] = m31_usize(term.raw_offset);
+                    matrix_coeff[term_index][row] = m31_i128(i128::from(term.matrix_coeff));
+                }
+                row += 1;
             }
-            row += 1;
-        }
-        if digit_terms.is_empty() {
-            active[row] = m31(1);
-            digit_index[row] = m31_usize(row_digit_index);
-            row += 1;
+            if digit_terms.is_empty() {
+                active[row] = m31(1);
+                digit_index[row] = m31_usize(row_digit_index);
+                row += 1;
+            }
         }
     }
-    debug_assert_eq!(row, PROJECTIVE_RCB_FOLDED_CONTRIBUTION_ROWS);
+    debug_assert_eq!(row, active_rows);
 
     let mut columns = vec![
         folded_contribution_schedule_column(
@@ -1141,34 +1240,38 @@ pub fn projective_rcb_folded_contribution_schedule_columns(
 }
 
 pub fn projective_rcb_folded_contribution_schedule_evals() -> Vec<M31ColumnEval> {
-    projective_rcb_folded_contribution_schedule_columns()
-        .into_iter()
-        .map(|column| {
-            m31_column_eval(
-                padded_log_size(PROJECTIVE_RCB_FOLDED_CONTRIBUTION_ROWS),
-                column.values,
-            )
-        })
-        .collect()
+    schedule_columns_to_evals(projective_rcb_folded_contribution_schedule_columns())
 }
 
 pub fn projective_rcb_folded_digit_schedule_columns() -> Vec<ProjectiveRcbFoldedDigitScheduleColumn>
 {
-    let padded_rows = 1usize << padded_log_size(FP_SOLINAS_REDUCTION_DIGITS);
+    projective_rcb_folded_digit_schedule_columns_for_mul_count(1)
+}
+
+fn projective_rcb_folded_digit_schedule_columns_for_mul_count(
+    mul_count: usize,
+) -> Vec<ProjectiveRcbFoldedDigitScheduleColumn> {
+    let active_rows = mul_count * FP_SOLINAS_REDUCTION_DIGITS;
+    let padded_rows = 1usize << padded_log_size(active_rows);
     let mut active = vec![m31(0); padded_rows];
     let mut digit_index = vec![m31(0); padded_rows];
     let mut group_active = vec![vec![m31(0); padded_rows]; PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS];
     let mut group_index = vec![vec![m31(0); padded_rows]; PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS];
 
-    for row in 0..FP_SOLINAS_REDUCTION_DIGITS {
-        active[row] = m31(1);
-        digit_index[row] = m31_usize(row);
-        let group_count = folded_contribution_group_count_for_digit_const(row);
-        for group in 0..group_count {
-            group_active[group][row] = m31(1);
-            group_index[group][row] = m31_usize(group);
+    let mut row = 0usize;
+    for _ in 0..mul_count {
+        for row_digit_index in 0..FP_SOLINAS_REDUCTION_DIGITS {
+            active[row] = m31(1);
+            digit_index[row] = m31_usize(row_digit_index);
+            let group_count = folded_contribution_group_count_for_digit_const(row_digit_index);
+            for group in 0..group_count {
+                group_active[group][row] = m31(1);
+                group_index[group][row] = m31_usize(group);
+            }
+            row += 1;
         }
     }
+    debug_assert_eq!(row, active_rows);
 
     let mut columns = vec![
         folded_digit_schedule_column(ProjectiveRcbFoldedDigitScheduleColumnIds::active(), active),
@@ -1191,10 +1294,88 @@ pub fn projective_rcb_folded_digit_schedule_columns() -> Vec<ProjectiveRcbFolded
 }
 
 pub fn projective_rcb_folded_digit_schedule_evals() -> Vec<M31ColumnEval> {
-    projective_rcb_folded_digit_schedule_columns()
+    schedule_columns_to_evals(projective_rcb_folded_digit_schedule_columns())
+}
+
+fn projective_rcb_air_schedule_preprocessed_columns(
+    trace: &ProjectiveRcbAirTraceClaim,
+) -> Vec<(PreProcessedColumnId, M31ColumnEval)> {
+    let mul_count = trace.mul_row_count();
+    let mut columns = Vec::new();
+    columns.extend(
+        projective_rcb_raw_product_chunk_schedule_columns_for_mul_count(mul_count)
+            .into_iter()
+            .map(|column| column_to_eval(column.id, column.values)),
+    );
+    columns.extend(
+        projective_rcb_folded_contribution_schedule_columns_for_mul_count(mul_count)
+            .into_iter()
+            .map(|column| column_to_eval(column.id, column.values)),
+    );
+    columns.extend(
+        projective_rcb_folded_digit_schedule_columns_for_mul_count(mul_count)
+            .into_iter()
+            .map(|column| column_to_eval(column.id, column.values)),
+    );
+    columns
+}
+
+fn schedule_columns_to_evals<C, I>(columns: I) -> Vec<M31ColumnEval>
+where
+    C: IntoScheduleColumn,
+    I: IntoIterator<Item = C>,
+{
+    columns
         .into_iter()
-        .map(|column| m31_column_eval(padded_log_size(FP_SOLINAS_REDUCTION_DIGITS), column.values))
+        .map(|column| {
+            let column = column.into_schedule_column();
+            column_to_eval(column.id, column.values).1
+        })
         .collect()
+}
+
+fn column_to_eval(
+    id: PreProcessedColumnId,
+    values: Vec<M31>,
+) -> (PreProcessedColumnId, M31ColumnEval) {
+    let log_size = values.len().trailing_zeros();
+    (id, m31_column_eval(log_size, values))
+}
+
+struct ScheduleColumnParts {
+    id: PreProcessedColumnId,
+    values: Vec<M31>,
+}
+
+trait IntoScheduleColumn {
+    fn into_schedule_column(self) -> ScheduleColumnParts;
+}
+
+impl IntoScheduleColumn for ProjectiveRcbRawProductChunkScheduleColumn {
+    fn into_schedule_column(self) -> ScheduleColumnParts {
+        ScheduleColumnParts {
+            id: self.id,
+            values: self.values,
+        }
+    }
+}
+
+impl IntoScheduleColumn for ProjectiveRcbFoldedContributionScheduleColumn {
+    fn into_schedule_column(self) -> ScheduleColumnParts {
+        ScheduleColumnParts {
+            id: self.id,
+            values: self.values,
+        }
+    }
+}
+
+impl IntoScheduleColumn for ProjectiveRcbFoldedDigitScheduleColumn {
+    fn into_schedule_column(self) -> ScheduleColumnParts {
+        ScheduleColumnParts {
+            id: self.id,
+            values: self.values,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2263,6 +2444,13 @@ pub enum ProjectiveRcbAirError {
     },
     RelationImbalance {
         relation: &'static str,
+    },
+    PreprocessedColumnMissing {
+        id: String,
+    },
+    PreprocessedColumnCountMismatch {
+        expected: usize,
+        actual: usize,
     },
     ProjectiveOutputMismatch {
         source_index: usize,
@@ -3658,5 +3846,65 @@ mod tests {
             projective_rcb_folded_digit_schedule_evals().len(),
             columns.len()
         );
+    }
+
+    #[test]
+    fn projective_rcb_air_preprocessed_trace_uses_global_claim_sizes() {
+        let trace = one_row_trace(ProjectiveEcOp::Double, PreparedAffinePoint::infinity());
+        let claim =
+            ProjectiveRcbAirTraceClaim::from_projective_trace(&trace).expect("valid RCB AIR trace");
+        let ids = claim.preprocessed_column_ids();
+        let preprocessed = claim
+            .gen_preprocessed_trace(&ids)
+            .expect("registered schedule columns generate");
+        let log_sizes = claim.component_log_sizes();
+
+        assert_eq!(
+            ids.len(),
+            (3 + 3 * PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS + 3)
+                + (3 + 5 * PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERMS)
+                + (2 + 2 * PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS)
+        );
+        assert_eq!(preprocessed.len(), ids.len());
+        assert_eq!(
+            preprocessed[0].domain.log_size(),
+            log_sizes.raw_product_chunk
+        );
+        assert_eq!(
+            preprocessed[3 + 3 * PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS + 3]
+                .domain
+                .log_size(),
+            log_sizes.folded_contribution
+        );
+        assert_eq!(
+            preprocessed[(3 + 3 * PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS + 3)
+                + (3 + 5 * PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERMS)]
+                .domain
+                .log_size(),
+            log_sizes.folded_digit
+        );
+        assert!(ids.contains(&ProjectiveRcbRawProductChunkScheduleColumnIds::coeff()));
+        assert!(ids.contains(&ProjectiveRcbFoldedContributionScheduleColumnIds::matrix_coeff(3)));
+        assert!(ids.contains(&ProjectiveRcbFoldedDigitScheduleColumnIds::group_index(29)));
+        claim
+            .verify_preprocessed_trace()
+            .expect("full schedule preprocessed trace verifies");
+    }
+
+    #[test]
+    fn projective_rcb_air_preprocessed_trace_rejects_unknown_column_id() {
+        let trace = one_row_trace(ProjectiveEcOp::Double, PreparedAffinePoint::infinity());
+        let claim =
+            ProjectiveRcbAirTraceClaim::from_projective_trace(&trace).expect("valid RCB AIR trace");
+        let err = claim
+            .gen_preprocessed_trace(&[PreProcessedColumnId {
+                id: "p256_projective_rcb_missing".to_string(),
+            }])
+            .expect_err("unknown preprocessed column must fail");
+
+        assert!(matches!(
+            err,
+            ProjectiveRcbAirError::PreprocessedColumnMissing { .. }
+        ));
     }
 }

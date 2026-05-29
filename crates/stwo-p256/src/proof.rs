@@ -146,6 +146,7 @@ impl P256ProofClaim {
         self.projective_ec_trace.verify()?;
         self.projective_rcb_air_trace
             .verify_against_projective_trace(&self.projective_ec_trace)?;
+        self.projective_rcb_air_trace.verify_preprocessed_trace()?;
         self.final_check.verify()?;
         self.prepared_use_counts.verify()?;
         Ok(())
@@ -572,7 +573,9 @@ mod tests {
     use crate::limbs::P256M31BigInt;
     use crate::prepared_table::PreparedAffinePoint;
     use crate::projective_air::{
-        PROJECTIVE_RCB_FOLDED_CONTRIBUTION_ROWS, PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS,
+        PROJECTIVE_RCB_FOLDED_CONTRIBUTION_ROWS, PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERMS,
+        PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS, PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS,
+        PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS,
     };
     use crate::types::{AffinePoint, Signature, U256};
     use core::cmp::Ordering;
@@ -705,6 +708,25 @@ mod tests {
                 .raw_product_chunk_count(),
             proof.claim.projective_rcb_air_trace.mul_row_count()
                 * PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS
+        );
+        let projective_rcb_preprocessed_ids = proof
+            .claim
+            .projective_rcb_air_trace
+            .preprocessed_column_ids();
+        let projective_rcb_preprocessed = proof
+            .claim
+            .projective_rcb_air_trace
+            .gen_preprocessed_trace(&projective_rcb_preprocessed_ids)
+            .expect("projective RCB schedule preprocessed trace generates");
+        assert_eq!(
+            projective_rcb_preprocessed_ids.len(),
+            (3 + 3 * PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS + 3)
+                + (3 + 5 * PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERMS)
+                + (2 + 2 * PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS)
+        );
+        assert_eq!(
+            projective_rcb_preprocessed.len(),
+            projective_rcb_preprocessed_ids.len()
         );
         assert_eq!(proof.claim.final_check.rows.len(), 2);
         assert_eq!(proof.claim.prepared_use_counts.certs.len(), 4);
