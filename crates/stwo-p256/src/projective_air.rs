@@ -54,11 +54,9 @@ pub const PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TRACE_COLUMNS: usize = 2
     + 1;
 pub const PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS: usize =
     folded_contribution_max_groups_per_digit_const();
-pub const PROJECTIVE_RCB_FOLDED_DIGIT_GROUP_TRACE_COLUMNS: usize = 3;
-pub const PROJECTIVE_RCB_FOLDED_DIGIT_TRACE_COLUMNS: usize = 1
-    + 3
-    + PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS * PROJECTIVE_RCB_FOLDED_DIGIT_GROUP_TRACE_COLUMNS
-    + 3;
+pub const PROJECTIVE_RCB_FOLDED_DIGIT_GROUP_TRACE_COLUMNS: usize = 1;
+pub const PROJECTIVE_RCB_FOLDED_DIGIT_TRACE_COLUMNS: usize =
+    2 + PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS * PROJECTIVE_RCB_FOLDED_DIGIT_GROUP_TRACE_COLUMNS + 3;
 pub const PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TRACE_COLUMNS: usize = 2
     + PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS * PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERM_TRACE_COLUMNS
     + PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS;
@@ -173,6 +171,32 @@ pub struct ProjectiveRcbFoldedContributionScheduleColumn {
     pub values: Vec<M31>,
 }
 
+pub struct ProjectiveRcbFoldedDigitScheduleColumnIds;
+
+impl ProjectiveRcbFoldedDigitScheduleColumnIds {
+    pub fn active() -> PreProcessedColumnId {
+        folded_digit_schedule_id("active")
+    }
+
+    pub fn digit_index() -> PreProcessedColumnId {
+        folded_digit_schedule_id("digit_index")
+    }
+
+    pub fn group_active(group: usize) -> PreProcessedColumnId {
+        folded_digit_schedule_id(format!("group_active_{group}"))
+    }
+
+    pub fn group_index(group: usize) -> PreProcessedColumnId {
+        folded_digit_schedule_id(format!("group_index_{group}"))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectiveRcbFoldedDigitScheduleColumn {
+    pub id: PreProcessedColumnId,
+    pub values: Vec<M31>,
+}
+
 #[derive(Clone)]
 pub struct ProjectiveRcbMulEval {
     pub log_size: u32,
@@ -256,7 +280,6 @@ impl FrameworkEval for ProjectiveRcbFoldedDigitEval {
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         let columns = ProjectiveRcbFoldedDigitColumns::read(&mut eval);
 
-        eval.add_constraint(columns.active.clone() * (one::<E>() - columns.active.clone()));
         add_projective_rcb_folded_digit(&mut eval, self.relations.as_refs(), &columns);
         eval.finalize_logup_in_pairs();
         eval
@@ -670,13 +693,19 @@ pub struct ProjectiveRcbFoldedDigitColumns<E: EvalAtRow> {
 impl<E: EvalAtRow> ProjectiveRcbFoldedDigitColumns<E> {
     fn read(eval: &mut E) -> Self {
         Self {
-            active: eval.next_trace_mask(),
+            active: eval
+                .get_preprocessed_column(ProjectiveRcbFoldedDigitScheduleColumnIds::active()),
             source_index: eval.next_trace_mask(),
             mul_index: eval.next_trace_mask(),
-            digit_index: eval.next_trace_mask(),
-            groups: core::array::from_fn(|_| ProjectiveRcbFoldedDigitGroupColumns {
-                group_active: eval.next_trace_mask(),
-                group_index: eval.next_trace_mask(),
+            digit_index: eval
+                .get_preprocessed_column(ProjectiveRcbFoldedDigitScheduleColumnIds::digit_index()),
+            groups: core::array::from_fn(|group| ProjectiveRcbFoldedDigitGroupColumns {
+                group_active: eval.get_preprocessed_column(
+                    ProjectiveRcbFoldedDigitScheduleColumnIds::group_active(group),
+                ),
+                group_index: eval.get_preprocessed_column(
+                    ProjectiveRcbFoldedDigitScheduleColumnIds::group_index(group),
+                ),
                 contribution_sum: eval.next_trace_mask(),
             }),
             prev_carry: eval.next_trace_mask(),
@@ -746,18 +775,7 @@ pub fn add_projective_rcb_folded_digit<E: EvalAtRow>(
 ) {
     let mut contribution_sum = zero::<E>();
     for group in &columns.groups {
-        eval.add_constraint(
-            columns.active.clone()
-                * group.group_active.clone()
-                * (one::<E>() - group.group_active.clone()),
-        );
         contribution_sum += group.group_active.clone() * group.contribution_sum.clone();
-        constrain_unused(
-            eval,
-            columns.active.clone(),
-            group.group_active.clone(),
-            group.group_index.clone(),
-        );
         constrain_unused(
             eval,
             columns.active.clone(),
@@ -1131,6 +1149,51 @@ pub fn projective_rcb_folded_contribution_schedule_evals() -> Vec<M31ColumnEval>
                 column.values,
             )
         })
+        .collect()
+}
+
+pub fn projective_rcb_folded_digit_schedule_columns() -> Vec<ProjectiveRcbFoldedDigitScheduleColumn>
+{
+    let padded_rows = 1usize << padded_log_size(FP_SOLINAS_REDUCTION_DIGITS);
+    let mut active = vec![m31(0); padded_rows];
+    let mut digit_index = vec![m31(0); padded_rows];
+    let mut group_active = vec![vec![m31(0); padded_rows]; PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS];
+    let mut group_index = vec![vec![m31(0); padded_rows]; PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS];
+
+    for row in 0..FP_SOLINAS_REDUCTION_DIGITS {
+        active[row] = m31(1);
+        digit_index[row] = m31_usize(row);
+        let group_count = folded_contribution_group_count_for_digit_const(row);
+        for group in 0..group_count {
+            group_active[group][row] = m31(1);
+            group_index[group][row] = m31_usize(group);
+        }
+    }
+
+    let mut columns = vec![
+        folded_digit_schedule_column(ProjectiveRcbFoldedDigitScheduleColumnIds::active(), active),
+        folded_digit_schedule_column(
+            ProjectiveRcbFoldedDigitScheduleColumnIds::digit_index(),
+            digit_index,
+        ),
+    ];
+    for group in 0..PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS {
+        columns.push(folded_digit_schedule_column(
+            ProjectiveRcbFoldedDigitScheduleColumnIds::group_active(group),
+            group_active[group].clone(),
+        ));
+        columns.push(folded_digit_schedule_column(
+            ProjectiveRcbFoldedDigitScheduleColumnIds::group_index(group),
+            group_index[group].clone(),
+        ));
+    }
+    columns
+}
+
+pub fn projective_rcb_folded_digit_schedule_evals() -> Vec<M31ColumnEval> {
+    projective_rcb_folded_digit_schedule_columns()
+        .into_iter()
+        .map(|column| m31_column_eval(padded_log_size(FP_SOLINAS_REDUCTION_DIGITS), column.values))
         .collect()
 }
 
@@ -2341,6 +2404,12 @@ fn folded_contribution_schedule_id(name: impl Into<String>) -> PreProcessedColum
     }
 }
 
+fn folded_digit_schedule_id(name: impl Into<String>) -> PreProcessedColumnId {
+    PreProcessedColumnId {
+        id: format!("p256_projective_rcb_folded_digit_{}", name.into()),
+    }
+}
+
 fn raw_product_chunk_schedule_column(
     id: PreProcessedColumnId,
     values: Vec<M31>,
@@ -2353,6 +2422,13 @@ fn folded_contribution_schedule_column(
     values: Vec<M31>,
 ) -> ProjectiveRcbFoldedContributionScheduleColumn {
     ProjectiveRcbFoldedContributionScheduleColumn { id, values }
+}
+
+fn folded_digit_schedule_column(
+    id: PreProcessedColumnId,
+    values: Vec<M31>,
+) -> ProjectiveRcbFoldedDigitScheduleColumn {
+    ProjectiveRcbFoldedDigitScheduleColumn { id, values }
 }
 
 const fn raw_product_chunk_count() -> usize {
@@ -2384,18 +2460,22 @@ const fn folded_contribution_max_groups_per_digit_const() -> usize {
     let mut digit_index = 0usize;
     let mut max_groups = 0usize;
     while digit_index < FP_SOLINAS_REDUCTION_DIGITS {
-        let terms = folded_contribution_term_count_for_digit_const(digit_index);
-        let groups = if terms == 0 {
-            1
-        } else {
-            terms.div_ceil(PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERMS)
-        };
+        let groups = folded_contribution_group_count_for_digit_const(digit_index);
         if groups > max_groups {
             max_groups = groups;
         }
         digit_index += 1;
     }
     max_groups
+}
+
+const fn folded_contribution_group_count_for_digit_const(digit_index: usize) -> usize {
+    let terms = folded_contribution_term_count_for_digit_const(digit_index);
+    if terms == 0 {
+        1
+    } else {
+        terms.div_ceil(PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERMS)
+    }
 }
 
 const fn folded_contribution_term_count_for_digit_const(digit_index: usize) -> usize {
@@ -3227,6 +3307,24 @@ mod tests {
     }
 
     #[test]
+    fn projective_rcb_air_rows_detect_mutated_folded_digit_schedule_metadata() {
+        let trace = one_row_trace(ProjectiveEcOp::Double, PreparedAffinePoint::infinity());
+        let mut claim =
+            ProjectiveRcbAirTraceClaim::from_projective_trace(&trace).expect("valid RCB AIR trace");
+        claim.rows[0].muls[0].folded_digits.rows[0].contribution_groups[0].group_index += 1;
+
+        let err = claim
+            .verify_against_projective_trace(&trace)
+            .expect_err("mutated folded digit schedule metadata must fail");
+
+        assert!(matches!(
+            err,
+            ProjectiveRcbAirError::FoldedDigitMismatch
+                | ProjectiveRcbAirError::FoldedDigitContributionSumMismatch { .. }
+        ));
+    }
+
+    #[test]
     fn projective_rcb_air_rows_detect_mutated_folded_contribution() {
         let trace = one_row_trace(ProjectiveEcOp::Double, PreparedAffinePoint::infinity());
         let mut claim =
@@ -3490,14 +3588,17 @@ mod tests {
         );
 
         assert_eq!(PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS, 30);
-        assert_eq!(
-            PROJECTIVE_RCB_FOLDED_DIGIT_TRACE_COLUMNS,
-            1 + 3 + 30 * 3 + 3
-        );
+        assert_eq!(PROJECTIVE_RCB_FOLDED_DIGIT_TRACE_COLUMNS, 2 + 30 + 3);
         assert_eq!(
             component.trace_log_degree_bounds()[1].len(),
             PROJECTIVE_RCB_FOLDED_DIGIT_TRACE_COLUMNS
         );
+        assert!(allocator
+            .preprocessed_columns()
+            .contains(&ProjectiveRcbFoldedDigitScheduleColumnIds::active()));
+        assert!(allocator
+            .preprocessed_columns()
+            .contains(&ProjectiveRcbFoldedDigitScheduleColumnIds::group_index(29)));
         assert_eq!(PROJECTIVE_RCB_FOLDED_DIGIT_RELATION_ARITY, 4);
         assert_eq!(PROJECTIVE_RCB_FOLDED_CARRY_RELATION_ARITY, 4);
         assert!(projective_rcb_folded_digit_contribution_sum_fits_m31());
@@ -3508,6 +3609,54 @@ mod tests {
             }
             .max_constraint_log_degree_bound(),
             11
+        );
+    }
+
+    #[test]
+    fn projective_rcb_folded_digit_schedule_columns_match_fixed_rows() {
+        let columns = projective_rcb_folded_digit_schedule_columns();
+        let log_size = padded_log_size(FP_SOLINAS_REDUCTION_DIGITS);
+        let row_count = 1usize << log_size;
+        let trace = one_row_trace(ProjectiveEcOp::Double, PreparedAffinePoint::infinity());
+        let claim =
+            ProjectiveRcbAirTraceClaim::from_projective_trace(&trace).expect("valid RCB AIR trace");
+        let fixed_rows = &claim.rows[0].muls[0].folded_digits.rows;
+
+        assert_eq!(columns.len(), 2 + 2 * PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS);
+        assert!(columns
+            .iter()
+            .all(|column| column.values.len() == row_count));
+        assert_eq!(
+            columns[0].values[..FP_SOLINAS_REDUCTION_DIGITS]
+                .iter()
+                .filter(|&&value| value == m31(1))
+                .count(),
+            FP_SOLINAS_REDUCTION_DIGITS
+        );
+        assert_eq!(columns[1].values[0], m31(0));
+        assert_eq!(
+            columns[1].values[FP_SOLINAS_REDUCTION_DIGITS - 1],
+            m31_usize(FP_SOLINAS_REDUCTION_DIGITS - 1)
+        );
+        assert_eq!(fixed_rows.len(), FP_SOLINAS_REDUCTION_DIGITS);
+        for (row_index, row) in fixed_rows.iter().enumerate() {
+            assert_eq!(columns[0].values[row_index], m31(1));
+            assert_eq!(columns[1].values[row_index], m31_usize(row.digit_index));
+            for (group_index, group) in row.contribution_groups.iter().enumerate() {
+                let base = 2 + 2 * group_index;
+                assert_eq!(
+                    columns[base].values[row_index],
+                    m31(u32::from(group.active))
+                );
+                assert_eq!(
+                    columns[base + 1].values[row_index],
+                    m31_usize(group.group_index)
+                );
+            }
+        }
+        assert_eq!(
+            projective_rcb_folded_digit_schedule_evals().len(),
+            columns.len()
         );
     }
 }
