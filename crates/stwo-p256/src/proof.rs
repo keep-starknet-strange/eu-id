@@ -318,6 +318,9 @@ impl P256ProofDraft {
 
     pub fn verify_current_e2e(&self) -> Result<(), P256ProofError> {
         self.claim.verify_current_components()?;
+        self.claim
+            .projective_rcb_air_trace
+            .verify_interaction_trace(&self.relations.projective_rcb)?;
         self.verify_audits()?;
         self.interaction_claim.verify_balanced()
     }

@@ -1,8 +1,16 @@
-use stwo::core::fields::{m31::M31, qm31::SecureField};
+use stwo::core::{
+    fields::{m31::M31, qm31::SecureField},
+    utils::{bit_reverse_index, coset_index_to_circle_domain_index},
+    ColumnVec,
+};
+use stwo::prover::backend::simd::{
+    m31::{LOG_N_LANES, N_LANES},
+    qm31::PackedQM31,
+};
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{
-    relation, EvalAtRow, FrameworkComponent, FrameworkEval, Relation, RelationEntry,
-    TraceLocationAllocator,
+    relation, EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation,
+    RelationEntry, TraceLocationAllocator,
 };
 use stwo_p256_utils::constants::{LIMB_BITS, N_LIMBS};
 use stwo_p256_utils::solinas::REDUCTION_MATRIX;
@@ -39,6 +47,7 @@ pub const PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGIT_RELATION_ARITY: usize = 6;
 pub const PROJECTIVE_RCB_FOLDED_CONTRIBUTION_RELATION_ARITY: usize = 5;
 pub const PROJECTIVE_RCB_FOLDED_DIGIT_RELATION_ARITY: usize = 4;
 pub const PROJECTIVE_RCB_FOLDED_CARRY_RELATION_ARITY: usize = 4;
+const QM31_TRACE_COLUMNS: usize = 4;
 pub const PROJECTIVE_RCB_MUL_ROLE_LHS: u32 = 0;
 pub const PROJECTIVE_RCB_MUL_ROLE_RHS: u32 = 1;
 pub const PROJECTIVE_RCB_MUL_ROLE_RESULT: u32 = 2;
@@ -204,6 +213,39 @@ pub struct ProjectiveRcbAirComponentLogSizes {
     pub raw_product_chunk: u32,
     pub folded_contribution: u32,
     pub folded_digit: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectiveRcbAirComponentInteractionClaim {
+    pub mul: SecureField,
+    pub raw_product_chunk: SecureField,
+    pub folded_contribution: SecureField,
+    pub folded_digit: SecureField,
+}
+
+impl ProjectiveRcbAirComponentInteractionClaim {
+    pub fn total(&self) -> SecureField {
+        self.mul + self.raw_product_chunk + self.folded_contribution + self.folded_digit
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ProjectiveRcbAirInteractionTraces {
+    pub mul: ColumnVec<M31ColumnEval>,
+    pub raw_product_chunk: ColumnVec<M31ColumnEval>,
+    pub folded_contribution: ColumnVec<M31ColumnEval>,
+    pub folded_digit: ColumnVec<M31ColumnEval>,
+}
+
+impl ProjectiveRcbAirInteractionTraces {
+    pub fn into_columns(self) -> Vec<M31ColumnEval> {
+        let mut columns = Vec::new();
+        columns.extend(self.mul);
+        columns.extend(self.raw_product_chunk);
+        columns.extend(self.folded_contribution);
+        columns.extend(self.folded_digit);
+        columns
+    }
 }
 
 #[derive(Clone)]
@@ -1093,6 +1135,114 @@ impl ProjectiveRcbAirTraceClaim {
             })
         }
     }
+
+    pub fn gen_interaction_trace(
+        &self,
+        relations: &ProjectiveRcbMulComponentRelations,
+    ) -> (
+        ProjectiveRcbAirInteractionTraces,
+        ProjectiveRcbAirComponentInteractionClaim,
+    ) {
+        let log_sizes = self.component_log_sizes();
+        let (mul, mul_claim) = gen_projective_rcb_family_interaction_trace(
+            log_sizes.mul,
+            self.mul_rows().map(|(source_index, mul_index, mul)| {
+                projective_rcb_mul_row_fractions(source_index, mul_index, mul)
+            }),
+            projective_rcb_mul_padding_fractions(),
+            relations,
+        );
+        let (raw_product_chunk, raw_product_chunk_claim) =
+            gen_projective_rcb_family_interaction_trace(
+                log_sizes.raw_product_chunk,
+                self.raw_product_chunk_rows()
+                    .map(projective_rcb_raw_product_chunk_fractions),
+                projective_rcb_raw_product_chunk_padding_fractions(),
+                relations,
+            );
+        let (folded_contribution, folded_contribution_claim) =
+            gen_projective_rcb_family_interaction_trace(
+                log_sizes.folded_contribution,
+                self.folded_contribution_rows()
+                    .map(projective_rcb_folded_contribution_fractions),
+                projective_rcb_folded_contribution_padding_fractions(),
+                relations,
+            );
+        let (folded_digit, folded_digit_claim) = gen_projective_rcb_family_interaction_trace(
+            log_sizes.folded_digit,
+            self.folded_digit_rows()
+                .map(projective_rcb_folded_digit_fractions),
+            projective_rcb_folded_digit_padding_fractions(),
+            relations,
+        );
+
+        (
+            ProjectiveRcbAirInteractionTraces {
+                mul,
+                raw_product_chunk,
+                folded_contribution,
+                folded_digit,
+            },
+            ProjectiveRcbAirComponentInteractionClaim {
+                mul: mul_claim,
+                raw_product_chunk: raw_product_chunk_claim,
+                folded_contribution: folded_contribution_claim,
+                folded_digit: folded_digit_claim,
+            },
+        )
+    }
+
+    pub fn verify_interaction_trace(
+        &self,
+        relations: &ProjectiveRcbMulComponentRelations,
+    ) -> Result<(), ProjectiveRcbAirError> {
+        let (traces, claim) = self.gen_interaction_trace(relations);
+        let expected = projective_rcb_mul_interaction_columns()
+            + projective_rcb_raw_product_chunk_interaction_columns()
+            + projective_rcb_folded_contribution_interaction_columns()
+            + projective_rcb_folded_digit_interaction_columns();
+        let actual = traces.into_columns().len();
+        if actual != expected {
+            return Err(ProjectiveRcbAirError::InteractionTraceColumnCountMismatch {
+                expected,
+                actual,
+            });
+        }
+        let _ = claim;
+        Ok(())
+    }
+
+    fn mul_rows(&self) -> impl Iterator<Item = (usize, usize, &ProjectiveRcbMulRow)> {
+        self.rows.iter().flat_map(|row| {
+            row.muls
+                .iter()
+                .enumerate()
+                .map(move |(mul_index, mul)| (row.source_index, mul_index, mul))
+        })
+    }
+
+    fn raw_product_chunk_rows(&self) -> impl Iterator<Item = &ProjectiveRcbRawProductChunkRow> {
+        self.rows
+            .iter()
+            .flat_map(|row| &row.muls)
+            .flat_map(|mul| &mul.raw_product_chunks)
+    }
+
+    fn folded_contribution_rows(
+        &self,
+    ) -> impl Iterator<Item = &ProjectiveRcbFoldedContributionRow> {
+        self.rows
+            .iter()
+            .flat_map(|row| &row.muls)
+            .flat_map(|mul| &mul.folded_contributions.rows)
+    }
+
+    fn folded_digit_rows(&self) -> impl Iterator<Item = &ProjectiveRcbFoldedDigitRow> {
+        self.rows
+            .iter()
+            .flat_map(|row| &row.muls)
+            .flat_map(|mul| &mul.folded_digits.rows)
+    }
 }
 
 pub fn projective_rcb_raw_product_chunk_schedule_columns(
@@ -1492,6 +1642,470 @@ fn rows_to_base_trace(
         .into_iter()
         .map(|values| m31_column_eval(log_size, values))
         .collect())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProjectiveRcbFractionSpec {
+    relation: ProjectiveRcbRelationKind,
+    numerator: i64,
+    values: Vec<M31>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProjectiveRcbRelationKind {
+    Range13,
+    SignedCarry,
+    MulLimb,
+    RawProductChunkDigit,
+    FoldedContribution,
+    FoldedDigit,
+    FoldedCarry,
+}
+
+fn gen_projective_rcb_family_interaction_trace(
+    log_size: u32,
+    rows: impl IntoIterator<Item = Vec<ProjectiveRcbFractionSpec>>,
+    padding_fractions: Vec<ProjectiveRcbFractionSpec>,
+    relations: &ProjectiveRcbMulComponentRelations,
+) -> (ColumnVec<M31ColumnEval>, SecureField) {
+    let row_fractions = rows.into_iter().collect::<Vec<_>>();
+    let padded_rows = 1usize << log_size;
+    assert!(
+        row_fractions.len() <= padded_rows,
+        "active rows exceed interaction domain"
+    );
+    let mut storage_fractions = vec![padding_fractions; padded_rows];
+    for (coset_index, fractions) in row_fractions.into_iter().enumerate() {
+        let row = bit_reverse_index(
+            coset_index_to_circle_domain_index(coset_index, log_size),
+            log_size,
+        );
+        storage_fractions[row] = fractions;
+    }
+    let max_fractions = storage_fractions.iter().map(Vec::len).max().unwrap_or(0);
+    if max_fractions == 0 {
+        return (Vec::new(), secure_zero());
+    }
+
+    let mut logup = LogupTraceGenerator::new(log_size);
+    for batch in 0..max_fractions.div_ceil(2) {
+        let mut col = logup.new_col();
+        for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+            let mut numerators = [secure_zero(); N_LANES];
+            let mut denominators = [secure_one(); N_LANES];
+            for lane in 0..N_LANES {
+                let row = vec_row * N_LANES + lane;
+                let (numerator, denominator) =
+                    projective_rcb_batch_fraction(&storage_fractions[row], batch, relations);
+                numerators[lane] = numerator;
+                denominators[lane] = denominator;
+            }
+            col.write_frac(
+                vec_row,
+                PackedQM31::from_array(numerators),
+                PackedQM31::from_array(denominators),
+            );
+        }
+        col.finalize_col();
+    }
+    logup.finalize_last()
+}
+
+fn projective_rcb_batch_fraction(
+    fractions: &[ProjectiveRcbFractionSpec],
+    batch: usize,
+    relations: &ProjectiveRcbMulComponentRelations,
+) -> (SecureField, SecureField) {
+    let first = fractions
+        .get(2 * batch)
+        .map(|fraction| projective_rcb_fraction(fraction, relations));
+    let second = fractions
+        .get(2 * batch + 1)
+        .map(|fraction| projective_rcb_fraction(fraction, relations));
+    match (first, second) {
+        (Some((n0, d0)), Some((n1, d1))) => (n0 * d1 + n1 * d0, d0 * d1),
+        (Some(fraction), None) | (None, Some(fraction)) => fraction,
+        (None, None) => zero_fraction(),
+    }
+}
+
+fn projective_rcb_fraction(
+    fraction: &ProjectiveRcbFractionSpec,
+    relations: &ProjectiveRcbMulComponentRelations,
+) -> (SecureField, SecureField) {
+    let denominator = match fraction.relation {
+        ProjectiveRcbRelationKind::Range13 => relations.range13.combine(&fraction.values),
+        ProjectiveRcbRelationKind::SignedCarry => relations.signed_carry.combine(&fraction.values),
+        ProjectiveRcbRelationKind::MulLimb => relations.mul_limb.combine(&fraction.values),
+        ProjectiveRcbRelationKind::RawProductChunkDigit => {
+            relations.raw_product_chunk_digit.combine(&fraction.values)
+        }
+        ProjectiveRcbRelationKind::FoldedContribution => {
+            relations.folded_contribution.combine(&fraction.values)
+        }
+        ProjectiveRcbRelationKind::FoldedDigit => relations.folded_digit.combine(&fraction.values),
+        ProjectiveRcbRelationKind::FoldedCarry => relations.folded_carry.combine(&fraction.values),
+    };
+    (secure_from_i64(fraction.numerator), denominator)
+}
+
+fn zero_fraction() -> (SecureField, SecureField) {
+    (secure_zero(), secure_one())
+}
+
+fn projective_rcb_mul_row_fractions(
+    source_index: usize,
+    mul_index: usize,
+    mul: &ProjectiveRcbMulRow,
+) -> Vec<ProjectiveRcbFractionSpec> {
+    let mut fractions = Vec::with_capacity(projective_rcb_mul_fraction_count());
+    for (role, limbs, multiplicity) in [
+        (
+            PROJECTIVE_RCB_MUL_ROLE_LHS,
+            mul.trace.lhs.limbs(),
+            -(N_LIMBS as i64),
+        ),
+        (
+            PROJECTIVE_RCB_MUL_ROLE_RHS,
+            mul.trace.rhs.limbs(),
+            -(N_LIMBS as i64),
+        ),
+    ] {
+        for (limb_index, limb) in limbs.iter().enumerate() {
+            fractions.push(range13_fraction(1, *limb));
+            fractions.push(mul_limb_fraction(
+                multiplicity,
+                source_index,
+                mul_index,
+                role,
+                limb_index,
+                *limb,
+            ));
+        }
+    }
+    for limb in mul.trace.result.limbs() {
+        fractions.push(range13_fraction(1, *limb));
+    }
+    for row in &mul.reduction.rows {
+        fractions.push(range13_fraction(1, m31(row.folded_digit)));
+        fractions.push(range13_fraction(1, m31(row.result_limb)));
+        fractions.push(signed_carry_fraction(1, m31_i128(row.prev_carry)));
+        fractions.push(signed_carry_fraction(1, m31_i128(row.carry)));
+    }
+    for row in &mul.reduction.rows {
+        fractions.push(folded_digit_fraction(
+            1,
+            source_index,
+            mul_index,
+            row.digit_index,
+            m31(row.folded_digit),
+        ));
+    }
+    fractions.push(folded_carry_fraction(
+        -1,
+        source_index,
+        mul_index,
+        0,
+        m31(0),
+    ));
+    fractions.push(folded_carry_fraction(
+        1,
+        source_index,
+        mul_index,
+        FP_SOLINAS_REDUCTION_DIGITS,
+        m31_i128(mul.folded_digits.final_carry),
+    ));
+    debug_assert_eq!(fractions.len(), projective_rcb_mul_fraction_count());
+    fractions
+}
+
+fn projective_rcb_raw_product_chunk_fractions(
+    row: &ProjectiveRcbRawProductChunkRow,
+) -> Vec<ProjectiveRcbFractionSpec> {
+    let mut fractions = Vec::with_capacity(projective_rcb_raw_product_chunk_fraction_count());
+    for term in &row.terms {
+        let active = i64::from(term.active);
+        fractions.push(mul_limb_fraction(
+            active,
+            row.source_index,
+            row.mul_index,
+            PROJECTIVE_RCB_MUL_ROLE_LHS,
+            term.lhs_index,
+            m31(term.lhs_limb),
+        ));
+        fractions.push(mul_limb_fraction(
+            active,
+            row.source_index,
+            row.mul_index,
+            PROJECTIVE_RCB_MUL_ROLE_RHS,
+            term.rhs_index,
+            m31(term.rhs_limb),
+        ));
+    }
+    fractions.push(range13_fraction(1, m31(row.digits[0])));
+    fractions.push(range13_fraction(1, m31(row.digits[1])));
+    for (offset, digit) in row.digits.iter().enumerate() {
+        fractions.push(raw_product_chunk_digit_fraction(
+            -(row.digit_use_counts[offset] as i64),
+            row.source_index,
+            row.mul_index,
+            row.coeff,
+            row.chunk,
+            offset,
+            m31(*digit),
+        ));
+    }
+    debug_assert_eq!(
+        fractions.len(),
+        projective_rcb_raw_product_chunk_fraction_count()
+    );
+    fractions
+}
+
+fn projective_rcb_folded_contribution_fractions(
+    row: &ProjectiveRcbFoldedContributionRow,
+) -> Vec<ProjectiveRcbFractionSpec> {
+    let mut fractions = Vec::with_capacity(projective_rcb_folded_contribution_fraction_count());
+    for term in &row.terms {
+        fractions.push(raw_product_chunk_digit_fraction(
+            i64::from(term.active),
+            row.source_index,
+            row.mul_index,
+            term.raw_coeff,
+            term.raw_chunk,
+            term.raw_offset,
+            m31(term.raw_digit),
+        ));
+    }
+    fractions.push(folded_contribution_fraction(
+        -1,
+        row.source_index,
+        row.mul_index,
+        row.digit_index,
+        row.group_index,
+        m31_i128(row.contribution_sum),
+    ));
+    debug_assert_eq!(
+        fractions.len(),
+        projective_rcb_folded_contribution_fraction_count()
+    );
+    fractions
+}
+
+fn projective_rcb_folded_digit_fractions(
+    row: &ProjectiveRcbFoldedDigitRow,
+) -> Vec<ProjectiveRcbFractionSpec> {
+    let mut fractions = Vec::with_capacity(projective_rcb_folded_digit_fraction_count());
+    for group in &row.contribution_groups {
+        fractions.push(folded_contribution_fraction(
+            i64::from(group.active),
+            row.source_index,
+            row.mul_index,
+            row.digit_index,
+            group.group_index,
+            m31_i128(group.contribution_sum),
+        ));
+    }
+    fractions.push(range13_fraction(1, m31(row.folded_digit)));
+    fractions.push(signed_carry_fraction(1, m31_i128(row.prev_carry)));
+    fractions.push(signed_carry_fraction(1, m31_i128(row.carry)));
+    fractions.push(folded_carry_fraction(
+        1,
+        row.source_index,
+        row.mul_index,
+        row.digit_index,
+        m31_i128(row.prev_carry),
+    ));
+    fractions.push(folded_carry_fraction(
+        -1,
+        row.source_index,
+        row.mul_index,
+        row.digit_index + 1,
+        m31_i128(row.carry),
+    ));
+    fractions.push(folded_digit_fraction(
+        -1,
+        row.source_index,
+        row.mul_index,
+        row.digit_index,
+        m31(row.folded_digit),
+    ));
+    debug_assert_eq!(
+        fractions.len(),
+        projective_rcb_folded_digit_fraction_count()
+    );
+    fractions
+}
+
+fn projective_rcb_mul_padding_fractions() -> Vec<ProjectiveRcbFractionSpec> {
+    zeroed_projective_rcb_fractions(projective_rcb_mul_fraction_count())
+}
+
+fn projective_rcb_raw_product_chunk_padding_fractions() -> Vec<ProjectiveRcbFractionSpec> {
+    zeroed_projective_rcb_fractions(projective_rcb_raw_product_chunk_fraction_count())
+}
+
+fn projective_rcb_folded_contribution_padding_fractions() -> Vec<ProjectiveRcbFractionSpec> {
+    zeroed_projective_rcb_fractions(projective_rcb_folded_contribution_fraction_count())
+}
+
+fn projective_rcb_folded_digit_padding_fractions() -> Vec<ProjectiveRcbFractionSpec> {
+    zeroed_projective_rcb_fractions(projective_rcb_folded_digit_fraction_count())
+}
+
+fn zeroed_projective_rcb_fractions(count: usize) -> Vec<ProjectiveRcbFractionSpec> {
+    (0..count).map(|_| range13_fraction(0, m31(0))).collect()
+}
+
+fn projective_rcb_mul_fraction_count() -> usize {
+    2 * N_LIMBS * 2 + N_LIMBS + 4 * FP_SOLINAS_REDUCTION_DIGITS + FP_SOLINAS_REDUCTION_DIGITS + 2
+}
+
+fn projective_rcb_raw_product_chunk_fraction_count() -> usize {
+    2 * PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS + 2 + PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS
+}
+
+fn projective_rcb_folded_contribution_fraction_count() -> usize {
+    PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERMS + 1
+}
+
+fn projective_rcb_folded_digit_fraction_count() -> usize {
+    PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS + 6
+}
+
+fn projective_rcb_mul_interaction_columns() -> usize {
+    QM31_TRACE_COLUMNS * projective_rcb_mul_fraction_count().div_ceil(2)
+}
+
+fn projective_rcb_raw_product_chunk_interaction_columns() -> usize {
+    QM31_TRACE_COLUMNS * projective_rcb_raw_product_chunk_fraction_count().div_ceil(2)
+}
+
+fn projective_rcb_folded_contribution_interaction_columns() -> usize {
+    QM31_TRACE_COLUMNS * projective_rcb_folded_contribution_fraction_count().div_ceil(2)
+}
+
+fn projective_rcb_folded_digit_interaction_columns() -> usize {
+    QM31_TRACE_COLUMNS * projective_rcb_folded_digit_fraction_count().div_ceil(2)
+}
+
+fn range13_fraction(numerator: i64, value: M31) -> ProjectiveRcbFractionSpec {
+    ProjectiveRcbFractionSpec {
+        relation: ProjectiveRcbRelationKind::Range13,
+        numerator,
+        values: vec![value],
+    }
+}
+
+fn signed_carry_fraction(numerator: i64, value: M31) -> ProjectiveRcbFractionSpec {
+    ProjectiveRcbFractionSpec {
+        relation: ProjectiveRcbRelationKind::SignedCarry,
+        numerator,
+        values: vec![value],
+    }
+}
+
+fn mul_limb_fraction(
+    numerator: i64,
+    source_index: usize,
+    mul_index: usize,
+    role: u32,
+    limb_index: usize,
+    limb: M31,
+) -> ProjectiveRcbFractionSpec {
+    ProjectiveRcbFractionSpec {
+        relation: ProjectiveRcbRelationKind::MulLimb,
+        numerator,
+        values: vec![
+            m31_usize(source_index),
+            m31_usize(mul_index),
+            m31(role),
+            m31_usize(limb_index),
+            limb,
+        ],
+    }
+}
+
+fn raw_product_chunk_digit_fraction(
+    numerator: i64,
+    source_index: usize,
+    mul_index: usize,
+    coeff: usize,
+    chunk: usize,
+    offset: usize,
+    digit: M31,
+) -> ProjectiveRcbFractionSpec {
+    ProjectiveRcbFractionSpec {
+        relation: ProjectiveRcbRelationKind::RawProductChunkDigit,
+        numerator,
+        values: vec![
+            m31_usize(source_index),
+            m31_usize(mul_index),
+            m31_usize(coeff),
+            m31_usize(chunk),
+            m31_usize(offset),
+            digit,
+        ],
+    }
+}
+
+fn folded_contribution_fraction(
+    numerator: i64,
+    source_index: usize,
+    mul_index: usize,
+    digit_index: usize,
+    group_index: usize,
+    contribution_sum: M31,
+) -> ProjectiveRcbFractionSpec {
+    ProjectiveRcbFractionSpec {
+        relation: ProjectiveRcbRelationKind::FoldedContribution,
+        numerator,
+        values: vec![
+            m31_usize(source_index),
+            m31_usize(mul_index),
+            m31_usize(digit_index),
+            m31_usize(group_index),
+            contribution_sum,
+        ],
+    }
+}
+
+fn folded_digit_fraction(
+    numerator: i64,
+    source_index: usize,
+    mul_index: usize,
+    digit_index: usize,
+    folded_digit: M31,
+) -> ProjectiveRcbFractionSpec {
+    ProjectiveRcbFractionSpec {
+        relation: ProjectiveRcbRelationKind::FoldedDigit,
+        numerator,
+        values: vec![
+            m31_usize(source_index),
+            m31_usize(mul_index),
+            m31_usize(digit_index),
+            folded_digit,
+        ],
+    }
+}
+
+fn folded_carry_fraction(
+    numerator: i64,
+    source_index: usize,
+    mul_index: usize,
+    digit_index: usize,
+    carry: M31,
+) -> ProjectiveRcbFractionSpec {
+    ProjectiveRcbFractionSpec {
+        relation: ProjectiveRcbRelationKind::FoldedCarry,
+        numerator,
+        values: vec![
+            m31_usize(source_index),
+            m31_usize(mul_index),
+            m31_usize(digit_index),
+            carry,
+        ],
+    }
 }
 
 fn schedule_columns_to_evals<C, I>(columns: I) -> Vec<M31ColumnEval>
@@ -2638,6 +3252,10 @@ pub enum ProjectiveRcbAirError {
         max: usize,
         actual: usize,
     },
+    InteractionTraceColumnCountMismatch {
+        expected: usize,
+        actual: usize,
+    },
     ProjectiveOutputMismatch {
         source_index: usize,
     },
@@ -2747,6 +3365,10 @@ fn verify_relation_zero(
 
 fn secure_zero() -> SecureField {
     SecureField::from(m31(0))
+}
+
+fn secure_one() -> SecureField {
+    SecureField::from(m31(1))
 }
 
 fn secure_from_i64(value: i64) -> SecureField {
@@ -4137,5 +4759,49 @@ mod tests {
         claim
             .verify_base_trace()
             .expect("base trace shape verifies");
+    }
+
+    #[test]
+    fn projective_rcb_air_interaction_trace_materializes_paired_logup_columns() {
+        let trace = one_row_trace(ProjectiveEcOp::Double, PreparedAffinePoint::infinity());
+        let claim =
+            ProjectiveRcbAirTraceClaim::from_projective_trace(&trace).expect("valid RCB AIR trace");
+        let relations = ProjectiveRcbMulComponentRelations::dummy();
+        let (traces, interaction_claim) = claim.gen_interaction_trace(&relations);
+        let log_sizes = claim.component_log_sizes();
+
+        assert_eq!(traces.mul.len(), projective_rcb_mul_interaction_columns());
+        assert_eq!(
+            traces.raw_product_chunk.len(),
+            projective_rcb_raw_product_chunk_interaction_columns()
+        );
+        assert_eq!(
+            traces.folded_contribution.len(),
+            projective_rcb_folded_contribution_interaction_columns()
+        );
+        assert_eq!(
+            traces.folded_digit.len(),
+            projective_rcb_folded_digit_interaction_columns()
+        );
+        assert!(traces
+            .mul
+            .iter()
+            .all(|column| column.domain.log_size() == log_sizes.mul));
+        assert!(traces
+            .raw_product_chunk
+            .iter()
+            .all(|column| column.domain.log_size() == log_sizes.raw_product_chunk));
+        assert!(traces
+            .folded_contribution
+            .iter()
+            .all(|column| column.domain.log_size() == log_sizes.folded_contribution));
+        assert!(traces
+            .folded_digit
+            .iter()
+            .all(|column| column.domain.log_size() == log_sizes.folded_digit));
+        assert_ne!(interaction_claim.total(), secure_zero());
+        claim
+            .verify_interaction_trace(&relations)
+            .expect("interaction trace shape verifies");
     }
 }
