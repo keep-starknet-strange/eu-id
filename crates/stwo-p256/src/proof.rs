@@ -145,6 +145,12 @@ impl P256ProofClaim {
         self.prepared_table_ec_trace
             .verify_against_table(&self.prepared_table)?;
         self.fake_glv_chain.verify()?;
+        self.fake_glv_chain.verify_against_claims(
+            &self.cert_inputs,
+            &self.fake_glv_scalars,
+            &self.fake_glv_selectors,
+            &self.prepared_table,
+        )?;
         self.fake_glv_ec_trace
             .verify_against_chain(&self.fake_glv_chain)?;
         self.projective_ec_trace.verify()?;

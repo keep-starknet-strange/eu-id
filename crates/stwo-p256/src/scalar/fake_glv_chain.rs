@@ -58,6 +58,24 @@ impl FakeGlvChainClaim {
         Ok(())
     }
 
+    pub fn verify_against_claims(
+        &self,
+        cert_inputs: &CertScalarInputClaim,
+        fake_glv_scalars: &FakeGlvScalarHintClaim,
+        selectors: &FakeGlvSelectorClaim,
+        prepared_table: &PreparedTableClaim,
+    ) -> Result<(), FakeGlvChainError> {
+        let expected = Self::from_claims(cert_inputs, fake_glv_scalars, selectors, prepared_table)?;
+        if self == &expected {
+            Ok(())
+        } else {
+            Err(FakeGlvChainError::ChainTraceMismatch {
+                expected: expected.active_row_count(),
+                actual: self.active_row_count(),
+            })
+        }
+    }
+
     pub fn prepared_point_consumers(&self) -> Vec<PreparedPointInstance<M31>> {
         self.certs
             .iter()
@@ -451,6 +469,10 @@ pub enum FakeGlvChainError {
         expected: usize,
         actual: usize,
     },
+    ChainTraceMismatch {
+        expected: usize,
+        actual: usize,
+    },
     FinalAccumulatorMismatch {
         sig_id: u32,
         cert_id: u32,
@@ -678,7 +700,13 @@ mod tests {
 
     fn build_chain(
         message_hash: u64,
-    ) -> (PreparedTableClaim, FakeGlvSelectorClaim, FakeGlvChainClaim) {
+    ) -> (
+        CertScalarInputClaim,
+        FakeGlvScalarHintClaim,
+        FakeGlvSelectorClaim,
+        PreparedTableClaim,
+        FakeGlvChainClaim,
+    ) {
         let public_claim = PublicEcdsaInputClaim::from_inputs(&[test_input(message_hash, 77, 1)]);
         let scalar_setup =
             ScalarSetupClaim::from_public_inputs(&public_claim).expect("valid scalar setup");
@@ -695,12 +723,12 @@ mod tests {
             FakeGlvSelectorClaim::from_scalar_hints(&fake_glv).expect("valid selectors");
         let table = PreparedTableClaim::from_claims(&certs, &fake_glv, &selectors).unwrap();
         let chain = FakeGlvChainClaim::from_claims(&certs, &fake_glv, &selectors, &table).unwrap();
-        (table, selectors, chain)
+        (certs, fake_glv, selectors, table, chain)
     }
 
     #[test]
     fn fake_glv_chain_trace_reaches_r3_for_active_certs() {
-        let (_, _, chain) = build_chain(42);
+        let (_, _, _, _, chain) = build_chain(42);
 
         assert_eq!(chain.certs.len(), 2);
         assert_eq!(chain.active_row_count(), 130);
@@ -712,7 +740,7 @@ mod tests {
 
     #[test]
     fn fake_glv_chain_trace_skips_inactive_zero_branch() {
-        let (_, _, chain) = build_chain(0);
+        let (_, _, _, _, chain) = build_chain(0);
 
         assert_eq!(chain.certs[0].cert_active.0, 0);
         assert!(chain.certs[0].rows.is_empty());
@@ -723,7 +751,7 @@ mod tests {
 
     #[test]
     fn fake_glv_chain_trace_produces_expected_prepared_point_consumers() {
-        let (_, selectors, chain) = build_chain(42);
+        let (_, _, selectors, _, chain) = build_chain(42);
         let consumers = chain.prepared_point_consumers();
 
         assert_eq!(consumers.len(), 130);
@@ -735,7 +763,7 @@ mod tests {
 
     #[test]
     fn fake_glv_chain_trace_detects_mutated_row_output() {
-        let (_, _, mut chain) = build_chain(42);
+        let (_, _, _, _, mut chain) = build_chain(42);
         chain.certs[0].rows[1].acc_after = PreparedAffinePoint::infinity();
 
         let err = chain.verify().expect_err("mutated row must fail");
@@ -744,8 +772,29 @@ mod tests {
     }
 
     #[test]
+    fn fake_glv_chain_trace_links_back_to_source_claims() {
+        let (certs, fake_glv, selectors, table, chain) = build_chain(42);
+
+        chain
+            .verify_against_claims(&certs, &fake_glv, &selectors, &table)
+            .expect("chain links to source claims");
+    }
+
+    #[test]
+    fn fake_glv_chain_trace_detects_mutated_source_link() {
+        let (certs, fake_glv, selectors, table, mut chain) = build_chain(42);
+        chain.certs[0].rows[0].kind = FakeGlvChainRowKind::Table16Step;
+
+        let err = chain
+            .verify_against_claims(&certs, &fake_glv, &selectors, &table)
+            .expect_err("mutated chain/source link must fail");
+
+        assert!(matches!(err, FakeGlvChainError::ChainTraceMismatch { .. }));
+    }
+
+    #[test]
     fn fake_glv_primitive_ec_trace_expands_chain_steps() {
-        let (_, _, chain) = build_chain(42);
+        let (_, _, _, _, chain) = build_chain(42);
         let trace =
             FakeGlvPrimitiveEcTraceClaim::from_chain(&chain).expect("primitive ec trace builds");
 
@@ -762,7 +811,7 @@ mod tests {
 
     #[test]
     fn fake_glv_primitive_ec_trace_skips_inactive_zero_branch() {
-        let (_, _, chain) = build_chain(0);
+        let (_, _, _, _, chain) = build_chain(0);
         let trace =
             FakeGlvPrimitiveEcTraceClaim::from_chain(&chain).expect("primitive ec trace builds");
 
@@ -775,7 +824,7 @@ mod tests {
 
     #[test]
     fn fake_glv_primitive_ec_trace_detects_mutated_output() {
-        let (_, _, chain) = build_chain(42);
+        let (_, _, _, _, chain) = build_chain(42);
         let mut trace =
             FakeGlvPrimitiveEcTraceClaim::from_chain(&chain).expect("primitive ec trace builds");
         trace.rows[0].output = PreparedAffinePoint::infinity();
@@ -792,7 +841,7 @@ mod tests {
 
     #[test]
     fn fake_glv_primitive_ec_trace_detects_missing_row() {
-        let (_, _, chain) = build_chain(42);
+        let (_, _, _, _, chain) = build_chain(42);
         let mut trace =
             FakeGlvPrimitiveEcTraceClaim::from_chain(&chain).expect("primitive ec trace builds");
         trace.rows.pop();
