@@ -35,6 +35,7 @@ use crate::prepared_point::{
     PreparedPointInstance, PreparedPointTraceClaim, PreparedPointUseCountClaim,
     PREPARED_BASE_COUNT, TABLE16_INDEX,
 };
+use crate::projective::{ProjectiveEcOp, ProjectiveEcTraceClaim};
 use crate::types::{AffinePoint, U256};
 
 use super::cert_bind::{CertScalarInputClaim, CertScalarInputRow, CERT_ID_U1_GENERATOR};
@@ -63,8 +64,13 @@ pub const PREPARED_TABLE_EC_POINT_COLUMNS: usize = 2 * N_LIMBS + 1;
 pub const PREPARED_TABLE_EC_ROW_RELATION_ARITY: usize = 5 + 3 * PREPARED_TABLE_EC_POINT_COLUMNS;
 pub const PREPARED_TABLE_EC_ROW_TRACE_COLUMNS: usize =
     1 + 3 + PREPARED_TABLE_EC_KIND_FLAGS + 2 + 3 * PREPARED_TABLE_EC_POINT_COLUMNS;
+pub const PREPARED_TABLE_PROJECTIVE_SOURCE_TRACE_COLUMNS: usize =
+    1 + 5 + 3 * PREPARED_TABLE_EC_POINT_COLUMNS;
 
 const PREPARED_TABLE_EC_ROW_INDEX_COLUMN: &str = "p256_prepared_table_ec_row_index";
+
+pub type PreparedTableProjectiveSourceComponent =
+    FrameworkComponent<PreparedTableProjectiveSourceEval>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedTableClaim {
@@ -341,6 +347,151 @@ pub struct PreparedTableEcRowProof<H: stwo::core::vcs_lifted::merkle_hasher::Mer
     pub stark_proof: StarkProof<H>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreparedTableProjectiveSourceProofClaim {
+    pub log_size: u32,
+}
+
+impl PreparedTableProjectiveSourceProofClaim {
+    pub fn from_prepared_trace(trace: &PreparedTableEcTraceClaim) -> Self {
+        Self {
+            log_size: padded_log_size(trace.rows.len()),
+        }
+    }
+
+    pub fn mix_into(&self, channel: &mut impl Channel) {
+        channel.mix_u64(self.log_size as u64);
+    }
+
+    pub fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
+        let mut allocator = TraceLocationAllocator::default();
+        let _ = PreparedTableProjectiveSourceComponents::new(
+            &mut allocator,
+            self.log_size,
+            &PreparedTableProjectiveSourceInteractionClaim::zero(),
+            &PreparedTableEcRowRelation::dummy(),
+        );
+        allocator.preprocessed_columns().clone()
+    }
+
+    pub fn trace_log_degree_bounds(&self, ids: &[PreProcessedColumnId]) -> TreeVec<ColumnVec<u32>> {
+        let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(ids);
+        let components = PreparedTableProjectiveSourceComponents::new(
+            &mut allocator,
+            self.log_size,
+            &PreparedTableProjectiveSourceInteractionClaim::zero(),
+            &PreparedTableEcRowRelation::dummy(),
+        );
+        components.trace_log_degree_bounds()
+    }
+
+    pub fn max_constraint_log_degree_bound(&self, ids: &[PreProcessedColumnId]) -> u32 {
+        let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(ids);
+        let components = PreparedTableProjectiveSourceComponents::new(
+            &mut allocator,
+            self.log_size,
+            &PreparedTableProjectiveSourceInteractionClaim::zero(),
+            &PreparedTableEcRowRelation::dummy(),
+        );
+        components.max_constraint_log_degree_bound()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreparedTableProjectiveSourceInteractionClaim {
+    pub provider_claimed_sum: SecureField,
+    pub consumer_claimed_sum: SecureField,
+}
+
+impl PreparedTableProjectiveSourceInteractionClaim {
+    pub fn zero() -> Self {
+        Self {
+            provider_claimed_sum: secure_zero(),
+            consumer_claimed_sum: secure_zero(),
+        }
+    }
+
+    pub fn total(self) -> SecureField {
+        self.provider_claimed_sum + self.consumer_claimed_sum
+    }
+
+    pub fn mix_into(&self, channel: &mut impl Channel) {
+        channel.mix_felts(&[self.provider_claimed_sum, self.consumer_claimed_sum]);
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct PreparedTableProjectiveSourceProof<
+    H: stwo::core::vcs_lifted::merkle_hasher::MerkleHasherLifted,
+> {
+    pub claim: PreparedTableProjectiveSourceProofClaim,
+    pub interaction_claim: PreparedTableProjectiveSourceInteractionClaim,
+    pub stark_proof: StarkProof<H>,
+}
+
+pub struct PreparedTableProjectiveSourceComponents {
+    pub provider: PreparedTableEcRowComponent,
+    pub consumer: PreparedTableProjectiveSourceComponent,
+}
+
+impl PreparedTableProjectiveSourceComponents {
+    pub fn new(
+        allocator: &mut TraceLocationAllocator,
+        log_size: u32,
+        interaction_claim: &PreparedTableProjectiveSourceInteractionClaim,
+        relation: &PreparedTableEcRowRelation,
+    ) -> Self {
+        Self {
+            provider: PreparedTableEcRowComponent::new(
+                allocator,
+                PreparedTableEcRowEval {
+                    log_size,
+                    relation: relation.clone(),
+                },
+                interaction_claim.provider_claimed_sum,
+            ),
+            consumer: PreparedTableProjectiveSourceComponent::new(
+                allocator,
+                PreparedTableProjectiveSourceEval {
+                    log_size,
+                    relation: relation.clone(),
+                },
+                interaction_claim.consumer_claimed_sum,
+            ),
+        }
+    }
+
+    pub fn components(&self) -> Vec<&dyn Component> {
+        vec![
+            &self.provider as &dyn Component,
+            &self.consumer as &dyn Component,
+        ]
+    }
+
+    pub fn component_provers(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
+        vec![
+            &self.provider as &dyn ComponentProver<SimdBackend>,
+            &self.consumer as &dyn ComponentProver<SimdBackend>,
+        ]
+    }
+
+    pub fn trace_log_degree_bounds(&self) -> TreeVec<ColumnVec<u32>> {
+        TreeVec::concat_cols(
+            self.components()
+                .into_iter()
+                .map(|component| component.trace_log_degree_bounds()),
+        )
+    }
+
+    pub fn max_constraint_log_degree_bound(&self) -> u32 {
+        self.components()
+            .into_iter()
+            .map(|component| component.max_constraint_log_degree_bound())
+            .max()
+            .unwrap_or(0)
+    }
+}
+
 #[derive(Clone)]
 pub struct PreparedTableEcRowEval {
     pub log_size: u32,
@@ -420,6 +571,64 @@ impl FrameworkEval for PreparedTableEcRowEval {
         eval.add_to_relation(RelationEntry::new(
             &self.relation,
             -E::EF::from(active),
+            &relation_values,
+        ));
+        eval.finalize_logup();
+        eval
+    }
+}
+
+#[derive(Clone)]
+pub struct PreparedTableProjectiveSourceEval {
+    pub log_size: u32,
+    pub relation: PreparedTableEcRowRelation,
+}
+
+impl FrameworkEval for PreparedTableProjectiveSourceEval {
+    fn log_size(&self) -> u32 {
+        self.log_size
+    }
+
+    fn max_constraint_log_degree_bound(&self) -> u32 {
+        self.log_size + 1
+    }
+
+    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+        let active = eval.next_trace_mask();
+        let source_index = eval.next_trace_mask();
+        let sig_id = eval.next_trace_mask();
+        let cert_id = eval.next_trace_mask();
+        let op = eval.next_trace_mask();
+        let table_index = eval.next_trace_mask();
+        let lhs = PreparedTableEcEvalPoint::read(&mut eval);
+        let rhs = PreparedTableEcEvalPoint::read(&mut eval);
+        let output = PreparedTableEcEvalPoint::read(&mut eval);
+        let one = E::F::from(M31::from_u32_unchecked(1));
+
+        eval.add_constraint(active.clone() * (active.clone() - one.clone()));
+        lhs.add_constraints(&mut eval, &active, &one);
+        rhs.add_constraints(&mut eval, &active, &one);
+        output.add_constraints(&mut eval, &active, &one);
+
+        for value in [
+            source_index.clone(),
+            sig_id.clone(),
+            cert_id.clone(),
+            op.clone(),
+            table_index.clone(),
+        ] {
+            eval.add_constraint((one.clone() - active.clone()) * value);
+        }
+
+        let relation_values = prepared_table_ec_row_relation_values(
+            &[source_index, sig_id, cert_id, op, table_index],
+            &lhs,
+            &rhs,
+            &output,
+        );
+        eval.add_to_relation(RelationEntry::new(
+            &self.relation,
+            E::EF::from(active),
             &relation_values,
         ));
         eval.finalize_logup();
@@ -598,6 +807,160 @@ pub fn verify_prepared_table_ec_row_proof_slice<MC: stwo::core::channel::MerkleC
     .map_err(|_| PreparedTableError::ProofLayer)
 }
 
+pub fn prove_prepared_table_projective_source_proof_slice<MC: stwo::core::channel::MerkleChannel>(
+    prepared: &PreparedTableEcTraceClaim,
+    projective: &ProjectiveEcTraceClaim,
+    config: PcsConfig,
+) -> Result<PreparedTableProjectiveSourceProof<MC::H>, PreparedTableError>
+where
+    SimdBackend: BackendForChannel<MC>,
+{
+    prepared.verify()?;
+    projective
+        .verify()
+        .map_err(|_| PreparedTableError::ProjectiveSourceInvalid)?;
+    let claim = PreparedTableProjectiveSourceProofClaim::from_prepared_trace(prepared);
+    let ids = claim.preprocessed_column_ids();
+    let max_constraint_log_degree_bound = claim.max_constraint_log_degree_bound(&ids);
+    let twiddles = SimdBackend::precompute_twiddles(
+        CanonicCoset::new(
+            config
+                .lifting_log_size
+                .unwrap_or(max_constraint_log_degree_bound + config.fri_config.log_blowup_factor),
+        )
+        .circle_domain()
+        .half_coset,
+    );
+
+    let mut channel = MC::C::default();
+    let mut commitment_scheme = CommitmentSchemeProver::<SimdBackend, MC>::new(config, &twiddles);
+    commitment_scheme.set_store_polynomials_coefficients();
+
+    let preprocessed = gen_prepared_table_ec_row_preprocessed_trace(claim.log_size, &ids)?;
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(preprocessed);
+    tree_builder.commit(&mut channel);
+
+    claim.mix_into(&mut channel);
+    let provider_base = gen_prepared_table_ec_row_base_trace(prepared, claim.log_size)?;
+    let consumer_base =
+        gen_prepared_table_projective_source_base_trace(prepared, projective, claim.log_size)?;
+    let mut base = provider_base.clone();
+    base.extend(consumer_base.clone());
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(base);
+    tree_builder.commit(&mut channel);
+
+    let relation = PreparedTableEcRowRelation::draw(&mut channel);
+    let (provider_interaction, provider_claim) =
+        gen_prepared_table_ec_row_interaction_trace(&provider_base, &relation);
+    let (consumer_interaction, consumer_claim) =
+        gen_prepared_table_projective_source_interaction_trace(&consumer_base, &relation);
+    let interaction_claim = PreparedTableProjectiveSourceInteractionClaim {
+        provider_claimed_sum: provider_claim.claimed_sum,
+        consumer_claimed_sum: consumer_claim.claimed_sum,
+    };
+    if interaction_claim.total() != secure_zero() {
+        return Err(PreparedTableError::RelationImbalance {
+            relation: "PreparedTableProjectiveSource",
+        });
+    }
+    interaction_claim.mix_into(&mut channel);
+    let mut interaction = provider_interaction;
+    interaction.extend(consumer_interaction);
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(interaction);
+    tree_builder.commit(&mut channel);
+
+    let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
+    let components = PreparedTableProjectiveSourceComponents::new(
+        &mut allocator,
+        claim.log_size,
+        &interaction_claim,
+        &relation,
+    );
+    assert_eq!(
+        commitment_scheme
+            .polynomials()
+            .as_cols_ref()
+            .map_cols(|column| column.evals.domain.log_size() - config.fri_config.log_blowup_factor)
+            .0,
+        components.trace_log_degree_bounds().0
+    );
+    let stark_proof = prove(
+        &components.component_provers(),
+        &mut channel,
+        commitment_scheme,
+    )
+    .map_err(|_| PreparedTableError::ProofLayer)?;
+
+    Ok(PreparedTableProjectiveSourceProof {
+        claim,
+        interaction_claim,
+        stark_proof,
+    })
+}
+
+pub fn verify_prepared_table_projective_source_proof_slice<
+    MC: stwo::core::channel::MerkleChannel,
+>(
+    proof: PreparedTableProjectiveSourceProof<MC::H>,
+) -> Result<(), PreparedTableError> {
+    let PreparedTableProjectiveSourceProof {
+        claim,
+        interaction_claim,
+        stark_proof,
+    } = proof;
+
+    if interaction_claim.total() != secure_zero() {
+        return Err(PreparedTableError::RelationImbalance {
+            relation: "PreparedTableProjectiveSource",
+        });
+    }
+
+    let ids = claim.preprocessed_column_ids();
+    let log_degree_bounds = claim.trace_log_degree_bounds(&ids);
+    let mut channel = MC::C::default();
+    let commitment_scheme = &mut CommitmentSchemeVerifier::<MC>::new(stark_proof.config);
+
+    commitment_scheme.commit(
+        stark_proof.commitments[0],
+        &log_degree_bounds[0],
+        &mut channel,
+    );
+
+    claim.mix_into(&mut channel);
+    commitment_scheme.commit(
+        stark_proof.commitments[1],
+        &log_degree_bounds[1],
+        &mut channel,
+    );
+
+    let relation = PreparedTableEcRowRelation::draw(&mut channel);
+
+    interaction_claim.mix_into(&mut channel);
+    commitment_scheme.commit(
+        stark_proof.commitments[2],
+        &log_degree_bounds[2],
+        &mut channel,
+    );
+
+    let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
+    let components = PreparedTableProjectiveSourceComponents::new(
+        &mut allocator,
+        claim.log_size,
+        &interaction_claim,
+        &relation,
+    );
+    verify(
+        &components.components(),
+        &mut channel,
+        commitment_scheme,
+        stark_proof,
+    )
+    .map_err(|_| PreparedTableError::ProofLayer)
+}
+
 fn gen_prepared_table_ec_row_preprocessed_trace(
     log_size: u32,
     ids: &[PreProcessedColumnId],
@@ -642,6 +1005,44 @@ fn gen_prepared_table_ec_row_base_trace(
     Ok(columns_from_rows(log_size, rows))
 }
 
+fn gen_prepared_table_projective_source_base_trace(
+    prepared: &PreparedTableEcTraceClaim,
+    projective: &ProjectiveEcTraceClaim,
+    log_size: u32,
+) -> Result<ColumnVec<M31ColumnEval>, PreparedTableError> {
+    let padded_rows = 1usize << log_size;
+    if prepared.rows.len() > padded_rows {
+        return Err(PreparedTableError::EcTraceRowsExceedDomain {
+            rows: prepared.rows.len(),
+            domain: padded_rows,
+        });
+    }
+    if projective.rows.len() < prepared.rows.len() {
+        return Err(PreparedTableError::ProjectiveSourcePrefixTooShort {
+            prepared: prepared.rows.len(),
+            projective: projective.rows.len(),
+        });
+    }
+    let mut rows = prepared
+        .rows
+        .iter()
+        .zip(projective.rows.iter())
+        .enumerate()
+        .map(|(source_index, (prepared_row, projective_row))| {
+            prepared_table_projective_source_trace_values(
+                source_index,
+                prepared_row,
+                projective_row,
+            )
+        })
+        .collect::<Vec<_>>();
+    rows.resize(
+        padded_rows,
+        [M31::from_u32_unchecked(0); PREPARED_TABLE_PROJECTIVE_SOURCE_TRACE_COLUMNS],
+    );
+    Ok(columns_from_rows(log_size, rows))
+}
+
 fn gen_prepared_table_ec_row_interaction_trace(
     base: &[M31ColumnEval],
     relation: &PreparedTableEcRowRelation,
@@ -653,6 +1054,25 @@ fn gen_prepared_table_ec_row_interaction_trace(
     for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
         let values = prepared_table_ec_row_packed_relation_values(base, vec_row);
         let numerator = -PackedQM31::from(base[0].data[vec_row]);
+        let denominator: PackedQM31 = relation.combine(&values);
+        col.write_frac(vec_row, numerator, denominator);
+    }
+    col.finalize_col();
+    let (trace, claimed_sum) = logup.finalize_last();
+    (trace, PreparedTableEcRowInteractionClaim { claimed_sum })
+}
+
+fn gen_prepared_table_projective_source_interaction_trace(
+    base: &[M31ColumnEval],
+    relation: &PreparedTableEcRowRelation,
+) -> (ColumnVec<M31ColumnEval>, PreparedTableEcRowInteractionClaim) {
+    assert_eq!(base.len(), PREPARED_TABLE_PROJECTIVE_SOURCE_TRACE_COLUMNS);
+    let log_size = base[0].domain.log_size();
+    let mut logup = LogupTraceGenerator::new(log_size);
+    let mut col = logup.new_col();
+    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+        let values = prepared_table_projective_source_packed_relation_values(base, vec_row);
+        let numerator = PackedQM31::from(base[0].data[vec_row]);
         let denominator: PackedQM31 = relation.combine(&values);
         col.write_frac(vec_row, numerator, denominator);
     }
@@ -674,6 +1094,24 @@ fn prepared_table_ec_row_packed_relation_values(
             4 => 18,
             5..=127 => 19 + (index - 5),
             _ => unreachable!("prepared-table EC packed relation index is in range"),
+        };
+        base[column].data[vec_row]
+    })
+}
+
+fn prepared_table_projective_source_packed_relation_values(
+    base: &[M31ColumnEval],
+    vec_row: usize,
+) -> [PackedM31; PREPARED_TABLE_EC_ROW_RELATION_ARITY] {
+    core::array::from_fn(|index| {
+        let column = match index {
+            0 => 1,
+            1 => 2,
+            2 => 3,
+            3 => 4,
+            4 => 5,
+            5..=127 => 6 + (index - 5),
+            _ => unreachable!("prepared-table projective source relation index is in range"),
         };
         base[column].data[vec_row]
     })
@@ -720,6 +1158,41 @@ fn prepared_table_ec_row_trace_values(
         column += 1;
     }
     debug_assert_eq!(column, PREPARED_TABLE_EC_ROW_TRACE_COLUMNS);
+    values
+}
+
+fn prepared_table_projective_source_trace_values(
+    source_index: usize,
+    prepared_row: &PreparedTableEcRow,
+    projective_row: &crate::projective::ProjectiveEcRow,
+) -> [M31; PREPARED_TABLE_PROJECTIVE_SOURCE_TRACE_COLUMNS] {
+    let mut values = [M31::from_u32_unchecked(0); PREPARED_TABLE_PROJECTIVE_SOURCE_TRACE_COLUMNS];
+    let mut column = 0;
+    values[column] = M31::from_u32_unchecked(1);
+    column += 1;
+    values[column] = M31::from_u32_unchecked(source_index as u32);
+    column += 1;
+    values[column] = projective_row.sig_id;
+    column += 1;
+    values[column] = projective_row.cert_id;
+    column += 1;
+    values[column] = projective_ec_op_code(projective_row.op);
+    column += 1;
+    values[column] = prepared_table_ec_table_index(prepared_row.kind);
+    column += 1;
+    for value in prepared_table_ec_point_values(&projective_row.lhs_affine) {
+        values[column] = value;
+        column += 1;
+    }
+    for value in prepared_table_ec_point_values(&projective_row.rhs_affine) {
+        values[column] = value;
+        column += 1;
+    }
+    for value in prepared_table_ec_point_values(&projective_row.output_affine) {
+        values[column] = value;
+        column += 1;
+    }
+    debug_assert_eq!(column, PREPARED_TABLE_PROJECTIVE_SOURCE_TRACE_COLUMNS);
     values
 }
 
@@ -820,6 +1293,14 @@ fn prepared_table_ec_op_code(kind: PreparedTableEcRowKind) -> M31 {
         | PreparedTableEcRowKind::AddR2R
         | PreparedTableEcRowKind::Base(_)
         | PreparedTableEcRowKind::Table16 => PREPARED_TABLE_EC_OP_MIXED_ADD,
+    };
+    M31::from_u32_unchecked(code)
+}
+
+fn projective_ec_op_code(op: ProjectiveEcOp) -> M31 {
+    let code = match op {
+        ProjectiveEcOp::Double => PREPARED_TABLE_EC_OP_DOUBLE,
+        ProjectiveEcOp::MixedAdd => PREPARED_TABLE_EC_OP_MIXED_ADD,
     };
     M31::from_u32_unchecked(code)
 }
@@ -1187,6 +1668,14 @@ pub enum PreparedTableError {
         rows: usize,
         domain: usize,
     },
+    ProjectiveSourcePrefixTooShort {
+        prepared: usize,
+        projective: usize,
+    },
+    ProjectiveSourceInvalid,
+    RelationImbalance {
+        relation: &'static str,
+    },
     PreprocessedColumnMissing,
     NonCanonicalInfinity,
     ProofLayer,
@@ -1474,6 +1963,8 @@ fn is_additive_inverse(lhs: &AffinePoint, rhs: &AffinePoint) -> bool {
 mod tests {
     use super::*;
     use crate::constants::{P256_GX, P256_GY};
+    use crate::fake_glv_chain::FakeGlvPrimitiveEcTraceClaim;
+    use crate::projective::ProjectiveEcTraceClaim;
     use crate::public_inputs::PublicEcdsaInputClaim;
     use crate::scalar::cert_bind::CertScalarInputClaim;
     use crate::scalar::fake_glv_scalar::{FakeGlvScalarHint, FakeGlvScalarHintClaim};
@@ -1533,6 +2024,22 @@ mod tests {
 
     fn prepared_table_ec_row_low_ram_config(trace: &PreparedTableEcTraceClaim) -> PcsConfig {
         let claim = PreparedTableEcRowProofClaim::from_trace(trace);
+        let ids = claim.preprocessed_column_ids();
+        let max_constraint_log_degree_bound = claim.max_constraint_log_degree_bound(&ids);
+        let fri_config = FriConfig::new(5, 4, 64, 1);
+        PcsConfig {
+            pow_bits: 0,
+            fri_config,
+            lifting_log_size: Some(
+                (max_constraint_log_degree_bound + fri_config.log_blowup_factor).max(10),
+            ),
+        }
+    }
+
+    fn prepared_table_projective_source_low_ram_config(
+        trace: &PreparedTableEcTraceClaim,
+    ) -> PcsConfig {
+        let claim = PreparedTableProjectiveSourceProofClaim::from_prepared_trace(trace);
         let ids = claim.preprocessed_column_ids();
         let max_constraint_log_degree_bound = claim.max_constraint_log_degree_bound(&ids);
         let fri_config = FriConfig::new(5, 4, 64, 1);
@@ -1697,6 +2204,56 @@ mod tests {
 
         verify_prepared_table_ec_row_proof_slice::<Blake2sMerkleChannel>(proof)
             .expect("prepared-table EC row provider slice verifies");
+    }
+
+    #[test]
+    fn prepared_table_projective_source_proof_slice_proves_and_verifies() {
+        let (certs, fake_glv, selectors, table) = build_table(42);
+        let prepared =
+            PreparedTableEcTraceClaim::from_claims(&certs, &fake_glv, &selectors, &table)
+                .expect("valid ec trace");
+        let projective = ProjectiveEcTraceClaim::from_native_traces(
+            &prepared,
+            &FakeGlvPrimitiveEcTraceClaim { rows: vec![] },
+        )
+        .expect("projective trace builds");
+        let proof = prove_prepared_table_projective_source_proof_slice::<Blake2sMerkleChannel>(
+            &prepared,
+            &projective,
+            prepared_table_projective_source_low_ram_config(&prepared),
+        )
+        .expect("prepared-table projective source link proves");
+
+        verify_prepared_table_projective_source_proof_slice::<Blake2sMerkleChannel>(proof)
+            .expect("prepared-table projective source link verifies");
+    }
+
+    #[test]
+    fn prepared_table_projective_source_proof_slice_rejects_mutated_prefix() {
+        let (certs, fake_glv, selectors, table) = build_table(42);
+        let prepared =
+            PreparedTableEcTraceClaim::from_claims(&certs, &fake_glv, &selectors, &table)
+                .expect("valid ec trace");
+        let mut projective = ProjectiveEcTraceClaim::from_native_traces(
+            &prepared,
+            &FakeGlvPrimitiveEcTraceClaim { rows: vec![] },
+        )
+        .expect("projective trace builds");
+        projective.rows[0].sig_id += M31::from_u32_unchecked(1);
+
+        let err = prove_prepared_table_projective_source_proof_slice::<Blake2sMerkleChannel>(
+            &prepared,
+            &projective,
+            prepared_table_projective_source_low_ram_config(&prepared),
+        )
+        .expect_err("mutated projective source tuple must not balance");
+
+        assert!(matches!(
+            err,
+            PreparedTableError::RelationImbalance {
+                relation: "PreparedTableProjectiveSource"
+            }
+        ));
     }
 
     #[test]
