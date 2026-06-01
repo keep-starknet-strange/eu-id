@@ -496,8 +496,8 @@ pub const P256_PROOF_COMPONENT_SLOTS: &[P256ProofComponentSlot] = &[
     },
     P256ProofComponentSlot {
         name: "PreparedTableEcRows",
-        status: P256ProofComponentStatus::Pending,
-        note: "AIR constraints for STATE_LOAD, table construction EC rows, R3 fixed-offset use, and AFFINE_EXPORT are not implemented yet.",
+        status: P256ProofComponentStatus::Implemented,
+        note: "Prepared-table EC row shape is proven and linked into projective RCB source rows; EC arithmetic is discharged by ProjectiveRcbAirRows.",
     },
     P256ProofComponentSlot {
         name: "FakeGlvChainTrace",
@@ -521,8 +521,8 @@ pub const P256_PROOF_COMPONENT_SLOTS: &[P256ProofComponentSlot] = &[
     },
     P256ProofComponentSlot {
         name: "FakeGlvEcChainRows",
-        status: P256ProofComponentStatus::Pending,
-        note: "Stwo AIR constraints for MSB init, primitive chain DOUBLE/ADD rows, Table[16] final step, and LSB correction are not implemented yet.",
+        status: P256ProofComponentStatus::Implemented,
+        note: "Fake-GLV chain schedule, continuity, operands, primitive expansion, prepared-point source, and projective-source links are proven; EC arithmetic is discharged by ProjectiveRcbAirRows.",
     },
     P256ProofComponentSlot {
         name: "FinalEcdsaCheck",
@@ -2024,13 +2024,15 @@ mod tests {
         assert!(implemented.contains(&"SolinasReductionTraceRows"));
         assert!(implemented.contains(&"PreparedTablePoints"));
         assert!(implemented.contains(&"PreparedTableEcTrace"));
+        assert!(implemented.contains(&"PreparedTableEcRows"));
         assert!(implemented.contains(&"FakeGlvChainTrace"));
         assert!(implemented.contains(&"FakeGlvPrimitiveEcTrace"));
+        assert!(implemented.contains(&"FakeGlvEcChainRows"));
         assert!(implemented.contains(&"ProjectiveRcbEcTrace"));
         assert!(implemented.contains(&"ProjectiveRcbAirRows"));
         assert!(implemented.contains(&"FinalEcdsaCheck"));
-        assert!(pending.contains(&"PreparedTableEcRows"));
-        assert!(pending.contains(&"FakeGlvEcChainRows"));
+        assert!(!pending.contains(&"PreparedTableEcRows"));
+        assert!(!pending.contains(&"FakeGlvEcChainRows"));
         assert!(pending.contains(&"StarkProveVerify"));
     }
 
