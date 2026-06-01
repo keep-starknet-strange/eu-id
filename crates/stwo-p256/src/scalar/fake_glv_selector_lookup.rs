@@ -3,9 +3,14 @@ use std::collections::BTreeMap;
 use num_traits::{One, Zero};
 use stwo::{
     core::{
+        air::Component,
+        channel::Channel,
         fields::{m31::M31, qm31::SecureField},
+        pcs::{CommitmentSchemeVerifier, PcsConfig, TreeVec},
         poly::circle::CanonicCoset,
+        proof::StarkProof,
         utils::{bit_reverse_index, coset_index_to_circle_domain_index},
+        verifier::verify,
         ColumnVec,
     },
     prover::{
@@ -15,13 +20,15 @@ use stwo::{
             qm31::{PackedQM31, PackedSecureField},
             SimdBackend,
         },
-        poly::{circle::CircleEvaluation, BitReversedOrder},
+        backend::BackendForChannel,
+        poly::{circle::CircleEvaluation, circle::PolyOps, BitReversedOrder},
+        prove, CommitmentSchemeProver, ComponentProver,
     },
 };
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{
     relation, EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation,
-    RelationEntry,
+    RelationEntry, TraceLocationAllocator,
 };
 
 use super::fake_glv_selector::{FakeGlvSelectorClaim, FAKE_GLV_SELECTOR_CHUNKS};
@@ -270,10 +277,22 @@ pub struct SelectorProviderInteractionClaim {
 }
 
 impl SelectorProviderInteractionClaim {
+    pub fn zero() -> Self {
+        Self::default()
+    }
+
     pub fn claimed_sum(&self) -> SecureField {
         self.selector4x4.claimed_sum
             + self.selector16_decode.claimed_sum
             + self.final_selector.claimed_sum
+    }
+
+    pub fn mix_into(&self, channel: &mut impl Channel) {
+        channel.mix_felts(&[
+            self.selector4x4.claimed_sum,
+            self.selector16_decode.claimed_sum,
+            self.final_selector.claimed_sum,
+        ]);
     }
 
     pub fn gen_interaction_traces(
@@ -320,7 +339,282 @@ impl SelectorProviderInteractionClaim {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SelectorLookupProviderProofClaim;
+
+impl SelectorLookupProviderProofClaim {
+    pub fn mix_into(&self, channel: &mut impl Channel) {
+        channel.mix_u64(SELECTOR4X4_LOG_SIZE as u64);
+        channel.mix_u64(SELECTOR16_DECODE_LOG_SIZE as u64);
+        channel.mix_u64(FINAL_SELECTOR_LOG_SIZE as u64);
+    }
+
+    pub fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
+        let mut allocator = TraceLocationAllocator::default();
+        let _ = SelectorLookupProviderComponents::new(
+            &mut allocator,
+            &SelectorProviderInteractionClaim::zero(),
+            &FakeGlvSelectorLookupRelations::dummy(),
+        );
+        allocator.preprocessed_columns().clone()
+    }
+
+    pub fn trace_log_degree_bounds(&self, ids: &[PreProcessedColumnId]) -> TreeVec<ColumnVec<u32>> {
+        let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(ids);
+        let components = SelectorLookupProviderComponents::new(
+            &mut allocator,
+            &SelectorProviderInteractionClaim::zero(),
+            &FakeGlvSelectorLookupRelations::dummy(),
+        );
+        components.trace_log_degree_bounds()
+    }
+
+    pub fn max_constraint_log_degree_bound(&self, ids: &[PreProcessedColumnId]) -> u32 {
+        let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(ids);
+        let components = SelectorLookupProviderComponents::new(
+            &mut allocator,
+            &SelectorProviderInteractionClaim::zero(),
+            &FakeGlvSelectorLookupRelations::dummy(),
+        );
+        components.max_constraint_log_degree_bound()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SelectorLookupProviderProof<H: stwo::core::vcs_lifted::merkle_hasher::MerkleHasherLifted>
+{
+    pub claim: SelectorLookupProviderProofClaim,
+    pub interaction_claim: SelectorProviderInteractionClaim,
+    pub stark_proof: StarkProof<H>,
+}
+
+pub struct SelectorLookupProviderComponents {
+    pub selector4x4: Selector4x4Component,
+    pub selector16_decode: Selector16DecodeComponent,
+    pub final_selector: FinalSelectorComponent,
+}
+
+impl SelectorLookupProviderComponents {
+    pub fn new(
+        allocator: &mut TraceLocationAllocator,
+        interaction_claim: &SelectorProviderInteractionClaim,
+        relations: &FakeGlvSelectorLookupRelations,
+    ) -> Self {
+        Self {
+            selector4x4: Selector4x4Component::new(
+                allocator,
+                Selector4x4Eval {
+                    relation: relations.selector4x4.clone(),
+                },
+                interaction_claim.selector4x4.claimed_sum,
+            ),
+            selector16_decode: Selector16DecodeComponent::new(
+                allocator,
+                Selector16DecodeEval {
+                    relation: relations.selector16_decode.clone(),
+                },
+                interaction_claim.selector16_decode.claimed_sum,
+            ),
+            final_selector: FinalSelectorComponent::new(
+                allocator,
+                FinalSelectorEval {
+                    relation: relations.final_selector.clone(),
+                },
+                interaction_claim.final_selector.claimed_sum,
+            ),
+        }
+    }
+
+    pub fn components(&self) -> Vec<&dyn Component> {
+        vec![
+            &self.selector4x4 as &dyn Component,
+            &self.selector16_decode as &dyn Component,
+            &self.final_selector as &dyn Component,
+        ]
+    }
+
+    pub fn component_provers(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
+        vec![
+            &self.selector4x4 as &dyn ComponentProver<SimdBackend>,
+            &self.selector16_decode as &dyn ComponentProver<SimdBackend>,
+            &self.final_selector as &dyn ComponentProver<SimdBackend>,
+        ]
+    }
+
+    pub fn trace_log_degree_bounds(&self) -> TreeVec<ColumnVec<u32>> {
+        TreeVec::concat_cols(
+            self.components()
+                .into_iter()
+                .map(|component| component.trace_log_degree_bounds()),
+        )
+    }
+
+    pub fn max_constraint_log_degree_bound(&self) -> u32 {
+        self.components()
+            .into_iter()
+            .map(|component| component.max_constraint_log_degree_bound())
+            .max()
+            .unwrap_or(0)
+    }
+}
+
+pub fn gen_selector_lookup_provider_preprocessed_trace() -> ColumnVec<SelectorColumnEval> {
+    let selector4x4 = Selector4x4ProviderClaim;
+    let selector16 = Selector16DecodeProviderClaim;
+    let final_selector = FinalSelectorProviderClaim;
+    let mut trace = Vec::new();
+    trace.extend(selector4x4.gen_preprocessed_columns());
+    trace.extend(selector16.gen_preprocessed_columns());
+    trace.extend(final_selector.gen_preprocessed_columns());
+    trace
+}
+
+pub fn gen_selector_lookup_provider_base_trace(
+    requests: &SelectorLookupRequests,
+) -> ColumnVec<SelectorColumnEval> {
+    let selector4x4 = Selector4x4ProviderClaim;
+    let selector16 = Selector16DecodeProviderClaim;
+    let final_selector = FinalSelectorProviderClaim;
+    vec![
+        selector4x4.gen_multiplicity_trace(requests),
+        selector16.gen_multiplicity_trace(requests),
+        final_selector.gen_multiplicity_trace(requests),
+    ]
+}
+
+pub fn prove_selector_lookup_provider_proof_slice<MC: stwo::core::channel::MerkleChannel>(
+    requests: &SelectorLookupRequests,
+    config: PcsConfig,
+) -> Result<SelectorLookupProviderProof<MC::H>, SelectorLookupError>
+where
+    SimdBackend: BackendForChannel<MC>,
+{
+    requests.verify()?;
+    let claim = SelectorLookupProviderProofClaim;
+    let ids = claim.preprocessed_column_ids();
+    let max_constraint_log_degree_bound = claim.max_constraint_log_degree_bound(&ids);
+    let twiddles = SimdBackend::precompute_twiddles(
+        CanonicCoset::new(
+            config
+                .lifting_log_size
+                .unwrap_or(max_constraint_log_degree_bound + config.fri_config.log_blowup_factor),
+        )
+        .circle_domain()
+        .half_coset,
+    );
+
+    let mut channel = MC::C::default();
+    let mut commitment_scheme = CommitmentSchemeProver::<SimdBackend, MC>::new(config, &twiddles);
+    commitment_scheme.set_store_polynomials_coefficients();
+
+    let preprocessed = gen_selector_lookup_provider_preprocessed_trace();
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(preprocessed);
+    tree_builder.commit(&mut channel);
+
+    claim.mix_into(&mut channel);
+    let base = gen_selector_lookup_provider_base_trace(requests);
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(base);
+    tree_builder.commit(&mut channel);
+
+    let relations = FakeGlvSelectorLookupRelations::draw(&mut channel);
+    let (interaction, interaction_claim) =
+        SelectorProviderInteractionClaim::gen_interaction_traces(requests, &relations);
+    if interaction_claim.claimed_sum() + selector_lookup_consumer_claimed_sum(requests, &relations)
+        != secure_zero()
+    {
+        return Err(SelectorLookupError::RelationImbalance {
+            relation: "SelectorLookups",
+        });
+    }
+    interaction_claim.mix_into(&mut channel);
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(interaction);
+    tree_builder.commit(&mut channel);
+
+    let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
+    let components =
+        SelectorLookupProviderComponents::new(&mut allocator, &interaction_claim, &relations);
+    assert_eq!(
+        commitment_scheme
+            .polynomials()
+            .as_cols_ref()
+            .map_cols(|column| column.evals.domain.log_size() - config.fri_config.log_blowup_factor)
+            .0,
+        components.trace_log_degree_bounds().0
+    );
+    let stark_proof = prove(
+        &components.component_provers(),
+        &mut channel,
+        commitment_scheme,
+    )
+    .map_err(|_| SelectorLookupError::ProofLayer)?;
+
+    Ok(SelectorLookupProviderProof {
+        claim,
+        interaction_claim,
+        stark_proof,
+    })
+}
+
+pub fn verify_selector_lookup_provider_proof_slice<MC: stwo::core::channel::MerkleChannel>(
+    proof: SelectorLookupProviderProof<MC::H>,
+) -> Result<(), SelectorLookupError> {
+    let SelectorLookupProviderProof {
+        claim,
+        interaction_claim,
+        stark_proof,
+    } = proof;
+
+    let ids = claim.preprocessed_column_ids();
+    let log_degree_bounds = claim.trace_log_degree_bounds(&ids);
+    let mut channel = MC::C::default();
+    let commitment_scheme = &mut CommitmentSchemeVerifier::<MC>::new(stark_proof.config);
+
+    commitment_scheme.commit(
+        stark_proof.commitments[0],
+        &log_degree_bounds[0],
+        &mut channel,
+    );
+
+    claim.mix_into(&mut channel);
+    commitment_scheme.commit(
+        stark_proof.commitments[1],
+        &log_degree_bounds[1],
+        &mut channel,
+    );
+
+    let relations = FakeGlvSelectorLookupRelations::draw(&mut channel);
+
+    interaction_claim.mix_into(&mut channel);
+    commitment_scheme.commit(
+        stark_proof.commitments[2],
+        &log_degree_bounds[2],
+        &mut channel,
+    );
+
+    let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
+    let components =
+        SelectorLookupProviderComponents::new(&mut allocator, &interaction_claim, &relations);
+    verify(
+        &components.components(),
+        &mut channel,
+        commitment_scheme,
+        stark_proof,
+    )
+    .map_err(|_| SelectorLookupError::ProofLayer)
+}
+
 impl FakeGlvSelectorLookupRelations {
+    pub fn draw(channel: &mut impl Channel) -> Self {
+        Self {
+            selector4x4: Selector4x4Relation::draw(channel),
+            selector16_decode: Selector16DecodeRelation::draw(channel),
+            final_selector: FinalSelectorRelation::draw(channel),
+        }
+    }
+
     pub fn dummy() -> Self {
         Self {
             selector4x4: Selector4x4Relation::dummy(),
@@ -817,6 +1111,10 @@ pub enum SelectorLookupError {
         expected: Selector16DecodeEntry,
     },
     InvalidFinalSelector(FinalSelectorEntry),
+    RelationImbalance {
+        relation: &'static str,
+    },
+    ProofLayer,
 }
 
 fn decode_selector16(selector: u32) -> Option<(u32, u32)> {
@@ -846,6 +1144,10 @@ fn secure_from_i64(value: i64) -> SecureField {
     SecureField::from(M31::from_u32_unchecked(value.rem_euclid(MODULUS) as u32))
 }
 
+fn secure_zero() -> SecureField {
+    SecureField::from(M31::from_u32_unchecked(0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -858,6 +1160,9 @@ mod tests {
     use crate::scalar::fake_glv_selector::FakeGlvSelectorClaim;
     use crate::scalar::setup_air::ScalarSetupClaim;
     use crate::types::{AffinePoint, EcdsaVerifyInput, Signature, U256};
+    use stwo::core::fri::FriConfig;
+    use stwo::core::pcs::PcsConfig;
+    use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
     use stwo_constraint_framework::TraceLocationAllocator;
 
     fn test_input(message_hash: u64, r: u64, s: u64) -> EcdsaVerifyInput {
@@ -907,6 +1212,20 @@ mod tests {
             .flat_map(|packed| packed.to_array())
             .map(|value| value.0)
             .sum()
+    }
+
+    fn selector_lookup_provider_low_ram_config() -> PcsConfig {
+        let claim = SelectorLookupProviderProofClaim;
+        let ids = claim.preprocessed_column_ids();
+        let max_constraint_log_degree_bound = claim.max_constraint_log_degree_bound(&ids);
+        let fri_config = FriConfig::new(5, 4, 64, 1);
+        PcsConfig {
+            pow_bits: 0,
+            fri_config,
+            lifting_log_size: Some(
+                (max_constraint_log_degree_bound + fri_config.log_blowup_factor).max(10),
+            ),
+        }
     }
 
     #[test]
@@ -1039,6 +1358,21 @@ mod tests {
             claim.claimed_sum(),
             selector_lookup_provider_claimed_sum(&requests, &relations)
         );
+    }
+
+    #[test]
+    fn selector_lookup_provider_proof_slice_proves_and_verifies() {
+        let (_, _, selectors) = build_selectors();
+        let requests =
+            SelectorLookupRequests::from_selector_claim(&selectors).expect("valid requests");
+        let proof = prove_selector_lookup_provider_proof_slice::<Blake2sMerkleChannel>(
+            &requests,
+            selector_lookup_provider_low_ram_config(),
+        )
+        .expect("selector lookup provider slice proves");
+
+        verify_selector_lookup_provider_proof_slice::<Blake2sMerkleChannel>(proof)
+            .expect("selector lookup provider slice verifies");
     }
 
     #[test]

@@ -635,6 +635,10 @@ mod tests {
     use super::*;
     use crate::constants::{P256_GX, P256_GY, P256_ORDER};
     use crate::curve::{mod_inverse, scalar_mul};
+    use crate::fake_glv_selector_lookup::{
+        prove_selector_lookup_provider_proof_slice, verify_selector_lookup_provider_proof_slice,
+        SelectorLookupProviderProofClaim,
+    };
     use crate::field_ops::mul_mod_witness;
     use crate::fp_solinas_air::FP_SOLINAS_REDUCTION_DIGITS;
     use crate::limbs::P256M31BigInt;
@@ -648,6 +652,9 @@ mod tests {
     };
     use crate::types::{AffinePoint, Signature, U256};
     use core::cmp::Ordering;
+    use stwo::core::fri::FriConfig;
+    use stwo::core::pcs::PcsConfig;
+    use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
 
     fn test_input(message_hash: u64, r: u64, s: u64) -> EcdsaVerifyInput {
         EcdsaVerifyInput {
@@ -719,6 +726,20 @@ mod tests {
             }
         }
         Ordering::Equal
+    }
+
+    fn selector_lookup_provider_low_ram_config() -> PcsConfig {
+        let claim = SelectorLookupProviderProofClaim;
+        let ids = claim.preprocessed_column_ids();
+        let max_constraint_log_degree_bound = claim.max_constraint_log_degree_bound(&ids);
+        let fri_config = FriConfig::new(5, 4, 64, 1);
+        PcsConfig {
+            pow_bits: 0,
+            fri_config,
+            lifting_log_size: Some(
+                (max_constraint_log_degree_bound + fri_config.log_blowup_factor).max(10),
+            ),
+        }
     }
 
     #[test]
@@ -1111,6 +1132,24 @@ mod tests {
             proof.claim.final_check.rows[0].h1,
             PreparedAffinePoint::infinity()
         );
+    }
+
+    #[test]
+    fn current_p256_proof_pipeline_proves_selector_lookup_provider_slice() {
+        let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+            valid_real_input_with_small_u_scalars(7, 11),
+        ])
+        .expect("current pipeline builds");
+        proof.verify_current_e2e().expect("current e2e verifies");
+
+        let selector_proof = prove_selector_lookup_provider_proof_slice::<Blake2sMerkleChannel>(
+            &proof.claim.selector_requests,
+            selector_lookup_provider_low_ram_config(),
+        )
+        .expect("selector lookup provider slice proves");
+
+        verify_selector_lookup_provider_proof_slice::<Blake2sMerkleChannel>(selector_proof)
+            .expect("selector lookup provider slice verifies");
     }
 
     #[test]
