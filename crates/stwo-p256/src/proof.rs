@@ -664,6 +664,11 @@ mod tests {
         prove_selector_lookup_provider_proof_slice, verify_selector_lookup_provider_proof_slice,
         SelectorLookupProviderProofClaim,
     };
+    use crate::fake_glv_signed_selector_operand::{
+        prove_fake_glv_signed_selector_operand_proof_slice,
+        verify_fake_glv_signed_selector_operand_proof_slice,
+        FakeGlvSignedSelectorOperandProofClaim,
+    };
     use crate::field_ops::mul_mod_witness;
     use crate::fp_solinas_air::FP_SOLINAS_REDUCTION_DIGITS;
     use crate::limbs::P256M31BigInt;
@@ -871,6 +876,23 @@ mod tests {
         chain: &FakeGlvChainClaim,
     ) -> PcsConfig {
         let claim = FakeGlvDirectPreparedOperandProofClaim::from_claims(selectors, chain);
+        let ids = claim.preprocessed_column_ids();
+        let max_constraint_log_degree_bound = claim.max_constraint_log_degree_bound(&ids);
+        let fri_config = FriConfig::new(5, 4, 64, 1);
+        PcsConfig {
+            pow_bits: 0,
+            fri_config,
+            lifting_log_size: Some(
+                (max_constraint_log_degree_bound + fri_config.log_blowup_factor).max(10),
+            ),
+        }
+    }
+
+    fn fake_glv_signed_selector_operand_low_ram_config(
+        selectors: &FakeGlvSelectorClaim,
+        chain: &FakeGlvChainClaim,
+    ) -> PcsConfig {
+        let claim = FakeGlvSignedSelectorOperandProofClaim::from_claims(selectors, chain);
         let ids = claim.preprocessed_column_ids();
         let max_constraint_log_degree_bound = claim.max_constraint_log_degree_bound(&ids);
         let fri_config = FriConfig::new(5, 4, 64, 1);
@@ -1460,6 +1482,30 @@ mod tests {
     }
 
     #[test]
+    fn current_p256_proof_pipeline_proves_fake_glv_signed_selector_operand_slice() {
+        let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+            valid_real_input_with_small_u_scalars(7, 11),
+        ])
+        .expect("current pipeline builds");
+        proof.verify_current_e2e().expect("current e2e verifies");
+
+        let operand_proof =
+            prove_fake_glv_signed_selector_operand_proof_slice::<Blake2sMerkleChannel>(
+                &proof.claim.prepared_table,
+                &proof.claim.fake_glv_selectors,
+                &proof.claim.fake_glv_chain,
+                fake_glv_signed_selector_operand_low_ram_config(
+                    &proof.claim.fake_glv_selectors,
+                    &proof.claim.fake_glv_chain,
+                ),
+            )
+            .expect("fake-GLV signed selector operand slice proves");
+
+        verify_fake_glv_signed_selector_operand_proof_slice::<Blake2sMerkleChannel>(operand_proof)
+            .expect("fake-GLV signed selector operand slice verifies");
+    }
+
+    #[test]
     fn current_p256_proof_pipeline_proves_fake_glv_prepared_point_source_slice() {
         let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
             valid_real_input_with_small_u_scalars(7, 11),
@@ -1606,6 +1652,31 @@ mod tests {
     }
 
     #[test]
+    fn current_p256_proof_pipeline_proves_fake_glv_signed_selector_operand_slice_with_zero_branch()
+    {
+        let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+            valid_real_input_with_small_u_scalars(0, 11),
+        ])
+        .expect("zero branch pipeline builds");
+        proof.verify_current_e2e().expect("zero branch verifies");
+
+        let operand_proof =
+            prove_fake_glv_signed_selector_operand_proof_slice::<Blake2sMerkleChannel>(
+                &proof.claim.prepared_table,
+                &proof.claim.fake_glv_selectors,
+                &proof.claim.fake_glv_chain,
+                fake_glv_signed_selector_operand_low_ram_config(
+                    &proof.claim.fake_glv_selectors,
+                    &proof.claim.fake_glv_chain,
+                ),
+            )
+            .expect("zero-branch fake-GLV signed selector operand slice proves");
+
+        verify_fake_glv_signed_selector_operand_proof_slice::<Blake2sMerkleChannel>(operand_proof)
+            .expect("zero-branch fake-GLV signed selector operand slice verifies");
+    }
+
+    #[test]
     fn current_p256_proof_pipeline_rejects_mutated_fake_glv_chain_expansion_slice() {
         let mut proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
             valid_real_input_with_small_u_scalars(7, 11),
@@ -1731,6 +1802,61 @@ mod tests {
             err,
             FakeGlvChainError::RelationImbalance {
                 relation: "FakeGlvDirectPreparedOperand",
+            }
+        );
+    }
+
+    #[test]
+    fn current_p256_proof_pipeline_rejects_mutated_fake_glv_signed_selector_operand_slice() {
+        let mut proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+            valid_real_input_with_small_u_scalars(7, 11),
+        ])
+        .expect("current pipeline builds");
+        proof.verify_current_e2e().expect("current e2e verifies");
+
+        let (cert_index, base_index) = proof
+            .claim
+            .fake_glv_selectors
+            .rows
+            .iter()
+            .enumerate()
+            .find_map(|(cert_index, selector_row)| {
+                if selector_row.cert_active.0 == 0 {
+                    return None;
+                }
+                (1..crate::scalar::fake_glv_selector::FAKE_GLV_SELECTOR_CHUNKS)
+                    .rev()
+                    .find_map(|step| {
+                        let decoded =
+                            crate::scalar::fake_glv_selector_lookup::Selector16DecodeEntry::from_selector(
+                                selector_row.selectors[step],
+                            )
+                            .ok()?;
+                        let base_index = decoded.base_index.0 as usize;
+                        (proof.claim.prepared_table.certs[cert_index].base[base_index].inf.0 == 0)
+                            .then_some((cert_index, base_index))
+                    })
+            })
+            .expect("at least one finite signed selector base point is used");
+        proof.claim.prepared_table.certs[cert_index].base[base_index]
+            .x
+            .limbs_mut()[0] += M31::from_u32_unchecked(1);
+
+        let err = prove_fake_glv_signed_selector_operand_proof_slice::<Blake2sMerkleChannel>(
+            &proof.claim.prepared_table,
+            &proof.claim.fake_glv_selectors,
+            &proof.claim.fake_glv_chain,
+            fake_glv_signed_selector_operand_low_ram_config(
+                &proof.claim.fake_glv_selectors,
+                &proof.claim.fake_glv_chain,
+            ),
+        )
+        .expect_err("mutated fake-GLV signed selector operand must reject");
+
+        assert_eq!(
+            err,
+            FakeGlvChainError::RelationImbalance {
+                relation: "FakeGlvSignedSelectorOperand",
             }
         );
     }

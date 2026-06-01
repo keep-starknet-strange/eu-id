@@ -10,6 +10,7 @@ pub mod fake_glv_prepared_point_source;
 pub mod fake_glv_scalar;
 pub mod fake_glv_selector;
 pub mod fake_glv_selector_lookup;
+pub mod fake_glv_signed_selector_operand;
 pub mod prepared_point;
 pub mod prepared_table;
 pub mod scalar_mod_mul;

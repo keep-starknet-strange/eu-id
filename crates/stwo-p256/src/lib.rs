@@ -66,6 +66,10 @@ pub mod fake_glv_selector_lookup {
     pub use crate::scalar::fake_glv_selector_lookup::*;
 }
 
+pub mod fake_glv_signed_selector_operand {
+    pub use crate::scalar::fake_glv_signed_selector_operand::*;
+}
+
 pub mod prepared_point {
     pub use crate::scalar::prepared_point::*;
 }
