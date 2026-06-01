@@ -995,7 +995,6 @@ impl P256ProofDraft {
         let mut channel = MC::C::default();
         let mut commitment_scheme =
             CommitmentSchemeProver::<SimdBackend, MC>::new(config, &twiddles);
-        commitment_scheme.set_store_polynomials_coefficients();
 
         let preprocessed = self.gen_current_air_preprocessed_trace(&proof_claim, &ids)?;
         let mut tree_builder = commitment_scheme.tree_builder();
@@ -1003,9 +1002,10 @@ impl P256ProofDraft {
         tree_builder.commit(&mut channel);
 
         proof_claim.mix_into(&mut channel);
-        let base = self.gen_current_air_base_trace(&proof_claim)?;
+        let mut base = self.gen_current_air_base_trace(&proof_claim)?;
+        let base_columns = std::mem::take(&mut base.columns);
         let mut tree_builder = commitment_scheme.tree_builder();
-        tree_builder.extend_evals(base.columns.clone());
+        tree_builder.extend_evals(base_columns);
         tree_builder.commit(&mut channel);
 
         let relations = P256CurrentAirRelations::draw(&mut channel);
