@@ -352,7 +352,7 @@ impl ProjectiveRcbAirProofClaim {
         components.trace_log_degree_bounds()
     }
 
-    fn max_constraint_log_degree_bound(&self, ids: &[PreProcessedColumnId]) -> u32 {
+    pub fn max_constraint_log_degree_bound(&self, ids: &[PreProcessedColumnId]) -> u32 {
         let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(ids);
         let components = ProjectiveRcbAirComponents::new_with_log_sizes(
             &mut allocator,
