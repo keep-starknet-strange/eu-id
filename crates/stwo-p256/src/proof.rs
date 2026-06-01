@@ -643,6 +643,10 @@ mod tests {
         prove_fake_glv_projective_source_proof_slice,
         verify_fake_glv_projective_source_proof_slice, FakeGlvProjectiveSourceProofClaim,
     };
+    use crate::fake_glv_prepared_point_source::{
+        prove_fake_glv_prepared_point_source_proof_slice,
+        verify_fake_glv_prepared_point_source_proof_slice, FakeGlvPreparedPointSourceProofClaim,
+    };
     use crate::fake_glv_selector_lookup::{
         prove_selector_lookup_provider_proof_slice, verify_selector_lookup_provider_proof_slice,
         SelectorLookupProviderProofClaim,
@@ -809,6 +813,23 @@ mod tests {
         source_offset: usize,
     ) -> PcsConfig {
         let claim = FakeGlvChainExpansionProofClaim::from_claims(chain, primitive, source_offset);
+        let ids = claim.preprocessed_column_ids();
+        let max_constraint_log_degree_bound = claim.max_constraint_log_degree_bound(&ids);
+        let fri_config = FriConfig::new(5, 4, 64, 1);
+        PcsConfig {
+            pow_bits: 0,
+            fri_config,
+            lifting_log_size: Some(
+                (max_constraint_log_degree_bound + fri_config.log_blowup_factor).max(10),
+            ),
+        }
+    }
+
+    fn fake_glv_prepared_point_source_low_ram_config(
+        prepared: &PreparedPointTraceClaim,
+        chain: &FakeGlvChainClaim,
+    ) -> PcsConfig {
+        let claim = FakeGlvPreparedPointSourceProofClaim::from_claims(prepared, chain);
         let ids = claim.preprocessed_column_ids();
         let max_constraint_log_degree_bound = claim.max_constraint_log_degree_bound(&ids);
         let fri_config = FriConfig::new(5, 4, 64, 1);
@@ -1318,6 +1339,66 @@ mod tests {
 
         verify_fake_glv_chain_expansion_proof_slice::<Blake2sMerkleChannel>(expansion_proof)
             .expect("fake-GLV chain expansion slice verifies");
+    }
+
+    #[test]
+    fn current_p256_proof_pipeline_proves_fake_glv_prepared_point_source_slice() {
+        let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+            valid_real_input_with_small_u_scalars(7, 11),
+        ])
+        .expect("current pipeline builds");
+        proof.verify_current_e2e().expect("current e2e verifies");
+
+        let prepared_point_proof =
+            prove_fake_glv_prepared_point_source_proof_slice::<Blake2sMerkleChannel>(
+                &proof.claim.prepared_trace,
+                &proof.claim.fake_glv_chain,
+                fake_glv_prepared_point_source_low_ram_config(
+                    &proof.claim.prepared_trace,
+                    &proof.claim.fake_glv_chain,
+                ),
+            )
+            .expect("fake-GLV prepared-point source slice proves");
+
+        verify_fake_glv_prepared_point_source_proof_slice::<Blake2sMerkleChannel>(
+            prepared_point_proof,
+        )
+        .expect("fake-GLV prepared-point source slice verifies");
+    }
+
+    #[test]
+    fn current_p256_proof_pipeline_rejects_mutated_fake_glv_prepared_point_source_slice() {
+        let mut proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+            valid_real_input_with_small_u_scalars(7, 11),
+        ])
+        .expect("current pipeline builds");
+        proof.verify_current_e2e().expect("current e2e verifies");
+        let provider = proof
+            .claim
+            .prepared_trace
+            .providers
+            .iter_mut()
+            .find(|provider| provider.use_count.0 != 0)
+            .expect("at least one prepared-point provider is used");
+        provider.instance.table_index =
+            M31::from_u32_unchecked(provider.instance.table_index.0 + 1);
+
+        let err = prove_fake_glv_prepared_point_source_proof_slice::<Blake2sMerkleChannel>(
+            &proof.claim.prepared_trace,
+            &proof.claim.fake_glv_chain,
+            fake_glv_prepared_point_source_low_ram_config(
+                &proof.claim.prepared_trace,
+                &proof.claim.fake_glv_chain,
+            ),
+        )
+        .expect_err("mutated fake-GLV prepared-point consumer must reject");
+
+        assert_eq!(
+            err,
+            FakeGlvChainError::RelationImbalance {
+                relation: "FakeGlvPreparedPointSource",
+            }
+        );
     }
 
     #[test]
