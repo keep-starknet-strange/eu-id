@@ -642,7 +642,10 @@ mod tests {
     use crate::field_ops::mul_mod_witness;
     use crate::fp_solinas_air::FP_SOLINAS_REDUCTION_DIGITS;
     use crate::limbs::P256M31BigInt;
-    use crate::prepared_table::PreparedAffinePoint;
+    use crate::prepared_table::{
+        prove_prepared_table_ec_row_proof_slice, verify_prepared_table_ec_row_proof_slice,
+        PreparedAffinePoint, PreparedTableEcRowProofClaim,
+    };
     use crate::projective_air::{
         PROJECTIVE_RCB_FOLDED_CONTRIBUTION_ROWS, PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERMS,
         PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TRACE_COLUMNS, PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS,
@@ -730,6 +733,20 @@ mod tests {
 
     fn selector_lookup_provider_low_ram_config() -> PcsConfig {
         let claim = SelectorLookupProviderProofClaim;
+        let ids = claim.preprocessed_column_ids();
+        let max_constraint_log_degree_bound = claim.max_constraint_log_degree_bound(&ids);
+        let fri_config = FriConfig::new(5, 4, 64, 1);
+        PcsConfig {
+            pow_bits: 0,
+            fri_config,
+            lifting_log_size: Some(
+                (max_constraint_log_degree_bound + fri_config.log_blowup_factor).max(10),
+            ),
+        }
+    }
+
+    fn prepared_table_ec_row_low_ram_config(trace: &PreparedTableEcTraceClaim) -> PcsConfig {
+        let claim = PreparedTableEcRowProofClaim::from_trace(trace);
         let ids = claim.preprocessed_column_ids();
         let max_constraint_log_degree_bound = claim.max_constraint_log_degree_bound(&ids);
         let fri_config = FriConfig::new(5, 4, 64, 1);
@@ -1150,6 +1167,24 @@ mod tests {
 
         verify_selector_lookup_provider_proof_slice::<Blake2sMerkleChannel>(selector_proof)
             .expect("selector lookup provider slice verifies");
+    }
+
+    #[test]
+    fn current_p256_proof_pipeline_proves_prepared_table_ec_row_slice() {
+        let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+            valid_real_input_with_small_u_scalars(7, 11),
+        ])
+        .expect("current pipeline builds");
+        proof.verify_current_e2e().expect("current e2e verifies");
+
+        let prepared_proof = prove_prepared_table_ec_row_proof_slice::<Blake2sMerkleChannel>(
+            &proof.claim.prepared_table_ec_trace,
+            prepared_table_ec_row_low_ram_config(&proof.claim.prepared_table_ec_trace),
+        )
+        .expect("prepared-table EC row provider slice proves");
+
+        verify_prepared_table_ec_row_proof_slice::<Blake2sMerkleChannel>(prepared_proof)
+            .expect("prepared-table EC row provider slice verifies");
     }
 
     #[test]

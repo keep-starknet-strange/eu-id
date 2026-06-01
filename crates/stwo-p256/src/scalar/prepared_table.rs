@@ -1,4 +1,31 @@
-use stwo::core::fields::m31::M31;
+use stwo::core::{
+    air::Component,
+    channel::Channel,
+    fields::{m31::M31, qm31::SecureField},
+    pcs::{CommitmentSchemeVerifier, PcsConfig, TreeVec},
+    poly::circle::CanonicCoset,
+    proof::StarkProof,
+    verifier::verify,
+    ColumnVec,
+};
+use stwo::prover::{
+    backend::{
+        simd::{
+            m31::{PackedM31, LOG_N_LANES},
+            qm31::PackedQM31,
+            SimdBackend,
+        },
+        BackendForChannel,
+    },
+    poly::circle::PolyOps,
+    prove, CommitmentSchemeProver, ComponentProver,
+};
+use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
+use stwo_constraint_framework::{
+    relation, EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation,
+    RelationEntry, TraceLocationAllocator,
+};
+use stwo_p256_utils::constants::N_LIMBS;
 
 use crate::constants::P256_MODULUS;
 use crate::curve::{point_add, point_double, scalar_mul};
@@ -14,6 +41,30 @@ use super::cert_bind::{CertScalarInputClaim, CertScalarInputRow, CERT_ID_U1_GENE
 use super::fake_glv_scalar::{FakeGlvScalarHintClaim, FakeGlvScalarHintRow};
 use super::fake_glv_selector::{FakeGlvSelectorClaim, FakeGlvSelectorRow};
 use super::fake_glv_selector_lookup::Selector16DecodeEntry;
+use super::scalar_mod_mul::columns::{m31_column_eval, padded_log_size, M31ColumnEval};
+
+relation!(
+    PreparedTableEcRowRelation,
+    PREPARED_TABLE_EC_ROW_RELATION_ARITY
+);
+
+pub type PreparedTableEcRowComponent = FrameworkComponent<PreparedTableEcRowEval>;
+
+pub const PREPARED_TABLE_EC_KIND_FLAGS: usize = 13;
+pub const PREPARED_TABLE_EC_KIND_DOUBLE_P: usize = 0;
+pub const PREPARED_TABLE_EC_KIND_ADD_P2P: usize = 1;
+pub const PREPARED_TABLE_EC_KIND_DOUBLE_R: usize = 2;
+pub const PREPARED_TABLE_EC_KIND_ADD_R2R: usize = 3;
+pub const PREPARED_TABLE_EC_KIND_BASE_START: usize = 4;
+pub const PREPARED_TABLE_EC_KIND_TABLE16: usize = 12;
+pub const PREPARED_TABLE_EC_OP_MIXED_ADD: u32 = 0;
+pub const PREPARED_TABLE_EC_OP_DOUBLE: u32 = 1;
+pub const PREPARED_TABLE_EC_POINT_COLUMNS: usize = 2 * N_LIMBS + 1;
+pub const PREPARED_TABLE_EC_ROW_RELATION_ARITY: usize = 5 + 3 * PREPARED_TABLE_EC_POINT_COLUMNS;
+pub const PREPARED_TABLE_EC_ROW_TRACE_COLUMNS: usize =
+    1 + 3 + PREPARED_TABLE_EC_KIND_FLAGS + 2 + 3 * PREPARED_TABLE_EC_POINT_COLUMNS;
+
+const PREPARED_TABLE_EC_ROW_INDEX_COLUMN: &str = "p256_prepared_table_ec_row_index";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedTableClaim {
@@ -214,6 +265,579 @@ impl PreparedTableEcTraceClaim {
         }
         Ok(())
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreparedTableEcRowProofClaim {
+    pub log_size: u32,
+}
+
+impl PreparedTableEcRowProofClaim {
+    pub fn from_trace(trace: &PreparedTableEcTraceClaim) -> Self {
+        Self {
+            log_size: padded_log_size(trace.rows.len()),
+        }
+    }
+
+    pub fn mix_into(&self, channel: &mut impl Channel) {
+        channel.mix_u64(self.log_size as u64);
+    }
+
+    pub fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
+        let mut allocator = TraceLocationAllocator::default();
+        let _ = PreparedTableEcRowComponent::new(
+            &mut allocator,
+            PreparedTableEcRowEval {
+                log_size: self.log_size,
+                relation: PreparedTableEcRowRelation::dummy(),
+            },
+            secure_zero(),
+        );
+        allocator.preprocessed_columns().clone()
+    }
+
+    pub fn trace_log_degree_bounds(&self, ids: &[PreProcessedColumnId]) -> TreeVec<ColumnVec<u32>> {
+        let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(ids);
+        let component = PreparedTableEcRowComponent::new(
+            &mut allocator,
+            PreparedTableEcRowEval {
+                log_size: self.log_size,
+                relation: PreparedTableEcRowRelation::dummy(),
+            },
+            secure_zero(),
+        );
+        component.trace_log_degree_bounds()
+    }
+
+    pub fn max_constraint_log_degree_bound(&self, ids: &[PreProcessedColumnId]) -> u32 {
+        let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(ids);
+        let component = PreparedTableEcRowComponent::new(
+            &mut allocator,
+            PreparedTableEcRowEval {
+                log_size: self.log_size,
+                relation: PreparedTableEcRowRelation::dummy(),
+            },
+            secure_zero(),
+        );
+        component.max_constraint_log_degree_bound()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreparedTableEcRowInteractionClaim {
+    pub claimed_sum: SecureField,
+}
+
+impl PreparedTableEcRowInteractionClaim {
+    pub fn mix_into(&self, channel: &mut impl Channel) {
+        channel.mix_felts(&[self.claimed_sum]);
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct PreparedTableEcRowProof<H: stwo::core::vcs_lifted::merkle_hasher::MerkleHasherLifted> {
+    pub claim: PreparedTableEcRowProofClaim,
+    pub interaction_claim: PreparedTableEcRowInteractionClaim,
+    pub stark_proof: StarkProof<H>,
+}
+
+#[derive(Clone)]
+pub struct PreparedTableEcRowEval {
+    pub log_size: u32,
+    pub relation: PreparedTableEcRowRelation,
+}
+
+impl FrameworkEval for PreparedTableEcRowEval {
+    fn log_size(&self) -> u32 {
+        self.log_size
+    }
+
+    fn max_constraint_log_degree_bound(&self) -> u32 {
+        self.log_size + 1
+    }
+
+    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+        let row_index = eval.get_preprocessed_column(prepared_table_ec_row_index_column_id());
+        let active = eval.next_trace_mask();
+        let source_index = eval.next_trace_mask();
+        let sig_id = eval.next_trace_mask();
+        let cert_id = eval.next_trace_mask();
+        let kind_flags: [E::F; PREPARED_TABLE_EC_KIND_FLAGS] =
+            core::array::from_fn(|_| eval.next_trace_mask());
+        let op = eval.next_trace_mask();
+        let table_index = eval.next_trace_mask();
+        let lhs = PreparedTableEcEvalPoint::read(&mut eval);
+        let rhs = PreparedTableEcEvalPoint::read(&mut eval);
+        let output = PreparedTableEcEvalPoint::read(&mut eval);
+        let one = E::F::from(M31::from_u32_unchecked(1));
+
+        eval.add_constraint(active.clone() * (active.clone() - one.clone()));
+        eval.add_constraint(active.clone() * (source_index.clone() - row_index));
+
+        let mut kind_sum = E::F::from(M31::from_u32_unchecked(0));
+        for flag in &kind_flags {
+            eval.add_constraint(flag.clone() * (flag.clone() - one.clone()));
+            eval.add_constraint((one.clone() - active.clone()) * flag.clone());
+            kind_sum += flag.clone();
+        }
+        eval.add_constraint(active.clone() * (kind_sum - one.clone()));
+
+        let double_flag = kind_flags[PREPARED_TABLE_EC_KIND_DOUBLE_P].clone()
+            + kind_flags[PREPARED_TABLE_EC_KIND_DOUBLE_R].clone();
+        eval.add_constraint(active.clone() * (op.clone() - double_flag.clone()));
+
+        let mut expected_table_index = E::F::from(M31::from_u32_unchecked(0));
+        for base_index in 0..PREPARED_BASE_COUNT {
+            expected_table_index += kind_flags[PREPARED_TABLE_EC_KIND_BASE_START + base_index]
+                .clone()
+                * E::F::from(M31::from_u32_unchecked(base_index as u32));
+        }
+        expected_table_index += kind_flags[PREPARED_TABLE_EC_KIND_TABLE16].clone()
+            * E::F::from(M31::from_u32_unchecked(TABLE16_INDEX));
+        eval.add_constraint(active.clone() * (table_index.clone() - expected_table_index));
+
+        eval.add_constraint(double_flag.clone() * (rhs.inf.clone() - one.clone()));
+        lhs.add_constraints(&mut eval, &active, &one);
+        rhs.add_constraints(&mut eval, &active, &one);
+        output.add_constraints(&mut eval, &active, &one);
+
+        for value in [
+            source_index.clone(),
+            sig_id.clone(),
+            cert_id.clone(),
+            op.clone(),
+            table_index.clone(),
+        ] {
+            eval.add_constraint((one.clone() - active.clone()) * value);
+        }
+
+        let relation_values = prepared_table_ec_row_relation_values(
+            &[source_index, sig_id, cert_id, op, table_index],
+            &lhs,
+            &rhs,
+            &output,
+        );
+        eval.add_to_relation(RelationEntry::new(
+            &self.relation,
+            -E::EF::from(active),
+            &relation_values,
+        ));
+        eval.finalize_logup();
+        eval
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PreparedTableEcEvalPoint<F> {
+    x: [F; N_LIMBS],
+    y: [F; N_LIMBS],
+    inf: F,
+}
+
+impl<F: Clone> PreparedTableEcEvalPoint<F> {
+    fn relation_values(&self) -> [F; PREPARED_TABLE_EC_POINT_COLUMNS] {
+        core::array::from_fn(|index| match index {
+            0..=19 => self.x[index].clone(),
+            20..=39 => self.y[index - N_LIMBS].clone(),
+            40 => self.inf.clone(),
+            _ => unreachable!("prepared-table EC point relation index is in range"),
+        })
+    }
+}
+
+impl<F> PreparedTableEcEvalPoint<F> {
+    fn read<E: EvalAtRow<F = F>>(eval: &mut E) -> Self {
+        Self {
+            x: core::array::from_fn(|_| eval.next_trace_mask()),
+            y: core::array::from_fn(|_| eval.next_trace_mask()),
+            inf: eval.next_trace_mask(),
+        }
+    }
+}
+
+impl<F> PreparedTableEcEvalPoint<F>
+where
+    F: Clone + core::ops::Add<Output = F> + core::ops::Sub<Output = F> + core::ops::Mul<Output = F>,
+{
+    fn add_constraints<E: EvalAtRow<F = F>>(&self, eval: &mut E, active: &F, one: &F) {
+        eval.add_constraint(self.inf.clone() * (self.inf.clone() - one.clone()));
+        for limb in self.x.iter().chain(self.y.iter()) {
+            eval.add_constraint(self.inf.clone() * limb.clone());
+            eval.add_constraint((one.clone() - active.clone()) * limb.clone());
+        }
+        eval.add_constraint((one.clone() - active.clone()) * self.inf.clone());
+    }
+}
+
+pub fn prove_prepared_table_ec_row_proof_slice<MC: stwo::core::channel::MerkleChannel>(
+    trace: &PreparedTableEcTraceClaim,
+    config: PcsConfig,
+) -> Result<PreparedTableEcRowProof<MC::H>, PreparedTableError>
+where
+    SimdBackend: BackendForChannel<MC>,
+{
+    trace.verify()?;
+    let claim = PreparedTableEcRowProofClaim::from_trace(trace);
+    let ids = claim.preprocessed_column_ids();
+    let max_constraint_log_degree_bound = claim.max_constraint_log_degree_bound(&ids);
+    let twiddles = SimdBackend::precompute_twiddles(
+        CanonicCoset::new(
+            config
+                .lifting_log_size
+                .unwrap_or(max_constraint_log_degree_bound + config.fri_config.log_blowup_factor),
+        )
+        .circle_domain()
+        .half_coset,
+    );
+
+    let mut channel = MC::C::default();
+    let mut commitment_scheme = CommitmentSchemeProver::<SimdBackend, MC>::new(config, &twiddles);
+    commitment_scheme.set_store_polynomials_coefficients();
+
+    let preprocessed = gen_prepared_table_ec_row_preprocessed_trace(claim.log_size, &ids)?;
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(preprocessed);
+    tree_builder.commit(&mut channel);
+
+    claim.mix_into(&mut channel);
+    let base = gen_prepared_table_ec_row_base_trace(trace, claim.log_size)?;
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(base.clone());
+    tree_builder.commit(&mut channel);
+
+    let relation = PreparedTableEcRowRelation::draw(&mut channel);
+    let (interaction, interaction_claim) =
+        gen_prepared_table_ec_row_interaction_trace(&base, &relation);
+    interaction_claim.mix_into(&mut channel);
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(interaction);
+    tree_builder.commit(&mut channel);
+
+    let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
+    let component = PreparedTableEcRowComponent::new(
+        &mut allocator,
+        PreparedTableEcRowEval {
+            log_size: claim.log_size,
+            relation,
+        },
+        interaction_claim.claimed_sum,
+    );
+    assert_eq!(
+        commitment_scheme
+            .polynomials()
+            .as_cols_ref()
+            .map_cols(|column| column.evals.domain.log_size() - config.fri_config.log_blowup_factor)
+            .0,
+        component.trace_log_degree_bounds().0
+    );
+    let stark_proof = prove(
+        &[&component as &dyn ComponentProver<SimdBackend>],
+        &mut channel,
+        commitment_scheme,
+    )
+    .map_err(|_| PreparedTableError::ProofLayer)?;
+
+    Ok(PreparedTableEcRowProof {
+        claim,
+        interaction_claim,
+        stark_proof,
+    })
+}
+
+pub fn verify_prepared_table_ec_row_proof_slice<MC: stwo::core::channel::MerkleChannel>(
+    proof: PreparedTableEcRowProof<MC::H>,
+) -> Result<(), PreparedTableError> {
+    let PreparedTableEcRowProof {
+        claim,
+        interaction_claim,
+        stark_proof,
+    } = proof;
+
+    let ids = claim.preprocessed_column_ids();
+    let log_degree_bounds = claim.trace_log_degree_bounds(&ids);
+    let mut channel = MC::C::default();
+    let commitment_scheme = &mut CommitmentSchemeVerifier::<MC>::new(stark_proof.config);
+
+    commitment_scheme.commit(
+        stark_proof.commitments[0],
+        &log_degree_bounds[0],
+        &mut channel,
+    );
+
+    claim.mix_into(&mut channel);
+    commitment_scheme.commit(
+        stark_proof.commitments[1],
+        &log_degree_bounds[1],
+        &mut channel,
+    );
+
+    let relation = PreparedTableEcRowRelation::draw(&mut channel);
+
+    interaction_claim.mix_into(&mut channel);
+    commitment_scheme.commit(
+        stark_proof.commitments[2],
+        &log_degree_bounds[2],
+        &mut channel,
+    );
+
+    let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
+    let component = PreparedTableEcRowComponent::new(
+        &mut allocator,
+        PreparedTableEcRowEval {
+            log_size: claim.log_size,
+            relation,
+        },
+        interaction_claim.claimed_sum,
+    );
+    verify(
+        &[&component as &dyn Component],
+        &mut channel,
+        commitment_scheme,
+        stark_proof,
+    )
+    .map_err(|_| PreparedTableError::ProofLayer)
+}
+
+fn gen_prepared_table_ec_row_preprocessed_trace(
+    log_size: u32,
+    ids: &[PreProcessedColumnId],
+) -> Result<ColumnVec<M31ColumnEval>, PreparedTableError> {
+    ids.iter()
+        .map(|id| {
+            if id == &prepared_table_ec_row_index_column_id() {
+                Ok(m31_column_eval(
+                    log_size,
+                    (0..(1usize << log_size))
+                        .map(|index| M31::from_u32_unchecked(index as u32))
+                        .collect(),
+                ))
+            } else {
+                Err(PreparedTableError::PreprocessedColumnMissing)
+            }
+        })
+        .collect()
+}
+
+fn gen_prepared_table_ec_row_base_trace(
+    trace: &PreparedTableEcTraceClaim,
+    log_size: u32,
+) -> Result<ColumnVec<M31ColumnEval>, PreparedTableError> {
+    let padded_rows = 1usize << log_size;
+    if trace.rows.len() > padded_rows {
+        return Err(PreparedTableError::EcTraceRowsExceedDomain {
+            rows: trace.rows.len(),
+            domain: padded_rows,
+        });
+    }
+    let mut rows = trace
+        .rows
+        .iter()
+        .enumerate()
+        .map(|(source_index, row)| prepared_table_ec_row_trace_values(source_index, row))
+        .collect::<Vec<_>>();
+    rows.resize(
+        padded_rows,
+        [M31::from_u32_unchecked(0); PREPARED_TABLE_EC_ROW_TRACE_COLUMNS],
+    );
+    Ok(columns_from_rows(log_size, rows))
+}
+
+fn gen_prepared_table_ec_row_interaction_trace(
+    base: &[M31ColumnEval],
+    relation: &PreparedTableEcRowRelation,
+) -> (ColumnVec<M31ColumnEval>, PreparedTableEcRowInteractionClaim) {
+    assert_eq!(base.len(), PREPARED_TABLE_EC_ROW_TRACE_COLUMNS);
+    let log_size = base[0].domain.log_size();
+    let mut logup = LogupTraceGenerator::new(log_size);
+    let mut col = logup.new_col();
+    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+        let values = prepared_table_ec_row_packed_relation_values(base, vec_row);
+        let numerator = -PackedQM31::from(base[0].data[vec_row]);
+        let denominator: PackedQM31 = relation.combine(&values);
+        col.write_frac(vec_row, numerator, denominator);
+    }
+    col.finalize_col();
+    let (trace, claimed_sum) = logup.finalize_last();
+    (trace, PreparedTableEcRowInteractionClaim { claimed_sum })
+}
+
+fn prepared_table_ec_row_packed_relation_values(
+    base: &[M31ColumnEval],
+    vec_row: usize,
+) -> [PackedM31; PREPARED_TABLE_EC_ROW_RELATION_ARITY] {
+    core::array::from_fn(|index| {
+        let column = match index {
+            0 => 1,
+            1 => 2,
+            2 => 3,
+            3 => 17,
+            4 => 18,
+            5..=127 => 19 + (index - 5),
+            _ => unreachable!("prepared-table EC packed relation index is in range"),
+        };
+        base[column].data[vec_row]
+    })
+}
+
+fn prepared_table_ec_row_index_column_id() -> PreProcessedColumnId {
+    PreProcessedColumnId {
+        id: PREPARED_TABLE_EC_ROW_INDEX_COLUMN.into(),
+    }
+}
+
+fn prepared_table_ec_row_trace_values(
+    source_index: usize,
+    row: &PreparedTableEcRow,
+) -> [M31; PREPARED_TABLE_EC_ROW_TRACE_COLUMNS] {
+    let mut values = [M31::from_u32_unchecked(0); PREPARED_TABLE_EC_ROW_TRACE_COLUMNS];
+    let mut column = 0;
+    values[column] = M31::from_u32_unchecked(1);
+    column += 1;
+    values[column] = M31::from_u32_unchecked(source_index as u32);
+    column += 1;
+    values[column] = row.sig_id;
+    column += 1;
+    values[column] = row.cert_id;
+    column += 1;
+    for flag in kind_flags(row.kind) {
+        values[column] = flag;
+        column += 1;
+    }
+    values[column] = prepared_table_ec_op_code(row.kind);
+    column += 1;
+    values[column] = prepared_table_ec_table_index(row.kind);
+    column += 1;
+    for value in prepared_table_ec_point_values(&row.lhs) {
+        values[column] = value;
+        column += 1;
+    }
+    for value in prepared_table_ec_point_values(&row.rhs) {
+        values[column] = value;
+        column += 1;
+    }
+    for value in prepared_table_ec_point_values(&row.output) {
+        values[column] = value;
+        column += 1;
+    }
+    debug_assert_eq!(column, PREPARED_TABLE_EC_ROW_TRACE_COLUMNS);
+    values
+}
+
+fn prepared_table_ec_row_relation_values<F: Clone>(
+    header: &[F; 5],
+    lhs: &impl PreparedTableEcPointLike<F>,
+    rhs: &impl PreparedTableEcPointLike<F>,
+    output: &impl PreparedTableEcPointLike<F>,
+) -> [F; PREPARED_TABLE_EC_ROW_RELATION_ARITY] {
+    let lhs = lhs.relation_values();
+    let rhs = rhs.relation_values();
+    let output = output.relation_values();
+    core::array::from_fn(|index| match index {
+        0..=4 => header[index].clone(),
+        5..=45 => lhs[index - 5].clone(),
+        46..=86 => rhs[index - 46].clone(),
+        87..=127 => output[index - 87].clone(),
+        _ => unreachable!("prepared-table EC row relation index is in range"),
+    })
+}
+
+trait PreparedTableEcPointLike<F: Clone> {
+    fn relation_values(&self) -> [F; PREPARED_TABLE_EC_POINT_COLUMNS];
+}
+
+impl<F: Clone> PreparedTableEcPointLike<F> for PreparedTableEcEvalPoint<F> {
+    fn relation_values(&self) -> [F; PREPARED_TABLE_EC_POINT_COLUMNS] {
+        self.relation_values()
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PreparedTableEcPointValues {
+    x: [M31; N_LIMBS],
+    y: [M31; N_LIMBS],
+    inf: M31,
+}
+
+impl PreparedTableEcPointValues {
+    fn from_prepared(point: &PreparedAffinePoint) -> Self {
+        Self {
+            x: *point.x.limbs(),
+            y: *point.y.limbs(),
+            inf: point.inf,
+        }
+    }
+}
+
+impl PreparedTableEcPointLike<M31> for PreparedTableEcPointValues {
+    fn relation_values(&self) -> [M31; PREPARED_TABLE_EC_POINT_COLUMNS] {
+        core::array::from_fn(|index| match index {
+            0..=19 => self.x[index],
+            20..=39 => self.y[index - N_LIMBS],
+            40 => self.inf,
+            _ => unreachable!("prepared-table EC point relation index is in range"),
+        })
+    }
+}
+
+fn prepared_table_ec_point_values(
+    point: &PreparedAffinePoint,
+) -> [M31; PREPARED_TABLE_EC_POINT_COLUMNS] {
+    PreparedTableEcPointValues::from_prepared(point).relation_values()
+}
+
+fn columns_from_rows<const N: usize>(
+    log_size: u32,
+    rows: Vec<[M31; N]>,
+) -> ColumnVec<M31ColumnEval> {
+    (0..N)
+        .map(|column| m31_column_eval(log_size, rows.iter().map(|row| row[column]).collect()))
+        .collect()
+}
+
+fn kind_flags(kind: PreparedTableEcRowKind) -> [M31; PREPARED_TABLE_EC_KIND_FLAGS] {
+    let mut flags = [M31::from_u32_unchecked(0); PREPARED_TABLE_EC_KIND_FLAGS];
+    flags[prepared_table_ec_kind_flag_index(kind)] = M31::from_u32_unchecked(1);
+    flags
+}
+
+fn prepared_table_ec_kind_flag_index(kind: PreparedTableEcRowKind) -> usize {
+    match kind {
+        PreparedTableEcRowKind::DoubleP => PREPARED_TABLE_EC_KIND_DOUBLE_P,
+        PreparedTableEcRowKind::AddP2P => PREPARED_TABLE_EC_KIND_ADD_P2P,
+        PreparedTableEcRowKind::DoubleR => PREPARED_TABLE_EC_KIND_DOUBLE_R,
+        PreparedTableEcRowKind::AddR2R => PREPARED_TABLE_EC_KIND_ADD_R2R,
+        PreparedTableEcRowKind::Base(index) => PREPARED_TABLE_EC_KIND_BASE_START + index as usize,
+        PreparedTableEcRowKind::Table16 => PREPARED_TABLE_EC_KIND_TABLE16,
+    }
+}
+
+fn prepared_table_ec_op_code(kind: PreparedTableEcRowKind) -> M31 {
+    let code = match kind {
+        PreparedTableEcRowKind::DoubleP | PreparedTableEcRowKind::DoubleR => {
+            PREPARED_TABLE_EC_OP_DOUBLE
+        }
+        PreparedTableEcRowKind::AddP2P
+        | PreparedTableEcRowKind::AddR2R
+        | PreparedTableEcRowKind::Base(_)
+        | PreparedTableEcRowKind::Table16 => PREPARED_TABLE_EC_OP_MIXED_ADD,
+    };
+    M31::from_u32_unchecked(code)
+}
+
+fn prepared_table_ec_table_index(kind: PreparedTableEcRowKind) -> M31 {
+    let index = match kind {
+        PreparedTableEcRowKind::Base(index) => index,
+        PreparedTableEcRowKind::Table16 => TABLE16_INDEX,
+        PreparedTableEcRowKind::DoubleP
+        | PreparedTableEcRowKind::AddP2P
+        | PreparedTableEcRowKind::DoubleR
+        | PreparedTableEcRowKind::AddR2R => 0,
+    };
+    M31::from_u32_unchecked(index)
+}
+
+fn secure_zero() -> SecureField {
+    SecureField::from(M31::from_u32_unchecked(0))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -559,7 +1183,13 @@ pub enum PreparedTableError {
         cert_id: u32,
         label: &'static str,
     },
+    EcTraceRowsExceedDomain {
+        rows: usize,
+        domain: usize,
+    },
+    PreprocessedColumnMissing,
     NonCanonicalInfinity,
+    ProofLayer,
 }
 
 fn require_unique_output(
@@ -850,6 +1480,11 @@ mod tests {
     use crate::scalar::fake_glv_selector::FakeGlvSelectorClaim;
     use crate::scalar::setup_air::ScalarSetupClaim;
     use crate::types::{Signature, U256};
+    use stwo::core::channel::Blake2sChannel;
+    use stwo::core::fri::FriConfig;
+    use stwo::core::pcs::PcsConfig;
+    use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
+    use stwo_constraint_framework::assert_constraints_on_polys;
 
     fn test_input(message_hash: u64, r: u64, s: u64) -> crate::types::EcdsaVerifyInput {
         crate::types::EcdsaVerifyInput {
@@ -894,6 +1529,20 @@ mod tests {
         let table =
             PreparedTableClaim::from_claims(&certs, &fake_glv, &selectors).expect("valid table");
         (certs, fake_glv, selectors, table)
+    }
+
+    fn prepared_table_ec_row_low_ram_config(trace: &PreparedTableEcTraceClaim) -> PcsConfig {
+        let claim = PreparedTableEcRowProofClaim::from_trace(trace);
+        let ids = claim.preprocessed_column_ids();
+        let max_constraint_log_degree_bound = claim.max_constraint_log_degree_bound(&ids);
+        let fri_config = FriConfig::new(5, 4, 64, 1);
+        PcsConfig {
+            pow_bits: 0,
+            fri_config,
+            lifting_log_size: Some(
+                (max_constraint_log_degree_bound + fri_config.log_blowup_factor).max(10),
+            ),
+        }
     }
 
     #[test]
@@ -998,6 +1647,56 @@ mod tests {
         trace
             .verify_against_table(&table)
             .expect("ec trace outputs match table points");
+    }
+
+    #[test]
+    fn prepared_table_ec_row_constraints_pass_for_honest_trace() {
+        let (certs, fake_glv, selectors, table) = build_table(42);
+        let trace = PreparedTableEcTraceClaim::from_claims(&certs, &fake_glv, &selectors, &table)
+            .expect("valid ec trace");
+        let claim = PreparedTableEcRowProofClaim::from_trace(&trace);
+        let ids = claim.preprocessed_column_ids();
+        let preprocessed =
+            gen_prepared_table_ec_row_preprocessed_trace(claim.log_size, &ids).unwrap();
+        let base = gen_prepared_table_ec_row_base_trace(&trace, claim.log_size).unwrap();
+        let mut channel = Blake2sChannel::default();
+        let relation = PreparedTableEcRowRelation::draw(&mut channel);
+        let (interaction, interaction_claim) =
+            gen_prepared_table_ec_row_interaction_trace(&base, &relation);
+        let trace_polys = TreeVec::new(vec![preprocessed, base, interaction]).map(|trace| {
+            trace
+                .into_iter()
+                .map(|column| column.interpolate())
+                .collect::<Vec<_>>()
+        });
+
+        assert_constraints_on_polys(
+            &trace_polys,
+            CanonicCoset::new(claim.log_size),
+            |eval| {
+                PreparedTableEcRowEval {
+                    log_size: claim.log_size,
+                    relation: relation.clone(),
+                }
+                .evaluate(eval);
+            },
+            interaction_claim.claimed_sum,
+        );
+    }
+
+    #[test]
+    fn prepared_table_ec_row_proof_slice_proves_and_verifies() {
+        let (certs, fake_glv, selectors, table) = build_table(42);
+        let trace = PreparedTableEcTraceClaim::from_claims(&certs, &fake_glv, &selectors, &table)
+            .expect("valid ec trace");
+        let proof = prove_prepared_table_ec_row_proof_slice::<Blake2sMerkleChannel>(
+            &trace,
+            prepared_table_ec_row_low_ram_config(&trace),
+        )
+        .expect("prepared-table EC row provider slice proves");
+
+        verify_prepared_table_ec_row_proof_slice::<Blake2sMerkleChannel>(proof)
+            .expect("prepared-table EC row provider slice verifies");
     }
 
     #[test]
