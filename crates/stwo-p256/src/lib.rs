@@ -37,6 +37,10 @@ pub mod fake_glv_chain_expansion {
     pub use crate::scalar::fake_glv_chain_expansion::*;
 }
 
+pub mod fake_glv_chain_schedule {
+    pub use crate::scalar::fake_glv_chain_schedule::*;
+}
+
 pub mod fake_glv_ec_source {
     pub use crate::scalar::fake_glv_ec_source::*;
 }
