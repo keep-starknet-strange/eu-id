@@ -961,7 +961,7 @@ pub fn verify_prepared_table_projective_source_proof_slice<
     .map_err(|_| PreparedTableError::ProofLayer)
 }
 
-fn gen_prepared_table_ec_row_preprocessed_trace(
+pub(crate) fn gen_prepared_table_ec_row_preprocessed_trace(
     log_size: u32,
     ids: &[PreProcessedColumnId],
 ) -> Result<ColumnVec<M31ColumnEval>, PreparedTableError> {
@@ -981,7 +981,7 @@ fn gen_prepared_table_ec_row_preprocessed_trace(
         .collect()
 }
 
-fn gen_prepared_table_ec_row_base_trace(
+pub(crate) fn gen_prepared_table_ec_row_base_trace(
     trace: &PreparedTableEcTraceClaim,
     log_size: u32,
 ) -> Result<ColumnVec<M31ColumnEval>, PreparedTableError> {
@@ -1005,7 +1005,7 @@ fn gen_prepared_table_ec_row_base_trace(
     Ok(columns_from_rows(log_size, rows))
 }
 
-fn gen_prepared_table_projective_source_base_trace(
+pub(crate) fn gen_prepared_table_projective_source_base_trace(
     prepared: &PreparedTableEcTraceClaim,
     projective: &ProjectiveEcTraceClaim,
     log_size: u32,
@@ -1043,7 +1043,7 @@ fn gen_prepared_table_projective_source_base_trace(
     Ok(columns_from_rows(log_size, rows))
 }
 
-fn gen_prepared_table_ec_row_interaction_trace(
+pub(crate) fn gen_prepared_table_ec_row_interaction_trace(
     base: &[M31ColumnEval],
     relation: &PreparedTableEcRowRelation,
 ) -> (ColumnVec<M31ColumnEval>, PreparedTableEcRowInteractionClaim) {
@@ -1062,7 +1062,7 @@ fn gen_prepared_table_ec_row_interaction_trace(
     (trace, PreparedTableEcRowInteractionClaim { claimed_sum })
 }
 
-fn gen_prepared_table_projective_source_interaction_trace(
+pub(crate) fn gen_prepared_table_projective_source_interaction_trace(
     base: &[M31ColumnEval],
     relation: &PreparedTableEcRowRelation,
 ) -> (ColumnVec<M31ColumnEval>, PreparedTableEcRowInteractionClaim) {

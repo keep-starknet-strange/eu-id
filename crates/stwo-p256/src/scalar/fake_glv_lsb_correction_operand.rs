@@ -488,7 +488,7 @@ pub fn verify_fake_glv_lsb_correction_operand_proof_slice<
     .map_err(|_| FakeGlvChainError::ProofLayer)
 }
 
-fn gen_lsb_correction_operand_preprocessed_trace(
+pub(crate) fn gen_lsb_correction_operand_preprocessed_trace(
     claim: &FakeGlvLsbCorrectionOperandProofClaim,
     ids: &[PreProcessedColumnId],
 ) -> Result<ColumnVec<M31ColumnEval>, FakeGlvChainError> {
@@ -506,7 +506,7 @@ fn gen_lsb_correction_operand_preprocessed_trace(
         .collect()
 }
 
-fn gen_lsb_correction_operand_provider_base_trace(
+pub(crate) fn gen_lsb_correction_operand_provider_base_trace(
     cert_inputs: &CertScalarInputClaim,
     fake_glv_scalars: &FakeGlvScalarHintClaim,
     prepared: &PreparedTableClaim,
@@ -518,7 +518,7 @@ fn gen_lsb_correction_operand_provider_base_trace(
     rows_to_base_trace(rows, log_size)
 }
 
-fn gen_lsb_correction_operand_consumer_base_trace(
+pub(crate) fn gen_lsb_correction_operand_consumer_base_trace(
     selectors: &FakeGlvSelectorClaim,
     chain: &FakeGlvChainClaim,
     log_size: u32,
@@ -699,7 +699,7 @@ fn negate_prepared(point: &PreparedAffinePoint) -> PreparedAffinePoint {
     }
 }
 
-fn gen_lsb_correction_operand_interaction_trace(
+pub(crate) fn gen_lsb_correction_operand_interaction_trace(
     base: &[M31ColumnEval],
     relation: &FakeGlvLsbCorrectionOperandRelation,
     provider: bool,

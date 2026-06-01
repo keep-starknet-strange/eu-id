@@ -468,7 +468,7 @@ pub fn verify_fake_glv_prepared_point_source_proof_slice<MC: stwo::core::channel
     .map_err(|_| FakeGlvChainError::ProofLayer)
 }
 
-fn gen_fake_glv_prepared_point_source_preprocessed_trace(
+pub(crate) fn gen_fake_glv_prepared_point_source_preprocessed_trace(
     claim: &FakeGlvPreparedPointSourceProofClaim,
     ids: &[PreProcessedColumnId],
 ) -> Result<ColumnVec<M31ColumnEval>, FakeGlvChainError> {
@@ -486,7 +486,7 @@ fn gen_fake_glv_prepared_point_source_preprocessed_trace(
         .collect()
 }
 
-fn gen_prepared_point_provider_base_trace(
+pub(crate) fn gen_prepared_point_provider_base_trace(
     trace: &PreparedPointTraceClaim,
     log_size: u32,
 ) -> Result<ColumnVec<M31ColumnEval>, FakeGlvChainError> {
@@ -513,7 +513,7 @@ fn gen_prepared_point_provider_base_trace(
     Ok(columns_from_rows(log_size, rows))
 }
 
-fn gen_fake_glv_prepared_point_consumer_base_trace(
+pub(crate) fn gen_fake_glv_prepared_point_consumer_base_trace(
     consumers: &[PreparedPointInstance<M31>],
     log_size: u32,
 ) -> Result<ColumnVec<M31ColumnEval>, FakeGlvChainError> {
@@ -535,7 +535,7 @@ fn gen_fake_glv_prepared_point_consumer_base_trace(
     Ok(columns_from_rows(log_size, rows))
 }
 
-fn gen_prepared_point_provider_interaction_trace(
+pub(crate) fn gen_prepared_point_provider_interaction_trace(
     base: &[M31ColumnEval],
     relation: &PreparedPointRelation,
 ) -> (ColumnVec<M31ColumnEval>, SecureField) {
@@ -553,7 +553,7 @@ fn gen_prepared_point_provider_interaction_trace(
     logup.finalize_last()
 }
 
-fn gen_fake_glv_prepared_point_consumer_interaction_trace(
+pub(crate) fn gen_fake_glv_prepared_point_consumer_interaction_trace(
     base: &[M31ColumnEval],
     relation: &PreparedPointRelation,
 ) -> (ColumnVec<M31ColumnEval>, SecureField) {

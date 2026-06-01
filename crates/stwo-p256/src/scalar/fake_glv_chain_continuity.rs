@@ -357,7 +357,7 @@ pub fn verify_fake_glv_chain_continuity_proof_slice<MC: stwo::core::channel::Mer
     .map_err(|_| FakeGlvChainError::ProofLayer)
 }
 
-fn gen_fake_glv_chain_continuity_preprocessed_trace(
+pub(crate) fn gen_fake_glv_chain_continuity_preprocessed_trace(
     log_size: u32,
     ids: &[PreProcessedColumnId],
 ) -> Result<ColumnVec<M31ColumnEval>, FakeGlvChainError> {
@@ -377,7 +377,7 @@ fn gen_fake_glv_chain_continuity_preprocessed_trace(
         .collect()
 }
 
-fn gen_fake_glv_chain_continuity_base_trace(
+pub(crate) fn gen_fake_glv_chain_continuity_base_trace(
     chain: &FakeGlvChainClaim,
     log_size: u32,
 ) -> Result<ColumnVec<M31ColumnEval>, FakeGlvChainError> {
@@ -405,7 +405,7 @@ fn gen_fake_glv_chain_continuity_base_trace(
     Ok(columns_from_rows(log_size, rows))
 }
 
-fn gen_fake_glv_chain_continuity_interaction_trace(
+pub(crate) fn gen_fake_glv_chain_continuity_interaction_trace(
     base: &[M31ColumnEval],
     relation: &FakeGlvChainAccumulatorRelation,
 ) -> (

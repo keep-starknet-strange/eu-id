@@ -527,7 +527,7 @@ pub fn verify_fake_glv_chain_expansion_proof_slice<MC: stwo::core::channel::Merk
     .map_err(|_| FakeGlvChainError::ProofLayer)
 }
 
-fn gen_fake_glv_chain_expansion_preprocessed_trace(
+pub(crate) fn gen_fake_glv_chain_expansion_preprocessed_trace(
     claim: FakeGlvChainExpansionProofClaim,
     ids: &[PreProcessedColumnId],
 ) -> Result<ColumnVec<M31ColumnEval>, FakeGlvChainError> {
@@ -547,7 +547,7 @@ fn gen_fake_glv_chain_expansion_preprocessed_trace(
         .collect()
 }
 
-fn gen_fake_glv_chain_expansion_base_trace(
+pub(crate) fn gen_fake_glv_chain_expansion_base_trace(
     chain: &FakeGlvChainClaim,
     primitive: &FakeGlvPrimitiveEcTraceClaim,
     source_offset: usize,
@@ -614,7 +614,7 @@ fn gen_fake_glv_chain_expansion_base_trace(
     Ok(columns_from_rows(log_size, rows))
 }
 
-fn gen_fake_glv_primitive_expansion_consumer_base_trace(
+pub(crate) fn gen_fake_glv_primitive_expansion_consumer_base_trace(
     primitive: &FakeGlvPrimitiveEcTraceClaim,
     source_offset: usize,
     log_size: u32,
@@ -641,7 +641,7 @@ fn gen_fake_glv_primitive_expansion_consumer_base_trace(
     Ok(columns_from_rows(log_size, rows))
 }
 
-fn gen_fake_glv_chain_expansion_interaction_trace(
+pub(crate) fn gen_fake_glv_chain_expansion_interaction_trace(
     base: &[M31ColumnEval],
     relation: &FakeGlvChainPrimitiveExpansionRelation,
 ) -> (ColumnVec<M31ColumnEval>, SecureField) {
@@ -670,7 +670,7 @@ fn gen_fake_glv_chain_expansion_interaction_trace(
     logup.finalize_last()
 }
 
-fn gen_fake_glv_primitive_expansion_consumer_interaction_trace(
+pub(crate) fn gen_fake_glv_primitive_expansion_consumer_interaction_trace(
     base: &[M31ColumnEval],
     relation: &FakeGlvChainPrimitiveExpansionRelation,
 ) -> (ColumnVec<M31ColumnEval>, SecureField) {

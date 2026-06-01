@@ -1,43 +1,84 @@
 use stwo::core::{
+    air::Component,
+    channel::Channel,
     channel::MerkleChannel,
     fields::{m31::M31, qm31::SecureField},
     fri::FriConfig,
-    pcs::PcsConfig,
+    pcs::{CommitmentSchemeVerifier, PcsConfig, TreeVec},
+    poly::circle::CanonicCoset,
+    proof::StarkProof,
     vcs_lifted::merkle_hasher::MerkleHasherLifted,
+    verifier::verify,
+    ColumnVec,
 };
-use stwo::prover::backend::{simd::SimdBackend, BackendForChannel};
+use stwo::prover::{
+    backend::{simd::SimdBackend, BackendForChannel},
+    poly::circle::PolyOps,
+    prove, CommitmentSchemeProver, ComponentProver,
+};
+use stwo_constraint_framework::{
+    preprocessed_columns::PreProcessedColumnId, TraceLocationAllocator,
+};
 
 use crate::ecdsa::ecdsa_verify;
 use crate::fake_glv_chain::{FakeGlvChainClaim, FakeGlvChainError, FakeGlvPrimitiveEcTraceClaim};
 use crate::fake_glv_chain_continuity::{
-    prove_fake_glv_chain_continuity_proof_slice, verify_fake_glv_chain_continuity_proof_slice,
-    FakeGlvChainContinuityProof, FakeGlvChainContinuityProofClaim,
+    gen_fake_glv_chain_continuity_base_trace, gen_fake_glv_chain_continuity_interaction_trace,
+    gen_fake_glv_chain_continuity_preprocessed_trace, prove_fake_glv_chain_continuity_proof_slice,
+    verify_fake_glv_chain_continuity_proof_slice, FakeGlvChainAccumulatorRelation,
+    FakeGlvChainContinuityComponent, FakeGlvChainContinuityEval,
+    FakeGlvChainContinuityInteractionClaim, FakeGlvChainContinuityProof,
+    FakeGlvChainContinuityProofClaim,
 };
 use crate::fake_glv_chain_expansion::{
+    gen_fake_glv_chain_expansion_base_trace, gen_fake_glv_chain_expansion_interaction_trace,
+    gen_fake_glv_chain_expansion_preprocessed_trace,
+    gen_fake_glv_primitive_expansion_consumer_base_trace,
+    gen_fake_glv_primitive_expansion_consumer_interaction_trace,
     prove_fake_glv_chain_expansion_proof_slice, verify_fake_glv_chain_expansion_proof_slice,
+    FakeGlvChainExpansionComponents, FakeGlvChainExpansionInteractionClaim,
     FakeGlvChainExpansionProof, FakeGlvChainExpansionProofClaim,
+    FakeGlvChainPrimitiveExpansionRelation,
 };
 use crate::fake_glv_chain_schedule::{
+    gen_fake_glv_chain_schedule_base_trace, gen_fake_glv_chain_schedule_preprocessed_trace,
     prove_fake_glv_chain_schedule_proof_slice, verify_fake_glv_chain_schedule_proof_slice,
-    FakeGlvChainScheduleProof, FakeGlvChainScheduleProofClaim,
+    FakeGlvChainScheduleComponent, FakeGlvChainScheduleEval, FakeGlvChainScheduleProof,
+    FakeGlvChainScheduleProofClaim,
 };
 use crate::fake_glv_direct_prepared_operand::{
+    gen_direct_operand_consumer_base_trace, gen_direct_operand_consumer_interaction_trace,
+    gen_direct_operand_preprocessed_trace, gen_direct_operand_provider_base_trace,
+    gen_direct_operand_provider_interaction_trace,
     prove_fake_glv_direct_prepared_operand_proof_slice,
-    verify_fake_glv_direct_prepared_operand_proof_slice, FakeGlvDirectPreparedOperandProof,
+    verify_fake_glv_direct_prepared_operand_proof_slice, FakeGlvDirectPreparedOperandComponents,
+    FakeGlvDirectPreparedOperandInteractionClaim, FakeGlvDirectPreparedOperandProof,
     FakeGlvDirectPreparedOperandProofClaim,
 };
 use crate::fake_glv_ec_source::{
+    gen_fake_glv_primitive_ec_preprocessed_trace, gen_fake_glv_primitive_ec_source_base_trace,
+    gen_fake_glv_primitive_ec_source_interaction_trace, gen_fake_glv_projective_source_base_trace,
     prove_fake_glv_projective_source_proof_slice, verify_fake_glv_projective_source_proof_slice,
-    FakeGlvProjectiveSourceProof, FakeGlvProjectiveSourceProofClaim,
+    FakeGlvPrimitiveEcRowRelation, FakeGlvProjectiveSourceComponents,
+    FakeGlvProjectiveSourceInteractionClaim, FakeGlvProjectiveSourceProof,
+    FakeGlvProjectiveSourceProofClaim, RelationMultiplicity,
 };
 use crate::fake_glv_lsb_correction_operand::{
+    gen_lsb_correction_operand_consumer_base_trace, gen_lsb_correction_operand_interaction_trace,
+    gen_lsb_correction_operand_preprocessed_trace, gen_lsb_correction_operand_provider_base_trace,
     prove_fake_glv_lsb_correction_operand_proof_slice,
-    verify_fake_glv_lsb_correction_operand_proof_slice, FakeGlvLsbCorrectionOperandProof,
-    FakeGlvLsbCorrectionOperandProofClaim,
+    verify_fake_glv_lsb_correction_operand_proof_slice, FakeGlvLsbCorrectionOperandComponents,
+    FakeGlvLsbCorrectionOperandInteractionClaim, FakeGlvLsbCorrectionOperandProof,
+    FakeGlvLsbCorrectionOperandProofClaim, FakeGlvLsbCorrectionOperandRelation,
 };
 use crate::fake_glv_prepared_point_source::{
+    gen_fake_glv_prepared_point_consumer_base_trace,
+    gen_fake_glv_prepared_point_consumer_interaction_trace,
+    gen_fake_glv_prepared_point_source_preprocessed_trace, gen_prepared_point_provider_base_trace,
+    gen_prepared_point_provider_interaction_trace,
     prove_fake_glv_prepared_point_source_proof_slice,
-    verify_fake_glv_prepared_point_source_proof_slice, FakeGlvPreparedPointSourceProof,
+    verify_fake_glv_prepared_point_source_proof_slice, FakeGlvPreparedPointSourceComponents,
+    FakeGlvPreparedPointSourceInteractionClaim, FakeGlvPreparedPointSourceProof,
     FakeGlvPreparedPointSourceProofClaim,
 };
 use crate::final_check::{FinalEcdsaCheckClaim, FinalEcdsaCheckError};
@@ -47,17 +88,22 @@ use crate::prepared_point::{
     PreparedPointUseCountClaim,
 };
 use crate::prepared_table::{
+    gen_prepared_table_ec_row_base_trace, gen_prepared_table_ec_row_interaction_trace,
+    gen_prepared_table_ec_row_preprocessed_trace, gen_prepared_table_projective_source_base_trace,
+    gen_prepared_table_projective_source_interaction_trace,
     prove_prepared_table_ec_row_proof_slice, prove_prepared_table_projective_source_proof_slice,
     verify_prepared_table_ec_row_proof_slice, verify_prepared_table_projective_source_proof_slice,
     PreparedTableClaim, PreparedTableEcRowProof, PreparedTableEcRowProofClaim,
-    PreparedTableEcTraceClaim, PreparedTableError, PreparedTableProjectiveSourceProof,
-    PreparedTableProjectiveSourceProofClaim,
+    PreparedTableEcRowRelation, PreparedTableEcTraceClaim, PreparedTableError,
+    PreparedTableProjectiveSourceComponents, PreparedTableProjectiveSourceInteractionClaim,
+    PreparedTableProjectiveSourceProof, PreparedTableProjectiveSourceProofClaim,
 };
 use crate::projective::{ProjectiveEcError, ProjectiveEcTraceClaim};
 use crate::projective_air::{
     projective_rcb_signed_carry_log_size, prove_projective_rcb_air_proof_slice,
-    verify_projective_rcb_air_proof_slice, ProjectiveRcbAirError, ProjectiveRcbAirInteractionClaim,
-    ProjectiveRcbAirProof, ProjectiveRcbAirProofClaim, ProjectiveRcbAirTraceClaim,
+    verify_projective_rcb_air_proof_slice, ProjectiveRcbAirComponents, ProjectiveRcbAirError,
+    ProjectiveRcbAirInteractionClaim, ProjectiveRcbAirProof, ProjectiveRcbAirProofClaim,
+    ProjectiveRcbAirProofInteractionClaim, ProjectiveRcbAirTraceClaim,
     ProjectiveRcbMulComponentRelations, PROJECTIVE_RCB_SIGNED_CARRY_BOUND,
     PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
 };
@@ -81,10 +127,15 @@ use crate::scalar::fake_glv_selector_lookup::{
     SelectorLookupProviderProofClaim, SelectorLookupRequests, SelectorProviderInteractionClaim,
 };
 use crate::scalar::fake_glv_signed_selector_operand::{
+    gen_signed_selector_operand_consumer_base_trace, gen_signed_selector_operand_interaction_trace,
+    gen_signed_selector_operand_preprocessed_trace,
+    gen_signed_selector_operand_provider_base_trace,
     prove_fake_glv_signed_selector_operand_proof_slice,
-    verify_fake_glv_signed_selector_operand_proof_slice, FakeGlvSignedSelectorOperandProof,
-    FakeGlvSignedSelectorOperandProofClaim,
+    verify_fake_glv_signed_selector_operand_proof_slice, FakeGlvSignedSelectorOperandComponents,
+    FakeGlvSignedSelectorOperandInteractionClaim, FakeGlvSignedSelectorOperandProof,
+    FakeGlvSignedSelectorOperandProofClaim, FakeGlvSignedSelectorOperandRelation,
 };
+use crate::scalar::scalar_mod_mul::columns::M31ColumnEval;
 use crate::scalar::setup_air::{ScalarSetupClaim, ScalarSetupClaimError};
 use crate::types::EcdsaVerifyInput;
 
@@ -463,6 +514,416 @@ impl<H: MerkleHasherLifted> P256StarkProofSlices<H> {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct P256CurrentAirProof<H: MerkleHasherLifted> {
+    pub claim: P256CurrentAirProofClaim,
+    pub interaction_claim: P256CurrentAirInteractionClaim,
+    pub stark_proof: StarkProof<H>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct P256CurrentAirProofClaim {
+    pub prepared_table_projective_source: PreparedTableProjectiveSourceProofClaim,
+    pub fake_glv_projective_source: FakeGlvProjectiveSourceProofClaim,
+    pub fake_glv_chain_expansion: FakeGlvChainExpansionProofClaim,
+    pub fake_glv_chain_continuity: FakeGlvChainContinuityProofClaim,
+    pub fake_glv_chain_schedule: FakeGlvChainScheduleProofClaim,
+    pub fake_glv_direct_prepared_operand: FakeGlvDirectPreparedOperandProofClaim,
+    pub fake_glv_signed_selector_operand: FakeGlvSignedSelectorOperandProofClaim,
+    pub fake_glv_lsb_correction_operand: FakeGlvLsbCorrectionOperandProofClaim,
+    pub fake_glv_prepared_point_source: FakeGlvPreparedPointSourceProofClaim,
+    pub projective_rcb_air: ProjectiveRcbAirProofClaim,
+}
+
+impl P256CurrentAirProofClaim {
+    fn from_claim(claim: &P256ProofClaim) -> Self {
+        let source_offset = claim.prepared_table_ec_trace.active_row_count();
+        Self {
+            prepared_table_projective_source:
+                PreparedTableProjectiveSourceProofClaim::from_prepared_trace(
+                    &claim.prepared_table_ec_trace,
+                ),
+            fake_glv_projective_source: FakeGlvProjectiveSourceProofClaim::from_fake_glv_trace(
+                &claim.fake_glv_ec_trace,
+                source_offset,
+            ),
+            fake_glv_chain_expansion: FakeGlvChainExpansionProofClaim::from_claims(
+                &claim.fake_glv_chain,
+                &claim.fake_glv_ec_trace,
+                source_offset,
+            ),
+            fake_glv_chain_continuity: FakeGlvChainContinuityProofClaim::from_chain(
+                &claim.fake_glv_chain,
+            ),
+            fake_glv_chain_schedule: FakeGlvChainScheduleProofClaim::from_chain(
+                &claim.fake_glv_chain,
+            ),
+            fake_glv_direct_prepared_operand: FakeGlvDirectPreparedOperandProofClaim::from_claims(
+                &claim.fake_glv_selectors,
+                &claim.fake_glv_chain,
+            ),
+            fake_glv_signed_selector_operand: FakeGlvSignedSelectorOperandProofClaim::from_claims(
+                &claim.fake_glv_selectors,
+                &claim.fake_glv_chain,
+            ),
+            fake_glv_lsb_correction_operand: FakeGlvLsbCorrectionOperandProofClaim::from_claims(
+                &claim.fake_glv_selectors,
+                &claim.fake_glv_chain,
+            ),
+            fake_glv_prepared_point_source: FakeGlvPreparedPointSourceProofClaim::from_claims(
+                &claim.prepared_trace,
+                &claim.fake_glv_chain,
+            ),
+            projective_rcb_air: ProjectiveRcbAirProofClaim::from_trace(
+                &claim.projective_rcb_air_trace,
+            ),
+        }
+    }
+
+    fn mix_into(&self, channel: &mut impl Channel) {
+        self.prepared_table_projective_source.mix_into(channel);
+        self.fake_glv_projective_source.mix_into(channel);
+        self.fake_glv_chain_expansion.mix_into(channel);
+        self.fake_glv_chain_continuity.mix_into(channel);
+        self.fake_glv_chain_schedule.mix_into(channel);
+        self.fake_glv_direct_prepared_operand.mix_into(channel);
+        self.fake_glv_signed_selector_operand.mix_into(channel);
+        self.fake_glv_lsb_correction_operand.mix_into(channel);
+        self.fake_glv_prepared_point_source.mix_into(channel);
+        self.projective_rcb_air.mix_into(channel);
+    }
+
+    fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
+        let mut ids = Vec::new();
+        append_unique_preprocessed_ids(
+            &mut ids,
+            self.prepared_table_projective_source
+                .preprocessed_column_ids(),
+        );
+        append_unique_preprocessed_ids(
+            &mut ids,
+            self.fake_glv_projective_source.preprocessed_column_ids(),
+        );
+        append_unique_preprocessed_ids(
+            &mut ids,
+            self.fake_glv_chain_expansion.preprocessed_column_ids(),
+        );
+        append_unique_preprocessed_ids(
+            &mut ids,
+            self.fake_glv_chain_continuity.preprocessed_column_ids(),
+        );
+        append_unique_preprocessed_ids(
+            &mut ids,
+            self.fake_glv_chain_schedule.preprocessed_column_ids(),
+        );
+        append_unique_preprocessed_ids(
+            &mut ids,
+            self.fake_glv_direct_prepared_operand
+                .preprocessed_column_ids(),
+        );
+        append_unique_preprocessed_ids(
+            &mut ids,
+            self.fake_glv_signed_selector_operand
+                .preprocessed_column_ids(),
+        );
+        append_unique_preprocessed_ids(
+            &mut ids,
+            self.fake_glv_lsb_correction_operand
+                .preprocessed_column_ids(),
+        );
+        append_unique_preprocessed_ids(
+            &mut ids,
+            self.fake_glv_prepared_point_source
+                .preprocessed_column_ids(),
+        );
+        append_unique_preprocessed_ids(&mut ids, self.projective_rcb_air.preprocessed_column_ids());
+        ids
+    }
+
+    fn trace_log_degree_bounds(
+        &self,
+        ids: &[PreProcessedColumnId],
+        interaction_claim: &P256CurrentAirInteractionClaim,
+        relations: &P256CurrentAirRelations,
+    ) -> TreeVec<ColumnVec<u32>> {
+        let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(ids);
+        let components =
+            P256CurrentAirComponents::new(&mut allocator, self, interaction_claim, relations);
+        components.trace_log_degree_bounds()
+    }
+
+    fn max_constraint_log_degree_bound(&self, ids: &[PreProcessedColumnId]) -> u32 {
+        let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(ids);
+        let components = P256CurrentAirComponents::new(
+            &mut allocator,
+            self,
+            &P256CurrentAirInteractionClaim::zero(),
+            &P256CurrentAirRelations::dummy(),
+        );
+        components.max_constraint_log_degree_bound()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct P256CurrentAirInteractionClaim {
+    pub prepared_table_projective_source: PreparedTableProjectiveSourceInteractionClaim,
+    pub fake_glv_projective_source: FakeGlvProjectiveSourceInteractionClaim,
+    pub fake_glv_chain_expansion: FakeGlvChainExpansionInteractionClaim,
+    pub fake_glv_chain_continuity: FakeGlvChainContinuityInteractionClaim,
+    pub fake_glv_direct_prepared_operand: FakeGlvDirectPreparedOperandInteractionClaim,
+    pub fake_glv_signed_selector_operand: FakeGlvSignedSelectorOperandInteractionClaim,
+    pub fake_glv_lsb_correction_operand: FakeGlvLsbCorrectionOperandInteractionClaim,
+    pub fake_glv_prepared_point_source: FakeGlvPreparedPointSourceInteractionClaim,
+    pub projective_rcb_air: ProjectiveRcbAirProofInteractionClaim,
+}
+
+impl P256CurrentAirInteractionClaim {
+    fn zero() -> Self {
+        Self {
+            prepared_table_projective_source: PreparedTableProjectiveSourceInteractionClaim::zero(),
+            fake_glv_projective_source: FakeGlvProjectiveSourceInteractionClaim::zero(),
+            fake_glv_chain_expansion: FakeGlvChainExpansionInteractionClaim::zero(),
+            fake_glv_chain_continuity: FakeGlvChainContinuityInteractionClaim {
+                claimed_sum: zero(),
+            },
+            fake_glv_direct_prepared_operand: FakeGlvDirectPreparedOperandInteractionClaim::zero(),
+            fake_glv_signed_selector_operand: FakeGlvSignedSelectorOperandInteractionClaim::zero(),
+            fake_glv_lsb_correction_operand: FakeGlvLsbCorrectionOperandInteractionClaim::zero(),
+            fake_glv_prepared_point_source: FakeGlvPreparedPointSourceInteractionClaim::zero(),
+            projective_rcb_air: ProjectiveRcbAirProofInteractionClaim::zero(),
+        }
+    }
+
+    fn mix_into(&self, channel: &mut impl Channel) {
+        self.prepared_table_projective_source.mix_into(channel);
+        self.fake_glv_projective_source.mix_into(channel);
+        self.fake_glv_chain_expansion.mix_into(channel);
+        self.fake_glv_chain_continuity.mix_into(channel);
+        self.fake_glv_direct_prepared_operand.mix_into(channel);
+        self.fake_glv_signed_selector_operand.mix_into(channel);
+        self.fake_glv_lsb_correction_operand.mix_into(channel);
+        self.fake_glv_prepared_point_source.mix_into(channel);
+        self.projective_rcb_air.mix_into(channel);
+    }
+
+    fn verify_balanced(&self) -> Result<(), P256ProofError> {
+        verify_current_air_relation_zero(
+            "PreparedTableProjectiveSource",
+            self.prepared_table_projective_source.total(),
+        )?;
+        verify_current_air_relation_zero(
+            "FakeGlvProjectiveSource",
+            self.fake_glv_projective_source.total(),
+        )?;
+        verify_current_air_relation_zero(
+            "FakeGlvChainExpansion",
+            self.fake_glv_chain_expansion.total(),
+        )?;
+        verify_current_air_relation_zero(
+            "FakeGlvChainContinuity",
+            self.fake_glv_chain_continuity.claimed_sum,
+        )?;
+        verify_current_air_relation_zero(
+            "FakeGlvDirectPreparedOperand",
+            self.fake_glv_direct_prepared_operand.total(),
+        )?;
+        verify_current_air_relation_zero(
+            "FakeGlvSignedSelectorOperand",
+            self.fake_glv_signed_selector_operand.total(),
+        )?;
+        verify_current_air_relation_zero(
+            "FakeGlvLsbCorrectionOperand",
+            self.fake_glv_lsb_correction_operand.total(),
+        )?;
+        verify_current_air_relation_zero(
+            "FakeGlvPreparedPointSource",
+            self.fake_glv_prepared_point_source.total(),
+        )?;
+        verify_current_air_relation_zero(
+            "ProjectiveRcbAirProofSlice",
+            self.projective_rcb_air.total(),
+        )
+    }
+}
+
+#[derive(Clone, Debug)]
+struct P256CurrentAirRelations {
+    prepared_table: PreparedTableEcRowRelation,
+    fake_glv_projective_source: FakeGlvPrimitiveEcRowRelation,
+    fake_glv_chain_expansion: FakeGlvChainPrimitiveExpansionRelation,
+    fake_glv_chain_continuity: FakeGlvChainAccumulatorRelation,
+    direct_prepared_operand: PreparedPointRelation,
+    signed_selector_operand: FakeGlvSignedSelectorOperandRelation,
+    lsb_correction_operand: FakeGlvLsbCorrectionOperandRelation,
+    prepared_point_source: PreparedPointRelation,
+    projective_rcb_air: ProjectiveRcbMulComponentRelations,
+}
+
+impl P256CurrentAirRelations {
+    fn dummy() -> Self {
+        Self {
+            prepared_table: PreparedTableEcRowRelation::dummy(),
+            fake_glv_projective_source: FakeGlvPrimitiveEcRowRelation::dummy(),
+            fake_glv_chain_expansion: FakeGlvChainPrimitiveExpansionRelation::dummy(),
+            fake_glv_chain_continuity: FakeGlvChainAccumulatorRelation::dummy(),
+            direct_prepared_operand: PreparedPointRelation::dummy(),
+            signed_selector_operand: FakeGlvSignedSelectorOperandRelation::dummy(),
+            lsb_correction_operand: FakeGlvLsbCorrectionOperandRelation::dummy(),
+            prepared_point_source: PreparedPointRelation::dummy(),
+            projective_rcb_air: ProjectiveRcbMulComponentRelations::dummy(),
+        }
+    }
+
+    fn draw(channel: &mut impl Channel) -> Self {
+        Self {
+            prepared_table: PreparedTableEcRowRelation::draw(channel),
+            fake_glv_projective_source: FakeGlvPrimitiveEcRowRelation::draw(channel),
+            fake_glv_chain_expansion: FakeGlvChainPrimitiveExpansionRelation::draw(channel),
+            fake_glv_chain_continuity: FakeGlvChainAccumulatorRelation::draw(channel),
+            direct_prepared_operand: PreparedPointRelation::draw(channel),
+            signed_selector_operand: FakeGlvSignedSelectorOperandRelation::draw(channel),
+            lsb_correction_operand: FakeGlvLsbCorrectionOperandRelation::draw(channel),
+            prepared_point_source: PreparedPointRelation::draw(channel),
+            projective_rcb_air: ProjectiveRcbMulComponentRelations::draw(channel),
+        }
+    }
+}
+
+struct P256CurrentAirComponents {
+    prepared_table_projective_source: PreparedTableProjectiveSourceComponents,
+    fake_glv_projective_source: FakeGlvProjectiveSourceComponents,
+    fake_glv_chain_expansion: FakeGlvChainExpansionComponents,
+    fake_glv_chain_continuity: FakeGlvChainContinuityComponent,
+    fake_glv_chain_schedule: FakeGlvChainScheduleComponent,
+    fake_glv_direct_prepared_operand: FakeGlvDirectPreparedOperandComponents,
+    fake_glv_signed_selector_operand: FakeGlvSignedSelectorOperandComponents,
+    fake_glv_lsb_correction_operand: FakeGlvLsbCorrectionOperandComponents,
+    fake_glv_prepared_point_source: FakeGlvPreparedPointSourceComponents,
+    projective_rcb_air: ProjectiveRcbAirComponents,
+}
+
+impl P256CurrentAirComponents {
+    fn new(
+        allocator: &mut TraceLocationAllocator,
+        claim: &P256CurrentAirProofClaim,
+        interaction_claim: &P256CurrentAirInteractionClaim,
+        relations: &P256CurrentAirRelations,
+    ) -> Self {
+        Self {
+            prepared_table_projective_source: PreparedTableProjectiveSourceComponents::new(
+                allocator,
+                claim.prepared_table_projective_source.log_size,
+                &interaction_claim.prepared_table_projective_source,
+                &relations.prepared_table,
+            ),
+            fake_glv_projective_source: FakeGlvProjectiveSourceComponents::new(
+                allocator,
+                claim.fake_glv_projective_source.log_size,
+                claim.fake_glv_projective_source.source_offset,
+                &interaction_claim.fake_glv_projective_source,
+                &relations.fake_glv_projective_source,
+            ),
+            fake_glv_chain_expansion: FakeGlvChainExpansionComponents::new(
+                allocator,
+                claim.fake_glv_chain_expansion,
+                &interaction_claim.fake_glv_chain_expansion,
+                &relations.fake_glv_chain_expansion,
+            ),
+            fake_glv_chain_continuity: FakeGlvChainContinuityComponent::new(
+                allocator,
+                FakeGlvChainContinuityEval {
+                    log_size: claim.fake_glv_chain_continuity.log_size,
+                    relation: relations.fake_glv_chain_continuity.clone(),
+                },
+                interaction_claim.fake_glv_chain_continuity.claimed_sum,
+            ),
+            fake_glv_chain_schedule: FakeGlvChainScheduleComponent::new(
+                allocator,
+                FakeGlvChainScheduleEval {
+                    log_size: claim.fake_glv_chain_schedule.log_size,
+                },
+                zero(),
+            ),
+            fake_glv_direct_prepared_operand: FakeGlvDirectPreparedOperandComponents::new(
+                allocator,
+                claim.fake_glv_direct_prepared_operand,
+                &interaction_claim.fake_glv_direct_prepared_operand,
+                &relations.direct_prepared_operand,
+            ),
+            fake_glv_signed_selector_operand: FakeGlvSignedSelectorOperandComponents::new(
+                allocator,
+                claim.fake_glv_signed_selector_operand,
+                &interaction_claim.fake_glv_signed_selector_operand,
+                &relations.signed_selector_operand,
+            ),
+            fake_glv_lsb_correction_operand: FakeGlvLsbCorrectionOperandComponents::new(
+                allocator,
+                claim.fake_glv_lsb_correction_operand,
+                &interaction_claim.fake_glv_lsb_correction_operand,
+                &relations.lsb_correction_operand,
+            ),
+            fake_glv_prepared_point_source: FakeGlvPreparedPointSourceComponents::new(
+                allocator,
+                claim.fake_glv_prepared_point_source,
+                &interaction_claim.fake_glv_prepared_point_source,
+                &relations.prepared_point_source,
+            ),
+            projective_rcb_air: ProjectiveRcbAirComponents::new_with_log_sizes(
+                allocator,
+                claim.projective_rcb_air.log_sizes,
+                &interaction_claim.projective_rcb_air,
+                &relations.projective_rcb_air,
+            ),
+        }
+    }
+
+    fn components(&self) -> Vec<&dyn Component> {
+        let mut components = Vec::new();
+        components.extend(self.prepared_table_projective_source.components());
+        components.extend(self.fake_glv_projective_source.components());
+        components.extend(self.fake_glv_chain_expansion.components());
+        components.push(&self.fake_glv_chain_continuity as &dyn Component);
+        components.push(&self.fake_glv_chain_schedule as &dyn Component);
+        components.extend(self.fake_glv_direct_prepared_operand.components());
+        components.extend(self.fake_glv_signed_selector_operand.components());
+        components.extend(self.fake_glv_lsb_correction_operand.components());
+        components.extend(self.fake_glv_prepared_point_source.components());
+        components.extend(self.projective_rcb_air.components());
+        components
+    }
+
+    fn component_provers(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
+        let mut components = Vec::new();
+        components.extend(self.prepared_table_projective_source.component_provers());
+        components.extend(self.fake_glv_projective_source.component_provers());
+        components.extend(self.fake_glv_chain_expansion.component_provers());
+        components.push(&self.fake_glv_chain_continuity as &dyn ComponentProver<SimdBackend>);
+        components.push(&self.fake_glv_chain_schedule as &dyn ComponentProver<SimdBackend>);
+        components.extend(self.fake_glv_direct_prepared_operand.component_provers());
+        components.extend(self.fake_glv_signed_selector_operand.component_provers());
+        components.extend(self.fake_glv_lsb_correction_operand.component_provers());
+        components.extend(self.fake_glv_prepared_point_source.component_provers());
+        components.extend(self.projective_rcb_air.component_provers());
+        components
+    }
+
+    fn trace_log_degree_bounds(&self) -> TreeVec<ColumnVec<u32>> {
+        TreeVec::concat_cols(
+            self.components()
+                .into_iter()
+                .map(|component| component.trace_log_degree_bounds()),
+        )
+    }
+
+    fn max_constraint_log_degree_bound(&self) -> u32 {
+        self.components()
+            .into_iter()
+            .map(|component| component.max_constraint_log_degree_bound())
+            .max()
+            .unwrap_or(0)
+    }
+}
+
 fn p256_stark_slice_low_ram_config(max_constraint_log_degree_bound: u32) -> PcsConfig {
     let fri_config = FriConfig::new(5, 4, 64, 1);
     PcsConfig {
@@ -508,6 +969,83 @@ impl P256ProofDraft {
             .verify_proof_slice_traces(&self.relations.projective_rcb)?;
         self.verify_audits()?;
         self.interaction_claim.verify_balanced()
+    }
+
+    pub fn prove_current_air_monolithic<MC>(
+        &self,
+    ) -> Result<P256CurrentAirProof<MC::H>, P256ProofError>
+    where
+        MC: MerkleChannel,
+        SimdBackend: BackendForChannel<MC>,
+    {
+        self.verify_current_e2e()?;
+        let proof_claim = P256CurrentAirProofClaim::from_claim(&self.claim);
+        let ids = proof_claim.preprocessed_column_ids();
+        let max_constraint_log_degree_bound = proof_claim.max_constraint_log_degree_bound(&ids);
+        let config = p256_stark_slice_low_ram_config(max_constraint_log_degree_bound);
+        let twiddles =
+            SimdBackend::precompute_twiddles(
+                CanonicCoset::new(config.lifting_log_size.unwrap_or(
+                    max_constraint_log_degree_bound + config.fri_config.log_blowup_factor,
+                ))
+                .circle_domain()
+                .half_coset,
+            );
+
+        let mut channel = MC::C::default();
+        let mut commitment_scheme =
+            CommitmentSchemeProver::<SimdBackend, MC>::new(config, &twiddles);
+        commitment_scheme.set_store_polynomials_coefficients();
+
+        let preprocessed = self.gen_current_air_preprocessed_trace(&proof_claim, &ids)?;
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(preprocessed);
+        tree_builder.commit(&mut channel);
+
+        proof_claim.mix_into(&mut channel);
+        let base = self.gen_current_air_base_trace(&proof_claim)?;
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(base.columns.clone());
+        tree_builder.commit(&mut channel);
+
+        let relations = P256CurrentAirRelations::draw(&mut channel);
+        let (interaction, interaction_claim) =
+            self.gen_current_air_interaction_trace(&base, &relations)?;
+        interaction_claim.verify_balanced()?;
+        interaction_claim.mix_into(&mut channel);
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(interaction);
+        tree_builder.commit(&mut channel);
+
+        let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
+        let components = P256CurrentAirComponents::new(
+            &mut allocator,
+            &proof_claim,
+            &interaction_claim,
+            &relations,
+        );
+        assert_eq!(
+            commitment_scheme
+                .polynomials()
+                .as_cols_ref()
+                .map_cols(|column| {
+                    column.evals.domain.log_size() - config.fri_config.log_blowup_factor
+                })
+                .0,
+            components.trace_log_degree_bounds().0
+        );
+        let stark_proof = prove(
+            &components.component_provers(),
+            &mut channel,
+            commitment_scheme,
+        )
+        .map_err(|error| P256ProofError::ProofLayer(error.to_string()))?;
+
+        Ok(P256CurrentAirProof {
+            claim: proof_claim,
+            interaction_claim,
+            stark_proof,
+        })
     }
 
     pub fn prove_current_stark_slices<MC>(
@@ -676,6 +1214,374 @@ impl P256ProofDraft {
         })
     }
 
+    fn gen_current_air_preprocessed_trace(
+        &self,
+        claim: &P256CurrentAirProofClaim,
+        global_ids: &[PreProcessedColumnId],
+    ) -> Result<ColumnVec<M31ColumnEval>, P256ProofError> {
+        let mut ids = Vec::new();
+        let mut columns = Vec::new();
+
+        let local_ids = claim
+            .prepared_table_projective_source
+            .preprocessed_column_ids();
+        let local_columns = gen_prepared_table_ec_row_preprocessed_trace(
+            claim.prepared_table_projective_source.log_size,
+            &local_ids,
+        )?;
+        append_unique_preprocessed_columns(&mut ids, &mut columns, local_ids, local_columns);
+
+        let local_ids = claim.fake_glv_projective_source.preprocessed_column_ids();
+        let local_columns = gen_fake_glv_primitive_ec_preprocessed_trace(
+            claim.fake_glv_projective_source.log_size,
+            &local_ids,
+        )?;
+        append_unique_preprocessed_columns(&mut ids, &mut columns, local_ids, local_columns);
+
+        let local_ids = claim.fake_glv_chain_expansion.preprocessed_column_ids();
+        let local_columns = gen_fake_glv_chain_expansion_preprocessed_trace(
+            claim.fake_glv_chain_expansion,
+            &local_ids,
+        )?;
+        append_unique_preprocessed_columns(&mut ids, &mut columns, local_ids, local_columns);
+
+        let local_ids = claim.fake_glv_chain_continuity.preprocessed_column_ids();
+        let local_columns = gen_fake_glv_chain_continuity_preprocessed_trace(
+            claim.fake_glv_chain_continuity.log_size,
+            &local_ids,
+        )?;
+        append_unique_preprocessed_columns(&mut ids, &mut columns, local_ids, local_columns);
+
+        let local_ids = claim.fake_glv_chain_schedule.preprocessed_column_ids();
+        let local_columns = gen_fake_glv_chain_schedule_preprocessed_trace(
+            claim.fake_glv_chain_schedule.log_size,
+            &local_ids,
+        )?;
+        append_unique_preprocessed_columns(&mut ids, &mut columns, local_ids, local_columns);
+
+        let local_ids = claim
+            .fake_glv_direct_prepared_operand
+            .preprocessed_column_ids();
+        let local_columns = gen_direct_operand_preprocessed_trace(
+            &claim.fake_glv_direct_prepared_operand,
+            &local_ids,
+        )?;
+        append_unique_preprocessed_columns(&mut ids, &mut columns, local_ids, local_columns);
+
+        let local_ids = claim
+            .fake_glv_signed_selector_operand
+            .preprocessed_column_ids();
+        let local_columns = gen_signed_selector_operand_preprocessed_trace(
+            &claim.fake_glv_signed_selector_operand,
+            &local_ids,
+        )?;
+        append_unique_preprocessed_columns(&mut ids, &mut columns, local_ids, local_columns);
+
+        let local_ids = claim
+            .fake_glv_lsb_correction_operand
+            .preprocessed_column_ids();
+        let local_columns = gen_lsb_correction_operand_preprocessed_trace(
+            &claim.fake_glv_lsb_correction_operand,
+            &local_ids,
+        )?;
+        append_unique_preprocessed_columns(&mut ids, &mut columns, local_ids, local_columns);
+
+        let local_ids = claim
+            .fake_glv_prepared_point_source
+            .preprocessed_column_ids();
+        let local_columns = gen_fake_glv_prepared_point_source_preprocessed_trace(
+            &claim.fake_glv_prepared_point_source,
+            &local_ids,
+        )?;
+        append_unique_preprocessed_columns(&mut ids, &mut columns, local_ids, local_columns);
+
+        let local_ids = claim.projective_rcb_air.preprocessed_column_ids();
+        let local_columns = self
+            .claim
+            .projective_rcb_air_trace
+            .gen_proof_slice_preprocessed_trace(&local_ids)?;
+        append_unique_preprocessed_columns(&mut ids, &mut columns, local_ids, local_columns);
+
+        debug_assert_eq!(ids, global_ids);
+        Ok(columns)
+    }
+
+    fn gen_current_air_base_trace(
+        &self,
+        claim: &P256CurrentAirProofClaim,
+    ) -> Result<P256CurrentAirBaseTrace, P256ProofError> {
+        let prepared_table_provider = gen_prepared_table_ec_row_base_trace(
+            &self.claim.prepared_table_ec_trace,
+            claim.prepared_table_projective_source.log_size,
+        )?;
+        let prepared_table_consumer = gen_prepared_table_projective_source_base_trace(
+            &self.claim.prepared_table_ec_trace,
+            &self.claim.projective_ec_trace,
+            claim.prepared_table_projective_source.log_size,
+        )?;
+        let fake_glv_projective_provider = gen_fake_glv_primitive_ec_source_base_trace(
+            &self.claim.fake_glv_ec_trace,
+            claim.fake_glv_projective_source.source_offset as usize,
+            claim.fake_glv_projective_source.log_size,
+        )?;
+        let fake_glv_projective_consumer = gen_fake_glv_projective_source_base_trace(
+            &self.claim.fake_glv_ec_trace,
+            &self.claim.projective_ec_trace,
+            claim.fake_glv_projective_source.source_offset as usize,
+            claim.fake_glv_projective_source.log_size,
+        )?;
+        let chain_expansion_provider = gen_fake_glv_chain_expansion_base_trace(
+            &self.claim.fake_glv_chain,
+            &self.claim.fake_glv_ec_trace,
+            claim.fake_glv_chain_expansion.source_offset as usize,
+            claim.fake_glv_chain_expansion.expansion_log_size,
+        )?;
+        let chain_expansion_consumer = gen_fake_glv_primitive_expansion_consumer_base_trace(
+            &self.claim.fake_glv_ec_trace,
+            claim.fake_glv_chain_expansion.source_offset as usize,
+            claim.fake_glv_chain_expansion.primitive_log_size,
+        )?;
+        let chain_continuity = gen_fake_glv_chain_continuity_base_trace(
+            &self.claim.fake_glv_chain,
+            claim.fake_glv_chain_continuity.log_size,
+        )?;
+        let chain_schedule = gen_fake_glv_chain_schedule_base_trace(
+            &self.claim.fake_glv_chain,
+            claim.fake_glv_chain_schedule.log_size,
+        )?;
+        let direct_provider = gen_direct_operand_provider_base_trace(
+            &self.claim.prepared_table,
+            &self.claim.fake_glv_selectors,
+            claim.fake_glv_direct_prepared_operand.provider_log_size,
+        )?;
+        let direct_consumer = gen_direct_operand_consumer_base_trace(
+            &self.claim.fake_glv_selectors,
+            &self.claim.fake_glv_chain,
+            claim.fake_glv_direct_prepared_operand.consumer_log_size,
+        )?;
+        let signed_provider = gen_signed_selector_operand_provider_base_trace(
+            &self.claim.prepared_table,
+            &self.claim.fake_glv_selectors,
+            claim.fake_glv_signed_selector_operand.provider_log_size,
+        )?;
+        let signed_consumer = gen_signed_selector_operand_consumer_base_trace(
+            &self.claim.fake_glv_selectors,
+            &self.claim.fake_glv_chain,
+            claim.fake_glv_signed_selector_operand.consumer_log_size,
+        )?;
+        let lsb_provider = gen_lsb_correction_operand_provider_base_trace(
+            &self.claim.cert_inputs,
+            &self.claim.fake_glv_scalars,
+            &self.claim.prepared_table,
+            &self.claim.fake_glv_selectors,
+            claim.fake_glv_lsb_correction_operand.provider_log_size,
+        )?;
+        let lsb_consumer = gen_lsb_correction_operand_consumer_base_trace(
+            &self.claim.fake_glv_selectors,
+            &self.claim.fake_glv_chain,
+            claim.fake_glv_lsb_correction_operand.consumer_log_size,
+        )?;
+        let prepared_point_provider = gen_prepared_point_provider_base_trace(
+            &self.claim.prepared_trace,
+            claim.fake_glv_prepared_point_source.provider_log_size,
+        )?;
+        let prepared_point_consumers = self.claim.fake_glv_chain.prepared_point_consumers();
+        let prepared_point_consumer = gen_fake_glv_prepared_point_consumer_base_trace(
+            &prepared_point_consumers,
+            claim.fake_glv_prepared_point_source.consumer_log_size,
+        )?;
+        let projective_rcb_air = self
+            .claim
+            .projective_rcb_air_trace
+            .gen_proof_slice_base_trace()?;
+
+        let mut columns = Vec::new();
+        columns.extend(prepared_table_provider.clone());
+        columns.extend(prepared_table_consumer.clone());
+        columns.extend(fake_glv_projective_provider.clone());
+        columns.extend(fake_glv_projective_consumer.clone());
+        columns.extend(chain_expansion_provider.clone());
+        columns.extend(chain_expansion_consumer.clone());
+        columns.extend(chain_continuity.clone());
+        columns.extend(chain_schedule.clone());
+        columns.extend(direct_provider.clone());
+        columns.extend(direct_consumer.clone());
+        columns.extend(signed_provider.clone());
+        columns.extend(signed_consumer.clone());
+        columns.extend(lsb_provider.clone());
+        columns.extend(lsb_consumer.clone());
+        columns.extend(prepared_point_provider.clone());
+        columns.extend(prepared_point_consumer.clone());
+        columns.extend(projective_rcb_air.clone());
+
+        Ok(P256CurrentAirBaseTrace {
+            columns,
+            prepared_table_provider,
+            prepared_table_consumer,
+            fake_glv_projective_provider,
+            fake_glv_projective_consumer,
+            chain_expansion_provider,
+            chain_expansion_consumer,
+            chain_continuity,
+            direct_provider,
+            direct_consumer,
+            signed_provider,
+            signed_consumer,
+            lsb_provider,
+            lsb_consumer,
+            prepared_point_provider,
+            prepared_point_consumer,
+        })
+    }
+
+    fn gen_current_air_interaction_trace(
+        &self,
+        base: &P256CurrentAirBaseTrace,
+        relations: &P256CurrentAirRelations,
+    ) -> Result<(ColumnVec<M31ColumnEval>, P256CurrentAirInteractionClaim), P256ProofError> {
+        let (prepared_provider_interaction, prepared_provider_claim) =
+            gen_prepared_table_ec_row_interaction_trace(
+                &base.prepared_table_provider,
+                &relations.prepared_table,
+            );
+        let (prepared_consumer_interaction, prepared_consumer_claim) =
+            gen_prepared_table_projective_source_interaction_trace(
+                &base.prepared_table_consumer,
+                &relations.prepared_table,
+            );
+        let (fake_glv_provider_interaction, fake_glv_provider_claim) =
+            gen_fake_glv_primitive_ec_source_interaction_trace(
+                &base.fake_glv_projective_provider,
+                &relations.fake_glv_projective_source,
+                RelationMultiplicity::Provider,
+            );
+        let (fake_glv_consumer_interaction, fake_glv_consumer_claim) =
+            gen_fake_glv_primitive_ec_source_interaction_trace(
+                &base.fake_glv_projective_consumer,
+                &relations.fake_glv_projective_source,
+                RelationMultiplicity::Consumer,
+            );
+        let (expansion_provider_interaction, expansion_provider_sum) =
+            gen_fake_glv_chain_expansion_interaction_trace(
+                &base.chain_expansion_provider,
+                &relations.fake_glv_chain_expansion,
+            );
+        let (expansion_consumer_interaction, expansion_consumer_sum) =
+            gen_fake_glv_primitive_expansion_consumer_interaction_trace(
+                &base.chain_expansion_consumer,
+                &relations.fake_glv_chain_expansion,
+            );
+        let (continuity_interaction, continuity_claim) =
+            gen_fake_glv_chain_continuity_interaction_trace(
+                &base.chain_continuity,
+                &relations.fake_glv_chain_continuity,
+            );
+        let (direct_provider_interaction, direct_provider_sum) =
+            gen_direct_operand_provider_interaction_trace(
+                &base.direct_provider,
+                &relations.direct_prepared_operand,
+            );
+        let (direct_consumer_interaction, direct_consumer_sum) =
+            gen_direct_operand_consumer_interaction_trace(
+                &base.direct_consumer,
+                &relations.direct_prepared_operand,
+            );
+        let (signed_provider_interaction, signed_provider_sum) =
+            gen_signed_selector_operand_interaction_trace(
+                &base.signed_provider,
+                &relations.signed_selector_operand,
+                true,
+            );
+        let (signed_consumer_interaction, signed_consumer_sum) =
+            gen_signed_selector_operand_interaction_trace(
+                &base.signed_consumer,
+                &relations.signed_selector_operand,
+                false,
+            );
+        let (lsb_provider_interaction, lsb_provider_sum) =
+            gen_lsb_correction_operand_interaction_trace(
+                &base.lsb_provider,
+                &relations.lsb_correction_operand,
+                true,
+            );
+        let (lsb_consumer_interaction, lsb_consumer_sum) =
+            gen_lsb_correction_operand_interaction_trace(
+                &base.lsb_consumer,
+                &relations.lsb_correction_operand,
+                false,
+            );
+        let (prepared_point_provider_interaction, prepared_point_provider_sum) =
+            gen_prepared_point_provider_interaction_trace(
+                &base.prepared_point_provider,
+                &relations.prepared_point_source,
+            );
+        let (prepared_point_consumer_interaction, prepared_point_consumer_sum) =
+            gen_fake_glv_prepared_point_consumer_interaction_trace(
+                &base.prepared_point_consumer,
+                &relations.prepared_point_source,
+            );
+        let (projective_interaction, projective_claim) = self
+            .claim
+            .projective_rcb_air_trace
+            .gen_proof_slice_interaction_trace(&relations.projective_rcb_air)?;
+
+        let mut columns = Vec::new();
+        columns.extend(prepared_provider_interaction);
+        columns.extend(prepared_consumer_interaction);
+        columns.extend(fake_glv_provider_interaction);
+        columns.extend(fake_glv_consumer_interaction);
+        columns.extend(expansion_provider_interaction);
+        columns.extend(expansion_consumer_interaction);
+        columns.extend(continuity_interaction);
+        columns.extend(direct_provider_interaction);
+        columns.extend(direct_consumer_interaction);
+        columns.extend(signed_provider_interaction);
+        columns.extend(signed_consumer_interaction);
+        columns.extend(lsb_provider_interaction);
+        columns.extend(lsb_consumer_interaction);
+        columns.extend(prepared_point_provider_interaction);
+        columns.extend(prepared_point_consumer_interaction);
+        columns.extend(projective_interaction);
+
+        Ok((
+            columns,
+            P256CurrentAirInteractionClaim {
+                prepared_table_projective_source: PreparedTableProjectiveSourceInteractionClaim {
+                    provider_claimed_sum: prepared_provider_claim.claimed_sum,
+                    consumer_claimed_sum: prepared_consumer_claim.claimed_sum,
+                },
+                fake_glv_projective_source: FakeGlvProjectiveSourceInteractionClaim {
+                    provider_claimed_sum: fake_glv_provider_claim.claimed_sum,
+                    consumer_claimed_sum: fake_glv_consumer_claim.claimed_sum,
+                },
+                fake_glv_chain_expansion: FakeGlvChainExpansionInteractionClaim {
+                    expansion_claimed_sum: expansion_provider_sum,
+                    primitive_claimed_sum: expansion_consumer_sum,
+                },
+                fake_glv_chain_continuity: FakeGlvChainContinuityInteractionClaim {
+                    claimed_sum: continuity_claim.claimed_sum,
+                },
+                fake_glv_direct_prepared_operand: FakeGlvDirectPreparedOperandInteractionClaim {
+                    provider_claimed_sum: direct_provider_sum,
+                    consumer_claimed_sum: direct_consumer_sum,
+                },
+                fake_glv_signed_selector_operand: FakeGlvSignedSelectorOperandInteractionClaim {
+                    provider_claimed_sum: signed_provider_sum,
+                    consumer_claimed_sum: signed_consumer_sum,
+                },
+                fake_glv_lsb_correction_operand: FakeGlvLsbCorrectionOperandInteractionClaim {
+                    provider_claimed_sum: lsb_provider_sum,
+                    consumer_claimed_sum: lsb_consumer_sum,
+                },
+                fake_glv_prepared_point_source: FakeGlvPreparedPointSourceInteractionClaim {
+                    provider_claimed_sum: prepared_point_provider_sum,
+                    consumer_claimed_sum: prepared_point_consumer_sum,
+                },
+                projective_rcb_air: projective_claim,
+            },
+        ))
+    }
+
     fn from_claim(
         inputs: Vec<EcdsaVerifyInput>,
         claim: P256ProofClaim,
@@ -715,6 +1621,116 @@ impl P256ProofDraft {
         }
 
         Ok(())
+    }
+}
+
+struct P256CurrentAirBaseTrace {
+    columns: ColumnVec<M31ColumnEval>,
+    prepared_table_provider: ColumnVec<M31ColumnEval>,
+    prepared_table_consumer: ColumnVec<M31ColumnEval>,
+    fake_glv_projective_provider: ColumnVec<M31ColumnEval>,
+    fake_glv_projective_consumer: ColumnVec<M31ColumnEval>,
+    chain_expansion_provider: ColumnVec<M31ColumnEval>,
+    chain_expansion_consumer: ColumnVec<M31ColumnEval>,
+    chain_continuity: ColumnVec<M31ColumnEval>,
+    direct_provider: ColumnVec<M31ColumnEval>,
+    direct_consumer: ColumnVec<M31ColumnEval>,
+    signed_provider: ColumnVec<M31ColumnEval>,
+    signed_consumer: ColumnVec<M31ColumnEval>,
+    lsb_provider: ColumnVec<M31ColumnEval>,
+    lsb_consumer: ColumnVec<M31ColumnEval>,
+    prepared_point_provider: ColumnVec<M31ColumnEval>,
+    prepared_point_consumer: ColumnVec<M31ColumnEval>,
+}
+
+pub fn verify_current_air_monolithic<MC>(
+    proof: P256CurrentAirProof<MC::H>,
+) -> Result<(), P256ProofError>
+where
+    MC: MerkleChannel,
+{
+    let P256CurrentAirProof {
+        claim,
+        interaction_claim,
+        stark_proof,
+    } = proof;
+    interaction_claim.verify_balanced()?;
+
+    let ids = claim.preprocessed_column_ids();
+    let mut channel = MC::C::default();
+    let commitment_scheme = &mut CommitmentSchemeVerifier::<MC>::new(stark_proof.config);
+    let dummy_log_degree_bounds = claim.trace_log_degree_bounds(
+        &ids,
+        &P256CurrentAirInteractionClaim::zero(),
+        &P256CurrentAirRelations::dummy(),
+    );
+
+    commitment_scheme.commit(
+        stark_proof.commitments[0],
+        &dummy_log_degree_bounds[0],
+        &mut channel,
+    );
+    claim.mix_into(&mut channel);
+    commitment_scheme.commit(
+        stark_proof.commitments[1],
+        &dummy_log_degree_bounds[1],
+        &mut channel,
+    );
+    let relations = P256CurrentAirRelations::draw(&mut channel);
+    let log_degree_bounds = claim.trace_log_degree_bounds(&ids, &interaction_claim, &relations);
+
+    interaction_claim.mix_into(&mut channel);
+    commitment_scheme.commit(
+        stark_proof.commitments[2],
+        &log_degree_bounds[2],
+        &mut channel,
+    );
+
+    let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
+    let components =
+        P256CurrentAirComponents::new(&mut allocator, &claim, &interaction_claim, &relations);
+    verify(
+        &components.components(),
+        &mut channel,
+        commitment_scheme,
+        stark_proof,
+    )
+    .map_err(|error| P256ProofError::ProofLayer(error.to_string()))
+}
+
+fn append_unique_preprocessed_ids(
+    out: &mut Vec<PreProcessedColumnId>,
+    ids: Vec<PreProcessedColumnId>,
+) {
+    for id in ids {
+        if !out.iter().any(|existing| existing == &id) {
+            out.push(id);
+        }
+    }
+}
+
+fn append_unique_preprocessed_columns(
+    out_ids: &mut Vec<PreProcessedColumnId>,
+    out_columns: &mut ColumnVec<M31ColumnEval>,
+    ids: Vec<PreProcessedColumnId>,
+    columns: ColumnVec<M31ColumnEval>,
+) {
+    for (id, column) in ids.into_iter().zip(columns) {
+        if !out_ids.iter().any(|existing| existing == &id) {
+            out_ids.push(id);
+            out_columns.push(column);
+        }
+    }
+}
+
+fn verify_current_air_relation_zero(
+    relation: &'static str,
+    total: SecureField,
+) -> Result<(), P256ProofError> {
+    if total == zero() {
+        Ok(())
+    } else {
+        Err(P256ProofError::RelationImbalance { relation })
     }
 }
 
@@ -840,6 +1856,7 @@ pub enum P256ProofError {
     PublicKeyOnCurve(PublicKeyOnCurveError),
     InvalidNativeEcdsaInput { index: usize },
     RelationImbalance { relation: &'static str },
+    ProofLayer(String),
 }
 
 impl From<ScalarSetupClaimError> for P256ProofError {
@@ -1880,6 +2897,22 @@ mod tests {
         stark_slices
             .verify::<Blake2sMerkleChannel>()
             .expect("P-256 STARK slice bundle verifies");
+    }
+
+    #[test]
+    fn current_p256_proof_pipeline_proves_and_verifies_current_air_monolithic_proof() {
+        let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+            valid_real_input_with_small_u_scalars(0, 11),
+        ])
+        .expect("zero branch pipeline builds");
+        proof.verify_current_e2e().expect("zero branch verifies");
+
+        let monolithic = proof
+            .prove_current_air_monolithic::<Blake2sMerkleChannel>()
+            .expect("current AIR monolithic proof proves");
+
+        verify_current_air_monolithic::<Blake2sMerkleChannel>(monolithic)
+            .expect("current AIR monolithic proof verifies");
     }
 
     #[test]

@@ -474,7 +474,7 @@ pub fn verify_fake_glv_direct_prepared_operand_proof_slice<
     .map_err(|_| FakeGlvChainError::ProofLayer)
 }
 
-fn gen_direct_operand_preprocessed_trace(
+pub(crate) fn gen_direct_operand_preprocessed_trace(
     claim: &FakeGlvDirectPreparedOperandProofClaim,
     ids: &[PreProcessedColumnId],
 ) -> Result<ColumnVec<M31ColumnEval>, FakeGlvChainError> {
@@ -492,7 +492,7 @@ fn gen_direct_operand_preprocessed_trace(
         .collect()
 }
 
-fn gen_direct_operand_provider_base_trace(
+pub(crate) fn gen_direct_operand_provider_base_trace(
     prepared: &PreparedTableClaim,
     selectors: &FakeGlvSelectorClaim,
     log_size: u32,
@@ -516,7 +516,7 @@ fn gen_direct_operand_provider_base_trace(
     Ok(columns_from_rows(log_size, rows))
 }
 
-fn gen_direct_operand_consumer_base_trace(
+pub(crate) fn gen_direct_operand_consumer_base_trace(
     selectors: &FakeGlvSelectorClaim,
     chain: &FakeGlvChainClaim,
     log_size: u32,
@@ -629,7 +629,7 @@ fn point_instance(
     point.instance(sig_id, cert_id, table_index)
 }
 
-fn gen_direct_operand_provider_interaction_trace(
+pub(crate) fn gen_direct_operand_provider_interaction_trace(
     base: &[M31ColumnEval],
     relation: &PreparedPointRelation,
 ) -> (ColumnVec<M31ColumnEval>, SecureField) {
@@ -649,7 +649,7 @@ fn gen_direct_operand_provider_interaction_trace(
     logup.finalize_last()
 }
 
-fn gen_direct_operand_consumer_interaction_trace(
+pub(crate) fn gen_direct_operand_consumer_interaction_trace(
     base: &[M31ColumnEval],
     relation: &PreparedPointRelation,
 ) -> (ColumnVec<M31ColumnEval>, SecureField) {

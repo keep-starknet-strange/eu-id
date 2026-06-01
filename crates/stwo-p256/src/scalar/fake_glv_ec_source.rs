@@ -488,7 +488,7 @@ pub fn verify_fake_glv_projective_source_proof_slice<MC: stwo::core::channel::Me
     .map_err(|_| FakeGlvChainError::ProofLayer)
 }
 
-fn gen_fake_glv_primitive_ec_preprocessed_trace(
+pub(crate) fn gen_fake_glv_primitive_ec_preprocessed_trace(
     log_size: u32,
     ids: &[PreProcessedColumnId],
 ) -> Result<ColumnVec<M31ColumnEval>, FakeGlvChainError> {
@@ -508,7 +508,7 @@ fn gen_fake_glv_primitive_ec_preprocessed_trace(
         .collect()
 }
 
-fn gen_fake_glv_primitive_ec_source_base_trace(
+pub(crate) fn gen_fake_glv_primitive_ec_source_base_trace(
     trace: &FakeGlvPrimitiveEcTraceClaim,
     source_offset: usize,
     log_size: u32,
@@ -535,7 +535,7 @@ fn gen_fake_glv_primitive_ec_source_base_trace(
     Ok(columns_from_rows(log_size, rows))
 }
 
-fn gen_fake_glv_projective_source_base_trace(
+pub(crate) fn gen_fake_glv_projective_source_base_trace(
     fake_glv: &FakeGlvPrimitiveEcTraceClaim,
     projective: &ProjectiveEcTraceClaim,
     source_offset: usize,
@@ -570,7 +570,7 @@ fn gen_fake_glv_projective_source_base_trace(
     Ok(columns_from_rows(log_size, rows))
 }
 
-fn gen_fake_glv_primitive_ec_source_interaction_trace(
+pub(crate) fn gen_fake_glv_primitive_ec_source_interaction_trace(
     base: &[M31ColumnEval],
     relation: &FakeGlvPrimitiveEcRowRelation,
     multiplicity: RelationMultiplicity,
@@ -722,12 +722,12 @@ fn secure_zero() -> SecureField {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct FakeGlvPrimitiveEcRowInteractionClaim {
-    claimed_sum: SecureField,
+pub(crate) struct FakeGlvPrimitiveEcRowInteractionClaim {
+    pub claimed_sum: SecureField,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RelationMultiplicity {
+pub(crate) enum RelationMultiplicity {
     Provider,
     Consumer,
 }

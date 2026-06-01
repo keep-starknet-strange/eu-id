@@ -254,7 +254,7 @@ pub fn verify_fake_glv_chain_schedule_proof_slice<MC: stwo::core::channel::Merkl
     .map_err(|_| FakeGlvChainError::ProofLayer)
 }
 
-fn gen_fake_glv_chain_schedule_preprocessed_trace(
+pub(crate) fn gen_fake_glv_chain_schedule_preprocessed_trace(
     log_size: u32,
     ids: &[PreProcessedColumnId],
 ) -> Result<ColumnVec<M31ColumnEval>, FakeGlvChainError> {
@@ -271,7 +271,7 @@ fn gen_fake_glv_chain_schedule_preprocessed_trace(
         .collect()
 }
 
-fn gen_fake_glv_chain_schedule_base_trace(
+pub(crate) fn gen_fake_glv_chain_schedule_base_trace(
     chain: &FakeGlvChainClaim,
     log_size: u32,
 ) -> Result<ColumnVec<M31ColumnEval>, FakeGlvChainError> {

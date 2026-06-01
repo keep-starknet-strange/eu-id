@@ -489,7 +489,7 @@ pub fn verify_fake_glv_signed_selector_operand_proof_slice<
     .map_err(|_| FakeGlvChainError::ProofLayer)
 }
 
-fn gen_signed_selector_operand_preprocessed_trace(
+pub(crate) fn gen_signed_selector_operand_preprocessed_trace(
     claim: &FakeGlvSignedSelectorOperandProofClaim,
     ids: &[PreProcessedColumnId],
 ) -> Result<ColumnVec<M31ColumnEval>, FakeGlvChainError> {
@@ -507,7 +507,7 @@ fn gen_signed_selector_operand_preprocessed_trace(
         .collect()
 }
 
-fn gen_signed_selector_operand_provider_base_trace(
+pub(crate) fn gen_signed_selector_operand_provider_base_trace(
     prepared: &PreparedTableClaim,
     selectors: &FakeGlvSelectorClaim,
     log_size: u32,
@@ -516,7 +516,7 @@ fn gen_signed_selector_operand_provider_base_trace(
     rows_to_base_trace(rows, log_size)
 }
 
-fn gen_signed_selector_operand_consumer_base_trace(
+pub(crate) fn gen_signed_selector_operand_consumer_base_trace(
     selectors: &FakeGlvSelectorClaim,
     chain: &FakeGlvChainClaim,
     log_size: u32,
@@ -667,7 +667,7 @@ fn apply_selector_sign(
     }
 }
 
-fn gen_signed_selector_operand_interaction_trace(
+pub(crate) fn gen_signed_selector_operand_interaction_trace(
     base: &[M31ColumnEval],
     relation: &FakeGlvSignedSelectorOperandRelation,
     provider: bool,
