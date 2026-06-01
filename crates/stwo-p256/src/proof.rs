@@ -734,53 +734,53 @@ pub struct P256ProofComponentSlot {
 pub const P256_PROOF_COMPONENT_SLOTS: &[P256ProofComponentSlot] = &[
     P256ProofComponentSlot {
         name: "PublicEcdsaInput",
-        status: P256ProofComponentStatus::Implemented,
-        note: "Public relation provider and scalar-setup consumer are linked.",
+        status: P256ProofComponentStatus::Pending,
+        note: "Public relation helper exists, but public input binding is not yet part of one verifier-facing STARK proof.",
     },
     P256ProofComponentSlot {
         name: "PublicKeyOnCurve",
-        status: P256ProofComponentStatus::Implemented,
-        note: "Public key curve equation is checked with Solinas base-field multiplication traces.",
+        status: P256ProofComponentStatus::Pending,
+        note: "Currently checked by native Solinas traces; still needs inclusion in the single verifier-facing STARK proof.",
     },
     P256ProofComponentSlot {
         name: "SolinasReductionTraceRows",
-        status: P256ProofComponentStatus::Implemented,
-        note: "Public-key on-curve field multiplications include split Solinas reduction rows tied back to each multiplication trace.",
+        status: P256ProofComponentStatus::Pending,
+        note: "Solinas reduction trace/checker exists for public-key checks, but those rows are not yet included in the single STARK proof.",
     },
     P256ProofComponentSlot {
         name: "ScalarSetup",
-        status: P256ProofComponentStatus::Implemented,
-        note: "Native witness and AIR-facing scalar setup claim are linked.",
+        status: P256ProofComponentStatus::Pending,
+        note: "Native witness and AIR-facing scalar setup claim exist, but scalar setup is not yet proven inside the single STARK proof.",
     },
     P256ProofComponentSlot {
         name: "CertScalarInput",
-        status: P256ProofComponentStatus::Implemented,
-        note: "Two fake-GLV certificate rows are derived from scalar setup.",
+        status: P256ProofComponentStatus::Pending,
+        note: "Certificate rows are derived natively from scalar setup; AIR binding into the single proof is still pending.",
     },
     P256ProofComponentSlot {
         name: "FakeGlvScalarHint",
-        status: P256ProofComponentStatus::Implemented,
-        note: "Scalar decomposition hints are checked against certificate scalars.",
+        status: P256ProofComponentStatus::Pending,
+        note: "Scalar decomposition hints are checked natively; AIR constraints for the scalar equation are still pending.",
     },
     P256ProofComponentSlot {
         name: "FakeGlvSelector",
-        status: P256ProofComponentStatus::Implemented,
-        note: "Selector reconstruction and selector lookup requests are linked.",
+        status: P256ProofComponentStatus::Pending,
+        note: "Selector lookup providers are proven, but selector reconstruction from scalar hints is still a native claim check.",
     },
     P256ProofComponentSlot {
         name: "PreparedPointUseCounts",
-        status: P256ProofComponentStatus::Implemented,
-        note: "PreparedPoint copy-bus counts and Range7 use-count bounds are linked.",
+        status: P256ProofComponentStatus::Pending,
+        note: "PreparedPoint use-count audit exists, but the Range7 use-count proof is not yet included in one top-level proof.",
     },
     P256ProofComponentSlot {
         name: "PreparedTablePoints",
-        status: P256ProofComponentStatus::Implemented,
-        note: "Native prepared-table point generation feeds real Base[0..7] and Table[16] coordinates into PreparedPoint providers.",
+        status: P256ProofComponentStatus::Pending,
+        note: "Prepared-table point generation is still native witness construction; row/source slices prove downstream uses but not one unified table-generation proof.",
     },
     P256ProofComponentSlot {
         name: "PreparedTableEcTrace",
-        status: P256ProofComponentStatus::Implemented,
-        note: "Native row-level DOUBLE/ADD trace verifies P3, R3, Base[0..7], and Table[16] production against prepared-table points.",
+        status: P256ProofComponentStatus::Pending,
+        note: "Prepared-table EC trace is constructed and checked natively; existing row/source proof slices are not yet merged into one proof.",
     },
     P256ProofComponentSlot {
         name: "PreparedTableEcRows",
@@ -814,13 +814,13 @@ pub const P256_PROOF_COMPONENT_SLOTS: &[P256ProofComponentSlot] = &[
     },
     P256ProofComponentSlot {
         name: "FinalEcdsaCheck",
-        status: P256ProofComponentStatus::Implemented,
-        note: "Native final check links H1/H2 to fake-GLV chain R3 values, enforces finite R = H1 + H2, and checks x(R) mod n = r.",
+        status: P256ProofComponentStatus::Pending,
+        note: "Native final check links H1/H2, finite R = H1 + H2, and x(R) mod n = r; AIR rows for this final equation are still pending.",
     },
     P256ProofComponentSlot {
         name: "StarkProveVerify",
-        status: P256ProofComponentStatus::Implemented,
-        note: "Top-level sequential proof-slice bundle proves and verifies every currently implemented Stwo AIR component.",
+        status: P256ProofComponentStatus::Pending,
+        note: "The current top-level helper is a sequential bundle of independent slice proofs, not one monolithic STARK proof artifact.",
     },
 ];
 
@@ -2325,21 +2325,26 @@ mod tests {
             .map(|slot| slot.name)
             .collect::<Vec<_>>();
 
-        assert!(implemented.contains(&"PublicKeyOnCurve"));
-        assert!(implemented.contains(&"SolinasReductionTraceRows"));
-        assert!(implemented.contains(&"PreparedTablePoints"));
-        assert!(implemented.contains(&"PreparedTableEcTrace"));
+        assert!(pending.contains(&"PublicEcdsaInput"));
+        assert!(pending.contains(&"PublicKeyOnCurve"));
+        assert!(pending.contains(&"SolinasReductionTraceRows"));
+        assert!(pending.contains(&"ScalarSetup"));
+        assert!(pending.contains(&"CertScalarInput"));
+        assert!(pending.contains(&"FakeGlvScalarHint"));
+        assert!(pending.contains(&"FakeGlvSelector"));
+        assert!(pending.contains(&"PreparedPointUseCounts"));
+        assert!(pending.contains(&"PreparedTablePoints"));
+        assert!(pending.contains(&"PreparedTableEcTrace"));
         assert!(implemented.contains(&"PreparedTableEcRows"));
         assert!(implemented.contains(&"FakeGlvChainTrace"));
         assert!(implemented.contains(&"FakeGlvPrimitiveEcTrace"));
         assert!(implemented.contains(&"FakeGlvEcChainRows"));
         assert!(implemented.contains(&"ProjectiveRcbEcTrace"));
         assert!(implemented.contains(&"ProjectiveRcbAirRows"));
-        assert!(implemented.contains(&"FinalEcdsaCheck"));
-        assert!(implemented.contains(&"StarkProveVerify"));
+        assert!(pending.contains(&"FinalEcdsaCheck"));
+        assert!(pending.contains(&"StarkProveVerify"));
         assert!(!pending.contains(&"PreparedTableEcRows"));
         assert!(!pending.contains(&"FakeGlvEcChainRows"));
-        assert!(pending.is_empty());
     }
 
     #[test]
