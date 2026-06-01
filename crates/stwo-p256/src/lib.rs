@@ -41,6 +41,10 @@ pub mod fake_glv_chain_schedule {
     pub use crate::scalar::fake_glv_chain_schedule::*;
 }
 
+pub mod fake_glv_direct_prepared_operand {
+    pub use crate::scalar::fake_glv_direct_prepared_operand::*;
+}
+
 pub mod fake_glv_ec_source {
     pub use crate::scalar::fake_glv_ec_source::*;
 }

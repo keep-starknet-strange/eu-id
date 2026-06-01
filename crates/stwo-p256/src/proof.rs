@@ -647,6 +647,11 @@ mod tests {
         prove_fake_glv_chain_schedule_proof_slice, verify_fake_glv_chain_schedule_proof_slice,
         FakeGlvChainScheduleProofClaim,
     };
+    use crate::fake_glv_direct_prepared_operand::{
+        prove_fake_glv_direct_prepared_operand_proof_slice,
+        verify_fake_glv_direct_prepared_operand_proof_slice,
+        FakeGlvDirectPreparedOperandProofClaim,
+    };
     use crate::fake_glv_ec_source::{
         prove_fake_glv_projective_source_proof_slice,
         verify_fake_glv_projective_source_proof_slice, FakeGlvProjectiveSourceProofClaim,
@@ -849,6 +854,23 @@ mod tests {
 
     fn fake_glv_chain_schedule_low_ram_config(chain: &FakeGlvChainClaim) -> PcsConfig {
         let claim = FakeGlvChainScheduleProofClaim::from_chain(chain);
+        let ids = claim.preprocessed_column_ids();
+        let max_constraint_log_degree_bound = claim.max_constraint_log_degree_bound(&ids);
+        let fri_config = FriConfig::new(5, 4, 64, 1);
+        PcsConfig {
+            pow_bits: 0,
+            fri_config,
+            lifting_log_size: Some(
+                (max_constraint_log_degree_bound + fri_config.log_blowup_factor).max(10),
+            ),
+        }
+    }
+
+    fn fake_glv_direct_prepared_operand_low_ram_config(
+        selectors: &FakeGlvSelectorClaim,
+        chain: &FakeGlvChainClaim,
+    ) -> PcsConfig {
+        let claim = FakeGlvDirectPreparedOperandProofClaim::from_claims(selectors, chain);
         let ids = claim.preprocessed_column_ids();
         let max_constraint_log_degree_bound = claim.max_constraint_log_degree_bound(&ids);
         let fri_config = FriConfig::new(5, 4, 64, 1);
@@ -1414,6 +1436,30 @@ mod tests {
     }
 
     #[test]
+    fn current_p256_proof_pipeline_proves_fake_glv_direct_prepared_operand_slice() {
+        let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+            valid_real_input_with_small_u_scalars(7, 11),
+        ])
+        .expect("current pipeline builds");
+        proof.verify_current_e2e().expect("current e2e verifies");
+
+        let operand_proof =
+            prove_fake_glv_direct_prepared_operand_proof_slice::<Blake2sMerkleChannel>(
+                &proof.claim.prepared_table,
+                &proof.claim.fake_glv_selectors,
+                &proof.claim.fake_glv_chain,
+                fake_glv_direct_prepared_operand_low_ram_config(
+                    &proof.claim.fake_glv_selectors,
+                    &proof.claim.fake_glv_chain,
+                ),
+            )
+            .expect("fake-GLV direct prepared operand slice proves");
+
+        verify_fake_glv_direct_prepared_operand_proof_slice::<Blake2sMerkleChannel>(operand_proof)
+            .expect("fake-GLV direct prepared operand slice verifies");
+    }
+
+    #[test]
     fn current_p256_proof_pipeline_proves_fake_glv_prepared_point_source_slice() {
         let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
             valid_real_input_with_small_u_scalars(7, 11),
@@ -1535,6 +1581,31 @@ mod tests {
     }
 
     #[test]
+    fn current_p256_proof_pipeline_proves_fake_glv_direct_prepared_operand_slice_with_zero_branch()
+    {
+        let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+            valid_real_input_with_small_u_scalars(0, 11),
+        ])
+        .expect("zero branch pipeline builds");
+        proof.verify_current_e2e().expect("zero branch verifies");
+
+        let operand_proof =
+            prove_fake_glv_direct_prepared_operand_proof_slice::<Blake2sMerkleChannel>(
+                &proof.claim.prepared_table,
+                &proof.claim.fake_glv_selectors,
+                &proof.claim.fake_glv_chain,
+                fake_glv_direct_prepared_operand_low_ram_config(
+                    &proof.claim.fake_glv_selectors,
+                    &proof.claim.fake_glv_chain,
+                ),
+            )
+            .expect("zero-branch fake-GLV direct prepared operand slice proves");
+
+        verify_fake_glv_direct_prepared_operand_proof_slice::<Blake2sMerkleChannel>(operand_proof)
+            .expect("zero-branch fake-GLV direct prepared operand slice verifies");
+    }
+
+    #[test]
     fn current_p256_proof_pipeline_rejects_mutated_fake_glv_chain_expansion_slice() {
         let mut proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
             valid_real_input_with_small_u_scalars(7, 11),
@@ -1621,6 +1692,47 @@ mod tests {
         .expect_err("mutated fake-GLV chain schedule must reject");
 
         assert_eq!(err, FakeGlvChainError::ProofLayer);
+    }
+
+    #[test]
+    fn current_p256_proof_pipeline_rejects_mutated_fake_glv_direct_prepared_operand_slice() {
+        let mut proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+            valid_real_input_with_small_u_scalars(7, 11),
+        ])
+        .expect("current pipeline builds");
+        proof.verify_current_e2e().expect("current e2e verifies");
+
+        let msb = proof
+            .claim
+            .fake_glv_chain
+            .certs
+            .iter_mut()
+            .find_map(|cert| {
+                cert.rows
+                    .iter_mut()
+                    .find(|row| row.kind == crate::fake_glv_chain::FakeGlvChainRowKind::MsbInit)
+            })
+            .expect("at least one active certificate has an MSB init row");
+        msb.operand.x.limbs_mut()[0] += M31::from_u32_unchecked(1);
+        msb.acc_after = msb.operand.clone();
+
+        let err = prove_fake_glv_direct_prepared_operand_proof_slice::<Blake2sMerkleChannel>(
+            &proof.claim.prepared_table,
+            &proof.claim.fake_glv_selectors,
+            &proof.claim.fake_glv_chain,
+            fake_glv_direct_prepared_operand_low_ram_config(
+                &proof.claim.fake_glv_selectors,
+                &proof.claim.fake_glv_chain,
+            ),
+        )
+        .expect_err("mutated fake-GLV direct prepared operand must reject");
+
+        assert_eq!(
+            err,
+            FakeGlvChainError::RelationImbalance {
+                relation: "FakeGlvDirectPreparedOperand",
+            }
+        );
     }
 
     #[test]
