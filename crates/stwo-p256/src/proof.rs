@@ -935,6 +935,15 @@ fn p256_stark_slice_low_ram_config(max_constraint_log_degree_bound: u32) -> PcsC
     }
 }
 
+fn p256_stark_monolithic_profile_config(_max_constraint_log_degree_bound: u32) -> PcsConfig {
+    let fri_config = FriConfig::new(5, 1, 64, 1);
+    PcsConfig {
+        pow_bits: 0,
+        fri_config,
+        lifting_log_size: None,
+    }
+}
+
 impl P256ProofDraft {
     pub fn from_verified_inputs_with_trivial_fake_glv_hints(
         inputs: Vec<EcdsaVerifyInput>,
@@ -982,7 +991,7 @@ impl P256ProofDraft {
         let proof_claim = P256CurrentAirProofClaim::from_claim(&self.claim);
         let ids = proof_claim.preprocessed_column_ids();
         let max_constraint_log_degree_bound = proof_claim.max_constraint_log_degree_bound(&ids);
-        let config = p256_stark_slice_low_ram_config(max_constraint_log_degree_bound);
+        let config = p256_stark_monolithic_profile_config(max_constraint_log_degree_bound);
         let twiddles =
             SimdBackend::precompute_twiddles(
                 CanonicCoset::new(config.lifting_log_size.unwrap_or(
@@ -1997,6 +2006,7 @@ mod tests {
     };
     use crate::types::{AffinePoint, Signature, U256};
     use core::cmp::Ordering;
+    use std::collections::BTreeMap;
     use stwo::core::fri::FriConfig;
     use stwo::core::pcs::PcsConfig;
     use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
@@ -2913,6 +2923,122 @@ mod tests {
 
         verify_current_air_monolithic::<Blake2sMerkleChannel>(monolithic)
             .expect("current AIR monolithic proof verifies");
+    }
+
+    #[test]
+    #[ignore = "prints current AIR row/column shape for performance diagnostics"]
+    fn current_p256_air_shape_diagnostic() {
+        let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+            valid_real_input_with_small_u_scalars(0, 11),
+        ])
+        .expect("zero branch pipeline builds");
+        proof.verify_current_e2e().expect("zero branch verifies");
+
+        let claim = P256CurrentAirProofClaim::from_claim(&proof.claim);
+        let ids = claim.preprocessed_column_ids();
+        let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
+        let components = P256CurrentAirComponents::new(
+            &mut allocator,
+            &claim,
+            &P256CurrentAirInteractionClaim::zero(),
+            &P256CurrentAirRelations::dummy(),
+        );
+
+        eprintln!("current-air unique_preprocessed_columns={}", ids.len());
+        eprintln!(
+            "current-air max_constraint_log_degree_bound={}",
+            claim.max_constraint_log_degree_bound(&ids)
+        );
+        eprintln!(
+            "native rows: prepared_ec={} fake_glv_chain={} fake_glv_primitive_ec={} projective_ec={} projective_rcb_active={} projective_mul={}",
+            proof.claim.prepared_table_ec_trace.active_row_count(),
+            proof.claim.fake_glv_chain.active_row_count(),
+            proof.claim.fake_glv_ec_trace.active_row_count(),
+            proof.claim.projective_ec_trace.active_row_count(),
+            proof.claim.projective_rcb_air_trace.active_row_count(),
+            proof.claim.projective_rcb_air_trace.mul_row_count(),
+        );
+        eprintln!(
+            "projective row families: raw_chunks={} folded_contributions={} folded_digits={} reductions={}",
+            proof.claim.projective_rcb_air_trace.raw_product_chunk_count(),
+            proof.claim.projective_rcb_air_trace.folded_contribution_row_count(),
+            proof.claim.projective_rcb_air_trace.folded_digit_row_count(),
+            proof.claim.projective_rcb_air_trace.reduction_row_count(),
+        );
+
+        print_component_shape(
+            "prepared_table_projective_source",
+            components
+                .prepared_table_projective_source
+                .trace_log_degree_bounds(),
+        );
+        print_component_shape(
+            "fake_glv_projective_source",
+            components
+                .fake_glv_projective_source
+                .trace_log_degree_bounds(),
+        );
+        print_component_shape(
+            "fake_glv_chain_expansion",
+            components
+                .fake_glv_chain_expansion
+                .trace_log_degree_bounds(),
+        );
+        print_component_shape(
+            "fake_glv_chain_continuity",
+            components
+                .fake_glv_chain_continuity
+                .trace_log_degree_bounds(),
+        );
+        print_component_shape(
+            "fake_glv_chain_schedule",
+            components.fake_glv_chain_schedule.trace_log_degree_bounds(),
+        );
+        print_component_shape(
+            "fake_glv_direct_prepared_operand",
+            components
+                .fake_glv_direct_prepared_operand
+                .trace_log_degree_bounds(),
+        );
+        print_component_shape(
+            "fake_glv_signed_selector_operand",
+            components
+                .fake_glv_signed_selector_operand
+                .trace_log_degree_bounds(),
+        );
+        print_component_shape(
+            "fake_glv_lsb_correction_operand",
+            components
+                .fake_glv_lsb_correction_operand
+                .trace_log_degree_bounds(),
+        );
+        print_component_shape(
+            "fake_glv_prepared_point_source",
+            components
+                .fake_glv_prepared_point_source
+                .trace_log_degree_bounds(),
+        );
+        print_component_shape(
+            "projective_rcb_air",
+            components.projective_rcb_air.trace_log_degree_bounds(),
+        );
+        print_component_shape("current_air_total", components.trace_log_degree_bounds());
+    }
+
+    fn print_component_shape(name: &str, bounds: TreeVec<ColumnVec<u32>>) {
+        let labels = ["preprocessed", "base", "interaction"];
+        for (tree, columns) in bounds.0.iter().enumerate() {
+            let mut by_log_size = BTreeMap::new();
+            for log_size in columns {
+                *by_log_size.entry(*log_size).or_insert(0usize) += 1;
+            }
+            eprintln!(
+                "shape {name} {} columns={} by_log_size={:?}",
+                labels.get(tree).copied().unwrap_or("extra"),
+                columns.len(),
+                by_log_size
+            );
+        }
     }
 
     #[test]
