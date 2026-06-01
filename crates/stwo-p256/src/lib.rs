@@ -49,6 +49,10 @@ pub mod fake_glv_ec_source {
     pub use crate::scalar::fake_glv_ec_source::*;
 }
 
+pub mod fake_glv_lsb_correction_operand {
+    pub use crate::scalar::fake_glv_lsb_correction_operand::*;
+}
+
 pub mod fake_glv_prepared_point_source {
     pub use crate::scalar::fake_glv_prepared_point_source::*;
 }
