@@ -62,7 +62,7 @@ pub const PROJECTIVE_RCB_MUL_ROLE_RESULT: u32 = 2;
 pub const PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS: usize = 2;
 pub const PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS: usize = 3;
 pub const PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS: usize = raw_product_chunk_count();
-pub const PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERM_TRACE_COLUMNS: usize = 2;
+pub const PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERM_TRACE_COLUMNS: usize = 4;
 pub const PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERMS: usize = 4;
 pub const PROJECTIVE_RCB_FOLDED_CONTRIBUTION_ROWS: usize = folded_contribution_row_count_const();
 pub const PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERM_TRACE_COLUMNS: usize = 1;
@@ -75,8 +75,10 @@ pub const PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS: usize =
 pub const PROJECTIVE_RCB_FOLDED_DIGIT_GROUP_TRACE_COLUMNS: usize = 1;
 pub const PROJECTIVE_RCB_FOLDED_DIGIT_TRACE_COLUMNS: usize =
     2 + PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS * PROJECTIVE_RCB_FOLDED_DIGIT_GROUP_TRACE_COLUMNS + 3;
-pub const PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TRACE_COLUMNS: usize = 2
+pub const PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TRACE_COLUMNS: usize = 1
+    + 2
     + PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS * PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERM_TRACE_COLUMNS
+    + PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS
     + PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS;
 pub const PROJECTIVE_RCB_MUL_ID_TRACE_COLUMNS: usize = 2;
 pub const PROJECTIVE_RCB_MUL_ACTIVE_TRACE_COLUMNS: usize = 1;
@@ -432,13 +434,12 @@ impl FrameworkEval for ProjectiveRcbRawProductChunkEval {
     }
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 4
+        self.log_size + 1
     }
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         let columns = ProjectiveRcbRawProductChunkColumns::read(&mut eval);
 
-        eval.add_constraint(columns.active.clone() * (one::<E>() - columns.active.clone()));
         add_projective_rcb_raw_product_chunk(&mut eval, self.relations.as_refs(), &columns);
         eval.finalize_logup_in_pairs();
         eval
@@ -633,6 +634,7 @@ pub fn add_projective_rcb_mul_row<E: EvalAtRow>(
 
 pub struct ProjectiveRcbRawProductChunkColumns<E: EvalAtRow> {
     pub active: E::F,
+    pub schedule_active: E::F,
     pub source_index: E::F,
     pub mul_index: E::F,
     pub coeff: E::F,
@@ -640,12 +642,14 @@ pub struct ProjectiveRcbRawProductChunkColumns<E: EvalAtRow> {
     pub terms: [ProjectiveRcbRawProductTermColumns<E>; PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS],
     pub digits: [E::F; PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS],
     pub digit_use_counts: [E::F; PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS],
+    pub schedule_digit_use_counts: [E::F; PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS],
 }
 
 impl<E: EvalAtRow> ProjectiveRcbRawProductChunkColumns<E> {
     fn read(eval: &mut E) -> Self {
         Self {
-            active: eval
+            active: eval.next_trace_mask(),
+            schedule_active: eval
                 .get_preprocessed_column(ProjectiveRcbRawProductChunkScheduleColumnIds::active()),
             source_index: eval.next_trace_mask(),
             mul_index: eval.next_trace_mask(),
@@ -654,7 +658,8 @@ impl<E: EvalAtRow> ProjectiveRcbRawProductChunkColumns<E> {
             chunk: eval
                 .get_preprocessed_column(ProjectiveRcbRawProductChunkScheduleColumnIds::chunk()),
             terms: core::array::from_fn(|term| ProjectiveRcbRawProductTermColumns {
-                term_active: eval.get_preprocessed_column(
+                term_active: eval.next_trace_mask(),
+                schedule_term_active: eval.get_preprocessed_column(
                     ProjectiveRcbRawProductChunkScheduleColumnIds::term_active(term),
                 ),
                 lhs_index: eval.get_preprocessed_column(
@@ -665,9 +670,11 @@ impl<E: EvalAtRow> ProjectiveRcbRawProductChunkColumns<E> {
                 ),
                 lhs_limb: eval.next_trace_mask(),
                 rhs_limb: eval.next_trace_mask(),
+                product: eval.next_trace_mask(),
             }),
             digits: core::array::from_fn(|_| eval.next_trace_mask()),
-            digit_use_counts: core::array::from_fn(|offset| {
+            digit_use_counts: core::array::from_fn(|_| eval.next_trace_mask()),
+            schedule_digit_use_counts: core::array::from_fn(|offset| {
                 eval.get_preprocessed_column(
                     ProjectiveRcbRawProductChunkScheduleColumnIds::digit_use_count(offset),
                 )
@@ -678,41 +685,65 @@ impl<E: EvalAtRow> ProjectiveRcbRawProductChunkColumns<E> {
 
 pub struct ProjectiveRcbRawProductTermColumns<E: EvalAtRow> {
     pub term_active: E::F,
+    pub schedule_term_active: E::F,
     pub lhs_index: E::F,
     pub rhs_index: E::F,
     pub lhs_limb: E::F,
     pub rhs_limb: E::F,
+    pub product: E::F,
 }
 
-pub fn add_projective_rcb_raw_product_chunk<E: EvalAtRow>(
+fn add_raw_product_chunk_polynomial_constraints<E: EvalAtRow>(
     eval: &mut E,
-    relations: ProjectiveRcbMulRelations<'_>,
     columns: &ProjectiveRcbRawProductChunkColumns<E>,
 ) {
     let mut product_sum = zero::<E>();
+    eval.add_constraint(columns.active.clone() * (one::<E>() - columns.active.clone()));
+    eval.add_constraint(columns.active.clone() - columns.schedule_active.clone());
     for term in &columns.terms {
-        eval.add_constraint(
-            columns.active.clone()
-                * term.term_active.clone()
-                * (one::<E>() - term.term_active.clone()),
-        );
-        product_sum += term.term_active.clone() * term.lhs_limb.clone() * term.rhs_limb.clone();
+        eval.add_constraint(term.term_active.clone() - term.schedule_term_active.clone());
+        eval.add_constraint(term.term_active.clone() * (one::<E>() - term.term_active.clone()));
+        eval.add_constraint(term.lhs_limb.clone() * term.rhs_limb.clone() - term.product.clone());
+        product_sum += term.term_active.clone() * term.product.clone();
         constrain_unused(
             eval,
-            columns.active.clone(),
+            one::<E>(),
             term.term_active.clone(),
             term.lhs_limb.clone(),
         );
         constrain_unused(
             eval,
-            columns.active.clone(),
+            one::<E>(),
             term.term_active.clone(),
             term.rhs_limb.clone(),
         );
+    }
+    for offset in 0..PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS {
+        eval.add_constraint(
+            columns.digit_use_counts[offset].clone()
+                - columns.schedule_digit_use_counts[offset].clone(),
+        );
+    }
+    eval.add_constraint(columns.digits[2].clone() * (columns.digits[2].clone() - one::<E>()));
+    let limb_base = E::F::from(M31::from_u32_unchecked(1u32 << LIMB_BITS));
+    eval.add_constraint(
+        product_sum
+            - columns.digits[0].clone()
+            - limb_base.clone() * columns.digits[1].clone()
+            - limb_base.clone() * limb_base * columns.digits[2].clone(),
+    );
+}
+
+fn add_raw_product_chunk_relations<E: EvalAtRow>(
+    eval: &mut E,
+    relations: ProjectiveRcbMulRelations<'_>,
+    columns: &ProjectiveRcbRawProductChunkColumns<E>,
+) {
+    for term in &columns.terms {
         add_projective_rcb_mul_limb_relation(
             eval,
             relations.mul_limb,
-            E::EF::from(columns.active.clone() * term.term_active.clone()),
+            E::EF::from(term.term_active.clone()),
             columns.source_index.clone(),
             columns.mul_index.clone(),
             constant(PROJECTIVE_RCB_MUL_ROLE_LHS),
@@ -722,7 +753,7 @@ pub fn add_projective_rcb_raw_product_chunk<E: EvalAtRow>(
         add_projective_rcb_mul_limb_relation(
             eval,
             relations.mul_limb,
-            E::EF::from(columns.active.clone() * term.term_active.clone()),
+            E::EF::from(term.term_active.clone()),
             columns.source_index.clone(),
             columns.mul_index.clone(),
             constant(PROJECTIVE_RCB_MUL_ROLE_RHS),
@@ -730,37 +761,18 @@ pub fn add_projective_rcb_raw_product_chunk<E: EvalAtRow>(
             term.rhs_limb.clone(),
         );
     }
-
-    add_range_check(
-        eval,
-        relations.range13,
-        columns.active.clone(),
-        columns.digits[0].clone(),
-    );
-    add_range_check(
-        eval,
-        relations.range13,
-        columns.active.clone(),
-        columns.digits[1].clone(),
-    );
-    eval.add_constraint(
-        columns.active.clone()
-            * columns.digits[2].clone()
-            * (columns.digits[2].clone() - one::<E>()),
-    );
-    let limb_base = E::F::from(M31::from_u32_unchecked(1u32 << LIMB_BITS));
-    eval.add_constraint(
-        columns.active.clone()
-            * (product_sum
-                - columns.digits[0].clone()
-                - limb_base.clone() * columns.digits[1].clone()
-                - limb_base.clone() * limb_base * columns.digits[2].clone()),
-    );
-
+    for digit in columns.digits.iter().take(2) {
+        add_range_check(
+            eval,
+            relations.range13,
+            columns.active.clone(),
+            digit.clone(),
+        );
+    }
     for (offset, digit) in columns.digits.iter().enumerate() {
         eval.add_to_relation(RelationEntry::new(
             relations.raw_product_chunk_digit,
-            -E::EF::from(columns.active.clone() * columns.digit_use_counts[offset].clone()),
+            -E::EF::from(columns.digit_use_counts[offset].clone()),
             &[
                 columns.source_index.clone(),
                 columns.mul_index.clone(),
@@ -771,6 +783,20 @@ pub fn add_projective_rcb_raw_product_chunk<E: EvalAtRow>(
             ],
         ));
     }
+    eval.add_to_relation(RelationEntry::new(
+        relations.range13,
+        E::EF::from(zero::<E>()),
+        &[zero::<E>()],
+    ));
+}
+
+pub fn add_projective_rcb_raw_product_chunk<E: EvalAtRow>(
+    eval: &mut E,
+    relations: ProjectiveRcbMulRelations<'_>,
+    columns: &ProjectiveRcbRawProductChunkColumns<E>,
+) {
+    add_raw_product_chunk_polynomial_constraints(eval, columns);
+    add_raw_product_chunk_relations(eval, relations, columns);
 }
 
 pub struct ProjectiveRcbFoldedContributionColumns<E: EvalAtRow> {
@@ -1857,13 +1883,17 @@ fn gen_projective_rcb_raw_product_chunk_base_trace(
         air_row.muls.iter().flat_map(|mul| {
             mul.raw_product_chunks.iter().map(|chunk| {
                 let mut row = Vec::with_capacity(PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TRACE_COLUMNS);
+                row.push(m31(1));
                 row.push(m31_usize(chunk.source_index));
                 row.push(m31_usize(chunk.mul_index));
                 for term in &chunk.terms {
+                    row.push(m31(u32::from(term.active)));
                     row.push(m31(term.lhs_limb));
                     row.push(m31(term.rhs_limb));
+                    row.push(m31(term.lhs_limb * term.rhs_limb));
                 }
                 row.extend(chunk.digits.iter().copied().map(m31));
+                row.extend(chunk.digit_use_counts.iter().copied().map(m31));
                 row
             })
         })
@@ -2001,7 +2031,8 @@ fn gen_projective_rcb_family_interaction_trace(
     }
 
     let mut logup = LogupTraceGenerator::new(log_size);
-    for batch in 0..max_fractions.div_ceil(2) {
+    let batch_count = max_fractions.div_ceil(2);
+    for batch in 0..batch_count {
         let mut col = logup.new_col();
         for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
             let mut numerators = [secure_zero(); N_LANES];
@@ -2168,6 +2199,7 @@ fn projective_rcb_raw_product_chunk_fractions(
             m31(*digit),
         ));
     }
+    fractions.push(range13_fraction(0, m31(0)));
     debug_assert_eq!(
         fractions.len(),
         projective_rcb_raw_product_chunk_fraction_count()
@@ -2275,7 +2307,7 @@ fn projective_rcb_mul_fraction_count() -> usize {
 }
 
 fn projective_rcb_raw_product_chunk_fraction_count() -> usize {
-    2 * PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS + 2 + PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS
+    2 * PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS + 2 + PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS + 1
 }
 
 fn projective_rcb_folded_contribution_fraction_count() -> usize {
@@ -4455,8 +4487,17 @@ mod tests {
     use crate::types::AffinePoint;
     use num_traits::Zero;
     use stwo::core::air::Component;
+    use stwo::core::channel::Blake2sChannel;
     use stwo::core::fields::qm31::SecureField;
-    use stwo_constraint_framework::TraceLocationAllocator;
+    use stwo::core::fri::FriConfig;
+    use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig, TreeVec};
+    use stwo::core::poly::circle::CanonicCoset;
+    use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
+    use stwo::core::verifier::verify;
+    use stwo::prover::backend::simd::SimdBackend;
+    use stwo::prover::poly::circle::PolyOps;
+    use stwo::prover::{prove, CommitmentSchemeProver, ComponentProver};
+    use stwo_constraint_framework::{assert_constraints_on_polys, TraceLocationAllocator};
 
     fn generator() -> PreparedAffinePoint {
         PreparedAffinePoint::from_affine(AffinePoint {
@@ -4488,6 +4529,126 @@ mod tests {
                 &output,
             )],
         }
+    }
+
+    fn low_ram_proof_layer_config(max_constraint_log_degree_bound: u32) -> PcsConfig {
+        let fri_config = FriConfig::new(5, 4, 64, 1);
+        PcsConfig {
+            pow_bits: 0,
+            fri_config,
+            lifting_log_size: Some(max_constraint_log_degree_bound + fri_config.log_blowup_factor),
+        }
+    }
+
+    fn prove_and_verify_raw_product_chunk_component(claim: &ProjectiveRcbAirTraceClaim) {
+        let log_size = claim.component_log_sizes().raw_product_chunk;
+        let mut ids_allocator = TraceLocationAllocator::default();
+        let sizing_component = ProjectiveRcbRawProductChunkComponent::new(
+            &mut ids_allocator,
+            ProjectiveRcbRawProductChunkEval {
+                log_size,
+                relations: ProjectiveRcbMulComponentRelations::dummy(),
+            },
+            SecureField::zero(),
+        );
+        let ids = ids_allocator.preprocessed_columns().clone();
+        let max_constraint_log_degree_bound = sizing_component.max_constraint_log_degree_bound();
+        let config = low_ram_proof_layer_config(max_constraint_log_degree_bound);
+        let twiddles =
+            SimdBackend::precompute_twiddles(
+                CanonicCoset::new(config.lifting_log_size.unwrap_or(
+                    max_constraint_log_degree_bound + config.fri_config.log_blowup_factor,
+                ))
+                .circle_domain()
+                .half_coset,
+            );
+
+        let mut channel = Blake2sChannel::default();
+        let mut commitment_scheme =
+            CommitmentSchemeProver::<SimdBackend, Blake2sMerkleChannel>::new(config, &twiddles);
+        commitment_scheme.set_store_polynomials_coefficients();
+
+        let preprocessed = claim
+            .gen_preprocessed_trace(&ids)
+            .expect("raw preprocessed trace generates");
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(preprocessed.clone());
+        tree_builder.commit(&mut channel);
+
+        let base = gen_projective_rcb_raw_product_chunk_base_trace(claim, log_size)
+            .expect("raw base trace generates");
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(base.clone());
+        tree_builder.commit(&mut channel);
+
+        let relations = ProjectiveRcbMulComponentRelations::draw(&mut channel);
+        let (interaction_traces, interaction_claim) = claim.gen_interaction_trace(&relations);
+        let interaction = interaction_traces.raw_product_chunk;
+        let mut component_allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
+        let component = ProjectiveRcbRawProductChunkComponent::new(
+            &mut component_allocator,
+            ProjectiveRcbRawProductChunkEval {
+                log_size,
+                relations: relations.clone(),
+            },
+            interaction_claim.raw_product_chunk,
+        );
+        let trace_polys =
+            TreeVec::new(vec![preprocessed, base, interaction.clone()]).map(|trace| {
+                trace
+                    .into_iter()
+                    .map(|column| column.interpolate())
+                    .collect::<Vec<_>>()
+            });
+        assert_constraints_on_polys(
+            &trace_polys,
+            CanonicCoset::new(log_size),
+            |eval| {
+                ProjectiveRcbRawProductChunkEval {
+                    log_size,
+                    relations: relations.clone(),
+                }
+                .evaluate(eval);
+            },
+            interaction_claim.raw_product_chunk,
+        );
+
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(interaction);
+        tree_builder.commit(&mut channel);
+
+        let proof = prove(
+            &[&component as &dyn ComponentProver<SimdBackend>],
+            &mut channel,
+            commitment_scheme,
+        )
+        .expect("raw product chunk component proves");
+
+        let mut verifier_channel = Blake2sChannel::default();
+        let commitment_scheme =
+            &mut CommitmentSchemeVerifier::<Blake2sMerkleChannel>::new(proof.config);
+        let sizes = component.trace_log_degree_bounds();
+        commitment_scheme.commit(proof.commitments[0], &sizes[0], &mut verifier_channel);
+        commitment_scheme.commit(proof.commitments[1], &sizes[1], &mut verifier_channel);
+        let verifier_relations = ProjectiveRcbMulComponentRelations::draw(&mut verifier_channel);
+        let mut verifier_allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
+        let verifier_component = ProjectiveRcbRawProductChunkComponent::new(
+            &mut verifier_allocator,
+            ProjectiveRcbRawProductChunkEval {
+                log_size,
+                relations: verifier_relations,
+            },
+            interaction_claim.raw_product_chunk,
+        );
+        commitment_scheme.commit(proof.commitments[2], &sizes[2], &mut verifier_channel);
+
+        verify(
+            &[&verifier_component],
+            &mut verifier_channel,
+            commitment_scheme,
+            proof,
+        )
+        .expect("raw product chunk component verifies");
     }
 
     #[test]
@@ -4787,7 +4948,7 @@ mod tests {
         assert_eq!(PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS, 210);
         assert_eq!(
             PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TRACE_COLUMNS,
-            2 + 2 * 2 + 3
+            1 + 2 + 2 * 4 + 3 + 3
         );
         assert_eq!(
             component.trace_log_degree_bounds()[1].len(),
@@ -4807,7 +4968,7 @@ mod tests {
                 relations: ProjectiveRcbMulComponentRelations::dummy(),
             }
             .max_constraint_log_degree_bound(),
-            12
+            9
         );
     }
 
@@ -5298,5 +5459,14 @@ mod tests {
         claim
             .verify_proof_slice_traces(&relations)
             .expect("proof slice trace shape verifies");
+    }
+
+    #[test]
+    fn projective_rcb_raw_product_chunk_component_proves_and_verifies() {
+        let trace = one_row_trace(ProjectiveEcOp::Double, PreparedAffinePoint::infinity());
+        let claim =
+            ProjectiveRcbAirTraceClaim::from_projective_trace(&trace).expect("valid RCB AIR trace");
+
+        prove_and_verify_raw_product_chunk_component(&claim);
     }
 }
