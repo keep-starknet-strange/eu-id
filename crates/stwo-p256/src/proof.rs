@@ -635,6 +635,10 @@ mod tests {
     use super::*;
     use crate::constants::{P256_GX, P256_GY, P256_ORDER};
     use crate::curve::{mod_inverse, scalar_mul};
+    use crate::fake_glv_ec_source::{
+        prove_fake_glv_projective_source_proof_slice,
+        verify_fake_glv_projective_source_proof_slice, FakeGlvProjectiveSourceProofClaim,
+    };
     use crate::fake_glv_selector_lookup::{
         prove_selector_lookup_provider_proof_slice, verify_selector_lookup_provider_proof_slice,
         SelectorLookupProviderProofClaim,
@@ -766,6 +770,23 @@ mod tests {
         trace: &PreparedTableEcTraceClaim,
     ) -> PcsConfig {
         let claim = PreparedTableProjectiveSourceProofClaim::from_prepared_trace(trace);
+        let ids = claim.preprocessed_column_ids();
+        let max_constraint_log_degree_bound = claim.max_constraint_log_degree_bound(&ids);
+        let fri_config = FriConfig::new(5, 4, 64, 1);
+        PcsConfig {
+            pow_bits: 0,
+            fri_config,
+            lifting_log_size: Some(
+                (max_constraint_log_degree_bound + fri_config.log_blowup_factor).max(10),
+            ),
+        }
+    }
+
+    fn fake_glv_projective_source_low_ram_config(
+        trace: &FakeGlvPrimitiveEcTraceClaim,
+        source_offset: usize,
+    ) -> PcsConfig {
+        let claim = FakeGlvProjectiveSourceProofClaim::from_fake_glv_trace(trace, source_offset);
         let ids = claim.preprocessed_column_ids();
         let max_constraint_log_degree_bound = claim.max_constraint_log_degree_bound(&ids);
         let fri_config = FriConfig::new(5, 4, 64, 1);
@@ -1226,6 +1247,62 @@ mod tests {
 
         verify_prepared_table_projective_source_proof_slice::<Blake2sMerkleChannel>(source_proof)
             .expect("prepared-table/projective source slice verifies");
+    }
+
+    #[test]
+    fn current_p256_proof_pipeline_proves_fake_glv_projective_source_slice() {
+        let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+            valid_real_input_with_small_u_scalars(7, 11),
+        ])
+        .expect("current pipeline builds");
+        proof.verify_current_e2e().expect("current e2e verifies");
+
+        let source_offset = proof.claim.prepared_table_ec_trace.active_row_count();
+        let source_proof = prove_fake_glv_projective_source_proof_slice::<Blake2sMerkleChannel>(
+            &proof.claim.fake_glv_ec_trace,
+            &proof.claim.projective_ec_trace,
+            source_offset,
+            fake_glv_projective_source_low_ram_config(
+                &proof.claim.fake_glv_ec_trace,
+                source_offset,
+            ),
+        )
+        .expect("fake-GLV/projective source slice proves");
+
+        verify_fake_glv_projective_source_proof_slice::<Blake2sMerkleChannel>(source_proof)
+            .expect("fake-GLV/projective source slice verifies");
+    }
+
+    #[test]
+    fn current_p256_proof_pipeline_rejects_mutated_fake_glv_projective_source_slice() {
+        let mut proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+            valid_real_input_with_small_u_scalars(7, 11),
+        ])
+        .expect("current pipeline builds");
+        proof.verify_current_e2e().expect("current e2e verifies");
+
+        let source_offset = proof.claim.prepared_table_ec_trace.active_row_count();
+        proof.claim.projective_ec_trace.rows[source_offset].sig_id = M31::from_u32_unchecked(
+            proof.claim.projective_ec_trace.rows[source_offset].sig_id.0 + 1,
+        );
+
+        let err = prove_fake_glv_projective_source_proof_slice::<Blake2sMerkleChannel>(
+            &proof.claim.fake_glv_ec_trace,
+            &proof.claim.projective_ec_trace,
+            source_offset,
+            fake_glv_projective_source_low_ram_config(
+                &proof.claim.fake_glv_ec_trace,
+                source_offset,
+            ),
+        )
+        .expect_err("mutated fake-GLV/projective source tuple must reject");
+
+        assert_eq!(
+            err,
+            FakeGlvChainError::RelationImbalance {
+                relation: "FakeGlvProjectiveSource",
+            }
+        );
     }
 
     #[test]

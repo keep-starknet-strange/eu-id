@@ -469,6 +469,21 @@ pub enum FakeGlvChainError {
         expected: usize,
         actual: usize,
     },
+    EcTraceRowsExceedDomain {
+        rows: usize,
+        domain: usize,
+    },
+    ProjectiveSourceInvalid,
+    ProjectiveSourceTooShort {
+        source_offset: usize,
+        fake_glv: usize,
+        projective: usize,
+    },
+    RelationImbalance {
+        relation: &'static str,
+    },
+    PreprocessedColumnMissing,
+    ProofLayer,
     ChainTraceMismatch {
         expected: usize,
         actual: usize,

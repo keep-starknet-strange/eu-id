@@ -637,14 +637,14 @@ impl FrameworkEval for PreparedTableProjectiveSourceEval {
 }
 
 #[derive(Clone, Debug)]
-struct PreparedTableEcEvalPoint<F> {
+pub(crate) struct PreparedTableEcEvalPoint<F> {
     x: [F; N_LIMBS],
     y: [F; N_LIMBS],
     inf: F,
 }
 
 impl<F: Clone> PreparedTableEcEvalPoint<F> {
-    fn relation_values(&self) -> [F; PREPARED_TABLE_EC_POINT_COLUMNS] {
+    pub(crate) fn relation_values(&self) -> [F; PREPARED_TABLE_EC_POINT_COLUMNS] {
         core::array::from_fn(|index| match index {
             0..=19 => self.x[index].clone(),
             20..=39 => self.y[index - N_LIMBS].clone(),
@@ -655,7 +655,7 @@ impl<F: Clone> PreparedTableEcEvalPoint<F> {
 }
 
 impl<F> PreparedTableEcEvalPoint<F> {
-    fn read<E: EvalAtRow<F = F>>(eval: &mut E) -> Self {
+    pub(crate) fn read<E: EvalAtRow<F = F>>(eval: &mut E) -> Self {
         Self {
             x: core::array::from_fn(|_| eval.next_trace_mask()),
             y: core::array::from_fn(|_| eval.next_trace_mask()),
@@ -668,7 +668,7 @@ impl<F> PreparedTableEcEvalPoint<F>
 where
     F: Clone + core::ops::Add<Output = F> + core::ops::Sub<Output = F> + core::ops::Mul<Output = F>,
 {
-    fn add_constraints<E: EvalAtRow<F = F>>(&self, eval: &mut E, active: &F, one: &F) {
+    pub(crate) fn add_constraints<E: EvalAtRow<F = F>>(&self, eval: &mut E, active: &F, one: &F) {
         eval.add_constraint(self.inf.clone() * (self.inf.clone() - one.clone()));
         for limb in self.x.iter().chain(self.y.iter()) {
             eval.add_constraint(self.inf.clone() * limb.clone());
@@ -1252,7 +1252,7 @@ impl PreparedTableEcPointLike<M31> for PreparedTableEcPointValues {
     }
 }
 
-fn prepared_table_ec_point_values(
+pub(crate) fn prepared_table_ec_point_values(
     point: &PreparedAffinePoint,
 ) -> [M31; PREPARED_TABLE_EC_POINT_COLUMNS] {
     PreparedTableEcPointValues::from_prepared(point).relation_values()
