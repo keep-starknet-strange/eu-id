@@ -1,13 +1,22 @@
 use stwo::core::{
+    air::Component,
     channel::Channel,
     fields::{m31::M31, qm31::SecureField},
+    pcs::{CommitmentSchemeVerifier, PcsConfig, TreeVec},
+    poly::circle::CanonicCoset,
+    proof::StarkProof,
     utils::{bit_reverse_index, coset_index_to_circle_domain_index},
+    verifier::verify,
     ColumnVec,
 };
 use stwo::prover::backend::simd::{
     m31::{LOG_N_LANES, N_LANES},
     qm31::PackedQM31,
+    SimdBackend,
 };
+use stwo::prover::backend::BackendForChannel;
+use stwo::prover::poly::circle::PolyOps;
+use stwo::prover::{prove, CommitmentSchemeProver, ComponentProver};
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{
     relation, EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation,
@@ -65,16 +74,19 @@ pub const PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS: usize = raw_product_chunk_count();
 pub const PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERM_TRACE_COLUMNS: usize = 4;
 pub const PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERMS: usize = 4;
 pub const PROJECTIVE_RCB_FOLDED_CONTRIBUTION_ROWS: usize = folded_contribution_row_count_const();
-pub const PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERM_TRACE_COLUMNS: usize = 1;
-pub const PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TRACE_COLUMNS: usize = 2
+pub const PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERM_TRACE_COLUMNS: usize = 4;
+pub const PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TRACE_COLUMNS: usize = 1
+    + 2
     + PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERMS
         * PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERM_TRACE_COLUMNS
     + 1;
 pub const PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS: usize =
     folded_contribution_max_groups_per_digit_const();
-pub const PROJECTIVE_RCB_FOLDED_DIGIT_GROUP_TRACE_COLUMNS: usize = 1;
-pub const PROJECTIVE_RCB_FOLDED_DIGIT_TRACE_COLUMNS: usize =
-    2 + PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS * PROJECTIVE_RCB_FOLDED_DIGIT_GROUP_TRACE_COLUMNS + 3;
+pub const PROJECTIVE_RCB_FOLDED_DIGIT_GROUP_TRACE_COLUMNS: usize = 3;
+pub const PROJECTIVE_RCB_FOLDED_DIGIT_TRACE_COLUMNS: usize = 1
+    + 2
+    + PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS * PROJECTIVE_RCB_FOLDED_DIGIT_GROUP_TRACE_COLUMNS
+    + 3;
 pub const PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TRACE_COLUMNS: usize = 1
     + 2
     + PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS * PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERM_TRACE_COLUMNS
@@ -266,9 +278,97 @@ pub struct ProjectiveRcbAirProofInteractionClaim {
 }
 
 impl ProjectiveRcbAirProofInteractionClaim {
+    pub fn zero() -> Self {
+        Self {
+            components: ProjectiveRcbAirComponentInteractionClaim {
+                mul: secure_zero(),
+                raw_product_chunk: secure_zero(),
+                folded_contribution: secure_zero(),
+                folded_digit: secure_zero(),
+            },
+            range13: RangeCheckInteractionClaim {
+                claimed_sum: secure_zero(),
+            },
+            signed_carry: RangeCheckInteractionClaim {
+                claimed_sum: secure_zero(),
+            },
+        }
+    }
+
     pub fn total(&self) -> SecureField {
         self.components.total() + self.range13.claimed_sum + self.signed_carry.claimed_sum
     }
+
+    pub fn mix_into(&self, channel: &mut impl Channel) {
+        channel.mix_felts(&[
+            self.components.mul,
+            self.components.raw_product_chunk,
+            self.components.folded_contribution,
+            self.components.folded_digit,
+            self.range13.claimed_sum,
+            self.signed_carry.claimed_sum,
+        ]);
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProjectiveRcbAirProofClaim {
+    pub log_sizes: ProjectiveRcbAirComponentLogSizes,
+}
+
+impl ProjectiveRcbAirProofClaim {
+    pub fn from_trace(trace: &ProjectiveRcbAirTraceClaim) -> Self {
+        Self {
+            log_sizes: trace.component_log_sizes(),
+        }
+    }
+
+    pub fn mix_into(&self, channel: &mut impl Channel) {
+        channel.mix_u64(self.log_sizes.mul as u64);
+        channel.mix_u64(self.log_sizes.raw_product_chunk as u64);
+        channel.mix_u64(self.log_sizes.folded_contribution as u64);
+        channel.mix_u64(self.log_sizes.folded_digit as u64);
+    }
+
+    pub fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
+        let mut allocator = TraceLocationAllocator::default();
+        let _ = ProjectiveRcbAirComponents::new_with_log_sizes(
+            &mut allocator,
+            self.log_sizes,
+            &ProjectiveRcbAirProofInteractionClaim::zero(),
+            &ProjectiveRcbMulComponentRelations::dummy(),
+        );
+        allocator.preprocessed_columns().clone()
+    }
+
+    fn trace_log_degree_bounds(&self, ids: &[PreProcessedColumnId]) -> TreeVec<ColumnVec<u32>> {
+        let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(ids);
+        let components = ProjectiveRcbAirComponents::new_with_log_sizes(
+            &mut allocator,
+            self.log_sizes,
+            &ProjectiveRcbAirProofInteractionClaim::zero(),
+            &ProjectiveRcbMulComponentRelations::dummy(),
+        );
+        components.trace_log_degree_bounds()
+    }
+
+    fn max_constraint_log_degree_bound(&self, ids: &[PreProcessedColumnId]) -> u32 {
+        let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(ids);
+        let components = ProjectiveRcbAirComponents::new_with_log_sizes(
+            &mut allocator,
+            self.log_sizes,
+            &ProjectiveRcbAirProofInteractionClaim::zero(),
+            &ProjectiveRcbMulComponentRelations::dummy(),
+        );
+        components.max_constraint_log_degree_bound()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ProjectiveRcbAirProof<H: stwo::core::vcs_lifted::merkle_hasher::MerkleHasherLifted> {
+    pub claim: ProjectiveRcbAirProofClaim,
+    pub interaction_claim: ProjectiveRcbAirProofInteractionClaim,
+    pub stark_proof: StarkProof<H>,
 }
 
 pub struct ProjectiveRcbAirComponents {
@@ -287,7 +387,20 @@ impl ProjectiveRcbAirComponents {
         interaction_claim: &ProjectiveRcbAirProofInteractionClaim,
         relations: &ProjectiveRcbMulComponentRelations,
     ) -> Self {
-        let log_sizes = claim.component_log_sizes();
+        Self::new_with_log_sizes(
+            allocator,
+            claim.component_log_sizes(),
+            interaction_claim,
+            relations,
+        )
+    }
+
+    pub fn new_with_log_sizes(
+        allocator: &mut TraceLocationAllocator,
+        log_sizes: ProjectiveRcbAirComponentLogSizes,
+        interaction_claim: &ProjectiveRcbAirProofInteractionClaim,
+        relations: &ProjectiveRcbMulComponentRelations,
+    ) -> Self {
         Self {
             mul: ProjectiveRcbMulComponent::new(
                 allocator,
@@ -337,6 +450,174 @@ impl ProjectiveRcbAirComponents {
             ),
         }
     }
+
+    pub fn components(&self) -> Vec<&dyn Component> {
+        vec![
+            &self.mul as &dyn Component,
+            &self.raw_product_chunk as &dyn Component,
+            &self.folded_contribution as &dyn Component,
+            &self.folded_digit as &dyn Component,
+            &self.range13 as &dyn Component,
+            &self.signed_carry as &dyn Component,
+        ]
+    }
+
+    pub fn component_provers(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
+        vec![
+            &self.mul as &dyn ComponentProver<SimdBackend>,
+            &self.raw_product_chunk as &dyn ComponentProver<SimdBackend>,
+            &self.folded_contribution as &dyn ComponentProver<SimdBackend>,
+            &self.folded_digit as &dyn ComponentProver<SimdBackend>,
+            &self.range13 as &dyn ComponentProver<SimdBackend>,
+            &self.signed_carry as &dyn ComponentProver<SimdBackend>,
+        ]
+    }
+
+    pub fn trace_log_degree_bounds(&self) -> TreeVec<ColumnVec<u32>> {
+        TreeVec::concat_cols(
+            self.components()
+                .into_iter()
+                .map(|component| component.trace_log_degree_bounds()),
+        )
+    }
+
+    pub fn max_constraint_log_degree_bound(&self) -> u32 {
+        self.components()
+            .into_iter()
+            .map(|component| component.max_constraint_log_degree_bound())
+            .max()
+            .unwrap_or(0)
+    }
+}
+
+pub fn prove_projective_rcb_air_proof_slice<MC: stwo::core::channel::MerkleChannel>(
+    trace: &ProjectiveRcbAirTraceClaim,
+    config: PcsConfig,
+) -> Result<ProjectiveRcbAirProof<MC::H>, ProjectiveRcbAirError>
+where
+    SimdBackend: BackendForChannel<MC>,
+{
+    let claim = ProjectiveRcbAirProofClaim::from_trace(trace);
+    let ids = claim.preprocessed_column_ids();
+    let max_constraint_log_degree_bound = claim.max_constraint_log_degree_bound(&ids);
+    let twiddles = SimdBackend::precompute_twiddles(
+        CanonicCoset::new(
+            config
+                .lifting_log_size
+                .unwrap_or(max_constraint_log_degree_bound + config.fri_config.log_blowup_factor),
+        )
+        .circle_domain()
+        .half_coset,
+    );
+
+    let mut channel = MC::C::default();
+    let mut commitment_scheme = CommitmentSchemeProver::<SimdBackend, MC>::new(config, &twiddles);
+    commitment_scheme.set_store_polynomials_coefficients();
+
+    let preprocessed = trace.gen_proof_slice_preprocessed_trace(&ids)?;
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(preprocessed);
+    tree_builder.commit(&mut channel);
+
+    claim.mix_into(&mut channel);
+    let base = trace.gen_proof_slice_base_trace()?;
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(base);
+    tree_builder.commit(&mut channel);
+
+    let relations = ProjectiveRcbMulComponentRelations::draw(&mut channel);
+    let (interaction, interaction_claim) = trace.gen_proof_slice_interaction_trace(&relations)?;
+    if interaction_claim.total() != secure_zero() {
+        return Err(ProjectiveRcbAirError::RelationImbalance {
+            relation: "ProjectiveRcbAirProofSlice",
+        });
+    }
+    interaction_claim.mix_into(&mut channel);
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(interaction);
+    tree_builder.commit(&mut channel);
+
+    let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
+    let components =
+        ProjectiveRcbAirComponents::new(&mut allocator, trace, &interaction_claim, &relations);
+    assert_eq!(
+        commitment_scheme
+            .polynomials()
+            .as_cols_ref()
+            .map_cols(|column| column.evals.domain.log_size() - config.fri_config.log_blowup_factor)
+            .0,
+        components.trace_log_degree_bounds().0
+    );
+    let stark_proof = prove(
+        &components.component_provers(),
+        &mut channel,
+        commitment_scheme,
+    )
+    .map_err(|error| ProjectiveRcbAirError::ProofLayer(error.to_string()))?;
+
+    Ok(ProjectiveRcbAirProof {
+        claim,
+        interaction_claim,
+        stark_proof,
+    })
+}
+
+pub fn verify_projective_rcb_air_proof_slice<MC: stwo::core::channel::MerkleChannel>(
+    proof: ProjectiveRcbAirProof<MC::H>,
+) -> Result<(), ProjectiveRcbAirError> {
+    let ProjectiveRcbAirProof {
+        claim,
+        interaction_claim,
+        stark_proof,
+    } = proof;
+
+    if interaction_claim.total() != secure_zero() {
+        return Err(ProjectiveRcbAirError::RelationImbalance {
+            relation: "ProjectiveRcbAirProofSlice",
+        });
+    }
+
+    let ids = claim.preprocessed_column_ids();
+    let log_degree_bounds = claim.trace_log_degree_bounds(&ids);
+    let mut channel = MC::C::default();
+    let commitment_scheme = &mut CommitmentSchemeVerifier::<MC>::new(stark_proof.config);
+
+    commitment_scheme.commit(
+        stark_proof.commitments[0],
+        &log_degree_bounds[0],
+        &mut channel,
+    );
+
+    claim.mix_into(&mut channel);
+    commitment_scheme.commit(
+        stark_proof.commitments[1],
+        &log_degree_bounds[1],
+        &mut channel,
+    );
+
+    let relations = ProjectiveRcbMulComponentRelations::draw(&mut channel);
+
+    interaction_claim.mix_into(&mut channel);
+    commitment_scheme.commit(
+        stark_proof.commitments[2],
+        &log_degree_bounds[2],
+        &mut channel,
+    );
+
+    let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
+    let components = ProjectiveRcbAirComponents::new_with_log_sizes(
+        &mut allocator,
+        claim.log_sizes,
+        &interaction_claim,
+        &relations,
+    );
+    verify(
+        &components.components(),
+        &mut channel,
+        commitment_scheme,
+        stark_proof,
+    )
+    .map_err(|error| ProjectiveRcbAirError::ProofLayer(error.to_string()))
 }
 
 #[derive(Clone)]
@@ -369,7 +650,7 @@ impl FrameworkEval for ProjectiveRcbMulEval {
             mul_index,
             &columns,
         );
-        eval.finalize_logup_in_pairs();
+        eval.finalize_logup();
         eval
     }
 }
@@ -398,14 +679,14 @@ impl FrameworkEval for ProjectiveRcbFoldedContributionEval {
     }
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 4
+        self.log_size + 1
     }
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         let columns = ProjectiveRcbFoldedContributionColumns::read(&mut eval);
 
         add_projective_rcb_folded_contribution(&mut eval, self.relations.as_refs(), &columns);
-        eval.finalize_logup_in_pairs();
+        eval.finalize_logup();
         eval
     }
 }
@@ -416,14 +697,14 @@ impl FrameworkEval for ProjectiveRcbFoldedDigitEval {
     }
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 3
+        self.log_size + 1
     }
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         let columns = ProjectiveRcbFoldedDigitColumns::read(&mut eval);
 
         add_projective_rcb_folded_digit(&mut eval, self.relations.as_refs(), &columns);
-        eval.finalize_logup_in_pairs();
+        eval.finalize_logup();
         eval
     }
 }
@@ -570,7 +851,6 @@ pub fn add_projective_rcb_mul_row<E: EvalAtRow>(
         0,
         &columns.result,
     );
-
     let reduction_relations = FpSolinasReductionRelations {
         range13: relations.range13,
         signed_carry: relations.signed_carry,
@@ -700,20 +980,20 @@ fn add_raw_product_chunk_polynomial_constraints<E: EvalAtRow>(
     let mut product_sum = zero::<E>();
     eval.add_constraint(columns.active.clone() * (one::<E>() - columns.active.clone()));
     eval.add_constraint(columns.active.clone() - columns.schedule_active.clone());
-    for term in &columns.terms {
+    for term in columns.terms.iter().take(2) {
         eval.add_constraint(term.term_active.clone() - term.schedule_term_active.clone());
         eval.add_constraint(term.term_active.clone() * (one::<E>() - term.term_active.clone()));
         eval.add_constraint(term.lhs_limb.clone() * term.rhs_limb.clone() - term.product.clone());
         product_sum += term.term_active.clone() * term.product.clone();
         constrain_unused(
             eval,
-            one::<E>(),
+            columns.mul_index.clone(),
             term.term_active.clone(),
             term.lhs_limb.clone(),
         );
         constrain_unused(
             eval,
-            one::<E>(),
+            columns.active.clone(),
             term.term_active.clone(),
             term.rhs_limb.clone(),
         );
@@ -801,6 +1081,7 @@ pub fn add_projective_rcb_raw_product_chunk<E: EvalAtRow>(
 
 pub struct ProjectiveRcbFoldedContributionColumns<E: EvalAtRow> {
     pub active: E::F,
+    pub schedule_active: E::F,
     pub source_index: E::F,
     pub mul_index: E::F,
     pub digit_index: E::F,
@@ -813,7 +1094,8 @@ pub struct ProjectiveRcbFoldedContributionColumns<E: EvalAtRow> {
 impl<E: EvalAtRow> ProjectiveRcbFoldedContributionColumns<E> {
     fn read(eval: &mut E) -> Self {
         Self {
-            active:
+            active: eval.next_trace_mask(),
+            schedule_active:
                 eval.get_preprocessed_column(
                     ProjectiveRcbFoldedContributionScheduleColumnIds::active(),
                 ),
@@ -826,7 +1108,8 @@ impl<E: EvalAtRow> ProjectiveRcbFoldedContributionColumns<E> {
                 ProjectiveRcbFoldedContributionScheduleColumnIds::group_index(),
             ),
             terms: core::array::from_fn(|term| ProjectiveRcbFoldedContributionTermColumns {
-                term_active: eval.get_preprocessed_column(
+                term_active: eval.next_trace_mask(),
+                schedule_term_active: eval.get_preprocessed_column(
                     ProjectiveRcbFoldedContributionScheduleColumnIds::term_active(term),
                 ),
                 raw_coeff: eval.get_preprocessed_column(
@@ -838,10 +1121,12 @@ impl<E: EvalAtRow> ProjectiveRcbFoldedContributionColumns<E> {
                 raw_offset: eval.get_preprocessed_column(
                     ProjectiveRcbFoldedContributionScheduleColumnIds::raw_offset(term),
                 ),
-                matrix_coeff: eval.get_preprocessed_column(
+                schedule_matrix_coeff: eval.get_preprocessed_column(
                     ProjectiveRcbFoldedContributionScheduleColumnIds::matrix_coeff(term),
                 ),
+                matrix_coeff: eval.next_trace_mask(),
                 raw_digit: eval.next_trace_mask(),
+                contribution: eval.next_trace_mask(),
             }),
             contribution_sum: eval.next_trace_mask(),
         }
@@ -850,15 +1135,19 @@ impl<E: EvalAtRow> ProjectiveRcbFoldedContributionColumns<E> {
 
 pub struct ProjectiveRcbFoldedContributionTermColumns<E: EvalAtRow> {
     pub term_active: E::F,
+    pub schedule_term_active: E::F,
     pub raw_coeff: E::F,
     pub raw_chunk: E::F,
     pub raw_offset: E::F,
+    pub schedule_matrix_coeff: E::F,
     pub matrix_coeff: E::F,
     pub raw_digit: E::F,
+    pub contribution: E::F,
 }
 
 pub struct ProjectiveRcbFoldedDigitColumns<E: EvalAtRow> {
     pub active: E::F,
+    pub schedule_active: E::F,
     pub source_index: E::F,
     pub mul_index: E::F,
     pub digit_index: E::F,
@@ -871,20 +1160,23 @@ pub struct ProjectiveRcbFoldedDigitColumns<E: EvalAtRow> {
 impl<E: EvalAtRow> ProjectiveRcbFoldedDigitColumns<E> {
     fn read(eval: &mut E) -> Self {
         Self {
-            active: eval
+            active: eval.next_trace_mask(),
+            schedule_active: eval
                 .get_preprocessed_column(ProjectiveRcbFoldedDigitScheduleColumnIds::active()),
             source_index: eval.next_trace_mask(),
             mul_index: eval.next_trace_mask(),
             digit_index: eval
                 .get_preprocessed_column(ProjectiveRcbFoldedDigitScheduleColumnIds::digit_index()),
             groups: core::array::from_fn(|group| ProjectiveRcbFoldedDigitGroupColumns {
-                group_active: eval.get_preprocessed_column(
+                group_active: eval.next_trace_mask(),
+                schedule_group_active: eval.get_preprocessed_column(
                     ProjectiveRcbFoldedDigitScheduleColumnIds::group_active(group),
                 ),
                 group_index: eval.get_preprocessed_column(
                     ProjectiveRcbFoldedDigitScheduleColumnIds::group_index(group),
                 ),
                 contribution_sum: eval.next_trace_mask(),
+                selected_contribution: eval.next_trace_mask(),
             }),
             prev_carry: eval.next_trace_mask(),
             folded_digit: eval.next_trace_mask(),
@@ -895,33 +1187,52 @@ impl<E: EvalAtRow> ProjectiveRcbFoldedDigitColumns<E> {
 
 pub struct ProjectiveRcbFoldedDigitGroupColumns<E: EvalAtRow> {
     pub group_active: E::F,
+    pub schedule_group_active: E::F,
     pub group_index: E::F,
     pub contribution_sum: E::F,
+    pub selected_contribution: E::F,
 }
 
-pub fn add_projective_rcb_folded_contribution<E: EvalAtRow>(
+fn add_folded_contribution_polynomial_constraints<E: EvalAtRow>(
     eval: &mut E,
-    relations: ProjectiveRcbMulRelations<'_>,
     columns: &ProjectiveRcbFoldedContributionColumns<E>,
 ) {
     let mut sum = zero::<E>();
+    eval.add_constraint(columns.active.clone() * (one::<E>() - columns.active.clone()));
+    eval.add_constraint(columns.active.clone() - columns.schedule_active.clone());
     for term in &columns.terms {
-        sum += term.term_active.clone() * term.matrix_coeff.clone() * term.raw_digit.clone();
-        constrain_unused(
-            eval,
-            columns.active.clone(),
-            term.term_active.clone(),
-            term.matrix_coeff.clone(),
+        eval.add_constraint(term.term_active.clone() - term.schedule_term_active.clone());
+        eval.add_constraint(term.term_active.clone() * (one::<E>() - term.term_active.clone()));
+        eval.add_constraint(term.matrix_coeff.clone() - term.schedule_matrix_coeff.clone());
+        eval.add_constraint(
+            term.matrix_coeff.clone() * term.raw_digit.clone() - term.contribution.clone(),
         );
+        sum += term.term_active.clone() * term.contribution.clone();
         constrain_unused(
             eval,
             columns.active.clone(),
             term.term_active.clone(),
             term.raw_digit.clone(),
         );
+        constrain_unused(
+            eval,
+            columns.active.clone(),
+            term.term_active.clone(),
+            term.contribution.clone(),
+        );
+    }
+    eval.add_constraint(columns.active.clone() * (sum - columns.contribution_sum.clone()));
+}
+
+fn add_folded_contribution_relations<E: EvalAtRow>(
+    eval: &mut E,
+    relations: ProjectiveRcbMulRelations<'_>,
+    columns: &ProjectiveRcbFoldedContributionColumns<E>,
+) {
+    for term in &columns.terms {
         eval.add_to_relation(RelationEntry::new(
             relations.raw_product_chunk_digit,
-            E::EF::from(columns.active.clone() * term.term_active.clone()),
+            E::EF::from(term.term_active.clone()),
             &[
                 columns.source_index.clone(),
                 columns.mul_index.clone(),
@@ -932,7 +1243,6 @@ pub fn add_projective_rcb_folded_contribution<E: EvalAtRow>(
             ],
         ));
     }
-    eval.add_constraint(columns.active.clone() * (sum - columns.contribution_sum.clone()));
     eval.add_to_relation(RelationEntry::new(
         relations.folded_contribution,
         -E::EF::from(columns.active.clone()),
@@ -946,23 +1256,62 @@ pub fn add_projective_rcb_folded_contribution<E: EvalAtRow>(
     ));
 }
 
-pub fn add_projective_rcb_folded_digit<E: EvalAtRow>(
+pub fn add_projective_rcb_folded_contribution<E: EvalAtRow>(
     eval: &mut E,
     relations: ProjectiveRcbMulRelations<'_>,
+    columns: &ProjectiveRcbFoldedContributionColumns<E>,
+) {
+    add_folded_contribution_polynomial_constraints(eval, columns);
+    add_folded_contribution_relations(eval, relations, columns);
+}
+
+fn add_folded_digit_polynomial_constraints<E: EvalAtRow>(
+    eval: &mut E,
     columns: &ProjectiveRcbFoldedDigitColumns<E>,
 ) {
     let mut contribution_sum = zero::<E>();
+    eval.add_constraint(columns.active.clone() * (one::<E>() - columns.active.clone()));
+    eval.add_constraint(columns.active.clone() - columns.schedule_active.clone());
     for group in &columns.groups {
-        contribution_sum += group.group_active.clone() * group.contribution_sum.clone();
+        eval.add_constraint(group.group_active.clone() - group.schedule_group_active.clone());
+        eval.add_constraint(group.group_active.clone() * (one::<E>() - group.group_active.clone()));
+        eval.add_constraint(
+            group.group_active.clone() * group.contribution_sum.clone()
+                - group.selected_contribution.clone(),
+        );
+        contribution_sum += group.selected_contribution.clone();
         constrain_unused(
             eval,
             columns.active.clone(),
             group.group_active.clone(),
             group.contribution_sum.clone(),
         );
+        constrain_unused(
+            eval,
+            columns.active.clone(),
+            group.group_active.clone(),
+            group.selected_contribution.clone(),
+        );
+    }
+
+    let limb_base = E::F::from(M31::from_u32_unchecked(1u32 << LIMB_BITS));
+    eval.add_constraint(
+        columns.active.clone()
+            * (contribution_sum + columns.prev_carry.clone()
+                - columns.folded_digit.clone()
+                - limb_base * columns.carry.clone()),
+    );
+}
+
+fn add_folded_digit_relations<E: EvalAtRow>(
+    eval: &mut E,
+    relations: ProjectiveRcbMulRelations<'_>,
+    columns: &ProjectiveRcbFoldedDigitColumns<E>,
+) {
+    for group in &columns.groups {
         eval.add_to_relation(RelationEntry::new(
             relations.folded_contribution,
-            E::EF::from(columns.active.clone() * group.group_active.clone()),
+            E::EF::from(group.group_active.clone()),
             &[
                 columns.source_index.clone(),
                 columns.mul_index.clone(),
@@ -972,7 +1321,6 @@ pub fn add_projective_rcb_folded_digit<E: EvalAtRow>(
             ],
         ));
     }
-
     add_range_check(
         eval,
         relations.range13,
@@ -991,15 +1339,6 @@ pub fn add_projective_rcb_folded_digit<E: EvalAtRow>(
         columns.active.clone(),
         columns.carry.clone(),
     );
-
-    let limb_base = E::F::from(M31::from_u32_unchecked(1u32 << LIMB_BITS));
-    eval.add_constraint(
-        columns.active.clone()
-            * (contribution_sum + columns.prev_carry.clone()
-                - columns.folded_digit.clone()
-                - limb_base * columns.carry.clone()),
-    );
-
     eval.add_to_relation(RelationEntry::new(
         relations.folded_carry,
         E::EF::from(columns.active.clone()),
@@ -1030,6 +1369,15 @@ pub fn add_projective_rcb_folded_digit<E: EvalAtRow>(
             columns.folded_digit.clone(),
         ],
     ));
+}
+
+pub fn add_projective_rcb_folded_digit<E: EvalAtRow>(
+    eval: &mut E,
+    relations: ProjectiveRcbMulRelations<'_>,
+    columns: &ProjectiveRcbFoldedDigitColumns<E>,
+) {
+    add_folded_digit_polynomial_constraints(eval, columns);
+    add_folded_digit_relations(eval, relations, columns);
 }
 
 pub const fn projective_rcb_raw_product_chunk_max_abs_expr() -> i128 {
@@ -1299,6 +1647,7 @@ impl ProjectiveRcbAirTraceClaim {
             }),
             projective_rcb_mul_padding_fractions(),
             relations,
+            false,
         );
         let (raw_product_chunk, raw_product_chunk_claim) =
             gen_projective_rcb_family_interaction_trace(
@@ -1307,6 +1656,7 @@ impl ProjectiveRcbAirTraceClaim {
                     .map(projective_rcb_raw_product_chunk_fractions),
                 projective_rcb_raw_product_chunk_padding_fractions(),
                 relations,
+                true,
             );
         let (folded_contribution, folded_contribution_claim) =
             gen_projective_rcb_family_interaction_trace(
@@ -1315,6 +1665,7 @@ impl ProjectiveRcbAirTraceClaim {
                     .map(projective_rcb_folded_contribution_fractions),
                 projective_rcb_folded_contribution_padding_fractions(),
                 relations,
+                false,
             );
         let (folded_digit, folded_digit_claim) = gen_projective_rcb_family_interaction_trace(
             log_sizes.folded_digit,
@@ -1322,6 +1673,7 @@ impl ProjectiveRcbAirTraceClaim {
                 .map(projective_rcb_folded_digit_fractions),
             projective_rcb_folded_digit_padding_fractions(),
             relations,
+            false,
         );
 
         (
@@ -1913,9 +2265,17 @@ fn gen_projective_rcb_folded_contribution_base_trace(
         air_row.muls.iter().flat_map(|mul| {
             mul.folded_contributions.rows.iter().map(|contribution| {
                 let mut row = Vec::with_capacity(PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TRACE_COLUMNS);
+                row.push(m31(1));
                 row.push(m31_usize(contribution.source_index));
                 row.push(m31_usize(contribution.mul_index));
-                row.extend(contribution.terms.iter().map(|term| m31(term.raw_digit)));
+                for term in &contribution.terms {
+                    row.push(m31(u32::from(term.active)));
+                    row.push(m31_i128(i128::from(term.matrix_coeff)));
+                    row.push(m31(term.raw_digit));
+                    row.push(m31_i128(
+                        i128::from(term.raw_digit) * i128::from(term.matrix_coeff),
+                    ));
+                }
                 row.push(m31_i128(contribution.contribution_sum));
                 row
             })
@@ -1936,14 +2296,18 @@ fn gen_projective_rcb_folded_digit_base_trace(
         air_row.muls.iter().flat_map(|mul| {
             mul.folded_digits.rows.iter().map(|digit| {
                 let mut row = Vec::with_capacity(PROJECTIVE_RCB_FOLDED_DIGIT_TRACE_COLUMNS);
+                row.push(m31(1));
                 row.push(m31_usize(digit.source_index));
                 row.push(m31_usize(digit.mul_index));
-                row.extend(
-                    digit
-                        .contribution_groups
-                        .iter()
-                        .map(|group| m31_i128(group.contribution_sum)),
-                );
+                for group in &digit.contribution_groups {
+                    row.push(m31(u32::from(group.active)));
+                    row.push(m31_i128(group.contribution_sum));
+                    row.push(if group.active {
+                        m31_i128(group.contribution_sum)
+                    } else {
+                        m31(0)
+                    });
+                }
                 row.push(m31_i128(digit.prev_carry));
                 row.push(m31(digit.folded_digit));
                 row.push(m31_i128(digit.carry));
@@ -2010,6 +2374,7 @@ fn gen_projective_rcb_family_interaction_trace(
     rows: impl IntoIterator<Item = Vec<ProjectiveRcbFractionSpec>>,
     padding_fractions: Vec<ProjectiveRcbFractionSpec>,
     relations: &ProjectiveRcbMulComponentRelations,
+    batch_in_pairs: bool,
 ) -> (ColumnVec<M31ColumnEval>, SecureField) {
     let row_fractions = rows.into_iter().collect::<Vec<_>>();
     let padded_rows = 1usize << log_size;
@@ -2031,7 +2396,11 @@ fn gen_projective_rcb_family_interaction_trace(
     }
 
     let mut logup = LogupTraceGenerator::new(log_size);
-    let batch_count = max_fractions.div_ceil(2);
+    let batch_count = if batch_in_pairs {
+        max_fractions.div_ceil(2)
+    } else {
+        max_fractions
+    };
     for batch in 0..batch_count {
         let mut col = logup.new_col();
         for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
@@ -2039,8 +2408,12 @@ fn gen_projective_rcb_family_interaction_trace(
             let mut denominators = [secure_one(); N_LANES];
             for lane in 0..N_LANES {
                 let row = vec_row * N_LANES + lane;
-                let (numerator, denominator) =
-                    projective_rcb_batch_fraction(&storage_fractions[row], batch, relations);
+                let (numerator, denominator) = projective_rcb_batch_fraction(
+                    &storage_fractions[row],
+                    batch,
+                    relations,
+                    batch_in_pairs,
+                );
                 numerators[lane] = numerator;
                 denominators[lane] = denominator;
             }
@@ -2059,7 +2432,14 @@ fn projective_rcb_batch_fraction(
     fractions: &[ProjectiveRcbFractionSpec],
     batch: usize,
     relations: &ProjectiveRcbMulComponentRelations,
+    batch_in_pairs: bool,
 ) -> (SecureField, SecureField) {
+    if !batch_in_pairs {
+        return fractions
+            .get(batch)
+            .map(|fraction| projective_rcb_fraction(fraction, relations))
+            .unwrap_or_else(zero_fraction);
+    }
     let first = fractions
         .get(2 * batch)
         .map(|fraction| projective_rcb_fraction(fraction, relations));
@@ -2167,7 +2547,7 @@ fn projective_rcb_raw_product_chunk_fractions(
     row: &ProjectiveRcbRawProductChunkRow,
 ) -> Vec<ProjectiveRcbFractionSpec> {
     let mut fractions = Vec::with_capacity(projective_rcb_raw_product_chunk_fraction_count());
-    for term in &row.terms {
+    for term in row.terms.iter().take(2) {
         let active = i64::from(term.active);
         fractions.push(mul_limb_fraction(
             active,
@@ -2319,7 +2699,7 @@ fn projective_rcb_folded_digit_fraction_count() -> usize {
 }
 
 fn projective_rcb_mul_interaction_columns() -> usize {
-    QM31_TRACE_COLUMNS * projective_rcb_mul_fraction_count().div_ceil(2)
+    QM31_TRACE_COLUMNS * projective_rcb_mul_fraction_count()
 }
 
 fn projective_rcb_raw_product_chunk_interaction_columns() -> usize {
@@ -2327,11 +2707,11 @@ fn projective_rcb_raw_product_chunk_interaction_columns() -> usize {
 }
 
 fn projective_rcb_folded_contribution_interaction_columns() -> usize {
-    QM31_TRACE_COLUMNS * projective_rcb_folded_contribution_fraction_count().div_ceil(2)
+    QM31_TRACE_COLUMNS * projective_rcb_folded_contribution_fraction_count()
 }
 
 fn projective_rcb_folded_digit_interaction_columns() -> usize {
-    QM31_TRACE_COLUMNS * projective_rcb_folded_digit_fraction_count().div_ceil(2)
+    QM31_TRACE_COLUMNS * projective_rcb_folded_digit_fraction_count()
 }
 
 fn range13_fraction(numerator: i64, value: M31) -> ProjectiveRcbFractionSpec {
@@ -3601,6 +3981,7 @@ pub enum ProjectiveRcbAirError {
         expected: usize,
         actual: usize,
     },
+    ProofLayer(String),
     SignedCarryLookupOutOfRange {
         value: i128,
         bound: i64,
@@ -4536,8 +4917,17 @@ mod tests {
         PcsConfig {
             pow_bits: 0,
             fri_config,
-            lifting_log_size: Some(max_constraint_log_degree_bound + fri_config.log_blowup_factor),
+            lifting_log_size: Some(
+                (max_constraint_log_degree_bound + fri_config.log_blowup_factor).max(10),
+            ),
         }
+    }
+
+    fn proof_slice_low_ram_config(claim: &ProjectiveRcbAirTraceClaim) -> PcsConfig {
+        let proof_claim = ProjectiveRcbAirProofClaim::from_trace(claim);
+        let ids = proof_claim.preprocessed_column_ids();
+        let max_constraint_log_degree_bound = proof_claim.max_constraint_log_degree_bound(&ids);
+        low_ram_proof_layer_config(max_constraint_log_degree_bound)
     }
 
     fn prove_and_verify_raw_product_chunk_component(claim: &ProjectiveRcbAirTraceClaim) {
@@ -4616,7 +5006,6 @@ mod tests {
         let mut tree_builder = commitment_scheme.tree_builder();
         tree_builder.extend_evals(interaction);
         tree_builder.commit(&mut channel);
-
         let proof = prove(
             &[&component as &dyn ComponentProver<SimdBackend>],
             &mut channel,
@@ -4649,6 +5038,647 @@ mod tests {
             proof,
         )
         .expect("raw product chunk component verifies");
+    }
+
+    fn prove_and_verify_mul_component(claim: &ProjectiveRcbAirTraceClaim) {
+        let log_size = claim.component_log_sizes().mul;
+        let mut ids_allocator = TraceLocationAllocator::default();
+        let sizing_component = ProjectiveRcbMulComponent::new(
+            &mut ids_allocator,
+            ProjectiveRcbMulEval {
+                log_size,
+                relations: ProjectiveRcbMulComponentRelations::dummy(),
+            },
+            SecureField::zero(),
+        );
+        let ids = ids_allocator.preprocessed_columns().clone();
+        let max_constraint_log_degree_bound = sizing_component.max_constraint_log_degree_bound();
+        let config = low_ram_proof_layer_config(max_constraint_log_degree_bound);
+        let twiddles =
+            SimdBackend::precompute_twiddles(
+                CanonicCoset::new(config.lifting_log_size.unwrap_or(
+                    max_constraint_log_degree_bound + config.fri_config.log_blowup_factor,
+                ))
+                .circle_domain()
+                .half_coset,
+            );
+
+        let mut channel = Blake2sChannel::default();
+        let mut commitment_scheme =
+            CommitmentSchemeProver::<SimdBackend, Blake2sMerkleChannel>::new(config, &twiddles);
+        commitment_scheme.set_store_polynomials_coefficients();
+
+        let preprocessed = claim
+            .gen_preprocessed_trace(&ids)
+            .expect("mul preprocessed trace generates");
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(preprocessed.clone());
+        tree_builder.commit(&mut channel);
+
+        let base =
+            gen_projective_rcb_mul_base_trace(claim, log_size).expect("mul base trace generates");
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(base.clone());
+        tree_builder.commit(&mut channel);
+
+        let relations = ProjectiveRcbMulComponentRelations::draw(&mut channel);
+        let (interaction_traces, interaction_claim) = claim.gen_interaction_trace(&relations);
+        let interaction = interaction_traces.mul;
+        let mut component_allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
+        let component = ProjectiveRcbMulComponent::new(
+            &mut component_allocator,
+            ProjectiveRcbMulEval {
+                log_size,
+                relations: relations.clone(),
+            },
+            interaction_claim.mul,
+        );
+        if component.trace_log_degree_bounds().len() > 2 {
+            assert_eq!(
+                interaction.len(),
+                component.trace_log_degree_bounds()[2].len(),
+                "mul interaction trace width must match component allocation"
+            );
+        }
+        let trace_polys =
+            TreeVec::new(vec![preprocessed, base, interaction.clone()]).map(|trace| {
+                trace
+                    .into_iter()
+                    .map(|column| column.interpolate())
+                    .collect::<Vec<_>>()
+            });
+        assert_constraints_on_polys(
+            &trace_polys,
+            CanonicCoset::new(log_size),
+            |eval| {
+                ProjectiveRcbMulEval {
+                    log_size,
+                    relations: relations.clone(),
+                }
+                .evaluate(eval);
+            },
+            interaction_claim.mul,
+        );
+
+        channel.mix_felts(&[interaction_claim.mul]);
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(interaction);
+        tree_builder.commit(&mut channel);
+
+        let proof = prove(
+            &[&component as &dyn ComponentProver<SimdBackend>],
+            &mut channel,
+            commitment_scheme,
+        )
+        .expect("mul component proves");
+        drop(proof);
+    }
+
+    fn prove_and_verify_folded_contribution_component(claim: &ProjectiveRcbAirTraceClaim) {
+        let log_size = claim.component_log_sizes().folded_contribution;
+        let mut ids_allocator = TraceLocationAllocator::default();
+        let sizing_component = ProjectiveRcbFoldedContributionComponent::new(
+            &mut ids_allocator,
+            ProjectiveRcbFoldedContributionEval {
+                log_size,
+                relations: ProjectiveRcbMulComponentRelations::dummy(),
+            },
+            SecureField::zero(),
+        );
+        let ids = ids_allocator.preprocessed_columns().clone();
+        let max_constraint_log_degree_bound = sizing_component.max_constraint_log_degree_bound();
+        let config = low_ram_proof_layer_config(max_constraint_log_degree_bound);
+        let twiddles =
+            SimdBackend::precompute_twiddles(
+                CanonicCoset::new(config.lifting_log_size.unwrap_or(
+                    max_constraint_log_degree_bound + config.fri_config.log_blowup_factor,
+                ))
+                .circle_domain()
+                .half_coset,
+            );
+
+        let mut channel = Blake2sChannel::default();
+        let mut commitment_scheme =
+            CommitmentSchemeProver::<SimdBackend, Blake2sMerkleChannel>::new(config, &twiddles);
+        commitment_scheme.set_store_polynomials_coefficients();
+
+        let preprocessed = claim
+            .gen_preprocessed_trace(&ids)
+            .expect("folded contribution preprocessed trace generates");
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(preprocessed.clone());
+        tree_builder.commit(&mut channel);
+
+        let base = gen_projective_rcb_folded_contribution_base_trace(claim, log_size)
+            .expect("folded contribution base trace generates");
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(base.clone());
+        tree_builder.commit(&mut channel);
+
+        let relations = ProjectiveRcbMulComponentRelations::draw(&mut channel);
+        let (interaction_traces, interaction_claim) = claim.gen_interaction_trace(&relations);
+        let interaction = interaction_traces.folded_contribution;
+        let mut component_allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
+        let component = ProjectiveRcbFoldedContributionComponent::new(
+            &mut component_allocator,
+            ProjectiveRcbFoldedContributionEval {
+                log_size,
+                relations: relations.clone(),
+            },
+            interaction_claim.folded_contribution,
+        );
+        assert_eq!(
+            interaction.len(),
+            component.trace_log_degree_bounds()[2].len(),
+            "folded contribution interaction trace width must match component allocation"
+        );
+        let trace_polys =
+            TreeVec::new(vec![preprocessed, base, interaction.clone()]).map(|trace| {
+                trace
+                    .into_iter()
+                    .map(|column| column.interpolate())
+                    .collect::<Vec<_>>()
+            });
+        assert_constraints_on_polys(
+            &trace_polys,
+            CanonicCoset::new(log_size),
+            |eval| {
+                ProjectiveRcbFoldedContributionEval {
+                    log_size,
+                    relations: relations.clone(),
+                }
+                .evaluate(eval);
+            },
+            interaction_claim.folded_contribution,
+        );
+
+        channel.mix_felts(&[interaction_claim.folded_contribution]);
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(interaction);
+        tree_builder.commit(&mut channel);
+
+        let proof = prove(
+            &[&component as &dyn ComponentProver<SimdBackend>],
+            &mut channel,
+            commitment_scheme,
+        )
+        .expect("folded contribution component proves");
+
+        let mut verifier_channel = Blake2sChannel::default();
+        let commitment_scheme =
+            &mut CommitmentSchemeVerifier::<Blake2sMerkleChannel>::new(proof.config);
+        let sizes = component.trace_log_degree_bounds();
+        commitment_scheme.commit(proof.commitments[0], &sizes[0], &mut verifier_channel);
+        commitment_scheme.commit(proof.commitments[1], &sizes[1], &mut verifier_channel);
+        let verifier_relations = ProjectiveRcbMulComponentRelations::draw(&mut verifier_channel);
+        let mut verifier_allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
+        let verifier_component = ProjectiveRcbFoldedContributionComponent::new(
+            &mut verifier_allocator,
+            ProjectiveRcbFoldedContributionEval {
+                log_size,
+                relations: verifier_relations,
+            },
+            interaction_claim.folded_contribution,
+        );
+        verifier_channel.mix_felts(&[interaction_claim.folded_contribution]);
+        commitment_scheme.commit(proof.commitments[2], &sizes[2], &mut verifier_channel);
+
+        verify(
+            &[&verifier_component],
+            &mut verifier_channel,
+            commitment_scheme,
+            proof,
+        )
+        .expect("folded contribution component verifies");
+    }
+
+    fn prove_and_verify_folded_digit_component(claim: &ProjectiveRcbAirTraceClaim) {
+        let log_size = claim.component_log_sizes().folded_digit;
+        let mut ids_allocator = TraceLocationAllocator::default();
+        let sizing_component = ProjectiveRcbFoldedDigitComponent::new(
+            &mut ids_allocator,
+            ProjectiveRcbFoldedDigitEval {
+                log_size,
+                relations: ProjectiveRcbMulComponentRelations::dummy(),
+            },
+            SecureField::zero(),
+        );
+        let ids = ids_allocator.preprocessed_columns().clone();
+        let max_constraint_log_degree_bound = sizing_component.max_constraint_log_degree_bound();
+        let config = low_ram_proof_layer_config(max_constraint_log_degree_bound);
+        let twiddles =
+            SimdBackend::precompute_twiddles(
+                CanonicCoset::new(config.lifting_log_size.unwrap_or(
+                    max_constraint_log_degree_bound + config.fri_config.log_blowup_factor,
+                ))
+                .circle_domain()
+                .half_coset,
+            );
+
+        let mut channel = Blake2sChannel::default();
+        let mut commitment_scheme =
+            CommitmentSchemeProver::<SimdBackend, Blake2sMerkleChannel>::new(config, &twiddles);
+        commitment_scheme.set_store_polynomials_coefficients();
+
+        let preprocessed = claim
+            .gen_preprocessed_trace(&ids)
+            .expect("folded digit preprocessed trace generates");
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(preprocessed.clone());
+        tree_builder.commit(&mut channel);
+
+        let base = gen_projective_rcb_folded_digit_base_trace(claim, log_size)
+            .expect("folded digit base trace generates");
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(base.clone());
+        tree_builder.commit(&mut channel);
+
+        let relations = ProjectiveRcbMulComponentRelations::draw(&mut channel);
+        let (interaction_traces, interaction_claim) = claim.gen_interaction_trace(&relations);
+        let interaction = interaction_traces.folded_digit;
+        let mut component_allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
+        let component = ProjectiveRcbFoldedDigitComponent::new(
+            &mut component_allocator,
+            ProjectiveRcbFoldedDigitEval {
+                log_size,
+                relations: relations.clone(),
+            },
+            interaction_claim.folded_digit,
+        );
+        let trace_polys =
+            TreeVec::new(vec![preprocessed, base, interaction.clone()]).map(|trace| {
+                trace
+                    .into_iter()
+                    .map(|column| column.interpolate())
+                    .collect::<Vec<_>>()
+            });
+        assert_constraints_on_polys(
+            &trace_polys,
+            CanonicCoset::new(log_size),
+            |eval| {
+                ProjectiveRcbFoldedDigitEval {
+                    log_size,
+                    relations: relations.clone(),
+                }
+                .evaluate(eval);
+            },
+            interaction_claim.folded_digit,
+        );
+
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(interaction);
+        tree_builder.commit(&mut channel);
+
+        let proof = prove(
+            &[&component as &dyn ComponentProver<SimdBackend>],
+            &mut channel,
+            commitment_scheme,
+        )
+        .expect("folded digit component proves");
+
+        let mut verifier_channel = Blake2sChannel::default();
+        let commitment_scheme =
+            &mut CommitmentSchemeVerifier::<Blake2sMerkleChannel>::new(proof.config);
+        let sizes = component.trace_log_degree_bounds();
+        commitment_scheme.commit(proof.commitments[0], &sizes[0], &mut verifier_channel);
+        commitment_scheme.commit(proof.commitments[1], &sizes[1], &mut verifier_channel);
+        let verifier_relations = ProjectiveRcbMulComponentRelations::draw(&mut verifier_channel);
+        let mut verifier_allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
+        let verifier_component = ProjectiveRcbFoldedDigitComponent::new(
+            &mut verifier_allocator,
+            ProjectiveRcbFoldedDigitEval {
+                log_size,
+                relations: verifier_relations,
+            },
+            interaction_claim.folded_digit,
+        );
+        commitment_scheme.commit(proof.commitments[2], &sizes[2], &mut verifier_channel);
+
+        verify(
+            &[&verifier_component],
+            &mut verifier_channel,
+            commitment_scheme,
+            proof,
+        )
+        .expect("folded digit component verifies");
+    }
+
+    fn prove_and_verify_projective_range13_provider(claim: &ProjectiveRcbAirTraceClaim) {
+        let range13 = RangeCheckClaim::new(RANGE13_BITS);
+        let ids = vec![crate::range_checks::range_check_value_column_id(
+            RANGE13_BITS,
+        )];
+        let max_constraint_log_degree_bound =
+            RangeCheckEval::new(RangeCheckRelation::dummy(), RANGE13_BITS)
+                .max_constraint_log_degree_bound();
+        let config = low_ram_proof_layer_config(max_constraint_log_degree_bound);
+        let twiddles =
+            SimdBackend::precompute_twiddles(
+                CanonicCoset::new(config.lifting_log_size.unwrap_or(
+                    max_constraint_log_degree_bound + config.fri_config.log_blowup_factor,
+                ))
+                .circle_domain()
+                .half_coset,
+            );
+
+        let mut channel = Blake2sChannel::default();
+        let mut commitment_scheme =
+            CommitmentSchemeProver::<SimdBackend, Blake2sMerkleChannel>::new(config, &twiddles);
+        commitment_scheme.set_store_polynomials_coefficients();
+
+        let values = range13.gen_preprocessed_column();
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(vec![values.clone()]);
+        tree_builder.commit(&mut channel);
+
+        let multiplicity = range13.gen_multiplicity_trace(claim.range13_lookup_values());
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(vec![multiplicity.clone()]);
+        tree_builder.commit(&mut channel);
+
+        let relation = RangeCheckRelation::draw(&mut channel);
+        let (interaction, interaction_claim) =
+            RangeCheckInteractionClaim::gen_interaction_trace(&multiplicity, &values, &relation);
+        let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
+        let component = RangeCheckComponent::new(
+            &mut allocator,
+            RangeCheckEval::new(relation.clone(), RANGE13_BITS),
+            interaction_claim.claimed_sum,
+        );
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(interaction);
+        tree_builder.commit(&mut channel);
+
+        let proof = prove(
+            &[&component as &dyn ComponentProver<SimdBackend>],
+            &mut channel,
+            commitment_scheme,
+        )
+        .expect("projective range13 provider proves");
+
+        let mut verifier_channel = Blake2sChannel::default();
+        let commitment_scheme =
+            &mut CommitmentSchemeVerifier::<Blake2sMerkleChannel>::new(proof.config);
+        let sizes = component.trace_log_degree_bounds();
+        commitment_scheme.commit(proof.commitments[0], &sizes[0], &mut verifier_channel);
+        commitment_scheme.commit(proof.commitments[1], &sizes[1], &mut verifier_channel);
+        let verifier_relation = RangeCheckRelation::draw(&mut verifier_channel);
+        let mut verifier_allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
+        let verifier_component = RangeCheckComponent::new(
+            &mut verifier_allocator,
+            RangeCheckEval::new(verifier_relation, RANGE13_BITS),
+            interaction_claim.claimed_sum,
+        );
+        commitment_scheme.commit(proof.commitments[2], &sizes[2], &mut verifier_channel);
+
+        verify(
+            &[&verifier_component],
+            &mut verifier_channel,
+            commitment_scheme,
+            proof,
+        )
+        .expect("projective range13 provider verifies");
+    }
+
+    fn prove_and_verify_projective_signed_carry_provider(claim: &ProjectiveRcbAirTraceClaim) {
+        let signed_carry = projective_rcb_signed_carry_claim();
+        let eval = SignedCarryRangeEval::new(
+            RangeCheckRelation::dummy(),
+            projective_rcb_signed_carry_log_size(),
+            PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
+        );
+        let ids = vec![eval.value_column_id(), eval.active_column_id()];
+        let max_constraint_log_degree_bound = eval.max_constraint_log_degree_bound();
+        let config = low_ram_proof_layer_config(max_constraint_log_degree_bound);
+        let twiddles =
+            SimdBackend::precompute_twiddles(
+                CanonicCoset::new(config.lifting_log_size.unwrap_or(
+                    max_constraint_log_degree_bound + config.fri_config.log_blowup_factor,
+                ))
+                .circle_domain()
+                .half_coset,
+            );
+
+        let mut channel = Blake2sChannel::default();
+        let mut commitment_scheme =
+            CommitmentSchemeProver::<SimdBackend, Blake2sMerkleChannel>::new(config, &twiddles);
+        commitment_scheme.set_store_polynomials_coefficients();
+
+        let values = signed_carry.gen_value_column();
+        let active = signed_carry.gen_active_column();
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(vec![values.clone(), active]);
+        tree_builder.commit(&mut channel);
+
+        let multiplicity = signed_carry.gen_multiplicity_trace(
+            claim
+                .signed_carry_lookup_values()
+                .expect("carry values fit"),
+        );
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(vec![multiplicity.clone()]);
+        tree_builder.commit(&mut channel);
+
+        let relation = RangeCheckRelation::draw(&mut channel);
+        let (interaction, interaction_claim) =
+            RangeCheckInteractionClaim::gen_interaction_trace(&multiplicity, &values, &relation);
+        let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
+        let component = SignedCarryRangeComponent::new(
+            &mut allocator,
+            SignedCarryRangeEval::new(
+                relation.clone(),
+                projective_rcb_signed_carry_log_size(),
+                PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
+            ),
+            interaction_claim.claimed_sum,
+        );
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(interaction);
+        tree_builder.commit(&mut channel);
+
+        let proof = prove(
+            &[&component as &dyn ComponentProver<SimdBackend>],
+            &mut channel,
+            commitment_scheme,
+        )
+        .expect("projective signed-carry provider proves");
+
+        let mut verifier_channel = Blake2sChannel::default();
+        let commitment_scheme =
+            &mut CommitmentSchemeVerifier::<Blake2sMerkleChannel>::new(proof.config);
+        let sizes = component.trace_log_degree_bounds();
+        commitment_scheme.commit(proof.commitments[0], &sizes[0], &mut verifier_channel);
+        commitment_scheme.commit(proof.commitments[1], &sizes[1], &mut verifier_channel);
+        let verifier_relation = RangeCheckRelation::draw(&mut verifier_channel);
+        let mut verifier_allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
+        let verifier_component = SignedCarryRangeComponent::new(
+            &mut verifier_allocator,
+            SignedCarryRangeEval::new(
+                verifier_relation,
+                projective_rcb_signed_carry_log_size(),
+                PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
+            ),
+            interaction_claim.claimed_sum,
+        );
+        commitment_scheme.commit(proof.commitments[2], &sizes[2], &mut verifier_channel);
+
+        verify(
+            &[&verifier_component],
+            &mut verifier_channel,
+            commitment_scheme,
+            proof,
+        )
+        .expect("projective signed-carry provider verifies");
+    }
+
+    fn prove_and_verify_projective_arithmetic_components(claim: &ProjectiveRcbAirTraceClaim) {
+        let log_sizes = claim.component_log_sizes();
+        let mut sizing_allocator = TraceLocationAllocator::default();
+        let zero_claim = ProjectiveRcbAirComponentInteractionClaim {
+            mul: SecureField::zero(),
+            raw_product_chunk: SecureField::zero(),
+            folded_contribution: SecureField::zero(),
+            folded_digit: SecureField::zero(),
+        };
+        let dummy = ProjectiveRcbMulComponentRelations::dummy();
+        let _sizing_mul = ProjectiveRcbMulComponent::new(
+            &mut sizing_allocator,
+            ProjectiveRcbMulEval {
+                log_size: log_sizes.mul,
+                relations: dummy.clone(),
+            },
+            zero_claim.mul,
+        );
+        let _sizing_raw = ProjectiveRcbRawProductChunkComponent::new(
+            &mut sizing_allocator,
+            ProjectiveRcbRawProductChunkEval {
+                log_size: log_sizes.raw_product_chunk,
+                relations: dummy.clone(),
+            },
+            zero_claim.raw_product_chunk,
+        );
+        let _sizing_contribution = ProjectiveRcbFoldedContributionComponent::new(
+            &mut sizing_allocator,
+            ProjectiveRcbFoldedContributionEval {
+                log_size: log_sizes.folded_contribution,
+                relations: dummy.clone(),
+            },
+            zero_claim.folded_contribution,
+        );
+        let _sizing_digit = ProjectiveRcbFoldedDigitComponent::new(
+            &mut sizing_allocator,
+            ProjectiveRcbFoldedDigitEval {
+                log_size: log_sizes.folded_digit,
+                relations: dummy,
+            },
+            zero_claim.folded_digit,
+        );
+        let ids = sizing_allocator.preprocessed_columns().clone();
+        let max_constraint_log_degree_bound = [
+            _sizing_mul.max_constraint_log_degree_bound(),
+            _sizing_raw.max_constraint_log_degree_bound(),
+            _sizing_contribution.max_constraint_log_degree_bound(),
+            _sizing_digit.max_constraint_log_degree_bound(),
+        ]
+        .into_iter()
+        .max()
+        .expect("arithmetic components exist");
+        let config = low_ram_proof_layer_config(max_constraint_log_degree_bound);
+        let twiddles =
+            SimdBackend::precompute_twiddles(
+                CanonicCoset::new(config.lifting_log_size.unwrap_or(
+                    max_constraint_log_degree_bound + config.fri_config.log_blowup_factor,
+                ))
+                .circle_domain()
+                .half_coset,
+            );
+
+        let mut channel = Blake2sChannel::default();
+        let mut commitment_scheme =
+            CommitmentSchemeProver::<SimdBackend, Blake2sMerkleChannel>::new(config, &twiddles);
+        commitment_scheme.set_store_polynomials_coefficients();
+
+        let preprocessed = claim
+            .gen_proof_slice_preprocessed_trace(&ids)
+            .expect("arithmetic preprocessed trace generates");
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(preprocessed);
+        tree_builder.commit(&mut channel);
+
+        let mut base = Vec::new();
+        base.extend(gen_projective_rcb_mul_base_trace(claim, log_sizes.mul).expect("mul base"));
+        base.extend(
+            gen_projective_rcb_raw_product_chunk_base_trace(claim, log_sizes.raw_product_chunk)
+                .expect("raw base"),
+        );
+        base.extend(
+            gen_projective_rcb_folded_contribution_base_trace(claim, log_sizes.folded_contribution)
+                .expect("contribution base"),
+        );
+        base.extend(
+            gen_projective_rcb_folded_digit_base_trace(claim, log_sizes.folded_digit)
+                .expect("digit base"),
+        );
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(base);
+        tree_builder.commit(&mut channel);
+
+        let relations = ProjectiveRcbMulComponentRelations::draw(&mut channel);
+        let (interaction_traces, interaction_claim) = claim.gen_interaction_trace(&relations);
+        let mut interaction = Vec::new();
+        interaction.extend(interaction_traces.mul);
+        interaction.extend(interaction_traces.raw_product_chunk);
+        interaction.extend(interaction_traces.folded_contribution);
+        interaction.extend(interaction_traces.folded_digit);
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(interaction);
+        tree_builder.commit(&mut channel);
+
+        let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
+        let mul = ProjectiveRcbMulComponent::new(
+            &mut allocator,
+            ProjectiveRcbMulEval {
+                log_size: log_sizes.mul,
+                relations: relations.clone(),
+            },
+            interaction_claim.mul,
+        );
+        let raw = ProjectiveRcbRawProductChunkComponent::new(
+            &mut allocator,
+            ProjectiveRcbRawProductChunkEval {
+                log_size: log_sizes.raw_product_chunk,
+                relations: relations.clone(),
+            },
+            interaction_claim.raw_product_chunk,
+        );
+        let contribution = ProjectiveRcbFoldedContributionComponent::new(
+            &mut allocator,
+            ProjectiveRcbFoldedContributionEval {
+                log_size: log_sizes.folded_contribution,
+                relations: relations.clone(),
+            },
+            interaction_claim.folded_contribution,
+        );
+        let digit = ProjectiveRcbFoldedDigitComponent::new(
+            &mut allocator,
+            ProjectiveRcbFoldedDigitEval {
+                log_size: log_sizes.folded_digit,
+                relations,
+            },
+            interaction_claim.folded_digit,
+        );
+        let proof = prove(
+            &[
+                &mul as &dyn ComponentProver<SimdBackend>,
+                &raw as &dyn ComponentProver<SimdBackend>,
+                &contribution as &dyn ComponentProver<SimdBackend>,
+                &digit as &dyn ComponentProver<SimdBackend>,
+            ],
+            &mut channel,
+            commitment_scheme,
+        )
+        .expect("projective arithmetic components prove");
+        drop(proof);
     }
 
     #[test]
@@ -5016,7 +6046,10 @@ mod tests {
             SecureField::zero(),
         );
 
-        assert_eq!(PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TRACE_COLUMNS, 2 + 4 + 1);
+        assert_eq!(
+            PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TRACE_COLUMNS,
+            1 + 2 + 4 * 4 + 1
+        );
         assert_eq!(
             component.trace_log_degree_bounds()[1].len(),
             PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TRACE_COLUMNS
@@ -5035,7 +6068,7 @@ mod tests {
                 relations: ProjectiveRcbMulComponentRelations::dummy(),
             }
             .max_constraint_log_degree_bound(),
-            13
+            10
         );
     }
 
@@ -5114,7 +6147,10 @@ mod tests {
         );
 
         assert_eq!(PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS, 30);
-        assert_eq!(PROJECTIVE_RCB_FOLDED_DIGIT_TRACE_COLUMNS, 2 + 30 + 3);
+        assert_eq!(
+            PROJECTIVE_RCB_FOLDED_DIGIT_TRACE_COLUMNS,
+            1 + 2 + 30 * 3 + 3
+        );
         assert_eq!(
             component.trace_log_degree_bounds()[1].len(),
             PROJECTIVE_RCB_FOLDED_DIGIT_TRACE_COLUMNS
@@ -5134,7 +6170,7 @@ mod tests {
                 relations: ProjectiveRcbMulComponentRelations::dummy(),
             }
             .max_constraint_log_degree_bound(),
-            12
+            10
         );
     }
 
@@ -5459,6 +6495,75 @@ mod tests {
         claim
             .verify_proof_slice_traces(&relations)
             .expect("proof slice trace shape verifies");
+    }
+
+    #[test]
+    fn projective_rcb_air_proof_slice_proves_and_verifies() {
+        let trace = one_row_trace(ProjectiveEcOp::Double, PreparedAffinePoint::infinity());
+        let claim =
+            ProjectiveRcbAirTraceClaim::from_projective_trace(&trace).expect("valid RCB AIR trace");
+        let proof = prove_projective_rcb_air_proof_slice::<Blake2sMerkleChannel>(
+            &claim,
+            proof_slice_low_ram_config(&claim),
+        )
+        .expect("projective RCB proof slice proves");
+
+        verify_projective_rcb_air_proof_slice::<Blake2sMerkleChannel>(proof)
+            .expect("projective RCB proof slice verifies");
+    }
+
+    #[test]
+    fn projective_rcb_arithmetic_components_prove_together() {
+        let trace = one_row_trace(ProjectiveEcOp::Double, PreparedAffinePoint::infinity());
+        let claim =
+            ProjectiveRcbAirTraceClaim::from_projective_trace(&trace).expect("valid RCB AIR trace");
+
+        prove_and_verify_projective_arithmetic_components(&claim);
+    }
+
+    #[test]
+    fn projective_rcb_mul_component_proves_and_verifies() {
+        let trace = one_row_trace(ProjectiveEcOp::Double, PreparedAffinePoint::infinity());
+        let claim =
+            ProjectiveRcbAirTraceClaim::from_projective_trace(&trace).expect("valid RCB AIR trace");
+
+        prove_and_verify_mul_component(&claim);
+    }
+
+    #[test]
+    fn projective_rcb_folded_contribution_component_proves_and_verifies() {
+        let trace = one_row_trace(ProjectiveEcOp::Double, PreparedAffinePoint::infinity());
+        let claim =
+            ProjectiveRcbAirTraceClaim::from_projective_trace(&trace).expect("valid RCB AIR trace");
+
+        prove_and_verify_folded_contribution_component(&claim);
+    }
+
+    #[test]
+    fn projective_rcb_folded_digit_component_proves_and_verifies() {
+        let trace = one_row_trace(ProjectiveEcOp::Double, PreparedAffinePoint::infinity());
+        let claim =
+            ProjectiveRcbAirTraceClaim::from_projective_trace(&trace).expect("valid RCB AIR trace");
+
+        prove_and_verify_folded_digit_component(&claim);
+    }
+
+    #[test]
+    fn projective_rcb_range13_provider_proves_and_verifies() {
+        let trace = one_row_trace(ProjectiveEcOp::Double, PreparedAffinePoint::infinity());
+        let claim =
+            ProjectiveRcbAirTraceClaim::from_projective_trace(&trace).expect("valid RCB AIR trace");
+
+        prove_and_verify_projective_range13_provider(&claim);
+    }
+
+    #[test]
+    fn projective_rcb_signed_carry_provider_proves_and_verifies() {
+        let trace = one_row_trace(ProjectiveEcOp::Double, PreparedAffinePoint::infinity());
+        let claim =
+            ProjectiveRcbAirTraceClaim::from_projective_trace(&trace).expect("valid RCB AIR trace");
+
+        prove_and_verify_projective_signed_carry_provider(&claim);
     }
 
     #[test]

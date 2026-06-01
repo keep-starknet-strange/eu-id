@@ -10,6 +10,7 @@ use stwo::core::ColumnVec;
 use stwo::prover::backend::{Backend, Column};
 use stwo::prover::poly::circle::CircleEvaluation;
 use stwo::prover::poly::BitReversedOrder;
+use stwo_constraint_framework::relation_tracker::{add_to_relation_entries, RelationTrackerEntry};
 use stwo_constraint_framework::{
     assert_constraints_on_trace, FrameworkComponent, FrameworkEval, TraceLocationAllocator,
     PREPROCESSED_TRACE_IDX,
@@ -132,6 +133,60 @@ pub fn assert_projective_rcb_air_constraints(claim: &ProjectiveRcbAirTraceClaim)
         SecureField::zero(),
         "invalid projective RCB logup sum"
     );
+}
+
+/// Collect projective RCB relation entries on trace-domain rows.
+///
+/// This mirrors Falcon's relation tracker path: build the same proof-slice
+/// traces and components as the prover, then evaluate every component's
+/// `add_to_relation` emissions directly over the circle domain.
+pub fn track_projective_rcb_air_relation_entries(
+    claim: &ProjectiveRcbAirTraceClaim,
+) -> Vec<RelationTrackerEntry> {
+    let mut dummy_channel = Blake2sM31Channel::default();
+    let relations = ProjectiveRcbMulComponentRelations::draw(&mut dummy_channel);
+    let preprocessed_ids = claim.proof_slice_preprocessed_column_ids(&relations);
+    let preprocessed = claim
+        .gen_proof_slice_preprocessed_trace(&preprocessed_ids)
+        .expect("projective RCB preprocessed trace generates");
+    let base = claim
+        .gen_proof_slice_base_trace()
+        .expect("projective RCB base trace generates");
+    let (interaction, interaction_claim) = claim
+        .gen_proof_slice_interaction_trace(&relations)
+        .expect("projective RCB interaction trace generates");
+
+    let mut commitment_scheme = MockCommitmentScheme::default();
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(preprocessed);
+    tree_builder.finalize_interaction();
+
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(base);
+    tree_builder.finalize_interaction();
+
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(interaction);
+    tree_builder.finalize_interaction();
+
+    let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&preprocessed_ids);
+    let components =
+        ProjectiveRcbAirComponents::new(&mut allocator, claim, &interaction_claim, &relations);
+    let trace = commitment_scheme.trace_domain_evaluations();
+    let mut entries: Vec<RelationTrackerEntry> = Vec::new();
+    entries.extend(add_to_relation_entries(&components.mul, &trace));
+    entries.extend(add_to_relation_entries(
+        &components.raw_product_chunk,
+        &trace,
+    ));
+    entries.extend(add_to_relation_entries(
+        &components.folded_contribution,
+        &trace,
+    ));
+    entries.extend(add_to_relation_entries(&components.folded_digit, &trace));
+    entries.extend(add_to_relation_entries(&components.range13, &trace));
+    entries.extend(add_to_relation_entries(&components.signed_carry, &trace));
+    entries
 }
 
 #[derive(Default)]
@@ -301,6 +356,23 @@ fn projective_rcb_debug_assert_constraints_pass_for_honest_trace() {
         .verify_proof_slice_traces(&ProjectiveRcbMulComponentRelations::dummy())
         .expect("projective RCB proof-slice traces verify");
     assert_projective_rcb_air_constraints(&claim);
+}
+
+#[test]
+fn projective_rcb_relation_tracker_balances_honest_trace() {
+    let claim = honest_projective_rcb_claim();
+    let entries = track_projective_rcb_air_relation_entries(&claim);
+    let mut exact_balances = std::collections::HashMap::<(String, Vec<M31>), M31>::new();
+    for entry in entries {
+        *exact_balances
+            .entry((entry.relation, entry.values))
+            .or_insert_with(M31::zero) += entry.mult;
+    }
+    exact_balances.retain(|_, multiplicity| !multiplicity.is_zero());
+    assert!(
+        exact_balances.is_empty(),
+        "imbalanced projective RCB relations:\n{exact_balances:#?}"
+    );
 }
 
 #[test]
