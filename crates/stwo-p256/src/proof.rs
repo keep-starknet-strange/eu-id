@@ -635,6 +635,10 @@ mod tests {
     use super::*;
     use crate::constants::{P256_GX, P256_GY, P256_ORDER};
     use crate::curve::{mod_inverse, scalar_mul};
+    use crate::fake_glv_chain_continuity::{
+        prove_fake_glv_chain_continuity_proof_slice, verify_fake_glv_chain_continuity_proof_slice,
+        FakeGlvChainContinuityProofClaim,
+    };
     use crate::fake_glv_chain_expansion::{
         prove_fake_glv_chain_expansion_proof_slice, verify_fake_glv_chain_expansion_proof_slice,
         FakeGlvChainExpansionProofClaim,
@@ -813,6 +817,20 @@ mod tests {
         source_offset: usize,
     ) -> PcsConfig {
         let claim = FakeGlvChainExpansionProofClaim::from_claims(chain, primitive, source_offset);
+        let ids = claim.preprocessed_column_ids();
+        let max_constraint_log_degree_bound = claim.max_constraint_log_degree_bound(&ids);
+        let fri_config = FriConfig::new(5, 4, 64, 1);
+        PcsConfig {
+            pow_bits: 0,
+            fri_config,
+            lifting_log_size: Some(
+                (max_constraint_log_degree_bound + fri_config.log_blowup_factor).max(10),
+            ),
+        }
+    }
+
+    fn fake_glv_chain_continuity_low_ram_config(chain: &FakeGlvChainClaim) -> PcsConfig {
+        let claim = FakeGlvChainContinuityProofClaim::from_chain(chain);
         let ids = claim.preprocessed_column_ids();
         let max_constraint_log_degree_bound = claim.max_constraint_log_degree_bound(&ids);
         let fri_config = FriConfig::new(5, 4, 64, 1);
@@ -1342,6 +1360,24 @@ mod tests {
     }
 
     #[test]
+    fn current_p256_proof_pipeline_proves_fake_glv_chain_continuity_slice() {
+        let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+            valid_real_input_with_small_u_scalars(7, 11),
+        ])
+        .expect("current pipeline builds");
+        proof.verify_current_e2e().expect("current e2e verifies");
+
+        let continuity_proof = prove_fake_glv_chain_continuity_proof_slice::<Blake2sMerkleChannel>(
+            &proof.claim.fake_glv_chain,
+            fake_glv_chain_continuity_low_ram_config(&proof.claim.fake_glv_chain),
+        )
+        .expect("fake-GLV chain continuity slice proves");
+
+        verify_fake_glv_chain_continuity_proof_slice::<Blake2sMerkleChannel>(continuity_proof)
+            .expect("fake-GLV chain continuity slice verifies");
+    }
+
+    #[test]
     fn current_p256_proof_pipeline_proves_fake_glv_prepared_point_source_slice() {
         let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
             valid_real_input_with_small_u_scalars(7, 11),
@@ -1427,6 +1463,24 @@ mod tests {
     }
 
     #[test]
+    fn current_p256_proof_pipeline_proves_fake_glv_chain_continuity_slice_with_zero_branch() {
+        let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+            valid_real_input_with_small_u_scalars(0, 11),
+        ])
+        .expect("zero branch pipeline builds");
+        proof.verify_current_e2e().expect("zero branch verifies");
+
+        let continuity_proof = prove_fake_glv_chain_continuity_proof_slice::<Blake2sMerkleChannel>(
+            &proof.claim.fake_glv_chain,
+            fake_glv_chain_continuity_low_ram_config(&proof.claim.fake_glv_chain),
+        )
+        .expect("zero-branch fake-GLV chain continuity slice proves");
+
+        verify_fake_glv_chain_continuity_proof_slice::<Blake2sMerkleChannel>(continuity_proof)
+            .expect("zero-branch fake-GLV chain continuity slice verifies");
+    }
+
+    #[test]
     fn current_p256_proof_pipeline_rejects_mutated_fake_glv_chain_expansion_slice() {
         let mut proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
             valid_real_input_with_small_u_scalars(7, 11),
@@ -1454,6 +1508,37 @@ mod tests {
             err,
             FakeGlvChainError::RelationImbalance {
                 relation: "FakeGlvChainExpansion",
+            }
+        );
+    }
+
+    #[test]
+    fn current_p256_proof_pipeline_rejects_mutated_fake_glv_chain_continuity_slice() {
+        let mut proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+            valid_real_input_with_small_u_scalars(7, 11),
+        ])
+        .expect("current pipeline builds");
+        proof.verify_current_e2e().expect("current e2e verifies");
+
+        let row = proof
+            .claim
+            .fake_glv_chain
+            .certs
+            .iter_mut()
+            .find_map(|cert| cert.rows.get_mut(1))
+            .expect("at least one active certificate has a successor row");
+        row.sig_id = M31::from_u32_unchecked(row.sig_id.0 + 1);
+
+        let err = prove_fake_glv_chain_continuity_proof_slice::<Blake2sMerkleChannel>(
+            &proof.claim.fake_glv_chain,
+            fake_glv_chain_continuity_low_ram_config(&proof.claim.fake_glv_chain),
+        )
+        .expect_err("mutated fake-GLV chain continuity tuple must reject");
+
+        assert_eq!(
+            err,
+            FakeGlvChainError::RelationImbalance {
+                relation: "FakeGlvChainContinuity",
             }
         );
     }

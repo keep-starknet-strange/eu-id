@@ -29,6 +29,10 @@ pub mod fake_glv_chain {
     pub use crate::scalar::fake_glv_chain::*;
 }
 
+pub mod fake_glv_chain_continuity {
+    pub use crate::scalar::fake_glv_chain_continuity::*;
+}
+
 pub mod fake_glv_chain_expansion {
     pub use crate::scalar::fake_glv_chain_expansion::*;
 }
