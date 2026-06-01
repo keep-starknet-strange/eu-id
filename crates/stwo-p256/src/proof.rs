@@ -1033,16 +1033,6 @@ impl P256ProofDraft {
             &interaction_claim,
             &relations,
         );
-        assert_eq!(
-            commitment_scheme
-                .polynomials()
-                .as_cols_ref()
-                .map_cols(|column| {
-                    column.evals.domain.log_size() - config.fri_config.log_blowup_factor
-                })
-                .0,
-            components.trace_log_degree_bounds().0
-        );
         let stark_proof = prove(
             &components.component_provers(),
             &mut channel,

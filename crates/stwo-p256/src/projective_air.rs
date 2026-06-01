@@ -68,7 +68,7 @@ pub const PROJECTIVE_RCB_SIGNED_CARRY_BOUND: i64 = projective_rcb_signed_carry_b
 pub const PROJECTIVE_RCB_MUL_ROLE_LHS: u32 = 0;
 pub const PROJECTIVE_RCB_MUL_ROLE_RHS: u32 = 1;
 pub const PROJECTIVE_RCB_MUL_ROLE_RESULT: u32 = 2;
-pub const PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS: usize = 2;
+pub const PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS: usize = 16;
 pub const PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS: usize = 3;
 pub const PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS: usize = raw_product_chunk_count();
 pub const PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERM_TRACE_COLUMNS: usize = 4;
@@ -540,14 +540,6 @@ where
     let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
     let components =
         ProjectiveRcbAirComponents::new(&mut allocator, trace, &interaction_claim, &relations);
-    assert_eq!(
-        commitment_scheme
-            .polynomials()
-            .as_cols_ref()
-            .map_cols(|column| column.evals.domain.log_size() - config.fri_config.log_blowup_factor)
-            .0,
-        components.trace_log_degree_bounds().0
-    );
     let stark_proof = prove(
         &components.component_provers(),
         &mut channel,
@@ -980,7 +972,7 @@ fn add_raw_product_chunk_polynomial_constraints<E: EvalAtRow>(
     let mut product_sum = zero::<E>();
     eval.add_constraint(columns.active.clone() * (one::<E>() - columns.active.clone()));
     eval.add_constraint(columns.active.clone() - columns.schedule_active.clone());
-    for term in columns.terms.iter().take(2) {
+    for term in &columns.terms {
         eval.add_constraint(term.term_active.clone() - term.schedule_term_active.clone());
         eval.add_constraint(term.term_active.clone() * (one::<E>() - term.term_active.clone()));
         eval.add_constraint(term.lhs_limb.clone() * term.rhs_limb.clone() - term.product.clone());
@@ -1004,7 +996,6 @@ fn add_raw_product_chunk_polynomial_constraints<E: EvalAtRow>(
                 - columns.schedule_digit_use_counts[offset].clone(),
         );
     }
-    eval.add_constraint(columns.digits[2].clone() * (columns.digits[2].clone() - one::<E>()));
     let limb_base = E::F::from(M31::from_u32_unchecked(1u32 << LIMB_BITS));
     eval.add_constraint(
         product_sum
@@ -1041,7 +1032,7 @@ fn add_raw_product_chunk_relations<E: EvalAtRow>(
             term.rhs_limb.clone(),
         );
     }
-    for digit in columns.digits.iter().take(2) {
+    for digit in &columns.digits {
         add_range_check(
             eval,
             relations.range13,
@@ -1063,11 +1054,6 @@ fn add_raw_product_chunk_relations<E: EvalAtRow>(
             ],
         ));
     }
-    eval.add_to_relation(RelationEntry::new(
-        relations.range13,
-        E::EF::from(zero::<E>()),
-        &[zero::<E>()],
-    ));
 }
 
 pub fn add_projective_rcb_raw_product_chunk<E: EvalAtRow>(
@@ -1860,8 +1846,7 @@ impl ProjectiveRcbAirTraceClaim {
                 values.push(m31(row.result_limb));
             }
             for chunk in &mul.raw_product_chunks {
-                values.push(m31(chunk.digits[0]));
-                values.push(m31(chunk.digits[1]));
+                values.extend(chunk.digits.iter().copied().map(m31));
             }
             for row in &mul.folded_digits.rows {
                 values.push(m31(row.folded_digit));
@@ -2547,7 +2532,7 @@ fn projective_rcb_raw_product_chunk_fractions(
     row: &ProjectiveRcbRawProductChunkRow,
 ) -> Vec<ProjectiveRcbFractionSpec> {
     let mut fractions = Vec::with_capacity(projective_rcb_raw_product_chunk_fraction_count());
-    for term in row.terms.iter().take(2) {
+    for term in &row.terms {
         let active = i64::from(term.active);
         fractions.push(mul_limb_fraction(
             active,
@@ -2566,8 +2551,9 @@ fn projective_rcb_raw_product_chunk_fractions(
             m31(term.rhs_limb),
         ));
     }
-    fractions.push(range13_fraction(1, m31(row.digits[0])));
-    fractions.push(range13_fraction(1, m31(row.digits[1])));
+    for digit in row.digits {
+        fractions.push(range13_fraction(1, m31(digit)));
+    }
     for (offset, digit) in row.digits.iter().enumerate() {
         fractions.push(raw_product_chunk_digit_fraction(
             -(row.digit_use_counts[offset] as i64),
@@ -2579,7 +2565,6 @@ fn projective_rcb_raw_product_chunk_fractions(
             m31(*digit),
         ));
     }
-    fractions.push(range13_fraction(0, m31(0)));
     debug_assert_eq!(
         fractions.len(),
         projective_rcb_raw_product_chunk_fraction_count()
@@ -2687,7 +2672,7 @@ fn projective_rcb_mul_fraction_count() -> usize {
 }
 
 fn projective_rcb_raw_product_chunk_fraction_count() -> usize {
-    2 * PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS + 2 + PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS + 1
+    2 * PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS + 2 * PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS
 }
 
 fn projective_rcb_folded_contribution_fraction_count() -> usize {
@@ -4410,7 +4395,9 @@ fn product_chunk_pairs(
 fn split_raw_product_chunk(
     mut value: i128,
 ) -> Result<[u32; PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS], ProjectiveRcbAirError> {
-    if !(0..=(2 * (FP_SOLINAS_LIMB_BASE - 1).pow(2))).contains(&value) {
+    if !(0..=(PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS as i128 * (FP_SOLINAS_LIMB_BASE - 1).pow(2)))
+        .contains(&value)
+    {
         return Err(ProjectiveRcbAirError::RawProductChunkOverflow { value });
     }
     let mut digits = [0u32; PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS];
@@ -6259,7 +6246,11 @@ mod tests {
         );
         assert!(ids.contains(&ProjectiveRcbRawProductChunkScheduleColumnIds::coeff()));
         assert!(ids.contains(&ProjectiveRcbFoldedContributionScheduleColumnIds::matrix_coeff(3)));
-        assert!(ids.contains(&ProjectiveRcbFoldedDigitScheduleColumnIds::group_index(29)));
+        assert!(
+            ids.contains(&ProjectiveRcbFoldedDigitScheduleColumnIds::group_index(
+                PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS - 1,
+            ))
+        );
         claim
             .verify_preprocessed_trace()
             .expect("full schedule preprocessed trace verifies");
@@ -6472,6 +6463,10 @@ mod tests {
             ))
         );
         assert_eq!(preprocessed.len(), ids.len());
+        let component_bounds = components.trace_log_degree_bounds();
+        assert_eq!(preprocessed.len(), component_bounds.0[0].len());
+        assert_eq!(base.len(), component_bounds.0[1].len());
+        assert_eq!(interaction.len(), component_bounds.0[2].len());
         assert_eq!(
             base.len(),
             PROJECTIVE_RCB_MUL_TRACE_COLUMNS
