@@ -1,6 +1,7 @@
 pub mod canonical_lt;
 pub mod cert_bind;
 pub mod fake_glv_chain;
+pub mod fake_glv_chain_expansion;
 pub mod fake_glv_ec_source;
 pub mod fake_glv_scalar;
 pub mod fake_glv_selector;
