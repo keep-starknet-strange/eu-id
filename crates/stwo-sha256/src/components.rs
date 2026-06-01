@@ -171,7 +171,7 @@ pub fn range_column_id(kind: RangeKind) -> PreProcessedColumnId {
 /// is `1` at storage index `Layout::block_slot(0, log_n_rows) = 0` and
 /// `0` elsewhere. `Sha256Eval` reads it via `eval.get_preprocessed_column`
 /// and pins `is_first_block ≡ is_first_row`, anchoring the §10.3 chain
-/// on block 0's IV binding (research/sha256-air-design.md §11 L2).
+/// on block 0's IV binding (docs/research/sha256-air-design.md §11 L2).
 pub fn is_first_row_column_id() -> PreProcessedColumnId {
     id("is_first_row")
 }
@@ -698,3 +698,61 @@ pub const RANGE_TABLES: &[RangeKind] = &[
     RangeKind::Range5,
     RangeKind::Range16,
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The per-table column-ID arrays are load-bearing: their order is what
+    /// the verifier's preprocessed-mask reads resolve against (via the
+    /// `TraceLocationAllocator`), so it must stay in lock-step with the
+    /// emission order in `crate::preprocessed`. That emission side is guarded
+    /// by `preprocessed::tests::emitted_columns_match_documented_field_order`;
+    /// this pins the ID side to its documented strings, so a one-sided
+    /// reorder here fails fast instead of silently mislabelling a column for
+    /// the verifier.
+    #[test]
+    fn column_ids_follow_documented_order() {
+        assert_eq!(
+            decode_column_ids(SigmaFn::Sigma0, Half::S),
+            [
+                id("decode_sigma0_s_key"),
+                id("decode_sigma0_s_omain_lo"),
+                id("decode_sigma0_s_omain_hi"),
+                id("decode_sigma0_s_o2_lo"),
+                id("decode_sigma0_s_o2_hi"),
+            ],
+        );
+        assert_eq!(
+            maj_ch_column_ids(),
+            [
+                id("maj_ch_a"),
+                id("maj_ch_b"),
+                id("maj_ch_c"),
+                id("maj_ch_maj"),
+                id("maj_ch_ch"),
+            ],
+        );
+        assert_eq!(
+            xor_8_column_ids(),
+            [id("xor_8_x"), id("xor_8_y"), id("xor_8_z")],
+        );
+        assert_eq!(
+            round_split_pack_column_ids(RoundPartition::Sigma0AndMaj, Half16::Lo),
+            [
+                id("sp_sigma0_lo_key"),
+                id("sp_sigma0_lo_g0"),
+                id("sp_sigma0_lo_g1"),
+                id("sp_sigma0_lo_g2"),
+            ],
+        );
+        assert_eq!(
+            sigma_split_pack_column_ids(LowerSigmaPartition::LowerSigma0, Half16::Lo),
+            [
+                id("sp_lsigma0_lo_key"),
+                id("sp_lsigma0_lo_s"),
+                id("sp_lsigma0_lo_sp"),
+            ],
+        );
+    }
+}

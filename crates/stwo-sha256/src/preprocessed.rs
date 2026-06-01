@@ -32,7 +32,7 @@
 //! - 1 `is_first_row` selector at the main `Sha256Eval` trace's `log_n_rows`
 //!   — value `1` at storage index `Layout::block_slot(0, log_n_rows) = 0`,
 //!   zero elsewhere. The AIR pins `is_first_block ≡ is_first_row`, which
-//!   anchors the §10.3 chain at block 0's IV binding (research/sha256-air-design.md §11 L2).
+//!   anchors the §10.3 chain at block 0's IV binding (docs/research/sha256-air-design.md §11 L2).
 //!
 //! Total committed columns:
 //! `8·5 + 5 + 3 + 4·4 + 4·3 + 4·1 + 1 = 40 + 5 + 3 + 16 + 12 + 4 + 1 = 81`.
@@ -67,12 +67,54 @@ pub const fn maj_ch_log_size(group_width: u32) -> u32 {
 
 /// Aggregate of one preprocessed-tree commit input: the column
 /// evaluations, their stable IDs, and their log sizes — all three of
-/// length 76 and aligned index-for-index.
+/// length 81 (see [`tests::total_preprocessed_columns_is_81`]) and aligned
+/// index-for-index.
 pub type PreprocessedTrace = (
     Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     Vec<PreProcessedColumnId>,
     Vec<u32>,
 );
+
+/// Log sizes of every preprocessed column, in canonical order —
+/// **metadata only**, allocating no `BaseColumn`/`CircleEvaluation`.
+///
+/// This is the verifier's entry point. To re-commit `tree[0]` the verifier
+/// needs only the per-column log sizes (and the IDs, from
+/// [`all_preprocessed_column_ids`]) — never the column *data*. Calling
+/// [`generate_preprocessed_trace`] on the verify path would rebuild every
+/// lookup table (millions of rows for Maj/Ch at `2^(3W)`) only to discard
+/// the evaluations.
+///
+/// The returned vector is identical, index-for-index, to the `log_sizes`
+/// that [`generate_preprocessed_trace`] returns and to the `log_size()` of
+/// each emitted column's domain — pinned by
+/// [`tests::metadata_log_sizes_match_built_columns`].
+pub fn preprocessed_log_sizes(group_width: u32, log_n_rows: u32) -> Vec<u32> {
+    let mut log_sizes = Vec::new();
+    // 8 σ/Σ decode tables × 5 columns, each at LOG_SIZE_16.
+    for _ in DECODE_TABLES {
+        log_sizes.extend(std::iter::repeat_n(LOG_SIZE_16, 5));
+    }
+    // 1 packed Maj/Ch table × 5 columns at maj_ch_log_size(group_width).
+    log_sizes.extend(std::iter::repeat_n(maj_ch_log_size(group_width), 5));
+    // 1 xor_8 table × 3 columns at LOG_SIZE_16.
+    log_sizes.extend(std::iter::repeat_n(LOG_SIZE_16, 3));
+    // 4 round-side split-pack tables × 4 columns at LOG_SIZE_16.
+    for _ in ROUND_SPLIT_TABLES {
+        log_sizes.extend(std::iter::repeat_n(LOG_SIZE_16, 4));
+    }
+    // 4 σ-side split-pack tables × 3 columns at LOG_SIZE_16.
+    for _ in SIGMA_SPLIT_TABLES {
+        log_sizes.extend(std::iter::repeat_n(LOG_SIZE_16, 3));
+    }
+    // 4 range tables × 1 column, each at its own range_log_size(kind).
+    for &kind in RANGE_TABLES {
+        log_sizes.push(range_log_size(kind));
+    }
+    // 1 is_first_row selector at the main trace's log_n_rows.
+    log_sizes.push(log_n_rows);
+    log_sizes
+}
 
 /// Generate the entire preprocessed trace plus its column IDs and log
 /// sizes — in the canonical order
@@ -307,5 +349,189 @@ mod tests {
                 "is_first_row[{i}] mismatch",
             );
         }
+    }
+
+    /// The metadata-only [`preprocessed_log_sizes`] must agree, index-for-
+    /// index, with both the `log_sizes` vector and the actual committed
+    /// column domains that [`generate_preprocessed_trace`] produces. This
+    /// pins the verifier's re-derived sizes (it calls `preprocessed_log_sizes`
+    /// directly, never building the columns) to what the prover commits, so
+    /// the two cannot silently drift.
+    #[test]
+    fn metadata_log_sizes_match_built_columns() {
+        let w = MAX_ROUND_GROUP_BITS;
+        let log_n_rows = LOG_N_LANES;
+        let (evals, ids, built_log_sizes) = generate_preprocessed_trace(w, log_n_rows);
+        let meta = preprocessed_log_sizes(w, log_n_rows);
+
+        assert_eq!(meta, built_log_sizes, "metadata vs builder log_sizes");
+        assert_eq!(meta.len(), evals.len());
+        assert_eq!(meta.len(), ids.len());
+        for (i, ev) in evals.iter().enumerate() {
+            assert_eq!(
+                ev.domain.log_size(),
+                meta[i],
+                "column {i}: committed domain log_size disagrees with metadata",
+            );
+        }
+    }
+
+    /// [`preprocessed_log_sizes`] is pure metadata (no table build), so its
+    /// shape is checked cheaply across the whole `group_width` range and for
+    /// large `log_n_rows`: 81 columns, the Maj/Ch block (cols 40..45) sized
+    /// to `3·W`, and the trailing selector sized to `log_n_rows`.
+    #[test]
+    fn metadata_log_sizes_shape_for_all_widths() {
+        for w in MAX_ROUND_GROUP_BITS..=crate::tables::MAX_GROUP_WIDTH {
+            for log_n_rows in [LOG_N_LANES, 20, 30] {
+                let meta = preprocessed_log_sizes(w, log_n_rows);
+                assert_eq!(meta.len(), 81, "w={w}, l={log_n_rows}");
+                for &ls in &meta[40..45] {
+                    assert_eq!(ls, 3 * w, "Maj/Ch log_size at w={w}");
+                }
+                assert_eq!(*meta.last().unwrap(), log_n_rows, "selector log_size");
+            }
+        }
+    }
+
+    /// Guard against silent field-order drift in the emitted preprocessed
+    /// columns (audit P3): emission order (here) and the column-ID order
+    /// (`components::*_column_ids`) are two hand-written lists coupled only
+    /// by position, so a swap like `o_main_lo` ↔ `o_main_hi` or `g0` ↔ `g1`
+    /// compiles and passes the count-only check while silently mislabelling
+    /// the verifier's mask data. Each family's columns are re-derived from
+    /// the table rows in the *documented* order and compared position-for-
+    /// position against what `generate_preprocessed_trace` emits.
+    #[test]
+    fn emitted_columns_match_documented_field_order() {
+        use crate::partitions::{SigmaFn, SIGMA0_GROUPS};
+        use crate::tables::{Half, Half16, LowerSigmaPartition};
+
+        let w = MAX_ROUND_GROUP_BITS;
+        let (evals, _, _) = generate_preprocessed_trace(w, LOG_N_LANES);
+
+        let col_eq = |idx: usize, expected: &[u32], label: &str| {
+            let ev = &evals[idx];
+            assert_eq!(ev.values.len(), expected.len(), "{label}: length");
+            for (i, &e) in expected.iter().enumerate() {
+                assert_eq!(ev.values.at(i), BaseField::from(e), "{label}[{i}]");
+            }
+        };
+
+        // decode table 0 (DECODE_TABLES[0] = Σ0,S) → cols 0..5.
+        let d = build_decode_table(SigmaFn::Sigma0, Half::S);
+        col_eq(
+            0,
+            &d.iter().map(|r| r.key).collect::<Vec<_>>(),
+            "decode.key",
+        );
+        col_eq(
+            1,
+            &d.iter().map(|r| r.o_main_lo).collect::<Vec<_>>(),
+            "decode.o_main_lo",
+        );
+        col_eq(
+            2,
+            &d.iter().map(|r| r.o_main_hi).collect::<Vec<_>>(),
+            "decode.o_main_hi",
+        );
+        col_eq(
+            3,
+            &d.iter().map(|r| r.o2_partial_lo).collect::<Vec<_>>(),
+            "decode.o2_lo",
+        );
+        col_eq(
+            4,
+            &d.iter().map(|r| r.o2_partial_hi).collect::<Vec<_>>(),
+            "decode.o2_hi",
+        );
+
+        // xor_8 → cols 45..48.
+        let xr = build_xor_8_table();
+        col_eq(45, &xr.iter().map(|r| r.x).collect::<Vec<_>>(), "xor.x");
+        col_eq(46, &xr.iter().map(|r| r.y).collect::<Vec<_>>(), "xor.y");
+        col_eq(47, &xr.iter().map(|r| r.z).collect::<Vec<_>>(), "xor.z");
+
+        // round-side split-pack table 0 (Σ0&Maj, Lo) → cols 48..52.
+        let rsp = build_round_split_pack_table(
+            &SIGMA0_GROUPS,
+            RoundPartition::Sigma0AndMaj.s_mask(),
+            Half16::Lo,
+        );
+        col_eq(
+            48,
+            &rsp.iter().map(|r| r.key).collect::<Vec<_>>(),
+            "round_split.key",
+        );
+        col_eq(
+            49,
+            &rsp.iter().map(|r| r.groups[0]).collect::<Vec<_>>(),
+            "round_split.g0",
+        );
+        col_eq(
+            50,
+            &rsp.iter().map(|r| r.groups[1]).collect::<Vec<_>>(),
+            "round_split.g1",
+        );
+        col_eq(
+            51,
+            &rsp.iter().map(|r| r.groups[2]).collect::<Vec<_>>(),
+            "round_split.g2",
+        );
+
+        // σ-side split-pack table 0 (LowerSigma0, Lo) → cols 64..67.
+        let ssp =
+            build_sigma_split_pack_table(LowerSigmaPartition::LowerSigma0.parts(), Half16::Lo);
+        col_eq(
+            64,
+            &ssp.iter().map(|r| r.key).collect::<Vec<_>>(),
+            "sigma_split.key",
+        );
+        col_eq(
+            65,
+            &ssp.iter().map(|r| r.groups[0]).collect::<Vec<_>>(),
+            "sigma_split.s",
+        );
+        col_eq(
+            66,
+            &ssp.iter().map(|r| r.groups[1]).collect::<Vec<_>>(),
+            "sigma_split.sp",
+        );
+
+        // Maj/Ch → cols 40..45: (a, b, c, maj, ch). Re-deriving the full
+        // 2^(3W) table would be wasteful, so pin the column order via two
+        // representative rows (row index = (a·2^W + b)·2^W + c, natural order):
+        //   row 1        = (0,0,1): maj=0, ch=1
+        //   row 2^(2W)+1 = (1,0,1): maj=1, ch=0
+        let n2 = (1usize << w) * (1usize << w);
+        let check_maj_ch = |row: usize, a: u32, b: u32, c: u32, maj: u32, ch: u32| {
+            assert_eq!(
+                evals[40].values.at(row),
+                BaseField::from(a),
+                "maj_ch.a[{row}]"
+            );
+            assert_eq!(
+                evals[41].values.at(row),
+                BaseField::from(b),
+                "maj_ch.b[{row}]"
+            );
+            assert_eq!(
+                evals[42].values.at(row),
+                BaseField::from(c),
+                "maj_ch.c[{row}]"
+            );
+            assert_eq!(
+                evals[43].values.at(row),
+                BaseField::from(maj),
+                "maj_ch.maj[{row}]"
+            );
+            assert_eq!(
+                evals[44].values.at(row),
+                BaseField::from(ch),
+                "maj_ch.ch[{row}]"
+            );
+        };
+        check_maj_ch(1, 0, 0, 1, 0, 1);
+        check_maj_ch(n2 + 1, 1, 0, 1, 1, 0);
     }
 }

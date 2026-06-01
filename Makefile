@@ -47,10 +47,6 @@ dev:
 	fi
 
 build:
-	# `--all-targets` covers lib, bins, integration tests, and examples
-	# (e.g. `crates/stwo-sha256/examples/prove_demo.rs`), so a compile
-	# regression in any of them surfaces in CI's build-test job rather
-	# than only when a contributor runs the example.
 	cargo build --all-targets
 
 run:

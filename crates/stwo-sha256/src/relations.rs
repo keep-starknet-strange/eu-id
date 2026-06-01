@@ -8,7 +8,7 @@
 //! component (committed separately at prover-setup time); the relations
 //! here are the contract between the two.
 //!
-//! Five channel families are wired into the constraint layer today:
+//! Five channel families are wired into the constraint layer:
 //!   - [`SigmaDecodeRelations`] — the eight `Σ`/`σ` decode tables.
 //!   - [`MajRelation`] / [`ChRelation`] — the packed Maj/Ch lookup,
 //!     sharing one underlying table at width `W ≥ MAX_ROUND_GROUP_BITS`.

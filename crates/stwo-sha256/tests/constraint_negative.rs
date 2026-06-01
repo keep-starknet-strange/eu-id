@@ -1,6 +1,6 @@
 //! Constraint-layer negative tests for the SHA-256 AIR.
 //!
-//! Direct response to audit lesson **L4** (research/sha256-air-design.md §11):
+//! Direct response to audit lesson **L4** (docs/research/sha256-air-design.md §11):
 //! `../sha256-air`'s suite passes *only because* every test feeds an honest
 //! trace — the broken constraints (no range checks, IV not bound) are never
 //! exercised. The eu-id component must not repeat that failure mode.
@@ -199,7 +199,7 @@ impl EvalAtRow for LinearConstraintCollector<'_> {
         // *linear* identities the AIR emits — IV binding, schedule
         // recurrence, T1/T2/e_new/a_new adds, σ-output reassembly, O2
         // chunk-bind, finalization, multi-block chain, and the §10.4
-        // padding-role block. Every mutation class in the 3.9.8 roadmap
+        // padding-role block. Every mutation class in the suite below
         // is caught by exactly those identities.
         //
         // Carry range-check lookups (`Range_2`/`4`/`5` per family) and
@@ -278,7 +278,7 @@ fn honest_multi_block_trace_yields_no_residuals() {
 }
 
 // ---------------------------------------------------------------------------
-// Mutation suite (one test per class, per roadmap 3.9.8)
+// Mutation suite (one test per mutation class)
 // ---------------------------------------------------------------------------
 
 /// Mutation class: corrupt a single limb in a single row.
@@ -438,8 +438,8 @@ fn rejects_scrambled_sigma_output() {
     );
 }
 
-/// Mutation class: mutate `h_in` on a continuation block (roadmap 3.9.6
-/// chain-break case).
+/// Mutation class: mutate `h_in` on a continuation block (chain-break
+/// case).
 ///
 /// The §10.3 block-chain copy constraint `(enabler − is_first_block) ·
 /// (h_in[block r] − h_out[block r-1]) = 0` rejects exactly this class.
@@ -474,8 +474,7 @@ fn rejects_mutated_h_in_on_continuation_block() {
     );
 }
 
-/// Mutation class: shift the padding's `0x80` marker (covers roadmap
-/// 3.9.7).
+/// Mutation class: shift the padding's `0x80` marker.
 ///
 /// The padding-role witness in `b"abc"`'s sole block has the marker at
 /// byte 3 of `W[0]` (i.e. `W[0].lo = 0x6380` — `'c' = 0x63` followed by
@@ -514,7 +513,7 @@ fn rejects_shifted_marker_byte_sel() {
 /// Mutation class: C1 IV-anchor exploit — clear `is_first_block` on block 0
 /// **and** plant an attacker-chosen `h_out` on the wraparound padding row.
 ///
-/// Pre-fix soundness gap (`research/sha256-air-design.md` §11 L2): with
+/// Pre-fix soundness gap (`docs/research/sha256-air-design.md` §11 L2): with
 /// `is_first_block = 0` on the real row, IV binding was vacuous. With the
 /// padding-row `h_out` cells unconstrained (Range_16/finalization both
 /// gated by `enabler`), the prover could inject any state `X` into block

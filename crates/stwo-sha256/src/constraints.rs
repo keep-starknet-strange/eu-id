@@ -33,7 +33,8 @@
 //! alignment (`padded.len() % 64 == 0`) is structural — one trace row
 //! IS one 64-byte block — and so no per-row constraint expresses it. The
 //! cross-component binding of the bit-length and the marker position to
-//! the mdoc-parser stream lands with roadmap 2.4.
+//! the mdoc-parser stream lands with the integration layer (mdoc/COSE
+//! structure analysis).
 //!
 //! Read-order invariant: every `next_trace_mask` call here happens in the
 //! same order as the writes in [`crate::trace::write_block_row`]. Layout
@@ -101,7 +102,7 @@ impl FrameworkEval for Sha256Eval {
         // `crate::preprocessed::generate_preprocessed_trace`.
         let is_first_row = eval.get_preprocessed_column(is_first_row_column_id());
 
-        // C1 anchor (research/sha256-air-design.md §11 L2): pin
+        // C1 anchor (docs/research/sha256-air-design.md §11 L2): pin
         // `is_first_block ≡ is_first_row`. The verifier trusts
         // `is_first_row` as preprocessed, so this single linear identity
         // forces `is_first_block = 1` at block 0's slot and `= 0`
@@ -638,7 +639,7 @@ impl FrameworkEval for Sha256Eval {
         // `h_out` (the digest output) has no downstream consumer in this
         // standalone component — without these lookups a prover could
         // present out-of-range M31 values that still satisfy the linear
-        // finalization identity (research/sha256-air-design.md §10.2 / §11
+        // finalization identity (docs/research/sha256-air-design.md §10.2 / §11
         // L1). Firing on every real block costs 16 lookups per row and
         // simplifies the gating (just `enabler`) without changing
         // soundness for intermediate blocks.
@@ -1962,7 +1963,7 @@ mod tests {
     // `verify_rejects_range_k_claimed_sum_mutations` for the four new
     // `Range_k` channels). Unifying the two paths under one
     // `AssertEvaluator` driver is a follow-up tracked in
-    // `research/sha256-initial-build-research-pt3.md` Phase C #9.
+    // `docs/research/sha256-initial-build-research-pt3.md` Phase C #9.
     // ------------------------------------------------------------------
 
     /// Coset-order predecessor of `slot` in a bit-reversed circle-domain

@@ -1,17 +1,10 @@
 //! Core types: the 32-bit-word → M31-limb representation, working state,
 //! block bytes, and the witness records the trace generator consumes.
 //!
-//! Following §3 of `research/sha256-air-design.md`, a SHA-256 word `w` is
+//! Following §3 of `docs/research/sha256-air-design.md`, a SHA-256 word `w` is
 //! stored as **two 16-bit limbs** `(lo, hi)` with `w = lo + 2¹⁶ · hi`. The
 //! 16+16 split is the natural minimum that aligns with the lookup-key width
 //! of the `Σ`/`σ` decode tables (whose keys are 16-bit half-words).
-//!
-//! `Serialize`/`Deserialize` is derived only where it costs nothing
-//! (small-array and `Vec`-backed types). Witness records contain
-//! `[T; N_ROUNDS]` arrays — `serde` does not auto-derive on `[T; 64]`, so
-//! those types use `Vec` instead of fixed-size arrays for the long axis.
-
-use serde::{Deserialize, Serialize};
 
 use crate::constants::{
     BLOCK_BYTES, DIGEST_BYTES, N_INPUT_WORDS, N_ROUNDS, N_STATE_WORDS, WORD_BYTES,
@@ -29,7 +22,7 @@ pub const LIMB_MAX: u32 = LIMB_BASE - 1;
 /// One word as `(lo, hi)` limbs. `lo, hi ∈ [0, 2¹⁶)`. The constraint layer
 /// range-checks these via the lookup-table consumers (every limb is either an
 /// input to or an output of a lookup keyed on `[0, 2¹⁶)`).
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct WordLimbs {
     pub lo: u32,
     pub hi: u32,
@@ -60,7 +53,7 @@ impl WordLimbs {
 }
 
 /// The SHA-256 working state `(a, b, c, d, e, f, g, h)`, in that order.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct WorkingState(pub [u32; N_STATE_WORDS]);
 
 impl WorkingState {
@@ -92,11 +85,11 @@ impl WorkingState {
 }
 
 /// The hash state `H = (H₀, H₁, …, H₇)` carried across blocks.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct HashState(pub [u32; N_STATE_WORDS]);
 
 /// A 512-bit padded block, as 16 big-endian 32-bit words.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Block(pub [u32; N_INPUT_WORDS]);
 
 impl Block {
@@ -122,7 +115,7 @@ impl Default for Schedule {
 }
 
 /// 256-bit digest as 8 big-endian `u32` words, equivalently 32 bytes.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Digest(pub [u8; DIGEST_BYTES]);
 
 impl Digest {
@@ -138,7 +131,7 @@ impl Digest {
 
 /// Witness for the padding step: the message we hash, its bit-length, and the
 /// constrained padded byte stream that the AIR consumes block-by-block.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaddingWitness {
     /// The raw message bytes (private input).
     pub message: Vec<u8>,
@@ -159,7 +152,7 @@ pub struct PaddingWitness {
 /// in `[0, 2^|group_i|) ⊆ [0, 2^W)`, range-checked implicitly by being a
 /// lookup-table input. Six values per word per partition — three `S`-side
 /// groups followed by three `S'`-side groups.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct RoundPackedGroups {
     /// 6 packed values in `partitions::RoundGroups::groups_in_order()` order.
     pub vals: [u32; 6],
@@ -200,7 +193,7 @@ impl RoundPackedGroups {
 /// Each cell is pinned to the split-and-pack table row content by the
 /// corresponding lookup, which also implicitly range-checks the
 /// originating 16-bit limb to `[0, 2¹⁶)` (design §11 L1).
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct RoundMajChWitness {
     /// a-side packed groups (`SIGMA0_GROUPS`) of the round's *new* `a`
     /// input. Pinned to `a.(lo, hi)` by the Σ0/Maj split-and-pack lookup.
@@ -232,7 +225,7 @@ pub struct RoundMajChWitness {
 /// those values (`a[0]=h_in[0]`, `e[0]=h_in[4]`). `h_in[3]` and `h_in[7]`
 /// never feed Σ/Maj/Ch directly — they enter only as plain mod-2³² adds
 /// — so they get no auxiliary split-and-pack either.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct BlockAuxSplitPackWitness {
     pub b_init: RoundPackedGroups,
     pub c_init: RoundPackedGroups,
@@ -257,7 +250,7 @@ pub struct BlockAuxSplitPackWitness {
 /// with the partition-specific coefficients living in
 /// [`crate::partitions::lower_sigma_key_hi_coeff_s`] (and the `_s_complement`
 /// twin).
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct SigmaInputSplitPackWitness {
     /// Bits of the input word's lo half at the partition's `S∩lo`
     /// positions, packed contiguously into the low `|S∩lo|` bits.
@@ -309,7 +302,7 @@ impl SigmaInputSplitPackWitness {
 /// inside that round. Limb-level fields are `u32` because the trace converts
 /// them to M31 just before commitment — and so this struct is testable
 /// without pulling in field types.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RoundWitness {
     /// Round index `t ∈ [0, 64)`.
     pub t: u32,
@@ -355,7 +348,7 @@ pub struct RoundWitness {
 /// sum into the high-limb sum; `hi` carries out of the high-limb sum (and is
 /// *discarded* — mod 2³²). Both are bounded by `k − 1` where `k` is the
 /// number of words summed; the AIR range-checks them.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct AddCarries {
     pub lo: u32,
     pub hi: u32,
@@ -370,7 +363,7 @@ pub struct AddCarries {
 /// the byte chunks of one limb so the witness can carry the values the
 /// chunk-bind constraint (lo + 256·hi == limb) range-checks, and the
 /// `xor_8` lookup can read `(b0_s, b0_s', b0_combined)` directly.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct LimbBytes {
     /// Low byte of the limb (`limb & 0xFF`).
     pub b0: u32,
@@ -402,7 +395,7 @@ impl LimbBytes {
 /// S′-side partial, and their XOR-combined value are all committed (see
 /// [`SigmaDecodeWitness`]) so the `xor_8` chunk-wise lookup can fire on
 /// the three matched byte triples.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct LimbPairBytes {
     pub lo: LimbBytes,
     pub hi: LimbBytes,
@@ -450,7 +443,7 @@ impl LimbPairBytes {
 /// This struct carries every intermediate the AIR commits per σ-call so the
 /// decode-table `add_to_relation` calls and the `xor_8` chunk-wise lookups
 /// can both be wired without re-deriving values from the input word.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct SigmaDecodeWitness {
     /// 16-bit packing of the `S`-positions of the input word — the decode
     /// table is indexed by this.
@@ -480,7 +473,7 @@ pub struct SigmaDecodeWitness {
 /// Witness for one message-schedule entry `W[t]`, for `t ∈ [16, 64)`.
 ///
 /// `W[t] = σ1(W[t−2]) + W[t−7] + σ0(W[t−15]) + W[t−16]` (mod 2³²).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ScheduleEntryWitness {
     /// Schedule index `t ∈ [16, 64)`.
     pub t: u32,
@@ -544,7 +537,7 @@ pub const BYTES_PER_WORD: usize = 4;
 /// the marker sits in `W[14]` or `W[15]` — never before `W[14]`. So
 /// the aux would be identically zero and its W[14]-zero constraints
 /// vacuous; we omit it.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct PaddingRowWitness {
     /// 1 iff this block contains the `0x80` padding marker.
     pub is_marker_block: u32,
@@ -681,11 +674,9 @@ impl PaddingRowWitness {
 
 /// Witness for one block: schedule, 64-round state evolution, IV-in/out.
 ///
-/// `schedule` is a `Vec` rather than `[WordLimbs; N_ROUNDS]` so that this
-/// type can derive `Serialize`/`Deserialize` (serde does not auto-derive
-/// `[T; N]` for `N > 32`). The length is always `N_ROUNDS`; the trace
-/// generator asserts this on construction.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// `schedule` is a `Vec` rather than `[WordLimbs; N_ROUNDS]`. The length is
+/// always `N_ROUNDS`; the trace generator asserts this on construction.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlockWitness {
     /// `H⁽ᵗ⁾` at block entry. Block 0 has `H⁽⁰⁾ = IV` (the AIR constrains it).
     pub h_in: [WordLimbs; N_STATE_WORDS],
@@ -710,7 +701,7 @@ pub struct BlockWitness {
 }
 
 /// Top-level witness for an arbitrary-length SHA-256 hash.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Sha256Witness {
     /// The padding witness (raw message → padded blocks).
     pub padding: PaddingWitness,

@@ -15,8 +15,7 @@ computation of *some* preimage, with every intermediate (the 64 schedule
 words `W[t]`, every round's working state, every block's `h_in` / `h_out`,
 the FIPS 180-4 §5.1.1 padding, and the multi-block chain) enforced by the
 AIR's constraint layer. Cross-component binding of the digest output to
-external public inputs (the mdoc `valueDigests` membership and the COSE
-`Sig_structure` digest → ECDSA `z`) is the integration layer's job and is
+external public inputs is the integration layer's job and is
 intentionally outside the scope of this standalone component.
 
 ## Quick start
@@ -62,10 +61,10 @@ The constraint degree stays at 2 throughout (`max_constraint_log_degree_bound
   layer.
 - **Tie the bit-length / marker position to the mdoc parser.** The padding
   layer constrains `W[14]`/`W[15]` to a length value committed in dedicated
-  aux columns, but binding that length to the mdoc preimage waits for
-  roadmap 2.4 (mdoc/COSE structure analysis).
+  aux columns, but binding that length to the mdoc preimage is the
+  integration layer's job (mdoc/COSE structure analysis).
 - **Hide the witness.** This crate produces *succinct* proofs, not
-  zero-knowledge ones. ZK masking is roadmap 4.1.
+  zero-knowledge ones. ZK masking is planned future work.
 - **Ship a CLI.** `examples/prove_demo.rs` is the shortest path today; the
   real `bin/eu-id` is owned by the integration stream.
 - **Use the workspace-shared range-check tables directly.** Until
@@ -79,7 +78,7 @@ The constraint degree stays at 2 throughout (`max_constraint_log_degree_bound
 | Module              | Role                                                                                                                          |
 | ------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
 | `constants`         | `K[0..63]` round constants and the `IV` initial hash value.                                                                   |
-| `partitions`        | Validated bit-index partitions for `Σ0` / `Σ1` / `σ0` / `σ1` (see `research/sha256-air-design.md`).                            |
+| `partitions`        | Validated bit-index partitions for `Σ0` / `Σ1` / `σ0` / `σ1` (see `docs/research/sha256-air-design.md`).                       |
 | `types`             | Word ↔ M31-limb representation, witness records.                                                                              |
 | `headroom`          | Machine-checked M31 headroom audit for every mod-2³² add family, plus the `Range_2/4/5` carry-range bounds the AIR consumes.  |
 | `native`            | Pure SHA-256 reference (padding, schedule, compression). Tested against the `sha2` crate.                                     |
@@ -97,5 +96,5 @@ The constraint degree stays at 2 throughout (`max_constraint_log_degree_bound
 
 ## Design
 
-See [`../../research/sha256-air-design.md`](../../research/sha256-air-design.md) (the
-validated design, supersedes the original sketch in `docs/sha256_air_design.md`).
+See [`docs/research/sha256-air-design.md`](docs/research/sha256-air-design.md) (the
+validated design, supersedes the original sketch in `docs/sha256_air_design_draft.md`).

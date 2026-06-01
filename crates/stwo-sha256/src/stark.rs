@@ -46,7 +46,9 @@ use crate::multiplicities::{
     decode_multiplicities, maj_ch_multiplicities, range_k_multiplicities,
     round_split_pack_multiplicities, sigma_split_pack_multiplicities, xor_8_multiplicities,
 };
-use crate::preprocessed::{generate_preprocessed_trace, maj_ch_log_size, LOG_SIZE_16};
+use crate::preprocessed::{
+    generate_preprocessed_trace, maj_ch_log_size, preprocessed_log_sizes, LOG_SIZE_16,
+};
 use crate::trace::Layout;
 use crate::types::{Digest, Sha256Witness};
 use crate::witness::compute_sha256_witness;
@@ -56,8 +58,7 @@ use crate::witness::compute_sha256_witness;
 /// `Default` picks the *smallest* legal value for each knob — enough to
 /// prove a single padded block on the SIMD backend. Callers proving
 /// anything longer **must** override `log_n_rows`; see its field doc for
-/// the canonical recipe. The laptop benchmark (the post-week-2 go/no-go
-/// gate in the roadmap) pins the production values.
+/// the canonical recipe. The laptop benchmark pins the production values.
 #[derive(Clone, Debug)]
 pub struct ProverConfig {
     /// `log2` of the SHA-256 component's trace row count. Each row is one
@@ -197,6 +198,19 @@ pub enum Sha256VerifyError {
     /// Per-component LogUp claimed sums do not sum to zero — the
     /// consumer ⇄ producer balance is broken.
     LogupSumNonZero,
+    /// `proof.group_width` is outside the supported `[min, max]` range.
+    /// Rejected before any allocation so a malformed proof cannot drive a
+    /// `panic!` inside the preprocessed-table builder (`build_maj_ch_table`).
+    UnsupportedGroupWidth {
+        group_width: u32,
+        min: u32,
+        max: u32,
+    },
+    /// `proof.log_n_rows` is outside the supported `[min, max]` range.
+    /// Rejected before any allocation so a malformed proof cannot drive an
+    /// out-of-memory allocation on the verify path (the trace row count is
+    /// `2^log_n_rows`).
+    UnsupportedLogNRows { log_n_rows: u32, min: u32, max: u32 },
 }
 
 impl core::fmt::Display for Sha256VerifyError {
@@ -206,6 +220,22 @@ impl core::fmt::Display for Sha256VerifyError {
             Self::LogupSumNonZero => write!(
                 f,
                 "LogUp claimed-sums total is non-zero: consumer ⇄ producer balance broken"
+            ),
+            Self::UnsupportedGroupWidth {
+                group_width,
+                min,
+                max,
+            } => write!(
+                f,
+                "proof.group_width = {group_width} outside supported range [{min}, {max}]"
+            ),
+            Self::UnsupportedLogNRows {
+                log_n_rows,
+                min,
+                max,
+            } => write!(
+                f,
+                "proof.log_n_rows = {log_n_rows} outside supported range [{min}, {max}]"
             ),
         }
     }
@@ -282,7 +312,7 @@ fn prove_sha256_inner(
         CommitmentSchemeProver::<SimdBackend, Blake2sMerkleChannel>::new(pcs_config, &twiddles);
 
     // ---- tree[0]: preprocessed trace ----
-    let (preprocessed_evals, preprocessed_ids, _log_sizes) =
+    let (preprocessed_evals, _ids, _log_sizes) =
         generate_preprocessed_trace(group_width, log_n_rows);
     let mut tree_builder = commitment_scheme.tree_builder();
     tree_builder.extend_evals(preprocessed_evals);
@@ -358,13 +388,8 @@ fn prove_sha256_inner(
     tree_builder.commit(channel);
 
     // ---- Build components and prove ----
-    let components_owned = Sha256Components::new(
-        &interaction_claim,
-        &relations,
-        log_n_rows,
-        group_width,
-        &preprocessed_ids,
-    );
+    let components_owned =
+        Sha256Components::new(&interaction_claim, &relations, log_n_rows, group_width);
     let component_provers = components_owned.component_provers();
     let stark_proof =
         prove::<SimdBackend, Blake2sMerkleChannel>(&component_provers, channel, commitment_scheme)?;
@@ -381,8 +406,54 @@ fn prove_sha256_inner(
     })
 }
 
+/// Largest `log_n_rows` the verifier will accept. Each trace row is one
+/// padded 64-byte block, so `2^MAX_LOG_N_ROWS` blocks is on the order of
+/// `64 GiB` of preimage — far beyond any proof a real prover would produce.
+/// This is a denial-of-service guard, **not** a protocol limit: it bounds
+/// verifier-side allocation against a malformed/malicious `proof.log_n_rows`
+/// (e.g. `63` → instant OOM) and can be raised if a legitimate use ever
+/// approaches it. The floor is `LOG_N_LANES` (the SIMD backend's
+/// one-packed-lane minimum the prover itself enforces).
+pub const MAX_LOG_N_ROWS: u32 = 30;
+
+/// Validate the structural size parameters a proof carries **before** any
+/// allocation or table build. Split out as a pure function so the gate can
+/// be unit-tested without constructing a full [`Sha256Proof`] (which needs
+/// a real `StarkProof`).
+///
+/// `group_width` must lie in `[MAX_ROUND_GROUP_BITS, MAX_GROUP_WIDTH]` — the
+/// same range [`crate::tables::build_maj_ch_table`] asserts — and
+/// `log_n_rows` in `[LOG_N_LANES, MAX_LOG_N_ROWS]`. Out-of-range values
+/// would otherwise panic the table builder (`group_width`) or drive an
+/// OOM (`log_n_rows`) on the untrusted verify path.
+fn validate_verify_params(group_width: u32, log_n_rows: u32) -> Result<(), Sha256VerifyError> {
+    let min_w = crate::partitions::MAX_ROUND_GROUP_BITS;
+    let max_w = crate::tables::MAX_GROUP_WIDTH;
+    if !(min_w..=max_w).contains(&group_width) {
+        return Err(Sha256VerifyError::UnsupportedGroupWidth {
+            group_width,
+            min: min_w,
+            max: max_w,
+        });
+    }
+    if !(LOG_N_LANES..=MAX_LOG_N_ROWS).contains(&log_n_rows) {
+        return Err(Sha256VerifyError::UnsupportedLogNRows {
+            log_n_rows,
+            min: LOG_N_LANES,
+            max: MAX_LOG_N_ROWS,
+        });
+    }
+    Ok(())
+}
+
 /// Verify a `Sha256Proof`.
 pub fn verify_sha256_proof(proof: &Sha256Proof) -> Result<(), Sha256VerifyError> {
+    // ---- Structural-parameter gate ----
+    // Reject malformed sizes before any allocation or table build, so a
+    // malicious proof cannot panic the preprocessed-table builder or drive
+    // an out-of-memory allocation on the untrusted verify path.
+    validate_verify_params(proof.group_width, proof.log_n_rows)?;
+
     // ---- Soundness gate: claimed sums must total zero ----
     if !proof.interaction_claim.total().is_zero() {
         return Err(Sha256VerifyError::LogupSumNonZero);
@@ -397,8 +468,11 @@ pub fn verify_sha256_proof(proof: &Sha256Proof) -> Result<(), Sha256VerifyError>
         &mut CommitmentSchemeVerifier::<Blake2sMerkleChannel>::new(pcs_config);
 
     // ---- tree[0]: preprocessed (re-derive log sizes from the proof) ----
-    let (_, preprocessed_ids, preprocessed_log_sizes) =
-        generate_preprocessed_trace(proof.group_width, proof.log_n_rows);
+    // Metadata only: the verifier needs the per-column log sizes to commit
+    // `tree[0]`, never the column data. Rebuilding the lookup tables here
+    // (millions of Maj/Ch rows) just to discard the evaluations would put
+    // prover-scale work on every verify — see `preprocessed_log_sizes`.
+    let preprocessed_log_sizes = preprocessed_log_sizes(proof.group_width, proof.log_n_rows);
     commitment_scheme_verifier.commit(
         proof.stark_proof.commitments[0],
         &preprocessed_log_sizes,
@@ -437,7 +511,6 @@ pub fn verify_sha256_proof(proof: &Sha256Proof) -> Result<(), Sha256VerifyError>
         &relations,
         proof.log_n_rows,
         proof.group_width,
-        &preprocessed_ids,
     );
     let components = components_owned.components();
 
@@ -645,14 +718,13 @@ impl Sha256Components {
         relations: &Sha256Relations,
         log_n_rows: u32,
         group_width: u32,
-        preprocessed_ids: &[stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId],
     ) -> Self {
         // The TraceLocationAllocator runs the same component order on
         // prover and verifier; it consumes preprocessed column IDs in
-        // the order each component's `evaluate` reads them. We seed it
-        // with the static list from `crate::components::all_preprocessed_column_ids`
-        // and let each FrameworkComponent claim its slice.
-        let _ = preprocessed_ids; // pinned by `all_preprocessed_column_ids` call below
+        // the order each component's `evaluate` reads them. We seed it with
+        // the static list from `crate::components::all_preprocessed_column_ids`
+        // — the single source of truth for column order — and let each
+        // FrameworkComponent claim its slice.
         let alloc_ids = all_preprocessed_column_ids();
         let allocator = &mut TraceLocationAllocator::new_with_preprocessed_columns(&alloc_ids);
 
@@ -877,5 +949,57 @@ mod tests {
             };
             assert_eq!(from_message, from_proof, "msg = {msg:?}");
         }
+    }
+
+    /// The structural-parameter gate accepts the supported range and rejects
+    /// out-of-range `group_width` / `log_n_rows` with a typed error — never a
+    /// panic or OOM. Exercised on the pure helper so it needs no real
+    /// `StarkProof` (which the happy-path round-trip tests, all `#[ignore]`d,
+    /// would require).
+    #[test]
+    fn verify_params_gate_accepts_range_and_rejects_outliers() {
+        use crate::partitions::MAX_ROUND_GROUP_BITS;
+        use crate::tables::MAX_GROUP_WIDTH;
+
+        // Accepts the whole supported box [MAX_ROUND_GROUP_BITS, MAX_GROUP_WIDTH]
+        // × [LOG_N_LANES, MAX_LOG_N_ROWS].
+        for w in MAX_ROUND_GROUP_BITS..=MAX_GROUP_WIDTH {
+            assert_eq!(validate_verify_params(w, LOG_N_LANES), Ok(()));
+            assert_eq!(validate_verify_params(w, MAX_LOG_N_ROWS), Ok(()));
+        }
+
+        // group_width below the floor (would under-cover the witness keys)
+        // and above the cap (would panic `build_maj_ch_table`).
+        assert_eq!(
+            validate_verify_params(MAX_ROUND_GROUP_BITS - 1, LOG_N_LANES),
+            Err(Sha256VerifyError::UnsupportedGroupWidth {
+                group_width: MAX_ROUND_GROUP_BITS - 1,
+                min: MAX_ROUND_GROUP_BITS,
+                max: MAX_GROUP_WIDTH,
+            }),
+        );
+        assert!(matches!(
+            validate_verify_params(MAX_GROUP_WIDTH + 1, LOG_N_LANES),
+            Err(Sha256VerifyError::UnsupportedGroupWidth { .. })
+        ));
+
+        // log_n_rows below the SIMD floor, and above the DoS ceiling — the
+        // unbounded value (e.g. 63) the audit flagged as an instant OOM.
+        assert!(matches!(
+            validate_verify_params(MAX_ROUND_GROUP_BITS, LOG_N_LANES - 1),
+            Err(Sha256VerifyError::UnsupportedLogNRows { .. })
+        ));
+        assert_eq!(
+            validate_verify_params(MAX_ROUND_GROUP_BITS, MAX_LOG_N_ROWS + 1),
+            Err(Sha256VerifyError::UnsupportedLogNRows {
+                log_n_rows: MAX_LOG_N_ROWS + 1,
+                min: LOG_N_LANES,
+                max: MAX_LOG_N_ROWS,
+            }),
+        );
+        assert!(matches!(
+            validate_verify_params(MAX_ROUND_GROUP_BITS, 63),
+            Err(Sha256VerifyError::UnsupportedLogNRows { .. })
+        ));
     }
 }

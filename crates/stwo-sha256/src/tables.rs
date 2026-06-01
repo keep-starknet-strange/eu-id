@@ -1,6 +1,6 @@
 //! Preprocessed lookup-table content for the SHA-256 AIR.
 //!
-//! Implements §9 of `research/sha256-air-design.md`. Six families of tables
+//! Implements §9 of `docs/research/sha256-air-design.md`. Six families of tables
 //! live here; all are deterministic functions of the FIPS spec and the
 //! validated bit-index partitions:
 //!
@@ -149,6 +149,15 @@ pub struct MajChRow {
     pub ch_val: u32,
 }
 
+/// Largest packed-group width `W` the Maj/Ch table supports. The table has
+/// `2^(3·W)` rows, so `W = 8` is already `2²⁴ ≈ 16.8 M` rows; anything
+/// larger is "oversized" and almost certainly a mis-tuned config. Together
+/// with [`crate::partitions::MAX_ROUND_GROUP_BITS`] (the lower bound) this
+/// brackets the legal `group_width` range `[MAX_ROUND_GROUP_BITS,
+/// MAX_GROUP_WIDTH]`. The verifier reuses this bound to reject a malformed
+/// `proof.group_width` before it can reach the `assert!` below.
+pub const MAX_GROUP_WIDTH: u32 = 8;
+
 /// Build the `(2^W)³` row packed `Maj`/`Ch` table.
 ///
 /// `group_width` must be at least
@@ -159,8 +168,8 @@ pub struct MajChRow {
 /// a future micro-optimisation pinned by 3.9.12's benchmark.
 pub fn build_maj_ch_table(group_width: u32) -> Vec<MajChRow> {
     assert!(
-        group_width <= 8,
-        "group_width > 8 generates an oversized table; tune W down"
+        group_width <= MAX_GROUP_WIDTH,
+        "group_width > {MAX_GROUP_WIDTH} generates an oversized table; tune W down"
     );
     assert!(
         group_width >= crate::partitions::MAX_ROUND_GROUP_BITS,

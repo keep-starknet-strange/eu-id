@@ -12,7 +12,7 @@
 //! i.e. `|expr| < M31_CENTER_LIMIT = (2³¹ − 2) / 2 = 2³⁰ − 1`, otherwise the
 //! M31 equation could be satisfied with a non-zero integer value and the
 //! constraint would not actually pin down `result`. The validated design
-//! (§3 of `research/sha256-air-design.md`) shows that even the widest add —
+//! (§3 of `docs/research/sha256-air-design.md`) shows that even the widest add —
 //! `T1` with 5 addends — has roughly 12 bits of headroom, so for SHA-256
 //! every family fits centered M31 directly. But per the AIR-soundness
 //! convention, the assertion must come from **code**, not a paragraph in
@@ -218,7 +218,7 @@ pub fn audit_round_short_adds() -> EquationHeadroom {
 /// 2-addend audit for the eight finalization adds per block:
 /// `Hⱼ⁽ᵗ⁺¹⁾ = Hⱼ⁽ᵗ⁾ + working_varⱼ` for `j ∈ [0, 8)`. Same limb shape as
 /// the round short adds; tracked separately for traceability with the
-/// roadmap families and validated design §10.3. Carries are range-checked
+/// validated design §10.3. Carries are range-checked
 /// to `[0, RANGE_2) = [0, 2)`.
 pub fn audit_finalization() -> EquationHeadroom {
     audit_mod_2_32_add(
@@ -368,7 +368,7 @@ mod tests {
 
     /// Sanity: the widest family (`T1`, k = 5) has a combined-expression
     /// bound below 2²⁰, matching the validated design's "~12 bits of
-    /// headroom" estimate in §3 of `research/sha256-air-design.md`.
+    /// headroom" estimate in §3 of `docs/research/sha256-air-design.md`.
     #[test]
     fn headroom_matches_design_estimate() {
         let widest = audit("t1");

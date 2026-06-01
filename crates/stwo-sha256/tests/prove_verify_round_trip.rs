@@ -5,8 +5,8 @@
 //! - The entire 23-component composition (`Sha256Eval` consumer +
 //!   8 σ/Σ decode producers + 1 packed Maj/Ch + 1 xor_8 + 4 round
 //!   split-pack + 4 σ split-pack + 4 `Range_k` producers).
-//! - The preprocessed-trace commitment (80 columns).
-//! - The base-trace commitment (9 355 SHA-256 columns + 23 producer
+//! - The preprocessed-trace commitment (81 columns).
+//! - The base-trace commitment (9 356 SHA-256 columns + 23 producer
 //!   multiplicity columns).
 //! - The LogUp interaction trace across every component, with
 //!   consumer ⇄ producer sums totalling zero — the soundness backbone.

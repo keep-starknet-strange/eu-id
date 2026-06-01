@@ -6,7 +6,7 @@
 //! Both can be multi-block; both must expose the digest as M31 columns so the
 //! integration layer can LogUp-bind them.
 //!
-//! Module layout (see `research/sha256-air-design.md` for the design):
+//! Module layout (see `docs/research/sha256-air-design.md` for the design):
 //!
 //! - [`constants`] — round constants `K[0..63]` and initial hash value `IV`.
 //! - [`partitions`] — the validated bit-index partitions for `Σ0`/`Σ1`/`σ0`/`σ1`.

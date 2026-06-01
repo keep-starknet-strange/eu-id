@@ -521,7 +521,7 @@ mod tests {
     /// `Range_k` table has no row for, so the consumer/producer claimed
     /// sums cannot balance. Together with the producer-side parity
     /// invariants further up this module, this closes audit lesson L4
-    /// (research/sha256-air-design.md §11) on the LogUp side at debug
+    /// (docs/research/sha256-air-design.md §11) on the LogUp side at debug
     /// cadence.
     #[test]
     fn out_of_range_carry_mutation_shifts_multiplicity_outside_table() {

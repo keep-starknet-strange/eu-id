@@ -1,6 +1,6 @@
 //! Validated bit-index partitions for `Σ0`, `Σ1`, `σ0`, `σ1`.
 //!
-//! Implements §§6–8 of `research/sha256-air-design.md`. Each function `F` is a
+//! Implements §§6–8 of `docs/research/sha256-air-design.md`. Each function `F` is a
 //! GF(2)-linear map from 32 input bits to 32 output bits. We pick a 16-bit
 //! subset `S` of the input bits and classify every output bit `i` by its
 //! input-bit dependency set `D(i)`:
@@ -47,7 +47,7 @@ pub mod s_mask {
 /// Six bit-groups per round-function partition.
 ///
 /// For `Σ0`: `(L0, H0, H1) ⊎ (L1, L2, H2) = S ⊎ S'`. Group naming follows
-/// `research/sha256-air-design.md` so the design doc and code stay traceable.
+/// `docs/research/sha256-air-design.md` so the design doc and code stay traceable.
 /// `Σ1` uses the analogous `(Le0, He0, He1) ⊎ (Le1, Le2, He2)`. Each group
 /// fits in one 16-bit half-word so the `Maj`/`Ch` packed tables can address
 /// it without crossing the limb boundary.
