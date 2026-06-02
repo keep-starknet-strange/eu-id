@@ -138,7 +138,21 @@ use crate::scalar::fake_glv_signed_selector_operand::{
     FakeGlvSignedSelectorOperandInteractionClaim, FakeGlvSignedSelectorOperandProof,
     FakeGlvSignedSelectorOperandProofClaim, FakeGlvSignedSelectorOperandRelation,
 };
+use crate::scalar::scalar_mod_mul::claim::{
+    gen_base_trace as gen_scalar_mod_mul_base_trace,
+    gen_interaction_trace as gen_scalar_mod_mul_interaction_trace,
+    gen_preprocessed_trace as gen_scalar_mod_mul_preprocessed_trace,
+    preprocessed_column_ids as scalar_mod_mul_preprocessed_column_ids, ScalarModMulComponents,
+};
 use crate::scalar::scalar_mod_mul::columns::M31ColumnEval;
+use crate::scalar::scalar_mod_mul::interaction_claim::{
+    zero_interaction_claim, ScalarModMulProofSliceInteractionClaim,
+};
+use crate::scalar::scalar_mod_mul::providers::LookupProviderClaims;
+use crate::scalar::scalar_mod_mul::relation::ScalarModMulLookupRelations;
+use crate::scalar::scalar_mod_mul::{
+    ScalarModMulClaim, ScalarModMulTraceError, ScalarModMulTraceRows,
+};
 use crate::scalar::setup_air::{ScalarSetupClaim, ScalarSetupClaimError};
 use crate::types::EcdsaVerifyInput;
 
@@ -528,6 +542,7 @@ pub struct P256CurrentAirProof<H: MerkleHasherLifted> {
 pub struct P256CurrentAirProofClaim {
     pub public_inputs: PublicEcdsaInputClaim,
     pub public_input_consumer: PublicEcdsaInputConsumerProofClaim,
+    pub scalar_setup_mod_muls: Vec<ScalarModMulClaim>,
     pub prepared_table_projective_source: PreparedTableProjectiveSourceProofClaim,
     pub fake_glv_projective_source: FakeGlvProjectiveSourceProofClaim,
     pub fake_glv_chain_expansion: FakeGlvChainExpansionProofClaim,
@@ -548,6 +563,11 @@ impl P256CurrentAirProofClaim {
             public_input_consumer: PublicEcdsaInputConsumerProofClaim::from_claim(
                 &claim.public_inputs,
             ),
+            scalar_setup_mod_muls: scalar_setup_mod_mul_rows(claim)
+                .expect("verified scalar setup mod-mul rows generate")
+                .iter()
+                .map(ScalarModMulClaim::from_rows)
+                .collect(),
             prepared_table_projective_source:
                 PreparedTableProjectiveSourceProofClaim::from_prepared_trace(
                     &claim.prepared_table_ec_trace,
@@ -592,6 +612,10 @@ impl P256CurrentAirProofClaim {
     fn mix_into(&self, channel: &mut impl Channel) {
         self.public_inputs.mix_into(channel);
         self.public_input_consumer.mix_into(channel);
+        channel.mix_u64(self.scalar_setup_mod_muls.len() as u64);
+        for claim in &self.scalar_setup_mod_muls {
+            claim.mix_into(channel);
+        }
         self.prepared_table_projective_source.mix_into(channel);
         self.fake_glv_projective_source.mix_into(channel);
         self.fake_glv_chain_expansion.mix_into(channel);
@@ -606,7 +630,13 @@ impl P256CurrentAirProofClaim {
 
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
         let mut ids = Vec::new();
-        append_unique_preprocessed_ids(&mut ids, Vec::new());
+        let lookup_claims = LookupProviderClaims::scalar_mod_mul();
+        for claim in &self.scalar_setup_mod_muls {
+            append_unique_preprocessed_ids(
+                &mut ids,
+                scalar_mod_mul_preprocessed_column_ids(claim, &lookup_claims),
+            );
+        }
         append_unique_preprocessed_ids(
             &mut ids,
             self.prepared_table_projective_source
@@ -661,7 +691,34 @@ impl P256CurrentAirProofClaim {
         let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(ids);
         let components =
             P256CurrentAirComponents::new(&mut allocator, self, interaction_claim, relations);
-        components.trace_log_degree_bounds()
+        let component_list = components.components();
+        let mut bounds = components.trace_log_degree_bounds();
+        let mut preprocessed_bounds = vec![0; ids.len()];
+        let mut visited = vec![false; ids.len()];
+
+        for component in component_list {
+            let component_bounds = component.trace_log_degree_bounds();
+            for (&index, &log_size) in std::iter::zip(
+                component.preprocessed_column_indices().iter(),
+                component_bounds[0].iter(),
+            ) {
+                if visited[index] {
+                    assert_eq!(
+                        preprocessed_bounds[index], log_size,
+                        "preprocessed column {index} log-size mismatch"
+                    );
+                } else {
+                    preprocessed_bounds[index] = log_size;
+                    visited[index] = true;
+                }
+            }
+        }
+        assert!(
+            visited.iter().all(|&is_visited| is_visited),
+            "not all preprocessed columns are used by current-air components"
+        );
+        bounds[0] = preprocessed_bounds;
+        bounds
     }
 
     fn max_constraint_log_degree_bound(&self, ids: &[PreProcessedColumnId]) -> u32 {
@@ -669,7 +726,7 @@ impl P256CurrentAirProofClaim {
         let components = P256CurrentAirComponents::new(
             &mut allocator,
             self,
-            &P256CurrentAirInteractionClaim::zero(),
+            &P256CurrentAirInteractionClaim::zero_for_claim(self),
             &P256CurrentAirRelations::dummy(),
         );
         components.max_constraint_log_degree_bound()
@@ -679,6 +736,7 @@ impl P256CurrentAirProofClaim {
 #[derive(Clone, Debug)]
 pub struct P256CurrentAirInteractionClaim {
     pub public_inputs: RelationBalanceClaim,
+    pub(crate) scalar_setup_mod_muls: Vec<ScalarModMulProofSliceInteractionClaim>,
     pub prepared_table_projective_source: PreparedTableProjectiveSourceInteractionClaim,
     pub fake_glv_projective_source: FakeGlvProjectiveSourceInteractionClaim,
     pub fake_glv_chain_expansion: FakeGlvChainExpansionInteractionClaim,
@@ -697,6 +755,7 @@ impl P256CurrentAirInteractionClaim {
                 provider_claimed_sum: zero(),
                 consumer_claimed_sum: zero(),
             },
+            scalar_setup_mod_muls: Vec::new(),
             prepared_table_projective_source: PreparedTableProjectiveSourceInteractionClaim::zero(),
             fake_glv_projective_source: FakeGlvProjectiveSourceInteractionClaim::zero(),
             fake_glv_chain_expansion: FakeGlvChainExpansionInteractionClaim::zero(),
@@ -711,11 +770,25 @@ impl P256CurrentAirInteractionClaim {
         }
     }
 
+    fn zero_for_claim(claim: &P256CurrentAirProofClaim) -> Self {
+        let mut zero = Self::zero();
+        zero.scalar_setup_mod_muls = (0..claim.scalar_setup_mod_muls.len())
+            .map(|_| zero_interaction_claim())
+            .collect();
+        zero
+    }
+
     fn mix_into(&self, channel: &mut impl Channel) {
         channel.mix_felts(&[
             self.public_inputs.provider_claimed_sum,
             self.public_inputs.consumer_claimed_sum,
         ]);
+        channel.mix_u64(self.scalar_setup_mod_muls.len() as u64);
+        for claim in &self.scalar_setup_mod_muls {
+            claim.scalar_mod_mul.mix_into(channel);
+            claim.range13.mix_into(channel);
+            claim.signed_carry.mix_into(channel);
+        }
         self.prepared_table_projective_source.mix_into(channel);
         self.fake_glv_projective_source.mix_into(channel);
         self.fake_glv_chain_expansion.mix_into(channel);
@@ -729,6 +802,9 @@ impl P256CurrentAirInteractionClaim {
 
     fn verify_balanced(&self) -> Result<(), P256ProofError> {
         self.public_inputs.verify("PublicEcdsaInstance")?;
+        for claim in &self.scalar_setup_mod_muls {
+            verify_current_air_relation_zero("ScalarSetupModMul", claim.claimed_sum())?;
+        }
         verify_current_air_relation_zero(
             "PreparedTableProjectiveSource",
             self.prepared_table_projective_source.total(),
@@ -768,9 +844,10 @@ impl P256CurrentAirInteractionClaim {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct P256CurrentAirRelations {
     public_inputs: PublicEcdsaInstanceRelation,
+    scalar_mod_mul: ScalarModMulLookupRelations,
     prepared_table: PreparedTableEcRowRelation,
     fake_glv_projective_source: FakeGlvPrimitiveEcRowRelation,
     fake_glv_chain_expansion: FakeGlvChainPrimitiveExpansionRelation,
@@ -786,6 +863,7 @@ impl P256CurrentAirRelations {
     fn dummy() -> Self {
         Self {
             public_inputs: PublicEcdsaInstanceRelation::dummy(),
+            scalar_mod_mul: ScalarModMulLookupRelations::dummy(),
             prepared_table: PreparedTableEcRowRelation::dummy(),
             fake_glv_projective_source: FakeGlvPrimitiveEcRowRelation::dummy(),
             fake_glv_chain_expansion: FakeGlvChainPrimitiveExpansionRelation::dummy(),
@@ -801,6 +879,7 @@ impl P256CurrentAirRelations {
     fn draw(channel: &mut impl Channel) -> Self {
         Self {
             public_inputs: PublicEcdsaInstanceRelation::draw(channel),
+            scalar_mod_mul: ScalarModMulLookupRelations::draw(channel),
             prepared_table: PreparedTableEcRowRelation::draw(channel),
             fake_glv_projective_source: FakeGlvPrimitiveEcRowRelation::draw(channel),
             fake_glv_chain_expansion: FakeGlvChainPrimitiveExpansionRelation::draw(channel),
@@ -816,6 +895,7 @@ impl P256CurrentAirRelations {
 
 struct P256CurrentAirComponents {
     public_input_consumer: PublicEcdsaInputConsumerComponents,
+    scalar_setup_mod_muls: Vec<ScalarModMulComponents>,
     prepared_table_projective_source: PreparedTableProjectiveSourceComponents,
     fake_glv_projective_source: FakeGlvProjectiveSourceComponents,
     fake_glv_chain_expansion: FakeGlvChainExpansionComponents,
@@ -835,6 +915,7 @@ impl P256CurrentAirComponents {
         interaction_claim: &P256CurrentAirInteractionClaim,
         relations: &P256CurrentAirRelations,
     ) -> Self {
+        let scalar_lookup_claims = LookupProviderClaims::scalar_mod_mul();
         Self {
             public_input_consumer: PublicEcdsaInputConsumerComponents::new(
                 allocator,
@@ -844,6 +925,20 @@ impl P256CurrentAirComponents {
                 },
                 &relations.public_inputs,
             ),
+            scalar_setup_mod_muls: claim
+                .scalar_setup_mod_muls
+                .iter()
+                .zip(&interaction_claim.scalar_setup_mod_muls)
+                .map(|(claim, interaction_claim)| {
+                    ScalarModMulComponents::new(
+                        allocator,
+                        claim,
+                        interaction_claim,
+                        &scalar_lookup_claims,
+                        &relations.scalar_mod_mul,
+                    )
+                })
+                .collect(),
             prepared_table_projective_source: PreparedTableProjectiveSourceComponents::new(
                 allocator,
                 claim.prepared_table_projective_source.log_size,
@@ -914,6 +1009,15 @@ impl P256CurrentAirComponents {
     fn components(&self) -> Vec<&dyn Component> {
         let mut components = Vec::new();
         components.extend(self.public_input_consumer.components());
+        for scalar_setup_mod_mul in &self.scalar_setup_mod_muls {
+            components.push(&scalar_setup_mod_mul.canonical as &dyn Component);
+            components.push(&scalar_setup_mod_mul.ab_chunks as &dyn Component);
+            components.push(&scalar_setup_mod_mul.qn_chunks as &dyn Component);
+            components.push(&scalar_setup_mod_mul.accumulators as &dyn Component);
+            components.push(&scalar_setup_mod_mul.reduction_digits as &dyn Component);
+            components.push(&scalar_setup_mod_mul.range13 as &dyn Component);
+            components.push(&scalar_setup_mod_mul.signed_carry as &dyn Component);
+        }
         components.extend(self.prepared_table_projective_source.components());
         components.extend(self.fake_glv_projective_source.components());
         components.extend(self.fake_glv_chain_expansion.components());
@@ -930,6 +1034,18 @@ impl P256CurrentAirComponents {
     fn component_provers(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
         let mut components = Vec::new();
         components.extend(self.public_input_consumer.component_provers());
+        for scalar_setup_mod_mul in &self.scalar_setup_mod_muls {
+            components.push(&scalar_setup_mod_mul.canonical as &dyn ComponentProver<SimdBackend>);
+            components.push(&scalar_setup_mod_mul.ab_chunks as &dyn ComponentProver<SimdBackend>);
+            components.push(&scalar_setup_mod_mul.qn_chunks as &dyn ComponentProver<SimdBackend>);
+            components
+                .push(&scalar_setup_mod_mul.accumulators as &dyn ComponentProver<SimdBackend>);
+            components
+                .push(&scalar_setup_mod_mul.reduction_digits as &dyn ComponentProver<SimdBackend>);
+            components.push(&scalar_setup_mod_mul.range13 as &dyn ComponentProver<SimdBackend>);
+            components
+                .push(&scalar_setup_mod_mul.signed_carry as &dyn ComponentProver<SimdBackend>);
+        }
         components.extend(self.prepared_table_projective_source.component_provers());
         components.extend(self.fake_glv_projective_source.component_provers());
         components.extend(self.fake_glv_chain_expansion.component_provers());
@@ -972,7 +1088,7 @@ fn p256_stark_slice_low_ram_config(max_constraint_log_degree_bound: u32) -> PcsC
 }
 
 fn p256_stark_monolithic_profile_config(_max_constraint_log_degree_bound: u32) -> PcsConfig {
-    let fri_config = FriConfig::new(5, 1, 64, 1);
+    let fri_config = FriConfig::new(5, 2, 64, 1);
     PcsConfig {
         pow_bits: 0,
         fri_config,
@@ -1257,6 +1373,16 @@ impl P256ProofDraft {
         let mut ids = Vec::new();
         let mut columns = Vec::new();
 
+        let scalar_lookup_claims = LookupProviderClaims::scalar_mod_mul();
+        let scalar_setup_rows = scalar_setup_mod_mul_rows(&self.claim)?;
+        for (rows, local_claim) in scalar_setup_rows.iter().zip(&claim.scalar_setup_mod_muls) {
+            let local_ids =
+                scalar_mod_mul_preprocessed_column_ids(local_claim, &scalar_lookup_claims);
+            let local_columns =
+                gen_scalar_mod_mul_preprocessed_trace(rows, &scalar_lookup_claims, &local_ids);
+            append_unique_preprocessed_columns(&mut ids, &mut columns, local_ids, local_columns);
+        }
+
         let local_ids = claim
             .prepared_table_projective_source
             .preprocessed_column_ids();
@@ -1337,8 +1463,17 @@ impl P256ProofDraft {
             .gen_proof_slice_preprocessed_trace(&local_ids)?;
         append_unique_preprocessed_columns(&mut ids, &mut columns, local_ids, local_columns);
 
-        debug_assert_eq!(ids, global_ids);
-        Ok(columns)
+        Ok(global_ids
+            .iter()
+            .map(|global_id| {
+                ids.iter()
+                    .zip(&columns)
+                    .find_map(|(id, column)| (id == global_id).then(|| column.clone()))
+                    .unwrap_or_else(|| {
+                        panic!("missing global preprocessed column {}", global_id.id)
+                    })
+            })
+            .collect())
     }
 
     fn gen_current_air_base_trace(
@@ -1352,6 +1487,12 @@ impl P256ProofDraft {
             &scalar_setup_public,
             claim.public_input_consumer.log_size,
         );
+        let scalar_lookup_claims = LookupProviderClaims::scalar_mod_mul();
+        let scalar_setup_rows = scalar_setup_mod_mul_rows(&self.claim)?;
+        let scalar_setup_mod_muls = scalar_setup_rows
+            .iter()
+            .map(|rows| gen_scalar_mod_mul_base_trace(rows, &scalar_lookup_claims))
+            .collect::<Vec<_>>();
         let prepared_table_provider = gen_prepared_table_ec_row_base_trace(
             &self.claim.prepared_table_ec_trace,
             claim.prepared_table_projective_source.log_size,
@@ -1439,6 +1580,9 @@ impl P256ProofDraft {
 
         let mut columns = Vec::new();
         columns.extend(public_input_consumer.clone());
+        for scalar_setup_mod_mul in &scalar_setup_mod_muls {
+            columns.extend(scalar_setup_mod_mul.clone());
+        }
         columns.extend(prepared_table_provider.clone());
         columns.extend(prepared_table_consumer.clone());
         columns.extend(fake_glv_projective_provider.clone());
@@ -1460,6 +1604,7 @@ impl P256ProofDraft {
         Ok(P256CurrentAirBaseTrace {
             columns,
             public_input_consumer,
+            scalar_setup_mod_muls,
             prepared_table_provider,
             prepared_table_consumer,
             fake_glv_projective_provider,
@@ -1492,6 +1637,20 @@ impl P256ProofDraft {
             .claim
             .public_inputs
             .initial_logup_claim(&relations.public_inputs);
+        let scalar_lookup_claims = LookupProviderClaims::scalar_mod_mul();
+        let scalar_setup_rows = scalar_setup_mod_mul_rows(&self.claim)?;
+        debug_assert_eq!(base.scalar_setup_mod_muls.len(), scalar_setup_rows.len());
+        let mut scalar_setup_interactions = Vec::with_capacity(scalar_setup_rows.len());
+        let mut scalar_setup_interaction_claims = Vec::with_capacity(scalar_setup_rows.len());
+        for rows in &scalar_setup_rows {
+            let (interaction, interaction_claim) = gen_scalar_mod_mul_interaction_trace(
+                rows,
+                &scalar_lookup_claims,
+                &relations.scalar_mod_mul,
+            );
+            scalar_setup_interactions.push(interaction);
+            scalar_setup_interaction_claims.push(interaction_claim);
+        }
         let (prepared_provider_interaction, prepared_provider_claim) =
             gen_prepared_table_ec_row_interaction_trace(
                 &base.prepared_table_provider,
@@ -1580,6 +1739,9 @@ impl P256ProofDraft {
 
         let mut columns = Vec::new();
         columns.extend(public_consumer_interaction);
+        for interaction in scalar_setup_interactions {
+            columns.extend(interaction);
+        }
         columns.extend(prepared_provider_interaction);
         columns.extend(prepared_consumer_interaction);
         columns.extend(fake_glv_provider_interaction);
@@ -1604,6 +1766,7 @@ impl P256ProofDraft {
                     public_provider_claim.claimed_sum,
                     public_consumer_claim.claimed_sum,
                 ),
+                scalar_setup_mod_muls: scalar_setup_interaction_claims,
                 prepared_table_projective_source: PreparedTableProjectiveSourceInteractionClaim {
                     provider_claimed_sum: prepared_provider_claim.claimed_sum,
                     consumer_claimed_sum: prepared_consumer_claim.claimed_sum,
@@ -1685,6 +1848,7 @@ impl P256ProofDraft {
 struct P256CurrentAirBaseTrace {
     columns: ColumnVec<M31ColumnEval>,
     public_input_consumer: ColumnVec<M31ColumnEval>,
+    scalar_setup_mod_muls: Vec<ColumnVec<M31ColumnEval>>,
     prepared_table_provider: ColumnVec<M31ColumnEval>,
     prepared_table_consumer: ColumnVec<M31ColumnEval>,
     fake_glv_projective_provider: ColumnVec<M31ColumnEval>,
@@ -1700,6 +1864,23 @@ struct P256CurrentAirBaseTrace {
     lsb_consumer: ColumnVec<M31ColumnEval>,
     prepared_point_provider: ColumnVec<M31ColumnEval>,
     prepared_point_consumer: ColumnVec<M31ColumnEval>,
+}
+
+fn scalar_setup_mod_mul_rows(
+    claim: &P256ProofClaim,
+) -> Result<Vec<ScalarModMulTraceRows>, P256ProofError> {
+    let mut rows = Vec::with_capacity(2 * claim.scalar_setup.rows.len());
+    for (sig_index, row) in claim.scalar_setup.rows.iter().enumerate() {
+        rows.push(ScalarModMulTraceRows::new(
+            (2 * sig_index) as u32,
+            &row.witness.trace.s_u1_eq,
+        )?);
+        rows.push(ScalarModMulTraceRows::new(
+            (2 * sig_index + 1) as u32,
+            &row.witness.trace.s_u2_eq,
+        )?);
+    }
+    Ok(rows)
 }
 
 pub fn verify_current_air_monolithic<MC>(
@@ -1720,7 +1901,7 @@ where
     let commitment_scheme = &mut CommitmentSchemeVerifier::<MC>::new(stark_proof.config);
     let dummy_log_degree_bounds = claim.trace_log_degree_bounds(
         &ids,
-        &P256CurrentAirInteractionClaim::zero(),
+        &P256CurrentAirInteractionClaim::zero_for_claim(&claim),
         &P256CurrentAirRelations::dummy(),
     );
 
@@ -1913,6 +2094,7 @@ pub enum P256ProofError {
     ProjectiveEc(ProjectiveEcError),
     ProjectiveRcbAir(ProjectiveRcbAirError),
     PublicKeyOnCurve(PublicKeyOnCurveError),
+    ScalarModMulTrace(ScalarModMulTraceError),
     InvalidNativeEcdsaInput { index: usize },
     RelationImbalance { relation: &'static str },
     ProofLayer(String),
@@ -1990,6 +2172,12 @@ impl From<PublicKeyOnCurveError> for P256ProofError {
     }
 }
 
+impl From<ScalarModMulTraceError> for P256ProofError {
+    fn from(value: ScalarModMulTraceError) -> Self {
+        Self::ScalarModMulTrace(value)
+    }
+}
+
 fn zero() -> SecureField {
     SecureField::from(M31::from_u32_unchecked(0))
 }
@@ -1999,6 +2187,7 @@ mod tests {
     use super::*;
     use crate::constants::{P256_GX, P256_GY, P256_ORDER};
     use crate::curve::{mod_inverse, scalar_mul};
+    use crate::debug::MockCommitmentScheme;
     use crate::fake_glv_chain_continuity::{
         prove_fake_glv_chain_continuity_proof_slice, verify_fake_glv_chain_continuity_proof_slice,
         FakeGlvChainContinuityProofClaim,
@@ -2054,12 +2243,26 @@ mod tests {
         PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS, PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS,
         PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TRACE_COLUMNS,
     };
+    use crate::scalar::scalar_mod_mul::interaction_claim::zero_interaction_claim;
+    use crate::scalar::scalar_mod_mul::layout::{
+        ScalarModMulFamilyTraces, PRODUCT_METADATA_TRACE_COLUMNS,
+    };
+    use crate::scalar::scalar_mod_mul::schedule::ScalarModMulFixedSchedule;
+    use crate::scalar::scalar_mod_mul::{
+        SCALAR_MOD_MUL_SPLIT_CHUNK_DIGITS, SCALAR_MOD_MUL_SPLIT_CHUNK_TERMS,
+    };
     use crate::types::{AffinePoint, Signature, U256};
     use core::cmp::Ordering;
     use std::collections::BTreeMap;
+    use std::ops::Deref;
+    use stwo::core::channel::Blake2sM31Channel;
     use stwo::core::fri::FriConfig;
     use stwo::core::pcs::PcsConfig;
     use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
+    use stwo::prover::backend::Column;
+    use stwo_constraint_framework::{
+        assert_constraints_on_trace, FrameworkComponent, FrameworkEval, PREPROCESSED_TRACE_IDX,
+    };
 
     fn test_input(message_hash: u64, r: u64, s: u64) -> EcdsaVerifyInput {
         EcdsaVerifyInput {
@@ -2996,6 +3199,464 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "prints and asserts current AIR constraints component by component"]
+    fn current_p256_air_constraint_diagnostic() {
+        let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+            valid_real_input_with_small_u_scalars(0, 11),
+        ])
+        .expect("zero branch pipeline builds");
+        proof.verify_current_e2e().expect("zero branch verifies");
+
+        assert_current_air_constraints(&proof);
+    }
+
+    #[test]
+    #[ignore = "proves scalar setup mod-mul rows through PCS for degree/profile diagnostics"]
+    fn scalar_setup_mod_mul_pcs_diagnostic() {
+        let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+            valid_real_input_with_small_u_scalars(0, 11),
+        ])
+        .expect("zero branch pipeline builds");
+        let rows = scalar_setup_mod_mul_rows(&proof.claim).expect("scalar mod-mul rows generate");
+
+        for rows in &rows {
+            prove_scalar_mod_mul_rows_for_diagnostic(rows);
+        }
+    }
+
+    #[test]
+    #[ignore = "checks scalar setup mod-mul AB schedule/base row order"]
+    fn scalar_setup_mod_mul_ab_row_order_diagnostic() {
+        let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+            valid_real_input_with_small_u_scalars(0, 11),
+        ])
+        .expect("zero branch pipeline builds");
+        let rows = scalar_setup_mod_mul_rows(&proof.claim).expect("scalar mod-mul rows generate");
+
+        for rows in &rows {
+            assert_ab_schedule_base_row_order(rows);
+        }
+    }
+
+    #[test]
+    #[ignore = "checks scalar setup mod-mul AB decomposition in logical and storage order"]
+    fn scalar_setup_mod_mul_ab_decomposition_row_order_diagnostic() {
+        let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+            valid_real_input_with_small_u_scalars(0, 11),
+        ])
+        .expect("zero branch pipeline builds");
+        let rows = scalar_setup_mod_mul_rows(&proof.claim).expect("scalar mod-mul rows generate");
+
+        for rows in &rows {
+            assert_ab_decomposition_columns(rows);
+        }
+    }
+
+    fn assert_ab_schedule_base_row_order(rows: &ScalarModMulTraceRows) {
+        let traces = ScalarModMulFamilyTraces::from_rows(rows);
+        let schedule = ScalarModMulFixedSchedule::from_rows(rows);
+        let trace_evals = traces.to_circle_evaluations();
+        let schedule_evals = schedule.to_circle_evaluations();
+
+        let terms = SCALAR_MOD_MUL_SPLIT_CHUNK_TERMS;
+        let digits = SCALAR_MOD_MUL_SPLIT_CHUNK_DIGITS;
+        let mut comparisons = vec![(0, 0, "active"), (1, 1, "coeff"), (2, 2, "chunk")];
+
+        for term in 0..terms {
+            comparisons.push((3 + term, 3 + 3 * term, "term_active"));
+            comparisons.push((3 + terms + term, 3 + 3 * term + 1, "lhs_index"));
+            comparisons.push((3 + 2 * terms + term, 3 + 3 * term + 2, "rhs_index"));
+        }
+        for offset in 0..digits {
+            comparisons.push((
+                3 + 3 * terms + offset,
+                3 + 3 * terms + offset,
+                "digit_active",
+            ));
+        }
+        assert_eq!(comparisons.len(), PRODUCT_METADATA_TRACE_COLUMNS);
+
+        for (base_col, schedule_col, name) in comparisons {
+            assert_eq!(
+                traces.ab_chunks.columns[base_col], schedule.ab_chunks[schedule_col].values,
+                "logical AB {name} column mismatch for mul_id={} base_col={base_col} schedule_col={schedule_col}",
+                rows.mul_id,
+            );
+            assert_eq!(
+                trace_evals.ab_chunks[base_col].values.to_cpu(),
+                schedule_evals.ab_chunks[schedule_col].values.to_cpu(),
+                "storage-order AB {name} column mismatch for mul_id={} base_col={base_col} schedule_col={schedule_col}",
+                rows.mul_id,
+            );
+        }
+    }
+
+    fn assert_ab_decomposition_columns(rows: &ScalarModMulTraceRows) {
+        let traces = ScalarModMulFamilyTraces::from_rows(rows);
+        assert_ab_decomposition_column_set(
+            rows.mul_id,
+            "logical",
+            traces.ab_chunks.columns.iter().map(Vec::as_slice).collect(),
+        );
+
+        let evals = traces.to_circle_evaluations();
+        let storage_columns = evals
+            .ab_chunks
+            .iter()
+            .map(|column| column.values.to_cpu())
+            .collect::<Vec<_>>();
+        assert_ab_decomposition_column_set(
+            rows.mul_id,
+            "storage",
+            storage_columns.iter().map(Vec::as_slice).collect(),
+        );
+    }
+
+    fn assert_ab_decomposition_column_set(mul_id: u32, order: &str, columns: Vec<&[M31]>) {
+        let terms = SCALAR_MOD_MUL_SPLIT_CHUNK_TERMS;
+        let limb_base = M31::from_u32_unchecked(1u32 << stwo_p256_utils::constants::LIMB_BITS);
+        let digit_start = PRODUCT_METADATA_TRACE_COLUMNS + 3 * terms;
+        for row in 0..columns[0].len() {
+            let mut product_sum = M31::from_u32_unchecked(0);
+            for term in 0..terms {
+                let term_active = columns[3 + term][row];
+                let product = columns[PRODUCT_METADATA_TRACE_COLUMNS + 3 * term + 2][row];
+                product_sum += term_active * product;
+            }
+            let decomposition = product_sum
+                - columns[digit_start][row]
+                - limb_base * columns[digit_start + 1][row]
+                - limb_base * limb_base * columns[digit_start + 2][row];
+            assert_eq!(
+                columns[0][row] * decomposition,
+                M31::from_u32_unchecked(0),
+                "AB decomposition mismatch mul_id={mul_id} order={order} row={row}",
+            );
+        }
+    }
+
+    fn prove_scalar_mod_mul_rows_for_diagnostic(rows: &ScalarModMulTraceRows) {
+        eprintln!("prove scalar_mod_mul {} aggregate", rows.mul_id);
+        let lookup_claims = LookupProviderClaims::scalar_mod_mul();
+        let claim = ScalarModMulClaim::from_rows(rows);
+        let ids = scalar_mod_mul_preprocessed_column_ids(&claim, &lookup_claims);
+        let max_constraint_log_degree_bound = {
+            let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
+            let components = ScalarModMulComponents::new(
+                &mut allocator,
+                &claim,
+                &zero_interaction_claim(),
+                &lookup_claims,
+                &ScalarModMulLookupRelations::dummy(),
+            );
+            scalar_mod_mul_max_constraint_log_degree_bound(&components)
+        };
+        let config = p256_stark_slice_low_ram_config(max_constraint_log_degree_bound);
+        eprintln!(
+            "scalar_mod_mul {} pcs max_bound={} blowup={} lifting={:?}",
+            rows.mul_id,
+            max_constraint_log_degree_bound,
+            config.fri_config.log_blowup_factor,
+            config.lifting_log_size
+        );
+        let twiddles =
+            SimdBackend::precompute_twiddles(
+                CanonicCoset::new(config.lifting_log_size.unwrap_or(
+                    max_constraint_log_degree_bound + config.fri_config.log_blowup_factor,
+                ))
+                .circle_domain()
+                .half_coset,
+            );
+        let mut channel = <Blake2sMerkleChannel as MerkleChannel>::C::default();
+        let mut commitment_scheme =
+            CommitmentSchemeProver::<SimdBackend, Blake2sMerkleChannel>::new(config, &twiddles);
+        let preprocessed = gen_scalar_mod_mul_preprocessed_trace(rows, &lookup_claims, &ids);
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(preprocessed);
+        tree_builder.commit(&mut channel);
+
+        claim.mix_into(&mut channel);
+        let base = gen_scalar_mod_mul_base_trace(rows, &lookup_claims);
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(base);
+        tree_builder.commit(&mut channel);
+
+        let relations = ScalarModMulLookupRelations::draw(&mut channel);
+        let (interaction, interaction_claim) =
+            gen_scalar_mod_mul_interaction_trace(rows, &lookup_claims, &relations);
+        interaction_claim.scalar_mod_mul.mix_into(&mut channel);
+        interaction_claim.range13.mix_into(&mut channel);
+        interaction_claim.signed_carry.mix_into(&mut channel);
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(interaction);
+        tree_builder.commit(&mut channel);
+
+        let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
+        let components = ScalarModMulComponents::new(
+            &mut allocator,
+            &claim,
+            &interaction_claim,
+            &lookup_claims,
+            &relations,
+        );
+        let component_provers = scalar_mod_mul_component_provers(&components);
+        prove(&component_provers, &mut channel, commitment_scheme)
+            .expect("scalar mod-mul PCS proof proves");
+    }
+
+    fn scalar_mod_mul_max_constraint_log_degree_bound(components: &ScalarModMulComponents) -> u32 {
+        [
+            components.canonical.max_constraint_log_degree_bound(),
+            components.ab_chunks.max_constraint_log_degree_bound(),
+            components.qn_chunks.max_constraint_log_degree_bound(),
+            components.accumulators.max_constraint_log_degree_bound(),
+            components
+                .reduction_digits
+                .max_constraint_log_degree_bound(),
+            components.range13.max_constraint_log_degree_bound(),
+            components.signed_carry.max_constraint_log_degree_bound(),
+        ]
+        .into_iter()
+        .max()
+        .unwrap_or(0)
+    }
+
+    fn scalar_mod_mul_component_provers(
+        components: &ScalarModMulComponents,
+    ) -> Vec<&dyn ComponentProver<SimdBackend>> {
+        vec![
+            &components.canonical as &dyn ComponentProver<SimdBackend>,
+            &components.ab_chunks as &dyn ComponentProver<SimdBackend>,
+            &components.qn_chunks as &dyn ComponentProver<SimdBackend>,
+            &components.accumulators as &dyn ComponentProver<SimdBackend>,
+            &components.reduction_digits as &dyn ComponentProver<SimdBackend>,
+            &components.range13 as &dyn ComponentProver<SimdBackend>,
+            &components.signed_carry as &dyn ComponentProver<SimdBackend>,
+        ]
+    }
+
+    fn assert_current_air_constraints(proof: &P256ProofDraft) {
+        let claim = P256CurrentAirProofClaim::from_claim(&proof.claim);
+        let ids = claim.preprocessed_column_ids();
+        let preprocessed = proof
+            .gen_current_air_preprocessed_trace(&claim, &ids)
+            .expect("current AIR preprocessed trace generates");
+        let base = proof
+            .gen_current_air_base_trace(&claim)
+            .expect("current AIR base trace generates");
+        let mut dummy_channel = Blake2sM31Channel::default();
+        let relations = P256CurrentAirRelations::draw(&mut dummy_channel);
+        let (interaction, interaction_claim) = proof
+            .gen_current_air_interaction_trace(&base, &relations)
+            .expect("current AIR interaction trace generates");
+
+        let mut commitment_scheme = MockCommitmentScheme::default();
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(preprocessed);
+        tree_builder.finalize_interaction();
+
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(base.columns);
+        tree_builder.finalize_interaction();
+
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(interaction);
+        tree_builder.finalize_interaction();
+
+        let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
+        let components =
+            P256CurrentAirComponents::new(&mut allocator, &claim, &interaction_claim, &relations);
+        let trace = commitment_scheme.trace_domain_evaluations();
+
+        assert_component_named(
+            "public_input_consumer",
+            &components.public_input_consumer.consumer,
+            &trace,
+        );
+        for (index, scalar_mod_mul) in components.scalar_setup_mod_muls.iter().enumerate() {
+            assert_scalar_mod_mul_components_named(index, scalar_mod_mul, &trace);
+        }
+        assert_component_named(
+            "prepared_table_projective_source.provider",
+            &components.prepared_table_projective_source.provider,
+            &trace,
+        );
+        assert_component_named(
+            "prepared_table_projective_source.consumer",
+            &components.prepared_table_projective_source.consumer,
+            &trace,
+        );
+        assert_component_named(
+            "fake_glv_projective_source.provider",
+            &components.fake_glv_projective_source.provider,
+            &trace,
+        );
+        assert_component_named(
+            "fake_glv_projective_source.consumer",
+            &components.fake_glv_projective_source.consumer,
+            &trace,
+        );
+        assert_component_named(
+            "fake_glv_chain_expansion.expansion",
+            &components.fake_glv_chain_expansion.expansion,
+            &trace,
+        );
+        assert_component_named(
+            "fake_glv_chain_expansion.primitive",
+            &components.fake_glv_chain_expansion.primitive,
+            &trace,
+        );
+        assert_component_named(
+            "fake_glv_chain_continuity",
+            &components.fake_glv_chain_continuity,
+            &trace,
+        );
+        assert_component_named(
+            "fake_glv_chain_schedule",
+            &components.fake_glv_chain_schedule,
+            &trace,
+        );
+        assert_component_named(
+            "fake_glv_direct_prepared_operand.provider",
+            &components.fake_glv_direct_prepared_operand.provider,
+            &trace,
+        );
+        assert_component_named(
+            "fake_glv_direct_prepared_operand.consumer",
+            &components.fake_glv_direct_prepared_operand.consumer,
+            &trace,
+        );
+        assert_component_named(
+            "fake_glv_signed_selector_operand.provider",
+            &components.fake_glv_signed_selector_operand.provider,
+            &trace,
+        );
+        assert_component_named(
+            "fake_glv_signed_selector_operand.consumer",
+            &components.fake_glv_signed_selector_operand.consumer,
+            &trace,
+        );
+        assert_component_named(
+            "fake_glv_lsb_correction_operand.provider",
+            &components.fake_glv_lsb_correction_operand.provider,
+            &trace,
+        );
+        assert_component_named(
+            "fake_glv_lsb_correction_operand.consumer",
+            &components.fake_glv_lsb_correction_operand.consumer,
+            &trace,
+        );
+        assert_component_named(
+            "fake_glv_prepared_point_source.provider",
+            &components.fake_glv_prepared_point_source.provider,
+            &trace,
+        );
+        assert_component_named(
+            "fake_glv_prepared_point_source.consumer",
+            &components.fake_glv_prepared_point_source.consumer,
+            &trace,
+        );
+        assert_component_named(
+            "projective_rcb_air.mul",
+            &components.projective_rcb_air.mul,
+            &trace,
+        );
+        assert_component_named(
+            "projective_rcb_air.raw_product_chunk",
+            &components.projective_rcb_air.raw_product_chunk,
+            &trace,
+        );
+        assert_component_named(
+            "projective_rcb_air.folded_contribution",
+            &components.projective_rcb_air.folded_contribution,
+            &trace,
+        );
+        assert_component_named(
+            "projective_rcb_air.folded_digit",
+            &components.projective_rcb_air.folded_digit,
+            &trace,
+        );
+        assert_component_named(
+            "projective_rcb_air.range13",
+            &components.projective_rcb_air.range13,
+            &trace,
+        );
+        assert_component_named(
+            "projective_rcb_air.signed_carry",
+            &components.projective_rcb_air.signed_carry,
+            &trace,
+        );
+    }
+
+    fn assert_scalar_mod_mul_components_named(
+        index: usize,
+        components: &ScalarModMulComponents,
+        trace: &TreeVec<Vec<&Vec<M31>>>,
+    ) {
+        assert_component_named(
+            &format!("scalar_setup_mod_mul_{index}.canonical"),
+            &components.canonical,
+            trace,
+        );
+        assert_component_named(
+            &format!("scalar_setup_mod_mul_{index}.ab_chunks"),
+            &components.ab_chunks,
+            trace,
+        );
+        assert_component_named(
+            &format!("scalar_setup_mod_mul_{index}.qn_chunks"),
+            &components.qn_chunks,
+            trace,
+        );
+        assert_component_named(
+            &format!("scalar_setup_mod_mul_{index}.accumulators"),
+            &components.accumulators,
+            trace,
+        );
+        assert_component_named(
+            &format!("scalar_setup_mod_mul_{index}.reduction_digits"),
+            &components.reduction_digits,
+            trace,
+        );
+        assert_component_named(
+            &format!("scalar_setup_mod_mul_{index}.range13"),
+            &components.range13,
+            trace,
+        );
+        assert_component_named(
+            &format!("scalar_setup_mod_mul_{index}.signed_carry"),
+            &components.signed_carry,
+            trace,
+        );
+    }
+
+    fn assert_component_named<E: FrameworkEval + Sync>(
+        name: &str,
+        component: &FrameworkComponent<E>,
+        trace: &TreeVec<Vec<&Vec<M31>>>,
+    ) {
+        eprintln!("assert {name}");
+        let mut component_trace = trace
+            .sub_tree(component.trace_locations())
+            .map(|tree| tree.into_iter().cloned().collect::<Vec<_>>());
+        component_trace[PREPROCESSED_TRACE_IDX] = component
+            .preprocessed_column_indices()
+            .iter()
+            .map(|index| trace[PREPROCESSED_TRACE_IDX][*index])
+            .collect();
+
+        let component_eval = component.deref();
+        assert_constraints_on_trace(
+            &component_trace,
+            component.log_size(),
+            |eval| {
+                let _ = component_eval.evaluate(eval);
+            },
+            component.claimed_sum(),
+        );
+    }
+
+    #[test]
     #[ignore = "prints current AIR row/column shape for performance diagnostics"]
     fn current_p256_air_shape_diagnostic() {
         let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
@@ -3036,6 +3697,12 @@ mod tests {
             proof.claim.projective_rcb_air_trace.reduction_row_count(),
         );
 
+        for (index, scalar_mod_mul) in components.scalar_setup_mod_muls.iter().enumerate() {
+            print_component_shape(
+                &format!("scalar_setup_mod_mul_{index}"),
+                scalar_mod_mul_component_bounds(scalar_mod_mul),
+            );
+        }
         print_component_shape(
             "prepared_table_projective_source",
             components
@@ -3109,6 +3776,23 @@ mod tests {
                 by_log_size
             );
         }
+    }
+
+    fn scalar_mod_mul_component_bounds(
+        components: &ScalarModMulComponents,
+    ) -> TreeVec<ColumnVec<u32>> {
+        TreeVec::concat_cols(
+            [
+                components.canonical.trace_log_degree_bounds(),
+                components.ab_chunks.trace_log_degree_bounds(),
+                components.qn_chunks.trace_log_degree_bounds(),
+                components.accumulators.trace_log_degree_bounds(),
+                components.reduction_digits.trace_log_degree_bounds(),
+                components.range13.trace_log_degree_bounds(),
+                components.signed_carry.trace_log_degree_bounds(),
+            ]
+            .into_iter(),
+        )
     }
 
     #[test]

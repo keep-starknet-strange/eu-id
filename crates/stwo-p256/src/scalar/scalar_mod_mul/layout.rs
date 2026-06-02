@@ -2,22 +2,26 @@ use std::collections::BTreeMap;
 
 use stwo::core::fields::m31::M31;
 use stwo_p256_utils::constants::N_LIMBS;
-use stwo_p256_utils::scalar_arithmetic::PRODUCT_EQUATION_LIMBS;
+use stwo_p256_utils::scalar_arithmetic::{CanonicalLtTrace, P256_ORDER, PRODUCT_EQUATION_LIMBS};
 
 use crate::range_checks::decode_signed_carry;
 
 use super::accumulator::for_each_digit_contribution;
 use super::columns::{m31_column_eval, padded_log_size, M31ColumnEval};
 use super::{
-    product_chunk_pairs, ProductSide, ScalarModMulTraceRows, PRODUCT_DIGIT_ACCUMULATOR_TERMS,
-    ROLE_RESULT, SCALAR_MOD_MUL_SPLIT_CHUNK_DIGITS, SCALAR_MOD_MUL_SPLIT_CHUNK_TERMS,
+    product_chunk_pairs, ProductSide, ScalarModMulLimbRole, ScalarModMulTraceRows,
+    PRODUCT_DIGIT_ACCUMULATOR_TERMS, PRODUCT_SCALAR_LIMB_USE_COUNT, ROLE_RESULT,
+    SCALAR_MOD_MUL_SPLIT_CHUNK_DIGITS, SCALAR_MOD_MUL_SPLIT_CHUNK_TERMS,
 };
 
-pub const CANONICAL_SCALAR_TRACE_COLUMNS: usize = 3 * N_LIMBS;
-pub const AB_PRODUCT_CHUNK_TRACE_COLUMNS: usize =
-    2 * SCALAR_MOD_MUL_SPLIT_CHUNK_TERMS + SCALAR_MOD_MUL_SPLIT_CHUNK_DIGITS;
+pub const CANONICAL_SCALAR_TRACE_COLUMNS: usize = 3 + 3 * N_LIMBS;
+pub const PRODUCT_METADATA_TRACE_COLUMNS: usize =
+    3 + 3 * SCALAR_MOD_MUL_SPLIT_CHUNK_TERMS + SCALAR_MOD_MUL_SPLIT_CHUNK_DIGITS;
+pub const AB_PRODUCT_CHUNK_TRACE_COLUMNS: usize = PRODUCT_METADATA_TRACE_COLUMNS
+    + 3 * SCALAR_MOD_MUL_SPLIT_CHUNK_TERMS
+    + SCALAR_MOD_MUL_SPLIT_CHUNK_DIGITS;
 pub const QN_PRODUCT_CHUNK_TRACE_COLUMNS: usize =
-    SCALAR_MOD_MUL_SPLIT_CHUNK_TERMS + SCALAR_MOD_MUL_SPLIT_CHUNK_DIGITS;
+    2 * SCALAR_MOD_MUL_SPLIT_CHUNK_TERMS + SCALAR_MOD_MUL_SPLIT_CHUNK_DIGITS;
 pub const PRODUCT_DIGIT_ACCUMULATOR_TRACE_COLUMNS: usize = PRODUCT_DIGIT_ACCUMULATOR_TERMS + 1;
 pub const SCALAR_REDUCTION_DIGIT_TRACE_COLUMNS: usize = 5;
 
@@ -79,10 +83,7 @@ pub struct ScalarModMulFamilyColumnEvals {
 impl ScalarModMulFamilyTraces {
     pub fn from_rows(rows: &ScalarModMulTraceRows) -> Self {
         Self {
-            canonical_scalars: ScalarModMulColumnTrace::from_rows(
-                &rows.canonical_scalars,
-                canonical_columns,
-            ),
+            canonical_scalars: canonical_column_trace(&rows.canonical_scalars),
             ab_chunks: ScalarModMulColumnTrace::from_rows(&rows.ab_chunks, ab_chunk_columns),
             qn_chunks: ScalarModMulColumnTrace::from_rows(&rows.qn_chunks, qn_chunk_columns),
             accumulators: ScalarModMulColumnTrace::from_rows(
@@ -350,34 +351,117 @@ fn canonical_columns(
     row: &super::CanonicalScalarTraceRow,
 ) -> [M31; CANONICAL_SCALAR_TRACE_COLUMNS] {
     let mut columns = [M31::from_u32_unchecked(0); CANONICAL_SCALAR_TRACE_COLUMNS];
-    columns[..N_LIMBS].copy_from_slice(&row.value);
-    columns[N_LIMBS..2 * N_LIMBS].copy_from_slice(&row.slack);
-    columns[2 * N_LIMBS..].copy_from_slice(&row.carries);
+    columns[0] = M31::from_u32_unchecked(1);
+    columns[1] = M31::from_u32_unchecked(row.role.relation_role());
+    columns[2] = M31::from_u32_unchecked(canonical_limb_multiplicity(row.role));
+    columns[3..3 + N_LIMBS].copy_from_slice(&row.value);
+    columns[3 + N_LIMBS..3 + 2 * N_LIMBS].copy_from_slice(&row.slack);
+    columns[3 + 2 * N_LIMBS..].copy_from_slice(&row.carries);
+    columns
+}
+
+fn canonical_limb_multiplicity(role: ScalarModMulLimbRole) -> u32 {
+    match role {
+        ScalarModMulLimbRole::A | ScalarModMulLimbRole::B | ScalarModMulLimbRole::Quotient => {
+            PRODUCT_SCALAR_LIMB_USE_COUNT
+        }
+        ScalarModMulLimbRole::Result => 1,
+    }
+}
+
+fn canonical_column_trace(
+    rows: &[super::CanonicalScalarTraceRow],
+) -> ScalarModMulColumnTrace<CANONICAL_SCALAR_TRACE_COLUMNS> {
+    let active_rows = rows.len();
+    let log_size = padded_log_size(active_rows);
+    let padded_rows = 1usize << log_size;
+    let padding = canonical_padding_columns();
+    let mut columns = std::array::from_fn(|index| vec![padding[index]; padded_rows]);
+
+    for (row_index, row) in rows.iter().enumerate() {
+        for (col_index, value) in canonical_columns(row).into_iter().enumerate() {
+            columns[col_index][row_index] = value;
+        }
+    }
+
+    ScalarModMulColumnTrace {
+        log_size,
+        active_rows,
+        columns,
+    }
+}
+
+fn canonical_padding_columns() -> [M31; CANONICAL_SCALAR_TRACE_COLUMNS] {
+    let padding = CanonicalLtTrace::new("padding", &[0, 0, 0, 0], "n", &P256_ORDER).expect("0 < n");
+    let mut columns = [M31::from_u32_unchecked(0); CANONICAL_SCALAR_TRACE_COLUMNS];
+    columns[3..3 + N_LIMBS].copy_from_slice(&padding.value.map(M31::from_u32_unchecked));
+    columns[3 + N_LIMBS..3 + 2 * N_LIMBS]
+        .copy_from_slice(&padding.slack.map(M31::from_u32_unchecked));
+    columns[3 + 2 * N_LIMBS..].copy_from_slice(
+        &padding
+            .carries
+            .map(|carry| M31::from_u32_unchecked(carry as u32)),
+    );
     columns
 }
 
 fn ab_chunk_columns(
     row: &super::VariableProductChunkTraceRow,
 ) -> [M31; AB_PRODUCT_CHUNK_TRACE_COLUMNS] {
-    [
-        row.terms[0].lhs,
-        row.terms[0].rhs,
-        row.terms[1].lhs,
-        row.terms[1].rhs,
-        row.digits[0],
-        row.digits[1],
-        row.digits[2],
-    ]
+    let mut columns = [M31::from_u32_unchecked(0); AB_PRODUCT_CHUNK_TRACE_COLUMNS];
+    fill_product_metadata_columns(
+        &mut columns[..PRODUCT_METADATA_TRACE_COLUMNS],
+        row.coeff,
+        row.chunk,
+    );
+    let mut offset = PRODUCT_METADATA_TRACE_COLUMNS;
+    for term in &row.terms {
+        columns[offset] = term.lhs;
+        columns[offset + 1] = term.rhs;
+        columns[offset + 2] = term.lhs * term.rhs;
+        offset += 3;
+    }
+    columns[offset..offset + SCALAR_MOD_MUL_SPLIT_CHUNK_DIGITS].copy_from_slice(&row.digits);
+    columns
+}
+
+fn fill_product_metadata_columns(columns: &mut [M31], coeff: usize, chunk: usize) {
+    debug_assert_eq!(columns.len(), PRODUCT_METADATA_TRACE_COLUMNS);
+    let (pairs, term_count) = product_chunk_pairs(coeff, chunk);
+    columns[0] = M31::from_u32_unchecked(1);
+    columns[1] = M31::from_u32_unchecked(coeff as u32);
+    columns[2] = M31::from_u32_unchecked(chunk as u32);
+    let mut offset = 3;
+    for term in 0..SCALAR_MOD_MUL_SPLIT_CHUNK_TERMS {
+        columns[offset] = M31::from_u32_unchecked((term < term_count) as u32);
+        offset += 1;
+    }
+    for pair in pairs.iter().take(SCALAR_MOD_MUL_SPLIT_CHUNK_TERMS) {
+        columns[offset] = M31::from_u32_unchecked(pair.0 as u32);
+        offset += 1;
+    }
+    for pair in pairs.iter().take(SCALAR_MOD_MUL_SPLIT_CHUNK_TERMS) {
+        columns[offset] = M31::from_u32_unchecked(pair.1 as u32);
+        offset += 1;
+    }
+    for digit_offset in 0..SCALAR_MOD_MUL_SPLIT_CHUNK_DIGITS {
+        columns[offset + digit_offset] =
+            M31::from_u32_unchecked((coeff + digit_offset < PRODUCT_EQUATION_LIMBS) as u32);
+    }
 }
 
 fn qn_chunk_columns(row: &super::QnProductChunkTraceRow) -> [M31; QN_PRODUCT_CHUNK_TRACE_COLUMNS] {
-    [
-        row.quotient_limbs[0],
-        row.quotient_limbs[1],
-        row.digits[0],
-        row.digits[1],
-        row.digits[2],
-    ]
+    let order_limbs = stwo_p256_utils::scalar_arithmetic::words_to_limbs(&P256_ORDER);
+    let (pairs, _) = product_chunk_pairs(row.coeff, row.chunk);
+    let mut columns = [M31::from_u32_unchecked(0); QN_PRODUCT_CHUNK_TRACE_COLUMNS];
+    let mut offset = 0;
+    for (term, quotient_limb) in row.quotient_limbs.iter().enumerate() {
+        columns[offset] = *quotient_limb;
+        columns[offset + 1] = *quotient_limb * M31::from_u32_unchecked(order_limbs[pairs[term].1]);
+        offset += 2;
+    }
+    columns[offset..offset + SCALAR_MOD_MUL_SPLIT_CHUNK_DIGITS].copy_from_slice(&row.digits);
+    columns
 }
 
 fn accumulator_columns(
@@ -434,16 +518,25 @@ mod tests {
         let rows = test_rows();
         let traces = ScalarModMulFamilyTraces::from_rows(&rows);
 
-        assert_eq!(traces.canonical_scalars.columns.len(), 60);
+        assert_eq!(
+            traces.canonical_scalars.columns.len(),
+            CANONICAL_SCALAR_TRACE_COLUMNS
+        );
         assert_eq!(traces.canonical_scalars.active_rows, 4);
         assert_eq!(
             traces.canonical_scalars.padded_rows(),
             1 << padded_log_size(4)
         );
-        assert_eq!(traces.ab_chunks.columns.len(), 7);
+        assert_eq!(
+            traces.ab_chunks.columns.len(),
+            AB_PRODUCT_CHUNK_TRACE_COLUMNS
+        );
         assert_eq!(traces.ab_chunks.active_rows, 210);
         assert_eq!(traces.ab_chunks.padded_rows(), 256);
-        assert_eq!(traces.qn_chunks.columns.len(), 5);
+        assert_eq!(
+            traces.qn_chunks.columns.len(),
+            QN_PRODUCT_CHUNK_TRACE_COLUMNS
+        );
         assert_eq!(traces.qn_chunks.padded_rows(), 256);
         assert_eq!(traces.accumulators.columns.len(), 31);
         assert_eq!(traces.accumulators.active_rows, 80);

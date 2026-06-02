@@ -5,7 +5,7 @@ pub mod claim;
 pub mod columns;
 pub mod component;
 pub mod interaction;
-mod interaction_claim;
+pub(crate) mod interaction_claim;
 pub mod layout;
 pub(crate) mod providers;
 pub mod reduction;
@@ -82,6 +82,20 @@ pub const ROLE_QUOTIENT: u32 = 3;
 
 pub const SIDE_AB: u32 = 0;
 pub const SIDE_QN: u32 = 1;
+
+pub(crate) const SCALAR_MOD_MUL_ENABLE_AB_A_LIMB_RELATIONS: bool = true;
+pub(crate) const SCALAR_MOD_MUL_ENABLE_AB_B_LIMB_RELATIONS: bool = true;
+pub(crate) const SCALAR_MOD_MUL_ENABLE_AB_SCALAR_LIMB_RELATIONS: bool =
+    SCALAR_MOD_MUL_ENABLE_AB_A_LIMB_RELATIONS || SCALAR_MOD_MUL_ENABLE_AB_B_LIMB_RELATIONS;
+pub(crate) const SCALAR_MOD_MUL_ENABLE_AB_RANGE_RELATIONS: bool = true;
+pub(crate) const SCALAR_MOD_MUL_ENABLE_AB_PRODUCT_CHUNK_DIGIT_RELATIONS: bool = true;
+pub(crate) const SCALAR_MOD_MUL_ENABLE_AB_RELATIONS: bool =
+    SCALAR_MOD_MUL_ENABLE_AB_SCALAR_LIMB_RELATIONS
+        || SCALAR_MOD_MUL_ENABLE_AB_RANGE_RELATIONS
+        || SCALAR_MOD_MUL_ENABLE_AB_PRODUCT_CHUNK_DIGIT_RELATIONS;
+pub(crate) const SCALAR_MOD_MUL_ENABLE_QN_RELATIONS: bool = true;
+pub(crate) const SCALAR_MOD_MUL_ENABLE_ACCUMULATOR_RELATIONS: bool = true;
+pub(crate) const SCALAR_MOD_MUL_ENABLE_REDUCTION_RELATIONS: bool = true;
 
 const LIMB_BOUND: i64 = 1i64 << LIMB_BITS;
 

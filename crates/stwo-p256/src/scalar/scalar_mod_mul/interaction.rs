@@ -19,6 +19,11 @@ use super::ScalarModMulInteractionClaim;
 use super::{
     product_chunk_pairs, ScalarModMulComponentRelations, ScalarModMulTraceRows,
     PRODUCT_DIGIT_ACCUMULATOR_TERMS, ROLE_A, ROLE_B, ROLE_QUOTIENT, ROLE_RESULT,
+    SCALAR_MOD_MUL_ENABLE_AB_A_LIMB_RELATIONS, SCALAR_MOD_MUL_ENABLE_AB_B_LIMB_RELATIONS,
+    SCALAR_MOD_MUL_ENABLE_AB_PRODUCT_CHUNK_DIGIT_RELATIONS,
+    SCALAR_MOD_MUL_ENABLE_AB_RANGE_RELATIONS, SCALAR_MOD_MUL_ENABLE_AB_RELATIONS,
+    SCALAR_MOD_MUL_ENABLE_AB_SCALAR_LIMB_RELATIONS, SCALAR_MOD_MUL_ENABLE_ACCUMULATOR_RELATIONS,
+    SCALAR_MOD_MUL_ENABLE_QN_RELATIONS, SCALAR_MOD_MUL_ENABLE_REDUCTION_RELATIONS,
     SCALAR_MOD_MUL_SPLIT_CHUNK_DIGITS, SCALAR_MOD_MUL_SPLIT_CHUNK_TERMS, SIDE_AB, SIDE_QN,
 };
 
@@ -42,6 +47,7 @@ impl ScalarModMulInteractionTraces {
                 .map(|row| canonical_fractions(rows.mul_id, row)),
             canonical_padding_fractions(rows.mul_id),
             relations,
+            false,
         );
         let (ab_chunks, ab_claim) = gen_family_interaction_trace(
             super::columns::padded_log_size(rows.ab_chunks.len()),
@@ -50,6 +56,7 @@ impl ScalarModMulInteractionTraces {
                 .map(|row| ab_chunk_fractions(rows.mul_id, row)),
             product_chunk_padding_fractions(rows.mul_id, SIDE_AB),
             relations,
+            false,
         );
         let (qn_chunks, qn_claim) = gen_family_interaction_trace(
             super::columns::padded_log_size(rows.qn_chunks.len()),
@@ -58,6 +65,7 @@ impl ScalarModMulInteractionTraces {
                 .map(|row| qn_chunk_fractions(rows.mul_id, row)),
             qn_product_chunk_padding_fractions(rows.mul_id),
             relations,
+            false,
         );
         let (accumulators, accumulator_claim) = gen_family_interaction_trace(
             super::columns::padded_log_size(rows.accumulators.len()),
@@ -66,6 +74,7 @@ impl ScalarModMulInteractionTraces {
                 .map(|row| accumulator_fractions(rows.mul_id, row)),
             accumulator_padding_fractions(rows.mul_id),
             relations,
+            false,
         );
         let (reduction_digits, reduction_claim) = gen_family_interaction_trace(
             super::columns::padded_log_size(rows.reduction_digits.len()),
@@ -74,6 +83,7 @@ impl ScalarModMulInteractionTraces {
                 .map(|row| reduction_fractions(rows.mul_id, row)),
             reduction_padding_fractions(rows.mul_id),
             relations,
+            false,
         );
 
         (
@@ -117,6 +127,7 @@ fn gen_family_interaction_trace(
     rows: impl IntoIterator<Item = Vec<FractionSpec>>,
     padding_fractions: Vec<FractionSpec>,
     relations: &ScalarModMulComponentRelations,
+    pair_fractions: bool,
 ) -> (ColumnVec<M31ColumnEval>, SecureField) {
     let row_fractions = rows.into_iter().collect::<Vec<_>>();
     let padded_rows = 1usize << log_size;
@@ -136,7 +147,11 @@ fn gen_family_interaction_trace(
     if max_fractions == 0 {
         return (Vec::new(), SecureField::from(M31::from_u32_unchecked(0)));
     }
-    let batch_count = max_fractions.div_ceil(2);
+    let batch_count = if pair_fractions {
+        max_fractions.div_ceil(2)
+    } else {
+        max_fractions
+    };
 
     let mut logup = LogupTraceGenerator::new(log_size);
     for batch in 0..batch_count {
@@ -147,7 +162,14 @@ fn gen_family_interaction_trace(
             for lane in 0..N_LANES {
                 let row = vec_row * N_LANES + lane;
                 let fractions = &storage_fractions[row];
-                let (numerator, denominator) = batch_fraction(fractions, batch, relations);
+                let (numerator, denominator) = if pair_fractions {
+                    batch_fraction(fractions, batch, relations)
+                } else {
+                    fractions
+                        .get(batch)
+                        .map(|fraction| scalar_fraction(fraction, relations))
+                        .unwrap_or_else(zero_fraction)
+                };
                 numerators[lane] = numerator;
                 denominators[lane] = denominator;
             }
@@ -257,37 +279,53 @@ fn canonical_padding_fractions(mul_id: u32) -> Vec<FractionSpec> {
 }
 
 fn ab_chunk_fractions(mul_id: u32, row: &super::VariableProductChunkTraceRow) -> Vec<FractionSpec> {
+    if !SCALAR_MOD_MUL_ENABLE_AB_RELATIONS {
+        return Vec::new();
+    }
     let (pairs, term_count) = product_chunk_pairs(row.coeff, row.chunk);
     let mut fractions = Vec::with_capacity(9);
-    for (term_index, term) in row
-        .terms
-        .iter()
-        .enumerate()
-        .take(SCALAR_MOD_MUL_SPLIT_CHUNK_TERMS)
+    if SCALAR_MOD_MUL_ENABLE_AB_SCALAR_LIMB_RELATIONS {
+        for (term_index, term) in row
+            .terms
+            .iter()
+            .enumerate()
+            .take(SCALAR_MOD_MUL_SPLIT_CHUNK_TERMS)
+        {
+            let term_active = (term_index < term_count) as i64;
+            if SCALAR_MOD_MUL_ENABLE_AB_A_LIMB_RELATIONS {
+                fractions.push(scalar_limb_use(
+                    mul_id,
+                    ROLE_A,
+                    pairs[term_index].0,
+                    term.lhs,
+                    term_active,
+                ));
+            }
+            if SCALAR_MOD_MUL_ENABLE_AB_B_LIMB_RELATIONS {
+                fractions.push(scalar_limb_use(
+                    mul_id,
+                    ROLE_B,
+                    pairs[term_index].1,
+                    term.rhs,
+                    term_active,
+                ));
+            }
+        }
+    }
+    if SCALAR_MOD_MUL_ENABLE_AB_RANGE_RELATIONS
+        || SCALAR_MOD_MUL_ENABLE_AB_PRODUCT_CHUNK_DIGIT_RELATIONS
     {
-        let term_active = (term_index < term_count) as i64;
-        fractions.push(scalar_limb_use(
-            mul_id,
-            ROLE_A,
-            pairs[term_index].0,
-            term.lhs,
-            term_active,
-        ));
-        fractions.push(scalar_limb_use(
-            mul_id,
-            ROLE_B,
-            pairs[term_index].1,
-            term.rhs,
-            term_active,
+        fractions.extend(product_chunk_finish_fractions(
+            mul_id, SIDE_AB, row.coeff, row.chunk, row.digits,
         ));
     }
-    fractions.extend(product_chunk_finish_fractions(
-        mul_id, SIDE_AB, row.coeff, row.chunk, row.digits,
-    ));
     fractions
 }
 
 fn qn_chunk_fractions(mul_id: u32, row: &super::QnProductChunkTraceRow) -> Vec<FractionSpec> {
+    if !SCALAR_MOD_MUL_ENABLE_QN_RELATIONS {
+        return Vec::new();
+    }
     let (pairs, term_count) = product_chunk_pairs(row.coeff, row.chunk);
     let mut fractions = Vec::with_capacity(7);
     for (term_index, quotient_limb) in row
@@ -319,31 +357,42 @@ fn product_chunk_finish_fractions(
     digits: [M31; SCALAR_MOD_MUL_SPLIT_CHUNK_DIGITS],
 ) -> Vec<FractionSpec> {
     let mut fractions = Vec::with_capacity(5);
-    fractions.push(range13_use(digits[0]));
-    fractions.push(range13_use(digits[1]));
-    for (offset, digit) in digits.iter().enumerate() {
-        let active = (coeff + offset < PRODUCT_EQUATION_LIMBS) as i64;
-        fractions.push(FractionSpec {
-            relation: RelationKind::ProductChunkDigit,
-            numerator: -active,
-            values: vec![
-                m31(mul_id),
-                m31(side),
-                m31(coeff as u32),
-                m31(chunk as u32),
-                m31(offset as u32),
-                *digit,
-            ],
-        });
+    if side != SIDE_AB || SCALAR_MOD_MUL_ENABLE_AB_RANGE_RELATIONS {
+        fractions.push(range13_use(digits[0]));
+        fractions.push(range13_use(digits[1]));
+    }
+    if side != SIDE_AB || SCALAR_MOD_MUL_ENABLE_AB_PRODUCT_CHUNK_DIGIT_RELATIONS {
+        for (offset, digit) in digits.iter().enumerate() {
+            let active = (coeff + offset < PRODUCT_EQUATION_LIMBS) as i64;
+            fractions.push(FractionSpec {
+                relation: RelationKind::ProductChunkDigit,
+                numerator: -active,
+                values: vec![
+                    m31(mul_id),
+                    m31(side),
+                    m31(coeff as u32),
+                    m31(chunk as u32),
+                    m31(offset as u32),
+                    *digit,
+                ],
+            });
+        }
     }
     fractions
 }
 
 fn product_chunk_padding_fractions(mul_id: u32, side: u32) -> Vec<FractionSpec> {
+    if !SCALAR_MOD_MUL_ENABLE_AB_RELATIONS {
+        return Vec::new();
+    }
     let mut fractions = Vec::with_capacity(2 * SCALAR_MOD_MUL_SPLIT_CHUNK_TERMS + 5);
     for _ in 0..SCALAR_MOD_MUL_SPLIT_CHUNK_TERMS {
-        fractions.push(scalar_limb_use(mul_id, ROLE_A, 0, m31(0), 0));
-        fractions.push(scalar_limb_use(mul_id, ROLE_B, 0, m31(0), 0));
+        if side != SIDE_AB || SCALAR_MOD_MUL_ENABLE_AB_A_LIMB_RELATIONS {
+            fractions.push(scalar_limb_use(mul_id, ROLE_A, 0, m31(0), 0));
+        }
+        if side != SIDE_AB || SCALAR_MOD_MUL_ENABLE_AB_B_LIMB_RELATIONS {
+            fractions.push(scalar_limb_use(mul_id, ROLE_B, 0, m31(0), 0));
+        }
     }
     fractions.extend(
         product_chunk_finish_fractions(
@@ -363,6 +412,9 @@ fn product_chunk_padding_fractions(mul_id: u32, side: u32) -> Vec<FractionSpec> 
 }
 
 fn qn_product_chunk_padding_fractions(mul_id: u32) -> Vec<FractionSpec> {
+    if !SCALAR_MOD_MUL_ENABLE_QN_RELATIONS {
+        return Vec::new();
+    }
     let mut fractions = Vec::with_capacity(SCALAR_MOD_MUL_SPLIT_CHUNK_TERMS + 5);
     for _ in 0..SCALAR_MOD_MUL_SPLIT_CHUNK_TERMS {
         fractions.push(scalar_limb_use(mul_id, ROLE_QUOTIENT, 0, m31(0), 0));
@@ -388,6 +440,9 @@ fn accumulator_fractions(
     mul_id: u32,
     row: &super::ProductDigitAccumulatorTraceRow,
 ) -> Vec<FractionSpec> {
+    if !SCALAR_MOD_MUL_ENABLE_ACCUMULATOR_RELATIONS {
+        return Vec::new();
+    }
     let mut fractions = Vec::with_capacity(PRODUCT_DIGIT_ACCUMULATOR_TERMS + 1);
     let side = row.side.relation_side();
     for_each_digit_contribution(row.digit_index, |term_index, coeff, chunk, offset| {
@@ -432,6 +487,9 @@ fn accumulator_fractions(
 }
 
 fn accumulator_padding_fractions(mul_id: u32) -> Vec<FractionSpec> {
+    if !SCALAR_MOD_MUL_ENABLE_ACCUMULATOR_RELATIONS {
+        return Vec::new();
+    }
     let mut fractions = Vec::with_capacity(PRODUCT_DIGIT_ACCUMULATOR_TERMS + 1);
     for _ in 0..PRODUCT_DIGIT_ACCUMULATOR_TERMS {
         fractions.push(FractionSpec {
@@ -452,6 +510,9 @@ fn reduction_fractions(
     mul_id: u32,
     row: &super::ScalarReductionDigitTraceRow,
 ) -> Vec<FractionSpec> {
+    if !SCALAR_MOD_MUL_ENABLE_REDUCTION_RELATIONS {
+        return Vec::new();
+    }
     let has_result_limb = (row.digit_index < N_LIMBS) as i64;
     let has_prev_carry = (row.digit_index > 0) as i64;
     let has_next_carry = (row.digit_index + 1 < PRODUCT_EQUATION_LIMBS) as i64;
@@ -491,6 +552,9 @@ fn reduction_fractions(
 }
 
 fn reduction_padding_fractions(mul_id: u32) -> Vec<FractionSpec> {
+    if !SCALAR_MOD_MUL_ENABLE_REDUCTION_RELATIONS {
+        return Vec::new();
+    }
     vec![
         product_digit_use(mul_id, SIDE_AB, 0, m31(0)).with_numerator(0),
         product_digit_use(mul_id, SIDE_QN, 0, m31(0)).with_numerator(0),
@@ -613,11 +677,11 @@ mod tests {
         assert_eq!(traces.accumulators[0].domain.size(), 128);
         assert_eq!(traces.reduction_digits[0].domain.size(), 64);
 
-        assert_eq!(traces.canonical_scalars.len(), 30 * 4);
-        assert_eq!(traces.ab_chunks.len(), 5 * 4);
-        assert_eq!(traces.qn_chunks.len(), 4 * 4);
-        assert_eq!(traces.accumulators.len(), 16 * 4);
-        assert_eq!(traces.reduction_digits.len(), 3 * 4);
+        assert_eq!(traces.canonical_scalars.len(), 60 * 4);
+        assert_eq!(traces.ab_chunks.len(), 9 * 4);
+        assert_eq!(traces.qn_chunks.len(), 7 * 4);
+        assert_eq!(traces.accumulators.len(), 31 * 4);
+        assert_eq!(traces.reduction_digits.len(), 6 * 4);
 
         assert_ne!(
             claim.canonical_scalars,

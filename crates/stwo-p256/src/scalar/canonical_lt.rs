@@ -17,9 +17,9 @@ pub struct CanonicalLtRelations<'a> {
 ///
 /// This function assumes `value` is the actual value being checked. The caller
 /// should pass the same limb columns used by the consuming row, or separately
-/// constrain equality before consuming this comparison. All constraints and
-/// lookups are gated by `gate`; callers must use the same 0/1 selector that
-/// guards downstream consumption.
+/// constrain equality before consuming this comparison. Range-check lookups are
+/// gated by `gate`; carry/equation constraints are ungated to keep this helper
+/// degree-2, so padding rows must contain a valid comparison witness.
 pub fn add_canonical_lt_fixed_bound<E: EvalAtRow>(
     eval: &mut E,
     relations: CanonicalLtRelations<'_>,
@@ -47,7 +47,7 @@ pub fn add_canonical_lt_fixed_bound<E: EvalAtRow>(
             slack.limbs()[i].clone(),
         );
 
-        eval.add_constraint(gate.clone() * carries[i].clone() * (carries[i].clone() - one.clone()));
+        eval.add_constraint(carries[i].clone() * (carries[i].clone() - one.clone()));
 
         let prev_carry = if i == 0 {
             E::F::from(M31::from_u32_unchecked(0))
@@ -62,10 +62,11 @@ pub fn add_canonical_lt_fixed_bound<E: EvalAtRow>(
         let recurrence = value.limbs()[i].clone() + slack.limbs()[i].clone() + prev_carry + delta
             - fixed_limb::<E>(bound, i)
             - limb_base.clone() * carries[i].clone();
-        eval.add_constraint(gate.clone() * recurrence);
+        eval.add_constraint(recurrence);
     }
 
-    eval.add_constraint(gate * carries[N_LIMBS - 1].clone());
+    let _ = gate;
+    eval.add_constraint(carries[N_LIMBS - 1].clone());
 }
 
 fn fixed_limb<E: EvalAtRow>(limbs: &BigIntLimbs, index: usize) -> E::F {
