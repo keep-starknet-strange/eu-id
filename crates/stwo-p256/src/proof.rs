@@ -108,7 +108,10 @@ use crate::projective_air::{
     PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
 };
 use crate::public_inputs::{
-    public_ecdsa_consumer_claimed_sum, PublicEcdsaInputClaim, PublicEcdsaInstanceRelation,
+    gen_public_ecdsa_input_consumer_base_trace, gen_public_ecdsa_input_consumer_interaction_trace,
+    public_ecdsa_consumer_claimed_sum, PublicEcdsaInputClaim, PublicEcdsaInputConsumerComponents,
+    PublicEcdsaInputConsumerProofClaim, PublicEcdsaInputInteractionClaim,
+    PublicEcdsaInstanceRelation,
 };
 use crate::public_key_check::{PublicKeyOnCurveClaim, PublicKeyOnCurveError};
 use crate::range_checks::{
@@ -521,8 +524,10 @@ pub struct P256CurrentAirProof<H: MerkleHasherLifted> {
     pub stark_proof: StarkProof<H>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct P256CurrentAirProofClaim {
+    pub public_inputs: PublicEcdsaInputClaim,
+    pub public_input_consumer: PublicEcdsaInputConsumerProofClaim,
     pub prepared_table_projective_source: PreparedTableProjectiveSourceProofClaim,
     pub fake_glv_projective_source: FakeGlvProjectiveSourceProofClaim,
     pub fake_glv_chain_expansion: FakeGlvChainExpansionProofClaim,
@@ -539,6 +544,10 @@ impl P256CurrentAirProofClaim {
     fn from_claim(claim: &P256ProofClaim) -> Self {
         let source_offset = claim.prepared_table_ec_trace.active_row_count();
         Self {
+            public_inputs: claim.public_inputs.clone(),
+            public_input_consumer: PublicEcdsaInputConsumerProofClaim::from_claim(
+                &claim.public_inputs,
+            ),
             prepared_table_projective_source:
                 PreparedTableProjectiveSourceProofClaim::from_prepared_trace(
                     &claim.prepared_table_ec_trace,
@@ -581,6 +590,8 @@ impl P256CurrentAirProofClaim {
     }
 
     fn mix_into(&self, channel: &mut impl Channel) {
+        self.public_inputs.mix_into(channel);
+        self.public_input_consumer.mix_into(channel);
         self.prepared_table_projective_source.mix_into(channel);
         self.fake_glv_projective_source.mix_into(channel);
         self.fake_glv_chain_expansion.mix_into(channel);
@@ -595,6 +606,7 @@ impl P256CurrentAirProofClaim {
 
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
         let mut ids = Vec::new();
+        append_unique_preprocessed_ids(&mut ids, Vec::new());
         append_unique_preprocessed_ids(
             &mut ids,
             self.prepared_table_projective_source
@@ -666,6 +678,7 @@ impl P256CurrentAirProofClaim {
 
 #[derive(Clone, Debug)]
 pub struct P256CurrentAirInteractionClaim {
+    pub public_inputs: RelationBalanceClaim,
     pub prepared_table_projective_source: PreparedTableProjectiveSourceInteractionClaim,
     pub fake_glv_projective_source: FakeGlvProjectiveSourceInteractionClaim,
     pub fake_glv_chain_expansion: FakeGlvChainExpansionInteractionClaim,
@@ -680,6 +693,10 @@ pub struct P256CurrentAirInteractionClaim {
 impl P256CurrentAirInteractionClaim {
     fn zero() -> Self {
         Self {
+            public_inputs: RelationBalanceClaim {
+                provider_claimed_sum: zero(),
+                consumer_claimed_sum: zero(),
+            },
             prepared_table_projective_source: PreparedTableProjectiveSourceInteractionClaim::zero(),
             fake_glv_projective_source: FakeGlvProjectiveSourceInteractionClaim::zero(),
             fake_glv_chain_expansion: FakeGlvChainExpansionInteractionClaim::zero(),
@@ -695,6 +712,10 @@ impl P256CurrentAirInteractionClaim {
     }
 
     fn mix_into(&self, channel: &mut impl Channel) {
+        channel.mix_felts(&[
+            self.public_inputs.provider_claimed_sum,
+            self.public_inputs.consumer_claimed_sum,
+        ]);
         self.prepared_table_projective_source.mix_into(channel);
         self.fake_glv_projective_source.mix_into(channel);
         self.fake_glv_chain_expansion.mix_into(channel);
@@ -707,6 +728,7 @@ impl P256CurrentAirInteractionClaim {
     }
 
     fn verify_balanced(&self) -> Result<(), P256ProofError> {
+        self.public_inputs.verify("PublicEcdsaInstance")?;
         verify_current_air_relation_zero(
             "PreparedTableProjectiveSource",
             self.prepared_table_projective_source.total(),
@@ -748,6 +770,7 @@ impl P256CurrentAirInteractionClaim {
 
 #[derive(Clone, Debug)]
 struct P256CurrentAirRelations {
+    public_inputs: PublicEcdsaInstanceRelation,
     prepared_table: PreparedTableEcRowRelation,
     fake_glv_projective_source: FakeGlvPrimitiveEcRowRelation,
     fake_glv_chain_expansion: FakeGlvChainPrimitiveExpansionRelation,
@@ -762,6 +785,7 @@ struct P256CurrentAirRelations {
 impl P256CurrentAirRelations {
     fn dummy() -> Self {
         Self {
+            public_inputs: PublicEcdsaInstanceRelation::dummy(),
             prepared_table: PreparedTableEcRowRelation::dummy(),
             fake_glv_projective_source: FakeGlvPrimitiveEcRowRelation::dummy(),
             fake_glv_chain_expansion: FakeGlvChainPrimitiveExpansionRelation::dummy(),
@@ -776,6 +800,7 @@ impl P256CurrentAirRelations {
 
     fn draw(channel: &mut impl Channel) -> Self {
         Self {
+            public_inputs: PublicEcdsaInstanceRelation::draw(channel),
             prepared_table: PreparedTableEcRowRelation::draw(channel),
             fake_glv_projective_source: FakeGlvPrimitiveEcRowRelation::draw(channel),
             fake_glv_chain_expansion: FakeGlvChainPrimitiveExpansionRelation::draw(channel),
@@ -790,6 +815,7 @@ impl P256CurrentAirRelations {
 }
 
 struct P256CurrentAirComponents {
+    public_input_consumer: PublicEcdsaInputConsumerComponents,
     prepared_table_projective_source: PreparedTableProjectiveSourceComponents,
     fake_glv_projective_source: FakeGlvProjectiveSourceComponents,
     fake_glv_chain_expansion: FakeGlvChainExpansionComponents,
@@ -810,6 +836,14 @@ impl P256CurrentAirComponents {
         relations: &P256CurrentAirRelations,
     ) -> Self {
         Self {
+            public_input_consumer: PublicEcdsaInputConsumerComponents::new(
+                allocator,
+                claim.public_input_consumer,
+                &PublicEcdsaInputInteractionClaim {
+                    claimed_sum: interaction_claim.public_inputs.consumer_claimed_sum,
+                },
+                &relations.public_inputs,
+            ),
             prepared_table_projective_source: PreparedTableProjectiveSourceComponents::new(
                 allocator,
                 claim.prepared_table_projective_source.log_size,
@@ -879,6 +913,7 @@ impl P256CurrentAirComponents {
 
     fn components(&self) -> Vec<&dyn Component> {
         let mut components = Vec::new();
+        components.extend(self.public_input_consumer.components());
         components.extend(self.prepared_table_projective_source.components());
         components.extend(self.fake_glv_projective_source.components());
         components.extend(self.fake_glv_chain_expansion.components());
@@ -894,6 +929,7 @@ impl P256CurrentAirComponents {
 
     fn component_provers(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
         let mut components = Vec::new();
+        components.extend(self.public_input_consumer.component_provers());
         components.extend(self.prepared_table_projective_source.component_provers());
         components.extend(self.fake_glv_projective_source.component_provers());
         components.extend(self.fake_glv_chain_expansion.component_provers());
@@ -1309,6 +1345,13 @@ impl P256ProofDraft {
         &self,
         claim: &P256CurrentAirProofClaim,
     ) -> Result<P256CurrentAirBaseTrace, P256ProofError> {
+        let scalar_setup_public = PublicEcdsaInputClaim {
+            instances: self.claim.scalar_setup.public_consumers(),
+        };
+        let public_input_consumer = gen_public_ecdsa_input_consumer_base_trace(
+            &scalar_setup_public,
+            claim.public_input_consumer.log_size,
+        );
         let prepared_table_provider = gen_prepared_table_ec_row_base_trace(
             &self.claim.prepared_table_ec_trace,
             claim.prepared_table_projective_source.log_size,
@@ -1395,6 +1438,7 @@ impl P256ProofDraft {
             .gen_proof_slice_base_trace()?;
 
         let mut columns = Vec::new();
+        columns.extend(public_input_consumer.clone());
         columns.extend(prepared_table_provider.clone());
         columns.extend(prepared_table_consumer.clone());
         columns.extend(fake_glv_projective_provider.clone());
@@ -1415,6 +1459,7 @@ impl P256ProofDraft {
 
         Ok(P256CurrentAirBaseTrace {
             columns,
+            public_input_consumer,
             prepared_table_provider,
             prepared_table_consumer,
             fake_glv_projective_provider,
@@ -1438,6 +1483,15 @@ impl P256ProofDraft {
         base: &P256CurrentAirBaseTrace,
         relations: &P256CurrentAirRelations,
     ) -> Result<(ColumnVec<M31ColumnEval>, P256CurrentAirInteractionClaim), P256ProofError> {
+        let (public_consumer_interaction, public_consumer_claim) =
+            gen_public_ecdsa_input_consumer_interaction_trace(
+                &base.public_input_consumer,
+                &relations.public_inputs,
+            );
+        let public_provider_claim = self
+            .claim
+            .public_inputs
+            .initial_logup_claim(&relations.public_inputs);
         let (prepared_provider_interaction, prepared_provider_claim) =
             gen_prepared_table_ec_row_interaction_trace(
                 &base.prepared_table_provider,
@@ -1525,6 +1579,7 @@ impl P256ProofDraft {
             .gen_proof_slice_interaction_trace(&relations.projective_rcb_air)?;
 
         let mut columns = Vec::new();
+        columns.extend(public_consumer_interaction);
         columns.extend(prepared_provider_interaction);
         columns.extend(prepared_consumer_interaction);
         columns.extend(fake_glv_provider_interaction);
@@ -1545,6 +1600,10 @@ impl P256ProofDraft {
         Ok((
             columns,
             P256CurrentAirInteractionClaim {
+                public_inputs: RelationBalanceClaim::new(
+                    public_provider_claim.claimed_sum,
+                    public_consumer_claim.claimed_sum,
+                ),
                 prepared_table_projective_source: PreparedTableProjectiveSourceInteractionClaim {
                     provider_claimed_sum: prepared_provider_claim.claimed_sum,
                     consumer_claimed_sum: prepared_consumer_claim.claimed_sum,
@@ -1625,6 +1684,7 @@ impl P256ProofDraft {
 
 struct P256CurrentAirBaseTrace {
     columns: ColumnVec<M31ColumnEval>,
+    public_input_consumer: ColumnVec<M31ColumnEval>,
     prepared_table_provider: ColumnVec<M31ColumnEval>,
     prepared_table_consumer: ColumnVec<M31ColumnEval>,
     fake_glv_projective_provider: ColumnVec<M31ColumnEval>,
@@ -1749,8 +1809,8 @@ pub struct P256ProofComponentSlot {
 pub const P256_PROOF_COMPONENT_SLOTS: &[P256ProofComponentSlot] = &[
     P256ProofComponentSlot {
         name: "PublicEcdsaInput",
-        status: P256ProofComponentStatus::Pending,
-        note: "Public relation helper exists, but public input binding is not yet part of one verifier-facing STARK proof.",
+        status: P256ProofComponentStatus::Implemented,
+        note: "The monolithic current AIR proof now carries verifier-supplied public ECDSA tuples and consumes them from scalar setup through PublicEcdsaInstance LogUp balance.",
     },
     P256ProofComponentSlot {
         name: "PublicKeyOnCurve",
@@ -2438,6 +2498,26 @@ mod tests {
             .expect_err("invalid native signature must not enter current AIR pipeline");
 
         assert_eq!(err, P256ProofError::InvalidNativeEcdsaInput { index: 0 });
+    }
+
+    #[test]
+    fn current_p256_monolithic_proof_rejects_mutated_public_input_binding() {
+        let mut proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+            valid_real_input_with_small_u_scalars(7, 11),
+        ])
+        .expect("current pipeline builds");
+        proof.claim.public_inputs.instances[0].r = P256M31BigInt::zero();
+
+        let err = proof
+            .prove_current_air_monolithic::<Blake2sMerkleChannel>()
+            .expect_err("public tuple mismatch must reject before proving");
+
+        assert_eq!(
+            err,
+            P256ProofError::RelationImbalance {
+                relation: "PublicEcdsaInstance"
+            }
+        );
     }
 
     #[test]
@@ -3474,7 +3554,7 @@ mod tests {
             .map(|slot| slot.name)
             .collect::<Vec<_>>();
 
-        assert!(pending.contains(&"PublicEcdsaInput"));
+        assert!(implemented.contains(&"PublicEcdsaInput"));
         assert!(pending.contains(&"PublicKeyOnCurve"));
         assert!(pending.contains(&"SolinasReductionTraceRows"));
         assert!(pending.contains(&"ScalarSetup"));

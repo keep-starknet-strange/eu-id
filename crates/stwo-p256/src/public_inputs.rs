@@ -1,13 +1,28 @@
 use std::{array, collections::BTreeMap};
 
 use stwo::core::{
+    air::Component,
     channel::Channel,
     fields::{m31::M31, qm31::SecureField},
+    pcs::TreeVec,
+    ColumnVec,
 };
-use stwo_constraint_framework::{relation, EvalAtRow, Relation, RelationEntry};
+use stwo::prover::{
+    backend::simd::{
+        m31::{PackedM31, LOG_N_LANES},
+        qm31::PackedQM31,
+        SimdBackend,
+    },
+    ComponentProver,
+};
+use stwo_constraint_framework::{
+    relation, EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation,
+    RelationEntry, TraceLocationAllocator,
+};
 use stwo_p256_utils::constants::N_LIMBS;
 
 use crate::limbs::{P256BigInt, P256M31BigInt};
+use crate::scalar::scalar_mod_mul::columns::{m31_column_eval, padded_log_size, M31ColumnEval};
 use crate::types::EcdsaVerifyInput;
 
 relation!(PublicEcdsaInstanceRelation, 101);
@@ -15,6 +30,9 @@ relation!(PublicEcdsaInstanceRelation, 101);
 /// Relation key shape:
 /// `(sig_id, z[20], r[20], s[20], pub_x[20], pub_y[20])`.
 pub const PUBLIC_ECDSA_INSTANCE_ARITY: usize = 1 + 5 * N_LIMBS;
+pub const PUBLIC_ECDSA_INPUT_CONSUMER_TRACE_COLUMNS: usize = 1 + PUBLIC_ECDSA_INSTANCE_ARITY;
+
+pub type PublicEcdsaInputConsumerComponent = FrameworkComponent<PublicEcdsaInputConsumerEval>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PublicEcdsaInstance<F> {
@@ -68,6 +86,111 @@ pub struct PublicEcdsaInputInteractionClaim {
 impl PublicEcdsaInputInteractionClaim {
     pub fn mix_into(&self, channel: &mut impl Channel) {
         channel.mix_felts(&[self.claimed_sum]);
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PublicEcdsaInputConsumerProofClaim {
+    pub log_size: u32,
+}
+
+impl PublicEcdsaInputConsumerProofClaim {
+    pub fn from_claim(claim: &PublicEcdsaInputClaim) -> Self {
+        Self {
+            log_size: padded_log_size(claim.instances.len()),
+        }
+    }
+
+    pub fn mix_into(&self, channel: &mut impl Channel) {
+        channel.mix_u64(self.log_size as u64);
+    }
+
+    pub fn trace_log_degree_bounds(
+        &self,
+        ids: &[stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId],
+        interaction_claim: &PublicEcdsaInputInteractionClaim,
+        relation: &PublicEcdsaInstanceRelation,
+    ) -> TreeVec<ColumnVec<u32>> {
+        let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(ids);
+        let component = PublicEcdsaInputConsumerComponent::new(
+            &mut allocator,
+            PublicEcdsaInputConsumerEval {
+                log_size: self.log_size,
+                relation: relation.clone(),
+            },
+            interaction_claim.claimed_sum,
+        );
+        component.trace_log_degree_bounds()
+    }
+}
+
+#[derive(Clone)]
+pub struct PublicEcdsaInputConsumerEval {
+    pub log_size: u32,
+    pub relation: PublicEcdsaInstanceRelation,
+}
+
+impl FrameworkEval for PublicEcdsaInputConsumerEval {
+    fn log_size(&self) -> u32 {
+        self.log_size
+    }
+
+    fn max_constraint_log_degree_bound(&self) -> u32 {
+        self.log_size + 1
+    }
+
+    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+        let active = eval.next_trace_mask();
+        let instance = PublicEcdsaInstance::<E::F>::read(&mut eval);
+        let one = E::F::from(M31::from_u32_unchecked(1));
+
+        eval.add_constraint(active.clone() * (active.clone() - one.clone()));
+        for value in instance.relation_values() {
+            eval.add_constraint((one.clone() - active.clone()) * value);
+        }
+        add_public_ecdsa_instance_consumer(&mut eval, &self.relation, active, &instance);
+        eval.finalize_logup();
+        eval
+    }
+}
+
+pub struct PublicEcdsaInputConsumerComponents {
+    pub consumer: PublicEcdsaInputConsumerComponent,
+}
+
+impl PublicEcdsaInputConsumerComponents {
+    pub fn new(
+        allocator: &mut TraceLocationAllocator,
+        claim: PublicEcdsaInputConsumerProofClaim,
+        interaction_claim: &PublicEcdsaInputInteractionClaim,
+        relation: &PublicEcdsaInstanceRelation,
+    ) -> Self {
+        Self {
+            consumer: PublicEcdsaInputConsumerComponent::new(
+                allocator,
+                PublicEcdsaInputConsumerEval {
+                    log_size: claim.log_size,
+                    relation: relation.clone(),
+                },
+                interaction_claim.claimed_sum,
+            ),
+        }
+    }
+
+    pub fn components(&self) -> Vec<&dyn Component> {
+        vec![&self.consumer as &dyn Component]
+    }
+
+    pub fn component_provers(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
+        vec![&self.consumer as &dyn ComponentProver<SimdBackend>]
+    }
+
+    pub fn trace_log_degree_bounds(&self) -> TreeVec<ColumnVec<u32>> {
+        self.consumer.trace_log_degree_bounds()
+    }
+
+    pub fn max_constraint_log_degree_bound(&self) -> u32 {
+        self.consumer.max_constraint_log_degree_bound()
     }
 }
 
@@ -144,6 +267,69 @@ impl<F: Clone> PublicEcdsaInstance<F> {
             _ => panic!("public ECDSA instance relation index {index} out of range"),
         }
     }
+}
+
+impl<F> PublicEcdsaInstance<F> {
+    fn read<E: EvalAtRow<F = F>>(eval: &mut E) -> Self {
+        Self {
+            sig_id: eval.next_trace_mask(),
+            z: P256BigInt::from_limbs(core::array::from_fn(|_| eval.next_trace_mask())),
+            r: P256BigInt::from_limbs(core::array::from_fn(|_| eval.next_trace_mask())),
+            s: P256BigInt::from_limbs(core::array::from_fn(|_| eval.next_trace_mask())),
+            pub_x: P256BigInt::from_limbs(core::array::from_fn(|_| eval.next_trace_mask())),
+            pub_y: P256BigInt::from_limbs(core::array::from_fn(|_| eval.next_trace_mask())),
+        }
+    }
+}
+
+pub fn gen_public_ecdsa_input_consumer_base_trace(
+    claim: &PublicEcdsaInputClaim,
+    log_size: u32,
+) -> ColumnVec<M31ColumnEval> {
+    let row_count = 1usize << log_size;
+    assert!(claim.instances.len() <= row_count);
+    let mut columns = vec![
+        vec![M31::from_u32_unchecked(0); row_count];
+        PUBLIC_ECDSA_INPUT_CONSUMER_TRACE_COLUMNS
+    ];
+    for (row, instance) in claim.instances.iter().enumerate() {
+        columns[0][row] = M31::from_u32_unchecked(1);
+        for (offset, value) in instance.relation_values().into_iter().enumerate() {
+            columns[1 + offset][row] = value;
+        }
+    }
+    columns
+        .into_iter()
+        .map(|values| m31_column_eval(log_size, values))
+        .collect()
+}
+
+pub fn gen_public_ecdsa_input_consumer_interaction_trace(
+    base: &[M31ColumnEval],
+    relation: &PublicEcdsaInstanceRelation,
+) -> (ColumnVec<M31ColumnEval>, PublicEcdsaInputInteractionClaim) {
+    assert_eq!(base.len(), PUBLIC_ECDSA_INPUT_CONSUMER_TRACE_COLUMNS);
+    let log_size = base[0].domain.log_size();
+    let mut logup = LogupTraceGenerator::new(log_size);
+    let mut col = logup.new_col();
+    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+        let values = public_ecdsa_packed_relation_values(base, vec_row);
+        col.write_frac(
+            vec_row,
+            PackedQM31::from(base[0].data[vec_row]),
+            relation.combine(&values),
+        );
+    }
+    col.finalize_col();
+    let (trace, claimed_sum) = logup.finalize_last();
+    (trace, PublicEcdsaInputInteractionClaim { claimed_sum })
+}
+
+fn public_ecdsa_packed_relation_values(
+    base: &[M31ColumnEval],
+    vec_row: usize,
+) -> [PackedM31; PUBLIC_ECDSA_INSTANCE_ARITY] {
+    core::array::from_fn(|index| base[1 + index].data[vec_row])
 }
 
 /// Public-data side of the relation: `-1 * PublicEcdsaInstance(...)`.
