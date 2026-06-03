@@ -82,6 +82,11 @@ use crate::fake_glv_prepared_point_source::{
     FakeGlvPreparedPointSourceProofClaim,
 };
 use crate::final_check::{FinalEcdsaCheckClaim, FinalEcdsaCheckError};
+use crate::final_check_air::{
+    ecdsa_result_provider_claimed_sum, gen_final_check_air_base_trace,
+    gen_final_check_air_interaction_trace, EcdsaResultRelation, FinalCheckAirComponents,
+    FinalCheckAirInteractionClaim, FinalCheckAirProofClaim,
+};
 use crate::prepared_point::{
     prepared_point_provider_claimed_sum, prepared_point_range7_consumer_claimed_sum,
     PreparedPointAudit, PreparedPointError, PreparedPointRelation, PreparedPointTraceClaim,
@@ -570,6 +575,7 @@ pub struct P256CurrentAirProofClaim {
     pub fake_glv_lsb_correction_operand: FakeGlvLsbCorrectionOperandProofClaim,
     pub fake_glv_prepared_point_source: FakeGlvPreparedPointSourceProofClaim,
     pub prepared_point_range7: RangeCheckClaim,
+    pub final_check: FinalCheckAirProofClaim,
     pub projective_rcb_air: ProjectiveRcbAirProofClaim,
 }
 
@@ -625,6 +631,7 @@ impl P256CurrentAirProofClaim {
                 &claim.fake_glv_chain,
             ),
             prepared_point_range7: RangeCheckClaim::new(RANGE7_BITS),
+            final_check: FinalCheckAirProofClaim::from_claim(&claim.public_inputs),
             projective_rcb_air: ProjectiveRcbAirProofClaim::from_trace(
                 &claim.projective_rcb_air_trace,
             ),
@@ -651,6 +658,7 @@ impl P256CurrentAirProofClaim {
         self.fake_glv_lsb_correction_operand.mix_into(channel);
         self.fake_glv_prepared_point_source.mix_into(channel);
         self.prepared_point_range7.mix_into(channel);
+        self.final_check.mix_into(channel);
         self.projective_rcb_air.mix_into(channel);
     }
 
@@ -781,6 +789,8 @@ pub struct P256CurrentAirInteractionClaim {
     pub fake_glv_lsb_correction_operand: FakeGlvLsbCorrectionOperandInteractionClaim,
     pub fake_glv_prepared_point_source: FakeGlvPreparedPointSourceInteractionClaim,
     pub prepared_point_range7: RangeCheckInteractionClaim,
+    pub final_check: FinalCheckAirInteractionClaim,
+    pub ecdsa_result_provider_claimed_sum: SecureField,
     pub projective_rcb_air: ProjectiveRcbAirProofInteractionClaim,
 }
 
@@ -809,6 +819,8 @@ impl P256CurrentAirInteractionClaim {
             prepared_point_range7: RangeCheckInteractionClaim {
                 claimed_sum: zero(),
             },
+            final_check: FinalCheckAirInteractionClaim::zero(),
+            ecdsa_result_provider_claimed_sum: zero(),
             projective_rcb_air: ProjectiveRcbAirProofInteractionClaim::zero(),
         }
     }
@@ -845,6 +857,8 @@ impl P256CurrentAirInteractionClaim {
         self.fake_glv_lsb_correction_operand.mix_into(channel);
         self.fake_glv_prepared_point_source.mix_into(channel);
         self.prepared_point_range7.mix_into(channel);
+        self.final_check.mix_into(channel);
+        channel.mix_felts(&[self.ecdsa_result_provider_claimed_sum]);
         self.projective_rcb_air.mix_into(channel);
     }
 
@@ -925,6 +939,11 @@ impl P256CurrentAirInteractionClaim {
                 + self.fake_glv_prepared_point_source.range7_consumer_claimed_sum,
         )?;
         verify_current_air_relation_zero(
+            "EcdsaResult",
+            self.ecdsa_result_provider_claimed_sum
+                + self.final_check.result_consumer_claimed_sum,
+        )?;
+        verify_current_air_relation_zero(
             "ProjectiveRcbAirProofSlice",
             self.projective_rcb_air.total(),
         )
@@ -948,6 +967,7 @@ struct P256CurrentAirRelations {
     lsb_correction_operand: FakeGlvLsbCorrectionOperandRelation,
     prepared_point_source: PreparedPointRelation,
     range7: RangeCheckRelation,
+    ecdsa_result: EcdsaResultRelation,
     projective_rcb_air: ProjectiveRcbMulComponentRelations,
 }
 
@@ -982,6 +1002,7 @@ impl P256CurrentAirRelations {
             lsb_correction_operand: FakeGlvLsbCorrectionOperandRelation::dummy(),
             prepared_point_source: PreparedPointRelation::dummy(),
             range7: RangeCheckRelation::dummy(),
+            ecdsa_result: EcdsaResultRelation::dummy(),
             projective_rcb_air: ProjectiveRcbMulComponentRelations::dummy(),
         }
     }
@@ -1016,6 +1037,7 @@ impl P256CurrentAirRelations {
             lsb_correction_operand: FakeGlvLsbCorrectionOperandRelation::draw(channel),
             prepared_point_source: PreparedPointRelation::draw(channel),
             range7: RangeCheckRelation::draw(channel),
+            ecdsa_result: EcdsaResultRelation::draw(channel),
             projective_rcb_air: ProjectiveRcbMulComponentRelations::draw(channel),
         }
     }
@@ -1037,6 +1059,7 @@ struct P256CurrentAirComponents {
     fake_glv_lsb_correction_operand: FakeGlvLsbCorrectionOperandComponents,
     fake_glv_prepared_point_source: FakeGlvPreparedPointSourceComponents,
     prepared_point_range7: RangeCheckComponent,
+    final_check: FinalCheckAirComponents,
     projective_rcb_air: ProjectiveRcbAirComponents,
 }
 
@@ -1156,6 +1179,12 @@ impl P256CurrentAirComponents {
                 ),
                 interaction_claim.prepared_point_range7.claimed_sum,
             ),
+            final_check: FinalCheckAirComponents::new(
+                allocator,
+                claim.final_check,
+                &interaction_claim.final_check,
+                &relations.ecdsa_result,
+            ),
             projective_rcb_air: ProjectiveRcbAirComponents::new_with_log_sizes(
                 allocator,
                 claim.projective_rcb_air.log_sizes,
@@ -1190,6 +1219,7 @@ impl P256CurrentAirComponents {
         components.extend(self.fake_glv_lsb_correction_operand.components());
         components.extend(self.fake_glv_prepared_point_source.components());
         components.push(&self.prepared_point_range7 as &dyn Component);
+        components.extend(self.final_check.components());
         components.extend(self.projective_rcb_air.components());
         components
     }
@@ -1222,6 +1252,7 @@ impl P256CurrentAirComponents {
         components.extend(self.fake_glv_lsb_correction_operand.component_provers());
         components.extend(self.fake_glv_prepared_point_source.component_provers());
         components.push(&self.prepared_point_range7 as &dyn ComponentProver<SimdBackend>);
+        components.extend(self.final_check.component_provers());
         components.extend(self.projective_rcb_air.component_provers());
         components
     }
@@ -1775,6 +1806,7 @@ impl P256ProofDraft {
                         (provider.use_count.0 != 0).then_some(provider.use_count)
                     },
                 ));
+        let final_check = gen_final_check_air_base_trace(&self.claim.public_inputs, claim.final_check);
         let projective_rcb_air = self
             .claim
             .projective_rcb_air_trace
@@ -1806,6 +1838,7 @@ impl P256ProofDraft {
         columns.extend(prepared_point_provider.clone());
         columns.extend(prepared_point_consumer.clone());
         columns.push(prepared_point_range7_multiplicity.clone());
+        columns.extend(final_check.clone());
         columns.extend(projective_rcb_air.clone());
 
         Ok(P256CurrentAirBaseTrace {
@@ -1831,6 +1864,7 @@ impl P256ProofDraft {
             prepared_point_provider,
             prepared_point_consumer,
             prepared_point_range7_multiplicity,
+            final_check,
         })
     }
 
@@ -1973,6 +2007,12 @@ impl P256ProofDraft {
                 &range7_value_column,
                 &relations.range7,
             );
+        let (final_check_interaction, final_check_claim) =
+            gen_final_check_air_interaction_trace(&base.final_check, &relations.ecdsa_result);
+        let ecdsa_result_provider_claimed_sum = ecdsa_result_provider_claimed_sum(
+            &self.claim.public_inputs.instances,
+            &relations.ecdsa_result,
+        );
         let (projective_interaction, projective_claim) = self
             .claim
             .projective_rcb_air_trace
@@ -2002,6 +2042,7 @@ impl P256ProofDraft {
         columns.extend(prepared_point_provider_interaction);
         columns.extend(prepared_point_consumer_interaction);
         columns.extend(prepared_point_range7_interaction);
+        columns.extend(final_check_interaction);
         columns.extend(projective_interaction);
 
         Ok((
@@ -2049,6 +2090,8 @@ impl P256ProofDraft {
                     range7_consumer_claimed_sum: prepared_point_range7_consumer_sum,
                 },
                 prepared_point_range7: prepared_point_range7_claim,
+                final_check: final_check_claim,
+                ecdsa_result_provider_claimed_sum,
                 projective_rcb_air: projective_claim,
             },
         ))
@@ -2119,6 +2162,7 @@ struct P256CurrentAirBaseTrace {
     prepared_point_provider: ColumnVec<M31ColumnEval>,
     prepared_point_consumer: ColumnVec<M31ColumnEval>,
     prepared_point_range7_multiplicity: M31ColumnEval,
+    final_check: ColumnVec<M31ColumnEval>,
 }
 
 fn scalar_setup_mod_mul_rows(
@@ -3042,6 +3086,31 @@ mod tests {
             .expect_err("mutated fake-GLV selector AIR claim must reject");
 
         assert!(matches!(err, P256ProofError::ProofLayer(_)));
+    }
+
+    #[test]
+    fn current_p256_monolithic_verifier_rejects_unbalanced_ecdsa_result_sum() {
+        use num_traits::One;
+        let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+            valid_real_input_with_small_u_scalars(7, 11),
+        ])
+        .expect("current pipeline builds");
+        let mut monolithic = proof
+            .prove_current_air_monolithic::<Blake2sMerkleChannel>()
+            .expect("current AIR monolithic proof proves");
+        monolithic
+            .interaction_claim
+            .ecdsa_result_provider_claimed_sum += SecureField::one();
+
+        let err = verify_current_air_monolithic::<Blake2sMerkleChannel>(monolithic)
+            .expect_err("EcdsaResult balance must reject mutated provider sum");
+
+        assert!(matches!(
+            err,
+            P256ProofError::RelationImbalance {
+                relation: "EcdsaResult"
+            }
+        ));
     }
 
     #[test]
@@ -4108,6 +4177,11 @@ mod tests {
         assert_component_named(
             "prepared_point_range7",
             &components.prepared_point_range7,
+            &trace,
+        );
+        assert_component_named(
+            "fake_glv_final_check",
+            &components.final_check.check,
             &trace,
         );
         assert_component_named(
