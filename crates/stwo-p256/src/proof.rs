@@ -2075,8 +2075,8 @@ pub const P256_PROOF_COMPONENT_SLOTS: &[P256ProofComponentSlot] = &[
     },
     P256ProofComponentSlot {
         name: "StarkProveVerify",
-        status: P256ProofComponentStatus::Pending,
-        note: "The current top-level helper is a sequential bundle of independent slice proofs, not one monolithic STARK proof artifact.",
+        status: P256ProofComponentStatus::Implemented,
+        note: "The current AIR path commits one global preprocessed tree, one global base tree, one global interaction tree, and verifies one monolithic STARK proof artifact.",
     },
 ];
 
@@ -4255,9 +4255,24 @@ mod tests {
         assert!(implemented.contains(&"ProjectiveRcbEcTrace"));
         assert!(implemented.contains(&"ProjectiveRcbAirRows"));
         assert!(pending.contains(&"FinalEcdsaCheck"));
-        assert!(pending.contains(&"StarkProveVerify"));
+        assert!(implemented.contains(&"StarkProveVerify"));
         assert!(!pending.contains(&"PreparedTableEcRows"));
         assert!(!pending.contains(&"FakeGlvEcChainRows"));
+    }
+
+    #[test]
+    #[ignore = "close-out gate: enable when all native-only full-proof slots are AIR-proven"]
+    fn full_p256_signature_proof_has_no_pending_component_slots() {
+        let pending = P256_PROOF_COMPONENT_SLOTS
+            .iter()
+            .filter(|slot| slot.status == P256ProofComponentStatus::Pending)
+            .map(|slot| slot.name)
+            .collect::<Vec<_>>();
+
+        assert!(
+            pending.is_empty(),
+            "full P-256 signature proof still has pending AIR slots: {pending:?}"
+        );
     }
 
     #[test]
