@@ -2207,8 +2207,8 @@ pub const P256_PROOF_COMPONENT_SLOTS: &[P256ProofComponentSlot] = &[
     },
     P256ProofComponentSlot {
         name: "FakeGlvSelector",
-        status: P256ProofComponentStatus::Pending,
-        note: "Selector lookup providers are proven, but selector reconstruction from scalar hints is still a native claim check.",
+        status: P256ProofComponentStatus::Implemented,
+        note: "Selector reconstruction is proven from FakeGlvScalarRelation inside the monolithic STARK with bit decomposition, limb reconstruction, final-selector/init-base, and inactive/padding zeroing; the separate selector lookup providers retain their proof slices.",
     },
     P256ProofComponentSlot {
         name: "PreparedPointUseCounts",
@@ -2957,6 +2957,49 @@ mod tests {
             .expect_err("mutated fake-GLV scalar AIR claim must reject");
 
         assert!(matches!(err, P256ProofError::ProofLayer(_)));
+    }
+
+    #[test]
+    fn current_p256_monolithic_verifier_rejects_mutated_fake_glv_selector_claim() {
+        let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+            valid_real_input_with_small_u_scalars(7, 11),
+        ])
+        .expect("current pipeline builds");
+        let mut monolithic = proof
+            .prove_current_air_monolithic::<Blake2sMerkleChannel>()
+            .expect("current AIR monolithic proof proves");
+        monolithic.claim.fake_glv_selector_air.log_size += 1;
+
+        let err = verify_current_air_monolithic::<Blake2sMerkleChannel>(monolithic)
+            .expect_err("mutated fake-GLV selector AIR claim must reject");
+
+        assert!(matches!(err, P256ProofError::ProofLayer(_)));
+    }
+
+    #[test]
+    fn current_p256_monolithic_verifier_rejects_unbalanced_scalar_consumer_sum() {
+        use num_traits::One;
+        let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+            valid_real_input_with_small_u_scalars(7, 11),
+        ])
+        .expect("current pipeline builds");
+        let mut monolithic = proof
+            .prove_current_air_monolithic::<Blake2sMerkleChannel>()
+            .expect("current AIR monolithic proof proves");
+        monolithic
+            .interaction_claim
+            .fake_glv_selector_air
+            .scalar_consumer_claimed_sum += SecureField::one();
+
+        let err = verify_current_air_monolithic::<Blake2sMerkleChannel>(monolithic)
+            .expect_err("scalar relation balance must reject mutated consumer sum");
+
+        assert!(matches!(
+            err,
+            P256ProofError::RelationImbalance {
+                relation: "FakeGlvScalar"
+            }
+        ));
     }
 
     #[test]
