@@ -46,7 +46,7 @@ fn coset_order_to_circle_domain_order(
 }
 
 /// Prover-side claim for a [`super::RangeCheckEval`] provider.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RangeCheckClaim {
     pub log_size: u32,
 }

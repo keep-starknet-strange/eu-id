@@ -112,8 +112,9 @@ use crate::public_inputs::{
 };
 use crate::public_key_check::{PublicKeyOnCurveClaim, PublicKeyOnCurveError};
 use crate::range_checks::{
-    RangeCheckClaim, RangeCheckInteractionClaim, RangeCheckRelation, SignedCarryRangeClaim,
-    RANGE13_BITS, RANGE7_BITS,
+    range_check_value_column_id, RangeCheckClaim, RangeCheckComponent, RangeCheckEval,
+    RangeCheckInteractionClaim, RangeCheckRelation, SignedCarryRangeClaim, RANGE13_BITS,
+    RANGE7_BITS,
 };
 use crate::scalar::cert_bind::{
     gen_cert_scalar_input_air_base_trace, gen_cert_scalar_input_air_interaction_trace,
@@ -568,6 +569,7 @@ pub struct P256CurrentAirProofClaim {
     pub fake_glv_signed_selector_operand: FakeGlvSignedSelectorOperandProofClaim,
     pub fake_glv_lsb_correction_operand: FakeGlvLsbCorrectionOperandProofClaim,
     pub fake_glv_prepared_point_source: FakeGlvPreparedPointSourceProofClaim,
+    pub prepared_point_range7: RangeCheckClaim,
     pub projective_rcb_air: ProjectiveRcbAirProofClaim,
 }
 
@@ -622,6 +624,7 @@ impl P256CurrentAirProofClaim {
                 &claim.prepared_trace,
                 &claim.fake_glv_chain,
             ),
+            prepared_point_range7: RangeCheckClaim::new(RANGE7_BITS),
             projective_rcb_air: ProjectiveRcbAirProofClaim::from_trace(
                 &claim.projective_rcb_air_trace,
             ),
@@ -647,6 +650,7 @@ impl P256CurrentAirProofClaim {
         self.fake_glv_signed_selector_operand.mix_into(channel);
         self.fake_glv_lsb_correction_operand.mix_into(channel);
         self.fake_glv_prepared_point_source.mix_into(channel);
+        self.prepared_point_range7.mix_into(channel);
         self.projective_rcb_air.mix_into(channel);
     }
 
@@ -700,6 +704,10 @@ impl P256CurrentAirProofClaim {
             &mut ids,
             self.fake_glv_prepared_point_source
                 .preprocessed_column_ids(),
+        );
+        append_unique_preprocessed_ids(
+            &mut ids,
+            vec![range_check_value_column_id(self.prepared_point_range7.log_size)],
         );
         append_unique_preprocessed_ids(&mut ids, self.projective_rcb_air.preprocessed_column_ids());
         ids
@@ -772,6 +780,7 @@ pub struct P256CurrentAirInteractionClaim {
     pub fake_glv_signed_selector_operand: FakeGlvSignedSelectorOperandInteractionClaim,
     pub fake_glv_lsb_correction_operand: FakeGlvLsbCorrectionOperandInteractionClaim,
     pub fake_glv_prepared_point_source: FakeGlvPreparedPointSourceInteractionClaim,
+    pub prepared_point_range7: RangeCheckInteractionClaim,
     pub projective_rcb_air: ProjectiveRcbAirProofInteractionClaim,
 }
 
@@ -797,6 +806,9 @@ impl P256CurrentAirInteractionClaim {
             fake_glv_signed_selector_operand: FakeGlvSignedSelectorOperandInteractionClaim::zero(),
             fake_glv_lsb_correction_operand: FakeGlvLsbCorrectionOperandInteractionClaim::zero(),
             fake_glv_prepared_point_source: FakeGlvPreparedPointSourceInteractionClaim::zero(),
+            prepared_point_range7: RangeCheckInteractionClaim {
+                claimed_sum: zero(),
+            },
             projective_rcb_air: ProjectiveRcbAirProofInteractionClaim::zero(),
         }
     }
@@ -832,6 +844,7 @@ impl P256CurrentAirInteractionClaim {
         self.fake_glv_signed_selector_operand.mix_into(channel);
         self.fake_glv_lsb_correction_operand.mix_into(channel);
         self.fake_glv_prepared_point_source.mix_into(channel);
+        self.prepared_point_range7.mix_into(channel);
         self.projective_rcb_air.mix_into(channel);
     }
 
@@ -907,6 +920,11 @@ impl P256CurrentAirInteractionClaim {
             self.fake_glv_prepared_point_source.total(),
         )?;
         verify_current_air_relation_zero(
+            "Range7",
+            self.prepared_point_range7.claimed_sum
+                + self.fake_glv_prepared_point_source.range7_consumer_claimed_sum,
+        )?;
+        verify_current_air_relation_zero(
             "ProjectiveRcbAirProofSlice",
             self.projective_rcb_air.total(),
         )
@@ -929,6 +947,7 @@ struct P256CurrentAirRelations {
     signed_selector_operand: FakeGlvSignedSelectorOperandRelation,
     lsb_correction_operand: FakeGlvLsbCorrectionOperandRelation,
     prepared_point_source: PreparedPointRelation,
+    range7: RangeCheckRelation,
     projective_rcb_air: ProjectiveRcbMulComponentRelations,
 }
 
@@ -962,6 +981,7 @@ impl P256CurrentAirRelations {
             signed_selector_operand: FakeGlvSignedSelectorOperandRelation::dummy(),
             lsb_correction_operand: FakeGlvLsbCorrectionOperandRelation::dummy(),
             prepared_point_source: PreparedPointRelation::dummy(),
+            range7: RangeCheckRelation::dummy(),
             projective_rcb_air: ProjectiveRcbMulComponentRelations::dummy(),
         }
     }
@@ -995,6 +1015,7 @@ impl P256CurrentAirRelations {
             signed_selector_operand: FakeGlvSignedSelectorOperandRelation::draw(channel),
             lsb_correction_operand: FakeGlvLsbCorrectionOperandRelation::draw(channel),
             prepared_point_source: PreparedPointRelation::draw(channel),
+            range7: RangeCheckRelation::draw(channel),
             projective_rcb_air: ProjectiveRcbMulComponentRelations::draw(channel),
         }
     }
@@ -1015,6 +1036,7 @@ struct P256CurrentAirComponents {
     fake_glv_signed_selector_operand: FakeGlvSignedSelectorOperandComponents,
     fake_glv_lsb_correction_operand: FakeGlvLsbCorrectionOperandComponents,
     fake_glv_prepared_point_source: FakeGlvPreparedPointSourceComponents,
+    prepared_point_range7: RangeCheckComponent,
     projective_rcb_air: ProjectiveRcbAirComponents,
 }
 
@@ -1124,6 +1146,15 @@ impl P256CurrentAirComponents {
                 claim.fake_glv_prepared_point_source,
                 &interaction_claim.fake_glv_prepared_point_source,
                 &relations.prepared_point_source,
+                &relations.range7,
+            ),
+            prepared_point_range7: RangeCheckComponent::new(
+                allocator,
+                RangeCheckEval::new(
+                    relations.range7.clone(),
+                    claim.prepared_point_range7.log_size,
+                ),
+                interaction_claim.prepared_point_range7.claimed_sum,
             ),
             projective_rcb_air: ProjectiveRcbAirComponents::new_with_log_sizes(
                 allocator,
@@ -1158,6 +1189,7 @@ impl P256CurrentAirComponents {
         components.extend(self.fake_glv_signed_selector_operand.components());
         components.extend(self.fake_glv_lsb_correction_operand.components());
         components.extend(self.fake_glv_prepared_point_source.components());
+        components.push(&self.prepared_point_range7 as &dyn Component);
         components.extend(self.projective_rcb_air.components());
         components
     }
@@ -1189,6 +1221,7 @@ impl P256CurrentAirComponents {
         components.extend(self.fake_glv_signed_selector_operand.component_provers());
         components.extend(self.fake_glv_lsb_correction_operand.component_provers());
         components.extend(self.fake_glv_prepared_point_source.component_provers());
+        components.push(&self.prepared_point_range7 as &dyn ComponentProver<SimdBackend>);
         components.extend(self.projective_rcb_air.component_provers());
         components
     }
@@ -1595,6 +1628,16 @@ impl P256ProofDraft {
         )?;
         append_unique_preprocessed_columns(&mut ids, &mut columns, local_ids, local_columns);
 
+        let range7_id =
+            range_check_value_column_id(claim.prepared_point_range7.log_size);
+        let range7_column = claim.prepared_point_range7.gen_preprocessed_column();
+        append_unique_preprocessed_columns(
+            &mut ids,
+            &mut columns,
+            vec![range7_id],
+            vec![range7_column],
+        );
+
         let local_ids = claim.projective_rcb_air.preprocessed_column_ids();
         let local_columns = self
             .claim
@@ -1724,6 +1767,14 @@ impl P256ProofDraft {
             &prepared_point_consumers,
             claim.fake_glv_prepared_point_source.consumer_log_size,
         )?;
+        let prepared_point_range7_multiplicity =
+            claim
+                .prepared_point_range7
+                .gen_multiplicity_trace(self.claim.prepared_trace.providers.iter().filter_map(
+                    |provider| {
+                        (provider.use_count.0 != 0).then_some(provider.use_count)
+                    },
+                ));
         let projective_rcb_air = self
             .claim
             .projective_rcb_air_trace
@@ -1754,6 +1805,7 @@ impl P256ProofDraft {
         columns.extend(lsb_consumer.clone());
         columns.extend(prepared_point_provider.clone());
         columns.extend(prepared_point_consumer.clone());
+        columns.push(prepared_point_range7_multiplicity.clone());
         columns.extend(projective_rcb_air.clone());
 
         Ok(P256CurrentAirBaseTrace {
@@ -1778,6 +1830,7 @@ impl P256ProofDraft {
             lsb_consumer,
             prepared_point_provider,
             prepared_point_consumer,
+            prepared_point_range7_multiplicity,
         })
     }
 
@@ -1899,15 +1952,26 @@ impl P256ProofDraft {
                 &relations.lsb_correction_operand,
                 false,
             );
-        let (prepared_point_provider_interaction, prepared_point_provider_sum) =
-            gen_prepared_point_provider_interaction_trace(
-                &base.prepared_point_provider,
-                &relations.prepared_point_source,
-            );
+        let (
+            prepared_point_provider_interaction,
+            prepared_point_provider_sum,
+            prepared_point_range7_consumer_sum,
+        ) = gen_prepared_point_provider_interaction_trace(
+            &base.prepared_point_provider,
+            &relations.prepared_point_source,
+            &relations.range7,
+        );
         let (prepared_point_consumer_interaction, prepared_point_consumer_sum) =
             gen_fake_glv_prepared_point_consumer_interaction_trace(
                 &base.prepared_point_consumer,
                 &relations.prepared_point_source,
+            );
+        let range7_value_column = RangeCheckClaim::new(RANGE7_BITS).gen_preprocessed_column();
+        let (prepared_point_range7_interaction, prepared_point_range7_claim) =
+            RangeCheckInteractionClaim::gen_interaction_trace(
+                &base.prepared_point_range7_multiplicity,
+                &range7_value_column,
+                &relations.range7,
             );
         let (projective_interaction, projective_claim) = self
             .claim
@@ -1937,6 +2001,7 @@ impl P256ProofDraft {
         columns.extend(lsb_consumer_interaction);
         columns.extend(prepared_point_provider_interaction);
         columns.extend(prepared_point_consumer_interaction);
+        columns.extend(prepared_point_range7_interaction);
         columns.extend(projective_interaction);
 
         Ok((
@@ -1981,7 +2046,9 @@ impl P256ProofDraft {
                 fake_glv_prepared_point_source: FakeGlvPreparedPointSourceInteractionClaim {
                     provider_claimed_sum: prepared_point_provider_sum,
                     consumer_claimed_sum: prepared_point_consumer_sum,
+                    range7_consumer_claimed_sum: prepared_point_range7_consumer_sum,
                 },
+                prepared_point_range7: prepared_point_range7_claim,
                 projective_rcb_air: projective_claim,
             },
         ))
@@ -2051,6 +2118,7 @@ struct P256CurrentAirBaseTrace {
     lsb_consumer: ColumnVec<M31ColumnEval>,
     prepared_point_provider: ColumnVec<M31ColumnEval>,
     prepared_point_consumer: ColumnVec<M31ColumnEval>,
+    prepared_point_range7_multiplicity: M31ColumnEval,
 }
 
 fn scalar_setup_mod_mul_rows(
@@ -2212,8 +2280,8 @@ pub const P256_PROOF_COMPONENT_SLOTS: &[P256ProofComponentSlot] = &[
     },
     P256ProofComponentSlot {
         name: "PreparedPointUseCounts",
-        status: P256ProofComponentStatus::Pending,
-        note: "PreparedPoint use-count audit exists, but the Range7 use-count proof is not yet included in one top-level proof.",
+        status: P256ProofComponentStatus::Implemented,
+        note: "PreparedPoint provider rows now consume Range7 on their use_count column, and the Range7 multiplicity provider sits inside the monolithic STARK with its LogUp balance enforced against the provider consumers.",
     },
     P256ProofComponentSlot {
         name: "PreparedTablePoints",
@@ -2974,6 +3042,30 @@ mod tests {
             .expect_err("mutated fake-GLV selector AIR claim must reject");
 
         assert!(matches!(err, P256ProofError::ProofLayer(_)));
+    }
+
+    #[test]
+    fn current_p256_monolithic_verifier_rejects_unbalanced_range7_consumer_sum() {
+        use num_traits::One;
+        let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+            valid_real_input_with_small_u_scalars(7, 11),
+        ])
+        .expect("current pipeline builds");
+        let mut monolithic = proof
+            .prove_current_air_monolithic::<Blake2sMerkleChannel>()
+            .expect("current AIR monolithic proof proves");
+        monolithic
+            .interaction_claim
+            .fake_glv_prepared_point_source
+            .range7_consumer_claimed_sum += SecureField::one();
+
+        let err = verify_current_air_monolithic::<Blake2sMerkleChannel>(monolithic)
+            .expect_err("Range7 balance must reject mutated consumer sum");
+
+        assert!(matches!(
+            err,
+            P256ProofError::RelationImbalance { relation: "Range7" }
+        ));
     }
 
     #[test]
@@ -4011,6 +4103,11 @@ mod tests {
         assert_component_named(
             "fake_glv_prepared_point_source.consumer",
             &components.fake_glv_prepared_point_source.consumer,
+            &trace,
+        );
+        assert_component_named(
+            "prepared_point_range7",
+            &components.prepared_point_range7,
             &trace,
         );
         assert_component_named(

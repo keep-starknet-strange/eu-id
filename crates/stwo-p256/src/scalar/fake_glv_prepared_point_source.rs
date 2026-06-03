@@ -27,6 +27,7 @@ use stwo_constraint_framework::{
 };
 use stwo_p256_utils::constants::N_LIMBS;
 
+use crate::range_checks::{add_range_check, RangeCheckRelation};
 use crate::scalar::fake_glv_chain::{FakeGlvChainClaim, FakeGlvChainError};
 use crate::scalar::prepared_point::{
     PreparedPointInstance, PreparedPointProvider, PreparedPointRelation, PreparedPointTraceClaim,
@@ -69,6 +70,7 @@ impl FakeGlvPreparedPointSourceProofClaim {
             *self,
             &FakeGlvPreparedPointSourceInteractionClaim::zero(),
             &PreparedPointRelation::dummy(),
+            &RangeCheckRelation::dummy(),
         );
         allocator.preprocessed_columns().clone()
     }
@@ -80,6 +82,7 @@ impl FakeGlvPreparedPointSourceProofClaim {
             *self,
             &FakeGlvPreparedPointSourceInteractionClaim::zero(),
             &PreparedPointRelation::dummy(),
+            &RangeCheckRelation::dummy(),
         );
         components.trace_log_degree_bounds()
     }
@@ -91,6 +94,7 @@ impl FakeGlvPreparedPointSourceProofClaim {
             *self,
             &FakeGlvPreparedPointSourceInteractionClaim::zero(),
             &PreparedPointRelation::dummy(),
+            &RangeCheckRelation::dummy(),
         );
         components.max_constraint_log_degree_bound()
     }
@@ -100,6 +104,7 @@ impl FakeGlvPreparedPointSourceProofClaim {
 pub struct FakeGlvPreparedPointSourceInteractionClaim {
     pub provider_claimed_sum: SecureField,
     pub consumer_claimed_sum: SecureField,
+    pub range7_consumer_claimed_sum: SecureField,
 }
 
 impl FakeGlvPreparedPointSourceInteractionClaim {
@@ -107,6 +112,7 @@ impl FakeGlvPreparedPointSourceInteractionClaim {
         Self {
             provider_claimed_sum: secure_zero(),
             consumer_claimed_sum: secure_zero(),
+            range7_consumer_claimed_sum: secure_zero(),
         }
     }
 
@@ -139,6 +145,7 @@ impl FakeGlvPreparedPointSourceComponents {
         claim: FakeGlvPreparedPointSourceProofClaim,
         interaction_claim: &FakeGlvPreparedPointSourceInteractionClaim,
         relation: &PreparedPointRelation,
+        range7: &RangeCheckRelation,
     ) -> Self {
         Self {
             provider: PreparedPointProviderComponent::new(
@@ -146,8 +153,10 @@ impl FakeGlvPreparedPointSourceComponents {
                 PreparedPointProviderEval {
                     log_size: claim.provider_log_size,
                     relation: relation.clone(),
+                    range7: range7.clone(),
                 },
-                interaction_claim.provider_claimed_sum,
+                interaction_claim.provider_claimed_sum
+                    + interaction_claim.range7_consumer_claimed_sum,
             ),
             consumer: FakeGlvPreparedPointConsumerComponent::new(
                 allocator,
@@ -195,6 +204,7 @@ impl FakeGlvPreparedPointSourceComponents {
 pub struct PreparedPointProviderEval {
     pub log_size: u32,
     pub relation: PreparedPointRelation,
+    pub range7: RangeCheckRelation,
 }
 
 impl FrameworkEval for PreparedPointProviderEval {
@@ -221,9 +231,10 @@ impl FrameworkEval for PreparedPointProviderEval {
         let values = instance.relation_values();
         eval.add_to_relation(RelationEntry::new(
             &self.relation,
-            -E::EF::from(use_count),
+            -E::EF::from(use_count.clone()),
             &values,
         ));
+        add_range_check(&mut eval, &self.range7, active, use_count);
         eval.finalize_logup();
         eval
     }
@@ -361,13 +372,15 @@ where
     tree_builder.commit(&mut channel);
 
     let relation = PreparedPointRelation::draw(&mut channel);
-    let (provider_interaction, provider_claimed_sum) =
-        gen_prepared_point_provider_interaction_trace(&provider_base, &relation);
+    let range7 = RangeCheckRelation::draw(&mut channel);
+    let (provider_interaction, provider_claimed_sum, range7_consumer_claimed_sum) =
+        gen_prepared_point_provider_interaction_trace(&provider_base, &relation, &range7);
     let (consumer_interaction, consumer_claimed_sum) =
         gen_fake_glv_prepared_point_consumer_interaction_trace(&consumer_base, &relation);
     let interaction_claim = FakeGlvPreparedPointSourceInteractionClaim {
         provider_claimed_sum,
         consumer_claimed_sum,
+        range7_consumer_claimed_sum,
     };
     if interaction_claim.total() != secure_zero() {
         return Err(FakeGlvChainError::RelationImbalance {
@@ -387,6 +400,7 @@ where
         claim,
         &interaction_claim,
         &relation,
+        &range7,
     );
     assert_eq!(
         commitment_scheme
@@ -444,6 +458,7 @@ pub fn verify_fake_glv_prepared_point_source_proof_slice<MC: stwo::core::channel
     );
 
     let relation = PreparedPointRelation::draw(&mut channel);
+    let range7 = RangeCheckRelation::draw(&mut channel);
 
     interaction_claim.mix_into(&mut channel);
     commitment_scheme.commit(
@@ -458,6 +473,7 @@ pub fn verify_fake_glv_prepared_point_source_proof_slice<MC: stwo::core::channel
         claim,
         &interaction_claim,
         &relation,
+        &range7,
     );
     verify(
         &components.components(),
@@ -538,7 +554,8 @@ pub(crate) fn gen_fake_glv_prepared_point_consumer_base_trace(
 pub(crate) fn gen_prepared_point_provider_interaction_trace(
     base: &[M31ColumnEval],
     relation: &PreparedPointRelation,
-) -> (ColumnVec<M31ColumnEval>, SecureField) {
+    range7: &RangeCheckRelation,
+) -> (ColumnVec<M31ColumnEval>, SecureField, SecureField) {
     assert_eq!(base.len(), PREPARED_POINT_PROVIDER_TRACE_COLUMNS);
     let log_size = base[0].domain.log_size();
     let mut logup = LogupTraceGenerator::new(log_size);
@@ -550,7 +567,24 @@ pub(crate) fn gen_prepared_point_provider_interaction_trace(
         col.write_frac(vec_row, numerator, denominator);
     }
     col.finalize_col();
-    logup.finalize_last()
+    let mut col = logup.new_col();
+    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+        let active = PackedQM31::from(base[0].data[vec_row]);
+        let denominator: PackedQM31 = range7.combine(&[base[1].data[vec_row]]);
+        col.write_frac(vec_row, active, denominator);
+    }
+    col.finalize_col();
+    let (trace, total_claimed_sum) = logup.finalize_last();
+    let provider_claimed_sum: SecureField = storage_rows(base)
+        .filter(|row| row[0] != M31::from_u32_unchecked(0))
+        .map(|row| -> SecureField {
+            let values = prepared_point_provider_relation_values(&row);
+            let denominator: SecureField = relation.combine(&values);
+            -SecureField::from(row[1]) / denominator
+        })
+        .sum();
+    let range7_consumer_claimed_sum = total_claimed_sum - provider_claimed_sum;
+    (trace, provider_claimed_sum, range7_consumer_claimed_sum)
 }
 
 pub(crate) fn gen_fake_glv_prepared_point_consumer_interaction_trace(
@@ -635,4 +669,19 @@ fn nonzero_prepared_provider_count(trace: &PreparedPointTraceClaim) -> usize {
 
 fn secure_zero() -> SecureField {
     SecureField::from(M31::from_u32_unchecked(0))
+}
+
+fn storage_rows(base: &[M31ColumnEval]) -> impl Iterator<Item = Vec<M31>> + '_ {
+    let row_count = base[0].domain.size();
+    (0..row_count).map(|row| {
+        let vec_row = row / (1 << LOG_N_LANES);
+        let lane = row % (1 << LOG_N_LANES);
+        base.iter()
+            .map(|column| column.data[vec_row].to_array()[lane])
+            .collect::<Vec<_>>()
+    })
+}
+
+fn prepared_point_provider_relation_values(row: &[M31]) -> [M31; PREPARED_POINT_ARITY] {
+    core::array::from_fn(|index| row[index + 2])
 }
