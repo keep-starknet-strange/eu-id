@@ -118,9 +118,11 @@ use crate::range_checks::{
 use crate::scalar::cert_bind::{
     gen_cert_scalar_input_air_base_trace, gen_cert_scalar_input_air_interaction_trace,
     CertScalarInputAirComponents, CertScalarInputAirInteractionClaim, CertScalarInputAirProofClaim,
-    CertScalarInputClaim, CertScalarInputError,
+    CertScalarInputClaim, CertScalarInputError, CertScalarInputRelation,
 };
 use crate::scalar::fake_glv_scalar::{
+    gen_fake_glv_scalar_air_base_trace, gen_fake_glv_scalar_air_interaction_trace,
+    FakeGlvScalarAirComponents, FakeGlvScalarAirInteractionClaim, FakeGlvScalarAirProofClaim,
     FakeGlvScalarHint, FakeGlvScalarHintClaim, FakeGlvScalarHintError,
 };
 use crate::scalar::fake_glv_selector::{FakeGlvSelectorClaim, FakeGlvSelectorError};
@@ -550,6 +552,7 @@ pub struct P256CurrentAirProofClaim {
     pub public_inputs: PublicEcdsaInputClaim,
     pub scalar_setup: ScalarSetupAirProofClaim,
     pub cert_scalar_inputs: CertScalarInputAirProofClaim,
+    pub fake_glv_scalar_air: FakeGlvScalarAirProofClaim,
     pub scalar_setup_mod_muls: Vec<ScalarModMulClaim>,
     pub prepared_table_projective_source: PreparedTableProjectiveSourceProofClaim,
     pub fake_glv_projective_source: FakeGlvProjectiveSourceProofClaim,
@@ -570,6 +573,7 @@ impl P256CurrentAirProofClaim {
             public_inputs: claim.public_inputs.clone(),
             scalar_setup: ScalarSetupAirProofClaim::from_claim(&claim.scalar_setup),
             cert_scalar_inputs: CertScalarInputAirProofClaim::from_claim(&claim.scalar_setup),
+            fake_glv_scalar_air: FakeGlvScalarAirProofClaim::from_claim(&claim.fake_glv_scalars),
             scalar_setup_mod_muls: scalar_setup_mod_mul_rows(claim)
                 .expect("verified scalar setup mod-mul rows generate")
                 .iter()
@@ -620,6 +624,7 @@ impl P256CurrentAirProofClaim {
         self.public_inputs.mix_into(channel);
         self.scalar_setup.mix_into(channel);
         self.cert_scalar_inputs.mix_into(channel);
+        self.fake_glv_scalar_air.mix_into(channel);
         channel.mix_u64(self.scalar_setup_mod_muls.len() as u64);
         for claim in &self.scalar_setup_mod_muls {
             claim.mix_into(channel);
@@ -747,6 +752,7 @@ pub struct P256CurrentAirInteractionClaim {
     pub public_inputs: RelationBalanceClaim,
     pub scalar_setup: ScalarSetupAirInteractionClaim,
     pub cert_scalar_inputs: CertScalarInputAirInteractionClaim,
+    pub fake_glv_scalar_air: FakeGlvScalarAirInteractionClaim,
     pub(crate) scalar_setup_mod_muls: Vec<ScalarModMulProofSliceInteractionClaim>,
     pub prepared_table_projective_source: PreparedTableProjectiveSourceInteractionClaim,
     pub fake_glv_projective_source: FakeGlvProjectiveSourceInteractionClaim,
@@ -768,6 +774,7 @@ impl P256CurrentAirInteractionClaim {
             },
             scalar_setup: ScalarSetupAirInteractionClaim::zero(),
             cert_scalar_inputs: CertScalarInputAirInteractionClaim::zero(),
+            fake_glv_scalar_air: FakeGlvScalarAirInteractionClaim::zero(),
             scalar_setup_mod_muls: Vec::new(),
             prepared_table_projective_source: PreparedTableProjectiveSourceInteractionClaim::zero(),
             fake_glv_projective_source: FakeGlvProjectiveSourceInteractionClaim::zero(),
@@ -798,6 +805,7 @@ impl P256CurrentAirInteractionClaim {
         ]);
         self.scalar_setup.mix_into(channel);
         self.cert_scalar_inputs.mix_into(channel);
+        self.fake_glv_scalar_air.mix_into(channel);
         channel.mix_u64(self.scalar_setup_mod_muls.len() as u64);
         for claim in &self.scalar_setup_mod_muls {
             claim.scalar_mod_mul.mix_into(channel);
@@ -821,6 +829,11 @@ impl P256CurrentAirInteractionClaim {
             "ScalarSetupOutput",
             self.scalar_setup.output_provider_claimed_sum
                 + self.cert_scalar_inputs.scalar_setup_consumer_claimed_sum,
+        )?;
+        verify_current_air_relation_zero(
+            "CertScalarInput",
+            self.cert_scalar_inputs.cert_provider_claimed_sum
+                + self.fake_glv_scalar_air.cert_consumer_claimed_sum,
         )?;
         verify_current_air_relation_zero(
             "ScalarSetupRange13",
@@ -887,6 +900,7 @@ impl P256CurrentAirInteractionClaim {
 struct P256CurrentAirRelations {
     public_inputs: PublicEcdsaInstanceRelation,
     scalar_setup_output: ScalarSetupOutputRelation,
+    cert_scalar_input: CertScalarInputRelation,
     scalar_mod_mul: ScalarModMulLookupRelations,
     scalar_setup: ScalarSetupAirRelations,
     prepared_table: PreparedTableEcRowRelation,
@@ -904,6 +918,7 @@ impl P256CurrentAirRelations {
     fn dummy() -> Self {
         let public_inputs = PublicEcdsaInstanceRelation::dummy();
         let scalar_setup_output = ScalarSetupOutputRelation::dummy();
+        let cert_scalar_input = CertScalarInputRelation::dummy();
         let scalar_mod_mul = ScalarModMulLookupRelations::dummy();
         let scalar_setup = ScalarSetupAirRelations {
             public_inputs: public_inputs.clone(),
@@ -916,6 +931,7 @@ impl P256CurrentAirRelations {
         Self {
             public_inputs,
             scalar_setup_output,
+            cert_scalar_input,
             scalar_mod_mul,
             scalar_setup,
             prepared_table: PreparedTableEcRowRelation::dummy(),
@@ -933,6 +949,7 @@ impl P256CurrentAirRelations {
     fn draw(channel: &mut impl Channel) -> Self {
         let public_inputs = PublicEcdsaInstanceRelation::draw(channel);
         let scalar_setup_output = ScalarSetupOutputRelation::draw(channel);
+        let cert_scalar_input = CertScalarInputRelation::draw(channel);
         let scalar_mod_mul = ScalarModMulLookupRelations::draw(channel);
         let scalar_setup = ScalarSetupAirRelations {
             public_inputs: public_inputs.clone(),
@@ -945,6 +962,7 @@ impl P256CurrentAirRelations {
         Self {
             public_inputs,
             scalar_setup_output,
+            cert_scalar_input,
             scalar_mod_mul,
             scalar_setup,
             prepared_table: PreparedTableEcRowRelation::draw(channel),
@@ -963,6 +981,7 @@ impl P256CurrentAirRelations {
 struct P256CurrentAirComponents {
     scalar_setup: ScalarSetupAirComponents,
     cert_scalar_inputs: CertScalarInputAirComponents,
+    fake_glv_scalar_air: FakeGlvScalarAirComponents,
     scalar_setup_mod_muls: Vec<ScalarModMulComponents>,
     prepared_table_projective_source: PreparedTableProjectiveSourceComponents,
     fake_glv_projective_source: FakeGlvProjectiveSourceComponents,
@@ -996,6 +1015,13 @@ impl P256CurrentAirComponents {
                 claim.cert_scalar_inputs,
                 &interaction_claim.cert_scalar_inputs,
                 &relations.scalar_setup_output,
+                &relations.cert_scalar_input,
+            ),
+            fake_glv_scalar_air: FakeGlvScalarAirComponents::new(
+                allocator,
+                claim.fake_glv_scalar_air,
+                &interaction_claim.fake_glv_scalar_air,
+                &relations.cert_scalar_input,
             ),
             scalar_setup_mod_muls: claim
                 .scalar_setup_mod_muls
@@ -1082,6 +1108,7 @@ impl P256CurrentAirComponents {
         let mut components = Vec::new();
         components.extend(self.scalar_setup.components());
         components.extend(self.cert_scalar_inputs.components());
+        components.extend(self.fake_glv_scalar_air.components());
         for scalar_setup_mod_mul in &self.scalar_setup_mod_muls {
             components.push(&scalar_setup_mod_mul.canonical as &dyn Component);
             components.push(&scalar_setup_mod_mul.ab_chunks as &dyn Component);
@@ -1108,6 +1135,7 @@ impl P256CurrentAirComponents {
         let mut components = Vec::new();
         components.extend(self.scalar_setup.component_provers());
         components.extend(self.cert_scalar_inputs.component_provers());
+        components.extend(self.fake_glv_scalar_air.component_provers());
         for scalar_setup_mod_mul in &self.scalar_setup_mod_muls {
             components.push(&scalar_setup_mod_mul.canonical as &dyn ComponentProver<SimdBackend>);
             components.push(&scalar_setup_mod_mul.ab_chunks as &dyn ComponentProver<SimdBackend>);
@@ -1230,6 +1258,7 @@ impl P256ProofDraft {
         let mut channel = MC::C::default();
         let mut commitment_scheme =
             CommitmentSchemeProver::<SimdBackend, MC>::new(config, &twiddles);
+        commitment_scheme.set_store_polynomials_coefficients();
 
         let preprocessed = self.gen_current_air_preprocessed_trace(&proof_claim, &ids)?;
         let mut tree_builder = commitment_scheme.tree_builder();
@@ -1567,6 +1596,11 @@ impl P256ProofDraft {
             &self.claim.cert_inputs,
             claim.cert_scalar_inputs,
         );
+        let fake_glv_scalar_air = gen_fake_glv_scalar_air_base_trace(
+            &self.claim.cert_inputs,
+            &self.claim.fake_glv_scalars,
+            claim.fake_glv_scalar_air,
+        );
         let scalar_lookup_claims = LookupProviderClaims::scalar_mod_mul();
         let scalar_setup_rows = scalar_setup_mod_mul_rows(&self.claim)?;
         let scalar_setup_mod_muls = scalar_setup_rows
@@ -1662,6 +1696,7 @@ impl P256ProofDraft {
         columns.extend(scalar_setup.clone());
         columns.extend(scalar_setup_lookup_providers.clone());
         columns.extend(cert_scalar_inputs.clone());
+        columns.extend(fake_glv_scalar_air.clone());
         for scalar_setup_mod_mul in &scalar_setup_mod_muls {
             columns.extend(scalar_setup_mod_mul.clone());
         }
@@ -1687,6 +1722,7 @@ impl P256ProofDraft {
             columns,
             scalar_setup,
             cert_scalar_inputs,
+            fake_glv_scalar_air,
             scalar_setup_mod_muls,
             prepared_table_provider,
             prepared_table_consumer,
@@ -1717,6 +1753,12 @@ impl P256ProofDraft {
             gen_cert_scalar_input_air_interaction_trace(
                 &base.cert_scalar_inputs,
                 &relations.scalar_setup_output,
+                &relations.cert_scalar_input,
+            );
+        let (fake_glv_scalar_interaction, fake_glv_scalar_claim) =
+            gen_fake_glv_scalar_air_interaction_trace(
+                &base.fake_glv_scalar_air,
+                &relations.cert_scalar_input,
             );
         let public_provider_claim = self
             .claim
@@ -1830,6 +1872,7 @@ impl P256ProofDraft {
         let mut columns = Vec::new();
         columns.extend(scalar_setup_interaction);
         columns.extend(cert_scalar_input_interaction);
+        columns.extend(fake_glv_scalar_interaction);
         for interaction in scalar_setup_interactions {
             columns.extend(interaction);
         }
@@ -1859,6 +1902,7 @@ impl P256ProofDraft {
                 ),
                 scalar_setup: scalar_setup_claim,
                 cert_scalar_inputs: cert_scalar_input_claim,
+                fake_glv_scalar_air: fake_glv_scalar_claim,
                 scalar_setup_mod_muls: scalar_setup_interaction_claims,
                 prepared_table_projective_source: PreparedTableProjectiveSourceInteractionClaim {
                     provider_claimed_sum: prepared_provider_claim.claimed_sum,
@@ -1942,6 +1986,7 @@ struct P256CurrentAirBaseTrace {
     columns: ColumnVec<M31ColumnEval>,
     scalar_setup: ColumnVec<M31ColumnEval>,
     cert_scalar_inputs: ColumnVec<M31ColumnEval>,
+    fake_glv_scalar_air: ColumnVec<M31ColumnEval>,
     scalar_setup_mod_muls: Vec<ColumnVec<M31ColumnEval>>,
     prepared_table_provider: ColumnVec<M31ColumnEval>,
     prepared_table_consumer: ColumnVec<M31ColumnEval>,
@@ -2109,8 +2154,8 @@ pub const P256_PROOF_COMPONENT_SLOTS: &[P256ProofComponentSlot] = &[
     },
     P256ProofComponentSlot {
         name: "FakeGlvScalarHint",
-        status: P256ProofComponentStatus::Pending,
-        note: "Scalar decomposition hints are checked natively; AIR constraints for the scalar equation are still pending.",
+        status: P256ProofComponentStatus::Implemented,
+        note: "Fake-GLV scalar rows are proven from CertScalarInput inside the monolithic STARK for the current trivial scalar strategy, including small-limb, active/inactive, sign, and scalar equality constraints.",
     },
     P256ProofComponentSlot {
         name: "FakeGlvSelector",
@@ -2850,6 +2895,23 @@ mod tests {
     }
 
     #[test]
+    fn current_p256_monolithic_verifier_rejects_mutated_fake_glv_scalar_claim() {
+        let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+            valid_real_input_with_small_u_scalars(7, 11),
+        ])
+        .expect("current pipeline builds");
+        let mut monolithic = proof
+            .prove_current_air_monolithic::<Blake2sMerkleChannel>()
+            .expect("current AIR monolithic proof proves");
+        monolithic.claim.fake_glv_scalar_air.log_size += 1;
+
+        let err = verify_current_air_monolithic::<Blake2sMerkleChannel>(monolithic)
+            .expect_err("mutated fake-GLV scalar AIR claim must reject");
+
+        assert!(matches!(err, P256ProofError::ProofLayer(_)));
+    }
+
+    #[test]
     fn current_p256_proof_pipeline_rejects_invalid_final_signature_linkage() {
         let err =
             P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![test_input(42, 77, 1)])
@@ -3351,6 +3413,17 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "proves fake-GLV scalar and selector AIR rows through PCS for degree/profile diagnostics"]
+    fn fake_glv_scalar_selector_pcs_diagnostic() {
+        let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+            valid_real_input_with_small_u_scalars(0, 11),
+        ])
+        .expect("zero branch pipeline builds");
+
+        prove_fake_glv_scalar_air_for_diagnostic(&proof);
+    }
+
+    #[test]
     #[ignore = "checks scalar setup mod-mul AB schedule/base row order"]
     fn scalar_setup_mod_mul_ab_row_order_diagnostic() {
         let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
@@ -3531,6 +3604,73 @@ mod tests {
             .expect("scalar mod-mul PCS proof proves");
     }
 
+    fn prove_fake_glv_scalar_air_for_diagnostic(proof: &P256ProofDraft) {
+        eprintln!("prove fake_glv_scalar_air aggregate");
+        let claim = FakeGlvScalarAirProofClaim::from_claim(&proof.claim.fake_glv_scalars);
+        let max_constraint_log_degree_bound = {
+            let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&[]);
+            let components = FakeGlvScalarAirComponents::new(
+                &mut allocator,
+                claim,
+                &FakeGlvScalarAirInteractionClaim::zero(),
+                &CertScalarInputRelation::dummy(),
+            );
+            components.max_constraint_log_degree_bound()
+        };
+        let config = p256_stark_slice_low_ram_config(max_constraint_log_degree_bound);
+        eprintln!(
+            "fake_glv_scalar_air pcs max_bound={} blowup={} lifting={:?}",
+            max_constraint_log_degree_bound, config.fri_config.log_blowup_factor, config.lifting_log_size
+        );
+        let twiddles =
+            SimdBackend::precompute_twiddles(
+                CanonicCoset::new(config.lifting_log_size.unwrap_or(
+                    max_constraint_log_degree_bound + config.fri_config.log_blowup_factor,
+                ))
+                .circle_domain()
+                .half_coset,
+            );
+        let mut channel = <Blake2sMerkleChannel as MerkleChannel>::C::default();
+        let mut commitment_scheme =
+            CommitmentSchemeProver::<SimdBackend, Blake2sMerkleChannel>::new(config, &twiddles);
+        commitment_scheme.set_store_polynomials_coefficients();
+
+        let tree_builder = commitment_scheme.tree_builder();
+        tree_builder.commit(&mut channel);
+
+        claim.mix_into(&mut channel);
+        let base = gen_fake_glv_scalar_air_base_trace(
+            &proof.claim.cert_inputs,
+            &proof.claim.fake_glv_scalars,
+            claim,
+        );
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(base.clone());
+        tree_builder.commit(&mut channel);
+
+        let cert_relation = CertScalarInputRelation::draw(&mut channel);
+        let (interaction, interaction_claim) =
+            gen_fake_glv_scalar_air_interaction_trace(&base, &cert_relation);
+        interaction_claim.mix_into(&mut channel);
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(interaction);
+        tree_builder.commit(&mut channel);
+
+        let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&[]);
+        let components = FakeGlvScalarAirComponents::new(
+            &mut allocator,
+            claim,
+            &interaction_claim,
+            &cert_relation,
+        );
+        prove(
+            &components.component_provers(),
+            &mut channel,
+            commitment_scheme,
+        )
+        .expect("fake-GLV scalar AIR PCS proof proves");
+    }
+
     fn scalar_mod_mul_max_constraint_log_degree_bound(components: &ScalarModMulComponents) -> u32 {
         [
             components.canonical.max_constraint_log_degree_bound(),
@@ -3614,6 +3754,11 @@ mod tests {
         assert_component_named(
             "cert_scalar_inputs",
             &components.cert_scalar_inputs.certs,
+            &trace,
+        );
+        assert_component_named(
+            "fake_glv_scalar_air",
+            &components.fake_glv_scalar_air.scalar,
             &trace,
         );
         for (index, scalar_mod_mul) in components.scalar_setup_mod_muls.iter().enumerate() {
@@ -4386,7 +4531,6 @@ mod tests {
         assert!(pending.contains(&"SolinasReductionTraceRows"));
         assert!(implemented.contains(&"ScalarSetup"));
         assert!(implemented.contains(&"CertScalarInput"));
-        assert!(pending.contains(&"FakeGlvScalarHint"));
         assert!(pending.contains(&"FakeGlvSelector"));
         assert!(pending.contains(&"PreparedPointUseCounts"));
         assert!(pending.contains(&"PreparedTablePoints"));
@@ -4400,6 +4544,7 @@ mod tests {
         assert!(pending.contains(&"FinalEcdsaCheck"));
         assert!(implemented.contains(&"StarkProveVerify"));
         assert!(!pending.contains(&"PreparedTableEcRows"));
+        assert!(!pending.contains(&"FakeGlvScalarHint"));
         assert!(!pending.contains(&"FakeGlvEcChainRows"));
     }
 

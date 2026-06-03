@@ -16,8 +16,8 @@ use stwo::prover::{
     ComponentProver,
 };
 use stwo_constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation, RelationEntry,
-    TraceLocationAllocator,
+    relation, EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation,
+    RelationEntry, TraceLocationAllocator,
 };
 use stwo_p256_utils::constants::N_LIMBS;
 
@@ -32,6 +32,12 @@ use super::setup_air::{
 
 pub const CERT_ID_U1_GENERATOR: u32 = 0;
 pub const CERT_ID_U2_PUBLIC_KEY: u32 = 1;
+pub const CERT_SCALAR_INPUT_RELATION_ARITY: usize = 2 + 3 * N_LIMBS + 1 + 4;
+
+relation!(
+    CertScalarInputRelation,
+    CERT_SCALAR_INPUT_RELATION_ARITY
+);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CertScalarInputClaim {
@@ -101,6 +107,7 @@ impl CertScalarInputAirProofClaim {
 pub struct CertScalarInputAirInteractionClaim {
     pub claimed_sum: SecureField,
     pub scalar_setup_consumer_claimed_sum: SecureField,
+    pub cert_provider_claimed_sum: SecureField,
 }
 
 impl CertScalarInputAirInteractionClaim {
@@ -108,6 +115,7 @@ impl CertScalarInputAirInteractionClaim {
         Self {
             claimed_sum: secure_zero(),
             scalar_setup_consumer_claimed_sum: secure_zero(),
+            cert_provider_claimed_sum: secure_zero(),
         }
     }
 
@@ -126,6 +134,7 @@ impl CertScalarInputAirComponents {
         claim: CertScalarInputAirProofClaim,
         interaction_claim: &CertScalarInputAirInteractionClaim,
         relation: &ScalarSetupOutputRelation,
+        cert_relation: &CertScalarInputRelation,
     ) -> Self {
         Self {
             certs: CertScalarInputAirComponent::new(
@@ -133,6 +142,7 @@ impl CertScalarInputAirComponents {
                 CertScalarInputAirEval {
                     log_size: claim.log_size,
                     scalar_setup_output: relation.clone(),
+                    cert_relation: cert_relation.clone(),
                 },
                 interaction_claim.claimed_sum,
             ),
@@ -160,6 +170,7 @@ impl CertScalarInputAirComponents {
 pub struct CertScalarInputAirEval {
     pub log_size: u32,
     pub scalar_setup_output: ScalarSetupOutputRelation,
+    pub cert_relation: CertScalarInputRelation,
 }
 
 impl FrameworkEval for CertScalarInputAirEval {
@@ -191,6 +202,16 @@ impl FrameworkEval for CertScalarInputAirEval {
             &self.scalar_setup_output,
             E::EF::from(active.clone()),
             &setup.relation_values(),
+        ));
+        eval.add_to_relation(RelationEntry::new(
+            &self.cert_relation,
+            -E::EF::from(active.clone()),
+            &cert0.relation_values(),
+        ));
+        eval.add_to_relation(RelationEntry::new(
+            &self.cert_relation,
+            -E::EF::from(active.clone()),
+            &cert1.relation_values(),
         ));
 
         constrain_cert_from_setup(
@@ -306,6 +327,37 @@ struct CertScalarInputAirRow<F> {
 }
 
 impl<F: Clone> CertScalarInputAirRow<F> {
+    fn relation_values(&self) -> [F; CERT_SCALAR_INPUT_RELATION_ARITY] {
+        core::array::from_fn(|index| self.relation_value(index))
+    }
+
+    fn relation_value(&self, index: usize) -> F {
+        if index == 0 {
+            return self.sig_id.clone();
+        }
+        if index == 1 {
+            return self.cert_id.clone();
+        }
+        let offset = index - 2;
+        if offset < N_LIMBS {
+            return self.scalar.limbs()[offset].clone();
+        }
+        if offset < 2 * N_LIMBS {
+            return self.base_x.limbs()[offset - N_LIMBS].clone();
+        }
+        if offset < 3 * N_LIMBS {
+            return self.base_y.limbs()[offset - 2 * N_LIMBS].clone();
+        }
+        match offset - 3 * N_LIMBS {
+            0 => self.base_inf.clone(),
+            1 => self.scalar_is_zero.clone(),
+            2 => self.scalar_is_nonzero.clone(),
+            3 => self.cert_active.clone(),
+            4 => self.cert_zero_active.clone(),
+            _ => panic!("cert scalar input relation index {index} out of range"),
+        }
+    }
+
     fn values(&self) -> Vec<F> {
         let mut values = Vec::with_capacity(CERT_SCALAR_INPUT_ROW_COLUMNS);
         values.push(self.sig_id.clone());
@@ -404,7 +456,8 @@ pub fn gen_cert_scalar_input_air_base_trace(
 
 pub(crate) fn gen_cert_scalar_input_air_interaction_trace(
     base: &[M31ColumnEval],
-    relation: &ScalarSetupOutputRelation,
+    setup_relation: &ScalarSetupOutputRelation,
+    cert_relation: &CertScalarInputRelation,
 ) -> (ColumnVec<M31ColumnEval>, CertScalarInputAirInteractionClaim) {
     assert_eq!(base.len(), CERT_SCALAR_INPUT_TRACE_COLUMNS);
     let log_size = base[0].domain.log_size();
@@ -415,7 +468,25 @@ pub(crate) fn gen_cert_scalar_input_air_interaction_trace(
         col.write_frac(
             vec_row,
             PackedQM31::from(base[0].data[vec_row]),
-            relation.combine(&values),
+            setup_relation.combine(&values),
+        );
+    }
+    col.finalize_col();
+    let mut col = logup.new_col();
+    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+        col.write_frac(
+            vec_row,
+            -PackedQM31::from(base[0].data[vec_row]),
+            cert_relation.combine(&cert_packed_values_from_base(base, vec_row, cert0_col())),
+        );
+    }
+    col.finalize_col();
+    let mut col = logup.new_col();
+    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+        col.write_frac(
+            vec_row,
+            -PackedQM31::from(base[0].data[vec_row]),
+            cert_relation.combine(&cert_packed_values_from_base(base, vec_row, cert1_col())),
         );
     }
     col.finalize_col();
@@ -424,8 +495,21 @@ pub(crate) fn gen_cert_scalar_input_air_interaction_trace(
         .filter(|row| row[0] != M31::from_u32_unchecked(0))
         .map(|row| {
             let values = scalar_setup_output_values_from_cert_base(&row);
-            let denominator: SecureField = relation.combine(&values);
+            let denominator: SecureField = setup_relation.combine(&values);
             SecureField::from(row[0]) / denominator
+        })
+        .sum();
+    let cert_provider_claimed_sum: SecureField = storage_rows(base)
+        .filter(|row| row[0] != M31::from_u32_unchecked(0))
+        .flat_map(|row| {
+            [
+                cert_values_from_base(&row, cert0_col()),
+                cert_values_from_base(&row, cert1_col()),
+            ]
+        })
+        .map(|values| -> SecureField {
+            let denominator: SecureField = cert_relation.combine(&values);
+            -SecureField::from(M31::from_u32_unchecked(1)) / denominator
         })
         .sum();
     (
@@ -433,6 +517,7 @@ pub(crate) fn gen_cert_scalar_input_air_interaction_trace(
         CertScalarInputAirInteractionClaim {
             claimed_sum,
             scalar_setup_consumer_claimed_sum,
+            cert_provider_claimed_sum,
         },
     )
 }
@@ -642,6 +727,26 @@ fn scalar_setup_output_packed_values_from_cert_base(
 
 fn scalar_setup_output_values_from_cert_base(row: &[M31]) -> [M31; SCALAR_SETUP_OUTPUT_ARITY] {
     core::array::from_fn(|index| row[1 + index])
+}
+
+fn cert_packed_values_from_base(
+    base: &[M31ColumnEval],
+    vec_row: usize,
+    start: usize,
+) -> [PackedM31; CERT_SCALAR_INPUT_RELATION_ARITY] {
+    core::array::from_fn(|index| base[start + index].data[vec_row])
+}
+
+fn cert_values_from_base(row: &[M31], start: usize) -> [M31; CERT_SCALAR_INPUT_RELATION_ARITY] {
+    core::array::from_fn(|index| row[start + index])
+}
+
+const fn cert0_col() -> usize {
+    1 + SCALAR_SETUP_OUTPUT_ARITY
+}
+
+const fn cert1_col() -> usize {
+    cert0_col() + CERT_SCALAR_INPUT_ROW_COLUMNS
 }
 
 fn storage_rows(base: &[M31ColumnEval]) -> impl Iterator<Item = Vec<M31>> + '_ {
