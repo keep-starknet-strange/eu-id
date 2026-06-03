@@ -38,13 +38,14 @@ pub struct ScalarModMulInteractionTraces {
 impl ScalarModMulInteractionTraces {
     pub fn from_rows(
         rows: &ScalarModMulTraceRows,
+        external_limb_links: bool,
         relations: &ScalarModMulComponentRelations,
     ) -> (Self, ScalarModMulInteractionClaim) {
         let (canonical_scalars, canonical_claim) = gen_family_interaction_trace(
             super::columns::padded_log_size(rows.canonical_scalars.len()),
             rows.canonical_scalars
                 .iter()
-                .map(|row| canonical_fractions(rows.mul_id, row)),
+                .map(|row| canonical_fractions(rows.mul_id, row, external_limb_links)),
             canonical_padding_fractions(rows.mul_id),
             relations,
             false,
@@ -226,13 +227,18 @@ fn zero_fraction() -> (SecureField, SecureField) {
     )
 }
 
-fn canonical_fractions(mul_id: u32, row: &super::CanonicalScalarTraceRow) -> Vec<FractionSpec> {
-    let multiplicity = match row.role {
+fn canonical_fractions(
+    mul_id: u32,
+    row: &super::CanonicalScalarTraceRow,
+    external_limb_links: bool,
+) -> Vec<FractionSpec> {
+    let internal_multiplicity = match row.role {
         super::ScalarModMulLimbRole::A
         | super::ScalarModMulLimbRole::B
         | super::ScalarModMulLimbRole::Quotient => N_LIMBS as i64,
         super::ScalarModMulLimbRole::Result => 1,
     };
+    let multiplicity = internal_multiplicity + i64::from(external_limb_links);
     let mut fractions = Vec::with_capacity(3 * N_LIMBS);
     for i in 0..N_LIMBS {
         fractions.push(range13_use(row.value[i]));
@@ -669,7 +675,7 @@ mod tests {
     #[test]
     fn scalar_mod_mul_interaction_traces_have_expected_domains_and_widths() {
         let rows = test_rows();
-        let (traces, claim) = ScalarModMulInteractionTraces::from_rows(&rows, &relations());
+        let (traces, claim) = ScalarModMulInteractionTraces::from_rows(&rows, false, &relations());
 
         assert_eq!(traces.canonical_scalars[0].domain.size(), 16);
         assert_eq!(traces.ab_chunks[0].domain.size(), 256);
@@ -692,11 +698,13 @@ mod tests {
     #[test]
     fn scalar_mod_mul_interaction_claim_changes_after_tuple_mutation() {
         let rows = test_rows();
-        let (_, honest_claim) = ScalarModMulInteractionTraces::from_rows(&rows, &relations());
+        let (_, honest_claim) =
+            ScalarModMulInteractionTraces::from_rows(&rows, false, &relations());
 
         let mut mutated = rows.clone();
         mutated.accumulators[0].terms[0] += M31::from_u32_unchecked(1);
-        let (_, mutated_claim) = ScalarModMulInteractionTraces::from_rows(&mutated, &relations());
+        let (_, mutated_claim) =
+            ScalarModMulInteractionTraces::from_rows(&mutated, false, &relations());
 
         assert_ne!(honest_claim.accumulators, mutated_claim.accumulators);
         assert!(!ScalarModMulRelationAudit::from_rows(&mutated).is_balanced());

@@ -29,6 +29,7 @@ pub struct ScalarModMulClaim {
     pub qn_chunks_log_size: u32,
     pub accumulator_log_size: u32,
     pub reduction_log_size: u32,
+    pub external_limb_links: bool,
 }
 
 impl ScalarModMulClaim {
@@ -40,6 +41,14 @@ impl ScalarModMulClaim {
             qn_chunks_log_size: padded_log_size(rows.qn_chunks.len()),
             accumulator_log_size: padded_log_size(rows.accumulators.len()),
             reduction_log_size: padded_log_size(rows.reduction_digits.len()),
+            external_limb_links: false,
+        }
+    }
+
+    pub fn from_rows_with_external_limb_links(rows: &ScalarModMulTraceRows) -> Self {
+        Self {
+            external_limb_links: true,
+            ..Self::from_rows(rows)
         }
     }
 
@@ -50,6 +59,7 @@ impl ScalarModMulClaim {
         channel.mix_u64(self.qn_chunks_log_size as u64);
         channel.mix_u64(self.accumulator_log_size as u64);
         channel.mix_u64(self.reduction_log_size as u64);
+        channel.mix_u64(self.external_limb_links as u64);
     }
 }
 
@@ -78,6 +88,7 @@ impl ScalarModMulComponents {
                 CanonicalScalarEval {
                     log_size: claim.canonical_log_size,
                     mul_id: claim.mul_id,
+                    external_limb_links: claim.external_limb_links,
                     relations: scalar_relations.clone(),
                 },
                 interaction_claim.scalar_mod_mul.canonical_scalars,
@@ -232,12 +243,16 @@ pub(crate) fn gen_base_trace(
 
 pub(crate) fn gen_interaction_trace(
     rows: &ScalarModMulTraceRows,
+    claim: &ScalarModMulClaim,
     lookup_claims: &LookupProviderClaims,
     relations: &ScalarModMulLookupRelations,
 ) -> (Vec<M31ColumnEval>, ScalarModMulProofSliceInteractionClaim) {
     let scalar_relations = relations.scalar_mod_mul();
-    let (scalar_trace, scalar_claim) =
-        ScalarModMulInteractionTraces::from_rows(rows, &scalar_relations);
+    let (scalar_trace, scalar_claim) = ScalarModMulInteractionTraces::from_rows(
+        rows,
+        claim.external_limb_links,
+        &scalar_relations,
+    );
     let lookup_traces =
         LookupProviderTraces::from_uses(lookup_claims, ScalarModMulLookupUses::from_rows(rows));
     let (range13_trace, range13_claim) = RangeCheckInteractionClaim::gen_interaction_trace(

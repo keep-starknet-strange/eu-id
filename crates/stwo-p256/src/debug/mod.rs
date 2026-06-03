@@ -59,7 +59,8 @@ pub fn assert_scalar_mod_mul_constraints(rows: &ScalarModMulTraceRows) {
 
     let mut dummy_channel = Blake2sM31Channel::default();
     let relations = ScalarModMulLookupRelations::draw(&mut dummy_channel);
-    let (interaction, interaction_claim) = gen_interaction_trace(rows, &lookup_claims, &relations);
+    let (interaction, interaction_claim) =
+        gen_interaction_trace(rows, &claim, &lookup_claims, &relations);
 
     let mut commitment_scheme = MockCommitmentScheme::default();
     let mut tree_builder = commitment_scheme.tree_builder();

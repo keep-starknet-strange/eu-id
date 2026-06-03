@@ -37,6 +37,7 @@ const SCALAR_MOD_MUL_ENABLE_REDUCTION_ARITHMETIC: bool = true;
 pub struct CanonicalScalarEval {
     pub log_size: u32,
     pub mul_id: u32,
+    pub external_limb_links: bool,
     pub relations: ScalarModMulComponentRelations,
 }
 
@@ -83,10 +84,14 @@ impl FrameworkEval for CanonicalScalarEval {
         );
 
         let mul_id: E::F = constant(self.mul_id);
+        let external_multiplicity =
+            E::F::from(M31::from_u32_unchecked(self.external_limb_links as u32));
+        let scalar_limb_multiplicity =
+            multiplicity.clone() + active.clone() * external_multiplicity;
         for (limb_index, limb) in value.limbs().iter().enumerate() {
             eval.add_to_relation(RelationEntry::new(
                 &self.relations.scalar_limb,
-                -E::EF::from(multiplicity.clone()),
+                -E::EF::from(scalar_limb_multiplicity.clone()),
                 &[
                     mul_id.clone(),
                     role.clone(),
@@ -767,6 +772,7 @@ mod tests {
             CanonicalScalarEval {
                 log_size: padded_log_size(4),
                 mul_id: 0,
+                external_limb_links: false,
                 relations: rel.clone(),
             },
             SecureField::zero(),
@@ -840,12 +846,14 @@ mod tests {
                 CanonicalScalarEval {
                     log_size: padded_log_size(4),
                     mul_id: 0,
+                    external_limb_links: false,
                     relations: rel.clone(),
                 }
                 .max_constraint_log_degree_bound(),
                 max_expression_degree(CanonicalScalarEval {
                     log_size: padded_log_size(4),
                     mul_id: 0,
+                    external_limb_links: false,
                     relations: rel.clone(),
                 }),
             ),
@@ -936,6 +944,7 @@ mod tests {
             CanonicalScalarEval {
                 log_size: padded_log_size(4),
                 mul_id: 0,
+                external_limb_links: false,
                 relations: rel.clone(),
             },
             SecureField::zero(),
@@ -974,6 +983,7 @@ mod tests {
             CanonicalScalarEval {
                 log_size: padded_log_size(4),
                 mul_id: 0,
+                external_limb_links: false,
                 relations: rel.clone(),
             }
             .max_constraint_log_degree_bound(),
