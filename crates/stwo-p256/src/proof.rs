@@ -2286,12 +2286,12 @@ pub const P256_PROOF_COMPONENT_SLOTS: &[P256ProofComponentSlot] = &[
     P256ProofComponentSlot {
         name: "PreparedTablePoints",
         status: P256ProofComponentStatus::Pending,
-        note: "Prepared-table point generation is still native witness construction; row/source slices prove downstream uses but not one unified table-generation proof.",
+        note: "Per-cert base binding (table[0] = G for cert_id=0, Q for cert_id=1) is not yet a verifier-checked AIR consumer of CertScalarInputRelation; correctness currently propagates only through the final ECDSA check (also pending).",
     },
     P256ProofComponentSlot {
         name: "PreparedTableEcTrace",
-        status: P256ProofComponentStatus::Pending,
-        note: "Prepared-table EC trace is constructed and checked natively; existing row/source proof slices are not yet merged into one proof.",
+        status: P256ProofComponentStatus::Implemented,
+        note: "Prepared-table EC row shape is proven inside the monolithic STARK by prepared_table_projective_source's provider/consumer pair over PreparedTableEcRowRelation; the legacy standalone slice proof is now redundant under prove_current_air_monolithic.",
     },
     P256ProofComponentSlot {
         name: "PreparedTableEcRows",
@@ -4797,10 +4797,10 @@ mod tests {
         assert!(pending.contains(&"SolinasReductionTraceRows"));
         assert!(implemented.contains(&"ScalarSetup"));
         assert!(implemented.contains(&"CertScalarInput"));
-        assert!(pending.contains(&"FakeGlvSelector"));
-        assert!(pending.contains(&"PreparedPointUseCounts"));
+        assert!(implemented.contains(&"FakeGlvSelector"));
+        assert!(implemented.contains(&"PreparedPointUseCounts"));
         assert!(pending.contains(&"PreparedTablePoints"));
-        assert!(pending.contains(&"PreparedTableEcTrace"));
+        assert!(implemented.contains(&"PreparedTableEcTrace"));
         assert!(implemented.contains(&"PreparedTableEcRows"));
         assert!(implemented.contains(&"FakeGlvChainTrace"));
         assert!(implemented.contains(&"FakeGlvPrimitiveEcTrace"));
