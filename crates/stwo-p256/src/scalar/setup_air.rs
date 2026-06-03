@@ -156,6 +156,27 @@ pub struct ScalarSetupOutput<F> {
     pub pub_y: P256BigInt<F>,
 }
 
+impl<F: Clone> ScalarSetupOutput<F> {
+    pub fn relation_values(&self) -> [F; SCALAR_SETUP_OUTPUT_ARITY] {
+        core::array::from_fn(|index| self.relation_value(index))
+    }
+
+    fn relation_value(&self, index: usize) -> F {
+        if index == 0 {
+            return self.sig_id.clone();
+        }
+        let limb_index = (index - 1) % N_LIMBS;
+        match (index - 1) / N_LIMBS {
+            0 => self.u1.limbs()[limb_index].clone(),
+            1 => self.u2.limbs()[limb_index].clone(),
+            2 => self.r.limbs()[limb_index].clone(),
+            3 => self.pub_x.limbs()[limb_index].clone(),
+            4 => self.pub_y.limbs()[limb_index].clone(),
+            _ => panic!("scalar setup output relation index {index} out of range"),
+        }
+    }
+}
+
 relation!(ScalarSetupOutputRelation, SCALAR_SETUP_OUTPUT_ARITY);
 
 pub type ScalarSetupAirComponent = FrameworkComponent<ScalarSetupAirEval>;
@@ -194,6 +215,7 @@ impl ScalarSetupAirProofClaim {
 pub struct ScalarSetupAirInteractionClaim {
     pub component_claimed_sum: SecureField,
     pub public_consumer_claimed_sum: SecureField,
+    pub output_provider_claimed_sum: SecureField,
     pub scalar_limb_consumer_claimed_sum: SecureField,
     pub range13_consumer_claimed_sum: SecureField,
     pub range9_consumer_claimed_sum: SecureField,
@@ -209,6 +231,7 @@ impl ScalarSetupAirInteractionClaim {
         Self {
             component_claimed_sum: zero,
             public_consumer_claimed_sum: zero,
+            output_provider_claimed_sum: zero,
             scalar_limb_consumer_claimed_sum: zero,
             range13_consumer_claimed_sum: zero,
             range9_consumer_claimed_sum: zero,
@@ -257,6 +280,7 @@ impl ScalarSetupAirComponents {
                 ScalarSetupAirEval {
                     log_size: claim.log_size,
                     public_relation: relations.public_inputs.clone(),
+                    output_relation: relations.output.clone(),
                     scalar_limb_relation: relations.scalar_mod_mul.scalar_limb.clone(),
                     range13: relations.range13.clone(),
                     range9: relations.range9.clone(),
@@ -324,6 +348,7 @@ impl ScalarSetupAirComponents {
 #[derive(Clone)]
 pub(crate) struct ScalarSetupAirRelations {
     pub(crate) public_inputs: PublicEcdsaInstanceRelation,
+    pub(crate) output: ScalarSetupOutputRelation,
     pub(crate) scalar_mod_mul: ScalarModMulLookupRelations,
     pub(crate) range13: RangeCheckRelation,
     pub(crate) range9: RangeCheckRelation,
@@ -334,6 +359,7 @@ impl ScalarSetupAirRelations {
     pub(crate) fn dummy() -> Self {
         Self {
             public_inputs: PublicEcdsaInstanceRelation::dummy(),
+            output: ScalarSetupOutputRelation::dummy(),
             scalar_mod_mul: ScalarModMulLookupRelations::dummy(),
             range13: RangeCheckRelation::dummy(),
             range9: RangeCheckRelation::dummy(),
@@ -346,6 +372,7 @@ impl ScalarSetupAirRelations {
 pub struct ScalarSetupAirEval {
     pub log_size: u32,
     pub public_relation: PublicEcdsaInstanceRelation,
+    pub output_relation: ScalarSetupOutputRelation,
     pub scalar_limb_relation: ScalarLimbRelation,
     pub range13: RangeCheckRelation,
     pub range9: RangeCheckRelation,
@@ -403,6 +430,19 @@ impl FrameworkEval for ScalarSetupAirEval {
             active.clone(),
             &public,
         );
+        let output = ScalarSetupOutput {
+            sig_id: public.sig_id.clone(),
+            u1: u1.clone(),
+            u2: u2.clone(),
+            r: public.r.clone(),
+            pub_x: public.pub_x.clone(),
+            pub_y: public.pub_y.clone(),
+        };
+        eval.add_to_relation(RelationEntry::new(
+            &self.output_relation,
+            -E::EF::from(active.clone()),
+            &output.relation_values(),
+        ));
 
         add_canonical_lt_fixed_bound(
             &mut eval,
@@ -805,6 +845,7 @@ pub(crate) fn gen_scalar_setup_air_interaction_trace(
 
     let mut logup = LogupTraceGenerator::new(log_size);
     let mut public_sum = secure_zero();
+    let mut output_sum = secure_zero();
     let mut scalar_limb_sum = secure_zero();
     let mut range13_sum = secure_zero();
     let mut range9_sum = secure_zero();
@@ -819,6 +860,17 @@ pub(crate) fn gen_scalar_setup_air_interaction_trace(
         let values: [M31; PUBLIC_ECDSA_INSTANCE_ARITY] =
             core::array::from_fn(|index| row[public_col + index]);
         relations.public_inputs.combine(&values)
+    });
+
+    append_relation_column_with_sign(&mut logup, base, active_col, -1, |vec_row| {
+        relations.output.combine(&scalar_setup_output_packed_values(
+            base, vec_row, z_red_col, u1_col, u2_col,
+        ))
+    });
+    output_sum += packed_relation_sum_with_sign(base, active_col, -1, |row| {
+        relations
+            .output
+            .combine(&scalar_setup_output_values(row, z_red_col, u1_col, u2_col))
     });
 
     for limb in 0..N_LIMBS {
@@ -975,6 +1027,7 @@ pub(crate) fn gen_scalar_setup_air_interaction_trace(
         ScalarSetupAirInteractionClaim {
             component_claimed_sum,
             public_consumer_claimed_sum: public_sum,
+            output_provider_claimed_sum: output_sum,
             scalar_limb_consumer_claimed_sum: scalar_limb_sum,
             range13_consumer_claimed_sum: range13_sum,
             range9_consumer_claimed_sum: range9_sum,
@@ -1131,16 +1184,24 @@ fn append_relation_column(
     logup: &mut LogupTraceGenerator,
     base: &[M31ColumnEval],
     active_col: usize,
+    denominator: impl FnMut(usize) -> PackedQM31,
+) {
+    append_relation_column_with_sign(logup, base, active_col, 1, denominator);
+}
+
+fn append_relation_column_with_sign(
+    logup: &mut LogupTraceGenerator,
+    base: &[M31ColumnEval],
+    active_col: usize,
+    sign: i32,
     mut denominator: impl FnMut(usize) -> PackedQM31,
 ) {
     let log_size = base[0].domain.log_size();
     let mut col = logup.new_col();
     for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
-        col.write_frac(
-            vec_row,
-            PackedQM31::from(base[active_col].data[vec_row]),
-            denominator(vec_row),
-        );
+        let numerator = PackedQM31::from(base[active_col].data[vec_row]);
+        let numerator = if sign < 0 { -numerator } else { numerator };
+        col.write_frac(vec_row, numerator, denominator(vec_row));
     }
     col.finalize_col();
 }
@@ -1183,12 +1244,70 @@ fn append_scalar_limb_column(
 fn packed_relation_sum(
     base: &[M31ColumnEval],
     active_col: usize,
+    denominator: impl FnMut(&[M31]) -> SecureField,
+) -> SecureField {
+    packed_relation_sum_with_sign(base, active_col, 1, denominator)
+}
+
+fn packed_relation_sum_with_sign(
+    base: &[M31ColumnEval],
+    active_col: usize,
+    sign: i32,
     mut denominator: impl FnMut(&[M31]) -> SecureField,
 ) -> SecureField {
     storage_rows(base)
         .filter(|row| row[active_col] != M31::from_u32_unchecked(0))
-        .map(|row| SecureField::from(row[active_col]) / denominator(&row))
+        .map(|row| {
+            let numerator = SecureField::from(row[active_col]);
+            let numerator = if sign < 0 { -numerator } else { numerator };
+            numerator / denominator(&row)
+        })
         .sum()
+}
+
+fn scalar_setup_output_packed_values(
+    base: &[M31ColumnEval],
+    vec_row: usize,
+    _z_red_col: usize,
+    u1_col: usize,
+    u2_col: usize,
+) -> [PackedM31; SCALAR_SETUP_OUTPUT_ARITY] {
+    core::array::from_fn(|index| {
+        if index == 0 {
+            return base[public_sig_id_col()].data[vec_row];
+        }
+        let limb = (index - 1) % N_LIMBS;
+        match (index - 1) / N_LIMBS {
+            0 => base[u1_col + limb].data[vec_row],
+            1 => base[u2_col + limb].data[vec_row],
+            2 => base[public_r_col(limb)].data[vec_row],
+            3 => base[public_x_col(limb)].data[vec_row],
+            4 => base[public_y_col(limb)].data[vec_row],
+            _ => panic!("scalar setup output relation index {index} out of range"),
+        }
+    })
+}
+
+fn scalar_setup_output_values(
+    row: &[M31],
+    _z_red_col: usize,
+    u1_col: usize,
+    u2_col: usize,
+) -> [M31; SCALAR_SETUP_OUTPUT_ARITY] {
+    core::array::from_fn(|index| {
+        if index == 0 {
+            return row[public_sig_id_col()];
+        }
+        let limb = (index - 1) % N_LIMBS;
+        match (index - 1) / N_LIMBS {
+            0 => row[u1_col + limb],
+            1 => row[u2_col + limb],
+            2 => row[public_r_col(limb)],
+            3 => row[public_x_col(limb)],
+            4 => row[public_y_col(limb)],
+            _ => panic!("scalar setup output relation index {index} out of range"),
+        }
+    })
 }
 
 fn range_sum(
@@ -1338,6 +1457,14 @@ const fn public_r_col(limb: usize) -> usize {
 
 const fn public_s_col(limb: usize) -> usize {
     2 + 2 * N_LIMBS + limb
+}
+
+const fn public_x_col(limb: usize) -> usize {
+    2 + 3 * N_LIMBS + limb
+}
+
+const fn public_y_col(limb: usize) -> usize {
+    2 + 4 * N_LIMBS + limb
 }
 
 const fn z_red_col() -> usize {

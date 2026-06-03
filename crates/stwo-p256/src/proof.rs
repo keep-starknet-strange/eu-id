@@ -115,7 +115,11 @@ use crate::range_checks::{
     RangeCheckClaim, RangeCheckInteractionClaim, RangeCheckRelation, SignedCarryRangeClaim,
     RANGE13_BITS, RANGE7_BITS,
 };
-use crate::scalar::cert_bind::{CertScalarInputClaim, CertScalarInputError};
+use crate::scalar::cert_bind::{
+    gen_cert_scalar_input_air_base_trace, gen_cert_scalar_input_air_interaction_trace,
+    CertScalarInputAirComponents, CertScalarInputAirInteractionClaim, CertScalarInputAirProofClaim,
+    CertScalarInputClaim, CertScalarInputError,
+};
 use crate::scalar::fake_glv_scalar::{
     FakeGlvScalarHint, FakeGlvScalarHintClaim, FakeGlvScalarHintError,
 };
@@ -155,7 +159,7 @@ use crate::scalar::setup_air::{
     gen_scalar_setup_air_lookup_provider_base_trace, gen_scalar_setup_air_preprocessed_trace,
     scalar_setup_air_preprocessed_column_ids, ScalarSetupAirComponents,
     ScalarSetupAirInteractionClaim, ScalarSetupAirProofClaim, ScalarSetupAirRelations,
-    ScalarSetupClaim, ScalarSetupClaimError,
+    ScalarSetupClaim, ScalarSetupClaimError, ScalarSetupOutputRelation,
 };
 use crate::types::EcdsaVerifyInput;
 
@@ -545,6 +549,7 @@ pub struct P256CurrentAirProof<H: MerkleHasherLifted> {
 pub struct P256CurrentAirProofClaim {
     pub public_inputs: PublicEcdsaInputClaim,
     pub scalar_setup: ScalarSetupAirProofClaim,
+    pub cert_scalar_inputs: CertScalarInputAirProofClaim,
     pub scalar_setup_mod_muls: Vec<ScalarModMulClaim>,
     pub prepared_table_projective_source: PreparedTableProjectiveSourceProofClaim,
     pub fake_glv_projective_source: FakeGlvProjectiveSourceProofClaim,
@@ -564,6 +569,7 @@ impl P256CurrentAirProofClaim {
         Self {
             public_inputs: claim.public_inputs.clone(),
             scalar_setup: ScalarSetupAirProofClaim::from_claim(&claim.scalar_setup),
+            cert_scalar_inputs: CertScalarInputAirProofClaim::from_claim(&claim.scalar_setup),
             scalar_setup_mod_muls: scalar_setup_mod_mul_rows(claim)
                 .expect("verified scalar setup mod-mul rows generate")
                 .iter()
@@ -613,6 +619,7 @@ impl P256CurrentAirProofClaim {
     fn mix_into(&self, channel: &mut impl Channel) {
         self.public_inputs.mix_into(channel);
         self.scalar_setup.mix_into(channel);
+        self.cert_scalar_inputs.mix_into(channel);
         channel.mix_u64(self.scalar_setup_mod_muls.len() as u64);
         for claim in &self.scalar_setup_mod_muls {
             claim.mix_into(channel);
@@ -739,6 +746,7 @@ impl P256CurrentAirProofClaim {
 pub struct P256CurrentAirInteractionClaim {
     pub public_inputs: RelationBalanceClaim,
     pub scalar_setup: ScalarSetupAirInteractionClaim,
+    pub cert_scalar_inputs: CertScalarInputAirInteractionClaim,
     pub(crate) scalar_setup_mod_muls: Vec<ScalarModMulProofSliceInteractionClaim>,
     pub prepared_table_projective_source: PreparedTableProjectiveSourceInteractionClaim,
     pub fake_glv_projective_source: FakeGlvProjectiveSourceInteractionClaim,
@@ -759,6 +767,7 @@ impl P256CurrentAirInteractionClaim {
                 consumer_claimed_sum: zero(),
             },
             scalar_setup: ScalarSetupAirInteractionClaim::zero(),
+            cert_scalar_inputs: CertScalarInputAirInteractionClaim::zero(),
             scalar_setup_mod_muls: Vec::new(),
             prepared_table_projective_source: PreparedTableProjectiveSourceInteractionClaim::zero(),
             fake_glv_projective_source: FakeGlvProjectiveSourceInteractionClaim::zero(),
@@ -788,6 +797,7 @@ impl P256CurrentAirInteractionClaim {
             self.public_inputs.consumer_claimed_sum,
         ]);
         self.scalar_setup.mix_into(channel);
+        self.cert_scalar_inputs.mix_into(channel);
         channel.mix_u64(self.scalar_setup_mod_muls.len() as u64);
         for claim in &self.scalar_setup_mod_muls {
             claim.scalar_mod_mul.mix_into(channel);
@@ -807,6 +817,11 @@ impl P256CurrentAirInteractionClaim {
 
     fn verify_balanced(&self) -> Result<(), P256ProofError> {
         self.public_inputs.verify("PublicEcdsaInstance")?;
+        verify_current_air_relation_zero(
+            "ScalarSetupOutput",
+            self.scalar_setup.output_provider_claimed_sum
+                + self.cert_scalar_inputs.scalar_setup_consumer_claimed_sum,
+        )?;
         verify_current_air_relation_zero(
             "ScalarSetupRange13",
             self.scalar_setup.range13_consumer_claimed_sum
@@ -871,6 +886,7 @@ impl P256CurrentAirInteractionClaim {
 #[derive(Clone)]
 struct P256CurrentAirRelations {
     public_inputs: PublicEcdsaInstanceRelation,
+    scalar_setup_output: ScalarSetupOutputRelation,
     scalar_mod_mul: ScalarModMulLookupRelations,
     scalar_setup: ScalarSetupAirRelations,
     prepared_table: PreparedTableEcRowRelation,
@@ -887,9 +903,11 @@ struct P256CurrentAirRelations {
 impl P256CurrentAirRelations {
     fn dummy() -> Self {
         let public_inputs = PublicEcdsaInstanceRelation::dummy();
+        let scalar_setup_output = ScalarSetupOutputRelation::dummy();
         let scalar_mod_mul = ScalarModMulLookupRelations::dummy();
         let scalar_setup = ScalarSetupAirRelations {
             public_inputs: public_inputs.clone(),
+            output: scalar_setup_output.clone(),
             scalar_mod_mul: scalar_mod_mul.clone(),
             range13: RangeCheckRelation::dummy(),
             range9: RangeCheckRelation::dummy(),
@@ -897,6 +915,7 @@ impl P256CurrentAirRelations {
         };
         Self {
             public_inputs,
+            scalar_setup_output,
             scalar_mod_mul,
             scalar_setup,
             prepared_table: PreparedTableEcRowRelation::dummy(),
@@ -913,9 +932,11 @@ impl P256CurrentAirRelations {
 
     fn draw(channel: &mut impl Channel) -> Self {
         let public_inputs = PublicEcdsaInstanceRelation::draw(channel);
+        let scalar_setup_output = ScalarSetupOutputRelation::draw(channel);
         let scalar_mod_mul = ScalarModMulLookupRelations::draw(channel);
         let scalar_setup = ScalarSetupAirRelations {
             public_inputs: public_inputs.clone(),
+            output: scalar_setup_output.clone(),
             scalar_mod_mul: scalar_mod_mul.clone(),
             range13: RangeCheckRelation::draw(channel),
             range9: RangeCheckRelation::draw(channel),
@@ -923,6 +944,7 @@ impl P256CurrentAirRelations {
         };
         Self {
             public_inputs,
+            scalar_setup_output,
             scalar_mod_mul,
             scalar_setup,
             prepared_table: PreparedTableEcRowRelation::draw(channel),
@@ -940,6 +962,7 @@ impl P256CurrentAirRelations {
 
 struct P256CurrentAirComponents {
     scalar_setup: ScalarSetupAirComponents,
+    cert_scalar_inputs: CertScalarInputAirComponents,
     scalar_setup_mod_muls: Vec<ScalarModMulComponents>,
     prepared_table_projective_source: PreparedTableProjectiveSourceComponents,
     fake_glv_projective_source: FakeGlvProjectiveSourceComponents,
@@ -967,6 +990,12 @@ impl P256CurrentAirComponents {
                 claim.scalar_setup,
                 &interaction_claim.scalar_setup,
                 &relations.scalar_setup,
+            ),
+            cert_scalar_inputs: CertScalarInputAirComponents::new(
+                allocator,
+                claim.cert_scalar_inputs,
+                &interaction_claim.cert_scalar_inputs,
+                &relations.scalar_setup_output,
             ),
             scalar_setup_mod_muls: claim
                 .scalar_setup_mod_muls
@@ -1052,6 +1081,7 @@ impl P256CurrentAirComponents {
     fn components(&self) -> Vec<&dyn Component> {
         let mut components = Vec::new();
         components.extend(self.scalar_setup.components());
+        components.extend(self.cert_scalar_inputs.components());
         for scalar_setup_mod_mul in &self.scalar_setup_mod_muls {
             components.push(&scalar_setup_mod_mul.canonical as &dyn Component);
             components.push(&scalar_setup_mod_mul.ab_chunks as &dyn Component);
@@ -1077,6 +1107,7 @@ impl P256CurrentAirComponents {
     fn component_provers(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
         let mut components = Vec::new();
         components.extend(self.scalar_setup.component_provers());
+        components.extend(self.cert_scalar_inputs.component_provers());
         for scalar_setup_mod_mul in &self.scalar_setup_mod_muls {
             components.push(&scalar_setup_mod_mul.canonical as &dyn ComponentProver<SimdBackend>);
             components.push(&scalar_setup_mod_mul.ab_chunks as &dyn ComponentProver<SimdBackend>);
@@ -1531,6 +1562,11 @@ impl P256ProofDraft {
             gen_scalar_setup_air_base_trace(&self.claim.scalar_setup, claim.scalar_setup);
         let scalar_setup_lookup_providers =
             gen_scalar_setup_air_lookup_provider_base_trace(&scalar_setup);
+        let cert_scalar_inputs = gen_cert_scalar_input_air_base_trace(
+            &self.claim.scalar_setup,
+            &self.claim.cert_inputs,
+            claim.cert_scalar_inputs,
+        );
         let scalar_lookup_claims = LookupProviderClaims::scalar_mod_mul();
         let scalar_setup_rows = scalar_setup_mod_mul_rows(&self.claim)?;
         let scalar_setup_mod_muls = scalar_setup_rows
@@ -1625,6 +1661,7 @@ impl P256ProofDraft {
         let mut columns = Vec::new();
         columns.extend(scalar_setup.clone());
         columns.extend(scalar_setup_lookup_providers.clone());
+        columns.extend(cert_scalar_inputs.clone());
         for scalar_setup_mod_mul in &scalar_setup_mod_muls {
             columns.extend(scalar_setup_mod_mul.clone());
         }
@@ -1649,6 +1686,7 @@ impl P256ProofDraft {
         Ok(P256CurrentAirBaseTrace {
             columns,
             scalar_setup,
+            cert_scalar_inputs,
             scalar_setup_mod_muls,
             prepared_table_provider,
             prepared_table_consumer,
@@ -1675,6 +1713,11 @@ impl P256ProofDraft {
     ) -> Result<(ColumnVec<M31ColumnEval>, P256CurrentAirInteractionClaim), P256ProofError> {
         let (scalar_setup_interaction, scalar_setup_claim) =
             gen_scalar_setup_air_interaction_trace(&base.scalar_setup, &relations.scalar_setup);
+        let (cert_scalar_input_interaction, cert_scalar_input_claim) =
+            gen_cert_scalar_input_air_interaction_trace(
+                &base.cert_scalar_inputs,
+                &relations.scalar_setup_output,
+            );
         let public_provider_claim = self
             .claim
             .public_inputs
@@ -1786,6 +1829,7 @@ impl P256ProofDraft {
 
         let mut columns = Vec::new();
         columns.extend(scalar_setup_interaction);
+        columns.extend(cert_scalar_input_interaction);
         for interaction in scalar_setup_interactions {
             columns.extend(interaction);
         }
@@ -1814,6 +1858,7 @@ impl P256ProofDraft {
                     scalar_setup_claim.public_consumer_claimed_sum,
                 ),
                 scalar_setup: scalar_setup_claim,
+                cert_scalar_inputs: cert_scalar_input_claim,
                 scalar_setup_mod_muls: scalar_setup_interaction_claims,
                 prepared_table_projective_source: PreparedTableProjectiveSourceInteractionClaim {
                     provider_claimed_sum: prepared_provider_claim.claimed_sum,
@@ -1896,6 +1941,7 @@ impl P256ProofDraft {
 struct P256CurrentAirBaseTrace {
     columns: ColumnVec<M31ColumnEval>,
     scalar_setup: ColumnVec<M31ColumnEval>,
+    cert_scalar_inputs: ColumnVec<M31ColumnEval>,
     scalar_setup_mod_muls: Vec<ColumnVec<M31ColumnEval>>,
     prepared_table_provider: ColumnVec<M31ColumnEval>,
     prepared_table_consumer: ColumnVec<M31ColumnEval>,
@@ -2058,8 +2104,8 @@ pub const P256_PROOF_COMPONENT_SLOTS: &[P256ProofComponentSlot] = &[
     },
     P256ProofComponentSlot {
         name: "CertScalarInput",
-        status: P256ProofComponentStatus::Pending,
-        note: "Certificate rows are derived natively from scalar setup; AIR binding into the single proof is still pending.",
+        status: P256ProofComponentStatus::Implemented,
+        note: "Certificate scalar input rows are proven from ScalarSetupOutput inside the monolithic STARK proof, including fixed-generator/public-key base binding and u2 nonzero enforcement.",
     },
     P256ProofComponentSlot {
         name: "FakeGlvScalarHint",
@@ -2784,6 +2830,21 @@ mod tests {
 
         let err = verify_current_air_monolithic::<Blake2sMerkleChannel>(monolithic)
             .expect_err("mutated verifier public r must reject");
+
+        assert!(matches!(err, P256ProofError::ProofLayer(_)));
+    }
+
+    #[test]
+    fn current_p256_monolithic_proof_rejects_mutated_cert_base() {
+        let mut proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+            valid_real_input_with_small_u_scalars(7, 11),
+        ])
+        .expect("current pipeline builds");
+        proof.claim.cert_inputs.rows[1].base_x.limbs_mut()[0] = M31::from_u32_unchecked(1234);
+
+        let err = proof
+            .prove_current_air_monolithic::<Blake2sMerkleChannel>()
+            .expect_err("mutated cert base must reject in the monolithic AIR");
 
         assert!(matches!(err, P256ProofError::ProofLayer(_)));
     }
@@ -3548,6 +3609,11 @@ mod tests {
         assert_component_named(
             "scalar_setup.signed_carry",
             &components.scalar_setup.signed_carry,
+            &trace,
+        );
+        assert_component_named(
+            "cert_scalar_inputs",
+            &components.cert_scalar_inputs.certs,
             &trace,
         );
         for (index, scalar_mod_mul) in components.scalar_setup_mod_muls.iter().enumerate() {
@@ -4319,7 +4385,7 @@ mod tests {
         assert!(pending.contains(&"PublicKeyOnCurve"));
         assert!(pending.contains(&"SolinasReductionTraceRows"));
         assert!(implemented.contains(&"ScalarSetup"));
-        assert!(pending.contains(&"CertScalarInput"));
+        assert!(implemented.contains(&"CertScalarInput"));
         assert!(pending.contains(&"FakeGlvScalarHint"));
         assert!(pending.contains(&"FakeGlvSelector"));
         assert!(pending.contains(&"PreparedPointUseCounts"));
