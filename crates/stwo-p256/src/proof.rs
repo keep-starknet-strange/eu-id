@@ -116,6 +116,14 @@ use crate::public_inputs::{
     public_ecdsa_consumer_claimed_sum, PublicEcdsaInputClaim, PublicEcdsaInstanceRelation,
 };
 use crate::public_key_check::{PublicKeyOnCurveClaim, PublicKeyOnCurveError};
+use crate::public_key_curve_air::{
+    gen_slice_base_trace as gen_public_key_on_curve_base_trace,
+    gen_slice_interaction_trace as gen_public_key_on_curve_interaction_trace,
+    gen_slice_preprocessed_trace as gen_public_key_on_curve_preprocessed_trace,
+    PublicKeyCurveSliceClaim, PublicKeyCurveSliceComponents, PublicKeyCurveSliceError,
+    PublicKeyCurveSliceInteractionClaim, PublicKeyCurveSliceProofClaim,
+    PublicKeyCurveSliceRelations, PublicKeyPointRelation,
+};
 use crate::range_checks::{
     range_check_value_column_id, RangeCheckClaim, RangeCheckComponent, RangeCheckEval,
     RangeCheckInteractionClaim, RangeCheckRelation, SignedCarryRangeClaim, RANGE13_BITS,
@@ -576,6 +584,7 @@ pub struct P256CurrentAirProofClaim {
     pub fake_glv_prepared_point_source: FakeGlvPreparedPointSourceProofClaim,
     pub prepared_point_range7: RangeCheckClaim,
     pub final_check: FinalCheckAirProofClaim,
+    pub public_key_on_curve: PublicKeyCurveSliceProofClaim,
     pub projective_rcb_air: ProjectiveRcbAirProofClaim,
 }
 
@@ -632,6 +641,10 @@ impl P256CurrentAirProofClaim {
             ),
             prepared_point_range7: RangeCheckClaim::new(RANGE7_BITS),
             final_check: FinalCheckAirProofClaim::from_claim(&claim.public_inputs),
+            public_key_on_curve: PublicKeyCurveSliceProofClaim::from_claim(
+                &public_key_on_curve_slice_claim(claim)
+                    .expect("verified public key lies on curve"),
+            ),
             projective_rcb_air: ProjectiveRcbAirProofClaim::from_trace(
                 &claim.projective_rcb_air_trace,
             ),
@@ -659,6 +672,7 @@ impl P256CurrentAirProofClaim {
         self.fake_glv_prepared_point_source.mix_into(channel);
         self.prepared_point_range7.mix_into(channel);
         self.final_check.mix_into(channel);
+        self.public_key_on_curve.mix_into(channel);
         self.projective_rcb_air.mix_into(channel);
     }
 
@@ -716,6 +730,10 @@ impl P256CurrentAirProofClaim {
         append_unique_preprocessed_ids(
             &mut ids,
             vec![range_check_value_column_id(self.prepared_point_range7.log_size)],
+        );
+        append_unique_preprocessed_ids(
+            &mut ids,
+            self.public_key_on_curve.preprocessed_column_ids(),
         );
         append_unique_preprocessed_ids(&mut ids, self.projective_rcb_air.preprocessed_column_ids());
         ids
@@ -791,6 +809,7 @@ pub struct P256CurrentAirInteractionClaim {
     pub prepared_point_range7: RangeCheckInteractionClaim,
     pub final_check: FinalCheckAirInteractionClaim,
     pub ecdsa_result_provider_claimed_sum: SecureField,
+    pub public_key_on_curve: PublicKeyCurveSliceInteractionClaim,
     pub projective_rcb_air: ProjectiveRcbAirProofInteractionClaim,
 }
 
@@ -821,6 +840,7 @@ impl P256CurrentAirInteractionClaim {
             },
             final_check: FinalCheckAirInteractionClaim::zero(),
             ecdsa_result_provider_claimed_sum: zero(),
+            public_key_on_curve: PublicKeyCurveSliceInteractionClaim::zero_claim(),
             projective_rcb_air: ProjectiveRcbAirProofInteractionClaim::zero(),
         }
     }
@@ -859,6 +879,7 @@ impl P256CurrentAirInteractionClaim {
         self.prepared_point_range7.mix_into(channel);
         self.final_check.mix_into(channel);
         channel.mix_felts(&[self.ecdsa_result_provider_claimed_sum]);
+        self.public_key_on_curve.mix_into_monolithic(channel);
         self.projective_rcb_air.mix_into(channel);
     }
 
@@ -946,6 +967,17 @@ impl P256CurrentAirInteractionClaim {
             self.ecdsa_result_provider_claimed_sum
                 + self.final_check.result_consumer_claimed_sum,
         )?;
+        // Binding: the scalar-setup component provides the `(sig_id, pub_x,
+        // pub_y)` tuple (yield, `-active`) from the public-input-bound public
+        // key; the public-key curve-check consumes it (use, `+active`). Every
+        // other relation in the public-key sub-graph is internal and nets to
+        // zero, so `public_key_on_curve.total()` equals the consumer sum and
+        // this balance forces the curve-checked `(x, y)` to equal the public
+        // key for the matching `sig_id`.
+        verify_current_air_relation_zero(
+            "PublicKeyPoint",
+            self.public_key_on_curve.total() + self.scalar_setup.point_provider_claimed_sum,
+        )?;
         verify_current_air_relation_zero(
             "ProjectiveRcbAirProofSlice",
             self.projective_rcb_air.total(),
@@ -971,6 +1003,10 @@ struct P256CurrentAirRelations {
     prepared_point_source: PreparedPointRelation,
     range7: RangeCheckRelation,
     ecdsa_result: EcdsaResultRelation,
+    /// Public-key sub-graph relations. Its `point` field is the shared
+    /// `(sig_id, pub_x, pub_y)` binding relation, also held by
+    /// `scalar_setup.public_key_point` (the provider).
+    public_key_on_curve: PublicKeyCurveSliceRelations,
     projective_rcb_air: ProjectiveRcbMulComponentRelations,
 }
 
@@ -981,6 +1017,7 @@ impl P256CurrentAirRelations {
         let cert_scalar_input = CertScalarInputRelation::dummy();
         let fake_glv_scalar = FakeGlvScalarRelation::dummy();
         let scalar_mod_mul = ScalarModMulLookupRelations::dummy();
+        let public_key_point = PublicKeyPointRelation::dummy();
         let scalar_setup = ScalarSetupAirRelations {
             public_inputs: public_inputs.clone(),
             output: scalar_setup_output.clone(),
@@ -988,6 +1025,7 @@ impl P256CurrentAirRelations {
             range13: RangeCheckRelation::dummy(),
             range9: RangeCheckRelation::dummy(),
             signed_carry: RangeCheckRelation::dummy(),
+            public_key_point: public_key_point.clone(),
         };
         Self {
             public_inputs,
@@ -1006,6 +1044,7 @@ impl P256CurrentAirRelations {
             prepared_point_source: PreparedPointRelation::dummy(),
             range7: RangeCheckRelation::dummy(),
             ecdsa_result: EcdsaResultRelation::dummy(),
+            public_key_on_curve: PublicKeyCurveSliceRelations::dummy_with_point(public_key_point),
             projective_rcb_air: ProjectiveRcbMulComponentRelations::dummy(),
         }
     }
@@ -1016,6 +1055,7 @@ impl P256CurrentAirRelations {
         let cert_scalar_input = CertScalarInputRelation::draw(channel);
         let fake_glv_scalar = FakeGlvScalarRelation::draw(channel);
         let scalar_mod_mul = ScalarModMulLookupRelations::draw(channel);
+        let public_key_point = PublicKeyPointRelation::draw(channel);
         let scalar_setup = ScalarSetupAirRelations {
             public_inputs: public_inputs.clone(),
             output: scalar_setup_output.clone(),
@@ -1023,6 +1063,7 @@ impl P256CurrentAirRelations {
             range13: RangeCheckRelation::draw(channel),
             range9: RangeCheckRelation::draw(channel),
             signed_carry: RangeCheckRelation::draw(channel),
+            public_key_point: public_key_point.clone(),
         };
         Self {
             public_inputs,
@@ -1041,6 +1082,10 @@ impl P256CurrentAirRelations {
             prepared_point_source: PreparedPointRelation::draw(channel),
             range7: RangeCheckRelation::draw(channel),
             ecdsa_result: EcdsaResultRelation::draw(channel),
+            public_key_on_curve: PublicKeyCurveSliceRelations::draw_with_point(
+                channel,
+                public_key_point,
+            ),
             projective_rcb_air: ProjectiveRcbMulComponentRelations::draw(channel),
         }
     }
@@ -1063,6 +1108,7 @@ struct P256CurrentAirComponents {
     fake_glv_prepared_point_source: FakeGlvPreparedPointSourceComponents,
     prepared_point_range7: RangeCheckComponent,
     final_check: FinalCheckAirComponents,
+    public_key_on_curve: PublicKeyCurveSliceComponents,
     projective_rcb_air: ProjectiveRcbAirComponents,
 }
 
@@ -1193,6 +1239,13 @@ impl P256CurrentAirComponents {
                     signed_carry: &relations.scalar_setup.signed_carry,
                 },
             ),
+            public_key_on_curve: PublicKeyCurveSliceComponents::new(
+                allocator,
+                claim.public_key_on_curve.log_sizes(),
+                &interaction_claim.public_key_on_curve,
+                &relations.public_key_on_curve,
+                true,
+            ),
             projective_rcb_air: ProjectiveRcbAirComponents::new_with_log_sizes(
                 allocator,
                 claim.projective_rcb_air.log_sizes,
@@ -1228,6 +1281,7 @@ impl P256CurrentAirComponents {
         components.extend(self.fake_glv_prepared_point_source.components());
         components.push(&self.prepared_point_range7 as &dyn Component);
         components.extend(self.final_check.components());
+        components.extend(self.public_key_on_curve.components());
         components.extend(self.projective_rcb_air.components());
         components
     }
@@ -1261,6 +1315,7 @@ impl P256CurrentAirComponents {
         components.extend(self.fake_glv_prepared_point_source.component_provers());
         components.push(&self.prepared_point_range7 as &dyn ComponentProver<SimdBackend>);
         components.extend(self.final_check.component_provers());
+        components.extend(self.public_key_on_curve.component_provers());
         components.extend(self.projective_rcb_air.component_provers());
         components
     }
@@ -1677,6 +1732,12 @@ impl P256ProofDraft {
             vec![range7_column],
         );
 
+        let public_key_slice_claim = public_key_on_curve_slice_claim(&self.claim)?;
+        let local_ids = claim.public_key_on_curve.preprocessed_column_ids();
+        let local_columns =
+            gen_public_key_on_curve_preprocessed_trace(&public_key_slice_claim, &local_ids)?;
+        append_unique_preprocessed_columns(&mut ids, &mut columns, local_ids, local_columns);
+
         let local_ids = claim.projective_rcb_air.preprocessed_column_ids();
         let local_columns = self
             .claim
@@ -1707,6 +1768,10 @@ impl P256ProofDraft {
         // scalar_setup providers' multiplicities.
         let final_check =
             gen_final_check_air_base_trace(&self.claim.final_check, claim.final_check);
+        // Public-key-on-curve sub-graph base trace (self-contained range13 /
+        // signed-carry providers; binds `(x, y)` to the public key).
+        let public_key_slice_claim = public_key_on_curve_slice_claim(&self.claim)?;
+        let public_key_on_curve = gen_public_key_on_curve_base_trace(&public_key_slice_claim)?;
         let scalar_setup_lookup_providers = gen_scalar_setup_air_lookup_provider_base_trace(
             &scalar_setup,
             crate::final_check_air::final_check_range13_uses_from_base(&final_check),
@@ -1854,6 +1919,7 @@ impl P256ProofDraft {
         columns.extend(prepared_point_consumer.clone());
         columns.push(prepared_point_range7_multiplicity.clone());
         columns.extend(final_check.clone());
+        columns.extend(public_key_on_curve.clone());
         columns.extend(projective_rcb_air.clone());
 
         Ok(P256CurrentAirBaseTrace {
@@ -1880,6 +1946,7 @@ impl P256ProofDraft {
             prepared_point_consumer,
             prepared_point_range7_multiplicity,
             final_check,
+            public_key_slice_claim,
         })
     }
 
@@ -2040,6 +2107,12 @@ impl P256ProofDraft {
             &self.claim.public_inputs.instances,
             &relations.ecdsa_result,
         );
+        let (public_key_on_curve_interaction, public_key_on_curve_claim) =
+            gen_public_key_on_curve_interaction_trace(
+                &base.public_key_slice_claim,
+                &relations.public_key_on_curve,
+                true,
+            )?;
         let (projective_interaction, projective_claim) = self
             .claim
             .projective_rcb_air_trace
@@ -2070,6 +2143,7 @@ impl P256ProofDraft {
         columns.extend(prepared_point_consumer_interaction);
         columns.extend(prepared_point_range7_interaction);
         columns.extend(final_check_interaction);
+        columns.extend(public_key_on_curve_interaction);
         columns.extend(projective_interaction);
 
         Ok((
@@ -2119,6 +2193,7 @@ impl P256ProofDraft {
                 prepared_point_range7: prepared_point_range7_claim,
                 final_check: final_check_claim,
                 ecdsa_result_provider_claimed_sum,
+                public_key_on_curve: public_key_on_curve_claim,
                 projective_rcb_air: projective_claim,
             },
         ))
@@ -2190,6 +2265,7 @@ struct P256CurrentAirBaseTrace {
     prepared_point_consumer: ColumnVec<M31ColumnEval>,
     prepared_point_range7_multiplicity: M31ColumnEval,
     final_check: ColumnVec<M31ColumnEval>,
+    public_key_slice_claim: PublicKeyCurveSliceClaim,
 }
 
 fn scalar_setup_mod_mul_rows(
@@ -2207,6 +2283,16 @@ fn scalar_setup_mod_mul_rows(
         )?);
     }
     Ok(rows)
+}
+
+/// Build the single-public-key on-curve witness for the monolithic current-AIR
+/// from the already-verified `public_key_check` claim. The monolithic proof
+/// covers exactly one signature, so `from_public_key_claim` requires one row.
+fn public_key_on_curve_slice_claim(
+    claim: &P256ProofClaim,
+) -> Result<PublicKeyCurveSliceClaim, P256ProofError> {
+    PublicKeyCurveSliceClaim::from_public_key_claim(&claim.public_key_check)
+        .map_err(P256ProofError::from)
 }
 
 pub fn verify_current_air_monolithic<MC>(
@@ -2321,13 +2407,13 @@ pub const P256_PROOF_COMPONENT_SLOTS: &[P256ProofComponentSlot] = &[
     },
     P256ProofComponentSlot {
         name: "PublicKeyOnCurve",
-        status: P256ProofComponentStatus::Pending,
-        note: "Currently checked by native Solinas traces; still needs inclusion in the single verifier-facing STARK proof.",
+        status: P256ProofComponentStatus::Implemented,
+        note: "The monolithic current AIR proves y^2 + 3x = x^3 + b (mod p) for the public key via four projective-RCB mod-p muls plus a signed-carry curve-identity check, and binds the curve-checked (x, y) to the public input through PublicKeyPointRelation (provided by scalar setup, consumed by the curve check).",
     },
     P256ProofComponentSlot {
         name: "SolinasReductionTraceRows",
-        status: P256ProofComponentStatus::Pending,
-        note: "Solinas reduction trace/checker exists for public-key checks, but those rows are not yet included in the single STARK proof.",
+        status: P256ProofComponentStatus::Implemented,
+        note: "The public-key-on-curve muls prove their Solinas raw-product / matrix-fold / reduction sub-traces in-AIR through the shared projective-RCB raw_product_chunk / folded_contribution / folded_digit families (public-key-namespaced schedule columns).",
     },
     P256ProofComponentSlot {
         name: "ScalarSetup",
@@ -2420,6 +2506,7 @@ pub enum P256ProofError {
     ProjectiveEc(ProjectiveEcError),
     ProjectiveRcbAir(ProjectiveRcbAirError),
     PublicKeyOnCurve(PublicKeyOnCurveError),
+    PublicKeyCurveSlice(PublicKeyCurveSliceError),
     ScalarModMulTrace(ScalarModMulTraceError),
     InvalidNativeEcdsaInput { index: usize },
     RelationImbalance { relation: &'static str },
@@ -2495,6 +2582,12 @@ impl From<ProjectiveRcbAirError> for P256ProofError {
 impl From<PublicKeyOnCurveError> for P256ProofError {
     fn from(value: PublicKeyOnCurveError) -> Self {
         Self::PublicKeyOnCurve(value)
+    }
+}
+
+impl From<PublicKeyCurveSliceError> for P256ProofError {
+    fn from(value: PublicKeyCurveSliceError) -> Self {
+        Self::PublicKeyCurveSlice(value)
     }
 }
 
@@ -3361,6 +3454,84 @@ mod tests {
         assert!(matches!(
             err,
             P256ProofError::PublicKeyOnCurve(PublicKeyOnCurveError::PointOffCurve { .. })
+        ));
+    }
+
+    /// In-AIR public-key-on-curve binding: the monolithic STARK proves the
+    /// public key lies on the curve via a dedicated curve-check component whose
+    /// witnessed `(x, y)` is LogUp-bound to the public input through
+    /// `PublicKeyPointRelation` (provided by scalar_setup, consumed by the
+    /// curve-check). Mutating the public-input `pub_y` after the draft is built
+    /// makes the scalar_setup provider emit a `pub_y'` that no longer matches
+    /// the curve-check's witnessed `y`, so the regenerated prover-side
+    /// `PublicKeyPoint` balance is non-zero and proving is rejected. Per
+    /// lessons.md #18 the rejection oracle is the relation-balance audit
+    /// (`RelationImbalance`), not `assert_constraints`.
+    #[test]
+    fn current_p256_proof_pipeline_rejects_public_key_off_curve_in_air() {
+        let mut proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+            valid_real_input_with_small_u_scalars(7, 11),
+        ])
+        .expect("current pipeline builds");
+
+        // Swap the curve-check witness to a *different* valid on-curve public
+        // key (2*G) while leaving scalar_setup and the public input bound to the
+        // real key (G). Everything else still balances; only the
+        // `PublicKeyPoint` binding tuple drifts: the curve check now consumes
+        // (sig_id, 2G_x, 2G_y) while scalar_setup provides (sig_id, G_x, G_y).
+        // This is exactly the soundness property the binding enforces - the
+        // curve-checked point must equal the public key - and it is caught by
+        // the relation-balance audit (lessons.md #18), not assert_constraints.
+        let two_g = scalar_mul(&scalar(2), &generator_point()).expect("2*G is finite");
+        let other_inputs = PublicEcdsaInputClaim::from_inputs(&[EcdsaVerifyInput {
+            message_hash: scalar(42),
+            signature: Signature {
+                r: scalar(77),
+                s: scalar(11),
+            },
+            public_key: two_g,
+        }]);
+        proof.claim.public_key_check =
+            PublicKeyOnCurveClaim::from_public_inputs(&other_inputs).expect("2*G is on curve");
+
+        let err = proof
+            .prove_current_air_monolithic::<Blake2sMerkleChannel>()
+            .expect_err("curve-check (x,y) unbound from public key must reject in the AIR");
+
+        assert_eq!(
+            err,
+            P256ProofError::RelationImbalance {
+                relation: "PublicKeyPoint"
+            }
+        );
+    }
+
+    /// The verifier independently enforces the `PublicKeyPoint` binding balance:
+    /// tampering with the scalar_setup provider's claimed sum on a fully valid
+    /// monolithic proof is rejected by `verify_current_air_monolithic`.
+    #[test]
+    fn current_p256_monolithic_verifier_rejects_unbalanced_public_key_point_sum() {
+        use num_traits::One;
+        let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+            valid_real_input_with_small_u_scalars(7, 11),
+        ])
+        .expect("current pipeline builds");
+        let mut monolithic = proof
+            .prove_current_air_monolithic::<Blake2sMerkleChannel>()
+            .expect("current AIR monolithic proof proves");
+        monolithic
+            .interaction_claim
+            .scalar_setup
+            .point_provider_claimed_sum += SecureField::one();
+
+        let err = verify_current_air_monolithic::<Blake2sMerkleChannel>(monolithic)
+            .expect_err("PublicKeyPoint balance must reject a mutated provider sum");
+
+        assert!(matches!(
+            err,
+            P256ProofError::RelationImbalance {
+                relation: "PublicKeyPoint"
+            }
         ));
     }
 
@@ -4894,8 +5065,10 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(implemented.contains(&"PublicEcdsaInput"));
-        assert!(pending.contains(&"PublicKeyOnCurve"));
-        assert!(pending.contains(&"SolinasReductionTraceRows"));
+        assert!(implemented.contains(&"PublicKeyOnCurve"));
+        assert!(implemented.contains(&"SolinasReductionTraceRows"));
+        assert!(!pending.contains(&"PublicKeyOnCurve"));
+        assert!(!pending.contains(&"SolinasReductionTraceRows"));
         assert!(implemented.contains(&"ScalarSetup"));
         assert!(implemented.contains(&"CertScalarInput"));
         assert!(implemented.contains(&"FakeGlvSelector"));

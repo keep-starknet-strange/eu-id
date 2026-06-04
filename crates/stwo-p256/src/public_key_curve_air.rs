@@ -92,7 +92,8 @@ use crate::projective_air::{
     ProjectiveRcbFoldedDigitEval, ProjectiveRcbMulColumns, ProjectiveRcbMulComponentRelations,
     ProjectiveRcbMulRow, ProjectiveRcbMulStep, ProjectiveRcbRawProductChunkComponent,
     ProjectiveRcbRawProductChunkEval, PROJECTIVE_RCB_MUL_ROLE_LHS, PROJECTIVE_RCB_MUL_ROLE_RESULT,
-    PROJECTIVE_RCB_MUL_ROLE_RHS, PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
+    PROJECTIVE_RCB_MUL_ROLE_RHS, PROJECTIVE_RCB_SCHEDULE_NAMESPACE_PUBLIC_KEY,
+    PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
 };
 use crate::public_inputs::PublicEcdsaInputClaim;
 use crate::public_key_check::{PublicKeyOnCurveClaim, PublicKeyOnCurveError};
@@ -111,6 +112,15 @@ pub const PUBLIC_KEY_MUL_COUNT: usize = 4;
 
 /// Arity of [`PublicKeyMulResultRelation`]: `[mul_index, role, limb_index, limb]`.
 pub const PUBLIC_KEY_MUL_RESULT_ARITY: usize = 4;
+
+/// Arity of [`PublicKeyPointRelation`]: `[sig_id, x_limbs.., y_limbs..]`.
+///
+/// This is the binding tuple. The scalar-setup component *provides* it from the
+/// public-key columns (`pub_x`, `pub_y`) that are themselves bound to the public
+/// ECDSA instance; the curve-check component *consumes* it with its witnessed
+/// `(sig_id, x, y)`. LogUp balance then forces the curve-checked `(x, y)` to
+/// equal the verifier's public key for the matching `sig_id`.
+pub const PUBLIC_KEY_POINT_ARITY: usize = 1 + 2 * N_LIMBS;
 
 /// Roles inside [`PublicKeyMulResultRelation`] (re-export the mul-family role
 /// constants so producers and consumers cannot drift).
@@ -135,6 +145,7 @@ const CURVE_QUOTIENT_BOUND: i64 = 1;
 /// `next_trace_mask` order. Keep this list and [`PublicKeyCurveCheckColumns::read`]
 /// in lockstep with [`gen_curve_check_base_trace`].
 const CURVE_CHECK_TRACE_COLUMNS: usize = 1            // active
+    + 1                                               // sig_id (binding)
     + N_LIMBS                                         // x
     + N_LIMBS                                         // y
     + N_LIMBS                                         // x2
@@ -145,6 +156,7 @@ const CURVE_CHECK_TRACE_COLUMNS: usize = 1            // active
     + N_LIMBS; // carries (signed)
 
 relation!(PublicKeyMulResultRelation, PUBLIC_KEY_MUL_RESULT_ARITY);
+relation!(PublicKeyPointRelation, PUBLIC_KEY_POINT_ARITY);
 
 // ---------------------------------------------------------------------------
 // Native claim
@@ -156,6 +168,9 @@ pub struct PublicKeyCurveSliceClaim {
     /// The four mod-`p` multiplications, expressed through the shared
     /// `projective_air` mul machinery (one source row, four mul rows).
     pub mul_trace: ProjectiveRcbAirTraceClaim,
+    /// Signature/public-key identifier. Binds the curve-checked `(x, y)` to the
+    /// public ECDSA instance of the same `sig_id` via [`PublicKeyPointRelation`].
+    pub sig_id: M31,
     /// Canonical `x` limbs.
     pub x: P256M31BigInt,
     /// Canonical `y` limbs.
@@ -235,6 +250,7 @@ impl PublicKeyCurveSliceClaim {
 
         let claim = Self {
             mul_trace,
+            sig_id: row.sig_id,
             x: row.x.clone(),
             y: row.y.clone(),
             x2: x2_limbs,
@@ -484,6 +500,7 @@ fn provide_mul_limbs<E: EvalAtRow>(
 
 struct PublicKeyCurveCheckColumns<E: EvalAtRow> {
     active: E::F,
+    sig_id: E::F,
     x: P256EvalBigInt<E>,
     y: P256EvalBigInt<E>,
     x2: P256EvalBigInt<E>,
@@ -498,6 +515,7 @@ impl<E: EvalAtRow> PublicKeyCurveCheckColumns<E> {
     fn read(eval: &mut E) -> Self {
         Self {
             active: eval.next_trace_mask(),
+            sig_id: eval.next_trace_mask(),
             x: eval.next_p256_bigint(),
             y: eval.next_p256_bigint(),
             x2: eval.next_p256_bigint(),
@@ -514,6 +532,13 @@ impl<E: EvalAtRow> PublicKeyCurveCheckColumns<E> {
 struct PublicKeyCurveCheckEval {
     log_size: u32,
     result_relation: PublicKeyMulResultRelation,
+    point_relation: PublicKeyPointRelation,
+    /// When `true`, the curve-check consumes the [`PublicKeyPointRelation`]
+    /// binding tuple `[sig_id, x.., y..]` (the monolithic proof, where
+    /// `scalar/setup_air.rs` provides it from the public-input-bound public key).
+    /// When `false` (the standalone slice), no binding tuple is emitted so the
+    /// slice's interaction trace stays self-balanced.
+    bind_to_public: bool,
     range13: RangeCheckRelation,
     signed_carry: RangeCheckRelation,
 }
@@ -549,6 +574,9 @@ impl FrameworkEval for PublicKeyCurveCheckEval {
             eval.add_constraint((one.clone() - columns.active.clone()) * limb.clone());
         }
         eval.add_constraint((one.clone() - columns.active.clone()) * columns.q.clone());
+        // `sig_id` is part of the binding tuple; gate it to zero on padding rows
+        // so disabled rows cannot consume a usable `PublicKeyPointRelation` tuple.
+        eval.add_constraint((one.clone() - columns.active.clone()) * columns.sig_id.clone());
 
         // Bind the witnessed limbs to the proven mul operands/results by
         // consuming (use, `+active`) the mul provider tuples using the
@@ -569,6 +597,16 @@ impl FrameworkEval for PublicKeyCurveCheckEval {
         consume_three_constant(&mut eval, &self.result_relation, &columns.active);
         consume_mul_limbs(&mut eval, &self.result_relation, &columns.active, MUL_THREE_X, ROLE_RHS, columns.x.limbs());
         consume_mul_limbs(&mut eval, &self.result_relation, &columns.active, MUL_THREE_X, ROLE_RESULT, columns.three_x.limbs());
+
+        // Bind the witnessed `(x, y)` to the verifier public key: consume (use,
+        // `+active`) the `PublicKeyPointRelation` tuple `[sig_id, x.., y..]`.
+        // The scalar-setup component provides exactly this tuple from its
+        // public-input-bound `pub_x`/`pub_y` columns, so LogUp balance forces
+        // `(x, y) == (pub_x, pub_y)` for the matching `sig_id`. Standalone (no
+        // public binding) emits nothing here.
+        if self.bind_to_public {
+            consume_public_key_point(&mut eval, &self.point_relation, &columns);
+        }
 
         // Range-check every witnessed limb (self-contained domain enforcement;
         // also guarantees the 13-bit headroom used by the identity below).
@@ -638,6 +676,25 @@ fn consume_three_constant<E: EvalAtRow>(
     }
 }
 
+/// Consume the binding tuple `[sig_id, x.., y..]` (use, `+active`) on the
+/// [`PublicKeyPointRelation`]. Keep the value order in lockstep with the
+/// provider in `scalar/setup_air.rs` and with [`point_consume_fraction_pair`].
+fn consume_public_key_point<E: EvalAtRow>(
+    eval: &mut E,
+    relation: &PublicKeyPointRelation,
+    columns: &PublicKeyCurveCheckColumns<E>,
+) {
+    let mut values = Vec::with_capacity(PUBLIC_KEY_POINT_ARITY);
+    values.push(columns.sig_id.clone());
+    values.extend(columns.x.limbs().iter().cloned());
+    values.extend(columns.y.limbs().iter().cloned());
+    eval.add_to_relation(RelationEntry::new(
+        relation,
+        E::EF::from(columns.active.clone()),
+        &values,
+    ));
+}
+
 fn add_curve_identity<E: EvalAtRow>(
     eval: &mut E,
     signed_carry: &RangeCheckRelation,
@@ -689,7 +746,7 @@ fn fixed_limb<E: EvalAtRow>(value: &P256M31BigInt, index: usize) -> E::F {
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct PublicKeyCurveSliceLogSizes {
+pub(crate) struct PublicKeyCurveSliceLogSizes {
     mul: u32,
     raw_product_chunk: u32,
     folded_contribution: u32,
@@ -711,9 +768,10 @@ impl PublicKeyCurveSliceLogSizes {
 }
 
 #[derive(Clone)]
-struct PublicKeyCurveSliceRelations {
+pub(crate) struct PublicKeyCurveSliceRelations {
     mul: ProjectiveRcbMulComponentRelations,
     result: PublicKeyMulResultRelation,
+    point: PublicKeyPointRelation,
 }
 
 impl PublicKeyCurveSliceRelations {
@@ -721,6 +779,7 @@ impl PublicKeyCurveSliceRelations {
         Self {
             mul: ProjectiveRcbMulComponentRelations::draw(channel),
             result: PublicKeyMulResultRelation::draw(channel),
+            point: PublicKeyPointRelation::draw(channel),
         }
     }
 
@@ -728,12 +787,38 @@ impl PublicKeyCurveSliceRelations {
         Self {
             mul: ProjectiveRcbMulComponentRelations::dummy(),
             result: PublicKeyMulResultRelation::dummy(),
+            point: PublicKeyPointRelation::dummy(),
+        }
+    }
+
+    /// Draw the public-key sub-graph's internal relations (`mul`, `result`)
+    /// fresh, but reuse a `point` relation shared with the
+    /// `scalar/setup_air.rs` provider so the binding tuple links the two
+    /// components. Used by the monolithic proof.
+    pub(crate) fn draw_with_point(
+        channel: &mut impl Channel,
+        point: PublicKeyPointRelation,
+    ) -> Self {
+        Self {
+            mul: ProjectiveRcbMulComponentRelations::draw(channel),
+            result: PublicKeyMulResultRelation::draw(channel),
+            point,
+        }
+    }
+
+    /// Dummy variant with a caller-supplied `point` relation (for preprocessed
+    /// column / degree-bound queries in the monolith).
+    pub(crate) fn dummy_with_point(point: PublicKeyPointRelation) -> Self {
+        Self {
+            mul: ProjectiveRcbMulComponentRelations::dummy(),
+            result: PublicKeyMulResultRelation::dummy(),
+            point,
         }
     }
 }
 
 #[derive(Clone, Debug)]
-struct PublicKeyCurveSliceInteractionClaim {
+pub struct PublicKeyCurveSliceInteractionClaim {
     mul: SecureField,
     raw_product_chunk: SecureField,
     folded_contribution: SecureField,
@@ -757,7 +842,16 @@ impl PublicKeyCurveSliceInteractionClaim {
         }
     }
 
-    fn total(&self) -> SecureField {
+    /// Aggregate claimed sum over every public-key sub-graph component.
+    ///
+    /// All internal relations (`mul_limb`, raw-product/fold families,
+    /// `PublicKeyMulResult`, and the sub-graph's own range13/signed-carry
+    /// providers) net to zero, so when the curve-check consumes the
+    /// [`PublicKeyPointRelation`] binding tuple (monolith) this total equals the
+    /// *negative* of the scalar-setup provider sum; it is the only relation
+    /// crossing the sub-graph boundary. The standalone slice (no binding)
+    /// totals to zero.
+    pub(crate) fn total(&self) -> SecureField {
         self.mul
             + self.raw_product_chunk
             + self.folded_contribution
@@ -780,7 +874,7 @@ impl PublicKeyCurveSliceInteractionClaim {
     }
 }
 
-struct PublicKeyCurveSliceComponents {
+pub(crate) struct PublicKeyCurveSliceComponents {
     mul: PublicKeyMulComponent,
     raw_product_chunk: ProjectiveRcbRawProductChunkComponent,
     folded_contribution: ProjectiveRcbFoldedContributionComponent,
@@ -791,11 +885,12 @@ struct PublicKeyCurveSliceComponents {
 }
 
 impl PublicKeyCurveSliceComponents {
-    fn new(
+    pub(crate) fn new(
         allocator: &mut TraceLocationAllocator,
         log_sizes: PublicKeyCurveSliceLogSizes,
         interaction_claim: &PublicKeyCurveSliceInteractionClaim,
         relations: &PublicKeyCurveSliceRelations,
+        bind_to_public: bool,
     ) -> Self {
         Self {
             mul: PublicKeyMulComponent::new(
@@ -812,6 +907,7 @@ impl PublicKeyCurveSliceComponents {
                 ProjectiveRcbRawProductChunkEval {
                     log_size: log_sizes.raw_product_chunk,
                     relations: relations.mul.clone(),
+                    schedule_namespace: PROJECTIVE_RCB_SCHEDULE_NAMESPACE_PUBLIC_KEY,
                 },
                 interaction_claim.raw_product_chunk,
             ),
@@ -820,6 +916,7 @@ impl PublicKeyCurveSliceComponents {
                 ProjectiveRcbFoldedContributionEval {
                     log_size: log_sizes.folded_contribution,
                     relations: relations.mul.clone(),
+                    schedule_namespace: PROJECTIVE_RCB_SCHEDULE_NAMESPACE_PUBLIC_KEY,
                 },
                 interaction_claim.folded_contribution,
             ),
@@ -828,6 +925,7 @@ impl PublicKeyCurveSliceComponents {
                 ProjectiveRcbFoldedDigitEval {
                     log_size: log_sizes.folded_digit,
                     relations: relations.mul.clone(),
+                    schedule_namespace: PROJECTIVE_RCB_SCHEDULE_NAMESPACE_PUBLIC_KEY,
                 },
                 interaction_claim.folded_digit,
             ),
@@ -836,6 +934,8 @@ impl PublicKeyCurveSliceComponents {
                 PublicKeyCurveCheckEval {
                     log_size: log_sizes.curve_check,
                     result_relation: relations.result.clone(),
+                    point_relation: relations.point.clone(),
+                    bind_to_public,
                     range13: relations.mul.range13.clone(),
                     signed_carry: relations.mul.signed_carry.clone(),
                 },
@@ -858,7 +958,7 @@ impl PublicKeyCurveSliceComponents {
         }
     }
 
-    fn components(&self) -> Vec<&dyn Component> {
+    pub(crate) fn components(&self) -> Vec<&dyn Component> {
         vec![
             &self.mul as &dyn Component,
             &self.raw_product_chunk as &dyn Component,
@@ -870,7 +970,7 @@ impl PublicKeyCurveSliceComponents {
         ]
     }
 
-    fn component_provers(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
+    pub(crate) fn component_provers(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
         vec![
             &self.mul as &dyn ComponentProver<SimdBackend>,
             &self.raw_product_chunk as &dyn ComponentProver<SimdBackend>,
@@ -904,18 +1004,18 @@ impl PublicKeyCurveSliceComponents {
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct PublicKeyCurveSliceProofClaim {
+pub struct PublicKeyCurveSliceProofClaim {
     log_sizes: PublicKeyCurveSliceLogSizes,
 }
 
 impl PublicKeyCurveSliceProofClaim {
-    fn from_claim(claim: &PublicKeyCurveSliceClaim) -> Self {
+    pub(crate) fn from_claim(claim: &PublicKeyCurveSliceClaim) -> Self {
         Self {
             log_sizes: PublicKeyCurveSliceLogSizes::from_claim(claim),
         }
     }
 
-    fn mix_into(&self, channel: &mut impl Channel) {
+    pub(crate) fn mix_into(&self, channel: &mut impl Channel) {
         channel.mix_u64(self.log_sizes.mul as u64);
         channel.mix_u64(self.log_sizes.raw_product_chunk as u64);
         channel.mix_u64(self.log_sizes.folded_contribution as u64);
@@ -923,13 +1023,14 @@ impl PublicKeyCurveSliceProofClaim {
         channel.mix_u64(self.log_sizes.curve_check as u64);
     }
 
-    fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
+    pub(crate) fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
         let mut allocator = TraceLocationAllocator::default();
         let _ = PublicKeyCurveSliceComponents::new(
             &mut allocator,
             self.log_sizes,
             &PublicKeyCurveSliceInteractionClaim::zero(),
             &PublicKeyCurveSliceRelations::dummy(),
+            false,
         );
         allocator.preprocessed_columns().clone()
     }
@@ -941,6 +1042,7 @@ impl PublicKeyCurveSliceProofClaim {
             self.log_sizes,
             &PublicKeyCurveSliceInteractionClaim::zero(),
             &PublicKeyCurveSliceRelations::dummy(),
+            false,
         );
         components.trace_log_degree_bounds()
     }
@@ -952,6 +1054,7 @@ impl PublicKeyCurveSliceProofClaim {
             self.log_sizes,
             &PublicKeyCurveSliceInteractionClaim::zero(),
             &PublicKeyCurveSliceRelations::dummy(),
+            false,
         );
         components.max_constraint_log_degree_bound()
     }
@@ -969,19 +1072,25 @@ pub struct PublicKeyOnCurveProof<H: stwo::core::vcs_lifted::merkle_hasher::Merkl
 // Trace generation
 // ---------------------------------------------------------------------------
 
-fn gen_slice_preprocessed_trace(
+pub(crate) fn gen_slice_preprocessed_trace(
     claim: &PublicKeyCurveSliceClaim,
     ids: &[PreProcessedColumnId],
 ) -> Result<Vec<M31ColumnEval>, PublicKeyCurveSliceError> {
     // The schedule columns for the three non-mul families come from the shared
     // projective preprocessed trace; the range13 / signed-carry value+active
     // columns are appended exactly as the projective slice does.
+    let projective_ids = claim
+        .mul_trace
+        .preprocessed_column_ids_with_namespace(PROJECTIVE_RCB_SCHEDULE_NAMESPACE_PUBLIC_KEY);
     let mut columns: Vec<(PreProcessedColumnId, M31ColumnEval)> = claim
         .mul_trace
-        .gen_preprocessed_trace(&claim.mul_trace.preprocessed_column_ids())
+        .gen_preprocessed_trace_with_namespace(
+            &projective_ids,
+            PROJECTIVE_RCB_SCHEDULE_NAMESPACE_PUBLIC_KEY,
+        )
         .map_err(PublicKeyCurveSliceError::MulTrace)?
         .into_iter()
-        .zip(claim.mul_trace.preprocessed_column_ids())
+        .zip(projective_ids)
         .map(|(eval, id)| (id, eval))
         .collect();
 
@@ -1020,7 +1129,7 @@ fn slice_signed_carry_claim() -> SignedCarryRangeClaim {
     )
 }
 
-fn gen_slice_base_trace(
+pub(crate) fn gen_slice_base_trace(
     claim: &PublicKeyCurveSliceClaim,
 ) -> Result<Vec<M31ColumnEval>, PublicKeyCurveSliceError> {
     let log_sizes = PublicKeyCurveSliceLogSizes::from_claim(claim);
@@ -1069,6 +1178,8 @@ fn gen_curve_check_base_trace(claim: &PublicKeyCurveSliceClaim, log_size: u32) -
     // Single active row at coset index 0.
     let mut offset = 0usize;
     columns[offset][0] = M31::from_u32_unchecked(1);
+    offset += 1;
+    columns[offset][0] = claim.sig_id;
     offset += 1;
     write_limbs(&mut columns, &mut offset, &claim.x, 0);
     write_limbs(&mut columns, &mut offset, &claim.y, 0);
@@ -1120,9 +1231,10 @@ fn slice_signed_carry_uses(
     Ok(uses)
 }
 
-fn gen_slice_interaction_trace(
+pub(crate) fn gen_slice_interaction_trace(
     claim: &PublicKeyCurveSliceClaim,
     relations: &PublicKeyCurveSliceRelations,
+    bind_to_public: bool,
 ) -> Result<(Vec<M31ColumnEval>, PublicKeyCurveSliceInteractionClaim), PublicKeyCurveSliceError> {
     let log_sizes = PublicKeyCurveSliceLogSizes::from_claim(claim);
     let mut trace = Vec::new();
@@ -1139,9 +1251,11 @@ fn gen_slice_interaction_trace(
     trace.extend(projective_traces.folded_contribution);
     trace.extend(projective_traces.folded_digit);
 
-    // Curve-check family (consumers).
+    // Curve-check family (consumers). In the monolith (`bind_to_public`) it
+    // also emits the `PublicKeyPointRelation` consume that binds `(x, y)` to the
+    // public key; the standalone slice emits no binding tuple.
     let (curve_trace, curve_claim) =
-        gen_curve_check_interaction_trace(claim, relations, log_sizes.curve_check);
+        gen_curve_check_interaction_trace(claim, relations, log_sizes.curve_check, bind_to_public);
     trace.extend(curve_trace);
 
     // Shared range providers.
@@ -1271,9 +1385,10 @@ fn gen_curve_check_interaction_trace(
     claim: &PublicKeyCurveSliceClaim,
     relations: &PublicKeyCurveSliceRelations,
     log_size: u32,
+    bind_to_public: bool,
 ) -> (ColumnVec<M31ColumnEval>, SecureField) {
     let padded_rows = 1usize << log_size;
-    let fractions = curve_check_fraction_pairs(claim, relations);
+    let fractions = curve_check_fraction_pairs(claim, relations, bind_to_public);
     let fraction_count = fractions.len();
 
     // Single active row at coset index 0; everything else is padding.
@@ -1312,11 +1427,13 @@ fn gen_curve_check_interaction_trace(
 /// Curve-check consumer fractions, in the exact order
 /// [`PublicKeyCurveCheckEval::evaluate`] emits them:
 /// 1. mul-result consume tuples (mul 0..3, roles lhs/rhs/result),
-/// 2. range13 uses for the witnessed limbs,
-/// 3. signed-carry uses for the carries.
+/// 2. (monolith only) the `PublicKeyPointRelation` binding consume,
+/// 3. range13 uses for the witnessed limbs,
+/// 4. signed-carry uses for the carries.
 fn curve_check_fraction_pairs(
     claim: &PublicKeyCurveSliceClaim,
     relations: &PublicKeyCurveSliceRelations,
+    bind_to_public: bool,
 ) -> Vec<(SecureField, SecureField)> {
     let mut pairs = Vec::new();
     let result = &relations.result;
@@ -1353,14 +1470,19 @@ fn curve_check_fraction_pairs(
     consume(&mut pairs, MUL_THREE_X, ROLE_RHS, &claim.x);
     consume(&mut pairs, MUL_THREE_X, ROLE_RESULT, &claim.three_x);
 
-    // 2. range13 uses for witnessed limbs (same order as the eval).
+    // 2. (monolith only) PublicKeyPoint binding consume (use, +1).
+    if bind_to_public {
+        pairs.push(point_consume_fraction_pair(claim, &relations.point));
+    }
+
+    // 3. range13 uses for witnessed limbs (same order as the eval).
     for value in [&claim.x, &claim.y, &claim.x2, &claim.x3, &claim.three_x, &claim.y2] {
         for limb in value.limbs() {
             pairs.push((secure_from_i64(1), relations.mul.range13.combine(&[*limb])));
         }
     }
 
-    // 3. signed-carry uses for carries.
+    // 4. signed-carry uses for carries.
     for carry in claim.carries {
         pairs.push((
             secure_from_i64(1),
@@ -1372,6 +1494,20 @@ fn curve_check_fraction_pairs(
     }
 
     pairs
+}
+
+/// The single `(numerator, denominator)` pair for the `PublicKeyPointRelation`
+/// binding consume, in the exact value order [`consume_public_key_point`] emits:
+/// `[sig_id, x.., y..]` with numerator `+1` (use).
+fn point_consume_fraction_pair(
+    claim: &PublicKeyCurveSliceClaim,
+    point: &PublicKeyPointRelation,
+) -> (SecureField, SecureField) {
+    let mut values = Vec::with_capacity(PUBLIC_KEY_POINT_ARITY);
+    values.push(claim.sig_id);
+    values.extend(claim.x.limbs().iter().copied());
+    values.extend(claim.y.limbs().iter().copied());
+    (secure_from_i64(1), point.combine(&values))
 }
 
 // ---------------------------------------------------------------------------
@@ -1416,7 +1552,7 @@ where
     tree_builder.commit(&mut channel);
 
     let relations = PublicKeyCurveSliceRelations::draw(&mut channel);
-    let (interaction, interaction_claim) = gen_slice_interaction_trace(claim, &relations)?;
+    let (interaction, interaction_claim) = gen_slice_interaction_trace(claim, &relations, false)?;
     if interaction_claim.total() != secure_zero() {
         return Err(PublicKeyCurveSliceError::RelationImbalance);
     }
@@ -1431,6 +1567,7 @@ where
         proof_claim.log_sizes,
         &interaction_claim,
         &relations,
+        false,
     );
     let stark_proof = prove(
         &components.component_provers(),
@@ -1493,6 +1630,7 @@ pub fn verify_public_key_on_curve_proof_slice<MC: MerkleChannel>(
         claim.log_sizes,
         &interaction_claim,
         &relations,
+        false,
     );
     verify(
         &components.components(),
@@ -1563,6 +1701,32 @@ pub fn public_key_curve_slice_claim_from_public_inputs(
 ) -> Result<PublicKeyCurveSliceClaim, PublicKeyCurveSliceError> {
     let on_curve = PublicKeyOnCurveClaim::from_public_inputs(public_inputs)?;
     PublicKeyCurveSliceClaim::from_public_key_claim(&on_curve)
+}
+
+// ---------------------------------------------------------------------------
+// Monolithic-proof integration surface
+// ---------------------------------------------------------------------------
+//
+// The monolithic current-AIR proof reuses the slice machinery above with
+// `bind_to_public = true`, drawing the `PublicKeyPointRelation` once and sharing
+// it with the `scalar/setup_air.rs` provider so the curve-checked `(x, y)` is
+// LogUp-bound to the verifier public key.
+
+impl PublicKeyCurveSliceProofClaim {
+    pub(crate) fn log_sizes(&self) -> PublicKeyCurveSliceLogSizes {
+        self.log_sizes
+    }
+}
+
+impl PublicKeyCurveSliceInteractionClaim {
+    /// Mix the public-key sub-graph claimed sums into the transcript (monolith).
+    pub(crate) fn mix_into_monolithic(&self, channel: &mut impl Channel) {
+        self.mix_into(channel);
+    }
+
+    pub(crate) fn zero_claim() -> Self {
+        Self::zero()
+    }
 }
 
 #[cfg(test)]
@@ -1675,7 +1839,7 @@ mod tests {
         let mut channel = stwo::core::channel::Blake2sChannel::default();
         let relations = PublicKeyCurveSliceRelations::draw(&mut channel);
         let (_, interaction_claim) =
-            gen_slice_interaction_trace(&forged, &relations).expect("trace builds");
+            gen_slice_interaction_trace(&forged, &relations, false).expect("trace builds");
         assert_ne!(interaction_claim.total(), secure_zero());
 
         // 3. The complementary attack — bindings made self-consistent for the
@@ -1690,7 +1854,7 @@ mod tests {
         let mut audit_channel = stwo::core::channel::Blake2sChannel::default();
         let audit_relations = PublicKeyCurveSliceRelations::draw(&mut audit_channel);
         let (_, balanced) =
-            gen_slice_interaction_trace(&consistent_off, &audit_relations).expect("trace builds");
+            gen_slice_interaction_trace(&consistent_off, &audit_relations, false).expect("trace builds");
         assert_eq!(balanced.total(), secure_zero());
         // But the prover rejects it (curve-identity recurrence does not vanish).
         let config = slice_config(&consistent_off);
@@ -1760,7 +1924,7 @@ mod tests {
 
         let relations = PublicKeyCurveSliceRelations::draw(&mut channel);
         let (interaction, interaction_claim) =
-            gen_slice_interaction_trace(claim, &relations).expect("interaction");
+            gen_slice_interaction_trace(claim, &relations, false).expect("interaction");
         interaction_claim.mix_into(&mut channel);
         let mut tree_builder = commitment_scheme.tree_builder();
         tree_builder.extend_evals(interaction);
@@ -1772,6 +1936,7 @@ mod tests {
             proof_claim.log_sizes,
             &interaction_claim,
             &relations,
+            false,
         );
         let result = prove(
             &components.component_provers(),

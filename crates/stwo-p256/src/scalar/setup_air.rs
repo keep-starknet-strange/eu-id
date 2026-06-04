@@ -29,6 +29,7 @@ use crate::public_inputs::{
     add_public_ecdsa_instance_consumer, PublicEcdsaInputClaim, PublicEcdsaInstance,
     PublicEcdsaInstanceRelation, PUBLIC_ECDSA_INSTANCE_ARITY,
 };
+use crate::public_key_curve_air::{PublicKeyPointRelation, PUBLIC_KEY_POINT_ARITY};
 use crate::range_checks::{
     add_range_check, decode_signed_carry, encode_signed_carry, range_check_value_column_id,
     signed_carry_active_column_id, signed_carry_value_column_id, RangeCheckClaim,
@@ -216,6 +217,8 @@ pub struct ScalarSetupAirInteractionClaim {
     pub component_claimed_sum: SecureField,
     pub public_consumer_claimed_sum: SecureField,
     pub output_provider_claimed_sum: SecureField,
+    /// Claimed sum of the `PublicKeyPointRelation` provider (yield, `-active`).
+    pub point_provider_claimed_sum: SecureField,
     pub scalar_limb_consumer_claimed_sum: SecureField,
     pub range13_consumer_claimed_sum: SecureField,
     pub range9_consumer_claimed_sum: SecureField,
@@ -232,6 +235,7 @@ impl ScalarSetupAirInteractionClaim {
             component_claimed_sum: zero,
             public_consumer_claimed_sum: zero,
             output_provider_claimed_sum: zero,
+            point_provider_claimed_sum: zero,
             scalar_limb_consumer_claimed_sum: zero,
             range13_consumer_claimed_sum: zero,
             range9_consumer_claimed_sum: zero,
@@ -285,6 +289,7 @@ impl ScalarSetupAirComponents {
                     range13: relations.range13.clone(),
                     range9: relations.range9.clone(),
                     signed_carry: relations.signed_carry.clone(),
+                    public_key_point: relations.public_key_point.clone(),
                 },
                 interaction_claim.component_claimed_sum,
             ),
@@ -353,6 +358,9 @@ pub(crate) struct ScalarSetupAirRelations {
     pub(crate) range13: RangeCheckRelation,
     pub(crate) range9: RangeCheckRelation,
     pub(crate) signed_carry: RangeCheckRelation,
+    /// Binding tuple `(sig_id, pub_x, pub_y)` provided to the public-key
+    /// curve-check (see `public_key_curve_air.rs`).
+    pub(crate) public_key_point: PublicKeyPointRelation,
 }
 
 impl ScalarSetupAirRelations {
@@ -364,6 +372,7 @@ impl ScalarSetupAirRelations {
             range13: RangeCheckRelation::dummy(),
             range9: RangeCheckRelation::dummy(),
             signed_carry: RangeCheckRelation::dummy(),
+            public_key_point: PublicKeyPointRelation::dummy(),
         }
     }
 }
@@ -377,6 +386,9 @@ pub struct ScalarSetupAirEval {
     pub range13: RangeCheckRelation,
     pub range9: RangeCheckRelation,
     pub signed_carry: RangeCheckRelation,
+    /// Provides the `(sig_id, pub_x, pub_y)` binding tuple consumed by the
+    /// public-key curve-check.
+    pub public_key_point: PublicKeyPointRelation,
 }
 
 impl FrameworkEval for ScalarSetupAirEval {
@@ -443,6 +455,12 @@ impl FrameworkEval for ScalarSetupAirEval {
             -E::EF::from(active.clone()),
             &output.relation_values(),
         ));
+
+        // Provide the public-key binding tuple `[sig_id, pub_x.., pub_y..]`
+        // (yield, `-active`). The public-key curve-check consumes it; LogUp
+        // balance forces the curve-checked `(x, y)` to equal this
+        // public-input-bound public key.
+        add_public_key_point_provider(&mut eval, &self.public_key_point, active.clone(), &public);
 
         add_canonical_lt_fixed_bound(
             &mut eval,
@@ -854,6 +872,7 @@ pub(crate) fn gen_scalar_setup_air_interaction_trace(
     let mut logup = LogupTraceGenerator::new(log_size);
     let mut public_sum = secure_zero();
     let mut output_sum = secure_zero();
+    let mut point_sum = secure_zero();
     let mut scalar_limb_sum = secure_zero();
     let mut range13_sum = secure_zero();
     let mut range9_sum = secure_zero();
@@ -879,6 +898,19 @@ pub(crate) fn gen_scalar_setup_air_interaction_trace(
         relations
             .output
             .combine(&scalar_setup_output_values(row, z_red_col, u1_col, u2_col))
+    });
+
+    // Public-key binding tuple provider (yield, `-active`), emitted right after
+    // the output provider to match `ScalarSetupAirEval::evaluate`.
+    append_relation_column_with_sign(&mut logup, base, active_col, -1, |vec_row| {
+        relations
+            .public_key_point
+            .combine(&scalar_setup_point_packed_values(base, vec_row))
+    });
+    point_sum += packed_relation_sum_with_sign(base, active_col, -1, |row| {
+        relations
+            .public_key_point
+            .combine(&scalar_setup_point_values(row))
     });
 
     for limb in 0..N_LIMBS {
@@ -1039,6 +1071,7 @@ pub(crate) fn gen_scalar_setup_air_interaction_trace(
             component_claimed_sum,
             public_consumer_claimed_sum: public_sum,
             output_provider_claimed_sum: output_sum,
+            point_provider_claimed_sum: point_sum,
             scalar_limb_consumer_claimed_sum: scalar_limb_sum,
             range13_consumer_claimed_sum: range13_sum,
             range9_consumer_claimed_sum: range9_sum,
@@ -1048,6 +1081,26 @@ pub(crate) fn gen_scalar_setup_air_interaction_trace(
             signed_carry_provider,
         },
     )
+}
+
+/// Provide (yield, `-gate`) the `PublicKeyPointRelation` binding tuple
+/// `[sig_id, pub_x.., pub_y..]`. Value order matches `consume_public_key_point`
+/// in `public_key_curve_air.rs`.
+fn add_public_key_point_provider<E: EvalAtRow>(
+    eval: &mut E,
+    relation: &PublicKeyPointRelation,
+    gate: E::F,
+    public: &PublicEcdsaInstance<E::F>,
+) {
+    let mut values = Vec::with_capacity(PUBLIC_KEY_POINT_ARITY);
+    values.push(public.sig_id.clone());
+    values.extend(public.pub_x.limbs().iter().cloned());
+    values.extend(public.pub_y.limbs().iter().cloned());
+    eval.add_to_relation(RelationEntry::new(
+        relation,
+        -E::EF::from(gate),
+        &values,
+    ));
 }
 
 fn read_public_instance<E: EvalAtRow>(eval: &mut E) -> PublicEcdsaInstance<E::F> {
@@ -1328,6 +1381,39 @@ fn range_sum(
     value_col: usize,
 ) -> SecureField {
     packed_relation_sum(base, active_col, |row| relation.combine(&[row[value_col]]))
+}
+
+/// Packed `PublicKeyPointRelation` provider tuple `[sig_id, pub_x.., pub_y..]`.
+fn scalar_setup_point_packed_values(
+    base: &[M31ColumnEval],
+    vec_row: usize,
+) -> [PackedM31; PUBLIC_KEY_POINT_ARITY] {
+    core::array::from_fn(|index| {
+        if index == 0 {
+            return base[public_sig_id_col()].data[vec_row];
+        }
+        let limb = (index - 1) % N_LIMBS;
+        if (index - 1) / N_LIMBS == 0 {
+            base[public_x_col(limb)].data[vec_row]
+        } else {
+            base[public_y_col(limb)].data[vec_row]
+        }
+    })
+}
+
+/// Row-wise `PublicKeyPointRelation` provider tuple `[sig_id, pub_x.., pub_y..]`.
+fn scalar_setup_point_values(row: &[M31]) -> [M31; PUBLIC_KEY_POINT_ARITY] {
+    core::array::from_fn(|index| {
+        if index == 0 {
+            return row[public_sig_id_col()];
+        }
+        let limb = (index - 1) % N_LIMBS;
+        if (index - 1) / N_LIMBS == 0 {
+            row[public_x_col(limb)]
+        } else {
+            row[public_y_col(limb)]
+        }
+    })
 }
 
 fn scalar_limb_sum_for_column(

@@ -123,35 +123,44 @@ relation!(
     PROJECTIVE_RCB_FOLDED_CARRY_RELATION_ARITY
 );
 
+/// Schedule-column id namespace for the canonical EC projective-RCB mul trace.
+/// Empty so existing preprocessed-column ids are unchanged.
+pub const PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC: &str = "";
+
+/// Schedule-column id namespace for the public-key-on-curve mul trace. Keeps the
+/// public-key sub-graph's schedule preprocessed columns distinct from the EC
+/// projective ones so the two mul traces can coexist in one proof.
+pub const PROJECTIVE_RCB_SCHEDULE_NAMESPACE_PUBLIC_KEY: &str = "public_key_";
+
 pub struct ProjectiveRcbRawProductChunkScheduleColumnIds;
 
 impl ProjectiveRcbRawProductChunkScheduleColumnIds {
-    pub fn active() -> PreProcessedColumnId {
-        raw_product_chunk_schedule_id("active")
+    pub fn active(namespace: &str) -> PreProcessedColumnId {
+        raw_product_chunk_schedule_id(namespace, "active")
     }
 
-    pub fn coeff() -> PreProcessedColumnId {
-        raw_product_chunk_schedule_id("coeff")
+    pub fn coeff(namespace: &str) -> PreProcessedColumnId {
+        raw_product_chunk_schedule_id(namespace, "coeff")
     }
 
-    pub fn chunk() -> PreProcessedColumnId {
-        raw_product_chunk_schedule_id("chunk")
+    pub fn chunk(namespace: &str) -> PreProcessedColumnId {
+        raw_product_chunk_schedule_id(namespace, "chunk")
     }
 
-    pub fn term_active(term: usize) -> PreProcessedColumnId {
-        raw_product_chunk_schedule_id(format!("term_active_{term}"))
+    pub fn term_active(namespace: &str, term: usize) -> PreProcessedColumnId {
+        raw_product_chunk_schedule_id(namespace, format!("term_active_{term}"))
     }
 
-    pub fn lhs_index(term: usize) -> PreProcessedColumnId {
-        raw_product_chunk_schedule_id(format!("lhs_index_{term}"))
+    pub fn lhs_index(namespace: &str, term: usize) -> PreProcessedColumnId {
+        raw_product_chunk_schedule_id(namespace, format!("lhs_index_{term}"))
     }
 
-    pub fn rhs_index(term: usize) -> PreProcessedColumnId {
-        raw_product_chunk_schedule_id(format!("rhs_index_{term}"))
+    pub fn rhs_index(namespace: &str, term: usize) -> PreProcessedColumnId {
+        raw_product_chunk_schedule_id(namespace, format!("rhs_index_{term}"))
     }
 
-    pub fn digit_use_count(offset: usize) -> PreProcessedColumnId {
-        raw_product_chunk_schedule_id(format!("digit_use_count_{offset}"))
+    pub fn digit_use_count(namespace: &str, offset: usize) -> PreProcessedColumnId {
+        raw_product_chunk_schedule_id(namespace, format!("digit_use_count_{offset}"))
     }
 }
 
@@ -164,36 +173,36 @@ pub struct ProjectiveRcbRawProductChunkScheduleColumn {
 pub struct ProjectiveRcbFoldedContributionScheduleColumnIds;
 
 impl ProjectiveRcbFoldedContributionScheduleColumnIds {
-    pub fn active() -> PreProcessedColumnId {
-        folded_contribution_schedule_id("active")
+    pub fn active(namespace: &str) -> PreProcessedColumnId {
+        folded_contribution_schedule_id(namespace, "active")
     }
 
-    pub fn digit_index() -> PreProcessedColumnId {
-        folded_contribution_schedule_id("digit_index")
+    pub fn digit_index(namespace: &str) -> PreProcessedColumnId {
+        folded_contribution_schedule_id(namespace, "digit_index")
     }
 
-    pub fn group_index() -> PreProcessedColumnId {
-        folded_contribution_schedule_id("group_index")
+    pub fn group_index(namespace: &str) -> PreProcessedColumnId {
+        folded_contribution_schedule_id(namespace, "group_index")
     }
 
-    pub fn term_active(term: usize) -> PreProcessedColumnId {
-        folded_contribution_schedule_id(format!("term_active_{term}"))
+    pub fn term_active(namespace: &str, term: usize) -> PreProcessedColumnId {
+        folded_contribution_schedule_id(namespace, format!("term_active_{term}"))
     }
 
-    pub fn raw_coeff(term: usize) -> PreProcessedColumnId {
-        folded_contribution_schedule_id(format!("raw_coeff_{term}"))
+    pub fn raw_coeff(namespace: &str, term: usize) -> PreProcessedColumnId {
+        folded_contribution_schedule_id(namespace, format!("raw_coeff_{term}"))
     }
 
-    pub fn raw_chunk(term: usize) -> PreProcessedColumnId {
-        folded_contribution_schedule_id(format!("raw_chunk_{term}"))
+    pub fn raw_chunk(namespace: &str, term: usize) -> PreProcessedColumnId {
+        folded_contribution_schedule_id(namespace, format!("raw_chunk_{term}"))
     }
 
-    pub fn raw_offset(term: usize) -> PreProcessedColumnId {
-        folded_contribution_schedule_id(format!("raw_offset_{term}"))
+    pub fn raw_offset(namespace: &str, term: usize) -> PreProcessedColumnId {
+        folded_contribution_schedule_id(namespace, format!("raw_offset_{term}"))
     }
 
-    pub fn matrix_coeff(term: usize) -> PreProcessedColumnId {
-        folded_contribution_schedule_id(format!("matrix_coeff_{term}"))
+    pub fn matrix_coeff(namespace: &str, term: usize) -> PreProcessedColumnId {
+        folded_contribution_schedule_id(namespace, format!("matrix_coeff_{term}"))
     }
 }
 
@@ -206,20 +215,20 @@ pub struct ProjectiveRcbFoldedContributionScheduleColumn {
 pub struct ProjectiveRcbFoldedDigitScheduleColumnIds;
 
 impl ProjectiveRcbFoldedDigitScheduleColumnIds {
-    pub fn active() -> PreProcessedColumnId {
-        folded_digit_schedule_id("active")
+    pub fn active(namespace: &str) -> PreProcessedColumnId {
+        folded_digit_schedule_id(namespace, "active")
     }
 
-    pub fn digit_index() -> PreProcessedColumnId {
-        folded_digit_schedule_id("digit_index")
+    pub fn digit_index(namespace: &str) -> PreProcessedColumnId {
+        folded_digit_schedule_id(namespace, "digit_index")
     }
 
-    pub fn group_active(group: usize) -> PreProcessedColumnId {
-        folded_digit_schedule_id(format!("group_active_{group}"))
+    pub fn group_active(namespace: &str, group: usize) -> PreProcessedColumnId {
+        folded_digit_schedule_id(namespace, format!("group_active_{group}"))
     }
 
-    pub fn group_index(group: usize) -> PreProcessedColumnId {
-        folded_digit_schedule_id(format!("group_index_{group}"))
+    pub fn group_index(namespace: &str, group: usize) -> PreProcessedColumnId {
+        folded_digit_schedule_id(namespace, format!("group_index_{group}"))
     }
 }
 
@@ -415,6 +424,7 @@ impl ProjectiveRcbAirComponents {
                 ProjectiveRcbRawProductChunkEval {
                     log_size: log_sizes.raw_product_chunk,
                     relations: relations.clone(),
+                    schedule_namespace: PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC,
                 },
                 interaction_claim.components.raw_product_chunk,
             ),
@@ -423,6 +433,7 @@ impl ProjectiveRcbAirComponents {
                 ProjectiveRcbFoldedContributionEval {
                     log_size: log_sizes.folded_contribution,
                     relations: relations.clone(),
+                    schedule_namespace: PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC,
                 },
                 interaction_claim.components.folded_contribution,
             ),
@@ -431,6 +442,7 @@ impl ProjectiveRcbAirComponents {
                 ProjectiveRcbFoldedDigitEval {
                     log_size: log_sizes.folded_digit,
                     relations: relations.clone(),
+                    schedule_namespace: PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC,
                 },
                 interaction_claim.components.folded_digit,
             ),
@@ -651,18 +663,25 @@ impl FrameworkEval for ProjectiveRcbMulEval {
 pub struct ProjectiveRcbRawProductChunkEval {
     pub log_size: u32,
     pub relations: ProjectiveRcbMulComponentRelations,
+    /// Schedule-column id namespace. Use
+    /// [`PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC`] for the EC projective trace and
+    /// [`PROJECTIVE_RCB_SCHEDULE_NAMESPACE_PUBLIC_KEY`] for the public-key trace
+    /// so two mul traces' schedule preprocessed columns stay distinct.
+    pub schedule_namespace: &'static str,
 }
 
 #[derive(Clone)]
 pub struct ProjectiveRcbFoldedContributionEval {
     pub log_size: u32,
     pub relations: ProjectiveRcbMulComponentRelations,
+    pub schedule_namespace: &'static str,
 }
 
 #[derive(Clone)]
 pub struct ProjectiveRcbFoldedDigitEval {
     pub log_size: u32,
     pub relations: ProjectiveRcbMulComponentRelations,
+    pub schedule_namespace: &'static str,
 }
 
 impl FrameworkEval for ProjectiveRcbFoldedContributionEval {
@@ -675,7 +694,8 @@ impl FrameworkEval for ProjectiveRcbFoldedContributionEval {
     }
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let columns = ProjectiveRcbFoldedContributionColumns::read(&mut eval);
+        let columns =
+            ProjectiveRcbFoldedContributionColumns::read(&mut eval, self.schedule_namespace);
 
         add_projective_rcb_folded_contribution(&mut eval, self.relations.as_refs(), &columns);
         eval.finalize_logup();
@@ -693,7 +713,7 @@ impl FrameworkEval for ProjectiveRcbFoldedDigitEval {
     }
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let columns = ProjectiveRcbFoldedDigitColumns::read(&mut eval);
+        let columns = ProjectiveRcbFoldedDigitColumns::read(&mut eval, self.schedule_namespace);
 
         add_projective_rcb_folded_digit(&mut eval, self.relations.as_refs(), &columns);
         eval.finalize_logup();
@@ -711,7 +731,8 @@ impl FrameworkEval for ProjectiveRcbRawProductChunkEval {
     }
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let columns = ProjectiveRcbRawProductChunkColumns::read(&mut eval);
+        let columns =
+            ProjectiveRcbRawProductChunkColumns::read(&mut eval, self.schedule_namespace);
 
         add_projective_rcb_raw_product_chunk(&mut eval, self.relations.as_refs(), &columns);
         eval.finalize_logup_in_pairs();
@@ -918,27 +939,30 @@ pub struct ProjectiveRcbRawProductChunkColumns<E: EvalAtRow> {
 }
 
 impl<E: EvalAtRow> ProjectiveRcbRawProductChunkColumns<E> {
-    fn read(eval: &mut E) -> Self {
+    fn read(eval: &mut E, namespace: &str) -> Self {
         Self {
             active: eval.next_trace_mask(),
-            schedule_active: eval
-                .get_preprocessed_column(ProjectiveRcbRawProductChunkScheduleColumnIds::active()),
+            schedule_active: eval.get_preprocessed_column(
+                ProjectiveRcbRawProductChunkScheduleColumnIds::active(namespace),
+            ),
             source_index: eval.next_trace_mask(),
             mul_index: eval.next_trace_mask(),
-            coeff: eval
-                .get_preprocessed_column(ProjectiveRcbRawProductChunkScheduleColumnIds::coeff()),
-            chunk: eval
-                .get_preprocessed_column(ProjectiveRcbRawProductChunkScheduleColumnIds::chunk()),
+            coeff: eval.get_preprocessed_column(
+                ProjectiveRcbRawProductChunkScheduleColumnIds::coeff(namespace),
+            ),
+            chunk: eval.get_preprocessed_column(
+                ProjectiveRcbRawProductChunkScheduleColumnIds::chunk(namespace),
+            ),
             terms: core::array::from_fn(|term| ProjectiveRcbRawProductTermColumns {
                 term_active: eval.next_trace_mask(),
                 schedule_term_active: eval.get_preprocessed_column(
-                    ProjectiveRcbRawProductChunkScheduleColumnIds::term_active(term),
+                    ProjectiveRcbRawProductChunkScheduleColumnIds::term_active(namespace, term),
                 ),
                 lhs_index: eval.get_preprocessed_column(
-                    ProjectiveRcbRawProductChunkScheduleColumnIds::lhs_index(term),
+                    ProjectiveRcbRawProductChunkScheduleColumnIds::lhs_index(namespace, term),
                 ),
                 rhs_index: eval.get_preprocessed_column(
-                    ProjectiveRcbRawProductChunkScheduleColumnIds::rhs_index(term),
+                    ProjectiveRcbRawProductChunkScheduleColumnIds::rhs_index(namespace, term),
                 ),
                 lhs_limb: eval.next_trace_mask(),
                 rhs_limb: eval.next_trace_mask(),
@@ -948,7 +972,9 @@ impl<E: EvalAtRow> ProjectiveRcbRawProductChunkColumns<E> {
             digit_use_counts: core::array::from_fn(|_| eval.next_trace_mask()),
             schedule_digit_use_counts: core::array::from_fn(|offset| {
                 eval.get_preprocessed_column(
-                    ProjectiveRcbRawProductChunkScheduleColumnIds::digit_use_count(offset),
+                    ProjectiveRcbRawProductChunkScheduleColumnIds::digit_use_count(
+                        namespace, offset,
+                    ),
                 )
             }),
         }
@@ -1078,37 +1104,36 @@ pub struct ProjectiveRcbFoldedContributionColumns<E: EvalAtRow> {
 }
 
 impl<E: EvalAtRow> ProjectiveRcbFoldedContributionColumns<E> {
-    fn read(eval: &mut E) -> Self {
+    fn read(eval: &mut E, namespace: &str) -> Self {
         Self {
             active: eval.next_trace_mask(),
-            schedule_active:
-                eval.get_preprocessed_column(
-                    ProjectiveRcbFoldedContributionScheduleColumnIds::active(),
-                ),
+            schedule_active: eval.get_preprocessed_column(
+                ProjectiveRcbFoldedContributionScheduleColumnIds::active(namespace),
+            ),
             source_index: eval.next_trace_mask(),
             mul_index: eval.next_trace_mask(),
             digit_index: eval.get_preprocessed_column(
-                ProjectiveRcbFoldedContributionScheduleColumnIds::digit_index(),
+                ProjectiveRcbFoldedContributionScheduleColumnIds::digit_index(namespace),
             ),
             group_index: eval.get_preprocessed_column(
-                ProjectiveRcbFoldedContributionScheduleColumnIds::group_index(),
+                ProjectiveRcbFoldedContributionScheduleColumnIds::group_index(namespace),
             ),
             terms: core::array::from_fn(|term| ProjectiveRcbFoldedContributionTermColumns {
                 term_active: eval.next_trace_mask(),
                 schedule_term_active: eval.get_preprocessed_column(
-                    ProjectiveRcbFoldedContributionScheduleColumnIds::term_active(term),
+                    ProjectiveRcbFoldedContributionScheduleColumnIds::term_active(namespace, term),
                 ),
                 raw_coeff: eval.get_preprocessed_column(
-                    ProjectiveRcbFoldedContributionScheduleColumnIds::raw_coeff(term),
+                    ProjectiveRcbFoldedContributionScheduleColumnIds::raw_coeff(namespace, term),
                 ),
                 raw_chunk: eval.get_preprocessed_column(
-                    ProjectiveRcbFoldedContributionScheduleColumnIds::raw_chunk(term),
+                    ProjectiveRcbFoldedContributionScheduleColumnIds::raw_chunk(namespace, term),
                 ),
                 raw_offset: eval.get_preprocessed_column(
-                    ProjectiveRcbFoldedContributionScheduleColumnIds::raw_offset(term),
+                    ProjectiveRcbFoldedContributionScheduleColumnIds::raw_offset(namespace, term),
                 ),
                 schedule_matrix_coeff: eval.get_preprocessed_column(
-                    ProjectiveRcbFoldedContributionScheduleColumnIds::matrix_coeff(term),
+                    ProjectiveRcbFoldedContributionScheduleColumnIds::matrix_coeff(namespace, term),
                 ),
                 matrix_coeff: eval.next_trace_mask(),
                 raw_digit: eval.next_trace_mask(),
@@ -1144,22 +1169,24 @@ pub struct ProjectiveRcbFoldedDigitColumns<E: EvalAtRow> {
 }
 
 impl<E: EvalAtRow> ProjectiveRcbFoldedDigitColumns<E> {
-    fn read(eval: &mut E) -> Self {
+    fn read(eval: &mut E, namespace: &str) -> Self {
         Self {
             active: eval.next_trace_mask(),
-            schedule_active: eval
-                .get_preprocessed_column(ProjectiveRcbFoldedDigitScheduleColumnIds::active()),
+            schedule_active: eval.get_preprocessed_column(
+                ProjectiveRcbFoldedDigitScheduleColumnIds::active(namespace),
+            ),
             source_index: eval.next_trace_mask(),
             mul_index: eval.next_trace_mask(),
-            digit_index: eval
-                .get_preprocessed_column(ProjectiveRcbFoldedDigitScheduleColumnIds::digit_index()),
+            digit_index: eval.get_preprocessed_column(
+                ProjectiveRcbFoldedDigitScheduleColumnIds::digit_index(namespace),
+            ),
             groups: core::array::from_fn(|group| ProjectiveRcbFoldedDigitGroupColumns {
                 group_active: eval.next_trace_mask(),
                 schedule_group_active: eval.get_preprocessed_column(
-                    ProjectiveRcbFoldedDigitScheduleColumnIds::group_active(group),
+                    ProjectiveRcbFoldedDigitScheduleColumnIds::group_active(namespace, group),
                 ),
                 group_index: eval.get_preprocessed_column(
-                    ProjectiveRcbFoldedDigitScheduleColumnIds::group_index(group),
+                    ProjectiveRcbFoldedDigitScheduleColumnIds::group_index(namespace, group),
                 ),
                 contribution_sum: eval.next_trace_mask(),
                 selected_contribution: eval.next_trace_mask(),
@@ -1514,6 +1541,17 @@ impl ProjectiveRcbAirTraceClaim {
     }
 
     pub fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
+        self.preprocessed_column_ids_with_namespace(PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC)
+    }
+
+    /// Preprocessed schedule-column ids for this mul trace under a given
+    /// schedule namespace. The public-key sub-graph uses
+    /// [`PROJECTIVE_RCB_SCHEDULE_NAMESPACE_PUBLIC_KEY`] so its schedule columns
+    /// stay distinct from the EC projective trace's.
+    pub(crate) fn preprocessed_column_ids_with_namespace(
+        &self,
+        namespace: &'static str,
+    ) -> Vec<PreProcessedColumnId> {
         let log_sizes = self.component_log_sizes();
         let mut allocator = TraceLocationAllocator::default();
         let relations = ProjectiveRcbMulComponentRelations::dummy();
@@ -1531,6 +1569,7 @@ impl ProjectiveRcbAirTraceClaim {
             ProjectiveRcbRawProductChunkEval {
                 log_size: log_sizes.raw_product_chunk,
                 relations: relations.clone(),
+                schedule_namespace: namespace,
             },
             zero,
         );
@@ -1539,6 +1578,7 @@ impl ProjectiveRcbAirTraceClaim {
             ProjectiveRcbFoldedContributionEval {
                 log_size: log_sizes.folded_contribution,
                 relations: relations.clone(),
+                schedule_namespace: namespace,
             },
             zero,
         );
@@ -1547,6 +1587,7 @@ impl ProjectiveRcbAirTraceClaim {
             ProjectiveRcbFoldedDigitEval {
                 log_size: log_sizes.folded_digit,
                 relations,
+                schedule_namespace: namespace,
             },
             zero,
         );
@@ -1557,7 +1598,16 @@ impl ProjectiveRcbAirTraceClaim {
         &self,
         ids: &[PreProcessedColumnId],
     ) -> Result<Vec<M31ColumnEval>, ProjectiveRcbAirError> {
-        let columns = projective_rcb_air_schedule_preprocessed_columns(self);
+        self.gen_preprocessed_trace_with_namespace(ids, PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC)
+    }
+
+    /// Schedule preprocessed trace for this mul trace under a given namespace.
+    pub(crate) fn gen_preprocessed_trace_with_namespace(
+        &self,
+        ids: &[PreProcessedColumnId],
+        namespace: &str,
+    ) -> Result<Vec<M31ColumnEval>, ProjectiveRcbAirError> {
+        let columns = projective_rcb_air_schedule_preprocessed_columns(self, namespace);
         ids.iter()
             .map(|id| {
                 columns
@@ -1706,7 +1756,8 @@ impl ProjectiveRcbAirTraceClaim {
         &self,
         ids: &[PreProcessedColumnId],
     ) -> Result<Vec<M31ColumnEval>, ProjectiveRcbAirError> {
-        let mut columns = projective_rcb_air_schedule_preprocessed_columns(self);
+        let mut columns =
+            projective_rcb_air_schedule_preprocessed_columns(self, PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC);
         let range13 = RangeCheckClaim::new(RANGE13_BITS);
         columns.push((
             crate::range_checks::range_check_value_column_id(RANGE13_BITS),
@@ -1923,10 +1974,14 @@ impl ProjectiveRcbAirTraceClaim {
 
 pub fn projective_rcb_raw_product_chunk_schedule_columns(
 ) -> Vec<ProjectiveRcbRawProductChunkScheduleColumn> {
-    projective_rcb_raw_product_chunk_schedule_columns_for_mul_count(1)
+    projective_rcb_raw_product_chunk_schedule_columns_for_mul_count(
+        PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC,
+        1,
+    )
 }
 
 fn projective_rcb_raw_product_chunk_schedule_columns_for_mul_count(
+    namespace: &str,
     mul_count: usize,
 ) -> Vec<ProjectiveRcbRawProductChunkScheduleColumn> {
     let active_rows = mul_count * PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS;
@@ -1968,35 +2023,35 @@ fn projective_rcb_raw_product_chunk_schedule_columns_for_mul_count(
 
     let mut columns = vec![
         raw_product_chunk_schedule_column(
-            ProjectiveRcbRawProductChunkScheduleColumnIds::active(),
+            ProjectiveRcbRawProductChunkScheduleColumnIds::active(namespace),
             active,
         ),
         raw_product_chunk_schedule_column(
-            ProjectiveRcbRawProductChunkScheduleColumnIds::coeff(),
+            ProjectiveRcbRawProductChunkScheduleColumnIds::coeff(namespace),
             coeff,
         ),
         raw_product_chunk_schedule_column(
-            ProjectiveRcbRawProductChunkScheduleColumnIds::chunk(),
+            ProjectiveRcbRawProductChunkScheduleColumnIds::chunk(namespace),
             chunk,
         ),
     ];
     for term in 0..PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS {
         columns.push(raw_product_chunk_schedule_column(
-            ProjectiveRcbRawProductChunkScheduleColumnIds::term_active(term),
+            ProjectiveRcbRawProductChunkScheduleColumnIds::term_active(namespace, term),
             term_active[term].clone(),
         ));
         columns.push(raw_product_chunk_schedule_column(
-            ProjectiveRcbRawProductChunkScheduleColumnIds::lhs_index(term),
+            ProjectiveRcbRawProductChunkScheduleColumnIds::lhs_index(namespace, term),
             lhs_index[term].clone(),
         ));
         columns.push(raw_product_chunk_schedule_column(
-            ProjectiveRcbRawProductChunkScheduleColumnIds::rhs_index(term),
+            ProjectiveRcbRawProductChunkScheduleColumnIds::rhs_index(namespace, term),
             rhs_index[term].clone(),
         ));
     }
     for (offset, values) in digit_use_count.into_iter().enumerate() {
         columns.push(raw_product_chunk_schedule_column(
-            ProjectiveRcbRawProductChunkScheduleColumnIds::digit_use_count(offset),
+            ProjectiveRcbRawProductChunkScheduleColumnIds::digit_use_count(namespace, offset),
             values,
         ));
     }
@@ -2009,10 +2064,14 @@ pub fn projective_rcb_raw_product_chunk_schedule_evals() -> Vec<M31ColumnEval> {
 
 pub fn projective_rcb_folded_contribution_schedule_columns(
 ) -> Vec<ProjectiveRcbFoldedContributionScheduleColumn> {
-    projective_rcb_folded_contribution_schedule_columns_for_mul_count(1)
+    projective_rcb_folded_contribution_schedule_columns_for_mul_count(
+        PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC,
+        1,
+    )
 }
 
 fn projective_rcb_folded_contribution_schedule_columns_for_mul_count(
+    namespace: &str,
     mul_count: usize,
 ) -> Vec<ProjectiveRcbFoldedContributionScheduleColumn> {
     let active_rows = mul_count * PROJECTIVE_RCB_FOLDED_CONTRIBUTION_ROWS;
@@ -2063,37 +2122,37 @@ fn projective_rcb_folded_contribution_schedule_columns_for_mul_count(
 
     let mut columns = vec![
         folded_contribution_schedule_column(
-            ProjectiveRcbFoldedContributionScheduleColumnIds::active(),
+            ProjectiveRcbFoldedContributionScheduleColumnIds::active(namespace),
             active,
         ),
         folded_contribution_schedule_column(
-            ProjectiveRcbFoldedContributionScheduleColumnIds::digit_index(),
+            ProjectiveRcbFoldedContributionScheduleColumnIds::digit_index(namespace),
             digit_index,
         ),
         folded_contribution_schedule_column(
-            ProjectiveRcbFoldedContributionScheduleColumnIds::group_index(),
+            ProjectiveRcbFoldedContributionScheduleColumnIds::group_index(namespace),
             group_index,
         ),
     ];
     for term in 0..PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERMS {
         columns.push(folded_contribution_schedule_column(
-            ProjectiveRcbFoldedContributionScheduleColumnIds::term_active(term),
+            ProjectiveRcbFoldedContributionScheduleColumnIds::term_active(namespace, term),
             term_active[term].clone(),
         ));
         columns.push(folded_contribution_schedule_column(
-            ProjectiveRcbFoldedContributionScheduleColumnIds::raw_coeff(term),
+            ProjectiveRcbFoldedContributionScheduleColumnIds::raw_coeff(namespace, term),
             raw_coeff[term].clone(),
         ));
         columns.push(folded_contribution_schedule_column(
-            ProjectiveRcbFoldedContributionScheduleColumnIds::raw_chunk(term),
+            ProjectiveRcbFoldedContributionScheduleColumnIds::raw_chunk(namespace, term),
             raw_chunk[term].clone(),
         ));
         columns.push(folded_contribution_schedule_column(
-            ProjectiveRcbFoldedContributionScheduleColumnIds::raw_offset(term),
+            ProjectiveRcbFoldedContributionScheduleColumnIds::raw_offset(namespace, term),
             raw_offset[term].clone(),
         ));
         columns.push(folded_contribution_schedule_column(
-            ProjectiveRcbFoldedContributionScheduleColumnIds::matrix_coeff(term),
+            ProjectiveRcbFoldedContributionScheduleColumnIds::matrix_coeff(namespace, term),
             matrix_coeff[term].clone(),
         ));
     }
@@ -2106,10 +2165,14 @@ pub fn projective_rcb_folded_contribution_schedule_evals() -> Vec<M31ColumnEval>
 
 pub fn projective_rcb_folded_digit_schedule_columns() -> Vec<ProjectiveRcbFoldedDigitScheduleColumn>
 {
-    projective_rcb_folded_digit_schedule_columns_for_mul_count(1)
+    projective_rcb_folded_digit_schedule_columns_for_mul_count(
+        PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC,
+        1,
+    )
 }
 
 fn projective_rcb_folded_digit_schedule_columns_for_mul_count(
+    namespace: &str,
     mul_count: usize,
 ) -> Vec<ProjectiveRcbFoldedDigitScheduleColumn> {
     let active_rows = mul_count * FP_SOLINAS_REDUCTION_DIGITS;
@@ -2135,19 +2198,22 @@ fn projective_rcb_folded_digit_schedule_columns_for_mul_count(
     debug_assert_eq!(row, active_rows);
 
     let mut columns = vec![
-        folded_digit_schedule_column(ProjectiveRcbFoldedDigitScheduleColumnIds::active(), active),
         folded_digit_schedule_column(
-            ProjectiveRcbFoldedDigitScheduleColumnIds::digit_index(),
+            ProjectiveRcbFoldedDigitScheduleColumnIds::active(namespace),
+            active,
+        ),
+        folded_digit_schedule_column(
+            ProjectiveRcbFoldedDigitScheduleColumnIds::digit_index(namespace),
             digit_index,
         ),
     ];
     for group in 0..PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS {
         columns.push(folded_digit_schedule_column(
-            ProjectiveRcbFoldedDigitScheduleColumnIds::group_active(group),
+            ProjectiveRcbFoldedDigitScheduleColumnIds::group_active(namespace, group),
             group_active[group].clone(),
         ));
         columns.push(folded_digit_schedule_column(
-            ProjectiveRcbFoldedDigitScheduleColumnIds::group_index(group),
+            ProjectiveRcbFoldedDigitScheduleColumnIds::group_index(namespace, group),
             group_index[group].clone(),
         ));
     }
@@ -2160,21 +2226,22 @@ pub fn projective_rcb_folded_digit_schedule_evals() -> Vec<M31ColumnEval> {
 
 fn projective_rcb_air_schedule_preprocessed_columns(
     trace: &ProjectiveRcbAirTraceClaim,
+    namespace: &str,
 ) -> Vec<(PreProcessedColumnId, M31ColumnEval)> {
     let mul_count = trace.mul_row_count();
     let mut columns = Vec::new();
     columns.extend(
-        projective_rcb_raw_product_chunk_schedule_columns_for_mul_count(mul_count)
+        projective_rcb_raw_product_chunk_schedule_columns_for_mul_count(namespace, mul_count)
             .into_iter()
             .map(|column| column_to_eval(column.id, column.values)),
     );
     columns.extend(
-        projective_rcb_folded_contribution_schedule_columns_for_mul_count(mul_count)
+        projective_rcb_folded_contribution_schedule_columns_for_mul_count(namespace, mul_count)
             .into_iter()
             .map(|column| column_to_eval(column.id, column.values)),
     );
     columns.extend(
-        projective_rcb_folded_digit_schedule_columns_for_mul_count(mul_count)
+        projective_rcb_folded_digit_schedule_columns_for_mul_count(namespace, mul_count)
             .into_iter()
             .map(|column| column_to_eval(column.id, column.values)),
     );
@@ -4140,21 +4207,33 @@ fn m31_i128(value: i128) -> M31 {
     M31::from_u32_unchecked(value.rem_euclid(M31_MODULUS) as u32)
 }
 
-fn raw_product_chunk_schedule_id(name: impl Into<String>) -> PreProcessedColumnId {
+fn raw_product_chunk_schedule_id(
+    namespace: &str,
+    name: impl Into<String>,
+) -> PreProcessedColumnId {
     PreProcessedColumnId {
-        id: format!("p256_projective_rcb_raw_product_chunk_{}", name.into()),
+        id: format!(
+            "p256_projective_rcb_{namespace}raw_product_chunk_{}",
+            name.into()
+        ),
     }
 }
 
-fn folded_contribution_schedule_id(name: impl Into<String>) -> PreProcessedColumnId {
+fn folded_contribution_schedule_id(
+    namespace: &str,
+    name: impl Into<String>,
+) -> PreProcessedColumnId {
     PreProcessedColumnId {
-        id: format!("p256_projective_rcb_folded_contribution_{}", name.into()),
+        id: format!(
+            "p256_projective_rcb_{namespace}folded_contribution_{}",
+            name.into()
+        ),
     }
 }
 
-fn folded_digit_schedule_id(name: impl Into<String>) -> PreProcessedColumnId {
+fn folded_digit_schedule_id(namespace: &str, name: impl Into<String>) -> PreProcessedColumnId {
     PreProcessedColumnId {
-        id: format!("p256_projective_rcb_folded_digit_{}", name.into()),
+        id: format!("p256_projective_rcb_{namespace}folded_digit_{}", name.into()),
     }
 }
 
@@ -4962,6 +5041,7 @@ mod tests {
             ProjectiveRcbRawProductChunkEval {
                 log_size,
                 relations: ProjectiveRcbMulComponentRelations::dummy(),
+                schedule_namespace: PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC,
             },
             SecureField::zero(),
         );
@@ -5004,6 +5084,7 @@ mod tests {
             ProjectiveRcbRawProductChunkEval {
                 log_size,
                 relations: relations.clone(),
+                schedule_namespace: PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC,
             },
             interaction_claim.raw_product_chunk,
         );
@@ -5021,6 +5102,7 @@ mod tests {
                 ProjectiveRcbRawProductChunkEval {
                     log_size,
                     relations: relations.clone(),
+                    schedule_namespace: PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC,
                 }
                 .evaluate(eval);
             },
@@ -5050,6 +5132,7 @@ mod tests {
             ProjectiveRcbRawProductChunkEval {
                 log_size,
                 relations: verifier_relations,
+                schedule_namespace: PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC,
             },
             interaction_claim.raw_product_chunk,
         );
@@ -5166,6 +5249,7 @@ mod tests {
             ProjectiveRcbFoldedContributionEval {
                 log_size,
                 relations: ProjectiveRcbMulComponentRelations::dummy(),
+                schedule_namespace: PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC,
             },
             SecureField::zero(),
         );
@@ -5208,6 +5292,7 @@ mod tests {
             ProjectiveRcbFoldedContributionEval {
                 log_size,
                 relations: relations.clone(),
+                schedule_namespace: PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC,
             },
             interaction_claim.folded_contribution,
         );
@@ -5230,6 +5315,7 @@ mod tests {
                 ProjectiveRcbFoldedContributionEval {
                     log_size,
                     relations: relations.clone(),
+                    schedule_namespace: PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC,
                 }
                 .evaluate(eval);
             },
@@ -5261,6 +5347,7 @@ mod tests {
             ProjectiveRcbFoldedContributionEval {
                 log_size,
                 relations: verifier_relations,
+                schedule_namespace: PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC,
             },
             interaction_claim.folded_contribution,
         );
@@ -5284,6 +5371,7 @@ mod tests {
             ProjectiveRcbFoldedDigitEval {
                 log_size,
                 relations: ProjectiveRcbMulComponentRelations::dummy(),
+                schedule_namespace: PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC,
             },
             SecureField::zero(),
         );
@@ -5326,6 +5414,7 @@ mod tests {
             ProjectiveRcbFoldedDigitEval {
                 log_size,
                 relations: relations.clone(),
+                schedule_namespace: PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC,
             },
             interaction_claim.folded_digit,
         );
@@ -5343,6 +5432,7 @@ mod tests {
                 ProjectiveRcbFoldedDigitEval {
                     log_size,
                     relations: relations.clone(),
+                    schedule_namespace: PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC,
                 }
                 .evaluate(eval);
             },
@@ -5373,6 +5463,7 @@ mod tests {
             ProjectiveRcbFoldedDigitEval {
                 log_size,
                 relations: verifier_relations,
+                schedule_namespace: PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC,
             },
             interaction_claim.folded_digit,
         );
@@ -5578,6 +5669,7 @@ mod tests {
             ProjectiveRcbRawProductChunkEval {
                 log_size: log_sizes.raw_product_chunk,
                 relations: dummy.clone(),
+                schedule_namespace: PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC,
             },
             zero_claim.raw_product_chunk,
         );
@@ -5586,6 +5678,7 @@ mod tests {
             ProjectiveRcbFoldedContributionEval {
                 log_size: log_sizes.folded_contribution,
                 relations: dummy.clone(),
+                schedule_namespace: PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC,
             },
             zero_claim.folded_contribution,
         );
@@ -5594,6 +5687,7 @@ mod tests {
             ProjectiveRcbFoldedDigitEval {
                 log_size: log_sizes.folded_digit,
                 relations: dummy,
+                schedule_namespace: PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC,
             },
             zero_claim.folded_digit,
         );
@@ -5672,6 +5766,7 @@ mod tests {
             ProjectiveRcbRawProductChunkEval {
                 log_size: log_sizes.raw_product_chunk,
                 relations: relations.clone(),
+                schedule_namespace: PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC,
             },
             interaction_claim.raw_product_chunk,
         );
@@ -5680,6 +5775,7 @@ mod tests {
             ProjectiveRcbFoldedContributionEval {
                 log_size: log_sizes.folded_contribution,
                 relations: relations.clone(),
+                schedule_namespace: PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC,
             },
             interaction_claim.folded_contribution,
         );
@@ -5688,6 +5784,7 @@ mod tests {
             ProjectiveRcbFoldedDigitEval {
                 log_size: log_sizes.folded_digit,
                 relations,
+                schedule_namespace: PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC,
             },
             interaction_claim.folded_digit,
         );
@@ -5995,6 +6092,7 @@ mod tests {
             ProjectiveRcbRawProductChunkEval {
                 log_size: 8,
                 relations: ProjectiveRcbMulComponentRelations::dummy(),
+                schedule_namespace: PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC,
             },
             SecureField::zero(),
         );
@@ -6008,18 +6106,24 @@ mod tests {
             component.trace_log_degree_bounds()[1].len(),
             PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TRACE_COLUMNS
         );
-        assert!(allocator
-            .preprocessed_columns()
-            .contains(&ProjectiveRcbRawProductChunkScheduleColumnIds::coeff()));
-        assert!(allocator
-            .preprocessed_columns()
-            .contains(&ProjectiveRcbRawProductChunkScheduleColumnIds::digit_use_count(2)));
+        assert!(allocator.preprocessed_columns().contains(
+            &ProjectiveRcbRawProductChunkScheduleColumnIds::coeff(
+                PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC
+            )
+        ));
+        assert!(allocator.preprocessed_columns().contains(
+            &ProjectiveRcbRawProductChunkScheduleColumnIds::digit_use_count(
+                PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC,
+                2
+            )
+        ));
         assert_eq!(PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGIT_RELATION_ARITY, 6);
         assert!(projective_rcb_raw_product_chunk_fits_m31());
         assert_eq!(
             ProjectiveRcbRawProductChunkEval {
                 log_size: 8,
                 relations: ProjectiveRcbMulComponentRelations::dummy(),
+                schedule_namespace: PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC,
             }
             .max_constraint_log_degree_bound(),
             9
@@ -6066,6 +6170,7 @@ mod tests {
             ProjectiveRcbFoldedContributionEval {
                 log_size: 9,
                 relations: ProjectiveRcbMulComponentRelations::dummy(),
+                schedule_namespace: PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC,
             },
             SecureField::zero(),
         );
@@ -6078,18 +6183,24 @@ mod tests {
             component.trace_log_degree_bounds()[1].len(),
             PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TRACE_COLUMNS
         );
-        assert!(allocator
-            .preprocessed_columns()
-            .contains(&ProjectiveRcbFoldedContributionScheduleColumnIds::active()));
-        assert!(allocator
-            .preprocessed_columns()
-            .contains(&ProjectiveRcbFoldedContributionScheduleColumnIds::matrix_coeff(3)));
+        assert!(allocator.preprocessed_columns().contains(
+            &ProjectiveRcbFoldedContributionScheduleColumnIds::active(
+                PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC
+            )
+        ));
+        assert!(allocator.preprocessed_columns().contains(
+            &ProjectiveRcbFoldedContributionScheduleColumnIds::matrix_coeff(
+                PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC,
+                3
+            )
+        ));
         assert_eq!(PROJECTIVE_RCB_FOLDED_CONTRIBUTION_RELATION_ARITY, 5);
         assert!(projective_rcb_folded_contribution_fits_m31());
         assert_eq!(
             ProjectiveRcbFoldedContributionEval {
                 log_size: 9,
                 relations: ProjectiveRcbMulComponentRelations::dummy(),
+                schedule_namespace: PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC,
             }
             .max_constraint_log_degree_bound(),
             10
@@ -6166,6 +6277,7 @@ mod tests {
             ProjectiveRcbFoldedDigitEval {
                 log_size: 9,
                 relations: ProjectiveRcbMulComponentRelations::dummy(),
+                schedule_namespace: PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC,
             },
             SecureField::zero(),
         );
@@ -6179,12 +6291,17 @@ mod tests {
             component.trace_log_degree_bounds()[1].len(),
             PROJECTIVE_RCB_FOLDED_DIGIT_TRACE_COLUMNS
         );
-        assert!(allocator
-            .preprocessed_columns()
-            .contains(&ProjectiveRcbFoldedDigitScheduleColumnIds::active()));
-        assert!(allocator
-            .preprocessed_columns()
-            .contains(&ProjectiveRcbFoldedDigitScheduleColumnIds::group_index(29)));
+        assert!(allocator.preprocessed_columns().contains(
+            &ProjectiveRcbFoldedDigitScheduleColumnIds::active(
+                PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC
+            )
+        ));
+        assert!(allocator.preprocessed_columns().contains(
+            &ProjectiveRcbFoldedDigitScheduleColumnIds::group_index(
+                PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC,
+                29
+            )
+        ));
         assert_eq!(PROJECTIVE_RCB_FOLDED_DIGIT_RELATION_ARITY, 4);
         assert_eq!(PROJECTIVE_RCB_FOLDED_CARRY_RELATION_ARITY, 4);
         assert!(projective_rcb_folded_digit_contribution_sum_fits_m31());
@@ -6192,6 +6309,7 @@ mod tests {
             ProjectiveRcbFoldedDigitEval {
                 log_size: 9,
                 relations: ProjectiveRcbMulComponentRelations::dummy(),
+                schedule_namespace: PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC,
             }
             .max_constraint_log_degree_bound(),
             10
@@ -6281,10 +6399,18 @@ mod tests {
                 .log_size(),
             log_sizes.folded_digit
         );
-        assert!(ids.contains(&ProjectiveRcbRawProductChunkScheduleColumnIds::coeff()));
-        assert!(ids.contains(&ProjectiveRcbFoldedContributionScheduleColumnIds::matrix_coeff(3)));
+        assert!(ids.contains(&ProjectiveRcbRawProductChunkScheduleColumnIds::coeff(
+            PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC
+        )));
+        assert!(
+            ids.contains(&ProjectiveRcbFoldedContributionScheduleColumnIds::matrix_coeff(
+                PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC,
+                3
+            ))
+        );
         assert!(
             ids.contains(&ProjectiveRcbFoldedDigitScheduleColumnIds::group_index(
+                PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC,
                 PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS - 1,
             ))
         );
