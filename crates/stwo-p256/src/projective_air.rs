@@ -788,7 +788,7 @@ pub struct ProjectiveRcbMulColumns<E: EvalAtRow> {
 }
 
 impl<E: EvalAtRow> ProjectiveRcbMulColumns<E> {
-    fn read(eval: &mut E) -> Self {
+    pub(crate) fn read(eval: &mut E) -> Self {
         Self {
             lhs: eval.next_p256_bigint(),
             rhs: eval.next_p256_bigint(),
@@ -2181,7 +2181,7 @@ fn projective_rcb_air_schedule_preprocessed_columns(
     columns
 }
 
-fn gen_projective_rcb_mul_base_trace(
+pub(crate) fn gen_projective_rcb_mul_base_trace(
     trace: &ProjectiveRcbAirTraceClaim,
     log_size: u32,
 ) -> Result<Vec<M31ColumnEval>, ProjectiveRcbAirError> {
@@ -2212,7 +2212,7 @@ fn gen_projective_rcb_mul_base_trace(
     rows_to_base_trace(rows, PROJECTIVE_RCB_MUL_TRACE_COLUMNS, log_size)
 }
 
-fn gen_projective_rcb_raw_product_chunk_base_trace(
+pub(crate) fn gen_projective_rcb_raw_product_chunk_base_trace(
     trace: &ProjectiveRcbAirTraceClaim,
     log_size: u32,
 ) -> Result<Vec<M31ColumnEval>, ProjectiveRcbAirError> {
@@ -2242,7 +2242,7 @@ fn gen_projective_rcb_raw_product_chunk_base_trace(
     )
 }
 
-fn gen_projective_rcb_folded_contribution_base_trace(
+pub(crate) fn gen_projective_rcb_folded_contribution_base_trace(
     trace: &ProjectiveRcbAirTraceClaim,
     log_size: u32,
 ) -> Result<Vec<M31ColumnEval>, ProjectiveRcbAirError> {
@@ -2273,7 +2273,7 @@ fn gen_projective_rcb_folded_contribution_base_trace(
     )
 }
 
-fn gen_projective_rcb_folded_digit_base_trace(
+pub(crate) fn gen_projective_rcb_folded_digit_base_trace(
     trace: &ProjectiveRcbAirTraceClaim,
     log_size: u32,
 ) -> Result<Vec<M31ColumnEval>, ProjectiveRcbAirError> {
@@ -2526,6 +2526,43 @@ fn projective_rcb_mul_row_fractions(
     ));
     debug_assert_eq!(fractions.len(), projective_rcb_mul_fraction_count());
     fractions
+}
+
+/// Number of LogUp fractions a single mul row emits inside the mul family.
+///
+/// Exposed so adapters that swap a custom evaluator in for
+/// [`ProjectiveRcbMulEval`] (see `public_key_curve_air`) can pad and size
+/// their interaction traces to match the shared mul family.
+pub(crate) fn projective_rcb_mul_row_fraction_count() -> usize {
+    projective_rcb_mul_fraction_count()
+}
+
+/// Evaluated `(numerator, denominator)` LogUp pairs for one mul row, in the
+/// exact order [`add_projective_rcb_mul_row`] emits them with a single
+/// `finalize_logup`.
+///
+/// This hides [`ProjectiveRcbFractionSpec`] internals so an adapter component
+/// can build a combined interaction trace (these standard pairs followed by
+/// its own provider pairs) inside one [`LogupTraceGenerator`].
+pub(crate) fn projective_rcb_mul_row_fraction_pairs(
+    source_index: usize,
+    mul_index: usize,
+    mul: &ProjectiveRcbMulRow,
+    relations: &ProjectiveRcbMulComponentRelations,
+) -> Vec<(SecureField, SecureField)> {
+    projective_rcb_mul_row_fractions(source_index, mul_index, mul)
+        .iter()
+        .map(|fraction| projective_rcb_fraction(fraction, relations))
+        .collect()
+}
+
+/// Padding `(numerator, denominator)` pairs for an inactive mul row: a
+/// zero numerator over a unit denominator, repeated for every standard mul
+/// fraction.
+pub(crate) fn projective_rcb_mul_padding_fraction_pairs() -> Vec<(SecureField, SecureField)> {
+    (0..projective_rcb_mul_fraction_count())
+        .map(|_| zero_fraction())
+        .collect()
 }
 
 fn projective_rcb_raw_product_chunk_fractions(
@@ -3217,7 +3254,7 @@ pub struct ProjectiveRcbMulRow {
 }
 
 impl ProjectiveRcbMulRow {
-    fn new(
+    pub(crate) fn new(
         source_index: usize,
         mul_index: usize,
         step: ProjectiveRcbMulStep,

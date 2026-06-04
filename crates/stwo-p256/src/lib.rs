@@ -13,6 +13,7 @@ pub mod projective_air;
 pub mod proof;
 pub mod public_inputs;
 pub mod public_key_check;
+pub mod public_key_curve_air;
 pub mod range_checks;
 pub mod scalar;
 pub mod types;
