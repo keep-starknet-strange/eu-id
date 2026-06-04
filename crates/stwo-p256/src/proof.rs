@@ -85,7 +85,7 @@ use crate::final_check::{FinalEcdsaCheckClaim, FinalEcdsaCheckError};
 use crate::final_check_air::{
     ecdsa_result_provider_claimed_sum, gen_final_check_air_base_trace,
     gen_final_check_air_interaction_trace, EcdsaResultRelation, FinalCheckAirComponents,
-    FinalCheckAirInteractionClaim, FinalCheckAirProofClaim,
+    FinalCheckAirInteractionClaim, FinalCheckAirProofClaim, FinalCheckAirRelations,
 };
 use crate::prepared_point::{
     prepared_point_provider_claimed_sum, prepared_point_range7_consumer_claimed_sum,
@@ -882,17 +882,20 @@ impl P256CurrentAirInteractionClaim {
         verify_current_air_relation_zero(
             "ScalarSetupRange13",
             self.scalar_setup.range13_consumer_claimed_sum
-                + self.scalar_setup.range13_provider.claimed_sum,
+                + self.scalar_setup.range13_provider.claimed_sum
+                + self.final_check.range13_consumer_claimed_sum,
         )?;
         verify_current_air_relation_zero(
             "ScalarSetupRange9",
             self.scalar_setup.range9_consumer_claimed_sum
-                + self.scalar_setup.range9_provider.claimed_sum,
+                + self.scalar_setup.range9_provider.claimed_sum
+                + self.final_check.range9_consumer_claimed_sum,
         )?;
         verify_current_air_relation_zero(
             "ScalarSetupSignedCarry",
             self.scalar_setup.signed_carry_consumer_claimed_sum
-                + self.scalar_setup.signed_carry_provider.claimed_sum,
+                + self.scalar_setup.signed_carry_provider.claimed_sum
+                + self.final_check.signed_carry_consumer_claimed_sum,
         )?;
         let scalar_setup_mod_mul_total = self
             .scalar_setup_mod_muls
@@ -1183,7 +1186,12 @@ impl P256CurrentAirComponents {
                 allocator,
                 claim.final_check,
                 &interaction_claim.final_check,
-                &relations.ecdsa_result,
+                FinalCheckAirRelations {
+                    result: &relations.ecdsa_result,
+                    range13: &relations.scalar_setup.range13,
+                    range9: &relations.scalar_setup.range9,
+                    signed_carry: &relations.scalar_setup.signed_carry,
+                },
             ),
             projective_rcb_air: ProjectiveRcbAirComponents::new_with_log_sizes(
                 allocator,
@@ -1695,8 +1703,16 @@ impl P256ProofDraft {
     ) -> Result<P256CurrentAirBaseTrace, P256ProofError> {
         let scalar_setup =
             gen_scalar_setup_air_base_trace(&self.claim.scalar_setup, claim.scalar_setup);
-        let scalar_setup_lookup_providers =
-            gen_scalar_setup_air_lookup_provider_base_trace(&scalar_setup);
+        // Generate final_check first so its range checks join the shared
+        // scalar_setup providers' multiplicities.
+        let final_check =
+            gen_final_check_air_base_trace(&self.claim.final_check, claim.final_check);
+        let scalar_setup_lookup_providers = gen_scalar_setup_air_lookup_provider_base_trace(
+            &scalar_setup,
+            crate::final_check_air::final_check_range13_uses_from_base(&final_check),
+            crate::final_check_air::final_check_range9_uses_from_base(&final_check),
+            crate::final_check_air::final_check_signed_carry_uses_from_base(&final_check),
+        );
         let cert_scalar_inputs = gen_cert_scalar_input_air_base_trace(
             &self.claim.scalar_setup,
             &self.claim.cert_inputs,
@@ -1806,7 +1822,6 @@ impl P256ProofDraft {
                         (provider.use_count.0 != 0).then_some(provider.use_count)
                     },
                 ));
-        let final_check = gen_final_check_air_base_trace(&self.claim.public_inputs, claim.final_check);
         let projective_rcb_air = self
             .claim
             .projective_rcb_air_trace
@@ -1873,8 +1888,13 @@ impl P256ProofDraft {
         base: &P256CurrentAirBaseTrace,
         relations: &P256CurrentAirRelations,
     ) -> Result<(ColumnVec<M31ColumnEval>, P256CurrentAirInteractionClaim), P256ProofError> {
-        let (scalar_setup_interaction, scalar_setup_claim) =
-            gen_scalar_setup_air_interaction_trace(&base.scalar_setup, &relations.scalar_setup);
+        let (scalar_setup_interaction, scalar_setup_claim) = gen_scalar_setup_air_interaction_trace(
+            &base.scalar_setup,
+            &relations.scalar_setup,
+            crate::final_check_air::final_check_range13_uses_from_base(&base.final_check),
+            crate::final_check_air::final_check_range9_uses_from_base(&base.final_check),
+            crate::final_check_air::final_check_signed_carry_uses_from_base(&base.final_check),
+        );
         let (cert_scalar_input_interaction, cert_scalar_input_claim) =
             gen_cert_scalar_input_air_interaction_trace(
                 &base.cert_scalar_inputs,
@@ -2007,8 +2027,15 @@ impl P256ProofDraft {
                 &range7_value_column,
                 &relations.range7,
             );
-        let (final_check_interaction, final_check_claim) =
-            gen_final_check_air_interaction_trace(&base.final_check, &relations.ecdsa_result);
+        let (final_check_interaction, final_check_claim) = gen_final_check_air_interaction_trace(
+            &base.final_check,
+            FinalCheckAirRelations {
+                result: &relations.ecdsa_result,
+                range13: &relations.scalar_setup.range13,
+                range9: &relations.scalar_setup.range9,
+                signed_carry: &relations.scalar_setup.signed_carry,
+            },
+        );
         let ecdsa_result_provider_claimed_sum = ecdsa_result_provider_claimed_sum(
             &self.claim.public_inputs.instances,
             &relations.ecdsa_result,
@@ -2370,7 +2397,7 @@ pub const P256_PROOF_COMPONENT_SLOTS: &[P256ProofComponentSlot] = &[
     P256ProofComponentSlot {
         name: "FinalEcdsaCheck",
         status: P256ProofComponentStatus::Pending,
-        note: "Native final check links H1/H2, finite R = H1 + H2, and x(R) mod n = r; AIR rows for this final equation are still pending.",
+        note: "Native final check links H1/H2, finite R = H1 + H2, and x(R) mod n = r. AIR now enforces the in-circuit one-subtraction reduction r_check = r_x mod n (Range13/Range9/SignedCarry-checked) and binds r_check to public r via EcdsaResultRelation; binding r_x to the fake-GLV chain final accumulator outputs is still pending.",
     },
     P256ProofComponentSlot {
         name: "StarkProveVerify",

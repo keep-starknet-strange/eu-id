@@ -785,24 +785,32 @@ pub fn gen_scalar_setup_air_base_trace(
 
 pub(crate) fn gen_scalar_setup_air_lookup_provider_base_trace(
     setup_base: &[M31ColumnEval],
+    extra_range13_uses: impl IntoIterator<Item = M31>,
+    extra_range9_uses: impl IntoIterator<Item = M31>,
+    extra_signed_carry_uses: impl IntoIterator<Item = i64>,
 ) -> ColumnVec<M31ColumnEval> {
     let providers = scalar_setup_lookup_provider_claims();
+    let mut range13_uses = scalar_setup_range13_uses_from_base(setup_base);
+    range13_uses.extend(extra_range13_uses);
+    let mut range9_uses = scalar_setup_range9_uses_from_base(setup_base);
+    range9_uses.extend(extra_range9_uses);
+    let mut signed_carry_uses = scalar_setup_signed_carry_uses_from_base(setup_base);
+    signed_carry_uses.extend(extra_signed_carry_uses);
     vec![
-        providers
-            .range13
-            .gen_multiplicity_trace(scalar_setup_range13_uses_from_base(setup_base)),
-        providers
-            .range9
-            .gen_multiplicity_trace(scalar_setup_range9_uses_from_base(setup_base)),
+        providers.range13.gen_multiplicity_trace(range13_uses),
+        providers.range9.gen_multiplicity_trace(range9_uses),
         providers
             .signed_carry
-            .gen_multiplicity_trace(scalar_setup_signed_carry_uses_from_base(setup_base)),
+            .gen_multiplicity_trace(signed_carry_uses),
     ]
 }
 
 pub(crate) fn gen_scalar_setup_air_interaction_trace(
     base: &[M31ColumnEval],
     relations: &ScalarSetupAirRelations,
+    extra_range13_uses: impl IntoIterator<Item = M31>,
+    extra_range9_uses: impl IntoIterator<Item = M31>,
+    extra_signed_carry_uses: impl IntoIterator<Item = i64>,
 ) -> (ColumnVec<M31ColumnEval>, ScalarSetupAirInteractionClaim) {
     assert_eq!(base.len(), SCALAR_SETUP_TRACE_COLUMNS);
     let log_size = base[0].domain.log_size();
@@ -994,7 +1002,8 @@ pub(crate) fn gen_scalar_setup_air_interaction_trace(
 
     let providers = scalar_setup_lookup_provider_claims();
     let range13_values = providers.range13.gen_preprocessed_column();
-    let range13_uses = scalar_setup_range13_uses_from_base(base);
+    let mut range13_uses = scalar_setup_range13_uses_from_base(base);
+    range13_uses.extend(extra_range13_uses);
     let range13_multiplicity = providers.range13.gen_multiplicity_trace(range13_uses);
     let (range13_trace, range13_provider) = RangeCheckInteractionClaim::gen_interaction_trace(
         &range13_multiplicity,
@@ -1002,7 +1011,8 @@ pub(crate) fn gen_scalar_setup_air_interaction_trace(
         &relations.range13,
     );
     let range9_values = providers.range9.gen_preprocessed_column();
-    let range9_uses = scalar_setup_range9_uses_from_base(base);
+    let mut range9_uses = scalar_setup_range9_uses_from_base(base);
+    range9_uses.extend(extra_range9_uses);
     let range9_multiplicity = providers.range9.gen_multiplicity_trace(range9_uses);
     let (range9_trace, range9_provider) = RangeCheckInteractionClaim::gen_interaction_trace(
         &range9_multiplicity,
@@ -1010,7 +1020,8 @@ pub(crate) fn gen_scalar_setup_air_interaction_trace(
         &relations.range9,
     );
     let signed_values = providers.signed_carry.gen_value_column();
-    let signed_uses = scalar_setup_signed_carry_uses_from_base(base);
+    let mut signed_uses = scalar_setup_signed_carry_uses_from_base(base);
+    signed_uses.extend(extra_signed_carry_uses);
     let signed_multiplicity = providers.signed_carry.gen_multiplicity_trace(signed_uses);
     let (signed_trace, signed_carry_provider) = RangeCheckInteractionClaim::gen_interaction_trace(
         &signed_multiplicity,
