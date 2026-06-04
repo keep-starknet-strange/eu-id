@@ -67,6 +67,19 @@ relation!(
     PREPARED_TABLE_CANONICAL_RELATION_ARITY
 );
 
+// `FinalCheckHintRelation` forwards the in-AIR-pinned signed hint point `R_i`
+// (= `±h_i`; for active certs `s2_sign_bit == 1` is forced in `fake_glv_scalar`,
+// so `R_i = -h_i`) from the prepared table to the FinalEcdsaCheck component.
+// Provider: `PreparedTableEcRowEval` yields `R_i` (= the `DoubleR` row's `lhs`,
+// which role-`R` pinning already binds to the canonical per-cert value) once per
+// active `DoubleR` row, gated `active * DoubleR_flag`, multiplicity `-1`.
+// Consumer: `FinalEcdsaCheck` uses `R_1` at `(sig, 0)` and `R_2` at `(sig, 1)`.
+relation!(FinalCheckHintRelation, FINAL_CHECK_HINT_RELATION_ARITY);
+
+/// `FinalCheckHintRelation` tuple arity:
+/// `(sig_id, cert_id, point[PREPARED_TABLE_EC_POINT_COLUMNS])`.
+pub const FINAL_CHECK_HINT_RELATION_ARITY: usize = 2 + PREPARED_TABLE_EC_POINT_COLUMNS;
+
 /// `CertBaseRelation` tuple arity: `(sig_id, cert_id, base_x[N_LIMBS], base_y[N_LIMBS])`.
 pub const CERT_BASE_RELATION_ARITY: usize = 2 + 2 * N_LIMBS;
 
@@ -591,6 +604,9 @@ impl PreparedTableProjectiveSourceComponents {
 pub struct PreparedTablePinningRelations {
     pub cert_base: CertBaseRelation,
     pub canonical: PreparedTableCanonicalRelation,
+    /// Forwards the pinned signed hint `R_i` (the `DoubleR` row's `lhs`) to the
+    /// FinalEcdsaCheck component. `None` for paths that do not consume it.
+    pub final_check_hint: Option<FinalCheckHintRelation>,
 }
 
 #[derive(Clone)]
@@ -967,6 +983,35 @@ fn add_pinning_emissions<E: EvalAtRow>(
             )),
         }
     }
+
+    // FinalCheckHint: yield `R_i` (= `lhs`) once per active `DoubleR` row, gated
+    // `active * DoubleR_flag`, multiplicity `-1`. Always emitted (one fraction
+    // per row) so the AIR numerator and the interaction trace stay in lockstep;
+    // the numerator is zero on non-`DoubleR`/padding rows. The relation tuple is
+    // the canonical-pinned `R_i`, so this forwards an already-bound value.
+    if let Some(final_check_hint) = &pinning.final_check_hint {
+        let gate = active.clone() * kind_flags[PREPARED_TABLE_EC_KIND_DOUBLE_R].clone();
+        eval.add_to_relation(RelationEntry::new(
+            final_check_hint,
+            -E::EF::from(gate),
+            &final_check_hint_relation_values::<E::F>(sig_id, cert_id, lhs),
+        ));
+    }
+}
+
+/// Build a `FinalCheckHintRelation` tuple `(sig_id, cert_id, point[41])`.
+fn final_check_hint_relation_values<F: Clone + From<M31>>(
+    sig_id: &F,
+    cert_id: &F,
+    point: &PreparedTableEcEvalPoint<F>,
+) -> [F; FINAL_CHECK_HINT_RELATION_ARITY] {
+    let point_values = point.relation_values();
+    core::array::from_fn(|index| match index {
+        0 => sig_id.clone(),
+        1 => cert_id.clone(),
+        2..=42 => point_values[index - 2].clone(),
+        _ => unreachable!("final check hint relation index in range"),
+    })
 }
 
 /// `mult · gate` as an extension-field numerator (`mult` may be negative).
@@ -1499,6 +1544,9 @@ pub struct PreparedTableEcRowPinnedInteractionClaim {
     pub prepared_table_provider_claimed_sum: SecureField,
     pub cert_base_consumer_claimed_sum: SecureField,
     pub canonical_claimed_sum: SecureField,
+    /// FinalCheckHint provider sum (yield `-1` per active `DoubleR` row). Zero
+    /// when no `final_check_hint` relation is forwarded.
+    pub final_check_hint_claimed_sum: SecureField,
 }
 
 impl PreparedTableEcRowPinnedInteractionClaim {
@@ -1508,18 +1556,22 @@ impl PreparedTableEcRowPinnedInteractionClaim {
             prepared_table_provider_claimed_sum: secure_zero(),
             cert_base_consumer_claimed_sum: secure_zero(),
             canonical_claimed_sum: secure_zero(),
+            final_check_hint_claimed_sum: secure_zero(),
         }
     }
 }
 
 /// Interaction trace for the monolithic EC-row provider: the base
 /// `PreparedTableEcRowRelation` yield plus the 30 `PIN_SCHEDULE` fractions, in
-/// the exact order emitted by `PreparedTableEcRowEval::evaluate`.
+/// the exact order emitted by `PreparedTableEcRowEval::evaluate`. When
+/// `final_check_hint` is `Some`, one more fraction is appended (the `DoubleR`
+/// `R_i` yield) to mirror the AIR's FinalCheckHint emission.
 pub(crate) fn gen_prepared_table_ec_row_pinned_interaction_trace(
     base: &[M31ColumnEval],
     relation: &PreparedTableEcRowRelation,
     cert_base: &CertBaseRelation,
     canonical: &PreparedTableCanonicalRelation,
+    final_check_hint: Option<&FinalCheckHintRelation>,
 ) -> (ColumnVec<M31ColumnEval>, PreparedTableEcRowPinnedInteractionClaim) {
     assert_eq!(base.len(), PREPARED_TABLE_EC_ROW_TRACE_COLUMNS);
     let log_size = base[0].domain.log_size();
@@ -1586,12 +1638,39 @@ pub(crate) fn gen_prepared_table_ec_row_pinned_interaction_trace(
         col.finalize_col();
     }
 
+    // Optional FinalCheckHint column: yield `R_i` (= `lhs`) gated `active *
+    // DoubleR_flag`, multiplicity `-1`. Emitted iff a relation is supplied, in
+    // lockstep with the AIR's `if let Some(final_check_hint)` emission.
+    if let Some(final_check_hint) = final_check_hint {
+        let mut col = logup.new_col();
+        for vec_row in 0..n_vec_rows {
+            let sig = base[PREPARED_TABLE_EC_COL_SIG_ID].data[vec_row];
+            let cert = base[PREPARED_TABLE_EC_COL_CERT_ID].data[vec_row];
+            let active = base[0].data[vec_row];
+            let double_r = base
+                [PREPARED_TABLE_EC_COL_KIND_FLAGS + PREPARED_TABLE_EC_KIND_DOUBLE_R]
+                .data[vec_row];
+            let gate = active * double_r;
+            let numerator = -PackedQM31::from(gate);
+            let denominator = final_check_hint.combine(&final_check_hint_packed_tuple(
+                base,
+                vec_row,
+                sig,
+                cert,
+                PREPARED_TABLE_EC_COL_LHS,
+            ));
+            col.write_frac(vec_row, numerator, denominator);
+        }
+        col.finalize_col();
+    }
+
     let (trace, total_claimed_sum) = logup.finalize_last();
 
     // Per-relation breakdown over storage rows (active rows only).
     let mut prepared_table_provider_claimed_sum = secure_zero();
     let mut cert_base_consumer_claimed_sum = secure_zero();
     let mut canonical_claimed_sum = secure_zero();
+    let mut final_check_hint_claimed_sum = secure_zero();
     for row in prepared_table_ec_storage_rows(base) {
         let active = row[0];
         if active == M31::from_u32_unchecked(0) {
@@ -1603,6 +1682,19 @@ pub(crate) fn gen_prepared_table_ec_row_pinned_interaction_trace(
         let values = prepared_table_ec_row_unpacked_relation_values(&row);
         let existing_denom: SecureField = relation.combine(&values);
         prepared_table_provider_claimed_sum += -SecureField::from(active) / existing_denom;
+        // FinalCheckHint yield (-1) on active DoubleR rows.
+        if let Some(final_check_hint) = final_check_hint {
+            let double_r = row[PREPARED_TABLE_EC_COL_KIND_FLAGS + PREPARED_TABLE_EC_KIND_DOUBLE_R];
+            if double_r != M31::from_u32_unchecked(0) {
+                let denom: SecureField = final_check_hint.combine(&final_check_hint_unpacked_tuple(
+                    &row,
+                    sig,
+                    cert,
+                    PREPARED_TABLE_EC_COL_LHS,
+                ));
+                final_check_hint_claimed_sum += -SecureField::from(active * double_r) / denom;
+            }
+        }
         for entry in PIN_SCHEDULE {
             let mut gate = M31::from_u32_unchecked(1);
             for &k in entry.kinds {
@@ -1647,8 +1739,42 @@ pub(crate) fn gen_prepared_table_ec_row_pinned_interaction_trace(
             prepared_table_provider_claimed_sum,
             cert_base_consumer_claimed_sum,
             canonical_claimed_sum,
+            final_check_hint_claimed_sum,
         },
     )
+}
+
+fn final_check_hint_packed_tuple(
+    base: &[M31ColumnEval],
+    vec_row: usize,
+    sig: PackedM31,
+    cert: PackedM31,
+    point_offset: usize,
+) -> [PackedM31; FINAL_CHECK_HINT_RELATION_ARITY] {
+    core::array::from_fn(|index| match index {
+        0 => sig,
+        1 => cert,
+        2..=21 => base[point_offset + (index - 2)].data[vec_row],
+        22..=41 => base[point_offset + N_LIMBS + (index - 22)].data[vec_row],
+        42 => base[point_offset + 2 * N_LIMBS].data[vec_row],
+        _ => unreachable!("final check hint tuple index in range"),
+    })
+}
+
+fn final_check_hint_unpacked_tuple(
+    row: &[M31],
+    sig: M31,
+    cert: M31,
+    point_offset: usize,
+) -> [M31; FINAL_CHECK_HINT_RELATION_ARITY] {
+    core::array::from_fn(|index| match index {
+        0 => sig,
+        1 => cert,
+        2..=21 => row[point_offset + (index - 2)],
+        22..=41 => row[point_offset + N_LIMBS + (index - 22)],
+        42 => row[point_offset + 2 * N_LIMBS],
+        _ => unreachable!("final check hint tuple index in range"),
+    })
 }
 
 fn cert_base_packed_tuple(
@@ -3409,6 +3535,7 @@ mod tests {
             &prepared_table,
             &cert_base,
             &canonical,
+            None,
         );
 
         (

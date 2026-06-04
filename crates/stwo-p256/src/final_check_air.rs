@@ -112,6 +112,8 @@ pub struct FinalCheckAirInteractionClaim {
     pub range13_consumer_claimed_sum: SecureField,
     pub range9_consumer_claimed_sum: SecureField,
     pub signed_carry_consumer_claimed_sum: SecureField,
+    /// FinalAddOutput consumer sum (use, `+active`) binding `r_x`.
+    pub final_add_output_consumer_claimed_sum: SecureField,
 }
 
 impl FinalCheckAirInteractionClaim {
@@ -122,6 +124,7 @@ impl FinalCheckAirInteractionClaim {
             range13_consumer_claimed_sum: secure_zero(),
             range9_consumer_claimed_sum: secure_zero(),
             signed_carry_consumer_claimed_sum: secure_zero(),
+            final_add_output_consumer_claimed_sum: secure_zero(),
         }
     }
 
@@ -140,6 +143,8 @@ pub struct FinalCheckAirRelations<'a> {
     pub range13: &'a RangeCheckRelation,
     pub range9: &'a RangeCheckRelation,
     pub signed_carry: &'a RangeCheckRelation,
+    /// Binds `r_x` to the proven `x(u1·G + u2·Q)` forwarded by `final_add_air`.
+    pub final_add_output: &'a crate::final_add_air::FinalAddOutputRelation,
 }
 
 impl FinalCheckAirComponents {
@@ -158,6 +163,7 @@ impl FinalCheckAirComponents {
                     range13: relations.range13.clone(),
                     range9: relations.range9.clone(),
                     signed_carry: relations.signed_carry.clone(),
+                    final_add_output: relations.final_add_output.clone(),
                 },
                 interaction_claim.claimed_sum,
             ),
@@ -188,6 +194,7 @@ pub struct FinalCheckAirEval {
     pub range13: RangeCheckRelation,
     pub range9: RangeCheckRelation,
     pub signed_carry: RangeCheckRelation,
+    pub final_add_output: crate::final_add_air::FinalAddOutputRelation,
 }
 
 impl FrameworkEval for FinalCheckAirEval {
@@ -231,6 +238,7 @@ impl FrameworkEval for FinalCheckAirEval {
         //   - r_check < n (canonical-LT helper)
         // All gated by `active`. Padding rows must still carry valid
         // canonical-LT witnesses (handled by trace gen).
+        let r_x_limbs: [E::F; N_LIMBS] = core::array::from_fn(|i| r_x.limbs()[i].clone());
         let reduction_columns = DigestReductionColumns {
             z: r_x,
             z_red: r_check.clone(),
@@ -254,12 +262,24 @@ impl FrameworkEval for FinalCheckAirEval {
         let r_check = reduction_columns.z_red;
 
         let mut values = Vec::with_capacity(ECDSA_RESULT_RELATION_ARITY);
-        values.push(sig_id);
+        values.push(sig_id.clone());
         values.extend(r_check.limbs().iter().cloned());
         eval.add_to_relation(RelationEntry::new(
             &self.result_relation,
-            E::EF::from(active),
+            E::EF::from(active.clone()),
             &values,
+        ));
+
+        // Bind `r_x` to the proven `x(u1·G + u2·Q)`: consume (use, `+active`)
+        // the `FinalAddOutputRelation` tuple `(sig_id, r_x)` provided by
+        // `final_add_air`. LogUp balance forces `r_x == x(R_1 + R_2)`.
+        let mut output_values = Vec::with_capacity(1 + N_LIMBS);
+        output_values.push(sig_id);
+        output_values.extend(r_x_limbs.iter().cloned());
+        eval.add_to_relation(RelationEntry::new(
+            &self.final_add_output,
+            E::EF::from(active),
+            &output_values,
         ));
         eval.finalize_logup();
         eval
@@ -426,6 +446,19 @@ pub(crate) fn gen_final_check_air_interaction_trace(
     }
     col.finalize_col();
 
+    // FinalAddOutput relation: consumer emits (active / combine(sig_id, r_x)).
+    let mut col = logup.new_col();
+    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+        col.write_frac(
+            vec_row,
+            PackedQM31::from(base[active_col].data[vec_row]),
+            relations
+                .final_add_output
+                .combine(&final_add_output_packed_values_from_base(base, vec_row)),
+        );
+    }
+    col.finalize_col();
+
     let (trace, claimed_sum) = logup.finalize_last();
 
     // Per-relation consumer claimed sums (used to verify per-relation balance).
@@ -449,6 +482,13 @@ pub(crate) fn gen_final_check_air_interaction_trace(
             .into_iter()
             .map(encode_signed_carry),
     );
+    let final_add_output_consumer_claimed_sum: SecureField = active_rows(base)
+        .map(|row| -> SecureField {
+            let denominator: SecureField =
+                relations.final_add_output.combine(&final_add_output_values_from_base(&row));
+            SecureField::from(row[0]) / denominator
+        })
+        .sum();
 
     (
         trace,
@@ -458,8 +498,33 @@ pub(crate) fn gen_final_check_air_interaction_trace(
             range13_consumer_claimed_sum,
             range9_consumer_claimed_sum,
             signed_carry_consumer_claimed_sum,
+            final_add_output_consumer_claimed_sum,
         },
     )
+}
+
+/// FinalAddOutput tuple `(sig_id, r_x[N_LIMBS])` packed values from base columns.
+fn final_add_output_packed_values_from_base(
+    base: &[M31ColumnEval],
+    vec_row: usize,
+) -> [PackedM31; 1 + N_LIMBS] {
+    core::array::from_fn(|index| {
+        if index == 0 {
+            base[1].data[vec_row]
+        } else {
+            base[r_x_offset() + (index - 1)].data[vec_row]
+        }
+    })
+}
+
+fn final_add_output_values_from_base(row: &[M31]) -> [M31; 1 + N_LIMBS] {
+    core::array::from_fn(|index| {
+        if index == 0 {
+            row[1]
+        } else {
+            row[r_x_offset() + (index - 1)]
+        }
+    })
 }
 
 fn append_range_column(

@@ -58,6 +58,7 @@ pub mod fake_glv_prepared_point_source {
     pub use crate::scalar::fake_glv_prepared_point_source::*;
 }
 
+pub mod final_add_air;
 pub mod final_check;
 pub mod final_check_air;
 pub mod fake_glv_scalar {

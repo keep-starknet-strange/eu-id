@@ -81,12 +81,18 @@ use crate::fake_glv_prepared_point_source::{
     FakeGlvPreparedPointSourceInteractionClaim, FakeGlvPreparedPointSourceProof,
     FakeGlvPreparedPointSourceProofClaim,
 };
+use crate::final_add_air::{
+    final_add_preprocessed_columns, gen_final_add_base_trace, gen_final_add_interaction_trace,
+    FinalAddClaim, FinalAddComponents, FinalAddError, FinalAddInteractionClaim,
+    FinalAddMulResultRelation, FinalAddOutputRelation, FinalAddProofClaim, FinalAddRelations,
+};
 use crate::final_check::{FinalEcdsaCheckClaim, FinalEcdsaCheckError};
 use crate::final_check_air::{
     ecdsa_result_provider_claimed_sum, gen_final_check_air_base_trace,
     gen_final_check_air_interaction_trace, EcdsaResultRelation, FinalCheckAirComponents,
     FinalCheckAirInteractionClaim, FinalCheckAirProofClaim, FinalCheckAirRelations,
 };
+use crate::prepared_table::FinalCheckHintRelation;
 use crate::prepared_point::{
     prepared_point_provider_claimed_sum, prepared_point_range7_consumer_claimed_sum,
     PreparedPointAudit, PreparedPointError, PreparedPointRelation, PreparedPointTraceClaim,
@@ -201,6 +207,8 @@ pub struct P256ProofClaim {
     pub projective_ec_trace: ProjectiveEcTraceClaim,
     pub projective_rcb_air_trace: ProjectiveRcbAirTraceClaim,
     pub final_check: FinalEcdsaCheckClaim,
+    /// In-AIR EC addition `S = R_1 + R_2` binding `r_x = x(S)`. Single signature.
+    pub final_add: FinalAddClaim,
     pub prepared_use_counts: PreparedPointUseCountClaim,
     pub prepared_trace: PreparedPointTraceClaim,
 }
@@ -245,6 +253,7 @@ impl P256ProofClaim {
             &fake_glv_scalars,
             &fake_glv_chain,
         )?;
+        let final_add = final_add_claim_from_final_check(&final_check)?;
         let prepared_use_counts =
             PreparedPointUseCountClaim::from_selector_claim(&fake_glv_selectors)?;
         let prepared_trace = prepared_table.prepared_point_trace(&prepared_use_counts)?;
@@ -264,6 +273,7 @@ impl P256ProofClaim {
             projective_ec_trace,
             projective_rcb_air_trace,
             final_check,
+            final_add,
             prepared_use_counts,
             prepared_trace,
         })
@@ -348,6 +358,7 @@ impl P256ProofClaim {
             projective_ec_trace,
             projective_rcb_air_trace,
             final_check: base.final_check,
+            final_add: base.final_add,
             prepared_use_counts: base.prepared_use_counts,
             prepared_trace,
         })
@@ -658,6 +669,7 @@ pub struct P256CurrentAirProofClaim {
     pub final_check: FinalCheckAirProofClaim,
     pub public_key_on_curve: PublicKeyCurveSliceProofClaim,
     pub projective_rcb_air: ProjectiveRcbAirProofClaim,
+    pub final_add: FinalAddProofClaim,
 }
 
 impl P256CurrentAirProofClaim {
@@ -720,6 +732,7 @@ impl P256CurrentAirProofClaim {
             projective_rcb_air: ProjectiveRcbAirProofClaim::from_trace(
                 &claim.projective_rcb_air_trace,
             ),
+            final_add: FinalAddProofClaim::from_claim(&claim.final_add),
         }
     }
 
@@ -746,6 +759,7 @@ impl P256CurrentAirProofClaim {
         self.final_check.mix_into(channel);
         self.public_key_on_curve.mix_into(channel);
         self.projective_rcb_air.mix_into(channel);
+        self.final_add.mix_into(channel);
     }
 
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
@@ -808,6 +822,7 @@ impl P256CurrentAirProofClaim {
             self.public_key_on_curve.preprocessed_column_ids(),
         );
         append_unique_preprocessed_ids(&mut ids, self.projective_rcb_air.preprocessed_column_ids());
+        append_unique_preprocessed_ids(&mut ids, self.final_add.preprocessed_column_ids());
         ids
     }
 
@@ -887,6 +902,7 @@ pub struct P256CurrentAirInteractionClaim {
     pub ecdsa_result_provider_claimed_sum: SecureField,
     pub public_key_on_curve: PublicKeyCurveSliceInteractionClaim,
     pub projective_rcb_air: ProjectiveRcbAirProofInteractionClaim,
+    pub final_add: FinalAddInteractionClaim,
 }
 
 impl P256CurrentAirInteractionClaim {
@@ -919,6 +935,7 @@ impl P256CurrentAirInteractionClaim {
             ecdsa_result_provider_claimed_sum: zero(),
             public_key_on_curve: PublicKeyCurveSliceInteractionClaim::zero_claim(),
             projective_rcb_air: ProjectiveRcbAirProofInteractionClaim::zero(),
+            final_add: FinalAddInteractionClaim::zero(),
         }
     }
 
@@ -963,6 +980,7 @@ impl P256CurrentAirInteractionClaim {
         channel.mix_felts(&[self.ecdsa_result_provider_claimed_sum]);
         self.public_key_on_curve.mix_into_monolithic(channel);
         self.projective_rcb_air.mix_into(channel);
+        self.final_add.mix_into(channel);
     }
 
     fn verify_balanced(&self) -> Result<(), P256ProofError> {
@@ -1021,7 +1039,8 @@ impl P256CurrentAirInteractionClaim {
             pinned.total_claimed_sum
                 - pinned.prepared_table_provider_claimed_sum
                 - pinned.cert_base_consumer_claimed_sum
-                - pinned.canonical_claimed_sum,
+                - pinned.canonical_claimed_sum
+                - pinned.final_check_hint_claimed_sum,
         )?;
         // PreparedTableEcRowRelation: EC-row provider (existing yield) balances
         // the projective-source consumer.
@@ -1092,6 +1111,27 @@ impl P256CurrentAirInteractionClaim {
         verify_current_air_relation_zero(
             "ProjectiveRcbAirProofSlice",
             self.projective_rcb_air.total(),
+        )?;
+        // FinalCheckHint: prepared-table yields `R_i` (active DoubleR rows);
+        // final-add consumes `R_1`, `R_2`. Per-cert-keyed balance forces the
+        // consumed points to equal the pinned hints (and `r_i_inf` to track
+        // cert activity).
+        verify_current_air_relation_zero(
+            "FinalCheckHint",
+            self.prepared_table_pinned.final_check_hint_claimed_sum
+                + self.final_add.hint_consumer_claimed_sum,
+        )?;
+        // FinalAdd sub-graph internals (mul engine + FinalAddMulResult + own
+        // range13/signed-carry providers) net to zero; the boundary-crossing
+        // FinalCheckHint consume and FinalAddOutput provide are excluded.
+        verify_current_air_relation_zero("FinalAddInternal", self.final_add.internal_total())?;
+        // FinalAddOutput: final-add yields the proven `(sig_id, x3)`; the final
+        // check consumes it as `r_x`. Balance forces `r_x == x(R_1 + R_2) =
+        // x(u1·G + u2·Q)`.
+        verify_current_air_relation_zero(
+            "FinalAddOutput",
+            self.final_add.output_provider_claimed_sum
+                + self.final_check.final_add_output_consumer_claimed_sum,
         )
     }
 }
@@ -1119,11 +1159,18 @@ struct P256CurrentAirRelations {
     prepared_point_source: PreparedPointRelation,
     range7: RangeCheckRelation,
     ecdsa_result: EcdsaResultRelation,
+    /// Forwards the pinned signed hint `R_i` from the prepared table to the
+    /// final-add sub-graph (provider: prepared-table `DoubleR` row; consumer:
+    /// `FinalAddCheckEval`).
+    final_check_hint: FinalCheckHintRelation,
     /// Public-key sub-graph relations. Its `point` field is the shared
     /// `(sig_id, pub_x, pub_y)` binding relation, also held by
     /// `scalar_setup.public_key_point` (the provider).
     public_key_on_curve: PublicKeyCurveSliceRelations,
     projective_rcb_air: ProjectiveRcbMulComponentRelations,
+    /// Final EC-addition sub-graph relations (mul engine + result + output).
+    /// `hint` is the same `final_check_hint` relation as above.
+    final_add: FinalAddRelations,
 }
 
 impl P256CurrentAirRelations {
@@ -1162,8 +1209,15 @@ impl P256CurrentAirRelations {
             prepared_point_source: PreparedPointRelation::dummy(),
             range7: RangeCheckRelation::dummy(),
             ecdsa_result: EcdsaResultRelation::dummy(),
+            final_check_hint: FinalCheckHintRelation::dummy(),
             public_key_on_curve: PublicKeyCurveSliceRelations::dummy_with_point(public_key_point),
             projective_rcb_air: ProjectiveRcbMulComponentRelations::dummy(),
+            final_add: FinalAddRelations {
+                mul: ProjectiveRcbMulComponentRelations::dummy(),
+                result: FinalAddMulResultRelation::dummy(),
+                hint: FinalCheckHintRelation::dummy(),
+                output: FinalAddOutputRelation::dummy(),
+            },
         }
     }
 
@@ -1183,6 +1237,7 @@ impl P256CurrentAirRelations {
             signed_carry: RangeCheckRelation::draw(channel),
             public_key_point: public_key_point.clone(),
         };
+        let final_check_hint = FinalCheckHintRelation::draw(channel);
         Self {
             public_inputs,
             scalar_setup_output,
@@ -1202,11 +1257,19 @@ impl P256CurrentAirRelations {
             prepared_point_source: PreparedPointRelation::draw(channel),
             range7: RangeCheckRelation::draw(channel),
             ecdsa_result: EcdsaResultRelation::draw(channel),
+            final_check_hint: final_check_hint.clone(),
             public_key_on_curve: PublicKeyCurveSliceRelations::draw_with_point(
                 channel,
                 public_key_point,
             ),
             projective_rcb_air: ProjectiveRcbMulComponentRelations::draw(channel),
+            final_add: FinalAddRelations {
+                mul: ProjectiveRcbMulComponentRelations::draw(channel),
+                result: FinalAddMulResultRelation::draw(channel),
+                // Shared with the prepared-table provider above.
+                hint: final_check_hint,
+                output: FinalAddOutputRelation::draw(channel),
+            },
         }
     }
 }
@@ -1230,6 +1293,7 @@ struct P256CurrentAirComponents {
     final_check: FinalCheckAirComponents,
     public_key_on_curve: PublicKeyCurveSliceComponents,
     projective_rcb_air: ProjectiveRcbAirComponents,
+    final_add: FinalAddComponents,
 }
 
 impl P256CurrentAirComponents {
@@ -1295,6 +1359,7 @@ impl P256CurrentAirComponents {
                 &PreparedTablePinningRelations {
                     cert_base: relations.cert_base.clone(),
                     canonical: relations.prepared_table_canonical.clone(),
+                    final_check_hint: Some(relations.final_check_hint.clone()),
                 },
             ),
             fake_glv_projective_source: FakeGlvProjectiveSourceComponents::new(
@@ -1367,6 +1432,7 @@ impl P256CurrentAirComponents {
                     range13: &relations.scalar_setup.range13,
                     range9: &relations.scalar_setup.range9,
                     signed_carry: &relations.scalar_setup.signed_carry,
+                    final_add_output: &relations.final_add.output,
                 },
             ),
             public_key_on_curve: PublicKeyCurveSliceComponents::new(
@@ -1381,6 +1447,12 @@ impl P256CurrentAirComponents {
                 claim.projective_rcb_air.log_sizes,
                 &interaction_claim.projective_rcb_air,
                 &relations.projective_rcb_air,
+            ),
+            final_add: FinalAddComponents::new(
+                allocator,
+                claim.final_add.log_sizes(),
+                &interaction_claim.final_add,
+                &relations.final_add,
             ),
         }
     }
@@ -1413,6 +1485,7 @@ impl P256CurrentAirComponents {
         components.extend(self.final_check.components());
         components.extend(self.public_key_on_curve.components());
         components.extend(self.projective_rcb_air.components());
+        components.extend(self.final_add.components());
         components
     }
 
@@ -1447,6 +1520,7 @@ impl P256CurrentAirComponents {
         components.extend(self.final_check.component_provers());
         components.extend(self.public_key_on_curve.component_provers());
         components.extend(self.projective_rcb_air.component_provers());
+        components.extend(self.final_add.component_provers());
         components
     }
 
@@ -1875,6 +1949,12 @@ impl P256ProofDraft {
             .gen_proof_slice_preprocessed_trace(&local_ids)?;
         append_unique_preprocessed_columns(&mut ids, &mut columns, local_ids, local_columns);
 
+        // Final EC-addition sub-graph preprocessed columns (FINAL_ADD-namespaced
+        // schedule + shared range13 / signed-carry value+active columns).
+        let final_add_pairs = final_add_preprocessed_columns(&self.claim.final_add)?;
+        let (local_ids, local_columns): (Vec<_>, Vec<_>) = final_add_pairs.into_iter().unzip();
+        append_unique_preprocessed_columns(&mut ids, &mut columns, local_ids, local_columns);
+
         Ok(global_ids
             .iter()
             .map(|global_id| {
@@ -2021,6 +2101,8 @@ impl P256ProofDraft {
             .claim
             .projective_rcb_air_trace
             .gen_proof_slice_base_trace()?;
+        let final_add =
+            gen_final_add_base_trace(&self.claim.final_add, claim.final_add.log_sizes())?;
 
         let mut columns = Vec::new();
         columns.extend(scalar_setup.clone());
@@ -2051,6 +2133,7 @@ impl P256ProofDraft {
         columns.extend(final_check.clone());
         columns.extend(public_key_on_curve.clone());
         columns.extend(projective_rcb_air.clone());
+        columns.extend(final_add);
 
         Ok(P256CurrentAirBaseTrace {
             columns,
@@ -2139,6 +2222,7 @@ impl P256ProofDraft {
                 &relations.prepared_table,
                 &relations.cert_base,
                 &relations.prepared_table_canonical,
+                Some(&relations.final_check_hint),
             );
         let (prepared_consumer_interaction, prepared_consumer_claim) =
             gen_prepared_table_projective_source_interaction_trace(
@@ -2234,6 +2318,7 @@ impl P256ProofDraft {
                 range13: &relations.scalar_setup.range13,
                 range9: &relations.scalar_setup.range9,
                 signed_carry: &relations.scalar_setup.signed_carry,
+                final_add_output: &relations.final_add.output,
             },
         );
         let ecdsa_result_provider_claimed_sum = ecdsa_result_provider_claimed_sum(
@@ -2250,6 +2335,11 @@ impl P256ProofDraft {
             .claim
             .projective_rcb_air_trace
             .gen_proof_slice_interaction_trace(&relations.projective_rcb_air)?;
+        let (final_add_interaction, final_add_claim) = gen_final_add_interaction_trace(
+            &self.claim.final_add,
+            &relations.final_add,
+            FinalAddProofClaim::from_claim(&self.claim.final_add).log_sizes(),
+        )?;
 
         let mut columns = Vec::new();
         columns.extend(scalar_setup_interaction);
@@ -2278,6 +2368,7 @@ impl P256ProofDraft {
         columns.extend(final_check_interaction);
         columns.extend(public_key_on_curve_interaction);
         columns.extend(projective_interaction);
+        columns.extend(final_add_interaction);
 
         Ok((
             columns,
@@ -2329,6 +2420,7 @@ impl P256ProofDraft {
                 ecdsa_result_provider_claimed_sum,
                 public_key_on_curve: public_key_on_curve_claim,
                 projective_rcb_air: projective_claim,
+                final_add: final_add_claim,
             },
         ))
     }
@@ -2427,6 +2519,41 @@ fn public_key_on_curve_slice_claim(
 ) -> Result<PublicKeyCurveSliceClaim, P256ProofError> {
     PublicKeyCurveSliceClaim::from_public_key_claim(&claim.public_key_check)
         .map_err(P256ProofError::from)
+}
+
+/// Build the final-add claim `S = R_1 + R_2` from the (single-signature)
+/// `FinalEcdsaCheckClaim`. The pinned hint `R_i = -h_i` for active certs
+/// (`s2_sign_bit == 1` forced in-AIR by `fake_glv_scalar`); for the inactive
+/// (zero-`u1`) branch `h_i = ∞`, so `R_i = ∞`. Negating the x-coordinate is a
+/// no-op for the binding, since `r_x = x(R_1 + R_2) = x(h_1 + h_2) = x(R)`.
+fn final_add_claim_from_final_check(
+    final_check: &FinalEcdsaCheckClaim,
+) -> Result<FinalAddClaim, P256ProofError> {
+    let row = final_check
+        .rows
+        .first()
+        .ok_or(P256ProofError::FinalAdd(FinalAddError::MulTraceShape))?;
+    let (r1, r1_inf) = negate_prepared(&row.h1);
+    let (r2, r2_inf) = negate_prepared(&row.h2);
+    FinalAddClaim::from_hints(row.sig_id, &r1, r1_inf, &r2, r2_inf).map_err(P256ProofError::FinalAdd)
+}
+
+/// `(-point, is_infinity)`: `(x, p - y)` for a finite point, or a dummy point
+/// flagged infinity.
+fn negate_prepared(
+    point: &crate::prepared_table::PreparedAffinePoint,
+) -> (crate::types::AffinePoint, bool) {
+    use crate::types::{AffinePoint, U256};
+    match point.to_option() {
+        Some(p) => {
+            let modulus = U256::from_le_u64s(&crate::constants::P256_MODULUS);
+            let neg_y = crate::field_ops::sub_mod_witness(&modulus, &p.y, &modulus)
+                .result
+                .to_u256();
+            (AffinePoint { x: p.x, y: neg_y }, false)
+        }
+        None => (AffinePoint { x: U256::ZERO, y: U256::ZERO }, true),
+    }
 }
 
 pub fn verify_current_air_monolithic<MC>(
@@ -2616,8 +2743,8 @@ pub const P256_PROOF_COMPONENT_SLOTS: &[P256ProofComponentSlot] = &[
     },
     P256ProofComponentSlot {
         name: "FinalEcdsaCheck",
-        status: P256ProofComponentStatus::Pending,
-        note: "Native final check links H1/H2, finite R = H1 + H2, and x(R) mod n = r. AIR now enforces the in-circuit one-subtraction reduction r_check = r_x mod n (Range13/Range9/SignedCarry-checked) and binds r_check to public r via EcdsaResultRelation; binding r_x to the fake-GLV chain final accumulator outputs is still pending.",
+        status: P256ProofComponentStatus::Implemented,
+        note: "r_x is now bound IN-AIR to x(u1·G + u2·Q). The prepared table forwards the canonically-pinned signed hint R_i (role-R) on FinalCheckHintRelation; the final-add sub-graph (final_add_air.rs) consumes R_1, R_2 and proves S = R_1 + R_2 in affine coordinates via the shared projective-RCB mod-p mul engine (lambda·dx ≡ dy, lambda² ≡ x3 + x1 + x2, dx·dx_inv ≡ 1 to reject x1 == x2), handling the zero-u1 infinity branch. Since R_i = -h_i (s2_sign_bit forced 1 for active certs), x(R_1 + R_2) = x(u1·G + u2·Q). x3 = S.x is forwarded on FinalAddOutputRelation and consumed by the final check as r_x; the existing one-subtraction reduction r_check = r_x mod n and EcdsaResultRelation then complete x(u1·G + u2·Q) mod n = r. The additive-inverse (R = ∞) and doubling (u1 = u2) cases are rejected by the witness builder.",
     },
     P256ProofComponentSlot {
         name: "StarkProveVerify",
@@ -2634,6 +2761,7 @@ pub enum P256ProofError {
     FakeGlvScalar(FakeGlvScalarHintError),
     FakeGlvSelector(FakeGlvSelectorError),
     FinalEcdsaCheck(FinalEcdsaCheckError),
+    FinalAdd(FinalAddError),
     SelectorLookup(SelectorLookupError),
     PreparedPoint(PreparedPointError),
     PreparedTable(PreparedTableError),
@@ -2674,6 +2802,12 @@ impl From<FakeGlvScalarHintError> for P256ProofError {
 impl From<FakeGlvSelectorError> for P256ProofError {
     fn from(value: FakeGlvSelectorError) -> Self {
         Self::FakeGlvSelector(value)
+    }
+}
+
+impl From<FinalAddError> for P256ProofError {
+    fn from(value: FinalAddError) -> Self {
+        Self::FinalAdd(value)
     }
 }
 
@@ -3306,7 +3440,15 @@ mod tests {
             .prove_current_air_monolithic::<Blake2sMerkleChannel>()
             .expect_err("mutated cert base must reject in the monolithic AIR");
 
-        assert!(matches!(err, P256ProofError::ProofLayer(_)));
+        // Phase 2's prepared-table base pinning now catches a wrong cert base at
+        // the interaction-balance check: cert_bind yields the mutated base on
+        // CertBaseRelation while the prepared-table provider still consumes the
+        // bound G/Q, so the relation no longer balances (a stronger, earlier
+        // rejection than the previous PCS-layer ConstraintsNotSatisfied).
+        assert!(
+            matches!(err, P256ProofError::RelationImbalance { relation: "CertBase" }),
+            "expected CertBase imbalance, got {err:?}"
+        );
     }
 
     #[test]
@@ -3971,6 +4113,28 @@ mod tests {
             .expect("current AIR monolithic proof verifies");
     }
 
+    /// Full monolithic prove/verify on the DISTINCT-finite-points branch
+    /// `(u1, u2) = (7, 11)` (both `h1, h2` finite, `x1 != x2`). This exercises
+    /// the final-add chord-addition identities with `both_finite = 1` through
+    /// the full PCS/OODS composition (the primary gate uses the zero-`u1`
+    /// branch where `both_finite = 0`), confirming the witnessed
+    /// `dx_inv_result` LogUp tuple matches off-domain.
+    #[test]
+    fn current_p256_proof_pipeline_proves_and_verifies_monolithic_distinct_branch() {
+        let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+            valid_real_input_with_small_u_scalars(7, 11),
+        ])
+        .expect("distinct branch pipeline builds");
+        proof.verify_current_e2e().expect("distinct branch verifies");
+
+        let monolithic = proof
+            .prove_current_air_monolithic::<Blake2sMerkleChannel>()
+            .expect("distinct branch monolithic proof proves");
+
+        verify_current_air_monolithic::<Blake2sMerkleChannel>(monolithic)
+            .expect("distinct branch monolithic proof verifies");
+    }
+
     #[test]
     #[ignore = "prints and asserts current AIR constraints component by component"]
     fn current_p256_air_constraint_diagnostic() {
@@ -4223,6 +4387,122 @@ mod tests {
             carry = sum >> 64;
         }
         U256::from_le_u64s(&out)
+    }
+
+    /// Re-run the monolithic interaction-trace generation for `draft` and return
+    /// the per-relation balance result (`verify_balanced`). This is the in-AIR
+    /// rejection oracle (lessons.md #18): the prover-side LogUp balance is the
+    /// soundness gate the verifier ultimately enforces, so a tampered witness
+    /// that unbalances any relation is rejected here.
+    fn monolithic_balance_outcome(draft: &P256ProofDraft) -> Result<(), P256ProofError> {
+        let proof_claim = P256CurrentAirProofClaim::from_claim(&draft.claim);
+        let ids = proof_claim.preprocessed_column_ids();
+        let max_bound = proof_claim.max_constraint_log_degree_bound(&ids);
+        let config = p256_stark_monolithic_profile_config(max_bound);
+        let twiddles = SimdBackend::precompute_twiddles(
+            CanonicCoset::new(config.lifting_log_size.unwrap_or(
+                max_bound + config.fri_config.log_blowup_factor,
+            ))
+            .circle_domain()
+            .half_coset,
+        );
+        let mut channel = <Blake2sMerkleChannel as MerkleChannel>::C::default();
+        let mut commitment_scheme =
+            CommitmentSchemeProver::<SimdBackend, Blake2sMerkleChannel>::new(config, &twiddles);
+        let preprocessed = draft
+            .gen_current_air_preprocessed_trace(&proof_claim, &ids)
+            .expect("preprocessed trace");
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(preprocessed);
+        tree_builder.commit(&mut channel);
+        proof_claim.mix_into(&mut channel);
+        let mut base = draft.gen_current_air_base_trace(&proof_claim).expect("base trace");
+        let base_columns = std::mem::take(&mut base.columns);
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(base_columns);
+        tree_builder.commit(&mut channel);
+        let relations = P256CurrentAirRelations::draw(&mut channel);
+        let (_, interaction_claim) = draft
+            .gen_current_air_interaction_trace(&base, &relations)
+            .expect("interaction trace");
+        interaction_claim.verify_balanced()
+    }
+
+    /// Build a valid single-signature draft for the in-AIR adversarial tests.
+    fn valid_draft_for_balance(u1: u64, u2: u64) -> P256ProofDraft {
+        let relations = P256ProofRelations::dummy();
+        let claim = P256ProofClaim::from_inputs_with_trivial_fake_glv_hints(&[
+            valid_real_input_with_small_u_scalars(u1, u2),
+        ])
+        .expect("valid claim");
+        let interaction_claim = P256ProofInteractionClaim::from_claim(&claim, &relations);
+        P256ProofDraft {
+            inputs: vec![valid_real_input_with_small_u_scalars(u1, u2)],
+            claim,
+            relations,
+            interaction_claim,
+        }
+    }
+
+    fn bump_limb0(value: &crate::limbs::P256M31BigInt) -> crate::limbs::P256M31BigInt {
+        let mut limbs = *value.limbs();
+        limbs[0] = limbs[0] + M31::from_u32_unchecked(1);
+        crate::limbs::P256M31BigInt::from_limbs(limbs)
+    }
+
+    /// IN-AIR oracle: mutating the proven final-add output `x3` (= `R_final.x`)
+    /// away from the value the final check consumes as `r_x` unbalances the
+    /// `FinalAddOutput` relation, so `verify_balanced` rejects.
+    #[test]
+    fn monolithic_rejects_mutated_final_add_x3() {
+        let mut draft = valid_draft_for_balance(7, 11);
+        monolithic_balance_outcome(&draft).expect("honest draft balances");
+        draft.claim.final_add.x3 = bump_limb0(&draft.claim.final_add.x3);
+        let err = monolithic_balance_outcome(&draft).expect_err("mutated x3 must reject");
+        assert!(
+            matches!(err, P256ProofError::RelationImbalance { relation: "FinalAddOutput" }),
+            "expected FinalAddOutput imbalance, got {err:?}"
+        );
+    }
+
+    /// IN-AIR oracle: mutating a consumed hint point `R_1` unbalances the
+    /// `FinalCheckHint` relation (the prepared table still yields the true,
+    /// pinned `R_1`), so `verify_balanced` rejects.
+    #[test]
+    fn monolithic_rejects_mutated_consumed_hint() {
+        let mut draft = valid_draft_for_balance(7, 11);
+        monolithic_balance_outcome(&draft).expect("honest draft balances");
+        let new_x = bump_limb0(&draft.claim.final_add.r1.x);
+        draft.claim.final_add.r1.x = new_x;
+        let err = monolithic_balance_outcome(&draft).expect_err("mutated R_1 must reject");
+        assert!(
+            matches!(err, P256ProofError::RelationImbalance { relation: "FinalCheckHint" }),
+            "expected FinalCheckHint imbalance, got {err:?}"
+        );
+    }
+
+    /// IN-AIR oracle: mutating the public signature `r` unbalances the public
+    /// relations binding `r`. The public `r` is provided on BOTH
+    /// `PublicEcdsaInstance` (the full instance tuple) and `EcdsaResult` (the
+    /// write-back the final check consumes as `r_check = r_x mod n`). Either
+    /// imbalance proves the public `r` is bound to the proven computation;
+    /// `verify_balanced` reports whichever it checks first.
+    #[test]
+    fn monolithic_rejects_mutated_public_r() {
+        let mut draft = valid_draft_for_balance(7, 11);
+        monolithic_balance_outcome(&draft).expect("honest draft balances");
+        draft.claim.public_inputs.instances[0].r =
+            bump_limb0(&draft.claim.public_inputs.instances[0].r);
+        let err = monolithic_balance_outcome(&draft).expect_err("mutated public r must reject");
+        assert!(
+            matches!(
+                err,
+                P256ProofError::RelationImbalance {
+                    relation: "EcdsaResult" | "PublicEcdsaInstance"
+                }
+            ),
+            "expected EcdsaResult/PublicEcdsaInstance imbalance, got {err:?}"
+        );
     }
 
     #[test]
@@ -5459,7 +5739,10 @@ mod tests {
         assert!(implemented.contains(&"FakeGlvEcChainRows"));
         assert!(implemented.contains(&"ProjectiveRcbEcTrace"));
         assert!(implemented.contains(&"ProjectiveRcbAirRows"));
-        assert!(pending.contains(&"FinalEcdsaCheck"));
+        // FinalEcdsaCheck is now AIR-proven: `r_x` is bound in-AIR to
+        // x(u1·G + u2·Q) via the FinalCheckHint forward + final-add sub-graph.
+        assert!(implemented.contains(&"FinalEcdsaCheck"));
+        assert!(!pending.contains(&"FinalEcdsaCheck"));
         assert!(implemented.contains(&"StarkProveVerify"));
         assert!(!pending.contains(&"PreparedTableEcRows"));
         assert!(!pending.contains(&"FakeGlvScalarHint"));

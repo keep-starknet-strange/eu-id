@@ -132,6 +132,11 @@ pub const PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC: &str = "";
 /// projective ones so the two mul traces can coexist in one proof.
 pub const PROJECTIVE_RCB_SCHEDULE_NAMESPACE_PUBLIC_KEY: &str = "public_key_";
 
+/// Schedule-column id namespace for the final EC-addition mul trace
+/// (`final_add_air.rs`). Distinct prefix so its schedule preprocessed columns
+/// coexist with the EC and public-key mul traces in one proof.
+pub const PROJECTIVE_RCB_SCHEDULE_NAMESPACE_FINAL_ADD: &str = "final_add_";
+
 pub struct ProjectiveRcbRawProductChunkScheduleColumnIds;
 
 impl ProjectiveRcbRawProductChunkScheduleColumnIds {
