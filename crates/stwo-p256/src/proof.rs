@@ -983,156 +983,244 @@ impl P256CurrentAirInteractionClaim {
         self.final_add.mix_into(channel);
     }
 
-    fn verify_balanced(&self) -> Result<(), P256ProofError> {
-        self.public_inputs.verify("PublicEcdsaInstance")?;
-        verify_current_air_relation_zero(
-            "ScalarSetupOutput",
-            self.scalar_setup.output_provider_claimed_sum
-                + self.cert_scalar_inputs.scalar_setup_consumer_claimed_sum,
-        )?;
-        verify_current_air_relation_zero(
-            "CertScalarInput",
-            self.cert_scalar_inputs.cert_provider_claimed_sum
-                + self.fake_glv_scalar_air.cert_consumer_claimed_sum,
-        )?;
-        verify_current_air_relation_zero(
-            "FakeGlvScalar",
-            self.fake_glv_scalar_air.scalar_provider_claimed_sum
-                + self.fake_glv_selector_air.scalar_consumer_claimed_sum,
-        )?;
-        verify_current_air_relation_zero(
-            "ScalarSetupRange13",
-            self.scalar_setup.range13_consumer_claimed_sum
-                + self.scalar_setup.range13_provider.claimed_sum
-                + self.final_check.range13_consumer_claimed_sum,
-        )?;
-        verify_current_air_relation_zero(
-            "ScalarSetupRange9",
-            self.scalar_setup.range9_consumer_claimed_sum
-                + self.scalar_setup.range9_provider.claimed_sum
-                + self.final_check.range9_consumer_claimed_sum,
-        )?;
-        verify_current_air_relation_zero(
-            "ScalarSetupSignedCarry",
-            self.scalar_setup.signed_carry_consumer_claimed_sum
-                + self.scalar_setup.signed_carry_provider.claimed_sum
-                + self.final_check.signed_carry_consumer_claimed_sum,
-        )?;
+    /// Single source of truth for every monolithic relation balance, as
+    /// `(name, claimed_sum)` pairs. A sound proof has every sum equal to zero.
+    /// Both [`Self::verify_balanced`] and [`Self::relation_audit`] derive from
+    /// this list, so a new relation must be added here exactly once.
+    ///
+    /// Notes on the non-1:1 entries:
+    /// - `PreparedTablePinned{Consistency,Breakdown}` bind the pinned EC-row
+    ///   provider's committed logup total to its declared sum and per-relation
+    ///   breakdown (so the breakdown is anchored to the PCS-verified total).
+    /// - `CertBase` / `PreparedTableCanonical` enforce the full table pinning.
+    /// - `EcdsaResult` / `PublicKeyPoint` / `FinalCheckHint` / `FinalAddOutput`
+    ///   are the boundary-crossing relations that link sub-graphs (see
+    ///   [`Self::liveness_witnesses`]).
+    fn relation_balances(&self) -> Vec<(&'static str, SecureField)> {
         let scalar_setup_mod_mul_total = self
             .scalar_setup_mod_muls
             .iter()
             .map(ScalarModMulProofSliceInteractionClaim::claimed_sum)
             .sum::<SecureField>()
             + self.scalar_setup.scalar_limb_consumer_claimed_sum;
-        verify_current_air_relation_zero("ScalarSetupModMul", scalar_setup_mod_mul_total)?;
-        // The pinned EC-row provider's committed logup total must equal the
-        // declared provider claimed sum and the sum of its per-relation
-        // breakdown, binding the breakdown to the PCS-verified total.
         let pinned = &self.prepared_table_pinned;
-        verify_current_air_relation_zero(
-            "PreparedTablePinnedConsistency",
-            pinned.total_claimed_sum
-                - self.prepared_table_projective_source.provider_claimed_sum,
-        )?;
-        verify_current_air_relation_zero(
-            "PreparedTablePinnedBreakdown",
-            pinned.total_claimed_sum
-                - pinned.prepared_table_provider_claimed_sum
-                - pinned.cert_base_consumer_claimed_sum
-                - pinned.canonical_claimed_sum
-                - pinned.final_check_hint_claimed_sum,
-        )?;
-        // PreparedTableEcRowRelation: EC-row provider (existing yield) balances
-        // the projective-source consumer.
-        verify_current_air_relation_zero(
-            "PreparedTableProjectiveSource",
-            pinned.prepared_table_provider_claimed_sum
-                + self.prepared_table_projective_source.consumer_claimed_sum,
-        )?;
-        // CertBaseRelation: cert-bind base provider (yield -m·cert_active)
-        // balances the prepared-table P-cell consumers.
-        verify_current_air_relation_zero(
-            "CertBase",
-            pinned.cert_base_consumer_claimed_sum
-                + self.cert_scalar_inputs.cert_base_provider_claimed_sum,
-        )?;
-        // PreparedTableCanonicalRelation: self-balancing within the EC-row
-        // provider (every canonical role yielded once, consumed N times).
-        verify_current_air_relation_zero("PreparedTableCanonical", pinned.canonical_claimed_sum)?;
-        verify_current_air_relation_zero(
-            "FakeGlvProjectiveSource",
-            self.fake_glv_projective_source.total(),
-        )?;
-        verify_current_air_relation_zero(
-            "FakeGlvChainExpansion",
-            self.fake_glv_chain_expansion.total(),
-        )?;
-        verify_current_air_relation_zero(
-            "FakeGlvChainContinuity",
-            self.fake_glv_chain_continuity.claimed_sum,
-        )?;
-        verify_current_air_relation_zero(
-            "FakeGlvDirectPreparedOperand",
-            self.fake_glv_direct_prepared_operand.total(),
-        )?;
-        verify_current_air_relation_zero(
-            "FakeGlvSignedSelectorOperand",
-            self.fake_glv_signed_selector_operand.total(),
-        )?;
-        verify_current_air_relation_zero(
-            "FakeGlvLsbCorrectionOperand",
-            self.fake_glv_lsb_correction_operand.total(),
-        )?;
-        verify_current_air_relation_zero(
-            "FakeGlvPreparedPointSource",
-            self.fake_glv_prepared_point_source.total(),
-        )?;
-        verify_current_air_relation_zero(
-            "Range7",
-            self.prepared_point_range7.claimed_sum
-                + self.fake_glv_prepared_point_source.range7_consumer_claimed_sum,
-        )?;
-        verify_current_air_relation_zero(
-            "EcdsaResult",
-            self.ecdsa_result_provider_claimed_sum
-                + self.final_check.result_consumer_claimed_sum,
-        )?;
-        // Binding: the scalar-setup component provides the `(sig_id, pub_x,
-        // pub_y)` tuple (yield, `-active`) from the public-input-bound public
-        // key; the public-key curve-check consumes it (use, `+active`). Every
-        // other relation in the public-key sub-graph is internal and nets to
-        // zero, so `public_key_on_curve.total()` equals the consumer sum and
-        // this balance forces the curve-checked `(x, y)` to equal the public
-        // key for the matching `sig_id`.
-        verify_current_air_relation_zero(
-            "PublicKeyPoint",
-            self.public_key_on_curve.total() + self.scalar_setup.point_provider_claimed_sum,
-        )?;
-        verify_current_air_relation_zero(
-            "ProjectiveRcbAirProofSlice",
-            self.projective_rcb_air.total(),
-        )?;
-        // FinalCheckHint: prepared-table yields `R_i` (active DoubleR rows);
-        // final-add consumes `R_1`, `R_2`. Per-cert-keyed balance forces the
-        // consumed points to equal the pinned hints (and `r_i_inf` to track
-        // cert activity).
-        verify_current_air_relation_zero(
-            "FinalCheckHint",
-            self.prepared_table_pinned.final_check_hint_claimed_sum
-                + self.final_add.hint_consumer_claimed_sum,
-        )?;
-        // FinalAdd sub-graph internals (mul engine + FinalAddMulResult + own
-        // range13/signed-carry providers) net to zero; the boundary-crossing
-        // FinalCheckHint consume and FinalAddOutput provide are excluded.
-        verify_current_air_relation_zero("FinalAddInternal", self.final_add.internal_total())?;
-        // FinalAddOutput: final-add yields the proven `(sig_id, x3)`; the final
-        // check consumes it as `r_x`. Balance forces `r_x == x(R_1 + R_2) =
-        // x(u1·G + u2·Q)`.
-        verify_current_air_relation_zero(
-            "FinalAddOutput",
-            self.final_add.output_provider_claimed_sum
-                + self.final_check.final_add_output_consumer_claimed_sum,
-        )
+        vec![
+            ("PublicEcdsaInstance", self.public_inputs.total()),
+            (
+                "ScalarSetupOutput",
+                self.scalar_setup.output_provider_claimed_sum
+                    + self.cert_scalar_inputs.scalar_setup_consumer_claimed_sum,
+            ),
+            (
+                "CertScalarInput",
+                self.cert_scalar_inputs.cert_provider_claimed_sum
+                    + self.fake_glv_scalar_air.cert_consumer_claimed_sum,
+            ),
+            (
+                "FakeGlvScalar",
+                self.fake_glv_scalar_air.scalar_provider_claimed_sum
+                    + self.fake_glv_selector_air.scalar_consumer_claimed_sum,
+            ),
+            (
+                "ScalarSetupRange13",
+                self.scalar_setup.range13_consumer_claimed_sum
+                    + self.scalar_setup.range13_provider.claimed_sum
+                    + self.final_check.range13_consumer_claimed_sum,
+            ),
+            (
+                "ScalarSetupRange9",
+                self.scalar_setup.range9_consumer_claimed_sum
+                    + self.scalar_setup.range9_provider.claimed_sum
+                    + self.final_check.range9_consumer_claimed_sum,
+            ),
+            (
+                "ScalarSetupSignedCarry",
+                self.scalar_setup.signed_carry_consumer_claimed_sum
+                    + self.scalar_setup.signed_carry_provider.claimed_sum
+                    + self.final_check.signed_carry_consumer_claimed_sum,
+            ),
+            ("ScalarSetupModMul", scalar_setup_mod_mul_total),
+            (
+                "PreparedTablePinnedConsistency",
+                pinned.total_claimed_sum
+                    - self.prepared_table_projective_source.provider_claimed_sum,
+            ),
+            (
+                "PreparedTablePinnedBreakdown",
+                pinned.total_claimed_sum
+                    - pinned.prepared_table_provider_claimed_sum
+                    - pinned.cert_base_consumer_claimed_sum
+                    - pinned.canonical_claimed_sum
+                    - pinned.final_check_hint_claimed_sum,
+            ),
+            (
+                "PreparedTableProjectiveSource",
+                pinned.prepared_table_provider_claimed_sum
+                    + self.prepared_table_projective_source.consumer_claimed_sum,
+            ),
+            (
+                "CertBase",
+                pinned.cert_base_consumer_claimed_sum
+                    + self.cert_scalar_inputs.cert_base_provider_claimed_sum,
+            ),
+            ("PreparedTableCanonical", pinned.canonical_claimed_sum),
+            (
+                "FakeGlvProjectiveSource",
+                self.fake_glv_projective_source.total(),
+            ),
+            ("FakeGlvChainExpansion", self.fake_glv_chain_expansion.total()),
+            (
+                "FakeGlvChainContinuity",
+                self.fake_glv_chain_continuity.claimed_sum,
+            ),
+            (
+                "FakeGlvDirectPreparedOperand",
+                self.fake_glv_direct_prepared_operand.total(),
+            ),
+            (
+                "FakeGlvSignedSelectorOperand",
+                self.fake_glv_signed_selector_operand.total(),
+            ),
+            (
+                "FakeGlvLsbCorrectionOperand",
+                self.fake_glv_lsb_correction_operand.total(),
+            ),
+            (
+                "FakeGlvPreparedPointSource",
+                self.fake_glv_prepared_point_source.total(),
+            ),
+            (
+                "Range7",
+                self.prepared_point_range7.claimed_sum
+                    + self.fake_glv_prepared_point_source.range7_consumer_claimed_sum,
+            ),
+            (
+                "EcdsaResult",
+                self.ecdsa_result_provider_claimed_sum
+                    + self.final_check.result_consumer_claimed_sum,
+            ),
+            (
+                "PublicKeyPoint",
+                self.public_key_on_curve.total() + self.scalar_setup.point_provider_claimed_sum,
+            ),
+            ("ProjectiveRcbAirProofSlice", self.projective_rcb_air.total()),
+            (
+                "FinalCheckHint",
+                self.prepared_table_pinned.final_check_hint_claimed_sum
+                    + self.final_add.hint_consumer_claimed_sum,
+            ),
+            ("FinalAddInternal", self.final_add.internal_total()),
+            (
+                "FinalAddOutput",
+                self.final_add.output_provider_claimed_sum
+                    + self.final_check.final_add_output_consumer_claimed_sum,
+            ),
+        ]
+    }
+
+    /// Per-relation provider/consumer activity witnesses for the boundary
+    /// relations that link otherwise-independent sub-graphs. For an active
+    /// proof each entry must be NONZERO — a zero means the link emitted nothing
+    /// (the sub-graphs are unconnected), which a balance check alone cannot see
+    /// because `0 + 0 == 0` is "balanced". Names mirror [`Self::relation_balances`].
+    #[cfg(test)]
+    fn liveness_witnesses(&self) -> Vec<(&'static str, SecureField)> {
+        vec![
+            ("EcdsaResult", self.final_check.result_consumer_claimed_sum),
+            ("PublicKeyPoint", self.scalar_setup.point_provider_claimed_sum),
+            (
+                "CertBase",
+                self.cert_scalar_inputs.cert_base_provider_claimed_sum,
+            ),
+            (
+                "FinalCheckHint",
+                self.prepared_table_pinned.final_check_hint_claimed_sum,
+            ),
+            (
+                "FinalAddOutput",
+                self.final_add.output_provider_claimed_sum,
+            ),
+        ]
+    }
+
+    /// Consolidated relation audit: every monolithic relation balance, plus the
+    /// liveness witnesses, in one structure that reports ALL problems at once.
+    /// A diagnostic/regression tool — the runtime `verify_balanced` path returns
+    /// the first imbalance directly.
+    #[cfg(test)]
+    pub(crate) fn relation_audit(&self) -> P256CurrentAirRelationAudit {
+        P256CurrentAirRelationAudit {
+            balances: self.relation_balances(),
+            liveness: self.liveness_witnesses(),
+        }
+    }
+
+    fn verify_balanced(&self) -> Result<(), P256ProofError> {
+        match self
+            .relation_balances()
+            .into_iter()
+            .find(|(_, sum)| *sum != zero())
+        {
+            None => Ok(()),
+            Some((relation, _)) => Err(P256ProofError::RelationImbalance { relation }),
+        }
+    }
+}
+
+/// Consolidated view of every monolithic relation balance plus the liveness
+/// witnesses for the boundary relations. A sound, fully-linked proof has
+/// `is_balanced()` true and `dead_links()` empty.
+///
+/// Unlike the first-imbalance error returned by `verify_balanced`, this reports
+/// ALL problems together — the relation-use accounting lesson borrowed from
+/// stwo-cairo. `dead_links` additionally catches the "internally consistent but
+/// not linked" case a pure balance check misses (`0 + 0 == 0` is "balanced").
+///
+/// Diagnostic/regression tool (`#[cfg(test)]`); the runtime `verify_balanced`
+/// returns the first imbalance directly from `relation_balances`.
+#[cfg(test)]
+pub(crate) struct P256CurrentAirRelationAudit {
+    balances: Vec<(&'static str, SecureField)>,
+    liveness: Vec<(&'static str, SecureField)>,
+}
+
+#[cfg(test)]
+impl P256CurrentAirRelationAudit {
+    /// Names of all relations whose claimed sum is nonzero (unbalanced).
+    pub(crate) fn imbalanced(&self) -> Vec<&'static str> {
+        self.balances
+            .iter()
+            .filter(|(_, sum)| *sum != zero())
+            .map(|(name, _)| *name)
+            .collect()
+    }
+
+    /// First unbalanced relation in declaration order (matches the historical
+    /// `verify_balanced` error), if any.
+    pub(crate) fn first_imbalance(&self) -> Option<&'static str> {
+        self.balances
+            .iter()
+            .find(|(_, sum)| *sum != zero())
+            .map(|(name, _)| *name)
+    }
+
+    pub(crate) fn is_balanced(&self) -> bool {
+        self.balances.iter().all(|(_, sum)| *sum == zero())
+    }
+
+    /// All relation names covered by the audit (the completeness surface).
+    pub(crate) fn relation_names(&self) -> Vec<&'static str> {
+        self.balances.iter().map(|(name, _)| *name).collect()
+    }
+
+    /// Boundary relations that emitted nothing (`sum == 0`). For an active proof
+    /// each indicates an unlinked sub-graph; empty for a healthy active proof.
+    pub(crate) fn dead_links(&self) -> Vec<&'static str> {
+        self.liveness
+            .iter()
+            .filter(|(_, sum)| *sum == zero())
+            .map(|(name, _)| *name)
+            .collect()
     }
 }
 
@@ -2633,17 +2721,6 @@ fn append_unique_preprocessed_columns(
             out_ids.push(id);
             out_columns.push(column);
         }
-    }
-}
-
-fn verify_current_air_relation_zero(
-    relation: &'static str,
-    total: SecureField,
-) -> Result<(), P256ProofError> {
-    if total == zero() {
-        Ok(())
-    } else {
-        Err(P256ProofError::RelationImbalance { relation })
     }
 }
 
@@ -4390,11 +4467,12 @@ mod tests {
     }
 
     /// Re-run the monolithic interaction-trace generation for `draft` and return
-    /// the per-relation balance result (`verify_balanced`). This is the in-AIR
-    /// rejection oracle (lessons.md #18): the prover-side LogUp balance is the
-    /// soundness gate the verifier ultimately enforces, so a tampered witness
-    /// that unbalances any relation is rejected here.
-    fn monolithic_balance_outcome(draft: &P256ProofDraft) -> Result<(), P256ProofError> {
+    /// the resulting interaction claim, with relations drawn from the real
+    /// transcript. The per-relation LogUp balance it carries is the in-AIR
+    /// rejection oracle (lessons.md #18); a tampered witness that unbalances any
+    /// relation is caught by `verify_balanced` (first imbalance) or surfaced in
+    /// full by `relation_audit`.
+    fn monolithic_interaction_claim(draft: &P256ProofDraft) -> P256CurrentAirInteractionClaim {
         let proof_claim = P256CurrentAirProofClaim::from_claim(&draft.claim);
         let ids = proof_claim.preprocessed_column_ids();
         let max_bound = proof_claim.max_constraint_log_degree_bound(&ids);
@@ -4425,7 +4503,73 @@ mod tests {
         let (_, interaction_claim) = draft
             .gen_current_air_interaction_trace(&base, &relations)
             .expect("interaction trace");
-        interaction_claim.verify_balanced()
+        interaction_claim
+    }
+
+    /// The per-relation balance result for `draft` (the first-imbalance oracle
+    /// the adversarial tests assert on).
+    fn monolithic_balance_outcome(draft: &P256ProofDraft) -> Result<(), P256ProofError> {
+        monolithic_interaction_claim(draft).verify_balanced()
+    }
+
+    #[test]
+    fn relation_audit_lists_all_imbalances_and_dead_links() {
+        let nonzero = SecureField::from(M31::from_u32_unchecked(1));
+        let audit = P256CurrentAirRelationAudit {
+            balances: vec![
+                ("Alpha", zero()),
+                ("Beta", nonzero),
+                ("Gamma", zero()),
+                ("Delta", nonzero),
+            ],
+            liveness: vec![("LiveOk", nonzero), ("DeadLink", zero())],
+        };
+        // Reports ALL imbalances at once, not just the first.
+        assert_eq!(audit.imbalanced(), vec!["Beta", "Delta"]);
+        assert_eq!(audit.first_imbalance(), Some("Beta"));
+        assert!(!audit.is_balanced());
+        // A boundary relation that emitted nothing is flagged even though it
+        // "balances" (0 + 0 == 0) — the unlinked-sub-graph case.
+        assert_eq!(audit.dead_links(), vec!["DeadLink"]);
+        assert_eq!(audit.relation_names(), vec!["Alpha", "Beta", "Gamma", "Delta"]);
+
+        let healthy = P256CurrentAirRelationAudit {
+            balances: vec![("A", zero())],
+            liveness: vec![("L", nonzero)],
+        };
+        assert!(healthy.is_balanced());
+        assert!(healthy.imbalanced().is_empty());
+        assert!(healthy.dead_links().is_empty());
+    }
+
+    #[test]
+    fn monolithic_relation_audit_is_balanced_and_fully_linked() {
+        // Both certs active (u1, u2 != 0), so every boundary relation must be live.
+        let draft = valid_draft_for_balance(7, 11);
+        let audit = monolithic_interaction_claim(&draft).relation_audit();
+        assert!(
+            audit.is_balanced(),
+            "honest proof has unbalanced relations: {:?}",
+            audit.imbalanced()
+        );
+        assert!(
+            audit.dead_links().is_empty(),
+            "honest active proof has unlinked boundary relations: {:?}",
+            audit.dead_links()
+        );
+        // The audit covers the full relation surface, including the four
+        // verifier-facing ECDSA bindings.
+        let names = audit.relation_names();
+        assert_eq!(names.len(), 27, "relation audit must cover every relation");
+        for required in [
+            "EcdsaResult",
+            "PublicKeyPoint",
+            "FinalCheckHint",
+            "FinalAddOutput",
+            "CertBase",
+        ] {
+            assert!(names.contains(&required), "audit missing relation: {required}");
+        }
     }
 
     /// Build a valid single-signature draft for the in-AIR adversarial tests.
