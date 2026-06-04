@@ -25,9 +25,9 @@ use stwo_constraint_framework::{
     relation, EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation,
     RelationEntry, TraceLocationAllocator,
 };
-use stwo_p256_utils::constants::N_LIMBS;
+use stwo_p256_utils::constants::{LIMB_BITS, N_LIMBS};
 
-use crate::constants::P256_MODULUS;
+use crate::constants::{P256_3GX, P256_3GY, P256_MODULUS};
 use crate::curve::{point_add, point_double, scalar_mul};
 use crate::field_ops::{add_mod_witness, sub_mod_witness};
 use crate::limbs::P256M31BigInt;
@@ -49,6 +49,40 @@ relation!(
     PREPARED_TABLE_EC_ROW_RELATION_ARITY
 );
 
+// --- PreparedTablePoints pinning relations (full table-pinning, Phase 2) ---
+//
+// `CertBaseRelation` binds every prepared-table cell that must equal the cert
+// base point `P` (= G for cert0, = public key Q for cert1) to the in-AIR
+// `cert.base` proven in `cert_bind.rs`. Provider: `CertScalarInputAirEval`
+// (yield `-m(cert_id)`). Consumer: `PreparedTableEcRowEval` (use `+1` per P-cell).
+relation!(CertBaseRelation, CERT_BASE_RELATION_ARITY);
+
+// `PreparedTableCanonicalRelation` ties every other prepared-table operand
+// (`P3 = 3P`, `R`, `R3 = 3R`, `-R`, `-R3`, `2P`, `2R`) to a single canonical
+// per-(sig,cert,role) value. Both providers and consumers are prepared-table
+// rows (self-balancing within `PreparedTableEcRowEval`), except cert0's `P3`
+// which is provided as the fixed constant `3·G`.
+relation!(
+    PreparedTableCanonicalRelation,
+    PREPARED_TABLE_CANONICAL_RELATION_ARITY
+);
+
+/// `CertBaseRelation` tuple arity: `(sig_id, cert_id, base_x[N_LIMBS], base_y[N_LIMBS])`.
+pub const CERT_BASE_RELATION_ARITY: usize = 2 + 2 * N_LIMBS;
+
+/// `PreparedTableCanonicalRelation` tuple arity:
+/// `(sig_id, cert_id, role, point[PREPARED_TABLE_EC_POINT_COLUMNS])`.
+pub const PREPARED_TABLE_CANONICAL_RELATION_ARITY: usize = 3 + PREPARED_TABLE_EC_POINT_COLUMNS;
+
+// Canonical roles. P is handled by `CertBaseRelation`; these cover the rest.
+pub const PREPARED_TABLE_CANONICAL_ROLE_P3: u32 = 0;
+pub const PREPARED_TABLE_CANONICAL_ROLE_R: u32 = 1;
+pub const PREPARED_TABLE_CANONICAL_ROLE_R3: u32 = 2;
+pub const PREPARED_TABLE_CANONICAL_ROLE_NEG_R: u32 = 3;
+pub const PREPARED_TABLE_CANONICAL_ROLE_NEG_R3: u32 = 4;
+pub const PREPARED_TABLE_CANONICAL_ROLE_P2: u32 = 5;
+pub const PREPARED_TABLE_CANONICAL_ROLE_R2: u32 = 6;
+
 pub type PreparedTableEcRowComponent = FrameworkComponent<PreparedTableEcRowEval>;
 
 pub const PREPARED_TABLE_EC_KIND_FLAGS: usize = 13;
@@ -62,8 +96,20 @@ pub const PREPARED_TABLE_EC_OP_MIXED_ADD: u32 = 0;
 pub const PREPARED_TABLE_EC_OP_DOUBLE: u32 = 1;
 pub const PREPARED_TABLE_EC_POINT_COLUMNS: usize = 2 * N_LIMBS + 1;
 pub const PREPARED_TABLE_EC_ROW_RELATION_ARITY: usize = 5 + 3 * PREPARED_TABLE_EC_POINT_COLUMNS;
+
+/// Number of signed carry columns for the in-AIR negation identity
+/// `neg.y + src.y = p` (one carry per limb; the top carry is constrained to 0).
+pub const PREPARED_TABLE_EC_NEG_CARRY_COLUMNS: usize = N_LIMBS;
+
+/// The negation aux block appended to every EC-row's base trace: a full point
+/// `neg` (= `-src`) plus its `neg.y + src.y = p` carries. Populated with `-R`
+/// on `DoubleR` rows and `-R3` on `AddR2R` rows; zero elsewhere.
+pub const PREPARED_TABLE_EC_NEG_AUX_COLUMNS: usize =
+    PREPARED_TABLE_EC_POINT_COLUMNS + PREPARED_TABLE_EC_NEG_CARRY_COLUMNS;
+
 pub const PREPARED_TABLE_EC_ROW_TRACE_COLUMNS: usize =
-    1 + 3 + PREPARED_TABLE_EC_KIND_FLAGS + 2 + 3 * PREPARED_TABLE_EC_POINT_COLUMNS;
+    1 + 3 + PREPARED_TABLE_EC_KIND_FLAGS + 2 + 3 * PREPARED_TABLE_EC_POINT_COLUMNS
+        + PREPARED_TABLE_EC_NEG_AUX_COLUMNS;
 pub const PREPARED_TABLE_PROJECTIVE_SOURCE_TRACE_COLUMNS: usize =
     1 + 5 + 3 * PREPARED_TABLE_EC_POINT_COLUMNS;
 
@@ -296,6 +342,7 @@ impl PreparedTableEcRowProofClaim {
             PreparedTableEcRowEval {
                 log_size: self.log_size,
                 relation: PreparedTableEcRowRelation::dummy(),
+                pinning: None,
             },
             secure_zero(),
         );
@@ -309,6 +356,7 @@ impl PreparedTableEcRowProofClaim {
             PreparedTableEcRowEval {
                 log_size: self.log_size,
                 relation: PreparedTableEcRowRelation::dummy(),
+                pinning: None,
             },
             secure_zero(),
         );
@@ -322,6 +370,7 @@ impl PreparedTableEcRowProofClaim {
             PreparedTableEcRowEval {
                 log_size: self.log_size,
                 relation: PreparedTableEcRowRelation::dummy(),
+                pinning: None,
             },
             secure_zero(),
         );
@@ -441,12 +490,48 @@ impl PreparedTableProjectiveSourceComponents {
         interaction_claim: &PreparedTableProjectiveSourceInteractionClaim,
         relation: &PreparedTableEcRowRelation,
     ) -> Self {
+        Self::new_inner(allocator, log_size, interaction_claim, relation, None)
+    }
+
+    /// Monolithic constructor: the provider additionally pins the table to
+    /// `cert.base` via `CertBaseRelation` and `PreparedTableCanonicalRelation`.
+    /// `provider_total_claimed_sum` is the provider's full logup total
+    /// (`PreparedTableEcRowPinnedInteractionClaim::total_claimed_sum`).
+    pub fn new_pinned(
+        allocator: &mut TraceLocationAllocator,
+        log_size: u32,
+        provider_total_claimed_sum: SecureField,
+        consumer_claimed_sum: SecureField,
+        relation: &PreparedTableEcRowRelation,
+        pinning: &PreparedTablePinningRelations,
+    ) -> Self {
+        let interaction_claim = PreparedTableProjectiveSourceInteractionClaim {
+            provider_claimed_sum: provider_total_claimed_sum,
+            consumer_claimed_sum,
+        };
+        Self::new_inner(
+            allocator,
+            log_size,
+            &interaction_claim,
+            relation,
+            Some(pinning.clone()),
+        )
+    }
+
+    fn new_inner(
+        allocator: &mut TraceLocationAllocator,
+        log_size: u32,
+        interaction_claim: &PreparedTableProjectiveSourceInteractionClaim,
+        relation: &PreparedTableEcRowRelation,
+        pinning: Option<PreparedTablePinningRelations>,
+    ) -> Self {
         Self {
             provider: PreparedTableEcRowComponent::new(
                 allocator,
                 PreparedTableEcRowEval {
                     log_size,
                     relation: relation.clone(),
+                    pinning,
                 },
                 interaction_claim.provider_claimed_sum,
             ),
@@ -492,10 +577,28 @@ impl PreparedTableProjectiveSourceComponents {
     }
 }
 
+/// Relations the `PreparedTableEcRowEval` provider consumes/provides to pin the
+/// prepared table to the cert base point. `Some` in the monolithic STARK (where
+/// `cert_bind` provides `CertBaseRelation`); `None` for the legacy standalone
+/// slice, which emits only `PreparedTableEcRowRelation`.
+///
+/// The in-AIR negation (`neg.y + src.y = p`) needs `neg`/`src` limbs bounded to
+/// 13 bits; that bound is inherited transitively — the canonical relation ties
+/// each `neg`/`src` to a base-row operand which feeds the projective EC-add,
+/// where every affine limb is already `Range13`-checked. So no extra range
+/// lookup is consumed here.
+#[derive(Clone)]
+pub struct PreparedTablePinningRelations {
+    pub cert_base: CertBaseRelation,
+    pub canonical: PreparedTableCanonicalRelation,
+}
+
 #[derive(Clone)]
 pub struct PreparedTableEcRowEval {
     pub log_size: u32,
     pub relation: PreparedTableEcRowRelation,
+    /// Monolithic full-table pinning relations. `None` => legacy slice.
+    pub pinning: Option<PreparedTablePinningRelations>,
 }
 
 impl FrameworkEval for PreparedTableEcRowEval {
@@ -520,6 +623,9 @@ impl FrameworkEval for PreparedTableEcRowEval {
         let lhs = PreparedTableEcEvalPoint::read(&mut eval);
         let rhs = PreparedTableEcEvalPoint::read(&mut eval);
         let output = PreparedTableEcEvalPoint::read(&mut eval);
+        let neg = PreparedTableEcEvalPoint::read(&mut eval);
+        let neg_carries: [E::F; PREPARED_TABLE_EC_NEG_CARRY_COLUMNS] =
+            core::array::from_fn(|_| eval.next_trace_mask());
         let one = E::F::from(M31::from_u32_unchecked(1));
 
         eval.add_constraint(active.clone() * (active.clone() - one.clone()));
@@ -551,6 +657,28 @@ impl FrameworkEval for PreparedTableEcRowEval {
         lhs.add_constraints(&mut eval, &active, &one);
         rhs.add_constraints(&mut eval, &active, &one);
         output.add_constraints(&mut eval, &active, &one);
+        neg.add_constraints(&mut eval, &active, &one);
+
+        // In-AIR negation: on DoubleR, `neg = -lhs (= -R)`; on AddR2R,
+        // `neg = -output (= -R3)`. Prove `neg.x = src.x` and the limb addition
+        // `neg.y + src.y = p` via the witnessed boolean carries. On all other
+        // rows `neg = 0` and `neg_carries = 0` (gated away below).
+        let neg_flag = kind_flags[PREPARED_TABLE_EC_KIND_DOUBLE_R].clone()
+            + kind_flags[PREPARED_TABLE_EC_KIND_ADD_R2R].clone();
+        let src = prepared_table_ec_negation_source::<E>(&kind_flags, &lhs, &output);
+        add_negation_constraints(&mut eval, &neg_flag, &src, &neg, &neg_carries, &one);
+        // Rows that do not witness a negation must carry `neg = 0` and zero carries.
+        let not_neg = active.clone() - neg_flag.clone();
+        for value in neg
+            .x
+            .iter()
+            .chain(neg.y.iter())
+            .cloned()
+            .chain(core::iter::once(neg.inf.clone()))
+            .chain(neg_carries.iter().cloned())
+        {
+            eval.add_constraint(not_neg.clone() * value);
+        }
 
         for value in [
             source_index.clone(),
@@ -563,18 +691,292 @@ impl FrameworkEval for PreparedTableEcRowEval {
         }
 
         let relation_values = prepared_table_ec_row_relation_values(
-            &[source_index, sig_id, cert_id, op, table_index],
+            &[
+                source_index,
+                sig_id.clone(),
+                cert_id.clone(),
+                op,
+                table_index,
+            ],
             &lhs,
             &rhs,
             &output,
         );
         eval.add_to_relation(RelationEntry::new(
             &self.relation,
-            -E::EF::from(active),
+            -E::EF::from(active.clone()),
             &relation_values,
         ));
+
+        if let Some(pinning) = &self.pinning {
+            // cert_id must be boolean so `is_cert0 = 1 - cert_id` selects cert0.
+            eval.add_constraint(active.clone() * cert_id.clone() * (cert_id.clone() - one.clone()));
+            add_pinning_emissions(
+                &mut eval,
+                pinning,
+                &active,
+                &sig_id,
+                &cert_id,
+                &kind_flags,
+                &lhs,
+                &rhs,
+                &output,
+                &neg,
+            );
+        }
+
         eval.finalize_logup();
         eval
+    }
+}
+
+// --- Shared pinning emission schedule ---------------------------------------
+//
+// Both `add_pinning_emissions` (AIR) and `gen_prepared_table_ec_row_pinned_*`
+// (interaction trace) iterate this single static list so the AIR numerators and
+// the committed logup fractions are the SAME low-degree polynomials in the same
+// order (lessons.md #39, #42). Each entry contributes exactly one logup fraction
+// per row; the numerator is the signed multiplicity times the gate product
+// (which is zero unless the row's kind/cert matches).
+
+/// Which point in the row supplies a pinning tuple.
+#[derive(Clone, Copy)]
+enum PinPoint {
+    Lhs,
+    Rhs,
+    Output,
+    Neg,
+    ConstThreeG,
+}
+
+/// Which relation a pinning entry targets.
+#[derive(Clone, Copy)]
+enum PinRelation {
+    /// `CertBaseRelation`: tuple `(sig, cert, base_x, base_y)`.
+    CertBase,
+    /// `PreparedTableCanonicalRelation`: tuple `(sig, cert, role, point)`.
+    Canonical(u32),
+}
+
+/// One row-local pinning emission.
+#[derive(Clone, Copy)]
+struct PinEntry {
+    relation: PinRelation,
+    point: PinPoint,
+    /// Signed multiplicity: `+1` for a use (consumer), `-count` for a yield
+    /// (provider). Multiplied by the gate product to form the numerator.
+    mult: i32,
+    /// Kind flags whose product gates this emission (e.g. `[BASE_START+1]`).
+    kinds: &'static [usize],
+    /// If `true`, additionally gate by `is_cert0 = active - cert_id`.
+    cert0_only: bool,
+}
+
+const fn base_kind(i: usize) -> usize {
+    PREPARED_TABLE_EC_KIND_BASE_START + i
+}
+
+/// The fixed pinning schedule (30 entries), identical in order to the manual
+/// enumeration verified for per-cert balance.
+const PIN_SCHEDULE: &[PinEntry] = &[
+    // CertBase consumers (use +1) on each P-cell.
+    PinEntry { relation: PinRelation::CertBase, point: PinPoint::Lhs, mult: 1, kinds: &[base_kind(1)], cert0_only: false },
+    PinEntry { relation: PinRelation::CertBase, point: PinPoint::Lhs, mult: 1, kinds: &[base_kind(2)], cert0_only: false },
+    PinEntry { relation: PinRelation::CertBase, point: PinPoint::Lhs, mult: 1, kinds: &[base_kind(5)], cert0_only: false },
+    PinEntry { relation: PinRelation::CertBase, point: PinPoint::Lhs, mult: 1, kinds: &[base_kind(6)], cert0_only: false },
+    PinEntry { relation: PinRelation::CertBase, point: PinPoint::Lhs, mult: 1, kinds: &[PREPARED_TABLE_EC_KIND_DOUBLE_P], cert0_only: false },
+    PinEntry { relation: PinRelation::CertBase, point: PinPoint::Rhs, mult: 1, kinds: &[PREPARED_TABLE_EC_KIND_ADD_P2P], cert0_only: false },
+    // Canonical providers (yield -count).
+    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_P3), point: PinPoint::Output, mult: -4, kinds: &[PREPARED_TABLE_EC_KIND_ADD_P2P], cert0_only: false },
+    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_P3), point: PinPoint::ConstThreeG, mult: -4, kinds: &[PREPARED_TABLE_EC_KIND_DOUBLE_R], cert0_only: true },
+    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_R), point: PinPoint::Lhs, mult: -3, kinds: &[PREPARED_TABLE_EC_KIND_DOUBLE_R], cert0_only: false },
+    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_R3), point: PinPoint::Output, mult: -3, kinds: &[PREPARED_TABLE_EC_KIND_ADD_R2R], cert0_only: false },
+    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_NEG_R), point: PinPoint::Neg, mult: -2, kinds: &[PREPARED_TABLE_EC_KIND_DOUBLE_R], cert0_only: false },
+    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_NEG_R3), point: PinPoint::Neg, mult: -2, kinds: &[PREPARED_TABLE_EC_KIND_ADD_R2R], cert0_only: false },
+    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_P2), point: PinPoint::Output, mult: -1, kinds: &[PREPARED_TABLE_EC_KIND_DOUBLE_P], cert0_only: false },
+    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_R2), point: PinPoint::Output, mult: -1, kinds: &[PREPARED_TABLE_EC_KIND_DOUBLE_R], cert0_only: false },
+    // Canonical consumers (use +1).
+    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_P3), point: PinPoint::Lhs, mult: 1, kinds: &[base_kind(0)], cert0_only: false },
+    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_P3), point: PinPoint::Lhs, mult: 1, kinds: &[base_kind(3)], cert0_only: false },
+    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_P3), point: PinPoint::Lhs, mult: 1, kinds: &[base_kind(4)], cert0_only: false },
+    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_P3), point: PinPoint::Lhs, mult: 1, kinds: &[base_kind(7)], cert0_only: false },
+    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_R), point: PinPoint::Rhs, mult: 1, kinds: &[PREPARED_TABLE_EC_KIND_ADD_R2R], cert0_only: false },
+    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_R), point: PinPoint::Rhs, mult: 1, kinds: &[base_kind(2)], cert0_only: false },
+    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_R), point: PinPoint::Rhs, mult: 1, kinds: &[base_kind(3)], cert0_only: false },
+    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_R3), point: PinPoint::Rhs, mult: 1, kinds: &[base_kind(6)], cert0_only: false },
+    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_R3), point: PinPoint::Rhs, mult: 1, kinds: &[base_kind(7)], cert0_only: false },
+    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_R3), point: PinPoint::Rhs, mult: 1, kinds: &[PREPARED_TABLE_EC_KIND_TABLE16], cert0_only: false },
+    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_NEG_R), point: PinPoint::Rhs, mult: 1, kinds: &[base_kind(0)], cert0_only: false },
+    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_NEG_R), point: PinPoint::Rhs, mult: 1, kinds: &[base_kind(1)], cert0_only: false },
+    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_NEG_R3), point: PinPoint::Rhs, mult: 1, kinds: &[base_kind(4)], cert0_only: false },
+    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_NEG_R3), point: PinPoint::Rhs, mult: 1, kinds: &[base_kind(5)], cert0_only: false },
+    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_P2), point: PinPoint::Lhs, mult: 1, kinds: &[PREPARED_TABLE_EC_KIND_ADD_P2P], cert0_only: false },
+    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_R2), point: PinPoint::Lhs, mult: 1, kinds: &[PREPARED_TABLE_EC_KIND_ADD_R2R], cert0_only: false },
+];
+
+/// Number of pinning logup fractions emitted per EC row (one per schedule entry).
+pub const PREPARED_TABLE_PINNING_FRACTIONS: usize = 30;
+
+const _: () = assert!(PIN_SCHEDULE.len() == PREPARED_TABLE_PINNING_FRACTIONS);
+
+/// Select the negation source point: `lhs` on `DoubleR` rows, `output` on
+/// `AddR2R` rows, `0` elsewhere. Exactly one kind flag is set on a neg row.
+fn prepared_table_ec_negation_source<E: EvalAtRow>(
+    kind_flags: &[E::F; PREPARED_TABLE_EC_KIND_FLAGS],
+    lhs: &PreparedTableEcEvalPoint<E::F>,
+    output: &PreparedTableEcEvalPoint<E::F>,
+) -> PreparedTableEcEvalPoint<E::F> {
+    let double_r = kind_flags[PREPARED_TABLE_EC_KIND_DOUBLE_R].clone();
+    let add_r2r = kind_flags[PREPARED_TABLE_EC_KIND_ADD_R2R].clone();
+    let select = |a: &E::F, b: &E::F| double_r.clone() * a.clone() + add_r2r.clone() * b.clone();
+    PreparedTableEcEvalPoint {
+        x: core::array::from_fn(|i| select(&lhs.x[i], &output.x[i])),
+        y: core::array::from_fn(|i| select(&lhs.y[i], &output.y[i])),
+        inf: select(&lhs.inf, &output.inf),
+    }
+}
+
+/// Constrain `neg = -src` (gated by `neg_flag`): `neg.x = src.x`, `neg.inf =
+/// src.inf`, and the limb addition `neg.y + src.y = p` via boolean carries. All
+/// constraints stay degree ≤ 2: the boolean carry constraint is ungated (carries
+/// on non-neg rows are forced to zero by the `not_neg` padding loop).
+fn add_negation_constraints<E: EvalAtRow>(
+    eval: &mut E,
+    neg_flag: &E::F,
+    src: &PreparedTableEcEvalPoint<E::F>,
+    neg: &PreparedTableEcEvalPoint<E::F>,
+    neg_carries: &[E::F; PREPARED_TABLE_EC_NEG_CARRY_COLUMNS],
+    one: &E::F,
+) {
+    let limb_base = E::F::from(M31::from_u32_unchecked(1u32 << LIMB_BITS));
+    let p_limbs = P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_MODULUS));
+    eval.add_constraint(neg_flag.clone() * (neg.inf.clone() - src.inf.clone()));
+    for i in 0..N_LIMBS {
+        eval.add_constraint(neg_flag.clone() * (neg.x[i].clone() - src.x[i].clone()));
+        // Boolean carry (ungated; degree 2).
+        let carry = neg_carries[i].clone();
+        eval.add_constraint(carry.clone() * (carry.clone() - one.clone()));
+        let prev_carry = if i == 0 {
+            E::F::from(M31::from_u32_unchecked(0))
+        } else {
+            neg_carries[i - 1].clone()
+        };
+        let p_limb = E::F::from(p_limbs.limbs()[i]);
+        // neg.y[i] + src.y[i] + prev_carry - p[i] - carry * 2^13 = 0.
+        eval.add_constraint(
+            neg_flag.clone()
+                * (neg.y[i].clone() + src.y[i].clone() + prev_carry
+                    - p_limb
+                    - carry * limb_base.clone()),
+        );
+    }
+    // The most-significant carry must vanish: neg.y + src.y == p exactly.
+    eval.add_constraint(neg_flag.clone() * neg_carries[N_LIMBS - 1].clone());
+}
+
+/// Build a `CertBaseRelation` tuple `(sig_id, cert_id, point.x[..], point.y[..])`
+/// for the cell's base point.
+fn cert_base_relation_values<F: Clone + From<M31>>(
+    sig_id: &F,
+    cert_id: &F,
+    point: &PreparedTableEcEvalPoint<F>,
+) -> [F; CERT_BASE_RELATION_ARITY] {
+    core::array::from_fn(|index| match index {
+        0 => sig_id.clone(),
+        1 => cert_id.clone(),
+        2..=21 => point.x[index - 2].clone(),
+        22..=41 => point.y[index - 2 - N_LIMBS].clone(),
+        _ => unreachable!("cert base relation index in range"),
+    })
+}
+
+/// Build a `PreparedTableCanonicalRelation` tuple `(sig_id, cert_id, role, point[41])`.
+fn canonical_relation_values<F: Clone + From<M31>>(
+    sig_id: &F,
+    cert_id: &F,
+    role: u32,
+    point: &PreparedTableEcEvalPoint<F>,
+) -> [F; PREPARED_TABLE_CANONICAL_RELATION_ARITY] {
+    let point_values = point.relation_values();
+    core::array::from_fn(|index| match index {
+        0 => sig_id.clone(),
+        1 => cert_id.clone(),
+        2 => F::from(M31::from_u32_unchecked(role)),
+        3..=43 => point_values[index - 3].clone(),
+        _ => unreachable!("canonical relation index in range"),
+    })
+}
+
+/// The fixed constant `3·G` as an eval point (cert0's pinned `P3`).
+fn three_g_point<F: Clone + From<M31>>() -> PreparedTableEcEvalPoint<F> {
+    let x = P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_3GX));
+    let y = P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_3GY));
+    PreparedTableEcEvalPoint {
+        x: core::array::from_fn(|i| F::from(x.limbs()[i])),
+        y: core::array::from_fn(|i| F::from(y.limbs()[i])),
+        inf: F::from(M31::from_u32_unchecked(0)),
+    }
+}
+
+/// Emit the fixed `PIN_SCHEDULE` of `CertBaseRelation` +
+/// `PreparedTableCanonicalRelation` fractions for one EC row. Every row emits the
+/// SAME ordered set of entries; numerators are gated to zero when the row's
+/// kind/cert does not match. Mirrored exactly by
+/// `gen_prepared_table_ec_row_pinned_interaction_trace`.
+#[allow(clippy::too_many_arguments)]
+fn add_pinning_emissions<E: EvalAtRow>(
+    eval: &mut E,
+    pinning: &PreparedTablePinningRelations,
+    active: &E::F,
+    sig_id: &E::F,
+    cert_id: &E::F,
+    kind_flags: &[E::F; PREPARED_TABLE_EC_KIND_FLAGS],
+    lhs: &PreparedTableEcEvalPoint<E::F>,
+    rhs: &PreparedTableEcEvalPoint<E::F>,
+    output: &PreparedTableEcEvalPoint<E::F>,
+    neg: &PreparedTableEcEvalPoint<E::F>,
+) {
+    let is_cert0 = active.clone() - cert_id.clone();
+    let three_g = three_g_point::<E::F>();
+    for entry in PIN_SCHEDULE {
+        let mut gate = E::F::from(M31::from_u32_unchecked(1));
+        for &k in entry.kinds {
+            gate = gate * kind_flags[k].clone();
+        }
+        if entry.cert0_only {
+            gate = gate * is_cert0.clone();
+        }
+        let point = match entry.point {
+            PinPoint::Lhs => lhs,
+            PinPoint::Rhs => rhs,
+            PinPoint::Output => output,
+            PinPoint::Neg => neg,
+            PinPoint::ConstThreeG => &three_g,
+        };
+        let numerator = signed_numerator::<E>(gate, entry.mult);
+        match entry.relation {
+            PinRelation::CertBase => eval.add_to_relation(RelationEntry::new(
+                &pinning.cert_base,
+                numerator,
+                &cert_base_relation_values::<E::F>(sig_id, cert_id, point),
+            )),
+            PinRelation::Canonical(role) => eval.add_to_relation(RelationEntry::new(
+                &pinning.canonical,
+                numerator,
+                &canonical_relation_values::<E::F>(sig_id, cert_id, role, point),
+            )),
+        }
+    }
+}
+
+/// `mult · gate` as an extension-field numerator (`mult` may be negative).
+fn signed_numerator<E: EvalAtRow>(gate: E::F, mult: i32) -> E::EF {
+    let magnitude = E::F::from(M31::from_u32_unchecked(mult.unsigned_abs()));
+    let scaled = E::EF::from(gate * magnitude);
+    if mult < 0 {
+        -scaled
+    } else {
+        scaled
     }
 }
 
@@ -728,6 +1130,7 @@ where
         PreparedTableEcRowEval {
             log_size: claim.log_size,
             relation,
+            pinning: None,
         },
         interaction_claim.claimed_sum,
     );
@@ -795,6 +1198,7 @@ pub fn verify_prepared_table_ec_row_proof_slice<MC: stwo::core::channel::MerkleC
         PreparedTableEcRowEval {
             log_size: claim.log_size,
             relation,
+            pinning: None,
         },
         interaction_claim.claimed_sum,
     );
@@ -1062,6 +1466,319 @@ pub(crate) fn gen_prepared_table_ec_row_interaction_trace(
     (trace, PreparedTableEcRowInteractionClaim { claimed_sum })
 }
 
+// Base-trace column offsets for the EC-row provider (used by the pinned
+// interaction trace generator). Layout: active, source_index, sig_id, cert_id,
+// kind_flags[13], op, table_index, lhs[41], rhs[41], output[41], neg[41],
+// neg_carries[20].
+const PREPARED_TABLE_EC_COL_SIG_ID: usize = 2;
+const PREPARED_TABLE_EC_COL_CERT_ID: usize = 3;
+const PREPARED_TABLE_EC_COL_KIND_FLAGS: usize = 4;
+const PREPARED_TABLE_EC_COL_LHS: usize = 4 + PREPARED_TABLE_EC_KIND_FLAGS + 2;
+const PREPARED_TABLE_EC_COL_RHS: usize = PREPARED_TABLE_EC_COL_LHS + PREPARED_TABLE_EC_POINT_COLUMNS;
+const PREPARED_TABLE_EC_COL_OUTPUT: usize =
+    PREPARED_TABLE_EC_COL_RHS + PREPARED_TABLE_EC_POINT_COLUMNS;
+const PREPARED_TABLE_EC_COL_NEG: usize =
+    PREPARED_TABLE_EC_COL_OUTPUT + PREPARED_TABLE_EC_POINT_COLUMNS;
+
+fn pin_point_column_offset(point: PinPoint) -> Option<usize> {
+    match point {
+        PinPoint::Lhs => Some(PREPARED_TABLE_EC_COL_LHS),
+        PinPoint::Rhs => Some(PREPARED_TABLE_EC_COL_RHS),
+        PinPoint::Output => Some(PREPARED_TABLE_EC_COL_OUTPUT),
+        PinPoint::Neg => Some(PREPARED_TABLE_EC_COL_NEG),
+        PinPoint::ConstThreeG => None,
+    }
+}
+
+/// Per-relation claimed sums of the pinned EC-row provider's logup trace. `total`
+/// is what the provider component declares; the breakdown lets `verify_balanced`
+/// check each relation independently.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreparedTableEcRowPinnedInteractionClaim {
+    pub total_claimed_sum: SecureField,
+    pub prepared_table_provider_claimed_sum: SecureField,
+    pub cert_base_consumer_claimed_sum: SecureField,
+    pub canonical_claimed_sum: SecureField,
+}
+
+impl PreparedTableEcRowPinnedInteractionClaim {
+    pub fn zero() -> Self {
+        Self {
+            total_claimed_sum: secure_zero(),
+            prepared_table_provider_claimed_sum: secure_zero(),
+            cert_base_consumer_claimed_sum: secure_zero(),
+            canonical_claimed_sum: secure_zero(),
+        }
+    }
+}
+
+/// Interaction trace for the monolithic EC-row provider: the base
+/// `PreparedTableEcRowRelation` yield plus the 30 `PIN_SCHEDULE` fractions, in
+/// the exact order emitted by `PreparedTableEcRowEval::evaluate`.
+pub(crate) fn gen_prepared_table_ec_row_pinned_interaction_trace(
+    base: &[M31ColumnEval],
+    relation: &PreparedTableEcRowRelation,
+    cert_base: &CertBaseRelation,
+    canonical: &PreparedTableCanonicalRelation,
+) -> (ColumnVec<M31ColumnEval>, PreparedTableEcRowPinnedInteractionClaim) {
+    assert_eq!(base.len(), PREPARED_TABLE_EC_ROW_TRACE_COLUMNS);
+    let log_size = base[0].domain.log_size();
+    let n_vec_rows = 1 << (log_size - LOG_N_LANES);
+    let mut logup = LogupTraceGenerator::new(log_size);
+
+    // Column 0: the existing PreparedTableEcRowRelation yield (-active).
+    let mut col = logup.new_col();
+    for vec_row in 0..n_vec_rows {
+        let values = prepared_table_ec_row_packed_relation_values(base, vec_row);
+        col.write_frac(
+            vec_row,
+            -PackedQM31::from(base[0].data[vec_row]),
+            relation.combine(&values),
+        );
+    }
+    col.finalize_col();
+
+    let three_g_x = P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_3GX));
+    let three_g_y = P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_3GY));
+
+    // Columns 1..=30: the pinning schedule, one fraction per entry.
+    for entry in PIN_SCHEDULE {
+        let mut col = logup.new_col();
+        for vec_row in 0..n_vec_rows {
+            let sig = base[PREPARED_TABLE_EC_COL_SIG_ID].data[vec_row];
+            let cert = base[PREPARED_TABLE_EC_COL_CERT_ID].data[vec_row];
+            let active = base[0].data[vec_row];
+            // Gate = product of kind flags (× is_cert0 = active - cert_id).
+            let mut gate = PackedM31::broadcast(M31::from_u32_unchecked(1));
+            for &k in entry.kinds {
+                gate *= base[PREPARED_TABLE_EC_COL_KIND_FLAGS + k].data[vec_row];
+            }
+            if entry.cert0_only {
+                gate *= active - cert;
+            }
+            let magnitude = PackedM31::broadcast(M31::from_u32_unchecked(entry.mult.unsigned_abs()));
+            let scaled = PackedQM31::from(gate * magnitude);
+            let numerator = if entry.mult < 0 { -scaled } else { scaled };
+            let denominator: PackedQM31 = match entry.relation {
+                PinRelation::CertBase => {
+                    let offset = pin_point_column_offset(entry.point)
+                        .expect("CertBase entries use a trace point");
+                    cert_base.combine(&cert_base_packed_tuple(base, vec_row, sig, cert, offset))
+                }
+                PinRelation::Canonical(role) => {
+                    let tuple = match pin_point_column_offset(entry.point) {
+                        Some(offset) => {
+                            canonical_packed_tuple_from_columns(base, vec_row, sig, cert, role, offset)
+                        }
+                        None => canonical_packed_tuple_const(
+                            sig,
+                            cert,
+                            role,
+                            &three_g_x,
+                            &three_g_y,
+                        ),
+                    };
+                    canonical.combine(&tuple)
+                }
+            };
+            col.write_frac(vec_row, numerator, denominator);
+        }
+        col.finalize_col();
+    }
+
+    let (trace, total_claimed_sum) = logup.finalize_last();
+
+    // Per-relation breakdown over storage rows (active rows only).
+    let mut prepared_table_provider_claimed_sum = secure_zero();
+    let mut cert_base_consumer_claimed_sum = secure_zero();
+    let mut canonical_claimed_sum = secure_zero();
+    for row in prepared_table_ec_storage_rows(base) {
+        let active = row[0];
+        if active == M31::from_u32_unchecked(0) {
+            continue;
+        }
+        let sig = row[PREPARED_TABLE_EC_COL_SIG_ID];
+        let cert = row[PREPARED_TABLE_EC_COL_CERT_ID];
+        // Existing relation yield (-active).
+        let values = prepared_table_ec_row_unpacked_relation_values(&row);
+        let existing_denom: SecureField = relation.combine(&values);
+        prepared_table_provider_claimed_sum += -SecureField::from(active) / existing_denom;
+        for entry in PIN_SCHEDULE {
+            let mut gate = M31::from_u32_unchecked(1);
+            for &k in entry.kinds {
+                gate *= row[PREPARED_TABLE_EC_COL_KIND_FLAGS + k];
+            }
+            if entry.cert0_only {
+                gate *= active - cert;
+            }
+            if gate == M31::from_u32_unchecked(0) {
+                continue;
+            }
+            let magnitude = M31::from_u32_unchecked(entry.mult.unsigned_abs());
+            let scaled = SecureField::from(gate * magnitude);
+            let numerator = if entry.mult < 0 { -scaled } else { scaled };
+            match entry.relation {
+                PinRelation::CertBase => {
+                    let offset = pin_point_column_offset(entry.point).unwrap();
+                    let denom: SecureField =
+                        cert_base.combine(&cert_base_unpacked_tuple(&row, sig, cert, offset));
+                    cert_base_consumer_claimed_sum += numerator / denom;
+                }
+                PinRelation::Canonical(role) => {
+                    let tuple = match pin_point_column_offset(entry.point) {
+                        Some(offset) => {
+                            canonical_unpacked_tuple_from_columns(&row, sig, cert, role, offset)
+                        }
+                        None => {
+                            canonical_unpacked_tuple_const(sig, cert, role, &three_g_x, &three_g_y)
+                        }
+                    };
+                    let denom: SecureField = canonical.combine(&tuple);
+                    canonical_claimed_sum += numerator / denom;
+                }
+            }
+        }
+    }
+
+    (
+        trace,
+        PreparedTableEcRowPinnedInteractionClaim {
+            total_claimed_sum,
+            prepared_table_provider_claimed_sum,
+            cert_base_consumer_claimed_sum,
+            canonical_claimed_sum,
+        },
+    )
+}
+
+fn cert_base_packed_tuple(
+    base: &[M31ColumnEval],
+    vec_row: usize,
+    sig: PackedM31,
+    cert: PackedM31,
+    point_offset: usize,
+) -> [PackedM31; CERT_BASE_RELATION_ARITY] {
+    core::array::from_fn(|index| match index {
+        0 => sig,
+        1 => cert,
+        2..=21 => base[point_offset + (index - 2)].data[vec_row],
+        22..=41 => base[point_offset + N_LIMBS + (index - 22)].data[vec_row],
+        _ => unreachable!("cert base tuple index in range"),
+    })
+}
+
+fn cert_base_unpacked_tuple(
+    row: &[M31],
+    sig: M31,
+    cert: M31,
+    point_offset: usize,
+) -> [M31; CERT_BASE_RELATION_ARITY] {
+    core::array::from_fn(|index| match index {
+        0 => sig,
+        1 => cert,
+        2..=21 => row[point_offset + (index - 2)],
+        22..=41 => row[point_offset + N_LIMBS + (index - 22)],
+        _ => unreachable!("cert base tuple index in range"),
+    })
+}
+
+fn canonical_packed_tuple_from_columns(
+    base: &[M31ColumnEval],
+    vec_row: usize,
+    sig: PackedM31,
+    cert: PackedM31,
+    role: u32,
+    point_offset: usize,
+) -> [PackedM31; PREPARED_TABLE_CANONICAL_RELATION_ARITY] {
+    core::array::from_fn(|index| match index {
+        0 => sig,
+        1 => cert,
+        2 => PackedM31::broadcast(M31::from_u32_unchecked(role)),
+        3..=43 => base[point_offset + (index - 3)].data[vec_row],
+        _ => unreachable!("canonical tuple index in range"),
+    })
+}
+
+fn canonical_packed_tuple_const(
+    sig: PackedM31,
+    cert: PackedM31,
+    role: u32,
+    x: &P256M31BigInt,
+    y: &P256M31BigInt,
+) -> [PackedM31; PREPARED_TABLE_CANONICAL_RELATION_ARITY] {
+    core::array::from_fn(|index| match index {
+        0 => sig,
+        1 => cert,
+        2 => PackedM31::broadcast(M31::from_u32_unchecked(role)),
+        3..=22 => PackedM31::broadcast(x.limbs()[index - 3]),
+        23..=42 => PackedM31::broadcast(y.limbs()[index - 23]),
+        43 => PackedM31::broadcast(M31::from_u32_unchecked(0)),
+        _ => unreachable!("canonical const tuple index in range"),
+    })
+}
+
+fn canonical_unpacked_tuple_from_columns(
+    row: &[M31],
+    sig: M31,
+    cert: M31,
+    role: u32,
+    point_offset: usize,
+) -> [M31; PREPARED_TABLE_CANONICAL_RELATION_ARITY] {
+    core::array::from_fn(|index| match index {
+        0 => sig,
+        1 => cert,
+        2 => M31::from_u32_unchecked(role),
+        3..=43 => row[point_offset + (index - 3)],
+        _ => unreachable!("canonical tuple index in range"),
+    })
+}
+
+fn canonical_unpacked_tuple_const(
+    sig: M31,
+    cert: M31,
+    role: u32,
+    x: &P256M31BigInt,
+    y: &P256M31BigInt,
+) -> [M31; PREPARED_TABLE_CANONICAL_RELATION_ARITY] {
+    core::array::from_fn(|index| match index {
+        0 => sig,
+        1 => cert,
+        2 => M31::from_u32_unchecked(role),
+        3..=22 => x.limbs()[index - 3],
+        23..=42 => y.limbs()[index - 23],
+        43 => M31::from_u32_unchecked(0),
+        _ => unreachable!("canonical const tuple index in range"),
+    })
+}
+
+fn prepared_table_ec_storage_rows(base: &[M31ColumnEval]) -> impl Iterator<Item = Vec<M31>> + '_ {
+    let row_count = base[0].domain.size();
+    (0..row_count).map(move |row| {
+        let vec_row = row / (1 << LOG_N_LANES);
+        let lane = row % (1 << LOG_N_LANES);
+        base.iter()
+            .map(|column| column.data[vec_row].to_array()[lane])
+            .collect::<Vec<_>>()
+    })
+}
+
+fn prepared_table_ec_row_unpacked_relation_values(
+    row: &[M31],
+) -> [M31; PREPARED_TABLE_EC_ROW_RELATION_ARITY] {
+    core::array::from_fn(|index| {
+        let column = match index {
+            0 => 1,
+            1 => 2,
+            2 => 3,
+            3 => 17,
+            4 => 18,
+            5..=127 => 19 + (index - 5),
+            _ => unreachable!("prepared-table EC relation index is in range"),
+        };
+        row[column]
+    })
+}
+
 pub(crate) fn gen_prepared_table_projective_source_interaction_trace(
     base: &[M31ColumnEval],
     relation: &PreparedTableEcRowRelation,
@@ -1157,8 +1874,62 @@ fn prepared_table_ec_row_trace_values(
         values[column] = value;
         column += 1;
     }
+    // Negation aux block: `neg = -src` plus `neg.y + src.y = p` carries.
+    //   DoubleR: src = lhs (= R)   -> neg = -R
+    //   AddR2R:  src = output (= R3) -> neg = -R3
+    //   otherwise: neg = 0, carries = 0 (padding-gated in the AIR).
+    let neg_source = match row.kind {
+        PreparedTableEcRowKind::DoubleR => Some(&row.lhs),
+        PreparedTableEcRowKind::AddR2R => Some(&row.output),
+        _ => None,
+    };
+    let (neg_point, neg_carries) = match neg_source {
+        Some(src) => prepared_table_ec_negation_witness(src),
+        None => (
+            PreparedAffinePoint::from_zero_limbs(),
+            [M31::from_u32_unchecked(0); PREPARED_TABLE_EC_NEG_CARRY_COLUMNS],
+        ),
+    };
+    for value in prepared_table_ec_point_values(&neg_point) {
+        values[column] = value;
+        column += 1;
+    }
+    for carry in neg_carries {
+        values[column] = carry;
+        column += 1;
+    }
     debug_assert_eq!(column, PREPARED_TABLE_EC_ROW_TRACE_COLUMNS);
     values
+}
+
+/// Witness the negation `neg = -src` (canonical limbs) together with the boolean
+/// carries of the limb addition `neg.y + src.y = p`. Because `neg.y, src.y < p`
+/// and (for a finite `src`) `neg.y + src.y = p` exactly, every carry is in
+/// `{0, 1}` and the top carry vanishes.
+fn prepared_table_ec_negation_witness(
+    src: &PreparedAffinePoint,
+) -> (
+    PreparedAffinePoint,
+    [M31; PREPARED_TABLE_EC_NEG_CARRY_COLUMNS],
+) {
+    let neg = prepared(negate_optional(src.to_option()));
+    let p_limbs = P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_MODULUS));
+    let mut carries = [M31::from_u32_unchecked(0); PREPARED_TABLE_EC_NEG_CARRY_COLUMNS];
+    let mut carry: u32 = 0;
+    let limb_modulus = 1u32 << LIMB_BITS;
+    for i in 0..N_LIMBS {
+        let sum = neg.y.limbs()[i].0 + src.y.limbs()[i].0 + carry;
+        carry = sum / limb_modulus;
+        debug_assert!(carry <= 1, "negation carry must be boolean");
+        debug_assert_eq!(
+            sum % limb_modulus,
+            p_limbs.limbs()[i].0,
+            "negation limb addition must reconstruct the modulus"
+        );
+        carries[i] = M31::from_u32_unchecked(carry);
+    }
+    debug_assert_eq!(carry, 0, "negation top carry must vanish");
+    (neg, carries)
 }
 
 fn prepared_table_projective_source_trace_values(
@@ -1502,6 +2273,82 @@ impl PreparedTableCert {
         })
     }
 
+    /// Test-only variant of [`Self::new`] that substitutes an injected hint
+    /// point `R'` for the production `R = signed_hint(scalar_mul(u, base))`.
+    /// Every R-derived cell (`R3 = 3R'`, `base[]`, `table16`) is recomputed
+    /// from `R'` so the resulting cert is internally consistent for an
+    /// arbitrary (possibly wrong) `R'`. Used to probe whether the in-AIR
+    /// scalar multiplication binds `R` to `u·base`.
+    #[cfg(test)]
+    pub(crate) fn new_with_r_override(
+        cert: &CertScalarInputRow,
+        _fake_glv: &FakeGlvScalarHintRow,
+        selector: &FakeGlvSelectorRow,
+        r_override: AffinePoint,
+    ) -> Result<Self, PreparedTableError> {
+        assert_eq!(cert.cert_active.0, 1, "override path requires active cert");
+        let p = AffinePoint {
+            x: cert.base_x.to_u256(),
+            y: cert.base_y.to_u256(),
+        };
+        let r = r_override;
+        let p3 = scalar_mul(&U256::from_le_u64s(&[3, 0, 0, 0]), &p).ok_or(
+            PreparedTableError::MissingTriplePoint {
+                point: "P",
+                sig_id: cert.sig_id.0,
+                cert_id: cert.cert_id.0,
+            },
+        )?;
+        let r3 = scalar_mul(&U256::from_le_u64s(&[3, 0, 0, 0]), &r).ok_or(
+            PreparedTableError::MissingTriplePoint {
+                point: "R",
+                sig_id: cert.sig_id.0,
+                cert_id: cert.cert_id.0,
+            },
+        )?;
+
+        let base = [
+            prepared(add_optional_points(
+                Some(p3.clone()),
+                negate_optional(Some(r.clone())),
+            )),
+            prepared(add_optional_points(
+                Some(p.clone()),
+                negate_optional(Some(r.clone())),
+            )),
+            prepared(add_optional_points(Some(p.clone()), Some(r.clone()))),
+            prepared(add_optional_points(Some(p3.clone()), Some(r.clone()))),
+            prepared(add_optional_points(
+                Some(p3.clone()),
+                negate_optional(Some(r3.clone())),
+            )),
+            prepared(add_optional_points(
+                Some(p.clone()),
+                negate_optional(Some(r3.clone())),
+            )),
+            prepared(add_optional_points(Some(p.clone()), Some(r3.clone()))),
+            prepared(add_optional_points(Some(p3.clone()), Some(r3.clone()))),
+        ];
+
+        let selector0 =
+            Selector16DecodeEntry::from_selector(selector.selectors[0]).map_err(|_| {
+                PreparedTableError::InvalidSelector {
+                    selector: selector.selectors[0].0,
+                }
+            })?;
+        let selected = apply_selector(&base, selector0)?;
+        let table16 = prepared(add_optional_points(selected.to_option(), Some(r3.clone())));
+
+        Ok(Self {
+            sig_id: cert.sig_id,
+            cert_id: cert.cert_id,
+            cert_active: cert.cert_active,
+            base,
+            r3: prepared(Some(r3)),
+            table16,
+        })
+    }
+
     pub fn verify(&self) -> Result<(), PreparedTableError> {
         if self.cert_active.0 > 1 {
             return Err(PreparedTableError::NonBooleanFlag {
@@ -1547,6 +2394,17 @@ impl PreparedAffinePoint {
         Self {
             x: P256M31BigInt::from_u256(&point.x),
             y: P256M31BigInt::from_u256(&point.y),
+            inf: M31::from_u32_unchecked(0),
+        }
+    }
+
+    /// All-zero point (`x = y = 0`, `inf = 0`). Used as the inert filler for the
+    /// negation aux block on rows that do not witness a negation; distinct from
+    /// [`Self::infinity`] (which sets `inf = 1`).
+    pub const fn from_zero_limbs() -> Self {
+        Self {
+            x: P256M31BigInt::zero(),
+            y: P256M31BigInt::zero(),
             inf: M31::from_u32_unchecked(0),
         }
     }
@@ -1860,6 +2718,210 @@ fn prepared_table_ec_rows_for_cert(
     Ok(rows)
 }
 
+/// Test-only variant of [`prepared_table_ec_rows_for_cert`] that uses an
+/// injected `R'` instead of the production `R`. Mirrors the production row
+/// shape exactly, sourcing R-derived outputs from `table` (which must itself
+/// be built from the same `R'`). The internal `output == expected` checks are
+/// kept verbatim so trace fidelity is preserved for an arbitrary `R'`.
+#[cfg(test)]
+fn prepared_table_ec_rows_for_cert_with_r_override(
+    cert: &CertScalarInputRow,
+    selector: &FakeGlvSelectorRow,
+    table: &PreparedTableCert,
+    r_override: AffinePoint,
+) -> Result<Vec<PreparedTableEcRow>, PreparedTableError> {
+    assert_eq!(cert.cert_active.0, 1, "override path requires active cert");
+    let sig_id = cert.sig_id;
+    let cert_id = cert.cert_id;
+    let p = PreparedAffinePoint::from_affine(AffinePoint {
+        x: cert.base_x.to_u256(),
+        y: cert.base_y.to_u256(),
+    });
+    let r = PreparedAffinePoint::from_affine(r_override);
+
+    let mut rows = Vec::new();
+    let p3 = if cert.cert_id.0 == CERT_ID_U1_GENERATOR {
+        PreparedAffinePoint::from_affine(
+            scalar_mul(&U256::from_le_u64s(&[3, 0, 0, 0]), &p.to_option().unwrap()).ok_or(
+                PreparedTableError::MissingTriplePoint {
+                    point: "P",
+                    sig_id: cert.sig_id.0,
+                    cert_id: cert.cert_id.0,
+                },
+            )?,
+        )
+    } else {
+        let p2 = prepared(double_optional(p.to_option()));
+        rows.push(PreparedTableEcRow::double(
+            sig_id,
+            cert_id,
+            PreparedTableEcRowKind::DoubleP,
+            p.clone(),
+            p2.clone(),
+        ));
+        let p3 = prepared(add_optional_points(p2.to_option(), p.to_option()));
+        rows.push(PreparedTableEcRow::add(
+            sig_id,
+            cert_id,
+            PreparedTableEcRowKind::AddP2P,
+            p2,
+            p.clone(),
+            p3.clone(),
+        ));
+        p3
+    };
+
+    let r2 = prepared(double_optional(r.to_option()));
+    rows.push(PreparedTableEcRow::double(
+        sig_id,
+        cert_id,
+        PreparedTableEcRowKind::DoubleR,
+        r.clone(),
+        r2.clone(),
+    ));
+    rows.push(PreparedTableEcRow::add(
+        sig_id,
+        cert_id,
+        PreparedTableEcRowKind::AddR2R,
+        r2.clone(),
+        r.clone(),
+        table.r3.clone(),
+    ));
+
+    let base_operands = [
+        (p3.clone(), prepared(negate_optional(r.to_option()))),
+        (p.clone(), prepared(negate_optional(r.to_option()))),
+        (p.clone(), r.clone()),
+        (p3.clone(), r.clone()),
+        (p3.clone(), prepared(negate_optional(table.r3.to_option()))),
+        (p.clone(), prepared(negate_optional(table.r3.to_option()))),
+        (p.clone(), table.r3.clone()),
+        (p3.clone(), table.r3.clone()),
+    ];
+
+    for (index, (lhs, rhs)) in base_operands.into_iter().enumerate() {
+        let output = table.base[index].clone();
+        rows.push(PreparedTableEcRow::add(
+            sig_id,
+            cert_id,
+            PreparedTableEcRowKind::Base(index as u32),
+            lhs.clone(),
+            rhs.clone(),
+            output.clone(),
+        ));
+        let expected = prepared(add_optional_points(lhs.to_option(), rhs.to_option()));
+        if output != expected {
+            return Err(PreparedTableError::PreparedTableOutputMismatch {
+                sig_id: sig_id.0,
+                cert_id: cert_id.0,
+                table_index: index as u32,
+            });
+        }
+    }
+
+    let selector0 = Selector16DecodeEntry::from_selector(selector.selectors[0]).map_err(|_| {
+        PreparedTableError::InvalidSelector {
+            selector: selector.selectors[0].0,
+        }
+    })?;
+    let selected = apply_selector(&table.base, selector0)?;
+    rows.push(PreparedTableEcRow::add(
+        sig_id,
+        cert_id,
+        PreparedTableEcRowKind::Table16,
+        selected.clone(),
+        table.r3.clone(),
+        table.table16.clone(),
+    ));
+    let expected_table16 = prepared(add_optional_points(
+        selected.to_option(),
+        table.r3.to_option(),
+    ));
+    if table.table16 != expected_table16 {
+        return Err(PreparedTableError::PreparedTableOutputMismatch {
+            sig_id: sig_id.0,
+            cert_id: cert_id.0,
+            table_index: TABLE16_INDEX,
+        });
+    }
+
+    Ok(rows)
+}
+
+/// Test-only: build a [`PreparedTableEcTraceClaim`] where the cert at
+/// `override_cert_index` uses the injected `R'`; all other certs use the
+/// production path. Skips the cross-`verify` against the native (true-R)
+/// derivation so a wrong-`R'` trace can be assembled.
+#[cfg(test)]
+impl PreparedTableEcTraceClaim {
+    pub(crate) fn from_claims_with_r_override(
+        cert_inputs: &CertScalarInputClaim,
+        fake_glv_scalars: &FakeGlvScalarHintClaim,
+        selectors: &FakeGlvSelectorClaim,
+        table: &PreparedTableClaim,
+        override_cert_index: usize,
+        r_override: AffinePoint,
+    ) -> Result<Self, PreparedTableError> {
+        let mut rows = Vec::new();
+        for (index, (((cert, fake_glv), selector), table_cert)) in cert_inputs
+            .rows
+            .iter()
+            .zip(&fake_glv_scalars.rows)
+            .zip(&selectors.rows)
+            .zip(&table.certs)
+            .enumerate()
+        {
+            if index == override_cert_index {
+                rows.extend(prepared_table_ec_rows_for_cert_with_r_override(
+                    cert,
+                    selector,
+                    table_cert,
+                    r_override.clone(),
+                )?);
+            } else {
+                rows.extend(prepared_table_ec_rows_for_cert(
+                    cert, fake_glv, selector, table_cert,
+                )?);
+            }
+        }
+        Ok(Self { rows })
+    }
+}
+
+/// Test-only: build a [`PreparedTableClaim`] where the cert at
+/// `override_cert_index` is rebuilt from the injected `R'`.
+#[cfg(test)]
+impl PreparedTableClaim {
+    pub(crate) fn from_claims_with_r_override(
+        cert_inputs: &CertScalarInputClaim,
+        fake_glv_scalars: &FakeGlvScalarHintClaim,
+        selectors: &FakeGlvSelectorClaim,
+        override_cert_index: usize,
+        r_override: AffinePoint,
+    ) -> Result<Self, PreparedTableError> {
+        let certs = cert_inputs
+            .rows
+            .iter()
+            .zip(&fake_glv_scalars.rows)
+            .zip(&selectors.rows)
+            .enumerate()
+            .map(|(index, ((cert, fake_glv), selector))| {
+                if index == override_cert_index {
+                    PreparedTableCert::new_with_r_override(
+                        cert,
+                        fake_glv,
+                        selector,
+                        r_override.clone(),
+                    )
+                } else {
+                    PreparedTableCert::new(cert, fake_glv, selector)
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self { certs })
+    }
+}
+
 fn require_same_id(
     source: &'static str,
     cert: &CertScalarInputRow,
@@ -1963,6 +3025,7 @@ fn is_additive_inverse(lhs: &AffinePoint, rhs: &AffinePoint) -> bool {
 mod tests {
     use super::*;
     use crate::constants::{P256_GX, P256_GY};
+    use crate::scalar::cert_bind::CERT_ID_U2_PUBLIC_KEY;
     use crate::fake_glv_chain::FakeGlvPrimitiveEcTraceClaim;
     use crate::projective::ProjectiveEcTraceClaim;
     use crate::public_inputs::PublicEcdsaInputClaim;
@@ -2184,6 +3247,7 @@ mod tests {
                 PreparedTableEcRowEval {
                     log_size: claim.log_size,
                     relation: relation.clone(),
+                    pinning: None,
                 }
                 .evaluate(eval);
             },
@@ -2302,5 +3366,188 @@ mod tests {
             .expect_err("mutated provider must fail");
 
         assert_eq!(err, PreparedTableError::PreparedPointTraceMismatch);
+    }
+
+    // --- Full-table pinning adversarial audits (rejection oracle = relation
+    // balance, lessons.md #18). The honest table must keep `CertBase` and
+    // `PreparedTableCanonical` balanced; a wrong base or inconsistent operand
+    // must imbalance the matching relation. ---
+
+    /// Draw the three pinning relations from one channel and compute, for the
+    /// given (possibly mutated) EC base trace + cert base trace, the
+    /// `CertBase` and `PreparedTableCanonical` net sums (zero iff balanced).
+    fn pinned_relation_balances(
+        certs: &CertScalarInputClaim,
+        ec_base: &[M31ColumnEval],
+        scalar_setup: &crate::scalar::setup_air::ScalarSetupClaim,
+    ) -> (SecureField, SecureField) {
+        use crate::scalar::cert_bind::{
+            gen_cert_scalar_input_air_base_trace, gen_cert_scalar_input_air_interaction_trace,
+            CertScalarInputAirProofClaim, CertScalarInputRelation,
+        };
+        use crate::scalar::setup_air::ScalarSetupOutputRelation;
+
+        let mut channel = Blake2sChannel::default();
+        let setup_relation = ScalarSetupOutputRelation::draw(&mut channel);
+        let cert_relation = CertScalarInputRelation::draw(&mut channel);
+        let cert_base = CertBaseRelation::draw(&mut channel);
+        let prepared_table = PreparedTableEcRowRelation::draw(&mut channel);
+        let canonical = PreparedTableCanonicalRelation::draw(&mut channel);
+
+        let cert_claim = CertScalarInputAirProofClaim::from_claim(scalar_setup);
+        let cert_base_trace =
+            gen_cert_scalar_input_air_base_trace(scalar_setup, certs, cert_claim);
+        let (_, cert_interaction) = gen_cert_scalar_input_air_interaction_trace(
+            &cert_base_trace,
+            &setup_relation,
+            &cert_relation,
+            Some(&cert_base),
+        );
+
+        let (_, pinned) = gen_prepared_table_ec_row_pinned_interaction_trace(
+            ec_base,
+            &prepared_table,
+            &cert_base,
+            &canonical,
+        );
+
+        (
+            pinned.cert_base_consumer_claimed_sum + cert_interaction.cert_base_provider_claimed_sum,
+            pinned.canonical_claimed_sum,
+        )
+    }
+
+    fn pinning_audit_fixture(
+        message_hash: u64,
+    ) -> (
+        CertScalarInputClaim,
+        crate::scalar::setup_air::ScalarSetupClaim,
+        PreparedTableEcTraceClaim,
+        u32,
+    ) {
+        use crate::scalar::setup_air::ScalarSetupClaim;
+        let public_claim =
+            PublicEcdsaInputClaim::from_inputs(&[test_input(message_hash, 77, 1)]);
+        let scalar_setup =
+            ScalarSetupClaim::from_public_inputs(&public_claim).expect("valid scalar setup");
+        let certs =
+            CertScalarInputClaim::from_scalar_setup(&scalar_setup).expect("valid cert inputs");
+        let hints = certs
+            .rows
+            .iter()
+            .map(|row| FakeGlvScalarHint::trivial_for_small_scalar(&row.scalar).unwrap())
+            .collect();
+        let fake_glv =
+            FakeGlvScalarHintClaim::from_cert_inputs(&certs, hints).expect("valid hints");
+        let selectors =
+            FakeGlvSelectorClaim::from_scalar_hints(&fake_glv).expect("valid selectors");
+        let table =
+            PreparedTableClaim::from_claims(&certs, &fake_glv, &selectors).expect("valid table");
+        let trace = PreparedTableEcTraceClaim::from_claims(&certs, &fake_glv, &selectors, &table)
+            .expect("valid ec trace");
+        let log_size = PreparedTableEcRowProofClaim::from_trace(&trace).log_size;
+        (certs, scalar_setup, trace, log_size)
+    }
+
+    #[test]
+    fn pinning_honest_trace_balances_cert_base_and_canonical() {
+        let (certs, scalar_setup, trace, log_size) = pinning_audit_fixture(42);
+        let base = gen_prepared_table_ec_row_base_trace(&trace, log_size).unwrap();
+        let (cert_base_balance, canonical_balance) =
+            pinned_relation_balances(&certs, &base, &scalar_setup);
+        assert_eq!(cert_base_balance, secure_zero(), "CertBase must balance");
+        assert_eq!(
+            canonical_balance,
+            secure_zero(),
+            "PreparedTableCanonical must balance"
+        );
+    }
+
+    #[test]
+    fn pinning_honest_trace_balances_with_inactive_cert0_zero_branch() {
+        // u1 == 0 => cert0 inactive: no cert0 EC rows, cert-base provider yields
+        // `-4·cert_active = 0`. Both relations must still net to zero.
+        let (certs, scalar_setup, trace, log_size) = pinning_audit_fixture(0);
+        assert_eq!(certs.rows[0].cert_active.0, 0, "cert0 inactive in fixture");
+        let base = gen_prepared_table_ec_row_base_trace(&trace, log_size).unwrap();
+        let (cert_base_balance, canonical_balance) =
+            pinned_relation_balances(&certs, &base, &scalar_setup);
+        assert_eq!(cert_base_balance, secure_zero(), "CertBase must balance");
+        assert_eq!(
+            canonical_balance,
+            secure_zero(),
+            "PreparedTableCanonical must balance"
+        );
+    }
+
+    /// Locate the `trace.rows` index for `(cert_id, kind)`.
+    fn find_row_index(
+        trace: &PreparedTableEcTraceClaim,
+        cert_id: u32,
+        kind: PreparedTableEcRowKind,
+    ) -> usize {
+        trace
+            .rows
+            .iter()
+            .position(|row| row.cert_id.0 == cert_id && row.kind == kind)
+            .expect("row exists")
+    }
+
+    /// Add `1` to limb 0 of `point.x` (a self-consistent, off-cell mutation that
+    /// only the pinning relations can detect).
+    fn bump_x(point: &mut PreparedAffinePoint) {
+        let mut limbs = *point.x.limbs();
+        limbs[0] += M31::from_u32_unchecked(1);
+        point.x = P256M31BigInt::from_limbs(limbs);
+    }
+
+    #[test]
+    fn pinning_rejects_cert0_prepared_p_not_equal_generator() {
+        // cert0 base must equal G; mutating a cert0 P-cell (Base(1).lhs) away
+        // from G leaves the CertBase consumer demanding a point the cert-base
+        // provider never yields.
+        let (certs, scalar_setup, mut trace, log_size) = pinning_audit_fixture(42);
+        let row = find_row_index(&trace, CERT_ID_U1_GENERATOR, PreparedTableEcRowKind::Base(1));
+        bump_x(&mut trace.rows[row].lhs);
+        let base = gen_prepared_table_ec_row_base_trace(&trace, log_size).unwrap();
+        let (cert_base_balance, _) = pinned_relation_balances(&certs, &base, &scalar_setup);
+        assert_ne!(
+            cert_base_balance,
+            secure_zero(),
+            "wrong cert0 base P must imbalance CertBase"
+        );
+    }
+
+    #[test]
+    fn pinning_rejects_cert1_prepared_p_not_equal_public_key() {
+        // cert1 base must equal the public key Q; mutating a cert1 P-cell
+        // (Base(2).lhs) away from Q imbalances CertBase.
+        let (certs, scalar_setup, mut trace, log_size) = pinning_audit_fixture(42);
+        let row = find_row_index(&trace, CERT_ID_U2_PUBLIC_KEY, PreparedTableEcRowKind::Base(2));
+        bump_x(&mut trace.rows[row].lhs);
+        let base = gen_prepared_table_ec_row_base_trace(&trace, log_size).unwrap();
+        let (cert_base_balance, _) = pinned_relation_balances(&certs, &base, &scalar_setup);
+        assert_ne!(
+            cert_base_balance,
+            secure_zero(),
+            "wrong cert1 base P must imbalance CertBase"
+        );
+    }
+
+    #[test]
+    fn pinning_rejects_inconsistent_r_between_base_rows() {
+        // Base(2).rhs and Base(3).rhs both consume canonical R. Mutating only
+        // Base(2).rhs makes it demand an R the DoubleR provider never yields,
+        // imbalancing PreparedTableCanonical.
+        let (certs, scalar_setup, mut trace, log_size) = pinning_audit_fixture(42);
+        let row = find_row_index(&trace, CERT_ID_U2_PUBLIC_KEY, PreparedTableEcRowKind::Base(2));
+        bump_x(&mut trace.rows[row].rhs);
+        let base = gen_prepared_table_ec_row_base_trace(&trace, log_size).unwrap();
+        let (_, canonical_balance) = pinned_relation_balances(&certs, &base, &scalar_setup);
+        assert_ne!(
+            canonical_balance,
+            secure_zero(),
+            "inconsistent R must imbalance PreparedTableCanonical"
+        );
     }
 }

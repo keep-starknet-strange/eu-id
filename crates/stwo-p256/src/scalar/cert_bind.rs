@@ -26,6 +26,7 @@ use crate::limbs::{P256BigInt, P256M31BigInt};
 use crate::scalar::scalar_mod_mul::columns::{m31_column_eval, padded_log_size, M31ColumnEval};
 use crate::types::U256;
 
+use super::prepared_table::{CertBaseRelation, CERT_BASE_RELATION_ARITY};
 use super::setup_air::{
     ScalarSetupClaim, ScalarSetupOutput, ScalarSetupOutputRelation, SCALAR_SETUP_OUTPUT_ARITY,
 };
@@ -33,6 +34,14 @@ use super::setup_air::{
 pub const CERT_ID_U1_GENERATOR: u32 = 0;
 pub const CERT_ID_U2_PUBLIC_KEY: u32 = 1;
 pub const CERT_SCALAR_INPUT_RELATION_ARITY: usize = 2 + 3 * N_LIMBS + 1 + 4;
+
+/// Number of prepared-table cells that must equal the cert base point `P` per
+/// cert. cert0 (generator) has no `DoubleP`/`AddP2P` rows, so only `Base(1,2,5,6)`
+/// reference `P` (4 cells). cert1 (public key) adds `DoubleP.lhs` and `AddP2P.rhs`
+/// (6 cells). The cert-base provider yields `-count·cert_active` to balance the
+/// per-cell consumers in `PreparedTableEcRowEval`.
+pub const CERT0_PREPARED_P_CELL_COUNT: u32 = 4;
+pub const CERT1_PREPARED_P_CELL_COUNT: u32 = 6;
 
 relation!(
     CertScalarInputRelation,
@@ -108,6 +117,9 @@ pub struct CertScalarInputAirInteractionClaim {
     pub claimed_sum: SecureField,
     pub scalar_setup_consumer_claimed_sum: SecureField,
     pub cert_provider_claimed_sum: SecureField,
+    /// Yield of `CertBaseRelation` (prepared-table base pinning). Zero unless the
+    /// cert-base provider is active (monolithic STARK).
+    pub cert_base_provider_claimed_sum: SecureField,
 }
 
 impl CertScalarInputAirInteractionClaim {
@@ -116,6 +128,7 @@ impl CertScalarInputAirInteractionClaim {
             claimed_sum: secure_zero(),
             scalar_setup_consumer_claimed_sum: secure_zero(),
             cert_provider_claimed_sum: secure_zero(),
+            cert_base_provider_claimed_sum: secure_zero(),
         }
     }
 
@@ -135,6 +148,7 @@ impl CertScalarInputAirComponents {
         interaction_claim: &CertScalarInputAirInteractionClaim,
         relation: &ScalarSetupOutputRelation,
         cert_relation: &CertScalarInputRelation,
+        cert_base_relation: Option<&CertBaseRelation>,
     ) -> Self {
         Self {
             certs: CertScalarInputAirComponent::new(
@@ -143,6 +157,7 @@ impl CertScalarInputAirComponents {
                     log_size: claim.log_size,
                     scalar_setup_output: relation.clone(),
                     cert_relation: cert_relation.clone(),
+                    cert_base_relation: cert_base_relation.cloned(),
                 },
                 interaction_claim.claimed_sum,
             ),
@@ -171,6 +186,11 @@ pub struct CertScalarInputAirEval {
     pub log_size: u32,
     pub scalar_setup_output: ScalarSetupOutputRelation,
     pub cert_relation: CertScalarInputRelation,
+    /// Provides `CertBaseRelation` for prepared-table base pinning. `Some` in the
+    /// monolithic STARK (consumed by `PreparedTableEcRowEval`); `None` for the
+    /// standalone cert slice. Yields `-m(cert_id)·cert_active` where `m` is the
+    /// number of prepared-table cells that must equal `P` (cert0: 4, cert1: 6).
+    pub cert_base_relation: Option<CertBaseRelation>,
 }
 
 impl FrameworkEval for CertScalarInputAirEval {
@@ -213,6 +233,27 @@ impl FrameworkEval for CertScalarInputAirEval {
             -E::EF::from(active.clone()),
             &cert1.relation_values(),
         ));
+
+        if let Some(cert_base_relation) = &self.cert_base_relation {
+            // Yield the base point `-m(cert_id)·cert_active` times so the
+            // prepared-table P-cell consumers (use +1) balance exactly.
+            eval.add_to_relation(RelationEntry::new(
+                cert_base_relation,
+                -E::EF::from(
+                    cert0.cert_active.clone()
+                        * E::F::from(M31::from_u32_unchecked(CERT0_PREPARED_P_CELL_COUNT)),
+                ),
+                &cert_base_relation_values_from_row(&cert0),
+            ));
+            eval.add_to_relation(RelationEntry::new(
+                cert_base_relation,
+                -E::EF::from(
+                    cert1.cert_active.clone()
+                        * E::F::from(M31::from_u32_unchecked(CERT1_PREPARED_P_CELL_COUNT)),
+                ),
+                &cert_base_relation_values_from_row(&cert1),
+            ));
+        }
 
         constrain_cert_from_setup(
             &mut eval,
@@ -458,6 +499,7 @@ pub(crate) fn gen_cert_scalar_input_air_interaction_trace(
     base: &[M31ColumnEval],
     setup_relation: &ScalarSetupOutputRelation,
     cert_relation: &CertScalarInputRelation,
+    cert_base_relation: Option<&CertBaseRelation>,
 ) -> (ColumnVec<M31ColumnEval>, CertScalarInputAirInteractionClaim) {
     assert_eq!(base.len(), CERT_SCALAR_INPUT_TRACE_COLUMNS);
     let log_size = base[0].domain.log_size();
@@ -490,6 +532,29 @@ pub(crate) fn gen_cert_scalar_input_air_interaction_trace(
         );
     }
     col.finalize_col();
+    // CertBase providers (yield `-count·cert_active`), one column per cert. Only
+    // emitted when the prepared-table consumer exists (monolithic STARK), in
+    // lockstep with `CertScalarInputAirEval`'s two extra `add_to_relation` calls.
+    if let Some(cert_base_relation) = cert_base_relation {
+        for (cert_col, count) in [
+            (cert0_col(), CERT0_PREPARED_P_CELL_COUNT),
+            (cert1_col(), CERT1_PREPARED_P_CELL_COUNT),
+        ] {
+            let count_packed = PackedM31::broadcast(M31::from_u32_unchecked(count));
+            let mut col = logup.new_col();
+            for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+                let cert_active = base[cert_col + CERT_ACTIVE_ROW_OFFSET].data[vec_row];
+                let numerator = -PackedQM31::from(count_packed * cert_active);
+                col.write_frac(
+                    vec_row,
+                    numerator,
+                    cert_base_relation
+                        .combine(&cert_base_packed_values_from_base(base, vec_row, cert_col)),
+                );
+            }
+            col.finalize_col();
+        }
+    }
     let (trace, claimed_sum) = logup.finalize_last();
     let scalar_setup_consumer_claimed_sum: SecureField = storage_rows(base)
         .filter(|row| row[0] != M31::from_u32_unchecked(0))
@@ -512,14 +577,49 @@ pub(crate) fn gen_cert_scalar_input_air_interaction_trace(
             -SecureField::from(M31::from_u32_unchecked(1)) / denominator
         })
         .sum();
+    let cert_base_provider_claimed_sum: SecureField = match cert_base_relation {
+        None => secure_zero(),
+        Some(cert_base_relation) => storage_rows(base)
+            .filter(|row| row[0] != M31::from_u32_unchecked(0))
+            .flat_map(|row| {
+                [
+                    (cert0_col(), CERT0_PREPARED_P_CELL_COUNT),
+                    (cert1_col(), CERT1_PREPARED_P_CELL_COUNT),
+                ]
+                .map(|(cert_col, count)| (row.clone(), cert_col, count))
+            })
+            .map(|(row, cert_col, count)| -> SecureField {
+                let cert_active = row[cert_col + CERT_ACTIVE_ROW_OFFSET];
+                let numerator = M31::from_u32_unchecked(count) * cert_active;
+                let values = cert_base_values_from_base(&row, cert_col);
+                let denominator: SecureField = cert_base_relation.combine(&values);
+                -SecureField::from(numerator) / denominator
+            })
+            .sum(),
+    };
     (
         trace,
         CertScalarInputAirInteractionClaim {
             claimed_sum,
             scalar_setup_consumer_claimed_sum,
             cert_provider_claimed_sum,
+            cert_base_provider_claimed_sum,
         },
     )
+}
+
+/// Build the `CertBaseRelation` tuple `(sig_id, cert_id, base_x[..], base_y[..])`
+/// from a cert row.
+fn cert_base_relation_values_from_row<F: Clone>(
+    row: &CertScalarInputAirRow<F>,
+) -> [F; CERT_BASE_RELATION_ARITY] {
+    core::array::from_fn(|index| match index {
+        0 => row.sig_id.clone(),
+        1 => row.cert_id.clone(),
+        2..=21 => row.base_x.limbs()[index - 2].clone(),
+        22..=41 => row.base_y.limbs()[index - 2 - N_LIMBS].clone(),
+        _ => unreachable!("cert base relation index in range"),
+    })
 }
 
 fn read_scalar_setup_output<E: EvalAtRow>(eval: &mut E) -> ScalarSetupOutput<E::F> {
@@ -739,6 +839,35 @@ fn cert_packed_values_from_base(
 
 fn cert_values_from_base(row: &[M31], start: usize) -> [M31; CERT_SCALAR_INPUT_RELATION_ARITY] {
     core::array::from_fn(|index| row[start + index])
+}
+
+/// Column offset (within a cert row block) of `cert_active`: after `sig_id`,
+/// `cert_id`, the three `N_LIMBS` bigints (`scalar`, `base_x`, `base_y`),
+/// `base_inf`, `scalar_is_zero`, and `scalar_is_nonzero`.
+const CERT_ACTIVE_ROW_OFFSET: usize = 2 + 3 * N_LIMBS + 1 + 2;
+
+/// `CertBaseRelation` tuple from a cert row block: `(sig_id, cert_id, base_x[..],
+/// base_y[..])`. Mirrors `cert_base_relation_values_from_row`.
+fn cert_base_index_in_row(index: usize) -> usize {
+    match index {
+        0 => 0,                                // sig_id
+        1 => 1,                                // cert_id
+        2..=21 => 2 + N_LIMBS + (index - 2),   // base_x limbs
+        22..=41 => 2 + 2 * N_LIMBS + (index - 22), // base_y limbs
+        _ => unreachable!("cert base relation index in range"),
+    }
+}
+
+fn cert_base_packed_values_from_base(
+    base: &[M31ColumnEval],
+    vec_row: usize,
+    start: usize,
+) -> [PackedM31; CERT_BASE_RELATION_ARITY] {
+    core::array::from_fn(|index| base[start + cert_base_index_in_row(index)].data[vec_row])
+}
+
+fn cert_base_values_from_base(row: &[M31], start: usize) -> [M31; CERT_BASE_RELATION_ARITY] {
+    core::array::from_fn(|index| row[start + cert_base_index_in_row(index)])
 }
 
 const fn cert0_col() -> usize {

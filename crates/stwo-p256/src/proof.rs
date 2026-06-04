@@ -93,13 +93,15 @@ use crate::prepared_point::{
     PreparedPointUseCountClaim,
 };
 use crate::prepared_table::{
-    gen_prepared_table_ec_row_base_trace, gen_prepared_table_ec_row_interaction_trace,
+    gen_prepared_table_ec_row_base_trace,
     gen_prepared_table_ec_row_preprocessed_trace, gen_prepared_table_projective_source_base_trace,
     gen_prepared_table_projective_source_interaction_trace,
     prove_prepared_table_ec_row_proof_slice, prove_prepared_table_projective_source_proof_slice,
     verify_prepared_table_ec_row_proof_slice, verify_prepared_table_projective_source_proof_slice,
-    PreparedTableClaim, PreparedTableEcRowProof, PreparedTableEcRowProofClaim,
-    PreparedTableEcRowRelation, PreparedTableEcTraceClaim, PreparedTableError,
+    gen_prepared_table_ec_row_pinned_interaction_trace, CertBaseRelation,
+    PreparedTableCanonicalRelation, PreparedTableClaim, PreparedTableEcRowPinnedInteractionClaim,
+    PreparedTableEcRowProof, PreparedTableEcRowProofClaim, PreparedTableEcRowRelation,
+    PreparedTableEcTraceClaim, PreparedTableError, PreparedTablePinningRelations,
     PreparedTableProjectiveSourceComponents, PreparedTableProjectiveSourceInteractionClaim,
     PreparedTableProjectiveSourceProof, PreparedTableProjectiveSourceProofClaim,
 };
@@ -279,6 +281,76 @@ impl P256ProofClaim {
             .map(|row| FakeGlvScalarHint::trivial_for_small_scalar(&row.scalar))
             .collect::<Result<Vec<_>, _>>()?;
         Self::from_inputs_with_hints(inputs, hints)
+    }
+
+    /// Test-only: build a globally-shaped proof claim in which the prepared
+    /// table + fake-GLV chain for `override_cert_index` are rebuilt from an
+    /// injected hint point `R'` (`!= ±u·base`), with every R-derived artifact
+    /// (EC trace, projective trace, rcb-air trace, prepared-point trace)
+    /// cascaded consistently from `R'`. The `final_check` is taken from the
+    /// true-R build (its `r_x`/`expected_r` columns bind to the public `r`
+    /// independently of the chain), so the public-input relation still
+    /// balances. The chain's `final_acc == r3` native gate is *not* asserted
+    /// during construction — the experiment then asks whether the monolithic
+    /// AIR constraints reject this wrong-`R'` witness.
+    #[cfg(test)]
+    pub(crate) fn from_inputs_with_wrong_r_for_cert(
+        inputs: &[EcdsaVerifyInput],
+        override_cert_index: usize,
+        r_override: crate::types::AffinePoint,
+    ) -> Result<Self, P256ProofError> {
+        let base = Self::from_inputs_with_trivial_fake_glv_hints(inputs)?;
+
+        let prepared_table = PreparedTableClaim::from_claims_with_r_override(
+            &base.cert_inputs,
+            &base.fake_glv_scalars,
+            &base.fake_glv_selectors,
+            override_cert_index,
+            r_override.clone(),
+        )?;
+        let prepared_table_ec_trace = PreparedTableEcTraceClaim::from_claims_with_r_override(
+            &base.cert_inputs,
+            &base.fake_glv_scalars,
+            &base.fake_glv_selectors,
+            &prepared_table,
+            override_cert_index,
+            r_override.clone(),
+        )?;
+        let fake_glv_chain = FakeGlvChainClaim::from_claims_with_r_override(
+            &base.cert_inputs,
+            &base.fake_glv_scalars,
+            &base.fake_glv_selectors,
+            &prepared_table,
+            override_cert_index,
+            r_override.clone(),
+        )?;
+        let fake_glv_ec_trace = FakeGlvPrimitiveEcTraceClaim::from_chain(&fake_glv_chain)?;
+        let projective_ec_trace = ProjectiveEcTraceClaim::from_native_traces(
+            &prepared_table_ec_trace,
+            &fake_glv_ec_trace,
+        )?;
+        let projective_rcb_air_trace =
+            ProjectiveRcbAirTraceClaim::from_projective_trace(&projective_ec_trace)?;
+        let prepared_trace = prepared_table.prepared_point_trace(&base.prepared_use_counts)?;
+
+        Ok(Self {
+            public_inputs: base.public_inputs,
+            public_key_check: base.public_key_check,
+            scalar_setup: base.scalar_setup,
+            cert_inputs: base.cert_inputs,
+            fake_glv_scalars: base.fake_glv_scalars,
+            fake_glv_selectors: base.fake_glv_selectors,
+            selector_requests: base.selector_requests,
+            prepared_table,
+            prepared_table_ec_trace,
+            fake_glv_chain,
+            fake_glv_ec_trace,
+            projective_ec_trace,
+            projective_rcb_air_trace,
+            final_check: base.final_check,
+            prepared_use_counts: base.prepared_use_counts,
+            prepared_trace,
+        })
     }
 
     pub fn verify_current_components(&self) -> Result<(), P256ProofError> {
@@ -799,6 +871,10 @@ pub struct P256CurrentAirInteractionClaim {
     pub fake_glv_selector_air: FakeGlvSelectorAirInteractionClaim,
     pub(crate) scalar_setup_mod_muls: Vec<ScalarModMulProofSliceInteractionClaim>,
     pub prepared_table_projective_source: PreparedTableProjectiveSourceInteractionClaim,
+    /// Per-relation breakdown of the pinned EC-row provider's logup total
+    /// (`prepared_table_projective_source.provider_claimed_sum`), used to verify
+    /// the `CertBase` and `PreparedTableCanonical` balances independently.
+    pub prepared_table_pinned: PreparedTableEcRowPinnedInteractionClaim,
     pub fake_glv_projective_source: FakeGlvProjectiveSourceInteractionClaim,
     pub fake_glv_chain_expansion: FakeGlvChainExpansionInteractionClaim,
     pub fake_glv_chain_continuity: FakeGlvChainContinuityInteractionClaim,
@@ -826,6 +902,7 @@ impl P256CurrentAirInteractionClaim {
             fake_glv_selector_air: FakeGlvSelectorAirInteractionClaim::zero(),
             scalar_setup_mod_muls: Vec::new(),
             prepared_table_projective_source: PreparedTableProjectiveSourceInteractionClaim::zero(),
+            prepared_table_pinned: PreparedTableEcRowPinnedInteractionClaim::zero(),
             fake_glv_projective_source: FakeGlvProjectiveSourceInteractionClaim::zero(),
             fake_glv_chain_expansion: FakeGlvChainExpansionInteractionClaim::zero(),
             fake_glv_chain_continuity: FakeGlvChainContinuityInteractionClaim {
@@ -869,6 +946,11 @@ impl P256CurrentAirInteractionClaim {
             claim.signed_carry.mix_into(channel);
         }
         self.prepared_table_projective_source.mix_into(channel);
+        channel.mix_felts(&[
+            self.prepared_table_pinned.prepared_table_provider_claimed_sum,
+            self.prepared_table_pinned.cert_base_consumer_claimed_sum,
+            self.prepared_table_pinned.canonical_claimed_sum,
+        ]);
         self.fake_glv_projective_source.mix_into(channel);
         self.fake_glv_chain_expansion.mix_into(channel);
         self.fake_glv_chain_continuity.mix_into(channel);
@@ -925,10 +1007,39 @@ impl P256CurrentAirInteractionClaim {
             .sum::<SecureField>()
             + self.scalar_setup.scalar_limb_consumer_claimed_sum;
         verify_current_air_relation_zero("ScalarSetupModMul", scalar_setup_mod_mul_total)?;
+        // The pinned EC-row provider's committed logup total must equal the
+        // declared provider claimed sum and the sum of its per-relation
+        // breakdown, binding the breakdown to the PCS-verified total.
+        let pinned = &self.prepared_table_pinned;
+        verify_current_air_relation_zero(
+            "PreparedTablePinnedConsistency",
+            pinned.total_claimed_sum
+                - self.prepared_table_projective_source.provider_claimed_sum,
+        )?;
+        verify_current_air_relation_zero(
+            "PreparedTablePinnedBreakdown",
+            pinned.total_claimed_sum
+                - pinned.prepared_table_provider_claimed_sum
+                - pinned.cert_base_consumer_claimed_sum
+                - pinned.canonical_claimed_sum,
+        )?;
+        // PreparedTableEcRowRelation: EC-row provider (existing yield) balances
+        // the projective-source consumer.
         verify_current_air_relation_zero(
             "PreparedTableProjectiveSource",
-            self.prepared_table_projective_source.total(),
+            pinned.prepared_table_provider_claimed_sum
+                + self.prepared_table_projective_source.consumer_claimed_sum,
         )?;
+        // CertBaseRelation: cert-bind base provider (yield -m·cert_active)
+        // balances the prepared-table P-cell consumers.
+        verify_current_air_relation_zero(
+            "CertBase",
+            pinned.cert_base_consumer_claimed_sum
+                + self.cert_scalar_inputs.cert_base_provider_claimed_sum,
+        )?;
+        // PreparedTableCanonicalRelation: self-balancing within the EC-row
+        // provider (every canonical role yielded once, consumed N times).
+        verify_current_air_relation_zero("PreparedTableCanonical", pinned.canonical_claimed_sum)?;
         verify_current_air_relation_zero(
             "FakeGlvProjectiveSource",
             self.fake_glv_projective_source.total(),
@@ -994,6 +1105,11 @@ struct P256CurrentAirRelations {
     scalar_mod_mul: ScalarModMulLookupRelations,
     scalar_setup: ScalarSetupAirRelations,
     prepared_table: PreparedTableEcRowRelation,
+    /// Binds prepared-table P-cells to `cert.base` (full table pinning).
+    cert_base: CertBaseRelation,
+    /// Ties prepared-table `P3/R/R3/±R/±R3/2P/2R` operands to canonical per-cert
+    /// values (full table pinning).
+    prepared_table_canonical: PreparedTableCanonicalRelation,
     fake_glv_projective_source: FakeGlvPrimitiveEcRowRelation,
     fake_glv_chain_expansion: FakeGlvChainPrimitiveExpansionRelation,
     fake_glv_chain_continuity: FakeGlvChainAccumulatorRelation,
@@ -1035,6 +1151,8 @@ impl P256CurrentAirRelations {
             scalar_mod_mul,
             scalar_setup,
             prepared_table: PreparedTableEcRowRelation::dummy(),
+            cert_base: CertBaseRelation::dummy(),
+            prepared_table_canonical: PreparedTableCanonicalRelation::dummy(),
             fake_glv_projective_source: FakeGlvPrimitiveEcRowRelation::dummy(),
             fake_glv_chain_expansion: FakeGlvChainPrimitiveExpansionRelation::dummy(),
             fake_glv_chain_continuity: FakeGlvChainAccumulatorRelation::dummy(),
@@ -1073,6 +1191,8 @@ impl P256CurrentAirRelations {
             scalar_mod_mul,
             scalar_setup,
             prepared_table: PreparedTableEcRowRelation::draw(channel),
+            cert_base: CertBaseRelation::draw(channel),
+            prepared_table_canonical: PreparedTableCanonicalRelation::draw(channel),
             fake_glv_projective_source: FakeGlvPrimitiveEcRowRelation::draw(channel),
             fake_glv_chain_expansion: FakeGlvChainPrimitiveExpansionRelation::draw(channel),
             fake_glv_chain_continuity: FakeGlvChainAccumulatorRelation::draw(channel),
@@ -1133,6 +1253,7 @@ impl P256CurrentAirComponents {
                 &interaction_claim.cert_scalar_inputs,
                 &relations.scalar_setup_output,
                 &relations.cert_scalar_input,
+                Some(&relations.cert_base),
             ),
             fake_glv_scalar_air: FakeGlvScalarAirComponents::new(
                 allocator,
@@ -1161,11 +1282,20 @@ impl P256CurrentAirComponents {
                     )
                 })
                 .collect(),
-            prepared_table_projective_source: PreparedTableProjectiveSourceComponents::new(
+            prepared_table_projective_source: PreparedTableProjectiveSourceComponents::new_pinned(
                 allocator,
                 claim.prepared_table_projective_source.log_size,
-                &interaction_claim.prepared_table_projective_source,
+                interaction_claim
+                    .prepared_table_projective_source
+                    .provider_claimed_sum,
+                interaction_claim
+                    .prepared_table_projective_source
+                    .consumer_claimed_sum,
                 &relations.prepared_table,
+                &PreparedTablePinningRelations {
+                    cert_base: relations.cert_base.clone(),
+                    canonical: relations.prepared_table_canonical.clone(),
+                },
             ),
             fake_glv_projective_source: FakeGlvProjectiveSourceComponents::new(
                 allocator,
@@ -1967,6 +2097,7 @@ impl P256ProofDraft {
                 &base.cert_scalar_inputs,
                 &relations.scalar_setup_output,
                 &relations.cert_scalar_input,
+                Some(&relations.cert_base),
             );
         let (fake_glv_scalar_interaction, fake_glv_scalar_claim) =
             gen_fake_glv_scalar_air_interaction_trace(
@@ -2002,10 +2133,12 @@ impl P256ProofDraft {
             scalar_setup_interactions.push(interaction);
             scalar_setup_interaction_claims.push(interaction_claim);
         }
-        let (prepared_provider_interaction, prepared_provider_claim) =
-            gen_prepared_table_ec_row_interaction_trace(
+        let (prepared_provider_interaction, prepared_pinned_claim) =
+            gen_prepared_table_ec_row_pinned_interaction_trace(
                 &base.prepared_table_provider,
                 &relations.prepared_table,
+                &relations.cert_base,
+                &relations.prepared_table_canonical,
             );
         let (prepared_consumer_interaction, prepared_consumer_claim) =
             gen_prepared_table_projective_source_interaction_trace(
@@ -2159,9 +2292,10 @@ impl P256ProofDraft {
                 fake_glv_selector_air: fake_glv_selector_claim,
                 scalar_setup_mod_muls: scalar_setup_interaction_claims,
                 prepared_table_projective_source: PreparedTableProjectiveSourceInteractionClaim {
-                    provider_claimed_sum: prepared_provider_claim.claimed_sum,
+                    provider_claimed_sum: prepared_pinned_claim.total_claimed_sum,
                     consumer_claimed_sum: prepared_consumer_claim.claimed_sum,
                 },
+                prepared_table_pinned: prepared_pinned_claim,
                 fake_glv_projective_source: FakeGlvProjectiveSourceInteractionClaim {
                     provider_claimed_sum: fake_glv_provider_claim.claimed_sum,
                     consumer_claimed_sum: fake_glv_consumer_claim.claimed_sum,
@@ -2442,8 +2576,8 @@ pub const P256_PROOF_COMPONENT_SLOTS: &[P256ProofComponentSlot] = &[
     },
     P256ProofComponentSlot {
         name: "PreparedTablePoints",
-        status: P256ProofComponentStatus::Pending,
-        note: "Per-cert base binding (table[0] = G for cert_id=0, Q for cert_id=1) is not yet a verifier-checked AIR consumer of CertScalarInputRelation; correctness currently propagates only through the final ECDSA check (also pending).",
+        status: P256ProofComponentStatus::Implemented,
+        note: "Full table pinning is enforced in the monolithic STARK: cert_bind yields CertBaseRelation (base = G for cert_id=0, Q for cert_id=1) and the prepared-table EC-row provider consumes it on every P-cell, while PreparedTableCanonicalRelation ties P3=3P (cert0 to constant 3G), R, R3=3R, -R, -R3, 2P, 2R to a single canonical value per (sig,cert,role) with an in-AIR field negation. With output = lhs + rhs already proven, base[] is forced to {P,3P}±{R,3R} for P = cert.base.",
     },
     P256ProofComponentSlot {
         name: "PreparedTableEcTrace",
@@ -2604,7 +2738,7 @@ fn zero() -> SecureField {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constants::{P256_GX, P256_GY, P256_ORDER};
+    use crate::constants::{P256_GX, P256_GY, P256_MODULUS, P256_ORDER};
     use crate::curve::{mod_inverse, scalar_mul};
     use crate::debug::MockCommitmentScheme;
     use crate::fake_glv_chain_continuity::{
@@ -2648,12 +2782,13 @@ mod tests {
     use crate::field_ops::mul_mod_witness;
     use crate::fp_solinas_air::FP_SOLINAS_REDUCTION_DIGITS;
     use crate::limbs::P256M31BigInt;
+    use crate::fake_glv_chain::FakeGlvChainCert;
     use crate::prepared_table::{
         prove_prepared_table_ec_row_proof_slice,
         prove_prepared_table_projective_source_proof_slice,
         verify_prepared_table_ec_row_proof_slice,
         verify_prepared_table_projective_source_proof_slice, PreparedAffinePoint,
-        PreparedTableEcRowProofClaim, PreparedTableProjectiveSourceProofClaim,
+        PreparedTableCert, PreparedTableEcRowProofClaim, PreparedTableProjectiveSourceProofClaim,
     };
     use crate::projective_air::{
         PROJECTIVE_RCB_FOLDED_CONTRIBUTION_ROWS, PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERMS,
@@ -3846,6 +3981,248 @@ mod tests {
         proof.verify_current_e2e().expect("zero branch verifies");
 
         assert_current_air_constraints(&proof);
+    }
+
+    /// EXPERIMENT (Phase A — feasibility probe): for ONE active cert, rebuild
+    /// the prepared table and fake-GLV chain from a WRONG hint point
+    /// `R' != ±u·base` (a valid curve point) while keeping `u`, the public
+    /// input and the selectors (= digits of `u`) UNCHANGED. Report whether the
+    /// chain's internal `final_acc == r3` gate holds for the wrong `R'`. If it
+    /// FAILS, no globally consistent wrong-`R` chain exists (the windowed
+    /// accumulation itself binds `R`). If it HOLDS, the accumulation does not
+    /// bind `R` and the full prove/verify experiment is worth running.
+    #[test]
+    fn wrong_r_chain_feasibility_probe() {
+        let inputs = vec![valid_real_input_with_small_u_scalars(7, 11)];
+        let claim = P256ProofClaim::from_inputs_with_trivial_fake_glv_hints(&inputs)
+            .expect("valid claim builds");
+
+        for cert_index in 0..claim.cert_inputs.rows.len() {
+            let cert = &claim.cert_inputs.rows[cert_index];
+            if cert.cert_active.0 == 0 {
+                eprintln!("cert {cert_index}: inactive, skipping");
+                continue;
+            }
+            let fake_glv = &claim.fake_glv_scalars.rows[cert_index];
+            let selector = &claim.fake_glv_selectors.rows[cert_index];
+
+            // Sanity: reconstruct the TRUE R the production pipeline used.
+            let base = AffinePoint {
+                x: cert.base_x.to_u256(),
+                y: cert.base_y.to_u256(),
+            };
+            let u = cert.scalar.to_u256();
+            let h = scalar_mul(&u, &base).expect("u*base finite");
+            let true_r = match fake_glv.hint.s2_sign_bit.0 {
+                0 => h.clone(),
+                1 => negate_affine(&h),
+                _ => panic!("bad sign bit"),
+            };
+
+            // Pick a WRONG R' that is a valid curve point but != ±u·base:
+            // R' = (u+1)*base.
+            let u_plus_1 = add_u256(&u, &U256::from_le_u64s(&[1, 0, 0, 0]));
+            let wrong_r = scalar_mul(&u_plus_1, &base).expect("(u+1)*base finite");
+            assert_ne!(wrong_r, true_r, "R' must differ from the true R");
+            assert_ne!(wrong_r, negate_affine(&true_r), "R' must differ from -R");
+
+            // Rebuild table + chain from R' using the production algorithm.
+            let wrong_table =
+                PreparedTableCert::new_with_r_override(cert, fake_glv, selector, wrong_r.clone())
+                    .expect("override table builds");
+            let wrong_chain = FakeGlvChainCert::from_claims_with_r_override(
+                cert,
+                selector,
+                &wrong_table,
+                wrong_r.clone(),
+            )
+            .expect("override chain builds");
+
+            let gate_holds = wrong_chain.final_acc == wrong_chain.r3;
+            let verify_result = wrong_chain.verify();
+            eprintln!(
+                "cert {cert_index} (cert_id={}): WRONG-R final_acc==r3 gate holds = {gate_holds}; chain.verify() = {:?}",
+                cert.cert_id.0, verify_result
+            );
+
+            // Cross-check: the SAME rebuild with the TRUE R must satisfy the gate.
+            let true_table =
+                PreparedTableCert::new_with_r_override(cert, fake_glv, selector, true_r.clone())
+                    .expect("true override table builds");
+            let true_chain = FakeGlvChainCert::from_claims_with_r_override(
+                cert,
+                selector,
+                &true_table,
+                true_r.clone(),
+            )
+            .expect("true override chain builds");
+            assert_eq!(
+                true_chain.final_acc, true_chain.r3,
+                "sanity: the TRUE R rebuild must satisfy final_acc==r3 (override harness fidelity)"
+            );
+            assert!(
+                true_chain.verify().is_ok(),
+                "sanity: TRUE R chain verifies"
+            );
+        }
+    }
+
+    fn true_r_for_cert(claim: &P256ProofClaim, cert_index: usize) -> AffinePoint {
+        let cert = &claim.cert_inputs.rows[cert_index];
+        let fake_glv = &claim.fake_glv_scalars.rows[cert_index];
+        let base = AffinePoint {
+            x: cert.base_x.to_u256(),
+            y: cert.base_y.to_u256(),
+        };
+        let h = scalar_mul(&cert.scalar.to_u256(), &base).expect("u*base finite");
+        match fake_glv.hint.s2_sign_bit.0 {
+            0 => h,
+            1 => negate_affine(&h),
+            _ => panic!("bad sign bit"),
+        }
+    }
+
+    /// FIDELITY CONTROL for the wrong-R AIR oracle: drive the *same* override
+    /// build path with the TRUE `R`. If `assert_current_air_constraints`
+    /// passes cleanly here, the override harness is faithful and the Phase C
+    /// constraint violation is attributable to the wrong `R'`, not to the
+    /// harness.
+    #[test]
+    fn wrong_r_harness_fidelity_true_r_air_constraints_pass() {
+        let inputs = vec![valid_real_input_with_small_u_scalars(7, 11)];
+        let base_claim = P256ProofClaim::from_inputs_with_trivial_fake_glv_hints(&inputs)
+            .expect("valid claim builds");
+        let true_r = true_r_for_cert(&base_claim, 0);
+
+        let rebuilt =
+            P256ProofClaim::from_inputs_with_wrong_r_for_cert(&inputs, 0, true_r.clone())
+                .expect("true-R rebuild via override path assembles");
+        // The override path must reproduce the production claim exactly.
+        assert_eq!(
+            rebuilt.prepared_table, base_claim.prepared_table,
+            "override prepared_table with TRUE R must equal production"
+        );
+        assert_eq!(
+            rebuilt.fake_glv_chain, base_claim.fake_glv_chain,
+            "override chain with TRUE R must equal production"
+        );
+
+        let relations = P256ProofRelations::dummy();
+        let interaction_claim = P256ProofInteractionClaim::from_claim(&rebuilt, &relations);
+        let draft = P256ProofDraft {
+            inputs,
+            claim: rebuilt,
+            relations,
+            interaction_claim,
+        };
+        assert_current_air_constraints(&draft);
+        eprintln!("FIDELITY: TRUE-R override path passes assert_current_air_constraints cleanly.");
+    }
+
+    fn wrong_r_for_cert(claim: &P256ProofClaim, cert_index: usize) -> AffinePoint {
+        let cert = &claim.cert_inputs.rows[cert_index];
+        let base = AffinePoint {
+            x: cert.base_x.to_u256(),
+            y: cert.base_y.to_u256(),
+        };
+        let u = cert.scalar.to_u256();
+        let u_plus_1 = add_u256(&u, &U256::from_le_u64s(&[1, 0, 0, 0]));
+        scalar_mul(&u_plus_1, &base).expect("(u+1)*base finite")
+    }
+
+    /// EXPERIMENT (Phase B — full monolithic pipeline on a wrong-`R` witness).
+    /// Builds a globally consistent claim whose cert-0 prepared table + chain
+    /// use `R' = (u+1)*base != ±u*base`, then drives
+    /// `prove_current_air_monolithic`. Reports the exact observed outcome.
+    #[test]
+    fn wrong_r_monolithic_prove_outcome() {
+        let inputs = vec![valid_real_input_with_small_u_scalars(7, 11)];
+        let base_claim = P256ProofClaim::from_inputs_with_trivial_fake_glv_hints(&inputs)
+            .expect("valid claim builds");
+        let r_prime = wrong_r_for_cert(&base_claim, 0);
+
+        let wrong_claim =
+            P256ProofClaim::from_inputs_with_wrong_r_for_cert(&inputs, 0, r_prime.clone())
+                .expect("wrong-R claim assembles (no native gate in override builders)");
+
+        // Build a draft WITHOUT verify_current_e2e (which would itself reject).
+        let relations = P256ProofRelations::dummy();
+        let interaction_claim = P256ProofInteractionClaim::from_claim(&wrong_claim, &relations);
+        let draft = P256ProofDraft {
+            inputs: inputs.clone(),
+            claim: wrong_claim,
+            relations,
+            interaction_claim,
+        };
+
+        // (1) Does the native pre-check inside prove reject?
+        match draft.prove_current_air_monolithic::<Blake2sMerkleChannel>() {
+            Ok(_) => eprintln!(
+                "PHASE B: prove_current_air_monolithic SUCCEEDED on wrong-R witness (UNEXPECTED — would indicate acceptance)"
+            ),
+            Err(e) => eprintln!("PHASE B: prove_current_air_monolithic REJECTED wrong-R: {e:?}"),
+        }
+    }
+
+    /// EXPERIMENT (Phase C — DECISIVE AIR oracle). Runs `assert_constraints`
+    /// directly on the wrong-`R` trace, bypassing every native shape check.
+    /// A clean return == AIR ACCEPTS (soundness gap). A panic/abort == AIR
+    /// REJECTS (sound). This isolates whether the monolithic AIR *constraints*
+    /// bind `R` to `u*base`, independent of native validation.
+    #[test]
+    #[ignore = "decisive manual wrong-R AIR oracle: assert_current_air_constraints \
+                panics (clean single polynomial-constraint panic at \
+                fake_glv_chain_continuity final_acc==r3) when the AIR correctly \
+                rejects a wrong R (sound). Run with --ignored. Not auto-run to avoid \
+                the lessons.md #18 double-panic/SIGABRT risk in the shared suite."]
+    fn wrong_r_air_constraints_oracle() {
+        let inputs = vec![valid_real_input_with_small_u_scalars(7, 11)];
+        let base_claim = P256ProofClaim::from_inputs_with_trivial_fake_glv_hints(&inputs)
+            .expect("valid claim builds");
+        let r_prime = wrong_r_for_cert(&base_claim, 0);
+
+        let wrong_claim =
+            P256ProofClaim::from_inputs_with_wrong_r_for_cert(&inputs, 0, r_prime.clone())
+                .expect("wrong-R claim assembles");
+        let relations = P256ProofRelations::dummy();
+        let interaction_claim = P256ProofInteractionClaim::from_claim(&wrong_claim, &relations);
+        let draft = P256ProofDraft {
+            inputs,
+            claim: wrong_claim,
+            relations,
+            interaction_claim,
+        };
+
+        eprintln!(
+            "PHASE C: running assert_current_air_constraints on wrong-R trace; \
+             a clean PASS == AIR accepts (gap), a panic/abort == AIR rejects (sound)."
+        );
+        assert_current_air_constraints(&draft);
+        eprintln!(
+            "PHASE C: assert_current_air_constraints RETURNED CLEANLY on wrong-R trace \
+             => AIR ACCEPTED the wrong R (soundness gap confirmed)."
+        );
+    }
+
+    fn negate_affine(p: &AffinePoint) -> AffinePoint {
+        let m = U256::from_le_u64s(&P256_MODULUS);
+        AffinePoint {
+            x: p.x.clone(),
+            y: crate::field_ops::sub_mod_witness(&m, &p.y, &m).result.to_u256(),
+        }
+    }
+
+    fn add_u256(a: &U256, b: &U256) -> U256 {
+        let a = a.to_le_u64s();
+        let b = b.to_le_u64s();
+        let mut out = [0u64; 4];
+        let mut carry = 0u128;
+        for i in 0..4 {
+            let sum = a[i] as u128 + b[i] as u128 + carry;
+            out[i] = sum as u64;
+            carry = sum >> 64;
+        }
+        U256::from_le_u64s(&out)
     }
 
     #[test]
@@ -5073,7 +5450,8 @@ mod tests {
         assert!(implemented.contains(&"CertScalarInput"));
         assert!(implemented.contains(&"FakeGlvSelector"));
         assert!(implemented.contains(&"PreparedPointUseCounts"));
-        assert!(pending.contains(&"PreparedTablePoints"));
+        assert!(implemented.contains(&"PreparedTablePoints"));
+        assert!(!pending.contains(&"PreparedTablePoints"));
         assert!(implemented.contains(&"PreparedTableEcTrace"));
         assert!(implemented.contains(&"PreparedTableEcRows"));
         assert!(implemented.contains(&"FakeGlvChainTrace"));

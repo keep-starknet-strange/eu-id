@@ -51,6 +51,43 @@ impl FakeGlvChainClaim {
         Ok(claim)
     }
 
+    /// Test-only: build a [`FakeGlvChainClaim`] where the cert at
+    /// `override_cert_index` uses the injected `R'` (paired with a prepared
+    /// table built from the same `R'`); other certs use the production path.
+    /// Does NOT call [`Self::verify`], so the `final_acc == r3` gate is not
+    /// asserted here — callers observe it (or the downstream AIR) instead.
+    #[cfg(test)]
+    pub(crate) fn from_claims_with_r_override(
+        cert_inputs: &CertScalarInputClaim,
+        fake_glv_scalars: &FakeGlvScalarHintClaim,
+        selectors: &FakeGlvSelectorClaim,
+        prepared_table: &PreparedTableClaim,
+        override_cert_index: usize,
+        r_override: AffinePoint,
+    ) -> Result<Self, FakeGlvChainError> {
+        let certs = cert_inputs
+            .rows
+            .iter()
+            .zip(&fake_glv_scalars.rows)
+            .zip(&selectors.rows)
+            .zip(&prepared_table.certs)
+            .enumerate()
+            .map(|(index, (((cert, fake_glv), selector), table))| {
+                if index == override_cert_index {
+                    FakeGlvChainCert::from_claims_with_r_override(
+                        cert,
+                        selector,
+                        table,
+                        r_override.clone(),
+                    )
+                } else {
+                    FakeGlvChainCert::from_claims(cert, fake_glv, selector, table)
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self { certs })
+    }
+
     pub fn verify(&self) -> Result<(), FakeGlvChainError> {
         for cert in &self.certs {
             cert.verify()?;
@@ -351,6 +388,116 @@ impl FakeGlvChainCert {
         };
         cert.verify()?;
         Ok(cert)
+    }
+
+    /// Test-only variant of [`Self::from_claims`] that uses an injected hint
+    /// point `R'` for the `lsb_correction` operand instead of the production
+    /// `R = signed_hint(scalar_mul(u, base))`. Pair it with a prepared table
+    /// built from the same `R'` (see
+    /// [`crate::prepared_table::PreparedTableCert::new_with_r_override`]) to
+    /// produce an internally consistent wrong-`R` chain. Returns the
+    /// constructed cert *without* running [`Self::verify`], so callers can
+    /// observe whether the `final_acc == r3` gate holds for the wrong `R'`.
+    #[cfg(test)]
+    pub(crate) fn from_claims_with_r_override(
+        cert: &CertScalarInputRow,
+        selector: &FakeGlvSelectorRow,
+        table: &crate::prepared_table::PreparedTableCert,
+        r_override: AffinePoint,
+    ) -> Result<Self, FakeGlvChainError> {
+        assert_eq!(cert.cert_active.0, 1, "override path requires active cert");
+        let p = PreparedAffinePoint::from_affine(AffinePoint {
+            x: cert.base_x.to_u256(),
+            y: cert.base_y.to_u256(),
+        });
+        let r = PreparedAffinePoint::from_affine(r_override);
+
+        let mut rows = Vec::new();
+        let mut consumers = Vec::new();
+
+        let mut acc = table_point(table, selector.init_base_index.0)?;
+        consumers.push(acc.instance(cert.sig_id, cert.cert_id, selector.init_base_index.0));
+        rows.push(FakeGlvChainRow {
+            sig_id: cert.sig_id,
+            cert_id: cert.cert_id,
+            kind: FakeGlvChainRowKind::MsbInit,
+            acc_before: PreparedAffinePoint::infinity(),
+            operand: acc.clone(),
+            acc_after: acc.clone(),
+        });
+
+        let selector0 =
+            Selector16DecodeEntry::from_selector(selector.selectors[0]).map_err(|_| {
+                FakeGlvChainError::InvalidSelector {
+                    selector: selector.selectors[0].0,
+                }
+            })?;
+        consumers.push(table_point(table, selector0.base_index.0)?.instance(
+            cert.sig_id,
+            cert.cert_id,
+            selector0.base_index.0,
+        ));
+
+        for (step, selector_value) in selector.selectors.iter().enumerate().skip(1).rev() {
+            let decoded = Selector16DecodeEntry::from_selector(*selector_value).map_err(|_| {
+                FakeGlvChainError::InvalidSelector {
+                    selector: selector_value.0,
+                }
+            })?;
+            let operand = selected_base_point(table, decoded)?;
+            consumers.push(table_point(table, decoded.base_index.0)?.instance(
+                cert.sig_id,
+                cert.cert_id,
+                decoded.base_index.0,
+            ));
+            let next = chain_step(&acc, &operand);
+            rows.push(FakeGlvChainRow {
+                sig_id: cert.sig_id,
+                cert_id: cert.cert_id,
+                kind: FakeGlvChainRowKind::ChainStep(step as u32),
+                acc_before: acc,
+                operand,
+                acc_after: next.clone(),
+            });
+            acc = next;
+        }
+
+        let table16 = table.table16.clone();
+        consumers.push(table16.instance(cert.sig_id, cert.cert_id, TABLE16_INDEX));
+        let next = chain_step(&acc, &table16);
+        rows.push(FakeGlvChainRow {
+            sig_id: cert.sig_id,
+            cert_id: cert.cert_id,
+            kind: FakeGlvChainRowKind::Table16Step,
+            acc_before: acc,
+            operand: table16,
+            acc_after: next.clone(),
+        });
+        acc = next;
+
+        let correction = lsb_correction(selector, &p, &r, table)?;
+        if selector.s1_lsb.0 == 0 && selector.s2_lsb.0 == 0 {
+            consumers.push(table.base[2].instance(cert.sig_id, cert.cert_id, 2));
+        }
+        let final_acc = prepared(add_optional_points(acc.to_option(), correction.to_option()));
+        rows.push(FakeGlvChainRow {
+            sig_id: cert.sig_id,
+            cert_id: cert.cert_id,
+            kind: FakeGlvChainRowKind::LsbCorrection,
+            acc_before: acc,
+            operand: correction,
+            acc_after: final_acc.clone(),
+        });
+
+        Ok(Self {
+            sig_id: cert.sig_id,
+            cert_id: cert.cert_id,
+            cert_active: cert.cert_active,
+            rows,
+            final_acc,
+            r3: table.r3.clone(),
+            consumers,
+        })
     }
 
     pub fn verify(&self) -> Result<(), FakeGlvChainError> {

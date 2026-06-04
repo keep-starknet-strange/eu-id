@@ -36,6 +36,26 @@ pub const P256_GY: [u64; 4] = [
     0x4FE3_42E2_FE1A_7F9B,
 ];
 
+/// P-256 point `3·G` x-coordinate, little-endian u64 limbs.
+///
+/// Used to pin the cert0 (generator) prepared-table `P3 = 3·P` cells to a fixed
+/// constant, since cert0 has no `DoubleP`/`AddP2P` setup rows. Verified against
+/// `scalar_mul(3, G)` in `constants` tests.
+pub const P256_3GX: [u64; 4] = [
+    0xFB41_661B_C6E7_FD6C,
+    0xE6C6_B721_EFAD_A985,
+    0xC8F7_EF95_1D4B_F165,
+    0x5ECB_E4D1_A633_0A44,
+];
+
+/// P-256 point `3·G` y-coordinate, little-endian u64 limbs.
+pub const P256_3GY: [u64; 4] = [
+    0x9A79_B127_A27D_5032,
+    0xD82A_B036_384F_B83D,
+    0x374B_06CE_1A64_A2EC,
+    0x8734_640C_4998_FF7E,
+];
+
 /// P-256 curve coefficient `b`, little-endian u64 limbs.
 pub const P256_B: [u64; 4] = [
     0x3BCE_3C3E_27D2_604B,
@@ -43,3 +63,22 @@ pub const P256_B: [u64; 4] = [
     0xB3EB_BD55_7698_86BC,
     0x5AC6_35D8_AA3A_93E7,
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::{P256_3GX, P256_3GY, P256_GX, P256_GY};
+    use crate::curve::scalar_mul;
+    use crate::types::{AffinePoint, U256};
+
+    #[test]
+    fn p256_3g_constant_matches_scalar_mul() {
+        let generator = AffinePoint {
+            x: U256::from_le_u64s(&P256_GX),
+            y: U256::from_le_u64s(&P256_GY),
+        };
+        let three = U256::from_le_u64s(&[3, 0, 0, 0]);
+        let three_g = scalar_mul(&three, &generator).expect("3*G is finite");
+        assert_eq!(three_g.x, U256::from_le_u64s(&P256_3GX));
+        assert_eq!(three_g.y, U256::from_le_u64s(&P256_3GY));
+    }
+}
