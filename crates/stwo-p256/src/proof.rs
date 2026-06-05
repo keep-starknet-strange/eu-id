@@ -143,9 +143,10 @@ use crate::scalar::cert_bind::{
     CertScalarInputClaim, CertScalarInputError, CertScalarInputRelation,
 };
 use crate::scalar::fake_glv_scalar::{
-    gen_fake_glv_scalar_air_base_trace, gen_fake_glv_scalar_air_interaction_trace,
-    FakeGlvScalarAirComponents, FakeGlvScalarAirInteractionClaim, FakeGlvScalarAirProofClaim,
-    FakeGlvScalarHint, FakeGlvScalarHintClaim, FakeGlvScalarHintError, FakeGlvScalarRelation,
+    fake_glv_small_to_le_u64s, gen_fake_glv_scalar_air_base_trace,
+    gen_fake_glv_scalar_air_interaction_trace, FakeGlvScalarAirComponents,
+    FakeGlvScalarAirInteractionClaim, FakeGlvScalarAirProofClaim, FakeGlvScalarHint,
+    FakeGlvScalarHintClaim, FakeGlvScalarHintError, FakeGlvScalarRelation,
 };
 use crate::scalar::fake_glv_selector::{
     gen_fake_glv_selector_air_base_trace, gen_fake_glv_selector_air_interaction_trace,
@@ -680,6 +681,7 @@ pub struct P256CurrentAirProofClaim {
     pub fake_glv_scalar_air: FakeGlvScalarAirProofClaim,
     pub fake_glv_selector_air: FakeGlvSelectorAirProofClaim,
     pub scalar_setup_mod_muls: Vec<ScalarModMulClaim>,
+    pub fake_glv_scalar_mod_muls: Vec<ScalarModMulClaim>,
     pub prepared_table_projective_source: PreparedTableProjectiveSourceProofClaim,
     pub fake_glv_projective_source: FakeGlvProjectiveSourceProofClaim,
     pub fake_glv_chain_expansion: FakeGlvChainExpansionProofClaim,
@@ -709,6 +711,11 @@ impl P256CurrentAirProofClaim {
             ),
             scalar_setup_mod_muls: scalar_setup_mod_mul_rows(claim)
                 .expect("verified scalar setup mod-mul rows generate")
+                .iter()
+                .map(ScalarModMulClaim::from_rows_with_external_limb_links)
+                .collect(),
+            fake_glv_scalar_mod_muls: fake_glv_scalar_mod_mul_rows(claim)
+                .expect("verified fake-GLV scalar mod-mul rows generate")
                 .iter()
                 .map(ScalarModMulClaim::from_rows_with_external_limb_links)
                 .collect(),
@@ -770,6 +777,10 @@ impl P256CurrentAirProofClaim {
         for claim in &self.scalar_setup_mod_muls {
             claim.mix_into(channel);
         }
+        channel.mix_u64(self.fake_glv_scalar_mod_muls.len() as u64);
+        for claim in &self.fake_glv_scalar_mod_muls {
+            claim.mix_into(channel);
+        }
         self.prepared_table_projective_source.mix_into(channel);
         self.fake_glv_projective_source.mix_into(channel);
         self.fake_glv_chain_expansion.mix_into(channel);
@@ -791,6 +802,12 @@ impl P256CurrentAirProofClaim {
         append_unique_preprocessed_ids(&mut ids, scalar_setup_air_preprocessed_column_ids());
         let lookup_claims = LookupProviderClaims::scalar_mod_mul();
         for claim in &self.scalar_setup_mod_muls {
+            append_unique_preprocessed_ids(
+                &mut ids,
+                scalar_mod_mul_preprocessed_column_ids(claim, &lookup_claims),
+            );
+        }
+        for claim in &self.fake_glv_scalar_mod_muls {
             append_unique_preprocessed_ids(
                 &mut ids,
                 scalar_mod_mul_preprocessed_column_ids(claim, &lookup_claims),
@@ -909,6 +926,7 @@ pub struct P256CurrentAirInteractionClaim {
     pub fake_glv_scalar_air: FakeGlvScalarAirInteractionClaim,
     pub fake_glv_selector_air: FakeGlvSelectorAirInteractionClaim,
     pub(crate) scalar_setup_mod_muls: Vec<ScalarModMulProofSliceInteractionClaim>,
+    pub(crate) fake_glv_scalar_mod_muls: Vec<ScalarModMulProofSliceInteractionClaim>,
     pub prepared_table_projective_source: PreparedTableProjectiveSourceInteractionClaim,
     /// Per-relation breakdown of the pinned EC-row provider's logup total
     /// (`prepared_table_projective_source.provider_claimed_sum`), used to verify
@@ -941,6 +959,7 @@ impl P256CurrentAirInteractionClaim {
             fake_glv_scalar_air: FakeGlvScalarAirInteractionClaim::zero(),
             fake_glv_selector_air: FakeGlvSelectorAirInteractionClaim::zero(),
             scalar_setup_mod_muls: Vec::new(),
+            fake_glv_scalar_mod_muls: Vec::new(),
             prepared_table_projective_source: PreparedTableProjectiveSourceInteractionClaim::zero(),
             prepared_table_pinned: PreparedTableEcRowPinnedInteractionClaim::zero(),
             fake_glv_projective_source: FakeGlvProjectiveSourceInteractionClaim::zero(),
@@ -968,6 +987,9 @@ impl P256CurrentAirInteractionClaim {
         zero.scalar_setup_mod_muls = (0..claim.scalar_setup_mod_muls.len())
             .map(|_| zero_interaction_claim())
             .collect();
+        zero.fake_glv_scalar_mod_muls = (0..claim.fake_glv_scalar_mod_muls.len())
+            .map(|_| zero_interaction_claim())
+            .collect();
         zero
     }
 
@@ -982,6 +1004,12 @@ impl P256CurrentAirInteractionClaim {
         self.fake_glv_selector_air.mix_into(channel);
         channel.mix_u64(self.scalar_setup_mod_muls.len() as u64);
         for claim in &self.scalar_setup_mod_muls {
+            claim.scalar_mod_mul.mix_into(channel);
+            claim.range13.mix_into(channel);
+            claim.signed_carry.mix_into(channel);
+        }
+        channel.mix_u64(self.fake_glv_scalar_mod_muls.len() as u64);
+        for claim in &self.fake_glv_scalar_mod_muls {
             claim.scalar_mod_mul.mix_into(channel);
             claim.range13.mix_into(channel);
             claim.signed_carry.mix_into(channel);
@@ -1027,6 +1055,12 @@ impl P256CurrentAirInteractionClaim {
             .map(ScalarModMulProofSliceInteractionClaim::claimed_sum)
             .sum::<SecureField>()
             + self.scalar_setup.scalar_limb_consumer_claimed_sum;
+        let fake_glv_scalar_mod_mul_total = self
+            .fake_glv_scalar_mod_muls
+            .iter()
+            .map(ScalarModMulProofSliceInteractionClaim::claimed_sum)
+            .sum::<SecureField>()
+            + self.fake_glv_scalar_air.scalar_mod_mul_provider_claimed_sum;
         let pinned = &self.prepared_table_pinned;
         vec![
             ("PublicEcdsaInstance", self.public_inputs.total()),
@@ -1064,6 +1098,7 @@ impl P256CurrentAirInteractionClaim {
                     + self.final_check.signed_carry_consumer_claimed_sum,
             ),
             ("ScalarSetupModMul", scalar_setup_mod_mul_total),
+            ("FakeGlvScalarModMul", fake_glv_scalar_mod_mul_total),
             (
                 "PreparedTablePinnedConsistency",
                 pinned.total_claimed_sum
@@ -1392,6 +1427,7 @@ struct P256CurrentAirComponents {
     fake_glv_scalar_air: FakeGlvScalarAirComponents,
     fake_glv_selector_air: FakeGlvSelectorAirComponents,
     scalar_setup_mod_muls: Vec<ScalarModMulComponents>,
+    fake_glv_scalar_mod_muls: Vec<ScalarModMulComponents>,
     prepared_table_projective_source: PreparedTableProjectiveSourceComponents,
     fake_glv_projective_source: FakeGlvProjectiveSourceComponents,
     fake_glv_chain_expansion: FakeGlvChainExpansionComponents,
@@ -1437,6 +1473,7 @@ impl P256CurrentAirComponents {
                 &interaction_claim.fake_glv_scalar_air,
                 &relations.cert_scalar_input,
                 &relations.fake_glv_scalar,
+                &relations.scalar_mod_mul.scalar_limb,
             ),
             fake_glv_selector_air: FakeGlvSelectorAirComponents::new(
                 allocator,
@@ -1448,6 +1485,20 @@ impl P256CurrentAirComponents {
                 .scalar_setup_mod_muls
                 .iter()
                 .zip(&interaction_claim.scalar_setup_mod_muls)
+                .map(|(claim, interaction_claim)| {
+                    ScalarModMulComponents::new(
+                        allocator,
+                        claim,
+                        interaction_claim,
+                        &scalar_lookup_claims,
+                        &relations.scalar_mod_mul,
+                    )
+                })
+                .collect(),
+            fake_glv_scalar_mod_muls: claim
+                .fake_glv_scalar_mod_muls
+                .iter()
+                .zip(&interaction_claim.fake_glv_scalar_mod_muls)
                 .map(|(claim, interaction_claim)| {
                     ScalarModMulComponents::new(
                         allocator,
@@ -1584,6 +1635,15 @@ impl P256CurrentAirComponents {
             components.push(&scalar_setup_mod_mul.range13 as &dyn Component);
             components.push(&scalar_setup_mod_mul.signed_carry as &dyn Component);
         }
+        for fake_glv_scalar_mod_mul in &self.fake_glv_scalar_mod_muls {
+            components.push(&fake_glv_scalar_mod_mul.canonical as &dyn Component);
+            components.push(&fake_glv_scalar_mod_mul.ab_chunks as &dyn Component);
+            components.push(&fake_glv_scalar_mod_mul.qn_chunks as &dyn Component);
+            components.push(&fake_glv_scalar_mod_mul.accumulators as &dyn Component);
+            components.push(&fake_glv_scalar_mod_mul.reduction_digits as &dyn Component);
+            components.push(&fake_glv_scalar_mod_mul.range13 as &dyn Component);
+            components.push(&fake_glv_scalar_mod_mul.signed_carry as &dyn Component);
+        }
         components.extend(self.prepared_table_projective_source.components());
         components.extend(self.fake_glv_projective_source.components());
         components.extend(self.fake_glv_chain_expansion.components());
@@ -1618,6 +1678,23 @@ impl P256CurrentAirComponents {
             components.push(&scalar_setup_mod_mul.range13 as &dyn ComponentProver<SimdBackend>);
             components
                 .push(&scalar_setup_mod_mul.signed_carry as &dyn ComponentProver<SimdBackend>);
+        }
+        for fake_glv_scalar_mod_mul in &self.fake_glv_scalar_mod_muls {
+            components
+                .push(&fake_glv_scalar_mod_mul.canonical as &dyn ComponentProver<SimdBackend>);
+            components
+                .push(&fake_glv_scalar_mod_mul.ab_chunks as &dyn ComponentProver<SimdBackend>);
+            components
+                .push(&fake_glv_scalar_mod_mul.qn_chunks as &dyn ComponentProver<SimdBackend>);
+            components
+                .push(&fake_glv_scalar_mod_mul.accumulators as &dyn ComponentProver<SimdBackend>);
+            components.push(
+                &fake_glv_scalar_mod_mul.reduction_digits as &dyn ComponentProver<SimdBackend>,
+            );
+            components
+                .push(&fake_glv_scalar_mod_mul.range13 as &dyn ComponentProver<SimdBackend>);
+            components
+                .push(&fake_glv_scalar_mod_mul.signed_carry as &dyn ComponentProver<SimdBackend>);
         }
         components.extend(self.prepared_table_projective_source.component_provers());
         components.extend(self.fake_glv_projective_source.component_provers());
@@ -1975,6 +2052,17 @@ impl P256ProofDraft {
                 gen_scalar_mod_mul_preprocessed_trace(rows, &scalar_lookup_claims, &local_ids);
             append_unique_preprocessed_columns(&mut ids, &mut columns, local_ids, local_columns);
         }
+        let fake_glv_scalar_rows = fake_glv_scalar_mod_mul_rows(&self.claim)?;
+        for (rows, local_claim) in fake_glv_scalar_rows
+            .iter()
+            .zip(&claim.fake_glv_scalar_mod_muls)
+        {
+            let local_ids =
+                scalar_mod_mul_preprocessed_column_ids(local_claim, &scalar_lookup_claims);
+            let local_columns =
+                gen_scalar_mod_mul_preprocessed_trace(rows, &scalar_lookup_claims, &local_ids);
+            append_unique_preprocessed_columns(&mut ids, &mut columns, local_ids, local_columns);
+        }
 
         let local_ids = claim
             .prepared_table_projective_source
@@ -2132,6 +2220,11 @@ impl P256ProofDraft {
             .iter()
             .map(|rows| gen_scalar_mod_mul_base_trace(rows, &scalar_lookup_claims))
             .collect::<Vec<_>>();
+        let fake_glv_scalar_rows = fake_glv_scalar_mod_mul_rows(&self.claim)?;
+        let fake_glv_scalar_mod_muls = fake_glv_scalar_rows
+            .iter()
+            .map(|rows| gen_scalar_mod_mul_base_trace(rows, &scalar_lookup_claims))
+            .collect::<Vec<_>>();
         let prepared_table_provider = gen_prepared_table_ec_row_base_trace(
             &self.claim.prepared_table_ec_trace,
             claim.prepared_table_projective_source.log_size,
@@ -2236,6 +2329,9 @@ impl P256ProofDraft {
         for scalar_setup_mod_mul in &scalar_setup_mod_muls {
             columns.extend(scalar_setup_mod_mul.clone());
         }
+        for fake_glv_scalar_mod_mul in &fake_glv_scalar_mod_muls {
+            columns.extend(fake_glv_scalar_mod_mul.clone());
+        }
         columns.extend(prepared_table_provider.clone());
         columns.extend(prepared_table_consumer.clone());
         columns.extend(fake_glv_projective_provider.clone());
@@ -2265,6 +2361,7 @@ impl P256ProofDraft {
             fake_glv_scalar_air,
             fake_glv_selector_air,
             scalar_setup_mod_muls,
+            fake_glv_scalar_mod_muls,
             prepared_table_provider,
             prepared_table_consumer,
             fake_glv_projective_provider,
@@ -2338,6 +2435,28 @@ impl P256ProofDraft {
             );
             scalar_setup_interactions.push(interaction);
             scalar_setup_interaction_claims.push(interaction_claim);
+        }
+        let fake_glv_scalar_rows = fake_glv_scalar_mod_mul_rows(&self.claim)?;
+        let fake_glv_scalar_claims = fake_glv_scalar_rows
+            .iter()
+            .map(ScalarModMulClaim::from_rows_with_external_limb_links)
+            .collect::<Vec<_>>();
+        debug_assert_eq!(
+            base.fake_glv_scalar_mod_muls.len(),
+            fake_glv_scalar_rows.len()
+        );
+        let mut fake_glv_scalar_interactions = Vec::with_capacity(fake_glv_scalar_rows.len());
+        let mut fake_glv_scalar_interaction_claims =
+            Vec::with_capacity(fake_glv_scalar_rows.len());
+        for (rows, claim) in fake_glv_scalar_rows.iter().zip(&fake_glv_scalar_claims) {
+            let (interaction, interaction_claim) = gen_scalar_mod_mul_interaction_trace(
+                rows,
+                claim,
+                &scalar_lookup_claims,
+                &relations.scalar_mod_mul,
+            );
+            fake_glv_scalar_interactions.push(interaction);
+            fake_glv_scalar_interaction_claims.push(interaction_claim);
         }
         let (prepared_provider_interaction, prepared_pinned_claim) =
             gen_prepared_table_ec_row_pinned_interaction_trace(
@@ -2472,6 +2591,9 @@ impl P256ProofDraft {
         for interaction in scalar_setup_interactions {
             columns.extend(interaction);
         }
+        for interaction in fake_glv_scalar_interactions {
+            columns.extend(interaction);
+        }
         columns.extend(prepared_provider_interaction);
         columns.extend(prepared_consumer_interaction);
         columns.extend(fake_glv_provider_interaction);
@@ -2505,6 +2627,7 @@ impl P256ProofDraft {
                 fake_glv_scalar_air: fake_glv_scalar_claim,
                 fake_glv_selector_air: fake_glv_selector_claim,
                 scalar_setup_mod_muls: scalar_setup_interaction_claims,
+                fake_glv_scalar_mod_muls: fake_glv_scalar_interaction_claims,
                 prepared_table_projective_source: PreparedTableProjectiveSourceInteractionClaim {
                     provider_claimed_sum: prepared_pinned_claim.total_claimed_sum,
                     consumer_claimed_sum: prepared_consumer_claim.claimed_sum,
@@ -2597,6 +2720,7 @@ struct P256CurrentAirBaseTrace {
     fake_glv_scalar_air: ColumnVec<M31ColumnEval>,
     fake_glv_selector_air: ColumnVec<M31ColumnEval>,
     scalar_setup_mod_muls: Vec<ColumnVec<M31ColumnEval>>,
+    fake_glv_scalar_mod_muls: Vec<ColumnVec<M31ColumnEval>>,
     prepared_table_provider: ColumnVec<M31ColumnEval>,
     prepared_table_consumer: ColumnVec<M31ColumnEval>,
     fake_glv_projective_provider: ColumnVec<M31ColumnEval>,
@@ -2633,6 +2757,59 @@ fn scalar_setup_mod_mul_rows(
     }
     Ok(rows)
 }
+
+/// Per-certificate `ScalarModMul` trace rows for the fake-GLV scalar equation
+/// `k · s2_abs ≡ ±s1 (mod n)`. One row per active certificate (inactive
+/// `cert_active == 0` certs contribute no mod-mul row). Mul IDs live in a
+/// disjoint range from [`scalar_setup_mod_mul_rows`] (`FAKE_GLV_SCALAR_MUL_ID_BASE`
+/// + `2 · sig_id + cert_id`) so the two families never collide in any logup.
+///
+/// **Currently dormant.** The end-to-end Task 4 wiring requires *both* this
+/// row builder *and* matching `add_to_relation` provider yields in the
+/// `fake_glv_scalar` AIR's `evaluate` (`(mul_id, role, limb_index, limb_value)`
+/// tuples into `ScalarLimbRelation`). Without the provider, the consumer-side
+/// claimed sums break the `FakeGlvScalarModMul` balance entry. We therefore
+/// return an empty `Vec` for now, so the balance trivially holds. The wider
+/// plumbing (claim slots, component lists, interaction generation, balance
+/// entry) is already in place — flipping `disabled` to `false` *and* adding
+/// the AIR-side provider yields is what activates the algebraic link.
+#[allow(unreachable_code, unused_variables, dead_code)]
+fn fake_glv_scalar_mod_mul_rows(
+    _claim: &P256ProofClaim,
+) -> Result<Vec<ScalarModMulTraceRows>, P256ProofError> {
+    use stwo_p256_utils::scalar_arithmetic::{ScalarFieldMulTrace, P256_ORDER};
+
+    // Dormant: emit no rows so the `FakeGlvScalarModMul` balance entry
+    // trivially equals zero. Activate by removing this early return *and*
+    // wiring the AIR-side provider yields in `fake_glv_scalar::evaluate`.
+    return Ok(Vec::new());
+
+    let mut rows = Vec::new();
+    for fake_glv_row in &_claim.fake_glv_scalars.rows {
+        if fake_glv_row.cert_active.0 == 0 {
+            continue;
+        }
+        let scalar_u64s = fake_glv_row.scalar.to_u256().to_le_u64s();
+        let s2_abs_u64s = fake_glv_small_to_le_u64s(&fake_glv_row.hint.s2_abs);
+        let trace = ScalarFieldMulTrace::new(
+            "fake_glv_scalar_equation",
+            &scalar_u64s,
+            &s2_abs_u64s,
+            &P256_ORDER,
+        )
+        .map_err(ScalarModMulTraceError::from)?;
+        let mul_id = FAKE_GLV_SCALAR_MUL_ID_BASE
+            + 2 * fake_glv_row.sig_id.0
+            + fake_glv_row.cert_id.0;
+        rows.push(ScalarModMulTraceRows::new(mul_id, &trace)?);
+    }
+    Ok(rows)
+}
+
+/// Base mul-id for the fake-GLV scalar `ScalarModMul` family. Disjoint from
+/// the `scalar_setup_mod_mul_rows` range (`0..2·num_sigs`) by a large margin
+/// so the two row sets remain distinguishable in lookups.
+const FAKE_GLV_SCALAR_MUL_ID_BASE: u32 = 1_000_000;
 
 /// Build the single-public-key on-curve witness for the monolithic current-AIR
 /// from the already-verified `public_key_check` claim. The monolithic proof
@@ -4961,6 +5138,7 @@ mod tests {
                 &FakeGlvScalarAirInteractionClaim::zero(),
                 &CertScalarInputRelation::dummy(),
                 &FakeGlvScalarRelation::dummy(),
+                &crate::scalar::scalar_mod_mul::relation::ScalarLimbRelation::dummy(),
             );
             components.max_constraint_log_degree_bound()
         };
@@ -5005,12 +5183,15 @@ mod tests {
         tree_builder.commit(&mut channel);
 
         let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&[]);
+        let scalar_limb_relation =
+            crate::scalar::scalar_mod_mul::relation::ScalarLimbRelation::dummy();
         let components = FakeGlvScalarAirComponents::new(
             &mut allocator,
             claim,
             &interaction_claim,
             &cert_relation,
             &scalar_relation,
+            &scalar_limb_relation,
         );
         prove(
             &components.component_provers(),

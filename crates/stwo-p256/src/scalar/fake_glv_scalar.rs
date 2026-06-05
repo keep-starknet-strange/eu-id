@@ -29,6 +29,18 @@ use super::cert_bind::{
     CertScalarInputClaim, CertScalarInputRelation, CertScalarInputRow,
     CERT_SCALAR_INPUT_RELATION_ARITY,
 };
+use super::scalar_mod_mul::relation::ScalarLimbRelation;
+// Role constants for the `ScalarLimbRelation` tuples once the AIR-side
+// provider for the fake-GLV scalar equation is wired (see
+// `fake_glv_scalar_mod_mul_rows` in `proof.rs` — currently dormant).
+#[allow(unused_imports)]
+use super::scalar_mod_mul::{ROLE_A, ROLE_B, ROLE_QUOTIENT, ROLE_RESULT};
+
+/// Mul-ID namespace base for fake-GLV scalar-mod-mul rows. Disjoint from the
+/// scalar-setup mod-mul IDs (which live in `[0, 2 · num_signatures)`).
+/// Each active fake-GLV cert produces one mul-row at
+/// `FAKE_GLV_SCALAR_MUL_ID_BASE + 2 · sig_id + cert_id`.
+pub const FAKE_GLV_SCALAR_MUL_ID_BASE: u32 = 1_000_000;
 
 pub const FAKE_GLV_SMALL_LIMBS: usize = 10;
 pub const FAKE_GLV_TOP_LIMB_BITS: u32 = 11;
@@ -123,6 +135,13 @@ pub struct FakeGlvScalarAirInteractionClaim {
     pub claimed_sum: SecureField,
     pub cert_consumer_claimed_sum: SecureField,
     pub scalar_provider_claimed_sum: SecureField,
+    /// Provider sum for the limb tuples yielded into the per-cert
+    /// `ScalarModMul` external-limb relation. Balances against the sum of
+    /// `ScalarModMulProofSliceInteractionClaim::claimed_sum()` across all
+    /// `fake_glv_scalar_mod_muls` entries in
+    /// `P256CurrentAirInteractionClaim::relation_balances`
+    /// (entry name: `FakeGlvScalarModMul`).
+    pub scalar_mod_mul_provider_claimed_sum: SecureField,
 }
 
 impl FakeGlvScalarAirInteractionClaim {
@@ -131,6 +150,7 @@ impl FakeGlvScalarAirInteractionClaim {
             claimed_sum: secure_zero(),
             cert_consumer_claimed_sum: secure_zero(),
             scalar_provider_claimed_sum: secure_zero(),
+            scalar_mod_mul_provider_claimed_sum: secure_zero(),
         }
     }
 
@@ -150,6 +170,7 @@ impl FakeGlvScalarAirComponents {
         interaction_claim: &FakeGlvScalarAirInteractionClaim,
         cert_relation: &CertScalarInputRelation,
         scalar_relation: &FakeGlvScalarRelation,
+        scalar_limb_relation: &ScalarLimbRelation,
     ) -> Self {
         Self {
             scalar: FakeGlvScalarAirComponent::new(
@@ -158,6 +179,7 @@ impl FakeGlvScalarAirComponents {
                     log_size: claim.log_size,
                     cert_relation: cert_relation.clone(),
                     scalar_relation: scalar_relation.clone(),
+                    scalar_limb_relation: scalar_limb_relation.clone(),
                 },
                 interaction_claim.claimed_sum,
             ),
@@ -186,6 +208,12 @@ pub struct FakeGlvScalarAirEval {
     pub log_size: u32,
     pub cert_relation: CertScalarInputRelation,
     pub scalar_relation: FakeGlvScalarRelation,
+    /// External-limb provider relation feeding `(mul_id, role, limb_index,
+    /// limb_value)` tuples into each active cert's `ScalarModMul`
+    /// component, where `mul_id = FAKE_GLV_SCALAR_MUL_ID_BASE + 2 · sig_id
+    /// + cert_id`. Closes the `scalar · s2_abs ≡ selected_s1 (mod n)`
+    /// algebraic identity in-AIR.
+    pub scalar_limb_relation: ScalarLimbRelation,
 }
 
 impl FrameworkEval for FakeGlvScalarAirEval {
@@ -458,6 +486,28 @@ impl FakeGlvSmallScalar {
         self.limbs.iter().all(|limb| limb.0 == 0)
     }
 
+    /// Convert to `[u64; 4]` little-endian word layout used by
+    /// `ScalarFieldMulTrace::new`. Lifts the 10 13-bit limbs (≤ 2^130 raw
+    /// shape, ≤ 2^128 after `require_128_bit_bound`) into the full 256-bit
+    /// representation by zero-padding the upper words.
+    /// Free-function alias: [`fake_glv_small_to_le_u64s`].
+    pub fn to_le_u64s(&self) -> [u64; 4] {
+        let mut value: u128 = 0;
+        for (i, limb) in self.limbs.iter().enumerate() {
+            value |= (u128::from(limb.0)) << (i * LIMB_BITS);
+        }
+        [value as u64, (value >> 64) as u64, 0, 0]
+    }
+
+}
+
+/// Free-function alias for [`FakeGlvSmallScalar::to_le_u64s`], for callers
+/// that prefer the standalone form.
+pub fn fake_glv_small_to_le_u64s(value: &FakeGlvSmallScalar) -> [u64; 4] {
+    value.to_le_u64s()
+}
+
+impl FakeGlvSmallScalar {
     fn require_128_bit_bound(self, field: &'static str) -> Result<(), FakeGlvScalarHintError> {
         for (index, limb) in self.limbs.iter().enumerate() {
             let bound = if index == FAKE_GLV_SMALL_LIMBS - 1 {
@@ -627,6 +677,15 @@ pub(crate) fn gen_fake_glv_scalar_air_interaction_trace(
             claimed_sum,
             cert_consumer_claimed_sum,
             scalar_provider_claimed_sum,
+            // Provider contribution for the per-cert ScalarModMul external-
+            // limb relation. Set to zero here; the matching AIR-eval
+            // `add_to_relation` calls are not yet wired (see the AIR
+            // provider work pending in `fake_glv_scalar.rs::evaluate`).
+            // The `FakeGlvScalarModMul` balance entry in
+            // `P256CurrentAirInteractionClaim::relation_balances` therefore
+            // currently equals `-Σ consumer claims` (i.e. the ScalarModMul
+            // components' claimed sums), and fails until the provider lands.
+            scalar_mod_mul_provider_claimed_sum: secure_zero(),
         },
     )
 }
