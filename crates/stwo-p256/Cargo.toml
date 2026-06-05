@@ -12,6 +12,8 @@ stwo = { workspace = true }
 stwo-constraint-framework = { workspace = true }
 stwo-p256-utils = { path = "../stwo-p256-utils" }
 itertools = { version = "0.12", default-features = false, features = ["use_alloc"] }
+num-bigint = "0.4"
+num-integer = "0.1"
 num-traits = { workspace = true }
 serde = { workspace = true }
 

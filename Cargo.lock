@@ -1316,6 +1316,8 @@ dependencies = [
  "ecdsa",
  "hex",
  "itertools 0.12.1",
+ "num-bigint",
+ "num-integer",
  "num-traits",
  "p256",
  "rand",

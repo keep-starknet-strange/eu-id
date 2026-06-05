@@ -293,6 +293,30 @@ impl P256ProofClaim {
         Self::from_inputs_with_hints(inputs, hints)
     }
 
+    /// Production builder: Garaga-style fake-GLV decomposition for any
+    /// scalar in `[0, n)`. Used for all real ECDSA signatures.
+    ///
+    /// Note: the AIR currently enforces the *trivial* fake-GLV constraints
+    /// (`s1 = scalar, s2 = 1, q = 0`). Tasks 3–4 of the
+    /// `2026-06-05-arbitrary-p256-signature-air.md` plan replace those with
+    /// the general `k · s2_abs ≡ ±s1 (mod n)` constraints proved via
+    /// `ScalarModMul` external limb links. Until those land, this builder
+    /// produces a valid native witness but `prove_current_air_monolithic`
+    /// will reject any signature whose `u1`/`u2` exceed `2^128`.
+    pub fn from_inputs_with_arbitrary_fake_glv_hints(
+        inputs: &[EcdsaVerifyInput],
+    ) -> Result<Self, P256ProofError> {
+        let public_inputs = PublicEcdsaInputClaim::from_inputs(inputs);
+        let scalar_setup = ScalarSetupClaim::from_public_inputs(&public_inputs)?;
+        let cert_inputs = CertScalarInputClaim::from_scalar_setup(&scalar_setup)?;
+        let hints = cert_inputs
+            .rows
+            .iter()
+            .map(|row| FakeGlvScalarHint::decompose(&row.scalar))
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::from_inputs_with_hints(inputs, hints)
+    }
+
     /// Test-only: build a globally-shaped proof claim in which the prepared
     /// table + fake-GLV chain for `override_cert_index` are rebuilt from an
     /// injected hint point `R'` (`!= ±u·base`), with every R-derived artifact
@@ -1673,6 +1697,17 @@ impl P256ProofDraft {
         inputs: Vec<EcdsaVerifyInput>,
     ) -> Result<Self, P256ProofError> {
         let claim = P256ProofClaim::from_inputs_with_trivial_fake_glv_hints(&inputs)?;
+        Self::from_claim(inputs, claim)
+    }
+
+    /// Production builder: Garaga-style fake-GLV decomposition for any
+    /// scalar in `[0, n)`. See
+    /// [`P256ProofClaim::from_inputs_with_arbitrary_fake_glv_hints`] for
+    /// the AIR-readiness caveat.
+    pub fn from_inputs_with_arbitrary_fake_glv_hints(
+        inputs: Vec<EcdsaVerifyInput>,
+    ) -> Result<Self, P256ProofError> {
+        let claim = P256ProofClaim::from_inputs_with_arbitrary_fake_glv_hints(&inputs)?;
         Self::from_claim(inputs, claim)
     }
 
@@ -3071,6 +3106,43 @@ mod tests {
         }
     }
 
+    /// Like `valid_real_input_with_small_u_scalars`, but builds a real ECDSA
+    /// statement for arbitrary full-width `u1`, `u2 ∈ [1, n)`. This stresses
+    /// the fake-GLV scalar AIR with scalars that do not fit a trivial hint.
+    fn valid_real_input_with_u_scalars(u1: U256, u2: U256) -> EcdsaVerifyInput {
+        assert_ne!(u2, U256::ZERO, "u2 must be nonzero for ECDSA setup");
+        let n = U256::from_le_u64s(&P256_ORDER);
+        let public_key = generator_point();
+        let u_sum = add_mod_u256(&u1, &u2, &n);
+        let r_point = scalar_mul(&u_sum, &public_key).expect("nonzero R");
+        let r = x_mod_order(&r_point.x);
+        let u2_inv = mod_inverse(&u2, &n);
+        let s = mul_mod_witness(&r, &u2_inv, &n).result.to_u256();
+        let message_hash = mul_mod_witness(&u1, &s, &n).result.to_u256();
+
+        EcdsaVerifyInput {
+            message_hash,
+            signature: Signature { r, s },
+            public_key,
+        }
+    }
+
+    /// Returns `n - delta` as a full-width 256-bit scalar — convenient for
+    /// generating arbitrary scalars that live in the upper end of `[0, n)`
+    /// and therefore cannot satisfy the trivial fake-GLV hint.
+    fn scalar_near_order(delta: u64) -> U256 {
+        let n = U256::from_le_u64s(&P256_ORDER);
+        sub_mod_u256(&n, &U256::from_le_u64s(&[delta, 0, 0, 0]), &n)
+    }
+
+    fn add_mod_u256(a: &U256, b: &U256, modulus: &U256) -> U256 {
+        crate::field_ops::add_mod_witness(a, b, modulus).result.to_u256()
+    }
+
+    fn sub_mod_u256(a: &U256, b: &U256, modulus: &U256) -> U256 {
+        crate::field_ops::sub_mod_witness(a, b, modulus).result.to_u256()
+    }
+
     fn x_mod_order(x: &U256) -> U256 {
         let n = U256::from_le_u64s(&P256_ORDER);
         if cmp_u256(x, &n).is_lt() {
@@ -3454,6 +3526,28 @@ mod tests {
             .projective_rcb
             .verify_balanced()
             .expect("projective RCB internal relations balance");
+    }
+
+    /// RED TEST (Task 1, Step 2): expected to fail until `Task 5` adds the
+    /// `from_inputs_with_arbitrary_fake_glv_hints` builder backed by the
+    /// Garaga-style decomposer (Task 2) and the general AIR (Tasks 3–4).
+    ///
+    /// Today this fails with either:
+    ///   - a missing-method compile error on `from_inputs_with_arbitrary_fake_glv_hints`,
+    ///     or once the method exists,
+    ///   - `FakeGlvScalarHintError::ScalarDoesNotFitTrivialHint`, because
+    ///     `scalar_near_order(123)` is full-width and the trivial hint
+    ///     forces `s1 = scalar < 2^128`.
+    #[test]
+    fn arbitrary_full_width_u_scalars_build_a_current_air_claim() {
+        let input = valid_real_input_with_u_scalars(scalar_near_order(123), scalar_near_order(456));
+        assert!(
+            ecdsa_verify(&input),
+            "synthetic arbitrary-width input must be valid",
+        );
+
+        P256ProofDraft::from_inputs_with_arbitrary_fake_glv_hints(vec![input])
+            .expect("arbitrary full-width valid signature should build a proof draft");
     }
 
     #[test]

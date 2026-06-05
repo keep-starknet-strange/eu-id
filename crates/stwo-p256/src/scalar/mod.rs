@@ -2,6 +2,7 @@ pub mod canonical_lt;
 pub mod cert_bind;
 pub mod fake_glv_chain;
 pub mod fake_glv_chain_continuity;
+pub mod fake_glv_decompose;
 pub mod fake_glv_chain_expansion;
 pub mod fake_glv_chain_schedule;
 pub mod fake_glv_direct_prepared_operand;

@@ -353,6 +353,35 @@ impl FakeGlvScalarHint {
         })
     }
 
+    /// Build a bounded fake-GLV hint for an arbitrary scalar in `[0, n)`
+    /// via Garaga's `precompute_lattice` (CT-2001 GLV Algorithm 3.7).
+    ///
+    /// Returns [`FakeGlvScalarHintError::ScalarDoesNotFitTrivialHint`] if
+    /// the lattice decomposer fails to produce a triple `(s1, s2_abs, q)`
+    /// each `< 2^128` — for production P-256 ECDSA scalars this should
+    /// never happen (the algorithm is complete on prime-order curves), but
+    /// the failure mode is preserved to surface pathological inputs early.
+    pub fn decompose(scalar: &P256M31BigInt) -> Result<Self, FakeGlvScalarHintError> {
+        use crate::scalar::fake_glv_decompose::decompose_scalar_mod_n;
+        let decomposition = decompose_scalar_mod_n(&scalar.to_u256())
+            .ok_or(FakeGlvScalarHintError::ScalarDoesNotFitTrivialHint)?;
+        Ok(Self {
+            s1: FakeGlvSmallScalar::from_p256_if_128_bit(&P256M31BigInt::from_u256(
+                &decomposition.s1,
+            ))
+            .ok_or(FakeGlvScalarHintError::ScalarDoesNotFitTrivialHint)?,
+            s2_abs: FakeGlvSmallScalar::from_p256_if_128_bit(&P256M31BigInt::from_u256(
+                &decomposition.s2_abs,
+            ))
+            .ok_or(FakeGlvScalarHintError::ScalarDoesNotFitTrivialHint)?,
+            s2_sign_bit: M31::from_u32_unchecked(decomposition.s2_sign_bit as u32),
+            q: FakeGlvSmallScalar::from_p256_if_128_bit(&P256M31BigInt::from_u256(
+                &decomposition.q,
+            ))
+            .ok_or(FakeGlvScalarHintError::ScalarDoesNotFitTrivialHint)?,
+        })
+    }
+
     fn is_zero(&self) -> bool {
         self.s1.is_zero() && self.s2_abs.is_zero() && self.s2_sign_bit.0 == 0 && self.q.is_zero()
     }
@@ -971,5 +1000,31 @@ mod tests {
         let mut channel = stwo::core::channel::Blake2sM31Channel::default();
 
         fake_glv.mix_into(&mut channel);
+    }
+
+    /// RED TEST (Task 1, Step 3): expected to fail until `Task 2, Step 4`
+    /// adds `FakeGlvScalarHint::decompose` backed by the Garaga / CT-2001
+    /// `precompute_lattice` decomposer (Task 2, Step 2). Today this is a
+    /// missing-method compile error.
+    ///
+    /// Once the decomposer lands, this test asserts that a near-`n`
+    /// full-width scalar — far outside the trivial hint's 128-bit window —
+    /// yields a valid hint that satisfies both the algebraic equation
+    /// (`verify_scalar_equation`) and the three 128-bit bounds.
+    #[test]
+    fn fake_glv_hint_supports_near_order_scalar() {
+        use stwo_p256_utils::scalar_arithmetic::P256_ORDER;
+        let scalar = P256M31BigInt::from_u256(&U256::from_le_u64s(&[
+            P256_ORDER[0] - 123,
+            P256_ORDER[1],
+            P256_ORDER[2],
+            P256_ORDER[3],
+        ]));
+        let hint = FakeGlvScalarHint::decompose(&scalar)
+            .expect("full-width scalar should have a bounded fake-GLV hint");
+        verify_scalar_equation(&scalar, &hint).expect("hint equation must verify");
+        hint.s1.require_128_bit_bound("s1").expect("s1 bound");
+        hint.s2_abs.require_128_bit_bound("s2_abs").expect("s2 bound");
+        hint.q.require_128_bit_bound("q").expect("q bound");
     }
 }
