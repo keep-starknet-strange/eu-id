@@ -83,8 +83,23 @@ pub type FakeGlvScalarAirComponent = FrameworkComponent<FakeGlvScalarAirEval>;
 
 pub const FAKE_GLV_SCALAR_TRACE_COLUMNS: usize =
     1 + CERT_SCALAR_INPUT_RELATION_ARITY + FAKE_GLV_SCALAR_ROW_COLUMNS;
-const FAKE_GLV_SCALAR_ROW_COLUMNS: usize = 4 + N_LIMBS + 2 * FAKE_GLV_SMALL_LIMBS + 1
-    + FAKE_GLV_SMALL_LIMBS;
+/// Trace columns per `FakeGlvScalarAirRow`:
+/// - `sig_id`, `cert_id`, `cert_active`, `cert_zero_active`             (4)
+/// - `scalar` (full 256-bit cert scalar, in `N_LIMBS` 13-bit limbs)
+/// - `s1`, `s2_abs`                                                     (2 · FAKE_GLV_SMALL_LIMBS)
+/// - `s2_sign_bit`                                                      (1)
+/// - `q`                                                                (FAKE_GLV_SMALL_LIMBS)
+/// - `active_bit` = `cert_active · s2_sign_bit`                         (1)
+/// - `selected_s1` ≡ `k · s2_abs (mod n)` in `N_LIMBS` 13-bit limbs     (N_LIMBS)
+/// - `selected_borrow` chain for the `n − s1` branch                    (N_LIMBS − 1)
+const FAKE_GLV_SCALAR_ROW_COLUMNS: usize = 4
+    + N_LIMBS
+    + 2 * FAKE_GLV_SMALL_LIMBS
+    + 1
+    + FAKE_GLV_SMALL_LIMBS
+    + 1
+    + N_LIMBS
+    + (N_LIMBS - 1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FakeGlvScalarAirProofClaim {
@@ -202,7 +217,7 @@ impl FrameworkEval for FakeGlvScalarAirEval {
             -E::EF::from(active.clone()),
             &scalar_relation_eval_values(&row),
         ));
-        constrain_fake_glv_scalar_trivial(&mut eval, active, &cert, &row);
+        constrain_fake_glv_scalar_general(&mut eval, active, &cert, &row);
         eval.finalize_logup();
         eval
     }
@@ -284,6 +299,19 @@ struct FakeGlvScalarAirRow<F> {
     s2_abs: [F; FAKE_GLV_SMALL_LIMBS],
     s2_sign_bit: F,
     q: [F; FAKE_GLV_SMALL_LIMBS],
+    /// `cert_active · s2_sign_bit` — witnessed to keep the
+    /// `selected_s1 = ±s1 mod n` selector at degree 2.
+    active_bit: F,
+    /// Canonical positive residue of `±s1 (mod n)`, fed as `Result` to the
+    /// `ScalarModMul` external-limb consumer in Task 4. Locked convention:
+    /// `bit = 1 ⇒ selected_s1 = s1`; `bit = 0 ⇒ selected_s1 = n − s1`.
+    selected_s1: [F; N_LIMBS],
+    /// Borrow chain witnessing the `n − s1` subtraction limb-by-limb when
+    /// `bit = 0`. `selected_borrow[i]` is the borrow OUT of limb `i`. The
+    /// top borrow (`selected_borrow[N_LIMBS − 1]`) is implicitly zero
+    /// because `n − s1 ∈ [1, n)` fits in `N_LIMBS` limbs, so we only
+    /// witness `N_LIMBS − 1` cells. When `bit = 1` these are all zero.
+    selected_borrow: [F; N_LIMBS - 1],
 }
 
 impl<F: Clone> FakeGlvScalarAirRow<F> {
@@ -298,9 +326,11 @@ impl<F: Clone> FakeGlvScalarAirRow<F> {
         values.extend(self.s2_abs.iter().cloned());
         values.push(self.s2_sign_bit.clone());
         values.extend(self.q.iter().cloned());
+        values.push(self.active_bit.clone());
+        values.extend(self.selected_s1.iter().cloned());
+        values.extend(self.selected_borrow.iter().cloned());
         values
     }
-
 }
 
 impl<F> FakeGlvScalarAirRow<F> {
@@ -315,6 +345,9 @@ impl<F> FakeGlvScalarAirRow<F> {
             s2_abs: core::array::from_fn(|_| eval.next_trace_mask()),
             s2_sign_bit: eval.next_trace_mask(),
             q: core::array::from_fn(|_| eval.next_trace_mask()),
+            active_bit: eval.next_trace_mask(),
+            selected_s1: core::array::from_fn(|_| eval.next_trace_mask()),
+            selected_borrow: core::array::from_fn(|_| eval.next_trace_mask()),
         }
     }
 }
@@ -654,7 +687,29 @@ fn read_cert_relation_values<E: EvalAtRow>(
     core::array::from_fn(|_| eval.next_trace_mask())
 }
 
-fn constrain_fake_glv_scalar_trivial<E: EvalAtRow>(
+/// General fake-GLV scalar AIR constraint. Replaces
+/// `constrain_fake_glv_scalar_trivial`.
+///
+/// Proves, for each active row, the eu-id-form fake-GLV identity
+/// ```text
+///     k · s2_abs − q · n ± s1 = 0  (over Z)
+/// ```
+/// where the sign is `+` when `s2_sign_bit = 0` (Garaga `s2_signed = +s2_abs`)
+/// and `−` when `s2_sign_bit = 1` (Garaga `s2_signed = −s2_abs`).
+///
+/// The algebraic multiplication is proven by an external `ScalarModMul`
+/// component (wired in Task 4). This helper's job is to:
+/// 1. Bind cert/flags/scalar/zero-active hint to existing trace cells.
+/// 2. Witness `selected_s1 ≡ k · s2_abs (mod n)` as the canonical positive
+///    residue in `[0, n)`, with the correct sign-dependent value:
+///       `bit = 1 ⇒ selected_s1 = s1`
+///       `bit = 0 ⇒ selected_s1 = n − s1`
+/// 3. Constrain `selected_s1` against `(s1, s2_sign_bit, n)` so that an
+///    adversary cannot decouple it from the witnessed hint.
+///
+/// `selected_s1` is fed to the `ScalarModMul` component as `Result`,
+/// `scalar` as `A`, `s2_abs` as `B`, `q` as `Quotient` (Task 4 wiring).
+fn constrain_fake_glv_scalar_general<E: EvalAtRow>(
     eval: &mut E,
     active: E::F,
     cert: &[E::F; CERT_SCALAR_INPUT_RELATION_ARITY],
@@ -662,43 +717,116 @@ fn constrain_fake_glv_scalar_trivial<E: EvalAtRow>(
 ) {
     let zero = E::F::from(M31::from_u32_unchecked(0));
     let one = E::F::from(M31::from_u32_unchecked(1));
+    let base = E::F::from(M31::from_u32_unchecked(1u32 << LIMB_BITS));
     let cert_scalar_start = 2;
     let cert_active = cert[2 + 3 * N_LIMBS + 3].clone();
     let cert_zero_active = cert[2 + 3 * N_LIMBS + 4].clone();
 
+    // (1) Cert and flag bindings (unchanged from the trivial helper, plus
+    //     boolean constraints for the new `active_bit` and `selected_borrow`).
     eval.add_constraint(active.clone() * (row.sig_id.clone() - cert[0].clone()));
     eval.add_constraint(active.clone() * (row.cert_id.clone() - cert[1].clone()));
-    eval.add_constraint(active.clone() * (row.cert_active.clone() - cert_active));
-    eval.add_constraint(active.clone() * (row.cert_zero_active.clone() - cert_zero_active));
+    eval.add_constraint(active.clone() * (row.cert_active.clone() - cert_active.clone()));
+    eval.add_constraint(
+        active.clone() * (row.cert_zero_active.clone() - cert_zero_active.clone()),
+    );
     for flag in [
         row.cert_active.clone(),
         row.cert_zero_active.clone(),
         row.s2_sign_bit.clone(),
+        row.active_bit.clone(),
     ] {
         eval.add_constraint(flag.clone() * (flag - one.clone()));
     }
+    for limb in 0..(N_LIMBS - 1) {
+        eval.add_constraint(
+            row.selected_borrow[limb].clone()
+                * (row.selected_borrow[limb].clone() - one.clone()),
+        );
+    }
+
+    // (2) Bind the witnessed `scalar` to the cert input. The trivial helper
+    //     additionally forced the upper `N_LIMBS − FAKE_GLV_SMALL_LIMBS` limbs
+    //     to zero — that constraint is gone now, because we want to admit
+    //     full-width `[0, n)` scalars.
     for limb in 0..N_LIMBS {
         eval.add_constraint(
             active.clone()
                 * (row.scalar.limbs()[limb].clone() - cert[cert_scalar_start + limb].clone()),
         );
-        if limb < FAKE_GLV_SMALL_LIMBS {
-            eval.add_constraint(
-                active.clone()
-                    * (row.s1[limb].clone() - row.scalar.limbs()[limb].clone()),
-            );
-        } else {
-            eval.add_constraint(active.clone() * row.scalar.limbs()[limb].clone());
-        }
     }
+
+    // (3) Zero-active branch: hint and derived witnesses are all zero. This
+    //     replaces the trivial-helper's piecewise zero constraints and
+    //     extends them over the new `active_bit`, `selected_s1`,
+    //     `selected_borrow` cells. (Universal `(1 − active) · value = 0`
+    //     elsewhere already zeros everything on padding rows.)
     for limb in 0..FAKE_GLV_SMALL_LIMBS {
-        let expected_s2 = if limb == 0 { one.clone() } else { zero.clone() };
-        eval.add_constraint(row.cert_active.clone() * (row.s2_abs[limb].clone() - expected_s2));
-        eval.add_constraint(row.cert_zero_active.clone() * row.s2_abs[limb].clone());
-        eval.add_constraint(active.clone() * row.q[limb].clone());
+        eval.add_constraint(cert_zero_active.clone() * row.s1[limb].clone());
+        eval.add_constraint(cert_zero_active.clone() * row.s2_abs[limb].clone());
+        eval.add_constraint(cert_zero_active.clone() * row.q[limb].clone());
     }
-    eval.add_constraint(row.cert_active.clone() * (row.s2_sign_bit.clone() - one.clone()));
-    eval.add_constraint(row.cert_zero_active.clone() * row.s2_sign_bit.clone());
+    eval.add_constraint(cert_zero_active.clone() * row.s2_sign_bit.clone());
+    eval.add_constraint(cert_zero_active.clone() * row.active_bit.clone());
+    for limb in 0..N_LIMBS {
+        eval.add_constraint(cert_zero_active.clone() * row.selected_s1[limb].clone());
+    }
+    for limb in 0..(N_LIMBS - 1) {
+        eval.add_constraint(cert_zero_active.clone() * row.selected_borrow[limb].clone());
+    }
+
+    // (4) Witness composition: `active_bit = cert_active · s2_sign_bit`.
+    //     Used as a degree-1 selector for the bit = 1 branch (and via
+    //     `cert_active − active_bit` for the bit = 0 branch), keeping the
+    //     selected-s1 constraints at degree 2.
+    eval.add_constraint(
+        row.active_bit.clone() - cert_active.clone() * row.s2_sign_bit.clone(),
+    );
+
+    // (5) bit = 1 branch  ⇒  selected_s1 = s1  (with s1[i] = 0 for
+    //     i ≥ FAKE_GLV_SMALL_LIMBS).
+    for limb in 0..FAKE_GLV_SMALL_LIMBS {
+        eval.add_constraint(
+            row.active_bit.clone()
+                * (row.selected_s1[limb].clone() - row.s1[limb].clone()),
+        );
+    }
+    for limb in FAKE_GLV_SMALL_LIMBS..N_LIMBS {
+        eval.add_constraint(row.active_bit.clone() * row.selected_s1[limb].clone());
+    }
+
+    // (6) bit = 0 branch  ⇒  selected_s1 = n − s1, limb-by-limb with borrows.
+    //     Gate selector: `cert_active_neg_bit = cert_active − active_bit`.
+    //     Per-limb identity:
+    //         selected_s1[i] + s1[i] − n[i] + borrow_in[i] − BASE · borrow_out[i] = 0
+    //     where `borrow_in[0] = 0`, `borrow_in[i] = selected_borrow[i − 1]`
+    //     for `i ≥ 1`, and `borrow_out[N_LIMBS − 1] = 0` (n − s1 ≥ 0 fits
+    //     in N_LIMBS limbs).
+    let cert_active_neg_bit = cert_active.clone() - row.active_bit.clone();
+    let n_limbs = words_to_limbs(&P256_ORDER);
+    for limb in 0..N_LIMBS {
+        let n_limb = E::F::from(M31::from_u32_unchecked(n_limbs[limb]));
+        let s1_limb = if limb < FAKE_GLV_SMALL_LIMBS {
+            row.s1[limb].clone()
+        } else {
+            zero.clone()
+        };
+        let borrow_in = if limb == 0 {
+            zero.clone()
+        } else {
+            row.selected_borrow[limb - 1].clone()
+        };
+        let borrow_out_term = if limb < N_LIMBS - 1 {
+            base.clone() * row.selected_borrow[limb].clone()
+        } else {
+            zero.clone()
+        };
+        eval.add_constraint(
+            cert_active_neg_bit.clone()
+                * (row.selected_s1[limb].clone() + s1_limb - n_limb + borrow_in
+                    - borrow_out_term),
+        );
+    }
 }
 
 fn write_cert_relation_values(
@@ -775,6 +903,78 @@ fn write_fake_glv_scalar_row(
         columns[*offset][row_index] = value;
         *offset += 1;
     }
+    let (active_bit, selected_s1, selected_borrow) = derive_selected_s1_witness(row);
+    columns[*offset][row_index] = active_bit;
+    *offset += 1;
+    for value in selected_s1 {
+        columns[*offset][row_index] = value;
+        *offset += 1;
+    }
+    for value in selected_borrow {
+        columns[*offset][row_index] = value;
+        *offset += 1;
+    }
+}
+
+/// Compute the trace-row witnesses derived from a fake-GLV hint row:
+///   - `active_bit = cert_active · s2_sign_bit`
+///   - `selected_s1 = bit ? s1 : (n − s1)` as `N_LIMBS` 13-bit limbs
+///   - `selected_borrow[i]` = borrow OUT of limb `i` during the `n − s1`
+///     subtraction (`N_LIMBS − 1` cells; the top borrow is zero by
+///     construction since `n − s1 ∈ [1, n)` fits in `N_LIMBS` limbs).
+///
+/// On inactive rows or in the `cert_zero_active` branch, every output is
+/// zero — keeping the universal zero-on-inactive constraints satisfied.
+fn derive_selected_s1_witness(
+    row: &FakeGlvScalarHintRow,
+) -> (M31, [M31; N_LIMBS], [M31; N_LIMBS - 1]) {
+    let zero = M31::from_u32_unchecked(0);
+    let active_bit = M31::from_u32_unchecked(row.cert_active.0 * row.hint.s2_sign_bit.0);
+
+    // Inactive or zero-active rows ⇒ all derived witnesses zero.
+    if row.cert_active.0 == 0 {
+        return (active_bit, [zero; N_LIMBS], [zero; N_LIMBS - 1]);
+    }
+
+    // Lift `s1` (≤ 2^128, held in `FAKE_GLV_SMALL_LIMBS` 13-bit limbs) into
+    // the full `N_LIMBS` layout by zero-padding the upper limbs.
+    let mut s1_full = [0u32; N_LIMBS];
+    for (dst, src) in s1_full.iter_mut().zip(row.hint.s1.limbs.iter()) {
+        *dst = src.0;
+    }
+
+    if row.hint.s2_sign_bit.0 == 1 {
+        // bit = 1 ⇒ selected_s1 = s1.
+        let selected_s1 = core::array::from_fn(|i| M31::from_u32_unchecked(s1_full[i]));
+        return (active_bit, selected_s1, [zero; N_LIMBS - 1]);
+    }
+
+    // bit = 0 ⇒ selected_s1 = n − s1 (limb-by-limb subtraction).
+    let n_limbs = words_to_limbs(&P256_ORDER);
+    let base = 1i64 << LIMB_BITS;
+    let mut selected_s1 = [zero; N_LIMBS];
+    let mut selected_borrow = [zero; N_LIMBS - 1];
+    let mut borrow_in: i64 = 0;
+    for i in 0..N_LIMBS {
+        let diff = i64::from(n_limbs[i]) - i64::from(s1_full[i]) - borrow_in;
+        let (limb, borrow_out) = if diff < 0 {
+            ((diff + base) as u32, 1u32)
+        } else {
+            (diff as u32, 0u32)
+        };
+        selected_s1[i] = M31::from_u32_unchecked(limb);
+        if i < N_LIMBS - 1 {
+            selected_borrow[i] = M31::from_u32_unchecked(borrow_out);
+        } else {
+            // `n − s1 ≥ 0`, so the top limb must not borrow out.
+            assert_eq!(
+                borrow_out, 0,
+                "borrow out of top limb during `n − s1` (n={n_limbs:?}, s1={s1_full:?})",
+            );
+        }
+        borrow_in = i64::from(borrow_out);
+    }
+    (active_bit, selected_s1, selected_borrow)
 }
 
 fn cert_packed_values_from_base(
