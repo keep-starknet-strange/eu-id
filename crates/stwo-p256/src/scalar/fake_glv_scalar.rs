@@ -30,10 +30,9 @@ use super::cert_bind::{
     CERT_SCALAR_INPUT_RELATION_ARITY,
 };
 use super::scalar_mod_mul::relation::ScalarLimbRelation;
-// Role constants for the `ScalarLimbRelation` tuples once the AIR-side
-// provider for the fake-GLV scalar equation is wired (see
-// `fake_glv_scalar_mod_mul_rows` in `proof.rs` — currently dormant).
-#[allow(unused_imports)]
+// Role constants for the `ScalarLimbRelation` tuples emitted by the
+// `FakeGlvScalarAirEval` provider (see `add_scalar_mod_mul_limb_links` below).
+// The matching consumer rows are built in `proof.rs::fake_glv_scalar_mod_mul_rows`.
 use super::scalar_mod_mul::{ROLE_A, ROLE_B, ROLE_QUOTIENT, ROLE_RESULT};
 
 /// Mul-ID namespace base for fake-GLV scalar-mod-mul rows. Disjoint from the
@@ -245,10 +244,104 @@ impl FrameworkEval for FakeGlvScalarAirEval {
             -E::EF::from(active.clone()),
             &scalar_relation_eval_values(&row),
         ));
+        add_scalar_mod_mul_limb_links(&mut eval, &self.scalar_limb_relation, &row);
         constrain_fake_glv_scalar_general(&mut eval, active, &cert, &row);
         eval.finalize_logup();
         eval
     }
+}
+
+/// Provider yields into the per-cert `ScalarModMul` external-limb relation.
+/// For each active cert (gated by `row.cert_active`), emits 4 · `N_LIMBS`
+/// `(mul_id, role, limb_index, limb_value)` tuples with `mul_id =
+/// FAKE_GLV_SCALAR_MUL_ID_BASE + 2 · sig_id + cert_id`:
+///   - Role A   ⇒ full 256-bit `scalar` (N_LIMBS limbs)
+///   - Role B   ⇒ `s2_abs` for limbs `0..FAKE_GLV_SMALL_LIMBS`, zero above
+///   - Role Q   ⇒ `q` for limbs `0..FAKE_GLV_SMALL_LIMBS`, zero above
+///   - Role R   ⇒ `selected_s1` (full N_LIMBS, holds canonical residue mod n)
+///
+/// On padding rows `cert_active == 0` so no tuple contributes. The numerator
+/// polarity (`+cert_active`) mirrors `setup_air::add_scalar_limb_link` so the
+/// matching `ScalarModMul` consumer (negative numerator) cancels.
+fn add_scalar_mod_mul_limb_links<E: EvalAtRow>(
+    eval: &mut E,
+    relation: &ScalarLimbRelation,
+    row: &FakeGlvScalarAirRow<E::F>,
+) {
+    let zero = E::F::from(M31::from_u32_unchecked(0));
+    let base = E::F::from(M31::from_u32_unchecked(FAKE_GLV_SCALAR_MUL_ID_BASE));
+    let two = E::F::from(M31::from_u32_unchecked(2));
+    let mul_id = base + two * row.sig_id.clone() + row.cert_id.clone();
+    let numerator = E::EF::from(row.cert_active.clone());
+    for limb in 0..N_LIMBS {
+        emit_scalar_limb_link(
+            eval,
+            relation,
+            numerator.clone(),
+            mul_id.clone(),
+            ROLE_A,
+            limb,
+            row.scalar.limbs()[limb].clone(),
+        );
+        let b_value = if limb < FAKE_GLV_SMALL_LIMBS {
+            row.s2_abs[limb].clone()
+        } else {
+            zero.clone()
+        };
+        emit_scalar_limb_link(
+            eval,
+            relation,
+            numerator.clone(),
+            mul_id.clone(),
+            ROLE_B,
+            limb,
+            b_value,
+        );
+        let q_value = if limb < FAKE_GLV_SMALL_LIMBS {
+            row.q[limb].clone()
+        } else {
+            zero.clone()
+        };
+        emit_scalar_limb_link(
+            eval,
+            relation,
+            numerator.clone(),
+            mul_id.clone(),
+            ROLE_QUOTIENT,
+            limb,
+            q_value,
+        );
+        emit_scalar_limb_link(
+            eval,
+            relation,
+            numerator.clone(),
+            mul_id.clone(),
+            ROLE_RESULT,
+            limb,
+            row.selected_s1[limb].clone(),
+        );
+    }
+}
+
+fn emit_scalar_limb_link<E: EvalAtRow>(
+    eval: &mut E,
+    relation: &ScalarLimbRelation,
+    numerator: E::EF,
+    mul_id: E::F,
+    role: u32,
+    limb: usize,
+    value: E::F,
+) {
+    eval.add_to_relation(RelationEntry::new(
+        relation,
+        numerator,
+        &[
+            mul_id,
+            E::F::from(M31::from_u32_unchecked(role)),
+            E::F::from(M31::from_u32_unchecked(limb as u32)),
+            value,
+        ],
+    ));
 }
 
 fn scalar_relation_eval_values<F: Clone>(
@@ -633,6 +726,7 @@ pub(crate) fn gen_fake_glv_scalar_air_interaction_trace(
     base: &[M31ColumnEval],
     cert_relation: &CertScalarInputRelation,
     scalar_relation: &FakeGlvScalarRelation,
+    scalar_limb_relation: &ScalarLimbRelation,
 ) -> (ColumnVec<M31ColumnEval>, FakeGlvScalarAirInteractionClaim) {
     assert_eq!(base.len(), FAKE_GLV_SCALAR_TRACE_COLUMNS);
     let log_size = base[0].domain.log_size();
@@ -655,6 +749,26 @@ pub(crate) fn gen_fake_glv_scalar_air_interaction_trace(
         );
     }
     col.finalize_col();
+
+    // Per-(role, limb) ScalarModMul external-limb provider columns. Numerator
+    // is `cert_active` (not the storage flag), mirroring
+    // `add_scalar_mod_mul_limb_links` in the AIR-eval. Order MUST match the
+    // AIR-eval's `add_to_relation` order: for each limb in `0..N_LIMBS`, emit
+    // tuples in the order (A, B, Quotient, Result).
+    for limb in 0..N_LIMBS {
+        for role_value_col in scalar_mod_mul_limb_value_columns(limb) {
+            let (role, value_col) = role_value_col;
+            append_scalar_mod_mul_limb_column(
+                &mut logup,
+                base,
+                scalar_limb_relation,
+                role,
+                limb,
+                value_col,
+            );
+        }
+    }
+
     let (trace, claimed_sum) = logup.finalize_last();
     let cert_consumer_claimed_sum: SecureField = storage_rows(base)
         .filter(|row| row[0] != M31::from_u32_unchecked(0))
@@ -671,25 +785,120 @@ pub(crate) fn gen_fake_glv_scalar_air_interaction_trace(
             -SecureField::from(row[0]) / denominator
         })
         .sum();
+    let scalar_mod_mul_provider_claimed_sum: SecureField = storage_rows(base)
+        .filter(|row| row[SCALAR_ROW_CERT_ACTIVE] != M31::from_u32_unchecked(0))
+        .map(|row| -> SecureField {
+            let mul_id = scalar_mod_mul_mul_id_from_row(&row);
+            let cert_active = SecureField::from(row[SCALAR_ROW_CERT_ACTIVE]);
+            let mut acc = secure_zero();
+            for limb in 0..N_LIMBS {
+                for (role, value_col) in scalar_mod_mul_limb_value_columns(limb) {
+                    let value = if value_col == SCALAR_ROW_ZERO_PAD_COL {
+                        M31::from_u32_unchecked(0)
+                    } else {
+                        row[value_col]
+                    };
+                    let denominator: SecureField = scalar_limb_relation.combine(&[
+                        mul_id,
+                        M31::from_u32_unchecked(role),
+                        M31::from_u32_unchecked(limb as u32),
+                        value,
+                    ]);
+                    acc += cert_active / denominator;
+                }
+            }
+            acc
+        })
+        .sum();
     (
         trace,
         FakeGlvScalarAirInteractionClaim {
             claimed_sum,
             cert_consumer_claimed_sum,
             scalar_provider_claimed_sum,
-            // Provider contribution for the per-cert ScalarModMul external-
-            // limb relation. Set to zero here; the matching AIR-eval
-            // `add_to_relation` calls are not yet wired (see the AIR
-            // provider work pending in `fake_glv_scalar.rs::evaluate`).
-            // The `FakeGlvScalarModMul` balance entry in
-            // `P256CurrentAirInteractionClaim::relation_balances` therefore
-            // currently equals `-Σ consumer claims` (i.e. the ScalarModMul
-            // components' claimed sums), and fails until the provider lands.
-            scalar_mod_mul_provider_claimed_sum: secure_zero(),
+            scalar_mod_mul_provider_claimed_sum,
         },
     )
 }
 
+/// Per-limb `(role, base-trace column index)` provider tuples used by both
+/// the AIR-eval (`add_scalar_mod_mul_limb_links`) and the trace-gen logup
+/// column / provider-sum loops. Role B and Quotient zero-pad above
+/// `FAKE_GLV_SMALL_LIMBS` (the bound on Garaga's decomposition); when
+/// `value_col` is `SCALAR_ROW_ZERO_PAD_COL` the trace cell is guaranteed to
+/// be zero (the storage `active` column at base index 0 — every padding cell
+/// holds zero, and on active rows it's `1`, but for the zero-pad role we
+/// instead pass an explicit `M31(0)` via a sentinel offset that points at a
+/// known-zero cell).
+fn scalar_mod_mul_limb_value_columns(limb: usize) -> [(u32, usize); 4] {
+    let b_col = if limb < FAKE_GLV_SMALL_LIMBS {
+        SCALAR_ROW_S2_ABS_START + limb
+    } else {
+        SCALAR_ROW_ZERO_PAD_COL
+    };
+    let q_col = if limb < FAKE_GLV_SMALL_LIMBS {
+        SCALAR_ROW_Q_START + limb
+    } else {
+        SCALAR_ROW_ZERO_PAD_COL
+    };
+    [
+        (ROLE_A, SCALAR_ROW_SCALAR_START + limb),
+        (ROLE_B, b_col),
+        (ROLE_QUOTIENT, q_col),
+        (ROLE_RESULT, SCALAR_ROW_SELECTED_S1_START + limb),
+    ]
+}
+
+fn append_scalar_mod_mul_limb_column(
+    logup: &mut LogupTraceGenerator,
+    base: &[M31ColumnEval],
+    relation: &ScalarLimbRelation,
+    role: u32,
+    limb: usize,
+    value_col: usize,
+) {
+    let log_size = base[0].domain.log_size();
+    let mut col = logup.new_col();
+    let role_packed = PackedM31::from(M31::from_u32_unchecked(role));
+    let limb_packed = PackedM31::from(M31::from_u32_unchecked(limb as u32));
+    let zero_packed = PackedM31::from(M31::from_u32_unchecked(0));
+    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+        let mul_id = scalar_mod_mul_mul_id_packed(base, vec_row);
+        let value = if value_col == SCALAR_ROW_ZERO_PAD_COL {
+            zero_packed
+        } else {
+            base[value_col].data[vec_row]
+        };
+        let denom = relation.combine(&[mul_id, role_packed, limb_packed, value]);
+        let numerator = PackedQM31::from(base[SCALAR_ROW_CERT_ACTIVE].data[vec_row]);
+        col.write_frac(vec_row, numerator, denom);
+    }
+    col.finalize_col();
+}
+
+fn scalar_mod_mul_mul_id_packed(base: &[M31ColumnEval], vec_row: usize) -> PackedM31 {
+    let base_m31 = PackedM31::from(M31::from_u32_unchecked(FAKE_GLV_SCALAR_MUL_ID_BASE));
+    let two = PackedM31::from(M31::from_u32_unchecked(2));
+    base_m31
+        + two * base[SCALAR_ROW_SIG_ID].data[vec_row]
+        + base[SCALAR_ROW_CERT_ID].data[vec_row]
+}
+
+fn scalar_mod_mul_mul_id_from_row(row: &[M31]) -> M31 {
+    M31::from_u32_unchecked(FAKE_GLV_SCALAR_MUL_ID_BASE)
+        + M31::from_u32_unchecked(2) * row[SCALAR_ROW_SIG_ID]
+        + row[SCALAR_ROW_CERT_ID]
+}
+
+/// Verify the unified scalar equation
+/// ```text
+///     scalar · s2_abs − q · n − selected_s1 = 0   (over Z)
+/// ```
+/// where `selected_s1 = s1` when `s2_sign_bit == 1` and `selected_s1 = n − s1`
+/// when `s2_sign_bit == 0`. This matches ScalarModMul's `A · B = Q · n + R`
+/// (with `A = scalar`, `B = s2_abs`, `Q = q`, `R = selected_s1`) exactly, so
+/// the AIR-provided `q` limbs balance against the per-cert ScalarModMul
+/// component's external-limb consumption.
 fn verify_scalar_equation(
     scalar: &P256M31BigInt,
     hint: &FakeGlvScalarHint,
@@ -698,20 +907,44 @@ fn verify_scalar_equation(
     let mut coeffs = [0i128; EQUATION_LIMBS];
     let n = words_to_limbs(&P256_ORDER);
 
-    for (i, (scalar_limb, n_limb)) in scalar.limbs().iter().zip(n).enumerate() {
+    // + scalar · s2_abs
+    for (i, scalar_limb) in scalar.limbs().iter().enumerate() {
         for j in 0..FAKE_GLV_SMALL_LIMBS {
             coeffs[i + j] += scalar_limb.0 as i128 * hint.s2_abs.limbs[j].0 as i128;
-            coeffs[i + j] -= n_limb as i128 * hint.q.limbs[j].0 as i128;
         }
     }
 
-    let s1_sign = if hint.s2_sign_bit.0 == 0 { 1 } else { -1 };
-    for (coeff, s1_limb) in coeffs
-        .iter_mut()
-        .zip(hint.s1.limbs)
-        .take(FAKE_GLV_SMALL_LIMBS)
-    {
-        *coeff += s1_sign * s1_limb.0 as i128;
+    // − n · q
+    for (i, n_limb) in n.iter().enumerate() {
+        for j in 0..FAKE_GLV_SMALL_LIMBS {
+            coeffs[i + j] -= *n_limb as i128 * hint.q.limbs[j].0 as i128;
+        }
+    }
+
+    // − selected_s1, where selected_s1 = (bit == 1 ? s1 : n − s1).
+    // bit = 1: subtract s1 limb-wise (only the lower FAKE_GLV_SMALL_LIMBS).
+    // bit = 0: subtract (n − s1) limb-wise, i.e. −n + s1.
+    if hint.s2_sign_bit.0 == 1 {
+        for (coeff, s1_limb) in coeffs
+            .iter_mut()
+            .zip(hint.s1.limbs)
+            .take(FAKE_GLV_SMALL_LIMBS)
+        {
+            *coeff -= s1_limb.0 as i128;
+        }
+    } else {
+        // − (n − s1) = −n + s1: subtract n's full N_LIMBS span, then add s1
+        // limbs back over the FAKE_GLV_SMALL_LIMBS span.
+        for (coeff, n_limb) in coeffs.iter_mut().zip(n.iter()).take(N_LIMBS) {
+            *coeff -= *n_limb as i128;
+        }
+        for (coeff, s1_limb) in coeffs
+            .iter_mut()
+            .zip(hint.s1.limbs)
+            .take(FAKE_GLV_SMALL_LIMBS)
+        {
+            *coeff += s1_limb.0 as i128;
+        }
     }
 
     let base = 1i128 << LIMB_BITS;
@@ -1051,9 +1284,18 @@ const SCALAR_ROW_START: usize = 1 + CERT_SCALAR_INPUT_RELATION_ARITY;
 const SCALAR_ROW_SIG_ID: usize = SCALAR_ROW_START;
 const SCALAR_ROW_CERT_ID: usize = SCALAR_ROW_START + 1;
 const SCALAR_ROW_CERT_ACTIVE: usize = SCALAR_ROW_START + 2;
+const SCALAR_ROW_SCALAR_START: usize = SCALAR_ROW_START + 4;
 const SCALAR_ROW_S1_START: usize = SCALAR_ROW_START + 4 + N_LIMBS;
 const SCALAR_ROW_S2_ABS_START: usize = SCALAR_ROW_S1_START + FAKE_GLV_SMALL_LIMBS;
 const SCALAR_ROW_S2_SIGN_BIT: usize = SCALAR_ROW_S2_ABS_START + FAKE_GLV_SMALL_LIMBS;
+const SCALAR_ROW_Q_START: usize = SCALAR_ROW_S2_SIGN_BIT + 1;
+const SCALAR_ROW_SELECTED_S1_START: usize = SCALAR_ROW_Q_START + FAKE_GLV_SMALL_LIMBS + 1;
+/// Sentinel used in [`scalar_mod_mul_limb_value_columns`] to mark a tuple
+/// whose value is a constant zero (because the corresponding role-limb is
+/// above `FAKE_GLV_SMALL_LIMBS` for `s2_abs` and `q`, which Garaga bounds at
+/// `2^128`). Callers swap in `M31(0)` / `PackedM31(0)` instead of indexing
+/// into the base trace.
+const SCALAR_ROW_ZERO_PAD_COL: usize = usize::MAX;
 
 fn scalar_relation_column_index(index: usize) -> usize {
     match index {

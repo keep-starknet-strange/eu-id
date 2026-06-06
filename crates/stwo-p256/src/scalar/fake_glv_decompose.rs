@@ -109,33 +109,44 @@ pub fn decompose_scalar_mod_n(scalar: &U256) -> Option<FakeGlvDecomposition> {
     let s1_pos = s1_signed.to_biguint().expect("s1 > 0 after normalize");
     let s2_abs_big = s2_signed.abs();
 
-    // --- Branch-direct q in the AIR equation's own form ---
-    // Never compute `q` as `abs(q_signed)` — instead read it off the AIR
-    // equation directly, branching on `sign(s2_signed)`.
+    // --- Branch-direct q aligned with ScalarModMul's `A·B = Q·n + R` ---
+    // ScalarModMul takes `A=k`, `B=s2_abs`, `Q=q`, `R=selected_s1` (the
+    // canonical positive residue) and proves the integer identity. We must
+    // compute `q` exactly as ScalarModMul does:
+    //   `q = (k·s2_abs − selected_s1) / n`
+    // which equals `(k·s2_abs − s1)/n` for bit=1 (selected_s1 = s1) and
+    // `(k·s2_abs − (n − s1))/n = (k·s2_abs + s1)/n − 1` for bit=0
+    // (selected_s1 = n − s1). The two AIR branches share the unified
+    // identity `k·s2_abs − q·n − selected_s1 = 0`.
     let (s2_sign_bit, selected_s1, q_unsigned) = if s2_signed.sign() == Sign::Minus {
-        // bit = 1 branch.  AIR: k·s2_abs − q·n − s1 = 0
-        //                   ⇒  q = (k·s2_abs − s1) / n
+        // bit = 1 branch: selected_s1 = s1.
         let numerator = &k * &s2_abs_big - BigInt::from(s1_pos.clone());
         debug_assert!(
             numerator.mod_floor(&n).is_zero(),
-            "AIR identity (bit=1): k·s2_abs − q·n − s1 = 0",
+            "ScalarModMul identity (bit=1): k·s2_abs ≡ s1 (mod n)",
         );
         let q = (&numerator / &n)
             .to_biguint()
-            .expect("q ≥ 0 by construction");
+            .expect("q ≥ 0 by construction (bit=1)");
         (true, s1_pos.clone(), q)
     } else {
-        // bit = 0 branch.  AIR: k·s2_abs − q·n + s1 = 0
-        //                   ⇒  q = (k·s2_abs + s1) / n
-        let numerator = &k * &s2_abs_big + BigInt::from(s1_pos.clone());
+        // bit = 0 branch: selected_s1 = n − s1.
+        // `k·s2_abs ≡ n − s1 (mod n)` ⇔ `k·s2_abs ≡ −s1 (mod n)` ⇔ Garaga.
+        let selected_s1 = &n_unsigned - &s1_pos;
+        let numerator = &k * &s2_abs_big - BigInt::from(selected_s1.clone());
         debug_assert!(
             numerator.mod_floor(&n).is_zero(),
-            "AIR identity (bit=0): k·s2_abs − q·n + s1 = 0",
+            "ScalarModMul identity (bit=0): k·s2_abs ≡ n − s1 (mod n)",
         );
-        let q = (&numerator / &n)
+        let q_signed = &numerator / &n;
+        if q_signed.sign() == Sign::Minus {
+            // Pathological corner where `k·s2_abs < n − s1`. The
+            // ScalarModMul convention requires `q ≥ 0`, so signal failure.
+            return None;
+        }
+        let q = q_signed
             .to_biguint()
-            .expect("q ≥ 0 by construction");
-        let selected_s1 = &n_unsigned - &s1_pos;
+            .expect("q ≥ 0 after the negative-q early return");
         (false, selected_s1, q)
     };
 
@@ -238,16 +249,19 @@ mod tests {
             decomp.s2_sign_bit,
         );
 
-        // Identity (2): AIR integer equation in the chosen branch.
-        let air_lhs = if decomp.s2_sign_bit {
-            &k * &s2_abs - &q * &n - &s1
+        // Identity (2): ScalarModMul integer equation
+        // `k · s2_abs − q · n − selected_s1 = 0` where
+        // `selected_s1 = s1` for bit=1 and `selected_s1 = n − s1` for bit=0.
+        let selected_s1 = if decomp.s2_sign_bit {
+            s1.clone()
         } else {
-            &k * &s2_abs - &q * &n + &s1
+            &n - &s1
         };
+        let air_lhs = &k * &s2_abs - &q * &n - &selected_s1;
         assert_eq!(
             air_lhs,
             BigInt::zero(),
-            "AIR integer identity (k = {k}, bit = {})",
+            "ScalarModMul integer identity (k = {k}, bit = {})",
             decomp.s2_sign_bit,
         );
     }

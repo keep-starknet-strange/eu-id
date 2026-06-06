@@ -53,13 +53,31 @@
 //! - `p1 == dy`                       (`lambda*(x2-x1) ≡ y2-y1`; both canonical)
 //! - `x3 + x1 + x2 ≡ lamsq (mod p)`   (`x3 = lambda^2 - x1 - x2`)
 //!
-//! All four are gated by `both_finite = (1 - r1_inf)(1 - r2_inf)`. The infinity
-//! branches use `x3 = x2` (when `R_1 = ∞`) or `x3 = x1` (when `R_2 = ∞`); the
-//! `R_1 = R_2 = ∞` case is rejected (`active · r1_inf · r2_inf = 0`).
+//! On the **distinct-add** branch, the four chord identities are gated by
+//! `distinct_add` (which itself requires `both_finite = (1 - r1_inf)(1 - r2_inf)`).
+//! The infinity branches use `x3 = x2` (when `R_1 = ∞`) or `x3 = x1`
+//! (when `R_2 = ∞`); the `R_1 = R_2 = ∞` case is rejected
+//! (`active · r1_inf · r2_inf = 0`).
 //!
-//! Doubling (`R_1 = R_2`, i.e. `u1 = u2`) and the additive-inverse case
-//! (`R_final = ∞`) are rejected by the native witness builder; the latter is
-//! already rejected by `final_check.rs` (`InfinityFinalR`).
+//! # Doubling (`R_1 = R_2`)
+//!
+//! When the witness commits to `double_add = 1`, the row enforces
+//! `r1.x = r2.x` and `r1.y = r2.y` (so the `x3 + x1 + x2 ≡ lamsq` reduction
+//! becomes `x3 + 2·x1 ≡ lamsq`). The `dx`/`dy`/`dx_inv` columns are
+//! repurposed to carry the tangent slope's denominator (`2·y1`), numerator
+//! (`3·x1^2 − 3`) and its inverse:
+//! - `dx + 0 ≡ 2·y1 (mod p)`           (`dx = denom = 2·y1`)
+//! - `dy + 3 ≡ 3·x1_sq (mod p)`        (`dy = numer = 3·x1_sq − 3`)
+//! - `p1 == dy`                        (re-used: `lambda · denom ≡ numer`)
+//! - `dx · dx_inv ≡ 1`                 (re-used: `denom != 0`, i.e. `y1 != 0`)
+//!
+//! `x1_sq = x1 · x1 mod p` is proven through a new mul `MUL_X1_SQUARED`
+//! (idle = `0·0 = 0` on non-doubling rows).
+//!
+//! # Additive-inverse (`R_1 = -R_2`)
+//!
+//! Rejected in-AIR: `active · inverse_add = 0` makes the row unprovable. The
+//! resulting EC sum would be `∞`, an invalid ECDSA result.
 //!
 //! `x3` is provided to `final_check_air` on [`FinalAddOutputRelation`] keyed
 //! `(sig_id, x3[N_LIMBS])`, which the final check consumes as its `r_x`.
@@ -131,12 +149,19 @@ pub const FINAL_ADD_MUL_RESULT_ARITY: usize = 4;
 
 relation!(FinalAddMulResultRelation, FINAL_ADD_MUL_RESULT_ARITY);
 
+/// `lambda · denom ≡ numer (mod p)`. `denom = (x2 − x1)` on the distinct
+/// branch and `denom = 2·y1` on the doubling branch (both stored in the same
+/// `dx` column, switched by the active branch selector).
 const MUL_LAMBDA_DX: u32 = 0;
 const MUL_LAMBDA_SQUARED: u32 = 1;
-/// `dx · dx_inv ≡ 1 (mod p)` — witnesses `dx != 0`, rejecting the degenerate
-/// `x1 == x2` doubling/inverse case in-AIR (where `lambda` would be free).
+/// `denom · denom_inv ≡ (distinct_add + double_add) (mod p)` — witnesses
+/// `denom != 0` on either finite branch (rejects `x1 == x2` for distinct and
+/// `y1 == 0` for doubling).
 const MUL_DX_INV: u32 = 2;
-pub const FINAL_ADD_MUL_COUNT: usize = 3;
+/// `x1 · x1 ≡ x1_sq (mod p)` — feeds the doubling slope numerator
+/// `numer + 3 ≡ 3·x1_sq (mod p)`. Idle (`0·0 = 0`) on the infinity branches.
+const MUL_X1_SQUARED: u32 = 3;
+pub const FINAL_ADD_MUL_COUNT: usize = 4;
 
 const ROLE_LHS: u32 = PROJECTIVE_RCB_MUL_ROLE_LHS;
 const ROLE_RHS: u32 = PROJECTIVE_RCB_MUL_ROLE_RHS;
@@ -151,45 +176,83 @@ const FINAL_ADD_QUOTIENT_BOUND: i64 = 2;
 // Native claim
 // ---------------------------------------------------------------------------
 
+/// Active branch selector for the final-add row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FinalAddBranch {
+    /// `r1`, `r2` finite, `r1.x != r2.x` (chord addition).
+    DistinctAdd,
+    /// `r1 == r2` finite (tangent doubling).
+    DoubleAdd,
+    /// `r1 = ∞`, `r2` finite (output `S = r2`).
+    R2Only,
+    /// `r2 = ∞`, `r1` finite (output `S = r1`).
+    R1Only,
+}
+
+impl FinalAddBranch {
+    fn double_add(self) -> M31 {
+        match self {
+            FinalAddBranch::DoubleAdd => M31::from_u32_unchecked(1),
+            _ => M31::from_u32_unchecked(0),
+        }
+    }
+}
+
 /// Fully checked native witness for one final EC addition `S = R_1 + R_2`.
+///
+/// The `dx`/`dy`/`dx_inv` columns carry semantic `denom`/`numer`/`denom_inv`
+/// values that differ per branch:
+/// - `DistinctAdd`: `dx = x2 − x1`, `dy = y2 − y1`, `dx_inv = dx^{-1}`.
+/// - `DoubleAdd`:   `dx = 2·y1`,  `dy = 3·x1^2 − 3`, `dx_inv = dx^{-1}`.
+/// - Infinity branches: all three zeroed.
 #[derive(Clone, Debug)]
 pub struct FinalAddClaim {
-    /// The two mod-`p` multiplications (`lambda·dx`, `lambda²`), through the
-    /// shared `projective_air` mul machinery (one source row, two mul rows).
+    /// All mod-`p` multiplications consumed by the check row, through the
+    /// shared `projective_air` mul machinery (one source row,
+    /// [`FINAL_ADD_MUL_COUNT`] mul rows).
     pub mul_trace: ProjectiveRcbAirTraceClaim,
     pub sig_id: M31,
+    /// Active row branch.
+    pub branch: FinalAddBranch,
     /// Consumed hint `R_1` (cert0 = `u1·G`).
     pub r1: PreparedAffinePoint,
     /// Consumed hint `R_2` (cert1 = `u2·Q`).
     pub r2: PreparedAffinePoint,
-    /// `dx = (x2 - x1) mod p` and its single-subtraction quotient/carries.
+    /// Slope denominator (see [`FinalAddBranch`] doc on the struct).
     pub dx: P256M31BigInt,
     pub dx_q: i64,
     pub dx_carries: [i64; N_LIMBS],
-    /// `dx_inv = dx^{-1} mod p`, witnessing `dx != 0` (rejects the degenerate
-    /// `x1 == x2` doubling case in-AIR). Zero on the infinity branches.
+    /// Slope-denominator inverse — witnesses `dx != 0` on both finite
+    /// branches (rejects `x1 == x2` for distinct and `y1 == 0` for doubling).
     pub dx_inv: P256M31BigInt,
-    /// `dy = (y2 - y1) mod p` and its quotient/carries.
+    /// Slope numerator (see [`FinalAddBranch`] doc on the struct).
     pub dy: P256M31BigInt,
     pub dy_q: i64,
     pub dy_carries: [i64; N_LIMBS],
-    /// Chord slope `lambda` and `lamsq = lambda² mod p`.
+    /// Slope `lambda = numer / denom (mod p)` and `lamsq = lambda² mod p`.
     pub lambda: P256M31BigInt,
     pub lamsq: P256M31BigInt,
     /// Proven x-coordinate `x3 = x(S)`.
     pub x3: P256M31BigInt,
-    /// `x3 + x1 + x2 ≡ lamsq (mod p)` quotient/carries.
+    /// `x3 + x1 + x2 ≡ lamsq (mod p)` quotient/carries. (`x2 = x1` for the
+    /// doubling branch, enforced by `double_add · (r2 − r1) = 0`.)
     pub x3_q: i64,
     pub x3_carries: [i64; N_LIMBS],
+    /// `x1_sq = x1·x1 mod p`. Proven by [`MUL_X1_SQUARED`] on every active
+    /// row; consumed by the doubling slope-numer reduction
+    /// `dy + 3 ≡ 3·x1_sq (mod p)`.
+    pub x1_sq: P256M31BigInt,
 }
 
 impl FinalAddClaim {
     /// Build a final-add claim from the two pinned hint points `R_1`, `R_2`.
     ///
-    /// Rejects (sound, but incomplete): the doubling case `R_1 == R_2` and the
-    /// additive-inverse case `R_1 == -R_2` (which yields `S = ∞`). Neither
-    /// occurs for the gated inputs; the latter is also rejected upstream in
-    /// `final_check.rs` (`InfinityFinalR`).
+    /// Supports: `DistinctAdd` (`x1 != x2`), `DoubleAdd` (`r1 == r2`),
+    /// `R1Only`/`R2Only` (one infinity branch).
+    ///
+    /// Rejects: the additive-inverse case `R_1 == -R_2` (yields `S = ∞`, an
+    /// invalid ECDSA result — the AIR also makes this branch unprovable via
+    /// `active · inverse_add = 0`) and both-infinity.
     pub fn from_hints(
         sig_id: M31,
         r1: &AffinePoint,
@@ -200,39 +263,68 @@ impl FinalAddClaim {
         let r1_values = point_values(r1, r1_inf);
         let r2_values = point_values(r2, r2_inf);
         let modulus = U256::from_le_u64s(&P256_MODULUS);
+        let zero = U256::ZERO;
+        let three = U256::from_le_u64s(&[3, 0, 0, 0]);
 
-        // Mul operands. On infinity rows the muls are trivial (0·0 = 0).
-        let (lambda_u, dx_u) = if !r1_inf && !r2_inf {
-            if r1.x == r2.x {
-                // Doubling (y1 == y2) or additive inverse (y1 == p - y2): both
-                // unsupported by this distinct-add component.
-                return Err(FinalAddError::UnsupportedEqualX {
-                    sig_id: sig_id.0,
-                });
+        // Pick the branch up front so every sub-witness can route on it.
+        let branch = match (r1_inf, r2_inf) {
+            (true, true) => return Err(FinalAddError::BothInfinity { sig_id: sig_id.0 }),
+            (true, false) => FinalAddBranch::R2Only,
+            (false, true) => FinalAddBranch::R1Only,
+            (false, false) => {
+                if r1.x == r2.x {
+                    if r1.y == r2.y {
+                        FinalAddBranch::DoubleAdd
+                    } else {
+                        // The only other equal-x case on the curve is y2 = p − y1,
+                        // i.e. R_1 = -R_2. The AIR forbids this branch (output ∞).
+                        return Err(FinalAddError::InverseAdd { sig_id: sig_id.0 });
+                    }
+                } else {
+                    FinalAddBranch::DistinctAdd
+                }
             }
-            let dx = fp_sub(&r2.x, &r1.x, &modulus);
-            let dy = fp_sub(&r2.y, &r1.y, &modulus);
-            let lambda = fp_mul(&dy, &mod_inverse(&dx, &modulus), &modulus);
-            (lambda, dx)
-        } else {
-            (U256::ZERO, U256::ZERO)
         };
 
-        // dx_inv witnesses dx != 0 on the both-finite branch (0 on inf branches).
-        let dx_inv_u = if !r1_inf && !r2_inf {
-            mod_inverse(&dx_u, &modulus)
-        } else {
-            U256::ZERO
+        // ----- Per-branch denom/numer/lambda derivation -----
+        let (lambda_u, dx_u, dy_u, dx_inv_u) = match branch {
+            FinalAddBranch::DistinctAdd => {
+                let dx = fp_sub(&r2.x, &r1.x, &modulus);
+                let dy = fp_sub(&r2.y, &r1.y, &modulus);
+                let dx_inv = mod_inverse(&dx, &modulus);
+                let lambda = fp_mul(&dy, &dx_inv, &modulus);
+                (lambda, dx, dy, dx_inv)
+            }
+            FinalAddBranch::DoubleAdd => {
+                let two_y1 = fp_add(&r1.y, &r1.y, &modulus);
+                let two_y1_inv = mod_inverse(&two_y1, &modulus);
+                let x1_sq = fp_mul(&r1.x, &r1.x, &modulus);
+                let three_x1_sq = fp_mul(&three, &x1_sq, &modulus);
+                let slope_numer = fp_sub(&three_x1_sq, &three, &modulus);
+                let lambda = fp_mul(&slope_numer, &two_y1_inv, &modulus);
+                (lambda, two_y1, slope_numer, two_y1_inv)
+            }
+            _ => (zero.clone(), zero.clone(), zero.clone(), zero.clone()),
         };
 
+        // ----- Mul rows (always 4) -----
+        //
+        // MUL_X1_SQUARED uses `r1.x · r1.x` even on non-doubling branches;
+        // the AIR doesn't constrain the result anywhere outside the doubling
+        // slope-numer reduction, so this is sound. On infinity rows `r1.x = 0`
+        // so the mul is trivial.
+        let x1_sq_u = if r1_inf { zero.clone() } else { fp_mul(&r1.x, &r1.x, &modulus) };
         let mut muls = Vec::with_capacity(FINAL_ADD_MUL_COUNT);
         let p1_u = push_mul(&mut muls, MUL_LAMBDA_DX as usize, &lambda_u, &dx_u)?;
         let lamsq_u = push_mul(&mut muls, MUL_LAMBDA_SQUARED as usize, &lambda_u, &lambda_u)?;
         let dx_inv_check = push_mul(&mut muls, MUL_DX_INV as usize, &dx_u, &dx_inv_u)?;
+        let x1_sq_check = push_mul(&mut muls, MUL_X1_SQUARED as usize, &r1.x, &r1.x)?;
         debug_assert!(
-            (r1_inf || r2_inf) || dx_inv_check == U256::from_le_u64s(&[1, 0, 0, 0]),
-            "dx * dx_inv must be 1 on the both-finite branch"
+            matches!(branch, FinalAddBranch::R1Only | FinalAddBranch::R2Only)
+                || dx_inv_check == U256::from_le_u64s(&[1, 0, 0, 0]),
+            "denom · denom_inv must be 1 on either finite branch"
         );
+        debug_assert!(x1_sq_check == x1_sq_u, "MUL_X1_SQUARED result mismatch");
 
         let air_row = ProjectiveRcbAirRow {
             source_index: 0,
@@ -246,37 +338,65 @@ impl FinalAddClaim {
             rows: vec![air_row],
         };
 
-        // x3 = x(R_1 + R_2), plus dy and the three reductions.
-        let (x3_u, dy_u, dx_red, dy_red, x3_red) = if !r1_inf && !r2_inf {
-            let dy_u = fp_sub(&r2.y, &r1.y, &modulus);
-            // p1 must equal dy (lambda*(x2-x1) ≡ y2-y1, both canonical < p).
-            if p1_u != dy_u {
-                return Err(FinalAddError::SlopeMismatch { sig_id: sig_id.0 });
+        // ----- x3 + the three column-bound reductions per branch -----
+        let (x3_u, dx_red, dy_red, x3_red) = match branch {
+            FinalAddBranch::DistinctAdd => {
+                if p1_u != dy_u {
+                    return Err(FinalAddError::SlopeMismatch { sig_id: sig_id.0 });
+                }
+                let x3 = fp_sub(&fp_sub(&lamsq_u, &r1.x, &modulus), &r2.x, &modulus);
+                let dx_red = solve_sub_reduction(&dx_u, &r1.x, &r2.x, &modulus).ok_or(
+                    FinalAddError::ReductionFailed { which: "dx", sig_id: sig_id.0 },
+                )?;
+                let dy_red = solve_sub_reduction(&dy_u, &r1.y, &r2.y, &modulus).ok_or(
+                    FinalAddError::ReductionFailed { which: "dy", sig_id: sig_id.0 },
+                )?;
+                let x3_red = solve_x3_reduction(&x3, &r1.x, &r2.x, &lamsq_u, &modulus).ok_or(
+                    FinalAddError::ReductionFailed { which: "x3", sig_id: sig_id.0 },
+                )?;
+                (x3, dx_red, dy_red, x3_red)
             }
-            // x3 = lamsq - x1 - x2 (mod p).
-            let x3_u = fp_sub(&fp_sub(&lamsq_u, &r1.x, &modulus), &r2.x, &modulus);
-            let dx_red = solve_sub_reduction(&dx_u, &r1.x, &r2.x, &modulus).ok_or(
-                FinalAddError::ReductionFailed { which: "dx", sig_id: sig_id.0 },
-            )?;
-            let dy_red = solve_sub_reduction(&dy_u, &r1.y, &r2.y, &modulus).ok_or(
-                FinalAddError::ReductionFailed { which: "dy", sig_id: sig_id.0 },
-            )?;
-            // x3 + x1 + x2 ≡ lamsq (mod p).
-            let x3_red = solve_x3_reduction(&x3_u, &r1.x, &r2.x, &lamsq_u, &modulus).ok_or(
-                FinalAddError::ReductionFailed { which: "x3", sig_id: sig_id.0 },
-            )?;
-            (x3_u, dy_u, dx_red, dy_red, x3_red)
-        } else if r1_inf && !r2_inf {
-            (r2.x.clone(), U256::ZERO, zero_reduction(), zero_reduction(), zero_reduction())
-        } else if r2_inf && !r1_inf {
-            (r1.x.clone(), U256::ZERO, zero_reduction(), zero_reduction(), zero_reduction())
-        } else {
-            return Err(FinalAddError::BothInfinity { sig_id: sig_id.0 });
+            FinalAddBranch::DoubleAdd => {
+                if p1_u != dy_u {
+                    return Err(FinalAddError::SlopeMismatch { sig_id: sig_id.0 });
+                }
+                // x3 = lamsq − 2·x1 (mod p).
+                let two_x1 = fp_add(&r1.x, &r1.x, &modulus);
+                let x3 = fp_sub(&lamsq_u, &two_x1, &modulus);
+                // dx = 2·y1  ⟺  dx + 0 ≡ 2·y1 (mod p) i.e. solve via the
+                // "sub" form `dx + lo ≡ hi`, with `lo = 0` and `hi = 2·y1`.
+                // We pose this as `dx + r1.y ≡ 2·y1 − r1.y + r1.y = 2·y1`,
+                // but the cleanest is a new dedicated reduction. We use a
+                // tiny helper: `dx + r1.y ≡ 2·y1` is the same as `dx ≡ 2·y1 − r1.y`.
+                // Equivalently `dx = (2·y1 − r1.y) mod p = r1.y mod p`. That
+                // would fold to `dx == r1.y`, which is wrong because dx is
+                // `2·y1 mod p`. We just use a dedicated double-add reduction
+                // `dx + q·p ≡ 2·y1 (mod 2^256)`.
+                let dx_red = solve_two_y1_reduction(&dx_u, &r1.y, &modulus).ok_or(
+                    FinalAddError::ReductionFailed { which: "dx_double", sig_id: sig_id.0 },
+                )?;
+                // dy = 3·x1_sq − 3 (mod p). `dy + 3 + q·p ≡ 3·x1_sq (mod 2^256)`.
+                let dy_red = solve_slope_numer_reduction(&dy_u, &x1_sq_u, &modulus).ok_or(
+                    FinalAddError::ReductionFailed { which: "dy_double", sig_id: sig_id.0 },
+                )?;
+                // x3 reduction uses x2 = x1 (enforced in-AIR by double_add gate).
+                let x3_red = solve_x3_reduction(&x3, &r1.x, &r1.x, &lamsq_u, &modulus).ok_or(
+                    FinalAddError::ReductionFailed { which: "x3_double", sig_id: sig_id.0 },
+                )?;
+                (x3, dx_red, dy_red, x3_red)
+            }
+            FinalAddBranch::R2Only => {
+                (r2.x.clone(), zero_reduction(), zero_reduction(), zero_reduction())
+            }
+            FinalAddBranch::R1Only => {
+                (r1.x.clone(), zero_reduction(), zero_reduction(), zero_reduction())
+            }
         };
 
         let claim = Self {
             mul_trace,
             sig_id,
+            branch,
             r1: r1_values,
             r2: r2_values,
             dx: P256M31BigInt::from_u256(&dx_u),
@@ -291,6 +411,7 @@ impl FinalAddClaim {
             x3: P256M31BigInt::from_u256(&x3_u),
             x3_q: x3_red.0,
             x3_carries: x3_red.1,
+            x1_sq: P256M31BigInt::from_u256(&x1_sq_u),
         };
         claim.verify()?;
         Ok(claim)
@@ -315,6 +436,9 @@ impl FinalAddClaim {
         require_eq("lambda^2.result", &muls[MUL_LAMBDA_SQUARED as usize].trace.result, &self.lamsq)?;
         require_eq("dx_inv.lhs", &muls[MUL_DX_INV as usize].trace.lhs, &self.dx)?;
         require_eq("dx_inv.rhs", &muls[MUL_DX_INV as usize].trace.rhs, &self.dx_inv)?;
+        require_eq("x1_sq.lhs", &muls[MUL_X1_SQUARED as usize].trace.lhs, &self.r1.x)?;
+        require_eq("x1_sq.rhs", &muls[MUL_X1_SQUARED as usize].trace.rhs, &self.r1.x)?;
+        require_eq("x1_sq.result", &muls[MUL_X1_SQUARED as usize].trace.result, &self.x1_sq)?;
 
         let r1_inf = self.r1.inf.0 == 1;
         let r2_inf = self.r2.inf.0 == 1;
@@ -322,26 +446,43 @@ impl FinalAddClaim {
             return Err(FinalAddError::BothInfinity { sig_id: self.sig_id.0 });
         }
 
-        if !r1_inf && !r2_inf {
-            let modulus = P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_MODULUS));
-            // dx * dx_inv == 1 (proves dx != 0, rejecting x1 == x2).
-            require_eq(
-                "dx*dx_inv==1",
-                &muls[MUL_DX_INV as usize].trace.result,
-                &P256M31BigInt::from_u256(&U256::from_le_u64s(&[1, 0, 0, 0])),
-            )?;
-            // p1 == dy.
-            require_eq("p1==dy", &muls[MUL_LAMBDA_DX as usize].trace.result, &self.dy)?;
-            // dx + x1 ≡ x2.
-            check_sub_reduction("dx", &self.dx, &self.r1.x, &self.r2.x, &modulus, self.dx_q, &self.dx_carries, self.sig_id.0)?;
-            // dy + y1 ≡ y2.
-            check_sub_reduction("dy", &self.dy, &self.r1.y, &self.r2.y, &modulus, self.dy_q, &self.dy_carries, self.sig_id.0)?;
-            // x3 + x1 + x2 ≡ lamsq.
-            check_x3_reduction(&self.x3, &self.r1.x, &self.r2.x, &self.lamsq, &modulus, self.x3_q, &self.x3_carries, self.sig_id.0)?;
-        } else if r1_inf {
-            require_eq("x3==x2", &self.x3, &self.r2.x)?;
-        } else {
-            require_eq("x3==x1", &self.x3, &self.r1.x)?;
+        let modulus = P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_MODULUS));
+        let three = P256M31BigInt::from_u256(&U256::from_le_u64s(&[3, 0, 0, 0]));
+
+        match self.branch {
+            FinalAddBranch::DistinctAdd => {
+                require_eq(
+                    "dx*dx_inv==1",
+                    &muls[MUL_DX_INV as usize].trace.result,
+                    &P256M31BigInt::from_u256(&U256::from_le_u64s(&[1, 0, 0, 0])),
+                )?;
+                require_eq("p1==dy", &muls[MUL_LAMBDA_DX as usize].trace.result, &self.dy)?;
+                check_sub_reduction("dx", &self.dx, &self.r1.x, &self.r2.x, &modulus, self.dx_q, &self.dx_carries, self.sig_id.0)?;
+                check_sub_reduction("dy", &self.dy, &self.r1.y, &self.r2.y, &modulus, self.dy_q, &self.dy_carries, self.sig_id.0)?;
+                check_x3_reduction(&self.x3, &self.r1.x, &self.r2.x, &self.lamsq, &modulus, self.x3_q, &self.x3_carries, self.sig_id.0)?;
+            }
+            FinalAddBranch::DoubleAdd => {
+                require_eq(
+                    "denom*denom_inv==1",
+                    &muls[MUL_DX_INV as usize].trace.result,
+                    &P256M31BigInt::from_u256(&U256::from_le_u64s(&[1, 0, 0, 0])),
+                )?;
+                require_eq("p1==numer", &muls[MUL_LAMBDA_DX as usize].trace.result, &self.dy)?;
+                require_eq("x1==x2 (double)", &self.r1.x, &self.r2.x)?;
+                require_eq("y1==y2 (double)", &self.r1.y, &self.r2.y)?;
+                check_two_y1_reduction(&self.dx, &self.r1.y, &modulus, self.dx_q, &self.dx_carries, self.sig_id.0)?;
+                check_slope_numer_reduction(&self.dy, &self.x1_sq, &three, &modulus, self.dy_q, &self.dy_carries, self.sig_id.0)?;
+                // x2 = x1 here; reuse the x3 + x1 + x2 ≡ lamsq reduction.
+                check_x3_reduction(&self.x3, &self.r1.x, &self.r1.x, &self.lamsq, &modulus, self.x3_q, &self.x3_carries, self.sig_id.0)?;
+            }
+            FinalAddBranch::R1Only => {
+                // r2 = ∞, r1 finite ⇒ output S = r1, so x3 ≡ r1.x.
+                require_eq("x3==x1", &self.x3, &self.r1.x)?;
+            }
+            FinalAddBranch::R2Only => {
+                // r1 = ∞, r2 finite ⇒ output S = r2, so x3 ≡ r2.x.
+                require_eq("x3==x2", &self.x3, &self.r2.x)?;
+            }
         }
         Ok(())
     }
@@ -356,7 +497,9 @@ pub enum FinalAddError {
     MulTraceShape,
     MulTrace(ProjectiveRcbAirError),
     WitnessMismatch { field: &'static str },
-    UnsupportedEqualX { sig_id: u32 },
+    /// `R_1 = -R_2`: native sum is the point at infinity, an invalid ECDSA
+    /// result. The AIR likewise rejects this branch.
+    InverseAdd { sig_id: u32 },
     SlopeMismatch { sig_id: u32 },
     ReductionFailed { which: &'static str, sig_id: u32 },
     BothInfinity { sig_id: u32 },
@@ -408,6 +551,9 @@ fn fp_sub(a: &U256, b: &U256, m: &U256) -> U256 {
 }
 fn fp_mul(a: &U256, b: &U256, m: &U256) -> U256 {
     crate::field_ops::mul_mod_witness(a, b, m).result.to_u256()
+}
+fn fp_add(a: &U256, b: &U256, m: &U256) -> U256 {
+    crate::field_ops::add_mod_witness(a, b, m).result.to_u256()
 }
 fn mod_inverse(a: &U256, m: &U256) -> U256 {
     crate::curve::mod_inverse(a, m)
@@ -517,6 +663,99 @@ fn try_x3_carries(
     }
 }
 
+/// Doubling-branch: `dx + q·p ≡ 2·y1 (mod 2^256)` with `q ∈ {0, 1}` and final
+/// carry 0. (`dx = (2·y1) mod p`, with `2·y1 < 2p` so `q ∈ {0, 1}`.)
+fn solve_two_y1_reduction(
+    dx: &U256,
+    y1: &U256,
+    modulus: &U256,
+) -> Option<(i64, [i64; N_LIMBS])> {
+    let dx = P256M31BigInt::from_u256(dx);
+    let y1 = P256M31BigInt::from_u256(y1);
+    let m = P256M31BigInt::from_u256(modulus);
+    for q in [0i64, 1] {
+        if let Some(carries) = try_two_y1_carries(&dx, &y1, &m, q) {
+            return Some((q, carries));
+        }
+    }
+    None
+}
+
+fn try_two_y1_carries(
+    dx: &P256M31BigInt,
+    y1: &P256M31BigInt,
+    m: &P256M31BigInt,
+    q: i64,
+) -> Option<[i64; N_LIMBS]> {
+    let base = 1i64 << LIMB_BITS;
+    let mut carries = [0i64; N_LIMBS];
+    let mut prev = 0i64;
+    for (i, carry) in carries.iter_mut().enumerate() {
+        // dx[i] + q·m[i] - 2·y1[i] + prev = base·c[i]
+        let combined = i64::from(dx.limbs()[i].0) + q * i64::from(m.limbs()[i].0)
+            - 2 * i64::from(y1.limbs()[i].0);
+        let total = combined + prev;
+        if total % base != 0 {
+            return None;
+        }
+        *carry = total / base;
+        prev = *carry;
+    }
+    if carries[N_LIMBS - 1] == 0 {
+        Some(carries)
+    } else {
+        None
+    }
+}
+
+/// Doubling-branch slope numerator: `dy + 3 + q·p ≡ 3·x1_sq (mod 2^256)` with
+/// `q ∈ {0, 1, 2}` and final carry 0. (`dy = (3·x1_sq − 3) mod p`; since
+/// `3·x1_sq < 3p` and `dy < p`, the quotient `q ∈ {0, 1, 2}`.)
+fn solve_slope_numer_reduction(
+    dy: &U256,
+    x1_sq: &U256,
+    modulus: &U256,
+) -> Option<(i64, [i64; N_LIMBS])> {
+    let dy = P256M31BigInt::from_u256(dy);
+    let x1_sq = P256M31BigInt::from_u256(x1_sq);
+    let m = P256M31BigInt::from_u256(modulus);
+    for q in [0i64, 1, 2] {
+        if let Some(carries) = try_slope_numer_carries(&dy, &x1_sq, &m, q) {
+            return Some((q, carries));
+        }
+    }
+    None
+}
+
+fn try_slope_numer_carries(
+    dy: &P256M31BigInt,
+    x1_sq: &P256M31BigInt,
+    m: &P256M31BigInt,
+    q: i64,
+) -> Option<[i64; N_LIMBS]> {
+    let base = 1i64 << LIMB_BITS;
+    let mut carries = [0i64; N_LIMBS];
+    let mut prev = 0i64;
+    for (i, carry) in carries.iter_mut().enumerate() {
+        // dy[i] + 3·(i==0) + q·m[i] - 3·x1_sq[i] + prev = base·c[i]
+        let three_at_zero = if i == 0 { 3i64 } else { 0i64 };
+        let combined = i64::from(dy.limbs()[i].0) + three_at_zero
+            + q * i64::from(m.limbs()[i].0)
+            - 3 * i64::from(x1_sq.limbs()[i].0);
+        let total = combined + prev;
+        if total % base != 0 {
+            return None;
+        }
+        *carry = total / base;
+        prev = *carry;
+    }
+    if carries[N_LIMBS - 1] == 0 {
+        Some(carries)
+    } else {
+        None
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn check_sub_reduction(
     which: &'static str,
@@ -586,6 +825,74 @@ fn check_x3_reduction(
     }
     if carries[N_LIMBS - 1] != 0 {
         return Err(FinalAddError::FinalCarryNonZero { which: "x3", carry: carries[N_LIMBS - 1] });
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_two_y1_reduction(
+    dx: &P256M31BigInt,
+    y1: &P256M31BigInt,
+    modulus: &P256M31BigInt,
+    q: i64,
+    carries: &[i64; N_LIMBS],
+    sig_id: u32,
+) -> Result<(), FinalAddError> {
+    let _ = sig_id;
+    if !(0..=1).contains(&q) {
+        return Err(FinalAddError::QuotientOutOfRange { which: "dx_double", q });
+    }
+    let base = 1i64 << LIMB_BITS;
+    let mut prev = 0i64;
+    for i in 0..N_LIMBS {
+        let combined = i64::from(dx.limbs()[i].0) + q * i64::from(modulus.limbs()[i].0)
+            - 2 * i64::from(y1.limbs()[i].0);
+        let total = combined + prev - base * carries[i];
+        if total != 0 {
+            return Err(FinalAddError::ReductionMismatch { which: "dx_double", limb: i, value: total });
+        }
+        if carries[i].abs() > projective_rcb_signed_carry_bound() {
+            return Err(FinalAddError::CarryOutOfRange { which: "dx_double", limb: i, carry: carries[i] });
+        }
+        prev = carries[i];
+    }
+    if carries[N_LIMBS - 1] != 0 {
+        return Err(FinalAddError::FinalCarryNonZero { which: "dx_double", carry: carries[N_LIMBS - 1] });
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_slope_numer_reduction(
+    dy: &P256M31BigInt,
+    x1_sq: &P256M31BigInt,
+    three: &P256M31BigInt,
+    modulus: &P256M31BigInt,
+    q: i64,
+    carries: &[i64; N_LIMBS],
+    sig_id: u32,
+) -> Result<(), FinalAddError> {
+    let _ = sig_id;
+    if !(0..=FINAL_ADD_QUOTIENT_BOUND).contains(&q) {
+        return Err(FinalAddError::QuotientOutOfRange { which: "dy_double", q });
+    }
+    let base = 1i64 << LIMB_BITS;
+    let mut prev = 0i64;
+    for i in 0..N_LIMBS {
+        let combined = i64::from(dy.limbs()[i].0) + i64::from(three.limbs()[i].0)
+            + q * i64::from(modulus.limbs()[i].0)
+            - 3 * i64::from(x1_sq.limbs()[i].0);
+        let total = combined + prev - base * carries[i];
+        if total != 0 {
+            return Err(FinalAddError::ReductionMismatch { which: "dy_double", limb: i, value: total });
+        }
+        if carries[i].abs() > projective_rcb_signed_carry_bound() {
+            return Err(FinalAddError::CarryOutOfRange { which: "dy_double", limb: i, carry: carries[i] });
+        }
+        prev = carries[i];
+    }
+    if carries[N_LIMBS - 1] != 0 {
+        return Err(FinalAddError::FinalCarryNonZero { which: "dy_double", carry: carries[N_LIMBS - 1] });
     }
     Ok(())
 }
@@ -669,14 +976,23 @@ struct FinalAddCheckColumns<E: EvalAtRow> {
     sig_id: E::F,
     r1: EvalPoint<E>,
     r2: EvalPoint<E>,
+    /// Witnessed `double_add` ∈ {0, 1}: the row commits to the doubling
+    /// tangent identity instead of the distinct chord identity.
+    double_add: E::F,
+    /// Witnessed `inverse_add` ∈ {0, 1}: the row commits to `R_1 = -R_2`
+    /// (output ∞). The AIR forbids this via `active · inverse_add = 0`.
+    inverse_add: E::F,
     dx: P256EvalBigInt<E>,
     dy: P256EvalBigInt<E>,
     lambda: P256EvalBigInt<E>,
     lamsq: P256EvalBigInt<E>,
     x3: P256EvalBigInt<E>,
     dx_inv: P256EvalBigInt<E>,
-    /// Witnessed `dx · dx_inv mod p` result: limb0 = `both_finite`, rest 0.
+    /// Witnessed `dx · dx_inv mod p` result: limb0 = `distinct_add + double_add`,
+    /// rest 0. (= 1 on either finite branch, 0 on infinity branches.)
     dx_inv_result: P256EvalBigInt<E>,
+    /// `x1_sq = r1.x · r1.x mod p`, used by the doubling slope-numer reduction.
+    x1_sq: P256EvalBigInt<E>,
     dx_q: E::F,
     dx_carries: [E::F; N_LIMBS],
     dy_q: E::F,
@@ -715,6 +1031,8 @@ impl<E: EvalAtRow> FinalAddCheckColumns<E> {
             sig_id: eval.next_trace_mask(),
             r1: EvalPoint::read(eval),
             r2: EvalPoint::read(eval),
+            double_add: eval.next_trace_mask(),
+            inverse_add: eval.next_trace_mask(),
             dx: eval.next_p256_bigint(),
             dy: eval.next_p256_bigint(),
             lambda: eval.next_p256_bigint(),
@@ -722,6 +1040,7 @@ impl<E: EvalAtRow> FinalAddCheckColumns<E> {
             x3: eval.next_p256_bigint(),
             dx_inv: eval.next_p256_bigint(),
             dx_inv_result: eval.next_p256_bigint(),
+            x1_sq: eval.next_p256_bigint(),
             dx_q: eval.next_trace_mask(),
             dx_carries: core::array::from_fn(|_| eval.next_trace_mask()),
             dy_q: eval.next_trace_mask(),
@@ -736,7 +1055,8 @@ impl<E: EvalAtRow> FinalAddCheckColumns<E> {
 const CHECK_TRACE_COLUMNS: usize = 1 // active
     + 1 // sig_id
     + 2 * (2 * N_LIMBS + 1) // r1, r2 points
-    + 7 * N_LIMBS // dx, dy, lambda, lamsq, x3, dx_inv, dx_inv_result
+    + 2 // double_add, inverse_add
+    + 8 * N_LIMBS // dx, dy, lambda, lamsq, x3, dx_inv, dx_inv_result, x1_sq
     + 3 * (1 + N_LIMBS); // (q + carries) × 3
 
 #[derive(Clone)]
@@ -758,6 +1078,8 @@ impl FrameworkEval for FinalAddCheckEval {
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         let one = E::F::from(M31::from_u32_unchecked(1));
+        let two = E::F::from(M31::from_u32_unchecked(2));
+        let three = E::F::from(M31::from_u32_unchecked(3));
         let columns = FinalAddCheckColumns::read(&mut eval);
         let active = columns.active.clone();
 
@@ -779,6 +1101,7 @@ impl FrameworkEval for FinalAddCheckEval {
             .chain(columns.x3.limbs())
             .chain(columns.dx_inv.limbs())
             .chain(columns.dx_inv_result.limbs())
+            .chain(columns.x1_sq.limbs())
         {
             eval.add_constraint((one.clone() - active.clone()) * limb.clone());
         }
@@ -786,6 +1109,8 @@ impl FrameworkEval for FinalAddCheckEval {
             columns.sig_id.clone(),
             columns.r1.inf.clone(),
             columns.r2.inf.clone(),
+            columns.double_add.clone(),
+            columns.inverse_add.clone(),
             columns.dx_q.clone(),
             columns.dy_q.clone(),
             columns.x3_q.clone(),
@@ -799,37 +1124,90 @@ impl FrameworkEval for FinalAddCheckEval {
         // Reject R_1 = R_2 = ∞ (=> R_final = ∞).
         eval.add_constraint(active.clone() * columns.r1.inf.clone() * columns.r2.inf.clone());
 
-        // Consume the pinned hints R_1 (cert0) and R_2 (cert1), gated
-        // `active · (1 - r_i_inf)`. The prepared table yields `R_i` only for
-        // ACTIVE certs (no `DoubleR` row exists for an inactive cert). The hint
-        // tuple is keyed by `cert_id`, so a consume of `(sig, cert_id, ·)` can
-        // only balance a same-`cert_id` yield. Hence balance forces:
-        //   - cert_i active  ⟹ a yield exists ⟹ the consume must fire ⟹ r_i_inf = 0
-        //     and the witnessed point equals the pinned `R_i`;
-        //   - cert_i inactive ⟹ no yield ⟹ the consume must NOT fire ⟹ r_i_inf = 1.
-        // This binds `r_i_inf` to cert_i's active status in-AIR.
+        // -------- Branch selectors --------
+        //
+        // Witnessed: double_add, inverse_add (both bool).
+        // Derived: both_finite, r1_only, r2_only, distinct_add (degree 2).
+        // Sum constraint: distinct_add + double_add + inverse_add + r1_only +
+        // r2_only = active. Since the boolean flags pin each in {0,1} and the
+        // infinity-derived selectors are mutually exclusive with both_finite,
+        // exactly one is 1 on an active row.
+        //
+        // The active · inverse_add = 0 constraint makes the additive-inverse
+        // branch unprovable: an honest prover with R_1 = -R_2 cannot select
+        // any other branch (the dx/dy/x3 reductions or the slope mul would
+        // fail), so the witness is uncompletable.
+        eval.add_constraint(
+            columns.double_add.clone() * (one.clone() - columns.double_add.clone()),
+        );
+        eval.add_constraint(
+            columns.inverse_add.clone() * (one.clone() - columns.inverse_add.clone()),
+        );
+        // Only one of double_add / inverse_add can be 1 (and they only apply
+        // when both R_1, R_2 are finite — gated implicitly via the chord muls).
+        eval.add_constraint(
+            active.clone() * columns.double_add.clone() * columns.inverse_add.clone(),
+        );
+        // Reject R_final = ∞ (additive-inverse case).
+        eval.add_constraint(active.clone() * columns.inverse_add.clone());
+
+        let both_finite =
+            (one.clone() - columns.r1.inf.clone()) * (one.clone() - columns.r2.inf.clone());
+        let r1_only = columns.r1.inf.clone() * (one.clone() - columns.r2.inf.clone());
+        let r2_only = columns.r2.inf.clone() * (one.clone() - columns.r1.inf.clone());
+        // distinct_add = both_finite - double_add - inverse_add (degree 2).
+        let distinct_add = both_finite.clone()
+            - columns.double_add.clone()
+            - columns.inverse_add.clone();
+        // distinct_add must itself be bool — distinct_add * (1 - distinct_add) = 0.
+        eval.add_constraint(
+            distinct_add.clone() * (one.clone() - distinct_add.clone()),
+        );
+        // double_add only makes sense when both finite (rejects double_add on
+        // infinity branches): double_add * (1 - both_finite) = 0.
+        eval.add_constraint(
+            columns.double_add.clone() * (one.clone() - both_finite.clone()),
+        );
+        eval.add_constraint(
+            columns.inverse_add.clone() * (one.clone() - both_finite.clone()),
+        );
+
+        // double_add forces r1.x = r2.x and r1.y = r2.y limb-wise.
+        for i in 0..N_LIMBS {
+            eval.add_constraint(
+                columns.double_add.clone()
+                    * (columns.r2.x.limbs()[i].clone() - columns.r1.x.limbs()[i].clone()),
+            );
+            eval.add_constraint(
+                columns.double_add.clone()
+                    * (columns.r2.y.limbs()[i].clone() - columns.r1.y.limbs()[i].clone()),
+            );
+        }
+
+        // -------- Hint consumes (unchanged) --------
         let r1_gate = active.clone() * (one.clone() - columns.r1.inf.clone());
         let r2_gate = active.clone() * (one.clone() - columns.r2.inf.clone());
         consume_hint(&mut eval, &self.hint_relation, &r1_gate, &columns.sig_id, 0, &columns.r1);
         consume_hint(&mut eval, &self.hint_relation, &r2_gate, &columns.sig_id, 1, &columns.r2);
 
-        // Bind the mul operands/results to the proven mul provider tuples.
+        // -------- Mul consumes --------
+        // lambda · dx = dy (semantically `lambda · denom = numer` per branch).
         consume_mul(&mut eval, &self.result_relation, &active, MUL_LAMBDA_DX, ROLE_LHS, columns.lambda.limbs());
         consume_mul(&mut eval, &self.result_relation, &active, MUL_LAMBDA_DX, ROLE_RHS, columns.dx.limbs());
         consume_mul(&mut eval, &self.result_relation, &active, MUL_LAMBDA_DX, ROLE_RESULT, columns.dy.limbs());
         consume_mul(&mut eval, &self.result_relation, &active, MUL_LAMBDA_SQUARED, ROLE_LHS, columns.lambda.limbs());
         consume_mul(&mut eval, &self.result_relation, &active, MUL_LAMBDA_SQUARED, ROLE_RHS, columns.lambda.limbs());
         consume_mul(&mut eval, &self.result_relation, &active, MUL_LAMBDA_SQUARED, ROLE_RESULT, columns.lamsq.limbs());
-        // dx · dx_inv: bind lhs = dx, rhs = dx_inv, result = the witnessed
-        // `dx_inv_result` column. The proven mul computes `dx·dx_inv mod p`.
-        // Constraints below pin `dx_inv_result` to `both_finite` (limb0 =
-        // both_finite, rest 0), forcing:
-        //   - both finite ⟹ dx·dx_inv ≡ 1 ⟹ dx invertible ⟹ dx != 0 ⟹ x1 != x2
-        //     (so `lambda` is uniquely determined and cannot be forged);
-        //   - an infinity branch ⟹ dx = dx_inv = 0 ⟹ dx·dx_inv = 0 = both_finite.
+        // dx · dx_inv = dx_inv_result, with dx_inv_result pinned to
+        // (distinct_add + double_add). Forces dx invertible on either finite
+        // branch (⟹ x1 != x2 for distinct, ⟹ y1 != 0 for doubling).
         consume_mul(&mut eval, &self.result_relation, &active, MUL_DX_INV, ROLE_LHS, columns.dx.limbs());
         consume_mul(&mut eval, &self.result_relation, &active, MUL_DX_INV, ROLE_RHS, columns.dx_inv.limbs());
         consume_mul(&mut eval, &self.result_relation, &active, MUL_DX_INV, ROLE_RESULT, columns.dx_inv_result.limbs());
+        // x1 · x1 = x1_sq.
+        consume_mul(&mut eval, &self.result_relation, &active, MUL_X1_SQUARED, ROLE_LHS, columns.r1.x.limbs());
+        consume_mul(&mut eval, &self.result_relation, &active, MUL_X1_SQUARED, ROLE_RHS, columns.r1.x.limbs());
+        consume_mul(&mut eval, &self.result_relation, &active, MUL_X1_SQUARED, ROLE_RESULT, columns.x1_sq.limbs());
 
         // Provide x3 to the final check (yield, -active).
         let mut out_values = Vec::with_capacity(FINAL_ADD_OUTPUT_RELATION_ARITY);
@@ -841,7 +1219,7 @@ impl FrameworkEval for FinalAddCheckEval {
             &out_values,
         ));
 
-        // Range-check every witnessed limb (domain enforcement + 13-bit headroom).
+        // Range-check every witnessed limb.
         for limb in columns
             .r1
             .x
@@ -857,51 +1235,59 @@ impl FrameworkEval for FinalAddCheckEval {
             .chain(columns.x3.limbs())
             .chain(columns.dx_inv.limbs())
             .chain(columns.dx_inv_result.limbs())
+            .chain(columns.x1_sq.limbs())
         {
             crate::range_checks::add_range_check(&mut eval, &self.range13, active.clone(), limb.clone());
         }
 
-        // both_finite gate.
-        let both_finite =
-            (one.clone() - columns.r1.inf.clone()) * (one.clone() - columns.r2.inf.clone());
-        let r1_only = columns.r1.inf.clone() * (one.clone() - columns.r2.inf.clone());
-        let r2_only = columns.r2.inf.clone() * (one.clone() - columns.r1.inf.clone());
-
-        // Pin the witnessed `dx_inv_result` (= consumed mul result) to
-        // `both_finite`: limb0 = both_finite, higher limbs 0. Gated `active` so
-        // the degree-2 binding holds on every active row (padding rows are
-        // zeroed by the padding loop above). With the mul provider supplying
-        // `dx·dx_inv mod p`, this forces `dx·dx_inv ≡ 1` on the both-finite
-        // branch (⟹ dx != 0 ⟹ x1 != x2).
+        // -------- dx_inv_result pinning --------
+        // Pin limb0 = (distinct_add + double_add), higher limbs 0.
+        let denom_inv_target = distinct_add.clone() + columns.double_add.clone();
         eval.add_constraint(
-            active.clone() * (columns.dx_inv_result.limbs()[0].clone() - both_finite.clone()),
+            active.clone()
+                * (columns.dx_inv_result.limbs()[0].clone() - denom_inv_target.clone()),
         );
         for limb in columns.dx_inv_result.limbs().iter().skip(1) {
             eval.add_constraint(active.clone() * limb.clone());
         }
 
-        // Quotients are in their declared ranges (gated by both_finite).
-        eval.add_constraint(both_finite.clone() * columns.dx_q.clone() * (columns.dx_q.clone() - one.clone()));
-        eval.add_constraint(both_finite.clone() * columns.dy_q.clone() * (columns.dy_q.clone() - one.clone()));
-        // x3_q ∈ {0,1,2}: q(q-1)(q-2) = 0.
+        // -------- Quotient bounds --------
+        let finite_finite = distinct_add.clone() + columns.double_add.clone();
+        // dx_q ∈ {0, 1} on either finite branch.
         eval.add_constraint(
-            both_finite.clone()
+            finite_finite.clone()
+                * columns.dx_q.clone()
+                * (columns.dx_q.clone() - one.clone()),
+        );
+        // dy_q ∈ {0, 1} on distinct; ∈ {0, 1, 2} on doubling.
+        eval.add_constraint(
+            distinct_add.clone()
+                * columns.dy_q.clone()
+                * (columns.dy_q.clone() - one.clone()),
+        );
+        eval.add_constraint(
+            columns.double_add.clone()
+                * columns.dy_q.clone()
+                * (columns.dy_q.clone() - one.clone())
+                * (columns.dy_q.clone() - two.clone()),
+        );
+        // x3_q ∈ {0, 1, 2} on either finite branch.
+        eval.add_constraint(
+            finite_finite.clone()
                 * columns.x3_q.clone()
                 * (columns.x3_q.clone() - one.clone())
-                * (columns.x3_q.clone() - E::F::from(M31::from_u32_unchecked(2))),
+                * (columns.x3_q.clone() - two.clone()),
         );
-        // On non-both_finite rows the q must be zero (already gated above for padding;
-        // here force for the infinity branches too).
-        eval.add_constraint((one.clone() - both_finite.clone()) * columns.dx_q.clone());
-        eval.add_constraint((one.clone() - both_finite.clone()) * columns.dy_q.clone());
-        eval.add_constraint((one.clone() - both_finite.clone()) * columns.x3_q.clone());
+        // On non-finite-finite rows the q must be zero.
+        eval.add_constraint((one.clone() - finite_finite.clone()) * columns.dx_q.clone());
+        eval.add_constraint((one.clone() - finite_finite.clone()) * columns.dy_q.clone());
+        eval.add_constraint((one.clone() - finite_finite.clone()) * columns.x3_q.clone());
 
-        // Reductions (gated both_finite): dx + x1 ≡ x2, dy + y1 ≡ y2,
-        // x3 + x1 + x2 ≡ lamsq.
+        // -------- Distinct-branch reductions: dx + x1 ≡ x2, dy + y1 ≡ y2 --------
         add_sub_reduction(
             &mut eval,
             &self.signed_carry,
-            &both_finite,
+            &distinct_add,
             &columns.dx,
             &columns.r1.x,
             &columns.r2.x,
@@ -911,17 +1297,40 @@ impl FrameworkEval for FinalAddCheckEval {
         add_sub_reduction(
             &mut eval,
             &self.signed_carry,
-            &both_finite,
+            &distinct_add,
             &columns.dy,
             &columns.r1.y,
             &columns.r2.y,
             &columns.dy_q,
             &columns.dy_carries,
         );
+
+        // -------- Doubling-branch reductions:
+        // dx + q·p ≡ 2·y1, dy + 3 + q·p ≡ 3·x1_sq --------
+        add_two_y1_reduction(
+            &mut eval,
+            &columns.double_add,
+            &columns.dx,
+            &columns.r1.y,
+            &columns.dx_q,
+            &columns.dx_carries,
+        );
+        add_slope_numer_reduction(
+            &mut eval,
+            &columns.double_add,
+            &columns.dy,
+            &columns.x1_sq,
+            &three,
+            &columns.dy_q,
+            &columns.dy_carries,
+        );
+
+        // x3 reduction: x3 + r1.x + r2.x ≡ lamsq. On doubling rows r2.x = r1.x
+        // (forced above), so this becomes x3 + 2·x1 ≡ lamsq automatically.
         add_x3_reduction(
             &mut eval,
             &self.signed_carry,
-            &both_finite,
+            &finite_finite,
             &columns.x3,
             &columns.r1.x,
             &columns.r2.x,
@@ -940,20 +1349,19 @@ impl FrameworkEval for FinalAddCheckEval {
             );
         }
 
-        // On non-both_finite rows, the carries must be zero (so the signed-carry
-        // lookups below are well-defined and padding/infinity rows leak nothing).
+        // On non-finite-finite rows, the carries must be zero so the
+        // signed-carry lookups are well-defined and padding leaks nothing.
         for carry in columns
             .dx_carries
             .iter()
             .chain(columns.dy_carries.iter())
             .chain(columns.x3_carries.iter())
         {
-            eval.add_constraint((one.clone() - both_finite.clone()) * carry.clone());
+            eval.add_constraint((one.clone() - finite_finite.clone()) * carry.clone());
         }
 
         // signed-carry range lookups for all 3·N_LIMBS carries (gated active so
-        // they balance; on infinity/padding rows the carry value is 0 which is in
-        // range). Use `active` (not both_finite) as the gate so the count is fixed.
+        // the count is fixed; on infinity/padding rows the carry value is 0).
         for carry in columns
             .dx_carries
             .iter()
@@ -1055,6 +1463,63 @@ fn add_x3_reduction<E: EvalAtRow>(
         let recurrence = x3.limbs()[i].clone() + x1.limbs()[i].clone() + x2.limbs()[i].clone()
             - lamsq.limbs()[i].clone()
             - q.clone() * fixed_limb::<E>(&modulus, i)
+            + prev
+            - limb_base.clone() * carries[i].clone();
+        eval.add_constraint(gate.clone() * recurrence);
+    }
+    eval.add_constraint(gate.clone() * carries[N_LIMBS - 1].clone());
+}
+
+/// `dx + q·p - 2·y1 = 0` over 13-bit limbs with signed carries.
+/// Doubling-branch: `dx ≡ 2·y1 (mod p)` so the slope denominator is `2·y1`.
+fn add_two_y1_reduction<E: EvalAtRow>(
+    eval: &mut E,
+    gate: &E::F,
+    dx: &P256EvalBigInt<E>,
+    y1: &P256EvalBigInt<E>,
+    q: &E::F,
+    carries: &[E::F; N_LIMBS],
+) {
+    let zero = E::F::from(M31::from_u32_unchecked(0));
+    let limb_base = E::F::from(M31::from_u32_unchecked(1u32 << LIMB_BITS));
+    let two = E::F::from(M31::from_u32_unchecked(2));
+    let modulus = P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_MODULUS));
+    for i in 0..N_LIMBS {
+        let prev = if i == 0 { zero.clone() } else { carries[i - 1].clone() };
+        let recurrence = dx.limbs()[i].clone() + q.clone() * fixed_limb::<E>(&modulus, i)
+            - two.clone() * y1.limbs()[i].clone()
+            + prev
+            - limb_base.clone() * carries[i].clone();
+        eval.add_constraint(gate.clone() * recurrence);
+    }
+    eval.add_constraint(gate.clone() * carries[N_LIMBS - 1].clone());
+}
+
+/// `dy + 3 + q·p - 3·x1_sq = 0` over 13-bit limbs with signed carries.
+/// Doubling-branch: `dy + 3 ≡ 3·x1² (mod p)`, i.e. `dy ≡ 3·x1² - 3 (mod p)`.
+/// The constant 3 is a single field element added to limb 0 only (its
+/// limb decomposition is `[3, 0, 0, …, 0]`).
+#[allow(clippy::too_many_arguments)]
+fn add_slope_numer_reduction<E: EvalAtRow>(
+    eval: &mut E,
+    gate: &E::F,
+    dy: &P256EvalBigInt<E>,
+    x1_sq: &P256EvalBigInt<E>,
+    three: &E::F,
+    q: &E::F,
+    carries: &[E::F; N_LIMBS],
+) {
+    let zero = E::F::from(M31::from_u32_unchecked(0));
+    let limb_base = E::F::from(M31::from_u32_unchecked(1u32 << LIMB_BITS));
+    let three_coeff = E::F::from(M31::from_u32_unchecked(3));
+    let modulus = P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_MODULUS));
+    for i in 0..N_LIMBS {
+        let prev = if i == 0 { zero.clone() } else { carries[i - 1].clone() };
+        let three_term = if i == 0 { three.clone() } else { zero.clone() };
+        let recurrence = dy.limbs()[i].clone()
+            + three_term
+            + q.clone() * fixed_limb::<E>(&modulus, i)
+            - three_coeff.clone() * x1_sq.limbs()[i].clone()
             + prev
             - limb_base.clone() * carries[i].clone();
         eval.add_constraint(gate.clone() * recurrence);
@@ -1415,6 +1880,11 @@ fn final_add_range13_uses(claim: &FinalAddClaim) -> Vec<M31> {
         &claim.x3,
         &claim.dx_inv,
         &dx_inv_result_value(claim),
+        // Task 6: the doubling-branch slope-numerator intermediate
+        // `x1_sq = x1 · x1 mod p` is a witnessed big-int field; every
+        // limb needs the standard 13-bit range lookup to balance the
+        // FinalAddInternal relation.
+        &claim.x1_sq,
     ] {
         uses.extend(value.limbs().iter().copied());
     }
@@ -1478,6 +1948,18 @@ fn gen_check_base_trace(claim: &FinalAddClaim, log_size: u32) -> Vec<M31ColumnEv
     offset += 1;
     write_point(&mut cols, &mut offset, &claim.r1, row);
     write_point(&mut cols, &mut offset, &claim.r2, row);
+    // Task 6 branch selectors. Valid claims never carry `InverseAdd` (the
+    // builder rejects `R_1 = -R_2`), so `inverse_add` is always 0 in the
+    // written trace; the AIR independently enforces
+    // `active · inverse_add = 0`.
+    cols[offset][row] = M31::from_u32_unchecked(if claim.branch == FinalAddBranch::DoubleAdd {
+        1
+    } else {
+        0
+    });
+    offset += 1;
+    cols[offset][row] = M31::from_u32_unchecked(0); // inverse_add: always 0 for valid claims
+    offset += 1;
     write_limbs(&mut cols, &mut offset, &claim.dx, row);
     write_limbs(&mut cols, &mut offset, &claim.dy, row);
     write_limbs(&mut cols, &mut offset, &claim.lambda, row);
@@ -1486,6 +1968,11 @@ fn gen_check_base_trace(claim: &FinalAddClaim, log_size: u32) -> Vec<M31ColumnEv
     write_limbs(&mut cols, &mut offset, &claim.dx_inv, row);
     let dx_inv_result = dx_inv_result_value(claim);
     write_limbs(&mut cols, &mut offset, &dx_inv_result, row);
+    // Task 6 doubling: `x1_sq = r1.x² mod p` is read at this position by the
+    // AIR (see `Columns::read`) and consumed via `MUL_X1_SQUARED`'s Result
+    // role. Without writing it the column stays zero, breaking the mul
+    // provider/consumer balance.
+    write_limbs(&mut cols, &mut offset, &claim.x1_sq, row);
     cols[offset][row] = M31::from_u32_unchecked(claim.dx_q as u32);
     offset += 1;
     write_signed_carries(&mut cols, &mut offset, &claim.dx_carries, row);
@@ -1774,6 +2261,12 @@ fn check_fraction_pairs(
     consume(&mut pairs, MUL_DX_INV, ROLE_RHS, &claim.dx_inv);
     // dx · dx_inv result = both_finite (1 if both finite, else 0).
     consume(&mut pairs, MUL_DX_INV, ROLE_RESULT, &dx_inv_result_value(claim));
+    // Task 6 doubling: MUL_X1_SQUARED proves `r1.x · r1.x ≡ x1_sq (mod p)`,
+    // consumed by the check eval the same way as the other muls so its
+    // provider/consumer pair balances in the FinalAddInternal totals.
+    consume(&mut pairs, MUL_X1_SQUARED, ROLE_LHS, &claim.r1.x);
+    consume(&mut pairs, MUL_X1_SQUARED, ROLE_RHS, &claim.r1.x);
+    consume(&mut pairs, MUL_X1_SQUARED, ROLE_RESULT, &claim.x1_sq);
 
     // 3. output provide.
     {
@@ -1798,6 +2291,10 @@ fn check_fraction_pairs(
         &claim.x3,
         &claim.dx_inv,
         &dx_inv_result_value(claim),
+        // Task 6: every limb of `x1_sq` is also range-checked by the AIR
+        // (see the `.chain(columns.x1_sq.limbs())` in the eval's range13
+        // chain), so the trace gen must emit matching multiplicities.
+        &claim.x1_sq,
     ] {
         for limb in value.limbs() {
             pairs.push((secure_from_i64(1), relations.mul.range13.combine(&[*limb])));
@@ -1890,12 +2387,15 @@ mod tests {
     }
 
     #[test]
-    fn final_add_rejects_equal_x_doubling() {
-        // R_1 == R_2 = 7G => doubling, unsupported.
+    fn final_add_supports_finite_doubling() {
+        // R_1 == R_2 = 7G => doubling. After Task 6 the AIR supports this
+        // branch (lambda = (3·x² − 3) / (2·y)) and the witness builder
+        // produces a valid `FinalAddClaim`.
         let r = mul(7);
-        let err = FinalAddClaim::from_hints(M31::from_u32_unchecked(0), &r, false, &r, false)
-            .expect_err("doubling rejected");
-        assert!(matches!(err, FinalAddError::UnsupportedEqualX { .. }));
+        let claim = FinalAddClaim::from_hints(M31::from_u32_unchecked(0), &r, false, &r, false)
+            .expect("finite doubling now supported by witness builder");
+        let expected = crate::curve::point_double(&r).output;
+        assert_eq!(claim.x3.to_u256(), expected.x);
     }
 
     #[test]

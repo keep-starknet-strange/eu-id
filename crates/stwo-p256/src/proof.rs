@@ -254,7 +254,7 @@ impl P256ProofClaim {
             &fake_glv_scalars,
             &fake_glv_chain,
         )?;
-        let final_add = final_add_claim_from_final_check(&final_check)?;
+        let final_add = final_add_claim_from_final_check(&final_check, &fake_glv_scalars)?;
         let prepared_use_counts =
             PreparedPointUseCountClaim::from_selector_claim(&fake_glv_selectors)?;
         let prepared_trace = prepared_table.prepared_point_trace(&prepared_use_counts)?;
@@ -2407,6 +2407,7 @@ impl P256ProofDraft {
                 &base.fake_glv_scalar_air,
                 &relations.cert_scalar_input,
                 &relations.fake_glv_scalar,
+                &relations.scalar_mod_mul.scalar_limb,
             );
         let (fake_glv_selector_interaction, fake_glv_selector_claim) =
             gen_fake_glv_selector_air_interaction_trace(
@@ -2764,28 +2765,20 @@ fn scalar_setup_mod_mul_rows(
 /// disjoint range from [`scalar_setup_mod_mul_rows`] (`FAKE_GLV_SCALAR_MUL_ID_BASE`
 /// + `2 · sig_id + cert_id`) so the two families never collide in any logup.
 ///
-/// **Currently dormant.** The end-to-end Task 4 wiring requires *both* this
-/// row builder *and* matching `add_to_relation` provider yields in the
-/// `fake_glv_scalar` AIR's `evaluate` (`(mul_id, role, limb_index, limb_value)`
-/// tuples into `ScalarLimbRelation`). Without the provider, the consumer-side
-/// claimed sums break the `FakeGlvScalarModMul` balance entry. We therefore
-/// return an empty `Vec` for now, so the balance trivially holds. The wider
-/// plumbing (claim slots, component lists, interaction generation, balance
-/// entry) is already in place — flipping `disabled` to `false` *and* adding
-/// the AIR-side provider yields is what activates the algebraic link.
-#[allow(unreachable_code, unused_variables, dead_code)]
+/// Active half of the Task 4 wiring: the matching AIR-side provider yields
+/// (per-(role, limb) `ScalarLimbRelation` tuples gated on `cert_active`) live
+/// in `crate::scalar::fake_glv_scalar::FakeGlvScalarAirEval::evaluate`, with
+/// the trace-gen provider sum mirrored in
+/// `gen_fake_glv_scalar_air_interaction_trace`. Together they close the
+/// `FakeGlvScalarModMul` balance entry in
+/// `P256CurrentAirInteractionClaim::relation_balances`.
 fn fake_glv_scalar_mod_mul_rows(
-    _claim: &P256ProofClaim,
+    claim: &P256ProofClaim,
 ) -> Result<Vec<ScalarModMulTraceRows>, P256ProofError> {
     use stwo_p256_utils::scalar_arithmetic::{ScalarFieldMulTrace, P256_ORDER};
 
-    // Dormant: emit no rows so the `FakeGlvScalarModMul` balance entry
-    // trivially equals zero. Activate by removing this early return *and*
-    // wiring the AIR-side provider yields in `fake_glv_scalar::evaluate`.
-    return Ok(Vec::new());
-
     let mut rows = Vec::new();
-    for fake_glv_row in &_claim.fake_glv_scalars.rows {
+    for fake_glv_row in &claim.fake_glv_scalars.rows {
         if fake_glv_row.cert_active.0 == 0 {
             continue;
         }
@@ -2822,20 +2815,63 @@ fn public_key_on_curve_slice_claim(
 }
 
 /// Build the final-add claim `S = R_1 + R_2` from the (single-signature)
-/// `FinalEcdsaCheckClaim`. The pinned hint `R_i = -h_i` for active certs
-/// (`s2_sign_bit == 1` forced in-AIR by `fake_glv_scalar`); for the inactive
-/// (zero-`u1`) branch `h_i = ∞`, so `R_i = ∞`. Negating the x-coordinate is a
-/// no-op for the binding, since `r_x = x(R_1 + R_2) = x(h_1 + h_2) = x(R)`.
+/// `FinalEcdsaCheckClaim`. `R_i = signed_hint_point(h_i, s2_sign_bit_i)`:
+/// `R_i = -h_i` when `s2_sign_bit == 1` (Garaga negative), `R_i = +h_i` when
+/// `s2_sign_bit == 0` (Garaga positive); for the inactive (zero-`u1`)
+/// branch `h_i = ∞`, so `R_i = ∞`. Both sign choices are accepted because
+/// `x(R_1 + R_2) = x(±(h_1 + h_2))` when both signs agree, which the AIR
+/// witness builder enforces upstream (via the per-cert `s2_sign_bit`
+/// consistency in `FakeGlvScalarHint::decompose`).
 fn final_add_claim_from_final_check(
     final_check: &FinalEcdsaCheckClaim,
+    fake_glv_scalars: &FakeGlvScalarHintClaim,
 ) -> Result<FinalAddClaim, P256ProofError> {
     let row = final_check
         .rows
         .first()
         .ok_or(P256ProofError::FinalAdd(FinalAddError::MulTraceShape))?;
-    let (r1, r1_inf) = negate_prepared(&row.h1);
-    let (r2, r2_inf) = negate_prepared(&row.h2);
+    // Match the two cert hints to the row's sig_id (each cert keyed by
+    // (sig_id, cert_id) with cert_id ∈ {0, 1}).
+    let bit_for = |cert_id: u32| -> M31 {
+        for fake_glv_row in &fake_glv_scalars.rows {
+            if fake_glv_row.sig_id == row.sig_id
+                && fake_glv_row.cert_id.0 == cert_id
+                && fake_glv_row.cert_active.0 == 1
+            {
+                return fake_glv_row.hint.s2_sign_bit;
+            }
+        }
+        // Inactive cert (zero-`u1` branch): sign is irrelevant because
+        // `h_i = ∞`; conventionally treat as `bit = 1`.
+        M31::from_u32_unchecked(1)
+    };
+    let (r1, r1_inf) = signed_prepared(&row.h1, bit_for(0));
+    let (r2, r2_inf) = signed_prepared(&row.h2, bit_for(1));
     FinalAddClaim::from_hints(row.sig_id, &r1, r1_inf, &r2, r2_inf).map_err(P256ProofError::FinalAdd)
+}
+
+/// `R = signed_hint_point(h, bit)`: returns `h` when `bit == 0` and `-h`
+/// when `bit == 1`, matching `signed_hint_point` in
+/// [`crate::scalar::prepared_table`]. For an infinity hint both branches
+/// collapse to the infinity flag.
+fn signed_prepared(
+    point: &crate::prepared_table::PreparedAffinePoint,
+    s2_sign_bit: M31,
+) -> (crate::types::AffinePoint, bool) {
+    if s2_sign_bit.0 == 0 {
+        return identity_prepared(point);
+    }
+    negate_prepared(point)
+}
+
+fn identity_prepared(
+    point: &crate::prepared_table::PreparedAffinePoint,
+) -> (crate::types::AffinePoint, bool) {
+    use crate::types::{AffinePoint, U256};
+    match point.to_option() {
+        Some(p) => (AffinePoint { x: p.x, y: p.y }, false),
+        None => (AffinePoint { x: U256::ZERO, y: U256::ZERO }, true),
+    }
 }
 
 /// `(-point, is_infinity)`: `(x, p - y)` for a finite point, or a dummy point
@@ -2978,7 +3014,7 @@ pub const P256_PROOF_COMPONENT_SLOTS: &[P256ProofComponentSlot] = &[
     P256ProofComponentSlot {
         name: "FakeGlvScalarHint",
         status: P256ProofComponentStatus::Implemented,
-        note: "Fake-GLV scalar rows are proven from CertScalarInput inside the monolithic STARK for the current trivial scalar strategy, including small-limb, active/inactive, sign, and scalar equality constraints.",
+        note: "Fake-GLV scalar rows are proven for arbitrary nonzero certificate scalars by bounding s1/s2_abs/q to 128 bits, witnessing the sign-selected `selected_s1` (= s1 if s2_sign_bit == 1, else n − s1) with a borrow chain, and linking `scalar · s2_abs ≡ selected_s1 (mod n)` through per-cert ScalarModMul rows that consume external limb tuples (mul_id, role, limb_index, limb_value) yielded by the fake-GLV AIR. Closes the Garaga-style identity in-AIR.",
     },
     P256ProofComponentSlot {
         name: "FakeGlvSelector",
@@ -3033,7 +3069,7 @@ pub const P256_PROOF_COMPONENT_SLOTS: &[P256ProofComponentSlot] = &[
     P256ProofComponentSlot {
         name: "FinalEcdsaCheck",
         status: P256ProofComponentStatus::Implemented,
-        note: "r_x is now bound IN-AIR to x(u1·G + u2·Q). The prepared table forwards the canonically-pinned signed hint R_i (role-R) on FinalCheckHintRelation; the final-add sub-graph (final_add_air.rs) consumes R_1, R_2 and proves S = R_1 + R_2 in affine coordinates via the shared projective-RCB mod-p mul engine (lambda·dx ≡ dy, lambda² ≡ x3 + x1 + x2, dx·dx_inv ≡ 1 to reject x1 == x2), handling the zero-u1 infinity branch. Since R_i = -h_i (s2_sign_bit forced 1 for active certs), x(R_1 + R_2) = x(u1·G + u2·Q). x3 = S.x is forwarded on FinalAddOutputRelation and consumed by the final check as r_x; the existing one-subtraction reduction r_check = r_x mod n and EcdsaResultRelation then complete x(u1·G + u2·Q) mod n = r. The additive-inverse (R = ∞) and doubling (u1 = u2) cases are rejected by the witness builder.",
+        note: "r_x is now bound IN-AIR to x(u1·G + u2·Q). The prepared table forwards the canonically-pinned signed hint R_i (role-R) on FinalCheckHintRelation; the final-add sub-graph (final_add_air.rs) consumes R_1, R_2 and proves S = R_1 + R_2 in affine coordinates via the shared projective-RCB mod-p mul engine. The distinct-x branch uses (lambda·dx ≡ dy, lambda² ≡ x3 + x1 + x2, dx·dx_inv ≡ 1) and the finite-doubling branch (Task 6) uses (lambda·(2·y1) ≡ 3·x1² − 3, lambda² ≡ x3 + 2·x1); branch selectors gate the constraints so the active branch is exactly one of {distinct, double, r1_only, r2_only, inverse}, with `inverse_add` (R_final = ∞) rejected by `active · inverse_add = 0`. Since R_i = -h_i for active certs (s2_sign_bit conventions: bit=1 ⇒ s2_signed = -s2_abs), x(R_1 + R_2) = x(u1·G + u2·Q). x3 = S.x is forwarded on FinalAddOutputRelation and consumed by the final check as r_x; r_check = r_x mod n and EcdsaResultRelation then complete x(u1·G + u2·Q) mod n = r.",
     },
     P256ProofComponentSlot {
         name: "StarkProveVerify",
@@ -3318,6 +3354,42 @@ mod tests {
 
     fn sub_mod_u256(a: &U256, b: &U256, modulus: &U256) -> U256 {
         crate::field_ops::sub_mod_witness(a, b, modulus).result.to_u256()
+    }
+
+    /// Deterministic real-world ECDSA fixture from the `p256` crate. Signs
+    /// a known message with a fixed signing key, runs the result through
+    /// SHA-256 for the message hash, and returns an `EcdsaVerifyInput`
+    /// laid out for the monolithic AIR. This exercises the production
+    /// arbitrary-fake-GLV path with a signature that wasn't constructed
+    /// to fit the trivial hint.
+    fn p256_crate_signed_input() -> EcdsaVerifyInput {
+        use ::ecdsa::signature::Signer;
+        use p256::ecdsa::{Signature as P256Signature, SigningKey};
+        use sha2::{Digest, Sha256};
+
+        let signing_key = SigningKey::from_bytes((&[7u8; 32]).into()).expect("valid signing key");
+        let verifying_key = signing_key.verifying_key();
+        let message = b"stwo-p256 arbitrary signature air fixture";
+        let digest = Sha256::digest(message);
+        let signature: P256Signature = signing_key.sign(message);
+        let encoded = verifying_key.to_encoded_point(false);
+
+        let r_bytes: [u8; 32] = signature.r().to_bytes().into();
+        let s_bytes: [u8; 32] = signature.s().to_bytes().into();
+        let x_bytes: [u8; 32] = encoded.x().expect("x").as_slice().try_into().expect("x len");
+        let y_bytes: [u8; 32] = encoded.y().expect("y").as_slice().try_into().expect("y len");
+
+        EcdsaVerifyInput {
+            message_hash: U256(digest.into()),
+            signature: Signature {
+                r: U256(r_bytes),
+                s: U256(s_bytes),
+            },
+            public_key: AffinePoint {
+                x: U256(x_bytes),
+                y: U256(y_bytes),
+            },
+        }
     }
 
     fn x_mod_order(x: &U256) -> U256 {
@@ -3725,6 +3797,39 @@ mod tests {
 
         P256ProofDraft::from_inputs_with_arbitrary_fake_glv_hints(vec![input])
             .expect("arbitrary full-width valid signature should build a proof draft");
+    }
+
+    /// Task 7 end-to-end: prove + verify a real `p256`-crate signature. The
+    /// signing key is fixed (deterministic fixture), the message is signed
+    /// via `Signer::sign`, and the resulting `(r, s)` together with the
+    /// SHA-256 digest and the SEC1-encoded public key are fed through the
+    /// production builder. This is the canonical "arbitrary signature"
+    /// proof — Task 4's external-limb `ScalarModMul` linkage and Task 6's
+    /// finite-doubling support combine to make this verify end-to-end.
+    #[test]
+    fn current_p256_monolithic_proves_real_p256_crate_signature() {
+        let input = p256_crate_signed_input();
+        assert!(ecdsa_verify(&input), "native verifier must accept the fixture");
+        let proof = P256ProofDraft::from_inputs_with_arbitrary_fake_glv_hints(vec![input])
+            .expect("real p256-crate signature builds a proof draft")
+            .prove_current_air_monolithic::<Blake2sMerkleChannel>()
+            .expect("real p256-crate signature proof generates");
+        verify_current_air_monolithic::<Blake2sMerkleChannel>(proof)
+            .expect("real p256-crate signature proof verifies");
+    }
+
+    /// Task 6 end-to-end: force `u1 == u2` so `R_1 = R_2` and the
+    /// FinalAdd AIR's finite-doubling branch is exercised inside the
+    /// monolithic proof.
+    #[test]
+    fn current_p256_monolithic_proves_arbitrary_doubling_final_add() {
+        let input = valid_real_input_with_small_u_scalars(99, 99);
+        let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![input])
+            .expect("u1 == u2 doubling draft builds")
+            .prove_current_air_monolithic::<Blake2sMerkleChannel>()
+            .expect("u1 == u2 doubling proof generates");
+        verify_current_air_monolithic::<Blake2sMerkleChannel>(proof)
+            .expect("u1 == u2 doubling proof verifies");
     }
 
     #[test]
@@ -5175,16 +5280,20 @@ mod tests {
 
         let cert_relation = CertScalarInputRelation::draw(&mut channel);
         let scalar_relation = FakeGlvScalarRelation::draw(&mut channel);
-        let (interaction, interaction_claim) =
-            gen_fake_glv_scalar_air_interaction_trace(&base, &cert_relation, &scalar_relation);
+        let scalar_limb_relation =
+            crate::scalar::scalar_mod_mul::relation::ScalarLimbRelation::dummy();
+        let (interaction, interaction_claim) = gen_fake_glv_scalar_air_interaction_trace(
+            &base,
+            &cert_relation,
+            &scalar_relation,
+            &scalar_limb_relation,
+        );
         interaction_claim.mix_into(&mut channel);
         let mut tree_builder = commitment_scheme.tree_builder();
         tree_builder.extend_evals(interaction);
         tree_builder.commit(&mut channel);
 
         let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&[]);
-        let scalar_limb_relation =
-            crate::scalar::scalar_mod_mul::relation::ScalarLimbRelation::dummy();
         let components = FakeGlvScalarAirComponents::new(
             &mut allocator,
             claim,

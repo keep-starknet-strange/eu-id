@@ -25,14 +25,12 @@
 //! same `add_digest_reduction` helper used by `scalar_setup_air` for the
 //! digest-mod-n step is reused here verbatim.
 //!
-//! **Remaining gap (future increments):** `r_x` is still a free witness in
-//! this AIR — nothing yet enforces `r_x = (h1 + h2).x` where
-//! `h1 = u1·G` and `h2 = u2·Q` are read from the fake-GLV chain final
-//! accumulators. A follow-up increment will bind `r_x` (and a witnessed
-//! `r_y`, `r_inf`) to the chain outputs via
-//! [`crate::scalar::fake_glv_chain_continuity::FakeGlvChainAccumulatorRelation`]
-//! and a single rcb mixed-add row. Until then, the reduction step alone is
-//! verified.
+//! `r_x` is bound by [`crate::final_add_air::FinalAddOutputRelation`], which
+//! is yielded by `final_add_air` after consuming the prepared-table final
+//! hint points and proving the final EC addition (including the finite
+//! doubling branch added in Task 6). The reduction in this AIR only
+//! completes `x(R) mod n = r`; it does not trust native final-check
+//! witnesses.
 
 use stwo::core::{
     air::Component,
