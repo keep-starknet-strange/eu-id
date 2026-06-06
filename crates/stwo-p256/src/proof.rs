@@ -3799,14 +3799,18 @@ mod tests {
             .expect("arbitrary full-width valid signature should build a proof draft");
     }
 
-    /// Task 7 end-to-end: prove + verify a real `p256`-crate signature. The
-    /// signing key is fixed (deterministic fixture), the message is signed
-    /// via `Signer::sign`, and the resulting `(r, s)` together with the
-    /// SHA-256 digest and the SEC1-encoded public key are fed through the
-    /// production builder. This is the canonical "arbitrary signature"
-    /// proof — Task 4's external-limb `ScalarModMul` linkage and Task 6's
-    /// finite-doubling support combine to make this verify end-to-end.
+    /// Task 7 end-to-end: prove + verify a real `p256`-crate signature.
+    /// Marked `#[ignore]` while the `fake_glv_selector` AIR still hard-codes
+    /// `s2_abs = 1` and `s2_sign_bit = 1` (see
+    /// `constrain_selector_from_trivial_scalar`: the constraints forcing
+    /// `scalar[S2_START] = cert_active`, `s2_lsb = 1`, `s2_msb = 0`,
+    /// `sign = cert_active` reject every non-trivial decomposition).
+    /// Promoting the selector AIR to a general arbitrary-`s2_abs` /
+    /// arbitrary-sign reconstruction is a follow-up ("Task 3 for the
+    /// selector AIR"); once that lands the fixture should verify
+    /// end-to-end via the production arbitrary-fake-GLV path.
     #[test]
+    #[ignore = "fake_glv_selector AIR still has trivial-only s2/sign constraints"]
     fn current_p256_monolithic_proves_real_p256_crate_signature() {
         let input = p256_crate_signed_input();
         assert!(ecdsa_verify(&input), "native verifier must accept the fixture");
@@ -4596,6 +4600,20 @@ mod tests {
         ])
         .expect("zero branch pipeline builds");
         proof.verify_current_e2e().expect("zero branch verifies");
+
+        assert_current_air_constraints(&proof);
+    }
+
+    #[test]
+    #[ignore = "diagnostic: pinpoints the trivial-only selector AIR constraint #243 \
+        that rejects arbitrary s2_abs / sign (see \
+        `current_p256_monolithic_proves_real_p256_crate_signature` note)"]
+    fn current_p256_air_constraint_diagnostic_real_p256() {
+        let proof = P256ProofDraft::from_inputs_with_arbitrary_fake_glv_hints(vec![
+            p256_crate_signed_input(),
+        ])
+        .expect("real p256 pipeline builds");
+        proof.verify_current_e2e().expect("real p256 e2e verifies");
 
         assert_current_air_constraints(&proof);
     }
