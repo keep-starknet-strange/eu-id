@@ -12,8 +12,12 @@ pub mod proof;
 pub mod public_inputs {
     pub use crate::components::public_inputs::*;
 }
-pub mod public_key_check;
-pub mod public_key_curve_air;
+pub mod public_key_check {
+    pub use crate::components::public_key_curve::native::*;
+}
+pub mod public_key_curve_air {
+    pub use crate::components::public_key_curve::air::*;
+}
 pub mod range_checks;
 pub mod scalar;
 pub mod types;
