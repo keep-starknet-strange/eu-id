@@ -5,7 +5,6 @@ pub mod curve;
 pub mod debug;
 pub mod ecdsa;
 pub mod field;
-pub mod projective;
 pub mod projective_air;
 pub mod proof;
 pub mod public_inputs;
@@ -29,6 +28,10 @@ pub mod fp_solinas {
 
 pub mod fp_solinas_air {
     pub use crate::field::solinas::air::*;
+}
+
+pub mod projective {
+    pub use crate::curve::projective::*;
 }
 
 pub mod canonical_lt {
