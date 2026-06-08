@@ -5,11 +5,20 @@
 use super::*;
 use crate::constants::{P256_GX, P256_GY};
 use crate::curve::point_double;
-use crate::range_checks::{RangeCheckClaim, SignedCarryRangeClaim, RANGE13_BITS};
-use crate::types::AffinePoint;
+use crate::fp_solinas_air::FpSolinasReductionTraceError;
+use crate::prepared_table::PreparedAffinePoint;
+use crate::projective::{
+    ProjectiveEcError, ProjectiveEcOp, ProjectiveEcRow, ProjectiveEcTraceClaim,
+};
+use crate::range_checks::{
+    RangeCheckClaim, RangeCheckInteractionClaim, RangeCheckRelation, SignedCarryRangeClaim,
+    RANGE13_BITS,
+};
+use crate::scalar::scalar_mod_mul::columns::padded_log_size;
+use crate::types::{AffinePoint, U256};
 use num_traits::Zero;
 use stwo::core::air::Component;
-use stwo::core::channel::Blake2sChannel;
+use stwo::core::channel::{Blake2sChannel, Channel};
 use stwo::core::fields::qm31::SecureField;
 use stwo::core::fri::FriConfig;
 use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig, TreeVec};
@@ -19,7 +28,10 @@ use stwo::core::verifier::verify;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::poly::circle::PolyOps;
 use stwo::prover::{prove, CommitmentSchemeProver, ComponentProver};
-use stwo_constraint_framework::{assert_constraints_on_polys, TraceLocationAllocator};
+use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
+use stwo_constraint_framework::{
+    assert_constraints_on_polys, FrameworkEval, TraceLocationAllocator,
+};
 
 fn generator() -> PreparedAffinePoint {
     PreparedAffinePoint::from_affine(AffinePoint {

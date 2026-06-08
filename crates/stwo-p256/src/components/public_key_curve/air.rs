@@ -53,13 +53,10 @@
 
 use stwo::core::{
     air::Component,
-    channel::{Channel, MerkleChannel},
+    channel::Channel,
     fields::{m31::M31, qm31::SecureField},
-    pcs::{CommitmentSchemeVerifier, PcsConfig, TreeVec},
-    poly::circle::CanonicCoset,
-    proof::StarkProof,
+    pcs::TreeVec,
     utils::{bit_reverse_index, coset_index_to_circle_domain_index},
-    verifier::verify,
     ColumnVec,
 };
 use stwo::prover::backend::simd::{
@@ -67,9 +64,7 @@ use stwo::prover::backend::simd::{
     qm31::PackedQM31,
     SimdBackend,
 };
-use stwo::prover::backend::BackendForChannel;
-use stwo::prover::poly::circle::PolyOps;
-use stwo::prover::{prove, CommitmentSchemeProver, ComponentProver};
+use stwo::prover::ComponentProver;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{
     relation, EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation,
@@ -1601,7 +1596,11 @@ mod tests {
     use crate::fp_solinas::M31_CENTERED_BOUND;
     use crate::types::{AffinePoint, EcdsaVerifyInput, Signature};
     use stwo::core::fri::FriConfig;
+    use stwo::core::pcs::PcsConfig;
+    use stwo::core::poly::circle::CanonicCoset;
     use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
+    use stwo::prover::poly::circle::PolyOps;
+    use stwo::prover::{prove, CommitmentSchemeProver};
 
     fn generator_inputs() -> PublicEcdsaInputClaim {
         PublicEcdsaInputClaim::from_inputs(&[EcdsaVerifyInput {

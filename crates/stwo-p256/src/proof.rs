@@ -2953,22 +2953,11 @@ mod tests {
     use crate::constants::{P256_GX, P256_GY, P256_MODULUS, P256_ORDER};
     use crate::curve::{mod_inverse, scalar_mul};
     use crate::debug::MockCommitmentScheme;
-    use crate::fake_glv_chain_continuity::FakeGlvChainContinuityProofClaim;
-    use crate::fake_glv_chain_expansion::FakeGlvChainExpansionProofClaim;
-    use crate::fake_glv_chain_schedule::FakeGlvChainScheduleProofClaim;
-    use crate::fake_glv_direct_prepared_operand::FakeGlvDirectPreparedOperandProofClaim;
-    use crate::fake_glv_ec_source::FakeGlvProjectiveSourceProofClaim;
-    use crate::fake_glv_lsb_correction_operand::FakeGlvLsbCorrectionOperandProofClaim;
-    use crate::fake_glv_prepared_point_source::FakeGlvPreparedPointSourceProofClaim;
-    use crate::fake_glv_signed_selector_operand::FakeGlvSignedSelectorOperandProofClaim;
     use crate::field_ops::mul_mod_witness;
     use crate::fp_solinas_air::FP_SOLINAS_REDUCTION_DIGITS;
     use crate::limbs::P256M31BigInt;
     use crate::fake_glv_chain::FakeGlvChainCert;
-    use crate::prepared_table::{
-        PreparedAffinePoint, PreparedTableCert, PreparedTableEcRowProofClaim,
-        PreparedTableProjectiveSourceProofClaim,
-    };
+    use crate::prepared_table::{PreparedAffinePoint, PreparedTableCert};
     use crate::projective_air::{
         PROJECTIVE_RCB_FOLDED_CONTRIBUTION_ROWS, PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERMS,
         PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TRACE_COLUMNS, PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS,
@@ -2989,8 +2978,6 @@ mod tests {
     use std::collections::BTreeMap;
     use std::ops::Deref;
     use stwo::core::channel::Blake2sM31Channel;
-    use stwo::core::fri::FriConfig;
-    use stwo::core::pcs::PcsConfig;
     use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
     use stwo::prover::backend::Column;
     use stwo_constraint_framework::{

@@ -3,57 +3,17 @@
 //!
 //! Split out of `mod.rs` (pure relocation, no behavioral change).
 
-use stwo::core::{
-    air::Component,
-    channel::Channel,
-    fields::{m31::M31, qm31::SecureField},
-    pcs::{CommitmentSchemeVerifier, PcsConfig, TreeVec},
-    poly::circle::CanonicCoset,
-    proof::StarkProof,
-    utils::{bit_reverse_index, coset_index_to_circle_domain_index},
-    verifier::verify,
-    ColumnVec,
-};
-use stwo::prover::backend::simd::{
-    m31::{LOG_N_LANES, N_LANES},
-    qm31::PackedQM31,
-    SimdBackend,
-};
-use stwo::prover::backend::BackendForChannel;
-use stwo::prover::poly::circle::PolyOps;
-use stwo::prover::{prove, CommitmentSchemeProver, ComponentProver};
-use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
-use stwo_constraint_framework::{
-    relation, EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation,
-    RelationEntry, TraceLocationAllocator,
-};
+use stwo::core::fields::m31::M31;
+use stwo_constraint_framework::{EvalAtRow, FrameworkComponent, FrameworkEval, RelationEntry};
 use stwo_p256_utils::constants::{LIMB_BITS, N_LIMBS};
-use stwo_p256_utils::solinas::REDUCTION_MATRIX;
 
-use crate::constants::{P256_B, P256_MODULUS};
-use crate::field_ops::{add_mod_witness, sub_mod_witness};
-use crate::fp_solinas::{
-    FpSolinasError, FpSolinasMulTrace, FP_SOLINAS_LIMB_BASE, FP_SOLINAS_RAW_LIMBS,
-    M31_CENTERED_BOUND,
-};
+use crate::fp_solinas::{FP_SOLINAS_LIMB_BASE, M31_CENTERED_BOUND};
 use crate::fp_solinas_air::{
     add_fp_solinas_reduction_digit, FpSolinasReductionDigitColumns, FpSolinasReductionRelations,
-    FpSolinasReductionTraceClaim, FpSolinasReductionTraceError,
-    FP_SOLINAS_CORRECTION_PRODUCT_MAX_ABS_DIGIT, FP_SOLINAS_REDUCTION_DIGITS,
-    FP_SOLINAS_REDUCTION_DIGIT_TRACE_COLUMNS,
+    FP_SOLINAS_REDUCTION_DIGITS, FP_SOLINAS_REDUCTION_DIGIT_TRACE_COLUMNS,
 };
 use crate::limbs::{EvalP256BigIntExt, P256EvalBigInt};
-use crate::prepared_table::PreparedAffinePoint;
-use crate::projective::{
-    ProjectiveEcError, ProjectiveEcOp, ProjectiveEcRow, ProjectiveEcTraceClaim, ProjectivePoint,
-};
-use crate::range_checks::{
-    add_range_check, RangeCheckClaim, RangeCheckComponent, RangeCheckEval,
-    RangeCheckInteractionClaim, RangeCheckRelation, SignedCarryRangeClaim,
-    SignedCarryRangeComponent, SignedCarryRangeEval, RANGE13_BITS,
-};
-use crate::scalar::scalar_mod_mul::columns::{m31_column_eval, padded_log_size, M31ColumnEval};
-use crate::types::U256;
+use crate::range_checks::add_range_check;
 use super::*;
 
 pub type ProjectiveRcbMulComponent = FrameworkComponent<ProjectiveRcbMulEval>;
