@@ -22,8 +22,8 @@ use stwo::prover::{
 };
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{
-    relation, EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation,
-    RelationEntry, TraceLocationAllocator,
+    EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation, RelationEntry,
+    TraceLocationAllocator,
 };
 use stwo_p256_utils::constants::{LIMB_BITS, N_LIMBS};
 
@@ -44,37 +44,9 @@ use crate::scalar::fake_glv_selector::{FakeGlvSelectorClaim, FakeGlvSelectorRow}
 use crate::scalar::fake_glv_selector_lookup::Selector16DecodeEntry;
 use crate::scalar::scalar_mod_mul::columns::{m31_column_eval, padded_log_size, M31ColumnEval};
 
-relation!(
-    PreparedTableEcRowRelation,
-    PREPARED_TABLE_EC_ROW_RELATION_ARITY
-);
+pub mod relation;
 
-// --- PreparedTablePoints pinning relations (full table-pinning, Phase 2) ---
-//
-// `CertBaseRelation` binds every prepared-table cell that must equal the cert
-// base point `P` (= G for cert0, = public key Q for cert1) to the in-AIR
-// `cert.base` proven in `cert_bind.rs`. Provider: `CertScalarInputAirEval`
-// (yield `-m(cert_id)`). Consumer: `PreparedTableEcRowEval` (use `+1` per P-cell).
-relation!(CertBaseRelation, CERT_BASE_RELATION_ARITY);
-
-// `PreparedTableCanonicalRelation` ties every other prepared-table operand
-// (`P3 = 3P`, `R`, `R3 = 3R`, `-R`, `-R3`, `2P`, `2R`) to a single canonical
-// per-(sig,cert,role) value. Both providers and consumers are prepared-table
-// rows (self-balancing within `PreparedTableEcRowEval`), except cert0's `P3`
-// which is provided as the fixed constant `3·G`.
-relation!(
-    PreparedTableCanonicalRelation,
-    PREPARED_TABLE_CANONICAL_RELATION_ARITY
-);
-
-// `FinalCheckHintRelation` forwards the in-AIR-pinned signed hint point `R_i`
-// (= `±h_i`; for active certs `s2_sign_bit == 1` is forced in `fake_glv_scalar`,
-// so `R_i = -h_i`) from the prepared table to the FinalEcdsaCheck component.
-// Provider: `PreparedTableEcRowEval` yields `R_i` (= the `DoubleR` row's `lhs`,
-// which role-`R` pinning already binds to the canonical per-cert value) once per
-// active `DoubleR` row, gated `active * DoubleR_flag`, multiplicity `-1`.
-// Consumer: `FinalEcdsaCheck` uses `R_1` at `(sig, 0)` and `R_2` at `(sig, 1)`.
-relation!(FinalCheckHintRelation, FINAL_CHECK_HINT_RELATION_ARITY);
+pub use relation::*;
 
 /// `FinalCheckHintRelation` tuple arity:
 /// `(sig_id, cert_id, point[PREPARED_TABLE_EC_POINT_COLUMNS])`.
@@ -572,25 +544,6 @@ impl PreparedTableProjectiveSourceComponents {
             .max()
             .unwrap_or(0)
     }
-}
-
-/// Relations the `PreparedTableEcRowEval` provider consumes/provides to pin the
-/// prepared table to the cert base point. `Some` in the monolithic STARK (where
-/// `cert_bind` provides `CertBaseRelation`); `None` for the legacy standalone
-/// slice, which emits only `PreparedTableEcRowRelation`.
-///
-/// The in-AIR negation (`neg.y + src.y = p`) needs `neg`/`src` limbs bounded to
-/// 13 bits; that bound is inherited transitively — the canonical relation ties
-/// each `neg`/`src` to a base-row operand which feeds the projective EC-add,
-/// where every affine limb is already `Range13`-checked. So no extra range
-/// lookup is consumed here.
-#[derive(Clone)]
-pub struct PreparedTablePinningRelations {
-    pub cert_base: CertBaseRelation,
-    pub canonical: PreparedTableCanonicalRelation,
-    /// Forwards the pinned signed hint `R_i` (the `DoubleR` row's `lhs`) to the
-    /// FinalEcdsaCheck component. `None` for paths that do not consume it.
-    pub final_check_hint: Option<FinalCheckHintRelation>,
 }
 
 #[derive(Clone)]
