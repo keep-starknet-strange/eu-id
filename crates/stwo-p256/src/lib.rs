@@ -4,10 +4,7 @@ pub mod constants;
 pub mod curve;
 pub mod debug;
 pub mod ecdsa;
-pub mod field_ops;
-pub mod fp_solinas;
-pub mod fp_solinas_air;
-pub mod limbs;
+pub mod field;
 pub mod projective;
 pub mod projective_air;
 pub mod proof;
@@ -17,6 +14,22 @@ pub mod public_key_curve_air;
 pub mod range_checks;
 pub mod scalar;
 pub mod types;
+
+pub mod limbs {
+    pub use crate::field::limbs::*;
+}
+
+pub mod field_ops {
+    pub use crate::field::ops::*;
+}
+
+pub mod fp_solinas {
+    pub use crate::field::solinas::native::*;
+}
+
+pub mod fp_solinas_air {
+    pub use crate::field::solinas::air::*;
+}
 
 pub mod canonical_lt {
     pub use crate::scalar::canonical_lt::*;
