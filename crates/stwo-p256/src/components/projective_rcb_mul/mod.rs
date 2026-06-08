@@ -50,78 +50,81 @@ use crate::range_checks::{
 use crate::scalar::scalar_mod_mul::columns::{m31_column_eval, padded_log_size, M31ColumnEval};
 use crate::types::U256;
 
+pub mod relation;
+
+pub use relation::*;
+
 pub type ProjectiveRcbMulComponent = FrameworkComponent<ProjectiveRcbMulEval>;
+
 pub type ProjectiveRcbRawProductChunkComponent =
     FrameworkComponent<ProjectiveRcbRawProductChunkEval>;
+
 pub type ProjectiveRcbFoldedContributionComponent =
     FrameworkComponent<ProjectiveRcbFoldedContributionEval>;
+
 pub type ProjectiveRcbFoldedDigitComponent = FrameworkComponent<ProjectiveRcbFoldedDigitEval>;
 
-pub const PROJECTIVE_RCB_MUL_LIMB_RELATION_ARITY: usize = 5;
-pub const PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGIT_RELATION_ARITY: usize = 6;
-pub const PROJECTIVE_RCB_FOLDED_CONTRIBUTION_RELATION_ARITY: usize = 5;
-pub const PROJECTIVE_RCB_FOLDED_DIGIT_RELATION_ARITY: usize = 4;
-pub const PROJECTIVE_RCB_FOLDED_CARRY_RELATION_ARITY: usize = 4;
 const QM31_TRACE_COLUMNS: usize = 4;
+
 pub const PROJECTIVE_RCB_SIGNED_CARRY_EQUATION: &str = "projective_rcb_reduction";
+
 pub const PROJECTIVE_RCB_SIGNED_CARRY_BOUND: i64 = projective_rcb_signed_carry_bound();
+
 pub const PROJECTIVE_RCB_MUL_ROLE_LHS: u32 = 0;
+
 pub const PROJECTIVE_RCB_MUL_ROLE_RHS: u32 = 1;
+
 pub const PROJECTIVE_RCB_MUL_ROLE_RESULT: u32 = 2;
+
 pub const PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS: usize = 16;
+
 pub const PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS: usize = 3;
+
 pub const PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS: usize = raw_product_chunk_count();
+
 pub const PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERM_TRACE_COLUMNS: usize = 4;
+
 pub const PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERMS: usize = 4;
+
 pub const PROJECTIVE_RCB_FOLDED_CONTRIBUTION_ROWS: usize = folded_contribution_row_count_const();
+
 pub const PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERM_TRACE_COLUMNS: usize = 4;
+
 pub const PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TRACE_COLUMNS: usize = 1
     + 2
     + PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERMS
         * PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERM_TRACE_COLUMNS
     + 1;
+
 pub const PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS: usize =
     folded_contribution_max_groups_per_digit_const();
+
 pub const PROJECTIVE_RCB_FOLDED_DIGIT_GROUP_TRACE_COLUMNS: usize = 3;
+
 pub const PROJECTIVE_RCB_FOLDED_DIGIT_TRACE_COLUMNS: usize = 1
     + 2
     + PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS * PROJECTIVE_RCB_FOLDED_DIGIT_GROUP_TRACE_COLUMNS
     + 3;
+
 pub const PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TRACE_COLUMNS: usize = 1
     + 2
     + PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS * PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERM_TRACE_COLUMNS
     + PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS
     + PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS;
+
 pub const PROJECTIVE_RCB_MUL_ID_TRACE_COLUMNS: usize = 2;
+
 pub const PROJECTIVE_RCB_MUL_ACTIVE_TRACE_COLUMNS: usize = 1;
+
 pub const PROJECTIVE_RCB_MUL_LIMB_TRACE_COLUMNS: usize = 3 * N_LIMBS;
+
 pub const PROJECTIVE_RCB_MUL_REDUCTION_TRACE_COLUMNS: usize =
     FP_SOLINAS_REDUCTION_DIGITS * FP_SOLINAS_REDUCTION_DIGIT_TRACE_COLUMNS + 1;
+
 pub const PROJECTIVE_RCB_MUL_TRACE_COLUMNS: usize = PROJECTIVE_RCB_MUL_ACTIVE_TRACE_COLUMNS
     + PROJECTIVE_RCB_MUL_ID_TRACE_COLUMNS
     + PROJECTIVE_RCB_MUL_LIMB_TRACE_COLUMNS
     + PROJECTIVE_RCB_MUL_REDUCTION_TRACE_COLUMNS;
-
-relation!(
-    ProjectiveRcbMulLimbRelation,
-    PROJECTIVE_RCB_MUL_LIMB_RELATION_ARITY
-);
-relation!(
-    ProjectiveRcbRawProductChunkDigitRelation,
-    PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGIT_RELATION_ARITY
-);
-relation!(
-    ProjectiveRcbFoldedContributionRelation,
-    PROJECTIVE_RCB_FOLDED_CONTRIBUTION_RELATION_ARITY
-);
-relation!(
-    ProjectiveRcbFoldedDigitRelation,
-    PROJECTIVE_RCB_FOLDED_DIGIT_RELATION_ARITY
-);
-relation!(
-    ProjectiveRcbFoldedCarryRelation,
-    PROJECTIVE_RCB_FOLDED_CARRY_RELATION_ARITY
-);
 
 /// Schedule-column id namespace for the canonical EC projective-RCB mul trace.
 /// Empty so existing preprocessed-column ids are unchanged.
@@ -614,66 +617,6 @@ impl FrameworkEval for ProjectiveRcbRawProductChunkEval {
         eval.finalize_logup_in_pairs();
         eval
     }
-}
-
-#[derive(Clone, Debug)]
-pub struct ProjectiveRcbMulComponentRelations {
-    pub range13: RangeCheckRelation,
-    pub signed_carry: RangeCheckRelation,
-    pub mul_limb: ProjectiveRcbMulLimbRelation,
-    pub raw_product_chunk_digit: ProjectiveRcbRawProductChunkDigitRelation,
-    pub folded_contribution: ProjectiveRcbFoldedContributionRelation,
-    pub folded_digit: ProjectiveRcbFoldedDigitRelation,
-    pub folded_carry: ProjectiveRcbFoldedCarryRelation,
-}
-
-impl ProjectiveRcbMulComponentRelations {
-    pub fn draw(channel: &mut impl Channel) -> Self {
-        Self {
-            range13: RangeCheckRelation::draw(channel),
-            signed_carry: RangeCheckRelation::draw(channel),
-            mul_limb: ProjectiveRcbMulLimbRelation::draw(channel),
-            raw_product_chunk_digit: ProjectiveRcbRawProductChunkDigitRelation::draw(channel),
-            folded_contribution: ProjectiveRcbFoldedContributionRelation::draw(channel),
-            folded_digit: ProjectiveRcbFoldedDigitRelation::draw(channel),
-            folded_carry: ProjectiveRcbFoldedCarryRelation::draw(channel),
-        }
-    }
-
-    pub fn dummy() -> Self {
-        Self {
-            range13: RangeCheckRelation::dummy(),
-            signed_carry: RangeCheckRelation::dummy(),
-            mul_limb: ProjectiveRcbMulLimbRelation::dummy(),
-            raw_product_chunk_digit: ProjectiveRcbRawProductChunkDigitRelation::dummy(),
-            folded_contribution: ProjectiveRcbFoldedContributionRelation::dummy(),
-            folded_digit: ProjectiveRcbFoldedDigitRelation::dummy(),
-            folded_carry: ProjectiveRcbFoldedCarryRelation::dummy(),
-        }
-    }
-
-    pub fn as_refs(&self) -> ProjectiveRcbMulRelations<'_> {
-        ProjectiveRcbMulRelations {
-            range13: &self.range13,
-            signed_carry: &self.signed_carry,
-            mul_limb: &self.mul_limb,
-            raw_product_chunk_digit: &self.raw_product_chunk_digit,
-            folded_contribution: &self.folded_contribution,
-            folded_digit: &self.folded_digit,
-            folded_carry: &self.folded_carry,
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-pub struct ProjectiveRcbMulRelations<'a> {
-    pub range13: &'a RangeCheckRelation,
-    pub signed_carry: &'a RangeCheckRelation,
-    pub mul_limb: &'a ProjectiveRcbMulLimbRelation,
-    pub raw_product_chunk_digit: &'a ProjectiveRcbRawProductChunkDigitRelation,
-    pub folded_contribution: &'a ProjectiveRcbFoldedContributionRelation,
-    pub folded_digit: &'a ProjectiveRcbFoldedDigitRelation,
-    pub folded_carry: &'a ProjectiveRcbFoldedCarryRelation,
 }
 
 pub struct ProjectiveRcbMulColumns<E: EvalAtRow> {
@@ -1314,7 +1257,7 @@ pub const fn projective_rcb_signed_carry_log_size() -> u32 {
         .ilog2()
 }
 
-fn projective_rcb_signed_carry_claim() -> SignedCarryRangeClaim {
+pub(crate) fn projective_rcb_signed_carry_claim() -> SignedCarryRangeClaim {
     SignedCarryRangeClaim::new(
         projective_rcb_signed_carry_log_size(),
         PROJECTIVE_RCB_SIGNED_CARRY_BOUND,
@@ -2297,7 +2240,7 @@ enum ProjectiveRcbRelationKind {
     FoldedCarry,
 }
 
-fn gen_projective_rcb_family_interaction_trace(
+pub(crate) fn gen_projective_rcb_family_interaction_trace(
     log_size: u32,
     rows: impl IntoIterator<Item = Vec<ProjectiveRcbFractionSpec>>,
     padding_fractions: Vec<ProjectiveRcbFractionSpec>,
@@ -2405,7 +2348,7 @@ fn zero_fraction() -> (SecureField, SecureField) {
     (secure_zero(), secure_one())
 }
 
-fn projective_rcb_mul_row_fractions(
+pub(crate) fn projective_rcb_mul_row_fractions(
     source_index: usize,
     mul_index: usize,
     mul: &ProjectiveRcbMulRow,
@@ -2508,7 +2451,7 @@ pub(crate) fn projective_rcb_mul_padding_fraction_pairs() -> Vec<(SecureField, S
         .collect()
 }
 
-fn projective_rcb_raw_product_chunk_fractions(
+pub(crate) fn projective_rcb_raw_product_chunk_fractions(
     row: &ProjectiveRcbRawProductChunkRow,
 ) -> Vec<ProjectiveRcbFractionSpec> {
     let mut fractions = Vec::with_capacity(projective_rcb_raw_product_chunk_fraction_count());
@@ -2552,7 +2495,7 @@ fn projective_rcb_raw_product_chunk_fractions(
     fractions
 }
 
-fn projective_rcb_folded_contribution_fractions(
+pub(crate) fn projective_rcb_folded_contribution_fractions(
     row: &ProjectiveRcbFoldedContributionRow,
 ) -> Vec<ProjectiveRcbFractionSpec> {
     let mut fractions = Vec::with_capacity(projective_rcb_folded_contribution_fraction_count());
@@ -2582,7 +2525,7 @@ fn projective_rcb_folded_contribution_fractions(
     fractions
 }
 
-fn projective_rcb_folded_digit_fractions(
+pub(crate) fn projective_rcb_folded_digit_fractions(
     row: &ProjectiveRcbFoldedDigitRow,
 ) -> Vec<ProjectiveRcbFractionSpec> {
     let mut fractions = Vec::with_capacity(projective_rcb_folded_digit_fraction_count());
@@ -2627,19 +2570,19 @@ fn projective_rcb_folded_digit_fractions(
     fractions
 }
 
-fn projective_rcb_mul_padding_fractions() -> Vec<ProjectiveRcbFractionSpec> {
+pub(crate) fn projective_rcb_mul_padding_fractions() -> Vec<ProjectiveRcbFractionSpec> {
     zeroed_projective_rcb_fractions(projective_rcb_mul_fraction_count())
 }
 
-fn projective_rcb_raw_product_chunk_padding_fractions() -> Vec<ProjectiveRcbFractionSpec> {
+pub(crate) fn projective_rcb_raw_product_chunk_padding_fractions() -> Vec<ProjectiveRcbFractionSpec> {
     zeroed_projective_rcb_fractions(projective_rcb_raw_product_chunk_fraction_count())
 }
 
-fn projective_rcb_folded_contribution_padding_fractions() -> Vec<ProjectiveRcbFractionSpec> {
+pub(crate) fn projective_rcb_folded_contribution_padding_fractions() -> Vec<ProjectiveRcbFractionSpec> {
     zeroed_projective_rcb_fractions(projective_rcb_folded_contribution_fraction_count())
 }
 
-fn projective_rcb_folded_digit_padding_fractions() -> Vec<ProjectiveRcbFractionSpec> {
+pub(crate) fn projective_rcb_folded_digit_padding_fractions() -> Vec<ProjectiveRcbFractionSpec> {
     zeroed_projective_rcb_fractions(projective_rcb_folded_digit_fraction_count())
 }
 
@@ -2663,19 +2606,19 @@ fn projective_rcb_folded_digit_fraction_count() -> usize {
     PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS + 6
 }
 
-fn projective_rcb_mul_interaction_columns() -> usize {
+pub(crate) fn projective_rcb_mul_interaction_columns() -> usize {
     QM31_TRACE_COLUMNS * projective_rcb_mul_fraction_count()
 }
 
-fn projective_rcb_raw_product_chunk_interaction_columns() -> usize {
+pub(crate) fn projective_rcb_raw_product_chunk_interaction_columns() -> usize {
     QM31_TRACE_COLUMNS * projective_rcb_raw_product_chunk_fraction_count().div_ceil(2)
 }
 
-fn projective_rcb_folded_contribution_interaction_columns() -> usize {
+pub(crate) fn projective_rcb_folded_contribution_interaction_columns() -> usize {
     QM31_TRACE_COLUMNS * projective_rcb_folded_contribution_fraction_count()
 }
 
-fn projective_rcb_folded_digit_interaction_columns() -> usize {
+pub(crate) fn projective_rcb_folded_digit_interaction_columns() -> usize {
     QM31_TRACE_COLUMNS * projective_rcb_folded_digit_fraction_count()
 }
 
@@ -4039,7 +3982,7 @@ fn one<E: EvalAtRow>() -> E::F {
     constant(1)
 }
 
-fn relation_fraction<R: Relation<M31, SecureField>>(
+pub(crate) fn relation_fraction<R: Relation<M31, SecureField>>(
     relation: &R,
     numerator: i64,
     values: &[M31],
