@@ -22,11 +22,15 @@ pub mod fake_glv_chain_schedule {
 pub mod fake_glv_direct_prepared_operand {
     pub use crate::components::fake_glv::selector::direct_operand::*;
 }
-pub mod fake_glv_ec_source;
+pub mod fake_glv_ec_source {
+    pub use crate::components::fake_glv::ec_source::air::*;
+}
 pub mod fake_glv_lsb_correction_operand {
     pub use crate::components::fake_glv::selector::lsb_correction::*;
 }
-pub mod fake_glv_prepared_point_source;
+pub mod fake_glv_prepared_point_source {
+    pub use crate::components::fake_glv::ec_source::prepared_point_source::*;
+}
 pub mod fake_glv_scalar {
     pub use crate::components::fake_glv::scalar::air::*;
 }
