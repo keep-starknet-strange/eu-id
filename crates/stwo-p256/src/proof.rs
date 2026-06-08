@@ -24,62 +24,47 @@ use crate::ecdsa::ecdsa_verify;
 use crate::fake_glv_chain::{FakeGlvChainClaim, FakeGlvChainError, FakeGlvPrimitiveEcTraceClaim};
 use crate::fake_glv_chain_continuity::{
     gen_fake_glv_chain_continuity_base_trace, gen_fake_glv_chain_continuity_interaction_trace,
-    gen_fake_glv_chain_continuity_preprocessed_trace, prove_fake_glv_chain_continuity_proof_slice,
-    verify_fake_glv_chain_continuity_proof_slice, FakeGlvChainAccumulatorRelation,
+    gen_fake_glv_chain_continuity_preprocessed_trace, FakeGlvChainAccumulatorRelation,
     FakeGlvChainContinuityComponent, FakeGlvChainContinuityEval,
-    FakeGlvChainContinuityInteractionClaim, FakeGlvChainContinuityProof,
-    FakeGlvChainContinuityProofClaim,
+    FakeGlvChainContinuityInteractionClaim, FakeGlvChainContinuityProofClaim,
 };
 use crate::fake_glv_chain_expansion::{
     gen_fake_glv_chain_expansion_base_trace, gen_fake_glv_chain_expansion_interaction_trace,
     gen_fake_glv_chain_expansion_preprocessed_trace,
     gen_fake_glv_primitive_expansion_consumer_base_trace,
     gen_fake_glv_primitive_expansion_consumer_interaction_trace,
-    prove_fake_glv_chain_expansion_proof_slice, verify_fake_glv_chain_expansion_proof_slice,
     FakeGlvChainExpansionComponents, FakeGlvChainExpansionInteractionClaim,
-    FakeGlvChainExpansionProof, FakeGlvChainExpansionProofClaim,
-    FakeGlvChainPrimitiveExpansionRelation,
+    FakeGlvChainExpansionProofClaim, FakeGlvChainPrimitiveExpansionRelation,
 };
 use crate::fake_glv_chain_schedule::{
     gen_fake_glv_chain_schedule_base_trace, gen_fake_glv_chain_schedule_preprocessed_trace,
-    prove_fake_glv_chain_schedule_proof_slice, verify_fake_glv_chain_schedule_proof_slice,
-    FakeGlvChainScheduleComponent, FakeGlvChainScheduleEval, FakeGlvChainScheduleProof,
-    FakeGlvChainScheduleProofClaim,
+    FakeGlvChainScheduleComponent, FakeGlvChainScheduleEval, FakeGlvChainScheduleProofClaim,
 };
 use crate::fake_glv_direct_prepared_operand::{
     gen_direct_operand_consumer_base_trace, gen_direct_operand_consumer_interaction_trace,
     gen_direct_operand_preprocessed_trace, gen_direct_operand_provider_base_trace,
-    gen_direct_operand_provider_interaction_trace,
-    prove_fake_glv_direct_prepared_operand_proof_slice,
-    verify_fake_glv_direct_prepared_operand_proof_slice, FakeGlvDirectPreparedOperandComponents,
-    FakeGlvDirectPreparedOperandInteractionClaim, FakeGlvDirectPreparedOperandProof,
-    FakeGlvDirectPreparedOperandProofClaim,
+    gen_direct_operand_provider_interaction_trace, FakeGlvDirectPreparedOperandComponents,
+    FakeGlvDirectPreparedOperandInteractionClaim, FakeGlvDirectPreparedOperandProofClaim,
 };
 use crate::fake_glv_ec_source::{
     gen_fake_glv_primitive_ec_preprocessed_trace, gen_fake_glv_primitive_ec_source_base_trace,
     gen_fake_glv_primitive_ec_source_interaction_trace, gen_fake_glv_projective_source_base_trace,
-    prove_fake_glv_projective_source_proof_slice, verify_fake_glv_projective_source_proof_slice,
     FakeGlvPrimitiveEcRowRelation, FakeGlvProjectiveSourceComponents,
-    FakeGlvProjectiveSourceInteractionClaim, FakeGlvProjectiveSourceProof,
-    FakeGlvProjectiveSourceProofClaim, RelationMultiplicity,
+    FakeGlvProjectiveSourceInteractionClaim, FakeGlvProjectiveSourceProofClaim,
+    RelationMultiplicity,
 };
 use crate::fake_glv_lsb_correction_operand::{
     gen_lsb_correction_operand_consumer_base_trace, gen_lsb_correction_operand_interaction_trace,
     gen_lsb_correction_operand_preprocessed_trace, gen_lsb_correction_operand_provider_base_trace,
-    prove_fake_glv_lsb_correction_operand_proof_slice,
-    verify_fake_glv_lsb_correction_operand_proof_slice, FakeGlvLsbCorrectionOperandComponents,
-    FakeGlvLsbCorrectionOperandInteractionClaim, FakeGlvLsbCorrectionOperandProof,
+    FakeGlvLsbCorrectionOperandComponents, FakeGlvLsbCorrectionOperandInteractionClaim,
     FakeGlvLsbCorrectionOperandProofClaim, FakeGlvLsbCorrectionOperandRelation,
 };
 use crate::fake_glv_prepared_point_source::{
     gen_fake_glv_prepared_point_consumer_base_trace,
     gen_fake_glv_prepared_point_consumer_interaction_trace,
     gen_fake_glv_prepared_point_source_preprocessed_trace, gen_prepared_point_provider_base_trace,
-    gen_prepared_point_provider_interaction_trace,
-    prove_fake_glv_prepared_point_source_proof_slice,
-    verify_fake_glv_prepared_point_source_proof_slice, FakeGlvPreparedPointSourceComponents,
-    FakeGlvPreparedPointSourceInteractionClaim, FakeGlvPreparedPointSourceProof,
-    FakeGlvPreparedPointSourceProofClaim,
+    gen_prepared_point_provider_interaction_trace, FakeGlvPreparedPointSourceComponents,
+    FakeGlvPreparedPointSourceInteractionClaim, FakeGlvPreparedPointSourceProofClaim,
 };
 use crate::final_add_air::{
     final_add_preprocessed_columns, gen_final_add_base_trace, gen_final_add_interaction_trace,
@@ -102,20 +87,16 @@ use crate::prepared_table::{
     gen_prepared_table_ec_row_base_trace,
     gen_prepared_table_ec_row_preprocessed_trace, gen_prepared_table_projective_source_base_trace,
     gen_prepared_table_projective_source_interaction_trace,
-    prove_prepared_table_ec_row_proof_slice, prove_prepared_table_projective_source_proof_slice,
-    verify_prepared_table_ec_row_proof_slice, verify_prepared_table_projective_source_proof_slice,
     gen_prepared_table_ec_row_pinned_interaction_trace, CertBaseRelation,
     PreparedTableCanonicalRelation, PreparedTableClaim, PreparedTableEcRowPinnedInteractionClaim,
-    PreparedTableEcRowProof, PreparedTableEcRowProofClaim, PreparedTableEcRowRelation,
-    PreparedTableEcTraceClaim, PreparedTableError, PreparedTablePinningRelations,
-    PreparedTableProjectiveSourceComponents, PreparedTableProjectiveSourceInteractionClaim,
-    PreparedTableProjectiveSourceProof, PreparedTableProjectiveSourceProofClaim,
+    PreparedTableEcRowRelation, PreparedTableEcTraceClaim, PreparedTableError,
+    PreparedTablePinningRelations, PreparedTableProjectiveSourceComponents,
+    PreparedTableProjectiveSourceInteractionClaim, PreparedTableProjectiveSourceProofClaim,
 };
 use crate::projective::{ProjectiveEcError, ProjectiveEcTraceClaim};
 use crate::projective_air::{
-    projective_rcb_signed_carry_log_size, prove_projective_rcb_air_proof_slice,
-    verify_projective_rcb_air_proof_slice, ProjectiveRcbAirComponents, ProjectiveRcbAirError,
-    ProjectiveRcbAirInteractionClaim, ProjectiveRcbAirProof, ProjectiveRcbAirProofClaim,
+    projective_rcb_signed_carry_log_size, ProjectiveRcbAirComponents, ProjectiveRcbAirError,
+    ProjectiveRcbAirInteractionClaim, ProjectiveRcbAirProofClaim,
     ProjectiveRcbAirProofInteractionClaim, ProjectiveRcbAirTraceClaim,
     ProjectiveRcbMulComponentRelations, PROJECTIVE_RCB_SIGNED_CARRY_BOUND,
     PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
@@ -154,19 +135,15 @@ use crate::scalar::fake_glv_selector::{
     FakeGlvSelectorAirProofClaim, FakeGlvSelectorClaim, FakeGlvSelectorError,
 };
 use crate::scalar::fake_glv_selector_lookup::{
-    prove_selector_lookup_provider_proof_slice, selector_lookup_consumer_claimed_sum,
-    verify_selector_lookup_provider_proof_slice, FakeGlvSelectorLookupRelations,
-    SelectorLookupAudit, SelectorLookupError, SelectorLookupProviderProof,
-    SelectorLookupProviderProofClaim, SelectorLookupRequests, SelectorProviderInteractionClaim,
+    selector_lookup_consumer_claimed_sum, FakeGlvSelectorLookupRelations, SelectorLookupAudit,
+    SelectorLookupError, SelectorLookupRequests, SelectorProviderInteractionClaim,
 };
 use crate::scalar::fake_glv_signed_selector_operand::{
     gen_signed_selector_operand_consumer_base_trace, gen_signed_selector_operand_interaction_trace,
     gen_signed_selector_operand_preprocessed_trace,
-    gen_signed_selector_operand_provider_base_trace,
-    prove_fake_glv_signed_selector_operand_proof_slice,
-    verify_fake_glv_signed_selector_operand_proof_slice, FakeGlvSignedSelectorOperandComponents,
-    FakeGlvSignedSelectorOperandInteractionClaim, FakeGlvSignedSelectorOperandProof,
-    FakeGlvSignedSelectorOperandProofClaim, FakeGlvSignedSelectorOperandRelation,
+    gen_signed_selector_operand_provider_base_trace, FakeGlvSignedSelectorOperandComponents,
+    FakeGlvSignedSelectorOperandInteractionClaim, FakeGlvSignedSelectorOperandProofClaim,
+    FakeGlvSignedSelectorOperandRelation,
 };
 use crate::scalar::scalar_mod_mul::claim::{
     gen_base_trace as gen_scalar_mod_mul_base_trace,
@@ -606,64 +583,6 @@ pub struct P256ProofDraft {
     pub claim: P256ProofClaim,
     pub relations: P256ProofRelations,
     pub interaction_claim: P256ProofInteractionClaim,
-}
-
-#[derive(Clone, Debug)]
-pub struct P256StarkProofSlices<H: MerkleHasherLifted> {
-    pub selector_lookup: SelectorLookupProviderProof<H>,
-    pub prepared_table_ec_rows: PreparedTableEcRowProof<H>,
-    pub prepared_table_projective_source: PreparedTableProjectiveSourceProof<H>,
-    pub fake_glv_projective_source: FakeGlvProjectiveSourceProof<H>,
-    pub fake_glv_chain_expansion: FakeGlvChainExpansionProof<H>,
-    pub fake_glv_chain_continuity: FakeGlvChainContinuityProof<H>,
-    pub fake_glv_chain_schedule: FakeGlvChainScheduleProof<H>,
-    pub fake_glv_direct_prepared_operand: FakeGlvDirectPreparedOperandProof<H>,
-    pub fake_glv_signed_selector_operand: FakeGlvSignedSelectorOperandProof<H>,
-    pub fake_glv_lsb_correction_operand: FakeGlvLsbCorrectionOperandProof<H>,
-    pub fake_glv_prepared_point_source: FakeGlvPreparedPointSourceProof<H>,
-    pub projective_rcb_air: ProjectiveRcbAirProof<H>,
-}
-
-impl<H: MerkleHasherLifted> P256StarkProofSlices<H> {
-    pub fn verify<MC>(self) -> Result<(), P256ProofError>
-    where
-        MC: MerkleChannel<H = H>,
-    {
-        let Self {
-            selector_lookup,
-            prepared_table_ec_rows,
-            prepared_table_projective_source,
-            fake_glv_projective_source,
-            fake_glv_chain_expansion,
-            fake_glv_chain_continuity,
-            fake_glv_chain_schedule,
-            fake_glv_direct_prepared_operand,
-            fake_glv_signed_selector_operand,
-            fake_glv_lsb_correction_operand,
-            fake_glv_prepared_point_source,
-            projective_rcb_air,
-        } = self;
-
-        verify_selector_lookup_provider_proof_slice::<MC>(selector_lookup)?;
-        verify_prepared_table_ec_row_proof_slice::<MC>(prepared_table_ec_rows)?;
-        verify_prepared_table_projective_source_proof_slice::<MC>(
-            prepared_table_projective_source,
-        )?;
-        verify_fake_glv_projective_source_proof_slice::<MC>(fake_glv_projective_source)?;
-        verify_fake_glv_chain_expansion_proof_slice::<MC>(fake_glv_chain_expansion)?;
-        verify_fake_glv_chain_continuity_proof_slice::<MC>(fake_glv_chain_continuity)?;
-        verify_fake_glv_chain_schedule_proof_slice::<MC>(fake_glv_chain_schedule)?;
-        verify_fake_glv_direct_prepared_operand_proof_slice::<MC>(
-            fake_glv_direct_prepared_operand,
-        )?;
-        verify_fake_glv_signed_selector_operand_proof_slice::<MC>(
-            fake_glv_signed_selector_operand,
-        )?;
-        verify_fake_glv_lsb_correction_operand_proof_slice::<MC>(fake_glv_lsb_correction_operand)?;
-        verify_fake_glv_prepared_point_source_proof_slice::<MC>(fake_glv_prepared_point_source)?;
-        verify_projective_rcb_air_proof_slice::<MC>(projective_rcb_air)?;
-        Ok(())
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -1865,172 +1784,6 @@ impl P256ProofDraft {
         })
     }
 
-    pub fn prove_current_stark_slices<MC>(
-        &self,
-    ) -> Result<P256StarkProofSlices<MC::H>, P256ProofError>
-    where
-        MC: MerkleChannel,
-        SimdBackend: BackendForChannel<MC>,
-    {
-        self.verify_current_e2e()?;
-        let source_offset = self.claim.prepared_table_ec_trace.active_row_count();
-        let selector_claim = SelectorLookupProviderProofClaim;
-        let selector_ids = selector_claim.preprocessed_column_ids();
-        let selector_config = p256_stark_slice_low_ram_config(
-            selector_claim.max_constraint_log_degree_bound(&selector_ids),
-        );
-        let prepared_table_ec_claim =
-            PreparedTableEcRowProofClaim::from_trace(&self.claim.prepared_table_ec_trace);
-        let prepared_table_ec_ids = prepared_table_ec_claim.preprocessed_column_ids();
-        let prepared_table_ec_config = p256_stark_slice_low_ram_config(
-            prepared_table_ec_claim.max_constraint_log_degree_bound(&prepared_table_ec_ids),
-        );
-        let prepared_table_source_claim =
-            PreparedTableProjectiveSourceProofClaim::from_prepared_trace(
-                &self.claim.prepared_table_ec_trace,
-            );
-        let prepared_table_source_ids = prepared_table_source_claim.preprocessed_column_ids();
-        let prepared_table_source_config = p256_stark_slice_low_ram_config(
-            prepared_table_source_claim.max_constraint_log_degree_bound(&prepared_table_source_ids),
-        );
-        let fake_glv_source_claim = FakeGlvProjectiveSourceProofClaim::from_fake_glv_trace(
-            &self.claim.fake_glv_ec_trace,
-            source_offset,
-        );
-        let fake_glv_source_ids = fake_glv_source_claim.preprocessed_column_ids();
-        let fake_glv_source_config = p256_stark_slice_low_ram_config(
-            fake_glv_source_claim.max_constraint_log_degree_bound(&fake_glv_source_ids),
-        );
-        let expansion_claim = FakeGlvChainExpansionProofClaim::from_claims(
-            &self.claim.fake_glv_chain,
-            &self.claim.fake_glv_ec_trace,
-            source_offset,
-        );
-        let expansion_ids = expansion_claim.preprocessed_column_ids();
-        let expansion_config = p256_stark_slice_low_ram_config(
-            expansion_claim.max_constraint_log_degree_bound(&expansion_ids),
-        );
-        let continuity_claim =
-            FakeGlvChainContinuityProofClaim::from_chain(&self.claim.fake_glv_chain);
-        let continuity_ids = continuity_claim.preprocessed_column_ids();
-        let continuity_config = p256_stark_slice_low_ram_config(
-            continuity_claim.max_constraint_log_degree_bound(&continuity_ids),
-        );
-        let schedule_claim = FakeGlvChainScheduleProofClaim::from_chain(&self.claim.fake_glv_chain);
-        let schedule_ids = schedule_claim.preprocessed_column_ids();
-        let schedule_config = p256_stark_slice_low_ram_config(
-            schedule_claim.max_constraint_log_degree_bound(&schedule_ids),
-        );
-        let direct_claim = FakeGlvDirectPreparedOperandProofClaim::from_claims(
-            &self.claim.fake_glv_selectors,
-            &self.claim.fake_glv_chain,
-        );
-        let direct_ids = direct_claim.preprocessed_column_ids();
-        let direct_config = p256_stark_slice_low_ram_config(
-            direct_claim.max_constraint_log_degree_bound(&direct_ids),
-        );
-        let signed_claim = FakeGlvSignedSelectorOperandProofClaim::from_claims(
-            &self.claim.fake_glv_selectors,
-            &self.claim.fake_glv_chain,
-        );
-        let signed_ids = signed_claim.preprocessed_column_ids();
-        let signed_config = p256_stark_slice_low_ram_config(
-            signed_claim.max_constraint_log_degree_bound(&signed_ids),
-        );
-        let lsb_claim = FakeGlvLsbCorrectionOperandProofClaim::from_claims(
-            &self.claim.fake_glv_selectors,
-            &self.claim.fake_glv_chain,
-        );
-        let lsb_ids = lsb_claim.preprocessed_column_ids();
-        let lsb_config =
-            p256_stark_slice_low_ram_config(lsb_claim.max_constraint_log_degree_bound(&lsb_ids));
-        let prepared_point_claim = FakeGlvPreparedPointSourceProofClaim::from_claims(
-            &self.claim.prepared_trace,
-            &self.claim.fake_glv_chain,
-        );
-        let prepared_point_ids = prepared_point_claim.preprocessed_column_ids();
-        let prepared_point_config = p256_stark_slice_low_ram_config(
-            prepared_point_claim.max_constraint_log_degree_bound(&prepared_point_ids),
-        );
-        let projective_claim =
-            ProjectiveRcbAirProofClaim::from_trace(&self.claim.projective_rcb_air_trace);
-        let projective_ids = projective_claim.preprocessed_column_ids();
-        let projective_config = p256_stark_slice_low_ram_config(
-            projective_claim.max_constraint_log_degree_bound(&projective_ids),
-        );
-
-        Ok(P256StarkProofSlices {
-            selector_lookup: prove_selector_lookup_provider_proof_slice::<MC>(
-                &self.claim.selector_requests,
-                selector_config,
-            )?,
-            prepared_table_ec_rows: prove_prepared_table_ec_row_proof_slice::<MC>(
-                &self.claim.prepared_table_ec_trace,
-                prepared_table_ec_config,
-            )?,
-            prepared_table_projective_source: prove_prepared_table_projective_source_proof_slice::<
-                MC,
-            >(
-                &self.claim.prepared_table_ec_trace,
-                &self.claim.projective_ec_trace,
-                prepared_table_source_config,
-            )?,
-            fake_glv_projective_source: prove_fake_glv_projective_source_proof_slice::<MC>(
-                &self.claim.fake_glv_ec_trace,
-                &self.claim.projective_ec_trace,
-                source_offset,
-                fake_glv_source_config,
-            )?,
-            fake_glv_chain_expansion: prove_fake_glv_chain_expansion_proof_slice::<MC>(
-                &self.claim.fake_glv_chain,
-                &self.claim.fake_glv_ec_trace,
-                source_offset,
-                expansion_config,
-            )?,
-            fake_glv_chain_continuity: prove_fake_glv_chain_continuity_proof_slice::<MC>(
-                &self.claim.fake_glv_chain,
-                continuity_config,
-            )?,
-            fake_glv_chain_schedule: prove_fake_glv_chain_schedule_proof_slice::<MC>(
-                &self.claim.fake_glv_chain,
-                schedule_config,
-            )?,
-            fake_glv_direct_prepared_operand: prove_fake_glv_direct_prepared_operand_proof_slice::<
-                MC,
-            >(
-                &self.claim.prepared_table,
-                &self.claim.fake_glv_selectors,
-                &self.claim.fake_glv_chain,
-                direct_config,
-            )?,
-            fake_glv_signed_selector_operand: prove_fake_glv_signed_selector_operand_proof_slice::<
-                MC,
-            >(
-                &self.claim.prepared_table,
-                &self.claim.fake_glv_selectors,
-                &self.claim.fake_glv_chain,
-                signed_config,
-            )?,
-            fake_glv_lsb_correction_operand: prove_fake_glv_lsb_correction_operand_proof_slice::<MC>(
-                &self.claim.cert_inputs,
-                &self.claim.fake_glv_scalars,
-                &self.claim.prepared_table,
-                &self.claim.fake_glv_selectors,
-                &self.claim.fake_glv_chain,
-                lsb_config,
-            )?,
-            fake_glv_prepared_point_source: prove_fake_glv_prepared_point_source_proof_slice::<MC>(
-                &self.claim.prepared_trace,
-                &self.claim.fake_glv_chain,
-                prepared_point_config,
-            )?,
-            projective_rcb_air: prove_projective_rcb_air_proof_slice::<MC>(
-                &self.claim.projective_rcb_air_trace,
-                projective_config,
-            )?,
-        })
-    }
-
     fn gen_current_air_preprocessed_trace(
         &self,
         claim: &P256CurrentAirProofClaim,
@@ -3218,21 +2971,16 @@ mod tests {
         FakeGlvDirectPreparedOperandProofClaim,
     };
     use crate::fake_glv_ec_source::{
-        prove_fake_glv_projective_source_proof_slice,
-        verify_fake_glv_projective_source_proof_slice, FakeGlvProjectiveSourceProofClaim,
+        prove_fake_glv_projective_source_proof_slice, FakeGlvProjectiveSourceProofClaim,
     };
     use crate::fake_glv_lsb_correction_operand::{
         prove_fake_glv_lsb_correction_operand_proof_slice,
         verify_fake_glv_lsb_correction_operand_proof_slice, FakeGlvLsbCorrectionOperandProofClaim,
     };
     use crate::fake_glv_prepared_point_source::{
-        prove_fake_glv_prepared_point_source_proof_slice,
-        verify_fake_glv_prepared_point_source_proof_slice, FakeGlvPreparedPointSourceProofClaim,
+        prove_fake_glv_prepared_point_source_proof_slice, FakeGlvPreparedPointSourceProofClaim,
     };
-    use crate::fake_glv_selector_lookup::{
-        prove_selector_lookup_provider_proof_slice, verify_selector_lookup_provider_proof_slice,
-        SelectorLookupProviderProofClaim,
-    };
+    use crate::fake_glv_selector_lookup::SelectorLookupProviderProofClaim;
     use crate::fake_glv_signed_selector_operand::{
         prove_fake_glv_signed_selector_operand_proof_slice,
         verify_fake_glv_signed_selector_operand_proof_slice,
@@ -3243,11 +2991,8 @@ mod tests {
     use crate::limbs::P256M31BigInt;
     use crate::fake_glv_chain::FakeGlvChainCert;
     use crate::prepared_table::{
-        prove_prepared_table_ec_row_proof_slice,
-        prove_prepared_table_projective_source_proof_slice,
-        verify_prepared_table_ec_row_proof_slice,
-        verify_prepared_table_projective_source_proof_slice, PreparedAffinePoint,
-        PreparedTableCert, PreparedTableEcRowProofClaim, PreparedTableProjectiveSourceProofClaim,
+        PreparedAffinePoint, PreparedTableCert, PreparedTableEcRowProofClaim,
+        PreparedTableProjectiveSourceProofClaim,
     };
     use crate::projective_air::{
         PROJECTIVE_RCB_FOLDED_CONTRIBUTION_ROWS, PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERMS,
@@ -4293,265 +4038,6 @@ mod tests {
             proof.claim.final_check.rows[0].h1,
             PreparedAffinePoint::infinity()
         );
-    }
-
-    #[test]
-    fn current_p256_proof_pipeline_proves_selector_lookup_provider_slice() {
-        let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
-            valid_real_input_with_small_u_scalars(7, 11),
-        ])
-        .expect("current pipeline builds");
-        proof.verify_current_e2e().expect("current e2e verifies");
-
-        let selector_proof = prove_selector_lookup_provider_proof_slice::<Blake2sMerkleChannel>(
-            &proof.claim.selector_requests,
-            selector_lookup_provider_low_ram_config(),
-        )
-        .expect("selector lookup provider slice proves");
-
-        verify_selector_lookup_provider_proof_slice::<Blake2sMerkleChannel>(selector_proof)
-            .expect("selector lookup provider slice verifies");
-    }
-
-    #[test]
-    fn current_p256_proof_pipeline_proves_prepared_table_ec_row_slice() {
-        let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
-            valid_real_input_with_small_u_scalars(7, 11),
-        ])
-        .expect("current pipeline builds");
-        proof.verify_current_e2e().expect("current e2e verifies");
-
-        let prepared_proof = prove_prepared_table_ec_row_proof_slice::<Blake2sMerkleChannel>(
-            &proof.claim.prepared_table_ec_trace,
-            prepared_table_ec_row_low_ram_config(&proof.claim.prepared_table_ec_trace),
-        )
-        .expect("prepared-table EC row provider slice proves");
-
-        verify_prepared_table_ec_row_proof_slice::<Blake2sMerkleChannel>(prepared_proof)
-            .expect("prepared-table EC row provider slice verifies");
-    }
-
-    #[test]
-    fn current_p256_proof_pipeline_proves_prepared_table_projective_source_slice() {
-        let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
-            valid_real_input_with_small_u_scalars(7, 11),
-        ])
-        .expect("current pipeline builds");
-        proof.verify_current_e2e().expect("current e2e verifies");
-
-        let source_proof =
-            prove_prepared_table_projective_source_proof_slice::<Blake2sMerkleChannel>(
-                &proof.claim.prepared_table_ec_trace,
-                &proof.claim.projective_ec_trace,
-                prepared_table_projective_source_low_ram_config(
-                    &proof.claim.prepared_table_ec_trace,
-                ),
-            )
-            .expect("prepared-table/projective source slice proves");
-
-        verify_prepared_table_projective_source_proof_slice::<Blake2sMerkleChannel>(source_proof)
-            .expect("prepared-table/projective source slice verifies");
-    }
-
-    #[test]
-    fn current_p256_proof_pipeline_proves_fake_glv_projective_source_slice() {
-        let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
-            valid_real_input_with_small_u_scalars(7, 11),
-        ])
-        .expect("current pipeline builds");
-        proof.verify_current_e2e().expect("current e2e verifies");
-
-        let source_offset = proof.claim.prepared_table_ec_trace.active_row_count();
-        let source_proof = prove_fake_glv_projective_source_proof_slice::<Blake2sMerkleChannel>(
-            &proof.claim.fake_glv_ec_trace,
-            &proof.claim.projective_ec_trace,
-            source_offset,
-            fake_glv_projective_source_low_ram_config(
-                &proof.claim.fake_glv_ec_trace,
-                source_offset,
-            ),
-        )
-        .expect("fake-GLV/projective source slice proves");
-
-        verify_fake_glv_projective_source_proof_slice::<Blake2sMerkleChannel>(source_proof)
-            .expect("fake-GLV/projective source slice verifies");
-    }
-
-    #[test]
-    fn current_p256_proof_pipeline_proves_fake_glv_chain_expansion_slice() {
-        let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
-            valid_real_input_with_small_u_scalars(7, 11),
-        ])
-        .expect("current pipeline builds");
-        proof.verify_current_e2e().expect("current e2e verifies");
-
-        let source_offset = proof.claim.prepared_table_ec_trace.active_row_count();
-        let expansion_proof = prove_fake_glv_chain_expansion_proof_slice::<Blake2sMerkleChannel>(
-            &proof.claim.fake_glv_chain,
-            &proof.claim.fake_glv_ec_trace,
-            source_offset,
-            fake_glv_chain_expansion_low_ram_config(
-                &proof.claim.fake_glv_chain,
-                &proof.claim.fake_glv_ec_trace,
-                source_offset,
-            ),
-        )
-        .expect("fake-GLV chain expansion slice proves");
-
-        verify_fake_glv_chain_expansion_proof_slice::<Blake2sMerkleChannel>(expansion_proof)
-            .expect("fake-GLV chain expansion slice verifies");
-    }
-
-    #[test]
-    fn current_p256_proof_pipeline_proves_fake_glv_chain_continuity_slice() {
-        let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
-            valid_real_input_with_small_u_scalars(7, 11),
-        ])
-        .expect("current pipeline builds");
-        proof.verify_current_e2e().expect("current e2e verifies");
-
-        let continuity_proof = prove_fake_glv_chain_continuity_proof_slice::<Blake2sMerkleChannel>(
-            &proof.claim.fake_glv_chain,
-            fake_glv_chain_continuity_low_ram_config(&proof.claim.fake_glv_chain),
-        )
-        .expect("fake-GLV chain continuity slice proves");
-
-        verify_fake_glv_chain_continuity_proof_slice::<Blake2sMerkleChannel>(continuity_proof)
-            .expect("fake-GLV chain continuity slice verifies");
-    }
-
-    #[test]
-    fn current_p256_proof_pipeline_proves_fake_glv_chain_schedule_slice() {
-        let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
-            valid_real_input_with_small_u_scalars(7, 11),
-        ])
-        .expect("current pipeline builds");
-        proof.verify_current_e2e().expect("current e2e verifies");
-
-        let schedule_proof = prove_fake_glv_chain_schedule_proof_slice::<Blake2sMerkleChannel>(
-            &proof.claim.fake_glv_chain,
-            fake_glv_chain_schedule_low_ram_config(&proof.claim.fake_glv_chain),
-        )
-        .expect("fake-GLV chain schedule slice proves");
-
-        verify_fake_glv_chain_schedule_proof_slice::<Blake2sMerkleChannel>(schedule_proof)
-            .expect("fake-GLV chain schedule slice verifies");
-    }
-
-    #[test]
-    fn current_p256_proof_pipeline_proves_fake_glv_direct_prepared_operand_slice() {
-        let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
-            valid_real_input_with_small_u_scalars(7, 11),
-        ])
-        .expect("current pipeline builds");
-        proof.verify_current_e2e().expect("current e2e verifies");
-
-        let operand_proof =
-            prove_fake_glv_direct_prepared_operand_proof_slice::<Blake2sMerkleChannel>(
-                &proof.claim.prepared_table,
-                &proof.claim.fake_glv_selectors,
-                &proof.claim.fake_glv_chain,
-                fake_glv_direct_prepared_operand_low_ram_config(
-                    &proof.claim.fake_glv_selectors,
-                    &proof.claim.fake_glv_chain,
-                ),
-            )
-            .expect("fake-GLV direct prepared operand slice proves");
-
-        verify_fake_glv_direct_prepared_operand_proof_slice::<Blake2sMerkleChannel>(operand_proof)
-            .expect("fake-GLV direct prepared operand slice verifies");
-    }
-
-    #[test]
-    fn current_p256_proof_pipeline_proves_fake_glv_signed_selector_operand_slice() {
-        let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
-            valid_real_input_with_small_u_scalars(7, 11),
-        ])
-        .expect("current pipeline builds");
-        proof.verify_current_e2e().expect("current e2e verifies");
-
-        let operand_proof =
-            prove_fake_glv_signed_selector_operand_proof_slice::<Blake2sMerkleChannel>(
-                &proof.claim.prepared_table,
-                &proof.claim.fake_glv_selectors,
-                &proof.claim.fake_glv_chain,
-                fake_glv_signed_selector_operand_low_ram_config(
-                    &proof.claim.fake_glv_selectors,
-                    &proof.claim.fake_glv_chain,
-                ),
-            )
-            .expect("fake-GLV signed selector operand slice proves");
-
-        verify_fake_glv_signed_selector_operand_proof_slice::<Blake2sMerkleChannel>(operand_proof)
-            .expect("fake-GLV signed selector operand slice verifies");
-    }
-
-    #[test]
-    fn current_p256_proof_pipeline_proves_fake_glv_lsb_correction_operand_slice() {
-        let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
-            valid_real_input_with_small_u_scalars(7, 11),
-        ])
-        .expect("current pipeline builds");
-        proof.verify_current_e2e().expect("current e2e verifies");
-
-        let operand_proof =
-            prove_fake_glv_lsb_correction_operand_proof_slice::<Blake2sMerkleChannel>(
-                &proof.claim.cert_inputs,
-                &proof.claim.fake_glv_scalars,
-                &proof.claim.prepared_table,
-                &proof.claim.fake_glv_selectors,
-                &proof.claim.fake_glv_chain,
-                fake_glv_lsb_correction_operand_low_ram_config(
-                    &proof.claim.fake_glv_selectors,
-                    &proof.claim.fake_glv_chain,
-                ),
-            )
-            .expect("fake-GLV LSB correction operand slice proves");
-
-        verify_fake_glv_lsb_correction_operand_proof_slice::<Blake2sMerkleChannel>(operand_proof)
-            .expect("fake-GLV LSB correction operand slice verifies");
-    }
-
-    #[test]
-    fn current_p256_proof_pipeline_proves_fake_glv_prepared_point_source_slice() {
-        let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
-            valid_real_input_with_small_u_scalars(7, 11),
-        ])
-        .expect("current pipeline builds");
-        proof.verify_current_e2e().expect("current e2e verifies");
-
-        let prepared_point_proof =
-            prove_fake_glv_prepared_point_source_proof_slice::<Blake2sMerkleChannel>(
-                &proof.claim.prepared_trace,
-                &proof.claim.fake_glv_chain,
-                fake_glv_prepared_point_source_low_ram_config(
-                    &proof.claim.prepared_trace,
-                    &proof.claim.fake_glv_chain,
-                ),
-            )
-            .expect("fake-GLV prepared-point source slice proves");
-
-        verify_fake_glv_prepared_point_source_proof_slice::<Blake2sMerkleChannel>(
-            prepared_point_proof,
-        )
-        .expect("fake-GLV prepared-point source slice verifies");
-    }
-
-    #[test]
-    fn current_p256_proof_pipeline_proves_and_verifies_stark_slice_bundle() {
-        let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
-            valid_real_input_with_small_u_scalars(0, 11),
-        ])
-        .expect("zero branch pipeline builds");
-        proof.verify_current_e2e().expect("zero branch verifies");
-
-        let stark_slices = proof
-            .prove_current_stark_slices::<Blake2sMerkleChannel>()
-            .expect("P-256 STARK slice bundle proves");
-
-        stark_slices
-            .verify::<Blake2sMerkleChannel>()
-            .expect("P-256 STARK slice bundle verifies");
     }
 
     #[test]
