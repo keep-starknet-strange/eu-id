@@ -1325,10 +1325,10 @@ fn projective_rcb_folded_digit_eval_allocates_expected_width() {
         SecureField::zero(),
     );
 
-    assert_eq!(PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS, 30);
+    assert_eq!(PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS, 7);
     assert_eq!(
         PROJECTIVE_RCB_FOLDED_DIGIT_TRACE_COLUMNS,
-        1 + 2 + 30 * 3 + 3
+        1 + 2 + PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS * 3 + 3
     );
     assert_eq!(
         component.trace_log_degree_bounds()[1].len(),
@@ -1342,7 +1342,7 @@ fn projective_rcb_folded_digit_eval_allocates_expected_width() {
     assert!(allocator.preprocessed_columns().contains(
         &ProjectiveRcbFoldedDigitScheduleColumnIds::group_index(
             PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC,
-            29
+            PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS - 1
         )
     ));
     assert_eq!(PROJECTIVE_RCB_FOLDED_DIGIT_RELATION_ARITY, 4);
