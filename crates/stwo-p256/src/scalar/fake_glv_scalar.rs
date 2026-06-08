@@ -110,7 +110,9 @@ const FAKE_GLV_SCALAR_ROW_COLUMNS: usize = 4
     + FAKE_GLV_SMALL_LIMBS
     + 1
     + N_LIMBS
-    + (N_LIMBS - 1);
+    + (N_LIMBS - 1)
+    // s2_abs_inv: witnessed inverse for the Garaga `s2_abs != 0` check.
+    + 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FakeGlvScalarAirProofClaim {
@@ -433,6 +435,10 @@ struct FakeGlvScalarAirRow<F> {
     /// because `n − s1 ∈ [1, n)` fits in `N_LIMBS` limbs, so we only
     /// witness `N_LIMBS − 1` cells. When `bit = 1` these are all zero.
     selected_borrow: [F; N_LIMBS - 1],
+    /// Witnessed inverse of the `s2_abs` limb sum: proves `s2_abs != 0` on the
+    /// nonzero branch (Garaga `assert(_s2_abs != 0)`, ec_ops.cairo:254). Zero on
+    /// the zero / inactive branch.
+    s2_abs_inv: F,
 }
 
 impl<F: Clone> FakeGlvScalarAirRow<F> {
@@ -450,6 +456,7 @@ impl<F: Clone> FakeGlvScalarAirRow<F> {
         values.push(self.active_bit.clone());
         values.extend(self.selected_s1.iter().cloned());
         values.extend(self.selected_borrow.iter().cloned());
+        values.push(self.s2_abs_inv.clone());
         values
     }
 }
@@ -469,6 +476,7 @@ impl<F> FakeGlvScalarAirRow<F> {
             active_bit: eval.next_trace_mask(),
             selected_s1: core::array::from_fn(|_| eval.next_trace_mask()),
             selected_borrow: core::array::from_fn(|_| eval.next_trace_mask()),
+            s2_abs_inv: eval.next_trace_mask(),
         }
     }
 }
@@ -1037,6 +1045,26 @@ fn constrain_fake_glv_scalar_general<E: EvalAtRow>(
         );
     }
 
+    // (1b) Garaga `assert(_s2_abs != 0)` (src/src/ec/ec_ops.cairo:254): on the
+    //      nonzero branch the lattice's second component must be nonzero. If a
+    //      prover sets s1 = s2_abs = 0 the certificate degenerates —
+    //      `[s1]P + [s2_abs]·H_signed = O` holds for an *arbitrary* hinted H,
+    //      forging the scalar multiplication. Standard inverse gadget: the
+    //      s2_abs limbs are 13-bit (range-checked via the ScalarModMul role-B
+    //      link, so their sum cannot wrap M31), hence
+    //      `sum(s2_abs) * s2_abs_inv = cert_active` forces
+    //      `sum(s2_abs) != 0  <=>  s2_abs != 0` exactly when cert_active = 1,
+    //      and is vacuous (sum = 0) on the zero / inactive branches.
+    let s2_abs_sum = row
+        .s2_abs
+        .iter()
+        .cloned()
+        .fold(zero.clone(), |acc, limb| acc + limb);
+    eval.add_constraint(s2_abs_sum * row.s2_abs_inv.clone() - row.cert_active.clone());
+    //      Pin the inverse witness on the zero branch (kept determined like the
+    //      other zero-branch cells).
+    eval.add_constraint(cert_zero_active.clone() * row.s2_abs_inv.clone());
+
     // (2) Bind the witnessed `scalar` to the cert input. The trivial helper
     //     additionally forced the upper `N_LIMBS − FAKE_GLV_SMALL_LIMBS` limbs
     //     to zero — that constraint is gone now, because we want to admit
@@ -1206,6 +1234,8 @@ fn write_fake_glv_scalar_row(
         columns[*offset][row_index] = value;
         *offset += 1;
     }
+    columns[*offset][row_index] = fake_glv_small_scalar_nonzero_inverse(row);
+    *offset += 1;
 }
 
 /// Compute the trace-row witnesses derived from a fake-GLV hint row:
@@ -1267,6 +1297,41 @@ fn derive_selected_s1_witness(
         borrow_in = i64::from(borrow_out);
     }
     (active_bit, selected_s1, selected_borrow)
+}
+
+/// Witness for the Garaga `s2_abs != 0` check (`assert(_s2_abs != 0)`,
+/// `src/src/ec/ec_ops.cairo:254`). On the nonzero branch (`cert_active == 1`)
+/// returns the M31 inverse of the `s2_abs` limb sum; the limbs are 13-bit
+/// (range-checked through the `ScalarModMul` role-`B` link), so the sum never
+/// wraps M31 and is nonzero iff `s2_abs` is. Zero on the zero / inactive branch.
+fn fake_glv_small_scalar_nonzero_inverse(row: &FakeGlvScalarHintRow) -> M31 {
+    if row.cert_active.0 != 1 {
+        return M31::from_u32_unchecked(0);
+    }
+    let sum = row
+        .hint
+        .s2_abs
+        .limbs
+        .iter()
+        .fold(0u64, |acc, limb| acc + u64::from(limb.0));
+    assert!(sum > 0, "nonzero fake-GLV s2_abs must have a nonzero limb sum");
+    m31_inverse(M31::from_u32_unchecked(sum as u32))
+}
+
+/// `value^(p - 2) mod p` — the M31 multiplicative inverse via Fermat.
+fn m31_inverse(value: M31) -> M31 {
+    const MODULUS: u64 = (1u64 << 31) - 1;
+    let mut base = u64::from(value.0);
+    let mut exp = MODULUS - 2;
+    let mut acc = 1u64;
+    while exp != 0 {
+        if exp & 1 == 1 {
+            acc = (acc * base) % MODULUS;
+        }
+        base = (base * base) % MODULUS;
+        exp >>= 1;
+    }
+    M31::from_u32_unchecked(acc as u32)
 }
 
 fn cert_packed_values_from_base(
