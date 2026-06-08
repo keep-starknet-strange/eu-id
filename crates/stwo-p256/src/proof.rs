@@ -2960,7 +2960,6 @@ mod tests {
     use crate::fake_glv_ec_source::FakeGlvProjectiveSourceProofClaim;
     use crate::fake_glv_lsb_correction_operand::FakeGlvLsbCorrectionOperandProofClaim;
     use crate::fake_glv_prepared_point_source::FakeGlvPreparedPointSourceProofClaim;
-    use crate::fake_glv_selector_lookup::SelectorLookupProviderProofClaim;
     use crate::fake_glv_signed_selector_operand::FakeGlvSignedSelectorOperandProofClaim;
     use crate::field_ops::mul_mod_witness;
     use crate::fp_solinas_air::FP_SOLINAS_REDUCTION_DIGITS;
