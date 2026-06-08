@@ -1,5 +1,6 @@
 #![feature(portable_simd)]
 
+pub mod components;
 pub mod constants;
 pub mod curve;
 pub mod debug;
