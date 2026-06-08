@@ -26,8 +26,8 @@ use crate::limbs::{P256BigInt, P256M31BigInt};
 use crate::scalar::scalar_mod_mul::columns::{m31_column_eval, padded_log_size, M31ColumnEval};
 use crate::types::U256;
 
-use super::prepared_table::{CertBaseRelation, CERT_BASE_RELATION_ARITY};
-use super::setup_air::{
+use crate::scalar::prepared_table::{CertBaseRelation, CERT_BASE_RELATION_ARITY};
+use crate::scalar::setup_air::{
     ScalarSetupClaim, ScalarSetupOutput, ScalarSetupOutputRelation, SCALAR_SETUP_OUTPUT_ARITY,
 };
 

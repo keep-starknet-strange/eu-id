@@ -1,7 +1,9 @@
 pub mod canonical_lt {
     pub use crate::gadgets::canonical_lt::*;
 }
-pub mod cert_bind;
+pub mod cert_bind {
+    pub use crate::components::scalar_setup::cert_bind::*;
+}
 pub mod fake_glv_chain;
 pub mod fake_glv_chain_continuity;
 pub mod fake_glv_decompose;
@@ -20,5 +22,9 @@ pub mod prepared_table;
 pub mod scalar_mod_mul {
     pub use crate::components::scalar_mod_mul::*;
 }
-pub mod setup_air;
-pub mod setup_witness;
+pub mod setup_air {
+    pub use crate::components::scalar_setup::air::*;
+}
+pub mod setup_witness {
+    pub use crate::components::scalar_setup::witness::*;
+}

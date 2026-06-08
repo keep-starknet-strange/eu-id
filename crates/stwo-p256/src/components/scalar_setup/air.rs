@@ -44,8 +44,8 @@ use crate::scalar::scalar_mod_mul::{
 };
 use crate::types::U256;
 
-use super::canonical_lt::{add_canonical_lt_fixed_bound, CanonicalLtRelations};
-use super::setup_witness::ScalarSetupWitness;
+use crate::scalar::canonical_lt::{add_canonical_lt_fixed_bound, CanonicalLtRelations};
+use crate::scalar::setup_witness::ScalarSetupWitness;
 
 pub const DIGEST_TOP_LIMB_BITS: u32 = 9;
 pub const DIGEST_REDUCTION_CARRY_BOUND: i64 = 1;
