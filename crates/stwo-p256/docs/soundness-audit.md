@@ -12,6 +12,18 @@ parallel auditors, cross-checked against the implementation spec
 confirmed C1/C2 first-hand and **elevated the EC-ladder gap to a third confirmed live forgery
 (C5)** — see the "Pass 2" section below.
 
+**POST-REORG PATH NOTE (2026-06-08):** after this audit, `crates/stwo-p256` was reorganized
+(behavior-identical — every finding below is unchanged) into `field/ curve/ gadgets/ components/
+proof/`. The `file:line` references below are PRE-reorg. New locations: `fp_solinas_air.rs`→
+`field/solinas/air.rs`; `projective_air.rs`→`components/projective_rcb_mul/{air,trace,interaction,
+relation}.rs`; `scalar_mod_mul/*`→`components/scalar_mod_mul/*`; `fake_glv_scalar.rs`→
+`components/fake_glv/scalar/air.rs`; `fake_glv_ec_source.rs`→`components/fake_glv/ec_source/air.rs`;
+`fake_glv_selector*.rs`→`components/fake_glv/selector/*`; `fake_glv_chain*.rs`→
+`components/fake_glv/chain/*`; `prepared_table.rs`→`components/fake_glv/prepared_table/*`;
+`final_add_air.rs`→`components/final_add/*`; `final_check_air.rs`→`components/final_check/*`;
+`public_key_curve_air.rs`→`components/public_key_curve/*`; `proof.rs`→`proof/{mod,balances,tests}.rs`;
+`ecdsa.rs`→`reference/ecdsa.rs`. Line numbers also shifted (deletions + splits).
+
 ---
 
 ## Verdict
