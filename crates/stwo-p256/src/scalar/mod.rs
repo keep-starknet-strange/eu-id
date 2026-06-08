@@ -4,13 +4,21 @@ pub mod canonical_lt {
 pub mod cert_bind {
     pub use crate::components::scalar_setup::cert_bind::*;
 }
-pub mod fake_glv_chain;
-pub mod fake_glv_chain_continuity;
+pub mod fake_glv_chain {
+    pub use crate::components::fake_glv::chain::native::*;
+}
+pub mod fake_glv_chain_continuity {
+    pub use crate::components::fake_glv::chain::continuity::*;
+}
 pub mod fake_glv_decompose {
     pub use crate::components::fake_glv::scalar::decompose::*;
 }
-pub mod fake_glv_chain_expansion;
-pub mod fake_glv_chain_schedule;
+pub mod fake_glv_chain_expansion {
+    pub use crate::components::fake_glv::chain::expansion::*;
+}
+pub mod fake_glv_chain_schedule {
+    pub use crate::components::fake_glv::chain::schedule::*;
+}
 pub mod fake_glv_direct_prepared_operand {
     pub use crate::components::fake_glv::selector::direct_operand::*;
 }

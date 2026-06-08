@@ -7,10 +7,10 @@ use crate::prepared_point::{PreparedPointInstance, TABLE16_INDEX};
 use crate::prepared_table::{PreparedAffinePoint, PreparedTableClaim};
 use crate::types::{AffinePoint, U256};
 
-use super::cert_bind::{CertScalarInputClaim, CertScalarInputRow};
-use super::fake_glv_scalar::{FakeGlvScalarHintClaim, FakeGlvScalarHintRow};
-use super::fake_glv_selector::{FakeGlvSelectorClaim, FakeGlvSelectorRow};
-use super::fake_glv_selector_lookup::Selector16DecodeEntry;
+use crate::scalar::cert_bind::{CertScalarInputClaim, CertScalarInputRow};
+use crate::scalar::fake_glv_scalar::{FakeGlvScalarHintClaim, FakeGlvScalarHintRow};
+use crate::scalar::fake_glv_selector::{FakeGlvSelectorClaim, FakeGlvSelectorRow};
+use crate::scalar::fake_glv_selector_lookup::Selector16DecodeEntry;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FakeGlvChainClaim {
