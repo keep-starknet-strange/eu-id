@@ -4,7 +4,9 @@ pub mod components;
 pub mod constants;
 pub mod curve;
 pub mod debug;
-pub mod ecdsa;
+pub mod ecdsa {
+    pub use crate::reference::ecdsa::*;
+}
 pub mod field;
 pub mod gadgets;
 pub mod projective_air {
@@ -21,6 +23,7 @@ pub mod public_key_curve_air {
     pub use crate::components::public_key_curve::air::*;
 }
 pub mod range_checks;
+pub mod reference;
 pub mod scalar;
 pub mod types;
 
