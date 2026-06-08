@@ -25,7 +25,6 @@ pub type QnProductChunkComponent = FrameworkComponent<QnProductChunkEval>;
 pub type ProductDigitAccumulatorComponent = FrameworkComponent<ProductDigitAccumulatorEval>;
 pub type ScalarReductionDigitComponent = FrameworkComponent<ScalarReductionDigitEval>;
 
-const SCALAR_MOD_MUL_ENABLE_AB_UNUSED_CONSTRAINTS: bool = false;
 const SCALAR_MOD_MUL_ENABLE_AB_TOP_DIGIT_CONSTRAINT: bool = false;
 const SCALAR_MOD_MUL_ENABLE_AB_TERM_PRODUCT_CONSTRAINTS: bool = true;
 const SCALAR_MOD_MUL_ENABLE_AB_DECOMPOSITION_CONSTRAINT: bool = true;
@@ -161,26 +160,6 @@ impl FrameworkEval for AbProductChunkEval {
                 );
             }
             product_sum += product.clone();
-            if SCALAR_MOD_MUL_ENABLE_AB_UNUSED_CONSTRAINTS {
-                constrain_unused(
-                    &mut eval,
-                    meta.active.clone(),
-                    term_active.clone(),
-                    lhs.clone(),
-                );
-                constrain_unused(
-                    &mut eval,
-                    meta.active.clone(),
-                    term_active.clone(),
-                    rhs.clone(),
-                );
-                constrain_unused(
-                    &mut eval,
-                    meta.active.clone(),
-                    term_active.clone(),
-                    product.clone(),
-                );
-            }
             if SCALAR_MOD_MUL_ENABLE_AB_SCALAR_LIMB_RELATIONS {
                 if SCALAR_MOD_MUL_ENABLE_AB_A_LIMB_RELATIONS {
                     consume_scalar_limb_dynamic(
