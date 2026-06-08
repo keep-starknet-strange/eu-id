@@ -1581,7 +1581,7 @@ fn projective_rcb_air_range_lookup_consumers_balance_with_providers() {
         claim.mul_row_count()
             * (3 * N_LIMBS
                 + 2 * FP_SOLINAS_REDUCTION_DIGITS
-                + 2 * PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS
+                + PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS * PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS
                 + FP_SOLINAS_REDUCTION_DIGITS)
     );
     let range13 = RangeCheckClaim::new(RANGE13_BITS);
