@@ -168,16 +168,18 @@ impl FinalAddClaim {
 
         // ----- Mul rows (always 4) -----
         //
-        // MUL_X1_SQUARED uses `r1.x · r1.x` even on non-doubling branches;
-        // the AIR doesn't constrain the result anywhere outside the doubling
-        // slope-numer reduction, so this is sound. On infinity rows `r1.x = 0`
-        // so the mul is trivial.
-        let x1_sq_u = if r1_inf { zero.clone() } else { fp_mul(&r1.x, &r1.x, &modulus) };
+        // MUL_X1_SQUARED must use the *column* x1 value (`r1_values.x`), which is
+        // 0 on an infinity row — NOT the raw hint `r1.x`. The AIR binds this mul's
+        // operands to the r1.x column, so on an inf row the operands must be 0
+        // (the mul is idle: 0·0 = 0). Using the raw `r1.x` made the witnessed mul
+        // disagree with the r1.x column and broke the AIR constraint on inf rows.
+        let x1_col_u = if r1_inf { zero.clone() } else { r1.x.clone() };
+        let x1_sq_u = fp_mul(&x1_col_u, &x1_col_u, &modulus);
         let mut muls = Vec::with_capacity(FINAL_ADD_MUL_COUNT);
         let p1_u = push_mul(&mut muls, MUL_LAMBDA_DX as usize, &lambda_u, &dx_u)?;
         let lamsq_u = push_mul(&mut muls, MUL_LAMBDA_SQUARED as usize, &lambda_u, &lambda_u)?;
         let dx_inv_check = push_mul(&mut muls, MUL_DX_INV as usize, &dx_u, &dx_inv_u)?;
-        let x1_sq_check = push_mul(&mut muls, MUL_X1_SQUARED as usize, &r1.x, &r1.x)?;
+        let x1_sq_check = push_mul(&mut muls, MUL_X1_SQUARED as usize, &x1_col_u, &x1_col_u)?;
         debug_assert!(
             matches!(branch, FinalAddBranch::R1Only | FinalAddBranch::R2Only)
                 || dx_inv_check == U256::from_le_u64s(&[1, 0, 0, 0]),
