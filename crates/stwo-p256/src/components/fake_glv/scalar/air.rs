@@ -25,15 +25,15 @@ use stwo_p256_utils::scalar_arithmetic::{words_to_limbs, P256_ORDER};
 use crate::limbs::{P256BigInt, P256M31BigInt};
 use crate::scalar::scalar_mod_mul::columns::{m31_column_eval, padded_log_size, M31ColumnEval};
 
-use super::cert_bind::{
+use crate::scalar::cert_bind::{
     CertScalarInputClaim, CertScalarInputRelation, CertScalarInputRow,
     CERT_SCALAR_INPUT_RELATION_ARITY,
 };
-use super::scalar_mod_mul::relation::ScalarLimbRelation;
+use crate::scalar::scalar_mod_mul::relation::ScalarLimbRelation;
 // Role constants for the `ScalarLimbRelation` tuples emitted by the
 // `FakeGlvScalarAirEval` provider (see `add_scalar_mod_mul_limb_links` below).
 // The matching consumer rows are built in `proof.rs::fake_glv_scalar_mod_mul_rows`.
-use super::scalar_mod_mul::{ROLE_A, ROLE_B, ROLE_QUOTIENT, ROLE_RESULT};
+use crate::scalar::scalar_mod_mul::{ROLE_A, ROLE_B, ROLE_QUOTIENT, ROLE_RESULT};
 
 /// Mul-ID namespace base for fake-GLV scalar-mod-mul rows. Disjoint from the
 /// scalar-setup mod-mul IDs (which live in `[0, 2 · num_signatures)`).
