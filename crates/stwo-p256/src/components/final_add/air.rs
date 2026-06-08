@@ -27,11 +27,11 @@ use super::*;
 // Mul-provider evaluator (clone of PublicKeyMulEval shape)
 // ---------------------------------------------------------------------------
 
-pub(crate) type FinalAddMulComponent = FrameworkComponent<FinalAddMulEval>;
-pub(crate) type FinalAddCheckComponent = FrameworkComponent<FinalAddCheckEval>;
+pub type FinalAddMulComponent = FrameworkComponent<FinalAddMulEval>;
+pub type FinalAddCheckComponent = FrameworkComponent<FinalAddCheckEval>;
 
 #[derive(Clone)]
-pub(crate) struct FinalAddMulEval {
+pub struct FinalAddMulEval {
     pub(crate) log_size: u32,
     pub(crate) mul_relations: ProjectiveRcbMulComponentRelations,
     pub(crate) result_relation: FinalAddMulResultRelation,
@@ -91,7 +91,7 @@ fn provide_mul_limbs<E: EvalAtRow>(
     }
 }
 
-pub(crate) const FINAL_ADD_MUL_PROVIDER_FRACTIONS: usize = 3 * N_LIMBS;
+pub const FINAL_ADD_MUL_PROVIDER_FRACTIONS: usize = 3 * N_LIMBS;
 
 // ---------------------------------------------------------------------------
 // Check evaluator
@@ -178,7 +178,7 @@ impl<E: EvalAtRow> FinalAddCheckColumns<E> {
 }
 
 /// Number of base-trace columns of the check component.
-pub(crate) const CHECK_TRACE_COLUMNS: usize = 1 // active
+pub const CHECK_TRACE_COLUMNS: usize = 1 // active
     + 1 // sig_id
     + 2 * (2 * N_LIMBS + 1) // r1, r2 points
     + 2 // double_add, inverse_add
@@ -186,7 +186,7 @@ pub(crate) const CHECK_TRACE_COLUMNS: usize = 1 // active
     + 3 * (1 + N_LIMBS); // (q + carries) × 3
 
 #[derive(Clone)]
-pub(crate) struct FinalAddCheckEval {
+pub struct FinalAddCheckEval {
     pub(crate) log_size: u32,
     pub(crate) result_relation: FinalAddMulResultRelation,
     pub(crate) hint_relation: FinalCheckHintRelation,
