@@ -24,7 +24,7 @@ use stwo_constraint_framework::{
     relation, EvalAtRow, LogupTraceGenerator, Relation, RelationEntry,
 };
 
-use super::fake_glv_selector::{FakeGlvSelectorClaim, FAKE_GLV_SELECTOR_CHUNKS};
+use crate::scalar::fake_glv_selector::{FakeGlvSelectorClaim, FAKE_GLV_SELECTOR_CHUNKS};
 
 relation!(Selector4x4Relation, 3);
 relation!(Selector16DecodeRelation, 3);

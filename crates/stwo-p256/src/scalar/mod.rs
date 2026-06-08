@@ -11,16 +11,26 @@ pub mod fake_glv_decompose {
 }
 pub mod fake_glv_chain_expansion;
 pub mod fake_glv_chain_schedule;
-pub mod fake_glv_direct_prepared_operand;
+pub mod fake_glv_direct_prepared_operand {
+    pub use crate::components::fake_glv::selector::direct_operand::*;
+}
 pub mod fake_glv_ec_source;
-pub mod fake_glv_lsb_correction_operand;
+pub mod fake_glv_lsb_correction_operand {
+    pub use crate::components::fake_glv::selector::lsb_correction::*;
+}
 pub mod fake_glv_prepared_point_source;
 pub mod fake_glv_scalar {
     pub use crate::components::fake_glv::scalar::air::*;
 }
-pub mod fake_glv_selector;
-pub mod fake_glv_selector_lookup;
-pub mod fake_glv_signed_selector_operand;
+pub mod fake_glv_selector {
+    pub use crate::components::fake_glv::selector::air::*;
+}
+pub mod fake_glv_selector_lookup {
+    pub use crate::components::fake_glv::selector::lookup::*;
+}
+pub mod fake_glv_signed_selector_operand {
+    pub use crate::components::fake_glv::selector::signed_operand::*;
+}
 pub mod prepared_point;
 pub mod prepared_table;
 pub mod scalar_mod_mul {

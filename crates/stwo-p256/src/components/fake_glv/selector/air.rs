@@ -20,7 +20,7 @@ use stwo_constraint_framework::{
     TraceLocationAllocator,
 };
 
-use super::fake_glv_scalar::{
+use crate::scalar::fake_glv_scalar::{
     FakeGlvScalarHintClaim, FakeGlvScalarHintRow, FakeGlvScalarRelation, FakeGlvSmallScalar,
     FAKE_GLV_SCALAR_RELATION_ARITY, FAKE_GLV_SMALL_LIMBS,
 };
