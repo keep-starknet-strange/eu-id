@@ -97,8 +97,8 @@ use stwo::prover::backend::simd::{
 };
 use stwo::prover::ComponentProver;
 use stwo_constraint_framework::{
-    relation, EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation,
-    RelationEntry, TraceLocationAllocator,
+    EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation, RelationEntry,
+    TraceLocationAllocator,
 };
 use stwo_p256_utils::constants::{LIMB_BITS, N_LIMBS};
 
@@ -133,21 +133,9 @@ use crate::types::{AffinePoint, U256};
 
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 
-/// `(sig_id, cert_id, point[PREPARED_TABLE_EC_POINT_COLUMNS])` — re-exported
-/// arity for the hint consumer.
-pub use crate::prepared_table::FINAL_CHECK_HINT_RELATION_ARITY;
+pub mod relation;
 
-/// Output relation: the proven `(sig_id, x3[N_LIMBS])` forwarded to the final
-/// check, which consumes it as `r_x`.
-pub const FINAL_ADD_OUTPUT_RELATION_ARITY: usize = 1 + N_LIMBS;
-
-relation!(FinalAddOutputRelation, FINAL_ADD_OUTPUT_RELATION_ARITY);
-
-/// Result relation linking the mul provider to the check consumer:
-/// `(mul_index, role, limb_index, limb)`.
-pub const FINAL_ADD_MUL_RESULT_ARITY: usize = 4;
-
-relation!(FinalAddMulResultRelation, FINAL_ADD_MUL_RESULT_ARITY);
+pub use relation::*;
 
 /// `lambda · denom ≡ numer (mod p)`. `denom = (x2 − x1)` on the distinct
 /// branch and `denom = 2·y1` on the doubling branch (both stored in the same
@@ -1555,14 +1543,6 @@ impl FinalAddLogSizes {
             check: padded_log_size(1),
         }
     }
-}
-
-#[derive(Clone)]
-pub struct FinalAddRelations {
-    pub mul: ProjectiveRcbMulComponentRelations,
-    pub result: FinalAddMulResultRelation,
-    pub hint: FinalCheckHintRelation,
-    pub output: FinalAddOutputRelation,
 }
 
 #[derive(Clone, Debug)]
