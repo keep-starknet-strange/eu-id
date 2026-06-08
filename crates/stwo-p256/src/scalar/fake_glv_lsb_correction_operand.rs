@@ -2,23 +2,15 @@ use stwo::core::{
     air::Component,
     channel::Channel,
     fields::{m31::M31, qm31::SecureField},
-    pcs::{CommitmentSchemeVerifier, PcsConfig, TreeVec},
-    poly::circle::CanonicCoset,
-    proof::StarkProof,
-    verifier::verify,
+    pcs::TreeVec,
     ColumnVec,
 };
 use stwo::prover::{
-    backend::{
-        simd::{
+    backend::simd::{
             m31::{PackedM31, LOG_N_LANES},
             qm31::PackedQM31,
             SimdBackend,
-        },
-        BackendForChannel,
-    },
-    poly::circle::PolyOps,
-    prove, CommitmentSchemeProver, ComponentProver,
+        }, ComponentProver,
 };
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{
@@ -137,15 +129,6 @@ impl FakeGlvLsbCorrectionOperandInteractionClaim {
     pub fn mix_into(&self, channel: &mut impl Channel) {
         channel.mix_felts(&[self.provider_claimed_sum, self.consumer_claimed_sum]);
     }
-}
-
-#[derive(Clone, Debug)]
-pub struct FakeGlvLsbCorrectionOperandProof<
-    H: stwo::core::vcs_lifted::merkle_hasher::MerkleHasherLifted,
-> {
-    pub claim: FakeGlvLsbCorrectionOperandProofClaim,
-    pub interaction_claim: FakeGlvLsbCorrectionOperandInteractionClaim,
-    pub stark_proof: StarkProof<H>,
 }
 
 pub struct FakeGlvLsbCorrectionOperandComponents {
@@ -328,164 +311,6 @@ where
         }
         self.operand.add_constraints(eval, &self.active, one);
     }
-}
-
-pub fn prove_fake_glv_lsb_correction_operand_proof_slice<MC: stwo::core::channel::MerkleChannel>(
-    cert_inputs: &CertScalarInputClaim,
-    fake_glv_scalars: &FakeGlvScalarHintClaim,
-    prepared: &PreparedTableClaim,
-    selectors: &FakeGlvSelectorClaim,
-    chain: &FakeGlvChainClaim,
-    config: PcsConfig,
-) -> Result<FakeGlvLsbCorrectionOperandProof<MC::H>, FakeGlvChainError>
-where
-    SimdBackend: BackendForChannel<MC>,
-{
-    prepared
-        .verify()
-        .map_err(FakeGlvChainError::PreparedPoint)?;
-    chain.verify()?;
-    let claim = FakeGlvLsbCorrectionOperandProofClaim::from_claims(selectors, chain);
-    let ids = claim.preprocessed_column_ids();
-    let max_constraint_log_degree_bound = claim.max_constraint_log_degree_bound(&ids);
-    let twiddles = SimdBackend::precompute_twiddles(
-        CanonicCoset::new(
-            config
-                .lifting_log_size
-                .unwrap_or(max_constraint_log_degree_bound + config.fri_config.log_blowup_factor),
-        )
-        .circle_domain()
-        .half_coset,
-    );
-
-    let mut channel = MC::C::default();
-    let mut commitment_scheme = CommitmentSchemeProver::<SimdBackend, MC>::new(config, &twiddles);
-    commitment_scheme.set_store_polynomials_coefficients();
-
-    let preprocessed = gen_lsb_correction_operand_preprocessed_trace(&claim, &ids)?;
-    let mut tree_builder = commitment_scheme.tree_builder();
-    tree_builder.extend_evals(preprocessed);
-    tree_builder.commit(&mut channel);
-
-    claim.mix_into(&mut channel);
-    let provider_base = gen_lsb_correction_operand_provider_base_trace(
-        cert_inputs,
-        fake_glv_scalars,
-        prepared,
-        selectors,
-        claim.provider_log_size,
-    )?;
-    let consumer_base =
-        gen_lsb_correction_operand_consumer_base_trace(selectors, chain, claim.consumer_log_size)?;
-    let mut base = provider_base.clone();
-    base.extend(consumer_base.clone());
-    let mut tree_builder = commitment_scheme.tree_builder();
-    tree_builder.extend_evals(base);
-    tree_builder.commit(&mut channel);
-
-    let relation = FakeGlvLsbCorrectionOperandRelation::draw(&mut channel);
-    let (provider_interaction, provider_claimed_sum) =
-        gen_lsb_correction_operand_interaction_trace(&provider_base, &relation, true);
-    let (consumer_interaction, consumer_claimed_sum) =
-        gen_lsb_correction_operand_interaction_trace(&consumer_base, &relation, false);
-    let interaction_claim = FakeGlvLsbCorrectionOperandInteractionClaim {
-        provider_claimed_sum,
-        consumer_claimed_sum,
-    };
-    if interaction_claim.total() != secure_zero() {
-        return Err(FakeGlvChainError::RelationImbalance {
-            relation: "FakeGlvLsbCorrectionOperand",
-        });
-    }
-    interaction_claim.mix_into(&mut channel);
-    let mut interaction = provider_interaction;
-    interaction.extend(consumer_interaction);
-    let mut tree_builder = commitment_scheme.tree_builder();
-    tree_builder.extend_evals(interaction);
-    tree_builder.commit(&mut channel);
-
-    let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
-    let components = FakeGlvLsbCorrectionOperandComponents::new(
-        &mut allocator,
-        claim,
-        &interaction_claim,
-        &relation,
-    );
-    assert_eq!(
-        commitment_scheme
-            .polynomials()
-            .as_cols_ref()
-            .map_cols(|column| column.evals.domain.log_size() - config.fri_config.log_blowup_factor)
-            .0,
-        components.trace_log_degree_bounds().0
-    );
-    let stark_proof = prove(
-        &components.component_provers(),
-        &mut channel,
-        commitment_scheme,
-    )
-    .map_err(|_| FakeGlvChainError::ProofLayer)?;
-
-    Ok(FakeGlvLsbCorrectionOperandProof {
-        claim,
-        interaction_claim,
-        stark_proof,
-    })
-}
-
-pub fn verify_fake_glv_lsb_correction_operand_proof_slice<
-    MC: stwo::core::channel::MerkleChannel,
->(
-    proof: FakeGlvLsbCorrectionOperandProof<MC::H>,
-) -> Result<(), FakeGlvChainError> {
-    let FakeGlvLsbCorrectionOperandProof {
-        claim,
-        interaction_claim,
-        stark_proof,
-    } = proof;
-    if interaction_claim.total() != secure_zero() {
-        return Err(FakeGlvChainError::RelationImbalance {
-            relation: "FakeGlvLsbCorrectionOperand",
-        });
-    }
-
-    let ids = claim.preprocessed_column_ids();
-    let log_degree_bounds = claim.trace_log_degree_bounds(&ids);
-    let mut channel = MC::C::default();
-    let commitment_scheme = &mut CommitmentSchemeVerifier::<MC>::new(stark_proof.config);
-    commitment_scheme.commit(
-        stark_proof.commitments[0],
-        &log_degree_bounds[0],
-        &mut channel,
-    );
-    claim.mix_into(&mut channel);
-    commitment_scheme.commit(
-        stark_proof.commitments[1],
-        &log_degree_bounds[1],
-        &mut channel,
-    );
-    let relation = FakeGlvLsbCorrectionOperandRelation::draw(&mut channel);
-    interaction_claim.mix_into(&mut channel);
-    commitment_scheme.commit(
-        stark_proof.commitments[2],
-        &log_degree_bounds[2],
-        &mut channel,
-    );
-
-    let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
-    let components = FakeGlvLsbCorrectionOperandComponents::new(
-        &mut allocator,
-        claim,
-        &interaction_claim,
-        &relation,
-    );
-    verify(
-        &components.components(),
-        &mut channel,
-        commitment_scheme,
-        stark_proof,
-    )
-    .map_err(|_| FakeGlvChainError::ProofLayer)
 }
 
 pub(crate) fn gen_lsb_correction_operand_preprocessed_trace(

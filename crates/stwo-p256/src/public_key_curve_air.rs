@@ -1060,14 +1060,6 @@ impl PublicKeyCurveSliceProofClaim {
     }
 }
 
-/// A standalone public-key-on-curve proof slice.
-#[derive(Clone, Debug)]
-pub struct PublicKeyOnCurveProof<H: stwo::core::vcs_lifted::merkle_hasher::MerkleHasherLifted> {
-    claim: PublicKeyCurveSliceProofClaim,
-    interaction_claim: PublicKeyCurveSliceInteractionClaim,
-    stark_proof: StarkProof<H>,
-}
-
 // ---------------------------------------------------------------------------
 // Trace generation
 // ---------------------------------------------------------------------------
@@ -1514,133 +1506,6 @@ fn point_consume_fraction_pair(
 // Prove / verify
 // ---------------------------------------------------------------------------
 
-/// Prove the standalone public-key-on-curve slice.
-pub fn prove_public_key_on_curve_proof_slice<MC: MerkleChannel>(
-    claim: &PublicKeyCurveSliceClaim,
-    config: PcsConfig,
-) -> Result<PublicKeyOnCurveProof<MC::H>, PublicKeyCurveSliceError>
-where
-    SimdBackend: BackendForChannel<MC>,
-{
-    claim.verify()?;
-    let proof_claim = PublicKeyCurveSliceProofClaim::from_claim(claim);
-    let ids = proof_claim.preprocessed_column_ids();
-    let max_constraint_log_degree_bound = proof_claim.max_constraint_log_degree_bound(&ids);
-    let twiddles = SimdBackend::precompute_twiddles(
-        CanonicCoset::new(
-            config
-                .lifting_log_size
-                .unwrap_or(max_constraint_log_degree_bound + config.fri_config.log_blowup_factor),
-        )
-        .circle_domain()
-        .half_coset,
-    );
-
-    let mut channel = MC::C::default();
-    let mut commitment_scheme = CommitmentSchemeProver::<SimdBackend, MC>::new(config, &twiddles);
-    commitment_scheme.set_store_polynomials_coefficients();
-
-    let preprocessed = gen_slice_preprocessed_trace(claim, &ids)?;
-    let mut tree_builder = commitment_scheme.tree_builder();
-    tree_builder.extend_evals(preprocessed);
-    tree_builder.commit(&mut channel);
-
-    proof_claim.mix_into(&mut channel);
-    let base = gen_slice_base_trace(claim)?;
-    let mut tree_builder = commitment_scheme.tree_builder();
-    tree_builder.extend_evals(base);
-    tree_builder.commit(&mut channel);
-
-    let relations = PublicKeyCurveSliceRelations::draw(&mut channel);
-    let (interaction, interaction_claim) = gen_slice_interaction_trace(claim, &relations, false)?;
-    if interaction_claim.total() != secure_zero() {
-        return Err(PublicKeyCurveSliceError::RelationImbalance);
-    }
-    interaction_claim.mix_into(&mut channel);
-    let mut tree_builder = commitment_scheme.tree_builder();
-    tree_builder.extend_evals(interaction);
-    tree_builder.commit(&mut channel);
-
-    let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
-    let components = PublicKeyCurveSliceComponents::new(
-        &mut allocator,
-        proof_claim.log_sizes,
-        &interaction_claim,
-        &relations,
-        false,
-    );
-    let stark_proof = prove(
-        &components.component_provers(),
-        &mut channel,
-        commitment_scheme,
-    )
-    .map_err(|error| PublicKeyCurveSliceError::ProofLayer(error.to_string()))?;
-
-    Ok(PublicKeyOnCurveProof {
-        claim: proof_claim,
-        interaction_claim,
-        stark_proof,
-    })
-}
-
-/// Verify the standalone public-key-on-curve slice.
-pub fn verify_public_key_on_curve_proof_slice<MC: MerkleChannel>(
-    proof: PublicKeyOnCurveProof<MC::H>,
-) -> Result<(), PublicKeyCurveSliceError> {
-    let PublicKeyOnCurveProof {
-        claim,
-        interaction_claim,
-        stark_proof,
-    } = proof;
-
-    if interaction_claim.total() != secure_zero() {
-        return Err(PublicKeyCurveSliceError::RelationImbalance);
-    }
-
-    let ids = claim.preprocessed_column_ids();
-    let log_degree_bounds = claim.trace_log_degree_bounds(&ids);
-    let mut channel = MC::C::default();
-    let commitment_scheme = &mut CommitmentSchemeVerifier::<MC>::new(stark_proof.config);
-
-    commitment_scheme.commit(
-        stark_proof.commitments[0],
-        &log_degree_bounds[0],
-        &mut channel,
-    );
-
-    claim.mix_into(&mut channel);
-    commitment_scheme.commit(
-        stark_proof.commitments[1],
-        &log_degree_bounds[1],
-        &mut channel,
-    );
-
-    let relations = PublicKeyCurveSliceRelations::draw(&mut channel);
-
-    interaction_claim.mix_into(&mut channel);
-    commitment_scheme.commit(
-        stark_proof.commitments[2],
-        &log_degree_bounds[2],
-        &mut channel,
-    );
-
-    let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
-    let components = PublicKeyCurveSliceComponents::new(
-        &mut allocator,
-        claim.log_sizes,
-        &interaction_claim,
-        &relations,
-        false,
-    );
-    verify(
-        &components.components(),
-        &mut channel,
-        commitment_scheme,
-        stark_proof,
-    )
-    .map_err(|error| PublicKeyCurveSliceError::ProofLayer(error.to_string()))
-}
-
 // ---------------------------------------------------------------------------
 // Errors + small helpers
 // ---------------------------------------------------------------------------
@@ -1788,17 +1653,6 @@ mod tests {
     }
 
     #[test]
-    fn public_key_on_curve_slice_accepts_generator() {
-        let claim =
-            public_key_curve_slice_claim_from_public_inputs(&generator_inputs()).expect("on-curve");
-        let config = slice_config(&claim);
-        let proof = prove_public_key_on_curve_proof_slice::<Blake2sMerkleChannel>(&claim, config)
-            .expect("slice proves");
-        verify_public_key_on_curve_proof_slice::<Blake2sMerkleChannel>(proof)
-            .expect("slice verifies");
-    }
-
-    #[test]
     fn public_key_on_curve_slice_rejects_off_curve() {
         // 1. The native pipeline rejects an off-curve public key outright:
         //    `PublicKeyOnCurveClaim::from_public_inputs` checks `y^2 == rhs`.
@@ -1892,7 +1746,7 @@ mod tests {
         claim: &mut PublicKeyCurveSliceClaim,
         config: PcsConfig,
     ) {
-        // Mirror `prove_public_key_on_curve_proof_slice` but skip the native
+        // Drive the slice prover stages directly but skip the native
         // `claim.verify()` guard so the prover itself is the oracle.
         let proof_claim = PublicKeyCurveSliceProofClaim::from_claim(claim);
         let ids = proof_claim.preprocessed_column_ids();

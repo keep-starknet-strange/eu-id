@@ -378,13 +378,6 @@ impl ProjectiveRcbAirProofClaim {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct ProjectiveRcbAirProof<H: stwo::core::vcs_lifted::merkle_hasher::MerkleHasherLifted> {
-    pub claim: ProjectiveRcbAirProofClaim,
-    pub interaction_claim: ProjectiveRcbAirProofInteractionClaim,
-    pub stark_proof: StarkProof<H>,
-}
-
 pub struct ProjectiveRcbAirComponents {
     pub mul: ProjectiveRcbMulComponent,
     pub raw_product_chunk: ProjectiveRcbRawProductChunkComponent,
@@ -505,128 +498,6 @@ impl ProjectiveRcbAirComponents {
             .max()
             .unwrap_or(0)
     }
-}
-
-pub fn prove_projective_rcb_air_proof_slice<MC: stwo::core::channel::MerkleChannel>(
-    trace: &ProjectiveRcbAirTraceClaim,
-    config: PcsConfig,
-) -> Result<ProjectiveRcbAirProof<MC::H>, ProjectiveRcbAirError>
-where
-    SimdBackend: BackendForChannel<MC>,
-{
-    let claim = ProjectiveRcbAirProofClaim::from_trace(trace);
-    let ids = claim.preprocessed_column_ids();
-    let max_constraint_log_degree_bound = claim.max_constraint_log_degree_bound(&ids);
-    let twiddles = SimdBackend::precompute_twiddles(
-        CanonicCoset::new(
-            config
-                .lifting_log_size
-                .unwrap_or(max_constraint_log_degree_bound + config.fri_config.log_blowup_factor),
-        )
-        .circle_domain()
-        .half_coset,
-    );
-
-    let mut channel = MC::C::default();
-    let mut commitment_scheme = CommitmentSchemeProver::<SimdBackend, MC>::new(config, &twiddles);
-    commitment_scheme.set_store_polynomials_coefficients();
-
-    let preprocessed = trace.gen_proof_slice_preprocessed_trace(&ids)?;
-    let mut tree_builder = commitment_scheme.tree_builder();
-    tree_builder.extend_evals(preprocessed);
-    tree_builder.commit(&mut channel);
-
-    claim.mix_into(&mut channel);
-    let base = trace.gen_proof_slice_base_trace()?;
-    let mut tree_builder = commitment_scheme.tree_builder();
-    tree_builder.extend_evals(base);
-    tree_builder.commit(&mut channel);
-
-    let relations = ProjectiveRcbMulComponentRelations::draw(&mut channel);
-    let (interaction, interaction_claim) = trace.gen_proof_slice_interaction_trace(&relations)?;
-    if interaction_claim.total() != secure_zero() {
-        return Err(ProjectiveRcbAirError::RelationImbalance {
-            relation: "ProjectiveRcbAirProofSlice",
-        });
-    }
-    interaction_claim.mix_into(&mut channel);
-    let mut tree_builder = commitment_scheme.tree_builder();
-    tree_builder.extend_evals(interaction);
-    tree_builder.commit(&mut channel);
-
-    let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
-    let components =
-        ProjectiveRcbAirComponents::new(&mut allocator, trace, &interaction_claim, &relations);
-    let stark_proof = prove(
-        &components.component_provers(),
-        &mut channel,
-        commitment_scheme,
-    )
-    .map_err(|error| ProjectiveRcbAirError::ProofLayer(error.to_string()))?;
-
-    Ok(ProjectiveRcbAirProof {
-        claim,
-        interaction_claim,
-        stark_proof,
-    })
-}
-
-pub fn verify_projective_rcb_air_proof_slice<MC: stwo::core::channel::MerkleChannel>(
-    proof: ProjectiveRcbAirProof<MC::H>,
-) -> Result<(), ProjectiveRcbAirError> {
-    let ProjectiveRcbAirProof {
-        claim,
-        interaction_claim,
-        stark_proof,
-    } = proof;
-
-    if interaction_claim.total() != secure_zero() {
-        return Err(ProjectiveRcbAirError::RelationImbalance {
-            relation: "ProjectiveRcbAirProofSlice",
-        });
-    }
-
-    let ids = claim.preprocessed_column_ids();
-    let log_degree_bounds = claim.trace_log_degree_bounds(&ids);
-    let mut channel = MC::C::default();
-    let commitment_scheme = &mut CommitmentSchemeVerifier::<MC>::new(stark_proof.config);
-
-    commitment_scheme.commit(
-        stark_proof.commitments[0],
-        &log_degree_bounds[0],
-        &mut channel,
-    );
-
-    claim.mix_into(&mut channel);
-    commitment_scheme.commit(
-        stark_proof.commitments[1],
-        &log_degree_bounds[1],
-        &mut channel,
-    );
-
-    let relations = ProjectiveRcbMulComponentRelations::draw(&mut channel);
-
-    interaction_claim.mix_into(&mut channel);
-    commitment_scheme.commit(
-        stark_proof.commitments[2],
-        &log_degree_bounds[2],
-        &mut channel,
-    );
-
-    let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
-    let components = ProjectiveRcbAirComponents::new_with_log_sizes(
-        &mut allocator,
-        claim.log_sizes,
-        &interaction_claim,
-        &relations,
-    );
-    verify(
-        &components.components(),
-        &mut channel,
-        commitment_scheme,
-        stark_proof,
-    )
-    .map_err(|error| ProjectiveRcbAirError::ProofLayer(error.to_string()))
 }
 
 #[derive(Clone)]
@@ -5031,13 +4902,6 @@ mod tests {
         }
     }
 
-    fn proof_slice_low_ram_config(claim: &ProjectiveRcbAirTraceClaim) -> PcsConfig {
-        let proof_claim = ProjectiveRcbAirProofClaim::from_trace(claim);
-        let ids = proof_claim.preprocessed_column_ids();
-        let max_constraint_log_degree_bound = proof_claim.max_constraint_log_degree_bound(&ids);
-        low_ram_proof_layer_config(max_constraint_log_degree_bound)
-    }
-
     fn prove_and_verify_raw_product_chunk_component(claim: &ProjectiveRcbAirTraceClaim) {
         let log_size = claim.component_log_sizes().raw_product_chunk;
         let mut ids_allocator = TraceLocationAllocator::default();
@@ -6658,21 +6522,6 @@ mod tests {
         claim
             .verify_proof_slice_traces(&relations)
             .expect("proof slice trace shape verifies");
-    }
-
-    #[test]
-    fn projective_rcb_air_proof_slice_proves_and_verifies() {
-        let trace = one_row_trace(ProjectiveEcOp::Double, PreparedAffinePoint::infinity());
-        let claim =
-            ProjectiveRcbAirTraceClaim::from_projective_trace(&trace).expect("valid RCB AIR trace");
-        let proof = prove_projective_rcb_air_proof_slice::<Blake2sMerkleChannel>(
-            &claim,
-            proof_slice_low_ram_config(&claim),
-        )
-        .expect("projective RCB proof slice proves");
-
-        verify_projective_rcb_air_proof_slice::<Blake2sMerkleChannel>(proof)
-            .expect("projective RCB proof slice verifies");
     }
 
     #[test]

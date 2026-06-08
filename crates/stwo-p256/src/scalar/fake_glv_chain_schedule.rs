@@ -2,16 +2,9 @@ use stwo::core::{
     air::Component,
     channel::Channel,
     fields::{m31::M31, qm31::SecureField},
-    pcs::{CommitmentSchemeVerifier, PcsConfig, TreeVec},
-    poly::circle::CanonicCoset,
+    pcs::TreeVec,
     proof::StarkProof,
-    verifier::verify,
     ColumnVec,
-};
-use stwo::prover::{
-    backend::{simd::SimdBackend, BackendForChannel},
-    poly::circle::PolyOps,
-    prove, CommitmentSchemeProver, ComponentProver,
 };
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{
@@ -150,108 +143,6 @@ impl FrameworkEval for FakeGlvChainScheduleEval {
 
         eval
     }
-}
-
-pub fn prove_fake_glv_chain_schedule_proof_slice<MC: stwo::core::channel::MerkleChannel>(
-    chain: &FakeGlvChainClaim,
-    config: PcsConfig,
-) -> Result<FakeGlvChainScheduleProof<MC::H>, FakeGlvChainError>
-where
-    SimdBackend: BackendForChannel<MC>,
-{
-    chain.verify()?;
-    let claim = FakeGlvChainScheduleProofClaim::from_chain(chain);
-    let ids = claim.preprocessed_column_ids();
-    let max_constraint_log_degree_bound = claim.max_constraint_log_degree_bound(&ids);
-    let twiddles = SimdBackend::precompute_twiddles(
-        CanonicCoset::new(
-            config
-                .lifting_log_size
-                .unwrap_or(max_constraint_log_degree_bound + config.fri_config.log_blowup_factor),
-        )
-        .circle_domain()
-        .half_coset,
-    );
-
-    let mut channel = MC::C::default();
-    let mut commitment_scheme = CommitmentSchemeProver::<SimdBackend, MC>::new(config, &twiddles);
-    commitment_scheme.set_store_polynomials_coefficients();
-
-    let preprocessed = gen_fake_glv_chain_schedule_preprocessed_trace(claim.log_size, &ids)?;
-    let mut tree_builder = commitment_scheme.tree_builder();
-    tree_builder.extend_evals(preprocessed);
-    tree_builder.commit(&mut channel);
-
-    claim.mix_into(&mut channel);
-    let base = gen_fake_glv_chain_schedule_base_trace(chain, claim.log_size)?;
-    let mut tree_builder = commitment_scheme.tree_builder();
-    tree_builder.extend_evals(base.clone());
-    tree_builder.commit(&mut channel);
-
-    let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
-    let component = FakeGlvChainScheduleComponent::new(
-        &mut allocator,
-        FakeGlvChainScheduleEval {
-            log_size: claim.log_size,
-        },
-        secure_zero(),
-    );
-    assert_eq!(
-        commitment_scheme
-            .polynomials()
-            .as_cols_ref()
-            .map_cols(|column| column.evals.domain.log_size() - config.fri_config.log_blowup_factor)
-            .0,
-        component.trace_log_degree_bounds().0
-    );
-    let stark_proof = prove(
-        &[&component as &dyn ComponentProver<SimdBackend>],
-        &mut channel,
-        commitment_scheme,
-    )
-    .map_err(|_| FakeGlvChainError::ProofLayer)?;
-
-    Ok(FakeGlvChainScheduleProof { claim, stark_proof })
-}
-
-pub fn verify_fake_glv_chain_schedule_proof_slice<MC: stwo::core::channel::MerkleChannel>(
-    proof: FakeGlvChainScheduleProof<MC::H>,
-) -> Result<(), FakeGlvChainError> {
-    let FakeGlvChainScheduleProof { claim, stark_proof } = proof;
-
-    let ids = claim.preprocessed_column_ids();
-    let log_degree_bounds = claim.trace_log_degree_bounds(&ids);
-    let mut channel = MC::C::default();
-    let commitment_scheme = &mut CommitmentSchemeVerifier::<MC>::new(stark_proof.config);
-
-    commitment_scheme.commit(
-        stark_proof.commitments[0],
-        &log_degree_bounds[0],
-        &mut channel,
-    );
-
-    claim.mix_into(&mut channel);
-    commitment_scheme.commit(
-        stark_proof.commitments[1],
-        &log_degree_bounds[1],
-        &mut channel,
-    );
-
-    let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
-    let component = FakeGlvChainScheduleComponent::new(
-        &mut allocator,
-        FakeGlvChainScheduleEval {
-            log_size: claim.log_size,
-        },
-        secure_zero(),
-    );
-    verify(
-        &[&component as &dyn Component],
-        &mut channel,
-        commitment_scheme,
-        stark_proof,
-    )
-    .map_err(|_| FakeGlvChainError::ProofLayer)
 }
 
 pub(crate) fn gen_fake_glv_chain_schedule_preprocessed_trace(
