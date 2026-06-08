@@ -975,7 +975,9 @@ mod tests {
                 relations: rel.clone(),
             }
             .max_constraint_log_degree_bound(),
-            9
+            // log_size + 1: degree-2 constraints + finalize_logup (verified
+            // sufficient by scalar_setup_mod_mul_pcs_diagnostic proving without panic).
+            8
         );
         assert_eq!(
             ScalarReductionDigitEval {
@@ -984,7 +986,7 @@ mod tests {
                 relations: rel,
             }
             .max_constraint_log_degree_bound(),
-            8
+            7
         );
     }
 }
