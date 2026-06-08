@@ -43,8 +43,12 @@ pub mod fake_glv_selector_lookup {
 pub mod fake_glv_signed_selector_operand {
     pub use crate::components::fake_glv::selector::signed_operand::*;
 }
-pub mod prepared_point;
-pub mod prepared_table;
+pub mod prepared_point {
+    pub use crate::components::fake_glv::prepared_point::*;
+}
+pub mod prepared_table {
+    pub use crate::components::fake_glv::prepared_table::*;
+}
 pub mod scalar_mod_mul {
     pub use crate::components::scalar_mod_mul::*;
 }

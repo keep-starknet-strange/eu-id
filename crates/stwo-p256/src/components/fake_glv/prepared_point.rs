@@ -7,8 +7,8 @@ use stwo_p256_utils::constants::N_LIMBS;
 use crate::limbs::{P256BigInt, P256M31BigInt};
 use crate::range_checks::{add_range_check, RangeCheckRelation};
 
-use super::fake_glv_selector::{FakeGlvSelectorClaim, FakeGlvSelectorRow};
-use super::fake_glv_selector_lookup::Selector16DecodeEntry;
+use crate::scalar::fake_glv_selector::{FakeGlvSelectorClaim, FakeGlvSelectorRow};
+use crate::scalar::fake_glv_selector_lookup::Selector16DecodeEntry;
 
 relation!(PreparedPointRelation, 44);
 

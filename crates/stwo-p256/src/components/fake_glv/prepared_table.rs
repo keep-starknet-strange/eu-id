@@ -38,11 +38,11 @@ use crate::prepared_point::{
 use crate::projective::{ProjectiveEcOp, ProjectiveEcTraceClaim};
 use crate::types::{AffinePoint, U256};
 
-use super::cert_bind::{CertScalarInputClaim, CertScalarInputRow, CERT_ID_U1_GENERATOR};
-use super::fake_glv_scalar::{FakeGlvScalarHintClaim, FakeGlvScalarHintRow};
-use super::fake_glv_selector::{FakeGlvSelectorClaim, FakeGlvSelectorRow};
-use super::fake_glv_selector_lookup::Selector16DecodeEntry;
-use super::scalar_mod_mul::columns::{m31_column_eval, padded_log_size, M31ColumnEval};
+use crate::scalar::cert_bind::{CertScalarInputClaim, CertScalarInputRow, CERT_ID_U1_GENERATOR};
+use crate::scalar::fake_glv_scalar::{FakeGlvScalarHintClaim, FakeGlvScalarHintRow};
+use crate::scalar::fake_glv_selector::{FakeGlvSelectorClaim, FakeGlvSelectorRow};
+use crate::scalar::fake_glv_selector_lookup::Selector16DecodeEntry;
+use crate::scalar::scalar_mod_mul::columns::{m31_column_eval, padded_log_size, M31ColumnEval};
 
 relation!(
     PreparedTableEcRowRelation,
