@@ -5,6 +5,7 @@ pub mod curve;
 pub mod debug;
 pub mod ecdsa;
 pub mod field;
+pub mod gadgets;
 pub mod projective_air;
 pub mod proof;
 pub mod public_inputs;

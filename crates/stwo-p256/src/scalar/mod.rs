@@ -1,4 +1,6 @@
-pub mod canonical_lt;
+pub mod canonical_lt {
+    pub use crate::gadgets::canonical_lt::*;
+}
 pub mod cert_bind;
 pub mod fake_glv_chain;
 pub mod fake_glv_chain_continuity;
