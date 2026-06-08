@@ -7,7 +7,9 @@ pub mod debug;
 pub mod ecdsa;
 pub mod field;
 pub mod gadgets;
-pub mod projective_air;
+pub mod projective_air {
+    pub use crate::components::projective_rcb_mul::*;
+}
 pub mod proof;
 pub mod public_inputs {
     pub use crate::components::public_inputs::*;

@@ -1,5 +1,6 @@
 pub mod final_add;
 pub mod final_check;
+pub mod projective_rcb_mul;
 pub mod public_inputs;
 pub mod public_key_curve;
 pub mod scalar_mod_mul;
