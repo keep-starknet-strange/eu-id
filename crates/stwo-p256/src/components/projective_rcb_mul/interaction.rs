@@ -15,10 +15,10 @@ use stwo::prover::backend::simd::{
 use stwo_constraint_framework::{LogupTraceGenerator, Relation};
 use stwo_p256_utils::constants::N_LIMBS;
 
+use super::*;
 use crate::fp_solinas_air::FP_SOLINAS_REDUCTION_DIGITS;
 use crate::range_checks::RangeCheckInteractionClaim;
 use crate::scalar::scalar_mod_mul::columns::M31ColumnEval;
-use super::*;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectiveRcbAirComponentInteractionClaim {
@@ -57,6 +57,7 @@ impl ProjectiveRcbAirInteractionTraces {
 pub struct ProjectiveRcbAirProofInteractionClaim {
     pub components: ProjectiveRcbAirComponentInteractionClaim,
     pub range13: RangeCheckInteractionClaim,
+    pub raw_product_carry16: RangeCheckInteractionClaim,
     pub signed_carry: RangeCheckInteractionClaim,
 }
 
@@ -72,6 +73,9 @@ impl ProjectiveRcbAirProofInteractionClaim {
             range13: RangeCheckInteractionClaim {
                 claimed_sum: secure_zero(),
             },
+            raw_product_carry16: RangeCheckInteractionClaim {
+                claimed_sum: secure_zero(),
+            },
             signed_carry: RangeCheckInteractionClaim {
                 claimed_sum: secure_zero(),
             },
@@ -79,7 +83,10 @@ impl ProjectiveRcbAirProofInteractionClaim {
     }
 
     pub fn total(&self) -> SecureField {
-        self.components.total() + self.range13.claimed_sum + self.signed_carry.claimed_sum
+        self.components.total()
+            + self.range13.claimed_sum
+            + self.raw_product_carry16.claimed_sum
+            + self.signed_carry.claimed_sum
     }
 
     pub fn mix_into(&self, channel: &mut impl Channel) {
@@ -89,6 +96,7 @@ impl ProjectiveRcbAirProofInteractionClaim {
             self.components.folded_contribution,
             self.components.folded_digit,
             self.range13.claimed_sum,
+            self.raw_product_carry16.claimed_sum,
             self.signed_carry.claimed_sum,
         ]);
     }
@@ -104,6 +112,7 @@ pub(crate) struct ProjectiveRcbFractionSpec {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ProjectiveRcbRelationKind {
     Range13,
+    RawProductCarry16,
     SignedCarry,
     MulLimb,
     RawProductChunkDigit,
@@ -202,6 +211,9 @@ fn projective_rcb_fraction(
 ) -> (SecureField, SecureField) {
     let denominator = match fraction.relation {
         ProjectiveRcbRelationKind::Range13 => relations.range13.combine(&fraction.values),
+        ProjectiveRcbRelationKind::RawProductCarry16 => {
+            relations.raw_product_carry16.combine(&fraction.values)
+        }
         ProjectiveRcbRelationKind::SignedCarry => relations.signed_carry.combine(&fraction.values),
         ProjectiveRcbRelationKind::MulLimb => relations.mul_limb.combine(&fraction.values),
         ProjectiveRcbRelationKind::RawProductChunkDigit => {
@@ -349,6 +361,7 @@ pub(crate) fn projective_rcb_raw_product_chunk_fractions(
     for digit in row.digits {
         fractions.push(range13_fraction(1, m31(digit)));
     }
+    fractions.push(raw_product_carry16_fraction(1, m31(row.carry1)));
     for (offset, digit) in row.digits.iter().enumerate() {
         fractions.push(raw_product_chunk_digit_fraction(
             -(row.digit_use_counts[offset] as i64),
@@ -446,11 +459,13 @@ pub(crate) fn projective_rcb_mul_padding_fractions() -> Vec<ProjectiveRcbFractio
     zeroed_projective_rcb_fractions(projective_rcb_mul_fraction_count())
 }
 
-pub(crate) fn projective_rcb_raw_product_chunk_padding_fractions() -> Vec<ProjectiveRcbFractionSpec> {
+pub(crate) fn projective_rcb_raw_product_chunk_padding_fractions() -> Vec<ProjectiveRcbFractionSpec>
+{
     zeroed_projective_rcb_fractions(projective_rcb_raw_product_chunk_fraction_count())
 }
 
-pub(crate) fn projective_rcb_folded_contribution_padding_fractions() -> Vec<ProjectiveRcbFractionSpec> {
+pub(crate) fn projective_rcb_folded_contribution_padding_fractions(
+) -> Vec<ProjectiveRcbFractionSpec> {
     zeroed_projective_rcb_fractions(projective_rcb_folded_contribution_fraction_count())
 }
 
@@ -467,7 +482,7 @@ fn projective_rcb_mul_fraction_count() -> usize {
 }
 
 fn projective_rcb_raw_product_chunk_fraction_count() -> usize {
-    2 * PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS + 2 * PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS
+    2 * PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS + 2 * PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS + 1
 }
 
 fn projective_rcb_folded_contribution_fraction_count() -> usize {
@@ -497,6 +512,14 @@ pub(crate) fn projective_rcb_folded_digit_interaction_columns() -> usize {
 fn range13_fraction(numerator: i64, value: M31) -> ProjectiveRcbFractionSpec {
     ProjectiveRcbFractionSpec {
         relation: ProjectiveRcbRelationKind::Range13,
+        numerator,
+        values: vec![value],
+    }
+}
+
+fn raw_product_carry16_fraction(numerator: i64, value: M31) -> ProjectiveRcbFractionSpec {
+    ProjectiveRcbFractionSpec {
+        relation: ProjectiveRcbRelationKind::RawProductCarry16,
         numerator,
         values: vec![value],
     }

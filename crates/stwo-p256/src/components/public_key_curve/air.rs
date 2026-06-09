@@ -97,6 +97,7 @@ use crate::range_checks::{
     signed_carry_active_column_id, signed_carry_value_column_id, RangeCheckClaim,
     RangeCheckComponent, RangeCheckEval, RangeCheckInteractionClaim, RangeCheckRelation,
     SignedCarryRangeClaim, SignedCarryRangeComponent, SignedCarryRangeEval, RANGE13_BITS,
+    RANGE16_BITS,
 };
 use crate::scalar::scalar_mod_mul::columns::{m31_column_eval, padded_log_size, M31ColumnEval};
 use crate::types::U256;
@@ -820,6 +821,7 @@ pub struct PublicKeyCurveSliceInteractionClaim {
     folded_digit: SecureField,
     curve_check: SecureField,
     range13: RangeCheckInteractionClaim,
+    raw_product_carry16: RangeCheckInteractionClaim,
     signed_carry: RangeCheckInteractionClaim,
 }
 
@@ -833,6 +835,7 @@ impl PublicKeyCurveSliceInteractionClaim {
             folded_digit: zero,
             curve_check: zero,
             range13: RangeCheckInteractionClaim { claimed_sum: zero },
+            raw_product_carry16: RangeCheckInteractionClaim { claimed_sum: zero },
             signed_carry: RangeCheckInteractionClaim { claimed_sum: zero },
         }
     }
@@ -853,6 +856,7 @@ impl PublicKeyCurveSliceInteractionClaim {
             + self.folded_digit
             + self.curve_check
             + self.range13.claimed_sum
+            + self.raw_product_carry16.claimed_sum
             + self.signed_carry.claimed_sum
     }
 
@@ -864,6 +868,7 @@ impl PublicKeyCurveSliceInteractionClaim {
             self.folded_digit,
             self.curve_check,
             self.range13.claimed_sum,
+            self.raw_product_carry16.claimed_sum,
             self.signed_carry.claimed_sum,
         ]);
     }
@@ -876,6 +881,7 @@ pub(crate) struct PublicKeyCurveSliceComponents {
     folded_digit: ProjectiveRcbFoldedDigitComponent,
     curve_check: PublicKeyCurveCheckComponent,
     range13: RangeCheckComponent,
+    raw_product_carry16: RangeCheckComponent,
     signed_carry: SignedCarryRangeComponent,
 }
 
@@ -941,6 +947,11 @@ impl PublicKeyCurveSliceComponents {
                 RangeCheckEval::new(relations.mul.range13.clone(), RANGE13_BITS),
                 interaction_claim.range13.claimed_sum,
             ),
+            raw_product_carry16: RangeCheckComponent::new(
+                allocator,
+                RangeCheckEval::new(relations.mul.raw_product_carry16.clone(), RANGE16_BITS),
+                interaction_claim.raw_product_carry16.claimed_sum,
+            ),
             signed_carry: SignedCarryRangeComponent::new(
                 allocator,
                 SignedCarryRangeEval::new(
@@ -961,6 +972,7 @@ impl PublicKeyCurveSliceComponents {
             &self.folded_digit as &dyn Component,
             &self.curve_check as &dyn Component,
             &self.range13 as &dyn Component,
+            &self.raw_product_carry16 as &dyn Component,
             &self.signed_carry as &dyn Component,
         ]
     }
@@ -973,6 +985,7 @@ impl PublicKeyCurveSliceComponents {
             &self.folded_digit as &dyn ComponentProver<SimdBackend>,
             &self.curve_check as &dyn ComponentProver<SimdBackend>,
             &self.range13 as &dyn ComponentProver<SimdBackend>,
+            &self.raw_product_carry16 as &dyn ComponentProver<SimdBackend>,
             &self.signed_carry as &dyn ComponentProver<SimdBackend>,
         ]
     }
@@ -1086,6 +1099,11 @@ pub(crate) fn gen_slice_preprocessed_trace(
         range_check_value_column_id(RANGE13_BITS),
         range13.gen_preprocessed_column(),
     ));
+    let raw_product_carry16 = RangeCheckClaim::new(RANGE16_BITS);
+    columns.push((
+        range_check_value_column_id(RANGE16_BITS),
+        raw_product_carry16.gen_preprocessed_column(),
+    ));
     let signed_carry = slice_signed_carry_claim();
     columns.push((
         signed_carry_value_column_id(PROJECTIVE_RCB_SIGNED_CARRY_EQUATION),
@@ -1152,6 +1170,10 @@ pub(crate) fn gen_slice_base_trace(
     // Shared range providers' multiplicity columns over *all* uses.
     let range13 = RangeCheckClaim::new(RANGE13_BITS);
     trace.push(range13.gen_multiplicity_trace(slice_range13_uses(claim)?));
+    let raw_product_carry16 = RangeCheckClaim::new(RANGE16_BITS);
+    trace.push(
+        raw_product_carry16.gen_multiplicity_trace(slice_raw_product_carry16_uses(claim)),
+    );
     let signed_carry = slice_signed_carry_claim();
     trace.push(signed_carry.gen_multiplicity_trace(slice_signed_carry_uses(claim)?));
 
@@ -1205,6 +1227,10 @@ fn slice_range13_uses(claim: &PublicKeyCurveSliceClaim) -> Result<Vec<M31>, Publ
     Ok(uses)
 }
 
+fn slice_raw_product_carry16_uses(claim: &PublicKeyCurveSliceClaim) -> Vec<M31> {
+    claim.mul_trace.raw_product_carry16_lookup_values()
+}
+
 /// All signed-carry uses: projective mul-family uses plus the curve-check
 /// carries.
 fn slice_signed_carry_uses(
@@ -1256,6 +1282,18 @@ pub(crate) fn gen_slice_interaction_trace(
     );
     trace.extend(range13_trace);
 
+    let raw_product_carry16 = RangeCheckClaim::new(RANGE16_BITS);
+    let raw_product_carry16_values = raw_product_carry16.gen_preprocessed_column();
+    let raw_product_carry16_multiplicity =
+        raw_product_carry16.gen_multiplicity_trace(slice_raw_product_carry16_uses(claim));
+    let (raw_product_carry16_trace, raw_product_carry16_claim) =
+        RangeCheckInteractionClaim::gen_interaction_trace(
+            &raw_product_carry16_multiplicity,
+            &raw_product_carry16_values,
+            &relations.mul.raw_product_carry16,
+        );
+    trace.extend(raw_product_carry16_trace);
+
     let signed_carry = slice_signed_carry_claim();
     let signed_carry_values = signed_carry.gen_value_column();
     let signed_carry_multiplicity =
@@ -1276,6 +1314,7 @@ pub(crate) fn gen_slice_interaction_trace(
             folded_digit: projective_claim.folded_digit,
             curve_check: curve_claim,
             range13: range13_claim,
+            raw_product_carry16: raw_product_carry16_claim,
             signed_carry: signed_carry_claim,
         },
     ))

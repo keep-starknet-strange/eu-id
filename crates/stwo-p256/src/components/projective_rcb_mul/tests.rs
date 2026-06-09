@@ -12,7 +12,7 @@ use crate::projective::{
 };
 use crate::range_checks::{
     RangeCheckClaim, RangeCheckInteractionClaim, RangeCheckRelation, SignedCarryRangeClaim,
-    RANGE13_BITS,
+    RANGE13_BITS, RANGE16_BITS,
 };
 use crate::scalar::scalar_mod_mul::columns::padded_log_size;
 use crate::types::{AffinePoint, U256};
@@ -91,14 +91,15 @@ fn prove_and_verify_raw_product_chunk_component(claim: &ProjectiveRcbAirTraceCla
     let ids = ids_allocator.preprocessed_columns().clone();
     let max_constraint_log_degree_bound = sizing_component.max_constraint_log_degree_bound();
     let config = low_ram_proof_layer_config(max_constraint_log_degree_bound);
-    let twiddles =
-        SimdBackend::precompute_twiddles(
-            CanonicCoset::new(config.lifting_log_size.unwrap_or(
-                max_constraint_log_degree_bound + config.fri_config.log_blowup_factor,
-            ))
-            .circle_domain()
-            .half_coset,
-        );
+    let twiddles = SimdBackend::precompute_twiddles(
+        CanonicCoset::new(
+            config
+                .lifting_log_size
+                .unwrap_or(max_constraint_log_degree_bound + config.fri_config.log_blowup_factor),
+        )
+        .circle_domain()
+        .half_coset,
+    );
 
     let mut channel = Blake2sChannel::default();
     let mut commitment_scheme =
@@ -131,13 +132,12 @@ fn prove_and_verify_raw_product_chunk_component(claim: &ProjectiveRcbAirTraceCla
         },
         interaction_claim.raw_product_chunk,
     );
-    let trace_polys =
-        TreeVec::new(vec![preprocessed, base, interaction.clone()]).map(|trace| {
-            trace
-                .into_iter()
-                .map(|column| column.interpolate())
-                .collect::<Vec<_>>()
-        });
+    let trace_polys = TreeVec::new(vec![preprocessed, base, interaction.clone()]).map(|trace| {
+        trace
+            .into_iter()
+            .map(|column| column.interpolate())
+            .collect::<Vec<_>>()
+    });
     assert_constraints_on_polys(
         &trace_polys,
         CanonicCoset::new(log_size),
@@ -204,14 +204,15 @@ fn prove_and_verify_mul_component(claim: &ProjectiveRcbAirTraceClaim) {
     let ids = ids_allocator.preprocessed_columns().clone();
     let max_constraint_log_degree_bound = sizing_component.max_constraint_log_degree_bound();
     let config = low_ram_proof_layer_config(max_constraint_log_degree_bound);
-    let twiddles =
-        SimdBackend::precompute_twiddles(
-            CanonicCoset::new(config.lifting_log_size.unwrap_or(
-                max_constraint_log_degree_bound + config.fri_config.log_blowup_factor,
-            ))
-            .circle_domain()
-            .half_coset,
-        );
+    let twiddles = SimdBackend::precompute_twiddles(
+        CanonicCoset::new(
+            config
+                .lifting_log_size
+                .unwrap_or(max_constraint_log_degree_bound + config.fri_config.log_blowup_factor),
+        )
+        .circle_domain()
+        .half_coset,
+    );
 
     let mut channel = Blake2sChannel::default();
     let mut commitment_scheme =
@@ -250,13 +251,12 @@ fn prove_and_verify_mul_component(claim: &ProjectiveRcbAirTraceClaim) {
             "mul interaction trace width must match component allocation"
         );
     }
-    let trace_polys =
-        TreeVec::new(vec![preprocessed, base, interaction.clone()]).map(|trace| {
-            trace
-                .into_iter()
-                .map(|column| column.interpolate())
-                .collect::<Vec<_>>()
-        });
+    let trace_polys = TreeVec::new(vec![preprocessed, base, interaction.clone()]).map(|trace| {
+        trace
+            .into_iter()
+            .map(|column| column.interpolate())
+            .collect::<Vec<_>>()
+    });
     assert_constraints_on_polys(
         &trace_polys,
         CanonicCoset::new(log_size),
@@ -299,14 +299,15 @@ fn prove_and_verify_folded_contribution_component(claim: &ProjectiveRcbAirTraceC
     let ids = ids_allocator.preprocessed_columns().clone();
     let max_constraint_log_degree_bound = sizing_component.max_constraint_log_degree_bound();
     let config = low_ram_proof_layer_config(max_constraint_log_degree_bound);
-    let twiddles =
-        SimdBackend::precompute_twiddles(
-            CanonicCoset::new(config.lifting_log_size.unwrap_or(
-                max_constraint_log_degree_bound + config.fri_config.log_blowup_factor,
-            ))
-            .circle_domain()
-            .half_coset,
-        );
+    let twiddles = SimdBackend::precompute_twiddles(
+        CanonicCoset::new(
+            config
+                .lifting_log_size
+                .unwrap_or(max_constraint_log_degree_bound + config.fri_config.log_blowup_factor),
+        )
+        .circle_domain()
+        .half_coset,
+    );
 
     let mut channel = Blake2sChannel::default();
     let mut commitment_scheme =
@@ -344,13 +345,12 @@ fn prove_and_verify_folded_contribution_component(claim: &ProjectiveRcbAirTraceC
         component.trace_log_degree_bounds()[2].len(),
         "folded contribution interaction trace width must match component allocation"
     );
-    let trace_polys =
-        TreeVec::new(vec![preprocessed, base, interaction.clone()]).map(|trace| {
-            trace
-                .into_iter()
-                .map(|column| column.interpolate())
-                .collect::<Vec<_>>()
-        });
+    let trace_polys = TreeVec::new(vec![preprocessed, base, interaction.clone()]).map(|trace| {
+        trace
+            .into_iter()
+            .map(|column| column.interpolate())
+            .collect::<Vec<_>>()
+    });
     assert_constraints_on_polys(
         &trace_polys,
         CanonicCoset::new(log_size),
@@ -421,14 +421,15 @@ fn prove_and_verify_folded_digit_component(claim: &ProjectiveRcbAirTraceClaim) {
     let ids = ids_allocator.preprocessed_columns().clone();
     let max_constraint_log_degree_bound = sizing_component.max_constraint_log_degree_bound();
     let config = low_ram_proof_layer_config(max_constraint_log_degree_bound);
-    let twiddles =
-        SimdBackend::precompute_twiddles(
-            CanonicCoset::new(config.lifting_log_size.unwrap_or(
-                max_constraint_log_degree_bound + config.fri_config.log_blowup_factor,
-            ))
-            .circle_domain()
-            .half_coset,
-        );
+    let twiddles = SimdBackend::precompute_twiddles(
+        CanonicCoset::new(
+            config
+                .lifting_log_size
+                .unwrap_or(max_constraint_log_degree_bound + config.fri_config.log_blowup_factor),
+        )
+        .circle_domain()
+        .half_coset,
+    );
 
     let mut channel = Blake2sChannel::default();
     let mut commitment_scheme =
@@ -461,13 +462,12 @@ fn prove_and_verify_folded_digit_component(claim: &ProjectiveRcbAirTraceClaim) {
         },
         interaction_claim.folded_digit,
     );
-    let trace_polys =
-        TreeVec::new(vec![preprocessed, base, interaction.clone()]).map(|trace| {
-            trace
-                .into_iter()
-                .map(|column| column.interpolate())
-                .collect::<Vec<_>>()
-        });
+    let trace_polys = TreeVec::new(vec![preprocessed, base, interaction.clone()]).map(|trace| {
+        trace
+            .into_iter()
+            .map(|column| column.interpolate())
+            .collect::<Vec<_>>()
+    });
     assert_constraints_on_polys(
         &trace_polys,
         CanonicCoset::new(log_size),
@@ -530,14 +530,15 @@ fn prove_and_verify_projective_range13_provider(claim: &ProjectiveRcbAirTraceCla
         RangeCheckEval::new(RangeCheckRelation::dummy(), RANGE13_BITS)
             .max_constraint_log_degree_bound();
     let config = low_ram_proof_layer_config(max_constraint_log_degree_bound);
-    let twiddles =
-        SimdBackend::precompute_twiddles(
-            CanonicCoset::new(config.lifting_log_size.unwrap_or(
-                max_constraint_log_degree_bound + config.fri_config.log_blowup_factor,
-            ))
-            .circle_domain()
-            .half_coset,
-        );
+    let twiddles = SimdBackend::precompute_twiddles(
+        CanonicCoset::new(
+            config
+                .lifting_log_size
+                .unwrap_or(max_constraint_log_degree_bound + config.fri_config.log_blowup_factor),
+        )
+        .circle_domain()
+        .half_coset,
+    );
 
     let mut channel = Blake2sChannel::default();
     let mut commitment_scheme =
@@ -608,14 +609,15 @@ fn prove_and_verify_projective_signed_carry_provider(claim: &ProjectiveRcbAirTra
     let ids = vec![eval.value_column_id(), eval.active_column_id()];
     let max_constraint_log_degree_bound = eval.max_constraint_log_degree_bound();
     let config = low_ram_proof_layer_config(max_constraint_log_degree_bound);
-    let twiddles =
-        SimdBackend::precompute_twiddles(
-            CanonicCoset::new(config.lifting_log_size.unwrap_or(
-                max_constraint_log_degree_bound + config.fri_config.log_blowup_factor,
-            ))
-            .circle_domain()
-            .half_coset,
-        );
+    let twiddles = SimdBackend::precompute_twiddles(
+        CanonicCoset::new(
+            config
+                .lifting_log_size
+                .unwrap_or(max_constraint_log_degree_bound + config.fri_config.log_blowup_factor),
+        )
+        .circle_domain()
+        .half_coset,
+    );
 
     let mut channel = Blake2sChannel::default();
     let mut commitment_scheme =
@@ -745,14 +747,15 @@ fn prove_and_verify_projective_arithmetic_components(claim: &ProjectiveRcbAirTra
     .max()
     .expect("arithmetic components exist");
     let config = low_ram_proof_layer_config(max_constraint_log_degree_bound);
-    let twiddles =
-        SimdBackend::precompute_twiddles(
-            CanonicCoset::new(config.lifting_log_size.unwrap_or(
-                max_constraint_log_degree_bound + config.fri_config.log_blowup_factor,
-            ))
-            .circle_domain()
-            .half_coset,
-        );
+    let twiddles = SimdBackend::precompute_twiddles(
+        CanonicCoset::new(
+            config
+                .lifting_log_size
+                .unwrap_or(max_constraint_log_degree_bound + config.fri_config.log_blowup_factor),
+        )
+        .circle_domain()
+        .half_coset,
+    );
 
     let mut channel = Blake2sChannel::default();
     let mut commitment_scheme =
@@ -1128,6 +1131,28 @@ fn projective_rcb_mul_eval_allocates_expected_width() {
 }
 
 #[test]
+fn projective_rcb_raw_product_chunk_constraints_fit_m31_for_admitted_ranges() {
+    assert!(
+        projective_rcb_raw_product_chunk_fits_m31(),
+        "raw-product chunk equations must fit M31 under admitted witness ranges"
+    );
+}
+
+#[test]
+fn projective_rcb_raw_product_chunk_wrapped_reconstruction_exceeds_raw_carry_range() {
+    let limb_base = FP_SOLINAS_LIMB_BASE;
+    let product_sum = PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS as i128 * (limb_base - 1).pow(2);
+    let wrapped_reconstruction = product_sum + ((1i128 << 31) - 1);
+    let low_digit = wrapped_reconstruction % limb_base;
+    let first_carry = (wrapped_reconstruction - low_digit) / limb_base;
+
+    assert!(
+        first_carry >= (1i128 << 16),
+        "a one-modulus wrapped reconstruction must not fit the raw carry range"
+    );
+}
+
+#[test]
 fn projective_rcb_raw_product_chunk_eval_allocates_expected_width() {
     let mut allocator = TraceLocationAllocator::default();
     let component = ProjectiveRcbRawProductChunkComponent::new(
@@ -1140,19 +1165,18 @@ fn projective_rcb_raw_product_chunk_eval_allocates_expected_width() {
         SecureField::zero(),
     );
 
-    assert_eq!(PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS, 210);
+    assert_eq!(PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS, 8);
+    assert_eq!(PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS, 69);
     assert_eq!(
         PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TRACE_COLUMNS,
-        1 + 2 + 2 * 4 + 3 + 3
+        1 + 2 + PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS * 4 + 1 + 3 + 3
     );
     assert_eq!(
         component.trace_log_degree_bounds()[1].len(),
         PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TRACE_COLUMNS
     );
     assert!(allocator.preprocessed_columns().contains(
-        &ProjectiveRcbRawProductChunkScheduleColumnIds::coeff(
-            PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC
-        )
+        &ProjectiveRcbRawProductChunkScheduleColumnIds::coeff(PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC)
     ));
     assert!(allocator.preprocessed_columns().contains(
         &ProjectiveRcbRawProductChunkScheduleColumnIds::digit_use_count(
@@ -1325,7 +1349,7 @@ fn projective_rcb_folded_digit_eval_allocates_expected_width() {
         SecureField::zero(),
     );
 
-    assert_eq!(PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS, 7);
+    assert_eq!(PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS, 10);
     assert_eq!(
         PROJECTIVE_RCB_FOLDED_DIGIT_TRACE_COLUMNS,
         1 + 2 + PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS * 3 + 3
@@ -1335,9 +1359,7 @@ fn projective_rcb_folded_digit_eval_allocates_expected_width() {
         PROJECTIVE_RCB_FOLDED_DIGIT_TRACE_COLUMNS
     );
     assert!(allocator.preprocessed_columns().contains(
-        &ProjectiveRcbFoldedDigitScheduleColumnIds::active(
-            PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC
-        )
+        &ProjectiveRcbFoldedDigitScheduleColumnIds::active(PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC)
     ));
     assert!(allocator.preprocessed_columns().contains(
         &ProjectiveRcbFoldedDigitScheduleColumnIds::group_index(
@@ -1442,15 +1464,17 @@ fn projective_rcb_air_preprocessed_trace_uses_global_claim_sizes() {
             .log_size(),
         log_sizes.folded_digit
     );
-    assert!(ids.contains(&ProjectiveRcbRawProductChunkScheduleColumnIds::coeff(
-        PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC
-    )));
     assert!(
-        ids.contains(&ProjectiveRcbFoldedContributionScheduleColumnIds::matrix_coeff(
-            PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC,
-            3
+        ids.contains(&ProjectiveRcbRawProductChunkScheduleColumnIds::coeff(
+            PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC
         ))
     );
+    assert!(ids.contains(
+        &ProjectiveRcbFoldedContributionScheduleColumnIds::matrix_coeff(
+            PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC,
+            3
+        )
+    ));
     assert!(
         ids.contains(&ProjectiveRcbFoldedDigitScheduleColumnIds::group_index(
             PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC,
@@ -1598,6 +1622,26 @@ fn projective_rcb_air_range_lookup_consumers_balance_with_providers() {
         secure_zero()
     );
 
+    let raw_product_carry16_values = claim.raw_product_carry16_lookup_values();
+    assert_eq!(
+        raw_product_carry16_values.len(),
+        claim.mul_row_count() * PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS
+    );
+    let range16 = RangeCheckClaim::new(RANGE16_BITS);
+    let range16_preprocessed = range16.gen_preprocessed_column();
+    let range16_multiplicity = range16.gen_multiplicity_trace(raw_product_carry16_values);
+    let (_, range16_provider) =
+        crate::range_checks::RangeCheckInteractionClaim::gen_interaction_trace(
+            &range16_multiplicity,
+            &range16_preprocessed,
+            &relations.raw_product_carry16,
+        );
+    assert_eq!(
+        range16_provider.claimed_sum
+            + claim.raw_product_carry16_consumer_claimed_sum(&relations.raw_product_carry16),
+        secure_zero()
+    );
+
     let signed_carry_values = claim
         .signed_carry_lookup_values()
         .expect("signed carries fit fixed bound");
@@ -1659,6 +1703,11 @@ fn projective_rcb_air_proof_slice_materializes_registered_traces() {
         ))
     );
     assert!(
+        ids.contains(&crate::range_checks::range_check_value_column_id(
+            RANGE16_BITS
+        ))
+    );
+    assert!(
         ids.contains(&crate::range_checks::signed_carry_value_column_id(
             PROJECTIVE_RCB_SIGNED_CARRY_EQUATION
         ))
@@ -1679,7 +1728,7 @@ fn projective_rcb_air_proof_slice_materializes_registered_traces() {
             + PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TRACE_COLUMNS
             + PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TRACE_COLUMNS
             + PROJECTIVE_RCB_FOLDED_DIGIT_TRACE_COLUMNS
-            + 2
+            + 3
     );
     assert_eq!(interaction_claim.total(), secure_zero());
     assert!(!interaction.is_empty());
@@ -1689,6 +1738,7 @@ fn projective_rcb_air_proof_slice_materializes_registered_traces() {
         claim.component_log_sizes().raw_product_chunk
     );
     assert_eq!(components.range13.log_size(), RANGE13_BITS);
+    assert_eq!(components.raw_product_carry16.log_size(), RANGE16_BITS);
     assert_eq!(
         components.signed_carry.log_size(),
         projective_rcb_signed_carry_log_size()

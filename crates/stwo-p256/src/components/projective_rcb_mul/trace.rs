@@ -13,6 +13,7 @@ use stwo_constraint_framework::TraceLocationAllocator;
 use stwo_p256_utils::constants::N_LIMBS;
 use stwo_p256_utils::solinas::REDUCTION_MATRIX;
 
+use super::*;
 use crate::constants::{P256_B, P256_MODULUS};
 use crate::field_ops::{add_mod_witness, sub_mod_witness};
 use crate::fp_solinas::{
@@ -27,11 +28,10 @@ use crate::projective::{
 };
 use crate::range_checks::{
     RangeCheckClaim, RangeCheckInteractionClaim, RangeCheckRelation, SignedCarryRangeClaim,
-    RANGE13_BITS,
+    RANGE13_BITS, RANGE16_BITS,
 };
 use crate::scalar::scalar_mod_mul::columns::{m31_column_eval, padded_log_size, M31ColumnEval};
 use crate::types::U256;
-use super::*;
 
 /// Schedule-column id namespace for the canonical EC projective-RCB mul trace.
 /// Empty so existing preprocessed-column ids are unchanged.
@@ -522,6 +522,9 @@ impl ProjectiveRcbAirTraceClaim {
             signed_carry: RangeCheckInteractionClaim {
                 claimed_sum: secure_zero(),
             },
+            raw_product_carry16: RangeCheckInteractionClaim {
+                claimed_sum: secure_zero(),
+            },
         };
         let _ =
             ProjectiveRcbAirComponents::new(&mut allocator, self, &interaction_claim, relations);
@@ -532,12 +535,19 @@ impl ProjectiveRcbAirTraceClaim {
         &self,
         ids: &[PreProcessedColumnId],
     ) -> Result<Vec<M31ColumnEval>, ProjectiveRcbAirError> {
-        let mut columns =
-            projective_rcb_air_schedule_preprocessed_columns(self, PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC);
+        let mut columns = projective_rcb_air_schedule_preprocessed_columns(
+            self,
+            PROJECTIVE_RCB_SCHEDULE_NAMESPACE_EC,
+        );
         let range13 = RangeCheckClaim::new(RANGE13_BITS);
         columns.push((
             crate::range_checks::range_check_value_column_id(RANGE13_BITS),
             range13.gen_preprocessed_column(),
+        ));
+        let raw_product_carry16 = RangeCheckClaim::new(RANGE16_BITS);
+        columns.push((
+            crate::range_checks::range_check_value_column_id(RANGE16_BITS),
+            raw_product_carry16.gen_preprocessed_column(),
         ));
         let signed_carry = projective_rcb_signed_carry_claim();
         columns.push((
@@ -567,6 +577,10 @@ impl ProjectiveRcbAirTraceClaim {
         let mut trace = self.gen_base_trace()?;
         let range13 = RangeCheckClaim::new(RANGE13_BITS);
         trace.push(range13.gen_multiplicity_trace(self.range13_lookup_values()));
+        let raw_product_carry16 = RangeCheckClaim::new(RANGE16_BITS);
+        trace.push(
+            raw_product_carry16.gen_multiplicity_trace(self.raw_product_carry16_lookup_values()),
+        );
         trace.push(
             projective_rcb_signed_carry_claim()
                 .gen_multiplicity_trace(self.signed_carry_lookup_values()?),
@@ -592,6 +606,18 @@ impl ProjectiveRcbAirTraceClaim {
         );
         trace.extend(range13_trace);
 
+        let raw_product_carry16 = RangeCheckClaim::new(RANGE16_BITS);
+        let raw_product_carry16_values = raw_product_carry16.gen_preprocessed_column();
+        let raw_product_carry16_multiplicity =
+            raw_product_carry16.gen_multiplicity_trace(self.raw_product_carry16_lookup_values());
+        let (raw_product_carry16_trace, raw_product_carry16_claim) =
+            RangeCheckInteractionClaim::gen_interaction_trace(
+                &raw_product_carry16_multiplicity,
+                &raw_product_carry16_values,
+                &relations.raw_product_carry16,
+            );
+        trace.extend(raw_product_carry16_trace);
+
         let signed_carry = projective_rcb_signed_carry_claim();
         let signed_carry_values = signed_carry.gen_value_column();
         let signed_carry_multiplicity =
@@ -609,6 +635,7 @@ impl ProjectiveRcbAirTraceClaim {
             ProjectiveRcbAirProofInteractionClaim {
                 components: component_claim,
                 range13: range13_claim,
+                raw_product_carry16: raw_product_carry16_claim,
                 signed_carry: signed_carry_claim,
             },
         ))
@@ -632,7 +659,7 @@ impl ProjectiveRcbAirTraceClaim {
             + PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TRACE_COLUMNS
             + PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TRACE_COLUMNS
             + PROJECTIVE_RCB_FOLDED_DIGIT_TRACE_COLUMNS
-            + 2;
+            + 3;
         if base.len() != expected_base {
             return Err(ProjectiveRcbAirError::BaseTraceColumnCountMismatch {
                 expected: expected_base,
@@ -697,8 +724,24 @@ impl ProjectiveRcbAirTraceClaim {
         Ok(values)
     }
 
+    pub fn raw_product_carry16_lookup_values(&self) -> Vec<M31> {
+        self.raw_product_chunk_rows()
+            .map(|chunk| m31(chunk.carry1))
+            .collect()
+    }
+
     pub fn range13_consumer_claimed_sum(&self, relation: &RangeCheckRelation) -> SecureField {
         self.range13_lookup_values()
+            .into_iter()
+            .map(|value| relation_fraction(relation, 1, &[value]))
+            .sum()
+    }
+
+    pub fn raw_product_carry16_consumer_claimed_sum(
+        &self,
+        relation: &RangeCheckRelation,
+    ) -> SecureField {
+        self.raw_product_carry16_lookup_values()
             .into_iter()
             .map(|value| relation_fraction(relation, 1, &[value]))
             .sum()
@@ -1072,6 +1115,7 @@ pub(crate) fn gen_projective_rcb_raw_product_chunk_base_trace(
                     row.push(m31(term.rhs_limb));
                     row.push(m31(term.lhs_limb * term.rhs_limb));
                 }
+                row.push(m31(chunk.carry1));
                 row.extend(chunk.digits.iter().copied().map(m31));
                 row.extend(chunk.digit_use_counts.iter().copied().map(m31));
                 row
@@ -1794,6 +1838,7 @@ pub struct ProjectiveRcbRawProductChunkRow {
     pub coeff: usize,
     pub chunk: usize,
     pub terms: [ProjectiveRcbRawProductTermRow; PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS],
+    pub carry1: u32,
     pub digits: [u32; PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS],
     pub digit_use_counts: [u32; PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS],
 }
@@ -1824,13 +1869,15 @@ impl ProjectiveRcbRawProductChunkRow {
                 };
             }
         }
+        let digits = split_raw_product_chunk(product_sum)?;
         Ok(Self {
             source_index,
             mul_index,
             coeff,
             chunk,
             terms,
-            digits: split_raw_product_chunk(product_sum)?,
+            carry1: raw_product_chunk_carry1(digits),
+            digits,
             digit_use_counts: core::array::from_fn(|offset| {
                 raw_product_chunk_digit_use_count_const(coeff, offset) as u32
             }),
@@ -1874,6 +1921,11 @@ impl ProjectiveRcbRawProductChunkRow {
                 coeff: self.coeff,
                 chunk: self.chunk,
             })
+        } else if self.carry1 != raw_product_chunk_carry1(digits) {
+            Err(ProjectiveRcbAirError::RawProductChunkDigitMismatch {
+                coeff: self.coeff,
+                chunk: self.chunk,
+            })
         } else if self.digit_use_counts
             != core::array::from_fn(|offset| {
                 raw_product_chunk_digit_use_count_const(self.coeff, offset) as u32
@@ -1895,6 +1947,10 @@ impl ProjectiveRcbRawProductChunkRow {
             .map(|term| i128::from(term.lhs_limb) * i128::from(term.rhs_limb))
             .sum()
     }
+}
+
+fn raw_product_chunk_carry1(digits: [u32; PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS]) -> u32 {
+    digits[1] + (FP_SOLINAS_LIMB_BASE as u32) * digits[2]
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2088,10 +2144,7 @@ impl From<FpSolinasReductionTraceError> for ProjectiveRcbAirError {
     }
 }
 
-fn raw_product_chunk_schedule_id(
-    namespace: &str,
-    name: impl Into<String>,
-) -> PreProcessedColumnId {
+fn raw_product_chunk_schedule_id(namespace: &str, name: impl Into<String>) -> PreProcessedColumnId {
     PreProcessedColumnId {
         id: format!(
             "p256_projective_rcb_{namespace}raw_product_chunk_{}",
@@ -2114,7 +2167,10 @@ fn folded_contribution_schedule_id(
 
 fn folded_digit_schedule_id(namespace: &str, name: impl Into<String>) -> PreProcessedColumnId {
     PreProcessedColumnId {
-        id: format!("p256_projective_rcb_{namespace}folded_digit_{}", name.into()),
+        id: format!(
+            "p256_projective_rcb_{namespace}folded_digit_{}",
+            name.into()
+        ),
     }
 }
 

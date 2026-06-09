@@ -7,6 +7,7 @@ use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkComponent, FrameworkEval, RelationEntry};
 use stwo_p256_utils::constants::{LIMB_BITS, N_LIMBS};
 
+use super::*;
 use crate::fp_solinas::{FP_SOLINAS_LIMB_BASE, M31_CENTERED_BOUND};
 use crate::fp_solinas_air::{
     add_fp_solinas_reduction_digit, FpSolinasReductionDigitColumns, FpSolinasReductionRelations,
@@ -14,7 +15,6 @@ use crate::fp_solinas_air::{
 };
 use crate::limbs::{EvalP256BigIntExt, P256EvalBigInt};
 use crate::range_checks::add_range_check;
-use super::*;
 
 pub type ProjectiveRcbMulComponent = FrameworkComponent<ProjectiveRcbMulEval>;
 
@@ -36,9 +36,11 @@ pub const PROJECTIVE_RCB_MUL_ROLE_RHS: u32 = 1;
 
 pub const PROJECTIVE_RCB_MUL_ROLE_RESULT: u32 = 2;
 
-pub const PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS: usize = 16;
+pub const PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS: usize = 8;
 
 pub const PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS: usize = 3;
+
+pub const PROJECTIVE_RCB_RAW_PRODUCT_CARRY_BITS: u32 = 16;
 
 pub const PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS: usize = raw_product_chunk_count();
 
@@ -69,6 +71,7 @@ pub const PROJECTIVE_RCB_FOLDED_DIGIT_TRACE_COLUMNS: usize = 1
 pub const PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TRACE_COLUMNS: usize = 1
     + 2
     + PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS * PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERM_TRACE_COLUMNS
+    + 1
     + PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS
     + PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS;
 
@@ -193,8 +196,7 @@ impl FrameworkEval for ProjectiveRcbRawProductChunkEval {
     }
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let columns =
-            ProjectiveRcbRawProductChunkColumns::read(&mut eval, self.schedule_namespace);
+        let columns = ProjectiveRcbRawProductChunkColumns::read(&mut eval, self.schedule_namespace);
 
         add_projective_rcb_raw_product_chunk(&mut eval, self.relations.as_refs(), &columns);
         eval.finalize_logup_in_pairs();
@@ -335,6 +337,7 @@ pub struct ProjectiveRcbRawProductChunkColumns<E: EvalAtRow> {
     pub coeff: E::F,
     pub chunk: E::F,
     pub terms: [ProjectiveRcbRawProductTermColumns<E>; PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS],
+    pub carry1: E::F,
     pub digits: [E::F; PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS],
     pub digit_use_counts: [E::F; PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS],
     pub schedule_digit_use_counts: [E::F; PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS],
@@ -370,6 +373,7 @@ impl<E: EvalAtRow> ProjectiveRcbRawProductChunkColumns<E> {
                 rhs_limb: eval.next_trace_mask(),
                 product: eval.next_trace_mask(),
             }),
+            carry1: eval.next_trace_mask(),
             digits: core::array::from_fn(|_| eval.next_trace_mask()),
             digit_use_counts: core::array::from_fn(|_| eval.next_trace_mask()),
             schedule_digit_use_counts: core::array::from_fn(|offset| {
@@ -426,10 +430,10 @@ fn add_raw_product_chunk_polynomial_constraints<E: EvalAtRow>(
     }
     let limb_base = E::F::from(M31::from_u32_unchecked(1u32 << LIMB_BITS));
     eval.add_constraint(
-        product_sum
-            - columns.digits[0].clone()
-            - limb_base.clone() * columns.digits[1].clone()
-            - limb_base.clone() * limb_base * columns.digits[2].clone(),
+        product_sum - columns.digits[0].clone() - limb_base.clone() * columns.carry1.clone(),
+    );
+    eval.add_constraint(
+        columns.carry1.clone() - columns.digits[1].clone() - limb_base * columns.digits[2].clone(),
     );
 }
 
@@ -468,6 +472,12 @@ fn add_raw_product_chunk_relations<E: EvalAtRow>(
             digit.clone(),
         );
     }
+    add_range_check(
+        eval,
+        relations.raw_product_carry16,
+        columns.active.clone(),
+        columns.carry1.clone(),
+    );
     for (offset, digit) in columns.digits.iter().enumerate() {
         eval.add_to_relation(RelationEntry::new(
             relations.raw_product_chunk_digit,
@@ -796,12 +806,24 @@ pub fn add_projective_rcb_folded_digit<E: EvalAtRow>(
 }
 
 pub const fn projective_rcb_raw_product_chunk_max_abs_expr() -> i128 {
+    max_i128(
+        projective_rcb_raw_product_chunk_first_carry_equation_max_abs_expr(),
+        projective_rcb_raw_product_chunk_second_carry_equation_max_abs_expr(),
+    )
+}
+
+pub const fn projective_rcb_raw_product_chunk_first_carry_equation_max_abs_expr() -> i128 {
     let product_sum =
         PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS as i128 * (FP_SOLINAS_LIMB_BASE - 1).pow(2);
     product_sum
         + (FP_SOLINAS_LIMB_BASE - 1)
+        + FP_SOLINAS_LIMB_BASE * ((1i128 << PROJECTIVE_RCB_RAW_PRODUCT_CARRY_BITS) - 1)
+}
+
+pub const fn projective_rcb_raw_product_chunk_second_carry_equation_max_abs_expr() -> i128 {
+    ((1i128 << PROJECTIVE_RCB_RAW_PRODUCT_CARRY_BITS) - 1)
+        + (FP_SOLINAS_LIMB_BASE - 1)
         + FP_SOLINAS_LIMB_BASE * (FP_SOLINAS_LIMB_BASE - 1)
-        + FP_SOLINAS_LIMB_BASE * FP_SOLINAS_LIMB_BASE
 }
 
 pub fn projective_rcb_raw_product_chunk_fits_m31() -> bool {

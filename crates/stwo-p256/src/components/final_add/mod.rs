@@ -102,7 +102,7 @@ use crate::projective_air::{
 };
 use crate::range_checks::{
     RangeCheckComponent, RangeCheckEval, SignedCarryRangeComponent, SignedCarryRangeEval,
-    RANGE13_BITS,
+    RANGE13_BITS, RANGE16_BITS,
 };
 use crate::scalar::scalar_mod_mul::columns::padded_log_size;
 
@@ -175,6 +175,7 @@ pub struct FinalAddComponents {
     folded_digit: ProjectiveRcbFoldedDigitComponent,
     check: FinalAddCheckComponent,
     range13: RangeCheckComponent,
+    raw_product_carry16: RangeCheckComponent,
     signed_carry: SignedCarryRangeComponent,
 }
 
@@ -239,6 +240,11 @@ impl FinalAddComponents {
                 RangeCheckEval::new(relations.mul.range13.clone(), RANGE13_BITS),
                 interaction_claim.range13.claimed_sum,
             ),
+            raw_product_carry16: RangeCheckComponent::new(
+                allocator,
+                RangeCheckEval::new(relations.mul.raw_product_carry16.clone(), RANGE16_BITS),
+                interaction_claim.raw_product_carry16.claimed_sum,
+            ),
             signed_carry: SignedCarryRangeComponent::new(
                 allocator,
                 SignedCarryRangeEval::new(
@@ -259,6 +265,7 @@ impl FinalAddComponents {
             &self.folded_digit as &dyn Component,
             &self.check as &dyn Component,
             &self.range13 as &dyn Component,
+            &self.raw_product_carry16 as &dyn Component,
             &self.signed_carry as &dyn Component,
         ]
     }
@@ -271,6 +278,7 @@ impl FinalAddComponents {
             &self.folded_digit as &dyn ComponentProver<SimdBackend>,
             &self.check as &dyn ComponentProver<SimdBackend>,
             &self.range13 as &dyn ComponentProver<SimdBackend>,
+            &self.raw_product_carry16 as &dyn ComponentProver<SimdBackend>,
             &self.signed_carry as &dyn ComponentProver<SimdBackend>,
         ]
     }
@@ -352,4 +360,3 @@ fn secure_from_i64(value: i64) -> SecureField {
         SecureField::from(M31::from_u32_unchecked(value as u32))
     }
 }
-

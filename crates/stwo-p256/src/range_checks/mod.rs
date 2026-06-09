@@ -35,6 +35,7 @@ use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{relation, EvalAtRow, RelationEntry};
 
 pub const RANGE13_BITS: u32 = 13;
+pub const RANGE16_BITS: u32 = 16;
 pub const RANGE11_BITS: u32 = 11;
 pub const RANGE9_BITS: u32 = 9;
 pub const RANGE7_BITS: u32 = 7;
@@ -122,7 +123,13 @@ mod tests {
 
     #[test]
     fn distinct_log_sizes_get_distinct_preprocessed_column_ids() {
-        let widths = [RANGE13_BITS, RANGE11_BITS, RANGE9_BITS, RANGE7_BITS];
+        let widths = [
+            RANGE16_BITS,
+            RANGE13_BITS,
+            RANGE11_BITS,
+            RANGE9_BITS,
+            RANGE7_BITS,
+        ];
         let ids = widths.map(range_check_value_column_id);
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {

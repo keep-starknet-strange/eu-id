@@ -16,7 +16,7 @@ use crate::fp_solinas_air::{
 };
 use crate::range_checks::{
     RangeCheckComponent, RangeCheckEval, SignedCarryRangeComponent, SignedCarryRangeEval,
-    RANGE13_BITS,
+    RANGE13_BITS, RANGE16_BITS,
 };
 
 pub mod air;
@@ -40,6 +40,7 @@ pub struct ProjectiveRcbAirComponents {
     pub folded_contribution: ProjectiveRcbFoldedContributionComponent,
     pub folded_digit: ProjectiveRcbFoldedDigitComponent,
     pub range13: RangeCheckComponent,
+    pub raw_product_carry16: RangeCheckComponent,
     pub signed_carry: SignedCarryRangeComponent,
 }
 
@@ -105,6 +106,11 @@ impl ProjectiveRcbAirComponents {
                 RangeCheckEval::new(relations.range13.clone(), RANGE13_BITS),
                 interaction_claim.range13.claimed_sum,
             ),
+            raw_product_carry16: RangeCheckComponent::new(
+                allocator,
+                RangeCheckEval::new(relations.raw_product_carry16.clone(), RANGE16_BITS),
+                interaction_claim.raw_product_carry16.claimed_sum,
+            ),
             signed_carry: SignedCarryRangeComponent::new(
                 allocator,
                 SignedCarryRangeEval::new(
@@ -124,6 +130,7 @@ impl ProjectiveRcbAirComponents {
             &self.folded_contribution as &dyn Component,
             &self.folded_digit as &dyn Component,
             &self.range13 as &dyn Component,
+            &self.raw_product_carry16 as &dyn Component,
             &self.signed_carry as &dyn Component,
         ]
     }
@@ -135,6 +142,7 @@ impl ProjectiveRcbAirComponents {
             &self.folded_contribution as &dyn ComponentProver<SimdBackend>,
             &self.folded_digit as &dyn ComponentProver<SimdBackend>,
             &self.range13 as &dyn ComponentProver<SimdBackend>,
+            &self.raw_product_carry16 as &dyn ComponentProver<SimdBackend>,
             &self.signed_carry as &dyn ComponentProver<SimdBackend>,
         ]
     }
@@ -350,6 +358,14 @@ const fn ceil_div_i128(value: i128, divisor: i128) -> i128 {
 }
 
 const fn max_i64(lhs: i64, rhs: i64) -> i64 {
+    if lhs > rhs {
+        lhs
+    } else {
+        rhs
+    }
+}
+
+const fn max_i128(lhs: i128, rhs: i128) -> i128 {
     if lhs > rhs {
         lhs
     } else {

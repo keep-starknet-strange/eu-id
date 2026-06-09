@@ -23,6 +23,7 @@ use crate::projective_air::{
 use crate::range_checks::{
     encode_signed_carry, range_check_value_column_id, signed_carry_active_column_id,
     signed_carry_value_column_id, RangeCheckClaim, SignedCarryRangeClaim, RANGE13_BITS,
+    RANGE16_BITS,
 };
 use crate::scalar::scalar_mod_mul::columns::{m31_column_eval, M31ColumnEval};
 use crate::types::{AffinePoint, U256};
@@ -788,6 +789,11 @@ pub fn final_add_preprocessed_columns(
         range_check_value_column_id(RANGE13_BITS),
         range13.gen_preprocessed_column(),
     ));
+    let raw_product_carry16 = RangeCheckClaim::new(RANGE16_BITS);
+    columns.push((
+        range_check_value_column_id(RANGE16_BITS),
+        raw_product_carry16.gen_preprocessed_column(),
+    ));
     let signed_carry = final_add_signed_carry_claim();
     columns.push((
         signed_carry_value_column_id(PROJECTIVE_RCB_SIGNED_CARRY_EQUATION),
@@ -806,6 +812,7 @@ pub fn final_add_preprocessed_column_ids(claim: &FinalAddClaim) -> Vec<PreProces
         .mul_trace
         .preprocessed_column_ids_with_namespace(PROJECTIVE_RCB_SCHEDULE_NAMESPACE_FINAL_ADD);
     ids.push(range_check_value_column_id(RANGE13_BITS));
+    ids.push(range_check_value_column_id(RANGE16_BITS));
     ids.push(signed_carry_value_column_id(PROJECTIVE_RCB_SIGNED_CARRY_EQUATION));
     ids.push(signed_carry_active_column_id(PROJECTIVE_RCB_SIGNED_CARRY_EQUATION));
     ids
@@ -855,6 +862,10 @@ pub(crate) fn final_add_range13_uses(claim: &FinalAddClaim) -> Vec<M31> {
     uses
 }
 
+pub(crate) fn final_add_raw_product_carry16_uses(claim: &FinalAddClaim) -> Vec<M31> {
+    claim.mul_trace.raw_product_carry16_lookup_values()
+}
+
 /// All signed-carry uses: mul-family uses + the check-row carries.
 pub(crate) fn final_add_signed_carry_uses(claim: &FinalAddClaim) -> Result<Vec<i64>, FinalAddError> {
     let mut uses = claim
@@ -896,6 +907,10 @@ pub fn gen_final_add_base_trace(
     // Shared range providers' multiplicity columns (over ALL uses in the sub-graph).
     let range13 = RangeCheckClaim::new(RANGE13_BITS);
     columns.push(range13.gen_multiplicity_trace(final_add_range13_uses(claim)));
+    let raw_product_carry16 = RangeCheckClaim::new(RANGE16_BITS);
+    columns.push(
+        raw_product_carry16.gen_multiplicity_trace(final_add_raw_product_carry16_uses(claim)),
+    );
     let signed_carry = final_add_signed_carry_claim();
     columns.push(signed_carry.gen_multiplicity_trace(final_add_signed_carry_uses(claim)?));
     Ok(columns)

@@ -45,6 +45,7 @@ relation!(
 #[derive(Clone, Debug)]
 pub struct ProjectiveRcbMulComponentRelations {
     pub range13: RangeCheckRelation,
+    pub raw_product_carry16: RangeCheckRelation,
     pub signed_carry: RangeCheckRelation,
     pub mul_limb: ProjectiveRcbMulLimbRelation,
     pub raw_product_chunk_digit: ProjectiveRcbRawProductChunkDigitRelation,
@@ -57,6 +58,7 @@ impl ProjectiveRcbMulComponentRelations {
     pub fn draw(channel: &mut impl Channel) -> Self {
         Self {
             range13: RangeCheckRelation::draw(channel),
+            raw_product_carry16: RangeCheckRelation::draw(channel),
             signed_carry: RangeCheckRelation::draw(channel),
             mul_limb: ProjectiveRcbMulLimbRelation::draw(channel),
             raw_product_chunk_digit: ProjectiveRcbRawProductChunkDigitRelation::draw(channel),
@@ -69,6 +71,7 @@ impl ProjectiveRcbMulComponentRelations {
     pub fn dummy() -> Self {
         Self {
             range13: RangeCheckRelation::dummy(),
+            raw_product_carry16: RangeCheckRelation::dummy(),
             signed_carry: RangeCheckRelation::dummy(),
             mul_limb: ProjectiveRcbMulLimbRelation::dummy(),
             raw_product_chunk_digit: ProjectiveRcbRawProductChunkDigitRelation::dummy(),
@@ -81,6 +84,7 @@ impl ProjectiveRcbMulComponentRelations {
     pub fn as_refs(&self) -> ProjectiveRcbMulRelations<'_> {
         ProjectiveRcbMulRelations {
             range13: &self.range13,
+            raw_product_carry16: &self.raw_product_carry16,
             signed_carry: &self.signed_carry,
             mul_limb: &self.mul_limb,
             raw_product_chunk_digit: &self.raw_product_chunk_digit,
@@ -94,6 +98,7 @@ impl ProjectiveRcbMulComponentRelations {
 #[derive(Clone, Copy)]
 pub struct ProjectiveRcbMulRelations<'a> {
     pub range13: &'a RangeCheckRelation,
+    pub raw_product_carry16: &'a RangeCheckRelation,
     pub signed_carry: &'a RangeCheckRelation,
     pub mul_limb: &'a ProjectiveRcbMulLimbRelation,
     pub raw_product_chunk_digit: &'a ProjectiveRcbRawProductChunkDigitRelation,

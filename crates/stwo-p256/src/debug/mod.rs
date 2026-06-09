@@ -186,6 +186,10 @@ pub fn track_projective_rcb_air_relation_entries(
     ));
     entries.extend(add_to_relation_entries(&components.folded_digit, &trace));
     entries.extend(add_to_relation_entries(&components.range13, &trace));
+    entries.extend(add_to_relation_entries(
+        &components.raw_product_carry16,
+        &trace,
+    ));
     entries.extend(add_to_relation_entries(&components.signed_carry, &trace));
     entries
 }
@@ -281,6 +285,9 @@ fn assert_projective_components(
 
     println!("projective_rcb_range13");
     assert_component(&components.range13, &trace);
+
+    println!("projective_rcb_raw_product_carry16");
+    assert_component(&components.raw_product_carry16, &trace);
 
     println!("projective_rcb_signed_carry");
     assert_component(&components.signed_carry, &trace);
