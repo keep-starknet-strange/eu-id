@@ -145,13 +145,6 @@ pub struct FpSolinasCorrectionDigitColumns<E: EvalAtRow> {
     pub sign_bit: E::F,
 }
 
-/// `j`-th 13-bit limb of the constant P-256 modulus. Each limb is `< 2¹³`, so
-/// it is already a canonical M31 constant usable as a convolution coefficient.
-fn fp_solinas_modulus_limb(j: usize) -> M31 {
-    let modulus = P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_MODULUS));
-    modulus.limbs()[j]
-}
-
 /// Bind the free `correction_product_digit` columns to the constrained
 /// convolution of range-checked 13-bit correction digits with the constant
 /// P-256 modulus limbs, closing C1.
@@ -165,7 +158,7 @@ fn fp_solinas_modulus_limb(j: usize) -> M31 {
 ///    where `MOD[j]` are the constant modulus limbs.
 ///
 /// The convolution term has degree two (`sign × digit`); gated it is degree
-/// three, matching the existing per-row carry-boolean constraint and fitting
+/// three, matching the sign-bit boolean constraint above and fitting
 /// the `log_size + 1` constraint-degree bound, so no auxiliary `signed_digit`
 /// columns are required.
 pub fn add_fp_solinas_correction_digit_binding<E: EvalAtRow>(
@@ -188,6 +181,11 @@ pub fn add_fp_solinas_correction_digit_binding<E: EvalAtRow>(
     let sign = E::F::from(M31::from_u32_unchecked(1))
         - correction.sign_bit.clone() - correction.sign_bit.clone();
 
+    // Constant P-256 modulus limbs (`< 2¹³`, canonical M31), hoisted out of the
+    // convolution loop. `mod_limbs[j]` is the `j`-th 13-bit limb.
+    let modulus = P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_MODULUS));
+    let mod_limbs = modulus.limbs();
+
     for (d, product_digit) in product_digits.iter().enumerate() {
         let mut convolution = E::F::from(M31::from_u32_unchecked(0));
         for (i, digit) in correction.digits.iter().enumerate() {
@@ -195,7 +193,7 @@ pub fn add_fp_solinas_correction_digit_binding<E: EvalAtRow>(
             if d < i || d - i >= N_LIMBS {
                 continue;
             }
-            convolution += digit.clone() * E::F::from(fp_solinas_modulus_limb(d - i));
+            convolution += digit.clone() * E::F::from(mod_limbs[d - i]);
         }
         eval.add_constraint(gate.clone() * (product_digit.clone() - sign.clone() * convolution));
     }

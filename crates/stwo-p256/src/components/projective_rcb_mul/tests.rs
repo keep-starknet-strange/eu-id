@@ -249,6 +249,10 @@ impl EvalAtRow for RecordingMulEvaluator<'_> {
 /// Returns whether every polynomial constraint of the mul component holds on all
 /// active rows of `claim`'s base trace. Drives the real
 /// [`ProjectiveRcbMulEval::evaluate`] logic via [`RecordingMulEvaluator`].
+///
+/// This validates the *polynomial* constraints only; LogUp/range-lookup balance
+/// is covered separately by
+/// `projective_rcb_air_range_lookup_consumers_balance_with_providers`.
 fn mul_component_constraints_hold(claim: &ProjectiveRcbAirTraceClaim) -> bool {
     let log_size = claim.component_log_sizes().mul;
     let base = gen_projective_rcb_mul_base_trace(claim, log_size)
@@ -293,7 +297,7 @@ fn mul_component_constraints_hold(claim: &ProjectiveRcbAirTraceClaim) -> bool {
 /// `result_limb` (-1) on one reduction digit. Pre-fix this is ACCEPTED
 /// (demonstrating C1); post-fix the convolution-pin constraint REJECTS it.
 #[test]
-fn solinas_reduction_rejects_out_of_range_correction_digit() {
+fn solinas_reduction_rejects_forged_correction_product_digit() {
     let trace = one_row_trace(ProjectiveEcOp::Double, PreparedAffinePoint::infinity());
     let honest =
         ProjectiveRcbAirTraceClaim::from_projective_trace(&trace).expect("valid RCB AIR trace");
