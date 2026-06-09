@@ -111,7 +111,44 @@ rtk git commit -m "fix(p256): range-check Solinas correction digit (close C1 fre
 
 ---
 
-## C5 BUILD — B2 DESIGN (APPROVED 2026-06-09; supersedes the B1 Phase 2–3 below)
+## C5 BUILD — AFFINE PIVOT (APPROVED 2026-06-09; supersedes the B2 and B1 designs below)
+
+**Decision (after studying Garaga `~/garaga`):** Garaga's production verifier uses fake-GLV + an **affine** windowed ladder (~5 muls/op), having *shelved* its own ECIP/divisor argument as fragile. Replace eu-id's projective RCB ladder (13 muls/op) with a Garaga-style **affine fake-GLV ladder** reusing `final_add`'s proven affine add/double gadget. **Soundness:** `dx·dx_inv=1` makes `x1=x2` collisions UNPROVABLE (the AIR analogue of Garaga's revert); **completeness** rests on the √n bound (`|s1|,|s2|<2¹²⁸`, which MUST be range-checked in-AIR) + the scalar relation `s1+k·s2≡0 (mod n)` (already in-AIR via ScalarModMul). The C5-2a affine-normalization blocker DISSOLVES (affine ops yield affine output directly — no `affine·z≡proj` mul). C1 stays (Solinas reduction is used by the affine muls). One honest tradeoff: affine is complete *under the standard curve-hardness assumption* (collisions cryptographically unreachable) — the field-standard, audited approach; projective's unconditional completeness was overkill.
+
+### Reuse / Delete / Build
+- **REUSE:** `final_add` gadget (extract to a shared `affine_ec_op` module), `add_projective_rcb_mul_row` + Solinas (C1 lives here), windowing/selector/prepared-table/scalar-decomposition/`ScalarModMul`, chain continuity + `r3` pin, `PreparedAffinePoint`/`PreparedTableEcEvalPoint` (already affine).
+- **DELETE (only after the new ladder is verified):** the silo COMPONENT (`ProjectiveRcbMulEval` that proves `ProjectiveEcRow`), `curve/projective.rs` (`ProjectiveEcRow`/`rcb_double`/`rcb_mixed_add`/`ProjectivePoint`), `lib.rs mod projective`, `components/fake_glv/ec_source/`, prepared_table's projective-source eval, C5-1's `ProjectiveRcbMulResultRelation`+`ConsumedMulLimbs`. **KEEP** the `add_projective_rcb_mul_row` builder + its raw-product/folded-digit sub-components (used by final_add/public_key_curve/new ladder).
+- **BUILD:** shared `affine_ec_op` module; new `fake_glv/affine_ladder/` component (per-op affine add/double, **x3 AND y3**, `dx_inv` witness, distinct/double branches); prepared-table affine-op consumer; in-AIR s1/s2/q range checks.
+
+### Key facts
+- `final_add` = 4 muls/op (proves only x3, since x(R)=x(−R)). The ladder chains full points → needs **y3** too → Add≈4, Double≈5 muls/op. New `add_y3_reduction` helper (analogue of `add_x3_reduction`); **air-writer review required**.
+- The √n bound is currently NATIVE-ONLY (`require_128_bit_bound` in `FakeGlvScalarHintRow::verify`, `scalar/air.rs:386`) — ZERO in-AIR range checks. MUST add (load-bearing for completeness).
+- Doublings (deterministic `2·acc`, `4·acc`) use the `double_add` branch; mixed-adds use `distinct_add`; `dx·dx_inv=1` rejects any collision.
+- Prepared-table multiples are computed natively and only *pinned* for 3G/R3/canonical — their intermediate arithmetic was ALSO routed to the silo (same C5 hole) → Task 5 required.
+
+### Tasks (TDD; each verified by `cargo check` + `monolithic_relation_audit_is_balanced_and_fully_linked` + the monolithic proof + a targeted forgery test)
+1. **Extract `affine_ec_op`** from `final_add/air.rs` into a shared module; refactor `final_add` to call it. Pure refactor — verify final_add tests + monolithic unchanged.
+2. **In-AIR s1/s2/q range checks** (`scalar/air.rs`: range-check all 10 limbs of each, top limb capped so total `<2¹²⁸`, mirroring `require_128_bit_bound`) + balance wiring. Forgery test: an out-of-2¹²⁸ `s2` decomposition now rejects (red→green).
+3. **New `affine_ladder` mul-provider** (mirror `FinalAddMulEval` + sub-components), wired ALONGSIDE the silo. Verify: builds, monolithic still proves (silo still authoritative).
+4. **New `affine_ladder` check eval**: constrain `acc_after = op(acc_before, operand)` with x3+y3, the `dx_inv` non-degeneracy witness, `distinct_add`/`double_add` branches. Forgery test: a forged `acc_after` x or y limb rejects.
+5. **prepared-table affine-op consumer** for the table multiples (DoubleP/AddP2P/DoubleR/AddR2R/Base/Table16). Forgery test: a forged table multiple rejects. (Confirm which table entries are pinned (no arithmetic) vs computed.)
+6. **Rewire operand sources** (continuity/expansion → the new component); confirm `r3`/`final_check` output binding intact. Verify monolithic + the existing R-forgery test.
+7. **Delete** the silo component + `projective_ec_trace` + C5-1 link + both old projective sources; **remove** balance entries `FakeGlvProjectiveSource`, `PreparedTableProjectiveSource`, `ProjectiveRcbMulResult`, `ProjectiveRcbAirProofSlice`, and the `prepared_table_projective_source.provider_claimed_sum` terms in `PreparedTablePinned{Consistency,Breakdown}`; **remove** the `ProjectiveRcbMulResult` liveness witness; **ADD** the new affine-ladder-op relation's balance + liveness. Verify relation audit balanced + fully-linked, monolithic, full forgery suite.
+8. **Soundness sweep**: re-run C1/C5 forgery tests; add a collision-attempt test (ladder fed `acc=operand` on a non-double step must be unprovable via `dx_inv`).
+
+### Deletion sequencing (no broken intermediate)
+Tasks 1→6 keep the silo LIVE (still authoritative) while the affine ladder is built and verified alongside it; only Task 7 removes the silo + its balances once the affine ladder fully replaces its role. C5-1's link (commit 669a8e6) stays live until Task 7 (deleting it earlier would leave silo muls provided-but-unconsumed → imbalance).
+
+### Risks
+- Prepared-table intermediate ops need affine constraints (Task 5, confirmed required); some entries may be fully pinned (no arithmetic) — verify.
+- y3 mul + `add_y3_reduction` is new soundness-critical code — air-writer review.
+- √n completeness edge for table doublings — verify each op's branch (double vs distinct) matches the native computation.
+- Liveness for the new link must be gated to active certs only.
+- **C2** (scalar-mod-mul AB top digit) remains open — orthogonal to this pivot.
+
+---
+
+## C5 BUILD — B2 DESIGN (SUPERSEDED by the AFFINE PIVOT above; kept for history)
 
 Investigation findings that reshape the build:
 - **Mul count is 13 per op** (`PROJECTIVE_RCB_MAX_MUL_ROWS_PER_OP = 13`; 13 Double + 13 MixedAdd slots in the `ProjectiveRcbMulStep` enum, trace.rs:1991), NOT 6/11.
