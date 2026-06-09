@@ -32,6 +32,10 @@ use crate::range_checks::{
 use super::double_formula::{
     bind_double_formula, DoubleFormulaColumns, DOUBLE_FORMULA_COLUMNS, DOUBLE_TOTAL_REDUCTIONS,
 };
+use super::mixed_add_formula::{
+    bind_mixed_add_formula, MixedAddFormulaColumns, MIXED_ADD_FORMULA_COLUMNS,
+    MIXED_ADD_TOTAL_REDUCTIONS,
+};
 
 /// Signed-carry preprocessed-column namespace for the fake-GLV projective-source
 /// Double-formula reductions. Reuses the projective-RCB equation so the shared
@@ -64,17 +68,24 @@ pub const FAKE_GLV_PRIMITIVE_EC_ROW_RELATION_ARITY: usize = 4 + 3 * PREPARED_TAB
 pub const FAKE_GLV_PRIMITIVE_EC_SOURCE_TRACE_COLUMNS: usize =
     1 + FAKE_GLV_PRIMITIVE_EC_ROW_RELATION_ARITY;
 /// Consumer base-trace width: the provider columns PLUS the C5 consumed-mul
-/// block (`has_muls` flag + the mul-limb columns) PLUS the C5-2 Double-formula
-/// block (`x3,y3,z3` working values + per-reduction quotient/carry witnesses),
-/// each appended LAST so the existing relation-value column offsets are
-/// unchanged.
+/// block (`has_muls` flag + the mul-limb columns) PLUS the C5-2a Double-formula
+/// block PLUS the C5-2b MixedAdd-formula block (each `x3,y3,z3` working values +
+/// per-reduction quotient/carry witnesses), all appended LAST so the existing
+/// relation-value column offsets are unchanged.
 pub const FAKE_GLV_PROJECTIVE_SOURCE_CONSUMER_TRACE_COLUMNS: usize =
-    FAKE_GLV_PRIMITIVE_EC_SOURCE_TRACE_COLUMNS + CONSUMED_MUL_LIMBS_COLUMNS + DOUBLE_FORMULA_COLUMNS;
-/// Column index where the C5-2 Double-formula block begins (after the
+    FAKE_GLV_PRIMITIVE_EC_SOURCE_TRACE_COLUMNS
+        + CONSUMED_MUL_LIMBS_COLUMNS
+        + DOUBLE_FORMULA_COLUMNS
+        + MIXED_ADD_FORMULA_COLUMNS;
+/// Column index where the C5-2a Double-formula block begins (after the
 /// consumed-mul block). The first `N_LIMBS` columns are the `x3` working value
 /// (then `y3`, `z3`, then the reduction witnesses).
 pub const FAKE_GLV_PROJECTIVE_DOUBLE_FORMULA_OFFSET: usize =
     FAKE_GLV_PRIMITIVE_EC_SOURCE_TRACE_COLUMNS + CONSUMED_MUL_LIMBS_COLUMNS;
+/// Column index where the C5-2b MixedAdd-formula block begins (right after the
+/// Double-formula block).
+pub const FAKE_GLV_PROJECTIVE_MIXED_ADD_FORMULA_OFFSET: usize =
+    FAKE_GLV_PROJECTIVE_DOUBLE_FORMULA_OFFSET + DOUBLE_FORMULA_COLUMNS;
 /// Column index of the consumed-mul block's `has_muls` flag (the limb columns
 /// follow at `+ 1`).
 const FAKE_GLV_PRIMITIVE_EC_HAS_MULS_COL: usize = FAKE_GLV_PRIMITIVE_EC_SOURCE_TRACE_COLUMNS;
@@ -431,10 +442,12 @@ impl FrameworkEval for FakeGlvProjectiveSourceEval {
         // equal to the silo's proven values; C5-2 (below) binds their operands
         // and the output to the Double-op coordinate formula.
         let consumed_muls = ConsumedMulLimbs::<E>::read(&mut eval);
-        // C5-2: the Double-formula working values + reduction witnesses, read
-        // LAST (matching the base-trace layout appended after the consumed-mul
-        // block).
+        // C5-2a: the Double-formula working values + reduction witnesses, read
+        // after the consumed-mul block.
         let double_columns = DoubleFormulaColumns::<E>::read(&mut eval);
+        // C5-2b: the MixedAdd-formula working values + reduction witnesses, read
+        // LAST (matching the base-trace layout appended after the Double block).
+        let mixed_columns = MixedAddFormulaColumns::<E>::read(&mut eval);
         let one = E::F::from(M31::from_u32_unchecked(1));
 
         eval.add_constraint(active.clone() * (active.clone() - one.clone()));
@@ -523,6 +536,61 @@ impl FrameworkEval for FakeGlvProjectiveSourceEval {
             eval.add_constraint(not_double.clone() * reduction.q.clone());
             for carry in &reduction.carries {
                 eval.add_constraint(not_double.clone() * carry.clone());
+            }
+        }
+
+        // C5-2b: constrain the MixedAdd-op coordinate formula. `mixed_active`
+        // (= active·(1−op)) is 1 only on active MixedAdd rows (op==0 ==
+        // MixedAdd); Double (op==1) and padding (active==0) are unaffected. The
+        // formula itself is additionally gated by `has_muls` inside the binder
+        // (an infinity-operand MixedAdd is a 0-mul no-op constrained `output =
+        // lhs`).
+        let mixed_active = active.clone() * (one.clone() - op.clone());
+        bind_mixed_add_formula(
+            &mut eval,
+            &mixed_active,
+            &active,
+            &rhs.inf(),
+            &lhs.x_bigint(),
+            &lhs.y_bigint(),
+            &rhs.x_bigint(),
+            &rhs.y_bigint(),
+            &lhs.inf(),
+            &output.x_bigint(),
+            &output.y_bigint(),
+            &output.inf(),
+            &muls_view,
+            &mixed_columns,
+            &self.range13,
+        );
+        // Range-check (use) the MixedAdd reduction carries against the
+        // consumer-local signed-carry table (gated `active`, fixed count), and
+        // force the MixedAdd working values + reduction witnesses to zero on
+        // non-MixedAdd / padding rows.
+        for reduction in &mixed_columns.reductions {
+            for carry in &reduction.carries {
+                crate::range_checks::add_range_check(
+                    &mut eval,
+                    &self.signed_carry,
+                    active.clone(),
+                    carry.clone(),
+                );
+            }
+        }
+        let not_mixed = one.clone() - mixed_active.clone();
+        for value in mixed_columns
+            .x3
+            .limbs()
+            .iter()
+            .chain(mixed_columns.y3.limbs())
+            .chain(mixed_columns.z3.limbs())
+        {
+            eval.add_constraint(not_mixed.clone() * value.clone());
+        }
+        for reduction in &mixed_columns.reductions {
+            eval.add_constraint(not_mixed.clone() * reduction.q.clone());
+            for carry in &reduction.carries {
+                eval.add_constraint(not_mixed.clone() * carry.clone());
             }
         }
         eval.finalize_logup();
@@ -723,30 +791,42 @@ pub(crate) fn gen_fake_glv_projective_source_consumer_interaction_trace(
             }
         }
     }
-    // C5-2: Range13 USE columns (one per fraction, `+active`), in the SAME order
-    // `bind_double_formula` emits them: lhs.x, lhs.y, output.x, output.y limbs,
-    // then x3, y3, z3 working-value limbs.
-    for base_col in double_formula_range13_use_columns() {
-        let mut col = logup.new_col();
-        for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
-            let active = PackedQM31::from(base[0].data[vec_row]);
-            let limb = base[base_col].data[vec_row];
-            col.write_frac(vec_row, active, range13_relation.combine(&[limb]));
+    // The C5-2 USE columns are emitted in the EXACT order the consumer AIR's
+    // single (unbatched) `finalize_logup` accumulates them — one interaction
+    // column per `add_to_relation` fraction, in call order:
+    //   Double range13, Double signed-carry, MixedAdd range13, MixedAdd
+    //   signed-carry.
+    // (Within each formula the AIR emits its range13 coord/working checks first,
+    // then its reduction-carry signed-carry checks.) Any reordering would break
+    // the per-column cumulative-sum constraint.
+    let emit_range13_uses = |logup: &mut LogupTraceGenerator, cols: Vec<usize>| {
+        for base_col in cols {
+            let mut col = logup.new_col();
+            for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+                let active = PackedQM31::from(base[0].data[vec_row]);
+                let limb = base[base_col].data[vec_row];
+                col.write_frac(vec_row, active, range13_relation.combine(&[limb]));
+            }
+            col.finalize_col();
         }
-        col.finalize_col();
-    }
-
-    // C5-2: signed-carry USE columns (one per fraction, `+active`), in the SAME
-    // order the consumer AIR emits them: reduction slot outer, carry limb inner.
-    for carry_col in double_formula_signed_carry_use_columns() {
-        let mut col = logup.new_col();
-        for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
-            let active = PackedQM31::from(base[0].data[vec_row]);
-            let carry = base[carry_col].data[vec_row];
-            col.write_frac(vec_row, active, signed_carry_relation.combine(&[carry]));
+    };
+    let emit_signed_carry_uses = |logup: &mut LogupTraceGenerator, cols: Vec<usize>| {
+        for carry_col in cols {
+            let mut col = logup.new_col();
+            for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+                let active = PackedQM31::from(base[0].data[vec_row]);
+                let carry = base[carry_col].data[vec_row];
+                col.write_frac(vec_row, active, signed_carry_relation.combine(&[carry]));
+            }
+            col.finalize_col();
         }
-        col.finalize_col();
-    }
+    };
+    // C5-2a (Double): range13 then signed-carry.
+    emit_range13_uses(&mut logup, double_formula_range13_use_columns());
+    emit_signed_carry_uses(&mut logup, double_formula_signed_carry_use_columns());
+    // C5-2b (MixedAdd): range13 then signed-carry.
+    emit_range13_uses(&mut logup, mixed_add_formula_range13_use_columns());
+    emit_signed_carry_uses(&mut logup, mixed_add_formula_signed_carry_use_columns());
 
     let (columns, _total) = logup.finalize_last();
 
@@ -756,16 +836,15 @@ pub(crate) fn gen_fake_glv_projective_source_consumer_interaction_trace(
     // independently.
     let (ec_row_sum, mul_result_sum) =
         fake_glv_projective_source_consumer_sums(base, ec_row_relation, mul_result_relation);
-    let range13_use_sum = sum_use_fractions(
-        base,
-        range13_relation,
-        double_formula_range13_use_columns(),
-    );
-    let signed_carry_use_sum = sum_use_fractions(
-        base,
-        signed_carry_relation,
-        double_formula_signed_carry_use_columns(),
-    );
+    // The analytic use sums net the provider yield; they are plain sums over the
+    // SAME multiset of USE columns the interaction trace emits (Double + MixedAdd
+    // for each relation). Order is irrelevant for a sum.
+    let mut range13_use_cols = double_formula_range13_use_columns();
+    range13_use_cols.extend(mixed_add_formula_range13_use_columns());
+    let range13_use_sum = sum_use_fractions(base, range13_relation, range13_use_cols);
+    let mut signed_carry_use_cols = double_formula_signed_carry_use_columns();
+    signed_carry_use_cols.extend(mixed_add_formula_signed_carry_use_columns());
+    let signed_carry_use_sum = sum_use_fractions(base, signed_carry_relation, signed_carry_use_cols);
     FakeGlvProjectiveSourceConsumerInteraction {
         columns,
         ec_row_sum,
@@ -819,21 +898,75 @@ fn double_formula_signed_carry_use_columns() -> Vec<usize> {
     cols
 }
 
+/// Base-trace column indices the Range13 USES read for the MixedAdd formula, in
+/// `bind_mixed_add_formula` emission order: lhs.x, lhs.y, rhs.x, rhs.y, output.x,
+/// output.y limbs, then x3, y3, z3 working-value limbs. (MixedAdd reads both
+/// affine operands, hence the extra rhs pair vs the Double list.)
+fn mixed_add_formula_range13_use_columns() -> Vec<usize> {
+    let lhs_x = 5; // after [active, source_index, sig_id, cert_id, op]
+    let lhs_y = lhs_x + N_LIMBS;
+    let rhs_x = 5 + PREPARED_TABLE_EC_POINT_COLUMNS;
+    let rhs_y = rhs_x + N_LIMBS;
+    let output_x = 5 + 2 * PREPARED_TABLE_EC_POINT_COLUMNS;
+    let output_y = output_x + N_LIMBS;
+    // x3, y3, z3 are the first 3·N_LIMBS columns of the MixedAdd-formula block.
+    let x3 = FAKE_GLV_PROJECTIVE_MIXED_ADD_FORMULA_OFFSET;
+    let mut cols = Vec::with_capacity(9 * N_LIMBS);
+    for start in [
+        lhs_x,
+        lhs_y,
+        rhs_x,
+        rhs_y,
+        output_x,
+        output_y,
+        x3,
+        x3 + N_LIMBS,
+        x3 + 2 * N_LIMBS,
+    ] {
+        for limb in 0..N_LIMBS {
+            cols.push(start + limb);
+        }
+    }
+    cols
+}
+
+/// Base-trace column indices the signed-carry USES read for the MixedAdd
+/// formula, in consumer-AIR emission order (reduction slot outer, carry limb
+/// inner). The MixedAdd-formula block layout is `x3,y3,z3` (3·N_LIMBS) then per
+/// reduction `(q, carries)`.
+fn mixed_add_formula_signed_carry_use_columns() -> Vec<usize> {
+    let block = FAKE_GLV_PROJECTIVE_MIXED_ADD_FORMULA_OFFSET;
+    let reductions_start = block + 3 * N_LIMBS;
+    let mut cols = Vec::with_capacity(MIXED_ADD_TOTAL_REDUCTIONS * N_LIMBS);
+    for slot in 0..MIXED_ADD_TOTAL_REDUCTIONS {
+        let q_col = reductions_start + slot * (1 + N_LIMBS);
+        for limb in 0..N_LIMBS {
+            cols.push(q_col + 1 + limb); // skip the quotient column
+        }
+    }
+    cols
+}
+
 /// Range13 USE values the consumer base trace contributes (per active row): the
-/// `lhs.x, lhs.y, output.x, output.y, x3, y3, z3` limbs the Double formula
-/// range-checks. Fed into the self-contained Range13 provider's multiplicity.
+/// Double-formula limbs followed by the MixedAdd-formula limbs (every row checks
+/// BOTH blocks under `active`; the inactive block's limbs are zeroed off-op, so
+/// they range-check as `0`). Fed into the self-contained Range13 provider's
+/// multiplicity. Order is irrelevant here (this is a multiset for the provider).
 pub(crate) fn fake_glv_projective_source_range13_uses_from_base(base: &[M31ColumnEval]) -> Vec<M31> {
-    let columns = double_formula_range13_use_columns();
+    let mut columns = double_formula_range13_use_columns();
+    columns.extend(mixed_add_formula_range13_use_columns());
     collect_active_use_values(base, &columns)
 }
 
 /// signed-carry USE values (decoded `i64`) the consumer base trace contributes
-/// (per active row): every Double-formula reduction carry. Fed into the
-/// self-contained signed-carry provider's multiplicity.
+/// (per active row): every Double-formula reduction carry followed by every
+/// MixedAdd-formula reduction carry. Fed into the self-contained signed-carry
+/// provider's multiplicity.
 pub(crate) fn fake_glv_projective_source_signed_carry_uses_from_base(
     base: &[M31ColumnEval],
 ) -> Vec<i64> {
-    let columns = double_formula_signed_carry_use_columns();
+    let mut columns = double_formula_signed_carry_use_columns();
+    columns.extend(mixed_add_formula_signed_carry_use_columns());
     collect_active_use_values(base, &columns)
         .into_iter()
         .map(crate::range_checks::decode_signed_carry)
@@ -1022,9 +1155,10 @@ fn fake_glv_projective_source_trace_values(
         column += 1;
     }
     debug_assert_eq!(column, FAKE_GLV_PROJECTIVE_DOUBLE_FORMULA_OFFSET);
-    // C5-2: the Double-formula working values + reduction witnesses. Emitted only
-    // for Double rows (op == DOUBLE); MixedAdd / padding leave this block zero,
-    // matching the `double_active`-gated constraints + off-Double zero gates.
+    // C5-2a: the Double-formula working values + reduction witnesses. Emitted
+    // only for Double rows (op == DOUBLE); MixedAdd / padding leave this block
+    // zero, matching the `double_active`-gated constraints + off-Double zero
+    // gates.
     if row.op == crate::projective::ProjectiveEcOp::Double {
         let witness = super::double_formula::solve_double_formula_witness(
             &mul_limbs,
@@ -1037,6 +1171,43 @@ fn fake_glv_projective_source_trace_values(
         }
     } else {
         column += DOUBLE_FORMULA_COLUMNS;
+    }
+    debug_assert_eq!(column, FAKE_GLV_PROJECTIVE_MIXED_ADD_FORMULA_OFFSET);
+    // C5-2b: the MixedAdd-formula working values + reduction witnesses. Emitted
+    // only for FINITE-operand MixedAdd rows (op == MIXED_ADD && has_muls); an
+    // infinity-operand MixedAdd (`has_muls = 0`) is a 0-mul no-op whose formula
+    // is gated off — its block stays zero (the no-op `output = lhs` constraint
+    // needs no witness columns). Double / padding also leave this block zero,
+    // matching the `mixed_active·has_muls`-gated constraints + off-MixedAdd zero
+    // gates.
+    let is_mixed = row.op == crate::projective::ProjectiveEcOp::MixedAdd;
+    if is_mixed && has_muls {
+        let witness = super::mixed_add_formula::solve_mixed_add_formula_witness(
+            &mul_limbs,
+            &row.output_projective,
+        )
+        .ok_or(FakeGlvChainError::ProjectiveSourceInvalid)?;
+        // `mixed_add_formula_trace_values` already writes the two witnessed gate
+        // columns as `(mixed_active, formula_gate) = (1, 1)` for this finite-mul
+        // MixedAdd row.
+        for value in super::mixed_add_formula::mixed_add_formula_trace_values(&witness) {
+            values[column] = value;
+            column += 1;
+        }
+    } else {
+        // No witness block (Double / padding / infinity-operand no-op MixedAdd):
+        // the x3/y3/z3 + reduction cells stay zero. But the two witnessed gate
+        // columns are constrained on EVERY row to `mixed_active = active·(1−op)`
+        // and `formula_gate = mixed_active·(1−rhs.inf)`, so they must be written
+        // here too: a no-op MixedAdd (op == MIXED_ADD, has_muls == false ⇔
+        // rhs.inf == 1) has `mixed_active = 1`, `formula_gate = 0`; a Double has
+        // both `0`. (Padding rows are produced by the all-zero `resize`, where
+        // `active = 0` ⇒ both gates `0`, matching the definition.)
+        let gate_base = column + super::mixed_add_formula::MIXED_ADD_GATE_OFFSET_IN_BLOCK;
+        let gates = super::mixed_add_formula::mixed_add_gate_trace_values(is_mixed, false);
+        values[gate_base] = gates[0];
+        values[gate_base + 1] = gates[1];
+        column += MIXED_ADD_FORMULA_COLUMNS;
     }
     debug_assert_eq!(column, FAKE_GLV_PROJECTIVE_SOURCE_CONSUMER_TRACE_COLUMNS);
     Ok(values)

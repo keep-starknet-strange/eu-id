@@ -207,7 +207,7 @@ fn current_p256_proof_pipeline_links_all_implemented_components() {
     assert_eq!(proof.claim.projective_rcb_air_trace.active_row_count(), 808);
     assert_eq!(
         proof.claim.projective_rcb_air_trace.mul_row_count(),
-        804 * 13
+        804 * 15
     );
     assert_eq!(
         proof.claim.projective_rcb_air_trace.reduction_row_count(),
@@ -315,7 +315,7 @@ fn current_p256_proof_pipeline_accepts_real_valid_signature_input() {
     assert_eq!(proof.claim.projective_rcb_air_trace.active_row_count(), 404);
     assert_eq!(
         proof.claim.projective_rcb_air_trace.mul_row_count(),
-        402 * 13
+        402 * 15
     );
     assert_eq!(
         proof.claim.projective_rcb_air_trace.reduction_row_count(),
@@ -1378,6 +1378,46 @@ fn current_p256_monolithic_rejects_forged_double_op_output() {
             }
         ),
         "expected FakeGlvProjectiveSource imbalance from forged Double output, got {err:?}"
+    );
+}
+
+/// C5-2b sibling of `current_p256_monolithic_rejects_forged_double_op_output`,
+/// for the MixedAdd-op coordinate formula. The distinct branch (`u1 != u2`)
+/// drives the chain's DOUBLE/DOUBLE/ADD ladder, so the projective EC trace
+/// contains active MixedAdd ops (op-code 0). The forge target is the committed
+/// MixedAdd-op `output_affine.x` (limb 0) on the fake-GLV projective-source
+/// CONSUMER.
+///
+/// Oracle: the same per-relation LogUp balance. The committed `output.x`
+/// participates in the `FakeGlvProjectiveSource` EC-row relation (consumer use
+/// vs provider yield) AND, post-C5-2b, in the MixedAdd-formula `M13.lhs ==
+/// output.x` operand binding — so a forged `output.x` unbalances the EC-row
+/// relation. (The dedicated binding-isolating tests are C5-3; this is the
+/// end-to-end rejection.) A clean honest control runs first.
+#[test]
+fn current_p256_monolithic_rejects_forged_mixed_add_op_output() {
+    use crate::scalar::prepared_table::PREPARED_TABLE_EC_POINT_COLUMNS;
+
+    let op_col = 4usize;
+    let output_x0_col = 5 + 2 * PREPARED_TABLE_EC_POINT_COLUMNS;
+    let mixed_add_op =
+        M31::from_u32_unchecked(crate::scalar::prepared_table::PREPARED_TABLE_EC_OP_MIXED_ADD);
+
+    // Distinct branch (u1 != u2) so the ladder runs real mixed-adds.
+    let honest = forged_double_output_balance_outcome(7, 11, None);
+    honest.expect("honest distinct-branch proof balances");
+
+    let err =
+        forged_double_output_balance_outcome(7, 11, Some((op_col, output_x0_col, mixed_add_op)))
+            .expect_err("forged MixedAdd-op output.x must be rejected by the monolithic AIR");
+    assert!(
+        matches!(
+            err,
+            P256ProofError::RelationImbalance {
+                relation: "FakeGlvProjectiveSource"
+            }
+        ),
+        "expected FakeGlvProjectiveSource imbalance from forged MixedAdd output, got {err:?}"
     );
 }
 

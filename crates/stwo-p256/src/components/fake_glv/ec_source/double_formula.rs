@@ -58,10 +58,13 @@
 //! The operand's only downstream use is as a factor in the silo product
 //! `result = lhs·rhs (mod p)`, which depends only on the operand's value mod p,
 //! so a non-canonical representative is harmless — exactly the basis on which
-//! `final_add` binds its (also non-canonical) operands. The signed-carry range
-//! check pins `q` to its small honest window (a `q`-shift by the field modulus
-//! would force out-of-range carries), so no explicit `q`-range product
-//! constraint is needed.
+//! `final_add` binds its (also non-canonical) operands. `q` is pinned only
+//! TRANSITIVELY, not directly: the per-limb recurrence has the shape
+//! `… − q·p_i + prev_carry − 2^13·carry_i = 0` with the carries range-checked
+//! and the operands 13-bit-bounded, so a `q` outside its small honest window
+//! cannot close the carry chain (it would force an out-of-range carry). Hence
+//! no explicit `q`-range product constraint is needed — the carry range check
+//! plus 13-bit operands already constrain `q`.
 
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::EvalAtRow;
@@ -130,16 +133,23 @@ impl<E: EvalAtRow> DoubleFormulaColumns<E> {
 pub(crate) const DOUBLE_FORMULA_COLUMNS: usize =
     3 * N_LIMBS + DOUBLE_TOTAL_REDUCTIONS * (1 + N_LIMBS);
 
-fn read_bigint<E: EvalAtRow>(eval: &mut E) -> P256EvalBigInt<E> {
+pub(crate) fn read_bigint<E: EvalAtRow>(eval: &mut E) -> P256EvalBigInt<E> {
     P256EvalBigInt::<E>::from_limbs(core::array::from_fn(|_| eval.next_trace_mask()))
 }
 
-fn modulus_bigint() -> P256M31BigInt {
+pub(crate) fn modulus_bigint() -> P256M31BigInt {
     P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_MODULUS))
 }
 
-fn curve_b_bigint() -> P256M31BigInt {
+pub(crate) fn curve_b_bigint() -> P256M31BigInt {
     P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_B))
+}
+
+/// The reduced field constant `1` as a [`P256M31BigInt`] (= the projective `z`
+/// coordinate of any affine accumulator, since the consumer's `lhs`/`rhs` are
+/// affine points lifted with `z = 1`).
+pub(crate) fn one_bigint() -> P256M31BigInt {
+    P256M31BigInt::from_u256(&U256::from_le_u64s(&[1, 0, 0, 0]))
 }
 
 fn fixed_limb<E: EvalAtRow>(value: &P256M31BigInt, index: usize) -> E::F {
@@ -212,7 +222,7 @@ fn signed_coeff_mul<E: EvalAtRow>(coeff: i64, limb: E::F) -> E::F {
 /// Limb-wise equality `target == src` over all `N_LIMBS` limbs, gated. Used for
 /// the operand bindings whose combo is a single reduced source with coefficient
 /// `+1` (the silo and the source are then equal as integers, degree 1).
-fn bind_equal<E: EvalAtRow>(
+pub(crate) fn bind_equal<E: EvalAtRow>(
     eval: &mut E,
     gate: &E::F,
     target: &P256EvalBigInt<E>,
@@ -225,7 +235,7 @@ fn bind_equal<E: EvalAtRow>(
 
 /// A reduced field constant (`1`, `b`) materialized as a [`P256EvalBigInt`] so
 /// it can be a [`bind_equal`] source.
-fn constant_bigint<E: EvalAtRow>(value: &P256M31BigInt) -> P256EvalBigInt<E> {
+pub(crate) fn constant_bigint<E: EvalAtRow>(value: &P256M31BigInt) -> P256EvalBigInt<E> {
     P256EvalBigInt::<E>::from_limbs(core::array::from_fn(|i| E::F::from(value.limbs()[i])))
 }
 
@@ -371,7 +381,7 @@ pub(crate) fn bind_double_formula<E: EvalAtRow>(
     }
 }
 
-fn term<'a, E: EvalAtRow>(coeff: i64, src: &'a P256EvalBigInt<E>) -> ComboTerm<'a, E> {
+pub(crate) fn term<'a, E: EvalAtRow>(coeff: i64, src: &'a P256EvalBigInt<E>) -> ComboTerm<'a, E> {
     ComboTerm { coeff, src }
 }
 
@@ -393,9 +403,9 @@ pub(crate) struct DoubleFormulaWitness {
 }
 
 /// One M31 reduction source term `coeff · src`.
-struct M31Term<'a> {
-    coeff: i64,
-    src: &'a P256M31BigInt,
+pub(crate) struct M31Term<'a> {
+    pub coeff: i64,
+    pub src: &'a P256M31BigInt,
 }
 
 /// Solve `Σ coeff_j·src_j ≡ target (mod p)` for the signed quotient `q` and the
@@ -403,7 +413,7 @@ struct M31Term<'a> {
 /// prev − 2^13·carry_i = 0`, final carry 0. `q` is determined as
 /// `(Σcoeff·src_value − target_value) / p`; we then verify the carry chain
 /// closes. Returns `None` if no valid `(q, carries)` exists (a prover bug).
-fn solve_combo_reduction(
+pub(crate) fn solve_combo_reduction(
     target: &P256M31BigInt,
     terms: &[M31Term<'_>],
     modulus: &P256M31BigInt,
