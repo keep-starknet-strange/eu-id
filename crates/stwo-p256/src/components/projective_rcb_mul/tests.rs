@@ -190,6 +190,151 @@ fn prove_and_verify_raw_product_chunk_component(claim: &ProjectiveRcbAirTraceCla
     .expect("raw product chunk component verifies");
 }
 
+/// Minimal recording `EvalAtRow` that evaluates the *polynomial* constraints of
+/// a component over one committed base-trace row and collects each constraint's
+/// value instead of asserting it is zero. LogUp relations are skipped (the C1
+/// pin is a pure polynomial constraint), so there is no `LogupAtRow` and hence
+/// no double-panic-on-failure abort — failures are observable as a non-zero
+/// recorded value rather than an uncatchable `SIGABRT`.
+struct RecordingMulEvaluator<'a> {
+    base: &'a [Vec<M31>],
+    col_index: usize,
+    row: usize,
+    constraints: Vec<SecureField>,
+}
+
+impl EvalAtRow for RecordingMulEvaluator<'_> {
+    type F = M31;
+    type EF = SecureField;
+
+    fn next_interaction_mask<const N: usize>(
+        &mut self,
+        interaction: usize,
+        offsets: [isize; N],
+    ) -> [Self::F; N] {
+        // The mul component reads only same-row base-trace masks.
+        assert_eq!(interaction, 1, "mul component reads only the base trace");
+        let col = self.col_index;
+        self.col_index += 1;
+        offsets.map(|offset| {
+            assert_eq!(offset, 0, "mul component reads only offset-0 masks");
+            self.base[col][self.row]
+        })
+    }
+
+    fn add_constraint<G>(&mut self, constraint: G)
+    where
+        Self::EF: std::ops::Mul<G, Output = Self::EF> + From<G>,
+    {
+        self.constraints.push(Self::EF::from(constraint));
+    }
+
+    fn combine_ef(values: [Self::F; 4]) -> Self::EF {
+        SecureField::from_m31_array(values)
+    }
+
+    // LogUp is irrelevant to the polynomial C1 pin; skip it so no LogupAtRow is
+    // constructed (its Drop would otherwise abort on a failing-constraint panic).
+    fn add_to_relation<R: stwo_constraint_framework::Relation<Self::F, Self::EF>>(
+        &mut self,
+        _entry: stwo_constraint_framework::RelationEntry<'_, Self::F, Self::EF, R>,
+    ) {
+    }
+
+    fn finalize_logup(&mut self) {}
+
+    fn finalize_logup_in_pairs(&mut self) {}
+}
+
+/// Returns whether every polynomial constraint of the mul component holds on all
+/// active rows of `claim`'s base trace. Drives the real
+/// [`ProjectiveRcbMulEval::evaluate`] logic via [`RecordingMulEvaluator`].
+fn mul_component_constraints_hold(claim: &ProjectiveRcbAirTraceClaim) -> bool {
+    let log_size = claim.component_log_sizes().mul;
+    let base = gen_projective_rcb_mul_base_trace(claim, log_size)
+        .expect("mul base trace generates")
+        .into_iter()
+        .map(|column| column.to_cpu().values)
+        .collect::<Vec<_>>();
+    let row_count = 1usize << log_size;
+    for row in 0..row_count {
+        let eval = RecordingMulEvaluator {
+            base: &base,
+            col_index: 0,
+            row,
+            constraints: Vec::new(),
+        };
+        let eval = ProjectiveRcbMulEval {
+            log_size,
+            relations: ProjectiveRcbMulComponentRelations::dummy(),
+        }
+        .evaluate(eval);
+        if eval
+            .constraints
+            .iter()
+            .any(|value| *value != SecureField::zero())
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// C1 soundness regression: the committed `correction_product_digit` must be
+/// pinned to the convolution of range-checked 13-bit correction digits with the
+/// constant P-256 modulus limbs. Without that pin a malicious prover can forge
+/// `correction_product_digit` (compensating via `result_limb` so the per-digit
+/// reduction recurrence still holds) and have a FALSE Fp product reduce
+/// correctly — every Fp multiply, hence every ECDSA verification, becomes
+/// forgeable.
+///
+/// The forgery here keeps every range-checked column inside its table and keeps
+/// the recurrence satisfied, touching only `correction_product_digit` (+1) and
+/// `result_limb` (-1) on one reduction digit. Pre-fix this is ACCEPTED
+/// (demonstrating C1); post-fix the convolution-pin constraint REJECTS it.
+#[test]
+fn solinas_reduction_rejects_out_of_range_correction_digit() {
+    let trace = one_row_trace(ProjectiveEcOp::Double, PreparedAffinePoint::infinity());
+    let honest =
+        ProjectiveRcbAirTraceClaim::from_projective_trace(&trace).expect("valid RCB AIR trace");
+
+    assert!(
+        mul_component_constraints_hold(&honest),
+        "honest mul-component trace must satisfy all constraints"
+    );
+
+    // Forge one mul's reduction: shift a real product digit away from the
+    // convolution while compensating `result_limb` so the recurrence holds and
+    // `result_limb` stays a valid 13-bit value.
+    let mut forged = honest.clone();
+    let reduction = &mut forged.rows[0].muls[0].reduction;
+    let digit = reduction
+        .rows
+        .iter()
+        .position(|row| row.digit_index < N_LIMBS && row.result_limb >= 1)
+        .expect("a reduction digit with a positive result limb exists");
+    reduction.rows[digit].correction_product_digit += 1;
+    reduction.rows[digit].result_limb -= 1;
+
+    // The recurrence `folded - cpd - result_limb + prev_carry - 2^13*carry`
+    // is preserved by the (+1, -1) shift, so only the convolution pin can fire.
+    assert_eq!(
+        i128::from(forged.rows[0].muls[0].reduction.rows[digit].folded_digit)
+            - forged.rows[0].muls[0].reduction.rows[digit].correction_product_digit
+            - i128::from(forged.rows[0].muls[0].reduction.rows[digit].result_limb)
+            + forged.rows[0].muls[0].reduction.rows[digit].prev_carry
+            - crate::fp_solinas::FP_SOLINAS_LIMB_BASE
+                * forged.rows[0].muls[0].reduction.rows[digit].carry,
+        0,
+        "forged row must keep the reduction recurrence satisfied"
+    );
+
+    assert!(
+        !mul_component_constraints_hold(&forged),
+        "forged correction_product_digit must be rejected by the convolution pin (C1)"
+    );
+}
+
 fn prove_and_verify_mul_component(claim: &ProjectiveRcbAirTraceClaim) {
     let log_size = claim.component_log_sizes().mul;
     let mut ids_allocator = TraceLocationAllocator::default();
@@ -1111,7 +1256,11 @@ fn projective_rcb_mul_eval_allocates_expected_width() {
 
     assert_eq!(
         PROJECTIVE_RCB_MUL_TRACE_COLUMNS,
-        1 + 2 + 3 * N_LIMBS + 1 + 5 * FP_SOLINAS_REDUCTION_DIGITS
+        1 + 2
+            + 3 * N_LIMBS
+            + 1
+            + 5 * FP_SOLINAS_REDUCTION_DIGITS
+            + PROJECTIVE_RCB_MUL_CORRECTION_DIGIT_TRACE_COLUMNS
     );
     assert_eq!(
         component.trace_log_degree_bounds()[1].len(),
@@ -1605,6 +1754,7 @@ fn projective_rcb_air_range_lookup_consumers_balance_with_providers() {
         claim.mul_row_count()
             * (3 * N_LIMBS
                 + 2 * FP_SOLINAS_REDUCTION_DIGITS
+                + crate::fp_solinas::FP_SOLINAS_SIGNED_CORRECTION_LIMBS
                 + PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS * PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS
                 + FP_SOLINAS_REDUCTION_DIGITS)
     );

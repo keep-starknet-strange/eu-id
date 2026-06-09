@@ -20,7 +20,8 @@ use crate::fp_solinas::{
     FpSolinasError, FpSolinasMulTrace, FP_SOLINAS_LIMB_BASE, FP_SOLINAS_RAW_LIMBS,
 };
 use crate::fp_solinas_air::{
-    FpSolinasReductionTraceClaim, FpSolinasReductionTraceError, FP_SOLINAS_REDUCTION_DIGITS,
+    fp_solinas_correction_digit_columns, FpSolinasReductionTraceClaim,
+    FpSolinasReductionTraceError, FP_SOLINAS_REDUCTION_DIGITS,
 };
 use crate::prepared_table::PreparedAffinePoint;
 use crate::projective::{
@@ -699,6 +700,9 @@ impl ProjectiveRcbAirTraceClaim {
                 values.push(m31(row.folded_digit));
                 values.push(m31(row.result_limb));
             }
+            let (_, correction_digits) = fp_solinas_correction_digit_columns(mul.trace.correction)
+                .expect("mul trace correction fits the signed window");
+            values.extend(correction_digits.iter().copied().map(m31));
             for chunk in &mul.raw_product_chunks {
                 values.extend(chunk.digits.iter().copied().map(m31));
             }
@@ -1092,6 +1096,13 @@ pub(crate) fn gen_projective_rcb_mul_base_trace(
                     row.push(m31_i128(reduction.prev_carry));
                     row.push(m31_i128(reduction.carry));
                 }
+                let (sign_bit, correction_digits) =
+                    fp_solinas_correction_digit_columns(mul.trace.correction)
+                        .expect("mul trace correction fits the signed window");
+                for digit in correction_digits {
+                    row.push(m31(digit));
+                }
+                row.push(m31(sign_bit));
                 row
             })
     });

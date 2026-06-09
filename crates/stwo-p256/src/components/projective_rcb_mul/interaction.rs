@@ -16,7 +16,8 @@ use stwo_constraint_framework::{LogupTraceGenerator, Relation};
 use stwo_p256_utils::constants::N_LIMBS;
 
 use super::*;
-use crate::fp_solinas_air::FP_SOLINAS_REDUCTION_DIGITS;
+use crate::fp_solinas::FP_SOLINAS_SIGNED_CORRECTION_LIMBS;
+use crate::fp_solinas_air::{fp_solinas_correction_digit_columns, FP_SOLINAS_REDUCTION_DIGITS};
 use crate::range_checks::RangeCheckInteractionClaim;
 use crate::scalar::scalar_mod_mul::columns::M31ColumnEval;
 
@@ -271,6 +272,14 @@ pub(crate) fn projective_rcb_mul_row_fractions(
         fractions.push(signed_carry_fraction(1, m31_i128(row.prev_carry)));
         fractions.push(signed_carry_fraction(1, m31_i128(row.carry)));
     }
+    // C1: Range13 consumers for the nine 13-bit correction digits, emitted by
+    // `add_fp_solinas_correction_digit_binding` immediately after the per-digit
+    // reduction fractions and before the folded-digit relation fractions.
+    let (_, correction_digits) = fp_solinas_correction_digit_columns(mul.trace.correction)
+        .expect("mul trace correction fits the signed window");
+    for digit in correction_digits {
+        fractions.push(range13_fraction(1, m31(digit)));
+    }
     for row in &mul.reduction.rows {
         fractions.push(folded_digit_fraction(
             1,
@@ -478,7 +487,12 @@ fn zeroed_projective_rcb_fractions(count: usize) -> Vec<ProjectiveRcbFractionSpe
 }
 
 fn projective_rcb_mul_fraction_count() -> usize {
-    2 * N_LIMBS * 2 + N_LIMBS + 4 * FP_SOLINAS_REDUCTION_DIGITS + FP_SOLINAS_REDUCTION_DIGITS + 2
+    2 * N_LIMBS * 2
+        + N_LIMBS
+        + 4 * FP_SOLINAS_REDUCTION_DIGITS
+        + FP_SOLINAS_SIGNED_CORRECTION_LIMBS
+        + FP_SOLINAS_REDUCTION_DIGITS
+        + 2
 }
 
 fn projective_rcb_raw_product_chunk_fraction_count() -> usize {

@@ -8,9 +8,12 @@ use stwo_constraint_framework::{EvalAtRow, FrameworkComponent, FrameworkEval, Re
 use stwo_p256_utils::constants::{LIMB_BITS, N_LIMBS};
 
 use super::*;
-use crate::fp_solinas::{FP_SOLINAS_LIMB_BASE, M31_CENTERED_BOUND};
+use crate::fp_solinas::{
+    FP_SOLINAS_LIMB_BASE, FP_SOLINAS_SIGNED_CORRECTION_LIMBS, M31_CENTERED_BOUND,
+};
 use crate::fp_solinas_air::{
-    add_fp_solinas_reduction_digit, FpSolinasReductionDigitColumns, FpSolinasReductionRelations,
+    add_fp_solinas_correction_digit_binding, add_fp_solinas_reduction_digit,
+    FpSolinasCorrectionDigitColumns, FpSolinasReductionDigitColumns, FpSolinasReductionRelations,
     FP_SOLINAS_REDUCTION_DIGITS, FP_SOLINAS_REDUCTION_DIGIT_TRACE_COLUMNS,
 };
 use crate::limbs::{EvalP256BigIntExt, P256EvalBigInt};
@@ -81,8 +84,16 @@ pub const PROJECTIVE_RCB_MUL_ACTIVE_TRACE_COLUMNS: usize = 1;
 
 pub const PROJECTIVE_RCB_MUL_LIMB_TRACE_COLUMNS: usize = 3 * N_LIMBS;
 
+/// Per-mul correction-digit columns that pin `correction_product_digit` to the
+/// convolution of range-checked 13-bit digits with the constant modulus limbs
+/// (closes C1): nine 13-bit digits plus one boolean sign bit.
+pub const PROJECTIVE_RCB_MUL_CORRECTION_DIGIT_TRACE_COLUMNS: usize =
+    FP_SOLINAS_SIGNED_CORRECTION_LIMBS + 1;
+
 pub const PROJECTIVE_RCB_MUL_REDUCTION_TRACE_COLUMNS: usize =
-    FP_SOLINAS_REDUCTION_DIGITS * FP_SOLINAS_REDUCTION_DIGIT_TRACE_COLUMNS + 1;
+    FP_SOLINAS_REDUCTION_DIGITS * FP_SOLINAS_REDUCTION_DIGIT_TRACE_COLUMNS
+        + 1
+        + PROJECTIVE_RCB_MUL_CORRECTION_DIGIT_TRACE_COLUMNS;
 
 pub const PROJECTIVE_RCB_MUL_TRACE_COLUMNS: usize = PROJECTIVE_RCB_MUL_ACTIVE_TRACE_COLUMNS
     + PROJECTIVE_RCB_MUL_ID_TRACE_COLUMNS
@@ -210,6 +221,9 @@ pub struct ProjectiveRcbMulColumns<E: EvalAtRow> {
     pub result: P256EvalBigInt<E>,
     pub folded_final_carry: E::F,
     pub reduction: [FpSolinasReductionDigitColumns<E>; FP_SOLINAS_REDUCTION_DIGITS],
+    /// Per-mul correction digits + sign bit that pin every
+    /// `correction_product_digit` to its honest convolution value (closes C1).
+    pub correction: FpSolinasCorrectionDigitColumns<E>,
 }
 
 impl<E: EvalAtRow> ProjectiveRcbMulColumns<E> {
@@ -226,6 +240,10 @@ impl<E: EvalAtRow> ProjectiveRcbMulColumns<E> {
                 prev_carry: eval.next_trace_mask(),
                 carry: eval.next_trace_mask(),
             }),
+            correction: FpSolinasCorrectionDigitColumns {
+                digits: core::array::from_fn(|_| eval.next_trace_mask()),
+                sign_bit: eval.next_trace_mask(),
+            },
         }
     }
 }
@@ -275,6 +293,19 @@ pub fn add_projective_rcb_mul_row<E: EvalAtRow>(
     for row in &columns.reduction {
         add_fp_solinas_reduction_digit(eval, reduction_relations, gate.clone(), row);
     }
+    // C1: pin every (otherwise free) correction_product_digit to the convolution
+    // of the range-checked 13-bit correction digits with the constant modulus
+    // limbs, bounding each product digit by construction and forcing the honest
+    // value.
+    let product_digits: [E::F; FP_SOLINAS_REDUCTION_DIGITS] =
+        core::array::from_fn(|d| columns.reduction[d].correction_product_digit.clone());
+    add_fp_solinas_correction_digit_binding(
+        eval,
+        relations.range13,
+        gate.clone(),
+        &columns.correction,
+        &product_digits,
+    );
     for (digit_index, row) in columns.reduction.iter().enumerate() {
         eval.add_to_relation(RelationEntry::new(
             relations.folded_digit,

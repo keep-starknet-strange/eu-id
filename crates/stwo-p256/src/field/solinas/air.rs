@@ -125,6 +125,82 @@ pub fn fp_solinas_reduction_digit_fits_m31() -> bool {
     FP_SOLINAS_REDUCTION_MAX_ABS_EXPR < M31_CENTERED_BOUND
 }
 
+/// Per-multiplication witness columns that *generate* the otherwise-free
+/// `correction_product_digit` values: the nine signed 13-bit digits of
+/// `|correction|` plus a boolean sign bit. They are shared across all
+/// [`FP_SOLINAS_REDUCTION_DIGITS`] reduction-digit rows of one Fp multiply.
+///
+/// Soundness (closes C1): without these, `correction_product_digit` is an
+/// unconstrained free witness bound only by the per-digit reduction recurrence,
+/// so a prover can pick wrong product digits (compensating via
+/// `result_limb`/carry) and have a FALSE product reduce correctly. Binding each
+/// product digit to the convolution of these Range13-checked digits with the
+/// constant P-256 modulus limbs makes every `correction_product_digit` bounded
+/// by `FP_SOLINAS_CORRECTION_PRODUCT_MAX_ABS_DIGIT` *by construction* and forces
+/// it to equal the unique honest value.
+pub struct FpSolinasCorrectionDigitColumns<E: EvalAtRow> {
+    /// Little-endian 13-bit digits of `|correction|`.
+    pub digits: [E::F; FP_SOLINAS_SIGNED_CORRECTION_LIMBS],
+    /// Sign bit: `0` for non-negative correction, `1` for negative.
+    pub sign_bit: E::F,
+}
+
+/// `j`-th 13-bit limb of the constant P-256 modulus. Each limb is `< 2¹³`, so
+/// it is already a canonical M31 constant usable as a convolution coefficient.
+fn fp_solinas_modulus_limb(j: usize) -> M31 {
+    let modulus = P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_MODULUS));
+    modulus.limbs()[j]
+}
+
+/// Bind the free `correction_product_digit` columns to the constrained
+/// convolution of range-checked 13-bit correction digits with the constant
+/// P-256 modulus limbs, closing C1.
+///
+/// Enforces, gated by `gate`:
+///  * each `correction_digit[i] ∈ [0, 2¹³)` (Range13 lookup);
+///  * `sign_bit ∈ {0, 1}` (`sign_bit·(sign_bit−1) = 0`); and, with
+///    `sign = 1 − 2·sign_bit`,
+///  * for every reduction digit `d`,
+///    `correction_product_digit[d] = sign · Σ_{i+j=d} correction_digit[i]·MOD[j]`
+///    where `MOD[j]` are the constant modulus limbs.
+///
+/// The convolution term has degree two (`sign × digit`); gated it is degree
+/// three, matching the existing per-row carry-boolean constraint and fitting
+/// the `log_size + 1` constraint-degree bound, so no auxiliary `signed_digit`
+/// columns are required.
+pub fn add_fp_solinas_correction_digit_binding<E: EvalAtRow>(
+    eval: &mut E,
+    range13: &RangeCheckRelation,
+    gate: E::F,
+    correction: &FpSolinasCorrectionDigitColumns<E>,
+    product_digits: &[E::F; FP_SOLINAS_REDUCTION_DIGITS],
+) {
+    for digit in &correction.digits {
+        add_range_check(eval, range13, gate.clone(), digit.clone());
+    }
+    eval.add_constraint(
+        gate.clone()
+            * correction.sign_bit.clone()
+            * (correction.sign_bit.clone() - E::F::from(M31::from_u32_unchecked(1))),
+    );
+
+    // sign = 1 - 2 * sign_bit  (∈ {+1, -1}).
+    let sign = E::F::from(M31::from_u32_unchecked(1))
+        - correction.sign_bit.clone() - correction.sign_bit.clone();
+
+    for (d, product_digit) in product_digits.iter().enumerate() {
+        let mut convolution = E::F::from(M31::from_u32_unchecked(0));
+        for (i, digit) in correction.digits.iter().enumerate() {
+            // i + j = d, with j a valid modulus-limb index.
+            if d < i || d - i >= N_LIMBS {
+                continue;
+            }
+            convolution += digit.clone() * E::F::from(fp_solinas_modulus_limb(d - i));
+        }
+        eval.add_constraint(gate.clone() * (product_digit.clone() - sign.clone() * convolution));
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FpSolinasReductionTraceClaim {
     pub rows: Vec<FpSolinasReductionRow>,
@@ -359,6 +435,18 @@ fn correction_product_digits(
         }
     }
     Ok(digits)
+}
+
+/// Trace-generation counterpart of [`add_fp_solinas_correction_digit_binding`]:
+/// the boolean sign bit (`0` non-negative, `1` negative) and the nine
+/// little-endian 13-bit digits of `|correction|`, ready to commit as the
+/// per-mul correction-digit columns.
+pub fn fp_solinas_correction_digit_columns(
+    correction: i128,
+) -> Result<(u32, [u32; FP_SOLINAS_SIGNED_CORRECTION_LIMBS]), FpSolinasReductionTraceError> {
+    let (sign, digits) = signed_correction_digits(correction)?;
+    let sign_bit = if sign < 0 { 1 } else { 0 };
+    Ok((sign_bit, digits))
 }
 
 fn signed_correction_digits(
