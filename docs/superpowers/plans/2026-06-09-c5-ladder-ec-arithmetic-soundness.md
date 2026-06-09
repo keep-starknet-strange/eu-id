@@ -44,9 +44,11 @@ Two ways to constrain the ladder's EC arithmetic in-AIR:
 
 ---
 
-## Phase 1: Close C1 — Range-Check the Solinas Correction Digit
+## Phase 1: Close C1 — Bind the Solinas Correction Product Digit to Range-Checked 13-bit Digits
 
 **Why first:** the silo's mults (which C5 will rely on) are forgeable until the correction digit is bounded. The fix also hardens `final_add`/`public_key_curve`.
+
+> **CORRECTED 2026-06-09 (original mechanism was infeasible).** The first draft prescribed offsetting `correction_product_digit` by `MAX` and range-checking `2·MAX` via the signed table. That is impossible: `MAX = FP_SOLINAS_CORRECTION_PRODUCT_MAX_ABS_DIGIT = 9·(2¹³−1)² ≈ 2³⁰`, so `2·MAX` exceeds the `MAX_LOG_SIZE = 30` table cap, and the signed table materializes one row per value (~1.2 B rows). **Correct approach:** `correction_product_digit[d]` is *natively* the convolution `sign · Σ_{i+j=d} correction_digit[i]·modulus_limb[j]` (`correction_product_digits`, air.rs:349-362), where `correction_digit[i] ∈ [0,8192)` are the nine 13-bit digits of `|correction|` (`signed_correction_digits`, air.rs:363-378), `modulus_limb[j]` are constant P256 modulus limbs, and `sign∈{−1,+1}`. So commit the **13-bit** digits (Range13 — exact fit) + a sign bit, range-check each digit, and pin `correction_product_digit` to the constrained convolution. Bounded ≤ MAX by construction; no new range table.
 
 **Files:**
 - Modify: `crates/stwo-p256/src/field/solinas/air.rs`
@@ -75,7 +77,7 @@ fn solinas_reduction_rejects_out_of_range_correction_digit() {
 
 - [ ] **Step 3: Run it; verify it FAILS to fail (i.e. currently passes → bug confirmed).**
 
-Run: `rtk proxy cargo test -p stwo-p256 solinas_reduction_rejects_out_of_range_correction_digit --release -- --test-threads=1 --nocapture`
+Run: `rtk proxy cargo test -p stwo-p256 solinas_reduction_rejects_forged_correction_product_digit --release -- --test-threads=1 --nocapture`
 Expected (pre-fix): test FAILS because the forged proof still satisfies constraints (demonstrates C1).
 
 - [ ] **Step 4: Add the range check in `add_fp_solinas_reduction_digit`.**
@@ -88,7 +90,7 @@ In `crates/stwo-p256/src/field/solinas/air.rs`, inside `add_fp_solinas_reduction
 
 Run:
 ```
-rtk proxy cargo test -p stwo-p256 solinas_reduction_rejects_out_of_range_correction_digit --release -- --test-threads=1 --nocapture
+rtk proxy cargo test -p stwo-p256 solinas_reduction_rejects_forged_correction_product_digit --release -- --test-threads=1 --nocapture
 rtk proxy cargo test -p stwo-p256 projective_rcb --release -- --test-threads=1 --nocapture
 ```
 Expected: new test PASS; existing projective/solinas tests PASS. The new range check consumes an existing range table (range13/raw_product_carry16) — confirm the consumed range relation is balanced in `relation_balances()` (the range provider's claimed sum must absorb the new consumer terms).
@@ -323,7 +325,7 @@ rtk git commit -m "test(p256): adversarial ladder/prepared-table point forgery r
 Run one at a time in release mode:
 
 ```bash
-rtk proxy cargo test -p stwo-p256 solinas_reduction_rejects_out_of_range_correction_digit --release -- --test-threads=1 --nocapture
+rtk proxy cargo test -p stwo-p256 solinas_reduction_rejects_forged_correction_product_digit --release -- --test-threads=1 --nocapture
 rtk proxy cargo test -p stwo-p256 silo_rejects_output_point_inconsistent_with_muls --release -- --test-threads=1 --nocapture
 rtk proxy cargo test -p stwo-p256 monolithic_relation_audit_is_balanced_and_fully_linked --release -- --test-threads=1 --nocapture
 rtk proxy cargo test -p stwo-p256 current_p256_monolithic_rejects_forged_ladder_output_point --release -- --test-threads=1 --nocapture
