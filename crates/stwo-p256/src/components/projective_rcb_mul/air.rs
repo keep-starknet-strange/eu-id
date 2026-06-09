@@ -289,6 +289,47 @@ impl<E: EvalAtRow> ConsumedMulLimbs<E> {
             }
         }
     }
+
+    /// Materialize a [`ConsumedMulLimbsView`]: the committed `lhs`/`rhs`/`result`
+    /// limbs of every mul wrapped as [`P256EvalBigInt`]s so a coordinate-formula
+    /// consumer (C5-2) can bind them with the limb-reduction helpers. The view
+    /// holds owned bigints (the underlying limb cells are `Clone`).
+    pub fn view(&self) -> ConsumedMulLimbsView<E> {
+        ConsumedMulLimbsView {
+            muls: core::array::from_fn(|mul| {
+                core::array::from_fn(|role| {
+                    P256EvalBigInt::<E>::from_limbs(self.limbs[mul][role].clone())
+                })
+            }),
+        }
+    }
+}
+
+/// A [`ConsumedMulLimbs`] reshaped so each mul's `lhs`/`rhs`/`result` limbs are a
+/// borrowable [`P256EvalBigInt`]. Indexed `[mul_index][role]` with
+/// `role ∈ {0=LHS, 1=RHS, 2=RESULT}` (canonical order). Built by
+/// [`ConsumedMulLimbs::view`]; consumed by the Double/MixedAdd coordinate-formula
+/// constraints to bind silo mul operands/results to input coords and prior
+/// results.
+pub struct ConsumedMulLimbsView<E: EvalAtRow> {
+    muls: [[P256EvalBigInt<E>; 3]; PROJECTIVE_RCB_MAX_MUL_ROWS_PER_OP],
+}
+
+impl<E: EvalAtRow> ConsumedMulLimbsView<E> {
+    /// The `lhs` operand limbs of mul `k` (`R_k`'s left factor).
+    pub fn lhs(&self, k: usize) -> &P256EvalBigInt<E> {
+        &self.muls[k][0]
+    }
+
+    /// The `rhs` operand limbs of mul `k`.
+    pub fn rhs(&self, k: usize) -> &P256EvalBigInt<E> {
+        &self.muls[k][1]
+    }
+
+    /// The `result` limbs `R_k` of mul `k`.
+    pub fn result(&self, k: usize) -> &P256EvalBigInt<E> {
+        &self.muls[k][2]
+    }
 }
 
 #[derive(Clone)]

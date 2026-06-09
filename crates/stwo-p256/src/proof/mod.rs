@@ -47,6 +47,8 @@ use crate::fake_glv_direct_prepared_operand::{
     FakeGlvDirectPreparedOperandInteractionClaim, FakeGlvDirectPreparedOperandProofClaim,
 };
 use crate::fake_glv_ec_source::{
+    fake_glv_projective_source_range13_uses_from_base,
+    fake_glv_projective_source_signed_carry_uses_from_base,
     gen_fake_glv_primitive_ec_preprocessed_trace, gen_fake_glv_primitive_ec_source_base_trace,
     gen_fake_glv_primitive_ec_source_interaction_trace, gen_fake_glv_projective_source_base_trace,
     gen_fake_glv_projective_source_consumer_interaction_trace, FakeGlvPrimitiveEcRowRelation,
@@ -873,6 +875,17 @@ impl P256CurrentAirInteractionClaim {
                 "FakeGlvProjectiveSource",
                 self.fake_glv_projective_source.total(),
             ),
+            // C5-2: the fake-GLV projective-source consumer's self-contained
+            // Range13 / signed-carry providers. The consumer's Double-formula
+            // uses + the providers' yields net to zero internally.
+            (
+                "FakeGlvProjectiveRange13",
+                self.fake_glv_projective_source.range13_total(),
+            ),
+            (
+                "FakeGlvProjectiveSignedCarry",
+                self.fake_glv_projective_source.signed_carry_total(),
+            ),
             // C5 plumbing: the RCB silo PROVIDES every projective EC op's
             // mul `lhs`/`rhs`/`result` limbs; the two projective-source
             // consumers CONSUME them over disjoint, exhaustive `source_index`
@@ -1074,6 +1087,11 @@ struct P256CurrentAirRelations {
     /// values (full table pinning).
     prepared_table_canonical: PreparedTableCanonicalRelation,
     fake_glv_projective_source: FakeGlvPrimitiveEcRowRelation,
+    /// C5-2: the fake-GLV projective-source consumer's self-contained Range13 /
+    /// signed-carry relations (Double-formula coord + reduction-carry checks).
+    /// Self-provided + self-consumed within the sub-graph (net to zero).
+    fake_glv_projective_range13: RangeCheckRelation,
+    fake_glv_projective_signed_carry: RangeCheckRelation,
     fake_glv_chain_expansion: FakeGlvChainPrimitiveExpansionRelation,
     fake_glv_chain_continuity: FakeGlvChainAccumulatorRelation,
     direct_prepared_operand: PreparedPointRelation,
@@ -1124,6 +1142,8 @@ impl P256CurrentAirRelations {
             cert_base: CertBaseRelation::dummy(),
             prepared_table_canonical: PreparedTableCanonicalRelation::dummy(),
             fake_glv_projective_source: FakeGlvPrimitiveEcRowRelation::dummy(),
+            fake_glv_projective_range13: RangeCheckRelation::dummy(),
+            fake_glv_projective_signed_carry: RangeCheckRelation::dummy(),
             fake_glv_chain_expansion: FakeGlvChainPrimitiveExpansionRelation::dummy(),
             fake_glv_chain_continuity: FakeGlvChainAccumulatorRelation::dummy(),
             direct_prepared_operand: PreparedPointRelation::dummy(),
@@ -1172,6 +1192,8 @@ impl P256CurrentAirRelations {
             cert_base: CertBaseRelation::draw(channel),
             prepared_table_canonical: PreparedTableCanonicalRelation::draw(channel),
             fake_glv_projective_source: FakeGlvPrimitiveEcRowRelation::draw(channel),
+            fake_glv_projective_range13: RangeCheckRelation::draw(channel),
+            fake_glv_projective_signed_carry: RangeCheckRelation::draw(channel),
             fake_glv_chain_expansion: FakeGlvChainPrimitiveExpansionRelation::draw(channel),
             fake_glv_chain_continuity: FakeGlvChainAccumulatorRelation::draw(channel),
             direct_prepared_operand: PreparedPointRelation::draw(channel),
@@ -1312,6 +1334,8 @@ impl P256CurrentAirComponents {
                 &interaction_claim.fake_glv_projective_source,
                 &relations.fake_glv_projective_source,
                 &relations.projective_rcb_air,
+                &relations.fake_glv_projective_range13,
+                &relations.fake_glv_projective_signed_carry,
             ),
             fake_glv_chain_expansion: FakeGlvChainExpansionComponents::new(
                 allocator,
@@ -1860,6 +1884,20 @@ impl P256ProofDraft {
             claim.fake_glv_projective_source.source_offset as usize,
             claim.fake_glv_projective_source.log_size,
         )?;
+        // C5-2: self-contained Range13 / signed-carry provider multiplicity
+        // columns, tallying the consumer's Double-formula uses. Generated from the
+        // consumer base trace so the tally exactly matches the AIR's uses.
+        let fake_glv_projective_range13_multiplicity =
+            crate::range_checks::RangeCheckClaim::new(crate::range_checks::RANGE13_BITS)
+                .gen_multiplicity_trace(fake_glv_projective_source_range13_uses_from_base(
+                    &fake_glv_projective_consumer,
+                ));
+        let fake_glv_projective_signed_carry_multiplicity =
+            crate::projective_air::projective_rcb_signed_carry_claim().gen_multiplicity_trace(
+                fake_glv_projective_source_signed_carry_uses_from_base(
+                    &fake_glv_projective_consumer,
+                ),
+            );
         let chain_expansion_provider = gen_fake_glv_chain_expansion_base_trace(
             &self.claim.fake_glv_chain,
             &self.claim.fake_glv_ec_trace,
@@ -1951,6 +1989,10 @@ impl P256ProofDraft {
         columns.extend(prepared_table_consumer.clone());
         columns.extend(fake_glv_projective_provider.clone());
         columns.extend(fake_glv_projective_consumer.clone());
+        // C5-2: provider multiplicity columns, in component order (range13, then
+        // signed_carry) right after the consumer.
+        columns.push(fake_glv_projective_range13_multiplicity.clone());
+        columns.push(fake_glv_projective_signed_carry_multiplicity.clone());
         columns.extend(chain_expansion_provider.clone());
         columns.extend(chain_expansion_consumer.clone());
         columns.extend(chain_continuity.clone());
@@ -1981,6 +2023,8 @@ impl P256ProofDraft {
             prepared_table_consumer,
             fake_glv_projective_provider,
             fake_glv_projective_consumer,
+            fake_glv_projective_range13_multiplicity,
+            fake_glv_projective_signed_carry_multiplicity,
             chain_expansion_provider,
             chain_expansion_consumer,
             chain_continuity,
@@ -2098,11 +2142,29 @@ impl P256ProofDraft {
                 &relations.fake_glv_projective_source,
                 RelationMultiplicity::Provider,
             );
-        let (fake_glv_consumer_interaction, fake_glv_consumer_ec_row_sum, fake_glv_consumer_mul_result_sum) =
-            gen_fake_glv_projective_source_consumer_interaction_trace(
-                &base.fake_glv_projective_consumer,
-                &relations.fake_glv_projective_source,
-                &relations.projective_rcb_air.mul_result,
+        let fake_glv_consumer = gen_fake_glv_projective_source_consumer_interaction_trace(
+            &base.fake_glv_projective_consumer,
+            &relations.fake_glv_projective_source,
+            &relations.projective_rcb_air.mul_result,
+            &relations.fake_glv_projective_range13,
+            &relations.fake_glv_projective_signed_carry,
+        );
+        // C5-2: the consumer's self-contained Range13 / signed-carry PROVIDERS.
+        // Their multiplicity columns (in the base trace) tally exactly the
+        // consumer's uses; their interaction columns net the uses to zero.
+        let (fake_glv_projective_range13_interaction, fake_glv_projective_range13_provider_claim) =
+            crate::range_checks::RangeCheckInteractionClaim::gen_interaction_trace(
+                &base.fake_glv_projective_range13_multiplicity,
+                &crate::range_checks::RangeCheckClaim::new(crate::range_checks::RANGE13_BITS)
+                    .gen_preprocessed_column(),
+                &relations.fake_glv_projective_range13,
+            );
+        let signed_carry_claim = crate::projective_air::projective_rcb_signed_carry_claim();
+        let (fake_glv_projective_signed_carry_interaction, fake_glv_projective_signed_carry_provider_claim) =
+            crate::range_checks::RangeCheckInteractionClaim::gen_interaction_trace(
+                &base.fake_glv_projective_signed_carry_multiplicity,
+                &signed_carry_claim.gen_value_column(),
+                &relations.fake_glv_projective_signed_carry,
             );
         let (expansion_provider_interaction, expansion_provider_sum) =
             gen_fake_glv_chain_expansion_interaction_trace(
@@ -2218,7 +2280,11 @@ impl P256ProofDraft {
         columns.extend(prepared_provider_interaction);
         columns.extend(prepared_consumer_interaction);
         columns.extend(fake_glv_provider_interaction);
-        columns.extend(fake_glv_consumer_interaction);
+        columns.extend(fake_glv_consumer.columns.clone());
+        // C5-2: provider interaction columns, in component order (range13, then
+        // signed_carry) right after the consumer.
+        columns.extend(fake_glv_projective_range13_interaction);
+        columns.extend(fake_glv_projective_signed_carry_interaction);
         columns.extend(expansion_provider_interaction);
         columns.extend(expansion_consumer_interaction);
         columns.extend(continuity_interaction);
@@ -2257,8 +2323,12 @@ impl P256ProofDraft {
                 prepared_table_pinned: prepared_pinned_claim,
                 fake_glv_projective_source: FakeGlvProjectiveSourceInteractionClaim {
                     provider_claimed_sum: fake_glv_provider_claim.claimed_sum,
-                    consumer_claimed_sum: fake_glv_consumer_ec_row_sum,
-                    mul_result_consumer_claimed_sum: fake_glv_consumer_mul_result_sum,
+                    consumer_claimed_sum: fake_glv_consumer.ec_row_sum,
+                    mul_result_consumer_claimed_sum: fake_glv_consumer.mul_result_sum,
+                    range13_consumer_claimed_sum: fake_glv_consumer.range13_use_sum,
+                    signed_carry_consumer_claimed_sum: fake_glv_consumer.signed_carry_use_sum,
+                    range13: fake_glv_projective_range13_provider_claim,
+                    signed_carry: fake_glv_projective_signed_carry_provider_claim,
                 },
                 fake_glv_chain_expansion: FakeGlvChainExpansionInteractionClaim {
                     expansion_claimed_sum: expansion_provider_sum,
@@ -2348,6 +2418,8 @@ struct P256CurrentAirBaseTrace {
     prepared_table_consumer: ColumnVec<M31ColumnEval>,
     fake_glv_projective_provider: ColumnVec<M31ColumnEval>,
     fake_glv_projective_consumer: ColumnVec<M31ColumnEval>,
+    fake_glv_projective_range13_multiplicity: M31ColumnEval,
+    fake_glv_projective_signed_carry_multiplicity: M31ColumnEval,
     chain_expansion_provider: ColumnVec<M31ColumnEval>,
     chain_expansion_consumer: ColumnVec<M31ColumnEval>,
     chain_continuity: ColumnVec<M31ColumnEval>,

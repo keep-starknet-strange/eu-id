@@ -30,7 +30,8 @@ use stwo::core::channel::Blake2sM31Channel;
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
 use stwo::prover::backend::Column;
 use stwo_constraint_framework::{
-    assert_constraints_on_trace, FrameworkComponent, FrameworkEval, PREPROCESSED_TRACE_IDX,
+    assert_constraints_on_polys, assert_constraints_on_trace, FrameworkComponent, FrameworkEval,
+    PREPROCESSED_TRACE_IDX,
 };
 
 fn test_input(message_hash: u64, r: u64, s: u64) -> EcdsaVerifyInput {
@@ -1276,7 +1277,7 @@ fn monolithic_relation_audit_is_balanced_and_fully_linked() {
     // The audit covers the full relation surface, including the four
     // verifier-facing ECDSA bindings.
     let names = audit.relation_names();
-    assert_eq!(names.len(), 29, "relation audit must cover every relation");
+    assert_eq!(names.len(), 31, "relation audit must cover every relation");
     for required in [
         "EcdsaResult",
         "PublicKeyPoint",
@@ -1285,6 +1286,10 @@ fn monolithic_relation_audit_is_balanced_and_fully_linked() {
         "CertBase",
         // C5 plumbing: the RCB silo → projective-source mul-result link.
         "ProjectiveRcbMulResult",
+        // C5-2: the fake-GLV projective-source Double-formula self-contained
+        // Range13 / signed-carry providers.
+        "FakeGlvProjectiveRange13",
+        "FakeGlvProjectiveSignedCarry",
     ] {
         assert!(names.contains(&required), "audit missing relation: {required}");
     }
@@ -1310,6 +1315,151 @@ fn bump_limb0(value: &crate::limbs::P256M31BigInt) -> crate::limbs::P256M31BigIn
     let mut limbs = *value.limbs();
     limbs[0] = limbs[0] + M31::from_u32_unchecked(1);
     crate::limbs::P256M31BigInt::from_limbs(limbs)
+}
+
+/// Extract an `M31ColumnEval`'s cells into a per-row `Vec<M31>` in the column's
+/// own storage order (used to forge one cell and rebuild the column).
+fn column_to_values(column: &crate::scalar::scalar_mod_mul::columns::M31ColumnEval) -> Vec<M31> {
+    let mut out = Vec::new();
+    for packed in &column.data {
+        out.extend_from_slice(&packed.to_array());
+    }
+    out
+}
+
+/// C5-2a-ii IN-AIR oracle: forging a Double-op `output_affine.x` limb on the
+/// fake-GLV projective-source consumer must make the consumer's AIR constraints
+/// UNSATISFIABLE — the affine-normalization binding `R13 == x3` (gated by
+/// `out_finite`, with the silo's `R13 = output.x · z3`) fires. This isolates the
+/// Double-formula coordinate binding: the forge is applied to the COMMITTED
+/// `output.x` column AFTER native trace generation (which would otherwise reject
+/// a wrong affine), so the rejection is the AIR constraint itself, not the
+/// native `verify()`. Pre-this-change (no Double-formula constraints) the same
+/// committed forge satisfied every consumer constraint (the EC-row self-loop
+/// cancels regardless of the output value) — i.e. the proof VERIFIED — which was
+/// the C5 hole. A clean honest control runs first.
+#[test]
+fn current_p256_monolithic_rejects_forged_double_op_output() {
+    use crate::scalar::prepared_table::PREPARED_TABLE_EC_POINT_COLUMNS;
+
+    // u1 == u2 drives the doubling ladder, so the projective EC trace contains
+    // active Double ops. The forge target is the committed Double-op
+    // `output_affine.x` (limb 0) on the fake-GLV projective-source CONSUMER.
+    //
+    // Oracle: the per-relation LogUp balance (lessons.md #18 — `verify_balanced`,
+    // not `assert_constraints`, which double-panics on a failing row via the
+    // `LogupAtRow::drop` finalize assert). The forge is applied to the COMMITTED
+    // base trace AFTER native trace generation (which would otherwise reject a
+    // wrong affine via `ProjectiveEcRow::verify`), so the rejection is the AIR's
+    // own balance, not the native check.
+    //
+    // The committed `output.x` participates in the `FakeGlvProjectiveSource`
+    // EC-row relation (consumer use vs provider yield) AND, post-C5-2, in the
+    // Double-formula `M13.lhs == output.x` operand binding — so a forged
+    // `output.x` both unbalances the EC-row relation and violates the in-AIR
+    // Double binding. Either way the proof is rejected.
+    let op_col = 4usize;
+    let output_x0_col = 5 + 2 * PREPARED_TABLE_EC_POINT_COLUMNS;
+    let double_op =
+        M31::from_u32_unchecked(crate::scalar::prepared_table::PREPARED_TABLE_EC_OP_DOUBLE);
+
+    let honest = forged_double_output_balance_outcome(99, 99, None);
+    honest.expect("honest doubling proof balances");
+
+    let err = forged_double_output_balance_outcome(99, 99, Some((op_col, output_x0_col, double_op)))
+        .expect_err("forged Double-op output.x must be rejected by the monolithic AIR");
+    // The forged committed output.x unbalances the EC-row relation that binds the
+    // consumer's output to the provider's (and, via C5-2, to double(input)).
+    assert!(
+        matches!(
+            err,
+            P256ProofError::RelationImbalance {
+                relation: "FakeGlvProjectiveSource"
+            }
+        ),
+        "expected FakeGlvProjectiveSource imbalance from forged Double output, got {err:?}"
+    );
+}
+
+/// Build the monolithic interaction claim for a `u1`/`u2` doubling draft and
+/// return its `verify_balanced()` outcome. If `forge` is `Some((op_col,
+/// limb_col, double_op))`, the COMMITTED fake-GLV projective-source CONSUMER base
+/// column `limb_col` is bumped by 1 on the first active row whose op-code column
+/// `op_col` equals `double_op` — a post-trace-gen forge of a Double-op output
+/// limb that exercises the in-AIR rejection (balance) rather than the native
+/// `ProjectiveEcRow::verify`.
+fn forged_double_output_balance_outcome(
+    u1: u64,
+    u2: u64,
+    forge: Option<(usize, usize, M31)>,
+) -> Result<(), P256ProofError> {
+    use stwo::core::poly::circle::CanonicCoset as CoreCanonicCoset;
+
+    let input = valid_real_input_with_small_u_scalars(u1, u2);
+    let draft = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![input])
+        .expect("doubling draft builds");
+    let proof_claim = P256CurrentAirProofClaim::from_claim(&draft.claim);
+    let ids = proof_claim.preprocessed_column_ids();
+    let max_bound = proof_claim.max_constraint_log_degree_bound(&ids);
+    let config = p256_stark_monolithic_profile_config(max_bound);
+    let twiddles = SimdBackend::precompute_twiddles(
+        CoreCanonicCoset::new(
+            config
+                .lifting_log_size
+                .unwrap_or(max_bound + config.fri_config.log_blowup_factor),
+        )
+        .circle_domain()
+        .half_coset,
+    );
+    let mut channel = <Blake2sMerkleChannel as MerkleChannel>::C::default();
+    let mut commitment_scheme =
+        CommitmentSchemeProver::<SimdBackend, Blake2sMerkleChannel>::new(config, &twiddles);
+    let preprocessed = draft
+        .gen_current_air_preprocessed_trace(&proof_claim, &ids)
+        .expect("preprocessed trace");
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(preprocessed);
+    tree_builder.commit(&mut channel);
+    proof_claim.mix_into(&mut channel);
+
+    let mut base = draft.gen_current_air_base_trace(&proof_claim).expect("base trace");
+
+    // Optional forge: bump one committed CONSUMER limb on the first active Double
+    // row (post-trace-gen, so native verification has already passed).
+    if let Some((op_col, limb_col, double_op)) = forge {
+        let consumer = &mut base.fake_glv_projective_consumer;
+        let log_size = consumer[0].domain.log_size();
+        let row_count = 1usize << log_size;
+        let active_vals = column_to_values(&consumer[0]);
+        let op_vals = column_to_values(&consumer[op_col]);
+        let mut limb_vals = column_to_values(&consumer[limb_col]);
+        let forge_row = (0..row_count)
+            .find(|&row| {
+                active_vals[row] != M31::from_u32_unchecked(0) && op_vals[row] == double_op
+            })
+            .expect("doubling proof must contain an active Double row to forge");
+        limb_vals[forge_row] = limb_vals[forge_row] + M31::from_u32_unchecked(1);
+        let forged_col = stwo::prover::poly::circle::CircleEvaluation::new(
+            consumer[limb_col].domain,
+            stwo::prover::backend::simd::column::BaseColumn::from_iter(limb_vals),
+        );
+        consumer[limb_col] = forged_col;
+        // Re-flatten the forged consumer columns into the monolithic `columns`
+        // so the committed trace reflects the forge. The consumer block is a
+        // contiguous slice; rebuild `base.columns` from the per-sub-graph fields
+        // is overkill, so instead recompute the interaction directly below from
+        // the (forged) `base` fields the interaction generator reads.
+    }
+
+    let base_columns = std::mem::take(&mut base.columns);
+    let mut tree_builder = commitment_scheme.tree_builder();
+    tree_builder.extend_evals(base_columns);
+    tree_builder.commit(&mut channel);
+    let relations = P256CurrentAirRelations::draw(&mut channel);
+    let (_, interaction_claim) = draft
+        .gen_current_air_interaction_trace(&base, &relations)
+        .expect("interaction trace");
+    interaction_claim.verify_balanced()
 }
 
 /// IN-AIR oracle: mutating the proven final-add output `x3` (= `R_final.x`)

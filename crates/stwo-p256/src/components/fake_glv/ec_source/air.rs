@@ -24,6 +24,20 @@ use crate::projective_air::{
     ProjectiveRcbMulResultRelation, CONSUMED_MUL_LIMBS_COLUMNS, PROJECTIVE_RCB_MUL_ROLE_LHS,
     PROJECTIVE_RCB_MUL_ROLE_RESULT, PROJECTIVE_RCB_MUL_ROLE_RHS, PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS,
 };
+use crate::projective_air::{projective_rcb_signed_carry_log_size, PROJECTIVE_RCB_SIGNED_CARRY_EQUATION};
+use crate::range_checks::{
+    RangeCheckClaim, RangeCheckComponent, RangeCheckEval, RangeCheckInteractionClaim,
+    RangeCheckRelation, SignedCarryRangeComponent, SignedCarryRangeEval, RANGE13_BITS,
+};
+use super::double_formula::{
+    bind_double_formula, DoubleFormulaColumns, DOUBLE_FORMULA_COLUMNS, DOUBLE_TOTAL_REDUCTIONS,
+};
+
+/// Signed-carry preprocessed-column namespace for the fake-GLV projective-source
+/// Double-formula reductions. Reuses the projective-RCB equation so the shared
+/// value/active preprocessed columns (same bound) are deduplicated; the consumer
+/// draws its OWN signed-carry relation instance, giving an independent balance.
+const FAKE_GLV_PROJECTIVE_SIGNED_CARRY_EQUATION: &str = PROJECTIVE_RCB_SIGNED_CARRY_EQUATION;
 use stwo_p256_utils::constants::N_LIMBS;
 use crate::scalar::fake_glv_chain::{
     FakeGlvChainError, FakeGlvPrimitiveEcOp, FakeGlvPrimitiveEcRow, FakeGlvPrimitiveEcTraceClaim,
@@ -50,9 +64,16 @@ pub const FAKE_GLV_PRIMITIVE_EC_ROW_RELATION_ARITY: usize = 4 + 3 * PREPARED_TAB
 pub const FAKE_GLV_PRIMITIVE_EC_SOURCE_TRACE_COLUMNS: usize =
     1 + FAKE_GLV_PRIMITIVE_EC_ROW_RELATION_ARITY;
 /// Consumer base-trace width: the provider columns PLUS the C5 consumed-mul
-/// block (`has_muls` flag + the mul-limb columns), appended LAST so the existing
-/// relation-value column offsets are unchanged.
+/// block (`has_muls` flag + the mul-limb columns) PLUS the C5-2 Double-formula
+/// block (`x3,y3,z3` working values + per-reduction quotient/carry witnesses),
+/// each appended LAST so the existing relation-value column offsets are
+/// unchanged.
 pub const FAKE_GLV_PROJECTIVE_SOURCE_CONSUMER_TRACE_COLUMNS: usize =
+    FAKE_GLV_PRIMITIVE_EC_SOURCE_TRACE_COLUMNS + CONSUMED_MUL_LIMBS_COLUMNS + DOUBLE_FORMULA_COLUMNS;
+/// Column index where the C5-2 Double-formula block begins (after the
+/// consumed-mul block). The first `N_LIMBS` columns are the `x3` working value
+/// (then `y3`, `z3`, then the reduction witnesses).
+pub const FAKE_GLV_PROJECTIVE_DOUBLE_FORMULA_OFFSET: usize =
     FAKE_GLV_PRIMITIVE_EC_SOURCE_TRACE_COLUMNS + CONSUMED_MUL_LIMBS_COLUMNS;
 /// Column index of the consumed-mul block's `has_muls` flag (the limb columns
 /// follow at `+ 1`).
@@ -90,6 +111,8 @@ impl FakeGlvProjectiveSourceProofClaim {
             &FakeGlvProjectiveSourceInteractionClaim::zero(),
             &FakeGlvPrimitiveEcRowRelation::dummy(),
             &ProjectiveRcbMulComponentRelations::dummy(),
+            &RangeCheckRelation::dummy(),
+            &RangeCheckRelation::dummy(),
         );
         allocator.preprocessed_columns().clone()
     }
@@ -103,6 +126,8 @@ impl FakeGlvProjectiveSourceProofClaim {
             &FakeGlvProjectiveSourceInteractionClaim::zero(),
             &FakeGlvPrimitiveEcRowRelation::dummy(),
             &ProjectiveRcbMulComponentRelations::dummy(),
+            &RangeCheckRelation::dummy(),
+            &RangeCheckRelation::dummy(),
         );
         components.trace_log_degree_bounds()
     }
@@ -116,12 +141,14 @@ impl FakeGlvProjectiveSourceProofClaim {
             &FakeGlvProjectiveSourceInteractionClaim::zero(),
             &FakeGlvPrimitiveEcRowRelation::dummy(),
             &ProjectiveRcbMulComponentRelations::dummy(),
+            &RangeCheckRelation::dummy(),
+            &RangeCheckRelation::dummy(),
         );
         components.max_constraint_log_degree_bound()
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct FakeGlvProjectiveSourceInteractionClaim {
     pub provider_claimed_sum: SecureField,
     /// `FakeGlvPrimitiveEcRowRelation` consumer sum (the EC-row self-loop).
@@ -131,6 +158,18 @@ pub struct FakeGlvProjectiveSourceInteractionClaim {
     /// group as `consumer_claimed_sum`, but is balanced separately under
     /// `ProjectiveRcbMulResult`.
     pub mul_result_consumer_claimed_sum: SecureField,
+    /// C5-2: Range13 USE sum on the consumer component (Double-formula coord +
+    /// working-value limb checks). Shares the consumer's single `finalize_logup`;
+    /// netted against `range13` (the provider) in the `FakeGlvProjectiveRange13`
+    /// balance.
+    pub range13_consumer_claimed_sum: SecureField,
+    /// C5-2: signed-carry USE sum on the consumer component (Double-formula
+    /// reduction carries). Netted against `signed_carry` (the provider).
+    pub signed_carry_consumer_claimed_sum: SecureField,
+    /// C5-2: the self-contained Range13 PROVIDER (yield) sum.
+    pub range13: RangeCheckInteractionClaim,
+    /// C5-2: the self-contained signed-carry PROVIDER (yield) sum.
+    pub signed_carry: RangeCheckInteractionClaim,
 }
 
 impl FakeGlvProjectiveSourceInteractionClaim {
@@ -139,20 +178,46 @@ impl FakeGlvProjectiveSourceInteractionClaim {
             provider_claimed_sum: secure_zero(),
             consumer_claimed_sum: secure_zero(),
             mul_result_consumer_claimed_sum: secure_zero(),
+            range13_consumer_claimed_sum: secure_zero(),
+            signed_carry_consumer_claimed_sum: secure_zero(),
+            range13: RangeCheckInteractionClaim {
+                claimed_sum: secure_zero(),
+            },
+            signed_carry: RangeCheckInteractionClaim {
+                claimed_sum: secure_zero(),
+            },
         }
     }
 
     /// `FakeGlvProjectiveSource` balance term: provider yield + EC-row consume.
-    /// EXCLUDES the mul-result consume (balanced under `ProjectiveRcbMulResult`).
-    pub fn total(self) -> SecureField {
+    /// EXCLUDES the mul-result consume (balanced under `ProjectiveRcbMulResult`)
+    /// and the range13/signed-carry consume+provide (balanced under their own
+    /// `FakeGlvProjective{Range13,SignedCarry}` relations).
+    pub fn total(&self) -> SecureField {
         self.provider_claimed_sum + self.consumer_claimed_sum
     }
 
+    /// `FakeGlvProjectiveRange13` balance: consumer Range13 uses + the provider
+    /// yield. Internal to this sub-graph, nets to zero.
+    pub fn range13_total(&self) -> SecureField {
+        self.range13_consumer_claimed_sum + self.range13.claimed_sum
+    }
+
+    /// `FakeGlvProjectiveSignedCarry` balance: consumer signed-carry uses + the
+    /// provider yield. Internal to this sub-graph, nets to zero.
+    pub fn signed_carry_total(&self) -> SecureField {
+        self.signed_carry_consumer_claimed_sum + self.signed_carry.claimed_sum
+    }
+
     /// The single claimed sum the consumer FrameworkComponent declares: the
-    /// EC-row + mul-result consumes share one interaction trace (one
-    /// `finalize_logup`), so the component's sum is their combination.
-    pub fn consumer_component_claimed_sum(self) -> SecureField {
-        self.consumer_claimed_sum + self.mul_result_consumer_claimed_sum
+    /// EC-row + mul-result + range13 + signed-carry consumes all share one
+    /// interaction trace (one `finalize_logup`), so the component's sum is their
+    /// combination.
+    pub fn consumer_component_claimed_sum(&self) -> SecureField {
+        self.consumer_claimed_sum
+            + self.mul_result_consumer_claimed_sum
+            + self.range13_consumer_claimed_sum
+            + self.signed_carry_consumer_claimed_sum
     }
 
     pub fn mix_into(&self, channel: &mut impl Channel) {
@@ -160,6 +225,10 @@ impl FakeGlvProjectiveSourceInteractionClaim {
             self.provider_claimed_sum,
             self.consumer_claimed_sum,
             self.mul_result_consumer_claimed_sum,
+            self.range13_consumer_claimed_sum,
+            self.signed_carry_consumer_claimed_sum,
+            self.range13.claimed_sum,
+            self.signed_carry.claimed_sum,
         ]);
     }
 }
@@ -167,9 +236,16 @@ impl FakeGlvProjectiveSourceInteractionClaim {
 pub struct FakeGlvProjectiveSourceComponents {
     pub provider: FakeGlvPrimitiveEcRowProviderComponent,
     pub consumer: FakeGlvProjectiveSourceComponent,
+    /// C5-2: self-contained Range13 provider for the Double-formula coordinate
+    /// limb range checks (mirrors `public_key_curve`).
+    pub range13: RangeCheckComponent,
+    /// C5-2: self-contained signed-carry provider for the Double-formula
+    /// reduction carries.
+    pub signed_carry: SignedCarryRangeComponent,
 }
 
 impl FakeGlvProjectiveSourceComponents {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         allocator: &mut TraceLocationAllocator,
         log_size: u32,
@@ -177,6 +253,8 @@ impl FakeGlvProjectiveSourceComponents {
         interaction_claim: &FakeGlvProjectiveSourceInteractionClaim,
         relation: &FakeGlvPrimitiveEcRowRelation,
         mul_relations: &ProjectiveRcbMulComponentRelations,
+        range13: &RangeCheckRelation,
+        signed_carry: &RangeCheckRelation,
     ) -> Self {
         Self {
             provider: FakeGlvPrimitiveEcRowProviderComponent::new(
@@ -194,9 +272,25 @@ impl FakeGlvProjectiveSourceComponents {
                     log_size,
                     relation: relation.clone(),
                     mul_relations: mul_relations.clone(),
+                    range13: range13.clone(),
+                    signed_carry: signed_carry.clone(),
                 },
                 // EC-row + mul-result consumes share one interaction trace.
                 interaction_claim.consumer_component_claimed_sum(),
+            ),
+            range13: RangeCheckComponent::new(
+                allocator,
+                RangeCheckEval::new(range13.clone(), RANGE13_BITS),
+                interaction_claim.range13.claimed_sum,
+            ),
+            signed_carry: SignedCarryRangeComponent::new(
+                allocator,
+                SignedCarryRangeEval::new(
+                    signed_carry.clone(),
+                    projective_rcb_signed_carry_log_size(),
+                    FAKE_GLV_PROJECTIVE_SIGNED_CARRY_EQUATION,
+                ),
+                interaction_claim.signed_carry.claimed_sum,
             ),
         }
     }
@@ -205,6 +299,8 @@ impl FakeGlvProjectiveSourceComponents {
         vec![
             &self.provider as &dyn Component,
             &self.consumer as &dyn Component,
+            &self.range13 as &dyn Component,
+            &self.signed_carry as &dyn Component,
         ]
     }
 
@@ -212,6 +308,8 @@ impl FakeGlvProjectiveSourceComponents {
         vec![
             &self.provider as &dyn ComponentProver<SimdBackend>,
             &self.consumer as &dyn ComponentProver<SimdBackend>,
+            &self.range13 as &dyn ComponentProver<SimdBackend>,
+            &self.signed_carry as &dyn ComponentProver<SimdBackend>,
         ]
     }
 
@@ -300,6 +398,15 @@ pub struct FakeGlvProjectiveSourceEval {
     /// C5 plumbing: relations bundle carrying `mul_result`, the relation the
     /// silo provides its proven mul limbs on and this source consumes.
     pub mul_relations: ProjectiveRcbMulComponentRelations,
+    /// C5-2 (Double formula): consumer-local Range13 relation. The consumer
+    /// PROVIDES this table itself (a self-contained provider, like
+    /// `public_key_curve`); the affine coords + working-value limbs of the
+    /// Double formula are range-checked (used) against it.
+    pub range13: RangeCheckRelation,
+    /// C5-2 (Double formula): consumer-local signed-carry relation for the
+    /// reduction carries. Also self-provided. Bound covers the Double formula's
+    /// reduction carries (worst ~30, well within `PROJECTIVE_RCB_SIGNED_CARRY_BOUND`).
+    pub signed_carry: RangeCheckRelation,
 }
 
 impl FrameworkEval for FakeGlvProjectiveSourceEval {
@@ -320,10 +427,14 @@ impl FrameworkEval for FakeGlvProjectiveSourceEval {
         let lhs = PreparedTableEcEvalPoint::read(&mut eval);
         let rhs = PreparedTableEcEvalPoint::read(&mut eval);
         let output = PreparedTableEcEvalPoint::read(&mut eval);
-        // C5 plumbing: the consumed silo mul limbs (read LAST, matching the
-        // base-trace layout). No coordinate constraints yet (Task C5-2); only
-        // the LogUp consume pins them equal to the silo's proven values.
+        // C5 plumbing: the consumed silo mul limbs. The LogUp consume pins them
+        // equal to the silo's proven values; C5-2 (below) binds their operands
+        // and the output to the Double-op coordinate formula.
         let consumed_muls = ConsumedMulLimbs::<E>::read(&mut eval);
+        // C5-2: the Double-formula working values + reduction witnesses, read
+        // LAST (matching the base-trace layout appended after the consumed-mul
+        // block).
+        let double_columns = DoubleFormulaColumns::<E>::read(&mut eval);
         let one = E::F::from(M31::from_u32_unchecked(1));
 
         eval.add_constraint(active.clone() * (active.clone() - one.clone()));
@@ -352,7 +463,7 @@ impl FrameworkEval for FakeGlvProjectiveSourceEval {
         consumed_muls.constrain_has_muls(&mut eval, &active, &expected_has_muls);
 
         let relation_values = fake_glv_primitive_ec_row_relation_values(
-            &[source_index.clone(), sig_id, cert_id, op],
+            &[source_index.clone(), sig_id, cert_id, op.clone()],
             &lhs,
             &rhs,
             &output,
@@ -365,6 +476,55 @@ impl FrameworkEval for FakeGlvProjectiveSourceEval {
         // CONSUME (use, `+has_muls`) the silo's proven mul limbs for this op,
         // keyed `(source_index, mul_index, role, limb_index, limb)`.
         consumed_muls.consume(&mut eval, &self.mul_relations.mul_result, &source_index);
+
+        // C5-2: constrain the Double-op coordinate formula. `double_active`
+        // (= active·op) is 1 only on active Double rows (op==1 == DOUBLE);
+        // MixedAdd (op==0) and padding (active==0) are unaffected.
+        let double_active = active.clone() * op.clone();
+        let muls_view = consumed_muls.view();
+        bind_double_formula(
+            &mut eval,
+            &double_active,
+            &active,
+            &lhs.x_bigint(),
+            &lhs.y_bigint(),
+            &output.x_bigint(),
+            &output.y_bigint(),
+            &output.inf(),
+            &muls_view,
+            &double_columns,
+            &self.range13,
+        );
+        // Range-check (use) the reduction carries against the consumer-local
+        // signed-carry table, and force the Double-formula working values +
+        // reduction witnesses to zero on non-Double / padding rows so they leak
+        // nothing and the lookup counts stay fixed (carries checked `active`).
+        for reduction in &double_columns.reductions {
+            for carry in &reduction.carries {
+                crate::range_checks::add_range_check(
+                    &mut eval,
+                    &self.signed_carry,
+                    active.clone(),
+                    carry.clone(),
+                );
+            }
+        }
+        let not_double = one.clone() - double_active.clone();
+        for value in double_columns
+            .x3
+            .limbs()
+            .iter()
+            .chain(double_columns.y3.limbs())
+            .chain(double_columns.z3.limbs())
+        {
+            eval.add_constraint(not_double.clone() * value.clone());
+        }
+        for reduction in &double_columns.reductions {
+            eval.add_constraint(not_double.clone() * reduction.q.clone());
+            for carry in &reduction.carries {
+                eval.add_constraint(not_double.clone() * carry.clone());
+            }
+        }
         eval.finalize_logup();
         eval
     }
@@ -374,6 +534,15 @@ pub(crate) fn gen_fake_glv_primitive_ec_preprocessed_trace(
     log_size: u32,
     ids: &[PreProcessedColumnId],
 ) -> Result<ColumnVec<M31ColumnEval>, FakeGlvChainError> {
+    // C5-2 preprocessed columns the self-contained Range13 / signed-carry
+    // providers declare (shared by id with the silo's, deduplicated globally).
+    let range13_value_id = crate::range_checks::range_check_value_column_id(RANGE13_BITS);
+    let signed_carry_value_id =
+        crate::range_checks::signed_carry_value_column_id(FAKE_GLV_PROJECTIVE_SIGNED_CARRY_EQUATION);
+    let signed_carry_active_id = crate::range_checks::signed_carry_active_column_id(
+        FAKE_GLV_PROJECTIVE_SIGNED_CARRY_EQUATION,
+    );
+    let signed_carry_claim = crate::projective_air::projective_rcb_signed_carry_claim();
     ids.iter()
         .map(|id| {
             if id == &fake_glv_primitive_ec_row_index_column_id() {
@@ -383,6 +552,13 @@ pub(crate) fn gen_fake_glv_primitive_ec_preprocessed_trace(
                         .map(|index| M31::from_u32_unchecked(index as u32))
                         .collect(),
                 ))
+            } else if id == &range13_value_id {
+                Ok(crate::range_checks::RangeCheckClaim::new(RANGE13_BITS)
+                    .gen_preprocessed_column())
+            } else if id == &signed_carry_value_id {
+                Ok(signed_carry_claim.gen_value_column())
+            } else if id == &signed_carry_active_id {
+                Ok(signed_carry_claim.gen_active_column())
             } else {
                 Err(FakeGlvChainError::PreprocessedColumnMissing)
             }
@@ -499,7 +675,9 @@ pub(crate) fn gen_fake_glv_projective_source_consumer_interaction_trace(
     base: &[M31ColumnEval],
     ec_row_relation: &FakeGlvPrimitiveEcRowRelation,
     mul_result_relation: &ProjectiveRcbMulResultRelation,
-) -> (ColumnVec<M31ColumnEval>, SecureField, SecureField) {
+    range13_relation: &RangeCheckRelation,
+    signed_carry_relation: &RangeCheckRelation,
+) -> FakeGlvProjectiveSourceConsumerInteraction {
     assert_eq!(base.len(), FAKE_GLV_PROJECTIVE_SOURCE_CONSUMER_TRACE_COLUMNS);
     let log_size = base[0].domain.log_size();
     // ONE LogupTraceGenerator over all columns so the combined cumulative sum
@@ -545,14 +723,164 @@ pub(crate) fn gen_fake_glv_projective_source_consumer_interaction_trace(
             }
         }
     }
+    // C5-2: Range13 USE columns (one per fraction, `+active`), in the SAME order
+    // `bind_double_formula` emits them: lhs.x, lhs.y, output.x, output.y limbs,
+    // then x3, y3, z3 working-value limbs.
+    for base_col in double_formula_range13_use_columns() {
+        let mut col = logup.new_col();
+        for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+            let active = PackedQM31::from(base[0].data[vec_row]);
+            let limb = base[base_col].data[vec_row];
+            col.write_frac(vec_row, active, range13_relation.combine(&[limb]));
+        }
+        col.finalize_col();
+    }
+
+    // C5-2: signed-carry USE columns (one per fraction, `+active`), in the SAME
+    // order the consumer AIR emits them: reduction slot outer, carry limb inner.
+    for carry_col in double_formula_signed_carry_use_columns() {
+        let mut col = logup.new_col();
+        for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+            let active = PackedQM31::from(base[0].data[vec_row]);
+            let carry = base[carry_col].data[vec_row];
+            col.write_frac(vec_row, active, signed_carry_relation.combine(&[carry]));
+        }
+        col.finalize_col();
+    }
+
     let (columns, _total) = logup.finalize_last();
 
-    // Sub-sums (unpacked `SecureField`): the EC-row consumer sum and the
-    // mul-result consumer sum. Computed analytically so the proof's
-    // `relation_balances()` can net each relation independently.
+    // Sub-sums (unpacked `SecureField`): the EC-row consumer sum, mul-result
+    // consumer sum, and the range13/signed-carry consumer-use sums. Computed
+    // analytically so the proof's `relation_balances()` can net each relation
+    // independently.
     let (ec_row_sum, mul_result_sum) =
         fake_glv_projective_source_consumer_sums(base, ec_row_relation, mul_result_relation);
-    (columns, ec_row_sum, mul_result_sum)
+    let range13_use_sum = sum_use_fractions(
+        base,
+        range13_relation,
+        double_formula_range13_use_columns(),
+    );
+    let signed_carry_use_sum = sum_use_fractions(
+        base,
+        signed_carry_relation,
+        double_formula_signed_carry_use_columns(),
+    );
+    FakeGlvProjectiveSourceConsumerInteraction {
+        columns,
+        ec_row_sum,
+        mul_result_sum,
+        range13_use_sum,
+        signed_carry_use_sum,
+    }
+}
+
+/// Output of the fake-GLV projective-source consumer interaction-trace
+/// generator: the interaction columns and the per-relation analytic use sums.
+pub(crate) struct FakeGlvProjectiveSourceConsumerInteraction {
+    pub columns: ColumnVec<M31ColumnEval>,
+    pub ec_row_sum: SecureField,
+    pub mul_result_sum: SecureField,
+    pub range13_use_sum: SecureField,
+    pub signed_carry_use_sum: SecureField,
+}
+
+/// Base-trace column indices the Range13 USES read, in `bind_double_formula`
+/// emission order: lhs.x, lhs.y, output.x, output.y limbs, then x3, y3, z3.
+fn double_formula_range13_use_columns() -> Vec<usize> {
+    let lhs_x = 5; // after [active, source_index, sig_id, cert_id, op]
+    let lhs_y = lhs_x + N_LIMBS;
+    let output_x = 5 + 2 * PREPARED_TABLE_EC_POINT_COLUMNS;
+    let output_y = output_x + N_LIMBS;
+    // x3, y3, z3 are the first 3·N_LIMBS columns of the Double-formula block.
+    let x3 = FAKE_GLV_PROJECTIVE_DOUBLE_FORMULA_OFFSET;
+    let mut cols = Vec::with_capacity(7 * N_LIMBS);
+    for start in [lhs_x, lhs_y, output_x, output_y, x3, x3 + N_LIMBS, x3 + 2 * N_LIMBS] {
+        for limb in 0..N_LIMBS {
+            cols.push(start + limb);
+        }
+    }
+    cols
+}
+
+/// Base-trace column indices the signed-carry USES read, in consumer-AIR
+/// emission order (reduction slot outer, carry limb inner). The Double-formula
+/// block layout is `x3,y3,z3` (3·N_LIMBS) then per reduction `(q, carries)`.
+fn double_formula_signed_carry_use_columns() -> Vec<usize> {
+    let block = FAKE_GLV_PROJECTIVE_DOUBLE_FORMULA_OFFSET;
+    let reductions_start = block + 3 * N_LIMBS;
+    let mut cols = Vec::with_capacity(DOUBLE_TOTAL_REDUCTIONS * N_LIMBS);
+    for slot in 0..DOUBLE_TOTAL_REDUCTIONS {
+        let q_col = reductions_start + slot * (1 + N_LIMBS);
+        for limb in 0..N_LIMBS {
+            cols.push(q_col + 1 + limb); // skip the quotient column
+        }
+    }
+    cols
+}
+
+/// Range13 USE values the consumer base trace contributes (per active row): the
+/// `lhs.x, lhs.y, output.x, output.y, x3, y3, z3` limbs the Double formula
+/// range-checks. Fed into the self-contained Range13 provider's multiplicity.
+pub(crate) fn fake_glv_projective_source_range13_uses_from_base(base: &[M31ColumnEval]) -> Vec<M31> {
+    let columns = double_formula_range13_use_columns();
+    collect_active_use_values(base, &columns)
+}
+
+/// signed-carry USE values (decoded `i64`) the consumer base trace contributes
+/// (per active row): every Double-formula reduction carry. Fed into the
+/// self-contained signed-carry provider's multiplicity.
+pub(crate) fn fake_glv_projective_source_signed_carry_uses_from_base(
+    base: &[M31ColumnEval],
+) -> Vec<i64> {
+    let columns = double_formula_signed_carry_use_columns();
+    collect_active_use_values(base, &columns)
+        .into_iter()
+        .map(crate::range_checks::decode_signed_carry)
+        .collect()
+}
+
+fn collect_active_use_values(base: &[M31ColumnEval], columns: &[usize]) -> Vec<M31> {
+    let log_size = base[0].domain.log_size();
+    let mut uses = Vec::new();
+    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+        for lane in 0..(1 << LOG_N_LANES) {
+            let active = base[0].data[vec_row].to_array()[lane];
+            if active == M31::from_u32_unchecked(0) {
+                continue;
+            }
+            for &col in columns {
+                uses.push(base[col].data[vec_row].to_array()[lane]);
+            }
+        }
+    }
+    uses
+}
+
+/// Analytic `Σ active / relation.combine([base[col]])` over the given USE columns
+/// (each gated by `active`, the consumer's column 0).
+fn sum_use_fractions(
+    base: &[M31ColumnEval],
+    relation: &RangeCheckRelation,
+    columns: Vec<usize>,
+) -> SecureField {
+    let log_size = base[0].domain.log_size();
+    let mut sum = secure_zero();
+    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+        for lane in 0..(1 << LOG_N_LANES) {
+            let active = base[0].data[vec_row].to_array()[lane];
+            if active == M31::from_u32_unchecked(0) {
+                continue;
+            }
+            let active_ef = SecureField::from(active);
+            for &col in &columns {
+                let value = base[col].data[vec_row].to_array()[lane];
+                let denom: SecureField = relation.combine(&[value]);
+                sum += active_ef / denom;
+            }
+        }
+    }
+    sum
 }
 
 /// Analytic `(ec_row_consumer_sum, mul_result_consumer_sum)` over the consumer
@@ -692,6 +1020,23 @@ fn fake_glv_projective_source_trace_values(
     for value in mul_limbs {
         values[column] = value;
         column += 1;
+    }
+    debug_assert_eq!(column, FAKE_GLV_PROJECTIVE_DOUBLE_FORMULA_OFFSET);
+    // C5-2: the Double-formula working values + reduction witnesses. Emitted only
+    // for Double rows (op == DOUBLE); MixedAdd / padding leave this block zero,
+    // matching the `double_active`-gated constraints + off-Double zero gates.
+    if row.op == crate::projective::ProjectiveEcOp::Double {
+        let witness = super::double_formula::solve_double_formula_witness(
+            &mul_limbs,
+            &row.output_projective,
+        )
+        .ok_or(FakeGlvChainError::ProjectiveSourceInvalid)?;
+        for value in super::double_formula::double_formula_trace_values(&witness) {
+            values[column] = value;
+            column += 1;
+        }
+    } else {
+        column += DOUBLE_FORMULA_COLUMNS;
     }
     debug_assert_eq!(column, FAKE_GLV_PROJECTIVE_SOURCE_CONSUMER_TRACE_COLUMNS);
     Ok(values)

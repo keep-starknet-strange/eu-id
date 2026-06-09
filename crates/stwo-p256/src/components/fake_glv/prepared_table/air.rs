@@ -462,6 +462,18 @@ impl<F: Clone> PreparedTableEcEvalPoint<F> {
     pub(crate) fn inf(&self) -> F {
         self.inf.clone()
     }
+
+    /// The affine `x` coordinate limbs as a [`P256BigInt`] (C5-2: the Double-op
+    /// formula binds the silo mul operands to the input point's coordinates).
+    pub(crate) fn x_bigint(&self) -> crate::limbs::P256BigInt<F> {
+        crate::limbs::P256BigInt::from_limbs(self.x.clone())
+    }
+
+    /// The affine `y` coordinate limbs as a [`P256BigInt`] (C5-2 Double-op
+    /// formula operand binding; see [`Self::x_bigint`]).
+    pub(crate) fn y_bigint(&self) -> crate::limbs::P256BigInt<F> {
+        crate::limbs::P256BigInt::from_limbs(self.y.clone())
+    }
 }
 
 
