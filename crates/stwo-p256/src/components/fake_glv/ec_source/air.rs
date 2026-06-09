@@ -341,11 +341,12 @@ impl FrameworkEval for FakeGlvProjectiveSourceEval {
             eval.add_constraint((one.clone() - active.clone()) * value);
         }
 
-        // C5 plumbing: `has_muls` gate. The silo emits 13 muls for Double
-        // (op == 1) and finite-operand MixedAdd (op == 0), but ZERO for an
-        // infinity-operand MixedAdd. So expected = 1 - (1 - op)·operand_inf
-        // (operand = `rhs`). Constrain the committed flag to this and gate the
-        // consumes by it so a 0-mul op consumes nothing (matches the silo).
+        // C5 plumbing: `has_muls` gate. The silo emits
+        // `PROJECTIVE_RCB_MAX_MUL_ROWS_PER_OP` muls for Double (op == 1) and
+        // finite-operand MixedAdd (op == 0), but ZERO for an infinity-operand
+        // MixedAdd. So expected = 1 - (1 - op)·operand_inf (operand = `rhs`).
+        // Constrain the committed flag to this and gate the consumes by it so a
+        // 0-mul op consumes nothing (matches the silo).
         let expected_has_muls =
             one.clone() - (one.clone() - op.clone()) * rhs.inf();
         consumed_muls.constrain_has_muls(&mut eval, &active, &expected_has_muls);

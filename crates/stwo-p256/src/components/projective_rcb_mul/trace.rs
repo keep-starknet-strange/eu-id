@@ -1370,10 +1370,16 @@ impl ProjectiveRcbAirRow {
         let lhs = ProjectivePoint::from_prepared(&row.lhs_affine);
         let mut muls = Vec::with_capacity(PROJECTIVE_RCB_MAX_MUL_ROWS_PER_OP);
         let output_projective = match row.op {
-            ProjectiveEcOp::Double => rcb_double_with_mul_rows(source_index, &lhs, &mut muls)?,
-            ProjectiveEcOp::MixedAdd => {
-                rcb_mixed_add_with_mul_rows(source_index, &lhs, &row.rhs_affine, &mut muls)?
+            ProjectiveEcOp::Double => {
+                rcb_double_with_mul_rows(source_index, &lhs, &row.output_affine, &mut muls)?
             }
+            ProjectiveEcOp::MixedAdd => rcb_mixed_add_with_mul_rows(
+                source_index,
+                &lhs,
+                &row.rhs_affine,
+                &row.output_affine,
+                &mut muls,
+            )?,
         };
         if output_projective != row.output_projective {
             return Err(ProjectiveRcbAirError::ProjectiveOutputMismatch { source_index });
@@ -2044,7 +2050,16 @@ impl ProjectiveRcbRawProductTermRow {
     }
 }
 
-pub const PROJECTIVE_RCB_MAX_MUL_ROWS_PER_OP: usize = 13;
+/// Field-muls one EC op contributes to the silo. The first 13 are the
+/// renes-costello-batina (RCB) formula muls (`Double`: 13 always; `MixedAdd`:
+/// 13 for a finite operand, 0 for an infinity operand — the no-op early-returns
+/// before any mul). The last 2 (`M13`, `M14`) are the affine-normalization muls
+/// `output_affine.{x,y} · output_projective.z`; C5-2a-ii will bind their
+/// operands/result to prove `output_affine = to_affine(output_projective)`. The
+/// silo proves all 15 products via its Solinas reduction; this constant is the
+/// SINGLE source of truth for the per-op mul count (consumer column widths and
+/// every count test scale from it).
+pub const PROJECTIVE_RCB_MAX_MUL_ROWS_PER_OP: usize = 15;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProjectiveRcbMulStep {
@@ -2061,6 +2076,10 @@ pub enum ProjectiveRcbMulStep {
     DoubleY1Z1,
     DoubleT0Z3Final,
     DoubleT0T1,
+    /// M13: `output_affine.x · output_projective.z` (affine-norm, → x3).
+    DoubleAffineNormX,
+    /// M14: `output_affine.y · output_projective.z` (affine-norm, → y3).
+    DoubleAffineNormY,
     MixedX1X2,
     MixedY1Y2,
     MixedX2Y2X1Y1,
@@ -2074,6 +2093,10 @@ pub enum ProjectiveRcbMulStep {
     MixedT3X3,
     MixedT4Z3,
     MixedT3T0,
+    /// M13: `output_affine.x · output_projective.z` (affine-norm, → x3).
+    MixedAffineNormX,
+    /// M14: `output_affine.y · output_projective.z` (affine-norm, → y3).
+    MixedAffineNormY,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2470,6 +2493,7 @@ fn fold_raw_coefficients(raw: &[i128; FP_SOLINAS_RAW_LIMBS]) -> [i128; N_LIMBS] 
 fn rcb_double_with_mul_rows(
     source_index: usize,
     input: &ProjectivePoint,
+    output_affine: &PreparedAffinePoint,
     muls: &mut Vec<ProjectiveRcbMulRow>,
 ) -> Result<ProjectivePoint, ProjectiveRcbAirError> {
     let x1 = input.x.to_u256();
@@ -2589,16 +2613,29 @@ fn rcb_double_with_mul_rows(
     z3 = fp_add(&z3, &z3);
     z3 = fp_add(&z3, &z3);
 
-    Ok(projective_from_u256(x3, y3, z3))
+    let output = projective_from_u256(x3, y3, z3);
+    append_affine_norm_muls(
+        source_index,
+        ProjectiveRcbMulStep::DoubleAffineNormX,
+        ProjectiveRcbMulStep::DoubleAffineNormY,
+        output_affine,
+        &output,
+        muls,
+    )?;
+    Ok(output)
 }
 
 fn rcb_mixed_add_with_mul_rows(
     source_index: usize,
     state: &ProjectivePoint,
     operand: &PreparedAffinePoint,
+    output_affine: &PreparedAffinePoint,
     muls: &mut Vec<ProjectiveRcbMulRow>,
 ) -> Result<ProjectivePoint, ProjectiveRcbAirError> {
     let Some(operand) = operand.to_option() else {
+        // Infinity-operand no-op: the silo emits ZERO muls for this op (including
+        // no affine-norm muls), so the consumer gates its consumes off via
+        // `has_muls = false` and the 3-way balance stays closed.
         return Ok(state.clone());
     };
 
@@ -2723,7 +2760,40 @@ fn rcb_mixed_add_with_mul_rows(
     )?;
     z3 = fp_add(&z3, &t1);
 
-    Ok(projective_from_u256(x3, y3, z3))
+    let output = projective_from_u256(x3, y3, z3);
+    append_affine_norm_muls(
+        source_index,
+        ProjectiveRcbMulStep::MixedAffineNormX,
+        ProjectiveRcbMulStep::MixedAffineNormY,
+        output_affine,
+        &output,
+        muls,
+    )?;
+    Ok(output)
+}
+
+/// Append the 2 affine-normalization muls (M13, M14) for an EC op that emitted
+/// the full RCB formula muls: `M13 = output_affine.x · output_projective.z` and
+/// `M14 = output_affine.y · output_projective.z`. For a finite output these
+/// equal `output_projective.{x,y}` (the to-affine identity); for the canonical
+/// infinity output (`z = 0`) both products are `0`. Either way the silo proves
+/// the honest product via [`ProjectiveRcbMulRow::new`]'s Solinas reduction. The
+/// downstream C5-2a-ii constraint binds these operands/result to the consumer's
+/// committed affine + projective output, completing the soundness argument.
+fn append_affine_norm_muls(
+    source_index: usize,
+    step_x: ProjectiveRcbMulStep,
+    step_y: ProjectiveRcbMulStep,
+    output_affine: &PreparedAffinePoint,
+    output_projective: &ProjectivePoint,
+    muls: &mut Vec<ProjectiveRcbMulRow>,
+) -> Result<(), ProjectiveRcbAirError> {
+    let affine_x = output_affine.x.to_u256();
+    let affine_y = output_affine.y.to_u256();
+    let projective_z = output_projective.z.to_u256();
+    fp_mul(source_index, step_x, &affine_x, &projective_z, muls)?;
+    fp_mul(source_index, step_y, &affine_y, &projective_z, muls)?;
+    Ok(())
 }
 
 fn fp_mul(

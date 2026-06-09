@@ -217,11 +217,11 @@ const PROJECTIVE_RCB_MUL_RESULT_ROLES: [u32; 3] = [
 /// up with the silo's provided yields. C5-2 will constrain the coordinate
 /// formula on these columns; C5-1 only pins them equal to the silo via balance.
 ///
-/// `has_muls` is a committed boolean gate: `1` iff the op emitted the full 13
-/// muls (Double, or MixedAdd with a finite operand), `0` for an infinity-operand
-/// MixedAdd no-op (which the silo proves with ZERO muls). The consume is gated
-/// by `has_muls` so a 0-mul op consumes nothing, matching the silo provider and
-/// keeping the 3-way balance closed.
+/// `has_muls` is a committed boolean gate: `1` iff the op emitted the full
+/// `PROJECTIVE_RCB_MAX_MUL_ROWS_PER_OP` muls (Double, or MixedAdd with a finite
+/// operand), `0` for an infinity-operand MixedAdd no-op (which the silo proves
+/// with ZERO muls). The consume is gated by `has_muls` so a 0-mul op consumes
+/// nothing, matching the silo provider and keeping the 3-way balance closed.
 pub struct ConsumedMulLimbs<E: EvalAtRow> {
     /// Committed `has_muls` flag (column 0 of the consumed-mul block).
     pub has_muls: E::F,
