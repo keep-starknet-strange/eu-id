@@ -111,7 +111,44 @@ rtk git commit -m "fix(p256): range-check Solinas correction digit (close C1 fre
 
 ---
 
-## Phase 2: Make the Silo Constrain the Full Projective EC Operation
+## C5 BUILD — B2 DESIGN (APPROVED 2026-06-09; supersedes the B1 Phase 2–3 below)
+
+Investigation findings that reshape the build:
+- **Mul count is 13 per op** (`PROJECTIVE_RCB_MAX_MUL_ROWS_PER_OP = 13`; 13 Double + 13 MixedAdd slots in the `ProjectiveRcbMulStep` enum, trace.rs:1991), NOT 6/11.
+- The silo commits **one mul per row** (`lhs`,`rhs`,`result` + reduction + the new C1 correction digits), **no point columns**. The `fp_add`/`fp_sub` glue tying mul results into `x3,y3,z3` is native Rust.
+- The `output = rcb_op(inputs)` binding currently exists **only** as a native recompute-and-compare (`verify_against_projective_row` → `from_projective_row`, trace.rs:1306-1344). That is the C5 hole.
+- `ProjectiveEcRow` (curve/projective.rs:78): inputs **affine** (`lhs_affine`,`rhs_affine`), output dual (`output_affine` + `output_projective{x,y,z}`). Affine↔projective conversion is native (`to_prepared` z-inversion).
+- Precedent to mirror: `final_add` — `FinalAddMulEval` PROVIDES mul limbs via `FinalAddMulResultRelation`; `FinalAddCheckEval` CONSUMES specific muls + constrains the coordinate formula via `add_*_reduction` helpers (final_add/air.rs:64,321,413-456).
+
+**B2 = mirror final_add:** the silo PROVIDES its proven mul-results into a new relation; the existing affine source-consumer (already per-EC-op, already commits the points) CONSUMES them and constrains the coordinate formula. No new silo columns; reuses the consumer's points + final_add's reduction idiom.
+
+### Task C5-1: Establish the balanced silo→source mul-result link (plumbing, no formula yet)
+Files: `projective_rcb_mul/{relation,air,interaction}.rs`, `fake_glv/ec_source/air.rs`, `fake_glv/prepared_table/air.rs`, `proof/mod.rs`.
+- Define `relation!(ProjectiveRcbMulResultRelation, 5)` keyed `(source_index, mul_index, role, limb_index, limb)`; role ∈ {LHS=0,RHS=1,RESULT=2} (constants `PROJECTIVE_RCB_MUL_ROLE_*` exist). Add to `ProjectiveRcbMulComponentRelations` (+draw/dummy/as_refs).
+- Silo `ProjectiveRcbMulEval::evaluate`: after the mul constraints, PROVIDE each role×limb with `+active` (mirror `provide_mul_limbs`). No new silo columns.
+- Source consumers (`FakeGlvProjectiveSourceEval` + prepared-table source): commit the mul-result limb columns they will need and CONSUME them with `-active` keyed by `(source_index, mul_index, role, limb)`. **No coordinate constraints yet** — just balance the link.
+- Wire `relation_balances()` (`("ProjectiveRcbMulResult", provider + consumers)`) and `liveness_witnesses()` (`("ProjectiveRcbMulResult", silo_provider_sum)`).
+- Verify: monolithic proof still proves+verifies; `monolithic_relation_audit_is_balanced_and_fully_linked` balanced AND the new link live. NO soundness change yet (consumer reads muls but doesn't constrain the formula).
+
+### Task C5-2: Constrain the coordinate formula in the source consumer (THE SOUNDNESS CORE — air-writer review REQUIRED)
+Files: `fake_glv/ec_source/air.rs` (+ prepared-table source); reuse `final_add` `add_*_reduction` helpers (degree ≤2).
+- **Step 1 — transcribe** the exact 13-slot formula for Double and MixedAdd from `curve/projective.rs:242` / `:285` + the `ProjectiveRcbMulStep` slot map (trace.rs:1991): the ordered (operand_a, operand_b)→result of the 13 muls and the `fp_add`/`fp_sub` glue producing the working values and `x3,y3,z3`. Record it.
+- **Step 2 — columns:** add committed projective working-value columns + per-coordinate quotient/carry columns in the consumer. Affine inputs ⇒ `z1 = 1` (constant); infinity via the `inf` flag.
+- **Step 3 — constrain** (branch-selected by `op`, reusing the limb-reduction idiom):
+  (a) **Operand binding** — each consumed mul's `lhs`/`rhs` limbs equal the correct linear combo of input coords / prior results (NOT just the `result`, else a wrong-operand forgery survives). This is the bulk and the soundness-critical part.
+  (b) **Output projective** — `x3,y3,z3` equal the final linear combos of mul results.
+  (c) **Affine normalization** — `output_affine.x · z3 ≡ output_projective.x` and `output_affine.y · z3 ≡ output_projective.y` (binds the committed affine output to the projective result; degree-2). Do NOT leave the affine output bound only natively.
+  (d) **Infinity / inactive** — gate the finite branch; `inf` rows force `output = other input`; inactive ⇒ zero.
+- Verify: a forged ladder `output` point is now rejected by `assert_constraints`; valid proofs still prove+verify; relation audit still balanced+live.
+
+### Task C5-3: Adversarial forgery tests (was Phase 5)
+- Forge a ladder `output` point in the proof claim → `verify_current_air_monolithic` rejects. Same for an intermediate Double output and a prepared-table multiple. Confirm pre-C5-2 these verified (the contrast proves closure).
+
+**Risks:** operand-binding (a) is the subtle soundness point; affine-normalization (c) must bind the committed affine output; mul-limb consumption may add more columns than the first cost estimate (commit only what the formula needs); air-writer review of the 13-slot transcription before merge. Projective→affine downstream: confirm the ladder result reaches final_check only via `final_add` (affine output) so no new normalization gadget is needed.
+
+---
+
+## Phase 2 (B1 — SUPERSEDED by B2 above): Make the Silo Constrain the Full Projective EC Operation
 
 Lift the native per-row check (`verify_against_projective_row`) into in-AIR constraints: the silo must prove `output_point = rcb_double(lhs)` (op=1) or `output_point = rcb_mixed_add(lhs, rhs)` (op=0), using its **existing** mul-result columns.
 
