@@ -49,9 +49,9 @@ use crate::fake_glv_direct_prepared_operand::{
 use crate::fake_glv_ec_source::{
     gen_fake_glv_primitive_ec_preprocessed_trace, gen_fake_glv_primitive_ec_source_base_trace,
     gen_fake_glv_primitive_ec_source_interaction_trace, gen_fake_glv_projective_source_base_trace,
-    FakeGlvPrimitiveEcRowRelation, FakeGlvProjectiveSourceComponents,
-    FakeGlvProjectiveSourceInteractionClaim, FakeGlvProjectiveSourceProofClaim,
-    RelationMultiplicity,
+    gen_fake_glv_projective_source_consumer_interaction_trace, FakeGlvPrimitiveEcRowRelation,
+    FakeGlvProjectiveSourceComponents, FakeGlvProjectiveSourceInteractionClaim,
+    FakeGlvProjectiveSourceProofClaim, RelationMultiplicity,
 };
 use crate::fake_glv_lsb_correction_operand::{
     gen_lsb_correction_operand_consumer_base_trace, gen_lsb_correction_operand_interaction_trace,
@@ -86,7 +86,7 @@ use crate::prepared_point::{
 use crate::prepared_table::{
     gen_prepared_table_ec_row_base_trace,
     gen_prepared_table_ec_row_preprocessed_trace, gen_prepared_table_projective_source_base_trace,
-    gen_prepared_table_projective_source_interaction_trace,
+    gen_prepared_table_projective_source_consumer_interaction_trace,
     gen_prepared_table_ec_row_pinned_interaction_trace, CertBaseRelation,
     PreparedTableCanonicalRelation, PreparedTableClaim, PreparedTableEcRowPinnedInteractionClaim,
     PreparedTableEcRowRelation, PreparedTableEcTraceClaim, PreparedTableError,
@@ -873,6 +873,21 @@ impl P256CurrentAirInteractionClaim {
                 "FakeGlvProjectiveSource",
                 self.fake_glv_projective_source.total(),
             ),
+            // C5 plumbing: the RCB silo PROVIDES every projective EC op's
+            // mul `lhs`/`rhs`/`result` limbs; the two projective-source
+            // consumers CONSUME them over disjoint, exhaustive `source_index`
+            // ranges (prepared-table `[0, source_offset)`, fake-GLV
+            // `[source_offset, ..)`), so this 3-way sum nets to zero.
+            (
+                "ProjectiveRcbMulResult",
+                self.projective_rcb_air.mul_result_provider_claimed_sum
+                    + self
+                        .fake_glv_projective_source
+                        .mul_result_consumer_claimed_sum
+                    + self
+                        .prepared_table_projective_source
+                        .mul_result_consumer_claimed_sum,
+            ),
             ("FakeGlvChainExpansion", self.fake_glv_chain_expansion.total()),
             (
                 "FakeGlvChainContinuity",
@@ -908,7 +923,16 @@ impl P256CurrentAirInteractionClaim {
                 "PublicKeyPoint",
                 self.public_key_on_curve.total() + self.scalar_setup.point_provider_claimed_sum,
             ),
-            ("ProjectiveRcbAirProofSlice", self.projective_rcb_air.total()),
+            // C5 plumbing: `total()` includes the `ProjectiveRcbMulResult`
+            // provider yields (they live in the silo's `mul` column), but those
+            // are balanced separately under `ProjectiveRcbMulResult` against the
+            // two source consumers. Exclude them here so this silo-internal
+            // entry still nets to zero.
+            (
+                "ProjectiveRcbAirProofSlice",
+                self.projective_rcb_air.total()
+                    - self.projective_rcb_air.mul_result_provider_claimed_sum,
+            ),
             (
                 "FinalCheckHint",
                 self.prepared_table_pinned.final_check_hint_claimed_sum
@@ -944,6 +968,12 @@ impl P256CurrentAirInteractionClaim {
             (
                 "FinalAddOutput",
                 self.final_add.output_provider_claimed_sum,
+            ),
+            // C5 plumbing: the silo→source mul-result link must stay live so the
+            // ladder/prepared-table cannot silently detach from the proven muls.
+            (
+                "ProjectiveRcbMulResult",
+                self.projective_rcb_air.mul_result_provider_claimed_sum,
             ),
         ]
     }
@@ -1264,12 +1294,16 @@ impl P256CurrentAirComponents {
                 interaction_claim
                     .prepared_table_projective_source
                     .consumer_claimed_sum,
+                interaction_claim
+                    .prepared_table_projective_source
+                    .mul_result_consumer_claimed_sum,
                 &relations.prepared_table,
                 &PreparedTablePinningRelations {
                     cert_base: relations.cert_base.clone(),
                     canonical: relations.prepared_table_canonical.clone(),
                     final_check_hint: Some(relations.final_check_hint.clone()),
                 },
+                &relations.projective_rcb_air,
             ),
             fake_glv_projective_source: FakeGlvProjectiveSourceComponents::new(
                 allocator,
@@ -1277,6 +1311,7 @@ impl P256CurrentAirComponents {
                 claim.fake_glv_projective_source.source_offset,
                 &interaction_claim.fake_glv_projective_source,
                 &relations.fake_glv_projective_source,
+                &relations.projective_rcb_air,
             ),
             fake_glv_chain_expansion: FakeGlvChainExpansionComponents::new(
                 allocator,
@@ -2047,10 +2082,15 @@ impl P256ProofDraft {
                 &relations.prepared_table_canonical,
                 Some(&relations.final_check_hint),
             );
-        let (prepared_consumer_interaction, prepared_consumer_claim) =
-            gen_prepared_table_projective_source_interaction_trace(
+        // C5 plumbing: the consumers emit BOTH their EC-row consume and the
+        // `ProjectiveRcbMulResultRelation` consumes for the silo muls of their
+        // op, so they use the dedicated consumer interaction generators that
+        // return `(trace, ec_row_sum, mul_result_sum)`.
+        let (prepared_consumer_interaction, prepared_consumer_ec_row_sum, prepared_consumer_mul_result_sum) =
+            gen_prepared_table_projective_source_consumer_interaction_trace(
                 &base.prepared_table_consumer,
                 &relations.prepared_table,
+                &relations.projective_rcb_air.mul_result,
             );
         let (fake_glv_provider_interaction, fake_glv_provider_claim) =
             gen_fake_glv_primitive_ec_source_interaction_trace(
@@ -2058,11 +2098,11 @@ impl P256ProofDraft {
                 &relations.fake_glv_projective_source,
                 RelationMultiplicity::Provider,
             );
-        let (fake_glv_consumer_interaction, fake_glv_consumer_claim) =
-            gen_fake_glv_primitive_ec_source_interaction_trace(
+        let (fake_glv_consumer_interaction, fake_glv_consumer_ec_row_sum, fake_glv_consumer_mul_result_sum) =
+            gen_fake_glv_projective_source_consumer_interaction_trace(
                 &base.fake_glv_projective_consumer,
                 &relations.fake_glv_projective_source,
-                RelationMultiplicity::Consumer,
+                &relations.projective_rcb_air.mul_result,
             );
         let (expansion_provider_interaction, expansion_provider_sum) =
             gen_fake_glv_chain_expansion_interaction_trace(
@@ -2211,12 +2251,14 @@ impl P256ProofDraft {
                 fake_glv_scalar_mod_muls: fake_glv_scalar_interaction_claims,
                 prepared_table_projective_source: PreparedTableProjectiveSourceInteractionClaim {
                     provider_claimed_sum: prepared_pinned_claim.total_claimed_sum,
-                    consumer_claimed_sum: prepared_consumer_claim.claimed_sum,
+                    consumer_claimed_sum: prepared_consumer_ec_row_sum,
+                    mul_result_consumer_claimed_sum: prepared_consumer_mul_result_sum,
                 },
                 prepared_table_pinned: prepared_pinned_claim,
                 fake_glv_projective_source: FakeGlvProjectiveSourceInteractionClaim {
                     provider_claimed_sum: fake_glv_provider_claim.claimed_sum,
-                    consumer_claimed_sum: fake_glv_consumer_claim.claimed_sum,
+                    consumer_claimed_sum: fake_glv_consumer_ec_row_sum,
+                    mul_result_consumer_claimed_sum: fake_glv_consumer_mul_result_sum,
                 },
                 fake_glv_chain_expansion: FakeGlvChainExpansionInteractionClaim {
                     expansion_claimed_sum: expansion_provider_sum,

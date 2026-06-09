@@ -17,6 +17,7 @@ use crate::prepared_point::{
     PREPARED_BASE_COUNT, TABLE16_INDEX,
 };
 use crate::projective::ProjectiveEcTraceClaim;
+use crate::projective_air::projective_rcb_op_mul_limbs;
 use crate::types::{AffinePoint, U256};
 
 use crate::scalar::cert_bind::{CertScalarInputClaim, CertScalarInputRow, CERT_ID_U1_GENERATOR};
@@ -317,6 +318,7 @@ impl PreparedTableProjectiveSourceProofClaim {
             self.log_size,
             &PreparedTableProjectiveSourceInteractionClaim::zero(),
             &PreparedTableEcRowRelation::dummy(),
+            &crate::projective_air::ProjectiveRcbMulComponentRelations::dummy(),
         );
         allocator.preprocessed_columns().clone()
     }
@@ -328,6 +330,7 @@ impl PreparedTableProjectiveSourceProofClaim {
             self.log_size,
             &PreparedTableProjectiveSourceInteractionClaim::zero(),
             &PreparedTableEcRowRelation::dummy(),
+            &crate::projective_air::ProjectiveRcbMulComponentRelations::dummy(),
         );
         components.trace_log_degree_bounds()
     }
@@ -339,6 +342,7 @@ impl PreparedTableProjectiveSourceProofClaim {
             self.log_size,
             &PreparedTableProjectiveSourceInteractionClaim::zero(),
             &PreparedTableEcRowRelation::dummy(),
+            &crate::projective_air::ProjectiveRcbMulComponentRelations::dummy(),
         );
         components.max_constraint_log_degree_bound()
     }
@@ -421,7 +425,7 @@ pub(crate) fn gen_prepared_table_projective_source_base_trace(
                 projective_row,
             )
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, _>>()?;
     rows.resize(
         padded_rows,
         [M31::from_u32_unchecked(0); PREPARED_TABLE_PROJECTIVE_SOURCE_TRACE_COLUMNS],
@@ -528,7 +532,7 @@ fn prepared_table_projective_source_trace_values(
     source_index: usize,
     prepared_row: &PreparedTableEcRow,
     projective_row: &crate::projective::ProjectiveEcRow,
-) -> [M31; PREPARED_TABLE_PROJECTIVE_SOURCE_TRACE_COLUMNS] {
+) -> Result<[M31; PREPARED_TABLE_PROJECTIVE_SOURCE_TRACE_COLUMNS], PreparedTableError> {
     let mut values = [M31::from_u32_unchecked(0); PREPARED_TABLE_PROJECTIVE_SOURCE_TRACE_COLUMNS];
     let mut column = 0;
     values[column] = M31::from_u32_unchecked(1);
@@ -555,8 +559,20 @@ fn prepared_table_projective_source_trace_values(
         values[column] = value;
         column += 1;
     }
+    debug_assert_eq!(column, PREPARED_TABLE_PROJECTIVE_SOURCE_HAS_MULS_COL);
+    // C5 plumbing: the `has_muls` flag, then the silo's proven mul limbs for this
+    // prepared-table op in canonical order. (Prepared-table ops use finite base
+    // operands, so `has_muls` is 1, but the flag keeps the consumer robust.)
+    let (mul_limbs, has_muls) = projective_rcb_op_mul_limbs(source_index, projective_row)
+        .map_err(|_| PreparedTableError::ProjectiveSourceInvalid)?;
+    values[column] = M31::from_u32_unchecked(has_muls as u32);
+    column += 1;
+    for value in mul_limbs {
+        values[column] = value;
+        column += 1;
+    }
     debug_assert_eq!(column, PREPARED_TABLE_PROJECTIVE_SOURCE_TRACE_COLUMNS);
-    values
+    Ok(values)
 }
 
 

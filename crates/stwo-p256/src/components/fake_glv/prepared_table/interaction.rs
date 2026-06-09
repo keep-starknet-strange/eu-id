@@ -14,6 +14,10 @@ use stwo_p256_utils::constants::N_LIMBS;
 
 use crate::constants::{P256_3GX, P256_3GY};
 use crate::limbs::P256M31BigInt;
+use crate::projective_air::{
+    ProjectiveRcbMulResultRelation, PROJECTIVE_RCB_MUL_ROLE_LHS, PROJECTIVE_RCB_MUL_ROLE_RESULT,
+    PROJECTIVE_RCB_MUL_ROLE_RHS, PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS,
+};
 use crate::types::U256;
 
 use crate::scalar::scalar_mod_mul::columns::M31ColumnEval;
@@ -36,7 +40,13 @@ impl PreparedTableEcRowInteractionClaim {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PreparedTableProjectiveSourceInteractionClaim {
     pub provider_claimed_sum: SecureField,
+    /// `PreparedTableEcRowRelation` consumer sum.
     pub consumer_claimed_sum: SecureField,
+    /// C5 plumbing: `ProjectiveRcbMulResultRelation` consumer sum (silo mul
+    /// limbs consumed on the prepared-table projective-source consumer). Shares
+    /// the consumer's interaction trace, balanced separately under
+    /// `ProjectiveRcbMulResult`.
+    pub mul_result_consumer_claimed_sum: SecureField,
 }
 
 
@@ -45,15 +55,28 @@ impl PreparedTableProjectiveSourceInteractionClaim {
         Self {
             provider_claimed_sum: secure_zero(),
             consumer_claimed_sum: secure_zero(),
+            mul_result_consumer_claimed_sum: secure_zero(),
         }
     }
 
+    /// `PreparedTableProjectiveSource` balance term: provider + EC-row consume.
+    /// EXCLUDES the mul-result consume (balanced under `ProjectiveRcbMulResult`).
     pub fn total(self) -> SecureField {
         self.provider_claimed_sum + self.consumer_claimed_sum
     }
 
+    /// The single claimed sum the consumer FrameworkComponent declares (EC-row
+    /// + mul-result consumes share one interaction trace / `finalize_logup`).
+    pub fn consumer_component_claimed_sum(self) -> SecureField {
+        self.consumer_claimed_sum + self.mul_result_consumer_claimed_sum
+    }
+
     pub fn mix_into(&self, channel: &mut impl Channel) {
-        channel.mix_felts(&[self.provider_claimed_sum, self.consumer_claimed_sum]);
+        channel.mix_felts(&[
+            self.provider_claimed_sum,
+            self.consumer_claimed_sum,
+            self.mul_result_consumer_claimed_sum,
+        ]);
     }
 }
 
@@ -493,23 +516,145 @@ fn prepared_table_ec_row_unpacked_relation_values(
 }
 
 
-pub(crate) fn gen_prepared_table_projective_source_interaction_trace(
+/// Canonical role order for the consumed mul-limb columns, matching
+/// `projective_rcb_op_mul_limbs` and `ConsumedMulLimbs`.
+const PROJECTIVE_RCB_MUL_RESULT_ROLES: [u32; 3] = [
+    PROJECTIVE_RCB_MUL_ROLE_LHS,
+    PROJECTIVE_RCB_MUL_ROLE_RHS,
+    PROJECTIVE_RCB_MUL_ROLE_RESULT,
+];
+
+
+/// C5 plumbing: interaction trace for the prepared-table projective-source
+/// CONSUMER. Emits, in the order `PreparedTableProjectiveSourceEval::evaluate`
+/// does under one `finalize_logup`: the `PreparedTableEcRowRelation` consume
+/// (col 0, `+active`), then one `ProjectiveRcbMulResultRelation` consume column
+/// per committed mul limb (canonical mul/role/limb order, `+active`). Returns
+/// the columns, the EC-row consumer sum, and the mul-result consumer sum.
+pub(crate) fn gen_prepared_table_projective_source_consumer_interaction_trace(
     base: &[M31ColumnEval],
-    relation: &PreparedTableEcRowRelation,
-) -> (ColumnVec<M31ColumnEval>, PreparedTableEcRowInteractionClaim) {
+    ec_row_relation: &PreparedTableEcRowRelation,
+    mul_result_relation: &ProjectiveRcbMulResultRelation,
+) -> (ColumnVec<M31ColumnEval>, SecureField, SecureField) {
     assert_eq!(base.len(), PREPARED_TABLE_PROJECTIVE_SOURCE_TRACE_COLUMNS);
     let log_size = base[0].domain.log_size();
     let mut logup = LogupTraceGenerator::new(log_size);
+
+    // Column 0: the existing EC-row consume (+active).
     let mut col = logup.new_col();
     for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
         let values = prepared_table_projective_source_packed_relation_values(base, vec_row);
-        let numerator = PackedQM31::from(base[0].data[vec_row]);
-        let denominator: PackedQM31 = relation.combine(&values);
-        col.write_frac(vec_row, numerator, denominator);
+        let active = PackedQM31::from(base[0].data[vec_row]);
+        col.write_frac(vec_row, active, ec_row_relation.combine(&values));
     }
     col.finalize_col();
-    let (trace, claimed_sum) = logup.finalize_last();
-    (trace, PreparedTableEcRowInteractionClaim { claimed_sum })
+
+    // Mul-result consume columns (one per fraction, gated by the `has_muls`
+    // column), canonical order.
+    for mul_index in 0..(PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS / (3 * N_LIMBS)) {
+        for (role_index, &role) in PROJECTIVE_RCB_MUL_RESULT_ROLES.iter().enumerate() {
+            for limb_index in 0..N_LIMBS {
+                let base_col = PREPARED_TABLE_PROJECTIVE_SOURCE_MUL_LIMB_OFFSET
+                    + mul_index * (3 * N_LIMBS)
+                    + role_index * N_LIMBS
+                    + limb_index;
+                let mut col = logup.new_col();
+                for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+                    let source_index = base[1].data[vec_row];
+                    let limb = base[base_col].data[vec_row];
+                    let has_muls = PackedQM31::from(
+                        base[PREPARED_TABLE_PROJECTIVE_SOURCE_HAS_MULS_COL].data[vec_row],
+                    );
+                    let values = [
+                        source_index,
+                        PackedM31::broadcast(M31::from_u32_unchecked(mul_index as u32)),
+                        PackedM31::broadcast(M31::from_u32_unchecked(role)),
+                        PackedM31::broadcast(M31::from_u32_unchecked(limb_index as u32)),
+                        limb,
+                    ];
+                    col.write_frac(vec_row, has_muls, mul_result_relation.combine(&values));
+                }
+                col.finalize_col();
+            }
+        }
+    }
+    let (columns, _total) = logup.finalize_last();
+
+    let (ec_row_sum, mul_result_sum) =
+        prepared_table_projective_source_consumer_sums(base, ec_row_relation, mul_result_relation);
+    (columns, ec_row_sum, mul_result_sum)
+}
+
+
+/// Analytic `(ec_row_consumer_sum, mul_result_consumer_sum)` over the consumer
+/// base trace's active rows, using unpacked `SecureField` combines.
+fn prepared_table_projective_source_consumer_sums(
+    base: &[M31ColumnEval],
+    ec_row_relation: &PreparedTableEcRowRelation,
+    mul_result_relation: &ProjectiveRcbMulResultRelation,
+) -> (SecureField, SecureField) {
+    let log_size = base[0].domain.log_size();
+    let mut ec_row_sum = secure_zero();
+    let mut mul_result_sum = secure_zero();
+    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+        for lane in 0..(1 << LOG_N_LANES) {
+            let active = base[0].data[vec_row].to_array()[lane];
+            if active != M31::from_u32_unchecked(0) {
+                let ec_values =
+                    prepared_table_projective_source_unpacked_relation_values(base, vec_row, lane);
+                let denom: SecureField = ec_row_relation.combine(&ec_values);
+                ec_row_sum += SecureField::from(active) / denom;
+            }
+
+            let has_muls =
+                base[PREPARED_TABLE_PROJECTIVE_SOURCE_HAS_MULS_COL].data[vec_row].to_array()[lane];
+            if has_muls == M31::from_u32_unchecked(0) {
+                continue;
+            }
+            let has_muls_ef = SecureField::from(has_muls);
+            let source_index = base[1].data[vec_row].to_array()[lane];
+            for mul_index in 0..(PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS / (3 * N_LIMBS)) {
+                for (role_index, &role) in PROJECTIVE_RCB_MUL_RESULT_ROLES.iter().enumerate() {
+                    for limb_index in 0..N_LIMBS {
+                        let base_col = PREPARED_TABLE_PROJECTIVE_SOURCE_MUL_LIMB_OFFSET
+                            + mul_index * (3 * N_LIMBS)
+                            + role_index * N_LIMBS
+                            + limb_index;
+                        let limb = base[base_col].data[vec_row].to_array()[lane];
+                        let denom: SecureField = mul_result_relation.combine(&[
+                            source_index,
+                            M31::from_u32_unchecked(mul_index as u32),
+                            M31::from_u32_unchecked(role),
+                            M31::from_u32_unchecked(limb_index as u32),
+                            limb,
+                        ]);
+                        mul_result_sum += has_muls_ef / denom;
+                    }
+                }
+            }
+        }
+    }
+    (ec_row_sum, mul_result_sum)
+}
+
+
+fn prepared_table_projective_source_unpacked_relation_values(
+    base: &[M31ColumnEval],
+    vec_row: usize,
+    lane: usize,
+) -> [M31; PREPARED_TABLE_EC_ROW_RELATION_ARITY] {
+    core::array::from_fn(|index| {
+        let column = match index {
+            0 => 1,
+            1 => 2,
+            2 => 3,
+            3 => 4,
+            4 => 5,
+            5..=127 => 6 + (index - 5),
+            _ => unreachable!("prepared-table projective source relation index is in range"),
+        };
+        base[column].data[vec_row].to_array()[lane]
+    })
 }
 
 

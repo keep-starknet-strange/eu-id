@@ -60,6 +60,11 @@ pub struct ProjectiveRcbAirProofInteractionClaim {
     pub range13: RangeCheckInteractionClaim,
     pub raw_product_carry16: RangeCheckInteractionClaim,
     pub signed_carry: RangeCheckInteractionClaim,
+    /// C5 plumbing: the `ProjectiveRcbMulResultRelation` provider sum (yield,
+    /// `-active`). Part of `components.mul`, surfaced separately so the proof's
+    /// `relation_balances()` can net it against the projective-source consumers
+    /// and `liveness_witnesses()` can require it nonzero.
+    pub mul_result_provider_claimed_sum: SecureField,
 }
 
 impl ProjectiveRcbAirProofInteractionClaim {
@@ -80,6 +85,7 @@ impl ProjectiveRcbAirProofInteractionClaim {
             signed_carry: RangeCheckInteractionClaim {
                 claimed_sum: secure_zero(),
             },
+            mul_result_provider_claimed_sum: secure_zero(),
         }
     }
 
@@ -99,6 +105,9 @@ impl ProjectiveRcbAirProofInteractionClaim {
             self.range13.claimed_sum,
             self.raw_product_carry16.claimed_sum,
             self.signed_carry.claimed_sum,
+            // C5 plumbing: bind the provider breakdown sum into Fiat-Shamir so
+            // the verifier-side `relation_balances()` term is sound.
+            self.mul_result_provider_claimed_sum,
         ]);
     }
 }
@@ -116,6 +125,7 @@ pub(crate) enum ProjectiveRcbRelationKind {
     RawProductCarry16,
     SignedCarry,
     MulLimb,
+    MulResult,
     RawProductChunkDigit,
     FoldedContribution,
     FoldedDigit,
@@ -217,6 +227,7 @@ fn projective_rcb_fraction(
         }
         ProjectiveRcbRelationKind::SignedCarry => relations.signed_carry.combine(&fraction.values),
         ProjectiveRcbRelationKind::MulLimb => relations.mul_limb.combine(&fraction.values),
+        ProjectiveRcbRelationKind::MulResult => relations.mul_result.combine(&fraction.values),
         ProjectiveRcbRelationKind::RawProductChunkDigit => {
             relations.raw_product_chunk_digit.combine(&fraction.values)
         }
@@ -305,6 +316,50 @@ pub(crate) fn projective_rcb_mul_row_fractions(
     ));
     debug_assert_eq!(fractions.len(), projective_rcb_mul_fraction_count());
     fractions
+}
+
+/// C5 plumbing: the SILO's per-mul fractions = the shared mul-family fractions
+/// PLUS the `ProjectiveRcbMulResultRelation` provider yields (one `-1` per limb
+/// of `lhs`/`rhs`/`result`). Appended LAST so the order matches the silo AIR
+/// (`add_projective_rcb_mul_row` then the three `provide_mul_result_limbs`
+/// calls) under one `finalize_logup`. NOT used by `final_add`/`public_key_curve`
+/// — they reuse `projective_rcb_mul_row_fractions` (without the provider) and
+/// have their own result relations.
+pub(crate) fn projective_rcb_silo_mul_row_fractions(
+    source_index: usize,
+    mul_index: usize,
+    mul: &ProjectiveRcbMulRow,
+) -> Vec<ProjectiveRcbFractionSpec> {
+    let mut fractions = projective_rcb_mul_row_fractions(source_index, mul_index, mul);
+    for (role, limbs) in [
+        (PROJECTIVE_RCB_MUL_ROLE_LHS, mul.trace.lhs.limbs()),
+        (PROJECTIVE_RCB_MUL_ROLE_RHS, mul.trace.rhs.limbs()),
+        (PROJECTIVE_RCB_MUL_ROLE_RESULT, mul.trace.result.limbs()),
+    ] {
+        for (limb_index, limb) in limbs.iter().enumerate() {
+            fractions.push(mul_result_fraction(
+                -1,
+                source_index,
+                mul_index,
+                role,
+                limb_index,
+                *limb,
+            ));
+        }
+    }
+    debug_assert_eq!(fractions.len(), projective_rcb_silo_mul_fraction_count());
+    fractions
+}
+
+/// SILO per-mul fraction count: shared mul-family + the `3 * N_LIMBS`
+/// `ProjectiveRcbMulResultRelation` provider yields.
+pub(crate) fn projective_rcb_silo_mul_fraction_count() -> usize {
+    projective_rcb_mul_fraction_count() + 3 * N_LIMBS
+}
+
+/// SILO mul-family padding fractions (one zero per silo mul fraction).
+pub(crate) fn projective_rcb_silo_mul_padding_fractions() -> Vec<ProjectiveRcbFractionSpec> {
+    zeroed_projective_rcb_fractions(projective_rcb_silo_mul_fraction_count())
 }
 
 /// Number of LogUp fractions a single mul row emits inside the mul family.
@@ -464,10 +519,6 @@ pub(crate) fn projective_rcb_folded_digit_fractions(
     fractions
 }
 
-pub(crate) fn projective_rcb_mul_padding_fractions() -> Vec<ProjectiveRcbFractionSpec> {
-    zeroed_projective_rcb_fractions(projective_rcb_mul_fraction_count())
-}
-
 pub(crate) fn projective_rcb_raw_product_chunk_padding_fractions() -> Vec<ProjectiveRcbFractionSpec>
 {
     zeroed_projective_rcb_fractions(projective_rcb_raw_product_chunk_fraction_count())
@@ -508,7 +559,11 @@ fn projective_rcb_folded_digit_fraction_count() -> usize {
 }
 
 pub(crate) fn projective_rcb_mul_interaction_columns() -> usize {
-    QM31_TRACE_COLUMNS * projective_rcb_mul_fraction_count()
+    // The SILO mul family emits the shared mul fractions PLUS the C5
+    // `ProjectiveRcbMulResultRelation` provider yields, so its interaction width
+    // uses the silo count. (`final_add`/`public_key_curve` size their own mul
+    // families with `projective_rcb_mul_row_fraction_count`.)
+    QM31_TRACE_COLUMNS * projective_rcb_silo_mul_fraction_count()
 }
 
 pub(crate) fn projective_rcb_raw_product_chunk_interaction_columns() -> usize {
@@ -557,6 +612,27 @@ fn mul_limb_fraction(
 ) -> ProjectiveRcbFractionSpec {
     ProjectiveRcbFractionSpec {
         relation: ProjectiveRcbRelationKind::MulLimb,
+        numerator,
+        values: vec![
+            m31_usize(source_index),
+            m31_usize(mul_index),
+            m31(role),
+            m31_usize(limb_index),
+            limb,
+        ],
+    }
+}
+
+fn mul_result_fraction(
+    numerator: i64,
+    source_index: usize,
+    mul_index: usize,
+    role: u32,
+    limb_index: usize,
+    limb: M31,
+) -> ProjectiveRcbFractionSpec {
+    ProjectiveRcbFractionSpec {
+        relation: ProjectiveRcbRelationKind::MulResult,
         numerator,
         values: vec![
             m31_usize(source_index),
@@ -926,4 +1002,41 @@ pub(crate) fn relation_fraction<R: Relation<M31, SecureField>>(
     values: &[M31],
 ) -> SecureField {
     secure_from_i64(numerator) / relation.combine(values)
+}
+
+/// C5 plumbing: the silo's `ProjectiveRcbMulResultRelation` provider claimed sum
+/// (yield, `-1` per limb of `lhs`/`rhs`/`result` of every mul). Computed
+/// analytically over the trace so the proof balance can net it against the two
+/// projective-source consumers. This sum is ALSO part of `components.mul` (the
+/// mul-family interaction column), but is exposed separately because it crosses
+/// the silo boundary and must NOT net to zero internally.
+pub(crate) fn projective_rcb_mul_result_provider_sum(
+    trace: &ProjectiveRcbAirTraceClaim,
+    relations: &ProjectiveRcbMulComponentRelations,
+) -> SecureField {
+    let mut sum = secure_zero();
+    for row in &trace.rows {
+        for (mul_index, mul) in row.muls.iter().enumerate() {
+            for (role, limbs) in [
+                (PROJECTIVE_RCB_MUL_ROLE_LHS, mul.trace.lhs.limbs()),
+                (PROJECTIVE_RCB_MUL_ROLE_RHS, mul.trace.rhs.limbs()),
+                (PROJECTIVE_RCB_MUL_ROLE_RESULT, mul.trace.result.limbs()),
+            ] {
+                for (limb_index, limb) in limbs.iter().enumerate() {
+                    sum += relation_fraction(
+                        &relations.mul_result,
+                        -1,
+                        &[
+                            m31_usize(row.source_index),
+                            m31_usize(mul_index),
+                            m31(role),
+                            m31_usize(limb_index),
+                            *limb,
+                        ],
+                    );
+                }
+            }
+        }
+    }
+    sum
 }

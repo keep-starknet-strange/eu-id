@@ -19,6 +19,12 @@ use stwo_constraint_framework::{
 };
 
 use crate::projective::{ProjectiveEcOp, ProjectiveEcTraceClaim};
+use crate::projective_air::{
+    projective_rcb_op_mul_limbs, ConsumedMulLimbs, ProjectiveRcbMulComponentRelations,
+    ProjectiveRcbMulResultRelation, CONSUMED_MUL_LIMBS_COLUMNS, PROJECTIVE_RCB_MUL_ROLE_LHS,
+    PROJECTIVE_RCB_MUL_ROLE_RESULT, PROJECTIVE_RCB_MUL_ROLE_RHS, PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS,
+};
+use stwo_p256_utils::constants::N_LIMBS;
 use crate::scalar::fake_glv_chain::{
     FakeGlvChainError, FakeGlvPrimitiveEcOp, FakeGlvPrimitiveEcRow, FakeGlvPrimitiveEcTraceClaim,
 };
@@ -38,8 +44,21 @@ pub type FakeGlvPrimitiveEcRowProviderComponent =
 pub type FakeGlvProjectiveSourceComponent = FrameworkComponent<FakeGlvProjectiveSourceEval>;
 
 pub const FAKE_GLV_PRIMITIVE_EC_ROW_RELATION_ARITY: usize = 4 + 3 * PREPARED_TABLE_EC_POINT_COLUMNS;
+/// Provider base-trace width: `active` + the EC-row relation columns. The
+/// provider (`FakeGlvPrimitiveEcRowProviderEval`) does NOT carry consumed-mul
+/// columns.
 pub const FAKE_GLV_PRIMITIVE_EC_SOURCE_TRACE_COLUMNS: usize =
     1 + FAKE_GLV_PRIMITIVE_EC_ROW_RELATION_ARITY;
+/// Consumer base-trace width: the provider columns PLUS the C5 consumed-mul
+/// block (`has_muls` flag + the mul-limb columns), appended LAST so the existing
+/// relation-value column offsets are unchanged.
+pub const FAKE_GLV_PROJECTIVE_SOURCE_CONSUMER_TRACE_COLUMNS: usize =
+    FAKE_GLV_PRIMITIVE_EC_SOURCE_TRACE_COLUMNS + CONSUMED_MUL_LIMBS_COLUMNS;
+/// Column index of the consumed-mul block's `has_muls` flag (the limb columns
+/// follow at `+ 1`).
+const FAKE_GLV_PRIMITIVE_EC_HAS_MULS_COL: usize = FAKE_GLV_PRIMITIVE_EC_SOURCE_TRACE_COLUMNS;
+/// Column index where the consumed-mul LIMB block begins (after `has_muls`).
+const FAKE_GLV_PRIMITIVE_EC_MUL_LIMB_OFFSET: usize = FAKE_GLV_PRIMITIVE_EC_HAS_MULS_COL + 1;
 
 const FAKE_GLV_PRIMITIVE_EC_ROW_INDEX_COLUMN: &str = "p256_fake_glv_primitive_ec_row_index";
 
@@ -70,6 +89,7 @@ impl FakeGlvProjectiveSourceProofClaim {
             self.source_offset,
             &FakeGlvProjectiveSourceInteractionClaim::zero(),
             &FakeGlvPrimitiveEcRowRelation::dummy(),
+            &ProjectiveRcbMulComponentRelations::dummy(),
         );
         allocator.preprocessed_columns().clone()
     }
@@ -82,6 +102,7 @@ impl FakeGlvProjectiveSourceProofClaim {
             self.source_offset,
             &FakeGlvProjectiveSourceInteractionClaim::zero(),
             &FakeGlvPrimitiveEcRowRelation::dummy(),
+            &ProjectiveRcbMulComponentRelations::dummy(),
         );
         components.trace_log_degree_bounds()
     }
@@ -94,6 +115,7 @@ impl FakeGlvProjectiveSourceProofClaim {
             self.source_offset,
             &FakeGlvProjectiveSourceInteractionClaim::zero(),
             &FakeGlvPrimitiveEcRowRelation::dummy(),
+            &ProjectiveRcbMulComponentRelations::dummy(),
         );
         components.max_constraint_log_degree_bound()
     }
@@ -102,7 +124,13 @@ impl FakeGlvProjectiveSourceProofClaim {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FakeGlvProjectiveSourceInteractionClaim {
     pub provider_claimed_sum: SecureField,
+    /// `FakeGlvPrimitiveEcRowRelation` consumer sum (the EC-row self-loop).
     pub consumer_claimed_sum: SecureField,
+    /// C5 plumbing: `ProjectiveRcbMulResultRelation` consumer sum (the silo mul
+    /// limbs consumed on the consumer component). Lives in the SAME trace/column
+    /// group as `consumer_claimed_sum`, but is balanced separately under
+    /// `ProjectiveRcbMulResult`.
+    pub mul_result_consumer_claimed_sum: SecureField,
 }
 
 impl FakeGlvProjectiveSourceInteractionClaim {
@@ -110,15 +138,29 @@ impl FakeGlvProjectiveSourceInteractionClaim {
         Self {
             provider_claimed_sum: secure_zero(),
             consumer_claimed_sum: secure_zero(),
+            mul_result_consumer_claimed_sum: secure_zero(),
         }
     }
 
+    /// `FakeGlvProjectiveSource` balance term: provider yield + EC-row consume.
+    /// EXCLUDES the mul-result consume (balanced under `ProjectiveRcbMulResult`).
     pub fn total(self) -> SecureField {
         self.provider_claimed_sum + self.consumer_claimed_sum
     }
 
+    /// The single claimed sum the consumer FrameworkComponent declares: the
+    /// EC-row + mul-result consumes share one interaction trace (one
+    /// `finalize_logup`), so the component's sum is their combination.
+    pub fn consumer_component_claimed_sum(self) -> SecureField {
+        self.consumer_claimed_sum + self.mul_result_consumer_claimed_sum
+    }
+
     pub fn mix_into(&self, channel: &mut impl Channel) {
-        channel.mix_felts(&[self.provider_claimed_sum, self.consumer_claimed_sum]);
+        channel.mix_felts(&[
+            self.provider_claimed_sum,
+            self.consumer_claimed_sum,
+            self.mul_result_consumer_claimed_sum,
+        ]);
     }
 }
 
@@ -134,6 +176,7 @@ impl FakeGlvProjectiveSourceComponents {
         source_offset: u32,
         interaction_claim: &FakeGlvProjectiveSourceInteractionClaim,
         relation: &FakeGlvPrimitiveEcRowRelation,
+        mul_relations: &ProjectiveRcbMulComponentRelations,
     ) -> Self {
         Self {
             provider: FakeGlvPrimitiveEcRowProviderComponent::new(
@@ -150,8 +193,10 @@ impl FakeGlvProjectiveSourceComponents {
                 FakeGlvProjectiveSourceEval {
                     log_size,
                     relation: relation.clone(),
+                    mul_relations: mul_relations.clone(),
                 },
-                interaction_claim.consumer_claimed_sum,
+                // EC-row + mul-result consumes share one interaction trace.
+                interaction_claim.consumer_component_claimed_sum(),
             ),
         }
     }
@@ -252,6 +297,9 @@ impl FrameworkEval for FakeGlvPrimitiveEcRowProviderEval {
 pub struct FakeGlvProjectiveSourceEval {
     pub log_size: u32,
     pub relation: FakeGlvPrimitiveEcRowRelation,
+    /// C5 plumbing: relations bundle carrying `mul_result`, the relation the
+    /// silo provides its proven mul limbs on and this source consumes.
+    pub mul_relations: ProjectiveRcbMulComponentRelations,
 }
 
 impl FrameworkEval for FakeGlvProjectiveSourceEval {
@@ -272,6 +320,10 @@ impl FrameworkEval for FakeGlvProjectiveSourceEval {
         let lhs = PreparedTableEcEvalPoint::read(&mut eval);
         let rhs = PreparedTableEcEvalPoint::read(&mut eval);
         let output = PreparedTableEcEvalPoint::read(&mut eval);
+        // C5 plumbing: the consumed silo mul limbs (read LAST, matching the
+        // base-trace layout). No coordinate constraints yet (Task C5-2); only
+        // the LogUp consume pins them equal to the silo's proven values.
+        let consumed_muls = ConsumedMulLimbs::<E>::read(&mut eval);
         let one = E::F::from(M31::from_u32_unchecked(1));
 
         eval.add_constraint(active.clone() * (active.clone() - one.clone()));
@@ -289,17 +341,29 @@ impl FrameworkEval for FakeGlvProjectiveSourceEval {
             eval.add_constraint((one.clone() - active.clone()) * value);
         }
 
+        // C5 plumbing: `has_muls` gate. The silo emits 13 muls for Double
+        // (op == 1) and finite-operand MixedAdd (op == 0), but ZERO for an
+        // infinity-operand MixedAdd. So expected = 1 - (1 - op)·operand_inf
+        // (operand = `rhs`). Constrain the committed flag to this and gate the
+        // consumes by it so a 0-mul op consumes nothing (matches the silo).
+        let expected_has_muls =
+            one.clone() - (one.clone() - op.clone()) * rhs.inf();
+        consumed_muls.constrain_has_muls(&mut eval, &active, &expected_has_muls);
+
         let relation_values = fake_glv_primitive_ec_row_relation_values(
-            &[source_index, sig_id, cert_id, op],
+            &[source_index.clone(), sig_id, cert_id, op],
             &lhs,
             &rhs,
             &output,
         );
         eval.add_to_relation(RelationEntry::new(
             &self.relation,
-            E::EF::from(active),
+            E::EF::from(active.clone()),
             &relation_values,
         ));
+        // CONSUME (use, `+has_muls`) the silo's proven mul limbs for this op,
+        // keyed `(source_index, mul_index, role, limb_index, limb)`.
+        consumed_muls.consume(&mut eval, &self.mul_relations.mul_result, &source_index);
         eval.finalize_logup();
         eval
     }
@@ -379,10 +443,10 @@ pub(crate) fn gen_fake_glv_projective_source_base_trace(
         .map(|(row_index, projective_row)| {
             fake_glv_projective_source_trace_values(source_offset + row_index, projective_row)
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, _>>()?;
     rows.resize(
         padded_rows,
-        [M31::from_u32_unchecked(0); FAKE_GLV_PRIMITIVE_EC_SOURCE_TRACE_COLUMNS],
+        [M31::from_u32_unchecked(0); FAKE_GLV_PROJECTIVE_SOURCE_CONSUMER_TRACE_COLUMNS],
     );
     Ok(columns_from_rows(log_size, rows))
 }
@@ -412,6 +476,133 @@ pub(crate) fn gen_fake_glv_primitive_ec_source_interaction_trace(
     col.finalize_col();
     let (trace, claimed_sum) = logup.finalize_last();
     (trace, FakeGlvPrimitiveEcRowInteractionClaim { claimed_sum })
+}
+
+/// Canonical role order for the consumed mul-limb columns, matching
+/// `projective_rcb_op_mul_limbs` and `ConsumedMulLimbs`.
+const PROJECTIVE_RCB_MUL_RESULT_ROLES: [u32; 3] = [
+    PROJECTIVE_RCB_MUL_ROLE_LHS,
+    PROJECTIVE_RCB_MUL_ROLE_RHS,
+    PROJECTIVE_RCB_MUL_ROLE_RESULT,
+];
+
+/// C5 plumbing: interaction trace for the fake-GLV projective-source CONSUMER.
+/// Emits, in the exact order `FakeGlvProjectiveSourceEval::evaluate` does under
+/// one `finalize_logup`:
+///   1. the `FakeGlvPrimitiveEcRowRelation` consume (col 0, `+active`),
+///   2. the `ProjectiveRcbMulResultRelation` consume for every committed mul
+///      limb (one col per fraction, canonical mul/role/limb order, `+active`).
+/// Returns the columns, the EC-row consumer sum, and the mul-result consumer sum
+/// (the latter feeds the 3-way `ProjectiveRcbMulResult` balance).
+pub(crate) fn gen_fake_glv_projective_source_consumer_interaction_trace(
+    base: &[M31ColumnEval],
+    ec_row_relation: &FakeGlvPrimitiveEcRowRelation,
+    mul_result_relation: &ProjectiveRcbMulResultRelation,
+) -> (ColumnVec<M31ColumnEval>, SecureField, SecureField) {
+    assert_eq!(base.len(), FAKE_GLV_PROJECTIVE_SOURCE_CONSUMER_TRACE_COLUMNS);
+    let log_size = base[0].domain.log_size();
+    // ONE LogupTraceGenerator over all columns so the combined cumulative sum
+    // matches the single `finalize_logup` in the consumer AIR (the EC-row
+    // consume column followed by one column per consumed mul limb).
+    let mut logup = LogupTraceGenerator::new(log_size);
+
+    // Column 0: the existing EC-row consume (+active).
+    let mut col = logup.new_col();
+    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+        let values = fake_glv_primitive_ec_row_packed_relation_values(base, vec_row);
+        let active = PackedQM31::from(base[0].data[vec_row]);
+        col.write_frac(vec_row, active, ec_row_relation.combine(&values));
+    }
+    col.finalize_col();
+
+    // Mul-result consume columns (one per fraction, gated by the `has_muls`
+    // column so 0-mul ops consume nothing), canonical order (mul_index outer,
+    // role `[LHS, RHS, RESULT]`, limb_index), matching `ConsumedMulLimbs`.
+    for mul_index in 0..(PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS / (3 * N_LIMBS)) {
+        for (role_index, &role) in PROJECTIVE_RCB_MUL_RESULT_ROLES.iter().enumerate() {
+            for limb_index in 0..N_LIMBS {
+                let base_col = FAKE_GLV_PRIMITIVE_EC_MUL_LIMB_OFFSET
+                    + mul_index * (3 * N_LIMBS)
+                    + role_index * N_LIMBS
+                    + limb_index;
+                let mut col = logup.new_col();
+                for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+                    let source_index = base[1].data[vec_row];
+                    let limb = base[base_col].data[vec_row];
+                    let has_muls =
+                        PackedQM31::from(base[FAKE_GLV_PRIMITIVE_EC_HAS_MULS_COL].data[vec_row]);
+                    let values = [
+                        source_index,
+                        PackedM31::broadcast(M31::from_u32_unchecked(mul_index as u32)),
+                        PackedM31::broadcast(M31::from_u32_unchecked(role)),
+                        PackedM31::broadcast(M31::from_u32_unchecked(limb_index as u32)),
+                        limb,
+                    ];
+                    col.write_frac(vec_row, has_muls, mul_result_relation.combine(&values));
+                }
+                col.finalize_col();
+            }
+        }
+    }
+    let (columns, _total) = logup.finalize_last();
+
+    // Sub-sums (unpacked `SecureField`): the EC-row consumer sum and the
+    // mul-result consumer sum. Computed analytically so the proof's
+    // `relation_balances()` can net each relation independently.
+    let (ec_row_sum, mul_result_sum) =
+        fake_glv_projective_source_consumer_sums(base, ec_row_relation, mul_result_relation);
+    (columns, ec_row_sum, mul_result_sum)
+}
+
+/// Analytic `(ec_row_consumer_sum, mul_result_consumer_sum)` over the consumer
+/// base trace, using unpacked `SecureField` combines. The EC-row sum is gated by
+/// `active`; the mul-result sum by the committed `has_muls` flag.
+fn fake_glv_projective_source_consumer_sums(
+    base: &[M31ColumnEval],
+    ec_row_relation: &FakeGlvPrimitiveEcRowRelation,
+    mul_result_relation: &ProjectiveRcbMulResultRelation,
+) -> (SecureField, SecureField) {
+    let log_size = base[0].domain.log_size();
+    let mut ec_row_sum = secure_zero();
+    let mut mul_result_sum = secure_zero();
+    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+        for lane in 0..(1 << LOG_N_LANES) {
+            let active = base[0].data[vec_row].to_array()[lane];
+            if active != M31::from_u32_unchecked(0) {
+                let ec_values: [M31; FAKE_GLV_PRIMITIVE_EC_ROW_RELATION_ARITY] =
+                    core::array::from_fn(|index| base[index + 1].data[vec_row].to_array()[lane]);
+                let denom: SecureField = ec_row_relation.combine(&ec_values);
+                ec_row_sum += SecureField::from(active) / denom;
+            }
+
+            let has_muls = base[FAKE_GLV_PRIMITIVE_EC_HAS_MULS_COL].data[vec_row].to_array()[lane];
+            if has_muls == M31::from_u32_unchecked(0) {
+                continue;
+            }
+            let has_muls_ef = SecureField::from(has_muls);
+            let source_index = base[1].data[vec_row].to_array()[lane];
+            for mul_index in 0..(PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS / (3 * N_LIMBS)) {
+                for (role_index, &role) in PROJECTIVE_RCB_MUL_RESULT_ROLES.iter().enumerate() {
+                    for limb_index in 0..N_LIMBS {
+                        let base_col = FAKE_GLV_PRIMITIVE_EC_MUL_LIMB_OFFSET
+                            + mul_index * (3 * N_LIMBS)
+                            + role_index * N_LIMBS
+                            + limb_index;
+                        let limb = base[base_col].data[vec_row].to_array()[lane];
+                        let denom: SecureField = mul_result_relation.combine(&[
+                            source_index,
+                            M31::from_u32_unchecked(mul_index as u32),
+                            M31::from_u32_unchecked(role),
+                            M31::from_u32_unchecked(limb_index as u32),
+                            limb,
+                        ]);
+                        mul_result_sum += has_muls_ef / denom;
+                    }
+                }
+            }
+        }
+    }
+    (ec_row_sum, mul_result_sum)
 }
 
 fn fake_glv_primitive_ec_row_packed_relation_values(
@@ -462,8 +653,9 @@ fn fake_glv_primitive_ec_source_trace_values(
 fn fake_glv_projective_source_trace_values(
     source_index: usize,
     row: &crate::projective::ProjectiveEcRow,
-) -> [M31; FAKE_GLV_PRIMITIVE_EC_SOURCE_TRACE_COLUMNS] {
-    let mut values = [M31::from_u32_unchecked(0); FAKE_GLV_PRIMITIVE_EC_SOURCE_TRACE_COLUMNS];
+) -> Result<[M31; FAKE_GLV_PROJECTIVE_SOURCE_CONSUMER_TRACE_COLUMNS], FakeGlvChainError> {
+    let mut values =
+        [M31::from_u32_unchecked(0); FAKE_GLV_PROJECTIVE_SOURCE_CONSUMER_TRACE_COLUMNS];
     let mut column = 0;
     values[column] = M31::from_u32_unchecked(1);
     column += 1;
@@ -487,8 +679,21 @@ fn fake_glv_projective_source_trace_values(
         values[column] = value;
         column += 1;
     }
-    debug_assert_eq!(column, FAKE_GLV_PRIMITIVE_EC_SOURCE_TRACE_COLUMNS);
-    values
+    debug_assert_eq!(column, FAKE_GLV_PRIMITIVE_EC_HAS_MULS_COL);
+    // C5 plumbing: the `has_muls` flag, then the silo's proven mul limbs for this
+    // op in canonical order. An infinity-operand MixedAdd is a 0-mul no-op
+    // (`has_muls = 0`, all-zero limbs) the consumer must NOT consume, so it
+    // matches the silo (which provides nothing for it).
+    let (mul_limbs, has_muls) = projective_rcb_op_mul_limbs(source_index, row)
+        .map_err(|_| FakeGlvChainError::ProjectiveSourceInvalid)?;
+    values[column] = M31::from_u32_unchecked(has_muls as u32);
+    column += 1;
+    for value in mul_limbs {
+        values[column] = value;
+        column += 1;
+    }
+    debug_assert_eq!(column, FAKE_GLV_PROJECTIVE_SOURCE_CONSUMER_TRACE_COLUMNS);
+    Ok(values)
 }
 
 fn fake_glv_primitive_ec_row_relation_values<F: Clone>(

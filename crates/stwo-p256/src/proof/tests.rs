@@ -1276,13 +1276,15 @@ fn monolithic_relation_audit_is_balanced_and_fully_linked() {
     // The audit covers the full relation surface, including the four
     // verifier-facing ECDSA bindings.
     let names = audit.relation_names();
-    assert_eq!(names.len(), 28, "relation audit must cover every relation");
+    assert_eq!(names.len(), 29, "relation audit must cover every relation");
     for required in [
         "EcdsaResult",
         "PublicKeyPoint",
         "FinalCheckHint",
         "FinalAddOutput",
         "CertBase",
+        // C5 plumbing: the RCB silo → projective-source mul-result link.
+        "ProjectiveRcbMulResult",
     ] {
         assert!(names.contains(&required), "audit missing relation: {required}");
     }

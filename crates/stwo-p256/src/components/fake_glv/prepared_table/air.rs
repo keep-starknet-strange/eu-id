@@ -11,6 +11,7 @@ use stwo_p256_utils::constants::{LIMB_BITS, N_LIMBS};
 use crate::constants::{P256_3GX, P256_3GY, P256_MODULUS};
 use crate::limbs::P256M31BigInt;
 use crate::prepared_point::{PREPARED_BASE_COUNT, TABLE16_INDEX};
+use crate::projective_air::{ConsumedMulLimbs, ProjectiveRcbMulComponentRelations};
 use crate::types::U256;
 
 use super::*;
@@ -365,6 +366,9 @@ fn signed_numerator<E: EvalAtRow>(gate: E::F, mult: i32) -> E::EF {
 pub struct PreparedTableProjectiveSourceEval {
     pub log_size: u32,
     pub relation: PreparedTableEcRowRelation,
+    /// C5 plumbing: relations bundle carrying `mul_result`, consumed for the
+    /// prepared-table EC ops (the `[0, source_offset)` slice of the silo).
+    pub mul_relations: ProjectiveRcbMulComponentRelations,
 }
 
 
@@ -387,6 +391,9 @@ impl FrameworkEval for PreparedTableProjectiveSourceEval {
         let lhs = PreparedTableEcEvalPoint::read(&mut eval);
         let rhs = PreparedTableEcEvalPoint::read(&mut eval);
         let output = PreparedTableEcEvalPoint::read(&mut eval);
+        // C5 plumbing: consumed silo mul limbs (read LAST, matching the
+        // base-trace layout). No coordinate constraints yet (Task C5-2).
+        let consumed_muls = ConsumedMulLimbs::<E>::read(&mut eval);
         let one = E::F::from(M31::from_u32_unchecked(1));
 
         eval.add_constraint(active.clone() * (active.clone() - one.clone()));
@@ -404,17 +411,28 @@ impl FrameworkEval for PreparedTableProjectiveSourceEval {
             eval.add_constraint((one.clone() - active.clone()) * value);
         }
 
+        // C5 plumbing: `has_muls` gate (1 for Double / finite-operand MixedAdd,
+        // 0 for an infinity-operand MixedAdd no-op). expected = 1 - (1 - op)·
+        // operand_inf, operand = `rhs`. Prepared-table ops all use finite base
+        // operands so this is 1 in practice, but the gate keeps the consumer
+        // robust and symmetric with the fake-GLV source.
+        let expected_has_muls = one.clone() - (one.clone() - op.clone()) * rhs.inf();
+        consumed_muls.constrain_has_muls(&mut eval, &active, &expected_has_muls);
+
         let relation_values = prepared_table_ec_row_relation_values(
-            &[source_index, sig_id, cert_id, op, table_index],
+            &[source_index.clone(), sig_id, cert_id, op, table_index],
             &lhs,
             &rhs,
             &output,
         );
         eval.add_to_relation(RelationEntry::new(
             &self.relation,
-            E::EF::from(active),
+            E::EF::from(active.clone()),
             &relation_values,
         ));
+        // CONSUME (use, `+has_muls`) the silo's proven mul limbs for this
+        // prepared-table op, keyed identically to the silo's provided yields.
+        consumed_muls.consume(&mut eval, &self.mul_relations.mul_result, &source_index);
         eval.finalize_logup();
         eval
     }
@@ -437,6 +455,12 @@ impl<F: Clone> PreparedTableEcEvalPoint<F> {
             40 => self.inf.clone(),
             _ => unreachable!("prepared-table EC point relation index is in range"),
         })
+    }
+
+    /// The point's infinity flag (C5 plumbing: used to compute the `has_muls`
+    /// gate — an infinity MixedAdd operand makes the silo emit zero muls).
+    pub(crate) fn inf(&self) -> F {
+        self.inf.clone()
     }
 }
 

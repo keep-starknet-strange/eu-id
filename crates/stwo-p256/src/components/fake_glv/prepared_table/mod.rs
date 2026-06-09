@@ -71,7 +71,14 @@ pub const PREPARED_TABLE_EC_ROW_TRACE_COLUMNS: usize =
     1 + 3 + PREPARED_TABLE_EC_KIND_FLAGS + 2 + 3 * PREPARED_TABLE_EC_POINT_COLUMNS
         + PREPARED_TABLE_EC_NEG_AUX_COLUMNS;
 pub const PREPARED_TABLE_PROJECTIVE_SOURCE_TRACE_COLUMNS: usize =
+    1 + 5 + 3 * PREPARED_TABLE_EC_POINT_COLUMNS + crate::projective_air::CONSUMED_MUL_LIMBS_COLUMNS;
+/// Column index of the C5 consumed-mul block's `has_muls` flag (appended LAST so
+/// existing relation-value column offsets are unchanged; limbs follow at `+ 1`).
+pub const PREPARED_TABLE_PROJECTIVE_SOURCE_HAS_MULS_COL: usize =
     1 + 5 + 3 * PREPARED_TABLE_EC_POINT_COLUMNS;
+/// Column index where the C5 consumed-mul LIMB block begins (after `has_muls`).
+pub const PREPARED_TABLE_PROJECTIVE_SOURCE_MUL_LIMB_OFFSET: usize =
+    PREPARED_TABLE_PROJECTIVE_SOURCE_HAS_MULS_COL + 1;
 
 const PREPARED_TABLE_EC_ROW_INDEX_COLUMN: &str = "p256_prepared_table_ec_row_index";
 
@@ -89,8 +96,9 @@ impl PreparedTableProjectiveSourceComponents {
         log_size: u32,
         interaction_claim: &PreparedTableProjectiveSourceInteractionClaim,
         relation: &PreparedTableEcRowRelation,
+        mul_relations: &crate::projective_air::ProjectiveRcbMulComponentRelations,
     ) -> Self {
-        Self::new_inner(allocator, log_size, interaction_claim, relation, None)
+        Self::new_inner(allocator, log_size, interaction_claim, relation, mul_relations, None)
     }
 
     /// Monolithic constructor: the provider additionally pins the table to
@@ -102,18 +110,22 @@ impl PreparedTableProjectiveSourceComponents {
         log_size: u32,
         provider_total_claimed_sum: SecureField,
         consumer_claimed_sum: SecureField,
+        mul_result_consumer_claimed_sum: SecureField,
         relation: &PreparedTableEcRowRelation,
         pinning: &PreparedTablePinningRelations,
+        mul_relations: &crate::projective_air::ProjectiveRcbMulComponentRelations,
     ) -> Self {
         let interaction_claim = PreparedTableProjectiveSourceInteractionClaim {
             provider_claimed_sum: provider_total_claimed_sum,
             consumer_claimed_sum,
+            mul_result_consumer_claimed_sum,
         };
         Self::new_inner(
             allocator,
             log_size,
             &interaction_claim,
             relation,
+            mul_relations,
             Some(pinning.clone()),
         )
     }
@@ -123,6 +135,7 @@ impl PreparedTableProjectiveSourceComponents {
         log_size: u32,
         interaction_claim: &PreparedTableProjectiveSourceInteractionClaim,
         relation: &PreparedTableEcRowRelation,
+        mul_relations: &crate::projective_air::ProjectiveRcbMulComponentRelations,
         pinning: Option<PreparedTablePinningRelations>,
     ) -> Self {
         Self {
@@ -140,8 +153,10 @@ impl PreparedTableProjectiveSourceComponents {
                 PreparedTableProjectiveSourceEval {
                     log_size,
                     relation: relation.clone(),
+                    mul_relations: mul_relations.clone(),
                 },
-                interaction_claim.consumer_claimed_sum,
+                // EC-row + mul-result consumes share one interaction trace.
+                interaction_claim.consumer_component_claimed_sum(),
             ),
         }
     }

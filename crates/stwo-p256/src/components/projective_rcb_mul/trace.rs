@@ -456,9 +456,12 @@ impl ProjectiveRcbAirTraceClaim {
         let (mul, mul_claim) = gen_projective_rcb_family_interaction_trace(
             log_sizes.mul,
             self.mul_rows().map(|(source_index, mul_index, mul)| {
-                projective_rcb_mul_row_fractions(source_index, mul_index, mul)
+                // SILO mul fractions include the `ProjectiveRcbMulResultRelation`
+                // provider yields (C5 plumbing); `final_add`/`public_key_curve`
+                // reuse `projective_rcb_mul_row_fractions` without them.
+                projective_rcb_silo_mul_row_fractions(source_index, mul_index, mul)
             }),
-            projective_rcb_mul_padding_fractions(),
+            projective_rcb_silo_mul_padding_fractions(),
             relations,
             false,
         );
@@ -526,6 +529,7 @@ impl ProjectiveRcbAirTraceClaim {
             raw_product_carry16: RangeCheckInteractionClaim {
                 claimed_sum: secure_zero(),
             },
+            mul_result_provider_claimed_sum: secure_zero(),
         };
         let _ =
             ProjectiveRcbAirComponents::new(&mut allocator, self, &interaction_claim, relations);
@@ -638,6 +642,9 @@ impl ProjectiveRcbAirTraceClaim {
                 range13: range13_claim,
                 raw_product_carry16: raw_product_carry16_claim,
                 signed_carry: signed_carry_claim,
+                mul_result_provider_claimed_sum: projective_rcb_mul_result_provider_sum(
+                    self, relations,
+                ),
             },
         ))
     }
@@ -667,7 +674,15 @@ impl ProjectiveRcbAirTraceClaim {
                 actual: base.len(),
             });
         }
-        verify_relation_zero("ProjectiveRcbAirProofSlice", interaction_claim.total())
+        // The `ProjectiveRcbMulResultRelation` provider yields (C5 plumbing) are
+        // consumed by the projective sources in OTHER components, so they do not
+        // net to zero within this slice. Exclude them from the slice's internal
+        // balance check (mirrors `final_add`'s `internal_total()`); the
+        // monolithic proof balances them globally in `relation_balances()`.
+        verify_relation_zero(
+            "ProjectiveRcbAirProofSlice",
+            interaction_claim.total() - interaction_claim.mul_result_provider_claimed_sum,
+        )
     }
 
     pub fn verify_interaction_trace(
@@ -1300,6 +1315,50 @@ pub struct ProjectiveRcbAirRow {
     pub op: ProjectiveEcOp,
     pub output_projective: ProjectivePoint,
     pub muls: Vec<ProjectiveRcbMulRow>,
+}
+
+/// Number of mul-result limb values one EC op contributes to a projective-source
+/// consumer (C5 plumbing): `PROJECTIVE_RCB_MAX_MUL_ROWS_PER_OP` muls ×
+/// `{LHS, RHS, RESULT}` × `N_LIMBS`. The consumer commits this many columns and
+/// CONSUMES them from the silo keyed `(source_index, mul_index, role,
+/// limb_index, limb)`.
+pub const PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS: usize = PROJECTIVE_RCB_MAX_MUL_ROWS_PER_OP * 3 * N_LIMBS;
+
+/// Flatten an EC op's proven mul `lhs`/`rhs`/`result` limbs into the canonical
+/// consumer layout: for `mul_index` in `0..PROJECTIVE_RCB_MAX_MUL_ROWS_PER_OP`,
+/// then role in `[LHS, RHS, RESULT]`, then `limb_index` in `0..N_LIMBS`. This is
+/// the SINGLE source of truth for the silo→source mul-limb column order; the
+/// consumer AIR reads and keys columns in exactly this order.
+///
+/// Returns `(limbs, has_muls)`. `has_muls` is `true` iff the op emitted the full
+/// `PROJECTIVE_RCB_MAX_MUL_ROWS_PER_OP` muls — `Double` (always) and `MixedAdd`
+/// with a FINITE operand. A `MixedAdd` with an infinity operand is a no-op that
+/// emits ZERO muls (`rcb_mixed_add_with_mul_rows` early-returns); for it
+/// `has_muls = false` and `limbs` are all zero, so the consumer must gate its
+/// `ProjectiveRcbMulResultRelation` consumes by `has_muls` to match the silo
+/// (which provides nothing for a 0-mul op). This keeps the 3-way balance closed.
+pub(crate) fn projective_rcb_op_mul_limbs(
+    source_index: usize,
+    row: &ProjectiveEcRow,
+) -> Result<([M31; PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS], bool), ProjectiveRcbAirError> {
+    let air_row = ProjectiveRcbAirRow::from_projective_row(source_index, row)?;
+    let mut values = [M31::from_u32_unchecked(0); PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS];
+    if air_row.muls.is_empty() {
+        // Infinity-operand MixedAdd no-op: zero muls, zero limbs, not gated in.
+        return Ok((values, false));
+    }
+    debug_assert_eq!(air_row.muls.len(), PROJECTIVE_RCB_MAX_MUL_ROWS_PER_OP);
+    let mut column = 0;
+    for mul in &air_row.muls {
+        for limbs in [mul.trace.lhs.limbs(), mul.trace.rhs.limbs(), mul.trace.result.limbs()] {
+            for limb in limbs {
+                values[column] = *limb;
+                column += 1;
+            }
+        }
+    }
+    debug_assert_eq!(column, PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS);
+    Ok((values, true))
 }
 
 impl ProjectiveRcbAirRow {

@@ -17,9 +17,23 @@ pub const PROJECTIVE_RCB_FOLDED_DIGIT_RELATION_ARITY: usize = 4;
 
 pub const PROJECTIVE_RCB_FOLDED_CARRY_RELATION_ARITY: usize = 4;
 
+/// Result relation linking the silo mul provider to the projective-source
+/// consumers (C5 plumbing): keyed `(source_index, mul_index, role, limb_index,
+/// limb)` where `role ∈ {LHS, RHS, RESULT}`. The silo PROVIDES every limb of
+/// every proven `fp_mul`'s `lhs`/`rhs`/`result`; the fake-GLV and prepared-table
+/// projective sources CONSUME the muls of the EC op on their row. Generalizes
+/// `FinalAddMulResultRelation` (arity 4) with a leading `source_index` so a
+/// single silo can serve multiple distinct EC ops.
+pub const PROJECTIVE_RCB_MUL_RESULT_RELATION_ARITY: usize = 5;
+
 relation!(
     ProjectiveRcbMulLimbRelation,
     PROJECTIVE_RCB_MUL_LIMB_RELATION_ARITY
+);
+
+relation!(
+    ProjectiveRcbMulResultRelation,
+    PROJECTIVE_RCB_MUL_RESULT_RELATION_ARITY
 );
 
 relation!(
@@ -48,6 +62,7 @@ pub struct ProjectiveRcbMulComponentRelations {
     pub raw_product_carry16: RangeCheckRelation,
     pub signed_carry: RangeCheckRelation,
     pub mul_limb: ProjectiveRcbMulLimbRelation,
+    pub mul_result: ProjectiveRcbMulResultRelation,
     pub raw_product_chunk_digit: ProjectiveRcbRawProductChunkDigitRelation,
     pub folded_contribution: ProjectiveRcbFoldedContributionRelation,
     pub folded_digit: ProjectiveRcbFoldedDigitRelation,
@@ -61,6 +76,7 @@ impl ProjectiveRcbMulComponentRelations {
             raw_product_carry16: RangeCheckRelation::draw(channel),
             signed_carry: RangeCheckRelation::draw(channel),
             mul_limb: ProjectiveRcbMulLimbRelation::draw(channel),
+            mul_result: ProjectiveRcbMulResultRelation::draw(channel),
             raw_product_chunk_digit: ProjectiveRcbRawProductChunkDigitRelation::draw(channel),
             folded_contribution: ProjectiveRcbFoldedContributionRelation::draw(channel),
             folded_digit: ProjectiveRcbFoldedDigitRelation::draw(channel),
@@ -74,6 +90,7 @@ impl ProjectiveRcbMulComponentRelations {
             raw_product_carry16: RangeCheckRelation::dummy(),
             signed_carry: RangeCheckRelation::dummy(),
             mul_limb: ProjectiveRcbMulLimbRelation::dummy(),
+            mul_result: ProjectiveRcbMulResultRelation::dummy(),
             raw_product_chunk_digit: ProjectiveRcbRawProductChunkDigitRelation::dummy(),
             folded_contribution: ProjectiveRcbFoldedContributionRelation::dummy(),
             folded_digit: ProjectiveRcbFoldedDigitRelation::dummy(),
@@ -87,6 +104,7 @@ impl ProjectiveRcbMulComponentRelations {
             raw_product_carry16: &self.raw_product_carry16,
             signed_carry: &self.signed_carry,
             mul_limb: &self.mul_limb,
+            mul_result: &self.mul_result,
             raw_product_chunk_digit: &self.raw_product_chunk_digit,
             folded_contribution: &self.folded_contribution,
             folded_digit: &self.folded_digit,
@@ -101,6 +119,7 @@ pub struct ProjectiveRcbMulRelations<'a> {
     pub raw_product_carry16: &'a RangeCheckRelation,
     pub signed_carry: &'a RangeCheckRelation,
     pub mul_limb: &'a ProjectiveRcbMulLimbRelation,
+    pub mul_result: &'a ProjectiveRcbMulResultRelation,
     pub raw_product_chunk_digit: &'a ProjectiveRcbRawProductChunkDigitRelation,
     pub folded_contribution: &'a ProjectiveRcbFoldedContributionRelation,
     pub folded_digit: &'a ProjectiveRcbFoldedDigitRelation,

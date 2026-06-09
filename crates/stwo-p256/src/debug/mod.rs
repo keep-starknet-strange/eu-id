@@ -129,8 +129,13 @@ pub fn assert_projective_rcb_air_constraints(claim: &ProjectiveRcbAirTraceClaim)
         ProjectiveRcbAirComponents::new(&mut allocator, claim, &interaction_claim, &relations);
     assert_projective_components(commitment_scheme.trace_domain_evaluations(), &components);
 
+    // C5 plumbing: the silo's `ProjectiveRcbMulResultRelation` provider yields
+    // (part of `total()`) are consumed by the projective sources in OTHER
+    // components, so they do not net to zero within this standalone slice.
+    // Exclude them (mirrors `verify_proof_slice_traces` and the monolithic
+    // `ProjectiveRcbAirProofSlice` balance entry).
     assert_eq!(
-        interaction_claim.total(),
+        interaction_claim.total() - interaction_claim.mul_result_provider_claimed_sum,
         SecureField::zero(),
         "invalid projective RCB logup sum"
     );
@@ -372,6 +377,14 @@ fn projective_rcb_relation_tracker_balances_honest_trace() {
     let entries = track_projective_rcb_air_relation_entries(&claim);
     let mut exact_balances = std::collections::HashMap::<(String, Vec<M31>), M31>::new();
     for entry in entries {
+        // C5 plumbing: `ProjectiveRcbMulResultRelation` is a BOUNDARY relation —
+        // the silo PROVIDES its mul limbs (yield) for consumption by the
+        // projective sources in OTHER components, so it is intentionally
+        // unbalanced within this standalone silo slice. Skip it here; the
+        // monolithic relation audit balances it 3-way.
+        if entry.relation == "ProjectiveRcbMulResultRelation" {
+            continue;
+        }
         *exact_balances
             .entry((entry.relation, entry.values))
             .or_insert_with(M31::zero) += entry.mult;

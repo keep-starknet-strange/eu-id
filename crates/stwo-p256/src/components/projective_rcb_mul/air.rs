@@ -125,13 +125,169 @@ impl FrameworkEval for ProjectiveRcbMulEval {
         add_projective_rcb_mul_row(
             &mut eval,
             self.relations.as_refs(),
-            active,
-            source_index,
-            mul_index,
+            active.clone(),
+            source_index.clone(),
+            mul_index.clone(),
             &columns,
+        );
+        // C5 plumbing: PROVIDE this mul's `lhs`/`rhs`/`result` limbs into the
+        // `ProjectiveRcbMulResultRelation` (yield, `-active`) so the projective
+        // sources can consume them keyed `(source_index, mul_index, role,
+        // limb_index, limb)`. Mirrors `final_add`'s `provide_mul_limbs`,
+        // generalized with the leading `source_index`. Only the silo provides;
+        // `final_add`/`public_key_curve` reuse `add_projective_rcb_mul_row` but
+        // NOT this relation (they have their own result relations).
+        provide_mul_result_limbs(
+            &mut eval,
+            &self.relations.mul_result,
+            &active,
+            &source_index,
+            &mul_index,
+            PROJECTIVE_RCB_MUL_ROLE_LHS,
+            columns.lhs.limbs(),
+        );
+        provide_mul_result_limbs(
+            &mut eval,
+            &self.relations.mul_result,
+            &active,
+            &source_index,
+            &mul_index,
+            PROJECTIVE_RCB_MUL_ROLE_RHS,
+            columns.rhs.limbs(),
+        );
+        provide_mul_result_limbs(
+            &mut eval,
+            &self.relations.mul_result,
+            &active,
+            &source_index,
+            &mul_index,
+            PROJECTIVE_RCB_MUL_ROLE_RESULT,
+            columns.result.limbs(),
         );
         eval.finalize_logup();
         eval
+    }
+}
+
+/// Number of `ProjectiveRcbMulResultRelation` provider fractions a single silo
+/// mul row emits: every limb of `lhs`/`rhs`/`result`.
+pub const PROJECTIVE_RCB_MUL_RESULT_PROVIDER_FRACTIONS: usize = 3 * N_LIMBS;
+
+/// PROVIDE (yield, `-active`) one `ProjectiveRcbMulResultRelation` fraction per
+/// limb, keyed `(source_index, mul_index, role, limb_index, limb)`.
+fn provide_mul_result_limbs<E: EvalAtRow>(
+    eval: &mut E,
+    relation: &ProjectiveRcbMulResultRelation,
+    active: &E::F,
+    source_index: &E::F,
+    mul_index: &E::F,
+    role: u32,
+    limbs: &[E::F; N_LIMBS],
+) {
+    for (limb_index, limb) in limbs.iter().enumerate() {
+        eval.add_to_relation(RelationEntry::new(
+            relation,
+            -E::EF::from(active.clone()),
+            &[
+                source_index.clone(),
+                mul_index.clone(),
+                constant(role),
+                constant(limb_index as u32),
+                limb.clone(),
+            ],
+        ));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// C5 plumbing: projective-source consumer side of `ProjectiveRcbMulResultRelation`
+// ---------------------------------------------------------------------------
+
+/// The three mul-operand roles, in the canonical column order used by both
+/// `projective_rcb_op_mul_limbs` (trace) and the consumer `read`/`consume`.
+const PROJECTIVE_RCB_MUL_RESULT_ROLES: [u32; 3] = [
+    PROJECTIVE_RCB_MUL_ROLE_LHS,
+    PROJECTIVE_RCB_MUL_ROLE_RHS,
+    PROJECTIVE_RCB_MUL_ROLE_RESULT,
+];
+
+/// An EC op's consumed silo mul limbs, committed as base-trace columns on a
+/// projective-source consumer. Indexed `[mul_index][role][limb_index]` in the
+/// SAME canonical order as `projective_rcb_op_mul_limbs` so the LogUp keys line
+/// up with the silo's provided yields. C5-2 will constrain the coordinate
+/// formula on these columns; C5-1 only pins them equal to the silo via balance.
+///
+/// `has_muls` is a committed boolean gate: `1` iff the op emitted the full 13
+/// muls (Double, or MixedAdd with a finite operand), `0` for an infinity-operand
+/// MixedAdd no-op (which the silo proves with ZERO muls). The consume is gated
+/// by `has_muls` so a 0-mul op consumes nothing, matching the silo provider and
+/// keeping the 3-way balance closed.
+pub struct ConsumedMulLimbs<E: EvalAtRow> {
+    /// Committed `has_muls` flag (column 0 of the consumed-mul block).
+    pub has_muls: E::F,
+    pub limbs: [[[E::F; N_LIMBS]; 3]; PROJECTIVE_RCB_MAX_MUL_ROWS_PER_OP],
+}
+
+/// Base-trace column count of the consumed-mul block: the `has_muls` flag plus
+/// the `PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS` limb columns.
+pub const CONSUMED_MUL_LIMBS_COLUMNS: usize = 1 + PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS;
+
+impl<E: EvalAtRow> ConsumedMulLimbs<E> {
+    /// Read the consumed-mul columns: `has_muls` first, then the
+    /// `PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS` limbs in canonical order (mul_index
+    /// outer, role `[LHS, RHS, RESULT]`, limb_index). Must match
+    /// `projective_rcb_op_mul_limbs` + the leading flag.
+    pub fn read(eval: &mut E) -> Self {
+        let has_muls = eval.next_trace_mask();
+        Self {
+            has_muls,
+            limbs: core::array::from_fn(|_mul| {
+                core::array::from_fn(|_role| core::array::from_fn(|_limb| eval.next_trace_mask()))
+            }),
+        }
+    }
+
+    /// Constrain the committed `has_muls` flag: boolean, zero on padding, and
+    /// equal to `expected_has_muls` on active rows. `expected_has_muls` is the
+    /// consumer-computed predicate `1 - (1 - op)·operand_inf` (1 for Double and
+    /// finite-operand MixedAdd, 0 for an infinity-operand MixedAdd), which is
+    /// exactly when the silo emits muls.
+    pub fn constrain_has_muls(&self, eval: &mut E, active: &E::F, expected_has_muls: &E::F) {
+        let one = one::<E>();
+        eval.add_constraint(self.has_muls.clone() * (one.clone() - self.has_muls.clone()));
+        eval.add_constraint((one - active.clone()) * self.has_muls.clone());
+        eval.add_constraint(active.clone() * (self.has_muls.clone() - expected_has_muls.clone()));
+    }
+
+    /// CONSUME (use, `+has_muls`) every committed limb from
+    /// `ProjectiveRcbMulResultRelation`, keyed `(source_index, mul_index, role,
+    /// limb_index, limb)`. Gated by `has_muls` so a 0-mul op (infinity-operand
+    /// MixedAdd) consumes nothing — matching the silo, which provides nothing
+    /// for it. The silo provided these with `-active` over the same keys, so the
+    /// LogUp balance pins each committed column equal to the silo's proven value.
+    pub fn consume(
+        &self,
+        eval: &mut E,
+        relation: &ProjectiveRcbMulResultRelation,
+        source_index: &E::F,
+    ) {
+        for (mul_index, roles) in self.limbs.iter().enumerate() {
+            for (role_index, limbs) in roles.iter().enumerate() {
+                for (limb_index, limb) in limbs.iter().enumerate() {
+                    eval.add_to_relation(RelationEntry::new(
+                        relation,
+                        E::EF::from(self.has_muls.clone()),
+                        &[
+                            source_index.clone(),
+                            constant(mul_index as u32),
+                            constant(PROJECTIVE_RCB_MUL_RESULT_ROLES[role_index]),
+                            constant(limb_index as u32),
+                            limb.clone(),
+                        ],
+                    ));
+                }
+            }
+        }
     }
 }
 

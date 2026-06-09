@@ -1884,7 +1884,13 @@ fn projective_rcb_air_proof_slice_materializes_registered_traces() {
             + PROJECTIVE_RCB_FOLDED_DIGIT_TRACE_COLUMNS
             + 3
     );
-    assert_eq!(interaction_claim.total(), secure_zero());
+    // C5 plumbing: the `ProjectiveRcbMulResultRelation` provider yields (part of
+    // `total()`) are consumed by the projective sources in OTHER components, so
+    // they don't net to zero in this standalone slice — exclude them.
+    assert_eq!(
+        interaction_claim.total() - interaction_claim.mul_result_provider_claimed_sum,
+        secure_zero()
+    );
     assert!(!interaction.is_empty());
     assert_eq!(components.mul.log_size(), claim.component_log_sizes().mul);
     assert_eq!(
