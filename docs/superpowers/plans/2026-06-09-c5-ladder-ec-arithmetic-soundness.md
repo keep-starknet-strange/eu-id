@@ -111,7 +111,9 @@ rtk git commit -m "fix(p256): range-check Solinas correction digit (close C1 fre
 
 ---
 
-## C5 BUILD — AFFINE PIVOT (APPROVED 2026-06-09; supersedes the B2 and B1 designs below)
+## C5 BUILD — AFFINE PIVOT (ABANDONED 2026-06-09 — kept for history)
+
+> **Reverted on 2nd thought:** the maintainer chose to stay with the projective **RCB** approach (unconditional completeness — no curve-hardness assumption; branch-free; C5-1 already built) rather than re-architect to affine. The LIVE plan is **B2 + Option A** (next section). The affine analysis below is retained for reference (it remains a valid future optimization if proving cost ever dominates). No code was changed for the affine pivot.
 
 **Decision (after studying Garaga `~/garaga`):** Garaga's production verifier uses fake-GLV + an **affine** windowed ladder (~5 muls/op), having *shelved* its own ECIP/divisor argument as fragile. Replace eu-id's projective RCB ladder (13 muls/op) with a Garaga-style **affine fake-GLV ladder** reusing `final_add`'s proven affine add/double gadget. **Soundness:** `dx·dx_inv=1` makes `x1=x2` collisions UNPROVABLE (the AIR analogue of Garaga's revert); **completeness** rests on the √n bound (`|s1|,|s2|<2¹²⁸`, which MUST be range-checked in-AIR) + the scalar relation `s1+k·s2≡0 (mod n)` (already in-AIR via ScalarModMul). The C5-2a affine-normalization blocker DISSOLVES (affine ops yield affine output directly — no `affine·z≡proj` mul). C1 stays (Solinas reduction is used by the affine muls). One honest tradeoff: affine is complete *under the standard curve-hardness assumption* (collisions cryptographically unreachable) — the field-standard, audited approach; projective's unconditional completeness was overkill.
 
@@ -148,7 +150,12 @@ Tasks 1→6 keep the silo LIVE (still authoritative) while the affine ladder is 
 
 ---
 
-## C5 BUILD — B2 DESIGN (SUPERSEDED by the AFFINE PIVOT above; kept for history)
+## C5 BUILD — B2 DESIGN + OPTION A — LIVE (RCB chosen over affine, 2026-06-09)
+
+> **Affine-normalization blocker resolution (Option A).** Binding the exported *affine* output in-AIR is a field multiplication, not a linear reduction: `output_affine.x · z3 ≡ output_projective.x` and `output_affine.y · z3 ≡ output_projective.y` (z3 = the projective output's Z). Resolve by adding **2 extra muls per op in the silo** (extend `PROJECTIVE_RCB_MAX_MUL_ROWS_PER_OP` 13→15, in BOTH `rcb_double_with_mul_rows` and `rcb_mixed_add_with_mul_rows`), so the affine output is bound via the silo's *proven* mul engine. The source consumer consumes the 2 normalization muls (M13/M14) and binds their operands (`output_affine.x/y`, `z3`) and result (`output_projective.x/y`). This also requires updating C5-1's consumed-mul count 13→15 and its count/shape tests. Rationale: sound, non-duplicating, reuses the proven mul engine — recommended over duplicating a Solinas gadget in the consumer.
+>
+> **Double-op transcription (recorded for C5-2a, verified by symbolic replay of `curve/projective.rs:242` against the `ProjectiveRcbMulStep` Double slots):** inputs affine ⇒ z1=1. The 13 muls (slot order):
+> `M0 X1²=x1·x1`, `M1 Y1²=y1·y1`, `M2 Z1²=1·1`, `M3 X1Y1=x1·y1`, `M4 X1Z1=x1·1`, `M5 BT2=b·R2`, `M6 X3Y3=(R1−3R5+6R4)·(R1+3R5−6R4)`, `M7 X3T3=(R1−3R5+6R4)·(2R3)`, `M8 BZ3=b·(2R4)`, `M9 T0Z3=(3R0−3R2)·(3R8−9R2−3R0)`, `M10 Y1Z1=y1·1`, `M11 T0Z3Final=(2R10)·(3R8−9R2−3R0)`, `M12 T0T1=(2R10)·R1`. Output (projective): `x3=R7−R11`, `y3=R6+R9`, `z3=4·R12`. Then **M13: output_affine.x·z3 ≡ x3**, **M14: output_affine.y·z3 ≡ y3** (the affine-norm binding). All operand linear-combos bound via signed-carry reductions (final_add idiom); gate by `double_active = active·op` to keep degree ≤4.
 
 Investigation findings that reshape the build:
 - **Mul count is 13 per op** (`PROJECTIVE_RCB_MAX_MUL_ROWS_PER_OP = 13`; 13 Double + 13 MixedAdd slots in the `ProjectiveRcbMulStep` enum, trace.rs:1991), NOT 6/11.
