@@ -1600,9 +1600,12 @@ fn p256_stark_slice_low_ram_config(max_constraint_log_degree_bound: u32) -> PcsC
 }
 
 fn p256_stark_monolithic_profile_config(_max_constraint_log_degree_bound: u32) -> PcsConfig {
-    let fri_config = FriConfig::new(5, 2, 64, 1);
+    // 128-bit target: pow_bits + log_blowup * n_queries = 20 + 2*54 = 128.
+    // Grinding trades a one-off ~2^20 prover hash search for 10 fewer FRI
+    // queries; queries dominate proof size (every query opens every column).
+    let fri_config = FriConfig::new(5, 2, 54, 1);
     PcsConfig {
-        pow_bits: 0,
+        pow_bits: 20,
         fri_config,
         lifting_log_size: None,
     }
@@ -2765,6 +2768,17 @@ where
     interaction_claim.verify_balanced()?;
 
     let ids = claim.preprocessed_column_ids();
+    // Pin the PCS config: `stark_proof.config` is prover-supplied, and the
+    // verifier must not inherit a weakened FRI/grinding setting from it (a
+    // 1-query proof would otherwise verify at ~2-bit security).
+    let expected_config =
+        p256_stark_monolithic_profile_config(claim.max_constraint_log_degree_bound(&ids));
+    if stark_proof.config != expected_config {
+        return Err(P256ProofError::ProofLayer(format!(
+            "proof PCS config {:?} does not match the pinned verifier config {:?}",
+            stark_proof.config, expected_config
+        )));
+    }
     let mut channel = MC::C::default();
     let commitment_scheme = &mut CommitmentSchemeVerifier::<MC>::new(stark_proof.config);
     let dummy_log_degree_bounds = claim.trace_log_degree_bounds(

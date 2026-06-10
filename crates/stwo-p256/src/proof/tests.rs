@@ -404,6 +404,29 @@ fn current_p256_monolithic_verifier_rejects_mutated_public_r() {
     assert!(matches!(err, P256ProofError::ProofLayer(_)));
 }
 
+/// The verifier must pin its PCS config: `stark_proof.config` is
+/// prover-supplied, so a weakened FRI/grinding setting (e.g. one query, no
+/// grind) must be rejected outright rather than inherited.
+#[test]
+fn current_p256_monolithic_verifier_rejects_weakened_pcs_config() {
+    let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+        valid_real_input_with_small_u_scalars(7, 11),
+    ])
+    .expect("current pipeline builds");
+    let mut monolithic = proof
+        .prove_current_air_monolithic::<Blake2sMerkleChannel>()
+        .expect("current AIR monolithic proof proves");
+    monolithic.stark_proof.0.config.pow_bits = 0;
+    monolithic.stark_proof.0.config.fri_config.n_queries = 1;
+
+    let err = verify_current_air_monolithic::<Blake2sMerkleChannel>(monolithic)
+        .expect_err("weakened prover-supplied PCS config must reject");
+    assert!(
+        matches!(err, P256ProofError::ProofLayer(ref message) if message.contains("pinned")),
+        "expected pinned-config rejection, got {err:?}"
+    );
+}
+
 /// The verifier must reject non-canonical public-key coordinates before any
 /// proof work: the AIR's curve check works mod p, so a non-canonical
 /// representative (`x + p`, or limbs above the 13-bit base) of a valid point
