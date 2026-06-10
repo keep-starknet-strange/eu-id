@@ -3,7 +3,8 @@
 //! come from one code path. Prints a table plus a machine-readable line.
 //!
 //! ```bash
-//! cargo run --release -p eu-id-ffi --example bench_all
+//! cargo run --release -p eu-id-ffi --example bench_all                 # single-threaded
+//! cargo run --release -p eu-id-ffi --example bench_all --features parallel  # rayon
 //! ```
 
 use eu_id_ffi::eu_id_bench_sha256;
@@ -16,8 +17,14 @@ fn main() {
         ("4KiB", vec![0xAB; 4096]),
     ];
 
+    let threaded = cfg!(feature = "parallel");
     println!(
-        "build: single-threaded | {} logical cores",
+        "build: {} | {} logical cores",
+        if threaded {
+            "parallel (rayon)"
+        } else {
+            "single-threaded"
+        },
         std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(0),

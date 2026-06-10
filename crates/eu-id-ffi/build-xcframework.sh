@@ -7,8 +7,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."   # workspace root
 
-# Extra cargo args passed through to every build via the EXTRA env var,
-# e.g. EXTRA="--features <name>".
+# Extra cargo args, e.g. EXTRA="--features parallel" for multi-threaded
+# proving on the phone's cores.
 EXTRA="${EXTRA:-}"
 
 TARGETS=(aarch64-apple-ios aarch64-apple-ios-sim)
