@@ -15,6 +15,7 @@
 //! ```text
 //! r_check + r_x_ge_n · n = r_x
 //! r_x   < 2^256          (top limb in 9-bit range)
+//! r_x   < p              (canonical-less-than helper, field prime)
 //! r_check < n            (canonical-less-than helper)
 //! r_x_ge_n in {0, 1}
 //! ```
@@ -24,6 +25,15 @@
 //! so a single subtraction takes any `r_x ∈ [0, 2^256)` into `[0, n)`. The
 //! same `add_digest_reduction` helper used by `scalar_setup_air` for the
 //! digest-mod-n step is reused here verbatim.
+//!
+//! The `r_x < p` canonical bound is load-bearing for ECDSA soundness, not a
+//! hygiene check: `final_add_air` only proves `r_x` *limb-exact equal to its
+//! computed output*, whose mod-p arithmetic admits any 256-bit representative
+//! of the residue class. Without `r_x < p`, a prover whose true canonical
+//! `x(R)` satisfies `x < 2^256 − p` (≈ 2^-32 of points) could witness
+//! `r_x = x + p` end-to-end and pass `r == (x + p) mod n` for a forged `r`,
+//! since `p mod n ≠ 0`. Enforcing `r_x < p` pins `r_x` to the unique
+//! canonical affine coordinate.
 //!
 //! `r_x` is bound by [`crate::final_add_air::FinalAddOutputRelation`], which
 //! is yielded by `final_add_air` after consuming the prepared-table final
@@ -53,8 +63,11 @@ use stwo_constraint_framework::{
 };
 use stwo_p256_utils::constants::N_LIMBS;
 use stwo_p256_utils::scalar_arithmetic::{
-    CanonicalLtTrace, DigestReductionTrace, P256_ORDER as P256_ORDER_WORDS,
+    words_to_limbs, CanonicalLtTrace, DigestReductionTrace, P256_ORDER as P256_ORDER_WORDS,
 };
+
+use crate::constants::P256_MODULUS as P256_MODULUS_WORDS;
+use crate::scalar::canonical_lt::{add_canonical_lt_fixed_bound, CanonicalLtRelations};
 
 use crate::final_check::FinalEcdsaCheckClaim;
 use crate::limbs::{P256BigInt, P256M31BigInt};
@@ -82,7 +95,9 @@ relation!(EcdsaResultRelation, ECDSA_RESULT_RELATION_ARITY);
 /// - N_LIMBS: signed carries for the reduction recurrence
 /// - N_LIMBS: `r_check < n` slack
 /// - N_LIMBS: `r_check < n` boolean carries
-const FINAL_CHECK_TRACE_COLUMNS: usize = 2 + 5 * N_LIMBS + 1;
+/// - N_LIMBS: `r_x < p` slack (canonical affine x-coordinate)
+/// - N_LIMBS: `r_x < p` boolean carries
+const FINAL_CHECK_TRACE_COLUMNS: usize = 2 + 7 * N_LIMBS + 1;
 
 pub type FinalCheckAirComponent = FrameworkComponent<FinalCheckAirEval>;
 
@@ -215,6 +230,10 @@ impl FrameworkEval for FinalCheckAirEval {
             P256BigInt::from_limbs(core::array::from_fn(|_| eval.next_trace_mask()));
         let r_check_lt_carries: [E::F; N_LIMBS] =
             core::array::from_fn(|_| eval.next_trace_mask());
+        let r_x_lt_p_slack =
+            P256BigInt::from_limbs(core::array::from_fn(|_| eval.next_trace_mask()));
+        let r_x_lt_p_carries: [E::F; N_LIMBS] =
+            core::array::from_fn(|_| eval.next_trace_mask());
         let one = E::F::from(M31::from_u32_unchecked(1));
 
         eval.add_constraint(active.clone() * (active.clone() - one.clone()));
@@ -257,6 +276,26 @@ impl FrameworkEval for FinalCheckAirEval {
             &reduction_columns,
         );
         let _ = r_check_lt_slack; // kept above for ownership; helper consumed it
+
+        // Canonical affine coordinate: `r_x < p`. `final_add_air` only pins
+        // `r_x` limb-exact to its computed output, whose mod-p arithmetic
+        // admits any 256-bit representative; this canonical-LT pins the unique
+        // representative so `r_x mod n` cannot be shifted by `+p` (see module
+        // docs). Same gadget as the `r_check < n` bound above; the equation
+        // and boolean-carry constraints are ungated (degree ≤ 2), so padding
+        // rows carry a valid `0 < p` witness (handled by trace gen).
+        let r_x_value = P256BigInt::from_limbs(r_x_limbs.clone());
+        add_canonical_lt_fixed_bound(
+            &mut eval,
+            CanonicalLtRelations {
+                limb_range: &self.range13,
+            },
+            active.clone(),
+            &r_x_value,
+            &words_to_limbs(&P256_MODULUS_WORDS),
+            &r_x_lt_p_slack,
+            &r_x_lt_p_carries,
+        );
         let r_check = reduction_columns.z_red;
 
         let mut values = Vec::with_capacity(ECDSA_RESULT_RELATION_ARITY);
@@ -308,6 +347,8 @@ pub fn gen_final_check_air_base_trace(
     let n_words = P256_ORDER_WORDS;
     let padding_lt = CanonicalLtTrace::new("padding_r_check", &[0u64; 4], "n", &n_words)
         .expect("0 is below the P-256 scalar order");
+    let padding_lt_p = CanonicalLtTrace::new("padding_r_x", &[0u64; 4], "p", &P256_MODULUS_WORDS)
+        .expect("0 is below the P-256 field prime");
 
     let mut columns =
         vec![vec![M31::from_u32_unchecked(0); row_count]; FINAL_CHECK_TRACE_COLUMNS];
@@ -322,6 +363,16 @@ pub fn gen_final_check_air_base_trace(
         }
         debug_assert_eq!(offset, lt_carry_offset());
         for carry in padding_lt.carries.iter() {
+            columns[offset][row] = encode_signed_carry(*carry);
+            offset += 1;
+        }
+        debug_assert_eq!(offset, lt_p_slack_offset());
+        for limb in padding_lt_p.slack.iter() {
+            columns[offset][row] = M31::from_u32_unchecked(*limb);
+            offset += 1;
+        }
+        debug_assert_eq!(offset, lt_p_carry_offset());
+        for carry in padding_lt_p.carries.iter() {
             columns[offset][row] = encode_signed_carry(*carry);
             offset += 1;
         }
@@ -370,6 +421,21 @@ pub fn gen_final_check_air_base_trace(
         }
         debug_assert_eq!(offset, lt_carry_offset());
         for carry in reduction.z_red_lt_n.carries.iter() {
+            columns[offset][row] = encode_signed_carry(*carry);
+            offset += 1;
+        }
+        // Canonical `r_x < p` witness. The native `r_point` is a canonical
+        // affine point (its coordinates are reduced mod p), so the witness
+        // always exists for honest claims.
+        let r_x_lt_p = CanonicalLtTrace::new("r_x", &r_x_words, "p", &P256_MODULUS_WORDS)
+            .expect("native final-add output coordinate is canonical (< p)");
+        debug_assert_eq!(offset, lt_p_slack_offset());
+        for limb in r_x_lt_p.slack.iter() {
+            columns[offset][row] = M31::from_u32_unchecked(*limb);
+            offset += 1;
+        }
+        debug_assert_eq!(offset, lt_p_carry_offset());
+        for carry in r_x_lt_p.carries.iter() {
             columns[offset][row] = encode_signed_carry(*carry);
             offset += 1;
         }
@@ -429,6 +495,28 @@ pub(crate) fn gen_final_check_air_interaction_trace(
             active_col,
             relations.range13,
             lt_slack_offset() + limb,
+        );
+    }
+    // `r_x < p` canonical-LT (emitted after `add_digest_reduction` in
+    // `evaluate`, so after the `r_check < n` columns here): the gadget
+    // range-checks the value (`r_x`) and slack limbs, in that per-limb order.
+    // This re-checks all 20 `r_x` limbs as Range13 (the top limb is
+    // additionally Range9-checked above), which is redundant but keeps the
+    // shared gadget intact.
+    for limb in 0..N_LIMBS {
+        append_range_column(
+            &mut logup,
+            base,
+            active_col,
+            relations.range13,
+            r_x_offset() + limb,
+        );
+        append_range_column(
+            &mut logup,
+            base,
+            active_col,
+            relations.range13,
+            lt_p_slack_offset() + limb,
         );
     }
     // Result relation: consumer emits (active / combine(result, values)).
@@ -545,7 +633,8 @@ fn append_range_column(
 /// Per-active-row range13 uses, matching the emission order in
 /// [`FinalCheckAirEval::evaluate`]: `add_digest_reduction` range-checks the
 /// non-top `r_x` limbs as Range13, then `add_canonical_lt_fixed_bound`
-/// range-checks both the value (`r_check`) and the slack limbs.
+/// range-checks both the value (`r_check`) and the slack limbs, then the
+/// `r_x < p` canonical-LT re-checks all `r_x` limbs plus its slack limbs.
 pub(crate) fn final_check_range13_uses_from_base(base: &[M31ColumnEval]) -> Vec<M31> {
     let mut uses = Vec::new();
     for row in active_rows(base) {
@@ -555,6 +644,10 @@ pub(crate) fn final_check_range13_uses_from_base(base: &[M31ColumnEval]) -> Vec<
         for limb in 0..N_LIMBS {
             uses.push(row[r_check_offset() + limb]);
             uses.push(row[lt_slack_offset() + limb]);
+        }
+        for limb in 0..N_LIMBS {
+            uses.push(row[r_x_offset() + limb]);
+            uses.push(row[lt_p_slack_offset() + limb]);
         }
     }
     uses
@@ -646,6 +739,14 @@ const fn lt_slack_offset() -> usize {
 
 const fn lt_carry_offset() -> usize {
     2 + 4 * N_LIMBS + 1
+}
+
+const fn lt_p_slack_offset() -> usize {
+    2 + 5 * N_LIMBS + 1
+}
+
+const fn lt_p_carry_offset() -> usize {
+    2 + 6 * N_LIMBS + 1
 }
 
 fn limbs_to_array(limbs: &[M31; N_LIMBS]) -> [u32; N_LIMBS] {
