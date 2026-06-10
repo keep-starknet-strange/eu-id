@@ -250,9 +250,10 @@ impl ProjectiveRcbAirTraceClaim {
         trace: &ProjectiveEcTraceClaim,
         lite: bool,
     ) -> Result<Self, ProjectiveRcbAirError> {
+        use rayon::prelude::*;
         let rows = trace
             .rows
-            .iter()
+            .par_iter()
             .enumerate()
             .map(|(source_index, row)| {
                 ProjectiveRcbAirRow::from_projective_row(lite, source_index, row)

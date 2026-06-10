@@ -839,7 +839,7 @@ fn prepared_table_sum_use_fractions(
     columns: Vec<usize>,
 ) -> SecureField {
     let log_size = base[0].domain.log_size();
-    let mut sum = secure_zero();
+    let mut denominators = Vec::new();
     for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
         for lane in 0..(1 << LOG_N_LANES) {
             let active = base[0].data[vec_row].to_array()[lane];
@@ -848,12 +848,11 @@ fn prepared_table_sum_use_fractions(
             }
             for &column in &columns {
                 let value = base[column].data[vec_row].to_array()[lane];
-                let denom: SecureField = relation.combine(&[value]);
-                sum += SecureField::from(active) / denom;
+                denominators.push(relation.combine(&[value]));
             }
         }
     }
-    sum
+    crate::range_checks::batched_inverse_sum(&denominators)
 }
 
 
@@ -865,16 +864,15 @@ fn prepared_table_projective_source_consumer_sums(
     mul_result_relation: &ProjectiveRcbMulResultRelation,
 ) -> (SecureField, SecureField) {
     let log_size = base[0].domain.log_size();
-    let mut ec_row_sum = secure_zero();
-    let mut mul_result_sum = secure_zero();
+    let mut ec_row_denominators = Vec::new();
+    let mut mul_result_denominators = Vec::new();
     for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
         for lane in 0..(1 << LOG_N_LANES) {
             let active = base[0].data[vec_row].to_array()[lane];
             if active != M31::from_u32_unchecked(0) {
                 let ec_values =
                     prepared_table_projective_source_unpacked_relation_values(base, vec_row, lane);
-                let denom: SecureField = ec_row_relation.combine(&ec_values);
-                ec_row_sum += SecureField::from(active) / denom;
+                ec_row_denominators.push(ec_row_relation.combine(&ec_values));
             }
 
             let has_muls =
@@ -882,7 +880,6 @@ fn prepared_table_projective_source_consumer_sums(
             if has_muls == M31::from_u32_unchecked(0) {
                 continue;
             }
-            let has_muls_ef = SecureField::from(has_muls);
             let source_index = base[1].data[vec_row].to_array()[lane];
             for mul_index in 0..(PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS / (3 * N_LIMBS)) {
                 for (role_index, &role) in PROJECTIVE_RCB_MUL_RESULT_ROLES.iter().enumerate() {
@@ -892,20 +889,22 @@ fn prepared_table_projective_source_consumer_sums(
                             + role_index * N_LIMBS
                             + limb_index;
                         let limb = base[base_col].data[vec_row].to_array()[lane];
-                        let denom: SecureField = mul_result_relation.combine(&[
+                        mul_result_denominators.push(mul_result_relation.combine(&[
                             source_index,
                             M31::from_u32_unchecked(mul_index as u32),
                             M31::from_u32_unchecked(role),
                             M31::from_u32_unchecked(limb_index as u32),
                             limb,
-                        ]);
-                        mul_result_sum += has_muls_ef / denom;
+                        ]));
                     }
                 }
             }
         }
     }
-    (ec_row_sum, mul_result_sum)
+    (
+        crate::range_checks::batched_inverse_sum(&ec_row_denominators),
+        crate::range_checks::batched_inverse_sum(&mul_result_denominators),
+    )
 }
 
 

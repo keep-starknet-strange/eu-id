@@ -78,6 +78,19 @@ pub fn signed_carry_active_column_id(equation_name: &str) -> PreProcessedColumnI
 /// `|carry| ≤ M31_HALF`; outside that range the encoding wraps modulo
 /// `M31_MODULUS` and the round-trip with [`decode_signed_carry`] no longer
 /// holds.
+/// Sum of `1 / denominator_i` with one Montgomery batch inversion
+/// (`FieldExpOps::batch_inverse`) instead of one field inversion per term.
+/// Callers gate which denominators they collect (numerators are 0/1 booleans),
+/// so the result is bit-identical to the naive per-term division.
+pub fn batched_inverse_sum(
+    denominators: &[stwo::core::fields::qm31::SecureField],
+) -> stwo::core::fields::qm31::SecureField {
+    use stwo::core::fields::FieldExpOps;
+    stwo::core::fields::qm31::SecureField::batch_inverse(denominators)
+        .into_iter()
+        .sum()
+}
+
 pub fn encode_signed_carry(carry: i64) -> M31 {
     assert!(
         (-M31_HALF..=M31_HALF).contains(&carry),
