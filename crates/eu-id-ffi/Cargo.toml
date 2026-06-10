@@ -1,0 +1,22 @@
+[package]
+name = "eu-id-ffi"
+version = "0.1.0"
+edition = "2021"
+
+# Thin C-ABI surface over the standalone SHA-256 prover, built for the
+# mobile benchmark harness. One function,
+# measured inside Rust, returned as a flat C struct. iOS links the
+# `staticlib`; Android (later) the `cdylib`.
+[lib]
+name = "eu_id_ffi"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+stwo-sha256 = { path = "../stwo-sha256" }
+# Peak-footprint sampler. On Apple `physical_mem` resolves to mach
+# `phys_footprint` — the iOS jetsam metric — the same crate the laptop
+# harness used.
+memory-stats = "1.2"
+
+[lints]
+workspace = true

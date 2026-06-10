@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/stwo-p256", "crates/stwo-sha256"]
+members = ["crates/stwo-p256", "crates/stwo-sha256", "crates/eu-id-ffi"]
 resolver = "2"
 
 # Workspace-wide lint configuration. Every crate opts in with `[lints]

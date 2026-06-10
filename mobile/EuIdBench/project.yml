@@ -1,0 +1,45 @@
+# XcodeGen spec for the SHA-256 mobile benchmark harness.
+# Regenerate the project with:  cd mobile/EuIdBench && xcodegen generate
+#
+# The app statically links EuId.xcframework (built by
+# crates/eu-id-ffi/build-xcframework.sh) and calls eu_id_bench_sha256 via a
+# bridging header. One screen, four digest buttons — see Sources/.
+name: EuIdBench
+options:
+  bundleIdPrefix: co.starkware.euid
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+
+targets:
+  EuIdBench:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+    dependencies:
+      # Static-lib xcframework: the .a is linked into the app binary.
+      - framework: ../../crates/eu-id-ffi/EuId.xcframework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: co.starkware.euid.bench
+        # Automatic signing. Set your Apple Developer Team ID via the
+        # DEVELOPMENT_TEAM env var before `xcodegen generate`; `xcodebuild
+        # -allowProvisioningUpdates` then registers the device + mints a
+        # development profile on first device build.
+        DEVELOPMENT_TEAM: ${DEVELOPMENT_TEAM}
+        CODE_SIGN_STYLE: Automatic
+        GENERATE_INFOPLIST_FILE: YES
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        # Bridging header pulls in the C ABI declared by eu_id_ffi.h.
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/EuIdBench-Bridging-Header.h
+        # So the bridging header can find eu_id_ffi.h.
+        HEADER_SEARCH_PATHS:
+          - ../../crates/eu-id-ffi/include
+        # Rust staticlib needs the C++ runtime + standard system libs.
+        OTHER_LDFLAGS:
+          - -lc++
+        # Phone-class compute can run a while; keep the app foregrounded.
+        INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
