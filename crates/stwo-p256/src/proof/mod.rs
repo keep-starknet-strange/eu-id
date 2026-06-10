@@ -413,7 +413,6 @@ pub struct P256ProofDraft {
     pub inputs: Vec<EcdsaVerifyInput>,
     pub claim: P256ProofClaim,
     pub relations: P256ProofRelations,
-    pub interaction_claim: P256ProofInteractionClaim,
 }
 
 #[derive(Clone, Debug)]
@@ -1612,13 +1611,23 @@ impl P256ProofDraft {
         Self::from_claim(inputs, claim)
     }
 
+    /// Analytic interaction claim, derived on demand from the draft's `claim`
+    /// and (dummy) `relations`. This is *not* stored on the draft: recomputing
+    /// it costs ~2.4s for a single signature, and the proving path never needs
+    /// it (it builds its own fresh interaction claim from the committed trace).
+    /// Tests and debug tooling that inspect the analytic per-relation balances
+    /// call this explicitly.
+    pub fn interaction_claim(&self) -> P256ProofInteractionClaim {
+        P256ProofInteractionClaim::from_claim(&self.claim, &self.relations)
+    }
+
     pub fn verify_current_e2e(&self) -> Result<(), P256ProofError> {
         self.claim.verify_current_components()?;
         self.claim
             .projective_rcb_air_trace
             .verify_proof_slice_traces(&self.relations.projective_rcb)?;
         self.verify_audits()?;
-        self.interaction_claim.verify_balanced()
+        self.interaction_claim().verify_balanced()
     }
 
     pub fn prove_current_air_monolithic<MC>(
@@ -2444,20 +2453,18 @@ impl P256ProofDraft {
         claim: P256ProofClaim,
     ) -> Result<Self, P256ProofError> {
         let relations = P256ProofRelations::dummy();
-        let interaction_claim = P256ProofInteractionClaim::from_claim(&claim, &relations);
-        let proof = Self {
+        // The analytic interaction claim is *derived* from `claim` + `relations`
+        // (see `interaction_claim()`), and recomputing it costs ~2.4s for a
+        // single signature. The proving path computes its own fresh interaction
+        // claim from the committed trace and balance-checks that, and the STARK
+        // verifier enforces every constraint — so the draft does not eagerly
+        // compute or balance-check it at build time. Tests/debug that want the
+        // analytic per-relation balances call `interaction_claim()` explicitly.
+        Ok(Self {
             inputs,
             claim,
             relations,
-            interaction_claim,
-        };
-        // Cheap build-time guard: confirm the analytic interaction claim
-        // balances, catching a malformed claim/relation set early. The expensive
-        // native re-verification (`verify_current_e2e`) is redundant with the
-        // proving path's fresh trace-derived balance check and the STARK
-        // verifier, so it is not run at draft-build time.
-        proof.interaction_claim.verify_balanced()?;
-        Ok(proof)
+        })
     }
 
     fn verify_audits(&self) -> Result<(), P256ProofError> {

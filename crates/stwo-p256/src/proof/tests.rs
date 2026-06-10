@@ -281,12 +281,12 @@ fn current_p256_proof_pipeline_links_all_implemented_components() {
             )
         );
     }
-    assert_eq!(proof.interaction_claim.public_inputs.total(), zero());
-    assert_eq!(proof.interaction_claim.selector_lookups.total(), zero());
-    assert_eq!(proof.interaction_claim.prepared_points.total(), zero());
-    assert_eq!(proof.interaction_claim.range7.total(), zero());
-    proof
-        .interaction_claim
+    let interaction_claim = proof.interaction_claim();
+    assert_eq!(interaction_claim.public_inputs.total(), zero());
+    assert_eq!(interaction_claim.selector_lookups.total(), zero());
+    assert_eq!(interaction_claim.prepared_points.total(), zero());
+    assert_eq!(interaction_claim.range7.total(), zero());
+    interaction_claim
         .projective_rcb
         .verify_balanced()
         .expect("projective RCB internal relations balance");
@@ -350,12 +350,12 @@ fn current_p256_proof_pipeline_accepts_real_valid_signature_input() {
         proof.claim.public_key_check.solinas_reduction_row_count(),
         112
     );
-    assert_eq!(proof.interaction_claim.public_inputs.total(), zero());
-    assert_eq!(proof.interaction_claim.selector_lookups.total(), zero());
-    assert_eq!(proof.interaction_claim.prepared_points.total(), zero());
-    assert_eq!(proof.interaction_claim.range7.total(), zero());
-    proof
-        .interaction_claim
+    let interaction_claim = proof.interaction_claim();
+    assert_eq!(interaction_claim.public_inputs.total(), zero());
+    assert_eq!(interaction_claim.selector_lookups.total(), zero());
+    assert_eq!(interaction_claim.prepared_points.total(), zero());
+    assert_eq!(interaction_claim.range7.total(), zero());
+    interaction_claim
         .projective_rcb
         .verify_balanced()
         .expect("projective RCB internal relations balance");
@@ -656,17 +656,16 @@ fn current_p256_proof_pipeline_detects_mutated_projective_rcb_raw_product_row() 
 
 #[test]
 fn current_p256_proof_pipeline_detects_projective_rcb_relation_imbalance() {
-    let mut proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+    let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
         valid_real_input_with_small_u_scalars(7, 11),
     ])
     .expect("current pipeline builds");
-    proof
-        .interaction_claim
+    let mut interaction_claim = proof.interaction_claim();
+    interaction_claim
         .projective_rcb
         .raw_product_chunk_digit += SecureField::from(M31::from_u32_unchecked(1));
 
-    let err = proof
-        .interaction_claim
+    let err = interaction_claim
         .verify_balanced()
         .expect_err("mutated projective RCB relation sum must fail");
 
@@ -1061,12 +1060,10 @@ fn wrong_r_harness_fidelity_true_r_air_constraints_pass() {
     );
 
     let relations = P256ProofRelations::dummy();
-    let interaction_claim = P256ProofInteractionClaim::from_claim(&rebuilt, &relations);
     let draft = P256ProofDraft {
         inputs,
         claim: rebuilt,
         relations,
-        interaction_claim,
     };
     assert_current_air_constraints(&draft);
     eprintln!("FIDELITY: TRUE-R override path passes assert_current_air_constraints cleanly.");
@@ -1098,14 +1095,13 @@ fn wrong_r_monolithic_prove_outcome() {
         P256ProofClaim::from_inputs_with_wrong_r_for_cert(&inputs, 0, r_prime.clone())
             .expect("wrong-R claim assembles (no native gate in override builders)");
 
-    // Build a draft WITHOUT verify_current_e2e (which would itself reject).
+    // Build the draft manually: no draft builder exists for a wrong-R claim
+    // (the `from_inputs_*` builders run a native ECDSA gate that rejects it).
     let relations = P256ProofRelations::dummy();
-    let interaction_claim = P256ProofInteractionClaim::from_claim(&wrong_claim, &relations);
     let draft = P256ProofDraft {
         inputs: inputs.clone(),
         claim: wrong_claim,
         relations,
-        interaction_claim,
     };
 
     // (1) Does the native pre-check inside prove reject?
@@ -1138,12 +1134,10 @@ fn wrong_r_air_constraints_oracle() {
         P256ProofClaim::from_inputs_with_wrong_r_for_cert(&inputs, 0, r_prime.clone())
             .expect("wrong-R claim assembles");
     let relations = P256ProofRelations::dummy();
-    let interaction_claim = P256ProofInteractionClaim::from_claim(&wrong_claim, &relations);
     let draft = P256ProofDraft {
         inputs,
         claim: wrong_claim,
         relations,
-        interaction_claim,
     };
 
     eprintln!(
@@ -1329,12 +1323,10 @@ fn valid_draft_for_balance(u1: u64, u2: u64) -> P256ProofDraft {
         valid_real_input_with_small_u_scalars(u1, u2),
     ])
     .expect("valid claim");
-    let interaction_claim = P256ProofInteractionClaim::from_claim(&claim, &relations);
     P256ProofDraft {
         inputs: vec![valid_real_input_with_small_u_scalars(u1, u2)],
         claim,
         relations,
-        interaction_claim,
     }
 }
 
@@ -2426,14 +2418,14 @@ fn full_p256_signature_proof_has_no_pending_component_slots() {
 
 #[test]
 fn current_p256_proof_pipeline_detects_public_relation_imbalance() {
-    let mut proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+    let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
         valid_real_input_with_small_u_scalars(7, 11),
     ])
     .expect("current pipeline builds");
-    proof.interaction_claim.public_inputs.consumer_claimed_sum = zero();
+    let mut interaction_claim = proof.interaction_claim();
+    interaction_claim.public_inputs.consumer_claimed_sum = zero();
 
-    let err = proof
-        .interaction_claim
+    let err = interaction_claim
         .verify_balanced()
         .expect_err("mutated public consumer sum must fail");
 
@@ -2447,17 +2439,16 @@ fn current_p256_proof_pipeline_detects_public_relation_imbalance() {
 
 #[test]
 fn current_p256_proof_pipeline_detects_selector_lookup_imbalance() {
-    let mut proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+    let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
         valid_real_input_with_small_u_scalars(7, 11),
     ])
     .expect("current pipeline builds");
-    proof
-        .interaction_claim
+    let mut interaction_claim = proof.interaction_claim();
+    interaction_claim
         .selector_lookups
         .consumer_claimed_sum = zero();
 
-    let err = proof
-        .interaction_claim
+    let err = interaction_claim
         .verify_balanced()
         .expect_err("mutated selector consumer sum must fail");
 
@@ -2471,14 +2462,14 @@ fn current_p256_proof_pipeline_detects_selector_lookup_imbalance() {
 
 #[test]
 fn current_p256_proof_pipeline_detects_prepared_point_imbalance() {
-    let mut proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+    let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
         valid_real_input_with_small_u_scalars(7, 11),
     ])
     .expect("current pipeline builds");
-    proof.interaction_claim.prepared_points.consumer_claimed_sum = zero();
+    let mut interaction_claim = proof.interaction_claim();
+    interaction_claim.prepared_points.consumer_claimed_sum = zero();
 
-    let err = proof
-        .interaction_claim
+    let err = interaction_claim
         .verify_balanced()
         .expect_err("mutated prepared consumer sum must fail");
 
