@@ -231,7 +231,6 @@ impl FrameworkEval for FinalAddCheckEval {
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         let one = E::F::from(M31::from_u32_unchecked(1));
-        let two = E::F::from(M31::from_u32_unchecked(2));
         let three = E::F::from(M31::from_u32_unchecked(3));
         let columns = FinalAddCheckColumns::read(&mut eval);
         let active = columns.active.clone();

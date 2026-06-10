@@ -1,6 +1,7 @@
 pub mod fake_glv;
 pub mod final_add;
 pub mod final_check;
+pub mod hinted_mul;
 pub mod projective_rcb_mul;
 pub mod public_inputs;
 pub mod public_key_curve;
