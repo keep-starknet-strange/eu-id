@@ -1628,7 +1628,14 @@ impl P256ProofDraft {
         MC: MerkleChannel,
         SimdBackend: BackendForChannel<MC>,
     {
-        self.verify_current_e2e()?;
+        // No pre-prove `verify_current_e2e()` here: it natively re-verifies the
+        // entire witness, which is fully redundant with (a) the authoritative
+        // balance check run below on the *fresh* interaction claim derived from
+        // the committed trace (`interaction_claim.verify_balanced()` after
+        // interaction-trace generation), and (b) the STARK verifier, which
+        // enforces every AIR constraint. Skipping it roughly halves single-proof
+        // wall time. `verify_current_e2e` remains a public method for
+        // tests/debug that want the native cross-check explicitly.
         let proof_claim = P256CurrentAirProofClaim::from_claim(&self.claim);
         let ids = proof_claim.preprocessed_column_ids();
         let max_constraint_log_degree_bound = proof_claim.max_constraint_log_degree_bound(&ids);
@@ -2444,7 +2451,12 @@ impl P256ProofDraft {
             relations,
             interaction_claim,
         };
-        proof.verify_current_e2e()?;
+        // Cheap build-time guard: confirm the analytic interaction claim
+        // balances, catching a malformed claim/relation set early. The expensive
+        // native re-verification (`verify_current_e2e`) is redundant with the
+        // proving path's fresh trace-derived balance check and the STARK
+        // verifier, so it is not run at draft-build time.
+        proof.interaction_claim.verify_balanced()?;
         Ok(proof)
     }
 
