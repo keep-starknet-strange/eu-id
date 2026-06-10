@@ -4,6 +4,7 @@
 
 use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::SecureField;
+use stwo::core::fields::FieldExpOps;
 use stwo::core::ColumnVec;
 use stwo::prover::backend::simd::m31::{PackedM31, LOG_N_LANES};
 use stwo::prover::backend::simd::qm31::PackedQM31;
@@ -291,35 +292,44 @@ pub fn gen_hinted_mul_interaction_trace(
     let (trace, claimed_sum) = logup.finalize_last();
 
     // Per-relation claimed sums from the scalar view (active rows only).
-    let mut range13_consumer = SecureField::from(M31::from_u32_unchecked(0));
-    let mut signed_consumer = SecureField::from(M31::from_u32_unchecked(0));
-    let mut mul_result_provider = SecureField::from(M31::from_u32_unchecked(0));
-    let one = SecureField::from(M31::from_u32_unchecked(1));
-    for (row, scheduled) in claim.rows.iter().enumerate() {
+    // Denominators are collected and inverted in one Montgomery batch per
+    // relation (`FieldExpOps::batch_inverse`): the naive per-entry division is
+    // ~367 QM31 inversions per row (~2.2M per signature) and dominated the
+    // whole interaction generation.
+    let mut range13_denominators: Vec<SecureField> =
+        Vec::with_capacity(claim.rows.len() * range13_uses.len());
+    let mut signed_denominators: Vec<SecureField> =
+        Vec::with_capacity(claim.rows.len() * signed_uses.len());
+    let mut mul_result_denominators: Vec<SecureField> =
+        Vec::with_capacity(claim.rows.len() * 3 * N_LIMBS);
+    for scheduled in claim.rows.iter() {
         let mut values = Vec::with_capacity(HINTED_MUL_TRACE_COLUMNS);
         push_row_values(&scheduled.witness, &mut values);
         for &(_, column) in range13_uses.iter() {
-            let denominator: SecureField = relations.range13.combine(&[values[column]]);
-            range13_consumer += one / denominator;
+            range13_denominators.push(relations.range13.combine(&[values[column]]));
         }
         for &(_, column) in signed_uses.iter() {
-            let denominator: SecureField = relations.signed_h.combine(&[values[column]]);
-            signed_consumer += one / denominator;
+            signed_denominators.push(relations.signed_h.combine(&[values[column]]));
         }
-        let _ = row;
         for &(role, base_column) in role_columns.iter() {
             for limb_index in 0..N_LIMBS {
-                let denominator: SecureField = relations.mul_result.combine(&[
+                mul_result_denominators.push(relations.mul_result.combine(&[
                     M31::from_u32_unchecked(scheduled.source_index),
                     M31::from_u32_unchecked(scheduled.mul_index),
                     M31::from_u32_unchecked(role),
                     M31::from_u32_unchecked(limb_index as u32),
                     values[base_column + limb_index],
-                ]);
-                mul_result_provider += -one / denominator;
+                ]));
             }
         }
     }
+    let range13_consumer: SecureField =
+        SecureField::batch_inverse(&range13_denominators).into_iter().sum();
+    let signed_consumer: SecureField =
+        SecureField::batch_inverse(&signed_denominators).into_iter().sum();
+    let mul_result_provider: SecureField = -SecureField::batch_inverse(&mul_result_denominators)
+        .into_iter()
+        .sum::<SecureField>();
 
     (
         trace,
