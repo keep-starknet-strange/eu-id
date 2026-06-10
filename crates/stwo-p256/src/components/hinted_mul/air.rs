@@ -262,6 +262,62 @@ pub struct HintedMulSliceClaimedSums {
     pub signed_h: SecureField,
 }
 
+/// Shape claim for the monolithic proof (mixed into the channel).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HintedMulProofClaim {
+    pub log_size: u32,
+}
+
+impl HintedMulProofClaim {
+    pub fn from_trace(claim: &HintedMulTraceClaim) -> Self {
+        Self {
+            log_size: claim.log_size(),
+        }
+    }
+
+    pub fn mix_into(&self, channel: &mut impl Channel) {
+        channel.mix_u64(self.log_size as u64);
+    }
+
+    pub fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
+        hinted_mul_slice_preprocessed_ids(self.log_size)
+    }
+}
+
+/// Per-relation claimed sums of the hinted-mul trio in the monolithic proof.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HintedMulProofInteractionClaim {
+    /// Total logup sum of the check component (its own claimed_sum).
+    pub claimed_sum: SecureField,
+    pub range13_consumer_claimed_sum: SecureField,
+    pub signed_h_consumer_claimed_sum: SecureField,
+    pub mul_result_provider_claimed_sum: SecureField,
+    pub range13_provider_claimed_sum: SecureField,
+    pub signed_h_provider_claimed_sum: SecureField,
+}
+
+impl HintedMulProofInteractionClaim {
+    pub fn zero() -> Self {
+        let zero = SecureField::from(M31::from_u32_unchecked(0));
+        Self {
+            claimed_sum: zero,
+            range13_consumer_claimed_sum: zero,
+            signed_h_consumer_claimed_sum: zero,
+            mul_result_provider_claimed_sum: zero,
+            range13_provider_claimed_sum: zero,
+            signed_h_provider_claimed_sum: zero,
+        }
+    }
+
+    pub fn mix_into(&self, channel: &mut impl Channel) {
+        channel.mix_felts(&[
+            self.claimed_sum,
+            self.range13_provider_claimed_sum,
+            self.signed_h_provider_claimed_sum,
+        ]);
+    }
+}
+
 pub fn hinted_mul_signed_table_claim() -> SignedCarryRangeClaim {
     SignedCarryRangeClaim::new(
         HINTED_MUL_H_HI_TABLE_LOG_SIZE,

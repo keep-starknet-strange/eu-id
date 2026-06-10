@@ -60,6 +60,8 @@ pub enum HintedMulWitnessError {
     CarryOutOfBounds { identity: usize, index: usize },
     /// A carry identity failed to divide exactly (internal invariant).
     CarryRemainder { identity: usize },
+    /// The recomputed canonical result differs from the silo's stored result.
+    ResultMismatch { source_index: usize, mul_index: usize },
 }
 
 /// Full witness for one hinted mul. All limb vectors are little-endian 13-bit

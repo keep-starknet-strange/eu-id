@@ -1363,7 +1363,9 @@ fn monolithic_relation_audit_is_balanced_and_fully_linked() {
         "Range7",
         "EcdsaResult",
         "PublicKeyPoint",
-        "ProjectiveRcbAirProofSlice",
+        "HintedMulRange13",
+        "HintedMulSignedH",
+        "HintedMulTotalConsistency",
         "FinalCheckHint",
         "FinalAddInternal",
         "FinalAddOutput",
@@ -2177,36 +2179,9 @@ fn assert_current_air_constraints(proof: &P256ProofDraft) {
         &components.final_check.check,
         &trace,
     );
-    assert_component_named(
-        "projective_rcb_air.mul",
-        &components.projective_rcb_air.mul,
-        &trace,
-    );
-    assert_component_named(
-        "projective_rcb_air.raw_product_chunk",
-        &components.projective_rcb_air.raw_product_chunk,
-        &trace,
-    );
-    assert_component_named(
-        "projective_rcb_air.folded_contribution",
-        &components.projective_rcb_air.folded_contribution,
-        &trace,
-    );
-    assert_component_named(
-        "projective_rcb_air.folded_digit",
-        &components.projective_rcb_air.folded_digit,
-        &trace,
-    );
-    assert_component_named(
-        "projective_rcb_air.range13",
-        &components.projective_rcb_air.range13,
-        &trace,
-    );
-    assert_component_named(
-        "projective_rcb_air.signed_carry",
-        &components.projective_rcb_air.signed_carry,
-        &trace,
-    );
+    assert_component_named("hinted_mul.check", &components.hinted_mul.check, &trace);
+    assert_component_named("hinted_mul.range13", &components.hinted_mul.range13, &trace);
+    assert_component_named("hinted_mul.signed_h", &components.hinted_mul.signed_h, &trace);
 }
 
 fn assert_scalar_mod_mul_components_named(
@@ -2377,8 +2352,16 @@ fn current_p256_air_shape_diagnostic() {
             .trace_log_degree_bounds(),
     );
     print_component_shape(
-        "projective_rcb_air",
-        components.projective_rcb_air.trace_log_degree_bounds(),
+        "hinted_mul.check",
+        stwo::core::air::Component::trace_log_degree_bounds(&components.hinted_mul.check),
+    );
+    print_component_shape(
+        "hinted_mul.range13",
+        stwo::core::air::Component::trace_log_degree_bounds(&components.hinted_mul.range13),
+    );
+    print_component_shape(
+        "hinted_mul.signed_h",
+        stwo::core::air::Component::trace_log_degree_bounds(&components.hinted_mul.signed_h),
     );
     print_component_shape("current_air_total", components.trace_log_degree_bounds());
 }

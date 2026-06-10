@@ -99,15 +99,23 @@ use crate::prepared_table::{
 };
 use crate::projective::{ProjectiveEcError, ProjectiveEcTraceClaim};
 use crate::projective_air::{
-    projective_rcb_signed_carry_log_size, ProjectiveRcbAirComponents, ProjectiveRcbAirError,
-    ProjectiveRcbAirInteractionClaim, ProjectiveRcbAirProofClaim,
-    ProjectiveRcbAirProofInteractionClaim, ProjectiveRcbAirTraceClaim,
-    ProjectiveRcbMulComponentRelations, PROJECTIVE_RCB_SIGNED_CARRY_BOUND,
-    PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
+    projective_rcb_signed_carry_log_size, ProjectiveRcbAirError, ProjectiveRcbAirInteractionClaim,
+    ProjectiveRcbAirTraceClaim, ProjectiveRcbMulComponentRelations,
+    PROJECTIVE_RCB_SIGNED_CARRY_BOUND, PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
 };
 use crate::public_inputs::{
     public_ecdsa_consumer_claimed_sum, PublicEcdsaInputClaim, PublicEcdsaInstanceRelation,
 };
+use crate::components::hinted_mul::air::{
+    gen_hinted_mul_slice_preprocessed_trace, hinted_mul_signed_table_claim, HintedMulChallenge,
+    HintedMulProofClaim, HintedMulProofInteractionClaim, HintedMulSliceClaimedSums,
+    HintedMulSliceComponents,
+};
+use crate::components::hinted_mul::trace::{
+    gen_hinted_mul_base_trace, gen_hinted_mul_interaction_trace, gen_hinted_mul_schedule_columns,
+    hinted_mul_range13_uses, hinted_mul_signed_uses, HintedMulRelations, HintedMulTraceClaim,
+};
+use crate::components::hinted_mul::witness::HintedMulWitnessError;
 use crate::public_key_check::{PublicKeyOnCurveClaim, PublicKeyOnCurveError};
 use crate::public_key_curve_air::{
     gen_slice_base_trace as gen_public_key_on_curve_base_trace,
@@ -191,6 +199,7 @@ pub struct P256ProofClaim {
     pub fake_glv_ec_trace: FakeGlvPrimitiveEcTraceClaim,
     pub projective_ec_trace: ProjectiveEcTraceClaim,
     pub projective_rcb_air_trace: ProjectiveRcbAirTraceClaim,
+    pub hinted_mul_trace: HintedMulTraceClaim,
     pub final_check: FinalEcdsaCheckClaim,
     /// In-AIR EC addition `S = R_1 + R_2` binding `r_x = x(S)`. Single signature.
     pub final_add: FinalAddClaim,
@@ -232,6 +241,7 @@ impl P256ProofClaim {
         )?;
         let projective_rcb_air_trace =
             ProjectiveRcbAirTraceClaim::from_projective_trace(&projective_ec_trace)?;
+        let hinted_mul_trace = HintedMulTraceClaim::from_projective_rcb(&projective_rcb_air_trace)?;
         let final_check = FinalEcdsaCheckClaim::from_claims(
             &public_inputs,
             &cert_inputs,
@@ -257,6 +267,7 @@ impl P256ProofClaim {
             fake_glv_ec_trace,
             projective_ec_trace,
             projective_rcb_air_trace,
+            hinted_mul_trace,
             final_check,
             final_add,
             prepared_use_counts,
@@ -350,6 +361,7 @@ impl P256ProofClaim {
         )?;
         let projective_rcb_air_trace =
             ProjectiveRcbAirTraceClaim::from_projective_trace(&projective_ec_trace)?;
+        let hinted_mul_trace = HintedMulTraceClaim::from_projective_rcb(&projective_rcb_air_trace)?;
         let prepared_trace = prepared_table.prepared_point_trace(&base.prepared_use_counts)?;
 
         Ok(Self {
@@ -366,6 +378,7 @@ impl P256ProofClaim {
             fake_glv_ec_trace,
             projective_ec_trace,
             projective_rcb_air_trace,
+            hinted_mul_trace,
             final_check: base.final_check,
             final_add: base.final_add,
             prepared_use_counts: base.prepared_use_counts,
@@ -400,6 +413,7 @@ impl P256ProofClaim {
             .verify_against_projective_trace(&self.projective_ec_trace)?;
         self.projective_rcb_air_trace.verify_preprocessed_trace()?;
         self.projective_rcb_air_trace.verify_base_trace()?;
+        self.hinted_mul_trace.verify()?;
         self.final_check.verify()?;
         self.prepared_use_counts.verify()?;
         self.prepared_table
@@ -443,7 +457,7 @@ pub struct P256CurrentAirProofClaim {
     pub prepared_point_range7: RangeCheckClaim,
     pub final_check: FinalCheckAirProofClaim,
     pub public_key_on_curve: PublicKeyCurveSliceProofClaim,
-    pub projective_rcb_air: ProjectiveRcbAirProofClaim,
+    pub hinted_mul: HintedMulProofClaim,
     pub final_add: FinalAddProofClaim,
 }
 
@@ -509,9 +523,7 @@ impl P256CurrentAirProofClaim {
                 &public_key_on_curve_slice_claim(claim)
                     .expect("verified public key lies on curve"),
             ),
-            projective_rcb_air: ProjectiveRcbAirProofClaim::from_trace(
-                &claim.projective_rcb_air_trace,
-            ),
+            hinted_mul: HintedMulProofClaim::from_trace(&claim.hinted_mul_trace),
             final_add: FinalAddProofClaim::from_claim(&claim.final_add),
         }
     }
@@ -542,7 +554,7 @@ impl P256CurrentAirProofClaim {
         self.prepared_point_range7.mix_into(channel);
         self.final_check.mix_into(channel);
         self.public_key_on_curve.mix_into(channel);
-        self.projective_rcb_air.mix_into(channel);
+        self.hinted_mul.mix_into(channel);
         self.final_add.mix_into(channel);
     }
 
@@ -611,7 +623,7 @@ impl P256CurrentAirProofClaim {
             &mut ids,
             self.public_key_on_curve.preprocessed_column_ids(),
         );
-        append_unique_preprocessed_ids(&mut ids, self.projective_rcb_air.preprocessed_column_ids());
+        append_unique_preprocessed_ids(&mut ids, self.hinted_mul.preprocessed_column_ids());
         append_unique_preprocessed_ids(&mut ids, self.final_add.preprocessed_column_ids());
         ids
     }
@@ -692,7 +704,7 @@ pub struct P256CurrentAirInteractionClaim {
     pub final_check: FinalCheckAirInteractionClaim,
     pub ecdsa_result_provider_claimed_sum: SecureField,
     pub public_key_on_curve: PublicKeyCurveSliceInteractionClaim,
-    pub projective_rcb_air: ProjectiveRcbAirProofInteractionClaim,
+    pub hinted_mul: HintedMulProofInteractionClaim,
     pub final_add: FinalAddInteractionClaim,
 }
 
@@ -726,7 +738,7 @@ impl P256CurrentAirInteractionClaim {
             final_check: FinalCheckAirInteractionClaim::zero(),
             ecdsa_result_provider_claimed_sum: zero(),
             public_key_on_curve: PublicKeyCurveSliceInteractionClaim::zero_claim(),
-            projective_rcb_air: ProjectiveRcbAirProofInteractionClaim::zero(),
+            hinted_mul: HintedMulProofInteractionClaim::zero(),
             final_add: FinalAddInteractionClaim::zero(),
         }
     }
@@ -780,7 +792,7 @@ impl P256CurrentAirInteractionClaim {
         self.final_check.mix_into(channel);
         channel.mix_felts(&[self.ecdsa_result_provider_claimed_sum]);
         self.public_key_on_curve.mix_into_monolithic(channel);
-        self.projective_rcb_air.mix_into(channel);
+        self.hinted_mul.mix_into(channel);
         self.final_add.mix_into(channel);
     }
 
@@ -905,7 +917,7 @@ impl P256CurrentAirInteractionClaim {
             // `[source_offset, ..)`), so this 3-way sum nets to zero.
             (
                 "ProjectiveRcbMulResult",
-                self.projective_rcb_air.mul_result_provider_claimed_sum
+                self.hinted_mul.mul_result_provider_claimed_sum
                     + self
                         .fake_glv_projective_source
                         .mul_result_consumer_claimed_sum
@@ -948,15 +960,26 @@ impl P256CurrentAirInteractionClaim {
                 "PublicKeyPoint",
                 self.public_key_on_curve.total() + self.scalar_setup.point_provider_claimed_sum,
             ),
-            // C5 plumbing: `total()` includes the `ProjectiveRcbMulResult`
-            // provider yields (they live in the silo's `mul` column), but those
-            // are balanced separately under `ProjectiveRcbMulResult` against the
-            // two source consumers. Exclude them here so this silo-internal
-            // entry still nets to zero.
+            // Hinted-mul internal balances: each table relation nets the
+            // provider against the check component's uses; the consistency
+            // entry anchors the analytic per-relation breakdown to the
+            // PCS-verified component total.
             (
-                "ProjectiveRcbAirProofSlice",
-                self.projective_rcb_air.total()
-                    - self.projective_rcb_air.mul_result_provider_claimed_sum,
+                "HintedMulRange13",
+                self.hinted_mul.range13_provider_claimed_sum
+                    + self.hinted_mul.range13_consumer_claimed_sum,
+            ),
+            (
+                "HintedMulSignedH",
+                self.hinted_mul.signed_h_provider_claimed_sum
+                    + self.hinted_mul.signed_h_consumer_claimed_sum,
+            ),
+            (
+                "HintedMulTotalConsistency",
+                self.hinted_mul.claimed_sum
+                    - self.hinted_mul.range13_consumer_claimed_sum
+                    - self.hinted_mul.signed_h_consumer_claimed_sum
+                    - self.hinted_mul.mul_result_provider_claimed_sum,
             ),
             (
                 "FinalCheckHint",
@@ -998,7 +1021,7 @@ impl P256CurrentAirInteractionClaim {
             // ladder/prepared-table cannot silently detach from the proven muls.
             (
                 "ProjectiveRcbMulResult",
-                self.projective_rcb_air.mul_result_provider_claimed_sum,
+                self.hinted_mul.mul_result_provider_claimed_sum,
             ),
         ]
     }
@@ -1126,6 +1149,8 @@ struct P256CurrentAirRelations {
     /// `scalar_setup.public_key_point` (the provider).
     public_key_on_curve: PublicKeyCurveSliceRelations,
     projective_rcb_air: ProjectiveRcbMulComponentRelations,
+    hinted_signed_h: RangeCheckRelation,
+    hinted_challenge: HintedMulChallenge,
     /// Final EC-addition sub-graph relations (mul engine + result + output).
     /// `hint` is the same `final_check_hint` relation as above.
     final_add: FinalAddRelations,
@@ -1174,6 +1199,8 @@ impl P256CurrentAirRelations {
             final_check_hint: FinalCheckHintRelation::dummy(),
             public_key_on_curve: PublicKeyCurveSliceRelations::dummy_with_point(public_key_point),
             projective_rcb_air: ProjectiveRcbMulComponentRelations::dummy(),
+            hinted_signed_h: RangeCheckRelation::dummy(),
+            hinted_challenge: HintedMulChallenge::from_z(SecureField::from(M31::from_u32_unchecked(2))),
             final_add: FinalAddRelations {
                 mul: ProjectiveRcbMulComponentRelations::dummy(),
                 result: FinalAddMulResultRelation::dummy(),
@@ -1229,6 +1256,8 @@ impl P256CurrentAirRelations {
                 public_key_point,
             ),
             projective_rcb_air: ProjectiveRcbMulComponentRelations::draw(channel),
+            hinted_signed_h: RangeCheckRelation::draw(channel),
+            hinted_challenge: HintedMulChallenge::draw(channel),
             final_add: FinalAddRelations {
                 mul: ProjectiveRcbMulComponentRelations::draw(channel),
                 result: FinalAddMulResultRelation::draw(channel),
@@ -1259,7 +1288,7 @@ struct P256CurrentAirComponents {
     prepared_point_range7: RangeCheckComponent,
     final_check: FinalCheckAirComponents,
     public_key_on_curve: PublicKeyCurveSliceComponents,
-    projective_rcb_air: ProjectiveRcbAirComponents,
+    hinted_mul: HintedMulSliceComponents,
     final_add: FinalAddComponents,
 }
 
@@ -1428,11 +1457,20 @@ impl P256CurrentAirComponents {
                 &relations.public_key_on_curve,
                 true,
             ),
-            projective_rcb_air: ProjectiveRcbAirComponents::new_with_log_sizes(
+            hinted_mul: HintedMulSliceComponents::new(
                 allocator,
-                claim.projective_rcb_air.log_sizes,
-                &interaction_claim.projective_rcb_air,
-                &relations.projective_rcb_air,
+                claim.hinted_mul.log_size,
+                &HintedMulSliceClaimedSums {
+                    check: interaction_claim.hinted_mul.claimed_sum,
+                    range13: interaction_claim.hinted_mul.range13_provider_claimed_sum,
+                    signed_h: interaction_claim.hinted_mul.signed_h_provider_claimed_sum,
+                },
+                &relations.hinted_challenge,
+                &HintedMulRelations {
+                    range13: relations.projective_rcb_air.range13.clone(),
+                    signed_h: relations.hinted_signed_h.clone(),
+                    mul_result: relations.projective_rcb_air.mul_result.clone(),
+                },
             ),
             final_add: FinalAddComponents::new(
                 allocator,
@@ -1479,7 +1517,7 @@ impl P256CurrentAirComponents {
         components.push(&self.prepared_point_range7 as &dyn Component);
         components.extend(self.final_check.components());
         components.extend(self.public_key_on_curve.components());
-        components.extend(self.projective_rcb_air.components());
+        components.extend(self.hinted_mul.components());
         components.extend(self.final_add.components());
         components
     }
@@ -1531,7 +1569,7 @@ impl P256CurrentAirComponents {
         components.push(&self.prepared_point_range7 as &dyn ComponentProver<SimdBackend>);
         components.extend(self.final_check.component_provers());
         components.extend(self.public_key_on_curve.component_provers());
-        components.extend(self.projective_rcb_air.component_provers());
+        components.extend(self.hinted_mul.component_provers());
         components.extend(self.final_add.component_provers());
         components
     }
@@ -1827,11 +1865,8 @@ impl P256ProofDraft {
             gen_public_key_on_curve_preprocessed_trace(&public_key_slice_claim, &local_ids)?;
         append_unique_preprocessed_columns(&mut ids, &mut columns, local_ids, local_columns);
 
-        let local_ids = claim.projective_rcb_air.preprocessed_column_ids();
-        let local_columns = self
-            .claim
-            .projective_rcb_air_trace
-            .gen_proof_slice_preprocessed_trace(&local_ids)?;
+        let local_ids = claim.hinted_mul.preprocessed_column_ids();
+        let local_columns = gen_hinted_mul_slice_preprocessed_trace(&self.claim.hinted_mul_trace);
         append_unique_preprocessed_columns(&mut ids, &mut columns, local_ids, local_columns);
 
         // Final EC-addition sub-graph preprocessed columns (FINAL_ADD-namespaced
@@ -2014,10 +2049,11 @@ impl P256ProofDraft {
                         (provider.use_count.0 != 0).then_some(provider.use_count)
                     },
                 ));
-        let projective_rcb_air = self
-            .claim
-            .projective_rcb_air_trace
-            .gen_proof_slice_base_trace()?;
+        let hinted_mul_base = gen_hinted_mul_base_trace(&self.claim.hinted_mul_trace);
+        let hinted_range13_multiplicity = RangeCheckClaim::new(RANGE13_BITS)
+            .gen_multiplicity_trace(hinted_mul_range13_uses(&self.claim.hinted_mul_trace));
+        let hinted_signed_h_multiplicity = hinted_mul_signed_table_claim()
+            .gen_multiplicity_trace(hinted_mul_signed_uses(&self.claim.hinted_mul_trace));
         let final_add =
             gen_final_add_base_trace(&self.claim.final_add, claim.final_add.log_sizes())?;
 
@@ -2060,7 +2096,9 @@ impl P256ProofDraft {
         columns.push(prepared_point_range7_multiplicity.clone());
         columns.extend(final_check.clone());
         columns.extend(public_key_on_curve.clone());
-        columns.extend(projective_rcb_air.clone());
+        columns.extend(hinted_mul_base.clone());
+        columns.push(hinted_range13_multiplicity.clone());
+        columns.push(hinted_signed_h_multiplicity.clone());
         columns.extend(final_add);
 
         Ok(P256CurrentAirBaseTrace {
@@ -2093,6 +2131,9 @@ impl P256ProofDraft {
             prepared_point_range7_multiplicity,
             final_check,
             public_key_slice_claim,
+            hinted_mul_base,
+            hinted_range13_multiplicity,
+            hinted_signed_h_multiplicity,
         })
     }
 
@@ -2332,10 +2373,29 @@ impl P256ProofDraft {
                 &relations.public_key_on_curve,
                 true,
             )?;
-        let (projective_interaction, projective_claim) = self
-            .claim
-            .projective_rcb_air_trace
-            .gen_proof_slice_interaction_trace(&relations.projective_rcb_air)?;
+        let hinted_schedule = gen_hinted_mul_schedule_columns(&self.claim.hinted_mul_trace);
+        let (hinted_interaction, hinted_claim) = gen_hinted_mul_interaction_trace(
+            &self.claim.hinted_mul_trace,
+            &base.hinted_mul_base,
+            &hinted_schedule,
+            &HintedMulRelations {
+                range13: relations.projective_rcb_air.range13.clone(),
+                signed_h: relations.hinted_signed_h.clone(),
+                mul_result: relations.projective_rcb_air.mul_result.clone(),
+            },
+        );
+        let (hinted_range13_interaction, hinted_range13_provider) =
+            crate::range_checks::RangeCheckInteractionClaim::gen_interaction_trace(
+                &base.hinted_range13_multiplicity,
+                &RangeCheckClaim::new(RANGE13_BITS).gen_preprocessed_column(),
+                &relations.projective_rcb_air.range13,
+            );
+        let (hinted_signed_h_interaction, hinted_signed_h_provider) =
+            crate::range_checks::RangeCheckInteractionClaim::gen_interaction_trace(
+                &base.hinted_signed_h_multiplicity,
+                &hinted_mul_signed_table_claim().gen_value_column(),
+                &relations.hinted_signed_h,
+            );
         let (final_add_interaction, final_add_claim) = gen_final_add_interaction_trace(
             &self.claim.final_add,
             &relations.final_add,
@@ -2379,7 +2439,9 @@ impl P256ProofDraft {
         columns.extend(prepared_point_range7_interaction);
         columns.extend(final_check_interaction);
         columns.extend(public_key_on_curve_interaction);
-        columns.extend(projective_interaction);
+        columns.extend(hinted_interaction);
+        columns.extend(hinted_range13_interaction);
+        columns.extend(hinted_signed_h_interaction);
         columns.extend(final_add_interaction);
 
         Ok((
@@ -2442,7 +2504,14 @@ impl P256ProofDraft {
                 final_check: final_check_claim,
                 ecdsa_result_provider_claimed_sum,
                 public_key_on_curve: public_key_on_curve_claim,
-                projective_rcb_air: projective_claim,
+                hinted_mul: HintedMulProofInteractionClaim {
+                    claimed_sum: hinted_claim.claimed_sum,
+                    range13_consumer_claimed_sum: hinted_claim.range13_consumer_claimed_sum,
+                    signed_h_consumer_claimed_sum: hinted_claim.signed_h_consumer_claimed_sum,
+                    mul_result_provider_claimed_sum: hinted_claim.mul_result_provider_claimed_sum,
+                    range13_provider_claimed_sum: hinted_range13_provider.claimed_sum,
+                    signed_h_provider_claimed_sum: hinted_signed_h_provider.claimed_sum,
+                },
                 final_add: final_add_claim,
             },
         ))
@@ -2523,6 +2592,9 @@ struct P256CurrentAirBaseTrace {
     prepared_point_range7_multiplicity: M31ColumnEval,
     final_check: ColumnVec<M31ColumnEval>,
     public_key_slice_claim: PublicKeyCurveSliceClaim,
+    hinted_mul_base: ColumnVec<M31ColumnEval>,
+    hinted_range13_multiplicity: M31ColumnEval,
+    hinted_signed_h_multiplicity: M31ColumnEval,
 }
 
 fn scalar_setup_mod_mul_rows(
@@ -2885,6 +2957,7 @@ pub enum P256ProofError {
     PreparedTable(PreparedTableError),
     ProjectiveEc(ProjectiveEcError),
     ProjectiveRcbAir(ProjectiveRcbAirError),
+    HintedMul(HintedMulWitnessError),
     PublicKeyOnCurve(PublicKeyOnCurveError),
     PublicKeyCurveSlice(PublicKeyCurveSliceError),
     ScalarModMulTrace(ScalarModMulTraceError),
@@ -2963,6 +3036,12 @@ impl From<ProjectiveEcError> for P256ProofError {
 impl From<ProjectiveRcbAirError> for P256ProofError {
     fn from(value: ProjectiveRcbAirError) -> Self {
         Self::ProjectiveRcbAir(value)
+    }
+}
+
+impl From<HintedMulWitnessError> for P256ProofError {
+    fn from(value: HintedMulWitnessError) -> Self {
+        Self::HintedMul(value)
     }
 }
 

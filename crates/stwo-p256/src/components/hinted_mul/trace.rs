@@ -38,6 +38,48 @@ impl HintedMulTraceClaim {
     pub fn log_size(&self) -> u32 {
         padded_log_size(self.rows.len()).max(LOG_N_LANES)
     }
+
+    /// Builds the hinted-mul rows from the silo trace claim, keyed by the
+    /// exact `(source_index, mul_index)` pairs the EC-formula consumers use.
+    /// The recomputed canonical result must match the silo's stored result
+    /// limb-exact (the native silo results are canonical, including the
+    /// identity fast-path rows whose result equals the canonical lhs), so the
+    /// consumed-limb tuples are unchanged by the swap.
+    pub fn from_projective_rcb(
+        claim: &crate::projective_air::ProjectiveRcbAirTraceClaim,
+    ) -> Result<Self, super::witness::HintedMulWitnessError> {
+        let mut rows = Vec::new();
+        for row in &claim.rows {
+            for (mul_index, mul) in row.muls.iter().enumerate() {
+                let a: [u32; N_LIMBS] = core::array::from_fn(|i| mul.trace.lhs.limbs()[i].0);
+                let b: [u32; N_LIMBS] = core::array::from_fn(|i| mul.trace.rhs.limbs()[i].0);
+                let witness = HintedMulWitness::new(&a, &b)?;
+                let stored: [u32; N_LIMBS] =
+                    core::array::from_fn(|i| mul.trace.result.limbs()[i].0);
+                if witness.r != stored {
+                    return Err(super::witness::HintedMulWitnessError::ResultMismatch {
+                        source_index: row.source_index,
+                        mul_index,
+                    });
+                }
+                rows.push(HintedMulScheduledRow {
+                    source_index: row.source_index as u32,
+                    mul_index: mul_index as u32,
+                    witness,
+                });
+            }
+        }
+        Ok(Self { rows })
+    }
+
+    /// Native re-verification of every witness (used by the draft's
+    /// `verify_current_components`).
+    pub fn verify(&self) -> Result<(), super::witness::HintedMulWitnessError> {
+        for row in &self.rows {
+            row.witness.verify()?;
+        }
+        Ok(())
+    }
 }
 
 /// Per-identity column group: `q`, then the 20-limb value (`m1`/`m2`/`r`),
