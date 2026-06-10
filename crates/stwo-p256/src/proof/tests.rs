@@ -2200,6 +2200,55 @@ fn current_p256_air_shape_diagnostic() {
         "hinted_mul.signed_h",
         stwo::core::air::Component::trace_log_degree_bounds(&components.hinted_mul.signed_h),
     );
+    let wrapper_bounds = |list: Vec<&dyn stwo::core::air::Component>| {
+        TreeVec::concat_cols(list.into_iter().map(|c| c.trace_log_degree_bounds()))
+    };
+    print_component_shape("scalar_setup", wrapper_bounds(components.scalar_setup.components()));
+    print_component_shape(
+        "cert_scalar_inputs",
+        wrapper_bounds(components.cert_scalar_inputs.components()),
+    );
+    print_component_shape(
+        "fake_glv_scalar_air",
+        wrapper_bounds(components.fake_glv_scalar_air.components()),
+    );
+    print_component_shape(
+        "fake_glv_selector_air",
+        wrapper_bounds(components.fake_glv_selector_air.components()),
+    );
+    fn mod_mul_components(slice: &ScalarModMulComponents) -> Vec<&dyn stwo::core::air::Component> {
+        vec![
+            &slice.canonical,
+            &slice.ab_chunks,
+            &slice.qn_chunks,
+            &slice.accumulators,
+            &slice.reduction_digits,
+            &slice.range13,
+            &slice.signed_carry,
+        ]
+    }
+    for (index, slice) in components.scalar_setup_mod_muls.iter().enumerate() {
+        print_component_shape(
+            &format!("scalar_setup_mod_mul_{index}"),
+            wrapper_bounds(mod_mul_components(slice)),
+        );
+    }
+    for (index, slice) in components.fake_glv_scalar_mod_muls.iter().enumerate() {
+        print_component_shape(
+            &format!("fake_glv_scalar_mod_mul_{index}"),
+            wrapper_bounds(mod_mul_components(slice)),
+        );
+    }
+    print_component_shape(
+        "prepared_point_range7",
+        stwo::core::air::Component::trace_log_degree_bounds(&components.prepared_point_range7),
+    );
+    print_component_shape("final_check", wrapper_bounds(components.final_check.components()));
+    print_component_shape(
+        "public_key_on_curve",
+        wrapper_bounds(components.public_key_on_curve.components()),
+    );
+    print_component_shape("final_add", wrapper_bounds(components.final_add.components()));
     print_component_shape("current_air_total", components.trace_log_degree_bounds());
 }
 
