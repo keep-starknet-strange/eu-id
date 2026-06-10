@@ -2048,6 +2048,25 @@ fn assert_component_named<E: FrameworkEval + Sync>(
 }
 
 #[test]
+#[ignore = "diagnostic: prints the serialized proof-size estimate and its breakdown"]
+fn current_p256_proof_size_diagnostic() {
+    let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+        valid_real_input_with_small_u_scalars(7, 11),
+    ])
+    .expect("pipeline builds")
+    .prove_current_air_monolithic::<Blake2sMerkleChannel>()
+    .expect("proof generates");
+    let stark = &proof.stark_proof;
+    let breakdown = stark.size_breakdown_estimate();
+    eprintln!("PROOF SIZE estimate: {} bytes", stark.size_estimate());
+    eprintln!("  oods_samples:        {}", breakdown.oods_samples);
+    eprintln!("  queries_values:      {}", breakdown.queries_values);
+    eprintln!("  fri_samples:         {}", breakdown.fri_samples);
+    eprintln!("  fri_decommitments:   {}", breakdown.fri_decommitments);
+    eprintln!("  trace_decommitments: {}", breakdown.trace_decommitments);
+}
+
+#[test]
 #[ignore = "prints current AIR row/column shape for performance diagnostics"]
 fn current_p256_air_shape_diagnostic() {
     let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
