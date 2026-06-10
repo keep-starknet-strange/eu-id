@@ -26,6 +26,7 @@ use crate::scalar::fake_glv_selector::{FakeGlvSelectorClaim, FakeGlvSelectorRow}
 use crate::scalar::fake_glv_selector_lookup::Selector16DecodeEntry;
 use crate::scalar::scalar_mod_mul::columns::{m31_column_eval, padded_log_size, M31ColumnEval};
 
+use super::super::ec_source::{double_formula, mixed_add_formula};
 use super::*;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -319,6 +320,8 @@ impl PreparedTableProjectiveSourceProofClaim {
             &PreparedTableProjectiveSourceInteractionClaim::zero(),
             &PreparedTableEcRowRelation::dummy(),
             &crate::projective_air::ProjectiveRcbMulComponentRelations::dummy(),
+            &crate::range_checks::RangeCheckRelation::dummy(),
+            &crate::range_checks::RangeCheckRelation::dummy(),
         );
         allocator.preprocessed_columns().clone()
     }
@@ -331,6 +334,8 @@ impl PreparedTableProjectiveSourceProofClaim {
             &PreparedTableProjectiveSourceInteractionClaim::zero(),
             &PreparedTableEcRowRelation::dummy(),
             &crate::projective_air::ProjectiveRcbMulComponentRelations::dummy(),
+            &crate::range_checks::RangeCheckRelation::dummy(),
+            &crate::range_checks::RangeCheckRelation::dummy(),
         );
         components.trace_log_degree_bounds()
     }
@@ -343,6 +348,8 @@ impl PreparedTableProjectiveSourceProofClaim {
             &PreparedTableProjectiveSourceInteractionClaim::zero(),
             &PreparedTableEcRowRelation::dummy(),
             &crate::projective_air::ProjectiveRcbMulComponentRelations::dummy(),
+            &crate::range_checks::RangeCheckRelation::dummy(),
+            &crate::range_checks::RangeCheckRelation::dummy(),
         );
         components.max_constraint_log_degree_bound()
     }
@@ -353,6 +360,17 @@ pub(crate) fn gen_prepared_table_ec_row_preprocessed_trace(
     log_size: u32,
     ids: &[PreProcessedColumnId],
 ) -> Result<ColumnVec<M31ColumnEval>, PreparedTableError> {
+    // C5-2 preprocessed columns the self-contained Range13 / signed-carry
+    // providers declare (shared by id with the silo's, deduplicated globally).
+    let range13_value_id =
+        crate::range_checks::range_check_value_column_id(crate::range_checks::RANGE13_BITS);
+    let signed_carry_value_id = crate::range_checks::signed_carry_value_column_id(
+        crate::projective_air::PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
+    );
+    let signed_carry_active_id = crate::range_checks::signed_carry_active_column_id(
+        crate::projective_air::PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
+    );
+    let signed_carry_claim = crate::projective_air::projective_rcb_signed_carry_claim();
     ids.iter()
         .map(|id| {
             if id == &prepared_table_ec_row_index_column_id() {
@@ -362,6 +380,15 @@ pub(crate) fn gen_prepared_table_ec_row_preprocessed_trace(
                         .map(|index| M31::from_u32_unchecked(index as u32))
                         .collect(),
                 ))
+            } else if id == &range13_value_id {
+                Ok(
+                    crate::range_checks::RangeCheckClaim::new(crate::range_checks::RANGE13_BITS)
+                        .gen_preprocessed_column(),
+                )
+            } else if id == &signed_carry_value_id {
+                Ok(signed_carry_claim.gen_value_column())
+            } else if id == &signed_carry_active_id {
+                Ok(signed_carry_claim.gen_active_column())
             } else {
                 Err(PreparedTableError::PreprocessedColumnMissing)
             }
@@ -570,6 +597,49 @@ fn prepared_table_projective_source_trace_values(
     for value in mul_limbs {
         values[column] = value;
         column += 1;
+    }
+    debug_assert_eq!(column, PREPARED_TABLE_PROJECTIVE_SOURCE_DOUBLE_FORMULA_OFFSET);
+    // C5-2: the Double-formula working values + reduction witnesses. Emitted
+    // only for Double rows; MixedAdd / padding leave this block zero, matching
+    // the `double_active`-gated constraints + off-Double zero gates.
+    if projective_row.op == crate::projective::ProjectiveEcOp::Double {
+        let witness = double_formula::solve_double_formula_witness(
+            &mul_limbs,
+            &projective_row.output_projective,
+        )
+        .ok_or(PreparedTableError::ProjectiveSourceInvalid)?;
+        for value in double_formula::double_formula_trace_values(&witness) {
+            values[column] = value;
+            column += 1;
+        }
+    } else {
+        column += double_formula::DOUBLE_FORMULA_COLUMNS;
+    }
+    debug_assert_eq!(
+        column,
+        PREPARED_TABLE_PROJECTIVE_SOURCE_MIXED_ADD_FORMULA_OFFSET
+    );
+    // C5-2: the MixedAdd-formula working values + reduction witnesses. Emitted
+    // only for FINITE-operand MixedAdd rows (always the case for prepared-table
+    // ops); the two witnessed gate columns are constrained on EVERY row, so the
+    // no-witness branch still writes them.
+    let is_mixed = projective_row.op == crate::projective::ProjectiveEcOp::MixedAdd;
+    if is_mixed && has_muls {
+        let witness = mixed_add_formula::solve_mixed_add_formula_witness(
+            &mul_limbs,
+            &projective_row.output_projective,
+        )
+        .ok_or(PreparedTableError::ProjectiveSourceInvalid)?;
+        for value in mixed_add_formula::mixed_add_formula_trace_values(&witness) {
+            values[column] = value;
+            column += 1;
+        }
+    } else {
+        let gate_base = column + mixed_add_formula::MIXED_ADD_GATE_OFFSET_IN_BLOCK;
+        let gates = mixed_add_formula::mixed_add_gate_trace_values(is_mixed, false);
+        values[gate_base] = gates[0];
+        values[gate_base + 1] = gates[1];
+        column += mixed_add_formula::MIXED_ADD_FORMULA_COLUMNS;
     }
     debug_assert_eq!(column, PREPARED_TABLE_PROJECTIVE_SOURCE_TRACE_COLUMNS);
     Ok(values)

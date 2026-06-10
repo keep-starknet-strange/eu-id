@@ -25,7 +25,6 @@ pub type QnProductChunkComponent = FrameworkComponent<QnProductChunkEval>;
 pub type ProductDigitAccumulatorComponent = FrameworkComponent<ProductDigitAccumulatorEval>;
 pub type ScalarReductionDigitComponent = FrameworkComponent<ScalarReductionDigitEval>;
 
-const SCALAR_MOD_MUL_ENABLE_AB_TOP_DIGIT_CONSTRAINT: bool = false;
 const SCALAR_MOD_MUL_ENABLE_AB_TERM_PRODUCT_CONSTRAINTS: bool = true;
 const SCALAR_MOD_MUL_ENABLE_AB_DECOMPOSITION_CONSTRAINT: bool = true;
 const SCALAR_MOD_MUL_ENABLE_QN_ARITHMETIC: bool = true;
@@ -593,20 +592,21 @@ fn finish_product_chunk_dynamic<E: EvalAtRow>(
         add_range_check(eval, &relations.range13, active.clone(), digits[0].clone());
         add_range_check(eval, &relations.range13, active.clone(), digits[1].clone());
     }
-    let enable_top_digit_constraint = match side {
-        SIDE_AB => SCALAR_MOD_MUL_ENABLE_AB_TOP_DIGIT_CONSTRAINT,
-        SIDE_QN => SCALAR_MOD_MUL_ENABLE_QN_ARITHMETIC,
-        _ => true,
-    };
     let enable_decomposition_constraint = match side {
         SIDE_AB => SCALAR_MOD_MUL_ENABLE_AB_DECOMPOSITION_CONSTRAINT,
         SIDE_QN => SCALAR_MOD_MUL_ENABLE_QN_ARITHMETIC,
         _ => true,
     };
 
-    if enable_top_digit_constraint {
-        eval.add_constraint(active.clone() * digits[2].clone() * (digits[2].clone() - one::<E>()));
-    }
+    // C2: the chunk top digit is exactly boolean. Each side sums at most
+    // SCALAR_MOD_MUL_SPLIT_CHUNK_TERMS = 2 term products of 13-bit limbs, so
+    // product_sum ≤ 2·(2^13 − 1)² < 2^27 and an honest digits[2] ∈ {0, 1}.
+    // Without this bound a forged digits[2] wraps M31 (2^26·32 = 2^31 ≡ 1) and
+    // re-encodes product_sum as a different integer, so the digit tuples fed to
+    // the accumulator no longer represent a·b. Ungated: digit columns are zero
+    // on padding rows, and the ungated form keeps the constraint at degree 2
+    // inside the component's exact `log_size + 1` bound.
+    eval.add_constraint(digits[2].clone() * (digits[2].clone() - one::<E>()));
 
     let limb_base = E::F::from(M31::from_u32_unchecked(1u32 << LIMB_BITS));
     if enable_decomposition_constraint {
@@ -720,14 +720,18 @@ mod tests {
     use stwo_constraint_framework::expr::ExprEvaluator;
     use stwo_constraint_framework::TraceLocationAllocator;
 
+    use stwo_p256_utils::scalar_arithmetic::ScalarFieldMulTrace;
+
     use crate::range_checks::RangeCheckRelation;
 
     use super::super::columns::padded_log_size;
     use super::super::layout::{
-        AB_PRODUCT_CHUNK_TRACE_COLUMNS, CANONICAL_SCALAR_TRACE_COLUMNS,
+        ScalarModMulFamilyTraces, AB_PRODUCT_CHUNK_TRACE_COLUMNS, CANONICAL_SCALAR_TRACE_COLUMNS,
         PRODUCT_DIGIT_ACCUMULATOR_TRACE_COLUMNS, QN_PRODUCT_CHUNK_TRACE_COLUMNS,
         SCALAR_REDUCTION_DIGIT_TRACE_COLUMNS,
     };
+    use super::super::schedule::{ScalarModMulFixedSchedule, ScalarModMulScheduleColumn};
+    use super::super::ScalarModMulTraceRows;
     use super::*;
 
     fn relations() -> ScalarModMulComponentRelations {
@@ -912,6 +916,180 @@ mod tests {
             .into_iter()
             .max()
             .unwrap_or(0) as u32
+    }
+
+    /// Minimal recording `EvalAtRow` for the product-chunk components: serves
+    /// preprocessed reads by column id from the fixed schedule, serves base
+    /// reads from (possibly forged) base columns, and records each polynomial
+    /// constraint's value instead of asserting it is zero. LogUp emissions are
+    /// skipped (the C2 pin is a pure polynomial constraint), so no `LogupAtRow`
+    /// is constructed and failures are observable as non-zero recorded values
+    /// rather than an uncatchable abort.
+    struct RecordingChunkEvaluator<'a> {
+        schedule: &'a [ScalarModMulScheduleColumn],
+        base: &'a [Vec<M31>],
+        col_index: usize,
+        row: usize,
+        constraints: Vec<SecureField>,
+    }
+
+    impl EvalAtRow for RecordingChunkEvaluator<'_> {
+        type F = M31;
+        type EF = SecureField;
+
+        fn get_preprocessed_column(
+            &mut self,
+            column: stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId,
+        ) -> M31 {
+            let schedule_column = self
+                .schedule
+                .iter()
+                .find(|candidate| candidate.id == column)
+                .expect("requested schedule column must exist");
+            schedule_column.values[self.row]
+        }
+
+        fn next_interaction_mask<const N: usize>(
+            &mut self,
+            interaction: usize,
+            offsets: [isize; N],
+        ) -> [M31; N] {
+            assert_eq!(
+                interaction, 1,
+                "chunk components read only same-row base-trace masks"
+            );
+            let col = self.col_index;
+            self.col_index += 1;
+            offsets.map(|offset| {
+                assert_eq!(offset, 0, "chunk components read only offset-0 masks");
+                self.base[col][self.row]
+            })
+        }
+
+        fn add_constraint<G>(&mut self, constraint: G)
+        where
+            Self::EF: std::ops::Mul<G, Output = Self::EF> + From<G>,
+        {
+            self.constraints.push(Self::EF::from(constraint));
+        }
+
+        fn combine_ef(values: [M31; 4]) -> SecureField {
+            SecureField::from_m31_array(values)
+        }
+
+        fn add_to_relation<R: stwo_constraint_framework::Relation<M31, SecureField>>(
+            &mut self,
+            _entry: RelationEntry<'_, M31, SecureField, R>,
+        ) {
+        }
+
+        fn finalize_logup(&mut self) {}
+
+        fn finalize_logup_in_pairs(&mut self) {}
+    }
+
+    /// Whether every polynomial constraint of [`AbProductChunkEval`] holds on
+    /// all rows of the given base columns (logical row order, matching the
+    /// fixed-schedule column order).
+    fn ab_chunk_constraints_hold(
+        log_size: u32,
+        base: &[Vec<M31>],
+        schedule: &[ScalarModMulScheduleColumn],
+    ) -> bool {
+        for row in 0..(1usize << log_size) {
+            let recorder = RecordingChunkEvaluator {
+                schedule,
+                base,
+                col_index: 0,
+                row,
+                constraints: Vec::new(),
+            };
+            let recorder = AbProductChunkEval {
+                log_size,
+                mul_id: TEST_FORGERY_MUL_ID,
+                relations: relations(),
+            }
+            .evaluate(recorder);
+            if recorder.constraints.iter().any(|value| !value.is_zero()) {
+                return false;
+            }
+        }
+        true
+    }
+
+    const TEST_FORGERY_MUL_ID: u32 = 3;
+
+    /// C2 regression: a forged AB product-chunk top digit must be rejected.
+    ///
+    /// The attack re-encodes `product_sum` as a different integer while keeping
+    /// the decomposition constraint satisfied over M31: adding 32 to
+    /// `digits[2]` adds `2^26 · 32 = 2^31 ≡ 1 (mod M31)` to the encoded value,
+    /// compensated by subtracting 1 from `digits[0]`. Both low digits stay in
+    /// their 13-bit ranges, so before the ungated boolean top-digit constraint
+    /// this forgery satisfied every polynomial constraint of
+    /// [`AbProductChunkEval`] and fed forged digit tuples to the product-digit
+    /// accumulator (forging `a · b` in the `s·u1 ≡ z` / `s·u2 ≡ r` reductions).
+    #[test]
+    fn ab_product_chunk_rejects_forged_top_digit() {
+        let trace = ScalarFieldMulTrace::new(
+            "ab_top_digit_forgery",
+            &[7, 0, 0, 0],
+            &[11, 0, 0, 0],
+            &stwo_p256_utils::scalar_arithmetic::P256_ORDER,
+        )
+        .expect("valid scalar mod-mul trace");
+        let rows =
+            ScalarModMulTraceRows::new(TEST_FORGERY_MUL_ID, &trace).expect("trace rows generate");
+        let honest = ScalarModMulFamilyTraces::from_rows(&rows);
+        let schedule = ScalarModMulFixedSchedule::from_rows(&rows);
+        for column in &schedule.ab_chunks {
+            assert_eq!(
+                column.values.len(),
+                1usize << honest.ab_chunks.log_size,
+                "schedule and base columns must share the AB chunk log size"
+            );
+        }
+
+        assert!(
+            ab_chunk_constraints_hold(
+                honest.ab_chunks.log_size,
+                &honest.ab_chunks.columns,
+                &schedule.ab_chunks,
+            ),
+            "honest AB chunk trace must satisfy the polynomial constraints"
+        );
+
+        // Row 0 is the (coeff 0, chunk 0) chunk: product_sum = 7 · 11 = 77 with
+        // digits [77, 0, 0], so digits[0] has room for the compensating -1.
+        let digit0_col = AB_PRODUCT_CHUNK_TRACE_COLUMNS - SCALAR_MOD_MUL_SPLIT_CHUNK_DIGITS;
+        let digit2_col = AB_PRODUCT_CHUNK_TRACE_COLUMNS - 1;
+        assert_eq!(rows.ab_chunks[0].digits[0], M31::from_u32_unchecked(77));
+        assert_eq!(rows.ab_chunks[0].digits[2], M31::from_u32_unchecked(0));
+
+        let mut forged = honest.ab_chunks.columns.clone();
+        forged[digit0_col][0] = M31::from_u32_unchecked(76);
+        forged[digit2_col][0] = M31::from_u32_unchecked(32);
+
+        // Sanity: the forged digits still satisfy the decomposition constraint
+        // over M31 (2^26 · 32 wraps to 1), proving the aliasing was live before
+        // the boolean top-digit pin.
+        let limb_base = M31::from_u32_unchecked(1 << LIMB_BITS);
+        assert_eq!(
+            forged[digit0_col][0]
+                + limb_base * forged[digit0_col + 1][0]
+                + limb_base * limb_base * forged[digit2_col][0],
+            M31::from_u32_unchecked(77),
+            "forged digits must still balance the decomposition mod M31"
+        );
+
+        assert!(
+            !ab_chunk_constraints_hold(
+                honest.ab_chunks.log_size,
+                &forged,
+                &schedule.ab_chunks,
+            ),
+            "forged top digit must be rejected by the boolean top-digit pin (C2)"
+        );
     }
 
     #[test]

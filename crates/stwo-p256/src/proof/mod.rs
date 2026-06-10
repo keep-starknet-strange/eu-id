@@ -89,6 +89,8 @@ use crate::prepared_table::{
     gen_prepared_table_ec_row_base_trace,
     gen_prepared_table_ec_row_preprocessed_trace, gen_prepared_table_projective_source_base_trace,
     gen_prepared_table_projective_source_consumer_interaction_trace,
+    prepared_table_projective_source_range13_uses_from_base,
+    prepared_table_projective_source_signed_carry_uses_from_base,
     gen_prepared_table_ec_row_pinned_interaction_trace, CertBaseRelation,
     PreparedTableCanonicalRelation, PreparedTableClaim, PreparedTableEcRowPinnedInteractionClaim,
     PreparedTableEcRowRelation, PreparedTableEcTraceClaim, PreparedTableError,
@@ -865,6 +867,17 @@ impl P256CurrentAirInteractionClaim {
                 pinned.prepared_table_provider_claimed_sum
                     + self.prepared_table_projective_source.consumer_claimed_sum,
             ),
+            // C5-2: the prepared-table projective-source consumer's
+            // self-contained Range13 / signed-carry providers. The consumer's
+            // formula uses + the providers' yields net to zero internally.
+            (
+                "PreparedTableProjectiveRange13",
+                self.prepared_table_projective_source.range13_total(),
+            ),
+            (
+                "PreparedTableProjectiveSignedCarry",
+                self.prepared_table_projective_source.signed_carry_total(),
+            ),
             (
                 "CertBase",
                 pinned.cert_base_consumer_claimed_sum
@@ -1086,6 +1099,11 @@ struct P256CurrentAirRelations {
     /// Ties prepared-table `P3/R/R3/±R/±R3/2P/2R` operands to canonical per-cert
     /// values (full table pinning).
     prepared_table_canonical: PreparedTableCanonicalRelation,
+    /// C5-2: the prepared-table projective-source consumer's self-contained
+    /// Range13 / signed-carry relations (formula coord + reduction-carry
+    /// checks). Self-provided + self-consumed within the sub-graph.
+    prepared_table_projective_range13: RangeCheckRelation,
+    prepared_table_projective_signed_carry: RangeCheckRelation,
     fake_glv_projective_source: FakeGlvPrimitiveEcRowRelation,
     /// C5-2: the fake-GLV projective-source consumer's self-contained Range13 /
     /// signed-carry relations (Double-formula coord + reduction-carry checks).
@@ -1141,6 +1159,8 @@ impl P256CurrentAirRelations {
             prepared_table: PreparedTableEcRowRelation::dummy(),
             cert_base: CertBaseRelation::dummy(),
             prepared_table_canonical: PreparedTableCanonicalRelation::dummy(),
+            prepared_table_projective_range13: RangeCheckRelation::dummy(),
+            prepared_table_projective_signed_carry: RangeCheckRelation::dummy(),
             fake_glv_projective_source: FakeGlvPrimitiveEcRowRelation::dummy(),
             fake_glv_projective_range13: RangeCheckRelation::dummy(),
             fake_glv_projective_signed_carry: RangeCheckRelation::dummy(),
@@ -1191,6 +1211,8 @@ impl P256CurrentAirRelations {
             prepared_table: PreparedTableEcRowRelation::draw(channel),
             cert_base: CertBaseRelation::draw(channel),
             prepared_table_canonical: PreparedTableCanonicalRelation::draw(channel),
+            prepared_table_projective_range13: RangeCheckRelation::draw(channel),
+            prepared_table_projective_signed_carry: RangeCheckRelation::draw(channel),
             fake_glv_projective_source: FakeGlvPrimitiveEcRowRelation::draw(channel),
             fake_glv_projective_range13: RangeCheckRelation::draw(channel),
             fake_glv_projective_signed_carry: RangeCheckRelation::draw(channel),
@@ -1313,12 +1335,7 @@ impl P256CurrentAirComponents {
                 interaction_claim
                     .prepared_table_projective_source
                     .provider_claimed_sum,
-                interaction_claim
-                    .prepared_table_projective_source
-                    .consumer_claimed_sum,
-                interaction_claim
-                    .prepared_table_projective_source
-                    .mul_result_consumer_claimed_sum,
+                &interaction_claim.prepared_table_projective_source,
                 &relations.prepared_table,
                 &PreparedTablePinningRelations {
                     cert_base: relations.cert_base.clone(),
@@ -1326,6 +1343,8 @@ impl P256CurrentAirComponents {
                     final_check_hint: Some(relations.final_check_hint.clone()),
                 },
                 &relations.projective_rcb_air,
+                &relations.prepared_table_projective_range13,
+                &relations.prepared_table_projective_signed_carry,
             ),
             fake_glv_projective_source: FakeGlvProjectiveSourceComponents::new(
                 allocator,
@@ -1873,6 +1892,19 @@ impl P256ProofDraft {
             &self.claim.projective_ec_trace,
             claim.prepared_table_projective_source.log_size,
         )?;
+        // C5-2: prepared-table self-contained Range13 / signed-carry provider
+        // multiplicity columns, tallying the consumer's formula uses.
+        let prepared_table_projective_range13_multiplicity =
+            crate::range_checks::RangeCheckClaim::new(crate::range_checks::RANGE13_BITS)
+                .gen_multiplicity_trace(prepared_table_projective_source_range13_uses_from_base(
+                    &prepared_table_consumer,
+                ));
+        let prepared_table_projective_signed_carry_multiplicity =
+            crate::projective_air::projective_rcb_signed_carry_claim().gen_multiplicity_trace(
+                prepared_table_projective_source_signed_carry_uses_from_base(
+                    &prepared_table_consumer,
+                ),
+            );
         let fake_glv_projective_provider = gen_fake_glv_primitive_ec_source_base_trace(
             &self.claim.fake_glv_ec_trace,
             claim.fake_glv_projective_source.source_offset as usize,
@@ -1987,6 +2019,10 @@ impl P256ProofDraft {
         }
         columns.extend(prepared_table_provider.clone());
         columns.extend(prepared_table_consumer.clone());
+        // C5-2: prepared-table provider multiplicity columns, in component
+        // order (range13, then signed_carry) right after the consumer.
+        columns.push(prepared_table_projective_range13_multiplicity.clone());
+        columns.push(prepared_table_projective_signed_carry_multiplicity.clone());
         columns.extend(fake_glv_projective_provider.clone());
         columns.extend(fake_glv_projective_consumer.clone());
         // C5-2: provider multiplicity columns, in component order (range13, then
@@ -2021,6 +2057,8 @@ impl P256ProofDraft {
             fake_glv_scalar_mod_muls,
             prepared_table_provider,
             prepared_table_consumer,
+            prepared_table_projective_range13_multiplicity,
+            prepared_table_projective_signed_carry_multiplicity,
             fake_glv_projective_provider,
             fake_glv_projective_consumer,
             fake_glv_projective_range13_multiplicity,
@@ -2130,12 +2168,34 @@ impl P256ProofDraft {
         // `ProjectiveRcbMulResultRelation` consumes for the silo muls of their
         // op, so they use the dedicated consumer interaction generators that
         // return `(trace, ec_row_sum, mul_result_sum)`.
-        let (prepared_consumer_interaction, prepared_consumer_ec_row_sum, prepared_consumer_mul_result_sum) =
-            gen_prepared_table_projective_source_consumer_interaction_trace(
-                &base.prepared_table_consumer,
-                &relations.prepared_table,
-                &relations.projective_rcb_air.mul_result,
-            );
+        let prepared_consumer = gen_prepared_table_projective_source_consumer_interaction_trace(
+            &base.prepared_table_consumer,
+            &relations.prepared_table,
+            &relations.projective_rcb_air.mul_result,
+            &relations.prepared_table_projective_range13,
+            &relations.prepared_table_projective_signed_carry,
+        );
+        // C5-2: the prepared-table consumer's self-contained Range13 /
+        // signed-carry PROVIDERS. Their multiplicity columns (in the base
+        // trace) tally exactly the consumer's uses.
+        let (
+            prepared_table_projective_range13_interaction,
+            prepared_table_projective_range13_provider_claim,
+        ) = crate::range_checks::RangeCheckInteractionClaim::gen_interaction_trace(
+            &base.prepared_table_projective_range13_multiplicity,
+            &crate::range_checks::RangeCheckClaim::new(crate::range_checks::RANGE13_BITS)
+                .gen_preprocessed_column(),
+            &relations.prepared_table_projective_range13,
+        );
+        let prepared_signed_carry_claim = crate::projective_air::projective_rcb_signed_carry_claim();
+        let (
+            prepared_table_projective_signed_carry_interaction,
+            prepared_table_projective_signed_carry_provider_claim,
+        ) = crate::range_checks::RangeCheckInteractionClaim::gen_interaction_trace(
+            &base.prepared_table_projective_signed_carry_multiplicity,
+            &prepared_signed_carry_claim.gen_value_column(),
+            &relations.prepared_table_projective_signed_carry,
+        );
         let (fake_glv_provider_interaction, fake_glv_provider_claim) =
             gen_fake_glv_primitive_ec_source_interaction_trace(
                 &base.fake_glv_projective_provider,
@@ -2278,7 +2338,11 @@ impl P256ProofDraft {
             columns.extend(interaction);
         }
         columns.extend(prepared_provider_interaction);
-        columns.extend(prepared_consumer_interaction);
+        columns.extend(prepared_consumer.columns.clone());
+        // C5-2: prepared-table provider interaction columns, in component order
+        // (range13, then signed_carry) right after the consumer.
+        columns.extend(prepared_table_projective_range13_interaction);
+        columns.extend(prepared_table_projective_signed_carry_interaction);
         columns.extend(fake_glv_provider_interaction);
         columns.extend(fake_glv_consumer.columns.clone());
         // C5-2: provider interaction columns, in component order (range13, then
@@ -2317,8 +2381,12 @@ impl P256ProofDraft {
                 fake_glv_scalar_mod_muls: fake_glv_scalar_interaction_claims,
                 prepared_table_projective_source: PreparedTableProjectiveSourceInteractionClaim {
                     provider_claimed_sum: prepared_pinned_claim.total_claimed_sum,
-                    consumer_claimed_sum: prepared_consumer_ec_row_sum,
-                    mul_result_consumer_claimed_sum: prepared_consumer_mul_result_sum,
+                    consumer_claimed_sum: prepared_consumer.ec_row_sum,
+                    mul_result_consumer_claimed_sum: prepared_consumer.mul_result_sum,
+                    range13_consumer_claimed_sum: prepared_consumer.range13_use_sum,
+                    signed_carry_consumer_claimed_sum: prepared_consumer.signed_carry_use_sum,
+                    range13: prepared_table_projective_range13_provider_claim,
+                    signed_carry: prepared_table_projective_signed_carry_provider_claim,
                 },
                 prepared_table_pinned: prepared_pinned_claim,
                 fake_glv_projective_source: FakeGlvProjectiveSourceInteractionClaim {
@@ -2416,6 +2484,8 @@ struct P256CurrentAirBaseTrace {
     fake_glv_scalar_mod_muls: Vec<ColumnVec<M31ColumnEval>>,
     prepared_table_provider: ColumnVec<M31ColumnEval>,
     prepared_table_consumer: ColumnVec<M31ColumnEval>,
+    prepared_table_projective_range13_multiplicity: M31ColumnEval,
+    prepared_table_projective_signed_carry_multiplicity: M31ColumnEval,
     fake_glv_projective_provider: ColumnVec<M31ColumnEval>,
     fake_glv_projective_consumer: ColumnVec<M31ColumnEval>,
     fake_glv_projective_range13_multiplicity: M31ColumnEval,
@@ -2713,7 +2783,7 @@ pub const P256_PROOF_COMPONENT_SLOTS: &[P256ProofComponentSlot] = &[
     P256ProofComponentSlot {
         name: "FakeGlvSelector",
         status: P256ProofComponentStatus::Implemented,
-        note: "Selector reconstruction is proven from FakeGlvScalarRelation inside the monolithic STARK with bit decomposition, limb reconstruction, final-selector/init-base, and inactive/padding zeroing; the separate selector lookup providers retain their proof slices.",
+        note: "Selector reconstruction is proven from FakeGlvScalarRelation inside the monolithic STARK for ARBITRARY decompositions: each 4-bit selector splits into boolean-constrained 2-bit s1/s2 chunks (selector = s1c + 4*s2c) and two symmetric 13-bit carry chains bind the reconstructed s1 AND s2_abs to the relation's limbs (s2_lsb/s2_msb/sign witnessed free, not hard-coded), plus final-selector/init-base and inactive/padding zeroing; the separate selector lookup providers retain their proof slices. Real full-width signatures prove via from_inputs_with_arbitrary_fake_glv_hints.",
     },
     P256ProofComponentSlot {
         name: "PreparedPointUseCounts",
@@ -2733,7 +2803,7 @@ pub const P256_PROOF_COMPONENT_SLOTS: &[P256ProofComponentSlot] = &[
     P256ProofComponentSlot {
         name: "PreparedTableEcRows",
         status: P256ProofComponentStatus::Implemented,
-        note: "Prepared-table EC row shape is proven and linked into projective RCB source rows; EC arithmetic is discharged by ProjectiveRcbAirRows.",
+        note: "Prepared-table EC row shape is proven and linked into projective RCB source rows. EC arithmetic is constrained in-AIR (C5-2): the prepared-table projective source binds the Double/MixedAdd coordinate formulas (bind_double_formula/bind_mixed_add_formula) on the consumed silo muls — output = double(lhs) / lhs+rhs incl. projective->affine normalization — with self-contained Range13/signed-carry providers, so the table multiples {P,3P}±{R,3R}, 2P, 2R are forced to correct EC results rather than free witnesses.",
     },
     P256ProofComponentSlot {
         name: "FakeGlvChainTrace",

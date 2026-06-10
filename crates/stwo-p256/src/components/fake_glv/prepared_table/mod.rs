@@ -70,8 +70,12 @@ pub const PREPARED_TABLE_EC_NEG_AUX_COLUMNS: usize =
 pub const PREPARED_TABLE_EC_ROW_TRACE_COLUMNS: usize =
     1 + 3 + PREPARED_TABLE_EC_KIND_FLAGS + 2 + 3 * PREPARED_TABLE_EC_POINT_COLUMNS
         + PREPARED_TABLE_EC_NEG_AUX_COLUMNS;
-pub const PREPARED_TABLE_PROJECTIVE_SOURCE_TRACE_COLUMNS: usize =
-    1 + 5 + 3 * PREPARED_TABLE_EC_POINT_COLUMNS + crate::projective_air::CONSUMED_MUL_LIMBS_COLUMNS;
+pub const PREPARED_TABLE_PROJECTIVE_SOURCE_TRACE_COLUMNS: usize = 1
+    + 5
+    + 3 * PREPARED_TABLE_EC_POINT_COLUMNS
+    + crate::projective_air::CONSUMED_MUL_LIMBS_COLUMNS
+    + super::ec_source::double_formula::DOUBLE_FORMULA_COLUMNS
+    + super::ec_source::mixed_add_formula::MIXED_ADD_FORMULA_COLUMNS;
 /// Column index of the C5 consumed-mul block's `has_muls` flag (appended LAST so
 /// existing relation-value column offsets are unchanged; limbs follow at `+ 1`).
 pub const PREPARED_TABLE_PROJECTIVE_SOURCE_HAS_MULS_COL: usize =
@@ -79,6 +83,17 @@ pub const PREPARED_TABLE_PROJECTIVE_SOURCE_HAS_MULS_COL: usize =
 /// Column index where the C5 consumed-mul LIMB block begins (after `has_muls`).
 pub const PREPARED_TABLE_PROJECTIVE_SOURCE_MUL_LIMB_OFFSET: usize =
     PREPARED_TABLE_PROJECTIVE_SOURCE_HAS_MULS_COL + 1;
+/// Column index where the C5-2 Double-formula block begins (after the
+/// consumed-mul block).
+pub const PREPARED_TABLE_PROJECTIVE_SOURCE_DOUBLE_FORMULA_OFFSET: usize = 1
+    + 5
+    + 3 * PREPARED_TABLE_EC_POINT_COLUMNS
+    + crate::projective_air::CONSUMED_MUL_LIMBS_COLUMNS;
+/// Column index where the C5-2 MixedAdd-formula block begins (right after the
+/// Double-formula block).
+pub const PREPARED_TABLE_PROJECTIVE_SOURCE_MIXED_ADD_FORMULA_OFFSET: usize =
+    PREPARED_TABLE_PROJECTIVE_SOURCE_DOUBLE_FORMULA_OFFSET
+        + super::ec_source::double_formula::DOUBLE_FORMULA_COLUMNS;
 
 const PREPARED_TABLE_EC_ROW_INDEX_COLUMN: &str = "p256_prepared_table_ec_row_index";
 
@@ -88,6 +103,12 @@ pub type PreparedTableProjectiveSourceComponent =
 pub struct PreparedTableProjectiveSourceComponents {
     pub provider: PreparedTableEcRowComponent,
     pub consumer: PreparedTableProjectiveSourceComponent,
+    /// C5-2: self-contained Range13 provider for the prepared-table formula
+    /// coordinate limb range checks (mirrors the fake-GLV projective source).
+    pub range13: crate::range_checks::RangeCheckComponent,
+    /// C5-2: self-contained signed-carry provider for the prepared-table
+    /// formula reduction carries.
+    pub signed_carry: crate::range_checks::SignedCarryRangeComponent,
 }
 
 impl PreparedTableProjectiveSourceComponents {
@@ -97,28 +118,40 @@ impl PreparedTableProjectiveSourceComponents {
         interaction_claim: &PreparedTableProjectiveSourceInteractionClaim,
         relation: &PreparedTableEcRowRelation,
         mul_relations: &crate::projective_air::ProjectiveRcbMulComponentRelations,
+        range13: &crate::range_checks::RangeCheckRelation,
+        signed_carry: &crate::range_checks::RangeCheckRelation,
     ) -> Self {
-        Self::new_inner(allocator, log_size, interaction_claim, relation, mul_relations, None)
+        Self::new_inner(
+            allocator,
+            log_size,
+            interaction_claim,
+            relation,
+            mul_relations,
+            range13,
+            signed_carry,
+            None,
+        )
     }
 
     /// Monolithic constructor: the provider additionally pins the table to
     /// `cert.base` via `CertBaseRelation` and `PreparedTableCanonicalRelation`.
     /// `provider_total_claimed_sum` is the provider's full logup total
     /// (`PreparedTableEcRowPinnedInteractionClaim::total_claimed_sum`).
+    #[allow(clippy::too_many_arguments)]
     pub fn new_pinned(
         allocator: &mut TraceLocationAllocator,
         log_size: u32,
         provider_total_claimed_sum: SecureField,
-        consumer_claimed_sum: SecureField,
-        mul_result_consumer_claimed_sum: SecureField,
+        consumer_interaction: &PreparedTableProjectiveSourceInteractionClaim,
         relation: &PreparedTableEcRowRelation,
         pinning: &PreparedTablePinningRelations,
         mul_relations: &crate::projective_air::ProjectiveRcbMulComponentRelations,
+        range13: &crate::range_checks::RangeCheckRelation,
+        signed_carry: &crate::range_checks::RangeCheckRelation,
     ) -> Self {
         let interaction_claim = PreparedTableProjectiveSourceInteractionClaim {
             provider_claimed_sum: provider_total_claimed_sum,
-            consumer_claimed_sum,
-            mul_result_consumer_claimed_sum,
+            ..consumer_interaction.clone()
         };
         Self::new_inner(
             allocator,
@@ -126,16 +159,21 @@ impl PreparedTableProjectiveSourceComponents {
             &interaction_claim,
             relation,
             mul_relations,
+            range13,
+            signed_carry,
             Some(pinning.clone()),
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn new_inner(
         allocator: &mut TraceLocationAllocator,
         log_size: u32,
         interaction_claim: &PreparedTableProjectiveSourceInteractionClaim,
         relation: &PreparedTableEcRowRelation,
         mul_relations: &crate::projective_air::ProjectiveRcbMulComponentRelations,
+        range13: &crate::range_checks::RangeCheckRelation,
+        signed_carry: &crate::range_checks::RangeCheckRelation,
         pinning: Option<PreparedTablePinningRelations>,
     ) -> Self {
         Self {
@@ -154,9 +192,29 @@ impl PreparedTableProjectiveSourceComponents {
                     log_size,
                     relation: relation.clone(),
                     mul_relations: mul_relations.clone(),
+                    range13: range13.clone(),
+                    signed_carry: signed_carry.clone(),
                 },
-                // EC-row + mul-result consumes share one interaction trace.
+                // EC-row + mul-result + range13 + signed-carry consumes share
+                // one interaction trace.
                 interaction_claim.consumer_component_claimed_sum(),
+            ),
+            range13: crate::range_checks::RangeCheckComponent::new(
+                allocator,
+                crate::range_checks::RangeCheckEval::new(
+                    range13.clone(),
+                    crate::range_checks::RANGE13_BITS,
+                ),
+                interaction_claim.range13.claimed_sum,
+            ),
+            signed_carry: crate::range_checks::SignedCarryRangeComponent::new(
+                allocator,
+                crate::range_checks::SignedCarryRangeEval::new(
+                    signed_carry.clone(),
+                    crate::projective_air::projective_rcb_signed_carry_log_size(),
+                    crate::projective_air::PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
+                ),
+                interaction_claim.signed_carry.claimed_sum,
             ),
         }
     }
@@ -165,6 +223,8 @@ impl PreparedTableProjectiveSourceComponents {
         vec![
             &self.provider as &dyn Component,
             &self.consumer as &dyn Component,
+            &self.range13 as &dyn Component,
+            &self.signed_carry as &dyn Component,
         ]
     }
 
@@ -172,6 +232,8 @@ impl PreparedTableProjectiveSourceComponents {
         vec![
             &self.provider as &dyn ComponentProver<SimdBackend>,
             &self.consumer as &dyn ComponentProver<SimdBackend>,
+            &self.range13 as &dyn ComponentProver<SimdBackend>,
+            &self.signed_carry as &dyn ComponentProver<SimdBackend>,
         ]
     }
 

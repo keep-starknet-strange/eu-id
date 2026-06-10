@@ -359,16 +359,9 @@ fn current_p256_proof_pipeline_accepts_real_valid_signature_input() {
         .expect("projective RCB internal relations balance");
 }
 
-/// RED TEST (Task 1, Step 2): expected to fail until `Task 5` adds the
-/// `from_inputs_with_arbitrary_fake_glv_hints` builder backed by the
-/// Garaga-style decomposer (Task 2) and the general AIR (Tasks 3–4).
-///
-/// Today this fails with either:
-///   - a missing-method compile error on `from_inputs_with_arbitrary_fake_glv_hints`,
-///     or once the method exists,
-///   - `FakeGlvScalarHintError::ScalarDoesNotFitTrivialHint`, because
-///     `scalar_near_order(123)` is full-width and the trivial hint
-///     forces `s1 = scalar < 2^128`.
+/// Arbitrary full-width scalars build a claim via
+/// `from_inputs_with_arbitrary_fake_glv_hints` (Garaga-style decomposer +
+/// the general selector AIR). Formerly the RED test for that pipeline.
 #[test]
 fn arbitrary_full_width_u_scalars_build_a_current_air_claim() {
     let input = valid_real_input_with_u_scalars(scalar_near_order(123), scalar_near_order(456));
@@ -381,18 +374,18 @@ fn arbitrary_full_width_u_scalars_build_a_current_air_claim() {
         .expect("arbitrary full-width valid signature should build a proof draft");
 }
 
-/// Task 7 end-to-end: prove + verify a real `p256`-crate signature.
-/// Marked `#[ignore]` while the `fake_glv_selector` AIR still hard-codes
-/// `s2_abs = 1` and `s2_sign_bit = 1` (see
-/// `constrain_selector_from_trivial_scalar`: the constraints forcing
-/// `scalar[S2_START] = cert_active`, `s2_lsb = 1`, `s2_msb = 0`,
-/// `sign = cert_active` reject every non-trivial decomposition).
-/// Promoting the selector AIR to a general arbitrary-`s2_abs` /
-/// arbitrary-sign reconstruction is a follow-up ("Task 3 for the
-/// selector AIR"); once that lands the fixture should verify
-/// end-to-end via the production arbitrary-fake-GLV path.
+/// End-to-end: prove + verify a real `p256`-crate signature through the
+/// monolithic current AIR via the production arbitrary-fake-GLV path.
+///
+/// This is the headline soundness milestone: the `fake_glv_selector` AIR now
+/// reconstructs an ARBITRARY decomposition (`constrain_selector_from_scalar`
+/// binds both the `s1` and `s2_abs` 13-bit carry chains to the scalar relation),
+/// so a genuine non-trivial `(s1, s2_abs, s2_sign_bit)` no longer trips the
+/// selector constraints. The heavy release run is gated behind `--ignored` only
+/// for wall-clock (a full STARK prove/verify), not because it is expected to
+/// fail.
 #[test]
-#[ignore = "fake_glv_selector AIR still has trivial-only s2/sign constraints"]
+#[cfg_attr(debug_assertions, ignore = "release-only: full STARK prove/verify is slow in debug")]
 fn current_p256_monolithic_proves_real_p256_crate_signature() {
     let input = p256_crate_signed_input();
     assert!(ecdsa_verify(&input), "native verifier must accept the fixture");
@@ -928,9 +921,9 @@ fn current_p256_air_constraint_diagnostic() {
 }
 
 #[test]
-#[ignore = "diagnostic: pinpoints the trivial-only selector AIR constraint #243 \
-    that rejects arbitrary s2_abs / sign (see \
-    `current_p256_monolithic_proves_real_p256_crate_signature` note)"]
+#[ignore = "diagnostic: row-by-row constraint dump for a real p256-crate \
+    signature (the general selector AIR now accepts arbitrary s2_abs / sign; \
+    this passes — kept as a slow manual diagnostic)"]
 fn current_p256_air_constraint_diagnostic_real_p256() {
     let proof = P256ProofDraft::from_inputs_with_arbitrary_fake_glv_hints(vec![
         p256_crate_signed_input(),
@@ -1276,23 +1269,55 @@ fn monolithic_relation_audit_is_balanced_and_fully_linked() {
     );
     // The audit covers the full relation surface, including the four
     // verifier-facing ECDSA bindings.
-    let names = audit.relation_names();
-    assert_eq!(names.len(), 31, "relation audit must cover every relation");
-    for required in [
-        "EcdsaResult",
-        "PublicKeyPoint",
-        "FinalCheckHint",
-        "FinalAddOutput",
+    // The audit covers the full relation surface, in `relation_balances()`
+    // order. EXHAUSTIVE on purpose: adding a relation to the proof without
+    // registering it in the audit (or removing/renaming one) must fail here
+    // with the exact name, not a bare count mismatch.
+    let expected = [
+        "PublicEcdsaInstance",
+        "ScalarSetupOutput",
+        "CertScalarInput",
+        "FakeGlvScalar",
+        "ScalarSetupRange13",
+        "ScalarSetupRange9",
+        "ScalarSetupSignedCarry",
+        "ScalarSetupModMul",
+        "FakeGlvScalarModMul",
+        "PreparedTablePinnedConsistency",
+        "PreparedTablePinnedBreakdown",
+        "PreparedTableProjectiveSource",
+        // C5-2: the prepared-table projective-source formula self-contained
+        // Range13 / signed-carry providers (the table-build EC arithmetic).
+        "PreparedTableProjectiveRange13",
+        "PreparedTableProjectiveSignedCarry",
         "CertBase",
-        // C5 plumbing: the RCB silo → projective-source mul-result link.
-        "ProjectiveRcbMulResult",
-        // C5-2: the fake-GLV projective-source Double-formula self-contained
-        // Range13 / signed-carry providers.
+        "PreparedTableCanonical",
+        "FakeGlvProjectiveSource",
+        // C5-2: the fake-GLV projective-source Double/MixedAdd-formula
+        // self-contained Range13 / signed-carry providers.
         "FakeGlvProjectiveRange13",
         "FakeGlvProjectiveSignedCarry",
-    ] {
-        assert!(names.contains(&required), "audit missing relation: {required}");
-    }
+        // C5 plumbing: the RCB silo → projective-source mul-result link.
+        "ProjectiveRcbMulResult",
+        "FakeGlvChainExpansion",
+        "FakeGlvChainContinuity",
+        "FakeGlvDirectPreparedOperand",
+        "FakeGlvSignedSelectorOperand",
+        "FakeGlvLsbCorrectionOperand",
+        "FakeGlvPreparedPointSource",
+        "Range7",
+        "EcdsaResult",
+        "PublicKeyPoint",
+        "ProjectiveRcbAirProofSlice",
+        "FinalCheckHint",
+        "FinalAddInternal",
+        "FinalAddOutput",
+    ];
+    assert_eq!(
+        audit.relation_names(),
+        expected,
+        "relation audit must cover exactly the proof's relation surface"
+    );
 }
 
 /// Build a valid single-signature draft for the in-AIR adversarial tests.
@@ -2379,8 +2404,11 @@ fn current_p256_proof_pipeline_reports_pending_full_proof_slots() {
     assert!(!pending.contains(&"FakeGlvEcChainRows"));
 }
 
+/// Close-out gate: every full-proof component slot is now AIR-proven (no slot is
+/// `Pending`). Enabled once the real-signature e2e
+/// (`current_p256_monolithic_proves_real_p256_crate_signature`) proves green via
+/// the production arbitrary-fake-GLV path.
 #[test]
-#[ignore = "close-out gate: enable when all native-only full-proof slots are AIR-proven"]
 fn full_p256_signature_proof_has_no_pending_component_slots() {
     let pending = P256_PROOF_COMPONENT_SLOTS
         .iter()

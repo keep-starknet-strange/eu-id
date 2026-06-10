@@ -434,3 +434,145 @@ fn pinning_rejects_inconsistent_r_between_base_rows() {
         "inconsistent R must imbalance PreparedTableCanonical"
     );
 }
+
+/// Minimal recording `EvalAtRow` for `PreparedTableProjectiveSourceEval`: the
+/// consumer reads only same-row base-trace masks (no preprocessed columns), so
+/// this serves base columns by read order and records each polynomial
+/// constraint instead of asserting. LogUp emissions are skipped — the C5-2
+/// coordinate-formula pins are pure polynomial constraints, so a forge that
+/// keeps every relation balanced (e.g. forging provider AND consumer in
+/// lockstep) is still caught here. Mirrors
+/// `projective_rcb_mul::tests::RecordingMulEvaluator` (lessons.md #18: no
+/// `LogupAtRow`, so a violated constraint is a recorded non-zero, not an
+/// uncatchable abort).
+struct RecordingSourceEvaluator<'a> {
+    base: &'a [Vec<M31>],
+    col_index: usize,
+    row: usize,
+    constraints: Vec<stwo::core::fields::qm31::SecureField>,
+}
+
+impl stwo_constraint_framework::EvalAtRow for RecordingSourceEvaluator<'_> {
+    type F = M31;
+    type EF = stwo::core::fields::qm31::SecureField;
+
+    fn next_interaction_mask<const N: usize>(
+        &mut self,
+        interaction: usize,
+        offsets: [isize; N],
+    ) -> [Self::F; N] {
+        assert_eq!(
+            interaction, 1,
+            "projective-source consumer reads only the base trace"
+        );
+        let col = self.col_index;
+        self.col_index += 1;
+        offsets.map(|offset| {
+            assert_eq!(offset, 0, "projective-source consumer reads offset-0 masks");
+            self.base[col][self.row]
+        })
+    }
+
+    fn add_constraint<G>(&mut self, constraint: G)
+    where
+        Self::EF: std::ops::Mul<G, Output = Self::EF> + From<G>,
+    {
+        self.constraints.push(Self::EF::from(constraint));
+    }
+
+    fn combine_ef(values: [Self::F; 4]) -> Self::EF {
+        Self::EF::from_m31_array(values)
+    }
+
+    fn add_to_relation<R: stwo_constraint_framework::Relation<Self::F, Self::EF>>(
+        &mut self,
+        _entry: stwo_constraint_framework::RelationEntry<'_, Self::F, Self::EF, R>,
+    ) {
+    }
+
+    fn finalize_logup(&mut self) {}
+
+    fn finalize_logup_in_pairs(&mut self) {}
+}
+
+/// Whether every polynomial constraint of `PreparedTableProjectiveSourceEval`
+/// holds on all rows of the given base columns.
+fn projective_source_constraints_hold(log_size: u32, base: &[Vec<M31>]) -> bool {
+    use num_traits::Zero;
+    for row in 0..(1usize << log_size) {
+        let recorder = RecordingSourceEvaluator {
+            base,
+            col_index: 0,
+            row,
+            constraints: Vec::new(),
+        };
+        let recorder = PreparedTableProjectiveSourceEval {
+            log_size,
+            relation: PreparedTableEcRowRelation::dummy(),
+            mul_relations: crate::projective_air::ProjectiveRcbMulComponentRelations::dummy(),
+            range13: crate::range_checks::RangeCheckRelation::dummy(),
+            signed_carry: crate::range_checks::RangeCheckRelation::dummy(),
+        }
+        .evaluate(recorder);
+        if recorder.constraints.iter().any(|value| !value.is_zero()) {
+            return false;
+        }
+    }
+    true
+}
+
+/// C5-2 binding isolation for the prepared table: forging a committed
+/// `output_affine.x` limb on a Double / MixedAdd source row must violate the
+/// coordinate-formula POLYNOMIAL constraints themselves — independent of any
+/// LogUp relation, so a prover who forges the provider and consumer in lockstep
+/// (keeping `PreparedTableProjectiveSource` balanced) is still rejected. Before
+/// this change the source had "no coordinate constraints yet" and both forges
+/// satisfied every polynomial constraint of the consumer.
+#[test]
+fn prepared_table_projective_source_rejects_forged_op_outputs() {
+    use crate::scalar::scalar_mod_mul::columns::padded_log_size;
+
+    let (certs, fake_glv, selectors, table) = build_table(42);
+    let trace = PreparedTableEcTraceClaim::from_claims(&certs, &fake_glv, &selectors, &table)
+        .expect("valid ec trace");
+    let fake_glv_ec = crate::fake_glv_chain::FakeGlvPrimitiveEcTraceClaim { rows: Vec::new() };
+    let projective = crate::projective::ProjectiveEcTraceClaim::from_native_traces(
+        &trace,
+        &fake_glv_ec,
+    )
+    .expect("projective trace generates");
+    let log_size = padded_log_size(trace.rows.len());
+    let base: Vec<Vec<M31>> =
+        gen_prepared_table_projective_source_base_trace(&trace, &projective, log_size)
+            .expect("source base trace generates")
+            .into_iter()
+            .map(|column| column.to_cpu().values)
+            .collect();
+
+    assert!(
+        projective_source_constraints_hold(log_size, &base),
+        "honest prepared-table source trace must satisfy the polynomial constraints"
+    );
+
+    let op_col = 4usize;
+    let output_x0_col = 6 + 2 * PREPARED_TABLE_EC_POINT_COLUMNS;
+    let rows = 1usize << log_size;
+    for (op_code, op_name) in [
+        (PREPARED_TABLE_EC_OP_DOUBLE, "Double"),
+        (PREPARED_TABLE_EC_OP_MIXED_ADD, "MixedAdd"),
+    ] {
+        let forge_row = (0..rows)
+            .find(|&row| {
+                base[0][row] != M31::from_u32_unchecked(0)
+                    && base[op_col][row] == M31::from_u32_unchecked(op_code)
+            })
+            .unwrap_or_else(|| panic!("table must contain an active {op_name} row"));
+        let mut forged = base.clone();
+        forged[output_x0_col][forge_row] =
+            forged[output_x0_col][forge_row] + M31::from_u32_unchecked(1);
+        assert!(
+            !projective_source_constraints_hold(log_size, &forged),
+            "forged {op_name} output.x must violate the coordinate-formula binding (C5-2)"
+        );
+    }
+}

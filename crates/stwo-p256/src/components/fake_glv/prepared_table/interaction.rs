@@ -14,6 +14,7 @@ use stwo_p256_utils::constants::N_LIMBS;
 
 use crate::constants::{P256_3GX, P256_3GY};
 use crate::limbs::P256M31BigInt;
+use crate::range_checks::{RangeCheckInteractionClaim, RangeCheckRelation};
 use crate::projective_air::{
     ProjectiveRcbMulResultRelation, PROJECTIVE_RCB_MUL_ROLE_LHS, PROJECTIVE_RCB_MUL_ROLE_RESULT,
     PROJECTIVE_RCB_MUL_ROLE_RHS, PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS,
@@ -22,6 +23,8 @@ use crate::types::U256;
 
 use crate::scalar::scalar_mod_mul::columns::M31ColumnEval;
 
+use super::super::ec_source::double_formula::DOUBLE_TOTAL_REDUCTIONS;
+use super::super::ec_source::mixed_add_formula::MIXED_ADD_TOTAL_REDUCTIONS;
 use super::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,7 +40,7 @@ impl PreparedTableEcRowInteractionClaim {
 }
 
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct PreparedTableProjectiveSourceInteractionClaim {
     pub provider_claimed_sum: SecureField,
     /// `PreparedTableEcRowRelation` consumer sum.
@@ -47,6 +50,18 @@ pub struct PreparedTableProjectiveSourceInteractionClaim {
     /// the consumer's interaction trace, balanced separately under
     /// `ProjectiveRcbMulResult`.
     pub mul_result_consumer_claimed_sum: SecureField,
+    /// C5-2: Range13 USE sum on the consumer component (formula coordinate +
+    /// working-value limb checks). Shares the consumer's single
+    /// `finalize_logup`; netted against `range13` (the provider) in the
+    /// `PreparedTableProjectiveRange13` balance.
+    pub range13_consumer_claimed_sum: SecureField,
+    /// C5-2: signed-carry USE sum on the consumer component (formula reduction
+    /// carries). Netted against `signed_carry` (the provider).
+    pub signed_carry_consumer_claimed_sum: SecureField,
+    /// C5-2: the self-contained Range13 PROVIDER (yield) sum.
+    pub range13: RangeCheckInteractionClaim,
+    /// C5-2: the self-contained signed-carry PROVIDER (yield) sum.
+    pub signed_carry: RangeCheckInteractionClaim,
 }
 
 
@@ -56,19 +71,45 @@ impl PreparedTableProjectiveSourceInteractionClaim {
             provider_claimed_sum: secure_zero(),
             consumer_claimed_sum: secure_zero(),
             mul_result_consumer_claimed_sum: secure_zero(),
+            range13_consumer_claimed_sum: secure_zero(),
+            signed_carry_consumer_claimed_sum: secure_zero(),
+            range13: RangeCheckInteractionClaim {
+                claimed_sum: secure_zero(),
+            },
+            signed_carry: RangeCheckInteractionClaim {
+                claimed_sum: secure_zero(),
+            },
         }
     }
 
     /// `PreparedTableProjectiveSource` balance term: provider + EC-row consume.
-    /// EXCLUDES the mul-result consume (balanced under `ProjectiveRcbMulResult`).
-    pub fn total(self) -> SecureField {
+    /// EXCLUDES the mul-result consume (balanced under `ProjectiveRcbMulResult`)
+    /// and the range13/signed-carry consume+provide (balanced under their own
+    /// `PreparedTableProjective{Range13,SignedCarry}` relations).
+    pub fn total(&self) -> SecureField {
         self.provider_claimed_sum + self.consumer_claimed_sum
     }
 
+    /// `PreparedTableProjectiveRange13` balance: consumer Range13 uses + the
+    /// provider yield. Internal to this sub-graph, nets to zero.
+    pub fn range13_total(&self) -> SecureField {
+        self.range13_consumer_claimed_sum + self.range13.claimed_sum
+    }
+
+    /// `PreparedTableProjectiveSignedCarry` balance: consumer signed-carry uses
+    /// + the provider yield. Internal to this sub-graph, nets to zero.
+    pub fn signed_carry_total(&self) -> SecureField {
+        self.signed_carry_consumer_claimed_sum + self.signed_carry.claimed_sum
+    }
+
     /// The single claimed sum the consumer FrameworkComponent declares (EC-row
-    /// + mul-result consumes share one interaction trace / `finalize_logup`).
-    pub fn consumer_component_claimed_sum(self) -> SecureField {
-        self.consumer_claimed_sum + self.mul_result_consumer_claimed_sum
+    /// + mul-result + range13 + signed-carry consumes share one interaction
+    /// trace / `finalize_logup`).
+    pub fn consumer_component_claimed_sum(&self) -> SecureField {
+        self.consumer_claimed_sum
+            + self.mul_result_consumer_claimed_sum
+            + self.range13_consumer_claimed_sum
+            + self.signed_carry_consumer_claimed_sum
     }
 
     pub fn mix_into(&self, channel: &mut impl Channel) {
@@ -76,6 +117,10 @@ impl PreparedTableProjectiveSourceInteractionClaim {
             self.provider_claimed_sum,
             self.consumer_claimed_sum,
             self.mul_result_consumer_claimed_sum,
+            self.range13_consumer_claimed_sum,
+            self.signed_carry_consumer_claimed_sum,
+            self.range13.claimed_sum,
+            self.signed_carry.claimed_sum,
         ]);
     }
 }
@@ -535,7 +580,9 @@ pub(crate) fn gen_prepared_table_projective_source_consumer_interaction_trace(
     base: &[M31ColumnEval],
     ec_row_relation: &PreparedTableEcRowRelation,
     mul_result_relation: &ProjectiveRcbMulResultRelation,
-) -> (ColumnVec<M31ColumnEval>, SecureField, SecureField) {
+    range13_relation: &RangeCheckRelation,
+    signed_carry_relation: &RangeCheckRelation,
+) -> PreparedTableProjectiveSourceConsumerInteraction {
     assert_eq!(base.len(), PREPARED_TABLE_PROJECTIVE_SOURCE_TRACE_COLUMNS);
     let log_size = base[0].domain.log_size();
     let mut logup = LogupTraceGenerator::new(log_size);
@@ -578,11 +625,235 @@ pub(crate) fn gen_prepared_table_projective_source_consumer_interaction_trace(
             }
         }
     }
+    // The C5-2 USE columns are emitted in the EXACT order the consumer AIR's
+    // single (unbatched) `finalize_logup` accumulates them — one interaction
+    // column per `add_to_relation` fraction, in call order:
+    //   Double range13, Double signed-carry, MixedAdd range13, MixedAdd
+    //   signed-carry.
+    let emit_range13_uses = |logup: &mut LogupTraceGenerator, cols: Vec<usize>| {
+        for base_col in cols {
+            let mut col = logup.new_col();
+            for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+                let active = PackedQM31::from(base[0].data[vec_row]);
+                let limb = base[base_col].data[vec_row];
+                col.write_frac(vec_row, active, range13_relation.combine(&[limb]));
+            }
+            col.finalize_col();
+        }
+    };
+    let emit_signed_carry_uses = |logup: &mut LogupTraceGenerator, cols: Vec<usize>| {
+        for carry_col in cols {
+            let mut col = logup.new_col();
+            for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+                let active = PackedQM31::from(base[0].data[vec_row]);
+                let carry = base[carry_col].data[vec_row];
+                col.write_frac(vec_row, active, signed_carry_relation.combine(&[carry]));
+            }
+            col.finalize_col();
+        }
+    };
+    // C5-2 (Double): range13 then signed-carry.
+    emit_range13_uses(&mut logup, prepared_double_formula_range13_use_columns());
+    emit_signed_carry_uses(&mut logup, prepared_double_formula_signed_carry_use_columns());
+    // C5-2 (MixedAdd): range13 then signed-carry.
+    emit_range13_uses(&mut logup, prepared_mixed_add_formula_range13_use_columns());
+    emit_signed_carry_uses(
+        &mut logup,
+        prepared_mixed_add_formula_signed_carry_use_columns(),
+    );
     let (columns, _total) = logup.finalize_last();
 
     let (ec_row_sum, mul_result_sum) =
         prepared_table_projective_source_consumer_sums(base, ec_row_relation, mul_result_relation);
-    (columns, ec_row_sum, mul_result_sum)
+    // Analytic use sums over the SAME multiset of USE columns the interaction
+    // trace emits (Double + MixedAdd for each relation); they net the provider
+    // yields in the proof's `relation_balances()`.
+    let mut range13_use_cols = prepared_double_formula_range13_use_columns();
+    range13_use_cols.extend(prepared_mixed_add_formula_range13_use_columns());
+    let range13_use_sum =
+        prepared_table_sum_use_fractions(base, range13_relation, range13_use_cols);
+    let mut signed_carry_use_cols = prepared_double_formula_signed_carry_use_columns();
+    signed_carry_use_cols.extend(prepared_mixed_add_formula_signed_carry_use_columns());
+    let signed_carry_use_sum =
+        prepared_table_sum_use_fractions(base, signed_carry_relation, signed_carry_use_cols);
+    PreparedTableProjectiveSourceConsumerInteraction {
+        columns,
+        ec_row_sum,
+        mul_result_sum,
+        range13_use_sum,
+        signed_carry_use_sum,
+    }
+}
+
+/// Output of the prepared-table projective-source consumer interaction-trace
+/// generator: the interaction columns and the per-relation analytic use sums.
+pub(crate) struct PreparedTableProjectiveSourceConsumerInteraction {
+    pub columns: ColumnVec<M31ColumnEval>,
+    pub ec_row_sum: SecureField,
+    pub mul_result_sum: SecureField,
+    pub range13_use_sum: SecureField,
+    pub signed_carry_use_sum: SecureField,
+}
+
+/// Base-trace column indices the Range13 USES read, in `bind_double_formula`
+/// emission order: lhs.x, lhs.y, output.x, output.y limbs, then x3, y3, z3.
+/// (The prepared-table source has 6 metadata columns — `table_index` follows
+/// `op` — so points start at column 6, one later than the fake-GLV source.)
+fn prepared_double_formula_range13_use_columns() -> Vec<usize> {
+    let lhs_x = 6; // after [active, source_index, sig_id, cert_id, op, table_index]
+    let lhs_y = lhs_x + N_LIMBS;
+    let output_x = 6 + 2 * PREPARED_TABLE_EC_POINT_COLUMNS;
+    let output_y = output_x + N_LIMBS;
+    let x3 = PREPARED_TABLE_PROJECTIVE_SOURCE_DOUBLE_FORMULA_OFFSET;
+    let mut cols = Vec::with_capacity(7 * N_LIMBS);
+    for start in [
+        lhs_x,
+        lhs_y,
+        output_x,
+        output_y,
+        x3,
+        x3 + N_LIMBS,
+        x3 + 2 * N_LIMBS,
+    ] {
+        for limb in 0..N_LIMBS {
+            cols.push(start + limb);
+        }
+    }
+    cols
+}
+
+/// Base-trace column indices the signed-carry USES read, in consumer-AIR
+/// emission order (reduction slot outer, carry limb inner). The Double-formula
+/// block layout is `x3,y3,z3` (3·N_LIMBS) then per reduction `(q, carries)`.
+fn prepared_double_formula_signed_carry_use_columns() -> Vec<usize> {
+    let block = PREPARED_TABLE_PROJECTIVE_SOURCE_DOUBLE_FORMULA_OFFSET;
+    let reductions_start = block + 3 * N_LIMBS;
+    let mut cols = Vec::with_capacity(DOUBLE_TOTAL_REDUCTIONS * N_LIMBS);
+    for slot in 0..DOUBLE_TOTAL_REDUCTIONS {
+        let q_col = reductions_start + slot * (1 + N_LIMBS);
+        for limb in 0..N_LIMBS {
+            cols.push(q_col + 1 + limb); // skip the quotient column
+        }
+    }
+    cols
+}
+
+/// Base-trace column indices the Range13 USES read for the MixedAdd formula, in
+/// `bind_mixed_add_formula` emission order: lhs.x, lhs.y, rhs.x, rhs.y,
+/// output.x, output.y limbs, then x3, y3, z3 working-value limbs.
+fn prepared_mixed_add_formula_range13_use_columns() -> Vec<usize> {
+    let lhs_x = 6; // after [active, source_index, sig_id, cert_id, op, table_index]
+    let lhs_y = lhs_x + N_LIMBS;
+    let rhs_x = 6 + PREPARED_TABLE_EC_POINT_COLUMNS;
+    let rhs_y = rhs_x + N_LIMBS;
+    let output_x = 6 + 2 * PREPARED_TABLE_EC_POINT_COLUMNS;
+    let output_y = output_x + N_LIMBS;
+    let x3 = PREPARED_TABLE_PROJECTIVE_SOURCE_MIXED_ADD_FORMULA_OFFSET;
+    let mut cols = Vec::with_capacity(9 * N_LIMBS);
+    for start in [
+        lhs_x,
+        lhs_y,
+        rhs_x,
+        rhs_y,
+        output_x,
+        output_y,
+        x3,
+        x3 + N_LIMBS,
+        x3 + 2 * N_LIMBS,
+    ] {
+        for limb in 0..N_LIMBS {
+            cols.push(start + limb);
+        }
+    }
+    cols
+}
+
+/// Base-trace column indices the signed-carry USES read for the MixedAdd
+/// formula, in consumer-AIR emission order (reduction slot outer, carry limb
+/// inner).
+fn prepared_mixed_add_formula_signed_carry_use_columns() -> Vec<usize> {
+    let block = PREPARED_TABLE_PROJECTIVE_SOURCE_MIXED_ADD_FORMULA_OFFSET;
+    let reductions_start = block + 3 * N_LIMBS;
+    let mut cols = Vec::with_capacity(MIXED_ADD_TOTAL_REDUCTIONS * N_LIMBS);
+    for slot in 0..MIXED_ADD_TOTAL_REDUCTIONS {
+        let q_col = reductions_start + slot * (1 + N_LIMBS);
+        for limb in 0..N_LIMBS {
+            cols.push(q_col + 1 + limb); // skip the quotient column
+        }
+    }
+    cols
+}
+
+/// Range13 USE values the consumer base trace contributes (per active row),
+/// Double-formula limbs then MixedAdd-formula limbs (every row checks BOTH
+/// blocks under `active`; the inactive block's limbs are zeroed off-op, so they
+/// range-check as `0`). Fed into the self-contained Range13 provider's
+/// multiplicity.
+pub(crate) fn prepared_table_projective_source_range13_uses_from_base(
+    base: &[M31ColumnEval],
+) -> Vec<M31> {
+    let mut columns = prepared_double_formula_range13_use_columns();
+    columns.extend(prepared_mixed_add_formula_range13_use_columns());
+    prepared_table_collect_active_use_values(base, &columns)
+}
+
+/// signed-carry USE values (decoded `i64`) the consumer base trace contributes
+/// (per active row). Fed into the self-contained signed-carry provider's
+/// multiplicity.
+pub(crate) fn prepared_table_projective_source_signed_carry_uses_from_base(
+    base: &[M31ColumnEval],
+) -> Vec<i64> {
+    let mut columns = prepared_double_formula_signed_carry_use_columns();
+    columns.extend(prepared_mixed_add_formula_signed_carry_use_columns());
+    prepared_table_collect_active_use_values(base, &columns)
+        .into_iter()
+        .map(crate::range_checks::decode_signed_carry)
+        .collect()
+}
+
+fn prepared_table_collect_active_use_values(
+    base: &[M31ColumnEval],
+    columns: &[usize],
+) -> Vec<M31> {
+    let log_size = base[0].domain.log_size();
+    let mut uses = Vec::new();
+    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+        for lane in 0..(1 << LOG_N_LANES) {
+            let active = base[0].data[vec_row].to_array()[lane];
+            if active == M31::from_u32_unchecked(0) {
+                continue;
+            }
+            for &column in columns {
+                uses.push(base[column].data[vec_row].to_array()[lane]);
+            }
+        }
+    }
+    uses
+}
+
+/// Analytic USE-fraction sum (`+active / combine([value])`) over the given base
+/// columns' active rows.
+fn prepared_table_sum_use_fractions(
+    base: &[M31ColumnEval],
+    relation: &RangeCheckRelation,
+    columns: Vec<usize>,
+) -> SecureField {
+    let log_size = base[0].domain.log_size();
+    let mut sum = secure_zero();
+    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+        for lane in 0..(1 << LOG_N_LANES) {
+            let active = base[0].data[vec_row].to_array()[lane];
+            if active == M31::from_u32_unchecked(0) {
+                continue;
+            }
+            for &column in &columns {
+                let value = base[column].data[vec_row].to_array()[lane];
+                let denom: SecureField = relation.combine(&[value]);
+                sum += SecureField::from(active) / denom;
+            }
+        }
+    }
+    sum
 }
 
 

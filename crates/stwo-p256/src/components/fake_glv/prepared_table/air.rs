@@ -12,8 +12,11 @@ use crate::constants::{P256_3GX, P256_3GY, P256_MODULUS};
 use crate::limbs::P256M31BigInt;
 use crate::prepared_point::{PREPARED_BASE_COUNT, TABLE16_INDEX};
 use crate::projective_air::{ConsumedMulLimbs, ProjectiveRcbMulComponentRelations};
+use crate::range_checks::RangeCheckRelation;
 use crate::types::U256;
 
+use super::super::ec_source::double_formula::{bind_double_formula, DoubleFormulaColumns};
+use super::super::ec_source::mixed_add_formula::{bind_mixed_add_formula, MixedAddFormulaColumns};
 use super::*;
 
 #[derive(Clone)]
@@ -369,6 +372,12 @@ pub struct PreparedTableProjectiveSourceEval {
     /// C5 plumbing: relations bundle carrying `mul_result`, consumed for the
     /// prepared-table EC ops (the `[0, source_offset)` slice of the silo).
     pub mul_relations: ProjectiveRcbMulComponentRelations,
+    /// C5-2: consumer-local Range13 relation for the formula coordinate /
+    /// working-value limb checks (self-provided within the sub-graph).
+    pub range13: RangeCheckRelation,
+    /// C5-2: consumer-local signed-carry relation for the formula reduction
+    /// carries (self-provided within the sub-graph).
+    pub signed_carry: RangeCheckRelation,
 }
 
 
@@ -391,12 +400,18 @@ impl FrameworkEval for PreparedTableProjectiveSourceEval {
         let lhs = PreparedTableEcEvalPoint::read(&mut eval);
         let rhs = PreparedTableEcEvalPoint::read(&mut eval);
         let output = PreparedTableEcEvalPoint::read(&mut eval);
-        // C5 plumbing: consumed silo mul limbs (read LAST, matching the
-        // base-trace layout). No coordinate constraints yet (Task C5-2).
+        // C5 plumbing: consumed silo mul limbs (read after the points, matching
+        // the base-trace layout).
         let consumed_muls = ConsumedMulLimbs::<E>::read(&mut eval);
+        // C5-2: the Double-formula working values + reduction witnesses, then
+        // the MixedAdd block, read LAST (matching the base-trace layout
+        // appended after the consumed-mul block).
+        let double_columns = DoubleFormulaColumns::<E>::read(&mut eval);
+        let mixed_columns = MixedAddFormulaColumns::<E>::read(&mut eval);
         let one = E::F::from(M31::from_u32_unchecked(1));
 
         eval.add_constraint(active.clone() * (active.clone() - one.clone()));
+        eval.add_constraint(op.clone() * (op.clone() - one.clone()));
         lhs.add_constraints(&mut eval, &active, &one);
         rhs.add_constraints(&mut eval, &active, &one);
         output.add_constraints(&mut eval, &active, &one);
@@ -420,7 +435,13 @@ impl FrameworkEval for PreparedTableProjectiveSourceEval {
         consumed_muls.constrain_has_muls(&mut eval, &active, &expected_has_muls);
 
         let relation_values = prepared_table_ec_row_relation_values(
-            &[source_index.clone(), sig_id, cert_id, op, table_index],
+            &[
+                source_index.clone(),
+                sig_id,
+                cert_id,
+                op.clone(),
+                table_index,
+            ],
             &lhs,
             &rhs,
             &output,
@@ -433,6 +454,108 @@ impl FrameworkEval for PreparedTableProjectiveSourceEval {
         // CONSUME (use, `+has_muls`) the silo's proven mul limbs for this
         // prepared-table op, keyed identically to the silo's provided yields.
         consumed_muls.consume(&mut eval, &self.mul_relations.mul_result, &source_index);
+
+        // C5-2: constrain the Double-op coordinate formula. `double_active`
+        // (= active·op) is 1 only on active Double rows (op==1 == DOUBLE);
+        // MixedAdd (op==0) and padding (active==0) are unaffected.
+        let double_active = active.clone() * op.clone();
+        let muls_view = consumed_muls.view();
+        bind_double_formula(
+            &mut eval,
+            &double_active,
+            &active,
+            &lhs.x_bigint(),
+            &lhs.y_bigint(),
+            &output.x_bigint(),
+            &output.y_bigint(),
+            &output.inf(),
+            &muls_view,
+            &double_columns,
+            &self.range13,
+        );
+        // Range-check (use) the Double reduction carries against the
+        // consumer-local signed-carry table (gated `active`, fixed count), and
+        // force the Double-formula working values + reduction witnesses to zero
+        // on non-Double / padding rows.
+        for reduction in &double_columns.reductions {
+            for carry in &reduction.carries {
+                crate::range_checks::add_range_check(
+                    &mut eval,
+                    &self.signed_carry,
+                    active.clone(),
+                    carry.clone(),
+                );
+            }
+        }
+        let not_double = one.clone() - double_active.clone();
+        for value in double_columns
+            .x3
+            .limbs()
+            .iter()
+            .chain(double_columns.y3.limbs())
+            .chain(double_columns.z3.limbs())
+        {
+            eval.add_constraint(not_double.clone() * value.clone());
+        }
+        for reduction in &double_columns.reductions {
+            eval.add_constraint(not_double.clone() * reduction.q.clone());
+            for carry in &reduction.carries {
+                eval.add_constraint(not_double.clone() * carry.clone());
+            }
+        }
+
+        // C5-2: constrain the MixedAdd-op coordinate formula. `mixed_active`
+        // (= active·(1−op)) is 1 only on active MixedAdd rows; the formula is
+        // additionally gated by `has_muls` inside the binder (an
+        // infinity-operand MixedAdd is a 0-mul no-op constrained `output =
+        // lhs`).
+        let mixed_active = active.clone() * (one.clone() - op.clone());
+        bind_mixed_add_formula(
+            &mut eval,
+            &mixed_active,
+            &active,
+            &rhs.inf(),
+            &lhs.x_bigint(),
+            &lhs.y_bigint(),
+            &rhs.x_bigint(),
+            &rhs.y_bigint(),
+            &lhs.inf(),
+            &output.x_bigint(),
+            &output.y_bigint(),
+            &output.inf(),
+            &muls_view,
+            &mixed_columns,
+            &self.range13,
+        );
+        // Range-check (use) the MixedAdd reduction carries (gated `active`,
+        // fixed count), and force the MixedAdd working values + reduction
+        // witnesses to zero on non-MixedAdd / padding rows.
+        for reduction in &mixed_columns.reductions {
+            for carry in &reduction.carries {
+                crate::range_checks::add_range_check(
+                    &mut eval,
+                    &self.signed_carry,
+                    active.clone(),
+                    carry.clone(),
+                );
+            }
+        }
+        let not_mixed = one.clone() - mixed_active.clone();
+        for value in mixed_columns
+            .x3
+            .limbs()
+            .iter()
+            .chain(mixed_columns.y3.limbs())
+            .chain(mixed_columns.z3.limbs())
+        {
+            eval.add_constraint(not_mixed.clone() * value.clone());
+        }
+        for reduction in &mixed_columns.reductions {
+            eval.add_constraint(not_mixed.clone() * reduction.q.clone());
+            for carry in &reduction.carries {
+                eval.add_constraint(not_mixed.clone() * carry.clone());
+            }
+        }
         eval.finalize_logup();
         eval
     }
