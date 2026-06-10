@@ -19,8 +19,10 @@ use stwo_constraint_framework::{
     relation, EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation,
     RelationEntry, TraceLocationAllocator,
 };
-use stwo_p256_utils::constants::N_LIMBS;
+use stwo_p256_utils::constants::{LIMB_BITS, N_LIMBS};
+use stwo_p256_utils::scalar_arithmetic::words_to_limbs;
 
+use crate::constants::P256_MODULUS;
 use crate::limbs::{P256BigInt, P256M31BigInt};
 use crate::scalar::scalar_mod_mul::columns::{m31_column_eval, padded_log_size, M31ColumnEval};
 use crate::types::EcdsaVerifyInput;
@@ -205,6 +207,43 @@ impl PublicEcdsaInstance<M31> {
             pub_y: P256M31BigInt::from_u256(&input.public_key.y),
         }
     }
+
+    /// Verifier-side canonicality gate for the public-key coordinates:
+    /// returns the first field (`"pub_x"`/`"pub_y"`) that is not a canonical
+    /// P-256 field element, i.e. whose limbs are not all 13-bit or whose
+    /// composed integer is `>= p`.
+    ///
+    /// The limb-range precondition is load-bearing: the `< p` comparison is
+    /// limbwise lexicographic (most-significant first), which equals integer
+    /// comparison only when every limb is below the `2^13` base. ECDSA public
+    /// keys are defined over canonical field elements; the AIR's curve check
+    /// works mod p and would otherwise accept a non-canonical representative
+    /// (`x + p`) of a valid point.
+    pub fn non_canonical_public_key_field(&self) -> Option<&'static str> {
+        if !is_canonical_field_element(&self.pub_x) {
+            Some("pub_x")
+        } else if !is_canonical_field_element(&self.pub_y) {
+            Some("pub_y")
+        } else {
+            None
+        }
+    }
+}
+
+fn is_canonical_field_element(value: &P256BigInt<M31>) -> bool {
+    let limb_bound = 1u32 << LIMB_BITS;
+    if value.limbs().iter().any(|limb| limb.0 >= limb_bound) {
+        return false;
+    }
+    let modulus = words_to_limbs(&P256_MODULUS);
+    for (limb, modulus_limb) in value.limbs().iter().zip(modulus.iter()).rev() {
+        match limb.0.cmp(modulus_limb) {
+            core::cmp::Ordering::Less => return true,
+            core::cmp::Ordering::Greater => return false,
+            core::cmp::Ordering::Equal => {}
+        }
+    }
+    false
 }
 
 pub fn public_ecdsa_provider_claimed_sum(

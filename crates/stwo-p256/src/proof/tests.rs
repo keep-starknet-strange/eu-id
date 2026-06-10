@@ -23,7 +23,7 @@ use crate::scalar::scalar_mod_mul::schedule::ScalarModMulFixedSchedule;
 use crate::scalar::scalar_mod_mul::{
     SCALAR_MOD_MUL_SPLIT_CHUNK_DIGITS, SCALAR_MOD_MUL_SPLIT_CHUNK_TERMS,
 };
-use crate::types::{AffinePoint, Signature, U256};
+use crate::types::{field_modulus, AffinePoint, Signature, U256};
 use core::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::ops::Deref;
@@ -460,6 +460,65 @@ fn current_p256_monolithic_verifier_rejects_mutated_public_r() {
         .expect_err("mutated verifier public r must reject");
 
     assert!(matches!(err, P256ProofError::ProofLayer(_)));
+}
+
+/// The verifier must reject non-canonical public-key coordinates before any
+/// proof work: the AIR's curve check works mod p, so a non-canonical
+/// representative (`x + p`, or limbs above the 13-bit base) of a valid point
+/// would otherwise pass. One honest prove, three mutation probes on clones.
+#[test]
+fn current_p256_monolithic_verifier_rejects_non_canonical_public_key() {
+    let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+        valid_real_input_with_small_u_scalars(7, 11),
+    ])
+    .expect("current pipeline builds");
+    let monolithic = proof
+        .prove_current_air_monolithic::<Blake2sMerkleChannel>()
+        .expect("current AIR monolithic proof proves");
+
+    // pub_x := p (>= p, the non-canonical representative of 0).
+    let mut forged = monolithic.clone();
+    forged.claim.public_inputs.instances[0].pub_x = P256M31BigInt::from_u256(&field_modulus());
+    let err = verify_current_air_monolithic::<Blake2sMerkleChannel>(forged)
+        .expect_err("pub_x = p must reject");
+    assert_eq!(
+        err,
+        P256ProofError::NonCanonicalPublicKey {
+            index: 0,
+            field: "pub_x",
+        }
+    );
+
+    // pub_y := p + 41 (a non-canonical representative of 41; p + 41 < 2^256).
+    let mut forged = monolithic.clone();
+    forged.claim.public_inputs.instances[0].pub_y = P256M31BigInt::from_u256(&add_u256(
+        &field_modulus(),
+        &U256::from_le_u64s(&[41, 0, 0, 0]),
+    ));
+    let err = verify_current_air_monolithic::<Blake2sMerkleChannel>(forged)
+        .expect_err("pub_y = p + 41 must reject");
+    assert_eq!(
+        err,
+        P256ProofError::NonCanonicalPublicKey {
+            index: 0,
+            field: "pub_y",
+        }
+    );
+
+    // A limb above the 13-bit base breaks the positional representation the
+    // lexicographic `< p` comparison relies on; it must be rejected outright.
+    let mut forged = monolithic;
+    forged.claim.public_inputs.instances[0].pub_x.limbs_mut()[0] =
+        M31::from_u32_unchecked(1 << 13);
+    let err = verify_current_air_monolithic::<Blake2sMerkleChannel>(forged)
+        .expect_err("out-of-range pub_x limb must reject");
+    assert_eq!(
+        err,
+        P256ProofError::NonCanonicalPublicKey {
+            index: 0,
+            field: "pub_x",
+        }
+    );
 }
 
 #[test]

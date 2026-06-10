@@ -2686,6 +2686,16 @@ where
         interaction_claim,
         stark_proof,
     } = proof;
+    // Public-key canonicality gate. The AIR range-checks the limbs and binds
+    // them to the curve equation, but the curve check works mod p, so a
+    // non-canonical representative (`x + p`) of a valid point would otherwise
+    // verify. ECDSA public keys are defined over canonical field elements;
+    // reject non-canonical coordinates before any proof work.
+    for (index, instance) in claim.public_inputs.instances.iter().enumerate() {
+        if let Some(field) = instance.non_canonical_public_key_field() {
+            return Err(P256ProofError::NonCanonicalPublicKey { index, field });
+        }
+    }
     interaction_claim.verify_balanced()?;
 
     let ids = claim.preprocessed_column_ids();
@@ -2879,6 +2889,7 @@ pub enum P256ProofError {
     PublicKeyCurveSlice(PublicKeyCurveSliceError),
     ScalarModMulTrace(ScalarModMulTraceError),
     InvalidNativeEcdsaInput { index: usize },
+    NonCanonicalPublicKey { index: usize, field: &'static str },
     RelationImbalance { relation: &'static str },
     ProofLayer(String),
 }
