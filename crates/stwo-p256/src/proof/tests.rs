@@ -10,7 +10,8 @@ use crate::prepared_table::{PreparedAffinePoint, PreparedTableCert};
 use crate::projective_air::{
     PROJECTIVE_RCB_FOLDED_CONTRIBUTION_ROWS, PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERMS,
     PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TRACE_COLUMNS, PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS,
-    PROJECTIVE_RCB_FOLDED_DIGIT_TRACE_COLUMNS, PROJECTIVE_RCB_MUL_TRACE_COLUMNS,
+    PROJECTIVE_RCB_FOLDED_DIGIT_TRACE_COLUMNS, PROJECTIVE_RCB_MUL_SILO_TRACE_COLUMNS,
+    PROJECTIVE_RCB_MUL_TRACE_COLUMNS,
     PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS, PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS,
     PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TRACE_COLUMNS,
 };
@@ -218,14 +219,14 @@ fn current_p256_proof_pipeline_links_all_implemented_components() {
             .claim
             .projective_rcb_air_trace
             .folded_digit_row_count(),
-        proof.claim.projective_rcb_air_trace.mul_row_count() * FP_SOLINAS_REDUCTION_DIGITS
+        proof.claim.projective_rcb_air_trace.non_identity_mul_row_count() * FP_SOLINAS_REDUCTION_DIGITS
     );
     assert_eq!(
         proof
             .claim
             .projective_rcb_air_trace
             .folded_contribution_row_count(),
-        proof.claim.projective_rcb_air_trace.mul_row_count()
+        proof.claim.projective_rcb_air_trace.non_identity_mul_row_count()
             * PROJECTIVE_RCB_FOLDED_CONTRIBUTION_ROWS
     );
     assert_eq!(
@@ -233,7 +234,7 @@ fn current_p256_proof_pipeline_links_all_implemented_components() {
             .claim
             .projective_rcb_air_trace
             .raw_product_chunk_count(),
-        proof.claim.projective_rcb_air_trace.mul_row_count()
+        proof.claim.projective_rcb_air_trace.non_identity_mul_row_count()
             * PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS
     );
     let projective_rcb_preprocessed_ids = proof
@@ -262,7 +263,8 @@ fn current_p256_proof_pipeline_links_all_implemented_components() {
         .expect("projective RCB base trace generates");
     assert_eq!(
         projective_rcb_base.len(),
-        PROJECTIVE_RCB_MUL_TRACE_COLUMNS
+        // The silo mul family carries the two extra identity columns.
+        PROJECTIVE_RCB_MUL_SILO_TRACE_COLUMNS
             + PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TRACE_COLUMNS
             + PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TRACE_COLUMNS
             + PROJECTIVE_RCB_FOLDED_DIGIT_TRACE_COLUMNS
@@ -326,14 +328,14 @@ fn current_p256_proof_pipeline_accepts_real_valid_signature_input() {
             .claim
             .projective_rcb_air_trace
             .folded_digit_row_count(),
-        proof.claim.projective_rcb_air_trace.mul_row_count() * FP_SOLINAS_REDUCTION_DIGITS
+        proof.claim.projective_rcb_air_trace.non_identity_mul_row_count() * FP_SOLINAS_REDUCTION_DIGITS
     );
     assert_eq!(
         proof
             .claim
             .projective_rcb_air_trace
             .folded_contribution_row_count(),
-        proof.claim.projective_rcb_air_trace.mul_row_count()
+        proof.claim.projective_rcb_air_trace.non_identity_mul_row_count()
             * PROJECTIVE_RCB_FOLDED_CONTRIBUTION_ROWS
     );
     assert_eq!(
@@ -341,7 +343,7 @@ fn current_p256_proof_pipeline_accepts_real_valid_signature_input() {
             .claim
             .projective_rcb_air_trace
             .raw_product_chunk_count(),
-        proof.claim.projective_rcb_air_trace.mul_row_count()
+        proof.claim.projective_rcb_air_trace.non_identity_mul_row_count()
             * PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS
     );
     assert_eq!(

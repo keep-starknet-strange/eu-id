@@ -57,6 +57,9 @@ impl FrameworkEval for FinalAddMulEval {
             &mut eval,
             self.mul_relations.as_refs(),
             active.clone(),
+            // No identity fast-path here (final-add operands are not affine-z=1):
+            // reduce_gate == gate, so every mul keeps its full reduction.
+            active.clone(),
             source_index.clone(),
             mul_index.clone(),
             &columns,

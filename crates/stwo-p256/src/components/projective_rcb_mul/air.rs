@@ -100,6 +100,11 @@ pub const PROJECTIVE_RCB_MUL_TRACE_COLUMNS: usize = PROJECTIVE_RCB_MUL_ACTIVE_TR
     + PROJECTIVE_RCB_MUL_LIMB_TRACE_COLUMNS
     + PROJECTIVE_RCB_MUL_REDUCTION_TRACE_COLUMNS;
 
+/// Silo mul-family width: the shared mul columns plus the two identity
+/// fast-path columns (`is_identity`, `reduce_active`) read only by
+/// `ProjectiveRcbMulEval` (NOT by final_add/public_key_curve).
+pub const PROJECTIVE_RCB_MUL_SILO_TRACE_COLUMNS: usize = PROJECTIVE_RCB_MUL_TRACE_COLUMNS + 2;
+
 #[derive(Clone)]
 pub struct ProjectiveRcbMulEval {
     pub log_size: u32,
@@ -120,12 +125,39 @@ impl FrameworkEval for ProjectiveRcbMulEval {
         let source_index = eval.next_trace_mask();
         let mul_index = eval.next_trace_mask();
         let columns = ProjectiveRcbMulColumns::read(&mut eval);
+        // Identity fast-path columns are silo-only (read AFTER the shared mul
+        // columns so `final_add`/`public_key_curve`, which reuse
+        // `ProjectiveRcbMulColumns` but have no identity path, are unaffected).
+        let is_identity = eval.next_trace_mask();
+        let reduce_active = eval.next_trace_mask();
 
         eval.add_constraint(active.clone() * (one::<E>() - active.clone()));
+        // Identity fast-path bookkeeping (all degree ≤ 2):
+        //  - is_identity ∈ {0,1};
+        //  - is_identity = 0 on padding rows (so the degree-2 L2/L3 below need no
+        //    extra `active` factor);
+        //  - reduce_active = active · (1 − is_identity) is the degree-1 gate for
+        //    every reduction emission (keeps them degree 2).
+        eval.add_constraint(is_identity.clone() * (one::<E>() - is_identity.clone()));
+        eval.add_constraint((one::<E>() - active.clone()) * is_identity.clone());
+        eval.add_constraint(
+            reduce_active.clone() - active.clone() * (one::<E>() - is_identity.clone()),
+        );
+        // L2: on an identity mul, rhs = 1 (bigint one). Combined with the
+        // formula's `bind_equal(rhs, …)`, this makes marking a real mul identity
+        // unsatisfiable. L3: result = lhs (= lhs·1). Both degree 2.
+        for (limb_index, rhs_limb) in columns.rhs.limbs().iter().enumerate() {
+            let expected = if limb_index == 0 { one::<E>() } else { zero::<E>() };
+            eval.add_constraint(is_identity.clone() * (rhs_limb.clone() - expected));
+        }
+        for (result_limb, lhs_limb) in columns.result.limbs().iter().zip(columns.lhs.limbs()) {
+            eval.add_constraint(is_identity.clone() * (result_limb.clone() - lhs_limb.clone()));
+        }
         add_projective_rcb_mul_row(
             &mut eval,
             self.relations.as_refs(),
             active.clone(),
+            reduce_active.clone(),
             source_index.clone(),
             mul_index.clone(),
             &columns,
@@ -449,14 +481,23 @@ pub fn add_projective_rcb_mul_row<E: EvalAtRow>(
     eval: &mut E,
     relations: ProjectiveRcbMulRelations<'_>,
     gate: E::F,
+    reduce_gate: E::F,
     source_index: E::F,
     mul_index: E::F,
     columns: &ProjectiveRcbMulColumns<E>,
 ) {
+    // `gate` (= active) keeps the limb range checks on every mul, including
+    // identity ones (cheap; preserves the domain bound the formula combos rely
+    // on). `reduce_gate` (= active·(1−is_identity)) gates the raw-product feed
+    // and the whole reduction sub-graph, so identity muls emit none of it.
+    //
+    // NOTE: `final_add`/`public_key_curve` reuse this with `reduce_gate == gate`
+    // (no identity fast-path — their operands are not affine-`z=1`).
     add_mul_limb_group(
         eval,
         relations,
         gate.clone(),
+        reduce_gate.clone(),
         source_index.clone(),
         mul_index.clone(),
         PROJECTIVE_RCB_MUL_ROLE_LHS,
@@ -467,6 +508,7 @@ pub fn add_projective_rcb_mul_row<E: EvalAtRow>(
         eval,
         relations,
         gate.clone(),
+        reduce_gate.clone(),
         source_index.clone(),
         mul_index.clone(),
         PROJECTIVE_RCB_MUL_ROLE_RHS,
@@ -477,6 +519,7 @@ pub fn add_projective_rcb_mul_row<E: EvalAtRow>(
         eval,
         relations,
         gate.clone(),
+        reduce_gate.clone(),
         source_index.clone(),
         mul_index.clone(),
         PROJECTIVE_RCB_MUL_ROLE_RESULT,
@@ -488,7 +531,7 @@ pub fn add_projective_rcb_mul_row<E: EvalAtRow>(
         signed_carry: relations.signed_carry,
     };
     for row in &columns.reduction {
-        add_fp_solinas_reduction_digit(eval, reduction_relations, gate.clone(), row);
+        add_fp_solinas_reduction_digit(eval, reduction_relations, reduce_gate.clone(), row);
     }
     // C1: pin every (otherwise free) correction_product_digit to the convolution
     // of the range-checked 13-bit correction digits with the constant modulus
@@ -499,14 +542,14 @@ pub fn add_projective_rcb_mul_row<E: EvalAtRow>(
     add_fp_solinas_correction_digit_binding(
         eval,
         relations.range13,
-        gate.clone(),
+        reduce_gate.clone(),
         &columns.correction,
         &product_digits,
     );
     for (digit_index, row) in columns.reduction.iter().enumerate() {
         eval.add_to_relation(RelationEntry::new(
             relations.folded_digit,
-            E::EF::from(gate.clone()),
+            E::EF::from(reduce_gate.clone()),
             &[
                 source_index.clone(),
                 mul_index.clone(),
@@ -517,7 +560,7 @@ pub fn add_projective_rcb_mul_row<E: EvalAtRow>(
     }
     eval.add_to_relation(RelationEntry::new(
         relations.folded_carry,
-        -E::EF::from(gate.clone()),
+        -E::EF::from(reduce_gate.clone()),
         &[
             source_index.clone(),
             mul_index.clone(),
@@ -527,7 +570,7 @@ pub fn add_projective_rcb_mul_row<E: EvalAtRow>(
     ));
     eval.add_to_relation(RelationEntry::new(
         relations.folded_carry,
-        E::EF::from(gate.clone()),
+        E::EF::from(reduce_gate.clone()),
         &[
             source_index.clone(),
             mul_index.clone(),
@@ -536,21 +579,21 @@ pub fn add_projective_rcb_mul_row<E: EvalAtRow>(
         ],
     ));
 
-    eval.add_constraint(gate.clone() * columns.reduction[0].prev_carry.clone());
+    eval.add_constraint(reduce_gate.clone() * columns.reduction[0].prev_carry.clone());
     for digit_index in 1..FP_SOLINAS_REDUCTION_DIGITS {
         eval.add_constraint(
-            gate.clone()
+            reduce_gate.clone()
                 * (columns.reduction[digit_index].prev_carry.clone()
                     - columns.reduction[digit_index - 1].carry.clone()),
         );
     }
     eval.add_constraint(
-        gate.clone()
+        reduce_gate.clone()
             * columns.folded_final_carry.clone()
             * (columns.folded_final_carry.clone() + one::<E>()),
     );
     eval.add_constraint(
-        gate * (columns.reduction[FP_SOLINAS_REDUCTION_DIGITS - 1]
+        reduce_gate * (columns.reduction[FP_SOLINAS_REDUCTION_DIGITS - 1]
             .carry
             .clone()
             + columns.folded_final_carry.clone()),
@@ -1091,10 +1134,12 @@ pub const fn projective_rcb_signed_carry_log_size() -> u32 {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn add_mul_limb_group<E: EvalAtRow>(
     eval: &mut E,
     relations: ProjectiveRcbMulRelations<'_>,
     gate: E::F,
+    reduce_gate: E::F,
     source_index: E::F,
     mul_index: E::F,
     role: u32,
@@ -1102,12 +1147,16 @@ fn add_mul_limb_group<E: EvalAtRow>(
     value: &P256EvalBigInt<E>,
 ) {
     for (limb_index, limb) in value.limbs().iter().enumerate() {
+        // Range check every mul's limbs (gate = active), identity or not: it is
+        // cheap and preserves the 13-bit domain bound the formula combos assume.
         add_range_check(eval, relations.range13, gate.clone(), limb.clone());
         if relation_multiplicity != 0 {
+            // The raw-product family consumes these limbs; gate by `reduce_gate`
+            // so identity muls (which have no raw-product rows) feed nothing.
             add_projective_rcb_mul_limb_relation(
                 eval,
                 relations.mul_limb,
-                -E::EF::from(gate.clone() * constant::<E::F>(relation_multiplicity)),
+                -E::EF::from(reduce_gate.clone() * constant::<E::F>(relation_multiplicity)),
                 source_index.clone(),
                 mul_index.clone(),
                 constant(role),

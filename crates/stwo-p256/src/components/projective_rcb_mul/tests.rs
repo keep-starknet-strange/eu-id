@@ -255,7 +255,7 @@ impl EvalAtRow for RecordingMulEvaluator<'_> {
 /// `projective_rcb_air_range_lookup_consumers_balance_with_providers`.
 fn mul_component_constraints_hold(claim: &ProjectiveRcbAirTraceClaim) -> bool {
     let log_size = claim.component_log_sizes().mul;
-    let base = gen_projective_rcb_mul_base_trace(claim, log_size)
+    let base = gen_projective_rcb_mul_silo_base_trace(claim, log_size)
         .expect("mul base trace generates")
         .into_iter()
         .map(|column| column.to_cpu().values)
@@ -376,7 +376,7 @@ fn prove_and_verify_mul_component(claim: &ProjectiveRcbAirTraceClaim) {
     tree_builder.commit(&mut channel);
 
     let base =
-        gen_projective_rcb_mul_base_trace(claim, log_size).expect("mul base trace generates");
+        gen_projective_rcb_mul_silo_base_trace(claim, log_size).expect("mul base trace generates");
     let mut tree_builder = commitment_scheme.tree_builder();
     tree_builder.extend_evals(base.clone());
     tree_builder.commit(&mut channel);
@@ -919,7 +919,7 @@ fn prove_and_verify_projective_arithmetic_components(claim: &ProjectiveRcbAirTra
     tree_builder.commit(&mut channel);
 
     let mut base = Vec::new();
-    base.extend(gen_projective_rcb_mul_base_trace(claim, log_sizes.mul).expect("mul base"));
+    base.extend(gen_projective_rcb_mul_silo_base_trace(claim, log_sizes.mul).expect("mul base"));
     base.extend(
         gen_projective_rcb_raw_product_chunk_base_trace(claim, log_sizes.raw_product_chunk)
             .expect("raw base"),
@@ -1008,17 +1008,20 @@ fn projective_rcb_air_rows_verify_double() {
         .expect("claim verifies");
     assert_eq!(claim.active_row_count(), 1);
     assert_eq!(claim.mul_row_count(), PROJECTIVE_RCB_MAX_MUL_ROWS_PER_OP);
+    // Sub-families (raw_product / folded_digit / folded_contribution) hold rows
+    // only for NON-identity muls; the inline reduction stays on every mul.
+    let non_identity = claim.non_identity_mul_row_count();
     assert_eq!(
         claim.raw_product_chunk_count(),
-        PROJECTIVE_RCB_MAX_MUL_ROWS_PER_OP * PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS
+        non_identity * PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS
     );
     assert_eq!(
         claim.folded_digit_row_count(),
-        PROJECTIVE_RCB_MAX_MUL_ROWS_PER_OP * FP_SOLINAS_REDUCTION_DIGITS
+        non_identity * FP_SOLINAS_REDUCTION_DIGITS
     );
     assert_eq!(
         claim.folded_contribution_row_count(),
-        PROJECTIVE_RCB_MAX_MUL_ROWS_PER_OP * PROJECTIVE_RCB_FOLDED_CONTRIBUTION_ROWS
+        non_identity * PROJECTIVE_RCB_FOLDED_CONTRIBUTION_ROWS
     );
     assert_eq!(
         claim.reduction_row_count(),
@@ -1268,7 +1271,8 @@ fn projective_rcb_mul_eval_allocates_expected_width() {
     );
     assert_eq!(
         component.trace_log_degree_bounds()[1].len(),
-        PROJECTIVE_RCB_MUL_TRACE_COLUMNS
+        // The silo eval reads the two extra identity columns.
+        PROJECTIVE_RCB_MUL_SILO_TRACE_COLUMNS
     );
     assert_eq!(PROJECTIVE_RCB_MUL_LIMB_RELATION_ARITY, 5);
     assert_eq!(PROJECTIVE_RCB_FOLDED_DIGIT_RELATION_ARITY, 4);
@@ -1663,14 +1667,14 @@ fn projective_rcb_air_base_trace_materializes_component_columns() {
         ProjectiveRcbAirTraceClaim::from_projective_trace(&trace).expect("valid RCB AIR trace");
     let base = claim.gen_base_trace().expect("base trace materializes");
     let log_sizes = claim.component_log_sizes();
-    let raw_start = PROJECTIVE_RCB_MUL_TRACE_COLUMNS;
+    let raw_start = PROJECTIVE_RCB_MUL_SILO_TRACE_COLUMNS;
     let folded_contribution_start = raw_start + PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TRACE_COLUMNS;
     let folded_digit_start =
         folded_contribution_start + PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TRACE_COLUMNS;
 
     assert_eq!(
         base.len(),
-        PROJECTIVE_RCB_MUL_TRACE_COLUMNS
+        PROJECTIVE_RCB_MUL_SILO_TRACE_COLUMNS
             + PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TRACE_COLUMNS
             + PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TRACE_COLUMNS
             + PROJECTIVE_RCB_FOLDED_DIGIT_TRACE_COLUMNS
@@ -1753,14 +1757,17 @@ fn projective_rcb_air_range_lookup_consumers_balance_with_providers() {
     let relations = ProjectiveRcbMulComponentRelations::dummy();
 
     let range13_values = claim.range13_lookup_values();
+    // Every mul range-checks its 3·N_LIMBS lhs/rhs/result limbs; only NON-identity
+    // muls additionally range-check their reduction/correction/raw-product/
+    // folded-digit values (identity muls skip the whole reduction).
     assert_eq!(
         range13_values.len(),
-        claim.mul_row_count()
-            * (3 * N_LIMBS
-                + 2 * FP_SOLINAS_REDUCTION_DIGITS
-                + crate::fp_solinas::FP_SOLINAS_SIGNED_CORRECTION_LIMBS
-                + PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS * PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS
-                + FP_SOLINAS_REDUCTION_DIGITS)
+        claim.mul_row_count() * 3 * N_LIMBS
+            + claim.non_identity_mul_row_count()
+                * (2 * FP_SOLINAS_REDUCTION_DIGITS
+                    + crate::fp_solinas::FP_SOLINAS_SIGNED_CORRECTION_LIMBS
+                    + PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS * PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS
+                    + FP_SOLINAS_REDUCTION_DIGITS)
     );
     let range13 = RangeCheckClaim::new(RANGE13_BITS);
     let range13_preprocessed = range13.gen_preprocessed_column();
@@ -1779,7 +1786,8 @@ fn projective_rcb_air_range_lookup_consumers_balance_with_providers() {
     let raw_product_carry16_values = claim.raw_product_carry16_lookup_values();
     assert_eq!(
         raw_product_carry16_values.len(),
-        claim.mul_row_count() * PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS
+        // One carry16 per raw-product chunk; identity muls have no chunks.
+        claim.non_identity_mul_row_count() * PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS
     );
     let range16 = RangeCheckClaim::new(RANGE16_BITS);
     let range16_preprocessed = range16.gen_preprocessed_column();
@@ -1801,7 +1809,9 @@ fn projective_rcb_air_range_lookup_consumers_balance_with_providers() {
         .expect("signed carries fit fixed bound");
     assert_eq!(
         signed_carry_values.len(),
-        claim.mul_row_count() * 4 * FP_SOLINAS_REDUCTION_DIGITS
+        // 4·DIGITS signed carries per NON-identity mul (reduction + folded-digit
+        // prev/carry); identity muls contribute none.
+        claim.non_identity_mul_row_count() * 4 * FP_SOLINAS_REDUCTION_DIGITS
     );
     let max_abs = signed_carry_values
         .iter()
@@ -1878,7 +1888,7 @@ fn projective_rcb_air_proof_slice_materializes_registered_traces() {
     assert_eq!(interaction.len(), component_bounds.0[2].len());
     assert_eq!(
         base.len(),
-        PROJECTIVE_RCB_MUL_TRACE_COLUMNS
+        PROJECTIVE_RCB_MUL_SILO_TRACE_COLUMNS
             + PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TRACE_COLUMNS
             + PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TRACE_COLUMNS
             + PROJECTIVE_RCB_FOLDED_DIGIT_TRACE_COLUMNS

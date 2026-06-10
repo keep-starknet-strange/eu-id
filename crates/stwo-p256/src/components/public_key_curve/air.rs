@@ -439,9 +439,11 @@ impl FrameworkEval for PublicKeyMulEval {
 
         eval.add_constraint(active.clone() * (E::F::from(M31::from_u32_unchecked(1)) - active.clone()));
         // Prove the modular multiplication exactly as the projective slice does.
+        // No identity fast-path here: reduce_gate == gate (full reduction).
         add_projective_rcb_mul_row(
             &mut eval,
             self.mul_relations.as_refs(),
+            active.clone(),
             active.clone(),
             source_index.clone(),
             mul_index.clone(),

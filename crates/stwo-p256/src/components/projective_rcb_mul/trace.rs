@@ -20,9 +20,10 @@ use crate::fp_solinas::{
     FpSolinasError, FpSolinasMulTrace, FP_SOLINAS_LIMB_BASE, FP_SOLINAS_RAW_LIMBS,
 };
 use crate::fp_solinas_air::{
-    fp_solinas_correction_digit_columns, FpSolinasReductionTraceClaim,
+    fp_solinas_correction_digit_columns, FpSolinasReductionRow, FpSolinasReductionTraceClaim,
     FpSolinasReductionTraceError, FP_SOLINAS_REDUCTION_DIGITS,
 };
+use crate::limbs::P256M31BigInt;
 use crate::prepared_table::PreparedAffinePoint;
 use crate::projective::{
     ProjectiveEcError, ProjectiveEcOp, ProjectiveEcRow, ProjectiveEcTraceClaim, ProjectivePoint,
@@ -269,6 +270,17 @@ impl ProjectiveRcbAirTraceClaim {
         self.rows.iter().map(|row| row.muls.len()).sum()
     }
 
+    /// Number of muls that actually reduce (non-identity) — i.e. the number of
+    /// muls contributing rows to the raw_product / folded_contribution /
+    /// folded_digit families. Drives those families' periodic schedules.
+    pub fn non_identity_mul_row_count(&self) -> usize {
+        self.rows
+            .iter()
+            .flat_map(|row| &row.muls)
+            .filter(|mul| !mul.is_identity)
+            .count()
+    }
+
     pub fn reduction_row_count(&self) -> usize {
         self.rows
             .iter()
@@ -413,7 +425,7 @@ impl ProjectiveRcbAirTraceClaim {
     pub fn gen_base_trace(&self) -> Result<Vec<M31ColumnEval>, ProjectiveRcbAirError> {
         let log_sizes = self.component_log_sizes();
         let mut columns = Vec::new();
-        columns.extend(gen_projective_rcb_mul_base_trace(self, log_sizes.mul)?);
+        columns.extend(gen_projective_rcb_mul_silo_base_trace(self, log_sizes.mul)?);
         columns.extend(gen_projective_rcb_raw_product_chunk_base_trace(
             self,
             log_sizes.raw_product_chunk,
@@ -431,7 +443,7 @@ impl ProjectiveRcbAirTraceClaim {
 
     pub fn verify_base_trace(&self) -> Result<(), ProjectiveRcbAirError> {
         let base = self.gen_base_trace()?;
-        let expected = PROJECTIVE_RCB_MUL_TRACE_COLUMNS
+        let expected = PROJECTIVE_RCB_MUL_SILO_TRACE_COLUMNS
             + PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TRACE_COLUMNS
             + PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TRACE_COLUMNS
             + PROJECTIVE_RCB_FOLDED_DIGIT_TRACE_COLUMNS;
@@ -663,7 +675,7 @@ impl ProjectiveRcbAirTraceClaim {
                 actual: preprocessed.len(),
             });
         }
-        let expected_base = PROJECTIVE_RCB_MUL_TRACE_COLUMNS
+        let expected_base = PROJECTIVE_RCB_MUL_SILO_TRACE_COLUMNS
             + PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TRACE_COLUMNS
             + PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TRACE_COLUMNS
             + PROJECTIVE_RCB_FOLDED_DIGIT_TRACE_COLUMNS
@@ -708,16 +720,23 @@ impl ProjectiveRcbAirTraceClaim {
     pub fn range13_lookup_values(&self) -> Vec<M31> {
         let mut values = Vec::new();
         for (_, _, mul) in self.mul_rows() {
+            // Always consumed (gated by `active`): the lhs/rhs/result limbs.
             values.extend(mul.trace.lhs.limbs().iter().copied());
             values.extend(mul.trace.rhs.limbs().iter().copied());
             values.extend(mul.trace.result.limbs().iter().copied());
-            for row in &mul.reduction.rows {
-                values.push(m31(row.folded_digit));
-                values.push(m31(row.result_limb));
+            // Reduction + correction Range13 consumes are gated by `reduce_active`
+            // (0 for identity muls), so identity rows provide none of them. The
+            // raw_product / folded_digit families are already empty for identity.
+            if !mul.is_identity {
+                for row in &mul.reduction.rows {
+                    values.push(m31(row.folded_digit));
+                    values.push(m31(row.result_limb));
+                }
+                let (_, correction_digits) =
+                    fp_solinas_correction_digit_columns(mul.trace.correction)
+                        .expect("mul trace correction fits the signed window");
+                values.extend(correction_digits.iter().copied().map(m31));
             }
-            let (_, correction_digits) = fp_solinas_correction_digit_columns(mul.trace.correction)
-                .expect("mul trace correction fits the signed window");
-            values.extend(correction_digits.iter().copied().map(m31));
             for chunk in &mul.raw_product_chunks {
                 values.extend(chunk.digits.iter().copied().map(m31));
             }
@@ -731,9 +750,13 @@ impl ProjectiveRcbAirTraceClaim {
     pub fn signed_carry_lookup_values(&self) -> Result<Vec<i64>, ProjectiveRcbAirError> {
         let mut values = Vec::new();
         for (_, _, mul) in self.mul_rows() {
-            for row in &mul.reduction.rows {
-                push_signed_carry_lookup(&mut values, row.prev_carry)?;
-                push_signed_carry_lookup(&mut values, row.carry)?;
+            // Reduction signed-carry consumes are gated by `reduce_active`, so
+            // identity muls provide none. folded_digits.rows is empty for them.
+            if !mul.is_identity {
+                for row in &mul.reduction.rows {
+                    push_signed_carry_lookup(&mut values, row.prev_carry)?;
+                    push_signed_carry_lookup(&mut values, row.carry)?;
+                }
             }
             for row in &mul.folded_digits.rows {
                 push_signed_carry_lookup(&mut values, row.prev_carry)?;
@@ -1066,7 +1089,12 @@ fn projective_rcb_air_schedule_preprocessed_columns(
     trace: &ProjectiveRcbAirTraceClaim,
     namespace: &str,
 ) -> Vec<(PreProcessedColumnId, M31ColumnEval)> {
-    let mul_count = trace.mul_row_count();
+    // The raw_product / folded_contribution / folded_digit families contain rows
+    // only for NON-identity muls (identity muls have empty sub-families), and
+    // every non-identity mul contributes the identical fixed chunk structure, so
+    // the periodic schedule is driven by the non-identity mul count — otherwise
+    // the (preprocessed) schedule over-counts and misaligns with the base trace.
+    let mul_count = trace.non_identity_mul_row_count();
     let mut columns = Vec::new();
     columns.extend(
         projective_rcb_raw_product_chunk_schedule_columns_for_mul_count(namespace, mul_count)
@@ -1086,17 +1114,41 @@ fn projective_rcb_air_schedule_preprocessed_columns(
     columns
 }
 
+/// Mul-family base trace WITHOUT the identity columns — for `final_add` and
+/// `public_key_curve`, whose muls have no identity fast-path.
 pub(crate) fn gen_projective_rcb_mul_base_trace(
     trace: &ProjectiveRcbAirTraceClaim,
     log_size: u32,
 ) -> Result<Vec<M31ColumnEval>, ProjectiveRcbAirError> {
-    let rows = trace.rows.iter().flat_map(|air_row| {
+    gen_projective_rcb_mul_base_trace_inner(trace, log_size, false)
+}
+
+/// Mul-family base trace WITH the two silo-only identity columns
+/// (`is_identity`, `reduce_active`) appended per row — for the EC ladder silo.
+pub(crate) fn gen_projective_rcb_mul_silo_base_trace(
+    trace: &ProjectiveRcbAirTraceClaim,
+    log_size: u32,
+) -> Result<Vec<M31ColumnEval>, ProjectiveRcbAirError> {
+    gen_projective_rcb_mul_base_trace_inner(trace, log_size, true)
+}
+
+fn gen_projective_rcb_mul_base_trace_inner(
+    trace: &ProjectiveRcbAirTraceClaim,
+    log_size: u32,
+    emit_identity: bool,
+) -> Result<Vec<M31ColumnEval>, ProjectiveRcbAirError> {
+    let width = if emit_identity {
+        PROJECTIVE_RCB_MUL_SILO_TRACE_COLUMNS
+    } else {
+        PROJECTIVE_RCB_MUL_TRACE_COLUMNS
+    };
+    let rows = trace.rows.iter().flat_map(move |air_row| {
         air_row
             .muls
             .iter()
             .enumerate()
             .map(move |(mul_index, mul)| {
-                let mut row = Vec::with_capacity(PROJECTIVE_RCB_MUL_TRACE_COLUMNS);
+                let mut row = Vec::with_capacity(width);
                 row.push(m31(1));
                 row.push(m31_usize(air_row.source_index));
                 row.push(m31_usize(mul_index));
@@ -1118,10 +1170,16 @@ pub(crate) fn gen_projective_rcb_mul_base_trace(
                     row.push(m31(digit));
                 }
                 row.push(m31(sign_bit));
+                if emit_identity {
+                    // is_identity, then reduce_active = active·(1−is_identity);
+                    // every generated row is active, so reduce_active = !identity.
+                    row.push(m31(mul.is_identity as u32));
+                    row.push(m31((!mul.is_identity) as u32));
+                }
                 row
             })
     });
-    rows_to_base_trace(rows, PROJECTIVE_RCB_MUL_TRACE_COLUMNS, log_size)
+    rows_to_base_trace(rows, width, log_size)
 }
 
 pub(crate) fn gen_projective_rcb_raw_product_chunk_base_trace(
@@ -1425,6 +1483,15 @@ pub struct ProjectiveRcbMulRow {
     pub folded_contributions: ProjectiveRcbFoldedContributionTraceClaim,
     pub folded_digits: ProjectiveRcbFoldedDigitTraceClaim,
     pub reduction: FpSolinasReductionTraceClaim,
+    /// Identity fast-path: `true` iff this is a `lhs · 1` mul (ladder affine
+    /// `z = 1`). Identity rows carry `rhs = 1`, `result = lhs` (RAW — `lhs` may be
+    /// non-canonical, which is harmless mod p; see the soundness analysis) and
+    /// EMPTY sub-families (`raw_product_chunks`/`folded_contributions`/
+    /// `folded_digits.rows`), with the inline `reduction` rows zeroed but kept so
+    /// the mul-row width stays fixed. The silo AIR gates the whole reduction off
+    /// via `reduce_active = active·(1 − is_identity)` and asserts `rhs = 1`,
+    /// `result = lhs` instead.
+    pub is_identity: bool,
 }
 
 impl ProjectiveRcbMulRow {
@@ -1459,10 +1526,60 @@ impl ProjectiveRcbMulRow {
             folded_contributions,
             folded_digits,
             reduction,
+            is_identity: false,
         })
     }
 
+    /// Build an identity `lhs · 1` mul row: `rhs = 1`, `result = lhs` (raw),
+    /// empty sub-families, zeroed-but-present inline reduction. The silo AIR
+    /// gates the reduction off and asserts `rhs = 1`, `result = lhs` directly,
+    /// so the (otherwise-free, gated-off) zeroed reduction columns are sound.
+    pub(crate) fn identity(step: ProjectiveRcbMulStep, lhs: &U256) -> Self {
+        let lhs_big = P256M31BigInt::from_u256(lhs);
+        let one_big = P256M31BigInt::from_u256(&U256::from_le_u64s(&[1, 0, 0, 0]));
+        let trace = FpSolinasMulTrace {
+            lhs: lhs_big.clone(),
+            rhs: one_big,
+            result: lhs_big,
+            raw_product: [0i128; FP_SOLINAS_RAW_LIMBS],
+            folded_coefficients: [0i128; N_LIMBS],
+            correction: 0,
+            carries: [0i128; N_LIMBS],
+        };
+        let reduction = FpSolinasReductionTraceClaim {
+            rows: (0..FP_SOLINAS_REDUCTION_DIGITS)
+                .map(|digit_index| FpSolinasReductionRow {
+                    digit_index,
+                    folded_digit: 0,
+                    correction_product_digit: 0,
+                    result_limb: 0,
+                    prev_carry: 0,
+                    carry: 0,
+                })
+                .collect(),
+            folded_final_carry: 0,
+        };
+        Self {
+            step,
+            trace,
+            raw_product_chunks: Vec::new(),
+            folded_contributions: ProjectiveRcbFoldedContributionTraceClaim { rows: Vec::new() },
+            folded_digits: ProjectiveRcbFoldedDigitTraceClaim {
+                rows: Vec::new(),
+                final_carry: 0,
+            },
+            reduction,
+            is_identity: true,
+        }
+    }
+
     pub fn verify(&self) -> Result<(), ProjectiveRcbAirError> {
+        if self.is_identity {
+            // Identity row: `result = lhs · 1` and empty sub-families, all by
+            // construction in `Self::identity`. Nothing to re-verify natively;
+            // the silo AIR enforces `rhs = 1 ∧ result = lhs`.
+            return Ok(());
+        }
         self.trace.verify()?;
         ProjectiveRcbRawProductTraceClaim {
             rows: self.raw_product_chunks.clone(),
@@ -2514,13 +2631,8 @@ fn rcb_double_with_mul_rows(
         &y1,
         muls,
     )?;
-    let mut t2 = fp_mul(
-        source_index,
-        ProjectiveRcbMulStep::DoubleZ1Squared,
-        &z1,
-        &z1,
-        muls,
-    )?;
+    // M2 z1·z1 (z1 = 1) → identity, value = z1.
+    let mut t2 = fp_mul_identity(ProjectiveRcbMulStep::DoubleZ1Squared, &z1, muls);
     let mut t3 = fp_mul(
         source_index,
         ProjectiveRcbMulStep::DoubleX1Y1,
@@ -2529,21 +2641,11 @@ fn rcb_double_with_mul_rows(
         muls,
     )?;
     t3 = fp_add(&t3, &t3);
-    let mut z3 = fp_mul(
-        source_index,
-        ProjectiveRcbMulStep::DoubleX1Z1,
-        &x1,
-        &z1,
-        muls,
-    )?;
+    // M4 x1·z1 (z1 = 1) → identity, value = x1.
+    let mut z3 = fp_mul_identity(ProjectiveRcbMulStep::DoubleX1Z1, &x1, muls);
     z3 = fp_add(&z3, &z3);
-    let mut y3 = fp_mul(
-        source_index,
-        ProjectiveRcbMulStep::DoubleBT2,
-        &curve_b(),
-        &t2,
-        muls,
-    )?;
+    // M5 b·t2 (t2 = z1² = 1) → identity, value = b.
+    let mut y3 = fp_mul_identity(ProjectiveRcbMulStep::DoubleBT2, &curve_b(), muls);
     y3 = fp_sub(&y3, &z3);
     let mut x3 = fp_add(&y3, &y3);
     y3 = fp_add(&x3, &y3);
@@ -2587,13 +2689,8 @@ fn rcb_double_with_mul_rows(
         muls,
     )?;
     y3 = fp_add(&y3, &t0);
-    t0 = fp_mul(
-        source_index,
-        ProjectiveRcbMulStep::DoubleY1Z1,
-        &y1,
-        &z1,
-        muls,
-    )?;
+    // M10 y1·z1 (z1 = 1) → identity, value = y1.
+    t0 = fp_mul_identity(ProjectiveRcbMulStep::DoubleY1Z1, &y1, muls);
     t0 = fp_add(&t0, &t0);
     z3 = fp_mul(
         source_index,
@@ -2670,29 +2767,14 @@ fn rcb_mixed_add_with_mul_rows(
     )?;
     t4 = fp_add(&t0, &t1);
     t3 = fp_sub(&t3, &t4);
-    t4 = fp_mul(
-        source_index,
-        ProjectiveRcbMulStep::MixedY2Z1,
-        &y2,
-        &z1,
-        muls,
-    )?;
+    // M3 y2·z1 (z1 = 1) → identity, value = y2.
+    t4 = fp_mul_identity(ProjectiveRcbMulStep::MixedY2Z1, &y2, muls);
     t4 = fp_add(&t4, &y1);
-    let mut y3 = fp_mul(
-        source_index,
-        ProjectiveRcbMulStep::MixedX2Z1,
-        &x2,
-        &z1,
-        muls,
-    )?;
+    // M4 x2·z1 (z1 = 1) → identity, value = x2.
+    let mut y3 = fp_mul_identity(ProjectiveRcbMulStep::MixedX2Z1, &x2, muls);
     y3 = fp_add(&y3, &x1);
-    let mut z3 = fp_mul(
-        source_index,
-        ProjectiveRcbMulStep::MixedBZ1,
-        &curve_b(),
-        &z1,
-        muls,
-    )?;
+    // M5 b·z1 (z1 = 1) → identity, value = b.
+    let mut z3 = fp_mul_identity(ProjectiveRcbMulStep::MixedBZ1, &curve_b(), muls);
     let mut x3 = fp_sub(&y3, &z3);
     z3 = fp_add(&x3, &x3);
     x3 = fp_add(&x3, &z3);
@@ -2807,6 +2889,21 @@ fn fp_mul(
     let result = row.trace.result.to_u256();
     muls.push(row);
     Ok(result)
+}
+
+/// `value · 1 = value` identity mul (ladder affine `z = 1`): pushes an identity
+/// row (empty sub-families, `rhs = 1`, `result = value`) and returns `value`.
+/// The silo AIR proves it via `rhs = 1 ∧ result = lhs` instead of a full Solinas
+/// reduction. Caller must pass the genuine non-one operand as `value`.
+fn fp_mul_identity(
+    step: ProjectiveRcbMulStep,
+    value: &U256,
+    muls: &mut Vec<ProjectiveRcbMulRow>,
+) -> U256 {
+    let row = ProjectiveRcbMulRow::identity(step, value);
+    let result = row.trace.result.to_u256();
+    muls.push(row);
+    result
 }
 
 fn projective_from_u256(x: U256, y: U256, z: U256) -> ProjectivePoint {

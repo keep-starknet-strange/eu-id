@@ -250,22 +250,20 @@ pub(crate) fn projective_rcb_mul_row_fractions(
     mul: &ProjectiveRcbMulRow,
 ) -> Vec<ProjectiveRcbFractionSpec> {
     let mut fractions = Vec::with_capacity(projective_rcb_mul_fraction_count());
-    for (role, limbs, multiplicity) in [
-        (
-            PROJECTIVE_RCB_MUL_ROLE_LHS,
-            mul.trace.lhs.limbs(),
-            -(N_LIMBS as i64),
-        ),
-        (
-            PROJECTIVE_RCB_MUL_ROLE_RHS,
-            mul.trace.rhs.limbs(),
-            -(N_LIMBS as i64),
-        ),
+    // Identity muls emit the SAME fraction columns (fixed count — lessons #37) but
+    // with numerator 0 on every reduction-gated fraction, mirroring the AIR's
+    // `reduce_active = active·(1 − is_identity)`. The limb range checks (gated by
+    // `active`) keep numerator 1. NOTE: a zeroed identity `reduction.rows` is kept
+    // (FP_SOLINAS_REDUCTION_DIGITS entries) so the row count below is fixed.
+    let reduce_active: i64 = if mul.is_identity { 0 } else { 1 };
+    for (role, limbs) in [
+        (PROJECTIVE_RCB_MUL_ROLE_LHS, mul.trace.lhs.limbs()),
+        (PROJECTIVE_RCB_MUL_ROLE_RHS, mul.trace.rhs.limbs()),
     ] {
         for (limb_index, limb) in limbs.iter().enumerate() {
             fractions.push(range13_fraction(1, *limb));
             fractions.push(mul_limb_fraction(
-                multiplicity,
+                -(N_LIMBS as i64) * reduce_active,
                 source_index,
                 mul_index,
                 role,
@@ -278,10 +276,10 @@ pub(crate) fn projective_rcb_mul_row_fractions(
         fractions.push(range13_fraction(1, *limb));
     }
     for row in &mul.reduction.rows {
-        fractions.push(range13_fraction(1, m31(row.folded_digit)));
-        fractions.push(range13_fraction(1, m31(row.result_limb)));
-        fractions.push(signed_carry_fraction(1, m31_i128(row.prev_carry)));
-        fractions.push(signed_carry_fraction(1, m31_i128(row.carry)));
+        fractions.push(range13_fraction(reduce_active, m31(row.folded_digit)));
+        fractions.push(range13_fraction(reduce_active, m31(row.result_limb)));
+        fractions.push(signed_carry_fraction(reduce_active, m31_i128(row.prev_carry)));
+        fractions.push(signed_carry_fraction(reduce_active, m31_i128(row.carry)));
     }
     // C1: Range13 consumers for the nine 13-bit correction digits, emitted by
     // `add_fp_solinas_correction_digit_binding` immediately after the per-digit
@@ -289,11 +287,11 @@ pub(crate) fn projective_rcb_mul_row_fractions(
     let (_, correction_digits) = fp_solinas_correction_digit_columns(mul.trace.correction)
         .expect("mul trace correction fits the signed window");
     for digit in correction_digits {
-        fractions.push(range13_fraction(1, m31(digit)));
+        fractions.push(range13_fraction(reduce_active, m31(digit)));
     }
     for row in &mul.reduction.rows {
         fractions.push(folded_digit_fraction(
-            1,
+            reduce_active,
             source_index,
             mul_index,
             row.digit_index,
@@ -301,14 +299,14 @@ pub(crate) fn projective_rcb_mul_row_fractions(
         ));
     }
     fractions.push(folded_carry_fraction(
-        -1,
+        -reduce_active,
         source_index,
         mul_index,
         0,
         m31(0),
     ));
     fractions.push(folded_carry_fraction(
-        1,
+        reduce_active,
         source_index,
         mul_index,
         FP_SOLINAS_REDUCTION_DIGITS,
@@ -782,22 +780,28 @@ impl ProjectiveRcbAirInteractionClaim {
         mul: &ProjectiveRcbMulRow,
         relations: &ProjectiveRcbMulComponentRelations,
     ) {
-        for (role, limbs) in [
-            (PROJECTIVE_RCB_MUL_ROLE_LHS, mul.trace.lhs.limbs()),
-            (PROJECTIVE_RCB_MUL_ROLE_RHS, mul.trace.rhs.limbs()),
-        ] {
-            for (limb_index, limb) in limbs.iter().enumerate() {
-                self.mul_limb += relation_fraction(
-                    &relations.mul_limb,
-                    -(N_LIMBS as i64),
-                    &[
-                        m31_usize(source_index),
-                        m31_usize(mul_index),
-                        m31(role),
-                        m31_usize(limb_index),
-                        *limb,
-                    ],
-                );
+        // The raw-product FEED provide is gated by `reduce_active` in the AIR, so
+        // identity muls provide none (their consume side — the chunks below — is
+        // empty too). Mirror that here or the ProjectiveRcbMulLimb relation
+        // imbalances.
+        if !mul.is_identity {
+            for (role, limbs) in [
+                (PROJECTIVE_RCB_MUL_ROLE_LHS, mul.trace.lhs.limbs()),
+                (PROJECTIVE_RCB_MUL_ROLE_RHS, mul.trace.rhs.limbs()),
+            ] {
+                for (limb_index, limb) in limbs.iter().enumerate() {
+                    self.mul_limb += relation_fraction(
+                        &relations.mul_limb,
+                        -(N_LIMBS as i64),
+                        &[
+                            m31_usize(source_index),
+                            m31_usize(mul_index),
+                            m31(role),
+                            m31_usize(limb_index),
+                            *limb,
+                        ],
+                    );
+                }
             }
         }
         for chunk in &mul.raw_product_chunks {
@@ -930,17 +934,21 @@ impl ProjectiveRcbAirInteractionClaim {
                 ],
             );
         }
-        for row in &mul.reduction.rows {
-            self.folded_digit += relation_fraction(
-                &relations.folded_digit,
-                1,
-                &[
-                    m31_usize(source_index),
-                    m31_usize(mul_index),
-                    m31_usize(row.digit_index),
-                    m31(row.folded_digit),
-                ],
-            );
+        // The reduction's folded-digit CONSUME is gated by `reduce_active`;
+        // identity muls keep zeroed reduction rows but must consume nothing.
+        if !mul.is_identity {
+            for row in &mul.reduction.rows {
+                self.folded_digit += relation_fraction(
+                    &relations.folded_digit,
+                    1,
+                    &[
+                        m31_usize(source_index),
+                        m31_usize(mul_index),
+                        m31_usize(row.digit_index),
+                        m31(row.folded_digit),
+                    ],
+                );
+            }
         }
     }
 
@@ -951,6 +959,11 @@ impl ProjectiveRcbAirInteractionClaim {
         mul: &ProjectiveRcbMulRow,
         relations: &ProjectiveRcbMulComponentRelations,
     ) {
+        // The folded-carry self-loop is gated by `reduce_active`; identity muls
+        // emit neither side.
+        if mul.is_identity {
+            return;
+        }
         self.folded_carry += relation_fraction(
             &relations.folded_carry,
             -1,
