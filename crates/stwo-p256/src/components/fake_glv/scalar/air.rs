@@ -1,3 +1,28 @@
+//! Fake-GLV scalar-hint AIR: binds each cert scalar `u` to its Garaga-style
+//! decomposition `(s1, s2)` with `s1 + u·s2 ≡ 0 (mod n)`.
+//!
+//! # Zero-scalar semantics (settled, Option A: allow zero scalars)
+//!
+//! `u1 = z·s⁻¹ mod n` is *legally zero* in ECDSA (a message hash with
+//! `z ≡ 0 mod n`), so zero scalars are accepted, not rejected:
+//!
+//! - **`u = 0` (zero branch).** `cert_active = 0`; every hint cell is pinned
+//!   to zero in-AIR and the EC chain produces the point at infinity for that
+//!   half (`R = O + u2·Q`), handled by the prepared-point/final-add infinity
+//!   flags. Covered end-to-end (full STARK prove + verify) by
+//!   `current_p256_proof_pipeline_proves_and_verifies_current_air_monolithic_proof`
+//!   on the `(u1, u2) = (0, 11)` fixture.
+//! - **`s2_abs ≠ 0` on the active branch** is enforced *in-AIR* by the
+//!   degree-1 M31 inverse gadget below (`sum(s2_abs)·s2_abs_inv =
+//!   cert_active`; the limb sum of a 20×13-bit value cannot wrap M31).
+//! - **`s1 = 0` on the active branch needs no in-AIR gadget**: the
+//!   ScalarModMul binding proves `u·s2_abs ≡ ±s1 (mod n)`, so `s1 = 0`
+//!   forces `u·s2_abs ≡ 0 (mod n)`; both factors are below the prime `n`
+//!   and `s2_abs ≠ 0` is enforced, hence `u ≡ 0 (mod n)` — i.e. the zero
+//!   branch. A malicious prover cannot place `s1 = 0` on an active cert; the
+//!   host-side `FakeGlvScalarHintRow::verify` rejection of `s1 = 0` is an
+//!   early error for honest builders, not a soundness boundary.
+
 use std::fmt;
 
 use stwo::core::{
