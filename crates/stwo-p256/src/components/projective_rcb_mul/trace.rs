@@ -234,11 +234,29 @@ impl ProjectiveRcbAirTraceClaim {
     pub fn from_projective_trace(
         trace: &ProjectiveEcTraceClaim,
     ) -> Result<Self, ProjectiveRcbAirError> {
+        Self::from_projective_trace_impl(trace, false)
+    }
+
+    /// Lite claim for the hinted-mul era: every mul row carries real
+    /// lhs/rhs/result but no schoolbook sub-families (~10x cheaper to build).
+    /// The silo AIR traces must not be generated from a lite claim.
+    pub fn from_projective_trace_lite(
+        trace: &ProjectiveEcTraceClaim,
+    ) -> Result<Self, ProjectiveRcbAirError> {
+        Self::from_projective_trace_impl(trace, true)
+    }
+
+    fn from_projective_trace_impl(
+        trace: &ProjectiveEcTraceClaim,
+        lite: bool,
+    ) -> Result<Self, ProjectiveRcbAirError> {
         let rows = trace
             .rows
             .iter()
             .enumerate()
-            .map(|(source_index, row)| ProjectiveRcbAirRow::from_projective_row(source_index, row))
+            .map(|(source_index, row)| {
+                ProjectiveRcbAirRow::from_projective_row(lite, source_index, row)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let claim = Self { rows };
         claim.verify_against_projective_trace(trace)?;
@@ -1402,7 +1420,7 @@ pub(crate) fn projective_rcb_op_mul_limbs(
     source_index: usize,
     row: &ProjectiveEcRow,
 ) -> Result<([M31; PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS], bool), ProjectiveRcbAirError> {
-    let air_row = ProjectiveRcbAirRow::from_projective_row(source_index, row)?;
+    let air_row = ProjectiveRcbAirRow::from_projective_row(true, source_index, row)?;
     let mut values = [M31::from_u32_unchecked(0); PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS];
     if air_row.muls.is_empty() {
         // Infinity-operand MixedAdd no-op: zero muls, zero limbs, not gated in.
@@ -1424,6 +1442,7 @@ pub(crate) fn projective_rcb_op_mul_limbs(
 
 impl ProjectiveRcbAirRow {
     fn from_projective_row(
+        lite: bool,
         source_index: usize,
         row: &ProjectiveEcRow,
     ) -> Result<Self, ProjectiveRcbAirError> {
@@ -1432,9 +1451,10 @@ impl ProjectiveRcbAirRow {
         let mut muls = Vec::with_capacity(PROJECTIVE_RCB_MAX_MUL_ROWS_PER_OP);
         let output_projective = match row.op {
             ProjectiveEcOp::Double => {
-                rcb_double_with_mul_rows(source_index, &lhs, &row.output_affine, &mut muls)?
+                rcb_double_with_mul_rows(lite, source_index, &lhs, &row.output_affine, &mut muls)?
             }
             ProjectiveEcOp::MixedAdd => rcb_mixed_add_with_mul_rows(
+                lite,
                 source_index,
                 &lhs,
                 &row.rhs_affine,
@@ -1461,7 +1481,8 @@ impl ProjectiveRcbAirRow {
         row: &ProjectiveEcRow,
     ) -> Result<(), ProjectiveRcbAirError> {
         self.verify()?;
-        let expected = Self::from_projective_row(source_index, row)?;
+        let lite = self.muls.iter().any(|mul| mul.lite);
+        let expected = Self::from_projective_row(lite, source_index, row)?;
         if self == &expected {
             Ok(())
         } else {
@@ -1495,6 +1516,13 @@ pub struct ProjectiveRcbMulRow {
     /// via `reduce_active = active·(1 − is_identity)` and asserts `rhs = 1`,
     /// `result = lhs` instead.
     pub is_identity: bool,
+    /// Lite fast-path (hinted-mul era): `true` iff the row was built without
+    /// the schoolbook sub-families (`raw_product_chunks`/`folded_contributions`/
+    /// `folded_digits`/`reduction` all empty). The monolithic prover discharges
+    /// the mul via the hinted-mul component, so only `trace` (lhs/rhs/result)
+    /// is populated and natively verified; the silo AIR families must NOT be
+    /// generated from lite rows.
+    pub lite: bool,
 }
 
 impl ProjectiveRcbMulRow {
@@ -1530,6 +1558,7 @@ impl ProjectiveRcbMulRow {
             folded_digits,
             reduction,
             is_identity: false,
+            lite: false,
         })
     }
 
@@ -1537,6 +1566,33 @@ impl ProjectiveRcbMulRow {
     /// empty sub-families, zeroed-but-present inline reduction. The silo AIR
     /// gates the reduction off and asserts `rhs = 1`, `result = lhs` directly,
     /// so the (otherwise-free, gated-off) zeroed reduction columns are sound.
+    /// Lite row for the hinted-mul era: real `FpSolinasMulTrace` (so the
+    /// native lhs·rhs = result check still runs and consumers read the same
+    /// limbs), empty schoolbook sub-families.
+    pub(crate) fn new_lite(
+        step: ProjectiveRcbMulStep,
+        lhs: &U256,
+        rhs: &U256,
+    ) -> Result<Self, ProjectiveRcbAirError> {
+        let trace = FpSolinasMulTrace::new(lhs, rhs)?;
+        Ok(Self {
+            step,
+            trace,
+            raw_product_chunks: Vec::new(),
+            folded_contributions: ProjectiveRcbFoldedContributionTraceClaim { rows: Vec::new() },
+            folded_digits: ProjectiveRcbFoldedDigitTraceClaim {
+                rows: Vec::new(),
+                final_carry: 0,
+            },
+            reduction: FpSolinasReductionTraceClaim {
+                rows: Vec::new(),
+                folded_final_carry: 0,
+            },
+            is_identity: false,
+            lite: true,
+        })
+    }
+
     pub(crate) fn identity(step: ProjectiveRcbMulStep, lhs: &U256) -> Self {
         let lhs_big = P256M31BigInt::from_u256(lhs);
         let one_big = P256M31BigInt::from_u256(&U256::from_le_u64s(&[1, 0, 0, 0]));
@@ -1573,6 +1629,7 @@ impl ProjectiveRcbMulRow {
             },
             reduction,
             is_identity: true,
+            lite: false,
         }
     }
 
@@ -1584,6 +1641,11 @@ impl ProjectiveRcbMulRow {
             return Ok(());
         }
         self.trace.verify()?;
+        if self.lite {
+            // Lite row: the mul itself is verified above; the schoolbook
+            // families are intentionally absent (hinted-mul proves the mul).
+            return Ok(());
+        }
         ProjectiveRcbRawProductTraceClaim {
             rows: self.raw_product_chunks.clone(),
         }
@@ -2611,6 +2673,7 @@ fn fold_raw_coefficients(raw: &[i128; FP_SOLINAS_RAW_LIMBS]) -> [i128; N_LIMBS] 
 }
 
 fn rcb_double_with_mul_rows(
+    lite: bool,
     source_index: usize,
     input: &ProjectivePoint,
     output_affine: &PreparedAffinePoint,
@@ -2620,14 +2683,14 @@ fn rcb_double_with_mul_rows(
     let y1 = input.y.to_u256();
     let z1 = input.z.to_u256();
 
-    let t0 = fp_mul(
+    let t0 = fp_mul(lite, 
         source_index,
         ProjectiveRcbMulStep::DoubleX1Squared,
         &x1,
         &x1,
         muls,
     )?;
-    let t1 = fp_mul(
+    let t1 = fp_mul(lite, 
         source_index,
         ProjectiveRcbMulStep::DoubleY1Squared,
         &y1,
@@ -2636,7 +2699,7 @@ fn rcb_double_with_mul_rows(
     )?;
     // M2 z1·z1 (z1 = 1) → identity, value = z1.
     let mut t2 = fp_mul_identity(ProjectiveRcbMulStep::DoubleZ1Squared, &z1, muls);
-    let mut t3 = fp_mul(
+    let mut t3 = fp_mul(lite, 
         source_index,
         ProjectiveRcbMulStep::DoubleX1Y1,
         &x1,
@@ -2654,14 +2717,14 @@ fn rcb_double_with_mul_rows(
     y3 = fp_add(&x3, &y3);
     x3 = fp_sub(&t1, &y3);
     y3 = fp_add(&t1, &y3);
-    y3 = fp_mul(
+    y3 = fp_mul(lite, 
         source_index,
         ProjectiveRcbMulStep::DoubleX3Y3,
         &x3,
         &y3,
         muls,
     )?;
-    x3 = fp_mul(
+    x3 = fp_mul(lite, 
         source_index,
         ProjectiveRcbMulStep::DoubleX3T3,
         &x3,
@@ -2670,7 +2733,7 @@ fn rcb_double_with_mul_rows(
     )?;
     t3 = fp_add(&t2, &t2);
     t2 = fp_add(&t2, &t3);
-    z3 = fp_mul(
+    z3 = fp_mul(lite, 
         source_index,
         ProjectiveRcbMulStep::DoubleBZ3,
         &curve_b(),
@@ -2684,7 +2747,7 @@ fn rcb_double_with_mul_rows(
     t3 = fp_add(&t0, &t0);
     let mut t0 = fp_add(&t3, &t0);
     t0 = fp_sub(&t0, &t2);
-    t0 = fp_mul(
+    t0 = fp_mul(lite, 
         source_index,
         ProjectiveRcbMulStep::DoubleT0Z3,
         &t0,
@@ -2695,7 +2758,7 @@ fn rcb_double_with_mul_rows(
     // M10 y1·z1 (z1 = 1) → identity, value = y1.
     t0 = fp_mul_identity(ProjectiveRcbMulStep::DoubleY1Z1, &y1, muls);
     t0 = fp_add(&t0, &t0);
-    z3 = fp_mul(
+    z3 = fp_mul(lite, 
         source_index,
         ProjectiveRcbMulStep::DoubleT0Z3Final,
         &t0,
@@ -2703,7 +2766,7 @@ fn rcb_double_with_mul_rows(
         muls,
     )?;
     x3 = fp_sub(&x3, &z3);
-    z3 = fp_mul(
+    z3 = fp_mul(lite, 
         source_index,
         ProjectiveRcbMulStep::DoubleT0T1,
         &t0,
@@ -2714,7 +2777,7 @@ fn rcb_double_with_mul_rows(
     z3 = fp_add(&z3, &z3);
 
     let output = projective_from_u256(x3, y3, z3);
-    append_affine_norm_muls(
+    append_affine_norm_muls(lite, 
         source_index,
         ProjectiveRcbMulStep::DoubleAffineNormX,
         ProjectiveRcbMulStep::DoubleAffineNormY,
@@ -2726,6 +2789,7 @@ fn rcb_double_with_mul_rows(
 }
 
 fn rcb_mixed_add_with_mul_rows(
+    lite: bool,
     source_index: usize,
     state: &ProjectivePoint,
     operand: &PreparedAffinePoint,
@@ -2745,14 +2809,14 @@ fn rcb_mixed_add_with_mul_rows(
     let x2 = operand.x;
     let y2 = operand.y;
 
-    let mut t0 = fp_mul(
+    let mut t0 = fp_mul(lite, 
         source_index,
         ProjectiveRcbMulStep::MixedX1X2,
         &x1,
         &x2,
         muls,
     )?;
-    let mut t1 = fp_mul(
+    let mut t1 = fp_mul(lite, 
         source_index,
         ProjectiveRcbMulStep::MixedY1Y2,
         &y1,
@@ -2761,7 +2825,7 @@ fn rcb_mixed_add_with_mul_rows(
     )?;
     let mut t3 = fp_add(&x2, &y2);
     let mut t4 = fp_add(&x1, &y1);
-    t3 = fp_mul(
+    t3 = fp_mul(lite, 
         source_index,
         ProjectiveRcbMulStep::MixedX2Y2X1Y1,
         &t3,
@@ -2783,7 +2847,7 @@ fn rcb_mixed_add_with_mul_rows(
     x3 = fp_add(&x3, &z3);
     z3 = fp_sub(&t1, &x3);
     x3 = fp_add(&t1, &x3);
-    y3 = fp_mul(
+    y3 = fp_mul(lite, 
         source_index,
         ProjectiveRcbMulStep::MixedBY3,
         &curve_b(),
@@ -2799,21 +2863,21 @@ fn rcb_mixed_add_with_mul_rows(
     t1 = fp_add(&t0, &t0);
     t0 = fp_add(&t1, &t0);
     t0 = fp_sub(&t0, &t2);
-    t1 = fp_mul(
+    t1 = fp_mul(lite, 
         source_index,
         ProjectiveRcbMulStep::MixedT4Y3,
         &t4,
         &y3,
         muls,
     )?;
-    let t2 = fp_mul(
+    let t2 = fp_mul(lite, 
         source_index,
         ProjectiveRcbMulStep::MixedT0Y3,
         &t0,
         &y3,
         muls,
     )?;
-    y3 = fp_mul(
+    y3 = fp_mul(lite, 
         source_index,
         ProjectiveRcbMulStep::MixedX3Z3,
         &x3,
@@ -2821,7 +2885,7 @@ fn rcb_mixed_add_with_mul_rows(
         muls,
     )?;
     y3 = fp_add(&y3, &t2);
-    x3 = fp_mul(
+    x3 = fp_mul(lite, 
         source_index,
         ProjectiveRcbMulStep::MixedT3X3,
         &t3,
@@ -2829,14 +2893,14 @@ fn rcb_mixed_add_with_mul_rows(
         muls,
     )?;
     x3 = fp_sub(&x3, &t1);
-    z3 = fp_mul(
+    z3 = fp_mul(lite, 
         source_index,
         ProjectiveRcbMulStep::MixedT4Z3,
         &t4,
         &z3,
         muls,
     )?;
-    t1 = fp_mul(
+    t1 = fp_mul(lite, 
         source_index,
         ProjectiveRcbMulStep::MixedT3T0,
         &t3,
@@ -2846,7 +2910,7 @@ fn rcb_mixed_add_with_mul_rows(
     z3 = fp_add(&z3, &t1);
 
     let output = projective_from_u256(x3, y3, z3);
-    append_affine_norm_muls(
+    append_affine_norm_muls(lite, 
         source_index,
         ProjectiveRcbMulStep::MixedAffineNormX,
         ProjectiveRcbMulStep::MixedAffineNormY,
@@ -2866,6 +2930,7 @@ fn rcb_mixed_add_with_mul_rows(
 /// downstream C5-2a-ii constraint binds these operands/result to the consumer's
 /// committed affine + projective output, completing the soundness argument.
 fn append_affine_norm_muls(
+    lite: bool,
     source_index: usize,
     step_x: ProjectiveRcbMulStep,
     step_y: ProjectiveRcbMulStep,
@@ -2876,19 +2941,24 @@ fn append_affine_norm_muls(
     let affine_x = output_affine.x.to_u256();
     let affine_y = output_affine.y.to_u256();
     let projective_z = output_projective.z.to_u256();
-    fp_mul(source_index, step_x, &affine_x, &projective_z, muls)?;
-    fp_mul(source_index, step_y, &affine_y, &projective_z, muls)?;
+    fp_mul(lite, source_index, step_x, &affine_x, &projective_z, muls)?;
+    fp_mul(lite, source_index, step_y, &affine_y, &projective_z, muls)?;
     Ok(())
 }
 
 fn fp_mul(
+    lite: bool,
     source_index: usize,
     step: ProjectiveRcbMulStep,
     lhs: &U256,
     rhs: &U256,
     muls: &mut Vec<ProjectiveRcbMulRow>,
 ) -> Result<U256, ProjectiveRcbAirError> {
-    let row = ProjectiveRcbMulRow::new(source_index, muls.len(), step, lhs, rhs)?;
+    let row = if lite {
+        ProjectiveRcbMulRow::new_lite(step, lhs, rhs)?
+    } else {
+        ProjectiveRcbMulRow::new(source_index, muls.len(), step, lhs, rhs)?
+    };
     let result = row.trace.result.to_u256();
     muls.push(row);
     Ok(result)

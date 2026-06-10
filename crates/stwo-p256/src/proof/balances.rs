@@ -34,9 +34,6 @@ pub struct P256ProofInteractionClaim {
     pub selector_lookups: RelationBalanceClaim,
     pub prepared_points: RelationBalanceClaim,
     pub range7: RelationBalanceClaim,
-    pub projective_range13: RelationBalanceClaim,
-    pub projective_signed_carry: RelationBalanceClaim,
-    pub projective_rcb: ProjectiveRcbAirInteractionClaim,
 }
 
 impl P256ProofInteractionClaim {
@@ -83,46 +80,6 @@ impl P256ProofInteractionClaim {
             &claim.prepared_use_counts,
             &relations.range7,
         );
-        let projective_range13 = RangeCheckClaim::new(RANGE13_BITS);
-        let projective_range13_values = projective_range13.gen_preprocessed_column();
-        let projective_range13_multiplicity = projective_range13
-            .gen_multiplicity_trace(claim.projective_rcb_air_trace.range13_lookup_values());
-        let (_, projective_range13_provider_interaction) =
-            RangeCheckInteractionClaim::gen_interaction_trace(
-                &projective_range13_multiplicity,
-                &projective_range13_values,
-                &relations.projective_rcb.range13,
-            );
-        let projective_range13_consumer = claim
-            .projective_rcb_air_trace
-            .range13_consumer_claimed_sum(&relations.projective_rcb.range13);
-
-        let projective_signed_carry = SignedCarryRangeClaim::new(
-            projective_rcb_signed_carry_log_size(),
-            PROJECTIVE_RCB_SIGNED_CARRY_BOUND,
-            PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
-        );
-        let projective_signed_carry_values = projective_signed_carry.gen_value_column();
-        let projective_signed_carry_multiplicity = projective_signed_carry.gen_multiplicity_trace(
-            claim
-                .projective_rcb_air_trace
-                .signed_carry_lookup_values()
-                .expect("verified projective RCB signed carries fit fixed bound"),
-        );
-        let (_, projective_signed_carry_provider_interaction) =
-            RangeCheckInteractionClaim::gen_interaction_trace(
-                &projective_signed_carry_multiplicity,
-                &projective_signed_carry_values,
-                &relations.projective_rcb.signed_carry,
-            );
-        let projective_signed_carry_consumer = claim
-            .projective_rcb_air_trace
-            .signed_carry_consumer_claimed_sum(&relations.projective_rcb.signed_carry)
-            .expect("verified projective RCB signed carries fit fixed bound");
-        let projective_rcb = claim
-            .projective_rcb_air_trace
-            .internal_interaction_claim(&relations.projective_rcb);
-
         Self {
             public_inputs: RelationBalanceClaim::new(public_provider, public_consumer),
             selector_lookups: RelationBalanceClaim::new(selector_provider, selector_consumer),
@@ -131,15 +88,6 @@ impl P256ProofInteractionClaim {
                 range7_provider_interaction.claimed_sum,
                 range7_consumer,
             ),
-            projective_range13: RelationBalanceClaim::new(
-                projective_range13_provider_interaction.claimed_sum,
-                projective_range13_consumer,
-            ),
-            projective_signed_carry: RelationBalanceClaim::new(
-                projective_signed_carry_provider_interaction.claimed_sum,
-                projective_signed_carry_consumer,
-            ),
-            projective_rcb,
         }
     }
 
@@ -148,10 +96,6 @@ impl P256ProofInteractionClaim {
         self.selector_lookups.verify("SelectorLookups")?;
         self.prepared_points.verify("PreparedPoint")?;
         self.range7.verify("Range7")?;
-        self.projective_range13.verify("ProjectiveRange13")?;
-        self.projective_signed_carry
-            .verify("ProjectiveSignedCarry")?;
-        self.projective_rcb.verify_balanced()?;
         Ok(())
     }
 }

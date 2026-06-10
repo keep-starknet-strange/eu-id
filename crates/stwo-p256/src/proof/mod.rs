@@ -99,9 +99,7 @@ use crate::prepared_table::{
 };
 use crate::projective::{ProjectiveEcError, ProjectiveEcTraceClaim};
 use crate::projective_air::{
-    projective_rcb_signed_carry_log_size, ProjectiveRcbAirError, ProjectiveRcbAirInteractionClaim,
-    ProjectiveRcbAirTraceClaim, ProjectiveRcbMulComponentRelations,
-    PROJECTIVE_RCB_SIGNED_CARRY_BOUND, PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
+    ProjectiveRcbAirError, ProjectiveRcbAirTraceClaim, ProjectiveRcbMulComponentRelations,
 };
 use crate::public_inputs::{
     public_ecdsa_consumer_claimed_sum, PublicEcdsaInputClaim, PublicEcdsaInstanceRelation,
@@ -127,7 +125,7 @@ use crate::public_key_curve_air::{
 };
 use crate::range_checks::{
     range_check_value_column_id, RangeCheckClaim, RangeCheckComponent, RangeCheckEval,
-    RangeCheckInteractionClaim, RangeCheckRelation, SignedCarryRangeClaim, RANGE13_BITS,
+    RangeCheckInteractionClaim, RangeCheckRelation, RANGE13_BITS,
     RANGE7_BITS,
 };
 use crate::scalar::cert_bind::{
@@ -240,7 +238,7 @@ impl P256ProofClaim {
             &fake_glv_ec_trace,
         )?;
         let projective_rcb_air_trace =
-            ProjectiveRcbAirTraceClaim::from_projective_trace(&projective_ec_trace)?;
+            ProjectiveRcbAirTraceClaim::from_projective_trace_lite(&projective_ec_trace)?;
         let hinted_mul_trace = HintedMulTraceClaim::from_projective_rcb(&projective_rcb_air_trace)?;
         let final_check = FinalEcdsaCheckClaim::from_claims(
             &public_inputs,
@@ -360,7 +358,7 @@ impl P256ProofClaim {
             &fake_glv_ec_trace,
         )?;
         let projective_rcb_air_trace =
-            ProjectiveRcbAirTraceClaim::from_projective_trace(&projective_ec_trace)?;
+            ProjectiveRcbAirTraceClaim::from_projective_trace_lite(&projective_ec_trace)?;
         let hinted_mul_trace = HintedMulTraceClaim::from_projective_rcb(&projective_rcb_air_trace)?;
         let prepared_trace = prepared_table.prepared_point_trace(&base.prepared_use_counts)?;
 
@@ -411,8 +409,7 @@ impl P256ProofClaim {
             .verify_against_native_traces(&self.prepared_table_ec_trace, &self.fake_glv_ec_trace)?;
         self.projective_rcb_air_trace
             .verify_against_projective_trace(&self.projective_ec_trace)?;
-        self.projective_rcb_air_trace.verify_preprocessed_trace()?;
-        self.projective_rcb_air_trace.verify_base_trace()?;
+
         self.hinted_mul_trace.verify()?;
         self.final_check.verify()?;
         self.prepared_use_counts.verify()?;
@@ -1661,9 +1658,6 @@ impl P256ProofDraft {
 
     pub fn verify_current_e2e(&self) -> Result<(), P256ProofError> {
         self.claim.verify_current_components()?;
-        self.claim
-            .projective_rcb_air_trace
-            .verify_proof_slice_traces(&self.relations.projective_rcb)?;
         self.verify_audits()?;
         self.interaction_claim().verify_balanced()
     }

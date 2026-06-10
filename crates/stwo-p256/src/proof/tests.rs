@@ -210,65 +210,24 @@ fn current_p256_proof_pipeline_links_all_implemented_components() {
         proof.claim.projective_rcb_air_trace.mul_row_count(),
         804 * 15
     );
+    // Lite (hinted-mul era) claim: the schoolbook sub-families are not built.
+    // Identity rows keep their fixed-width zeroed reduction rows; lite rows
+    // carry none.
     assert_eq!(
         proof.claim.projective_rcb_air_trace.reduction_row_count(),
-        proof.claim.projective_rcb_air_trace.mul_row_count() * FP_SOLINAS_REDUCTION_DIGITS
+        (proof.claim.projective_rcb_air_trace.mul_row_count()
+            - proof.claim.projective_rcb_air_trace.non_identity_mul_row_count())
+            * FP_SOLINAS_REDUCTION_DIGITS
     );
-    assert_eq!(
-        proof
-            .claim
-            .projective_rcb_air_trace
-            .folded_digit_row_count(),
-        proof.claim.projective_rcb_air_trace.non_identity_mul_row_count() * FP_SOLINAS_REDUCTION_DIGITS
-    );
+    assert_eq!(proof.claim.projective_rcb_air_trace.folded_digit_row_count(), 0);
     assert_eq!(
         proof
             .claim
             .projective_rcb_air_trace
             .folded_contribution_row_count(),
-        proof.claim.projective_rcb_air_trace.non_identity_mul_row_count()
-            * PROJECTIVE_RCB_FOLDED_CONTRIBUTION_ROWS
+        0
     );
-    assert_eq!(
-        proof
-            .claim
-            .projective_rcb_air_trace
-            .raw_product_chunk_count(),
-        proof.claim.projective_rcb_air_trace.non_identity_mul_row_count()
-            * PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS
-    );
-    let projective_rcb_preprocessed_ids = proof
-        .claim
-        .projective_rcb_air_trace
-        .preprocessed_column_ids();
-    let projective_rcb_preprocessed = proof
-        .claim
-        .projective_rcb_air_trace
-        .gen_preprocessed_trace(&projective_rcb_preprocessed_ids)
-        .expect("projective RCB schedule preprocessed trace generates");
-    assert_eq!(
-        projective_rcb_preprocessed_ids.len(),
-        (3 + 3 * PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS + 3)
-            + (3 + 5 * PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERMS)
-            + (2 + 2 * PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS)
-    );
-    assert_eq!(
-        projective_rcb_preprocessed.len(),
-        projective_rcb_preprocessed_ids.len()
-    );
-    let projective_rcb_base = proof
-        .claim
-        .projective_rcb_air_trace
-        .gen_base_trace()
-        .expect("projective RCB base trace generates");
-    assert_eq!(
-        projective_rcb_base.len(),
-        // The silo mul family carries the two extra identity columns.
-        PROJECTIVE_RCB_MUL_SILO_TRACE_COLUMNS
-            + PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TRACE_COLUMNS
-            + PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TRACE_COLUMNS
-            + PROJECTIVE_RCB_FOLDED_DIGIT_TRACE_COLUMNS
-    );
+    assert_eq!(proof.claim.projective_rcb_air_trace.raw_product_chunk_count(), 0);
     assert_eq!(proof.claim.final_check.rows.len(), 2);
     assert_eq!(proof.claim.prepared_use_counts.certs.len(), 4);
     for provider in &proof.claim.prepared_trace.providers {
@@ -286,10 +245,6 @@ fn current_p256_proof_pipeline_links_all_implemented_components() {
     assert_eq!(interaction_claim.selector_lookups.total(), zero());
     assert_eq!(interaction_claim.prepared_points.total(), zero());
     assert_eq!(interaction_claim.range7.total(), zero());
-    interaction_claim
-        .projective_rcb
-        .verify_balanced()
-        .expect("projective RCB internal relations balance");
 }
 
 #[test]
@@ -319,33 +274,24 @@ fn current_p256_proof_pipeline_accepts_real_valid_signature_input() {
         proof.claim.projective_rcb_air_trace.mul_row_count(),
         402 * 15
     );
+    // Lite (hinted-mul era) claim: the schoolbook sub-families are not built.
+    // Identity rows keep their fixed-width zeroed reduction rows; lite rows
+    // carry none.
     assert_eq!(
         proof.claim.projective_rcb_air_trace.reduction_row_count(),
-        proof.claim.projective_rcb_air_trace.mul_row_count() * FP_SOLINAS_REDUCTION_DIGITS
+        (proof.claim.projective_rcb_air_trace.mul_row_count()
+            - proof.claim.projective_rcb_air_trace.non_identity_mul_row_count())
+            * FP_SOLINAS_REDUCTION_DIGITS
     );
-    assert_eq!(
-        proof
-            .claim
-            .projective_rcb_air_trace
-            .folded_digit_row_count(),
-        proof.claim.projective_rcb_air_trace.non_identity_mul_row_count() * FP_SOLINAS_REDUCTION_DIGITS
-    );
+    assert_eq!(proof.claim.projective_rcb_air_trace.folded_digit_row_count(), 0);
     assert_eq!(
         proof
             .claim
             .projective_rcb_air_trace
             .folded_contribution_row_count(),
-        proof.claim.projective_rcb_air_trace.non_identity_mul_row_count()
-            * PROJECTIVE_RCB_FOLDED_CONTRIBUTION_ROWS
+        0
     );
-    assert_eq!(
-        proof
-            .claim
-            .projective_rcb_air_trace
-            .raw_product_chunk_count(),
-        proof.claim.projective_rcb_air_trace.non_identity_mul_row_count()
-            * PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS
-    );
+    assert_eq!(proof.claim.projective_rcb_air_trace.raw_product_chunk_count(), 0);
     assert_eq!(
         proof.claim.public_key_check.solinas_reduction_row_count(),
         112
@@ -355,10 +301,6 @@ fn current_p256_proof_pipeline_accepts_real_valid_signature_input() {
     assert_eq!(interaction_claim.selector_lookups.total(), zero());
     assert_eq!(interaction_claim.prepared_points.total(), zero());
     assert_eq!(interaction_claim.range7.total(), zero());
-    interaction_claim
-        .projective_rcb
-        .verify_balanced()
-        .expect("projective RCB internal relations balance");
 }
 
 /// Arbitrary full-width scalars build a claim via
@@ -662,153 +604,6 @@ fn current_p256_proof_pipeline_rejects_invalid_final_signature_linkage() {
     assert!(matches!(
         err,
         P256ProofError::FinalEcdsaCheck(FinalEcdsaCheckError::SignatureRMismatch { .. })
-    ));
-}
-
-#[test]
-fn current_p256_proof_pipeline_detects_mutated_projective_rcb_air_row() {
-    let mut proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
-        valid_real_input_with_small_u_scalars(7, 11),
-    ])
-    .expect("current pipeline builds");
-    proof.claim.projective_rcb_air_trace.rows[0].muls[0]
-        .reduction
-        .rows[0]
-        .folded_digit ^= 1;
-
-    let err = proof
-        .verify_current_e2e()
-        .expect_err("mutated projective RCB AIR row must fail");
-
-    assert!(matches!(
-        err,
-        P256ProofError::ProjectiveRcbAir(
-            ProjectiveRcbAirError::FpSolinasReduction(
-                crate::fp_solinas_air::FpSolinasReductionTraceError::TraceRowsMismatch
-                    | crate::fp_solinas_air::FpSolinasReductionTraceError::ReductionEquationMismatch { .. }
-            )
-            | ProjectiveRcbAirError::FoldedReductionDigitMismatch { .. }
-        )
-    ));
-}
-
-#[test]
-fn current_p256_proof_pipeline_detects_mutated_projective_rcb_raw_product_row() {
-    let mut proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
-        valid_real_input_with_small_u_scalars(7, 11),
-    ])
-    .expect("current pipeline builds");
-    proof.claim.projective_rcb_air_trace.rows[0].muls[0].raw_product_chunks[0].digits[0] ^= 1;
-
-    let err = proof
-        .verify_current_e2e()
-        .expect_err("mutated projective RCB raw product row must fail");
-
-    assert!(matches!(
-        err,
-        P256ProofError::ProjectiveRcbAir(
-            ProjectiveRcbAirError::RawProductChunkDigitMismatch { .. }
-                | ProjectiveRcbAirError::RawProductChunkMismatch { .. }
-        )
-    ));
-}
-
-#[test]
-fn current_p256_proof_pipeline_detects_projective_rcb_relation_imbalance() {
-    let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
-        valid_real_input_with_small_u_scalars(7, 11),
-    ])
-    .expect("current pipeline builds");
-    let mut interaction_claim = proof.interaction_claim();
-    interaction_claim
-        .projective_rcb
-        .raw_product_chunk_digit += SecureField::from(M31::from_u32_unchecked(1));
-
-    let err = interaction_claim
-        .verify_balanced()
-        .expect_err("mutated projective RCB relation sum must fail");
-
-    assert!(matches!(
-        err,
-        P256ProofError::ProjectiveRcbAir(ProjectiveRcbAirError::RelationImbalance {
-            relation: "ProjectiveRcbRawProductChunkDigit"
-        })
-    ));
-}
-
-#[test]
-fn current_p256_proof_pipeline_detects_mutated_projective_rcb_folded_row() {
-    let mut proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
-        valid_real_input_with_small_u_scalars(7, 11),
-    ])
-    .expect("current pipeline builds");
-    proof.claim.projective_rcb_air_trace.rows[0].muls[0]
-        .folded_digits
-        .rows[0]
-        .folded_digit ^= 1;
-
-    let err = proof
-        .verify_current_e2e()
-        .expect_err("mutated projective RCB folded row must fail");
-
-    assert!(matches!(
-        err,
-        P256ProofError::ProjectiveRcbAir(
-            ProjectiveRcbAirError::FoldedDigitMismatch
-                | ProjectiveRcbAirError::FoldedDigitEquationMismatch { .. }
-                | ProjectiveRcbAirError::FoldedReductionDigitMismatch { .. }
-        )
-    ));
-}
-
-#[test]
-fn current_p256_proof_pipeline_detects_mutated_projective_rcb_folded_digit_group() {
-    let mut proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
-        valid_real_input_with_small_u_scalars(7, 11),
-    ])
-    .expect("current pipeline builds");
-    proof.claim.projective_rcb_air_trace.rows[0].muls[0]
-        .folded_digits
-        .rows[0]
-        .contribution_groups[0]
-        .contribution_sum += 1;
-
-    let err = proof
-        .verify_current_e2e()
-        .expect_err("mutated projective RCB folded digit group must fail");
-
-    assert!(matches!(
-        err,
-        P256ProofError::ProjectiveRcbAir(
-            ProjectiveRcbAirError::FoldedDigitContributionSumMismatch { .. }
-                | ProjectiveRcbAirError::FoldedDigitMismatch
-        )
-    ));
-}
-
-#[test]
-fn current_p256_proof_pipeline_detects_mutated_projective_rcb_folded_contribution() {
-    let mut proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
-        valid_real_input_with_small_u_scalars(7, 11),
-    ])
-    .expect("current pipeline builds");
-    proof.claim.projective_rcb_air_trace.rows[0].muls[0]
-        .folded_contributions
-        .rows[0]
-        .contribution_sum += 1;
-
-    let err = proof
-        .verify_current_e2e()
-        .expect_err("mutated projective RCB folded contribution must fail");
-
-    assert!(matches!(
-        err,
-        P256ProofError::ProjectiveRcbAir(
-            ProjectiveRcbAirError::FoldedContributionMismatch
-                | ProjectiveRcbAirError::FoldedContributionSumMismatch { .. }
-                | ProjectiveRcbAirError::FoldedDigitMismatch
-                | ProjectiveRcbAirError::FoldedDigitEquationMismatch { .. }
-        )
     ));
 }
 
