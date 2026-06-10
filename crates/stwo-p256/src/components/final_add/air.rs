@@ -136,6 +136,15 @@ struct FinalAddCheckColumns<E: EvalAtRow> {
     /// The defining constraint is ungated, so padding rows hold `1` (their
     /// inf flags are forced to 0).
     both_finite: E::F,
+    /// Witnessed bit splits pinning the reduction quotients to their ternary
+    /// ranges at degree ≤ 2: `q = b0 + 2·b1` with `b0, b1 ∈ {0,1}` and
+    /// `b0·b1 = 0` gives exactly `q ∈ {0, 1, 2}` (the inline ternary checks
+    /// `gate·q·(q−1)·(q−2)` are degree 4). All split constraints are ungated;
+    /// padding/off-branch rows hold all-zero quotients and bits.
+    dy_q_b0: E::F,
+    dy_q_b1: E::F,
+    x3_q_b0: E::F,
+    x3_q_b1: E::F,
 }
 
 struct EvalPoint<E: EvalAtRow> {
@@ -185,6 +194,10 @@ impl<E: EvalAtRow> FinalAddCheckColumns<E> {
             x3_q: eval.next_trace_mask(),
             x3_carries: core::array::from_fn(|_| eval.next_trace_mask()),
             both_finite: eval.next_trace_mask(),
+            dy_q_b0: eval.next_trace_mask(),
+            dy_q_b1: eval.next_trace_mask(),
+            x3_q_b0: eval.next_trace_mask(),
+            x3_q_b1: eval.next_trace_mask(),
         }
     }
 }
@@ -196,7 +209,8 @@ pub const CHECK_TRACE_COLUMNS: usize = 1 // active
     + 2 // double_add, inverse_add
     + 8 * N_LIMBS // dx, dy, lambda, lamsq, x3, dx_inv, dx_inv_result, x1_sq
     + 3 * (1 + N_LIMBS) // (q + carries) × 3
-    + 1; // both_finite (witnessed degree-1 gate)
+    + 1 // both_finite (witnessed degree-1 gate)
+    + 4; // dy_q/x3_q bit splits (b0, b1 each)
 
 #[derive(Clone)]
 pub struct FinalAddCheckEval {
@@ -409,33 +423,34 @@ impl FrameworkEval for FinalAddCheckEval {
             eval.add_constraint(active.clone() * limb.clone());
         }
 
-        // -------- Quotient bounds --------
+        // -------- Quotient bounds (all degree ≤ 2; lessons.md #44) --------
+        // The former gated ternary checks `gate·q·(q−1)·(q−2)` were degree 4,
+        // over the log_size + 1 (degree-2) composition budget. Replace them
+        // with ungated witnessed bit splits: `q = b0 + 2·b1`, `b0, b1` bool,
+        // `b0·b1 = 0` ⟺ `q ∈ {0, 1, 2}` on EVERY row (strictly stronger than
+        // the former gated checks; padding/off-branch rows hold q = bits = 0).
         let finite_finite = distinct_add.clone() + columns.double_add.clone();
-        // dx_q ∈ {0, 1} on either finite branch.
+        // dx_q ∈ {0, 1} everywhere (ungated boolean; off-branch zero below).
+        eval.add_constraint(columns.dx_q.clone() * (columns.dx_q.clone() - one.clone()));
+        // dy_q ∈ {0, 1, 2} everywhere; ∈ {0, 1} on the distinct branch.
         eval.add_constraint(
-            finite_finite.clone()
-                * columns.dx_q.clone()
-                * (columns.dx_q.clone() - one.clone()),
+            columns.dy_q.clone()
+                - columns.dy_q_b0.clone()
+                - (columns.dy_q_b1.clone() + columns.dy_q_b1.clone()),
         );
-        // dy_q ∈ {0, 1} on distinct; ∈ {0, 1, 2} on doubling.
+        eval.add_constraint(columns.dy_q_b0.clone() * (one.clone() - columns.dy_q_b0.clone()));
+        eval.add_constraint(columns.dy_q_b1.clone() * (one.clone() - columns.dy_q_b1.clone()));
+        eval.add_constraint(columns.dy_q_b0.clone() * columns.dy_q_b1.clone());
+        eval.add_constraint(distinct_add.clone() * columns.dy_q_b1.clone());
+        // x3_q ∈ {0, 1, 2} everywhere.
         eval.add_constraint(
-            distinct_add.clone()
-                * columns.dy_q.clone()
-                * (columns.dy_q.clone() - one.clone()),
+            columns.x3_q.clone()
+                - columns.x3_q_b0.clone()
+                - (columns.x3_q_b1.clone() + columns.x3_q_b1.clone()),
         );
-        eval.add_constraint(
-            columns.double_add.clone()
-                * columns.dy_q.clone()
-                * (columns.dy_q.clone() - one.clone())
-                * (columns.dy_q.clone() - two.clone()),
-        );
-        // x3_q ∈ {0, 1, 2} on either finite branch.
-        eval.add_constraint(
-            finite_finite.clone()
-                * columns.x3_q.clone()
-                * (columns.x3_q.clone() - one.clone())
-                * (columns.x3_q.clone() - two.clone()),
-        );
+        eval.add_constraint(columns.x3_q_b0.clone() * (one.clone() - columns.x3_q_b0.clone()));
+        eval.add_constraint(columns.x3_q_b1.clone() * (one.clone() - columns.x3_q_b1.clone()));
+        eval.add_constraint(columns.x3_q_b0.clone() * columns.x3_q_b1.clone());
         // On non-finite-finite rows the q must be zero.
         eval.add_constraint((one.clone() - finite_finite.clone()) * columns.dx_q.clone());
         eval.add_constraint((one.clone() - finite_finite.clone()) * columns.dy_q.clone());

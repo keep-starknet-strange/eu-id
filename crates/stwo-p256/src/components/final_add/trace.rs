@@ -970,6 +970,18 @@ fn gen_check_base_trace(claim: &FinalAddClaim, log_size: u32) -> Vec<M31ColumnEv
     }
     cols[offset][row] = (one - claim.r1.inf) * (one - claim.r2.inf);
     offset += 1;
+    // Witnessed bit splits `q = b0 + 2·b1` for the ternary quotient ranges
+    // (padding rows stay all-zero, matching q = 0).
+    debug_assert!((0..=2).contains(&claim.dy_q), "dy_q ∈ {{0,1,2}}");
+    debug_assert!((0..=2).contains(&claim.x3_q), "x3_q ∈ {{0,1,2}}");
+    cols[offset][row] = M31::from_u32_unchecked(u32::from(claim.dy_q == 1));
+    offset += 1;
+    cols[offset][row] = M31::from_u32_unchecked(u32::from(claim.dy_q == 2));
+    offset += 1;
+    cols[offset][row] = M31::from_u32_unchecked(u32::from(claim.x3_q == 1));
+    offset += 1;
+    cols[offset][row] = M31::from_u32_unchecked(u32::from(claim.x3_q == 2));
+    offset += 1;
     debug_assert_eq!(offset, CHECK_TRACE_COLUMNS);
 
     cols.into_iter()
