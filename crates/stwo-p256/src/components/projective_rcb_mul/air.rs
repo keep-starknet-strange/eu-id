@@ -305,19 +305,16 @@ impl<E: EvalAtRow> ConsumedMulLimbs<E> {
     ) {
         for (mul_index, roles) in self.limbs.iter().enumerate() {
             for (role_index, limbs) in roles.iter().enumerate() {
-                for (limb_index, limb) in limbs.iter().enumerate() {
-                    eval.add_to_relation(RelationEntry::new(
-                        relation,
-                        E::EF::from(self.has_muls.clone()),
-                        &[
-                            source_index.clone(),
-                            constant(mul_index as u32),
-                            constant(PROJECTIVE_RCB_MUL_RESULT_ROLES[role_index]),
-                            constant(limb_index as u32),
-                            limb.clone(),
-                        ],
-                    ));
-                }
+                let mut values = Vec::with_capacity(3 + N_LIMBS);
+                values.push(source_index.clone());
+                values.push(constant(mul_index as u32));
+                values.push(constant(PROJECTIVE_RCB_MUL_RESULT_ROLES[role_index]));
+                values.extend(limbs.iter().cloned());
+                eval.add_to_relation(RelationEntry::new(
+                    relation,
+                    E::EF::from(self.has_muls.clone()),
+                    &values,
+                ));
             }
         }
     }

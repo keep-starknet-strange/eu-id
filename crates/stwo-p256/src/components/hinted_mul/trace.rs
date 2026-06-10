@@ -234,23 +234,17 @@ pub fn gen_hinted_mul_interaction_trace(
         (2, role_result_column()),
     ];
     for &(role, base_column) in role_columns.iter() {
-        for limb_index in 0..N_LIMBS {
-            descriptors.push(EntryKind::Provide {
-                role,
-                column: base_column + limb_index,
-            });
-        }
+        descriptors.push(EntryKind::Provide {
+            role,
+            column: base_column,
+        });
     }
 
     // Per-entry packed denominators (independent → rayon).
     use rayon::prelude::*;
-    let limb_index_of = |descriptor_index: usize| {
-        (descriptor_index - HINTED_MUL_TRACE_COLUMNS) % N_LIMBS
-    };
     let entries: Vec<(i64, Vec<PackedQM31>)> = descriptors
         .par_iter()
-        .enumerate()
-        .map(|(index, kind)| match kind {
+        .map(|kind| match kind {
             EntryKind::Range13(column) => (
                 1i64,
                 (0..vec_rows)
@@ -267,15 +261,15 @@ pub fn gen_hinted_mul_interaction_trace(
                 -1i64,
                 (0..vec_rows)
                     .map(|vec_row| {
-                        relations.mul_result.combine(&[
-                            source_index.data[vec_row],
-                            mul_index.data[vec_row],
-                            PackedM31::broadcast(M31::from_u32_unchecked(*role)),
-                            PackedM31::broadcast(M31::from_u32_unchecked(
-                                limb_index_of(index) as u32,
-                            )),
-                            base[*column].data[vec_row],
-                        ])
+                        // Wide tuple: (source_index, mul_index, role, 20 limbs).
+                        let mut values = Vec::with_capacity(3 + N_LIMBS);
+                        values.push(source_index.data[vec_row]);
+                        values.push(mul_index.data[vec_row]);
+                        values.push(PackedM31::broadcast(M31::from_u32_unchecked(*role)));
+                        for limb in 0..N_LIMBS {
+                            values.push(base[*column + limb].data[vec_row]);
+                        }
+                        relations.mul_result.combine(&values)
                     })
                     .collect(),
             ),

@@ -762,33 +762,27 @@ pub(crate) fn gen_fake_glv_projective_source_consumer_interaction_trace(
     }
     col.finalize_col();
 
-    // Mul-result consume columns (one per fraction, gated by the `has_muls`
-    // column so 0-mul ops consume nothing), canonical order (mul_index outer,
-    // role `[LHS, RHS, RESULT]`, limb_index), matching `ConsumedMulLimbs`.
+    // Mul-result consume columns (one WIDE fraction per consumed value, gated
+    // by the `has_muls` column so 0-mul ops consume nothing), canonical order
+    // (mul_index outer, role `[LHS, RHS, RESULT]`), matching `ConsumedMulLimbs`.
     for mul_index in 0..(PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS / (3 * N_LIMBS)) {
         for (role_index, &role) in PROJECTIVE_RCB_MUL_RESULT_ROLES.iter().enumerate() {
-            for limb_index in 0..N_LIMBS {
-                let base_col = FAKE_GLV_PRIMITIVE_EC_MUL_LIMB_OFFSET
-                    + mul_index * (3 * N_LIMBS)
-                    + role_index * N_LIMBS
-                    + limb_index;
-                let mut col = logup.new_col();
-                for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
-                    let source_index = base[1].data[vec_row];
-                    let limb = base[base_col].data[vec_row];
-                    let has_muls =
-                        PackedQM31::from(base[FAKE_GLV_PRIMITIVE_EC_HAS_MULS_COL].data[vec_row]);
-                    let values = [
-                        source_index,
-                        PackedM31::broadcast(M31::from_u32_unchecked(mul_index as u32)),
-                        PackedM31::broadcast(M31::from_u32_unchecked(role)),
-                        PackedM31::broadcast(M31::from_u32_unchecked(limb_index as u32)),
-                        limb,
-                    ];
-                    col.write_frac(vec_row, has_muls, mul_result_relation.combine(&values));
+            let base_col =
+                FAKE_GLV_PRIMITIVE_EC_MUL_LIMB_OFFSET + mul_index * (3 * N_LIMBS) + role_index * N_LIMBS;
+            let mut col = logup.new_col();
+            for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+                let has_muls =
+                    PackedQM31::from(base[FAKE_GLV_PRIMITIVE_EC_HAS_MULS_COL].data[vec_row]);
+                let mut values = Vec::with_capacity(3 + N_LIMBS);
+                values.push(base[1].data[vec_row]);
+                values.push(PackedM31::broadcast(M31::from_u32_unchecked(mul_index as u32)));
+                values.push(PackedM31::broadcast(M31::from_u32_unchecked(role)));
+                for limb in 0..N_LIMBS {
+                    values.push(base[base_col + limb].data[vec_row]);
                 }
-                col.finalize_col();
+                col.write_frac(vec_row, has_muls, mul_result_relation.combine(&values));
             }
+            col.finalize_col();
         }
     }
     // The C5-2 USE columns are emitted in the EXACT order the consumer AIR's
@@ -1041,20 +1035,17 @@ fn fake_glv_projective_source_consumer_sums(
             let source_index = base[1].data[vec_row].to_array()[lane];
             for mul_index in 0..(PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS / (3 * N_LIMBS)) {
                 for (role_index, &role) in PROJECTIVE_RCB_MUL_RESULT_ROLES.iter().enumerate() {
-                    for limb_index in 0..N_LIMBS {
-                        let base_col = FAKE_GLV_PRIMITIVE_EC_MUL_LIMB_OFFSET
-                            + mul_index * (3 * N_LIMBS)
-                            + role_index * N_LIMBS
-                            + limb_index;
-                        let limb = base[base_col].data[vec_row].to_array()[lane];
-                        mul_result_denominators.push(mul_result_relation.combine(&[
-                            source_index,
-                            M31::from_u32_unchecked(mul_index as u32),
-                            M31::from_u32_unchecked(role),
-                            M31::from_u32_unchecked(limb_index as u32),
-                            limb,
-                        ]));
+                    let base_col = FAKE_GLV_PRIMITIVE_EC_MUL_LIMB_OFFSET
+                        + mul_index * (3 * N_LIMBS)
+                        + role_index * N_LIMBS;
+                    let mut values = Vec::with_capacity(3 + N_LIMBS);
+                    values.push(source_index);
+                    values.push(M31::from_u32_unchecked(mul_index as u32));
+                    values.push(M31::from_u32_unchecked(role));
+                    for limb in 0..N_LIMBS {
+                        values.push(base[base_col + limb].data[vec_row].to_array()[lane]);
                     }
+                    mul_result_denominators.push(mul_result_relation.combine(&values));
                 }
             }
         }

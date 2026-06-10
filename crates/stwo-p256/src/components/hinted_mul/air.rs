@@ -137,19 +137,16 @@ impl FrameworkEval for HintedMulEval {
         // silo's external relation, so consumers are untouched by the swap.
         let result = &groups[2].1;
         for (role, limbs) in [(0u32, &a), (1u32, &b), (2u32, result)] {
-            for (limb_index, limb) in limbs.iter().enumerate() {
-                eval.add_to_relation(RelationEntry::new(
-                    &self.mul_result,
-                    -E::EF::from(active.clone()),
-                    &[
-                        source_index.clone(),
-                        mul_index.clone(),
-                        E::F::from(M31::from_u32_unchecked(role)),
-                        E::F::from(M31::from_u32_unchecked(limb_index as u32)),
-                        limb.clone(),
-                    ],
-                ));
-            }
+            let mut values = Vec::with_capacity(3 + N_LIMBS);
+            values.push(source_index.clone());
+            values.push(mul_index.clone());
+            values.push(E::F::from(M31::from_u32_unchecked(role)));
+            values.extend(limbs.iter().cloned());
+            eval.add_to_relation(RelationEntry::new(
+                &self.mul_result,
+                -E::EF::from(active.clone()),
+                &values,
+            ));
         }
 
         // The three carry identities at z (ungated; degree ≤ 2).
