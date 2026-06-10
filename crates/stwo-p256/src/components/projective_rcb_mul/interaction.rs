@@ -12,6 +12,7 @@ use stwo::prover::backend::simd::{
     m31::{LOG_N_LANES, N_LANES},
     qm31::PackedQM31,
 };
+use rayon::prelude::*;
 use stwo_constraint_framework::{LogupTraceGenerator, Relation};
 use stwo_p256_utils::constants::N_LIMBS;
 
@@ -164,9 +165,13 @@ pub(crate) fn gen_projective_rcb_family_interaction_trace(
     } else {
         max_fractions
     };
+    let vec_rows = 1usize << (log_size - LOG_N_LANES);
     for batch in 0..batch_count {
-        let mut col = logup.new_col();
-        for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+        // Compute each packed (numerator, denominator) fraction in parallel
+        // across vec-rows; `col_from_par_iter` is index-ordered, so the column
+        // is bit-identical to the serial `write_frac` loop. `storage_fractions`
+        // and `relations` are read-only shared state, so the closure is `Sync`.
+        logup.col_from_par_iter((0..vec_rows).into_par_iter().map(|vec_row| {
             let mut numerators = [secure_zero(); N_LANES];
             let mut denominators = [secure_one(); N_LANES];
             for lane in 0..N_LANES {
@@ -180,13 +185,11 @@ pub(crate) fn gen_projective_rcb_family_interaction_trace(
                 numerators[lane] = numerator;
                 denominators[lane] = denominator;
             }
-            col.write_frac(
-                vec_row,
+            (
                 PackedQM31::from_array(numerators),
                 PackedQM31::from_array(denominators),
-            );
-        }
-        col.finalize_col();
+            )
+        }));
     }
     logup.finalize_last()
 }

@@ -9,8 +9,9 @@ std = ["stwo/std", "stwo-constraint-framework/std"]
 
 [dependencies]
 stwo = { workspace = true, features = ["parallel"] }
-stwo-constraint-framework = { workspace = true }
+stwo-constraint-framework = { workspace = true, features = ["parallel"] }
 stwo-p256-utils = { path = "../stwo-p256-utils" }
+rayon = "1"
 itertools = { version = "0.12", default-features = false, features = ["use_alloc"] }
 num-bigint = "0.4"
 num-integer = "0.1"

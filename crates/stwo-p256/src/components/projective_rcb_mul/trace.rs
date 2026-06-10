@@ -8,6 +8,7 @@ use stwo::core::{
     fields::{m31::M31, qm31::SecureField},
     ColumnVec,
 };
+use rayon::prelude::*;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::TraceLocationAllocator;
 use stwo_p256_utils::constants::N_LIMBS;
@@ -1301,8 +1302,10 @@ fn rows_to_base_trace(
         actual_rows = row_index + 1;
     }
     debug_assert!(actual_rows <= row_count);
+    // Each column is independent and `into_par_iter().collect()` is index-ordered,
+    // so the per-column coset-order scatter parallelizes to a bit-identical result.
     Ok(columns
-        .into_iter()
+        .into_par_iter()
         .map(|values| m31_column_eval(log_size, values))
         .collect())
 }
