@@ -87,5 +87,7 @@
 //! `(source_index, mul_index, role, limb_index, limb)` the silo provides
 //! today, so the EC-formula consumers are untouched.
 
+pub mod air;
+pub mod trace;
 pub mod wide;
 pub mod witness;
