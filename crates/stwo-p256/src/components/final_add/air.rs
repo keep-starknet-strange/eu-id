@@ -128,6 +128,14 @@ struct FinalAddCheckColumns<E: EvalAtRow> {
     dy_carries: [E::F; N_LIMBS],
     x3_q: E::F,
     x3_carries: [E::F; N_LIMBS],
+    /// Witnessed `both_finite = (1 − r1.inf)·(1 − r2.inf)` as a degree-1 gate
+    /// column (lessons.md #44 idiom). Inlining the degree-2 product makes
+    /// every gate that multiplies it degree 3, over the `log_size + 1`
+    /// (degree-2) composition budget — a latent completeness hazard that
+    /// activates once no larger component pads the global composition domain.
+    /// The defining constraint is ungated, so padding rows hold `1` (their
+    /// inf flags are forced to 0).
+    both_finite: E::F,
 }
 
 struct EvalPoint<E: EvalAtRow> {
@@ -176,6 +184,7 @@ impl<E: EvalAtRow> FinalAddCheckColumns<E> {
             dy_carries: core::array::from_fn(|_| eval.next_trace_mask()),
             x3_q: eval.next_trace_mask(),
             x3_carries: core::array::from_fn(|_| eval.next_trace_mask()),
+            both_finite: eval.next_trace_mask(),
         }
     }
 }
@@ -186,7 +195,8 @@ pub const CHECK_TRACE_COLUMNS: usize = 1 // active
     + 2 * (2 * N_LIMBS + 1) // r1, r2 points
     + 2 // double_add, inverse_add
     + 8 * N_LIMBS // dx, dy, lambda, lamsq, x3, dx_inv, dx_inv_result, x1_sq
-    + 3 * (1 + N_LIMBS); // (q + carries) × 3
+    + 3 * (1 + N_LIMBS) // (q + carries) × 3
+    + 1; // both_finite (witnessed degree-1 gate)
 
 #[derive(Clone)]
 pub struct FinalAddCheckEval {
@@ -250,8 +260,23 @@ impl FrameworkEval for FinalAddCheckEval {
         // inf flags boolean.
         eval.add_constraint(columns.r1.inf.clone() * (one.clone() - columns.r1.inf.clone()));
         eval.add_constraint(columns.r2.inf.clone() * (one.clone() - columns.r2.inf.clone()));
-        // Reject R_1 = R_2 = ∞ (=> R_final = ∞).
-        eval.add_constraint(active.clone() * columns.r1.inf.clone() * columns.r2.inf.clone());
+        // Witnessed `both_finite = (1 − r1.inf)·(1 − r2.inf)` (ungated degree-2
+        // definition; padding rows hold 1 since their inf flags are 0). All
+        // gates below use the degree-1 column so every constraint stays within
+        // the log_size + 1 (degree-2) composition budget.
+        eval.add_constraint(
+            columns.both_finite.clone()
+                - (one.clone() - columns.r1.inf.clone())
+                    * (one.clone() - columns.r2.inf.clone()),
+        );
+        // Reject R_1 = R_2 = ∞ (=> R_final = ∞). With both inf flags boolean,
+        // inf1·inf2 = both_finite − 1 + inf1 + inf2 (degree 1 via the column).
+        eval.add_constraint(
+            active.clone()
+                * (columns.both_finite.clone() + columns.r1.inf.clone()
+                    + columns.r2.inf.clone()
+                    - one.clone()),
+        );
 
         // -------- Branch selectors --------
         //
@@ -272,18 +297,22 @@ impl FrameworkEval for FinalAddCheckEval {
         eval.add_constraint(
             columns.inverse_add.clone() * (one.clone() - columns.inverse_add.clone()),
         );
-        // Only one of double_add / inverse_add can be 1 (and they only apply
-        // when both R_1, R_2 are finite — gated implicitly via the chord muls).
-        eval.add_constraint(
-            active.clone() * columns.double_add.clone() * columns.inverse_add.clone(),
-        );
+        // Mutual exclusion of double_add / inverse_add needs no constraint of
+        // its own: `active · inverse_add = 0` below already forces
+        // inverse_add = 0 on active rows (the former degree-3
+        // `active · double_add · inverse_add` was redundant and over the
+        // degree-2 budget).
         // Reject R_final = ∞ (additive-inverse case).
         eval.add_constraint(active.clone() * columns.inverse_add.clone());
 
-        let both_finite =
-            (one.clone() - columns.r1.inf.clone()) * (one.clone() - columns.r2.inf.clone());
-        let r1_only = columns.r1.inf.clone() * (one.clone() - columns.r2.inf.clone());
-        let r2_only = columns.r2.inf.clone() * (one.clone() - columns.r1.inf.clone());
+        // Degree-1 witnessed gate (defined above next to the inf booleans).
+        let both_finite = columns.both_finite.clone();
+        // Degree-1 forms via the witnessed gate: with
+        // bf = (1 − inf1)(1 − inf2) (enforced above),
+        // inf1·(1 − inf2) = 1 − bf − inf2 and inf2·(1 − inf1) = 1 − bf − inf1
+        // hold pointwise, keeping the passthrough bindings below at degree 2.
+        let r1_only = one.clone() - both_finite.clone() - columns.r2.inf.clone();
+        let r2_only = one.clone() - both_finite.clone() - columns.r1.inf.clone();
         // distinct_add = both_finite - double_add - inverse_add (degree 2).
         let distinct_add = both_finite.clone()
             - columns.double_add.clone()

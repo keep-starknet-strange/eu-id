@@ -961,6 +961,15 @@ fn gen_check_base_trace(claim: &FinalAddClaim, log_size: u32) -> Vec<M31ColumnEv
     cols[offset][row] = M31::from_u32_unchecked(claim.x3_q as u32);
     offset += 1;
     write_signed_carries(&mut cols, &mut offset, &claim.x3_carries, row);
+    // Witnessed `both_finite = (1 − r1.inf)·(1 − r2.inf)`. The defining
+    // constraint is ungated and padding rows carry zeroed inf flags, so every
+    // padding row must hold 1; the active row holds the real product.
+    let one = M31::from_u32_unchecked(1);
+    for value in cols[offset].iter_mut() {
+        *value = one;
+    }
+    cols[offset][row] = (one - claim.r1.inf) * (one - claim.r2.inf);
+    offset += 1;
     debug_assert_eq!(offset, CHECK_TRACE_COLUMNS);
 
     cols.into_iter()

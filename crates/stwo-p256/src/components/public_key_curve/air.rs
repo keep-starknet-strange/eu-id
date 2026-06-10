@@ -149,7 +149,9 @@ const CURVE_CHECK_TRACE_COLUMNS: usize = 1            // active
     + N_LIMBS                                         // three_x
     + N_LIMBS                                         // y2
     + 1                                               // q (signed)
-    + N_LIMBS; // carries (signed)
+    + N_LIMBS                                         // carries (signed)
+    + 1                                               // q_pos (q == 1)
+    + 1; // q_neg (q == -1)
 
 relation!(PublicKeyMulResultRelation, PUBLIC_KEY_MUL_RESULT_ARITY);
 relation!(PublicKeyPointRelation, PUBLIC_KEY_POINT_ARITY);
@@ -507,6 +509,13 @@ struct PublicKeyCurveCheckColumns<E: EvalAtRow> {
     y2: P256EvalBigInt<E>,
     q: E::F,
     carries: [E::F; N_LIMBS],
+    /// Witnessed boolean split of `q ∈ {-1, 0, 1}`: `q = q_pos − q_neg` with
+    /// `q_pos, q_neg ∈ {0, 1}` mutually exclusive (lessons.md #44 idiom). The
+    /// inline quartic `q·(q−1)·(q+1)` is degree 4, over the `log_size + 1`
+    /// (degree-2) composition budget — a latent completeness hazard that
+    /// activates once no larger component pads the global composition domain.
+    q_pos: E::F,
+    q_neg: E::F,
 }
 
 impl<E: EvalAtRow> PublicKeyCurveCheckColumns<E> {
@@ -522,6 +531,8 @@ impl<E: EvalAtRow> PublicKeyCurveCheckColumns<E> {
             y2: eval.next_p256_bigint(),
             q: eval.next_trace_mask(),
             carries: core::array::from_fn(|_| eval.next_trace_mask()),
+            q_pos: eval.next_trace_mask(),
+            q_neg: eval.next_trace_mask(),
         }
     }
 }
@@ -703,13 +714,16 @@ fn add_curve_identity<E: EvalAtRow>(
     let modulus = P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_MODULUS));
     let b = P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_B));
 
-    // q ∈ {-1, 0, 1}:  q·(q-1)·(q+1) = 0.  Gated so padding rows (q = 0) pass.
-    eval.add_constraint(
-        columns.active.clone()
-            * columns.q.clone()
-            * (columns.q.clone() - E::F::from(M31::from_u32_unchecked(1)))
-            * (columns.q.clone() + E::F::from(M31::from_u32_unchecked(1))),
-    );
+    // q ∈ {-1, 0, 1} via the witnessed boolean split `q = q_pos − q_neg`
+    // (lessons.md #44): the inline quartic `active·q·(q−1)·(q+1)` is degree 4,
+    // over the log_size + 1 (degree-2) composition budget. All four
+    // constraints are ungated (padding rows hold q = q_pos = q_neg = 0) and
+    // strictly stronger than the former active-gated quartic.
+    let one = E::F::from(M31::from_u32_unchecked(1));
+    eval.add_constraint(columns.q.clone() - columns.q_pos.clone() + columns.q_neg.clone());
+    eval.add_constraint(columns.q_pos.clone() * (one.clone() - columns.q_pos.clone()));
+    eval.add_constraint(columns.q_neg.clone() * (one - columns.q_neg.clone()));
+    eval.add_constraint(columns.q_pos.clone() * columns.q_neg.clone());
 
     for i in 0..N_LIMBS {
         add_range_check(
@@ -1204,6 +1218,13 @@ fn gen_curve_check_base_trace(claim: &PublicKeyCurveSliceClaim, log_size: u32) -
         columns[offset][0] = encode_signed_carry(carry);
         offset += 1;
     }
+    // Witnessed boolean split of q ∈ {-1, 0, 1} (padding rows stay all-zero,
+    // satisfying the ungated split constraints with q = 0).
+    debug_assert!((-1..=1).contains(&claim.q), "curve-identity q ∈ {{-1,0,1}}");
+    columns[offset][0] = M31::from_u32_unchecked(u32::from(claim.q == 1));
+    offset += 1;
+    columns[offset][0] = M31::from_u32_unchecked(u32::from(claim.q == -1));
+    offset += 1;
     debug_assert_eq!(offset, CURVE_CHECK_TRACE_COLUMNS);
 
     columns
