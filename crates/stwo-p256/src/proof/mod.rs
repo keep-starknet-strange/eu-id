@@ -108,7 +108,8 @@ use crate::projective_air::{
     ProjectiveRcbAirError, ProjectiveRcbAirTraceClaim, ProjectiveRcbMulComponentRelations,
 };
 use crate::public_inputs::{
-    public_ecdsa_consumer_claimed_sum, PublicEcdsaInputClaim, PublicEcdsaInstanceRelation,
+    public_ecdsa_consumer_claimed_sum, public_ecdsa_provider_claimed_sum, PublicEcdsaInputClaim,
+    PublicEcdsaInstanceRelation,
 };
 use crate::components::hinted_mul::air::{
     gen_hinted_mul_slice_preprocessed_trace, hinted_mul_signed_table_claim, HintedMulChallenge,
@@ -2943,8 +2944,6 @@ where
             return Err(P256ProofError::NonCanonicalPublicKey { index, field });
         }
     }
-    interaction_claim.verify_balanced()?;
-
     let ids = claim.preprocessed_column_ids();
     // Pin the PCS config: `stark_proof.config` is prover-supplied, and the
     // verifier must not inherit a weakened FRI/grinding setting from it (a
@@ -2977,6 +2976,21 @@ where
         &mut channel,
     );
     let relations = P256CurrentAirRelations::draw(&mut channel);
+
+    // O1 — public-input binding: the `PublicEcdsaInstance` and `EcdsaResult`
+    // relations are provided by public-data INITIAL LogUp claims (no committed
+    // trace), so the prover supplies their provider sums freely. Recompute both
+    // from the verifier's own instances (the consumer sides are STARK-bound
+    // committed components) so the balance ties the proof to exactly the
+    // `(sig_id, r, pub_x, pub_y, …)` the verifier was handed — otherwise the
+    // statement is unbound and signature acceptance is forgeable.
+    let mut interaction_claim = interaction_claim;
+    interaction_claim.public_inputs.provider_claimed_sum =
+        public_ecdsa_provider_claimed_sum(&claim.public_inputs.instances, &relations.public_inputs);
+    interaction_claim.ecdsa_result_provider_claimed_sum =
+        ecdsa_result_provider_claimed_sum(&claim.public_inputs.instances, &relations.ecdsa_result);
+    interaction_claim.verify_balanced()?;
+
     let log_degree_bounds = claim.trace_log_degree_bounds(&ids, &interaction_claim, &relations);
 
     interaction_claim.mix_into(&mut channel);

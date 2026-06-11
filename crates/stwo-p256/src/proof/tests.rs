@@ -353,10 +353,43 @@ fn current_p256_monolithic_verifier_rejects_mutated_public_r() {
         .expect("current AIR monolithic proof proves");
     monolithic.claim.public_inputs.instances[0].r = P256M31BigInt::zero();
 
+    // O1: the verifier recomputes the public-data initial-LogUp providers from
+    // ITS instances, so a mutated `r` no longer matches the STARK-bound
+    // consumer trace and the balance fails DIRECTLY (before the STARK layer)
+    // rather than only via an incidental Fiat-Shamir / FRI divergence.
     let err = verify_current_air_monolithic::<Blake2sMerkleChannel>(monolithic)
         .expect_err("mutated verifier public r must reject");
 
-    assert!(matches!(err, P256ProofError::ProofLayer(_)));
+    assert!(
+        matches!(err, P256ProofError::RelationImbalance { .. }),
+        "expected a public-input binding imbalance, got {err:?}"
+    );
+}
+
+/// O1 — public-input binding: a malicious prover that commits a trace for a
+/// FAKE public key but presents the REAL key (with a matching fake provider
+/// sum) is caught because the verifier recomputes the `PublicEcdsaInstance`
+/// provider from its own instances. Simulated by mutating a presented
+/// public-key coordinate after proving: the verifier-recomputed provider then
+/// disagrees with the (STARK-bound) consumer sum.
+#[test]
+fn current_p256_monolithic_verifier_rejects_unbound_public_key() {
+    let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+        valid_real_input_with_small_u_scalars(7, 11),
+    ])
+    .expect("current pipeline builds");
+    let mut monolithic = proof
+        .prove_current_air_monolithic::<Blake2sMerkleChannel>()
+        .expect("current AIR monolithic proof proves");
+    let pub_x = &mut monolithic.claim.public_inputs.instances[0].pub_x;
+    pub_x.limbs_mut()[0] = M31::from_u32_unchecked(pub_x.limbs()[0].0 ^ 1);
+
+    let err = verify_current_air_monolithic::<Blake2sMerkleChannel>(monolithic)
+        .expect_err("presented public key unbound from the committed trace must reject");
+    assert!(
+        matches!(err, P256ProofError::RelationImbalance { .. }),
+        "expected a public-input binding imbalance, got {err:?}"
+    );
 }
 
 /// The verifier must pin its PCS config: `stark_proof.config` is
@@ -477,8 +510,17 @@ fn current_p256_monolithic_verifier_rejects_mutated_fake_glv_scalar_claim() {
 
     let err = verify_current_air_monolithic::<Blake2sMerkleChannel>(monolithic)
         .expect_err("mutated fake-GLV scalar AIR claim must reject");
-
-    assert!(matches!(err, P256ProofError::ProofLayer(_)));
+    // Mutating a claim's log size perturbs the Fiat-Shamir transcript and hence
+    // the drawn relation elements, so the O1 verifier-recomputed public-input
+    // provider no longer matches the committed consumer trace: rejected at the
+    // balance layer (before the STARK layer) rather than only via FRI.
+    assert!(
+        matches!(
+            err,
+            P256ProofError::RelationImbalance { .. } | P256ProofError::ProofLayer(_)
+        ),
+        "expected a hard verifier rejection, got {err:?}"
+    );
 }
 
 #[test]
@@ -494,12 +536,23 @@ fn current_p256_monolithic_verifier_rejects_mutated_fake_glv_selector_claim() {
 
     let err = verify_current_air_monolithic::<Blake2sMerkleChannel>(monolithic)
         .expect_err("mutated fake-GLV selector AIR claim must reject");
-
-    assert!(matches!(err, P256ProofError::ProofLayer(_)));
+    assert!(
+        matches!(
+            err,
+            P256ProofError::RelationImbalance { .. } | P256ProofError::ProofLayer(_)
+        ),
+        "expected a hard verifier rejection, got {err:?}"
+    );
 }
 
+/// O1 — the prover-supplied `ecdsa_result_provider_claimed_sum` (and the public
+/// instance provider sum) are PUBLIC-DATA initial-LogUp claims with no committed
+/// trace, so the verifier recomputes them from its own instances and ignores
+/// the prover's value. Tampering with the field is therefore a no-op: the proof
+/// still verifies (the recomputed provider overrides the tampered one). Before
+/// O1 this same tampering produced a forgeable `EcdsaResult` balance.
 #[test]
-fn current_p256_monolithic_verifier_rejects_unbalanced_ecdsa_result_sum() {
+fn current_p256_monolithic_verifier_ignores_prover_ecdsa_result_provider_sum() {
     use num_traits::One;
     let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
         valid_real_input_with_small_u_scalars(7, 11),
@@ -512,15 +565,10 @@ fn current_p256_monolithic_verifier_rejects_unbalanced_ecdsa_result_sum() {
         .interaction_claim
         .ecdsa_result_provider_claimed_sum += SecureField::one();
 
-    let err = verify_current_air_monolithic::<Blake2sMerkleChannel>(monolithic)
-        .expect_err("EcdsaResult balance must reject mutated provider sum");
-
-    assert!(matches!(
-        err,
-        P256ProofError::RelationImbalance {
-            relation: "EcdsaResult"
-        }
-    ));
+    verify_current_air_monolithic::<Blake2sMerkleChannel>(monolithic).expect(
+        "the verifier recomputes the ecdsa-result provider from its instances, \
+         so a tampered prover-supplied value is ignored",
+    );
 }
 
 #[test]
@@ -2418,3 +2466,4 @@ fn current_p256_per_component_shape_diagnostic() {
         eprintln!("component {index:2} log={log:2} pre={pre:3} base={base:4} inter={inter:4}");
     }
 }
+
