@@ -167,11 +167,18 @@ constants, so no replay of one row's digest into another row/component/kind.
 - **I-4 public binding**: untouched.
 
 ### 5.3 The preprocessed schedule (presence) requirement
-The digest yield multiplicity and the tall group layout are PREPROCESSED, so
-the set of digest-carrying rows must be witness-independent. This holds for
+The tall group layout (start/end/in_group flags) is PREPROCESSED — it is the
+schedule ANCHOR: every scheduled group's digest is consumed unconditionally,
+so a wide row that fails to yield (or yields when unscheduled) unbalances the
+relation. The WIDE yield numerator may therefore be the witness `active`
+column (adopted components use it): honest activity must match the schedule,
+and any dishonest deviation is rejected by the anchored tall side. The set of
+scheduled rows must be witness-independent for completeness. This holds for
 the adopted components: the ladder schedule, prepared-table rows, final_add /
 curve-check / scalar_setup active rows are deterministic per signature count
-(the existing preprocessed row-index/schedule columns encode exactly this).
+(the existing preprocessed row-index/schedule columns encode exactly this;
+the layouts derive from the claim's mixed `rows` count, from which the
+verifier rebuilds the preprocessed root).
 Witness-dependent gates (e.g. `has_muls`, formula-kind flags) do NOT gate the
 digest: all use-list columns are digested unconditionally (§5.4). If a future
 component has genuinely witness-dependent activity, it cannot adopt the
@@ -219,8 +226,10 @@ Per adopted wide component: ~L/2 QM31 logup columns removed per row-width,
 M31 columns at log_size ≈ log2(rows·L/K).
 
 Phases (measure shape + proof size + e2e after each):
-- **A**: gadget components + adopt `fake_glv_projective_source`
-  (1,976 → ~110 wide cols + tall ~36 cols at ~2^15) — the largest single win.
+- **A** ✅ (2026-06-11): gadget + `fake_glv_projective_source` adopted —
+  1,984 → 156 M31 interaction cols (consumer 100 at 2^8 + two talls at
+  2^13/2^14 + providers); monolith total 8,816 → 6,988; proof 4.49 → 4.06 MB;
+  e2e 1.25 s; suite 330/0.
 - **B**: adopt `prepared_table_projective_source` (2,100 → ~110 + tall at 2^11).
 - **C**: adopt `final_add.check`, `public_key_on_curve.curve_check`,
   `scalar_setup` (range9 kind added), `final_check`.
