@@ -1,5 +1,5 @@
-pub(crate) mod bit_decomposition;
-pub(crate) mod range_check;
+pub mod bit_decomposition;
+pub mod range_check;
 
 use crate::age::types::{AgeBitDecompositionProof, AgeRangeCheckProof};
 

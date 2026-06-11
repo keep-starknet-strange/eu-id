@@ -1,7 +1,8 @@
-mod calendar;
+// Calendar tables/components are shared proving utilities used by both strategies.
+pub mod calendar;
 pub(crate) mod predicate;
-pub(crate) mod strategy;
-pub(crate) mod types;
+pub mod strategy;
+pub mod types;
 
 use strategy::{AgeCheckStrategy, AgeProof};
 use types::{DateOfBirth, Error, PublicInput};

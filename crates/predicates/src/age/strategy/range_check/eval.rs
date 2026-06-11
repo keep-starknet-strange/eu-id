@@ -7,7 +7,7 @@ use stwo::core::fields::m31::BaseField;
 use stwo_constraint_framework::{EvalAtRow, FrameworkComponent, FrameworkEval, RelationEntry};
 
 #[derive(Clone)]
-pub(super) struct AgeRangeCheckEval {
+pub struct AgeRangeCheckEval {
     pub(super) public: PublicInput,
     pub(super) lookup_elements: LookupElements
 }
@@ -91,4 +91,4 @@ impl FrameworkEval for AgeRangeCheckEval {
     }
 }
 
-pub(super) type AgeRangeCheckComponent = FrameworkComponent<AgeRangeCheckEval>;
+pub type AgeRangeCheckComponent = FrameworkComponent<AgeRangeCheckEval>;

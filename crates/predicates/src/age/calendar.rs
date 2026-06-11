@@ -30,7 +30,7 @@ pub(crate) fn max_days_at(month: u32, year: u32) -> u32 {
     }
 }
 
-pub(crate) fn calendar_log_size(bounds: &AgeBounds) -> u32 {
+pub fn calendar_log_size(bounds: &AgeBounds) -> u32 {
     bits_needed((bounds.max_supported_age_years + 1) * 12) as u32
 }
 
@@ -45,7 +45,7 @@ pub(crate) fn valid_day_row_index(max_days: u32, day: u32) -> usize {
     (start + day - 1) as usize
 }
 
-pub(crate) fn generate_max_days_per_month(age_bounds: &AgeBounds) -> Trace {
+pub fn generate_max_days_per_month(age_bounds: &AgeBounds) -> Trace {
     let log_size = calendar_log_size(age_bounds);
 
     let domain = CanonicCoset::new(log_size).circle_domain();
@@ -74,7 +74,7 @@ pub(crate) fn generate_max_days_per_month(age_bounds: &AgeBounds) -> Trace {
     ]
 }
 
-pub(crate) fn valid_date_ranges() -> Trace {
+pub fn valid_date_ranges() -> Trace {
     let max_days_values: [u32; 4] = [28, 29, 30, 31];
     let total_rows: u32 = max_days_values.iter().sum();
     let log_size = bits_needed(total_rows) as u32;
@@ -102,7 +102,7 @@ pub(crate) fn valid_date_ranges() -> Trace {
 relation!(CalendarElements, 2);
 relation!(ValidDayElements, 2);
 
-pub(crate) fn calendar_max_days_col_id(bounds: &AgeBounds) -> PreProcessedColumnId {
+pub fn calendar_max_days_col_id(bounds: &AgeBounds) -> PreProcessedColumnId {
     PreProcessedColumnId {
         id: format!(
             "age/calendar/max_days/{}/{}/{}",
@@ -111,7 +111,7 @@ pub(crate) fn calendar_max_days_col_id(bounds: &AgeBounds) -> PreProcessedColumn
     }
 }
 
-pub(crate) fn calendar_index_col_id(bounds: &AgeBounds) -> PreProcessedColumnId {
+pub fn calendar_index_col_id(bounds: &AgeBounds) -> PreProcessedColumnId {
     PreProcessedColumnId {
         id: format!(
             "age/calendar/index/{}/{}/{}",
@@ -120,20 +120,20 @@ pub(crate) fn calendar_index_col_id(bounds: &AgeBounds) -> PreProcessedColumnId 
     }
 }
 
-pub(crate) fn valid_day_max_days_col_id() -> PreProcessedColumnId {
+pub fn valid_day_max_days_col_id() -> PreProcessedColumnId {
     PreProcessedColumnId {
         id: "age/valid_day/max_days".to_string(),
     }
 }
 
-pub(crate) fn valid_day_day_col_id() -> PreProcessedColumnId {
+pub fn valid_day_day_col_id() -> PreProcessedColumnId {
     PreProcessedColumnId {
         id: "age/valid_day/day".to_string(),
     }
 }
 
 #[derive(Clone)]
-pub(crate) struct CalendarTableEval {
+pub struct CalendarTableEval {
     pub bounds: AgeBounds,
     pub lookup_elements: CalendarElements,
 }
@@ -164,7 +164,7 @@ impl FrameworkEval for CalendarTableEval {
 }
 
 #[derive(Clone)]
-pub(crate) struct ValidDayTableEval {
+pub struct ValidDayTableEval {
     pub lookup_elements: ValidDayElements,
 }
 

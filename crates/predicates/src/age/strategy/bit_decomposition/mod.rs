@@ -1,9 +1,9 @@
-mod components;
-mod eval;
-mod interaction;
-mod preprocessed;
-mod witness;
-mod lookup_elements;
+pub mod components;
+pub mod eval;
+pub mod interaction;
+pub mod preprocessed;
+pub mod witness;
+pub mod lookup_elements;
 
 use crate::age::calendar::{
     calendar_log_size, valid_date_ranges,
@@ -27,7 +27,7 @@ use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::poly::circle::PolyOps;
 use stwo::prover::{prove, CommitmentSchemeProver, ComponentProver};
 
-pub struct AgeBitDecomposition(pub AgePredicate);
+pub struct AgeBitDecomposition(AgePredicate);
 
 impl AgeBitDecomposition {
     pub fn new(pcs_config: PcsConfig) -> Self {

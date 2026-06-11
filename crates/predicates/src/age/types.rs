@@ -123,7 +123,7 @@ impl PublicInput {
         }
     }
 
-    pub(crate) fn mix_into(&self, channel: &mut impl Channel) {
+    pub fn mix_into(&self, channel: &mut impl Channel) {
         channel.mix_u64(self.current.year as u64);
         channel.mix_u64(self.current.month as u64);
         channel.mix_u64(self.current.day as u64);

@@ -7,7 +7,7 @@ use num_traits::One;
 use stwo::core::fields::m31::BaseField;
 use stwo_constraint_framework::{EvalAtRow, FrameworkComponent, FrameworkEval, RelationEntry};
 
-pub(super) struct BitDecompositionEval {
+pub struct BitDecompositionEval {
     pub(super) public: PublicInput,
     pub(super) lookup_elements: LookupElements
 }
@@ -85,4 +85,4 @@ impl FrameworkEval for BitDecompositionEval {
     }
 }
 
-pub(super) type AgeBitDecompositionComponent = FrameworkComponent<BitDecompositionEval>;
+pub type AgeBitDecompositionComponent = FrameworkComponent<BitDecompositionEval>;
