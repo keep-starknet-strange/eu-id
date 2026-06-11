@@ -1,10 +1,12 @@
 #![allow(dead_code)]
 
+use predicates::age::strategy::AgeCheckStrategy;
 use predicates::{
-    age as age_predicate, AgeBitDecompositionProof, AgeCheckStrategy, AgeProof, AgeRangeCheckProof,
-    Date, DateOfBirth, PublicInput,
+    AgeBitDecomposition, AgeBitDecompositionProof, AgeRangeCheck, AgeRangeCheckProof, Date,
+    DateOfBirth, PublicInput,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
+use stwo::core::pcs::PcsConfig;
 
 use super::common::{get_flag, DEFAULT_PROOF_PATH};
 
@@ -70,12 +72,32 @@ pub fn prove(args: &[String], output: &str) {
         .unwrap_or(AgeCheckStrategy::RangeCheck);
 
     let public = PublicInput::new(current, min_age);
-    let proof = age_predicate::prove(&public, &DateOfBirth(dob), strategy).unwrap_or_else(|e| {
-        eprintln!("prove failed: {e}");
-        std::process::exit(1)
-    });
+    let dob = DateOfBirth(dob);
 
-    std::fs::write(output, serialize_proof(&proof)).unwrap_or_else(|e| {
+    // Each strategy is its own predicate; call the chosen one directly and
+    // serialize its concrete proof type.
+    let proof_bytes = match strategy {
+        AgeCheckStrategy::RangeCheck => {
+            let proof = AgeRangeCheck::new(PcsConfig::default())
+                .prove(&public, &dob)
+                .unwrap_or_else(|e| {
+                    eprintln!("prove failed: {e}");
+                    std::process::exit(1)
+                });
+            bincode::serialize(&proof).unwrap()
+        }
+        AgeCheckStrategy::BitDecomposition => {
+            let proof = AgeBitDecomposition::new(PcsConfig::default())
+                .prove(&public, &dob)
+                .unwrap_or_else(|e| {
+                    eprintln!("prove failed: {e}");
+                    std::process::exit(1)
+                });
+            bincode::serialize(&proof).unwrap()
+        }
+    };
+
+    std::fs::write(output, proof_bytes).unwrap_or_else(|e| {
         eprintln!("failed to write proof: {e}");
         std::process::exit(1)
     });
@@ -102,12 +124,20 @@ pub fn verify(args: &[String], input: &str) {
         std::process::exit(1);
     });
 
-    let proof = deserialize_proof(&bytes, strategy).unwrap_or_else(|e| {
-        eprintln!("failed to deserialize proof: {e}");
-        std::process::exit(1)
-    });
+    // Deserialize the concrete proof type for the chosen strategy and verify it
+    // with that strategy's predicate directly.
+    let result = match strategy {
+        AgeCheckStrategy::RangeCheck => {
+            let proof: AgeRangeCheckProof = deserialize_proof(&bytes);
+            AgeRangeCheck::new(PcsConfig::default()).verify(&proof)
+        }
+        AgeCheckStrategy::BitDecomposition => {
+            let proof: AgeBitDecompositionProof = deserialize_proof(&bytes);
+            AgeBitDecomposition::new(PcsConfig::default()).verify(&proof)
+        }
+    };
 
-    age_predicate::verify(&proof).unwrap_or_else(|e| {
+    result.unwrap_or_else(|e| {
         eprintln!("verify failed: {e}");
         std::process::exit(1)
     });
@@ -164,25 +194,9 @@ fn parse_strategy(s: &str) -> Result<AgeCheckStrategy, String> {
     }
 }
 
-fn serialize_proof(proof: &AgeProof) -> Vec<u8> {
-    match proof {
-        AgeProof::BitDecomposition(p) => bincode::serialize(p).unwrap(),
-        AgeProof::RangeCheck(p) => bincode::serialize(p).unwrap(),
-    }
-}
-
-fn deserialize_proof(
-    bytes: &[u8],
-    strategy: AgeCheckStrategy,
-) -> Result<AgeProof, Box<dyn std::error::Error>> {
-    match strategy {
-        AgeCheckStrategy::BitDecomposition => {
-            let p: AgeBitDecompositionProof = bincode::deserialize(bytes)?;
-            Ok(AgeProof::BitDecomposition(p))
-        }
-        AgeCheckStrategy::RangeCheck => {
-            let p: AgeRangeCheckProof = bincode::deserialize(bytes)?;
-            Ok(AgeProof::RangeCheck(p))
-        }
-    }
+fn deserialize_proof<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> T {
+    bincode::deserialize(bytes).unwrap_or_else(|e| {
+        eprintln!("failed to deserialize proof: {e}");
+        std::process::exit(1)
+    })
 }
