@@ -3,18 +3,19 @@ mod eval;
 mod interaction;
 mod preprocessed;
 mod witness;
+mod lookup_elements;
 
 use crate::age::calendar::{
-    calendar_log_size, valid_date_ranges, CalendarElements, ValidDayElements,
+    calendar_log_size, valid_date_ranges,
 };
 use crate::age::predicate::AgePredicate;
 use crate::age::strategy::range_check::components::components;
 use crate::age::strategy::range_check::interaction::InteractionTraces;
+use crate::age::strategy::range_check::lookup_elements::LookupElements;
 use crate::age::strategy::range_check::preprocessed::Preprocessed;
 use crate::age::strategy::range_check::witness::WitnessData;
 use crate::age::types::{AgeRangeCheckProof, DateOfBirth, Error, PublicInput, Witness};
 use crate::predicate::{Predicate, StandalonePredicate};
-use crate::range_check::RangeCheckLookupElements;
 use num_traits::Zero;
 use stwo::core::channel::{Blake2sChannel, Channel};
 use stwo::core::fields::qm31::QM31;
@@ -115,21 +116,13 @@ impl StandalonePredicate for AgeRangeCheck {
         witness_data.extend_evals(&mut tb);
         tb.commit(channel);
 
-        let calendar_elements = CalendarElements::draw(channel);
-        let valid_day_elements = ValidDayElements::draw(channel);
-        let day_delta_elements = RangeCheckLookupElements::draw(channel);
-        let month_delta_elements = RangeCheckLookupElements::draw(channel);
-        let year_delta_elements = RangeCheckLookupElements::draw(channel);
+        let lookup_elements = LookupElements::draw(channel);
 
         // Phase 3: interaction traces
         let interaction = InteractionTraces::new(
             &witness_data,
             &preprocessed,
-            &calendar_elements,
-            &valid_day_elements,
-            &day_delta_elements,
-            &month_delta_elements,
-            &year_delta_elements,
+            &lookup_elements
         );
 
         interaction.mix_into(channel);
@@ -149,11 +142,7 @@ impl StandalonePredicate for AgeRangeCheck {
             year_delta_component,
         ) = components(
             public,
-            calendar_elements,
-            valid_day_elements,
-            day_delta_elements,
-            month_delta_elements,
-            year_delta_elements,
+            lookup_elements,
             interaction.age_claimed_sum,
             interaction.cal_claimed_sum,
             interaction.valid_day_claimed_sum,
@@ -238,11 +227,7 @@ impl StandalonePredicate for AgeRangeCheck {
             .collect();
         commitment_scheme.commit(proof.stark_proof.commitments[1], &main_sizes, channel);
 
-        let calendar_elements = CalendarElements::draw(channel);
-        let valid_day_elements = ValidDayElements::draw(channel);
-        let day_delta_elements = RangeCheckLookupElements::draw(channel);
-        let month_delta_elements = RangeCheckLookupElements::draw(channel);
-        let year_delta_elements = RangeCheckLookupElements::draw(channel);
+        let lookup_elements = LookupElements::draw(channel);
 
         channel.mix_felts(&[
             proof.age_claimed_sum,
@@ -285,11 +270,7 @@ impl StandalonePredicate for AgeRangeCheck {
             year_delta_component,
         ) = components(
             &proof.public,
-            calendar_elements,
-            valid_day_elements,
-            day_delta_elements,
-            month_delta_elements,
-            year_delta_elements,
+            lookup_elements,
             proof.age_claimed_sum,
             proof.calendar_table_claimed_sum,
             proof.valid_day_table_claimed_sum,

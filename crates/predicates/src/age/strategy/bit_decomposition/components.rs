@@ -1,11 +1,12 @@
 use crate::age::calendar::{
     calendar_index_col_id, calendar_max_days_col_id, valid_day_day_col_id,
-    valid_day_max_days_col_id, CalendarElements, CalendarTableComponent, CalendarTableEval,
-    ValidDayElements, ValidDayTableComponent, ValidDayTableEval,
+    valid_day_max_days_col_id, CalendarTableComponent, CalendarTableEval
+    , ValidDayTableComponent, ValidDayTableEval,
 };
 use crate::age::strategy::bit_decomposition::eval::{
     AgeBitDecompositionComponent, BitDecompositionEval,
 };
+use crate::age::strategy::bit_decomposition::lookup_elements::LookupElements;
 use crate::{AgeBounds, PublicInput};
 use stwo::core::fields::qm31::QM31;
 use stwo_constraint_framework::TraceLocationAllocator;
@@ -21,8 +22,7 @@ fn make_allocator(bounds: &AgeBounds) -> TraceLocationAllocator {
 
 pub fn components(
     public: &PublicInput,
-    calendar_elements: CalendarElements,
-    valid_day_elements: ValidDayElements,
+    lookup_elements: LookupElements,
     age_claimed_sum: QM31,
     cal_claimed_sum: QM31,
     valid_day_claimed_sum: QM31,
@@ -36,8 +36,7 @@ pub fn components(
         &mut allocator,
         BitDecompositionEval {
             public: *public,
-            calendar_elements: calendar_elements.clone(),
-            valid_day_elements: valid_day_elements.clone(),
+            lookup_elements: lookup_elements.clone(),
         },
         age_claimed_sum,
     );
@@ -45,14 +44,14 @@ pub fn components(
         &mut allocator,
         CalendarTableEval {
             bounds: public.bounds,
-            lookup_elements: calendar_elements,
+            lookup_elements: lookup_elements.calendar,
         },
         cal_claimed_sum,
     );
     let valid_day_component = ValidDayTableComponent::new(
         &mut allocator,
         ValidDayTableEval {
-            lookup_elements: valid_day_elements,
+            lookup_elements: lookup_elements.valid_day,
         },
         valid_day_claimed_sum,
     );

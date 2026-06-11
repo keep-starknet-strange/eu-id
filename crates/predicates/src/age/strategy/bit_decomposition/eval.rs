@@ -1,4 +1,4 @@
-use crate::age::calendar::{CalendarElements, ValidDayElements};
+use crate::age::strategy::bit_decomposition::lookup_elements::LookupElements;
 use crate::age::strategy::bit_decomposition::witness::WitnessData;
 use crate::age::strategy::bit_decomposition::witness::{DAY_OFFSET_BITS, MONTH_OFFSET_BITS};
 use crate::age::types::{PublicInput, DATE_MONTH_BASE, DATE_YEAR_BASE};
@@ -9,8 +9,7 @@ use stwo_constraint_framework::{EvalAtRow, FrameworkComponent, FrameworkEval, Re
 
 pub(super) struct BitDecompositionEval {
     pub(super) public: PublicInput,
-    pub(super) calendar_elements: CalendarElements,
-    pub(super) valid_day_elements: ValidDayElements,
+    pub(super) lookup_elements: LookupElements
 }
 
 impl FrameworkEval for BitDecompositionEval {
@@ -71,12 +70,12 @@ impl FrameworkEval for BitDecompositionEval {
             + dob_month
             - field_const::<E>(1);
         eval.add_to_relation(RelationEntry::new(
-            &self.calendar_elements,
+            &self.lookup_elements.calendar,
             E::EF::one(),
             &[table_index, max_days.clone()],
         ));
         eval.add_to_relation(RelationEntry::new(
-            &self.valid_day_elements,
+            &self.lookup_elements.valid_day,
             E::EF::one(),
             &[max_days, dob_day],
         ));

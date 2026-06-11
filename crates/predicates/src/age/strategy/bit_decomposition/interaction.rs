@@ -1,4 +1,4 @@
-use crate::age::calendar::{CalendarElements, ValidDayElements};
+use crate::age::strategy::bit_decomposition::lookup_elements::LookupElements;
 use crate::age::strategy::bit_decomposition::preprocessed::Preprocessed;
 use crate::age::strategy::bit_decomposition::witness::WitnessData;
 use crate::types::Trace;
@@ -26,8 +26,7 @@ impl InteractionTraces {
     pub fn new(
         witness_data: &WitnessData,
         preprocessed: &Preprocessed,
-        calendar_elements: &CalendarElements,
-        valid_day_elements: &ValidDayElements,
+        lookup_elements: &LookupElements
     ) -> Self {
         let cal_log_size = preprocessed.cal_trace[0].domain.log_size();
         let valid_day_log_size = preprocessed.valid_day_trace[0].domain.log_size();
@@ -40,7 +39,7 @@ impl InteractionTraces {
         col_gen.write_frac(
             0,
             PackedQM31::one(),
-            calendar_elements.combine(&[
+            lookup_elements.calendar.combine(&[
                 PackedM31::broadcast(M31::from_u32_unchecked(witness_data.table_index)),
                 PackedM31::broadcast(M31::from_u32_unchecked(witness_data.dob_max_days)),
             ]),
@@ -51,7 +50,7 @@ impl InteractionTraces {
         col_gen.write_frac(
             0,
             PackedQM31::one(),
-            valid_day_elements.combine(&[
+            lookup_elements.valid_day.combine(&[
                 PackedM31::broadcast(M31::from_u32_unchecked(witness_data.dob_max_days)),
                 PackedM31::broadcast(M31::from_u32_unchecked(witness_data.dob_day)),
             ]),
@@ -71,7 +70,7 @@ impl InteractionTraces {
             col_gen.write_frac(
                 vec_row,
                 PackedQM31::from(-mult_val),
-                calendar_elements.combine(&[index_val, max_days_val]),
+                lookup_elements.calendar.combine(&[index_val, max_days_val]),
             );
         }
         col_gen.finalize_col();
@@ -88,7 +87,7 @@ impl InteractionTraces {
             col_gen.write_frac(
                 vec_row,
                 PackedQM31::from(-mult_val),
-                valid_day_elements.combine(&[max_days_val, day_val]),
+                lookup_elements.valid_day.combine(&[max_days_val, day_val]),
             );
         }
         col_gen.finalize_col();

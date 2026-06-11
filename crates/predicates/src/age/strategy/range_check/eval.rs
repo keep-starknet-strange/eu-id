@@ -1,7 +1,6 @@
-use crate::age::calendar::{CalendarElements, ValidDayElements};
+use crate::age::strategy::range_check::lookup_elements::LookupElements;
 use crate::age::strategy::range_check::witness::WitnessData;
 use crate::age::types::PublicInput;
-use crate::range_check::RangeCheckLookupElements;
 use crate::utils::field_const;
 use num_traits::One;
 use stwo::core::fields::m31::BaseField;
@@ -10,11 +9,7 @@ use stwo_constraint_framework::{EvalAtRow, FrameworkComponent, FrameworkEval, Re
 #[derive(Clone)]
 pub(super) struct AgeRangeCheckEval {
     pub(super) public: PublicInput,
-    pub(super) calendar_elements: CalendarElements,
-    pub(super) valid_day_elements: ValidDayElements,
-    pub(super) day_delta_elements: RangeCheckLookupElements,
-    pub(super) month_delta_elements: RangeCheckLookupElements,
-    pub(super) year_delta_elements: RangeCheckLookupElements,
+    pub(super) lookup_elements: LookupElements
 }
 
 impl FrameworkEval for AgeRangeCheckEval {
@@ -66,27 +61,27 @@ impl FrameworkEval for AgeRangeCheckEval {
             + birth_month
             - field_const::<E>(1);
         eval.add_to_relation(RelationEntry::new(
-            &self.calendar_elements,
+            &self.lookup_elements.calendar,
             E::EF::one(),
             &[table_index, max_days.clone()],
         ));
         eval.add_to_relation(RelationEntry::new(
-            &self.valid_day_elements,
+            &self.lookup_elements.valid_day,
             E::EF::one(),
             &[max_days, birth_day],
         ));
         eval.add_to_relation(RelationEntry::new(
-            &self.day_delta_elements,
+            &self.lookup_elements.day_delta,
             E::EF::one(),
             &[day_delta],
         ));
         eval.add_to_relation(RelationEntry::new(
-            &self.month_delta_elements,
+            &self.lookup_elements.month_delta,
             E::EF::one(),
             &[month_delta],
         ));
         eval.add_to_relation(RelationEntry::new(
-            &self.year_delta_elements,
+            &self.lookup_elements.year_delta,
             E::EF::one(),
             &[year_delta],
         ));

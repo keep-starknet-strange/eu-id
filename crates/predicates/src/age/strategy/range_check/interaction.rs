@@ -1,7 +1,6 @@
-use crate::age::calendar::{CalendarElements, ValidDayElements};
+use crate::age::strategy::range_check::lookup_elements::LookupElements;
 use crate::age::strategy::range_check::preprocessed::Preprocessed;
 use crate::age::strategy::range_check::witness::WitnessData;
-use crate::range_check::RangeCheckLookupElements;
 use crate::types::Trace;
 use num_traits::One;
 use stwo::core::channel::Channel;
@@ -33,11 +32,7 @@ impl InteractionTraces {
     pub fn new(
         witness_data: &WitnessData,
         preprocessed: &Preprocessed,
-        calendar_elements: &CalendarElements,
-        valid_day_elements: &ValidDayElements,
-        day_delta_elements: &RangeCheckLookupElements,
-        month_delta_elements: &RangeCheckLookupElements,
-        year_delta_elements: &RangeCheckLookupElements,
+        lookup_elements: &LookupElements,
     ) -> Self {
         let cal_log_size = preprocessed.cal_trace[0].domain.log_size();
         let valid_day_log_size = preprocessed.valid_day_trace[0].domain.log_size();
@@ -52,7 +47,7 @@ impl InteractionTraces {
             col_gen.write_frac(
                 packed_row,
                 PackedQM31::one(),
-                calendar_elements.combine(&[
+                lookup_elements.calendar.combine(&[
                     PackedM31::broadcast(M31::from_u32_unchecked(witness_data.table_index)),
                     PackedM31::broadcast(M31::from_u32_unchecked(witness_data.dob_max_days)),
                 ]),
@@ -65,7 +60,7 @@ impl InteractionTraces {
             col_gen.write_frac(
                 packed_row,
                 PackedQM31::one(),
-                valid_day_elements.combine(&[
+                lookup_elements.valid_day.combine(&[
                     PackedM31::broadcast(M31::from_u32_unchecked(witness_data.dob_max_days)),
                     PackedM31::broadcast(M31::from_u32_unchecked(witness_data.dob_day)),
                 ]),
@@ -78,7 +73,7 @@ impl InteractionTraces {
             col_gen.write_frac(
                 packed_row,
                 PackedQM31::one(),
-                day_delta_elements.combine(&[PackedM31::broadcast(M31::from_u32_unchecked(
+                lookup_elements.day_delta.combine(&[PackedM31::broadcast(M31::from_u32_unchecked(
                     witness_data.day_delta_val,
                 ))]),
             );
@@ -90,7 +85,7 @@ impl InteractionTraces {
             col_gen.write_frac(
                 packed_row,
                 PackedQM31::one(),
-                month_delta_elements.combine(&[PackedM31::broadcast(M31::from_u32_unchecked(
+                lookup_elements.month_delta.combine(&[PackedM31::broadcast(M31::from_u32_unchecked(
                     witness_data.month_delta_val,
                 ))]),
             );
@@ -102,7 +97,7 @@ impl InteractionTraces {
             col_gen.write_frac(
                 packed_row,
                 PackedQM31::one(),
-                year_delta_elements.combine(&[PackedM31::broadcast(M31::from_u32_unchecked(
+                lookup_elements.year_delta.combine(&[PackedM31::broadcast(M31::from_u32_unchecked(
                     witness_data.year_delta_val,
                 ))]),
             );
@@ -121,7 +116,7 @@ impl InteractionTraces {
             col_gen.write_frac(
                 vec_row,
                 PackedQM31::from(-mult_val),
-                calendar_elements.combine(&[index_val, max_days_val]),
+                lookup_elements.calendar.combine(&[index_val, max_days_val]),
             );
         }
         col_gen.finalize_col();
@@ -137,7 +132,7 @@ impl InteractionTraces {
             col_gen.write_frac(
                 vec_row,
                 PackedQM31::from(-mult_val),
-                valid_day_elements.combine(&[max_days_val, day_val]),
+                lookup_elements.valid_day.combine(&[max_days_val, day_val]),
             );
         }
         col_gen.finalize_col();
@@ -153,7 +148,7 @@ impl InteractionTraces {
             col_gen.write_frac(
                 vec_row,
                 PackedQM31::from(-mult),
-                day_delta_elements.combine(&[value]),
+                lookup_elements.day_delta.combine(&[value]),
             );
         }
         col_gen.finalize_col();
@@ -169,7 +164,7 @@ impl InteractionTraces {
             col_gen.write_frac(
                 vec_row,
                 PackedQM31::from(-mult),
-                month_delta_elements.combine(&[value]),
+                lookup_elements.month_delta.combine(&[value]),
             );
         }
         col_gen.finalize_col();
@@ -184,7 +179,7 @@ impl InteractionTraces {
             col_gen.write_frac(
                 vec_row,
                 PackedQM31::from(-mult),
-                year_delta_elements.combine(&[value]),
+                lookup_elements.year_delta.combine(&[value]),
             );
         }
         col_gen.finalize_col();

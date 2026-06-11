@@ -3,13 +3,15 @@ mod eval;
 mod interaction;
 mod preprocessed;
 mod witness;
+mod lookup_elements;
 
 use crate::age::calendar::{
-    calendar_log_size, valid_date_ranges, CalendarElements, ValidDayElements,
+    calendar_log_size, valid_date_ranges,
 };
 use crate::age::predicate::AgePredicate;
 use crate::age::strategy::bit_decomposition::components::components;
 use crate::age::strategy::bit_decomposition::interaction::InteractionTraces;
+use crate::age::strategy::bit_decomposition::lookup_elements::LookupElements;
 use crate::age::strategy::bit_decomposition::preprocessed::Preprocessed;
 use crate::age::strategy::bit_decomposition::witness::WitnessData;
 use crate::age::types::{AgeBitDecompositionProof, DateOfBirth, Error, PublicInput, Witness};
@@ -108,15 +110,13 @@ impl StandalonePredicate for AgeBitDecomposition {
         witness_data.extend_evals(&mut tb);
         tb.commit(channel);
 
-        let calendar_elements = CalendarElements::draw(channel);
-        let valid_day_elements = ValidDayElements::draw(channel);
+        let lookup_elements = LookupElements::draw(channel);
 
         // Phase 3: interaction traces
         let interaction = InteractionTraces::new(
             &witness_data,
             &preprocessed,
-            &calendar_elements,
-            &valid_day_elements,
+            &lookup_elements
         );
 
         interaction.mix_into(channel);
@@ -129,8 +129,7 @@ impl StandalonePredicate for AgeBitDecomposition {
         // Phase 4: component assembly
         let (age_component, cal_component, valid_day_component) = components(
             public,
-            calendar_elements,
-            valid_day_elements,
+            lookup_elements,
             interaction.age_claimed_sum,
             interaction.cal_claimed_sum,
             interaction.valid_day_claimed_sum,
@@ -185,8 +184,7 @@ impl StandalonePredicate for AgeBitDecomposition {
                 .collect();
         commitment_scheme.commit(proof.stark_proof.commitments[1], &main_sizes, channel);
 
-        let calendar_elements = CalendarElements::draw(channel);
-        let valid_day_elements = ValidDayElements::draw(channel);
+        let lookup_elements = LookupElements::draw(channel);
 
         channel.mix_felts(&[
             proof.age_claimed_sum,
@@ -212,8 +210,7 @@ impl StandalonePredicate for AgeBitDecomposition {
 
         let (age_component, cal_component, valid_day_component) = components(
             &proof.public,
-            calendar_elements,
-            valid_day_elements,
+            lookup_elements,
             proof.age_claimed_sum,
             proof.calendar_table_claimed_sum,
             proof.valid_day_table_claimed_sum,
