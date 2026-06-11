@@ -1,4 +1,6 @@
 pub mod age;
+// Orchestrator that combines proving modules into one STARK proof.
+pub mod air;
 // Generic range-check gadget shared by the proving process (embedded in each
 // strategy's `LookupElements`).
 pub mod range_check;
@@ -20,4 +22,4 @@ pub use nat::types::{
     Error as NatError, InputError as NatInputError, PrivateInput as NatPrivateInput,
     Proof as NatProof, PublicInput as NatPublicInput,
 };
-pub use predicate::{Predicate, StandalonePredicate};
+pub use predicate::{PredicateProver, PredicateVerifier};

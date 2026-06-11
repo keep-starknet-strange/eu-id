@@ -12,8 +12,7 @@ use crate::age::strategy::bit_decomposition::interaction::InteractionTraces;
 use crate::age::strategy::bit_decomposition::lookup_elements::LookupElements;
 use crate::age::strategy::bit_decomposition::preprocessed::Preprocessed;
 use crate::age::strategy::bit_decomposition::witness::WitnessData;
-use crate::age::types::{AgeBitDecompositionProof, DateOfBirth, Error, PublicInput, Witness};
-use crate::predicate::{Predicate, StandalonePredicate};
+use crate::age::types::{AgeBitDecompositionProof, DateOfBirth, Error, PublicInput};
 use num_traits::Zero;
 use stwo::core::channel::{Blake2sChannel, Channel};
 use stwo::core::fields::qm31::QM31;
@@ -41,36 +40,15 @@ impl AgeBitDecomposition {
     }
 }
 
-impl Predicate for AgeBitDecomposition {
-    type PublicInput = PublicInput;
-    type PrivateInput = DateOfBirth;
-    type Witness = Witness;
-    type Error = Error;
-
-    fn validate(&self, public: &Self::PublicInput) -> Result<(), Self::Error> {
-        self.0.validate(public)
-    }
-
-    fn witness(
+impl AgeBitDecomposition {
+    pub fn prove(
         &self,
-        public: &Self::PublicInput,
-        private: &Self::PrivateInput,
-    ) -> Result<Self::Witness, Self::Error> {
-        self.0.witness(public, private)
-    }
-}
+        public: &PublicInput,
+        private: &DateOfBirth,
+    ) -> Result<AgeBitDecompositionProof, Error> {
+        self.0.validate(public)?;
 
-impl StandalonePredicate for AgeBitDecomposition {
-    type Proof = AgeBitDecompositionProof;
-
-    fn prove(
-        &self,
-        public: &Self::PublicInput,
-        private: &Self::PrivateInput,
-    ) -> Result<Self::Proof, Self::Error> {
-        self.validate(public)?;
-
-        let witness = self.witness(public, private)?;
+        let witness = self.0.witness(public, private)?;
         let bounds = public.bounds;
 
         // Phase 1: preprocessed tables
@@ -145,8 +123,8 @@ impl StandalonePredicate for AgeBitDecomposition {
         })
     }
 
-    fn verify(&self, proof: &Self::Proof) -> Result<(), Self::Error> {
-        self.validate(&proof.public)?;
+    pub fn verify(&self, proof: &AgeBitDecompositionProof) -> Result<(), Error> {
+        self.0.validate(&proof.public)?;
 
         let bounds = proof.public.bounds;
         let cal_log_size = calendar_log_size(&bounds);

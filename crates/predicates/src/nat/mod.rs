@@ -1,3 +1,4 @@
+pub mod air;
 pub mod components;
 pub mod eval;
 pub mod interaction;
@@ -8,26 +9,15 @@ pub mod table;
 pub mod types;
 pub mod witness;
 
-use components::components;
-use interaction::InteractionTraces;
-use lookup_elements::LookupElements;
-use preprocessed::Preprocessed;
+use air::{NatProver, NatVerifier};
 use types::{Error, InputError, PrivateInput, Proof, PublicInput, Witness};
-use witness::WitnessData;
 
+use crate::air::{prove, verify, Air};
 use crate::nat::nationalities::Nationality;
-use crate::predicate::{Predicate, StandalonePredicate};
-use num_traits::Zero;
+use crate::predicate::{PredicateProver, PredicateVerifier};
 use strum::IntoEnumIterator;
-use stwo::core::channel::{Blake2sChannel, Channel};
 use stwo::core::fields::qm31::QM31;
-use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
-use stwo::core::poly::circle::CanonicCoset;
-use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
-use stwo::core::verifier::verify;
-use stwo::prover::backend::simd::SimdBackend;
-use stwo::prover::poly::circle::PolyOps;
-use stwo::prover::{prove, CommitmentSchemeProver, ComponentProver};
+use stwo::core::pcs::PcsConfig;
 
 pub struct NationalityPredicate {
     pub pcs_config: PcsConfig,
@@ -39,12 +29,8 @@ impl NationalityPredicate {
     }
 }
 
-impl Predicate for NationalityPredicate {
-    type PublicInput = PublicInput;
-    type PrivateInput = PrivateInput;
-    type Witness = Witness;
-    type Error = Error;
-
+impl NationalityPredicate {
+    /// Check the acceptable set is well-formed.
     fn validate(&self, public: &PublicInput) -> Result<(), Error> {
         if public.acceptable.len() < 2 {
             return Err(InputError::AcceptableSetTooSmall.into());
@@ -59,6 +45,7 @@ impl Predicate for NationalityPredicate {
         Ok(())
     }
 
+    /// Find the first private nationality that is in the acceptable set.
     fn witness(&self, public: &PublicInput, private: &PrivateInput) -> Result<Witness, Error> {
         for &nat in &private.nationalities {
             if let Ok(row_index) = public.acceptable.binary_search(&nat) {
@@ -71,146 +58,55 @@ impl Predicate for NationalityPredicate {
         }
         Err(InputError::NoMatch.into())
     }
-}
 
-impl StandalonePredicate for NationalityPredicate {
-    type Proof = Proof;
+    /// Prove this predicate on its own and pack the result into a [`Proof`].
+    pub fn prove(&self, public: &PublicInput, private: &PrivateInput) -> Result<Proof, Error> {
+        let mut prover = self.prover(public, private)?;
+        let stark_proof = prove(&mut [&mut prover], self.pcs_config)?;
 
-    fn prove(&self, public: &PublicInput, private: &PrivateInput) -> Result<Proof, Error> {
-        self.validate(public)?;
-        let witness = self.witness(public, private)?;
-
-        let preprocessed_log_size = public.log_size();
-        let preprocessed = Preprocessed::new(public);
-
-        let max_log_size = WitnessData::log_size().max(preprocessed_log_size);
-        let twiddles = SimdBackend::precompute_twiddles(
-            CanonicCoset::new(max_log_size + 1 + self.pcs_config.fri_config.log_blowup_factor)
-                .circle_domain()
-                .half_coset,
-        );
-
-        let channel = &mut Blake2sChannel::default();
-        self.pcs_config.mix_into(channel);
-
-        let mut commitment_scheme =
-            CommitmentSchemeProver::<SimdBackend, Blake2sMerkleChannel>::new(
-                self.pcs_config,
-                &twiddles,
-            );
-
-        // Tree 0: acceptable nationality table (1 column).
-        let mut tb = commitment_scheme.tree_builder();
-        preprocessed.extend_evals(&mut tb);
-        tb.commit(channel);
-
-        public.mix_into(channel);
-
-        // Tree 1: nationality witness (1 col) + table multiplicity (1 col).
-        let witness_data = WitnessData::new(&witness, public);
-        let mut tb = commitment_scheme.tree_builder();
-        witness_data.extend_evals(&mut tb);
-        tb.commit(channel);
-
-        let lookup_elements = LookupElements::draw(channel);
-
-        // Tree 2: interaction traces (1 logup fraction per component = 4 M31 cols each).
-        let interaction = InteractionTraces::new(&witness_data, &preprocessed, &lookup_elements);
-        interaction.mix_into(channel);
-
-        let mut tb = commitment_scheme.tree_builder();
-        interaction.extend_evals(&mut tb);
-        tb.commit(channel);
-
-        let (nat_component, table_component) = components(
-            public,
-            lookup_elements,
-            interaction.nat_claimed_sum,
-            interaction.table_claimed_sum,
-        );
-
-        let stark_proof = prove::<SimdBackend, Blake2sMerkleChannel>(
-            &[
-                &nat_component as &dyn ComponentProver<SimdBackend>,
-                &table_component,
-            ],
-            channel,
-            commitment_scheme,
-        )?;
-
+        let claimed_sums = prover.claimed_sums();
         Ok(Proof {
             public: public.clone(),
-            nat_claimed_sum: interaction.nat_claimed_sum,
-            table_claimed_sum: interaction.table_claimed_sum,
+            nat_claimed_sum: claimed_sums[0],
+            table_claimed_sum: claimed_sums[1],
             stark_proof,
         })
     }
 
-    fn verify(&self, proof: &Proof) -> Result<(), Error> {
-        self.validate(&proof.public)?;
-
-        let t_log_size = proof.public.log_size();
-        let nat_log_size = WitnessData::log_size();
-
-        let config = proof.stark_proof.config;
-        let channel = &mut Blake2sChannel::default();
-        config.mix_into(channel);
-
-        let commitment_scheme = &mut CommitmentSchemeVerifier::<Blake2sMerkleChannel>::new(config);
-
-        // Tree 0: acceptable nationality table (1 column).
-        commitment_scheme.commit(proof.stark_proof.commitments[0], &[t_log_size], channel);
-
-        proof.public.mix_into(channel);
-
-        // Tree 1: nationality witness (1 col) + table multiplicity (1 col).
-        commitment_scheme.commit(
-            proof.stark_proof.commitments[1],
-            &[nat_log_size, t_log_size],
-            channel,
-        );
-
-        let lookup_elements = LookupElements::draw(channel);
-
-        channel.mix_felts(&[proof.nat_claimed_sum, proof.table_claimed_sum]);
-
-        if proof.nat_claimed_sum + proof.table_claimed_sum != QM31::zero() {
-            return Err(InputError::InvalidProof.into());
-        }
-
-        // Tree 2: nat interaction (4 M31) + table interaction (4 M31).
-        commitment_scheme.commit(
-            proof.stark_proof.commitments[2],
-            &std::iter::repeat_n(nat_log_size, 4)
-                .chain(std::iter::repeat_n(t_log_size, 4))
-                .collect::<Vec<_>>(),
-            channel,
-        );
-
-        let (nat_component, table_component) = components(
+    /// Verify a standalone [`Proof`] of this predicate.
+    pub fn verify(&self, proof: &Proof) -> Result<(), Error> {
+        let mut verifier = self.verifier(
             &proof.public,
-            lookup_elements,
-            proof.nat_claimed_sum,
-            proof.table_claimed_sum,
-        );
-
-        verify(
-            &[&nat_component, &table_component],
-            channel,
-            commitment_scheme,
-            proof.stark_proof.clone(),
+            &[proof.nat_claimed_sum, proof.table_claimed_sum],
         )?;
+        verify(&mut [&mut verifier], &proof.stark_proof)?;
 
         Ok(())
     }
 }
 
-pub fn prove_nationality(public: &PublicInput, private: &PrivateInput) -> Result<Proof, Error> {
-    NationalityPredicate::new(PcsConfig::default()).prove(public, private)
+impl PredicateProver for NationalityPredicate {
+    type PublicInput = PublicInput;
+    type PrivateInput = PrivateInput;
+    type Error = Error;
+    type Prover = NatProver;
+
+    fn prover(&self, public: &PublicInput, private: &PrivateInput) -> Result<NatProver, Error> {
+        self.validate(public)?;
+        let witness = self.witness(public, private)?;
+        Ok(NatProver::new(public, &witness))
+    }
 }
 
-pub fn verify_nationality(proof: &Proof) -> Result<(), Error> {
-    NationalityPredicate::new(PcsConfig::default()).verify(proof)
+impl PredicateVerifier for NationalityPredicate {
+    type PublicInput = PublicInput;
+    type Error = Error;
+    type Verifier = NatVerifier;
+
+    fn verifier(&self, public: &PublicInput, claimed_sums: &[QM31]) -> Result<NatVerifier, Error> {
+        self.validate(public)?;
+        Ok(NatVerifier::new(public, claimed_sums[0], claimed_sums[1]))
+    }
 }
 
 #[cfg(test)]

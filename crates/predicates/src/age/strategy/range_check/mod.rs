@@ -12,8 +12,7 @@ use crate::age::strategy::range_check::interaction::InteractionTraces;
 use crate::age::strategy::range_check::lookup_elements::LookupElements;
 use crate::age::strategy::range_check::preprocessed::Preprocessed;
 use crate::age::strategy::range_check::witness::WitnessData;
-use crate::age::types::{AgeRangeCheckProof, DateOfBirth, Error, PublicInput, Witness};
-use crate::predicate::{Predicate, StandalonePredicate};
+use crate::age::types::{AgeRangeCheckProof, DateOfBirth, Error, PublicInput};
 use num_traits::Zero;
 use stwo::core::channel::{Blake2sChannel, Channel};
 use stwo::core::fields::qm31::QM31;
@@ -41,36 +40,15 @@ impl AgeRangeCheck {
     }
 }
 
-impl Predicate for AgeRangeCheck {
-    type PublicInput = PublicInput;
-    type PrivateInput = DateOfBirth;
-    type Witness = Witness;
-    type Error = Error;
-
-    fn validate(&self, public: &Self::PublicInput) -> Result<(), Self::Error> {
-        self.0.validate(public)
-    }
-
-    fn witness(
+impl AgeRangeCheck {
+    pub fn prove(
         &self,
-        public: &Self::PublicInput,
-        private: &Self::PrivateInput,
-    ) -> Result<Self::Witness, Self::Error> {
-        self.0.witness(public, private)
-    }
-}
+        public: &PublicInput,
+        private: &DateOfBirth,
+    ) -> Result<AgeRangeCheckProof, Error> {
+        self.0.validate(public)?;
 
-impl StandalonePredicate for AgeRangeCheck {
-    type Proof = AgeRangeCheckProof;
-
-    fn prove(
-        &self,
-        public: &Self::PublicInput,
-        private: &Self::PrivateInput,
-    ) -> Result<Self::Proof, Self::Error> {
-        self.validate(public)?;
-
-        let witness = self.witness(public, private)?;
+        let witness = self.0.witness(public, private)?;
         let bounds = public.bounds;
 
         let day_delta_range_check = Preprocessed::day_range();
@@ -171,8 +149,8 @@ impl StandalonePredicate for AgeRangeCheck {
         })
     }
 
-    fn verify(&self, proof: &Self::Proof) -> Result<(), Self::Error> {
-        self.validate(&proof.public)?;
+    pub fn verify(&self, proof: &AgeRangeCheckProof) -> Result<(), Error> {
+        self.0.validate(&proof.public)?;
 
         let bounds = proof.public.bounds;
         let day_delta_range_check = Preprocessed::day_range();

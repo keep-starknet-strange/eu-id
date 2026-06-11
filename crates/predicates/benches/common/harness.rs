@@ -1,7 +1,9 @@
 use criterion::Criterion;
+use predicates::nat::NationalityPredicate;
 use predicates::{
-    age, nat, AgeCheckStrategy, AgeProof, DateOfBirth, NatPrivateInput, NatPublicInput, PublicInput,
+    age, AgeCheckStrategy, AgeProof, DateOfBirth, NatPrivateInput, NatPublicInput, PublicInput,
 };
+use stwo::core::pcs::PcsConfig;
 
 pub struct BenchCase {
     pub name: &'static str,
@@ -45,13 +47,23 @@ pub fn run_nat_bench(c: &mut Criterion, case: &NatBenchCase) {
     let mut group = c.benchmark_group(case.name);
 
     group.bench_function("prove", |b| {
-        b.iter(|| nat::prove_nationality(&case.public, &case.private).unwrap())
+        b.iter(|| {
+            NationalityPredicate::new(PcsConfig::default())
+                .prove(&case.public, &case.private)
+                .unwrap()
+        })
     });
 
-    let proof = nat::prove_nationality(&case.public, &case.private).unwrap();
+    let proof = NationalityPredicate::new(PcsConfig::default())
+        .prove(&case.public, &case.private)
+        .unwrap();
 
     group.bench_function("verify", |b| {
-        b.iter(|| nat::verify_nationality(&proof).unwrap())
+        b.iter(|| {
+            NationalityPredicate::new(PcsConfig::default())
+                .verify(&proof)
+                .unwrap()
+        })
     });
 
     let proof_bytes = bincode::serialize(&proof).unwrap();

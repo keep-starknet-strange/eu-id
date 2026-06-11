@@ -19,7 +19,6 @@ mod tests {
     use super::bit_decomposition::AgeBitDecomposition;
     use super::range_check::AgeRangeCheck;
     use crate::age::types::{AgeBounds, Date, DateOfBirth, Error, PublicInput};
-    use crate::predicate::StandalonePredicate;
     use crate::AgeInputError;
     use stwo::core::pcs::PcsConfig;
 
