@@ -1,8 +1,9 @@
 #![allow(dead_code)]
 
-use predicates::{nat as nat_predicate, NatPrivateInput, NatProof, NatPublicInput};
-
 use super::common::{get_flag, DEFAULT_PROOF_PATH};
+use predicates::nat::NationalityPredicate;
+use predicates::{NatPrivateInput, NatProof, NatPublicInput};
+use stwo::core::pcs::PcsConfig;
 
 pub fn prove_usage() -> ! {
     eprintln!(
@@ -44,10 +45,12 @@ pub fn prove(args: &[String], output: &str) {
         nationalities: nationality,
     };
 
-    let proof = nat_predicate::prove_nationality(&public, &private).unwrap_or_else(|e| {
-        eprintln!("prove failed: {e}");
-        std::process::exit(1)
-    });
+    let proof = NationalityPredicate::new(PcsConfig::default())
+        .prove(&public, &private)
+        .unwrap_or_else(|e| {
+            eprintln!("prove failed: {e}");
+            std::process::exit(1)
+        });
 
     std::fs::write(output, serialize_proof(&proof)).unwrap_or_else(|e| {
         eprintln!("failed to write proof: {e}");
@@ -72,10 +75,12 @@ pub fn verify(args: &[String], input: &str) {
         std::process::exit(1)
     });
 
-    nat_predicate::verify_nationality(&proof).unwrap_or_else(|e| {
-        eprintln!("verify failed: {e}");
-        std::process::exit(1)
-    });
+    NationalityPredicate::new(PcsConfig::default())
+        .verify(&proof)
+        .unwrap_or_else(|e| {
+            eprintln!("verify failed: {e}");
+            std::process::exit(1)
+        });
 
     println!("verified ok");
 }
