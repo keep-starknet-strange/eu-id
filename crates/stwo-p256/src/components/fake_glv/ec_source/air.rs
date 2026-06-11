@@ -29,7 +29,8 @@ use stwo::core::utils::{bit_reverse_index, coset_index_to_circle_domain_index};
 use stwo::prover::backend::simd::m31::N_LANES;
 
 use crate::components::gamma_digest::{
-    gamma_digest_of_values, gamma_digest_tuple, gamma_digest_yield_sum, yield_gamma_digest,
+    gamma_collect_group_values, gamma_digest_of_values, gamma_digest_tuple,
+    gamma_digest_yield_sum, gamma_row_index_of, yield_gamma_digest,
     GammaChallenge, GammaDigestRelation, GammaTallComponent, GammaTallEval,
     GammaTallInstance, GammaTallInteractionClaim, GammaTallLayout,
     GAMMA_TAG_FAKE_GLV_RANGE13, GAMMA_TAG_FAKE_GLV_SIGNED,
@@ -900,8 +901,8 @@ pub fn fake_glv_gamma_layouts(rows: usize) -> [GammaTallLayout; 2] {
 pub(crate) fn fake_glv_gamma_instances(base: &[M31ColumnEval]) -> [GammaTallInstance; 2] {
     let r13_columns = fake_glv_gamma_range13_columns();
     let signed_columns = fake_glv_gamma_signed_carry_columns();
-    let r13_groups = collect_group_values(base, &r13_columns);
-    let signed_groups = collect_group_values(base, &signed_columns);
+    let r13_groups = gamma_collect_group_values(base, &r13_columns);
+    let signed_groups = gamma_collect_group_values(base, &signed_columns);
     [
         GammaTallInstance::new(
             GAMMA_TAG_FAKE_GLV_RANGE13,
@@ -916,33 +917,6 @@ pub(crate) fn fake_glv_gamma_instances(base: &[M31ColumnEval]) -> [GammaTallInst
             signed_groups,
         ),
     ]
-}
-
-/// Per active row (contiguous coset rows from 0), the values at the given
-/// base columns — the digest groups, keyed by the preprocessed row index.
-fn collect_group_values(base: &[M31ColumnEval], columns: &[usize]) -> Vec<Vec<M31>> {
-    let log_size = base[0].domain.log_size();
-    let rows = 1usize << log_size;
-    let mut groups = Vec::new();
-    for coset in 0..rows {
-        let position = bit_reverse_index(
-            coset_index_to_circle_domain_index(coset, log_size),
-            log_size,
-        );
-        let (vec_row, lane) = (position / N_LANES, position % N_LANES);
-        let active = base[0].data[vec_row].to_array()[lane];
-        if active == M31::from_u32_unchecked(0) {
-            // Active rows are contiguous from coset row 0.
-            break;
-        }
-        groups.push(
-            columns
-                .iter()
-                .map(|&col| base[col].data[vec_row].to_array()[lane])
-                .collect(),
-        );
-    }
-    groups
 }
 
 pub(crate) fn gen_fake_glv_projective_source_consumer_interaction_trace(
@@ -1016,7 +990,7 @@ pub(crate) fn gen_fake_glv_projective_source_consumer_interaction_trace(
             let mut denominator = [SecureField::from(M31::from_u32_unchecked(1)); N_LANES];
             for lane in 0..N_LANES {
                 let active = base[0].data[vec_row].to_array()[lane];
-                let row_index = row_index_of(vec_row, lane, log_size);
+                let row_index = gamma_row_index_of(vec_row, lane, log_size);
                 let values: Vec<M31> = columns
                     .iter()
                     .map(|&col| base[col].data[vec_row].to_array()[lane])
@@ -1061,28 +1035,6 @@ pub(crate) fn gen_fake_glv_projective_source_consumer_interaction_trace(
         mul_result_sum,
         gamma_yield_sum,
     }
-}
-
-/// Coset row index of a packed (vec_row, lane) circle-domain position — the
-/// value of the preprocessed row-index column there.
-fn row_index_of(vec_row: usize, lane: usize, log_size: u32) -> u32 {
-    let position = vec_row * N_LANES + lane;
-    // `row_index[domain_row] = coset` is the inverse of the coset→domain map;
-    // both are involutions composed of bit-reversal, so invert by search-free
-    // re-application is NOT valid in general — build the inverse directly.
-    // (Small domains: this helper is only used in trace gen.)
-    let mut inverse = u32::MAX;
-    for coset in 0..(1usize << log_size) {
-        if bit_reverse_index(
-            coset_index_to_circle_domain_index(coset, log_size),
-            log_size,
-        ) == position
-        {
-            inverse = coset as u32;
-            break;
-        }
-    }
-    inverse
 }
 
 /// Output of the fake-GLV projective-source consumer interaction-trace

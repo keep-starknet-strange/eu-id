@@ -298,6 +298,8 @@ impl PreparedTableEcRowProofClaim {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PreparedTableProjectiveSourceProofClaim {
     pub log_size: u32,
+    /// Active prepared-table rows (= γ-digest groups / tall schedule).
+    pub rows: u32,
 }
 
 
@@ -305,11 +307,13 @@ impl PreparedTableProjectiveSourceProofClaim {
     pub fn from_prepared_trace(trace: &PreparedTableEcTraceClaim) -> Self {
         Self {
             log_size: padded_log_size(trace.rows.len()),
+            rows: trace.rows.len() as u32,
         }
     }
 
     pub fn mix_into(&self, channel: &mut impl Channel) {
         channel.mix_u64(self.log_size as u64);
+        channel.mix_u64(self.rows as u64);
     }
 
     pub fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
@@ -317,11 +321,14 @@ impl PreparedTableProjectiveSourceProofClaim {
         let _ = PreparedTableProjectiveSourceComponents::new(
             &mut allocator,
             self.log_size,
+            self.rows,
             &PreparedTableProjectiveSourceInteractionClaim::zero(),
             &PreparedTableEcRowRelation::dummy(),
             &crate::projective_air::ProjectiveRcbMulComponentRelations::dummy(),
             &crate::range_checks::RangeCheckRelation::dummy(),
             &crate::range_checks::RangeCheckRelation::dummy(),
+            &crate::components::gamma_digest::GammaDigestRelation::dummy(),
+            &prepared_dummy_gamma_challenge(),
         );
         allocator.preprocessed_columns().clone()
     }
@@ -331,11 +338,14 @@ impl PreparedTableProjectiveSourceProofClaim {
         let components = PreparedTableProjectiveSourceComponents::new(
             &mut allocator,
             self.log_size,
+            self.rows,
             &PreparedTableProjectiveSourceInteractionClaim::zero(),
             &PreparedTableEcRowRelation::dummy(),
             &crate::projective_air::ProjectiveRcbMulComponentRelations::dummy(),
             &crate::range_checks::RangeCheckRelation::dummy(),
             &crate::range_checks::RangeCheckRelation::dummy(),
+            &crate::components::gamma_digest::GammaDigestRelation::dummy(),
+            &prepared_dummy_gamma_challenge(),
         );
         components.trace_log_degree_bounds()
     }
@@ -345,21 +355,39 @@ impl PreparedTableProjectiveSourceProofClaim {
         let components = PreparedTableProjectiveSourceComponents::new(
             &mut allocator,
             self.log_size,
+            self.rows,
             &PreparedTableProjectiveSourceInteractionClaim::zero(),
             &PreparedTableEcRowRelation::dummy(),
             &crate::projective_air::ProjectiveRcbMulComponentRelations::dummy(),
             &crate::range_checks::RangeCheckRelation::dummy(),
             &crate::range_checks::RangeCheckRelation::dummy(),
+            &crate::components::gamma_digest::GammaDigestRelation::dummy(),
+            &prepared_dummy_gamma_challenge(),
         );
         components.max_constraint_log_degree_bound()
     }
 }
 
 
+/// Dummy γ challenge for preprocessed-id / degree-bound queries.
+pub(crate) fn prepared_dummy_gamma_challenge() -> crate::components::gamma_digest::GammaChallenge {
+    crate::components::gamma_digest::GammaChallenge::from_gamma(
+        stwo::core::fields::qm31::SecureField::from(M31::from_u32_unchecked(2)),
+        crate::components::gamma_digest::gamma_padded_values(
+            super::interaction::prepared_gamma_range13_columns().len(),
+        )
+        .max(crate::components::gamma_digest::gamma_padded_values(
+            super::interaction::prepared_gamma_signed_carry_columns().len(),
+        )),
+    )
+}
+
 pub(crate) fn gen_prepared_table_ec_row_preprocessed_trace(
     log_size: u32,
+    rows: u32,
     ids: &[PreProcessedColumnId],
 ) -> Result<ColumnVec<M31ColumnEval>, PreparedTableError> {
+    let gamma_layouts = super::interaction::prepared_gamma_layouts(rows as usize);
     // C5-2 preprocessed columns the self-contained Range13 / signed-carry
     // providers declare (shared by id with the silo's, deduplicated globally).
     let range13_value_id =
@@ -389,6 +417,10 @@ pub(crate) fn gen_prepared_table_ec_row_preprocessed_trace(
                 Ok(signed_carry_claim.gen_value_column())
             } else if id == &signed_carry_active_id {
                 Ok(signed_carry_claim.gen_active_column())
+            } else if let Some(column) = gamma_layouts.iter().find_map(|layout| {
+                crate::components::gamma_digest::gamma_tall_preprocessed_column(layout, id)
+            }) {
+                Ok(column)
             } else {
                 Err(PreparedTableError::PreprocessedColumnMissing)
             }

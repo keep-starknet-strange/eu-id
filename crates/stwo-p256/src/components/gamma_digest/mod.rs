@@ -320,6 +320,55 @@ pub fn gen_gamma_tall_base_trace(instance: &GammaTallInstance) -> Vec<M31ColumnE
         .collect()
 }
 
+/// Per active row (contiguous coset rows from 0, flagged by base column 0),
+/// the values at the given base columns — a component's digest groups, keyed
+/// by the preprocessed row index.
+pub fn gamma_collect_group_values(
+    base: &[M31ColumnEval],
+    columns: &[usize],
+) -> Vec<Vec<M31>> {
+    let log_size = base[0].domain.log_size();
+    let rows = 1usize << log_size;
+    let mut groups = Vec::new();
+    for coset in 0..rows {
+        let position = bit_reverse_index(
+            coset_index_to_circle_domain_index(coset, log_size),
+            log_size,
+        );
+        let (vec_row, lane) = (position / N_LANES, position % N_LANES);
+        let active = base[0].data[vec_row].to_array()[lane];
+        if active == M31::from_u32_unchecked(0) {
+            // Active rows are contiguous from coset row 0.
+            break;
+        }
+        groups.push(
+            columns
+                .iter()
+                .map(|&col| base[col].data[vec_row].to_array()[lane])
+                .collect(),
+        );
+    }
+    groups
+}
+
+/// Coset row index of a packed (vec_row, lane) circle-domain position — the
+/// value of a component's preprocessed row-index column there. Trace-gen only.
+pub fn gamma_row_index_of(vec_row: usize, lane: usize, log_size: u32) -> u32 {
+    let position = vec_row * N_LANES + lane;
+    let mut inverse = u32::MAX;
+    for coset in 0..(1usize << log_size) {
+        if bit_reverse_index(
+            coset_index_to_circle_domain_index(coset, log_size),
+            log_size,
+        ) == position
+        {
+            inverse = coset as u32;
+            break;
+        }
+    }
+    inverse
+}
+
 /// Resolve one of a tall instance's preprocessed columns by id (for id-keyed
 /// global preprocessed-trace generators).
 pub fn gamma_tall_preprocessed_column(

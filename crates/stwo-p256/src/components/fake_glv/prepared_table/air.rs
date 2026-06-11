@@ -12,7 +12,10 @@ use crate::constants::{P256_3GX, P256_3GY, P256_MODULUS};
 use crate::limbs::P256M31BigInt;
 use crate::prepared_point::{PREPARED_BASE_COUNT, TABLE16_INDEX};
 use crate::projective_air::{ConsumedMulLimbs, ProjectiveRcbMulComponentRelations};
-use crate::range_checks::RangeCheckRelation;
+use crate::components::gamma_digest::{
+    yield_gamma_digest, GammaChallenge, GammaDigestRelation, GAMMA_TAG_PREPARED_RANGE13,
+    GAMMA_TAG_PREPARED_SIGNED,
+};
 use crate::types::U256;
 
 use super::super::ec_source::double_formula::{bind_double_formula, DoubleFormulaColumns};
@@ -372,12 +375,12 @@ pub struct PreparedTableProjectiveSourceEval {
     /// C5 plumbing: relations bundle carrying `mul_result`, consumed for the
     /// prepared-table EC ops (the `[0, source_offset)` slice of the silo).
     pub mul_relations: ProjectiveRcbMulComponentRelations,
-    /// C5-2: consumer-local Range13 relation for the formula coordinate /
-    /// working-value limb checks (self-provided within the sub-graph).
-    pub range13: RangeCheckRelation,
-    /// C5-2: consumer-local signed-carry relation for the formula reduction
-    /// carries (self-provided within the sub-graph).
-    pub signed_carry: RangeCheckRelation,
+    /// γ-digest reshape (docs/gamma-digest-design.md): the formula blocks'
+    /// range13 + signed-carry values are bound into two per-row digests
+    /// yielded on this relation; the tall expander components re-expand them
+    /// and emit the actual range uses against the sub-graph's providers.
+    pub gamma_digest: GammaDigestRelation,
+    pub gamma_challenge: GammaChallenge,
 }
 
 
@@ -460,11 +463,11 @@ impl FrameworkEval for PreparedTableProjectiveSourceEval {
         // MixedAdd (op==0) and padding (active==0) are unaffected.
         let double_active = active.clone() * op.clone();
         let muls_view = consumed_muls.view();
-        // The binders COLLECT their range13 values (γ-digest interface); this
-        // not-yet-adopted consumer re-emits them as per-value uses in the same
-        // order, keeping its fraction stream unchanged.
-        let mut double_range13_values: Vec<E::F> = Vec::new();
-        let mut mixed_range13_values: Vec<E::F> = Vec::new();
+        // The binders COLLECT their range13 values; together with the signed
+        // reduction carries they feed the two γ-digest yields below (fixed
+        // order: Double block then MixedAdd block).
+        let mut range13_values: Vec<E::F> = Vec::new();
+        let mut signed_carry_values: Vec<E::F> = Vec::new();
         bind_double_formula(
             &mut eval,
             &double_active,
@@ -475,28 +478,14 @@ impl FrameworkEval for PreparedTableProjectiveSourceEval {
             &output.inf(),
             &muls_view,
             &double_columns,
-            &mut double_range13_values,
+            &mut range13_values,
         );
-        for value in &double_range13_values {
-            crate::range_checks::add_range_check(
-                &mut eval,
-                &self.range13,
-                active.clone(),
-                value.clone(),
-            );
-        }
-        // Range-check (use) the Double reduction carries against the
-        // consumer-local signed-carry table (gated `active`, fixed count), and
-        // force the Double-formula working values + reduction witnesses to zero
-        // on non-Double / padding rows.
+        // Collect the Double reduction carries for the signed-carry digest,
+        // and force the Double-formula working values + reduction witnesses to
+        // zero on non-Double / padding rows.
         for reduction in &double_columns.reductions {
             for carry in &reduction.carries {
-                crate::range_checks::add_range_check(
-                    &mut eval,
-                    &self.signed_carry,
-                    active.clone(),
-                    carry.clone(),
-                );
+                signed_carry_values.push(carry.clone());
             }
         }
         let not_double = one.clone() - double_active.clone();
@@ -536,27 +525,14 @@ impl FrameworkEval for PreparedTableProjectiveSourceEval {
             &output.inf(),
             &muls_view,
             &mixed_columns,
-            &mut mixed_range13_values,
+            &mut range13_values,
         );
-        for value in &mixed_range13_values {
-            crate::range_checks::add_range_check(
-                &mut eval,
-                &self.range13,
-                active.clone(),
-                value.clone(),
-            );
-        }
-        // Range-check (use) the MixedAdd reduction carries (gated `active`,
-        // fixed count), and force the MixedAdd working values + reduction
-        // witnesses to zero on non-MixedAdd / padding rows.
+        // Collect the MixedAdd reduction carries for the signed-carry digest,
+        // and force the MixedAdd working values + reduction witnesses to zero
+        // on non-MixedAdd / padding rows.
         for reduction in &mixed_columns.reductions {
             for carry in &reduction.carries {
-                crate::range_checks::add_range_check(
-                    &mut eval,
-                    &self.signed_carry,
-                    active.clone(),
-                    carry.clone(),
-                );
+                signed_carry_values.push(carry.clone());
             }
         }
         let not_mixed = one.clone() - mixed_active.clone();
@@ -575,6 +551,31 @@ impl FrameworkEval for PreparedTableProjectiveSourceEval {
                 eval.add_constraint(not_mixed.clone() * carry.clone());
             }
         }
+        // γ-digest yields (one per kind), keyed by the shared preprocessed
+        // row-index column; presence = `active` (the tall expanders'
+        // preprocessed schedule is the anchor).
+        let row_index = eval.get_preprocessed_column(prepared_table_ec_row_index_column_id());
+        yield_gamma_digest(
+            &mut eval,
+            &self.gamma_digest,
+            &self.gamma_challenge,
+            GAMMA_TAG_PREPARED_RANGE13,
+            row_index.clone(),
+            active.clone(),
+            M31::from_u32_unchecked(0),
+            &range13_values,
+        );
+        yield_gamma_digest(
+            &mut eval,
+            &self.gamma_digest,
+            &self.gamma_challenge,
+            GAMMA_TAG_PREPARED_SIGNED,
+            row_index,
+            active.clone(),
+            crate::range_checks::encode_signed_carry(0),
+            &signed_carry_values,
+        );
+
         eval.finalize_logup_batched(&crate::range_checks::consecutive_batching(
             crate::components::fake_glv::prepared_table::interaction::prepared_consumer_logup_entries(),
             crate::components::fake_glv::prepared_table::interaction::PREPARED_CONSUMER_LOGUP_BATCH,

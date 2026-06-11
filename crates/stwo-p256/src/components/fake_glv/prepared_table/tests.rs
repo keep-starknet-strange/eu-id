@@ -175,7 +175,7 @@ fn prepared_table_ec_row_constraints_pass_for_honest_trace() {
     let claim = PreparedTableEcRowProofClaim::from_trace(&trace);
     let ids = claim.preprocessed_column_ids();
     let preprocessed =
-        gen_prepared_table_ec_row_preprocessed_trace(claim.log_size, &ids).unwrap();
+        gen_prepared_table_ec_row_preprocessed_trace(claim.log_size, 0, &ids).unwrap();
     let base = gen_prepared_table_ec_row_base_trace(&trace, claim.log_size).unwrap();
     let mut channel = Blake2sChannel::default();
     let relation = PreparedTableEcRowRelation::draw(&mut channel);
@@ -461,6 +461,11 @@ impl stwo_constraint_framework::EvalAtRow for RecordingSourceEvaluator<'_> {
         interaction: usize,
         offsets: [isize; N],
     ) -> [Self::F; N] {
+        if interaction == stwo_constraint_framework::PREPROCESSED_TRACE_IDX {
+            // The γ-digest row-index read: only used as a LogUp tuple value
+            // (ignored by this recorder), never in a polynomial constraint.
+            return offsets.map(|_| M31::from_u32_unchecked(self.row as u32));
+        }
         assert_eq!(
             interaction, 1,
             "projective-source consumer reads only the base trace"
@@ -512,8 +517,8 @@ fn projective_source_constraints_hold(log_size: u32, base: &[Vec<M31>]) -> bool 
             log_size,
             relation: PreparedTableEcRowRelation::dummy(),
             mul_relations: crate::projective_air::ProjectiveRcbMulComponentRelations::dummy(),
-            range13: crate::range_checks::RangeCheckRelation::dummy(),
-            signed_carry: crate::range_checks::RangeCheckRelation::dummy(),
+            gamma_digest: crate::components::gamma_digest::GammaDigestRelation::dummy(),
+            gamma_challenge: super::trace::prepared_dummy_gamma_challenge(),
         }
         .evaluate(recorder);
         if recorder.constraints.iter().any(|value| !value.is_zero()) {

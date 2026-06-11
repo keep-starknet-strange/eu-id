@@ -230,7 +230,10 @@ Phases (measure shape + proof size + e2e after each):
   1,984 → 156 M31 interaction cols (consumer 100 at 2^8 + two talls at
   2^13/2^14 + providers); monolith total 8,816 → 6,988; proof 4.49 → 4.06 MB;
   e2e 1.25 s; suite 330/0.
-- **B**: adopt `prepared_table_projective_source` (2,100 → ~110 + tall at 2^11).
+- **B** ✅ (2026-06-11): `prepared_table_projective_source` adopted —
+  2,108 → 280 M31 interaction cols (consumer 986 → 48 entries/row, talls at
+  2^10); monolith total 6,988 → 5,160; proof 4.06 → 3.64 MB; e2e 1.22 s;
+  suite 330/0.
 - **C**: adopt `final_add.check`, `public_key_on_curve.curve_check`,
   `scalar_setup` (range9 kind added), `final_check`.
 - **D** (optional): consolidate per-component range relations/providers.

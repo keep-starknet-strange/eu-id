@@ -7,6 +7,9 @@ use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 use stwo_p256_utils::constants::N_LIMBS;
 
+use crate::components::gamma_digest::{
+    GammaChallenge, GammaDigestRelation, GammaTallComponent, GammaTallEval,
+};
 use crate::prepared_point::TABLE16_INDEX;
 use crate::projective::ProjectiveEcOp;
 
@@ -103,6 +106,9 @@ pub type PreparedTableProjectiveSourceComponent =
 pub struct PreparedTableProjectiveSourceComponents {
     pub provider: PreparedTableEcRowComponent,
     pub consumer: PreparedTableProjectiveSourceComponent,
+    /// γ-digest tall expanders (range13 kind, signed kind).
+    pub gamma_range13: GammaTallComponent,
+    pub gamma_signed: GammaTallComponent,
     /// C5-2: self-contained Range13 provider for the prepared-table formula
     /// coordinate limb range checks (mirrors the fake-GLV projective source).
     pub range13: crate::range_checks::RangeCheckComponent,
@@ -112,23 +118,30 @@ pub struct PreparedTableProjectiveSourceComponents {
 }
 
 impl PreparedTableProjectiveSourceComponents {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         allocator: &mut TraceLocationAllocator,
         log_size: u32,
+        rows: u32,
         interaction_claim: &PreparedTableProjectiveSourceInteractionClaim,
         relation: &PreparedTableEcRowRelation,
         mul_relations: &crate::projective_air::ProjectiveRcbMulComponentRelations,
         range13: &crate::range_checks::RangeCheckRelation,
         signed_carry: &crate::range_checks::RangeCheckRelation,
+        gamma_digest: &GammaDigestRelation,
+        gamma_challenge: &GammaChallenge,
     ) -> Self {
         Self::new_inner(
             allocator,
             log_size,
+            rows,
             interaction_claim,
             relation,
             mul_relations,
             range13,
             signed_carry,
+            gamma_digest,
+            gamma_challenge,
             None,
         )
     }
@@ -141,6 +154,7 @@ impl PreparedTableProjectiveSourceComponents {
     pub fn new_pinned(
         allocator: &mut TraceLocationAllocator,
         log_size: u32,
+        rows: u32,
         provider_total_claimed_sum: SecureField,
         consumer_interaction: &PreparedTableProjectiveSourceInteractionClaim,
         relation: &PreparedTableEcRowRelation,
@@ -148,6 +162,8 @@ impl PreparedTableProjectiveSourceComponents {
         mul_relations: &crate::projective_air::ProjectiveRcbMulComponentRelations,
         range13: &crate::range_checks::RangeCheckRelation,
         signed_carry: &crate::range_checks::RangeCheckRelation,
+        gamma_digest: &GammaDigestRelation,
+        gamma_challenge: &GammaChallenge,
     ) -> Self {
         let interaction_claim = PreparedTableProjectiveSourceInteractionClaim {
             provider_claimed_sum: provider_total_claimed_sum,
@@ -156,11 +172,14 @@ impl PreparedTableProjectiveSourceComponents {
         Self::new_inner(
             allocator,
             log_size,
+            rows,
             &interaction_claim,
             relation,
             mul_relations,
             range13,
             signed_carry,
+            gamma_digest,
+            gamma_challenge,
             Some(pinning.clone()),
         )
     }
@@ -169,13 +188,17 @@ impl PreparedTableProjectiveSourceComponents {
     fn new_inner(
         allocator: &mut TraceLocationAllocator,
         log_size: u32,
+        rows: u32,
         interaction_claim: &PreparedTableProjectiveSourceInteractionClaim,
         relation: &PreparedTableEcRowRelation,
         mul_relations: &crate::projective_air::ProjectiveRcbMulComponentRelations,
         range13: &crate::range_checks::RangeCheckRelation,
         signed_carry: &crate::range_checks::RangeCheckRelation,
+        gamma_digest: &GammaDigestRelation,
+        gamma_challenge: &GammaChallenge,
         pinning: Option<PreparedTablePinningRelations>,
     ) -> Self {
+        let [gamma_range13_layout, gamma_signed_layout] = prepared_gamma_layouts(rows as usize);
         Self {
             provider: PreparedTableEcRowComponent::new(
                 allocator,
@@ -192,12 +215,32 @@ impl PreparedTableProjectiveSourceComponents {
                     log_size,
                     relation: relation.clone(),
                     mul_relations: mul_relations.clone(),
-                    range13: range13.clone(),
-                    signed_carry: signed_carry.clone(),
+                    gamma_digest: gamma_digest.clone(),
+                    gamma_challenge: gamma_challenge.clone(),
                 },
-                // EC-row + mul-result + range13 + signed-carry consumes share
+                // EC-row + mul-result consumes and the γ-digest yields share
                 // one interaction trace.
                 interaction_claim.consumer_component_claimed_sum(),
+            ),
+            gamma_range13: GammaTallComponent::new(
+                allocator,
+                GammaTallEval {
+                    layout: gamma_range13_layout,
+                    challenge: gamma_challenge.clone(),
+                    digest: gamma_digest.clone(),
+                    range: range13.clone(),
+                },
+                interaction_claim.gamma_range13.claimed_sum,
+            ),
+            gamma_signed: GammaTallComponent::new(
+                allocator,
+                GammaTallEval {
+                    layout: gamma_signed_layout,
+                    challenge: gamma_challenge.clone(),
+                    digest: gamma_digest.clone(),
+                    range: signed_carry.clone(),
+                },
+                interaction_claim.gamma_signed.claimed_sum,
             ),
             range13: crate::range_checks::RangeCheckComponent::new(
                 allocator,
@@ -223,6 +266,8 @@ impl PreparedTableProjectiveSourceComponents {
         vec![
             &self.provider as &dyn Component,
             &self.consumer as &dyn Component,
+            &self.gamma_range13 as &dyn Component,
+            &self.gamma_signed as &dyn Component,
             &self.range13 as &dyn Component,
             &self.signed_carry as &dyn Component,
         ]
@@ -232,6 +277,8 @@ impl PreparedTableProjectiveSourceComponents {
         vec![
             &self.provider as &dyn ComponentProver<SimdBackend>,
             &self.consumer as &dyn ComponentProver<SimdBackend>,
+            &self.gamma_range13 as &dyn ComponentProver<SimdBackend>,
+            &self.gamma_signed as &dyn ComponentProver<SimdBackend>,
             &self.range13 as &dyn ComponentProver<SimdBackend>,
             &self.signed_carry as &dyn ComponentProver<SimdBackend>,
         ]

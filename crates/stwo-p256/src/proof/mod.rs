@@ -50,6 +50,7 @@ use crate::components::gamma_digest::{
     gen_gamma_tall_base_trace, gen_gamma_tall_interaction_trace, GammaChallenge,
     GammaDigestRelation,
 };
+use crate::components::fake_glv::prepared_table::interaction::prepared_gamma_instances;
 use crate::fake_glv_ec_source::{
     fake_glv_gamma_instances, fake_glv_gamma_max_padded_values,
     fake_glv_projective_source_range13_uses_from_base,
@@ -946,7 +947,8 @@ impl P256CurrentAirInteractionClaim {
             // tall expanders' digest uses.
             (
                 "GammaDigest",
-                self.fake_glv_projective_source.gamma_digest_total(),
+                self.fake_glv_projective_source.gamma_digest_total()
+                    + self.prepared_table_projective_source.gamma_digest_total(),
             ),
             // C5 plumbing: the RCB silo PROVIDES every projective EC op's
             // mul `lhs`/`rhs`/`result` limbs; the two projective-source
@@ -1424,6 +1426,7 @@ impl P256CurrentAirComponents {
             prepared_table_projective_source: PreparedTableProjectiveSourceComponents::new_pinned(
                 allocator,
                 claim.prepared_table_projective_source.log_size,
+                claim.prepared_table_projective_source.rows,
                 interaction_claim
                     .prepared_table_projective_source
                     .provider_claimed_sum,
@@ -1437,6 +1440,8 @@ impl P256CurrentAirComponents {
                 &relations.projective_rcb_air,
                 &relations.prepared_table_projective_range13,
                 &relations.prepared_table_projective_signed_carry,
+                &relations.gamma_digest,
+                &relations.gamma_challenge,
             ),
             fake_glv_projective_source: FakeGlvProjectiveSourceComponents::new(
                 allocator,
@@ -1849,6 +1854,7 @@ impl P256ProofDraft {
             .preprocessed_column_ids();
         let local_columns = gen_prepared_table_ec_row_preprocessed_trace(
             claim.prepared_table_projective_source.log_size,
+            claim.prepared_table_projective_source.rows,
             &local_ids,
         )?;
         append_unique_preprocessed_columns(&mut ids, &mut columns, local_ids, local_columns);
@@ -2025,6 +2031,12 @@ impl P256ProofDraft {
                     &prepared_table_consumer,
                 ),
             );
+        // γ-digest tall expander value grids for the prepared-table consumer.
+        let [prepared_gamma_range13_instance, prepared_gamma_signed_instance] =
+            prepared_gamma_instances(&prepared_table_consumer);
+        let prepared_gamma_range13_base =
+            gen_gamma_tall_base_trace(&prepared_gamma_range13_instance);
+        let prepared_gamma_signed_base = gen_gamma_tall_base_trace(&prepared_gamma_signed_instance);
         let fake_glv_projective_provider = gen_fake_glv_primitive_ec_source_base_trace(
             &self.claim.fake_glv_ec_trace,
             claim.fake_glv_projective_source.source_offset as usize,
@@ -2147,8 +2159,10 @@ impl P256ProofDraft {
         }
         columns.extend(prepared_table_provider.clone());
         columns.extend(prepared_table_consumer.clone());
-        // C5-2: prepared-table provider multiplicity columns, in component
-        // order (range13, then signed_carry) right after the consumer.
+        // γ-digest tall value grids, then the C5-2 provider multiplicity
+        // columns, in component order right after the consumer.
+        columns.extend(prepared_gamma_range13_base);
+        columns.extend(prepared_gamma_signed_base);
         columns.push(prepared_table_projective_range13_multiplicity.clone());
         columns.push(prepared_table_projective_signed_carry_multiplicity.clone());
         columns.extend(fake_glv_projective_provider.clone());
@@ -2307,9 +2321,25 @@ impl P256ProofDraft {
             &base.prepared_table_consumer,
             &relations.prepared_table,
             &relations.projective_rcb_air.mul_result,
-            &relations.prepared_table_projective_range13,
-            &relations.prepared_table_projective_signed_carry,
+            &relations.gamma_digest,
+            &relations.gamma_challenge,
         );
+        let [prepared_gamma_range13_instance, prepared_gamma_signed_instance] =
+            prepared_gamma_instances(&base.prepared_table_consumer);
+        let (prepared_gamma_range13_interaction, prepared_gamma_range13_claim) =
+            gen_gamma_tall_interaction_trace(
+                &prepared_gamma_range13_instance,
+                &relations.gamma_challenge,
+                &relations.gamma_digest,
+                &relations.prepared_table_projective_range13,
+            );
+        let (prepared_gamma_signed_interaction, prepared_gamma_signed_claim) =
+            gen_gamma_tall_interaction_trace(
+                &prepared_gamma_signed_instance,
+                &relations.gamma_challenge,
+                &relations.gamma_digest,
+                &relations.prepared_table_projective_signed_carry,
+            );
         // C5-2: the prepared-table consumer's self-contained Range13 /
         // signed-carry PROVIDERS. Their multiplicity columns (in the base
         // trace) tally exactly the consumer's uses.
@@ -2511,8 +2541,10 @@ impl P256ProofDraft {
         }
         columns.extend(prepared_provider_interaction);
         columns.extend(prepared_consumer.columns.clone());
-        // C5-2: prepared-table provider interaction columns, in component order
-        // (range13, then signed_carry) right after the consumer.
+        // γ-digest tall expanders, then the provider interaction columns, in
+        // component order right after the consumer.
+        columns.extend(prepared_gamma_range13_interaction);
+        columns.extend(prepared_gamma_signed_interaction);
         columns.extend(prepared_table_projective_range13_interaction);
         columns.extend(prepared_table_projective_signed_carry_interaction);
         columns.extend(fake_glv_provider_interaction);
@@ -2559,8 +2591,9 @@ impl P256ProofDraft {
                     provider_claimed_sum: prepared_pinned_claim.total_claimed_sum,
                     consumer_claimed_sum: prepared_consumer.ec_row_sum,
                     mul_result_consumer_claimed_sum: prepared_consumer.mul_result_sum,
-                    range13_consumer_claimed_sum: prepared_consumer.range13_use_sum,
-                    signed_carry_consumer_claimed_sum: prepared_consumer.signed_carry_use_sum,
+                    gamma_yield_sum: prepared_consumer.gamma_yield_sum,
+                    gamma_range13: prepared_gamma_range13_claim,
+                    gamma_signed: prepared_gamma_signed_claim,
                     range13: prepared_table_projective_range13_provider_claim,
                     signed_carry: prepared_table_projective_signed_carry_provider_claim,
                 },
