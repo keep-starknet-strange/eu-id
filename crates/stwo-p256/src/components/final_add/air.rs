@@ -15,90 +15,17 @@ use crate::limbs::{EvalP256BigIntExt, P256EvalBigInt, P256M31BigInt};
 use crate::prepared_table::{
     FinalCheckHintRelation, PREPARED_TABLE_EC_POINT_COLUMNS,
 };
-use crate::projective_air::{
-    add_projective_rcb_mul_row, ProjectiveRcbMulColumns, ProjectiveRcbMulComponentRelations,
-};
+use crate::projective_air::ProjectiveRcbMulResultRelation;
 use crate::range_checks::RangeCheckRelation;
 use crate::types::U256;
 
 use super::*;
 
 // ---------------------------------------------------------------------------
-// Mul-provider evaluator (clone of PublicKeyMulEval shape)
+// Check evaluator (the four muls are proven by hinted-mul rows)
 // ---------------------------------------------------------------------------
 
-pub type FinalAddMulComponent = FrameworkComponent<FinalAddMulEval>;
 pub type FinalAddCheckComponent = FrameworkComponent<FinalAddCheckEval>;
-
-#[derive(Clone)]
-pub struct FinalAddMulEval {
-    pub(crate) log_size: u32,
-    pub(crate) mul_relations: ProjectiveRcbMulComponentRelations,
-    pub(crate) result_relation: FinalAddMulResultRelation,
-}
-
-impl FrameworkEval for FinalAddMulEval {
-    fn log_size(&self) -> u32 {
-        self.log_size
-    }
-    fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 1
-    }
-    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let active = eval.next_trace_mask();
-        let source_index = eval.next_trace_mask();
-        let mul_index = eval.next_trace_mask();
-        let columns = ProjectiveRcbMulColumns::read(&mut eval);
-
-        eval.add_constraint(
-            active.clone() * (E::F::from(M31::from_u32_unchecked(1)) - active.clone()),
-        );
-        add_projective_rcb_mul_row(
-            &mut eval,
-            self.mul_relations.as_refs(),
-            active.clone(),
-            // No identity fast-path here (final-add operands are not affine-z=1):
-            // reduce_gate == gate, so every mul keeps its full reduction.
-            active.clone(),
-            source_index.clone(),
-            mul_index.clone(),
-            &columns,
-        );
-        provide_mul_limbs(&mut eval, &self.result_relation, &active, &mul_index, ROLE_LHS, columns.lhs.limbs());
-        provide_mul_limbs(&mut eval, &self.result_relation, &active, &mul_index, ROLE_RHS, columns.rhs.limbs());
-        provide_mul_limbs(&mut eval, &self.result_relation, &active, &mul_index, ROLE_RESULT, columns.result.limbs());
-        eval.finalize_logup();
-        eval
-    }
-}
-
-fn provide_mul_limbs<E: EvalAtRow>(
-    eval: &mut E,
-    relation: &FinalAddMulResultRelation,
-    active: &E::F,
-    mul_index: &E::F,
-    role: u32,
-    limbs: &[E::F; N_LIMBS],
-) {
-    for (limb_index, limb) in limbs.iter().enumerate() {
-        eval.add_to_relation(RelationEntry::new(
-            relation,
-            -E::EF::from(active.clone()),
-            &[
-                mul_index.clone(),
-                E::F::from(M31::from_u32_unchecked(role)),
-                E::F::from(M31::from_u32_unchecked(limb_index as u32)),
-                limb.clone(),
-            ],
-        ));
-    }
-}
-
-pub const FINAL_ADD_MUL_PROVIDER_FRACTIONS: usize = 3 * N_LIMBS;
-
-// ---------------------------------------------------------------------------
-// Check evaluator
-// ---------------------------------------------------------------------------
 
 struct FinalAddCheckColumns<E: EvalAtRow> {
     active: E::F,
@@ -215,7 +142,10 @@ pub const CHECK_TRACE_COLUMNS: usize = 1 // active
 #[derive(Clone)]
 pub struct FinalAddCheckEval {
     pub(crate) log_size: u32,
-    pub(crate) result_relation: FinalAddMulResultRelation,
+    pub(crate) mul_result: ProjectiveRcbMulResultRelation,
+    /// First hinted-mul `source_index` reserved for final-add muls (the row's
+    /// source is `hinted_source_offset + sig_id`).
+    pub(crate) hinted_source_offset: u32,
     pub(crate) hint_relation: FinalCheckHintRelation,
     pub(crate) output_relation: FinalAddOutputRelation,
     pub(crate) range13: RangeCheckRelation,
@@ -361,24 +291,26 @@ impl FrameworkEval for FinalAddCheckEval {
         consume_hint(&mut eval, &self.hint_relation, &r1_gate, &columns.sig_id, 0, &columns.r1);
         consume_hint(&mut eval, &self.hint_relation, &r2_gate, &columns.sig_id, 1, &columns.r2);
 
-        // -------- Mul consumes --------
+        // -------- Mul consumes (wide tuples, hinted provider) --------
+        let mul_source = E::F::from(M31::from_u32_unchecked(self.hinted_source_offset))
+            + columns.sig_id.clone();
         // lambda · dx = dy (semantically `lambda · denom = numer` per branch).
-        consume_mul(&mut eval, &self.result_relation, &active, MUL_LAMBDA_DX, ROLE_LHS, columns.lambda.limbs());
-        consume_mul(&mut eval, &self.result_relation, &active, MUL_LAMBDA_DX, ROLE_RHS, columns.dx.limbs());
-        consume_mul(&mut eval, &self.result_relation, &active, MUL_LAMBDA_DX, ROLE_RESULT, columns.dy.limbs());
-        consume_mul(&mut eval, &self.result_relation, &active, MUL_LAMBDA_SQUARED, ROLE_LHS, columns.lambda.limbs());
-        consume_mul(&mut eval, &self.result_relation, &active, MUL_LAMBDA_SQUARED, ROLE_RHS, columns.lambda.limbs());
-        consume_mul(&mut eval, &self.result_relation, &active, MUL_LAMBDA_SQUARED, ROLE_RESULT, columns.lamsq.limbs());
+        consume_mul(&mut eval, &self.mul_result, &active, &mul_source, MUL_LAMBDA_DX, ROLE_LHS, columns.lambda.limbs());
+        consume_mul(&mut eval, &self.mul_result, &active, &mul_source, MUL_LAMBDA_DX, ROLE_RHS, columns.dx.limbs());
+        consume_mul(&mut eval, &self.mul_result, &active, &mul_source, MUL_LAMBDA_DX, ROLE_RESULT, columns.dy.limbs());
+        consume_mul(&mut eval, &self.mul_result, &active, &mul_source, MUL_LAMBDA_SQUARED, ROLE_LHS, columns.lambda.limbs());
+        consume_mul(&mut eval, &self.mul_result, &active, &mul_source, MUL_LAMBDA_SQUARED, ROLE_RHS, columns.lambda.limbs());
+        consume_mul(&mut eval, &self.mul_result, &active, &mul_source, MUL_LAMBDA_SQUARED, ROLE_RESULT, columns.lamsq.limbs());
         // dx · dx_inv = dx_inv_result, with dx_inv_result pinned to
         // (distinct_add + double_add). Forces dx invertible on either finite
         // branch (⟹ x1 != x2 for distinct, ⟹ y1 != 0 for doubling).
-        consume_mul(&mut eval, &self.result_relation, &active, MUL_DX_INV, ROLE_LHS, columns.dx.limbs());
-        consume_mul(&mut eval, &self.result_relation, &active, MUL_DX_INV, ROLE_RHS, columns.dx_inv.limbs());
-        consume_mul(&mut eval, &self.result_relation, &active, MUL_DX_INV, ROLE_RESULT, columns.dx_inv_result.limbs());
+        consume_mul(&mut eval, &self.mul_result, &active, &mul_source, MUL_DX_INV, ROLE_LHS, columns.dx.limbs());
+        consume_mul(&mut eval, &self.mul_result, &active, &mul_source, MUL_DX_INV, ROLE_RHS, columns.dx_inv.limbs());
+        consume_mul(&mut eval, &self.mul_result, &active, &mul_source, MUL_DX_INV, ROLE_RESULT, columns.dx_inv_result.limbs());
         // x1 · x1 = x1_sq.
-        consume_mul(&mut eval, &self.result_relation, &active, MUL_X1_SQUARED, ROLE_LHS, columns.r1.x.limbs());
-        consume_mul(&mut eval, &self.result_relation, &active, MUL_X1_SQUARED, ROLE_RHS, columns.r1.x.limbs());
-        consume_mul(&mut eval, &self.result_relation, &active, MUL_X1_SQUARED, ROLE_RESULT, columns.x1_sq.limbs());
+        consume_mul(&mut eval, &self.mul_result, &active, &mul_source, MUL_X1_SQUARED, ROLE_LHS, columns.r1.x.limbs());
+        consume_mul(&mut eval, &self.mul_result, &active, &mul_source, MUL_X1_SQUARED, ROLE_RHS, columns.r1.x.limbs());
+        consume_mul(&mut eval, &self.mul_result, &active, &mul_source, MUL_X1_SQUARED, ROLE_RESULT, columns.x1_sq.limbs());
 
         // Provide x3 to the final check (yield, -active).
         let mut out_values = Vec::with_capacity(FINAL_ADD_OUTPUT_RELATION_ARITY);
@@ -565,24 +497,23 @@ fn consume_hint<E: EvalAtRow>(
 
 fn consume_mul<E: EvalAtRow>(
     eval: &mut E,
-    relation: &FinalAddMulResultRelation,
+    relation: &ProjectiveRcbMulResultRelation,
     active: &E::F,
+    source_index: &E::F,
     mul_index: u32,
     role: u32,
     limbs: &[E::F; N_LIMBS],
 ) {
-    for (limb_index, limb) in limbs.iter().enumerate() {
-        eval.add_to_relation(RelationEntry::new(
-            relation,
-            E::EF::from(active.clone()),
-            &[
-                E::F::from(M31::from_u32_unchecked(mul_index)),
-                E::F::from(M31::from_u32_unchecked(role)),
-                E::F::from(M31::from_u32_unchecked(limb_index as u32)),
-                limb.clone(),
-            ],
-        ));
-    }
+    let mut values = Vec::with_capacity(3 + N_LIMBS);
+    values.push(source_index.clone());
+    values.push(E::F::from(M31::from_u32_unchecked(mul_index)));
+    values.push(E::F::from(M31::from_u32_unchecked(role)));
+    values.extend(limbs.iter().cloned());
+    eval.add_to_relation(RelationEntry::new(
+        relation,
+        E::EF::from(active.clone()),
+        &values,
+    ));
 }
 
 /// `value + lo - hi - q·p = 0` over 13-bit limbs with signed carries, final 0.

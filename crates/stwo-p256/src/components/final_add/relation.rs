@@ -6,7 +6,8 @@ use stwo_constraint_framework::relation;
 use stwo_p256_utils::constants::N_LIMBS;
 
 use crate::prepared_table::FinalCheckHintRelation;
-use crate::projective_air::ProjectiveRcbMulComponentRelations;
+use crate::projective_air::ProjectiveRcbMulResultRelation;
+use crate::range_checks::RangeCheckRelation;
 
 /// `(sig_id, cert_id, point[PREPARED_TABLE_EC_POINT_COLUMNS])` — re-exported
 /// arity for the hint consumer.
@@ -18,16 +19,15 @@ pub const FINAL_ADD_OUTPUT_RELATION_ARITY: usize = 1 + N_LIMBS;
 
 relation!(FinalAddOutputRelation, FINAL_ADD_OUTPUT_RELATION_ARITY);
 
-/// Result relation linking the mul provider to the check consumer:
-/// `(mul_index, role, limb_index, limb)`.
-pub const FINAL_ADD_MUL_RESULT_ARITY: usize = 4;
-
-relation!(FinalAddMulResultRelation, FINAL_ADD_MUL_RESULT_ARITY);
-
 #[derive(Clone)]
 pub struct FinalAddRelations {
-    pub mul: ProjectiveRcbMulComponentRelations,
-    pub result: FinalAddMulResultRelation,
+    /// SHARED with the hinted-mul provider: final-add's four muls are proven
+    /// as hinted rows (source_index = hinted_source_offset + sig_id), and the
+    /// check consumes them through the same wide
+    /// `(source_index, mul_index, role, limb_0..limb_19)` relation instance.
+    pub mul_result: ProjectiveRcbMulResultRelation,
+    pub range13: RangeCheckRelation,
+    pub signed_carry: RangeCheckRelation,
     pub hint: FinalCheckHintRelation,
     pub output: FinalAddOutputRelation,
 }

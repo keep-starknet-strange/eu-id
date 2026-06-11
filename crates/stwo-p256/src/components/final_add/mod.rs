@@ -93,16 +93,13 @@ use stwo_constraint_framework::TraceLocationAllocator;
 
 use crate::prepared_table::FinalCheckHintRelation;
 use crate::projective_air::{
-    projective_rcb_signed_carry_log_size, ProjectiveRcbFoldedContributionComponent,
-    ProjectiveRcbFoldedContributionEval, ProjectiveRcbFoldedDigitComponent,
-    ProjectiveRcbFoldedDigitEval, ProjectiveRcbMulComponentRelations,
-    ProjectiveRcbRawProductChunkComponent, ProjectiveRcbRawProductChunkEval,
+    projective_rcb_signed_carry_log_size, ProjectiveRcbMulResultRelation,
     PROJECTIVE_RCB_MUL_ROLE_LHS, PROJECTIVE_RCB_MUL_ROLE_RESULT, PROJECTIVE_RCB_MUL_ROLE_RHS,
-    PROJECTIVE_RCB_SCHEDULE_NAMESPACE_FINAL_ADD, PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
+    PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
 };
 use crate::range_checks::{
-    RangeCheckComponent, RangeCheckEval, SignedCarryRangeComponent, SignedCarryRangeEval,
-    RANGE13_BITS, RANGE16_BITS,
+    RangeCheckComponent, RangeCheckEval, RangeCheckRelation, SignedCarryRangeComponent,
+    SignedCarryRangeEval, RANGE13_BITS,
 };
 use crate::scalar::scalar_mod_mul::columns::padded_log_size;
 
@@ -148,34 +145,24 @@ const FINAL_ADD_QUOTIENT_BOUND: i64 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FinalAddLogSizes {
-    mul: u32,
-    raw_product_chunk: u32,
-    folded_contribution: u32,
-    folded_digit: u32,
     check: u32,
+    /// First hinted-mul `source_index` reserved for final-add muls (claim
+    /// shape, mixed into the channel via [`FinalAddProofClaim`]).
+    pub hinted_source_offset: u32,
 }
 
 impl FinalAddLogSizes {
     fn from_claim(claim: &FinalAddClaim) -> Self {
-        let projective = claim.mul_trace.component_log_sizes();
         Self {
-            mul: projective.mul,
-            raw_product_chunk: projective.raw_product_chunk,
-            folded_contribution: projective.folded_contribution,
-            folded_digit: projective.folded_digit,
             check: padded_log_size(1),
+            hinted_source_offset: claim.hinted_source_offset,
         }
     }
 }
 
 pub struct FinalAddComponents {
-    mul: FinalAddMulComponent,
-    raw_product_chunk: ProjectiveRcbRawProductChunkComponent,
-    folded_contribution: ProjectiveRcbFoldedContributionComponent,
-    folded_digit: ProjectiveRcbFoldedDigitComponent,
     check: FinalAddCheckComponent,
     range13: RangeCheckComponent,
-    raw_product_carry16: RangeCheckComponent,
     signed_carry: SignedCarryRangeComponent,
 }
 
@@ -187,68 +174,28 @@ impl FinalAddComponents {
         relations: &FinalAddRelations,
     ) -> Self {
         Self {
-            mul: FinalAddMulComponent::new(
-                allocator,
-                FinalAddMulEval {
-                    log_size: log_sizes.mul,
-                    mul_relations: relations.mul.clone(),
-                    result_relation: relations.result.clone(),
-                },
-                interaction_claim.mul,
-            ),
-            raw_product_chunk: ProjectiveRcbRawProductChunkComponent::new(
-                allocator,
-                ProjectiveRcbRawProductChunkEval {
-                    log_size: log_sizes.raw_product_chunk,
-                    relations: relations.mul.clone(),
-                    schedule_namespace: PROJECTIVE_RCB_SCHEDULE_NAMESPACE_FINAL_ADD,
-                },
-                interaction_claim.raw_product_chunk,
-            ),
-            folded_contribution: ProjectiveRcbFoldedContributionComponent::new(
-                allocator,
-                ProjectiveRcbFoldedContributionEval {
-                    log_size: log_sizes.folded_contribution,
-                    relations: relations.mul.clone(),
-                    schedule_namespace: PROJECTIVE_RCB_SCHEDULE_NAMESPACE_FINAL_ADD,
-                },
-                interaction_claim.folded_contribution,
-            ),
-            folded_digit: ProjectiveRcbFoldedDigitComponent::new(
-                allocator,
-                ProjectiveRcbFoldedDigitEval {
-                    log_size: log_sizes.folded_digit,
-                    relations: relations.mul.clone(),
-                    schedule_namespace: PROJECTIVE_RCB_SCHEDULE_NAMESPACE_FINAL_ADD,
-                },
-                interaction_claim.folded_digit,
-            ),
             check: FinalAddCheckComponent::new(
                 allocator,
                 FinalAddCheckEval {
                     log_size: log_sizes.check,
-                    result_relation: relations.result.clone(),
+                    mul_result: relations.mul_result.clone(),
+                    hinted_source_offset: log_sizes.hinted_source_offset,
                     hint_relation: relations.hint.clone(),
                     output_relation: relations.output.clone(),
-                    range13: relations.mul.range13.clone(),
-                    signed_carry: relations.mul.signed_carry.clone(),
+                    range13: relations.range13.clone(),
+                    signed_carry: relations.signed_carry.clone(),
                 },
                 interaction_claim.check,
             ),
             range13: RangeCheckComponent::new(
                 allocator,
-                RangeCheckEval::new(relations.mul.range13.clone(), RANGE13_BITS),
+                RangeCheckEval::new(relations.range13.clone(), RANGE13_BITS),
                 interaction_claim.range13.claimed_sum,
-            ),
-            raw_product_carry16: RangeCheckComponent::new(
-                allocator,
-                RangeCheckEval::new(relations.mul.raw_product_carry16.clone(), RANGE16_BITS),
-                interaction_claim.raw_product_carry16.claimed_sum,
             ),
             signed_carry: SignedCarryRangeComponent::new(
                 allocator,
                 SignedCarryRangeEval::new(
-                    relations.mul.signed_carry.clone(),
+                    relations.signed_carry.clone(),
                     projective_rcb_signed_carry_log_size(),
                     PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
                 ),
@@ -259,26 +206,16 @@ impl FinalAddComponents {
 
     pub fn components(&self) -> Vec<&dyn Component> {
         vec![
-            &self.mul as &dyn Component,
-            &self.raw_product_chunk as &dyn Component,
-            &self.folded_contribution as &dyn Component,
-            &self.folded_digit as &dyn Component,
             &self.check as &dyn Component,
             &self.range13 as &dyn Component,
-            &self.raw_product_carry16 as &dyn Component,
             &self.signed_carry as &dyn Component,
         ]
     }
 
     pub fn component_provers(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
         vec![
-            &self.mul as &dyn ComponentProver<SimdBackend>,
-            &self.raw_product_chunk as &dyn ComponentProver<SimdBackend>,
-            &self.folded_contribution as &dyn ComponentProver<SimdBackend>,
-            &self.folded_digit as &dyn ComponentProver<SimdBackend>,
             &self.check as &dyn ComponentProver<SimdBackend>,
             &self.range13 as &dyn ComponentProver<SimdBackend>,
-            &self.raw_product_carry16 as &dyn ComponentProver<SimdBackend>,
             &self.signed_carry as &dyn ComponentProver<SimdBackend>,
         ]
     }
@@ -313,11 +250,8 @@ impl FinalAddProofClaim {
     }
 
     pub fn mix_into(&self, channel: &mut impl Channel) {
-        channel.mix_u64(self.log_sizes.mul as u64);
-        channel.mix_u64(self.log_sizes.raw_product_chunk as u64);
-        channel.mix_u64(self.log_sizes.folded_contribution as u64);
-        channel.mix_u64(self.log_sizes.folded_digit as u64);
         channel.mix_u64(self.log_sizes.check as u64);
+        channel.mix_u64(self.log_sizes.hinted_source_offset as u64);
     }
 
     pub fn log_sizes(&self) -> FinalAddLogSizes {
@@ -333,8 +267,9 @@ impl FinalAddProofClaim {
             self.log_sizes,
             &FinalAddInteractionClaim::zero(),
             &FinalAddRelations {
-                mul: ProjectiveRcbMulComponentRelations::dummy(),
-                result: FinalAddMulResultRelation::dummy(),
+                mul_result: ProjectiveRcbMulResultRelation::dummy(),
+                range13: RangeCheckRelation::dummy(),
+                signed_carry: RangeCheckRelation::dummy(),
                 hint: FinalCheckHintRelation::dummy(),
                 output: FinalAddOutputRelation::dummy(),
             },

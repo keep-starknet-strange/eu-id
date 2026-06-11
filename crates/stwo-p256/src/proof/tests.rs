@@ -1425,9 +1425,17 @@ fn monolithic_rejects_mutated_consumed_hint() {
     let new_x = bump_limb0(&draft.claim.final_add.r1.x);
     draft.claim.final_add.r1.x = new_x;
     let err = monolithic_balance_outcome(&draft).expect_err("mutated R_1 must reject");
+    // `r1.x` feeds both the FinalCheckHint consume and the MUL_X1_SQUARED wide
+    // mul tuple (hinted provider), so the mutation unbalances both relations;
+    // `verify_balanced` reports the first in list order.
     assert!(
-        matches!(err, P256ProofError::RelationImbalance { relation: "FinalCheckHint" }),
-        "expected FinalCheckHint imbalance, got {err:?}"
+        matches!(
+            err,
+            P256ProofError::RelationImbalance {
+                relation: "FinalCheckHint" | "ProjectiveRcbMulResult"
+            }
+        ),
+        "expected FinalCheckHint/ProjectiveRcbMulResult imbalance, got {err:?}"
     );
 }
 

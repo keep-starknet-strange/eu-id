@@ -48,8 +48,22 @@ impl HintedMulTraceClaim {
     pub fn from_projective_rcb(
         claim: &crate::projective_air::ProjectiveRcbAirTraceClaim,
     ) -> Result<Self, super::witness::HintedMulWitnessError> {
+        let mut rows = Self { rows: Vec::new() };
+        rows.extend_from_projective_rcb(claim, 0)?;
+        Ok(rows)
+    }
+
+    /// Appends every mul of `claim` keyed at
+    /// `(source_offset + row.source_index, mul_index)` — used to fold other
+    /// sub-graphs' muls (final-add, public-key curve check) into the single
+    /// hinted provider with disjoint source ranges.
+    pub fn extend_from_projective_rcb(
+        &mut self,
+        claim: &crate::projective_air::ProjectiveRcbAirTraceClaim,
+        source_offset: u32,
+    ) -> Result<(), super::witness::HintedMulWitnessError> {
         use rayon::prelude::*;
-        let rows = claim
+        let new_rows = claim
             .rows
             .par_iter()
             .flat_map_iter(|row| {
@@ -66,14 +80,15 @@ impl HintedMulTraceClaim {
                         });
                     }
                     Ok(HintedMulScheduledRow {
-                        source_index: row.source_index as u32,
+                        source_index: source_offset + row.source_index as u32,
                         mul_index: mul_index as u32,
                         witness,
                     })
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(Self { rows })
+        self.rows.extend(new_rows);
+        Ok(())
     }
 
     /// Native re-verification of every witness (used by the draft's

@@ -23,39 +23,34 @@ use crate::range_checks::{
     encode_signed_carry, RangeCheckClaim, RangeCheckInteractionClaim, RANGE13_BITS, RANGE16_BITS,
 };
 use crate::scalar::scalar_mod_mul::columns::M31ColumnEval;
+use stwo_p256_utils::constants::N_LIMBS;
 
 use super::*;
 
 #[derive(Clone, Debug)]
 pub struct FinalAddInteractionClaim {
-    pub mul: SecureField,
-    pub raw_product_chunk: SecureField,
-    pub folded_contribution: SecureField,
-    pub folded_digit: SecureField,
     pub check: SecureField,
     pub range13: RangeCheckInteractionClaim,
-    pub raw_product_carry16: RangeCheckInteractionClaim,
     pub signed_carry: RangeCheckInteractionClaim,
     /// FinalCheckHint consumer sum (use, `+active`) for `R_1`, `R_2`.
     pub hint_consumer_claimed_sum: SecureField,
     /// FinalAddOutput provider sum (yield, `-active`).
     pub output_provider_claimed_sum: SecureField,
+    /// `ProjectiveRcbMulResult` consumer sum (use, `+active`) for the four
+    /// hinted muls; balances against the hinted-mul provider globally.
+    pub mul_result_consumer_claimed_sum: SecureField,
 }
 
 impl FinalAddInteractionClaim {
     pub fn zero() -> Self {
         let zero = secure_zero();
         Self {
-            mul: zero,
-            raw_product_chunk: zero,
-            folded_contribution: zero,
-            folded_digit: zero,
             check: zero,
             range13: RangeCheckInteractionClaim { claimed_sum: zero },
-            raw_product_carry16: RangeCheckInteractionClaim { claimed_sum: zero },
             signed_carry: RangeCheckInteractionClaim { claimed_sum: zero },
             hint_consumer_claimed_sum: zero,
             output_provider_claimed_sum: zero,
+            mul_result_consumer_claimed_sum: zero,
         }
     }
 
@@ -64,30 +59,20 @@ impl FinalAddInteractionClaim {
     /// carry providers all balance internally; the boundary-crossing relations
     /// (`FinalCheckHint`, `FinalAddOutput`) are excluded.
     pub fn internal_total(&self) -> SecureField {
-        self.mul
-            + self.raw_product_chunk
-            + self.folded_contribution
-            + self.folded_digit
-            + self.check
-            + self.range13.claimed_sum
-            + self.raw_product_carry16.claimed_sum
-            + self.signed_carry.claimed_sum
+        self.check + self.range13.claimed_sum + self.signed_carry.claimed_sum
             - self.hint_consumer_claimed_sum
             - self.output_provider_claimed_sum
+            - self.mul_result_consumer_claimed_sum
     }
 
     pub fn mix_into(&self, channel: &mut impl Channel) {
         channel.mix_felts(&[
-            self.mul,
-            self.raw_product_chunk,
-            self.folded_contribution,
-            self.folded_digit,
             self.check,
             self.range13.claimed_sum,
-            self.raw_product_carry16.claimed_sum,
             self.signed_carry.claimed_sum,
             self.hint_consumer_claimed_sum,
             self.output_provider_claimed_sum,
+            self.mul_result_consumer_claimed_sum,
         ]);
     }
 }
@@ -99,21 +84,9 @@ pub fn gen_final_add_interaction_trace(
 ) -> Result<(Vec<M31ColumnEval>, FinalAddInteractionClaim), FinalAddError> {
     let mut columns = Vec::new();
 
-    // Mul family: standard mul fractions ++ FinalAddMulResult provider, one
-    // LogupTraceGenerator / one finalize_last.
-    let (mul_interaction, mul_sum) =
-        gen_mul_family_interaction_trace(claim, relations, log_sizes.mul);
-    columns.extend(mul_interaction);
-
-    // Three non-mul families, reused unchanged.
-    let (projective_traces, projective_claim) =
-        claim.mul_trace.gen_interaction_trace(&relations.mul);
-    columns.extend(projective_traces.raw_product_chunk);
-    columns.extend(projective_traces.folded_contribution);
-    columns.extend(projective_traces.folded_digit);
-
-    // Check family (consumers + output provider).
-    let (check_interaction, check_sum, hint_sum, output_sum) =
+    // Check family (consumers + output provider). The four muls are proven by
+    // hinted-mul rows; the check consumes them via wide tuples.
+    let (check_interaction, check_sum, hint_sum, output_sum, mul_result_sum) =
         gen_check_interaction_trace(claim, relations, log_sizes.check);
     columns.extend(check_interaction);
 
@@ -124,21 +97,9 @@ pub fn gen_final_add_interaction_trace(
     let (range13_trace, range13_claim) = RangeCheckInteractionClaim::gen_interaction_trace(
         &range13_multiplicity,
         &range13_values,
-        &relations.mul.range13,
+        &relations.range13,
     );
     columns.extend(range13_trace);
-
-    let raw_product_carry16 = RangeCheckClaim::new(RANGE16_BITS);
-    let raw_product_carry16_values = raw_product_carry16.gen_preprocessed_column();
-    let raw_product_carry16_multiplicity =
-        raw_product_carry16.gen_multiplicity_trace(final_add_raw_product_carry16_uses(claim));
-    let (raw_product_carry16_trace, raw_product_carry16_claim) =
-        RangeCheckInteractionClaim::gen_interaction_trace(
-            &raw_product_carry16_multiplicity,
-            &raw_product_carry16_values,
-            &relations.mul.raw_product_carry16,
-        );
-    columns.extend(raw_product_carry16_trace);
 
     let signed_carry = final_add_signed_carry_claim();
     let signed_carry_values = signed_carry.gen_value_column();
@@ -148,113 +109,31 @@ pub fn gen_final_add_interaction_trace(
         RangeCheckInteractionClaim::gen_interaction_trace(
             &signed_carry_multiplicity,
             &signed_carry_values,
-            &relations.mul.signed_carry,
+            &relations.signed_carry,
         );
     columns.extend(signed_carry_trace);
 
     Ok((
         columns,
         FinalAddInteractionClaim {
-            mul: mul_sum,
-            raw_product_chunk: projective_claim.raw_product_chunk,
-            folded_contribution: projective_claim.folded_contribution,
-            folded_digit: projective_claim.folded_digit,
             check: check_sum,
             range13: range13_claim,
-            raw_product_carry16: raw_product_carry16_claim,
             signed_carry: signed_carry_claim,
             hint_consumer_claimed_sum: hint_sum,
             output_provider_claimed_sum: output_sum,
+            mul_result_consumer_claimed_sum: mul_result_sum,
         },
     ))
 }
 
-fn gen_mul_family_interaction_trace(
-    claim: &FinalAddClaim,
-    relations: &FinalAddRelations,
-    log_size: u32,
-) -> (Vec<M31ColumnEval>, SecureField) {
-    let padded_rows = 1usize << log_size;
-    let standard_count = projective_rcb_mul_row_fraction_count();
-    let provider_count = FINAL_ADD_MUL_PROVIDER_FRACTIONS;
-    let total = standard_count + provider_count;
-
-    let mut storage: Vec<Vec<(SecureField, SecureField)>> = (0..padded_rows)
-        .map(|_| {
-            let mut v = projective_rcb_mul_padding_fraction_pairs();
-            v.extend((0..provider_count).map(|_| (secure_zero(), secure_one())));
-            v
-        })
-        .collect();
-
-    for (mul_index, mul) in claim.mul_trace.rows[0].muls.iter().enumerate() {
-        let coset_index = mul_index;
-        let row = bit_reverse_index(
-            coset_index_to_circle_domain_index(coset_index, log_size),
-            log_size,
-        );
-        let mut pairs = projective_rcb_mul_row_fraction_pairs(0, mul_index, mul, &relations.mul);
-        pairs.extend(provider_fraction_pairs(mul_index, mul, &relations.result));
-        storage[row] = pairs;
-    }
-
-    let mut logup = LogupTraceGenerator::new(log_size);
-    for column in 0..total {
-        let mut col = logup.new_col();
-        for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
-            let mut numerators = [secure_zero(); N_LANES];
-            let mut denominators = [secure_one(); N_LANES];
-            for lane in 0..N_LANES {
-                let row = vec_row * N_LANES + lane;
-                let (numerator, denominator) = storage[row][column];
-                numerators[lane] = numerator;
-                denominators[lane] = denominator;
-            }
-            col.write_frac(
-                vec_row,
-                PackedQM31::from_array(numerators),
-                PackedQM31::from_array(denominators),
-            );
-        }
-        col.finalize_col();
-    }
-    logup.finalize_last()
-}
-
-fn provider_fraction_pairs(
-    mul_index: usize,
-    mul: &ProjectiveRcbMulRow,
-    relation: &FinalAddMulResultRelation,
-) -> Vec<(SecureField, SecureField)> {
-    let mut pairs = Vec::with_capacity(FINAL_ADD_MUL_PROVIDER_FRACTIONS);
-    for (role, limbs) in [
-        (ROLE_LHS, mul.trace.lhs.limbs()),
-        (ROLE_RHS, mul.trace.rhs.limbs()),
-        (ROLE_RESULT, mul.trace.result.limbs()),
-    ] {
-        for (limb_index, limb) in limbs.iter().enumerate() {
-            pairs.push((
-                secure_from_i64(-1),
-                relation.combine(&[
-                    M31::from_u32_unchecked(mul_index as u32),
-                    M31::from_u32_unchecked(role),
-                    M31::from_u32_unchecked(limb_index as u32),
-                    *limb,
-                ]),
-            ));
-        }
-    }
-    pairs
-}
-
-#[allow(clippy::type_complexity)]
 fn gen_check_interaction_trace(
     claim: &FinalAddClaim,
     relations: &FinalAddRelations,
     log_size: u32,
-) -> (Vec<M31ColumnEval>, SecureField, SecureField, SecureField) {
+) -> (Vec<M31ColumnEval>, SecureField, SecureField, SecureField, SecureField) {
     let padded_rows = 1usize << log_size;
-    let (fractions, hint_sum, output_sum) = check_fraction_pairs(claim, relations);
+    let (fractions, hint_sum, output_sum, mul_result_sum) =
+        check_fraction_pairs(claim, relations);
     let fraction_count = fractions.len();
 
     let active_row = bit_reverse_index(coset_index_to_circle_domain_index(0, log_size), log_size);
@@ -284,7 +163,7 @@ fn gen_check_interaction_trace(
         col.finalize_col();
     }
     let (trace, check_sum) = logup.finalize_last();
-    (trace, check_sum, hint_sum, output_sum)
+    (trace, check_sum, hint_sum, output_sum, mul_result_sum)
 }
 
 /// Check consumer/provider fractions, in the EXACT order `FinalAddCheckEval`
@@ -297,7 +176,7 @@ fn gen_check_interaction_trace(
 fn check_fraction_pairs(
     claim: &FinalAddClaim,
     relations: &FinalAddRelations,
-) -> (Vec<(SecureField, SecureField)>, SecureField, SecureField) {
+) -> (Vec<(SecureField, SecureField)>, SecureField, SecureField, SecureField) {
     let mut pairs = Vec::new();
     let mut hint_sum = secure_zero();
     let mut output_sum = secure_zero();
@@ -322,22 +201,22 @@ fn check_fraction_pairs(
         hint_sum += numerator / denom;
     }
 
-    // 2. mul-result consumes.
-    let consume = |pairs: &mut Vec<(SecureField, SecureField)>,
-                   mul_index: u32,
-                   role: u32,
-                   value: &P256M31BigInt| {
-        for (limb_index, limb) in value.limbs().iter().enumerate() {
-            pairs.push((
-                secure_from_i64(1),
-                relations.result.combine(&[
-                    M31::from_u32_unchecked(mul_index),
-                    M31::from_u32_unchecked(role),
-                    M31::from_u32_unchecked(limb_index as u32),
-                    *limb,
-                ]),
-            ));
-        }
+    // 2. mul-result consumes (wide tuples against the hinted provider).
+    let mut mul_result_sum = secure_zero();
+    let mul_source =
+        M31::from_u32_unchecked(claim.hinted_source_offset) + claim.sig_id;
+    let mut consume = |pairs: &mut Vec<(SecureField, SecureField)>,
+                       mul_index: u32,
+                       role: u32,
+                       value: &P256M31BigInt| {
+        let mut values = Vec::with_capacity(3 + N_LIMBS);
+        values.push(mul_source);
+        values.push(M31::from_u32_unchecked(mul_index));
+        values.push(M31::from_u32_unchecked(role));
+        values.extend(value.limbs().iter().copied());
+        let denom = relations.mul_result.combine(&values);
+        pairs.push((secure_from_i64(1), denom));
+        mul_result_sum += secure_from_i64(1) / denom;
     };
     consume(&mut pairs, MUL_LAMBDA_DX, ROLE_LHS, &claim.lambda);
     consume(&mut pairs, MUL_LAMBDA_DX, ROLE_RHS, &claim.dx);
@@ -390,7 +269,7 @@ fn check_fraction_pairs(
         &claim.x1_sq,
     ] {
         for limb in value.limbs() {
-            pairs.push((secure_from_i64(1), relations.mul.range13.combine(&[*limb])));
+            pairs.push((secure_from_i64(1), relations.range13.combine(&[*limb])));
         }
     }
 
@@ -403,12 +282,9 @@ fn check_fraction_pairs(
     {
         pairs.push((
             secure_from_i64(1),
-            relations
-                .mul
-                .signed_carry
-                .combine(&[encode_signed_carry(*carry)]),
+            relations.signed_carry.combine(&[encode_signed_carry(*carry)]),
         ));
     }
 
-    (pairs, hint_sum, output_sum)
+    (pairs, hint_sum, output_sum, mul_result_sum)
 }

@@ -71,6 +71,8 @@ pub struct FinalAddClaim {
     /// shared `projective_air` mul machinery (one source row,
     /// [`FINAL_ADD_MUL_COUNT`] mul rows).
     pub mul_trace: ProjectiveRcbAirTraceClaim,
+    /// First hinted-mul `source_index` reserved for this claim's four muls.
+    pub hinted_source_offset: u32,
     pub sig_id: M31,
     /// Active row branch.
     pub branch: FinalAddBranch,
@@ -119,6 +121,7 @@ impl FinalAddClaim {
         r1_inf: bool,
         r2: &AffinePoint,
         r2_inf: bool,
+        hinted_source_offset: u32,
     ) -> Result<Self, FinalAddError> {
         let r1_values = point_values(r1, r1_inf);
         let r2_values = point_values(r2, r2_inf);
@@ -257,6 +260,7 @@ impl FinalAddClaim {
 
         let claim = Self {
             mul_trace,
+            hinted_source_offset,
             sig_id,
             branch,
             r1: r1_values,
@@ -389,7 +393,7 @@ fn push_mul(
     lhs: &U256,
     rhs: &U256,
 ) -> Result<U256, FinalAddError> {
-    let row = ProjectiveRcbMulRow::new(0, mul_index, ProjectiveRcbMulStep::DoubleX1Squared, lhs, rhs)
+    let row = ProjectiveRcbMulRow::new_lite(ProjectiveRcbMulStep::DoubleX1Squared, lhs, rhs)
         .map_err(FinalAddError::MulTrace)?;
     let result = row.trace.result.to_u256();
     muls.push(row);
@@ -836,9 +840,10 @@ pub(crate) fn final_add_signed_carry_claim() -> SignedCarryRangeClaim {
     )
 }
 
-/// All range13 uses: mul-family uses + the check-row witnessed limbs.
+/// Range13 uses: the check-row witnessed limbs (the four muls are hinted
+/// rows, which range-check their own limbs in the hinted component).
 pub(crate) fn final_add_range13_uses(claim: &FinalAddClaim) -> Vec<M31> {
-    let mut uses = claim.mul_trace.range13_lookup_values();
+    let mut uses = Vec::new();
     for value in [
         &claim.r1.x,
         &claim.r1.y,
@@ -862,16 +867,9 @@ pub(crate) fn final_add_range13_uses(claim: &FinalAddClaim) -> Vec<M31> {
     uses
 }
 
-pub(crate) fn final_add_raw_product_carry16_uses(claim: &FinalAddClaim) -> Vec<M31> {
-    claim.mul_trace.raw_product_carry16_lookup_values()
-}
-
-/// All signed-carry uses: mul-family uses + the check-row carries.
+/// Signed-carry uses: the check-row carries only.
 pub(crate) fn final_add_signed_carry_uses(claim: &FinalAddClaim) -> Result<Vec<i64>, FinalAddError> {
-    let mut uses = claim
-        .mul_trace
-        .signed_carry_lookup_values()
-        .map_err(FinalAddError::MulTrace)?;
+    let mut uses = Vec::new();
     uses.extend(claim.dx_carries.iter().copied());
     uses.extend(claim.dy_carries.iter().copied());
     uses.extend(claim.x3_carries.iter().copied());
@@ -883,34 +881,12 @@ pub fn gen_final_add_base_trace(
     log_sizes: FinalAddLogSizes,
 ) -> Result<Vec<M31ColumnEval>, FinalAddError> {
     let mut columns = Vec::new();
-    columns.extend(
-        gen_projective_rcb_mul_base_trace(&claim.mul_trace, log_sizes.mul)
-            .map_err(FinalAddError::MulTrace)?,
-    );
-    columns.extend(
-        gen_projective_rcb_raw_product_chunk_base_trace(&claim.mul_trace, log_sizes.raw_product_chunk)
-            .map_err(FinalAddError::MulTrace)?,
-    );
-    columns.extend(
-        gen_projective_rcb_folded_contribution_base_trace(
-            &claim.mul_trace,
-            log_sizes.folded_contribution,
-        )
-        .map_err(FinalAddError::MulTrace)?,
-    );
-    columns.extend(
-        gen_projective_rcb_folded_digit_base_trace(&claim.mul_trace, log_sizes.folded_digit)
-            .map_err(FinalAddError::MulTrace)?,
-    );
     columns.extend(gen_check_base_trace(claim, log_sizes.check));
 
-    // Shared range providers' multiplicity columns (over ALL uses in the sub-graph).
+    // Range providers' multiplicity columns (check-row uses only; the four
+    // muls are proven by hinted-mul rows, which range-check their own limbs).
     let range13 = RangeCheckClaim::new(RANGE13_BITS);
     columns.push(range13.gen_multiplicity_trace(final_add_range13_uses(claim)));
-    let raw_product_carry16 = RangeCheckClaim::new(RANGE16_BITS);
-    columns.push(
-        raw_product_carry16.gen_multiplicity_trace(final_add_raw_product_carry16_uses(claim)),
-    );
     let signed_carry = final_add_signed_carry_claim();
     columns.push(signed_carry.gen_multiplicity_trace(final_add_signed_carry_uses(claim)?));
     Ok(columns)

@@ -71,7 +71,7 @@ use crate::fake_glv_prepared_point_source::{
 use crate::final_add_air::{
     final_add_preprocessed_columns, gen_final_add_base_trace, gen_final_add_interaction_trace,
     FinalAddClaim, FinalAddComponents, FinalAddError, FinalAddInteractionClaim,
-    FinalAddMulResultRelation, FinalAddOutputRelation, FinalAddProofClaim, FinalAddRelations,
+    FinalAddOutputRelation, FinalAddProofClaim, FinalAddRelations,
 };
 use crate::final_check::{FinalEcdsaCheckClaim, FinalEcdsaCheckError};
 use crate::final_check_air::{
@@ -239,14 +239,21 @@ impl P256ProofClaim {
         )?;
         let projective_rcb_air_trace =
             ProjectiveRcbAirTraceClaim::from_projective_trace_lite(&projective_ec_trace)?;
-        let hinted_mul_trace = HintedMulTraceClaim::from_projective_rcb(&projective_rcb_air_trace)?;
         let final_check = FinalEcdsaCheckClaim::from_claims(
             &public_inputs,
             &cert_inputs,
             &fake_glv_scalars,
             &fake_glv_chain,
         )?;
-        let final_add = final_add_claim_from_final_check(&final_check, &fake_glv_scalars)?;
+        // Final-add's four muls ride the hinted provider on source indices
+        // just past the ladder ops.
+        let hinted_source_offset = projective_rcb_air_trace.rows.len() as u32;
+        let final_add =
+            final_add_claim_from_final_check(&final_check, &fake_glv_scalars, hinted_source_offset)?;
+        let mut hinted_mul_trace =
+            HintedMulTraceClaim::from_projective_rcb(&projective_rcb_air_trace)?;
+        hinted_mul_trace
+            .extend_from_projective_rcb(&final_add.mul_trace, final_add.hinted_source_offset)?;
         let prepared_use_counts =
             PreparedPointUseCountClaim::from_selector_claim(&fake_glv_selectors)?;
         let prepared_trace = prepared_table.prepared_point_trace(&prepared_use_counts)?;
@@ -359,7 +366,12 @@ impl P256ProofClaim {
         )?;
         let projective_rcb_air_trace =
             ProjectiveRcbAirTraceClaim::from_projective_trace_lite(&projective_ec_trace)?;
-        let hinted_mul_trace = HintedMulTraceClaim::from_projective_rcb(&projective_rcb_air_trace)?;
+        let mut hinted_mul_trace =
+            HintedMulTraceClaim::from_projective_rcb(&projective_rcb_air_trace)?;
+        hinted_mul_trace.extend_from_projective_rcb(
+            &base.final_add.mul_trace,
+            base.final_add.hinted_source_offset,
+        )?;
         let prepared_trace = prepared_table.prepared_point_trace(&base.prepared_use_counts)?;
 
         Ok(Self {
@@ -920,7 +932,8 @@ impl P256CurrentAirInteractionClaim {
                         .mul_result_consumer_claimed_sum
                     + self
                         .prepared_table_projective_source
-                        .mul_result_consumer_claimed_sum,
+                        .mul_result_consumer_claimed_sum
+                    + self.final_add.mul_result_consumer_claimed_sum,
             ),
             ("FakeGlvChainExpansion", self.fake_glv_chain_expansion.total()),
             (
@@ -1199,8 +1212,11 @@ impl P256CurrentAirRelations {
             hinted_signed_h: RangeCheckRelation::dummy(),
             hinted_challenge: HintedMulChallenge::from_z(SecureField::from(M31::from_u32_unchecked(2))),
             final_add: FinalAddRelations {
-                mul: ProjectiveRcbMulComponentRelations::dummy(),
-                result: FinalAddMulResultRelation::dummy(),
+                // SHARED with the hinted-mul provider relation above (dummy
+                // instances are value-identical, mirroring the draw path).
+                mul_result: ProjectiveRcbMulComponentRelations::dummy().mul_result,
+                range13: RangeCheckRelation::dummy(),
+                signed_carry: RangeCheckRelation::dummy(),
                 hint: FinalCheckHintRelation::dummy(),
                 output: FinalAddOutputRelation::dummy(),
             },
@@ -1208,6 +1224,7 @@ impl P256CurrentAirRelations {
     }
 
     fn draw(channel: &mut impl Channel) -> Self {
+        let projective_rcb_air_relations = ProjectiveRcbMulComponentRelations::draw(channel);
         let public_inputs = PublicEcdsaInstanceRelation::draw(channel);
         let scalar_setup_output = ScalarSetupOutputRelation::draw(channel);
         let cert_scalar_input = CertScalarInputRelation::draw(channel);
@@ -1252,12 +1269,15 @@ impl P256CurrentAirRelations {
                 channel,
                 public_key_point,
             ),
-            projective_rcb_air: ProjectiveRcbMulComponentRelations::draw(channel),
+            projective_rcb_air: projective_rcb_air_relations.clone(),
             hinted_signed_h: RangeCheckRelation::draw(channel),
             hinted_challenge: HintedMulChallenge::draw(channel),
             final_add: FinalAddRelations {
-                mul: ProjectiveRcbMulComponentRelations::draw(channel),
-                result: FinalAddMulResultRelation::draw(channel),
+                // SHARED with the hinted-mul provider: final-add's muls are
+                // hinted rows, so the consumer must use the same instance.
+                mul_result: projective_rcb_air_relations.mul_result.clone(),
+                range13: RangeCheckRelation::draw(channel),
+                signed_carry: RangeCheckRelation::draw(channel),
                 // Shared with the prepared-table provider above.
                 hint: final_check_hint,
                 output: FinalAddOutputRelation::draw(channel),
@@ -2677,6 +2697,7 @@ fn public_key_on_curve_slice_claim(
 fn final_add_claim_from_final_check(
     final_check: &FinalEcdsaCheckClaim,
     fake_glv_scalars: &FakeGlvScalarHintClaim,
+    hinted_source_offset: u32,
 ) -> Result<FinalAddClaim, P256ProofError> {
     let row = final_check
         .rows
@@ -2699,7 +2720,8 @@ fn final_add_claim_from_final_check(
     };
     let (r1, r1_inf) = signed_prepared(&row.h1, bit_for(0));
     let (r2, r2_inf) = signed_prepared(&row.h2, bit_for(1));
-    FinalAddClaim::from_hints(row.sig_id, &r1, r1_inf, &r2, r2_inf).map_err(P256ProofError::FinalAdd)
+    FinalAddClaim::from_hints(row.sig_id, &r1, r1_inf, &r2, r2_inf, hinted_source_offset)
+        .map_err(P256ProofError::FinalAdd)
 }
 
 /// `R = signed_hint_point(h, bit)`: returns `h` when `bit == 0` and `-h`
