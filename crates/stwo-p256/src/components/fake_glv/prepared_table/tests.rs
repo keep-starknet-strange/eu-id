@@ -516,7 +516,7 @@ fn projective_source_constraints_hold(log_size: u32, base: &[Vec<M31>]) -> bool 
         let recorder = PreparedTableProjectiveSourceEval {
             log_size,
             relation: PreparedTableEcRowRelation::dummy(),
-            mul_relations: crate::projective_air::ProjectiveRcbMulComponentRelations::dummy(),
+            mul_result: crate::projective_air::ProjectiveRcbMulResultRelation::dummy(),
             gamma_digest: crate::components::gamma_digest::GammaDigestRelation::dummy(),
             gamma_challenge: super::trace::prepared_dummy_gamma_challenge(),
         }

@@ -214,7 +214,7 @@ impl PreparedTableProjectiveSourceComponents {
                 PreparedTableProjectiveSourceEval {
                     log_size,
                     relation: relation.clone(),
-                    mul_relations: mul_relations.clone(),
+                    mul_result: mul_relations.mul_result.clone(),
                     gamma_digest: gamma_digest.clone(),
                     gamma_challenge: gamma_challenge.clone(),
                 },

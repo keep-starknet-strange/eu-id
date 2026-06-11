@@ -3,7 +3,6 @@ use crate::constants::{P256_GX, P256_GY, P256_MODULUS, P256_ORDER};
 use crate::curve::{mod_inverse, scalar_mul};
 use crate::debug::MockCommitmentScheme;
 use crate::field_ops::mul_mod_witness;
-use crate::fp_solinas_air::FP_SOLINAS_REDUCTION_DIGITS;
 use crate::limbs::P256M31BigInt;
 use crate::fake_glv_chain::FakeGlvChainCert;
 use crate::prepared_table::{PreparedAffinePoint, PreparedTableCert};
@@ -202,24 +201,6 @@ fn current_p256_proof_pipeline_links_all_implemented_components() {
         proof.claim.projective_rcb_air_trace.mul_row_count(),
         804 * 15
     );
-    // Lite (hinted-mul era) claim: the schoolbook sub-families are not built.
-    // Identity rows keep their fixed-width zeroed reduction rows; lite rows
-    // carry none.
-    assert_eq!(
-        proof.claim.projective_rcb_air_trace.reduction_row_count(),
-        (proof.claim.projective_rcb_air_trace.mul_row_count()
-            - proof.claim.projective_rcb_air_trace.non_identity_mul_row_count())
-            * FP_SOLINAS_REDUCTION_DIGITS
-    );
-    assert_eq!(proof.claim.projective_rcb_air_trace.folded_digit_row_count(), 0);
-    assert_eq!(
-        proof
-            .claim
-            .projective_rcb_air_trace
-            .folded_contribution_row_count(),
-        0
-    );
-    assert_eq!(proof.claim.projective_rcb_air_trace.raw_product_chunk_count(), 0);
     assert_eq!(proof.claim.final_check.rows.len(), 2);
     assert_eq!(proof.claim.prepared_use_counts.certs.len(), 4);
     for provider in &proof.claim.prepared_trace.providers {
@@ -266,24 +247,6 @@ fn current_p256_proof_pipeline_accepts_real_valid_signature_input() {
         proof.claim.projective_rcb_air_trace.mul_row_count(),
         402 * 15
     );
-    // Lite (hinted-mul era) claim: the schoolbook sub-families are not built.
-    // Identity rows keep their fixed-width zeroed reduction rows; lite rows
-    // carry none.
-    assert_eq!(
-        proof.claim.projective_rcb_air_trace.reduction_row_count(),
-        (proof.claim.projective_rcb_air_trace.mul_row_count()
-            - proof.claim.projective_rcb_air_trace.non_identity_mul_row_count())
-            * FP_SOLINAS_REDUCTION_DIGITS
-    );
-    assert_eq!(proof.claim.projective_rcb_air_trace.folded_digit_row_count(), 0);
-    assert_eq!(
-        proof
-            .claim
-            .projective_rcb_air_trace
-            .folded_contribution_row_count(),
-        0
-    );
-    assert_eq!(proof.claim.projective_rcb_air_trace.raw_product_chunk_count(), 0);
     assert_eq!(
         proof.claim.public_key_check.solinas_reduction_row_count(),
         112
@@ -2143,14 +2106,7 @@ fn current_p256_air_shape_diagnostic() {
         proof.claim.projective_rcb_air_trace.active_row_count(),
         proof.claim.projective_rcb_air_trace.mul_row_count(),
     );
-    eprintln!(
-        "projective row families: raw_chunks={} folded_contributions={} folded_digits={} reductions={}",
-        proof.claim.projective_rcb_air_trace.raw_product_chunk_count(),
-        proof.claim.projective_rcb_air_trace.folded_contribution_row_count(),
-        proof.claim.projective_rcb_air_trace.folded_digit_row_count(),
-        proof.claim.projective_rcb_air_trace.reduction_row_count(),
-    );
-
+    
     for (index, scalar_mod_mul) in components.scalar_setup_mod_muls.iter().enumerate() {
         print_component_shape(
             &format!("scalar_setup_mod_mul_{index}"),

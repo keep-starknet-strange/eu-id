@@ -324,7 +324,7 @@ impl FakeGlvProjectiveSourceComponents {
                 FakeGlvProjectiveSourceEval {
                     log_size,
                     relation: relation.clone(),
-                    mul_relations: mul_relations.clone(),
+                    mul_result: mul_relations.mul_result.clone(),
                     gamma_digest: gamma_digest.clone(),
                     gamma_challenge: gamma_challenge.clone(),
                 },
@@ -472,9 +472,9 @@ impl FrameworkEval for FakeGlvPrimitiveEcRowProviderEval {
 pub struct FakeGlvProjectiveSourceEval {
     pub log_size: u32,
     pub relation: FakeGlvPrimitiveEcRowRelation,
-    /// C5 plumbing: relations bundle carrying `mul_result`, the relation the
-    /// silo provides its proven mul limbs on and this source consumes.
-    pub mul_relations: ProjectiveRcbMulComponentRelations,
+    /// The hinted provider's wide mul relation (operands/results consumed
+    /// per `(source, mul, role, limbs)` tuple).
+    pub mul_result: crate::projective_air::ProjectiveRcbMulResultRelation,
     /// γ-digest reshape (docs/gamma-digest-design.md): the formula blocks'
     /// range13 + signed-carry values are bound into two per-row digests
     /// yielded on this relation; the tall expander components re-expand them
@@ -567,7 +567,7 @@ impl FrameworkEval for FakeGlvProjectiveSourceEval {
         ));
         // CONSUME (use, `+has_muls`) the silo's proven mul limbs for this op,
         // keyed `(source_index, mul_index, role, limb_index, limb)`.
-        consumed_muls.consume(&mut eval, &self.mul_relations.mul_result, &source_index);
+        consumed_muls.consume(&mut eval, &self.mul_result, &source_index);
 
         // C5-2: constrain the Double-op coordinate formula. `double_active`
         // (= active·op) is 1 only on active Double rows (op==1 == DOUBLE);
@@ -798,10 +798,10 @@ pub(crate) fn gen_fake_glv_projective_source_base_trace(
     Ok(columns_from_rows(log_size, rows))
 }
 
+/// Provider (yield, `-active`) interaction trace for the EC-row relation.
 pub(crate) fn gen_fake_glv_primitive_ec_source_interaction_trace(
     base: &[M31ColumnEval],
     relation: &FakeGlvPrimitiveEcRowRelation,
-    multiplicity: RelationMultiplicity,
 ) -> (
     ColumnVec<M31ColumnEval>,
     FakeGlvPrimitiveEcRowInteractionClaim,
@@ -812,11 +812,7 @@ pub(crate) fn gen_fake_glv_primitive_ec_source_interaction_trace(
     let mut col = logup.new_col();
     for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
         let values = fake_glv_primitive_ec_row_packed_relation_values(base, vec_row);
-        let active = PackedQM31::from(base[0].data[vec_row]);
-        let numerator = match multiplicity {
-            RelationMultiplicity::Provider => -active,
-            RelationMultiplicity::Consumer => active,
-        };
+        let numerator = -PackedQM31::from(base[0].data[vec_row]);
         let denominator: PackedQM31 = relation.combine(&values);
         col.write_frac(vec_row, numerator, denominator);
     }
@@ -1441,8 +1437,3 @@ pub(crate) struct FakeGlvPrimitiveEcRowInteractionClaim {
     pub claimed_sum: SecureField,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RelationMultiplicity {
-    Provider,
-    Consumer,
-}

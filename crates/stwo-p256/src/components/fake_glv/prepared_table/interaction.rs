@@ -138,6 +138,8 @@ impl PreparedTableProjectiveSourceInteractionClaim {
 }
 
 
+/// Unpinned provider trace (test-only; the monolith uses the pinned gen).
+#[cfg(test)]
 pub(crate) fn gen_prepared_table_ec_row_interaction_trace(
     base: &[M31ColumnEval],
     relation: &PreparedTableEcRowRelation,

@@ -15,13 +15,11 @@ use crate::projective::{ProjectiveEcOp, ProjectivePoint};
 use crate::projective_air::{
     projective_rcb_signed_carry_bound,
     projective_rcb_signed_carry_log_size, ProjectiveRcbAirError, ProjectiveRcbAirRow,
-    ProjectiveRcbAirTraceClaim, ProjectiveRcbMulRow, ProjectiveRcbMulStep,
-    PROJECTIVE_RCB_SCHEDULE_NAMESPACE_FINAL_ADD, PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
+    ProjectiveRcbAirTraceClaim, ProjectiveRcbMulRow, ProjectiveRcbMulStep, PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
 };
 use crate::range_checks::{
     encode_signed_carry, range_check_value_column_id, signed_carry_active_column_id,
     signed_carry_value_column_id, RangeCheckClaim, SignedCarryRangeClaim, RANGE13_BITS,
-    RANGE16_BITS,
 };
 use crate::scalar::scalar_mod_mul::columns::{m31_column_eval, M31ColumnEval};
 use crate::types::{AffinePoint, U256};
@@ -761,30 +759,15 @@ fn check_slope_numer_reduction(
 pub fn final_add_preprocessed_columns(
     claim: &FinalAddClaim,
 ) -> Result<Vec<(PreProcessedColumnId, M31ColumnEval)>, FinalAddError> {
-    let projective_ids = claim
-        .mul_trace
-        .preprocessed_column_ids_with_namespace(PROJECTIVE_RCB_SCHEDULE_NAMESPACE_FINAL_ADD);
-    let mut columns: Vec<(PreProcessedColumnId, M31ColumnEval)> = claim
-        .mul_trace
-        .gen_preprocessed_trace_with_namespace(
-            &projective_ids,
-            PROJECTIVE_RCB_SCHEDULE_NAMESPACE_FINAL_ADD,
-        )
-        .map_err(FinalAddError::MulTrace)?
-        .into_iter()
-        .zip(projective_ids)
-        .map(|(eval, id)| (id, eval))
-        .collect();
-
+    // Only the live providers' columns: the four muls ride the hinted
+    // provider (no schedule/carry16 candidates — they were generated and
+    // dropped by the global id selector since the fold).
+    let _ = claim;
+    let mut columns: Vec<(PreProcessedColumnId, M31ColumnEval)> = Vec::new();
     let range13 = RangeCheckClaim::new(RANGE13_BITS);
     columns.push((
         range_check_value_column_id(RANGE13_BITS),
         range13.gen_preprocessed_column(),
-    ));
-    let raw_product_carry16 = RangeCheckClaim::new(RANGE16_BITS);
-    columns.push((
-        range_check_value_column_id(RANGE16_BITS),
-        raw_product_carry16.gen_preprocessed_column(),
     ));
     let signed_carry = final_add_signed_carry_claim();
     columns.push((
@@ -808,11 +791,8 @@ pub fn final_add_preprocessed_columns(
 
 /// Preprocessed column ids this sub-graph reads (schedule + range/signed-carry).
 pub fn final_add_preprocessed_column_ids(claim: &FinalAddClaim) -> Vec<PreProcessedColumnId> {
-    let mut ids = claim
-        .mul_trace
-        .preprocessed_column_ids_with_namespace(PROJECTIVE_RCB_SCHEDULE_NAMESPACE_FINAL_ADD);
-    ids.push(range_check_value_column_id(RANGE13_BITS));
-    ids.push(range_check_value_column_id(RANGE16_BITS));
+    let _ = claim;
+    let mut ids = vec![range_check_value_column_id(RANGE13_BITS)];
     ids.push(signed_carry_value_column_id(PROJECTIVE_RCB_SIGNED_CARRY_EQUATION));
     ids.push(signed_carry_active_column_id(PROJECTIVE_RCB_SIGNED_CARRY_EQUATION));
     for layout in super::final_add_gamma_layouts() {

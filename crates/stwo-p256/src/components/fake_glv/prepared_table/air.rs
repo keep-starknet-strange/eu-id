@@ -11,7 +11,7 @@ use stwo_p256_utils::constants::{LIMB_BITS, N_LIMBS};
 use crate::constants::{P256_3GX, P256_3GY, P256_MODULUS};
 use crate::limbs::P256M31BigInt;
 use crate::prepared_point::{PREPARED_BASE_COUNT, TABLE16_INDEX};
-use crate::projective_air::{ConsumedMulLimbs, ProjectiveRcbMulComponentRelations};
+use crate::projective_air::ConsumedMulLimbs;
 use crate::components::gamma_digest::{
     yield_gamma_digest, GammaChallenge, GammaDigestRelation, GAMMA_TAG_PREPARED_RANGE13,
     GAMMA_TAG_PREPARED_SIGNED,
@@ -372,9 +372,9 @@ fn signed_numerator<E: EvalAtRow>(gate: E::F, mult: i32) -> E::EF {
 pub struct PreparedTableProjectiveSourceEval {
     pub log_size: u32,
     pub relation: PreparedTableEcRowRelation,
-    /// C5 plumbing: relations bundle carrying `mul_result`, consumed for the
-    /// prepared-table EC ops (the `[0, source_offset)` slice of the silo).
-    pub mul_relations: ProjectiveRcbMulComponentRelations,
+    /// The hinted provider's wide mul relation (operands/results consumed
+    /// per `(source, mul, role, limbs)` tuple).
+    pub mul_result: crate::projective_air::ProjectiveRcbMulResultRelation,
     /// γ-digest reshape (docs/gamma-digest-design.md): the formula blocks'
     /// range13 + signed-carry values are bound into two per-row digests
     /// yielded on this relation; the tall expander components re-expand them
@@ -468,7 +468,7 @@ impl FrameworkEval for PreparedTableProjectiveSourceEval {
         ));
         // CONSUME (use, `+has_muls`) the silo's proven mul limbs for this
         // prepared-table op, keyed identically to the silo's provided yields.
-        consumed_muls.consume(&mut eval, &self.mul_relations.mul_result, &source_index);
+        consumed_muls.consume(&mut eval, &self.mul_result, &source_index);
 
         // C5-2: constrain the Double-op coordinate formula. `double_active`
         // (= active·op) is 1 only on active Double rows (op==1 == DOUBLE);

@@ -59,7 +59,7 @@ use crate::fake_glv_ec_source::{
     gen_fake_glv_primitive_ec_source_interaction_trace, gen_fake_glv_projective_source_base_trace,
     gen_fake_glv_projective_source_consumer_interaction_trace, FakeGlvPrimitiveEcRowRelation,
     FakeGlvProjectiveSourceComponents, FakeGlvProjectiveSourceInteractionClaim,
-    FakeGlvProjectiveSourceProofClaim, RelationMultiplicity,
+    FakeGlvProjectiveSourceProofClaim,
 };
 use crate::fake_glv_lsb_correction_operand::{
     gen_lsb_correction_operand_consumer_base_trace, gen_lsb_correction_operand_interaction_trace,
@@ -2383,7 +2383,6 @@ impl P256ProofDraft {
             gen_fake_glv_primitive_ec_source_interaction_trace(
                 &base.fake_glv_projective_provider,
                 &relations.fake_glv_projective_source,
-                RelationMultiplicity::Provider,
             );
         let fake_glv_consumer = gen_fake_glv_projective_source_consumer_interaction_trace(
             &base.fake_glv_projective_consumer,
