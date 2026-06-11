@@ -90,7 +90,6 @@ use super::double_formula::{
 };
 use crate::limbs::{P256EvalBigInt, P256M31BigInt};
 use crate::projective_air::ConsumedMulLimbsView;
-use crate::range_checks::{add_range_check, RangeCheckRelation};
 
 /// Number of silo muls whose operands the MixedAdd formula binds via the
 /// signed-carry reduction idiom (multi-term / coefficient ≠ 1 combos).
@@ -171,7 +170,6 @@ pub(crate) const MIXED_ADD_FORMULA_COLUMNS: usize =
 pub(crate) fn bind_mixed_add_formula<E: EvalAtRow>(
     eval: &mut E,
     gate: &E::F,
-    active: &E::F,
     rhs_inf: &E::F,
     x1: &P256EvalBigInt<E>,
     y1: &P256EvalBigInt<E>,
@@ -183,7 +181,7 @@ pub(crate) fn bind_mixed_add_formula<E: EvalAtRow>(
     output_inf: &E::F,
     muls: &ConsumedMulLimbsView<E>,
     columns: &MixedAddFormulaColumns<E>,
-    range13: &RangeCheckRelation,
+    range13_values: &mut Vec<E::F>,
 ) {
     let one = E::F::from(M31::from_u32_unchecked(1));
     let one_const = constant_bigint::<E>(&one_bigint());
@@ -346,12 +344,13 @@ pub(crate) fn bind_mixed_add_formula<E: EvalAtRow>(
     bind_equal(eval, &noop_gate, output_y, y1);
     eval.add_constraint(noop_gate.clone() * (output_inf.clone() - lhs_inf.clone()));
 
-    // ----- Range checks (gated `active`, fixed count) -----
+    // ----- Range-checked values (fixed count, γ-digest) -----
     // Cover the affine input/operand/output coords and the x3/y3/z3 working
     // values so the reduction headroom (no M31 wraparound) holds and padding
     // leaks nothing. The consumed mul limbs are already Range13-checked by the
-    // silo; signed carries + quotients are range-checked separately by the
-    // caller against the consumer-local signed-carry table.
+    // silo. The values are COLLECTED (in the fixed
+    // `mixed_add_formula_range13_use_columns` order) into the caller's
+    // γ-digest; the tall expander emits the actual range uses.
     for limb in x1
         .limbs()
         .iter()
@@ -364,7 +363,7 @@ pub(crate) fn bind_mixed_add_formula<E: EvalAtRow>(
         .chain(columns.y3.limbs())
         .chain(columns.z3.limbs())
     {
-        add_range_check(eval, range13, active.clone(), limb.clone());
+        range13_values.push(limb.clone());
     }
 }
 

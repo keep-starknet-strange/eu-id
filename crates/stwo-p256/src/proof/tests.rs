@@ -1178,6 +1178,8 @@ fn monolithic_relation_audit_is_balanced_and_fully_linked() {
         // self-contained Range13 / signed-carry providers.
         "FakeGlvProjectiveRange13",
         "FakeGlvProjectiveSignedCarry",
+        // γ-digest reshape: wide consumers' digest yields vs tall expanders.
+        "GammaDigest",
         // C5 plumbing: the RCB silo → projective-source mul-result link.
         "ProjectiveRcbMulResult",
         "FakeGlvChainExpansion",

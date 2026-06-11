@@ -46,7 +46,12 @@ use crate::fake_glv_direct_prepared_operand::{
     gen_direct_operand_provider_interaction_trace, FakeGlvDirectPreparedOperandComponents,
     FakeGlvDirectPreparedOperandInteractionClaim, FakeGlvDirectPreparedOperandProofClaim,
 };
+use crate::components::gamma_digest::{
+    gen_gamma_tall_base_trace, gen_gamma_tall_interaction_trace, GammaChallenge,
+    GammaDigestRelation,
+};
 use crate::fake_glv_ec_source::{
+    fake_glv_gamma_instances, fake_glv_gamma_max_padded_values,
     fake_glv_projective_source_range13_uses_from_base,
     fake_glv_projective_source_signed_carry_uses_from_base,
     gen_fake_glv_primitive_ec_preprocessed_trace, gen_fake_glv_primitive_ec_source_base_trace,
@@ -937,6 +942,12 @@ impl P256CurrentAirInteractionClaim {
                 "FakeGlvProjectiveSignedCarry",
                 self.fake_glv_projective_source.signed_carry_total(),
             ),
+            // γ-digest reshape: the adopting consumers' digest yields net the
+            // tall expanders' digest uses.
+            (
+                "GammaDigest",
+                self.fake_glv_projective_source.gamma_digest_total(),
+            ),
             // C5 plumbing: the RCB silo PROVIDES every projective EC op's
             // mul `lhs`/`rhs`/`result` limbs; the two projective-source
             // consumers CONSUME them over disjoint, exhaustive `source_index`
@@ -1182,6 +1193,10 @@ struct P256CurrentAirRelations {
     projective_rcb_air: ProjectiveRcbMulComponentRelations,
     hinted_signed_h: RangeCheckRelation,
     hinted_challenge: HintedMulChallenge,
+    /// γ-digest reshape: the digest relation + post-base-commit challenge
+    /// shared by every adopting wide component and its tall expanders.
+    gamma_digest: GammaDigestRelation,
+    gamma_challenge: GammaChallenge,
     /// Final EC-addition sub-graph relations (mul engine + result + output).
     /// `hint` is the same `final_check_hint` relation as above.
     final_add: FinalAddRelations,
@@ -1235,6 +1250,11 @@ impl P256CurrentAirRelations {
             projective_rcb_air: ProjectiveRcbMulComponentRelations::dummy(),
             hinted_signed_h: RangeCheckRelation::dummy(),
             hinted_challenge: HintedMulChallenge::from_z(SecureField::from(M31::from_u32_unchecked(2))),
+            gamma_digest: GammaDigestRelation::dummy(),
+            gamma_challenge: GammaChallenge::from_gamma(
+                SecureField::from(M31::from_u32_unchecked(2)),
+                fake_glv_gamma_max_padded_values(),
+            ),
             final_add: FinalAddRelations {
                 // SHARED with the hinted-mul provider relation above (dummy
                 // instances are value-identical, mirroring the draw path).
@@ -1297,6 +1317,8 @@ impl P256CurrentAirRelations {
             projective_rcb_air: projective_rcb_air_relations.clone(),
             hinted_signed_h: RangeCheckRelation::draw(channel),
             hinted_challenge: HintedMulChallenge::draw(channel),
+            gamma_digest: GammaDigestRelation::draw(channel),
+            gamma_challenge: GammaChallenge::draw(channel, fake_glv_gamma_max_padded_values()),
             final_add: FinalAddRelations {
                 // SHARED with the hinted-mul provider: final-add's muls are
                 // hinted rows, so the consumer must use the same instance.
@@ -1420,11 +1442,14 @@ impl P256CurrentAirComponents {
                 allocator,
                 claim.fake_glv_projective_source.log_size,
                 claim.fake_glv_projective_source.source_offset,
+                claim.fake_glv_projective_source.rows,
                 &interaction_claim.fake_glv_projective_source,
                 &relations.fake_glv_projective_source,
                 &relations.projective_rcb_air,
                 &relations.fake_glv_projective_range13,
                 &relations.fake_glv_projective_signed_carry,
+                &relations.gamma_digest,
+                &relations.gamma_challenge,
             ),
             fake_glv_chain_expansion: FakeGlvChainExpansionComponents::new(
                 allocator,
@@ -1831,6 +1856,7 @@ impl P256ProofDraft {
         let local_ids = claim.fake_glv_projective_source.preprocessed_column_ids();
         let local_columns = gen_fake_glv_primitive_ec_preprocessed_trace(
             claim.fake_glv_projective_source.log_size,
+            claim.fake_glv_projective_source.rows,
             &local_ids,
         )?;
         append_unique_preprocessed_columns(&mut ids, &mut columns, local_ids, local_columns);
@@ -2024,6 +2050,13 @@ impl P256ProofDraft {
                     &fake_glv_projective_consumer,
                 ),
             );
+        // γ-digest tall expander value grids (range13 kind, signed kind),
+        // gathered from the consumer base trace.
+        let [fake_glv_gamma_range13_instance, fake_glv_gamma_signed_instance] =
+            fake_glv_gamma_instances(&fake_glv_projective_consumer);
+        let fake_glv_gamma_range13_base =
+            gen_gamma_tall_base_trace(&fake_glv_gamma_range13_instance);
+        let fake_glv_gamma_signed_base = gen_gamma_tall_base_trace(&fake_glv_gamma_signed_instance);
         let chain_expansion_provider = gen_fake_glv_chain_expansion_base_trace(
             &self.claim.fake_glv_chain,
             &self.claim.fake_glv_ec_trace,
@@ -2120,8 +2153,10 @@ impl P256ProofDraft {
         columns.push(prepared_table_projective_signed_carry_multiplicity.clone());
         columns.extend(fake_glv_projective_provider.clone());
         columns.extend(fake_glv_projective_consumer.clone());
-        // C5-2: provider multiplicity columns, in component order (range13, then
-        // signed_carry) right after the consumer.
+        // γ-digest tall value grids, then the C5-2 provider multiplicity
+        // columns, in component order right after the consumer.
+        columns.extend(fake_glv_gamma_range13_base.clone());
+        columns.extend(fake_glv_gamma_signed_base.clone());
         columns.push(fake_glv_projective_range13_multiplicity.clone());
         columns.push(fake_glv_projective_signed_carry_multiplicity.clone());
         columns.extend(chain_expansion_provider.clone());
@@ -2306,9 +2341,27 @@ impl P256ProofDraft {
             &base.fake_glv_projective_consumer,
             &relations.fake_glv_projective_source,
             &relations.projective_rcb_air.mul_result,
-            &relations.fake_glv_projective_range13,
-            &relations.fake_glv_projective_signed_carry,
+            &relations.gamma_digest,
+            &relations.gamma_challenge,
         );
+        // γ-digest tall expanders: re-expand the consumer's digested values and
+        // emit the actual range13 / signed-carry uses.
+        let [fake_glv_gamma_range13_instance, fake_glv_gamma_signed_instance] =
+            fake_glv_gamma_instances(&base.fake_glv_projective_consumer);
+        let (fake_glv_gamma_range13_interaction, fake_glv_gamma_range13_claim) =
+            gen_gamma_tall_interaction_trace(
+                &fake_glv_gamma_range13_instance,
+                &relations.gamma_challenge,
+                &relations.gamma_digest,
+                &relations.fake_glv_projective_range13,
+            );
+        let (fake_glv_gamma_signed_interaction, fake_glv_gamma_signed_claim) =
+            gen_gamma_tall_interaction_trace(
+                &fake_glv_gamma_signed_instance,
+                &relations.gamma_challenge,
+                &relations.gamma_digest,
+                &relations.fake_glv_projective_signed_carry,
+            );
         // C5-2: the consumer's self-contained Range13 / signed-carry PROVIDERS.
         // Their multiplicity columns (in the base trace) tally exactly the
         // consumer's uses; their interaction columns net the uses to zero.
@@ -2464,8 +2517,10 @@ impl P256ProofDraft {
         columns.extend(prepared_table_projective_signed_carry_interaction);
         columns.extend(fake_glv_provider_interaction);
         columns.extend(fake_glv_consumer.columns.clone());
-        // C5-2: provider interaction columns, in component order (range13, then
-        // signed_carry) right after the consumer.
+        // γ-digest tall expanders, then the C5-2 provider interaction columns,
+        // in component order right after the consumer.
+        columns.extend(fake_glv_gamma_range13_interaction);
+        columns.extend(fake_glv_gamma_signed_interaction);
         columns.extend(fake_glv_projective_range13_interaction);
         columns.extend(fake_glv_projective_signed_carry_interaction);
         columns.extend(expansion_provider_interaction);
@@ -2514,8 +2569,9 @@ impl P256ProofDraft {
                     provider_claimed_sum: fake_glv_provider_claim.claimed_sum,
                     consumer_claimed_sum: fake_glv_consumer.ec_row_sum,
                     mul_result_consumer_claimed_sum: fake_glv_consumer.mul_result_sum,
-                    range13_consumer_claimed_sum: fake_glv_consumer.range13_use_sum,
-                    signed_carry_consumer_claimed_sum: fake_glv_consumer.signed_carry_use_sum,
+                    gamma_yield_sum: fake_glv_consumer.gamma_yield_sum,
+                    gamma_range13: fake_glv_gamma_range13_claim,
+                    gamma_signed: fake_glv_gamma_signed_claim,
                     range13: fake_glv_projective_range13_provider_claim,
                     signed_carry: fake_glv_projective_signed_carry_provider_claim,
                 },

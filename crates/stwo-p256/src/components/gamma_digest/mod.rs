@@ -101,11 +101,16 @@ pub fn yield_gamma_digest<E: EvalAtRow>(
     tag: u32,
     row_index: E::F,
     presence: E::F,
+    pad_value: M31,
     values: &[E::F],
 ) {
     let padded = gamma_padded_values(values.len());
-    let zero = E::F::from(M31::from_u32_unchecked(0));
-    let mut coords: [E::F; SECURE_EXTENSION_DEGREE] = array::from_fn(|_| zero.clone());
+    // The lane-padding tail holds `pad_value` on the tall side; its digest
+    // contribution `pad·(γ^0 + … + γ^(P−L−1))` is a constant.
+    let pad_sum = pad_tail_sum(challenge, values.len()) * SecureField::from(pad_value);
+    let pad_coords = pad_sum.to_m31_array();
+    let mut coords: [E::F; SECURE_EXTENSION_DEGREE] =
+        array::from_fn(|coord| E::F::from(pad_coords[coord]));
     for (i, value) in values.iter().enumerate() {
         let power = challenge.power(padded - 1 - i).to_m31_array();
         for (coord, power_coord) in coords.iter_mut().zip(power) {
@@ -123,13 +128,25 @@ pub fn yield_gamma_digest<E: EvalAtRow>(
     ));
 }
 
-/// Gen-side digest of one wide row's concrete values (lane-padded with zeros).
+/// Sum of the γ powers covering the lane-padding tail: `γ^0 + … + γ^(P−L−1)`.
+fn pad_tail_sum(challenge: &GammaChallenge, values_len: usize) -> SecureField {
+    let padded = gamma_padded_values(values_len);
+    let mut sum = SecureField::from(M31::from_u32_unchecked(0));
+    for power in 0..(padded - values_len) {
+        sum += challenge.power(power);
+    }
+    sum
+}
+
+/// Gen-side digest of one wide row's concrete values (lane-padded with
+/// `pad_value`).
 pub fn gamma_digest_of_values(
     challenge: &GammaChallenge,
+    pad_value: M31,
     values: &[M31],
 ) -> SecureField {
     let padded = gamma_padded_values(values.len());
-    let mut digest = SecureField::from(M31::from_u32_unchecked(0));
+    let mut digest = pad_tail_sum(challenge, values.len()) * SecureField::from(pad_value);
     for (i, value) in values.iter().enumerate() {
         digest += challenge.power(padded - 1 - i) * SecureField::from(*value);
     }
@@ -192,11 +209,19 @@ impl GammaTallLayout {
 #[derive(Clone, Debug)]
 pub struct GammaTallInstance {
     pub layout: GammaTallLayout,
+    /// Value of the lane-padding tail (and a member of the kind's range
+    /// table — e.g. `encode_signed_carry(0)` for the signed kind).
+    pub pad_value: M31,
     pub group_values: Vec<Vec<M31>>,
 }
 
 impl GammaTallInstance {
-    pub fn new(tag: u32, values_per_group: usize, group_values: Vec<Vec<M31>>) -> Self {
+    pub fn new(
+        tag: u32,
+        values_per_group: usize,
+        pad_value: M31,
+        group_values: Vec<Vec<M31>>,
+    ) -> Self {
         assert!(values_per_group > 0, "empty digest group");
         for values in &group_values {
             assert_eq!(values.len(), values_per_group, "ragged digest group");
@@ -207,27 +232,40 @@ impl GammaTallInstance {
                 group_count: group_values.len(),
                 values_per_group,
             },
+            pad_value,
             group_values,
         }
     }
 
     /// Lane value at (coset row, lane): group `r / G`, in-group row `r % G`.
+    /// Scheduled groups pad their tail lanes with `pad_value`; rows past the
+    /// schedule are all-zero.
     fn lane_value(&self, coset_row: usize, lane: usize) -> M31 {
         let g = self.layout.rows_per_group();
         let group = coset_row / g;
         let index = (coset_row % g) * GAMMA_DIGEST_LANES + lane;
-        if group < self.layout.group_count && index < self.layout.values_per_group {
+        if group >= self.layout.group_count {
+            M31::from_u32_unchecked(0)
+        } else if index < self.layout.values_per_group {
             self.group_values[group][index]
         } else {
-            M31::from_u32_unchecked(0)
+            self.pad_value
         }
     }
 
     /// All lane-padded values of one group (digest order).
-    fn padded_group_values(&self, group: usize) -> Vec<M31> {
+    pub fn padded_group_values(&self, group: usize) -> Vec<M31> {
         let mut values = self.group_values[group].clone();
-        values.resize(self.layout.padded_values(), M31::from_u32_unchecked(0));
+        values.resize(self.layout.padded_values(), self.pad_value);
         values
+    }
+
+    /// Every value the tall instance range-checks, flattened (the kind's
+    /// provider multiplicity seed — the single source of truth).
+    pub fn all_scheduled_values(&self) -> Vec<M31> {
+        (0..self.layout.group_count)
+            .flat_map(|group| self.padded_group_values(group))
+            .collect()
     }
 }
 
@@ -280,6 +318,17 @@ pub fn gen_gamma_tall_base_trace(instance: &GammaTallInstance) -> Vec<M31ColumnE
             m31_column_eval(log_size, values)
         })
         .collect()
+}
+
+/// Resolve one of a tall instance's preprocessed columns by id (for id-keyed
+/// global preprocessed-trace generators).
+pub fn gamma_tall_preprocessed_column(
+    layout: &GammaTallLayout,
+    id: &PreProcessedColumnId,
+) -> Option<M31ColumnEval> {
+    let ids = gamma_tall_preprocessed_ids(layout.tag);
+    let index = ids.iter().position(|candidate| candidate == id)?;
+    Some(gen_gamma_tall_preprocessed_trace(layout).swap_remove(index))
 }
 
 pub type GammaTallComponent = FrameworkComponent<GammaTallEval>;
@@ -514,7 +563,13 @@ pub fn gamma_digest_yield_sum(
 ) -> SecureField {
     let mut sum = SecureField::from(M31::from_u32_unchecked(0));
     for group in 0..instance.layout.group_count {
-        let digest = gamma_digest_of_values(challenge, &instance.padded_group_values(group));
+        // `padded_group_values` is already lane-padded, so no further padding
+        // happens inside the digest (`P − L = 0` ⇒ pad term vanishes).
+        let digest = gamma_digest_of_values(
+            challenge,
+            instance.pad_value,
+            &instance.padded_group_values(group),
+        );
         let tuple = gamma_digest_tuple(
             instance.layout.tag,
             M31::from_u32_unchecked(group as u32),
@@ -543,11 +598,12 @@ mod tests {
     }
 
     fn test_instance(tag: u32) -> GammaTallInstance {
-        // 3 groups of 11 values (K=8 -> 2 rows/group, 5 padding lanes).
+        // 3 groups of 11 values (K=8 -> 2 rows/group, 5 padding lanes), with a
+        // nonzero pad value to exercise the constant tail term.
         let group_values = (0..3u32)
             .map(|g| (0..11u32).map(|i| m31((g * 977 + 13 * i + 7) % 8192)).collect())
             .collect();
-        GammaTallInstance::new(tag, 11, group_values)
+        GammaTallInstance::new(tag, 11, m31(3), group_values)
     }
 
     fn test_challenge() -> GammaChallenge {
@@ -572,9 +628,12 @@ mod tests {
     fn gamma_digest_coordinates_are_m31_linear() {
         let challenge = test_challenge();
         let values: Vec<M31> = (0..11u32).map(|i| m31(1 + 591 * i)).collect();
-        let digest = gamma_digest_of_values(&challenge, &values);
+        let pad = m31(3);
+        let digest = gamma_digest_of_values(&challenge, pad, &values);
         let padded = gamma_padded_values(values.len());
-        let mut coords = [m31(0); SECURE_EXTENSION_DEGREE];
+        let pad_coords =
+            (pad_tail_sum(&challenge, values.len()) * SecureField::from(pad)).to_m31_array();
+        let mut coords = pad_coords;
         for (i, value) in values.iter().enumerate() {
             let power = challenge.power(padded - 1 - i).to_m31_array();
             for (coord, power_coord) in coords.iter_mut().zip(power) {
@@ -700,8 +759,11 @@ mod tests {
         // Forge yields with row indices 0 and 1 swapped.
         let mut swapped = SecureField::from(m31(0));
         for group in 0..instance.layout.group_count {
-            let digest =
-                gamma_digest_of_values(&challenge, &instance.padded_group_values(group));
+            let digest = gamma_digest_of_values(
+                &challenge,
+                instance.pad_value,
+                &instance.padded_group_values(group),
+            );
             let row_index = match group {
                 0 => 1u32,
                 1 => 0u32,

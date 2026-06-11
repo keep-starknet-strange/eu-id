@@ -460,10 +460,14 @@ impl FrameworkEval for PreparedTableProjectiveSourceEval {
         // MixedAdd (op==0) and padding (active==0) are unaffected.
         let double_active = active.clone() * op.clone();
         let muls_view = consumed_muls.view();
+        // The binders COLLECT their range13 values (γ-digest interface); this
+        // not-yet-adopted consumer re-emits them as per-value uses in the same
+        // order, keeping its fraction stream unchanged.
+        let mut double_range13_values: Vec<E::F> = Vec::new();
+        let mut mixed_range13_values: Vec<E::F> = Vec::new();
         bind_double_formula(
             &mut eval,
             &double_active,
-            &active,
             &lhs.x_bigint(),
             &lhs.y_bigint(),
             &output.x_bigint(),
@@ -471,8 +475,16 @@ impl FrameworkEval for PreparedTableProjectiveSourceEval {
             &output.inf(),
             &muls_view,
             &double_columns,
-            &self.range13,
+            &mut double_range13_values,
         );
+        for value in &double_range13_values {
+            crate::range_checks::add_range_check(
+                &mut eval,
+                &self.range13,
+                active.clone(),
+                value.clone(),
+            );
+        }
         // Range-check (use) the Double reduction carries against the
         // consumer-local signed-carry table (gated `active`, fixed count), and
         // force the Double-formula working values + reduction witnesses to zero
@@ -513,7 +525,6 @@ impl FrameworkEval for PreparedTableProjectiveSourceEval {
         bind_mixed_add_formula(
             &mut eval,
             &mixed_active,
-            &active,
             &rhs.inf(),
             &lhs.x_bigint(),
             &lhs.y_bigint(),
@@ -525,8 +536,16 @@ impl FrameworkEval for PreparedTableProjectiveSourceEval {
             &output.inf(),
             &muls_view,
             &mixed_columns,
-            &self.range13,
+            &mut mixed_range13_values,
         );
+        for value in &mixed_range13_values {
+            crate::range_checks::add_range_check(
+                &mut eval,
+                &self.range13,
+                active.clone(),
+                value.clone(),
+            );
+        }
         // Range-check (use) the MixedAdd reduction carries (gated `active`,
         // fixed count), and force the MixedAdd working values + reduction
         // witnesses to zero on non-MixedAdd / padding rows.

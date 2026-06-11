@@ -73,7 +73,6 @@ use stwo_p256_utils::constants::{LIMB_BITS, N_LIMBS};
 use crate::constants::{P256_B, P256_MODULUS};
 use crate::limbs::{P256EvalBigInt, P256M31BigInt};
 use crate::projective_air::ConsumedMulLimbsView;
-use crate::range_checks::{add_range_check, RangeCheckRelation};
 use crate::types::U256;
 
 /// Number of silo muls whose operands the Double formula binds via the
@@ -251,7 +250,6 @@ pub(crate) fn constant_bigint<E: EvalAtRow>(value: &P256M31BigInt) -> P256EvalBi
 pub(crate) fn bind_double_formula<E: EvalAtRow>(
     eval: &mut E,
     gate: &E::F,
-    active: &E::F,
     x1: &P256EvalBigInt<E>,
     y1: &P256EvalBigInt<E>,
     output_x: &P256EvalBigInt<E>,
@@ -259,7 +257,7 @@ pub(crate) fn bind_double_formula<E: EvalAtRow>(
     output_inf: &E::F,
     muls: &ConsumedMulLimbsView<E>,
     columns: &DoubleFormulaColumns<E>,
-    range13: &RangeCheckRelation,
+    range13_values: &mut Vec<E::F>,
 ) {
     let one = E::F::from(M31::from_u32_unchecked(1));
     let one_const = constant_bigint::<E>(&P256M31BigInt::from_u256(&U256::from_le_u64s(&[
@@ -360,13 +358,14 @@ pub(crate) fn bind_double_formula<E: EvalAtRow>(
         eval.add_constraint(inf_gate.clone() * columns.z3.limbs()[i].clone());
     }
 
-    // ----- Range checks (gated `active`, fixed count): every witnessed limb the
-    // reductions read on the combo side or pin on the target side. The consumed
-    // mul limbs are already Range13-checked by the silo; here we cover the
-    // affine input/output coords and the x3/y3/z3 working values so the reduction
-    // headroom (no M31 wraparound) holds and padding leaks nothing. The signed
-    // carries + quotients are range-checked separately by the caller against the
-    // consumer-local signed-carry table.
+    // ----- Range-checked values (fixed count, γ-digest): every witnessed limb
+    // the reductions read on the combo side or pin on the target side. The
+    // consumed mul limbs are already Range13-checked by the silo; here we cover
+    // the affine input/output coords and the x3/y3/z3 working values so the
+    // reduction headroom (no M31 wraparound) holds and padding leaks nothing.
+    // The values are COLLECTED (in the fixed `double_formula_range13_use_columns`
+    // order) into the caller's γ-digest; the tall expander emits the actual
+    // range uses. Signed carries + quotients are collected by the caller.
     for limb in x1
         .limbs()
         .iter()
@@ -377,7 +376,7 @@ pub(crate) fn bind_double_formula<E: EvalAtRow>(
         .chain(columns.y3.limbs())
         .chain(columns.z3.limbs())
     {
-        add_range_check(eval, range13, active.clone(), limb.clone());
+        range13_values.push(limb.clone());
     }
 }
 
