@@ -169,10 +169,10 @@ impl FinalAddClaim {
         let x1_col_u = if r1_inf { zero.clone() } else { r1.x.clone() };
         let x1_sq_u = fp_mul(&x1_col_u, &x1_col_u, &modulus);
         let mut muls = Vec::with_capacity(FINAL_ADD_MUL_COUNT);
-        let p1_u = push_mul(&mut muls, MUL_LAMBDA_DX as usize, &lambda_u, &dx_u)?;
-        let lamsq_u = push_mul(&mut muls, MUL_LAMBDA_SQUARED as usize, &lambda_u, &lambda_u)?;
-        let dx_inv_check = push_mul(&mut muls, MUL_DX_INV as usize, &dx_u, &dx_inv_u)?;
-        let x1_sq_check = push_mul(&mut muls, MUL_X1_SQUARED as usize, &x1_col_u, &x1_col_u)?;
+        let p1_u = push_mul(&mut muls, &lambda_u, &dx_u)?;
+        let lamsq_u = push_mul(&mut muls, &lambda_u, &lambda_u)?;
+        let dx_inv_check = push_mul(&mut muls, &dx_u, &dx_inv_u)?;
+        let x1_sq_check = push_mul(&mut muls, &x1_col_u, &x1_col_u)?;
         debug_assert!(
             matches!(branch, FinalAddBranch::R1Only | FinalAddBranch::R2Only)
                 || dx_inv_check == U256::from_le_u64s(&[1, 0, 0, 0]),
@@ -378,7 +378,6 @@ fn point_values(point: &AffinePoint, inf: bool) -> PreparedAffinePoint {
 
 fn push_mul(
     muls: &mut Vec<ProjectiveRcbMulRow>,
-    mul_index: usize,
     lhs: &U256,
     rhs: &U256,
 ) -> Result<U256, FinalAddError> {

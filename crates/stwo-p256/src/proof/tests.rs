@@ -672,6 +672,22 @@ fn current_p256_proof_pipeline_rejects_public_key_off_curve_in_air() {
     }]);
     proof.claim.public_key_check =
         PublicKeyOnCurveClaim::from_public_inputs(&other_inputs).expect("2*G is on curve");
+    // Keep the hinted provider in lockstep with the swapped witness (its four
+    // curve-check muls now prove 2G's squares/cubes), so the ONLY drifted
+    // relation is the `PublicKeyPoint` binding itself.
+    let mut hinted = HintedMulTraceClaim::from_projective_rcb(&proof.claim.projective_rcb_air_trace)
+        .expect("hinted trace rebuilds");
+    hinted
+        .extend_from_projective_rcb(
+            &proof.claim.final_add.mul_trace,
+            proof.claim.final_add.hinted_source_offset,
+        )
+        .expect("final-add muls re-extend");
+    let pkc_slice = public_key_on_curve_slice_claim(&proof.claim).expect("2*G slice claim builds");
+    hinted
+        .extend_from_projective_rcb(&pkc_slice.mul_trace, pkc_slice.hinted_source_offset)
+        .expect("curve-check muls re-extend");
+    proof.claim.hinted_mul_trace = hinted;
 
     let err = proof
         .prove_current_air_monolithic::<Blake2sMerkleChannel>()

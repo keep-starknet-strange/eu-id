@@ -254,6 +254,15 @@ impl P256ProofClaim {
             HintedMulTraceClaim::from_projective_rcb(&projective_rcb_air_trace)?;
         hinted_mul_trace
             .extend_from_projective_rcb(&final_add.mul_trace, final_add.hinted_source_offset)?;
+        // Public-key curve-check muls ride the hinted provider right after.
+        let public_key_curve_slice = public_key_slice_from_check(
+            &public_key_check,
+            hinted_source_offset + final_add.mul_trace.rows.len() as u32,
+        )?;
+        hinted_mul_trace.extend_from_projective_rcb(
+            &public_key_curve_slice.mul_trace,
+            public_key_curve_slice.hinted_source_offset,
+        )?;
         let prepared_use_counts =
             PreparedPointUseCountClaim::from_selector_claim(&fake_glv_selectors)?;
         let prepared_trace = prepared_table.prepared_point_trace(&prepared_use_counts)?;
@@ -371,6 +380,15 @@ impl P256ProofClaim {
         hinted_mul_trace.extend_from_projective_rcb(
             &base.final_add.mul_trace,
             base.final_add.hinted_source_offset,
+        )?;
+        let public_key_curve_slice = public_key_slice_from_check(
+            &base.public_key_check,
+            projective_rcb_air_trace.rows.len() as u32
+                + base.final_add.mul_trace.rows.len() as u32,
+        )?;
+        hinted_mul_trace.extend_from_projective_rcb(
+            &public_key_curve_slice.mul_trace,
+            public_key_curve_slice.hinted_source_offset,
         )?;
         let prepared_trace = prepared_table.prepared_point_trace(&base.prepared_use_counts)?;
 
@@ -933,7 +951,10 @@ impl P256CurrentAirInteractionClaim {
                     + self
                         .prepared_table_projective_source
                         .mul_result_consumer_claimed_sum
-                    + self.final_add.mul_result_consumer_claimed_sum,
+                    + self.final_add.mul_result_consumer_claimed_sum
+                    + self
+                        .public_key_on_curve
+                        .mul_result_consumer_claimed_sum,
             ),
             ("FakeGlvChainExpansion", self.fake_glv_chain_expansion.total()),
             (
@@ -1207,7 +1228,10 @@ impl P256CurrentAirRelations {
             range7: RangeCheckRelation::dummy(),
             ecdsa_result: EcdsaResultRelation::dummy(),
             final_check_hint: FinalCheckHintRelation::dummy(),
-            public_key_on_curve: PublicKeyCurveSliceRelations::dummy_with_point(public_key_point),
+            public_key_on_curve: PublicKeyCurveSliceRelations::dummy_with_point(
+                public_key_point,
+                ProjectiveRcbMulComponentRelations::dummy().mul_result,
+            ),
             projective_rcb_air: ProjectiveRcbMulComponentRelations::dummy(),
             hinted_signed_h: RangeCheckRelation::dummy(),
             hinted_challenge: HintedMulChallenge::from_z(SecureField::from(M31::from_u32_unchecked(2))),
@@ -1268,6 +1292,7 @@ impl P256CurrentAirRelations {
             public_key_on_curve: PublicKeyCurveSliceRelations::draw_with_point(
                 channel,
                 public_key_point,
+                projective_rcb_air_relations.mul_result.clone(),
             ),
             projective_rcb_air: projective_rcb_air_relations.clone(),
             hinted_signed_h: RangeCheckRelation::draw(channel),
@@ -1608,6 +1633,7 @@ impl P256CurrentAirComponents {
     }
 }
 
+#[cfg(test)]
 fn p256_stark_slice_low_ram_config(max_constraint_log_degree_bound: u32) -> PcsConfig {
     let fri_config = FriConfig::new(5, 4, 64, 1);
     PcsConfig {
@@ -2678,11 +2704,35 @@ const FAKE_GLV_SCALAR_MUL_ID_BASE: u32 = 1_000_000;
 
 /// Build the single-public-key on-curve witness for the monolithic current-AIR
 /// from the already-verified `public_key_check` claim. The monolithic proof
-/// covers exactly one signature, so `from_public_key_claim` requires one row.
+/// covers exactly one signature, so the slice is built from the FIRST
+/// public-key row (mirroring [`final_add_claim_from_final_check`]).
 fn public_key_on_curve_slice_claim(
     claim: &P256ProofClaim,
 ) -> Result<PublicKeyCurveSliceClaim, P256ProofError> {
-    PublicKeyCurveSliceClaim::from_public_key_claim(&claim.public_key_check)
+    // The curve-check muls ride the hinted provider on source indices just
+    // past the ladder ops and final-add (one source row per signature each).
+    let hinted_source_offset = claim.projective_rcb_air_trace.rows.len() as u32
+        + claim.final_add.mul_trace.rows.len() as u32;
+    public_key_slice_from_check(&claim.public_key_check, hinted_source_offset)
+}
+
+/// Build the (single-signature) curve-check slice claim from the FIRST
+/// public-key row: multi-signature claim *construction* stays available
+/// (`links_all_implemented_components`), while the monolithic prove path
+/// remains single-signature, exactly like `final_add_claim_from_final_check`.
+fn public_key_slice_from_check(
+    public_key_check: &PublicKeyOnCurveClaim,
+    hinted_source_offset: u32,
+) -> Result<PublicKeyCurveSliceClaim, P256ProofError> {
+    let first = public_key_check.rows.first().ok_or(
+        P256ProofError::PublicKeyCurveSlice(PublicKeyCurveSliceError::UnsupportedRowCount {
+            actual: 0,
+        }),
+    )?;
+    let single = PublicKeyOnCurveClaim {
+        rows: vec![first.clone()],
+    };
+    PublicKeyCurveSliceClaim::from_public_key_claim(&single, hinted_source_offset)
         .map_err(P256ProofError::from)
 }
 

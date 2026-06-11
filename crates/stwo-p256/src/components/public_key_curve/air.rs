@@ -55,7 +55,6 @@ use stwo::core::{
     air::Component,
     channel::Channel,
     fields::{m31::M31, qm31::SecureField},
-    pcs::TreeVec,
     utils::{bit_reverse_index, coset_index_to_circle_domain_index},
     ColumnVec,
 };
@@ -76,18 +75,10 @@ use crate::constants::{P256_B, P256_MODULUS};
 use crate::limbs::{EvalP256BigIntExt, P256EvalBigInt, P256M31BigInt};
 use crate::projective::{ProjectiveEcOp, ProjectivePoint};
 use crate::projective_air::{
-    add_projective_rcb_mul_row, gen_projective_rcb_folded_contribution_base_trace,
-    gen_projective_rcb_folded_digit_base_trace, gen_projective_rcb_mul_base_trace,
-    gen_projective_rcb_raw_product_chunk_base_trace, projective_rcb_mul_padding_fraction_pairs,
-    projective_rcb_mul_row_fraction_count, projective_rcb_mul_row_fraction_pairs,
-    projective_rcb_signed_carry_bound, projective_rcb_signed_carry_log_size,
-    ProjectiveRcbAirError, ProjectiveRcbAirRow,
-    ProjectiveRcbAirTraceClaim, ProjectiveRcbFoldedContributionComponent,
-    ProjectiveRcbFoldedContributionEval, ProjectiveRcbFoldedDigitComponent,
-    ProjectiveRcbFoldedDigitEval, ProjectiveRcbMulColumns, ProjectiveRcbMulComponentRelations,
-    ProjectiveRcbMulRow, ProjectiveRcbMulStep, ProjectiveRcbRawProductChunkComponent,
-    ProjectiveRcbRawProductChunkEval, PROJECTIVE_RCB_MUL_ROLE_LHS, PROJECTIVE_RCB_MUL_ROLE_RESULT,
-    PROJECTIVE_RCB_MUL_ROLE_RHS, PROJECTIVE_RCB_SCHEDULE_NAMESPACE_PUBLIC_KEY,
+    projective_rcb_signed_carry_bound, projective_rcb_signed_carry_log_size, ProjectiveRcbAirError,
+    ProjectiveRcbAirRow, ProjectiveRcbAirTraceClaim, ProjectiveRcbMulResultRelation,
+    ProjectiveRcbMulRow, ProjectiveRcbMulStep, PROJECTIVE_RCB_MUL_ROLE_LHS,
+    PROJECTIVE_RCB_MUL_ROLE_RESULT, PROJECTIVE_RCB_MUL_ROLE_RHS,
     PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
 };
 use crate::public_inputs::PublicEcdsaInputClaim;
@@ -97,7 +88,6 @@ use crate::range_checks::{
     signed_carry_active_column_id, signed_carry_value_column_id, RangeCheckClaim,
     RangeCheckComponent, RangeCheckEval, RangeCheckInteractionClaim, RangeCheckRelation,
     SignedCarryRangeClaim, SignedCarryRangeComponent, SignedCarryRangeEval, RANGE13_BITS,
-    RANGE16_BITS,
 };
 use crate::scalar::scalar_mod_mul::columns::{m31_column_eval, padded_log_size, M31ColumnEval};
 use crate::types::U256;
@@ -153,7 +143,6 @@ const CURVE_CHECK_TRACE_COLUMNS: usize = 1            // active
     + 1                                               // q_pos (q == 1)
     + 1; // q_neg (q == -1)
 
-relation!(PublicKeyMulResultRelation, PUBLIC_KEY_MUL_RESULT_ARITY);
 relation!(PublicKeyPointRelation, PUBLIC_KEY_POINT_ARITY);
 
 // ---------------------------------------------------------------------------
@@ -166,6 +155,8 @@ pub struct PublicKeyCurveSliceClaim {
     /// The four mod-`p` multiplications, expressed through the shared
     /// `projective_air` mul machinery (one source row, four mul rows).
     pub mul_trace: ProjectiveRcbAirTraceClaim,
+    /// First hinted-mul `source_index` reserved for this claim's four muls.
+    pub hinted_source_offset: u32,
     /// Signature/public-key identifier. Binds the curve-checked `(x, y)` to the
     /// public ECDSA instance of the same `sig_id` via [`PublicKeyPointRelation`].
     pub sig_id: M31,
@@ -195,6 +186,7 @@ impl PublicKeyCurveSliceClaim {
     /// rejected before any trace is generated.
     pub fn from_public_key_claim(
         claim: &PublicKeyOnCurveClaim,
+        hinted_source_offset: u32,
     ) -> Result<Self, PublicKeyCurveSliceError> {
         if claim.rows.len() != 1 {
             return Err(PublicKeyCurveSliceError::UnsupportedRowCount {
@@ -212,15 +204,10 @@ impl PublicKeyCurveSliceClaim {
         // exactly as in `projective_air`. `step` is a pure label and never
         // constrained.
         let mut muls = Vec::with_capacity(PUBLIC_KEY_MUL_COUNT);
-        let y2 = push_mul(&mut muls, MUL_Y_SQUARED as usize, &y, &y)?;
-        let x2 = push_mul(&mut muls, MUL_X_SQUARED as usize, &x, &x)?;
-        let x3 = push_mul(&mut muls, MUL_X_CUBED as usize, &x2, &x)?;
-        let three_x = push_mul(
-            &mut muls,
-            MUL_THREE_X as usize,
-            &U256::from_le_u64s(&[3, 0, 0, 0]),
-            &x,
-        )?;
+        let y2 = push_mul(&mut muls, &y, &y)?;
+        let x2 = push_mul(&mut muls, &x, &x)?;
+        let x3 = push_mul(&mut muls, &x2, &x)?;
+        let three_x = push_mul(&mut muls, &U256::from_le_u64s(&[3, 0, 0, 0]), &x)?;
 
         let air_row = ProjectiveRcbAirRow {
             source_index: 0,
@@ -244,10 +231,12 @@ impl PublicKeyCurveSliceClaim {
         let x2_limbs = P256M31BigInt::from_u256(&x2);
         let x3_limbs = P256M31BigInt::from_u256(&x3);
         let three_x_limbs = P256M31BigInt::from_u256(&three_x);
-        let (q, carries) = solve_curve_identity(&y2_limbs, &three_x_limbs, &x3_limbs, &b, &modulus)?;
+        let (q, carries) =
+            solve_curve_identity(&y2_limbs, &three_x_limbs, &x3_limbs, &b, &modulus)?;
 
         let claim = Self {
             mul_trace,
+            hinted_source_offset,
             sig_id: row.sig_id,
             x: row.x.clone(),
             y: row.y.clone(),
@@ -338,12 +327,11 @@ impl PublicKeyCurveSliceClaim {
 
 fn push_mul(
     muls: &mut Vec<ProjectiveRcbMulRow>,
-    mul_index: usize,
     lhs: &U256,
     rhs: &U256,
 ) -> Result<U256, PublicKeyCurveSliceError> {
     // `ProjectiveRcbMulStep` is a pure label; reuse one valid variant.
-    let row = ProjectiveRcbMulRow::new(0, mul_index, ProjectiveRcbMulStep::DoubleX1Squared, lhs, rhs)
+    let row = ProjectiveRcbMulRow::new_lite(ProjectiveRcbMulStep::DoubleX1Squared, lhs, rhs)
         .map_err(PublicKeyCurveSliceError::MulTrace)?;
     let result = row.trace.result.to_u256();
     muls.push(row);
@@ -413,90 +401,11 @@ fn try_curve_carries(
 // Mul family evaluator (swaps in for `ProjectiveRcbMulEval`)
 // ---------------------------------------------------------------------------
 
-type PublicKeyMulComponent = FrameworkComponent<PublicKeyMulEval>;
+// ---------------------------------------------------------------------------
+// Curve-check evaluator (the four muls are proven by hinted-mul rows)
+// ---------------------------------------------------------------------------
+
 type PublicKeyCurveCheckComponent = FrameworkComponent<PublicKeyCurveCheckEval>;
-
-#[derive(Clone)]
-struct PublicKeyMulEval {
-    log_size: u32,
-    mul_relations: ProjectiveRcbMulComponentRelations,
-    result_relation: PublicKeyMulResultRelation,
-}
-
-impl FrameworkEval for PublicKeyMulEval {
-    fn log_size(&self) -> u32 {
-        self.log_size
-    }
-
-    fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 1
-    }
-
-    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        // Same read order as `ProjectiveRcbMulEval`.
-        let active = eval.next_trace_mask();
-        let source_index = eval.next_trace_mask();
-        let mul_index = eval.next_trace_mask();
-        let columns = ProjectiveRcbMulColumns::read(&mut eval);
-
-        eval.add_constraint(active.clone() * (E::F::from(M31::from_u32_unchecked(1)) - active.clone()));
-        // Prove the modular multiplication exactly as the projective slice does.
-        // No identity fast-path here: reduce_gate == gate (full reduction).
-        add_projective_rcb_mul_row(
-            &mut eval,
-            self.mul_relations.as_refs(),
-            active.clone(),
-            active.clone(),
-            source_index.clone(),
-            mul_index.clone(),
-            &columns,
-        );
-
-        // THEN provide the lhs / rhs / result limbs of this mul on the
-        // public-key result relation (yield, multiplicity `-active`). These
-        // are emitted *after* the standard mul fractions, matching the
-        // interaction-trace generator order.
-        provide_mul_limbs(&mut eval, &self.result_relation, &active, &mul_index, ROLE_LHS, columns.lhs.limbs());
-        provide_mul_limbs(&mut eval, &self.result_relation, &active, &mul_index, ROLE_RHS, columns.rhs.limbs());
-        provide_mul_limbs(
-            &mut eval,
-            &self.result_relation,
-            &active,
-            &mul_index,
-            ROLE_RESULT,
-            columns.result.limbs(),
-        );
-
-        eval.finalize_logup();
-        eval
-    }
-}
-
-fn provide_mul_limbs<E: EvalAtRow>(
-    eval: &mut E,
-    relation: &PublicKeyMulResultRelation,
-    active: &E::F,
-    mul_index: &E::F,
-    role: u32,
-    limbs: &[E::F; N_LIMBS],
-) {
-    for (limb_index, limb) in limbs.iter().enumerate() {
-        eval.add_to_relation(RelationEntry::new(
-            relation,
-            -E::EF::from(active.clone()),
-            &[
-                mul_index.clone(),
-                E::F::from(M31::from_u32_unchecked(role)),
-                E::F::from(M31::from_u32_unchecked(limb_index as u32)),
-                limb.clone(),
-            ],
-        ));
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Curve-check evaluator
-// ---------------------------------------------------------------------------
 
 struct PublicKeyCurveCheckColumns<E: EvalAtRow> {
     active: E::F,
@@ -540,7 +449,10 @@ impl<E: EvalAtRow> PublicKeyCurveCheckColumns<E> {
 #[derive(Clone)]
 struct PublicKeyCurveCheckEval {
     log_size: u32,
-    result_relation: PublicKeyMulResultRelation,
+    mul_result: ProjectiveRcbMulResultRelation,
+    /// First hinted-mul `source_index` reserved for the curve-check muls (the
+    /// row's source is `hinted_source_offset + sig_id`).
+    hinted_source_offset: u32,
     point_relation: PublicKeyPointRelation,
     /// When `true`, the curve-check consumes the [`PublicKeyPointRelation`]
     /// binding tuple `[sig_id, x.., y..]` (the monolithic proof, where
@@ -590,22 +502,112 @@ impl FrameworkEval for PublicKeyCurveCheckEval {
         // Bind the witnessed limbs to the proven mul operands/results by
         // consuming (use, `+active`) the mul provider tuples using the
         // witnessed column as the looked-up value.
-        consume_mul_limbs(&mut eval, &self.result_relation, &columns.active, MUL_Y_SQUARED, ROLE_LHS, columns.y.limbs());
-        consume_mul_limbs(&mut eval, &self.result_relation, &columns.active, MUL_Y_SQUARED, ROLE_RHS, columns.y.limbs());
-        consume_mul_limbs(&mut eval, &self.result_relation, &columns.active, MUL_Y_SQUARED, ROLE_RESULT, columns.y2.limbs());
+        let mul_source =
+            E::F::from(M31::from_u32_unchecked(self.hinted_source_offset)) + columns.sig_id.clone();
+        consume_mul_limbs(
+            &mut eval,
+            &self.mul_result,
+            &columns.active,
+            &mul_source,
+            MUL_Y_SQUARED,
+            ROLE_LHS,
+            columns.y.limbs(),
+        );
+        consume_mul_limbs(
+            &mut eval,
+            &self.mul_result,
+            &columns.active,
+            &mul_source,
+            MUL_Y_SQUARED,
+            ROLE_RHS,
+            columns.y.limbs(),
+        );
+        consume_mul_limbs(
+            &mut eval,
+            &self.mul_result,
+            &columns.active,
+            &mul_source,
+            MUL_Y_SQUARED,
+            ROLE_RESULT,
+            columns.y2.limbs(),
+        );
 
-        consume_mul_limbs(&mut eval, &self.result_relation, &columns.active, MUL_X_SQUARED, ROLE_LHS, columns.x.limbs());
-        consume_mul_limbs(&mut eval, &self.result_relation, &columns.active, MUL_X_SQUARED, ROLE_RHS, columns.x.limbs());
-        consume_mul_limbs(&mut eval, &self.result_relation, &columns.active, MUL_X_SQUARED, ROLE_RESULT, columns.x2.limbs());
+        consume_mul_limbs(
+            &mut eval,
+            &self.mul_result,
+            &columns.active,
+            &mul_source,
+            MUL_X_SQUARED,
+            ROLE_LHS,
+            columns.x.limbs(),
+        );
+        consume_mul_limbs(
+            &mut eval,
+            &self.mul_result,
+            &columns.active,
+            &mul_source,
+            MUL_X_SQUARED,
+            ROLE_RHS,
+            columns.x.limbs(),
+        );
+        consume_mul_limbs(
+            &mut eval,
+            &self.mul_result,
+            &columns.active,
+            &mul_source,
+            MUL_X_SQUARED,
+            ROLE_RESULT,
+            columns.x2.limbs(),
+        );
 
-        consume_mul_limbs(&mut eval, &self.result_relation, &columns.active, MUL_X_CUBED, ROLE_LHS, columns.x2.limbs());
-        consume_mul_limbs(&mut eval, &self.result_relation, &columns.active, MUL_X_CUBED, ROLE_RHS, columns.x.limbs());
-        consume_mul_limbs(&mut eval, &self.result_relation, &columns.active, MUL_X_CUBED, ROLE_RESULT, columns.x3.limbs());
+        consume_mul_limbs(
+            &mut eval,
+            &self.mul_result,
+            &columns.active,
+            &mul_source,
+            MUL_X_CUBED,
+            ROLE_LHS,
+            columns.x2.limbs(),
+        );
+        consume_mul_limbs(
+            &mut eval,
+            &self.mul_result,
+            &columns.active,
+            &mul_source,
+            MUL_X_CUBED,
+            ROLE_RHS,
+            columns.x.limbs(),
+        );
+        consume_mul_limbs(
+            &mut eval,
+            &self.mul_result,
+            &columns.active,
+            &mul_source,
+            MUL_X_CUBED,
+            ROLE_RESULT,
+            columns.x3.limbs(),
+        );
 
         // mul 3 lhs is the fixed constant 3 (limb 0 = 3, rest 0).
-        consume_three_constant(&mut eval, &self.result_relation, &columns.active);
-        consume_mul_limbs(&mut eval, &self.result_relation, &columns.active, MUL_THREE_X, ROLE_RHS, columns.x.limbs());
-        consume_mul_limbs(&mut eval, &self.result_relation, &columns.active, MUL_THREE_X, ROLE_RESULT, columns.three_x.limbs());
+        consume_three_constant(&mut eval, &self.mul_result, &columns.active, &mul_source);
+        consume_mul_limbs(
+            &mut eval,
+            &self.mul_result,
+            &columns.active,
+            &mul_source,
+            MUL_THREE_X,
+            ROLE_RHS,
+            columns.x.limbs(),
+        );
+        consume_mul_limbs(
+            &mut eval,
+            &self.mul_result,
+            &columns.active,
+            &mul_source,
+            MUL_THREE_X,
+            ROLE_RESULT,
+            columns.three_x.limbs(),
+        );
 
         // Bind the witnessed `(x, y)` to the verifier public key: consume (use,
         // `+active`) the `PublicKeyPointRelation` tuple `[sig_id, x.., y..]`.
@@ -629,7 +631,12 @@ impl FrameworkEval for PublicKeyCurveCheckEval {
             .chain(columns.three_x.limbs())
             .chain(columns.y2.limbs())
         {
-            add_range_check(&mut eval, &self.range13, columns.active.clone(), limb.clone());
+            add_range_check(
+                &mut eval,
+                &self.range13,
+                columns.active.clone(),
+                limb.clone(),
+            );
         }
 
         // Curve identity: (y2 + three_x) - (x3 + b) - q·p = 0 over 13-bit
@@ -643,46 +650,46 @@ impl FrameworkEval for PublicKeyCurveCheckEval {
 
 fn consume_mul_limbs<E: EvalAtRow>(
     eval: &mut E,
-    relation: &PublicKeyMulResultRelation,
+    relation: &ProjectiveRcbMulResultRelation,
     active: &E::F,
+    source_index: &E::F,
     mul_index: u32,
     role: u32,
     limbs: &[E::F; N_LIMBS],
 ) {
-    for (limb_index, limb) in limbs.iter().enumerate() {
-        eval.add_to_relation(RelationEntry::new(
-            relation,
-            E::EF::from(active.clone()),
-            &[
-                E::F::from(M31::from_u32_unchecked(mul_index)),
-                E::F::from(M31::from_u32_unchecked(role)),
-                E::F::from(M31::from_u32_unchecked(limb_index as u32)),
-                limb.clone(),
-            ],
-        ));
-    }
+    let mut values = Vec::with_capacity(3 + N_LIMBS);
+    values.push(source_index.clone());
+    values.push(E::F::from(M31::from_u32_unchecked(mul_index)));
+    values.push(E::F::from(M31::from_u32_unchecked(role)));
+    values.extend(limbs.iter().cloned());
+    eval.add_to_relation(RelationEntry::new(
+        relation,
+        E::EF::from(active.clone()),
+        &values,
+    ));
 }
 
 /// Consume `mul 3`'s lhs as the fixed constant `3` (limb 0 = 3, rest 0). This
 /// binds the proven `3x` mul's left operand to the literal `3`.
 fn consume_three_constant<E: EvalAtRow>(
     eval: &mut E,
-    relation: &PublicKeyMulResultRelation,
+    relation: &ProjectiveRcbMulResultRelation,
     active: &E::F,
+    source_index: &E::F,
 ) {
+    let mut values = Vec::with_capacity(3 + N_LIMBS);
+    values.push(source_index.clone());
+    values.push(E::F::from(M31::from_u32_unchecked(MUL_THREE_X)));
+    values.push(E::F::from(M31::from_u32_unchecked(ROLE_LHS)));
     for limb_index in 0..N_LIMBS {
         let value = if limb_index == 0 { 3 } else { 0 };
-        eval.add_to_relation(RelationEntry::new(
-            relation,
-            E::EF::from(active.clone()),
-            &[
-                E::F::from(M31::from_u32_unchecked(MUL_THREE_X)),
-                E::F::from(M31::from_u32_unchecked(ROLE_LHS)),
-                E::F::from(M31::from_u32_unchecked(limb_index as u32)),
-                E::F::from(M31::from_u32_unchecked(value)),
-            ],
-        ));
+        values.push(E::F::from(M31::from_u32_unchecked(value)));
     }
+    eval.add_to_relation(RelationEntry::new(
+        relation,
+        E::EF::from(active.clone()),
+        &values,
+    ));
 }
 
 /// Consume the binding tuple `[sig_id, x.., y..]` (use, `+active`) on the
@@ -759,46 +766,49 @@ fn fixed_limb<E: EvalAtRow>(value: &P256M31BigInt, index: usize) -> E::F {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PublicKeyCurveSliceLogSizes {
-    mul: u32,
-    raw_product_chunk: u32,
-    folded_contribution: u32,
-    folded_digit: u32,
     curve_check: u32,
+    /// First hinted-mul `source_index` reserved for the curve-check muls.
+    pub(crate) hinted_source_offset: u32,
 }
 
 impl PublicKeyCurveSliceLogSizes {
     fn from_claim(claim: &PublicKeyCurveSliceClaim) -> Self {
-        let projective = claim.mul_trace.component_log_sizes();
         Self {
-            mul: projective.mul,
-            raw_product_chunk: projective.raw_product_chunk,
-            folded_contribution: projective.folded_contribution,
-            folded_digit: projective.folded_digit,
-            curve_check: padded_log_size(1),
+            curve_check: padded_log_size(claim.mul_trace.rows.len()),
+            hinted_source_offset: claim.hinted_source_offset,
         }
     }
 }
 
 #[derive(Clone)]
 pub(crate) struct PublicKeyCurveSliceRelations {
-    mul: ProjectiveRcbMulComponentRelations,
-    result: PublicKeyMulResultRelation,
+    /// SHARED with the hinted-mul provider in the monolith (the standalone
+    /// slice draws its own instance; its mul consumes are unbalanced there,
+    /// which only the monolithic balance accounting observes).
+    mul_result: ProjectiveRcbMulResultRelation,
+    range13: RangeCheckRelation,
+    signed_carry: RangeCheckRelation,
     point: PublicKeyPointRelation,
 }
 
 impl PublicKeyCurveSliceRelations {
+    /// Standalone draw (test-only): the monolith shares instances via
+    /// [`Self::draw_with_point`].
+    #[cfg(test)]
     fn draw(channel: &mut impl Channel) -> Self {
         Self {
-            mul: ProjectiveRcbMulComponentRelations::draw(channel),
-            result: PublicKeyMulResultRelation::draw(channel),
+            mul_result: ProjectiveRcbMulResultRelation::draw(channel),
+            range13: RangeCheckRelation::draw(channel),
+            signed_carry: RangeCheckRelation::draw(channel),
             point: PublicKeyPointRelation::draw(channel),
         }
     }
 
     fn dummy() -> Self {
         Self {
-            mul: ProjectiveRcbMulComponentRelations::dummy(),
-            result: PublicKeyMulResultRelation::dummy(),
+            mul_result: ProjectiveRcbMulResultRelation::dummy(),
+            range13: RangeCheckRelation::dummy(),
+            signed_carry: RangeCheckRelation::dummy(),
             point: PublicKeyPointRelation::dummy(),
         }
     }
@@ -810,20 +820,26 @@ impl PublicKeyCurveSliceRelations {
     pub(crate) fn draw_with_point(
         channel: &mut impl Channel,
         point: PublicKeyPointRelation,
+        mul_result: ProjectiveRcbMulResultRelation,
     ) -> Self {
         Self {
-            mul: ProjectiveRcbMulComponentRelations::draw(channel),
-            result: PublicKeyMulResultRelation::draw(channel),
+            mul_result,
+            range13: RangeCheckRelation::draw(channel),
+            signed_carry: RangeCheckRelation::draw(channel),
             point,
         }
     }
 
     /// Dummy variant with a caller-supplied `point` relation (for preprocessed
     /// column / degree-bound queries in the monolith).
-    pub(crate) fn dummy_with_point(point: PublicKeyPointRelation) -> Self {
+    pub(crate) fn dummy_with_point(
+        point: PublicKeyPointRelation,
+        mul_result: ProjectiveRcbMulResultRelation,
+    ) -> Self {
         Self {
-            mul: ProjectiveRcbMulComponentRelations::dummy(),
-            result: PublicKeyMulResultRelation::dummy(),
+            mul_result,
+            range13: RangeCheckRelation::dummy(),
+            signed_carry: RangeCheckRelation::dummy(),
             point,
         }
     }
@@ -831,28 +847,22 @@ impl PublicKeyCurveSliceRelations {
 
 #[derive(Clone, Debug)]
 pub struct PublicKeyCurveSliceInteractionClaim {
-    mul: SecureField,
-    raw_product_chunk: SecureField,
-    folded_contribution: SecureField,
-    folded_digit: SecureField,
     curve_check: SecureField,
     range13: RangeCheckInteractionClaim,
-    raw_product_carry16: RangeCheckInteractionClaim,
     signed_carry: RangeCheckInteractionClaim,
+    /// `ProjectiveRcbMulResult` consumer sum (use, `+active`) for the four
+    /// hinted muls; balances against the hinted-mul provider globally.
+    pub(crate) mul_result_consumer_claimed_sum: SecureField,
 }
 
 impl PublicKeyCurveSliceInteractionClaim {
     fn zero() -> Self {
         let zero = secure_zero();
         Self {
-            mul: zero,
-            raw_product_chunk: zero,
-            folded_contribution: zero,
-            folded_digit: zero,
             curve_check: zero,
             range13: RangeCheckInteractionClaim { claimed_sum: zero },
-            raw_product_carry16: RangeCheckInteractionClaim { claimed_sum: zero },
             signed_carry: RangeCheckInteractionClaim { claimed_sum: zero },
+            mul_result_consumer_claimed_sum: zero,
         }
     }
 
@@ -866,38 +876,27 @@ impl PublicKeyCurveSliceInteractionClaim {
     /// crossing the sub-graph boundary. The standalone slice (no binding)
     /// totals to zero.
     pub(crate) fn total(&self) -> SecureField {
-        self.mul
-            + self.raw_product_chunk
-            + self.folded_contribution
-            + self.folded_digit
-            + self.curve_check
-            + self.range13.claimed_sum
-            + self.raw_product_carry16.claimed_sum
-            + self.signed_carry.claimed_sum
+        // Internal netting: the check's range/signed uses cancel the two
+        // providers; the boundary-crossing sums (the point binding inside
+        // `curve_check`, and the hinted mul-result consumes, subtracted here)
+        // are balanced globally.
+        self.curve_check + self.range13.claimed_sum + self.signed_carry.claimed_sum
+            - self.mul_result_consumer_claimed_sum
     }
 
     fn mix_into(&self, channel: &mut impl Channel) {
         channel.mix_felts(&[
-            self.mul,
-            self.raw_product_chunk,
-            self.folded_contribution,
-            self.folded_digit,
             self.curve_check,
             self.range13.claimed_sum,
-            self.raw_product_carry16.claimed_sum,
             self.signed_carry.claimed_sum,
+            self.mul_result_consumer_claimed_sum,
         ]);
     }
 }
 
 pub(crate) struct PublicKeyCurveSliceComponents {
-    mul: PublicKeyMulComponent,
-    raw_product_chunk: ProjectiveRcbRawProductChunkComponent,
-    folded_contribution: ProjectiveRcbFoldedContributionComponent,
-    folded_digit: ProjectiveRcbFoldedDigitComponent,
     curve_check: PublicKeyCurveCheckComponent,
     range13: RangeCheckComponent,
-    raw_product_carry16: RangeCheckComponent,
     signed_carry: SignedCarryRangeComponent,
 }
 
@@ -910,68 +909,28 @@ impl PublicKeyCurveSliceComponents {
         bind_to_public: bool,
     ) -> Self {
         Self {
-            mul: PublicKeyMulComponent::new(
-                allocator,
-                PublicKeyMulEval {
-                    log_size: log_sizes.mul,
-                    mul_relations: relations.mul.clone(),
-                    result_relation: relations.result.clone(),
-                },
-                interaction_claim.mul,
-            ),
-            raw_product_chunk: ProjectiveRcbRawProductChunkComponent::new(
-                allocator,
-                ProjectiveRcbRawProductChunkEval {
-                    log_size: log_sizes.raw_product_chunk,
-                    relations: relations.mul.clone(),
-                    schedule_namespace: PROJECTIVE_RCB_SCHEDULE_NAMESPACE_PUBLIC_KEY,
-                },
-                interaction_claim.raw_product_chunk,
-            ),
-            folded_contribution: ProjectiveRcbFoldedContributionComponent::new(
-                allocator,
-                ProjectiveRcbFoldedContributionEval {
-                    log_size: log_sizes.folded_contribution,
-                    relations: relations.mul.clone(),
-                    schedule_namespace: PROJECTIVE_RCB_SCHEDULE_NAMESPACE_PUBLIC_KEY,
-                },
-                interaction_claim.folded_contribution,
-            ),
-            folded_digit: ProjectiveRcbFoldedDigitComponent::new(
-                allocator,
-                ProjectiveRcbFoldedDigitEval {
-                    log_size: log_sizes.folded_digit,
-                    relations: relations.mul.clone(),
-                    schedule_namespace: PROJECTIVE_RCB_SCHEDULE_NAMESPACE_PUBLIC_KEY,
-                },
-                interaction_claim.folded_digit,
-            ),
             curve_check: PublicKeyCurveCheckComponent::new(
                 allocator,
                 PublicKeyCurveCheckEval {
                     log_size: log_sizes.curve_check,
-                    result_relation: relations.result.clone(),
+                    mul_result: relations.mul_result.clone(),
+                    hinted_source_offset: log_sizes.hinted_source_offset,
                     point_relation: relations.point.clone(),
                     bind_to_public,
-                    range13: relations.mul.range13.clone(),
-                    signed_carry: relations.mul.signed_carry.clone(),
+                    range13: relations.range13.clone(),
+                    signed_carry: relations.signed_carry.clone(),
                 },
                 interaction_claim.curve_check,
             ),
             range13: RangeCheckComponent::new(
                 allocator,
-                RangeCheckEval::new(relations.mul.range13.clone(), RANGE13_BITS),
+                RangeCheckEval::new(relations.range13.clone(), RANGE13_BITS),
                 interaction_claim.range13.claimed_sum,
-            ),
-            raw_product_carry16: RangeCheckComponent::new(
-                allocator,
-                RangeCheckEval::new(relations.mul.raw_product_carry16.clone(), RANGE16_BITS),
-                interaction_claim.raw_product_carry16.claimed_sum,
             ),
             signed_carry: SignedCarryRangeComponent::new(
                 allocator,
                 SignedCarryRangeEval::new(
-                    relations.mul.signed_carry.clone(),
+                    relations.signed_carry.clone(),
                     projective_rcb_signed_carry_log_size(),
                     PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
                 ),
@@ -982,38 +941,21 @@ impl PublicKeyCurveSliceComponents {
 
     pub(crate) fn components(&self) -> Vec<&dyn Component> {
         vec![
-            &self.mul as &dyn Component,
-            &self.raw_product_chunk as &dyn Component,
-            &self.folded_contribution as &dyn Component,
-            &self.folded_digit as &dyn Component,
             &self.curve_check as &dyn Component,
             &self.range13 as &dyn Component,
-            &self.raw_product_carry16 as &dyn Component,
             &self.signed_carry as &dyn Component,
         ]
     }
 
     pub(crate) fn component_provers(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
         vec![
-            &self.mul as &dyn ComponentProver<SimdBackend>,
-            &self.raw_product_chunk as &dyn ComponentProver<SimdBackend>,
-            &self.folded_contribution as &dyn ComponentProver<SimdBackend>,
-            &self.folded_digit as &dyn ComponentProver<SimdBackend>,
             &self.curve_check as &dyn ComponentProver<SimdBackend>,
             &self.range13 as &dyn ComponentProver<SimdBackend>,
-            &self.raw_product_carry16 as &dyn ComponentProver<SimdBackend>,
             &self.signed_carry as &dyn ComponentProver<SimdBackend>,
         ]
     }
 
-    fn trace_log_degree_bounds(&self) -> TreeVec<ColumnVec<u32>> {
-        TreeVec::concat_cols(
-            self.components()
-                .into_iter()
-                .map(|component| component.trace_log_degree_bounds()),
-        )
-    }
-
+    #[cfg(test)]
     fn max_constraint_log_degree_bound(&self) -> u32 {
         self.components()
             .into_iter()
@@ -1040,11 +982,8 @@ impl PublicKeyCurveSliceProofClaim {
     }
 
     pub(crate) fn mix_into(&self, channel: &mut impl Channel) {
-        channel.mix_u64(self.log_sizes.mul as u64);
-        channel.mix_u64(self.log_sizes.raw_product_chunk as u64);
-        channel.mix_u64(self.log_sizes.folded_contribution as u64);
-        channel.mix_u64(self.log_sizes.folded_digit as u64);
         channel.mix_u64(self.log_sizes.curve_check as u64);
+        channel.mix_u64(self.log_sizes.hinted_source_offset as u64);
     }
 
     pub(crate) fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
@@ -1059,18 +998,7 @@ impl PublicKeyCurveSliceProofClaim {
         allocator.preprocessed_columns().clone()
     }
 
-    fn trace_log_degree_bounds(&self, ids: &[PreProcessedColumnId]) -> TreeVec<ColumnVec<u32>> {
-        let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(ids);
-        let components = PublicKeyCurveSliceComponents::new(
-            &mut allocator,
-            self.log_sizes,
-            &PublicKeyCurveSliceInteractionClaim::zero(),
-            &PublicKeyCurveSliceRelations::dummy(),
-            false,
-        );
-        components.trace_log_degree_bounds()
-    }
-
+    #[cfg(test)]
     fn max_constraint_log_degree_bound(&self, ids: &[PreProcessedColumnId]) -> u32 {
         let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(ids);
         let components = PublicKeyCurveSliceComponents::new(
@@ -1089,46 +1017,27 @@ impl PublicKeyCurveSliceProofClaim {
 // ---------------------------------------------------------------------------
 
 pub(crate) fn gen_slice_preprocessed_trace(
-    claim: &PublicKeyCurveSliceClaim,
+    _claim: &PublicKeyCurveSliceClaim,
     ids: &[PreProcessedColumnId],
 ) -> Result<Vec<M31ColumnEval>, PublicKeyCurveSliceError> {
-    // The schedule columns for the three non-mul families come from the shared
-    // projective preprocessed trace; the range13 / signed-carry value+active
-    // columns are appended exactly as the projective slice does.
-    let projective_ids = claim
-        .mul_trace
-        .preprocessed_column_ids_with_namespace(PROJECTIVE_RCB_SCHEDULE_NAMESPACE_PUBLIC_KEY);
-    let mut columns: Vec<(PreProcessedColumnId, M31ColumnEval)> = claim
-        .mul_trace
-        .gen_preprocessed_trace_with_namespace(
-            &projective_ids,
-            PROJECTIVE_RCB_SCHEDULE_NAMESPACE_PUBLIC_KEY,
-        )
-        .map_err(PublicKeyCurveSliceError::MulTrace)?
-        .into_iter()
-        .zip(projective_ids)
-        .map(|(eval, id)| (id, eval))
-        .collect();
-
+    // Only the local range13 / signed-carry providers keep preprocessed
+    // columns; the four muls are proven by the shared hinted provider.
     let range13 = RangeCheckClaim::new(RANGE13_BITS);
-    columns.push((
-        range_check_value_column_id(RANGE13_BITS),
-        range13.gen_preprocessed_column(),
-    ));
-    let raw_product_carry16 = RangeCheckClaim::new(RANGE16_BITS);
-    columns.push((
-        range_check_value_column_id(RANGE16_BITS),
-        raw_product_carry16.gen_preprocessed_column(),
-    ));
     let signed_carry = slice_signed_carry_claim();
-    columns.push((
-        signed_carry_value_column_id(PROJECTIVE_RCB_SIGNED_CARRY_EQUATION),
-        signed_carry.gen_value_column(),
-    ));
-    columns.push((
-        signed_carry_active_column_id(PROJECTIVE_RCB_SIGNED_CARRY_EQUATION),
-        signed_carry.gen_active_column(),
-    ));
+    let columns: Vec<(PreProcessedColumnId, M31ColumnEval)> = vec![
+        (
+            range_check_value_column_id(RANGE13_BITS),
+            range13.gen_preprocessed_column(),
+        ),
+        (
+            signed_carry_value_column_id(PROJECTIVE_RCB_SIGNED_CARRY_EQUATION),
+            signed_carry.gen_value_column(),
+        ),
+        (
+            signed_carry_active_column_id(PROJECTIVE_RCB_SIGNED_CARRY_EQUATION),
+            signed_carry.gen_active_column(),
+        ),
+    ];
 
     ids.iter()
         .map(|id| {
@@ -1156,47 +1065,22 @@ pub(crate) fn gen_slice_base_trace(
     let log_sizes = PublicKeyCurveSliceLogSizes::from_claim(claim);
     let mut trace = Vec::new();
 
-    // Mul family base trace (identical column layout to `ProjectiveRcbMulEval`).
-    trace.extend(
-        gen_projective_rcb_mul_base_trace(&claim.mul_trace, log_sizes.mul)
-            .map_err(PublicKeyCurveSliceError::MulTrace)?,
-    );
-    // Three non-mul families, reused unchanged.
-    trace.extend(
-        gen_projective_rcb_raw_product_chunk_base_trace(
-            &claim.mul_trace,
-            log_sizes.raw_product_chunk,
-        )
-        .map_err(PublicKeyCurveSliceError::MulTrace)?,
-    );
-    trace.extend(
-        gen_projective_rcb_folded_contribution_base_trace(
-            &claim.mul_trace,
-            log_sizes.folded_contribution,
-        )
-        .map_err(PublicKeyCurveSliceError::MulTrace)?,
-    );
-    trace.extend(
-        gen_projective_rcb_folded_digit_base_trace(&claim.mul_trace, log_sizes.folded_digit)
-            .map_err(PublicKeyCurveSliceError::MulTrace)?,
-    );
-    // Curve-check family.
+    // Curve-check family (the four muls are proven by hinted-mul rows).
     trace.extend(gen_curve_check_base_trace(claim, log_sizes.curve_check));
 
-    // Shared range providers' multiplicity columns over *all* uses.
+    // Local range providers' multiplicity columns over the curve-check uses.
     let range13 = RangeCheckClaim::new(RANGE13_BITS);
-    trace.push(range13.gen_multiplicity_trace(slice_range13_uses(claim)?));
-    let raw_product_carry16 = RangeCheckClaim::new(RANGE16_BITS);
-    trace.push(
-        raw_product_carry16.gen_multiplicity_trace(slice_raw_product_carry16_uses(claim)),
-    );
+    trace.push(range13.gen_multiplicity_trace(slice_range13_uses(claim)));
     let signed_carry = slice_signed_carry_claim();
-    trace.push(signed_carry.gen_multiplicity_trace(slice_signed_carry_uses(claim)?));
+    trace.push(signed_carry.gen_multiplicity_trace(slice_signed_carry_uses(claim)));
 
     Ok(trace)
 }
 
-fn gen_curve_check_base_trace(claim: &PublicKeyCurveSliceClaim, log_size: u32) -> Vec<M31ColumnEval> {
+fn gen_curve_check_base_trace(
+    claim: &PublicKeyCurveSliceClaim,
+    log_size: u32,
+) -> Vec<M31ColumnEval> {
     let row_count = 1usize << log_size;
     let mut columns = vec![vec![M31::from_u32_unchecked(0); row_count]; CURVE_CHECK_TRACE_COLUMNS];
 
@@ -1240,31 +1124,27 @@ fn write_limbs(columns: &mut [Vec<M31>], offset: &mut usize, value: &P256M31BigI
     }
 }
 
-/// All range13 uses across the slice: projective mul-family uses plus the
-/// curve-check witnessed limbs.
-fn slice_range13_uses(claim: &PublicKeyCurveSliceClaim) -> Result<Vec<M31>, PublicKeyCurveSliceError> {
-    let mut uses = claim.mul_trace.range13_lookup_values();
-    for value in [&claim.x, &claim.y, &claim.x2, &claim.x3, &claim.three_x, &claim.y2] {
+/// Range13 uses across the slice: the curve-check witnessed limbs. The lite
+/// mul rows' operand/result limbs are range-checked by the hinted-mul
+/// provider, not here.
+fn slice_range13_uses(claim: &PublicKeyCurveSliceClaim) -> Vec<M31> {
+    let mut uses = Vec::new();
+    for value in [
+        &claim.x,
+        &claim.y,
+        &claim.x2,
+        &claim.x3,
+        &claim.three_x,
+        &claim.y2,
+    ] {
         uses.extend(value.limbs().iter().copied());
     }
-    Ok(uses)
+    uses
 }
 
-fn slice_raw_product_carry16_uses(claim: &PublicKeyCurveSliceClaim) -> Vec<M31> {
-    claim.mul_trace.raw_product_carry16_lookup_values()
-}
-
-/// All signed-carry uses: projective mul-family uses plus the curve-check
-/// carries.
-fn slice_signed_carry_uses(
-    claim: &PublicKeyCurveSliceClaim,
-) -> Result<Vec<i64>, PublicKeyCurveSliceError> {
-    let mut uses = claim
-        .mul_trace
-        .signed_carry_lookup_values()
-        .map_err(PublicKeyCurveSliceError::MulTrace)?;
-    uses.extend(claim.carries.iter().copied());
-    Ok(uses)
+/// Signed-carry uses: the curve-check identity carries.
+fn slice_signed_carry_uses(claim: &PublicKeyCurveSliceClaim) -> Vec<i64> {
+    claim.carries.to_vec()
 }
 
 pub(crate) fn gen_slice_interaction_trace(
@@ -1275,176 +1155,61 @@ pub(crate) fn gen_slice_interaction_trace(
     let log_sizes = PublicKeyCurveSliceLogSizes::from_claim(claim);
     let mut trace = Vec::new();
 
-    // Mul family: standard mul fractions ++ public-key result provider
-    // fractions, generated in one LogupTraceGenerator (one finalize_last).
-    let (mul_trace, mul_claim) = gen_mul_family_interaction_trace(claim, relations, log_sizes.mul);
-    trace.extend(mul_trace);
-
-    // Three non-mul families, reused unchanged.
-    let (projective_traces, projective_claim) =
-        claim.mul_trace.gen_interaction_trace(&relations.mul);
-    trace.extend(projective_traces.raw_product_chunk);
-    trace.extend(projective_traces.folded_contribution);
-    trace.extend(projective_traces.folded_digit);
-
-    // Curve-check family (consumers). In the monolith (`bind_to_public`) it
-    // also emits the `PublicKeyPointRelation` consume that binds `(x, y)` to the
-    // public key; the standalone slice emits no binding tuple.
-    let (curve_trace, curve_claim) =
+    // Curve-check family (consumers). The four muls are proven by hinted-mul
+    // rows; the check consumes them via wide tuples against the shared
+    // `ProjectiveRcbMulResult` relation. In the monolith (`bind_to_public`) it
+    // also emits the `PublicKeyPointRelation` consume that binds `(x, y)` to
+    // the public key; the standalone slice emits no binding tuple.
+    let (curve_trace, curve_claim, mul_result_sum) =
         gen_curve_check_interaction_trace(claim, relations, log_sizes.curve_check, bind_to_public);
     trace.extend(curve_trace);
 
-    // Shared range providers.
+    // Local range providers.
     let range13 = RangeCheckClaim::new(RANGE13_BITS);
     let range13_values = range13.gen_preprocessed_column();
-    let range13_multiplicity = range13.gen_multiplicity_trace(slice_range13_uses(claim)?);
+    let range13_multiplicity = range13.gen_multiplicity_trace(slice_range13_uses(claim));
     let (range13_trace, range13_claim) = RangeCheckInteractionClaim::gen_interaction_trace(
         &range13_multiplicity,
         &range13_values,
-        &relations.mul.range13,
+        &relations.range13,
     );
     trace.extend(range13_trace);
-
-    let raw_product_carry16 = RangeCheckClaim::new(RANGE16_BITS);
-    let raw_product_carry16_values = raw_product_carry16.gen_preprocessed_column();
-    let raw_product_carry16_multiplicity =
-        raw_product_carry16.gen_multiplicity_trace(slice_raw_product_carry16_uses(claim));
-    let (raw_product_carry16_trace, raw_product_carry16_claim) =
-        RangeCheckInteractionClaim::gen_interaction_trace(
-            &raw_product_carry16_multiplicity,
-            &raw_product_carry16_values,
-            &relations.mul.raw_product_carry16,
-        );
-    trace.extend(raw_product_carry16_trace);
 
     let signed_carry = slice_signed_carry_claim();
     let signed_carry_values = signed_carry.gen_value_column();
     let signed_carry_multiplicity =
-        signed_carry.gen_multiplicity_trace(slice_signed_carry_uses(claim)?);
-    let (signed_carry_trace, signed_carry_claim) = RangeCheckInteractionClaim::gen_interaction_trace(
-        &signed_carry_multiplicity,
-        &signed_carry_values,
-        &relations.mul.signed_carry,
-    );
+        signed_carry.gen_multiplicity_trace(slice_signed_carry_uses(claim));
+    let (signed_carry_trace, signed_carry_claim) =
+        RangeCheckInteractionClaim::gen_interaction_trace(
+            &signed_carry_multiplicity,
+            &signed_carry_values,
+            &relations.signed_carry,
+        );
     trace.extend(signed_carry_trace);
 
     Ok((
         trace,
         PublicKeyCurveSliceInteractionClaim {
-            mul: mul_claim,
-            raw_product_chunk: projective_claim.raw_product_chunk,
-            folded_contribution: projective_claim.folded_contribution,
-            folded_digit: projective_claim.folded_digit,
             curve_check: curve_claim,
             range13: range13_claim,
-            raw_product_carry16: raw_product_carry16_claim,
             signed_carry: signed_carry_claim,
+            mul_result_consumer_claimed_sum: mul_result_sum,
         },
     ))
 }
-
-/// Mul-family interaction trace: the standard projective mul fractions
-/// followed by the public-key result provider fractions, all in one
-/// `LogupTraceGenerator` and one `finalize_last` so the cross-row-linked last
-/// column matches a single `finalize_logup` on the AIR side.
-fn gen_mul_family_interaction_trace(
-    claim: &PublicKeyCurveSliceClaim,
-    relations: &PublicKeyCurveSliceRelations,
-    log_size: u32,
-) -> (ColumnVec<M31ColumnEval>, SecureField) {
-    let padded_rows = 1usize << log_size;
-    let standard_count = projective_rcb_mul_row_fraction_count();
-    let provider_count = PUBLIC_KEY_MUL_COUNT_PROVIDER_FRACTIONS;
-    let total = standard_count + provider_count;
-
-    // Per storage-row fraction pairs. Padding rows hold zero fractions.
-    let mut storage: Vec<Vec<(SecureField, SecureField)>> = (0..padded_rows)
-        .map(|_| {
-            let mut v = projective_rcb_mul_padding_fraction_pairs();
-            v.extend((0..provider_count).map(|_| (secure_zero(), secure_one())));
-            v
-        })
-        .collect();
-
-    for (mul_index, mul) in claim.mul_trace.rows[0].muls.iter().enumerate() {
-        let coset_index = mul_index; // one mul per row, source_index = 0
-        let row = bit_reverse_index(
-            coset_index_to_circle_domain_index(coset_index, log_size),
-            log_size,
-        );
-        let mut pairs = projective_rcb_mul_row_fraction_pairs(0, mul_index, mul, &relations.mul);
-        pairs.extend(provider_fraction_pairs(mul_index, mul, &relations.result));
-        storage[row] = pairs;
-    }
-
-    let mut logup = LogupTraceGenerator::new(log_size);
-    for column in 0..total {
-        let mut col = logup.new_col();
-        for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
-            let mut numerators = [secure_zero(); N_LANES];
-            let mut denominators = [secure_one(); N_LANES];
-            for lane in 0..N_LANES {
-                let row = vec_row * N_LANES + lane;
-                let (numerator, denominator) = storage[row][column];
-                numerators[lane] = numerator;
-                denominators[lane] = denominator;
-            }
-            col.write_frac(
-                vec_row,
-                PackedQM31::from_array(numerators),
-                PackedQM31::from_array(denominators),
-            );
-        }
-        col.finalize_col();
-    }
-    logup.finalize_last()
-}
-
-/// Provider `(numerator, denominator)` pairs of one mul, in the same order
-/// [`provide_mul_limbs`] emits them: lhs limbs, rhs limbs, result limbs.
-fn provider_fraction_pairs(
-    mul_index: usize,
-    mul: &ProjectiveRcbMulRow,
-    relation: &PublicKeyMulResultRelation,
-) -> Vec<(SecureField, SecureField)> {
-    let mut pairs = Vec::with_capacity(PUBLIC_KEY_MUL_COUNT_PROVIDER_FRACTIONS);
-    for (role, limbs) in [
-        (ROLE_LHS, mul.trace.lhs.limbs()),
-        (ROLE_RHS, mul.trace.rhs.limbs()),
-        (ROLE_RESULT, mul.trace.result.limbs()),
-    ] {
-        for (limb_index, limb) in limbs.iter().enumerate() {
-            pairs.push((
-                secure_from_i64(-1),
-                relation.combine(&[
-                    M31::from_u32_unchecked(mul_index as u32),
-                    M31::from_u32_unchecked(role),
-                    M31::from_u32_unchecked(limb_index as u32),
-                    *limb,
-                ]),
-            ));
-        }
-    }
-    pairs
-}
-
-const PUBLIC_KEY_MUL_COUNT_PROVIDER_FRACTIONS: usize = 3 * N_LIMBS;
 
 fn gen_curve_check_interaction_trace(
     claim: &PublicKeyCurveSliceClaim,
     relations: &PublicKeyCurveSliceRelations,
     log_size: u32,
     bind_to_public: bool,
-) -> (ColumnVec<M31ColumnEval>, SecureField) {
+) -> (ColumnVec<M31ColumnEval>, SecureField, SecureField) {
     let padded_rows = 1usize << log_size;
-    let fractions = curve_check_fraction_pairs(claim, relations, bind_to_public);
+    let (fractions, mul_result_sum) = curve_check_fraction_pairs(claim, relations, bind_to_public);
     let fraction_count = fractions.len();
 
     // Single active row at coset index 0; everything else is padding.
-    let active_row = bit_reverse_index(
-        coset_index_to_circle_domain_index(0, log_size),
-        log_size,
-    );
+    let active_row = bit_reverse_index(coset_index_to_circle_domain_index(0, log_size), log_size);
     let mut storage: Vec<Vec<(SecureField, SecureField)>> = (0..padded_rows)
         .map(|_| vec![(secure_zero(), secure_one()); fraction_count])
         .collect();
@@ -1470,36 +1235,44 @@ fn gen_curve_check_interaction_trace(
         }
         col.finalize_col();
     }
-    logup.finalize_last()
+    let (trace, curve_sum) = logup.finalize_last();
+    (trace, curve_sum, mul_result_sum)
 }
 
 /// Curve-check consumer fractions, in the exact order
 /// [`PublicKeyCurveCheckEval::evaluate`] emits them:
-/// 1. mul-result consume tuples (mul 0..3, roles lhs/rhs/result),
+/// 1. wide mul-result consume tuples (mul 0..3, roles lhs/rhs/result),
 /// 2. (monolith only) the `PublicKeyPointRelation` binding consume,
 /// 3. range13 uses for the witnessed limbs,
 /// 4. signed-carry uses for the carries.
+///
+/// Also returns the mul-result boundary sum (the slice's consumer side of the
+/// shared hinted-provider relation).
 fn curve_check_fraction_pairs(
     claim: &PublicKeyCurveSliceClaim,
     relations: &PublicKeyCurveSliceRelations,
     bind_to_public: bool,
-) -> Vec<(SecureField, SecureField)> {
+) -> (Vec<(SecureField, SecureField)>, SecureField) {
     let mut pairs = Vec::new();
-    let result = &relations.result;
 
-    // 1. consume tuples (use, +1).
-    let consume = |pairs: &mut Vec<(SecureField, SecureField)>, mul_index: u32, role: u32, value: &P256M31BigInt| {
-        for (limb_index, limb) in value.limbs().iter().enumerate() {
-            pairs.push((
-                secure_from_i64(1),
-                result.combine(&[
-                    M31::from_u32_unchecked(mul_index),
-                    M31::from_u32_unchecked(role),
-                    M31::from_u32_unchecked(limb_index as u32),
-                    *limb,
-                ]),
-            ));
-        }
+    // 1. mul-result consumes (use, +1): wide tuples against the hinted
+    //    provider, in the exact order the eval emits them. The `MUL_THREE_X`
+    //    lhs is the fixed constant `3` (limbs [3, 0, ..]), matching
+    //    [`consume_three_constant`].
+    let mut mul_result_sum = secure_zero();
+    let mul_source = M31::from_u32_unchecked(claim.hinted_source_offset) + claim.sig_id;
+    let mut consume = |pairs: &mut Vec<(SecureField, SecureField)>,
+                       mul_index: u32,
+                       role: u32,
+                       value: &P256M31BigInt| {
+        let mut values = Vec::with_capacity(3 + N_LIMBS);
+        values.push(mul_source);
+        values.push(M31::from_u32_unchecked(mul_index));
+        values.push(M31::from_u32_unchecked(role));
+        values.extend(value.limbs().iter().copied());
+        let denom = relations.mul_result.combine(&values);
+        pairs.push((secure_from_i64(1), denom));
+        mul_result_sum += secure_from_i64(1) / denom;
     };
     let three = P256M31BigInt::from_u256(&U256::from_le_u64s(&[3, 0, 0, 0]));
 
@@ -1525,9 +1298,16 @@ fn curve_check_fraction_pairs(
     }
 
     // 3. range13 uses for witnessed limbs (same order as the eval).
-    for value in [&claim.x, &claim.y, &claim.x2, &claim.x3, &claim.three_x, &claim.y2] {
+    for value in [
+        &claim.x,
+        &claim.y,
+        &claim.x2,
+        &claim.x3,
+        &claim.three_x,
+        &claim.y2,
+    ] {
         for limb in value.limbs() {
-            pairs.push((secure_from_i64(1), relations.mul.range13.combine(&[*limb])));
+            pairs.push((secure_from_i64(1), relations.range13.combine(&[*limb])));
         }
     }
 
@@ -1536,13 +1316,12 @@ fn curve_check_fraction_pairs(
         pairs.push((
             secure_from_i64(1),
             relations
-                .mul
                 .signed_carry
                 .combine(&[encode_signed_carry(carry)]),
         ));
     }
 
-    pairs
+    (pairs, mul_result_sum)
 }
 
 /// The single `(numerator, denominator)` pair for the `PublicKeyPointRelation`
@@ -1622,7 +1401,8 @@ pub fn public_key_curve_slice_claim_from_public_inputs(
     public_inputs: &PublicEcdsaInputClaim,
 ) -> Result<PublicKeyCurveSliceClaim, PublicKeyCurveSliceError> {
     let on_curve = PublicKeyOnCurveClaim::from_public_inputs(public_inputs)?;
-    PublicKeyCurveSliceClaim::from_public_key_claim(&on_curve)
+    // The standalone slice has no hinted provider; source offset 0 is a label.
+    PublicKeyCurveSliceClaim::from_public_key_claim(&on_curve, 0)
 }
 
 // ---------------------------------------------------------------------------
@@ -1735,9 +1515,10 @@ mod tests {
         //
         //    Per lessons.md #18 the rejection oracle is the relation-balance
         //    audit (not `assert_constraints`, which double-panics on a failing
-        //    LogUp). The mul provider yields the real `y` limbs on
-        //    `PublicKeyMulResultRelation`; the curve check now consumes the
-        //    corrupted limbs, so the relation can no longer balance.
+        //    LogUp). The muls are proven by the shared hinted provider, which
+        //    yields wide tuples for the real `y` limbs on
+        //    `ProjectiveRcbMulResult`; the curve check consumes the corrupted
+        //    limbs, so the cross-component boundary can no longer balance.
         let mut forged =
             public_key_curve_slice_claim_from_public_inputs(&generator_inputs()).expect("on-curve");
         forged.y.limbs_mut()[0] = M31::from_u32_unchecked(forged.y.limbs()[0].0 ^ 1);
@@ -1748,14 +1529,28 @@ mod tests {
             Err(PublicKeyCurveSliceError::WitnessMismatch { .. })
         ));
 
-        // The interaction trace audit residue is nonzero: the corrupted `y`
-        // consume tuples (mul 0, roles lhs/rhs) no longer cancel the mul
-        // provider's real-`y` yield tuples.
+        // The mul-result boundary residue is nonzero: the corrupted `y`
+        // consume tuples (mul 0, roles lhs/rhs) no longer cancel the hinted
+        // provider's real-`y` yield tuples (modelled by
+        // `hinted_provider_sum`, the exact wide tuples the monolithic
+        // hinted-mul component yields for this claim's `mul_trace`).
         let mut channel = stwo::core::channel::Blake2sChannel::default();
         let relations = PublicKeyCurveSliceRelations::draw(&mut channel);
+        let honest =
+            public_key_curve_slice_claim_from_public_inputs(&generator_inputs()).expect("on-curve");
+        let (_, honest_claim) =
+            gen_slice_interaction_trace(&honest, &relations, false).expect("trace builds");
+        assert_eq!(
+            honest_claim.mul_result_consumer_claimed_sum + hinted_provider_sum(&honest, &relations),
+            secure_zero()
+        );
         let (_, interaction_claim) =
             gen_slice_interaction_trace(&forged, &relations, false).expect("trace builds");
-        assert_ne!(interaction_claim.total(), secure_zero());
+        assert_ne!(
+            interaction_claim.mul_result_consumer_claimed_sum
+                + hinted_provider_sum(&forged, &relations),
+            secure_zero()
+        );
 
         // 3. The complementary attack — bindings made self-consistent for the
         //    wrong `y'` (the `y^2` mul squares `y'`, `y2 = y'^2`) but the
@@ -1768,14 +1563,46 @@ mod tests {
         // mul-result relation balances; only the curve identity is violated.
         let mut audit_channel = stwo::core::channel::Blake2sChannel::default();
         let audit_relations = PublicKeyCurveSliceRelations::draw(&mut audit_channel);
-        let (_, balanced) =
-            gen_slice_interaction_trace(&consistent_off, &audit_relations, false).expect("trace builds");
+        let (_, balanced) = gen_slice_interaction_trace(&consistent_off, &audit_relations, false)
+            .expect("trace builds");
         assert_eq!(balanced.total(), secure_zero());
+        assert_eq!(
+            balanced.mul_result_consumer_claimed_sum
+                + hinted_provider_sum(&consistent_off, &audit_relations),
+            secure_zero()
+        );
         // But the prover rejects it (curve-identity recurrence does not vanish).
         let config = slice_config(&consistent_off);
         // `prove_*` first calls `claim.verify()`, which catches the off-curve
         // identity natively; bypass that and drive the prover directly.
         consistent_off_assert_prove_fails(&mut consistent_off, config);
+    }
+
+    /// The hinted-mul provider's `ProjectiveRcbMulResult` yields (yield, −1)
+    /// for the slice's four muls — the monolithic counterpart of the slice's
+    /// consumer boundary sum (`mul_result_consumer_claimed_sum`).
+    fn hinted_provider_sum(
+        claim: &PublicKeyCurveSliceClaim,
+        relations: &PublicKeyCurveSliceRelations,
+    ) -> SecureField {
+        let mut sum = secure_zero();
+        let source = M31::from_u32_unchecked(claim.hinted_source_offset) + claim.sig_id;
+        for (mul_index, mul) in claim.mul_trace.rows[0].muls.iter().enumerate() {
+            for (role, value) in [
+                (ROLE_LHS, &mul.trace.lhs),
+                (ROLE_RHS, &mul.trace.rhs),
+                (ROLE_RESULT, &mul.trace.result),
+            ] {
+                let mut values = Vec::with_capacity(3 + N_LIMBS);
+                values.push(source);
+                values.push(M31::from_u32_unchecked(mul_index as u32));
+                values.push(M31::from_u32_unchecked(role));
+                values.extend(value.limbs().iter().copied());
+                let denom: SecureField = relations.mul_result.combine(&values);
+                sum += secure_from_i64(-1) / denom;
+            }
+        }
+        sum
     }
 
     /// Build an off-curve claim whose bindings are self-consistent for `y'`
@@ -1787,14 +1614,9 @@ mod tests {
         let mut wrong_y = claim.y.clone();
         wrong_y.limbs_mut()[0] = M31::from_u32_unchecked(wrong_y.limbs()[0].0 ^ 1);
         let y_u = wrong_y.to_u256();
-        let new_y2 = ProjectiveRcbMulRow::new(
-            0,
-            MUL_Y_SQUARED as usize,
-            ProjectiveRcbMulStep::DoubleX1Squared,
-            &y_u,
-            &y_u,
-        )
-        .expect("mul builds");
+        let new_y2 =
+            ProjectiveRcbMulRow::new_lite(ProjectiveRcbMulStep::DoubleX1Squared, &y_u, &y_u)
+                .expect("mul builds");
         claim.y2 = new_y2.trace.result.clone();
         claim.mul_trace.rows[0].muls[MUL_Y_SQUARED as usize] = new_y2;
         claim.y = wrong_y;
@@ -1803,10 +1625,7 @@ mod tests {
         claim
     }
 
-    fn consistent_off_assert_prove_fails(
-        claim: &mut PublicKeyCurveSliceClaim,
-        config: PcsConfig,
-    ) {
+    fn consistent_off_assert_prove_fails(claim: &mut PublicKeyCurveSliceClaim, config: PcsConfig) {
         // Drive the slice prover stages directly but skip the native
         // `claim.verify()` guard so the prover itself is the oracle.
         let proof_claim = PublicKeyCurveSliceProofClaim::from_claim(claim);

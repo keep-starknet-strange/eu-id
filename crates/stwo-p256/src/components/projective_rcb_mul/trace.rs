@@ -6,7 +6,6 @@
 use stwo::core::{
     channel::Channel,
     fields::{m31::M31, qm31::SecureField},
-    ColumnVec,
 };
 use rayon::prelude::*;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
@@ -194,7 +193,12 @@ impl ProjectiveRcbAirProofClaim {
         allocator.preprocessed_columns().clone()
     }
 
-    fn trace_log_degree_bounds(&self, ids: &[PreProcessedColumnId]) -> TreeVec<ColumnVec<u32>> {
+    /// Standalone-slice helper (test-only since the monolith went hinted).
+    #[cfg(test)]
+    fn trace_log_degree_bounds(
+        &self,
+        ids: &[PreProcessedColumnId],
+    ) -> TreeVec<stwo::core::ColumnVec<u32>> {
         let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(ids);
         let components = ProjectiveRcbAirComponents::new_with_log_sizes(
             &mut allocator,
@@ -1132,15 +1136,6 @@ fn projective_rcb_air_schedule_preprocessed_columns(
             .map(|column| column_to_eval(column.id, column.values)),
     );
     columns
-}
-
-/// Mul-family base trace WITHOUT the identity columns — for `final_add` and
-/// `public_key_curve`, whose muls have no identity fast-path.
-pub(crate) fn gen_projective_rcb_mul_base_trace(
-    trace: &ProjectiveRcbAirTraceClaim,
-    log_size: u32,
-) -> Result<Vec<M31ColumnEval>, ProjectiveRcbAirError> {
-    gen_projective_rcb_mul_base_trace_inner(trace, log_size, false)
 }
 
 /// Mul-family base trace WITH the two silo-only identity columns
