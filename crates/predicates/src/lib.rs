@@ -17,7 +17,7 @@ pub use age::types::{
     Error, PublicInput, Witness,
 };
 pub use nat::types::{
-    Error as NatError, PrivateInput as NatPrivateInput, Proof as NatProof,
-    PublicInput as NatPublicInput,
+    Error as NatError, InputError as NatInputError, PrivateInput as NatPrivateInput,
+    Proof as NatProof, PublicInput as NatPublicInput,
 };
 pub use predicate::{Predicate, StandalonePredicate};

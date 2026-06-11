@@ -23,12 +23,12 @@ impl PublicInput {
         Self { acceptable }
     }
 
-    pub(crate) fn log_size(&self) -> u32 {
+    pub fn log_size(&self) -> u32 {
         let padded = (self.acceptable.len() as u32).next_power_of_two();
         padded.ilog2().max(LOG_N_LANES)
     }
 
-    pub(crate) fn mix_into(&self, channel: &mut impl Channel) {
+    pub fn mix_into(&self, channel: &mut impl Channel) {
         for &code in &self.acceptable {
             channel.mix_u64(code as u64);
         }

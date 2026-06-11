@@ -11,7 +11,7 @@ use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::poly::circle::CircleEvaluation;
 use stwo::prover::TreeBuilder;
 
-pub(super) struct WitnessData {
+pub struct WitnessData {
     pub witness_trace: Trace,
     pub table_mult_trace: Trace,
     pub nationality: u32,

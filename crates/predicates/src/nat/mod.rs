@@ -1,16 +1,17 @@
-mod components;
-mod eval;
-mod interaction;
+pub mod components;
+pub mod eval;
+pub mod interaction;
+pub mod lookup_elements;
 pub mod nationalities;
-mod preprocessed;
+pub mod preprocessed;
 pub mod table;
 pub mod types;
-mod witness;
+pub mod witness;
 
 use components::components;
 use interaction::InteractionTraces;
+use lookup_elements::LookupElements;
 use preprocessed::Preprocessed;
-use table::NatTableElements;
 use types::{Error, InputError, PrivateInput, Proof, PublicInput, Witness};
 use witness::WitnessData;
 
@@ -111,7 +112,7 @@ impl StandalonePredicate for NationalityPredicate {
         witness_data.extend_evals(&mut tb);
         tb.commit(channel);
 
-        let lookup_elements = NatTableElements::draw(channel);
+        let lookup_elements = LookupElements::draw(channel);
 
         // Tree 2: interaction traces (1 logup fraction per component = 4 M31 cols each).
         let interaction = InteractionTraces::new(&witness_data, &preprocessed, &lookup_elements);
@@ -169,7 +170,7 @@ impl StandalonePredicate for NationalityPredicate {
             channel,
         );
 
-        let lookup_elements = NatTableElements::draw(channel);
+        let lookup_elements = LookupElements::draw(channel);
 
         channel.mix_felts(&[proof.nat_claimed_sum, proof.table_claimed_sum]);
 

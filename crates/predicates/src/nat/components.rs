@@ -1,5 +1,6 @@
 use crate::nat::eval::{NationalityComponent, NationalityEval};
-use crate::nat::table::{acceptable_col_id, NatTableComponent, NatTableElements, NatTableEval};
+use crate::nat::lookup_elements::LookupElements;
+use crate::nat::table::{acceptable_col_id, NatTableComponent, NatTableEval};
 use crate::nat::types::PublicInput;
 use stwo::core::fields::qm31::QM31;
 use stwo_constraint_framework::TraceLocationAllocator;
@@ -8,9 +9,9 @@ fn make_allocator(public: &PublicInput) -> TraceLocationAllocator {
     TraceLocationAllocator::new_with_preprocessed_columns(&[acceptable_col_id(&public.acceptable)])
 }
 
-pub(super) fn components(
+pub fn components(
     public: &PublicInput,
-    lookup_elements: NatTableElements,
+    lookup_elements: LookupElements,
     nat_claimed_sum: QM31,
     table_claimed_sum: QM31,
 ) -> (NationalityComponent, NatTableComponent) {
@@ -28,7 +29,7 @@ pub(super) fn components(
         &mut allocator,
         NatTableEval {
             public: public.clone(),
-            lookup_elements,
+            lookup_elements: lookup_elements.nat_table,
         },
         table_claimed_sum,
     );

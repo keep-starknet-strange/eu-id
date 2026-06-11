@@ -9,7 +9,7 @@ use stwo::prover::backend::Column;
 use stwo::prover::poly::circle::CircleEvaluation;
 use stwo::prover::TreeBuilder;
 
-pub(super) struct Preprocessed {
+pub struct Preprocessed {
     pub acceptable: Trace,
 }
 
