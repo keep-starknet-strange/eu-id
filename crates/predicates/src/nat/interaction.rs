@@ -1,5 +1,5 @@
+use crate::nat::lookup_elements::LookupElements;
 use crate::nat::preprocessed::Preprocessed;
-use crate::nat::table::NatTableElements;
 use crate::nat::witness::WitnessData;
 use crate::types::Trace;
 use num_traits::One;
@@ -13,7 +13,7 @@ use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::TreeBuilder;
 use stwo_constraint_framework::{LogupTraceGenerator, Relation};
 
-pub(super) struct InteractionTraces {
+pub struct InteractionTraces {
     pub nat_interaction: Trace,
     pub table_interaction: Trace,
     pub nat_claimed_sum: QM31,
@@ -24,7 +24,7 @@ impl InteractionTraces {
     pub fn new(
         witness_data: &WitnessData,
         preprocessed: &Preprocessed,
-        lookup_elements: &NatTableElements,
+        lookup_elements: &LookupElements,
     ) -> Self {
         let acceptable_nat_log_size = preprocessed.acceptable[0].domain.log_size();
         let n_packed = 1 << (WitnessData::log_size() - LOG_N_LANES);
@@ -35,9 +35,9 @@ impl InteractionTraces {
             col_gen.write_frac(
                 packed_row,
                 PackedQM31::one(),
-                lookup_elements.combine(&[PackedM31::broadcast(M31::from_u32_unchecked(
-                    witness_data.nationality,
-                ))]),
+                lookup_elements.nat_table.combine(&[PackedM31::broadcast(
+                    M31::from_u32_unchecked(witness_data.nationality),
+                )]),
             );
         }
         col_gen.finalize_col();
@@ -51,7 +51,7 @@ impl InteractionTraces {
             col_gen.write_frac(
                 vec_row,
                 PackedQM31::from(-mult_val),
-                lookup_elements.combine(&[nat_val]),
+                lookup_elements.nat_table.combine(&[nat_val]),
             );
         }
         col_gen.finalize_col();

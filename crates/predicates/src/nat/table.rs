@@ -6,7 +6,7 @@ use stwo_constraint_framework::{
 
 relation!(NatTableElements, 1);
 
-pub(crate) fn acceptable_col_id(acceptable: &[u32]) -> PreProcessedColumnId {
+pub fn acceptable_col_id(acceptable: &[u32]) -> PreProcessedColumnId {
     let ids: Vec<String> = acceptable.iter().map(|c| c.to_string()).collect();
     PreProcessedColumnId {
         id: format!("nat/acceptable/{}", ids.join(",")),
@@ -14,12 +14,12 @@ pub(crate) fn acceptable_col_id(acceptable: &[u32]) -> PreProcessedColumnId {
 }
 
 #[derive(Clone)]
-pub(crate) struct NatTableEval {
+pub struct NatTableEval {
     pub public: PublicInput,
     pub lookup_elements: NatTableElements,
 }
 
-pub(crate) type NatTableComponent = FrameworkComponent<NatTableEval>;
+pub type NatTableComponent = FrameworkComponent<NatTableEval>;
 
 impl FrameworkEval for NatTableEval {
     fn log_size(&self) -> u32 {
