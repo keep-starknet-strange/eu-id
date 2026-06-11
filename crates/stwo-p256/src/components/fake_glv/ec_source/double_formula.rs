@@ -269,20 +269,13 @@ pub(crate) fn bind_double_formula<E: EvalAtRow>(
     let r = |k: usize| muls.result(k);
 
     // ----- (1a) Operand bindings: single reduced source, coefficient +1 -----
-    // M0 x1·x1, M1 y1·y1, M2 z1·z1 (z1=1), M3 x1·y1, M4 x1·z1, M5 b·R2,
-    // M8.lhs b, M10 y1·z1, M12.rhs R1.
-    bind_equal(eval, gate, muls.lhs(0), x1);
-    bind_equal(eval, gate, muls.rhs(0), x1);
-    bind_equal(eval, gate, muls.lhs(1), y1);
-    bind_equal(eval, gate, muls.rhs(1), y1);
+    // Operand dedup: M0/M1/M3/M4/M5 lhs+rhs are dropped consumed-mul slots —
+    // their consume-tuple values ARE the bound expressions
+    // (`ConsumedMulLimbs::fill_dropped`), so no `bind_equal` is needed here.
+    // Only slots that keep committed columns (combo-reduced in the MixedAdd
+    // kind) are pinned: M2 z1·z1 (z1=1), M8.lhs b, M10 y1·z1, M12.rhs R1.
     bind_equal(eval, gate, muls.lhs(2), &one_const);
     bind_equal(eval, gate, muls.rhs(2), &one_const);
-    bind_equal(eval, gate, muls.lhs(3), x1);
-    bind_equal(eval, gate, muls.rhs(3), y1);
-    bind_equal(eval, gate, muls.lhs(4), x1);
-    bind_equal(eval, gate, muls.rhs(4), &one_const);
-    bind_equal(eval, gate, muls.lhs(5), &b_const);
-    bind_equal(eval, gate, muls.rhs(5), r(2));
     bind_equal(eval, gate, muls.lhs(8), &b_const);
     bind_equal(eval, gate, muls.lhs(10), y1);
     bind_equal(eval, gate, muls.rhs(10), &one_const);
@@ -329,17 +322,12 @@ pub(crate) fn bind_double_formula<E: EvalAtRow>(
     add_combo_reduction(eval, gate, &columns.z3, &combo_z3, &columns.reductions[12]);
 
     // ----- (3a) Affine-normalization OPERAND binding (the link to `output`) ----
-    // The silo proves R13 = M13.lhs · M13.rhs and R14 = M14.lhs · M14.rhs, but
-    // those operands are free witnesses in the silo. Bind them to the committed
-    // affine output coords and `z3` so R13 = output.x·z3, R14 = output.y·z3 hold
-    // for THIS row's committed `output`. Without this, a prover could feed the
-    // silo a different `output.x` than the one the EC-row relation carries (the
-    // forged-output hole). Unconditional on Double rows (the silo computes these
-    // for every Double, finite or infinity).
-    bind_equal(eval, gate, muls.lhs(13), output_x);
-    bind_equal(eval, gate, muls.rhs(13), &columns.z3);
-    bind_equal(eval, gate, muls.lhs(14), output_y);
-    bind_equal(eval, gate, muls.rhs(14), &columns.z3);
+    // Operand dedup: M13/M14's operands are dropped slots whose consume-tuple
+    // values are `output.x`/`output.y` and `z3_double + z3_mixed` (the
+    // inactive block is zero-forced, so the sum is THIS kind's `z3`). The
+    // consume↔provider balance pins the silo operands to exactly those
+    // columns, closing the forged-output hole the old per-limb `bind_equal`s
+    // closed — now on every `has_muls` row of either kind.
 
     // ----- (3b) Affine-normalization RESULT binding, gated by out_finite -------
     // R13 == x3,  R14 == y3 (limb-wise). Combined with (3a)'s R13 = output.x·z3,

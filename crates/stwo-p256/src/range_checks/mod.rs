@@ -27,7 +27,10 @@ pub mod trace;
 pub use component::{
     RangeCheckComponent, RangeCheckEval, SignedCarryRangeComponent, SignedCarryRangeEval,
 };
-pub use interaction::{consecutive_batching, write_batched_logup_columns, RangeCheckInteractionClaim};
+pub use interaction::{
+    batching_with_solo, consecutive_batching, write_batched_logup_columns,
+    write_logup_columns_with_batching, RangeCheckInteractionClaim,
+};
 pub use trace::{ColumnEval, RangeCheckClaim, SignedCarryRangeClaim};
 
 use stwo::core::fields::m31::M31;

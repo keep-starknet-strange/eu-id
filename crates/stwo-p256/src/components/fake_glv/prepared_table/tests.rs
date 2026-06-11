@@ -561,6 +561,37 @@ fn prepared_table_projective_source_rejects_forged_op_outputs() {
         "honest prepared-table source trace must satisfy the polynomial constraints"
     );
 
+    // Operand dedup moved the affine-normalization OPERAND binding (3a) out of
+    // the polynomial constraints and into the consume tuples: M13.lhs's value
+    // IS the committed `output.x`, pinned to the silo's proven operand by the
+    // `ProjectiveRcbMulResult` balance. A forged `output.x` therefore no
+    // longer trips a polynomial constraint — the oracle is the consumer's
+    // mul-result sum drifting from the (unchanged) provider yield.
+    let mut channel = stwo::core::channel::Blake2sChannel::default();
+    let ec_row_relation = PreparedTableEcRowRelation::draw(&mut channel);
+    let mul_result_relation =
+        crate::projective_air::ProjectiveRcbMulResultRelation::draw(&mut channel);
+    let gamma_digest_relation =
+        crate::components::gamma_digest::GammaDigestRelation::draw(&mut channel);
+    let gamma_challenge = super::trace::prepared_dummy_gamma_challenge();
+    let consumer_mul_sum = |columns: &[Vec<M31>]| {
+        let evals: Vec<_> = columns
+            .iter()
+            .map(|values| {
+                crate::scalar::scalar_mod_mul::columns::m31_column_eval(log_size, values.clone())
+            })
+            .collect();
+        super::interaction::gen_prepared_table_projective_source_consumer_interaction_trace(
+            &evals,
+            &ec_row_relation,
+            &mul_result_relation,
+            &gamma_digest_relation,
+            &gamma_challenge,
+        )
+        .mul_result_sum
+    };
+    let honest_mul_sum = consumer_mul_sum(&base);
+
     let op_col = 4usize;
     let output_x0_col = 6 + 2 * PREPARED_TABLE_EC_POINT_COLUMNS;
     let rows = 1usize << log_size;
@@ -577,9 +608,11 @@ fn prepared_table_projective_source_rejects_forged_op_outputs() {
         let mut forged = base.clone();
         forged[output_x0_col][forge_row] =
             forged[output_x0_col][forge_row] + M31::from_u32_unchecked(1);
-        assert!(
-            !projective_source_constraints_hold(log_size, &forged),
-            "forged {op_name} output.x must violate the coordinate-formula binding (C5-2)"
+        assert_ne!(
+            consumer_mul_sum(&forged),
+            honest_mul_sum,
+            "forged {op_name} output.x must drift the M13.lhs consume from the \
+             silo provider's yield (ProjectiveRcbMulResult imbalance)"
         );
     }
 }

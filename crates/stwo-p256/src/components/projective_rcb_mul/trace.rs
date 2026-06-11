@@ -1436,6 +1436,92 @@ pub(crate) fn projective_rcb_op_mul_limbs(
     Ok((values, true))
 }
 
+/// Project the canonical full limb array onto the KEPT consumed-mul slots
+/// (the committed block layout after operand dedup), in canonical order.
+pub(crate) fn projective_rcb_kept_mul_limbs(
+    full: &[M31; PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS],
+) -> Vec<M31> {
+    let mut kept = Vec::with_capacity(crate::projective_air::CONSUMED_MUL_KEPT_SLOTS * N_LIMBS);
+    for mul in 0..PROJECTIVE_RCB_MAX_MUL_ROWS_PER_OP {
+        for role in 0..3 {
+            if crate::projective_air::consumed_mul_slot_kept(mul, role) {
+                let start = (mul * 3 + role) * N_LIMBS;
+                kept.extend_from_slice(&full[start..start + N_LIMBS]);
+            }
+        }
+    }
+    kept
+}
+
+/// Gen-side column layout a projective-source consumer hands to
+/// [`consumed_mul_slot_packed_limbs`] so dropped-slot consume values can be
+/// computed from the SAME base columns the eval's expressions read.
+pub(crate) struct ConsumedMulGenLayout {
+    pub op_col: usize,
+    pub x1_col: usize,
+    pub y1_col: usize,
+    pub x2_col: usize,
+    pub y2_col: usize,
+    pub output_x_col: usize,
+    pub output_y_col: usize,
+    pub z3_double_col: usize,
+    pub z3_mixed_col: usize,
+    /// First kept-limb column (right after the `has_muls` flag).
+    pub mul_limb_offset: usize,
+}
+
+/// The packed limb values of consumed-mul slot `(mul, role)` at `vec_row`:
+/// kept slots read their committed columns; dropped slots evaluate the
+/// operand-dedup expressions (mirroring `ConsumedMulLimbs::fill_dropped`).
+pub(crate) fn consumed_mul_slot_packed_limbs(
+    base: &[M31ColumnEval],
+    vec_row: usize,
+    layout: &ConsumedMulGenLayout,
+    mul: usize,
+    role: usize,
+) -> Vec<stwo::prover::backend::simd::m31::PackedM31> {
+    use stwo::prover::backend::simd::m31::PackedM31;
+    if let Some(offset) = crate::projective_air::consumed_mul_kept_column(mul, role) {
+        return (0..N_LIMBS)
+            .map(|limb| base[layout.mul_limb_offset + offset + limb].data[vec_row])
+            .collect();
+    }
+    let op = base[layout.op_col].data[vec_row];
+    let one_minus_op = PackedM31::broadcast(M31::from_u32_unchecked(1)) - op;
+    let column = |col: usize, limb: usize| base[col + limb].data[vec_row];
+    let one_limb = |limb: usize| {
+        PackedM31::broadcast(M31::from_u32_unchecked(u32::from(limb == 0)))
+    };
+    let b = crate::limbs::P256M31BigInt::from_u256(&crate::types::U256::from_le_u64s(
+        &crate::constants::P256_B,
+    ));
+    let r2_offset = crate::projective_air::consumed_mul_kept_column(2, 2)
+        .expect("R2 is a kept slot");
+    (0..N_LIMBS)
+        .map(|limb| match (mul, role) {
+            (0, 0) => column(layout.x1_col, limb),
+            (0, 1) => op * column(layout.x1_col, limb) + one_minus_op * column(layout.x2_col, limb),
+            (1, 0) => column(layout.y1_col, limb),
+            (1, 1) => op * column(layout.y1_col, limb) + one_minus_op * column(layout.y2_col, limb),
+            (3, 0) => op * column(layout.x1_col, limb) + one_minus_op * column(layout.y2_col, limb),
+            (3, 1) => op * column(layout.y1_col, limb) + one_minus_op * one_limb(limb),
+            (4, 0) => op * column(layout.x1_col, limb) + one_minus_op * column(layout.x2_col, limb),
+            (4, 1) => one_limb(limb),
+            (5, 0) => PackedM31::broadcast(b.limbs()[limb]),
+            (5, 1) => {
+                op * base[layout.mul_limb_offset + r2_offset + limb].data[vec_row]
+                    + one_minus_op * one_limb(limb)
+            }
+            (13, 0) => column(layout.output_x_col, limb),
+            (13, 1) | (14, 1) => {
+                column(layout.z3_double_col, limb) + column(layout.z3_mixed_col, limb)
+            }
+            (14, 0) => column(layout.output_y_col, limb),
+            _ => unreachable!("dropped-slot table covers exactly the dedup slots"),
+        })
+        .collect()
+}
+
 impl ProjectiveRcbAirRow {
     fn from_projective_row(
         lite: bool,

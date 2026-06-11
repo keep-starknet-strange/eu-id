@@ -626,7 +626,8 @@ fn prepared_table_projective_source_trace_values(
         .map_err(|_| PreparedTableError::ProjectiveSourceInvalid)?;
     values[column] = M31::from_u32_unchecked(has_muls as u32);
     column += 1;
-    for value in mul_limbs {
+    // Operand dedup: only the KEPT slots are committed.
+    for value in crate::projective_air::projective_rcb_kept_mul_limbs(&mul_limbs) {
         values[column] = value;
         column += 1;
     }

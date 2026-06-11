@@ -405,7 +405,7 @@ impl FrameworkEval for PreparedTableProjectiveSourceEval {
         let output = PreparedTableEcEvalPoint::read(&mut eval);
         // C5 plumbing: consumed silo mul limbs (read after the points, matching
         // the base-trace layout).
-        let consumed_muls = ConsumedMulLimbs::<E>::read(&mut eval);
+        let mut consumed_muls = ConsumedMulLimbs::<E>::read(&mut eval);
         // C5-2: the Double-formula working values + reduction witnesses, then
         // the MixedAdd block, read LAST (matching the base-trace layout
         // appended after the consumed-mul block).
@@ -436,6 +436,18 @@ impl FrameworkEval for PreparedTableProjectiveSourceEval {
         // robust and symmetric with the fake-GLV source.
         let expected_has_muls = one.clone() - (one.clone() - op.clone()) * rhs.inf();
         consumed_muls.constrain_has_muls(&mut eval, &active, &expected_has_muls);
+        // Operand dedup: install the dropped slots' consume expressions.
+        consumed_muls.fill_dropped(&crate::projective_air::ConsumedMulWiring {
+            op: op.clone(),
+            x1: lhs.x_bigint(),
+            y1: lhs.y_bigint(),
+            x2: rhs.x_bigint(),
+            y2: rhs.y_bigint(),
+            output_x: output.x_bigint(),
+            output_y: output.y_bigint(),
+            z3_double: double_columns.z3.clone(),
+            z3_mixed: mixed_columns.z3.clone(),
+        });
 
         let relation_values = prepared_table_ec_row_relation_values(
             &[
@@ -576,10 +588,9 @@ impl FrameworkEval for PreparedTableProjectiveSourceEval {
             &signed_carry_values,
         );
 
-        eval.finalize_logup_batched(&crate::range_checks::consecutive_batching(
-            crate::components::fake_glv::prepared_table::interaction::prepared_consumer_logup_entries(),
-            crate::components::fake_glv::prepared_table::interaction::PREPARED_CONSUMER_LOGUP_BATCH,
-        ));
+        eval.finalize_logup_batched(
+            &crate::components::fake_glv::prepared_table::interaction::prepared_consumer_logup_batching(),
+        );
         eval
     }
 }

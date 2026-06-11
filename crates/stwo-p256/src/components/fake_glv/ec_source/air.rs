@@ -508,7 +508,7 @@ impl FrameworkEval for FakeGlvProjectiveSourceEval {
         // C5 plumbing: the consumed silo mul limbs. The LogUp consume pins them
         // equal to the silo's proven values; C5-2 (below) binds their operands
         // and the output to the Double-op coordinate formula.
-        let consumed_muls = ConsumedMulLimbs::<E>::read(&mut eval);
+        let mut consumed_muls = ConsumedMulLimbs::<E>::read(&mut eval);
         // C5-2a: the Double-formula working values + reduction witnesses, read
         // after the consumed-mul block.
         let double_columns = DoubleFormulaColumns::<E>::read(&mut eval);
@@ -541,6 +541,18 @@ impl FrameworkEval for FakeGlvProjectiveSourceEval {
         let expected_has_muls =
             one.clone() - (one.clone() - op.clone()) * rhs.inf();
         consumed_muls.constrain_has_muls(&mut eval, &active, &expected_has_muls);
+        // Operand dedup: install the dropped slots' consume expressions.
+        consumed_muls.fill_dropped(&crate::projective_air::ConsumedMulWiring {
+            op: op.clone(),
+            x1: lhs.x_bigint(),
+            y1: lhs.y_bigint(),
+            x2: rhs.x_bigint(),
+            y2: rhs.y_bigint(),
+            output_x: output.x_bigint(),
+            output_y: output.y_bigint(),
+            z3_double: double_columns.z3.clone(),
+            z3_mixed: mixed_columns.z3.clone(),
+        });
 
         let relation_values = fake_glv_primitive_ec_row_relation_values(
             &[source_index.clone(), sig_id, cert_id, op.clone()],
@@ -677,10 +689,7 @@ impl FrameworkEval for FakeGlvProjectiveSourceEval {
             &signed_carry_values,
         );
 
-        eval.finalize_logup_batched(&crate::range_checks::consecutive_batching(
-            fake_glv_consumer_logup_entries(),
-            FAKE_GLV_CONSUMER_LOGUP_BATCH,
-        ));
+        eval.finalize_logup_batched(&fake_glv_consumer_logup_batching());
         eval
     }
 }
@@ -845,6 +854,39 @@ pub(crate) fn fake_glv_consumer_logup_entries() -> usize {
     1 + (PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS / (3 * N_LIMBS)) * 3 + 2
 }
 
+/// Consumer logup batching: pairs, except the operand-dedup slots whose
+/// consume values are degree-2 op-mixes — those entries sit in solo batches
+/// (denominator degree 2 + cumulative term = 3, the `log_size + 1` ceiling).
+pub(crate) fn fake_glv_consumer_logup_batching() -> Vec<usize> {
+    let solo: Vec<usize> = (0..PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS / (3 * N_LIMBS))
+        .flat_map(|mul| (0..3usize).map(move |role| (mul, role)))
+        .filter(|&(mul, role)| crate::projective_air::consumed_mul_slot_degree2(mul, role))
+        .map(|(mul, role)| 1 + mul * 3 + role)
+        .collect();
+    crate::range_checks::batching_with_solo(
+        fake_glv_consumer_logup_entries(),
+        FAKE_GLV_CONSUMER_LOGUP_BATCH,
+        &solo,
+    )
+}
+
+/// Gen-side layout for [`consumed_mul_slot_packed_limbs`] over the fake-GLV
+/// consumer base trace.
+fn fake_glv_consumed_mul_gen_layout() -> crate::projective_air::ConsumedMulGenLayout {
+    crate::projective_air::ConsumedMulGenLayout {
+        op_col: 4,
+        x1_col: 5,
+        y1_col: 5 + N_LIMBS,
+        x2_col: 5 + PREPARED_TABLE_EC_POINT_COLUMNS,
+        y2_col: 5 + PREPARED_TABLE_EC_POINT_COLUMNS + N_LIMBS,
+        output_x_col: 5 + 2 * PREPARED_TABLE_EC_POINT_COLUMNS,
+        output_y_col: 5 + 2 * PREPARED_TABLE_EC_POINT_COLUMNS + N_LIMBS,
+        z3_double_col: FAKE_GLV_PROJECTIVE_DOUBLE_FORMULA_OFFSET + 2 * N_LIMBS,
+        z3_mixed_col: FAKE_GLV_PROJECTIVE_MIXED_ADD_FORMULA_OFFSET + 2 * N_LIMBS,
+        mul_limb_offset: FAKE_GLV_PRIMITIVE_EC_MUL_LIMB_OFFSET,
+    }
+}
+
 /// Range13 digest value order: the Double-formula list then the MixedAdd list
 /// (matching the two binder collection passes in the eval).
 pub(crate) fn fake_glv_gamma_range13_columns() -> Vec<usize> {
@@ -952,10 +994,9 @@ pub(crate) fn gen_fake_glv_projective_source_consumer_interaction_trace(
     let has_muls_numerators: Vec<PackedQM31> = (0..vec_rows)
         .map(|vec_row| PackedQM31::from(base[FAKE_GLV_PRIMITIVE_EC_HAS_MULS_COL].data[vec_row]))
         .collect();
+    let layout = fake_glv_consumed_mul_gen_layout();
     for mul_index in 0..(PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS / (3 * N_LIMBS)) {
         for (role_index, &role) in PROJECTIVE_RCB_MUL_RESULT_ROLES.iter().enumerate() {
-            let base_col =
-                FAKE_GLV_PRIMITIVE_EC_MUL_LIMB_OFFSET + mul_index * (3 * N_LIMBS) + role_index * N_LIMBS;
             entries.push((
                 has_muls_numerators.clone(),
                 (0..vec_rows)
@@ -964,9 +1005,9 @@ pub(crate) fn gen_fake_glv_projective_source_consumer_interaction_trace(
                         values.push(base[1].data[vec_row]);
                         values.push(PackedM31::broadcast(M31::from_u32_unchecked(mul_index as u32)));
                         values.push(PackedM31::broadcast(M31::from_u32_unchecked(role)));
-                        for limb in 0..N_LIMBS {
-                            values.push(base[base_col + limb].data[vec_row]);
-                        }
+                        values.extend(crate::projective_air::consumed_mul_slot_packed_limbs(
+                            base, vec_row, &layout, mul_index, role_index,
+                        ));
                         mul_result_relation.combine(&values)
                     })
                     .collect(),
@@ -1012,10 +1053,10 @@ pub(crate) fn gen_fake_glv_projective_source_consumer_interaction_trace(
 
     assert_eq!(entries.len(), fake_glv_consumer_logup_entries());
     let mut logup = LogupTraceGenerator::new(log_size);
-    crate::range_checks::write_batched_logup_columns(
+    crate::range_checks::write_logup_columns_with_batching(
         &mut logup,
         &entries,
-        FAKE_GLV_CONSUMER_LOGUP_BATCH,
+        &fake_glv_consumer_logup_batching(),
     );
     let (columns, _total) = logup.finalize_last();
 
@@ -1178,18 +1219,17 @@ fn fake_glv_projective_source_consumer_sums(
                 continue;
             }
             let source_index = base[1].data[vec_row].to_array()[lane];
+            let layout = fake_glv_consumed_mul_gen_layout();
             for mul_index in 0..(PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS / (3 * N_LIMBS)) {
                 for (role_index, &role) in PROJECTIVE_RCB_MUL_RESULT_ROLES.iter().enumerate() {
-                    let base_col = FAKE_GLV_PRIMITIVE_EC_MUL_LIMB_OFFSET
-                        + mul_index * (3 * N_LIMBS)
-                        + role_index * N_LIMBS;
+                    let limbs = crate::projective_air::consumed_mul_slot_packed_limbs(
+                        base, vec_row, &layout, mul_index, role_index,
+                    );
                     let mut values = Vec::with_capacity(3 + N_LIMBS);
                     values.push(source_index);
                     values.push(M31::from_u32_unchecked(mul_index as u32));
                     values.push(M31::from_u32_unchecked(role));
-                    for limb in 0..N_LIMBS {
-                        values.push(base[base_col + limb].data[vec_row].to_array()[lane]);
-                    }
+                    values.extend(limbs.iter().map(|packed| packed.to_array()[lane]));
                     mul_result_denominators.push(mul_result_relation.combine(&values));
                 }
             }
@@ -1284,7 +1324,9 @@ fn fake_glv_projective_source_trace_values(
         .map_err(|_| FakeGlvChainError::ProjectiveSourceInvalid)?;
     values[column] = M31::from_u32_unchecked(has_muls as u32);
     column += 1;
-    for value in mul_limbs {
+    // Operand dedup: only the KEPT slots are committed; dropped operands are
+    // consume-tuple expressions of other row columns.
+    for value in crate::projective_air::projective_rcb_kept_mul_limbs(&mul_limbs) {
         values[column] = value;
         column += 1;
     }

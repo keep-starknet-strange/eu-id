@@ -73,6 +73,66 @@ pub fn consecutive_batching(entries: usize, batch: usize) -> Vec<usize> {
 /// AIR emission order. A batched column's constraint degree is
 /// `batch + max(numerator degree)`, so the component bound must allow it
 /// (batch 8 with degree-1 numerators needs `log_size + 3`).
+/// Batching vector: pair entries `batch` at a time, but give every entry in
+/// `solo` (sorted indices) its own batch — a batch never mixes a solo entry
+/// with others, and batches stay consecutive runs of entries.
+pub fn batching_with_solo(total: usize, batch: usize, solo: &[usize]) -> Vec<usize> {
+    let mut batching = Vec::with_capacity(total);
+    let mut batch_id = 0usize;
+    let mut filled = 0usize;
+    for entry in 0..total {
+        let is_solo = solo.contains(&entry);
+        if filled > 0 && (is_solo || filled == batch) {
+            batch_id += 1;
+            filled = 0;
+        }
+        batching.push(batch_id);
+        filled += 1;
+        if is_solo {
+            batch_id += 1;
+            filled = 0;
+        }
+    }
+    batching
+}
+
+/// [`write_batched_logup_columns`] generalized to an arbitrary batching
+/// vector (consecutive runs of equal batch ids, as the evals'
+/// `finalize_logup_batched` expects).
+pub fn write_logup_columns_with_batching(
+    logup: &mut stwo_constraint_framework::LogupTraceGenerator,
+    entries: &[(
+        Vec<stwo::prover::backend::simd::qm31::PackedQM31>,
+        Vec<stwo::prover::backend::simd::qm31::PackedQM31>,
+    )],
+    batching: &[usize],
+) {
+    assert_eq!(entries.len(), batching.len());
+    let mut start = 0usize;
+    while start < entries.len() {
+        let mut end = start + 1;
+        while end < entries.len() && batching[end] == batching[start] {
+            end += 1;
+        }
+        let chunk = &entries[start..end];
+        let vec_rows = chunk[0].0.len();
+        let mut col = logup.new_col();
+        for vec_row in 0..vec_rows {
+            let mut numerator = chunk[0].0[vec_row];
+            let mut denominator = chunk[0].1[vec_row];
+            for (next_numerators, next_denominators) in chunk[1..].iter() {
+                let n = next_numerators[vec_row];
+                let d = next_denominators[vec_row];
+                numerator = numerator * d + n * denominator;
+                denominator = denominator * d;
+            }
+            col.write_frac(vec_row, numerator, denominator);
+        }
+        col.finalize_col();
+        start = end;
+    }
+}
+
 pub fn write_batched_logup_columns(
     logup: &mut stwo_constraint_framework::LogupTraceGenerator,
     entries: &[(

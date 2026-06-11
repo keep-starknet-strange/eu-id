@@ -600,6 +600,38 @@ pub(crate) fn prepared_consumer_logup_entries() -> usize {
     1 + (PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS / (3 * N_LIMBS)) * 3 + 2
 }
 
+/// Consumer logup batching: pairs, except the operand-dedup slots whose
+/// consume values are degree-2 op-mixes (solo batches; see the fake-GLV twin).
+pub(crate) fn prepared_consumer_logup_batching() -> Vec<usize> {
+    let solo: Vec<usize> = (0..PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS / (3 * N_LIMBS))
+        .flat_map(|mul| (0..3usize).map(move |role| (mul, role)))
+        .filter(|&(mul, role)| crate::projective_air::consumed_mul_slot_degree2(mul, role))
+        .map(|(mul, role)| 1 + mul * 3 + role)
+        .collect();
+    crate::range_checks::batching_with_solo(
+        prepared_consumer_logup_entries(),
+        PREPARED_CONSUMER_LOGUP_BATCH,
+        &solo,
+    )
+}
+
+/// Gen-side layout for `consumed_mul_slot_packed_limbs` over the prepared
+/// consumer base trace (6 metadata columns — `table_index` follows `op`).
+fn prepared_consumed_mul_gen_layout() -> crate::projective_air::ConsumedMulGenLayout {
+    crate::projective_air::ConsumedMulGenLayout {
+        op_col: 4,
+        x1_col: 6,
+        y1_col: 6 + N_LIMBS,
+        x2_col: 6 + PREPARED_TABLE_EC_POINT_COLUMNS,
+        y2_col: 6 + PREPARED_TABLE_EC_POINT_COLUMNS + N_LIMBS,
+        output_x_col: 6 + 2 * PREPARED_TABLE_EC_POINT_COLUMNS,
+        output_y_col: 6 + 2 * PREPARED_TABLE_EC_POINT_COLUMNS + N_LIMBS,
+        z3_double_col: PREPARED_TABLE_PROJECTIVE_SOURCE_DOUBLE_FORMULA_OFFSET + 2 * N_LIMBS,
+        z3_mixed_col: PREPARED_TABLE_PROJECTIVE_SOURCE_MIXED_ADD_FORMULA_OFFSET + 2 * N_LIMBS,
+        mul_limb_offset: PREPARED_TABLE_PROJECTIVE_SOURCE_MUL_LIMB_OFFSET,
+    }
+}
+
 /// Range13 digest value order: the Double-formula list then the MixedAdd list.
 pub(crate) fn prepared_gamma_range13_columns() -> Vec<usize> {
     let mut columns = prepared_double_formula_range13_use_columns();
@@ -687,11 +719,9 @@ pub(crate) fn gen_prepared_table_projective_source_consumer_interaction_trace(
             PackedQM31::from(base[PREPARED_TABLE_PROJECTIVE_SOURCE_HAS_MULS_COL].data[vec_row])
         })
         .collect();
+    let layout = prepared_consumed_mul_gen_layout();
     for mul_index in 0..(PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS / (3 * N_LIMBS)) {
         for (role_index, &role) in PROJECTIVE_RCB_MUL_RESULT_ROLES.iter().enumerate() {
-            let base_col = PREPARED_TABLE_PROJECTIVE_SOURCE_MUL_LIMB_OFFSET
-                + mul_index * (3 * N_LIMBS)
-                + role_index * N_LIMBS;
             entries.push((
                 has_muls_numerators.clone(),
                 (0..vec_rows)
@@ -700,9 +730,9 @@ pub(crate) fn gen_prepared_table_projective_source_consumer_interaction_trace(
                         values.push(base[1].data[vec_row]);
                         values.push(PackedM31::broadcast(M31::from_u32_unchecked(mul_index as u32)));
                         values.push(PackedM31::broadcast(M31::from_u32_unchecked(role)));
-                        for limb in 0..N_LIMBS {
-                            values.push(base[base_col + limb].data[vec_row]);
-                        }
+                        values.extend(crate::projective_air::consumed_mul_slot_packed_limbs(
+                            base, vec_row, &layout, mul_index, role_index,
+                        ));
                         mul_result_relation.combine(&values)
                     })
                     .collect(),
@@ -747,10 +777,10 @@ pub(crate) fn gen_prepared_table_projective_source_consumer_interaction_trace(
 
     assert_eq!(entries.len(), prepared_consumer_logup_entries());
     let mut logup = LogupTraceGenerator::new(log_size);
-    crate::range_checks::write_batched_logup_columns(
+    crate::range_checks::write_logup_columns_with_batching(
         &mut logup,
         &entries,
-        PREPARED_CONSUMER_LOGUP_BATCH,
+        &prepared_consumer_logup_batching(),
     );
     let (columns, _total) = logup.finalize_last();
 
@@ -916,18 +946,17 @@ fn prepared_table_projective_source_consumer_sums(
                 continue;
             }
             let source_index = base[1].data[vec_row].to_array()[lane];
+            let layout = prepared_consumed_mul_gen_layout();
             for mul_index in 0..(PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS / (3 * N_LIMBS)) {
                 for (role_index, &role) in PROJECTIVE_RCB_MUL_RESULT_ROLES.iter().enumerate() {
-                    let base_col = PREPARED_TABLE_PROJECTIVE_SOURCE_MUL_LIMB_OFFSET
-                        + mul_index * (3 * N_LIMBS)
-                        + role_index * N_LIMBS;
+                    let limbs = crate::projective_air::consumed_mul_slot_packed_limbs(
+                        base, vec_row, &layout, mul_index, role_index,
+                    );
                     let mut values = Vec::with_capacity(3 + N_LIMBS);
                     values.push(source_index);
                     values.push(M31::from_u32_unchecked(mul_index as u32));
                     values.push(M31::from_u32_unchecked(role));
-                    for limb in 0..N_LIMBS {
-                        values.push(base[base_col + limb].data[vec_row].to_array()[lane]);
-                    }
+                    values.extend(limbs.iter().map(|packed| packed.to_array()[lane]));
                     mul_result_denominators.push(mul_result_relation.combine(&values));
                 }
             }
