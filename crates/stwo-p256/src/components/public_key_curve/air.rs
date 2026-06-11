@@ -74,6 +74,13 @@ use stwo_p256_utils::constants::{LIMB_BITS, N_LIMBS};
 use crate::constants::{P256_B, P256_MODULUS};
 use crate::limbs::{EvalP256BigIntExt, P256EvalBigInt, P256M31BigInt};
 use crate::projective::{ProjectiveEcOp, ProjectivePoint};
+use crate::components::gamma_digest::{
+    gamma_digest_of_values, gamma_digest_tuple,
+    gen_gamma_tall_base_trace, gen_gamma_tall_interaction_trace,
+    gen_gamma_tall_preprocessed_trace, yield_gamma_digest, GammaChallenge,
+    GammaDigestRelation, GammaTallComponent, GammaTallEval, GammaTallInstance,
+    GammaTallInteractionClaim, GammaTallLayout, GAMMA_TAG_PKC_RANGE13, GAMMA_TAG_PKC_SIGNED,
+};
 use crate::projective_air::{
     projective_rcb_signed_carry_bound, projective_rcb_signed_carry_log_size, ProjectiveRcbAirError,
     ProjectiveRcbAirRow, ProjectiveRcbAirTraceClaim, ProjectiveRcbMulResultRelation,
@@ -84,7 +91,7 @@ use crate::projective_air::{
 use crate::public_inputs::PublicEcdsaInputClaim;
 use crate::public_key_check::{PublicKeyOnCurveClaim, PublicKeyOnCurveError};
 use crate::range_checks::{
-    add_range_check, encode_signed_carry, range_check_value_column_id,
+    encode_signed_carry, range_check_value_column_id,
     signed_carry_active_column_id, signed_carry_value_column_id, RangeCheckClaim,
     RangeCheckComponent, RangeCheckEval, RangeCheckInteractionClaim, RangeCheckRelation,
     SignedCarryRangeClaim, SignedCarryRangeComponent, SignedCarryRangeEval, RANGE13_BITS,
@@ -460,8 +467,11 @@ struct PublicKeyCurveCheckEval {
     /// When `false` (the standalone slice), no binding tuple is emitted so the
     /// slice's interaction trace stays self-balanced.
     bind_to_public: bool,
-    range13: RangeCheckRelation,
-    signed_carry: RangeCheckRelation,
+    /// γ-digest reshape: the witnessed limbs' range13 uses and the curve
+    /// identity's signed-carry uses are bound into two per-row digests; the
+    /// slice's tall expanders re-expand them against the local providers.
+    gamma_digest: GammaDigestRelation,
+    gamma_challenge: GammaChallenge,
 }
 
 impl FrameworkEval for PublicKeyCurveCheckEval {
@@ -619,9 +629,10 @@ impl FrameworkEval for PublicKeyCurveCheckEval {
             consume_public_key_point(&mut eval, &self.point_relation, &columns);
         }
 
-        // Range-check every witnessed limb (self-contained domain enforcement;
-        // also guarantees the 13-bit headroom used by the identity below).
-        for limb in columns
+        // Collect every witnessed limb for the range13 γ-digest (self-
+        // contained domain enforcement via the tall expander; also guarantees
+        // the 13-bit headroom used by the identity below).
+        let range13_values: Vec<E::F> = columns
             .x
             .limbs()
             .iter()
@@ -630,18 +641,37 @@ impl FrameworkEval for PublicKeyCurveCheckEval {
             .chain(columns.x3.limbs())
             .chain(columns.three_x.limbs())
             .chain(columns.y2.limbs())
-        {
-            add_range_check(
-                &mut eval,
-                &self.range13,
-                columns.active.clone(),
-                limb.clone(),
-            );
-        }
+            .cloned()
+            .collect();
 
         // Curve identity: (y2 + three_x) - (x3 + b) - q·p = 0 over 13-bit
-        // limbs with a signed-carry recurrence and final carry 0.
-        add_curve_identity(&mut eval, &self.signed_carry, &columns);
+        // limbs with a signed-carry recurrence and final carry 0; the carries
+        // are collected for the signed γ-digest.
+        let signed_carry_values = add_curve_identity(&mut eval, &columns);
+
+        // γ-digest yields. The slice covers ONE signature, so the digest
+        // row_index is the constant 0 (the talls' single scheduled group).
+        let row_zero = E::F::from(M31::from_u32_unchecked(0));
+        yield_gamma_digest(
+            &mut eval,
+            &self.gamma_digest,
+            &self.gamma_challenge,
+            GAMMA_TAG_PKC_RANGE13,
+            row_zero.clone(),
+            columns.active.clone(),
+            M31::from_u32_unchecked(0),
+            &range13_values,
+        );
+        yield_gamma_digest(
+            &mut eval,
+            &self.gamma_digest,
+            &self.gamma_challenge,
+            GAMMA_TAG_PKC_SIGNED,
+            row_zero,
+            columns.active.clone(),
+            encode_signed_carry(0),
+            &signed_carry_values,
+        );
 
         eval.finalize_logup();
         eval
@@ -711,11 +741,12 @@ fn consume_public_key_point<E: EvalAtRow>(
     ));
 }
 
+/// Returns the curve-identity carries (in limb order) for the signed-carry
+/// γ-digest.
 fn add_curve_identity<E: EvalAtRow>(
     eval: &mut E,
-    signed_carry: &RangeCheckRelation,
     columns: &PublicKeyCurveCheckColumns<E>,
-) {
+) -> Vec<E::F> {
     let zero = E::F::from(M31::from_u32_unchecked(0));
     let limb_base = E::F::from(M31::from_u32_unchecked(1u32 << LIMB_BITS));
     let modulus = P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_MODULUS));
@@ -732,13 +763,9 @@ fn add_curve_identity<E: EvalAtRow>(
     eval.add_constraint(columns.q_neg.clone() * (one - columns.q_neg.clone()));
     eval.add_constraint(columns.q_pos.clone() * columns.q_neg.clone());
 
+    let mut carries = Vec::with_capacity(N_LIMBS);
     for i in 0..N_LIMBS {
-        add_range_check(
-            eval,
-            signed_carry,
-            columns.active.clone(),
-            columns.carries[i].clone(),
-        );
+        carries.push(columns.carries[i].clone());
 
         let prev_carry = if i == 0 {
             zero.clone()
@@ -754,6 +781,7 @@ fn add_curve_identity<E: EvalAtRow>(
         eval.add_constraint(columns.active.clone() * recurrence);
     }
     eval.add_constraint(columns.active.clone() * columns.carries[N_LIMBS - 1].clone());
+    carries
 }
 
 fn fixed_limb<E: EvalAtRow>(value: &P256M31BigInt, index: usize) -> E::F {
@@ -789,6 +817,10 @@ pub(crate) struct PublicKeyCurveSliceRelations {
     range13: RangeCheckRelation,
     signed_carry: RangeCheckRelation,
     point: PublicKeyPointRelation,
+    /// γ-digest relation + challenge (SHARED with every adopter in the
+    /// monolith; the standalone slice draws/builds its own).
+    gamma_digest: GammaDigestRelation,
+    gamma_challenge: GammaChallenge,
 }
 
 impl PublicKeyCurveSliceRelations {
@@ -801,6 +833,8 @@ impl PublicKeyCurveSliceRelations {
             range13: RangeCheckRelation::draw(channel),
             signed_carry: RangeCheckRelation::draw(channel),
             point: PublicKeyPointRelation::draw(channel),
+            gamma_digest: GammaDigestRelation::draw(channel),
+            gamma_challenge: GammaChallenge::draw(channel, pkc_gamma_max_padded_values()),
         }
     }
 
@@ -810,6 +844,11 @@ impl PublicKeyCurveSliceRelations {
             range13: RangeCheckRelation::dummy(),
             signed_carry: RangeCheckRelation::dummy(),
             point: PublicKeyPointRelation::dummy(),
+            gamma_digest: GammaDigestRelation::dummy(),
+            gamma_challenge: GammaChallenge::from_gamma(
+                SecureField::from(M31::from_u32_unchecked(2)),
+                pkc_gamma_max_padded_values(),
+            ),
         }
     }
 
@@ -821,12 +860,16 @@ impl PublicKeyCurveSliceRelations {
         channel: &mut impl Channel,
         point: PublicKeyPointRelation,
         mul_result: ProjectiveRcbMulResultRelation,
+        gamma_digest: GammaDigestRelation,
+        gamma_challenge: GammaChallenge,
     ) -> Self {
         Self {
             mul_result,
             range13: RangeCheckRelation::draw(channel),
             signed_carry: RangeCheckRelation::draw(channel),
             point,
+            gamma_digest,
+            gamma_challenge,
         }
     }
 
@@ -835,12 +878,16 @@ impl PublicKeyCurveSliceRelations {
     pub(crate) fn dummy_with_point(
         point: PublicKeyPointRelation,
         mul_result: ProjectiveRcbMulResultRelation,
+        gamma_digest: GammaDigestRelation,
+        gamma_challenge: GammaChallenge,
     ) -> Self {
         Self {
             mul_result,
             range13: RangeCheckRelation::dummy(),
             signed_carry: RangeCheckRelation::dummy(),
             point,
+            gamma_digest,
+            gamma_challenge,
         }
     }
 }
@@ -850,6 +897,11 @@ pub struct PublicKeyCurveSliceInteractionClaim {
     curve_check: SecureField,
     range13: RangeCheckInteractionClaim,
     signed_carry: RangeCheckInteractionClaim,
+    /// γ-digest tall expanders (range13 kind, signed kind).
+    gamma_range13: GammaTallInteractionClaim,
+    gamma_signed: GammaTallInteractionClaim,
+    /// The curve-check's two γ-digest yields (−active).
+    gamma_yield_sum: SecureField,
     /// `ProjectiveRcbMulResult` consumer sum (use, `+active`) for the four
     /// hinted muls; balances against the hinted-mul provider globally.
     pub(crate) mul_result_consumer_claimed_sum: SecureField,
@@ -862,8 +914,19 @@ impl PublicKeyCurveSliceInteractionClaim {
             curve_check: zero,
             range13: RangeCheckInteractionClaim { claimed_sum: zero },
             signed_carry: RangeCheckInteractionClaim { claimed_sum: zero },
+            gamma_range13: GammaTallInteractionClaim::zero(),
+            gamma_signed: GammaTallInteractionClaim::zero(),
+            gamma_yield_sum: zero,
             mul_result_consumer_claimed_sum: zero,
         }
+    }
+
+    /// `GammaDigest` balance for this sub-graph (yields vs tall uses; nets to
+    /// zero internally).
+    pub(crate) fn gamma_digest_total(&self) -> SecureField {
+        self.gamma_yield_sum
+            + self.gamma_range13.digest_use_sum
+            + self.gamma_signed.digest_use_sum
     }
 
     /// Aggregate claimed sum over every public-key sub-graph component.
@@ -876,11 +939,15 @@ impl PublicKeyCurveSliceInteractionClaim {
     /// crossing the sub-graph boundary. The standalone slice (no binding)
     /// totals to zero.
     pub(crate) fn total(&self) -> SecureField {
-        // Internal netting: the check's range/signed uses cancel the two
-        // providers; the boundary-crossing sums (the point binding inside
-        // `curve_check`, and the hinted mul-result consumes, subtracted here)
-        // are balanced globally.
-        self.curve_check + self.range13.claimed_sum + self.signed_carry.claimed_sum
+        // Internal netting: the check's γ-digest yields cancel the talls'
+        // digest uses; the talls' range uses cancel the two providers. The
+        // boundary-crossing sums (the point binding inside `curve_check`, and
+        // the hinted mul-result consumes, subtracted here) balance globally.
+        self.curve_check
+            + self.range13.claimed_sum
+            + self.signed_carry.claimed_sum
+            + self.gamma_range13.claimed_sum
+            + self.gamma_signed.claimed_sum
             - self.mul_result_consumer_claimed_sum
     }
 
@@ -889,13 +956,18 @@ impl PublicKeyCurveSliceInteractionClaim {
             self.curve_check,
             self.range13.claimed_sum,
             self.signed_carry.claimed_sum,
+            self.gamma_yield_sum,
             self.mul_result_consumer_claimed_sum,
         ]);
+        self.gamma_range13.mix_into(channel);
+        self.gamma_signed.mix_into(channel);
     }
 }
 
 pub(crate) struct PublicKeyCurveSliceComponents {
     curve_check: PublicKeyCurveCheckComponent,
+    gamma_range13: GammaTallComponent,
+    gamma_signed: GammaTallComponent,
     range13: RangeCheckComponent,
     signed_carry: SignedCarryRangeComponent,
 }
@@ -917,10 +989,30 @@ impl PublicKeyCurveSliceComponents {
                     hinted_source_offset: log_sizes.hinted_source_offset,
                     point_relation: relations.point.clone(),
                     bind_to_public,
-                    range13: relations.range13.clone(),
-                    signed_carry: relations.signed_carry.clone(),
+                    gamma_digest: relations.gamma_digest.clone(),
+                    gamma_challenge: relations.gamma_challenge.clone(),
                 },
                 interaction_claim.curve_check,
+            ),
+            gamma_range13: GammaTallComponent::new(
+                allocator,
+                GammaTallEval {
+                    layout: pkc_gamma_layouts()[0],
+                    challenge: relations.gamma_challenge.clone(),
+                    digest: relations.gamma_digest.clone(),
+                    range: relations.range13.clone(),
+                },
+                interaction_claim.gamma_range13.claimed_sum,
+            ),
+            gamma_signed: GammaTallComponent::new(
+                allocator,
+                GammaTallEval {
+                    layout: pkc_gamma_layouts()[1],
+                    challenge: relations.gamma_challenge.clone(),
+                    digest: relations.gamma_digest.clone(),
+                    range: relations.signed_carry.clone(),
+                },
+                interaction_claim.gamma_signed.claimed_sum,
             ),
             range13: RangeCheckComponent::new(
                 allocator,
@@ -942,6 +1034,8 @@ impl PublicKeyCurveSliceComponents {
     pub(crate) fn components(&self) -> Vec<&dyn Component> {
         vec![
             &self.curve_check as &dyn Component,
+            &self.gamma_range13 as &dyn Component,
+            &self.gamma_signed as &dyn Component,
             &self.range13 as &dyn Component,
             &self.signed_carry as &dyn Component,
         ]
@@ -950,6 +1044,8 @@ impl PublicKeyCurveSliceComponents {
     pub(crate) fn component_provers(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
         vec![
             &self.curve_check as &dyn ComponentProver<SimdBackend>,
+            &self.gamma_range13 as &dyn ComponentProver<SimdBackend>,
+            &self.gamma_signed as &dyn ComponentProver<SimdBackend>,
             &self.range13 as &dyn ComponentProver<SimdBackend>,
             &self.signed_carry as &dyn ComponentProver<SimdBackend>,
         ]
@@ -1020,11 +1116,11 @@ pub(crate) fn gen_slice_preprocessed_trace(
     _claim: &PublicKeyCurveSliceClaim,
     ids: &[PreProcessedColumnId],
 ) -> Result<Vec<M31ColumnEval>, PublicKeyCurveSliceError> {
-    // Only the local range13 / signed-carry providers keep preprocessed
-    // columns; the four muls are proven by the shared hinted provider.
+    // Local range13 / signed-carry provider columns plus the γ-digest tall
+    // schedules; the four muls are proven by the shared hinted provider.
     let range13 = RangeCheckClaim::new(RANGE13_BITS);
     let signed_carry = slice_signed_carry_claim();
-    let columns: Vec<(PreProcessedColumnId, M31ColumnEval)> = vec![
+    let mut columns: Vec<(PreProcessedColumnId, M31ColumnEval)> = vec![
         (
             range_check_value_column_id(RANGE13_BITS),
             range13.gen_preprocessed_column(),
@@ -1038,6 +1134,13 @@ pub(crate) fn gen_slice_preprocessed_trace(
             signed_carry.gen_active_column(),
         ),
     ];
+    for layout in pkc_gamma_layouts() {
+        columns.extend(
+            crate::components::gamma_digest::gamma_tall_preprocessed_ids(layout.tag)
+                .into_iter()
+                .zip(gen_gamma_tall_preprocessed_trace(&layout)),
+        );
+    }
 
     ids.iter()
         .map(|id| {
@@ -1049,6 +1152,61 @@ pub(crate) fn gen_slice_preprocessed_trace(
                 })
         })
         .collect()
+}
+
+/// γ-digest value lists for the (single-row) curve-check slice. Range13:
+/// every witnessed limb in [`PublicKeyCurveCheckEval`]'s collection order
+/// (x, y, x2, x3, three_x, y2); signed: the curve-identity carries.
+fn pkc_gamma_range13_values(claim: &PublicKeyCurveSliceClaim) -> Vec<M31> {
+    [&claim.x, &claim.y, &claim.x2, &claim.x3, &claim.three_x, &claim.y2]
+        .iter()
+        .flat_map(|value| value.limbs().iter().copied())
+        .collect()
+}
+
+fn pkc_gamma_signed_values(claim: &PublicKeyCurveSliceClaim) -> Vec<M31> {
+    claim.carries.iter().copied().map(encode_signed_carry).collect()
+}
+
+const PKC_GAMMA_RANGE13_VALUES: usize = 6 * N_LIMBS;
+const PKC_GAMMA_SIGNED_VALUES: usize = N_LIMBS;
+
+pub(crate) fn pkc_gamma_max_padded_values() -> usize {
+    crate::components::gamma_digest::gamma_padded_values(PKC_GAMMA_RANGE13_VALUES)
+        .max(crate::components::gamma_digest::gamma_padded_values(PKC_GAMMA_SIGNED_VALUES))
+}
+
+/// The slice covers exactly one signature ⇒ one digest group per kind.
+pub(crate) fn pkc_gamma_layouts() -> [GammaTallLayout; 2] {
+    [
+        GammaTallLayout {
+            tag: GAMMA_TAG_PKC_RANGE13,
+            group_count: 1,
+            values_per_group: PKC_GAMMA_RANGE13_VALUES,
+        },
+        GammaTallLayout {
+            tag: GAMMA_TAG_PKC_SIGNED,
+            group_count: 1,
+            values_per_group: PKC_GAMMA_SIGNED_VALUES,
+        },
+    ]
+}
+
+pub(crate) fn pkc_gamma_instances(claim: &PublicKeyCurveSliceClaim) -> [GammaTallInstance; 2] {
+    [
+        GammaTallInstance::new(
+            GAMMA_TAG_PKC_RANGE13,
+            PKC_GAMMA_RANGE13_VALUES,
+            M31::from_u32_unchecked(0),
+            vec![pkc_gamma_range13_values(claim)],
+        ),
+        GammaTallInstance::new(
+            GAMMA_TAG_PKC_SIGNED,
+            PKC_GAMMA_SIGNED_VALUES,
+            encode_signed_carry(0),
+            vec![pkc_gamma_signed_values(claim)],
+        ),
+    ]
 }
 
 fn slice_signed_carry_claim() -> SignedCarryRangeClaim {
@@ -1068,7 +1226,11 @@ pub(crate) fn gen_slice_base_trace(
     // Curve-check family (the four muls are proven by hinted-mul rows).
     trace.extend(gen_curve_check_base_trace(claim, log_sizes.curve_check));
 
-    // Local range providers' multiplicity columns over the curve-check uses.
+    // γ-digest tall value grids, then the local range providers' multiplicity
+    // columns (tallying the talls' uses), in component order.
+    let [gamma_range13_instance, gamma_signed_instance] = pkc_gamma_instances(claim);
+    trace.extend(gen_gamma_tall_base_trace(&gamma_range13_instance));
+    trace.extend(gen_gamma_tall_base_trace(&gamma_signed_instance));
     let range13 = RangeCheckClaim::new(RANGE13_BITS);
     trace.push(range13.gen_multiplicity_trace(slice_range13_uses(claim)));
     let signed_carry = slice_signed_carry_claim();
@@ -1124,27 +1286,23 @@ fn write_limbs(columns: &mut [Vec<M31>], offset: &mut usize, value: &P256M31BigI
     }
 }
 
-/// Range13 uses across the slice: the curve-check witnessed limbs. The lite
-/// mul rows' operand/result limbs are range-checked by the hinted-mul
-/// provider, not here.
+/// Range13 uses across the slice: the γ-digest tall expander's grid (the
+/// curve-check witnessed limbs, lane-padded). The tall instance is the single
+/// source of truth, so the provider tally cannot drift from the consumption.
 fn slice_range13_uses(claim: &PublicKeyCurveSliceClaim) -> Vec<M31> {
-    let mut uses = Vec::new();
-    for value in [
-        &claim.x,
-        &claim.y,
-        &claim.x2,
-        &claim.x3,
-        &claim.three_x,
-        &claim.y2,
-    ] {
-        uses.extend(value.limbs().iter().copied());
-    }
-    uses
+    let [r13, _] = pkc_gamma_instances(claim);
+    r13.all_scheduled_values()
 }
 
-/// Signed-carry uses: the curve-check identity carries.
+/// Signed-carry uses: the signed tall expander's grid (the curve-identity
+/// carries, lane-padded with `encode_signed_carry(0)`), decoded.
 fn slice_signed_carry_uses(claim: &PublicKeyCurveSliceClaim) -> Vec<i64> {
-    claim.carries.to_vec()
+    let [_, signed] = pkc_gamma_instances(claim);
+    signed
+        .all_scheduled_values()
+        .into_iter()
+        .map(crate::range_checks::decode_signed_carry)
+        .collect()
 }
 
 pub(crate) fn gen_slice_interaction_trace(
@@ -1160,9 +1318,26 @@ pub(crate) fn gen_slice_interaction_trace(
     // `ProjectiveRcbMulResult` relation. In the monolith (`bind_to_public`) it
     // also emits the `PublicKeyPointRelation` consume that binds `(x, y)` to
     // the public key; the standalone slice emits no binding tuple.
-    let (curve_trace, curve_claim, mul_result_sum) =
+    let (curve_trace, curve_claim, mul_result_sum, gamma_yield_sum) =
         gen_curve_check_interaction_trace(claim, relations, log_sizes.curve_check, bind_to_public);
     trace.extend(curve_trace);
+
+    // γ-digest tall expanders (range13 kind, signed kind).
+    let [gamma_range13_instance, gamma_signed_instance] = pkc_gamma_instances(claim);
+    let (gamma_range13_trace, gamma_range13_claim) = gen_gamma_tall_interaction_trace(
+        &gamma_range13_instance,
+        &relations.gamma_challenge,
+        &relations.gamma_digest,
+        &relations.range13,
+    );
+    trace.extend(gamma_range13_trace);
+    let (gamma_signed_trace, gamma_signed_claim) = gen_gamma_tall_interaction_trace(
+        &gamma_signed_instance,
+        &relations.gamma_challenge,
+        &relations.gamma_digest,
+        &relations.signed_carry,
+    );
+    trace.extend(gamma_signed_trace);
 
     // Local range providers.
     let range13 = RangeCheckClaim::new(RANGE13_BITS);
@@ -1193,6 +1368,9 @@ pub(crate) fn gen_slice_interaction_trace(
             curve_check: curve_claim,
             range13: range13_claim,
             signed_carry: signed_carry_claim,
+            gamma_range13: gamma_range13_claim,
+            gamma_signed: gamma_signed_claim,
+            gamma_yield_sum,
             mul_result_consumer_claimed_sum: mul_result_sum,
         },
     ))
@@ -1203,9 +1381,10 @@ fn gen_curve_check_interaction_trace(
     relations: &PublicKeyCurveSliceRelations,
     log_size: u32,
     bind_to_public: bool,
-) -> (ColumnVec<M31ColumnEval>, SecureField, SecureField) {
+) -> (ColumnVec<M31ColumnEval>, SecureField, SecureField, SecureField) {
     let padded_rows = 1usize << log_size;
-    let (fractions, mul_result_sum) = curve_check_fraction_pairs(claim, relations, bind_to_public);
+    let (fractions, mul_result_sum, gamma_yield_sum) =
+        curve_check_fraction_pairs(claim, relations, bind_to_public);
     let fraction_count = fractions.len();
 
     // Single active row at coset index 0; everything else is padding.
@@ -1236,23 +1415,21 @@ fn gen_curve_check_interaction_trace(
         col.finalize_col();
     }
     let (trace, curve_sum) = logup.finalize_last();
-    (trace, curve_sum, mul_result_sum)
+    (trace, curve_sum, mul_result_sum, gamma_yield_sum)
 }
 
 /// Curve-check consumer fractions, in the exact order
 /// [`PublicKeyCurveCheckEval::evaluate`] emits them:
 /// 1. wide mul-result consume tuples (mul 0..3, roles lhs/rhs/result),
 /// 2. (monolith only) the `PublicKeyPointRelation` binding consume,
-/// 3. range13 uses for the witnessed limbs,
-/// 4. signed-carry uses for the carries.
+/// 3. the two γ-digest yields (range13 kind, signed kind).
 ///
-/// Also returns the mul-result boundary sum (the slice's consumer side of the
-/// shared hinted-provider relation).
+/// Also returns the mul-result boundary sum and the γ-yield sum.
 fn curve_check_fraction_pairs(
     claim: &PublicKeyCurveSliceClaim,
     relations: &PublicKeyCurveSliceRelations,
     bind_to_public: bool,
-) -> (Vec<(SecureField, SecureField)>, SecureField) {
+) -> (Vec<(SecureField, SecureField)>, SecureField, SecureField) {
     let mut pairs = Vec::new();
 
     // 1. mul-result consumes (use, +1): wide tuples against the hinted
@@ -1297,31 +1474,22 @@ fn curve_check_fraction_pairs(
         pairs.push(point_consume_fraction_pair(claim, &relations.point));
     }
 
-    // 3. range13 uses for witnessed limbs (same order as the eval).
-    for value in [
-        &claim.x,
-        &claim.y,
-        &claim.x2,
-        &claim.x3,
-        &claim.three_x,
-        &claim.y2,
-    ] {
-        for limb in value.limbs() {
-            pairs.push((secure_from_i64(1), relations.range13.combine(&[*limb])));
-        }
+    // 3. γ-digest yields (−1 on the single active row), range13 kind then
+    //    signed kind, mirroring the eval's collection order.
+    let mut gamma_yield_sum = secure_zero();
+    for instance in pkc_gamma_instances(claim) {
+        let digest = gamma_digest_of_values(
+            &relations.gamma_challenge,
+            instance.pad_value,
+            &instance.padded_group_values(0),
+        );
+        let tuple = gamma_digest_tuple(instance.layout.tag, M31::from_u32_unchecked(0), digest);
+        let denom: SecureField = relations.gamma_digest.combine(&tuple);
+        pairs.push((secure_from_i64(-1), denom));
+        gamma_yield_sum += secure_from_i64(-1) / denom;
     }
 
-    // 4. signed-carry uses for carries.
-    for carry in claim.carries {
-        pairs.push((
-            secure_from_i64(1),
-            relations
-                .signed_carry
-                .combine(&[encode_signed_carry(carry)]),
-        ));
-    }
-
-    (pairs, mul_result_sum)
+    (pairs, mul_result_sum, gamma_yield_sum)
 }
 
 /// The single `(numerator, denominator)` pair for the `PublicKeyPointRelation`

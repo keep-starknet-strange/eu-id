@@ -795,6 +795,14 @@ pub fn final_add_preprocessed_columns(
         signed_carry_active_column_id(PROJECTIVE_RCB_SIGNED_CARRY_EQUATION),
         signed_carry.gen_active_column(),
     ));
+    // γ-digest tall schedules.
+    for layout in super::final_add_gamma_layouts() {
+        columns.extend(
+            crate::components::gamma_digest::gamma_tall_preprocessed_ids(layout.tag)
+                .into_iter()
+                .zip(crate::components::gamma_digest::gen_gamma_tall_preprocessed_trace(&layout)),
+        );
+    }
     Ok(columns)
 }
 
@@ -807,6 +815,9 @@ pub fn final_add_preprocessed_column_ids(claim: &FinalAddClaim) -> Vec<PreProces
     ids.push(range_check_value_column_id(RANGE16_BITS));
     ids.push(signed_carry_value_column_id(PROJECTIVE_RCB_SIGNED_CARRY_EQUATION));
     ids.push(signed_carry_active_column_id(PROJECTIVE_RCB_SIGNED_CARRY_EQUATION));
+    for layout in super::final_add_gamma_layouts() {
+        ids.extend(crate::components::gamma_digest::gamma_tall_preprocessed_ids(layout.tag));
+    }
     ids
 }
 
@@ -828,9 +839,10 @@ pub(crate) fn final_add_signed_carry_claim() -> SignedCarryRangeClaim {
     )
 }
 
-/// Range13 uses: the check-row witnessed limbs (the four muls are hinted
-/// rows, which range-check their own limbs in the hinted component).
-pub(crate) fn final_add_range13_uses(claim: &FinalAddClaim) -> Vec<M31> {
+/// The check row's range13 value list in digest order (the 12 witnessed
+/// big-ints; the four muls are hinted rows, which range-check their own
+/// limbs in the hinted component).
+pub(crate) fn final_add_range13_uses_list(claim: &FinalAddClaim) -> Vec<M31> {
     let mut uses = Vec::new();
     for value in [
         &claim.r1.x,
@@ -844,10 +856,6 @@ pub(crate) fn final_add_range13_uses(claim: &FinalAddClaim) -> Vec<M31> {
         &claim.x3,
         &claim.dx_inv,
         &dx_inv_result_value(claim),
-        // Task 6: the doubling-branch slope-numerator intermediate
-        // `x1_sq = x1 · x1 mod p` is a witnessed big-int field; every
-        // limb needs the standard 13-bit range lookup to balance the
-        // FinalAddInternal relation.
         &claim.x1_sq,
     ] {
         uses.extend(value.limbs().iter().copied());
@@ -855,13 +863,31 @@ pub(crate) fn final_add_range13_uses(claim: &FinalAddClaim) -> Vec<M31> {
     uses
 }
 
-/// Signed-carry uses: the check-row carries only.
+/// The check row's encoded signed-carry value list in digest order.
+pub(crate) fn final_add_signed_values_list(claim: &FinalAddClaim) -> Vec<M31> {
+    claim
+        .dx_carries
+        .iter()
+        .chain(claim.dy_carries.iter())
+        .chain(claim.x3_carries.iter())
+        .map(|&carry| crate::range_checks::encode_signed_carry(carry))
+        .collect()
+}
+
+/// Range13 uses: the γ-digest tall grid (single source of truth).
+pub(crate) fn final_add_range13_uses(claim: &FinalAddClaim) -> Vec<M31> {
+    let [r13, _] = super::final_add_gamma_instances(claim);
+    r13.all_scheduled_values()
+}
+
+/// Signed-carry uses: the signed tall grid, decoded.
 pub(crate) fn final_add_signed_carry_uses(claim: &FinalAddClaim) -> Result<Vec<i64>, FinalAddError> {
-    let mut uses = Vec::new();
-    uses.extend(claim.dx_carries.iter().copied());
-    uses.extend(claim.dy_carries.iter().copied());
-    uses.extend(claim.x3_carries.iter().copied());
-    Ok(uses)
+    let [_, signed] = super::final_add_gamma_instances(claim);
+    Ok(signed
+        .all_scheduled_values()
+        .into_iter()
+        .map(crate::range_checks::decode_signed_carry)
+        .collect())
 }
 
 pub fn gen_final_add_base_trace(
@@ -871,8 +897,15 @@ pub fn gen_final_add_base_trace(
     let mut columns = Vec::new();
     columns.extend(gen_check_base_trace(claim, log_sizes.check));
 
-    // Range providers' multiplicity columns (check-row uses only; the four
-    // muls are proven by hinted-mul rows, which range-check their own limbs).
+    // γ-digest tall value grids, then the range providers' multiplicity
+    // columns (tallying the talls' uses), in component order.
+    let [gamma_range13_instance, gamma_signed_instance] = super::final_add_gamma_instances(claim);
+    columns.extend(crate::components::gamma_digest::gen_gamma_tall_base_trace(
+        &gamma_range13_instance,
+    ));
+    columns.extend(crate::components::gamma_digest::gen_gamma_tall_base_trace(
+        &gamma_signed_instance,
+    ));
     let range13 = RangeCheckClaim::new(RANGE13_BITS);
     columns.push(range13.gen_multiplicity_trace(final_add_range13_uses(claim)));
     let signed_carry = final_add_signed_carry_claim();

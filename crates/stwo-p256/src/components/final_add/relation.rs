@@ -30,4 +30,7 @@ pub struct FinalAddRelations {
     pub signed_carry: RangeCheckRelation,
     pub hint: FinalCheckHintRelation,
     pub output: FinalAddOutputRelation,
+    /// γ-digest relation + challenge (SHARED with every adopter).
+    pub gamma_digest: crate::components::gamma_digest::GammaDigestRelation,
+    pub gamma_challenge: crate::components::gamma_digest::GammaChallenge,
 }

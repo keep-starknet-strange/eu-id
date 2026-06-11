@@ -160,8 +160,58 @@ impl FinalAddLogSizes {
     }
 }
 
+/// γ-digest value-list lengths for the (single-row) final-add check: 12
+/// witnessed big-ints' limbs (range13) and the 3·N_LIMBS reduction carries.
+const FINAL_ADD_GAMMA_RANGE13_VALUES: usize = 12 * stwo_p256_utils::constants::N_LIMBS;
+const FINAL_ADD_GAMMA_SIGNED_VALUES: usize = 3 * stwo_p256_utils::constants::N_LIMBS;
+
+pub(crate) fn final_add_gamma_max_padded_values() -> usize {
+    crate::components::gamma_digest::gamma_padded_values(FINAL_ADD_GAMMA_RANGE13_VALUES).max(
+        crate::components::gamma_digest::gamma_padded_values(FINAL_ADD_GAMMA_SIGNED_VALUES),
+    )
+}
+
+/// One signature ⇒ one digest group per kind.
+pub(crate) fn final_add_gamma_layouts() -> [crate::components::gamma_digest::GammaTallLayout; 2] {
+    [
+        crate::components::gamma_digest::GammaTallLayout {
+            tag: crate::components::gamma_digest::GAMMA_TAG_FINAL_ADD_RANGE13,
+            group_count: 1,
+            values_per_group: FINAL_ADD_GAMMA_RANGE13_VALUES,
+        },
+        crate::components::gamma_digest::GammaTallLayout {
+            tag: crate::components::gamma_digest::GAMMA_TAG_FINAL_ADD_SIGNED,
+            group_count: 1,
+            values_per_group: FINAL_ADD_GAMMA_SIGNED_VALUES,
+        },
+    ]
+}
+
+/// The two tall instances from the (single-row) claim, value order matching
+/// the check eval's collection order.
+pub(crate) fn final_add_gamma_instances(
+    claim: &FinalAddClaim,
+) -> [crate::components::gamma_digest::GammaTallInstance; 2] {
+    [
+        crate::components::gamma_digest::GammaTallInstance::new(
+            crate::components::gamma_digest::GAMMA_TAG_FINAL_ADD_RANGE13,
+            FINAL_ADD_GAMMA_RANGE13_VALUES,
+            M31::from_u32_unchecked(0),
+            vec![trace::final_add_range13_uses_list(claim)],
+        ),
+        crate::components::gamma_digest::GammaTallInstance::new(
+            crate::components::gamma_digest::GAMMA_TAG_FINAL_ADD_SIGNED,
+            FINAL_ADD_GAMMA_SIGNED_VALUES,
+            crate::range_checks::encode_signed_carry(0),
+            vec![trace::final_add_signed_values_list(claim)],
+        ),
+    ]
+}
+
 pub struct FinalAddComponents {
     check: FinalAddCheckComponent,
+    gamma_range13: crate::components::gamma_digest::GammaTallComponent,
+    gamma_signed: crate::components::gamma_digest::GammaTallComponent,
     range13: RangeCheckComponent,
     signed_carry: SignedCarryRangeComponent,
 }
@@ -182,10 +232,30 @@ impl FinalAddComponents {
                     hinted_source_offset: log_sizes.hinted_source_offset,
                     hint_relation: relations.hint.clone(),
                     output_relation: relations.output.clone(),
-                    range13: relations.range13.clone(),
-                    signed_carry: relations.signed_carry.clone(),
+                    gamma_digest: relations.gamma_digest.clone(),
+                    gamma_challenge: relations.gamma_challenge.clone(),
                 },
                 interaction_claim.check,
+            ),
+            gamma_range13: crate::components::gamma_digest::GammaTallComponent::new(
+                allocator,
+                crate::components::gamma_digest::GammaTallEval {
+                    layout: final_add_gamma_layouts()[0],
+                    challenge: relations.gamma_challenge.clone(),
+                    digest: relations.gamma_digest.clone(),
+                    range: relations.range13.clone(),
+                },
+                interaction_claim.gamma_range13.claimed_sum,
+            ),
+            gamma_signed: crate::components::gamma_digest::GammaTallComponent::new(
+                allocator,
+                crate::components::gamma_digest::GammaTallEval {
+                    layout: final_add_gamma_layouts()[1],
+                    challenge: relations.gamma_challenge.clone(),
+                    digest: relations.gamma_digest.clone(),
+                    range: relations.signed_carry.clone(),
+                },
+                interaction_claim.gamma_signed.claimed_sum,
             ),
             range13: RangeCheckComponent::new(
                 allocator,
@@ -207,6 +277,8 @@ impl FinalAddComponents {
     pub fn components(&self) -> Vec<&dyn Component> {
         vec![
             &self.check as &dyn Component,
+            &self.gamma_range13 as &dyn Component,
+            &self.gamma_signed as &dyn Component,
             &self.range13 as &dyn Component,
             &self.signed_carry as &dyn Component,
         ]
@@ -215,6 +287,8 @@ impl FinalAddComponents {
     pub fn component_provers(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
         vec![
             &self.check as &dyn ComponentProver<SimdBackend>,
+            &self.gamma_range13 as &dyn ComponentProver<SimdBackend>,
+            &self.gamma_signed as &dyn ComponentProver<SimdBackend>,
             &self.range13 as &dyn ComponentProver<SimdBackend>,
             &self.signed_carry as &dyn ComponentProver<SimdBackend>,
         ]
@@ -272,6 +346,11 @@ impl FinalAddProofClaim {
                 signed_carry: RangeCheckRelation::dummy(),
                 hint: FinalCheckHintRelation::dummy(),
                 output: FinalAddOutputRelation::dummy(),
+                gamma_digest: crate::components::gamma_digest::GammaDigestRelation::dummy(),
+                gamma_challenge: crate::components::gamma_digest::GammaChallenge::from_gamma(
+                    SecureField::from(M31::from_u32_unchecked(2)),
+                    final_add_gamma_max_padded_values(),
+                ),
             },
         );
         allocator.preprocessed_columns().clone()

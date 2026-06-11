@@ -234,8 +234,12 @@ Phases (measure shape + proof size + e2e after each):
   2,108 → 280 M31 interaction cols (consumer 986 → 48 entries/row, talls at
   2^10); monolith total 6,988 → 5,160; proof 4.06 → 3.64 MB; e2e 1.22 s;
   suite 330/0.
-- **C**: adopt `final_add.check`, `public_key_on_curve.curve_check`,
-  `scalar_setup` (range9 kind added), `final_check`.
+- **C1** ✅ (2026-06-11): `final_add.check` (1,268 → 124) +
+  `public_key_on_curve.curve_check` (620 → 116) adopted — both single-row, so
+  the tall layouts are constants (group_count = 1, row_index = literal 0) and
+  the instances build straight from the claims; monolith total 5,160 → 3,512;
+  proof 3.64 → 3.28 MB; e2e 1.24 s; suite 330/0.
+- **C2**: adopt `scalar_setup` (range9 kind added), `final_check`.
 - **D** (optional): consolidate per-component range relations/providers.
 
 Projected total after C: 8,816 → ~2.5–3k M31 interaction columns,

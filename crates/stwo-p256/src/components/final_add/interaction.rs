@@ -16,7 +16,7 @@ use stwo_constraint_framework::{LogupTraceGenerator, Relation};
 
 use crate::limbs::P256M31BigInt;
 use crate::range_checks::{
-    encode_signed_carry, RangeCheckClaim, RangeCheckInteractionClaim, RANGE13_BITS,
+    RangeCheckClaim, RangeCheckInteractionClaim, RANGE13_BITS,
 };
 use crate::scalar::scalar_mod_mul::columns::M31ColumnEval;
 use stwo_p256_utils::constants::N_LIMBS;
@@ -28,6 +28,11 @@ pub struct FinalAddInteractionClaim {
     pub check: SecureField,
     pub range13: RangeCheckInteractionClaim,
     pub signed_carry: RangeCheckInteractionClaim,
+    /// γ-digest tall expanders (range13 kind, signed kind) + the check's
+    /// yield sum.
+    pub gamma_range13: crate::components::gamma_digest::GammaTallInteractionClaim,
+    pub gamma_signed: crate::components::gamma_digest::GammaTallInteractionClaim,
+    pub gamma_yield_sum: SecureField,
     /// FinalCheckHint consumer sum (use, `+active`) for `R_1`, `R_2`.
     pub hint_consumer_claimed_sum: SecureField,
     /// FinalAddOutput provider sum (yield, `-active`).
@@ -44,6 +49,9 @@ impl FinalAddInteractionClaim {
             check: zero,
             range13: RangeCheckInteractionClaim { claimed_sum: zero },
             signed_carry: RangeCheckInteractionClaim { claimed_sum: zero },
+            gamma_range13: crate::components::gamma_digest::GammaTallInteractionClaim::zero(),
+            gamma_signed: crate::components::gamma_digest::GammaTallInteractionClaim::zero(),
+            gamma_yield_sum: zero,
             hint_consumer_claimed_sum: zero,
             output_provider_claimed_sum: zero,
             mul_result_consumer_claimed_sum: zero,
@@ -55,10 +63,21 @@ impl FinalAddInteractionClaim {
     /// carry providers all balance internally; the boundary-crossing relations
     /// (`FinalCheckHint`, `FinalAddOutput`) are excluded.
     pub fn internal_total(&self) -> SecureField {
-        self.check + self.range13.claimed_sum + self.signed_carry.claimed_sum
+        self.check
+            + self.range13.claimed_sum
+            + self.signed_carry.claimed_sum
+            + self.gamma_range13.claimed_sum
+            + self.gamma_signed.claimed_sum
             - self.hint_consumer_claimed_sum
             - self.output_provider_claimed_sum
             - self.mul_result_consumer_claimed_sum
+    }
+
+    /// `GammaDigest` balance for this sub-graph (nets to zero internally).
+    pub fn gamma_digest_total(&self) -> SecureField {
+        self.gamma_yield_sum
+            + self.gamma_range13.digest_use_sum
+            + self.gamma_signed.digest_use_sum
     }
 
     pub fn mix_into(&self, channel: &mut impl Channel) {
@@ -66,10 +85,13 @@ impl FinalAddInteractionClaim {
             self.check,
             self.range13.claimed_sum,
             self.signed_carry.claimed_sum,
+            self.gamma_yield_sum,
             self.hint_consumer_claimed_sum,
             self.output_provider_claimed_sum,
             self.mul_result_consumer_claimed_sum,
         ]);
+        self.gamma_range13.mix_into(channel);
+        self.gamma_signed.mix_into(channel);
     }
 }
 
@@ -82,9 +104,29 @@ pub fn gen_final_add_interaction_trace(
 
     // Check family (consumers + output provider). The four muls are proven by
     // hinted-mul rows; the check consumes them via wide tuples.
-    let (check_interaction, check_sum, hint_sum, output_sum, mul_result_sum) =
+    let (check_interaction, check_sum, hint_sum, output_sum, mul_result_sum, gamma_yield_sum) =
         gen_check_interaction_trace(claim, relations, log_sizes.check);
     columns.extend(check_interaction);
+
+    // γ-digest tall expanders (range13 kind, signed kind).
+    let [gamma_range13_instance, gamma_signed_instance] =
+        super::final_add_gamma_instances(claim);
+    let (gamma_range13_trace, gamma_range13_claim) =
+        crate::components::gamma_digest::gen_gamma_tall_interaction_trace(
+            &gamma_range13_instance,
+            &relations.gamma_challenge,
+            &relations.gamma_digest,
+            &relations.range13,
+        );
+    columns.extend(gamma_range13_trace);
+    let (gamma_signed_trace, gamma_signed_claim) =
+        crate::components::gamma_digest::gen_gamma_tall_interaction_trace(
+            &gamma_signed_instance,
+            &relations.gamma_challenge,
+            &relations.gamma_digest,
+            &relations.signed_carry,
+        );
+    columns.extend(gamma_signed_trace);
 
     // Shared range providers.
     let range13 = RangeCheckClaim::new(RANGE13_BITS);
@@ -115,6 +157,9 @@ pub fn gen_final_add_interaction_trace(
             check: check_sum,
             range13: range13_claim,
             signed_carry: signed_carry_claim,
+            gamma_range13: gamma_range13_claim,
+            gamma_signed: gamma_signed_claim,
+            gamma_yield_sum,
             hint_consumer_claimed_sum: hint_sum,
             output_provider_claimed_sum: output_sum,
             mul_result_consumer_claimed_sum: mul_result_sum,
@@ -126,9 +171,16 @@ fn gen_check_interaction_trace(
     claim: &FinalAddClaim,
     relations: &FinalAddRelations,
     log_size: u32,
-) -> (Vec<M31ColumnEval>, SecureField, SecureField, SecureField, SecureField) {
+) -> (
+    Vec<M31ColumnEval>,
+    SecureField,
+    SecureField,
+    SecureField,
+    SecureField,
+    SecureField,
+) {
     let padded_rows = 1usize << log_size;
-    let (fractions, hint_sum, output_sum, mul_result_sum) =
+    let (fractions, hint_sum, output_sum, mul_result_sum, gamma_yield_sum) =
         check_fraction_pairs(claim, relations);
     let fraction_count = fractions.len();
 
@@ -159,7 +211,7 @@ fn gen_check_interaction_trace(
         col.finalize_col();
     }
     let (trace, check_sum) = logup.finalize_last();
-    (trace, check_sum, hint_sum, output_sum, mul_result_sum)
+    (trace, check_sum, hint_sum, output_sum, mul_result_sum, gamma_yield_sum)
 }
 
 /// Check consumer/provider fractions, in the EXACT order `FinalAddCheckEval`
@@ -172,7 +224,13 @@ fn gen_check_interaction_trace(
 fn check_fraction_pairs(
     claim: &FinalAddClaim,
     relations: &FinalAddRelations,
-) -> (Vec<(SecureField, SecureField)>, SecureField, SecureField, SecureField) {
+) -> (
+    Vec<(SecureField, SecureField)>,
+    SecureField,
+    SecureField,
+    SecureField,
+    SecureField,
+) {
     let mut pairs = Vec::new();
     let mut hint_sum = secure_zero();
     let mut output_sum = secure_zero();
@@ -246,41 +304,24 @@ fn check_fraction_pairs(
         output_sum += secure_from_i64(-1) / denom;
     }
 
-    // 4. range13 uses.
-    for value in [
-        &claim.r1.x,
-        &claim.r1.y,
-        &claim.r2.x,
-        &claim.r2.y,
-        &claim.dx,
-        &claim.dy,
-        &claim.lambda,
-        &claim.lamsq,
-        &claim.x3,
-        &claim.dx_inv,
-        &dx_inv_result_value(claim),
-        // Task 6: every limb of `x1_sq` is also range-checked by the AIR
-        // (see the `.chain(columns.x1_sq.limbs())` in the eval's range13
-        // chain), so the trace gen must emit matching multiplicities.
-        &claim.x1_sq,
-    ] {
-        for limb in value.limbs() {
-            pairs.push((secure_from_i64(1), relations.range13.combine(&[*limb])));
-        }
+    // 4. γ-digest yields (−1 on the single active row), range13 kind then
+    //    signed kind, mirroring the eval's collection order.
+    let mut gamma_yield_sum = secure_zero();
+    for instance in super::final_add_gamma_instances(claim) {
+        let digest = crate::components::gamma_digest::gamma_digest_of_values(
+            &relations.gamma_challenge,
+            instance.pad_value,
+            &instance.padded_group_values(0),
+        );
+        let tuple = crate::components::gamma_digest::gamma_digest_tuple(
+            instance.layout.tag,
+            M31::from_u32_unchecked(0),
+            digest,
+        );
+        let denom: SecureField = relations.gamma_digest.combine(&tuple);
+        pairs.push((secure_from_i64(-1), denom));
+        gamma_yield_sum += secure_from_i64(-1) / denom;
     }
 
-    // 5. signed-carry uses.
-    for carry in claim
-        .dx_carries
-        .iter()
-        .chain(claim.dy_carries.iter())
-        .chain(claim.x3_carries.iter())
-    {
-        pairs.push((
-            secure_from_i64(1),
-            relations.signed_carry.combine(&[encode_signed_carry(*carry)]),
-        ));
-    }
-
-    (pairs, hint_sum, output_sum, mul_result_sum)
+    (pairs, hint_sum, output_sum, mul_result_sum, gamma_yield_sum)
 }

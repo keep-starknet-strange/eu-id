@@ -16,7 +16,6 @@ use crate::prepared_table::{
     FinalCheckHintRelation, PREPARED_TABLE_EC_POINT_COLUMNS,
 };
 use crate::projective_air::ProjectiveRcbMulResultRelation;
-use crate::range_checks::RangeCheckRelation;
 use crate::types::U256;
 
 use super::*;
@@ -148,8 +147,8 @@ pub struct FinalAddCheckEval {
     pub(crate) hinted_source_offset: u32,
     pub(crate) hint_relation: FinalCheckHintRelation,
     pub(crate) output_relation: FinalAddOutputRelation,
-    pub(crate) range13: RangeCheckRelation,
-    pub(crate) signed_carry: RangeCheckRelation,
+    pub(crate) gamma_digest: crate::components::gamma_digest::GammaDigestRelation,
+    pub(crate) gamma_challenge: crate::components::gamma_digest::GammaChallenge,
 }
 
 impl FrameworkEval for FinalAddCheckEval {
@@ -322,8 +321,9 @@ impl FrameworkEval for FinalAddCheckEval {
             &out_values,
         ));
 
-        // Range-check every witnessed limb.
-        for limb in columns
+        // Collect every witnessed limb for the range13 γ-digest (same order
+        // as `final_add_range13_uses`).
+        let range13_values: Vec<E::F> = columns
             .r1
             .x
             .limbs()
@@ -339,9 +339,8 @@ impl FrameworkEval for FinalAddCheckEval {
             .chain(columns.dx_inv.limbs())
             .chain(columns.dx_inv_result.limbs())
             .chain(columns.x1_sq.limbs())
-        {
-            crate::range_checks::add_range_check(&mut eval, &self.range13, active.clone(), limb.clone());
-        }
+            .cloned()
+            .collect();
 
         // -------- dx_inv_result pinning --------
         // Pin limb0 = (distinct_add + double_add), higher limbs 0.
@@ -390,7 +389,6 @@ impl FrameworkEval for FinalAddCheckEval {
         // -------- Distinct-branch reductions: dx + x1 ≡ x2, dy + y1 ≡ y2 --------
         add_sub_reduction(
             &mut eval,
-            &self.signed_carry,
             &distinct_add,
             &columns.dx,
             &columns.r1.x,
@@ -400,7 +398,6 @@ impl FrameworkEval for FinalAddCheckEval {
         );
         add_sub_reduction(
             &mut eval,
-            &self.signed_carry,
             &distinct_add,
             &columns.dy,
             &columns.r1.y,
@@ -433,7 +430,6 @@ impl FrameworkEval for FinalAddCheckEval {
         // (forced above), so this becomes x3 + 2·x1 ≡ lamsq automatically.
         add_x3_reduction(
             &mut eval,
-            &self.signed_carry,
             &finite_finite,
             &columns.x3,
             &columns.r1.x,
@@ -464,16 +460,38 @@ impl FrameworkEval for FinalAddCheckEval {
             eval.add_constraint((one.clone() - finite_finite.clone()) * carry.clone());
         }
 
-        // signed-carry range lookups for all 3·N_LIMBS carries (gated active so
-        // the count is fixed; on infinity/padding rows the carry value is 0).
-        for carry in columns
+        // Collect all 3·N_LIMBS carries for the signed γ-digest (dx, dy, x3
+        // order, matching `final_add_signed_carry_uses`).
+        let signed_carry_values: Vec<E::F> = columns
             .dx_carries
             .iter()
             .chain(columns.dy_carries.iter())
             .chain(columns.x3_carries.iter())
-        {
-            crate::range_checks::add_range_check(&mut eval, &self.signed_carry, active.clone(), carry.clone());
-        }
+            .cloned()
+            .collect();
+
+        // γ-digest yields: ONE signature ⇒ the constant group row 0.
+        let row_zero = E::F::from(M31::from_u32_unchecked(0));
+        crate::components::gamma_digest::yield_gamma_digest(
+            &mut eval,
+            &self.gamma_digest,
+            &self.gamma_challenge,
+            crate::components::gamma_digest::GAMMA_TAG_FINAL_ADD_RANGE13,
+            row_zero.clone(),
+            active.clone(),
+            M31::from_u32_unchecked(0),
+            &range13_values,
+        );
+        crate::components::gamma_digest::yield_gamma_digest(
+            &mut eval,
+            &self.gamma_digest,
+            &self.gamma_challenge,
+            crate::components::gamma_digest::GAMMA_TAG_FINAL_ADD_SIGNED,
+            row_zero,
+            active.clone(),
+            crate::range_checks::encode_signed_carry(0),
+            &signed_carry_values,
+        );
 
         eval.finalize_logup();
         eval
@@ -521,7 +539,6 @@ fn consume_mul<E: EvalAtRow>(
 #[allow(clippy::too_many_arguments)]
 fn add_sub_reduction<E: EvalAtRow>(
     eval: &mut E,
-    signed_carry: &RangeCheckRelation,
     gate: &E::F,
     value: &P256EvalBigInt<E>,
     lo: &P256EvalBigInt<E>,
@@ -529,7 +546,6 @@ fn add_sub_reduction<E: EvalAtRow>(
     q: &E::F,
     carries: &[E::F; N_LIMBS],
 ) {
-    let _ = signed_carry;
     let zero = E::F::from(M31::from_u32_unchecked(0));
     let limb_base = E::F::from(M31::from_u32_unchecked(1u32 << LIMB_BITS));
     let modulus = P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_MODULUS));
@@ -548,7 +564,6 @@ fn add_sub_reduction<E: EvalAtRow>(
 #[allow(clippy::too_many_arguments)]
 fn add_x3_reduction<E: EvalAtRow>(
     eval: &mut E,
-    signed_carry: &RangeCheckRelation,
     gate: &E::F,
     x3: &P256EvalBigInt<E>,
     x1: &P256EvalBigInt<E>,
@@ -557,7 +572,6 @@ fn add_x3_reduction<E: EvalAtRow>(
     q: &E::F,
     carries: &[E::F; N_LIMBS],
 ) {
-    let _ = signed_carry;
     let zero = E::F::from(M31::from_u32_unchecked(0));
     let limb_base = E::F::from(M31::from_u32_unchecked(1u32 << LIMB_BITS));
     let modulus = P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_MODULUS));

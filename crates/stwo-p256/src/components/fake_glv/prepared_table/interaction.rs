@@ -20,7 +20,7 @@ use crate::components::gamma_digest::{
     GammaTallInstance, GammaTallInteractionClaim, GammaTallLayout,
     GAMMA_TAG_PREPARED_RANGE13, GAMMA_TAG_PREPARED_SIGNED,
 };
-use crate::range_checks::{RangeCheckInteractionClaim, RangeCheckRelation};
+use crate::range_checks::RangeCheckInteractionClaim;
 use crate::projective_air::{
     ProjectiveRcbMulResultRelation, PROJECTIVE_RCB_MUL_ROLE_LHS, PROJECTIVE_RCB_MUL_ROLE_RESULT,
     PROJECTIVE_RCB_MUL_ROLE_RHS, PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS,

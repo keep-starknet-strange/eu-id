@@ -50,6 +50,10 @@ pub const GAMMA_TAG_FAKE_GLV_RANGE13: u32 = 1;
 pub const GAMMA_TAG_FAKE_GLV_SIGNED: u32 = 2;
 pub const GAMMA_TAG_PREPARED_RANGE13: u32 = 3;
 pub const GAMMA_TAG_PREPARED_SIGNED: u32 = 4;
+pub const GAMMA_TAG_FINAL_ADD_RANGE13: u32 = 5;
+pub const GAMMA_TAG_FINAL_ADD_SIGNED: u32 = 6;
+pub const GAMMA_TAG_PKC_RANGE13: u32 = 7;
+pub const GAMMA_TAG_PKC_SIGNED: u32 = 8;
 
 /// The post-base-commit digest challenge: γ and its powers up to the largest
 /// lane-padded value-list length any adopted component uses. Drawn at the

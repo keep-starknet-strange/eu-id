@@ -948,7 +948,9 @@ impl P256CurrentAirInteractionClaim {
             (
                 "GammaDigest",
                 self.fake_glv_projective_source.gamma_digest_total()
-                    + self.prepared_table_projective_source.gamma_digest_total(),
+                    + self.prepared_table_projective_source.gamma_digest_total()
+                    + self.public_key_on_curve.gamma_digest_total()
+                    + self.final_add.gamma_digest_total(),
             ),
             // C5 plumbing: the RCB silo PROVIDES every projective EC op's
             // mul `lhs`/`rhs`/`result` limbs; the two projective-source
@@ -1248,6 +1250,11 @@ impl P256CurrentAirRelations {
             public_key_on_curve: PublicKeyCurveSliceRelations::dummy_with_point(
                 public_key_point,
                 ProjectiveRcbMulComponentRelations::dummy().mul_result,
+                GammaDigestRelation::dummy(),
+                GammaChallenge::from_gamma(
+                    SecureField::from(M31::from_u32_unchecked(2)),
+                    fake_glv_gamma_max_padded_values(),
+                ),
             ),
             projective_rcb_air: ProjectiveRcbMulComponentRelations::dummy(),
             hinted_signed_h: RangeCheckRelation::dummy(),
@@ -1265,6 +1272,11 @@ impl P256CurrentAirRelations {
                 signed_carry: RangeCheckRelation::dummy(),
                 hint: FinalCheckHintRelation::dummy(),
                 output: FinalAddOutputRelation::dummy(),
+                gamma_digest: GammaDigestRelation::dummy(),
+                gamma_challenge: GammaChallenge::from_gamma(
+                    SecureField::from(M31::from_u32_unchecked(2)),
+                    fake_glv_gamma_max_padded_values(),
+                ),
             },
         }
     }
@@ -1287,6 +1299,8 @@ impl P256CurrentAirRelations {
             public_key_point: public_key_point.clone(),
         };
         let final_check_hint = FinalCheckHintRelation::draw(channel);
+        let gamma_digest = GammaDigestRelation::draw(channel);
+        let gamma_challenge = GammaChallenge::draw(channel, fake_glv_gamma_max_padded_values());
         Self {
             public_inputs,
             scalar_setup_output,
@@ -1315,12 +1329,14 @@ impl P256CurrentAirRelations {
                 channel,
                 public_key_point,
                 projective_rcb_air_relations.mul_result.clone(),
+                gamma_digest.clone(),
+                gamma_challenge.clone(),
             ),
             projective_rcb_air: projective_rcb_air_relations.clone(),
             hinted_signed_h: RangeCheckRelation::draw(channel),
             hinted_challenge: HintedMulChallenge::draw(channel),
-            gamma_digest: GammaDigestRelation::draw(channel),
-            gamma_challenge: GammaChallenge::draw(channel, fake_glv_gamma_max_padded_values()),
+            gamma_digest: gamma_digest.clone(),
+            gamma_challenge: gamma_challenge.clone(),
             final_add: FinalAddRelations {
                 // SHARED with the hinted-mul provider: final-add's muls are
                 // hinted rows, so the consumer must use the same instance.
@@ -1330,6 +1346,8 @@ impl P256CurrentAirRelations {
                 // Shared with the prepared-table provider above.
                 hint: final_check_hint,
                 output: FinalAddOutputRelation::draw(channel),
+                gamma_digest: gamma_digest.clone(),
+                gamma_challenge: gamma_challenge.clone(),
             },
         }
     }
