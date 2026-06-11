@@ -1,13 +1,11 @@
 pub mod components;
 pub mod eval;
 pub mod interaction;
+pub mod lookup_elements;
 pub mod preprocessed;
 pub mod witness;
-pub mod lookup_elements;
 
-use crate::age::calendar::{
-    calendar_log_size, valid_date_ranges,
-};
+use crate::age::calendar::{calendar_log_size, valid_date_ranges};
 use crate::age::predicate::AgePredicate;
 use crate::age::strategy::range_check::components::components;
 use crate::age::strategy::range_check::interaction::InteractionTraces;
@@ -119,11 +117,7 @@ impl StandalonePredicate for AgeRangeCheck {
         let lookup_elements = LookupElements::draw(channel);
 
         // Phase 3: interaction traces
-        let interaction = InteractionTraces::new(
-            &witness_data,
-            &preprocessed,
-            &lookup_elements
-        );
+        let interaction = InteractionTraces::new(&witness_data, &preprocessed, &lookup_elements);
 
         interaction.mix_into(channel);
 

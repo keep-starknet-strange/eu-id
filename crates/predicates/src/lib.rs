@@ -3,8 +3,8 @@ pub mod age;
 // strategy's `LookupElements`).
 pub mod range_check;
 // Column/Trace aliases surface in public interaction-trace fields.
-pub mod types;
 pub(crate) mod predicate;
+pub mod types;
 pub(crate) mod utils;
 
 // Common, strategy-agnostic surface. Strategy-specific building blocks (which

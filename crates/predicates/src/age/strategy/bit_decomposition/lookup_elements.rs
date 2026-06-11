@@ -1,5 +1,5 @@
-use stwo::core::channel::Channel;
 use crate::age::calendar::{CalendarElements, ValidDayElements};
+use stwo::core::channel::Channel;
 
 #[derive(Clone)]
 pub struct LookupElements {

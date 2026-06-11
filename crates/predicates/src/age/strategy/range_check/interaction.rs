@@ -73,9 +73,9 @@ impl InteractionTraces {
             col_gen.write_frac(
                 packed_row,
                 PackedQM31::one(),
-                lookup_elements.day_delta.combine(&[PackedM31::broadcast(M31::from_u32_unchecked(
-                    witness_data.day_delta_val,
-                ))]),
+                lookup_elements.day_delta.combine(&[PackedM31::broadcast(
+                    M31::from_u32_unchecked(witness_data.day_delta_val),
+                )]),
             );
         }
         col_gen.finalize_col();
@@ -85,9 +85,9 @@ impl InteractionTraces {
             col_gen.write_frac(
                 packed_row,
                 PackedQM31::one(),
-                lookup_elements.month_delta.combine(&[PackedM31::broadcast(M31::from_u32_unchecked(
-                    witness_data.month_delta_val,
-                ))]),
+                lookup_elements.month_delta.combine(&[PackedM31::broadcast(
+                    M31::from_u32_unchecked(witness_data.month_delta_val),
+                )]),
             );
         }
         col_gen.finalize_col();
@@ -97,9 +97,9 @@ impl InteractionTraces {
             col_gen.write_frac(
                 packed_row,
                 PackedQM31::one(),
-                lookup_elements.year_delta.combine(&[PackedM31::broadcast(M31::from_u32_unchecked(
-                    witness_data.year_delta_val,
-                ))]),
+                lookup_elements.year_delta.combine(&[PackedM31::broadcast(
+                    M31::from_u32_unchecked(witness_data.year_delta_val),
+                )]),
             );
         }
         col_gen.finalize_col();

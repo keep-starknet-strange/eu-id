@@ -9,7 +9,7 @@ use stwo_constraint_framework::{EvalAtRow, FrameworkComponent, FrameworkEval, Re
 #[derive(Clone)]
 pub struct AgeRangeCheckEval {
     pub(super) public: PublicInput,
-    pub(super) lookup_elements: LookupElements
+    pub(super) lookup_elements: LookupElements,
 }
 
 impl FrameworkEval for AgeRangeCheckEval {

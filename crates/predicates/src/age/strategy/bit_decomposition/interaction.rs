@@ -26,7 +26,7 @@ impl InteractionTraces {
     pub fn new(
         witness_data: &WitnessData,
         preprocessed: &Preprocessed,
-        lookup_elements: &LookupElements
+        lookup_elements: &LookupElements,
     ) -> Self {
         let cal_log_size = preprocessed.cal_trace[0].domain.log_size();
         let valid_day_log_size = preprocessed.valid_day_trace[0].domain.log_size();

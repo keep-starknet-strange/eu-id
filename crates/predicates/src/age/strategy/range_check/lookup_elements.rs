@@ -1,6 +1,6 @@
-use stwo::core::channel::Channel;
 use crate::age::calendar::{CalendarElements, ValidDayElements};
 use crate::range_check::RangeCheckLookupElements;
+use stwo::core::channel::Channel;
 
 #[derive(Clone)]
 pub struct LookupElements {

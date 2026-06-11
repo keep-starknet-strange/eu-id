@@ -1,7 +1,7 @@
 use crate::age::calendar::{
     calendar_index_col_id, calendar_max_days_col_id, valid_day_day_col_id,
-    valid_day_max_days_col_id, CalendarTableComponent, CalendarTableEval
-    , ValidDayTableComponent, ValidDayTableEval,
+    valid_day_max_days_col_id, CalendarTableComponent, CalendarTableEval, ValidDayTableComponent,
+    ValidDayTableEval,
 };
 use crate::age::strategy::range_check::eval::{AgeRangeCheckComponent, AgeRangeCheckEval};
 use crate::age::strategy::range_check::lookup_elements::LookupElements;
