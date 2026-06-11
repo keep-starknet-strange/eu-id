@@ -1,17 +1,14 @@
 pub mod bit_decomposition;
 pub mod range_check;
 
-use crate::age::types::{AgeBitDecompositionProof, AgeRangeCheckProof};
-
+/// Helper enum for selecting an age-check strategy. Used inside the crate (e.g.
+/// by the demo CLI and benches) to represent a choice; external callers pick a
+/// strategy by calling [`range_check::AgeRangeCheck`] or
+/// [`bit_decomposition::AgeBitDecomposition`] directly.
 #[derive(Clone, Copy)]
 pub enum AgeCheckStrategy {
     BitDecomposition,
     RangeCheck,
-}
-
-pub enum AgeProof {
-    BitDecomposition(AgeBitDecompositionProof),
-    RangeCheck(AgeRangeCheckProof),
 }
 
 #[cfg(test)]

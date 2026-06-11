@@ -1,5 +1,6 @@
 use crate::harness::BenchCase;
-use predicates::{AgeCheckStrategy, Date, DateOfBirth, PublicInput};
+use predicates::age::strategy::AgeCheckStrategy;
+use predicates::{Date, DateOfBirth, PublicInput};
 
 fn default_case(name: &'static str, strategy: AgeCheckStrategy) -> BenchCase {
     BenchCase {
