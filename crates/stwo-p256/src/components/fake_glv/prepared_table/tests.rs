@@ -493,6 +493,8 @@ impl stwo_constraint_framework::EvalAtRow for RecordingSourceEvaluator<'_> {
     fn finalize_logup(&mut self) {}
 
     fn finalize_logup_in_pairs(&mut self) {}
+
+    fn finalize_logup_batched(&mut self, _batching: &Vec<usize>) {}
 }
 
 /// Whether every polynomial constraint of `PreparedTableProjectiveSourceEval`

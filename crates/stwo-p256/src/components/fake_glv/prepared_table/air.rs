@@ -556,7 +556,10 @@ impl FrameworkEval for PreparedTableProjectiveSourceEval {
                 eval.add_constraint(not_mixed.clone() * carry.clone());
             }
         }
-        eval.finalize_logup();
+        eval.finalize_logup_batched(&crate::range_checks::consecutive_batching(
+            crate::components::fake_glv::prepared_table::interaction::prepared_consumer_logup_entries(),
+            crate::components::fake_glv::prepared_table::interaction::PREPARED_CONSUMER_LOGUP_BATCH,
+        ));
         eval
     }
 }

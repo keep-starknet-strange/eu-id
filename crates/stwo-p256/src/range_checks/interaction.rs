@@ -57,3 +57,44 @@ impl RangeCheckInteractionClaim {
         (interaction_trace, Self { claimed_sum })
     }
 }
+
+/// Consecutive batch assignment for `finalize_logup_batched`: entry `i` goes
+/// to batch `i / batch`. The interaction generator must write columns with
+/// [`write_batched_logup_columns`] using the same `batch` so the layouts
+/// match.
+pub fn consecutive_batching(entries: usize, batch: usize) -> Vec<usize> {
+    (0..entries).map(|index| index / batch).collect()
+}
+
+/// Write logup interaction columns with `batch` fractions per column, summed
+/// per packed row: `(n1, d1) + (n2, d2) = (n1·d2 + n2·d1, d1·d2)`. Mirrors the
+/// AIR-side `finalize_logup_batched(&consecutive_batching(n, batch))` layout.
+/// Each entry is `(numerators, denominators)` per packed row, in the exact
+/// AIR emission order. A batched column's constraint degree is
+/// `batch + max(numerator degree)`, so the component bound must allow it
+/// (batch 8 with degree-1 numerators needs `log_size + 3`).
+pub fn write_batched_logup_columns(
+    logup: &mut stwo_constraint_framework::LogupTraceGenerator,
+    entries: &[(
+        Vec<stwo::prover::backend::simd::qm31::PackedQM31>,
+        Vec<stwo::prover::backend::simd::qm31::PackedQM31>,
+    )],
+    batch: usize,
+) {
+    for chunk in entries.chunks(batch) {
+        let vec_rows = chunk[0].0.len();
+        let mut col = logup.new_col();
+        for vec_row in 0..vec_rows {
+            let mut numerator = chunk[0].0[vec_row];
+            let mut denominator = chunk[0].1[vec_row];
+            for (next_numerators, next_denominators) in chunk[1..].iter() {
+                let n = next_numerators[vec_row];
+                let d = next_denominators[vec_row];
+                numerator = numerator * d + n * denominator;
+                denominator = denominator * d;
+            }
+            col.write_frac(vec_row, numerator, denominator);
+        }
+        col.finalize_col();
+    }
+}

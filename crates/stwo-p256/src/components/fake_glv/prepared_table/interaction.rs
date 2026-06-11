@@ -576,6 +576,21 @@ const PROJECTIVE_RCB_MUL_RESULT_ROLES: [u32; 3] = [
 /// (col 0, `+active`), then one `ProjectiveRcbMulResultRelation` consume column
 /// per committed mul limb (canonical mul/role/limb order, `+active`). Returns
 /// the columns, the EC-row consumer sum, and the mul-result consumer sum.
+
+/// LogUp batch size for the prepared-table projective-source consumer: 2
+/// fractions per interaction column (degree ≤ 3 at the `log_size + 1` bound;
+/// bounds past +1 empirically fail OODS in this stwo).
+pub(crate) const PREPARED_CONSUMER_LOGUP_BATCH: usize = 2;
+
+/// Total LogUp entries the consumer eval emits, in emission order.
+pub(crate) fn prepared_consumer_logup_entries() -> usize {
+    1 + (PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS / (3 * N_LIMBS)) * 3
+        + prepared_double_formula_range13_use_columns().len()
+        + prepared_double_formula_signed_carry_use_columns().len()
+        + prepared_mixed_add_formula_range13_use_columns().len()
+        + prepared_mixed_add_formula_signed_carry_use_columns().len()
+}
+
 pub(crate) fn gen_prepared_table_projective_source_consumer_interaction_trace(
     base: &[M31ColumnEval],
     ec_row_relation: &PreparedTableEcRowRelation,
@@ -585,76 +600,88 @@ pub(crate) fn gen_prepared_table_projective_source_consumer_interaction_trace(
 ) -> PreparedTableProjectiveSourceConsumerInteraction {
     assert_eq!(base.len(), PREPARED_TABLE_PROJECTIVE_SOURCE_TRACE_COLUMNS);
     let log_size = base[0].domain.log_size();
-    let mut logup = LogupTraceGenerator::new(log_size);
+    let vec_rows = 1usize << (log_size - LOG_N_LANES);
+    // Collect every fraction in the consumer AIR's emission order, then write
+    // them `PREPARED_CONSUMER_LOGUP_BATCH` per interaction column to mirror
+    // the eval's `finalize_logup_batched(consecutive_batching(..))` layout.
+    let mut entries: Vec<(Vec<PackedQM31>, Vec<PackedQM31>)> = Vec::new();
+    let active_numerators: Vec<PackedQM31> = (0..vec_rows)
+        .map(|vec_row| PackedQM31::from(base[0].data[vec_row]))
+        .collect();
 
-    // Column 0: the existing EC-row consume (+active).
-    let mut col = logup.new_col();
-    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
-        let values = prepared_table_projective_source_packed_relation_values(base, vec_row);
-        let active = PackedQM31::from(base[0].data[vec_row]);
-        col.write_frac(vec_row, active, ec_row_relation.combine(&values));
-    }
-    col.finalize_col();
+    // Entry 0: the EC-row consume (+active).
+    entries.push((
+        active_numerators.clone(),
+        (0..vec_rows)
+            .map(|vec_row| {
+                let values = prepared_table_projective_source_packed_relation_values(base, vec_row);
+                ec_row_relation.combine(&values)
+            })
+            .collect(),
+    ));
 
-    // Mul-result consume columns (one WIDE fraction per consumed value, gated
-    // by the `has_muls` column), canonical order.
+    // Wide mul-result consumes (+has_muls), canonical order.
+    let has_muls_numerators: Vec<PackedQM31> = (0..vec_rows)
+        .map(|vec_row| {
+            PackedQM31::from(base[PREPARED_TABLE_PROJECTIVE_SOURCE_HAS_MULS_COL].data[vec_row])
+        })
+        .collect();
     for mul_index in 0..(PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS / (3 * N_LIMBS)) {
         for (role_index, &role) in PROJECTIVE_RCB_MUL_RESULT_ROLES.iter().enumerate() {
             let base_col = PREPARED_TABLE_PROJECTIVE_SOURCE_MUL_LIMB_OFFSET
                 + mul_index * (3 * N_LIMBS)
                 + role_index * N_LIMBS;
-            let mut col = logup.new_col();
-            for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
-                let has_muls = PackedQM31::from(
-                    base[PREPARED_TABLE_PROJECTIVE_SOURCE_HAS_MULS_COL].data[vec_row],
-                );
-                let mut values = Vec::with_capacity(3 + N_LIMBS);
-                values.push(base[1].data[vec_row]);
-                values.push(PackedM31::broadcast(M31::from_u32_unchecked(mul_index as u32)));
-                values.push(PackedM31::broadcast(M31::from_u32_unchecked(role)));
-                for limb in 0..N_LIMBS {
-                    values.push(base[base_col + limb].data[vec_row]);
-                }
-                col.write_frac(vec_row, has_muls, mul_result_relation.combine(&values));
-            }
-            col.finalize_col();
+            entries.push((
+                has_muls_numerators.clone(),
+                (0..vec_rows)
+                    .map(|vec_row| {
+                        let mut values = Vec::with_capacity(3 + N_LIMBS);
+                        values.push(base[1].data[vec_row]);
+                        values.push(PackedM31::broadcast(M31::from_u32_unchecked(mul_index as u32)));
+                        values.push(PackedM31::broadcast(M31::from_u32_unchecked(role)));
+                        for limb in 0..N_LIMBS {
+                            values.push(base[base_col + limb].data[vec_row]);
+                        }
+                        mul_result_relation.combine(&values)
+                    })
+                    .collect(),
+            ));
         }
     }
-    // The C5-2 USE columns are emitted in the EXACT order the consumer AIR's
-    // single (unbatched) `finalize_logup` accumulates them — one interaction
-    // column per `add_to_relation` fraction, in call order:
+    // The C5-2 USE entries, in the consumer AIR's emission order:
     //   Double range13, Double signed-carry, MixedAdd range13, MixedAdd
     //   signed-carry.
-    let emit_range13_uses = |logup: &mut LogupTraceGenerator, cols: Vec<usize>| {
+    let push_uses = |entries: &mut Vec<(Vec<PackedQM31>, Vec<PackedQM31>)>,
+                         relation: &RangeCheckRelation,
+                         cols: Vec<usize>| {
         for base_col in cols {
-            let mut col = logup.new_col();
-            for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
-                let active = PackedQM31::from(base[0].data[vec_row]);
-                let limb = base[base_col].data[vec_row];
-                col.write_frac(vec_row, active, range13_relation.combine(&[limb]));
-            }
-            col.finalize_col();
+            entries.push((
+                active_numerators.clone(),
+                (0..vec_rows)
+                    .map(|vec_row| relation.combine(&[base[base_col].data[vec_row]]))
+                    .collect(),
+            ));
         }
     };
-    let emit_signed_carry_uses = |logup: &mut LogupTraceGenerator, cols: Vec<usize>| {
-        for carry_col in cols {
-            let mut col = logup.new_col();
-            for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
-                let active = PackedQM31::from(base[0].data[vec_row]);
-                let carry = base[carry_col].data[vec_row];
-                col.write_frac(vec_row, active, signed_carry_relation.combine(&[carry]));
-            }
-            col.finalize_col();
-        }
-    };
-    // C5-2 (Double): range13 then signed-carry.
-    emit_range13_uses(&mut logup, prepared_double_formula_range13_use_columns());
-    emit_signed_carry_uses(&mut logup, prepared_double_formula_signed_carry_use_columns());
-    // C5-2 (MixedAdd): range13 then signed-carry.
-    emit_range13_uses(&mut logup, prepared_mixed_add_formula_range13_use_columns());
-    emit_signed_carry_uses(
-        &mut logup,
+    push_uses(&mut entries, range13_relation, prepared_double_formula_range13_use_columns());
+    push_uses(
+        &mut entries,
+        signed_carry_relation,
+        prepared_double_formula_signed_carry_use_columns(),
+    );
+    push_uses(&mut entries, range13_relation, prepared_mixed_add_formula_range13_use_columns());
+    push_uses(
+        &mut entries,
+        signed_carry_relation,
         prepared_mixed_add_formula_signed_carry_use_columns(),
+    );
+
+    assert_eq!(entries.len(), prepared_consumer_logup_entries());
+    let mut logup = LogupTraceGenerator::new(log_size);
+    crate::range_checks::write_batched_logup_columns(
+        &mut logup,
+        &entries,
+        PREPARED_CONSUMER_LOGUP_BATCH,
     );
     let (columns, _total) = logup.finalize_last();
 

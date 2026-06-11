@@ -13,9 +13,7 @@ use crate::limbs::P256M31BigInt;
 use crate::prepared_table::PreparedAffinePoint;
 use crate::projective::{ProjectiveEcOp, ProjectivePoint};
 use crate::projective_air::{
-    gen_projective_rcb_folded_contribution_base_trace,
-    gen_projective_rcb_folded_digit_base_trace, gen_projective_rcb_mul_base_trace,
-    gen_projective_rcb_raw_product_chunk_base_trace, projective_rcb_signed_carry_bound,
+    projective_rcb_signed_carry_bound,
     projective_rcb_signed_carry_log_size, ProjectiveRcbAirError, ProjectiveRcbAirRow,
     ProjectiveRcbAirTraceClaim, ProjectiveRcbMulRow, ProjectiveRcbMulStep,
     PROJECTIVE_RCB_SCHEDULE_NAMESPACE_FINAL_ADD, PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
@@ -47,15 +45,6 @@ pub enum FinalAddBranch {
     R2Only,
     /// `r2 = ∞`, `r1` finite (output `S = r1`).
     R1Only,
-}
-
-impl FinalAddBranch {
-    fn double_add(self) -> M31 {
-        match self {
-            FinalAddBranch::DoubleAdd => M31::from_u32_unchecked(1),
-            _ => M31::from_u32_unchecked(0),
-        }
-    }
 }
 
 /// Fully checked native witness for one final EC addition `S = R_1 + R_2`.

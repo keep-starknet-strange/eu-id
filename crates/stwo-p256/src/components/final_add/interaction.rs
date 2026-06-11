@@ -15,12 +15,8 @@ use stwo::prover::backend::simd::{
 use stwo_constraint_framework::{LogupTraceGenerator, Relation};
 
 use crate::limbs::P256M31BigInt;
-use crate::projective_air::{
-    projective_rcb_mul_padding_fraction_pairs, projective_rcb_mul_row_fraction_count,
-    projective_rcb_mul_row_fraction_pairs, ProjectiveRcbMulRow,
-};
 use crate::range_checks::{
-    encode_signed_carry, RangeCheckClaim, RangeCheckInteractionClaim, RANGE13_BITS, RANGE16_BITS,
+    encode_signed_carry, RangeCheckClaim, RangeCheckInteractionClaim, RANGE13_BITS,
 };
 use crate::scalar::scalar_mod_mul::columns::M31ColumnEval;
 use stwo_p256_utils::constants::N_LIMBS;

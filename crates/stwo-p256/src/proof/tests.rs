@@ -7,14 +7,6 @@ use crate::fp_solinas_air::FP_SOLINAS_REDUCTION_DIGITS;
 use crate::limbs::P256M31BigInt;
 use crate::fake_glv_chain::FakeGlvChainCert;
 use crate::prepared_table::{PreparedAffinePoint, PreparedTableCert};
-use crate::projective_air::{
-    PROJECTIVE_RCB_FOLDED_CONTRIBUTION_ROWS, PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TERMS,
-    PROJECTIVE_RCB_FOLDED_CONTRIBUTION_TRACE_COLUMNS, PROJECTIVE_RCB_FOLDED_DIGIT_GROUPS,
-    PROJECTIVE_RCB_FOLDED_DIGIT_TRACE_COLUMNS, PROJECTIVE_RCB_MUL_SILO_TRACE_COLUMNS,
-    PROJECTIVE_RCB_MUL_TRACE_COLUMNS,
-    PROJECTIVE_RCB_RAW_PRODUCT_CHUNKS, PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS,
-    PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TRACE_COLUMNS,
-};
 use crate::scalar::scalar_mod_mul::interaction_claim::zero_interaction_claim;
 use crate::scalar::scalar_mod_mul::layout::{
     ScalarModMulFamilyTraces, PRODUCT_METADATA_TRACE_COLUMNS,
@@ -31,7 +23,7 @@ use stwo::core::channel::Blake2sM31Channel;
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
 use stwo::prover::backend::Column;
 use stwo_constraint_framework::{
-    assert_constraints_on_polys, assert_constraints_on_trace, FrameworkComponent, FrameworkEval,
+    assert_constraints_on_trace, FrameworkComponent, FrameworkEval,
     PREPROCESSED_TRACE_IDX,
 };
 
