@@ -2122,7 +2122,10 @@ fn current_p256_air_shape_diagnostic() {
     let components = P256CurrentAirComponents::new(
         &mut allocator,
         &claim,
-        &P256CurrentAirInteractionClaim::zero(),
+        // zero_for_claim, NOT zero(): the mod-mul component lists are zipped
+        // against the interaction claim's vectors, so a plain zero() silently
+        // drops them from the diagnostic.
+        &P256CurrentAirInteractionClaim::zero_for_claim(&claim),
         &P256CurrentAirRelations::dummy(),
     );
 
@@ -2442,7 +2445,8 @@ fn current_p256_per_component_shape_diagnostic() {
     let components = P256CurrentAirComponents::new(
         &mut allocator,
         &claim,
-        &P256CurrentAirInteractionClaim::zero(),
+        // zero_for_claim, NOT zero() (see the shape diagnostic).
+        &P256CurrentAirInteractionClaim::zero_for_claim(&claim),
         &P256CurrentAirRelations::dummy(),
     );
     for (index, component) in components.components().iter().enumerate() {
