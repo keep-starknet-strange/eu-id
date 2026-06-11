@@ -2426,3 +2426,35 @@ fn current_p256_proof_pipeline_detects_prepared_point_imbalance() {
         }
     );
 }
+
+/// Per-FrameworkComponent log size + column counts, in global registration
+/// order (finer-grained companion of `current_p256_air_shape_diagnostic`).
+#[test]
+#[ignore = "diagnostic: per-component log sizes and column counts"]
+fn current_p256_per_component_shape_diagnostic() {
+    let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+        valid_real_input_with_small_u_scalars(0, 11),
+    ])
+    .expect("pipeline builds");
+    let claim = P256CurrentAirProofClaim::from_claim(&proof.claim);
+    let ids = claim.preprocessed_column_ids();
+    let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
+    let components = P256CurrentAirComponents::new(
+        &mut allocator,
+        &claim,
+        &P256CurrentAirInteractionClaim::zero(),
+        &P256CurrentAirRelations::dummy(),
+    );
+    for (index, component) in components.components().iter().enumerate() {
+        let bounds = component.trace_log_degree_bounds();
+        let pre = bounds[0].len();
+        let base = bounds[1].len();
+        let inter = bounds.get(2).map(|tree| tree.len()).unwrap_or(0);
+        let log = bounds
+            .iter()
+            .flat_map(|tree| tree.iter().copied())
+            .max()
+            .unwrap_or(0);
+        eprintln!("component {index:2} log={log:2} pre={pre:3} base={base:4} inter={inter:4}");
+    }
+}
