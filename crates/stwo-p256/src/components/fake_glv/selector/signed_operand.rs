@@ -19,6 +19,7 @@ use stwo_constraint_framework::{
 };
 
 use crate::constants::P256_MODULUS;
+use crate::components::ComponentInteractionClaim;
 use crate::field_ops::sub_mod_witness;
 use crate::limbs::P256M31BigInt;
 use crate::scalar::fake_glv_chain::{FakeGlvChainClaim, FakeGlvChainError, FakeGlvChainRowKind};
@@ -108,24 +109,25 @@ impl FakeGlvSignedSelectorOperandProofClaim {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FakeGlvSignedSelectorOperandInteractionClaim {
-    pub provider_claimed_sum: SecureField,
-    pub consumer_claimed_sum: SecureField,
+    pub provider: ComponentInteractionClaim,
+    pub consumer: ComponentInteractionClaim,
 }
 
 impl FakeGlvSignedSelectorOperandInteractionClaim {
     pub fn zero() -> Self {
         Self {
-            provider_claimed_sum: secure_zero(),
-            consumer_claimed_sum: secure_zero(),
+            provider: ComponentInteractionClaim::zero(),
+            consumer: ComponentInteractionClaim::zero(),
         }
     }
 
     pub fn total(self) -> SecureField {
-        self.provider_claimed_sum + self.consumer_claimed_sum
+        self.provider.claimed_sum + self.consumer.claimed_sum
     }
 
     pub fn mix_into(&self, channel: &mut impl Channel) {
-        channel.mix_felts(&[self.provider_claimed_sum, self.consumer_claimed_sum]);
+        self.provider.mix_into(channel);
+        self.consumer.mix_into(channel);
     }
 }
 
@@ -148,7 +150,7 @@ impl FakeGlvSignedSelectorOperandComponents {
                     log_size: claim.provider_log_size,
                     relation: relation.clone(),
                 },
-                interaction_claim.provider_claimed_sum,
+                interaction_claim.provider.claimed_sum,
             ),
             consumer: FakeGlvSignedSelectorOperandConsumerComponent::new(
                 allocator,
@@ -156,7 +158,7 @@ impl FakeGlvSignedSelectorOperandComponents {
                     log_size: claim.consumer_log_size,
                     relation: relation.clone(),
                 },
-                interaction_claim.consumer_claimed_sum,
+                interaction_claim.consumer.claimed_sum,
             ),
         }
     }
@@ -555,8 +557,4 @@ fn signed_selector_operand_zero_column_id() -> PreProcessedColumnId {
     PreProcessedColumnId {
         id: SIGNED_SELECTOR_OPERAND_ZERO_COLUMN.into(),
     }
-}
-
-fn secure_zero() -> SecureField {
-    SecureField::from(M31::from_u32_unchecked(0))
 }

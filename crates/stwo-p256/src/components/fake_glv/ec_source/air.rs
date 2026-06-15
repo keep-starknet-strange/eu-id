@@ -34,6 +34,7 @@ use crate::components::gamma_digest::{
     GammaTallInstance, GammaTallInteractionClaim, GammaTallLayout,
     GAMMA_TAG_FAKE_GLV_RANGE13, GAMMA_TAG_FAKE_GLV_SIGNED,
 };
+use crate::components::ComponentInteractionClaim;
 use crate::range_checks::{
     RangeCheckComponent, RangeCheckEval, RangeCheckInteractionClaim,
     RangeCheckRelation, SignedCarryRangeComponent, SignedCarryRangeEval, RANGE13_BITS,
@@ -188,18 +189,8 @@ impl FakeGlvProjectiveSourceProofClaim {
 
 #[derive(Clone, Debug)]
 pub struct FakeGlvProjectiveSourceInteractionClaim {
-    pub provider_claimed_sum: SecureField,
-    /// `FakeGlvPrimitiveEcRowRelation` consumer sum (the EC-row self-loop).
-    pub consumer_claimed_sum: SecureField,
-    /// C5 plumbing: `ProjectiveRcbMulResultRelation` consumer sum (the silo mul
-    /// limbs consumed on the consumer component). Lives in the SAME trace/column
-    /// group as `consumer_claimed_sum`, but is balanced separately under
-    /// `ProjectiveRcbMulResult`.
-    pub mul_result_consumer_claimed_sum: SecureField,
-    /// γ-digest: the consumer's two digest YIELDS (−active, range13 + signed
-    /// kinds). Netted against the tall expanders' `digest_use_sum`s under the
-    /// `GammaDigest` balance.
-    pub gamma_yield_sum: SecureField,
+    pub provider: ComponentInteractionClaim,
+    pub consumer: ComponentInteractionClaim,
     /// γ-digest: the range13-kind tall expander (digest use + range uses).
     pub gamma_range13: GammaTallInteractionClaim,
     /// γ-digest: the signed-kind tall expander.
@@ -213,10 +204,8 @@ pub struct FakeGlvProjectiveSourceInteractionClaim {
 impl FakeGlvProjectiveSourceInteractionClaim {
     pub fn zero() -> Self {
         Self {
-            provider_claimed_sum: secure_zero(),
-            consumer_claimed_sum: secure_zero(),
-            mul_result_consumer_claimed_sum: secure_zero(),
-            gamma_yield_sum: secure_zero(),
+            provider: ComponentInteractionClaim::zero(),
+            consumer: ComponentInteractionClaim::zero(),
             gamma_range13: GammaTallInteractionClaim::zero(),
             gamma_signed: GammaTallInteractionClaim::zero(),
             range13: RangeCheckInteractionClaim {
@@ -233,46 +222,23 @@ impl FakeGlvProjectiveSourceInteractionClaim {
     /// and the range13/signed-carry consume+provide (balanced under their own
     /// `FakeGlvProjective{Range13,SignedCarry}` relations).
     pub fn total(&self) -> SecureField {
-        self.provider_claimed_sum + self.consumer_claimed_sum
+        self.provider.claimed_sum + self.consumer.claimed_sum
     }
 
-    /// `FakeGlvProjectiveRange13` balance: the tall expander's range uses +
-    /// the provider yield. Internal to this sub-graph, nets to zero.
-    pub fn range13_total(&self) -> SecureField {
-        self.gamma_range13.range_use_sum + self.range13.claimed_sum
-    }
-
-    /// `FakeGlvProjectiveSignedCarry` balance: the tall expander's range uses
-    /// + the provider yield. Internal to this sub-graph, nets to zero.
-    pub fn signed_carry_total(&self) -> SecureField {
-        self.gamma_signed.range_use_sum + self.signed_carry.claimed_sum
-    }
-
-    /// `GammaDigest` balance for this sub-graph: the consumer's two yields +
-    /// the two tall expanders' digest uses. Nets to zero.
-    pub fn gamma_digest_total(&self) -> SecureField {
-        self.gamma_yield_sum
-            + self.gamma_range13.digest_use_sum
-            + self.gamma_signed.digest_use_sum
-    }
-
-    /// The single claimed sum the consumer FrameworkComponent declares: the
-    /// EC-row + mul-result consumes and the two γ-digest yields share one
-    /// interaction trace (one `finalize_logup`), so the component's sum is
-    /// their combination.
-    pub fn consumer_component_claimed_sum(&self) -> SecureField {
-        self.consumer_claimed_sum + self.mul_result_consumer_claimed_sum + self.gamma_yield_sum
+    pub(crate) fn component_claimed_sum(&self) -> SecureField {
+        self.provider.claimed_sum
+            + self.consumer.claimed_sum
+            + self.gamma_range13.claimed_sum
+            + self.gamma_signed.claimed_sum
+            + self.range13.claimed_sum
+            + self.signed_carry.claimed_sum
     }
 
     pub fn mix_into(&self, channel: &mut impl Channel) {
-        channel.mix_felts(&[
-            self.provider_claimed_sum,
-            self.consumer_claimed_sum,
-            self.mul_result_consumer_claimed_sum,
-            self.gamma_yield_sum,
-            self.range13.claimed_sum,
-            self.signed_carry.claimed_sum,
-        ]);
+        self.provider.mix_into(channel);
+        self.consumer.mix_into(channel);
+        self.range13.mix_into(channel);
+        self.signed_carry.mix_into(channel);
         self.gamma_range13.mix_into(channel);
         self.gamma_signed.mix_into(channel);
     }
@@ -317,7 +283,7 @@ impl FakeGlvProjectiveSourceComponents {
                     source_offset,
                     relation: relation.clone(),
                 },
-                interaction_claim.provider_claimed_sum,
+                interaction_claim.provider.claimed_sum,
             ),
             consumer: FakeGlvProjectiveSourceComponent::new(
                 allocator,
@@ -329,7 +295,7 @@ impl FakeGlvProjectiveSourceComponents {
                     gamma_challenge: gamma_challenge.clone(),
                 },
                 // EC-row + mul-result consumes share one interaction trace.
-                interaction_claim.consumer_component_claimed_sum(),
+                interaction_claim.consumer.claimed_sum,
             ),
             gamma_range13: GammaTallComponent::new(
                 allocator,
@@ -1436,4 +1402,3 @@ fn secure_zero() -> SecureField {
 pub(crate) struct FakeGlvPrimitiveEcRowInteractionClaim {
     pub claimed_sum: SecureField,
 }
-

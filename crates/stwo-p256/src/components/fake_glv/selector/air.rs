@@ -107,14 +107,12 @@ impl FakeGlvSelectorAirProofClaim {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FakeGlvSelectorAirInteractionClaim {
     pub claimed_sum: SecureField,
-    pub scalar_consumer_claimed_sum: SecureField,
 }
 
 impl FakeGlvSelectorAirInteractionClaim {
     pub fn zero() -> Self {
         Self {
             claimed_sum: secure_zero(),
-            scalar_consumer_claimed_sum: secure_zero(),
         }
     }
 
@@ -520,19 +518,10 @@ pub(crate) fn gen_fake_glv_selector_air_interaction_trace(
     }
     col.finalize_col();
     let (trace, claimed_sum) = logup.finalize_last();
-    let scalar_consumer_claimed_sum: SecureField = storage_rows(base)
-        .filter(|row| row[0] != M31::from_u32_unchecked(0))
-        .map(|row| -> SecureField {
-            let denominator: SecureField =
-                relation.combine(&scalar_values_from_selector_base(&row));
-            SecureField::from(row[0]) / denominator
-        })
-        .sum();
     (
         trace,
         FakeGlvSelectorAirInteractionClaim {
             claimed_sum,
-            scalar_consumer_claimed_sum,
         },
     )
 }
@@ -888,21 +877,6 @@ fn scalar_packed_values_from_selector_base(
     vec_row: usize,
 ) -> [PackedM31; FAKE_GLV_SCALAR_RELATION_ARITY] {
     core::array::from_fn(|index| base[1 + index].data[vec_row])
-}
-
-fn scalar_values_from_selector_base(row: &[M31]) -> [M31; FAKE_GLV_SCALAR_RELATION_ARITY] {
-    core::array::from_fn(|index| row[1 + index])
-}
-
-fn storage_rows(base: &[M31ColumnEval]) -> impl Iterator<Item = Vec<M31>> + '_ {
-    let row_count = base[0].domain.size();
-    (0..row_count).map(|row| {
-        let vec_row = row / (1 << LOG_N_LANES);
-        let lane = row % (1 << LOG_N_LANES);
-        base.iter()
-            .map(|column| column.data[vec_row].to_array()[lane])
-            .collect::<Vec<_>>()
-    })
 }
 
 fn secure_zero() -> SecureField {

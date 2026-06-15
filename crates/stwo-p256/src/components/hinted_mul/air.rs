@@ -286,11 +286,8 @@ impl HintedMulProofClaim {
 pub struct HintedMulProofInteractionClaim {
     /// Total logup sum of the check component (its own claimed_sum).
     pub claimed_sum: SecureField,
-    pub range13_consumer_claimed_sum: SecureField,
-    pub signed_h_consumer_claimed_sum: SecureField,
-    pub mul_result_provider_claimed_sum: SecureField,
-    pub range13_provider_claimed_sum: SecureField,
-    pub signed_h_provider_claimed_sum: SecureField,
+    pub range13: SecureField,
+    pub signed_h: SecureField,
 }
 
 impl HintedMulProofInteractionClaim {
@@ -298,20 +295,17 @@ impl HintedMulProofInteractionClaim {
         let zero = SecureField::from(M31::from_u32_unchecked(0));
         Self {
             claimed_sum: zero,
-            range13_consumer_claimed_sum: zero,
-            signed_h_consumer_claimed_sum: zero,
-            mul_result_provider_claimed_sum: zero,
-            range13_provider_claimed_sum: zero,
-            signed_h_provider_claimed_sum: zero,
+            range13: zero,
+            signed_h: zero,
         }
     }
 
     pub fn mix_into(&self, channel: &mut impl Channel) {
-        channel.mix_felts(&[
-            self.claimed_sum,
-            self.range13_provider_claimed_sum,
-            self.signed_h_provider_claimed_sum,
-        ]);
+        channel.mix_felts(&[self.claimed_sum, self.range13, self.signed_h]);
+    }
+
+    pub(crate) fn total(&self) -> SecureField {
+        self.claimed_sum + self.range13 + self.signed_h
     }
 }
 
@@ -586,8 +580,12 @@ mod tests {
         // The check's range/signed consumers must balance against the two
         // providers; the mul-result provides have no consumer in this
         // standalone slice and are excluded (mirrors the projective harness).
-        let balance = interaction_claim.range13_consumer_claimed_sum
-            + interaction_claim.signed_h_consumer_claimed_sum
+        let mul_result_provider =
+            crate::components::hinted_mul::trace::hinted_mul_result_provider_sum(
+                &claim, &relations,
+            );
+        let balance = interaction_claim.claimed_sum
+            - mul_result_provider
             + range13_provider.claimed_sum
             + signed_provider.claimed_sum;
         if balance != SecureField::from(M31::from_u32_unchecked(0)) {

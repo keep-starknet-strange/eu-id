@@ -115,20 +115,12 @@ impl CertScalarInputAirProofClaim {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CertScalarInputAirInteractionClaim {
     pub claimed_sum: SecureField,
-    pub scalar_setup_consumer_claimed_sum: SecureField,
-    pub cert_provider_claimed_sum: SecureField,
-    /// Yield of `CertBaseRelation` (prepared-table base pinning). Zero unless the
-    /// cert-base provider is active (monolithic STARK).
-    pub cert_base_provider_claimed_sum: SecureField,
 }
 
 impl CertScalarInputAirInteractionClaim {
     pub fn zero() -> Self {
         Self {
             claimed_sum: secure_zero(),
-            scalar_setup_consumer_claimed_sum: secure_zero(),
-            cert_provider_claimed_sum: secure_zero(),
-            cert_base_provider_claimed_sum: secure_zero(),
         }
     }
 
@@ -556,27 +548,25 @@ pub(crate) fn gen_cert_scalar_input_air_interaction_trace(
         }
     }
     let (trace, claimed_sum) = logup.finalize_last();
-    let scalar_setup_consumer_claimed_sum: SecureField = storage_rows(base)
-        .filter(|row| row[0] != M31::from_u32_unchecked(0))
-        .map(|row| {
-            let values = scalar_setup_output_values_from_cert_base(&row);
-            let denominator: SecureField = setup_relation.combine(&values);
-            SecureField::from(row[0]) / denominator
-        })
-        .sum();
-    let cert_provider_claimed_sum: SecureField = storage_rows(base)
-        .filter(|row| row[0] != M31::from_u32_unchecked(0))
-        .flat_map(|row| {
-            [
-                cert_values_from_base(&row, cert0_col()),
-                cert_values_from_base(&row, cert1_col()),
-            ]
-        })
-        .map(|values| -> SecureField {
-            let denominator: SecureField = cert_relation.combine(&values);
-            -SecureField::from(M31::from_u32_unchecked(1)) / denominator
-        })
-        .sum();
+    (
+        trace,
+        CertScalarInputAirInteractionClaim {
+            claimed_sum,
+        },
+    )
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DebugCertScalarInputAirRelationSums {
+    pub cert_base_provider_claimed_sum: SecureField,
+}
+
+#[cfg(test)]
+pub(crate) fn debug_cert_scalar_input_air_relation_sums(
+    base: &[M31ColumnEval],
+    cert_base_relation: Option<&CertBaseRelation>,
+) -> DebugCertScalarInputAirRelationSums {
     let cert_base_provider_claimed_sum: SecureField = match cert_base_relation {
         None => secure_zero(),
         Some(cert_base_relation) => storage_rows(base)
@@ -597,15 +587,9 @@ pub(crate) fn gen_cert_scalar_input_air_interaction_trace(
             })
             .sum(),
     };
-    (
-        trace,
-        CertScalarInputAirInteractionClaim {
-            claimed_sum,
-            scalar_setup_consumer_claimed_sum,
-            cert_provider_claimed_sum,
-            cert_base_provider_claimed_sum,
-        },
-    )
+    DebugCertScalarInputAirRelationSums {
+        cert_base_provider_claimed_sum,
+    }
 }
 
 /// Build the `CertBaseRelation` tuple `(sig_id, cert_id, base_x[..], base_y[..])`
@@ -825,20 +809,12 @@ fn scalar_setup_output_packed_values_from_cert_base(
     core::array::from_fn(|index| base[1 + index].data[vec_row])
 }
 
-fn scalar_setup_output_values_from_cert_base(row: &[M31]) -> [M31; SCALAR_SETUP_OUTPUT_ARITY] {
-    core::array::from_fn(|index| row[1 + index])
-}
-
 fn cert_packed_values_from_base(
     base: &[M31ColumnEval],
     vec_row: usize,
     start: usize,
 ) -> [PackedM31; CERT_SCALAR_INPUT_RELATION_ARITY] {
     core::array::from_fn(|index| base[start + index].data[vec_row])
-}
-
-fn cert_values_from_base(row: &[M31], start: usize) -> [M31; CERT_SCALAR_INPUT_RELATION_ARITY] {
-    core::array::from_fn(|index| row[start + index])
 }
 
 /// Column offset (within a cert row block) of `cert_active`: after `sig_id`,
@@ -866,6 +842,7 @@ fn cert_base_packed_values_from_base(
     core::array::from_fn(|index| base[start + cert_base_index_in_row(index)].data[vec_row])
 }
 
+#[cfg(test)]
 fn cert_base_values_from_base(row: &[M31], start: usize) -> [M31; CERT_BASE_RELATION_ARITY] {
     core::array::from_fn(|index| row[start + cert_base_index_in_row(index)])
 }
@@ -878,6 +855,7 @@ const fn cert1_col() -> usize {
     cert0_col() + CERT_SCALAR_INPUT_ROW_COLUMNS
 }
 
+#[cfg(test)]
 fn storage_rows(base: &[M31ColumnEval]) -> impl Iterator<Item = Vec<M31>> + '_ {
     let row_count = base[0].domain.size();
     (0..row_count).map(|row| {

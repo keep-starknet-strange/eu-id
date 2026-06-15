@@ -91,6 +91,19 @@ pub struct FinalAddClaim {
     /// row; consumed by the doubling slope-numer reduction
     /// `dy + 3 ≡ 3·x1_sq (mod p)`.
     pub x1_sq: P256M31BigInt,
+    /// Per-cert PROVEN fake-GLV sign bits (consumed from `FinalAddSignRelation`,
+    /// bound to `fake_glv_scalar`'s `s2_sign_bit`).
+    pub sign_b1: M31,
+    pub sign_b2: M31,
+    /// `d = sign_b1 ⊕ sign_b2`. Orients `R_2` so the bound x-coordinate is
+    /// `x(h_1 + h_2)` rather than `x(R_1 + R_2)`.
+    pub sign_d: M31,
+    /// `r2p_y ≡ (−1)^d · r2.y (mod p)` — the oriented `R_2` y-coordinate fed to
+    /// the add. (Stored zero on the `R_2 = ∞` branch.)
+    pub r2p_y: P256M31BigInt,
+    /// Modular-negation quotient (∈ {0,1}) + carries for the `d = 1` branch.
+    pub neg_q: i64,
+    pub neg_carries: [i64; N_LIMBS],
 }
 
 impl FinalAddClaim {
@@ -102,19 +115,49 @@ impl FinalAddClaim {
     /// Rejects: the additive-inverse case `R_1 == -R_2` (yields `S = ∞`, an
     /// invalid ECDSA result — the AIR also makes this branch unprovable via
     /// `active · inverse_add = 0`) and both-infinity.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_hints(
         sig_id: M31,
         r1: &AffinePoint,
         r1_inf: bool,
-        r2: &AffinePoint,
+        sign_b1: M31,
+        r2_orig: &AffinePoint,
         r2_inf: bool,
+        sign_b2: M31,
         hinted_source_offset: u32,
     ) -> Result<Self, FinalAddError> {
-        let r1_values = point_values(r1, r1_inf);
-        let r2_values = point_values(r2, r2_inf);
         let modulus = U256::from_le_u64s(&P256_MODULUS);
         let zero = U256::ZERO;
         let three = U256::from_le_u64s(&[3, 0, 0, 0]);
+
+        // Orient R_2 by d = b1 ⊕ b2 so the chord add binds x(h_1 + h_2):
+        // x(R_1 + (−1)^d R_2) = x(h_1 + h_2). x and inf are sign-invariant; only
+        // y is conditionally negated. The ORIGINAL R_2 is still stored (and
+        // consumed by the hint relation); the add runs on the oriented point.
+        let sign_d = M31::from_u32_unchecked(sign_b1.0 ^ sign_b2.0);
+        let r2p_y_u256 = if r2_inf {
+            zero.clone()
+        } else if sign_d.0 == 1 {
+            fp_sub(&zero, &r2_orig.y, &modulus) // −r2.y mod p
+        } else {
+            r2_orig.y.clone()
+        };
+        let (neg_q, neg_carries) = if !r2_inf && sign_d.0 == 1 {
+            solve_sub_reduction(&r2p_y_u256, &r2_orig.y, &zero, &modulus).ok_or(
+                FinalAddError::ReductionFailed { which: "neg", sig_id: sig_id.0 },
+            )?
+        } else {
+            zero_reduction()
+        };
+        let r2p_point = AffinePoint {
+            x: r2_orig.x.clone(),
+            y: r2p_y_u256.clone(),
+        };
+        // The oriented point drives all branch selection and reductions below.
+        let r2 = &r2p_point;
+
+        let r1_values = point_values(r1, r1_inf);
+        let r2_values = point_values(r2_orig, r2_inf);
 
         // Pick the branch up front so every sub-witness can route on it.
         let branch = match (r1_inf, r2_inf) {
@@ -265,6 +308,12 @@ impl FinalAddClaim {
             x3_q: x3_red.0,
             x3_carries: x3_red.1,
             x1_sq: P256M31BigInt::from_u256(&x1_sq_u),
+            sign_b1,
+            sign_b2,
+            sign_d,
+            r2p_y: P256M31BigInt::from_u256(&r2p_y_u256),
+            neg_q,
+            neg_carries,
         };
         claim.verify()?;
         Ok(claim)
@@ -302,6 +351,27 @@ impl FinalAddClaim {
         let modulus = P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_MODULUS));
         let three = P256M31BigInt::from_u256(&U256::from_le_u64s(&[3, 0, 0, 0]));
 
+        // Sign-bit orientation consistency: d = b1 ⊕ b2, and
+        // r2p_y ≡ (−1)^d · r2.y (mod p). The add below uses r2p_y as the
+        // second point's y, binding x(R_1 + (−1)^d R_2) = x(h_1 + h_2).
+        if self.sign_b1.0 > 1 || self.sign_b2.0 > 1 {
+            return Err(FinalAddError::WitnessMismatch { field: "sign_bit_bool" });
+        }
+        if self.sign_d.0 != (self.sign_b1.0 ^ self.sign_b2.0) {
+            return Err(FinalAddError::WitnessMismatch { field: "sign_d" });
+        }
+        let modulus_u256 = U256::from_le_u64s(&P256_MODULUS);
+        let expected_r2p_y = if self.sign_d.0 == 1 {
+            fp_sub(&U256::ZERO, &self.r2.y.to_u256(), &modulus_u256)
+        } else {
+            self.r2.y.to_u256()
+        };
+        require_eq(
+            "r2p_y orientation",
+            &self.r2p_y,
+            &P256M31BigInt::from_u256(&expected_r2p_y),
+        )?;
+
         match self.branch {
             FinalAddBranch::DistinctAdd => {
                 require_eq(
@@ -311,7 +381,7 @@ impl FinalAddClaim {
                 )?;
                 require_eq("p1==dy", &muls[MUL_LAMBDA_DX as usize].trace.result, &self.dy)?;
                 check_sub_reduction("dx", &self.dx, &self.r1.x, &self.r2.x, &modulus, self.dx_q, &self.dx_carries, self.sig_id.0)?;
-                check_sub_reduction("dy", &self.dy, &self.r1.y, &self.r2.y, &modulus, self.dy_q, &self.dy_carries, self.sig_id.0)?;
+                check_sub_reduction("dy", &self.dy, &self.r1.y, &self.r2p_y, &modulus, self.dy_q, &self.dy_carries, self.sig_id.0)?;
                 check_x3_reduction(&self.x3, &self.r1.x, &self.r2.x, &self.lamsq, &modulus, self.x3_q, &self.x3_carries, self.sig_id.0)?;
             }
             FinalAddBranch::DoubleAdd => {
@@ -322,7 +392,7 @@ impl FinalAddClaim {
                 )?;
                 require_eq("p1==numer", &muls[MUL_LAMBDA_DX as usize].trace.result, &self.dy)?;
                 require_eq("x1==x2 (double)", &self.r1.x, &self.r2.x)?;
-                require_eq("y1==y2 (double)", &self.r1.y, &self.r2.y)?;
+                require_eq("y1==y2 (double)", &self.r1.y, &self.r2p_y)?;
                 check_two_y1_reduction(&self.dx, &self.r1.y, &modulus, self.dx_q, &self.dx_carries, self.sig_id.0)?;
                 check_slope_numer_reduction(&self.dy, &self.x1_sq, &three, &modulus, self.dy_q, &self.dy_carries, self.sig_id.0)?;
                 // x2 = x1 here; reuse the x3 + x1 + x2 ≡ lamsq reduction.
@@ -837,6 +907,7 @@ pub(crate) fn final_add_range13_uses_list(claim: &FinalAddClaim) -> Vec<M31> {
         &claim.dx_inv,
         &dx_inv_result_value(claim),
         &claim.x1_sq,
+        &claim.r2p_y,
     ] {
         uses.extend(value.limbs().iter().copied());
     }
@@ -850,6 +921,7 @@ pub(crate) fn final_add_signed_values_list(claim: &FinalAddClaim) -> Vec<M31> {
         .iter()
         .chain(claim.dy_carries.iter())
         .chain(claim.x3_carries.iter())
+        .chain(claim.neg_carries.iter())
         .map(|&carry| crate::range_checks::encode_signed_carry(carry))
         .collect()
 }
@@ -959,6 +1031,17 @@ fn gen_check_base_trace(claim: &FinalAddClaim, log_size: u32) -> Vec<M31ColumnEv
     offset += 1;
     cols[offset][row] = M31::from_u32_unchecked(u32::from(claim.x3_q == 2));
     offset += 1;
+    // Sign-bit + R_2 orientation columns (must match `Columns::read` order).
+    cols[offset][row] = claim.sign_b1;
+    offset += 1;
+    cols[offset][row] = claim.sign_b2;
+    offset += 1;
+    cols[offset][row] = claim.sign_d;
+    offset += 1;
+    write_limbs(&mut cols, &mut offset, &claim.r2p_y, row);
+    cols[offset][row] = M31::from_u32_unchecked(claim.neg_q as u32);
+    offset += 1;
+    write_signed_carries(&mut cols, &mut offset, &claim.neg_carries, row);
     debug_assert_eq!(offset, CHECK_TRACE_COLUMNS);
 
     cols.into_iter()

@@ -148,14 +148,13 @@ impl PreparedTableProjectiveSourceComponents {
 
     /// Monolithic constructor: the provider additionally pins the table to
     /// `cert.base` via `CertBaseRelation` and `PreparedTableCanonicalRelation`.
-    /// `provider_total_claimed_sum` is the provider's full logup total
-    /// (`PreparedTableEcRowPinnedInteractionClaim::total_claimed_sum`).
+    /// `provider_claimed_sum` is the provider's full logup total.
     #[allow(clippy::too_many_arguments)]
     pub fn new_pinned(
         allocator: &mut TraceLocationAllocator,
         log_size: u32,
         rows: u32,
-        provider_total_claimed_sum: SecureField,
+        provider_claimed_sum: SecureField,
         consumer_interaction: &PreparedTableProjectiveSourceInteractionClaim,
         relation: &PreparedTableEcRowRelation,
         pinning: &PreparedTablePinningRelations,
@@ -166,7 +165,9 @@ impl PreparedTableProjectiveSourceComponents {
         gamma_challenge: &GammaChallenge,
     ) -> Self {
         let interaction_claim = PreparedTableProjectiveSourceInteractionClaim {
-            provider_claimed_sum: provider_total_claimed_sum,
+            provider: crate::components::ComponentInteractionClaim {
+                claimed_sum: provider_claimed_sum,
+            },
             ..consumer_interaction.clone()
         };
         Self::new_inner(
@@ -207,7 +208,7 @@ impl PreparedTableProjectiveSourceComponents {
                     relation: relation.clone(),
                     pinning,
                 },
-                interaction_claim.provider_claimed_sum,
+                interaction_claim.provider.claimed_sum,
             ),
             consumer: PreparedTableProjectiveSourceComponent::new(
                 allocator,
@@ -218,9 +219,7 @@ impl PreparedTableProjectiveSourceComponents {
                     gamma_digest: gamma_digest.clone(),
                     gamma_challenge: gamma_challenge.clone(),
                 },
-                // EC-row + mul-result consumes and the γ-digest yields share
-                // one interaction trace.
-                interaction_claim.consumer_component_claimed_sum(),
+                interaction_claim.consumer.claimed_sum,
             ),
             gamma_range13: GammaTallComponent::new(
                 allocator,
@@ -444,4 +443,3 @@ fn prepared_table_ec_row_index_column_id() -> PreProcessedColumnId {
 fn secure_zero() -> SecureField {
     SecureField::from(M31::from_u32_unchecked(0))
 }
-

@@ -22,6 +22,7 @@ use stwo_p256_utils::constants::N_LIMBS;
 use crate::scalar::fake_glv_chain::{
     FakeGlvChainClaim, FakeGlvChainError, FakeGlvChainRow, FakeGlvChainRowKind,
 };
+use crate::components::ComponentInteractionClaim;
 use crate::scalar::fake_glv_selector::FakeGlvSelectorClaim;
 use crate::scalar::prepared_point::{PreparedPointInstance, PreparedPointRelation, TABLE16_INDEX};
 use crate::scalar::prepared_table::{PreparedAffinePoint, PreparedTableClaim};
@@ -98,24 +99,25 @@ impl FakeGlvDirectPreparedOperandProofClaim {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FakeGlvDirectPreparedOperandInteractionClaim {
-    pub provider_claimed_sum: SecureField,
-    pub consumer_claimed_sum: SecureField,
+    pub provider: ComponentInteractionClaim,
+    pub consumer: ComponentInteractionClaim,
 }
 
 impl FakeGlvDirectPreparedOperandInteractionClaim {
     pub fn zero() -> Self {
         Self {
-            provider_claimed_sum: secure_zero(),
-            consumer_claimed_sum: secure_zero(),
+            provider: ComponentInteractionClaim::zero(),
+            consumer: ComponentInteractionClaim::zero(),
         }
     }
 
     pub fn total(self) -> SecureField {
-        self.provider_claimed_sum + self.consumer_claimed_sum
+        self.provider.claimed_sum + self.consumer.claimed_sum
     }
 
     pub fn mix_into(&self, channel: &mut impl Channel) {
-        channel.mix_felts(&[self.provider_claimed_sum, self.consumer_claimed_sum]);
+        self.provider.mix_into(channel);
+        self.consumer.mix_into(channel);
     }
 }
 
@@ -138,7 +140,7 @@ impl FakeGlvDirectPreparedOperandComponents {
                     log_size: claim.provider_log_size,
                     relation: relation.clone(),
                 },
-                interaction_claim.provider_claimed_sum,
+                interaction_claim.provider.claimed_sum,
             ),
             consumer: DirectPreparedOperandConsumerComponent::new(
                 allocator,
@@ -146,7 +148,7 @@ impl FakeGlvDirectPreparedOperandComponents {
                     log_size: claim.consumer_log_size,
                     relation: relation.clone(),
                 },
-                interaction_claim.consumer_claimed_sum,
+                interaction_claim.consumer.claimed_sum,
             ),
         }
     }
@@ -554,8 +556,4 @@ fn direct_operand_zero_column_id() -> PreProcessedColumnId {
     PreProcessedColumnId {
         id: DIRECT_OPERAND_ZERO_COLUMN.into(),
     }
-}
-
-fn secure_zero() -> SecureField {
-    SecureField::from(M31::from_u32_unchecked(0))
 }

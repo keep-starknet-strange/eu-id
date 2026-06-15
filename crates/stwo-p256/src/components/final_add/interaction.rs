@@ -25,70 +25,40 @@ use super::*;
 
 #[derive(Clone, Debug)]
 pub struct FinalAddInteractionClaim {
-    pub check: SecureField,
+    pub claimed_sum: SecureField,
     pub range13: RangeCheckInteractionClaim,
     pub signed_carry: RangeCheckInteractionClaim,
     /// γ-digest tall expanders (range13 kind, signed kind) + the check's
-    /// yield sum.
+    /// yield fractions folded into the check component's claimed sum.
     pub gamma_range13: crate::components::gamma_digest::GammaTallInteractionClaim,
     pub gamma_signed: crate::components::gamma_digest::GammaTallInteractionClaim,
-    pub gamma_yield_sum: SecureField,
-    /// FinalCheckHint consumer sum (use, `+active`) for `R_1`, `R_2`.
-    pub hint_consumer_claimed_sum: SecureField,
-    /// FinalAddOutput provider sum (yield, `-active`).
-    pub output_provider_claimed_sum: SecureField,
-    /// `ProjectiveRcbMulResult` consumer sum (use, `+active`) for the four
-    /// hinted muls; balances against the hinted-mul provider globally.
-    pub mul_result_consumer_claimed_sum: SecureField,
 }
 
 impl FinalAddInteractionClaim {
     pub fn zero() -> Self {
         let zero = secure_zero();
         Self {
-            check: zero,
+            claimed_sum: zero,
             range13: RangeCheckInteractionClaim { claimed_sum: zero },
             signed_carry: RangeCheckInteractionClaim { claimed_sum: zero },
             gamma_range13: crate::components::gamma_digest::GammaTallInteractionClaim::zero(),
             gamma_signed: crate::components::gamma_digest::GammaTallInteractionClaim::zero(),
-            gamma_yield_sum: zero,
-            hint_consumer_claimed_sum: zero,
-            output_provider_claimed_sum: zero,
-            mul_result_consumer_claimed_sum: zero,
         }
     }
 
-    /// Internal total: every relation that nets to zero WITHIN the sub-graph.
-    /// `mul_limb`/raw/fold families + `FinalAddMulResult` + own range13/signed
-    /// carry providers all balance internally; the boundary-crossing relations
-    /// (`FinalCheckHint`, `FinalAddOutput`) are excluded.
-    pub fn internal_total(&self) -> SecureField {
-        self.check
+    pub fn total(&self) -> SecureField {
+        self.claimed_sum
             + self.range13.claimed_sum
             + self.signed_carry.claimed_sum
             + self.gamma_range13.claimed_sum
             + self.gamma_signed.claimed_sum
-            - self.hint_consumer_claimed_sum
-            - self.output_provider_claimed_sum
-            - self.mul_result_consumer_claimed_sum
-    }
-
-    /// `GammaDigest` balance for this sub-graph (nets to zero internally).
-    pub fn gamma_digest_total(&self) -> SecureField {
-        self.gamma_yield_sum
-            + self.gamma_range13.digest_use_sum
-            + self.gamma_signed.digest_use_sum
     }
 
     pub fn mix_into(&self, channel: &mut impl Channel) {
         channel.mix_felts(&[
-            self.check,
+            self.claimed_sum,
             self.range13.claimed_sum,
             self.signed_carry.claimed_sum,
-            self.gamma_yield_sum,
-            self.hint_consumer_claimed_sum,
-            self.output_provider_claimed_sum,
-            self.mul_result_consumer_claimed_sum,
         ]);
         self.gamma_range13.mix_into(channel);
         self.gamma_signed.mix_into(channel);
@@ -104,8 +74,15 @@ pub fn gen_final_add_interaction_trace(
 
     // Check family (consumers + output provider). The four muls are proven by
     // hinted-mul rows; the check consumes them via wide tuples.
-    let (check_interaction, check_sum, hint_sum, output_sum, mul_result_sum, gamma_yield_sum) =
-        gen_check_interaction_trace(claim, relations, log_sizes.check);
+    let (
+        check_interaction,
+        check_sum,
+        _hint_sum,
+        _sign_sum,
+        _output_sum,
+        _mul_result_sum,
+        _gamma_yield_sum,
+    ) = gen_check_interaction_trace(claim, relations, log_sizes.check);
     columns.extend(check_interaction);
 
     // γ-digest tall expanders (range13 kind, signed kind).
@@ -154,15 +131,11 @@ pub fn gen_final_add_interaction_trace(
     Ok((
         columns,
         FinalAddInteractionClaim {
-            check: check_sum,
+            claimed_sum: check_sum,
             range13: range13_claim,
             signed_carry: signed_carry_claim,
             gamma_range13: gamma_range13_claim,
             gamma_signed: gamma_signed_claim,
-            gamma_yield_sum,
-            hint_consumer_claimed_sum: hint_sum,
-            output_provider_claimed_sum: output_sum,
-            mul_result_consumer_claimed_sum: mul_result_sum,
         },
     ))
 }
@@ -178,9 +151,10 @@ fn gen_check_interaction_trace(
     SecureField,
     SecureField,
     SecureField,
+    SecureField,
 ) {
     let padded_rows = 1usize << log_size;
-    let (fractions, hint_sum, output_sum, mul_result_sum, gamma_yield_sum) =
+    let (fractions, hint_sum, sign_sum, output_sum, mul_result_sum, gamma_yield_sum) =
         check_fraction_pairs(claim, relations);
     let fraction_count = fractions.len();
 
@@ -211,7 +185,7 @@ fn gen_check_interaction_trace(
         col.finalize_col();
     }
     let (trace, check_sum) = logup.finalize_last();
-    (trace, check_sum, hint_sum, output_sum, mul_result_sum, gamma_yield_sum)
+    (trace, check_sum, hint_sum, sign_sum, output_sum, mul_result_sum, gamma_yield_sum)
 }
 
 /// Check consumer/provider fractions, in the EXACT order `FinalAddCheckEval`
@@ -230,9 +204,11 @@ fn check_fraction_pairs(
     SecureField,
     SecureField,
     SecureField,
+    SecureField,
 ) {
     let mut pairs = Vec::new();
     let mut hint_sum = secure_zero();
+    let mut sign_sum = secure_zero();
     let mut output_sum = secure_zero();
 
     // 1. hint consumes, numerator `(1 - inf)` (active row only): an inactive
@@ -253,6 +229,21 @@ fn check_fraction_pairs(
         let denom = relations.hint.combine(&values);
         pairs.push((numerator, denom));
         hint_sum += numerator / denom;
+    }
+
+    // 1b. sign consumes (same gate/numerator as the hint consume), binding the
+    //     witnessed per-cert bit to the fake_glv_scalar provider. MUST mirror
+    //     the AIR-eval emission order (right after the hint consumes).
+    for (cert_id, point, bit) in [(0u32, &claim.r1, claim.sign_b1), (1u32, &claim.r2, claim.sign_b2)] {
+        let numerator = if point.inf.0 == 1 {
+            secure_zero()
+        } else {
+            secure_from_i64(1)
+        };
+        let values = [claim.sig_id, M31::from_u32_unchecked(cert_id), bit];
+        let denom = relations.sign.combine(&values);
+        pairs.push((numerator, denom));
+        sign_sum += numerator / denom;
     }
 
     // 2. mul-result consumes (wide tuples against the hinted provider).
@@ -323,5 +314,5 @@ fn check_fraction_pairs(
         gamma_yield_sum += secure_from_i64(-1) / denom;
     }
 
-    (pairs, hint_sum, output_sum, mul_result_sum, gamma_yield_sum)
+    (pairs, hint_sum, sign_sum, output_sum, mul_result_sum, gamma_yield_sum)
 }

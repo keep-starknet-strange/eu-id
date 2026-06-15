@@ -11,18 +11,26 @@
 //!
 //! For each signature, the prepared table proves a per-cert *signed hint point*
 //! `R_i` (= the `DoubleR` row's `lhs`), which `PreparedTableCanonicalRelation`
-//! role `R` already pins in-AIR. `R_i = ±h_i` where `h_i = u_i · base_i`; for an
-//! ACTIVE cert `fake_glv_scalar` forces `s2_sign_bit == 1`, so `R_i = -h_i`.
-//! The prepared table yields `R_i` on [`FinalCheckHintRelation`] keyed
-//! `(sig_id, cert_id, point)`; this component CONSUMES `R_1` (cert0 = `u1·G`)
-//! and `R_2` (cert1 = `u2·Q`).
+//! role `R` already pins in-AIR. `R_i = (-1)^{b_i}·h_i` where `h_i = u_i·base_i`
+//! and `b_i` is the per-cert fake-GLV `s2_sign_bit` from the Garaga
+//! decomposition. **`b_i` is input-dependent: both values occur for honest
+//! signatures** (the real `p256`-crate fixture decomposes both certs to
+//! `b_i = 0`, i.e. `R_i = +h_i`). The prepared table yields `R_i` on
+//! [`FinalCheckHintRelation`] keyed `(sig_id, cert_id, point)`; this component
+//! CONSUMES `R_1` (cert0 = `u1·G`) and `R_2` (cert1 = `u2·Q`).
 //!
-//! # Why the negation cancels
+//! # KNOWN COMPLETENESS GAP (pending fix): mixed sign bits
 //!
-//! `R_final = h1 + h2 = (-R_1) + (-R_2) = -(R_1 + R_2)`. Negation preserves the
-//! x-coordinate, so `x(R_final) = x(R_1 + R_2)`. Hence this component computes
-//! `S = R_1 + R_2` and binds `r_x = x(S) = x(R_final)`. No per-coordinate
-//! negation gadget is needed.
+//! This component currently computes `S = R_1 + R_2` and binds `r_x = x(S)`.
+//! That equals the ECDSA target `x(h_1 + h_2)` **only when `b_1 == b_2`**
+//! (then `R_1 + R_2 = (-1)^{b}(h_1 + h_2)` and `x` is sign-invariant). When the
+//! two certs decompose to opposite signs (`b_1 != b_2`, ~50% of real signatures
+//! since `u_1, u_2` are independent), `R_1 + R_2 = ±(h_1 - h_2)` and the bound
+//! `r_x` is wrong, so such a (valid!) signature fails to prove with
+//! `RelationImbalance { FinalAddOutput }`. This is a completeness gap, not a
+//! forgery. Fix: consume each proven `b_i` (via a new sign relation provided by
+//! `fake_glv_scalar`) and conditionally negate `R_2` by `d = b_1 XOR b_2`
+//! before the add, so the component computes `x(R_1 + (-1)^d R_2) = x(h_1+h_2)`.
 //!
 //! # Architecture (mirrors `public_key_curve_air.rs`)
 //!
@@ -160,10 +168,11 @@ impl FinalAddLogSizes {
     }
 }
 
-/// γ-digest value-list lengths for the (single-row) final-add check: 12
-/// witnessed big-ints' limbs (range13) and the 3·N_LIMBS reduction carries.
-const FINAL_ADD_GAMMA_RANGE13_VALUES: usize = 12 * stwo_p256_utils::constants::N_LIMBS;
-const FINAL_ADD_GAMMA_SIGNED_VALUES: usize = 3 * stwo_p256_utils::constants::N_LIMBS;
+/// γ-digest value-list lengths for the (single-row) final-add check: 13
+/// witnessed big-ints' limbs (range13: the original 12 + the oriented `r2p_y`)
+/// and the 4·N_LIMBS reduction carries (dx, dy, x3 + the negation carries).
+const FINAL_ADD_GAMMA_RANGE13_VALUES: usize = 13 * stwo_p256_utils::constants::N_LIMBS;
+const FINAL_ADD_GAMMA_SIGNED_VALUES: usize = 4 * stwo_p256_utils::constants::N_LIMBS;
 
 pub(crate) fn final_add_gamma_max_padded_values() -> usize {
     crate::components::gamma_digest::gamma_padded_values(FINAL_ADD_GAMMA_RANGE13_VALUES).max(
@@ -231,11 +240,12 @@ impl FinalAddComponents {
                     mul_result: relations.mul_result.clone(),
                     hinted_source_offset: log_sizes.hinted_source_offset,
                     hint_relation: relations.hint.clone(),
+                    sign_relation: relations.sign.clone(),
                     output_relation: relations.output.clone(),
                     gamma_digest: relations.gamma_digest.clone(),
                     gamma_challenge: relations.gamma_challenge.clone(),
                 },
-                interaction_claim.check,
+                interaction_claim.claimed_sum,
             ),
             gamma_range13: crate::components::gamma_digest::GammaTallComponent::new(
                 allocator,
@@ -346,6 +356,7 @@ impl FinalAddProofClaim {
                 signed_carry: RangeCheckRelation::dummy(),
                 hint: FinalCheckHintRelation::dummy(),
                 output: FinalAddOutputRelation::dummy(),
+                sign: FinalAddSignRelation::dummy(),
                 gamma_digest: crate::components::gamma_digest::GammaDigestRelation::dummy(),
                 gamma_challenge: crate::components::gamma_digest::GammaChallenge::from_gamma(
                     SecureField::from(M31::from_u32_unchecked(2)),

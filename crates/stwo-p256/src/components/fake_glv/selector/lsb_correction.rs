@@ -19,6 +19,7 @@ use stwo_constraint_framework::{
 };
 
 use crate::constants::P256_MODULUS;
+use crate::components::ComponentInteractionClaim;
 use crate::curve::scalar_mul;
 use crate::field_ops::sub_mod_witness;
 use crate::limbs::P256M31BigInt;
@@ -110,24 +111,25 @@ impl FakeGlvLsbCorrectionOperandProofClaim {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FakeGlvLsbCorrectionOperandInteractionClaim {
-    pub provider_claimed_sum: SecureField,
-    pub consumer_claimed_sum: SecureField,
+    pub provider: ComponentInteractionClaim,
+    pub consumer: ComponentInteractionClaim,
 }
 
 impl FakeGlvLsbCorrectionOperandInteractionClaim {
     pub fn zero() -> Self {
         Self {
-            provider_claimed_sum: secure_zero(),
-            consumer_claimed_sum: secure_zero(),
+            provider: ComponentInteractionClaim::zero(),
+            consumer: ComponentInteractionClaim::zero(),
         }
     }
 
     pub fn total(self) -> SecureField {
-        self.provider_claimed_sum + self.consumer_claimed_sum
+        self.provider.claimed_sum + self.consumer.claimed_sum
     }
 
     pub fn mix_into(&self, channel: &mut impl Channel) {
-        channel.mix_felts(&[self.provider_claimed_sum, self.consumer_claimed_sum]);
+        self.provider.mix_into(channel);
+        self.consumer.mix_into(channel);
     }
 }
 
@@ -150,7 +152,7 @@ impl FakeGlvLsbCorrectionOperandComponents {
                     log_size: claim.provider_log_size,
                     relation: relation.clone(),
                 },
-                interaction_claim.provider_claimed_sum,
+                interaction_claim.provider.claimed_sum,
             ),
             consumer: FakeGlvLsbCorrectionOperandConsumerComponent::new(
                 allocator,
@@ -158,7 +160,7 @@ impl FakeGlvLsbCorrectionOperandComponents {
                     log_size: claim.consumer_log_size,
                     relation: relation.clone(),
                 },
-                interaction_claim.consumer_claimed_sum,
+                interaction_claim.consumer.claimed_sum,
             ),
         }
     }
@@ -583,8 +585,4 @@ fn lsb_correction_operand_zero_column_id() -> PreProcessedColumnId {
     PreProcessedColumnId {
         id: LSB_CORRECTION_OPERAND_ZERO_COLUMN.into(),
     }
-}
-
-fn secure_zero() -> SecureField {
-    SecureField::from(M31::from_u32_unchecked(0))
 }

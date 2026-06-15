@@ -19,6 +19,7 @@ use stwo_constraint_framework::{
 };
 use stwo_p256_utils::constants::N_LIMBS;
 
+use crate::components::ComponentInteractionClaim;
 use crate::range_checks::{add_range_check, RangeCheckRelation};
 use crate::scalar::fake_glv_chain::{FakeGlvChainClaim, FakeGlvChainError};
 use crate::scalar::prepared_point::{
@@ -94,26 +95,29 @@ impl FakeGlvPreparedPointSourceProofClaim {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FakeGlvPreparedPointSourceInteractionClaim {
-    pub provider_claimed_sum: SecureField,
-    pub consumer_claimed_sum: SecureField,
-    pub range7_consumer_claimed_sum: SecureField,
+    pub provider: ComponentInteractionClaim,
+    pub consumer: ComponentInteractionClaim,
 }
 
 impl FakeGlvPreparedPointSourceInteractionClaim {
     pub fn zero() -> Self {
         Self {
-            provider_claimed_sum: secure_zero(),
-            consumer_claimed_sum: secure_zero(),
-            range7_consumer_claimed_sum: secure_zero(),
+            provider: ComponentInteractionClaim::zero(),
+            consumer: ComponentInteractionClaim::zero(),
         }
     }
 
     pub fn total(self) -> SecureField {
-        self.provider_claimed_sum + self.consumer_claimed_sum
+        self.provider.claimed_sum + self.consumer.claimed_sum
+    }
+
+    pub(crate) fn component_claimed_sum(self) -> SecureField {
+        self.provider.claimed_sum + self.consumer.claimed_sum
     }
 
     pub fn mix_into(&self, channel: &mut impl Channel) {
-        channel.mix_felts(&[self.provider_claimed_sum, self.consumer_claimed_sum]);
+        self.provider.mix_into(channel);
+        self.consumer.mix_into(channel);
     }
 }
 
@@ -138,8 +142,7 @@ impl FakeGlvPreparedPointSourceComponents {
                     relation: relation.clone(),
                     range7: range7.clone(),
                 },
-                interaction_claim.provider_claimed_sum
-                    + interaction_claim.range7_consumer_claimed_sum,
+                interaction_claim.provider.claimed_sum,
             ),
             consumer: FakeGlvPreparedPointConsumerComponent::new(
                 allocator,
@@ -147,7 +150,7 @@ impl FakeGlvPreparedPointSourceComponents {
                     log_size: claim.consumer_log_size,
                     relation: relation.clone(),
                 },
-                interaction_claim.consumer_claimed_sum,
+                interaction_claim.consumer.claimed_sum,
             ),
         }
     }
@@ -492,10 +495,6 @@ fn nonzero_prepared_provider_count(trace: &PreparedPointTraceClaim) -> usize {
         .iter()
         .filter(|provider| provider.use_count.0 != 0)
         .count()
-}
-
-fn secure_zero() -> SecureField {
-    SecureField::from(M31::from_u32_unchecked(0))
 }
 
 fn storage_rows(base: &[M31ColumnEval]) -> impl Iterator<Item = Vec<M31>> + '_ {

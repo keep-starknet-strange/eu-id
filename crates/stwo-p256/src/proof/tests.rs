@@ -19,12 +19,202 @@ use core::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::ops::Deref;
 use stwo::core::channel::Blake2sM31Channel;
+use stwo::core::channel::MerkleChannel;
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
 use stwo::prover::backend::Column;
 use stwo_constraint_framework::{
     assert_constraints_on_trace, FrameworkComponent, FrameworkEval,
     PREPROCESSED_TRACE_IDX,
 };
+
+/// Verify a monolithic proof bound to its OWN embedded public instances.
+///
+/// Production relying parties must pass an independently-sourced expected
+/// statement to [`verify_current_air_monolithic`] (that caller-argument binding
+/// is what this helper deliberately short-circuits). Tests that build a proof
+/// honestly — or tamper with it before verifying — bind to whatever the proof
+/// carries, so the equality gate is a no-op and each test still exercises its
+/// intended deeper failure layer (relation imbalance, canonicality, PCS, …).
+/// The caller-binding gate itself is covered by
+/// `current_p256_monolithic_verifier_rejects_mismatched_expected_instances`.
+fn verify_self_bound<MC: MerkleChannel>(
+    proof: P256CurrentAirProof<MC::H>,
+) -> Result<(), P256ProofError> {
+    let expected = proof.claim.public_inputs.instances.clone();
+    verify_current_air_monolithic::<MC>(proof, &expected)
+}
+
+fn stwo_p256_source_files() -> Vec<std::path::PathBuf> {
+    fn visit(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("source directory is readable") {
+            let entry = entry.expect("source entry is readable");
+            let path = entry.path();
+            if path.is_dir() {
+                visit(&path, out);
+            } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    visit(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut files,
+    );
+    files.sort();
+    files
+}
+
+// Lightweight source-shape guard, not a full Rust parser. Block-comment and
+// string-literal brace edge cases are out of scope for this structural test.
+fn is_interaction_claim_struct_item(line: &str) -> bool {
+    let tokens = line.split_whitespace().collect::<Vec<_>>();
+    tokens
+        .windows(2)
+        .any(|window| window[0] == "struct" && window[1].contains("InteractionClaim"))
+}
+
+fn interaction_claim_struct_ranges(source: &str) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut start = None;
+    let mut depth = 0isize;
+
+    for (line_index, line) in source.lines().enumerate() {
+        let line_without_comment = line.split_once("//").map_or(line, |(code, _)| code);
+        let trimmed = line_without_comment.trim_start();
+        if start.is_none() {
+            if is_interaction_claim_struct_item(trimmed) {
+                start = Some(line_index);
+            } else {
+                continue;
+            }
+        }
+
+        depth += line_without_comment.matches('{').count() as isize;
+        depth -= line_without_comment.matches('}').count() as isize;
+
+        if start.is_some() && depth == 0 && line_without_comment.contains('}') {
+            ranges.push(start.take().expect("struct start")..line_index + 1);
+        }
+    }
+
+    ranges
+}
+
+fn source_line_field_name(line: &str) -> Option<&str> {
+    let line = line.trim();
+    if line.is_empty()
+        || line.starts_with("//")
+        || line.starts_with("///")
+        || line.starts_with("#[")
+        || line.starts_with('}')
+    {
+        return None;
+    }
+
+    let (before_colon, _) = line.split_once(':')?;
+    before_colon.split_whitespace().last()
+}
+
+fn is_forbidden_interaction_claim_field(field_name: &str) -> bool {
+    if field_name == "check" {
+        return true;
+    }
+
+    [
+        "consumer_claimed_sum",
+        "provider_claimed_sum",
+        "total_claimed_sum",
+        "component_claimed_sum",
+        "yield_sum",
+        "use_sum",
+        "digest_use_sum",
+        "range_use_sum",
+    ]
+    .iter()
+    .any(|semantic_name| field_name.contains(semantic_name))
+}
+
+fn is_direct_semantic_secure_field(line: &str, field_name: &str) -> bool {
+    line.contains("SecureField")
+        && (field_name == "ecdsa_result_provider_claimed_sum"
+            || field_name.contains("provider_claimed_sum")
+            || field_name.contains("consumer_claimed_sum")
+            || field_name.contains("claimed_sum"))
+}
+
+#[test]
+fn interaction_claim_structs_match_stwo_cairo_shape() {
+    let mut offenders = Vec::new();
+
+    for path in stwo_p256_source_files() {
+        let source = std::fs::read_to_string(&path).expect("source file is readable");
+        if !source.contains("InteractionClaim") {
+            continue;
+        }
+        let lines = source.lines().collect::<Vec<_>>();
+        for range in interaction_claim_struct_ranges(&source) {
+            for line_index in range {
+                let Some(field_name) = source_line_field_name(lines[line_index]) else {
+                    continue;
+                };
+                if is_forbidden_interaction_claim_field(field_name) {
+                    offenders.push(format!(
+                        "{}:{}: {}",
+                        path.strip_prefix(env!("CARGO_MANIFEST_DIR"))
+                            .unwrap_or(&path)
+                            .display(),
+                        line_index + 1,
+                        lines[line_index].trim()
+                    ));
+                }
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "interaction claims must expose only component claimed sums, stwo-cairo style:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn top_level_interaction_claim_has_no_direct_semantic_secure_fields() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/proof/mod.rs");
+    let source = std::fs::read_to_string(&path).expect("proof module is readable");
+    let lines = source.lines().collect::<Vec<_>>();
+    let struct_range = interaction_claim_struct_ranges(&source)
+        .into_iter()
+        .find(|range| lines[range.start].contains("P256CurrentAirInteractionClaim"))
+        .expect("P256CurrentAirInteractionClaim exists");
+    let mut offenders = Vec::new();
+
+    for line_index in struct_range {
+        let Some(field_name) = source_line_field_name(lines[line_index]) else {
+            continue;
+        };
+        if is_direct_semantic_secure_field(lines[line_index], field_name)
+            || lines[line_index].contains("RelationBalanceClaim")
+        {
+            offenders.push(format!(
+                "{}:{}: {}",
+                path.strip_prefix(env!("CARGO_MANIFEST_DIR"))
+                    .unwrap_or(&path)
+                    .display(),
+                line_index + 1,
+                field_name
+            ));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "top-level interaction claim must aggregate component claims, not direct semantic SecureField fields:\n{}",
+        offenders.join("\n")
+    );
+}
 
 fn test_input(message_hash: u64, r: u64, s: u64) -> EcdsaVerifyInput {
     EcdsaVerifyInput {
@@ -292,8 +482,52 @@ fn current_p256_monolithic_proves_real_p256_crate_signature() {
         .expect("real p256-crate signature builds a proof draft")
         .prove_current_air_monolithic::<Blake2sMerkleChannel>()
         .expect("real p256-crate signature proof generates");
-    verify_current_air_monolithic::<Blake2sMerkleChannel>(proof)
+    verify_self_bound::<Blake2sMerkleChannel>(proof)
         .expect("real p256-crate signature proof verifies");
+}
+
+/// Regression for the final_add mixed-sign-bit completeness bug. A valid ECDSA
+/// signature whose two cert scalars decompose to OPPOSITE fake-GLV sign bits
+/// (`b1 != b2`, ~50% of real signatures since `u1, u2` are independent) must
+/// prove and verify. Before the `FinalAddSignRelation` orientation fix this
+/// failed with `RelationImbalance { FinalAddOutput }`, because `final_add`
+/// bound `x(R_1 + R_2)` instead of `x(h_1 + h_2)` and those differ when the
+/// signs disagree. The fix consumes each proven `s2_sign_bit` and orients
+/// `R_2` by `d = b1 ⊕ b2`.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release-only: full STARK prove/verify is slow in debug")]
+fn current_p256_monolithic_proves_mixed_sign_bit_signature() {
+    use crate::scalar::fake_glv_decompose::decompose_scalar_mod_n;
+    // Find full-width u-values with DIFFERING decompose sign bits.
+    let mut u_bit0: Option<U256> = None;
+    let mut u_bit1: Option<U256> = None;
+    let mut state: u128 = 0xdead_beef_0123_4567_89ab_cdef_fedc_ba98;
+    while u_bit0.is_none() || u_bit1.is_none() {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let hi = state;
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let lo = state;
+        let mut bytes = [0u8; 32];
+        bytes[..16].copy_from_slice(&hi.to_be_bytes());
+        bytes[16..].copy_from_slice(&lo.to_be_bytes());
+        let u = x_mod_order(&U256(bytes));
+        if u == U256::ZERO {
+            continue;
+        }
+        match decompose_scalar_mod_n(&u) {
+            Some(d) if d.s2_sign_bit && u_bit1.is_none() => u_bit1 = Some(u),
+            Some(d) if !d.s2_sign_bit && u_bit0.is_none() => u_bit0 = Some(u),
+            _ => {}
+        }
+    }
+    let input = valid_real_input_with_u_scalars(u_bit0.unwrap(), u_bit1.unwrap());
+    assert!(ecdsa_verify(&input), "mixed-bit synthetic input must be valid");
+    let proof = P256ProofDraft::from_inputs_with_arbitrary_fake_glv_hints(vec![input])
+        .expect("mixed-bit signature builds a proof draft")
+        .prove_current_air_monolithic::<Blake2sMerkleChannel>()
+        .expect("mixed-bit signature proof generates");
+    verify_self_bound::<Blake2sMerkleChannel>(proof)
+        .expect("mixed-bit signature proof verifies (final_add orients R_2 by d=b1^b2)");
 }
 
 /// Task 6 end-to-end: force `u1 == u2` so `R_1 = R_2` and the
@@ -306,7 +540,7 @@ fn current_p256_monolithic_proves_arbitrary_doubling_final_add() {
         .expect("u1 == u2 doubling draft builds")
         .prove_current_air_monolithic::<Blake2sMerkleChannel>()
         .expect("u1 == u2 doubling proof generates");
-    verify_current_air_monolithic::<Blake2sMerkleChannel>(proof)
+    verify_self_bound::<Blake2sMerkleChannel>(proof)
         .expect("u1 == u2 doubling proof verifies");
 }
 
@@ -337,7 +571,7 @@ fn current_p256_monolithic_proof_rejects_mutated_public_input_binding() {
     assert_eq!(
         err,
         P256ProofError::RelationImbalance {
-            relation: "PublicEcdsaInstance"
+            relation: "LookupSum"
         }
     );
 }
@@ -357,7 +591,7 @@ fn current_p256_monolithic_verifier_rejects_mutated_public_r() {
     // ITS instances, so a mutated `r` no longer matches the STARK-bound
     // consumer trace and the balance fails DIRECTLY (before the STARK layer)
     // rather than only via an incidental Fiat-Shamir / FRI divergence.
-    let err = verify_current_air_monolithic::<Blake2sMerkleChannel>(monolithic)
+    let err = verify_self_bound::<Blake2sMerkleChannel>(monolithic)
         .expect_err("mutated verifier public r must reject");
 
     assert!(
@@ -384,12 +618,45 @@ fn current_p256_monolithic_verifier_rejects_unbound_public_key() {
     let pub_x = &mut monolithic.claim.public_inputs.instances[0].pub_x;
     pub_x.limbs_mut()[0] = M31::from_u32_unchecked(pub_x.limbs()[0].0 ^ 1);
 
-    let err = verify_current_air_monolithic::<Blake2sMerkleChannel>(monolithic)
+    let err = verify_self_bound::<Blake2sMerkleChannel>(monolithic)
         .expect_err("presented public key unbound from the committed trace must reject");
     assert!(
         matches!(err, P256ProofError::RelationImbalance { .. }),
         "expected a public-input binding imbalance, got {err:?}"
     );
+}
+
+/// Caller-argument binding: `verify_current_air_monolithic` must reject a proof
+/// whose embedded public instances differ from the statement the caller asked
+/// to verify, even when the proof is internally valid. Otherwise a relying
+/// party that trusts `Ok(())` would accept a valid proof of ANY signature the
+/// prover chose. The happy path (correct expected statement) must still verify.
+#[test]
+fn current_p256_monolithic_verifier_rejects_mismatched_expected_instances() {
+    let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+        valid_real_input_with_small_u_scalars(7, 11),
+    ])
+    .expect("current pipeline builds");
+    let monolithic = proof
+        .prove_current_air_monolithic::<Blake2sMerkleChannel>()
+        .expect("current AIR monolithic proof proves");
+
+    // A relying party that expected a DIFFERENT signature (one bit flipped in r)
+    // must be rejected up front, before any proof work.
+    let mut wrong_expected = monolithic.claim.public_inputs.instances.clone();
+    let r = &mut wrong_expected[0].r;
+    r.limbs_mut()[0] = M31::from_u32_unchecked(r.limbs()[0].0 ^ 1);
+    let err = verify_current_air_monolithic::<Blake2sMerkleChannel>(monolithic.clone(), &wrong_expected)
+        .expect_err("proof of a different statement than the caller expected must reject");
+    assert!(
+        matches!(err, P256ProofError::PublicInstanceMismatch),
+        "expected PublicInstanceMismatch, got {err:?}"
+    );
+
+    // The same proof verifies when the caller passes the matching statement.
+    let correct_expected = monolithic.claim.public_inputs.instances.clone();
+    verify_current_air_monolithic::<Blake2sMerkleChannel>(monolithic, &correct_expected)
+        .expect("proof of exactly the caller's expected statement must verify");
 }
 
 /// The verifier must pin its PCS config: `stark_proof.config` is
@@ -407,7 +674,7 @@ fn current_p256_monolithic_verifier_rejects_weakened_pcs_config() {
     monolithic.stark_proof.0.config.pow_bits = 0;
     monolithic.stark_proof.0.config.fri_config.n_queries = 1;
 
-    let err = verify_current_air_monolithic::<Blake2sMerkleChannel>(monolithic)
+    let err = verify_self_bound::<Blake2sMerkleChannel>(monolithic)
         .expect_err("weakened prover-supplied PCS config must reject");
     assert!(
         matches!(err, P256ProofError::ProofLayer(ref message) if message.contains("pinned")),
@@ -432,7 +699,7 @@ fn current_p256_monolithic_verifier_rejects_non_canonical_public_key() {
     // pub_x := p (>= p, the non-canonical representative of 0).
     let mut forged = monolithic.clone();
     forged.claim.public_inputs.instances[0].pub_x = P256M31BigInt::from_u256(&field_modulus());
-    let err = verify_current_air_monolithic::<Blake2sMerkleChannel>(forged)
+    let err = verify_self_bound::<Blake2sMerkleChannel>(forged)
         .expect_err("pub_x = p must reject");
     assert_eq!(
         err,
@@ -448,7 +715,7 @@ fn current_p256_monolithic_verifier_rejects_non_canonical_public_key() {
         &field_modulus(),
         &U256::from_le_u64s(&[41, 0, 0, 0]),
     ));
-    let err = verify_current_air_monolithic::<Blake2sMerkleChannel>(forged)
+    let err = verify_self_bound::<Blake2sMerkleChannel>(forged)
         .expect_err("pub_y = p + 41 must reject");
     assert_eq!(
         err,
@@ -463,7 +730,7 @@ fn current_p256_monolithic_verifier_rejects_non_canonical_public_key() {
     let mut forged = monolithic;
     forged.claim.public_inputs.instances[0].pub_x.limbs_mut()[0] =
         M31::from_u32_unchecked(1 << 13);
-    let err = verify_current_air_monolithic::<Blake2sMerkleChannel>(forged)
+    let err = verify_self_bound::<Blake2sMerkleChannel>(forged)
         .expect_err("out-of-range pub_x limb must reject");
     assert_eq!(
         err,
@@ -475,7 +742,7 @@ fn current_p256_monolithic_verifier_rejects_non_canonical_public_key() {
 }
 
 #[test]
-fn current_p256_monolithic_proof_rejects_mutated_cert_base() {
+fn current_p256_monolithic_verifier_rejects_mutated_cert_base_lookup_sum() {
     let mut proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
         valid_real_input_with_small_u_scalars(7, 11),
     ])
@@ -484,16 +751,11 @@ fn current_p256_monolithic_proof_rejects_mutated_cert_base() {
 
     let err = proof
         .prove_current_air_monolithic::<Blake2sMerkleChannel>()
-        .expect_err("mutated cert base must reject in the monolithic AIR");
+        .expect_err("mutated cert base must reject during proving");
 
-    // Phase 2's prepared-table base pinning now catches a wrong cert base at
-    // the interaction-balance check: cert_bind yields the mutated base on
-    // CertBaseRelation while the prepared-table provider still consumes the
-    // bound G/Q, so the relation no longer balances (a stronger, earlier
-    // rejection than the previous PCS-layer ConstraintsNotSatisfied).
     assert!(
-        matches!(err, P256ProofError::RelationImbalance { relation: "CertBase" }),
-        "expected CertBase imbalance, got {err:?}"
+        matches!(err, P256ProofError::RelationImbalance { relation: "LookupSum" }),
+        "expected LookupSum imbalance, got {err:?}"
     );
 }
 
@@ -508,7 +770,7 @@ fn current_p256_monolithic_verifier_rejects_mutated_fake_glv_scalar_claim() {
         .expect("current AIR monolithic proof proves");
     monolithic.claim.fake_glv_scalar_air.log_size += 1;
 
-    let err = verify_current_air_monolithic::<Blake2sMerkleChannel>(monolithic)
+    let err = verify_self_bound::<Blake2sMerkleChannel>(monolithic)
         .expect_err("mutated fake-GLV scalar AIR claim must reject");
     // Mutating a claim's log size perturbs the Fiat-Shamir transcript and hence
     // the drawn relation elements, so the O1 verifier-recomputed public-input
@@ -534,7 +796,7 @@ fn current_p256_monolithic_verifier_rejects_mutated_fake_glv_selector_claim() {
         .expect("current AIR monolithic proof proves");
     monolithic.claim.fake_glv_selector_air.log_size += 1;
 
-    let err = verify_current_air_monolithic::<Blake2sMerkleChannel>(monolithic)
+    let err = verify_self_bound::<Blake2sMerkleChannel>(monolithic)
         .expect_err("mutated fake-GLV selector AIR claim must reject");
     assert!(
         matches!(
@@ -545,34 +807,8 @@ fn current_p256_monolithic_verifier_rejects_mutated_fake_glv_selector_claim() {
     );
 }
 
-/// O1 — the prover-supplied `ecdsa_result_provider_claimed_sum` (and the public
-/// instance provider sum) are PUBLIC-DATA initial-LogUp claims with no committed
-/// trace, so the verifier recomputes them from its own instances and ignores
-/// the prover's value. Tampering with the field is therefore a no-op: the proof
-/// still verifies (the recomputed provider overrides the tampered one). Before
-/// O1 this same tampering produced a forgeable `EcdsaResult` balance.
 #[test]
-fn current_p256_monolithic_verifier_ignores_prover_ecdsa_result_provider_sum() {
-    use num_traits::One;
-    let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
-        valid_real_input_with_small_u_scalars(7, 11),
-    ])
-    .expect("current pipeline builds");
-    let mut monolithic = proof
-        .prove_current_air_monolithic::<Blake2sMerkleChannel>()
-        .expect("current AIR monolithic proof proves");
-    monolithic
-        .interaction_claim
-        .ecdsa_result_provider_claimed_sum += SecureField::one();
-
-    verify_current_air_monolithic::<Blake2sMerkleChannel>(monolithic).expect(
-        "the verifier recomputes the ecdsa-result provider from its instances, \
-         so a tampered prover-supplied value is ignored",
-    );
-}
-
-#[test]
-fn current_p256_monolithic_verifier_rejects_unbalanced_range7_consumer_sum() {
+fn current_p256_monolithic_verifier_rejects_unbalanced_prepared_point_source_sum() {
     use num_traits::One;
     let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
         valid_real_input_with_small_u_scalars(7, 11),
@@ -584,19 +820,22 @@ fn current_p256_monolithic_verifier_rejects_unbalanced_range7_consumer_sum() {
     monolithic
         .interaction_claim
         .fake_glv_prepared_point_source
-        .range7_consumer_claimed_sum += SecureField::one();
+        .provider
+        .claimed_sum += SecureField::one();
 
-    let err = verify_current_air_monolithic::<Blake2sMerkleChannel>(monolithic)
-        .expect_err("Range7 balance must reject mutated consumer sum");
+    let err = verify_self_bound::<Blake2sMerkleChannel>(monolithic)
+        .expect_err("LookupSum must reject mutated prepared-point source sum");
 
     assert!(matches!(
         err,
-        P256ProofError::RelationImbalance { relation: "Range7" }
+        P256ProofError::RelationImbalance {
+            relation: "LookupSum"
+        }
     ));
 }
 
 #[test]
-fn current_p256_monolithic_verifier_rejects_unbalanced_scalar_consumer_sum() {
+fn current_p256_monolithic_verifier_rejects_mutated_selector_claimed_sum() {
     use num_traits::One;
     let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
         valid_real_input_with_small_u_scalars(7, 11),
@@ -608,15 +847,15 @@ fn current_p256_monolithic_verifier_rejects_unbalanced_scalar_consumer_sum() {
     monolithic
         .interaction_claim
         .fake_glv_selector_air
-        .scalar_consumer_claimed_sum += SecureField::one();
+        .claimed_sum += SecureField::one();
 
-    let err = verify_current_air_monolithic::<Blake2sMerkleChannel>(monolithic)
-        .expect_err("scalar relation balance must reject mutated consumer sum");
+    let err = verify_self_bound::<Blake2sMerkleChannel>(monolithic)
+        .expect_err("aggregate lookup sum must reject mutated component sum");
 
     assert!(matches!(
         err,
         P256ProofError::RelationImbalance {
-            relation: "FakeGlvScalar"
+            relation: "LookupSum"
         }
     ));
 }
@@ -707,14 +946,14 @@ fn current_p256_proof_pipeline_rejects_public_key_off_curve_in_air() {
     assert_eq!(
         err,
         P256ProofError::RelationImbalance {
-            relation: "PublicKeyPoint"
+            relation: "LookupSum"
         }
     );
 }
 
-/// The verifier independently enforces the `PublicKeyPoint` binding balance:
-/// tampering with the scalar_setup provider's claimed sum on a fully valid
-/// monolithic proof is rejected by `verify_current_air_monolithic`.
+/// The verifier independently enforces the aggregate lookup balance: tampering
+/// with a scalar-setup component claimed sum on a fully valid monolithic proof
+/// is rejected by `verify_current_air_monolithic`.
 #[test]
 fn current_p256_monolithic_verifier_rejects_unbalanced_public_key_point_sum() {
     use num_traits::One;
@@ -728,15 +967,15 @@ fn current_p256_monolithic_verifier_rejects_unbalanced_public_key_point_sum() {
     monolithic
         .interaction_claim
         .scalar_setup
-        .point_provider_claimed_sum += SecureField::one();
+        .claimed_sum += SecureField::one();
 
-    let err = verify_current_air_monolithic::<Blake2sMerkleChannel>(monolithic)
-        .expect_err("PublicKeyPoint balance must reject a mutated provider sum");
+    let err = verify_self_bound::<Blake2sMerkleChannel>(monolithic)
+        .expect_err("aggregate lookup balance must reject a mutated component sum");
 
     assert!(matches!(
         err,
         P256ProofError::RelationImbalance {
-            relation: "PublicKeyPoint"
+            relation: "LookupSum"
         }
     ));
 }
@@ -779,7 +1018,7 @@ fn current_p256_proof_pipeline_proves_and_verifies_current_air_monolithic_proof(
         .prove_current_air_monolithic::<Blake2sMerkleChannel>()
         .expect("current AIR monolithic proof proves");
 
-    verify_current_air_monolithic::<Blake2sMerkleChannel>(monolithic)
+    verify_self_bound::<Blake2sMerkleChannel>(monolithic)
         .expect("current AIR monolithic proof verifies");
 }
 
@@ -801,7 +1040,7 @@ fn current_p256_proof_pipeline_proves_and_verifies_monolithic_distinct_branch() 
         .prove_current_air_monolithic::<Blake2sMerkleChannel>()
         .expect("distinct branch monolithic proof proves");
 
-    verify_current_air_monolithic::<Blake2sMerkleChannel>(monolithic)
+    verify_self_bound::<Blake2sMerkleChannel>(monolithic)
         .expect("distinct branch monolithic proof verifies");
 }
 
@@ -1074,7 +1313,9 @@ fn add_u256(a: &U256, b: &U256) -> U256 {
 /// rejection oracle (lessons.md #18); a tampered witness that unbalances any
 /// relation is caught by `verify_balanced` (first imbalance) or surfaced in
 /// full by `relation_audit`.
-fn monolithic_interaction_claim(draft: &P256ProofDraft) -> P256CurrentAirInteractionClaim {
+fn monolithic_interaction_claim(
+    draft: &P256ProofDraft,
+) -> (P256CurrentAirInteractionClaim, P256CurrentAirRelations) {
     let proof_claim = P256CurrentAirProofClaim::from_claim(&draft.claim);
     let ids = proof_claim.preprocessed_column_ids();
     let max_bound = proof_claim.max_constraint_log_degree_bound(&ids);
@@ -1105,13 +1346,14 @@ fn monolithic_interaction_claim(draft: &P256ProofDraft) -> P256CurrentAirInterac
     let (_, interaction_claim) = draft
         .gen_current_air_interaction_trace(&base, &relations)
         .expect("interaction trace");
-    interaction_claim
+    (interaction_claim, relations)
 }
 
 /// The per-relation balance result for `draft` (the first-imbalance oracle
 /// the adversarial tests assert on).
 fn monolithic_balance_outcome(draft: &P256ProofDraft) -> Result<(), P256ProofError> {
-    monolithic_interaction_claim(draft).verify_balanced()
+    let (interaction_claim, relations) = monolithic_interaction_claim(draft);
+    interaction_claim.verify_balanced(&draft.claim.public_inputs.instances, &relations)
 }
 
 #[test]
@@ -1148,7 +1390,8 @@ fn relation_audit_lists_all_imbalances_and_dead_links() {
 fn monolithic_relation_audit_is_balanced_and_fully_linked() {
     // Both certs active (u1, u2 != 0), so every boundary relation must be live.
     let draft = valid_draft_for_balance(7, 11);
-    let audit = monolithic_interaction_claim(&draft).relation_audit();
+    let (interaction_claim, relations) = monolithic_interaction_claim(&draft);
+    let audit = interaction_claim.relation_audit(&draft.claim.public_inputs.instances, &relations);
     assert!(
         audit.is_balanced(),
         "honest proof has unbalanced relations: {:?}",
@@ -1159,56 +1402,7 @@ fn monolithic_relation_audit_is_balanced_and_fully_linked() {
         "honest active proof has unlinked boundary relations: {:?}",
         audit.dead_links()
     );
-    // The audit covers the full relation surface, including the four
-    // verifier-facing ECDSA bindings.
-    // The audit covers the full relation surface, in `relation_balances()`
-    // order. EXHAUSTIVE on purpose: adding a relation to the proof without
-    // registering it in the audit (or removing/renaming one) must fail here
-    // with the exact name, not a bare count mismatch.
-    let expected = [
-        "PublicEcdsaInstance",
-        "ScalarSetupOutput",
-        "CertScalarInput",
-        "FakeGlvScalar",
-        "ScalarSetupRange13",
-        "ScalarSetupRange9",
-        "ScalarSetupSignedCarry",
-        "ScalarSetupModMul",
-        "FakeGlvScalarModMul",
-        "PreparedTablePinnedConsistency",
-        "PreparedTablePinnedBreakdown",
-        "PreparedTableProjectiveSource",
-        // C5-2: the prepared-table projective-source formula self-contained
-        // Range13 / signed-carry providers (the table-build EC arithmetic).
-        "PreparedTableProjectiveRange13",
-        "PreparedTableProjectiveSignedCarry",
-        "CertBase",
-        "PreparedTableCanonical",
-        "FakeGlvProjectiveSource",
-        // C5-2: the fake-GLV projective-source Double/MixedAdd-formula
-        // self-contained Range13 / signed-carry providers.
-        "FakeGlvProjectiveRange13",
-        "FakeGlvProjectiveSignedCarry",
-        // γ-digest reshape: wide consumers' digest yields vs tall expanders.
-        "GammaDigest",
-        // C5 plumbing: the RCB silo → projective-source mul-result link.
-        "ProjectiveRcbMulResult",
-        "FakeGlvChainExpansion",
-        "FakeGlvChainContinuity",
-        "FakeGlvDirectPreparedOperand",
-        "FakeGlvSignedSelectorOperand",
-        "FakeGlvLsbCorrectionOperand",
-        "FakeGlvPreparedPointSource",
-        "Range7",
-        "EcdsaResult",
-        "PublicKeyPoint",
-        "HintedMulRange13",
-        "HintedMulSignedH",
-        "HintedMulTotalConsistency",
-        "FinalCheckHint",
-        "FinalAddInternal",
-        "FinalAddOutput",
-    ];
+    let expected = ["LookupSum"];
     assert_eq!(
         audit.relation_names(),
         expected,
@@ -1287,16 +1481,14 @@ fn current_p256_monolithic_rejects_forged_double_op_output() {
 
     let err = forged_double_output_balance_outcome(99, 99, Some((op_col, output_x0_col, double_op)))
         .expect_err("forged Double-op output.x must be rejected by the monolithic AIR");
-    // The forged committed output.x unbalances the EC-row relation that binds the
-    // consumer's output to the provider's (and, via C5-2, to double(input)).
     assert!(
         matches!(
             err,
             P256ProofError::RelationImbalance {
-                relation: "FakeGlvProjectiveSource"
+                relation: "LookupSum"
             }
         ),
-        "expected FakeGlvProjectiveSource imbalance from forged Double output, got {err:?}"
+        "expected LookupSum imbalance from forged Double output, got {err:?}"
     );
 }
 
@@ -1307,12 +1499,9 @@ fn current_p256_monolithic_rejects_forged_double_op_output() {
 /// MixedAdd-op `output_affine.x` (limb 0) on the fake-GLV projective-source
 /// CONSUMER.
 ///
-/// Oracle: the same per-relation LogUp balance. The committed `output.x`
-/// participates in the `FakeGlvProjectiveSource` EC-row relation (consumer use
-/// vs provider yield) AND, post-C5-2b, in the MixedAdd-formula `M13.lhs ==
-/// output.x` operand binding — so a forged `output.x` unbalances the EC-row
-/// relation. (The dedicated binding-isolating tests are C5-3; this is the
-/// end-to-end rejection.) A clean honest control runs first.
+/// Oracle: the aggregate LogUp balance. The dedicated binding-isolating tests
+/// are C5-3; this is the end-to-end rejection. A clean honest control runs
+/// first.
 #[test]
 fn current_p256_monolithic_rejects_forged_mixed_add_op_output() {
     use crate::scalar::prepared_table::PREPARED_TABLE_EC_POINT_COLUMNS;
@@ -1333,10 +1522,10 @@ fn current_p256_monolithic_rejects_forged_mixed_add_op_output() {
         matches!(
             err,
             P256ProofError::RelationImbalance {
-                relation: "FakeGlvProjectiveSource"
+                relation: "LookupSum"
             }
         ),
-        "expected FakeGlvProjectiveSource imbalance from forged MixedAdd output, got {err:?}"
+        "expected LookupSum imbalance from forged MixedAdd output, got {err:?}"
     );
 }
 
@@ -1418,27 +1607,32 @@ fn forged_double_output_balance_outcome(
     let (_, interaction_claim) = draft
         .gen_current_air_interaction_trace(&base, &relations)
         .expect("interaction trace");
-    interaction_claim.verify_balanced()
+    interaction_claim.verify_balanced(&draft.claim.public_inputs.instances, &relations)
 }
 
-/// IN-AIR oracle: mutating the proven final-add output `x3` (= `R_final.x`)
-/// away from the value the final check consumes as `r_x` unbalances the
-/// `FinalAddOutput` relation, so `verify_balanced` rejects.
+/// Proof-layer oracle: mutating the proven final-add output `x3` (= `R_final.x`)
+/// away from the value the final check consumes as `r_x` leaves the
+/// `FinalAddOutput` lookup unmatched. The normalized leaf final-check claim no
+/// longer exposes that consumer side sum directly, so the verifier catches this
+/// through the aggregate `LookupSum` gate.
 #[test]
-fn monolithic_rejects_mutated_final_add_x3() {
+fn monolithic_verifier_rejects_mutated_final_add_x3_lookup_sum() {
     let mut draft = valid_draft_for_balance(7, 11);
     monolithic_balance_outcome(&draft).expect("honest draft balances");
     draft.claim.final_add.x3 = bump_limb0(&draft.claim.final_add.x3);
-    let err = monolithic_balance_outcome(&draft).expect_err("mutated x3 must reject");
+    let err = draft
+        .prove_current_air_monolithic::<Blake2sMerkleChannel>()
+        .expect_err("mutated final-add output must reject during proving");
     assert!(
-        matches!(err, P256ProofError::RelationImbalance { relation: "FinalAddOutput" }),
-        "expected FinalAddOutput imbalance, got {err:?}"
+        matches!(err, P256ProofError::RelationImbalance { relation: "LookupSum" }),
+        "expected LookupSum imbalance, got {err:?}"
     );
 }
 
-/// IN-AIR oracle: mutating a consumed hint point `R_1` unbalances the
-/// `FinalCheckHint` relation (the prepared table still yields the true,
-/// pinned `R_1`), so `verify_balanced` rejects.
+/// IN-AIR oracle: mutating a consumed hint point `R_1` changes a scoped
+/// component claimed sum. The production verifier no longer exposes the
+/// `FinalCheckHint` side field, so `verify_balanced` rejects through the
+/// aggregate `LookupSum`.
 #[test]
 fn monolithic_rejects_mutated_consumed_hint() {
     let mut draft = valid_draft_for_balance(7, 11);
@@ -1446,26 +1640,19 @@ fn monolithic_rejects_mutated_consumed_hint() {
     let new_x = bump_limb0(&draft.claim.final_add.r1.x);
     draft.claim.final_add.r1.x = new_x;
     let err = monolithic_balance_outcome(&draft).expect_err("mutated R_1 must reject");
-    // `r1.x` feeds both the FinalCheckHint consume and the MUL_X1_SQUARED wide
-    // mul tuple (hinted provider), so the mutation unbalances both relations;
-    // `verify_balanced` reports the first in list order.
     assert!(
         matches!(
             err,
             P256ProofError::RelationImbalance {
-                relation: "FinalCheckHint" | "ProjectiveRcbMulResult"
+                relation: "LookupSum"
             }
         ),
-        "expected FinalCheckHint/ProjectiveRcbMulResult imbalance, got {err:?}"
+        "expected LookupSum imbalance, got {err:?}"
     );
 }
 
-/// IN-AIR oracle: mutating the public signature `r` unbalances the public
-/// relations binding `r`. The public `r` is provided on BOTH
-/// `PublicEcdsaInstance` (the full instance tuple) and `EcdsaResult` (the
-/// write-back the final check consumes as `r_check = r_x mod n`). Either
-/// imbalance proves the public `r` is bound to the proven computation;
-/// `verify_balanced` reports whichever it checks first.
+/// IN-AIR oracle: mutating the public signature `r` changes the aggregate
+/// lookup sum once public-data initial claims are recomputed.
 #[test]
 fn monolithic_rejects_mutated_public_r() {
     let mut draft = valid_draft_for_balance(7, 11);
@@ -1477,10 +1664,10 @@ fn monolithic_rejects_mutated_public_r() {
         matches!(
             err,
             P256ProofError::RelationImbalance {
-                relation: "EcdsaResult" | "PublicEcdsaInstance"
+                relation: "LookupSum"
             }
         ),
-        "expected EcdsaResult/PublicEcdsaInstance imbalance, got {err:?}"
+        "expected LookupSum imbalance, got {err:?}"
     );
 }
 
@@ -1703,6 +1890,7 @@ fn prove_fake_glv_scalar_air_for_diagnostic(proof: &P256ProofDraft) {
             &CertScalarInputRelation::dummy(),
             &FakeGlvScalarRelation::dummy(),
             &crate::scalar::scalar_mod_mul::relation::ScalarLimbRelation::dummy(),
+            &FinalAddSignRelation::dummy(),
         );
         components.max_constraint_log_degree_bound()
     };
@@ -1741,11 +1929,13 @@ fn prove_fake_glv_scalar_air_for_diagnostic(proof: &P256ProofDraft) {
     let scalar_relation = FakeGlvScalarRelation::draw(&mut channel);
     let scalar_limb_relation =
         crate::scalar::scalar_mod_mul::relation::ScalarLimbRelation::dummy();
+    let sign_relation = FinalAddSignRelation::draw(&mut channel);
     let (interaction, interaction_claim) = gen_fake_glv_scalar_air_interaction_trace(
         &base,
         &cert_relation,
         &scalar_relation,
         &scalar_limb_relation,
+        &sign_relation,
     );
     interaction_claim.mix_into(&mut channel);
     let mut tree_builder = commitment_scheme.tree_builder();
@@ -1760,6 +1950,7 @@ fn prove_fake_glv_scalar_air_for_diagnostic(proof: &P256ProofDraft) {
         &cert_relation,
         &scalar_relation,
         &scalar_limb_relation,
+        &sign_relation,
     );
     prove(
         &components.component_provers(),
@@ -2466,4 +2657,3 @@ fn current_p256_per_component_shape_diagnostic() {
         eprintln!("component {index:2} log={log:2} pre={pre:3} base={base:4} inter={inter:4}");
     }
 }
-

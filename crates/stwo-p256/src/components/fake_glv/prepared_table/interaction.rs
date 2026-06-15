@@ -20,6 +20,7 @@ use crate::components::gamma_digest::{
     GammaTallInstance, GammaTallInteractionClaim, GammaTallLayout,
     GAMMA_TAG_PREPARED_RANGE13, GAMMA_TAG_PREPARED_SIGNED,
 };
+use crate::components::ComponentInteractionClaim;
 use crate::range_checks::RangeCheckInteractionClaim;
 use crate::projective_air::{
     ProjectiveRcbMulResultRelation, PROJECTIVE_RCB_MUL_ROLE_LHS, PROJECTIVE_RCB_MUL_ROLE_RESULT,
@@ -48,17 +49,8 @@ impl PreparedTableEcRowInteractionClaim {
 
 #[derive(Clone, Debug)]
 pub struct PreparedTableProjectiveSourceInteractionClaim {
-    pub provider_claimed_sum: SecureField,
-    /// `PreparedTableEcRowRelation` consumer sum.
-    pub consumer_claimed_sum: SecureField,
-    /// C5 plumbing: `ProjectiveRcbMulResultRelation` consumer sum (silo mul
-    /// limbs consumed on the prepared-table projective-source consumer). Shares
-    /// the consumer's interaction trace, balanced separately under
-    /// `ProjectiveRcbMulResult`.
-    pub mul_result_consumer_claimed_sum: SecureField,
-    /// γ-digest: the consumer's two digest YIELDS (−active). Netted against
-    /// the tall expanders' `digest_use_sum`s under the `GammaDigest` balance.
-    pub gamma_yield_sum: SecureField,
+    pub provider: ComponentInteractionClaim,
+    pub consumer: ComponentInteractionClaim,
     /// γ-digest: the range13-kind tall expander (digest use + range uses).
     pub gamma_range13: GammaTallInteractionClaim,
     /// γ-digest: the signed-kind tall expander.
@@ -73,10 +65,8 @@ pub struct PreparedTableProjectiveSourceInteractionClaim {
 impl PreparedTableProjectiveSourceInteractionClaim {
     pub fn zero() -> Self {
         Self {
-            provider_claimed_sum: secure_zero(),
-            consumer_claimed_sum: secure_zero(),
-            mul_result_consumer_claimed_sum: secure_zero(),
-            gamma_yield_sum: secure_zero(),
+            provider: ComponentInteractionClaim::zero(),
+            consumer: ComponentInteractionClaim::zero(),
             gamma_range13: GammaTallInteractionClaim::zero(),
             gamma_signed: GammaTallInteractionClaim::zero(),
             range13: RangeCheckInteractionClaim {
@@ -93,45 +83,23 @@ impl PreparedTableProjectiveSourceInteractionClaim {
     /// and the range13/signed-carry consume+provide (balanced under their own
     /// `PreparedTableProjective{Range13,SignedCarry}` relations).
     pub fn total(&self) -> SecureField {
-        self.provider_claimed_sum + self.consumer_claimed_sum
+        self.provider.claimed_sum + self.consumer.claimed_sum
     }
 
-    /// `PreparedTableProjectiveRange13` balance: the tall expander's range
-    /// uses + the provider yield. Internal to this sub-graph, nets to zero.
-    pub fn range13_total(&self) -> SecureField {
-        self.gamma_range13.range_use_sum + self.range13.claimed_sum
-    }
-
-    /// `PreparedTableProjectiveSignedCarry` balance: the tall expander's range
-    /// uses + the provider yield. Internal to this sub-graph, nets to zero.
-    pub fn signed_carry_total(&self) -> SecureField {
-        self.gamma_signed.range_use_sum + self.signed_carry.claimed_sum
-    }
-
-    /// `GammaDigest` balance for this sub-graph: the consumer's two yields +
-    /// the two tall expanders' digest uses. Nets to zero.
-    pub fn gamma_digest_total(&self) -> SecureField {
-        self.gamma_yield_sum
-            + self.gamma_range13.digest_use_sum
-            + self.gamma_signed.digest_use_sum
-    }
-
-    /// The single claimed sum the consumer FrameworkComponent declares (EC-row
-    /// + mul-result consumes and the γ-digest yields share one interaction
-    /// trace / `finalize_logup`).
-    pub fn consumer_component_claimed_sum(&self) -> SecureField {
-        self.consumer_claimed_sum + self.mul_result_consumer_claimed_sum + self.gamma_yield_sum
+    pub(crate) fn component_claimed_sum(&self) -> SecureField {
+        self.provider.claimed_sum
+            + self.consumer.claimed_sum
+            + self.gamma_range13.claimed_sum
+            + self.gamma_signed.claimed_sum
+            + self.range13.claimed_sum
+            + self.signed_carry.claimed_sum
     }
 
     pub fn mix_into(&self, channel: &mut impl Channel) {
-        channel.mix_felts(&[
-            self.provider_claimed_sum,
-            self.consumer_claimed_sum,
-            self.mul_result_consumer_claimed_sum,
-            self.gamma_yield_sum,
-            self.range13.claimed_sum,
-            self.signed_carry.claimed_sum,
-        ]);
+        self.provider.mix_into(channel);
+        self.consumer.mix_into(channel);
+        self.range13.mix_into(channel);
+        self.signed_carry.mix_into(channel);
         self.gamma_range13.mix_into(channel);
         self.gamma_signed.mix_into(channel);
     }
@@ -192,29 +160,18 @@ fn pin_point_column_offset(point: PinPoint) -> Option<usize> {
 }
 
 
-/// Per-relation claimed sums of the pinned EC-row provider's logup trace. `total`
-/// is what the provider component declares; the breakdown lets `verify_balanced`
-/// check each relation independently.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PreparedTableEcRowPinnedInteractionClaim {
-    pub total_claimed_sum: SecureField,
-    pub prepared_table_provider_claimed_sum: SecureField,
-    pub cert_base_consumer_claimed_sum: SecureField,
-    pub canonical_claimed_sum: SecureField,
-    /// FinalCheckHint provider sum (yield `-1` per active `DoubleR` row). Zero
-    /// when no `final_check_hint` relation is forwarded.
-    pub final_check_hint_claimed_sum: SecureField,
+    pub claimed_sum: SecureField,
+    pub final_check_hint: ComponentInteractionClaim,
 }
 
 
 impl PreparedTableEcRowPinnedInteractionClaim {
     pub fn zero() -> Self {
         Self {
-            total_claimed_sum: secure_zero(),
-            prepared_table_provider_claimed_sum: secure_zero(),
-            cert_base_consumer_claimed_sum: secure_zero(),
-            canonical_claimed_sum: secure_zero(),
-            final_check_hint_claimed_sum: secure_zero(),
+            claimed_sum: secure_zero(),
+            final_check_hint: ComponentInteractionClaim::zero(),
         }
     }
 }
@@ -323,12 +280,8 @@ pub(crate) fn gen_prepared_table_ec_row_pinned_interaction_trace(
         col.finalize_col();
     }
 
-    let (trace, total_claimed_sum) = logup.finalize_last();
+    let (trace, claimed_sum) = logup.finalize_last();
 
-    // Per-relation breakdown over storage rows (active rows only).
-    let mut prepared_table_provider_claimed_sum = secure_zero();
-    let mut cert_base_consumer_claimed_sum = secure_zero();
-    let mut canonical_claimed_sum = secure_zero();
     let mut final_check_hint_claimed_sum = secure_zero();
     for row in prepared_table_ec_storage_rows(base) {
         let active = row[0];
@@ -337,11 +290,6 @@ pub(crate) fn gen_prepared_table_ec_row_pinned_interaction_trace(
         }
         let sig = row[PREPARED_TABLE_EC_COL_SIG_ID];
         let cert = row[PREPARED_TABLE_EC_COL_CERT_ID];
-        // Existing relation yield (-active).
-        let values = prepared_table_ec_row_unpacked_relation_values(&row);
-        let existing_denom: SecureField = relation.combine(&values);
-        prepared_table_provider_claimed_sum += -SecureField::from(active) / existing_denom;
-        // FinalCheckHint yield (-1) on active DoubleR rows.
         if let Some(final_check_hint) = final_check_hint {
             let double_r = row[PREPARED_TABLE_EC_COL_KIND_FLAGS + PREPARED_TABLE_EC_KIND_DOUBLE_R];
             if double_r != M31::from_u32_unchecked(0) {
@@ -354,10 +302,45 @@ pub(crate) fn gen_prepared_table_ec_row_pinned_interaction_trace(
                 final_check_hint_claimed_sum += -SecureField::from(active * double_r) / denom;
             }
         }
+    }
+
+    (
+        trace,
+        PreparedTableEcRowPinnedInteractionClaim {
+            claimed_sum,
+            final_check_hint: ComponentInteractionClaim {
+                claimed_sum: final_check_hint_claimed_sum,
+            },
+        },
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn debug_prepared_table_pinned_relation_sums(
+    base: &[M31ColumnEval],
+    relation: &PreparedTableEcRowRelation,
+    cert_base: &CertBaseRelation,
+    canonical: &PreparedTableCanonicalRelation,
+) -> (SecureField, SecureField, SecureField) {
+    let three_g_x = P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_3GX));
+    let three_g_y = P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_3GY));
+    let mut prepared_table_sum = secure_zero();
+    let mut cert_base_sum = secure_zero();
+    let mut canonical_sum = secure_zero();
+    for row in prepared_table_ec_storage_rows(base) {
+        let active = row[0];
+        if active == M31::from_u32_unchecked(0) {
+            continue;
+        }
+        let sig = row[PREPARED_TABLE_EC_COL_SIG_ID];
+        let cert = row[PREPARED_TABLE_EC_COL_CERT_ID];
+        let values = prepared_table_ec_row_unpacked_relation_values(&row);
+        let denom: SecureField = relation.combine(&values);
+        prepared_table_sum += -SecureField::from(active) / denom;
         for entry in PIN_SCHEDULE {
             let mut gate = M31::from_u32_unchecked(1);
-            for &k in entry.kinds {
-                gate *= row[PREPARED_TABLE_EC_COL_KIND_FLAGS + k];
+            for &kind in entry.kinds {
+                gate *= row[PREPARED_TABLE_EC_COL_KIND_FLAGS + kind];
             }
             if entry.cert0_only {
                 gate *= active - cert;
@@ -373,7 +356,7 @@ pub(crate) fn gen_prepared_table_ec_row_pinned_interaction_trace(
                     let offset = pin_point_column_offset(entry.point).unwrap();
                     let denom: SecureField =
                         cert_base.combine(&cert_base_unpacked_tuple(&row, sig, cert, offset));
-                    cert_base_consumer_claimed_sum += numerator / denom;
+                    cert_base_sum += numerator / denom;
                 }
                 PinRelation::Canonical(role) => {
                     let tuple = match pin_point_column_offset(entry.point) {
@@ -385,22 +368,12 @@ pub(crate) fn gen_prepared_table_ec_row_pinned_interaction_trace(
                         }
                     };
                     let denom: SecureField = canonical.combine(&tuple);
-                    canonical_claimed_sum += numerator / denom;
+                    canonical_sum += numerator / denom;
                 }
             }
         }
     }
-
-    (
-        trace,
-        PreparedTableEcRowPinnedInteractionClaim {
-            total_claimed_sum,
-            prepared_table_provider_claimed_sum,
-            cert_base_consumer_claimed_sum,
-            canonical_claimed_sum,
-            final_check_hint_claimed_sum,
-        },
-    )
+    (prepared_table_sum, cert_base_sum, canonical_sum)
 }
 
 
@@ -456,6 +429,7 @@ fn cert_base_packed_tuple(
 }
 
 
+#[cfg(test)]
 fn cert_base_unpacked_tuple(
     row: &[M31],
     sig: M31,
@@ -509,6 +483,7 @@ fn canonical_packed_tuple_const(
 }
 
 
+#[cfg(test)]
 fn canonical_unpacked_tuple_from_columns(
     row: &[M31],
     sig: M31,
@@ -526,6 +501,7 @@ fn canonical_unpacked_tuple_from_columns(
 }
 
 
+#[cfg(test)]
 fn canonical_unpacked_tuple_const(
     sig: M31,
     cert: M31,
@@ -557,6 +533,7 @@ fn prepared_table_ec_storage_rows(base: &[M31ColumnEval]) -> impl Iterator<Item 
 }
 
 
+#[cfg(test)]
 fn prepared_table_ec_row_unpacked_relation_values(
     row: &[M31],
 ) -> [M31; PREPARED_TABLE_EC_ROW_RELATION_ARITY] {
@@ -1027,4 +1004,3 @@ fn prepared_table_projective_source_packed_relation_values(
         base[column].data[vec_row]
     })
 }
-

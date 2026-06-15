@@ -33,8 +33,10 @@ relation!(
 );
 
 // `FinalCheckHintRelation` forwards the in-AIR-pinned signed hint point `R_i`
-// (= `±h_i`; for active certs `s2_sign_bit == 1` is forced in `fake_glv_scalar`,
-// so `R_i = -h_i`) from the prepared table to the FinalEcdsaCheck component.
+// (= `±h_i`, where the sign is the per-cert `s2_sign_bit` from the Garaga
+// decomposition: `R_i = -h_i` when the bit is 1, `R_i = +h_i` when it is 0 —
+// both occur for honest signatures) from the prepared table to the
+// FinalEcdsaCheck / FinalAdd components.
 // Provider: `PreparedTableEcRowEval` yields `R_i` (= the `DoubleR` row's `lhs`,
 // which role-`R` pinning already binds to the canonical per-cert value) once per
 // active `DoubleR` row, gated `active * DoubleR_flag`, multiplicity `-1`.

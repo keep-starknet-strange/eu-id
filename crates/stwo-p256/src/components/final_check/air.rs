@@ -121,23 +121,12 @@ impl FinalCheckAirProofClaim {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FinalCheckAirInteractionClaim {
     pub claimed_sum: SecureField,
-    pub result_consumer_claimed_sum: SecureField,
-    pub range13_consumer_claimed_sum: SecureField,
-    pub range9_consumer_claimed_sum: SecureField,
-    pub signed_carry_consumer_claimed_sum: SecureField,
-    /// FinalAddOutput consumer sum (use, `+active`) binding `r_x`.
-    pub final_add_output_consumer_claimed_sum: SecureField,
 }
 
 impl FinalCheckAirInteractionClaim {
     pub fn zero() -> Self {
         Self {
             claimed_sum: secure_zero(),
-            result_consumer_claimed_sum: secure_zero(),
-            range13_consumer_claimed_sum: secure_zero(),
-            range9_consumer_claimed_sum: secure_zero(),
-            signed_carry_consumer_claimed_sum: secure_zero(),
-            final_add_output_consumer_claimed_sum: secure_zero(),
         }
     }
 
@@ -547,44 +536,10 @@ pub(crate) fn gen_final_check_air_interaction_trace(
 
     let (trace, claimed_sum) = logup.finalize_last();
 
-    // Per-relation consumer claimed sums (used to verify per-relation balance).
-    let result_consumer_claimed_sum: SecureField = active_rows(base)
-        .map(|row| -> SecureField {
-            let denominator: SecureField = relations.result.combine(&result_values_from_base(&row));
-            SecureField::from(row[0]) / denominator
-        })
-        .sum();
-    let range13_consumer_claimed_sum = sum_consumer_fractions(
-        relations.range13,
-        final_check_range13_uses_from_base(base).into_iter(),
-    );
-    let range9_consumer_claimed_sum = sum_consumer_fractions(
-        relations.range9,
-        final_check_range9_uses_from_base(base).into_iter(),
-    );
-    let signed_carry_consumer_claimed_sum = sum_consumer_fractions(
-        relations.signed_carry,
-        final_check_signed_carry_uses_from_base(base)
-            .into_iter()
-            .map(encode_signed_carry),
-    );
-    let final_add_output_consumer_claimed_sum: SecureField = active_rows(base)
-        .map(|row| -> SecureField {
-            let denominator: SecureField =
-                relations.final_add_output.combine(&final_add_output_values_from_base(&row));
-            SecureField::from(row[0]) / denominator
-        })
-        .sum();
-
     (
         trace,
         FinalCheckAirInteractionClaim {
             claimed_sum,
-            result_consumer_claimed_sum,
-            range13_consumer_claimed_sum,
-            range9_consumer_claimed_sum,
-            signed_carry_consumer_claimed_sum,
-            final_add_output_consumer_claimed_sum,
         },
     )
 }
@@ -599,16 +554,6 @@ fn final_add_output_packed_values_from_base(
             base[1].data[vec_row]
         } else {
             base[r_x_offset() + (index - 1)].data[vec_row]
-        }
-    })
-}
-
-fn final_add_output_values_from_base(row: &[M31]) -> [M31; 1 + N_LIMBS] {
-    core::array::from_fn(|index| {
-        if index == 0 {
-            row[1]
-        } else {
-            row[r_x_offset() + (index - 1)]
         }
     })
 }
@@ -671,18 +616,6 @@ pub(crate) fn final_check_signed_carry_uses_from_base(base: &[M31ColumnEval]) ->
     uses
 }
 
-fn sum_consumer_fractions<I: Iterator<Item = M31>>(
-    relation: &RangeCheckRelation,
-    values: I,
-) -> SecureField {
-    values
-        .map(|value| {
-            let denominator: SecureField = relation.combine(&[value]);
-            SecureField::from(M31::from_u32_unchecked(1)) / denominator
-        })
-        .sum()
-}
-
 fn result_values(instance: &PublicEcdsaInstance<M31>) -> [M31; ECDSA_RESULT_RELATION_ARITY] {
     core::array::from_fn(|index| {
         if index == 0 {
@@ -698,10 +631,6 @@ fn result_packed_values_from_base(
     vec_row: usize,
 ) -> [PackedM31; ECDSA_RESULT_RELATION_ARITY] {
     core::array::from_fn(|index| base[1 + index].data[vec_row])
-}
-
-fn result_values_from_base(row: &[M31]) -> [M31; ECDSA_RESULT_RELATION_ARITY] {
-    core::array::from_fn(|index| row[1 + index])
 }
 
 fn active_rows(base: &[M31ColumnEval]) -> impl Iterator<Item = Vec<M31>> + '_ {

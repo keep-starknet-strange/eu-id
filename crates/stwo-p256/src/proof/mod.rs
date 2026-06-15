@@ -77,7 +77,7 @@ use crate::fake_glv_prepared_point_source::{
 use crate::final_add_air::{
     final_add_preprocessed_columns, gen_final_add_base_trace, gen_final_add_interaction_trace,
     FinalAddClaim, FinalAddComponents, FinalAddError, FinalAddInteractionClaim,
-    FinalAddOutputRelation, FinalAddProofClaim, FinalAddRelations,
+    FinalAddOutputRelation, FinalAddProofClaim, FinalAddRelations, FinalAddSignRelation,
 };
 use crate::final_check::{FinalEcdsaCheckClaim, FinalEcdsaCheckError};
 use crate::final_check_air::{
@@ -109,7 +109,7 @@ use crate::projective_air::{
 };
 use crate::public_inputs::{
     public_ecdsa_consumer_claimed_sum, public_ecdsa_provider_claimed_sum, PublicEcdsaInputClaim,
-    PublicEcdsaInstanceRelation,
+    PublicEcdsaInstance, PublicEcdsaInstanceRelation,
 };
 use crate::components::hinted_mul::air::{
     gen_hinted_mul_slice_preprocessed_trace, hinted_mul_signed_table_claim, HintedMulChallenge,
@@ -715,7 +715,6 @@ impl P256CurrentAirProofClaim {
 
 #[derive(Clone, Debug)]
 pub struct P256CurrentAirInteractionClaim {
-    pub public_inputs: RelationBalanceClaim,
     pub scalar_setup: ScalarSetupAirInteractionClaim,
     pub cert_scalar_inputs: CertScalarInputAirInteractionClaim,
     pub fake_glv_scalar_air: FakeGlvScalarAirInteractionClaim,
@@ -723,9 +722,6 @@ pub struct P256CurrentAirInteractionClaim {
     pub(crate) scalar_setup_mod_muls: Vec<ScalarModMulProofSliceInteractionClaim>,
     pub(crate) fake_glv_scalar_mod_muls: Vec<ScalarModMulProofSliceInteractionClaim>,
     pub prepared_table_projective_source: PreparedTableProjectiveSourceInteractionClaim,
-    /// Per-relation breakdown of the pinned EC-row provider's logup total
-    /// (`prepared_table_projective_source.provider_claimed_sum`), used to verify
-    /// the `CertBase` and `PreparedTableCanonical` balances independently.
     pub prepared_table_pinned: PreparedTableEcRowPinnedInteractionClaim,
     pub fake_glv_projective_source: FakeGlvProjectiveSourceInteractionClaim,
     pub fake_glv_chain_expansion: FakeGlvChainExpansionInteractionClaim,
@@ -736,7 +732,6 @@ pub struct P256CurrentAirInteractionClaim {
     pub fake_glv_prepared_point_source: FakeGlvPreparedPointSourceInteractionClaim,
     pub prepared_point_range7: RangeCheckInteractionClaim,
     pub final_check: FinalCheckAirInteractionClaim,
-    pub ecdsa_result_provider_claimed_sum: SecureField,
     pub public_key_on_curve: PublicKeyCurveSliceInteractionClaim,
     pub hinted_mul: HintedMulProofInteractionClaim,
     pub final_add: FinalAddInteractionClaim,
@@ -745,10 +740,6 @@ pub struct P256CurrentAirInteractionClaim {
 impl P256CurrentAirInteractionClaim {
     fn zero() -> Self {
         Self {
-            public_inputs: RelationBalanceClaim {
-                provider_claimed_sum: zero(),
-                consumer_claimed_sum: zero(),
-            },
             scalar_setup: ScalarSetupAirInteractionClaim::zero(),
             cert_scalar_inputs: CertScalarInputAirInteractionClaim::zero(),
             fake_glv_scalar_air: FakeGlvScalarAirInteractionClaim::zero(),
@@ -770,7 +761,6 @@ impl P256CurrentAirInteractionClaim {
                 claimed_sum: zero(),
             },
             final_check: FinalCheckAirInteractionClaim::zero(),
-            ecdsa_result_provider_claimed_sum: zero(),
             public_key_on_curve: PublicKeyCurveSliceInteractionClaim::zero_claim(),
             hinted_mul: HintedMulProofInteractionClaim::zero(),
             final_add: FinalAddInteractionClaim::zero(),
@@ -789,10 +779,6 @@ impl P256CurrentAirInteractionClaim {
     }
 
     fn mix_into(&self, channel: &mut impl Channel) {
-        channel.mix_felts(&[
-            self.public_inputs.provider_claimed_sum,
-            self.public_inputs.consumer_claimed_sum,
-        ]);
         self.scalar_setup.mix_into(channel);
         self.cert_scalar_inputs.mix_into(channel);
         self.fake_glv_scalar_air.mix_into(channel);
@@ -810,11 +796,6 @@ impl P256CurrentAirInteractionClaim {
             claim.signed_carry.mix_into(channel);
         }
         self.prepared_table_projective_source.mix_into(channel);
-        channel.mix_felts(&[
-            self.prepared_table_pinned.prepared_table_provider_claimed_sum,
-            self.prepared_table_pinned.cert_base_consumer_claimed_sum,
-            self.prepared_table_pinned.canonical_claimed_sum,
-        ]);
         self.fake_glv_projective_source.mix_into(channel);
         self.fake_glv_chain_expansion.mix_into(channel);
         self.fake_glv_chain_continuity.mix_into(channel);
@@ -824,221 +805,57 @@ impl P256CurrentAirInteractionClaim {
         self.fake_glv_prepared_point_source.mix_into(channel);
         self.prepared_point_range7.mix_into(channel);
         self.final_check.mix_into(channel);
-        channel.mix_felts(&[self.ecdsa_result_provider_claimed_sum]);
         self.public_key_on_curve.mix_into_monolithic(channel);
         self.hinted_mul.mix_into(channel);
         self.final_add.mix_into(channel);
     }
 
-    /// Single source of truth for every monolithic relation balance, as
-    /// `(name, claimed_sum)` pairs. A sound proof has every sum equal to zero.
-    /// Both [`Self::verify_balanced`] and [`Self::relation_audit`] derive from
-    /// this list, so a new relation must be added here exactly once.
-    ///
-    /// Notes on the non-1:1 entries:
-    /// - `PreparedTablePinned{Consistency,Breakdown}` bind the pinned EC-row
-    ///   provider's committed logup total to its declared sum and per-relation
-    ///   breakdown (so the breakdown is anchored to the PCS-verified total).
-    /// - `CertBase` / `PreparedTableCanonical` enforce the full table pinning.
-    /// - `EcdsaResult` / `PublicKeyPoint` / `FinalCheckHint` / `FinalAddOutput`
-    ///   are the boundary-crossing relations that link sub-graphs (see
-    ///   [`Self::liveness_witnesses`]).
-    fn relation_balances(&self) -> Vec<(&'static str, SecureField)> {
-        let scalar_setup_mod_mul_total = self
-            .scalar_setup_mod_muls
-            .iter()
-            .map(ScalarModMulProofSliceInteractionClaim::claimed_sum)
-            .sum::<SecureField>()
-            + self.scalar_setup.scalar_limb_consumer_claimed_sum;
-        let fake_glv_scalar_mod_mul_total = self
-            .fake_glv_scalar_mod_muls
-            .iter()
-            .map(ScalarModMulProofSliceInteractionClaim::claimed_sum)
-            .sum::<SecureField>()
-            + self.fake_glv_scalar_air.scalar_mod_mul_provider_claimed_sum;
-        let pinned = &self.prepared_table_pinned;
+    fn lookup_sum(
+        &self,
+        public_instances: &[PublicEcdsaInstance<M31>],
+        relations: &P256CurrentAirRelations,
+    ) -> SecureField {
+        public_ecdsa_provider_claimed_sum(public_instances, &relations.public_inputs)
+            + ecdsa_result_provider_claimed_sum(public_instances, &relations.ecdsa_result)
+            + self.scalar_setup.total()
+            + self.cert_scalar_inputs.claimed_sum
+            + self.fake_glv_scalar_air.claimed_sum
+            + self.fake_glv_selector_air.claimed_sum
+            + self
+                .scalar_setup_mod_muls
+                .iter()
+                .map(ScalarModMulProofSliceInteractionClaim::claimed_sum)
+                .sum::<SecureField>()
+            + self
+                .fake_glv_scalar_mod_muls
+                .iter()
+                .map(ScalarModMulProofSliceInteractionClaim::claimed_sum)
+                .sum::<SecureField>()
+            + self.prepared_table_projective_source.component_claimed_sum()
+            + self.fake_glv_projective_source.component_claimed_sum()
+            + self.fake_glv_chain_expansion.total()
+            + self.fake_glv_chain_continuity.claimed_sum
+            + self.fake_glv_direct_prepared_operand.total()
+            + self.fake_glv_signed_selector_operand.total()
+            + self.fake_glv_lsb_correction_operand.total()
+            + self.fake_glv_prepared_point_source.component_claimed_sum()
+            + self.prepared_point_range7.claimed_sum
+            + self.final_check.claimed_sum
+            + self.public_key_on_curve.total()
+            + self.hinted_mul.total()
+            + self.final_add.total()
+    }
+
+    /// Stwo-cairo-style aggregate interaction balance. Component claims expose
+    /// their declared LogUp sums; semantic provider/consumer splits stay out of
+    /// production claims and are checked by AIR constraints plus this aggregate.
+    fn relation_balances(
+        &self,
+        public_instances: &[PublicEcdsaInstance<M31>],
+        relations: &P256CurrentAirRelations,
+    ) -> Vec<(&'static str, SecureField)> {
         vec![
-            ("PublicEcdsaInstance", self.public_inputs.total()),
-            (
-                "ScalarSetupOutput",
-                self.scalar_setup.output_provider_claimed_sum
-                    + self.cert_scalar_inputs.scalar_setup_consumer_claimed_sum,
-            ),
-            (
-                "CertScalarInput",
-                self.cert_scalar_inputs.cert_provider_claimed_sum
-                    + self.fake_glv_scalar_air.cert_consumer_claimed_sum,
-            ),
-            (
-                "FakeGlvScalar",
-                self.fake_glv_scalar_air.scalar_provider_claimed_sum
-                    + self.fake_glv_selector_air.scalar_consumer_claimed_sum,
-            ),
-            (
-                "ScalarSetupRange13",
-                self.scalar_setup.range13_consumer_claimed_sum
-                    + self.scalar_setup.range13_provider.claimed_sum
-                    + self.final_check.range13_consumer_claimed_sum,
-            ),
-            (
-                "ScalarSetupRange9",
-                self.scalar_setup.range9_consumer_claimed_sum
-                    + self.scalar_setup.range9_provider.claimed_sum
-                    + self.final_check.range9_consumer_claimed_sum,
-            ),
-            (
-                "ScalarSetupSignedCarry",
-                self.scalar_setup.signed_carry_consumer_claimed_sum
-                    + self.scalar_setup.signed_carry_provider.claimed_sum
-                    + self.final_check.signed_carry_consumer_claimed_sum,
-            ),
-            ("ScalarSetupModMul", scalar_setup_mod_mul_total),
-            ("FakeGlvScalarModMul", fake_glv_scalar_mod_mul_total),
-            (
-                "PreparedTablePinnedConsistency",
-                pinned.total_claimed_sum
-                    - self.prepared_table_projective_source.provider_claimed_sum,
-            ),
-            (
-                "PreparedTablePinnedBreakdown",
-                pinned.total_claimed_sum
-                    - pinned.prepared_table_provider_claimed_sum
-                    - pinned.cert_base_consumer_claimed_sum
-                    - pinned.canonical_claimed_sum
-                    - pinned.final_check_hint_claimed_sum,
-            ),
-            (
-                "PreparedTableProjectiveSource",
-                pinned.prepared_table_provider_claimed_sum
-                    + self.prepared_table_projective_source.consumer_claimed_sum,
-            ),
-            // C5-2: the prepared-table projective-source consumer's
-            // self-contained Range13 / signed-carry providers. The consumer's
-            // formula uses + the providers' yields net to zero internally.
-            (
-                "PreparedTableProjectiveRange13",
-                self.prepared_table_projective_source.range13_total(),
-            ),
-            (
-                "PreparedTableProjectiveSignedCarry",
-                self.prepared_table_projective_source.signed_carry_total(),
-            ),
-            (
-                "CertBase",
-                pinned.cert_base_consumer_claimed_sum
-                    + self.cert_scalar_inputs.cert_base_provider_claimed_sum,
-            ),
-            ("PreparedTableCanonical", pinned.canonical_claimed_sum),
-            (
-                "FakeGlvProjectiveSource",
-                self.fake_glv_projective_source.total(),
-            ),
-            // C5-2: the fake-GLV projective-source consumer's self-contained
-            // Range13 / signed-carry providers. The consumer's Double-formula
-            // uses + the providers' yields net to zero internally.
-            (
-                "FakeGlvProjectiveRange13",
-                self.fake_glv_projective_source.range13_total(),
-            ),
-            (
-                "FakeGlvProjectiveSignedCarry",
-                self.fake_glv_projective_source.signed_carry_total(),
-            ),
-            // γ-digest reshape: the adopting consumers' digest yields net the
-            // tall expanders' digest uses.
-            (
-                "GammaDigest",
-                self.fake_glv_projective_source.gamma_digest_total()
-                    + self.prepared_table_projective_source.gamma_digest_total()
-                    + self.public_key_on_curve.gamma_digest_total()
-                    + self.final_add.gamma_digest_total(),
-            ),
-            // C5 plumbing: the RCB silo PROVIDES every projective EC op's
-            // mul `lhs`/`rhs`/`result` limbs; the two projective-source
-            // consumers CONSUME them over disjoint, exhaustive `source_index`
-            // ranges (prepared-table `[0, source_offset)`, fake-GLV
-            // `[source_offset, ..)`), so this 3-way sum nets to zero.
-            (
-                "ProjectiveRcbMulResult",
-                self.hinted_mul.mul_result_provider_claimed_sum
-                    + self
-                        .fake_glv_projective_source
-                        .mul_result_consumer_claimed_sum
-                    + self
-                        .prepared_table_projective_source
-                        .mul_result_consumer_claimed_sum
-                    + self.final_add.mul_result_consumer_claimed_sum
-                    + self
-                        .public_key_on_curve
-                        .mul_result_consumer_claimed_sum,
-            ),
-            ("FakeGlvChainExpansion", self.fake_glv_chain_expansion.total()),
-            (
-                "FakeGlvChainContinuity",
-                self.fake_glv_chain_continuity.claimed_sum,
-            ),
-            (
-                "FakeGlvDirectPreparedOperand",
-                self.fake_glv_direct_prepared_operand.total(),
-            ),
-            (
-                "FakeGlvSignedSelectorOperand",
-                self.fake_glv_signed_selector_operand.total(),
-            ),
-            (
-                "FakeGlvLsbCorrectionOperand",
-                self.fake_glv_lsb_correction_operand.total(),
-            ),
-            (
-                "FakeGlvPreparedPointSource",
-                self.fake_glv_prepared_point_source.total(),
-            ),
-            (
-                "Range7",
-                self.prepared_point_range7.claimed_sum
-                    + self.fake_glv_prepared_point_source.range7_consumer_claimed_sum,
-            ),
-            (
-                "EcdsaResult",
-                self.ecdsa_result_provider_claimed_sum
-                    + self.final_check.result_consumer_claimed_sum,
-            ),
-            (
-                "PublicKeyPoint",
-                self.public_key_on_curve.total() + self.scalar_setup.point_provider_claimed_sum,
-            ),
-            // Hinted-mul internal balances: each table relation nets the
-            // provider against the check component's uses; the consistency
-            // entry anchors the analytic per-relation breakdown to the
-            // PCS-verified component total.
-            (
-                "HintedMulRange13",
-                self.hinted_mul.range13_provider_claimed_sum
-                    + self.hinted_mul.range13_consumer_claimed_sum,
-            ),
-            (
-                "HintedMulSignedH",
-                self.hinted_mul.signed_h_provider_claimed_sum
-                    + self.hinted_mul.signed_h_consumer_claimed_sum,
-            ),
-            (
-                "HintedMulTotalConsistency",
-                self.hinted_mul.claimed_sum
-                    - self.hinted_mul.range13_consumer_claimed_sum
-                    - self.hinted_mul.signed_h_consumer_claimed_sum
-                    - self.hinted_mul.mul_result_provider_claimed_sum,
-            ),
-            (
-                "FinalCheckHint",
-                self.prepared_table_pinned.final_check_hint_claimed_sum
-                    + self.final_add.hint_consumer_claimed_sum,
-            ),
-            ("FinalAddInternal", self.final_add.internal_total()),
-            (
-                "FinalAddOutput",
-                self.final_add.output_provider_claimed_sum
-                    + self.final_check.final_add_output_consumer_claimed_sum,
-            ),
+            ("LookupSum", self.lookup_sum(public_instances, relations)),
         ]
     }
 
@@ -1050,26 +867,65 @@ impl P256CurrentAirInteractionClaim {
     #[cfg(test)]
     fn liveness_witnesses(&self) -> Vec<(&'static str, SecureField)> {
         vec![
-            ("EcdsaResult", self.final_check.result_consumer_claimed_sum),
-            ("PublicKeyPoint", self.scalar_setup.point_provider_claimed_sum),
+            ("ScalarSetup", self.scalar_setup.total()),
+            ("CertScalarInputs", self.cert_scalar_inputs.claimed_sum),
+            ("PreparedTablePinned", self.prepared_table_pinned.claimed_sum),
             (
-                "CertBase",
-                self.cert_scalar_inputs.cert_base_provider_claimed_sum,
+                "PreparedTableFinalCheckHint",
+                self.prepared_table_pinned.final_check_hint.claimed_sum,
             ),
             (
-                "FinalCheckHint",
-                self.prepared_table_pinned.final_check_hint_claimed_sum,
+                "PreparedTableProjectiveSourceProvider",
+                self.prepared_table_projective_source.provider.claimed_sum,
             ),
             (
-                "FinalAddOutput",
-                self.final_add.output_provider_claimed_sum,
+                "PreparedTableProjectiveSourceConsumer",
+                self.prepared_table_projective_source.consumer.claimed_sum,
             ),
-            // C5 plumbing: the silo→source mul-result link must stay live so the
-            // ladder/prepared-table cannot silently detach from the proven muls.
             (
-                "ProjectiveRcbMulResult",
-                self.hinted_mul.mul_result_provider_claimed_sum,
+                "FakeGlvProjectiveSourceProvider",
+                self.fake_glv_projective_source.provider.claimed_sum,
             ),
+            (
+                "FakeGlvProjectiveSourceConsumer",
+                self.fake_glv_projective_source.consumer.claimed_sum,
+            ),
+            (
+                "FakeGlvDirectPreparedOperandProvider",
+                self.fake_glv_direct_prepared_operand.provider.claimed_sum,
+            ),
+            (
+                "FakeGlvDirectPreparedOperandConsumer",
+                self.fake_glv_direct_prepared_operand.consumer.claimed_sum,
+            ),
+            (
+                "FakeGlvSignedSelectorOperandProvider",
+                self.fake_glv_signed_selector_operand.provider.claimed_sum,
+            ),
+            (
+                "FakeGlvSignedSelectorOperandConsumer",
+                self.fake_glv_signed_selector_operand.consumer.claimed_sum,
+            ),
+            (
+                "FakeGlvLsbCorrectionOperandProvider",
+                self.fake_glv_lsb_correction_operand.provider.claimed_sum,
+            ),
+            (
+                "FakeGlvLsbCorrectionOperandConsumer",
+                self.fake_glv_lsb_correction_operand.consumer.claimed_sum,
+            ),
+            (
+                "FakeGlvPreparedPointSourceProvider",
+                self.fake_glv_prepared_point_source.provider.claimed_sum,
+            ),
+            (
+                "FakeGlvPreparedPointSourceConsumer",
+                self.fake_glv_prepared_point_source.consumer.claimed_sum,
+            ),
+            ("FinalCheck", self.final_check.claimed_sum),
+            ("PublicKeyCurve", self.public_key_on_curve.total()),
+            ("HintedMul", self.hinted_mul.total()),
+            ("FinalAdd", self.final_add.total()),
         ]
     }
 
@@ -1078,16 +934,24 @@ impl P256CurrentAirInteractionClaim {
     /// A diagnostic/regression tool — the runtime `verify_balanced` path returns
     /// the first imbalance directly.
     #[cfg(test)]
-    pub(crate) fn relation_audit(&self) -> P256CurrentAirRelationAudit {
+    fn relation_audit(
+        &self,
+        public_instances: &[PublicEcdsaInstance<M31>],
+        relations: &P256CurrentAirRelations,
+    ) -> P256CurrentAirRelationAudit {
         P256CurrentAirRelationAudit {
-            balances: self.relation_balances(),
+            balances: self.relation_balances(public_instances, relations),
             liveness: self.liveness_witnesses(),
         }
     }
 
-    fn verify_balanced(&self) -> Result<(), P256ProofError> {
+    fn verify_balanced(
+        &self,
+        public_instances: &[PublicEcdsaInstance<M31>],
+        relations: &P256CurrentAirRelations,
+    ) -> Result<(), P256ProofError> {
         match self
-            .relation_balances()
+            .relation_balances(public_instances, relations)
             .into_iter()
             .find(|(_, sum)| *sum != zero())
         {
@@ -1202,6 +1066,9 @@ struct P256CurrentAirRelations {
     /// shared by every adopting wide component and its tall expanders.
     gamma_digest: GammaDigestRelation,
     gamma_challenge: GammaChallenge,
+    /// Per-cert proven `s2_sign_bit` provided by `fake_glv_scalar`, consumed by
+    /// `final_add` to orient `R_2`. Shared into `final_add.sign`.
+    final_add_sign: FinalAddSignRelation,
     /// Final EC-addition sub-graph relations (mul engine + result + output).
     /// `hint` is the same `final_check_hint` relation as above.
     final_add: FinalAddRelations,
@@ -1265,6 +1132,7 @@ impl P256CurrentAirRelations {
                 SecureField::from(M31::from_u32_unchecked(2)),
                 fake_glv_gamma_max_padded_values(),
             ),
+            final_add_sign: FinalAddSignRelation::dummy(),
             final_add: FinalAddRelations {
                 // SHARED with the hinted-mul provider relation above (dummy
                 // instances are value-identical, mirroring the draw path).
@@ -1273,6 +1141,7 @@ impl P256CurrentAirRelations {
                 signed_carry: RangeCheckRelation::dummy(),
                 hint: FinalCheckHintRelation::dummy(),
                 output: FinalAddOutputRelation::dummy(),
+                sign: FinalAddSignRelation::dummy(),
                 gamma_digest: GammaDigestRelation::dummy(),
                 gamma_challenge: GammaChallenge::from_gamma(
                     SecureField::from(M31::from_u32_unchecked(2)),
@@ -1300,6 +1169,7 @@ impl P256CurrentAirRelations {
             public_key_point: public_key_point.clone(),
         };
         let final_check_hint = FinalCheckHintRelation::draw(channel);
+        let final_add_sign = FinalAddSignRelation::draw(channel);
         let gamma_digest = GammaDigestRelation::draw(channel);
         let gamma_challenge = GammaChallenge::draw(channel, fake_glv_gamma_max_padded_values());
         Self {
@@ -1338,6 +1208,7 @@ impl P256CurrentAirRelations {
             hinted_challenge: HintedMulChallenge::draw(channel),
             gamma_digest: gamma_digest.clone(),
             gamma_challenge: gamma_challenge.clone(),
+            final_add_sign: final_add_sign.clone(),
             final_add: FinalAddRelations {
                 // SHARED with the hinted-mul provider: final-add's muls are
                 // hinted rows, so the consumer must use the same instance.
@@ -1347,6 +1218,8 @@ impl P256CurrentAirRelations {
                 // Shared with the prepared-table provider above.
                 hint: final_check_hint,
                 output: FinalAddOutputRelation::draw(channel),
+                // Shared with the fake_glv_scalar provider.
+                sign: final_add_sign,
                 gamma_digest: gamma_digest.clone(),
                 gamma_challenge: gamma_challenge.clone(),
             },
@@ -1407,6 +1280,7 @@ impl P256CurrentAirComponents {
                 &relations.cert_scalar_input,
                 &relations.fake_glv_scalar,
                 &relations.scalar_mod_mul.scalar_limb,
+                &relations.final_add_sign,
             ),
             fake_glv_selector_air: FakeGlvSelectorAirComponents::new(
                 allocator,
@@ -1448,7 +1322,8 @@ impl P256CurrentAirComponents {
                 claim.prepared_table_projective_source.rows,
                 interaction_claim
                     .prepared_table_projective_source
-                    .provider_claimed_sum,
+                    .provider
+                    .claimed_sum,
                 &interaction_claim.prepared_table_projective_source,
                 &relations.prepared_table,
                 &PreparedTablePinningRelations {
@@ -1553,8 +1428,8 @@ impl P256CurrentAirComponents {
                 claim.hinted_mul.log_size,
                 &HintedMulSliceClaimedSums {
                     check: interaction_claim.hinted_mul.claimed_sum,
-                    range13: interaction_claim.hinted_mul.range13_provider_claimed_sum,
-                    signed_h: interaction_claim.hinted_mul.signed_h_provider_claimed_sum,
+                    range13: interaction_claim.hinted_mul.range13,
+                    signed_h: interaction_claim.hinted_mul.signed_h,
                 },
                 &relations.hinted_challenge,
                 &HintedMulRelations {
@@ -1808,7 +1683,7 @@ impl P256ProofDraft {
         let relations = P256CurrentAirRelations::draw(&mut channel);
         let (interaction, interaction_claim) =
             self.gen_current_air_interaction_trace(&base, &relations)?;
-        interaction_claim.verify_balanced()?;
+        interaction_claim.verify_balanced(&self.claim.public_inputs.instances, &relations)?;
         interaction_claim.mix_into(&mut channel);
         let mut tree_builder = commitment_scheme.tree_builder();
         tree_builder.extend_evals(interaction);
@@ -2253,13 +2128,14 @@ impl P256ProofDraft {
         base: &P256CurrentAirBaseTrace,
         relations: &P256CurrentAirRelations,
     ) -> Result<(ColumnVec<M31ColumnEval>, P256CurrentAirInteractionClaim), P256ProofError> {
-        let (scalar_setup_interaction, scalar_setup_claim) = gen_scalar_setup_air_interaction_trace(
-            &base.scalar_setup,
-            &relations.scalar_setup,
-            crate::final_check_air::final_check_range13_uses_from_base(&base.final_check),
-            crate::final_check_air::final_check_range9_uses_from_base(&base.final_check),
-            crate::final_check_air::final_check_signed_carry_uses_from_base(&base.final_check),
-        );
+        let (scalar_setup_interaction, scalar_setup_claim) =
+            gen_scalar_setup_air_interaction_trace(
+                &base.scalar_setup,
+                &relations.scalar_setup,
+                crate::final_check_air::final_check_range13_uses_from_base(&base.final_check),
+                crate::final_check_air::final_check_range9_uses_from_base(&base.final_check),
+                crate::final_check_air::final_check_signed_carry_uses_from_base(&base.final_check),
+            );
         let (cert_scalar_input_interaction, cert_scalar_input_claim) =
             gen_cert_scalar_input_air_interaction_trace(
                 &base.cert_scalar_inputs,
@@ -2273,16 +2149,13 @@ impl P256ProofDraft {
                 &relations.cert_scalar_input,
                 &relations.fake_glv_scalar,
                 &relations.scalar_mod_mul.scalar_limb,
+                &relations.final_add_sign,
             );
         let (fake_glv_selector_interaction, fake_glv_selector_claim) =
             gen_fake_glv_selector_air_interaction_trace(
                 &base.fake_glv_selector_air,
                 &relations.fake_glv_scalar,
             );
-        let public_provider_claim = self
-            .claim
-            .public_inputs
-            .initial_logup_claim(&relations.public_inputs);
         let scalar_lookup_claims = LookupProviderClaims::scalar_mod_mul();
         let scalar_setup_rows = scalar_setup_mod_mul_rows(&self.claim)?;
         let scalar_setup_claims = scalar_setup_rows
@@ -2507,10 +2380,6 @@ impl P256ProofDraft {
                 final_add_output: &relations.final_add.output,
             },
         );
-        let ecdsa_result_provider_claimed_sum = ecdsa_result_provider_claimed_sum(
-            &self.claim.public_inputs.instances,
-            &relations.ecdsa_result,
-        );
         let (public_key_on_curve_interaction, public_key_on_curve_claim) =
             gen_public_key_on_curve_interaction_trace(
                 &base.public_key_slice_claim,
@@ -2595,10 +2464,6 @@ impl P256ProofDraft {
         Ok((
             columns,
             P256CurrentAirInteractionClaim {
-                public_inputs: RelationBalanceClaim::new(
-                    public_provider_claim.claimed_sum,
-                    scalar_setup_claim.public_consumer_claimed_sum,
-                ),
                 scalar_setup: scalar_setup_claim,
                 cert_scalar_inputs: cert_scalar_input_claim,
                 fake_glv_scalar_air: fake_glv_scalar_claim,
@@ -2606,10 +2471,14 @@ impl P256ProofDraft {
                 scalar_setup_mod_muls: scalar_setup_interaction_claims,
                 fake_glv_scalar_mod_muls: fake_glv_scalar_interaction_claims,
                 prepared_table_projective_source: PreparedTableProjectiveSourceInteractionClaim {
-                    provider_claimed_sum: prepared_pinned_claim.total_claimed_sum,
-                    consumer_claimed_sum: prepared_consumer.ec_row_sum,
-                    mul_result_consumer_claimed_sum: prepared_consumer.mul_result_sum,
-                    gamma_yield_sum: prepared_consumer.gamma_yield_sum,
+                    provider: crate::components::ComponentInteractionClaim {
+                        claimed_sum: prepared_pinned_claim.claimed_sum,
+                    },
+                    consumer: crate::components::ComponentInteractionClaim {
+                        claimed_sum: prepared_consumer.ec_row_sum
+                            + prepared_consumer.mul_result_sum
+                            + prepared_consumer.gamma_yield_sum,
+                    },
                     gamma_range13: prepared_gamma_range13_claim,
                     gamma_signed: prepared_gamma_signed_claim,
                     range13: prepared_table_projective_range13_provider_claim,
@@ -2617,10 +2486,14 @@ impl P256ProofDraft {
                 },
                 prepared_table_pinned: prepared_pinned_claim,
                 fake_glv_projective_source: FakeGlvProjectiveSourceInteractionClaim {
-                    provider_claimed_sum: fake_glv_provider_claim.claimed_sum,
-                    consumer_claimed_sum: fake_glv_consumer.ec_row_sum,
-                    mul_result_consumer_claimed_sum: fake_glv_consumer.mul_result_sum,
-                    gamma_yield_sum: fake_glv_consumer.gamma_yield_sum,
+                    provider: crate::components::ComponentInteractionClaim {
+                        claimed_sum: fake_glv_provider_claim.claimed_sum,
+                    },
+                    consumer: crate::components::ComponentInteractionClaim {
+                        claimed_sum: fake_glv_consumer.ec_row_sum
+                            + fake_glv_consumer.mul_result_sum
+                            + fake_glv_consumer.gamma_yield_sum,
+                    },
                     gamma_range13: fake_glv_gamma_range13_claim,
                     gamma_signed: fake_glv_gamma_signed_claim,
                     range13: fake_glv_projective_range13_provider_claim,
@@ -2634,33 +2507,45 @@ impl P256ProofDraft {
                     claimed_sum: continuity_claim.claimed_sum,
                 },
                 fake_glv_direct_prepared_operand: FakeGlvDirectPreparedOperandInteractionClaim {
-                    provider_claimed_sum: direct_provider_sum,
-                    consumer_claimed_sum: direct_consumer_sum,
+                    provider: crate::components::ComponentInteractionClaim {
+                        claimed_sum: direct_provider_sum,
+                    },
+                    consumer: crate::components::ComponentInteractionClaim {
+                        claimed_sum: direct_consumer_sum,
+                    },
                 },
                 fake_glv_signed_selector_operand: FakeGlvSignedSelectorOperandInteractionClaim {
-                    provider_claimed_sum: signed_provider_sum,
-                    consumer_claimed_sum: signed_consumer_sum,
+                    provider: crate::components::ComponentInteractionClaim {
+                        claimed_sum: signed_provider_sum,
+                    },
+                    consumer: crate::components::ComponentInteractionClaim {
+                        claimed_sum: signed_consumer_sum,
+                    },
                 },
                 fake_glv_lsb_correction_operand: FakeGlvLsbCorrectionOperandInteractionClaim {
-                    provider_claimed_sum: lsb_provider_sum,
-                    consumer_claimed_sum: lsb_consumer_sum,
+                    provider: crate::components::ComponentInteractionClaim {
+                        claimed_sum: lsb_provider_sum,
+                    },
+                    consumer: crate::components::ComponentInteractionClaim {
+                        claimed_sum: lsb_consumer_sum,
+                    },
                 },
                 fake_glv_prepared_point_source: FakeGlvPreparedPointSourceInteractionClaim {
-                    provider_claimed_sum: prepared_point_provider_sum,
-                    consumer_claimed_sum: prepared_point_consumer_sum,
-                    range7_consumer_claimed_sum: prepared_point_range7_consumer_sum,
+                    provider: crate::components::ComponentInteractionClaim {
+                        claimed_sum: prepared_point_provider_sum
+                            + prepared_point_range7_consumer_sum,
+                    },
+                    consumer: crate::components::ComponentInteractionClaim {
+                        claimed_sum: prepared_point_consumer_sum,
+                    },
                 },
                 prepared_point_range7: prepared_point_range7_claim,
                 final_check: final_check_claim,
-                ecdsa_result_provider_claimed_sum,
                 public_key_on_curve: public_key_on_curve_claim,
                 hinted_mul: HintedMulProofInteractionClaim {
                     claimed_sum: hinted_claim.claimed_sum,
-                    range13_consumer_claimed_sum: hinted_claim.range13_consumer_claimed_sum,
-                    signed_h_consumer_claimed_sum: hinted_claim.signed_h_consumer_claimed_sum,
-                    mul_result_provider_claimed_sum: hinted_claim.mul_result_provider_claimed_sum,
-                    range13_provider_claimed_sum: hinted_range13_provider.claimed_sum,
-                    signed_h_provider_claimed_sum: hinted_signed_h_provider.claimed_sum,
+                    range13: hinted_range13_provider.claimed_sum,
+                    signed_h: hinted_signed_h_provider.claimed_sum,
                 },
                 final_add: final_add_claim,
             },
@@ -2875,9 +2760,14 @@ fn final_add_claim_from_final_check(
         // `h_i = ∞`; conventionally treat as `bit = 1`.
         M31::from_u32_unchecked(1)
     };
-    let (r1, r1_inf) = signed_prepared(&row.h1, bit_for(0));
-    let (r2, r2_inf) = signed_prepared(&row.h2, bit_for(1));
-    FinalAddClaim::from_hints(row.sig_id, &r1, r1_inf, &r2, r2_inf, hinted_source_offset)
+    let b1 = bit_for(0);
+    let b2 = bit_for(1);
+    let (r1, r1_inf) = signed_prepared(&row.h1, b1);
+    let (r2, r2_inf) = signed_prepared(&row.h2, b2);
+    // Pass the proven per-cert sign bits: `from_hints` orients `R_2` by
+    // `d = b1 ⊕ b2` so the bound x-coordinate is `x(h_1 + h_2)`, and the AIR
+    // binds `b1`/`b2` to these same values via `FinalAddSignRelation`.
+    FinalAddClaim::from_hints(row.sig_id, &r1, r1_inf, b1, &r2, r2_inf, b2, hinted_source_offset)
         .map_err(P256ProofError::FinalAdd)
 }
 
@@ -2925,6 +2815,7 @@ fn negate_prepared(
 
 pub fn verify_current_air_monolithic<MC>(
     proof: P256CurrentAirProof<MC::H>,
+    expected_instances: &[PublicEcdsaInstance<M31>],
 ) -> Result<(), P256ProofError>
 where
     MC: MerkleChannel,
@@ -2934,6 +2825,16 @@ where
         interaction_claim,
         stark_proof,
     } = proof;
+    // Caller-argument binding. The O1 fix below ties the proof to its OWN
+    // embedded `claim.public_inputs.instances` (recomputed provider sums against
+    // STARK-bound consumers), but this function returns only `Result<(), _>`: a
+    // relying party that trusts `Ok(())` would otherwise accept a valid proof of
+    // ANY signature the prover embedded, not the `(z, r, s, pub_x, pub_y)` the
+    // caller intended to verify. Compare the embedded instances against the
+    // caller's expected statement first — cheap, and fail-closed on any mismatch.
+    if claim.public_inputs.instances.as_slice() != expected_instances {
+        return Err(P256ProofError::PublicInstanceMismatch);
+    }
     // Public-key canonicality gate. The AIR range-checks the limbs and binds
     // them to the curve equation, but the curve check works mod p, so a
     // non-canonical representative (`x + p`) of a valid point would otherwise
@@ -2977,19 +2878,11 @@ where
     );
     let relations = P256CurrentAirRelations::draw(&mut channel);
 
-    // O1 — public-input binding: the `PublicEcdsaInstance` and `EcdsaResult`
-    // relations are provided by public-data INITIAL LogUp claims (no committed
-    // trace), so the prover supplies their provider sums freely. Recompute both
-    // from the verifier's own instances (the consumer sides are STARK-bound
-    // committed components) so the balance ties the proof to exactly the
-    // `(sig_id, r, pub_x, pub_y, …)` the verifier was handed — otherwise the
-    // statement is unbound and signature acceptance is forgeable.
-    let mut interaction_claim = interaction_claim;
-    interaction_claim.public_inputs.provider_claimed_sum =
-        public_ecdsa_provider_claimed_sum(&claim.public_inputs.instances, &relations.public_inputs);
-    interaction_claim.ecdsa_result_provider_claimed_sum =
-        ecdsa_result_provider_claimed_sum(&claim.public_inputs.instances, &relations.ecdsa_result);
-    interaction_claim.verify_balanced()?;
+    if interaction_claim.lookup_sum(&claim.public_inputs.instances, &relations) != zero() {
+        return Err(P256ProofError::RelationImbalance {
+            relation: "LookupSum",
+        });
+    }
 
     let log_degree_bounds = claim.trace_log_degree_bounds(&ids, &interaction_claim, &relations);
 
@@ -3164,6 +3057,11 @@ pub enum P256ProofError {
     InvalidNativeEcdsaInput { index: usize },
     NonCanonicalPublicKey { index: usize, field: &'static str },
     RelationImbalance { relation: &'static str },
+    /// The verified proof's embedded public instances do not match the
+    /// statement the caller asked to verify. Without this check, a relying
+    /// party that trusts `Ok(())` would accept a valid proof of ANY signature
+    /// the prover chose, not the one the caller intended.
+    PublicInstanceMismatch,
     ProofLayer(String),
 }
 

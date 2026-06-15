@@ -265,14 +265,11 @@ fn pinned_relation_balances(
     scalar_setup: &crate::scalar::setup_air::ScalarSetupClaim,
 ) -> (SecureField, SecureField) {
     use crate::scalar::cert_bind::{
-        gen_cert_scalar_input_air_base_trace, gen_cert_scalar_input_air_interaction_trace,
-        CertScalarInputAirProofClaim, CertScalarInputRelation,
+        debug_cert_scalar_input_air_relation_sums, gen_cert_scalar_input_air_base_trace,
+        CertScalarInputAirProofClaim,
     };
-    use crate::scalar::setup_air::ScalarSetupOutputRelation;
 
     let mut channel = Blake2sChannel::default();
-    let setup_relation = ScalarSetupOutputRelation::draw(&mut channel);
-    let cert_relation = CertScalarInputRelation::draw(&mut channel);
     let cert_base = CertBaseRelation::draw(&mut channel);
     let prepared_table = PreparedTableEcRowRelation::draw(&mut channel);
     let canonical = PreparedTableCanonicalRelation::draw(&mut channel);
@@ -280,24 +277,19 @@ fn pinned_relation_balances(
     let cert_claim = CertScalarInputAirProofClaim::from_claim(scalar_setup);
     let cert_base_trace =
         gen_cert_scalar_input_air_base_trace(scalar_setup, certs, cert_claim);
-    let (_, cert_interaction) = gen_cert_scalar_input_air_interaction_trace(
-        &cert_base_trace,
-        &setup_relation,
-        &cert_relation,
-        Some(&cert_base),
-    );
+    let cert_sums =
+        debug_cert_scalar_input_air_relation_sums(&cert_base_trace, Some(&cert_base));
 
-    let (_, pinned) = gen_prepared_table_ec_row_pinned_interaction_trace(
+    let (_, cert_base_consumer, canonical_claimed) = debug_prepared_table_pinned_relation_sums(
         ec_base,
         &prepared_table,
         &cert_base,
         &canonical,
-        None,
     );
 
     (
-        pinned.cert_base_consumer_claimed_sum + cert_interaction.cert_base_provider_claimed_sum,
-        pinned.canonical_claimed_sum,
+        cert_base_consumer + cert_sums.cert_base_provider_claimed_sum,
+        canonical_claimed,
     )
 }
 

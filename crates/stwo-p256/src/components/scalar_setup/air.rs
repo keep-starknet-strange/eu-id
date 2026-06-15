@@ -214,15 +214,7 @@ impl ScalarSetupAirProofClaim {
 
 #[derive(Clone, Debug)]
 pub struct ScalarSetupAirInteractionClaim {
-    pub component_claimed_sum: SecureField,
-    pub public_consumer_claimed_sum: SecureField,
-    pub output_provider_claimed_sum: SecureField,
-    /// Claimed sum of the `PublicKeyPointRelation` provider (yield, `-active`).
-    pub point_provider_claimed_sum: SecureField,
-    pub scalar_limb_consumer_claimed_sum: SecureField,
-    pub range13_consumer_claimed_sum: SecureField,
-    pub range9_consumer_claimed_sum: SecureField,
-    pub signed_carry_consumer_claimed_sum: SecureField,
+    pub claimed_sum: SecureField,
     pub range13_provider: RangeCheckInteractionClaim,
     pub range9_provider: RangeCheckInteractionClaim,
     pub signed_carry_provider: RangeCheckInteractionClaim,
@@ -232,14 +224,7 @@ impl ScalarSetupAirInteractionClaim {
     pub fn zero() -> Self {
         let zero = secure_zero();
         Self {
-            component_claimed_sum: zero,
-            public_consumer_claimed_sum: zero,
-            output_provider_claimed_sum: zero,
-            point_provider_claimed_sum: zero,
-            scalar_limb_consumer_claimed_sum: zero,
-            range13_consumer_claimed_sum: zero,
-            range9_consumer_claimed_sum: zero,
-            signed_carry_consumer_claimed_sum: zero,
+            claimed_sum: zero,
             range13_provider: RangeCheckInteractionClaim { claimed_sum: zero },
             range9_provider: RangeCheckInteractionClaim { claimed_sum: zero },
             signed_carry_provider: RangeCheckInteractionClaim { claimed_sum: zero },
@@ -248,7 +233,7 @@ impl ScalarSetupAirInteractionClaim {
 
     pub fn mix_into(&self, channel: &mut impl Channel) {
         channel.mix_felts(&[
-            self.component_claimed_sum,
+            self.claimed_sum,
             self.range13_provider.claimed_sum,
             self.range9_provider.claimed_sum,
             self.signed_carry_provider.claimed_sum,
@@ -256,7 +241,7 @@ impl ScalarSetupAirInteractionClaim {
     }
 
     pub fn total(&self) -> SecureField {
-        self.component_claimed_sum
+        self.claimed_sum
             + self.range13_provider.claimed_sum
             + self.range9_provider.claimed_sum
             + self.signed_carry_provider.claimed_sum
@@ -291,7 +276,7 @@ impl ScalarSetupAirComponents {
                     signed_carry: relations.signed_carry.clone(),
                     public_key_point: relations.public_key_point.clone(),
                 },
-                interaction_claim.component_claimed_sum,
+                interaction_claim.claimed_sum,
             ),
             range13: RangeCheckComponent::new(
                 allocator,
@@ -829,7 +814,10 @@ pub(crate) fn gen_scalar_setup_air_interaction_trace(
     extra_range13_uses: impl IntoIterator<Item = M31>,
     extra_range9_uses: impl IntoIterator<Item = M31>,
     extra_signed_carry_uses: impl IntoIterator<Item = i64>,
-) -> (ColumnVec<M31ColumnEval>, ScalarSetupAirInteractionClaim) {
+) -> (
+    ColumnVec<M31ColumnEval>,
+    ScalarSetupAirInteractionClaim,
+) {
     assert_eq!(base.len(), SCALAR_SETUP_TRACE_COLUMNS);
     let log_size = base[0].domain.log_size();
     let mut offset = 0usize;
@@ -871,12 +859,12 @@ pub(crate) fn gen_scalar_setup_air_interaction_trace(
 
     let mut logup = LogupTraceGenerator::new(log_size);
     let mut public_sum = secure_zero();
-    let mut output_sum = secure_zero();
-    let mut point_sum = secure_zero();
-    let mut scalar_limb_sum = secure_zero();
-    let mut range13_sum = secure_zero();
-    let mut range9_sum = secure_zero();
-    let mut signed_carry_sum = secure_zero();
+    let mut _output_sum = secure_zero();
+    let mut _point_sum = secure_zero();
+    let mut _scalar_limb_sum = secure_zero();
+    let mut _range13_sum = secure_zero();
+    let mut _range9_sum = secure_zero();
+    let mut _signed_carry_sum = secure_zero();
 
     append_relation_column(&mut logup, base, active_col, |vec_row| {
         let values: [PackedM31; PUBLIC_ECDSA_INSTANCE_ARITY] =
@@ -894,7 +882,7 @@ pub(crate) fn gen_scalar_setup_air_interaction_trace(
             base, vec_row, z_red_col, u1_col, u2_col,
         ))
     });
-    output_sum += packed_relation_sum_with_sign(base, active_col, -1, |row| {
+    _output_sum += packed_relation_sum_with_sign(base, active_col, -1, |row| {
         relations
             .output
             .combine(&scalar_setup_output_values(row, z_red_col, u1_col, u2_col))
@@ -907,7 +895,7 @@ pub(crate) fn gen_scalar_setup_air_interaction_trace(
             .public_key_point
             .combine(&scalar_setup_point_packed_values(base, vec_row))
     });
-    point_sum += packed_relation_sum_with_sign(base, active_col, -1, |row| {
+    _point_sum += packed_relation_sum_with_sign(base, active_col, -1, |row| {
         relations
             .public_key_point
             .combine(&scalar_setup_point_values(row))
@@ -928,8 +916,8 @@ pub(crate) fn gen_scalar_setup_air_interaction_trace(
             &relations.range13,
             r_slack_col + limb,
         );
-        range13_sum += range_sum(base, active_col, &relations.range13, public_r_col(limb));
-        range13_sum += range_sum(base, active_col, &relations.range13, r_slack_col + limb);
+        _range13_sum += range_sum(base, active_col, &relations.range13, public_r_col(limb));
+        _range13_sum += range_sum(base, active_col, &relations.range13, r_slack_col + limb);
     }
     for limb in 0..N_LIMBS {
         append_range_column(
@@ -946,8 +934,8 @@ pub(crate) fn gen_scalar_setup_air_interaction_trace(
             &relations.range13,
             s_slack_col + limb,
         );
-        range13_sum += range_sum(base, active_col, &relations.range13, public_s_col(limb));
-        range13_sum += range_sum(base, active_col, &relations.range13, s_slack_col + limb);
+        _range13_sum += range_sum(base, active_col, &relations.range13, public_s_col(limb));
+        _range13_sum += range_sum(base, active_col, &relations.range13, s_slack_col + limb);
     }
     for limb in 0..N_LIMBS {
         let relation = if limb == N_LIMBS - 1 {
@@ -957,9 +945,9 @@ pub(crate) fn gen_scalar_setup_air_interaction_trace(
         };
         append_range_column(&mut logup, base, active_col, relation, public_z_col(limb));
         if limb == N_LIMBS - 1 {
-            range9_sum += range_sum(base, active_col, relation, public_z_col(limb));
+            _range9_sum += range_sum(base, active_col, relation, public_z_col(limb));
         } else {
-            range13_sum += range_sum(base, active_col, relation, public_z_col(limb));
+            _range13_sum += range_sum(base, active_col, relation, public_z_col(limb));
         }
         append_range_column(
             &mut logup,
@@ -968,7 +956,7 @@ pub(crate) fn gen_scalar_setup_air_interaction_trace(
             &relations.signed_carry,
             digest_carry_col + limb,
         );
-        signed_carry_sum += range_sum(
+        _signed_carry_sum += range_sum(
             base,
             active_col,
             &relations.signed_carry,
@@ -990,8 +978,8 @@ pub(crate) fn gen_scalar_setup_air_interaction_trace(
             &relations.range13,
             z_red_slack_col + limb,
         );
-        range13_sum += range_sum(base, active_col, &relations.range13, z_red_col + limb);
-        range13_sum += range_sum(base, active_col, &relations.range13, z_red_slack_col + limb);
+        _range13_sum += range_sum(base, active_col, &relations.range13, z_red_col + limb);
+        _range13_sum += range_sum(base, active_col, &relations.range13, z_red_slack_col + limb);
     }
 
     for limb in 0..N_LIMBS {
@@ -1016,7 +1004,7 @@ pub(crate) fn gen_scalar_setup_air_interaction_trace(
                     value_col,
                     &relations.scalar_mod_mul.scalar_limb,
                 );
-                scalar_limb_sum += scalar_limb_sum_for_column(
+                _scalar_limb_sum += scalar_limb_sum_for_column(
                     base,
                     active_col,
                     public_sig_id_col(),
@@ -1030,7 +1018,7 @@ pub(crate) fn gen_scalar_setup_air_interaction_trace(
         }
     }
 
-    let (mut trace, component_claimed_sum) = logup.finalize_last();
+    let (mut trace, claimed_sum) = logup.finalize_last();
 
     let providers = scalar_setup_lookup_provider_claims();
     let range13_values = providers.range13.gen_preprocessed_column();
@@ -1068,14 +1056,7 @@ pub(crate) fn gen_scalar_setup_air_interaction_trace(
     (
         trace,
         ScalarSetupAirInteractionClaim {
-            component_claimed_sum,
-            public_consumer_claimed_sum: public_sum,
-            output_provider_claimed_sum: output_sum,
-            point_provider_claimed_sum: point_sum,
-            scalar_limb_consumer_claimed_sum: scalar_limb_sum,
-            range13_consumer_claimed_sum: range13_sum,
-            range9_consumer_claimed_sum: range9_sum,
-            signed_carry_consumer_claimed_sum: signed_carry_sum,
+            claimed_sum,
             range13_provider,
             range9_provider,
             signed_carry_provider,

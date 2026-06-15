@@ -894,70 +894,40 @@ impl PublicKeyCurveSliceRelations {
 
 #[derive(Clone, Debug)]
 pub struct PublicKeyCurveSliceInteractionClaim {
-    curve_check: SecureField,
+    claimed_sum: SecureField,
     range13: RangeCheckInteractionClaim,
     signed_carry: RangeCheckInteractionClaim,
     /// γ-digest tall expanders (range13 kind, signed kind).
     gamma_range13: GammaTallInteractionClaim,
     gamma_signed: GammaTallInteractionClaim,
-    /// The curve-check's two γ-digest yields (−active).
-    gamma_yield_sum: SecureField,
-    /// `ProjectiveRcbMulResult` consumer sum (use, `+active`) for the four
-    /// hinted muls; balances against the hinted-mul provider globally.
-    pub(crate) mul_result_consumer_claimed_sum: SecureField,
 }
 
 impl PublicKeyCurveSliceInteractionClaim {
     fn zero() -> Self {
         let zero = secure_zero();
         Self {
-            curve_check: zero,
+            claimed_sum: zero,
             range13: RangeCheckInteractionClaim { claimed_sum: zero },
             signed_carry: RangeCheckInteractionClaim { claimed_sum: zero },
             gamma_range13: GammaTallInteractionClaim::zero(),
             gamma_signed: GammaTallInteractionClaim::zero(),
-            gamma_yield_sum: zero,
-            mul_result_consumer_claimed_sum: zero,
         }
     }
 
-    /// `GammaDigest` balance for this sub-graph (yields vs tall uses; nets to
-    /// zero internally).
-    pub(crate) fn gamma_digest_total(&self) -> SecureField {
-        self.gamma_yield_sum
-            + self.gamma_range13.digest_use_sum
-            + self.gamma_signed.digest_use_sum
-    }
-
     /// Aggregate claimed sum over every public-key sub-graph component.
-    ///
-    /// All internal relations (`mul_limb`, raw-product/fold families,
-    /// `PublicKeyMulResult`, and the sub-graph's own range13/signed-carry
-    /// providers) net to zero, so when the curve-check consumes the
-    /// [`PublicKeyPointRelation`] binding tuple (monolith) this total equals the
-    /// *negative* of the scalar-setup provider sum; it is the only relation
-    /// crossing the sub-graph boundary. The standalone slice (no binding)
-    /// totals to zero.
     pub(crate) fn total(&self) -> SecureField {
-        // Internal netting: the check's γ-digest yields cancel the talls'
-        // digest uses; the talls' range uses cancel the two providers. The
-        // boundary-crossing sums (the point binding inside `curve_check`, and
-        // the hinted mul-result consumes, subtracted here) balance globally.
-        self.curve_check
+        self.claimed_sum
             + self.range13.claimed_sum
             + self.signed_carry.claimed_sum
             + self.gamma_range13.claimed_sum
             + self.gamma_signed.claimed_sum
-            - self.mul_result_consumer_claimed_sum
     }
 
     fn mix_into(&self, channel: &mut impl Channel) {
         channel.mix_felts(&[
-            self.curve_check,
+            self.claimed_sum,
             self.range13.claimed_sum,
             self.signed_carry.claimed_sum,
-            self.gamma_yield_sum,
-            self.mul_result_consumer_claimed_sum,
         ]);
         self.gamma_range13.mix_into(channel);
         self.gamma_signed.mix_into(channel);
@@ -992,7 +962,7 @@ impl PublicKeyCurveSliceComponents {
                     gamma_digest: relations.gamma_digest.clone(),
                     gamma_challenge: relations.gamma_challenge.clone(),
                 },
-                interaction_claim.curve_check,
+                interaction_claim.claimed_sum,
             ),
             gamma_range13: GammaTallComponent::new(
                 allocator,
@@ -1318,7 +1288,7 @@ pub(crate) fn gen_slice_interaction_trace(
     // `ProjectiveRcbMulResult` relation. In the monolith (`bind_to_public`) it
     // also emits the `PublicKeyPointRelation` consume that binds `(x, y)` to
     // the public key; the standalone slice emits no binding tuple.
-    let (curve_trace, curve_claim, mul_result_sum, gamma_yield_sum) =
+    let (curve_trace, curve_claim, _mul_result_sum, _gamma_yield_sum) =
         gen_curve_check_interaction_trace(claim, relations, log_sizes.curve_check, bind_to_public);
     trace.extend(curve_trace);
 
@@ -1365,13 +1335,11 @@ pub(crate) fn gen_slice_interaction_trace(
     Ok((
         trace,
         PublicKeyCurveSliceInteractionClaim {
-            curve_check: curve_claim,
+            claimed_sum: curve_claim,
             range13: range13_claim,
             signed_carry: signed_carry_claim,
             gamma_range13: gamma_range13_claim,
             gamma_signed: gamma_signed_claim,
-            gamma_yield_sum,
-            mul_result_consumer_claimed_sum: mul_result_sum,
         },
     ))
 }
@@ -1490,6 +1458,16 @@ fn curve_check_fraction_pairs(
     }
 
     (pairs, mul_result_sum, gamma_yield_sum)
+}
+
+#[cfg(test)]
+fn curve_mul_result_consumer_sum(
+    claim: &PublicKeyCurveSliceClaim,
+    relations: &PublicKeyCurveSliceRelations,
+    bind_to_public: bool,
+) -> SecureField {
+    let (_, mul_result_sum, _) = curve_check_fraction_pairs(claim, relations, bind_to_public);
+    mul_result_sum
 }
 
 /// The single `(numerator, denominator)` pair for the `PublicKeyPointRelation`
@@ -1706,17 +1684,18 @@ mod tests {
         let relations = PublicKeyCurveSliceRelations::draw(&mut channel);
         let honest =
             public_key_curve_slice_claim_from_public_inputs(&generator_inputs()).expect("on-curve");
-        let (_, honest_claim) =
+        let (_, _honest_claim) =
             gen_slice_interaction_trace(&honest, &relations, false).expect("trace builds");
+        let honest_mul_consumer = curve_mul_result_consumer_sum(&honest, &relations, false);
         assert_eq!(
-            honest_claim.mul_result_consumer_claimed_sum + hinted_provider_sum(&honest, &relations),
+            honest_mul_consumer + hinted_provider_sum(&honest, &relations),
             secure_zero()
         );
-        let (_, interaction_claim) =
+        let (_, _interaction_claim) =
             gen_slice_interaction_trace(&forged, &relations, false).expect("trace builds");
+        let forged_mul_consumer = curve_mul_result_consumer_sum(&forged, &relations, false);
         assert_ne!(
-            interaction_claim.mul_result_consumer_claimed_sum
-                + hinted_provider_sum(&forged, &relations),
+            forged_mul_consumer + hinted_provider_sum(&forged, &relations),
             secure_zero()
         );
 
@@ -1733,9 +1712,11 @@ mod tests {
         let audit_relations = PublicKeyCurveSliceRelations::draw(&mut audit_channel);
         let (_, balanced) = gen_slice_interaction_trace(&consistent_off, &audit_relations, false)
             .expect("trace builds");
-        assert_eq!(balanced.total(), secure_zero());
+        let balanced_mul_consumer =
+            curve_mul_result_consumer_sum(&consistent_off, &audit_relations, false);
+        assert_eq!(balanced.total() - balanced_mul_consumer, secure_zero());
         assert_eq!(
-            balanced.mul_result_consumer_claimed_sum
+            balanced_mul_consumer
                 + hinted_provider_sum(&consistent_off, &audit_relations),
             secure_zero()
         );
@@ -1748,7 +1729,7 @@ mod tests {
 
     /// The hinted-mul provider's `ProjectiveRcbMulResult` yields (yield, −1)
     /// for the slice's four muls — the monolithic counterpart of the slice's
-    /// consumer boundary sum (`mul_result_consumer_claimed_sum`).
+    /// consumer boundary sum recomputed by `curve_mul_result_consumer_sum`.
     fn hinted_provider_sum(
         claim: &PublicKeyCurveSliceClaim,
         relations: &PublicKeyCurveSliceRelations,

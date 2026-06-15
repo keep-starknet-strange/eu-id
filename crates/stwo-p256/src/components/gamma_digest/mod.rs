@@ -18,7 +18,6 @@
 //! single relation entry.
 
 use core::array;
-
 use stwo::core::channel::Channel;
 use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::{SecureField, SECURE_EXTENSION_DEGREE};
@@ -457,24 +456,16 @@ impl FrameworkEval for GammaTallEval {
 pub struct GammaTallInteractionClaim {
     /// The component's logup claimed sum (range uses + digest uses).
     pub claimed_sum: SecureField,
-    /// The digest-use part (balances against the wide rows' yields).
-    pub digest_use_sum: SecureField,
-    /// The range-use part (balances against the kind's range provider).
-    pub range_use_sum: SecureField,
 }
 
 impl GammaTallInteractionClaim {
     pub fn zero() -> Self {
         let zero = SecureField::from(M31::from_u32_unchecked(0));
-        Self {
-            claimed_sum: zero,
-            digest_use_sum: zero,
-            range_use_sum: zero,
-        }
+        Self { claimed_sum: zero }
     }
 
     pub fn mix_into(&self, channel: &mut impl Channel) {
-        channel.mix_felts(&[self.claimed_sum, self.digest_use_sum, self.range_use_sum]);
+        channel.mix_felts(&[self.claimed_sum]);
     }
 }
 
@@ -597,16 +588,41 @@ pub fn gen_gamma_tall_interaction_trace(
 
     (
         trace,
-        GammaTallInteractionClaim {
-            claimed_sum,
-            digest_use_sum,
-            range_use_sum,
-        },
+        GammaTallInteractionClaim { claimed_sum },
     )
 }
 
-/// Gen-side yield sum of the wide rows feeding one tall instance: the exact
-/// counterpart of [`GammaTallInteractionClaim::digest_use_sum`]. Adopting
+/// Tall-side digest use sum, recomputed from the instance and relation for
+/// debug/audit callers that need the semantic split without storing it in the
+/// production interaction claim.
+pub fn gamma_digest_use_sum(
+    instance: &GammaTallInstance,
+    challenge: &GammaChallenge,
+    digest_relation: &GammaDigestRelation,
+) -> SecureField {
+    -gamma_digest_yield_sum(instance, challenge, digest_relation)
+}
+
+/// Tall-side range use sum, recomputed from the instance and relation for
+/// debug/audit callers that need the semantic split without storing it in the
+/// production interaction claim.
+pub fn gamma_range_use_sum(
+    instance: &GammaTallInstance,
+    range_relation: &RangeCheckRelation,
+) -> SecureField {
+    let mut sum = SecureField::from(M31::from_u32_unchecked(0));
+    let one = SecureField::from(M31::from_u32_unchecked(1));
+    for row in 0..instance.layout.active_rows() {
+        for lane in 0..GAMMA_DIGEST_LANES {
+            let value = instance.lane_value(row, lane);
+            let denom: SecureField = range_relation.combine(&[value]);
+            sum += one / denom;
+        }
+    }
+    sum
+}
+
+/// Gen-side yield sum of the wide rows feeding one tall instance. Adopting
 /// components fold these fractions into their own logup; this helper computes
 /// the analytic sum for balance accounting and tests.
 pub fn gamma_digest_yield_sum(
@@ -715,14 +731,13 @@ mod tests {
             &range_relation,
         );
 
-        // Wide-side yields cancel the tall digest uses.
+        // Wide-side yields cancel the recomputed tall digest uses.
         let yields = gamma_digest_yield_sum(&instance, &challenge, &digest_relation);
-        assert_eq!(interaction_claim.digest_use_sum + yields, SecureField::from(m31(0)));
+        let digest_uses = gamma_digest_use_sum(&instance, &challenge, &digest_relation);
+        let range_uses = gamma_range_use_sum(&instance, &range_relation);
+        assert_eq!(digest_uses + yields, SecureField::from(m31(0)));
         // The component total splits exactly into its two parts.
-        assert_eq!(
-            interaction_claim.claimed_sum,
-            interaction_claim.digest_use_sum + interaction_claim.range_use_sum
-        );
+        assert_eq!(interaction_claim.claimed_sum, digest_uses + range_uses);
 
         let mut commitment_scheme = MockCommitmentScheme::default();
         let mut tree_builder = commitment_scheme.tree_builder();
@@ -781,14 +796,14 @@ mod tests {
 
         let mut forged = honest.clone();
         forged.group_values[1][4] = m31(forged.group_values[1][4].0 ^ 1);
-        let (_, forged_claim) = gen_gamma_tall_interaction_trace(
+        let _ = gen_gamma_tall_interaction_trace(
             &forged,
             &challenge,
             &digest_relation,
             &range_relation,
         );
         assert_ne!(
-            forged_claim.digest_use_sum + honest_yields,
+            gamma_digest_use_sum(&forged, &challenge, &digest_relation) + honest_yields,
             SecureField::from(m31(0)),
             "a flipped tall value must unbalance the digest relation"
         );
@@ -802,7 +817,7 @@ mod tests {
         let instance = test_instance(tag);
         let challenge = test_challenge();
         let (digest_relation, range_relation) = draw_relations();
-        let (_, claim) = gen_gamma_tall_interaction_trace(
+        let _ = gen_gamma_tall_interaction_trace(
             &instance,
             &challenge,
             &digest_relation,
@@ -827,7 +842,7 @@ mod tests {
             swapped -= SecureField::from(m31(1)) / denom;
         }
         assert_ne!(
-            claim.digest_use_sum + swapped,
+            gamma_digest_use_sum(&instance, &challenge, &digest_relation) + swapped,
             SecureField::from(m31(0)),
             "digest replay across row indices must unbalance the relation"
         );
@@ -841,13 +856,16 @@ mod tests {
         let instance_b = test_instance(8);
         let challenge = test_challenge();
         let (digest_relation, range_relation) = draw_relations();
-        let (_, claim_a) = gen_gamma_tall_interaction_trace(
+        let _ = gen_gamma_tall_interaction_trace(
             &instance_a,
             &challenge,
             &digest_relation,
             &range_relation,
         );
         let yields_b = gamma_digest_yield_sum(&instance_b, &challenge, &digest_relation);
-        assert_ne!(claim_a.digest_use_sum + yields_b, SecureField::from(m31(0)));
+        assert_ne!(
+            gamma_digest_use_sum(&instance_a, &challenge, &digest_relation) + yields_b,
+            SecureField::from(m31(0))
+        );
     }
 }

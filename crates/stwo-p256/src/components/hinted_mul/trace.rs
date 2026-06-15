@@ -199,9 +199,6 @@ pub struct HintedMulRelations {
 /// interaction column (`finalize_logup_in_pairs` on the AIR side).
 pub struct HintedMulInteractionClaim {
     pub claimed_sum: SecureField,
-    pub range13_consumer_claimed_sum: SecureField,
-    pub signed_h_consumer_claimed_sum: SecureField,
-    pub mul_result_provider_claimed_sum: SecureField,
 }
 
 pub fn gen_hinted_mul_interaction_trace(
@@ -355,11 +352,37 @@ pub fn gen_hinted_mul_interaction_trace(
         trace,
         HintedMulInteractionClaim {
             claimed_sum,
-            range13_consumer_claimed_sum: range13_consumer,
-            signed_h_consumer_claimed_sum: signed_consumer,
-            mul_result_provider_claimed_sum: mul_result_provider,
         },
     )
+}
+
+/// Recompute the hinted-mul check component's `ProjectiveRcbMulResult`
+/// provider sum without storing it in the production interaction claim.
+#[cfg(test)]
+pub(crate) fn hinted_mul_result_provider_sum(
+    claim: &HintedMulTraceClaim,
+    relations: &HintedMulRelations,
+) -> SecureField {
+    let mut sum = SecureField::from(M31::from_u32_unchecked(0));
+    let roles = [
+        (0u32, 0usize),
+        (1u32, N_LIMBS),
+        (2u32, role_result_column()),
+    ];
+    for scheduled in &claim.rows {
+        let mut values = Vec::new();
+        push_row_values(&scheduled.witness, &mut values);
+        for (role, base_column) in roles {
+            let mut tuple = Vec::with_capacity(3 + N_LIMBS);
+            tuple.push(M31::from_u32_unchecked(scheduled.source_index));
+            tuple.push(M31::from_u32_unchecked(scheduled.mul_index));
+            tuple.push(M31::from_u32_unchecked(role));
+            tuple.extend(values[base_column..base_column + N_LIMBS].iter().copied());
+            let denom: SecureField = relations.mul_result.combine(&tuple);
+            sum -= SecureField::from(M31::from_u32_unchecked(1)) / denom;
+        }
+    }
+    sum
 }
 
 /// Range13 use values per active row (multiplicity feed for the provider).

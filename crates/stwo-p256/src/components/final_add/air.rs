@@ -71,6 +71,20 @@ struct FinalAddCheckColumns<E: EvalAtRow> {
     dy_q_b1: E::F,
     x3_q_b0: E::F,
     x3_q_b1: E::F,
+    /// Per-cert PROVEN fake-GLV sign bits, consumed from `FinalAddSignRelation`
+    /// (bound to `fake_glv_scalar`'s `s2_sign_bit`). On an inactive cert the
+    /// consume gate is 0, leaving the bit free — harmless, because that cert's
+    /// `R` is ∞ and orientation is x-invariant-moot.
+    b1: E::F,
+    b2: E::F,
+    /// `d = b1 ⊕ b2` (witnessed boolean; defining constraint `d = b1+b2−2·b1·b2`).
+    sign_d: E::F,
+    /// `R_2` oriented by `d`: `r2p_y ≡ (−1)^d · r2.y (mod p)`. The add runs on
+    /// `(R_1, (r2.x, r2p_y))`, binding `x(R_1 + (−1)^d R_2) = x(h_1 + h_2)`.
+    r2p_y: P256EvalBigInt<E>,
+    /// Modular-negation quotient (`∈ {0,1}`) and carries for the `d = 1` branch.
+    neg_q: E::F,
+    neg_carries: [E::F; N_LIMBS],
 }
 
 struct EvalPoint<E: EvalAtRow> {
@@ -124,6 +138,12 @@ impl<E: EvalAtRow> FinalAddCheckColumns<E> {
             dy_q_b1: eval.next_trace_mask(),
             x3_q_b0: eval.next_trace_mask(),
             x3_q_b1: eval.next_trace_mask(),
+            b1: eval.next_trace_mask(),
+            b2: eval.next_trace_mask(),
+            sign_d: eval.next_trace_mask(),
+            r2p_y: eval.next_p256_bigint(),
+            neg_q: eval.next_trace_mask(),
+            neg_carries: core::array::from_fn(|_| eval.next_trace_mask()),
         }
     }
 }
@@ -136,7 +156,11 @@ pub const CHECK_TRACE_COLUMNS: usize = 1 // active
     + 8 * N_LIMBS // dx, dy, lambda, lamsq, x3, dx_inv, dx_inv_result, x1_sq
     + 3 * (1 + N_LIMBS) // (q + carries) × 3
     + 1 // both_finite (witnessed degree-1 gate)
-    + 4; // dy_q/x3_q bit splits (b0, b1 each)
+    + 4 // dy_q/x3_q bit splits (b0, b1 each)
+    + 3 // b1, b2, sign_d (per-cert sign bits + their XOR)
+    + N_LIMBS // r2p_y (oriented R_2 y-coordinate)
+    + 1 // neg_q (modular-negation quotient)
+    + N_LIMBS; // neg_carries
 
 #[derive(Clone)]
 pub struct FinalAddCheckEval {
@@ -146,6 +170,7 @@ pub struct FinalAddCheckEval {
     /// source is `hinted_source_offset + sig_id`).
     pub(crate) hinted_source_offset: u32,
     pub(crate) hint_relation: FinalCheckHintRelation,
+    pub(crate) sign_relation: FinalAddSignRelation,
     pub(crate) output_relation: FinalAddOutputRelation,
     pub(crate) gamma_digest: crate::components::gamma_digest::GammaDigestRelation,
     pub(crate) gamma_challenge: crate::components::gamma_digest::GammaChallenge,
@@ -183,6 +208,8 @@ impl FrameworkEval for FinalAddCheckEval {
             .chain(columns.dx_inv.limbs())
             .chain(columns.dx_inv_result.limbs())
             .chain(columns.x1_sq.limbs())
+            .chain(columns.r2p_y.limbs())
+            .chain(columns.neg_carries.iter())
         {
             eval.add_constraint((one.clone() - active.clone()) * limb.clone());
         }
@@ -195,6 +222,10 @@ impl FrameworkEval for FinalAddCheckEval {
             columns.dx_q.clone(),
             columns.dy_q.clone(),
             columns.x3_q.clone(),
+            columns.b1.clone(),
+            columns.b2.clone(),
+            columns.sign_d.clone(),
+            columns.neg_q.clone(),
         ] {
             eval.add_constraint((one.clone() - active.clone()) * value);
         }
@@ -272,7 +303,8 @@ impl FrameworkEval for FinalAddCheckEval {
             columns.inverse_add.clone() * (one.clone() - both_finite.clone()),
         );
 
-        // double_add forces r1.x = r2.x and r1.y = r2.y limb-wise.
+        // double_add means R_1 = R_2' (the ORIENTED second point), so it forces
+        // r1.x = r2.x and r1.y = r2p_y limb-wise (h-doubling, not R-doubling).
         for i in 0..N_LIMBS {
             eval.add_constraint(
                 columns.double_add.clone()
@@ -280,7 +312,7 @@ impl FrameworkEval for FinalAddCheckEval {
             );
             eval.add_constraint(
                 columns.double_add.clone()
-                    * (columns.r2.y.limbs()[i].clone() - columns.r1.y.limbs()[i].clone()),
+                    * (columns.r2p_y.limbs()[i].clone() - columns.r1.y.limbs()[i].clone()),
             );
         }
 
@@ -289,6 +321,55 @@ impl FrameworkEval for FinalAddCheckEval {
         let r2_gate = active.clone() * (one.clone() - columns.r2.inf.clone());
         consume_hint(&mut eval, &self.hint_relation, &r1_gate, &columns.sig_id, 0, &columns.r1);
         consume_hint(&mut eval, &self.hint_relation, &r2_gate, &columns.sig_id, 1, &columns.r2);
+
+        // -------- Sign-bit consumes + R_2 orientation --------
+        // Bind b1,b2 to the proven per-cert s2_sign_bit (provider:
+        // fake_glv_scalar). SAME gate as the hint consume, so the bit is bound
+        // exactly for active finite certs; free (harmless) on inactive certs.
+        consume_sign(&mut eval, &self.sign_relation, &r1_gate, &columns.sig_id, 0, &columns.b1);
+        consume_sign(&mut eval, &self.sign_relation, &r2_gate, &columns.sig_id, 1, &columns.b2);
+        eval.add_constraint(columns.b1.clone() * (one.clone() - columns.b1.clone()));
+        eval.add_constraint(columns.b2.clone() * (one.clone() - columns.b2.clone()));
+        eval.add_constraint(columns.sign_d.clone() * (one.clone() - columns.sign_d.clone()));
+        // d = b1 ⊕ b2 = b1 + b2 − 2·b1·b2 (degree 2).
+        eval.add_constraint(
+            columns.sign_d.clone()
+                - (columns.b1.clone() + columns.b2.clone()
+                    - (columns.b1.clone() + columns.b1.clone()) * columns.b2.clone()),
+        );
+        // r2p_y ≡ (−1)^d · r2.y (mod p): passthrough when d=0, modular negation
+        // when d=1. x and inf of R_2 are reused unchanged (orientation preserves
+        // them), so the add below runs on (R_1, (r2.x, r2p_y)) and binds
+        // x(R_1 + (−1)^d R_2) = x(h_1 + h_2).
+        let neg_d = one.clone() - columns.sign_d.clone();
+        for i in 0..N_LIMBS {
+            eval.add_constraint(
+                neg_d.clone()
+                    * (columns.r2p_y.limbs()[i].clone() - columns.r2.y.limbs()[i].clone()),
+            );
+        }
+        add_negation_reduction(
+            &mut eval,
+            &columns.sign_d,
+            &columns.r2p_y,
+            &columns.r2.y,
+            &columns.neg_q,
+            &columns.neg_carries,
+        );
+        eval.add_constraint(columns.neg_q.clone() * (one.clone() - columns.neg_q.clone()));
+        // neg_q = 0 on the passthrough (d=0) branch (and on padding via the
+        // (1−active) gate above). The negation carries are likewise zero unless
+        // the d=1 reduction constrains them, so they are not free witnesses.
+        eval.add_constraint(neg_d.clone() * columns.neg_q.clone());
+        for carry in columns.neg_carries.iter() {
+            eval.add_constraint(neg_d.clone() * carry.clone());
+        }
+        // The ORIENTED second point fed to the add (x, inf reused from R_2).
+        let r2p: EvalPoint<E> = EvalPoint {
+            x: columns.r2.x.clone(),
+            y: columns.r2p_y.clone(),
+            inf: columns.r2.inf.clone(),
+        };
 
         // -------- Mul consumes (wide tuples, hinted provider) --------
         let mul_source = E::F::from(M31::from_u32_unchecked(self.hinted_source_offset))
@@ -339,6 +420,7 @@ impl FrameworkEval for FinalAddCheckEval {
             .chain(columns.dx_inv.limbs())
             .chain(columns.dx_inv_result.limbs())
             .chain(columns.x1_sq.limbs())
+            .chain(columns.r2p_y.limbs())
             .cloned()
             .collect();
 
@@ -401,7 +483,7 @@ impl FrameworkEval for FinalAddCheckEval {
             &distinct_add,
             &columns.dy,
             &columns.r1.y,
-            &columns.r2.y,
+            &r2p.y,
             &columns.dy_q,
             &columns.dy_carries,
         );
@@ -460,13 +542,14 @@ impl FrameworkEval for FinalAddCheckEval {
             eval.add_constraint((one.clone() - finite_finite.clone()) * carry.clone());
         }
 
-        // Collect all 3·N_LIMBS carries for the signed γ-digest (dx, dy, x3
-        // order, matching `final_add_signed_carry_uses`).
+        // Collect all 4·N_LIMBS carries for the signed γ-digest (dx, dy, x3,
+        // neg order, matching `final_add_signed_values_list`).
         let signed_carry_values: Vec<E::F> = columns
             .dx_carries
             .iter()
             .chain(columns.dy_carries.iter())
             .chain(columns.x3_carries.iter())
+            .chain(columns.neg_carries.iter())
             .cloned()
             .collect();
 
@@ -511,6 +594,49 @@ fn consume_hint<E: EvalAtRow>(
     values.push(E::F::from(M31::from_u32_unchecked(cert_id)));
     values.extend(point.relation_values());
     eval.add_to_relation(RelationEntry::new(relation, E::EF::from(active.clone()), &values));
+}
+
+/// Consume a cert's proven `s2_sign_bit` (use, `+gate`). Bound to the
+/// `fake_glv_scalar` provider; the gate matches the hint consume.
+fn consume_sign<E: EvalAtRow>(
+    eval: &mut E,
+    relation: &FinalAddSignRelation,
+    gate: &E::F,
+    sig_id: &E::F,
+    cert_id: u32,
+    bit: &E::F,
+) {
+    let values = [
+        sig_id.clone(),
+        E::F::from(M31::from_u32_unchecked(cert_id)),
+        bit.clone(),
+    ];
+    eval.add_to_relation(RelationEntry::new(relation, E::EF::from(gate.clone()), &values));
+}
+
+/// `r2p_y + r2_y − q·p = 0` over 13-bit limbs with signed carries, final 0.
+/// Gated by `d` (the negation branch); `q ∈ {0,1}`. Establishes
+/// `r2p_y ≡ −r2_y (mod p)`, i.e. the y-coordinate of `−R_2`.
+fn add_negation_reduction<E: EvalAtRow>(
+    eval: &mut E,
+    gate: &E::F,
+    r2p_y: &P256EvalBigInt<E>,
+    r2_y: &P256EvalBigInt<E>,
+    q: &E::F,
+    carries: &[E::F; N_LIMBS],
+) {
+    let zero = E::F::from(M31::from_u32_unchecked(0));
+    let limb_base = E::F::from(M31::from_u32_unchecked(1u32 << LIMB_BITS));
+    let modulus = P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_MODULUS));
+    for i in 0..N_LIMBS {
+        let prev = if i == 0 { zero.clone() } else { carries[i - 1].clone() };
+        let recurrence = r2p_y.limbs()[i].clone() + r2_y.limbs()[i].clone()
+            - q.clone() * fixed_limb::<E>(&modulus, i)
+            + prev
+            - limb_base.clone() * carries[i].clone();
+        eval.add_constraint(gate.clone() * recurrence);
+    }
+    eval.add_constraint(gate.clone() * carries[N_LIMBS - 1].clone());
 }
 
 fn consume_mul<E: EvalAtRow>(

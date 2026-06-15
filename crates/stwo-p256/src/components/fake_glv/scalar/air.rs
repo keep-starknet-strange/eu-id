@@ -54,6 +54,7 @@ use crate::scalar::cert_bind::{
     CertScalarInputClaim, CertScalarInputRelation, CertScalarInputRow,
     CERT_SCALAR_INPUT_RELATION_ARITY,
 };
+use crate::final_add_air::FinalAddSignRelation;
 use crate::scalar::scalar_mod_mul::relation::ScalarLimbRelation;
 // Role constants for the `ScalarLimbRelation` tuples emitted by the
 // `FakeGlvScalarAirEval` provider (see `add_scalar_mod_mul_limb_links` below).
@@ -159,24 +160,12 @@ impl FakeGlvScalarAirProofClaim {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FakeGlvScalarAirInteractionClaim {
     pub claimed_sum: SecureField,
-    pub cert_consumer_claimed_sum: SecureField,
-    pub scalar_provider_claimed_sum: SecureField,
-    /// Provider sum for the limb tuples yielded into the per-cert
-    /// `ScalarModMul` external-limb relation. Balances against the sum of
-    /// `ScalarModMulProofSliceInteractionClaim::claimed_sum()` across all
-    /// `fake_glv_scalar_mod_muls` entries in
-    /// `P256CurrentAirInteractionClaim::relation_balances`
-    /// (entry name: `FakeGlvScalarModMul`).
-    pub scalar_mod_mul_provider_claimed_sum: SecureField,
 }
 
 impl FakeGlvScalarAirInteractionClaim {
     pub fn zero() -> Self {
         Self {
             claimed_sum: secure_zero(),
-            cert_consumer_claimed_sum: secure_zero(),
-            scalar_provider_claimed_sum: secure_zero(),
-            scalar_mod_mul_provider_claimed_sum: secure_zero(),
         }
     }
 
@@ -197,6 +186,7 @@ impl FakeGlvScalarAirComponents {
         cert_relation: &CertScalarInputRelation,
         scalar_relation: &FakeGlvScalarRelation,
         scalar_limb_relation: &ScalarLimbRelation,
+        sign_relation: &FinalAddSignRelation,
     ) -> Self {
         Self {
             scalar: FakeGlvScalarAirComponent::new(
@@ -206,6 +196,7 @@ impl FakeGlvScalarAirComponents {
                     cert_relation: cert_relation.clone(),
                     scalar_relation: scalar_relation.clone(),
                     scalar_limb_relation: scalar_limb_relation.clone(),
+                    sign_relation: sign_relation.clone(),
                 },
                 interaction_claim.claimed_sum,
             ),
@@ -240,6 +231,9 @@ pub struct FakeGlvScalarAirEval {
     /// + cert_id`. Closes the `scalar · s2_abs ≡ selected_s1 (mod n)`
     /// algebraic identity in-AIR.
     pub scalar_limb_relation: ScalarLimbRelation,
+    /// Provider relation forwarding each cert's PROVEN `s2_sign_bit` to the
+    /// final-add sub-graph (consumer: `FinalAddCheckEval`).
+    pub sign_relation: FinalAddSignRelation,
 }
 
 impl FrameworkEval for FakeGlvScalarAirEval {
@@ -270,6 +264,16 @@ impl FrameworkEval for FakeGlvScalarAirEval {
             &self.scalar_relation,
             -E::EF::from(active.clone()),
             &scalar_relation_eval_values(&row),
+        ));
+        // Yield each active cert's PROVEN s2_sign_bit to the final-add sub-graph
+        // (consumer: FinalAddCheckEval). Numerator `-cert_active`: only active
+        // certs contribute (zero/inactive certs and padding yield nothing). MUST
+        // mirror the interaction-trace column order (right after the scalar
+        // provide, before the scalar-mod-mul limb links).
+        eval.add_to_relation(RelationEntry::new(
+            &self.sign_relation,
+            -E::EF::from(row.cert_active.clone()),
+            &[row.sig_id.clone(), row.cert_id.clone(), row.s2_sign_bit.clone()],
         ));
         add_scalar_mod_mul_limb_links(&mut eval, &self.scalar_limb_relation, &row);
         constrain_fake_glv_scalar_general(&mut eval, active, &cert, &row);
@@ -760,6 +764,7 @@ pub(crate) fn gen_fake_glv_scalar_air_interaction_trace(
     cert_relation: &CertScalarInputRelation,
     scalar_relation: &FakeGlvScalarRelation,
     scalar_limb_relation: &ScalarLimbRelation,
+    sign_relation: &FinalAddSignRelation,
 ) -> (ColumnVec<M31ColumnEval>, FakeGlvScalarAirInteractionClaim) {
     assert_eq!(base.len(), FAKE_GLV_SCALAR_TRACE_COLUMNS);
     let log_size = base[0].domain.log_size();
@@ -779,6 +784,27 @@ pub(crate) fn gen_fake_glv_scalar_air_interaction_trace(
             vec_row,
             -PackedQM31::from(base[0].data[vec_row]),
             scalar_relation.combine(&scalar_packed_values_from_base(base, vec_row)),
+        );
+    }
+    col.finalize_col();
+
+    // Sign-bit provider column: yield each active cert's s2_sign_bit to the
+    // final-add sub-graph. Numerator `-cert_active`; tuple (sig_id, cert_id,
+    // s2_sign_bit) read from the scalar relation packed values (positions 0, 1,
+    // and 2 + 2·FAKE_GLV_SMALL_LIMBS). MUST mirror the AIR-eval emission order
+    // (right after the scalar provide).
+    let mut col = logup.new_col();
+    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+        let scalar_vals = scalar_packed_values_from_base(base, vec_row);
+        let sign_tuple = [
+            scalar_vals[0],
+            scalar_vals[1],
+            scalar_vals[2 + 2 * FAKE_GLV_SMALL_LIMBS],
+        ];
+        col.write_frac(
+            vec_row,
+            -PackedQM31::from(base[SCALAR_ROW_CERT_ACTIVE].data[vec_row]),
+            sign_relation.combine(&sign_tuple),
         );
     }
     col.finalize_col();
@@ -803,53 +829,10 @@ pub(crate) fn gen_fake_glv_scalar_air_interaction_trace(
     }
 
     let (trace, claimed_sum) = logup.finalize_last();
-    let cert_consumer_claimed_sum: SecureField = storage_rows(base)
-        .filter(|row| row[0] != M31::from_u32_unchecked(0))
-        .map(|row| -> SecureField {
-            let denominator: SecureField = cert_relation.combine(&cert_values_from_base(&row));
-            SecureField::from(row[0]) / denominator
-        })
-        .sum();
-    let scalar_provider_claimed_sum: SecureField = storage_rows(base)
-        .filter(|row| row[0] != M31::from_u32_unchecked(0))
-        .map(|row| -> SecureField {
-            let denominator: SecureField =
-                scalar_relation.combine(&scalar_values_from_base(&row));
-            -SecureField::from(row[0]) / denominator
-        })
-        .sum();
-    let scalar_mod_mul_provider_claimed_sum: SecureField = storage_rows(base)
-        .filter(|row| row[SCALAR_ROW_CERT_ACTIVE] != M31::from_u32_unchecked(0))
-        .map(|row| -> SecureField {
-            let mul_id = scalar_mod_mul_mul_id_from_row(&row);
-            let cert_active = SecureField::from(row[SCALAR_ROW_CERT_ACTIVE]);
-            let mut acc = secure_zero();
-            for limb in 0..N_LIMBS {
-                for (role, value_col) in scalar_mod_mul_limb_value_columns(limb) {
-                    let value = if value_col == SCALAR_ROW_ZERO_PAD_COL {
-                        M31::from_u32_unchecked(0)
-                    } else {
-                        row[value_col]
-                    };
-                    let denominator: SecureField = scalar_limb_relation.combine(&[
-                        mul_id,
-                        M31::from_u32_unchecked(role),
-                        M31::from_u32_unchecked(limb as u32),
-                        value,
-                    ]);
-                    acc += cert_active / denominator;
-                }
-            }
-            acc
-        })
-        .sum();
     (
         trace,
         FakeGlvScalarAirInteractionClaim {
             claimed_sum,
-            cert_consumer_claimed_sum,
-            scalar_provider_claimed_sum,
-            scalar_mod_mul_provider_claimed_sum,
         },
     )
 }
@@ -915,12 +898,6 @@ fn scalar_mod_mul_mul_id_packed(base: &[M31ColumnEval], vec_row: usize) -> Packe
     base_m31
         + two * base[SCALAR_ROW_SIG_ID].data[vec_row]
         + base[SCALAR_ROW_CERT_ID].data[vec_row]
-}
-
-fn scalar_mod_mul_mul_id_from_row(row: &[M31]) -> M31 {
-    M31::from_u32_unchecked(FAKE_GLV_SCALAR_MUL_ID_BASE)
-        + M31::from_u32_unchecked(2) * row[SCALAR_ROW_SIG_ID]
-        + row[SCALAR_ROW_CERT_ID]
 }
 
 /// Verify the unified scalar equation
@@ -1366,10 +1343,6 @@ fn cert_packed_values_from_base(
     core::array::from_fn(|index| base[1 + index].data[vec_row])
 }
 
-fn cert_values_from_base(row: &[M31]) -> [M31; CERT_SCALAR_INPUT_RELATION_ARITY] {
-    core::array::from_fn(|index| row[1 + index])
-}
-
 const SCALAR_ROW_START: usize = 1 + CERT_SCALAR_INPUT_RELATION_ARITY;
 const SCALAR_ROW_SIG_ID: usize = SCALAR_ROW_START;
 const SCALAR_ROW_CERT_ID: usize = SCALAR_ROW_START + 1;
@@ -1406,21 +1379,6 @@ fn scalar_packed_values_from_base(
     vec_row: usize,
 ) -> [PackedM31; FAKE_GLV_SCALAR_RELATION_ARITY] {
     core::array::from_fn(|index| base[scalar_relation_column_index(index)].data[vec_row])
-}
-
-fn scalar_values_from_base(row: &[M31]) -> [M31; FAKE_GLV_SCALAR_RELATION_ARITY] {
-    core::array::from_fn(|index| row[scalar_relation_column_index(index)])
-}
-
-fn storage_rows(base: &[M31ColumnEval]) -> impl Iterator<Item = Vec<M31>> + '_ {
-    let row_count = base[0].domain.size();
-    (0..row_count).map(|row| {
-        let vec_row = row / (1 << LOG_N_LANES);
-        let lane = row % (1 << LOG_N_LANES);
-        base.iter()
-            .map(|column| column.data[vec_row].to_array()[lane])
-            .collect::<Vec<_>>()
-    })
 }
 
 fn secure_zero() -> SecureField {
