@@ -50,11 +50,11 @@ use stwo_p256_utils::scalar_arithmetic::{words_to_limbs, P256_ORDER};
 use crate::limbs::{P256BigInt, P256M31BigInt};
 use crate::scalar::scalar_mod_mul::columns::{m31_column_eval, padded_log_size, M31ColumnEval};
 
+use crate::final_add_air::FinalAddSignRelation;
 use crate::scalar::cert_bind::{
     CertScalarInputClaim, CertScalarInputRelation, CertScalarInputRow,
     CERT_SCALAR_INPUT_RELATION_ARITY,
 };
-use crate::final_add_air::FinalAddSignRelation;
 use crate::scalar::scalar_mod_mul::relation::ScalarLimbRelation;
 // Role constants for the `ScalarLimbRelation` tuples emitted by the
 // `FakeGlvScalarAirEval` provider (see `add_scalar_mod_mul_limb_links` below).
@@ -228,8 +228,8 @@ pub struct FakeGlvScalarAirEval {
     /// External-limb provider relation feeding `(mul_id, role, limb_index,
     /// limb_value)` tuples into each active cert's `ScalarModMul`
     /// component, where `mul_id = FAKE_GLV_SCALAR_MUL_ID_BASE + 2 · sig_id
-    /// + cert_id`. Closes the `scalar · s2_abs ≡ selected_s1 (mod n)`
-    /// algebraic identity in-AIR.
+    ///   + cert_id`. Closes the `scalar · s2_abs ≡ selected_s1 (mod n)`
+    ///     algebraic identity in-AIR.
     pub scalar_limb_relation: ScalarLimbRelation,
     /// Provider relation forwarding each cert's PROVEN `s2_sign_bit` to the
     /// final-add sub-graph (consumer: `FinalAddCheckEval`).
@@ -273,7 +273,11 @@ impl FrameworkEval for FakeGlvScalarAirEval {
         eval.add_to_relation(RelationEntry::new(
             &self.sign_relation,
             -E::EF::from(row.cert_active.clone()),
-            &[row.sig_id.clone(), row.cert_id.clone(), row.s2_sign_bit.clone()],
+            &[
+                row.sig_id.clone(),
+                row.cert_id.clone(),
+                row.s2_sign_bit.clone(),
+            ],
         ));
         add_scalar_mod_mul_limb_links(&mut eval, &self.scalar_limb_relation, &row);
         constrain_fake_glv_scalar_general(&mut eval, active, &cert, &row);
@@ -628,7 +632,6 @@ impl FakeGlvSmallScalar {
         }
         [value as u64, (value >> 64) as u64, 0, 0]
     }
-
 }
 
 /// Free-function alias for [`FakeGlvSmallScalar::to_le_u64s`], for callers
@@ -829,12 +832,7 @@ pub(crate) fn gen_fake_glv_scalar_air_interaction_trace(
     }
 
     let (trace, claimed_sum) = logup.finalize_last();
-    (
-        trace,
-        FakeGlvScalarAirInteractionClaim {
-            claimed_sum,
-        },
-    )
+    (trace, FakeGlvScalarAirInteractionClaim { claimed_sum })
 }
 
 /// Per-limb `(role, base-trace column index)` provider tuples used by both
@@ -895,9 +893,7 @@ fn append_scalar_mod_mul_limb_column(
 fn scalar_mod_mul_mul_id_packed(base: &[M31ColumnEval], vec_row: usize) -> PackedM31 {
     let base_m31 = PackedM31::from(M31::from_u32_unchecked(FAKE_GLV_SCALAR_MUL_ID_BASE));
     let two = PackedM31::from(M31::from_u32_unchecked(2));
-    base_m31
-        + two * base[SCALAR_ROW_SIG_ID].data[vec_row]
-        + base[SCALAR_ROW_CERT_ID].data[vec_row]
+    base_m31 + two * base[SCALAR_ROW_SIG_ID].data[vec_row] + base[SCALAR_ROW_CERT_ID].data[vec_row]
 }
 
 /// Verify the unified scalar equation
@@ -1004,8 +1000,8 @@ fn read_cert_relation_values<E: EvalAtRow>(
 /// 1. Bind cert/flags/scalar/zero-active hint to existing trace cells.
 /// 2. Witness `selected_s1 ≡ k · s2_abs (mod n)` as the canonical positive
 ///    residue in `[0, n)`, with the correct sign-dependent value:
-///       `bit = 1 ⇒ selected_s1 = s1`
-///       `bit = 0 ⇒ selected_s1 = n − s1`
+///    `bit = 1 ⇒ selected_s1 = s1`
+///    `bit = 0 ⇒ selected_s1 = n − s1`
 /// 3. Constrain `selected_s1` against `(s1, s2_sign_bit, n)` so that an
 ///    adversary cannot decouple it from the witnessed hint.
 ///
@@ -1029,9 +1025,7 @@ fn constrain_fake_glv_scalar_general<E: EvalAtRow>(
     eval.add_constraint(active.clone() * (row.sig_id.clone() - cert[0].clone()));
     eval.add_constraint(active.clone() * (row.cert_id.clone() - cert[1].clone()));
     eval.add_constraint(active.clone() * (row.cert_active.clone() - cert_active.clone()));
-    eval.add_constraint(
-        active.clone() * (row.cert_zero_active.clone() - cert_zero_active.clone()),
-    );
+    eval.add_constraint(active.clone() * (row.cert_zero_active.clone() - cert_zero_active.clone()));
     for flag in [
         row.cert_active.clone(),
         row.cert_zero_active.clone(),
@@ -1042,8 +1036,7 @@ fn constrain_fake_glv_scalar_general<E: EvalAtRow>(
     }
     for limb in 0..(N_LIMBS - 1) {
         eval.add_constraint(
-            row.selected_borrow[limb].clone()
-                * (row.selected_borrow[limb].clone() - one.clone()),
+            row.selected_borrow[limb].clone() * (row.selected_borrow[limb].clone() - one.clone()),
         );
     }
 
@@ -1101,16 +1094,13 @@ fn constrain_fake_glv_scalar_general<E: EvalAtRow>(
     //     Used as a degree-1 selector for the bit = 1 branch (and via
     //     `cert_active − active_bit` for the bit = 0 branch), keeping the
     //     selected-s1 constraints at degree 2.
-    eval.add_constraint(
-        row.active_bit.clone() - cert_active.clone() * row.s2_sign_bit.clone(),
-    );
+    eval.add_constraint(row.active_bit.clone() - cert_active.clone() * row.s2_sign_bit.clone());
 
     // (5) bit = 1 branch  ⇒  selected_s1 = s1  (with s1[i] = 0 for
     //     i ≥ FAKE_GLV_SMALL_LIMBS).
     for limb in 0..FAKE_GLV_SMALL_LIMBS {
         eval.add_constraint(
-            row.active_bit.clone()
-                * (row.selected_s1[limb].clone() - row.s1[limb].clone()),
+            row.active_bit.clone() * (row.selected_s1[limb].clone() - row.s1[limb].clone()),
         );
     }
     for limb in FAKE_GLV_SMALL_LIMBS..N_LIMBS {
@@ -1126,8 +1116,8 @@ fn constrain_fake_glv_scalar_general<E: EvalAtRow>(
     //     in N_LIMBS limbs).
     let cert_active_neg_bit = cert_active.clone() - row.active_bit.clone();
     let n_limbs = words_to_limbs(&P256_ORDER);
-    for limb in 0..N_LIMBS {
-        let n_limb = E::F::from(M31::from_u32_unchecked(n_limbs[limb]));
+    for (limb, n_limb) in n_limbs.iter().copied().enumerate().take(N_LIMBS) {
+        let n_limb = E::F::from(M31::from_u32_unchecked(n_limb));
         let s1_limb = if limb < FAKE_GLV_SMALL_LIMBS {
             row.s1[limb].clone()
         } else {
@@ -1145,8 +1135,7 @@ fn constrain_fake_glv_scalar_general<E: EvalAtRow>(
         };
         eval.add_constraint(
             cert_active_neg_bit.clone()
-                * (row.selected_s1[limb].clone() + s1_limb - n_limb + borrow_in
-                    - borrow_out_term),
+                * (row.selected_s1[limb].clone() + s1_limb - n_limb + borrow_in - borrow_out_term),
         );
     }
 }
@@ -1316,7 +1305,10 @@ fn fake_glv_small_scalar_nonzero_inverse(row: &FakeGlvScalarHintRow) -> M31 {
         .limbs
         .iter()
         .fold(0u64, |acc, limb| acc + u64::from(limb.0));
-    assert!(sum > 0, "nonzero fake-GLV s2_abs must have a nonzero limb sum");
+    assert!(
+        sum > 0,
+        "nonzero fake-GLV s2_abs must have a nonzero limb sum"
+    );
     m31_inverse(M31::from_u32_unchecked(sum as u32))
 }
 
@@ -1573,7 +1565,9 @@ mod tests {
             .expect("full-width scalar should have a bounded fake-GLV hint");
         verify_scalar_equation(&scalar, &hint).expect("hint equation must verify");
         hint.s1.require_128_bit_bound("s1").expect("s1 bound");
-        hint.s2_abs.require_128_bit_bound("s2_abs").expect("s2 bound");
+        hint.s2_abs
+            .require_128_bit_bound("s2_abs")
+            .expect("s2 bound");
         hint.q.require_128_bit_bound("q").expect("q bound");
     }
 }

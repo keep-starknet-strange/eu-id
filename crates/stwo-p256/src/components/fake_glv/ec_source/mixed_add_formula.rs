@@ -252,30 +252,138 @@ pub(crate) fn bind_mixed_add_formula<E: EvalAtRow>(
     let combo_z3p = [term(1, r(1)), term(-3, r(4)), term(3, r(5)), term(-3, x1)];
     let combo_t3 = [term(-1, r(0)), term(-1, r(1)), term(1, r(2))];
 
-    add_combo_reduction(eval, &formula_gate, muls.lhs(2), &combo_x2y2, &columns.reductions[0]);
-    add_combo_reduction(eval, &formula_gate, muls.rhs(2), &combo_x1y1, &columns.reductions[1]);
-    add_combo_reduction(eval, &formula_gate, muls.rhs(6), &combo_r4x1, &columns.reductions[2]);
-    add_combo_reduction(eval, &formula_gate, muls.lhs(7), &combo_r3y1, &columns.reductions[3]);
-    add_combo_reduction(eval, &formula_gate, muls.rhs(7), &combo_yy, &columns.reductions[4]);
-    add_combo_reduction(eval, &formula_gate, muls.lhs(8), &combo_3r0, &columns.reductions[5]);
-    add_combo_reduction(eval, &formula_gate, muls.rhs(8), &combo_yy, &columns.reductions[6]);
-    add_combo_reduction(eval, &formula_gate, muls.lhs(9), &combo_x3p, &columns.reductions[7]);
-    add_combo_reduction(eval, &formula_gate, muls.rhs(9), &combo_z3p, &columns.reductions[8]);
-    add_combo_reduction(eval, &formula_gate, muls.lhs(10), &combo_t3, &columns.reductions[9]);
-    add_combo_reduction(eval, &formula_gate, muls.rhs(10), &combo_x3p, &columns.reductions[10]);
-    add_combo_reduction(eval, &formula_gate, muls.lhs(11), &combo_r3y1, &columns.reductions[11]);
-    add_combo_reduction(eval, &formula_gate, muls.rhs(11), &combo_z3p, &columns.reductions[12]);
-    add_combo_reduction(eval, &formula_gate, muls.lhs(12), &combo_t3, &columns.reductions[13]);
-    add_combo_reduction(eval, &formula_gate, muls.rhs(12), &combo_3r0, &columns.reductions[14]);
+    add_combo_reduction(
+        eval,
+        &formula_gate,
+        muls.lhs(2),
+        &combo_x2y2,
+        &columns.reductions[0],
+    );
+    add_combo_reduction(
+        eval,
+        &formula_gate,
+        muls.rhs(2),
+        &combo_x1y1,
+        &columns.reductions[1],
+    );
+    add_combo_reduction(
+        eval,
+        &formula_gate,
+        muls.rhs(6),
+        &combo_r4x1,
+        &columns.reductions[2],
+    );
+    add_combo_reduction(
+        eval,
+        &formula_gate,
+        muls.lhs(7),
+        &combo_r3y1,
+        &columns.reductions[3],
+    );
+    add_combo_reduction(
+        eval,
+        &formula_gate,
+        muls.rhs(7),
+        &combo_yy,
+        &columns.reductions[4],
+    );
+    add_combo_reduction(
+        eval,
+        &formula_gate,
+        muls.lhs(8),
+        &combo_3r0,
+        &columns.reductions[5],
+    );
+    add_combo_reduction(
+        eval,
+        &formula_gate,
+        muls.rhs(8),
+        &combo_yy,
+        &columns.reductions[6],
+    );
+    add_combo_reduction(
+        eval,
+        &formula_gate,
+        muls.lhs(9),
+        &combo_x3p,
+        &columns.reductions[7],
+    );
+    add_combo_reduction(
+        eval,
+        &formula_gate,
+        muls.rhs(9),
+        &combo_z3p,
+        &columns.reductions[8],
+    );
+    add_combo_reduction(
+        eval,
+        &formula_gate,
+        muls.lhs(10),
+        &combo_t3,
+        &columns.reductions[9],
+    );
+    add_combo_reduction(
+        eval,
+        &formula_gate,
+        muls.rhs(10),
+        &combo_x3p,
+        &columns.reductions[10],
+    );
+    add_combo_reduction(
+        eval,
+        &formula_gate,
+        muls.lhs(11),
+        &combo_r3y1,
+        &columns.reductions[11],
+    );
+    add_combo_reduction(
+        eval,
+        &formula_gate,
+        muls.rhs(11),
+        &combo_z3p,
+        &columns.reductions[12],
+    );
+    add_combo_reduction(
+        eval,
+        &formula_gate,
+        muls.lhs(12),
+        &combo_t3,
+        &columns.reductions[13],
+    );
+    add_combo_reduction(
+        eval,
+        &formula_gate,
+        muls.rhs(12),
+        &combo_3r0,
+        &columns.reductions[14],
+    );
 
     // ----- (2) Output projective working values -----
     // x3 ≡ R10 − R7,  y3 ≡ R8 + R9,  z3 ≡ R11 + R12.
     let combo_x3 = [term(1, r(10)), term(-1, r(7))];
     let combo_y3 = [term(1, r(8)), term(1, r(9))];
     let combo_z3 = [term(1, r(11)), term(1, r(12))];
-    add_combo_reduction(eval, &formula_gate, &columns.x3, &combo_x3, &columns.reductions[15]);
-    add_combo_reduction(eval, &formula_gate, &columns.y3, &combo_y3, &columns.reductions[16]);
-    add_combo_reduction(eval, &formula_gate, &columns.z3, &combo_z3, &columns.reductions[17]);
+    add_combo_reduction(
+        eval,
+        &formula_gate,
+        &columns.x3,
+        &combo_x3,
+        &columns.reductions[15],
+    );
+    add_combo_reduction(
+        eval,
+        &formula_gate,
+        &columns.y3,
+        &combo_y3,
+        &columns.reductions[16],
+    );
+    add_combo_reduction(
+        eval,
+        &formula_gate,
+        &columns.z3,
+        &combo_z3,
+        &columns.reductions[17],
+    );
 
     // ----- (3a) Affine-normalization OPERAND binding (the link to `output`) ----
     // Operand dedup: M13/M14's operands are dropped consumed-mul slots whose
@@ -421,12 +529,24 @@ pub(crate) fn solve_mixed_add_formula_witness(
         (operand(7, 1), vec![tt(3, &r6), tt(-3, &r0), tt(-9, &one)]),
         (operand(8, 0), vec![tt(3, &r0), tt(-3, &one)]),
         (operand(8, 1), vec![tt(3, &r6), tt(-3, &r0), tt(-9, &one)]),
-        (operand(9, 0), vec![tt(1, &r1), tt(3, &r4), tt(-3, &r5), tt(3, &x1)]),
-        (operand(9, 1), vec![tt(1, &r1), tt(-3, &r4), tt(3, &r5), tt(-3, &x1)]),
+        (
+            operand(9, 0),
+            vec![tt(1, &r1), tt(3, &r4), tt(-3, &r5), tt(3, &x1)],
+        ),
+        (
+            operand(9, 1),
+            vec![tt(1, &r1), tt(-3, &r4), tt(3, &r5), tt(-3, &x1)],
+        ),
         (operand(10, 0), vec![tt(-1, &r0), tt(-1, &r1), tt(1, &r2)]),
-        (operand(10, 1), vec![tt(1, &r1), tt(3, &r4), tt(-3, &r5), tt(3, &x1)]),
+        (
+            operand(10, 1),
+            vec![tt(1, &r1), tt(3, &r4), tt(-3, &r5), tt(3, &x1)],
+        ),
         (operand(11, 0), vec![tt(1, &r3), tt(1, &y1)]),
-        (operand(11, 1), vec![tt(1, &r1), tt(-3, &r4), tt(3, &r5), tt(-3, &x1)]),
+        (
+            operand(11, 1),
+            vec![tt(1, &r1), tt(-3, &r4), tt(3, &r5), tt(-3, &x1)],
+        ),
         (operand(12, 0), vec![tt(-1, &r0), tt(-1, &r1), tt(1, &r2)]),
         (operand(12, 1), vec![tt(3, &r0), tt(-3, &one)]),
         (x3.clone(), vec![tt(1, &r10), tt(-1, &r7)]),
@@ -499,7 +619,10 @@ pub(crate) fn mixed_add_formula_trace_values(
 /// MixedAdd `mixed_active = 1`, `formula_gate = 0`. The AIR constrains these
 /// columns to exactly these definitions, so they must be written for EVERY row
 /// (not only the finite-MixedAdd rows whose witness block is otherwise nonzero).
-pub(crate) fn mixed_add_gate_trace_values(is_mixed_active: bool, is_finite_mixed: bool) -> [M31; 2] {
+pub(crate) fn mixed_add_gate_trace_values(
+    is_mixed_active: bool,
+    is_finite_mixed: bool,
+) -> [M31; 2] {
     [
         M31::from_u32_unchecked(is_mixed_active as u32),
         M31::from_u32_unchecked(is_finite_mixed as u32),

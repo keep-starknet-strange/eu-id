@@ -5,16 +5,12 @@
 //! Split out of `mod.rs` (pure relocation, no behavioral change).
 
 use stwo::core::fields::m31::M31;
-use stwo_constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, RelationEntry,
-};
+use stwo_constraint_framework::{EvalAtRow, FrameworkComponent, FrameworkEval, RelationEntry};
 use stwo_p256_utils::constants::{LIMB_BITS, N_LIMBS};
 
 use crate::constants::P256_MODULUS;
 use crate::limbs::{EvalP256BigIntExt, P256EvalBigInt, P256M31BigInt};
-use crate::prepared_table::{
-    FinalCheckHintRelation, PREPARED_TABLE_EC_POINT_COLUMNS,
-};
+use crate::prepared_table::{FinalCheckHintRelation, PREPARED_TABLE_EC_POINT_COLUMNS};
 use crate::projective_air::ProjectiveRcbMulResultRelation;
 use crate::types::U256;
 
@@ -239,15 +235,13 @@ impl FrameworkEval for FinalAddCheckEval {
         // the log_size + 1 (degree-2) composition budget.
         eval.add_constraint(
             columns.both_finite.clone()
-                - (one.clone() - columns.r1.inf.clone())
-                    * (one.clone() - columns.r2.inf.clone()),
+                - (one.clone() - columns.r1.inf.clone()) * (one.clone() - columns.r2.inf.clone()),
         );
         // Reject R_1 = R_2 = ∞ (=> R_final = ∞). With both inf flags boolean,
         // inf1·inf2 = both_finite − 1 + inf1 + inf2 (degree 1 via the column).
         eval.add_constraint(
             active.clone()
-                * (columns.both_finite.clone() + columns.r1.inf.clone()
-                    + columns.r2.inf.clone()
+                * (columns.both_finite.clone() + columns.r1.inf.clone() + columns.r2.inf.clone()
                     - one.clone()),
         );
 
@@ -287,21 +281,14 @@ impl FrameworkEval for FinalAddCheckEval {
         let r1_only = one.clone() - both_finite.clone() - columns.r2.inf.clone();
         let r2_only = one.clone() - both_finite.clone() - columns.r1.inf.clone();
         // distinct_add = both_finite - double_add - inverse_add (degree 2).
-        let distinct_add = both_finite.clone()
-            - columns.double_add.clone()
-            - columns.inverse_add.clone();
+        let distinct_add =
+            both_finite.clone() - columns.double_add.clone() - columns.inverse_add.clone();
         // distinct_add must itself be bool — distinct_add * (1 - distinct_add) = 0.
-        eval.add_constraint(
-            distinct_add.clone() * (one.clone() - distinct_add.clone()),
-        );
+        eval.add_constraint(distinct_add.clone() * (one.clone() - distinct_add.clone()));
         // double_add only makes sense when both finite (rejects double_add on
         // infinity branches): double_add * (1 - both_finite) = 0.
-        eval.add_constraint(
-            columns.double_add.clone() * (one.clone() - both_finite.clone()),
-        );
-        eval.add_constraint(
-            columns.inverse_add.clone() * (one.clone() - both_finite.clone()),
-        );
+        eval.add_constraint(columns.double_add.clone() * (one.clone() - both_finite.clone()));
+        eval.add_constraint(columns.inverse_add.clone() * (one.clone() - both_finite.clone()));
 
         // double_add means R_1 = R_2' (the ORIENTED second point), so it forces
         // r1.x = r2.x and r1.y = r2p_y limb-wise (h-doubling, not R-doubling).
@@ -319,15 +306,43 @@ impl FrameworkEval for FinalAddCheckEval {
         // -------- Hint consumes (unchanged) --------
         let r1_gate = active.clone() * (one.clone() - columns.r1.inf.clone());
         let r2_gate = active.clone() * (one.clone() - columns.r2.inf.clone());
-        consume_hint(&mut eval, &self.hint_relation, &r1_gate, &columns.sig_id, 0, &columns.r1);
-        consume_hint(&mut eval, &self.hint_relation, &r2_gate, &columns.sig_id, 1, &columns.r2);
+        consume_hint(
+            &mut eval,
+            &self.hint_relation,
+            &r1_gate,
+            &columns.sig_id,
+            0,
+            &columns.r1,
+        );
+        consume_hint(
+            &mut eval,
+            &self.hint_relation,
+            &r2_gate,
+            &columns.sig_id,
+            1,
+            &columns.r2,
+        );
 
         // -------- Sign-bit consumes + R_2 orientation --------
         // Bind b1,b2 to the proven per-cert s2_sign_bit (provider:
         // fake_glv_scalar). SAME gate as the hint consume, so the bit is bound
         // exactly for active finite certs; free (harmless) on inactive certs.
-        consume_sign(&mut eval, &self.sign_relation, &r1_gate, &columns.sig_id, 0, &columns.b1);
-        consume_sign(&mut eval, &self.sign_relation, &r2_gate, &columns.sig_id, 1, &columns.b2);
+        consume_sign(
+            &mut eval,
+            &self.sign_relation,
+            &r1_gate,
+            &columns.sig_id,
+            0,
+            &columns.b1,
+        );
+        consume_sign(
+            &mut eval,
+            &self.sign_relation,
+            &r2_gate,
+            &columns.sig_id,
+            1,
+            &columns.b2,
+        );
         eval.add_constraint(columns.b1.clone() * (one.clone() - columns.b1.clone()));
         eval.add_constraint(columns.b2.clone() * (one.clone() - columns.b2.clone()));
         eval.add_constraint(columns.sign_d.clone() * (one.clone() - columns.sign_d.clone()));
@@ -372,25 +387,121 @@ impl FrameworkEval for FinalAddCheckEval {
         };
 
         // -------- Mul consumes (wide tuples, hinted provider) --------
-        let mul_source = E::F::from(M31::from_u32_unchecked(self.hinted_source_offset))
-            + columns.sig_id.clone();
+        let mul_source =
+            E::F::from(M31::from_u32_unchecked(self.hinted_source_offset)) + columns.sig_id.clone();
         // lambda · dx = dy (semantically `lambda · denom = numer` per branch).
-        consume_mul(&mut eval, &self.mul_result, &active, &mul_source, MUL_LAMBDA_DX, ROLE_LHS, columns.lambda.limbs());
-        consume_mul(&mut eval, &self.mul_result, &active, &mul_source, MUL_LAMBDA_DX, ROLE_RHS, columns.dx.limbs());
-        consume_mul(&mut eval, &self.mul_result, &active, &mul_source, MUL_LAMBDA_DX, ROLE_RESULT, columns.dy.limbs());
-        consume_mul(&mut eval, &self.mul_result, &active, &mul_source, MUL_LAMBDA_SQUARED, ROLE_LHS, columns.lambda.limbs());
-        consume_mul(&mut eval, &self.mul_result, &active, &mul_source, MUL_LAMBDA_SQUARED, ROLE_RHS, columns.lambda.limbs());
-        consume_mul(&mut eval, &self.mul_result, &active, &mul_source, MUL_LAMBDA_SQUARED, ROLE_RESULT, columns.lamsq.limbs());
+        consume_mul(
+            &mut eval,
+            &self.mul_result,
+            &active,
+            &mul_source,
+            MUL_LAMBDA_DX,
+            ROLE_LHS,
+            columns.lambda.limbs(),
+        );
+        consume_mul(
+            &mut eval,
+            &self.mul_result,
+            &active,
+            &mul_source,
+            MUL_LAMBDA_DX,
+            ROLE_RHS,
+            columns.dx.limbs(),
+        );
+        consume_mul(
+            &mut eval,
+            &self.mul_result,
+            &active,
+            &mul_source,
+            MUL_LAMBDA_DX,
+            ROLE_RESULT,
+            columns.dy.limbs(),
+        );
+        consume_mul(
+            &mut eval,
+            &self.mul_result,
+            &active,
+            &mul_source,
+            MUL_LAMBDA_SQUARED,
+            ROLE_LHS,
+            columns.lambda.limbs(),
+        );
+        consume_mul(
+            &mut eval,
+            &self.mul_result,
+            &active,
+            &mul_source,
+            MUL_LAMBDA_SQUARED,
+            ROLE_RHS,
+            columns.lambda.limbs(),
+        );
+        consume_mul(
+            &mut eval,
+            &self.mul_result,
+            &active,
+            &mul_source,
+            MUL_LAMBDA_SQUARED,
+            ROLE_RESULT,
+            columns.lamsq.limbs(),
+        );
         // dx · dx_inv = dx_inv_result, with dx_inv_result pinned to
         // (distinct_add + double_add). Forces dx invertible on either finite
         // branch (⟹ x1 != x2 for distinct, ⟹ y1 != 0 for doubling).
-        consume_mul(&mut eval, &self.mul_result, &active, &mul_source, MUL_DX_INV, ROLE_LHS, columns.dx.limbs());
-        consume_mul(&mut eval, &self.mul_result, &active, &mul_source, MUL_DX_INV, ROLE_RHS, columns.dx_inv.limbs());
-        consume_mul(&mut eval, &self.mul_result, &active, &mul_source, MUL_DX_INV, ROLE_RESULT, columns.dx_inv_result.limbs());
+        consume_mul(
+            &mut eval,
+            &self.mul_result,
+            &active,
+            &mul_source,
+            MUL_DX_INV,
+            ROLE_LHS,
+            columns.dx.limbs(),
+        );
+        consume_mul(
+            &mut eval,
+            &self.mul_result,
+            &active,
+            &mul_source,
+            MUL_DX_INV,
+            ROLE_RHS,
+            columns.dx_inv.limbs(),
+        );
+        consume_mul(
+            &mut eval,
+            &self.mul_result,
+            &active,
+            &mul_source,
+            MUL_DX_INV,
+            ROLE_RESULT,
+            columns.dx_inv_result.limbs(),
+        );
         // x1 · x1 = x1_sq.
-        consume_mul(&mut eval, &self.mul_result, &active, &mul_source, MUL_X1_SQUARED, ROLE_LHS, columns.r1.x.limbs());
-        consume_mul(&mut eval, &self.mul_result, &active, &mul_source, MUL_X1_SQUARED, ROLE_RHS, columns.r1.x.limbs());
-        consume_mul(&mut eval, &self.mul_result, &active, &mul_source, MUL_X1_SQUARED, ROLE_RESULT, columns.x1_sq.limbs());
+        consume_mul(
+            &mut eval,
+            &self.mul_result,
+            &active,
+            &mul_source,
+            MUL_X1_SQUARED,
+            ROLE_LHS,
+            columns.r1.x.limbs(),
+        );
+        consume_mul(
+            &mut eval,
+            &self.mul_result,
+            &active,
+            &mul_source,
+            MUL_X1_SQUARED,
+            ROLE_RHS,
+            columns.r1.x.limbs(),
+        );
+        consume_mul(
+            &mut eval,
+            &self.mul_result,
+            &active,
+            &mul_source,
+            MUL_X1_SQUARED,
+            ROLE_RESULT,
+            columns.x1_sq.limbs(),
+        );
 
         // Provide x3 to the final check (yield, -active).
         let mut out_values = Vec::with_capacity(FINAL_ADD_OUTPUT_RELATION_ARITY);
@@ -428,8 +539,7 @@ impl FrameworkEval for FinalAddCheckEval {
         // Pin limb0 = (distinct_add + double_add), higher limbs 0.
         let denom_inv_target = distinct_add.clone() + columns.double_add.clone();
         eval.add_constraint(
-            active.clone()
-                * (columns.dx_inv_result.limbs()[0].clone() - denom_inv_target.clone()),
+            active.clone() * (columns.dx_inv_result.limbs()[0].clone() - denom_inv_target.clone()),
         );
         for limb in columns.dx_inv_result.limbs().iter().skip(1) {
             eval.add_constraint(active.clone() * limb.clone());
@@ -593,7 +703,11 @@ fn consume_hint<E: EvalAtRow>(
     values.push(sig_id.clone());
     values.push(E::F::from(M31::from_u32_unchecked(cert_id)));
     values.extend(point.relation_values());
-    eval.add_to_relation(RelationEntry::new(relation, E::EF::from(active.clone()), &values));
+    eval.add_to_relation(RelationEntry::new(
+        relation,
+        E::EF::from(active.clone()),
+        &values,
+    ));
 }
 
 /// Consume a cert's proven `s2_sign_bit` (use, `+gate`). Bound to the
@@ -611,7 +725,11 @@ fn consume_sign<E: EvalAtRow>(
         E::F::from(M31::from_u32_unchecked(cert_id)),
         bit.clone(),
     ];
-    eval.add_to_relation(RelationEntry::new(relation, E::EF::from(gate.clone()), &values));
+    eval.add_to_relation(RelationEntry::new(
+        relation,
+        E::EF::from(gate.clone()),
+        &values,
+    ));
 }
 
 /// `r2p_y + r2_y − q·p = 0` over 13-bit limbs with signed carries, final 0.
@@ -629,7 +747,11 @@ fn add_negation_reduction<E: EvalAtRow>(
     let limb_base = E::F::from(M31::from_u32_unchecked(1u32 << LIMB_BITS));
     let modulus = P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_MODULUS));
     for i in 0..N_LIMBS {
-        let prev = if i == 0 { zero.clone() } else { carries[i - 1].clone() };
+        let prev = if i == 0 {
+            zero.clone()
+        } else {
+            carries[i - 1].clone()
+        };
         let recurrence = r2p_y.limbs()[i].clone() + r2_y.limbs()[i].clone()
             - q.clone() * fixed_limb::<E>(&modulus, i)
             + prev
@@ -676,8 +798,13 @@ fn add_sub_reduction<E: EvalAtRow>(
     let limb_base = E::F::from(M31::from_u32_unchecked(1u32 << LIMB_BITS));
     let modulus = P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_MODULUS));
     for i in 0..N_LIMBS {
-        let prev = if i == 0 { zero.clone() } else { carries[i - 1].clone() };
-        let recurrence = value.limbs()[i].clone() + lo.limbs()[i].clone() - hi.limbs()[i].clone()
+        let prev = if i == 0 {
+            zero.clone()
+        } else {
+            carries[i - 1].clone()
+        };
+        let recurrence = value.limbs()[i].clone() + lo.limbs()[i].clone()
+            - hi.limbs()[i].clone()
             - q.clone() * fixed_limb::<E>(&modulus, i)
             + prev
             - limb_base.clone() * carries[i].clone();
@@ -702,7 +829,11 @@ fn add_x3_reduction<E: EvalAtRow>(
     let limb_base = E::F::from(M31::from_u32_unchecked(1u32 << LIMB_BITS));
     let modulus = P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_MODULUS));
     for i in 0..N_LIMBS {
-        let prev = if i == 0 { zero.clone() } else { carries[i - 1].clone() };
+        let prev = if i == 0 {
+            zero.clone()
+        } else {
+            carries[i - 1].clone()
+        };
         let recurrence = x3.limbs()[i].clone() + x1.limbs()[i].clone() + x2.limbs()[i].clone()
             - lamsq.limbs()[i].clone()
             - q.clone() * fixed_limb::<E>(&modulus, i)
@@ -728,7 +859,11 @@ fn add_two_y1_reduction<E: EvalAtRow>(
     let two = E::F::from(M31::from_u32_unchecked(2));
     let modulus = P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_MODULUS));
     for i in 0..N_LIMBS {
-        let prev = if i == 0 { zero.clone() } else { carries[i - 1].clone() };
+        let prev = if i == 0 {
+            zero.clone()
+        } else {
+            carries[i - 1].clone()
+        };
         let recurrence = dx.limbs()[i].clone() + q.clone() * fixed_limb::<E>(&modulus, i)
             - two.clone() * y1.limbs()[i].clone()
             + prev
@@ -757,14 +892,17 @@ fn add_slope_numer_reduction<E: EvalAtRow>(
     let three_coeff = E::F::from(M31::from_u32_unchecked(3));
     let modulus = P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_MODULUS));
     for i in 0..N_LIMBS {
-        let prev = if i == 0 { zero.clone() } else { carries[i - 1].clone() };
+        let prev = if i == 0 {
+            zero.clone()
+        } else {
+            carries[i - 1].clone()
+        };
         let three_term = if i == 0 { three.clone() } else { zero.clone() };
-        let recurrence = dy.limbs()[i].clone()
-            + three_term
-            + q.clone() * fixed_limb::<E>(&modulus, i)
-            - three_coeff.clone() * x1_sq.limbs()[i].clone()
-            + prev
-            - limb_base.clone() * carries[i].clone();
+        let recurrence =
+            dy.limbs()[i].clone() + three_term + q.clone() * fixed_limb::<E>(&modulus, i)
+                - three_coeff.clone() * x1_sq.limbs()[i].clone()
+                + prev
+                - limb_base.clone() * carries[i].clone();
         eval.add_constraint(gate.clone() * recurrence);
     }
     eval.add_constraint(gate.clone() * carries[N_LIMBS - 1].clone());

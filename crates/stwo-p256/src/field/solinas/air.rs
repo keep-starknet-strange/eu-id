@@ -179,7 +179,8 @@ pub fn add_fp_solinas_correction_digit_binding<E: EvalAtRow>(
 
     // sign = 1 - 2 * sign_bit  (∈ {+1, -1}).
     let sign = E::F::from(M31::from_u32_unchecked(1))
-        - correction.sign_bit.clone() - correction.sign_bit.clone();
+        - correction.sign_bit.clone()
+        - correction.sign_bit.clone();
 
     // Constant P-256 modulus limbs (`< 2¹³`, canonical M31), hoisted out of the
     // convolution loop. `mod_limbs[j]` is the `j`-th 13-bit limb.

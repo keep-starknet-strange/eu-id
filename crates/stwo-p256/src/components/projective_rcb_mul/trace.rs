@@ -47,9 +47,7 @@ impl ProjectiveRcbAirTraceClaim {
             .rows
             .par_iter()
             .enumerate()
-            .map(|(source_index, row)| {
-                ProjectiveRcbAirRow::from_projective_row(source_index, row)
-            })
+            .map(|(source_index, row)| ProjectiveRcbAirRow::from_projective_row(source_index, row))
             .collect::<Result<Vec<_>, _>>()?;
         let claim = Self { rows };
         claim.verify_against_projective_trace(trace)?;
@@ -98,7 +96,8 @@ pub struct ProjectiveRcbAirRow {
 /// `{LHS, RHS, RESULT}` × `N_LIMBS`. The consumer commits this many columns and
 /// CONSUMES them from the silo keyed `(source_index, mul_index, role,
 /// limb_index, limb)`.
-pub const PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS: usize = PROJECTIVE_RCB_MAX_MUL_ROWS_PER_OP * 3 * N_LIMBS;
+pub const PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS: usize =
+    PROJECTIVE_RCB_MAX_MUL_ROWS_PER_OP * 3 * N_LIMBS;
 
 /// Flatten an EC op's proven mul `lhs`/`rhs`/`result` limbs into the canonical
 /// consumer layout: for `mul_index` in `0..PROJECTIVE_RCB_MAX_MUL_ROWS_PER_OP`,
@@ -126,7 +125,11 @@ pub(crate) fn projective_rcb_op_mul_limbs(
     debug_assert_eq!(air_row.muls.len(), PROJECTIVE_RCB_MAX_MUL_ROWS_PER_OP);
     let mut column = 0;
     for mul in &air_row.muls {
-        for limbs in [mul.trace.lhs.limbs(), mul.trace.rhs.limbs(), mul.trace.result.limbs()] {
+        for limbs in [
+            mul.trace.lhs.limbs(),
+            mul.trace.rhs.limbs(),
+            mul.trace.result.limbs(),
+        ] {
             for limb in limbs {
                 values[column] = *limb;
                 column += 1;
@@ -190,14 +193,13 @@ pub(crate) fn consumed_mul_slot_packed_limbs(
     let op = base[layout.op_col].data[vec_row];
     let one_minus_op = PackedM31::broadcast(M31::from_u32_unchecked(1)) - op;
     let column = |col: usize, limb: usize| base[col + limb].data[vec_row];
-    let one_limb = |limb: usize| {
-        PackedM31::broadcast(M31::from_u32_unchecked(u32::from(limb == 0)))
-    };
+    let one_limb =
+        |limb: usize| PackedM31::broadcast(M31::from_u32_unchecked(u32::from(limb == 0)));
     let b = crate::limbs::P256M31BigInt::from_u256(&crate::types::U256::from_le_u64s(
         &crate::constants::P256_B,
     ));
-    let r2_offset = crate::projective_air::consumed_mul_kept_column(2, 2)
-        .expect("R2 is a kept slot");
+    let r2_offset =
+        crate::projective_air::consumed_mul_kept_column(2, 2).expect("R2 is a kept slot");
     (0..N_LIMBS)
         .map(|limb| match (mul, role) {
             (0, 0) => column(layout.x1_col, limb),
@@ -235,11 +237,9 @@ impl ProjectiveRcbAirRow {
             ProjectiveEcOp::Double => {
                 rcb_double_with_mul_rows(&lhs, &row.output_affine, &mut muls)?
             }
-            ProjectiveEcOp::MixedAdd => rcb_mixed_add_with_mul_rows(&lhs,
-                &row.rhs_affine,
-                &row.output_affine,
-                &mut muls,
-            )?,
+            ProjectiveEcOp::MixedAdd => {
+                rcb_mixed_add_with_mul_rows(&lhs, &row.rhs_affine, &row.output_affine, &mut muls)?
+            }
         };
         if output_projective != row.output_projective {
             return Err(ProjectiveRcbAirError::ProjectiveOutputMismatch { source_index });
@@ -533,23 +533,11 @@ fn rcb_double_with_mul_rows(
     let y1 = input.y.to_u256();
     let z1 = input.z.to_u256();
 
-    let t0 = fp_mul(ProjectiveRcbMulStep::DoubleX1Squared,
-        &x1,
-        &x1,
-        muls,
-    )?;
-    let t1 = fp_mul(ProjectiveRcbMulStep::DoubleY1Squared,
-        &y1,
-        &y1,
-        muls,
-    )?;
+    let t0 = fp_mul(ProjectiveRcbMulStep::DoubleX1Squared, &x1, &x1, muls)?;
+    let t1 = fp_mul(ProjectiveRcbMulStep::DoubleY1Squared, &y1, &y1, muls)?;
     // M2 z1·z1 (z1 = 1) → identity, value = z1.
     let mut t2 = fp_mul_identity(ProjectiveRcbMulStep::DoubleZ1Squared, &z1, muls);
-    let mut t3 = fp_mul(ProjectiveRcbMulStep::DoubleX1Y1,
-        &x1,
-        &y1,
-        muls,
-    )?;
+    let mut t3 = fp_mul(ProjectiveRcbMulStep::DoubleX1Y1, &x1, &y1, muls)?;
     t3 = fp_add(&t3, &t3);
     // M4 x1·z1 (z1 = 1) → identity, value = x1.
     let mut z3 = fp_mul_identity(ProjectiveRcbMulStep::DoubleX1Z1, &x1, muls);
@@ -561,23 +549,11 @@ fn rcb_double_with_mul_rows(
     y3 = fp_add(&x3, &y3);
     x3 = fp_sub(&t1, &y3);
     y3 = fp_add(&t1, &y3);
-    y3 = fp_mul(ProjectiveRcbMulStep::DoubleX3Y3,
-        &x3,
-        &y3,
-        muls,
-    )?;
-    x3 = fp_mul(ProjectiveRcbMulStep::DoubleX3T3,
-        &x3,
-        &t3,
-        muls,
-    )?;
+    y3 = fp_mul(ProjectiveRcbMulStep::DoubleX3Y3, &x3, &y3, muls)?;
+    x3 = fp_mul(ProjectiveRcbMulStep::DoubleX3T3, &x3, &t3, muls)?;
     t3 = fp_add(&t2, &t2);
     t2 = fp_add(&t2, &t3);
-    z3 = fp_mul(ProjectiveRcbMulStep::DoubleBZ3,
-        &curve_b(),
-        &z3,
-        muls,
-    )?;
+    z3 = fp_mul(ProjectiveRcbMulStep::DoubleBZ3, &curve_b(), &z3, muls)?;
     z3 = fp_sub(&z3, &t2);
     z3 = fp_sub(&z3, &t0);
     t3 = fp_add(&z3, &z3);
@@ -585,31 +561,20 @@ fn rcb_double_with_mul_rows(
     t3 = fp_add(&t0, &t0);
     let mut t0 = fp_add(&t3, &t0);
     t0 = fp_sub(&t0, &t2);
-    t0 = fp_mul(ProjectiveRcbMulStep::DoubleT0Z3,
-        &t0,
-        &z3,
-        muls,
-    )?;
+    t0 = fp_mul(ProjectiveRcbMulStep::DoubleT0Z3, &t0, &z3, muls)?;
     y3 = fp_add(&y3, &t0);
     // M10 y1·z1 (z1 = 1) → identity, value = y1.
     t0 = fp_mul_identity(ProjectiveRcbMulStep::DoubleY1Z1, &y1, muls);
     t0 = fp_add(&t0, &t0);
-    z3 = fp_mul(ProjectiveRcbMulStep::DoubleT0Z3Final,
-        &t0,
-        &z3,
-        muls,
-    )?;
+    z3 = fp_mul(ProjectiveRcbMulStep::DoubleT0Z3Final, &t0, &z3, muls)?;
     x3 = fp_sub(&x3, &z3);
-    z3 = fp_mul(ProjectiveRcbMulStep::DoubleT0T1,
-        &t0,
-        &t1,
-        muls,
-    )?;
+    z3 = fp_mul(ProjectiveRcbMulStep::DoubleT0T1, &t0, &t1, muls)?;
     z3 = fp_add(&z3, &z3);
     z3 = fp_add(&z3, &z3);
 
     let output = projective_from_u256(x3, y3, z3);
-    append_affine_norm_muls(ProjectiveRcbMulStep::DoubleAffineNormX,
+    append_affine_norm_muls(
+        ProjectiveRcbMulStep::DoubleAffineNormX,
         ProjectiveRcbMulStep::DoubleAffineNormY,
         output_affine,
         &output,
@@ -637,23 +602,11 @@ fn rcb_mixed_add_with_mul_rows(
     let x2 = operand.x;
     let y2 = operand.y;
 
-    let mut t0 = fp_mul(ProjectiveRcbMulStep::MixedX1X2,
-        &x1,
-        &x2,
-        muls,
-    )?;
-    let mut t1 = fp_mul(ProjectiveRcbMulStep::MixedY1Y2,
-        &y1,
-        &y2,
-        muls,
-    )?;
+    let mut t0 = fp_mul(ProjectiveRcbMulStep::MixedX1X2, &x1, &x2, muls)?;
+    let mut t1 = fp_mul(ProjectiveRcbMulStep::MixedY1Y2, &y1, &y2, muls)?;
     let mut t3 = fp_add(&x2, &y2);
     let mut t4 = fp_add(&x1, &y1);
-    t3 = fp_mul(ProjectiveRcbMulStep::MixedX2Y2X1Y1,
-        &t3,
-        &t4,
-        muls,
-    )?;
+    t3 = fp_mul(ProjectiveRcbMulStep::MixedX2Y2X1Y1, &t3, &t4, muls)?;
     t4 = fp_add(&t0, &t1);
     t3 = fp_sub(&t3, &t4);
     // M3 y2·z1 (z1 = 1) → identity, value = y2.
@@ -669,11 +622,7 @@ fn rcb_mixed_add_with_mul_rows(
     x3 = fp_add(&x3, &z3);
     z3 = fp_sub(&t1, &x3);
     x3 = fp_add(&t1, &x3);
-    y3 = fp_mul(ProjectiveRcbMulStep::MixedBY3,
-        &curve_b(),
-        &y3,
-        muls,
-    )?;
+    y3 = fp_mul(ProjectiveRcbMulStep::MixedBY3, &curve_b(), &y3, muls)?;
     t1 = fp_add(&z1, &z1);
     let t2 = fp_add(&t1, &z1);
     y3 = fp_sub(&y3, &t2);
@@ -683,42 +632,19 @@ fn rcb_mixed_add_with_mul_rows(
     t1 = fp_add(&t0, &t0);
     t0 = fp_add(&t1, &t0);
     t0 = fp_sub(&t0, &t2);
-    t1 = fp_mul(ProjectiveRcbMulStep::MixedT4Y3,
-        &t4,
-        &y3,
-        muls,
-    )?;
-    let t2 = fp_mul(ProjectiveRcbMulStep::MixedT0Y3,
-        &t0,
-        &y3,
-        muls,
-    )?;
-    y3 = fp_mul(ProjectiveRcbMulStep::MixedX3Z3,
-        &x3,
-        &z3,
-        muls,
-    )?;
+    t1 = fp_mul(ProjectiveRcbMulStep::MixedT4Y3, &t4, &y3, muls)?;
+    let t2 = fp_mul(ProjectiveRcbMulStep::MixedT0Y3, &t0, &y3, muls)?;
+    y3 = fp_mul(ProjectiveRcbMulStep::MixedX3Z3, &x3, &z3, muls)?;
     y3 = fp_add(&y3, &t2);
-    x3 = fp_mul(ProjectiveRcbMulStep::MixedT3X3,
-        &t3,
-        &x3,
-        muls,
-    )?;
+    x3 = fp_mul(ProjectiveRcbMulStep::MixedT3X3, &t3, &x3, muls)?;
     x3 = fp_sub(&x3, &t1);
-    z3 = fp_mul(ProjectiveRcbMulStep::MixedT4Z3,
-        &t4,
-        &z3,
-        muls,
-    )?;
-    t1 = fp_mul(ProjectiveRcbMulStep::MixedT3T0,
-        &t3,
-        &t0,
-        muls,
-    )?;
+    z3 = fp_mul(ProjectiveRcbMulStep::MixedT4Z3, &t4, &z3, muls)?;
+    t1 = fp_mul(ProjectiveRcbMulStep::MixedT3T0, &t3, &t0, muls)?;
     z3 = fp_add(&z3, &t1);
 
     let output = projective_from_u256(x3, y3, z3);
-    append_affine_norm_muls(ProjectiveRcbMulStep::MixedAffineNormX,
+    append_affine_norm_muls(
+        ProjectiveRcbMulStep::MixedAffineNormX,
         ProjectiveRcbMulStep::MixedAffineNormY,
         output_affine,
         &output,

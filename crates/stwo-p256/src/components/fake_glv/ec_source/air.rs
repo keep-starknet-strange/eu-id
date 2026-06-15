@@ -7,10 +7,11 @@ use stwo::core::{
 };
 use stwo::prover::{
     backend::simd::{
-            m31::{PackedM31, LOG_N_LANES},
-            qm31::PackedQM31,
-            SimdBackend,
-        }, ComponentProver,
+        m31::{PackedM31, LOG_N_LANES},
+        qm31::PackedQM31,
+        SimdBackend,
+    },
+    ComponentProver,
 };
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{
@@ -22,23 +23,14 @@ use crate::projective::{ProjectiveEcOp, ProjectiveEcTraceClaim};
 use crate::projective_air::{
     projective_rcb_op_mul_limbs, ConsumedMulLimbs, ProjectiveRcbMulComponentRelations,
     ProjectiveRcbMulResultRelation, CONSUMED_MUL_LIMBS_COLUMNS, PROJECTIVE_RCB_MUL_ROLE_LHS,
-    PROJECTIVE_RCB_MUL_ROLE_RESULT, PROJECTIVE_RCB_MUL_ROLE_RHS, PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS,
+    PROJECTIVE_RCB_MUL_ROLE_RESULT, PROJECTIVE_RCB_MUL_ROLE_RHS,
+    PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS,
 };
-use crate::projective_air::{projective_rcb_signed_carry_log_size, PROJECTIVE_RCB_SIGNED_CARRY_EQUATION};
+use crate::projective_air::{
+    projective_rcb_signed_carry_log_size, PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
+};
 use stwo::prover::backend::simd::m31::N_LANES;
 
-use crate::components::gamma_digest::{
-    gamma_collect_group_values, gamma_digest_of_values, gamma_digest_tuple,
-    gamma_digest_yield_sum, gamma_row_index_of, yield_gamma_digest,
-    GammaChallenge, GammaDigestRelation, GammaTallComponent, GammaTallEval,
-    GammaTallInstance, GammaTallInteractionClaim, GammaTallLayout,
-    GAMMA_TAG_FAKE_GLV_RANGE13, GAMMA_TAG_FAKE_GLV_SIGNED,
-};
-use crate::components::ComponentInteractionClaim;
-use crate::range_checks::{
-    RangeCheckComponent, RangeCheckEval, RangeCheckInteractionClaim,
-    RangeCheckRelation, SignedCarryRangeComponent, SignedCarryRangeEval, RANGE13_BITS,
-};
 use super::double_formula::{
     bind_double_formula, DoubleFormulaColumns, DOUBLE_FORMULA_COLUMNS, DOUBLE_TOTAL_REDUCTIONS,
 };
@@ -46,13 +38,23 @@ use super::mixed_add_formula::{
     bind_mixed_add_formula, MixedAddFormulaColumns, MIXED_ADD_FORMULA_COLUMNS,
     MIXED_ADD_TOTAL_REDUCTIONS,
 };
+use crate::components::gamma_digest::{
+    gamma_collect_group_values, gamma_digest_of_values, gamma_digest_tuple, gamma_digest_yield_sum,
+    gamma_row_index_of, yield_gamma_digest, GammaChallenge, GammaDigestRelation,
+    GammaTallComponent, GammaTallEval, GammaTallInstance, GammaTallInteractionClaim,
+    GammaTallLayout, GAMMA_TAG_FAKE_GLV_RANGE13, GAMMA_TAG_FAKE_GLV_SIGNED,
+};
+use crate::components::ComponentInteractionClaim;
+use crate::range_checks::{
+    RangeCheckComponent, RangeCheckEval, RangeCheckInteractionClaim, RangeCheckRelation,
+    SignedCarryRangeComponent, SignedCarryRangeEval, RANGE13_BITS,
+};
 
 /// Signed-carry preprocessed-column namespace for the fake-GLV projective-source
 /// Double-formula reductions. Reuses the projective-RCB equation so the shared
 /// value/active preprocessed columns (same bound) are deduplicated; the consumer
 /// draws its OWN signed-carry relation instance, giving an independent balance.
 const FAKE_GLV_PROJECTIVE_SIGNED_CARRY_EQUATION: &str = PROJECTIVE_RCB_SIGNED_CARRY_EQUATION;
-use stwo_p256_utils::constants::N_LIMBS;
 use crate::scalar::fake_glv_chain::{
     FakeGlvChainError, FakeGlvPrimitiveEcOp, FakeGlvPrimitiveEcRow, FakeGlvPrimitiveEcTraceClaim,
 };
@@ -61,6 +63,7 @@ use crate::scalar::prepared_table::{
     PREPARED_TABLE_EC_OP_MIXED_ADD, PREPARED_TABLE_EC_POINT_COLUMNS,
 };
 use crate::scalar::scalar_mod_mul::columns::{m31_column_eval, padded_log_size, M31ColumnEval};
+use stwo_p256_utils::constants::N_LIMBS;
 
 relation!(
     FakeGlvPrimitiveEcRowRelation,
@@ -504,8 +507,7 @@ impl FrameworkEval for FakeGlvProjectiveSourceEval {
         // MixedAdd. So expected = 1 - (1 - op)·operand_inf (operand = `rhs`).
         // Constrain the committed flag to this and gate the consumes by it so a
         // 0-mul op consumes nothing (matches the silo).
-        let expected_has_muls =
-            one.clone() - (one.clone() - op.clone()) * rhs.inf();
+        let expected_has_muls = one.clone() - (one.clone() - op.clone()) * rhs.inf();
         consumed_muls.constrain_has_muls(&mut eval, &active, &expected_has_muls);
         // Operand dedup: install the dropped slots' consume expressions.
         consumed_muls.fill_dropped(&crate::projective_air::ConsumedMulWiring {
@@ -669,8 +671,9 @@ pub(crate) fn gen_fake_glv_primitive_ec_preprocessed_trace(
     // C5-2 preprocessed columns the self-contained Range13 / signed-carry
     // providers declare (shared by id with the silo's, deduplicated globally).
     let range13_value_id = crate::range_checks::range_check_value_column_id(RANGE13_BITS);
-    let signed_carry_value_id =
-        crate::range_checks::signed_carry_value_column_id(FAKE_GLV_PROJECTIVE_SIGNED_CARRY_EQUATION);
+    let signed_carry_value_id = crate::range_checks::signed_carry_value_column_id(
+        FAKE_GLV_PROJECTIVE_SIGNED_CARRY_EQUATION,
+    );
     let signed_carry_active_id = crate::range_checks::signed_carry_active_column_id(
         FAKE_GLV_PROJECTIVE_SIGNED_CARRY_EQUATION,
     );
@@ -795,19 +798,19 @@ const PROJECTIVE_RCB_MUL_RESULT_ROLES: [u32; 3] = [
     PROJECTIVE_RCB_MUL_ROLE_RESULT,
 ];
 
-/// C5 plumbing: interaction trace for the fake-GLV projective-source CONSUMER.
-/// Emits, in the exact order `FakeGlvProjectiveSourceEval::evaluate` does under
-/// one `finalize_logup`:
-///   1. the `FakeGlvPrimitiveEcRowRelation` consume (col 0, `+active`),
-///   2. the `ProjectiveRcbMulResultRelation` consume for every committed mul
-///      limb (one col per fraction, canonical mul/role/limb order, `+active`).
-/// Returns the columns, the EC-row consumer sum, and the mul-result consumer sum
-/// (the latter feeds the 3-way `ProjectiveRcbMulResult` balance).
-
-/// LogUp batch size for the projective-source consumer: 2 fractions per
-/// interaction column (the `finalize_logup_in_pairs` layout, expressed via
-/// `consecutive_batching`). Degree ≤ 3 at the `log_size + 1` bound. Larger
-/// batches need a bound past +1, which empirically fails OODS in this stwo.
+// C5 plumbing: interaction trace for the fake-GLV projective-source CONSUMER.
+// Emits, in the exact order `FakeGlvProjectiveSourceEval::evaluate` does under
+// one `finalize_logup`:
+//   1. the `FakeGlvPrimitiveEcRowRelation` consume (col 0, `+active`),
+//   2. the `ProjectiveRcbMulResultRelation` consume for every committed mul
+//      limb (one col per fraction, canonical mul/role/limb order, `+active`).
+// Returns the columns, the EC-row consumer sum, and the mul-result consumer sum
+// (the latter feeds the 3-way `ProjectiveRcbMulResult` balance).
+//
+// LogUp batch size for the projective-source consumer: 2 fractions per
+// interaction column (the `finalize_logup_in_pairs` layout, expressed via
+// `consecutive_batching`). Degree <= 3 at the `log_size + 1` bound. Larger
+// batches need a bound past +1, which empirically fails OODS in this stwo.
 pub(crate) const FAKE_GLV_CONSUMER_LOGUP_BATCH: usize = 2;
 
 /// Total LogUp entries the consumer eval emits (EC-row consume + wide mul
@@ -929,7 +932,10 @@ pub(crate) fn gen_fake_glv_projective_source_consumer_interaction_trace(
     gamma_digest_relation: &GammaDigestRelation,
     gamma_challenge: &GammaChallenge,
 ) -> FakeGlvProjectiveSourceConsumerInteraction {
-    assert_eq!(base.len(), FAKE_GLV_PROJECTIVE_SOURCE_CONSUMER_TRACE_COLUMNS);
+    assert_eq!(
+        base.len(),
+        FAKE_GLV_PROJECTIVE_SOURCE_CONSUMER_TRACE_COLUMNS
+    );
     let log_size = base[0].domain.log_size();
     let vec_rows = 1usize << (log_size - LOG_N_LANES);
     // Collect every fraction in the consumer AIR's emission order, then write
@@ -965,7 +971,9 @@ pub(crate) fn gen_fake_glv_projective_source_consumer_interaction_trace(
                     .map(|vec_row| {
                         let mut values = Vec::with_capacity(3 + N_LIMBS);
                         values.push(base[1].data[vec_row]);
-                        values.push(PackedM31::broadcast(M31::from_u32_unchecked(mul_index as u32)));
+                        values.push(PackedM31::broadcast(M31::from_u32_unchecked(
+                            mul_index as u32,
+                        )));
                         values.push(PackedM31::broadcast(M31::from_u32_unchecked(role)));
                         values.extend(crate::projective_air::consumed_mul_slot_packed_limbs(
                             base, vec_row, &layout, mul_index, role_index,
@@ -997,8 +1005,7 @@ pub(crate) fn gen_fake_glv_projective_source_consumer_interaction_trace(
                     .iter()
                     .map(|&col| base[col].data[vec_row].to_array()[lane])
                     .collect();
-                let digest =
-                    gamma_digest_of_values(gamma_challenge, instance.pad_value, &values);
+                let digest = gamma_digest_of_values(gamma_challenge, instance.pad_value, &values);
                 let tuple = gamma_digest_tuple(
                     instance.layout.tag,
                     M31::from_u32_unchecked(row_index),
@@ -1060,7 +1067,15 @@ fn double_formula_range13_use_columns() -> Vec<usize> {
     // x3, y3, z3 are the first 3·N_LIMBS columns of the Double-formula block.
     let x3 = FAKE_GLV_PROJECTIVE_DOUBLE_FORMULA_OFFSET;
     let mut cols = Vec::with_capacity(7 * N_LIMBS);
-    for start in [lhs_x, lhs_y, output_x, output_y, x3, x3 + N_LIMBS, x3 + 2 * N_LIMBS] {
+    for start in [
+        lhs_x,
+        lhs_y,
+        output_x,
+        output_y,
+        x3,
+        x3 + N_LIMBS,
+        x3 + 2 * N_LIMBS,
+    ] {
         for limb in 0..N_LIMBS {
             cols.push(start + limb);
         }
@@ -1138,7 +1153,9 @@ fn mixed_add_formula_signed_carry_use_columns() -> Vec<usize> {
 /// zeros). Fed into the self-contained Range13 provider's multiplicity. The
 /// tall instance is the single source of truth, so provider tallies can never
 /// drift from the expander's consumption.
-pub(crate) fn fake_glv_projective_source_range13_uses_from_base(base: &[M31ColumnEval]) -> Vec<M31> {
+pub(crate) fn fake_glv_projective_source_range13_uses_from_base(
+    base: &[M31ColumnEval],
+) -> Vec<M31> {
     let [r13, _] = fake_glv_gamma_instances(base);
     r13.all_scheduled_values()
 }
@@ -1298,11 +1315,9 @@ fn fake_glv_projective_source_trace_values(
     // zero, matching the `double_active`-gated constraints + off-Double zero
     // gates.
     if row.op == crate::projective::ProjectiveEcOp::Double {
-        let witness = super::double_formula::solve_double_formula_witness(
-            &mul_limbs,
-            &row.output_projective,
-        )
-        .ok_or(FakeGlvChainError::ProjectiveSourceInvalid)?;
+        let witness =
+            super::double_formula::solve_double_formula_witness(&mul_limbs, &row.output_projective)
+                .ok_or(FakeGlvChainError::ProjectiveSourceInvalid)?;
         for value in super::double_formula::double_formula_trace_values(&witness) {
             values[column] = value;
             column += 1;

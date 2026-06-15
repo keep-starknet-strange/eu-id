@@ -20,6 +20,21 @@ use stwo_constraint_framework::{
     preprocessed_columns::PreProcessedColumnId, TraceLocationAllocator,
 };
 
+use crate::components::fake_glv::prepared_table::interaction::prepared_gamma_instances;
+use crate::components::gamma_digest::{
+    gen_gamma_tall_base_trace, gen_gamma_tall_interaction_trace, GammaChallenge,
+    GammaDigestRelation,
+};
+use crate::components::hinted_mul::air::{
+    gen_hinted_mul_slice_preprocessed_trace, hinted_mul_signed_table_claim, HintedMulChallenge,
+    HintedMulProofClaim, HintedMulProofInteractionClaim, HintedMulSliceClaimedSums,
+    HintedMulSliceComponents,
+};
+use crate::components::hinted_mul::trace::{
+    gen_hinted_mul_base_trace, gen_hinted_mul_interaction_trace, gen_hinted_mul_schedule_columns,
+    hinted_mul_range13_uses, hinted_mul_signed_uses, HintedMulRelations, HintedMulTraceClaim,
+};
+use crate::components::hinted_mul::witness::HintedMulWitnessError;
 use crate::ecdsa::ecdsa_verify;
 use crate::fake_glv_chain::{FakeGlvChainClaim, FakeGlvChainError, FakeGlvPrimitiveEcTraceClaim};
 use crate::fake_glv_chain_continuity::{
@@ -32,9 +47,9 @@ use crate::fake_glv_chain_expansion::{
     gen_fake_glv_chain_expansion_base_trace, gen_fake_glv_chain_expansion_interaction_trace,
     gen_fake_glv_chain_expansion_preprocessed_trace,
     gen_fake_glv_primitive_expansion_consumer_base_trace,
-    gen_fake_glv_primitive_expansion_consumer_interaction_trace,
-    FakeGlvChainExpansionComponents, FakeGlvChainExpansionInteractionClaim,
-    FakeGlvChainExpansionProofClaim, FakeGlvChainPrimitiveExpansionRelation,
+    gen_fake_glv_primitive_expansion_consumer_interaction_trace, FakeGlvChainExpansionComponents,
+    FakeGlvChainExpansionInteractionClaim, FakeGlvChainExpansionProofClaim,
+    FakeGlvChainPrimitiveExpansionRelation,
 };
 use crate::fake_glv_chain_schedule::{
     gen_fake_glv_chain_schedule_base_trace, gen_fake_glv_chain_schedule_preprocessed_trace,
@@ -46,11 +61,6 @@ use crate::fake_glv_direct_prepared_operand::{
     gen_direct_operand_provider_interaction_trace, FakeGlvDirectPreparedOperandComponents,
     FakeGlvDirectPreparedOperandInteractionClaim, FakeGlvDirectPreparedOperandProofClaim,
 };
-use crate::components::gamma_digest::{
-    gen_gamma_tall_base_trace, gen_gamma_tall_interaction_trace, GammaChallenge,
-    GammaDigestRelation,
-};
-use crate::components::fake_glv::prepared_table::interaction::prepared_gamma_instances;
 use crate::fake_glv_ec_source::{
     fake_glv_gamma_instances, fake_glv_gamma_max_padded_values,
     fake_glv_projective_source_range13_uses_from_base,
@@ -85,19 +95,18 @@ use crate::final_check_air::{
     gen_final_check_air_interaction_trace, EcdsaResultRelation, FinalCheckAirComponents,
     FinalCheckAirInteractionClaim, FinalCheckAirProofClaim, FinalCheckAirRelations,
 };
-use crate::prepared_table::FinalCheckHintRelation;
 use crate::prepared_point::{
     prepared_point_provider_claimed_sum, prepared_point_range7_consumer_claimed_sum,
     PreparedPointAudit, PreparedPointError, PreparedPointRelation, PreparedPointTraceClaim,
     PreparedPointUseCountClaim,
 };
+use crate::prepared_table::FinalCheckHintRelation;
 use crate::prepared_table::{
-    gen_prepared_table_ec_row_base_trace,
+    gen_prepared_table_ec_row_base_trace, gen_prepared_table_ec_row_pinned_interaction_trace,
     gen_prepared_table_ec_row_preprocessed_trace, gen_prepared_table_projective_source_base_trace,
     gen_prepared_table_projective_source_consumer_interaction_trace,
     prepared_table_projective_source_range13_uses_from_base,
-    prepared_table_projective_source_signed_carry_uses_from_base,
-    gen_prepared_table_ec_row_pinned_interaction_trace, CertBaseRelation,
+    prepared_table_projective_source_signed_carry_uses_from_base, CertBaseRelation,
     PreparedTableCanonicalRelation, PreparedTableClaim, PreparedTableEcRowPinnedInteractionClaim,
     PreparedTableEcRowRelation, PreparedTableEcTraceClaim, PreparedTableError,
     PreparedTablePinningRelations, PreparedTableProjectiveSourceComponents,
@@ -111,16 +120,6 @@ use crate::public_inputs::{
     public_ecdsa_consumer_claimed_sum, public_ecdsa_provider_claimed_sum, PublicEcdsaInputClaim,
     PublicEcdsaInstance, PublicEcdsaInstanceRelation,
 };
-use crate::components::hinted_mul::air::{
-    gen_hinted_mul_slice_preprocessed_trace, hinted_mul_signed_table_claim, HintedMulChallenge,
-    HintedMulProofClaim, HintedMulProofInteractionClaim, HintedMulSliceClaimedSums,
-    HintedMulSliceComponents,
-};
-use crate::components::hinted_mul::trace::{
-    gen_hinted_mul_base_trace, gen_hinted_mul_interaction_trace, gen_hinted_mul_schedule_columns,
-    hinted_mul_range13_uses, hinted_mul_signed_uses, HintedMulRelations, HintedMulTraceClaim,
-};
-use crate::components::hinted_mul::witness::HintedMulWitnessError;
 use crate::public_key_check::{PublicKeyOnCurveClaim, PublicKeyOnCurveError};
 use crate::public_key_curve_air::{
     gen_slice_base_trace as gen_public_key_on_curve_base_trace,
@@ -132,8 +131,7 @@ use crate::public_key_curve_air::{
 };
 use crate::range_checks::{
     range_check_value_column_id, RangeCheckClaim, RangeCheckComponent, RangeCheckEval,
-    RangeCheckInteractionClaim, RangeCheckRelation, RANGE13_BITS,
-    RANGE7_BITS,
+    RangeCheckInteractionClaim, RangeCheckRelation, RANGE13_BITS, RANGE7_BITS,
 };
 use crate::scalar::cert_bind::{
     gen_cert_scalar_input_air_base_trace, gen_cert_scalar_input_air_interaction_trace,
@@ -148,8 +146,8 @@ use crate::scalar::fake_glv_scalar::{
 };
 use crate::scalar::fake_glv_selector::{
     gen_fake_glv_selector_air_base_trace, gen_fake_glv_selector_air_interaction_trace,
-    FakeGlvSelectorAirComponents, FakeGlvSelectorAirInteractionClaim,
-    FakeGlvSelectorAirProofClaim, FakeGlvSelectorClaim, FakeGlvSelectorError,
+    FakeGlvSelectorAirComponents, FakeGlvSelectorAirInteractionClaim, FakeGlvSelectorAirProofClaim,
+    FakeGlvSelectorClaim, FakeGlvSelectorError,
 };
 use crate::scalar::fake_glv_selector_lookup::{
     selector_lookup_consumer_claimed_sum, FakeGlvSelectorLookupRelations, SelectorLookupAudit,
@@ -255,8 +253,11 @@ impl P256ProofClaim {
         // Final-add's four muls ride the hinted provider on source indices
         // just past the ladder ops.
         let hinted_source_offset = projective_rcb_air_trace.rows.len() as u32;
-        let final_add =
-            final_add_claim_from_final_check(&final_check, &fake_glv_scalars, hinted_source_offset)?;
+        let final_add = final_add_claim_from_final_check(
+            &final_check,
+            &fake_glv_scalars,
+            hinted_source_offset,
+        )?;
         let mut hinted_mul_trace =
             HintedMulTraceClaim::from_projective_rcb(&projective_rcb_air_trace)?;
         hinted_mul_trace
@@ -390,8 +391,7 @@ impl P256ProofClaim {
         )?;
         let public_key_curve_slice = public_key_slice_from_check(
             &base.public_key_check,
-            projective_rcb_air_trace.rows.len() as u32
-                + base.final_add.mul_trace.rows.len() as u32,
+            projective_rcb_air_trace.rows.len() as u32 + base.final_add.mul_trace.rows.len() as u32,
         )?;
         hinted_mul_trace.extend_from_projective_rcb(
             &public_key_curve_slice.mul_trace,
@@ -554,8 +554,7 @@ impl P256CurrentAirProofClaim {
             prepared_point_range7: RangeCheckClaim::new(RANGE7_BITS),
             final_check: FinalCheckAirProofClaim::from_claim(&claim.public_inputs),
             public_key_on_curve: PublicKeyCurveSliceProofClaim::from_claim(
-                &public_key_on_curve_slice_claim(claim)
-                    .expect("verified public key lies on curve"),
+                &public_key_on_curve_slice_claim(claim).expect("verified public key lies on curve"),
             ),
             hinted_mul: HintedMulProofClaim::from_trace(&claim.hinted_mul_trace),
             final_add: FinalAddProofClaim::from_claim(&claim.final_add),
@@ -651,7 +650,9 @@ impl P256CurrentAirProofClaim {
         );
         append_unique_preprocessed_ids(
             &mut ids,
-            vec![range_check_value_column_id(self.prepared_point_range7.log_size)],
+            vec![range_check_value_column_id(
+                self.prepared_point_range7.log_size,
+            )],
         );
         append_unique_preprocessed_ids(
             &mut ids,
@@ -831,7 +832,9 @@ impl P256CurrentAirInteractionClaim {
                 .iter()
                 .map(ScalarModMulProofSliceInteractionClaim::claimed_sum)
                 .sum::<SecureField>()
-            + self.prepared_table_projective_source.component_claimed_sum()
+            + self
+                .prepared_table_projective_source
+                .component_claimed_sum()
             + self.fake_glv_projective_source.component_claimed_sum()
             + self.fake_glv_chain_expansion.total()
             + self.fake_glv_chain_continuity.claimed_sum
@@ -854,9 +857,7 @@ impl P256CurrentAirInteractionClaim {
         public_instances: &[PublicEcdsaInstance<M31>],
         relations: &P256CurrentAirRelations,
     ) -> Vec<(&'static str, SecureField)> {
-        vec![
-            ("LookupSum", self.lookup_sum(public_instances, relations)),
-        ]
+        vec![("LookupSum", self.lookup_sum(public_instances, relations))]
     }
 
     /// Per-relation provider/consumer activity witnesses for the boundary
@@ -869,7 +870,10 @@ impl P256CurrentAirInteractionClaim {
         vec![
             ("ScalarSetup", self.scalar_setup.total()),
             ("CertScalarInputs", self.cert_scalar_inputs.claimed_sum),
-            ("PreparedTablePinned", self.prepared_table_pinned.claimed_sum),
+            (
+                "PreparedTablePinned",
+                self.prepared_table_pinned.claimed_sum,
+            ),
             (
                 "PreparedTableFinalCheckHint",
                 self.prepared_table_pinned.final_check_hint.claimed_sum,
@@ -1126,7 +1130,9 @@ impl P256CurrentAirRelations {
             ),
             projective_rcb_air: ProjectiveRcbMulComponentRelations::dummy(),
             hinted_signed_h: RangeCheckRelation::dummy(),
-            hinted_challenge: HintedMulChallenge::from_z(SecureField::from(M31::from_u32_unchecked(2))),
+            hinted_challenge: HintedMulChallenge::from_z(SecureField::from(
+                M31::from_u32_unchecked(2),
+            )),
             gamma_digest: GammaDigestRelation::dummy(),
             gamma_challenge: GammaChallenge::from_gamma(
                 SecureField::from(M31::from_u32_unchecked(2)),
@@ -1518,8 +1524,7 @@ impl P256CurrentAirComponents {
             components.push(
                 &fake_glv_scalar_mod_mul.reduction_digits as &dyn ComponentProver<SimdBackend>,
             );
-            components
-                .push(&fake_glv_scalar_mod_mul.range13 as &dyn ComponentProver<SimdBackend>);
+            components.push(&fake_glv_scalar_mod_mul.range13 as &dyn ComponentProver<SimdBackend>);
             components
                 .push(&fake_glv_scalar_mod_mul.signed_carry as &dyn ComponentProver<SimdBackend>);
         }
@@ -1818,8 +1823,7 @@ impl P256ProofDraft {
         )?;
         append_unique_preprocessed_columns(&mut ids, &mut columns, local_ids, local_columns);
 
-        let range7_id =
-            range_check_value_column_id(claim.prepared_point_range7.log_size);
+        let range7_id = range_check_value_column_id(claim.prepared_point_range7.log_size);
         let range7_column = claim.prepared_point_range7.gen_preprocessed_column();
         append_unique_preprocessed_columns(
             &mut ids,
@@ -2024,13 +2028,15 @@ impl P256ProofDraft {
             claim.fake_glv_prepared_point_source.consumer_log_size,
         )?;
         let prepared_point_range7_multiplicity =
-            claim
-                .prepared_point_range7
-                .gen_multiplicity_trace(self.claim.prepared_trace.providers.iter().filter_map(
-                    |provider| {
+            claim.prepared_point_range7.gen_multiplicity_trace(
+                self.claim
+                    .prepared_trace
+                    .providers
+                    .iter()
+                    .filter_map(|provider| {
                         (provider.use_count.0 != 0).then_some(provider.use_count)
-                    },
-                ));
+                    }),
+            );
         let hinted_mul_base = gen_hinted_mul_base_trace(&self.claim.hinted_mul_trace);
         let hinted_range13_multiplicity = RangeCheckClaim::new(RANGE13_BITS)
             .gen_multiplicity_trace(hinted_mul_range13_uses(&self.claim.hinted_mul_trace));
@@ -2128,14 +2134,13 @@ impl P256ProofDraft {
         base: &P256CurrentAirBaseTrace,
         relations: &P256CurrentAirRelations,
     ) -> Result<(ColumnVec<M31ColumnEval>, P256CurrentAirInteractionClaim), P256ProofError> {
-        let (scalar_setup_interaction, scalar_setup_claim) =
-            gen_scalar_setup_air_interaction_trace(
-                &base.scalar_setup,
-                &relations.scalar_setup,
-                crate::final_check_air::final_check_range13_uses_from_base(&base.final_check),
-                crate::final_check_air::final_check_range9_uses_from_base(&base.final_check),
-                crate::final_check_air::final_check_signed_carry_uses_from_base(&base.final_check),
-            );
+        let (scalar_setup_interaction, scalar_setup_claim) = gen_scalar_setup_air_interaction_trace(
+            &base.scalar_setup,
+            &relations.scalar_setup,
+            crate::final_check_air::final_check_range13_uses_from_base(&base.final_check),
+            crate::final_check_air::final_check_range9_uses_from_base(&base.final_check),
+            crate::final_check_air::final_check_signed_carry_uses_from_base(&base.final_check),
+        );
         let (cert_scalar_input_interaction, cert_scalar_input_claim) =
             gen_cert_scalar_input_air_interaction_trace(
                 &base.cert_scalar_inputs,
@@ -2185,8 +2190,7 @@ impl P256ProofDraft {
             fake_glv_scalar_rows.len()
         );
         let mut fake_glv_scalar_interactions = Vec::with_capacity(fake_glv_scalar_rows.len());
-        let mut fake_glv_scalar_interaction_claims =
-            Vec::with_capacity(fake_glv_scalar_rows.len());
+        let mut fake_glv_scalar_interaction_claims = Vec::with_capacity(fake_glv_scalar_rows.len());
         for (rows, claim) in fake_glv_scalar_rows.iter().zip(&fake_glv_scalar_claims) {
             let (interaction, interaction_claim) = gen_scalar_mod_mul_interaction_trace(
                 rows,
@@ -2244,7 +2248,8 @@ impl P256ProofDraft {
                 .gen_preprocessed_column(),
             &relations.prepared_table_projective_range13,
         );
-        let prepared_signed_carry_claim = crate::projective_air::projective_rcb_signed_carry_claim();
+        let prepared_signed_carry_claim =
+            crate::projective_air::projective_rcb_signed_carry_claim();
         let (
             prepared_table_projective_signed_carry_interaction,
             prepared_table_projective_signed_carry_provider_claim,
@@ -2294,12 +2299,14 @@ impl P256ProofDraft {
                 &relations.fake_glv_projective_range13,
             );
         let signed_carry_claim = crate::projective_air::projective_rcb_signed_carry_claim();
-        let (fake_glv_projective_signed_carry_interaction, fake_glv_projective_signed_carry_provider_claim) =
-            crate::range_checks::RangeCheckInteractionClaim::gen_interaction_trace(
-                &base.fake_glv_projective_signed_carry_multiplicity,
-                &signed_carry_claim.gen_value_column(),
-                &relations.fake_glv_projective_signed_carry,
-            );
+        let (
+            fake_glv_projective_signed_carry_interaction,
+            fake_glv_projective_signed_carry_provider_claim,
+        ) = crate::range_checks::RangeCheckInteractionClaim::gen_interaction_trace(
+            &base.fake_glv_projective_signed_carry_multiplicity,
+            &signed_carry_claim.gen_value_column(),
+            &relations.fake_glv_projective_signed_carry,
+        );
         let (expansion_provider_interaction, expansion_provider_sum) =
             gen_fake_glv_chain_expansion_interaction_trace(
                 &base.chain_expansion_provider,
@@ -2681,9 +2688,8 @@ fn fake_glv_scalar_mod_mul_rows(
             &P256_ORDER,
         )
         .map_err(ScalarModMulTraceError::from)?;
-        let mul_id = FAKE_GLV_SCALAR_MUL_ID_BASE
-            + 2 * fake_glv_row.sig_id.0
-            + fake_glv_row.cert_id.0;
+        let mul_id =
+            FAKE_GLV_SCALAR_MUL_ID_BASE + 2 * fake_glv_row.sig_id.0 + fake_glv_row.cert_id.0;
         rows.push(ScalarModMulTraceRows::new(mul_id, &trace)?);
     }
     Ok(rows)
@@ -2716,11 +2722,12 @@ fn public_key_slice_from_check(
     public_key_check: &PublicKeyOnCurveClaim,
     hinted_source_offset: u32,
 ) -> Result<PublicKeyCurveSliceClaim, P256ProofError> {
-    let first = public_key_check.rows.first().ok_or(
-        P256ProofError::PublicKeyCurveSlice(PublicKeyCurveSliceError::UnsupportedRowCount {
-            actual: 0,
-        }),
-    )?;
+    let first = public_key_check
+        .rows
+        .first()
+        .ok_or(P256ProofError::PublicKeyCurveSlice(
+            PublicKeyCurveSliceError::UnsupportedRowCount { actual: 0 },
+        ))?;
     let single = PublicKeyOnCurveClaim {
         rows: vec![first.clone()],
     };
@@ -2767,8 +2774,17 @@ fn final_add_claim_from_final_check(
     // Pass the proven per-cert sign bits: `from_hints` orients `R_2` by
     // `d = b1 ⊕ b2` so the bound x-coordinate is `x(h_1 + h_2)`, and the AIR
     // binds `b1`/`b2` to these same values via `FinalAddSignRelation`.
-    FinalAddClaim::from_hints(row.sig_id, &r1, r1_inf, b1, &r2, r2_inf, b2, hinted_source_offset)
-        .map_err(P256ProofError::FinalAdd)
+    FinalAddClaim::from_hints(
+        row.sig_id,
+        &r1,
+        r1_inf,
+        b1,
+        &r2,
+        r2_inf,
+        b2,
+        hinted_source_offset,
+    )
+    .map_err(P256ProofError::FinalAdd)
 }
 
 /// `R = signed_hint_point(h, bit)`: returns `h` when `bit == 0` and `-h`
@@ -2791,7 +2807,13 @@ fn identity_prepared(
     use crate::types::{AffinePoint, U256};
     match point.to_option() {
         Some(p) => (AffinePoint { x: p.x, y: p.y }, false),
-        None => (AffinePoint { x: U256::ZERO, y: U256::ZERO }, true),
+        None => (
+            AffinePoint {
+                x: U256::ZERO,
+                y: U256::ZERO,
+            },
+            true,
+        ),
     }
 }
 
@@ -2809,7 +2831,13 @@ fn negate_prepared(
                 .to_u256();
             (AffinePoint { x: p.x, y: neg_y }, false)
         }
-        None => (AffinePoint { x: U256::ZERO, y: U256::ZERO }, true),
+        None => (
+            AffinePoint {
+                x: U256::ZERO,
+                y: U256::ZERO,
+            },
+            true,
+        ),
     }
 }
 
@@ -3054,9 +3082,16 @@ pub enum P256ProofError {
     PublicKeyOnCurve(PublicKeyOnCurveError),
     PublicKeyCurveSlice(PublicKeyCurveSliceError),
     ScalarModMulTrace(ScalarModMulTraceError),
-    InvalidNativeEcdsaInput { index: usize },
-    NonCanonicalPublicKey { index: usize, field: &'static str },
-    RelationImbalance { relation: &'static str },
+    InvalidNativeEcdsaInput {
+        index: usize,
+    },
+    NonCanonicalPublicKey {
+        index: usize,
+        field: &'static str,
+    },
+    RelationImbalance {
+        relation: &'static str,
+    },
     /// The verified proof's embedded public instances do not match the
     /// statement the caller asked to verify. Without this check, a relying
     /// party that trusts `Ok(())` would accept a valid proof of ANY signature

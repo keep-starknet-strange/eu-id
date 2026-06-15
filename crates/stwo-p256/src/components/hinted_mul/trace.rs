@@ -15,9 +15,7 @@ use crate::components::projective_rcb_mul::relation::ProjectiveRcbMulResultRelat
 use crate::range_checks::{encode_signed_carry, RangeCheckRelation};
 use crate::scalar::scalar_mod_mul::columns::{m31_column_eval, padded_log_size, M31ColumnEval};
 
-use super::witness::{
-    split_carry, HintedMulWitness, HINTED_MUL_H_COEFFS, HINTED_MUL_Q_LIMBS,
-};
+use super::witness::{split_carry, HintedMulWitness, HINTED_MUL_H_COEFFS, HINTED_MUL_Q_LIMBS};
 
 /// One scheduled mul: the witness plus its `(source_index, mul_index)` key in
 /// the `ProjectiveRcbMulResultRelation` namespace.
@@ -103,8 +101,7 @@ impl HintedMulTraceClaim {
 
 /// Per-identity column group: `q`, then the 20-limb value (`m1`/`m2`/`r`),
 /// then `h_lo`, then `h_hi`.
-pub const HINTED_MUL_GROUP_COLUMNS: usize =
-    HINTED_MUL_Q_LIMBS + N_LIMBS + 2 * HINTED_MUL_H_COEFFS;
+pub const HINTED_MUL_GROUP_COLUMNS: usize = HINTED_MUL_Q_LIMBS + N_LIMBS + 2 * HINTED_MUL_H_COEFFS;
 
 /// Base-trace column count: `a`, `b`, then the three identity groups.
 pub const HINTED_MUL_TRACE_COLUMNS: usize = 2 * N_LIMBS + 3 * HINTED_MUL_GROUP_COLUMNS;
@@ -327,8 +324,7 @@ pub fn gen_hinted_mul_interaction_trace(
         .collect();
     let inverses = PackedQM31::batch_inverse(&flat);
     let zero = SecureField::from(M31::from_u32_unchecked(0));
-    let (mut range13_consumer, mut signed_consumer, mut mul_result_provider) =
-        (zero, zero, zero);
+    let (mut range13_consumer, mut signed_consumer, mut mul_result_provider) = (zero, zero, zero);
     for (index, kind) in descriptors.iter().enumerate() {
         let segment = &inverses[index * vec_rows..(index + 1) * vec_rows];
         let total: SecureField = segment
@@ -348,12 +344,7 @@ pub fn gen_hinted_mul_interaction_trace(
         }
     }
 
-    (
-        trace,
-        HintedMulInteractionClaim {
-            claimed_sum,
-        },
-    )
+    (trace, HintedMulInteractionClaim { claimed_sum })
 }
 
 /// Recompute the hinted-mul check component's `ProjectiveRcbMulResult`

@@ -5,11 +5,11 @@ use stwo_p256_utils::scalar_arithmetic::{words_to_limbs, P256_ORDER};
 use crate::limbs::P256EvalBigInt;
 use crate::range_checks::RangeCheckRelation;
 
-use crate::scalar::canonical_lt::{add_canonical_lt_fixed_bound, CanonicalLtRelations};
 use super::{
     provide_scalar_limb, ScalarLimbRelation, PRODUCT_SCALAR_LIMB_USE_COUNT, ROLE_A, ROLE_B,
     ROLE_QUOTIENT, ROLE_RESULT,
 };
+use crate::scalar::canonical_lt::{add_canonical_lt_fixed_bound, CanonicalLtRelations};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScalarModMulLimbRole {

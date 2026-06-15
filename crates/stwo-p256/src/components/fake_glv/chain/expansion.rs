@@ -8,10 +8,11 @@ use stwo::core::{
 };
 use stwo::prover::{
     backend::simd::{
-            m31::{LOG_N_LANES, N_LANES},
-            qm31::PackedQM31,
-            SimdBackend,
-        }, ComponentProver,
+        m31::{LOG_N_LANES, N_LANES},
+        qm31::PackedQM31,
+        SimdBackend,
+    },
+    ComponentProver,
 };
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{

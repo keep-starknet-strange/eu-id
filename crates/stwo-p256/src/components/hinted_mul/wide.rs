@@ -49,17 +49,17 @@ pub fn u512_to_limbs13(value: &U512, n: usize) -> Vec<u32> {
 /// Schoolbook 512-bit multiplication. Panics if the product exceeds 512 bits.
 pub fn u512_mul(a: &U512, b: &U512) -> U512 {
     let mut acc = [0u128; 9];
-    for i in 0..8 {
-        if a[i] == 0 {
+    for (i, &a_word) in a.iter().enumerate().take(8) {
+        if a_word == 0 {
             continue;
         }
-        for j in 0..8 {
-            if b[j] == 0 {
+        for (j, &b_word) in b.iter().enumerate().take(8) {
+            if b_word == 0 {
                 continue;
             }
             let k = i + j;
             assert!(k < 8, "u512_mul overflow: term at word {k}");
-            let prod = (a[i] as u128) * (b[j] as u128);
+            let prod = (a_word as u128) * (b_word as u128);
             // Split the 128-bit product to keep the accumulator below 2^128.
             acc[k] += prod & u128::from(u64::MAX);
             acc[k + 1] += prod >> 64;

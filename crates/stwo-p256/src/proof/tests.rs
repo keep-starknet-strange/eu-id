@@ -2,9 +2,9 @@ use super::*;
 use crate::constants::{P256_GX, P256_GY, P256_MODULUS, P256_ORDER};
 use crate::curve::{mod_inverse, scalar_mul};
 use crate::debug::MockCommitmentScheme;
+use crate::fake_glv_chain::FakeGlvChainCert;
 use crate::field_ops::mul_mod_witness;
 use crate::limbs::P256M31BigInt;
-use crate::fake_glv_chain::FakeGlvChainCert;
 use crate::prepared_table::{PreparedAffinePoint, PreparedTableCert};
 use crate::scalar::scalar_mod_mul::interaction_claim::zero_interaction_claim;
 use crate::scalar::scalar_mod_mul::layout::{
@@ -23,8 +23,7 @@ use stwo::core::channel::MerkleChannel;
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
 use stwo::prover::backend::Column;
 use stwo_constraint_framework::{
-    assert_constraints_on_trace, FrameworkComponent, FrameworkEval,
-    PREPROCESSED_TRACE_IDX,
+    assert_constraints_on_trace, FrameworkComponent, FrameworkEval, PREPROCESSED_TRACE_IDX,
 };
 
 /// Verify a monolithic proof bound to its OWN embedded public instances.
@@ -288,11 +287,15 @@ fn scalar_near_order(delta: u64) -> U256 {
 }
 
 fn add_mod_u256(a: &U256, b: &U256, modulus: &U256) -> U256 {
-    crate::field_ops::add_mod_witness(a, b, modulus).result.to_u256()
+    crate::field_ops::add_mod_witness(a, b, modulus)
+        .result
+        .to_u256()
 }
 
 fn sub_mod_u256(a: &U256, b: &U256, modulus: &U256) -> U256 {
-    crate::field_ops::sub_mod_witness(a, b, modulus).result.to_u256()
+    crate::field_ops::sub_mod_witness(a, b, modulus)
+        .result
+        .to_u256()
 }
 
 /// Deterministic real-world ECDSA fixture from the `p256` crate. Signs
@@ -315,8 +318,8 @@ fn p256_crate_signed_input() -> EcdsaVerifyInput {
 
     let r_bytes: [u8; 32] = signature.r().to_bytes().into();
     let s_bytes: [u8; 32] = signature.s().to_bytes().into();
-    let x_bytes: [u8; 32] = encoded.x().expect("x").as_slice().try_into().expect("x len");
-    let y_bytes: [u8; 32] = encoded.y().expect("y").as_slice().try_into().expect("y len");
+    let x_bytes: [u8; 32] = encoded.x().expect("x")[..].try_into().expect("x len");
+    let y_bytes: [u8; 32] = encoded.y().expect("y")[..].try_into().expect("y len");
 
     EcdsaVerifyInput {
         message_hash: U256(digest.into()),
@@ -474,10 +477,16 @@ fn arbitrary_full_width_u_scalars_build_a_current_air_claim() {
 /// for wall-clock (a full STARK prove/verify), not because it is expected to
 /// fail.
 #[test]
-#[cfg_attr(debug_assertions, ignore = "release-only: full STARK prove/verify is slow in debug")]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "release-only: full STARK prove/verify is slow in debug"
+)]
 fn current_p256_monolithic_proves_real_p256_crate_signature() {
     let input = p256_crate_signed_input();
-    assert!(ecdsa_verify(&input), "native verifier must accept the fixture");
+    assert!(
+        ecdsa_verify(&input),
+        "native verifier must accept the fixture"
+    );
     let proof = P256ProofDraft::from_inputs_with_arbitrary_fake_glv_hints(vec![input])
         .expect("real p256-crate signature builds a proof draft")
         .prove_current_air_monolithic::<Blake2sMerkleChannel>()
@@ -495,7 +504,10 @@ fn current_p256_monolithic_proves_real_p256_crate_signature() {
 /// signs disagree. The fix consumes each proven `s2_sign_bit` and orients
 /// `R_2` by `d = b1 ⊕ b2`.
 #[test]
-#[cfg_attr(debug_assertions, ignore = "release-only: full STARK prove/verify is slow in debug")]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "release-only: full STARK prove/verify is slow in debug"
+)]
 fn current_p256_monolithic_proves_mixed_sign_bit_signature() {
     use crate::scalar::fake_glv_decompose::decompose_scalar_mod_n;
     // Find full-width u-values with DIFFERING decompose sign bits.
@@ -503,9 +515,13 @@ fn current_p256_monolithic_proves_mixed_sign_bit_signature() {
     let mut u_bit1: Option<U256> = None;
     let mut state: u128 = 0xdead_beef_0123_4567_89ab_cdef_fedc_ba98;
     while u_bit0.is_none() || u_bit1.is_none() {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let hi = state;
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let lo = state;
         let mut bytes = [0u8; 32];
         bytes[..16].copy_from_slice(&hi.to_be_bytes());
@@ -521,7 +537,10 @@ fn current_p256_monolithic_proves_mixed_sign_bit_signature() {
         }
     }
     let input = valid_real_input_with_u_scalars(u_bit0.unwrap(), u_bit1.unwrap());
-    assert!(ecdsa_verify(&input), "mixed-bit synthetic input must be valid");
+    assert!(
+        ecdsa_verify(&input),
+        "mixed-bit synthetic input must be valid"
+    );
     let proof = P256ProofDraft::from_inputs_with_arbitrary_fake_glv_hints(vec![input])
         .expect("mixed-bit signature builds a proof draft")
         .prove_current_air_monolithic::<Blake2sMerkleChannel>()
@@ -540,8 +559,7 @@ fn current_p256_monolithic_proves_arbitrary_doubling_final_add() {
         .expect("u1 == u2 doubling draft builds")
         .prove_current_air_monolithic::<Blake2sMerkleChannel>()
         .expect("u1 == u2 doubling proof generates");
-    verify_self_bound::<Blake2sMerkleChannel>(proof)
-        .expect("u1 == u2 doubling proof verifies");
+    verify_self_bound::<Blake2sMerkleChannel>(proof).expect("u1 == u2 doubling proof verifies");
 }
 
 #[test]
@@ -646,8 +664,9 @@ fn current_p256_monolithic_verifier_rejects_mismatched_expected_instances() {
     let mut wrong_expected = monolithic.claim.public_inputs.instances.clone();
     let r = &mut wrong_expected[0].r;
     r.limbs_mut()[0] = M31::from_u32_unchecked(r.limbs()[0].0 ^ 1);
-    let err = verify_current_air_monolithic::<Blake2sMerkleChannel>(monolithic.clone(), &wrong_expected)
-        .expect_err("proof of a different statement than the caller expected must reject");
+    let err =
+        verify_current_air_monolithic::<Blake2sMerkleChannel>(monolithic.clone(), &wrong_expected)
+            .expect_err("proof of a different statement than the caller expected must reject");
     assert!(
         matches!(err, P256ProofError::PublicInstanceMismatch),
         "expected PublicInstanceMismatch, got {err:?}"
@@ -699,8 +718,7 @@ fn current_p256_monolithic_verifier_rejects_non_canonical_public_key() {
     // pub_x := p (>= p, the non-canonical representative of 0).
     let mut forged = monolithic.clone();
     forged.claim.public_inputs.instances[0].pub_x = P256M31BigInt::from_u256(&field_modulus());
-    let err = verify_self_bound::<Blake2sMerkleChannel>(forged)
-        .expect_err("pub_x = p must reject");
+    let err = verify_self_bound::<Blake2sMerkleChannel>(forged).expect_err("pub_x = p must reject");
     assert_eq!(
         err,
         P256ProofError::NonCanonicalPublicKey {
@@ -715,8 +733,8 @@ fn current_p256_monolithic_verifier_rejects_non_canonical_public_key() {
         &field_modulus(),
         &U256::from_le_u64s(&[41, 0, 0, 0]),
     ));
-    let err = verify_self_bound::<Blake2sMerkleChannel>(forged)
-        .expect_err("pub_y = p + 41 must reject");
+    let err =
+        verify_self_bound::<Blake2sMerkleChannel>(forged).expect_err("pub_y = p + 41 must reject");
     assert_eq!(
         err,
         P256ProofError::NonCanonicalPublicKey {
@@ -728,8 +746,7 @@ fn current_p256_monolithic_verifier_rejects_non_canonical_public_key() {
     // A limb above the 13-bit base breaks the positional representation the
     // lexicographic `< p` comparison relies on; it must be rejected outright.
     let mut forged = monolithic;
-    forged.claim.public_inputs.instances[0].pub_x.limbs_mut()[0] =
-        M31::from_u32_unchecked(1 << 13);
+    forged.claim.public_inputs.instances[0].pub_x.limbs_mut()[0] = M31::from_u32_unchecked(1 << 13);
     let err = verify_self_bound::<Blake2sMerkleChannel>(forged)
         .expect_err("out-of-range pub_x limb must reject");
     assert_eq!(
@@ -754,7 +771,12 @@ fn current_p256_monolithic_verifier_rejects_mutated_cert_base_lookup_sum() {
         .expect_err("mutated cert base must reject during proving");
 
     assert!(
-        matches!(err, P256ProofError::RelationImbalance { relation: "LookupSum" }),
+        matches!(
+            err,
+            P256ProofError::RelationImbalance {
+                relation: "LookupSum"
+            }
+        ),
         "expected LookupSum imbalance, got {err:?}"
     );
 }
@@ -862,9 +884,8 @@ fn current_p256_monolithic_verifier_rejects_mutated_selector_claimed_sum() {
 
 #[test]
 fn current_p256_proof_pipeline_rejects_invalid_final_signature_linkage() {
-    let err =
-        P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![test_input(42, 77, 1)])
-            .expect_err("invalid final signature linkage must fail");
+    let err = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![test_input(42, 77, 1)])
+        .expect_err("invalid final signature linkage must fail");
 
     assert!(matches!(
         err,
@@ -925,8 +946,9 @@ fn current_p256_proof_pipeline_rejects_public_key_off_curve_in_air() {
     // Keep the hinted provider in lockstep with the swapped witness (its four
     // curve-check muls now prove 2G's squares/cubes), so the ONLY drifted
     // relation is the `PublicKeyPoint` binding itself.
-    let mut hinted = HintedMulTraceClaim::from_projective_rcb(&proof.claim.projective_rcb_air_trace)
-        .expect("hinted trace rebuilds");
+    let mut hinted =
+        HintedMulTraceClaim::from_projective_rcb(&proof.claim.projective_rcb_air_trace)
+            .expect("hinted trace rebuilds");
     hinted
         .extend_from_projective_rcb(
             &proof.claim.final_add.mul_trace,
@@ -964,10 +986,7 @@ fn current_p256_monolithic_verifier_rejects_unbalanced_public_key_point_sum() {
     let mut monolithic = proof
         .prove_current_air_monolithic::<Blake2sMerkleChannel>()
         .expect("current AIR monolithic proof proves");
-    monolithic
-        .interaction_claim
-        .scalar_setup
-        .claimed_sum += SecureField::one();
+    monolithic.interaction_claim.scalar_setup.claimed_sum += SecureField::one();
 
     let err = verify_self_bound::<Blake2sMerkleChannel>(monolithic)
         .expect_err("aggregate lookup balance must reject a mutated component sum");
@@ -1034,7 +1053,9 @@ fn current_p256_proof_pipeline_proves_and_verifies_monolithic_distinct_branch() 
         valid_real_input_with_small_u_scalars(7, 11),
     ])
     .expect("distinct branch pipeline builds");
-    proof.verify_current_e2e().expect("distinct branch verifies");
+    proof
+        .verify_current_e2e()
+        .expect("distinct branch verifies");
 
     let monolithic = proof
         .prove_current_air_monolithic::<Blake2sMerkleChannel>()
@@ -1061,10 +1082,9 @@ fn current_p256_air_constraint_diagnostic() {
     signature (the general selector AIR now accepts arbitrary s2_abs / sign; \
     this passes — kept as a slow manual diagnostic)"]
 fn current_p256_air_constraint_diagnostic_real_p256() {
-    let proof = P256ProofDraft::from_inputs_with_arbitrary_fake_glv_hints(vec![
-        p256_crate_signed_input(),
-    ])
-    .expect("real p256 pipeline builds");
+    let proof =
+        P256ProofDraft::from_inputs_with_arbitrary_fake_glv_hints(vec![p256_crate_signed_input()])
+            .expect("real p256 pipeline builds");
     proof.verify_current_e2e().expect("real p256 e2e verifies");
 
     assert_current_air_constraints(&proof);
@@ -1147,10 +1167,7 @@ fn wrong_r_chain_feasibility_probe() {
             true_chain.final_acc, true_chain.r3,
             "sanity: the TRUE R rebuild must satisfy final_acc==r3 (override harness fidelity)"
         );
-        assert!(
-            true_chain.verify().is_ok(),
-            "sanity: TRUE R chain verifies"
-        );
+        assert!(true_chain.verify().is_ok(), "sanity: TRUE R chain verifies");
     }
 }
 
@@ -1181,9 +1198,8 @@ fn wrong_r_harness_fidelity_true_r_air_constraints_pass() {
         .expect("valid claim builds");
     let true_r = true_r_for_cert(&base_claim, 0);
 
-    let rebuilt =
-        P256ProofClaim::from_inputs_with_wrong_r_for_cert(&inputs, 0, true_r.clone())
-            .expect("true-R rebuild via override path assembles");
+    let rebuilt = P256ProofClaim::from_inputs_with_wrong_r_for_cert(&inputs, 0, true_r.clone())
+        .expect("true-R rebuild via override path assembles");
     // The override path must reproduce the production claim exactly.
     assert_eq!(
         rebuilt.prepared_table, base_claim.prepared_table,
@@ -1290,7 +1306,9 @@ fn negate_affine(p: &AffinePoint) -> AffinePoint {
     let m = U256::from_le_u64s(&P256_MODULUS);
     AffinePoint {
         x: p.x.clone(),
-        y: crate::field_ops::sub_mod_witness(&m, &p.y, &m).result.to_u256(),
+        y: crate::field_ops::sub_mod_witness(&m, &p.y, &m)
+            .result
+            .to_u256(),
     }
 }
 
@@ -1321,9 +1339,11 @@ fn monolithic_interaction_claim(
     let max_bound = proof_claim.max_constraint_log_degree_bound(&ids);
     let config = p256_stark_monolithic_profile_config(max_bound);
     let twiddles = SimdBackend::precompute_twiddles(
-        CanonicCoset::new(config.lifting_log_size.unwrap_or(
-            max_bound + config.fri_config.log_blowup_factor,
-        ))
+        CanonicCoset::new(
+            config
+                .lifting_log_size
+                .unwrap_or(max_bound + config.fri_config.log_blowup_factor),
+        )
         .circle_domain()
         .half_coset,
     );
@@ -1337,7 +1357,9 @@ fn monolithic_interaction_claim(
     tree_builder.extend_evals(preprocessed);
     tree_builder.commit(&mut channel);
     proof_claim.mix_into(&mut channel);
-    let mut base = draft.gen_current_air_base_trace(&proof_claim).expect("base trace");
+    let mut base = draft
+        .gen_current_air_base_trace(&proof_claim)
+        .expect("base trace");
     let base_columns = std::mem::take(&mut base.columns);
     let mut tree_builder = commitment_scheme.tree_builder();
     tree_builder.extend_evals(base_columns);
@@ -1375,7 +1397,10 @@ fn relation_audit_lists_all_imbalances_and_dead_links() {
     // A boundary relation that emitted nothing is flagged even though it
     // "balances" (0 + 0 == 0) — the unlinked-sub-graph case.
     assert_eq!(audit.dead_links(), vec!["DeadLink"]);
-    assert_eq!(audit.relation_names(), vec!["Alpha", "Beta", "Gamma", "Delta"]);
+    assert_eq!(
+        audit.relation_names(),
+        vec!["Alpha", "Beta", "Gamma", "Delta"]
+    );
 
     let healthy = P256CurrentAirRelationAudit {
         balances: vec![("A", zero())],
@@ -1426,7 +1451,7 @@ fn valid_draft_for_balance(u1: u64, u2: u64) -> P256ProofDraft {
 
 fn bump_limb0(value: &crate::limbs::P256M31BigInt) -> crate::limbs::P256M31BigInt {
     let mut limbs = *value.limbs();
-    limbs[0] = limbs[0] + M31::from_u32_unchecked(1);
+    limbs[0] += M31::from_u32_unchecked(1);
     crate::limbs::P256M31BigInt::from_limbs(limbs)
 }
 
@@ -1479,8 +1504,9 @@ fn current_p256_monolithic_rejects_forged_double_op_output() {
     let honest = forged_double_output_balance_outcome(99, 99, None);
     honest.expect("honest doubling proof balances");
 
-    let err = forged_double_output_balance_outcome(99, 99, Some((op_col, output_x0_col, double_op)))
-        .expect_err("forged Double-op output.x must be rejected by the monolithic AIR");
+    let err =
+        forged_double_output_balance_outcome(99, 99, Some((op_col, output_x0_col, double_op)))
+            .expect_err("forged Double-op output.x must be rejected by the monolithic AIR");
     assert!(
         matches!(
             err,
@@ -1570,7 +1596,9 @@ fn forged_double_output_balance_outcome(
     tree_builder.commit(&mut channel);
     proof_claim.mix_into(&mut channel);
 
-    let mut base = draft.gen_current_air_base_trace(&proof_claim).expect("base trace");
+    let mut base = draft
+        .gen_current_air_base_trace(&proof_claim)
+        .expect("base trace");
 
     // Optional forge: bump one committed CONSUMER limb on the first active Double
     // row (post-trace-gen, so native verification has already passed).
@@ -1586,7 +1614,7 @@ fn forged_double_output_balance_outcome(
                 active_vals[row] != M31::from_u32_unchecked(0) && op_vals[row] == double_op
             })
             .expect("doubling proof must contain an active Double row to forge");
-        limb_vals[forge_row] = limb_vals[forge_row] + M31::from_u32_unchecked(1);
+        limb_vals[forge_row] += M31::from_u32_unchecked(1);
         let forged_col = stwo::prover::poly::circle::CircleEvaluation::new(
             consumer[limb_col].domain,
             stwo::prover::backend::simd::column::BaseColumn::from_iter(limb_vals),
@@ -1624,7 +1652,12 @@ fn monolithic_verifier_rejects_mutated_final_add_x3_lookup_sum() {
         .prove_current_air_monolithic::<Blake2sMerkleChannel>()
         .expect_err("mutated final-add output must reject during proving");
     assert!(
-        matches!(err, P256ProofError::RelationImbalance { relation: "LookupSum" }),
+        matches!(
+            err,
+            P256ProofError::RelationImbalance {
+                relation: "LookupSum"
+            }
+        ),
         "expected LookupSum imbalance, got {err:?}"
     );
 }
@@ -1832,14 +1865,15 @@ fn prove_scalar_mod_mul_rows_for_diagnostic(rows: &ScalarModMulTraceRows) {
         config.fri_config.log_blowup_factor,
         config.lifting_log_size
     );
-    let twiddles =
-        SimdBackend::precompute_twiddles(
-            CanonicCoset::new(config.lifting_log_size.unwrap_or(
-                max_constraint_log_degree_bound + config.fri_config.log_blowup_factor,
-            ))
-            .circle_domain()
-            .half_coset,
-        );
+    let twiddles = SimdBackend::precompute_twiddles(
+        CanonicCoset::new(
+            config
+                .lifting_log_size
+                .unwrap_or(max_constraint_log_degree_bound + config.fri_config.log_blowup_factor),
+        )
+        .circle_domain()
+        .half_coset,
+    );
     let mut channel = <Blake2sMerkleChannel as MerkleChannel>::C::default();
     let mut commitment_scheme =
         CommitmentSchemeProver::<SimdBackend, Blake2sMerkleChannel>::new(config, &twiddles);
@@ -1897,16 +1931,19 @@ fn prove_fake_glv_scalar_air_for_diagnostic(proof: &P256ProofDraft) {
     let config = p256_stark_slice_low_ram_config(max_constraint_log_degree_bound);
     eprintln!(
         "fake_glv_scalar_air pcs max_bound={} blowup={} lifting={:?}",
-        max_constraint_log_degree_bound, config.fri_config.log_blowup_factor, config.lifting_log_size
+        max_constraint_log_degree_bound,
+        config.fri_config.log_blowup_factor,
+        config.lifting_log_size
     );
-    let twiddles =
-        SimdBackend::precompute_twiddles(
-            CanonicCoset::new(config.lifting_log_size.unwrap_or(
-                max_constraint_log_degree_bound + config.fri_config.log_blowup_factor,
-            ))
-            .circle_domain()
-            .half_coset,
-        );
+    let twiddles = SimdBackend::precompute_twiddles(
+        CanonicCoset::new(
+            config
+                .lifting_log_size
+                .unwrap_or(max_constraint_log_degree_bound + config.fri_config.log_blowup_factor),
+        )
+        .circle_domain()
+        .half_coset,
+    );
     let mut channel = <Blake2sMerkleChannel as MerkleChannel>::C::default();
     let mut commitment_scheme =
         CommitmentSchemeProver::<SimdBackend, Blake2sMerkleChannel>::new(config, &twiddles);
@@ -1927,8 +1964,7 @@ fn prove_fake_glv_scalar_air_for_diagnostic(proof: &P256ProofDraft) {
 
     let cert_relation = CertScalarInputRelation::draw(&mut channel);
     let scalar_relation = FakeGlvScalarRelation::draw(&mut channel);
-    let scalar_limb_relation =
-        crate::scalar::scalar_mod_mul::relation::ScalarLimbRelation::dummy();
+    let scalar_limb_relation = crate::scalar::scalar_mod_mul::relation::ScalarLimbRelation::dummy();
     let sign_relation = FinalAddSignRelation::draw(&mut channel);
     let (interaction, interaction_claim) = gen_fake_glv_scalar_air_interaction_trace(
         &base,
@@ -1980,14 +2016,15 @@ fn prove_fake_glv_selector_air_for_diagnostic(proof: &P256ProofDraft) {
         config.fri_config.log_blowup_factor,
         config.lifting_log_size
     );
-    let twiddles =
-        SimdBackend::precompute_twiddles(
-            CanonicCoset::new(config.lifting_log_size.unwrap_or(
-                max_constraint_log_degree_bound + config.fri_config.log_blowup_factor,
-            ))
-            .circle_domain()
-            .half_coset,
-        );
+    let twiddles = SimdBackend::precompute_twiddles(
+        CanonicCoset::new(
+            config
+                .lifting_log_size
+                .unwrap_or(max_constraint_log_degree_bound + config.fri_config.log_blowup_factor),
+        )
+        .circle_domain()
+        .half_coset,
+    );
     let mut channel = <Blake2sMerkleChannel as MerkleChannel>::C::default();
     let mut commitment_scheme =
         CommitmentSchemeProver::<SimdBackend, Blake2sMerkleChannel>::new(config, &twiddles);
@@ -2219,7 +2256,11 @@ fn assert_current_air_constraints(proof: &P256ProofDraft) {
     );
     assert_component_named("hinted_mul.check", &components.hinted_mul.check, &trace);
     assert_component_named("hinted_mul.range13", &components.hinted_mul.range13, &trace);
-    assert_component_named("hinted_mul.signed_h", &components.hinted_mul.signed_h, &trace);
+    assert_component_named(
+        "hinted_mul.signed_h",
+        &components.hinted_mul.signed_h,
+        &trace,
+    );
 }
 
 fn assert_scalar_mod_mul_components_named(
@@ -2345,7 +2386,7 @@ fn current_p256_air_shape_diagnostic() {
         proof.claim.projective_rcb_air_trace.active_row_count(),
         proof.claim.projective_rcb_air_trace.mul_row_count(),
     );
-    
+
     for (index, scalar_mod_mul) in components.scalar_setup_mod_muls.iter().enumerate() {
         print_component_shape(
             &format!("scalar_setup_mod_mul_{index}"),
@@ -2419,7 +2460,10 @@ fn current_p256_air_shape_diagnostic() {
     let wrapper_bounds = |list: Vec<&dyn stwo::core::air::Component>| {
         TreeVec::concat_cols(list.into_iter().map(|c| c.trace_log_degree_bounds()))
     };
-    print_component_shape("scalar_setup", wrapper_bounds(components.scalar_setup.components()));
+    print_component_shape(
+        "scalar_setup",
+        wrapper_bounds(components.scalar_setup.components()),
+    );
     print_component_shape(
         "cert_scalar_inputs",
         wrapper_bounds(components.cert_scalar_inputs.components()),
@@ -2459,12 +2503,18 @@ fn current_p256_air_shape_diagnostic() {
         "prepared_point_range7",
         stwo::core::air::Component::trace_log_degree_bounds(&components.prepared_point_range7),
     );
-    print_component_shape("final_check", wrapper_bounds(components.final_check.components()));
+    print_component_shape(
+        "final_check",
+        wrapper_bounds(components.final_check.components()),
+    );
     print_component_shape(
         "public_key_on_curve",
         wrapper_bounds(components.public_key_on_curve.components()),
     );
-    print_component_shape("final_add", wrapper_bounds(components.final_add.components()));
+    print_component_shape(
+        "final_add",
+        wrapper_bounds(components.final_add.components()),
+    );
     print_component_shape("current_air_total", components.trace_log_degree_bounds());
 }
 
@@ -2484,9 +2534,7 @@ fn print_component_shape(name: &str, bounds: TreeVec<ColumnVec<u32>>) {
     }
 }
 
-fn scalar_mod_mul_component_bounds(
-    components: &ScalarModMulComponents,
-) -> TreeVec<ColumnVec<u32>> {
+fn scalar_mod_mul_component_bounds(components: &ScalarModMulComponents) -> TreeVec<ColumnVec<u32>> {
     TreeVec::concat_cols(
         [
             components.canonical.trace_log_degree_bounds(),
@@ -2588,9 +2636,7 @@ fn current_p256_proof_pipeline_detects_selector_lookup_imbalance() {
     ])
     .expect("current pipeline builds");
     let mut interaction_claim = proof.interaction_claim();
-    interaction_claim
-        .selector_lookups
-        .consumer_claimed_sum = zero();
+    interaction_claim.selector_lookups.consumer_claimed_sum = zero();
 
     let err = interaction_claim
         .verify_balanced()

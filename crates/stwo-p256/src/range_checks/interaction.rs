@@ -124,7 +124,7 @@ pub fn write_logup_columns_with_batching(
                 let n = next_numerators[vec_row];
                 let d = next_denominators[vec_row];
                 numerator = numerator * d + n * denominator;
-                denominator = denominator * d;
+                denominator *= d;
             }
             col.write_frac(vec_row, numerator, denominator);
         }
@@ -151,7 +151,7 @@ pub fn write_batched_logup_columns(
                 let n = next_numerators[vec_row];
                 let d = next_denominators[vec_row];
                 numerator = numerator * d + n * denominator;
-                denominator = denominator * d;
+                denominator *= d;
             }
             col.write_frac(vec_row, numerator, denominator);
         }

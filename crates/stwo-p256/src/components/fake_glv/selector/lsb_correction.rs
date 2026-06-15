@@ -7,10 +7,11 @@ use stwo::core::{
 };
 use stwo::prover::{
     backend::simd::{
-            m31::{PackedM31, LOG_N_LANES},
-            qm31::PackedQM31,
-            SimdBackend,
-        }, ComponentProver,
+        m31::{PackedM31, LOG_N_LANES},
+        qm31::PackedQM31,
+        SimdBackend,
+    },
+    ComponentProver,
 };
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{
@@ -18,8 +19,8 @@ use stwo_constraint_framework::{
     RelationEntry, TraceLocationAllocator,
 };
 
-use crate::constants::P256_MODULUS;
 use crate::components::ComponentInteractionClaim;
+use crate::constants::P256_MODULUS;
 use crate::curve::scalar_mul;
 use crate::field_ops::sub_mod_witness;
 use crate::limbs::P256M31BigInt;

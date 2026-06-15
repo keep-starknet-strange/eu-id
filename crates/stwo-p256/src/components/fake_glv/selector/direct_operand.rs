@@ -7,10 +7,11 @@ use stwo::core::{
 };
 use stwo::prover::{
     backend::simd::{
-            m31::{PackedM31, LOG_N_LANES},
-            qm31::PackedQM31,
-            SimdBackend,
-        }, ComponentProver,
+        m31::{PackedM31, LOG_N_LANES},
+        qm31::PackedQM31,
+        SimdBackend,
+    },
+    ComponentProver,
 };
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{
@@ -19,10 +20,10 @@ use stwo_constraint_framework::{
 };
 use stwo_p256_utils::constants::N_LIMBS;
 
+use crate::components::ComponentInteractionClaim;
 use crate::scalar::fake_glv_chain::{
     FakeGlvChainClaim, FakeGlvChainError, FakeGlvChainRow, FakeGlvChainRowKind,
 };
-use crate::components::ComponentInteractionClaim;
 use crate::scalar::fake_glv_selector::FakeGlvSelectorClaim;
 use crate::scalar::prepared_point::{PreparedPointInstance, PreparedPointRelation, TABLE16_INDEX};
 use crate::scalar::prepared_table::{PreparedAffinePoint, PreparedTableClaim};

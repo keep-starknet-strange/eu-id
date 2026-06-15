@@ -8,14 +8,14 @@ use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval, RelationEntry};
 use stwo_p256_utils::constants::{LIMB_BITS, N_LIMBS};
 
-use crate::constants::{P256_3GX, P256_3GY, P256_MODULUS};
-use crate::limbs::P256M31BigInt;
-use crate::prepared_point::{PREPARED_BASE_COUNT, TABLE16_INDEX};
-use crate::projective_air::ConsumedMulLimbs;
 use crate::components::gamma_digest::{
     yield_gamma_digest, GammaChallenge, GammaDigestRelation, GAMMA_TAG_PREPARED_RANGE13,
     GAMMA_TAG_PREPARED_SIGNED,
 };
+use crate::constants::{P256_3GX, P256_3GY, P256_MODULUS};
+use crate::limbs::P256M31BigInt;
+use crate::prepared_point::{PREPARED_BASE_COUNT, TABLE16_INDEX};
+use crate::projective_air::ConsumedMulLimbs;
 use crate::types::U256;
 
 use super::super::ec_source::double_formula::{bind_double_formula, DoubleFormulaColumns};
@@ -29,7 +29,6 @@ pub struct PreparedTableEcRowEval {
     /// Monolithic full-table pinning relations. `None` => legacy slice.
     pub pinning: Option<PreparedTablePinningRelations>,
 }
-
 
 impl FrameworkEval for PreparedTableEcRowEval {
     fn log_size(&self) -> u32 {
@@ -169,7 +168,6 @@ impl FrameworkEval for PreparedTableEcRowEval {
 // per row; the numerator is the signed multiplicity times the gate product
 // (which is zero unless the row's kind/cert matches).
 
-
 /// Select the negation source point: `lhs` on `DoubleR` rows, `output` on
 /// `AddR2R` rows, `0` elsewhere. Exactly one kind flag is set on a neg row.
 fn prepared_table_ec_negation_source<E: EvalAtRow>(
@@ -186,7 +184,6 @@ fn prepared_table_ec_negation_source<E: EvalAtRow>(
         inf: select(&lhs.inf, &output.inf),
     }
 }
-
 
 /// Constrain `neg = -src` (gated by `neg_flag`): `neg.x = src.x`, `neg.inf =
 /// src.inf`, and the limb addition `neg.y + src.y = p` via boolean carries. All
@@ -226,7 +223,6 @@ fn add_negation_constraints<E: EvalAtRow>(
     eval.add_constraint(neg_flag.clone() * neg_carries[N_LIMBS - 1].clone());
 }
 
-
 /// Build a `CertBaseRelation` tuple `(sig_id, cert_id, point.x[..], point.y[..])`
 /// for the cell's base point.
 fn cert_base_relation_values<F: Clone + From<M31>>(
@@ -242,7 +238,6 @@ fn cert_base_relation_values<F: Clone + From<M31>>(
         _ => unreachable!("cert base relation index in range"),
     })
 }
-
 
 /// Build a `PreparedTableCanonicalRelation` tuple `(sig_id, cert_id, role, point[41])`.
 fn canonical_relation_values<F: Clone + From<M31>>(
@@ -261,7 +256,6 @@ fn canonical_relation_values<F: Clone + From<M31>>(
     })
 }
 
-
 /// The fixed constant `3·G` as an eval point (cert0's pinned `P3`).
 fn three_g_point<F: Clone + From<M31>>() -> PreparedTableEcEvalPoint<F> {
     let x = P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_3GX));
@@ -272,7 +266,6 @@ fn three_g_point<F: Clone + From<M31>>() -> PreparedTableEcEvalPoint<F> {
         inf: F::from(M31::from_u32_unchecked(0)),
     }
 }
-
 
 /// Emit the fixed `PIN_SCHEDULE` of `CertBaseRelation` +
 /// `PreparedTableCanonicalRelation` fractions for one EC row. Every row emits the
@@ -297,10 +290,10 @@ fn add_pinning_emissions<E: EvalAtRow>(
     for entry in PIN_SCHEDULE {
         let mut gate = E::F::from(M31::from_u32_unchecked(1));
         for &k in entry.kinds {
-            gate = gate * kind_flags[k].clone();
+            gate *= kind_flags[k].clone();
         }
         if entry.cert0_only {
-            gate = gate * is_cert0.clone();
+            gate *= is_cert0.clone();
         }
         let point = match entry.point {
             PinPoint::Lhs => lhs,
@@ -339,7 +332,6 @@ fn add_pinning_emissions<E: EvalAtRow>(
     }
 }
 
-
 /// Build a `FinalCheckHintRelation` tuple `(sig_id, cert_id, point[41])`.
 fn final_check_hint_relation_values<F: Clone + From<M31>>(
     sig_id: &F,
@@ -355,7 +347,6 @@ fn final_check_hint_relation_values<F: Clone + From<M31>>(
     })
 }
 
-
 /// `mult · gate` as an extension-field numerator (`mult` may be negative).
 fn signed_numerator<E: EvalAtRow>(gate: E::F, mult: i32) -> E::EF {
     let magnitude = E::F::from(M31::from_u32_unchecked(mult.unsigned_abs()));
@@ -366,7 +357,6 @@ fn signed_numerator<E: EvalAtRow>(gate: E::F, mult: i32) -> E::EF {
         scaled
     }
 }
-
 
 #[derive(Clone)]
 pub struct PreparedTableProjectiveSourceEval {
@@ -382,7 +372,6 @@ pub struct PreparedTableProjectiveSourceEval {
     pub gamma_digest: GammaDigestRelation,
     pub gamma_challenge: GammaChallenge,
 }
-
 
 impl FrameworkEval for PreparedTableProjectiveSourceEval {
     fn log_size(&self) -> u32 {
@@ -595,14 +584,12 @@ impl FrameworkEval for PreparedTableProjectiveSourceEval {
     }
 }
 
-
 #[derive(Clone, Debug)]
 pub(crate) struct PreparedTableEcEvalPoint<F> {
     x: [F; N_LIMBS],
     y: [F; N_LIMBS],
     inf: F,
 }
-
 
 impl<F: Clone> PreparedTableEcEvalPoint<F> {
     pub(crate) fn relation_values(&self) -> [F; PREPARED_TABLE_EC_POINT_COLUMNS] {
@@ -633,7 +620,6 @@ impl<F: Clone> PreparedTableEcEvalPoint<F> {
     }
 }
 
-
 impl<F> PreparedTableEcEvalPoint<F> {
     pub(crate) fn read<E: EvalAtRow<F = F>>(eval: &mut E) -> Self {
         Self {
@@ -643,7 +629,6 @@ impl<F> PreparedTableEcEvalPoint<F> {
         }
     }
 }
-
 
 impl<F> PreparedTableEcEvalPoint<F>
 where
@@ -658,7 +643,6 @@ where
         eval.add_constraint((one.clone() - active.clone()) * self.inf.clone());
     }
 }
-
 
 fn prepared_table_ec_row_relation_values<F: Clone>(
     header: &[F; 5],
@@ -678,10 +662,8 @@ fn prepared_table_ec_row_relation_values<F: Clone>(
     })
 }
 
-
 impl<F: Clone> PreparedTableEcPointLike<F> for PreparedTableEcEvalPoint<F> {
     fn relation_values(&self) -> [F; PREPARED_TABLE_EC_POINT_COLUMNS] {
         self.relation_values()
     }
 }
-

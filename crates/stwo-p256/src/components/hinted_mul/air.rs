@@ -79,6 +79,8 @@ impl HintedMulChallenge {
 
 pub type HintedMulComponent = FrameworkComponent<HintedMulEval>;
 
+type HintedMulEvalGroup<F> = (Vec<F>, Vec<F>, Vec<F>, Vec<F>);
+
 #[derive(Clone)]
 pub struct HintedMulEval {
     pub log_size: u32,
@@ -118,7 +120,7 @@ impl FrameworkEval for HintedMulEval {
         };
         let a = read_range13(&mut eval, N_LIMBS);
         let b = read_range13(&mut eval, N_LIMBS);
-        let mut groups: Vec<(Vec<E::F>, Vec<E::F>, Vec<E::F>, Vec<E::F>)> = Vec::new();
+        let mut groups: Vec<HintedMulEvalGroup<E::F>> = Vec::new();
         for _ in 0..3 {
             let q = read_range13(&mut eval, HINTED_MUL_Q_LIMBS);
             let value = read_range13(&mut eval, N_LIMBS);
@@ -153,7 +155,7 @@ impl FrameworkEval for HintedMulEval {
         let at_z = |limbs: &[E::F], shift: usize| -> E::EF {
             let mut acc = E::EF::from(SecureField::from(M31::from_u32_unchecked(0)));
             for (i, limb) in limbs.iter().enumerate() {
-                acc = acc + E::EF::from(self.challenge.z_powers[shift + i]) * limb.clone();
+                acc += E::EF::from(self.challenge.z_powers[shift + i]) * limb.clone();
             }
             acc
         };
@@ -161,9 +163,8 @@ impl FrameworkEval for HintedMulEval {
         let h_at_z = |h_lo: &[E::F], h_hi: &[E::F]| -> E::EF {
             let mut acc = E::EF::from(SecureField::from(M31::from_u32_unchecked(0)));
             for i in 0..HINTED_MUL_H_COEFFS {
-                acc = acc
-                    + E::EF::from(self.challenge.z_powers[i])
-                        * (h_lo[i].clone() + beta.clone() * h_hi[i].clone());
+                acc += E::EF::from(self.challenge.z_powers[i])
+                    * (h_lo[i].clone() + beta.clone() * h_hi[i].clone());
             }
             acc
         };
@@ -176,8 +177,9 @@ impl FrameworkEval for HintedMulEval {
 
         // (1) A(z)·B_lo(z) − Q1(z)·P(z) − M1(z) − (z−β)·H1(z) = 0
         // (2) A(z)·B_hi(z) − Q2(z)·P(z) − M2(z) − (z−β)·H2(z) = 0
-        for (half_at_z, (q, value, h_lo, h_hi)) in
-            [b_lo_at_z, b_hi_at_z].into_iter().zip(groups.iter().take(2))
+        for (half_at_z, (q, value, h_lo, h_hi)) in [b_lo_at_z, b_hi_at_z]
+            .into_iter()
+            .zip(groups.iter().take(2))
         {
             eval.add_constraint(
                 a_at_z.clone() * half_at_z
@@ -404,9 +406,10 @@ mod tests {
         let claim = test_claim(5);
         let log_size = claim.log_size();
         let relations = dummy_relations();
-        let challenge = HintedMulChallenge::from_z(SecureField::from_m31_array(
-            core::array::from_fn(|i| M31::from_u32_unchecked(17 + 13 * i as u32)),
-        ));
+        let challenge =
+            HintedMulChallenge::from_z(SecureField::from_m31_array(core::array::from_fn(|i| {
+                M31::from_u32_unchecked(17 + 13 * i as u32)
+            })));
 
         let schedule = gen_hinted_mul_schedule_columns(&claim);
         let base = gen_hinted_mul_base_trace(&claim);
@@ -584,8 +587,7 @@ mod tests {
             crate::components::hinted_mul::trace::hinted_mul_result_provider_sum(
                 &claim, &relations,
             );
-        let balance = interaction_claim.claimed_sum
-            - mul_result_provider
+        let balance = interaction_claim.claimed_sum - mul_result_provider
             + range13_provider.claimed_sum
             + signed_provider.claimed_sum;
         if balance != SecureField::from(M31::from_u32_unchecked(0)) {
@@ -595,8 +597,10 @@ mod tests {
         let mut interaction_tree = check_interaction;
         interaction_tree.extend(range13_interaction);
         interaction_tree.extend(signed_interaction);
-        let interaction_bounds: Vec<u32> =
-            interaction_tree.iter().map(|c| c.domain.log_size()).collect();
+        let interaction_bounds: Vec<u32> = interaction_tree
+            .iter()
+            .map(|c| c.domain.log_size())
+            .collect();
         let mut tree_builder = commitment_scheme.tree_builder();
         tree_builder.extend_evals(interaction_tree);
         tree_builder.commit(&mut channel);

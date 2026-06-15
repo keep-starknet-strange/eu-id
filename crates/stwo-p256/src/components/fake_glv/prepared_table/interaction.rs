@@ -12,20 +12,20 @@ use stwo::prover::backend::simd::{
 use stwo_constraint_framework::{LogupTraceGenerator, Relation};
 use stwo_p256_utils::constants::N_LIMBS;
 
-use crate::constants::{P256_3GX, P256_3GY};
-use crate::limbs::P256M31BigInt;
 use crate::components::gamma_digest::{
-    gamma_collect_group_values, gamma_digest_of_values, gamma_digest_tuple,
-    gamma_digest_yield_sum, gamma_row_index_of, GammaChallenge, GammaDigestRelation,
-    GammaTallInstance, GammaTallInteractionClaim, GammaTallLayout,
-    GAMMA_TAG_PREPARED_RANGE13, GAMMA_TAG_PREPARED_SIGNED,
+    gamma_collect_group_values, gamma_digest_of_values, gamma_digest_tuple, gamma_digest_yield_sum,
+    gamma_row_index_of, GammaChallenge, GammaDigestRelation, GammaTallInstance,
+    GammaTallInteractionClaim, GammaTallLayout, GAMMA_TAG_PREPARED_RANGE13,
+    GAMMA_TAG_PREPARED_SIGNED,
 };
 use crate::components::ComponentInteractionClaim;
-use crate::range_checks::RangeCheckInteractionClaim;
+use crate::constants::{P256_3GX, P256_3GY};
+use crate::limbs::P256M31BigInt;
 use crate::projective_air::{
     ProjectiveRcbMulResultRelation, PROJECTIVE_RCB_MUL_ROLE_LHS, PROJECTIVE_RCB_MUL_ROLE_RESULT,
     PROJECTIVE_RCB_MUL_ROLE_RHS, PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS,
 };
+use crate::range_checks::RangeCheckInteractionClaim;
 use crate::types::U256;
 
 use crate::scalar::scalar_mod_mul::columns::M31ColumnEval;
@@ -39,13 +39,11 @@ pub struct PreparedTableEcRowInteractionClaim {
     pub claimed_sum: SecureField,
 }
 
-
 impl PreparedTableEcRowInteractionClaim {
     pub fn mix_into(&self, channel: &mut impl Channel) {
         channel.mix_felts(&[self.claimed_sum]);
     }
 }
-
 
 #[derive(Clone, Debug)]
 pub struct PreparedTableProjectiveSourceInteractionClaim {
@@ -60,7 +58,6 @@ pub struct PreparedTableProjectiveSourceInteractionClaim {
     /// C5-2: the self-contained signed-carry PROVIDER (yield) sum.
     pub signed_carry: RangeCheckInteractionClaim,
 }
-
 
 impl PreparedTableProjectiveSourceInteractionClaim {
     pub fn zero() -> Self {
@@ -105,7 +102,6 @@ impl PreparedTableProjectiveSourceInteractionClaim {
     }
 }
 
-
 /// Unpinned provider trace (test-only; the monolith uses the pinned gen).
 #[cfg(test)]
 pub(crate) fn gen_prepared_table_ec_row_interaction_trace(
@@ -127,7 +123,6 @@ pub(crate) fn gen_prepared_table_ec_row_interaction_trace(
     (trace, PreparedTableEcRowInteractionClaim { claimed_sum })
 }
 
-
 // Base-trace column offsets for the EC-row provider (used by the pinned
 // interaction trace generator). Layout: active, source_index, sig_id, cert_id,
 // kind_flags[13], op, table_index, lhs[41], rhs[41], output[41], neg[41],
@@ -140,14 +135,14 @@ const PREPARED_TABLE_EC_COL_KIND_FLAGS: usize = 4;
 
 const PREPARED_TABLE_EC_COL_LHS: usize = 4 + PREPARED_TABLE_EC_KIND_FLAGS + 2;
 
-const PREPARED_TABLE_EC_COL_RHS: usize = PREPARED_TABLE_EC_COL_LHS + PREPARED_TABLE_EC_POINT_COLUMNS;
+const PREPARED_TABLE_EC_COL_RHS: usize =
+    PREPARED_TABLE_EC_COL_LHS + PREPARED_TABLE_EC_POINT_COLUMNS;
 
 const PREPARED_TABLE_EC_COL_OUTPUT: usize =
     PREPARED_TABLE_EC_COL_RHS + PREPARED_TABLE_EC_POINT_COLUMNS;
 
 const PREPARED_TABLE_EC_COL_NEG: usize =
     PREPARED_TABLE_EC_COL_OUTPUT + PREPARED_TABLE_EC_POINT_COLUMNS;
-
 
 fn pin_point_column_offset(point: PinPoint) -> Option<usize> {
     match point {
@@ -159,13 +154,11 @@ fn pin_point_column_offset(point: PinPoint) -> Option<usize> {
     }
 }
 
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PreparedTableEcRowPinnedInteractionClaim {
     pub claimed_sum: SecureField,
     pub final_check_hint: ComponentInteractionClaim,
 }
-
 
 impl PreparedTableEcRowPinnedInteractionClaim {
     pub fn zero() -> Self {
@@ -175,7 +168,6 @@ impl PreparedTableEcRowPinnedInteractionClaim {
         }
     }
 }
-
 
 /// Interaction trace for the monolithic EC-row provider: the base
 /// `PreparedTableEcRowRelation` yield plus the 30 `PIN_SCHEDULE` fractions, in
@@ -188,7 +180,10 @@ pub(crate) fn gen_prepared_table_ec_row_pinned_interaction_trace(
     cert_base: &CertBaseRelation,
     canonical: &PreparedTableCanonicalRelation,
     final_check_hint: Option<&FinalCheckHintRelation>,
-) -> (ColumnVec<M31ColumnEval>, PreparedTableEcRowPinnedInteractionClaim) {
+) -> (
+    ColumnVec<M31ColumnEval>,
+    PreparedTableEcRowPinnedInteractionClaim,
+) {
     assert_eq!(base.len(), PREPARED_TABLE_EC_ROW_TRACE_COLUMNS);
     let log_size = base[0].domain.log_size();
     let n_vec_rows = 1 << (log_size - LOG_N_LANES);
@@ -224,7 +219,8 @@ pub(crate) fn gen_prepared_table_ec_row_pinned_interaction_trace(
             if entry.cert0_only {
                 gate *= active - cert;
             }
-            let magnitude = PackedM31::broadcast(M31::from_u32_unchecked(entry.mult.unsigned_abs()));
+            let magnitude =
+                PackedM31::broadcast(M31::from_u32_unchecked(entry.mult.unsigned_abs()));
             let scaled = PackedQM31::from(gate * magnitude);
             let numerator = if entry.mult < 0 { -scaled } else { scaled };
             let denominator: PackedQM31 = match entry.relation {
@@ -235,16 +231,12 @@ pub(crate) fn gen_prepared_table_ec_row_pinned_interaction_trace(
                 }
                 PinRelation::Canonical(role) => {
                     let tuple = match pin_point_column_offset(entry.point) {
-                        Some(offset) => {
-                            canonical_packed_tuple_from_columns(base, vec_row, sig, cert, role, offset)
-                        }
-                        None => canonical_packed_tuple_const(
-                            sig,
-                            cert,
-                            role,
-                            &three_g_x,
-                            &three_g_y,
+                        Some(offset) => canonical_packed_tuple_from_columns(
+                            base, vec_row, sig, cert, role, offset,
                         ),
+                        None => {
+                            canonical_packed_tuple_const(sig, cert, role, &three_g_x, &three_g_y)
+                        }
                     };
                     canonical.combine(&tuple)
                 }
@@ -263,8 +255,7 @@ pub(crate) fn gen_prepared_table_ec_row_pinned_interaction_trace(
             let sig = base[PREPARED_TABLE_EC_COL_SIG_ID].data[vec_row];
             let cert = base[PREPARED_TABLE_EC_COL_CERT_ID].data[vec_row];
             let active = base[0].data[vec_row];
-            let double_r = base
-                [PREPARED_TABLE_EC_COL_KIND_FLAGS + PREPARED_TABLE_EC_KIND_DOUBLE_R]
+            let double_r = base[PREPARED_TABLE_EC_COL_KIND_FLAGS + PREPARED_TABLE_EC_KIND_DOUBLE_R]
                 .data[vec_row];
             let gate = active * double_r;
             let numerator = -PackedQM31::from(gate);
@@ -293,12 +284,9 @@ pub(crate) fn gen_prepared_table_ec_row_pinned_interaction_trace(
         if let Some(final_check_hint) = final_check_hint {
             let double_r = row[PREPARED_TABLE_EC_COL_KIND_FLAGS + PREPARED_TABLE_EC_KIND_DOUBLE_R];
             if double_r != M31::from_u32_unchecked(0) {
-                let denom: SecureField = final_check_hint.combine(&final_check_hint_unpacked_tuple(
-                    &row,
-                    sig,
-                    cert,
-                    PREPARED_TABLE_EC_COL_LHS,
-                ));
+                let denom: SecureField = final_check_hint.combine(
+                    &final_check_hint_unpacked_tuple(&row, sig, cert, PREPARED_TABLE_EC_COL_LHS),
+                );
                 final_check_hint_claimed_sum += -SecureField::from(active * double_r) / denom;
             }
         }
@@ -376,7 +364,6 @@ pub(crate) fn debug_prepared_table_pinned_relation_sums(
     (prepared_table_sum, cert_base_sum, canonical_sum)
 }
 
-
 fn final_check_hint_packed_tuple(
     base: &[M31ColumnEval],
     vec_row: usize,
@@ -394,7 +381,6 @@ fn final_check_hint_packed_tuple(
     })
 }
 
-
 fn final_check_hint_unpacked_tuple(
     row: &[M31],
     sig: M31,
@@ -410,7 +396,6 @@ fn final_check_hint_unpacked_tuple(
         _ => unreachable!("final check hint tuple index in range"),
     })
 }
-
 
 fn cert_base_packed_tuple(
     base: &[M31ColumnEval],
@@ -428,7 +413,6 @@ fn cert_base_packed_tuple(
     })
 }
 
-
 #[cfg(test)]
 fn cert_base_unpacked_tuple(
     row: &[M31],
@@ -444,7 +428,6 @@ fn cert_base_unpacked_tuple(
         _ => unreachable!("cert base tuple index in range"),
     })
 }
-
 
 fn canonical_packed_tuple_from_columns(
     base: &[M31ColumnEval],
@@ -462,7 +445,6 @@ fn canonical_packed_tuple_from_columns(
         _ => unreachable!("canonical tuple index in range"),
     })
 }
-
 
 fn canonical_packed_tuple_const(
     sig: PackedM31,
@@ -482,7 +464,6 @@ fn canonical_packed_tuple_const(
     })
 }
 
-
 #[cfg(test)]
 fn canonical_unpacked_tuple_from_columns(
     row: &[M31],
@@ -499,7 +480,6 @@ fn canonical_unpacked_tuple_from_columns(
         _ => unreachable!("canonical tuple index in range"),
     })
 }
-
 
 #[cfg(test)]
 fn canonical_unpacked_tuple_const(
@@ -520,7 +500,6 @@ fn canonical_unpacked_tuple_const(
     })
 }
 
-
 fn prepared_table_ec_storage_rows(base: &[M31ColumnEval]) -> impl Iterator<Item = Vec<M31>> + '_ {
     let row_count = base[0].domain.size();
     (0..row_count).map(move |row| {
@@ -531,7 +510,6 @@ fn prepared_table_ec_storage_rows(base: &[M31ColumnEval]) -> impl Iterator<Item 
             .collect::<Vec<_>>()
     })
 }
-
 
 #[cfg(test)]
 fn prepared_table_ec_row_unpacked_relation_values(
@@ -551,7 +529,6 @@ fn prepared_table_ec_row_unpacked_relation_values(
     })
 }
 
-
 /// Canonical role order for the consumed mul-limb columns, matching
 /// `projective_rcb_op_mul_limbs` and `ConsumedMulLimbs`.
 const PROJECTIVE_RCB_MUL_RESULT_ROLES: [u32; 3] = [
@@ -560,17 +537,16 @@ const PROJECTIVE_RCB_MUL_RESULT_ROLES: [u32; 3] = [
     PROJECTIVE_RCB_MUL_ROLE_RESULT,
 ];
 
-
-/// C5 plumbing: interaction trace for the prepared-table projective-source
-/// CONSUMER. Emits, in the order `PreparedTableProjectiveSourceEval::evaluate`
-/// does under one `finalize_logup`: the `PreparedTableEcRowRelation` consume
-/// (col 0, `+active`), then one `ProjectiveRcbMulResultRelation` consume column
-/// per committed mul limb (canonical mul/role/limb order, `+active`). Returns
-/// the columns, the EC-row consumer sum, and the mul-result consumer sum.
-
-/// LogUp batch size for the prepared-table projective-source consumer: 2
-/// fractions per interaction column (degree ≤ 3 at the `log_size + 1` bound;
-/// bounds past +1 empirically fail OODS in this stwo).
+// C5 plumbing: interaction trace for the prepared-table projective-source
+// CONSUMER. Emits, in the order `PreparedTableProjectiveSourceEval::evaluate`
+// does under one `finalize_logup`: the `PreparedTableEcRowRelation` consume
+// (col 0, `+active`), then one `ProjectiveRcbMulResultRelation` consume column
+// per committed mul limb (canonical mul/role/limb order, `+active`). Returns
+// the columns, the EC-row consumer sum, and the mul-result consumer sum.
+//
+// LogUp batch size for the prepared-table projective-source consumer: 2
+// fractions per interaction column (degree <= 3 at the `log_size + 1` bound;
+// bounds past +1 empirically fail OODS in this stwo).
 pub(crate) const PREPARED_CONSUMER_LOGUP_BATCH: usize = 2;
 
 /// Total LogUp entries the consumer eval emits (EC-row consume + wide mul
@@ -707,7 +683,9 @@ pub(crate) fn gen_prepared_table_projective_source_consumer_interaction_trace(
                     .map(|vec_row| {
                         let mut values = Vec::with_capacity(3 + N_LIMBS);
                         values.push(base[1].data[vec_row]);
-                        values.push(PackedM31::broadcast(M31::from_u32_unchecked(mul_index as u32)));
+                        values.push(PackedM31::broadcast(M31::from_u32_unchecked(
+                            mul_index as u32,
+                        )));
                         values.push(PackedM31::broadcast(M31::from_u32_unchecked(role)));
                         values.extend(crate::projective_air::consumed_mul_slot_packed_limbs(
                             base, vec_row, &layout, mul_index, role_index,
@@ -738,8 +716,7 @@ pub(crate) fn gen_prepared_table_projective_source_consumer_interaction_trace(
                     .iter()
                     .map(|&col| base[col].data[vec_row].to_array()[lane])
                     .collect();
-                let digest =
-                    gamma_digest_of_values(gamma_challenge, instance.pad_value, &values);
+                let digest = gamma_digest_of_values(gamma_challenge, instance.pad_value, &values);
                 let tuple = gamma_digest_tuple(
                     instance.layout.tag,
                     M31::from_u32_unchecked(row_index),
@@ -899,7 +876,6 @@ pub(crate) fn prepared_table_projective_source_signed_carry_uses_from_base(
         .collect()
 }
 
-
 /// Analytic `(ec_row_consumer_sum, mul_result_consumer_sum)` over the consumer
 /// base trace's active rows, using unpacked `SecureField` combines.
 fn prepared_table_projective_source_consumer_sums(
@@ -947,7 +923,6 @@ fn prepared_table_projective_source_consumer_sums(
     )
 }
 
-
 fn prepared_table_projective_source_unpacked_relation_values(
     base: &[M31ColumnEval],
     vec_row: usize,
@@ -967,7 +942,6 @@ fn prepared_table_projective_source_unpacked_relation_values(
     })
 }
 
-
 fn prepared_table_ec_row_packed_relation_values(
     base: &[M31ColumnEval],
     vec_row: usize,
@@ -985,7 +959,6 @@ fn prepared_table_ec_row_packed_relation_values(
         base[column].data[vec_row]
     })
 }
-
 
 fn prepared_table_projective_source_packed_relation_values(
     base: &[M31ColumnEval],

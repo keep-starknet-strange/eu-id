@@ -71,16 +71,15 @@ use stwo_constraint_framework::{
 };
 use stwo_p256_utils::constants::{LIMB_BITS, N_LIMBS};
 
+use crate::components::gamma_digest::{
+    gamma_digest_of_values, gamma_digest_tuple, gen_gamma_tall_base_trace,
+    gen_gamma_tall_interaction_trace, gen_gamma_tall_preprocessed_trace, yield_gamma_digest,
+    GammaChallenge, GammaDigestRelation, GammaTallComponent, GammaTallEval, GammaTallInstance,
+    GammaTallInteractionClaim, GammaTallLayout, GAMMA_TAG_PKC_RANGE13, GAMMA_TAG_PKC_SIGNED,
+};
 use crate::constants::{P256_B, P256_MODULUS};
 use crate::limbs::{EvalP256BigIntExt, P256EvalBigInt, P256M31BigInt};
 use crate::projective::{ProjectiveEcOp, ProjectivePoint};
-use crate::components::gamma_digest::{
-    gamma_digest_of_values, gamma_digest_tuple,
-    gen_gamma_tall_base_trace, gen_gamma_tall_interaction_trace,
-    gen_gamma_tall_preprocessed_trace, yield_gamma_digest, GammaChallenge,
-    GammaDigestRelation, GammaTallComponent, GammaTallEval, GammaTallInstance,
-    GammaTallInteractionClaim, GammaTallLayout, GAMMA_TAG_PKC_RANGE13, GAMMA_TAG_PKC_SIGNED,
-};
 use crate::projective_air::{
     projective_rcb_signed_carry_bound, projective_rcb_signed_carry_log_size, ProjectiveRcbAirError,
     ProjectiveRcbAirRow, ProjectiveRcbAirTraceClaim, ProjectiveRcbMulResultRelation,
@@ -91,10 +90,10 @@ use crate::projective_air::{
 use crate::public_inputs::PublicEcdsaInputClaim;
 use crate::public_key_check::{PublicKeyOnCurveClaim, PublicKeyOnCurveError};
 use crate::range_checks::{
-    encode_signed_carry, range_check_value_column_id,
-    signed_carry_active_column_id, signed_carry_value_column_id, RangeCheckClaim,
-    RangeCheckComponent, RangeCheckEval, RangeCheckInteractionClaim, RangeCheckRelation,
-    SignedCarryRangeClaim, SignedCarryRangeComponent, SignedCarryRangeEval, RANGE13_BITS,
+    encode_signed_carry, range_check_value_column_id, signed_carry_active_column_id,
+    signed_carry_value_column_id, RangeCheckClaim, RangeCheckComponent, RangeCheckEval,
+    RangeCheckInteractionClaim, RangeCheckRelation, SignedCarryRangeClaim,
+    SignedCarryRangeComponent, SignedCarryRangeEval, RANGE13_BITS,
 };
 use crate::scalar::scalar_mod_mul::columns::{m31_column_eval, padded_log_size, M31ColumnEval};
 use crate::types::U256;
@@ -1128,22 +1127,35 @@ pub(crate) fn gen_slice_preprocessed_trace(
 /// every witnessed limb in [`PublicKeyCurveCheckEval`]'s collection order
 /// (x, y, x2, x3, three_x, y2); signed: the curve-identity carries.
 fn pkc_gamma_range13_values(claim: &PublicKeyCurveSliceClaim) -> Vec<M31> {
-    [&claim.x, &claim.y, &claim.x2, &claim.x3, &claim.three_x, &claim.y2]
-        .iter()
-        .flat_map(|value| value.limbs().iter().copied())
-        .collect()
+    [
+        &claim.x,
+        &claim.y,
+        &claim.x2,
+        &claim.x3,
+        &claim.three_x,
+        &claim.y2,
+    ]
+    .iter()
+    .flat_map(|value| value.limbs().iter().copied())
+    .collect()
 }
 
 fn pkc_gamma_signed_values(claim: &PublicKeyCurveSliceClaim) -> Vec<M31> {
-    claim.carries.iter().copied().map(encode_signed_carry).collect()
+    claim
+        .carries
+        .iter()
+        .copied()
+        .map(encode_signed_carry)
+        .collect()
 }
 
 const PKC_GAMMA_RANGE13_VALUES: usize = 6 * N_LIMBS;
 const PKC_GAMMA_SIGNED_VALUES: usize = N_LIMBS;
 
 pub(crate) fn pkc_gamma_max_padded_values() -> usize {
-    crate::components::gamma_digest::gamma_padded_values(PKC_GAMMA_RANGE13_VALUES)
-        .max(crate::components::gamma_digest::gamma_padded_values(PKC_GAMMA_SIGNED_VALUES))
+    crate::components::gamma_digest::gamma_padded_values(PKC_GAMMA_RANGE13_VALUES).max(
+        crate::components::gamma_digest::gamma_padded_values(PKC_GAMMA_SIGNED_VALUES),
+    )
 }
 
 /// The slice covers exactly one signature ⇒ one digest group per kind.
@@ -1349,7 +1361,12 @@ fn gen_curve_check_interaction_trace(
     relations: &PublicKeyCurveSliceRelations,
     log_size: u32,
     bind_to_public: bool,
-) -> (ColumnVec<M31ColumnEval>, SecureField, SecureField, SecureField) {
+) -> (
+    ColumnVec<M31ColumnEval>,
+    SecureField,
+    SecureField,
+    SecureField,
+) {
     let padded_rows = 1usize << log_size;
     let (fractions, mul_result_sum, gamma_yield_sum) =
         curve_check_fraction_pairs(claim, relations, bind_to_public);
@@ -1716,8 +1733,7 @@ mod tests {
             curve_mul_result_consumer_sum(&consistent_off, &audit_relations, false);
         assert_eq!(balanced.total() - balanced_mul_consumer, secure_zero());
         assert_eq!(
-            balanced_mul_consumer
-                + hinted_provider_sum(&consistent_off, &audit_relations),
+            balanced_mul_consumer + hinted_provider_sum(&consistent_off, &audit_relations),
             secure_zero()
         );
         // But the prover rejects it (curve-identity recurrence does not vanish).

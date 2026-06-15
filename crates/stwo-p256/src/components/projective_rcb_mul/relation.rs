@@ -14,8 +14,7 @@ use crate::range_checks::RangeCheckRelation;
 /// at 1/20th the interaction columns). The provider YIELDS every proven
 /// `fp_mul`'s `lhs`/`rhs`/`result`; the fake-GLV and prepared-table projective
 /// sources CONSUME the muls of the EC op on their row.
-pub const PROJECTIVE_RCB_MUL_RESULT_RELATION_ARITY: usize =
-    3 + stwo_p256_utils::constants::N_LIMBS;
+pub const PROJECTIVE_RCB_MUL_RESULT_RELATION_ARITY: usize = 3 + stwo_p256_utils::constants::N_LIMBS;
 
 relation!(
     ProjectiveRcbMulResultRelation,

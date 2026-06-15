@@ -72,9 +72,7 @@ use crate::scalar::canonical_lt::{add_canonical_lt_fixed_bound, CanonicalLtRelat
 use crate::final_check::FinalEcdsaCheckClaim;
 use crate::limbs::{P256BigInt, P256M31BigInt};
 use crate::public_inputs::{PublicEcdsaInputClaim, PublicEcdsaInstance};
-use crate::range_checks::{
-    decode_signed_carry, encode_signed_carry, RangeCheckRelation,
-};
+use crate::range_checks::{decode_signed_carry, encode_signed_carry, RangeCheckRelation};
 use crate::scalar::scalar_mod_mul::columns::{m31_column_eval, padded_log_size, M31ColumnEval};
 use crate::scalar::setup_air::{
     add_digest_reduction, DigestReductionColumns, DigestReductionRelations,
@@ -217,12 +215,10 @@ impl FrameworkEval for FinalCheckAirEval {
         let reduction_carries: [E::F; N_LIMBS] = core::array::from_fn(|_| eval.next_trace_mask());
         let r_check_lt_slack =
             P256BigInt::from_limbs(core::array::from_fn(|_| eval.next_trace_mask()));
-        let r_check_lt_carries: [E::F; N_LIMBS] =
-            core::array::from_fn(|_| eval.next_trace_mask());
+        let r_check_lt_carries: [E::F; N_LIMBS] = core::array::from_fn(|_| eval.next_trace_mask());
         let r_x_lt_p_slack =
             P256BigInt::from_limbs(core::array::from_fn(|_| eval.next_trace_mask()));
-        let r_x_lt_p_carries: [E::F; N_LIMBS] =
-            core::array::from_fn(|_| eval.next_trace_mask());
+        let r_x_lt_p_carries: [E::F; N_LIMBS] = core::array::from_fn(|_| eval.next_trace_mask());
         let one = E::F::from(M31::from_u32_unchecked(1));
 
         eval.add_constraint(active.clone() * (active.clone() - one.clone()));
@@ -339,8 +335,7 @@ pub fn gen_final_check_air_base_trace(
     let padding_lt_p = CanonicalLtTrace::new("padding_r_x", &[0u64; 4], "p", &P256_MODULUS_WORDS)
         .expect("0 is below the P-256 field prime");
 
-    let mut columns =
-        vec![vec![M31::from_u32_unchecked(0); row_count]; FINAL_CHECK_TRACE_COLUMNS];
+    let mut columns = vec![vec![M31::from_u32_unchecked(0); row_count]; FINAL_CHECK_TRACE_COLUMNS];
 
     // Pre-fill padding-row canonical-LT slack/carries so the ungated
     // constraints inside `add_canonical_lt_fixed_bound` hold on every row.
@@ -536,12 +531,7 @@ pub(crate) fn gen_final_check_air_interaction_trace(
 
     let (trace, claimed_sum) = logup.finalize_last();
 
-    (
-        trace,
-        FinalCheckAirInteractionClaim {
-            claimed_sum,
-        },
-    )
+    (trace, FinalCheckAirInteractionClaim { claimed_sum })
 }
 
 /// FinalAddOutput tuple `(sig_id, r_x[N_LIMBS])` packed values from base columns.

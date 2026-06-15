@@ -34,7 +34,6 @@ pub struct PreparedTableClaim {
     pub certs: Vec<PreparedTableCert>,
 }
 
-
 impl PreparedTableClaim {
     pub fn from_claims(
         cert_inputs: &CertScalarInputClaim,
@@ -114,12 +113,10 @@ impl PreparedTableClaim {
     }
 }
 
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedTableEcTraceClaim {
     pub rows: Vec<PreparedTableEcRow>,
 }
-
 
 impl PreparedTableEcTraceClaim {
     pub fn from_claims(
@@ -233,12 +230,10 @@ impl PreparedTableEcTraceClaim {
     }
 }
 
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PreparedTableEcRowProofClaim {
     pub log_size: u32,
 }
-
 
 impl PreparedTableEcRowProofClaim {
     pub fn from_trace(trace: &PreparedTableEcTraceClaim) -> Self {
@@ -294,14 +289,12 @@ impl PreparedTableEcRowProofClaim {
     }
 }
 
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PreparedTableProjectiveSourceProofClaim {
     pub log_size: u32,
     /// Active prepared-table rows (= γ-digest groups / tall schedule).
     pub rows: u32,
 }
-
 
 impl PreparedTableProjectiveSourceProofClaim {
     pub fn from_prepared_trace(trace: &PreparedTableEcTraceClaim) -> Self {
@@ -368,7 +361,6 @@ impl PreparedTableProjectiveSourceProofClaim {
     }
 }
 
-
 /// Dummy γ challenge for preprocessed-id / degree-bound queries.
 pub(crate) fn prepared_dummy_gamma_challenge() -> crate::components::gamma_digest::GammaChallenge {
     crate::components::gamma_digest::GammaChallenge::from_gamma(
@@ -428,7 +420,6 @@ pub(crate) fn gen_prepared_table_ec_row_preprocessed_trace(
         .collect()
 }
 
-
 pub(crate) fn gen_prepared_table_ec_row_base_trace(
     trace: &PreparedTableEcTraceClaim,
     log_size: u32,
@@ -452,7 +443,6 @@ pub(crate) fn gen_prepared_table_ec_row_base_trace(
     );
     Ok(columns_from_rows(log_size, rows))
 }
-
 
 pub(crate) fn gen_prepared_table_projective_source_base_trace(
     prepared: &PreparedTableEcTraceClaim,
@@ -491,7 +481,6 @@ pub(crate) fn gen_prepared_table_projective_source_base_trace(
     );
     Ok(columns_from_rows(log_size, rows))
 }
-
 
 fn prepared_table_ec_row_trace_values(
     source_index: usize,
@@ -555,7 +544,6 @@ fn prepared_table_ec_row_trace_values(
     values
 }
 
-
 /// Witness the negation `neg = -src` (canonical limbs) together with the boolean
 /// carries of the limb addition `neg.y + src.y = p`. Because `neg.y, src.y < p`
 /// and (for a finite `src`) `neg.y + src.y = p` exactly, every carry is in
@@ -571,7 +559,7 @@ fn prepared_table_ec_negation_witness(
     let mut carries = [M31::from_u32_unchecked(0); PREPARED_TABLE_EC_NEG_CARRY_COLUMNS];
     let mut carry: u32 = 0;
     let limb_modulus = 1u32 << LIMB_BITS;
-    for i in 0..N_LIMBS {
+    for (i, carry_slot) in carries.iter_mut().enumerate().take(N_LIMBS) {
         let sum = neg.y.limbs()[i].0 + src.y.limbs()[i].0 + carry;
         carry = sum / limb_modulus;
         debug_assert!(carry <= 1, "negation carry must be boolean");
@@ -580,12 +568,11 @@ fn prepared_table_ec_negation_witness(
             p_limbs.limbs()[i].0,
             "negation limb addition must reconstruct the modulus"
         );
-        carries[i] = M31::from_u32_unchecked(carry);
+        *carry_slot = M31::from_u32_unchecked(carry);
     }
     debug_assert_eq!(carry, 0, "negation top carry must vanish");
     (neg, carries)
 }
-
 
 fn prepared_table_projective_source_trace_values(
     source_index: usize,
@@ -631,7 +618,10 @@ fn prepared_table_projective_source_trace_values(
         values[column] = value;
         column += 1;
     }
-    debug_assert_eq!(column, PREPARED_TABLE_PROJECTIVE_SOURCE_DOUBLE_FORMULA_OFFSET);
+    debug_assert_eq!(
+        column,
+        PREPARED_TABLE_PROJECTIVE_SOURCE_DOUBLE_FORMULA_OFFSET
+    );
     // C5-2: the Double-formula working values + reduction witnesses. Emitted
     // only for Double rows; MixedAdd / padding leave this block zero, matching
     // the `double_active`-gated constraints + off-Double zero gates.
@@ -678,14 +668,12 @@ fn prepared_table_projective_source_trace_values(
     Ok(values)
 }
 
-
 #[derive(Clone, Debug)]
 struct PreparedTableEcPointValues {
     x: [M31; N_LIMBS],
     y: [M31; N_LIMBS],
     inf: M31,
 }
-
 
 impl PreparedTableEcPointValues {
     fn from_prepared(point: &PreparedAffinePoint) -> Self {
@@ -696,7 +684,6 @@ impl PreparedTableEcPointValues {
         }
     }
 }
-
 
 impl PreparedTableEcPointLike<M31> for PreparedTableEcPointValues {
     fn relation_values(&self) -> [M31; PREPARED_TABLE_EC_POINT_COLUMNS] {
@@ -709,13 +696,11 @@ impl PreparedTableEcPointLike<M31> for PreparedTableEcPointValues {
     }
 }
 
-
 pub(crate) fn prepared_table_ec_point_values(
     point: &PreparedAffinePoint,
 ) -> [M31; PREPARED_TABLE_EC_POINT_COLUMNS] {
     PreparedTableEcPointValues::from_prepared(point).relation_values()
 }
-
 
 fn columns_from_rows<const N: usize>(
     log_size: u32,
@@ -726,7 +711,6 @@ fn columns_from_rows<const N: usize>(
         .collect()
 }
 
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedTableEcRow {
     pub sig_id: M31,
@@ -736,7 +720,6 @@ pub struct PreparedTableEcRow {
     pub rhs: PreparedAffinePoint,
     pub output: PreparedAffinePoint,
 }
-
 
 impl PreparedTableEcRow {
     fn double(
@@ -802,7 +785,6 @@ impl PreparedTableEcRow {
     }
 }
 
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PreparedTableEcRowKind {
     DoubleP,
@@ -813,7 +795,6 @@ pub enum PreparedTableEcRowKind {
     Table16,
 }
 
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedTableCert {
     pub sig_id: M31,
@@ -823,7 +804,6 @@ pub struct PreparedTableCert {
     pub r3: PreparedAffinePoint,
     pub table16: PreparedAffinePoint,
 }
-
 
 impl PreparedTableCert {
     fn new(
@@ -1013,14 +993,12 @@ impl PreparedTableCert {
     }
 }
 
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedAffinePoint {
     pub x: P256M31BigInt,
     pub y: P256M31BigInt,
     pub inf: M31,
 }
-
 
 impl PreparedAffinePoint {
     pub const fn infinity() -> Self {
@@ -1086,7 +1064,6 @@ impl PreparedAffinePoint {
         }
     }
 }
-
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PreparedTableError {
@@ -1181,7 +1158,6 @@ pub enum PreparedTableError {
     ProofLayer,
 }
 
-
 fn require_unique_output(
     rows: &[&PreparedTableEcRow],
     sig_id: M31,
@@ -1214,7 +1190,6 @@ fn require_unique_output(
         }),
     }
 }
-
 
 fn prepared_table_ec_rows_for_cert(
     cert: &CertScalarInputRow,
@@ -1362,7 +1337,6 @@ fn prepared_table_ec_rows_for_cert(
     Ok(rows)
 }
 
-
 /// Test-only variant of [`prepared_table_ec_rows_for_cert`] that uses an
 /// injected `R'` instead of the production `R`. Mirrors the production row
 /// shape exactly, sourcing R-derived outputs from `table` (which must itself
@@ -1493,7 +1467,6 @@ fn prepared_table_ec_rows_for_cert_with_r_override(
     Ok(rows)
 }
 
-
 /// Test-only: build a [`PreparedTableEcTraceClaim`] where the cert at
 /// `override_cert_index` uses the injected `R'`; all other certs use the
 /// production path. Skips the cross-`verify` against the native (true-R)
@@ -1534,7 +1507,6 @@ impl PreparedTableEcTraceClaim {
     }
 }
 
-
 /// Test-only: build a [`PreparedTableClaim`] where the cert at
 /// `override_cert_index` is rebuilt from the injected `R'`.
 #[cfg(test)]
@@ -1569,7 +1541,6 @@ impl PreparedTableClaim {
     }
 }
 
-
 fn require_same_id(
     source: &'static str,
     cert: &CertScalarInputRow,
@@ -1589,7 +1560,6 @@ fn require_same_id(
     }
 }
 
-
 fn signed_hint_point(h: &AffinePoint, s2_sign_bit: M31) -> Result<AffinePoint, PreparedTableError> {
     match s2_sign_bit.0 {
         0 => Ok(h.clone()),
@@ -1600,7 +1570,6 @@ fn signed_hint_point(h: &AffinePoint, s2_sign_bit: M31) -> Result<AffinePoint, P
         }),
     }
 }
-
 
 pub(crate) fn apply_selector(
     base: &[PreparedAffinePoint; PREPARED_BASE_COUNT],
@@ -1625,7 +1594,6 @@ pub(crate) fn apply_selector(
     }
 }
 
-
 pub(crate) fn prepared(point: Option<AffinePoint>) -> PreparedAffinePoint {
     point.map_or_else(
         PreparedAffinePoint::infinity,
@@ -1633,8 +1601,10 @@ pub(crate) fn prepared(point: Option<AffinePoint>) -> PreparedAffinePoint {
     )
 }
 
-
-pub(crate) fn add_optional_points(lhs: Option<AffinePoint>, rhs: Option<AffinePoint>) -> Option<AffinePoint> {
+pub(crate) fn add_optional_points(
+    lhs: Option<AffinePoint>,
+    rhs: Option<AffinePoint>,
+) -> Option<AffinePoint> {
     match (lhs, rhs) {
         (None, None) => None,
         (Some(point), None) | (None, Some(point)) => Some(point),
@@ -1644,16 +1614,13 @@ pub(crate) fn add_optional_points(lhs: Option<AffinePoint>, rhs: Option<AffinePo
     }
 }
 
-
 fn double_optional(point: Option<AffinePoint>) -> Option<AffinePoint> {
     point.map(|point| point_double(&point).output)
 }
 
-
 fn negate_optional(point: Option<AffinePoint>) -> Option<AffinePoint> {
     point.map(|point| negate_point(&point))
 }
-
 
 fn negate_point(point: &AffinePoint) -> AffinePoint {
     AffinePoint {
@@ -1668,7 +1635,6 @@ fn negate_point(point: &AffinePoint) -> AffinePoint {
     }
 }
 
-
 fn is_additive_inverse(lhs: &AffinePoint, rhs: &AffinePoint) -> bool {
     lhs.x == rhs.x
         && add_mod_witness(&lhs.y, &rhs.y, &U256::from_le_u64s(&P256_MODULUS))
@@ -1676,4 +1642,3 @@ fn is_additive_inverse(lhs: &AffinePoint, rhs: &AffinePoint) -> bool {
             .to_u256()
             == U256::ZERO
 }
-

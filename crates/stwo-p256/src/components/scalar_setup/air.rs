@@ -814,10 +814,7 @@ pub(crate) fn gen_scalar_setup_air_interaction_trace(
     extra_range13_uses: impl IntoIterator<Item = M31>,
     extra_range9_uses: impl IntoIterator<Item = M31>,
     extra_signed_carry_uses: impl IntoIterator<Item = i64>,
-) -> (
-    ColumnVec<M31ColumnEval>,
-    ScalarSetupAirInteractionClaim,
-) {
+) -> (ColumnVec<M31ColumnEval>, ScalarSetupAirInteractionClaim) {
     assert_eq!(base.len(), SCALAR_SETUP_TRACE_COLUMNS);
     let log_size = base[0].domain.log_size();
     let mut offset = 0usize;
@@ -1077,11 +1074,7 @@ fn add_public_key_point_provider<E: EvalAtRow>(
     values.push(public.sig_id.clone());
     values.extend(public.pub_x.limbs().iter().cloned());
     values.extend(public.pub_y.limbs().iter().cloned());
-    eval.add_to_relation(RelationEntry::new(
-        relation,
-        -E::EF::from(gate),
-        &values,
-    ));
+    eval.add_to_relation(RelationEntry::new(relation, -E::EF::from(gate), &values));
 }
 
 fn read_public_instance<E: EvalAtRow>(eval: &mut E) -> PublicEcdsaInstance<E::F> {
@@ -1106,6 +1099,7 @@ fn enforce_nonzero<E: EvalAtRow>(eval: &mut E, gate: E::F, limbs: &[E::F; N_LIMB
     eval.add_constraint(gate * (sum * inverse - one));
 }
 
+#[allow(clippy::too_many_arguments)]
 fn add_scalar_limb_links<E: EvalAtRow>(
     eval: &mut E,
     relation: &ScalarLimbRelation,
@@ -1201,6 +1195,7 @@ fn add_scalar_limb_links<E: EvalAtRow>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn add_scalar_limb_link<E: EvalAtRow>(
     eval: &mut E,
     relation: &ScalarLimbRelation,
@@ -1263,6 +1258,7 @@ fn append_range_column(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_scalar_limb_column(
     logup: &mut LogupTraceGenerator,
     base: &[M31ColumnEval],
@@ -1397,6 +1393,7 @@ fn scalar_setup_point_values(row: &[M31]) -> [M31; PUBLIC_KEY_POINT_ARITY] {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn scalar_limb_sum_for_column(
     base: &[M31ColumnEval],
     active_col: usize,

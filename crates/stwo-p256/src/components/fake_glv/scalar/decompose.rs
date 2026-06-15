@@ -234,7 +234,11 @@ mod tests {
         let s1 = BigInt::from(biguint_from_u256(&decomp.s1));
         let s2_abs = BigInt::from(biguint_from_u256(&decomp.s2_abs));
         let q = BigInt::from(biguint_from_u256(&decomp.q));
-        let s2_signed = if decomp.s2_sign_bit { -&s2_abs } else { s2_abs.clone() };
+        let s2_signed = if decomp.s2_sign_bit {
+            -&s2_abs
+        } else {
+            s2_abs.clone()
+        };
 
         // 128-bit bounds.
         assert!(s1 > BigInt::zero() && s1 < bound, "s1 bound");

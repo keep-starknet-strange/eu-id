@@ -43,10 +43,7 @@ pub const CERT_SCALAR_INPUT_RELATION_ARITY: usize = 2 + 3 * N_LIMBS + 1 + 4;
 pub const CERT0_PREPARED_P_CELL_COUNT: u32 = 4;
 pub const CERT1_PREPARED_P_CELL_COUNT: u32 = 6;
 
-relation!(
-    CertScalarInputRelation,
-    CERT_SCALAR_INPUT_RELATION_ARITY
-);
+relation!(CertScalarInputRelation, CERT_SCALAR_INPUT_RELATION_ARITY);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CertScalarInputClaim {
@@ -548,12 +545,7 @@ pub(crate) fn gen_cert_scalar_input_air_interaction_trace(
         }
     }
     let (trace, claimed_sum) = logup.finalize_last();
-    (
-        trace,
-        CertScalarInputAirInteractionClaim {
-            claimed_sum,
-        },
-    )
+    (trace, CertScalarInputAirInteractionClaim { claimed_sum })
 }
 
 #[cfg(test)]
@@ -826,9 +818,9 @@ const CERT_ACTIVE_ROW_OFFSET: usize = 2 + 3 * N_LIMBS + 1 + 2;
 /// base_y[..])`. Mirrors `cert_base_relation_values_from_row`.
 fn cert_base_index_in_row(index: usize) -> usize {
     match index {
-        0 => 0,                                // sig_id
-        1 => 1,                                // cert_id
-        2..=21 => 2 + N_LIMBS + (index - 2),   // base_x limbs
+        0 => 0,                                    // sig_id
+        1 => 1,                                    // cert_id
+        2..=21 => 2 + N_LIMBS + (index - 2),       // base_x limbs
         22..=41 => 2 + 2 * N_LIMBS + (index - 22), // base_y limbs
         _ => unreachable!("cert base relation index in range"),
     }

@@ -126,4 +126,3 @@ const fn coefficient_term_count_const(coeff: usize) -> usize {
         FP_SOLINAS_RAW_LIMBS - coeff
     }
 }
-

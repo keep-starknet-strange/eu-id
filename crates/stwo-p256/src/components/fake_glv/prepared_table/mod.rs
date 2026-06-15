@@ -70,9 +70,12 @@ pub const PREPARED_TABLE_EC_NEG_CARRY_COLUMNS: usize = N_LIMBS;
 pub const PREPARED_TABLE_EC_NEG_AUX_COLUMNS: usize =
     PREPARED_TABLE_EC_POINT_COLUMNS + PREPARED_TABLE_EC_NEG_CARRY_COLUMNS;
 
-pub const PREPARED_TABLE_EC_ROW_TRACE_COLUMNS: usize =
-    1 + 3 + PREPARED_TABLE_EC_KIND_FLAGS + 2 + 3 * PREPARED_TABLE_EC_POINT_COLUMNS
-        + PREPARED_TABLE_EC_NEG_AUX_COLUMNS;
+pub const PREPARED_TABLE_EC_ROW_TRACE_COLUMNS: usize = 1
+    + 3
+    + PREPARED_TABLE_EC_KIND_FLAGS
+    + 2
+    + 3 * PREPARED_TABLE_EC_POINT_COLUMNS
+    + PREPARED_TABLE_EC_NEG_AUX_COLUMNS;
 pub const PREPARED_TABLE_PROJECTIVE_SOURCE_TRACE_COLUMNS: usize = 1
     + 5
     + 3 * PREPARED_TABLE_EC_POINT_COLUMNS
@@ -88,10 +91,8 @@ pub const PREPARED_TABLE_PROJECTIVE_SOURCE_MUL_LIMB_OFFSET: usize =
     PREPARED_TABLE_PROJECTIVE_SOURCE_HAS_MULS_COL + 1;
 /// Column index where the C5-2 Double-formula block begins (after the
 /// consumed-mul block).
-pub const PREPARED_TABLE_PROJECTIVE_SOURCE_DOUBLE_FORMULA_OFFSET: usize = 1
-    + 5
-    + 3 * PREPARED_TABLE_EC_POINT_COLUMNS
-    + crate::projective_air::CONSUMED_MUL_LIMBS_COLUMNS;
+pub const PREPARED_TABLE_PROJECTIVE_SOURCE_DOUBLE_FORMULA_OFFSET: usize =
+    1 + 5 + 3 * PREPARED_TABLE_EC_POINT_COLUMNS + crate::projective_air::CONSUMED_MUL_LIMBS_COLUMNS;
 /// Column index where the C5-2 MixedAdd-formula block begins (right after the
 /// Double-formula block).
 pub const PREPARED_TABLE_PROJECTIVE_SOURCE_MIXED_ADD_FORMULA_OFFSET: usize =
@@ -341,38 +342,218 @@ const fn base_kind(i: usize) -> usize {
 /// enumeration verified for per-cert balance.
 const PIN_SCHEDULE: &[PinEntry] = &[
     // CertBase consumers (use +1) on each P-cell.
-    PinEntry { relation: PinRelation::CertBase, point: PinPoint::Lhs, mult: 1, kinds: &[base_kind(1)], cert0_only: false },
-    PinEntry { relation: PinRelation::CertBase, point: PinPoint::Lhs, mult: 1, kinds: &[base_kind(2)], cert0_only: false },
-    PinEntry { relation: PinRelation::CertBase, point: PinPoint::Lhs, mult: 1, kinds: &[base_kind(5)], cert0_only: false },
-    PinEntry { relation: PinRelation::CertBase, point: PinPoint::Lhs, mult: 1, kinds: &[base_kind(6)], cert0_only: false },
-    PinEntry { relation: PinRelation::CertBase, point: PinPoint::Lhs, mult: 1, kinds: &[PREPARED_TABLE_EC_KIND_DOUBLE_P], cert0_only: false },
-    PinEntry { relation: PinRelation::CertBase, point: PinPoint::Rhs, mult: 1, kinds: &[PREPARED_TABLE_EC_KIND_ADD_P2P], cert0_only: false },
+    PinEntry {
+        relation: PinRelation::CertBase,
+        point: PinPoint::Lhs,
+        mult: 1,
+        kinds: &[base_kind(1)],
+        cert0_only: false,
+    },
+    PinEntry {
+        relation: PinRelation::CertBase,
+        point: PinPoint::Lhs,
+        mult: 1,
+        kinds: &[base_kind(2)],
+        cert0_only: false,
+    },
+    PinEntry {
+        relation: PinRelation::CertBase,
+        point: PinPoint::Lhs,
+        mult: 1,
+        kinds: &[base_kind(5)],
+        cert0_only: false,
+    },
+    PinEntry {
+        relation: PinRelation::CertBase,
+        point: PinPoint::Lhs,
+        mult: 1,
+        kinds: &[base_kind(6)],
+        cert0_only: false,
+    },
+    PinEntry {
+        relation: PinRelation::CertBase,
+        point: PinPoint::Lhs,
+        mult: 1,
+        kinds: &[PREPARED_TABLE_EC_KIND_DOUBLE_P],
+        cert0_only: false,
+    },
+    PinEntry {
+        relation: PinRelation::CertBase,
+        point: PinPoint::Rhs,
+        mult: 1,
+        kinds: &[PREPARED_TABLE_EC_KIND_ADD_P2P],
+        cert0_only: false,
+    },
     // Canonical providers (yield -count).
-    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_P3), point: PinPoint::Output, mult: -4, kinds: &[PREPARED_TABLE_EC_KIND_ADD_P2P], cert0_only: false },
-    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_P3), point: PinPoint::ConstThreeG, mult: -4, kinds: &[PREPARED_TABLE_EC_KIND_DOUBLE_R], cert0_only: true },
-    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_R), point: PinPoint::Lhs, mult: -3, kinds: &[PREPARED_TABLE_EC_KIND_DOUBLE_R], cert0_only: false },
-    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_R3), point: PinPoint::Output, mult: -3, kinds: &[PREPARED_TABLE_EC_KIND_ADD_R2R], cert0_only: false },
-    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_NEG_R), point: PinPoint::Neg, mult: -2, kinds: &[PREPARED_TABLE_EC_KIND_DOUBLE_R], cert0_only: false },
-    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_NEG_R3), point: PinPoint::Neg, mult: -2, kinds: &[PREPARED_TABLE_EC_KIND_ADD_R2R], cert0_only: false },
-    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_P2), point: PinPoint::Output, mult: -1, kinds: &[PREPARED_TABLE_EC_KIND_DOUBLE_P], cert0_only: false },
-    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_R2), point: PinPoint::Output, mult: -1, kinds: &[PREPARED_TABLE_EC_KIND_DOUBLE_R], cert0_only: false },
+    PinEntry {
+        relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_P3),
+        point: PinPoint::Output,
+        mult: -4,
+        kinds: &[PREPARED_TABLE_EC_KIND_ADD_P2P],
+        cert0_only: false,
+    },
+    PinEntry {
+        relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_P3),
+        point: PinPoint::ConstThreeG,
+        mult: -4,
+        kinds: &[PREPARED_TABLE_EC_KIND_DOUBLE_R],
+        cert0_only: true,
+    },
+    PinEntry {
+        relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_R),
+        point: PinPoint::Lhs,
+        mult: -3,
+        kinds: &[PREPARED_TABLE_EC_KIND_DOUBLE_R],
+        cert0_only: false,
+    },
+    PinEntry {
+        relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_R3),
+        point: PinPoint::Output,
+        mult: -3,
+        kinds: &[PREPARED_TABLE_EC_KIND_ADD_R2R],
+        cert0_only: false,
+    },
+    PinEntry {
+        relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_NEG_R),
+        point: PinPoint::Neg,
+        mult: -2,
+        kinds: &[PREPARED_TABLE_EC_KIND_DOUBLE_R],
+        cert0_only: false,
+    },
+    PinEntry {
+        relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_NEG_R3),
+        point: PinPoint::Neg,
+        mult: -2,
+        kinds: &[PREPARED_TABLE_EC_KIND_ADD_R2R],
+        cert0_only: false,
+    },
+    PinEntry {
+        relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_P2),
+        point: PinPoint::Output,
+        mult: -1,
+        kinds: &[PREPARED_TABLE_EC_KIND_DOUBLE_P],
+        cert0_only: false,
+    },
+    PinEntry {
+        relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_R2),
+        point: PinPoint::Output,
+        mult: -1,
+        kinds: &[PREPARED_TABLE_EC_KIND_DOUBLE_R],
+        cert0_only: false,
+    },
     // Canonical consumers (use +1).
-    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_P3), point: PinPoint::Lhs, mult: 1, kinds: &[base_kind(0)], cert0_only: false },
-    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_P3), point: PinPoint::Lhs, mult: 1, kinds: &[base_kind(3)], cert0_only: false },
-    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_P3), point: PinPoint::Lhs, mult: 1, kinds: &[base_kind(4)], cert0_only: false },
-    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_P3), point: PinPoint::Lhs, mult: 1, kinds: &[base_kind(7)], cert0_only: false },
-    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_R), point: PinPoint::Rhs, mult: 1, kinds: &[PREPARED_TABLE_EC_KIND_ADD_R2R], cert0_only: false },
-    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_R), point: PinPoint::Rhs, mult: 1, kinds: &[base_kind(2)], cert0_only: false },
-    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_R), point: PinPoint::Rhs, mult: 1, kinds: &[base_kind(3)], cert0_only: false },
-    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_R3), point: PinPoint::Rhs, mult: 1, kinds: &[base_kind(6)], cert0_only: false },
-    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_R3), point: PinPoint::Rhs, mult: 1, kinds: &[base_kind(7)], cert0_only: false },
-    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_R3), point: PinPoint::Rhs, mult: 1, kinds: &[PREPARED_TABLE_EC_KIND_TABLE16], cert0_only: false },
-    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_NEG_R), point: PinPoint::Rhs, mult: 1, kinds: &[base_kind(0)], cert0_only: false },
-    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_NEG_R), point: PinPoint::Rhs, mult: 1, kinds: &[base_kind(1)], cert0_only: false },
-    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_NEG_R3), point: PinPoint::Rhs, mult: 1, kinds: &[base_kind(4)], cert0_only: false },
-    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_NEG_R3), point: PinPoint::Rhs, mult: 1, kinds: &[base_kind(5)], cert0_only: false },
-    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_P2), point: PinPoint::Lhs, mult: 1, kinds: &[PREPARED_TABLE_EC_KIND_ADD_P2P], cert0_only: false },
-    PinEntry { relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_R2), point: PinPoint::Lhs, mult: 1, kinds: &[PREPARED_TABLE_EC_KIND_ADD_R2R], cert0_only: false },
+    PinEntry {
+        relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_P3),
+        point: PinPoint::Lhs,
+        mult: 1,
+        kinds: &[base_kind(0)],
+        cert0_only: false,
+    },
+    PinEntry {
+        relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_P3),
+        point: PinPoint::Lhs,
+        mult: 1,
+        kinds: &[base_kind(3)],
+        cert0_only: false,
+    },
+    PinEntry {
+        relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_P3),
+        point: PinPoint::Lhs,
+        mult: 1,
+        kinds: &[base_kind(4)],
+        cert0_only: false,
+    },
+    PinEntry {
+        relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_P3),
+        point: PinPoint::Lhs,
+        mult: 1,
+        kinds: &[base_kind(7)],
+        cert0_only: false,
+    },
+    PinEntry {
+        relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_R),
+        point: PinPoint::Rhs,
+        mult: 1,
+        kinds: &[PREPARED_TABLE_EC_KIND_ADD_R2R],
+        cert0_only: false,
+    },
+    PinEntry {
+        relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_R),
+        point: PinPoint::Rhs,
+        mult: 1,
+        kinds: &[base_kind(2)],
+        cert0_only: false,
+    },
+    PinEntry {
+        relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_R),
+        point: PinPoint::Rhs,
+        mult: 1,
+        kinds: &[base_kind(3)],
+        cert0_only: false,
+    },
+    PinEntry {
+        relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_R3),
+        point: PinPoint::Rhs,
+        mult: 1,
+        kinds: &[base_kind(6)],
+        cert0_only: false,
+    },
+    PinEntry {
+        relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_R3),
+        point: PinPoint::Rhs,
+        mult: 1,
+        kinds: &[base_kind(7)],
+        cert0_only: false,
+    },
+    PinEntry {
+        relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_R3),
+        point: PinPoint::Rhs,
+        mult: 1,
+        kinds: &[PREPARED_TABLE_EC_KIND_TABLE16],
+        cert0_only: false,
+    },
+    PinEntry {
+        relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_NEG_R),
+        point: PinPoint::Rhs,
+        mult: 1,
+        kinds: &[base_kind(0)],
+        cert0_only: false,
+    },
+    PinEntry {
+        relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_NEG_R),
+        point: PinPoint::Rhs,
+        mult: 1,
+        kinds: &[base_kind(1)],
+        cert0_only: false,
+    },
+    PinEntry {
+        relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_NEG_R3),
+        point: PinPoint::Rhs,
+        mult: 1,
+        kinds: &[base_kind(4)],
+        cert0_only: false,
+    },
+    PinEntry {
+        relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_NEG_R3),
+        point: PinPoint::Rhs,
+        mult: 1,
+        kinds: &[base_kind(5)],
+        cert0_only: false,
+    },
+    PinEntry {
+        relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_P2),
+        point: PinPoint::Lhs,
+        mult: 1,
+        kinds: &[PREPARED_TABLE_EC_KIND_ADD_P2P],
+        cert0_only: false,
+    },
+    PinEntry {
+        relation: PinRelation::Canonical(PREPARED_TABLE_CANONICAL_ROLE_R2),
+        point: PinPoint::Lhs,
+        mult: 1,
+        kinds: &[PREPARED_TABLE_EC_KIND_ADD_R2R],
+        cert0_only: false,
+    },
 ];
 
 /// Number of pinning logup fractions emitted per EC row (one per schedule entry).

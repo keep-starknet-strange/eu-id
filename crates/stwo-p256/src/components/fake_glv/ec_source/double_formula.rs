@@ -195,12 +195,12 @@ pub(crate) fn add_combo_reduction<E: EvalAtRow>(
         let mut combo = zero.clone();
         for term in terms {
             let limb = term.src.limbs()[i].clone();
-            combo = combo + signed_coeff_mul::<E>(term.coeff, limb);
+            combo += signed_coeff_mul::<E>(term.coeff, limb);
         }
-        let recurrence = combo - target.limbs()[i].clone()
-            - witness.q.clone() * fixed_limb::<E>(&modulus, i)
-            + prev
-            - limb_base.clone() * witness.carries[i].clone();
+        let recurrence =
+            combo - target.limbs()[i].clone() - witness.q.clone() * fixed_limb::<E>(&modulus, i)
+                + prev
+                - limb_base.clone() * witness.carries[i].clone();
         eval.add_constraint(gate.clone() * recurrence);
     }
     eval.add_constraint(gate.clone() * witness.carries[N_LIMBS - 1].clone());
@@ -301,16 +301,52 @@ pub(crate) fn bind_double_formula<E: EvalAtRow>(
     let combo_t = [term(3, r(8)), term(-9, r(2)), term(-3, r(0))];
     let combo_2r10 = [term(2, r(10))];
 
-    add_combo_reduction(eval, gate, muls.lhs(6), &combo_m6lhs, &columns.reductions[0]);
-    add_combo_reduction(eval, gate, muls.rhs(6), &combo_m6rhs, &columns.reductions[1]);
-    add_combo_reduction(eval, gate, muls.lhs(7), &combo_m6lhs, &columns.reductions[2]);
+    add_combo_reduction(
+        eval,
+        gate,
+        muls.lhs(6),
+        &combo_m6lhs,
+        &columns.reductions[0],
+    );
+    add_combo_reduction(
+        eval,
+        gate,
+        muls.rhs(6),
+        &combo_m6rhs,
+        &columns.reductions[1],
+    );
+    add_combo_reduction(
+        eval,
+        gate,
+        muls.lhs(7),
+        &combo_m6lhs,
+        &columns.reductions[2],
+    );
     add_combo_reduction(eval, gate, muls.rhs(7), &combo_2r3, &columns.reductions[3]);
     add_combo_reduction(eval, gate, muls.rhs(8), &combo_2r4, &columns.reductions[4]);
-    add_combo_reduction(eval, gate, muls.lhs(9), &combo_m9lhs, &columns.reductions[5]);
+    add_combo_reduction(
+        eval,
+        gate,
+        muls.lhs(9),
+        &combo_m9lhs,
+        &columns.reductions[5],
+    );
     add_combo_reduction(eval, gate, muls.rhs(9), &combo_t, &columns.reductions[6]);
-    add_combo_reduction(eval, gate, muls.lhs(11), &combo_2r10, &columns.reductions[7]);
+    add_combo_reduction(
+        eval,
+        gate,
+        muls.lhs(11),
+        &combo_2r10,
+        &columns.reductions[7],
+    );
     add_combo_reduction(eval, gate, muls.rhs(11), &combo_t, &columns.reductions[8]);
-    add_combo_reduction(eval, gate, muls.lhs(12), &combo_2r10, &columns.reductions[9]);
+    add_combo_reduction(
+        eval,
+        gate,
+        muls.lhs(12),
+        &combo_2r10,
+        &columns.reductions[9],
+    );
 
     // ----- (2) Output projective working values -----
     // x3 ≡ R7 − R11,  y3 ≡ R6 + R9,  z3 ≡ 4·R12.
@@ -436,8 +472,8 @@ fn try_combo_carries(
         for t in terms {
             combo += t.coeff * i64::from(t.src.limbs()[i].0);
         }
-        let total = combo - i64::from(target.limbs()[i].0) - q * i64::from(modulus.limbs()[i].0)
-            + prev;
+        let total =
+            combo - i64::from(target.limbs()[i].0) - q * i64::from(modulus.limbs()[i].0) + prev;
         if total % base != 0 {
             return None;
         }

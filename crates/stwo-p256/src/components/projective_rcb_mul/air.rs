@@ -170,8 +170,13 @@ impl<E: EvalAtRow> ConsumedMulLimbs<E> {
     pub fn fill_dropped(&mut self, wiring: &ConsumedMulWiring<E>) {
         let one = E::F::from(M31::from_u32_unchecked(1));
         let mixed = one - wiring.op.clone();
-        let one_limbs: [M31; N_LIMBS] =
-            core::array::from_fn(|i| if i == 0 { M31::from_u32_unchecked(1) } else { M31::from_u32_unchecked(0) });
+        let one_limbs: [M31; N_LIMBS] = core::array::from_fn(|i| {
+            if i == 0 {
+                M31::from_u32_unchecked(1)
+            } else {
+                M31::from_u32_unchecked(0)
+            }
+        });
         let b: [M31; N_LIMBS] = core::array::from_fn(|i| {
             crate::limbs::P256M31BigInt::from_u256(&crate::types::U256::from_le_u64s(
                 &crate::constants::P256_B,
@@ -191,9 +196,8 @@ impl<E: EvalAtRow> ConsumedMulLimbs<E> {
         let shared = |a: &P256EvalBigInt<E>| -> [E::F; N_LIMBS] {
             core::array::from_fn(|i| a.limbs()[i].clone())
         };
-        let consts = |c: &[M31; N_LIMBS]| -> [E::F; N_LIMBS] {
-            core::array::from_fn(|i| E::F::from(c[i]))
-        };
+        let consts =
+            |c: &[M31; N_LIMBS]| -> [E::F; N_LIMBS] { core::array::from_fn(|i| E::F::from(c[i])) };
         let z3_sum: [E::F; N_LIMBS] = core::array::from_fn(|i| {
             wiring.z3_double.limbs()[i].clone() + wiring.z3_mixed.limbs()[i].clone()
         });
@@ -309,4 +313,3 @@ pub const fn projective_rcb_signed_carry_log_size() -> u32 {
         .next_power_of_two()
         .ilog2()
 }
-

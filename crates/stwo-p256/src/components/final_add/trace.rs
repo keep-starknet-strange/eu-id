@@ -13,9 +13,9 @@ use crate::limbs::P256M31BigInt;
 use crate::prepared_table::PreparedAffinePoint;
 use crate::projective::{ProjectiveEcOp, ProjectivePoint};
 use crate::projective_air::{
-    projective_rcb_signed_carry_bound,
-    projective_rcb_signed_carry_log_size, ProjectiveRcbAirError, ProjectiveRcbAirRow,
-    ProjectiveRcbAirTraceClaim, ProjectiveRcbMulRow, ProjectiveRcbMulStep, PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
+    projective_rcb_signed_carry_bound, projective_rcb_signed_carry_log_size, ProjectiveRcbAirError,
+    ProjectiveRcbAirRow, ProjectiveRcbAirTraceClaim, ProjectiveRcbMulRow, ProjectiveRcbMulStep,
+    PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
 };
 use crate::range_checks::{
     encode_signed_carry, range_check_value_column_id, signed_carry_active_column_id,
@@ -144,7 +144,10 @@ impl FinalAddClaim {
         };
         let (neg_q, neg_carries) = if !r2_inf && sign_d.0 == 1 {
             solve_sub_reduction(&r2p_y_u256, &r2_orig.y, &zero, &modulus).ok_or(
-                FinalAddError::ReductionFailed { which: "neg", sig_id: sig_id.0 },
+                FinalAddError::ReductionFailed {
+                    which: "neg",
+                    sig_id: sig_id.0,
+                },
             )?
         } else {
             zero_reduction()
@@ -241,13 +244,22 @@ impl FinalAddClaim {
                 }
                 let x3 = fp_sub(&fp_sub(&lamsq_u, &r1.x, &modulus), &r2.x, &modulus);
                 let dx_red = solve_sub_reduction(&dx_u, &r1.x, &r2.x, &modulus).ok_or(
-                    FinalAddError::ReductionFailed { which: "dx", sig_id: sig_id.0 },
+                    FinalAddError::ReductionFailed {
+                        which: "dx",
+                        sig_id: sig_id.0,
+                    },
                 )?;
                 let dy_red = solve_sub_reduction(&dy_u, &r1.y, &r2.y, &modulus).ok_or(
-                    FinalAddError::ReductionFailed { which: "dy", sig_id: sig_id.0 },
+                    FinalAddError::ReductionFailed {
+                        which: "dy",
+                        sig_id: sig_id.0,
+                    },
                 )?;
                 let x3_red = solve_x3_reduction(&x3, &r1.x, &r2.x, &lamsq_u, &modulus).ok_or(
-                    FinalAddError::ReductionFailed { which: "x3", sig_id: sig_id.0 },
+                    FinalAddError::ReductionFailed {
+                        which: "x3",
+                        sig_id: sig_id.0,
+                    },
                 )?;
                 (x3, dx_red, dy_red, x3_red)
             }
@@ -268,24 +280,39 @@ impl FinalAddClaim {
                 // `2·y1 mod p`. We just use a dedicated double-add reduction
                 // `dx + q·p ≡ 2·y1 (mod 2^256)`.
                 let dx_red = solve_two_y1_reduction(&dx_u, &r1.y, &modulus).ok_or(
-                    FinalAddError::ReductionFailed { which: "dx_double", sig_id: sig_id.0 },
+                    FinalAddError::ReductionFailed {
+                        which: "dx_double",
+                        sig_id: sig_id.0,
+                    },
                 )?;
                 // dy = 3·x1_sq − 3 (mod p). `dy + 3 + q·p ≡ 3·x1_sq (mod 2^256)`.
                 let dy_red = solve_slope_numer_reduction(&dy_u, &x1_sq_u, &modulus).ok_or(
-                    FinalAddError::ReductionFailed { which: "dy_double", sig_id: sig_id.0 },
+                    FinalAddError::ReductionFailed {
+                        which: "dy_double",
+                        sig_id: sig_id.0,
+                    },
                 )?;
                 // x3 reduction uses x2 = x1 (enforced in-AIR by double_add gate).
                 let x3_red = solve_x3_reduction(&x3, &r1.x, &r1.x, &lamsq_u, &modulus).ok_or(
-                    FinalAddError::ReductionFailed { which: "x3_double", sig_id: sig_id.0 },
+                    FinalAddError::ReductionFailed {
+                        which: "x3_double",
+                        sig_id: sig_id.0,
+                    },
                 )?;
                 (x3, dx_red, dy_red, x3_red)
             }
-            FinalAddBranch::R2Only => {
-                (r2.x.clone(), zero_reduction(), zero_reduction(), zero_reduction())
-            }
-            FinalAddBranch::R1Only => {
-                (r1.x.clone(), zero_reduction(), zero_reduction(), zero_reduction())
-            }
+            FinalAddBranch::R2Only => (
+                r2.x.clone(),
+                zero_reduction(),
+                zero_reduction(),
+                zero_reduction(),
+            ),
+            FinalAddBranch::R1Only => (
+                r1.x.clone(),
+                zero_reduction(),
+                zero_reduction(),
+                zero_reduction(),
+            ),
         };
 
         let claim = Self {
@@ -331,21 +358,59 @@ impl FinalAddClaim {
         }
         let muls = &self.mul_trace.rows[0].muls;
         // Mul operands/results match the witnessed copies.
-        require_eq("lambda(dx).lhs", &muls[MUL_LAMBDA_DX as usize].trace.lhs, &self.lambda)?;
-        require_eq("lambda(dx).rhs", &muls[MUL_LAMBDA_DX as usize].trace.rhs, &self.dx)?;
-        require_eq("lambda^2.lhs", &muls[MUL_LAMBDA_SQUARED as usize].trace.lhs, &self.lambda)?;
-        require_eq("lambda^2.rhs", &muls[MUL_LAMBDA_SQUARED as usize].trace.rhs, &self.lambda)?;
-        require_eq("lambda^2.result", &muls[MUL_LAMBDA_SQUARED as usize].trace.result, &self.lamsq)?;
+        require_eq(
+            "lambda(dx).lhs",
+            &muls[MUL_LAMBDA_DX as usize].trace.lhs,
+            &self.lambda,
+        )?;
+        require_eq(
+            "lambda(dx).rhs",
+            &muls[MUL_LAMBDA_DX as usize].trace.rhs,
+            &self.dx,
+        )?;
+        require_eq(
+            "lambda^2.lhs",
+            &muls[MUL_LAMBDA_SQUARED as usize].trace.lhs,
+            &self.lambda,
+        )?;
+        require_eq(
+            "lambda^2.rhs",
+            &muls[MUL_LAMBDA_SQUARED as usize].trace.rhs,
+            &self.lambda,
+        )?;
+        require_eq(
+            "lambda^2.result",
+            &muls[MUL_LAMBDA_SQUARED as usize].trace.result,
+            &self.lamsq,
+        )?;
         require_eq("dx_inv.lhs", &muls[MUL_DX_INV as usize].trace.lhs, &self.dx)?;
-        require_eq("dx_inv.rhs", &muls[MUL_DX_INV as usize].trace.rhs, &self.dx_inv)?;
-        require_eq("x1_sq.lhs", &muls[MUL_X1_SQUARED as usize].trace.lhs, &self.r1.x)?;
-        require_eq("x1_sq.rhs", &muls[MUL_X1_SQUARED as usize].trace.rhs, &self.r1.x)?;
-        require_eq("x1_sq.result", &muls[MUL_X1_SQUARED as usize].trace.result, &self.x1_sq)?;
+        require_eq(
+            "dx_inv.rhs",
+            &muls[MUL_DX_INV as usize].trace.rhs,
+            &self.dx_inv,
+        )?;
+        require_eq(
+            "x1_sq.lhs",
+            &muls[MUL_X1_SQUARED as usize].trace.lhs,
+            &self.r1.x,
+        )?;
+        require_eq(
+            "x1_sq.rhs",
+            &muls[MUL_X1_SQUARED as usize].trace.rhs,
+            &self.r1.x,
+        )?;
+        require_eq(
+            "x1_sq.result",
+            &muls[MUL_X1_SQUARED as usize].trace.result,
+            &self.x1_sq,
+        )?;
 
         let r1_inf = self.r1.inf.0 == 1;
         let r2_inf = self.r2.inf.0 == 1;
         if r1_inf && r2_inf {
-            return Err(FinalAddError::BothInfinity { sig_id: self.sig_id.0 });
+            return Err(FinalAddError::BothInfinity {
+                sig_id: self.sig_id.0,
+            });
         }
 
         let modulus = P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_MODULUS));
@@ -355,7 +420,9 @@ impl FinalAddClaim {
         // r2p_y ≡ (−1)^d · r2.y (mod p). The add below uses r2p_y as the
         // second point's y, binding x(R_1 + (−1)^d R_2) = x(h_1 + h_2).
         if self.sign_b1.0 > 1 || self.sign_b2.0 > 1 {
-            return Err(FinalAddError::WitnessMismatch { field: "sign_bit_bool" });
+            return Err(FinalAddError::WitnessMismatch {
+                field: "sign_bit_bool",
+            });
         }
         if self.sign_d.0 != (self.sign_b1.0 ^ self.sign_b2.0) {
             return Err(FinalAddError::WitnessMismatch { field: "sign_d" });
@@ -379,10 +446,41 @@ impl FinalAddClaim {
                     &muls[MUL_DX_INV as usize].trace.result,
                     &P256M31BigInt::from_u256(&U256::from_le_u64s(&[1, 0, 0, 0])),
                 )?;
-                require_eq("p1==dy", &muls[MUL_LAMBDA_DX as usize].trace.result, &self.dy)?;
-                check_sub_reduction("dx", &self.dx, &self.r1.x, &self.r2.x, &modulus, self.dx_q, &self.dx_carries, self.sig_id.0)?;
-                check_sub_reduction("dy", &self.dy, &self.r1.y, &self.r2p_y, &modulus, self.dy_q, &self.dy_carries, self.sig_id.0)?;
-                check_x3_reduction(&self.x3, &self.r1.x, &self.r2.x, &self.lamsq, &modulus, self.x3_q, &self.x3_carries, self.sig_id.0)?;
+                require_eq(
+                    "p1==dy",
+                    &muls[MUL_LAMBDA_DX as usize].trace.result,
+                    &self.dy,
+                )?;
+                check_sub_reduction(
+                    "dx",
+                    &self.dx,
+                    &self.r1.x,
+                    &self.r2.x,
+                    &modulus,
+                    self.dx_q,
+                    &self.dx_carries,
+                    self.sig_id.0,
+                )?;
+                check_sub_reduction(
+                    "dy",
+                    &self.dy,
+                    &self.r1.y,
+                    &self.r2p_y,
+                    &modulus,
+                    self.dy_q,
+                    &self.dy_carries,
+                    self.sig_id.0,
+                )?;
+                check_x3_reduction(
+                    &self.x3,
+                    &self.r1.x,
+                    &self.r2.x,
+                    &self.lamsq,
+                    &modulus,
+                    self.x3_q,
+                    &self.x3_carries,
+                    self.sig_id.0,
+                )?;
             }
             FinalAddBranch::DoubleAdd => {
                 require_eq(
@@ -390,13 +488,41 @@ impl FinalAddClaim {
                     &muls[MUL_DX_INV as usize].trace.result,
                     &P256M31BigInt::from_u256(&U256::from_le_u64s(&[1, 0, 0, 0])),
                 )?;
-                require_eq("p1==numer", &muls[MUL_LAMBDA_DX as usize].trace.result, &self.dy)?;
+                require_eq(
+                    "p1==numer",
+                    &muls[MUL_LAMBDA_DX as usize].trace.result,
+                    &self.dy,
+                )?;
                 require_eq("x1==x2 (double)", &self.r1.x, &self.r2.x)?;
                 require_eq("y1==y2 (double)", &self.r1.y, &self.r2p_y)?;
-                check_two_y1_reduction(&self.dx, &self.r1.y, &modulus, self.dx_q, &self.dx_carries, self.sig_id.0)?;
-                check_slope_numer_reduction(&self.dy, &self.x1_sq, &three, &modulus, self.dy_q, &self.dy_carries, self.sig_id.0)?;
+                check_two_y1_reduction(
+                    &self.dx,
+                    &self.r1.y,
+                    &modulus,
+                    self.dx_q,
+                    &self.dx_carries,
+                    self.sig_id.0,
+                )?;
+                check_slope_numer_reduction(
+                    &self.dy,
+                    &self.x1_sq,
+                    &three,
+                    &modulus,
+                    self.dy_q,
+                    &self.dy_carries,
+                    self.sig_id.0,
+                )?;
                 // x2 = x1 here; reuse the x3 + x1 + x2 ≡ lamsq reduction.
-                check_x3_reduction(&self.x3, &self.r1.x, &self.r1.x, &self.lamsq, &modulus, self.x3_q, &self.x3_carries, self.sig_id.0)?;
+                check_x3_reduction(
+                    &self.x3,
+                    &self.r1.x,
+                    &self.r1.x,
+                    &self.lamsq,
+                    &modulus,
+                    self.x3_q,
+                    &self.x3_carries,
+                    self.sig_id.0,
+                )?;
             }
             FinalAddBranch::R1Only => {
                 // r2 = ∞, r1 finite ⇒ output S = r1, so x3 ≡ r1.x.
@@ -419,17 +545,42 @@ impl FinalAddClaim {
 pub enum FinalAddError {
     MulTraceShape,
     MulTrace(ProjectiveRcbAirError),
-    WitnessMismatch { field: &'static str },
+    WitnessMismatch {
+        field: &'static str,
+    },
     /// `R_1 = -R_2`: native sum is the point at infinity, an invalid ECDSA
     /// result. The AIR likewise rejects this branch.
-    InverseAdd { sig_id: u32 },
-    SlopeMismatch { sig_id: u32 },
-    ReductionFailed { which: &'static str, sig_id: u32 },
-    BothInfinity { sig_id: u32 },
-    QuotientOutOfRange { which: &'static str, q: i64 },
-    CarryOutOfRange { which: &'static str, limb: usize, carry: i64 },
-    ReductionMismatch { which: &'static str, limb: usize, value: i64 },
-    FinalCarryNonZero { which: &'static str, carry: i64 },
+    InverseAdd {
+        sig_id: u32,
+    },
+    SlopeMismatch {
+        sig_id: u32,
+    },
+    ReductionFailed {
+        which: &'static str,
+        sig_id: u32,
+    },
+    BothInfinity {
+        sig_id: u32,
+    },
+    QuotientOutOfRange {
+        which: &'static str,
+        q: i64,
+    },
+    CarryOutOfRange {
+        which: &'static str,
+        limb: usize,
+        carry: i64,
+    },
+    ReductionMismatch {
+        which: &'static str,
+        limb: usize,
+        value: i64,
+    },
+    FinalCarryNonZero {
+        which: &'static str,
+        carry: i64,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -567,10 +718,10 @@ fn try_x3_carries(
     let mut carries = [0i64; N_LIMBS];
     let mut prev = 0i64;
     for (i, carry) in carries.iter_mut().enumerate() {
-        let combined = i64::from(x3.limbs()[i].0) + i64::from(x1.limbs()[i].0)
-            + i64::from(x2.limbs()[i].0)
-            - i64::from(lamsq.limbs()[i].0)
-            - q * i64::from(m.limbs()[i].0);
+        let combined =
+            i64::from(x3.limbs()[i].0) + i64::from(x1.limbs()[i].0) + i64::from(x2.limbs()[i].0)
+                - i64::from(lamsq.limbs()[i].0)
+                - q * i64::from(m.limbs()[i].0);
         let total = combined + prev;
         if total % base != 0 {
             return None;
@@ -587,11 +738,7 @@ fn try_x3_carries(
 
 /// Doubling-branch: `dx + q·p ≡ 2·y1 (mod 2^256)` with `q ∈ {0, 1}` and final
 /// carry 0. (`dx = (2·y1) mod p`, with `2·y1 < 2p` so `q ∈ {0, 1}`.)
-fn solve_two_y1_reduction(
-    dx: &U256,
-    y1: &U256,
-    modulus: &U256,
-) -> Option<(i64, [i64; N_LIMBS])> {
+fn solve_two_y1_reduction(dx: &U256, y1: &U256, modulus: &U256) -> Option<(i64, [i64; N_LIMBS])> {
     let dx = P256M31BigInt::from_u256(dx);
     let y1 = P256M31BigInt::from_u256(y1);
     let m = P256M31BigInt::from_u256(modulus);
@@ -661,8 +808,7 @@ fn try_slope_numer_carries(
     for (i, carry) in carries.iter_mut().enumerate() {
         // dy[i] + 3·(i==0) + q·m[i] - 3·x1_sq[i] + prev = base·c[i]
         let three_at_zero = if i == 0 { 3i64 } else { 0i64 };
-        let combined = i64::from(dy.limbs()[i].0) + three_at_zero
-            + q * i64::from(m.limbs()[i].0)
+        let combined = i64::from(dy.limbs()[i].0) + three_at_zero + q * i64::from(m.limbs()[i].0)
             - 3 * i64::from(x1_sq.limbs()[i].0);
         let total = combined + prev;
         if total % base != 0 {
@@ -695,21 +841,32 @@ fn check_sub_reduction(
     }
     let base = 1i64 << LIMB_BITS;
     let mut prev = 0i64;
-    for i in 0..N_LIMBS {
+    for (i, carry_value) in carries.iter().copied().enumerate().take(N_LIMBS) {
         let combined = i64::from(value.limbs()[i].0) + i64::from(lo.limbs()[i].0)
             - i64::from(hi.limbs()[i].0)
             - q * i64::from(modulus.limbs()[i].0);
-        let total = combined + prev - base * carries[i];
+        let total = combined + prev - base * carry_value;
         if total != 0 {
-            return Err(FinalAddError::ReductionMismatch { which, limb: i, value: total });
+            return Err(FinalAddError::ReductionMismatch {
+                which,
+                limb: i,
+                value: total,
+            });
         }
-        if carries[i].abs() > projective_rcb_signed_carry_bound() {
-            return Err(FinalAddError::CarryOutOfRange { which, limb: i, carry: carries[i] });
+        if carry_value.abs() > projective_rcb_signed_carry_bound() {
+            return Err(FinalAddError::CarryOutOfRange {
+                which,
+                limb: i,
+                carry: carry_value,
+            });
         }
-        prev = carries[i];
+        prev = carry_value;
     }
     if carries[N_LIMBS - 1] != 0 {
-        return Err(FinalAddError::FinalCarryNonZero { which, carry: carries[N_LIMBS - 1] });
+        return Err(FinalAddError::FinalCarryNonZero {
+            which,
+            carry: carries[N_LIMBS - 1],
+        });
     }
     Ok(())
 }
@@ -731,22 +888,33 @@ fn check_x3_reduction(
     }
     let base = 1i64 << LIMB_BITS;
     let mut prev = 0i64;
-    for i in 0..N_LIMBS {
-        let combined = i64::from(x3.limbs()[i].0) + i64::from(x1.limbs()[i].0)
-            + i64::from(x2.limbs()[i].0)
-            - i64::from(lamsq.limbs()[i].0)
-            - q * i64::from(modulus.limbs()[i].0);
-        let total = combined + prev - base * carries[i];
+    for (i, carry_value) in carries.iter().copied().enumerate().take(N_LIMBS) {
+        let combined =
+            i64::from(x3.limbs()[i].0) + i64::from(x1.limbs()[i].0) + i64::from(x2.limbs()[i].0)
+                - i64::from(lamsq.limbs()[i].0)
+                - q * i64::from(modulus.limbs()[i].0);
+        let total = combined + prev - base * carry_value;
         if total != 0 {
-            return Err(FinalAddError::ReductionMismatch { which: "x3", limb: i, value: total });
+            return Err(FinalAddError::ReductionMismatch {
+                which: "x3",
+                limb: i,
+                value: total,
+            });
         }
-        if carries[i].abs() > projective_rcb_signed_carry_bound() {
-            return Err(FinalAddError::CarryOutOfRange { which: "x3", limb: i, carry: carries[i] });
+        if carry_value.abs() > projective_rcb_signed_carry_bound() {
+            return Err(FinalAddError::CarryOutOfRange {
+                which: "x3",
+                limb: i,
+                carry: carry_value,
+            });
         }
-        prev = carries[i];
+        prev = carry_value;
     }
     if carries[N_LIMBS - 1] != 0 {
-        return Err(FinalAddError::FinalCarryNonZero { which: "x3", carry: carries[N_LIMBS - 1] });
+        return Err(FinalAddError::FinalCarryNonZero {
+            which: "x3",
+            carry: carries[N_LIMBS - 1],
+        });
     }
     Ok(())
 }
@@ -762,24 +930,38 @@ fn check_two_y1_reduction(
 ) -> Result<(), FinalAddError> {
     let _ = sig_id;
     if !(0..=1).contains(&q) {
-        return Err(FinalAddError::QuotientOutOfRange { which: "dx_double", q });
+        return Err(FinalAddError::QuotientOutOfRange {
+            which: "dx_double",
+            q,
+        });
     }
     let base = 1i64 << LIMB_BITS;
     let mut prev = 0i64;
-    for i in 0..N_LIMBS {
+    for (i, carry_value) in carries.iter().copied().enumerate().take(N_LIMBS) {
         let combined = i64::from(dx.limbs()[i].0) + q * i64::from(modulus.limbs()[i].0)
             - 2 * i64::from(y1.limbs()[i].0);
-        let total = combined + prev - base * carries[i];
+        let total = combined + prev - base * carry_value;
         if total != 0 {
-            return Err(FinalAddError::ReductionMismatch { which: "dx_double", limb: i, value: total });
+            return Err(FinalAddError::ReductionMismatch {
+                which: "dx_double",
+                limb: i,
+                value: total,
+            });
         }
-        if carries[i].abs() > projective_rcb_signed_carry_bound() {
-            return Err(FinalAddError::CarryOutOfRange { which: "dx_double", limb: i, carry: carries[i] });
+        if carry_value.abs() > projective_rcb_signed_carry_bound() {
+            return Err(FinalAddError::CarryOutOfRange {
+                which: "dx_double",
+                limb: i,
+                carry: carry_value,
+            });
         }
-        prev = carries[i];
+        prev = carry_value;
     }
     if carries[N_LIMBS - 1] != 0 {
-        return Err(FinalAddError::FinalCarryNonZero { which: "dx_double", carry: carries[N_LIMBS - 1] });
+        return Err(FinalAddError::FinalCarryNonZero {
+            which: "dx_double",
+            carry: carries[N_LIMBS - 1],
+        });
     }
     Ok(())
 }
@@ -796,25 +978,40 @@ fn check_slope_numer_reduction(
 ) -> Result<(), FinalAddError> {
     let _ = sig_id;
     if !(0..=FINAL_ADD_QUOTIENT_BOUND).contains(&q) {
-        return Err(FinalAddError::QuotientOutOfRange { which: "dy_double", q });
+        return Err(FinalAddError::QuotientOutOfRange {
+            which: "dy_double",
+            q,
+        });
     }
     let base = 1i64 << LIMB_BITS;
     let mut prev = 0i64;
-    for i in 0..N_LIMBS {
-        let combined = i64::from(dy.limbs()[i].0) + i64::from(three.limbs()[i].0)
+    for (i, carry_value) in carries.iter().copied().enumerate().take(N_LIMBS) {
+        let combined = i64::from(dy.limbs()[i].0)
+            + i64::from(three.limbs()[i].0)
             + q * i64::from(modulus.limbs()[i].0)
             - 3 * i64::from(x1_sq.limbs()[i].0);
-        let total = combined + prev - base * carries[i];
+        let total = combined + prev - base * carry_value;
         if total != 0 {
-            return Err(FinalAddError::ReductionMismatch { which: "dy_double", limb: i, value: total });
+            return Err(FinalAddError::ReductionMismatch {
+                which: "dy_double",
+                limb: i,
+                value: total,
+            });
         }
-        if carries[i].abs() > projective_rcb_signed_carry_bound() {
-            return Err(FinalAddError::CarryOutOfRange { which: "dy_double", limb: i, carry: carries[i] });
+        if carry_value.abs() > projective_rcb_signed_carry_bound() {
+            return Err(FinalAddError::CarryOutOfRange {
+                which: "dy_double",
+                limb: i,
+                carry: carry_value,
+            });
         }
-        prev = carries[i];
+        prev = carry_value;
     }
     if carries[N_LIMBS - 1] != 0 {
-        return Err(FinalAddError::FinalCarryNonZero { which: "dy_double", carry: carries[N_LIMBS - 1] });
+        return Err(FinalAddError::FinalCarryNonZero {
+            which: "dy_double",
+            carry: carries[N_LIMBS - 1],
+        });
     }
     Ok(())
 }
@@ -863,8 +1060,12 @@ pub fn final_add_preprocessed_columns(
 pub fn final_add_preprocessed_column_ids(claim: &FinalAddClaim) -> Vec<PreProcessedColumnId> {
     let _ = claim;
     let mut ids = vec![range_check_value_column_id(RANGE13_BITS)];
-    ids.push(signed_carry_value_column_id(PROJECTIVE_RCB_SIGNED_CARRY_EQUATION));
-    ids.push(signed_carry_active_column_id(PROJECTIVE_RCB_SIGNED_CARRY_EQUATION));
+    ids.push(signed_carry_value_column_id(
+        PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
+    ));
+    ids.push(signed_carry_active_column_id(
+        PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
+    ));
     for layout in super::final_add_gamma_layouts() {
         ids.extend(crate::components::gamma_digest::gamma_tall_preprocessed_ids(layout.tag));
     }
@@ -933,7 +1134,9 @@ pub(crate) fn final_add_range13_uses(claim: &FinalAddClaim) -> Vec<M31> {
 }
 
 /// Signed-carry uses: the signed tall grid, decoded.
-pub(crate) fn final_add_signed_carry_uses(claim: &FinalAddClaim) -> Result<Vec<i64>, FinalAddError> {
+pub(crate) fn final_add_signed_carry_uses(
+    claim: &FinalAddClaim,
+) -> Result<Vec<i64>, FinalAddError> {
     let [_, signed] = super::final_add_gamma_instances(claim);
     Ok(signed
         .all_scheduled_values()
@@ -1049,12 +1252,7 @@ fn gen_check_base_trace(claim: &FinalAddClaim, log_size: u32) -> Vec<M31ColumnEv
         .collect()
 }
 
-fn write_point(
-    cols: &mut [Vec<M31>],
-    offset: &mut usize,
-    point: &PreparedAffinePoint,
-    row: usize,
-) {
+fn write_point(cols: &mut [Vec<M31>], offset: &mut usize, point: &PreparedAffinePoint, row: usize) {
     for limb in point.x.limbs() {
         cols[*offset][row] = *limb;
         *offset += 1;

@@ -7,9 +7,9 @@ use stwo::core::{
     ColumnVec,
 };
 use stwo::prover::backend::simd::{
-            m31::{PackedM31, LOG_N_LANES},
-            qm31::PackedQM31,
-        };
+    m31::{PackedM31, LOG_N_LANES},
+    qm31::PackedQM31,
+};
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{
     relation, EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation,

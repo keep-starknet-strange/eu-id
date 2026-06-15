@@ -549,8 +549,12 @@ fn read_product_metadata_base_copies<E: EvalAtRow>(
         eval.add_constraint(lhs_index[term].clone() - fixed.lhs_index[term].clone());
         eval.add_constraint(rhs_index[term].clone() - fixed.rhs_index[term].clone());
     }
-    for offset in 0..SCALAR_MOD_MUL_SPLIT_CHUNK_DIGITS {
-        eval.add_constraint(digit_active[offset].clone() - fixed.digit_active[offset].clone());
+    for (offset, digit_active) in digit_active
+        .iter()
+        .enumerate()
+        .take(SCALAR_MOD_MUL_SPLIT_CHUNK_DIGITS)
+    {
+        eval.add_constraint(digit_active.clone() - fixed.digit_active[offset].clone());
     }
 
     ProductMetadata {
@@ -1083,11 +1087,7 @@ mod tests {
         );
 
         assert!(
-            !ab_chunk_constraints_hold(
-                honest.ab_chunks.log_size,
-                &forged,
-                &schedule.ab_chunks,
-            ),
+            !ab_chunk_constraints_hold(honest.ab_chunks.log_size, &forged, &schedule.ab_chunks,),
             "forged top digit must be rejected by the boolean top-digit pin (C2)"
         );
     }

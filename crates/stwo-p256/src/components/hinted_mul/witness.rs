@@ -61,7 +61,10 @@ pub enum HintedMulWitnessError {
     /// A carry identity failed to divide exactly (internal invariant).
     CarryRemainder { identity: usize },
     /// The recomputed canonical result differs from the silo's stored result.
-    ResultMismatch { source_index: usize, mul_index: usize },
+    ResultMismatch {
+        source_index: usize,
+        mul_index: usize,
+    },
 }
 
 /// Full witness for one hinted mul. All limb vectors are little-endian 13-bit
@@ -94,8 +97,7 @@ impl HintedMulWitness {
         let a_value = u512_from_limbs13(a);
 
         let b_lo: [u32; HINTED_MUL_B_SPLIT] = core::array::from_fn(|i| b[i]);
-        let b_hi: [u32; HINTED_MUL_B_SPLIT] =
-            core::array::from_fn(|i| b[HINTED_MUL_B_SPLIT + i]);
+        let b_hi: [u32; HINTED_MUL_B_SPLIT] = core::array::from_fn(|i| b[HINTED_MUL_B_SPLIT + i]);
 
         // Identity 1: a · b_lo = q1 · p + m1.
         let n1 = u512_mul(&a_value, &u512_from_limbs13(&b_lo));
@@ -318,10 +320,16 @@ fn quotient_limbs(
     let used_bits: usize = value
         .iter()
         .enumerate()
-        .map(|(i, &w)| if w == 0 { 0 } else { 64 * i + (64 - w.leading_zeros() as usize) })
+        .map(|(i, &w)| {
+            if w == 0 {
+                0
+            } else {
+                64 * i + (64 - w.leading_zeros() as usize)
+            }
+        })
         .max()
         .unwrap_or(0);
-    if used_bits > LIMB_BITS as usize * HINTED_MUL_Q_LIMBS {
+    if used_bits > LIMB_BITS * HINTED_MUL_Q_LIMBS {
         return Err(HintedMulWitnessError::QuotientTooWide { identity });
     }
     Ok(to_array(u512_to_limbs13(value, HINTED_MUL_Q_LIMBS)))
@@ -362,9 +370,7 @@ mod tests {
             slack < M31_PRIME,
             "coefficient relation slack {slack} must stay below p_M31 {M31_PRIME}",
         );
-        // Honest carries must fit the committed split.
-        assert!(HINTED_MUL_H_BOUND <= HINTED_MUL_H_RANGE_MAX);
-        // And the documented numbers stay what the worksheet says. Note
+        // The documented numbers stay what the worksheet says. Note
         // MAX_C = (β−1)·(11·(β−1) + 1), so the honest carry bound is exact.
         assert_eq!(HINTED_MUL_MAX_COEFF, 738_025_482);
         assert_eq!(HINTED_MUL_H_BOUND, 90_102);
@@ -461,10 +467,8 @@ mod tests {
 
     #[test]
     fn witness_handles_edge_operands() {
-        let p_minus_1 = U256::from_le_u64s(&sub_words4(
-            &field_modulus().to_le_u64s(),
-            &[1, 0, 0, 0],
-        ));
+        let p_minus_1 =
+            U256::from_le_u64s(&sub_words4(&field_modulus().to_le_u64s(), &[1, 0, 0, 0]));
         for (a, b) in [
             (U256::ZERO, pseudo_random_value(7)),
             (pseudo_random_value(8), U256::ZERO),

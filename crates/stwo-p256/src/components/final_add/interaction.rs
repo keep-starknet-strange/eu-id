@@ -15,9 +15,7 @@ use stwo::prover::backend::simd::{
 use stwo_constraint_framework::{LogupTraceGenerator, Relation};
 
 use crate::limbs::P256M31BigInt;
-use crate::range_checks::{
-    RangeCheckClaim, RangeCheckInteractionClaim, RANGE13_BITS,
-};
+use crate::range_checks::{RangeCheckClaim, RangeCheckInteractionClaim, RANGE13_BITS};
 use crate::scalar::scalar_mod_mul::columns::M31ColumnEval;
 use stwo_p256_utils::constants::N_LIMBS;
 
@@ -86,8 +84,7 @@ pub fn gen_final_add_interaction_trace(
     columns.extend(check_interaction);
 
     // γ-digest tall expanders (range13 kind, signed kind).
-    let [gamma_range13_instance, gamma_signed_instance] =
-        super::final_add_gamma_instances(claim);
+    let [gamma_range13_instance, gamma_signed_instance] = super::final_add_gamma_instances(claim);
     let (gamma_range13_trace, gamma_range13_claim) =
         crate::components::gamma_digest::gen_gamma_tall_interaction_trace(
             &gamma_range13_instance,
@@ -185,7 +182,15 @@ fn gen_check_interaction_trace(
         col.finalize_col();
     }
     let (trace, check_sum) = logup.finalize_last();
-    (trace, check_sum, hint_sum, sign_sum, output_sum, mul_result_sum, gamma_yield_sum)
+    (
+        trace,
+        check_sum,
+        hint_sum,
+        sign_sum,
+        output_sum,
+        mul_result_sum,
+        gamma_yield_sum,
+    )
 }
 
 /// Check consumer/provider fractions, in the EXACT order `FinalAddCheckEval`
@@ -234,7 +239,10 @@ fn check_fraction_pairs(
     // 1b. sign consumes (same gate/numerator as the hint consume), binding the
     //     witnessed per-cert bit to the fake_glv_scalar provider. MUST mirror
     //     the AIR-eval emission order (right after the hint consumes).
-    for (cert_id, point, bit) in [(0u32, &claim.r1, claim.sign_b1), (1u32, &claim.r2, claim.sign_b2)] {
+    for (cert_id, point, bit) in [
+        (0u32, &claim.r1, claim.sign_b1),
+        (1u32, &claim.r2, claim.sign_b2),
+    ] {
         let numerator = if point.inf.0 == 1 {
             secure_zero()
         } else {
@@ -248,8 +256,7 @@ fn check_fraction_pairs(
 
     // 2. mul-result consumes (wide tuples against the hinted provider).
     let mut mul_result_sum = secure_zero();
-    let mul_source =
-        M31::from_u32_unchecked(claim.hinted_source_offset) + claim.sig_id;
+    let mul_source = M31::from_u32_unchecked(claim.hinted_source_offset) + claim.sig_id;
     let mut consume = |pairs: &mut Vec<(SecureField, SecureField)>,
                        mul_index: u32,
                        role: u32,
@@ -314,5 +321,12 @@ fn check_fraction_pairs(
         gamma_yield_sum += secure_from_i64(-1) / denom;
     }
 
-    (pairs, hint_sum, sign_sum, output_sum, mul_result_sum, gamma_yield_sum)
+    (
+        pairs,
+        hint_sum,
+        sign_sum,
+        output_sum,
+        mul_result_sum,
+        gamma_yield_sum,
+    )
 }

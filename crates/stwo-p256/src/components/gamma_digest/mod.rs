@@ -97,6 +97,7 @@ pub const fn gamma_padded_values(values_len: usize) -> usize {
 /// is the row's fixed use-column list in digest order; missing tail lanes are
 /// implicit zeros. The digest coordinates are built as degree-1 expressions of
 /// the value columns, so this adds one relation entry and nothing else.
+#[allow(clippy::too_many_arguments)]
 pub fn yield_gamma_digest<E: EvalAtRow>(
     eval: &mut E,
     relation: &GammaDigestRelation,
@@ -124,11 +125,7 @@ pub fn yield_gamma_digest<E: EvalAtRow>(
     tuple.push(E::F::from(M31::from_u32_unchecked(tag)));
     tuple.push(row_index);
     tuple.extend(coords);
-    eval.add_to_relation(RelationEntry::new(
-        relation,
-        -E::EF::from(presence),
-        &tuple,
-    ));
+    eval.add_to_relation(RelationEntry::new(relation, -E::EF::from(presence), &tuple));
 }
 
 /// Sum of the γ powers covering the lane-padding tail: `γ^0 + … + γ^(P−L−1)`.
@@ -157,7 +154,11 @@ pub fn gamma_digest_of_values(
 }
 
 /// Gen-side `(tag, row_index, d0..d3)` tuple matching [`yield_gamma_digest`].
-pub fn gamma_digest_tuple(tag: u32, row_index: M31, digest: SecureField) -> [M31; GAMMA_DIGEST_RELATION_ARITY] {
+pub fn gamma_digest_tuple(
+    tag: u32,
+    row_index: M31,
+    digest: SecureField,
+) -> [M31; GAMMA_DIGEST_RELATION_ARITY] {
     let coords = digest.to_m31_array();
     [
         M31::from_u32_unchecked(tag),
@@ -299,7 +300,7 @@ pub fn gen_gamma_tall_preprocessed_trace(layout: &GammaTallLayout) -> Vec<M31Col
     let mut in_group = vec![M31::from_u32_unchecked(0); rows];
     for row in 0..layout.active_rows() {
         row_id[row] = M31::from_u32_unchecked((row / g) as u32);
-        start[row] = M31::from_u32_unchecked(u32::from(row % g == 0));
+        start[row] = M31::from_u32_unchecked(u32::from(row.is_multiple_of(g)));
         end[row] = M31::from_u32_unchecked(u32::from(row % g == g - 1));
         in_group[row] = M31::from_u32_unchecked(1);
     }
@@ -326,10 +327,7 @@ pub fn gen_gamma_tall_base_trace(instance: &GammaTallInstance) -> Vec<M31ColumnE
 /// Per active row (contiguous coset rows from 0, flagged by base column 0),
 /// the values at the given base columns — a component's digest groups, keyed
 /// by the preprocessed row index.
-pub fn gamma_collect_group_values(
-    base: &[M31ColumnEval],
-    columns: &[usize],
-) -> Vec<Vec<M31>> {
+pub fn gamma_collect_group_values(base: &[M31ColumnEval], columns: &[usize]) -> Vec<Vec<M31>> {
     let log_size = base[0].domain.log_size();
     let rows = 1usize << log_size;
     let mut groups = Vec::new();
@@ -425,8 +423,8 @@ impl FrameworkEval for GammaTallEval {
         let gamma_k = E::EF::from(self.challenge.power(GAMMA_DIGEST_LANES));
         let mut expected = E::EF::from(one - start) * acc_prev * gamma_k;
         for (j, value) in values.iter().enumerate() {
-            expected = expected
-                + E::EF::from(self.challenge.power(GAMMA_DIGEST_LANES - 1 - j)) * value.clone();
+            expected +=
+                E::EF::from(self.challenge.power(GAMMA_DIGEST_LANES - 1 - j)) * value.clone();
         }
         eval.add_constraint(acc - expected);
 
@@ -436,7 +434,7 @@ impl FrameworkEval for GammaTallEval {
             eval.add_to_relation(RelationEntry::new(
                 &self.range,
                 E::EF::from(in_group.clone()),
-                &[value.clone()],
+                std::slice::from_ref(value),
             ));
         }
         // Digest use at the group end: acc must equal the wide row's digest.
@@ -489,10 +487,8 @@ pub fn gen_gamma_tall_interaction_trace(
     let gamma_k = challenge.power(GAMMA_DIGEST_LANES);
     let mut acc = vec![zero; rows];
     for row in 0..rows {
-        let prev = if row % g == 0 && row < layout.active_rows() {
+        let prev = if row == 0 || (row.is_multiple_of(g) && row < layout.active_rows()) {
             zero // group start: (1 − start) kills the chain term
-        } else if row == 0 {
-            zero
         } else {
             acc[row - 1]
         };
@@ -507,7 +503,9 @@ pub fn gen_gamma_tall_interaction_trace(
         .map(|coord| {
             m31_column_eval(
                 log_size,
-                acc.iter().map(|value| value.to_m31_array()[coord]).collect(),
+                acc.iter()
+                    .map(|value| value.to_m31_array()[coord])
+                    .collect(),
             )
         })
         .collect();
@@ -586,10 +584,7 @@ pub fn gen_gamma_tall_interaction_trace(
     let (logup_trace, claimed_sum) = logup.finalize_last();
     trace.extend(logup_trace);
 
-    (
-        trace,
-        GammaTallInteractionClaim { claimed_sum },
-    )
+    (trace, GammaTallInteractionClaim { claimed_sum })
 }
 
 /// Tall-side digest use sum, recomputed from the instance and relation for
@@ -670,7 +665,11 @@ mod tests {
         // 3 groups of 11 values (K=8 -> 2 rows/group, 5 padding lanes), with a
         // nonzero pad value to exercise the constant tail term.
         let group_values = (0..3u32)
-            .map(|g| (0..11u32).map(|i| m31((g * 977 + 13 * i + 7) % 8192)).collect())
+            .map(|g| {
+                (0..11u32)
+                    .map(|i| m31((g * 977 + 13 * i + 7) % 8192))
+                    .collect()
+            })
             .collect();
         GammaTallInstance::new(tag, 11, m31(3), group_values)
     }
@@ -750,8 +749,9 @@ mod tests {
         tree_builder.extend_evals(interaction);
         tree_builder.finalize_interaction();
 
-        let mut allocator =
-            TraceLocationAllocator::new_with_preprocessed_columns(&gamma_tall_preprocessed_ids(tag));
+        let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(
+            &gamma_tall_preprocessed_ids(tag),
+        );
         let component = GammaTallComponent::new(
             &mut allocator,
             GammaTallEval {

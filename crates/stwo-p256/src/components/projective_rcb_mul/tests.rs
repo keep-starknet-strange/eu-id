@@ -43,7 +43,6 @@ fn one_row_trace(op: ProjectiveEcOp, rhs: PreparedAffinePoint) -> ProjectiveEcTr
     }
 }
 
-
 #[test]
 fn projective_rcb_air_rows_verify_double() {
     let trace = one_row_trace(ProjectiveEcOp::Double, PreparedAffinePoint::infinity());

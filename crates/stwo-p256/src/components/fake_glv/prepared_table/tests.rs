@@ -47,17 +47,14 @@ fn build_table(
     let public_claim = PublicEcdsaInputClaim::from_inputs(&[test_input(message_hash, 77, 1)]);
     let scalar_setup =
         ScalarSetupClaim::from_public_inputs(&public_claim).expect("valid scalar setup");
-    let certs =
-        CertScalarInputClaim::from_scalar_setup(&scalar_setup).expect("valid cert inputs");
+    let certs = CertScalarInputClaim::from_scalar_setup(&scalar_setup).expect("valid cert inputs");
     let hints = certs
         .rows
         .iter()
         .map(|row| FakeGlvScalarHint::trivial_for_small_scalar(&row.scalar).unwrap())
         .collect();
-    let fake_glv =
-        FakeGlvScalarHintClaim::from_cert_inputs(&certs, hints).expect("valid hints");
-    let selectors =
-        FakeGlvSelectorClaim::from_scalar_hints(&fake_glv).expect("valid selectors");
+    let fake_glv = FakeGlvScalarHintClaim::from_cert_inputs(&certs, hints).expect("valid hints");
+    let selectors = FakeGlvSelectorClaim::from_scalar_hints(&fake_glv).expect("valid selectors");
     let table =
         PreparedTableClaim::from_claims(&certs, &fake_glv, &selectors).expect("valid table");
     (certs, fake_glv, selectors, table)
@@ -143,9 +140,8 @@ fn prepared_table_ec_trace_skips_inactive_zero_branch() {
 #[test]
 fn prepared_table_ec_trace_detects_mutated_output() {
     let (certs, fake_glv, selectors, table) = build_table(42);
-    let mut trace =
-        PreparedTableEcTraceClaim::from_claims(&certs, &fake_glv, &selectors, &table)
-            .expect("valid ec trace");
+    let mut trace = PreparedTableEcTraceClaim::from_claims(&certs, &fake_glv, &selectors, &table)
+        .expect("valid ec trace");
     trace.rows[0].output = PreparedAffinePoint::infinity();
 
     let err = trace.verify().expect_err("mutated output must fail");
@@ -275,17 +271,11 @@ fn pinned_relation_balances(
     let canonical = PreparedTableCanonicalRelation::draw(&mut channel);
 
     let cert_claim = CertScalarInputAirProofClaim::from_claim(scalar_setup);
-    let cert_base_trace =
-        gen_cert_scalar_input_air_base_trace(scalar_setup, certs, cert_claim);
-    let cert_sums =
-        debug_cert_scalar_input_air_relation_sums(&cert_base_trace, Some(&cert_base));
+    let cert_base_trace = gen_cert_scalar_input_air_base_trace(scalar_setup, certs, cert_claim);
+    let cert_sums = debug_cert_scalar_input_air_relation_sums(&cert_base_trace, Some(&cert_base));
 
-    let (_, cert_base_consumer, canonical_claimed) = debug_prepared_table_pinned_relation_sums(
-        ec_base,
-        &prepared_table,
-        &cert_base,
-        &canonical,
-    );
+    let (_, cert_base_consumer, canonical_claimed) =
+        debug_prepared_table_pinned_relation_sums(ec_base, &prepared_table, &cert_base, &canonical);
 
     (
         cert_base_consumer + cert_sums.cert_base_provider_claimed_sum,
@@ -302,21 +292,17 @@ fn pinning_audit_fixture(
     u32,
 ) {
     use crate::scalar::setup_air::ScalarSetupClaim;
-    let public_claim =
-        PublicEcdsaInputClaim::from_inputs(&[test_input(message_hash, 77, 1)]);
+    let public_claim = PublicEcdsaInputClaim::from_inputs(&[test_input(message_hash, 77, 1)]);
     let scalar_setup =
         ScalarSetupClaim::from_public_inputs(&public_claim).expect("valid scalar setup");
-    let certs =
-        CertScalarInputClaim::from_scalar_setup(&scalar_setup).expect("valid cert inputs");
+    let certs = CertScalarInputClaim::from_scalar_setup(&scalar_setup).expect("valid cert inputs");
     let hints = certs
         .rows
         .iter()
         .map(|row| FakeGlvScalarHint::trivial_for_small_scalar(&row.scalar).unwrap())
         .collect();
-    let fake_glv =
-        FakeGlvScalarHintClaim::from_cert_inputs(&certs, hints).expect("valid hints");
-    let selectors =
-        FakeGlvSelectorClaim::from_scalar_hints(&fake_glv).expect("valid selectors");
+    let fake_glv = FakeGlvScalarHintClaim::from_cert_inputs(&certs, hints).expect("valid hints");
+    let selectors = FakeGlvSelectorClaim::from_scalar_hints(&fake_glv).expect("valid selectors");
     let table =
         PreparedTableClaim::from_claims(&certs, &fake_glv, &selectors).expect("valid table");
     let trace = PreparedTableEcTraceClaim::from_claims(&certs, &fake_glv, &selectors, &table)
@@ -383,7 +369,11 @@ fn pinning_rejects_cert0_prepared_p_not_equal_generator() {
     // from G leaves the CertBase consumer demanding a point the cert-base
     // provider never yields.
     let (certs, scalar_setup, mut trace, log_size) = pinning_audit_fixture(42);
-    let row = find_row_index(&trace, CERT_ID_U1_GENERATOR, PreparedTableEcRowKind::Base(1));
+    let row = find_row_index(
+        &trace,
+        CERT_ID_U1_GENERATOR,
+        PreparedTableEcRowKind::Base(1),
+    );
     bump_x(&mut trace.rows[row].lhs);
     let base = gen_prepared_table_ec_row_base_trace(&trace, log_size).unwrap();
     let (cert_base_balance, _) = pinned_relation_balances(&certs, &base, &scalar_setup);
@@ -399,7 +389,11 @@ fn pinning_rejects_cert1_prepared_p_not_equal_public_key() {
     // cert1 base must equal the public key Q; mutating a cert1 P-cell
     // (Base(2).lhs) away from Q imbalances CertBase.
     let (certs, scalar_setup, mut trace, log_size) = pinning_audit_fixture(42);
-    let row = find_row_index(&trace, CERT_ID_U2_PUBLIC_KEY, PreparedTableEcRowKind::Base(2));
+    let row = find_row_index(
+        &trace,
+        CERT_ID_U2_PUBLIC_KEY,
+        PreparedTableEcRowKind::Base(2),
+    );
     bump_x(&mut trace.rows[row].lhs);
     let base = gen_prepared_table_ec_row_base_trace(&trace, log_size).unwrap();
     let (cert_base_balance, _) = pinned_relation_balances(&certs, &base, &scalar_setup);
@@ -416,7 +410,11 @@ fn pinning_rejects_inconsistent_r_between_base_rows() {
     // Base(2).rhs makes it demand an R the DoubleR provider never yields,
     // imbalancing PreparedTableCanonical.
     let (certs, scalar_setup, mut trace, log_size) = pinning_audit_fixture(42);
-    let row = find_row_index(&trace, CERT_ID_U2_PUBLIC_KEY, PreparedTableEcRowKind::Base(2));
+    let row = find_row_index(
+        &trace,
+        CERT_ID_U2_PUBLIC_KEY,
+        PreparedTableEcRowKind::Base(2),
+    );
     bump_x(&mut trace.rows[row].rhs);
     let base = gen_prepared_table_ec_row_base_trace(&trace, log_size).unwrap();
     let (_, canonical_balance) = pinned_relation_balances(&certs, &base, &scalar_setup);
@@ -535,11 +533,9 @@ fn prepared_table_projective_source_rejects_forged_op_outputs() {
     let trace = PreparedTableEcTraceClaim::from_claims(&certs, &fake_glv, &selectors, &table)
         .expect("valid ec trace");
     let fake_glv_ec = crate::fake_glv_chain::FakeGlvPrimitiveEcTraceClaim { rows: Vec::new() };
-    let projective = crate::projective::ProjectiveEcTraceClaim::from_native_traces(
-        &trace,
-        &fake_glv_ec,
-    )
-    .expect("projective trace generates");
+    let projective =
+        crate::projective::ProjectiveEcTraceClaim::from_native_traces(&trace, &fake_glv_ec)
+            .expect("projective trace generates");
     let log_size = padded_log_size(trace.rows.len());
     let base: Vec<Vec<M31>> =
         gen_prepared_table_projective_source_base_trace(&trace, &projective, log_size)
@@ -598,8 +594,7 @@ fn prepared_table_projective_source_rejects_forged_op_outputs() {
             })
             .unwrap_or_else(|| panic!("table must contain an active {op_name} row"));
         let mut forged = base.clone();
-        forged[output_x0_col][forge_row] =
-            forged[output_x0_col][forge_row] + M31::from_u32_unchecked(1);
+        forged[output_x0_col][forge_row] += M31::from_u32_unchecked(1);
         assert_ne!(
             consumer_mul_sum(&forged),
             honest_mul_sum,

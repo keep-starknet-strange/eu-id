@@ -518,12 +518,7 @@ pub(crate) fn gen_fake_glv_selector_air_interaction_trace(
     }
     col.finalize_col();
     let (trace, claimed_sum) = logup.finalize_last();
-    (
-        trace,
-        FakeGlvSelectorAirInteractionClaim {
-            claimed_sum,
-        },
-    )
+    (trace, FakeGlvSelectorAirInteractionClaim { claimed_sum })
 }
 
 /// Constrain the selector reconstruction for an ARBITRARY fake-GLV
@@ -645,13 +640,17 @@ fn constrain_selector_from_scalar<E: EvalAtRow>(
 
     eval.add_constraint(
         row.cert_active.clone()
-            * (row.selector_final.clone() - five.clone() - row.s1_msb.clone()
+            * (row.selector_final.clone()
+                - five.clone()
+                - row.s1_msb.clone()
                 - four.clone() * row.s2_msb.clone()),
     );
     eval.add_constraint(inactive.clone() * row.selector_final.clone());
     eval.add_constraint(
         row.cert_active.clone()
-            * (row.init_base_index.clone() - two.clone() - row.s1_msb.clone()
+            * (row.init_base_index.clone()
+                - two.clone()
+                - row.s1_msb.clone()
                 - four * row.s2_msb.clone()),
     );
     eval.add_constraint(inactive * row.init_base_index.clone());
@@ -1217,8 +1216,7 @@ mod tests {
         let scalars = FakeGlvScalarHintClaim {
             rows: vec![scalar_row],
         };
-        let selectors =
-            FakeGlvSelectorClaim::from_scalar_hints(&scalars).expect("selectors build");
+        let selectors = FakeGlvSelectorClaim::from_scalar_hints(&scalars).expect("selectors build");
         selectors.verify(&scalars).expect("native verify");
 
         let proof_claim = FakeGlvSelectorAirProofClaim {
@@ -1242,7 +1240,7 @@ mod tests {
         // `SCALAR_RELATION_S2_START`, i.e. base column `1 + SCALAR_RELATION_S2_START`.
         let s2_limb_col = 1 + SCALAR_RELATION_S2_START;
         let mut forged = base.clone();
-        forged[s2_limb_col][0] = forged[s2_limb_col][0] + M31::from_u32_unchecked(1);
+        forged[s2_limb_col][0] += M31::from_u32_unchecked(1);
         assert!(
             !selector_air_constraints_hold(&forged, log_size),
             "forged s2_abs limb must be rejected by the s2 reconstruction chain"
