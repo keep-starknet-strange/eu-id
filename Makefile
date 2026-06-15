@@ -36,7 +36,7 @@ help:
 	@echo "  make dev           watch sources and re-run cargo check (uses cargo-watch)"
 	@echo "  make build         compile the whole workspace"
 	@echo "  make run           run the demo prover CLI"
-	@echo "  make test          run the workspace test suite"
+	@echo "  make test          run the workspace test suite in release mode"
 	@echo "  make check         clippy + rustfmt — identical to the CI lint step"
 	@echo "  make fmt           apply rustfmt across the workspace"
 	@echo "  make bench             laptop criterion benchmark suite"
@@ -79,7 +79,7 @@ run:
 	fi
 
 test:
-	cargo test --workspace
+	cargo test --workspace --release
 
 check:
 	@bash scripts/check.sh
