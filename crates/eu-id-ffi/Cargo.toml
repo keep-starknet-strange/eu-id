@@ -11,6 +11,10 @@ edition = "2021"
 name = "eu_id_ffi"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# Pass through to multi-threaded Stwo proving (rayon). Off by default.
+parallel = ["stwo-sha256/parallel"]
+
 [dependencies]
 stwo-sha256 = { path = "../stwo-sha256" }
 # Peak-footprint sampler. On Apple `physical_mem` resolves to mach

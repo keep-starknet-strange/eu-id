@@ -6,6 +6,10 @@ edition = "2021"
 [features]
 default = ["std"]
 std = ["stwo/std", "stwo-constraint-framework/std"]
+# Multi-threaded proving via Stwo's rayon paths. Off by default (the prover
+# is single-threaded without it). Enables the M4 Max's many cores on the
+# laptop and the phone's performance cores on-device.
+parallel = ["stwo/parallel", "stwo-constraint-framework/parallel"]
 
 [dependencies]
 stwo = { git = "https://github.com/starkware-libs/stwo.git", features = ["prover"] }
