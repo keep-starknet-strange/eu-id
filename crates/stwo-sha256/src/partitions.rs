@@ -88,10 +88,10 @@ pub const SIGMA0_GROUPS: RoundGroups = RoundGroups {
         &[28, 29, 30, 31],     // H1  (4 bits)
     ],
     s_complement: [
-        &[2, 3, 4, 5, 6],       // L1  (5 bits)
-        &[12, 13, 14, 15],      // L2  (4 bits)
-        &[16, 17],              // H2a (2 bits)
-        &[23, 24, 25, 26, 27],  // H2b (5 bits)
+        &[2, 3, 4, 5, 6],      // L1  (5 bits)
+        &[12, 13, 14, 15],     // L2  (4 bits)
+        &[16, 17],             // H2a (2 bits)
+        &[23, 24, 25, 26, 27], // H2b (5 bits)
     ],
 };
 
@@ -727,8 +727,7 @@ mod tests {
                 let key_s_built = (0..4).map(|i| coeffs[i] * packed[i]).sum::<u32>();
                 assert_eq!(key_s_built, pack_half_key(w, s_mask), "{w:#x} S-side");
                 // S'-side reassembly: Σ_{i in 4..8} c[i]·g[i].
-                let key_s_complement_built =
-                    (4..8).map(|i| coeffs[i] * packed[i]).sum::<u32>();
+                let key_s_complement_built = (4..8).map(|i| coeffs[i] * packed[i]).sum::<u32>();
                 assert_eq!(
                     key_s_complement_built,
                     pack_half_key(w, !s_mask),
