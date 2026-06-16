@@ -8,6 +8,7 @@ default = ["std"]
 std = ["stwo/std", "stwo-constraint-framework/std"]
 
 [dependencies]
+air-core = { path = "../air-core" }
 stwo = { workspace = true, features = ["parallel"] }
 stwo-constraint-framework = { workspace = true, features = ["parallel"] }
 stwo-p256-utils = { path = "../stwo-p256-utils" }

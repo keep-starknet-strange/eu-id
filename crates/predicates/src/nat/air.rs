@@ -5,19 +5,36 @@
 //! (verifier side). Both share the same transcript binding, layout, and
 //! component assembly via the [`Air`] trait.
 
-use air_core::{Air, AirProver, TreeLayout};
-use crate::nat::components::components;
+use crate::nat::components::{components, preprocessed_column_ids};
+use crate::nat::eval::NationalityComponent;
 use crate::nat::interaction::InteractionTraces;
 use crate::nat::lookup_elements::LookupElements;
 use crate::nat::preprocessed::Preprocessed;
+use crate::nat::table::NatTableComponent;
 use crate::nat::types::{PublicInput, Witness};
 use crate::nat::witness::WitnessData;
+use air_core::{Air, AirProver, TreeLayout};
 use stwo::core::air::Component;
 use stwo::core::channel::Blake2sChannel;
 use stwo::core::fields::qm31::QM31;
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::{ComponentProver, TreeBuilder};
+use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
+use stwo_constraint_framework::TraceLocationAllocator;
+
+/// The nationality predicate's two components, in commit order.
+type NatComponents = (NationalityComponent, NatTableComponent);
+
+/// Borrow the built components as `dyn Component`, in commit order.
+fn component_refs(c: &NatComponents) -> Vec<&dyn Component> {
+    vec![&c.0, &c.1]
+}
+
+/// Borrow the built components as `dyn ComponentProver`, in commit order.
+fn prover_component_refs(c: &NatComponents) -> Vec<&dyn ComponentProver<SimdBackend>> {
+    vec![&c.0, &c.1]
+}
 
 /// Column layout shared by both prover and verifier: it depends only on the
 /// public input, never on the witness.
@@ -43,6 +60,7 @@ pub struct NatProver {
     witness_data: WitnessData,
     lookup_elements: Option<LookupElements>,
     claimed_sums: Vec<QM31>,
+    components: Option<NatComponents>,
 }
 
 impl NatProver {
@@ -53,6 +71,7 @@ impl NatProver {
             witness_data: WitnessData::new(witness, public),
             lookup_elements: None,
             claimed_sums: Vec::new(),
+            components: None,
         }
     }
 
@@ -60,6 +79,12 @@ impl NatProver {
         self.lookup_elements
             .as_ref()
             .expect("relations are drawn before they are used")
+    }
+
+    fn built_components(&self) -> &NatComponents {
+        self.components
+            .as_ref()
+            .expect("components are built before they are borrowed")
     }
 }
 
@@ -80,14 +105,22 @@ impl Air for NatProver {
         self.claimed_sums.clone()
     }
 
-    fn components(&self) -> Vec<Box<dyn Component>> {
-        let (nat, table) = components(
+    fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
+        preprocessed_column_ids(&self.public)
+    }
+
+    fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
+        self.components = Some(components(
+            allocator,
             &self.public,
             self.relations().clone(),
             self.claimed_sums[0],
             self.claimed_sums[1],
-        );
-        vec![Box::new(nat), Box::new(table)]
+        ));
+    }
+
+    fn components(&self) -> Vec<&dyn Component> {
+        component_refs(self.built_components())
     }
 }
 
@@ -111,14 +144,8 @@ impl AirProver for NatProver {
         self.claimed_sums = vec![interaction.nat_claimed_sum, interaction.table_claimed_sum];
     }
 
-    fn prover_components(&self) -> Vec<Box<dyn ComponentProver<SimdBackend>>> {
-        let (nat, table) = components(
-            &self.public,
-            self.relations().clone(),
-            self.claimed_sums[0],
-            self.claimed_sums[1],
-        );
-        vec![Box::new(nat), Box::new(table)]
+    fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
+        prover_component_refs(self.built_components())
     }
 }
 
@@ -128,6 +155,7 @@ pub struct NatVerifier {
     public: PublicInput,
     lookup_elements: Option<LookupElements>,
     claimed_sums: Vec<QM31>,
+    components: Option<NatComponents>,
 }
 
 impl NatVerifier {
@@ -136,7 +164,20 @@ impl NatVerifier {
             public: public.clone(),
             lookup_elements: None,
             claimed_sums: vec![nat_claimed_sum, table_claimed_sum],
+            components: None,
         }
+    }
+
+    fn relations(&self) -> &LookupElements {
+        self.lookup_elements
+            .as_ref()
+            .expect("relations are drawn before they are used")
+    }
+
+    fn built_components(&self) -> &NatComponents {
+        self.components
+            .as_ref()
+            .expect("components are built before they are borrowed")
     }
 }
 
@@ -157,17 +198,21 @@ impl Air for NatVerifier {
         self.claimed_sums.clone()
     }
 
-    fn components(&self) -> Vec<Box<dyn Component>> {
-        let lookup_elements = self
-            .lookup_elements
-            .clone()
-            .expect("relations are drawn before they are used");
-        let (nat, table) = components(
+    fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
+        preprocessed_column_ids(&self.public)
+    }
+
+    fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
+        self.components = Some(components(
+            allocator,
             &self.public,
-            lookup_elements,
+            self.relations().clone(),
             self.claimed_sums[0],
             self.claimed_sums[1],
-        );
-        vec![Box::new(nat), Box::new(table)]
+        ));
+    }
+
+    fn components(&self) -> Vec<&dyn Component> {
+        component_refs(self.built_components())
     }
 }

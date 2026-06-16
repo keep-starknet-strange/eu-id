@@ -23,6 +23,7 @@ version = "0.1.0"
 dependencies = [
  "num-traits",
  "stwo",
+ "stwo-constraint-framework",
 ]
 
 [[package]]
@@ -1502,6 +1503,7 @@ dependencies = [
 name = "stwo-p256"
 version = "0.1.0"
 dependencies = [
+ "air-core",
  "ecdsa",
  "hex",
  "itertools 0.12.1",
