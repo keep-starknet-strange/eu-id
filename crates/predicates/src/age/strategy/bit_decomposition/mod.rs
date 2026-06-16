@@ -11,7 +11,7 @@ use crate::age::strategy::bit_decomposition::air::{
     BitDecompositionProver, BitDecompositionVerifier,
 };
 use crate::age::types::{AgeBitDecompositionProof, DateOfBirth, Error, PublicInput};
-use crate::air::{prove, verify, Air};
+use air_core::{prove, verify, Air};
 use crate::predicate::{PredicateProver, PredicateVerifier};
 use stwo::core::fields::qm31::QM31;
 use stwo::core::pcs::PcsConfig;

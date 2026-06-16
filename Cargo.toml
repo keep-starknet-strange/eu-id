@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/air-core",
     "crates/stwo-p256",
     "crates/stwo-p256-utils",
     "crates/stwo-sha256",

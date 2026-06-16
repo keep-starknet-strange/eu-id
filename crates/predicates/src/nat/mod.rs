@@ -12,7 +12,7 @@ pub mod witness;
 use air::{NatProver, NatVerifier};
 use types::{Error, InputError, PrivateInput, Proof, PublicInput, Witness};
 
-use crate::air::{prove, verify, Air};
+use air_core::{prove, verify, Air};
 use crate::nat::nationalities::Nationality;
 use crate::predicate::{PredicateProver, PredicateVerifier};
 use strum::IntoEnumIterator;

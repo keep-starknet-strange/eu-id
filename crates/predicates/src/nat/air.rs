@@ -5,7 +5,7 @@
 //! (verifier side). Both share the same transcript binding, layout, and
 //! component assembly via the [`Air`] trait.
 
-use crate::air::{Air, AirProver, TreeLayout};
+use air_core::{Air, AirProver, TreeLayout};
 use crate::nat::components::components;
 use crate::nat::interaction::InteractionTraces;
 use crate::nat::lookup_elements::LookupElements;
