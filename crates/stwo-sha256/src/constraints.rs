@@ -50,9 +50,9 @@ use stwo_constraint_framework::{
 use crate::components::is_first_row_column_id;
 use crate::constants::{IV, K, N_ROUNDS, N_STATE_WORDS};
 use crate::partitions::{
-    lower_sigma_key_hi_coeff_s, lower_sigma_key_hi_coeff_s_complement, round_key_coeffs,
-    GROUPS_PER_ROUND_PARTITION, LOWER_SIGMA0_PARTS, LOWER_SIGMA1_PARTS, SIGMA0_GROUPS,
-    SIGMA1_GROUPS,
+    lower_sigma_key_hi_coeff_s, lower_sigma_key_hi_coeff_s_complement, round_groups_half_indices,
+    round_key_coeffs, GROUPS_PER_ROUND_PARTITION, LOWER_SIGMA0_PARTS, LOWER_SIGMA1_PARTS,
+    SIGMA0_GROUPS, SIGMA1_GROUPS,
 };
 use crate::relations::Sha256Relations;
 use crate::trace::ROUND_MAJ_CH_OPERANDS;
@@ -149,9 +149,20 @@ impl FrameworkEval for Sha256Eval {
             eval.add_constraint(is_first_block.clone() * (hi.clone() - iv_hi));
         }
 
+        // Per-partition lo/hi half projections onto `groups_in_order()`
+        // (length 4 each under the W=6 partition). The round-side
+        // split-and-pack lookup keys the lo-half table on the groups at
+        // `*_lo_idx` and the hi-half table on those at `*_hi_idx`. Computed
+        // once per evaluate; both the constraint side (below) and the
+        // prover's multiplicity emitter (`interaction::write_block_lookups`)
+        // derive the same projection from `round_groups_half_indices`, so
+        // the LogUp tuples line up cell-for-cell.
+        let (sigma0_lo_idx, sigma0_hi_idx) = round_groups_half_indices(&SIGMA0_GROUPS);
+        let (sigma1_lo_idx, sigma1_hi_idx) = round_groups_half_indices(&SIGMA1_GROUPS);
+
         // ---- §8.1 reuse chain initial splits ----
         //
-        // 4 operands × 6 groups, in the fixed `[b_init, c_init, f_init,
+        // 4 operands × 8 groups, in the fixed `[b_init, c_init, f_init,
         // g_init]` order matching [`crate::trace::write_h_in_aux_grp`].
         // Each operand is the a-side / e-side split-and-pack of a specific
         // `h_in[j]` and gets pinned to that limb pair by the corresponding
@@ -173,6 +184,8 @@ impl FrameworkEval for Sha256Eval {
             enabler.clone(),
             &h_in[1],
             &b_init,
+            &sigma0_lo_idx,
+            &sigma0_hi_idx,
             &self.relations.split_pack.sigma0_lo,
             &self.relations.split_pack.sigma0_hi,
         );
@@ -181,6 +194,8 @@ impl FrameworkEval for Sha256Eval {
             enabler.clone(),
             &h_in[2],
             &c_init,
+            &sigma0_lo_idx,
+            &sigma0_hi_idx,
             &self.relations.split_pack.sigma0_lo,
             &self.relations.split_pack.sigma0_hi,
         );
@@ -189,6 +204,8 @@ impl FrameworkEval for Sha256Eval {
             enabler.clone(),
             &h_in[5],
             &f_init,
+            &sigma1_lo_idx,
+            &sigma1_hi_idx,
             &self.relations.split_pack.sigma1_lo,
             &self.relations.split_pack.sigma1_hi,
         );
@@ -197,6 +214,8 @@ impl FrameworkEval for Sha256Eval {
             enabler.clone(),
             &h_in[6],
             &g_init,
+            &sigma1_lo_idx,
+            &sigma1_hi_idx,
             &self.relations.split_pack.sigma1_lo,
             &self.relations.split_pack.sigma1_hi,
         );
@@ -390,7 +409,7 @@ impl FrameworkEval for Sha256Eval {
                 &self.relations.xor_8,
             );
 
-            // Maj/Ch packed-group block — 24 cells (post §8.1 reuse).
+            // Maj/Ch packed-group block — 32 cells (post §8.1 reuse).
             // Operand order is fixed: `[a, maj_out]` (a-side / Σ0
             // partition) followed by `[e, ch_out]` (e-side / Σ1). The
             // `b`/`c`/`f`/`g` lookup keys come from the §8.1 chain
@@ -403,7 +422,7 @@ impl FrameworkEval for Sha256Eval {
                 });
             let [a_grp, maj_grp, e_grp, ch_grp] = packed_groups;
 
-            // 6 Maj lookups — one per a-side group position. The row
+            // 8 Maj lookups — one per a-side group position. The row
             // shape is `(a_grp[i], b_grp[i], c_grp[i], maj_grp[i])`,
             // matching `MajRelation` (size 4). With the split-and-pack
             // lookups below in place, `a_grp` is pinned to `a.(lo, hi)`,
@@ -426,7 +445,7 @@ impl FrameworkEval for Sha256Eval {
                     ],
                 ));
             }
-            // 6 Ch lookups — one per e-side group position. Same shape,
+            // 8 Ch lookups — one per e-side group position. Same shape,
             // against `ChRelation` (size 4).
             for i in 0..GROUPS_PER_ROUND_PARTITION {
                 eval.add_to_relation(RelationEntry::new(
@@ -451,6 +470,8 @@ impl FrameworkEval for Sha256Eval {
                 enabler.clone(),
                 a,
                 &a_grp,
+                &sigma0_lo_idx,
+                &sigma0_hi_idx,
                 &self.relations.split_pack.sigma0_lo,
                 &self.relations.split_pack.sigma0_hi,
             );
@@ -459,6 +480,8 @@ impl FrameworkEval for Sha256Eval {
                 enabler.clone(),
                 &maj,
                 &maj_grp,
+                &sigma0_lo_idx,
+                &sigma0_hi_idx,
                 &self.relations.split_pack.sigma0_lo,
                 &self.relations.split_pack.sigma0_hi,
             );
@@ -467,6 +490,8 @@ impl FrameworkEval for Sha256Eval {
                 enabler.clone(),
                 e,
                 &e_grp,
+                &sigma1_lo_idx,
+                &sigma1_hi_idx,
                 &self.relations.split_pack.sigma1_lo,
                 &self.relations.split_pack.sigma1_hi,
             );
@@ -475,6 +500,8 @@ impl FrameworkEval for Sha256Eval {
                 enabler.clone(),
                 &ch,
                 &ch_grp,
+                &sigma1_lo_idx,
+                &sigma1_hi_idx,
                 &self.relations.split_pack.sigma1_lo,
                 &self.relations.split_pack.sigma1_hi,
             );
@@ -988,27 +1015,36 @@ fn read_sigma_input_split<E: EvalAtRow>(eval: &mut E) -> SigmaInputSplitMasks<E:
 /// Fire a pair of round-side split-and-pack lookups (lo half, hi half) on
 /// `word` against its partition's tables.
 ///
-/// `grp` is the 6-element packed-group commitment in `groups_in_order`
-/// ordering — `[L0, H0, H1, L1, L2, H2]` for the Σ0/Maj partition (or the
-/// analogous Σ1/Ch e-side ordering). The lo-half table content carries
-/// the three groups that live in the lo limb (`L0`, `L1`, `L2` for Σ0)
-/// in `s` order then `s_complement` order, which projects to trace cells
-/// `grp[0]`, `grp[3]`, `grp[4]`. The hi half analogously projects to
-/// `grp[1]`, `grp[2]`, `grp[5]`. Each lookup row matches the
-/// `(key, packed_group_0, packed_group_1, packed_group_2)` shape of
+/// `grp` is the 8-element packed-group commitment in `groups_in_order`
+/// ordering (the four `S`-side groups then the four `S'`-side groups of the
+/// W=6 partition). `lo_idx` / `hi_idx` are the per-partition projections
+/// from [`crate::partitions::round_groups_half_indices`]: the positions
+/// within `grp` whose bits live in the lo / hi 16-bit half (length 4 each).
+/// The lo-half table row carries `grp[lo_idx[0..4]]`, the hi-half row
+/// `grp[hi_idx[0..4]]`, in that order — matching
+/// [`crate::tables::build_round_split_pack_table`] (which lists each half's
+/// groups in `groups_in_order` index order). Each lookup row matches the
+/// `(key, g0, g1, g2, g3)` shape of
 /// [`crate::relations::ROUND_SPLIT_PACK_REL_SIZE`].
 ///
-/// Firing the lookup pins the three packed-group cells to the table row
+/// Firing the lookup pins the four packed-group cells to the table row
 /// determined by `word.lo` (resp. `word.hi`) and implicitly range-checks
 /// the limb to `[0, 2¹⁶)` (design §11 L1).
+#[allow(clippy::too_many_arguments)]
 fn wire_round_split_pack<E: EvalAtRow>(
     eval: &mut E,
     enabler: E::F,
     word: &(E::F, E::F),
     grp: &[E::F; GROUPS_PER_ROUND_PARTITION],
+    lo_idx: &[usize],
+    hi_idx: &[usize],
     rel_lo: &impl Relation<E::F, E::EF>,
     rel_hi: &impl Relation<E::F, E::EF>,
 ) {
+    // Each 16-bit half holds exactly 4 sub-groups under the W=6 partition,
+    // so the relation tuple is `key + 4` packed groups (= ROUND_SPLIT_PACK_REL_SIZE).
+    debug_assert_eq!(lo_idx.len(), 4);
+    debug_assert_eq!(hi_idx.len(), 4);
     // Gate by `enabler` so padding rows (every cell zero, so denominator
     // collapses to `-z` for every lookup) contribute a zero fraction
     // instead of `+1/(-z)`. Without this, every padding row would emit
@@ -1021,9 +1057,10 @@ fn wire_round_split_pack<E: EvalAtRow>(
         mult.clone(),
         &[
             word.0.clone(),
-            grp[0].clone(),
-            grp[3].clone(),
-            grp[4].clone(),
+            grp[lo_idx[0]].clone(),
+            grp[lo_idx[1]].clone(),
+            grp[lo_idx[2]].clone(),
+            grp[lo_idx[3]].clone(),
         ],
     ));
     eval.add_to_relation(RelationEntry::new(
@@ -1031,9 +1068,10 @@ fn wire_round_split_pack<E: EvalAtRow>(
         mult,
         &[
             word.1.clone(),
-            grp[1].clone(),
-            grp[2].clone(),
-            grp[5].clone(),
+            grp[hi_idx[0]].clone(),
+            grp[hi_idx[1]].clone(),
+            grp[hi_idx[2]].clone(),
+            grp[hi_idx[3]].clone(),
         ],
     ));
 }
@@ -1079,8 +1117,8 @@ fn wire_sigma_input_split<E: EvalAtRow>(
 /// Σ1) via linear assembly with the partition-specific coefficients
 /// (`partitions::round_key_coeffs`).
 ///
-///   `key_s            = c[0]·g[0] + c[1]·g[1] + c[2]·g[2]`
-///   `key_s_complement = c[3]·g[3] + c[4]·g[4] + c[5]·g[5]`
+///   `key_s            = Σ_{i<4}     c[i]·g[i]`   (the four `S`-side groups)
+///   `key_s_complement = Σ_{i in 4..8} c[i]·g[i]` (the four `S'`-side groups)
 ///
 /// where `g[i] = grp[i]` (the i-th packed group of the operand) and
 /// `c[i]` is the i-th coefficient. This closes the soundness loop on the
@@ -1095,20 +1133,20 @@ fn emit_round_decode_key_reassembly<E: EvalAtRow>(
     coeffs: [u32; GROUPS_PER_ROUND_PARTITION],
 ) {
     let c = coeffs.map(|v| E::F::from(M31::from(v)));
-    eval.add_constraint(
-        enabler.clone()
-            * (decode.s_values[0].clone()
-                - c[0].clone() * grp[0].clone()
-                - c[1].clone() * grp[1].clone()
-                - c[2].clone() * grp[2].clone()),
-    );
-    eval.add_constraint(
-        enabler
-            * (decode.s_complement_values[0].clone()
-                - c[3].clone() * grp[3].clone()
-                - c[4].clone() * grp[4].clone()
-                - c[5].clone() * grp[5].clone()),
-    );
+    // `groups_in_order()` is the four `S`-side groups followed by the four
+    // `S'`-side groups, so the key for each side is the linear combination
+    // over its half of `grp`.
+    let half = GROUPS_PER_ROUND_PARTITION / 2;
+    let mut key_s = decode.s_values[0].clone();
+    for i in 0..half {
+        key_s = key_s - c[i].clone() * grp[i].clone();
+    }
+    eval.add_constraint(enabler.clone() * key_s);
+    let mut key_s_complement = decode.s_complement_values[0].clone();
+    for i in half..GROUPS_PER_ROUND_PARTITION {
+        key_s_complement = key_s_complement - c[i].clone() * grp[i].clone();
+    }
+    eval.add_constraint(enabler * key_s_complement);
 }
 
 /// Tie a σ-input decode block's `key_s` and `key_s_complement` to the
@@ -1759,11 +1797,12 @@ mod tests {
     }
 
     /// Maj/Ch/`xor_8` multiplicities per block equal the static counts
-    /// the trace shape dictates — 6 Maj + 6 Ch lookups per round, and 4
-    /// chunk-wise `xor_8` lookups per σ-application (with 2 σ-applications
-    /// per round and 2 per schedule entry). A regression here means the
-    /// witness-side counter (which the LogUp table-side multiplicity
-    /// column must reproduce) has drifted from the constraint-side wiring.
+    /// the trace shape dictates — 8 Maj + 8 Ch lookups per round (W=6, one
+    /// per group position), and 4 chunk-wise `xor_8` lookups per
+    /// σ-application (with 2 σ-applications per round and 2 per schedule
+    /// entry). A regression here means the witness-side counter (which the
+    /// LogUp table-side multiplicity column must reproduce) has drifted
+    /// from the constraint-side wiring.
     #[test]
     fn maj_ch_xor_multiplicities_match_per_block_totals() {
         use crate::partitions::GROUPS_PER_ROUND_PARTITION;
@@ -1775,10 +1814,10 @@ mod tests {
         assert_eq!(witness.blocks.len(), 1);
         let m = maj_ch_xor_multiplicities_for_block(&witness.blocks[0]);
         let groups = GROUPS_PER_ROUND_PARTITION as u32;
-        // 6 packed-group lookups per round per function.
+        // 8 packed-group lookups per round per function (W=6).
         assert_eq!(m.maj, (N_ROUNDS as u32) * groups);
         assert_eq!(m.ch, (N_ROUNDS as u32) * groups);
-        assert_eq!(m.maj, 64 * 6);
+        assert_eq!(m.maj, 64 * 8);
         // 4 xor_8 per σ-application; (2·64 + 2·48) σ-applications/block.
         let sigma_apps_per_block = 2 * (N_ROUNDS as u32) + 2 * ((N_ROUNDS - 16) as u32);
         assert_eq!(m.xor_8, 4 * sigma_apps_per_block);

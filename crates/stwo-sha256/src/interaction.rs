@@ -46,7 +46,8 @@ use crate::multiplicities::{
     MajChMultiplicities,
 };
 use crate::partitions::{
-    pack_round_groups, GROUPS_PER_ROUND_PARTITION, SIGMA0_GROUPS, SIGMA1_GROUPS,
+    pack_round_groups, round_groups_half_indices, GROUPS_PER_ROUND_PARTITION, SIGMA0_GROUPS,
+    SIGMA1_GROUPS,
 };
 use crate::relations::Sha256Relations;
 use crate::tables::{
@@ -402,13 +403,14 @@ fn round_split_pack_interaction(
     let s_mask = p.s_mask();
     let rows = build_round_split_pack_table(&groups, s_mask, h);
     let log_size = crate::preprocessed::LOG_SIZE_16;
-    // 4-cell row: (key, g0, g1, g2).
+    // 5-cell row: (key, g0, g1, g2, g3) — the four W=6 sub-groups in this half.
     let row_iter = rows.iter().map(|r| {
         [
             BaseField::from(r.key),
             BaseField::from(r.groups[0]),
             BaseField::from(r.groups[1]),
             BaseField::from(r.groups[2]),
+            BaseField::from(r.groups[3]),
         ]
     });
     let frac = match (p, h) {
@@ -531,19 +533,24 @@ fn sha256_interaction(
     //     ⇒ 18 per entry
     //   - per round (64):
     //       2 Σ-decode ⇒ 12
-    //       6 Maj + 6 Ch ⇒ 12
+    //       8 Maj + 8 Ch ⇒ 16   (W=6: one lookup per group position, 8 groups)
     //       4 round-side split-pack (a, maj_out, e, ch_out — lo+hi each = 8) ⇒ 8
     //       4 carry-range lookups (2 × `Range_5` for T1; 2 × `Range_2` × 3 families) ⇒ 8
-    //     ⇒ 40 per round
+    //     ⇒ 44 per round
     //   - finalization: 8 mod-2³² adds × 2 carries × 1 `Range_2` lookup each ⇒ 16
     //   - terminal `Range_16` on `h_out`: 8 words × 2 limbs ⇒ 16
     //
-    // Total per block = 8 + 48·18 + 64·40 + 16 + 16
-    //                 = 8 + 864 + 2560 + 16 + 16 = 3464.
+    // Total per block = 8 + 48·18 + 64·44 + 16 + 16
+    //                 = 8 + 864 + 2816 + 16 + 16 = 3720.
+    //
+    // Note the split-pack *lookup count* is unchanged from W=7 (still one
+    // lo+hi pair per operand); only each split-pack row's *width* grew
+    // (4 → 5 cells). The +256 over the old 3464 is purely the 4 extra
+    // Maj + 4 extra Ch lookups per round × 64 rounds.
     //
     // We allocate one Vec<Frac> per lookup index (`lookup_idx`) of length
     // `n_rows`, default-filled, then fill real-block rows below.
-    let lookups_per_block = 3464usize;
+    let lookups_per_block = 3720usize;
     let mut all_lookups: Vec<Vec<Frac>> = (0..lookups_per_block)
         .map(|_| vec![(SecureField::zero(), SecureField::one()); n_rows])
         .collect();
@@ -569,6 +576,11 @@ fn write_block_lookups(
     block: &crate::types::BlockWitness,
     relations: &Sha256Relations,
 ) {
+    // Per-partition lo/hi half projections (length 4 each, W=6) — the same
+    // `round_groups_half_indices` projection the constraint side keys on.
+    let (sigma0_lo_idx, sigma0_hi_idx) = round_groups_half_indices(&SIGMA0_GROUPS);
+    let (sigma1_lo_idx, sigma1_hi_idx) = round_groups_half_indices(&SIGMA1_GROUPS);
+
     // ---- 1. h_in aux split-pack lookups (4 operands × 2 halves = 8) ----
     //
     // Order in Sha256Eval::evaluate: b_init, c_init, f_init, g_init —
@@ -582,6 +594,12 @@ fn write_block_lookups(
             3 => (block.h_in[6].to_u32(), RelTag::Sigma1Lo, RelTag::Sigma1Hi),
             _ => unreachable!(),
         };
+        // op_idx 0,1 are the Σ0 partition; 2,3 the Σ1 partition.
+        let (lo_idx, hi_idx): (&[usize], &[usize]) = if op_idx < 2 {
+            (&sigma0_lo_idx, &sigma0_hi_idx)
+        } else {
+            (&sigma1_lo_idx, &sigma1_hi_idx)
+        };
         write_round_split_pack_pair(
             all,
             cursor,
@@ -590,7 +608,7 @@ fn write_block_lookups(
             relations,
             lo_rel_tag,
             hi_rel_tag,
-            // 6-element packed-group values come from the aux witness.
+            // 8-element packed-group values come from the aux witness.
             match op_idx {
                 0 => block.aux_split_pack.b_init.vals,
                 1 => block.aux_split_pack.c_init.vals,
@@ -598,6 +616,8 @@ fn write_block_lookups(
                 3 => block.aux_split_pack.g_init.vals,
                 _ => unreachable!(),
             },
+            lo_idx,
+            hi_idx,
         );
     }
 
@@ -693,7 +713,7 @@ fn write_block_lookups(
             relations,
         );
 
-        // 6 Maj + 6 Ch.
+        // 8 Maj + 8 Ch.
         let a_grp = round.maj_ch.a_grp.vals;
         let maj_grp = round.maj_ch.maj_grp.vals;
         let e_grp = round.maj_ch.e_grp.vals;
@@ -731,6 +751,8 @@ fn write_block_lookups(
             RelTag::Sigma0Lo,
             RelTag::Sigma0Hi,
             a_grp,
+            &sigma0_lo_idx,
+            &sigma0_hi_idx,
         );
         let maj_word = round.maj.to_u32();
         let maj_packed = pack_round_groups(maj_word, &SIGMA0_GROUPS);
@@ -743,6 +765,8 @@ fn write_block_lookups(
             RelTag::Sigma0Lo,
             RelTag::Sigma0Hi,
             maj_packed,
+            &sigma0_lo_idx,
+            &sigma0_hi_idx,
         );
         let e_word = round.state_in[4].to_u32(); // e
         write_round_split_pack_pair(
@@ -754,6 +778,8 @@ fn write_block_lookups(
             RelTag::Sigma1Lo,
             RelTag::Sigma1Hi,
             e_grp,
+            &sigma1_lo_idx,
+            &sigma1_hi_idx,
         );
         let ch_word = round.ch.to_u32();
         let ch_packed = pack_round_groups(ch_word, &SIGMA1_GROUPS);
@@ -766,6 +792,8 @@ fn write_block_lookups(
             RelTag::Sigma1Lo,
             RelTag::Sigma1Hi,
             ch_packed,
+            &sigma1_lo_idx,
+            &sigma1_hi_idx,
         );
 
         // Carry range-checks for the four mod-2³² adds of this round.
@@ -1027,27 +1055,34 @@ fn write_round_split_pack_pair(
     lo_tag: RelTag,
     hi_tag: RelTag,
     grp: [u32; GROUPS_PER_ROUND_PARTITION],
+    lo_idx: &[usize],
+    hi_idx: &[usize],
 ) {
+    // Mirror `constraints::wire_round_split_pack` exactly: the lo-half tuple
+    // is `(word.lo, grp[lo_idx[0..4]])`, the hi-half `(word.hi,
+    // grp[hi_idx[0..4]])`. Any divergence here breaks the LogUp balance.
+    debug_assert_eq!(lo_idx.len(), 4);
+    debug_assert_eq!(hi_idx.len(), 4);
     let word_lo = word & 0xFFFF;
     let word_hi = (word >> 16) & 0xFFFF;
-    // wire_round_split_pack lo: (word.lo, grp[0], grp[3], grp[4])
     let lo_vals = [
         BaseField::from(word_lo),
-        BaseField::from(grp[0]),
-        BaseField::from(grp[3]),
-        BaseField::from(grp[4]),
+        BaseField::from(grp[lo_idx[0]]),
+        BaseField::from(grp[lo_idx[1]]),
+        BaseField::from(grp[lo_idx[2]]),
+        BaseField::from(grp[lo_idx[3]]),
     ];
     all[*cursor][slot] = (
         SecureField::one(),
         combine_with_tag(relations, lo_tag, &lo_vals),
     );
     *cursor += 1;
-    // wire_round_split_pack hi: (word.hi, grp[1], grp[2], grp[5])
     let hi_vals = [
         BaseField::from(word_hi),
-        BaseField::from(grp[1]),
-        BaseField::from(grp[2]),
-        BaseField::from(grp[5]),
+        BaseField::from(grp[hi_idx[0]]),
+        BaseField::from(grp[hi_idx[1]]),
+        BaseField::from(grp[hi_idx[2]]),
+        BaseField::from(grp[hi_idx[3]]),
     ];
     all[*cursor][slot] = (
         SecureField::one(),

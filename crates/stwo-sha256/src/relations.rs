@@ -20,9 +20,10 @@
 //!     σ-application.
 //!   - [`SplitPackRelations`] — the eight split-and-pack tables (one per
 //!     partition × `{lo, hi}` half) that map a 16-bit half-word to its
-//!     packed-group decomposition. Round-side rows are width 4 (`key + 3
-//!     packed groups`); σ-side rows are width 3 (`key + packed_s +
-//!     packed_s_complement`). Firing each lookup implicitly range-checks
+//!     packed-group decomposition. Round-side rows are width 5 (`key + 4
+//!     packed groups`, the four W=6 sub-groups in that half); σ-side rows
+//!     are width 3 (`key + packed_s + packed_s_complement`). Firing each
+//!     lookup implicitly range-checks
 //!     the input limb to `[0, 2¹⁶)` and supplies the packed values the
 //!     Maj/Ch and `Σ`/`σ` decode-key reconstruction read.
 //!   - [`RangeRelations`] — the four width-1 range-check channels
@@ -136,13 +137,14 @@ pub const XOR_8_REL_SIZE: usize = 3;
 relation!(Xor8Relation, XOR_8_REL_SIZE);
 
 /// Row width of a **round-partition** split-and-pack table: `(key,
-/// packed_group_0, packed_group_1, packed_group_2)`. Three packed groups
-/// because the `Σ0`/`Maj` and `Σ1`/`Ch` partitions each place exactly
-/// three of their six groups in each 16-bit half (see
-/// [`crate::partitions::SIGMA0_GROUPS`] / [`crate::partitions::SIGMA1_GROUPS`]).
+/// packed_group_0, …, packed_group_3)`. Four packed groups because the
+/// `W = 6` `Σ0`/`Maj` and `Σ1`/`Ch` partitions each place exactly four of
+/// their eight groups in each 16-bit half (see
+/// [`crate::partitions::SIGMA0_GROUPS`] / [`crate::partitions::SIGMA1_GROUPS`]
+/// and [`crate::partitions::round_groups_half_indices`]).
 /// `key` is the 16-bit half-word the partition's groups live in; matching
 /// this row pins the half-word to `[0, 2¹⁶)` implicitly (design §11 L1).
-pub const ROUND_SPLIT_PACK_REL_SIZE: usize = 4;
+pub const ROUND_SPLIT_PACK_REL_SIZE: usize = 5;
 
 relation!(Sigma0SplitPackLo, ROUND_SPLIT_PACK_REL_SIZE);
 relation!(Sigma0SplitPackHi, ROUND_SPLIT_PACK_REL_SIZE);
@@ -391,11 +393,12 @@ mod tests {
         assert_eq!(XOR_8_REL_SIZE, 3);
     }
 
-    /// The four round-side split-and-pack channels expose row width 4.
-    /// Cross-checked through the `Relation` trait so an off-by-one in the
-    /// macro declaration would fail closed.
+    /// The four round-side split-and-pack channels expose row width 5
+    /// (`key + 4` packed sub-groups at `W = 6`). Cross-checked through the
+    /// `Relation` trait so an off-by-one in the macro declaration would
+    /// fail closed.
     #[test]
-    fn round_split_pack_relations_have_row_width_4() {
+    fn round_split_pack_relations_have_row_width_5() {
         use stwo::core::fields::m31::BaseField;
         use stwo::core::fields::qm31::SecureField;
         use stwo_constraint_framework::Relation;
@@ -416,7 +419,7 @@ mod tests {
         ] {
             assert_eq!(size, ROUND_SPLIT_PACK_REL_SIZE);
         }
-        assert_eq!(ROUND_SPLIT_PACK_REL_SIZE, 4);
+        assert_eq!(ROUND_SPLIT_PACK_REL_SIZE, 5);
     }
 
     /// Every `Range_k` channel exposes row width 1. The lookup tuple

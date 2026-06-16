@@ -44,45 +44,71 @@ pub mod s_mask {
     }
 }
 
-/// Six bit-groups per round-function partition.
+/// Eight bit-groups per round-function partition (`W = 6` layout).
 ///
-/// For `Σ0`: `(L0, H0, H1) ⊎ (L1, L2, H2) = S ⊎ S'`. Group naming follows
-/// `docs/research/sha256-air-design.md` so the design doc and code stay traceable.
-/// `Σ1` uses the analogous `(Le0, He0, He1) ⊎ (Le1, Le2, He2)`. Each group
-/// fits in one 16-bit half-word so the `Maj`/`Ch` packed tables can address
-/// it without crossing the limb boundary.
+/// For `W = 6` the `Maj`/`Ch` packed table must address each group with
+/// `≤ 6` bits, so the two 7-bit groups of the original `W = 7` partition
+/// (`Σ0`: `L0`, `H2`; `Σ1`: `Le1`, `He0`) are each split into two ≤6-bit
+/// sub-groups that stay inside their original 16-bit half. The bitwise
+/// nature of `Maj`/`Ch` means *any* partition of a word's bits is sound
+/// (design §8.1, §9.2), so the only constraints on a split are: ≤6 bits,
+/// within one half, and balanced for packing efficiency.
+///
+/// Sub-group splits (design §9.2 "pad smaller groups into the single 2¹⁸
+/// table"):
+///
+/// - `Σ0`: `L0 = {0,1,7,8,9,10,11}` → `L0a = {0,1}` (2b) + `L0b =
+///   {7,8,9,10,11}` (5b); `H2 = {16,17,23,24,25,26,27}` → `H2a = {16,17}`
+///   (2b) + `H2b = {23,24,25,26,27}` (5b). Result: `(L0a, L0b, H0, H1) ⊎
+///   (L1, L2, H2a, H2b) = S ⊎ S'`.
+/// - `Σ1`: `Le1 = {0,1,4,5,8,9,10}` → `Le1a = {0,1,4,5}` (4b) + `Le1b =
+///   {8,9,10}` (3b); `He0 = {16,17,20,21,24,25,26}` → `He0a =
+///   {16,17,20,21}` (4b) + `He0b = {24,25,26}` (3b). Result: `(Le0, He0a,
+///   He0b, He1) ⊎ (Le1a, Le1b, Le2, He2) = S ⊎ S'`.
+///
+/// Each group is listed lowest-bit-index first within its side, and every
+/// group's bits form a contiguous run in the side's ascending-bit order —
+/// the invariant [`round_key_coeffs`] relies on. Group naming follows
+/// `docs/research/sha256-air-design.md` so the design doc and code stay
+/// traceable.
 pub struct RoundGroups {
-    /// Three groups composing the `S` half. Indices are LSB-0.
-    pub s: [&'static [u32]; 3],
-    /// Three groups composing the `S'` half. Indices are LSB-0.
-    pub s_complement: [&'static [u32]; 3],
+    /// Four groups composing the `S` half, lowest-bit-index first. LSB-0.
+    pub s: [&'static [u32]; 4],
+    /// Four groups composing the `S'` half, lowest-bit-index first. LSB-0.
+    pub s_complement: [&'static [u32]; 4],
 }
 
-/// `Σ0` groups — `L0/H0/H1` ⊎ `L1/L2/H2` per §6.2.
+/// `Σ0` groups — `L0a/L0b/H0/H1` ⊎ `L1/L2/H2a/H2b` (W=6 split of §6.2's
+/// `L0/H0/H1 ⊎ L1/L2/H2`; `L0` and `H2` subdivided to ≤6 bits).
 pub const SIGMA0_GROUPS: RoundGroups = RoundGroups {
     s: [
-        &[0, 1, 7, 8, 9, 10, 11], // L0
-        &[18, 19, 20, 21, 22],    // H0
-        &[28, 29, 30, 31],        // H1
+        &[0, 1],               // L0a (2 bits)
+        &[7, 8, 9, 10, 11],    // L0b (5 bits)
+        &[18, 19, 20, 21, 22], // H0  (5 bits)
+        &[28, 29, 30, 31],     // H1  (4 bits)
     ],
     s_complement: [
-        &[2, 3, 4, 5, 6],              // L1
-        &[12, 13, 14, 15],             // L2
-        &[16, 17, 23, 24, 25, 26, 27], // H2
+        &[2, 3, 4, 5, 6],       // L1  (5 bits)
+        &[12, 13, 14, 15],      // L2  (4 bits)
+        &[16, 17],              // H2a (2 bits)
+        &[23, 24, 25, 26, 27],  // H2b (5 bits)
     ],
 };
 
-/// `Σ1` groups — `Le0/He0/He1` ⊎ `Le1/Le2/He2` per §7.
+/// `Σ1` groups — `Le0/He0a/He0b/He1` ⊎ `Le1a/Le1b/Le2/He2` (W=6 split of
+/// §7's `Le0/He0/He1 ⊎ Le1/Le2/He2`; `He0` and `Le1` subdivided to ≤6 bits).
 pub const SIGMA1_GROUPS: RoundGroups = RoundGroups {
     s: [
-        &[2, 3, 6, 7, 11, 12],         // Le0
-        &[16, 17, 20, 21, 24, 25, 26], // He0
-        &[29, 30, 31],                 // He1
+        &[2, 3, 6, 7, 11, 12], // Le0  (6 bits)
+        &[16, 17, 20, 21],     // He0a (4 bits)
+        &[24, 25, 26],         // He0b (3 bits)
+        &[29, 30, 31],         // He1  (3 bits)
     ],
     s_complement: [
-        &[0, 1, 4, 5, 8, 9, 10],   // Le1
-        &[13, 14, 15],             // Le2
-        &[18, 19, 22, 23, 27, 28], // He2
+        &[0, 1, 4, 5],             // Le1a (4 bits)
+        &[8, 9, 10],               // Le1b (3 bits)
+        &[13, 14, 15],             // Le2  (3 bits)
+        &[18, 19, 22, 23, 27, 28], // He2  (6 bits)
     ],
 };
 
@@ -324,16 +350,21 @@ pub fn sigma_parts_consistent(parts: &SigmaParts, expected_s: u32) -> bool {
         && s_complement_hi_in_hi
 }
 
-/// Sanity: every group must fit a 16-bit half (`Maj`/`Ch` packed table cap).
-pub const MAX_ROUND_GROUP_BITS: u32 = 7;
+/// Max packed-group width `W`. At `W = 6` the `Maj`/`Ch` table is `2^(3·6)
+/// = 2¹⁸` rows (≈ 262 k) — an 8× shrink from the `W = 7` `2²¹` table that
+/// dominates prove cost (perf-doc §3.1, §4.1). Every round-function group
+/// is `≤ 6` bits; smaller sub-groups pad with leading zeros into the same
+/// table (design §9.2).
+pub const MAX_ROUND_GROUP_BITS: u32 = 6;
 
-/// Number of groups per round-function partition (3 `S`-side + 3 `S'`-side).
-/// The constraint layer enumerates them in this order — `S[0..3]` then
-/// `S'[0..3]` — and the Maj/Ch lookup fires once per group position.
-pub const GROUPS_PER_ROUND_PARTITION: usize = 6;
+/// Number of groups per round-function partition (4 `S`-side + 4 `S'`-side).
+/// The constraint layer enumerates them in this order — `S[0..4]` then
+/// `S'[0..4]` — and the Maj/Ch lookup fires once per group position
+/// (8 lookups per function per round at `W = 6`, design §9.2).
+pub const GROUPS_PER_ROUND_PARTITION: usize = 8;
 
 impl RoundGroups {
-    /// Six groups in fixed enumeration order: `S[0..3]` then `S'[0..3]`.
+    /// Eight groups in fixed enumeration order: `S[0..4]` then `S'[0..4]`.
     /// Used by the Maj/Ch witness emitter and the AIR's packed-group read
     /// loop to agree on which packed value corresponds to which set of
     /// natural bit-positions.
@@ -342,14 +373,44 @@ impl RoundGroups {
             self.s[0],
             self.s[1],
             self.s[2],
+            self.s[3],
             self.s_complement[0],
             self.s_complement[1],
             self.s_complement[2],
+            self.s_complement[3],
         ]
     }
 }
 
-/// Pack the bits of `w` at each of the partition's six group positions into
+/// Positions within [`RoundGroups::groups_in_order`] whose bits live in the
+/// lo (`< 16`) and hi (`≥ 16`) 16-bit word half, returned as
+/// `(lo_indices, hi_indices)` in ascending index order.
+///
+/// This is the projection the round-side split-and-pack lookup keys on: the
+/// lo-half table row carries the packed groups at `lo_indices`, the hi-half
+/// row those at `hi_indices`. The order matches
+/// [`crate::tables::build_round_split_pack_table`], which iterates
+/// `s.chain(s_complement)` filtered by half — i.e. `groups_in_order()`
+/// filtered by half, preserving index order. Under the `W = 6` partition
+/// each half holds exactly four sub-groups, so both vectors have length 4
+/// (matching `key + 4 groups = ROUND_SPLIT_PACK_REL_SIZE` cells). The split
+/// differs per partition: `Σ0` projects lo `[0,1,4,5]` / hi `[2,3,6,7]`;
+/// `Σ1` projects lo `[0,4,5,6]` / hi `[1,2,3,7]`.
+pub fn round_groups_half_indices(groups: &RoundGroups) -> (Vec<usize>, Vec<usize>) {
+    let mut lo = Vec::new();
+    let mut hi = Vec::new();
+    for (i, g) in groups.groups_in_order().iter().enumerate() {
+        // Every group lies entirely in one half (round_groups_consistent).
+        if g.iter().all(|&b| b < 16) {
+            lo.push(i);
+        } else {
+            hi.push(i);
+        }
+    }
+    (lo, hi)
+}
+
+/// Pack the bits of `w` at each of the partition's eight group positions into
 /// the low bits of a packed value. Output `[i]` is the bits of `w` at
 /// `groups_in_order()[i]`, compressed contiguously from bit 0. Each value
 /// lies in `[0, 2^|group_i|) ⊆ [0, 2^MAX_ROUND_GROUP_BITS)`.
@@ -372,9 +433,9 @@ pub fn pack_round_groups(w: u32, groups: &RoundGroups) -> [u32; GROUPS_PER_ROUND
     out
 }
 
-/// Coefficients linking the partition's 6 packed-group values to the
+/// Coefficients linking the partition's 8 packed-group values to the
 /// `(key_s, key_s_complement)` of the decode table, in `groups_in_order()`
-/// ordering — `[c(s[0]), c(s[1]), c(s[2]), c(s'[0]), c(s'[1]), c(s'[2])]`.
+/// ordering — `[c(s[0..4]), c(s'[0..4])]`.
 ///
 /// The decode-table key is `pack_half_key(w, side_mask)` — bits at the
 /// side's positions packed contiguously into the low bits in **ascending
@@ -385,20 +446,24 @@ pub fn pack_round_groups(w: u32, groups: &RoundGroups) -> [u32; GROUPS_PER_ROUND
 /// `key_s` (or `key_s_complement`) at the power-of-two offset equal to
 /// the count of S-side bits that precede it.
 ///
-/// So:
-///   `key_s            = c[0] · g[0] + c[1] · g[1] + c[2] · g[2]`
-///   `key_s_complement = c[3] · g[3] + c[4] · g[4] + c[5] · g[5]`
+/// So (four groups per side under `W = 6`):
+///   `key_s            = c[0]·g[0] + c[1]·g[1] + c[2]·g[2] + c[3]·g[3]`
+///   `key_s_complement = c[4]·g[4] + c[5]·g[5] + c[6]·g[6] + c[7]·g[7]`
 ///
 /// where `g[i] = packed value of groups_in_order()[i]` and `c[i]` is this
 /// function's `i`-th return.
 pub const fn round_key_coeffs(groups: &RoundGroups) -> [u32; GROUPS_PER_ROUND_PARTITION] {
+    let s = &groups.s;
+    let sc = &groups.s_complement;
     [
         1,
-        1u32 << groups.s[0].len() as u32,
-        1u32 << (groups.s[0].len() + groups.s[1].len()) as u32,
+        1u32 << s[0].len() as u32,
+        1u32 << (s[0].len() + s[1].len()) as u32,
+        1u32 << (s[0].len() + s[1].len() + s[2].len()) as u32,
         1,
-        1u32 << groups.s_complement[0].len() as u32,
-        1u32 << (groups.s_complement[0].len() + groups.s_complement[1].len()) as u32,
+        1u32 << sc[0].len() as u32,
+        1u32 << (sc[0].len() + sc[1].len()) as u32,
+        1u32 << (sc[0].len() + sc[1].len() + sc[2].len()) as u32,
     ]
 }
 
@@ -501,8 +566,8 @@ mod tests {
         ));
     }
 
-    /// Every round-function group is at most `MAX_ROUND_GROUP_BITS = 7` wide,
-    /// so a packed `Maj`/`Ch` lookup table of width `W = 7` suffices.
+    /// Every round-function group is at most `MAX_ROUND_GROUP_BITS = 6` wide,
+    /// so a packed `Maj`/`Ch` lookup table of width `W = 6` suffices.
     #[test]
     fn round_groups_within_max_width() {
         for groups in [&SIGMA0_GROUPS, &SIGMA1_GROUPS] {
@@ -515,20 +580,76 @@ mod tests {
         }
     }
 
-    /// `groups_in_order` enumerates `S[0..3]` then `S'[0..3]` and matches
+    /// Pin the `W = 6` sub-group structure: each partition has 8 groups
+    /// (4 `S`-side + 4 `S'`-side), every group is `≤ 6` bits and sits
+    /// entirely within one 16-bit half, and the union is still `S ⊎ S'`
+    /// (so subdividing the 7-bit groups did not change which bits the
+    /// `Σ`/`Maj`/`Ch` decode keys on). A regression here is a soundness
+    /// hazard — the decode tables are keyed by the full `S`/`S'` masks.
+    #[test]
+    fn round_groups_subdivided_for_w6() {
+        assert_eq!(MAX_ROUND_GROUP_BITS, 6);
+        assert_eq!(GROUPS_PER_ROUND_PARTITION, 8);
+        for (groups, s) in [
+            (&SIGMA0_GROUPS, s_mask::SIGMA0),
+            (&SIGMA1_GROUPS, s_mask::SIGMA1),
+        ] {
+            assert_eq!(groups.s.len(), 4);
+            assert_eq!(groups.s_complement.len(), 4);
+            for g in groups.s.iter().chain(groups.s_complement.iter()) {
+                assert!(!g.is_empty(), "empty group");
+                assert!(g.len() as u32 <= 6, "group {g:?} wider than 6 bits");
+                let lo = g.iter().all(|&b| b < 16);
+                let hi = g.iter().all(|&b| b >= 16);
+                assert!(lo || hi, "group {g:?} straddles the 16-bit half boundary");
+            }
+            // Union is still S ⊎ S' (no bits added, dropped, or moved sides).
+            assert!(round_groups_consistent(groups, s));
+        }
+    }
+
+    /// `groups_in_order` enumerates `S[0..4]` then `S'[0..4]` and matches
     /// what `pack_round_groups` reads — a regression on either would
     /// silently rotate the Maj/Ch lookup keys against the table content.
     #[test]
-    fn groups_in_order_lists_six_groups_s_then_s_complement() {
+    fn groups_in_order_lists_eight_groups_s_then_s_complement() {
         for groups in [&SIGMA0_GROUPS, &SIGMA1_GROUPS] {
             let order = groups.groups_in_order();
             assert_eq!(order.len(), GROUPS_PER_ROUND_PARTITION);
-            assert!(std::ptr::eq(order[0], groups.s[0]));
-            assert!(std::ptr::eq(order[1], groups.s[1]));
-            assert!(std::ptr::eq(order[2], groups.s[2]));
-            assert!(std::ptr::eq(order[3], groups.s_complement[0]));
-            assert!(std::ptr::eq(order[4], groups.s_complement[1]));
-            assert!(std::ptr::eq(order[5], groups.s_complement[2]));
+            for i in 0..4 {
+                assert!(std::ptr::eq(order[i], groups.s[i]));
+                assert!(std::ptr::eq(order[4 + i], groups.s_complement[i]));
+            }
+        }
+    }
+
+    /// `round_groups_half_indices` projects `groups_in_order()` onto the
+    /// lo/hi 16-bit word halves. Pin the exact projection for both
+    /// partitions (it differs per partition) and cross-check that every
+    /// listed index really points at a group living in that half. The
+    /// constraint side (`wire_round_split_pack`) and the prover side
+    /// (`write_round_split_pack_pair`) both key on this projection, so a
+    /// drift here breaks the LogUp balance.
+    #[test]
+    fn round_groups_half_indices_match_sub_group_bit_lists() {
+        let (lo0, hi0) = round_groups_half_indices(&SIGMA0_GROUPS);
+        assert_eq!(lo0, vec![0, 1, 4, 5]); // L0a, L0b, L1, L2
+        assert_eq!(hi0, vec![2, 3, 6, 7]); // H0, H1, H2a, H2b
+        let (lo1, hi1) = round_groups_half_indices(&SIGMA1_GROUPS);
+        assert_eq!(lo1, vec![0, 4, 5, 6]); // Le0, Le1a, Le1b, Le2
+        assert_eq!(hi1, vec![1, 2, 3, 7]); // He0a, He0b, He1, He2
+
+        for groups in [&SIGMA0_GROUPS, &SIGMA1_GROUPS] {
+            let order = groups.groups_in_order();
+            let (lo, hi) = round_groups_half_indices(groups);
+            // Exactly 4 sub-groups per half, partitioning all 8 indices.
+            assert_eq!(lo.len(), 4);
+            assert_eq!(hi.len(), 4);
+            assert!(lo.iter().all(|&i| order[i].iter().all(|&b| b < 16)));
+            assert!(hi.iter().all(|&i| order[i].iter().all(|&b| b >= 16)));
+            let mut all: Vec<usize> = lo.iter().chain(hi.iter()).copied().collect();
+            all.sort_unstable();
+            assert_eq!(all, (0..GROUPS_PER_ROUND_PARTITION).collect::<Vec<_>>());
         }
     }
 
@@ -577,7 +698,7 @@ mod tests {
         }
     }
 
-    /// Linear assembly of the 6 packed groups via `round_key_coeffs`
+    /// Linear assembly of the 8 packed groups via `round_key_coeffs`
     /// reproduces `pack_half_key(w, side_mask)` for both sides. This is
     /// the soundness property the AIR's σ-decode-key-pin constraint
     /// depends on: a row with the right packed groups must algebraically
@@ -602,13 +723,12 @@ mod tests {
                 u32::MAX,
             ] {
                 let packed = pack_round_groups(w, groups);
-                // S-side reassembly: c[0]·g[0] + c[1]·g[1] + c[2]·g[2].
-                let key_s_built =
-                    coeffs[0] * packed[0] + coeffs[1] * packed[1] + coeffs[2] * packed[2];
+                // S-side reassembly: Σ_{i<4} c[i]·g[i].
+                let key_s_built = (0..4).map(|i| coeffs[i] * packed[i]).sum::<u32>();
                 assert_eq!(key_s_built, pack_half_key(w, s_mask), "{w:#x} S-side");
-                // S'-side reassembly.
+                // S'-side reassembly: Σ_{i in 4..8} c[i]·g[i].
                 let key_s_complement_built =
-                    coeffs[3] * packed[3] + coeffs[4] * packed[4] + coeffs[5] * packed[5];
+                    (4..8).map(|i| coeffs[i] * packed[i]).sum::<u32>();
                 assert_eq!(
                     key_s_complement_built,
                     pack_half_key(w, !s_mask),

@@ -208,16 +208,18 @@ pub fn xor_8_column_ids() -> [PreProcessedColumnId; 3] {
     [id("xor_8_x"), id("xor_8_y"), id("xor_8_z")]
 }
 
-/// IDs of the 4 preprocessed columns of one round-side split-and-pack
-/// table. Order: `(key, g0, g1, g2)` matching
-/// `crate::relations::ROUND_SPLIT_PACK_REL_SIZE`.
-pub fn round_split_pack_column_ids(p: RoundPartition, h: Half16) -> [PreProcessedColumnId; 4] {
+/// IDs of the 5 preprocessed columns of one round-side split-and-pack
+/// table. Order: `(key, g0, g1, g2, g3)` matching
+/// `crate::relations::ROUND_SPLIT_PACK_REL_SIZE` (the four W=6 sub-groups
+/// in this half).
+pub fn round_split_pack_column_ids(p: RoundPartition, h: Half16) -> [PreProcessedColumnId; 5] {
     let t = round_split_tag(p, h);
     [
         id(&format!("{t}_key")),
         id(&format!("{t}_g0")),
         id(&format!("{t}_g1")),
         id(&format!("{t}_g2")),
+        id(&format!("{t}_g3")),
     ]
 }
 
@@ -460,8 +462,9 @@ impl FrameworkEval for RoundSplitPackEval {
         let g0 = eval.get_preprocessed_column(cols[1].clone());
         let g1 = eval.get_preprocessed_column(cols[2].clone());
         let g2 = eval.get_preprocessed_column(cols[3].clone());
+        let g3 = eval.get_preprocessed_column(cols[4].clone());
         let mult = eval.next_trace_mask();
-        let values = [key, g0, g1, g2];
+        let values = [key, g0, g1, g2, g3];
         let neg = -E::EF::from(mult);
         use crate::relations::*;
         match (self.partition, self.half) {
@@ -744,6 +747,7 @@ mod tests {
                 id("sp_sigma0_lo_g0"),
                 id("sp_sigma0_lo_g1"),
                 id("sp_sigma0_lo_g2"),
+                id("sp_sigma0_lo_g3"),
             ],
         );
         assert_eq!(
