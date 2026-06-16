@@ -583,6 +583,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
+name = "eu-id-ffi"
+version = "0.1.0"
+dependencies = [
+ "memory-stats",
+ "stwo-sha256",
+]
+
+[[package]]
 name = "ff"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -738,9 +746,9 @@ dependencies = [
 
 [[package]]
 name = "http"
-version = "1.4.1"
+version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8be7462df143984c4598a256ef469b251d7d7f9e271135073e78fc535414f3d0"
+checksum = "6970f50e31d6fc17d3fa27329444bfa74e196cf62e95052a3f6fee181dba6425"
 dependencies = [
  "bytes",
  "itoa",
@@ -845,9 +853,9 @@ dependencies = [
 
 [[package]]
 name = "log"
-version = "0.4.30"
+version = "0.4.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "616ec5685824bcc94416c6d4a7a446eea774a31efd7062c8480ba6fd06d7a6e5"
+checksum = "953f07c43838f8e6f9758cab68bf5bed85465e7587ebe0b823f1bcd81978ad3a"
 
 [[package]]
 name = "memchr"
@@ -1440,7 +1448,7 @@ dependencies = [
 [[package]]
 name = "stwo"
 version = "2.2.0"
-source = "git+https://github.com/starkware-libs/stwo.git#e1286720e5a6352cae79cc1201c322d5e02ab52f"
+source = "git+https://github.com/starkware-libs/stwo.git#cca98119f4641c3e096de74b915c1aa55453bcad"
 dependencies = [
  "blake2",
  "blake3",
@@ -1469,7 +1477,7 @@ dependencies = [
 [[package]]
 name = "stwo-constraint-framework"
 version = "2.2.0"
-source = "git+https://github.com/starkware-libs/stwo.git#e1286720e5a6352cae79cc1201c322d5e02ab52f"
+source = "git+https://github.com/starkware-libs/stwo.git#cca98119f4641c3e096de74b915c1aa55453bcad"
 dependencies = [
  "hashbrown 0.17.1",
  "itertools 0.12.1",
