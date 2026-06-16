@@ -8,11 +8,11 @@ default = ["std"]
 std = ["stwo/std", "stwo-constraint-framework/std"]
 
 [dependencies]
-stwo = { git = "https://github.com/starkware-libs/stwo.git", features = ["prover"] }
-stwo-constraint-framework = { git = "https://github.com/starkware-libs/stwo.git", features = ["prover"] }
+stwo = { workspace = true }
+stwo-constraint-framework = { workspace = true }
 itertools = { version = "0.12", default-features = false, features = ["use_alloc"] }
-num-traits = "0.2"
-serde = { version = "1", features = ["derive"] }
+num-traits = { workspace = true }
+serde = { workspace = true }
 
 [dev-dependencies]
 p256 = { version = "0.13", features = ["ecdsa"] }
