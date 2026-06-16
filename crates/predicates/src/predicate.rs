@@ -1,26 +1,37 @@
-pub trait Predicate {
+use crate::air::{Air, AirProver};
+use stwo::core::fields::qm31::QM31;
+
+/// Proving side of a predicate.
+///
+/// Given the public and private inputs, it validates the public statement and
+/// hands back a prover module (which implements [`AirProver`]). A prover-only
+/// binary depends on this half alone.
+pub trait PredicateProver {
     type PublicInput;
     type PrivateInput;
-    type Witness;
     type Error;
+    type Prover: AirProver;
 
-    fn validate(&self, public: &Self::PublicInput) -> Result<(), Self::Error>;
-
-    fn witness(
+    fn prover(
         &self,
         public: &Self::PublicInput,
         private: &Self::PrivateInput,
-    ) -> Result<Self::Witness, Self::Error>;
+    ) -> Result<Self::Prover, Self::Error>;
 }
 
-pub trait StandalonePredicate: Predicate {
-    type Proof;
+/// Verifying side of a predicate.
+///
+/// Given the public input and the claimed LogUp sums carried by a proof, it
+/// validates the public statement and hands back a verifier module (which
+/// implements [`Air`]). A verifier-only binary depends on this half alone.
+pub trait PredicateVerifier {
+    type PublicInput;
+    type Error;
+    type Verifier: Air;
 
-    fn prove(
+    fn verifier(
         &self,
         public: &Self::PublicInput,
-        private: &Self::PrivateInput,
-    ) -> Result<Self::Proof, Self::Error>;
-
-    fn verify(&self, proof: &Self::Proof) -> Result<(), Self::Error>;
+        claimed_sums: &[QM31],
+    ) -> Result<Self::Verifier, Self::Error>;
 }

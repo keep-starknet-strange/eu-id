@@ -1,5 +1,6 @@
 mod age;
 mod common;
+mod nat;
 
 use common::{get_flag, DEFAULT_PROOF_PATH};
 
@@ -7,6 +8,7 @@ fn usage() -> ! {
     eprintln!("usage: prove <predicate> [predicate-flags] [--output PATH]");
     eprintln!("predicates:");
     eprintln!("  age   prove age predicate (run `prove age --help` for flags)");
+    eprintln!("  nat   prove nationality predicate (run `prove nat --help` for flags)");
     std::process::exit(1);
 }
 
@@ -19,6 +21,7 @@ fn main() {
 
     match predicate {
         "age" => age::prove(&rest, output),
+        "nat" => nat::prove(&rest, output),
         "--help" | "-h" => usage(),
         other => {
             eprintln!("unknown predicate '{other}'");
