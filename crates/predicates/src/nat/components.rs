@@ -3,22 +3,24 @@ use crate::nat::lookup_elements::LookupElements;
 use crate::nat::table::{acceptable_col_id, NatTableComponent, NatTableEval};
 use crate::nat::types::PublicInput;
 use stwo::core::fields::qm31::QM31;
+use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::TraceLocationAllocator;
 
-fn make_allocator(public: &PublicInput) -> TraceLocationAllocator {
-    TraceLocationAllocator::new_with_preprocessed_columns(&[acceptable_col_id(&public.acceptable)])
+/// Preprocessed column ids this predicate contributes, in commit order. The
+/// orchestrator concatenates these to seed the shared allocator.
+pub fn preprocessed_column_ids(public: &PublicInput) -> Vec<PreProcessedColumnId> {
+    vec![acceptable_col_id(&public.acceptable)]
 }
 
 pub fn components(
+    allocator: &mut TraceLocationAllocator,
     public: &PublicInput,
     lookup_elements: LookupElements,
     nat_claimed_sum: QM31,
     table_claimed_sum: QM31,
 ) -> (NationalityComponent, NatTableComponent) {
-    let mut allocator = make_allocator(public);
-
     let nat_component = NationalityComponent::new(
-        &mut allocator,
+        allocator,
         NationalityEval {
             lookup_elements: lookup_elements.clone(),
         },
@@ -26,7 +28,7 @@ pub fn components(
     );
 
     let table_component = NatTableComponent::new(
-        &mut allocator,
+        allocator,
         NatTableEval {
             public: public.clone(),
             lookup_elements: lookup_elements.nat_table,

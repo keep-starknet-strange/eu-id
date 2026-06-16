@@ -26,6 +26,7 @@ use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::poly::circle::CircleEvaluation;
 use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::{ComponentProver, TreeBuilder};
+use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 
 use crate::components::{
@@ -78,6 +79,7 @@ pub struct Sha256Prover<'a> {
     group_width: u32,
     relations: Option<Sha256Relations>,
     interaction_claim: Option<InteractionClaim>,
+    components: Option<Sha256Components>,
 }
 
 impl<'a> Sha256Prover<'a> {
@@ -88,7 +90,14 @@ impl<'a> Sha256Prover<'a> {
             group_width,
             relations: None,
             interaction_claim: None,
+            components: None,
         }
+    }
+
+    fn built_components(&self) -> &Sha256Components {
+        self.components
+            .as_ref()
+            .expect("components are built before they are borrowed")
     }
 
     /// The aggregate claim produced during the interaction phase. The caller
@@ -128,14 +137,22 @@ impl Air for Sha256Prover<'_> {
         flatten_claimed_sums(self.interaction_claim())
     }
 
-    fn components(&self) -> Vec<Box<dyn Component>> {
-        Sha256Components::new(
+    fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
+        all_preprocessed_column_ids()
+    }
+
+    fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
+        self.components = Some(Sha256Components::new(
+            allocator,
             self.interaction_claim(),
             self.relations(),
             self.log_n_rows,
             self.group_width,
-        )
-        .into_boxed_components()
+        ));
+    }
+
+    fn components(&self) -> Vec<&dyn Component> {
+        self.built_components().components()
     }
 }
 
@@ -173,14 +190,8 @@ impl AirProver for Sha256Prover<'_> {
         self.interaction_claim = Some(interaction_claim);
     }
 
-    fn prover_components(&self) -> Vec<Box<dyn ComponentProver<SimdBackend>>> {
-        Sha256Components::new(
-            self.interaction_claim(),
-            self.relations(),
-            self.log_n_rows,
-            self.group_width,
-        )
-        .into_boxed_prover_components()
+    fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
+        self.built_components().component_provers()
     }
 }
 
@@ -191,6 +202,7 @@ pub struct Sha256Verifier {
     group_width: u32,
     interaction_claim: InteractionClaim,
     relations: Option<Sha256Relations>,
+    components: Option<Sha256Components>,
 }
 
 impl Sha256Verifier {
@@ -200,6 +212,7 @@ impl Sha256Verifier {
             group_width,
             interaction_claim,
             relations: None,
+            components: None,
         }
     }
 
@@ -207,6 +220,12 @@ impl Sha256Verifier {
         self.relations
             .as_ref()
             .expect("relations are drawn before they are used")
+    }
+
+    fn built_components(&self) -> &Sha256Components {
+        self.components
+            .as_ref()
+            .expect("components are built before they are borrowed")
     }
 }
 
@@ -231,14 +250,22 @@ impl Air for Sha256Verifier {
         flatten_claimed_sums(&self.interaction_claim)
     }
 
-    fn components(&self) -> Vec<Box<dyn Component>> {
-        Sha256Components::new(
+    fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
+        all_preprocessed_column_ids()
+    }
+
+    fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
+        self.components = Some(Sha256Components::new(
+            allocator,
             &self.interaction_claim,
             self.relations(),
             self.log_n_rows,
             self.group_width,
-        )
-        .into_boxed_components()
+        ));
+    }
+
+    fn components(&self) -> Vec<&dyn Component> {
+        self.built_components().components()
     }
 }
 
@@ -409,20 +436,16 @@ struct Sha256Components {
 
 impl Sha256Components {
     fn new(
+        allocator: &mut TraceLocationAllocator,
         claim: &InteractionClaim,
         relations: &Sha256Relations,
         log_n_rows: u32,
         group_width: u32,
     ) -> Self {
-        // The TraceLocationAllocator runs the same component order on
-        // prover and verifier; it consumes preprocessed column IDs in
-        // the order each component's `evaluate` reads them. We seed it with
-        // the static list from `crate::components::all_preprocessed_column_ids`
-        // — the single source of truth for column order — and let each
-        // FrameworkComponent claim its slice.
-        let alloc_ids = all_preprocessed_column_ids();
-        let allocator = &mut TraceLocationAllocator::new_with_preprocessed_columns(&alloc_ids);
-
+        // The shared TraceLocationAllocator (seeded by the orchestrator with
+        // every module's `preprocessed_column_ids` in commit order) runs the
+        // same component order on prover and verifier; each FrameworkComponent
+        // claims its slice of preprocessed columns as it is built.
         let sha256 = FrameworkComponent::new(
             allocator,
             Sha256Eval {
@@ -511,62 +534,46 @@ impl Sha256Components {
         }
     }
 
-    /// Box every component as `dyn Component`, in commit order — the
+    /// Borrow every component as `dyn Component`, in commit order — the
     /// verifier-side surface the orchestrator consumes.
-    fn into_boxed_components(self) -> Vec<Box<dyn Component>> {
-        let mut out: Vec<Box<dyn Component>> = Vec::new();
-        out.push(Box::new(self.sha256));
-        out.extend(
-            self.decode
-                .into_iter()
-                .map(|c| Box::new(c) as Box<dyn Component>),
-        );
-        out.push(Box::new(self.maj_ch));
-        out.push(Box::new(self.xor_8));
-        out.extend(
-            self.round_split_pack
-                .into_iter()
-                .map(|c| Box::new(c) as Box<dyn Component>),
-        );
-        out.extend(
-            self.sigma_split_pack
-                .into_iter()
-                .map(|c| Box::new(c) as Box<dyn Component>),
-        );
-        out.extend(
-            self.range
-                .into_iter()
-                .map(|c| Box::new(c) as Box<dyn Component>),
-        );
+    fn components(&self) -> Vec<&dyn Component> {
+        let mut out: Vec<&dyn Component> = Vec::new();
+        out.push(&self.sha256);
+        out.extend(self.decode.iter().map(|c| c as &dyn Component));
+        out.push(&self.maj_ch);
+        out.push(&self.xor_8);
+        out.extend(self.round_split_pack.iter().map(|c| c as &dyn Component));
+        out.extend(self.sigma_split_pack.iter().map(|c| c as &dyn Component));
+        out.extend(self.range.iter().map(|c| c as &dyn Component));
         out
     }
 
-    /// Box every component as `dyn ComponentProver`, in commit order — the
+    /// Borrow every component as `dyn ComponentProver`, in commit order — the
     /// prover-side surface the orchestrator consumes.
-    fn into_boxed_prover_components(self) -> Vec<Box<dyn ComponentProver<SimdBackend>>> {
-        let mut out: Vec<Box<dyn ComponentProver<SimdBackend>>> = Vec::new();
-        out.push(Box::new(self.sha256));
+    fn component_provers(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
+        let mut out: Vec<&dyn ComponentProver<SimdBackend>> = Vec::new();
+        out.push(&self.sha256);
         out.extend(
             self.decode
-                .into_iter()
-                .map(|c| Box::new(c) as Box<dyn ComponentProver<SimdBackend>>),
+                .iter()
+                .map(|c| c as &dyn ComponentProver<SimdBackend>),
         );
-        out.push(Box::new(self.maj_ch));
-        out.push(Box::new(self.xor_8));
+        out.push(&self.maj_ch);
+        out.push(&self.xor_8);
         out.extend(
             self.round_split_pack
-                .into_iter()
-                .map(|c| Box::new(c) as Box<dyn ComponentProver<SimdBackend>>),
+                .iter()
+                .map(|c| c as &dyn ComponentProver<SimdBackend>),
         );
         out.extend(
             self.sigma_split_pack
-                .into_iter()
-                .map(|c| Box::new(c) as Box<dyn ComponentProver<SimdBackend>>),
+                .iter()
+                .map(|c| c as &dyn ComponentProver<SimdBackend>),
         );
         out.extend(
             self.range
-                .into_iter()
-                .map(|c| Box::new(c) as Box<dyn ComponentProver<SimdBackend>>),
+                .iter()
+                .map(|c| c as &dyn ComponentProver<SimdBackend>),
         );
         out
     }

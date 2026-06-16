@@ -495,6 +495,39 @@ fn current_p256_monolithic_proves_real_p256_crate_signature() {
         .expect("real p256-crate signature proof verifies");
 }
 
+/// The P256 AIR routed through the shared `air_core` orchestrator
+/// ([`super::air::prove_current_air`] / [`super::air::verify_current_air`])
+/// proves and verifies a real signature — the same statement as the monolithic
+/// path, but driven as one `air_core` module. Also checks the wrapper's
+/// caller-argument binding rejects a mismatched expected statement.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "release-only: full STARK prove/verify is slow in debug"
+)]
+fn air_core_p256_proves_and_verifies_real_signature() {
+    let input = p256_crate_signed_input();
+    assert!(
+        ecdsa_verify(&input),
+        "native verifier must accept the fixture"
+    );
+    let draft = P256ProofDraft::from_inputs_with_arbitrary_fake_glv_hints(vec![input])
+        .expect("real p256-crate signature builds a proof draft");
+    let proof = super::air::prove_current_air(&draft).expect("air_core P256 proof generates");
+
+    // Caller-argument binding: a mismatched expected statement is rejected.
+    let mut wrong = proof.claim.public_inputs.instances.clone();
+    wrong[0].r = P256M31BigInt::zero();
+    assert!(matches!(
+        super::air::verify_current_air(proof.clone(), &wrong),
+        Err(P256ProofError::PublicInstanceMismatch)
+    ));
+
+    // Bound to its own statement, the proof verifies.
+    let expected = proof.claim.public_inputs.instances.clone();
+    super::air::verify_current_air(proof, &expected).expect("air_core P256 proof verifies");
+}
+
 /// Regression for the final_add mixed-sign-bit completeness bug. A valid ECDSA
 /// signature whose two cert scalars decompose to OPPOSITE fake-GLV sign bits
 /// (`b1 != b2`, ~50% of real signatures since `u1, u2` are independent) must

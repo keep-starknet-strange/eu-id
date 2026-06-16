@@ -37,6 +37,8 @@ use stwo::prover::poly::circle::PolyOps;
 use stwo::prover::{
     prove as stark_prove, CommitmentSchemeProver, ComponentProver, ProvingError, TreeBuilder,
 };
+use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
+use stwo_constraint_framework::TraceLocationAllocator;
 
 /// The Merkle channel (i.e. the hash) that binds the whole proof. Every module
 /// commits its trees and draws its challenges against this one type.
@@ -73,13 +75,37 @@ pub trait Air {
     /// Column log-sizes per tree, in commit order.
     fn layout(&self) -> TreeLayout;
 
-    /// The module's claimed LogUp sums, in the same order its components expect.
-    /// On the verifier side these come from the proof; on the prover side they
-    /// are filled in by [`AirProver::write_interaction`].
+    /// The module's claimed LogUp sums whose total enters the global balance.
+    /// The orchestrator sums these across all modules and rejects unless the
+    /// total is zero. For most modules these are the per-component sums; a
+    /// module whose balance also folds in public-input provider terms (P256)
+    /// returns those terms here too.
     fn claimed_sums(&self) -> Vec<QM31>;
 
-    /// Build the verifier-side components (needs relations + claimed sums).
-    fn components(&self) -> Vec<Box<dyn Component>>;
+    /// Mix this module's claimed-sum commitment into the transcript, just before
+    /// the interaction tree is committed. The default mixes [`Air::claimed_sums`]
+    /// as one flat felt slice. A module whose standalone transcript mixed a
+    /// richer structure (P256 mixes per-component claims plus u64 counts) can
+    /// override to reproduce it exactly. Must match between prove and verify.
+    fn mix_claimed_sums(&self, channel: &mut Ch) {
+        channel.mix_felts(&self.claimed_sums());
+    }
+
+    /// The preprocessed column ids this module contributes to tree 0, in commit
+    /// order. The orchestrator concatenates these across all modules to seed the
+    /// single shared [`TraceLocationAllocator`] before building components.
+    fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId>;
+
+    /// Build this module's AIR components against the shared allocator and stash
+    /// them. Called once, in module order, after relations are drawn and the
+    /// allocator is seeded. A module owns its components and lends them out via
+    /// [`Air::components`] / [`AirProver::prover_components`] — matching Stwo's
+    /// borrowed-component prove/verify API and avoiding any rebuild.
+    fn build_components(&mut self, allocator: &mut TraceLocationAllocator);
+
+    /// Borrow the built verifier-side components, in commit order. Call only
+    /// after [`Air::build_components`].
+    fn components(&self) -> Vec<&dyn Component>;
 }
 
 /// The prover-only extension: a module that holds a witness and can write its
@@ -88,6 +114,27 @@ pub trait AirProver: Air {
     /// Largest trace log-size this module uses; the orchestrator takes the max
     /// over all modules to size the FRI twiddles.
     fn max_log_size(&self) -> u32;
+
+    /// Largest constraint-evaluation log-degree this module needs the twiddle
+    /// domain to cover. The orchestrator takes the max over all modules and adds
+    /// the FRI blow-up to size the precomputed twiddles (unless the config pins
+    /// an explicit `lifting_log_size`).
+    ///
+    /// The default — `max_log_size() + 1` — is exactly the domain a degree-2 AIR
+    /// needs, which is what the predicate and SHA modules use. A module with
+    /// higher-degree constraints (the P256 ECDSA AIR) overrides this with the
+    /// real bound computed from its components.
+    fn max_constraint_log_degree_bound(&self) -> u32 {
+        self.max_log_size() + 1
+    }
+
+    /// Whether the commitment scheme must retain committed polynomials in
+    /// coefficient form (`set_store_polynomials_coefficients`). Off by default;
+    /// the P256 module turns it on for its lifting path. If any module in a
+    /// `prove` call needs it, the orchestrator enables it for the whole proof.
+    fn store_polynomial_coefficients(&self) -> bool {
+        false
+    }
 
     /// Phase 0 — append preprocessed columns to the shared tree.
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, Mc>);
@@ -100,8 +147,9 @@ pub trait AirProver: Air {
     /// [`Air::claimed_sums`]).
     fn write_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, Mc>);
 
-    /// Build the prover-side components (needs relations + claimed sums).
-    fn prover_components(&self) -> Vec<Box<dyn ComponentProver<SimdBackend>>>;
+    /// Borrow the built prover-side components, in commit order. Call only
+    /// after [`Air::build_components`].
+    fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>>;
 }
 
 /// Drive every module through the four phases against one shared channel and one
@@ -110,22 +158,32 @@ pub fn prove(
     modules: &mut [&mut dyn AirProver],
     config: PcsConfig,
 ) -> Result<StarkProof<Hasher>, ProvingError> {
-    let max_log_size = modules
+    // Size the twiddles to the largest constraint-evaluation domain any module
+    // needs, plus the FRI blow-up — unless the config pins an explicit lifting
+    // size. With the default (degree-2) bound this is `max_log_size + 1 +
+    // log_blowup`, matching the standalone provers.
+    let max_constraint_log_degree_bound = modules
         .iter()
-        .map(|m| m.max_log_size())
+        .map(|m| m.max_constraint_log_degree_bound())
         .max()
         .expect("at least one module");
+    let twiddle_log_size = config
+        .lifting_log_size
+        .unwrap_or(max_constraint_log_degree_bound + config.fri_config.log_blowup_factor);
 
     let twiddles = SimdBackend::precompute_twiddles(
-        CanonicCoset::new(max_log_size + 1 + config.fri_config.log_blowup_factor)
-            .circle_domain()
-            .half_coset,
+        CanonicCoset::new(twiddle_log_size).circle_domain().half_coset,
     );
 
     let channel = &mut Ch::default();
     config.mix_into(channel);
 
     let mut commitment_scheme = CommitmentSchemeProver::<SimdBackend, Mc>::new(config, &twiddles);
+    // If any module needs committed polynomials kept in coefficient form (the
+    // P256 lifting path), enable it for the shared scheme.
+    if modules.iter().any(|m| m.store_polynomial_coefficients()) {
+        commitment_scheme.set_store_polynomials_coefficients();
+    }
 
     // Tree 0: every module's preprocessed columns.
     let mut tb = commitment_scheme.tree_builder();
@@ -155,14 +213,24 @@ pub fn prove(
     for m in modules.iter_mut() {
         m.write_interaction(&mut tb);
     }
-    let claimed_sums: Vec<QM31> = modules.iter().flat_map(|m| m.claimed_sums()).collect();
-    channel.mix_felts(&claimed_sums);
+    for m in modules.iter() {
+        m.mix_claimed_sums(channel);
+    }
     tb.commit(channel);
 
-    let components: Vec<Box<dyn ComponentProver<SimdBackend>>> =
-        modules.iter().flat_map(|m| m.prover_components()).collect();
+    // Build every module's components against one shared allocator seeded with
+    // the concatenated preprocessed column ids (commit order), then collect the
+    // borrowed prover-component refs for the single prove call.
+    let preprocessed_ids: Vec<PreProcessedColumnId> = modules
+        .iter()
+        .flat_map(|m| m.preprocessed_column_ids())
+        .collect();
+    let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&preprocessed_ids);
+    for m in modules.iter_mut() {
+        m.build_components(&mut allocator);
+    }
     let component_refs: Vec<&dyn ComponentProver<SimdBackend>> =
-        components.iter().map(|c| c.as_ref()).collect();
+        modules.iter().flat_map(|m| m.prover_components()).collect();
 
     stark_prove::<SimdBackend, Mc>(&component_refs, channel, commitment_scheme)
 }
@@ -197,15 +265,17 @@ pub fn verify(
         m.draw_relations(channel);
     }
 
-    let claimed_sums: Vec<QM31> = modules.iter().flat_map(|m| m.claimed_sums()).collect();
-    channel.mix_felts(&claimed_sums);
-
     // Global LogUp balance: every yield (+) must be matched by a require (-)
     // across all modules.
+    let claimed_sums: Vec<QM31> = modules.iter().flat_map(|m| m.claimed_sums()).collect();
     if claimed_sums.iter().fold(QM31::zero(), |acc, &s| acc + s) != QM31::zero() {
         return Err(VerificationError::InvalidStructure(
             "LogUp claimed sums do not cancel".into(),
         ));
+    }
+
+    for m in modules.iter() {
+        m.mix_claimed_sums(channel);
     }
 
     // Tree 2: interaction columns of every module.
@@ -215,8 +285,18 @@ pub fn verify(
         .collect();
     commitment_scheme.commit(proof.commitments[2], &interaction_sizes, channel);
 
-    let components: Vec<Box<dyn Component>> = modules.iter().flat_map(|m| m.components()).collect();
-    let component_refs: Vec<&dyn Component> = components.iter().map(|c| c.as_ref()).collect();
+    // Build every module's components against one shared allocator (same seeding
+    // as the prover), then collect the borrowed component refs to verify.
+    let preprocessed_ids: Vec<PreProcessedColumnId> = modules
+        .iter()
+        .flat_map(|m| m.preprocessed_column_ids())
+        .collect();
+    let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&preprocessed_ids);
+    for m in modules.iter_mut() {
+        m.build_components(&mut allocator);
+    }
+    let component_refs: Vec<&dyn Component> =
+        modules.iter().flat_map(|m| m.components()).collect();
 
     stark_verify(&component_refs, channel, commitment_scheme, proof.clone())
 }

@@ -184,6 +184,7 @@ use crate::scalar::setup_air::{
 };
 use crate::types::EcdsaVerifyInput;
 
+pub mod air;
 pub mod balances;
 pub use balances::*;
 
