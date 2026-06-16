@@ -28,6 +28,7 @@
 use air_core::{Air, AirProver, TreeLayout};
 use stwo::core::air::Component;
 use stwo::core::channel::Blake2sChannel;
+use stwo::core::pcs::PcsConfig;
 use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::QM31;
 use stwo::core::vcs_lifted::blake2_merkle::{Blake2sMerkleChannel, Blake2sMerkleHasher};
@@ -145,16 +146,34 @@ impl<'a> P256Prover<'a> {
         })
     }
 
+    /// The PCS config this circuit is calibrated for. A combined proof that
+    /// includes the P256 module should drive the whole proof with this config
+    /// (it is the security-calibrated one); `lifting_log_size` is `None`, so the
+    /// orchestrator still sizes twiddles from the max constraint bound across
+    /// all modules.
+    pub fn pcs_config(&self) -> PcsConfig {
+        p256_stark_monolithic_profile_config(self.max_constraint_bound)
+    }
+
+    /// The proof claim, for packing into a combined proof and reconstructing the
+    /// verifier module.
+    pub fn proof_claim(&self) -> &P256CurrentAirProofClaim {
+        &self.proof_claim
+    }
+
+    /// The aggregate interaction claim produced during proving. Read back after
+    /// [`air_core::prove`] to pack the combined proof. Panics if called before
+    /// the interaction phase has run.
+    pub fn interaction_claim(&self) -> &P256CurrentAirInteractionClaim {
+        self.interaction_claim
+            .as_ref()
+            .expect("interaction claim is set during the interaction phase")
+    }
+
     fn relations(&self) -> &P256CurrentAirRelations {
         self.relations
             .as_ref()
             .expect("relations are drawn before they are used")
-    }
-
-    fn interaction_claim(&self) -> &P256CurrentAirInteractionClaim {
-        self.interaction_claim
-            .as_ref()
-            .expect("interaction claim is set during the interaction phase")
     }
 
     fn built_components(&self) -> &P256CurrentAirComponents {
