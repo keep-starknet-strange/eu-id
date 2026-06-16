@@ -18,10 +18,10 @@
 //! - `is_first_block` (1 col) — `1` on the first block, used by the AIR to
 //!   force `h_in == IV` only there.
 //! - `h_in` (16 cols) — 8 words × 2 limbs each, little-endian limb order.
-//! - `H_IN_AUX_GRP_COLS` (24 cols) — per-block split-and-pack of `h_in[1]`,
+//! - `H_IN_AUX_GRP_COLS` (32 cols) — per-block split-and-pack of `h_in[1]`,
 //!   `h_in[2]`, `h_in[5]`, `h_in[6]` (the §8.1 reuse chain's initial
 //!   `b`/`c`/`f`/`g` values that no prior round can supply). 4 operands
-//!   × `GROUPS_PER_ROUND_PARTITION` = 24 cells, in the fixed operand
+//!   × `GROUPS_PER_ROUND_PARTITION` = 32 cells, in the fixed operand
 //!   order `[b_init, c_init, f_init, g_init]`.
 //! - schedule words `W[0..63]` (128 cols) — 64 words × 2 limbs.
 //! - schedule witnesses for `W[16..63]`: per entry, the `σ0`/`σ1` output
@@ -46,9 +46,9 @@
 //! place; the Maj/Ch packed groups are appended at the tail so neither
 //! the limb-add nor the σ-decode read order shifts.
 //!
-//! Per-round Maj/Ch block (`ROUND_MAJ_CH_COLS = 4 · 6 = 24`): packed-group
+//! Per-round Maj/Ch block (`ROUND_MAJ_CH_COLS = 4 · 8 = 32`): packed-group
 //! values of each *fresh* operand in the partition-enumeration order
-//! (`groups_in_order` — `S[0..3]` then `S'[0..3]`). Operand order is
+//! (`groups_in_order` — `S[0..4]` then `S'[0..4]`). Operand order is
 //! `a, maj_out` (a-side / `SIGMA0_GROUPS`) followed by `e, ch_out`
 //! (e-side / `SIGMA1_GROUPS`). `b`, `c`, `f`, `g` are not committed — the
 //! §8.1 reuse chain aliases them back to prior-round `a`/`e` columns
@@ -104,7 +104,7 @@ pub const SIGMA_DECODE_COLS: usize = 5 + 5 + 2 + 4 + 4 + 4;
 /// `a`/`e` columns via in-row aliasing).
 pub const ROUND_MAJ_CH_OPERANDS: usize = 4;
 /// Columns per round dedicated to the Maj/Ch packed-group lookup
-/// inputs/outputs. `4 operands · 6 groups = 24`. Each cell is one packed
+/// inputs/outputs. `4 operands · 8 groups = 32`. Each cell is one packed
 /// value in `[0, 2^|group|) ⊆ [0, 2^MAX_ROUND_GROUP_BITS)`.
 pub const ROUND_MAJ_CH_COLS: usize = ROUND_MAJ_CH_OPERANDS * GROUPS_PER_ROUND_PARTITION;
 /// Columns per σ-input split-and-pack block: four packed values
@@ -127,7 +127,7 @@ pub const SCHEDULE_ENTRY_COLS: usize = 6 + 2 * SIGMA_DECODE_COLS + 2 * SIGMA_INP
 /// `h_in[3]`/`h_in[7]` never enter Σ/Maj/Ch directly.
 pub const H_IN_AUX_OPERANDS: usize = 4;
 /// Columns dedicated to the per-block auxiliary split-and-pack of the
-/// §8.1 reuse chain's initial values. `4 operands · 6 groups = 24` cells
+/// §8.1 reuse chain's initial values. `4 operands · 8 groups = 32` cells
 /// per block.
 pub const H_IN_AUX_GRP_COLS: usize = H_IN_AUX_OPERANDS * GROUPS_PER_ROUND_PARTITION;
 /// Number of schedule entries: `W[16..64]` ⇒ 48.
@@ -265,8 +265,8 @@ impl Layout {
         base + 24 + which * SIGMA_DECODE_COLS
     }
 
-    /// Start column of one round's Maj/Ch packed-group block — 24 cells
-    /// laid out as 4 operands × 6 groups, in `write_round_maj_ch` order.
+    /// Start column of one round's Maj/Ch packed-group block — 32 cells
+    /// laid out as 4 operands × 8 groups, in `write_round_maj_ch` order.
     /// `b`/`c`/`f`/`g` are not present here; the AIR aliases them via the
     /// §8.1 reuse chain.
     #[inline]
@@ -278,7 +278,7 @@ impl Layout {
     /// Column of one operand's packed-group cell within round `t`.
     ///
     /// `operand_idx ∈ [0, 4)` indexes the operands in the fixed order
-    /// `[a, maj_out, e, ch_out]`. `group_idx ∈ [0, 6)` indexes the groups
+    /// `[a, maj_out, e, ch_out]`. `group_idx ∈ [0, 8)` indexes the groups
     /// in the partition's `groups_in_order` enumeration.
     #[inline]
     pub const fn round_packed_group(t: usize, operand_idx: usize, group_idx: usize) -> usize {
@@ -589,7 +589,7 @@ fn write_chunk_quad(cols: &mut [Vec<BaseField>], row: usize, base: usize, chunks
     cols[base + 3][row] = m31(chunks.hi.b1);
 }
 
-/// Write one round's Maj/Ch packed-group block — 4 operands × 6 cells each,
+/// Write one round's Maj/Ch packed-group block — 4 operands × 8 cells each,
 /// in the fixed operand order `[a, maj_out, e, ch_out]` and the partition's
 /// `groups_in_order` enumeration. The §8.1 reuse chain handles `b`/`c`/
 /// `f`/`g` via in-row aliasing to prior rounds' `a`/`e` columns (and to
@@ -825,8 +825,8 @@ mod tests {
             ROUND_COLS,
             base_round + 2 * SIGMA_DECODE_COLS + ROUND_MAJ_CH_COLS
         );
-        assert_eq!(ROUND_MAJ_CH_COLS, 4 * 6);
-        assert_eq!(H_IN_AUX_GRP_COLS, 4 * 6);
+        assert_eq!(ROUND_MAJ_CH_COLS, 4 * 8);
+        assert_eq!(H_IN_AUX_GRP_COLS, 4 * 8);
         assert_eq!(SIGMA_INPUT_SPLIT_COLS, 4);
         // 4 flags + 16 word-selector + 4 byte-selector + 4 byte cells
         // + 1 post-strict aux + 4 bit-length limbs = 33 padding cells.
@@ -872,7 +872,7 @@ mod tests {
 
         for (t, round) in block.rounds.iter().enumerate() {
             // §8.1 reuse: only the four fresh operands are committed.
-            let operand_values: [[u32; 6]; 4] = [
+            let operand_values: [[u32; 8]; 4] = [
                 round.maj_ch.a_grp.vals,
                 round.maj_ch.maj_grp.vals,
                 round.maj_ch.e_grp.vals,
@@ -903,7 +903,7 @@ mod tests {
         let block = &witness.blocks[0];
         let slot = Layout::block_slot(0, log_size);
 
-        let operands: [[u32; 6]; H_IN_AUX_OPERANDS] = [
+        let operands: [[u32; 8]; H_IN_AUX_OPERANDS] = [
             block.aux_split_pack.b_init.vals,
             block.aux_split_pack.c_init.vals,
             block.aux_split_pack.f_init.vals,

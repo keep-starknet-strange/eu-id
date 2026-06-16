@@ -163,9 +163,10 @@ pub const MAX_GROUP_WIDTH: u32 = 8;
 /// `group_width` must be at least
 /// [`crate::partitions::MAX_ROUND_GROUP_BITS`] — every packed-group value
 /// the witness emits is in `[0, 2^|group|) ⊆ [0, 2^MAX_ROUND_GROUP_BITS)`,
-/// so a smaller `W` would not cover the witness's lookup keys. Subdividing
-/// 7-bit groups into smaller sub-groups (the `W = 6` design path, §9.2) is
-/// a future micro-optimisation pinned by 3.9.12's benchmark.
+/// so a smaller `W` would not cover the witness's lookup keys. The default
+/// is `W = 6` (`2¹⁸` rows): the round partitions subdivide their 7-bit
+/// groups into ≤6-bit sub-groups (design §9.2; smaller sub-groups pad with
+/// leading zeros into the same table).
 pub fn build_maj_ch_table(group_width: u32) -> Vec<MajChRow> {
     assert!(
         group_width <= MAX_GROUP_WIDTH,
@@ -174,8 +175,7 @@ pub fn build_maj_ch_table(group_width: u32) -> Vec<MajChRow> {
     assert!(
         group_width >= crate::partitions::MAX_ROUND_GROUP_BITS,
         "group_width {} below the partitions' max group width ({}); \
-         smaller widths require subdividing 7-bit groups, which the AIR \
-         does not implement yet",
+         every packed group must be ≤ W bits to key the table",
         group_width,
         crate::partitions::MAX_ROUND_GROUP_BITS,
     );
@@ -221,11 +221,12 @@ pub fn build_xor_8_table() -> Vec<Xor8Row> {
 ///
 /// Maps a 16-bit half-word (`key ∈ [0, 2¹⁶)`) to the packed group values it
 /// contributes to a given partition's half-side. For `Σ0` lo half against
-/// the a-side partition, for example, the row carries:
+/// the a-side partition (`W = 6`), for example, the row carries the four
+/// lo-half sub-groups:
 ///
-/// - the packed bits of `L0` (`{0,1,7,8,9,10,11}` ∩ lo) — appears in S,
-/// - the packed bits of `L1` (`{2,3,4,5,6}` ∩ lo) — appears in S',
-/// - the packed bits of `L2` (`{12,13,14,15}` ∩ lo) — appears in S'.
+/// - the packed bits of `L0a` (`{0,1}`) and `L0b` (`{7,8,9,10,11}`) — in S,
+/// - the packed bits of `L1` (`{2,3,4,5,6}`) — in S',
+/// - the packed bits of `L2` (`{12,13,14,15}`) — in S'.
 ///
 /// Plus the "spread" S/S' bits at their original lo-half positions, so the
 /// decode-table inputs can be assembled by linear combination across the
@@ -275,7 +276,11 @@ pub enum Half16 {
 
 /// Build the split-and-pack table for one half of one round-function
 /// partition. Each row's `groups` vector contains the packed values of the
-/// groups that intersect this half, in `s` order then `s_complement` order.
+/// groups that intersect this half, in `s` order then `s_complement` order
+/// — equivalently, `groups_in_order()` filtered to this half preserving
+/// index order, matching [`crate::partitions::round_groups_half_indices`].
+/// Under the `W = 6` partition each half intersects exactly four of the
+/// eight groups, so every row exposes 4 packed values.
 pub fn build_round_split_pack_table(
     groups: &RoundGroups,
     s_mask: u32,
@@ -589,6 +594,8 @@ mod tests {
                     build_round_split_pack_table(partition.groups(), partition.s_mask(), half);
                 assert_eq!(rows.len(), 1 << 16);
                 for row in rows.iter().take(64) {
+                    // Each half intersects exactly 4 of the 8 W=6 groups.
+                    assert_eq!(row.groups.len(), 4);
                     // spread_s ⊎ spread_s_complement = key in this half (lifted to 32-bit positions).
                     let lifted = match half {
                         Half16::Lo => row.key,

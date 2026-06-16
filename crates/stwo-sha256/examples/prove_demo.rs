@@ -12,7 +12,7 @@
 //! cargo run --release --example prove_demo -p stwo-sha256 -- "the quick brown fox"
 //! ```
 //!
-//! Build in `--release`: the 2²¹-row packed Maj/Ch preprocessed table
+//! Build in `--release`: the 2¹⁸-row packed Maj/Ch preprocessed table
 //! generation dominates wall time and is ~100× slower in debug. The
 //! eventual `bin/eu-id` (owned by the integration stream) replaces this
 //! example with a real CLI.

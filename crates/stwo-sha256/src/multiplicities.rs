@@ -93,7 +93,7 @@ pub fn decode_multiplicities(witness: &Sha256Witness, f: SigmaFn, half: Half) ->
 /// rows in `(a, b, c)`-major order: row `r = (a · 2^W + b) · 2^W + c`.
 ///
 /// Firing rule:
-/// - Per round, per group position `i ∈ [0, 6)`:
+/// - Per round, per group position `i ∈ [0, 8)`:
 ///   - one `Maj` lookup on `(a_grp[i], b_grp[i], c_grp[i])` (a-side, `Σ0` partition)
 ///   - one `Ch` lookup on `(e_grp[i], f_grp[i], g_grp[i])` (e-side, `Σ1` partition)
 ///

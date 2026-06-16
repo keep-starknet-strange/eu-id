@@ -34,8 +34,9 @@
 //!   zero elsewhere. The AIR pins `is_first_block ≡ is_first_row`, which
 //!   anchors the §10.3 chain at block 0's IV binding (docs/research/sha256-air-design.md §11 L2).
 //!
-//! Total committed columns:
-//! `8·5 + 5 + 3 + 4·4 + 4·3 + 4·1 + 1 = 40 + 5 + 3 + 16 + 12 + 4 + 1 = 81`.
+//! Total committed columns (round-side split-pack is now 5 cols each at
+//! `W = 6` — `key + 4` packed sub-groups):
+//! `8·5 + 5 + 3 + 4·5 + 4·3 + 4·1 + 1 = 40 + 5 + 3 + 20 + 12 + 4 + 1 = 85`.
 
 use stwo::core::fields::m31::BaseField;
 use stwo::core::poly::circle::CanonicCoset;
@@ -67,7 +68,7 @@ pub const fn maj_ch_log_size(group_width: u32) -> u32 {
 
 /// Aggregate of one preprocessed-tree commit input: the column
 /// evaluations, their stable IDs, and their log sizes — all three of
-/// length 81 (see [`tests::total_preprocessed_columns_is_81`]) and aligned
+/// length 85 (see [`tests::total_preprocessed_columns_is_85`]) and aligned
 /// index-for-index.
 pub type PreprocessedTrace = (
     Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
@@ -99,9 +100,9 @@ pub fn preprocessed_log_sizes(group_width: u32, log_n_rows: u32) -> Vec<u32> {
     log_sizes.extend(std::iter::repeat_n(maj_ch_log_size(group_width), 5));
     // 1 xor_8 table × 3 columns at LOG_SIZE_16.
     log_sizes.extend(std::iter::repeat_n(LOG_SIZE_16, 3));
-    // 4 round-side split-pack tables × 4 columns at LOG_SIZE_16.
+    // 4 round-side split-pack tables × 5 columns at LOG_SIZE_16.
     for _ in ROUND_SPLIT_TABLES {
-        log_sizes.extend(std::iter::repeat_n(LOG_SIZE_16, 4));
+        log_sizes.extend(std::iter::repeat_n(LOG_SIZE_16, 5));
     }
     // 4 σ-side split-pack tables × 3 columns at LOG_SIZE_16.
     for _ in SIGMA_SPLIT_TABLES {
@@ -190,14 +191,15 @@ pub fn generate_preprocessed_trace(group_width: u32, log_n_rows: u32) -> Preproc
         };
         let s_mask = p.s_mask();
         let rows = build_round_split_pack_table(&groups, s_mask, h);
-        // Per construction, round-side rows expose exactly 3 packed groups
-        // (the half's intersection with the partition's 6 groups).
-        debug_assert!(rows.iter().all(|r| r.groups.len() == 3));
+        // Per construction, round-side rows expose exactly 4 packed groups
+        // (the half's intersection with the partition's 8 W=6 groups).
+        debug_assert!(rows.iter().all(|r| r.groups.len() == 4));
         let key_col: BaseColumn = rows.iter().map(|r| BaseField::from(r.key)).collect();
         let g0_col: BaseColumn = rows.iter().map(|r| BaseField::from(r.groups[0])).collect();
         let g1_col: BaseColumn = rows.iter().map(|r| BaseField::from(r.groups[1])).collect();
         let g2_col: BaseColumn = rows.iter().map(|r| BaseField::from(r.groups[2])).collect();
-        for col in [key_col, g0_col, g1_col, g2_col] {
+        let g3_col: BaseColumn = rows.iter().map(|r| BaseField::from(r.groups[3])).collect();
+        for col in [key_col, g0_col, g1_col, g2_col, g3_col] {
             evals.push(CircleEvaluation::new(domain, col));
             log_sizes.push(LOG_SIZE_16);
         }
@@ -293,24 +295,26 @@ mod tests {
     use stwo::prover::backend::simd::m31::LOG_N_LANES;
     use stwo::prover::backend::Column;
 
-    /// Total column count: 8·5 + 5 + 3 + 4·4 + 4·3 + 4·1 + 1 = 81. Catches
+    /// Total column count: 8·5 + 5 + 3 + 4·5 + 4·3 + 4·1 + 1 = 85. Catches
     /// any regression in the per-table layout. The trailing `+ 1` is the
     /// `is_first_row` selector emitted at the main trace's `log_n_rows`.
+    /// (Round-side split-pack is 5 cols each at `W = 6`: `key + 4` groups.)
     #[test]
-    fn total_preprocessed_columns_is_81() {
+    fn total_preprocessed_columns_is_85() {
         let log_n_rows = LOG_N_LANES;
         let (evals, ids, log_sizes) = generate_preprocessed_trace(MAX_ROUND_GROUP_BITS, log_n_rows);
-        assert_eq!(evals.len(), 81);
-        assert_eq!(ids.len(), 81);
-        assert_eq!(log_sizes.len(), 81);
+        assert_eq!(evals.len(), 85);
+        assert_eq!(ids.len(), 85);
+        assert_eq!(log_sizes.len(), 85);
     }
 
     /// First eight tables (40 columns) are decode tables at log_size = 16.
-    /// Next 5 columns are Maj/Ch at log_size = 3W. The next 33 columns are
-    /// xor_8 + round/σ split-pack at log_size 16. Then 4 `Range_k` columns
-    /// — three at `LOG_N_LANES = 4` (for Range_2/4/5, padded to 16 rows)
-    /// and one at log_size 16 (Range_16, 2¹⁶ rows). The trailing column
-    /// (index 80) is `is_first_row` at the main trace's `log_n_rows`.
+    /// Next 5 columns are Maj/Ch at log_size = 3W. The next 35 columns are
+    /// xor_8 (3) + round split-pack (4×5) + σ split-pack (4×3) at log_size
+    /// 16. Then 4 `Range_k` columns — three at `LOG_N_LANES = 4` (for
+    /// Range_2/4/5, padded to 16 rows) and one at log_size 16 (Range_16,
+    /// 2¹⁶ rows). The trailing column (index 84) is `is_first_row` at the
+    /// main trace's `log_n_rows`.
     #[test]
     fn log_sizes_lay_out_correctly() {
         let w = MAX_ROUND_GROUP_BITS;
@@ -319,9 +323,9 @@ mod tests {
         for (i, &ls) in log_sizes.iter().enumerate() {
             let expected = if (40..45).contains(&i) {
                 3 * w
-            } else if (76..79).contains(&i) {
+            } else if (80..83).contains(&i) {
                 LOG_N_LANES
-            } else if i == 80 {
+            } else if i == 84 {
                 log_n_rows
             } else {
                 16
@@ -338,7 +342,7 @@ mod tests {
     fn is_first_row_selector_is_one_at_index_zero() {
         let log_n_rows = LOG_N_LANES;
         let (evals, _, _) = generate_preprocessed_trace(MAX_ROUND_GROUP_BITS, log_n_rows);
-        // The selector is the last column (index 80).
+        // The selector is the last column (index 84).
         let selector = evals.last().expect("at least one preprocessed column");
         let n_rows = 1usize << log_n_rows;
         for i in 0..n_rows {
@@ -378,14 +382,14 @@ mod tests {
 
     /// [`preprocessed_log_sizes`] is pure metadata (no table build), so its
     /// shape is checked cheaply across the whole `group_width` range and for
-    /// large `log_n_rows`: 81 columns, the Maj/Ch block (cols 40..45) sized
+    /// large `log_n_rows`: 85 columns, the Maj/Ch block (cols 40..45) sized
     /// to `3·W`, and the trailing selector sized to `log_n_rows`.
     #[test]
     fn metadata_log_sizes_shape_for_all_widths() {
         for w in MAX_ROUND_GROUP_BITS..=crate::tables::MAX_GROUP_WIDTH {
             for log_n_rows in [LOG_N_LANES, 20, 30] {
                 let meta = preprocessed_log_sizes(w, log_n_rows);
-                assert_eq!(meta.len(), 81, "w={w}, l={log_n_rows}");
+                assert_eq!(meta.len(), 85, "w={w}, l={log_n_rows}");
                 for &ls in &meta[40..45] {
                     assert_eq!(ls, 3 * w, "Maj/Ch log_size at w={w}");
                 }
@@ -452,7 +456,8 @@ mod tests {
         col_eq(46, &xr.iter().map(|r| r.y).collect::<Vec<_>>(), "xor.y");
         col_eq(47, &xr.iter().map(|r| r.z).collect::<Vec<_>>(), "xor.z");
 
-        // round-side split-pack table 0 (Σ0&Maj, Lo) → cols 48..52.
+        // round-side split-pack table 0 (Σ0&Maj, Lo) → cols 48..53 (5 cols
+        // at W=6: key + 4 sub-groups).
         let rsp = build_round_split_pack_table(
             &SIGMA0_GROUPS,
             RoundPartition::Sigma0AndMaj.s_mask(),
@@ -478,22 +483,28 @@ mod tests {
             &rsp.iter().map(|r| r.groups[2]).collect::<Vec<_>>(),
             "round_split.g2",
         );
+        col_eq(
+            52,
+            &rsp.iter().map(|r| r.groups[3]).collect::<Vec<_>>(),
+            "round_split.g3",
+        );
 
-        // σ-side split-pack table 0 (LowerSigma0, Lo) → cols 64..67.
+        // σ-side split-pack table 0 (LowerSigma0, Lo) → cols 68..71 (after
+        // the 4 round-side tables now occupy cols 48..68).
         let ssp =
             build_sigma_split_pack_table(LowerSigmaPartition::LowerSigma0.parts(), Half16::Lo);
         col_eq(
-            64,
+            68,
             &ssp.iter().map(|r| r.key).collect::<Vec<_>>(),
             "sigma_split.key",
         );
         col_eq(
-            65,
+            69,
             &ssp.iter().map(|r| r.groups[0]).collect::<Vec<_>>(),
             "sigma_split.s",
         );
         col_eq(
-            66,
+            70,
             &ssp.iter().map(|r| r.groups[1]).collect::<Vec<_>>(),
             "sigma_split.sp",
         );

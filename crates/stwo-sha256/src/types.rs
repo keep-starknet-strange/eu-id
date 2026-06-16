@@ -143,23 +143,24 @@ pub struct PaddingWitness {
     pub bit_length: u64,
 }
 
-/// Packed-group decomposition of one 32-bit value under a 6-group
+/// Packed-group decomposition of one 32-bit value under an 8-group
 /// round-function partition (`Σ0`/`Maj` a-side or `Σ1`/`Ch` e-side).
 ///
 /// The Maj/Ch packed table at width `W ≥ MAX_ROUND_GROUP_BITS` is keyed on
 /// these packed values: bit `j` of `vals[i]` is the bit of the source word
 /// at the partition's `groups_in_order()[i][j]` position. Each value lies
 /// in `[0, 2^|group_i|) ⊆ [0, 2^W)`, range-checked implicitly by being a
-/// lookup-table input. Six values per word per partition — three `S`-side
-/// groups followed by three `S'`-side groups.
+/// lookup-table input. Eight values per word per partition — four `S`-side
+/// groups followed by four `S'`-side groups (the `W = 6` layout subdivides
+/// the two 7-bit groups of each partition; design §9.2).
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct RoundPackedGroups {
-    /// 6 packed values in `partitions::RoundGroups::groups_in_order()` order.
-    pub vals: [u32; 6],
+    /// 8 packed values in `partitions::RoundGroups::groups_in_order()` order.
+    pub vals: [u32; 8],
 }
 
 impl RoundPackedGroups {
-    /// Pack the 6 group values of `w` against the given partition. Mirrors
+    /// Pack the 8 group values of `w` against the given partition. Mirrors
     /// `partitions::pack_round_groups` but typed at the witness layer so
     /// every consumer reads the same field order.
     #[inline]
@@ -171,7 +172,7 @@ impl RoundPackedGroups {
 }
 
 /// Per-round Maj/Ch packed-group witness — the inputs and outputs of the
-/// 6 Maj lookups and the 6 Ch lookups the AIR fires per round, after the
+/// 8 Maj lookups and the 8 Ch lookups the AIR fires per round, after the
 /// §8.1 "split once, reuse" optimisation.
 ///
 /// Only the **fresh** operands per round live here: the *new* a-side input

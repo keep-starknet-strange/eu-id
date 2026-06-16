@@ -15,18 +15,20 @@ use stwo_sha256::witness::{
 /// Pin `Layout::TOTAL_COLS` to the claimed total so any future
 /// column-count drift fails closed against the test-plan value.
 ///
-/// 9 322 was the pre-padding total after the split-and-pack refactor.
-/// Adding the §10.4 padding-role witness tacks `PADDING_ROW_COLS = 33`
-/// cells onto each row, then the C1-fix aux column `enabler_step` adds
-/// 1 more — final total 9 356.
+/// 9 842 is the pre-padding total at `W = 6`: the round-side Maj/Ch and
+/// `H_IN_AUX` packed-group blocks each grew from 6 to 8 groups per
+/// operand (+8 cells/round × 64 rounds, +8 for the aux block), i.e.
+/// +520 over the `W = 7` baseline of 9 322. Adding the §10.4 padding-role
+/// witness tacks `PADDING_ROW_COLS = 33` cells onto each row, then the
+/// C1-fix aux column `enabler_step` adds 1 more — final total 9 876.
 #[test]
-fn total_cols_equals_9356_after_c1_aux_column() {
+fn total_cols_equals_9876_at_w6() {
     println!("Layout::TOTAL_COLS = {}", Layout::TOTAL_COLS);
-    assert_eq!(Layout::TOTAL_COLS, 9_356);
+    assert_eq!(Layout::TOTAL_COLS, 9_876);
     // The 33-cell padding delta and the trailing `enabler_step` cell add
-    // up to the post-padding delta over the 9 322-column refactor baseline.
+    // up to the post-padding delta over the 9 842-column W=6 baseline.
     assert_eq!(PADDING_ROW_COLS, 33);
-    assert_eq!(Layout::TOTAL_COLS, 9_322 + PADDING_ROW_COLS + 1);
+    assert_eq!(Layout::TOTAL_COLS, 9_842 + PADDING_ROW_COLS + 1);
 }
 
 /// Print per-block lookup multiplicities for the `b"abc"` single-block
@@ -53,6 +55,8 @@ fn per_block_multiplicities_for_abc_match_plan() {
     println!("grand_total = {grand_total}");
 
     assert_eq!(decode.total(), 448);
-    assert_eq!(maj_ch_xor.total(), 1664);
+    // W=6: maj = ch = 64 rounds × 8 groups = 512 each; xor_8 = 896
+    // (unchanged) ⇒ 1920. (Was 1664 at W=7's 6 groups.)
+    assert_eq!(maj_ch_xor.total(), 1920);
     assert_eq!(split_pack.total(), 712);
 }

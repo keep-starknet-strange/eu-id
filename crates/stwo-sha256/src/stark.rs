@@ -87,12 +87,12 @@ pub struct ProverConfig {
     /// fitting at most 16 padded blocks (~1 KiB of message). Larger
     /// messages must override; see the recipe above.
     pub log_n_rows: u32,
-    /// Group width `W` for the packed `Maj`/`Ch` table. `7` is the minimum
-    /// without subdividing the existing partitions' 7-bit groups; smaller
-    /// `W` values require a partition rework (design §9.2 sketches the
-    /// `W = 6` "subdivide 7-bit groups" path as a future micro-optimisation
-    /// the laptop/mobile benchmark can pin). The packed-table size is
-    /// `2^(3W)` rows; at `W = 7` that is `2²¹ ≈ 2.1 M` rows.
+    /// Group width `W` for the packed `Maj`/`Ch` table. The default is
+    /// `MAX_ROUND_GROUP_BITS = 6`: the round partitions subdivide their two
+    /// 7-bit groups into ≤6-bit sub-groups (design §9.2), so every packed
+    /// group is `≤ 6` bits and the table is `2^(3·6) = 2¹⁸ ≈ 262 k` rows —
+    /// an 8× shrink from the old `W = 7` `2²¹` table that dominated prove
+    /// cost (perf-doc §3.1, §4.1). The packed-table size is `2^(3W)` rows.
     pub group_width: u32,
     /// Stwo PCS configuration (FRI + PoW parameters). Use
     /// `PcsConfig::default()` for the smallest sensible test config;
@@ -660,10 +660,11 @@ fn interaction_trace_log_sizes(
     // base-field columns at the same log_size.
     const EXT: usize = stwo::core::fields::qm31::SECURE_EXTENSION_DEGREE;
 
-    // Sha256Eval consumer: 3464 lookups per block → 1732 paired columns.
-    // Sized at log_n_rows. See `interaction::sha256_interaction` for the
-    // per-block lookup-count breakdown.
-    let sha_cols = num_paired_cols(3464);
+    // Sha256Eval consumer: 3720 lookups per block (W=6) → 1860 paired
+    // columns. Sized at log_n_rows. See `interaction::sha256_interaction`
+    // for the per-block lookup-count breakdown (the +256 over W=7's 3464 is
+    // the 8-vs-6 Maj/Ch lookups per round × 64 rounds).
+    let sha_cols = num_paired_cols(3720);
     out.extend(std::iter::repeat_n(log_n_rows, sha_cols * EXT));
     // 8 decode producers: 1 lookup each → 1 column each at log_size 16.
     for _ in DECODE_TABLES {

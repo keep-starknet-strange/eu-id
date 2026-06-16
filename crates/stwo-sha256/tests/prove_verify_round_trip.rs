@@ -5,9 +5,9 @@
 //! - The entire 23-component composition (`Sha256Eval` consumer +
 //!   8 σ/Σ decode producers + 1 packed Maj/Ch + 1 xor_8 + 4 round
 //!   split-pack + 4 σ split-pack + 4 `Range_k` producers).
-//! - The preprocessed-trace commitment (81 columns).
-//! - The base-trace commitment (9 356 SHA-256 columns + 23 producer
-//!   multiplicity columns).
+//! - The preprocessed-trace commitment (85 columns at W=6).
+//! - The base-trace commitment (`Layout::TOTAL_COLS` SHA-256 columns +
+//!   23 producer multiplicity columns).
 //! - The LogUp interaction trace across every component, with
 //!   consumer ⇄ producer sums totalling zero — the soundness backbone.
 //! - The Blake2s channel + PCS commitment scheme + FRI proof flow.
@@ -15,7 +15,7 @@
 //!   non-zero claimed-sum total).
 //!
 //! These are the slowest tests in the suite — the packed Maj/Ch table is
-//! 2²¹ rows, so the preprocessed trace generation and commitment
+//! 2¹⁸ rows (W=6), so the preprocessed trace generation and commitment
 //! dominate. Marked `#[ignore]` so `cargo test` stays quick; run
 //! explicitly with `cargo test -p stwo-sha256 --release
 //! prove_verify_round_trip -- --ignored`.
@@ -50,7 +50,7 @@ fn prove_and_verify(msg: &[u8]) -> usize {
 }
 
 /// FIPS 180-4 Appendix B.1 test vector — single padded block.
-#[ignore = "slow: 2^21-row Maj/Ch preprocessed trace dominates; run in release with --ignored"]
+#[ignore = "slow: 2^18-row Maj/Ch preprocessed trace dominates; run in release with --ignored"]
 #[test]
 fn prove_and_verify_abc() {
     assert_eq!(prove_and_verify(b"abc"), 1);
@@ -60,7 +60,7 @@ fn prove_and_verify_abc() {
 /// the multi-block padding flag layout (marker block ≠ length block),
 /// and the multi-block `Range_k` consumer lookups end-to-end. None of
 /// these constraints fire on the single-block `b"abc"` case.
-#[ignore = "slow: 2^21-row Maj/Ch preprocessed trace dominates; run in release with --ignored"]
+#[ignore = "slow: 2^18-row Maj/Ch preprocessed trace dominates; run in release with --ignored"]
 #[test]
 fn prove_and_verify_multi_block() {
     // 200 bytes ⇒ 200 + 9 = 209 padding bytes ⇒ 4 padded blocks. The
@@ -81,7 +81,7 @@ fn prove_and_verify_multi_block() {
 /// component is larger than the smaller producer tables — would slip
 /// through the other coverage. A 4 096-byte message produces ~65 padded
 /// blocks ⇒ `log_n_rows = 7`, three bits above the floor.
-#[ignore = "slow: 2^21-row Maj/Ch preprocessed trace dominates; run in release with --ignored"]
+#[ignore = "slow: 2^18-row Maj/Ch preprocessed trace dominates; run in release with --ignored"]
 #[test]
 fn prove_and_verify_long_message() {
     // 4 096 bytes ⇒ 4 096 + 9 = 4 105 padding bytes ⇒ ceil(4 105 / 64) =
@@ -102,7 +102,7 @@ fn prove_and_verify_long_message() {
 /// padding constraints. These boundaries are covered at the witness and
 /// trace layer but not at the end-to-end prove/verify boundary anywhere
 /// else in the suite.
-#[ignore = "slow: 2^21-row Maj/Ch preprocessed trace dominates; run in release with --ignored"]
+#[ignore = "slow: 2^18-row Maj/Ch preprocessed trace dominates; run in release with --ignored"]
 #[test]
 fn prove_and_verify_padding_boundaries() {
     // Empty message — single marker+length block, marker at byte 0 of W[0].
@@ -123,7 +123,7 @@ fn prove_and_verify_padding_boundaries() {
 /// callers can supply a pre-built witness (e.g. coming from a credential
 /// builder, not raw bytes). Pin the contract that it produces a proof
 /// indistinguishable from `prove_sha256` on the same message.
-#[ignore = "slow: 2^21-row Maj/Ch preprocessed trace dominates; run in release with --ignored"]
+#[ignore = "slow: 2^18-row Maj/Ch preprocessed trace dominates; run in release with --ignored"]
 #[test]
 fn prove_sha256_from_witness_matches_prove_sha256() {
     let msg = b"abc";
@@ -195,7 +195,7 @@ fn verify_rejects_logup_sum_mutation() {
 /// the *proof* to isolate the `Range_k` LogUp loop; this one mutates the
 /// *witness* end-to-end. Together they cover the L4 audit lesson from
 /// both directions.
-#[ignore = "slow: 2^21-row Maj/Ch preprocessed trace dominates; run in release with --ignored"]
+#[ignore = "slow: 2^18-row Maj/Ch preprocessed trace dominates; run in release with --ignored"]
 #[test]
 fn rejects_out_of_range_carry_witness_mutation() {
     let msg = b"abc";
