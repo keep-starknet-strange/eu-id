@@ -17,6 +17,7 @@ orchestration are implemented.
 - `crates/stwo-p256`: AIR-facing code, native witnesses, range-check providers, scalar setup, and scalar mod-mul components.
 - `crates/stwo-p256-utils`: prover-independent arithmetic utilities, limb constants, scalar arithmetic traces, and Solinas matrix generation.
 - `crates/stwo-p256/docs`: implementation specs for the P-256 ECDSA AIR.
+- `crates/predicates`: STARK proofs for credential predicates (e.g. age-over-N), plus `prove`/`verify` CLI binaries. See `crates/predicates/USAGE.md`.
 
 ## Development
 
