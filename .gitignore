@@ -2,3 +2,10 @@
 /tasks
 .idea
 .DS_Store
+
+# Mobile harness — generated/build artifacts (regenerate via
+# crates/eu-id-ffi/build-xcframework.sh and `xcodegen generate`).
+/crates/eu-id-ffi/EuId.xcframework
+# xcodebuild output dirs: build/ (simulator), build-device/ (on-device), etc.
+/mobile/EuIdBench/build*
+/mobile/EuIdBench/EuIdBench.xcodeproj

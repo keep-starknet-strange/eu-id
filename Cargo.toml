@@ -4,6 +4,7 @@ members = [
     "crates/stwo-p256-utils",
     "crates/stwo-sha256",
     "crates/predicates",
+    "crates/eu-id-ffi",
 ]
 resolver = "2"
 
