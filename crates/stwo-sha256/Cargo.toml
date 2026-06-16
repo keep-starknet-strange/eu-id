@@ -12,8 +12,8 @@ std = ["stwo/std", "stwo-constraint-framework/std"]
 parallel = ["stwo/parallel", "stwo-constraint-framework/parallel"]
 
 [dependencies]
-stwo = { git = "https://github.com/starkware-libs/stwo.git", features = ["prover"] }
-stwo-constraint-framework = { git = "https://github.com/starkware-libs/stwo.git", features = ["prover"] }
+stwo = { workspace = true }
+stwo-constraint-framework = { workspace = true }
 num-traits = "0.2"
 
 [dev-dependencies]
