@@ -1,6 +1,21 @@
 [workspace]
-members = ["crates/stwo-p256", "crates/stwo-sha256", "crates/eu-id-ffi"]
+members = [
+    "crates/stwo-p256",
+    "crates/stwo-p256-utils",
+    "crates/stwo-sha256",
+    "crates/predicates",
+    "crates/eu-id-ffi",
+]
 resolver = "2"
+
+[profile.release]
+debug = true
+
+[workspace.dependencies]
+stwo = { git = "https://github.com/starkware-libs/stwo.git", features = ["prover"] }
+stwo-constraint-framework = { git = "https://github.com/starkware-libs/stwo.git", features = ["prover"] }
+serde = { version = "1", features = ["derive"] }
+num-traits = "0.2"
 
 # Workspace-wide lint configuration. Every crate opts in with `[lints]
 # workspace = true`, so the whole workspace shares one clippy baseline and a
