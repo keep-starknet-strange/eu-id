@@ -18,38 +18,15 @@
 //! breaks the verifier's challenge re-derivation.
 
 use num_traits::Zero;
-use stwo::core::air::Component;
-use stwo::core::channel::Blake2sChannel;
-use stwo::core::fields::m31::BaseField;
-use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
-use stwo::core::poly::circle::CanonicCoset;
+use stwo::core::pcs::PcsConfig;
 use stwo::core::proof::StarkProof;
-use stwo::core::vcs_lifted::blake2_merkle::{Blake2sMerkleChannel, Blake2sMerkleHasher};
-use stwo::core::verifier::{verify, VerificationError as StwoVerificationError};
-use stwo::prover::backend::simd::column::BaseColumn;
+use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleHasher;
+use stwo::core::verifier::VerificationError as StwoVerificationError;
 use stwo::prover::backend::simd::m31::LOG_N_LANES;
-use stwo::prover::backend::simd::SimdBackend;
-use stwo::prover::poly::circle::{CircleEvaluation, PolyOps};
-use stwo::prover::poly::BitReversedOrder;
-use stwo::prover::{prove, CommitmentSchemeProver, ComponentProver};
-use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 
-use crate::components::{
-    all_preprocessed_column_ids, range_log_size, MajChEval, RangeKEval, RoundSplitPackEval,
-    Sha256Relations, SigmaDecodeEval, SigmaSplitPackEval, Xor8Eval, DECODE_TABLES, RANGE_TABLES,
-    ROUND_SPLIT_TABLES, SIGMA_SPLIT_TABLES,
-};
+use crate::air::{Sha256Prover, Sha256Verifier};
 use crate::constants::DIGEST_BYTES;
-use crate::constraints::Sha256Eval;
-use crate::interaction::{generate_interaction_trace, InteractionClaim};
-use crate::multiplicities::{
-    decode_multiplicities, maj_ch_multiplicities, range_k_multiplicities,
-    round_split_pack_multiplicities, sigma_split_pack_multiplicities, xor_8_multiplicities,
-};
-use crate::preprocessed::{
-    generate_preprocessed_trace, maj_ch_log_size, preprocessed_log_sizes, LOG_SIZE_16,
-};
-use crate::trace::Layout;
+use crate::interaction::InteractionClaim;
 use crate::types::{Digest, Sha256Witness};
 use crate::witness::compute_sha256_witness;
 
@@ -284,6 +261,11 @@ pub fn prove_sha256_from_witness(
 
 /// Inner prover — assumes `config` has been validated. Split out so the
 /// `?`/error-mapping at the boundary stays tidy.
+///
+/// The four-phase plumbing (preprocessed tables, base trace + producer
+/// multiplicities, per-component interaction trace, component assembly) now
+/// lives in [`Sha256Prover`]; this is the thin one-module wrapper that runs it
+/// through the shared [`air_core::prove`] orchestrator.
 fn prove_sha256_inner(
     witness: &Sha256Witness,
     config: &ProverConfig,
@@ -292,107 +274,9 @@ fn prove_sha256_inner(
     let group_width = config.group_width;
     let pcs_config = config.pcs_config;
 
-    // ---- Setup protocol & twiddles ----
-    let channel = &mut Blake2sChannel::default();
-    pcs_config.mix_into(channel);
-
-    // Twiddles must cover the largest committed domain plus the FRI
-    // blow-up. Among our 23 components, Maj/Ch is the biggest at `3W`
-    // rows; everything else is ≤ 16. Use `+ 1` for the half-coset.
-    let max_log_size = maj_ch_log_size(group_width)
-        .max(LOG_SIZE_16)
-        .max(log_n_rows);
-    let twiddles = SimdBackend::precompute_twiddles(
-        CanonicCoset::new(max_log_size + 1 + pcs_config.fri_config.log_blowup_factor)
-            .circle_domain()
-            .half_coset,
-    );
-
-    let mut commitment_scheme =
-        CommitmentSchemeProver::<SimdBackend, Blake2sMerkleChannel>::new(pcs_config, &twiddles);
-
-    // ---- tree[0]: preprocessed trace ----
-    let (preprocessed_evals, _ids, _log_sizes) =
-        generate_preprocessed_trace(group_width, log_n_rows);
-    let mut tree_builder = commitment_scheme.tree_builder();
-    tree_builder.extend_evals(preprocessed_evals);
-    tree_builder.commit(channel);
-
-    // Mix stmt0 (the per-component log sizes) into the channel so the
-    // verifier's challenge stream matches. We use `log_n_rows` and
-    // `group_width` as the surface — the rest of the log sizes are pinned
-    // by these via `LOG_SIZE_16` and `maj_ch_log_size(W)`.
-    Stmt0 {
-        log_n_rows,
-        group_width,
-    }
-    .mix_into(channel);
-
-    // ---- tree[1]: Sha256Eval base trace + producer multiplicity cols ----
-    let mut base_trace: Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>> =
-        Vec::new();
-
-    let sha_main = crate::trace::generate_trace(witness, log_n_rows);
-    debug_assert_eq!(sha_main.len(), Layout::TOTAL_COLS);
-    let sha_domain = CanonicCoset::new(log_n_rows).circle_domain();
-    for col_vec in sha_main {
-        let col: BaseColumn = col_vec.into_iter().collect();
-        base_trace.push(CircleEvaluation::new(sha_domain, col));
-    }
-
-    // Multiplicity columns — same order as `Components::component_provers`.
-    for &(f, h) in DECODE_TABLES {
-        let mults = decode_multiplicities(witness, f, h);
-        base_trace.push(mult_col_to_eval(&mults, LOG_SIZE_16));
-    }
-    {
-        let mc = maj_ch_multiplicities(witness, group_width);
-        let log_size = maj_ch_log_size(group_width);
-        base_trace.push(mult_col_to_eval(&mc.maj, log_size));
-        base_trace.push(mult_col_to_eval(&mc.ch, log_size));
-    }
-    {
-        let mults = xor_8_multiplicities(witness);
-        base_trace.push(mult_col_to_eval(&mults, LOG_SIZE_16));
-    }
-    for &(p, h) in ROUND_SPLIT_TABLES {
-        let mults = round_split_pack_multiplicities(witness, p, h);
-        base_trace.push(mult_col_to_eval(&mults, LOG_SIZE_16));
-    }
-    for &(p, h) in SIGMA_SPLIT_TABLES {
-        let mults = sigma_split_pack_multiplicities(witness, p, h);
-        base_trace.push(mult_col_to_eval(&mults, LOG_SIZE_16));
-    }
-    for &kind in RANGE_TABLES {
-        let mults = range_k_multiplicities(witness, kind);
-        base_trace.push(mult_col_to_eval(&mults, range_log_size(kind)));
-    }
-
-    let mut tree_builder = commitment_scheme.tree_builder();
-    tree_builder.extend_evals(base_trace);
-    tree_builder.commit(channel);
-
-    // ---- Draw LogUp relations ----
-    let relations = Sha256Relations::draw(channel);
-
-    // ---- tree[2]: interaction trace per component ----
-    let (interaction_evals, interaction_claim) =
-        generate_interaction_trace(&relations, witness, log_n_rows, group_width);
-
-    // Mix stmt1 (the per-component claimed sums) before committing the
-    // interaction tree. Verifier mirrors this order.
-    interaction_claim.mix_into(channel);
-
-    let mut tree_builder = commitment_scheme.tree_builder();
-    tree_builder.extend_evals(interaction_evals);
-    tree_builder.commit(channel);
-
-    // ---- Build components and prove ----
-    let components_owned =
-        Sha256Components::new(&interaction_claim, &relations, log_n_rows, group_width);
-    let component_provers = components_owned.component_provers();
-    let stark_proof =
-        prove::<SimdBackend, Blake2sMerkleChannel>(&component_provers, channel, commitment_scheme)?;
+    let mut prover = Sha256Prover::new(witness, log_n_rows, group_width);
+    let stark_proof = air_core::prove(&mut [&mut prover], pcs_config)?;
+    let interaction_claim = prover.interaction_claim().clone();
 
     let digest = witness.digest_from_blocks();
     Ok(Sha256Proof {
@@ -455,72 +339,23 @@ pub fn verify_sha256_proof(proof: &Sha256Proof) -> Result<(), Sha256VerifyError>
     validate_verify_params(proof.group_width, proof.log_n_rows)?;
 
     // ---- Soundness gate: claimed sums must total zero ----
+    // The orchestrator also enforces this (its global LogUp balance), but we
+    // check it up front so a broken balance surfaces as the typed
+    // `LogupSumNonZero` rather than a generic structural rejection.
     if !proof.interaction_claim.total().is_zero() {
         return Err(Sha256VerifyError::LogupSumNonZero);
     }
 
-    let pcs_config = proof.pcs_config;
-
-    // ---- Setup ----
-    let channel = &mut Blake2sChannel::default();
-    pcs_config.mix_into(channel);
-    let commitment_scheme_verifier =
-        &mut CommitmentSchemeVerifier::<Blake2sMerkleChannel>::new(pcs_config);
-
-    // ---- tree[0]: preprocessed (re-derive log sizes from the proof) ----
-    // Metadata only: the verifier needs the per-column log sizes to commit
-    // `tree[0]`, never the column data. Rebuilding the lookup tables here
-    // (millions of Maj/Ch rows) just to discard the evaluations would put
-    // prover-scale work on every verify — see `preprocessed_log_sizes`.
-    let preprocessed_log_sizes = preprocessed_log_sizes(proof.group_width, proof.log_n_rows);
-    commitment_scheme_verifier.commit(
-        proof.stark_proof.commitments[0],
-        &preprocessed_log_sizes,
-        channel,
-    );
-
-    Stmt0 {
-        log_n_rows: proof.log_n_rows,
-        group_width: proof.group_width,
-    }
-    .mix_into(channel);
-
-    // ---- tree[1]: base trace log sizes ----
-    let base_log_sizes = base_trace_log_sizes(proof.log_n_rows, proof.group_width);
-    commitment_scheme_verifier.commit(proof.stark_proof.commitments[1], &base_log_sizes, channel);
-
-    // ---- Draw relations (must match prover order) ----
-    let relations = Sha256Relations::draw(channel);
-
-    // ---- tree[2]: interaction trace log sizes ----
-    proof.interaction_claim.mix_into(channel);
-    let interaction_log_sizes = interaction_trace_log_sizes(
+    // The transcript re-derivation, tree commitments, and component
+    // reconstruction now live in [`Sha256Verifier`] + the shared
+    // [`air_core::verify`] orchestrator.
+    let mut verifier = Sha256Verifier::new(
         proof.log_n_rows,
         proof.group_width,
-        &proof.interaction_claim,
+        proof.interaction_claim.clone(),
     );
-    commitment_scheme_verifier.commit(
-        proof.stark_proof.commitments[2],
-        &interaction_log_sizes,
-        channel,
-    );
-
-    // ---- Reconstruct components and verify ----
-    let components_owned = Sha256Components::new(
-        &proof.interaction_claim,
-        &relations,
-        proof.log_n_rows,
-        proof.group_width,
-    );
-    let components = components_owned.components();
-
-    verify(
-        &components,
-        channel,
-        commitment_scheme_verifier,
-        proof.stark_proof.clone(),
-    )
-    .map_err(|e: StwoVerificationError| Sha256VerifyError::StarkRejected(format!("{e:?}")))
+    air_core::verify(&mut [&mut verifier], &proof.stark_proof)
+        .map_err(|e: StwoVerificationError| Sha256VerifyError::StarkRejected(format!("{e:?}")))
 }
 
 /// Native (out-of-circuit) digest. Useful for integration tests and as
@@ -593,274 +428,10 @@ pub fn build_trace_for(
     Ok((witness, trace))
 }
 
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
-/// Per-proof "statement 0": fixes the component log-size surface so the
-/// channel state agrees on both sides.
-struct Stmt0 {
-    log_n_rows: u32,
-    group_width: u32,
-}
-impl Stmt0 {
-    fn mix_into(&self, channel: &mut Blake2sChannel) {
-        use stwo::core::channel::Channel;
-        channel.mix_u64(self.log_n_rows as u64);
-        channel.mix_u64(self.group_width as u64);
-    }
-}
-
-/// Pack a `Vec<u32>` multiplicity vector into a SIMD `BaseColumn`-backed
-/// `CircleEvaluation` at the given `log_size`. The vector's length must
-/// equal `1 << log_size`.
-fn mult_col_to_eval(
-    mults: &[u32],
-    log_size: u32,
-) -> CircleEvaluation<SimdBackend, BaseField, BitReversedOrder> {
-    debug_assert_eq!(mults.len(), 1usize << log_size);
-    let domain = CanonicCoset::new(log_size).circle_domain();
-    let col: BaseColumn = mults.iter().map(|&m| BaseField::from(m)).collect();
-    CircleEvaluation::new(domain, col)
-}
-
-/// log_sizes of every base-trace column in commit order. The Sha256Eval
-/// block first (`TOTAL_COLS` × `log_n_rows`), then one mult col per
-/// producer component.
-fn base_trace_log_sizes(log_n_rows: u32, group_width: u32) -> Vec<u32> {
-    let mut out = vec![log_n_rows; Layout::TOTAL_COLS];
-    // 8 decode mults, each at log_size 16.
-    out.extend(std::iter::repeat_n(LOG_SIZE_16, DECODE_TABLES.len()));
-    // 2 Maj/Ch mults, each at log_size 3W.
-    out.extend(std::iter::repeat_n(maj_ch_log_size(group_width), 2));
-    // xor_8 mult.
-    out.push(LOG_SIZE_16);
-    // 4 round + 4 σ split-pack mults.
-    out.extend(std::iter::repeat_n(LOG_SIZE_16, ROUND_SPLIT_TABLES.len()));
-    out.extend(std::iter::repeat_n(LOG_SIZE_16, SIGMA_SPLIT_TABLES.len()));
-    // 4 range mults, each at its own `range_log_size(kind)`.
-    for &kind in RANGE_TABLES {
-        out.push(range_log_size(kind));
-    }
-    out
-}
-
-/// log_sizes of every interaction-trace column in commit order. Each
-/// component's column count is `(n_lookups + 1) / 2`. We infer the count
-/// from the structural firing rule (matching the
-/// `interaction::sha256_interaction` derivation).
-fn interaction_trace_log_sizes(
-    log_n_rows: u32,
-    group_width: u32,
-    _claim: &InteractionClaim,
-) -> Vec<u32> {
-    let mut out = Vec::new();
-
-    // Each SecureField interaction column expands to SECURE_EXTENSION_DEGREE = 4
-    // base-field columns at the same log_size.
-    const EXT: usize = stwo::core::fields::qm31::SECURE_EXTENSION_DEGREE;
-
-    // Sha256Eval consumer: 3720 lookups per block (W=6) → 1860 paired
-    // columns. Sized at log_n_rows. See `interaction::sha256_interaction`
-    // for the per-block lookup-count breakdown (the +256 over W=7's 3464 is
-    // the 8-vs-6 Maj/Ch lookups per round × 64 rounds).
-    let sha_cols = num_paired_cols(3720);
-    out.extend(std::iter::repeat_n(log_n_rows, sha_cols * EXT));
-    // 8 decode producers: 1 lookup each → 1 column each at log_size 16.
-    for _ in DECODE_TABLES {
-        out.extend(std::iter::repeat_n(LOG_SIZE_16, num_paired_cols(1) * EXT));
-    }
-    // Maj/Ch: 2 lookups → 1 paired column at log_size 3W.
-    out.extend(std::iter::repeat_n(
-        maj_ch_log_size(group_width),
-        num_paired_cols(2) * EXT,
-    ));
-    // xor_8: 1 lookup → 1 column at log_size 16.
-    out.extend(std::iter::repeat_n(LOG_SIZE_16, num_paired_cols(1) * EXT));
-    // 4 round split-pack: 1 lookup each.
-    for _ in ROUND_SPLIT_TABLES {
-        out.extend(std::iter::repeat_n(LOG_SIZE_16, num_paired_cols(1) * EXT));
-    }
-    // 4 σ split-pack: 1 lookup each.
-    for _ in SIGMA_SPLIT_TABLES {
-        out.extend(std::iter::repeat_n(LOG_SIZE_16, num_paired_cols(1) * EXT));
-    }
-    // 4 Range_k producers: 1 lookup each, at the kind's own log_size.
-    for &kind in RANGE_TABLES {
-        out.extend(std::iter::repeat_n(
-            range_log_size(kind),
-            num_paired_cols(1) * EXT,
-        ));
-    }
-    out
-}
-
-/// Number of interaction columns produced by `n_lookups` lookups under
-/// pair-batching: `ceil(n_lookups / 2)`.
-#[inline]
-const fn num_paired_cols(n_lookups: usize) -> usize {
-    n_lookups.div_ceil(2)
-}
-
-/// Aggregate of every `FrameworkComponent` in the proof, in commit order.
-struct Sha256Components {
-    sha256: FrameworkComponent<Sha256Eval>,
-    decode: Vec<FrameworkComponent<SigmaDecodeEval>>, // 8
-    maj_ch: FrameworkComponent<MajChEval>,
-    xor_8: FrameworkComponent<Xor8Eval>,
-    round_split_pack: Vec<FrameworkComponent<RoundSplitPackEval>>, // 4
-    sigma_split_pack: Vec<FrameworkComponent<SigmaSplitPackEval>>, // 4
-    range: Vec<FrameworkComponent<RangeKEval>>,                    // 4
-}
-
-impl Sha256Components {
-    fn new(
-        claim: &InteractionClaim,
-        relations: &Sha256Relations,
-        log_n_rows: u32,
-        group_width: u32,
-    ) -> Self {
-        // The TraceLocationAllocator runs the same component order on
-        // prover and verifier; it consumes preprocessed column IDs in
-        // the order each component's `evaluate` reads them. We seed it with
-        // the static list from `crate::components::all_preprocessed_column_ids`
-        // — the single source of truth for column order — and let each
-        // FrameworkComponent claim its slice.
-        let alloc_ids = all_preprocessed_column_ids();
-        let allocator = &mut TraceLocationAllocator::new_with_preprocessed_columns(&alloc_ids);
-
-        let sha256 = FrameworkComponent::new(
-            allocator,
-            Sha256Eval {
-                log_size: log_n_rows,
-                relations: relations.clone(),
-            },
-            claim.sha256.claimed_sum,
-        );
-
-        let mut decode = Vec::with_capacity(8);
-        for (i, &(f, h)) in DECODE_TABLES.iter().enumerate() {
-            decode.push(FrameworkComponent::new(
-                allocator,
-                SigmaDecodeEval {
-                    log_size: LOG_SIZE_16,
-                    f,
-                    half: h,
-                    relations: relations.clone(),
-                },
-                claim.decode[i].claimed_sum,
-            ));
-        }
-        let maj_ch = FrameworkComponent::new(
-            allocator,
-            MajChEval {
-                log_size: maj_ch_log_size(group_width),
-                relations: relations.clone(),
-            },
-            claim.maj_ch.claimed_sum,
-        );
-        let xor_8 = FrameworkComponent::new(
-            allocator,
-            Xor8Eval {
-                log_size: LOG_SIZE_16,
-                relations: relations.clone(),
-            },
-            claim.xor_8.claimed_sum,
-        );
-        let mut round_split_pack = Vec::with_capacity(4);
-        for (i, &(p, h)) in ROUND_SPLIT_TABLES.iter().enumerate() {
-            round_split_pack.push(FrameworkComponent::new(
-                allocator,
-                RoundSplitPackEval {
-                    log_size: LOG_SIZE_16,
-                    partition: p,
-                    half: h,
-                    relations: relations.clone(),
-                },
-                claim.round_split_pack[i].claimed_sum,
-            ));
-        }
-        let mut sigma_split_pack = Vec::with_capacity(4);
-        for (i, &(p, h)) in SIGMA_SPLIT_TABLES.iter().enumerate() {
-            sigma_split_pack.push(FrameworkComponent::new(
-                allocator,
-                SigmaSplitPackEval {
-                    log_size: LOG_SIZE_16,
-                    partition: p,
-                    half: h,
-                    relations: relations.clone(),
-                },
-                claim.sigma_split_pack[i].claimed_sum,
-            ));
-        }
-        let mut range = Vec::with_capacity(4);
-        for (i, &kind) in RANGE_TABLES.iter().enumerate() {
-            range.push(FrameworkComponent::new(
-                allocator,
-                RangeKEval {
-                    log_size: range_log_size(kind),
-                    kind,
-                    relations: relations.clone(),
-                },
-                claim.range[i].claimed_sum,
-            ));
-        }
-
-        Self {
-            sha256,
-            decode,
-            maj_ch,
-            xor_8,
-            round_split_pack,
-            sigma_split_pack,
-            range,
-        }
-    }
-
-    fn components(&self) -> Vec<&dyn Component> {
-        let mut out: Vec<&dyn Component> = Vec::new();
-        out.push(&self.sha256);
-        for c in &self.decode {
-            out.push(c);
-        }
-        out.push(&self.maj_ch);
-        out.push(&self.xor_8);
-        for c in &self.round_split_pack {
-            out.push(c);
-        }
-        for c in &self.sigma_split_pack {
-            out.push(c);
-        }
-        for c in &self.range {
-            out.push(c);
-        }
-        out
-    }
-
-    fn component_provers(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
-        let mut out: Vec<&dyn ComponentProver<SimdBackend>> = Vec::new();
-        out.push(&self.sha256);
-        for c in &self.decode {
-            out.push(c);
-        }
-        out.push(&self.maj_ch);
-        out.push(&self.xor_8);
-        for c in &self.round_split_pack {
-            out.push(c);
-        }
-        for c in &self.sigma_split_pack {
-            out.push(c);
-        }
-        for c in &self.range {
-            out.push(c);
-        }
-        out
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::trace::Layout;
 
     #[test]
     fn prove_rejects_too_small_trace() {

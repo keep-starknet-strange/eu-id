@@ -46,6 +46,7 @@
 //!   aggregator across the consumer and every producer component.
 //! - [`stark`] — prover/verifier entry points for the standalone component.
 
+pub mod air;
 pub mod components;
 pub mod constants;
 pub mod constraints;
