@@ -1339,6 +1339,9 @@ version = "0.1.0"
 name = "stwo-sha256"
 version = "0.1.0"
 dependencies = [
+ "hex",
+ "num-traits",
+ "sha2",
  "stwo",
  "stwo-constraint-framework",
 ]

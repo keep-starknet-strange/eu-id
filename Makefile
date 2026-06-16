@@ -69,7 +69,7 @@ dev:
 	fi
 
 build:
-	cargo build
+	cargo build --all-targets
 
 run:
 	@if [ -d bin ]; then \
