@@ -23,9 +23,14 @@ DATE     ?= $(shell date +%Y-%m-%d)
 MIN_AGE  ?= 18
 STRATEGY ?= rc
 
+# Nationality predicate overrides
+NATIONALITY ?=
+ACCEPTABLE  ?=
+
 .DEFAULT_GOAL := help
 .PHONY: help dev build run test check fmt bench bench-predicates bench-mobile prove verify \
         prove-age verify-age \
+        prove-nat verify-nat \
         profile-prove-age-rc profile-verify-age-rc \
         profile-prove-age-bd profile-verify-age-bd \
         clean
@@ -53,6 +58,12 @@ help:
 	@echo ""
 	@echo "  prove-age overrides: DOB= DATE= MIN_AGE= STRATEGY=bd|rc PROOF="
 	@echo "  verify-age overrides: STRATEGY=bd|rc PROOF="
+	@echo ""
+	@echo "  make prove-nat     run the nationality predicate prover  (NATIONALITY= ACCEPTABLE= required)"
+	@echo "  make verify-nat    run the nationality predicate verifier"
+	@echo ""
+	@echo "  prove-nat overrides: NATIONALITY= ACCEPTABLE= PROOF="
+	@echo "  verify-nat overrides: PROOF="
 	@echo ""
 	@echo "  make profile-prove-age-rc    profile age prove (range check)"
 	@echo "  make profile-verify-age-rc   profile age verify (range check)"
@@ -122,6 +133,18 @@ endif
 
 verify-age:
 	cargo run --bin verify -- age --strategy $(STRATEGY) --input $(PROOF)
+
+prove-nat:
+ifndef NATIONALITY
+	$(error NATIONALITY is required, e.g. make prove-nat NATIONALITY=300 ACCEPTABLE=250,276,300)
+endif
+ifndef ACCEPTABLE
+	$(error ACCEPTABLE is required, e.g. make prove-nat NATIONALITY=300 ACCEPTABLE=250,276,300)
+endif
+	cargo run --bin prove -- nat --nationality $(NATIONALITY) --acceptable $(ACCEPTABLE) --output $(PROOF)
+
+verify-nat:
+	cargo run --bin verify -- nat --input $(PROOF)
 
 profile-prove-age-rc:
 	cargo instruments -t Allocations --manifest-path crates/predicates/Cargo.toml --bin prove --release -- age --dob 1990-01-01 --output target/instruments/age-rc.bin
