@@ -1,17 +1,27 @@
 //! Combines one or more proving modules into a single STARK proof.
 //!
-//! Each predicate (and, later, the SHA and P256 provers) implements [`Air`] and
-//! [`AirProver`]. A module does NOT own the channel or the commitment scheme; it
-//! only contributes columns and components to shared commitment trees. The
-//! orchestrator functions [`prove`] and [`verify`] own the transcript and drive
-//! every module through the same four phases:
+//! Each circuit implements [`Air`] and [`AirProver`]. A module does NOT own the
+//! channel or the commitment scheme; it only contributes columns and components
+//! to shared commitment trees. The orchestrator functions [`prove`] and
+//! [`verify`] own the transcript and drive every module through the same four
+//! phases:
 //!
 //! 0. preprocessed tables
 //! 1. main witness + multiplicity columns
 //! 2. interaction (LogUp) columns
 //! 3. component assembly + the single `prove`/`verify` call
 //!
-//! Proving a single predicate is just `prove(&mut [&mut module])`
+//! Proving a single circuit is just `prove(&mut [&mut module])`.
+//!
+//! ## Hash choice
+//!
+//! A single combined proof has exactly one channel and one commitment scheme,
+//! so every module must agree on one hash. That choice lives here once, behind
+//! the [`Mc`]/[`Ch`]/[`Hasher`] aliases, rather than as a generic parameter
+//! threaded through every module: genericity at the module level buys nothing
+//! when all modules in a `prove` call must use the identical channel anyway.
+//! Switching the system to a different (e.g. Stwo-friendly) hash is a one-line
+//! change to these aliases.
 
 use num_traits::Zero;
 use stwo::core::air::Component;
@@ -28,6 +38,17 @@ use stwo::prover::{
     prove as stark_prove, CommitmentSchemeProver, ComponentProver, ProvingError, TreeBuilder,
 };
 
+/// The Merkle channel (i.e. the hash) that binds the whole proof. Every module
+/// commits its trees and draws its challenges against this one type.
+pub type Mc = Blake2sMerkleChannel;
+
+/// The Fiat-Shamir channel modules mix their public statement and relations
+/// into. Must stay equal to `<Mc as MerkleChannel>::C`.
+pub type Ch = Blake2sChannel;
+
+/// The hasher carried inside the emitted [`StarkProof`] (`Mc::H`).
+pub type Hasher = Blake2sMerkleHasher;
+
 /// The per-tree column log-sizes a module contributes, in commit order.
 ///
 /// The verifier uses this to commit against the proof's commitments without
@@ -43,11 +64,11 @@ pub struct TreeLayout {
 /// its claimed LogUp sums, and assemble its AIR components.
 pub trait Air {
     /// Bind this module's public statement to the shared transcript.
-    fn mix_public(&self, channel: &mut Blake2sChannel);
+    fn mix_public(&self, channel: &mut Ch);
 
     /// Draw this module's lookup relations from the shared channel and stash
     /// them for the interaction phase and component assembly.
-    fn draw_relations(&mut self, channel: &mut Blake2sChannel);
+    fn draw_relations(&mut self, channel: &mut Ch);
 
     /// Column log-sizes per tree, in commit order.
     fn layout(&self) -> TreeLayout;
@@ -69,15 +90,15 @@ pub trait AirProver: Air {
     fn max_log_size(&self) -> u32;
 
     /// Phase 0 — append preprocessed columns to the shared tree.
-    fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>);
+    fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, Mc>);
 
     /// Phase 1 — append main witness + multiplicity columns to the shared tree.
-    fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>);
+    fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, Mc>);
 
     /// Phase 2 — build the interaction (LogUp) columns from the drawn relations,
     /// append them, and stash this module's claimed sums (read back via
     /// [`Air::claimed_sums`]).
-    fn write_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>);
+    fn write_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, Mc>);
 
     /// Build the prover-side components (needs relations + claimed sums).
     fn prover_components(&self) -> Vec<Box<dyn ComponentProver<SimdBackend>>>;
@@ -85,10 +106,10 @@ pub trait AirProver: Air {
 
 /// Drive every module through the four phases against one shared channel and one
 /// shared commitment scheme, producing a single STARK proof.
-pub(crate) fn prove(
+pub fn prove(
     modules: &mut [&mut dyn AirProver],
     config: PcsConfig,
-) -> Result<StarkProof<Blake2sMerkleHasher>, ProvingError> {
+) -> Result<StarkProof<Hasher>, ProvingError> {
     let max_log_size = modules
         .iter()
         .map(|m| m.max_log_size())
@@ -101,11 +122,10 @@ pub(crate) fn prove(
             .half_coset,
     );
 
-    let channel = &mut Blake2sChannel::default();
+    let channel = &mut Ch::default();
     config.mix_into(channel);
 
-    let mut commitment_scheme =
-        CommitmentSchemeProver::<SimdBackend, Blake2sMerkleChannel>::new(config, &twiddles);
+    let mut commitment_scheme = CommitmentSchemeProver::<SimdBackend, Mc>::new(config, &twiddles);
 
     // Tree 0: every module's preprocessed columns.
     let mut tb = commitment_scheme.tree_builder();
@@ -144,19 +164,19 @@ pub(crate) fn prove(
     let component_refs: Vec<&dyn ComponentProver<SimdBackend>> =
         components.iter().map(|c| c.as_ref()).collect();
 
-    stark_prove::<SimdBackend, Blake2sMerkleChannel>(&component_refs, channel, commitment_scheme)
+    stark_prove::<SimdBackend, Mc>(&component_refs, channel, commitment_scheme)
 }
 
 /// Re-derive the transcript for every module and verify the single STARK proof.
-pub(crate) fn verify(
+pub fn verify(
     modules: &mut [&mut dyn Air],
-    proof: &StarkProof<Blake2sMerkleHasher>,
+    proof: &StarkProof<Hasher>,
 ) -> Result<(), VerificationError> {
     let config = proof.config;
-    let channel = &mut Blake2sChannel::default();
+    let channel = &mut Ch::default();
     config.mix_into(channel);
 
-    let commitment_scheme = &mut CommitmentSchemeVerifier::<Blake2sMerkleChannel>::new(config);
+    let commitment_scheme = &mut CommitmentSchemeVerifier::<Mc>::new(config);
 
     // Tree 0: preprocessed columns of every module.
     let preprocessed_sizes: Vec<u32> = modules

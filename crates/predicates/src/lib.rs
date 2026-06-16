@@ -1,6 +1,4 @@
 pub mod age;
-// Orchestrator that combines proving modules into one STARK proof.
-pub mod air;
 // Generic range-check gadget shared by the proving process (embedded in each
 // strategy's `LookupElements`).
 pub mod range_check;

@@ -1,4 +1,4 @@
-//! Wraps the range-check age strategy as [`crate::air`] proving modules.
+//! Wraps the range-check age strategy as [`air_core`] proving modules.
 //!
 //! [`RangeCheckProver`] holds the witness and contributes all columns (prover
 //! side). [`RangeCheckVerifier`] holds only the public input and the claimed
@@ -11,7 +11,7 @@ use crate::age::strategy::range_check::lookup_elements::LookupElements;
 use crate::age::strategy::range_check::preprocessed::Preprocessed;
 use crate::age::strategy::range_check::witness::WitnessData;
 use crate::age::types::{PublicInput, Witness};
-use crate::air::{Air, AirProver, TreeLayout};
+use air_core::{Air, AirProver, TreeLayout};
 use stwo::core::air::Component;
 use stwo::core::channel::Blake2sChannel;
 use stwo::core::fields::qm31::QM31;

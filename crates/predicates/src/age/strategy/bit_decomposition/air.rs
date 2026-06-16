@@ -1,4 +1,4 @@
-//! Wraps the bit-decomposition age strategy as [`crate::air`] proving modules.
+//! Wraps the bit-decomposition age strategy as [`air_core`] proving modules.
 //!
 //! [`BitDecompositionProver`] holds the witness and contributes all columns
 //! (prover side). [`BitDecompositionVerifier`] holds only the public input and
@@ -11,7 +11,7 @@ use crate::age::strategy::bit_decomposition::lookup_elements::LookupElements;
 use crate::age::strategy::bit_decomposition::preprocessed::Preprocessed;
 use crate::age::strategy::bit_decomposition::witness::WitnessData;
 use crate::age::types::{PublicInput, Witness};
-use crate::air::{Air, AirProver, TreeLayout};
+use air_core::{Air, AirProver, TreeLayout};
 use stwo::core::air::Component;
 use stwo::core::channel::Blake2sChannel;
 use stwo::core::fields::qm31::QM31;
