@@ -600,6 +600,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "eu-id-prover"
+version = "0.1.0"
+dependencies = [
+ "air-core",
+ "ecdsa",
+ "p256",
+ "sha2",
+ "stwo",
+ "stwo-p256",
+ "stwo-sha256",
+]
+
+[[package]]
 name = "ff"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -1,0 +1,18 @@
+[package]
+name = "eu-id-prover"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+air-core = { path = "../air-core" }
+stwo-p256 = { path = "../stwo-p256" }
+stwo-sha256 = { path = "../stwo-sha256" }
+stwo = { workspace = true }
+
+[dev-dependencies]
+p256 = { version = "0.13", features = ["ecdsa"] }
+ecdsa = { version = "0.16", features = ["signing", "verifying"] }
+sha2 = "0.10"
+
+[lints]
+workspace = true
