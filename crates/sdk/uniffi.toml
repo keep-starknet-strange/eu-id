@@ -1,0 +1,3 @@
+[bindings.kotlin]
+package_name = "com.kss.euid.zk.sdk"
+cdylib_name = "euid_zk_sdk"

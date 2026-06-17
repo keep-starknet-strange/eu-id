@@ -1,0 +1,48 @@
+[package]
+name = "sdk"
+version = "0.1.0"
+edition = "2021"
+
+# The EU-ID ZK SDK: the single source of truth for the prover/verifier data
+# contract. It owns the contract types, the deterministic-CBOR statement
+# encoding (`encode_statement` — folded into Fiat-Shamir, so byte drift fails
+# verification), and the `prove_identity`/`verify_identity` entry points.
+#
+# Bodies are STUBBED for this iteration (dummy proof / `ok = true`); the real
+# STWO proving swaps in behind the same UniFFI surface with no app-side change.
+#
+# Boundary rule: this crate stays mdoc-agnostic — it takes already-extracted
+# raw bytes and returns proof/verdict. No Multipaz / verifier-core deps.
+[lib]
+# Crate/lib identifier -> output filename `libeuid_zk_sdk.so` / `.dylib`. Rust
+# lib names can't contain hyphens, so this is the underscore form of euid-zk-sdk.
+name = "euid_zk_sdk"
+# cdylib -> the stub `.so`/`.dylib` loaded by the Kotlin bindings on Android.
+# staticlib -> iOS static link (deferred). rlib -> lets the bundled
+# `uniffi-bindgen` bin link against this crate.
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[features]
+# Pulls the binding generator (clap, cargo_metadata, …) into the build. Needed
+# ONLY for the `uniffi-bindgen` bin — kept off by default so the stub cdylib
+# doesn't link the whole generator toolchain into the `.so`.
+bindgen = ["uniffi/cli"]
+
+[dependencies]
+uniffi = { version = "0.29" }
+thiserror = "2.0.18"
+# Deterministic CBOR: we build an explicitly-ordered `ciborium::value::Value`
+# map, so the same bytes come out on prove and verify sides.
+ciborium = "0.2.2"
+
+[[bin]]
+# Bundled binding generator. Run as:
+#   cargo run -p sdk --bin uniffi-bindgen -- generate \
+#     --library <built .so/.dylib> --language kotlin --out-dir <dir>
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+# Only buildable with the bindgen toolchain; never compiled for the cdylib/.so.
+required-features = ["bindgen"]
+
+[lints]
+workspace = true
