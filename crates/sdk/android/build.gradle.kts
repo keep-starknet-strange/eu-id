@@ -45,6 +45,9 @@ android {
 
     defaultConfig {
         minSdk = 24
+        // Instrumented tests (src/androidTest) run on an emulator/device and load
+        // the bundled ABI .so — no host-arch build needed.
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     publishing {
@@ -66,12 +69,18 @@ val ndkHome = "$androidSdkDir/ndk/$ndkVer"
 
 // PATH that still finds the Rust toolchain when Gradle is launched by Android
 // Studio (which doesn't inherit the login shell's PATH).
-val toolPath = listOf(
+val toolBinDirs = listOf(
     "${System.getProperty("user.home")}/.cargo/bin",
     "/opt/homebrew/bin",
     "/usr/local/bin",
-    System.getenv("PATH") ?: "",
-).joinToString(File.pathSeparator)
+)
+val toolPath = (toolBinDirs + (System.getenv("PATH") ?: "")).joinToString(File.pathSeparator)
+
+// Absolute path to `cargo`. Gradle resolves the *executable* name against the
+// daemon's PATH (not the environment() we set on the task), and the daemon —
+// especially when started by Android Studio — has no ~/.cargo/bin. So launch
+// cargo by absolute path; the PATH env above then lets cargo find cargo-ndk etc.
+val cargoExe = toolBinDirs.map { "$it/cargo" }.firstOrNull { file(it).exists() } ?: "cargo"
 
 // 1. Cross-compile libeuid_zk_sdk.so for each ABI -> src/main/jniLibs/<abi>/libeuid_zk_sdk.so.
 val cargoNdkBuild by tasks.registering(Exec::class) {
@@ -81,7 +90,7 @@ val cargoNdkBuild by tasks.registering(Exec::class) {
     environment("PATH", toolPath)
     environment("ANDROID_NDK_HOME", ndkHome)
     commandLine(
-        "cargo", "ndk",
+        cargoExe, "ndk",
         "-t", "arm64-v8a", "-t", "x86_64",
         "-o", jniLibsOut.absolutePath,
         "build", "--release", "-p", "sdk",
@@ -102,7 +111,7 @@ val generateUniffiBindings by tasks.registering(Exec::class) {
     environment("PATH", toolPath)
     val builtLib = jniLibsOut.resolve("arm64-v8a/libeuid_zk_sdk.so")
     commandLine(
-        "cargo", "run", "-p", "sdk", "--features", "bindgen", "--bin", "uniffi-bindgen", "--",
+        cargoExe, "run", "-p", "sdk", "--features", "bindgen", "--bin", "uniffi-bindgen", "--",
         "generate",
         "--library", builtLib.absolutePath,
         "--language", "kotlin",
@@ -120,6 +129,10 @@ dependencies {
     // UniFFI's Kotlin runtime is JNA-based; `api` makes it transitive so
     // consumers don't have to declare it.
     api("net.java.dev.jna:jna:5.19.1@aar")
+
+    // Instrumented tests only.
+    androidTestImplementation("androidx.test.ext:junit:1.3.0")
+    androidTestImplementation("androidx.test:runner:1.7.0")
 }
 
 publishing {

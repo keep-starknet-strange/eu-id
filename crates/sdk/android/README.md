@@ -31,8 +31,8 @@ they're packaged into the AAR with no source-set DSL. Runs on Gradle 9.x.
 - `cargo-ndk`: `cargo install cargo-ndk`.
 - The Android Rust targets: `rustup target add aarch64-linux-android x86_64-linux-android`.
 
-This project has no committed Gradle wrapper. Generate one once with a system
-Gradle (`gradle wrapper`), or open it in Android Studio.
+The Gradle wrapper is committed (`./gradlew`, pinned to Gradle 9.5.0), so no
+system Gradle install is needed — `./gradlew` bootstraps it.
 
 ## Build & publish (to Maven Local)
 
@@ -46,6 +46,19 @@ Useful intermediate tasks:
 - `./gradlew cargoNdkBuild` — cross-compile `libeuid_zk_sdk.so` per ABI.
 - `./gradlew generateUniffiBindings` — emit `com/kss/euid/zk/sdk/euid_zk_sdk.kt`.
 - `./gradlew assembleRelease` — build the AAR without publishing.
+
+## Test
+
+The SDK is exercised by **instrumented tests** (`src/androidTest`), which run on
+an emulator/device and load the bundled ABI `.so` — no host-arch build needed.
+
+```bash
+# with an emulator/device connected:
+./gradlew connectedAndroidTest
+```
+
+(JVM unit tests under `src/test` are not used: they'd load the library from the
+host and so would require a separate macOS/Linux `libeuid_zk_sdk` build.)
 
 ## Consume
 
