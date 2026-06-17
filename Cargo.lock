@@ -606,6 +606,7 @@ dependencies = [
  "air-core",
  "ecdsa",
  "p256",
+ "predicates",
  "sha2",
  "stwo",
  "stwo-p256",
