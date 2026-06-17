@@ -35,7 +35,7 @@ use crate::components::{
     ROUND_SPLIT_TABLES, SIGMA_SPLIT_TABLES,
 };
 use crate::constraints::Sha256Eval;
-use crate::interaction::{generate_interaction_trace, InteractionClaim};
+use crate::interaction::{generate_interaction_trace, sha_lookups_per_block, InteractionClaim};
 use crate::multiplicities::{
     decode_multiplicities, maj_ch_multiplicities, range_k_multiplicities,
     round_split_pack_multiplicities, sigma_split_pack_multiplicities, xor_8_multiplicities,
@@ -49,11 +49,11 @@ use crate::types::Sha256Witness;
 /// Column log-sizes per tree, shared by prover and verifier — they depend
 /// only on the public size surface (`log_n_rows`, `group_width`), never on the
 /// witness.
-fn layout(log_n_rows: u32, group_width: u32) -> TreeLayout {
+fn layout(log_n_rows: u32, group_width: u32, expose_digest: bool) -> TreeLayout {
     TreeLayout {
         preprocessed: preprocessed_log_sizes(group_width, log_n_rows),
         trace: base_trace_log_sizes(log_n_rows, group_width),
-        interaction: interaction_trace_log_sizes(log_n_rows, group_width),
+        interaction: interaction_trace_log_sizes(log_n_rows, group_width, expose_digest),
     }
 }
 
@@ -77,6 +77,7 @@ pub struct Sha256Prover<'a> {
     witness: &'a Sha256Witness,
     log_n_rows: u32,
     group_width: u32,
+    expose_digest: bool,
     relations: Option<Sha256Relations>,
     interaction_claim: Option<InteractionClaim>,
     components: Option<Sha256Components>,
@@ -88,10 +89,24 @@ impl<'a> Sha256Prover<'a> {
             witness,
             log_n_rows,
             group_width,
+            expose_digest: false,
             relations: None,
             interaction_claim: None,
             components: None,
         }
+    }
+
+    /// Enable the cross-component digest provider (§6.2): the module yields
+    /// the final-block digest on the `Sha256Digest` channel, so a composed
+    /// consumer (the P256 `z` binding) can require it. This leaves the SHA
+    /// module's claimed sum non-zero on its own — it cancels only against the
+    /// consumer's require — so it is **off by default**, keeping a standalone
+    /// SHA proof self-balancing. The flag is mixed into the transcript
+    /// ([`Stmt0`]) so prover and verifier agree, and must be set identically
+    /// on the matching [`Sha256Verifier`].
+    pub fn with_digest_provider(mut self) -> Self {
+        self.expose_digest = true;
+        self
     }
 
     fn built_components(&self) -> &Sha256Components {
@@ -121,6 +136,7 @@ impl Air for Sha256Prover<'_> {
         Stmt0 {
             log_n_rows: self.log_n_rows,
             group_width: self.group_width,
+            expose_digest: self.expose_digest,
         }
         .mix_into(channel);
     }
@@ -130,7 +146,7 @@ impl Air for Sha256Prover<'_> {
     }
 
     fn layout(&self) -> TreeLayout {
-        layout(self.log_n_rows, self.group_width)
+        layout(self.log_n_rows, self.group_width, self.expose_digest)
     }
 
     fn claimed_sums(&self) -> Vec<QM31> {
@@ -148,6 +164,7 @@ impl Air for Sha256Prover<'_> {
             self.relations(),
             self.log_n_rows,
             self.group_width,
+            self.expose_digest,
         ));
     }
 
@@ -185,6 +202,7 @@ impl AirProver for Sha256Prover<'_> {
             self.witness,
             self.log_n_rows,
             self.group_width,
+            self.expose_digest,
         );
         tb.extend_evals(interaction_evals);
         self.interaction_claim = Some(interaction_claim);
@@ -200,6 +218,7 @@ impl AirProver for Sha256Prover<'_> {
 pub struct Sha256Verifier {
     log_n_rows: u32,
     group_width: u32,
+    expose_digest: bool,
     interaction_claim: InteractionClaim,
     relations: Option<Sha256Relations>,
     components: Option<Sha256Components>,
@@ -210,10 +229,20 @@ impl Sha256Verifier {
         Self {
             log_n_rows,
             group_width,
+            expose_digest: false,
             interaction_claim,
             relations: None,
             components: None,
         }
+    }
+
+    /// Match a [`Sha256Prover::with_digest_provider`] proof: reconstruct the
+    /// verifier with the digest provider active so the interaction-column
+    /// layout and the mixed [`Stmt0`] flag agree with the prover's transcript.
+    /// Must be set iff the prover set it.
+    pub fn with_digest_provider(mut self) -> Self {
+        self.expose_digest = true;
+        self
     }
 
     fn relations(&self) -> &Sha256Relations {
@@ -234,6 +263,7 @@ impl Air for Sha256Verifier {
         Stmt0 {
             log_n_rows: self.log_n_rows,
             group_width: self.group_width,
+            expose_digest: self.expose_digest,
         }
         .mix_into(channel);
     }
@@ -243,7 +273,7 @@ impl Air for Sha256Verifier {
     }
 
     fn layout(&self) -> TreeLayout {
-        layout(self.log_n_rows, self.group_width)
+        layout(self.log_n_rows, self.group_width, self.expose_digest)
     }
 
     fn claimed_sums(&self) -> Vec<QM31> {
@@ -261,6 +291,7 @@ impl Air for Sha256Verifier {
             self.relations(),
             self.log_n_rows,
             self.group_width,
+            self.expose_digest,
         ));
     }
 
@@ -278,11 +309,17 @@ impl Air for Sha256Verifier {
 struct Stmt0 {
     log_n_rows: u32,
     group_width: u32,
+    /// Whether the cross-component digest provider is active. Mixed into the
+    /// transcript so the prover and verifier agree on the lookup count (and
+    /// hence the interaction-column layout); a mismatch reshapes the
+    /// interaction tree and the verifier rejects.
+    expose_digest: bool,
 }
 impl Stmt0 {
     fn mix_into(&self, channel: &mut Blake2sChannel) {
         channel.mix_u64(self.log_n_rows as u64);
         channel.mix_u64(self.group_width as u64);
+        channel.mix_u64(u64::from(self.expose_digest));
     }
 }
 
@@ -374,18 +411,20 @@ fn base_trace_log_sizes(log_n_rows: u32, group_width: u32) -> Vec<u32> {
 /// component's column count is `(n_lookups + 1) / 2`. We infer the count
 /// from the structural firing rule (matching the
 /// `interaction::sha256_interaction` derivation).
-fn interaction_trace_log_sizes(log_n_rows: u32, group_width: u32) -> Vec<u32> {
+fn interaction_trace_log_sizes(log_n_rows: u32, group_width: u32, expose_digest: bool) -> Vec<u32> {
     let mut out = Vec::new();
 
     // Each SecureField interaction column expands to SECURE_EXTENSION_DEGREE = 4
     // base-field columns at the same log_size.
     const EXT: usize = SECURE_EXTENSION_DEGREE;
 
-    // Sha256Eval consumer: 3720 lookups per block (W=6) → 1860 paired
-    // columns. Sized at log_n_rows. See `interaction::sha256_interaction`
-    // for the per-block lookup-count breakdown (the +256 over W=7's 3464 is
-    // the 8-vs-6 Maj/Ch lookups per round × 64 rounds).
-    let sha_cols = num_paired_cols(3720);
+    // Sha256Eval consumer: `sha_lookups_per_block(expose_digest)` lookups per
+    // block (W=6: 3720, plus the one digest yield when the provider is on) →
+    // `ceil(n/2)` paired columns. Sized at log_n_rows. See
+    // `interaction::sha256_interaction` for the per-block lookup-count
+    // breakdown (the +256 over W=7's 3464 is the 8-vs-6 Maj/Ch lookups per
+    // round × 64 rounds).
+    let sha_cols = num_paired_cols(sha_lookups_per_block(expose_digest));
     out.extend(std::iter::repeat_n(log_n_rows, sha_cols * EXT));
     // 8 decode producers: 1 lookup each → 1 column each at log_size 16.
     for _ in DECODE_TABLES {
@@ -441,6 +480,7 @@ impl Sha256Components {
         relations: &Sha256Relations,
         log_n_rows: u32,
         group_width: u32,
+        expose_digest: bool,
     ) -> Self {
         // The shared TraceLocationAllocator (seeded by the orchestrator with
         // every module's `preprocessed_column_ids` in commit order) runs the
@@ -451,6 +491,7 @@ impl Sha256Components {
             Sha256Eval {
                 log_size: log_n_rows,
                 relations: relations.clone(),
+                expose_digest,
             },
             claim.sha256.claimed_sum,
         );

@@ -48,7 +48,7 @@ use stwo_constraint_framework::{
 };
 
 use crate::components::is_first_row_column_id;
-use crate::constants::{IV, K, N_ROUNDS, N_STATE_WORDS};
+use crate::constants::{DIGEST_BYTES, IV, K, N_ROUNDS, N_STATE_WORDS};
 use crate::partitions::{
     lower_sigma_key_hi_coeff_s, lower_sigma_key_hi_coeff_s_complement, round_groups_half_indices,
     round_key_coeffs, GROUPS_PER_ROUND_PARTITION, LOWER_SIGMA0_PARTS, LOWER_SIGMA1_PARTS,
@@ -64,8 +64,19 @@ pub struct Sha256Eval {
     /// `log2` of the row count (i.e. the smallest power-of-two ≥ block count).
     pub log_size: u32,
     /// LogUp channels: `Σ`/`σ` decode tables (8), packed Maj/Ch (2),
-    /// chunk-wise `xor_8` (1).
+    /// chunk-wise `xor_8` (1), the four `Range_k` channels, and the
+    /// cross-component `Sha256Digest` channel.
     pub relations: Sha256Relations,
+    /// When set, the AIR *yields* the final-block digest bytes on the
+    /// `Sha256Digest` channel (the producer half of the `SHA_DIGEST ↔ ECDSA_Z`
+    /// binding). Off for the standalone SHA proof — the digest has no
+    /// in-module consumer, so yielding it would leave the module's claimed
+    /// sum non-zero and the standalone proof would not self-balance. The
+    /// combined prover sets it once a consumer (P256 `z`) is composed in. The
+    /// `is_last_block` flag, the digest byte columns, and their decomposition
+    /// constraints are present and enforced regardless — only the
+    /// cross-module *yield* is gated.
+    pub expose_digest: bool,
 }
 
 impl FrameworkEval for Sha256Eval {
@@ -87,12 +98,15 @@ impl FrameworkEval for Sha256Eval {
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         // ---- header ----
         //
-        // Reads `enabler` with a `[0, -1]` cross-row mask so the contiguity
-        // constraint below can pin `enabler_prev`. The single
+        // Reads `enabler` with a `[0, -1, 1]` cross-row mask so the
+        // contiguity constraint below can pin `enabler_prev` (first-real-row
+        // marker `enabler_step`) and the digest gate can pin `enabler_next`
+        // (last-real-row marker `is_last_block`). The single
         // `next_interaction_mask` call still consumes one trace column slot
-        // (per Stwo's mask-consumption rule); the read order vs. the trace
-        // layout is unchanged.
-        let [enabler, enabler_prev] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1]);
+        // (per Stwo's mask-consumption rule) regardless of how many offsets
+        // it reads; the read order vs. the trace layout is unchanged.
+        let [enabler, enabler_prev, enabler_next] =
+            eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1, 1]);
         eval.add_constraint(enabler.clone() * (E::F::one() - enabler.clone()));
 
         let is_first_block = eval.next_trace_mask();
@@ -712,12 +726,70 @@ impl FrameworkEval for Sha256Eval {
             eval.add_constraint(chain_gate.clone() * (h_in[j].1.clone() - h_out_prev[j].1.clone()));
         }
 
-        // TODO(integration): digest binding. Expose `h_out` to the integration
-        // layer via two LogUp relations (interface contract item 1):
-        //   - `valueDigests` membership uses the IssuerSignedItem hash output;
-        //   - ECDSA `z` consumes the COSE Sig_structure hash output.
-        // The relation tag names (interface contract item 2) get agreed with
-        // the mdoc and integration stream owners before wiring.
+        // ---- digest provider: is_last_block gate, byte view, yield ----
+        //
+        // `is_last_block` is the symmetric twin of the `enabler_step`
+        // first-real-row marker: `enabler · (1 − enabler_next)` is `1` only at
+        // the last row of the contiguous real-row prefix (the final block of a
+        // multi-block hash) and `0` everywhere else — including the last
+        // padding row (`enabler = 0`) and every intermediate real block
+        // (`enabler_next = 1`). Committed as a degree-1 column (read here in
+        // trace-layout order) and pinned to the degree-2 product, so the digest
+        // yield's multiplicity below stays degree ≤ 2 like every other
+        // constraint here. Soundness note: this assumes ≥ 1 padding row, so
+        // the final block's coset successor is disabled — guaranteed on the
+        // credential path (one block in ≥ 2^LOG_N_LANES rows). With a fully
+        // real trace `is_last_block` would be `0` everywhere and the digest
+        // simply would not be exposed (a liveness limit, never a false yield).
+        let is_last_block = eval.next_trace_mask();
+        eval.add_constraint(
+            is_last_block.clone() - enabler.clone() * (E::F::one() - enabler_next.clone()),
+        );
+
+        // Digest byte view: the 32 big-endian bytes of `h_out`, read in the
+        // `crate::trace::h_out_digest_bytes` order — per state word `j` the
+        // cells are `[hi.b1, hi.b0, lo.b1, lo.b0]`, so each `(lo, hi)` limb
+        // recomposes from its two bytes as `limb = 256·b1 + b0`. The limbs are
+        // already pinned to `[0, 2¹⁶)` by the terminal `Range_16` above, so
+        // these two constraints per word (gated by `enabler`, degree 2) tie the
+        // bytes to the digest. The bytes' own `[0, 256)` range-check is the
+        // *consumer's* responsibility (interface-contract item 4): a consumer
+        // requiring out-of-range bytes cannot match the honest in-range bytes a
+        // correct prover yields, so the cross-module balance fails closed.
+        let digest_bytes: [E::F; DIGEST_BYTES] = std::array::from_fn(|_| eval.next_trace_mask());
+        let two_pow_8 = E::F::from(M31::from(1u32 << 8));
+        for (j, h_out_word) in h_out.iter().enumerate().take(N_STATE_WORDS) {
+            // hi limb = 256·hi.b1 + hi.b0
+            eval.add_constraint(
+                enabler.clone()
+                    * (h_out_word.1.clone()
+                        - two_pow_8.clone() * digest_bytes[4 * j].clone()
+                        - digest_bytes[4 * j + 1].clone()),
+            );
+            // lo limb = 256·lo.b1 + lo.b0
+            eval.add_constraint(
+                enabler.clone()
+                    * (h_out_word.0.clone()
+                        - two_pow_8.clone() * digest_bytes[4 * j + 2].clone()
+                        - digest_bytes[4 * j + 3].clone()),
+            );
+        }
+
+        // Yield the 32-byte digest across the module boundary (provider side).
+        // Gated by `expose_digest` so the standalone SHA proof — which has no
+        // consumer — still self-balances. The multiplicity is `−is_last_block`
+        // (yield on the final block only); a downstream module (the P256 `z`
+        // binding, §6.3) *requires* the same 32-byte tuple, so the global LogUp
+        // balance cancels iff the bytes match — i.e. the signature is verified
+        // over the hash SHA actually computed. The tuple order matches
+        // `crate::interaction`'s digest yield and `crate::trace::h_out_digest_bytes`.
+        if self.expose_digest {
+            eval.add_to_relation(RelationEntry::new(
+                &self.relations.digest.digest,
+                -E::EF::from(is_last_block.clone()),
+                &digest_bytes,
+            ));
+        }
 
         // ---- §10.4 padding-role constraints ----
         //
@@ -1855,6 +1927,7 @@ mod tests {
         let eval = Sha256Eval {
             log_size,
             relations: Sha256Relations::dummy(),
+            expose_digest: false,
         };
         let info = run_evaluate_with_finalized_info(&eval, log_size);
 

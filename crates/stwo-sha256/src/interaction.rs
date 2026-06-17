@@ -2,7 +2,10 @@
 //!
 //! The main `Sha256Eval` (consumer) and the 22 producer table components
 //! (8 σ/Σ decode + 1 packed Maj/Ch + 1 `xor_8` + 8 split-and-pack + 4
-//! `Range_k`) each emit their own interaction trace. Each is built by
+//! `Range_k`) each emit their own interaction trace. When the digest provider
+//! is exposed (§6.2), `Sha256Eval` *also* yields the final-block digest on the
+//! `Sha256Digest` channel — the one provider-side term it contributes — which
+//! is why its claimed sum is non-zero on its own in that mode. Each is built by
 //! walking that component's fractions row-by-row through
 //! [`stwo_constraint_framework::LogupTraceGenerator`] — pairs of
 //! consecutive fractions share an interaction column (matching
@@ -40,6 +43,7 @@ use stwo_constraint_framework::{LogupTraceGenerator, Relation};
 use crate::components::{
     range_log_size, RangeKind, DECODE_TABLES, RANGE_TABLES, ROUND_SPLIT_TABLES, SIGMA_SPLIT_TABLES,
 };
+use crate::constants::DIGEST_BYTES;
 use crate::multiplicities::{
     decode_multiplicities, maj_ch_multiplicities, range_k_multiplicities,
     round_split_pack_multiplicities, sigma_split_pack_multiplicities, xor_8_multiplicities,
@@ -55,8 +59,25 @@ use crate::tables::{
     build_sigma_split_pack_table, build_xor_8_table, Half, Half16, LowerSigmaPartition,
     RoundPartition,
 };
-use crate::trace::Layout;
+use crate::trace::{h_out_digest_bytes, Layout};
 use crate::types::Sha256Witness;
+
+/// Consumer-side lookups the main `Sha256Eval` fires per block, **excluding**
+/// the optional digest yield. Breakdown (W=6), matching the firing order in
+/// [`write_block_lookups`] and `crate::constraints::Sha256Eval::evaluate`:
+///   8 (h_in aux split-pack) + 48·18 (schedule entries) + 64·44 (rounds)
+///   + 16 (finalization carries) + 16 (terminal `Range_16`) = 3720.
+pub const SHA_LOOKUPS_PER_BLOCK_BASE: usize = 3720;
+
+/// Total consumer-side lookups `Sha256Eval` fires per block. The digest
+/// provider (§6.2) adds exactly one width-32 yield when `expose_digest` is
+/// set; otherwise the count is unchanged from the standalone AIR. Both the
+/// interaction generator here and `crate::air`'s interaction-column sizing
+/// read this so the two never drift.
+#[inline]
+pub fn sha_lookups_per_block(expose_digest: bool) -> usize {
+    SHA_LOOKUPS_PER_BLOCK_BASE + usize::from(expose_digest)
+}
 
 // ---------------------------------------------------------------------------
 // Per-component claim
@@ -515,11 +536,18 @@ fn sha256_interaction(
     relations: &Sha256Relations,
     witness: &Sha256Witness,
     log_size: u32,
+    expose_digest: bool,
 ) -> (
     ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     SecureField,
 ) {
     let n_rows = 1usize << log_size;
+    let n_blocks = witness.blocks.len();
+    // `is_last_block` matches the AIR gate `enabler · (1 − enabler_next)`:
+    // set on the final block only when a padding successor exists. See
+    // `crate::trace::generate_trace`.
+    let has_padding = n_blocks < n_rows;
+    let last_block_idx = n_blocks.saturating_sub(1);
 
     // Pre-allocate per-lookup fraction vectors. Each filled with `(0, 1)`
     // for padding rows up front; real-block rows overwrite below.
@@ -541,7 +569,16 @@ fn sha256_interaction(
     //   - terminal `Range_16` on `h_out`: 8 words × 2 limbs ⇒ 16
     //
     // Total per block = 8 + 48·18 + 64·44 + 16 + 16
-    //                 = 8 + 864 + 2816 + 16 + 16 = 3720.
+    //                 = 8 + 864 + 2816 + 16 + 16 = 3720 (= SHA_LOOKUPS_PER_BLOCK_BASE).
+    //
+    // When `expose_digest` is set the digest provider (§6.2) appends exactly
+    // one width-32 yield after the terminal `Range_16` block — the only
+    // provider-side (negative-multiplicity) term the SHA module emits — so the
+    // count becomes `sha_lookups_per_block(true) = 3721`. The yield's
+    // numerator is `−is_last_block`, zero on every block but the final one, so
+    // intermediate/padding blocks contribute `(0, denom)` and do not perturb
+    // the sum; only the final block's `−1/combine(digest)` survives, leaving
+    // the module's claimed sum non-zero until a consumer requires it.
     //
     // Note the split-pack *lookup count* is unchanged from W=7 (still one
     // lo+hi pair per operand); only each split-pack row's *width* grew
@@ -550,15 +587,24 @@ fn sha256_interaction(
     //
     // We allocate one Vec<Frac> per lookup index (`lookup_idx`) of length
     // `n_rows`, default-filled, then fill real-block rows below.
-    let lookups_per_block = 3720usize;
+    let lookups_per_block = sha_lookups_per_block(expose_digest);
     let mut all_lookups: Vec<Vec<Frac>> = (0..lookups_per_block)
         .map(|_| vec![(SecureField::zero(), SecureField::one()); n_rows])
         .collect();
 
     for (block_idx, block) in witness.blocks.iter().enumerate() {
         let slot = Layout::block_slot(block_idx, log_size);
+        let is_last_block = block_idx == last_block_idx && has_padding;
         let mut cursor = 0usize;
-        write_block_lookups(&mut all_lookups, &mut cursor, slot, block, relations);
+        write_block_lookups(
+            &mut all_lookups,
+            &mut cursor,
+            slot,
+            block,
+            relations,
+            expose_digest,
+            is_last_block,
+        );
         debug_assert_eq!(cursor, lookups_per_block, "block lookup miscount");
     }
 
@@ -569,12 +615,15 @@ fn sha256_interaction(
 /// `Sha256Eval::evaluate` firing order. Bumps `cursor` past each lookup
 /// so the same lookup index always lands at the same column across
 /// blocks.
+#[allow(clippy::too_many_arguments)]
 fn write_block_lookups(
     all: &mut [Vec<Frac>],
     cursor: &mut usize,
     slot: usize,
     block: &crate::types::BlockWitness,
     relations: &Sha256Relations,
+    expose_digest: bool,
+    is_last_block: bool,
 ) {
     // Per-partition lo/hi half projections (length 4 each, W=6) — the same
     // `round_groups_half_indices` projection the constraint side keys on.
@@ -852,6 +901,24 @@ fn write_block_lookups(
         write_range_check(all, cursor, slot, relations, RangeKind::Range16, h.lo);
         write_range_check(all, cursor, slot, relations, RangeKind::Range16, h.hi);
     }
+
+    // ---- 6. Digest yield (provider side, final block only) ----
+    //
+    // Mirrors the `if self.expose_digest { add_to_relation(...) }` tail of
+    // `Sha256Eval::evaluate`: a single width-32 yield on the `Sha256Digest`
+    // channel with multiplicity `−is_last_block`. The 32 cells are this
+    // block's `h_out` bytes in `h_out_digest_bytes` order — identical to the
+    // byte columns the constraint reads — so producer and consumer combine the
+    // same tuple. On non-final blocks the numerator is `0` (the frac is
+    // `(0, denom)`), so only the final block contributes `−1/combine(digest)`.
+    if expose_digest {
+        let bytes = h_out_digest_bytes(&block.h_out);
+        let values: [BaseField; DIGEST_BYTES] = std::array::from_fn(|i| BaseField::from(bytes[i]));
+        let denom = relations.digest.digest.combine(&values);
+        let num = -SecureField::from(BaseField::from(u32::from(is_last_block)));
+        all[*cursor][slot] = (num, denom);
+        *cursor += 1;
+    }
 }
 
 /// Internal tag for which split-pack relation a write targets.
@@ -1105,6 +1172,7 @@ pub fn generate_interaction_trace(
     witness: &Sha256Witness,
     sha256_log_size: u32,
     group_width: u32,
+    expose_digest: bool,
 ) -> (
     Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     InteractionClaim,
@@ -1112,7 +1180,10 @@ pub fn generate_interaction_trace(
     let mut combined = Vec::new();
 
     // Sha256Eval consumer first — its slot in the proof's component list.
-    let (sha_trace, sha_sum) = sha256_interaction(relations, witness, sha256_log_size);
+    // `expose_digest` adds the cross-component digest yield to this
+    // component's fractions (and hence its claimed sum).
+    let (sha_trace, sha_sum) =
+        sha256_interaction(relations, witness, sha256_log_size, expose_digest);
     combined.extend(sha_trace);
     let sha256 = ComponentClaim {
         claimed_sum: sha_sum,
@@ -1169,4 +1240,103 @@ pub fn generate_interaction_trace(
         range,
     };
     (combined, claim)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::partitions::MAX_ROUND_GROUP_BITS;
+    use crate::trace::min_log_size;
+    use crate::witness::compute_sha256_witness;
+    use stwo::core::channel::Blake2sChannel;
+
+    /// With the digest provider **off**, the SHA module's claimed sums still
+    /// net to zero — the standalone consumer ⇄ producer balance is untouched,
+    /// so a standalone SHA proof keeps self-verifying.
+    #[test]
+    fn digest_provider_off_keeps_module_self_balanced() {
+        let witness = compute_sha256_witness(b"abc");
+        let log_size = min_log_size(witness.blocks.len());
+        let relations = Sha256Relations::draw(&mut Blake2sChannel::default());
+        let (_, claim) =
+            generate_interaction_trace(&relations, &witness, log_size, MAX_ROUND_GROUP_BITS, false);
+        assert_eq!(
+            claim.total(),
+            SecureField::zero(),
+            "standalone SHA module must self-balance when the digest is not exposed",
+        );
+    }
+
+    /// With the digest provider **on**, the module yields the 32 final-block
+    /// digest bytes. Every other lookup still self-cancels, so the module's
+    /// claimed-sum total is exactly the outstanding provider term
+    /// `−1/combine(digest)`. A synthetic consumer that *requires* the same
+    /// digest tuple contributes `+1/combine(digest)` — exactly the claimed sum
+    /// of a consumer interaction column that fires `+1` on the final-block row
+    /// and `0` elsewhere — and the two cancel. This is the §6.2 producer-half
+    /// balance check, at the claimed-sum level (no full proof needed).
+    #[test]
+    fn digest_provider_balances_against_synthetic_consumer() {
+        let witness = compute_sha256_witness(b"abc");
+        let log_size = min_log_size(witness.blocks.len());
+        let relations = Sha256Relations::draw(&mut Blake2sChannel::default());
+
+        let (_, claim) =
+            generate_interaction_trace(&relations, &witness, log_size, MAX_ROUND_GROUP_BITS, true);
+        let module_total = claim.total();
+
+        // Synthesize the consumer term: +1 / combine(final-block digest bytes),
+        // using the same drawn relation the provider yielded against.
+        let last = witness.blocks.last().expect("at least one block");
+        let bytes = h_out_digest_bytes(&last.h_out);
+        let values: [BaseField; DIGEST_BYTES] = std::array::from_fn(|i| BaseField::from(bytes[i]));
+        let denom: SecureField = relations.digest.digest.combine(&values);
+        assert_ne!(
+            denom,
+            SecureField::zero(),
+            "digest combine must be invertible under the drawn challenges",
+        );
+        let consumer = SecureField::one() / denom;
+
+        // The yield leaves the module unbalanced on its own (the whole point:
+        // the digest term enters the global balance)...
+        assert_ne!(
+            module_total,
+            SecureField::zero(),
+            "exposing the digest must leave an outstanding provider term",
+        );
+        // ...and the synthetic consumer cancels it exactly.
+        assert_eq!(
+            module_total + consumer,
+            SecureField::zero(),
+            "digest provider must balance a consumer requiring the same bytes",
+        );
+    }
+
+    /// A consumer requiring a *different* digest (one bit flipped) does not
+    /// cancel the provider's yield — the balance closes only for the exact
+    /// bytes SHA computed. This is the binding's core property (a signature
+    /// over the wrong hash is rejected) exercised at the §6.2 level.
+    #[test]
+    fn digest_provider_rejects_mismatched_consumer() {
+        let witness = compute_sha256_witness(b"abc");
+        let log_size = min_log_size(witness.blocks.len());
+        let relations = Sha256Relations::draw(&mut Blake2sChannel::default());
+
+        let (_, claim) =
+            generate_interaction_trace(&relations, &witness, log_size, MAX_ROUND_GROUP_BITS, true);
+
+        let last = witness.blocks.last().unwrap();
+        let mut bytes = h_out_digest_bytes(&last.h_out);
+        bytes[0] ^= 1; // flip one bit of the first digest byte
+        let values: [BaseField; DIGEST_BYTES] = std::array::from_fn(|i| BaseField::from(bytes[i]));
+        let denom: SecureField = relations.digest.digest.combine(&values);
+        let wrong_consumer = SecureField::one() / denom;
+
+        assert_ne!(
+            claim.total() + wrong_consumer,
+            SecureField::zero(),
+            "a consumer requiring different bytes must not balance the digest yield",
+        );
+    }
 }
