@@ -78,6 +78,7 @@ pub struct Sha256Prover<'a> {
     log_n_rows: u32,
     group_width: u32,
     expose_digest: bool,
+    digest_handle: Option<air_core::relations::SharedDigestRelation>,
     relations: Option<Sha256Relations>,
     interaction_claim: Option<InteractionClaim>,
     components: Option<Sha256Components>,
@@ -90,6 +91,7 @@ impl<'a> Sha256Prover<'a> {
             log_n_rows,
             group_width,
             expose_digest: false,
+            digest_handle: None,
             relations: None,
             interaction_claim: None,
             components: None,
@@ -106,6 +108,16 @@ impl<'a> Sha256Prover<'a> {
     /// on the matching [`Sha256Verifier`].
     pub fn with_digest_provider(mut self) -> Self {
         self.expose_digest = true;
+        self
+    }
+
+    /// As [`Self::with_digest_provider`], plus **share** the drawn
+    /// `Sha256Digest` relation through `handle` so a sibling module (the P256
+    /// digest-bind bridge) consumes it over the identical `LookupElements`
+    /// (§6.3). The handle is populated during [`Air::draw_relations`].
+    pub fn with_digest_handle(mut self, handle: air_core::relations::SharedDigestRelation) -> Self {
+        self.expose_digest = true;
+        self.digest_handle = Some(handle);
         self
     }
 
@@ -142,7 +154,12 @@ impl Air for Sha256Prover<'_> {
     }
 
     fn draw_relations(&mut self, channel: &mut Blake2sChannel) {
-        self.relations = Some(Sha256Relations::draw(channel));
+        let relations = Sha256Relations::draw(channel);
+        // Share the drawn digest relation with the consumer module, if composed.
+        if let Some(handle) = &self.digest_handle {
+            handle.set(relations.digest.digest.clone());
+        }
+        self.relations = Some(relations);
     }
 
     fn layout(&self) -> TreeLayout {
@@ -219,6 +236,7 @@ pub struct Sha256Verifier {
     log_n_rows: u32,
     group_width: u32,
     expose_digest: bool,
+    digest_handle: Option<air_core::relations::SharedDigestRelation>,
     interaction_claim: InteractionClaim,
     relations: Option<Sha256Relations>,
     components: Option<Sha256Components>,
@@ -230,6 +248,7 @@ impl Sha256Verifier {
             log_n_rows,
             group_width,
             expose_digest: false,
+            digest_handle: None,
             interaction_claim,
             relations: None,
             components: None,
@@ -242,6 +261,14 @@ impl Sha256Verifier {
     /// Must be set iff the prover set it.
     pub fn with_digest_provider(mut self) -> Self {
         self.expose_digest = true;
+        self
+    }
+
+    /// Match a [`Sha256Prover::with_digest_handle`] proof: share the drawn
+    /// digest relation with the consumer module through `handle`.
+    pub fn with_digest_handle(mut self, handle: air_core::relations::SharedDigestRelation) -> Self {
+        self.expose_digest = true;
+        self.digest_handle = Some(handle);
         self
     }
 
@@ -269,7 +296,11 @@ impl Air for Sha256Verifier {
     }
 
     fn draw_relations(&mut self, channel: &mut Blake2sChannel) {
-        self.relations = Some(Sha256Relations::draw(channel));
+        let relations = Sha256Relations::draw(channel);
+        if let Some(handle) = &self.digest_handle {
+            handle.set(relations.digest.digest.clone());
+        }
+        self.relations = Some(relations);
     }
 
     fn layout(&self) -> TreeLayout {

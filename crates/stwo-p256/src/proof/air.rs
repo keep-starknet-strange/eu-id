@@ -38,6 +38,9 @@ use stwo::prover::{ComponentProver, TreeBuilder};
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::TraceLocationAllocator;
 
+use crate::components::digest_bind::{
+    scalar_z_provider_claimed_sum, ScalarZRelation, SharedScalarZRelation,
+};
 use crate::public_inputs::PublicEcdsaInstance;
 use crate::scalar::scalar_mod_mul::columns::M31ColumnEval;
 
@@ -121,6 +124,14 @@ pub struct P256Prover<'a> {
     relations: Option<P256CurrentAirRelations>,
     interaction_claim: Option<P256CurrentAirInteractionClaim>,
     components: Option<P256CurrentAirComponents>,
+    /// Cross-module `z` binding (§6.3): when set, the module additionally draws a
+    /// [`ScalarZRelation`], shares it through [`Self::scalar_z_handle`], and folds
+    /// an analytic `−1/combine(sig_id, z)` provider term into its claimed sum —
+    /// the counterpart the digest-bind bridge consumes. Off for a standalone
+    /// P256 proof, leaving its transcript and balance unchanged.
+    bind_z: bool,
+    scalar_z_handle: Option<SharedScalarZRelation>,
+    scalar_z: Option<ScalarZRelation>,
 }
 
 impl<'a> P256Prover<'a> {
@@ -143,7 +154,21 @@ impl<'a> P256Prover<'a> {
             relations: None,
             interaction_claim: None,
             components: None,
+            bind_z: false,
+            scalar_z_handle: None,
+            scalar_z: None,
         })
+    }
+
+    /// Enable the cross-module `z` binding (§6.3): the module draws and shares a
+    /// [`ScalarZRelation`] through `handle` and yields the analytic
+    /// `(sig_id, z)` provider term. Set this iff the composed proof includes the
+    /// digest-bind bridge that consumes the same relation; the matching
+    /// [`P256Verifier`] must be built with [`P256Verifier::with_z_binding`].
+    pub fn with_z_binding(mut self, handle: SharedScalarZRelation) -> Self {
+        self.bind_z = true;
+        self.scalar_z_handle = Some(handle);
+        self
     }
 
     /// The PCS config this circuit is calibrated for. A combined proof that
@@ -190,6 +215,16 @@ impl Air for P256Prover<'_> {
 
     fn draw_relations(&mut self, channel: &mut Blake2sChannel) {
         self.relations = Some(P256CurrentAirRelations::draw(channel));
+        // Drawn after the module's own relations (so the existing transcript is
+        // unperturbed) and shared with the bridge module that consumes it.
+        if self.bind_z {
+            let scalar_z = ScalarZRelation::draw(channel);
+            self.scalar_z_handle
+                .as_ref()
+                .expect("scalar_z handle set by with_z_binding")
+                .set(scalar_z.clone());
+            self.scalar_z = Some(scalar_z);
+        }
     }
 
     fn layout(&self) -> TreeLayout {
@@ -203,10 +238,19 @@ impl Air for P256Prover<'_> {
     fn claimed_sums(&self) -> Vec<QM31> {
         // The whole `lookup_sum` (component sums plus public-input provider
         // terms) as one balance entry; the orchestrator rejects unless it is
-        // zero, matching the monolithic verifier's `lookup_sum == 0` gate.
-        vec![self
+        // zero, matching the monolithic verifier's `lookup_sum == 0` gate. When
+        // the `z` binding is on, add the analytic `(sig_id, z)` provider term the
+        // bridge consumes.
+        let mut sum = self
             .interaction_claim()
-            .lookup_sum(&self.proof_claim.public_inputs.instances, self.relations())]
+            .lookup_sum(&self.proof_claim.public_inputs.instances, self.relations());
+        if self.bind_z {
+            sum += scalar_z_provider_claimed_sum(
+                &self.proof_claim.public_inputs.instances,
+                self.scalar_z.as_ref().expect("scalar_z drawn when bind_z"),
+            );
+        }
+        vec![sum]
     }
 
     fn mix_claimed_sums(&self, channel: &mut Blake2sChannel) {
@@ -291,6 +335,9 @@ pub struct P256Verifier {
     interaction_claim: P256CurrentAirInteractionClaim,
     relations: Option<P256CurrentAirRelations>,
     components: Option<P256CurrentAirComponents>,
+    bind_z: bool,
+    scalar_z_handle: Option<SharedScalarZRelation>,
+    scalar_z: Option<ScalarZRelation>,
 }
 
 impl P256Verifier {
@@ -305,7 +352,19 @@ impl P256Verifier {
             interaction_claim,
             relations: None,
             components: None,
+            bind_z: false,
+            scalar_z_handle: None,
+            scalar_z: None,
         }
+    }
+
+    /// Match a [`P256Prover::with_z_binding`] proof: draw and share the same
+    /// [`ScalarZRelation`] and fold the analytic provider term into the balance.
+    /// Must be set iff the prover set it.
+    pub fn with_z_binding(mut self, handle: SharedScalarZRelation) -> Self {
+        self.bind_z = true;
+        self.scalar_z_handle = Some(handle);
+        self
     }
 
     fn relations(&self) -> &P256CurrentAirRelations {
@@ -328,6 +387,14 @@ impl Air for P256Verifier {
 
     fn draw_relations(&mut self, channel: &mut Blake2sChannel) {
         self.relations = Some(P256CurrentAirRelations::draw(channel));
+        if self.bind_z {
+            let scalar_z = ScalarZRelation::draw(channel);
+            self.scalar_z_handle
+                .as_ref()
+                .expect("scalar_z handle set by with_z_binding")
+                .set(scalar_z.clone());
+            self.scalar_z = Some(scalar_z);
+        }
     }
 
     fn layout(&self) -> TreeLayout {
@@ -335,9 +402,16 @@ impl Air for P256Verifier {
     }
 
     fn claimed_sums(&self) -> Vec<QM31> {
-        vec![self
+        let mut sum = self
             .interaction_claim
-            .lookup_sum(&self.proof_claim.public_inputs.instances, self.relations())]
+            .lookup_sum(&self.proof_claim.public_inputs.instances, self.relations());
+        if self.bind_z {
+            sum += scalar_z_provider_claimed_sum(
+                &self.proof_claim.public_inputs.instances,
+                self.scalar_z.as_ref().expect("scalar_z drawn when bind_z"),
+            );
+        }
+        vec![sum]
     }
 
     fn mix_claimed_sums(&self, channel: &mut Blake2sChannel) {

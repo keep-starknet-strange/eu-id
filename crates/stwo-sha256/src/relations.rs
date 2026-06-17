@@ -295,7 +295,19 @@ impl Default for RangeRelations {
 /// `word_j.to_be_bytes()` — so cell `4j+k` is digest byte `4j+k`.
 pub const DIGEST_REL_SIZE: usize = crate::constants::DIGEST_BYTES;
 
-relation!(Sha256Digest, DIGEST_REL_SIZE);
+/// The cross-component digest channel is **shared** with the consumer (the P256
+/// `z` binding, §6.3): a yield here only cancels against a require there if both
+/// sides combine over the *same* drawn `LookupElements`. So the relation type is
+/// defined once in the common [`air_core`] crate and aliased here, rather than
+/// declared locally. Width, and the `relation!`-generated `draw`/`dummy`/
+/// `combine`, are unchanged — 6.2's transcript order and width-32 test still
+/// hold — so this is a transparent move, not a behavioural change.
+pub use air_core::relations::DigestBytesRelation as Sha256Digest;
+
+// The shared arity must match this crate's digest-byte count, or the provider
+// and consumer would size their relation tuples differently and silently fail
+// to balance.
+const _: () = assert!(DIGEST_REL_SIZE == air_core::relations::DIGEST_BYTES_ARITY);
 
 /// The cross-component digest channel (interface-contract item 2:
 /// `SHA_DIGEST ↔ ECDSA_Z`). **This is the one relation the SHA-256 AIR uses

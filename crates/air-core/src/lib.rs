@@ -23,6 +23,8 @@
 //! Switching the system to a different (e.g. Stwo-friendly) hash is a one-line
 //! change to these aliases.
 
+pub mod relations;
+
 use num_traits::Zero;
 use stwo::core::air::Component;
 use stwo::core::channel::{Blake2sChannel, Channel};
