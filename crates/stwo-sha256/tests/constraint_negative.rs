@@ -230,6 +230,10 @@ fn collect_constraint_residuals(trace: &[Vec<BaseField>], log_size: u32) -> Vec<
     let eval = Sha256Eval {
         log_size,
         relations: Sha256Relations::dummy(),
+        // The digest yield is a LogUp term, not a linear constraint, so it
+        // does not affect this linear-residual collector either way; keep it
+        // off to mirror the standalone (self-balancing) AIR.
+        expose_digest: false,
     };
     let n_rows = 1usize << log_size;
     let mut all = Vec::new();

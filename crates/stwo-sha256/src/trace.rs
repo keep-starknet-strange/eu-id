@@ -79,11 +79,11 @@
 use stwo::core::fields::m31::{BaseField, M31};
 use stwo::core::utils::{bit_reverse_index, coset_index_to_circle_domain_index};
 
-use crate::constants::{N_ROUNDS, N_STATE_WORDS};
+use crate::constants::{DIGEST_BYTES, N_ROUNDS, N_STATE_WORDS};
 use crate::partitions::GROUPS_PER_ROUND_PARTITION;
 use crate::types::{
-    AddCarries, BlockAuxSplitPackWitness, BlockWitness, LimbPairBytes, PaddingRowWitness,
-    RoundMajChWitness, RoundPackedGroups, Sha256Witness, SigmaDecodeWitness,
+    AddCarries, BlockAuxSplitPackWitness, BlockWitness, LimbBytes, LimbPairBytes,
+    PaddingRowWitness, RoundMajChWitness, RoundPackedGroups, Sha256Witness, SigmaDecodeWitness,
     SigmaInputSplitPackWitness, WordLimbs, BYTES_PER_WORD, WORDS_PER_BLOCK,
 };
 
@@ -182,11 +182,34 @@ impl Layout {
     pub const COL_H_OUT_START: usize = Self::COL_FINAL_CARRIES_END;
     pub const COL_H_OUT_END: usize = Self::COL_H_OUT_START + 2 * N_STATE_WORDS;
 
-    /// Per-block padding-role region. Appended after `h_out` so the
-    /// existing read order in [`crate::constraints::Sha256Eval`] stays
+    /// `is_last_block` flag (1 col): `1` on the final real block of a
+    /// multi-block hash, `0` on every other block and on every padding row.
+    /// The AIR pins it to `enabler · (1 − enabler_next)` — the symmetric
+    /// twin of the [`Self::COL_ENABLER_STEP`] first-real-row marker — so it
+    /// flags exactly the last row of the contiguous real-row prefix. It
+    /// gates the cross-component digest yield to the final block, since the
+    /// intermediate blocks' `h_out` are multi-block chaining state, not the
+    /// credential digest. Read after `h_out` so the existing
+    /// `next_trace_mask` order is undisturbed.
+    pub const COL_IS_LAST_BLOCK: usize = Self::COL_H_OUT_END;
+
+    /// Digest byte view (`DIGEST_BYTES = 32` cols): the 32 big-endian bytes
+    /// of this block's `h_out`, laid out per state word `j` as
+    /// `[hi.b1, hi.b0, lo.b1, lo.b0]` (i.e. `word_j.to_be_bytes()`, see
+    /// [`h_out_digest_bytes`]). Each `(lo, hi)` limb is tied to its two
+    /// bytes by the decomposition constraint `limb = 256·b1 + b0` in
+    /// `crate::constraints::Sha256Eval`; these cells are exactly what the
+    /// `Sha256Digest` relation yields on the final block. Materialised on
+    /// every block (the decomposition fires under `enabler`); only the
+    /// final block's bytes are yielded across the module boundary.
+    pub const COL_DIGEST_BYTES_START: usize = Self::COL_IS_LAST_BLOCK + 1;
+    pub const COL_DIGEST_BYTES_END: usize = Self::COL_DIGEST_BYTES_START + DIGEST_BYTES;
+
+    /// Per-block padding-role region. Appended after the digest byte view so
+    /// the existing read order in [`crate::constraints::Sha256Eval`] stays
     /// intact — the AIR's `next_trace_mask` walk simply continues into
     /// these columns at the end of the row.
-    pub const COL_PADDING_START: usize = Self::COL_H_OUT_END;
+    pub const COL_PADDING_START: usize = Self::COL_DIGEST_BYTES_END;
     pub const COL_IS_MARKER_BLOCK: usize = Self::COL_PADDING_START;
     pub const COL_IS_LENGTH_BLOCK: usize = Self::COL_PADDING_START + 1;
     pub const COL_IS_LENGTH_ONLY_BLOCK: usize = Self::COL_PADDING_START + 2;
@@ -334,6 +357,13 @@ impl Layout {
         (base, base + 1)
     }
 
+    /// Column of digest byte `idx` (`idx ∈ [0, DIGEST_BYTES)`), in the
+    /// big-endian `to_be_bytes` order of [`h_out_digest_bytes`].
+    #[inline]
+    pub const fn digest_byte(idx: usize) -> usize {
+        Self::COL_DIGEST_BYTES_START + idx
+    }
+
     /// `(lo_carry, hi_carry)` slot for the `j`-th finalization add.
     #[inline]
     pub const fn final_carry(j: usize) -> (usize, usize) {
@@ -383,6 +413,30 @@ impl Layout {
     }
 }
 
+/// The 32 digest bytes of a block's `h_out`, in the fixed big-endian order
+/// the [`Layout::COL_DIGEST_BYTES_START`] columns and the
+/// `crate::relations::Sha256Digest` relation use: per state word `j`,
+/// `word_j.to_be_bytes()` = `[hi.b1, hi.b0, lo.b1, lo.b0]` (recall
+/// `word_j = lo + 2¹⁶·hi`, so the high limb supplies the two most-significant
+/// big-endian bytes). The trace generator fills the byte columns from this,
+/// `crate::interaction` combines the digest LogUp tuple from this, and
+/// `crate::constraints` reads the columns back in this order — keeping the
+/// digest provider and any consumer byte-for-byte aligned (interface-contract
+/// item 4). The two bytes of each limb satisfy `limb = 256·b1 + b0`, which is
+/// the decomposition the AIR constrains.
+pub fn h_out_digest_bytes(h_out: &[WordLimbs; N_STATE_WORDS]) -> [u32; DIGEST_BYTES] {
+    let mut out = [0u32; DIGEST_BYTES];
+    for (j, limb) in h_out.iter().enumerate() {
+        let lo = LimbBytes::from_u16(limb.lo);
+        let hi = LimbBytes::from_u16(limb.hi);
+        out[4 * j] = hi.b1;
+        out[4 * j + 1] = hi.b0;
+        out[4 * j + 2] = lo.b1;
+        out[4 * j + 3] = lo.b0;
+    }
+    out
+}
+
 /// Materialise the trace for a `Sha256Witness`.
 ///
 /// Returns `Vec<Vec<BaseField>>`, one inner `Vec` per column. Length of
@@ -402,9 +456,24 @@ pub fn generate_trace(witness: &Sha256Witness, log_size: u32) -> Vec<Vec<BaseFie
 
     let mut cols = vec![vec![BaseField::from(0u32); n_rows]; Layout::TOTAL_COLS];
 
+    // `is_last_block` mirrors the AIR's `enabler · (1 − enabler_next)` gate:
+    // it is `1` at the final real block *only if* that block has a padding
+    // successor (coset index `n_blocks` is disabled). With a fully real trace
+    // (`n_blocks == n_rows`) the final block's coset successor wraps to the
+    // real block 0, so the gate — and this flag — are `0` everywhere and the
+    // digest is simply not exposed. Keeping the trace value in lock-step with
+    // the constraint avoids a spurious residual on a full trace.
+    let last_block_idx = witness.blocks.len().saturating_sub(1);
+    let has_padding = witness.blocks.len() < n_rows;
     for (block_idx, block) in witness.blocks.iter().enumerate() {
         let slot = Layout::block_slot(block_idx, log_size);
-        write_block_row(&mut cols, slot, block, block_idx == 0);
+        write_block_row(
+            &mut cols,
+            slot,
+            block,
+            block_idx == 0,
+            block_idx == last_block_idx && has_padding,
+        );
     }
 
     // C1-fix aux column: `enabler_step` is `1` only at the slot whose
@@ -430,6 +499,7 @@ fn write_block_row(
     row: usize,
     block: &BlockWitness,
     is_first_block: bool,
+    is_last_block: bool,
 ) {
     cols[Layout::COL_ENABLER][row] = BaseField::from(1u32);
     cols[Layout::COL_IS_FIRST_BLOCK][row] = BaseField::from(is_first_block as u32);
@@ -533,6 +603,16 @@ fn write_block_row(
         let (lo, hi) = Layout::h_out_word(j);
         cols[lo][row] = m31(block.h_out[j].lo);
         cols[hi][row] = m31(block.h_out[j].hi);
+    }
+
+    // is_last_block flag + the digest byte view of this block's h_out.
+    // The byte columns are written for every block (the decomposition
+    // constraint fires under `enabler`); only the final block's bytes are
+    // yielded across the module boundary, gated by `is_last_block`.
+    cols[Layout::COL_IS_LAST_BLOCK][row] = BaseField::from(is_last_block as u32);
+    let digest_bytes = h_out_digest_bytes(&block.h_out);
+    for (idx, &byte) in digest_bytes.iter().enumerate() {
+        cols[Layout::digest_byte(idx)][row] = m31(byte);
     }
 
     // padding-role witness — laid out per `PADDING_ROW_COLS` above.
@@ -728,6 +808,51 @@ mod tests {
         round_trip_digest(&[0xAB; 200]);
     }
 
+    /// The 32 digest byte columns recompose to the same digest as sha2 (in
+    /// the fixed `to_be_bytes` order the `Sha256Digest` relation yields), and
+    /// `is_last_block` is `1` at exactly the final block's slot and `0` on
+    /// every other block. Pins the byte ordering and the final-block gate the
+    /// digest provider relies on, at the trace level (independent of the AIR).
+    fn digest_byte_columns_match(msg: &[u8]) {
+        let witness = compute_sha256_witness(msg);
+        let log_size = min_log_size(witness.blocks.len());
+        let trace = generate_trace(&witness, log_size);
+
+        let last = witness.blocks.len() - 1;
+        let last_slot = Layout::block_slot(last, log_size);
+
+        let mut digest_bytes = [0u8; DIGEST_BYTES];
+        for (idx, b) in digest_bytes.iter_mut().enumerate() {
+            let v = trace[Layout::digest_byte(idx)][last_slot].0;
+            assert!(v < 256, "digest byte {idx} = {v} out of [0, 256)");
+            *b = v as u8;
+        }
+        assert_eq!(digest_bytes, sha2_reference(msg));
+
+        // `is_last_block` is set on the final block only when a padding
+        // successor exists (the AIR's `enabler · (1 − enabler_next)` gate).
+        let has_padding = witness.blocks.len() < (1usize << log_size);
+        for block_idx in 0..witness.blocks.len() {
+            let slot = Layout::block_slot(block_idx, log_size);
+            let expected = (block_idx == last && has_padding) as u32;
+            assert_eq!(
+                trace[Layout::COL_IS_LAST_BLOCK][slot].0,
+                expected,
+                "is_last_block at block {block_idx}"
+            );
+        }
+    }
+
+    #[test]
+    fn digest_byte_columns_single_block() {
+        digest_byte_columns_match(b"abc");
+    }
+
+    #[test]
+    fn digest_byte_columns_multi_block() {
+        digest_byte_columns_match(&[0xAB; 200]);
+    }
+
     #[test]
     fn empty_message_round_trip() {
         round_trip_digest(b"");
@@ -807,6 +932,8 @@ mod tests {
             + N_ROUNDS * ROUND_COLS
             + 2 * N_STATE_WORDS                // finalization carries
             + 2 * N_STATE_WORDS                // h_out
+            + 1                                // is_last_block flag
+            + DIGEST_BYTES                     // digest byte view of h_out
             + PADDING_ROW_COLS                 // §10.4 padding-role witness
             + 1; // C1-fix `enabler_step` aux column at the tail
         assert_eq!(Layout::TOTAL_COLS, expected);
@@ -842,6 +969,8 @@ mod tests {
                 + 64 * (base_round + 2 * SIGMA_DECODE_COLS + ROUND_MAJ_CH_COLS)
                 + 16
                 + 16
+                + 1 // is_last_block flag
+                + DIGEST_BYTES // digest byte view of h_out
                 + PADDING_ROW_COLS
                 + 1 // C1-fix `enabler_step` aux column
         );

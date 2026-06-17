@@ -260,3 +260,50 @@ fn verify_rejects_range_k_claimed_sum_mutations() {
         }
     }
 }
+
+/// §6.2 producer-half end-to-end: prove the SHA module with the digest
+/// provider **on** and confirm two things in a *real* proof (not just the
+/// claimed-sum algebra the unit smoke test checks):
+///
+/// 1. The Stwo prover **accepts** the digest yield — its constraint is
+///    satisfiable and degree ≤ 2, and the extra interaction column lines up
+///    with the `add_to_relation` the AIR emits. A degree blow-up or a
+///    provider/consumer tuple desync would fail here, at prove time.
+/// 2. The verifier **rejects** the module on its own — the yield has no
+///    consumer, so the `air_core` global LogUp balance is non-zero. This is
+///    the whole point of §6.2: the digest term enters the global balance and
+///    only cancels once a consumer (the P256 `z` binding, §6.3) requires the
+///    same bytes. The matching positive case — a consumer that *does* balance
+///    it — lands with that binding.
+#[ignore = "slow: produces a real proof first; same cost as prove_and_verify_abc"]
+#[test]
+fn digest_provider_proof_is_unbalanced_without_consumer() {
+    use num_traits::Zero;
+    use stwo::core::fields::qm31::SecureField;
+    use stwo_sha256::air::{Sha256Prover, Sha256Verifier};
+
+    let witness = compute_sha256_witness(b"abc");
+    let config = config_for(witness.blocks.len());
+
+    let mut prover =
+        Sha256Prover::new(&witness, config.log_n_rows, config.group_width).with_digest_provider();
+    let stark_proof = air_core::prove(&mut [&mut prover], config.pcs_config)
+        .expect("prove with digest provider must succeed");
+    let interaction_claim = prover.interaction_claim().clone();
+
+    // (1) The exposed digest leaves the module's claimed sums unbalanced.
+    assert_ne!(
+        interaction_claim.total(),
+        SecureField::zero(),
+        "exposing the digest must leave an outstanding provider term",
+    );
+
+    // (2) The verifier's global LogUp balance check rejects it.
+    let mut verifier =
+        Sha256Verifier::new(config.log_n_rows, config.group_width, interaction_claim)
+            .with_digest_provider();
+    assert!(
+        air_core::verify(&mut [&mut verifier], &stark_proof).is_err(),
+        "an unbalanced digest yield (no consumer) must fail verification",
+    );
+}
