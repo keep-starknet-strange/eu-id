@@ -7,9 +7,15 @@ edition = "2021"
 air-core = { path = "../air-core" }
 stwo-p256 = { path = "../stwo-p256" }
 stwo-sha256 = { path = "../stwo-sha256" }
+predicates = { path = "../predicates" }
 stwo = { workspace = true }
 
-[dev-dependencies]
+# Reference oracles. These back the POC's native credential generator and its
+# end-to-end self-validation (the SPEC's "property-based testing against a
+# reference oracle" mitigation). They are reachable from the public
+# `generator`/`fixtures` API on purpose: every later binding task diffs against
+# a trusted witness rather than a guess, and integration tests in `tests/`
+# (which see only the public surface) consume the fixtures.
 p256 = { version = "0.13", features = ["ecdsa"] }
 ecdsa = { version = "0.16", features = ["signing", "verifying"] }
 sha2 = "0.10"

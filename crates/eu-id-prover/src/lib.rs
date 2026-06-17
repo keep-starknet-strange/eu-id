@@ -20,6 +20,21 @@
 //! global balance only cancels when the signature is verified over the hash SHA
 //! actually computed. Until that relation exists, treat this as orchestration
 //! scaffolding, not a meaningful identity proof.
+//!
+//! ## Credential format & witness oracle
+//!
+//! [`credential`] defines the simplified POC credential `C` (the frozen
+//! byte-offset contract every binding relation keys off), [`generator`] is the
+//! native signer + composed [`generator::PipelineWitness`] cross-checked against
+//! `sha2` / the `p256` crate, and [`fixtures`] is the deterministic catalogue of
+//! valid and adversarial witnesses the binding tasks diff against.
+
+pub mod credential;
+pub mod fixtures;
+pub mod generator;
+
+pub use credential::Credential;
+pub use generator::{IssuerKey, PipelineWitness, Policy, SignedCredential};
 
 use stwo::core::fields::m31::M31;
 use stwo::core::proof::StarkProof;
@@ -109,10 +124,7 @@ pub fn prove(
 
 /// Verify a [`Proof`], binding the P256 module to the caller's expected
 /// ECDSA statement.
-pub fn verify(
-    proof: &Proof,
-    expected_instances: &[PublicEcdsaInstance<M31>],
-) -> Result<(), Error> {
+pub fn verify(proof: &Proof, expected_instances: &[PublicEcdsaInstance<M31>]) -> Result<(), Error> {
     // Caller-argument binding for the P256 statement (the same gate the P256
     // standalone wrapper enforces).
     if proof.p256_claim.public_inputs.instances.as_slice() != expected_instances {
