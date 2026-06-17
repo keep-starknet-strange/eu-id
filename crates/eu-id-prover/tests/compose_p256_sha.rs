@@ -55,7 +55,10 @@ fn composes_and_verifies_p256_and_sha() {
 
     // P256 module: prove the ECDSA signature verifies.
     let input = signed_input(message);
-    assert!(ecdsa_verify(&input), "native verifier must accept the fixture");
+    assert!(
+        ecdsa_verify(&input),
+        "native verifier must accept the fixture"
+    );
     let draft = P256ProofDraft::from_inputs_with_arbitrary_fake_glv_hints(vec![input])
         .expect("signature builds a proof draft");
 

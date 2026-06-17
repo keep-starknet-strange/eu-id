@@ -172,7 +172,9 @@ pub fn prove(
         .unwrap_or(max_constraint_log_degree_bound + config.fri_config.log_blowup_factor);
 
     let twiddles = SimdBackend::precompute_twiddles(
-        CanonicCoset::new(twiddle_log_size).circle_domain().half_coset,
+        CanonicCoset::new(twiddle_log_size)
+            .circle_domain()
+            .half_coset,
     );
 
     let channel = &mut Ch::default();
@@ -295,8 +297,7 @@ pub fn verify(
     for m in modules.iter_mut() {
         m.build_components(&mut allocator);
     }
-    let component_refs: Vec<&dyn Component> =
-        modules.iter().flat_map(|m| m.components()).collect();
+    let component_refs: Vec<&dyn Component> = modules.iter().flat_map(|m| m.components()).collect();
 
     stark_verify(&component_refs, channel, commitment_scheme, proof.clone())
 }

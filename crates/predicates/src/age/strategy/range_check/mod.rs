@@ -9,8 +9,8 @@ pub mod witness;
 use crate::age::predicate::AgePredicate;
 use crate::age::strategy::range_check::air::{RangeCheckProver, RangeCheckVerifier};
 use crate::age::types::{AgeRangeCheckProof, DateOfBirth, Error, PublicInput};
-use air_core::{prove, verify, Air};
 use crate::predicate::{PredicateProver, PredicateVerifier};
+use air_core::{prove, verify, Air};
 use stwo::core::fields::qm31::QM31;
 use stwo::core::pcs::PcsConfig;
 

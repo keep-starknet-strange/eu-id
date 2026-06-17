@@ -28,9 +28,9 @@
 use air_core::{Air, AirProver, TreeLayout};
 use stwo::core::air::Component;
 use stwo::core::channel::Blake2sChannel;
-use stwo::core::pcs::PcsConfig;
 use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::QM31;
+use stwo::core::pcs::PcsConfig;
 use stwo::core::vcs_lifted::blake2_merkle::{Blake2sMerkleChannel, Blake2sMerkleHasher};
 use stwo::core::ColumnVec;
 use stwo::prover::backend::simd::SimdBackend;
@@ -193,7 +193,11 @@ impl Air for P256Prover<'_> {
     }
 
     fn layout(&self) -> TreeLayout {
-        layout(&self.proof_claim, &self.ids, self.interaction_claim.as_ref())
+        layout(
+            &self.proof_claim,
+            &self.ids,
+            self.interaction_claim.as_ref(),
+        )
     }
 
     fn claimed_sums(&self) -> Vec<QM31> {
