@@ -1,17 +1,20 @@
-//! Composes the P256 ECDSA module, the SHA-256 module, and the digest-bind
-//! bridge into one **cross-bound** STARK proof and round-trips it through the
-//! shared orchestrator.
+//! Composes the P256 ECDSA module, the SHA-256 module, the digest-bind bridge,
+//! and the age + nationality predicate modules into one STARK proof and
+//! round-trips it through the shared orchestrator.
 //!
-//! This validates the §6.3 binding end-to-end: the global LogUp balance cancels
-//! only when the ECDSA message hash `z` equals the digest SHA actually computed.
-//! The positive case proves a consistent witness (P256 signs `SHA-256(m)`, SHA
-//! hashes the same `m`); the negative case signs one message but hashes another
-//! and asserts the verifier rejects the imbalance.
+//! Two things are validated here. First, the digest binding: the global LogUp
+//! balance cancels only when the ECDSA message hash `z` equals the digest SHA
+//! actually computed — the positive case proves a consistent witness (P256 signs
+//! `SHA-256(m)`, SHA hashes the same `m`), the negative case signs one message
+//! but hashes another and asserts rejection. Second, that all five modules
+//! compose: `composes_all_modules_for_an_honest_credential` drives a real signed
+//! credential through the full slice. The predicate modules are present but not
+//! yet credential-bound, so each nets to zero and does not change the balance.
 //!
 //! Marked `#[ignore]` — a real STARK prove/verify dominated by P256 is slow; run
 //! with `--release --ignored`.
 
-use eu_id_prover::{prove, verify};
+use eu_id_prover::{fixtures, prove, verify};
 use stwo_p256::ecdsa::ecdsa_verify;
 use stwo_p256::proof::P256ProofDraft;
 use stwo_p256::types::{AffinePoint, EcdsaVerifyInput, Signature, U256};
@@ -55,8 +58,17 @@ fn sha_params(witness_blocks: usize) -> (u32, u32) {
     (log_n_rows, group_width)
 }
 
+/// Valid predicate inputs (over-18, accepted nationality) for the appended age
+/// and nationality modules, taken from the honest `valid_over_18` fixture. The
+/// digest-binding tests pair these with their own P256/SHA witnesses; the
+/// predicates net to zero, so they compose without affecting the binding the
+/// test exercises. `_lite` skips the (unused) P256 draft.
+fn valid_predicate_inputs() -> eu_id_prover::PipelineWitness {
+    fixtures::valid_over_18().pipeline_witness_lite()
+}
+
 #[test]
-#[ignore = "slow: full P256 + SHA + bridge STARK prove/verify; run with --release --ignored"]
+#[ignore = "slow: full P256 + SHA + bridge + predicates STARK prove/verify; run with --release --ignored"]
 fn binds_p256_z_to_sha_digest() {
     let message = b"eu-id combined p256 + sha256 fixture";
 
@@ -72,7 +84,18 @@ fn binds_p256_z_to_sha_digest() {
     let witness = compute_sha256_witness(message);
     let (log_n_rows, group_width) = sha_params(witness.blocks.len());
 
-    let proof = prove(&draft, &witness, log_n_rows, group_width).expect("combined proof generates");
+    let preds = valid_predicate_inputs();
+    let proof = prove(
+        &draft,
+        &witness,
+        log_n_rows,
+        group_width,
+        &preds.age_public,
+        &preds.age_dob,
+        &preds.nat_public,
+        &preds.nat_private,
+    )
+    .expect("combined proof generates");
 
     // Bound to its own ECDSA statement, the cross-bound proof verifies (the
     // global LogUp balance holds: z == SHA-256(message) at the byte level).
@@ -86,7 +109,7 @@ fn binds_p256_z_to_sha_digest() {
 }
 
 #[test]
-#[ignore = "slow: full P256 + SHA + bridge STARK prove/verify; run with --release --ignored"]
+#[ignore = "slow: full P256 + SHA + bridge + predicates STARK prove/verify; run with --release --ignored"]
 fn rejects_signed_one_message_hashed_another() {
     // The binding the whole task exists for: P256 signs message B (so its `z` is
     // the digest of B), but the SHA module hashes message A. `z` no longer equals
@@ -104,9 +127,20 @@ fn rejects_signed_one_message_hashed_another() {
     let (log_n_rows, group_width) = sha_params(witness.blocks.len());
 
     // The prover still produces a proof (each module is internally consistent;
-    // the cross-module imbalance is a verify-time check).
-    let proof =
-        prove(&draft, &witness, log_n_rows, group_width).expect("prover accepts the mismatch");
+    // the cross-module imbalance is a verify-time check). The appended predicates
+    // are valid and net to zero, so the only imbalance is the digest mismatch.
+    let preds = valid_predicate_inputs();
+    let proof = prove(
+        &draft,
+        &witness,
+        log_n_rows,
+        group_width,
+        &preds.age_public,
+        &preds.age_dob,
+        &preds.nat_public,
+        &preds.nat_private,
+    )
+    .expect("prover accepts the mismatch");
 
     // The verifier rejects: digest(B) (the ECDSA z) ≠ digest(A) (what SHA hashed),
     // so the digest-bind LogUp term does not cancel SHA's yield.
@@ -115,4 +149,41 @@ fn rejects_signed_one_message_hashed_another() {
         verify(&proof, &expected).is_err(),
         "signing one message while hashing another must be rejected",
     );
+}
+
+#[test]
+#[ignore = "slow: full P256 + SHA + bridge + predicates STARK prove/verify; run with --release --ignored"]
+fn composes_all_modules_for_an_honest_credential() {
+    // The honest end-to-end witness from the credential generator: a signed
+    // credential whose holder is over 18 and whose nationality is in the accepted
+    // set. This drives all five modules — P256, SHA-256, the digest bridge, age,
+    // and nationality — through one `air_core::prove`/`verify`, the unbound
+    // pipeline the predicate-binding tasks build on.
+    let pw = fixtures::valid_over_18().pipeline_witness();
+    assert!(
+        pw.check_consistency().all_ok(),
+        "fixture witness must be self-consistent"
+    );
+    let draft = pw
+        .p256_draft
+        .as_ref()
+        .expect("a valid signature builds a P256 draft");
+
+    let proof = prove(
+        draft,
+        &pw.sha_witness,
+        pw.sha_log_n_rows,
+        pw.sha_group_width,
+        &pw.age_public,
+        &pw.age_dob,
+        &pw.nat_public,
+        &pw.nat_private,
+    )
+    .expect("five-module proof generates");
+
+    // The full proof verifies against its own ECDSA statement: the digest binds
+    // (z == SHA-256(C)) and each predicate's sub-balance nets to zero, so the
+    // global LogUp balance holds.
+    let expected = proof.p256_instances().to_vec();
+    verify(&proof, &expected).expect("five-module proof verifies");
 }
