@@ -80,10 +80,11 @@ use stwo::core::fields::m31::{BaseField, M31};
 use stwo::core::utils::{bit_reverse_index, coset_index_to_circle_domain_index};
 
 use crate::constants::{DIGEST_BYTES, N_ROUNDS, N_STATE_WORDS};
+use crate::field_exposure::FieldExposure;
 use crate::partitions::GROUPS_PER_ROUND_PARTITION;
 use crate::types::{
-    AddCarries, BlockAuxSplitPackWitness, BlockWitness, LimbBytes, LimbPairBytes,
-    PaddingRowWitness, RoundMajChWitness, RoundPackedGroups, Sha256Witness, SigmaDecodeWitness,
+    AddCarries, BlockAuxSplitPackWitness, BlockWitness, LimbPairBytes, PaddingRowWitness,
+    RoundMajChWitness, RoundPackedGroups, Sha256Witness, SigmaDecodeWitness,
     SigmaInputSplitPackWitness, WordLimbs, BYTES_PER_WORD, WORDS_PER_BLOCK,
 };
 
@@ -241,8 +242,38 @@ impl Layout {
     /// which doesn't unify cleanly with the degree-2 producer components).
     pub const COL_ENABLER_STEP: usize = Self::COL_PADDING_END;
 
-    /// Total number of columns in the trace.
+    /// Number of **base** trace columns — the full width when no credential
+    /// field is exposed. The optional field-byte view (§6.5) is a dynamic tail
+    /// appended after this (see [`Self::COL_FIELD_BYTES_START`]).
     pub const TOTAL_COLS: usize = Self::COL_ENABLER_STEP + 1;
+
+    /// First column of the optional credential-field byte view (§6.5).
+    ///
+    /// The field byte columns are a **dynamic tail** appended after every base
+    /// column (including `enabler_step`), so enabling field exposure never
+    /// shifts a base offset. The count is `WORD_BYTES ×` (distinct exposed
+    /// message words) — see
+    /// [`crate::field_exposure::FieldExposure::n_columns`]. Each `(lo, hi)` limb
+    /// of an exposed word is tied to its two bytes by `limb = 256·b1 + b0` in
+    /// `crate::constraints::Sha256Eval`, the same decomposition the digest view
+    /// uses; only the exposed window bytes are yielded across the module
+    /// boundary, gated to the first block.
+    pub const COL_FIELD_BYTES_START: usize = Self::TOTAL_COLS;
+
+    /// Column of field byte `slot` (`0`-based among the exposure's byte
+    /// columns, packed by decomposed-word then big-endian byte position — see
+    /// [`crate::field_exposure::FieldExposure::yield_column_slot`]).
+    #[inline]
+    pub const fn field_byte_col(slot: usize) -> usize {
+        Self::COL_FIELD_BYTES_START + slot
+    }
+
+    /// Total trace width when a field exposure adds `n_field_cols` byte columns
+    /// (`0` ⇒ [`Self::TOTAL_COLS`]).
+    #[inline]
+    pub const fn total_cols_with_fields(n_field_cols: usize) -> usize {
+        Self::TOTAL_COLS + n_field_cols
+    }
 
     /// `(lo, hi)` slot for the `j`-th word of `h_in`.
     #[inline]
@@ -427,17 +458,15 @@ impl Layout {
 pub fn h_out_digest_bytes(h_out: &[WordLimbs; N_STATE_WORDS]) -> [u32; DIGEST_BYTES] {
     let mut out = [0u32; DIGEST_BYTES];
     for (j, limb) in h_out.iter().enumerate() {
-        let lo = LimbBytes::from_u16(limb.lo);
-        let hi = LimbBytes::from_u16(limb.hi);
-        out[4 * j] = hi.b1;
-        out[4 * j + 1] = hi.b0;
-        out[4 * j + 2] = lo.b1;
-        out[4 * j + 3] = lo.b0;
+        let bytes = crate::field_exposure::word_be_bytes(limb.lo, limb.hi);
+        out[4 * j..4 * j + 4].copy_from_slice(&bytes);
     }
     out
 }
 
-/// Materialise the trace for a `Sha256Witness`.
+/// Materialise the trace for a `Sha256Witness`, with no credential field
+/// exposed (the base width [`Layout::TOTAL_COLS`]). See
+/// [`generate_trace_with_fields`] for the field-exposing variant.
 ///
 /// Returns `Vec<Vec<BaseField>>`, one inner `Vec` per column. Length of
 /// every inner `Vec` equals `1 << log_size`, padded with zeros past the
@@ -446,6 +475,20 @@ pub fn h_out_digest_bytes(h_out: &[WordLimbs; N_STATE_WORDS]) -> [u32; DIGEST_BY
 /// Choose `log_size` so that `(1 << log_size) >= witness.blocks.len()`.
 /// The function panics otherwise.
 pub fn generate_trace(witness: &Sha256Witness, log_size: u32) -> Vec<Vec<BaseField>> {
+    generate_trace_with_fields(witness, log_size, &FieldExposure::empty())
+}
+
+/// Materialise the trace for a `Sha256Witness`, additionally committing the
+/// credential-field byte view (§6.5) for every block when `field_exposure` is
+/// non-empty.
+///
+/// The field byte columns are appended after every base column; an empty
+/// exposure adds nothing and the result is identical to [`generate_trace`].
+pub fn generate_trace_with_fields(
+    witness: &Sha256Witness,
+    log_size: u32,
+    field_exposure: &FieldExposure,
+) -> Vec<Vec<BaseField>> {
     let n_rows = 1usize << log_size;
     assert!(
         witness.blocks.len() <= n_rows,
@@ -454,7 +497,8 @@ pub fn generate_trace(witness: &Sha256Witness, log_size: u32) -> Vec<Vec<BaseFie
         n_rows
     );
 
-    let mut cols = vec![vec![BaseField::from(0u32); n_rows]; Layout::TOTAL_COLS];
+    let total_cols = Layout::total_cols_with_fields(field_exposure.n_columns());
+    let mut cols = vec![vec![BaseField::from(0u32); n_rows]; total_cols];
 
     // `is_last_block` mirrors the AIR's `enabler · (1 − enabler_next)` gate:
     // it is `1` at the final real block *only if* that block has a padding
@@ -473,6 +517,7 @@ pub fn generate_trace(witness: &Sha256Witness, log_size: u32) -> Vec<Vec<BaseFie
             block,
             block_idx == 0,
             block_idx == last_block_idx && has_padding,
+            field_exposure,
         );
     }
 
@@ -500,6 +545,7 @@ fn write_block_row(
     block: &BlockWitness,
     is_first_block: bool,
     is_last_block: bool,
+    field_exposure: &FieldExposure,
 ) {
     cols[Layout::COL_ENABLER][row] = BaseField::from(1u32);
     cols[Layout::COL_IS_FIRST_BLOCK][row] = BaseField::from(is_first_block as u32);
@@ -617,6 +663,21 @@ fn write_block_row(
 
     // padding-role witness — laid out per `PADDING_ROW_COLS` above.
     write_padding_row(cols, row, &block.padding_row);
+
+    // Credential-field byte view (§6.5), appended after every base column.
+    // Each distinct exposed message word is decomposed into its four big-endian
+    // bytes; the decomposition constraint (`limb = 256·b1 + b0`) fires under
+    // `enabler` on every block, so the bytes are materialised for every block
+    // (only the first block's window bytes are yielded across the module
+    // boundary). Empty exposure writes nothing. `byte_in_word` order matches
+    // `field_exposure::word_be_bytes` and the constraint read order.
+    for (word_slot, &word_idx) in field_exposure.decomposed_words().iter().enumerate() {
+        let limb = block.schedule[word_idx];
+        let bytes = crate::field_exposure::word_be_bytes(limb.lo, limb.hi);
+        for (b, &byte) in bytes.iter().enumerate() {
+            cols[Layout::field_byte_col(word_slot * BYTES_PER_WORD + b)][row] = m31(byte);
+        }
+    }
 }
 
 #[inline]

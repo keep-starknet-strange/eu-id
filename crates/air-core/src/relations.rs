@@ -9,11 +9,18 @@
 //! hand the single drawn instance from the module that draws it to the module
 //! that reads it.
 //!
-//! Today this hosts the SHA→consumer **digest byte bridge** (`docs/ROADMAP_E2E`
-//! §6.3): SHA-256 yields its 32-byte final-block digest; the P256 ECDSA module
-//! requires the same 32 bytes as its message hash `z`. The credential-field
-//! bindings (§6.5–6.7) reuse the same byte-bridge shape and will add their own
-//! relations alongside this one.
+//! Today this hosts two byte-level bridges:
+//!
+//! - the SHA→consumer **digest byte bridge** (`docs/ROADMAP_E2E` §6.3): SHA-256
+//!   yields its 32-byte final-block digest; the P256 ECDSA module requires the
+//!   same 32 bytes as its message hash `z`.
+//! - the SHA→predicate **credential-field byte bridge** (`docs/ROADMAP_E2E`
+//!   §6.5): SHA-256 yields the byte windows of the signed credential's fields
+//!   (date of birth, nationality); each predicate requires exactly those bytes
+//!   so the attribute it reasons about is the one that was signed (§6.6/§6.7).
+//!
+//! Both reuse the same shape — expose some trace bytes as an 8-bit LogUp
+//! relation, share the drawn `LookupElements` via a [`SharedRelation`] handle.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -94,6 +101,37 @@ impl<R: Clone> SharedRelation<R> {
 /// The SHA → consumer digest-byte channel handle.
 pub type SharedDigestRelation = SharedRelation<DigestBytesRelation>;
 
+/// Number of base-field cells in the cross-module credential-field relation:
+/// `(field_id, byte_index, value)`. The SHA preimage field-exposure provider
+/// (`docs/ROADMAP_E2E` §6.5) yields one such tuple per exposed credential byte;
+/// each predicate consumer (§6.6/§6.7) requires exactly the tuples of the field
+/// it binds. Keying on `(field_id, byte_index)` lets one shared channel carry
+/// every field's bytes without an index column — the producer and consumer pin
+/// the same position by emitting the same first two cells.
+pub const FIELD_BYTES_ARITY: usize = 3;
+
+relation!(FieldBytesRelation, FIELD_BYTES_ARITY);
+
+/// The SHA → predicate credential-field channel handle. One shared channel
+/// carries every exposed field byte; the `field_id` cell distinguishes which
+/// credential field a byte belongs to.
+pub type SharedFieldRelation = SharedRelation<FieldBytesRelation>;
+
+/// Opaque credential-field tags carried in the first cell of a
+/// [`FieldBytesRelation`] tuple. They are assigned by the credential layer and
+/// are part of the frozen cross-module contract — the SHA producer is agnostic
+/// to their meaning (it yields whatever tags its field-exposure spec lists), and
+/// each predicate consumer requires the tag of the field it binds. The MVP
+/// credential exposes exactly these two fields (`docs/credential-format.md`).
+pub mod field_id {
+    /// The date-of-birth window (`year_hi, year_lo, month, day`), bound by the
+    /// age predicate (§6.6).
+    pub const DOB: u32 = 0;
+    /// The nationality window (`code_hi, code_lo`), bound by the nationality
+    /// predicate (§6.7).
+    pub const NATIONALITY: u32 = 1;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,5 +166,33 @@ mod tests {
     #[should_panic(expected = "read before it was drawn")]
     fn get_before_set_panics() {
         let _ = SharedDigestRelation::new().get();
+    }
+
+    #[test]
+    fn field_relation_has_arity_3() {
+        use stwo::core::fields::m31::BaseField;
+        use stwo::core::fields::qm31::SecureField;
+        let r = FieldBytesRelation::dummy();
+        assert_eq!(
+            <FieldBytesRelation as Relation<BaseField, SecureField>>::get_size(&r),
+            FIELD_BYTES_ARITY,
+        );
+        assert_eq!(FIELD_BYTES_ARITY, 3);
+    }
+
+    #[test]
+    fn shared_field_handle_round_trips_the_drawn_relation() {
+        let handle = SharedFieldRelation::new();
+        assert!(!handle.is_set());
+        let mut channel = Blake2sChannel::default();
+        let drawn = FieldBytesRelation::draw(&mut channel);
+        handle.set(drawn.clone());
+        assert!(handle.is_set());
+        assert_eq!(handle.clone().get(), drawn);
+    }
+
+    #[test]
+    fn credential_field_ids_are_distinct() {
+        assert_ne!(field_id::DOB, field_id::NATIONALITY);
     }
 }

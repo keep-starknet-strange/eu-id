@@ -307,3 +307,59 @@ fn digest_provider_proof_is_unbalanced_without_consumer() {
         "an unbalanced digest yield (no consumer) must fail verification",
     );
 }
+
+/// §6.5 end-to-end: a real proof exposing the credential field windows
+/// (date of birth + nationality). Mirrors the digest test above, exercising the
+/// full constraint + trace + interaction field path (the byte-decomposition
+/// columns, the `is_first_block`-gated yields, and the claimed-sum fold) at
+/// prove time. Two assertions:
+///
+/// 1. The proof **succeeds**, so the AIR's field columns, decomposition
+///    constraints, and per-yield lookups are internally consistent and the
+///    interaction trace matches the constraint firing order — a provider tuple
+///    desync would fail here.
+/// 2. The verifier **rejects** the module on its own — the field yields have no
+///    predicate consumer yet (§6.6/§6.7), so the global LogUp balance is
+///    non-zero and fails closed. The matching positive case lands with the
+///    age/nat credential bindings.
+#[ignore = "slow: produces a real proof first; same cost as prove_and_verify_abc"]
+#[test]
+fn field_provider_proof_is_unbalanced_without_consumer() {
+    use air_core::relations::field_id;
+    use num_traits::Zero;
+    use stwo::core::fields::qm31::SecureField;
+    use stwo_sha256::air::{Sha256Prover, Sha256Verifier};
+    use stwo_sha256::field_exposure::FieldExposure;
+
+    // A credential-shaped preimage: "EUID" | ver | 2007-03-15 | DE(276).
+    let credential: [u8; 11] = [b'E', b'U', b'I', b'D', 1, 0x07, 0xD7, 3, 15, 0x01, 0x14];
+    let exposure = FieldExposure::from_preimage_windows(&[
+        (field_id::DOB, 5, 4),
+        (field_id::NATIONALITY, 9, 2),
+    ]);
+
+    let witness = compute_sha256_witness(&credential);
+    let config = config_for(witness.blocks.len());
+
+    let mut prover = Sha256Prover::new(&witness, config.log_n_rows, config.group_width)
+        .with_field_provider(exposure.clone());
+    let stark_proof = air_core::prove(&mut [&mut prover], config.pcs_config)
+        .expect("prove with field provider must succeed");
+    let interaction_claim = prover.interaction_claim().clone();
+
+    // (1) The exposed field windows leave the module's claimed sums unbalanced.
+    assert_ne!(
+        interaction_claim.total(),
+        SecureField::zero(),
+        "exposing the credential fields must leave outstanding provider terms",
+    );
+
+    // (2) The verifier's global LogUp balance check rejects it (no consumer).
+    let mut verifier =
+        Sha256Verifier::new(config.log_n_rows, config.group_width, interaction_claim)
+            .with_field_provider(exposure);
+    assert!(
+        air_core::verify(&mut [&mut verifier], &stark_proof).is_err(),
+        "unbalanced field yields (no consumer) must fail verification",
+    );
+}

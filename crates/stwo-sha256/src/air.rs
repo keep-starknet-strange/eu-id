@@ -35,6 +35,7 @@ use crate::components::{
     ROUND_SPLIT_TABLES, SIGMA_SPLIT_TABLES,
 };
 use crate::constraints::Sha256Eval;
+use crate::field_exposure::FieldExposure;
 use crate::interaction::{generate_interaction_trace, sha_lookups_per_block, InteractionClaim};
 use crate::multiplicities::{
     decode_multiplicities, maj_ch_multiplicities, range_k_multiplicities,
@@ -49,11 +50,21 @@ use crate::types::Sha256Witness;
 /// Column log-sizes per tree, shared by prover and verifier — they depend
 /// only on the public size surface (`log_n_rows`, `group_width`), never on the
 /// witness.
-fn layout(log_n_rows: u32, group_width: u32, expose_digest: bool) -> TreeLayout {
+fn layout(
+    log_n_rows: u32,
+    group_width: u32,
+    expose_digest: bool,
+    field_exposure: &FieldExposure,
+) -> TreeLayout {
     TreeLayout {
         preprocessed: preprocessed_log_sizes(group_width, log_n_rows),
-        trace: base_trace_log_sizes(log_n_rows, group_width),
-        interaction: interaction_trace_log_sizes(log_n_rows, group_width, expose_digest),
+        trace: base_trace_log_sizes(log_n_rows, group_width, field_exposure.n_columns()),
+        interaction: interaction_trace_log_sizes(
+            log_n_rows,
+            group_width,
+            expose_digest,
+            field_exposure,
+        ),
     }
 }
 
@@ -79,6 +90,8 @@ pub struct Sha256Prover<'a> {
     group_width: u32,
     expose_digest: bool,
     digest_handle: Option<air_core::relations::SharedDigestRelation>,
+    field_exposure: FieldExposure,
+    field_handle: Option<air_core::relations::SharedFieldRelation>,
     relations: Option<Sha256Relations>,
     interaction_claim: Option<InteractionClaim>,
     components: Option<Sha256Components>,
@@ -92,6 +105,8 @@ impl<'a> Sha256Prover<'a> {
             group_width,
             expose_digest: false,
             digest_handle: None,
+            field_exposure: FieldExposure::empty(),
+            field_handle: None,
             relations: None,
             interaction_claim: None,
             components: None,
@@ -121,6 +136,33 @@ impl<'a> Sha256Prover<'a> {
         self
     }
 
+    /// Enable the credential-field provider (§6.5): the module yields the given
+    /// byte windows on the `Sha256Field` channel so predicate consumers
+    /// (§6.6/§6.7) can require them. Like [`Self::with_digest_provider`] this
+    /// leaves the module's claimed sum non-zero until a consumer cancels it, so
+    /// it is off by default. The exposure shape is mixed into the transcript
+    /// ([`Stmt0`]) and must be set identically on the matching
+    /// [`Sha256Verifier`]. Use [`Self::with_field_handle`] to also share the
+    /// drawn relation with the consumer module.
+    pub fn with_field_provider(mut self, exposure: FieldExposure) -> Self {
+        self.field_exposure = exposure;
+        self
+    }
+
+    /// As [`Self::with_field_provider`], plus **share** the drawn `Sha256Field`
+    /// relation through `handle` so the predicate modules consume it over the
+    /// identical `LookupElements`. The handle is populated during
+    /// [`Air::draw_relations`].
+    pub fn with_field_handle(
+        mut self,
+        exposure: FieldExposure,
+        handle: air_core::relations::SharedFieldRelation,
+    ) -> Self {
+        self.field_exposure = exposure;
+        self.field_handle = Some(handle);
+        self
+    }
+
     fn built_components(&self) -> &Sha256Components {
         self.components
             .as_ref()
@@ -145,25 +187,35 @@ impl<'a> Sha256Prover<'a> {
 
 impl Air for Sha256Prover<'_> {
     fn mix_public(&self, channel: &mut Blake2sChannel) {
-        Stmt0 {
-            log_n_rows: self.log_n_rows,
-            group_width: self.group_width,
-            expose_digest: self.expose_digest,
-        }
+        Stmt0::new(
+            self.log_n_rows,
+            self.group_width,
+            self.expose_digest,
+            &self.field_exposure,
+        )
         .mix_into(channel);
     }
 
     fn draw_relations(&mut self, channel: &mut Blake2sChannel) {
         let relations = Sha256Relations::draw(channel);
-        // Share the drawn digest relation with the consumer module, if composed.
+        // Share the drawn digest / field relations with the consumer modules, if
+        // composed.
         if let Some(handle) = &self.digest_handle {
             handle.set(relations.digest.digest.clone());
+        }
+        if let Some(handle) = &self.field_handle {
+            handle.set(relations.field.field.clone());
         }
         self.relations = Some(relations);
     }
 
     fn layout(&self) -> TreeLayout {
-        layout(self.log_n_rows, self.group_width, self.expose_digest)
+        layout(
+            self.log_n_rows,
+            self.group_width,
+            self.expose_digest,
+            &self.field_exposure,
+        )
     }
 
     fn claimed_sums(&self) -> Vec<QM31> {
@@ -182,6 +234,7 @@ impl Air for Sha256Prover<'_> {
             self.log_n_rows,
             self.group_width,
             self.expose_digest,
+            &self.field_exposure,
         ));
     }
 
@@ -210,6 +263,7 @@ impl AirProver for Sha256Prover<'_> {
             self.witness,
             self.log_n_rows,
             self.group_width,
+            &self.field_exposure,
         ));
     }
 
@@ -220,6 +274,7 @@ impl AirProver for Sha256Prover<'_> {
             self.log_n_rows,
             self.group_width,
             self.expose_digest,
+            &self.field_exposure,
         );
         tb.extend_evals(interaction_evals);
         self.interaction_claim = Some(interaction_claim);
@@ -237,6 +292,8 @@ pub struct Sha256Verifier {
     group_width: u32,
     expose_digest: bool,
     digest_handle: Option<air_core::relations::SharedDigestRelation>,
+    field_exposure: FieldExposure,
+    field_handle: Option<air_core::relations::SharedFieldRelation>,
     interaction_claim: InteractionClaim,
     relations: Option<Sha256Relations>,
     components: Option<Sha256Components>,
@@ -249,6 +306,8 @@ impl Sha256Verifier {
             group_width,
             expose_digest: false,
             digest_handle: None,
+            field_exposure: FieldExposure::empty(),
+            field_handle: None,
             interaction_claim,
             relations: None,
             components: None,
@@ -272,6 +331,27 @@ impl Sha256Verifier {
         self
     }
 
+    /// Match a [`Sha256Prover::with_field_provider`] proof: reconstruct the
+    /// verifier with the **same** field exposure so the trace/interaction
+    /// layout and the mixed [`Stmt0`] shape agree with the prover's transcript.
+    /// Must be set identically to the prover's exposure.
+    pub fn with_field_provider(mut self, exposure: FieldExposure) -> Self {
+        self.field_exposure = exposure;
+        self
+    }
+
+    /// Match a [`Sha256Prover::with_field_handle`] proof: share the drawn field
+    /// relation with the consumer module through `handle`.
+    pub fn with_field_handle(
+        mut self,
+        exposure: FieldExposure,
+        handle: air_core::relations::SharedFieldRelation,
+    ) -> Self {
+        self.field_exposure = exposure;
+        self.field_handle = Some(handle);
+        self
+    }
+
     fn relations(&self) -> &Sha256Relations {
         self.relations
             .as_ref()
@@ -287,11 +367,12 @@ impl Sha256Verifier {
 
 impl Air for Sha256Verifier {
     fn mix_public(&self, channel: &mut Blake2sChannel) {
-        Stmt0 {
-            log_n_rows: self.log_n_rows,
-            group_width: self.group_width,
-            expose_digest: self.expose_digest,
-        }
+        Stmt0::new(
+            self.log_n_rows,
+            self.group_width,
+            self.expose_digest,
+            &self.field_exposure,
+        )
         .mix_into(channel);
     }
 
@@ -300,11 +381,19 @@ impl Air for Sha256Verifier {
         if let Some(handle) = &self.digest_handle {
             handle.set(relations.digest.digest.clone());
         }
+        if let Some(handle) = &self.field_handle {
+            handle.set(relations.field.field.clone());
+        }
         self.relations = Some(relations);
     }
 
     fn layout(&self) -> TreeLayout {
-        layout(self.log_n_rows, self.group_width, self.expose_digest)
+        layout(
+            self.log_n_rows,
+            self.group_width,
+            self.expose_digest,
+            &self.field_exposure,
+        )
     }
 
     fn claimed_sums(&self) -> Vec<QM31> {
@@ -323,6 +412,7 @@ impl Air for Sha256Verifier {
             self.log_n_rows,
             self.group_width,
             self.expose_digest,
+            &self.field_exposure,
         ));
     }
 
@@ -345,12 +435,36 @@ struct Stmt0 {
     /// hence the interaction-column layout); a mismatch reshapes the
     /// interaction tree and the verifier rejects.
     expose_digest: bool,
+    /// Credential-field exposure shape — `(byte columns, yields)`. Mixed for the
+    /// same reason as `expose_digest`: the column count sets the base-trace
+    /// width and the yield count sets the consumer's interaction-column count,
+    /// so a prover/verifier disagreement reshapes the trees and the verifier
+    /// rejects.
+    n_field_columns: u32,
+    n_field_yields: u32,
 }
 impl Stmt0 {
+    fn new(
+        log_n_rows: u32,
+        group_width: u32,
+        expose_digest: bool,
+        field_exposure: &FieldExposure,
+    ) -> Self {
+        Self {
+            log_n_rows,
+            group_width,
+            expose_digest,
+            n_field_columns: field_exposure.n_columns() as u32,
+            n_field_yields: field_exposure.n_yields() as u32,
+        }
+    }
+
     fn mix_into(&self, channel: &mut Blake2sChannel) {
         channel.mix_u64(self.log_n_rows as u64);
         channel.mix_u64(self.group_width as u64);
         channel.mix_u64(u64::from(self.expose_digest));
+        channel.mix_u64(u64::from(self.n_field_columns));
+        channel.mix_u64(u64::from(self.n_field_yields));
     }
 }
 
@@ -374,12 +488,16 @@ fn build_base_trace(
     witness: &Sha256Witness,
     log_n_rows: u32,
     group_width: u32,
+    field_exposure: &FieldExposure,
 ) -> Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>> {
     let mut base_trace: Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>> =
         Vec::new();
 
-    let sha_main = crate::trace::generate_trace(witness, log_n_rows);
-    debug_assert_eq!(sha_main.len(), Layout::TOTAL_COLS);
+    let sha_main = crate::trace::generate_trace_with_fields(witness, log_n_rows, field_exposure);
+    debug_assert_eq!(
+        sha_main.len(),
+        Layout::total_cols_with_fields(field_exposure.n_columns())
+    );
     let sha_domain = CanonicCoset::new(log_n_rows).circle_domain();
     for col_vec in sha_main {
         let col: BaseColumn = col_vec.into_iter().collect();
@@ -410,7 +528,7 @@ fn build_base_trace(
         base_trace.push(mult_col_to_eval(&mults, LOG_SIZE_16));
     }
     for &kind in RANGE_TABLES {
-        let mults = range_k_multiplicities(witness, kind);
+        let mults = range_k_multiplicities(witness, kind, field_exposure);
         base_trace.push(mult_col_to_eval(&mults, range_log_size(kind)));
     }
 
@@ -420,8 +538,10 @@ fn build_base_trace(
 /// log_sizes of every base-trace column in commit order. The Sha256Eval
 /// block first (`TOTAL_COLS` × `log_n_rows`), then one mult col per
 /// producer component.
-fn base_trace_log_sizes(log_n_rows: u32, group_width: u32) -> Vec<u32> {
-    let mut out = vec![log_n_rows; Layout::TOTAL_COLS];
+fn base_trace_log_sizes(log_n_rows: u32, group_width: u32, n_field_cols: usize) -> Vec<u32> {
+    // Base columns + the dynamic credential-field byte tail (§6.5), all at the
+    // trace's `log_n_rows`. Empty exposure leaves this at `Layout::TOTAL_COLS`.
+    let mut out = vec![log_n_rows; Layout::total_cols_with_fields(n_field_cols)];
     // 8 decode mults, each at log_size 16.
     out.extend(std::iter::repeat_n(LOG_SIZE_16, DECODE_TABLES.len()));
     // 2 Maj/Ch mults, each at log_size 3W.
@@ -442,20 +562,25 @@ fn base_trace_log_sizes(log_n_rows: u32, group_width: u32) -> Vec<u32> {
 /// component's column count is `(n_lookups + 1) / 2`. We infer the count
 /// from the structural firing rule (matching the
 /// `interaction::sha256_interaction` derivation).
-fn interaction_trace_log_sizes(log_n_rows: u32, group_width: u32, expose_digest: bool) -> Vec<u32> {
+fn interaction_trace_log_sizes(
+    log_n_rows: u32,
+    group_width: u32,
+    expose_digest: bool,
+    field_exposure: &FieldExposure,
+) -> Vec<u32> {
     let mut out = Vec::new();
 
     // Each SecureField interaction column expands to SECURE_EXTENSION_DEGREE = 4
     // base-field columns at the same log_size.
     const EXT: usize = SECURE_EXTENSION_DEGREE;
 
-    // Sha256Eval consumer: `sha_lookups_per_block(expose_digest)` lookups per
-    // block (W=6: 3720, plus the one digest yield when the provider is on) →
-    // `ceil(n/2)` paired columns. Sized at log_n_rows. See
-    // `interaction::sha256_interaction` for the per-block lookup-count
-    // breakdown (the +256 over W=7's 3464 is the 8-vs-6 Maj/Ch lookups per
-    // round × 64 rounds).
-    let sha_cols = num_paired_cols(sha_lookups_per_block(expose_digest));
+    // Sha256Eval consumer: `sha_lookups_per_block(expose_digest, field_exposure)`
+    // lookups per block (W=6: 3720, plus the digest yield when that provider is
+    // on, plus the field provider's two `Range16` byte range-checks per exposed
+    // byte column and one yield per exposed window byte) → `ceil(n/2)` paired
+    // columns. Sized at log_n_rows. See `interaction::sha256_interaction` for the
+    // per-block lookup-count breakdown.
+    let sha_cols = num_paired_cols(sha_lookups_per_block(expose_digest, field_exposure));
     out.extend(std::iter::repeat_n(log_n_rows, sha_cols * EXT));
     // 8 decode producers: 1 lookup each → 1 column each at log_size 16.
     for _ in DECODE_TABLES {
@@ -512,6 +637,7 @@ impl Sha256Components {
         log_n_rows: u32,
         group_width: u32,
         expose_digest: bool,
+        field_exposure: &FieldExposure,
     ) -> Self {
         // The shared TraceLocationAllocator (seeded by the orchestrator with
         // every module's `preprocessed_column_ids` in commit order) runs the
@@ -523,6 +649,7 @@ impl Sha256Components {
                 log_size: log_n_rows,
                 relations: relations.clone(),
                 expose_digest,
+                field_exposure: field_exposure.clone(),
             },
             claim.sha256.claimed_sum,
         );
