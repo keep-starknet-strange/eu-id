@@ -13,9 +13,11 @@
 //!   `rejects_age_dob_not_matching_credential` proves an over-18 date the
 //!   credential does not contain and asserts rejection, while the honest and
 //!   boundary fixtures (exactly-18, leap-year) verify and under-18 is rejected.
-//!
-//! Nationality is not yet credential-bound (§6.7), so the nat module nets to zero
-//! internally and composes without changing the balance.
+//! - **Nationality↔credential binding** (§6.7): the code the nat module proves
+//!   set-membership for must be the credential's signed nationality bytes —
+//!   `rejects_nationality_not_matching_credential` proves membership for a
+//!   different (also accepted) code than the credential holds and asserts
+//!   rejection.
 //!
 //! Marked `#[ignore]` — a real STARK prove/verify dominated by P256 is slow; run
 //! with `--release --ignored`.
@@ -160,6 +162,31 @@ fn rejects_age_dob_not_matching_credential() {
     assert!(
         verify(&proof, &expected).is_err(),
         "an age proved from a DOB the credential does not contain must be rejected",
+    );
+}
+
+/// The nationality↔credential binding (§6.7): a credential for one nationality
+/// (DE = 276) is signed, but the nat module proves set-membership for a
+/// *different* code (FR = 250) that is also in the accepted set. The signature is
+/// valid, the age sub-statement holds, and membership passes against the injected
+/// code — only the binding is broken. The nat module's nationality-byte requires
+/// (for 250) no longer cancel SHA's yields (for 276), so the global balance
+/// breaks and the verifier rejects.
+#[test]
+#[ignore = "slow: full P256 + SHA + bridge + predicates STARK prove/verify; run with --release --ignored"]
+fn rejects_nationality_not_matching_credential() {
+    let f = fixtures::tampered_nationality_bytes();
+    // The fixture isolates exactly this: crypto + age + membership pass, binding fails.
+    assert!(!f.expectation.binding_consistent);
+    assert!(f.expectation.nationality_accepted);
+
+    let pw = f.pipeline_witness();
+    let proof = prove_pipeline(&pw).expect("prover accepts the mismatch");
+
+    let expected = proof.p256_instances().to_vec();
+    assert!(
+        verify(&proof, &expected).is_err(),
+        "a nationality proved from a code the credential does not contain must be rejected",
     );
 }
 
