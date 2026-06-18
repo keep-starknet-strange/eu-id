@@ -100,10 +100,11 @@ jobs:
       - name: make test
         run: make test
 
-  # Scheduled-only: the slow full-pipeline proof-generation test. Runs the
+  # Scheduled-only: the slow full-pipeline proof-generation tests. Runs the
   # `#[ignore]`-marked tests in release mode (proving in debug is far too
-  # slow). With no ignored tests present yet this is a fast no-op; it starts
-  # doing real work once the integration crate ships an end-to-end test.
+  # slow). This is the documented runner for the end-to-end soundness suite
+  # (`eu-id-prover/tests/e2e_soundness.rs`) and the composition/boundary tests
+  # — the happy-path bound proof plus one negative per mutation class.
   e2e:
     name: End-to-end proof generation
     if: github.event_name == 'schedule'
