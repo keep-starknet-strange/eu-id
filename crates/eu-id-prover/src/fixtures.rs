@@ -1,21 +1,25 @@
 //! Deterministic credential fixtures — the oracle's catalogue of cases.
 //!
-//! Six fixtures, each isolating exactly one property so a later binding task can
-//! pin down which relation a regression broke:
+//! Seven fixtures, each isolating exactly one property so a later binding task
+//! can pin down which relation a regression broke:
 //!
-//! | fixture               | crypto | binding | age ≥ 18 | nat ∈ set | verifies |
-//! |-----------------------|:------:|:-------:|:--------:|:---------:|:--------:|
-//! | `valid_over_18`       |   ✓    |    ✓    |    ✓     |     ✓     |    ✓     |
-//! | `valid_exactly_18`    |   ✓    |    ✓    |    ✓     |     ✓     |    ✓     |
-//! | `under_18`            |   ✓    |    ✓    |    ✗     |     ✓     |    ✗     |
-//! | `wrong_nationality`   |   ✓    |    ✓    |    ✓     |     ✗     |    ✗     |
-//! | `tampered_dob_bytes`  |   ✓    |    ✗    |    ✓*    |     ✓     |    ✗     |
-//! | `bad_signature`       |   ✗    |    ✓    |    ✓     |     ✓     |    ✗     |
+//! | fixture                      | crypto | binding | age ≥ 18 | nat ∈ set | verifies |
+//! |------------------------------|:------:|:-------:|:--------:|:---------:|:--------:|
+//! | `valid_over_18`              |   ✓    |    ✓    |    ✓     |     ✓     |    ✓     |
+//! | `valid_exactly_18`           |   ✓    |    ✓    |    ✓     |     ✓     |    ✓     |
+//! | `under_18`                   |   ✓    |    ✓    |    ✗     |     ✓     |    ✗     |
+//! | `wrong_nationality`          |   ✓    |    ✓    |    ✓     |     ✗     |    ✗     |
+//! | `tampered_dob_bytes`         |   ✓    |    ✗    |    ✓*    |     ✓     |    ✗     |
+//! | `tampered_nationality_bytes` |   ✓    |    ✗    |    ✓     |     ✓*    |    ✗     |
+//! | `bad_signature`              |   ✗    |    ✓    |    ✓     |     ✓     |    ✗     |
 //!
-//! `tampered_dob_bytes` (*) is the credential↔predicate attack: a real under-18
-//! credential is signed, but the age module is fed an over-18 date of birth.
-//! The signature and the age sub-statement both "pass" — only the binding is
-//! broken, which is exactly what the age↔credential relation must catch.
+//! The two tampered fixtures (*) are the credential↔predicate attacks. In
+//! `tampered_dob_bytes` a real under-18 credential is signed but the age module
+//! is fed an over-18 date of birth; in `tampered_nationality_bytes` a credential
+//! for one nationality is signed but the nat module is fed a different (still
+//! accepted) code. Each time the signature and the predicate sub-statement both
+//! "pass" — only the binding is broken, which is exactly what the
+//! age↔credential / nationality↔credential relations must catch.
 //!
 //! Every fixture declares its [`Expectation`]; [`Fixture::actual_expectation`]
 //! recomputes it from the witness + reference oracles, and the tests assert the
@@ -229,6 +233,33 @@ pub fn tampered_dob_bytes() -> Fixture {
     }
 }
 
+/// Credential↔predicate mismatch on nationality: a credential for Germany
+/// (276) is signed, but the nat module is fed France (250) — a *different* code
+/// that is also in the accepted set, so the membership sub-statement still
+/// passes. Crypto, age, and membership hold; only the nationality binding is
+/// broken (the code the nat module proves ≠ the credential's signed nationality
+/// bytes). This is the §6.7 twin of `tampered_dob_bytes`.
+pub fn tampered_nationality_bytes() -> Fixture {
+    let credential = Credential::new(2000, 1, 1, 276); // real nationality DE
+    let signed = sign_credential(&credential, &IssuerKey::demo());
+    let injected_other_accepted = 250; // FR — in the accepted set, but not the credential's code
+    Fixture {
+        name: "tampered_nationality_bytes",
+        description:
+            "Real nationality DE(276) signed, but the nat module is fed FR(250); binding fails.",
+        signed,
+        policy: demo_policy(),
+        age_dob: DateOfBirth(credential_dob(&credential)),
+        nat_code: injected_other_accepted,
+        expectation: Expectation {
+            crypto_consistent: true,
+            binding_consistent: false,
+            age_ge_threshold: true,
+            nationality_accepted: true, // 250 ∈ accepted set
+        },
+    }
+}
+
 /// Tampered signature (born 2000-01-01, Germany; the low bit of `s` flipped) —
 /// binding and statements sound, but the signature no longer verifies.
 pub fn bad_signature() -> Fixture {
@@ -251,7 +282,7 @@ pub fn bad_signature() -> Fixture {
     }
 }
 
-/// All six fixtures, in catalogue order.
+/// All seven fixtures, in catalogue order.
 pub fn all() -> Vec<Fixture> {
     vec![
         valid_over_18(),
@@ -259,6 +290,7 @@ pub fn all() -> Vec<Fixture> {
         under_18(),
         wrong_nationality(),
         tampered_dob_bytes(),
+        tampered_nationality_bytes(),
         bad_signature(),
     ]
 }

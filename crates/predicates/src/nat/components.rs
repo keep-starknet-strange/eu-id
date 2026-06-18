@@ -2,6 +2,7 @@ use crate::nat::eval::{NationalityComponent, NationalityEval};
 use crate::nat::lookup_elements::LookupElements;
 use crate::nat::table::{acceptable_col_id, NatTableComponent, NatTableEval};
 use crate::nat::types::PublicInput;
+use air_core::relations::FieldBytesRelation;
 use stwo::core::fields::qm31::QM31;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::TraceLocationAllocator;
@@ -16,6 +17,7 @@ pub fn components(
     allocator: &mut TraceLocationAllocator,
     public: &PublicInput,
     lookup_elements: LookupElements,
+    nat_binding: Option<FieldBytesRelation>,
     nat_claimed_sum: QM31,
     table_claimed_sum: QM31,
 ) -> (NationalityComponent, NatTableComponent) {
@@ -23,6 +25,7 @@ pub fn components(
         allocator,
         NationalityEval {
             lookup_elements: lookup_elements.clone(),
+            nat_binding,
         },
         nat_claimed_sum,
     );

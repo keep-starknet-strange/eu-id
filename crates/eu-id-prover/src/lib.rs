@@ -21,25 +21,30 @@
 //! value on this path: [`verify`] checks the issuer key `Q` and the signature
 //! `(r, s)` against the caller's statement but **not** `z`.
 //!
-//! ## Predicates: age credential-bound, nationality pending
+//! ## Predicates: both credential-bound
 //!
 //! The age and nationality modules are both part of the composed proof: the age
 //! module proves the date of birth it holds clears the policy threshold, and the
-//! nationality module proves its private code is in the accepted set.
+//! nationality module proves its private code is in the accepted set. Both are
+//! now bound to the signed credential bytes.
 //!
-//! **Age is now credential-bound** (`docs/ROADMAP_E2E` §6.6). SHA exposes the
-//! DOB byte window of the preimage `C` on a shared field channel; the age module
+//! **Age is credential-bound** (`docs/ROADMAP_E2E` §6.6). SHA exposes the DOB
+//! byte window of the preimage `C` on a shared field channel; the age module
 //! *requires* exactly those bytes and reconciles them against the packed
 //! `(year, month, day)` it reasons about (big-endian recomposition). So the
 //! global balance cancels **only** when the date of birth the age module clears
 //! against the threshold is the one encoded in the signed credential — a prover
 //! can no longer attest age from a date `C` does not contain.
 //!
-//! **Nationality is not yet bound** (§6.7): its private code is still
-//! free-floating, so the nat module's LogUp sub-balance nets to zero on its own
-//! and it composes without perturbing the global balance. Binding it (and the
-//! full policy-shaped public-input contract a relying party checks against) is
-//! the remaining glue tracked in the integration roadmap.
+//! **Nationality is credential-bound** (§6.7), the same way: SHA exposes the
+//! nationality byte window of `C` on the same field channel, and the nat module
+//! *requires* those two bytes and reconciles them against the packed `code` it
+//! proves set-membership for (`code = code_hi · 256 + code_lo`). So the balance
+//! cancels **only** when the nationality the nat module clears against the
+//! accepted set is the one encoded in the signed credential — a prover can no
+//! longer prove membership for a code `C` does not contain. The remaining glue
+//! (the full policy-shaped public-input contract a relying party checks against)
+//! is tracked in the integration roadmap.
 //!
 //! ## Credential format & witness oracle
 //!
@@ -149,19 +154,27 @@ fn bridge_log_size(n_instances: usize) -> u32 {
     needed.max(4)
 }
 
-/// The SHA field-exposure spec for the §6.6 age binding: expose **only** the
-/// credential's DOB byte window. SHA yields these four bytes on the shared
-/// `Sha256Field` channel and the age module requires them. The nationality
-/// window is added in §6.7 (with its nat consumer); exposing a window with no
-/// consumer would leave the global balance non-zero, so the exposure is kept in
-/// lock-step with the wired consumers. Prover and verifier must build the
-/// identical spec (it is mixed into the SHA transcript).
-fn dob_exposure() -> FieldExposure {
-    FieldExposure::from_preimage_windows(&[(
-        field_id::DOB,
-        credential::DOB_WINDOW.start,
-        credential::DOB_WINDOW.end - credential::DOB_WINDOW.start,
-    )])
+/// The SHA field-exposure spec for the credential bindings: expose the DOB byte
+/// window (§6.6, age consumer) **and** the nationality byte window (§6.7, nat
+/// consumer). SHA yields these six bytes on the shared `Sha256Field` channel and
+/// the age + nat modules require them — four DOB bytes by age, two nationality
+/// bytes by nat. Exposing a window with no consumer would leave the global
+/// balance non-zero, so the exposure stays in lock-step with the wired
+/// consumers; both are now wired. Prover and verifier must build the identical
+/// spec (it is mixed into the SHA transcript).
+fn credential_exposure() -> FieldExposure {
+    FieldExposure::from_preimage_windows(&[
+        (
+            field_id::DOB,
+            credential::DOB_WINDOW.start,
+            credential::DOB_WINDOW.end - credential::DOB_WINDOW.start,
+        ),
+        (
+            field_id::NATIONALITY,
+            credential::NATIONALITY_WINDOW.start,
+            credential::NATIONALITY_WINDOW.end - credential::NATIONALITY_WINDOW.start,
+        ),
+    ])
 }
 
 /// Per-instance `(sig_id, z)` rows the bridge binds, sourced from the proven
@@ -209,11 +222,12 @@ pub fn prove(
     let mut p256 = P256Prover::new(p256_draft)
         .map_err(Error::P256Prepare)?
         .with_z_binding(scalar_z_handle.clone());
-    // SHA both yields its digest (P256↔SHA bridge, §6.3) and exposes the DOB
-    // byte window (age↔credential bridge, §6.6) on the shared field channel.
+    // SHA both yields its digest (P256↔SHA bridge, §6.3) and exposes the DOB +
+    // nationality byte windows (age/nat↔credential bridges, §6.6/§6.7) on the
+    // shared field channel.
     let mut sha = Sha256Prover::new(sha_witness, sha_log_n_rows, sha_group_width)
         .with_digest_handle(digest_handle.clone())
-        .with_field_handle(dob_exposure(), field_handle.clone());
+        .with_field_handle(credential_exposure(), field_handle.clone());
 
     let instances = p256.proof_claim().public_inputs.instances.clone();
     let rows = bridge_rows(&instances);
@@ -226,31 +240,39 @@ pub fn prove(
     // unused by `prover()` — only the input validation and witness generation it
     // performs matter; the shared orchestrator config below governs the proof.
     //
-    // The age module is **credential-bound** (§6.6): `with_dob_binding` makes it
-    // require the DOB bytes SHA yields, so the date of birth it proves ≥ the
-    // threshold is provably the signed credential's — a prover can no longer
-    // attest age from a date the credential does not contain. (Nationality is
-    // bound in §6.7; until then nat nets to zero internally.)
+    // Both predicate modules are **credential-bound**. `with_dob_binding` (§6.6)
+    // makes age require the DOB bytes SHA yields, so the date of birth it proves
+    // ≥ the threshold is provably the signed credential's; `with_nat_binding`
+    // (§6.7) makes nat require the nationality bytes SHA yields, so the code it
+    // proves ∈ the accepted set is provably the signed credential's. A prover can
+    // no longer attest age from a date — or membership from a code — the
+    // credential does not contain.
     let mut age = AgeRangeCheck::new(PcsConfig::default())
         .prover(age_public, age_dob)
         .map_err(Error::AgePrepare)?
         .with_dob_binding(field_handle.clone());
     let mut nat = NationalityPredicate::new(PcsConfig::default())
         .prover(nat_public, nat_private)
-        .map_err(Error::NatPrepare)?;
+        .map_err(Error::NatPrepare)?
+        .with_nat_binding(field_handle.clone());
 
     let config = p256.pcs_config();
 
     // Module order is load-bearing: it fixes the transcript, the tree-column /
     // preprocessed-id concatenation, and the order the shared relations are
-    // drawn. P256 draws ScalarZ, SHA draws the digest, the bridge reads both, so
-    // the bridge must follow its two producers. Age and nat share no relation
-    // with the others (they are not yet credential-bound), so they append after
-    // the binding cluster. Their preprocessed-id namespaces are disjoint from the
-    // rest — age uses `age/...` and the generic `range_check_[0, N]` delta tables,
-    // nat uses `nat/...`; neither aliases SHA's `sha256_range_*`, P256's
-    // `p256_*`, or the bridge's `digest_bind_*` ids in the shared allocator. The
-    // verifier must use this same order.
+    // drawn. P256 draws ScalarZ, SHA draws the digest + the credential-field
+    // relation, the bridge reads ScalarZ + the digest, and age + nat read the
+    // field relation — so every consumer follows SHA (and the bridge follows its
+    // two producers). Age and nat append after the binding cluster.
+    //
+    // The credential bindings ride the cross-module `Sha256Field` LogUp channel
+    // (drawn from the transcript), not a preprocessed column, so they add no
+    // preprocessed id and cannot collide with one. The preprocessed-id namespaces
+    // stay disjoint — age uses `age/...` and the generic `range_check_[0, N]`
+    // delta tables, nat uses `nat/...` (incl. the accepted-set `nat/acceptable/...`
+    // column); neither aliases SHA's `sha256_range_*`, P256's `p256_*`, or the
+    // bridge's `digest_bind_*` ids in the shared allocator. The verifier must use
+    // this same order.
     let stark_proof = {
         let mut modules: [&mut dyn AirProver; 5] =
             [&mut p256, &mut sha, &mut bridge, &mut age, &mut nat];
@@ -320,7 +342,7 @@ pub fn verify(proof: &Proof, expected_instances: &[PublicEcdsaInstance<M31>]) ->
         proof.sha_interaction_claim.clone(),
     )
     .with_digest_handle(digest_handle.clone())
-    .with_field_handle(dob_exposure(), field_handle.clone());
+    .with_field_handle(credential_exposure(), field_handle.clone());
     let mut bridge = DigestBindVerifier::new(
         proof.bridge_log_size,
         proof.bridge_interaction_claim.clone(),
@@ -330,15 +352,17 @@ pub fn verify(proof: &Proof, expected_instances: &[PublicEcdsaInstance<M31>]) ->
 
     // Rebuild the predicate verifier modules from the public input and claimed
     // sums carried in the proof, with the same canonical strategy the prover
-    // used (`range_check` for age). The age module is credential-bound (§6.6),
-    // so it reads the same shared field channel to reconstruct its require terms.
+    // used (`range_check` for age). Both modules are credential-bound (§6.6 age,
+    // §6.7 nat), so each reads the same shared field channel to reconstruct its
+    // require terms.
     let mut age = AgeRangeCheck::new(PcsConfig::default())
         .verifier(&proof.age_public, &proof.age_claimed_sums)
         .map_err(Error::AgePrepare)?
         .with_dob_binding(field_handle.clone());
     let mut nat = NationalityPredicate::new(PcsConfig::default())
         .verifier(&proof.nat_public, &proof.nat_claimed_sums)
-        .map_err(Error::NatPrepare)?;
+        .map_err(Error::NatPrepare)?
+        .with_nat_binding(field_handle.clone());
 
     // Same module order as the prover.
     let mut modules: [&mut dyn Air; 5] = [&mut p256, &mut sha, &mut bridge, &mut age, &mut nat];
