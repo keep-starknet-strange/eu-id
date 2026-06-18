@@ -42,6 +42,7 @@
 //! completes `x(R) mod n = r`; it does not trust native final-check
 //! witnesses.
 
+use serde::{Deserialize, Serialize};
 use stwo::core::{
     air::Component,
     channel::Channel,
@@ -99,7 +100,7 @@ const FINAL_CHECK_TRACE_COLUMNS: usize = 2 + 7 * N_LIMBS + 1;
 
 pub type FinalCheckAirComponent = FrameworkComponent<FinalCheckAirEval>;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FinalCheckAirProofClaim {
     pub log_size: u32,
 }
@@ -116,7 +117,7 @@ impl FinalCheckAirProofClaim {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FinalCheckAirInteractionClaim {
     pub claimed_sum: SecureField,
 }

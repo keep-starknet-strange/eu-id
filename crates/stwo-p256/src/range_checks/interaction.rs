@@ -1,5 +1,6 @@
 //! LogUp interaction trace for the range-check providers.
 
+use serde::{Deserialize, Serialize};
 use stwo::{
     core::{channel::Channel, fields::qm31::SecureField, ColumnVec},
     prover::backend::simd::{m31::LOG_N_LANES, qm31::PackedQM31},
@@ -16,7 +17,7 @@ use super::{ColumnEval, RangeCheckRelation};
 /// single claim type covers both. The `value` column is the preprocessed
 /// `0..2^log_size` table for plain range checks, or the centered
 /// signed-carry value column for the signed-carry provider.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RangeCheckInteractionClaim {
     pub claimed_sum: SecureField,
 }

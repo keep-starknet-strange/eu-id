@@ -29,6 +29,7 @@
 //! a benchmark-driven future micro-optimisation.
 
 use num_traits::{One, Zero};
+use serde::{Deserialize, Serialize};
 use stwo::core::channel::Channel;
 use stwo::core::fields::m31::BaseField;
 use stwo::core::fields::qm31::SecureField;
@@ -92,7 +93,7 @@ pub fn sha_lookups_per_block(expose_digest: bool, field_exposure: &FieldExposure
 /// One component's slot in the aggregate interaction claim. `claimed_sum`
 /// is what the verifier checks each component's interaction column
 /// cumulatively reaches; the total over every component must be zero.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ComponentClaim {
     pub claimed_sum: SecureField,
 }
@@ -107,7 +108,7 @@ impl ComponentClaim {
 ///
 /// Field order **must** match the order components are added to the proof
 /// (`crate::stark::commit_base_trace` / `crate::stark::component_provers`).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InteractionClaim {
     pub sha256: ComponentClaim,
     pub decode: Vec<ComponentClaim>, // 8

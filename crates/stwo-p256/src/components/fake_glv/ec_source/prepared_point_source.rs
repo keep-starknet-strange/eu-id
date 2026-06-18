@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use stwo::core::{
     air::Component,
     channel::Channel,
@@ -38,7 +39,7 @@ pub const FAKE_GLV_PREPARED_POINT_CONSUMER_TRACE_COLUMNS: usize = 1 + PREPARED_P
 
 const PREPARED_POINT_SOURCE_ZERO_COLUMN: &str = "p256_prepared_point_source_zero";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FakeGlvPreparedPointSourceProofClaim {
     pub provider_log_size: u32,
     pub consumer_log_size: u32,
@@ -94,7 +95,7 @@ impl FakeGlvPreparedPointSourceProofClaim {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FakeGlvPreparedPointSourceInteractionClaim {
     pub provider: ComponentInteractionClaim,
     pub consumer: ComponentInteractionClaim,

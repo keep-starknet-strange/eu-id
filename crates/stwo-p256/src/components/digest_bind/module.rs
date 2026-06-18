@@ -25,6 +25,7 @@
 
 use air_core::relations::DigestBytesRelation;
 use air_core::{Air, AirProver, TreeLayout};
+use serde::{Deserialize, Serialize};
 use stwo::core::air::Component;
 use stwo::core::channel::{Blake2sChannel, Channel};
 use stwo::core::fields::qm31::{QM31, SECURE_EXTENSION_DEGREE};
@@ -104,7 +105,7 @@ fn interaction_base_cols(n_lookups: usize) -> usize {
 }
 
 /// The three claimed sums the bridge module commits, in component (commit) order.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DigestBindInteractionClaim {
     pub digest_bind: QM31,
     pub byte_range: QM31,

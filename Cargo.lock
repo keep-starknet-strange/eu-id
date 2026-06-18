@@ -1545,6 +1545,7 @@ dependencies = [
  "air-core",
  "hex",
  "num-traits",
+ "serde",
  "sha2",
  "stwo",
  "stwo-constraint-framework",

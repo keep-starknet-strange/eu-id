@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use stwo::core::{
@@ -195,7 +196,7 @@ pub const SCALAR_SETUP_TRACE_COLUMNS: usize = 1
     + 2;
 const SCALAR_SETUP_SIGNED_CARRY_EQUATION: &str = "scalar_setup_digest";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScalarSetupAirProofClaim {
     pub log_size: u32,
 }
@@ -212,7 +213,7 @@ impl ScalarSetupAirProofClaim {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ScalarSetupAirInteractionClaim {
     pub claimed_sum: SecureField,
     pub range13_provider: RangeCheckInteractionClaim,

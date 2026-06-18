@@ -23,6 +23,7 @@
 //!   host-side `FakeGlvScalarHintRow::verify` rejection of `s1 = 0` is an
 //!   early error for honest builders, not a soundness boundary.
 
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use stwo::core::{
@@ -140,7 +141,7 @@ const FAKE_GLV_SCALAR_ROW_COLUMNS: usize = 4
     // s2_abs_inv: witnessed inverse for the Garaga `s2_abs != 0` check.
     + 1;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FakeGlvScalarAirProofClaim {
     pub log_size: u32,
 }
@@ -157,7 +158,7 @@ impl FakeGlvScalarAirProofClaim {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FakeGlvScalarAirInteractionClaim {
     pub claimed_sum: SecureField,
 }

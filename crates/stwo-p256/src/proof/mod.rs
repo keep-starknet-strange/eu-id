@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use stwo::core::{
     air::Component,
     channel::Channel,
@@ -471,7 +472,7 @@ pub struct P256CurrentAirProof<H: MerkleHasherLifted> {
     pub stark_proof: StarkProof<H>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct P256CurrentAirProofClaim {
     pub public_inputs: PublicEcdsaInputClaim,
     pub scalar_setup: ScalarSetupAirProofClaim,
@@ -715,7 +716,7 @@ impl P256CurrentAirProofClaim {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct P256CurrentAirInteractionClaim {
     pub scalar_setup: ScalarSetupAirInteractionClaim,
     pub cert_scalar_inputs: CertScalarInputAirInteractionClaim,

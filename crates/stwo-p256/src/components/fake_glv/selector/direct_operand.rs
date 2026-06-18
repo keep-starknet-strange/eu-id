@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use stwo::core::{
     air::Component,
     channel::Channel,
@@ -40,7 +41,7 @@ pub const DIRECT_PREPARED_OPERAND_CONSUMER_TRACE_COLUMNS: usize = 1 + DIRECT_OPE
 const DIRECT_OPERAND_ARITY: usize = 3 + 2 * N_LIMBS + 1;
 const DIRECT_OPERAND_ZERO_COLUMN: &str = "p256_fake_glv_direct_prepared_operand_zero";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FakeGlvDirectPreparedOperandProofClaim {
     pub provider_log_size: u32,
     pub consumer_log_size: u32,
@@ -98,7 +99,7 @@ impl FakeGlvDirectPreparedOperandProofClaim {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FakeGlvDirectPreparedOperandInteractionClaim {
     pub provider: ComponentInteractionClaim,
     pub consumer: ComponentInteractionClaim,

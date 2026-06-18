@@ -3,6 +3,7 @@
 //!
 //! Split out of `mod.rs` (pure relocation, no behavioral change).
 
+use serde::{Deserialize, Serialize};
 use stwo::core::{air::Component, channel::Channel, fields::m31::M31, pcs::TreeVec, ColumnVec};
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::TraceLocationAllocator;
@@ -289,7 +290,7 @@ impl PreparedTableEcRowProofClaim {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreparedTableProjectiveSourceProofClaim {
     pub log_size: u32,
     /// Active prepared-table rows (= γ-digest groups / tall schedule).
