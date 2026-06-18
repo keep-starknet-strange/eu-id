@@ -12,15 +12,25 @@ name = "eu_id_ffi"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
-# Pass through to multi-threaded Stwo proving (rayon). Off by default.
+# Pass through to multi-threaded Stwo proving (rayon). Off by default. Reaches
+# the SHA module (in both the standalone SHA bench and the combined identity
+# bench); the combined proof is P256-dominated and P256 has no rayon path yet,
+# so this barely moves the identity number — see `eu_id_bench_identity`.
 parallel = ["stwo-sha256/parallel"]
 
 [dependencies]
+# The combined, cross-bound identity prover (`prove_identity`/`verify_identity`)
+# the identity bench wraps, plus the standalone SHA-256 prover the SHA bench
+# wraps. eu-id-prover re-pulls stwo-sha256, but the SHA bench depends on it
+# directly too.
+eu-id-prover = { path = "../eu-id-prover" }
 stwo-sha256 = { path = "../stwo-sha256" }
 # Peak-footprint sampler. On Apple `physical_mem` resolves to mach
 # `phys_footprint` — the iOS jetsam metric — the same crate the laptop
 # harness used.
 memory-stats = "1.2"
+# Serialize the combined proof to report its size from `eu_id_bench_identity`.
+bincode = "1"
 
 [lints]
 workspace = true

@@ -80,6 +80,10 @@ pub mod generator;
 
 pub use credential::Credential;
 pub use generator::{IssuerKey, PipelineWitness, Policy, SignedCredential};
+// `Policy::current_date` is a `predicates::Date`; re-export it so a relying
+// party (e.g. the FFI benchmark harness) can build a `Policy` — and thus a
+// `PublicStatement` — without depending on `predicates` directly.
+pub use predicates::Date;
 
 use serde::{Deserialize, Serialize};
 
