@@ -1,7 +1,8 @@
 use crate::age::strategy::range_check::lookup_elements::LookupElements;
 use crate::age::strategy::range_check::preprocessed::Preprocessed;
-use crate::age::strategy::range_check::witness::WitnessData;
+use crate::age::strategy::range_check::witness::{WitnessData, BIND_ACTIVE_COL};
 use crate::types::Trace;
+use air_core::relations::{field_id, FieldBytesRelation};
 use num_traits::One;
 use stwo::core::channel::Channel;
 use stwo::core::fields::m31::M31;
@@ -33,6 +34,7 @@ impl InteractionTraces {
         witness_data: &WitnessData,
         preprocessed: &Preprocessed,
         lookup_elements: &LookupElements,
+        dob_field: Option<&FieldBytesRelation>,
     ) -> Self {
         let cal_log_size = preprocessed.cal_trace[0].domain.log_size();
         let valid_day_log_size = preprocessed.valid_day_trace[0].domain.log_size();
@@ -103,6 +105,31 @@ impl InteractionTraces {
             );
         }
         col_gen.finalize_col();
+
+        // §6.6 credential-field binding: require the four DOB bytes on the shared
+        // `Sha256Field` channel, one solo column per byte. The numerator is the
+        // `bind_active` selector (1 on a single row), so each byte is required
+        // exactly once — matching SHA's single `−is_first_block` yield. Appended
+        // after the statement's own five fractions so those columns are
+        // unchanged; the eval emits the same order before `finalize_logup`.
+        if let (Some(field), Some(bytes)) = (dob_field, witness_data.dob_bytes) {
+            let bind_active = &witness_data.witness_trace[BIND_ACTIVE_COL];
+            for (byte_index, &value) in bytes.iter().enumerate() {
+                let mut col_gen = logup_gen.new_col();
+                for packed_row in 0..n_packed {
+                    col_gen.write_frac(
+                        packed_row,
+                        PackedQM31::from(bind_active.values.data[packed_row]),
+                        field.combine(&[
+                            PackedM31::broadcast(M31::from_u32_unchecked(field_id::DOB)),
+                            PackedM31::broadcast(M31::from_u32_unchecked(byte_index as u32)),
+                            PackedM31::broadcast(M31::from_u32_unchecked(value)),
+                        ]),
+                    );
+                }
+                col_gen.finalize_col();
+            }
+        }
 
         let (age_interaction, age_claimed_sum) = logup_gen.finalize_last();
 
