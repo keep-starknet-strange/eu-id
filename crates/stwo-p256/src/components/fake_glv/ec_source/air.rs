@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use stwo::core::{
     air::Component,
     channel::Channel,
@@ -107,7 +108,7 @@ const FAKE_GLV_PRIMITIVE_EC_MUL_LIMB_OFFSET: usize = FAKE_GLV_PRIMITIVE_EC_HAS_M
 
 const FAKE_GLV_PRIMITIVE_EC_ROW_INDEX_COLUMN: &str = "p256_fake_glv_primitive_ec_row_index";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FakeGlvProjectiveSourceProofClaim {
     pub log_size: u32,
     pub source_offset: u32,
@@ -190,7 +191,7 @@ impl FakeGlvProjectiveSourceProofClaim {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FakeGlvProjectiveSourceInteractionClaim {
     pub provider: ComponentInteractionClaim,
     pub consumer: ComponentInteractionClaim,

@@ -1,5 +1,6 @@
 use std::{array, collections::BTreeMap};
 
+use serde::{Deserialize, Serialize};
 use stwo::core::{
     air::Component,
     channel::Channel,
@@ -36,7 +37,7 @@ pub const PUBLIC_ECDSA_INPUT_CONSUMER_TRACE_COLUMNS: usize = 1 + PUBLIC_ECDSA_IN
 
 pub type PublicEcdsaInputConsumerComponent = FrameworkComponent<PublicEcdsaInputConsumerEval>;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublicEcdsaInstance<F> {
     pub sig_id: F,
     pub z: P256BigInt<F>,
@@ -46,7 +47,7 @@ pub struct PublicEcdsaInstance<F> {
     pub pub_y: P256BigInt<F>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublicEcdsaInputClaim {
     pub instances: Vec<PublicEcdsaInstance<M31>>,
 }

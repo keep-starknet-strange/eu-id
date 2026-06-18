@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use stwo::core::{
@@ -92,7 +93,7 @@ pub const CERT_SCALAR_INPUT_TRACE_COLUMNS: usize =
     1 + SCALAR_SETUP_OUTPUT_ARITY + 2 * CERT_SCALAR_INPUT_ROW_COLUMNS + 2;
 const CERT_SCALAR_INPUT_ROW_COLUMNS: usize = 2 + 3 * N_LIMBS + 1 + 4;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CertScalarInputAirProofClaim {
     pub log_size: u32,
 }
@@ -109,7 +110,7 @@ impl CertScalarInputAirProofClaim {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CertScalarInputAirInteractionClaim {
     pub claimed_sum: SecureField,
 }

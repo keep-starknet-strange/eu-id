@@ -9,6 +9,7 @@
 //! needed. Every committed limb is range-checked: Range13 for 13-bit limbs,
 //! a `[−12, 12]` signed table for the carry high parts.
 
+use serde::{Deserialize, Serialize};
 use stwo::core::channel::Channel;
 use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::SecureField;
@@ -262,7 +263,7 @@ pub struct HintedMulSliceClaimedSums {
 }
 
 /// Shape claim for the monolithic proof (mixed into the channel).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HintedMulProofClaim {
     pub log_size: u32,
 }
@@ -284,7 +285,7 @@ impl HintedMulProofClaim {
 }
 
 /// Per-relation claimed sums of the hinted-mul trio in the monolithic proof.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HintedMulProofInteractionClaim {
     /// Total logup sum of the check component (its own claimed_sum).
     pub claimed_sum: SecureField,

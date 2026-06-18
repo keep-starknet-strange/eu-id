@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use stwo::core::{
     air::Component,
     channel::Channel,
@@ -50,7 +51,7 @@ pub const FAKE_GLV_PRIMITIVE_EXPANSION_CONSUMER_TRACE_COLUMNS: usize =
 const FAKE_GLV_PRIMITIVE_EXPANSION_ROW_INDEX_COLUMN: &str =
     "p256_fake_glv_primitive_expansion_row_index";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FakeGlvChainExpansionProofClaim {
     pub expansion_log_size: u32,
     pub primitive_log_size: u32,
@@ -110,7 +111,7 @@ impl FakeGlvChainExpansionProofClaim {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FakeGlvChainExpansionInteractionClaim {
     pub expansion_claimed_sum: SecureField,
     pub primitive_claimed_sum: SecureField,

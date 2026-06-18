@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use stwo::core::{
     air::Component,
     channel::Channel,
@@ -30,7 +31,7 @@ const EXPECTED_TABLE16_STEP_COLUMN: &str = "p256_fake_glv_chain_expected_table16
 const EXPECTED_LSB_CORRECTION_COLUMN: &str = "p256_fake_glv_chain_expected_lsb_correction";
 const EXPECTED_CHAIN_STEP_INDEX_COLUMN: &str = "p256_fake_glv_chain_expected_chain_step_index";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FakeGlvChainScheduleProofClaim {
     pub log_size: u32,
 }

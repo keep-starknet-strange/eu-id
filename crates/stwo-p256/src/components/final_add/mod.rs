@@ -90,6 +90,7 @@
 //! `x3` is provided to `final_check_air` on [`FinalAddOutputRelation`] keyed
 //! `(sig_id, x3[N_LIMBS])`, which the final check consumes as its `r_x`.
 
+use serde::{Deserialize, Serialize};
 use stwo::core::{
     air::Component, channel::Channel, fields::m31::M31, fields::qm31::SecureField, pcs::TreeVec,
     ColumnVec,
@@ -151,7 +152,7 @@ const FINAL_ADD_QUOTIENT_BOUND: i64 = 2;
 // Components bundle
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FinalAddLogSizes {
     check: u32,
     /// First hinted-mul `source_index` reserved for final-add muls (claim
@@ -321,7 +322,7 @@ impl FinalAddComponents {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FinalAddProofClaim {
     log_sizes: FinalAddLogSizes,
 }

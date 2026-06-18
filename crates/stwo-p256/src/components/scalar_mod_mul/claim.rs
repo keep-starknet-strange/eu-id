@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use stwo::core::channel::Channel;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::TraceLocationAllocator;
@@ -21,7 +22,7 @@ use super::providers::{LookupProviderClaims, LookupProviderTraces, SIGNED_CARRY_
 use super::relation::ScalarModMulLookupRelations;
 use super::{ScalarModMulFixedSchedule, ScalarModMulInteractionTraces, ScalarModMulTraceRows};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ScalarModMulClaim {
     pub mul_id: u32,
     pub canonical_log_size: u32,

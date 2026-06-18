@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use stwo::core::{
     air::Component,
     channel::Channel,
@@ -52,7 +53,7 @@ pub const FAKE_GLV_LSB_CORRECTION_OPERAND_TRACE_COLUMNS: usize =
 
 const LSB_CORRECTION_OPERAND_ZERO_COLUMN: &str = "p256_fake_glv_lsb_correction_operand_zero";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FakeGlvLsbCorrectionOperandProofClaim {
     pub provider_log_size: u32,
     pub consumer_log_size: u32,
@@ -110,7 +111,7 @@ impl FakeGlvLsbCorrectionOperandProofClaim {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FakeGlvLsbCorrectionOperandInteractionClaim {
     pub provider: ComponentInteractionClaim,
     pub consumer: ComponentInteractionClaim,

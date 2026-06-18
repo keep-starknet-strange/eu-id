@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use stwo::core::{
     air::Component,
     channel::Channel,
@@ -35,7 +36,7 @@ pub const FAKE_GLV_CHAIN_CONTINUITY_TRACE_COLUMNS: usize = 8 + 4 * PREPARED_TABL
 
 const FAKE_GLV_CHAIN_ROW_INDEX_COLUMN: &str = "p256_fake_glv_chain_row_index";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FakeGlvChainContinuityProofClaim {
     pub log_size: u32,
 }
@@ -91,7 +92,7 @@ impl FakeGlvChainContinuityProofClaim {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FakeGlvChainContinuityInteractionClaim {
     pub claimed_sum: SecureField,
 }

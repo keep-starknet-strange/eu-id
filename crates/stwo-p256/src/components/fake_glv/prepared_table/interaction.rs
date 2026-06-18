@@ -4,6 +4,7 @@
 //!
 //! Split out of `mod.rs` (pure relocation, no behavioral change).
 
+use serde::{Deserialize, Serialize};
 use stwo::core::{channel::Channel, fields::m31::M31, fields::qm31::SecureField, ColumnVec};
 use stwo::prover::backend::simd::{
     m31::{PackedM31, LOG_N_LANES, N_LANES},
@@ -45,7 +46,7 @@ impl PreparedTableEcRowInteractionClaim {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PreparedTableProjectiveSourceInteractionClaim {
     pub provider: ComponentInteractionClaim,
     pub consumer: ComponentInteractionClaim,
@@ -154,7 +155,7 @@ fn pin_point_column_offset(point: PinPoint) -> Option<usize> {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreparedTableEcRowPinnedInteractionClaim {
     pub claimed_sum: SecureField,
     pub final_check_hint: ComponentInteractionClaim,

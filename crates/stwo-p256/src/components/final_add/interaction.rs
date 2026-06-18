@@ -3,6 +3,7 @@
 //!
 //! Split out of `mod.rs` (pure relocation, no behavioral change).
 
+use serde::{Deserialize, Serialize};
 use stwo::core::{
     channel::Channel,
     fields::{m31::M31, qm31::SecureField},
@@ -21,7 +22,7 @@ use stwo_p256_utils::constants::N_LIMBS;
 
 use super::*;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FinalAddInteractionClaim {
     pub claimed_sum: SecureField,
     pub range13: RangeCheckInteractionClaim,

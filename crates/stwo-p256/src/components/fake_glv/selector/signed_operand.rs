@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use stwo::core::{
     air::Component,
     channel::Channel,
@@ -50,7 +51,7 @@ pub const FAKE_GLV_SIGNED_SELECTOR_OPERAND_TRACE_COLUMNS: usize =
 
 const SIGNED_SELECTOR_OPERAND_ZERO_COLUMN: &str = "p256_fake_glv_signed_selector_operand_zero";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FakeGlvSignedSelectorOperandProofClaim {
     pub provider_log_size: u32,
     pub consumer_log_size: u32,
@@ -108,7 +109,7 @@ impl FakeGlvSignedSelectorOperandProofClaim {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FakeGlvSignedSelectorOperandInteractionClaim {
     pub provider: ComponentInteractionClaim,
     pub consumer: ComponentInteractionClaim,
