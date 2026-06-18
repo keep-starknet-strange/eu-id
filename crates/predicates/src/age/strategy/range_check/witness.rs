@@ -28,10 +28,21 @@ pub struct WitnessData {
     pub day_delta_val: u32,
     pub month_delta_val: u32,
     pub year_delta_val: u32,
+    /// The four credential DOB byte values `[year_hi, year_lo, month, day]` when
+    /// the §6.6 binding is wired (`Some`) — the require tuples the interaction
+    /// trace emits against the shared `Sha256Field` channel. `None` for a
+    /// standalone age proof, where [`witness_trace`](Self::witness_trace) holds
+    /// only the nine base columns.
+    pub dob_bytes: Option<[u32; 4]>,
 }
 
+/// Trace column index of the single-row binding selector `bind_active` (the
+/// tenth column, after the nine base witness columns). Only present when the
+/// DOB binding is wired; the interaction trace reads it as the require numerator.
+pub const BIND_ACTIVE_COL: usize = 9;
+
 impl WitnessData {
-    pub fn new(witness: &Witness, preprocessed: &Preprocessed) -> Self {
+    pub fn new(witness: &Witness, preprocessed: &Preprocessed, bind_dob: bool) -> Self {
         let dob_max_days = max_days_at(witness.dob.month, witness.dob.year);
         let table_index = (witness.dob.year - witness.public.bounds.min_supported_year) * 12
             + witness.dob.month
@@ -74,8 +85,19 @@ impl WitnessData {
             .claim()
             .gen_multiplicity_col(&[repeated(year_delta_val)])];
 
+        // Big-endian recomposition matches `Credential::encode` (`year` is the
+        // u16 birth year): byte 0 is the high byte, byte 1 the low byte, then the
+        // single month/day bytes — the same four bytes SHA yields for the DOB
+        // window (`docs/credential-format.md`).
+        let dob_bytes = bind_dob.then_some([
+            witness.dob.year >> 8,
+            witness.dob.year & 0xFF,
+            witness.dob.month,
+            witness.dob.day,
+        ]);
+
         Self {
-            witness_trace: gen_trace(witness),
+            witness_trace: gen_trace(witness, bind_dob),
             cal_mult_trace,
             valid_day_mult_trace,
             day_delta_mult_trace,
@@ -87,6 +109,7 @@ impl WitnessData {
             day_delta_val,
             month_delta_val,
             year_delta_val,
+            dob_bytes,
         }
     }
 
@@ -107,8 +130,8 @@ impl WitnessData {
     }
 }
 
-fn gen_trace(witness: &Witness) -> Trace {
-    let mut cols = Vec::with_capacity(9);
+fn gen_trace(witness: &Witness, bind_dob: bool) -> Trace {
+    let mut cols = Vec::with_capacity(if bind_dob { 12 } else { 9 });
     push_repeated_column(&mut cols, witness.dob.day, LOG_SIZE);
     push_repeated_column(&mut cols, witness.dob.month, LOG_SIZE);
     push_repeated_column(&mut cols, witness.dob.year, LOG_SIZE);
@@ -132,5 +155,32 @@ fn gen_trace(witness: &Witness) -> Trace {
     push_repeated_column(&mut cols, day_borrow, LOG_SIZE);
     push_repeated_column(&mut cols, month_borrow, LOG_SIZE);
 
+    // §6.6 credential-field binding columns (slots 9..12). `bind_active` selects
+    // the single row whose DOB-byte requires fire; `year_hi`/`year_lo` are the
+    // big-endian birth-year bytes the reconciliation constraint ties to the
+    // packed `birth_year`. Repeated so the always-on reconciliation holds on
+    // every row; the global LogUp balance forces the selected row's bytes to the
+    // credential's signed bytes.
+    if bind_dob {
+        push_single_active(&mut cols, LOG_SIZE);
+        push_repeated_column(&mut cols, witness.dob.year >> 8, LOG_SIZE);
+        push_repeated_column(&mut cols, witness.dob.year & 0xFF, LOG_SIZE);
+    }
+
     cols
+}
+
+/// A column that is `1` on exactly one row and `0` on the rest — the §6.6
+/// single-row require selector. Any single fixed row works: the age witness
+/// repeats its columns across all rows, and the boolean constraint plus the
+/// cross-module balance force this column to fire once with the credential's
+/// bytes.
+fn push_single_active(
+    columns: &mut Vec<CircleEvaluation<SimdBackend, M31, stwo::prover::poly::BitReversedOrder>>,
+    log_size: u32,
+) {
+    let domain = CanonicCoset::new(log_size).circle_domain();
+    let mut data = vec![M31::zero(); 1 << log_size];
+    data[0] = M31::from_u32_unchecked(1);
+    columns.push(CircleEvaluation::new(domain, BaseColumn::from_iter(data)));
 }

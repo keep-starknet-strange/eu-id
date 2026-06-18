@@ -9,6 +9,7 @@ use crate::age::strategy::range_check::preprocessed::{
     DayDeltaTableComponent, MonthDeltaTableComponent, Preprocessed, YearDeltaTableComponent,
 };
 use crate::{AgeBounds, PublicInput};
+use air_core::relations::FieldBytesRelation;
 use stwo::core::fields::qm31::QM31;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::TraceLocationAllocator;
@@ -32,6 +33,7 @@ pub fn components(
     allocator: &mut TraceLocationAllocator,
     public: &PublicInput,
     lookup_elements: LookupElements,
+    dob_binding: Option<FieldBytesRelation>,
     age_claimed_sum: QM31,
     cal_claimed_sum: QM31,
     valid_day_claimed_sum: QM31,
@@ -51,6 +53,7 @@ pub fn components(
         AgeRangeCheckEval {
             public: *public,
             lookup_elements: lookup_elements.clone(),
+            dob_binding,
         },
         age_claimed_sum,
     );

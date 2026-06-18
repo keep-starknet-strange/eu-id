@@ -1,28 +1,34 @@
-//! Composes the P256 ECDSA module, the SHA-256 module, the digest-bind bridge,
-//! and the age + nationality predicate modules into one STARK proof and
-//! round-trips it through the shared orchestrator.
+//! End-to-end composition + binding tests for the combined `eu-id` proof.
 //!
-//! Two things are validated here. First, the digest binding: the global LogUp
-//! balance cancels only when the ECDSA message hash `z` equals the digest SHA
-//! actually computed — the positive case proves a consistent witness (P256 signs
-//! `SHA-256(m)`, SHA hashes the same `m`), the negative case signs one message
-//! but hashes another and asserts rejection. Second, that all five modules
-//! compose: `composes_all_modules_for_an_honest_credential` drives a real signed
-//! credential through the full slice. The predicate modules are present but not
-//! yet credential-bound, so each nets to zero and does not change the balance.
+//! Drives the P256 ECDSA module, the SHA-256 module, the digest-bind bridge, and
+//! the age + nationality predicate modules through one STARK proof and exercises
+//! the cross-module bindings that are wired so far:
+//!
+//! - **Digest binding** (§6.3): the global LogUp balance cancels only when the
+//!   ECDSA message hash `z` equals the digest SHA actually computed —
+//!   `rejects_signed_one_message_hashed_another` hashes a credential but signs a
+//!   different message and asserts rejection.
+//! - **Age↔credential binding** (§6.6): the date of birth the age module clears
+//!   against the threshold must be the credential's signed DOB bytes —
+//!   `rejects_age_dob_not_matching_credential` proves an over-18 date the
+//!   credential does not contain and asserts rejection, while the honest and
+//!   boundary fixtures (exactly-18, leap-year) verify and under-18 is rejected.
+//!
+//! Nationality is not yet credential-bound (§6.7), so the nat module nets to zero
+//! internally and composes without changing the balance.
 //!
 //! Marked `#[ignore]` — a real STARK prove/verify dominated by P256 is slow; run
 //! with `--release --ignored`.
 
-use eu_id_prover::{fixtures, prove, verify};
-use stwo_p256::ecdsa::ecdsa_verify;
+use eu_id_prover::credential::Credential;
+use eu_id_prover::generator::{sign_credential, IssuerKey};
+use eu_id_prover::{fixtures, prove, verify, Error, PipelineWitness, Proof};
 use stwo_p256::proof::P256ProofDraft;
 use stwo_p256::types::{AffinePoint, EcdsaVerifyInput, Signature, U256};
-use stwo_sha256::trace::min_log_size;
-use stwo_sha256::witness::compute_sha256_witness;
 
-/// A real P256 signature over `SHA-256(message)`, as an `EcdsaVerifyInput`
-/// (mirrors the stwo-p256 test fixture). The instance's `z` is `SHA-256(message)`.
+/// A real P256 signature over `SHA-256(message)`, as an `EcdsaVerifyInput`. The
+/// instance's `z` is `SHA-256(message)`. Used to forge a digest mismatch (sign a
+/// message other than the hashed credential).
 fn signed_input(message: &[u8]) -> EcdsaVerifyInput {
     use ::ecdsa::signature::Signer;
     use p256::ecdsa::{Signature as P256Signature, SigningKey};
@@ -52,124 +58,13 @@ fn signed_input(message: &[u8]) -> EcdsaVerifyInput {
     }
 }
 
-fn sha_params(witness_blocks: usize) -> (u32, u32) {
-    let log_n_rows = min_log_size(witness_blocks).max(4);
-    let group_width = 7; // MAX_ROUND_GROUP_BITS, SHA's default group width.
-    (log_n_rows, group_width)
-}
-
-/// Valid predicate inputs (over-18, accepted nationality) for the appended age
-/// and nationality modules, taken from the honest `valid_over_18` fixture. The
-/// digest-binding tests pair these with their own P256/SHA witnesses; the
-/// predicates net to zero, so they compose without affecting the binding the
-/// test exercises. `_lite` skips the (unused) P256 draft.
-fn valid_predicate_inputs() -> eu_id_prover::PipelineWitness {
-    fixtures::valid_over_18().pipeline_witness_lite()
-}
-
-#[test]
-#[ignore = "slow: full P256 + SHA + bridge + predicates STARK prove/verify; run with --release --ignored"]
-fn binds_p256_z_to_sha_digest() {
-    let message = b"eu-id combined p256 + sha256 fixture";
-
-    // P256 signs SHA-256(message); SHA hashes the same message. So z == digest.
-    let input = signed_input(message);
-    assert!(
-        ecdsa_verify(&input),
-        "native verifier must accept the fixture"
-    );
-    let draft = P256ProofDraft::from_inputs_with_arbitrary_fake_glv_hints(vec![input])
-        .expect("signature builds a proof draft");
-
-    let witness = compute_sha256_witness(message);
-    let (log_n_rows, group_width) = sha_params(witness.blocks.len());
-
-    let preds = valid_predicate_inputs();
-    let proof = prove(
-        &draft,
-        &witness,
-        log_n_rows,
-        group_width,
-        &preds.age_public,
-        &preds.age_dob,
-        &preds.nat_public,
-        &preds.nat_private,
-    )
-    .expect("combined proof generates");
-
-    // Bound to its own ECDSA statement, the cross-bound proof verifies (the
-    // global LogUp balance holds: z == SHA-256(message) at the byte level).
-    let expected = proof.p256_instances().to_vec();
-    verify(&proof, &expected).expect("cross-bound proof verifies");
-
-    // Caller-argument binding: a mismatched expected statement is rejected.
-    let mut wrong = expected;
-    wrong.truncate(0);
-    assert!(verify(&proof, &wrong).is_err());
-}
-
-#[test]
-#[ignore = "slow: full P256 + SHA + bridge + predicates STARK prove/verify; run with --release --ignored"]
-fn rejects_signed_one_message_hashed_another() {
-    // The binding the whole task exists for: P256 signs message B (so its `z` is
-    // the digest of B), but the SHA module hashes message A. `z` no longer equals
-    // the computed digest, so the global balance must break.
-    let message_a = b"the message SHA-256 actually hashes";
-    let message_b = b"a DIFFERENT message the signature is over";
-    assert_ne!(&message_a[..], &message_b[..]);
-
-    let input = signed_input(message_b); // z = SHA-256(message_b)
-    assert!(ecdsa_verify(&input), "the signature itself is valid over B");
-    let draft = P256ProofDraft::from_inputs_with_arbitrary_fake_glv_hints(vec![input])
-        .expect("signature builds a proof draft");
-
-    let witness = compute_sha256_witness(message_a); // SHA computes digest of A
-    let (log_n_rows, group_width) = sha_params(witness.blocks.len());
-
-    // The prover still produces a proof (each module is internally consistent;
-    // the cross-module imbalance is a verify-time check). The appended predicates
-    // are valid and net to zero, so the only imbalance is the digest mismatch.
-    let preds = valid_predicate_inputs();
-    let proof = prove(
-        &draft,
-        &witness,
-        log_n_rows,
-        group_width,
-        &preds.age_public,
-        &preds.age_dob,
-        &preds.nat_public,
-        &preds.nat_private,
-    )
-    .expect("prover accepts the mismatch");
-
-    // The verifier rejects: digest(B) (the ECDSA z) ≠ digest(A) (what SHA hashed),
-    // so the digest-bind LogUp term does not cancel SHA's yield.
-    let expected = proof.p256_instances().to_vec();
-    assert!(
-        verify(&proof, &expected).is_err(),
-        "signing one message while hashing another must be rejected",
-    );
-}
-
-#[test]
-#[ignore = "slow: full P256 + SHA + bridge + predicates STARK prove/verify; run with --release --ignored"]
-fn composes_all_modules_for_an_honest_credential() {
-    // The honest end-to-end witness from the credential generator: a signed
-    // credential whose holder is over 18 and whose nationality is in the accepted
-    // set. This drives all five modules — P256, SHA-256, the digest bridge, age,
-    // and nationality — through one `air_core::prove`/`verify`, the unbound
-    // pipeline the predicate-binding tasks build on.
-    let pw = fixtures::valid_over_18().pipeline_witness();
-    assert!(
-        pw.check_consistency().all_ok(),
-        "fixture witness must be self-consistent"
-    );
+/// Drive a pipeline witness through the five-module combined prover.
+fn prove_pipeline(pw: &PipelineWitness) -> Result<Proof, Error> {
     let draft = pw
         .p256_draft
         .as_ref()
         .expect("a valid signature builds a P256 draft");
-
-    let proof = prove(
+    prove(
         draft,
         &pw.sha_witness,
         pw.sha_log_n_rows,
@@ -179,11 +74,139 @@ fn composes_all_modules_for_an_honest_credential() {
         &pw.nat_public,
         &pw.nat_private,
     )
-    .expect("five-module proof generates");
+}
 
-    // The full proof verifies against its own ECDSA statement: the digest binds
-    // (z == SHA-256(C)) and each predicate's sub-balance nets to zero, so the
-    // global LogUp balance holds.
+/// The honest end-to-end witness: a signed credential whose holder is over 18 and
+/// whose nationality is accepted. Drives all five modules — P256, SHA-256, the
+/// digest bridge, the **credential-bound** age module, and nationality — and
+/// verifies. The age binding holds (the date of birth the module clears against
+/// the threshold is the credential's signed DOB), and the digest binds, so the
+/// global LogUp balance cancels.
+#[test]
+#[ignore = "slow: full P256 + SHA + bridge + predicates STARK prove/verify; run with --release --ignored"]
+fn composes_all_modules_for_an_honest_credential() {
+    let pw = fixtures::valid_over_18().pipeline_witness();
+    assert!(
+        pw.check_consistency().all_ok(),
+        "fixture witness must be self-consistent"
+    );
+
+    let proof = prove_pipeline(&pw).expect("five-module proof generates");
+
     let expected = proof.p256_instances().to_vec();
-    verify(&proof, &expected).expect("five-module proof verifies");
+    verify(&proof, &expected).expect("five-module bound proof verifies");
+
+    // Caller-argument binding: a mismatched expected statement is rejected.
+    assert!(
+        verify(&proof, &[]).is_err(),
+        "an empty expected statement must be rejected",
+    );
+}
+
+/// The digest binding (§6.3), isolated: SHA hashes the credential `C` (so the age
+/// binding holds), but the signature is over a *different* message, so its `z`
+/// is the digest of that other message, not `SHA-256(C)`. The digest-bind
+/// LogUp term cannot cancel SHA's yield → the verifier rejects.
+#[test]
+#[ignore = "slow: full P256 + SHA + bridge + predicates STARK prove/verify; run with --release --ignored"]
+fn rejects_signed_one_message_hashed_another() {
+    // SHA hashes the credential and the predicates use its attributes, so age
+    // and nationality both hold — the only broken relation is the digest binding.
+    let pw = fixtures::valid_over_18().pipeline_witness();
+
+    // The signature is over a message that is NOT the credential bytes, so
+    // z = SHA-256(other) ≠ SHA-256(C).
+    let other = signed_input(b"a different message than the signed credential");
+    let draft = P256ProofDraft::from_inputs_with_arbitrary_fake_glv_hints(vec![other])
+        .expect("signature builds a proof draft");
+
+    let proof = prove(
+        &draft,
+        &pw.sha_witness,
+        pw.sha_log_n_rows,
+        pw.sha_group_width,
+        &pw.age_public,
+        &pw.age_dob,
+        &pw.nat_public,
+        &pw.nat_private,
+    )
+    .expect("prover accepts the mismatch (imbalance is a verify-time check)");
+
+    let expected = proof.p256_instances().to_vec();
+    assert!(
+        verify(&proof, &expected).is_err(),
+        "signing one message while hashing another must be rejected",
+    );
+}
+
+/// The age↔credential binding (§6.6), the headline of this task: a real under-18
+/// credential (born 2010-01-01) is signed, but the age module is fed an over-18
+/// date of birth (2000-01-01). The signature is valid and the age sub-statement
+/// passes against the injected date — only the binding is broken. The age
+/// module's DOB-byte requires (for 2000) no longer cancel SHA's yields (for
+/// 2010), so the global balance breaks and the verifier rejects.
+#[test]
+#[ignore = "slow: full P256 + SHA + bridge + predicates STARK prove/verify; run with --release --ignored"]
+fn rejects_age_dob_not_matching_credential() {
+    let f = fixtures::tampered_dob_bytes();
+    // The fixture isolates exactly this: crypto + age statement pass, binding fails.
+    assert!(!f.expectation.binding_consistent);
+    assert!(f.expectation.age_ge_threshold);
+
+    let pw = f.pipeline_witness();
+    let proof = prove_pipeline(&pw).expect("prover accepts the mismatch");
+
+    let expected = proof.p256_instances().to_vec();
+    assert!(
+        verify(&proof, &expected).is_err(),
+        "an age proved from a DOB the credential does not contain must be rejected",
+    );
+}
+
+/// Boundary case through the bound path: a holder who turns exactly 18 on the
+/// reference date (born 2008-06-17, cutoff 2008-06-17, DOB == cutoff is accepted).
+/// The age binding holds and the proof verifies.
+#[test]
+#[ignore = "slow: full P256 + SHA + bridge + predicates STARK prove/verify; run with --release --ignored"]
+fn binds_exactly_18_credential() {
+    let pw = fixtures::valid_exactly_18().pipeline_witness();
+    let proof = prove_pipeline(&pw).expect("exactly-18 proof generates");
+    let expected = proof.p256_instances().to_vec();
+    verify(&proof, &expected).expect("exactly-18 bound proof verifies");
+}
+
+/// Boundary case through the bound path: an under-18 credential (born 2008-06-18,
+/// one day too young on the reference date). The validating age module rejects
+/// the date of birth at witness generation, so the bound prover never emits a
+/// proof — under-18 cannot be attested.
+#[test]
+#[ignore = "slow: builds the P256 draft before the age module rejects; run with --release --ignored"]
+fn rejects_under_18_credential() {
+    let pw = fixtures::under_18().pipeline_witness();
+    let result = prove_pipeline(&pw);
+    assert!(
+        matches!(result, Err(Error::AgePrepare(_))),
+        "an under-18 date of birth must be rejected by the bound prover, got: {:?}",
+        result.err(),
+    );
+}
+
+/// Boundary case through the bound path: a leap-day date of birth (born
+/// 2000-02-29 — 2000 is a leap year, so Feb 29 exists). Exercises the calendar /
+/// valid-day path of the bound age module; the binding holds and the proof
+/// verifies. 2000-02-29 reconciles to DOB bytes `[0x07, 0xD0, 0x02, 0x1D]`.
+#[test]
+#[ignore = "slow: full P256 + SHA + bridge + predicates STARK prove/verify; run with --release --ignored"]
+fn binds_leap_year_credential() {
+    let credential = Credential::new(2000, 2, 29, 276);
+    let signed = sign_credential(&credential, &IssuerKey::demo());
+    let pw = PipelineWitness::build(signed, fixtures::demo_policy());
+    assert!(
+        pw.check_consistency().all_ok(),
+        "leap-year credential witness must be self-consistent"
+    );
+
+    let proof = prove_pipeline(&pw).expect("leap-year proof generates");
+    let expected = proof.p256_instances().to_vec();
+    verify(&proof, &expected).expect("leap-year bound proof verifies");
 }
