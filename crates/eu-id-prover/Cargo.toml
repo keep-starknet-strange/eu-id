@@ -10,6 +10,12 @@ stwo-sha256 = { path = "../stwo-sha256" }
 predicates = { path = "../predicates" }
 stwo = { workspace = true }
 
+# Proof (de)serialization for the `eu-id` CLI: `prove` writes a proof file,
+# `verify` reads it back. The combined `Proof` derives serde over the per-module
+# claims (P256 / SHA / bridge claim trees made serde-serializable for this).
+serde = { workspace = true }
+bincode = "1"
+
 # Reference oracles. These back the POC's native credential generator and its
 # end-to-end self-validation (the SPEC's "property-based testing against a
 # reference oracle" mitigation). They are reachable from the public
