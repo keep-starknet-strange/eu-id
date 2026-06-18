@@ -607,10 +607,13 @@ version = "0.1.0"
 dependencies = [
  "air-core",
  "bincode",
+ "criterion",
  "ecdsa",
+ "memory-stats",
  "p256",
  "predicates",
  "serde",
+ "serde_json",
  "sha2",
  "stwo",
  "stwo-p256",

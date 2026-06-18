@@ -1,8 +1,9 @@
 import SwiftUI
 
-// SHA-256 mobile benchmark harness. Drives the Rust prover via the
-// eu_id_bench_sha256 C ABI and shows prove/verify time, peak footprint, and
-// the claimed digest for the four message sizes from the laptop perf doc.
+// eu-id mobile benchmark harness. Drives the Rust provers via the C ABI and
+// shows prove/verify time and peak footprint: the combined, cross-bound identity
+// proof (eu_id_bench_identity) as the headline, plus the standalone SHA-256
+// component (eu_id_bench_sha256) across four message sizes.
 @main
 struct EuIdBenchApp: App {
     var body: some Scene {

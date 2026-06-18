@@ -34,10 +34,14 @@ use stwo_sha256::witness::compute_sha256_witness;
 
 use crate::credential::Credential;
 
-/// SHA-256 round-group width fed to the SHA module. Matches the value the
-/// proven compose path uses (`crates/eu-id-prover/tests/compose_p256_sha.rs`);
-/// the legal range is `[MAX_ROUND_GROUP_BITS = 6, MAX_GROUP_WIDTH]`.
-pub const SHA_GROUP_WIDTH: u32 = 7;
+/// SHA-256 round-group width fed to the SHA module. `MAX_ROUND_GROUP_BITS = 6`
+/// is the minimum of the legal range `[6, MAX_GROUP_WIDTH]` and the smallest
+/// Maj/Ch table (`2^18` rows). Benchmarking showed `6` roughly halves the
+/// combined prove time and cuts peak memory ~3.5× versus the earlier `7`
+/// (`2^21` rows) — with SHA the dominant component at `7` but P256 the dominant
+/// component at `6` — and the full soundness suite passes either way, so the
+/// combined proof uses the cheaper `6`.
+pub const SHA_GROUP_WIDTH: u32 = 6;
 
 /// Deterministic demo issuer seed. A fixed seed keeps `Q` (and therefore every
 /// fixture's public statement) reproducible across runs. Not a real key —

@@ -1,0 +1,27 @@
+{
+  "note": "On-device results for the combined identity proof (eu_id_bench_identity), captured by running the EuIdBench harness app; see docs/benchmarks.md for the build + capture recipe. peak_bytes is mach phys_footprint, the figure iOS jetsam enforces. proof_bytes is device-independent (the proof is identical to the laptop's). Device runs are single-iteration (iters=1, not best-of-N); peak is logged at MiB precision. SHA group width W=6.",
+  "schema": {
+    "prove_ms": "prove_identity wall-clock (single run unless noted)",
+    "verify_ms": "verify_identity wall-clock",
+    "peak_bytes": "peak phys_footprint across the measured window",
+    "proof_bytes": "serialized (bincode) proof size"
+  },
+  "devices": [
+    {
+      "device": "iPhone 15 Pro Max",
+      "chip": "A17 Pro",
+      "ram_gb": 8,
+      "ios": "26.5",
+      "measured": true,
+      "notes": "Ran clean (ok=1, no jetsam). peak ~1.29 GiB (1318 MiB); single run via devicectl --autorun-identity.",
+      "identity": { "prove_ms": 1813, "verify_ms": 45, "peak_bytes": 1382023168, "proof_bytes": 7846609 }
+    },
+    {
+      "device": "iPhone 16 Pro",
+      "chip": "A18 Pro",
+      "ram_gb": 8,
+      "measured": false,
+      "identity": { "prove_ms": null, "verify_ms": null, "peak_bytes": null, "proof_bytes": 7846609 }
+    }
+  ]
+}

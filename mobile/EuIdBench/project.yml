@@ -1,9 +1,10 @@
-# XcodeGen spec for the SHA-256 mobile benchmark harness.
+# XcodeGen spec for the eu-id mobile benchmark harness.
 # Regenerate the project with:  cd mobile/EuIdBench && xcodegen generate
 #
 # The app statically links EuId.xcframework (built by
-# crates/eu-id-ffi/build-xcframework.sh) and calls eu_id_bench_sha256 via a
-# bridging header. One screen, four digest buttons — see Sources/.
+# crates/eu-id-ffi/build-xcframework.sh) and calls the prover C ABI via a
+# bridging header: eu_id_bench_identity (the combined proof) and
+# eu_id_bench_sha256 (the SHA-256 component) — see Sources/.
 name: EuIdBench
 options:
   bundleIdPrefix: co.starkware.euid
