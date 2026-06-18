@@ -609,9 +609,11 @@ name = "eu-id-prover"
 version = "0.1.0"
 dependencies = [
  "air-core",
+ "bincode",
  "ecdsa",
  "p256",
  "predicates",
+ "serde",
  "sha2",
  "stwo",
  "stwo-p256",

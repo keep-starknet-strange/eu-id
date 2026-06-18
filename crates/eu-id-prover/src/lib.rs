@@ -42,9 +42,29 @@
 //! proves set-membership for (`code = code_hi · 256 + code_lo`). So the balance
 //! cancels **only** when the nationality the nat module clears against the
 //! accepted set is the one encoded in the signed credential — a prover can no
-//! longer prove membership for a code `C` does not contain. The remaining glue
-//! (the full policy-shaped public-input contract a relying party checks against)
-//! is tracked in the integration roadmap.
+//! longer prove membership for a code `C` does not contain.
+//!
+//! ## Relying-party API & public statement
+//!
+//! [`prove_identity`] takes a credential, the issuer signing key, and a
+//! [`Policy`] (reference date, age threshold, accepted set), signs the
+//! credential, and returns one bound [`Proof`]. [`verify_identity`] checks that
+//! proof against a [`PublicStatement`] — exactly `{ issuer key Q, current date,
+//! age threshold, accepted nationality set }`. The date of birth, the
+//! nationality, and the digest `z` are **proven equal to the credential's**, not
+//! supplied. Caller-argument binding rejects the proof unless its public values
+//! match the caller's statement: the issuer key `Q` against the ECDSA instance's
+//! public-key limbs, and the policy against the age / nationality public inputs.
+//!
+//! **Issuer key / trust anchor.** `Q` is a public input the verifier checks
+//! against an issuer it already trusts (out of band). Binding `Q` to a committed
+//! issuer registry *in-circuit* (a trust anchor over `Q` / `H(Q)`) is a
+//! deliberate non-goal for the MVP and is deferred (`docs/ROADMAP_E2E` §8.2).
+//!
+//! The lower-level [`prove`] / [`verify`] take each module's witness / expected
+//! ECDSA instances explicitly; they are the composition primitives the
+//! credential API is built on, and the surface the negative-test suite forges
+//! deliberately inconsistent witnesses against.
 //!
 //! ## Credential format & witness oracle
 //!
@@ -60,6 +80,8 @@ pub mod generator;
 
 pub use credential::Credential;
 pub use generator::{IssuerKey, PipelineWitness, Policy, SignedCredential};
+
+use serde::{Deserialize, Serialize};
 
 use air_core::relations::{field_id, SharedDigestRelation, SharedFieldRelation};
 use air_core::{Air, AirProver};
@@ -80,9 +102,13 @@ use stwo_p256::components::digest_bind::module::{
 };
 use stwo_p256::components::digest_bind::witness::DigestBindRow;
 use stwo_p256::components::digest_bind::SharedScalarZRelation;
+use stwo_p256::limbs::P256M31BigInt;
 use stwo_p256::proof::air::{P256Prover, P256Verifier};
 use stwo_p256::proof::{P256CurrentAirInteractionClaim, P256CurrentAirProofClaim, P256ProofDraft};
 use stwo_p256::public_inputs::PublicEcdsaInstance;
+// Re-exported: `AffinePoint` is the type of `PublicStatement::issuer_key`, so a
+// relying party needs it in scope to build a statement.
+pub use stwo_p256::types::AffinePoint;
 
 use stwo_sha256::air::{Sha256Prover, Sha256Verifier};
 use stwo_sha256::field_exposure::FieldExposure;
@@ -91,6 +117,10 @@ use stwo_sha256::types::Sha256Witness;
 
 /// A single STARK proof over the composed P256 + SHA + digest-bind modules, plus
 /// the public claims the verifier needs to reconstruct each module.
+///
+/// Serde-serializable end to end (the per-module claim trees derive serde), so
+/// the `eu-id` CLI can write a proof in one process and verify it in another.
+#[derive(Serialize, Deserialize)]
 pub struct Proof {
     /// The one shared STARK proof.
     pub stark_proof: StarkProof<Blake2sMerkleHasher>,
@@ -140,9 +170,43 @@ pub enum Error {
     /// The verifier's expected ECDSA statement (issuer key + signature) does not
     /// match the proof.
     P256InstanceMismatch,
+    /// The proof's issuer public key does not match the statement's `Q`.
+    IssuerKeyMismatch,
+    /// The proof's age public input (reference date / threshold) does not match
+    /// the statement's policy.
+    AgePolicyMismatch,
+    /// The proof's accepted-nationality set does not match the statement's
+    /// policy.
+    NatPolicyMismatch,
+    /// A freshly signed credential did not yield a natively-verifying ECDSA
+    /// witness (no proof draft) — should not happen for a well-formed issuer key.
+    SignatureInvalid,
     /// The shared STARK verifier rejected the proof (includes a broken global
     /// LogUp balance — e.g. the signed digest does not equal `SHA-256(C)`).
     Verify(String),
+}
+
+/// The relying party's public statement — the only thing [`verify_identity`]
+/// checks a [`Proof`] against. Exactly `{ issuer key Q, current date, age
+/// threshold, accepted nationality set }`: the date of birth, the nationality,
+/// and the digest `z` are proven equal to the signed credential's, never
+/// supplied here.
+#[derive(Clone, Debug)]
+pub struct PublicStatement {
+    /// The issuer public key `Q` the credential must be signed under. The
+    /// verifier trusts this key out of band; an in-circuit trust anchor over a
+    /// committed issuer set is deferred (`docs/ROADMAP_E2E` §8.2).
+    pub issuer_key: AffinePoint,
+    /// The verifier policy: reference date, minimum age, and accepted
+    /// nationality set. Maps directly to the age / nationality public inputs.
+    pub policy: Policy,
+}
+
+impl PublicStatement {
+    /// Build a statement from a trusted issuer key and a policy.
+    pub fn new(issuer_key: AffinePoint, policy: Policy) -> Self {
+        Self { issuer_key, policy }
+    }
 }
 
 /// Bridge trace size: enough rows for one active row per ECDSA instance, at the
@@ -198,12 +262,14 @@ fn bridge_rows(instances: &[PublicEcdsaInstance<M31>]) -> Vec<DigestBindRow> {
 /// largest module constraint bound (P256's) and enables the lifting path P256
 /// needs. The predicate modules are plain degree-2 / Blake2s `air_core` modules,
 /// so they compose under that config with no friction. The SHA digest is bound
-/// to the ECDSA `z` (see the crate docs); the predicate statements are proven but
-/// **not yet** bound to the credential bytes, so each nets to zero internally.
+/// to the ECDSA `z`, and the age / nationality predicates are bound to the
+/// credential's signed DOB / nationality bytes (see the crate docs).
 //
-// Scaffolding takes each module's witness loosely. The relying-party-facing API
-// (a later task) collapses these into one credential + policy and supersedes
-// this signature, so the argument count is intentional here.
+// This is the lower-level composition primitive: it takes each module's witness
+// explicitly. The relying-party-facing `prove_identity` collapses these into one
+// credential + policy and is built on top; the explicit form stays public so the
+// negative-test suite can compose deliberately inconsistent witnesses (e.g. hash
+// one message but sign another). The argument count is intentional.
 #[allow(clippy::too_many_arguments)]
 pub fn prove(
     p256_draft: &P256ProofDraft,
@@ -297,6 +363,38 @@ pub fn prove(
     })
 }
 
+/// Prove an identity statement from a credential, an issuer signing key, and a
+/// policy — the relying-party-facing entry point.
+///
+/// Signs `credential` with `issuer` (real ES256, so `z = SHA-256(C)`), composes
+/// the pipeline witness, and drives all five modules through [`prove`]. The
+/// returned [`Proof`] is bound: `z == SHA-256(C)`, and the date of birth /
+/// nationality the predicates reason about are the credential's signed bytes.
+/// Proving a false statement fails here — e.g. an under-age date of birth is
+/// rejected by the age module's witness generation ([`Error::AgePrepare`]).
+///
+/// Pair the returned proof with [`verify_identity`] against a [`PublicStatement`]
+/// built from the issuer's *public* key and the same policy.
+pub fn prove_identity(
+    credential: &Credential,
+    issuer: &IssuerKey,
+    policy: &Policy,
+) -> Result<Proof, Error> {
+    let signed = generator::sign_credential(credential, issuer);
+    let witness = PipelineWitness::build(signed, policy.clone());
+    let draft = witness.p256_draft.as_ref().ok_or(Error::SignatureInvalid)?;
+    prove(
+        draft,
+        &witness.sha_witness,
+        witness.sha_log_n_rows,
+        witness.sha_group_width,
+        &witness.age_public,
+        &witness.age_dob,
+        &witness.nat_public,
+        &witness.nat_private,
+    )
+}
+
 /// Whether the proof's instances match the caller's expected statement, **except
 /// `z`** — the message hash is proven equal to `SHA-256(C)` by the digest
 /// binding, so the relying party supplies only the issuer key `Q = (pub_x,
@@ -317,6 +415,10 @@ fn instances_match_ignoring_z(
 
 /// Verify a [`Proof`], binding the P256 module to the caller's expected ECDSA
 /// statement (issuer key + signature, **not** `z`).
+///
+/// This is the lower-level verify against an explicit ECDSA instance list.
+/// Relying parties should prefer [`verify_identity`], which checks the small
+/// public statement `{ Q, policy }` instead.
 pub fn verify(proof: &Proof, expected_instances: &[PublicEcdsaInstance<M31>]) -> Result<(), Error> {
     // Caller-argument binding for the P256 statement, minus `z` (internally
     // bound to the SHA digest).
@@ -326,7 +428,51 @@ pub fn verify(proof: &Proof, expected_instances: &[PublicEcdsaInstance<M31>]) ->
     ) {
         return Err(Error::P256InstanceMismatch);
     }
+    verify_stark(proof)
+}
 
+/// Verify a [`Proof`] against a relying party's [`PublicStatement`] — the
+/// credential-API counterpart of [`prove_identity`].
+///
+/// Caller-argument binding for the full statement: the issuer key `Q` against the
+/// ECDSA instance's public-key limbs, the reference date + threshold against the
+/// age public input, and the accepted set against the nationality public input.
+/// `z`, the date of birth, and the nationality are not supplied — they are proven
+/// equal to the credential's. Then checks the shared STARK (the global LogUp
+/// balance). Returns `Ok(())` iff every check passes.
+pub fn verify_identity(proof: &Proof, statement: &PublicStatement) -> Result<(), Error> {
+    // Issuer key: every ECDSA instance's public-key limbs must equal `Q`. The
+    // MVP proves a single signature, so there is exactly one instance; an empty
+    // instance list never satisfies a concrete issuer.
+    let expected_pub_x = P256M31BigInt::from_u256(&statement.issuer_key.x);
+    let expected_pub_y = P256M31BigInt::from_u256(&statement.issuer_key.y);
+    let instances = &proof.p256_claim.public_inputs.instances;
+    if instances.is_empty()
+        || !instances
+            .iter()
+            .all(|i| i.pub_x == expected_pub_x && i.pub_y == expected_pub_y)
+    {
+        return Err(Error::IssuerKeyMismatch);
+    }
+
+    // Policy: the proven age / nationality public inputs must equal the policy's.
+    // Both sides build them from the policy the same way, so equality holds iff
+    // the reference date, threshold, and normalized accepted set all match.
+    if proof.age_public != statement.policy.age_public_input() {
+        return Err(Error::AgePolicyMismatch);
+    }
+    if proof.nat_public != statement.policy.nat_public_input() {
+        return Err(Error::NatPolicyMismatch);
+    }
+
+    verify_stark(proof)
+}
+
+/// Rebuild the five verifier modules from the proof and check the shared STARK
+/// (the global LogUp balance). The caller does any public-input / statement
+/// binding *first*: both [`verify`] and [`verify_identity`] bind, then delegate
+/// here.
+fn verify_stark(proof: &Proof) -> Result<(), Error> {
     let scalar_z_handle = SharedScalarZRelation::new();
     let digest_handle = SharedDigestRelation::new();
     let field_handle = SharedFieldRelation::new();
