@@ -49,6 +49,7 @@ use stwo_constraint_framework::{
 
 use crate::components::is_first_row_column_id;
 use crate::constants::{DIGEST_BYTES, IV, K, N_ROUNDS, N_STATE_WORDS};
+use crate::field_exposure::FieldExposure;
 use crate::partitions::{
     lower_sigma_key_hi_coeff_s, lower_sigma_key_hi_coeff_s_complement, round_groups_half_indices,
     round_key_coeffs, GROUPS_PER_ROUND_PARTITION, LOWER_SIGMA0_PARTS, LOWER_SIGMA1_PARTS,
@@ -77,6 +78,16 @@ pub struct Sha256Eval {
     /// constraints are present and enforced regardless — only the
     /// cross-module *yield* is gated.
     pub expose_digest: bool,
+    /// Credential-field byte exposure (§6.5). When non-empty, the AIR commits a
+    /// byte-decomposition of each covered message word as a dynamic column tail
+    /// and *yields* the configured byte windows on the **first block** over the
+    /// `Sha256Field` channel, so predicate consumers can require the exact bytes
+    /// of the field they bind (§6.6/§6.7). Empty for a standalone SHA proof and
+    /// for the combined proof before the predicate consumers are wired (yields
+    /// with no consumer would leave the module's claimed sum non-zero). The
+    /// byte columns and their decomposition constraints exist iff the exposure
+    /// is non-empty; the cross-module yield is what binds.
+    pub field_exposure: FieldExposure,
 }
 
 impl FrameworkEval for Sha256Eval {
@@ -1046,6 +1057,95 @@ impl FrameworkEval for Sha256Eval {
         );
         eval.add_constraint((E::F::one() - is_first_row.clone()) * enabler_step.clone());
 
+        // ---- field provider: byte view of covered message words, range-checked, + yields ----
+        //
+        // The credential-field byte columns are the dynamic tail of the trace
+        // (read here, after `enabler_step`, in `crate::trace::write_block_row`
+        // order — word-slot major, big-endian byte minor). For each exposed
+        // message word `W[word_idx]` the two bytes of each 16-bit limb recompose
+        // it as `limb = 256·b1 + b0`; the limbs are already pinned to `[0, 2¹⁶)`
+        // by the σ-input split-and-pack on `W[1..15]` (the credential's fields
+        // live in `W[1]`/`W[2]`), so these two `enabler`-gated, degree-2
+        // constraints per word tie the bytes to the message. Each byte is then
+        // range-checked to `[0, 256)` (two `Range16` lookups, below) so every
+        // touched limb's split is unique and a yielded byte equals the signed
+        // preimage byte. The digest can defer this to its consumer because it
+        // exposes whole words; a field window can be sub-word, so the provider
+        // pins the bytes itself (interface-contract item 4).
+        if !self.field_exposure.is_empty() {
+            let field_bytes: Vec<E::F> = (0..self.field_exposure.n_columns())
+                .map(|_| eval.next_trace_mask())
+                .collect();
+            for (word_slot, &word_idx) in self.field_exposure.decomposed_words().iter().enumerate()
+            {
+                let (w_lo, w_hi) = w[word_idx].clone();
+                let base = word_slot * BYTES_PER_WORD;
+                // hi limb = 256·b0 + b1  (b0 the high byte, b1 the low byte of hi)
+                eval.add_constraint(
+                    enabler.clone()
+                        * (w_hi
+                            - two_pow_8.clone() * field_bytes[base].clone()
+                            - field_bytes[base + 1].clone()),
+                );
+                // lo limb = 256·b2 + b3
+                eval.add_constraint(
+                    enabler.clone()
+                        * (w_lo
+                            - two_pow_8.clone() * field_bytes[base + 2].clone()
+                            - field_bytes[base + 3].clone()),
+                );
+            }
+
+            // Range-check every exposed byte to `[0, 256)` so the limb split
+            // above is unique (a 16-bit limb `= 256·b_hi + b_lo` splits uniquely
+            // only when both bytes are bytes — otherwise an edge byte of a
+            // sub-word window could be forged by absorbing slack into a
+            // non-exposed limb partner). No `[0, 2⁸)` table exists, so each byte
+            // `b` is pinned by two `Range16` lookups — on `b` and on `b +
+            // OFFSET` — gated by `is_first_block` to match the yield. Order is
+            // word-slot major, byte minor (the `field_bytes` order), mirrored by
+            // `interaction::write_block_lookups` section 7a.
+            let byte_range_offset =
+                E::F::from(M31::from(crate::field_exposure::BYTE_RANGE_CHECK_OFFSET));
+            for b in &field_bytes {
+                wire_range_check::<E>(
+                    &mut eval,
+                    is_first_block.clone(),
+                    b.clone(),
+                    crate::components::RangeKind::Range16,
+                    &self.relations,
+                );
+                wire_range_check::<E>(
+                    &mut eval,
+                    is_first_block.clone(),
+                    b.clone() + byte_range_offset.clone(),
+                    crate::components::RangeKind::Range16,
+                    &self.relations,
+                );
+            }
+
+            // Yield one `(field_id, byte_index, value)` tuple per exposed byte,
+            // on the **first block** only (`−is_first_block`): the credential's
+            // fields are at fixed offsets from the preimage start, so they live
+            // in block 0. Like the digest yield, these terms have no in-module
+            // consumer until a predicate (§6.6/§6.7) requires the same tuples, so
+            // they leave the module's claimed sum non-zero — which is exactly
+            // what binds the attribute to the signed bytes.
+            for y in self.field_exposure.yields() {
+                let slot = self.field_exposure.yield_column_slot(y);
+                let tuple = [
+                    E::F::from(M31::from(y.field_id)),
+                    E::F::from(M31::from(y.byte_index)),
+                    field_bytes[slot].clone(),
+                ];
+                eval.add_to_relation(RelationEntry::new(
+                    &self.relations.field.field,
+                    -E::EF::from(is_first_block.clone()),
+                    &tuple,
+                ));
+            }
+        }
+
         // Close the LogUp loop over every SHA-256-specific channel: the
         // eight `Σ`/`σ` decode lookups, the packed `Maj`/`Ch` pair, the
         // chunk-wise `xor_8`, the eight split-and-pack channels, and the
@@ -1928,6 +2028,7 @@ mod tests {
             log_size,
             relations: Sha256Relations::dummy(),
             expose_digest: false,
+            field_exposure: FieldExposure::empty(),
         };
         let info = run_evaluate_with_finalized_info(&eval, log_size);
 
@@ -2009,6 +2110,69 @@ mod tests {
             range_2_per_block + range_4_per_block + range_5_per_block + range_16_per_block;
         let expected_total = decode.total() + maj_ch_xor.total() + split_pack.total() + range_total;
         assert_eq!(total_lookups, expected_total);
+    }
+
+    /// With a non-empty credential-field exposure, `evaluate` reads the dynamic
+    /// field-byte tail and fires one `FieldBytesRelation` lookup per exposed
+    /// byte. Asserts the two structural counts the trace generator and
+    /// interaction generator must match: the mask count grows by exactly the
+    /// field byte columns (`4 ×` distinct words), and the field relation fires
+    /// exactly `n_yields` times. This is the constraint-side cover for §6.5 (the
+    /// interaction-side balance is `interaction::tests::field_provider_*`).
+    #[test]
+    fn evaluate_reads_field_columns_and_fires_field_yields() {
+        use air_core::relations::field_id;
+        use stwo_constraint_framework::ORIGINAL_TRACE_IDX;
+
+        let log_size = 4;
+        // DOB (4 bytes) + nationality (2 bytes) over words W[1]/W[2] ⇒ 8 columns,
+        // 6 yields.
+        let exposure = FieldExposure::from_preimage_windows(&[
+            (field_id::DOB, 5, 4),
+            (field_id::NATIONALITY, 9, 2),
+        ]);
+        assert_eq!(exposure.n_columns(), 8);
+        assert_eq!(exposure.n_yields(), 6);
+
+        let eval = Sha256Eval {
+            log_size,
+            relations: Sha256Relations::dummy(),
+            expose_digest: false,
+            field_exposure: exposure.clone(),
+        };
+        let info = run_evaluate_with_finalized_info(&eval, log_size);
+
+        // Mask count = base width + the dynamic field byte tail.
+        assert_eq!(
+            info.mask_offsets[ORIGINAL_TRACE_IDX].len(),
+            Layout::TOTAL_COLS + exposure.n_columns(),
+            "field exposure must extend the trace mask count by its byte columns",
+        );
+
+        // One field-relation lookup per exposed byte.
+        let field_firings = info
+            .logup_counts
+            .iter()
+            .find_map(|(k, v)| (k == "FieldBytesRelation").then_some(*v))
+            .unwrap_or(0);
+        assert_eq!(
+            field_firings,
+            exposure.n_yields(),
+            "field provider must fire one lookup per exposed credential byte",
+        );
+
+        // Two `Range16` byte range-checks per exposed byte column (the `[0,256)`
+        // pin), on top of the 16 terminal `h_out` limb checks (8 words × 2).
+        let range16_firings = info
+            .logup_counts
+            .iter()
+            .find_map(|(k, v)| (k == "Range16Relation").then_some(*v))
+            .unwrap_or(0);
+        assert_eq!(
+            range16_firings,
+            2 * N_STATE_WORDS + 2 * exposure.n_columns(),
+            "field provider must fire two Range16 byte range-checks per exposed byte",
+        );
     }
 
     /// Drive one `InfoEvaluator` pass through `Sha256Eval::evaluate`.

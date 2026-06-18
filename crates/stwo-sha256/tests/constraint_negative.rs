@@ -54,6 +54,7 @@ use stwo_constraint_framework::{
 
 use stwo_sha256::components::is_first_row_column_id;
 use stwo_sha256::constraints::Sha256Eval;
+use stwo_sha256::field_exposure::FieldExposure;
 use stwo_sha256::relations::Sha256Relations;
 use stwo_sha256::trace::{generate_trace, min_log_size, Layout};
 use stwo_sha256::witness::compute_sha256_witness;
@@ -234,6 +235,10 @@ fn collect_constraint_residuals(trace: &[Vec<BaseField>], log_size: u32) -> Vec<
         // does not affect this linear-residual collector either way; keep it
         // off to mirror the standalone (self-balancing) AIR.
         expose_digest: false,
+        // No credential field exposed: the linear-residual collector targets the
+        // base AIR. The field byte-decomposition would add columns this harness
+        // doesn't synthesise, so leave it empty.
+        field_exposure: FieldExposure::empty(),
     };
     let n_rows = 1usize << log_size;
     let mut all = Vec::new();

@@ -44,6 +44,7 @@ use crate::components::{
     range_log_size, RangeKind, DECODE_TABLES, RANGE_TABLES, ROUND_SPLIT_TABLES, SIGMA_SPLIT_TABLES,
 };
 use crate::constants::DIGEST_BYTES;
+use crate::field_exposure::{word_be_bytes, FieldExposure, BYTE_RANGE_CHECK_OFFSET};
 use crate::multiplicities::{
     decode_multiplicities, maj_ch_multiplicities, range_k_multiplicities,
     round_split_pack_multiplicities, sigma_split_pack_multiplicities, xor_8_multiplicities,
@@ -70,13 +71,18 @@ use crate::types::Sha256Witness;
 pub const SHA_LOOKUPS_PER_BLOCK_BASE: usize = 3720;
 
 /// Total consumer-side lookups `Sha256Eval` fires per block. The digest
-/// provider (§6.2) adds exactly one width-32 yield when `expose_digest` is
-/// set; otherwise the count is unchanged from the standalone AIR. Both the
-/// interaction generator here and `crate::air`'s interaction-column sizing
-/// read this so the two never drift.
+/// provider (§6.2) adds exactly one width-32 yield when `expose_digest` is set;
+/// the credential-field provider (§6.5) adds, per exposed byte column, two
+/// `Range16` byte range-checks (the `[0, 256)` pin) plus one width-3 yield per
+/// exposed window byte — i.e. `2·n_columns + n_yields`. All are zero for the
+/// standalone AIR. Both the interaction generator here and `crate::air`'s
+/// interaction-column sizing read this so the two never drift.
 #[inline]
-pub fn sha_lookups_per_block(expose_digest: bool) -> usize {
-    SHA_LOOKUPS_PER_BLOCK_BASE + usize::from(expose_digest)
+pub fn sha_lookups_per_block(expose_digest: bool, field_exposure: &FieldExposure) -> usize {
+    SHA_LOOKUPS_PER_BLOCK_BASE
+        + usize::from(expose_digest)
+        + 2 * field_exposure.n_columns()
+        + field_exposure.n_yields()
 }
 
 // ---------------------------------------------------------------------------
@@ -456,12 +462,13 @@ fn range_k_interaction(
     relations: &Sha256Relations,
     witness: &Sha256Witness,
     kind: RangeKind,
+    field_exposure: &FieldExposure,
 ) -> (
     ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     SecureField,
 ) {
     let log_size = range_log_size(kind);
-    let mults = range_k_multiplicities(witness, kind);
+    let mults = range_k_multiplicities(witness, kind, field_exposure);
     let n_rows = 1usize << log_size;
     let k = kind.bound() as usize;
     // Producer rows are `[0, 1, …, k-1, 0, 0, …]` — leading `k` real values
@@ -537,6 +544,7 @@ fn sha256_interaction(
     witness: &Sha256Witness,
     log_size: u32,
     expose_digest: bool,
+    field_exposure: &FieldExposure,
 ) -> (
     ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     SecureField,
@@ -545,7 +553,8 @@ fn sha256_interaction(
     let n_blocks = witness.blocks.len();
     // `is_last_block` matches the AIR gate `enabler · (1 − enabler_next)`:
     // set on the final block only when a padding successor exists. See
-    // `crate::trace::generate_trace`.
+    // `crate::trace::generate_trace`. The field provider gates on the symmetric
+    // `is_first_block` (block 0), which needs no padding successor.
     let has_padding = n_blocks < n_rows;
     let last_block_idx = n_blocks.saturating_sub(1);
 
@@ -587,7 +596,7 @@ fn sha256_interaction(
     //
     // We allocate one Vec<Frac> per lookup index (`lookup_idx`) of length
     // `n_rows`, default-filled, then fill real-block rows below.
-    let lookups_per_block = sha_lookups_per_block(expose_digest);
+    let lookups_per_block = sha_lookups_per_block(expose_digest, field_exposure);
     let mut all_lookups: Vec<Vec<Frac>> = (0..lookups_per_block)
         .map(|_| vec![(SecureField::zero(), SecureField::one()); n_rows])
         .collect();
@@ -595,6 +604,7 @@ fn sha256_interaction(
     for (block_idx, block) in witness.blocks.iter().enumerate() {
         let slot = Layout::block_slot(block_idx, log_size);
         let is_last_block = block_idx == last_block_idx && has_padding;
+        let is_first_block = block_idx == 0;
         let mut cursor = 0usize;
         write_block_lookups(
             &mut all_lookups,
@@ -604,6 +614,8 @@ fn sha256_interaction(
             relations,
             expose_digest,
             is_last_block,
+            field_exposure,
+            is_first_block,
         );
         debug_assert_eq!(cursor, lookups_per_block, "block lookup miscount");
     }
@@ -624,6 +636,8 @@ fn write_block_lookups(
     relations: &Sha256Relations,
     expose_digest: bool,
     is_last_block: bool,
+    field_exposure: &FieldExposure,
+    is_first_block: bool,
 ) {
     // Per-partition lo/hi half projections (length 4 each, W=6) — the same
     // `round_groups_half_indices` projection the constraint side keys on.
@@ -919,6 +933,62 @@ fn write_block_lookups(
         all[*cursor][slot] = (num, denom);
         *cursor += 1;
     }
+
+    // ---- 7. Credential-field range-checks + yields (provider side, first block) ----
+    //
+    // Mirrors the field tail of `Sha256Eval::evaluate`, in the same order:
+    //   7a. two `Range16` byte range-checks per exposed byte column (the
+    //       `[0, 256)` pin, multiplicity `is_first_block`), then
+    //   7b. one width-3 `(field_id, byte_index, value)` yield per exposed window
+    //       byte on the `Sha256Field` channel (multiplicity `−is_first_block`).
+    // Every byte value is read from this block's covered message word in
+    // `word_be_bytes` order — identical to the columns the constraint reads — so
+    // producer and consumer combine the same tuple. On non-first blocks the
+    // numerator is `0`, so only block 0 contributes; the matching `Range16`
+    // producer increments are in `range_k_multiplicities`.
+    if !field_exposure.is_empty() {
+        // Cache each covered word's big-endian bytes once, keyed by decomposed
+        // word slot (same order the constraint/trace use).
+        let word_bytes: Vec<[u32; crate::constants::WORD_BYTES]> = field_exposure
+            .decomposed_words()
+            .iter()
+            .map(|&w| {
+                let limb = block.schedule[w];
+                word_be_bytes(limb.lo, limb.hi)
+            })
+            .collect();
+        let is_first_sf = SecureField::from(BaseField::from(u32::from(is_first_block)));
+
+        // 7a. Range-check every exposed byte to `[0, 256)` — word-slot major,
+        // byte minor (the `field_bytes` order on the constraint side).
+        for bytes in &word_bytes {
+            for &b in bytes {
+                all[*cursor][slot] = (is_first_sf, combine_range(relations, RangeKind::Range16, b));
+                *cursor += 1;
+                all[*cursor][slot] = (
+                    is_first_sf,
+                    combine_range(relations, RangeKind::Range16, b + BYTE_RANGE_CHECK_OFFSET),
+                );
+                *cursor += 1;
+            }
+        }
+
+        // 7b. Yield each window byte (`−is_first_block`).
+        for y in field_exposure.yields() {
+            let slot_idx = field_exposure.yield_column_slot(y);
+            let word_slot = slot_idx / crate::constants::WORD_BYTES;
+            let byte_in_word = slot_idx % crate::constants::WORD_BYTES;
+            let value = word_bytes[word_slot][byte_in_word];
+            let tuple = [
+                BaseField::from(y.field_id),
+                BaseField::from(y.byte_index),
+                BaseField::from(value),
+            ];
+            let denom = relations.field.field.combine(&tuple);
+            all[*cursor][slot] = (-is_first_sf, denom);
+            *cursor += 1;
+        }
+    }
 }
 
 /// Internal tag for which split-pack relation a write targets.
@@ -1173,6 +1243,7 @@ pub fn generate_interaction_trace(
     sha256_log_size: u32,
     group_width: u32,
     expose_digest: bool,
+    field_exposure: &FieldExposure,
 ) -> (
     Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     InteractionClaim,
@@ -1180,10 +1251,16 @@ pub fn generate_interaction_trace(
     let mut combined = Vec::new();
 
     // Sha256Eval consumer first — its slot in the proof's component list.
-    // `expose_digest` adds the cross-component digest yield to this
-    // component's fractions (and hence its claimed sum).
-    let (sha_trace, sha_sum) =
-        sha256_interaction(relations, witness, sha256_log_size, expose_digest);
+    // `expose_digest` adds the cross-component digest yield to this component's
+    // fractions; `field_exposure` adds one credential-field yield per exposed
+    // byte (and hence to its claimed sum).
+    let (sha_trace, sha_sum) = sha256_interaction(
+        relations,
+        witness,
+        sha256_log_size,
+        expose_digest,
+        field_exposure,
+    );
     combined.extend(sha_trace);
     let sha256 = ComponentClaim {
         claimed_sum: sha_sum,
@@ -1225,7 +1302,7 @@ pub fn generate_interaction_trace(
     // 4 range producers (Range_2, Range_4, Range_5, Range_16).
     let mut range = Vec::with_capacity(4);
     for &kind in RANGE_TABLES {
-        let (t, s) = range_k_interaction(relations, witness, kind);
+        let (t, s) = range_k_interaction(relations, witness, kind, field_exposure);
         combined.extend(t);
         range.push(ComponentClaim { claimed_sum: s });
     }
@@ -1258,8 +1335,14 @@ mod tests {
         let witness = compute_sha256_witness(b"abc");
         let log_size = min_log_size(witness.blocks.len());
         let relations = Sha256Relations::draw(&mut Blake2sChannel::default());
-        let (_, claim) =
-            generate_interaction_trace(&relations, &witness, log_size, MAX_ROUND_GROUP_BITS, false);
+        let (_, claim) = generate_interaction_trace(
+            &relations,
+            &witness,
+            log_size,
+            MAX_ROUND_GROUP_BITS,
+            false,
+            &FieldExposure::empty(),
+        );
         assert_eq!(
             claim.total(),
             SecureField::zero(),
@@ -1281,8 +1364,14 @@ mod tests {
         let log_size = min_log_size(witness.blocks.len());
         let relations = Sha256Relations::draw(&mut Blake2sChannel::default());
 
-        let (_, claim) =
-            generate_interaction_trace(&relations, &witness, log_size, MAX_ROUND_GROUP_BITS, true);
+        let (_, claim) = generate_interaction_trace(
+            &relations,
+            &witness,
+            log_size,
+            MAX_ROUND_GROUP_BITS,
+            true,
+            &FieldExposure::empty(),
+        );
         let module_total = claim.total();
 
         // Synthesize the consumer term: +1 / combine(final-block digest bytes),
@@ -1323,8 +1412,14 @@ mod tests {
         let log_size = min_log_size(witness.blocks.len());
         let relations = Sha256Relations::draw(&mut Blake2sChannel::default());
 
-        let (_, claim) =
-            generate_interaction_trace(&relations, &witness, log_size, MAX_ROUND_GROUP_BITS, true);
+        let (_, claim) = generate_interaction_trace(
+            &relations,
+            &witness,
+            log_size,
+            MAX_ROUND_GROUP_BITS,
+            true,
+            &FieldExposure::empty(),
+        );
 
         let last = witness.blocks.last().unwrap();
         let mut bytes = h_out_digest_bytes(&last.h_out);
@@ -1337,6 +1432,147 @@ mod tests {
             claim.total() + wrong_consumer,
             SecureField::zero(),
             "a consumer requiring different bytes must not balance the digest yield",
+        );
+    }
+
+    // ---- §6.5 credential-field provider ----
+
+    use air_core::relations::field_id;
+
+    /// A credential-shaped 11-byte preimage (`docs/credential-format.md`):
+    /// `"EUID" | ver | year(2007) | month(3) | day(15) | nat(276=0x0114)`. The
+    /// DOB window is `c[5..9]`, the nationality window `c[9..11]`.
+    const SAMPLE_CREDENTIAL: [u8; 11] = [b'E', b'U', b'I', b'D', 1, 0x07, 0xD7, 3, 15, 0x01, 0x14];
+
+    /// Sum a synthetic consumer that *requires* each `(field_id, byte_index,
+    /// value)` tuple over the same drawn field relation the provider yielded
+    /// against: `+1 / combine(tuple)` per byte.
+    fn synthetic_field_consumer(
+        relations: &Sha256Relations,
+        tuples: &[(u32, u32, u32)],
+    ) -> SecureField {
+        let mut acc = SecureField::zero();
+        for &(f, b, v) in tuples {
+            let tuple = [BaseField::from(f), BaseField::from(b), BaseField::from(v)];
+            let denom: SecureField = relations.field.field.combine(&tuple);
+            assert_ne!(denom, SecureField::zero(), "combine must be invertible");
+            acc += SecureField::one() / denom;
+        }
+        acc
+    }
+
+    /// The required §6.5 smoke test: with **only** the DOB window exposed, the
+    /// SHA module yields the four DOB bytes, and a synthetic consumer requiring
+    /// exactly `(DOB, i, c[5+i])` cancels the module's outstanding provider term.
+    /// Balancing for the credential's *actual* DOB bytes is the proof that SHA
+    /// exposed the bytes that were hashed.
+    #[test]
+    fn field_provider_dob_window_balances_against_synthetic_consumer() {
+        let c = SAMPLE_CREDENTIAL;
+        let witness = compute_sha256_witness(&c);
+        let log_size = min_log_size(witness.blocks.len());
+        let relations = Sha256Relations::draw(&mut Blake2sChannel::default());
+        let exposure = FieldExposure::from_preimage_windows(&[(field_id::DOB, 5, 4)]);
+
+        let (_, claim) = generate_interaction_trace(
+            &relations,
+            &witness,
+            log_size,
+            MAX_ROUND_GROUP_BITS,
+            false,
+            &exposure,
+        );
+        let module_total = claim.total();
+
+        let dob: Vec<(u32, u32, u32)> = (0..4)
+            .map(|i| (field_id::DOB, i as u32, c[5 + i] as u32))
+            .collect();
+        let consumer = synthetic_field_consumer(&relations, &dob);
+
+        // The yield leaves the module unbalanced on its own...
+        assert_ne!(
+            module_total,
+            SecureField::zero(),
+            "exposing the DOB window must leave an outstanding provider term",
+        );
+        // ...and the synthetic DOB consumer cancels it exactly.
+        assert_eq!(
+            module_total + consumer,
+            SecureField::zero(),
+            "DOB field provider must balance a consumer requiring the same bytes",
+        );
+    }
+
+    /// Both windows exposed at once: a consumer requiring all six bytes (DOB +
+    /// nationality) balances. Confirms one shared channel carries both fields,
+    /// keyed by `field_id`.
+    #[test]
+    fn field_provider_balances_full_credential_exposure() {
+        let c = SAMPLE_CREDENTIAL;
+        let witness = compute_sha256_witness(&c);
+        let log_size = min_log_size(witness.blocks.len());
+        let relations = Sha256Relations::draw(&mut Blake2sChannel::default());
+        let exposure = FieldExposure::from_preimage_windows(&[
+            (field_id::DOB, 5, 4),
+            (field_id::NATIONALITY, 9, 2),
+        ]);
+
+        let (_, claim) = generate_interaction_trace(
+            &relations,
+            &witness,
+            log_size,
+            MAX_ROUND_GROUP_BITS,
+            false,
+            &exposure,
+        );
+
+        let mut tuples: Vec<(u32, u32, u32)> = (0..4)
+            .map(|i| (field_id::DOB, i as u32, c[5 + i] as u32))
+            .collect();
+        tuples.push((field_id::NATIONALITY, 0, c[9] as u32));
+        tuples.push((field_id::NATIONALITY, 1, c[10] as u32));
+        let consumer = synthetic_field_consumer(&relations, &tuples);
+
+        assert_eq!(
+            claim.total() + consumer,
+            SecureField::zero(),
+            "field provider must balance a consumer requiring every exposed byte",
+        );
+    }
+
+    /// A consumer requiring a *different* field byte (DOB day off by one) does
+    /// not cancel the provider's yield — the balance closes only for the exact
+    /// credential bytes SHA hashed. This is the §6.6 binding's core property
+    /// (proving age from a date other than the signed one is rejected) at the
+    /// §6.5 level.
+    #[test]
+    fn field_provider_rejects_mismatched_consumer() {
+        let c = SAMPLE_CREDENTIAL;
+        let witness = compute_sha256_witness(&c);
+        let log_size = min_log_size(witness.blocks.len());
+        let relations = Sha256Relations::draw(&mut Blake2sChannel::default());
+        let exposure = FieldExposure::from_preimage_windows(&[(field_id::DOB, 5, 4)]);
+
+        let (_, claim) = generate_interaction_trace(
+            &relations,
+            &witness,
+            log_size,
+            MAX_ROUND_GROUP_BITS,
+            false,
+            &exposure,
+        );
+
+        // Require the DOB window but with the day byte tampered (15 → 16).
+        let mut dob: Vec<(u32, u32, u32)> = (0..4)
+            .map(|i| (field_id::DOB, i as u32, c[5 + i] as u32))
+            .collect();
+        dob[3].2 += 1;
+        let wrong_consumer = synthetic_field_consumer(&relations, &dob);
+
+        assert_ne!(
+            claim.total() + wrong_consumer,
+            SecureField::zero(),
+            "a consumer requiring a different DOB byte must not balance the yield",
         );
     }
 }
