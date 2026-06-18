@@ -43,6 +43,25 @@ impl PredicateMode {
             PredicateMode::Or => "or",
         }
     }
+
+    /// Inverse of [`PredicateMode::as_token`]. Returns `None` for unknown tokens.
+    fn from_token(token: &str) -> Option<PredicateMode> {
+        match token {
+            "age" => Some(PredicateMode::Age),
+            "nat" => Some(PredicateMode::Nat),
+            "and" => Some(PredicateMode::And),
+            "or" => Some(PredicateMode::Or),
+            _ => None,
+        }
+    }
+
+    fn uses_age(self) -> bool {
+        matches!(self, PredicateMode::Age | PredicateMode::And | PredicateMode::Or)
+    }
+
+    fn uses_nat(self) -> bool {
+        matches!(self, PredicateMode::Nat | PredicateMode::And | PredicateMode::Or)
+    }
 }
 
 /// Nationality membership mode. Only [`NatMode::Any`] is implemented this
@@ -61,6 +80,113 @@ impl NatMode {
             NatMode::Any => "any",
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Contract surface — the shared identifiers/keys and small helpers that BOTH
+// the wallet and the verifier must agree on. They live here (not duplicated in
+// each app) so there is one source of truth. Consumed from Kotlin/Swift via the
+// generated bindings.
+//
+// Note: these include EUDI-mdoc *identifiers* (namespace, element ids, doctype)
+// as plain string values. This crate still does not depend on / parse mdoc — the
+// credential extraction stays app-side; the apps only read these strings to know
+// what to extract.
+// ---------------------------------------------------------------------------
+
+/// All shared contract identifiers and `ZkSystemSpec.params` keys, in one place.
+/// Fetch once via [`zk_contract_v1`] and reference the fields instead of hardcoding
+/// strings in either app.
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct ZkContract {
+    /// Must equal the verifier's requested `ZkSystemSpec.system`.
+    pub system_name: String,
+    pub spec_id_pid: String,
+    pub pid_namespace: String,
+    pub doctype_pid: String,
+    pub element_birth_date: String,
+    pub element_nationality: String,
+    // ZkSystemSpec.params keys (the verifier↔wallet contract).
+    pub param_predicate_mode: String,
+    pub param_min_age: String,
+    pub param_accepted_countries: String,
+    pub param_nat_mode: String,
+    pub param_version: String,
+    pub param_num_attributes: String,
+    pub param_circuit_hash: String,
+    /// Synthetic result claim id for the nationality predicate.
+    pub result_nat_in_set: String,
+}
+
+/// The frozen contract constants. Single source of truth for both apps.
+#[uniffi::export]
+pub fn zk_contract_v1() -> ZkContract {
+    ZkContract {
+        system_name: "stwo-euid-v1".to_string(),
+        spec_id_pid: "stwo-euid-pid-v1".to_string(),
+        pid_namespace: "eu.europa.ec.eudi.pid.1".to_string(),
+        doctype_pid: "eu.europa.ec.eudi.pid.1".to_string(),
+        element_birth_date: "birth_date".to_string(),
+        element_nationality: "nationality".to_string(),
+        param_predicate_mode: "predicate_mode".to_string(),
+        param_min_age: "min_age".to_string(),
+        param_accepted_countries: "accepted_countries".to_string(),
+        param_nat_mode: "nat_mode".to_string(),
+        param_version: "version".to_string(),
+        param_num_attributes: "num_attributes".to_string(),
+        param_circuit_hash: "circuit_hash".to_string(),
+        result_nat_in_set: "nationality_in_set".to_string(),
+    }
+}
+
+/// The synthetic result claim id for an age predicate, e.g. `age_over_18`.
+#[uniffi::export]
+pub fn result_age_over(min_age: u32) -> String {
+    format!("age_over_{min_age}")
+}
+
+/// Construct a [`PredicateMode`] from its canonical token (the value carried in
+/// `ZkSystemSpec.params["predicate_mode"]`). Returns `None` for unknown tokens.
+///
+/// UniFFI exposes this as a top-level function (enums can't carry exported
+/// inherent methods), which is the equivalent of `PredicateMode::from(string)`.
+#[uniffi::export]
+pub fn predicate_mode_from_token(token: String) -> Option<PredicateMode> {
+    PredicateMode::from_token(&token)
+}
+
+/// The canonical token for a [`PredicateMode`] (inverse of [`predicate_mode_from_token`]).
+#[uniffi::export]
+pub fn predicate_mode_token(mode: PredicateMode) -> String {
+    mode.as_token().to_string()
+}
+
+/// Whether the mode activates the age predicate.
+#[uniffi::export]
+pub fn predicate_mode_uses_age(mode: PredicateMode) -> bool {
+    mode.uses_age()
+}
+
+/// Whether the mode activates the nationality predicate.
+#[uniffi::export]
+pub fn predicate_mode_uses_nat(mode: PredicateMode) -> bool {
+    mode.uses_nat()
+}
+
+/// The canonical token for a [`NatMode`] (`nat.mode`).
+#[uniffi::export]
+pub fn nat_mode_token(mode: NatMode) -> String {
+    mode.as_token().to_string()
+}
+
+/// ISO-3166-1 alpha-2 → numeric. Converts an mdoc nationality string (e.g.
+/// `"GR"`) into the numeric code the nat circuit and the accepted-set use.
+///
+/// Backed by the `celes` crate (full ISO 3166-1 coverage, case-insensitive).
+/// Returns `None` for an unknown code.
+#[uniffi::export]
+pub fn iso_alpha2_to_numeric(alpha2: String) -> Option<u32> {
+    celes::Country::from_alpha2(alpha2).ok().map(|c| c.value as u32)
 }
 
 /// The PUBLIC statement `I` — the instance shared byte-identically between
@@ -306,5 +432,44 @@ mod tests {
 
         let both = sample_statement();
         assert!(encode_statement(&age_only).len() < encode_statement(&both).len());
+    }
+
+    #[test]
+    fn predicate_mode_token_round_trips() {
+        for mode in [PredicateMode::Age, PredicateMode::Nat, PredicateMode::And, PredicateMode::Or] {
+            let token = predicate_mode_token(mode);
+            assert_eq!(predicate_mode_from_token(token), Some(mode));
+        }
+        assert_eq!(predicate_mode_from_token("nope".to_string()), None);
+    }
+
+    #[test]
+    fn predicate_mode_usage_flags() {
+        assert!(predicate_mode_uses_age(PredicateMode::Age));
+        assert!(!predicate_mode_uses_nat(PredicateMode::Age));
+        assert!(predicate_mode_uses_nat(PredicateMode::Nat));
+        assert!(predicate_mode_uses_age(PredicateMode::And) && predicate_mode_uses_nat(PredicateMode::And));
+    }
+
+    #[test]
+    fn result_age_over_formats() {
+        assert_eq!(result_age_over(18), "age_over_18");
+    }
+
+    #[test]
+    fn iso_alpha2_lookup_matches_numeric_codes() {
+        assert_eq!(iso_alpha2_to_numeric("GR".to_string()), Some(300));
+        assert_eq!(iso_alpha2_to_numeric("cy".to_string()), Some(196)); // case-insensitive
+        assert_eq!(iso_alpha2_to_numeric("US".to_string()), Some(840)); // full ISO coverage (celes), not just EU
+        assert_eq!(iso_alpha2_to_numeric("ZZ".to_string()), None);
+    }
+
+    #[test]
+    fn contract_exposes_stable_identifiers() {
+        let c = zk_contract_v1();
+        assert_eq!(c.system_name, "stwo-euid-v1");
+        assert_eq!(c.pid_namespace, "eu.europa.ec.eudi.pid.1");
+        assert_eq!(c.param_min_age, "min_age");
+        assert_eq!(c.result_nat_in_set, "nationality_in_set");
     }
 }

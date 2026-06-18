@@ -34,6 +34,7 @@ thiserror = "2.0.18"
 # Deterministic CBOR: we build an explicitly-ordered `ciborium::value::Value`
 # map, so the same bytes come out on prove and verify sides.
 ciborium = "0.2.2"
+celes = "2.8.2"
 
 [[bin]]
 # Bundled binding generator. Run as:
