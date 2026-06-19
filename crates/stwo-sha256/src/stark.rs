@@ -376,8 +376,9 @@ pub fn native_digest(message: &[u8]) -> Digest {
 ///
 /// The standalone component does not cryptographically bind `digest` /
 /// `n_blocks` to the AIR — see [`Sha256Proof`]'s doc-comment for the
-/// binding plan. This type defines the *shape* the integration layer
-/// will eventually pin.
+/// binding approach. This type defines the *shape* the integration layer
+/// pins: the opt-in digest provider (`with_digest_provider`) yields the
+/// digest bytes on a shared LogUp channel for a consumer to bind against.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Sha256PublicInputs {
     pub digest: [u8; DIGEST_BYTES],
