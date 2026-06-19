@@ -1544,15 +1544,11 @@ mod tests {
         fake_glv.mix_into(&mut channel);
     }
 
-    /// RED TEST (Task 1, Step 3): expected to fail until `Task 2, Step 4`
-    /// adds `FakeGlvScalarHint::decompose` backed by the Garaga / CT-2001
-    /// `precompute_lattice` decomposer (Task 2, Step 2). Today this is a
-    /// missing-method compile error.
-    ///
-    /// Once the decomposer lands, this test asserts that a near-`n`
-    /// full-width scalar — far outside the trivial hint's 128-bit window —
-    /// yields a valid hint that satisfies both the algebraic equation
-    /// (`verify_scalar_equation`) and the three 128-bit bounds.
+    /// Asserts that a near-`n` full-width scalar — far outside the trivial
+    /// hint's 128-bit window — yields a valid hint via the Garaga / CT-2001
+    /// `precompute_lattice` decomposer (`FakeGlvScalarHint::decompose`) that
+    /// satisfies both the algebraic equation (`verify_scalar_equation`) and
+    /// the three 128-bit bounds.
     #[test]
     fn fake_glv_hint_supports_near_order_scalar() {
         use stwo_p256_utils::scalar_arithmetic::P256_ORDER;

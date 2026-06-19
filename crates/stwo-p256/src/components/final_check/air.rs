@@ -375,7 +375,8 @@ pub fn gen_final_check_air_base_trace(
             columns[2 + limb_index][row] = *limb;
         }
 
-        // r_x = R.x (witnessed; not yet bound to chain outputs).
+        // r_x = R.x (witnessed here; bound to the chain outputs in-AIR via
+        // FinalAddOutputRelation — see this module's header).
         let r_x_words = final_row.r_point.x.to_u256().to_le_u64s();
         let reduction = DigestReductionTrace::new(&r_x_words, &n_words)
             .expect("R.x reduces mod n: covered by FinalEcdsaCheckClaim::verify");

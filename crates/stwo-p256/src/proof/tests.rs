@@ -2623,10 +2623,10 @@ fn current_p256_proof_pipeline_reports_pending_full_proof_slots() {
     assert!(!pending.contains(&"FakeGlvEcChainRows"));
 }
 
-/// Close-out gate: every full-proof component slot is now AIR-proven (no slot is
-/// `Pending`). Enabled once the real-signature e2e
+/// Close-out gate: every full-proof component slot is AIR-proven (no slot is
+/// `Pending`). The real-signature e2e
 /// (`current_p256_monolithic_proves_real_p256_crate_signature`) proves green via
-/// the production arbitrary-fake-GLV path.
+/// the production arbitrary-fake-GLV path, so no slot remains pending.
 #[test]
 fn full_p256_signature_proof_has_no_pending_component_slots() {
     let pending = P256_PROOF_COMPONENT_SLOTS
