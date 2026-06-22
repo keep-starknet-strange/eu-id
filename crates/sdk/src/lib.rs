@@ -56,11 +56,17 @@ impl PredicateMode {
     }
 
     fn uses_age(self) -> bool {
-        matches!(self, PredicateMode::Age | PredicateMode::And | PredicateMode::Or)
+        matches!(
+            self,
+            PredicateMode::Age | PredicateMode::And | PredicateMode::Or
+        )
     }
 
     fn uses_nat(self) -> bool {
-        matches!(self, PredicateMode::Nat | PredicateMode::And | PredicateMode::Or)
+        matches!(
+            self,
+            PredicateMode::Nat | PredicateMode::And | PredicateMode::Or
+        )
     }
 }
 
@@ -186,7 +192,9 @@ pub fn nat_mode_token(mode: NatMode) -> String {
 /// Returns `None` for an unknown code.
 #[uniffi::export]
 pub fn iso_alpha2_to_numeric(alpha2: String) -> Option<u32> {
-    celes::Country::from_alpha2(alpha2).ok().map(|c| c.value as u32)
+    celes::Country::from_alpha2(alpha2)
+        .ok()
+        .map(|c| c.value as u32)
 }
 
 /// The PUBLIC statement `I` — the instance shared byte-identically between
@@ -436,7 +444,12 @@ mod tests {
 
     #[test]
     fn predicate_mode_token_round_trips() {
-        for mode in [PredicateMode::Age, PredicateMode::Nat, PredicateMode::And, PredicateMode::Or] {
+        for mode in [
+            PredicateMode::Age,
+            PredicateMode::Nat,
+            PredicateMode::And,
+            PredicateMode::Or,
+        ] {
             let token = predicate_mode_token(mode);
             assert_eq!(predicate_mode_from_token(token), Some(mode));
         }
@@ -448,7 +461,10 @@ mod tests {
         assert!(predicate_mode_uses_age(PredicateMode::Age));
         assert!(!predicate_mode_uses_nat(PredicateMode::Age));
         assert!(predicate_mode_uses_nat(PredicateMode::Nat));
-        assert!(predicate_mode_uses_age(PredicateMode::And) && predicate_mode_uses_nat(PredicateMode::And));
+        assert!(
+            predicate_mode_uses_age(PredicateMode::And)
+                && predicate_mode_uses_nat(PredicateMode::And)
+        );
     }
 
     #[test]
