@@ -23,3 +23,20 @@ pub use nat::types::{
     Proof as NatProof, PublicInput as NatPublicInput,
 };
 pub use predicate::{PredicateProver, PredicateVerifier};
+
+use strum::IntoEnumIterator;
+
+/// Every assigned ISO-3166-1 numeric code the nationality predicate accepts, in
+/// ascending order — the same domain [`nat::NationalityPredicate`] validates an
+/// acceptable set against.
+///
+/// This is the "universal accepted set": passing it to [`NatPublicInput::new`]
+/// yields a membership table every assigned nationality is trivially in, so it
+/// neutralizes the nationality predicate (any held code passes) without
+/// depending on the private held value — which is what makes it reconstructible
+/// by a verifier that never learns the nationality.
+pub fn all_nationality_codes() -> Vec<u32> {
+    nat::nationalities::Nationality::iter()
+        .map(|n| n as u32)
+        .collect()
+}

@@ -20,6 +20,14 @@ use ciborium::value::Value;
 
 uniffi::setup_scaffolding!();
 
+// The pure contract↔prover translation layer (§9.1). Its entry points
+// (`to_public_statement` / `to_policy` / `to_credential`) are wired into the
+// real `prove_identity` / `verify_identity` bodies in §9.2; until then they are
+// exercised only by their own unit tests, hence the documented `dead_code`
+// allow.
+#[allow(dead_code)]
+mod mapping;
+
 /// Which predicate(s) the statement asserts.
 ///
 /// `Age` / `Nat` activate a single predicate; `And` / `Or` combine both. The

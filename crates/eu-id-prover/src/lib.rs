@@ -84,6 +84,11 @@ pub use generator::{IssuerKey, PipelineWitness, Policy, SignedCredential};
 // party (e.g. the FFI benchmark harness) can build a `Policy` — and thus a
 // `PublicStatement` — without depending on `predicates` directly.
 pub use predicates::Date;
+// The universal accepted-nationality set (every assigned ISO-3166-1 numeric
+// code). A relying party that needs to neutralize the nationality predicate —
+// e.g. the SDK contract mapping for an age-only request — builds its accepted
+// set from this without depending on `predicates` directly.
+pub use predicates::all_nationality_codes;
 
 use serde::{Deserialize, Serialize};
 
