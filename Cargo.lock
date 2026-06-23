@@ -1605,9 +1605,11 @@ dependencies = [
 name = "sdk"
 version = "0.1.0"
 dependencies = [
+ "bincode",
  "celes",
  "ciborium",
  "eu-id-prover",
+ "serde",
  "thiserror",
  "uniffi",
 ]

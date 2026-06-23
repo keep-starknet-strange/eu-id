@@ -11,21 +11,40 @@
 //! (issuer key, signature, MSO, item bytes, …) and get back a proof or verdict.
 //! No Multipaz / verifier-core types leak in.
 //!
-//! ## Stub status
-//! `prove_identity` returns the canonical statement bytes as the "proof" (a
-//! deterministic round trip), and `verify_identity` returns `ok = true`. The
-//! real STWO proving swaps in behind this exact surface later — §6, §8 N1.
+//! ## What the proof binds (§9.2)
+//! `prove_identity` runs the real STWO combined prover (`eu_id_prover`) over the
+//! POC credential and returns a [`ProofEnvelope`]: the bincode-serialized STARK
+//! `Proof` **plus** the canonical-CBOR bytes of the full [`ZkPublicStatement`].
+//! The two layers bind complementary things:
+//!
+//! - **The STARK** binds `{ demo issuer key Q, age public input, nat public
+//!   input }` — i.e. the age threshold + reference date and the accepted
+//!   nationality set, plus (internally) that the signature is over `SHA-256(C)`
+//!   and that the DOB / nationality the predicates reason about are the signed
+//!   credential's bytes.
+//! - **The envelope** binds everything the STARK does *not* cover but the mdoc
+//!   contract carries: `nonce` (the `SessionTranscript` freshness / anti-replay
+//!   value), `doctype`, `namespace`, `spec_id`, and `version`. `verify_identity`
+//!   rejects (fail-closed `ok = false`) if the envelope's statement bytes drift
+//!   from the verifier's own [`encode_statement`].
+//!
+//! This preserves the stub's "the statement survived transport" guarantee on top
+//! of the real proof, so freshness / doctype are not silently dropped when the
+//! stub body is swapped out.
+//!
+//! The combined prover overflows a small default thread stack (`EXC_BAD_ACCESS`
+//! on device — see ROADMAP_E2E §7.2), so both entry points run the heavy work on
+//! a dedicated large-stack thread the SDK owns; the apps call the UniFFI fn
+//! synchronously and do no thread handling of their own.
 
 use ciborium::value::Value;
+use serde::{Deserialize, Serialize};
 
 uniffi::setup_scaffolding!();
 
-// The pure contract↔prover translation layer (§9.1). Its entry points
-// (`to_public_statement` / `to_policy` / `to_credential`) are wired into the
-// real `prove_identity` / `verify_identity` bodies in §9.2; until then they are
-// exercised only by their own unit tests, hence the documented `dead_code`
-// allow.
-#[allow(dead_code)]
+// The pure contract↔prover translation layer (§9.1): `to_public_statement` /
+// `to_policy` / `to_credential` build the prover's relying-party types from the
+// UniFFI contract types. Wired into the real prove/verify bodies below (§9.2).
 mod mapping;
 
 /// Which predicate(s) the statement asserts.
@@ -328,36 +347,147 @@ fn encode_statement(s: &ZkPublicStatement) -> Vec<u8> {
     out
 }
 
+/// The wire format `prove_identity` returns and `verify_identity` consumes: the
+/// real STARK proof alongside the full statement it does not itself bind.
+///
+/// `statement_bytes` is [`encode_statement`] of the *whole* [`ZkPublicStatement`]
+/// (incl. `nonce` / `doctype` / `namespace` / `spec_id` / `version`); the
+/// verifier rebuilds the same bytes from its own statement and rejects on any
+/// drift, so the mdoc freshness / anti-replay nonce is bound even though the
+/// STARK only covers `{ Q, age input, nat input }`.
+#[derive(Serialize, Deserialize)]
+struct ProofEnvelope {
+    /// Canonical CBOR of the full public statement (the envelope binding).
+    statement_bytes: Vec<u8>,
+    /// bincode of the `eu_id_prover::Proof` (the STARK binding).
+    stark_proof: Vec<u8>,
+}
+
+/// Stack size for the dedicated prover/verifier thread. The combined prover
+/// overflows the small default worker-thread stack with `EXC_BAD_ACCESS`; 32 MiB
+/// is the headroom the FFI harness established on device (ROADMAP_E2E §7.2).
+const PROVER_STACK_SIZE: usize = 32 * 1024 * 1024;
+
+/// Run `work` on a dedicated large-stack thread and join it, returning its
+/// result.
+///
+/// The closure owns everything it touches (the statement / witness are moved
+/// in), so the thread is `'static`. A panic inside `work` is caught by `join`
+/// and surfaced as [`ZkError::Prove`] — it never unwinds across the UniFFI
+/// boundary (requirement: the spawned thread must not unwind across FFI).
+fn on_large_stack<T, F>(work: F) -> Result<T, ZkError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, ZkError> + Send + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name("euid-prover".to_string())
+        .stack_size(PROVER_STACK_SIZE)
+        .spawn(work)
+        .map_err(|e| ZkError::Prove(format!("failed to spawn prover thread: {e}")))?;
+    match handle.join() {
+        Ok(result) => result,
+        Err(_) => Err(ZkError::Prove("prover thread panicked".to_string())),
+    }
+}
+
+/// Map a prover error to the FFI error. A false statement (under-age,
+/// nationality not in the accepted set) is rejected at witness generation, so it
+/// surfaces here as a failed *prove* — not a panic and not a verify failure.
+fn map_prover_error(e: eu_id_prover::Error) -> ZkError {
+    use eu_id_prover::Error::*;
+    match e {
+        // Witness-generation / proving failures — incl. the "no honest witness
+        // exists" cases (under-age DOB, code outside the accepted set, an
+        // invalid signature) that the prover rejects before it can prove.
+        P256Prepare(_) | AgePrepare(_) | NatPrepare(_) | SignatureInvalid | Prove(_) => {
+            ZkError::Prove(format!("{e:?}"))
+        }
+        // Verifier-side rejections (only reachable from the verify path).
+        P256InstanceMismatch | IssuerKeyMismatch | AgePolicyMismatch | NatPolicyMismatch
+        | Verify(_) => ZkError::Verify(format!("{e:?}")),
+    }
+}
+
 /// Prove the public statement holds for the given witness.
 ///
-/// STUB: returns the canonical statement bytes as the "proof" (deterministic
-/// round trip), so the stub verifier can confirm the claims survived transport
-/// — the agreed §9 choice.
+/// Maps the mdoc-shaped contract to the prover's `Credential` / `Policy` (§9.1),
+/// signs with the deterministic [`IssuerKey::demo`] (decision 1 — the real EU
+/// issuer key in `statement.issuer_key_x/y` is ignored this iteration), runs the
+/// real combined STWO prover, and returns a bincode-serialized [`ProofEnvelope`]
+/// (STARK proof + the full statement bytes). Runs on a large-stack thread.
 ///
-/// TODO(real): build `I`/`W` field elements via the shared map, run the STWO
-/// prover, return the serialized `StarkProof`.
+/// A false statement (e.g. under-age) cannot be proven and returns
+/// [`ZkError::Prove`]; a structurally invalid request returns
+/// [`ZkError::InvalidInput`].
 #[uniffi::export]
 pub fn prove_identity(
     statement: ZkPublicStatement,
-    _witness: ZkWitness,
+    witness: ZkWitness,
 ) -> Result<Vec<u8>, ZkError> {
-    Ok(encode_statement(&statement))
+    on_large_stack(move || {
+        let policy = mapping::to_policy(&statement)?;
+        let credential = mapping::to_credential(&witness, &policy)?;
+        let issuer = eu_id_prover::IssuerKey::demo();
+
+        let proof = eu_id_prover::prove_identity(&credential, &issuer, &policy)
+            .map_err(map_prover_error)?;
+        let stark_proof = bincode::serialize(&proof)
+            .map_err(|e| ZkError::Prove(format!("failed to serialize proof: {e}")))?;
+
+        let envelope = ProofEnvelope {
+            // The full statement (incl. nonce / doctype / …) — bound by the
+            // envelope, not the STARK.
+            statement_bytes: encode_statement(&statement),
+            stark_proof,
+        };
+        bincode::serialize(&envelope)
+            .map_err(|e| ZkError::Prove(format!("failed to serialize proof envelope: {e}")))
+    })
 }
 
 /// Verify a proof against the public statement.
 ///
-/// STUB: `ok` is true iff the proof bytes equal this statement's canonical
-/// encoding — i.e. the round trip from [`prove_identity`] survived transport. A
-/// caller (e.g. the wallet) can pass deliberately mismatched bytes to exercise
-/// the rejection path. TODO(real): re-derive `I` field elements via the shared
-/// map and verify the `StarkProof`.
+/// Deserializes the [`ProofEnvelope`], checks its statement bytes match the
+/// verifier's own [`encode_statement`] (the full-statement / anti-replay
+/// binding), rebuilds the [`PublicStatement`] via §9.1, and runs the real STARK
+/// verifier. `ok` is true iff every layer accepts; any rejection — envelope
+/// drift, a malformed proof, or a broken STARK balance — is fail-closed
+/// `ok = false`. A structurally invalid *request* returns
+/// [`ZkError::InvalidInput`]. Runs on a large-stack thread.
 #[uniffi::export]
 pub fn verify_identity(
     statement: ZkPublicStatement,
     proof: Vec<u8>,
 ) -> Result<ZkVerifyResult, ZkError> {
-    Ok(ZkVerifyResult {
-        ok: proof == encode_statement(&statement),
+    on_large_stack(move || {
+        // A malformed envelope is a rejected proof, not a caller error.
+        let envelope: ProofEnvelope = match bincode::deserialize(&proof) {
+            Ok(envelope) => envelope,
+            Err(_) => return Ok(ZkVerifyResult { ok: false }),
+        };
+
+        // Full-statement binding: the envelope must carry the exact statement the
+        // verifier expects — this is where `nonce` / `doctype` / `namespace` /
+        // `spec_id` / `version` (none of which the STARK covers) are enforced.
+        if envelope.statement_bytes != encode_statement(&statement) {
+            return Ok(ZkVerifyResult { ok: false });
+        }
+
+        // The verifier rebuilds the statement from its own request (decision 1:
+        // demo Q, never the supplied issuer key). A structurally invalid request
+        // is a caller error; a well-formed-but-wrong one falls through to the
+        // STARK check below.
+        let public_statement = mapping::to_public_statement(&statement)?;
+
+        let stark_proof: eu_id_prover::Proof = match bincode::deserialize(&envelope.stark_proof) {
+            Ok(stark_proof) => stark_proof,
+            Err(_) => return Ok(ZkVerifyResult { ok: false }),
+        };
+
+        Ok(ZkVerifyResult {
+            ok: eu_id_prover::verify_identity(&stark_proof, &public_statement).is_ok(),
+        })
     })
 }
 
@@ -396,6 +526,34 @@ mod tests {
         }
     }
 
+    /// An honest statement: today 2020-01-01, age threshold 18, accepted set
+    /// includes the held nationality — provable over [`honest_witness`].
+    fn honest_statement(mode: PredicateMode) -> ZkPublicStatement {
+        ZkPublicStatement {
+            spec_id: "stwo-euid-pid-v1".to_string(),
+            version: 1,
+            doctype: "eu.europa.ec.eudi.pid.1".to_string(),
+            namespace: "eu.europa.ec.eudi.pid.1".to_string(),
+            issuer_key_x: vec![0x11; 32],
+            issuer_key_y: vec![0x22; 32],
+            today_epoch_day: 18262, // 2020-01-01
+            nonce: vec![0x01, 0x02, 0x03, 0x04],
+            predicate_mode: mode,
+            age_threshold_years: Some(18),
+            accepted_numeric_countries: Some(vec![276, 250]), // DE, FR
+            nat_mode: NatMode::Any,
+        }
+    }
+
+    /// Born 1990-07-15 (well over 18 on 2020-01-01), holds DE — in the accepted
+    /// set above.
+    fn honest_witness() -> ZkWitness {
+        let mut w = sample_witness();
+        w.birth_date = "1990-07-15".to_string();
+        w.nationalities = vec![276];
+        w
+    }
+
     #[test]
     fn encode_statement_is_deterministic() {
         let s = sample_statement();
@@ -403,39 +561,112 @@ mod tests {
     }
 
     #[test]
-    fn stub_prove_returns_canonical_statement_bytes() {
+    fn verify_rejects_a_malformed_proof() {
+        // Garbage bytes don't deserialize to an envelope -> fail-closed, no error.
         let s = sample_statement();
-        let proof = prove_identity(s.clone(), sample_witness()).unwrap();
-        assert_eq!(proof, encode_statement(&s));
-    }
-
-    #[test]
-    fn stub_verify_accepts_a_matching_proof() {
-        // The §9 round trip: prove emits statement bytes, the stub verifier
-        // accepts — the end-to-end shape both apps exercise.
-        let s = sample_statement();
-        let proof = prove_identity(s.clone(), sample_witness()).unwrap();
-        let result = verify_identity(s, proof).unwrap();
-        assert!(result.ok);
-    }
-
-    #[test]
-    fn stub_verify_rejects_a_mismatched_proof() {
-        // Lets the wallet fake a bad proof to exercise the rejection path.
-        let s = sample_statement();
-        let result = verify_identity(s, b"not the statement".to_vec()).unwrap();
+        let result = verify_identity(s, b"not a proof envelope".to_vec()).unwrap();
         assert!(!result.ok);
     }
 
     #[test]
-    fn stub_verify_rejects_proof_for_a_different_statement() {
-        // A proof produced for statement A must not verify against statement B.
+    fn verify_rejects_statement_envelope_drift() {
+        // The envelope binds the *full* statement (incl. nonce). An envelope
+        // built for statement A is rejected against statement B before the STARK
+        // is even deserialized — this is the anti-replay / doctype binding, and
+        // it needs no real proof to exercise.
         let a = sample_statement();
         let mut b = sample_statement();
+        b.nonce = vec![0xff; 8]; // a fresh session -> different statement bytes
+
+        let envelope = bincode::serialize(&ProofEnvelope {
+            statement_bytes: encode_statement(&a),
+            stark_proof: b"opaque".to_vec(),
+        })
+        .unwrap();
+        assert!(!verify_identity(b, envelope).unwrap().ok);
+    }
+
+    #[test]
+    fn verify_rejects_matching_statement_but_corrupt_stark_proof() {
+        // Envelope statement matches, but the inner STARK proof is junk -> the
+        // STARK deserialization fails and the result is fail-closed.
+        let s = sample_statement();
+        let envelope = bincode::serialize(&ProofEnvelope {
+            statement_bytes: encode_statement(&s),
+            stark_proof: b"not a stark proof".to_vec(),
+        })
+        .unwrap();
+        assert!(!verify_identity(s, envelope).unwrap().ok);
+    }
+
+    // ---- real prover round trips (slow; `cargo test -p sdk --release -- --ignored`) ----
+
+    #[test]
+    #[ignore = "runs the real combined STWO prover (~seconds); use --release --ignored"]
+    fn real_round_trip_verifies() {
+        let s = honest_statement(PredicateMode::And);
+        let proof = prove_identity(s.clone(), honest_witness()).unwrap();
+        assert!(verify_identity(s, proof).unwrap().ok);
+    }
+
+    #[test]
+    #[ignore = "runs the real combined STWO prover (~seconds); use --release --ignored"]
+    fn real_proof_for_statement_a_rejected_against_b() {
+        // A genuine proof for A (threshold 18) must not verify against B
+        // (threshold 21) — the policy drives both the envelope bytes and the
+        // STARK's age public input, so both layers reject.
+        let a = honest_statement(PredicateMode::And);
+        let mut b = honest_statement(PredicateMode::And);
         b.age_threshold_years = Some(21);
 
-        let proof_for_a = prove_identity(a, sample_witness()).unwrap();
+        let proof_for_a = prove_identity(a, honest_witness()).unwrap();
         assert!(!verify_identity(b, proof_for_a).unwrap().ok);
+    }
+
+    #[test]
+    #[ignore = "runs the real combined STWO prover (~seconds); use --release --ignored"]
+    fn real_proof_rejected_when_only_the_nonce_differs() {
+        // The purest anti-replay test: A and B share an identical policy, so the
+        // STARK alone would accept the proof against either. They differ ONLY in
+        // the freshness `nonce` — which the STARK does not bind. The envelope's
+        // full-statement binding is what rejects the replay.
+        let a = honest_statement(PredicateMode::And);
+        let mut b = honest_statement(PredicateMode::And);
+        b.nonce = vec![0xde, 0xad, 0xbe, 0xef]; // a different session
+
+        // Sanity: the only difference is the nonce, so the derived policy (hence
+        // everything the STARK binds) is identical — without the envelope, B
+        // would accept A's proof.
+        assert_eq!(
+            mapping::to_policy(&a).unwrap(),
+            mapping::to_policy(&b).unwrap()
+        );
+
+        let proof_for_a = prove_identity(a.clone(), honest_witness()).unwrap();
+        assert!(verify_identity(a, proof_for_a.clone()).unwrap().ok);
+        assert!(!verify_identity(b, proof_for_a).unwrap().ok);
+    }
+
+    #[test]
+    #[ignore = "runs the real combined STWO prover (~seconds); use --release --ignored"]
+    fn real_each_predicate_mode_round_trips() {
+        for mode in [PredicateMode::Age, PredicateMode::Nat, PredicateMode::And] {
+            let s = honest_statement(mode);
+            let proof = prove_identity(s.clone(), honest_witness()).unwrap();
+            assert!(verify_identity(s, proof).unwrap().ok, "mode {mode:?}");
+        }
+    }
+
+    #[test]
+    #[ignore = "runs the real combined STWO prover (~seconds); use --release --ignored"]
+    fn real_under_age_is_an_unprovable_statement() {
+        // Born 2015 -> not 18 on 2020-01-01; the age module rejects the witness,
+        // so prove fails (a false statement, surfaced as ZkError::Prove) rather
+        // than producing a proof that would fail to verify.
+        let s = honest_statement(PredicateMode::Age);
+        let mut w = honest_witness();
+        w.birth_date = "2015-07-15".to_string();
+        assert!(matches!(prove_identity(s, w), Err(ZkError::Prove(_))));
     }
 
     #[test]

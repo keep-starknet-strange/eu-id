@@ -29,11 +29,12 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 bindgen = ["uniffi/cli"]
 
 [dependencies]
-# The prover's relying-party types are the *target* of the contract mapping
-# (§9.1): `Credential` / `Policy` / `PublicStatement` / `Date` / `IssuerKey` /
-# `AffinePoint` and the universal-nationality-set helper. The mapping is
-# proving-free — it constructs these types but never calls prove/verify (that
-# swap is §9.2) — so this dependency carries types only for now.
+# The prover's relying-party types and entry points. The §9.1 contract mapping
+# constructs `Credential` / `Policy` / `PublicStatement` / `Date` / `IssuerKey` /
+# `AffinePoint` from the UniFFI types; §9.2 wires the real `prove_identity` /
+# `verify_identity` in behind the stub surface, so this is now a proving
+# dependency (it drags the whole STWO stack into the cdylib — that footprint is
+# 9.3's concern).
 eu-id-prover = { path = "../eu-id-prover" }
 uniffi = { version = "0.29" }
 thiserror = "2.0.18"
@@ -41,6 +42,10 @@ thiserror = "2.0.18"
 # map, so the same bytes come out on prove and verify sides.
 ciborium = "0.2.2"
 celes = "2.8.2"
+# The combined `Proof` is serde-serializable; bincode is the wire format the FFI
+# bench + `eu-id` CLI already use, so the SDK matches it for the proof envelope.
+serde = { workspace = true }
+bincode = "1"
 
 [[bin]]
 # Bundled binding generator. Run as:
