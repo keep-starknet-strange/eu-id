@@ -48,7 +48,7 @@ impl ScalarModMulInteractionTraces {
                 .map(|row| canonical_fractions(rows.mul_id, row, external_limb_links)),
             canonical_padding_fractions(rows.mul_id),
             relations,
-            false,
+            true,
         );
         let (ab_chunks, ab_claim) = gen_family_interaction_trace(
             super::columns::padded_log_size(rows.ab_chunks.len()),
@@ -57,7 +57,7 @@ impl ScalarModMulInteractionTraces {
                 .map(|row| ab_chunk_fractions(rows.mul_id, row)),
             product_chunk_padding_fractions(rows.mul_id, SIDE_AB),
             relations,
-            false,
+            true,
         );
         let (qn_chunks, qn_claim) = gen_family_interaction_trace(
             super::columns::padded_log_size(rows.qn_chunks.len()),
@@ -66,7 +66,7 @@ impl ScalarModMulInteractionTraces {
                 .map(|row| qn_chunk_fractions(rows.mul_id, row)),
             qn_product_chunk_padding_fractions(rows.mul_id),
             relations,
-            false,
+            true,
         );
         let (accumulators, accumulator_claim) = gen_family_interaction_trace(
             super::columns::padded_log_size(rows.accumulators.len()),
@@ -75,7 +75,7 @@ impl ScalarModMulInteractionTraces {
                 .map(|row| accumulator_fractions(rows.mul_id, row)),
             accumulator_padding_fractions(rows.mul_id),
             relations,
-            false,
+            true,
         );
         let (reduction_digits, reduction_claim) = gen_family_interaction_trace(
             super::columns::padded_log_size(rows.reduction_digits.len()),
@@ -84,7 +84,7 @@ impl ScalarModMulInteractionTraces {
                 .map(|row| reduction_fractions(rows.mul_id, row)),
             reduction_padding_fractions(rows.mul_id),
             relations,
-            false,
+            true,
         );
 
         (

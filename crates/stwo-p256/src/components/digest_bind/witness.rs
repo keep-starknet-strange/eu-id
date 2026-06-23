@@ -4,7 +4,7 @@
 //! carries[31])` (see [`super`] `COL_*`). The interaction trace replays the
 //! bridge's LogUp consumes — range8 bytes, range13 carries, the `(sig_id, z)`
 //! binding, then the optional cross-module digest — in the **same order** the
-//! eval's `finalize_logup` emits them, one fraction per column (degree 2).
+//! eval emits them, paired into LogUp columns.
 
 use num_traits::{One, Zero};
 use stwo::core::fields::m31::M31;
@@ -114,8 +114,8 @@ pub struct DigestBindRelations<'a> {
 
 /// Build the bridge's LogUp interaction trace and its claimed sum. Lookups are
 /// emitted in the canonical order (range8 bytes, range13 carries, `(sig_id, z)`,
-/// then the optional digest), one fraction per column (batch 1), matching the
-/// eval's `finalize_logup`.
+/// then the optional digest), paired by consecutive entries to match the
+/// eval's `finalize_logup_in_pairs`.
 pub fn gen_interaction_trace(
     base: &[ColumnEval],
     relations: &DigestBindRelations<'_>,
@@ -176,11 +176,8 @@ pub fn gen_interaction_trace(
         entries.push((numerators.clone(), denoms));
     }
 
-    // One fraction per column (batch 1), matching the eval's `finalize_logup`.
-    // Solo columns keep every LogUp constraint degree 2, so the module never
-    // needs the higher-degree lifting path.
     let mut logup = LogupTraceGenerator::new(log_size);
-    write_batched_logup_columns(&mut logup, &entries, 1);
+    write_batched_logup_columns(&mut logup, &entries, 2);
     let (trace, claimed_sum) = logup.finalize_last();
     (trace, claimed_sum)
 }

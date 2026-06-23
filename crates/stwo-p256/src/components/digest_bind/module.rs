@@ -98,10 +98,10 @@ impl FrameworkEval for NamespacedRangeEval {
 type NamespacedRangeComponent = FrameworkComponent<NamespacedRangeEval>;
 
 /// Number of base-field interaction columns produced by `n_lookups` lookups
-/// under solo batching (one fraction per column, matching `finalize_logup`):
-/// `n` secure columns × `SECURE_EXTENSION_DEGREE`.
+/// under paired batching (`finalize_logup_in_pairs`): `ceil(n / 2)` secure
+/// columns × `SECURE_EXTENSION_DEGREE`.
 fn interaction_base_cols(n_lookups: usize) -> usize {
-    n_lookups * EXT
+    n_lookups.div_ceil(2) * EXT
 }
 
 /// The three claimed sums the bridge module commits, in component (commit) order.

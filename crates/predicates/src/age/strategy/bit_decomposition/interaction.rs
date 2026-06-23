@@ -13,6 +13,19 @@ use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::TreeBuilder;
 use stwo_constraint_framework::{LogupTraceGenerator, Relation};
 
+fn write_pair(
+    logup: &mut LogupTraceGenerator,
+    row: usize,
+    first: (PackedQM31, PackedQM31),
+    second: (PackedQM31, PackedQM31),
+) {
+    let mut col_gen = logup.new_col();
+    let (n0, d0) = first;
+    let (n1, d1) = second;
+    col_gen.write_frac(row, n0 * d1 + n1 * d0, d0 * d1);
+    col_gen.finalize_col();
+}
+
 pub struct InteractionTraces {
     pub age_interaction: Trace,
     pub cal_interaction: Trace,
@@ -35,27 +48,24 @@ impl InteractionTraces {
         // LOG_SIZE == LOG_N_LANES, so there is exactly 1 packed row.
         let mut logup_gen = LogupTraceGenerator::new(WitnessData::log_size());
 
-        let mut col_gen = logup_gen.new_col();
-        col_gen.write_frac(
+        write_pair(
+            &mut logup_gen,
             0,
-            PackedQM31::one(),
-            lookup_elements.calendar.combine(&[
-                PackedM31::broadcast(M31::from_u32_unchecked(witness_data.table_index)),
-                PackedM31::broadcast(M31::from_u32_unchecked(witness_data.dob_max_days)),
-            ]),
+            (
+                PackedQM31::one(),
+                lookup_elements.calendar.combine(&[
+                    PackedM31::broadcast(M31::from_u32_unchecked(witness_data.table_index)),
+                    PackedM31::broadcast(M31::from_u32_unchecked(witness_data.dob_max_days)),
+                ]),
+            ),
+            (
+                PackedQM31::one(),
+                lookup_elements.valid_day.combine(&[
+                    PackedM31::broadcast(M31::from_u32_unchecked(witness_data.dob_max_days)),
+                    PackedM31::broadcast(M31::from_u32_unchecked(witness_data.dob_day)),
+                ]),
+            ),
         );
-        col_gen.finalize_col();
-
-        let mut col_gen = logup_gen.new_col();
-        col_gen.write_frac(
-            0,
-            PackedQM31::one(),
-            lookup_elements.valid_day.combine(&[
-                PackedM31::broadcast(M31::from_u32_unchecked(witness_data.dob_max_days)),
-                PackedM31::broadcast(M31::from_u32_unchecked(witness_data.dob_day)),
-            ]),
-        );
-        col_gen.finalize_col();
 
         let (age_interaction, age_claimed_sum) = logup_gen.finalize_last();
 

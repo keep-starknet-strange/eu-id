@@ -76,7 +76,7 @@ impl FrameworkEval for NationalityEval {
             }
         }
 
-        eval.finalize_logup();
+        eval.finalize_logup_in_pairs();
         eval
     }
 }

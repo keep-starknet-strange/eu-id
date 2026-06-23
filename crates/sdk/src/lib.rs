@@ -690,6 +690,24 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "runs the real combined STWO prover (~seconds); prints FFI proof sizes"]
+    fn real_round_trip_reports_ffi_proof_size() {
+        let s = honest_statement(PredicateMode::And);
+        let proof = prove_identity(s.clone(), honest_witness()).unwrap();
+        let envelope: ProofEnvelope = bincode::deserialize(&proof).unwrap();
+        let raw_stark_proof = decompress_stark_proof_from_ffi(&envelope.stark_proof).unwrap();
+
+        println!("ffi_envelope_bytes={}", proof.len());
+        println!(
+            "compressed_stark_payload_bytes={}",
+            envelope.stark_proof.len()
+        );
+        println!("raw_stark_bincode_bytes={}", raw_stark_proof.len());
+
+        assert!(verify_identity(s, proof).unwrap().ok);
+    }
+
+    #[test]
     #[ignore = "runs the real combined STWO prover (~seconds); use --release --ignored"]
     fn real_proof_for_statement_a_rejected_against_b() {
         // A genuine proof for A (threshold 18) must not verify against B

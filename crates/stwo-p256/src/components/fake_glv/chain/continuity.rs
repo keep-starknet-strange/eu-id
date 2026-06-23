@@ -17,6 +17,7 @@ use stwo_constraint_framework::{
     RelationEntry, TraceLocationAllocator,
 };
 
+use crate::range_checks::write_batched_logup_columns;
 use crate::scalar::fake_glv_chain::{FakeGlvChainClaim, FakeGlvChainError, FakeGlvChainRow};
 use crate::scalar::prepared_table::{
     prepared_table_ec_point_values, PreparedAffinePoint, PreparedTableEcEvalPoint,
@@ -203,7 +204,7 @@ impl FrameworkEval for FakeGlvChainContinuityEval {
             E::EF::from(has_prev),
             &consumer_values,
         ));
-        eval.finalize_logup();
+        eval.finalize_logup_in_pairs();
         eval
     }
 }
@@ -265,25 +266,26 @@ pub(crate) fn gen_fake_glv_chain_continuity_interaction_trace(
 ) {
     assert_eq!(base.len(), FAKE_GLV_CHAIN_CONTINUITY_TRACE_COLUMNS);
     let log_size = base[0].domain.log_size();
+    let vec_rows = 1 << (log_size - LOG_N_LANES);
+    let mut provider_numerators = Vec::with_capacity(vec_rows);
+    let mut provider_denominators = Vec::with_capacity(vec_rows);
+    let mut consumer_numerators = Vec::with_capacity(vec_rows);
+    let mut consumer_denominators = Vec::with_capacity(vec_rows);
+    for vec_row in 0..vec_rows {
+        let provider_values = fake_glv_chain_provider_packed_relation_values(base, vec_row);
+        provider_numerators.push(-PackedQM31::from(base[3].data[vec_row]));
+        provider_denominators.push(relation.combine(&provider_values));
+        let consumer_values = fake_glv_chain_consumer_packed_relation_values(base, vec_row);
+        consumer_numerators.push(PackedQM31::from(base[2].data[vec_row]));
+        consumer_denominators.push(relation.combine(&consumer_values));
+    }
+    let entries = [
+        (provider_numerators, provider_denominators),
+        (consumer_numerators, consumer_denominators),
+    ];
+
     let mut logup = LogupTraceGenerator::new(log_size);
-    let mut provider_col = logup.new_col();
-    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
-        let values = fake_glv_chain_provider_packed_relation_values(base, vec_row);
-        let numerator = -PackedQM31::from(base[3].data[vec_row]);
-        let denominator: PackedQM31 = relation.combine(&values);
-        provider_col.write_frac(vec_row, numerator, denominator);
-    }
-    provider_col.finalize_col();
-
-    let mut consumer_col = logup.new_col();
-    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
-        let values = fake_glv_chain_consumer_packed_relation_values(base, vec_row);
-        let numerator = PackedQM31::from(base[2].data[vec_row]);
-        let denominator: PackedQM31 = relation.combine(&values);
-        consumer_col.write_frac(vec_row, numerator, denominator);
-    }
-    consumer_col.finalize_col();
-
+    write_batched_logup_columns(&mut logup, &entries, 2);
     let (trace, claimed_sum) = logup.finalize_last();
     (
         trace,

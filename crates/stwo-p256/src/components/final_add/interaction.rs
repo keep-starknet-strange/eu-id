@@ -163,14 +163,20 @@ fn gen_check_interaction_trace(
     storage[active_row] = fractions;
 
     let mut logup = LogupTraceGenerator::new(log_size);
-    for column in 0..fraction_count {
+    for column in (0..fraction_count).step_by(2) {
         let mut col = logup.new_col();
         for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
             let mut numerators = [secure_zero(); N_LANES];
             let mut denominators = [secure_one(); N_LANES];
             for lane in 0..N_LANES {
                 let row = vec_row * N_LANES + lane;
-                let (numerator, denominator) = storage[row][column];
+                let (mut numerator, mut denominator) = storage[row][column];
+                if let Some((next_numerator, next_denominator)) =
+                    storage[row].get(column + 1).copied()
+                {
+                    numerator = numerator * next_denominator + next_numerator * denominator;
+                    denominator *= next_denominator;
+                }
                 numerators[lane] = numerator;
                 denominators[lane] = denominator;
             }

@@ -24,6 +24,7 @@ use stwo_p256_utils::constants::N_LIMBS;
 
 use crate::constants::{P256_GX, P256_GY};
 use crate::limbs::{P256BigInt, P256M31BigInt};
+use crate::range_checks::write_batched_logup_columns;
 use crate::scalar::scalar_mod_mul::columns::{m31_column_eval, padded_log_size, M31ColumnEval};
 use crate::types::U256;
 
@@ -262,7 +263,7 @@ impl FrameworkEval for CertScalarInputAirEval {
             cert1_inv,
         );
 
-        eval.finalize_logup();
+        eval.finalize_logup_in_pairs();
         eval
     }
 }
@@ -493,35 +494,27 @@ pub(crate) fn gen_cert_scalar_input_air_interaction_trace(
 ) -> (ColumnVec<M31ColumnEval>, CertScalarInputAirInteractionClaim) {
     assert_eq!(base.len(), CERT_SCALAR_INPUT_TRACE_COLUMNS);
     let log_size = base[0].domain.log_size();
-    let mut logup = LogupTraceGenerator::new(log_size);
-    let mut col = logup.new_col();
-    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+    let vec_rows = 1 << (log_size - LOG_N_LANES);
+    let mut entries = Vec::new();
+    append_packed_entry(&mut entries, vec_rows, |vec_row| {
         let values = scalar_setup_output_packed_values_from_cert_base(base, vec_row);
-        col.write_frac(
-            vec_row,
+        (
             PackedQM31::from(base[0].data[vec_row]),
             setup_relation.combine(&values),
-        );
-    }
-    col.finalize_col();
-    let mut col = logup.new_col();
-    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
-        col.write_frac(
-            vec_row,
+        )
+    });
+    append_packed_entry(&mut entries, vec_rows, |vec_row| {
+        (
             -PackedQM31::from(base[0].data[vec_row]),
             cert_relation.combine(&cert_packed_values_from_base(base, vec_row, cert0_col())),
-        );
-    }
-    col.finalize_col();
-    let mut col = logup.new_col();
-    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
-        col.write_frac(
-            vec_row,
+        )
+    });
+    append_packed_entry(&mut entries, vec_rows, |vec_row| {
+        (
             -PackedQM31::from(base[0].data[vec_row]),
             cert_relation.combine(&cert_packed_values_from_base(base, vec_row, cert1_col())),
-        );
-    }
-    col.finalize_col();
+        )
+    });
     // CertBase providers (yield `-count·cert_active`), one column per cert. Only
     // emitted when the prepared-table consumer exists (monolithic STARK), in
     // lockstep with `CertScalarInputAirEval`'s two extra `add_to_relation` calls.
@@ -531,22 +524,38 @@ pub(crate) fn gen_cert_scalar_input_air_interaction_trace(
             (cert1_col(), CERT1_PREPARED_P_CELL_COUNT),
         ] {
             let count_packed = PackedM31::broadcast(M31::from_u32_unchecked(count));
-            let mut col = logup.new_col();
-            for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+            append_packed_entry(&mut entries, vec_rows, |vec_row| {
                 let cert_active = base[cert_col + CERT_ACTIVE_ROW_OFFSET].data[vec_row];
                 let numerator = -PackedQM31::from(count_packed * cert_active);
-                col.write_frac(
-                    vec_row,
+                (
                     numerator,
                     cert_base_relation
                         .combine(&cert_base_packed_values_from_base(base, vec_row, cert_col)),
-                );
-            }
-            col.finalize_col();
+                )
+            });
         }
     }
+    let mut logup = LogupTraceGenerator::new(log_size);
+    write_batched_logup_columns(&mut logup, &entries, 2);
     let (trace, claimed_sum) = logup.finalize_last();
     (trace, CertScalarInputAirInteractionClaim { claimed_sum })
+}
+
+type LogupEntry = (Vec<PackedQM31>, Vec<PackedQM31>);
+
+fn append_packed_entry(
+    entries: &mut Vec<LogupEntry>,
+    vec_rows: usize,
+    fraction: impl Fn(usize) -> (PackedQM31, PackedQM31),
+) {
+    let mut numerators = Vec::with_capacity(vec_rows);
+    let mut denominators = Vec::with_capacity(vec_rows);
+    for vec_row in 0..vec_rows {
+        let (numerator, denominator) = fraction(vec_row);
+        numerators.push(numerator);
+        denominators.push(denominator);
+    }
+    entries.push((numerators, denominators));
 }
 
 #[cfg(test)]

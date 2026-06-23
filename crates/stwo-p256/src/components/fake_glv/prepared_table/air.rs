@@ -154,7 +154,7 @@ impl FrameworkEval for PreparedTableEcRowEval {
             );
         }
 
-        eval.finalize_logup();
+        eval.finalize_logup_in_pairs();
         eval
     }
 }

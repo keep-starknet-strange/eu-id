@@ -41,14 +41,17 @@ fn prover_component_refs(c: &NatComponents) -> Vec<&dyn ComponentProver<SimdBack
 /// input and whether the nationality binding is wired (`bind_nat`), never
 /// on the witness values. Binding adds three trace columns (the `bind_active`
 /// selector + the two nationality bytes) and two LogUp fractions (the
-/// nationality-byte requires) to the nationality component.
+/// nationality-byte requires) to the nationality component. The nationality
+/// component pairs consecutive LogUp fractions.
 fn layout(public: &PublicInput, bind_nat: bool) -> TreeLayout {
     let table_log_size = public.log_size();
     let nat_log_size = WitnessData::log_size();
     // The nationality component: 1 (+3 binding) trace columns and 1 (+2 binding)
-    // solo LogUp fractions, each fraction four M31 (`SECURE_EXTENSION_DEGREE`).
+    // logical LogUp fractions, paired into secure columns, each four M31
+    // (`SECURE_EXTENSION_DEGREE`).
     let nat_trace_cols = if bind_nat { 4 } else { 1 };
-    let nat_interaction_cols = if bind_nat { 12 } else { 4 };
+    let logical_nat_lookups = if bind_nat { 3usize } else { 1 };
+    let nat_interaction_cols = logical_nat_lookups.div_ceil(2) * 4;
     TreeLayout {
         // Tree 0: the acceptable-nationality table (1 column).
         preprocessed: vec![table_log_size],

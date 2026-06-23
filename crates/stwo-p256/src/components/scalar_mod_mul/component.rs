@@ -99,7 +99,7 @@ impl FrameworkEval for CanonicalScalarEval {
             ));
         }
 
-        eval.finalize_logup();
+        eval.finalize_logup_in_pairs();
         eval
     }
 }
@@ -198,7 +198,7 @@ impl FrameworkEval for AbProductChunkEval {
             digits,
         );
         if SCALAR_MOD_MUL_ENABLE_AB_RELATIONS {
-            eval.finalize_logup();
+            eval.finalize_logup_in_pairs();
         }
         eval
     }
@@ -289,7 +289,7 @@ impl FrameworkEval for QnProductChunkEval {
             digits,
         );
         if SCALAR_MOD_MUL_ENABLE_QN_RELATIONS {
-            eval.finalize_logup();
+            eval.finalize_logup_in_pairs();
         }
         eval
     }
@@ -367,7 +367,7 @@ impl FrameworkEval for ProductDigitAccumulatorEval {
                 digit,
                 product_digit,
             );
-            eval.finalize_logup();
+            eval.finalize_logup_in_pairs();
         }
         eval
     }
@@ -480,7 +480,7 @@ impl FrameworkEval for ScalarReductionDigitEval {
                 digit,
                 carry,
             );
-            eval.finalize_logup();
+            eval.finalize_logup_in_pairs();
         }
         eval
     }

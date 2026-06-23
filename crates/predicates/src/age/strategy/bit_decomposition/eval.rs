@@ -80,7 +80,7 @@ impl FrameworkEval for BitDecompositionEval {
             &[max_days, dob_day],
         ));
 
-        eval.finalize_logup();
+        eval.finalize_logup_in_pairs();
         eval
     }
 }

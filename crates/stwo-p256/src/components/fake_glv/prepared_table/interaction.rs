@@ -26,7 +26,7 @@ use crate::projective_air::{
     ProjectiveRcbMulResultRelation, PROJECTIVE_RCB_MUL_ROLE_LHS, PROJECTIVE_RCB_MUL_ROLE_RESULT,
     PROJECTIVE_RCB_MUL_ROLE_RHS, PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS,
 };
-use crate::range_checks::RangeCheckInteractionClaim;
+use crate::range_checks::{write_batched_logup_columns, RangeCheckInteractionClaim};
 use crate::types::U256;
 
 use crate::scalar::scalar_mod_mul::columns::M31ColumnEval;
@@ -188,27 +188,23 @@ pub(crate) fn gen_prepared_table_ec_row_pinned_interaction_trace(
     assert_eq!(base.len(), PREPARED_TABLE_EC_ROW_TRACE_COLUMNS);
     let log_size = base[0].domain.log_size();
     let n_vec_rows = 1 << (log_size - LOG_N_LANES);
-    let mut logup = LogupTraceGenerator::new(log_size);
+    let mut entries = Vec::new();
 
-    // Column 0: the existing PreparedTableEcRowRelation yield (-active).
-    let mut col = logup.new_col();
-    for vec_row in 0..n_vec_rows {
+    // Entry 0: the existing PreparedTableEcRowRelation yield (-active).
+    append_packed_entry(&mut entries, n_vec_rows, |vec_row| {
         let values = prepared_table_ec_row_packed_relation_values(base, vec_row);
-        col.write_frac(
-            vec_row,
+        (
             -PackedQM31::from(base[0].data[vec_row]),
             relation.combine(&values),
-        );
-    }
-    col.finalize_col();
+        )
+    });
 
     let three_g_x = P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_3GX));
     let three_g_y = P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_3GY));
 
-    // Columns 1..=30: the pinning schedule, one fraction per entry.
+    // Entries 1..=30: the pinning schedule, one fraction per entry.
     for entry in PIN_SCHEDULE {
-        let mut col = logup.new_col();
-        for vec_row in 0..n_vec_rows {
+        append_packed_entry(&mut entries, n_vec_rows, |vec_row| {
             let sig = base[PREPARED_TABLE_EC_COL_SIG_ID].data[vec_row];
             let cert = base[PREPARED_TABLE_EC_COL_CERT_ID].data[vec_row];
             let active = base[0].data[vec_row];
@@ -242,17 +238,15 @@ pub(crate) fn gen_prepared_table_ec_row_pinned_interaction_trace(
                     canonical.combine(&tuple)
                 }
             };
-            col.write_frac(vec_row, numerator, denominator);
-        }
-        col.finalize_col();
+            (numerator, denominator)
+        });
     }
 
-    // Optional FinalCheckHint column: yield `R_i` (= `lhs`) gated `active *
+    // Optional FinalCheckHint entry: yield `R_i` (= `lhs`) gated `active *
     // DoubleR_flag`, multiplicity `-1`. Emitted iff a relation is supplied, in
     // lockstep with the AIR's `if let Some(final_check_hint)` emission.
     if let Some(final_check_hint) = final_check_hint {
-        let mut col = logup.new_col();
-        for vec_row in 0..n_vec_rows {
+        append_packed_entry(&mut entries, n_vec_rows, |vec_row| {
             let sig = base[PREPARED_TABLE_EC_COL_SIG_ID].data[vec_row];
             let cert = base[PREPARED_TABLE_EC_COL_CERT_ID].data[vec_row];
             let active = base[0].data[vec_row];
@@ -267,11 +261,12 @@ pub(crate) fn gen_prepared_table_ec_row_pinned_interaction_trace(
                 cert,
                 PREPARED_TABLE_EC_COL_LHS,
             ));
-            col.write_frac(vec_row, numerator, denominator);
-        }
-        col.finalize_col();
+            (numerator, denominator)
+        });
     }
 
+    let mut logup = LogupTraceGenerator::new(log_size);
+    write_batched_logup_columns(&mut logup, &entries, 2);
     let (trace, claimed_sum) = logup.finalize_last();
 
     let mut final_check_hint_claimed_sum = secure_zero();
@@ -302,6 +297,23 @@ pub(crate) fn gen_prepared_table_ec_row_pinned_interaction_trace(
             },
         },
     )
+}
+
+type LogupEntry = (Vec<PackedQM31>, Vec<PackedQM31>);
+
+fn append_packed_entry(
+    entries: &mut Vec<LogupEntry>,
+    vec_rows: usize,
+    fraction: impl Fn(usize) -> (PackedQM31, PackedQM31),
+) {
+    let mut numerators = Vec::with_capacity(vec_rows);
+    let mut denominators = Vec::with_capacity(vec_rows);
+    for vec_row in 0..vec_rows {
+        let (numerator, denominator) = fraction(vec_row);
+        numerators.push(numerator);
+        denominators.push(denominator);
+    }
+    entries.push((numerators, denominators));
 }
 
 #[cfg(test)]

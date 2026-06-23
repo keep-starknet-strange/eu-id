@@ -21,6 +21,7 @@ use stwo_constraint_framework::{
     RelationEntry, TraceLocationAllocator,
 };
 
+use crate::range_checks::write_batched_logup_columns;
 use crate::scalar::fake_glv_chain::{
     FakeGlvChainClaim, FakeGlvChainError, FakeGlvChainRow, FakeGlvChainRowKind,
     FakeGlvPrimitiveEcOp, FakeGlvPrimitiveEcRow, FakeGlvPrimitiveEcTraceClaim,
@@ -491,26 +492,28 @@ pub(crate) fn gen_fake_glv_chain_expansion_interaction_trace(
 ) -> (ColumnVec<M31ColumnEval>, SecureField) {
     assert_eq!(base.len(), FAKE_GLV_CHAIN_EXPANSION_TRACE_COLUMNS);
     let log_size = base[0].domain.log_size();
-    let mut logup = LogupTraceGenerator::new(log_size);
+    let vec_rows = 1 << (log_size - LOG_N_LANES);
+    let mut entries = Vec::with_capacity(3);
     for slot in 0..3 {
-        let mut col = logup.new_col();
-        for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+        let mut entry_numerators = Vec::with_capacity(vec_rows);
+        let mut entry_denominators = Vec::with_capacity(vec_rows);
+        for vec_row in 0..vec_rows {
             let mut numerators = [secure_zero(); N_LANES];
             let mut denominators = [secure_one(); N_LANES];
             for lane in 0..N_LANES {
                 let numerator = chain_expansion_slot_numerator(base, vec_row, lane, slot);
                 let values = chain_expansion_slot_relation_values(base, vec_row, lane, slot);
+                let denominator: SecureField = relation.combine(&values);
                 numerators[lane] = numerator;
-                denominators[lane] = relation.combine(&values);
+                denominators[lane] = denominator;
             }
-            col.write_frac(
-                vec_row,
-                PackedQM31::from_array(numerators),
-                PackedQM31::from_array(denominators),
-            );
+            entry_numerators.push(PackedQM31::from_array(numerators));
+            entry_denominators.push(PackedQM31::from_array(denominators));
         }
-        col.finalize_col();
+        entries.push((entry_numerators, entry_denominators));
     }
+    let mut logup = LogupTraceGenerator::new(log_size);
+    write_batched_logup_columns(&mut logup, &entries, 1);
     logup.finalize_last()
 }
 

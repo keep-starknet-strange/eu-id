@@ -49,6 +49,7 @@ use stwo_p256_utils::constants::{LIMB_BITS, N_LIMBS};
 use stwo_p256_utils::scalar_arithmetic::{words_to_limbs, P256_ORDER};
 
 use crate::limbs::{P256BigInt, P256M31BigInt};
+use crate::range_checks::write_batched_logup_columns;
 use crate::scalar::scalar_mod_mul::columns::{m31_column_eval, padded_log_size, M31ColumnEval};
 
 use crate::final_add_air::FinalAddSignRelation;
@@ -282,7 +283,7 @@ impl FrameworkEval for FakeGlvScalarAirEval {
         ));
         add_scalar_mod_mul_limb_links(&mut eval, &self.scalar_limb_relation, &row);
         constrain_fake_glv_scalar_general(&mut eval, active, &cert, &row);
-        eval.finalize_logup();
+        eval.finalize_logup_in_pairs();
         eval
     }
 }
@@ -772,46 +773,39 @@ pub(crate) fn gen_fake_glv_scalar_air_interaction_trace(
 ) -> (ColumnVec<M31ColumnEval>, FakeGlvScalarAirInteractionClaim) {
     assert_eq!(base.len(), FAKE_GLV_SCALAR_TRACE_COLUMNS);
     let log_size = base[0].domain.log_size();
-    let mut logup = LogupTraceGenerator::new(log_size);
-    let mut col = logup.new_col();
-    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
-        col.write_frac(
-            vec_row,
+    let vec_rows = 1 << (log_size - LOG_N_LANES);
+    let mut entries = Vec::new();
+
+    append_relation_entry(&mut entries, vec_rows, |vec_row| {
+        (
             PackedQM31::from(base[0].data[vec_row]),
             cert_relation.combine(&cert_packed_values_from_base(base, vec_row)),
-        );
-    }
-    col.finalize_col();
-    let mut col = logup.new_col();
-    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
-        col.write_frac(
-            vec_row,
+        )
+    });
+    append_relation_entry(&mut entries, vec_rows, |vec_row| {
+        (
             -PackedQM31::from(base[0].data[vec_row]),
             scalar_relation.combine(&scalar_packed_values_from_base(base, vec_row)),
-        );
-    }
-    col.finalize_col();
+        )
+    });
 
     // Sign-bit provider column: yield each active cert's s2_sign_bit to the
     // final-add sub-graph. Numerator `-cert_active`; tuple (sig_id, cert_id,
     // s2_sign_bit) read from the scalar relation packed values (positions 0, 1,
     // and 2 + 2·FAKE_GLV_SMALL_LIMBS). MUST mirror the AIR-eval emission order
     // (right after the scalar provide).
-    let mut col = logup.new_col();
-    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+    append_relation_entry(&mut entries, vec_rows, |vec_row| {
         let scalar_vals = scalar_packed_values_from_base(base, vec_row);
         let sign_tuple = [
             scalar_vals[0],
             scalar_vals[1],
             scalar_vals[2 + 2 * FAKE_GLV_SMALL_LIMBS],
         ];
-        col.write_frac(
-            vec_row,
+        (
             -PackedQM31::from(base[SCALAR_ROW_CERT_ACTIVE].data[vec_row]),
             sign_relation.combine(&sign_tuple),
-        );
-    }
-    col.finalize_col();
+        )
+    });
 
     // Per-(role, limb) ScalarModMul external-limb provider columns. Numerator
     // is `cert_active` (not the storage flag), mirroring
@@ -821,8 +815,8 @@ pub(crate) fn gen_fake_glv_scalar_air_interaction_trace(
     for limb in 0..N_LIMBS {
         for role_value_col in scalar_mod_mul_limb_value_columns(limb) {
             let (role, value_col) = role_value_col;
-            append_scalar_mod_mul_limb_column(
-                &mut logup,
+            append_scalar_mod_mul_limb_entry(
+                &mut entries,
                 base,
                 scalar_limb_relation,
                 role,
@@ -832,6 +826,8 @@ pub(crate) fn gen_fake_glv_scalar_air_interaction_trace(
         }
     }
 
+    let mut logup = LogupTraceGenerator::new(log_size);
+    write_batched_logup_columns(&mut logup, &entries, 2);
     let (trace, claimed_sum) = logup.finalize_last();
     (trace, FakeGlvScalarAirInteractionClaim { claimed_sum })
 }
@@ -864,8 +860,25 @@ fn scalar_mod_mul_limb_value_columns(limb: usize) -> [(u32, usize); 4] {
     ]
 }
 
-fn append_scalar_mod_mul_limb_column(
-    logup: &mut LogupTraceGenerator,
+type LogupEntry = (Vec<PackedQM31>, Vec<PackedQM31>);
+
+fn append_relation_entry(
+    entries: &mut Vec<LogupEntry>,
+    vec_rows: usize,
+    fraction: impl Fn(usize) -> (PackedQM31, PackedQM31),
+) {
+    let mut numerators = Vec::with_capacity(vec_rows);
+    let mut denominators = Vec::with_capacity(vec_rows);
+    for vec_row in 0..vec_rows {
+        let (numerator, denominator) = fraction(vec_row);
+        numerators.push(numerator);
+        denominators.push(denominator);
+    }
+    entries.push((numerators, denominators));
+}
+
+fn append_scalar_mod_mul_limb_entry(
+    entries: &mut Vec<LogupEntry>,
     base: &[M31ColumnEval],
     relation: &ScalarLimbRelation,
     role: u32,
@@ -873,11 +886,11 @@ fn append_scalar_mod_mul_limb_column(
     value_col: usize,
 ) {
     let log_size = base[0].domain.log_size();
-    let mut col = logup.new_col();
+    let vec_rows = 1 << (log_size - LOG_N_LANES);
     let role_packed = PackedM31::from(M31::from_u32_unchecked(role));
     let limb_packed = PackedM31::from(M31::from_u32_unchecked(limb as u32));
     let zero_packed = PackedM31::from(M31::from_u32_unchecked(0));
-    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+    append_relation_entry(entries, vec_rows, |vec_row| {
         let mul_id = scalar_mod_mul_mul_id_packed(base, vec_row);
         let value = if value_col == SCALAR_ROW_ZERO_PAD_COL {
             zero_packed
@@ -886,9 +899,8 @@ fn append_scalar_mod_mul_limb_column(
         };
         let denom = relation.combine(&[mul_id, role_packed, limb_packed, value]);
         let numerator = PackedQM31::from(base[SCALAR_ROW_CERT_ACTIVE].data[vec_row]);
-        col.write_frac(vec_row, numerator, denom);
-    }
-    col.finalize_col();
+        (numerator, denom)
+    });
 }
 
 fn scalar_mod_mul_mul_id_packed(base: &[M31ColumnEval], vec_row: usize) -> PackedM31 {

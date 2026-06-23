@@ -47,11 +47,9 @@ impl FrameworkEval for DigestBindEval {
     }
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        // Every constraint is degree 2: the recomposition is `active · linear`,
-        // and `finalize_logup` (one fraction per column, no batching) keeps the
-        // LogUp constraint degree 2 (`diff · denominator − numerator`). Staying at
-        // degree 2 means the composition never needs the higher-degree "lifting"
-        // path, so the module proves under any blow-up factor.
+        // Recomposition is degree 2. Pair-batched LogUp columns multiply two
+        // linear denominators, so their constraints stay within the standard
+        // `log_size + 1` budget.
         self.log_size + 1
     }
 
@@ -134,7 +132,7 @@ impl FrameworkEval for DigestBindEval {
             ));
         }
 
-        eval.finalize_logup();
+        eval.finalize_logup_in_pairs();
         eval
     }
 }

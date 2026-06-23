@@ -35,8 +35,9 @@ fn layout(public: &PublicInput) -> TreeLayout {
         trace: std::iter::repeat_n(witness, WitnessData::trace_columns(bounds))
             .chain([cal, valid_day])
             .collect(),
-        // Tree 2: age (2 LogUp fractions = 8 M31) + cal (4) + valid_day (4).
-        interaction: std::iter::repeat_n(witness, 8)
+        // Tree 2: age (2 LogUp fractions paired into 1 secure column = 4 M31)
+        // + cal (4) + valid_day (4).
+        interaction: std::iter::repeat_n(witness, 4)
             .chain(std::iter::repeat_n(cal, 4))
             .chain(std::iter::repeat_n(valid_day, 4))
             .collect(),

@@ -686,7 +686,7 @@ impl FrameworkEval for FinalAddCheckEval {
             &signed_carry_values,
         );
 
-        eval.finalize_logup();
+        eval.finalize_logup_in_pairs();
         eval
     }
 }

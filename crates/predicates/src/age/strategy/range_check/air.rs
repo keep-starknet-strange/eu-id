@@ -26,7 +26,8 @@ use stwo_constraint_framework::TraceLocationAllocator;
 /// input (its bounds) and whether the DOB binding is wired (`bind_dob`),
 /// never on the witness values. Binding adds three trace columns (the
 /// `bind_active` selector + the two birth-year bytes) and four LogUp fractions
-/// (the DOB-byte requires) to the age component.
+/// (the DOB-byte requires) to the age component. The age component pairs
+/// consecutive LogUp fractions.
 fn layout(public: &PublicInput, bind_dob: bool) -> TreeLayout {
     let bounds = &public.bounds;
     let cal = calendar_log_size(bounds);
@@ -35,10 +36,12 @@ fn layout(public: &PublicInput, bind_dob: bool) -> TreeLayout {
     let month = Preprocessed::month_range().log_size();
     let year = Preprocessed::year_range(bounds).log_size();
     let witness = WitnessData::log_size();
-    // The age component: 9 (+3 binding) trace columns and 5 (+4 binding) solo
-    // LogUp fractions, each fraction four M31 (`SECURE_EXTENSION_DEGREE`).
+    // The age component: 9 (+3 binding) trace columns and 5 (+4 binding)
+    // logical LogUp fractions, paired into secure columns, each four M31
+    // (`SECURE_EXTENSION_DEGREE`).
     let age_trace_cols = if bind_dob { 12 } else { 9 };
-    let age_interaction_cols = if bind_dob { 36 } else { 20 };
+    let logical_age_lookups = if bind_dob { 9usize } else { 5 };
+    let age_interaction_cols = logical_age_lookups.div_ceil(2) * 4;
     TreeLayout {
         // Tree 0: calendar (2), valid-day (2), day/month/year delta tables (1 each).
         preprocessed: vec![cal, cal, valid_day, valid_day, day, month, year],
