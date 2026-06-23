@@ -586,7 +586,12 @@ checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 name = "eu-id-ffi"
 version = "0.1.0"
 dependencies = [
+ "ecdsa",
  "memory-stats",
+ "p256",
+ "sha2",
+ "stwo",
+ "stwo-p256",
  "stwo-sha256",
 ]
 

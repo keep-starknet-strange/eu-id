@@ -12,15 +12,33 @@ name = "eu_id_ffi"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
-# Pass through to multi-threaded Stwo proving (rayon). Off by default.
+# Pass through to multi-threaded Stwo proving (rayon) for the SHA-256 crate's
+# own paths. Off by default. (Note: stwo itself is already built with parallel
+# because stwo-p256 requires it — see the dependency note below.)
 parallel = ["stwo-sha256/parallel"]
 
 [dependencies]
 stwo-sha256 = { path = "../stwo-sha256" }
+# P-256 ECDSA verification prover. NOTE: stwo-p256 hardwires stwo's
+# `parallel` feature, and Cargo unifies features across the build graph, so
+# pulling it in turns stwo's rayon paths on for the SHA-256 side too. That is
+# desirable on-device (faster), just not gated by the `parallel` feature below.
+stwo-p256 = { path = "../stwo-p256" }
+# Direct dep purely to name the concrete `Blake2sMerkleChannel` the p256
+# prove/verify entry points are generic over.
+stwo = { workspace = true }
 # Peak-footprint sampler. On Apple `physical_mem` resolves to mach
 # `phys_footprint` — the iOS jetsam metric — the same crate the laptop
 # harness used.
 memory-stats = "1.2"
+
+# Test-only: produce a real P-256 signature to exercise the big-endian
+# (z, r, s, qx, qy) marshalling contract end-to-end. The host build does the
+# signing in Swift/CryptoKit, so these never enter the iOS staticlib.
+[dev-dependencies]
+p256 = { version = "0.13", features = ["ecdsa"] }
+ecdsa = { version = "0.16", features = ["signing", "verifying"] }
+sha2 = "0.10"
 
 [lints]
 workspace = true
