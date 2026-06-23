@@ -1,7 +1,7 @@
 [package]
 name = "eu-id-prover"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 
 [features]
 # Forward Stwo's rayon paths to the SHA module. Cargo unifies the single `stwo`

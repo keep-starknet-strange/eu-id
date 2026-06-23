@@ -1,7 +1,7 @@
 [package]
 name = "sdk"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 
 # The EU-ID ZK SDK: the single source of truth for the prover/verifier data
 # contract. It owns the contract types, the deterministic-CBOR statement

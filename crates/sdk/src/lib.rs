@@ -178,6 +178,16 @@ pub fn zk_contract_v1() -> ZkContract {
     }
 }
 
+/// The SDK's semantic version — the Cargo crate version, baked in at compile
+/// time via `CARGO_PKG_VERSION`. Since the crate inherits its version from the
+/// workspace (`version.workspace = true`), this is the same value the published
+/// AAR / JVM jar carry, so a consumer can assert the native lib it loaded matches
+/// the artifact it depends on.
+#[uniffi::export]
+pub fn sdk_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
 /// The synthetic result claim id for an age predicate, e.g. `age_over_18`.
 #[uniffi::export]
 pub fn result_age_over(min_age: u32) -> String {
@@ -779,6 +789,15 @@ mod tests {
     #[test]
     fn result_age_over_formats() {
         assert_eq!(result_age_over(18), "age_over_18");
+    }
+
+    #[test]
+    fn sdk_version_reports_crate_version() {
+        // Non-empty and equal to the crate version Cargo compiled in — the same
+        // value the workspace owns and the Gradle artifacts publish.
+        let v = sdk_version();
+        assert!(!v.is_empty());
+        assert_eq!(v, env!("CARGO_PKG_VERSION"));
     }
 
     #[test]

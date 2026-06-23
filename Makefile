@@ -33,6 +33,7 @@ ACCEPTABLE  ?=
         prove-nat verify-nat \
         profile-prove-age-rc profile-verify-age-rc \
         profile-prove-age-bd profile-verify-age-bd \
+        publish-android-local publish-jvm-local publish-local \
         clean
 
 help:
@@ -71,6 +72,10 @@ help:
 	@echo "  make profile-verify-age-rc   profile age verify (range check)"
 	@echo "  make profile-prove-age-bd    profile age prove (bit decomposition)"
 	@echo "  make profile-verify-age-bd   profile age verify (bit decomposition)"
+	@echo ""
+	@echo "  make publish-android-local   build + publish the SDK AAR to ~/.m2 (mavenLocal)"
+	@echo "  make publish-jvm-local       build + publish the SDK JVM jar to ~/.m2 (mavenLocal)"
+	@echo "  make publish-local           publish both the AAR and the JVM jar to ~/.m2"
 
 dev:
 	@if command -v cargo-watch >/dev/null 2>&1; then \
@@ -165,6 +170,19 @@ profile-prove-age-bd:
 
 profile-verify-age-bd:
 	cargo instruments -t Allocations --manifest-path crates/predicates/Cargo.toml --bin verify --release -- age --strategy bd --input target/instruments/age-bd.bin
+
+# Cross-compile + package the SDK and install it into the local Maven repo
+# (~/.m2). Each Gradle project owns its native build (cargo-ndk / cargo-zigbuild)
+# and UniFFI binding generation, and stamps the artifact with the workspace
+# version (parsed from [workspace.package] in Cargo.toml). Consumers depend on
+# the result via `mavenLocal()`.
+publish-android-local:
+	cd crates/sdk/android && ./gradlew publishToMavenLocal
+
+publish-jvm-local:
+	cd crates/sdk/jvm && ./gradlew publishToMavenLocal
+
+publish-local: publish-android-local publish-jvm-local
 
 clean:
 	cargo clean

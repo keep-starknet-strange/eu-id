@@ -28,6 +28,18 @@ val workspaceRoot = file("$projectDir/../../..")
 val crateDir = file("$projectDir/..")
 val uniffiConfig = file("$projectDir/../uniffi.toml")
 
+// Single source of truth for the published version: the Cargo workspace. Crates
+// set `version.workspace = true`, so the literal lives in the root Cargo.toml
+// under [workspace.package] — the same value Rust sees as CARGO_PKG_VERSION.
+// Parse it here so the AAR version can never drift from the crate; bump it once
+// in the Cargo manifest.
+val cargoVersion: String = run {
+    val pkgSection = workspaceRoot.resolve("Cargo.toml").readText()
+        .substringAfter("[workspace.package]").substringBefore("\n[")
+    Regex("""(?m)^\s*version\s*=\s*"([^"]+)"""").find(pkgSection)?.groupValues?.get(1)
+        ?: error("Could not find [workspace.package].version in ${workspaceRoot.resolve("Cargo.toml")}")
+}
+
 // Generated outputs land in AGP's conventional source dirs (gitignored). AGP
 // packages src/main/jniLibs/<abi>/*.so and compiles src/main/kotlin by default.
 val jniLibsOut = file("$projectDir/src/main/jniLibs")
@@ -140,7 +152,7 @@ publishing {
         register<MavenPublication>("release") {
             groupId = "com.kss"
             artifactId = "eu-id-zk-sdk"
-            version = "0.1.0"
+            version = cargoVersion
             // `release` component isn't available until AGP configures it.
             afterEvaluate { from(components["release"]) }
         }
