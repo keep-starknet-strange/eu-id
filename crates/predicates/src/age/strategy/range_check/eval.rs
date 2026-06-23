@@ -12,9 +12,9 @@ pub struct AgeRangeCheckEval {
     pub(super) public: PublicInput,
     pub(super) lookup_elements: LookupElements,
     /// The shared credential-field channel, when the DOB↔credential binding is
-    /// wired (`docs/ROADMAP_E2E` §6.6). `None` for a standalone age proof — then
-    /// this component is byte-for-byte the unbound predicate and stays internally
-    /// balanced. `Some(relation)` adds the three binding columns, the byte↔packed
+    /// wired. `None` for a standalone age proof — then this component is
+    /// byte-for-byte the unbound predicate and stays internally balanced.
+    /// `Some(relation)` adds the three binding columns, the byte↔packed
     /// reconciliation, and the four DOB-byte *require* terms.
     pub(super) dob_binding: Option<FieldBytesRelation>,
 }
@@ -40,7 +40,7 @@ impl FrameworkEval for AgeRangeCheckEval {
         let day_borrow = eval.next_trace_mask();
         let month_borrow = eval.next_trace_mask();
 
-        // Credential-field binding columns (§6.6). Read here, immediately after
+        // Credential-field binding columns. Read here, immediately after
         // the base witness columns, so they occupy this component's trace slots
         // `9..12` — the order the witness generator commits them and the
         // `air_core` allocator assigns. The base-value clones are captured before
@@ -113,7 +113,7 @@ impl FrameworkEval for AgeRangeCheckEval {
             &[year_delta],
         ));
 
-        // Credential-field binding (§6.6), after the statement's own lookups so
+        // Credential-field binding, after the statement's own lookups so
         // the existing interaction columns are unchanged and the binding
         // fractions append. `bind_active` is boolean and selects the single row
         // whose requires fire; the reconciliation ties the packed `birth_year` to

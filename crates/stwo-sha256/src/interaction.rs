@@ -3,7 +3,7 @@
 //! The main `Sha256Eval` (consumer) and the 22 producer table components
 //! (8 σ/Σ decode + 1 packed Maj/Ch + 1 `xor_8` + 8 split-and-pack + 4
 //! `Range_k`) each emit their own interaction trace. When the digest provider
-//! is exposed (§6.2), `Sha256Eval` *also* yields the final-block digest on the
+//! is exposed, `Sha256Eval` *also* yields the final-block digest on the
 //! `Sha256Digest` channel — the one provider-side term it contributes — which
 //! is why its claimed sum is non-zero on its own in that mode. Each is built by
 //! walking that component's fractions row-by-row through
@@ -72,8 +72,8 @@ use crate::types::Sha256Witness;
 pub const SHA_LOOKUPS_PER_BLOCK_BASE: usize = 3720;
 
 /// Total consumer-side lookups `Sha256Eval` fires per block. The digest
-/// provider (§6.2) adds exactly one width-32 yield when `expose_digest` is set;
-/// the credential-field provider (§6.5) adds, per exposed byte column, two
+/// provider adds exactly one width-32 yield when `expose_digest` is set;
+/// the credential-field provider adds, per exposed byte column, two
 /// `Range16` byte range-checks (the `[0, 256)` pin) plus one width-3 yield per
 /// exposed window byte — i.e. `2·n_columns + n_yields`. All are zero for the
 /// standalone AIR. Both the interaction generator here and `crate::air`'s
@@ -581,7 +581,7 @@ fn sha256_interaction(
     // Total per block = 8 + 48·18 + 64·44 + 16 + 16
     //                 = 8 + 864 + 2816 + 16 + 16 = 3720 (= SHA_LOOKUPS_PER_BLOCK_BASE).
     //
-    // When `expose_digest` is set the digest provider (§6.2) appends exactly
+    // When `expose_digest` is set the digest provider appends exactly
     // one width-32 yield after the terminal `Range_16` block — the only
     // provider-side (negative-multiplicity) term the SHA module emits — so the
     // count becomes `sha_lookups_per_block(true) = 3721`. The yield's
@@ -1357,7 +1357,7 @@ mod tests {
     /// `−1/combine(digest)`. A synthetic consumer that *requires* the same
     /// digest tuple contributes `+1/combine(digest)` — exactly the claimed sum
     /// of a consumer interaction column that fires `+1` on the final-block row
-    /// and `0` elsewhere — and the two cancel. This is the §6.2 producer-half
+    /// and `0` elsewhere — and the two cancel. This is the producer-half
     /// balance check, at the claimed-sum level (no full proof needed).
     #[test]
     fn digest_provider_balances_against_synthetic_consumer() {
@@ -1406,7 +1406,7 @@ mod tests {
     /// A consumer requiring a *different* digest (one bit flipped) does not
     /// cancel the provider's yield — the balance closes only for the exact
     /// bytes SHA computed. This is the binding's core property (a signature
-    /// over the wrong hash is rejected) exercised at the §6.2 level.
+    /// over the wrong hash is rejected) exercised at the digest-provider level.
     #[test]
     fn digest_provider_rejects_mismatched_consumer() {
         let witness = compute_sha256_witness(b"abc");
@@ -1436,7 +1436,7 @@ mod tests {
         );
     }
 
-    // ---- §6.5 credential-field provider ----
+    // ---- credential-field provider ----
 
     use air_core::relations::field_id;
 
@@ -1462,7 +1462,7 @@ mod tests {
         acc
     }
 
-    /// The required §6.5 smoke test: with **only** the DOB window exposed, the
+    /// The credential-field provider smoke test: with **only** the DOB window exposed, the
     /// SHA module yields the four DOB bytes, and a synthetic consumer requiring
     /// exactly `(DOB, i, c[5+i])` cancels the module's outstanding provider term.
     /// Balancing for the credential's *actual* DOB bytes is the proof that SHA
@@ -1543,9 +1543,9 @@ mod tests {
 
     /// A consumer requiring a *different* field byte (DOB day off by one) does
     /// not cancel the provider's yield — the balance closes only for the exact
-    /// credential bytes SHA hashed. This is the §6.6 binding's core property
+    /// credential bytes SHA hashed. This is the DOB binding's core property
     /// (proving age from a date other than the signed one is rejected) at the
-    /// §6.5 level.
+    /// credential-field provider level.
     #[test]
     fn field_provider_rejects_mismatched_consumer() {
         let c = SAMPLE_CREDENTIAL;

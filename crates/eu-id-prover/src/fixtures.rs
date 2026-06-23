@@ -238,7 +238,7 @@ pub fn tampered_dob_bytes() -> Fixture {
 /// that is also in the accepted set, so the membership sub-statement still
 /// passes. Crypto, age, and membership hold; only the nationality binding is
 /// broken (the code the nat module proves ≠ the credential's signed nationality
-/// bytes). This is the §6.7 twin of `tampered_dob_bytes`.
+/// bytes). This is the nationality twin of `tampered_dob_bytes`.
 pub fn tampered_nationality_bytes() -> Fixture {
     let credential = Credential::new(2000, 1, 1, 276); // real nationality DE
     let signed = sign_credential(&credential, &IssuerKey::demo());

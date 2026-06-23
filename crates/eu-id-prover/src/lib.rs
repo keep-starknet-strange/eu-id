@@ -1,7 +1,7 @@
 //! End-to-end `eu-id` prover: composes the per-circuit `air_core` modules into
 //! a single STARK proof.
 //!
-//! This is the standalone library the FFI will eventually wrap. It drives the
+//! This is the standalone library the `eu-id-ffi` C-ABI surface wraps. It drives the
 //! P256 ECDSA module, the SHA-256 module, the **digest-bind bridge**, and the
 //! **age** and **nationality** predicate modules through one [`air_core::prove`]
 //! call — one channel, one commitment scheme, one proof — and verifies the
@@ -9,8 +9,8 @@
 //!
 //! ## Cross-bound: the signature is over the hash of this preimage
 //!
-//! The composition is **cross-bound** for the P256↔SHA half (`docs/ROADMAP_E2E`
-//! §6.3). SHA yields its final-block digest; the bridge requires those 32 bytes
+//! The composition is **cross-bound** for the P256↔SHA half. SHA yields its
+//! final-block digest; the bridge requires those 32 bytes
 //! as the ECDSA message hash `z` (reconciling SHA's 16-bit limbs against P256's
 //! 13-bit limbs at the byte level), and an analytic provider ties the bridge's
 //! `z` to the proven ECDSA `z`. So the global balance cancels **only** when the
@@ -28,7 +28,7 @@
 //! nationality module proves its private code is in the accepted set. Both are
 //! now bound to the signed credential bytes.
 //!
-//! **Age is credential-bound** (`docs/ROADMAP_E2E` §6.6). SHA exposes the DOB
+//! **Age is credential-bound.** SHA exposes the DOB
 //! byte window of the preimage `C` on a shared field channel; the age module
 //! *requires* exactly those bytes and reconciles them against the packed
 //! `(year, month, day)` it reasons about (big-endian recomposition). So the
@@ -36,7 +36,7 @@
 //! against the threshold is the one encoded in the signed credential — a prover
 //! can no longer attest age from a date `C` does not contain.
 //!
-//! **Nationality is credential-bound** (§6.7), the same way: SHA exposes the
+//! **Nationality is credential-bound**, the same way: SHA exposes the
 //! nationality byte window of `C` on the same field channel, and the nat module
 //! *requires* those two bytes and reconciles them against the packed `code` it
 //! proves set-membership for (`code = code_hi · 256 + code_lo`). So the balance
@@ -59,7 +59,7 @@
 //! **Issuer key / trust anchor.** `Q` is a public input the verifier checks
 //! against an issuer it already trusts (out of band). Binding `Q` to a committed
 //! issuer registry *in-circuit* (a trust anchor over `Q` / `H(Q)`) is a
-//! deliberate non-goal for the MVP and is deferred (`docs/ROADMAP_E2E` §8.2).
+//! deliberate non-goal for the MVP and is deferred.
 //!
 //! The lower-level [`prove`] / [`verify`] take each module's witness / expected
 //! ECDSA instances explicitly; they are the composition primitives the
@@ -199,7 +199,7 @@ pub enum Error {
 pub struct PublicStatement {
     /// The issuer public key `Q` the credential must be signed under. The
     /// verifier trusts this key out of band; an in-circuit trust anchor over a
-    /// committed issuer set is deferred (`docs/ROADMAP_E2E` §8.2).
+    /// committed issuer set is deferred.
     pub issuer_key: AffinePoint,
     /// The verifier policy: reference date, minimum age, and accepted
     /// nationality set. Maps directly to the age / nationality public inputs.
@@ -223,7 +223,7 @@ fn bridge_log_size(n_instances: usize) -> u32 {
 }
 
 /// The SHA field-exposure spec for the credential bindings: expose the DOB byte
-/// window (§6.6, age consumer) **and** the nationality byte window (§6.7, nat
+/// window (for the age consumer) **and** the nationality byte window (for the nat
 /// consumer). SHA yields these six bytes on the shared `Sha256Field` channel and
 /// the age + nat modules require them — four DOB bytes by age, two nationality
 /// bytes by nat. Exposing a window with no consumer would leave the global
@@ -292,8 +292,8 @@ pub fn prove(
     let mut p256 = P256Prover::new(p256_draft)
         .map_err(Error::P256Prepare)?
         .with_z_binding(scalar_z_handle.clone());
-    // SHA both yields its digest (P256↔SHA bridge, §6.3) and exposes the DOB +
-    // nationality byte windows (age/nat↔credential bridges, §6.6/§6.7) on the
+    // SHA both yields its digest (P256↔SHA bridge) and exposes the DOB +
+    // nationality byte windows (age/nat↔credential bridges) on the
     // shared field channel.
     let mut sha = Sha256Prover::new(sha_witness, sha_log_n_rows, sha_group_width)
         .with_digest_handle(digest_handle.clone())
@@ -310,10 +310,10 @@ pub fn prove(
     // unused by `prover()` — only the input validation and witness generation it
     // performs matter; the shared orchestrator config below governs the proof.
     //
-    // Both predicate modules are **credential-bound**. `with_dob_binding` (§6.6)
+    // Both predicate modules are **credential-bound**. `with_dob_binding`
     // makes age require the DOB bytes SHA yields, so the date of birth it proves
     // ≥ the threshold is provably the signed credential's; `with_nat_binding`
-    // (§6.7) makes nat require the nationality bytes SHA yields, so the code it
+    // makes nat require the nationality bytes SHA yields, so the code it
     // proves ∈ the accepted set is provably the signed credential's. A prover can
     // no longer attest age from a date — or membership from a code — the
     // credential does not contain.
@@ -502,9 +502,8 @@ fn verify_stark(proof: &Proof) -> Result<(), Error> {
 
     // Rebuild the predicate verifier modules from the public input and claimed
     // sums carried in the proof, with the same canonical strategy the prover
-    // used (`range_check` for age). Both modules are credential-bound (§6.6 age,
-    // §6.7 nat), so each reads the same shared field channel to reconstruct its
-    // require terms.
+    // used (`range_check` for age). Both modules are credential-bound, so each
+    // reads the same shared field channel to reconstruct its require terms.
     let mut age = AgeRangeCheck::new(PcsConfig::default())
         .verifier(&proof.age_public, &proof.age_claimed_sums)
         .map_err(Error::AgePrepare)?

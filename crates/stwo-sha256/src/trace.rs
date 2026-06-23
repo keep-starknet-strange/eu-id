@@ -243,11 +243,11 @@ impl Layout {
     pub const COL_ENABLER_STEP: usize = Self::COL_PADDING_END;
 
     /// Number of **base** trace columns — the full width when no credential
-    /// field is exposed. The optional field-byte view (§6.5) is a dynamic tail
+    /// field is exposed. The optional field-byte view is a dynamic tail
     /// appended after this (see [`Self::COL_FIELD_BYTES_START`]).
     pub const TOTAL_COLS: usize = Self::COL_ENABLER_STEP + 1;
 
-    /// First column of the optional credential-field byte view (§6.5).
+    /// First column of the optional credential-field byte view.
     ///
     /// The field byte columns are a **dynamic tail** appended after every base
     /// column (including `enabler_step`), so enabling field exposure never
@@ -479,7 +479,7 @@ pub fn generate_trace(witness: &Sha256Witness, log_size: u32) -> Vec<Vec<BaseFie
 }
 
 /// Materialise the trace for a `Sha256Witness`, additionally committing the
-/// credential-field byte view (§6.5) for every block when `field_exposure` is
+/// credential-field byte view for every block when `field_exposure` is
 /// non-empty.
 ///
 /// The field byte columns are appended after every base column; an empty
@@ -664,7 +664,7 @@ fn write_block_row(
     // padding-role witness — laid out per `PADDING_ROW_COLS` above.
     write_padding_row(cols, row, &block.padding_row);
 
-    // Credential-field byte view (§6.5), appended after every base column.
+    // Credential-field byte view, appended after every base column.
     // Each distinct exposed message word is decomposed into its four big-endian
     // bytes; the decomposition constraint (`limb = 256·b1 + b0`) fires under
     // `enabler` on every block, so the bytes are materialised for every block

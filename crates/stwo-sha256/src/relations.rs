@@ -296,7 +296,7 @@ impl Default for RangeRelations {
 pub const DIGEST_REL_SIZE: usize = crate::constants::DIGEST_BYTES;
 
 /// The cross-component digest channel is **shared** with the consumer (the P256
-/// `z` binding, §6.3): a yield here only cancels against a require there if both
+/// `z` binding): a yield here only cancels against a require there if both
 /// sides combine over the *same* drawn `LookupElements`. So the relation type is
 /// defined once in the common [`air_core`] crate and aliased here, rather than
 /// declared locally. Width, and the `relation!`-generated `draw`/`dummy`/
@@ -313,8 +313,8 @@ const _: () = assert!(DIGEST_REL_SIZE == air_core::relations::DIGEST_BYTES_ARITY
 /// `SHA_DIGEST ↔ ECDSA_Z`). **This is the one relation the SHA-256 AIR uses
 /// from the *provider* side**: on the final block of a multi-block hash it
 /// *yields* the 32 digest bytes (`add_to_relation(&digest, −is_last_block,
-/// &[b0..b31])`), so a downstream module (the P256 ECDSA `z` binding, §6.3;
-/// the field predicates reuse the same byte-bridge machinery, §6.5) can
+/// &[b0..b31])`), so a downstream module (the P256 ECDSA `z` binding;
+/// the field predicates reuse the same byte-bridge machinery) can
 /// *require* them. Unlike every other channel here, the yield has no
 /// in-module consumer, so it leaves the SHA module's claimed-sum non-zero —
 /// it only cancels once a consumer requires the same bytes, which is what
@@ -359,7 +359,7 @@ impl Default for DigestRelation {
 }
 
 /// The cross-component credential-field channel is **shared** with the predicate
-/// consumers (§6.5–6.7), so — like [`Sha256Digest`] — the relation type is
+/// consumers, so — like [`Sha256Digest`] — the relation type is
 /// defined once in [`air_core`] and aliased here. Width 3: `(field_id,
 /// byte_index, value)`.
 pub use air_core::relations::FieldBytesRelation as Sha256Field;
@@ -376,7 +376,7 @@ pub const FIELD_REL_SIZE: usize = air_core::relations::FIELD_BYTES_ARITY;
 /// it *yields* one `(field_id, byte_index, value)` tuple per exposed credential
 /// byte (`add_to_relation(&field, −is_first_block, &[field_id, byte_index,
 /// value])`), so a downstream predicate can *require* exactly the byte window of
-/// the field it binds (§6.6/§6.7). Like the digest yield, these terms have no
+/// the field it binds. Like the digest yield, these terms have no
 /// in-module consumer — they leave the SHA module's claimed sum non-zero until a
 /// predicate consumer cancels them — so they are gated behind the field-exposure
 /// spec (empty by default), keeping a standalone SHA proof self-balancing.
@@ -439,7 +439,7 @@ pub struct Sha256Relations {
     pub digest: DigestRelation,
     /// Cross-component credential-field channel — provider side. Always drawn so
     /// the relation bundle is uniform; only *used* when a non-empty field
-    /// exposure is configured (the predicate-binding path, §6.5–6.7). See
+    /// exposure is configured (the predicate-binding path). See
     /// [`FieldRelation`].
     pub field: FieldRelation,
 }
@@ -611,7 +611,7 @@ mod tests {
 
     /// The cross-component credential-field channel exposes row width 3 —
     /// `(field_id, byte_index, value)`. A regression here would desync the
-    /// provider tuple from the predicate consumer (§6.6/§6.7) and silently break
+    /// provider tuple from the predicate consumer and silently break
     /// the combined-proof balance.
     #[test]
     fn field_relation_has_row_width_3() {

@@ -38,7 +38,7 @@ fn prover_component_refs(c: &NatComponents) -> Vec<&dyn ComponentProver<SimdBack
 }
 
 /// Column layout shared by both prover and verifier: it depends on the public
-/// input and whether the §6.7 nationality binding is wired (`bind_nat`), never
+/// input and whether the nationality binding is wired (`bind_nat`), never
 /// on the witness values. Binding adds three trace columns (the `bind_active`
 /// selector + the two nationality bytes) and two LogUp fractions (the
 /// nationality-byte requires) to the nationality component.
@@ -69,7 +69,7 @@ pub struct NatProver {
     witness: Witness,
     preprocessed: Preprocessed,
     witness_data: WitnessData,
-    /// Shared `Sha256Field` channel when the §6.7 nationality binding is wired.
+    /// Shared `Sha256Field` channel when the nationality binding is wired.
     /// `None` for a standalone nat proof (the module stays internally balanced).
     nat_binding: Option<SharedFieldRelation>,
     lookup_elements: Option<LookupElements>,
@@ -92,10 +92,10 @@ impl NatProver {
     }
 
     /// Bind the nationality this module proves set-membership for to the
-    /// credential's signed nationality bytes (`docs/ROADMAP_E2E` §6.7): require
-    /// the two nationality bytes on the shared `Sha256Field` channel `handle`,
-    /// which the SHA module yields. Off by default; regenerates the witness with
-    /// the binding columns. The matching [`NatVerifier`] must set the same handle.
+    /// credential's signed nationality bytes: require the two nationality bytes
+    /// on the shared `Sha256Field` channel `handle`, which the SHA module yields.
+    /// Off by default; regenerates the witness with the binding columns. The
+    /// matching [`NatVerifier`] must set the same handle.
     pub fn with_nat_binding(mut self, handle: SharedFieldRelation) -> Self {
         self.witness_data = WitnessData::new(&self.witness, &self.public, true);
         self.nat_binding = Some(handle);
@@ -273,7 +273,7 @@ impl Air for NatVerifier {
 
 #[cfg(test)]
 mod binding_tests {
-    //! Isolated nationality↔credential binding (§6.7) tests: drive the bound nat
+    //! Isolated nationality↔credential binding tests: drive the bound nat
     //! module against a *synthetic* field producer that plays SHA's role (yields
     //! the two nationality bytes on the shared `Sha256Field` channel). This
     //! exercises the whole bound path — the binding layout, the

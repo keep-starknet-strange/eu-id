@@ -19,7 +19,7 @@ use stwo_sha256::witness::{
 /// 9 842 is the through-`h_out` total at `W = 6`: the round-side Maj/Ch and
 /// `H_IN_AUX` packed-group blocks each grew from 6 to 8 groups per
 /// operand (+8 cells/round × 64 rounds, +8 for the aux block), i.e.
-/// +520 over the `W = 7` baseline of 9 322. The §6.2 digest provider then
+/// +520 over the `W = 7` baseline of 9 322. The digest provider then
 /// inserts `1` (`is_last_block` flag) + `DIGEST_BYTES = 32` (the big-endian
 /// byte view of `h_out`) after `h_out`; the §10.4 padding-role witness adds
 /// `PADDING_ROW_COLS = 33`; and the C1-fix aux column `enabler_step` adds 1

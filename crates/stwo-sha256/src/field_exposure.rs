@@ -1,14 +1,13 @@
-//! Optional credential-field byte exposure for the SHA-256 preimage
-//! (`docs/ROADMAP_E2E` §6.5).
+//! Optional credential-field byte exposure for the SHA-256 preimage.
 //!
 //! The producer half of the `CRED_FIELD ↔ PREDICATE_INPUT` binding: the SHA-256
 //! AIR can expose chosen byte windows of the signed preimage `C` as a LogUp
-//! provider, so a downstream predicate (§6.6/§6.7) can *require* exactly those
+//! provider, so a downstream predicate can *require* exactly those
 //! bytes and thereby reason about the attribute that was actually signed — not a
 //! free-floating witness.
 //!
 //! The mechanism reuses the byte-decomposition machinery the digest provider
-//! (§6.2) introduced: the message words `W[0..15]` already live in the trace as
+//! introduced: the message words `W[0..15]` already live in the trace as
 //! 16-bit `(lo, hi)` limbs; exposing a field is just decomposing the limbs of
 //! the word(s) that cover it into bytes and yielding the byte windows the
 //! predicates consume. A field byte at preimage offset `o` lives in message word
@@ -165,7 +164,7 @@ pub fn word_be_bytes(lo: u32, hi: u32) -> [u32; WORD_BYTES] {
 }
 
 /// Offset for the two-lookup byte range-check that pins an exposed field byte to
-/// `[0, 256)` (`docs/ROADMAP_E2E` §6.5).
+/// `[0, 256)`.
 ///
 /// This AIR has no `[0, 2⁸)` range table — only the carry tables (`[0, 2)`,
 /// `[0, 4)`, `[0, 5)`) and the 16-bit `Range16` (`[0, 2¹⁶)`). A byte `b` is

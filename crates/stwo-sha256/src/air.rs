@@ -113,7 +113,7 @@ impl<'a> Sha256Prover<'a> {
         }
     }
 
-    /// Enable the cross-component digest provider (§6.2): the module yields
+    /// Enable the cross-component digest provider: the module yields
     /// the final-block digest on the `Sha256Digest` channel, so a composed
     /// consumer (the P256 `z` binding) can require it. This leaves the SHA
     /// module's claimed sum non-zero on its own — it cancels only against the
@@ -128,17 +128,17 @@ impl<'a> Sha256Prover<'a> {
 
     /// As [`Self::with_digest_provider`], plus **share** the drawn
     /// `Sha256Digest` relation through `handle` so a sibling module (the P256
-    /// digest-bind bridge) consumes it over the identical `LookupElements`
-    /// (§6.3). The handle is populated during [`Air::draw_relations`].
+    /// digest-bind bridge) consumes it over the identical `LookupElements`.
+    /// The handle is populated during [`Air::draw_relations`].
     pub fn with_digest_handle(mut self, handle: air_core::relations::SharedDigestRelation) -> Self {
         self.expose_digest = true;
         self.digest_handle = Some(handle);
         self
     }
 
-    /// Enable the credential-field provider (§6.5): the module yields the given
+    /// Enable the credential-field provider: the module yields the given
     /// byte windows on the `Sha256Field` channel so predicate consumers
-    /// (§6.6/§6.7) can require them. Like [`Self::with_digest_provider`] this
+    /// can require them. Like [`Self::with_digest_provider`] this
     /// leaves the module's claimed sum non-zero until a consumer cancels it, so
     /// it is off by default. The exposure shape is mixed into the transcript
     /// ([`Stmt0`]) and must be set identically on the matching
@@ -539,7 +539,7 @@ fn build_base_trace(
 /// block first (`TOTAL_COLS` × `log_n_rows`), then one mult col per
 /// producer component.
 fn base_trace_log_sizes(log_n_rows: u32, group_width: u32, n_field_cols: usize) -> Vec<u32> {
-    // Base columns + the dynamic credential-field byte tail (§6.5), all at the
+    // Base columns + the dynamic credential-field byte tail, all at the
     // trace's `log_n_rows`. Empty exposure leaves this at `Layout::TOTAL_COLS`.
     let mut out = vec![log_n_rows; Layout::total_cols_with_fields(n_field_cols)];
     // 8 decode mults, each at log_size 16.

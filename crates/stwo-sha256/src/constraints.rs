@@ -78,11 +78,11 @@ pub struct Sha256Eval {
     /// constraints are present and enforced regardless — only the
     /// cross-module *yield* is gated.
     pub expose_digest: bool,
-    /// Credential-field byte exposure (§6.5). When non-empty, the AIR commits a
+    /// Credential-field byte exposure. When non-empty, the AIR commits a
     /// byte-decomposition of each covered message word as a dynamic column tail
     /// and *yields* the configured byte windows on the **first block** over the
     /// `Sha256Field` channel, so predicate consumers can require the exact bytes
-    /// of the field they bind (§6.6/§6.7). Empty for a standalone SHA proof and
+    /// of the field they bind. Empty for a standalone SHA proof and
     /// for the combined proof before the predicate consumers are wired (yields
     /// with no consumer would leave the module's claimed sum non-zero). The
     /// byte columns and their decomposition constraints exist iff the exposure
@@ -790,7 +790,7 @@ impl FrameworkEval for Sha256Eval {
         // Gated by `expose_digest` so the standalone SHA proof — which has no
         // consumer — still self-balances. The multiplicity is `−is_last_block`
         // (yield on the final block only); a downstream module (the P256 `z`
-        // binding, §6.3) *requires* the same 32-byte tuple, so the global LogUp
+        // binding) *requires* the same 32-byte tuple, so the global LogUp
         // balance cancels iff the bytes match — i.e. the signature is verified
         // over the hash SHA actually computed. The tuple order matches
         // `crate::interaction`'s digest yield and `crate::trace::h_out_digest_bytes`.
@@ -1128,7 +1128,7 @@ impl FrameworkEval for Sha256Eval {
             // on the **first block** only (`−is_first_block`): the credential's
             // fields are at fixed offsets from the preimage start, so they live
             // in block 0. Like the digest yield, these terms have no in-module
-            // consumer until a predicate (§6.6/§6.7) requires the same tuples, so
+            // consumer until a predicate requires the same tuples, so
             // they leave the module's claimed sum non-zero — which is exactly
             // what binds the attribute to the signed bytes.
             for y in self.field_exposure.yields() {
@@ -2117,8 +2117,9 @@ mod tests {
     /// byte. Asserts the two structural counts the trace generator and
     /// interaction generator must match: the mask count grows by exactly the
     /// field byte columns (`4 ×` distinct words), and the field relation fires
-    /// exactly `n_yields` times. This is the constraint-side cover for §6.5 (the
-    /// interaction-side balance is `interaction::tests::field_provider_*`).
+    /// exactly `n_yields` times. This is the constraint-side cover for the
+    /// credential-field exposure (the interaction-side balance is
+    /// `interaction::tests::field_provider_*`).
     #[test]
     fn evaluate_reads_field_columns_and_fires_field_yields() {
         use air_core::relations::field_id;
@@ -2238,8 +2239,7 @@ mod tests {
     // covered by `tests/prove_verify_round_trip.rs` (specifically
     // `verify_rejects_range_k_claimed_sum_mutations` for the four new
     // `Range_k` channels). Unifying the two paths under one
-    // `AssertEvaluator` driver is a follow-up tracked in
-    // `docs/research/sha256-initial-build-research-pt3.md` Phase C #9.
+    // `AssertEvaluator` driver is a possible follow-up.
     // ------------------------------------------------------------------
 
     /// Coset-order predecessor of `slot` in a bit-reversed circle-domain

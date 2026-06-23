@@ -5,7 +5,7 @@
 //! returns one bound proof; `verify_identity` checks it against a
 //! `PublicStatement` `{ issuer key Q, policy }` only. The headline properties:
 //!
-//! - an honest credential proves and verifies against its statement (§6.8);
+//! - an honest credential proves and verifies against its statement;
 //! - caller-argument binding rejects a mismatched statement — wrong issuer key,
 //!   wrong age threshold, or wrong accepted set — *before* the STARK check;
 //! - the proof round-trips through bincode (the CLI's prove→file→verify path);
@@ -25,7 +25,7 @@ fn demo_statement(policy: &Policy) -> PublicStatement {
     PublicStatement::new(IssuerKey::demo().public_key(), policy.clone())
 }
 
-/// The headline §6.8 path: prove an honest credential through `prove_identity`
+/// The headline happy path: prove an honest credential through `prove_identity`
 /// and verify it through `verify_identity` against its public statement.
 #[test]
 #[ignore = "slow: full P256 + SHA + bridge + predicates STARK prove/verify; run with --release --ignored"]

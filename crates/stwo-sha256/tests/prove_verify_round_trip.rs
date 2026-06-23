@@ -261,7 +261,7 @@ fn verify_rejects_range_k_claimed_sum_mutations() {
     }
 }
 
-/// §6.2 producer-half end-to-end: prove the SHA module with the digest
+/// Digest-provider producer-half end-to-end: prove the SHA module with the digest
 /// provider **on** and confirm two things in a *real* proof (not just the
 /// claimed-sum algebra the unit smoke test checks):
 ///
@@ -271,8 +271,8 @@ fn verify_rejects_range_k_claimed_sum_mutations() {
 ///    provider/consumer tuple desync would fail here, at prove time.
 /// 2. The verifier **rejects** the module on its own — the yield has no
 ///    consumer, so the `air_core` global LogUp balance is non-zero. This is
-///    the whole point of §6.2: the digest term enters the global balance and
-///    only cancels once a consumer (the P256 `z` binding, §6.3) requires the
+///    the whole point of the digest provider: the digest term enters the global balance and
+///    only cancels once a consumer (the P256 `z` binding) requires the
 ///    same bytes. The matching positive case — a consumer that *does* balance
 ///    it — lands with that binding.
 #[ignore = "slow: produces a real proof first; same cost as prove_and_verify_abc"]
@@ -308,7 +308,7 @@ fn digest_provider_proof_is_unbalanced_without_consumer() {
     );
 }
 
-/// §6.5 end-to-end: a real proof exposing the credential field windows
+/// Credential-field end-to-end: a real proof exposing the credential field windows
 /// (date of birth + nationality). Mirrors the digest test above, exercising the
 /// full constraint + trace + interaction field path (the byte-decomposition
 /// columns, the `is_first_block`-gated yields, and the claimed-sum fold) at
@@ -319,7 +319,7 @@ fn digest_provider_proof_is_unbalanced_without_consumer() {
 ///    interaction trace matches the constraint firing order — a provider tuple
 ///    desync would fail here.
 /// 2. The verifier **rejects** the module on its own — the field yields have no
-///    predicate consumer yet (§6.6/§6.7), so the global LogUp balance is
+///    predicate consumer yet, so the global LogUp balance is
 ///    non-zero and fails closed. The matching positive case lands with the
 ///    age/nat credential bindings.
 #[ignore = "slow: produces a real proof first; same cost as prove_and_verify_abc"]
