@@ -1,7 +1,8 @@
 use crate::nat::lookup_elements::LookupElements;
 use crate::nat::preprocessed::Preprocessed;
-use crate::nat::witness::WitnessData;
+use crate::nat::witness::{WitnessData, BIND_ACTIVE_COL};
 use crate::types::Trace;
+use air_core::relations::{field_id, FieldBytesRelation};
 use num_traits::One;
 use stwo::core::channel::Channel;
 use stwo::core::fields::m31::M31;
@@ -25,6 +26,7 @@ impl InteractionTraces {
         witness_data: &WitnessData,
         preprocessed: &Preprocessed,
         lookup_elements: &LookupElements,
+        nat_field: Option<&FieldBytesRelation>,
     ) -> Self {
         let acceptable_nat_log_size = preprocessed.acceptable[0].domain.log_size();
         let n_packed = 1 << (WitnessData::log_size() - LOG_N_LANES);
@@ -41,6 +43,32 @@ impl InteractionTraces {
             );
         }
         col_gen.finalize_col();
+
+        // The credential-field binding: require the two nationality bytes on the
+        // shared `Sha256Field` channel, one solo column per byte. The numerator
+        // is the `bind_active` selector (1 on a single row), so each byte is
+        // required exactly once — matching SHA's single `−is_first_block` yield.
+        // Appended after the membership fraction so that column is unchanged; the
+        // eval emits the same order before `finalize_logup`.
+        if let (Some(field), Some(bytes)) = (nat_field, witness_data.nat_bytes) {
+            let bind_active = &witness_data.witness_trace[BIND_ACTIVE_COL];
+            for (byte_index, &value) in bytes.iter().enumerate() {
+                let mut col_gen = logup_gen.new_col();
+                for packed_row in 0..n_packed {
+                    col_gen.write_frac(
+                        packed_row,
+                        PackedQM31::from(bind_active.values.data[packed_row]),
+                        field.combine(&[
+                            PackedM31::broadcast(M31::from_u32_unchecked(field_id::NATIONALITY)),
+                            PackedM31::broadcast(M31::from_u32_unchecked(byte_index as u32)),
+                            PackedM31::broadcast(M31::from_u32_unchecked(value)),
+                        ]),
+                    );
+                }
+                col_gen.finalize_col();
+            }
+        }
+
         let (nat_interaction, nat_claimed_sum) = logup_gen.finalize_last();
 
         let mut logup_gen = LogupTraceGenerator::new(acceptable_nat_log_size);

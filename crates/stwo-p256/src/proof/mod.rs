@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use stwo::core::{
     air::Component,
     channel::Channel,
@@ -184,6 +185,7 @@ use crate::scalar::setup_air::{
 };
 use crate::types::EcdsaVerifyInput;
 
+pub mod air;
 pub mod balances;
 pub use balances::*;
 
@@ -314,13 +316,12 @@ impl P256ProofClaim {
     /// Production builder: Garaga-style fake-GLV decomposition for any
     /// scalar in `[0, n)`. Used for all real ECDSA signatures.
     ///
-    /// Note: the AIR currently enforces the *trivial* fake-GLV constraints
-    /// (`s1 = scalar, s2 = 1, q = 0`). Tasks 3–4 of the
-    /// `2026-06-05-arbitrary-p256-signature-air.md` plan replace those with
-    /// the general `k · s2_abs ≡ ±s1 (mod n)` constraints proved via
-    /// `ScalarModMul` external limb links. Until those land, this builder
-    /// produces a valid native witness but `prove_current_air_monolithic`
-    /// will reject any signature whose `u1`/`u2` exceed `2^128`.
+    /// The AIR enforces the *general* fake-GLV constraints — `k · s2_abs ≡
+    /// ±s1 (mod n)` proved via `ScalarModMul` external limb links
+    /// (`constrain_fake_glv_scalar_general`) — so this builder produces a
+    /// witness `prove_current_air_monolithic` accepts for any signature,
+    /// including full-width `u1`/`u2`. Real `p256`-crate signatures prove and
+    /// verify end-to-end (`air_core_p256_proves_and_verifies_real_signature`).
     pub fn from_inputs_with_arbitrary_fake_glv_hints(
         inputs: &[EcdsaVerifyInput],
     ) -> Result<Self, P256ProofError> {
@@ -470,7 +471,7 @@ pub struct P256CurrentAirProof<H: MerkleHasherLifted> {
     pub stark_proof: StarkProof<H>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct P256CurrentAirProofClaim {
     pub public_inputs: PublicEcdsaInputClaim,
     pub scalar_setup: ScalarSetupAirProofClaim,
@@ -714,7 +715,7 @@ impl P256CurrentAirProofClaim {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct P256CurrentAirInteractionClaim {
     pub scalar_setup: ScalarSetupAirInteractionClaim,
     pub cert_scalar_inputs: CertScalarInputAirInteractionClaim,

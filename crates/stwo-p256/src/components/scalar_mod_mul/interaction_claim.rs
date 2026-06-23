@@ -1,4 +1,5 @@
 use num_traits::Zero;
+use serde::{Deserialize, Serialize};
 use stwo::core::{
     channel::Channel,
     fields::qm31::{SecureField, QM31},
@@ -6,7 +7,7 @@ use stwo::core::{
 
 use crate::range_checks::RangeCheckInteractionClaim;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ScalarModMulInteractionClaim {
     pub canonical_scalars: SecureField,
     pub ab_chunks: SecureField,
@@ -27,7 +28,7 @@ impl ScalarModMulInteractionClaim {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct ScalarModMulProofSliceInteractionClaim {
     pub scalar_mod_mul: ScalarModMulInteractionClaim,
     pub range13: RangeCheckInteractionClaim,

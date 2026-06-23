@@ -1,4 +1,4 @@
-use crate::air::{Air, AirProver};
+use air_core::{Air, AirProver};
 use stwo::core::fields::qm31::QM31;
 
 /// Proving side of a predicate.

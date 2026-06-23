@@ -6,6 +6,7 @@
 //! depend on internal helpers; the assertions themselves are cheap
 //! enough to run on every `cargo test`.
 
+use stwo_sha256::constants::DIGEST_BYTES;
 use stwo_sha256::trace::{Layout, PADDING_ROW_COLS};
 use stwo_sha256::witness::{
     compute_sha256_witness, decode_multiplicities_for_block, maj_ch_xor_multiplicities_for_block,
@@ -15,20 +16,27 @@ use stwo_sha256::witness::{
 /// Pin `Layout::TOTAL_COLS` to the claimed total so any future
 /// column-count drift fails closed against the test-plan value.
 ///
-/// 9 842 is the pre-padding total at `W = 6`: the round-side Maj/Ch and
+/// 9 842 is the through-`h_out` total at `W = 6`: the round-side Maj/Ch and
 /// `H_IN_AUX` packed-group blocks each grew from 6 to 8 groups per
 /// operand (+8 cells/round × 64 rounds, +8 for the aux block), i.e.
-/// +520 over the `W = 7` baseline of 9 322. Adding the §10.4 padding-role
-/// witness tacks `PADDING_ROW_COLS = 33` cells onto each row, then the
-/// C1-fix aux column `enabler_step` adds 1 more — final total 9 876.
+/// +520 over the `W = 7` baseline of 9 322. The digest provider then
+/// inserts `1` (`is_last_block` flag) + `DIGEST_BYTES = 32` (the big-endian
+/// byte view of `h_out`) after `h_out`; the §10.4 padding-role witness adds
+/// `PADDING_ROW_COLS = 33`; and the C1-fix aux column `enabler_step` adds 1
+/// more — final total 9 909.
 #[test]
-fn total_cols_equals_9876_at_w6() {
+fn total_cols_equals_9909_at_w6() {
     println!("Layout::TOTAL_COLS = {}", Layout::TOTAL_COLS);
-    assert_eq!(Layout::TOTAL_COLS, 9_876);
-    // The 33-cell padding delta and the trailing `enabler_step` cell add
-    // up to the post-padding delta over the 9 842-column W=6 baseline.
+    assert_eq!(Layout::TOTAL_COLS, 9_909);
+    // The digest delta (1 + 32), the 33-cell padding delta, and the trailing
+    // `enabler_step` cell add up to the total over the 9 842-column W=6
+    // through-`h_out` baseline.
     assert_eq!(PADDING_ROW_COLS, 33);
-    assert_eq!(Layout::TOTAL_COLS, 9_842 + PADDING_ROW_COLS + 1);
+    assert_eq!(DIGEST_BYTES, 32);
+    assert_eq!(
+        Layout::TOTAL_COLS,
+        9_842 + 1 + DIGEST_BYTES + PADDING_ROW_COLS + 1
+    );
 }
 
 /// Print per-block lookup multiplicities for the `b"abc"` single-block

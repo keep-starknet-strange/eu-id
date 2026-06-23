@@ -3,21 +3,30 @@ name = "eu-id-ffi"
 version = "0.1.0"
 edition = "2021"
 
-# Thin C-ABI surface over the standalone SHA-256 prover, built for the
-# mobile benchmark harness. One function,
-# measured inside Rust, returned as a flat C struct. iOS links the
-# `staticlib`; Android (later) the `cdylib`.
+# Thin C-ABI surface over the eu-id provers, built for the mobile benchmark
+# harness. One function per workload — the standalone SHA-256 and P-256 ECDSA
+# provers, plus the combined cross-bound identity proof — each measured inside
+# Rust and returned as a flat C struct. iOS links the `staticlib`; Android
+# (later) the `cdylib`.
 [lib]
 name = "eu_id_ffi"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
-# Pass through to multi-threaded Stwo proving (rayon) for the SHA-256 crate's
-# own paths. Off by default. (Note: stwo itself is already built with parallel
-# because stwo-p256 requires it — see the dependency note below.)
+# Pass through to multi-threaded Stwo proving (rayon). Off by default. Reaches
+# the SHA module (in the standalone SHA bench and the SHA part of the combined
+# identity bench); the combined proof is P256-dominated and P256 has no rayon
+# path yet, so this barely moves the identity number — see `eu_id_bench_identity`.
+# (Note: stwo itself is already built with parallel because stwo-p256 requires
+# it — see the dependency note below.)
 parallel = ["stwo-sha256/parallel"]
 
 [dependencies]
+# The combined, cross-bound identity prover (`prove_identity`/`verify_identity`)
+# the identity bench wraps, plus the standalone SHA-256 prover the SHA bench
+# wraps. eu-id-prover re-pulls stwo-sha256, but the SHA bench depends on it
+# directly too.
+eu-id-prover = { path = "../eu-id-prover" }
 stwo-sha256 = { path = "../stwo-sha256" }
 # P-256 ECDSA verification prover. NOTE: stwo-p256 hardwires stwo's
 # `parallel` feature, and Cargo unifies features across the build graph, so
@@ -31,6 +40,8 @@ stwo = { workspace = true }
 # `phys_footprint` — the iOS jetsam metric — the same crate the laptop
 # harness used.
 memory-stats = "1.2"
+# Serialize the combined proof to report its size from `eu_id_bench_identity`.
+bincode = "1"
 
 # Test-only: produce a real P-256 signature to exercise the big-endian
 # (z, r, s, qx, qy) marshalling contract end-to-end. The host build does the

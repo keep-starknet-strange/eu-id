@@ -352,7 +352,7 @@ pub fn sigma_parts_consistent(parts: &SigmaParts, expected_s: u32) -> bool {
 
 /// Max packed-group width `W`. At `W = 6` the `Maj`/`Ch` table is `2^(3·6)
 /// = 2¹⁸` rows (≈ 262 k) — an 8× shrink from the `W = 7` `2²¹` table that
-/// dominates prove cost (perf-doc §3.1, §4.1). Every round-function group
+/// dominates prove cost. Every round-function group
 /// is `≤ 6` bits; smaller sub-groups pad with leading zeros into the same
 /// table (design §9.2).
 pub const MAX_ROUND_GROUP_BITS: u32 = 6;

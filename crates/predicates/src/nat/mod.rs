@@ -12,9 +12,9 @@ pub mod witness;
 use air::{NatProver, NatVerifier};
 use types::{Error, InputError, PrivateInput, Proof, PublicInput, Witness};
 
-use crate::air::{prove, verify, Air};
 use crate::nat::nationalities::Nationality;
 use crate::predicate::{PredicateProver, PredicateVerifier};
+use air_core::{prove, verify, Air};
 use strum::IntoEnumIterator;
 use stwo::core::fields::qm31::QM31;
 use stwo::core::pcs::PcsConfig;

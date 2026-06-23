@@ -288,6 +288,138 @@ impl Default for RangeRelations {
     }
 }
 
+/// Row width of the cross-component digest relation: the 32 bytes of the
+/// final-block SHA-256 digest. The digest byte string is `H0..H7` each
+/// serialised **big-endian** (FIPS 180-4 §5); the 32 cells are laid out
+/// per state word `j` as `[hi.b1, hi.b0, lo.b1, lo.b0]` — i.e.
+/// `word_j.to_be_bytes()` — so cell `4j+k` is digest byte `4j+k`.
+pub const DIGEST_REL_SIZE: usize = crate::constants::DIGEST_BYTES;
+
+/// The cross-component digest channel is **shared** with the consumer (the P256
+/// `z` binding): a yield here only cancels against a require there if both
+/// sides combine over the *same* drawn `LookupElements`. So the relation type is
+/// defined once in the common [`air_core`] crate and aliased here, rather than
+/// declared locally. Width, and the `relation!`-generated `draw`/`dummy`/
+/// `combine`, are unchanged — 6.2's transcript order and width-32 test still
+/// hold — so this is a transparent move, not a behavioural change.
+pub use air_core::relations::DigestBytesRelation as Sha256Digest;
+
+// The shared arity must match this crate's digest-byte count, or the provider
+// and consumer would size their relation tuples differently and silently fail
+// to balance.
+const _: () = assert!(DIGEST_REL_SIZE == air_core::relations::DIGEST_BYTES_ARITY);
+
+/// The cross-component digest channel (interface-contract item 2:
+/// `SHA_DIGEST ↔ ECDSA_Z`). **This is the one relation the SHA-256 AIR uses
+/// from the *provider* side**: on the final block of a multi-block hash it
+/// *yields* the 32 digest bytes (`add_to_relation(&digest, −is_last_block,
+/// &[b0..b31])`), so a downstream module (the P256 ECDSA `z` binding;
+/// the field predicates reuse the same byte-bridge machinery) can
+/// *require* them. Unlike every other channel here, the yield has no
+/// in-module consumer, so it leaves the SHA module's claimed-sum non-zero —
+/// it only cancels once a consumer requires the same bytes, which is what
+/// makes the combined proof bind "the signature is over the hash of this
+/// preimage". The yield is gated behind `Sha256Eval::expose_digest` so the
+/// standalone SHA proof (no consumer) still self-balances.
+///
+/// **Representation bridge (interface-contract item 4).** SHA holds the
+/// digest as 16-bit `(lo, hi)` limbs; P256 holds `z` as 13-bit limbs. The
+/// two cannot be equated limb-for-limb, so the relation carries **bytes**:
+/// the SHA AIR decomposes each limb into two bytes (`limb = 256·b1 + b0`)
+/// and yields the 32 big-endian bytes. The byte values are tied to the
+/// (already `Range_16`-pinned) `h_out` limbs by that decomposition
+/// constraint; the **`[0, 256)` range-check of each byte is the consumer's
+/// responsibility** (P256 already witnesses and range-checks `z`'s byte
+/// decomposition). A consumer that requires out-of-range bytes cannot match
+/// the honest in-range bytes a correct prover yields, so the balance fails
+/// closed — see the relation's use in `crate::constraints::Sha256Eval`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DigestRelation {
+    pub digest: Sha256Digest,
+}
+
+impl DigestRelation {
+    pub fn draw(channel: &mut impl Channel) -> Self {
+        Self {
+            digest: Sha256Digest::draw(channel),
+        }
+    }
+
+    pub fn dummy() -> Self {
+        Self {
+            digest: Sha256Digest::dummy(),
+        }
+    }
+}
+
+impl Default for DigestRelation {
+    fn default() -> Self {
+        Self::dummy()
+    }
+}
+
+/// The cross-component credential-field channel is **shared** with the predicate
+/// consumers, so — like [`Sha256Digest`] — the relation type is
+/// defined once in [`air_core`] and aliased here. Width 3: `(field_id,
+/// byte_index, value)`.
+pub use air_core::relations::FieldBytesRelation as Sha256Field;
+
+// The shared arity must match this crate's expectation, or the provider and
+// consumer would size their relation tuples differently and silently fail to
+// balance.
+pub const FIELD_REL_SIZE: usize = air_core::relations::FIELD_BYTES_ARITY;
+
+/// The cross-component credential-field channel (interface-contract item 3:
+/// `CRED_FIELD ↔ PREDICATE_INPUT`). The second cross-module channel the SHA-256
+/// AIR uses from the **provider** side: when a non-empty
+/// [`crate::field_exposure::FieldExposure`] is configured, on the **first block**
+/// it *yields* one `(field_id, byte_index, value)` tuple per exposed credential
+/// byte (`add_to_relation(&field, −is_first_block, &[field_id, byte_index,
+/// value])`), so a downstream predicate can *require* exactly the byte window of
+/// the field it binds. Like the digest yield, these terms have no
+/// in-module consumer — they leave the SHA module's claimed sum non-zero until a
+/// predicate consumer cancels them — so they are gated behind the field-exposure
+/// spec (empty by default), keeping a standalone SHA proof self-balancing.
+///
+/// **Representation bridge (interface-contract item 4).** The message words live
+/// in the trace as 16-bit `(lo, hi)` limbs; the field bytes are their big-endian
+/// decomposition (`limb = 256·b1 + b0`), the same byte bridge the digest uses.
+/// The byte values are tied to the (split-and-pack-pinned) message-word limbs by
+/// that decomposition. Unlike the digest — which exposes whole words, so a
+/// limb's two bytes are *both* yielded and the consumer's per-byte range-check
+/// pins the split — a field window can be **sub-word**: an edge byte shares a
+/// limb with a non-exposed neighbour, and a 16-bit limb's split `256·b_hi + b_lo`
+/// is unique only when *both* bytes are in `[0, 256)`. So the provider itself
+/// range-checks **every** exposed byte to `[0, 256)` (two `Range16` lookups per
+/// byte; see [`crate::field_exposure::BYTE_RANGE_CHECK_OFFSET`]). With both bytes
+/// of every touched limb pinned and the limb already in `[0, 2¹⁶)`, each yielded
+/// byte is exactly the signed preimage byte — the binding holds without trusting
+/// the consumer to range-check anything.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FieldRelation {
+    pub field: Sha256Field,
+}
+
+impl FieldRelation {
+    pub fn draw(channel: &mut impl Channel) -> Self {
+        Self {
+            field: Sha256Field::draw(channel),
+        }
+    }
+
+    pub fn dummy() -> Self {
+        Self {
+            field: Sha256Field::dummy(),
+        }
+    }
+}
+
+impl Default for FieldRelation {
+    fn default() -> Self {
+        Self::dummy()
+    }
+}
+
 /// All LogUp channels the SHA-256 AIR consumes today: the eight `Σ`/`σ`
 /// decode-table channels, the packed Maj/Ch pair, the chunk-wise `xor_8`
 /// channel, the eight split-and-pack channels, and the four range-check
@@ -301,6 +433,15 @@ pub struct Sha256Relations {
     pub xor_8: Xor8Relation,
     pub split_pack: SplitPackRelations,
     pub range: RangeRelations,
+    /// Cross-component digest channel — provider side. Always drawn so the
+    /// relation bundle is uniform; only *used* when `Sha256Eval::expose_digest`
+    /// is set (the combined-proof path). See [`DigestRelation`].
+    pub digest: DigestRelation,
+    /// Cross-component credential-field channel — provider side. Always drawn so
+    /// the relation bundle is uniform; only *used* when a non-empty field
+    /// exposure is configured (the predicate-binding path). See
+    /// [`FieldRelation`].
+    pub field: FieldRelation,
 }
 
 impl Sha256Relations {
@@ -318,6 +459,14 @@ impl Sha256Relations {
             xor_8: Xor8Relation::draw(channel),
             split_pack: SplitPackRelations::draw(channel),
             range: RangeRelations::draw(channel),
+            // Drawn after every standalone channel so adding it leaves their
+            // challenges unchanged (the draw order above is frozen — see the
+            // doc-comment). Prover and verifier both draw it whether or not
+            // the digest is exposed, keeping the transcript symmetric.
+            digest: DigestRelation::draw(channel),
+            // Drawn last (after the digest), same reasoning: additive, so the
+            // field channel never perturbs an earlier channel's challenge.
+            field: FieldRelation::draw(channel),
         }
     }
 
@@ -331,6 +480,8 @@ impl Sha256Relations {
             xor_8: Xor8Relation::dummy(),
             split_pack: SplitPackRelations::dummy(),
             range: RangeRelations::dummy(),
+            digest: DigestRelation::dummy(),
+            field: FieldRelation::dummy(),
         }
     }
 }
@@ -439,6 +590,40 @@ mod tests {
             assert_eq!(size, RANGE_REL_SIZE);
         }
         assert_eq!(RANGE_REL_SIZE, 1);
+    }
+
+    /// The cross-component digest channel exposes row width 32 — the 32
+    /// big-endian bytes of the SHA-256 digest. A regression here would
+    /// desync the provider tuple from the consumer (P256 `z`) tuple and
+    /// silently break the combined-proof balance.
+    #[test]
+    fn digest_relation_has_row_width_32() {
+        use stwo::core::fields::m31::BaseField;
+        use stwo::core::fields::qm31::SecureField;
+        use stwo_constraint_framework::Relation;
+        let r = Sha256Relations::dummy();
+        assert_eq!(
+            <Sha256Digest as Relation<BaseField, SecureField>>::get_size(&r.digest.digest),
+            DIGEST_REL_SIZE
+        );
+        assert_eq!(DIGEST_REL_SIZE, 32);
+    }
+
+    /// The cross-component credential-field channel exposes row width 3 —
+    /// `(field_id, byte_index, value)`. A regression here would desync the
+    /// provider tuple from the predicate consumer and silently break
+    /// the combined-proof balance.
+    #[test]
+    fn field_relation_has_row_width_3() {
+        use stwo::core::fields::m31::BaseField;
+        use stwo::core::fields::qm31::SecureField;
+        use stwo_constraint_framework::Relation;
+        let r = Sha256Relations::dummy();
+        assert_eq!(
+            <Sha256Field as Relation<BaseField, SecureField>>::get_size(&r.field.field),
+            FIELD_REL_SIZE
+        );
+        assert_eq!(FIELD_REL_SIZE, 3);
     }
 
     /// The four σ-side split-and-pack channels expose row width 3.

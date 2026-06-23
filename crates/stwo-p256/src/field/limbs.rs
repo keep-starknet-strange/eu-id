@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::EvalAtRow;
 use stwo_p256_utils::constants::{LIMB_BITS, N_LIMBS};
@@ -9,7 +10,7 @@ use crate::types::U256;
 /// A P-256-sized integer decomposed into N_LIMBS limbs of LIMB_BITS each.
 ///
 /// Limb 0 is the least significant.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct P256BigInt<F>(pub [F; N_LIMBS]);
 
 /// A P-256 bigint whose limbs are values read by an AIR evaluator.

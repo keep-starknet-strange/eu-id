@@ -2,6 +2,7 @@ use crate::age::strategy::range_check::lookup_elements::LookupElements;
 use crate::age::strategy::range_check::witness::WitnessData;
 use crate::age::types::PublicInput;
 use crate::utils::field_const;
+use air_core::relations::{field_id, FieldBytesRelation};
 use num_traits::One;
 use stwo::core::fields::m31::BaseField;
 use stwo_constraint_framework::{EvalAtRow, FrameworkComponent, FrameworkEval, RelationEntry};
@@ -10,6 +11,12 @@ use stwo_constraint_framework::{EvalAtRow, FrameworkComponent, FrameworkEval, Re
 pub struct AgeRangeCheckEval {
     pub(super) public: PublicInput,
     pub(super) lookup_elements: LookupElements,
+    /// The shared credential-field channel, when the DOB↔credential binding is
+    /// wired. `None` for a standalone age proof — then this component is
+    /// byte-for-byte the unbound predicate and stays internally balanced.
+    /// `Some(relation)` adds the three binding columns, the byte↔packed
+    /// reconciliation, and the four DOB-byte *require* terms.
+    pub(super) dob_binding: Option<FieldBytesRelation>,
 }
 
 impl FrameworkEval for AgeRangeCheckEval {
@@ -32,6 +39,26 @@ impl FrameworkEval for AgeRangeCheckEval {
         let year_delta = eval.next_trace_mask();
         let day_borrow = eval.next_trace_mask();
         let month_borrow = eval.next_trace_mask();
+
+        // Credential-field binding columns. Read here, immediately after
+        // the base witness columns, so they occupy this component's trace slots
+        // `9..12` — the order the witness generator commits them and the
+        // `air_core` allocator assigns. The base-value clones are captured before
+        // the statement constraints below consume `birth_*`.
+        let dob_binding = self.dob_binding.as_ref().map(|relation| {
+            let bind_active = eval.next_trace_mask();
+            let year_hi = eval.next_trace_mask();
+            let year_lo = eval.next_trace_mask();
+            (
+                relation,
+                bind_active,
+                year_hi,
+                year_lo,
+                birth_year.clone(),
+                birth_month.clone(),
+                birth_day.clone(),
+            )
+        });
 
         eval.add_constraint(day_borrow.clone() * (field_const::<E>(1) - day_borrow.clone()));
         eval.add_constraint(month_borrow.clone() * (field_const::<E>(1) - month_borrow.clone()));
@@ -85,6 +112,39 @@ impl FrameworkEval for AgeRangeCheckEval {
             E::EF::one(),
             &[year_delta],
         ));
+
+        // Credential-field binding, after the statement's own lookups so
+        // the existing interaction columns are unchanged and the binding
+        // fractions append. `bind_active` is boolean and selects the single row
+        // whose requires fire; the reconciliation ties the packed `birth_year` to
+        // its two exposed bytes (`month`/`day` are single bytes, bound directly);
+        // the four requires cancel SHA's `−is_first_block` yield iff the bytes
+        // the age module reasons about are the credential's signed DOB bytes.
+        if let Some((relation, bind_active, year_hi, year_lo, birth_year, birth_month, birth_day)) =
+            dob_binding
+        {
+            eval.add_constraint(bind_active.clone() * (field_const::<E>(1) - bind_active.clone()));
+            eval.add_constraint(
+                birth_year - field_const::<E>(256) * year_hi.clone() - year_lo.clone(),
+            );
+            let mult = E::EF::from(bind_active);
+            for (byte_index, value) in [
+                (0u32, year_hi),
+                (1, year_lo),
+                (2, birth_month),
+                (3, birth_day),
+            ] {
+                eval.add_to_relation(RelationEntry::new(
+                    relation,
+                    mult.clone(),
+                    &[
+                        field_const::<E>(field_id::DOB),
+                        field_const::<E>(byte_index),
+                        value,
+                    ],
+                ));
+            }
+        }
 
         eval.finalize_logup();
         eval

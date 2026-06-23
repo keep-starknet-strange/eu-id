@@ -18,6 +18,7 @@
 //! single relation entry.
 
 use core::array;
+use serde::{Deserialize, Serialize};
 use stwo::core::channel::Channel;
 use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::{SecureField, SECURE_EXTENSION_DEGREE};
@@ -450,7 +451,7 @@ impl FrameworkEval for GammaTallEval {
 }
 
 /// Interaction claim of one tall instance.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GammaTallInteractionClaim {
     /// The component's logup claimed sum (range uses + digest uses).
     pub claimed_sum: SecureField,

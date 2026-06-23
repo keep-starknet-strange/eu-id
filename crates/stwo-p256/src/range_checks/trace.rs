@@ -1,6 +1,7 @@
 //! Prover-side trace generation for the range-check providers.
 
 use num_traits::{One, Zero};
+use serde::{Deserialize, Serialize};
 use stwo::{
     core::{
         channel::Channel,
@@ -46,7 +47,7 @@ fn coset_order_to_circle_domain_order(
 }
 
 /// Prover-side claim for a [`super::RangeCheckEval`] provider.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RangeCheckClaim {
     pub log_size: u32,
 }

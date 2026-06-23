@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use stwo::core::{
@@ -87,7 +88,7 @@ impl FakeGlvSelectorClaim {
 
 pub type FakeGlvSelectorAirComponent = FrameworkComponent<FakeGlvSelectorAirEval>;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FakeGlvSelectorAirProofClaim {
     pub log_size: u32,
 }
@@ -104,7 +105,7 @@ impl FakeGlvSelectorAirProofClaim {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FakeGlvSelectorAirInteractionClaim {
     pub claimed_sum: SecureField,
 }

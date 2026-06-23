@@ -19,18 +19,21 @@
 //! [`FinalCheckHintRelation`] keyed `(sig_id, cert_id, point)`; this component
 //! CONSUMES `R_1` (cert0 = `u1·G`) and `R_2` (cert1 = `u2·Q`).
 //!
-//! # KNOWN COMPLETENESS GAP (pending fix): mixed sign bits
+//! # Mixed sign bits: orienting `R_2` by the proven fake-GLV signs
 //!
-//! This component currently computes `S = R_1 + R_2` and binds `r_x = x(S)`.
-//! That equals the ECDSA target `x(h_1 + h_2)` **only when `b_1 == b_2`**
-//! (then `R_1 + R_2 = (-1)^{b}(h_1 + h_2)` and `x` is sign-invariant). When the
-//! two certs decompose to opposite signs (`b_1 != b_2`, ~50% of real signatures
-//! since `u_1, u_2` are independent), `R_1 + R_2 = ±(h_1 - h_2)` and the bound
-//! `r_x` is wrong, so such a (valid!) signature fails to prove with
-//! `RelationImbalance { FinalAddOutput }`. This is a completeness gap, not a
-//! forgery. Fix: consume each proven `b_i` (via a new sign relation provided by
-//! `fake_glv_scalar`) and conditionally negate `R_2` by `d = b_1 XOR b_2`
-//! before the add, so the component computes `x(R_1 + (-1)^d R_2) = x(h_1+h_2)`.
+//! Binding `r_x = x(R_1 + R_2)` directly would equal the ECDSA target
+//! `x(h_1 + h_2)` **only when `b_1 == b_2`** (then `R_1 + R_2 =
+//! (-1)^{b}(h_1 + h_2)` and `x` is sign-invariant). When the two certs
+//! decompose to opposite signs (`b_1 != b_2`, ~50% of real signatures since
+//! `u_1, u_2` are independent), `R_1 + R_2 = ±(h_1 - h_2)` and that bound `r_x`
+//! would be wrong. To bind the correct x-coordinate in both cases the component
+//! consumes each cert's proven `b_i` (`s2_sign_bit`) from `fake_glv_scalar`
+//! over [`FinalAddSignRelation`], witnesses `d = b_1 ⊕ b_2` (constrained
+//! `d = b_1 + b_2 − 2·b_1·b_2`), and conditionally negates `R_2`'s
+//! y-coordinate by `(-1)^d` (the `x` and infinity flags are sign-invariant)
+//! before the add — so it computes `x(R_1 + (-1)^d R_2) = x(h_1 + h_2)` for
+//! both equal and mixed signs. Regression:
+//! `current_p256_monolithic_proves_mixed_sign_bit_signature`.
 //!
 //! # Architecture (mirrors `public_key_curve_air.rs`)
 //!
@@ -90,6 +93,7 @@
 //! `x3` is provided to `final_check_air` on [`FinalAddOutputRelation`] keyed
 //! `(sig_id, x3[N_LIMBS])`, which the final check consumes as its `r_x`.
 
+use serde::{Deserialize, Serialize};
 use stwo::core::{
     air::Component, channel::Channel, fields::m31::M31, fields::qm31::SecureField, pcs::TreeVec,
     ColumnVec,
@@ -151,7 +155,7 @@ const FINAL_ADD_QUOTIENT_BOUND: i64 = 2;
 // Components bundle
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FinalAddLogSizes {
     check: u32,
     /// First hinted-mul `source_index` reserved for final-add muls (claim
@@ -321,7 +325,7 @@ impl FinalAddComponents {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FinalAddProofClaim {
     log_sizes: FinalAddLogSizes,
 }

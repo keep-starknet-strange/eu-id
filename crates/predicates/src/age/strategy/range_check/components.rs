@@ -9,11 +9,15 @@ use crate::age::strategy::range_check::preprocessed::{
     DayDeltaTableComponent, MonthDeltaTableComponent, Preprocessed, YearDeltaTableComponent,
 };
 use crate::{AgeBounds, PublicInput};
+use air_core::relations::FieldBytesRelation;
 use stwo::core::fields::qm31::QM31;
+use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::TraceLocationAllocator;
 
-fn make_allocator(bounds: &AgeBounds) -> TraceLocationAllocator {
-    TraceLocationAllocator::new_with_preprocessed_columns(&[
+/// Preprocessed column ids this strategy contributes, in commit order. The
+/// orchestrator concatenates these to seed the shared allocator.
+pub fn preprocessed_column_ids(bounds: &AgeBounds) -> Vec<PreProcessedColumnId> {
+    vec![
         calendar_max_days_col_id(bounds),
         calendar_index_col_id(bounds),
         valid_day_max_days_col_id(),
@@ -21,13 +25,15 @@ fn make_allocator(bounds: &AgeBounds) -> TraceLocationAllocator {
         Preprocessed::day_range().id(),
         Preprocessed::month_range().id(),
         Preprocessed::year_range(bounds).id(),
-    ])
+    ]
 }
 
 #[allow(clippy::too_many_arguments)]
 pub fn components(
+    allocator: &mut TraceLocationAllocator,
     public: &PublicInput,
     lookup_elements: LookupElements,
+    dob_binding: Option<FieldBytesRelation>,
     age_claimed_sum: QM31,
     cal_claimed_sum: QM31,
     valid_day_claimed_sum: QM31,
@@ -42,17 +48,17 @@ pub fn components(
     MonthDeltaTableComponent,
     YearDeltaTableComponent,
 ) {
-    let mut allocator = make_allocator(&public.bounds);
     let age_component = AgeRangeCheckComponent::new(
-        &mut allocator,
+        allocator,
         AgeRangeCheckEval {
             public: *public,
             lookup_elements: lookup_elements.clone(),
+            dob_binding,
         },
         age_claimed_sum,
     );
     let cal_component = CalendarTableComponent::new(
-        &mut allocator,
+        allocator,
         CalendarTableEval {
             bounds: public.bounds,
             lookup_elements: lookup_elements.calendar,
@@ -60,24 +66,24 @@ pub fn components(
         cal_claimed_sum,
     );
     let valid_day_component = ValidDayTableComponent::new(
-        &mut allocator,
+        allocator,
         ValidDayTableEval {
             lookup_elements: lookup_elements.valid_day,
         },
         valid_day_claimed_sum,
     );
     let day_delta_component = DayDeltaTableComponent::new(
-        &mut allocator,
+        allocator,
         Preprocessed::day_range().eval(lookup_elements.day_delta),
         day_delta_claimed_sum,
     );
     let month_delta_component = MonthDeltaTableComponent::new(
-        &mut allocator,
+        allocator,
         Preprocessed::month_range().eval(lookup_elements.month_delta),
         month_delta_claimed_sum,
     );
     let year_delta_component = YearDeltaTableComponent::new(
-        &mut allocator,
+        allocator,
         Preprocessed::year_range(&public.bounds).eval(lookup_elements.year_delta),
         year_delta_claimed_sum,
     );

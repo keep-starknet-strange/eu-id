@@ -51,6 +51,7 @@
 //! be bound to `PublicEcdsaInstanceRelation` (the public-key columns), exactly
 //! as `scalar/setup_air.rs` binds its public instance.
 
+use serde::{Deserialize, Serialize};
 use stwo::core::{
     air::Component,
     channel::Channel,
@@ -791,7 +792,7 @@ fn fixed_limb<E: EvalAtRow>(value: &P256M31BigInt, index: usize) -> E::F {
 // Components bundle
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PublicKeyCurveSliceLogSizes {
     curve_check: u32,
     /// First hinted-mul `source_index` reserved for the curve-check muls.
@@ -891,7 +892,7 @@ impl PublicKeyCurveSliceRelations {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PublicKeyCurveSliceInteractionClaim {
     claimed_sum: SecureField,
     range13: RangeCheckInteractionClaim,
@@ -1034,7 +1035,7 @@ impl PublicKeyCurveSliceComponents {
 // Proof claim + proof object
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublicKeyCurveSliceProofClaim {
     log_sizes: PublicKeyCurveSliceLogSizes,
 }

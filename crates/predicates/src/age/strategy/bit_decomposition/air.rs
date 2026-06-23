@@ -1,23 +1,25 @@
-//! Wraps the bit-decomposition age strategy as [`crate::air`] proving modules.
+//! Wraps the bit-decomposition age strategy as [`air_core`] proving modules.
 //!
 //! [`BitDecompositionProver`] holds the witness and contributes all columns
 //! (prover side). [`BitDecompositionVerifier`] holds only the public input and
 //! the claimed sums from the proof (verifier side).
 
 use crate::age::calendar::{calendar_log_size, valid_date_ranges};
-use crate::age::strategy::bit_decomposition::components::components;
+use crate::age::strategy::bit_decomposition::components::{components, preprocessed_column_ids};
 use crate::age::strategy::bit_decomposition::interaction::InteractionTraces;
 use crate::age::strategy::bit_decomposition::lookup_elements::LookupElements;
 use crate::age::strategy::bit_decomposition::preprocessed::Preprocessed;
 use crate::age::strategy::bit_decomposition::witness::WitnessData;
 use crate::age::types::{PublicInput, Witness};
-use crate::air::{Air, AirProver, TreeLayout};
+use air_core::{Air, AirProver, TreeLayout};
 use stwo::core::air::Component;
 use stwo::core::channel::Blake2sChannel;
 use stwo::core::fields::qm31::QM31;
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::{ComponentProver, TreeBuilder};
+use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
+use stwo_constraint_framework::TraceLocationAllocator;
 
 /// Column layout shared by both prover and verifier: it depends only on the
 /// public input (its bounds), never on the witness.
@@ -48,6 +50,7 @@ pub struct BitDecompositionProver {
     witness_data: WitnessData,
     lookup_elements: Option<LookupElements>,
     claimed_sums: Vec<QM31>,
+    components: Option<BitDecompositionComponents>,
 }
 
 impl BitDecompositionProver {
@@ -60,6 +63,7 @@ impl BitDecompositionProver {
             witness_data,
             lookup_elements: None,
             claimed_sums: Vec::new(),
+            components: None,
         }
     }
 
@@ -67,6 +71,12 @@ impl BitDecompositionProver {
         self.lookup_elements
             .as_ref()
             .expect("relations are drawn before they are used")
+    }
+
+    fn built_components(&self) -> &BitDecompositionComponents {
+        self.components
+            .as_ref()
+            .expect("components are built before they are borrowed")
     }
 }
 
@@ -87,10 +97,21 @@ impl Air for BitDecompositionProver {
         self.claimed_sums.clone()
     }
 
-    fn components(&self) -> Vec<Box<dyn Component>> {
-        let (age, cal, valid_day) =
-            build_components(&self.public, self.relations().clone(), &self.claimed_sums);
-        vec![Box::new(age), Box::new(cal), Box::new(valid_day)]
+    fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
+        preprocessed_column_ids(&self.public.bounds)
+    }
+
+    fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
+        self.components = Some(build_components(
+            allocator,
+            &self.public,
+            self.relations().clone(),
+            &self.claimed_sums,
+        ));
+    }
+
+    fn components(&self) -> Vec<&dyn Component> {
+        component_refs(self.built_components())
     }
 }
 
@@ -118,10 +139,8 @@ impl AirProver for BitDecompositionProver {
         ];
     }
 
-    fn prover_components(&self) -> Vec<Box<dyn ComponentProver<SimdBackend>>> {
-        let (age, cal, valid_day) =
-            build_components(&self.public, self.relations().clone(), &self.claimed_sums);
-        vec![Box::new(age), Box::new(cal), Box::new(valid_day)]
+    fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
+        prover_component_refs(self.built_components())
     }
 }
 
@@ -131,6 +150,7 @@ pub struct BitDecompositionVerifier {
     public: PublicInput,
     lookup_elements: Option<LookupElements>,
     claimed_sums: Vec<QM31>,
+    components: Option<BitDecompositionComponents>,
 }
 
 impl BitDecompositionVerifier {
@@ -139,7 +159,20 @@ impl BitDecompositionVerifier {
             public: *public,
             lookup_elements: None,
             claimed_sums,
+            components: None,
         }
+    }
+
+    fn relations(&self) -> &LookupElements {
+        self.lookup_elements
+            .as_ref()
+            .expect("relations are drawn before they are used")
+    }
+
+    fn built_components(&self) -> &BitDecompositionComponents {
+        self.components
+            .as_ref()
+            .expect("components are built before they are borrowed")
     }
 }
 
@@ -160,14 +193,21 @@ impl Air for BitDecompositionVerifier {
         self.claimed_sums.clone()
     }
 
-    fn components(&self) -> Vec<Box<dyn Component>> {
-        let lookup_elements = self
-            .lookup_elements
-            .clone()
-            .expect("relations are drawn before they are used");
-        let (age, cal, valid_day) =
-            build_components(&self.public, lookup_elements, &self.claimed_sums);
-        vec![Box::new(age), Box::new(cal), Box::new(valid_day)]
+    fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
+        preprocessed_column_ids(&self.public.bounds)
+    }
+
+    fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
+        self.components = Some(build_components(
+            allocator,
+            &self.public,
+            self.relations().clone(),
+            &self.claimed_sums,
+        ));
+    }
+
+    fn components(&self) -> Vec<&dyn Component> {
+        component_refs(self.built_components())
     }
 }
 
@@ -178,17 +218,30 @@ type BitDecompositionComponents = (
 );
 
 /// Assemble the three components for the bit-decomposition strategy from the
-/// drawn relations and the claimed sums (in `[age, cal, valid_day]` order).
+/// shared allocator, the drawn relations, and the claimed sums (in
+/// `[age, cal, valid_day]` order).
 fn build_components(
+    allocator: &mut TraceLocationAllocator,
     public: &PublicInput,
     lookup_elements: LookupElements,
     claimed_sums: &[QM31],
 ) -> BitDecompositionComponents {
     components(
+        allocator,
         public,
         lookup_elements,
         claimed_sums[0],
         claimed_sums[1],
         claimed_sums[2],
     )
+}
+
+/// Borrow the three built components as `dyn Component`, in commit order.
+fn component_refs(c: &BitDecompositionComponents) -> Vec<&dyn Component> {
+    vec![&c.0, &c.1, &c.2]
+}
+
+/// Borrow the three built components as `dyn ComponentProver`, in commit order.
+fn prover_component_refs(c: &BitDecompositionComponents) -> Vec<&dyn ComponentProver<SimdBackend>> {
+    vec![&c.0, &c.1, &c.2]
 }
