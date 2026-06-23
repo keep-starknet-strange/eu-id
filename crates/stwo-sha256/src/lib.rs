@@ -32,7 +32,7 @@
 //!   crate's API so migration is a one-import swap (see the module-level
 //!   docs for the upstream-context survey and API-shape rationale).
 //! - [`field_exposure`] — optional spec for exposing credential-field byte
-//!   windows of the preimage as a LogUp provider (`docs/ROADMAP_E2E` §6.5), the
+//!   windows of the preimage as a LogUp provider, the
 //!   producer half of the SHA→predicate `CRED_FIELD ↔ PREDICATE_INPUT` binding.
 //! - [`witness`] — full witness emitter — every value the trace stores per row.
 //! - [`trace`] — column layout and materialisation from a witness.

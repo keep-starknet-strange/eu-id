@@ -11,13 +11,13 @@
 //!
 //! Today this hosts two byte-level bridges:
 //!
-//! - the SHA→consumer **digest byte bridge** (`docs/ROADMAP_E2E` §6.3): SHA-256
-//!   yields its 32-byte final-block digest; the P256 ECDSA module requires the
-//!   same 32 bytes as its message hash `z`.
-//! - the SHA→predicate **credential-field byte bridge** (`docs/ROADMAP_E2E`
-//!   §6.5): SHA-256 yields the byte windows of the signed credential's fields
-//!   (date of birth, nationality); each predicate requires exactly those bytes
-//!   so the attribute it reasons about is the one that was signed (§6.6/§6.7).
+//! - the SHA→consumer **digest byte bridge**: SHA-256 yields its 32-byte
+//!   final-block digest; the P256 ECDSA module requires the same 32 bytes as its
+//!   message hash `z`.
+//! - the SHA→predicate **credential-field byte bridge**: SHA-256 yields the byte
+//!   windows of the signed credential's fields (date of birth, nationality);
+//!   each predicate requires exactly those bytes so the attribute it reasons
+//!   about is the one that was signed.
 //!
 //! Both reuse the same shape — expose some trace bytes as an 8-bit LogUp
 //! relation, share the drawn `LookupElements` via a [`SharedRelation`] handle.
@@ -103,9 +103,9 @@ pub type SharedDigestRelation = SharedRelation<DigestBytesRelation>;
 
 /// Number of base-field cells in the cross-module credential-field relation:
 /// `(field_id, byte_index, value)`. The SHA preimage field-exposure provider
-/// (`docs/ROADMAP_E2E` §6.5) yields one such tuple per exposed credential byte;
-/// each predicate consumer (§6.6/§6.7) requires exactly the tuples of the field
-/// it binds. Keying on `(field_id, byte_index)` lets one shared channel carry
+/// yields one such tuple per exposed credential byte; each predicate consumer
+/// requires exactly the tuples of the field it binds. Keying on
+/// `(field_id, byte_index)` lets one shared channel carry
 /// every field's bytes without an index column — the producer and consumer pin
 /// the same position by emitting the same first two cells.
 pub const FIELD_BYTES_ARITY: usize = 3;
@@ -125,10 +125,10 @@ pub type SharedFieldRelation = SharedRelation<FieldBytesRelation>;
 /// credential exposes exactly these two fields (`docs/credential-format.md`).
 pub mod field_id {
     /// The date-of-birth window (`year_hi, year_lo, month, day`), bound by the
-    /// age predicate (§6.6).
+    /// age predicate.
     pub const DOB: u32 = 0;
     /// The nationality window (`code_hi, code_lo`), bound by the nationality
-    /// predicate (§6.7).
+    /// predicate.
     pub const NATIONALITY: u32 = 1;
 }
 

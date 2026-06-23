@@ -44,7 +44,7 @@ impl InteractionTraces {
         }
         col_gen.finalize_col();
 
-        // §6.7 credential-field binding: require the two nationality bytes on the
+        // The credential-field binding: require the two nationality bytes on the
         // shared `Sha256Field` channel, one solo column per byte. The numerator
         // is the `bind_active` selector (1 on a single row), so each byte is
         // required exactly once — matching SHA's single `−is_first_block` yield.

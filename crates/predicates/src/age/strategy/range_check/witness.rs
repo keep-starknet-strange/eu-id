@@ -29,7 +29,7 @@ pub struct WitnessData {
     pub month_delta_val: u32,
     pub year_delta_val: u32,
     /// The four credential DOB byte values `[year_hi, year_lo, month, day]` when
-    /// the §6.6 binding is wired (`Some`) — the require tuples the interaction
+    /// the credential binding is wired (`Some`) — the require tuples the interaction
     /// trace emits against the shared `Sha256Field` channel. `None` for a
     /// standalone age proof, where [`witness_trace`](Self::witness_trace) holds
     /// only the nine base columns.
@@ -155,7 +155,7 @@ fn gen_trace(witness: &Witness, bind_dob: bool) -> Trace {
     push_repeated_column(&mut cols, day_borrow, LOG_SIZE);
     push_repeated_column(&mut cols, month_borrow, LOG_SIZE);
 
-    // §6.6 credential-field binding columns (slots 9..12). `bind_active` selects
+    // The credential-field binding columns (slots 9..12). `bind_active` selects
     // the single row whose DOB-byte requires fire; `year_hi`/`year_lo` are the
     // big-endian birth-year bytes the reconciliation constraint ties to the
     // packed `birth_year`. Repeated so the always-on reconciliation holds on
@@ -170,11 +170,11 @@ fn gen_trace(witness: &Witness, bind_dob: bool) -> Trace {
     cols
 }
 
-/// A column that is `1` on exactly one row and `0` on the rest — the §6.6
-/// single-row require selector. Any single fixed row works: the age witness
-/// repeats its columns across all rows, and the boolean constraint plus the
-/// cross-module balance force this column to fire once with the credential's
-/// bytes.
+/// A column that is `1` on exactly one row and `0` on the rest — the
+/// credential-field binding single-row require selector. Any single fixed row
+/// works: the age witness repeats its columns across all rows, and the boolean
+/// constraint plus the cross-module balance force this column to fire once with
+/// the credential's bytes.
 fn push_single_active(
     columns: &mut Vec<CircleEvaluation<SimdBackend, M31, stwo::prover::poly::BitReversedOrder>>,
     log_size: u32,

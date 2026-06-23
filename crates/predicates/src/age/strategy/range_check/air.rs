@@ -23,7 +23,7 @@ use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::TraceLocationAllocator;
 
 /// Column layout shared by both prover and verifier: it depends on the public
-/// input (its bounds) and whether the §6.6 DOB binding is wired (`bind_dob`),
+/// input (its bounds) and whether the DOB binding is wired (`bind_dob`),
 /// never on the witness values. Binding adds three trace columns (the
 /// `bind_active` selector + the two birth-year bytes) and four LogUp fractions
 /// (the DOB-byte requires) to the age component.
@@ -76,7 +76,7 @@ pub struct RangeCheckProver {
     witness: Witness,
     preprocessed: Preprocessed,
     witness_data: WitnessData,
-    /// Shared `Sha256Field` channel when the §6.6 DOB binding is wired. `None`
+    /// Shared `Sha256Field` channel when the DOB binding is wired. `None`
     /// for a standalone age proof (the module stays internally balanced).
     dob_binding: Option<SharedFieldRelation>,
     lookup_elements: Option<LookupElements>,
@@ -101,10 +101,10 @@ impl RangeCheckProver {
     }
 
     /// Bind the date of birth this module reasons about to the credential's
-    /// signed DOB bytes (`docs/ROADMAP_E2E` §6.6): require the four DOB bytes on
-    /// the shared `Sha256Field` channel `handle`, which the SHA module yields.
-    /// Off by default; regenerates the witness with the binding columns. The
-    /// matching [`RangeCheckVerifier`] must set the same handle.
+    /// signed DOB bytes: require the four DOB bytes on the shared `Sha256Field`
+    /// channel `handle`, which the SHA module yields. Off by default; regenerates
+    /// the witness with the binding columns. The matching [`RangeCheckVerifier`]
+    /// must set the same handle.
     pub fn with_dob_binding(mut self, handle: SharedFieldRelation) -> Self {
         self.witness_data = WitnessData::new(&self.witness, &self.preprocessed, true);
         self.dob_binding = Some(handle);
@@ -330,7 +330,7 @@ fn prover_component_refs(c: &RangeCheckComponents) -> Vec<&dyn ComponentProver<S
 
 #[cfg(test)]
 mod binding_tests {
-    //! Isolated DOB↔credential binding (§6.6) tests: drive the bound age module
+    //! Isolated DOB↔credential binding tests: drive the bound age module
     //! against a *synthetic* field producer that plays SHA's role (yields the
     //! four DOB bytes on the shared `Sha256Field` channel). This exercises the
     //! whole bound path — the binding layout, the boolean/reconciliation

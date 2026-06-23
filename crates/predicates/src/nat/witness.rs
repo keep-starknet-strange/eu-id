@@ -18,10 +18,11 @@ pub struct WitnessData {
     #[allow(dead_code)]
     pub nat_index: usize,
     /// The two credential nationality byte values `[code_hi, code_lo]` (big-endian)
-    /// when the §6.7 binding is wired (`Some`) — the require tuples the interaction
-    /// trace emits against the shared `Sha256Field` channel. `None` for a
-    /// standalone nationality proof, where [`witness_trace`](Self::witness_trace)
-    /// holds only the single base `nationality` column.
+    /// when the credential binding is wired (`Some`) — the require tuples the
+    /// interaction trace emits against the shared `Sha256Field` channel. `None`
+    /// for a standalone nationality proof, where
+    /// [`witness_trace`](Self::witness_trace) holds only the single base
+    /// `nationality` column.
     pub nat_bytes: Option<[u32; 2]>,
 }
 
@@ -37,7 +38,7 @@ impl WitnessData {
         let mut witness_trace = Vec::new();
         push_repeated_column(&mut witness_trace, witness.nationality, LOG_N_LANES);
 
-        // §6.7 credential-field binding columns (slots 1..4). `bind_active`
+        // The credential-field binding columns (slots 1..4). `bind_active`
         // selects the single row whose nationality-byte requires fire;
         // `code_hi`/`code_lo` are the big-endian nationality bytes the
         // reconciliation constraint ties to the packed `nationality`. Repeated so
@@ -79,11 +80,11 @@ impl WitnessData {
     }
 }
 
-/// A column that is `1` on exactly one row and `0` on the rest — the §6.7
-/// single-row require selector. Any single fixed row works: the nat witness
-/// repeats its columns across all rows, and the boolean constraint plus the
-/// cross-module balance force this column to fire once with the credential's
-/// bytes.
+/// A column that is `1` on exactly one row and `0` on the rest — the
+/// credential-field binding single-row require selector. Any single fixed row
+/// works: the nat witness repeats its columns across all rows, and the boolean
+/// constraint plus the cross-module balance force this column to fire once with
+/// the credential's bytes.
 fn push_single_active(
     columns: &mut Vec<CircleEvaluation<SimdBackend, M31, stwo::prover::poly::BitReversedOrder>>,
     log_size: u32,

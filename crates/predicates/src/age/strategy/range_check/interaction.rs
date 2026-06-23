@@ -106,7 +106,7 @@ impl InteractionTraces {
         }
         col_gen.finalize_col();
 
-        // §6.6 credential-field binding: require the four DOB bytes on the shared
+        // The credential-field binding: require the four DOB bytes on the shared
         // `Sha256Field` channel, one solo column per byte. The numerator is the
         // `bind_active` selector (1 on a single row), so each byte is required
         // exactly once — matching SHA's single `−is_first_block` yield. Appended

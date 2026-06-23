@@ -124,7 +124,7 @@ pub struct P256Prover<'a> {
     relations: Option<P256CurrentAirRelations>,
     interaction_claim: Option<P256CurrentAirInteractionClaim>,
     components: Option<P256CurrentAirComponents>,
-    /// Cross-module `z` binding (§6.3): when set, the module additionally draws a
+    /// Cross-module `z` binding: when set, the module additionally draws a
     /// [`ScalarZRelation`], shares it through [`Self::scalar_z_handle`], and folds
     /// an analytic `−1/combine(sig_id, z)` provider term into its claimed sum —
     /// the counterpart the digest-bind bridge consumes. Off for a standalone
@@ -160,7 +160,7 @@ impl<'a> P256Prover<'a> {
         })
     }
 
-    /// Enable the cross-module `z` binding (§6.3): the module draws and shares a
+    /// Enable the cross-module `z` binding: the module draws and shares a
     /// [`ScalarZRelation`] through `handle` and yields the analytic
     /// `(sig_id, z)` provider term. Set this iff the composed proof includes the
     /// digest-bind bridge that consumes the same relation; the matching

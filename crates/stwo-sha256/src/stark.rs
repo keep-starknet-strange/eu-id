@@ -69,7 +69,7 @@ pub struct ProverConfig {
     /// 7-bit groups into ≤6-bit sub-groups (design §9.2), so every packed
     /// group is `≤ 6` bits and the table is `2^(3·6) = 2¹⁸ ≈ 262 k` rows —
     /// an 8× shrink from the old `W = 7` `2²¹` table that dominated prove
-    /// cost (perf-doc §3.1, §4.1). The packed-table size is `2^(3W)` rows.
+    /// cost. The packed-table size is `2^(3W)` rows.
     pub group_width: u32,
     /// Stwo PCS configuration (FRI + PoW parameters). Use
     /// `PcsConfig::default()` for the smallest sensible test config;

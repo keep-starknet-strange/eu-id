@@ -329,7 +329,7 @@ pub fn sigma_split_pack_multiplicities(
 ///   - One `Range_16` increment per terminal `h_out` limb (2 limbs × 8
 ///     words per block), plus — when `field_exposure` is non-empty — two
 ///     increments per exposed first-block field byte (the byte and the byte +
-///     [`BYTE_RANGE_CHECK_OFFSET`] of the `[0, 256)` range-check; §6.5).
+///     [`BYTE_RANGE_CHECK_OFFSET`] of the `[0, 256)` range-check).
 ///
 /// `field_exposure` affects only `Range16`; every other kind ignores it.
 pub fn range_k_multiplicities(
@@ -380,7 +380,7 @@ pub fn range_k_multiplicities(
         }
     }
 
-    // Field-byte range-checks (§6.5): each exposed byte `b` is pinned to
+    // Field-byte range-checks: each exposed byte `b` is pinned to
     // `[0, 256)` by two consumer-side `Range16` lookups (on `b` and on
     // `b + BYTE_RANGE_CHECK_OFFSET`), fired on the first block only — matching
     // the `is_first_block`-gated `wire_range_check` loop in
@@ -509,7 +509,8 @@ mod tests {
 
     /// With a credential exposure, the `Range16` producer gains exactly two
     /// increments per exposed first-block field byte — the `[0, 256)`
-    /// range-check of §6.5 (one on `b`, one on `b + BYTE_RANGE_CHECK_OFFSET`).
+    /// credential-field byte range-check (one on `b`, one on
+    /// `b + BYTE_RANGE_CHECK_OFFSET`).
     /// This is the producer side of the byte range-check that closes the
     /// sub-word forge; the consumer side lives in `constraints`/`interaction`.
     #[test]
