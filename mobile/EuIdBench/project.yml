@@ -3,8 +3,9 @@
 #
 # The app statically links EuId.xcframework (built by
 # crates/eu-id-ffi/build-xcframework.sh) and calls the prover C ABI via a
-# bridging header: eu_id_bench_identity (the combined proof) and
-# eu_id_bench_sha256 (the SHA-256 component) — see Sources/.
+# bridging header — one tab per workload: eu_id_bench_identity (the combined
+# proof, the default tab), eu_id_bench_sha256, and eu_id_bench_p256 — see
+# Sources/.
 name: EuIdBench
 options:
   bundleIdPrefix: co.starkware.euid

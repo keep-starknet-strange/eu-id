@@ -680,7 +680,10 @@ mod tests {
         };
 
         let r = unsafe { eu_id_bench_identity(&input, 1) };
-        assert_eq!(r.ok, 1, "an honest over-18 credential should prove + verify");
+        assert_eq!(
+            r.ok, 1,
+            "an honest over-18 credential should prove + verify"
+        );
         assert!(r.peak_bytes > 0, "sampler should observe nonzero footprint");
         assert!(
             r.proof_bytes > 0,

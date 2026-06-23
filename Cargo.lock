@@ -596,8 +596,13 @@ name = "eu-id-ffi"
 version = "0.1.0"
 dependencies = [
  "bincode",
+ "ecdsa",
  "eu-id-prover",
  "memory-stats",
+ "p256",
+ "sha2",
+ "stwo",
+ "stwo-p256",
  "stwo-sha256",
 ]
 
