@@ -46,6 +46,9 @@ celes = "2.8.2"
 # bench + `eu-id` CLI already use, so the SDK matches it for the proof envelope.
 serde = { workspace = true }
 bincode = "1"
+# FFI transport compression: the SDK keeps its exported byte API stable while
+# compressing the inner bincode `Proof` payload carried in `ProofEnvelope`.
+bzip2 = "0.6"
 
 [[bin]]
 # Bundled binding generator. Run as:

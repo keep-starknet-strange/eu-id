@@ -13,8 +13,9 @@
 //!
 //! ## What the proof binds (§9.2)
 //! `prove_identity` runs the real STWO combined prover (`eu_id_prover`) over the
-//! POC credential and returns a [`ProofEnvelope`]: the bincode-serialized STARK
-//! `Proof` **plus** the canonical-CBOR bytes of the full [`ZkPublicStatement`].
+//! POC credential and returns a [`ProofEnvelope`]: the bzip2-compressed,
+//! bincode-serialized STARK `Proof` **plus** the canonical-CBOR bytes of the
+//! full [`ZkPublicStatement`].
 //! The two layers bind complementary things:
 //!
 //! - **The STARK** binds `{ demo issuer key Q, age public input, nat public
@@ -37,6 +38,11 @@
 //! a dedicated large-stack thread the SDK owns; the apps call the UniFFI fn
 //! synchronously and do no thread handling of their own.
 
+use std::io::{Read, Write};
+
+use bzip2::read::BzDecoder;
+use bzip2::write::BzEncoder;
+use bzip2::Compression;
 use ciborium::value::Value;
 use serde::{Deserialize, Serialize};
 
@@ -359,7 +365,7 @@ fn encode_statement(s: &ZkPublicStatement) -> Vec<u8> {
 struct ProofEnvelope {
     /// Canonical CBOR of the full public statement (the envelope binding).
     statement_bytes: Vec<u8>,
-    /// bincode of the `eu_id_prover::Proof` (the STARK binding).
+    /// bzip2-compressed bincode of the `eu_id_prover::Proof` (the STARK binding).
     stark_proof: Vec<u8>,
 }
 
@@ -409,13 +415,35 @@ fn map_prover_error(e: eu_id_prover::Error) -> ZkError {
     }
 }
 
+/// Compress the raw bincode STARK proof for the FFI transport envelope.
+fn compress_stark_proof_for_ffi(raw_bincode: &[u8]) -> Result<Vec<u8>, ZkError> {
+    let mut encoder = BzEncoder::new(Vec::new(), Compression::best());
+    encoder
+        .write_all(raw_bincode)
+        .map_err(|e| ZkError::Prove(format!("failed to compress proof: {e}")))?;
+    encoder
+        .finish()
+        .map_err(|e| ZkError::Prove(format!("failed to finish proof compression: {e}")))
+}
+
+/// Decompress the FFI transport proof payload back to raw bincode bytes.
+fn decompress_stark_proof_from_ffi(compressed: &[u8]) -> Result<Vec<u8>, ZkError> {
+    let mut decoder = BzDecoder::new(compressed);
+    let mut raw_bincode = Vec::new();
+    decoder
+        .read_to_end(&mut raw_bincode)
+        .map_err(|e| ZkError::Verify(format!("failed to decompress proof: {e}")))?;
+    Ok(raw_bincode)
+}
+
 /// Prove the public statement holds for the given witness.
 ///
 /// Maps the mdoc-shaped contract to the prover's `Credential` / `Policy` (§9.1),
 /// signs with the deterministic [`IssuerKey::demo`] (decision 1 — the real EU
 /// issuer key in `statement.issuer_key_x/y` is ignored this iteration), runs the
 /// real combined STWO prover, and returns a bincode-serialized [`ProofEnvelope`]
-/// (STARK proof + the full statement bytes). Runs on a large-stack thread.
+/// (compressed STARK proof + the full statement bytes). Runs on a large-stack
+/// thread.
 ///
 /// A false statement (e.g. under-age) cannot be proven and returns
 /// [`ZkError::Prove`]; a structurally invalid request returns
@@ -432,8 +460,9 @@ pub fn prove_identity(
 
         let proof = eu_id_prover::prove_identity(&credential, &issuer, &policy)
             .map_err(map_prover_error)?;
-        let stark_proof = bincode::serialize(&proof)
+        let stark_proof_bincode = bincode::serialize(&proof)
             .map_err(|e| ZkError::Prove(format!("failed to serialize proof: {e}")))?;
+        let stark_proof = compress_stark_proof_for_ffi(&stark_proof_bincode)?;
 
         let envelope = ProofEnvelope {
             // The full statement (incl. nonce / doctype / …) — bound by the
@@ -480,7 +509,12 @@ pub fn verify_identity(
         // STARK check below.
         let public_statement = mapping::to_public_statement(&statement)?;
 
-        let stark_proof: eu_id_prover::Proof = match bincode::deserialize(&envelope.stark_proof) {
+        let stark_proof_bincode = match decompress_stark_proof_from_ffi(&envelope.stark_proof) {
+            Ok(bytes) => bytes,
+            Err(_) => return Ok(ZkVerifyResult { ok: false }),
+        };
+
+        let stark_proof: eu_id_prover::Proof = match bincode::deserialize(&stark_proof_bincode) {
             Ok(stark_proof) => stark_proof,
             Err(_) => return Ok(ZkVerifyResult { ok: false }),
         };
@@ -569,6 +603,28 @@ mod tests {
     }
 
     #[test]
+    fn ffi_stark_proof_payload_is_bzip2_compressed() {
+        let raw_bincode = b"serialized stark proof bytes";
+        let compressed = compress_stark_proof_for_ffi(raw_bincode).unwrap();
+
+        assert!(
+            compressed.starts_with(b"BZh"),
+            "bzip2 payloads must carry the BZh stream header, got prefix {:?}",
+            &compressed[..compressed.len().min(3)]
+        );
+        assert_ne!(
+            compressed, raw_bincode,
+            "FFI transport must not expose raw bincode proof bytes"
+        );
+
+        let restored = decompress_stark_proof_from_ffi(&compressed).unwrap();
+        assert_eq!(
+            restored, raw_bincode,
+            "verifier-side decompression must restore the exact bincode bytes"
+        );
+    }
+
+    #[test]
     fn verify_rejects_statement_envelope_drift() {
         // The envelope binds the *full* statement (incl. nonce). An envelope
         // built for statement A is rejected against statement B before the STARK
@@ -594,6 +650,20 @@ mod tests {
         let envelope = bincode::serialize(&ProofEnvelope {
             statement_bytes: encode_statement(&s),
             stark_proof: b"not a stark proof".to_vec(),
+        })
+        .unwrap();
+        assert!(!verify_identity(s, envelope).unwrap().ok);
+    }
+
+    #[test]
+    fn verify_rejects_matching_statement_but_compressed_corrupt_stark_proof() {
+        // The FFI transport layer may be well-formed bzip2 while the decompressed
+        // bytes are not a valid STARK proof. That still rejects fail-closed.
+        let s = sample_statement();
+        let compressed_junk = compress_stark_proof_for_ffi(b"not a stark proof").unwrap();
+        let envelope = bincode::serialize(&ProofEnvelope {
+            statement_bytes: encode_statement(&s),
+            stark_proof: compressed_junk,
         })
         .unwrap();
         assert!(!verify_identity(s, envelope).unwrap().ok);
