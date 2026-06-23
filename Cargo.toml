@@ -7,6 +7,7 @@ members = [
     "crates/predicates",
     "crates/eu-id-prover",
     "crates/eu-id-ffi",
+    "crates/sdk",
 ]
 resolver = "2"
 
