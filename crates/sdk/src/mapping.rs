@@ -110,11 +110,53 @@ pub(crate) fn to_policy(statement: &ZkPublicStatement) -> Result<Policy, ZkError
 
 /// Map a [`ZkWitness`] to the prover's private [`Credential`] (prove side only).
 /// The `policy` (built from the statement) supplies the accepted set the held
-/// code is selected against.
-pub(crate) fn to_credential(witness: &ZkWitness, policy: &Policy) -> Result<Credential, ZkError> {
-    let (year, month, day) = parse_birth_date(&witness.birth_date)?;
-    let nationality = select_nationality(&witness.nationalities, &policy.accepted_nationalities)?;
+/// code is selected against; `mode` says which predicates are actually active.
+///
+/// **Selective disclosure.** A neutralized predicate (decision 3) must not force
+/// the holder to disclose the irrelevant attribute. So when the *age* predicate
+/// is neutralized the holder may leave `birth_date` empty, and when the *nat*
+/// predicate is neutralized the holder may leave `nationalities` empty — in each
+/// case a value that trivially clears the neutralized leg is substituted. This
+/// only touches the private witness (verify rebuilds the statement, never the
+/// credential), so the prove/verify symmetry is unaffected. The substituted
+/// values satisfy the neutralized predicate by construction: `min_age = 0` makes
+/// the age cutoff today (and the bound is inclusive, so a DOB of today passes),
+/// and the universal accepted set contains every assigned code.
+pub(crate) fn to_credential(
+    witness: &ZkWitness,
+    policy: &Policy,
+    mode: PredicateMode,
+) -> Result<Credential, ZkError> {
+    // Age neutralized + no date supplied ⇒ default to today's date, which clears
+    // the `min_age = 0` cutoff (inclusive). A supplied date is still validated.
+    let (year, month, day) = if !mode.uses_age() && witness.birth_date.is_empty() {
+        let d = policy.current_date;
+        (d.year as u16, d.month as u8, d.day as u8)
+    } else {
+        parse_birth_date(&witness.birth_date)?
+    };
+
+    // Nat neutralized + no nationality supplied ⇒ default to any assigned code
+    // (the accepted set is universal, so it is a trivial member). A supplied set
+    // is still selected against the accepted set.
+    let nationality = if !mode.uses_nat() && witness.nationalities.is_empty() {
+        default_assigned_code()
+    } else {
+        select_nationality(&witness.nationalities, &policy.accepted_nationalities)?
+    };
+
     Ok(Credential::new(year, month, day, nationality))
+}
+
+/// A deterministic assigned ISO-3166-1 numeric code, used to fill the credential
+/// when the nat predicate is neutralized and the holder discloses no
+/// nationality. Any assigned code is a member of the universal accepted set.
+fn default_assigned_code() -> u16 {
+    all_nationality_codes()
+        .first()
+        .copied()
+        .and_then(|c| u16::try_from(c).ok())
+        .unwrap_or(276) // Germany — always assigned
 }
 
 /// Reject an age threshold beyond the age predicate's supported span. Reuses the
@@ -430,7 +472,7 @@ mod tests {
     #[test]
     fn credential_parses_date_and_selects_accepted_code() {
         let policy = to_policy(&statement_with(PredicateMode::And)).unwrap();
-        let cred = to_credential(&witness(), &policy).unwrap();
+        let cred = to_credential(&witness(), &policy, PredicateMode::And).unwrap();
         assert_eq!(cred.birth_year, 1990);
         assert_eq!(cred.birth_month, 7);
         assert_eq!(cred.birth_day, 15);
@@ -446,7 +488,7 @@ mod tests {
 
         let mut w = witness();
         w.nationalities = vec![250, 276]; // FR (not accepted), DE (accepted)
-        let cred = to_credential(&w, &policy).unwrap();
+        let cred = to_credential(&w, &policy, PredicateMode::Nat).unwrap();
         assert_eq!(cred.nationality, 276, "must pick the accepted held code");
     }
 
@@ -461,7 +503,7 @@ mod tests {
 
         let mut w = witness();
         w.nationalities = vec![250];
-        let cred = to_credential(&w, &policy).unwrap();
+        let cred = to_credential(&w, &policy, PredicateMode::Nat).unwrap();
         assert_eq!(cred.nationality, 250);
     }
 
@@ -480,7 +522,10 @@ mod tests {
             let mut w = witness();
             w.birth_date = bad.to_string();
             assert!(
-                matches!(to_credential(&w, &policy), Err(ZkError::InvalidInput(_))),
+                matches!(
+                    to_credential(&w, &policy, PredicateMode::And),
+                    Err(ZkError::InvalidInput(_))
+                ),
                 "expected rejection for `{bad}`"
             );
         }
@@ -492,7 +537,7 @@ mod tests {
         let mut w = witness();
         w.nationalities = vec![1]; // not an assigned ISO numeric
         assert!(matches!(
-            to_credential(&w, &policy),
+            to_credential(&w, &policy, PredicateMode::And),
             Err(ZkError::InvalidInput(_))
         ));
     }
@@ -503,7 +548,64 @@ mod tests {
         let mut w = witness();
         w.nationalities = vec![];
         assert!(matches!(
-            to_credential(&w, &policy),
+            to_credential(&w, &policy, PredicateMode::And),
+            Err(ZkError::InvalidInput(_))
+        ));
+    }
+
+    // ---- selective disclosure: a neutralized predicate needs no witness -----
+
+    #[test]
+    fn age_only_allows_an_empty_nationality_set() {
+        // Verifier asks only for age ⇒ the holder discloses no nationality.
+        // The credential is filled with a default assigned code (trivially a
+        // member of the universal accepted set), so prove can proceed.
+        let policy = to_policy(&statement_with(PredicateMode::Age)).unwrap();
+        let mut w = witness();
+        w.nationalities = vec![];
+        let cred = to_credential(&w, &policy, PredicateMode::Age).unwrap();
+        let assigned: HashSet<u32> = all_nationality_codes().into_iter().collect();
+        assert!(assigned.contains(&u32::from(cred.nationality)));
+    }
+
+    #[test]
+    fn nat_only_allows_an_empty_birth_date() {
+        // Verifier asks only for nationality ⇒ the holder discloses no DOB.
+        // The credential is filled with today's date, which clears the
+        // neutralized `min_age = 0` cutoff (inclusive).
+        let stmt = statement_with(PredicateMode::Nat);
+        let policy = to_policy(&stmt).unwrap();
+        let mut w = witness();
+        w.birth_date = String::new();
+        let cred = to_credential(&w, &policy, PredicateMode::Nat).unwrap();
+        assert_eq!(
+            date(
+                u32::from(cred.birth_year),
+                u32::from(cred.birth_month),
+                u32::from(cred.birth_day)
+            ),
+            policy.current_date,
+            "default DOB must equal the policy reference date"
+        );
+    }
+
+    #[test]
+    fn and_mode_still_requires_both_witness_fields() {
+        // Neutralization is per-predicate: with both active, an absent field is
+        // still a hard error (no silent default).
+        let policy = to_policy(&statement_with(PredicateMode::And)).unwrap();
+
+        let mut w = witness();
+        w.nationalities = vec![];
+        assert!(matches!(
+            to_credential(&w, &policy, PredicateMode::And),
+            Err(ZkError::InvalidInput(_))
+        ));
+
+        let mut w = witness();
+        w.birth_date = String::new();
+        assert!(matches!(
+            to_credential(&w, &policy, PredicateMode::And),
             Err(ZkError::InvalidInput(_))
         ));
     }

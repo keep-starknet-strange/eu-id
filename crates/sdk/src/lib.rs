@@ -413,12 +413,18 @@ where
 fn map_prover_error(e: eu_id_prover::Error) -> ZkError {
     use eu_id_prover::Error::*;
     match e {
-        // Witness-generation / proving failures — incl. the "no honest witness
-        // exists" cases (under-age DOB, code outside the accepted set, an
-        // invalid signature) that the prover rejects before it can prove.
-        P256Prepare(_) | AgePrepare(_) | NatPrepare(_) | SignatureInvalid | Prove(_) => {
-            ZkError::Prove(format!("{e:?}"))
-        }
+        // "No honest witness exists" cases: the holder genuinely does not
+        // satisfy the predicate, so the prover refuses at witness generation
+        // (not a verify failure). Lead with a human explanation — the raw Debug
+        // detail (e.g. `NatPrepare(Input(NoMatch))`) is kept for diagnostics.
+        AgePrepare(_) => ZkError::Prove(format!(
+            "the holder does not satisfy the age predicate (likely under the requested minimum age) [{e:?}]"
+        )),
+        NatPrepare(_) => ZkError::Prove(format!(
+            "the holder's nationality is not in the accepted set [{e:?}]"
+        )),
+        // Other witness-generation / proving failures (bad signature, internal).
+        P256Prepare(_) | SignatureInvalid | Prove(_) => ZkError::Prove(format!("{e:?}")),
         // Verifier-side rejections (only reachable from the verify path).
         P256InstanceMismatch | IssuerKeyMismatch | AgePolicyMismatch | NatPolicyMismatch
         | Verify(_) => ZkError::Verify(format!("{e:?}")),
@@ -465,7 +471,7 @@ pub fn prove_identity(
 ) -> Result<Vec<u8>, ZkError> {
     on_large_stack(move || {
         let policy = mapping::to_policy(&statement)?;
-        let credential = mapping::to_credential(&witness, &policy)?;
+        let credential = mapping::to_credential(&witness, &policy, statement.predicate_mode)?;
         let issuer = eu_id_prover::IssuerKey::demo();
 
         let proof = eu_id_prover::prove_identity(&credential, &issuer, &policy)
@@ -753,6 +759,32 @@ mod tests {
             let proof = prove_identity(s.clone(), honest_witness()).unwrap();
             assert!(verify_identity(s, proof).unwrap().ok, "mode {mode:?}");
         }
+    }
+
+    #[test]
+    #[ignore = "runs the real combined STWO prover (~seconds); use --release --ignored"]
+    fn real_age_only_proves_without_a_disclosed_nationality() {
+        // Verifier asks only for age; the holder discloses no nationality. The
+        // request must still prove and verify (the nat leg is neutralized to the
+        // universal set, the credential is filled with a default member).
+        let s = honest_statement(PredicateMode::Age);
+        let mut w = honest_witness();
+        w.nationalities = vec![];
+        let proof = prove_identity(s.clone(), w).unwrap();
+        assert!(verify_identity(s, proof).unwrap().ok);
+    }
+
+    #[test]
+    #[ignore = "runs the real combined STWO prover (~seconds); use --release --ignored"]
+    fn real_nat_only_proves_without_a_disclosed_birth_date() {
+        // Verifier asks only for nationality; the holder discloses no DOB. The
+        // request must still prove and verify (the age leg is neutralized to
+        // min_age 0, the credential is filled with today's date).
+        let s = honest_statement(PredicateMode::Nat);
+        let mut w = honest_witness();
+        w.birth_date = String::new();
+        let proof = prove_identity(s.clone(), w).unwrap();
+        assert!(verify_identity(s, proof).unwrap().ok);
     }
 
     #[test]
