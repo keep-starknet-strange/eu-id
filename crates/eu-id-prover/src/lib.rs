@@ -296,6 +296,72 @@ pub fn prove(
     nat_public: &NatPublicInput,
     nat_private: &NatPrivateInput,
 ) -> Result<Proof, Error> {
+    prove_with_column_breakdown(
+        p256_draft,
+        sha_witness,
+        sha_log_n_rows,
+        sha_group_width,
+        age_public,
+        age_dob,
+        nat_public,
+        nat_private,
+    )
+    .map(|(proof, _)| proof)
+}
+
+/// The committed-column counts a single module contributes to each commitment
+/// tree, captured from its [`air_core::TreeLayout`].
+///
+/// The proof-size byte-breakdown instrumentation (`examples/bench_report`)
+/// uses these to attribute the width-linear proof streams — `queried_values` and
+/// the OODS `sampled_values` — to modules by committed-column count. These are
+/// the same per-tree column sizes the verifier commits against, so the
+/// attribution matches the committed columns exactly.
+#[derive(Clone, Debug)]
+pub struct ModuleColumns {
+    /// Module label, in commit order (`p256`, `sha`, `bridge`, `age`, `nat`).
+    pub name: &'static str,
+    /// Columns in tree 0 (preprocessed).
+    pub preprocessed: usize,
+    /// Columns in tree 1 (main trace + multiplicities).
+    pub trace: usize,
+    /// Columns in tree 2 (interaction / LogUp).
+    pub interaction: usize,
+}
+
+impl ModuleColumns {
+    fn of(name: &'static str, layout: &air_core::TreeLayout) -> Self {
+        Self {
+            name,
+            preprocessed: layout.preprocessed.len(),
+            trace: layout.trace.len(),
+            interaction: layout.interaction.len(),
+        }
+    }
+
+    /// Total committed columns across the three module-owned trees: preprocessed,
+    /// trace, and interaction. The composition / quotient tree is shared and not
+    /// attributed to any single module.
+    pub fn total(&self) -> usize {
+        self.preprocessed + self.trace + self.interaction
+    }
+}
+
+/// Like [`prove`], but also returns each module's committed-column counts in
+/// commit order — the per-module attribution input for the proof-size
+/// byte-breakdown. The counts come from the **same** module instances that
+/// produce the proof, so they cannot drift from what was committed.
+#[allow(clippy::too_many_arguments)]
+pub fn prove_with_column_breakdown(
+    p256_draft: &P256ProofDraft,
+    sha_witness: &Sha256Witness,
+    sha_log_n_rows: u32,
+    sha_group_width: u32,
+    age_public: &AgePublicInput,
+    age_dob: &DateOfBirth,
+    nat_public: &NatPublicInput,
+    nat_private: &NatPrivateInput,
+) -> Result<(Proof, Vec<ModuleColumns>), Error> {
     let scalar_z_handle = SharedScalarZRelation::new();
     let digest_handle = SharedDigestRelation::new();
     let field_handle = SharedFieldRelation::new();
@@ -345,6 +411,19 @@ pub fn prove(
 
     let config = p256.pcs_config();
 
+    // Capture each module's committed-column counts before the modules are
+    // borrowed into the prove slice. `layout()` is available right after
+    // construction (the verifier reads it pre-build too), and these are the same
+    // per-tree sizes committed below — the byte-breakdown attributes the
+    // width-linear streams by them.
+    let column_breakdown = vec![
+        ModuleColumns::of("p256", &p256.layout()),
+        ModuleColumns::of("sha", &sha.layout()),
+        ModuleColumns::of("bridge", &bridge.layout()),
+        ModuleColumns::of("age", &age.layout()),
+        ModuleColumns::of("nat", &nat.layout()),
+    ];
+
     // Module order is load-bearing: it fixes the transcript, the tree-column /
     // preprocessed-id concatenation, and the order the shared relations are
     // drawn. P256 draws ScalarZ, SHA draws the digest + the credential-field
@@ -364,7 +443,7 @@ pub fn prove(
         prove_with_parallel_p256_sha(&mut p256, &mut sha, &mut bridge, &mut age, &mut nat, config)
             .map_err(|e| Error::Prove(format!("{e:?}")))?;
 
-    Ok(Proof {
+    let proof = Proof {
         stark_proof,
         p256_claim: p256.proof_claim().clone(),
         p256_interaction_claim: p256.interaction_claim().clone(),
@@ -379,7 +458,8 @@ pub fn prove(
         age_claimed_sums: age.claimed_sums(),
         nat_public: nat_public.clone(),
         nat_claimed_sums: nat.claimed_sums(),
-    })
+    };
+    Ok((proof, column_breakdown))
 }
 
 fn prove_with_parallel_p256_sha(

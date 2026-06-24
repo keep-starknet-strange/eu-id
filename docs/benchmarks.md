@@ -174,6 +174,106 @@ xcrun devicectl device process launch --device "$DEV" co.starkware.euid.bench
 # `EUIDBENCH RESULT label=identity` line).
 ```
 
+## Proof-size byte-breakdown (Phase 10 baseline, §10.1)
+
+Phase 10 is about shrinking the multi-MB combined proof (the Bluetooth transfer
+bottleneck). Before optimising, we decomposed the proof into its serialized
+parts so every later task is prioritised against real numbers. The breakdown
+driver (`BENCH_BREAKDOWN=1 … bench_report`) proves the combined pipeline once,
+sizes each `CommitmentSchemeProof` field with `bincode::serialized_size`,
+attributes the width-linear streams per module by committed-column count, and
+records the real bzip2 transport size. Machine-readable results:
+[`benchmarks/proof-size-breakdown.json`](./benchmarks/proof-size-breakdown.json).
+
+**Headline:** the combined proof is **7,300,513 bytes (6.96 MiB)** raw bincode,
+**4.34 MiB** over the wire (bzip2-best, **1.60×**). It is **~96.6% width-linear**
+(opened column values + OODS), only **~3.4% depth** (FRI + Merkle auth paths).
+And — the surprise — **SHA-256, not P256, is the single largest contributor to
+proof size** (62% of the width-linear mass), the inverse of the prove-time and
+standalone-size picture where P256 dominates.
+
+### By `CommitmentSchemeProof` field (inner `stark_proof` = 6.96 MiB)
+
+| field            | size      | %     | nature |
+|------------------|----------:|------:|--------|
+| `queried_values` | 6.06 MiB  | 87.1% | opened column values — **width × queries** |
+| `sampled_values` (OODS) | 672.7 KiB | 9.4% | mask evaluations — width-linear |
+| `fri_proof`      | 154.8 KiB | 2.2%  | FRI layer commitments + witnesses — **depth** |
+| `decommitments`  | 90.4 KiB  | 1.3%  | Merkle auth-path hashes — **depth** |
+| `commitments`    | 136 B     | 0.0%  | per-tree Merkle roots |
+| `proof_of_work`  | 8 B       | 0.0%  | grinding nonce |
+| `config`         | 25 B      | 0.0%  | `PcsConfig` |
+
+The two width-linear streams (`queried_values` + OODS) are **96.6%** of the
+proof; the two depth-driven streams (`fri_proof` + `decommitments`) are **3.4%**.
+So the size levers are **query count** (§10.2 — scales the whole 96.6%) and
+**committed width** (§10.5/§10.6); reducing FRI depth can recover at most ~245 KiB
+total.
+
+### Per-module attribution of the width-linear bytes
+
+The proof commits **28,383 columns** across four trees (311 preprocessed +
+16,976 trace + 11,088 interaction + 8 composition), every one opened at the
+P256-inherited **54 queries** (`FriConfig::new(5, 2, 54, 1)`, `log_blowup = 2`).
+Attributing `queried_values` + OODS by each module's committed-column count:
+
+| module | columns (pre / trace / interaction) | width-linear | % |
+|--------|------------------------------------:|-------------:|---:|
+| **sha**    | 17,601 (85 / 9,940 / 7,576) | **4.17 MiB** | **62.0%** |
+| **p256**   | 10,463 (216 / 6,927 / 3,320) | **2.48 MiB** | **36.9%** |
+| bridge | 229 (2 / 87 / 140) | 55.6 KiB | 0.8% |
+| age    | 64 (7 / 17 / 40) | 15.5 KiB | 0.2% |
+| nat    | 18 (1 / 5 / 12) | 4.4 KiB | 0.1% |
+| composition (shared) | 8 | ~2 KiB | 0.0% |
+
+**SHA dominates because it is the widest module, and width is what proof size is
+linear in.** Its 9,940 trace columns alone account for ~2.0 MiB of opened values
+(confirming the roadmap's ~2 MiB / 9,909-column estimate — the 31-column delta is
+the §6.5–§6.7 credential-binding tail), but its **7,576 LogUp interaction
+columns add a further ~2.2 MiB the estimate missed**. Crucially, standalone SHA
+proves under the weak `PcsConfig::default()` (few queries), so its standalone
+proof (0.76 MiB) **drastically understates** its footprint inside the combined
+proof, where it inherits P256's 54-query / `log_blowup = 2` config. This flips
+the roadmap's stated priority: **§10.5 (shrink SHA width, including the
+interaction tree) is the higher-value structural lever, not §10.6 (P256).**
+
+**P256 is width-bound, not depth-bound.** Its 2.48 MiB is almost entirely opened
+values + OODS; the depth streams (FRI + decommitments) total only **245 KiB
+across all modules combined**. So §10.6's depth lever (shorter FRI chain via a
+smaller `log_size`) can recover at most ~245 KiB; only the width lever (limb-slot
+reuse across mutually-exclusive row types) is a meaningful P256 size play — and it
+is secondary to SHA.
+
+### Merkle auth-path sharing — already deduplicated (§10.3 / §10.1 req)
+
+Stwo's `MerkleDecommitmentLifted` **already shares upper auth-path nodes across
+co-located queries** — no "octopus" decommitment work remains. The lifted Merkle
+verifier (`stwo/src/core/vcs_lifted/verifier.rs::verify`) walks the tree
+bottom-up, chunks each layer by siblings (`a.idx ^ 1 == b.idx`), and consumes a
+witness hash **only when a node's sibling is absent** (chunk length 1); where two
+query paths converge, the shared ancestor is computed once and never re-sent. The
+tiny `decommitments` field (90.4 KiB, 1.3%) is consistent with already-deduped
+paths. **§10.3's batched/"octopus" decommitment item can be closed as
+already-implemented upstream.**
+
+### Compression is not the lever
+
+bzip2-best yields only **1.60×** (6.96 MiB → 4.34 MiB). STARK proofs are
+high-entropy — Merkle digests are incompressible and `queried_values` is densely
+packed field elements — so the wire payload stays multi-MB regardless. The real
+reductions come from committing fewer/narrower values (§10.2, §10.5) or
+collapsing the whole proof via recursion (§10.4), not from a better compressor.
+The §10.3 31-bit M31 bit-packing (~3% of the width-linear mass) is marginal but
+free; it stacks on top.
+
+### Baseline note — the proof already shrank ~7% on this branch
+
+§7.2 recorded the combined proof at **7,846,609 B (7.48 MiB)**. The current
+baseline is **7,300,513 B (6.96 MiB)**, a ~7% reduction from the LogUp
+pair-batching landed in commit `4dc2e56` ("Batch eligible LogUp columns in
+pairs"), which halves eligible interaction columns. The numbers above are the
+**post-batching** Phase-10 baseline; later tasks measure against them.
+
 ## Reproduce the laptop numbers
 
 ```bash
@@ -187,6 +287,10 @@ BENCH_LABEL=m4max-single cargo run --release -p eu-id-prover --example bench_rep
 # Parallel delta:
 BENCH_LABEL=m4max-parallel cargo run --release -p eu-id-prover --example bench_report \
     --features parallel -- docs/benchmarks/laptop-m4max-parallel.json
+
+# Proof-size byte-breakdown (Phase 10 baseline, §10.1):
+BENCH_BREAKDOWN=1 BENCH_LABEL=m4max cargo run --release -p eu-id-prover \
+    --example bench_report -- docs/benchmarks/proof-size-breakdown.json
 ```
 
 `make bench` runs the criterion suite; `make bench-report` writes the JSON.
