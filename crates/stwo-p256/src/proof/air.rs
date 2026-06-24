@@ -415,6 +415,18 @@ impl P256Verifier {
         }
     }
 
+    /// The PCS config this proof must have been produced under — the verifier-side
+    /// counterpart of [`P256Prover::pcs_config`]. A combined proof that embeds the
+    /// P256 module inherits this config for the whole STARK, so the combined
+    /// verifier pins the proof-supplied config against this value (the standalone
+    /// `verify_current_air` does the same). This stops a malicious prover from
+    /// submitting a weakened FRI/grinding setting.
+    pub fn expected_pcs_config(&self) -> PcsConfig {
+        p256_stark_monolithic_profile_config(
+            self.proof_claim.max_constraint_log_degree_bound(&self.ids),
+        )
+    }
+
     /// Match a [`P256Prover::with_z_binding`] proof: draw and share the same
     /// [`ScalarZRelation`] and fold the analytic provider term into the balance.
     /// Must be set iff the prover set it.

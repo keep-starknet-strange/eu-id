@@ -199,6 +199,15 @@ pub enum Error {
     /// The shared STARK verifier rejected the proof (includes a broken global
     /// LogUp balance — e.g. the signed digest does not equal `SHA-256(C)`).
     Verify(String),
+    /// The proof was produced under a PCS config that does not match the pinned
+    /// security profile (e.g. a prover-weakened FRI/grinding setting). Rejected
+    /// before the STARK check, so a low-query proof cannot be inherited.
+    WeakConfig {
+        /// The config embedded in the proof.
+        got: PcsConfig,
+        /// The pinned config the combined proof must be produced under.
+        expected: PcsConfig,
+    },
 }
 
 /// The relying party's public statement — the only thing [`verify_identity`]
@@ -726,6 +735,21 @@ fn verify_stark(proof: &Proof) -> Result<(), Error> {
         .verifier(&proof.nat_public, &proof.nat_claimed_sums)
         .map_err(Error::NatPrepare)?
         .with_nat_binding(field_handle.clone());
+
+    // Pin the PCS config. The combined proof inherits the P256 module's
+    // security-calibrated config (`prove` drives the whole STARK with
+    // `p256.pcs_config()`), and the config is prover-supplied inside
+    // `proof.stark_proof`. Reject a weakened FRI/grinding setting outright rather
+    // than inherit it — the standalone P256 verifier (`verify_current_air`) does
+    // the same. Checked before the STARK verification so a low-query proof never
+    // reaches it.
+    let expected_config = p256.expected_pcs_config();
+    if proof.stark_proof.config != expected_config {
+        return Err(Error::WeakConfig {
+            got: proof.stark_proof.config,
+            expected: expected_config,
+        });
+    }
 
     // Same module order as the prover.
     let mut modules: [&mut dyn Air; 5] = [&mut p256, &mut sha, &mut bridge, &mut age, &mut nat];

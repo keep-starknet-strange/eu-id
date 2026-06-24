@@ -427,7 +427,7 @@ fn map_prover_error(e: eu_id_prover::Error) -> ZkError {
         P256Prepare(_) | SignatureInvalid | Prove(_) => ZkError::Prove(format!("{e:?}")),
         // Verifier-side rejections (only reachable from the verify path).
         P256InstanceMismatch | IssuerKeyMismatch | AgePolicyMismatch | NatPolicyMismatch
-        | Verify(_) => ZkError::Verify(format!("{e:?}")),
+        | WeakConfig { .. } | Verify(_) => ZkError::Verify(format!("{e:?}")),
     }
 }
 

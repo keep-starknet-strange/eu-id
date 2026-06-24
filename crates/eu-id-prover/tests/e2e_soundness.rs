@@ -13,6 +13,7 @@
 //! | DOB ≠ credential                 | age ↔ credential bytes      | global LogUp balance       |
 //! | nationality ≠ credential         | nat ↔ credential bytes      | global LogUp balance       |
 //! | wrong issuer key Q               | caller statement            | caller-argument binding    |
+//! | weakened PCS config              | security profile            | config pin (pre-STARK)     |
 //! | tampered signature               | ECDSA validity              | prover-side: witness build |
 //! | under-age date of birth          | age statement               | prover-side: witness build |
 //! | nationality outside accepted set | nat membership statement    | prover-side: witness build |
@@ -289,6 +290,41 @@ fn rejects_wrong_issuer_key() {
             Err(Error::IssuerKeyMismatch)
         ),
         "a statement with the wrong issuer key must be rejected",
+    );
+}
+
+/// Weakened PCS config: an honest proof whose prover-supplied FRI/grinding config
+/// is downgraded after the fact (a single FRI query, no grinding). The combined
+/// verifier pins the config against the security profile (96-bit conjectured) and
+/// rejects it *before* the STARK check, so a low-query proof can never be
+/// inherited. This is the combined-proof counterpart of the standalone P256
+/// `current_p256_monolithic_verifier_rejects_weakened_pcs_config` test.
+#[test]
+#[ignore = "slow: full P256 + SHA + bridge + predicates STARK prove/verify; run with --release --ignored"]
+fn rejects_weakened_pcs_config() {
+    let fixture = fixtures::valid_over_18();
+    let mut proof = prove_identity(
+        &fixture.signed.credential,
+        &IssuerKey::demo(),
+        &fixture.policy,
+    )
+    .expect("an honest credential proves");
+
+    // Sanity: it verifies at the pinned (security-calibrated) config.
+    verify_identity(&proof, &demo_statement(&fixture.policy))
+        .expect("the proof verifies at the pinned config");
+
+    // Downgrade the prover-supplied config to a single FRI query and no grinding —
+    // the cheap-to-forge setting the pin exists to reject.
+    proof.stark_proof.0.config.fri_config.n_queries = 1;
+    proof.stark_proof.0.config.pow_bits = 0;
+
+    assert!(
+        matches!(
+            verify_identity(&proof, &demo_statement(&fixture.policy)),
+            Err(Error::WeakConfig { .. })
+        ),
+        "a weakened PCS config must be rejected before the STARK check",
     );
 }
 
