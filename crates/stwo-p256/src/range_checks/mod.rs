@@ -29,6 +29,7 @@ pub use component::{
 };
 pub use interaction::{
     batching_with_solo, consecutive_batching, write_batched_logup_columns,
+    write_generated_batched_logup_columns, write_generated_logup_columns_with_batching,
     write_logup_columns_with_batching, RangeCheckInteractionClaim,
 };
 pub use trace::{ColumnEval, RangeCheckClaim, SignedCarryRangeClaim};

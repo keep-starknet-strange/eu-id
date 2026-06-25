@@ -86,7 +86,8 @@ use stwo_p256_utils::constants::N_LIMBS;
 
 use super::double_formula::{
     add_combo_reduction, bind_equal, constant_bigint, curve_b_bigint, modulus_bigint, one_bigint,
-    read_bigint, solve_combo_reduction, term, M31Term, ReductionWitness,
+    solve_combo_reduction, term, M31Term, SharedFormulaColumns, SHARED_FORMULA_COLUMNS,
+    SHARED_FORMULA_GATE_OFFSET_IN_BLOCK,
 };
 use crate::limbs::{P256EvalBigInt, P256M31BigInt};
 use crate::projective_air::ConsumedMulLimbsView;
@@ -100,58 +101,12 @@ pub(crate) const MIXED_ADD_OUTPUT_REDUCTIONS: usize = 3;
 pub(crate) const MIXED_ADD_TOTAL_REDUCTIONS: usize =
     MIXED_ADD_OPERAND_REDUCTIONS + MIXED_ADD_OUTPUT_REDUCTIONS;
 
-/// Number of witnessed degree-1 gate columns (`mixed_active`, `formula_gate`)
-/// the MixedAdd formula commits so its operand/reduction/output bindings stay at
-/// degree 2 (the effective ceiling of stwo's SubDomain composition; binding by
-/// the inline degree-3 product `active·(1−op)·(1−rhs.inf)` pushes the limb
-/// bindings to degree 4, which aliases in the composition quotient even though
-/// the constraint is 0 on every trace row).
-pub(crate) const MIXED_ADD_GATE_COLUMNS: usize = 2;
-
-/// Committed working values + reduction witnesses + witnessed gate columns for
-/// the MixedAdd formula.
-///
-/// Read order (must match the base-trace writer in `air.rs`):
-/// `x3, y3, z3` bigints, then the [`MIXED_ADD_TOTAL_REDUCTIONS`] reduction
-/// witnesses in canonical order (the 15 operand reductions, then `x3`,`y3`,`z3`
-/// output reductions), then the two witnessed gate columns `mixed_active_col`,
-/// `formula_gate_col` (appended LAST so the x3/y3/z3 + reduction column offsets
-/// the Range13 / signed-carry USE lists reference are unchanged).
-pub(crate) struct MixedAddFormulaColumns<E: EvalAtRow> {
-    pub x3: P256EvalBigInt<E>,
-    pub y3: P256EvalBigInt<E>,
-    pub z3: P256EvalBigInt<E>,
-    pub reductions: [ReductionWitness<E>; MIXED_ADD_TOTAL_REDUCTIONS],
-    /// Witnessed `mixed_active = active · (1 − op)` (degree-1 column).
-    pub mixed_active_col: E::F,
-    /// Witnessed `formula_gate = mixed_active · (1 − rhs.inf)` (degree-1 column).
-    pub formula_gate_col: E::F,
-}
-
-impl<E: EvalAtRow> MixedAddFormulaColumns<E> {
-    pub(crate) fn read(eval: &mut E) -> Self {
-        let x3 = read_bigint(eval);
-        let y3 = read_bigint(eval);
-        let z3 = read_bigint(eval);
-        let reductions = core::array::from_fn(|_| ReductionWitness::read(eval));
-        let mixed_active_col = eval.next_trace_mask();
-        let formula_gate_col = eval.next_trace_mask();
-        Self {
-            x3,
-            y3,
-            z3,
-            reductions,
-            mixed_active_col,
-            formula_gate_col,
-        }
-    }
-}
+pub(crate) type MixedAddFormulaColumns<E> = SharedFormulaColumns<E>;
 
 /// Base-trace column count of the MixedAdd-formula block: three bigints plus the
 /// per-reduction `(q + N_LIMBS carries)` columns plus the two witnessed gate
 /// columns.
-pub(crate) const MIXED_ADD_FORMULA_COLUMNS: usize =
-    3 * N_LIMBS + MIXED_ADD_TOTAL_REDUCTIONS * (1 + N_LIMBS) + MIXED_ADD_GATE_COLUMNS;
+pub(crate) const MIXED_ADD_FORMULA_COLUMNS: usize = SHARED_FORMULA_COLUMNS;
 
 /// Bind the full MixedAdd-op coordinate formula on this consumer row.
 ///
@@ -630,6 +585,5 @@ pub(crate) fn mixed_add_gate_trace_values(
 }
 
 /// Block-relative column offset of the first witnessed gate column
-/// (`mixed_active`), i.e. `MIXED_ADD_FORMULA_COLUMNS − MIXED_ADD_GATE_COLUMNS`.
-pub(crate) const MIXED_ADD_GATE_OFFSET_IN_BLOCK: usize =
-    MIXED_ADD_FORMULA_COLUMNS - MIXED_ADD_GATE_COLUMNS;
+/// (`mixed_active`) in the shared formula block.
+pub(crate) const MIXED_ADD_GATE_OFFSET_IN_BLOCK: usize = SHARED_FORMULA_GATE_OFFSET_IN_BLOCK;

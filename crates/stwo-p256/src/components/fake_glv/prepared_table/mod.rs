@@ -80,7 +80,6 @@ pub const PREPARED_TABLE_PROJECTIVE_SOURCE_TRACE_COLUMNS: usize = 1
     + 5
     + 3 * PREPARED_TABLE_EC_POINT_COLUMNS
     + crate::projective_air::CONSUMED_MUL_LIMBS_COLUMNS
-    + super::ec_source::double_formula::DOUBLE_FORMULA_COLUMNS
     + super::ec_source::mixed_add_formula::MIXED_ADD_FORMULA_COLUMNS;
 /// Column index of the C5 consumed-mul block's `has_muls` flag (appended LAST so
 /// existing relation-value column offsets are unchanged; limbs follow at `+ 1`).
@@ -89,15 +88,10 @@ pub const PREPARED_TABLE_PROJECTIVE_SOURCE_HAS_MULS_COL: usize =
 /// Column index where the C5 consumed-mul LIMB block begins (after `has_muls`).
 pub const PREPARED_TABLE_PROJECTIVE_SOURCE_MUL_LIMB_OFFSET: usize =
     PREPARED_TABLE_PROJECTIVE_SOURCE_HAS_MULS_COL + 1;
-/// Column index where the C5-2 Double-formula block begins (after the
+/// Column index where the shared C5-2 formula block begins (after the
 /// consumed-mul block).
-pub const PREPARED_TABLE_PROJECTIVE_SOURCE_DOUBLE_FORMULA_OFFSET: usize =
+pub const PREPARED_TABLE_PROJECTIVE_SOURCE_FORMULA_OFFSET: usize =
     1 + 5 + 3 * PREPARED_TABLE_EC_POINT_COLUMNS + crate::projective_air::CONSUMED_MUL_LIMBS_COLUMNS;
-/// Column index where the C5-2 MixedAdd-formula block begins (right after the
-/// Double-formula block).
-pub const PREPARED_TABLE_PROJECTIVE_SOURCE_MIXED_ADD_FORMULA_OFFSET: usize =
-    PREPARED_TABLE_PROJECTIVE_SOURCE_DOUBLE_FORMULA_OFFSET
-        + super::ec_source::double_formula::DOUBLE_FORMULA_COLUMNS;
 
 const PREPARED_TABLE_EC_ROW_INDEX_COLUMN: &str = "p256_prepared_table_ec_row_index";
 

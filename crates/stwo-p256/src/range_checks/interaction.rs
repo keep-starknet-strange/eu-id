@@ -134,6 +134,68 @@ pub fn write_logup_columns_with_batching(
     }
 }
 
+/// Streaming variant of [`write_logup_columns_with_batching`]. `fraction`
+/// generates entry `entry` at packed row `vec_row` in AIR emission order,
+/// avoiding the temporary per-entry numerator/denominator matrix.
+pub fn write_generated_logup_columns_with_batching(
+    logup: &mut stwo_constraint_framework::LogupTraceGenerator,
+    entry_count: usize,
+    vec_rows: usize,
+    batching: &[usize],
+    mut fraction: impl FnMut(
+        usize,
+        usize,
+    ) -> (
+        stwo::prover::backend::simd::qm31::PackedQM31,
+        stwo::prover::backend::simd::qm31::PackedQM31,
+    ),
+) {
+    assert_eq!(entry_count, batching.len());
+    let mut start = 0usize;
+    while start < entry_count {
+        let mut end = start + 1;
+        while end < entry_count && batching[end] == batching[start] {
+            end += 1;
+        }
+        let mut col = logup.new_col();
+        for vec_row in 0..vec_rows {
+            let (mut numerator, mut denominator) = fraction(start, vec_row);
+            for entry in (start + 1)..end {
+                let (n, d) = fraction(entry, vec_row);
+                numerator = numerator * d + n * denominator;
+                denominator *= d;
+            }
+            col.write_frac(vec_row, numerator, denominator);
+        }
+        col.finalize_col();
+        start = end;
+    }
+}
+
+/// Streaming variant of [`write_batched_logup_columns`] for consecutive
+/// `batch`-sized groups.
+pub fn write_generated_batched_logup_columns(
+    logup: &mut stwo_constraint_framework::LogupTraceGenerator,
+    entry_count: usize,
+    vec_rows: usize,
+    batch: usize,
+    fraction: impl FnMut(
+        usize,
+        usize,
+    ) -> (
+        stwo::prover::backend::simd::qm31::PackedQM31,
+        stwo::prover::backend::simd::qm31::PackedQM31,
+    ),
+) {
+    write_generated_logup_columns_with_batching(
+        logup,
+        entry_count,
+        vec_rows,
+        &consecutive_batching(entry_count, batch),
+        fraction,
+    );
+}
+
 pub fn write_batched_logup_columns(
     logup: &mut stwo_constraint_framework::LogupTraceGenerator,
     entries: &[(
@@ -157,5 +219,71 @@ pub fn write_batched_logup_columns(
             col.write_frac(vec_row, numerator, denominator);
         }
         col.finalize_col();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use stwo::core::fields::m31::M31;
+
+    fn test_fraction(entry: usize, vec_row: usize) -> (PackedQM31, PackedQM31) {
+        let numerator = core::array::from_fn(|lane| {
+            SecureField::from(M31::from_u32_unchecked(
+                10 + entry as u32 * 17 + vec_row as u32 * 3 + lane as u32,
+            ))
+        });
+        let denominator = core::array::from_fn(|lane| {
+            SecureField::from(M31::from_u32_unchecked(
+                100 + entry as u32 * 19 + vec_row as u32 * 5 + lane as u32,
+            ))
+        });
+        (
+            PackedQM31::from_array(numerator),
+            PackedQM31::from_array(denominator),
+        )
+    }
+
+    #[test]
+    fn generated_logup_batching_matches_staged_entries() {
+        let log_size = LOG_N_LANES + 2;
+        let vec_rows = 1usize << (log_size - LOG_N_LANES);
+        let entry_count = 5usize;
+        let batching = [0usize, 0, 1, 2, 2];
+        let entries: Vec<_> = (0..entry_count)
+            .map(|entry| {
+                let mut numerators = Vec::with_capacity(vec_rows);
+                let mut denominators = Vec::with_capacity(vec_rows);
+                for vec_row in 0..vec_rows {
+                    let (numerator, denominator) = test_fraction(entry, vec_row);
+                    numerators.push(numerator);
+                    denominators.push(denominator);
+                }
+                (numerators, denominators)
+            })
+            .collect();
+
+        let mut staged = LogupTraceGenerator::new(log_size);
+        write_logup_columns_with_batching(&mut staged, &entries, &batching);
+        let (staged_trace, staged_sum) = staged.finalize_last();
+
+        let mut generated = LogupTraceGenerator::new(log_size);
+        write_generated_logup_columns_with_batching(
+            &mut generated,
+            entry_count,
+            vec_rows,
+            &batching,
+            test_fraction,
+        );
+        let (generated_trace, generated_sum) = generated.finalize_last();
+
+        assert_eq!(generated_sum, staged_sum);
+        assert_eq!(generated_trace.len(), staged_trace.len());
+        for (generated_column, staged_column) in generated_trace.iter().zip(staged_trace.iter()) {
+            assert_eq!(generated_column.data.len(), staged_column.data.len());
+            for (generated, staged) in generated_column.data.iter().zip(staged_column.data.iter()) {
+                assert_eq!(generated.to_array(), staged.to_array());
+            }
+        }
     }
 }

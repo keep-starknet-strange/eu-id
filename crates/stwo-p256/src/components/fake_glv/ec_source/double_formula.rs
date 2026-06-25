@@ -100,37 +100,51 @@ impl<E: EvalAtRow> ReductionWitness<E> {
     }
 }
 
-/// Committed working values + reduction witnesses for the Double formula.
-///
-/// Read order (must match the base-trace writer in `trace.rs`):
-/// `x3, y3, z3` bigints, then the [`DOUBLE_TOTAL_REDUCTIONS`] reduction
-/// witnesses in canonical order (the 10 operand reductions, then `x3`,`y3`,`z3`
-/// output reductions).
-pub(crate) struct DoubleFormulaColumns<E: EvalAtRow> {
-    pub x3: P256EvalBigInt<E>,
-    pub y3: P256EvalBigInt<E>,
-    pub z3: P256EvalBigInt<E>,
-    pub reductions: [ReductionWitness<E>; DOUBLE_TOTAL_REDUCTIONS],
-}
-
-impl<E: EvalAtRow> DoubleFormulaColumns<E> {
-    pub(crate) fn read(eval: &mut E) -> Self {
-        let x3 = read_bigint(eval);
-        let y3 = read_bigint(eval);
-        let z3 = read_bigint(eval);
-        Self {
-            x3,
-            y3,
-            z3,
-            reductions: core::array::from_fn(|_| ReductionWitness::read(eval)),
-        }
-    }
-}
-
 /// Base-trace column count of the Double-formula block: three bigints plus the
 /// per-reduction `(q + N_LIMBS carries)` columns.
 pub(crate) const DOUBLE_FORMULA_COLUMNS: usize =
     3 * N_LIMBS + DOUBLE_TOTAL_REDUCTIONS * (1 + N_LIMBS);
+
+pub(crate) const SHARED_FORMULA_TOTAL_REDUCTIONS: usize = 18;
+pub(crate) const SHARED_FORMULA_GATE_COLUMNS: usize = 2;
+pub(crate) const SHARED_FORMULA_COLUMNS: usize =
+    3 * N_LIMBS + SHARED_FORMULA_TOTAL_REDUCTIONS * (1 + N_LIMBS) + SHARED_FORMULA_GATE_COLUMNS;
+pub(crate) const SHARED_FORMULA_GATE_OFFSET_IN_BLOCK: usize =
+    SHARED_FORMULA_COLUMNS - SHARED_FORMULA_GATE_COLUMNS;
+
+/// Superset formula block shared by Double and MixedAdd rows.
+///
+/// Double rows use the first [`DOUBLE_TOTAL_REDUCTIONS`] reduction slots. The
+/// remaining reduction slots and the witnessed MixedAdd gate columns are
+/// explicitly zero-forced by the consumer AIR, so sharing the block removes
+/// duplicated columns without introducing free witness space.
+pub(crate) struct SharedFormulaColumns<E: EvalAtRow> {
+    pub x3: P256EvalBigInt<E>,
+    pub y3: P256EvalBigInt<E>,
+    pub z3: P256EvalBigInt<E>,
+    pub reductions: [ReductionWitness<E>; SHARED_FORMULA_TOTAL_REDUCTIONS],
+    pub mixed_active_col: E::F,
+    pub formula_gate_col: E::F,
+}
+
+impl<E: EvalAtRow> SharedFormulaColumns<E> {
+    pub(crate) fn read(eval: &mut E) -> Self {
+        let x3 = read_bigint(eval);
+        let y3 = read_bigint(eval);
+        let z3 = read_bigint(eval);
+        let reductions = core::array::from_fn(|_| ReductionWitness::read(eval));
+        let mixed_active_col = eval.next_trace_mask();
+        let formula_gate_col = eval.next_trace_mask();
+        Self {
+            x3,
+            y3,
+            z3,
+            reductions,
+            mixed_active_col,
+            formula_gate_col,
+        }
+    }
+}
 
 pub(crate) fn read_bigint<E: EvalAtRow>(eval: &mut E) -> P256EvalBigInt<E> {
     P256EvalBigInt::<E>::from_limbs(core::array::from_fn(|_| eval.next_trace_mask()))
@@ -256,7 +270,7 @@ pub(crate) fn bind_double_formula<E: EvalAtRow>(
     output_y: &P256EvalBigInt<E>,
     output_inf: &E::F,
     muls: &ConsumedMulLimbsView<E>,
-    columns: &DoubleFormulaColumns<E>,
+    columns: &SharedFormulaColumns<E>,
     range13_values: &mut Vec<E::F>,
 ) {
     let one = E::F::from(M31::from_u32_unchecked(1));
@@ -580,6 +594,15 @@ pub(crate) fn double_formula_trace_values(
         }
     }
     debug_assert_eq!(col, DOUBLE_FORMULA_COLUMNS);
+    values
+}
+
+pub(crate) fn double_formula_shared_trace_values(
+    witness: &DoubleFormulaWitness,
+) -> [M31; SHARED_FORMULA_COLUMNS] {
+    let mut values = [M31::from_u32_unchecked(0); SHARED_FORMULA_COLUMNS];
+    let double_values = double_formula_trace_values(witness);
+    values[..DOUBLE_FORMULA_COLUMNS].copy_from_slice(&double_values);
     values
 }
 

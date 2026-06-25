@@ -2422,6 +2422,14 @@ impl P256ProofDraft {
             &relations.final_add,
             FinalAddProofClaim::from_claim(&self.claim.final_add).log_sizes(),
         )?;
+        let prepared_consumer_claimed_sum = prepared_consumer.ec_row_sum
+            + prepared_consumer.mul_result_sum
+            + prepared_consumer.gamma_yield_sum;
+        let prepared_consumer_columns = prepared_consumer.columns;
+        let fake_glv_consumer_claimed_sum = fake_glv_consumer.ec_row_sum
+            + fake_glv_consumer.mul_result_sum
+            + fake_glv_consumer.gamma_yield_sum;
+        let fake_glv_consumer_columns = fake_glv_consumer.columns;
 
         let mut columns = Vec::new();
         columns.extend(scalar_setup_interaction);
@@ -2435,7 +2443,7 @@ impl P256ProofDraft {
             columns.extend(interaction);
         }
         columns.extend(prepared_provider_interaction);
-        columns.extend(prepared_consumer.columns.clone());
+        columns.extend(prepared_consumer_columns);
         // γ-digest tall expanders, then the provider interaction columns, in
         // component order right after the consumer.
         columns.extend(prepared_gamma_range13_interaction);
@@ -2443,7 +2451,7 @@ impl P256ProofDraft {
         columns.extend(prepared_table_projective_range13_interaction);
         columns.extend(prepared_table_projective_signed_carry_interaction);
         columns.extend(fake_glv_provider_interaction);
-        columns.extend(fake_glv_consumer.columns.clone());
+        columns.extend(fake_glv_consumer_columns);
         // γ-digest tall expanders, then the C5-2 provider interaction columns,
         // in component order right after the consumer.
         columns.extend(fake_glv_gamma_range13_interaction);
@@ -2483,9 +2491,7 @@ impl P256ProofDraft {
                         claimed_sum: prepared_pinned_claim.claimed_sum,
                     },
                     consumer: crate::components::ComponentInteractionClaim {
-                        claimed_sum: prepared_consumer.ec_row_sum
-                            + prepared_consumer.mul_result_sum
-                            + prepared_consumer.gamma_yield_sum,
+                        claimed_sum: prepared_consumer_claimed_sum,
                     },
                     gamma_range13: prepared_gamma_range13_claim,
                     gamma_signed: prepared_gamma_signed_claim,
@@ -2498,9 +2504,7 @@ impl P256ProofDraft {
                         claimed_sum: fake_glv_provider_claim.claimed_sum,
                     },
                     consumer: crate::components::ComponentInteractionClaim {
-                        claimed_sum: fake_glv_consumer.ec_row_sum
-                            + fake_glv_consumer.mul_result_sum
-                            + fake_glv_consumer.gamma_yield_sum,
+                        claimed_sum: fake_glv_consumer_claimed_sum,
                     },
                     gamma_range13: fake_glv_gamma_range13_claim,
                     gamma_signed: fake_glv_gamma_signed_claim,

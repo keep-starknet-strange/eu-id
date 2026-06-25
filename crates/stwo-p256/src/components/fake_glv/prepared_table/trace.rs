@@ -619,36 +619,22 @@ fn prepared_table_projective_source_trace_values(
         values[column] = value;
         column += 1;
     }
-    debug_assert_eq!(
-        column,
-        PREPARED_TABLE_PROJECTIVE_SOURCE_DOUBLE_FORMULA_OFFSET
-    );
-    // C5-2: the Double-formula working values + reduction witnesses. Emitted
-    // only for Double rows; MixedAdd / padding leave this block zero, matching
-    // the `double_active`-gated constraints + off-Double zero gates.
+    debug_assert_eq!(column, PREPARED_TABLE_PROJECTIVE_SOURCE_FORMULA_OFFSET);
+    // C5-2: one shared formula block. Double rows write the first 13 reduction
+    // slots and leave the mixed-only suffix/gates zero; finite MixedAdd rows
+    // write the full superset.
+    let is_mixed = projective_row.op == crate::projective::ProjectiveEcOp::MixedAdd;
     if projective_row.op == crate::projective::ProjectiveEcOp::Double {
         let witness = double_formula::solve_double_formula_witness(
             &mul_limbs,
             &projective_row.output_projective,
         )
         .ok_or(PreparedTableError::ProjectiveSourceInvalid)?;
-        for value in double_formula::double_formula_trace_values(&witness) {
+        for value in double_formula::double_formula_shared_trace_values(&witness) {
             values[column] = value;
             column += 1;
         }
-    } else {
-        column += double_formula::DOUBLE_FORMULA_COLUMNS;
-    }
-    debug_assert_eq!(
-        column,
-        PREPARED_TABLE_PROJECTIVE_SOURCE_MIXED_ADD_FORMULA_OFFSET
-    );
-    // C5-2: the MixedAdd-formula working values + reduction witnesses. Emitted
-    // only for FINITE-operand MixedAdd rows (always the case for prepared-table
-    // ops); the two witnessed gate columns are constrained on EVERY row, so the
-    // no-witness branch still writes them.
-    let is_mixed = projective_row.op == crate::projective::ProjectiveEcOp::MixedAdd;
-    if is_mixed && has_muls {
+    } else if is_mixed && has_muls {
         let witness = mixed_add_formula::solve_mixed_add_formula_witness(
             &mul_limbs,
             &projective_row.output_projective,

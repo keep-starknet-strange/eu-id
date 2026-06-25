@@ -13,13 +13,15 @@ use crate::components::gamma_digest::{
     GAMMA_TAG_PREPARED_SIGNED,
 };
 use crate::constants::{P256_3GX, P256_3GY, P256_MODULUS};
-use crate::limbs::P256M31BigInt;
+use crate::limbs::{P256EvalBigInt, P256M31BigInt};
 use crate::prepared_point::{PREPARED_BASE_COUNT, TABLE16_INDEX};
 use crate::projective_air::ConsumedMulLimbs;
 use crate::types::U256;
 
-use super::super::ec_source::double_formula::{bind_double_formula, DoubleFormulaColumns};
-use super::super::ec_source::mixed_add_formula::{bind_mixed_add_formula, MixedAddFormulaColumns};
+use super::super::ec_source::double_formula::{
+    bind_double_formula, SharedFormulaColumns, DOUBLE_TOTAL_REDUCTIONS,
+};
+use super::super::ec_source::mixed_add_formula::bind_mixed_add_formula;
 use super::*;
 
 #[derive(Clone)]
@@ -395,11 +397,10 @@ impl FrameworkEval for PreparedTableProjectiveSourceEval {
         // C5 plumbing: consumed silo mul limbs (read after the points, matching
         // the base-trace layout).
         let mut consumed_muls = ConsumedMulLimbs::<E>::read(&mut eval);
-        // C5-2: the Double-formula working values + reduction witnesses, then
-        // the MixedAdd block, read LAST (matching the base-trace layout
-        // appended after the consumed-mul block).
-        let double_columns = DoubleFormulaColumns::<E>::read(&mut eval);
-        let mixed_columns = MixedAddFormulaColumns::<E>::read(&mut eval);
+        // C5-2: one shared formula block. Double rows use the first 13
+        // reduction slots; MixedAdd rows use all 18 slots plus the two
+        // witnessed gate columns.
+        let formula_columns = SharedFormulaColumns::<E>::read(&mut eval);
         let one = E::F::from(M31::from_u32_unchecked(1));
 
         eval.add_constraint(active.clone() * (active.clone() - one.clone()));
@@ -434,8 +435,10 @@ impl FrameworkEval for PreparedTableProjectiveSourceEval {
             y2: rhs.y_bigint(),
             output_x: output.x_bigint(),
             output_y: output.y_bigint(),
-            z3_double: double_columns.z3.clone(),
-            z3_mixed: mixed_columns.z3.clone(),
+            z3_double: formula_columns.z3.clone(),
+            z3_mixed: P256EvalBigInt::<E>::from_limbs(core::array::from_fn(|_| {
+                E::F::from(M31::from_u32_unchecked(0))
+            })),
         });
 
         let relation_values = prepared_table_ec_row_relation_values(
@@ -478,33 +481,9 @@ impl FrameworkEval for PreparedTableProjectiveSourceEval {
             &output.y_bigint(),
             &output.inf(),
             &muls_view,
-            &double_columns,
+            &formula_columns,
             &mut range13_values,
         );
-        // Collect the Double reduction carries for the signed-carry digest,
-        // and force the Double-formula working values + reduction witnesses to
-        // zero on non-Double / padding rows.
-        for reduction in &double_columns.reductions {
-            for carry in &reduction.carries {
-                signed_carry_values.push(carry.clone());
-            }
-        }
-        let not_double = one.clone() - double_active.clone();
-        for value in double_columns
-            .x3
-            .limbs()
-            .iter()
-            .chain(double_columns.y3.limbs())
-            .chain(double_columns.z3.limbs())
-        {
-            eval.add_constraint(not_double.clone() * value.clone());
-        }
-        for reduction in &double_columns.reductions {
-            eval.add_constraint(not_double.clone() * reduction.q.clone());
-            for carry in &reduction.carries {
-                eval.add_constraint(not_double.clone() * carry.clone());
-            }
-        }
 
         // C5-2: constrain the MixedAdd-op coordinate formula. `mixed_active`
         // (= active·(1−op)) is 1 only on active MixedAdd rows; the formula is
@@ -525,33 +504,55 @@ impl FrameworkEval for PreparedTableProjectiveSourceEval {
             &output.y_bigint(),
             &output.inf(),
             &muls_view,
-            &mixed_columns,
+            &formula_columns,
             &mut range13_values,
         );
-        // Collect the MixedAdd reduction carries for the signed-carry digest,
-        // and force the MixedAdd working values + reduction witnesses to zero
-        // on non-MixedAdd / padding rows.
-        for reduction in &mixed_columns.reductions {
+        range13_values.clear();
+        for limb in lhs
+            .x_bigint()
+            .limbs()
+            .iter()
+            .chain(lhs.y_bigint().limbs())
+            .chain(rhs.x_bigint().limbs())
+            .chain(rhs.y_bigint().limbs())
+            .chain(output.x_bigint().limbs())
+            .chain(output.y_bigint().limbs())
+            .chain(formula_columns.x3.limbs())
+            .chain(formula_columns.y3.limbs())
+            .chain(formula_columns.z3.limbs())
+        {
+            range13_values.push(limb.clone());
+        }
+        for reduction in &formula_columns.reductions {
             for carry in &reduction.carries {
                 signed_carry_values.push(carry.clone());
             }
         }
-        let not_mixed = one.clone() - mixed_active.clone();
-        for value in mixed_columns
+        let no_muls = one.clone() - consumed_muls.has_muls.clone();
+        for value in formula_columns
             .x3
             .limbs()
             .iter()
-            .chain(mixed_columns.y3.limbs())
-            .chain(mixed_columns.z3.limbs())
+            .chain(formula_columns.y3.limbs())
+            .chain(formula_columns.z3.limbs())
         {
-            eval.add_constraint(not_mixed.clone() * value.clone());
+            eval.add_constraint(no_muls.clone() * value.clone());
         }
-        for reduction in &mixed_columns.reductions {
-            eval.add_constraint(not_mixed.clone() * reduction.q.clone());
+        for reduction in &formula_columns.reductions {
+            eval.add_constraint(no_muls.clone() * reduction.q.clone());
             for carry in &reduction.carries {
-                eval.add_constraint(not_mixed.clone() * carry.clone());
+                eval.add_constraint(no_muls.clone() * carry.clone());
             }
         }
+        let double_only = double_active.clone();
+        for reduction in &formula_columns.reductions[DOUBLE_TOTAL_REDUCTIONS..] {
+            eval.add_constraint(double_only.clone() * reduction.q.clone());
+            for carry in &reduction.carries {
+                eval.add_constraint(double_only.clone() * carry.clone());
+            }
+        }
+        eval.add_constraint(double_only.clone() * formula_columns.mixed_active_col.clone());
+        eval.add_constraint(double_only * formula_columns.formula_gate_col.clone());
         // γ-digest yields (one per kind), keyed by the shared preprocessed
         // row-index column; presence = `active` (the tall expanders'
         // preprocessed schedule is the anchor).

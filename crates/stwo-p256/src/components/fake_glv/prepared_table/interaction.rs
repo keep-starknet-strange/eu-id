@@ -26,12 +26,14 @@ use crate::projective_air::{
     ProjectiveRcbMulResultRelation, PROJECTIVE_RCB_MUL_ROLE_LHS, PROJECTIVE_RCB_MUL_ROLE_RESULT,
     PROJECTIVE_RCB_MUL_ROLE_RHS, PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS,
 };
-use crate::range_checks::{write_batched_logup_columns, RangeCheckInteractionClaim};
+use crate::range_checks::{
+    write_generated_batched_logup_columns, write_generated_logup_columns_with_batching,
+    RangeCheckInteractionClaim,
+};
 use crate::types::U256;
 
 use crate::scalar::scalar_mod_mul::columns::M31ColumnEval;
 
-use super::super::ec_source::double_formula::DOUBLE_TOTAL_REDUCTIONS;
 use super::super::ec_source::mixed_add_formula::MIXED_ADD_TOTAL_REDUCTIONS;
 use super::*;
 
@@ -188,65 +190,67 @@ pub(crate) fn gen_prepared_table_ec_row_pinned_interaction_trace(
     assert_eq!(base.len(), PREPARED_TABLE_EC_ROW_TRACE_COLUMNS);
     let log_size = base[0].domain.log_size();
     let n_vec_rows = 1 << (log_size - LOG_N_LANES);
-    let mut entries = Vec::new();
-
-    // Entry 0: the existing PreparedTableEcRowRelation yield (-active).
-    append_packed_entry(&mut entries, n_vec_rows, |vec_row| {
-        let values = prepared_table_ec_row_packed_relation_values(base, vec_row);
-        (
-            -PackedQM31::from(base[0].data[vec_row]),
-            relation.combine(&values),
-        )
-    });
 
     let three_g_x = P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_3GX));
     let three_g_y = P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_3GY));
 
-    // Entries 1..=30: the pinning schedule, one fraction per entry.
-    for entry in PIN_SCHEDULE {
-        append_packed_entry(&mut entries, n_vec_rows, |vec_row| {
-            let sig = base[PREPARED_TABLE_EC_COL_SIG_ID].data[vec_row];
-            let cert = base[PREPARED_TABLE_EC_COL_CERT_ID].data[vec_row];
-            let active = base[0].data[vec_row];
-            // Gate = product of kind flags (× is_cert0 = active - cert_id).
-            let mut gate = PackedM31::broadcast(M31::from_u32_unchecked(1));
-            for &k in entry.kinds {
-                gate *= base[PREPARED_TABLE_EC_COL_KIND_FLAGS + k].data[vec_row];
+    let entry_count = 1 + PIN_SCHEDULE.len() + usize::from(final_check_hint.is_some());
+    let final_check_entry = 1 + PIN_SCHEDULE.len();
+    let mut logup = LogupTraceGenerator::new(log_size);
+    write_generated_batched_logup_columns(
+        &mut logup,
+        entry_count,
+        n_vec_rows,
+        2,
+        |entry_index, vec_row| {
+            if entry_index == 0 {
+                let values = prepared_table_ec_row_packed_relation_values(base, vec_row);
+                return (
+                    -PackedQM31::from(base[0].data[vec_row]),
+                    relation.combine(&values),
+                );
             }
-            if entry.cert0_only {
-                gate *= active - cert;
-            }
-            let magnitude =
-                PackedM31::broadcast(M31::from_u32_unchecked(entry.mult.unsigned_abs()));
-            let scaled = PackedQM31::from(gate * magnitude);
-            let numerator = if entry.mult < 0 { -scaled } else { scaled };
-            let denominator: PackedQM31 = match entry.relation {
-                PinRelation::CertBase => {
-                    let offset = pin_point_column_offset(entry.point)
-                        .expect("CertBase entries use a trace point");
-                    cert_base.combine(&cert_base_packed_tuple(base, vec_row, sig, cert, offset))
-                }
-                PinRelation::Canonical(role) => {
-                    let tuple = match pin_point_column_offset(entry.point) {
-                        Some(offset) => canonical_packed_tuple_from_columns(
-                            base, vec_row, sig, cert, role, offset,
-                        ),
-                        None => {
-                            canonical_packed_tuple_const(sig, cert, role, &three_g_x, &three_g_y)
-                        }
-                    };
-                    canonical.combine(&tuple)
-                }
-            };
-            (numerator, denominator)
-        });
-    }
 
-    // Optional FinalCheckHint entry: yield `R_i` (= `lhs`) gated `active *
-    // DoubleR_flag`, multiplicity `-1`. Emitted iff a relation is supplied, in
-    // lockstep with the AIR's `if let Some(final_check_hint)` emission.
-    if let Some(final_check_hint) = final_check_hint {
-        append_packed_entry(&mut entries, n_vec_rows, |vec_row| {
+            if entry_index < final_check_entry {
+                let entry = &PIN_SCHEDULE[entry_index - 1];
+                let sig = base[PREPARED_TABLE_EC_COL_SIG_ID].data[vec_row];
+                let cert = base[PREPARED_TABLE_EC_COL_CERT_ID].data[vec_row];
+                let active = base[0].data[vec_row];
+                // Gate = product of kind flags (× is_cert0 = active - cert_id).
+                let mut gate = PackedM31::broadcast(M31::from_u32_unchecked(1));
+                for &k in entry.kinds {
+                    gate *= base[PREPARED_TABLE_EC_COL_KIND_FLAGS + k].data[vec_row];
+                }
+                if entry.cert0_only {
+                    gate *= active - cert;
+                }
+                let magnitude =
+                    PackedM31::broadcast(M31::from_u32_unchecked(entry.mult.unsigned_abs()));
+                let scaled = PackedQM31::from(gate * magnitude);
+                let numerator = if entry.mult < 0 { -scaled } else { scaled };
+                let denominator: PackedQM31 = match entry.relation {
+                    PinRelation::CertBase => {
+                        let offset = pin_point_column_offset(entry.point)
+                            .expect("CertBase entries use a trace point");
+                        cert_base.combine(&cert_base_packed_tuple(base, vec_row, sig, cert, offset))
+                    }
+                    PinRelation::Canonical(role) => {
+                        let tuple = match pin_point_column_offset(entry.point) {
+                            Some(offset) => canonical_packed_tuple_from_columns(
+                                base, vec_row, sig, cert, role, offset,
+                            ),
+                            None => canonical_packed_tuple_const(
+                                sig, cert, role, &three_g_x, &three_g_y,
+                            ),
+                        };
+                        canonical.combine(&tuple)
+                    }
+                };
+                return (numerator, denominator);
+            }
+
+            assert_eq!(entry_index, final_check_entry);
+            let final_check_hint = final_check_hint.expect("final-check hint entry has relation");
             let sig = base[PREPARED_TABLE_EC_COL_SIG_ID].data[vec_row];
             let cert = base[PREPARED_TABLE_EC_COL_CERT_ID].data[vec_row];
             let active = base[0].data[vec_row];
@@ -262,11 +266,8 @@ pub(crate) fn gen_prepared_table_ec_row_pinned_interaction_trace(
                 PREPARED_TABLE_EC_COL_LHS,
             ));
             (numerator, denominator)
-        });
-    }
-
-    let mut logup = LogupTraceGenerator::new(log_size);
-    write_batched_logup_columns(&mut logup, &entries, 2);
+        },
+    );
     let (trace, claimed_sum) = logup.finalize_last();
 
     let mut final_check_hint_claimed_sum = secure_zero();
@@ -297,23 +298,6 @@ pub(crate) fn gen_prepared_table_ec_row_pinned_interaction_trace(
             },
         },
     )
-}
-
-type LogupEntry = (Vec<PackedQM31>, Vec<PackedQM31>);
-
-fn append_packed_entry(
-    entries: &mut Vec<LogupEntry>,
-    vec_rows: usize,
-    fraction: impl Fn(usize) -> (PackedQM31, PackedQM31),
-) {
-    let mut numerators = Vec::with_capacity(vec_rows);
-    let mut denominators = Vec::with_capacity(vec_rows);
-    for vec_row in 0..vec_rows {
-        let (numerator, denominator) = fraction(vec_row);
-        numerators.push(numerator);
-        denominators.push(denominator);
-    }
-    entries.push((numerators, denominators));
 }
 
 #[cfg(test)]
@@ -594,24 +578,21 @@ fn prepared_consumed_mul_gen_layout() -> crate::projective_air::ConsumedMulGenLa
         y2_col: 6 + PREPARED_TABLE_EC_POINT_COLUMNS + N_LIMBS,
         output_x_col: 6 + 2 * PREPARED_TABLE_EC_POINT_COLUMNS,
         output_y_col: 6 + 2 * PREPARED_TABLE_EC_POINT_COLUMNS + N_LIMBS,
-        z3_double_col: PREPARED_TABLE_PROJECTIVE_SOURCE_DOUBLE_FORMULA_OFFSET + 2 * N_LIMBS,
-        z3_mixed_col: PREPARED_TABLE_PROJECTIVE_SOURCE_MIXED_ADD_FORMULA_OFFSET + 2 * N_LIMBS,
+        z3_double_col: PREPARED_TABLE_PROJECTIVE_SOURCE_FORMULA_OFFSET + 2 * N_LIMBS,
+        z3_mixed_col: None,
         mul_limb_offset: PREPARED_TABLE_PROJECTIVE_SOURCE_MUL_LIMB_OFFSET,
     }
 }
 
-/// Range13 digest value order: the Double-formula list then the MixedAdd list.
+/// Range13 digest value order: the shared superset needed by both formula
+/// kinds: lhs, rhs, output, and the shared x3/y3/z3 working values.
 pub(crate) fn prepared_gamma_range13_columns() -> Vec<usize> {
-    let mut columns = prepared_double_formula_range13_use_columns();
-    columns.extend(prepared_mixed_add_formula_range13_use_columns());
-    columns
+    prepared_mixed_add_formula_range13_use_columns()
 }
 
-/// Signed-carry digest value order: Double then MixedAdd reduction carries.
+/// Signed-carry digest value order: all shared reduction carry slots.
 pub(crate) fn prepared_gamma_signed_carry_columns() -> Vec<usize> {
-    let mut columns = prepared_double_formula_signed_carry_use_columns();
-    columns.extend(prepared_mixed_add_formula_signed_carry_use_columns());
-    columns
+    prepared_mixed_add_formula_signed_carry_use_columns()
 }
 
 /// The two γ-digest tall layouts for `rows` scheduled prepared-table rows.
@@ -662,64 +643,58 @@ pub(crate) fn gen_prepared_table_projective_source_consumer_interaction_trace(
     assert_eq!(base.len(), PREPARED_TABLE_PROJECTIVE_SOURCE_TRACE_COLUMNS);
     let log_size = base[0].domain.log_size();
     let vec_rows = 1usize << (log_size - LOG_N_LANES);
-    // Collect every fraction in the consumer AIR's emission order, then write
-    // them `PREPARED_CONSUMER_LOGUP_BATCH` per interaction column to mirror
-    // the eval's `finalize_logup_batched(consecutive_batching(..))` layout.
-    let mut entries: Vec<(Vec<PackedQM31>, Vec<PackedQM31>)> = Vec::new();
-    let active_numerators: Vec<PackedQM31> = (0..vec_rows)
-        .map(|vec_row| PackedQM31::from(base[0].data[vec_row]))
-        .collect();
-
-    // Entry 0: the EC-row consume (+active).
-    entries.push((
-        active_numerators.clone(),
-        (0..vec_rows)
-            .map(|vec_row| {
-                let values = prepared_table_projective_source_packed_relation_values(base, vec_row);
-                ec_row_relation.combine(&values)
-            })
-            .collect(),
-    ));
-
-    // Wide mul-result consumes (+has_muls), canonical order.
-    let has_muls_numerators: Vec<PackedQM31> = (0..vec_rows)
-        .map(|vec_row| {
-            PackedQM31::from(base[PREPARED_TABLE_PROJECTIVE_SOURCE_HAS_MULS_COL].data[vec_row])
-        })
-        .collect();
     let layout = prepared_consumed_mul_gen_layout();
-    for mul_index in 0..(PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS / (3 * N_LIMBS)) {
-        for (role_index, &role) in PROJECTIVE_RCB_MUL_RESULT_ROLES.iter().enumerate() {
-            entries.push((
-                has_muls_numerators.clone(),
-                (0..vec_rows)
-                    .map(|vec_row| {
-                        let mut values = Vec::with_capacity(3 + N_LIMBS);
-                        values.push(base[1].data[vec_row]);
-                        values.push(PackedM31::broadcast(M31::from_u32_unchecked(
-                            mul_index as u32,
-                        )));
-                        values.push(PackedM31::broadcast(M31::from_u32_unchecked(role)));
-                        values.extend(crate::projective_air::consumed_mul_slot_packed_limbs(
-                            base, vec_row, &layout, mul_index, role_index,
-                        ));
-                        mul_result_relation.combine(&values)
-                    })
-                    .collect(),
-            ));
-        }
-    }
+    let mul_count = PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS / (3 * N_LIMBS);
+    let mul_entry_count = mul_count * PROJECTIVE_RCB_MUL_RESULT_ROLES.len();
     // γ-digest yields (−active), in eval order: range13 kind then signed
     // kind, mirroring the eval's digest computation per row.
     let instances = prepared_gamma_instances(base);
-    for instance in &instances {
-        let columns = match instance.layout.tag {
-            GAMMA_TAG_PREPARED_RANGE13 => prepared_gamma_range13_columns(),
-            _ => prepared_gamma_signed_carry_columns(),
-        };
-        let mut numerators = Vec::with_capacity(vec_rows);
-        let mut denominators = Vec::with_capacity(vec_rows);
-        for vec_row in 0..vec_rows {
+    let gamma_columns = [
+        prepared_gamma_range13_columns(),
+        prepared_gamma_signed_carry_columns(),
+    ];
+
+    assert_eq!(prepared_consumer_logup_entries(), 1 + mul_entry_count + 2);
+    let mut logup = LogupTraceGenerator::new(log_size);
+    write_generated_logup_columns_with_batching(
+        &mut logup,
+        prepared_consumer_logup_entries(),
+        vec_rows,
+        &prepared_consumer_logup_batching(),
+        |entry_index, vec_row| {
+            if entry_index == 0 {
+                let values = prepared_table_projective_source_packed_relation_values(base, vec_row);
+                return (
+                    PackedQM31::from(base[0].data[vec_row]),
+                    ec_row_relation.combine(&values),
+                );
+            }
+
+            if entry_index <= mul_entry_count {
+                let slot = entry_index - 1;
+                let mul_index = slot / PROJECTIVE_RCB_MUL_RESULT_ROLES.len();
+                let role_index = slot % PROJECTIVE_RCB_MUL_RESULT_ROLES.len();
+                let role = PROJECTIVE_RCB_MUL_RESULT_ROLES[role_index];
+                let mut values = Vec::with_capacity(3 + N_LIMBS);
+                values.push(base[1].data[vec_row]);
+                values.push(PackedM31::broadcast(M31::from_u32_unchecked(
+                    mul_index as u32,
+                )));
+                values.push(PackedM31::broadcast(M31::from_u32_unchecked(role)));
+                values.extend(crate::projective_air::consumed_mul_slot_packed_limbs(
+                    base, vec_row, &layout, mul_index, role_index,
+                ));
+                return (
+                    PackedQM31::from(
+                        base[PREPARED_TABLE_PROJECTIVE_SOURCE_HAS_MULS_COL].data[vec_row],
+                    ),
+                    mul_result_relation.combine(&values),
+                );
+            }
+
+            let gamma_index = entry_index - 1 - mul_entry_count;
+            let instance = &instances[gamma_index];
+            let columns = &gamma_columns[gamma_index];
             let mut numerator = [secure_zero(); N_LANES];
             let mut denominator = [SecureField::from(M31::from_u32_unchecked(1)); N_LANES];
             for lane in 0..N_LANES {
@@ -738,18 +713,11 @@ pub(crate) fn gen_prepared_table_projective_source_consumer_interaction_trace(
                 numerator[lane] = -SecureField::from(active);
                 denominator[lane] = gamma_digest_relation.combine(&tuple);
             }
-            numerators.push(PackedQM31::from_array(numerator));
-            denominators.push(PackedQM31::from_array(denominator));
-        }
-        entries.push((numerators, denominators));
-    }
-
-    assert_eq!(entries.len(), prepared_consumer_logup_entries());
-    let mut logup = LogupTraceGenerator::new(log_size);
-    crate::range_checks::write_logup_columns_with_batching(
-        &mut logup,
-        &entries,
-        &prepared_consumer_logup_batching(),
+            (
+                PackedQM31::from_array(numerator),
+                PackedQM31::from_array(denominator),
+            )
+        },
     );
     let (columns, _total) = logup.finalize_last();
 
@@ -777,49 +745,6 @@ pub(crate) struct PreparedTableProjectiveSourceConsumerInteraction {
     pub gamma_yield_sum: SecureField,
 }
 
-/// Base-trace column indices the Range13 USES read, in `bind_double_formula`
-/// emission order: lhs.x, lhs.y, output.x, output.y limbs, then x3, y3, z3.
-/// (The prepared-table source has 6 metadata columns — `table_index` follows
-/// `op` — so points start at column 6, one later than the fake-GLV source.)
-fn prepared_double_formula_range13_use_columns() -> Vec<usize> {
-    let lhs_x = 6; // after [active, source_index, sig_id, cert_id, op, table_index]
-    let lhs_y = lhs_x + N_LIMBS;
-    let output_x = 6 + 2 * PREPARED_TABLE_EC_POINT_COLUMNS;
-    let output_y = output_x + N_LIMBS;
-    let x3 = PREPARED_TABLE_PROJECTIVE_SOURCE_DOUBLE_FORMULA_OFFSET;
-    let mut cols = Vec::with_capacity(7 * N_LIMBS);
-    for start in [
-        lhs_x,
-        lhs_y,
-        output_x,
-        output_y,
-        x3,
-        x3 + N_LIMBS,
-        x3 + 2 * N_LIMBS,
-    ] {
-        for limb in 0..N_LIMBS {
-            cols.push(start + limb);
-        }
-    }
-    cols
-}
-
-/// Base-trace column indices the signed-carry USES read, in consumer-AIR
-/// emission order (reduction slot outer, carry limb inner). The Double-formula
-/// block layout is `x3,y3,z3` (3·N_LIMBS) then per reduction `(q, carries)`.
-fn prepared_double_formula_signed_carry_use_columns() -> Vec<usize> {
-    let block = PREPARED_TABLE_PROJECTIVE_SOURCE_DOUBLE_FORMULA_OFFSET;
-    let reductions_start = block + 3 * N_LIMBS;
-    let mut cols = Vec::with_capacity(DOUBLE_TOTAL_REDUCTIONS * N_LIMBS);
-    for slot in 0..DOUBLE_TOTAL_REDUCTIONS {
-        let q_col = reductions_start + slot * (1 + N_LIMBS);
-        for limb in 0..N_LIMBS {
-            cols.push(q_col + 1 + limb); // skip the quotient column
-        }
-    }
-    cols
-}
-
 /// Base-trace column indices the Range13 USES read for the MixedAdd formula, in
 /// `bind_mixed_add_formula` emission order: lhs.x, lhs.y, rhs.x, rhs.y,
 /// output.x, output.y limbs, then x3, y3, z3 working-value limbs.
@@ -830,7 +755,7 @@ fn prepared_mixed_add_formula_range13_use_columns() -> Vec<usize> {
     let rhs_y = rhs_x + N_LIMBS;
     let output_x = 6 + 2 * PREPARED_TABLE_EC_POINT_COLUMNS;
     let output_y = output_x + N_LIMBS;
-    let x3 = PREPARED_TABLE_PROJECTIVE_SOURCE_MIXED_ADD_FORMULA_OFFSET;
+    let x3 = PREPARED_TABLE_PROJECTIVE_SOURCE_FORMULA_OFFSET;
     let mut cols = Vec::with_capacity(9 * N_LIMBS);
     for start in [
         lhs_x,
@@ -854,7 +779,7 @@ fn prepared_mixed_add_formula_range13_use_columns() -> Vec<usize> {
 /// formula, in consumer-AIR emission order (reduction slot outer, carry limb
 /// inner).
 fn prepared_mixed_add_formula_signed_carry_use_columns() -> Vec<usize> {
-    let block = PREPARED_TABLE_PROJECTIVE_SOURCE_MIXED_ADD_FORMULA_OFFSET;
+    let block = PREPARED_TABLE_PROJECTIVE_SOURCE_FORMULA_OFFSET;
     let reductions_start = block + 3 * N_LIMBS;
     let mut cols = Vec::with_capacity(MIXED_ADD_TOTAL_REDUCTIONS * N_LIMBS);
     for slot in 0..MIXED_ADD_TOTAL_REDUCTIONS {

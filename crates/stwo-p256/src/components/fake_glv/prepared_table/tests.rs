@@ -603,3 +603,48 @@ fn prepared_table_projective_source_rejects_forged_op_outputs() {
         );
     }
 }
+
+#[test]
+fn prepared_table_projective_source_rejects_double_row_mixed_only_witness() {
+    use crate::components::fake_glv::ec_source::double_formula::DOUBLE_TOTAL_REDUCTIONS;
+    use crate::scalar::scalar_mod_mul::columns::padded_log_size;
+    use stwo_p256_utils::constants::N_LIMBS;
+
+    let (certs, fake_glv, selectors, table) = build_table(42);
+    let trace = PreparedTableEcTraceClaim::from_claims(&certs, &fake_glv, &selectors, &table)
+        .expect("valid ec trace");
+    let fake_glv_ec = crate::fake_glv_chain::FakeGlvPrimitiveEcTraceClaim { rows: Vec::new() };
+    let projective =
+        crate::projective::ProjectiveEcTraceClaim::from_native_traces(&trace, &fake_glv_ec)
+            .expect("projective trace generates");
+    let log_size = padded_log_size(trace.rows.len());
+    let base: Vec<Vec<M31>> =
+        gen_prepared_table_projective_source_base_trace(&trace, &projective, log_size)
+            .expect("source base trace generates")
+            .into_iter()
+            .map(|column| column.to_cpu().values)
+            .collect();
+
+    assert!(
+        projective_source_constraints_hold(log_size, &base),
+        "honest prepared-table source trace must satisfy the polynomial constraints"
+    );
+
+    let op_col = 4usize;
+    let rows = 1usize << log_size;
+    let double_row = (0..rows)
+        .find(|&row| {
+            base[0][row] != M31::from_u32_unchecked(0)
+                && base[op_col][row] == M31::from_u32_unchecked(PREPARED_TABLE_EC_OP_DOUBLE)
+        })
+        .expect("table must contain an active Double row");
+    let reductions_start = PREPARED_TABLE_PROJECTIVE_SOURCE_FORMULA_OFFSET + 3 * N_LIMBS;
+    let first_mixed_only_q_col = reductions_start + DOUBLE_TOTAL_REDUCTIONS * (1 + N_LIMBS);
+
+    let mut forged = base.clone();
+    forged[first_mixed_only_q_col][double_row] += M31::from_u32_unchecked(1);
+    assert!(
+        !projective_source_constraints_hold(log_size, &forged),
+        "Double rows must zero-force the shared formula block's mixed-only reduction slots"
+    );
+}
