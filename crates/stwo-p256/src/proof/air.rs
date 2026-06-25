@@ -17,8 +17,9 @@
 //! - **Constraint-degree FRI sizing.** P256's constraints exceed degree 2, so
 //!   it reports its real [`AirProver::max_constraint_log_degree_bound`]; the
 //!   orchestrator sizes twiddles from it.
-//! - **Stored polynomial coefficients.** P256 needs the lifting path, so it
-//!   returns `true` from [`AirProver::store_polynomial_coefficients`].
+//! - **Constraint-degree FRI sizing.** P256 sizes the lifting domain from its
+//!   real component bounds, but it does not need to retain committed
+//!   polynomials in coefficient form during ordinary proving.
 //! - **Provider-inclusive balance + structured transcript mix.** P256's global
 //!   balance is `lookup_sum` (component sums *plus* public-input provider
 //!   terms), returned from [`Air::claimed_sums`]; its transcript mix is the
@@ -134,8 +135,39 @@ pub struct P256Prover<'a> {
     scalar_z: Option<ScalarZRelation>,
 }
 
+/// P-256 proof metadata and trace columns materialized before the module is
+/// wired to cross-module relation handles.
+pub struct PreparedP256Prover<'a> {
+    draft: &'a P256ProofDraft,
+    proof_claim: P256CurrentAirProofClaim,
+    ids: Vec<PreProcessedColumnId>,
+    max_constraint_bound: u32,
+    preprocessed: ColumnVec<M31ColumnEval>,
+    base: P256CurrentAirBaseTrace,
+}
+
+pub struct P256InteractionJob<'a> {
+    draft: &'a P256ProofDraft,
+    base: &'a P256CurrentAirBaseTrace,
+    relations: &'a P256CurrentAirRelations,
+}
+
+pub struct PreparedP256Interaction {
+    columns: ColumnVec<M31ColumnEval>,
+    claim: P256CurrentAirInteractionClaim,
+}
+
+impl P256InteractionJob<'_> {
+    pub fn materialize(self) -> Result<PreparedP256Interaction, P256ProofError> {
+        let (columns, claim) = self
+            .draft
+            .gen_current_air_interaction_trace(self.base, self.relations)?;
+        Ok(PreparedP256Interaction { columns, claim })
+    }
+}
+
 impl<'a> P256Prover<'a> {
-    pub fn new(draft: &'a P256ProofDraft) -> Result<Self, P256ProofError> {
+    pub fn prepare(draft: &'a P256ProofDraft) -> Result<PreparedP256Prover<'a>, P256ProofError> {
         let proof_claim = P256CurrentAirProofClaim::from_claim(&draft.claim);
         let ids = proof_claim.preprocessed_column_ids();
         let max_constraint_bound = proof_claim.max_constraint_log_degree_bound(&ids);
@@ -144,20 +176,35 @@ impl<'a> P256Prover<'a> {
         // evaluations into the shared trees.
         let preprocessed = draft.gen_current_air_preprocessed_trace(&proof_claim, &ids)?;
         let base = draft.gen_current_air_base_trace(&proof_claim)?;
-        Ok(Self {
+        Ok(PreparedP256Prover {
             draft,
             proof_claim,
             ids,
             max_constraint_bound,
-            preprocessed: Some(preprocessed),
-            base: Some(base),
+            preprocessed,
+            base,
+        })
+    }
+
+    pub fn new(draft: &'a P256ProofDraft) -> Result<Self, P256ProofError> {
+        Self::prepare(draft).map(Self::from_prepared)
+    }
+
+    pub fn from_prepared(prepared: PreparedP256Prover<'a>) -> Self {
+        Self {
+            draft: prepared.draft,
+            proof_claim: prepared.proof_claim,
+            ids: prepared.ids,
+            max_constraint_bound: prepared.max_constraint_bound,
+            preprocessed: Some(prepared.preprocessed),
+            base: Some(prepared.base),
             relations: None,
             interaction_claim: None,
             components: None,
             bind_z: false,
             scalar_z_handle: None,
             scalar_z: None,
-        })
+        }
     }
 
     /// Enable the cross-module `z` binding: the module draws and shares a
@@ -205,6 +252,26 @@ impl<'a> P256Prover<'a> {
         self.components
             .as_ref()
             .expect("components are built before they are borrowed")
+    }
+
+    pub fn interaction_job(&self) -> P256InteractionJob<'_> {
+        P256InteractionJob {
+            draft: self.draft,
+            base: self.base.as_ref().expect("base trace present"),
+            relations: self
+                .relations
+                .as_ref()
+                .expect("relations are drawn before the interaction phase"),
+        }
+    }
+
+    pub fn write_prepared_interaction(
+        &mut self,
+        tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>,
+        prepared: PreparedP256Interaction,
+    ) {
+        tb.extend_evals(prepared.columns);
+        self.interaction_claim = Some(prepared.claim);
     }
 }
 
@@ -286,10 +353,6 @@ impl AirProver for P256Prover<'_> {
         self.max_constraint_bound
     }
 
-    fn store_polynomial_coefficients(&self) -> bool {
-        true
-    }
-
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>) {
         let preprocessed = self
             .preprocessed
@@ -310,17 +373,11 @@ impl AirProver for P256Prover<'_> {
     }
 
     fn write_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>) {
-        let base = self.base.as_ref().expect("base trace present");
-        let relations = self
-            .relations
-            .as_ref()
-            .expect("relations are drawn before the interaction phase");
-        let (interaction, interaction_claim) = self
-            .draft
-            .gen_current_air_interaction_trace(base, relations)
+        let prepared = self
+            .interaction_job()
+            .materialize()
             .expect("interaction trace generates for a validated draft");
-        tb.extend_evals(interaction);
-        self.interaction_claim = Some(interaction_claim);
+        self.write_prepared_interaction(tb, prepared);
     }
 
     fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {

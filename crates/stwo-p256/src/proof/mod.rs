@@ -33,7 +33,8 @@ use crate::components::hinted_mul::air::{
 };
 use crate::components::hinted_mul::trace::{
     gen_hinted_mul_base_trace, gen_hinted_mul_interaction_trace, gen_hinted_mul_schedule_columns,
-    hinted_mul_range13_uses, hinted_mul_signed_uses, HintedMulRelations, HintedMulTraceClaim,
+    hinted_mul_gamma_instances, hinted_mul_gamma_max_padded_values, hinted_mul_range13_uses,
+    hinted_mul_signed_uses, HintedMulRelations, HintedMulTraceClaim,
 };
 use crate::components::hinted_mul::witness::HintedMulWitnessError;
 use crate::ecdsa::ecdsa_verify;
@@ -1079,6 +1080,10 @@ struct P256CurrentAirRelations {
     final_add: FinalAddRelations,
 }
 
+fn p256_gamma_max_padded_values() -> usize {
+    fake_glv_gamma_max_padded_values().max(hinted_mul_gamma_max_padded_values())
+}
+
 impl P256CurrentAirRelations {
     fn dummy() -> Self {
         let public_inputs = PublicEcdsaInstanceRelation::dummy();
@@ -1126,7 +1131,7 @@ impl P256CurrentAirRelations {
                 GammaDigestRelation::dummy(),
                 GammaChallenge::from_gamma(
                     SecureField::from(M31::from_u32_unchecked(2)),
-                    fake_glv_gamma_max_padded_values(),
+                    p256_gamma_max_padded_values(),
                 ),
             ),
             projective_rcb_air: ProjectiveRcbMulComponentRelations::dummy(),
@@ -1137,7 +1142,7 @@ impl P256CurrentAirRelations {
             gamma_digest: GammaDigestRelation::dummy(),
             gamma_challenge: GammaChallenge::from_gamma(
                 SecureField::from(M31::from_u32_unchecked(2)),
-                fake_glv_gamma_max_padded_values(),
+                p256_gamma_max_padded_values(),
             ),
             final_add_sign: FinalAddSignRelation::dummy(),
             final_add: FinalAddRelations {
@@ -1152,7 +1157,7 @@ impl P256CurrentAirRelations {
                 gamma_digest: GammaDigestRelation::dummy(),
                 gamma_challenge: GammaChallenge::from_gamma(
                     SecureField::from(M31::from_u32_unchecked(2)),
-                    fake_glv_gamma_max_padded_values(),
+                    p256_gamma_max_padded_values(),
                 ),
             },
         }
@@ -1178,7 +1183,7 @@ impl P256CurrentAirRelations {
         let final_check_hint = FinalCheckHintRelation::draw(channel);
         let final_add_sign = FinalAddSignRelation::draw(channel);
         let gamma_digest = GammaDigestRelation::draw(channel);
-        let gamma_challenge = GammaChallenge::draw(channel, fake_glv_gamma_max_padded_values());
+        let gamma_challenge = GammaChallenge::draw(channel, p256_gamma_max_padded_values());
         Self {
             public_inputs,
             scalar_setup_output,
@@ -1432,9 +1437,11 @@ impl P256CurrentAirComponents {
             ),
             hinted_mul: HintedMulSliceComponents::new(
                 allocator,
-                claim.hinted_mul.log_size,
+                claim.hinted_mul,
                 &HintedMulSliceClaimedSums {
                     check: interaction_claim.hinted_mul.claimed_sum,
+                    gamma_range13: interaction_claim.hinted_mul.gamma_range13,
+                    gamma_signed: interaction_claim.hinted_mul.gamma_signed,
                     range13: interaction_claim.hinted_mul.range13,
                     signed_h: interaction_claim.hinted_mul.signed_h,
                 },
@@ -1443,6 +1450,8 @@ impl P256CurrentAirComponents {
                     range13: relations.projective_rcb_air.range13.clone(),
                     signed_h: relations.hinted_signed_h.clone(),
                     mul_result: relations.projective_rcb_air.mul_result.clone(),
+                    gamma_digest: relations.gamma_digest.clone(),
+                    gamma_challenge: relations.gamma_challenge.clone(),
                 },
             ),
             final_add: FinalAddComponents::new(
@@ -1672,7 +1681,6 @@ impl P256ProofDraft {
         let mut channel = MC::C::default();
         let mut commitment_scheme =
             CommitmentSchemeProver::<SimdBackend, MC>::new(config, &twiddles);
-        commitment_scheme.set_store_polynomials_coefficients();
 
         let preprocessed = self.gen_current_air_preprocessed_trace(&proof_claim, &ids)?;
         let mut tree_builder = commitment_scheme.tree_builder();
@@ -2039,6 +2047,10 @@ impl P256ProofDraft {
                     }),
             );
         let hinted_mul_base = gen_hinted_mul_base_trace(&self.claim.hinted_mul_trace);
+        let [hinted_gamma_range13_instance, hinted_gamma_signed_instance] =
+            hinted_mul_gamma_instances(&self.claim.hinted_mul_trace);
+        let hinted_gamma_range13_base = gen_gamma_tall_base_trace(&hinted_gamma_range13_instance);
+        let hinted_gamma_signed_base = gen_gamma_tall_base_trace(&hinted_gamma_signed_instance);
         let hinted_range13_multiplicity = RangeCheckClaim::new(RANGE13_BITS)
             .gen_multiplicity_trace(hinted_mul_range13_uses(&self.claim.hinted_mul_trace));
         let hinted_signed_h_multiplicity = hinted_mul_signed_table_claim()
@@ -2090,6 +2102,8 @@ impl P256ProofDraft {
         columns.extend(final_check.clone());
         columns.extend(public_key_on_curve.clone());
         columns.extend(hinted_mul_base.clone());
+        columns.extend(hinted_gamma_range13_base.clone());
+        columns.extend(hinted_gamma_signed_base.clone());
         columns.push(hinted_range13_multiplicity.clone());
         columns.push(hinted_signed_h_multiplicity.clone());
         columns.extend(final_add);
@@ -2403,6 +2417,31 @@ impl P256ProofDraft {
                 range13: relations.projective_rcb_air.range13.clone(),
                 signed_h: relations.hinted_signed_h.clone(),
                 mul_result: relations.projective_rcb_air.mul_result.clone(),
+                gamma_digest: relations.gamma_digest.clone(),
+                gamma_challenge: relations.gamma_challenge.clone(),
+            },
+        );
+        let [hinted_gamma_range13_instance, hinted_gamma_signed_instance] =
+            hinted_mul_gamma_instances(&self.claim.hinted_mul_trace);
+        let (
+            (hinted_gamma_range13_interaction, hinted_gamma_range13_claim),
+            (hinted_gamma_signed_interaction, hinted_gamma_signed_claim),
+        ) = rayon::join(
+            || {
+                gen_gamma_tall_interaction_trace(
+                    &hinted_gamma_range13_instance,
+                    &relations.gamma_challenge,
+                    &relations.gamma_digest,
+                    &relations.projective_rcb_air.range13,
+                )
+            },
+            || {
+                gen_gamma_tall_interaction_trace(
+                    &hinted_gamma_signed_instance,
+                    &relations.gamma_challenge,
+                    &relations.gamma_digest,
+                    &relations.hinted_signed_h,
+                )
             },
         );
         let (hinted_range13_interaction, hinted_range13_provider) =
@@ -2473,6 +2512,8 @@ impl P256ProofDraft {
         columns.extend(final_check_interaction);
         columns.extend(public_key_on_curve_interaction);
         columns.extend(hinted_interaction);
+        columns.extend(hinted_gamma_range13_interaction);
+        columns.extend(hinted_gamma_signed_interaction);
         columns.extend(hinted_range13_interaction);
         columns.extend(hinted_signed_h_interaction);
         columns.extend(final_add_interaction);
@@ -2556,6 +2597,8 @@ impl P256ProofDraft {
                 public_key_on_curve: public_key_on_curve_claim,
                 hinted_mul: HintedMulProofInteractionClaim {
                     claimed_sum: hinted_claim.claimed_sum,
+                    gamma_range13: hinted_gamma_range13_claim,
+                    gamma_signed: hinted_gamma_signed_claim,
                     range13: hinted_range13_provider.claimed_sum,
                     signed_h: hinted_signed_h_provider.claimed_sum,
                 },

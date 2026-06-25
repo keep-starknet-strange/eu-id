@@ -132,8 +132,9 @@ pub trait AirProver: Air {
 
     /// Whether the commitment scheme must retain committed polynomials in
     /// coefficient form (`set_store_polynomials_coefficients`). Off by default;
-    /// the P256 module turns it on for its lifting path. If any module in a
-    /// `prove` call needs it, the orchestrator enables it for the whole proof.
+    /// diagnostic modules may turn it on when they need coefficient-level
+    /// inspection. If any module in a `prove` call needs it, the orchestrator
+    /// enables it for the whole proof.
     fn store_polynomial_coefficients(&self) -> bool {
         false
     }
@@ -183,8 +184,8 @@ pub fn prove(
     config.mix_into(channel);
 
     let mut commitment_scheme = CommitmentSchemeProver::<SimdBackend, Mc>::new(config, &twiddles);
-    // If any module needs committed polynomials kept in coefficient form (the
-    // P256 lifting path), enable it for the shared scheme.
+    // If any module needs committed polynomials kept in coefficient form,
+    // enable it for the shared scheme.
     if modules.iter().any(|m| m.store_polynomial_coefficients()) {
         commitment_scheme.set_store_polynomials_coefficients();
     }

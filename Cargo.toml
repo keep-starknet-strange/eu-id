@@ -23,6 +23,7 @@ stwo = { git = "https://github.com/starkware-libs/stwo.git", rev = "e1286720e5a6
 stwo-constraint-framework = { git = "https://github.com/starkware-libs/stwo.git", rev = "e1286720e5a6352cae79cc1201c322d5e02ab52f", features = ["prover"] }
 serde = { version = "1", features = ["derive"] }
 num-traits = "0.2"
+rayon = "1"
 
 # Workspace-wide lint configuration. Every crate opts in with `[lints]
 # workspace = true`, so the whole workspace shares one clippy baseline and a

@@ -18,6 +18,8 @@ stwo-p256 = { path = "../stwo-p256" }
 stwo-sha256 = { path = "../stwo-sha256" }
 predicates = { path = "../predicates" }
 stwo = { workspace = true }
+stwo-constraint-framework = { workspace = true }
+rayon = { workspace = true }
 
 # Proof (de)serialization for the `eu-id` CLI: `prove` writes a proof file,
 # `verify` reads it back. The combined `Proof` derives serde over the per-module

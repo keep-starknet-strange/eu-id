@@ -31,11 +31,13 @@ use stwo_constraint_framework::{
     RelationEntry, INTERACTION_TRACE_IDX,
 };
 
-use crate::range_checks::{consecutive_batching, write_batched_logup_columns, RangeCheckRelation};
+use crate::range_checks::{
+    consecutive_batching, write_generated_logup_columns_with_batching, RangeCheckRelation,
+};
 use crate::scalar::scalar_mod_mul::columns::{m31_column_eval, padded_log_size, M31ColumnEval};
 
 /// Values per tall-expander row (`K` in the design doc). 8 keeps the tall
-/// instances small (group of L values → ceil(L/8) rows) while the batched
+/// instances small (group of L values -> ceil(L/8) rows) while the batched
 /// logup stays at 5 QM31 columns (K range uses + 1 digest use, batch 2).
 pub const GAMMA_DIGEST_LANES: usize = 8;
 
@@ -54,6 +56,8 @@ pub const GAMMA_TAG_FINAL_ADD_RANGE13: u32 = 5;
 pub const GAMMA_TAG_FINAL_ADD_SIGNED: u32 = 6;
 pub const GAMMA_TAG_PKC_RANGE13: u32 = 7;
 pub const GAMMA_TAG_PKC_SIGNED: u32 = 8;
+pub const GAMMA_TAG_HINTED_MUL_RANGE13: u32 = 9;
+pub const GAMMA_TAG_HINTED_MUL_SIGNED: u32 = 10;
 
 /// The post-base-commit digest challenge: γ and its powers up to the largest
 /// lane-padded value-list length any adopted component uses. Drawn at the
@@ -514,9 +518,6 @@ pub fn gen_gamma_tall_interaction_trace(
     // Logup entries (eval order: K range uses, then the digest use), packed
     // over the circle-domain row layout.
     let vec_rows = 1usize << (log_size - LOG_N_LANES);
-    let mut entries: Vec<(Vec<PackedQM31>, Vec<PackedQM31>)> = Vec::new();
-    let mut digest_use_sum = zero;
-    let mut range_use_sum = zero;
     // Map circle-domain (bit-reversed) rows back to coset indices.
     let mut row_lookup = vec![0usize; rows];
     for coset in 0..rows {
@@ -526,62 +527,48 @@ pub fn gen_gamma_tall_interaction_trace(
         );
         row_lookup[domain_row] = coset;
     }
-    for lane in 0..GAMMA_DIGEST_LANES {
-        let mut numerators = Vec::with_capacity(vec_rows);
-        let mut denominators = Vec::with_capacity(vec_rows);
-        for vec_row in 0..vec_rows {
-            let mut numerator = [zero; N_LANES];
-            let mut denominator = [one; N_LANES];
-            for simd_lane in 0..N_LANES {
-                let coset = row_lookup[vec_row * N_LANES + simd_lane];
-                let value = instance.lane_value(coset, lane);
-                let in_group = coset < layout.active_rows();
-                let denom: SecureField = range_relation.combine(&[value]);
-                numerator[simd_lane] = if in_group { one } else { zero };
-                denominator[simd_lane] = denom;
-                if in_group {
-                    range_use_sum += one / denom;
-                }
-            }
-            numerators.push(PackedQM31::from_array(numerator));
-            denominators.push(PackedQM31::from_array(denominator));
-        }
-        entries.push((numerators, denominators));
-    }
-    {
-        let mut numerators = Vec::with_capacity(vec_rows);
-        let mut denominators = Vec::with_capacity(vec_rows);
-        for vec_row in 0..vec_rows {
-            let mut numerator = [zero; N_LANES];
-            let mut denominator = [one; N_LANES];
-            for simd_lane in 0..N_LANES {
-                let coset = row_lookup[vec_row * N_LANES + simd_lane];
-                let is_end = coset < layout.active_rows() && coset % g == g - 1;
-                let row_id = M31::from_u32_unchecked((coset / g) as u32);
-                let digest_coords = acc[coset].to_m31_array();
-                let tuple = [
-                    M31::from_u32_unchecked(layout.tag),
-                    row_id,
-                    digest_coords[0],
-                    digest_coords[1],
-                    digest_coords[2],
-                    digest_coords[3],
-                ];
-                let denom: SecureField = digest_relation.combine(&tuple);
-                numerator[simd_lane] = if is_end { one } else { zero };
-                denominator[simd_lane] = denom;
-                if is_end {
-                    digest_use_sum += one / denom;
-                }
-            }
-            numerators.push(PackedQM31::from_array(numerator));
-            denominators.push(PackedQM31::from_array(denominator));
-        }
-        entries.push((numerators, denominators));
-    }
 
     let mut logup = LogupTraceGenerator::new(log_size);
-    write_batched_logup_columns(&mut logup, &entries, 2);
+    let entry_count = GAMMA_DIGEST_LANES + 1;
+    write_generated_logup_columns_with_batching(
+        &mut logup,
+        entry_count,
+        vec_rows,
+        &consecutive_batching(entry_count, 2),
+        |entry, vec_row| {
+            let mut numerator = [zero; N_LANES];
+            let mut denominator = [one; N_LANES];
+            for simd_lane in 0..N_LANES {
+                let coset = row_lookup[vec_row * N_LANES + simd_lane];
+                if entry < GAMMA_DIGEST_LANES {
+                    let value = instance.lane_value(coset, entry);
+                    let in_group = coset < layout.active_rows();
+                    let denom: SecureField = range_relation.combine(&[value]);
+                    numerator[simd_lane] = if in_group { one } else { zero };
+                    denominator[simd_lane] = denom;
+                } else {
+                    let is_end = coset < layout.active_rows() && coset % g == g - 1;
+                    let row_id = M31::from_u32_unchecked((coset / g) as u32);
+                    let digest_coords = acc[coset].to_m31_array();
+                    let tuple = [
+                        M31::from_u32_unchecked(layout.tag),
+                        row_id,
+                        digest_coords[0],
+                        digest_coords[1],
+                        digest_coords[2],
+                        digest_coords[3],
+                    ];
+                    let denom: SecureField = digest_relation.combine(&tuple);
+                    numerator[simd_lane] = if is_end { one } else { zero };
+                    denominator[simd_lane] = denom;
+                }
+            }
+            (
+                PackedQM31::from_array(numerator),
+                PackedQM31::from_array(denominator),
+            )
+        },
+    );
     let (logup_trace, claimed_sum) = logup.finalize_last();
     trace.extend(logup_trace);
 

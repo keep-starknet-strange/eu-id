@@ -47,6 +47,43 @@ use crate::preprocessed::{
 use crate::trace::Layout;
 use crate::types::Sha256Witness;
 
+type Sha256ColumnEval = CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>;
+
+/// SHA trace columns materialized before the module is wired to shared relation
+/// handles.
+pub struct PreparedSha256Traces {
+    preprocessed: Vec<Sha256ColumnEval>,
+    base: Vec<Sha256ColumnEval>,
+}
+
+pub struct Sha256InteractionJob<'a> {
+    relations: &'a Sha256Relations,
+    witness: &'a Sha256Witness,
+    log_n_rows: u32,
+    group_width: u32,
+    expose_digest: bool,
+    field_exposure: &'a FieldExposure,
+}
+
+pub struct PreparedSha256Interaction {
+    columns: Vec<Sha256ColumnEval>,
+    claim: InteractionClaim,
+}
+
+impl Sha256InteractionJob<'_> {
+    pub fn materialize(self) -> PreparedSha256Interaction {
+        let (columns, claim) = generate_interaction_trace(
+            self.relations,
+            self.witness,
+            self.log_n_rows,
+            self.group_width,
+            self.expose_digest,
+            self.field_exposure,
+        );
+        PreparedSha256Interaction { columns, claim }
+    }
+}
+
 /// Column log-sizes per tree, shared by prover and verifier — they depend
 /// only on the public size surface (`log_n_rows`, `group_width`), never on the
 /// witness.
@@ -95,6 +132,8 @@ pub struct Sha256Prover<'a> {
     relations: Option<Sha256Relations>,
     interaction_claim: Option<InteractionClaim>,
     components: Option<Sha256Components>,
+    preprocessed: Option<Vec<Sha256ColumnEval>>,
+    base: Option<Vec<Sha256ColumnEval>>,
 }
 
 impl<'a> Sha256Prover<'a> {
@@ -110,7 +149,26 @@ impl<'a> Sha256Prover<'a> {
             relations: None,
             interaction_claim: None,
             components: None,
+            preprocessed: None,
+            base: None,
         }
+    }
+
+    pub fn prepare_traces(
+        witness: &Sha256Witness,
+        log_n_rows: u32,
+        group_width: u32,
+        field_exposure: &FieldExposure,
+    ) -> PreparedSha256Traces {
+        let (preprocessed, _ids, _log_sizes) = generate_preprocessed_trace(group_width, log_n_rows);
+        let base = build_base_trace(witness, log_n_rows, group_width, field_exposure);
+        PreparedSha256Traces { preprocessed, base }
+    }
+
+    pub fn with_prepared_traces(mut self, prepared: PreparedSha256Traces) -> Self {
+        self.preprocessed = Some(prepared.preprocessed);
+        self.base = Some(prepared.base);
+        self
     }
 
     /// Enable the cross-component digest provider: the module yields
@@ -183,6 +241,26 @@ impl<'a> Sha256Prover<'a> {
             .as_ref()
             .expect("relations are drawn before they are used")
     }
+
+    pub fn interaction_job(&self) -> Sha256InteractionJob<'_> {
+        Sha256InteractionJob {
+            relations: self.relations(),
+            witness: self.witness,
+            log_n_rows: self.log_n_rows,
+            group_width: self.group_width,
+            expose_digest: self.expose_digest,
+            field_exposure: &self.field_exposure,
+        }
+    }
+
+    pub fn write_prepared_interaction(
+        &mut self,
+        tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>,
+        prepared: PreparedSha256Interaction,
+    ) {
+        tb.extend_evals(prepared.columns);
+        self.interaction_claim = Some(prepared.claim);
+    }
 }
 
 impl Air for Sha256Prover<'_> {
@@ -253,31 +331,29 @@ impl AirProver for Sha256Prover<'_> {
     }
 
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>) {
-        let (preprocessed_evals, _ids, _log_sizes) =
-            generate_preprocessed_trace(self.group_width, self.log_n_rows);
-        tb.extend_evals(preprocessed_evals);
+        let preprocessed = self.preprocessed.take().unwrap_or_else(|| {
+            let (preprocessed_evals, _ids, _log_sizes) =
+                generate_preprocessed_trace(self.group_width, self.log_n_rows);
+            preprocessed_evals
+        });
+        tb.extend_evals(preprocessed);
     }
 
     fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>) {
-        tb.extend_evals(build_base_trace(
-            self.witness,
-            self.log_n_rows,
-            self.group_width,
-            &self.field_exposure,
-        ));
+        let base = self.base.take().unwrap_or_else(|| {
+            build_base_trace(
+                self.witness,
+                self.log_n_rows,
+                self.group_width,
+                &self.field_exposure,
+            )
+        });
+        tb.extend_evals(base);
     }
 
     fn write_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>) {
-        let (interaction_evals, interaction_claim) = generate_interaction_trace(
-            self.relations(),
-            self.witness,
-            self.log_n_rows,
-            self.group_width,
-            self.expose_digest,
-            &self.field_exposure,
-        );
-        tb.extend_evals(interaction_evals);
-        self.interaction_claim = Some(interaction_claim);
+        let prepared = self.interaction_job().materialize();
+        self.write_prepared_interaction(tb, prepared);
     }
 
     fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {

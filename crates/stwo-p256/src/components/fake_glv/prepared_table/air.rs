@@ -435,6 +435,9 @@ impl FrameworkEval for PreparedTableProjectiveSourceEval {
             y2: rhs.y_bigint(),
             output_x: output.x_bigint(),
             output_y: output.y_bigint(),
+            output_inf: output.inf(),
+            x3: formula_columns.x3.clone(),
+            y3: formula_columns.y3.clone(),
             z3_double: formula_columns.z3.clone(),
             z3_mixed: P256EvalBigInt::<E>::from_limbs(core::array::from_fn(|_| {
                 E::F::from(M31::from_u32_unchecked(0))

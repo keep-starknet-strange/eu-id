@@ -97,8 +97,14 @@ use air_core::{Air, AirProver};
 use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::QM31;
 use stwo::core::pcs::PcsConfig;
+use stwo::core::poly::circle::CanonicCoset;
 use stwo::core::proof::StarkProof;
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleHasher;
+use stwo::prover::backend::simd::SimdBackend;
+use stwo::prover::poly::circle::PolyOps;
+use stwo::prover::{prove as stark_prove, CommitmentSchemeProver, ComponentProver, ProvingError};
+use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
+use stwo_constraint_framework::TraceLocationAllocator;
 
 use predicates::nat::NationalityPredicate;
 use predicates::{
@@ -294,15 +300,21 @@ pub fn prove(
     let digest_handle = SharedDigestRelation::new();
     let field_handle = SharedFieldRelation::new();
 
-    let mut p256 = P256Prover::new(p256_draft)
-        .map_err(Error::P256Prepare)?
+    let exposure = credential_exposure();
+    let (p256_prepared, sha_prepared) = rayon::join(
+        || P256Prover::prepare(p256_draft),
+        || Sha256Prover::prepare_traces(sha_witness, sha_log_n_rows, sha_group_width, &exposure),
+    );
+
+    let mut p256 = P256Prover::from_prepared(p256_prepared.map_err(Error::P256Prepare)?)
         .with_z_binding(scalar_z_handle.clone());
     // SHA both yields its digest (P256↔SHA bridge) and exposes the DOB +
     // nationality byte windows (age/nat↔credential bridges) on the
     // shared field channel.
     let mut sha = Sha256Prover::new(sha_witness, sha_log_n_rows, sha_group_width)
         .with_digest_handle(digest_handle.clone())
-        .with_field_handle(credential_exposure(), field_handle.clone());
+        .with_field_handle(exposure, field_handle.clone())
+        .with_prepared_traces(sha_prepared);
 
     let instances = p256.proof_claim().public_inputs.instances.clone();
     let rows = bridge_rows(&instances);
@@ -348,11 +360,9 @@ pub fn prove(
     // column); neither aliases SHA's `sha256_range_*`, P256's `p256_*`, or the
     // bridge's `digest_bind_*` ids in the shared allocator. The verifier must use
     // this same order.
-    let stark_proof = {
-        let mut modules: [&mut dyn AirProver; 5] =
-            [&mut p256, &mut sha, &mut bridge, &mut age, &mut nat];
-        air_core::prove(&mut modules, config).map_err(|e| Error::Prove(format!("{e:?}")))?
-    };
+    let stark_proof =
+        prove_with_parallel_p256_sha(&mut p256, &mut sha, &mut bridge, &mut age, &mut nat, config)
+            .map_err(|e| Error::Prove(format!("{e:?}")))?;
 
     Ok(Proof {
         stark_proof,
@@ -370,6 +380,125 @@ pub fn prove(
         nat_public: nat_public.clone(),
         nat_claimed_sums: nat.claimed_sums(),
     })
+}
+
+fn prove_with_parallel_p256_sha(
+    p256: &mut P256Prover<'_>,
+    sha: &mut Sha256Prover<'_>,
+    bridge: &mut DigestBindProver,
+    age: &mut dyn AirProver,
+    nat: &mut dyn AirProver,
+    config: PcsConfig,
+) -> Result<StarkProof<Blake2sMerkleHasher>, ProvingError> {
+    let max_constraint_log_degree_bound = [
+        p256.max_constraint_log_degree_bound(),
+        sha.max_constraint_log_degree_bound(),
+        bridge.max_constraint_log_degree_bound(),
+        age.max_constraint_log_degree_bound(),
+        nat.max_constraint_log_degree_bound(),
+    ]
+    .into_iter()
+    .max()
+    .expect("at least one module");
+    let twiddle_log_size = config
+        .lifting_log_size
+        .unwrap_or(max_constraint_log_degree_bound + config.fri_config.log_blowup_factor);
+
+    let twiddles = SimdBackend::precompute_twiddles(
+        CanonicCoset::new(twiddle_log_size)
+            .circle_domain()
+            .half_coset,
+    );
+
+    let channel = &mut air_core::Ch::default();
+    config.mix_into(channel);
+
+    let mut commitment_scheme =
+        CommitmentSchemeProver::<SimdBackend, air_core::Mc>::new(config, &twiddles);
+    if p256.store_polynomial_coefficients()
+        || sha.store_polynomial_coefficients()
+        || bridge.store_polynomial_coefficients()
+        || age.store_polynomial_coefficients()
+        || nat.store_polynomial_coefficients()
+    {
+        commitment_scheme.set_store_polynomials_coefficients();
+    }
+
+    let mut tb = commitment_scheme.tree_builder();
+    p256.write_preprocessed(&mut tb);
+    sha.write_preprocessed(&mut tb);
+    bridge.write_preprocessed(&mut tb);
+    age.write_preprocessed(&mut tb);
+    nat.write_preprocessed(&mut tb);
+    tb.commit(channel);
+
+    p256.mix_public(channel);
+    sha.mix_public(channel);
+    bridge.mix_public(channel);
+    age.mix_public(channel);
+    nat.mix_public(channel);
+
+    let mut tb = commitment_scheme.tree_builder();
+    p256.write_trace(&mut tb);
+    sha.write_trace(&mut tb);
+    bridge.write_trace(&mut tb);
+    age.write_trace(&mut tb);
+    nat.write_trace(&mut tb);
+    tb.commit(channel);
+
+    p256.draw_relations(channel);
+    sha.draw_relations(channel);
+    bridge.draw_relations(channel);
+    age.draw_relations(channel);
+    nat.draw_relations(channel);
+
+    let p256_job = p256.interaction_job();
+    let sha_job = sha.interaction_job();
+    let (p256_interaction, sha_interaction) = rayon::join(
+        || {
+            p256_job
+                .materialize()
+                .expect("interaction trace generates for a validated draft")
+        },
+        || sha_job.materialize(),
+    );
+
+    let mut tb = commitment_scheme.tree_builder();
+    p256.write_prepared_interaction(&mut tb, p256_interaction);
+    sha.write_prepared_interaction(&mut tb, sha_interaction);
+    bridge.write_interaction(&mut tb);
+    age.write_interaction(&mut tb);
+    nat.write_interaction(&mut tb);
+
+    p256.mix_claimed_sums(channel);
+    sha.mix_claimed_sums(channel);
+    bridge.mix_claimed_sums(channel);
+    age.mix_claimed_sums(channel);
+    nat.mix_claimed_sums(channel);
+    tb.commit(channel);
+
+    let mut preprocessed_ids: Vec<PreProcessedColumnId> = Vec::new();
+    preprocessed_ids.extend(p256.preprocessed_column_ids());
+    preprocessed_ids.extend(sha.preprocessed_column_ids());
+    preprocessed_ids.extend(bridge.preprocessed_column_ids());
+    preprocessed_ids.extend(age.preprocessed_column_ids());
+    preprocessed_ids.extend(nat.preprocessed_column_ids());
+    let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&preprocessed_ids);
+
+    p256.build_components(&mut allocator);
+    sha.build_components(&mut allocator);
+    bridge.build_components(&mut allocator);
+    age.build_components(&mut allocator);
+    nat.build_components(&mut allocator);
+
+    let mut component_refs: Vec<&dyn ComponentProver<SimdBackend>> = Vec::new();
+    component_refs.extend(p256.prover_components());
+    component_refs.extend(sha.prover_components());
+    component_refs.extend(bridge.prover_components());
+    component_refs.extend(age.prover_components());
+    component_refs.extend(nat.prover_components());
+
+    stark_prove::<SimdBackend, air_core::Mc>(&component_refs, channel, commitment_scheme)
 }
 
 /// Prove an identity statement from a credential, an issuer signing key, and a

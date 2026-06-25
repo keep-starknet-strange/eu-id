@@ -3,7 +3,7 @@
 //! lockstep with `HintedMulEval::evaluate`).
 
 use stwo::core::fields::m31::M31;
-use stwo::core::fields::qm31::SecureField;
+use stwo::core::fields::qm31::{SecureField, SECURE_EXTENSION_DEGREE};
 use stwo::core::ColumnVec;
 use stwo::prover::backend::simd::m31::{PackedM31, LOG_N_LANES};
 use stwo::prover::backend::simd::qm31::PackedQM31;
@@ -11,6 +11,10 @@ use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{LogupTraceGenerator, Relation};
 use stwo_p256_utils::constants::N_LIMBS;
 
+use crate::components::gamma_digest::{
+    gamma_padded_values, GammaChallenge, GammaDigestRelation, GammaTallInstance, GammaTallLayout,
+    GAMMA_TAG_HINTED_MUL_RANGE13, GAMMA_TAG_HINTED_MUL_SIGNED,
+};
 use crate::components::projective_rcb_mul::relation::ProjectiveRcbMulResultRelation;
 use crate::range_checks::{encode_signed_carry, RangeCheckRelation};
 use crate::scalar::scalar_mod_mul::columns::{m31_column_eval, padded_log_size, M31ColumnEval};
@@ -105,6 +109,9 @@ pub const HINTED_MUL_GROUP_COLUMNS: usize = HINTED_MUL_Q_LIMBS + N_LIMBS + 2 * H
 
 /// Base-trace column count: `a`, `b`, then the three identity groups.
 pub const HINTED_MUL_TRACE_COLUMNS: usize = 2 * N_LIMBS + 3 * HINTED_MUL_GROUP_COLUMNS;
+pub const HINTED_MUL_RANGE13_VALUES_PER_ROW: usize =
+    2 * N_LIMBS + 3 * (HINTED_MUL_Q_LIMBS + N_LIMBS + HINTED_MUL_H_COEFFS);
+pub const HINTED_MUL_SIGNED_VALUES_PER_ROW: usize = 3 * HINTED_MUL_H_COEFFS;
 
 pub fn hinted_mul_schedule_active_id(log_size: u32) -> PreProcessedColumnId {
     PreProcessedColumnId {
@@ -124,23 +131,32 @@ pub fn hinted_mul_schedule_mul_index_id(log_size: u32) -> PreProcessedColumnId {
     }
 }
 
+pub fn hinted_mul_schedule_row_index_id(log_size: u32) -> PreProcessedColumnId {
+    PreProcessedColumnId {
+        id: format!("hinted_mul_schedule_row_index_{log_size}"),
+    }
+}
+
 /// Schedule columns (per-circuit constants once the mul list shape is fixed):
-/// `active`, `source_index`, `mul_index`.
+/// `active`, `source_index`, `mul_index`, `row_index`.
 pub fn gen_hinted_mul_schedule_columns(claim: &HintedMulTraceClaim) -> ColumnVec<M31ColumnEval> {
     let log_size = claim.log_size();
     let rows = 1usize << log_size;
     let mut active = vec![M31::from_u32_unchecked(0); rows];
     let mut source_index = vec![M31::from_u32_unchecked(0); rows];
     let mut mul_index = vec![M31::from_u32_unchecked(0); rows];
+    let mut row_index = vec![M31::from_u32_unchecked(0); rows];
     for (row, scheduled) in claim.rows.iter().enumerate() {
         active[row] = M31::from_u32_unchecked(1);
         source_index[row] = M31::from_u32_unchecked(scheduled.source_index);
         mul_index[row] = M31::from_u32_unchecked(scheduled.mul_index);
+        row_index[row] = M31::from_u32_unchecked(row as u32);
     }
     vec![
         m31_column_eval(log_size, active),
         m31_column_eval(log_size, source_index),
         m31_column_eval(log_size, mul_index),
+        m31_column_eval(log_size, row_index),
     ]
 }
 
@@ -162,6 +178,95 @@ pub fn gen_hinted_mul_base_trace(claim: &HintedMulTraceClaim) -> ColumnVec<M31Co
         .into_iter()
         .map(|values| m31_column_eval(log_size, values))
         .collect()
+}
+
+pub fn hinted_mul_gamma_range13_columns() -> Vec<usize> {
+    let mut columns = Vec::with_capacity(HINTED_MUL_RANGE13_VALUES_PER_ROW);
+    let mut cursor = 0usize;
+    for _ in 0..2 * N_LIMBS {
+        columns.push(cursor);
+        cursor += 1;
+    }
+    for _ in 0..3 {
+        for _ in 0..HINTED_MUL_Q_LIMBS + N_LIMBS + HINTED_MUL_H_COEFFS {
+            columns.push(cursor);
+            cursor += 1;
+        }
+        cursor += HINTED_MUL_H_COEFFS;
+    }
+    debug_assert_eq!(columns.len(), HINTED_MUL_RANGE13_VALUES_PER_ROW);
+    columns
+}
+
+pub fn hinted_mul_gamma_signed_columns() -> Vec<usize> {
+    let mut columns = Vec::with_capacity(HINTED_MUL_SIGNED_VALUES_PER_ROW);
+    let mut cursor = 2 * N_LIMBS;
+    for _ in 0..3 {
+        cursor += HINTED_MUL_Q_LIMBS + N_LIMBS + HINTED_MUL_H_COEFFS;
+        for _ in 0..HINTED_MUL_H_COEFFS {
+            columns.push(cursor);
+            cursor += 1;
+        }
+    }
+    debug_assert_eq!(columns.len(), HINTED_MUL_SIGNED_VALUES_PER_ROW);
+    columns
+}
+
+pub fn hinted_mul_gamma_max_padded_values() -> usize {
+    gamma_padded_values(HINTED_MUL_RANGE13_VALUES_PER_ROW)
+        .max(gamma_padded_values(HINTED_MUL_SIGNED_VALUES_PER_ROW))
+}
+
+pub fn hinted_mul_gamma_layouts(rows: usize) -> [GammaTallLayout; 2] {
+    [
+        GammaTallLayout {
+            tag: GAMMA_TAG_HINTED_MUL_RANGE13,
+            group_count: rows,
+            values_per_group: HINTED_MUL_RANGE13_VALUES_PER_ROW,
+        },
+        GammaTallLayout {
+            tag: GAMMA_TAG_HINTED_MUL_SIGNED,
+            group_count: rows,
+            values_per_group: HINTED_MUL_SIGNED_VALUES_PER_ROW,
+        },
+    ]
+}
+
+pub fn hinted_mul_gamma_instances(claim: &HintedMulTraceClaim) -> [GammaTallInstance; 2] {
+    let range13_columns = hinted_mul_gamma_range13_columns();
+    let signed_columns = hinted_mul_gamma_signed_columns();
+    let mut range13_groups = Vec::with_capacity(claim.rows.len());
+    let mut signed_groups = Vec::with_capacity(claim.rows.len());
+    for scheduled in &claim.rows {
+        let mut values = Vec::with_capacity(HINTED_MUL_TRACE_COLUMNS);
+        push_row_values(&scheduled.witness, &mut values);
+        range13_groups.push(
+            range13_columns
+                .iter()
+                .map(|&column| values[column])
+                .collect(),
+        );
+        signed_groups.push(
+            signed_columns
+                .iter()
+                .map(|&column| values[column])
+                .collect(),
+        );
+    }
+    [
+        GammaTallInstance::new(
+            GAMMA_TAG_HINTED_MUL_RANGE13,
+            HINTED_MUL_RANGE13_VALUES_PER_ROW,
+            M31::from_u32_unchecked(0),
+            range13_groups,
+        ),
+        GammaTallInstance::new(
+            GAMMA_TAG_HINTED_MUL_SIGNED,
+            HINTED_MUL_SIGNED_VALUES_PER_ROW,
+            encode_signed_carry(0),
+            signed_groups,
+        ),
+    ]
 }
 
 /// The committed M31 values of one witness, in column order. This is the
@@ -190,6 +295,8 @@ pub struct HintedMulRelations {
     pub range13: RangeCheckRelation,
     pub signed_h: RangeCheckRelation,
     pub mul_result: ProjectiveRcbMulResultRelation,
+    pub gamma_digest: GammaDigestRelation,
+    pub gamma_challenge: GammaChallenge,
 }
 
 /// Interaction trace + per-relation claimed sums, paired two fractions per
@@ -205,38 +312,29 @@ pub fn gen_hinted_mul_interaction_trace(
     relations: &HintedMulRelations,
 ) -> (ColumnVec<M31ColumnEval>, HintedMulInteractionClaim) {
     assert_eq!(base.len(), HINTED_MUL_TRACE_COLUMNS);
-    assert_eq!(schedule.len(), 3);
+    assert_eq!(schedule.len(), 4);
     let log_size = claim.log_size();
     let vec_rows = 1usize << (log_size - LOG_N_LANES);
     let active = &schedule[0];
     let source_index = &schedule[1];
     let mul_index = &schedule[2];
+    let row_index = &schedule[3];
 
-    // Entry descriptors in the exact `evaluate` emission order: every
-    // committed column in column order (Range13 for limbs, the signed table
-    // for h_hi), then the 60 mul-result provides.
+    // Entry descriptors in the exact `evaluate` emission order: the three
+    // mul-result provides, then the two gamma-digest yields that bind all
+    // range/signed lookup values to their tall expanders.
     enum EntryKind {
-        Range13(usize),
-        SignedH(usize),
-        Provide { role: u32, column: usize },
+        Provide {
+            role: u32,
+            column: usize,
+        },
+        GammaDigest {
+            tag: u32,
+            pad_value: M31,
+            columns: Vec<usize>,
+        },
     }
     let mut descriptors: Vec<EntryKind> = Vec::new();
-    let mut column_cursor = 0usize;
-    for _ in 0..2 * N_LIMBS {
-        descriptors.push(EntryKind::Range13(column_cursor));
-        column_cursor += 1;
-    }
-    for _ in 0..3 {
-        for _ in 0..HINTED_MUL_Q_LIMBS + N_LIMBS + HINTED_MUL_H_COEFFS {
-            descriptors.push(EntryKind::Range13(column_cursor));
-            column_cursor += 1;
-        }
-        for _ in 0..HINTED_MUL_H_COEFFS {
-            descriptors.push(EntryKind::SignedH(column_cursor));
-            column_cursor += 1;
-        }
-    }
-    assert_eq!(column_cursor, HINTED_MUL_TRACE_COLUMNS);
     let role_columns: [(u32, usize); 3] = [
         (0, 0),       // LHS → a
         (1, N_LIMBS), // RHS → b
@@ -248,24 +346,22 @@ pub fn gen_hinted_mul_interaction_trace(
             column: base_column,
         });
     }
+    descriptors.push(EntryKind::GammaDigest {
+        tag: GAMMA_TAG_HINTED_MUL_RANGE13,
+        pad_value: M31::from_u32_unchecked(0),
+        columns: hinted_mul_gamma_range13_columns(),
+    });
+    descriptors.push(EntryKind::GammaDigest {
+        tag: GAMMA_TAG_HINTED_MUL_SIGNED,
+        pad_value: encode_signed_carry(0),
+        columns: hinted_mul_gamma_signed_columns(),
+    });
 
     // Per-entry packed denominators (independent → rayon).
     use rayon::prelude::*;
     let entries: Vec<(i64, Vec<PackedQM31>)> = descriptors
         .par_iter()
         .map(|kind| match kind {
-            EntryKind::Range13(column) => (
-                1i64,
-                (0..vec_rows)
-                    .map(|vec_row| relations.range13.combine(&[base[*column].data[vec_row]]))
-                    .collect(),
-            ),
-            EntryKind::SignedH(column) => (
-                1i64,
-                (0..vec_rows)
-                    .map(|vec_row| relations.signed_h.combine(&[base[*column].data[vec_row]]))
-                    .collect(),
-            ),
             EntryKind::Provide { role, column } => (
                 -1i64,
                 (0..vec_rows)
@@ -279,6 +375,42 @@ pub fn gen_hinted_mul_interaction_trace(
                             values.push(base[*column + limb].data[vec_row]);
                         }
                         relations.mul_result.combine(&values)
+                    })
+                    .collect(),
+            ),
+            EntryKind::GammaDigest {
+                tag,
+                pad_value,
+                columns,
+            } => (
+                -1i64,
+                (0..vec_rows)
+                    .map(|vec_row| {
+                        let padded = gamma_padded_values(columns.len());
+                        let pad_sum = {
+                            let mut sum = SecureField::from(M31::from_u32_unchecked(0));
+                            for power in 0..(padded - columns.len()) {
+                                sum += relations.gamma_challenge.power(power);
+                            }
+                            sum * SecureField::from(*pad_value)
+                        };
+                        let mut coords: [PackedM31; SECURE_EXTENSION_DEGREE] =
+                            pad_sum.to_m31_array().map(PackedM31::broadcast);
+                        for (i, column) in columns.iter().enumerate() {
+                            let power = relations
+                                .gamma_challenge
+                                .power(padded - 1 - i)
+                                .to_m31_array();
+                            for (coord, power_coord) in coords.iter_mut().zip(power) {
+                                *coord +=
+                                    base[*column].data[vec_row] * PackedM31::broadcast(power_coord);
+                            }
+                        }
+                        let mut values = Vec::with_capacity(2 + SECURE_EXTENSION_DEGREE);
+                        values.push(PackedM31::broadcast(M31::from_u32_unchecked(*tag)));
+                        values.push(row_index.data[vec_row]);
+                        values.extend(coords);
+                        relations.gamma_digest.combine(&values)
                     })
                     .collect(),
             ),
@@ -338,9 +470,14 @@ pub fn gen_hinted_mul_interaction_trace(
             })
             .sum();
         match kind {
-            EntryKind::Range13(_) => range13_consumer += total,
-            EntryKind::SignedH(_) => signed_consumer += total,
             EntryKind::Provide { .. } => mul_result_provider -= total,
+            EntryKind::GammaDigest { tag, .. } if *tag == GAMMA_TAG_HINTED_MUL_RANGE13 => {
+                range13_consumer -= total
+            }
+            EntryKind::GammaDigest { tag, .. } if *tag == GAMMA_TAG_HINTED_MUL_SIGNED => {
+                signed_consumer -= total
+            }
+            EntryKind::GammaDigest { .. } => unreachable!(),
         }
     }
 
@@ -378,24 +515,8 @@ pub(crate) fn hinted_mul_result_provider_sum(
 
 /// Range13 use values per active row (multiplicity feed for the provider).
 pub fn hinted_mul_range13_uses(claim: &HintedMulTraceClaim) -> Vec<M31> {
-    let mut uses = Vec::new();
-    for scheduled in &claim.rows {
-        let mut values = Vec::with_capacity(HINTED_MUL_TRACE_COLUMNS);
-        push_row_values(&scheduled.witness, &mut values);
-        let mut column = 0usize;
-        for _ in 0..2 * N_LIMBS {
-            uses.push(values[column]);
-            column += 1;
-        }
-        for _ in 0..3 {
-            for _ in 0..HINTED_MUL_Q_LIMBS + N_LIMBS + HINTED_MUL_H_COEFFS {
-                uses.push(values[column]);
-                column += 1;
-            }
-            column += HINTED_MUL_H_COEFFS; // skip h_hi (signed table)
-        }
-    }
-    uses
+    let [range13, _] = hinted_mul_gamma_instances(claim);
+    range13.all_scheduled_values()
 }
 
 /// Signed-table use values (`h_hi`, decoded) per active row.
@@ -411,6 +532,9 @@ pub fn hinted_mul_signed_uses(claim: &HintedMulTraceClaim) -> Vec<i64> {
                 uses.push(split_carry(coeff).1);
             }
         }
+        let pad_count = gamma_padded_values(HINTED_MUL_SIGNED_VALUES_PER_ROW)
+            - HINTED_MUL_SIGNED_VALUES_PER_ROW;
+        uses.extend(std::iter::repeat_n(0, pad_count));
     }
     uses
 }

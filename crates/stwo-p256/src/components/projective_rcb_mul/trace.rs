@@ -168,6 +168,9 @@ pub(crate) struct ConsumedMulGenLayout {
     pub y2_col: usize,
     pub output_x_col: usize,
     pub output_y_col: usize,
+    pub output_inf_col: usize,
+    pub x3_col: usize,
+    pub y3_col: usize,
     pub z3_double_col: usize,
     pub z3_mixed_col: Option<usize>,
     /// First kept-limb column (right after the `has_muls` flag).
@@ -192,6 +195,8 @@ pub(crate) fn consumed_mul_slot_packed_limbs(
     }
     let op = base[layout.op_col].data[vec_row];
     let one_minus_op = PackedM31::broadcast(M31::from_u32_unchecked(1)) - op;
+    let out_finite = PackedM31::broadcast(M31::from_u32_unchecked(1))
+        - base[layout.output_inf_col].data[vec_row];
     let column = |col: usize, limb: usize| base[col + limb].data[vec_row];
     let one_limb =
         |limb: usize| PackedM31::broadcast(M31::from_u32_unchecked(u32::from(limb == 0)));
@@ -223,6 +228,8 @@ pub(crate) fn consumed_mul_slot_packed_limbs(
                 None => column(layout.z3_double_col, limb),
             },
             (14, 0) => column(layout.output_y_col, limb),
+            (13, 2) => out_finite * column(layout.x3_col, limb),
+            (14, 2) => out_finite * column(layout.y3_col, limb),
             _ => unreachable!("dropped-slot table covers exactly the dedup slots"),
         })
         .collect()

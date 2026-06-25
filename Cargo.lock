@@ -749,10 +749,12 @@ dependencies = [
  "memory-stats",
  "p256",
  "predicates",
+ "rayon",
  "serde",
  "serde_json",
  "sha2",
  "stwo",
+ "stwo-constraint-framework",
  "stwo-p256",
  "stwo-sha256",
 ]

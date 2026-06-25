@@ -56,7 +56,7 @@ pub struct ConsumedMulLimbs<E: EvalAtRow> {
 /// operand slots that are combo-reduced in EITHER kind keep their columns.
 pub const fn consumed_mul_slot_kept(mul: usize, role: usize) -> bool {
     if role == 2 {
-        return true;
+        return !matches!(mul, 13 | 14);
     }
     !matches!(mul, 0 | 1 | 3 | 4 | 5 | 13 | 14)
 }
@@ -69,7 +69,7 @@ pub const fn consumed_mul_slot_kept(mul: usize, role: usize) -> bool {
 pub const fn consumed_mul_slot_degree2(mul: usize, role: usize) -> bool {
     matches!(
         (mul, role),
-        (0, 1) | (1, 1) | (3, 0) | (3, 1) | (4, 0) | (5, 1)
+        (0, 1) | (1, 1) | (3, 0) | (3, 1) | (4, 0) | (5, 1) | (13, 2) | (14, 2)
     )
 }
 
@@ -132,6 +132,9 @@ pub struct ConsumedMulWiring<E: EvalAtRow> {
     pub y2: P256EvalBigInt<E>,
     pub output_x: P256EvalBigInt<E>,
     pub output_y: P256EvalBigInt<E>,
+    pub output_inf: E::F,
+    pub x3: P256EvalBigInt<E>,
+    pub y3: P256EvalBigInt<E>,
     pub z3_double: P256EvalBigInt<E>,
     pub z3_mixed: P256EvalBigInt<E>,
 }
@@ -169,7 +172,7 @@ impl<E: EvalAtRow> ConsumedMulLimbs<E> {
     ///   M5  b·R2    | b·1,     M13 out_x·z3,   M14 out_y·z3.
     pub fn fill_dropped(&mut self, wiring: &ConsumedMulWiring<E>) {
         let one = E::F::from(M31::from_u32_unchecked(1));
-        let mixed = one - wiring.op.clone();
+        let mixed = one.clone() - wiring.op.clone();
         let one_limbs: [M31; N_LIMBS] = core::array::from_fn(|i| {
             if i == 0 {
                 M31::from_u32_unchecked(1)
@@ -215,8 +218,13 @@ impl<E: EvalAtRow> ConsumedMulLimbs<E> {
         self.limbs[5][1] = pick_const(&r2, &one_limbs);
         self.limbs[13][0] = shared(&wiring.output_x);
         self.limbs[13][1] = z3_sum.clone();
+        let out_finite = one - wiring.output_inf.clone();
+        self.limbs[13][2] =
+            core::array::from_fn(|i| out_finite.clone() * wiring.x3.limbs()[i].clone());
         self.limbs[14][0] = shared(&wiring.output_y);
         self.limbs[14][1] = z3_sum;
+        self.limbs[14][2] =
+            core::array::from_fn(|i| out_finite.clone() * wiring.y3.limbs()[i].clone());
     }
 
     /// Constrain the committed `has_muls` flag: boolean, zero on padding, and
@@ -312,4 +320,31 @@ pub const fn projective_rcb_signed_carry_log_size() -> u32 {
     (2 * PROJECTIVE_RCB_SIGNED_CARRY_BOUND as u64 + 1)
         .next_power_of_two()
         .ilog2()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn consumed_mul_layout_drops_affine_normalization_results() {
+        assert!(!consumed_mul_slot_kept(
+            13,
+            PROJECTIVE_RCB_MUL_ROLE_RESULT as usize
+        ));
+        assert!(!consumed_mul_slot_kept(
+            14,
+            PROJECTIVE_RCB_MUL_ROLE_RESULT as usize
+        ));
+        assert!(consumed_mul_slot_degree2(
+            13,
+            PROJECTIVE_RCB_MUL_ROLE_RESULT as usize
+        ));
+        assert!(consumed_mul_slot_degree2(
+            14,
+            PROJECTIVE_RCB_MUL_ROLE_RESULT as usize
+        ));
+        assert_eq!(CONSUMED_MUL_KEPT_SLOTS, 29);
+        assert_eq!(CONSUMED_MUL_LIMBS_COLUMNS, 1 + 29 * N_LIMBS);
+    }
 }

@@ -510,6 +510,9 @@ impl FrameworkEval for FakeGlvProjectiveSourceEval {
             y2: rhs.y_bigint(),
             output_x: output.x_bigint(),
             output_y: output.y_bigint(),
+            output_inf: output.inf(),
+            x3: formula_columns.x3.clone(),
+            y3: formula_columns.y3.clone(),
             z3_double: formula_columns.z3.clone(),
             z3_mixed: crate::limbs::P256EvalBigInt::<E>::from_limbs(core::array::from_fn(|_| {
                 E::F::from(M31::from_u32_unchecked(0))
@@ -844,6 +847,9 @@ fn fake_glv_consumed_mul_gen_layout() -> crate::projective_air::ConsumedMulGenLa
         y2_col: 5 + PREPARED_TABLE_EC_POINT_COLUMNS + N_LIMBS,
         output_x_col: 5 + 2 * PREPARED_TABLE_EC_POINT_COLUMNS,
         output_y_col: 5 + 2 * PREPARED_TABLE_EC_POINT_COLUMNS + N_LIMBS,
+        output_inf_col: 5 + 2 * PREPARED_TABLE_EC_POINT_COLUMNS + 2 * N_LIMBS,
+        x3_col: FAKE_GLV_PROJECTIVE_FORMULA_OFFSET,
+        y3_col: FAKE_GLV_PROJECTIVE_FORMULA_OFFSET + N_LIMBS,
         z3_double_col: FAKE_GLV_PROJECTIVE_FORMULA_OFFSET + 2 * N_LIMBS,
         z3_mixed_col: None,
         mul_limb_offset: FAKE_GLV_PRIMITIVE_EC_MUL_LIMB_OFFSET,
