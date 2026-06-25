@@ -101,6 +101,21 @@ val cargoNdkBuild by tasks.registering(Exec::class) {
     workingDir = workspaceRoot
     environment("PATH", toolPath)
     environment("ANDROID_NDK_HOME", ndkHome)
+    // Opt-in via `-PemitBuildId=true` (see the `publish-android-symbols` make target):
+    // emit a GNU build-id note into each .so so Perfetto/heapprofd & simpleperf can
+    // match the stripped on-device lib to the local unstripped copy in jniLibs for
+    // offline symbolization (DWARF itself is already on via [profile.release] debug).
+    // Scoped per Android target through CARGO_TARGET_<triple>_RUSTFLAGS so the host
+    // build scripts / proc-macros — linked by Apple ld, which rejects --build-id —
+    // are left untouched. Set on the forked process here, so it reaches cargo
+    // regardless of the Gradle daemon's own environment.
+    val emitBuildId = (project.findProperty("emitBuildId") as String?)?.toBoolean() ?: false
+    if (emitBuildId) {
+        val buildIdFlag = "-C link-arg=-Wl,--build-id=sha1"
+        environment("CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS", buildIdFlag)
+        environment("CARGO_TARGET_X86_64_LINUX_ANDROID_RUSTFLAGS", buildIdFlag)
+    }
+    inputs.property("emitBuildId", emitBuildId)
     commandLine(
         cargoExe, "ndk",
         "-t", "arm64-v8a", "-t", "x86_64",

@@ -33,7 +33,7 @@ ACCEPTABLE  ?=
         prove-nat verify-nat \
         profile-prove-age-rc profile-verify-age-rc \
         profile-prove-age-bd profile-verify-age-bd \
-        publish-android-local publish-jvm-local publish-local \
+        publish-android-local publish-android-symbols publish-jvm-local publish-local \
         clean
 
 help:
@@ -74,6 +74,8 @@ help:
 	@echo "  make profile-verify-age-bd   profile age verify (bit decomposition)"
 	@echo ""
 	@echo "  make publish-android-local   build + publish the SDK AAR to ~/.m2 (mavenLocal)"
+	@echo "  make publish-android-symbols build + publish the SDK AAR with a GNU build-id (DWARF"
+	@echo "                               already on) so heapprofd/simpleperf traces symbolize"
 	@echo "  make publish-jvm-local       build + publish the SDK JVM jar to ~/.m2 (mavenLocal)"
 	@echo "  make publish-local           publish both the AAR and the JVM jar to ~/.m2"
 
@@ -178,6 +180,14 @@ profile-verify-age-bd:
 # the result via `mavenLocal()`.
 publish-android-local:
 	cd crates/sdk/android && ./gradlew publishToMavenLocal
+
+# Same as publish-android-local, but relinks each .so with a GNU build-id so the
+# stripped on-device lib can be matched to the unstripped copy in
+# crates/sdk/android/src/main/jniLibs for offline symbolization (Perfetto/heapprofd,
+# simpleperf). Toggling the flag changes the cargo build fingerprint, so this forces
+# a relink. DWARF is already produced by [profile.release] debug = true.
+publish-android-symbols:
+	cd crates/sdk/android && ./gradlew publishToMavenLocal -PemitBuildId=true
 
 publish-jvm-local:
 	cd crates/sdk/jvm && ./gradlew publishToMavenLocal
