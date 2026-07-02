@@ -1,0 +1,28 @@
+# Perf log — benches of record
+
+Single-thread: `RAYON_NUM_THREADS=1 cargo bench -p eu-id-prover --bench longfellow_equiv_bench`
+(the env var is mandatory — rayon is an unconditional stwo-p256 dep; baselines below predate this rule and were run without it)
+Parallel: `cargo bench -p eu-id-prover --bench identity_bench --features parallel -- 'prove'`
+Shape: `cargo test -p eu-id-prover --release shape_dump -- --ignored --nocapture`
+
+| date | commit | change (WO) | bench | before | after |
+|---|---|---|---|---|---|
+| 2026-07-02 | 8cb0a461 | baseline | BM_ECDSAZKProver_equiv/1 (1-thread) | — | 565 ms |
+| 2026-07-02 | 8cb0a461 | baseline | BM_ShaZK_equiv/1 (1-thread) | — | 331 ms |
+| 2026-07-02 | 8cb0a461 | baseline | BM_ShaZK_equiv/33 (1-thread) | — | 383 ms |
+| 2026-07-02 | 8cb0a461 | baseline | pipeline/prove (12-core parallel) | — | 820 ms |
+| 2026-07-02 | 8cb0a461 | baseline | shape_dump total cells | — | 28,488,480 |
+| 2026-07-02 | 603519d0 | WO-1.8 +bench LTO/CU1 | BM_ECDSAZKProver_equiv/1 (1-thread) | 2.258 s | 1.911 s |
+| 2026-07-02 | 603519d0 | WO-1.8 +bench LTO/CU1 | BM_ShaZK_equiv/1 (1-thread) | 1.393 s | 1.161 s |
+| 2026-07-02 | 603519d0 | WO-1.8 +bench LTO/CU1 | BM_ShaZK_equiv/33 (1-thread) | 1.525 s | 1.284 s |
+| 2026-07-02 | 603519d0 | WO-1.8 +bench LTO/CU1 | pipeline/prove (parallel) | 933 ms | 771 ms |
+| 2026-07-02 | 603519d0 | WO-1.8 +native via RUSTFLAGS | BM_ECDSAZKProver_equiv/1 (1-thread) | 1.911 s | 1.890 s |
+| 2026-07-02 | 603519d0 | WO-1.8 +native via RUSTFLAGS | BM_ShaZK_equiv/1 (1-thread) | 1.161 s | 1.120 s |
+| 2026-07-02 | 603519d0 | WO-1.8 +native via RUSTFLAGS | BM_ShaZK_equiv/33 (1-thread) | 1.284 s | 1.212 s |
+| 2026-07-02 | 603519d0 | WO-1.8 +native via RUSTFLAGS | pipeline/prove (parallel) | 771 ms | 716 ms |
+| 2026-07-02 | 603519d0 | WO-1.8 +bench mimalloc | BM_ECDSAZKProver_equiv/1 (1-thread) | 1.890 s | 1.894 s |
+| 2026-07-02 | 603519d0 | WO-1.8 +bench mimalloc | BM_ShaZK_equiv/1 (1-thread) | 1.120 s | 1.055 s |
+| 2026-07-02 | 603519d0 | WO-1.8 +bench mimalloc | BM_ShaZK_equiv/33 (1-thread) | 1.212 s | 1.154 s |
+| 2026-07-02 | 603519d0 | WO-1.8 +bench mimalloc | pipeline/prove (parallel) | 716 ms | 700 ms |
+
+WO-1.8 note: `target-cpu=native` was measured with `RUSTFLAGS="-C target-cpu=native"` instead of committed `.cargo/config.toml`, because CI builds this repo on `ubuntu-latest` and would consume committed Cargo config. LTO/CU1 is scoped to `[profile.bench]`; putting it in `[profile.release]` made `cargo test --workspace --release` fail in the P-256 monolithic proof gate with `ProofLayer("Constraints not satisfied.")`.
