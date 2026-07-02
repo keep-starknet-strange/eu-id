@@ -330,6 +330,10 @@ impl AirProver for Sha256Prover<'_> {
             .max(self.log_n_rows)
     }
 
+    fn store_polynomial_coefficients(&self) -> bool {
+        true
+    }
+
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>) {
         let preprocessed = self.preprocessed.take().unwrap_or_else(|| {
             let (preprocessed_evals, _ids, _log_sizes) =
