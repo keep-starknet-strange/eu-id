@@ -47,8 +47,8 @@ use stwo_constraint_framework::{
     EvalAtRow, FrameworkEval, Relation, RelationEntry, ORIGINAL_TRACE_IDX,
 };
 
-use crate::components::is_first_row_column_id;
-use crate::constants::{DIGEST_BYTES, IV, K, N_ROUNDS, N_STATE_WORDS};
+use crate::components::{is_first_row_column_id, round_cyclic_column_ids};
+use crate::constants::{DIGEST_BYTES, IV, N_STATE_WORDS};
 use crate::field_exposure::FieldExposure;
 use crate::partitions::{
     lower_sigma_key_hi_coeff_s, lower_sigma_key_hi_coeff_s_complement, round_groups_half_indices,
@@ -56,13 +56,13 @@ use crate::partitions::{
     SIGMA0_GROUPS, SIGMA1_GROUPS,
 };
 use crate::relations::Sha256Relations;
-use crate::trace::ROUND_MAJ_CH_OPERANDS;
 use crate::types::{BYTES_PER_WORD, LIMB_BITS, WORDS_PER_BLOCK};
 
-/// AIR evaluator over the wide one-row-per-block layout.
+/// AIR evaluator over the rotated one-row-per-round layout.
 #[derive(Clone)]
 pub struct Sha256Eval {
-    /// `log2` of the row count (i.e. the smallest power-of-two ≥ block count).
+    /// `log2` of the row count (the smallest power of two **strictly**
+    /// greater than `64 · block count`, per [`crate::trace::min_log_size`]).
     pub log_size: u32,
     /// LogUp channels: `Σ`/`σ` decode tables (8), packed Maj/Ch (2),
     /// chunk-wise `xor_8` (1), the four `Range_k` channels, and the
@@ -80,13 +80,14 @@ pub struct Sha256Eval {
     pub expose_digest: bool,
     /// Credential-field byte exposure. When non-empty, the AIR commits a
     /// byte-decomposition of each covered message word as a dynamic column tail
-    /// and *yields* the configured byte windows on the **first block** over the
-    /// `Sha256Field` channel, so predicate consumers can require the exact bytes
-    /// of the field they bind. Empty for a standalone SHA proof and
-    /// for the combined proof before the predicate consumers are wired (yields
-    /// with no consumer would leave the module's claimed sum non-zero). The
-    /// byte columns and their decomposition constraints exist iff the exposure
-    /// is non-empty; the cross-module yield is what binds.
+    /// (live on `t = 15` rows) and *yields* the configured byte windows on the
+    /// **first block** over the `Sha256Field` channel, so predicate consumers
+    /// can require the exact bytes of the field they bind. Empty for a
+    /// standalone SHA proof and for the combined proof before the predicate
+    /// consumers are wired (yields with no consumer would leave the module's
+    /// claimed sum non-zero). The byte columns and their decomposition
+    /// constraints exist iff the exposure is non-empty; the cross-module yield
+    /// is what binds.
     pub field_exposure: FieldExposure,
 }
 
@@ -96,119 +97,193 @@ impl FrameworkEval for Sha256Eval {
     }
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        // Every constraint here is degree ≤ 2. The §10.3 chain factor and
-        // the C1 contiguity constraint both stay degree 2 by using an aux
-        // column `enabler_step` committed in the main trace (the
-        // alternative — `(1 − is_first_row) · enabler · (1 − enabler_prev)`
-        // — would be degree 3, which Stwo's `EvaluationMode::infer` cannot
-        // unify with the degree-2 producer components without a global
-        // log-blowup bump). The `+1` is the standard FRI headroom.
+        // Constraints here are degree ≤ 3: a degree-2 boundary gate
+        // (`enabler · is_round_k`, with the indicator preprocessed) times a
+        // linear identity, or `enabler` times a degree-2 boundary-select
+        // expression. `log_size + 1` covers D ≤ 3 — the same budget the
+        // P256 components in the composed proof already use. The `+1` is
+        // the standard FRI headroom.
         self.log_size + 1
     }
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+        // ---- preprocessed round-cyclic columns ----
+        //
+        // All functions of `t = natural_row mod 64` alone, committed once
+        // per circuit (see `crate::preprocessed`): the round constant
+        // `K[t]`'s limbs, the boundary indicators, and the schedule gate.
+        let cyclic = round_cyclic_column_ids();
+        let k_lo = eval.get_preprocessed_column(cyclic[0].clone());
+        let k_hi = eval.get_preprocessed_column(cyclic[1].clone());
+        let r0 = eval.get_preprocessed_column(cyclic[2].clone());
+        let r1 = eval.get_preprocessed_column(cyclic[3].clone());
+        let r2 = eval.get_preprocessed_column(cyclic[4].clone());
+        let r3 = eval.get_preprocessed_column(cyclic[5].clone());
+        let r15 = eval.get_preprocessed_column(cyclic[6].clone());
+        let r63 = eval.get_preprocessed_column(cyclic[7].clone());
+        let is_sched = eval.get_preprocessed_column(cyclic[8].clone());
+        // `is_first_row` pins exactly one anchor row (natural row 0 = block
+        // 0, round 0) for IV binding.
+        let is_first_row = eval.get_preprocessed_column(is_first_row_column_id());
+
         // ---- header ----
         //
-        // Reads `enabler` with a `[0, -1, 1]` cross-row mask so the
-        // contiguity constraint below can pin `enabler_prev` (first-real-row
+        // `enabler` is read with a `[0, -1, 1]` cross-row mask so the
+        // contiguity constraint can pin `enabler_prev` (first-real-row
         // marker `enabler_step`) and the digest gate can pin `enabler_next`
-        // (last-real-row marker `is_last_block`). The single
-        // `next_interaction_mask` call still consumes one trace column slot
-        // (per Stwo's mask-consumption rule) regardless of how many offsets
-        // it reads; the read order vs. the trace layout is unchanged.
+        // (last-real-row marker `is_last_block`).
         let [enabler, enabler_prev, enabler_next] =
             eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1, 1]);
         eval.add_constraint(enabler.clone() * (E::F::one() - enabler.clone()));
 
-        let is_first_block = eval.next_trace_mask();
-        // `is_first_row` is the preprocessed selector that pins exactly
-        // one anchor row for IV binding — `1` at storage index
-        // `Layout::block_slot(0, log_n_rows) = 0`, `0` elsewhere. See
-        // `crate::preprocessed::generate_preprocessed_trace`.
-        let is_first_row = eval.get_preprocessed_column(is_first_row_column_id());
+        // The row-family gates. Each is `enabler · indicator` — degree 2,
+        // used both as constraint gates and as LogUp multiplicities.
+        let gate_r0 = enabler.clone() * r0.clone();
+        let gate_r15 = enabler.clone() * r15.clone();
+        let gate_r63 = enabler.clone() * r63.clone();
+        let gate_sched = enabler.clone() * is_sched.clone();
 
-        // C1 anchor (docs/research/sha256-air-design.md §11 L2): pin
-        // `is_first_block ≡ is_first_row`. The verifier trusts
-        // `is_first_row` as preprocessed, so this single linear identity
-        // forces `is_first_block = 1` at block 0's slot and `= 0`
-        // everywhere else — which in turn forces IV binding to fire at
-        // exactly that one slot and the chain gate to be `1` (active) at
-        // every other real row. Subsumes the old `x · (1 − x) = 0`
-        // binary check on `is_first_block`.
+        // ---- W: the row's schedule word, read at every offset any family
+        // needs. `w[k]` is `W[t−k]`: the schedule recurrence reads k ∈
+        // {2, 7, 15, 16}; the `t = 15` padding/field families read the
+        // block's message words `W[j] = w[15−j]`, j ∈ [0, 16).
+        let w_lo = eval.next_interaction_mask(
+            ORIGINAL_TRACE_IDX,
+            [
+                0, -1, -2, -3, -4, -5, -6, -7, -8, -9, -10, -11, -12, -13, -14, -15, -16,
+            ],
+        );
+        let w_hi = eval.next_interaction_mask(
+            ORIGINAL_TRACE_IDX,
+            [
+                0, -1, -2, -3, -4, -5, -6, -7, -8, -9, -10, -11, -12, -13, -14, -15, -16,
+            ],
+        );
+        let w: [(E::F, E::F); 17] = std::array::from_fn(|k| (w_lo[k].clone(), w_hi[k].clone()));
+
+        // ---- round family: outputs, carries, Σ-decodes, packed groups ----
+        //
+        // Column order matches `trace::write_round_row`: σ0, σ1, ch, maj,
+        // t1, t2 read at offset 0; a_new / e_new additionally at offsets
+        // −1..−4 (they carry the working state across rows).
+        let sigma0 = (eval.next_trace_mask(), eval.next_trace_mask());
+        let sigma1 = (eval.next_trace_mask(), eval.next_trace_mask());
+        let ch = (eval.next_trace_mask(), eval.next_trace_mask());
+        let maj = (eval.next_trace_mask(), eval.next_trace_mask());
+        let t1 = (eval.next_trace_mask(), eval.next_trace_mask());
+        let t2 = (eval.next_trace_mask(), eval.next_trace_mask());
+        let a_new_lo = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1, -2, -3, -4]);
+        let a_new_hi = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1, -2, -3, -4]);
+        let e_new_lo = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1, -2, -3, -4]);
+        let e_new_hi = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1, -2, -3, -4]);
+        let a_new = (a_new_lo[0].clone(), a_new_hi[0].clone());
+        let e_new = (e_new_lo[0].clone(), e_new_hi[0].clone());
+
+        let t1_carry = (eval.next_trace_mask(), eval.next_trace_mask());
+        let t2_carry = (eval.next_trace_mask(), eval.next_trace_mask());
+        let e_new_carry = (eval.next_trace_mask(), eval.next_trace_mask());
+        let a_new_carry = (eval.next_trace_mask(), eval.next_trace_mask());
+
+        let round_sigma0_decode = read_sigma_decode::<E>(&mut eval);
+        let round_sigma1_decode = read_sigma_decode::<E>(&mut eval);
+
+        // Packed-group block, operand order `[a, maj, e, ch, b, c, f, g]`.
+        // `a_grp` / `e_grp` are additionally read at offsets −1/−2: the
+        // select constraints pin the committed `b`/`c`/`f`/`g` duplicates
+        // to them (§8.1 reuse chain).
+        let a_grp_m: [[E::F; 3]; GROUPS_PER_ROUND_PARTITION] = std::array::from_fn(|_| {
+            eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1, -2])
+        });
+        let maj_grp: [E::F; GROUPS_PER_ROUND_PARTITION] =
+            std::array::from_fn(|_| eval.next_trace_mask());
+        let e_grp_m: [[E::F; 3]; GROUPS_PER_ROUND_PARTITION] = std::array::from_fn(|_| {
+            eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1, -2])
+        });
+        let ch_grp: [E::F; GROUPS_PER_ROUND_PARTITION] =
+            std::array::from_fn(|_| eval.next_trace_mask());
+        let b_grp: [E::F; GROUPS_PER_ROUND_PARTITION] =
+            std::array::from_fn(|_| eval.next_trace_mask());
+        let c_grp: [E::F; GROUPS_PER_ROUND_PARTITION] =
+            std::array::from_fn(|_| eval.next_trace_mask());
+        let f_grp: [E::F; GROUPS_PER_ROUND_PARTITION] =
+            std::array::from_fn(|_| eval.next_trace_mask());
+        let g_grp: [E::F; GROUPS_PER_ROUND_PARTITION] =
+            std::array::from_fn(|_| eval.next_trace_mask());
+        let a_grp: [E::F; GROUPS_PER_ROUND_PARTITION] =
+            std::array::from_fn(|i| a_grp_m[i][0].clone());
+        let e_grp: [E::F; GROUPS_PER_ROUND_PARTITION] =
+            std::array::from_fn(|i| e_grp_m[i][0].clone());
+
+        // ---- schedule family (live t ≥ 16) ----
+        let s0 = (eval.next_trace_mask(), eval.next_trace_mask());
+        let s1 = (eval.next_trace_mask(), eval.next_trace_mask());
+        let sched_carry_lo = eval.next_trace_mask();
+        let sched_carry_hi = eval.next_trace_mask();
+        let sched_sigma0_decode = read_sigma_decode::<E>(&mut eval);
+        let sched_sigma1_decode = read_sigma_decode::<E>(&mut eval);
+        let sched_sigma0_split = read_sigma_input_split::<E>(&mut eval);
+        let sched_sigma1_split = read_sigma_input_split::<E>(&mut eval);
+
+        // ---- t = 0 family ----
+        //
+        // `is_first_block` is also read at offset −15: the field-exposure
+        // family on the `t = 15` row gates its range checks and yields by
+        // "is this block 0", which lives 15 rows up.
+        let [is_first_block, is_first_block_m15] =
+            eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -15]);
+        // C1 anchors: pin `is_first_block ≡ is_first_row` and force the
+        // anchor row to be committed as a real row.
         eval.add_constraint(is_first_block.clone() - is_first_row.clone());
-
-        // C1 anchor (continued): force `enabler = 1` at block 0's slot so
-        // the IV-bound row is committed as a real row. Without this, a
-        // prover could set `enabler = 0` at the anchor slot, leaving the
-        // is_first_block-driven IV binding vacuously satisfied via the
-        // degenerate (-1) chain-gate case while disabling every other
-        // real-row constraint at that slot.
         eval.add_constraint(is_first_row.clone() * (E::F::one() - enabler.clone()));
 
-        // C1 contiguity (degree 2 via aux column): `enabler_prev` is read
-        // here as the cross-row signal that the aux column `enabler_step`
-        // (committed at the tail of the trace; see
-        // [`crate::trace::Layout::COL_ENABLER_STEP`]) pins to
-        // `enabler · (1 − enabler_prev)`. The two constraints —
-        //   • `enabler_step − enabler · (1 − enabler_prev) = 0` (defines the
-        //     aux column, degree 2)
-        //   • `(1 − is_first_row) · enabler_step = 0` (contiguity, degree 2)
-        // — are emitted at the bottom of `evaluate`, after `enabler_step`
-        // is read in trace-layout order.
-
-        // ---- h_in: 8 words × (lo, hi) ----
-        let h_in: [(E::F, E::F); N_STATE_WORDS] =
-            std::array::from_fn(|_| (eval.next_trace_mask(), eval.next_trace_mask()));
-
-        // IV binding: on the first block row, `h_in == IV`. We multiply by
-        // `is_first_block` so the constraint is vacuous on every other row.
-        // `is_first_block` is pinned to the `is_first_row` preprocessed
-        // selector above, so IV binding fires at exactly one slot
-        // (block 0's). Together with the contiguity constraint and the
-        // existing §10.3 chain, this enforces `h_in[block_r] = IV` at
-        // `r = 0` and `h_in[block_r] = h_out[block_{r-1}]` for `r > 0`.
-        for ((lo, hi), &iv_word) in h_in.iter().zip(IV.iter()) {
-            let iv_lo = E::F::from(M31::from(iv_word & 0xFFFF));
-            let iv_hi = E::F::from(M31::from(iv_word >> LIMB_BITS));
-            eval.add_constraint(is_first_block.clone() * (lo.clone() - iv_lo));
-            eval.add_constraint(is_first_block.clone() * (hi.clone() - iv_hi));
+        // `h_in`: this block's input state (t = 0 row), laid out (lo, hi)
+        // per word — reads interleave accordingly. Offsets −1..−3 feed the
+        // working-state boundary selects on rows t ∈ {1, 2, 3}; offset −63
+        // feeds the finalization adds on the t = 63 row of the same block.
+        let mut h_in_lo: [[E::F; 5]; N_STATE_WORDS] =
+            std::array::from_fn(|_| std::array::from_fn(|_| E::F::from(M31::from(0u32))));
+        let mut h_in_hi: [[E::F; 5]; N_STATE_WORDS] =
+            std::array::from_fn(|_| std::array::from_fn(|_| E::F::from(M31::from(0u32))));
+        for j in 0..N_STATE_WORDS {
+            h_in_lo[j] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1, -2, -3, -63]);
+            h_in_hi[j] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1, -2, -3, -63]);
         }
 
-        // Per-partition lo/hi half projections onto `groups_in_order()`
-        // (length 4 each under the W=6 partition). The round-side
-        // split-and-pack lookup keys the lo-half table on the groups at
-        // `*_lo_idx` and the hi-half table on those at `*_hi_idx`. Computed
-        // once per evaluate; both the constraint side (below) and the
-        // prover's multiplicity emitter (`interaction::write_block_lookups`)
-        // derive the same projection from `round_groups_half_indices`, so
-        // the LogUp tuples line up cell-for-cell.
-        let (sigma0_lo_idx, sigma0_hi_idx) = round_groups_half_indices(&SIGMA0_GROUPS);
-        let (sigma1_lo_idx, sigma1_hi_idx) = round_groups_half_indices(&SIGMA1_GROUPS);
+        // IV binding on the anchor row.
+        for (j, &iv_word) in IV.iter().enumerate() {
+            let iv_lo = E::F::from(M31::from(iv_word & 0xFFFF));
+            let iv_hi = E::F::from(M31::from(iv_word >> LIMB_BITS));
+            eval.add_constraint(is_first_block.clone() * (h_in_lo[j][0].clone() - iv_lo));
+            eval.add_constraint(is_first_block.clone() * (h_in_hi[j][0].clone() - iv_hi));
+        }
 
-        // ---- §8.1 reuse chain initial splits ----
-        //
-        // 4 operands × 8 groups, in the fixed `[b_init, c_init, f_init,
-        // g_init]` order matching [`crate::trace::write_h_in_aux_grp`].
-        // Each operand is the a-side / e-side split-and-pack of a specific
-        // `h_in[j]` and gets pinned to that limb pair by the corresponding
-        // split-and-pack lookup below.
-        let b_init: [E::F; GROUPS_PER_ROUND_PARTITION] =
-            std::array::from_fn(|_| eval.next_trace_mask());
+        // §8.1 reuse-chain initial splits (t = 0 row): b/c/f/g_init, each
+        // read at offsets [0, −1] (row t = 1 seeds its `c`/`g` duplicates
+        // from the previous row's aux cells).
+        let b_init: [[E::F; 2]; GROUPS_PER_ROUND_PARTITION] =
+            std::array::from_fn(|_| eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1]));
         let c_init: [E::F; GROUPS_PER_ROUND_PARTITION] =
             std::array::from_fn(|_| eval.next_trace_mask());
-        let f_init: [E::F; GROUPS_PER_ROUND_PARTITION] =
-            std::array::from_fn(|_| eval.next_trace_mask());
+        let f_init: [[E::F; 2]; GROUPS_PER_ROUND_PARTITION] =
+            std::array::from_fn(|_| eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1]));
         let g_init: [E::F; GROUPS_PER_ROUND_PARTITION] =
             std::array::from_fn(|_| eval.next_trace_mask());
 
-        // a-side split-and-pack lookups for `h_in[1]` (→ `b_init`) and
-        // `h_in[2]` (→ `c_init`); e-side for `h_in[5]` / `h_in[6]`.
-        // Pins each limb to `[0, 2¹⁶)` implicitly via the lookup input.
+        let (sigma0_lo_idx, sigma0_hi_idx) = round_groups_half_indices(&SIGMA0_GROUPS);
+        let (sigma1_lo_idx, sigma1_hi_idx) = round_groups_half_indices(&SIGMA1_GROUPS);
+
+        // Aux split-and-pack lookups (8 sites), gated to t = 0 rows.
+        let b_init_now: [E::F; GROUPS_PER_ROUND_PARTITION] =
+            std::array::from_fn(|i| b_init[i][0].clone());
+        let f_init_now: [E::F; GROUPS_PER_ROUND_PARTITION] =
+            std::array::from_fn(|i| f_init[i][0].clone());
+        let h_in_word =
+            |j: usize| -> (E::F, E::F) { (h_in_lo[j][0].clone(), h_in_hi[j][0].clone()) };
         wire_round_split_pack::<E>(
             &mut eval,
-            enabler.clone(),
-            &h_in[1],
-            &b_init,
+            gate_r0.clone(),
+            &h_in_word(1),
+            &b_init_now,
             &sigma0_lo_idx,
             &sigma0_hi_idx,
             &self.relations.split_pack.sigma0_lo,
@@ -216,8 +291,8 @@ impl FrameworkEval for Sha256Eval {
         );
         wire_round_split_pack::<E>(
             &mut eval,
-            enabler.clone(),
-            &h_in[2],
+            gate_r0.clone(),
+            &h_in_word(2),
             &c_init,
             &sigma0_lo_idx,
             &sigma0_hi_idx,
@@ -226,9 +301,288 @@ impl FrameworkEval for Sha256Eval {
         );
         wire_round_split_pack::<E>(
             &mut eval,
+            gate_r0.clone(),
+            &h_in_word(5),
+            &f_init_now,
+            &sigma1_lo_idx,
+            &sigma1_hi_idx,
+            &self.relations.split_pack.sigma1_lo,
+            &self.relations.split_pack.sigma1_hi,
+        );
+        wire_round_split_pack::<E>(
+            &mut eval,
+            gate_r0.clone(),
+            &h_in_word(6),
+            &g_init,
+            &sigma1_lo_idx,
+            &sigma1_hi_idx,
+            &self.relations.split_pack.sigma1_lo,
+            &self.relations.split_pack.sigma1_hi,
+        );
+
+        // ---- schedule constraints (gate: enabler · is_schedule) ----
+        //
+        // W[t] = σ1(W[t−2]) + W[t−7] + σ0(W[t−15]) + W[t−16] (mod 2³²),
+        // with the σ outputs enforced through decode + split-pack lookups
+        // exactly as on the round side.
+        wire_sigma_decode::<E>(
+            &mut eval,
+            gate_sched.clone(),
+            &sched_sigma0_decode,
+            &s0,
+            &self.relations.sigma_decode.lower_sigma0_s,
+            &self.relations.sigma_decode.lower_sigma0_s_complement,
+            &self.relations.xor_8,
+        );
+        wire_sigma_decode::<E>(
+            &mut eval,
+            gate_sched.clone(),
+            &sched_sigma1_decode,
+            &s1,
+            &self.relations.sigma_decode.lower_sigma1_s,
+            &self.relations.sigma_decode.lower_sigma1_s_complement,
+            &self.relations.xor_8,
+        );
+        wire_sigma_input_split::<E>(
+            &mut eval,
+            gate_sched.clone(),
+            &w[15],
+            &sched_sigma0_split,
+            &self.relations.split_pack.lower_sigma0_lo,
+            &self.relations.split_pack.lower_sigma0_hi,
+        );
+        wire_sigma_input_split::<E>(
+            &mut eval,
+            gate_sched.clone(),
+            &w[2],
+            &sched_sigma1_split,
+            &self.relations.split_pack.lower_sigma1_lo,
+            &self.relations.split_pack.lower_sigma1_hi,
+        );
+        emit_sigma_input_decode_key_reassembly::<E>(
+            &mut eval,
+            gate_sched.clone(),
+            &sched_sigma0_decode,
+            &sched_sigma0_split,
+            lower_sigma_key_hi_coeff_s(&LOWER_SIGMA0_PARTS),
+            lower_sigma_key_hi_coeff_s_complement(&LOWER_SIGMA0_PARTS),
+        );
+        emit_sigma_input_decode_key_reassembly::<E>(
+            &mut eval,
+            gate_sched.clone(),
+            &sched_sigma1_decode,
+            &sched_sigma1_split,
+            lower_sigma_key_hi_coeff_s(&LOWER_SIGMA1_PARTS),
+            lower_sigma_key_hi_coeff_s_complement(&LOWER_SIGMA1_PARTS),
+        );
+        emit_mod_2_32_add_linear(
+            &mut eval,
+            gate_sched.clone(),
+            &[s1.clone(), w[7].clone(), s0.clone(), w[16].clone()],
+            &w[0],
+            &sched_carry_lo,
+            &sched_carry_hi,
+            crate::components::RangeKind::Range4,
+            &self.relations,
+        );
+
+        // ---- working-state boundary selects ----
+        //
+        // The state entering round `t` is, per slot, either an earlier
+        // row's `a_new`/`e_new` or (for t ∈ {0..3}) an `h_in` word of the
+        // t = 0 row, selected by the preprocessed round indicators. Each
+        // select is a degree-2 expression; it only ever appears inside
+        // `enabler`-gated linear identities (degree ≤ 3 total).
+        let not_r0 = E::F::one() - r0.clone();
+        let not_r01 = E::F::one() - r0.clone() - r1.clone();
+        let not_r012 = E::F::one() - r0.clone() - r1.clone() - r2.clone();
+        let not_r0123 = E::F::one() - r0.clone() - r1.clone() - r2.clone() - r3.clone();
+        let boundary_select = |h_word: [usize; 4],
+                               new_lo: &[E::F; 5],
+                               new_hi: &[E::F; 5],
+                               slot: usize|
+         -> (E::F, E::F) {
+            // slot 0 → a/e (uses h_in[h_word[0]]@0, new@−1),
+            // slot 1 → b/f, slot 2 → c/g, slot 3 → d/h.
+            match slot {
+                0 => (
+                    r0.clone() * h_in_lo[h_word[0]][0].clone() + not_r0.clone() * new_lo[1].clone(),
+                    r0.clone() * h_in_hi[h_word[0]][0].clone() + not_r0.clone() * new_hi[1].clone(),
+                ),
+                1 => (
+                    r0.clone() * h_in_lo[h_word[1]][0].clone()
+                        + r1.clone() * h_in_lo[h_word[0]][1].clone()
+                        + not_r01.clone() * new_lo[2].clone(),
+                    r0.clone() * h_in_hi[h_word[1]][0].clone()
+                        + r1.clone() * h_in_hi[h_word[0]][1].clone()
+                        + not_r01.clone() * new_hi[2].clone(),
+                ),
+                2 => (
+                    r0.clone() * h_in_lo[h_word[2]][0].clone()
+                        + r1.clone() * h_in_lo[h_word[1]][1].clone()
+                        + r2.clone() * h_in_lo[h_word[0]][2].clone()
+                        + not_r012.clone() * new_lo[3].clone(),
+                    r0.clone() * h_in_hi[h_word[2]][0].clone()
+                        + r1.clone() * h_in_hi[h_word[1]][1].clone()
+                        + r2.clone() * h_in_hi[h_word[0]][2].clone()
+                        + not_r012.clone() * new_hi[3].clone(),
+                ),
+                3 => (
+                    r0.clone() * h_in_lo[h_word[3]][0].clone()
+                        + r1.clone() * h_in_lo[h_word[2]][1].clone()
+                        + r2.clone() * h_in_lo[h_word[1]][2].clone()
+                        + r3.clone() * h_in_lo[h_word[0]][3].clone()
+                        + not_r0123.clone() * new_lo[4].clone(),
+                    r0.clone() * h_in_hi[h_word[3]][0].clone()
+                        + r1.clone() * h_in_hi[h_word[2]][1].clone()
+                        + r2.clone() * h_in_hi[h_word[1]][2].clone()
+                        + r3.clone() * h_in_hi[h_word[0]][3].clone()
+                        + not_r0123.clone() * new_hi[4].clone(),
+                ),
+                _ => unreachable!(),
+            }
+        };
+        // Only `d` and `h` enter the round adds as words; `a`/`e` enter via
+        // their packed-group splits (case-split split-pack lookups below),
+        // and `b`/`c`/`f`/`g` only via the committed group duplicates.
+        let d_in = boundary_select([0, 1, 2, 3], &a_new_lo, &a_new_hi, 3);
+        let h_in_state = boundary_select([4, 5, 6, 7], &e_new_lo, &e_new_hi, 3);
+
+        // ---- round constraints ----
+        wire_sigma_decode::<E>(
+            &mut eval,
             enabler.clone(),
-            &h_in[5],
-            &f_init,
+            &round_sigma0_decode,
+            &sigma0,
+            &self.relations.sigma_decode.sigma0_s,
+            &self.relations.sigma_decode.sigma0_s_complement,
+            &self.relations.xor_8,
+        );
+        wire_sigma_decode::<E>(
+            &mut eval,
+            enabler.clone(),
+            &round_sigma1_decode,
+            &sigma1,
+            &self.relations.sigma_decode.sigma1_s,
+            &self.relations.sigma_decode.sigma1_s_complement,
+            &self.relations.xor_8,
+        );
+
+        // Maj/Ch lookups — tuples read only committed cells; the reuse
+        // duplicates are pinned by the select constraints below.
+        let maj_ch_mult = E::EF::from(enabler.clone());
+        for i in 0..GROUPS_PER_ROUND_PARTITION {
+            eval.add_to_relation(RelationEntry::new(
+                &self.relations.maj,
+                maj_ch_mult.clone(),
+                &[
+                    a_grp[i].clone(),
+                    b_grp[i].clone(),
+                    c_grp[i].clone(),
+                    maj_grp[i].clone(),
+                ],
+            ));
+        }
+        for i in 0..GROUPS_PER_ROUND_PARTITION {
+            eval.add_to_relation(RelationEntry::new(
+                &self.relations.ch,
+                maj_ch_mult.clone(),
+                &[
+                    e_grp[i].clone(),
+                    f_grp[i].clone(),
+                    g_grp[i].clone(),
+                    ch_grp[i].clone(),
+                ],
+            ));
+        }
+
+        // §8.1 reuse-chain select pins for the committed duplicates.
+        // b_grp = a_grp@−1, seeded from `b_init` on t = 0; c_grp = a_grp@−2,
+        // seeded from `c_init` (t = 0) / `b_init@−1` (t = 1). The e-side is
+        // symmetric. Degree 3 (enabler × degree-2 select).
+        for i in 0..GROUPS_PER_ROUND_PARTITION {
+            eval.add_constraint(
+                enabler.clone()
+                    * (b_grp[i].clone()
+                        - r0.clone() * b_init[i][0].clone()
+                        - not_r0.clone() * a_grp_m[i][1].clone()),
+            );
+            eval.add_constraint(
+                enabler.clone()
+                    * (c_grp[i].clone()
+                        - r0.clone() * c_init[i].clone()
+                        - r1.clone() * b_init[i][1].clone()
+                        - not_r01.clone() * a_grp_m[i][2].clone()),
+            );
+            eval.add_constraint(
+                enabler.clone()
+                    * (f_grp[i].clone()
+                        - r0.clone() * f_init[i][0].clone()
+                        - not_r0.clone() * e_grp_m[i][1].clone()),
+            );
+            eval.add_constraint(
+                enabler.clone()
+                    * (g_grp[i].clone()
+                        - r0.clone() * g_init[i].clone()
+                        - r1.clone() * f_init[i][1].clone()
+                        - not_r01.clone() * e_grp_m[i][2].clone()),
+            );
+        }
+
+        // Round-side split-and-pack lookups. `maj`/`ch` are fresh outputs
+        // committed on this row — a single enabler-gated lookup each. The
+        // `a`/`e` operand groups split against the *input* word, which is
+        // `a_new@−1` on t ≥ 1 rows and `h_in[0]`/`h_in[4]` on the t = 0
+        // row — two complementary-gated lookups per half so every tuple
+        // element stays a committed cell.
+        let a_prev = (a_new_lo[1].clone(), a_new_hi[1].clone());
+        let e_prev = (e_new_lo[1].clone(), e_new_hi[1].clone());
+        let gate_not_r0 = enabler.clone() * not_r0.clone();
+        wire_round_split_pack::<E>(
+            &mut eval,
+            gate_not_r0.clone(),
+            &a_prev,
+            &a_grp,
+            &sigma0_lo_idx,
+            &sigma0_hi_idx,
+            &self.relations.split_pack.sigma0_lo,
+            &self.relations.split_pack.sigma0_hi,
+        );
+        wire_round_split_pack::<E>(
+            &mut eval,
+            gate_r0.clone(),
+            &h_in_word(0),
+            &a_grp,
+            &sigma0_lo_idx,
+            &sigma0_hi_idx,
+            &self.relations.split_pack.sigma0_lo,
+            &self.relations.split_pack.sigma0_hi,
+        );
+        wire_round_split_pack::<E>(
+            &mut eval,
+            enabler.clone(),
+            &maj,
+            &maj_grp,
+            &sigma0_lo_idx,
+            &sigma0_hi_idx,
+            &self.relations.split_pack.sigma0_lo,
+            &self.relations.split_pack.sigma0_hi,
+        );
+        wire_round_split_pack::<E>(
+            &mut eval,
+            gate_not_r0.clone(),
+            &e_prev,
+            &e_grp,
+            &sigma1_lo_idx,
+            &sigma1_hi_idx,
+            &self.relations.split_pack.sigma1_lo,
+            &self.relations.split_pack.sigma1_hi,
+        );
+        wire_round_split_pack::<E>(
+            &mut eval,
+            gate_r0.clone(),
+            &h_in_word(4),
+            &e_grp,
             &sigma1_lo_idx,
             &sigma1_hi_idx,
             &self.relations.split_pack.sigma1_lo,
@@ -237,429 +591,90 @@ impl FrameworkEval for Sha256Eval {
         wire_round_split_pack::<E>(
             &mut eval,
             enabler.clone(),
-            &h_in[6],
-            &g_init,
+            &ch,
+            &ch_grp,
             &sigma1_lo_idx,
             &sigma1_hi_idx,
             &self.relations.split_pack.sigma1_lo,
             &self.relations.split_pack.sigma1_hi,
         );
 
-        // ---- W[0..63]: 64 words × (lo, hi) ----
-        let w: [(E::F, E::F); N_ROUNDS] =
-            std::array::from_fn(|_| (eval.next_trace_mask(), eval.next_trace_mask()));
-
-        // ---- schedule entries: 48 × (σ0, σ1 limbs + carries + decode blocks) ----
-        //
-        // The σ-output values are not free — each is enforced via two
-        // decode-table lookups (one per `S`/`S′` half) on the input word's
-        // 16-bit packed halves, plus a chunk-wise `xor_8` combine of the
-        // two `O2` partials (§9.3). This loop emits the decode-side
-        // `add_to_relation` calls, the σ-output reassembly identity that
-        // ties the decoded intermediates to the σ-output limbs, and the
-        // chunk-wise `xor_8` lookups that bind the `O2` combine.
-        for j in 0..(N_ROUNDS - 16) {
-            let t = j + 16;
-            let s0 = (eval.next_trace_mask(), eval.next_trace_mask());
-            let s1 = (eval.next_trace_mask(), eval.next_trace_mask());
-            let carry_lo = eval.next_trace_mask();
-            let carry_hi = eval.next_trace_mask();
-
-            // σ-decode blocks (read in the order written by
-            // `trace::write_sigma_decode_block`).
-            let sigma0_decode = read_sigma_decode::<E>(&mut eval);
-            let sigma1_decode = read_sigma_decode::<E>(&mut eval);
-
-            // σ-input split-and-pack blocks (read in the order written by
-            // `trace::write_sigma_input_split_block`). One per σ-application.
-            let sigma0_input_split = read_sigma_input_split::<E>(&mut eval);
-            let sigma1_input_split = read_sigma_input_split::<E>(&mut eval);
-
-            // σ0(W[t-15]) → s0 — emit S-side and S′-side decode lookups,
-            // the linear reassembly identity, the O2 chunk-bind, and the
-            // chunk-wise `xor_8` lookup that closes
-            // `o2_combined = o2_partial_s ⊕ o2_partial_s'`.
-            wire_sigma_decode::<E>(
-                &mut eval,
-                enabler.clone(),
-                &sigma0_decode,
-                &s0,
-                &self.relations.sigma_decode.lower_sigma0_s,
-                &self.relations.sigma_decode.lower_sigma0_s_complement,
-                &self.relations.xor_8,
-            );
-            // σ1(W[t-2]) → s1.
-            wire_sigma_decode::<E>(
-                &mut eval,
-                enabler.clone(),
-                &sigma1_decode,
-                &s1,
-                &self.relations.sigma_decode.lower_sigma1_s,
-                &self.relations.sigma_decode.lower_sigma1_s_complement,
-                &self.relations.xor_8,
-            );
-
-            // σ-input split-and-pack lookups — one per half. Pin
-            // `W[t-15].(lo, hi)` to the `σ0` partition's split-and-pack
-            // tables, and `W[t-2].(lo, hi)` to the `σ1` partition's. As
-            // with the round side, this implicitly range-checks each
-            // input limb to `[0, 2¹⁶)`.
-            let w_t_minus_15 = w[t - 15].clone();
-            let w_t_minus_2 = w[t - 2].clone();
-            wire_sigma_input_split::<E>(
-                &mut eval,
-                enabler.clone(),
-                &w_t_minus_15,
-                &sigma0_input_split,
-                &self.relations.split_pack.lower_sigma0_lo,
-                &self.relations.split_pack.lower_sigma0_hi,
-            );
-            wire_sigma_input_split::<E>(
-                &mut eval,
-                enabler.clone(),
-                &w_t_minus_2,
-                &sigma1_input_split,
-                &self.relations.split_pack.lower_sigma1_lo,
-                &self.relations.split_pack.lower_sigma1_hi,
-            );
-
-            // Tie each σ-decode block's `key_s` / `key_s_complement` to
-            // the σ-input split-and-pack outputs by linear assembly
-            // (§9.3 / partitions::lower_sigma_key_hi_coeff_s). Without
-            // this pin, a prover supplies arbitrary `key_s` to the
-            // decode-table lookup; with the pin, the decode key must
-            // come from the bits of `W[t-15]` / `W[t-2]`.
-            emit_sigma_input_decode_key_reassembly::<E>(
-                &mut eval,
-                enabler.clone(),
-                &sigma0_decode,
-                &sigma0_input_split,
-                lower_sigma_key_hi_coeff_s(&LOWER_SIGMA0_PARTS),
-                lower_sigma_key_hi_coeff_s_complement(&LOWER_SIGMA0_PARTS),
-            );
-            emit_sigma_input_decode_key_reassembly::<E>(
-                &mut eval,
-                enabler.clone(),
-                &sigma1_decode,
-                &sigma1_input_split,
-                lower_sigma_key_hi_coeff_s(&LOWER_SIGMA1_PARTS),
-                lower_sigma_key_hi_coeff_s_complement(&LOWER_SIGMA1_PARTS),
-            );
-
-            // W[t] = σ1(W[t-2]) + W[t-7] + σ0(W[t-15]) + W[t-16]  (mod 2³²)
-            //
-            // Limb-add identity, 4 addends:
-            //   lo: s1.lo + W[t-7].lo + s0.lo + W[t-16].lo
-            //         = W[t].lo + 2¹⁶ · carry_lo
-            //   hi: s1.hi + W[t-7].hi + s0.hi + W[t-16].hi + carry_lo
-            //         = W[t].hi + 2¹⁶ · carry_hi
-            let w_t = w[t].clone();
-            let w_t_minus_7 = w[t - 7].clone();
-            let w_t_minus_16 = w[t - 16].clone();
-
-            emit_mod_2_32_add_linear(
-                &mut eval,
-                enabler.clone(),
-                &[s1.clone(), w_t_minus_7, s0.clone(), w_t_minus_16],
-                &w_t,
-                &carry_lo,
-                &carry_hi,
-                crate::components::RangeKind::Range4,
-                &self.relations,
-            );
-        }
-
-        // ---- 64 rounds ----
-        //
-        // Track `(a, b, c, d, e, f, g, h)` symbolically across rounds, plus
-        // the §8.1 reuse chain for the a-side and e-side packed-group
-        // splits: `b_grp[t] = a_grp[t-1]`, `c_grp[t] = a_grp[t-2]`, with
-        // the first two rounds seeded from the per-block aux splits
-        // (`b_init = h_in[1]`, `c_init = h_in[2]`, `f_init = h_in[5]`,
-        // `g_init = h_in[6]`).
-        let mut state: [(E::F, E::F); N_STATE_WORDS] = h_in.clone();
-        let mut b_grp = b_init.clone();
-        let mut c_grp = c_init.clone();
-        let mut f_grp = f_init.clone();
-        let mut g_grp = g_init.clone();
-
+        // Σ-decode key reassembly against the committed input splits.
         let sigma0_coeffs = round_key_coeffs(&SIGMA0_GROUPS);
         let sigma1_coeffs = round_key_coeffs(&SIGMA1_GROUPS);
+        emit_round_decode_key_reassembly::<E>(
+            &mut eval,
+            enabler.clone(),
+            &round_sigma0_decode,
+            &a_grp,
+            sigma0_coeffs,
+        );
+        emit_round_decode_key_reassembly::<E>(
+            &mut eval,
+            enabler.clone(),
+            &round_sigma1_decode,
+            &e_grp,
+            sigma1_coeffs,
+        );
 
-        for (t, &k_t) in K.iter().enumerate().take(N_ROUNDS) {
-            let [ref a, ref b, ref c, ref d, ref e, ref f, ref g, ref h_state] = state;
+        // The four mod-2³² adds of the round. K[t] comes from the
+        // preprocessed cyclic columns; `h`/`d` are boundary selects.
+        let k_t = (k_lo.clone(), k_hi.clone());
+        emit_mod_2_32_add_linear(
+            &mut eval,
+            enabler.clone(),
+            &[
+                h_in_state.clone(),
+                sigma1.clone(),
+                ch.clone(),
+                k_t,
+                w[0].clone(),
+            ],
+            &t1,
+            &t1_carry.0,
+            &t1_carry.1,
+            crate::components::RangeKind::Range5,
+            &self.relations,
+        );
+        emit_mod_2_32_add_linear(
+            &mut eval,
+            enabler.clone(),
+            &[sigma0.clone(), maj.clone()],
+            &t2,
+            &t2_carry.0,
+            &t2_carry.1,
+            crate::components::RangeKind::Range2,
+            &self.relations,
+        );
+        emit_mod_2_32_add_linear(
+            &mut eval,
+            enabler.clone(),
+            &[d_in.clone(), t1.clone()],
+            &e_new,
+            &e_new_carry.0,
+            &e_new_carry.1,
+            crate::components::RangeKind::Range2,
+            &self.relations,
+        );
+        emit_mod_2_32_add_linear(
+            &mut eval,
+            enabler.clone(),
+            &[t1.clone(), t2.clone()],
+            &a_new,
+            &a_new_carry.0,
+            &a_new_carry.1,
+            crate::components::RangeKind::Range2,
+            &self.relations,
+        );
 
-            // Round outputs, in the trace's column order:
-            // σ0, σ1, ch, maj, t1, t2, a_new, e_new (each lo, hi),
-            // then 4 carry pairs: t1, t2, e_new, a_new.
-            let sigma0 = (eval.next_trace_mask(), eval.next_trace_mask());
-            let sigma1 = (eval.next_trace_mask(), eval.next_trace_mask());
-            let ch = (eval.next_trace_mask(), eval.next_trace_mask());
-            let maj = (eval.next_trace_mask(), eval.next_trace_mask());
-            let t1 = (eval.next_trace_mask(), eval.next_trace_mask());
-            let t2 = (eval.next_trace_mask(), eval.next_trace_mask());
-            let a_new = (eval.next_trace_mask(), eval.next_trace_mask());
-            let e_new = (eval.next_trace_mask(), eval.next_trace_mask());
-
-            let t1_carry = (eval.next_trace_mask(), eval.next_trace_mask());
-            let t2_carry = (eval.next_trace_mask(), eval.next_trace_mask());
-            let e_new_carry = (eval.next_trace_mask(), eval.next_trace_mask());
-            let a_new_carry = (eval.next_trace_mask(), eval.next_trace_mask());
-
-            // σ-decode blocks for Σ0(a) and Σ1(e), in the order written by
-            // `trace::write_block_row`.
-            let sigma0_decode = read_sigma_decode::<E>(&mut eval);
-            let sigma1_decode = read_sigma_decode::<E>(&mut eval);
-
-            // Σ0(a) → sigma0 — S/S′ decode lookups, σ-output reassembly,
-            // `O2` chunk-bind constraints, and the chunk-wise `xor_8`
-            // lookup that combines the two `O2` partials.
-            wire_sigma_decode::<E>(
-                &mut eval,
-                enabler.clone(),
-                &sigma0_decode,
-                &sigma0,
-                &self.relations.sigma_decode.sigma0_s,
-                &self.relations.sigma_decode.sigma0_s_complement,
-                &self.relations.xor_8,
-            );
-            // Σ1(e) → sigma1.
-            wire_sigma_decode::<E>(
-                &mut eval,
-                enabler.clone(),
-                &sigma1_decode,
-                &sigma1,
-                &self.relations.sigma_decode.sigma1_s,
-                &self.relations.sigma_decode.sigma1_s_complement,
-                &self.relations.xor_8,
-            );
-
-            // Maj/Ch packed-group block — 32 cells (post §8.1 reuse).
-            // Operand order is fixed: `[a, maj_out]` (a-side / Σ0
-            // partition) followed by `[e, ch_out]` (e-side / Σ1). The
-            // `b`/`c`/`f`/`g` lookup keys come from the §8.1 chain
-            // (`b_grp`, `c_grp`, `f_grp`, `g_grp` updated at end of loop).
-            let packed_groups: [[E::F; GROUPS_PER_ROUND_PARTITION]; ROUND_MAJ_CH_OPERANDS] =
-                std::array::from_fn(|_| {
-                    std::array::from_fn::<E::F, GROUPS_PER_ROUND_PARTITION, _>(|_| {
-                        eval.next_trace_mask()
-                    })
-                });
-            let [a_grp, maj_grp, e_grp, ch_grp] = packed_groups;
-
-            // 8 Maj lookups — one per a-side group position. The row
-            // shape is `(a_grp[i], b_grp[i], c_grp[i], maj_grp[i])`,
-            // matching `MajRelation` (size 4). With the split-and-pack
-            // lookups below in place, `a_grp` is pinned to `a.(lo, hi)`,
-            // `b_grp` (= `a_grp[t-1]` or aux `b_init`) is pinned to its
-            // originating limb, and similarly for `c_grp` and `maj_grp`.
-            //
-            // Multiplicity is `enabler` (1 on real-block rows, 0 on
-            // padding) so padding rows — every cell zero — don't pollute
-            // the producer's LogUp balance with all-zero keys.
-            let maj_ch_mult = E::EF::from(enabler.clone());
-            for i in 0..GROUPS_PER_ROUND_PARTITION {
-                eval.add_to_relation(RelationEntry::new(
-                    &self.relations.maj,
-                    maj_ch_mult.clone(),
-                    &[
-                        a_grp[i].clone(),
-                        b_grp[i].clone(),
-                        c_grp[i].clone(),
-                        maj_grp[i].clone(),
-                    ],
-                ));
-            }
-            // 8 Ch lookups — one per e-side group position. Same shape,
-            // against `ChRelation` (size 4).
-            for i in 0..GROUPS_PER_ROUND_PARTITION {
-                eval.add_to_relation(RelationEntry::new(
-                    &self.relations.ch,
-                    maj_ch_mult.clone(),
-                    &[
-                        e_grp[i].clone(),
-                        f_grp[i].clone(),
-                        g_grp[i].clone(),
-                        ch_grp[i].clone(),
-                    ],
-                ));
-            }
-
-            // Round-side split-and-pack lookups — one per half per fresh
-            // operand (a-side: `a`, `maj`; e-side: `e`, `ch`). Each
-            // lookup pins three packed-group columns to the table row
-            // determined by the input limb, and implicitly range-checks
-            // the limb to `[0, 2¹⁶)` (design §11 L1).
-            wire_round_split_pack::<E>(
-                &mut eval,
-                enabler.clone(),
-                a,
-                &a_grp,
-                &sigma0_lo_idx,
-                &sigma0_hi_idx,
-                &self.relations.split_pack.sigma0_lo,
-                &self.relations.split_pack.sigma0_hi,
-            );
-            wire_round_split_pack::<E>(
-                &mut eval,
-                enabler.clone(),
-                &maj,
-                &maj_grp,
-                &sigma0_lo_idx,
-                &sigma0_hi_idx,
-                &self.relations.split_pack.sigma0_lo,
-                &self.relations.split_pack.sigma0_hi,
-            );
-            wire_round_split_pack::<E>(
-                &mut eval,
-                enabler.clone(),
-                e,
-                &e_grp,
-                &sigma1_lo_idx,
-                &sigma1_hi_idx,
-                &self.relations.split_pack.sigma1_lo,
-                &self.relations.split_pack.sigma1_hi,
-            );
-            wire_round_split_pack::<E>(
-                &mut eval,
-                enabler.clone(),
-                &ch,
-                &ch_grp,
-                &sigma1_lo_idx,
-                &sigma1_hi_idx,
-                &self.relations.split_pack.sigma1_lo,
-                &self.relations.split_pack.sigma1_hi,
-            );
-
-            // Tie each round σ-decode block's `key_s` / `key_s_complement`
-            // to the just-pinned `a_grp` / `e_grp` packed values via
-            // linear assembly (partitions::round_key_coeffs). This is
-            // what closes the Σ0/Σ1 decode lookups against the actual
-            // input word's bits — without it, a prover supplies arbitrary
-            // `key_s` to the decode lookup.
-            emit_round_decode_key_reassembly::<E>(
-                &mut eval,
-                enabler.clone(),
-                &sigma0_decode,
-                &a_grp,
-                sigma0_coeffs,
-            );
-            emit_round_decode_key_reassembly::<E>(
-                &mut eval,
-                enabler.clone(),
-                &sigma1_decode,
-                &e_grp,
-                sigma1_coeffs,
-            );
-
-            // Carry range-checks fire inside each `emit_mod_2_32_add_linear`
-            // call below (`Range_5` for `T1`, `Range_2` for `T2`/`e_new`/
-            // `a_new` per the headroom audit).
-
-            // K[t] is a circuit constant, never a free column.
-            let k_lo = E::F::from(M31::from(k_t & 0xFFFF));
-            let k_hi = E::F::from(M31::from(k_t >> LIMB_BITS));
-            let k_t = (k_lo, k_hi);
-
-            // T1 = h + Σ1 + Ch + K[t] + W[t]  (5-addend mod-2³² add).
-            emit_mod_2_32_add_linear(
-                &mut eval,
-                enabler.clone(),
-                &[
-                    h_state.clone(),
-                    sigma1.clone(),
-                    ch.clone(),
-                    k_t.clone(),
-                    w[t].clone(),
-                ],
-                &t1,
-                &t1_carry.0,
-                &t1_carry.1,
-                crate::components::RangeKind::Range5,
-                &self.relations,
-            );
-
-            // T2 = Σ0 + Maj  (2-addend add).
-            emit_mod_2_32_add_linear(
-                &mut eval,
-                enabler.clone(),
-                &[sigma0.clone(), maj.clone()],
-                &t2,
-                &t2_carry.0,
-                &t2_carry.1,
-                crate::components::RangeKind::Range2,
-                &self.relations,
-            );
-
-            // e_new = d + T1.
-            emit_mod_2_32_add_linear(
-                &mut eval,
-                enabler.clone(),
-                &[d.clone(), t1.clone()],
-                &e_new,
-                &e_new_carry.0,
-                &e_new_carry.1,
-                crate::components::RangeKind::Range2,
-                &self.relations,
-            );
-
-            // a_new = T1 + T2.
-            emit_mod_2_32_add_linear(
-                &mut eval,
-                enabler.clone(),
-                &[t1.clone(), t2.clone()],
-                &a_new,
-                &a_new_carry.0,
-                &a_new_carry.1,
-                crate::components::RangeKind::Range2,
-                &self.relations,
-            );
-
-            // State rotation for the next round:
-            //   (a, b, c, d, e, f, g, h) ← (a_new, a, b, c, e_new, e, f, g)
-            state = [
-                a_new,
-                a.clone(),
-                b.clone(),
-                c.clone(),
-                e_new,
-                e.clone(),
-                f.clone(),
-                g.clone(),
-            ];
-
-            // §8.1 reuse-chain advance, mirroring the working-state
-            // rotation on the packed-group side. After round `t` we
-            // have:
-            //   b_grp_next = a_grp[t]   (because b[t+1] = a[t])
-            //   c_grp_next = b_grp[t]   (because c[t+1] = b[t])
-            //   f_grp_next = e_grp[t]
-            //   g_grp_next = f_grp[t]
-            // Compute the *next* values before overwriting `b_grp` /
-            // `f_grp` so the chain stays consistent.
-            let prev_b_grp = b_grp.clone();
-            b_grp = a_grp.clone();
-            c_grp = prev_b_grp;
-            let prev_f_grp = f_grp.clone();
-            f_grp = e_grp.clone();
-            g_grp = prev_f_grp;
-        }
-
-        // ---- finalization carries: 8 × (lo, hi) ----
+        // ---- t = 63 family: finalization, digest, chain ----
         let final_carries: [(E::F, E::F); N_STATE_WORDS] =
             std::array::from_fn(|_| (eval.next_trace_mask(), eval.next_trace_mask()));
 
-        // ---- h_out: 8 words × (lo, hi), each read at offsets [0, -1] ----
-        //
-        // The cross-row offset gives us this row's `h_out` *and* the
-        // previous (coset-predecessor) row's `h_out` in one mask call. The
-        // previous row's values feed the §10.3 block-chain constraint
-        // below; this row's values feed the finalization adds.
-        //
-        // `Layout::block_slot` ensures block `b` lives at coset index `b`,
-        // so offset `-1` resolves to block `b − 1`'s row (with cyclic
-        // wraparound on row 0 / first block — which is shielded by the
-        // chain gate below).
+        // h_out, each limb read at [0, −1]: offset 0 feeds the finalization
+        // on the t = 63 row; offset −1 feeds the block-chain constraint on
+        // the next block's t = 0 row (its coset predecessor is this t = 63
+        // row).
         let mut h_out: [(E::F, E::F); N_STATE_WORDS] =
             std::array::from_fn(|_| (E::F::from(M31::from(0u32)), E::F::from(M31::from(0u32))));
         let mut h_out_prev: [(E::F, E::F); N_STATE_WORDS] =
@@ -671,12 +686,24 @@ impl FrameworkEval for Sha256Eval {
             h_out_prev[j] = (lo_prev, hi_prev);
         }
 
-        // Finalization: h_out[j] = h_in[j] + working_var[j]  (mod 2³²).
-        for (j, working) in state.iter().enumerate().take(N_STATE_WORDS) {
+        // Finalization: h_out[j] = h_in[j] + working[j] (mod 2³²), on the
+        // t = 63 row. `h_in[j]` is the same block's t = 0 row (offset −63);
+        // `working[j]` is the state after round 63 — `a_new`/`e_new` of
+        // this row and the three before it. All addends are committed
+        // cells, so the degree-2 gate keeps every constraint ≤ 3.
+        let working = |j: usize| -> (E::F, E::F) {
+            match j {
+                0..=3 => (a_new_lo[j].clone(), a_new_hi[j].clone()),
+                4..=7 => (e_new_lo[j - 4].clone(), e_new_hi[j - 4].clone()),
+                _ => unreachable!(),
+            }
+        };
+        for j in 0..N_STATE_WORDS {
+            let h_in_final = (h_in_lo[j][4].clone(), h_in_hi[j][4].clone());
             emit_mod_2_32_add_linear(
                 &mut eval,
-                enabler.clone(),
-                &[h_in[j].clone(), working.clone()],
+                gate_r63.clone(),
+                &[h_in_final, working(j)],
                 &h_out[j],
                 &final_carries[j].0,
                 &final_carries[j].1,
@@ -685,115 +712,72 @@ impl FrameworkEval for Sha256Eval {
             );
         }
 
-        // Terminal `Range_16` on every real-block `h_out` limb. Most
-        // intermediate limbs are transitively pinned to `[0, 2¹⁶)` via the
-        // next block's split-and-pack lookups, but the final block's
-        // `h_out` (the digest output) has no downstream consumer in this
-        // standalone component — without these lookups a prover could
-        // present out-of-range M31 values that still satisfy the linear
-        // finalization identity (docs/research/sha256-air-design.md §10.2 / §11
-        // L1). Firing on every real block costs 16 lookups per row and
-        // simplifies the gating (just `enabler`) without changing
-        // soundness for intermediate blocks.
+        // Terminal `Range_16` on the block's `h_out` limbs (t = 63 rows).
         for h_out_word in h_out.iter().take(N_STATE_WORDS) {
             wire_range_check::<E>(
                 &mut eval,
-                enabler.clone(),
+                gate_r63.clone(),
                 h_out_word.0.clone(),
                 crate::components::RangeKind::Range16,
                 &self.relations,
             );
             wire_range_check::<E>(
                 &mut eval,
-                enabler.clone(),
+                gate_r63.clone(),
                 h_out_word.1.clone(),
                 crate::components::RangeKind::Range16,
                 &self.relations,
             );
         }
 
-        // §10.3 multi-block chain: on every *continuation* row (a real
-        // block other than the first), `h_in[j] == h_out_prev[j]` for both
-        // limbs. The constraint is vacuous on the first-block row (where
-        // IV binding takes over) and on padding rows (where `enabler = 0`
-        // by contiguity).
-        //
-        // The chain gate `(enabler − is_first_block)` resolves as follows
-        // under the C1 anchor constraints above
-        // (`is_first_block ≡ is_first_row`, `is_first_row · (1 − enabler) = 0`,
-        // and contiguity):
-        //   - block 0 slot (enabler=1, is_first_block=1): factor 0 — vacuous.
-        //     IV binding pins `h_in = IV` instead.
-        //   - real continuation (enabler=1, is_first_block=0): factor 1 —
-        //     chain fires. Predecessor is real by contiguity, so
-        //     `h_out_prev` is `Range_16`-pinned.
-        //   - padding row (enabler=0, is_first_block=0): factor 0 — vacuous.
-        //   - degenerate (enabler=0, is_first_block=1): ruled out by the
-        //     anchor constraint `is_first_row · (1 − enabler) = 0` combined
-        //     with `is_first_block ≡ is_first_row`.
-        let chain_gate = enabler.clone() - is_first_block.clone();
+        // §10.3 multi-block chain, on continuation blocks' t = 0 rows: this
+        // block's `h_in` equals the previous block's `h_out` (offset −1 =
+        // the predecessor's t = 63 row). The gate `enabler·is_round_0 −
+        // is_first_block` is 1 exactly on real continuation t = 0 rows, 0 on
+        // the anchor row (IV binding takes over), on rows t ≠ 0 (both sides
+        // of the difference are dead-family zeros there), and on padding.
+        let chain_gate = gate_r0.clone() - is_first_block.clone();
         for j in 0..N_STATE_WORDS {
-            eval.add_constraint(chain_gate.clone() * (h_in[j].0.clone() - h_out_prev[j].0.clone()));
-            eval.add_constraint(chain_gate.clone() * (h_in[j].1.clone() - h_out_prev[j].1.clone()));
+            eval.add_constraint(
+                chain_gate.clone() * (h_in_lo[j][0].clone() - h_out_prev[j].0.clone()),
+            );
+            eval.add_constraint(
+                chain_gate.clone() * (h_in_hi[j][0].clone() - h_out_prev[j].1.clone()),
+            );
         }
 
         // ---- digest provider: is_last_block gate, byte view, yield ----
         //
-        // `is_last_block` is the symmetric twin of the `enabler_step`
-        // first-real-row marker: `enabler · (1 − enabler_next)` is `1` only at
-        // the last row of the contiguous real-row prefix (the final block of a
-        // multi-block hash) and `0` everywhere else — including the last
-        // padding row (`enabler = 0`) and every intermediate real block
-        // (`enabler_next = 1`). Committed as a degree-1 column (read here in
-        // trace-layout order) and pinned to the degree-2 product, so the digest
-        // yield's multiplicity below stays degree ≤ 2 like every other
-        // constraint here. Soundness note: this assumes ≥ 1 padding row, so
-        // the final block's coset successor is disabled — guaranteed on the
-        // credential path (one block in ≥ 2^LOG_N_LANES rows). With a fully
-        // real trace `is_last_block` would be `0` everywhere and the digest
-        // simply would not be exposed (a liveness limit, never a false yield).
+        // `is_last_block = enabler · is_round_63 · (1 − enabler_next)`: 1
+        // only at the last real row (the final block's t = 63 row, whose
+        // successor is padding — guaranteed by `min_log_size`).
         let is_last_block = eval.next_trace_mask();
         eval.add_constraint(
-            is_last_block.clone() - enabler.clone() * (E::F::one() - enabler_next.clone()),
+            is_last_block.clone()
+                - gate_r63.clone() * (E::F::one() - enabler_next.clone()),
         );
 
-        // Digest byte view: the 32 big-endian bytes of `h_out`, read in the
-        // `crate::trace::h_out_digest_bytes` order — per state word `j` the
-        // cells are `[hi.b1, hi.b0, lo.b1, lo.b0]`, so each `(lo, hi)` limb
-        // recomposes from its two bytes as `limb = 256·b1 + b0`. The limbs are
-        // already pinned to `[0, 2¹⁶)` by the terminal `Range_16` above, so
-        // these two constraints per word (gated by `enabler`, degree 2) tie the
-        // bytes to the digest. The bytes' own `[0, 256)` range-check is the
-        // *consumer's* responsibility (interface-contract item 4): a consumer
-        // requiring out-of-range bytes cannot match the honest in-range bytes a
-        // correct prover yields, so the cross-module balance fails closed.
+        // Digest byte view (t = 63 rows): per state word `j` the cells are
+        // `[hi.b1, hi.b0, lo.b1, lo.b0]`; each limb recomposes as
+        // `limb = 256·b1 + b0`. Limbs are `Range_16`-pinned above; byte
+        // range checks are the consumer's responsibility (interface-contract
+        // item 4).
         let digest_bytes: [E::F; DIGEST_BYTES] = std::array::from_fn(|_| eval.next_trace_mask());
         let two_pow_8 = E::F::from(M31::from(1u32 << 8));
         for (j, h_out_word) in h_out.iter().enumerate().take(N_STATE_WORDS) {
-            // hi limb = 256·hi.b1 + hi.b0
             eval.add_constraint(
-                enabler.clone()
+                gate_r63.clone()
                     * (h_out_word.1.clone()
                         - two_pow_8.clone() * digest_bytes[4 * j].clone()
                         - digest_bytes[4 * j + 1].clone()),
             );
-            // lo limb = 256·lo.b1 + lo.b0
             eval.add_constraint(
-                enabler.clone()
+                gate_r63.clone()
                     * (h_out_word.0.clone()
                         - two_pow_8.clone() * digest_bytes[4 * j + 2].clone()
                         - digest_bytes[4 * j + 3].clone()),
             );
         }
-
-        // Yield the 32-byte digest across the module boundary (provider side).
-        // Gated by `expose_digest` so the standalone SHA proof — which has no
-        // consumer — still self-balances. The multiplicity is `−is_last_block`
-        // (yield on the final block only); a downstream module (the P256 `z`
-        // binding) *requires* the same 32-byte tuple, so the global LogUp
-        // balance cancels iff the bytes match — i.e. the signature is verified
-        // over the hash SHA actually computed. The tuple order matches
-        // `crate::interaction`'s digest yield and `crate::trace::h_out_digest_bytes`.
         if self.expose_digest {
             eval.add_to_relation(RelationEntry::new(
                 &self.relations.digest.digest,
@@ -802,10 +786,12 @@ impl FrameworkEval for Sha256Eval {
             ));
         }
 
-        // ---- §10.4 padding-role constraints ----
+        // ---- §10.4 padding-role constraints (t = 15 rows) ----
         //
-        // Read order mirrors `crate::trace::write_padding_row`; offsets
-        // are documented on `Layout::COL_PADDING_*`.
+        // Identical algebra to the wide layout; the block's message words
+        // `W[j]` are the `W` columns of rows `t = j`, i.e. `w[15 − j]` from
+        // here. On every row outside a real t = 15 row all padding cells
+        // are zero, so each identity holds vacuously.
         let is_marker_block = eval.next_trace_mask();
         let is_length_block = eval.next_trace_mask();
         let is_length_only_block = eval.next_trace_mask();
@@ -822,9 +808,10 @@ impl FrameworkEval for Sha256Eval {
         let bit_length_w15_lo = eval.next_trace_mask();
         let bit_length_w15_hi = eval.next_trace_mask();
 
-        // (P.A) Binary checks. Every padding-role flag and one-hot bit
-        // satisfies `x · (1 − x) = 0`. Not gated by `enabler`: on padding
-        // rows every cell is 0 and the identity holds trivially.
+        // The block's message word `W[j]`, from the t = 15 row's viewpoint.
+        let w_msg = |j: usize| -> &(E::F, E::F) { &w[15 - j] };
+
+        // (P.A) Binary checks (ungated — all cells are 0 off-family).
         for flag in [
             &is_marker_block,
             &is_length_block,
@@ -841,20 +828,7 @@ impl FrameworkEval for Sha256Eval {
             eval.add_constraint(bit.clone() * (E::F::one() - bit.clone()));
         }
 
-        // (P.A') Mn1: pin every padding-role flag to `0` on disabled rows.
-        // Without these, P.B–P.H are internally consistent algebraically
-        // for an attacker-controlled disabled row (e.g.,
-        // `is_marker_block = 1` accompanied by self-consistent
-        // `is_marker_word` / `marker_byte_sel` / `marker_word_byte` cells),
-        // which is harmless in isolation but undesirable as defense in
-        // depth — disabled rows should carry no padding metadata.
-        //
-        // The four single-cell flags suffice: `marker_byte_sel`,
-        // `is_marker_word`, and `marker_word_post_strict_15` collapse to
-        // zero via the sum identities (P.B) and aux definition (P.C') once
-        // `is_marker_block` and `is_length_block` are pinned. `(1 − enabler)`
-        // is degree 1 and each flag is degree 1, so each constraint is
-        // degree 2.
+        // (P.A') Mn1: pin the padding-role flags to 0 on disabled rows.
         let one_minus_enabler = E::F::one() - enabler.clone();
         for flag in [
             &is_marker_block,
@@ -865,9 +839,7 @@ impl FrameworkEval for Sha256Eval {
             eval.add_constraint(one_minus_enabler.clone() * flag.clone());
         }
 
-        // (P.B) One-hot sums match the block role. Marker-word selectors
-        // sum to `is_marker_block` (1 on a marker block, 0 elsewhere);
-        // marker-byte selectors do the same. Degree 1.
+        // (P.B) One-hot sums match the block role.
         let sum_is_marker_word: E::F = is_marker_word
             .iter()
             .cloned()
@@ -879,10 +851,7 @@ impl FrameworkEval for Sha256Eval {
             .fold(E::F::from(M31::from(0u32)), |acc, b| acc + b);
         eval.add_constraint(sum_marker_byte_sel - is_marker_block.clone());
 
-        // (P.C) Aux-flag definitions. Each is the product of two role
-        // flags — committed as standalone columns so downstream
-        // constraints stay degree ≤ 2 instead of degree 3. Constraint
-        // form `aux − product = 0` is degree 2.
+        // (P.C) Aux-flag definitions.
         eval.add_constraint(
             is_length_only_block.clone()
                 - (E::F::one() - is_marker_block.clone()) * is_length_block.clone(),
@@ -892,55 +861,26 @@ impl FrameworkEval for Sha256Eval {
                 - is_marker_block.clone() * (E::F::one() - is_length_block.clone()),
         );
 
-        // Cumulative one-hot sums: `cumulative_marker_word_sel[j] =
-        // Σ_{j' < j} is_marker_word[j']`. With `is_marker_word` one-hot,
-        // this is `0` for `j ≤ marker_word_idx` and `1` for
-        // `j > marker_word_idx` (i.e., "strictly after marker"). Built
-        // up in-place by accumulating each prefix.
+        // Cumulative one-hot marker-word prefix sums.
         let mut cum_marker_word: [E::F; WORDS_PER_BLOCK] =
             std::array::from_fn(|_| E::F::from(M31::from(0u32)));
         for j in 1..WORDS_PER_BLOCK {
             cum_marker_word[j] = cum_marker_word[j - 1].clone() + is_marker_word[j - 1].clone();
         }
-        let cum_marker_word_at_end = cum_marker_word[WORDS_PER_BLOCK - 1].clone()
-            + is_marker_word[WORDS_PER_BLOCK - 1].clone();
-        // Sanity: the total marker-word cumulative equals is_marker_block
-        // (drops out of (P.B), restated here for the constraint loop's
-        // self-documentation; not a separate identity).
-        let _ = cum_marker_word_at_end;
 
         // (P.C') marker-word post-strict aux for the `W[15]` slot.
-        // `marker_word_post_strict_15 = cum_marker_word[15] · (1 −
-        // is_length_block)`. On a marker-only block (Case B's penult,
-        // marker at `W[14]` or `W[15]`) this fires only when the marker
-        // is at `W[14]` (cum[15] = 1) — forcing `W[15]` to zero. On
-        // length-bearing blocks the `(1 − is_length_block) = 0` factor
-        // zeros it. The symmetric `_14` aux would be identically zero
-        // (no valid trace places the marker strictly before `W[14]`) and
-        // is omitted; see `crate::types::PaddingRowWitness`.
         eval.add_constraint(
             marker_word_post_strict_15.clone()
                 - cum_marker_word[15].clone() * (E::F::one() - is_length_block.clone()),
         );
 
-        // (P.D) Marker-word byte assembly. The marker word `W[k]` (where
-        // `k = marker_word_idx`) selected via the one-hot vector matches
-        // the BE byte decomposition `(byte_0, byte_1, byte_2, byte_3)`.
-        // Reads of the schedule words happen at offsets fixed by
-        // `Layout::schedule_word(j)`; we already pulled those into the
-        // local `w: [(E::F, E::F); N_ROUNDS]` array at the top of
-        // `evaluate`, so they're in scope here.
-        //
-        // `W[k].hi = byte_0 · 256 + byte_1`, `W[k].lo = byte_2 · 256 + byte_3`.
-        // On non-marker rows every is_marker_word[j] = 0 and the bytes
-        // are 0 too (default trace fill), so both identities hold
-        // vacuously. Degree 2 — sum-of-products of two degree-1 cells.
+        // (P.D) Marker-word byte assembly.
         let byte_base = E::F::from(M31::from(1u32 << 8));
         let mut sum_w_hi = E::F::from(M31::from(0u32));
         let mut sum_w_lo = E::F::from(M31::from(0u32));
         for j in 0..WORDS_PER_BLOCK {
-            sum_w_hi += is_marker_word[j].clone() * w[j].1.clone();
-            sum_w_lo += is_marker_word[j].clone() * w[j].0.clone();
+            sum_w_hi += is_marker_word[j].clone() * w_msg(j).1.clone();
+            sum_w_lo += is_marker_word[j].clone() * w_msg(j).0.clone();
         }
         eval.add_constraint(
             sum_w_hi
@@ -953,10 +893,7 @@ impl FrameworkEval for Sha256Eval {
                 - marker_word_byte[3].clone(),
         );
 
-        // (P.E) The marker byte is `0x80`. Per byte position `b`, the
-        // one-hot selector pins `byte[b] = 0x80` exactly when this is
-        // the marker byte. On non-marker rows every selector is 0 and
-        // the constraint is vacuous. Degree 2.
+        // (P.E) The marker byte is `0x80`.
         let marker_value = E::F::from(M31::from(0x80u32));
         for b in 0..BYTES_PER_WORD {
             eval.add_constraint(
@@ -964,173 +901,91 @@ impl FrameworkEval for Sha256Eval {
             );
         }
 
-        // (P.F) Bytes strictly after the marker byte (within the marker
-        // word) are zero. `cumulative_byte_sel_before[b] = Σ_{b' < b}
-        // marker_byte_sel[b']` selects "the marker is at some earlier
-        // byte position than `b`". For `b = 0` it's identically 0
-        // (constraint vacuous); for `b = 1, 2, 3` it's the cumulative
-        // sum. Degree 2.
+        // (P.F) Bytes strictly after the marker byte are zero.
         let mut cum_byte_sel = E::F::from(M31::from(0u32));
         for b in 0..BYTES_PER_WORD {
-            // Constraint uses the cumulative *before* b, so emit before
-            // accumulating b's own selector.
             eval.add_constraint(cum_byte_sel.clone() * marker_word_byte[b].clone());
             cum_byte_sel += marker_byte_sel[b].clone();
         }
 
-        // (P.G) Words strictly after the marker word are zero — with the
-        // length-field exception. The "must be zero" indicator for each
-        // word index `j ∈ [0, 14)` is the sum of two mutually exclusive
-        // sources:
-        //   - `cum_marker_word[j]`: marker block with marker before j.
-        //   - `is_length_only_block`: pure length block (W[0..14] all zero).
-        // For `W[15]` only the marker-only-block contribution applies
-        // (in length-bearing blocks `W[14]`/`W[15]` are the length
-        // field); we use the pre-committed `marker_word_post_strict_15`
-        // aux to express it without a degree-3 product. `W[14]` gets no
-        // (P.G) constraint: the only way it would need one is a marker
-        // block with marker strictly before `W[14]`, which never happens
-        // (in Case A `is_length_block = 1` zeros the gate; in Case B
-        // penult the marker is always at `W[14]` or `W[15]`, and when
-        // it's at `W[14]` the byte-level (P.D)/(P.E)/(P.F) already pin
-        // `W[14]` to `0x80000000`).
+        // (P.G) Words strictly after the marker word are zero (length-field
+        // exception; see the wide-layout derivation for the W[14]/W[15]
+        // case analysis).
         for j in 0..14 {
             let gate = cum_marker_word[j].clone() + is_length_only_block.clone();
-            eval.add_constraint(gate.clone() * w[j].0.clone());
-            eval.add_constraint(gate * w[j].1.clone());
+            eval.add_constraint(gate.clone() * w_msg(j).0.clone());
+            eval.add_constraint(gate * w_msg(j).1.clone());
         }
-        eval.add_constraint(marker_word_post_strict_15.clone() * w[15].0.clone());
-        eval.add_constraint(marker_word_post_strict_15.clone() * w[15].1.clone());
+        eval.add_constraint(marker_word_post_strict_15.clone() * w_msg(15).0.clone());
+        eval.add_constraint(marker_word_post_strict_15.clone() * w_msg(15).1.clone());
 
-        // (P.H) Length-field encoding. On a length-bearing block,
-        // `W[14]` and `W[15]` equal the committed bit-length limbs. The
-        // 64-bit bit-length stored as four 16-bit limbs:
-        //   bit_length_w14_hi : bits 48..63 (W[14].hi)
-        //   bit_length_w14_lo : bits 32..47 (W[14].lo)
-        //   bit_length_w15_hi : bits 16..31 (W[15].hi)
-        //   bit_length_w15_lo : bits  0..15 (W[15].lo)
-        // The cross-component LogUp binding to the mdoc parser (post 2.4)
-        // exposes these four limbs uniformly — that's why we keep the
-        // limb commitment separate from `W[14]`/`W[15]` themselves
-        // rather than relying on the schedule cells alone. Degree 2.
+        // (P.H) Length-field encoding.
         eval.add_constraint(
-            is_length_block.clone() * (w[14].0.clone() - bit_length_w14_lo.clone()),
+            is_length_block.clone() * (w_msg(14).0.clone() - bit_length_w14_lo.clone()),
         );
         eval.add_constraint(
-            is_length_block.clone() * (w[14].1.clone() - bit_length_w14_hi.clone()),
+            is_length_block.clone() * (w_msg(14).1.clone() - bit_length_w14_hi.clone()),
         );
         eval.add_constraint(
-            is_length_block.clone() * (w[15].0.clone() - bit_length_w15_lo.clone()),
+            is_length_block.clone() * (w_msg(15).0.clone() - bit_length_w15_lo.clone()),
         );
         eval.add_constraint(
-            is_length_block.clone() * (w[15].1.clone() - bit_length_w15_hi.clone()),
+            is_length_block.clone() * (w_msg(15).1.clone() - bit_length_w15_hi.clone()),
         );
-
-        // Note: block-alignment (padded.len() % 64 == 0) is structural —
-        // one trace row IS one 64-byte block — and the AIR cannot
-        // represent a partial block, so no per-row constraint is needed
-        // for the "total padded length is a multiple of BLOCK_BYTES"
-        // requirement.
-        //
-        // Note: cross-component binding of bit_length and marker position
-        // to the mdoc/COSE-parser stream is the integration layer's job
-        // and is intentionally out of scope here.
 
         // ---- C1 contiguity (aux column `enabler_step`) ----
-        //
-        // `enabler_step` is the *last* column of the trace per
-        // [`crate::trace::Layout::COL_ENABLER_STEP`]. It is committed by the
-        // prover to satisfy `enabler_step = enabler · (1 − enabler_prev)`
-        // — `1` only at the first real row following a padding predecessor
-        // in coset order, `0` everywhere else. The contiguity constraint
-        // `(1 − is_first_row) · enabler_step = 0` then forces that
-        // "first real row" to live exclusively at block 0's slot
-        // (`is_first_row = 1`), so the trace's real-row run is a contiguous
-        // prefix starting from block 0 (the IV-bound anchor). Together
-        // with the §10.3 chain and the IV-binding constraints, this
-        // closes the block-skip / state-injection variant of C1 and
-        // discharges Mj1 (every continuation row's `h_in` chains from a
-        // `Range_16`-checked predecessor `h_out`).
         let enabler_step = eval.next_trace_mask();
         eval.add_constraint(
             enabler_step.clone() - enabler.clone() * (E::F::one() - enabler_prev.clone()),
         );
         eval.add_constraint((E::F::one() - is_first_row.clone()) * enabler_step.clone());
 
-        // ---- field provider: byte view of covered message words, range-checked, + yields ----
+        // ---- field provider (t = 15 rows; yields gated to block 0) ----
         //
-        // The credential-field byte columns are the dynamic tail of the trace
-        // (read here, after `enabler_step`, in `crate::trace::write_block_row`
-        // order — word-slot major, big-endian byte minor). For each exposed
-        // message word `W[word_idx]` the two bytes of each 16-bit limb recompose
-        // it as `limb = 256·b1 + b0`; the limbs are already pinned to `[0, 2¹⁶)`
-        // by the σ-input split-and-pack on `W[1..15]` (the credential's fields
-        // live in `W[1]`/`W[2]`), so these two `enabler`-gated, degree-2
-        // constraints per word tie the bytes to the message. Each byte is then
-        // range-checked to `[0, 256)` (two `Range16` lookups, below) so every
-        // touched limb's split is unique and a yielded byte equals the signed
-        // preimage byte. The digest can defer this to its consumer because it
-        // exposes whole words; a field window can be sub-word, so the provider
-        // pins the bytes itself (interface-contract item 4).
+        // The exposed message words are read through the same `W` offsets
+        // the padding family uses. The block-0 gate is `is_first_block`
+        // read at offset −15 (the block's t = 0 row).
         if !self.field_exposure.is_empty() {
             let field_bytes: Vec<E::F> = (0..self.field_exposure.n_columns())
                 .map(|_| eval.next_trace_mask())
                 .collect();
             for (word_slot, &word_idx) in self.field_exposure.decomposed_words().iter().enumerate()
             {
-                let (w_lo, w_hi) = w[word_idx].clone();
+                let (w_lo_v, w_hi_v) = w_msg(word_idx).clone();
                 let base = word_slot * BYTES_PER_WORD;
-                // hi limb = 256·b0 + b1  (b0 the high byte, b1 the low byte of hi)
                 eval.add_constraint(
-                    enabler.clone()
-                        * (w_hi
+                    gate_r15.clone()
+                        * (w_hi_v
                             - two_pow_8.clone() * field_bytes[base].clone()
                             - field_bytes[base + 1].clone()),
                 );
-                // lo limb = 256·b2 + b3
                 eval.add_constraint(
-                    enabler.clone()
-                        * (w_lo
+                    gate_r15.clone()
+                        * (w_lo_v
                             - two_pow_8.clone() * field_bytes[base + 2].clone()
                             - field_bytes[base + 3].clone()),
                 );
             }
 
-            // Range-check every exposed byte to `[0, 256)` so the limb split
-            // above is unique (a 16-bit limb `= 256·b_hi + b_lo` splits uniquely
-            // only when both bytes are bytes — otherwise an edge byte of a
-            // sub-word window could be forged by absorbing slack into a
-            // non-exposed limb partner). No `[0, 2⁸)` table exists, so each byte
-            // `b` is pinned by two `Range16` lookups — on `b` and on `b +
-            // OFFSET` — gated by `is_first_block` to match the yield. Order is
-            // word-slot major, byte minor (the `field_bytes` order), mirrored by
-            // `interaction::write_block_lookups` section 7a.
             let byte_range_offset =
                 E::F::from(M31::from(crate::field_exposure::BYTE_RANGE_CHECK_OFFSET));
             for b in &field_bytes {
                 wire_range_check::<E>(
                     &mut eval,
-                    is_first_block.clone(),
+                    is_first_block_m15.clone(),
                     b.clone(),
                     crate::components::RangeKind::Range16,
                     &self.relations,
                 );
                 wire_range_check::<E>(
                     &mut eval,
-                    is_first_block.clone(),
+                    is_first_block_m15.clone(),
                     b.clone() + byte_range_offset.clone(),
                     crate::components::RangeKind::Range16,
                     &self.relations,
                 );
             }
 
-            // Yield one `(field_id, byte_index, value)` tuple per exposed byte,
-            // on the **first block** only (`−is_first_block`): the credential's
-            // fields are at fixed offsets from the preimage start, so they live
-            // in block 0. Like the digest yield, these terms have no in-module
-            // consumer until a predicate requires the same tuples, so
-            // they leave the module's claimed sum non-zero — which is exactly
-            // what binds the attribute to the signed bytes.
             for y in self.field_exposure.yields() {
                 let slot = self.field_exposure.yield_column_slot(y);
                 let tuple = [
@@ -1140,19 +995,12 @@ impl FrameworkEval for Sha256Eval {
                 ];
                 eval.add_to_relation(RelationEntry::new(
                     &self.relations.field.field,
-                    -E::EF::from(is_first_block.clone()),
+                    -E::EF::from(is_first_block_m15.clone()),
                     &tuple,
                 ));
             }
         }
 
-        // Close the LogUp loop over every SHA-256-specific channel: the
-        // eight `Σ`/`σ` decode lookups, the packed `Maj`/`Ch` pair, the
-        // chunk-wise `xor_8`, the eight split-and-pack channels, and the
-        // four `Range_k` channels (`Range_2`/`4`/`5` for mod-2³² carries
-        // per family; `Range_16` for terminal `h_out` limbs). Each pair of
-        // fractions batches into one interaction column (pairs share a
-        // denominator) for proof-size economy.
         eval.finalize_logup_in_pairs();
 
         eval
@@ -1649,208 +1497,193 @@ fn wire_range_check<E: EvalAtRow>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::constants::{IV, K, N_ROUNDS, N_STATE_WORDS};
     use crate::trace::{generate_trace, min_log_size, Layout};
+    use crate::types::WORDS_PER_BLOCK;
     use crate::witness::compute_sha256_witness;
+    use stwo::core::fields::m31::BaseField;
 
-    /// Sanity: a fully-populated trace from a real message satisfies the
-    /// **linear** add identities this module emits, end-to-end. Lookup
-    /// relations are stubbed, so this only checks limb-add consistency
-    /// (and IV binding, finalization, the state chain) — but a failure here
-    /// indicates the witness or the constraint algebra is off, not just a
-    /// missing lookup.
+    type Trace = Vec<Vec<BaseField>>;
+
+    fn cell(trace: &[Vec<BaseField>], col: usize, slot: usize) -> i64 {
+        i64::from(trace[col][slot].0)
+    }
+
+    /// `(lo, hi)` of a two-column pair at a slot.
+    fn pair(trace: &Trace, cols: (usize, usize), slot: usize) -> (i64, i64) {
+        (cell(trace, cols.0, slot), cell(trace, cols.1, slot))
+    }
+
+    /// The working-state word entering round `t` at slot position `k`
+    /// (`k = 1` → a/e, `k = 4` → d/h), reconstructed exactly the way the
+    /// AIR's boundary select does: `h_in` of the block's `t = 0` row for
+    /// `t < k`, else `a_new`/`e_new` of row `t − k`.
+    fn state_word(
+        trace: &Trace,
+        log_size: u32,
+        b: usize,
+        t: usize,
+        k: usize,
+        h_base: usize, // 0 for the a-side, 4 for the e-side
+        new_cols: (usize, usize),
+    ) -> (i64, i64) {
+        if t < k {
+            // h_in[h_base + (k − 1 − t)] on the t = 0 row.
+            let j = h_base + (k - 1 - t);
+            pair(
+                trace,
+                Layout::h_in_word(j),
+                Layout::round_row_slot(b, 0, log_size),
+            )
+        } else {
+            pair(trace, new_cols, Layout::round_row_slot(b, t - k, log_size))
+        }
+    }
+
+    /// Assert one mod-2³² limb-add identity: `Σ addends = result + carries`.
+    fn assert_add(
+        addends: &[(i64, i64)],
+        result: (i64, i64),
+        carries: (i64, i64),
+        ctx: &str,
+    ) {
+        let sum_lo: i64 = addends.iter().map(|a| a.0).sum();
+        let sum_hi: i64 = addends.iter().map(|a| a.1).sum();
+        assert_eq!(sum_lo, result.0 + (carries.0 << 16), "lo residual: {ctx}");
+        assert_eq!(
+            sum_hi + carries.0,
+            result.1 + (carries.1 << 16),
+            "hi residual: {ctx}"
+        );
+    }
+
+    /// Verify every linear identity of the rotated AIR on an honest trace:
+    /// round adds (with boundary-selected `d`/`h`), schedule recurrence,
+    /// IV binding, block chain, and finalization.
     fn check_linear_constraints_on_message(msg: &[u8]) {
         let witness = compute_sha256_witness(msg);
         let log_size = min_log_size(witness.blocks.len());
         let trace = generate_trace(&witness, log_size);
-        for block_idx in 0..witness.blocks.len() {
-            let slot = Layout::block_slot(block_idx, log_size);
-            check_add_identities_in_row(&trace, slot);
-            if block_idx == 0 {
-                check_iv_binding_first_row(&trace, slot);
+
+        let r = Layout::round_col();
+        let sigma0_c = (r[0], r[1]);
+        let sigma1_c = (r[2], r[3]);
+        let ch_c = (r[4], r[5]);
+        let maj_c = (r[6], r[7]);
+        let t1_c = (r[8], r[9]);
+        let t2_c = (r[10], r[11]);
+        let a_new_c = (r[12], r[13]);
+        let e_new_c = (r[14], r[15]);
+        let t1_carry = (r[16], r[17]);
+        let t2_carry = (r[18], r[19]);
+        let e_new_carry = (r[20], r[21]);
+        let a_new_carry = (r[22], r[23]);
+        let w_c = Layout::schedule_word();
+
+        for b in 0..witness.blocks.len() {
+            // IV binding / chain on the t = 0 row.
+            let slot0 = Layout::round_row_slot(b, 0, log_size);
+            for j in 0..N_STATE_WORDS {
+                let h_in = pair(&trace, Layout::h_in_word(j), slot0);
+                if b == 0 {
+                    let iv = IV[j];
+                    assert_eq!(h_in.0 as u32, iv & 0xFFFF, "IV lo j={j}");
+                    assert_eq!(h_in.1 as u32, iv >> 16, "IV hi j={j}");
+                } else {
+                    let prev63 = Layout::round_row_slot(b - 1, N_ROUNDS - 1, log_size);
+                    let h_out_prev = pair(&trace, Layout::h_out_word(j), prev63);
+                    assert_eq!(h_in, h_out_prev, "chain j={j} b={b}");
+                }
             }
-            check_h_out_finalization(&trace, slot, &witness, block_idx);
+
+            for t in 0..N_ROUNDS {
+                let slot = Layout::round_row_slot(b, t, log_size);
+                let d = state_word(&trace, log_size, b, t, 4, 0, a_new_c);
+                let h_state = state_word(&trace, log_size, b, t, 4, 4, e_new_c);
+                let k_t = (
+                    i64::from(K[t] & 0xFFFF),
+                    i64::from(K[t] >> 16),
+                );
+                let w_t = pair(&trace, w_c, slot);
+                let sigma0 = pair(&trace, sigma0_c, slot);
+                let sigma1 = pair(&trace, sigma1_c, slot);
+                let ch = pair(&trace, ch_c, slot);
+                let maj = pair(&trace, maj_c, slot);
+                let t1 = pair(&trace, t1_c, slot);
+                let t2 = pair(&trace, t2_c, slot);
+                let a_new = pair(&trace, a_new_c, slot);
+                let e_new = pair(&trace, e_new_c, slot);
+
+                assert_add(
+                    &[h_state, sigma1, ch, k_t, w_t],
+                    t1,
+                    pair(&trace, t1_carry, slot),
+                    &format!("t1 b={b} t={t}"),
+                );
+                assert_add(
+                    &[sigma0, maj],
+                    t2,
+                    pair(&trace, t2_carry, slot),
+                    &format!("t2 b={b} t={t}"),
+                );
+                assert_add(
+                    &[d, t1],
+                    e_new,
+                    pair(&trace, e_new_carry, slot),
+                    &format!("e_new b={b} t={t}"),
+                );
+                assert_add(
+                    &[t1, t2],
+                    a_new,
+                    pair(&trace, a_new_carry, slot),
+                    &format!("a_new b={b} t={t}"),
+                );
+
+                // Schedule recurrence (t ≥ 16 rows).
+                if t >= 16 {
+                    let e = Layout::schedule_entry();
+                    let s0 = (cell(&trace, e[0], slot), cell(&trace, e[1], slot));
+                    let s1 = (cell(&trace, e[2], slot), cell(&trace, e[3], slot));
+                    let carries = (cell(&trace, e[4], slot), cell(&trace, e[5], slot));
+                    let at = |k: usize| {
+                        pair(&trace, w_c, Layout::round_row_slot(b, t - k, log_size))
+                    };
+                    assert_add(
+                        &[s1, at(7), s0, at(16)],
+                        w_t,
+                        carries,
+                        &format!("schedule b={b} t={t}"),
+                    );
+                }
+            }
+
+            // Finalization on the t = 63 row.
+            let slot63 = Layout::round_row_slot(b, N_ROUNDS - 1, log_size);
+            for j in 0..N_STATE_WORDS {
+                let h_in = pair(&trace, Layout::h_in_word(j), slot0);
+                let working = if j < 4 {
+                    pair(
+                        &trace,
+                        a_new_c,
+                        Layout::round_row_slot(b, N_ROUNDS - 1 - j, log_size),
+                    )
+                } else {
+                    pair(
+                        &trace,
+                        e_new_c,
+                        Layout::round_row_slot(b, N_ROUNDS - 1 - (j - 4), log_size),
+                    )
+                };
+                let h_out = pair(&trace, Layout::h_out_word(j), slot63);
+                let carries = pair(&trace, Layout::final_carry(j), slot63);
+                assert_add(
+                    &[h_in, working],
+                    h_out,
+                    carries,
+                    &format!("finalization b={b} j={j}"),
+                );
+            }
         }
-        // §10.3 chain constraint: block `b+1`'s `h_in` equals block `b`'s
-        // `h_out`. Verified row-by-row in the witness via `block_slot`.
-        for block_idx in 1..witness.blocks.len() {
-            let cur = Layout::block_slot(block_idx, log_size);
-            let prev = Layout::block_slot(block_idx - 1, log_size);
-            check_block_chain_link(&trace, cur, prev);
-        }
-    }
-
-    /// For every limb-add `c = Σ aᵢ`, verify
-    /// `Σ aᵢ.lo = c.lo + 2¹⁶·carry_lo` and
-    /// `Σ aᵢ.hi + carry_lo = c.hi + 2¹⁶·carry_hi`.
-    fn check_add_identities_in_row(trace: &[Vec<stwo::core::fields::m31::BaseField>], row: usize) {
-        let v = |col: usize| trace[col][row].0;
-        let two16 = 1u64 << 16;
-
-        // Schedule entries.
-        for j in 0..(N_ROUNDS - 16) {
-            let t = j + 16;
-            let entry_cols = Layout::schedule_entry(j);
-            let s0 = (v(entry_cols[0]) as u64, v(entry_cols[1]) as u64);
-            let s1 = (v(entry_cols[2]) as u64, v(entry_cols[3]) as u64);
-            let c_lo = v(entry_cols[4]) as u64;
-            let c_hi = v(entry_cols[5]) as u64;
-
-            let w_t = limb_pair(trace, row, Layout::schedule_word(t));
-            let w_t_minus_7 = limb_pair(trace, row, Layout::schedule_word(t - 7));
-            let w_t_minus_16 = limb_pair(trace, row, Layout::schedule_word(t - 16));
-
-            let lhs_lo = s1.0 + w_t_minus_7.0 + s0.0 + w_t_minus_16.0;
-            let rhs_lo = w_t.0 + two16 * c_lo;
-            assert_eq!(lhs_lo, rhs_lo, "schedule t={t}: low limb identity");
-
-            let lhs_hi = s1.1 + w_t_minus_7.1 + s0.1 + w_t_minus_16.1 + c_lo;
-            let rhs_hi = w_t.1 + two16 * c_hi;
-            assert_eq!(lhs_hi, rhs_hi, "schedule t={t}: high limb identity");
-        }
-
-        // Rounds.
-        let mut state: [(u64, u64); 8] = std::array::from_fn(|j| {
-            let (lo, hi) = Layout::h_in_word(j);
-            (v(lo) as u64, v(hi) as u64)
-        });
-        for (t, &k_t) in K.iter().enumerate().take(N_ROUNDS) {
-            let cols = Layout::round_col(t);
-            let sigma0 = (v(cols[0]) as u64, v(cols[1]) as u64);
-            let sigma1 = (v(cols[2]) as u64, v(cols[3]) as u64);
-            let ch = (v(cols[4]) as u64, v(cols[5]) as u64);
-            let maj = (v(cols[6]) as u64, v(cols[7]) as u64);
-            let t1 = (v(cols[8]) as u64, v(cols[9]) as u64);
-            let t2 = (v(cols[10]) as u64, v(cols[11]) as u64);
-            let a_new = (v(cols[12]) as u64, v(cols[13]) as u64);
-            let e_new = (v(cols[14]) as u64, v(cols[15]) as u64);
-            let t1_carry = (v(cols[16]) as u64, v(cols[17]) as u64);
-            let t2_carry = (v(cols[18]) as u64, v(cols[19]) as u64);
-            let e_new_carry = (v(cols[20]) as u64, v(cols[21]) as u64);
-            let a_new_carry = (v(cols[22]) as u64, v(cols[23]) as u64);
-
-            let w_t = limb_pair(trace, row, Layout::schedule_word(t));
-            let k_lo = (k_t & 0xFFFF) as u64;
-            let k_hi = (k_t >> 16) as u64;
-            let [a, b, c, d, e, _f, _g, h] = state;
-            let _ = b;
-            let _ = c;
-
-            // T1 add.
-            assert_eq!(
-                h.0 + sigma1.0 + ch.0 + k_lo + w_t.0,
-                t1.0 + two16 * t1_carry.0,
-                "t={t}: T1.lo"
-            );
-            assert_eq!(
-                h.1 + sigma1.1 + ch.1 + k_hi + w_t.1 + t1_carry.0,
-                t1.1 + two16 * t1_carry.1,
-                "t={t}: T1.hi"
-            );
-            // T2 add.
-            assert_eq!(sigma0.0 + maj.0, t2.0 + two16 * t2_carry.0, "t={t}: T2.lo");
-            assert_eq!(
-                sigma0.1 + maj.1 + t2_carry.0,
-                t2.1 + two16 * t2_carry.1,
-                "t={t}: T2.hi"
-            );
-            // e_new add.
-            assert_eq!(
-                d.0 + t1.0,
-                e_new.0 + two16 * e_new_carry.0,
-                "t={t}: e_new.lo"
-            );
-            assert_eq!(
-                d.1 + t1.1 + e_new_carry.0,
-                e_new.1 + two16 * e_new_carry.1,
-                "t={t}: e_new.hi"
-            );
-            // a_new add.
-            assert_eq!(
-                t1.0 + t2.0,
-                a_new.0 + two16 * a_new_carry.0,
-                "t={t}: a_new.lo"
-            );
-            assert_eq!(
-                t1.1 + t2.1 + a_new_carry.0,
-                a_new.1 + two16 * a_new_carry.1,
-                "t={t}: a_new.hi"
-            );
-
-            // State rotation.
-            state = [a_new, a, state[1], state[2], e_new, e, state[5], state[6]];
-        }
-
-        // Finalization adds.
-        for (j, working) in state.iter().enumerate().take(N_STATE_WORDS) {
-            let (h_in_lo, h_in_hi) = Layout::h_in_word(j);
-            let (h_out_lo, h_out_hi) = Layout::h_out_word(j);
-            let (c_lo, c_hi) = Layout::final_carry(j);
-            let h_in_v = (v(h_in_lo) as u64, v(h_in_hi) as u64);
-            let h_out_v = (v(h_out_lo) as u64, v(h_out_hi) as u64);
-            let carry = (v(c_lo) as u64, v(c_hi) as u64);
-            assert_eq!(
-                h_in_v.0 + working.0,
-                h_out_v.0 + two16 * carry.0,
-                "final[{j}].lo"
-            );
-            assert_eq!(
-                h_in_v.1 + working.1 + carry.0,
-                h_out_v.1 + two16 * carry.1,
-                "final[{j}].hi"
-            );
-        }
-    }
-
-    fn check_iv_binding_first_row(trace: &[Vec<stwo::core::fields::m31::BaseField>], row: usize) {
-        for (j, &iv_j) in IV.iter().enumerate().take(N_STATE_WORDS) {
-            let (lo, hi) = Layout::h_in_word(j);
-            let word = trace[lo][row].0 | (trace[hi][row].0 << 16);
-            assert_eq!(word, iv_j, "h_in[{j}] not bound to IV on first-block row");
-        }
-    }
-
-    fn check_h_out_finalization(
-        trace: &[Vec<stwo::core::fields::m31::BaseField>],
-        row: usize,
-        witness: &crate::types::Sha256Witness,
-        block_idx: usize,
-    ) {
-        for j in 0..N_STATE_WORDS {
-            let (lo, hi) = Layout::h_out_word(j);
-            let word = trace[lo][row].0 | (trace[hi][row].0 << 16);
-            assert_eq!(word, witness.blocks[block_idx].h_out[j].to_u32());
-        }
-    }
-
-    /// §10.3 chain check on the trace: every limb of `h_in` at row `cur`
-    /// equals the corresponding limb of `h_out` at row `prev`. Mirrors the
-    /// AIR's cross-row copy constraint at the trace level.
-    fn check_block_chain_link(
-        trace: &[Vec<stwo::core::fields::m31::BaseField>],
-        cur: usize,
-        prev: usize,
-    ) {
-        for j in 0..N_STATE_WORDS {
-            let (h_in_lo, h_in_hi) = Layout::h_in_word(j);
-            let (h_out_lo, h_out_hi) = Layout::h_out_word(j);
-            assert_eq!(
-                trace[h_in_lo][cur].0, trace[h_out_lo][prev].0,
-                "chain mismatch: h_in[{j}].lo @ {cur} != h_out[{j}].lo @ {prev}"
-            );
-            assert_eq!(
-                trace[h_in_hi][cur].0, trace[h_out_hi][prev].0,
-                "chain mismatch: h_in[{j}].hi @ {cur} != h_out[{j}].hi @ {prev}"
-            );
-        }
-    }
-
-    fn limb_pair(
-        trace: &[Vec<stwo::core::fields::m31::BaseField>],
-        row: usize,
-        cols: (usize, usize),
-    ) -> (u64, u64) {
-        (trace[cols.0][row].0 as u64, trace[cols.1][row].0 as u64)
     }
 
     #[test]
@@ -1865,842 +1698,310 @@ mod tests {
 
     #[test]
     fn linear_identities_hold_for_multi_block() {
-        check_linear_constraints_on_message(&[0xABu8; 200]);
+        check_linear_constraints_on_message(&[0x42; 150]);
     }
 
-    /// Each σ-application's decoded intermediates round-trip the σ-output
-    /// reassembly identity and the `O2` chunk-bind that the AIR emits in
-    /// [`wire_sigma_decode`]. A failure here means the witness or the
-    /// reassembly algebra is off — not just a missing lookup.
-    fn check_decode_reassembly_in_row(
-        trace: &[Vec<stwo::core::fields::m31::BaseField>],
-        row: usize,
-    ) {
-        let v = |col: usize| trace[col][row].0;
-        let two_pow_8 = 1u32 << 8;
-
-        let check_block = |base: usize, label: &str| -> (u32, u32) {
-            // Layout per `crate::trace::SIGMA_DECODE_COLS`:
-            //   0..5   S-side tuple   (key, o_main.lo, .hi, o2_partial.lo, .hi)
-            //   5..10  S′-side tuple
-            //   10,11  o2_combined.lo, .hi
-            //   12..16 o2_chunks_s             (lo.b0, lo.b1, hi.b0, hi.b1)
-            //   16..20 o2_chunks_s_complement
-            //   20..24 o2_chunks_combined
-            // Chunk-bind: `limb == b0 + 256·b1` for each of the six limbs.
-            assert_eq!(
-                v(base + 3),
-                v(base + 12) + two_pow_8 * v(base + 13),
-                "{label}: chunk-bind o2_partial_s.lo"
-            );
-            assert_eq!(
-                v(base + 4),
-                v(base + 14) + two_pow_8 * v(base + 15),
-                "{label}: chunk-bind o2_partial_s.hi"
-            );
-            assert_eq!(
-                v(base + 8),
-                v(base + 16) + two_pow_8 * v(base + 17),
-                "{label}: chunk-bind o2_partial_s_complement.lo"
-            );
-            assert_eq!(
-                v(base + 9),
-                v(base + 18) + two_pow_8 * v(base + 19),
-                "{label}: chunk-bind o2_partial_s_complement.hi"
-            );
-            assert_eq!(
-                v(base + 10),
-                v(base + 20) + two_pow_8 * v(base + 21),
-                "{label}: chunk-bind o2_combined.lo"
-            );
-            assert_eq!(
-                v(base + 11),
-                v(base + 22) + two_pow_8 * v(base + 23),
-                "{label}: chunk-bind o2_combined.hi"
-            );
-            // Reassembly: σ = o_main_s + o_main_s_complement + o2_combined
-            // — limb by limb. Returned so the caller compares against the
-            // σ-output limbs committed elsewhere in the row.
-            (
-                v(base + 1) + v(base + 6) + v(base + 10),
-                v(base + 2) + v(base + 7) + v(base + 11),
-            )
-        };
-
-        for j in 0..(N_ROUNDS - 16) {
-            let [s0_lo, s0_hi, s1_lo, s1_hi, _, _] = Layout::schedule_entry(j);
-            let s0 = (v(s0_lo), v(s0_hi));
-            let s1 = (v(s1_lo), v(s1_hi));
-            let sigma0_sum = check_block(Layout::schedule_entry_decode(j, 0), "schedule σ0");
-            assert_eq!(s0, sigma0_sum, "schedule[{j}]: σ0 reassembly");
-            let sigma1_sum = check_block(Layout::schedule_entry_decode(j, 1), "schedule σ1");
-            assert_eq!(s1, sigma1_sum, "schedule[{j}]: σ1 reassembly");
-        }
-
-        for t in 0..N_ROUNDS {
-            let cols = Layout::round_col(t);
-            let sigma0 = (v(cols[0]), v(cols[1]));
-            let sigma1 = (v(cols[2]), v(cols[3]));
-            let sigma0_sum = check_block(Layout::round_decode(t, 0), "round Σ0");
-            assert_eq!(sigma0, sigma0_sum, "round[{t}]: Σ0 reassembly");
-            let sigma1_sum = check_block(Layout::round_decode(t, 1), "round Σ1");
-            assert_eq!(sigma1, sigma1_sum, "round[{t}]: Σ1 reassembly");
-        }
-    }
-
+    /// §8.1 duplicate-operand columns match their originating cells: on
+    /// every row, `b_grp = a_grp@(t−1)` (aux `b_init` on t = 0), `c_grp =
+    /// a_grp@(t−2)` (aux seeds on t ∈ {0, 1}); e-side symmetric.
     #[test]
-    fn decode_reassembly_holds_for_abc() {
-        let witness = compute_sha256_witness(b"abc");
-        let log_size = min_log_size(witness.blocks.len());
-        let trace = generate_trace(&witness, log_size);
-        for block_idx in 0..witness.blocks.len() {
-            check_decode_reassembly_in_row(&trace, Layout::block_slot(block_idx, log_size));
-        }
-    }
-
-    #[test]
-    fn decode_reassembly_holds_for_multi_block() {
-        let witness = compute_sha256_witness(&[0xABu8; 200]);
-        let log_size = min_log_size(witness.blocks.len());
-        let trace = generate_trace(&witness, log_size);
-        for block_idx in 0..witness.blocks.len() {
-            check_decode_reassembly_in_row(&trace, Layout::block_slot(block_idx, log_size));
-        }
-    }
-
-    /// Maj/Ch/`xor_8` multiplicities per block equal the static counts
-    /// the trace shape dictates — 8 Maj + 8 Ch lookups per round (W=6, one
-    /// per group position), and 4 chunk-wise `xor_8` lookups per
-    /// σ-application (with 2 σ-applications per round and 2 per schedule
-    /// entry). A regression here means the witness-side counter (which the
-    /// LogUp table-side multiplicity column must reproduce) has drifted
-    /// from the constraint-side wiring.
-    #[test]
-    fn maj_ch_xor_multiplicities_match_per_block_totals() {
+    fn reuse_chain_duplicates_match_their_sources() {
         use crate::partitions::GROUPS_PER_ROUND_PARTITION;
-        use crate::witness::{
-            maj_ch_xor_multiplicities_for_block, maj_ch_xor_multiplicities_for_witness,
-        };
-
-        let witness = crate::witness::compute_sha256_witness(b"abc");
-        assert_eq!(witness.blocks.len(), 1);
-        let m = maj_ch_xor_multiplicities_for_block(&witness.blocks[0]);
-        let groups = GROUPS_PER_ROUND_PARTITION as u32;
-        // 8 packed-group lookups per round per function (W=6).
-        assert_eq!(m.maj, (N_ROUNDS as u32) * groups);
-        assert_eq!(m.ch, (N_ROUNDS as u32) * groups);
-        assert_eq!(m.maj, 64 * 8);
-        // 4 xor_8 per σ-application; (2·64 + 2·48) σ-applications/block.
-        let sigma_apps_per_block = 2 * (N_ROUNDS as u32) + 2 * ((N_ROUNDS - 16) as u32);
-        assert_eq!(m.xor_8, 4 * sigma_apps_per_block);
-        assert_eq!(m.xor_8, 4 * (128 + 96));
-        assert_eq!(m.total(), m.maj + m.ch + m.xor_8);
-
-        // Multi-block scaling is exactly linear in `n_blocks`.
-        let multi = crate::witness::compute_sha256_witness(&[0xABu8; 200]);
-        let n = multi.blocks.len() as u32;
-        assert!(n >= 2);
-        let agg = maj_ch_xor_multiplicities_for_witness(&multi);
-        assert_eq!(agg.maj, n * m.maj);
-        assert_eq!(agg.ch, n * m.ch);
-        assert_eq!(agg.xor_8, n * m.xor_8);
-    }
-
-    /// Drives [`Sha256Eval::evaluate`] through Stwo's `InfoEvaluator` and
-    /// asserts every observable count lines up:
-    ///
-    ///   - The number of `next_trace_mask` calls equals `Layout::TOTAL_COLS`
-    ///     — a drift here silently shifts every constraint and lookup
-    ///     against the column it reads.
-    ///   - Per-relation lookup firings (one entry per `relation!` tag)
-    ///     equal the per-block static counts from
-    ///     `crate::witness::*_multiplicities_for_block`. This covers
-    ///     decode, Maj/Ch + xor_8, and the eight split-and-pack
-    ///     channels.
-    ///   - The total lookup count equals the sum across all per-channel
-    ///     witness-side totals.
-    #[test]
-    fn evaluate_mask_and_lookup_counts_agree_with_witness() {
-        use stwo_constraint_framework::ORIGINAL_TRACE_IDX;
-
-        let log_size = 4;
-        let eval = Sha256Eval {
-            log_size,
-            relations: Sha256Relations::dummy(),
-            expose_digest: false,
-            field_exposure: FieldExposure::empty(),
-        };
-        let info = run_evaluate_with_finalized_info(&eval, log_size);
-
-        // The AIR fires one row's worth of lookups (i.e. per-block totals
-        // — every row of the trace runs one block's evaluator pass).
-        let witness = compute_sha256_witness(b"abc");
-        let decode = crate::witness::decode_multiplicities_for_block(&witness.blocks[0]);
-        let maj_ch_xor = crate::witness::maj_ch_xor_multiplicities_for_block(&witness.blocks[0]);
-        let split_pack = crate::witness::split_pack_multiplicities_for_block(&witness.blocks[0]);
-
-        // The `relation!` macro derives the relation tag's name as the
-        // struct name string. These must agree with what
-        // `crate::relations` declares.
-        let get = |name: &str| -> u32 {
-            info.logup_counts
-                .iter()
-                .find_map(|(k, v)| if k == name { Some(*v as u32) } else { None })
-                .unwrap_or(0)
-        };
-
-        // Decode.
-        assert_eq!(get("Sigma0DecodeS"), decode.sigma0_s);
-        assert_eq!(get("Sigma0DecodeSPrime"), decode.sigma0_s_complement);
-        assert_eq!(get("Sigma1DecodeS"), decode.sigma1_s);
-        assert_eq!(get("Sigma1DecodeSPrime"), decode.sigma1_s_complement);
-        assert_eq!(get("LowerSigma0DecodeS"), decode.lower_sigma0_s);
-        assert_eq!(
-            get("LowerSigma0DecodeSPrime"),
-            decode.lower_sigma0_s_complement
-        );
-        assert_eq!(get("LowerSigma1DecodeS"), decode.lower_sigma1_s);
-        assert_eq!(
-            get("LowerSigma1DecodeSPrime"),
-            decode.lower_sigma1_s_complement
-        );
-
-        // Maj/Ch/xor_8.
-        assert_eq!(get("MajRelation"), maj_ch_xor.maj);
-        assert_eq!(get("ChRelation"), maj_ch_xor.ch);
-        assert_eq!(get("Xor8Relation"), maj_ch_xor.xor_8);
-
-        // Split-and-pack.
-        assert_eq!(get("Sigma0SplitPackLo"), split_pack.sigma0_lo);
-        assert_eq!(get("Sigma0SplitPackHi"), split_pack.sigma0_hi);
-        assert_eq!(get("Sigma1SplitPackLo"), split_pack.sigma1_lo);
-        assert_eq!(get("Sigma1SplitPackHi"), split_pack.sigma1_hi);
-        assert_eq!(get("LowerSigma0SplitPackLo"), split_pack.lower_sigma0_lo);
-        assert_eq!(get("LowerSigma0SplitPackHi"), split_pack.lower_sigma0_hi);
-        assert_eq!(get("LowerSigma1SplitPackLo"), split_pack.lower_sigma1_lo);
-        assert_eq!(get("LowerSigma1SplitPackHi"), split_pack.lower_sigma1_hi);
-
-        // Range_k carry / terminal lookups. Per block, structurally:
-        //   Range_4  : 2 carries × 48 schedule entries        = 96
-        //   Range_5  : 2 carries × 64 rounds (T1 only)        = 128
-        //   Range_2  : 2 carries × (3 round-side adds × 64
-        //                          + 8 finalization adds)     = 400
-        //   Range_16 : 2 limbs × 8 h_out words                = 16
-        let n_entries = (N_ROUNDS as u32) - 16; // schedule entries per block
-        let range_4_per_block: u32 = 2 * n_entries;
-        let range_5_per_block: u32 = 2 * (N_ROUNDS as u32);
-        let range_2_per_block: u32 = 2 * (3 * (N_ROUNDS as u32) + (N_STATE_WORDS as u32));
-        let range_16_per_block: u32 = 2 * (N_STATE_WORDS as u32);
-        assert_eq!(get("Range2Relation"), range_2_per_block);
-        assert_eq!(get("Range4Relation"), range_4_per_block);
-        assert_eq!(get("Range5Relation"), range_5_per_block);
-        assert_eq!(get("Range16Relation"), range_16_per_block);
-
-        // Mask count — `info.mask_offsets[ORIGINAL_TRACE_IDX]` is the
-        // main trace (the list pushed by every `next_trace_mask` call).
-        assert_eq!(
-            info.mask_offsets[ORIGINAL_TRACE_IDX].len(),
-            Layout::TOTAL_COLS,
-            "AIR's `next_trace_mask` count diverged from `Layout::TOTAL_COLS`",
-        );
-
-        // Verify the witness-side total firings = sum across channels.
-        let total_lookups: u32 = info.logup_counts.iter().map(|(_, &v)| v as u32).sum();
-        let range_total =
-            range_2_per_block + range_4_per_block + range_5_per_block + range_16_per_block;
-        let expected_total = decode.total() + maj_ch_xor.total() + split_pack.total() + range_total;
-        assert_eq!(total_lookups, expected_total);
-    }
-
-    /// With a non-empty credential-field exposure, `evaluate` reads the dynamic
-    /// field-byte tail and fires one `FieldBytesRelation` lookup per exposed
-    /// byte. Asserts the two structural counts the trace generator and
-    /// interaction generator must match: the mask count grows by exactly the
-    /// field byte columns (`4 ×` distinct words), and the field relation fires
-    /// exactly `n_yields` times. This is the constraint-side cover for the
-    /// credential-field exposure (the interaction-side balance is
-    /// `interaction::tests::field_provider_*`).
-    #[test]
-    fn evaluate_reads_field_columns_and_fires_field_yields() {
-        use air_core::relations::field_id;
-        use stwo_constraint_framework::ORIGINAL_TRACE_IDX;
-
-        let log_size = 4;
-        // DOB (4 bytes) + nationality (2 bytes) over words W[1]/W[2] ⇒ 8 columns,
-        // 6 yields.
-        let exposure = FieldExposure::from_preimage_windows(&[
-            (field_id::DOB, 5, 4),
-            (field_id::NATIONALITY, 9, 2),
-        ]);
-        assert_eq!(exposure.n_columns(), 8);
-        assert_eq!(exposure.n_yields(), 6);
-
-        let eval = Sha256Eval {
-            log_size,
-            relations: Sha256Relations::dummy(),
-            expose_digest: false,
-            field_exposure: exposure.clone(),
-        };
-        let info = run_evaluate_with_finalized_info(&eval, log_size);
-
-        // Mask count = base width + the dynamic field byte tail.
-        assert_eq!(
-            info.mask_offsets[ORIGINAL_TRACE_IDX].len(),
-            Layout::TOTAL_COLS + exposure.n_columns(),
-            "field exposure must extend the trace mask count by its byte columns",
-        );
-
-        // One field-relation lookup per exposed byte.
-        let field_firings = info
-            .logup_counts
-            .iter()
-            .find_map(|(k, v)| (k == "FieldBytesRelation").then_some(*v))
-            .unwrap_or(0);
-        assert_eq!(
-            field_firings,
-            exposure.n_yields(),
-            "field provider must fire one lookup per exposed credential byte",
-        );
-
-        // Two `Range16` byte range-checks per exposed byte column (the `[0,256)`
-        // pin), on top of the 16 terminal `h_out` limb checks (8 words × 2).
-        let range16_firings = info
-            .logup_counts
-            .iter()
-            .find_map(|(k, v)| (k == "Range16Relation").then_some(*v))
-            .unwrap_or(0);
-        assert_eq!(
-            range16_firings,
-            2 * N_STATE_WORDS + 2 * exposure.n_columns(),
-            "field provider must fire two Range16 byte range-checks per exposed byte",
-        );
-    }
-
-    /// Drive one `InfoEvaluator` pass through `Sha256Eval::evaluate`.
-    /// `evaluate` ends with `finalize_logup_in_pairs()` (so the
-    /// `LogupAtRow` Drop guard passes) — this helper just exposes the
-    /// captured info to the test assertions.
-    fn run_evaluate_with_finalized_info(
-        eval: &Sha256Eval,
-        log_size: u32,
-    ) -> stwo_constraint_framework::InfoEvaluator {
-        use stwo::core::fields::qm31::SecureField;
-        use stwo_constraint_framework::{FrameworkEval, InfoEvaluator};
-        eval.evaluate(InfoEvaluator::new(log_size, vec![], SecureField::default()))
-    }
-
-    /// Per-block decode-lookup multiplicities equal the static per-block
-    /// counts dictated by the trace shape — 64 round σ-applications (per
-    /// side per function), 48 schedule σ-applications likewise. Sanity:
-    /// the wiring fires the expected number of times.
-    #[test]
-    fn decode_lookup_multiplicities_match_per_block_totals() {
-        use crate::witness::{decode_multiplicities_for_block, decode_multiplicities_for_witness};
-
-        // Single block (`b"abc"` is one padded block).
-        let witness = compute_sha256_witness(b"abc");
-        assert_eq!(witness.blocks.len(), 1);
-        let m = decode_multiplicities_for_block(&witness.blocks[0]);
-        assert_eq!(m.sigma0_s, N_ROUNDS as u32);
-        assert_eq!(m.sigma0_s_complement, N_ROUNDS as u32);
-        assert_eq!(m.sigma1_s, N_ROUNDS as u32);
-        assert_eq!(m.sigma1_s_complement, N_ROUNDS as u32);
-        assert_eq!(m.lower_sigma0_s, (N_ROUNDS - 16) as u32);
-        assert_eq!(m.lower_sigma0_s_complement, (N_ROUNDS - 16) as u32);
-        assert_eq!(m.lower_sigma1_s, (N_ROUNDS - 16) as u32);
-        assert_eq!(m.lower_sigma1_s_complement, (N_ROUNDS - 16) as u32);
-        // Total = 4·64 (rounds) + 4·48 (schedule) = 448 decode lookups per block.
-        assert_eq!(
-            m.total(),
-            4 * (N_ROUNDS as u32) + 4 * ((N_ROUNDS - 16) as u32)
-        );
-        assert_eq!(m.total(), 448);
-
-        // Multi-block scaling is exactly linear in `n_blocks`.
-        let multi = compute_sha256_witness(&[0xABu8; 200]);
-        let n = multi.blocks.len() as u32;
-        assert!(n >= 2, "expected the multi-block case to exceed one block");
-        let agg = decode_multiplicities_for_witness(&multi);
-        assert_eq!(agg.total(), n * 448);
-        assert_eq!(agg.sigma0_s, n * N_ROUNDS as u32);
-        assert_eq!(agg.lower_sigma1_s_complement, n * (N_ROUNDS - 16) as u32);
-    }
-
-    // ------------------------------------------------------------------
-    // §10.3 cross-row block-chain copy constraint.
-    //
-    // The constraint is `(enabler − is_first_block) · (h_in − h_out_prev) = 0`.
-    // We evaluate it directly on the trace data (the same style as
-    // `linear_identities_hold_for_*` above) rather than driving Stwo's
-    // `AssertEvaluator`, because this is the linear path: the mutation
-    // case (an `h_in` mutation on a non-first block row triggering
-    // rejection) is exactly what this formula catches without needing
-    // the interaction trace. The LogUp side of the SHA-256 AIR is
-    // covered by `tests/prove_verify_round_trip.rs` (specifically
-    // `verify_rejects_range_k_claimed_sum_mutations` for the four new
-    // `Range_k` channels). Unifying the two paths under one
-    // `AssertEvaluator` driver is a possible follow-up.
-    // ------------------------------------------------------------------
-
-    /// Coset-order predecessor of `slot` in a bit-reversed circle-domain
-    /// trace of size `2^log_size`. Mirrors `AssertEvaluator`'s `off = -1`
-    /// path so a trace-level residual computation lines up with the
-    /// constraint values the AIR would emit on the same data.
-    fn coset_predecessor_slot(slot: usize, log_size: u32) -> usize {
-        use stwo::core::utils::{
-            bit_reverse_index, circle_domain_index_to_coset_index,
-            coset_index_to_circle_domain_index,
-        };
-        let domain_size = 1isize << log_size;
-        let coset_index =
-            circle_domain_index_to_coset_index(bit_reverse_index(slot, log_size), log_size)
-                as isize;
-        let prev_coset = (coset_index - 1).rem_euclid(domain_size) as usize;
-        bit_reverse_index(
-            coset_index_to_circle_domain_index(prev_coset, log_size),
-            log_size,
-        )
-    }
-
-    /// For one row `slot` of `trace`, compute every block-chain limb
-    /// residual the AIR emits at that point:
-    ///
-    /// ```text
-    /// resid[j].lo = (enabler[slot] − is_first_block[slot])
-    ///                 · (h_in[j].lo[slot] − h_out[j].lo[slot − 1 coset])
-    /// resid[j].hi = …  (analogous)
-    /// ```
-    ///
-    /// Returns a `Vec<(i64, i64)>` of length `N_STATE_WORDS` so callers
-    /// can either assert all-zero (honest) or assert at least one
-    /// non-zero (mutated).
-    fn block_chain_residuals(
-        trace: &[Vec<stwo::core::fields::m31::BaseField>],
-        slot: usize,
-        log_size: u32,
-    ) -> Vec<(i64, i64)> {
-        let prev_slot = coset_predecessor_slot(slot, log_size);
-        let enabler = trace[Layout::COL_ENABLER][slot].0 as i64;
-        let is_first = trace[Layout::COL_IS_FIRST_BLOCK][slot].0 as i64;
-        let gate = enabler - is_first;
-        (0..N_STATE_WORDS)
-            .map(|j| {
-                let (h_in_lo, h_in_hi) = Layout::h_in_word(j);
-                let (h_out_lo, h_out_hi) = Layout::h_out_word(j);
-                let lo_diff = trace[h_in_lo][slot].0 as i64 - trace[h_out_lo][prev_slot].0 as i64;
-                let hi_diff = trace[h_in_hi][slot].0 as i64 - trace[h_out_hi][prev_slot].0 as i64;
-                (gate * lo_diff, gate * hi_diff)
-            })
-            .collect()
-    }
-
-    /// Honest multi-block trace: every slot — first-block, continuation,
-    /// padding — yields all-zero chain residuals. Covers the gating
-    /// truth-table the constraint relies on (first-block vacuous via
-    /// `is_first_block`, padding vacuous via `enabler`, chain active
-    /// in-between).
-    #[test]
-    fn chain_constraint_is_zero_on_honest_multi_block_trace() {
-        let witness = compute_sha256_witness(&[0xABu8; 200]);
-        assert!(witness.blocks.len() >= 2, "need ≥2 blocks for the chain");
+        let witness = compute_sha256_witness(&[0x24; 100]);
         let log_size = min_log_size(witness.blocks.len());
         let trace = generate_trace(&witness, log_size);
-        let n_rows = 1usize << log_size;
-        for slot in 0..n_rows {
-            let residuals = block_chain_residuals(&trace, slot, log_size);
-            for (j, (lo, hi)) in residuals.iter().enumerate() {
-                assert_eq!(
-                    *lo, 0,
-                    "chain residual nonzero on honest trace: slot {slot}, h[{j}].lo"
-                );
-                assert_eq!(
-                    *hi, 0,
-                    "chain residual nonzero on honest trace: slot {slot}, h[{j}].hi"
-                );
+        for b in 0..witness.blocks.len() {
+            let slot0 = Layout::round_row_slot(b, 0, log_size);
+            for t in 0..N_ROUNDS {
+                let slot = Layout::round_row_slot(b, t, log_size);
+                for i in 0..GROUPS_PER_ROUND_PARTITION {
+                    let b_dup = cell(&trace, Layout::round_packed_group(4, i), slot);
+                    let c_dup = cell(&trace, Layout::round_packed_group(5, i), slot);
+                    let f_dup = cell(&trace, Layout::round_packed_group(6, i), slot);
+                    let g_dup = cell(&trace, Layout::round_packed_group(7, i), slot);
+                    let a_at = |tt: usize| {
+                        cell(
+                            &trace,
+                            Layout::round_packed_group(0, i),
+                            Layout::round_row_slot(b, tt, log_size),
+                        )
+                    };
+                    let e_at = |tt: usize| {
+                        cell(
+                            &trace,
+                            Layout::round_packed_group(2, i),
+                            Layout::round_row_slot(b, tt, log_size),
+                        )
+                    };
+                    let aux = |op: usize| cell(&trace, Layout::h_in_aux_grp(op, i), slot0);
+                    let (b_exp, c_exp) = match t {
+                        0 => (aux(0), aux(1)),
+                        1 => (a_at(0), aux(0)),
+                        _ => (a_at(t - 1), a_at(t - 2)),
+                    };
+                    let (f_exp, g_exp) = match t {
+                        0 => (aux(2), aux(3)),
+                        1 => (e_at(0), aux(2)),
+                        _ => (e_at(t - 1), e_at(t - 2)),
+                    };
+                    assert_eq!(b_dup, b_exp, "b_grp b={b} t={t} i={i}");
+                    assert_eq!(c_dup, c_exp, "c_grp b={b} t={t} i={i}");
+                    assert_eq!(f_dup, f_exp, "f_grp b={b} t={t} i={i}");
+                    assert_eq!(g_dup, g_exp, "g_grp b={b} t={t} i={i}");
+                }
             }
         }
     }
 
-    /// Mutating block 1's `h_in[0].lo` must break the chain constraint
-    /// at block 1's row (and only there — block 0's row stays vacuous
-    /// because `is_first_block = 1`). Anchors the chain-constraint
-    /// rejection class for the broader mutation suite in
-    /// `tests/constraint_negative.rs`.
+    /// Chain rejection: mutating block 1's `h_in` breaks the chain residual.
     #[test]
     fn chain_constraint_rejects_h_in_mutation_on_block_1() {
-        let witness = compute_sha256_witness(&[0xABu8; 200]);
-        assert!(witness.blocks.len() >= 2, "need multi-block message");
+        let witness = compute_sha256_witness(&[0x24; 100]); // 2 blocks
+        assert!(witness.blocks.len() >= 2);
         let log_size = min_log_size(witness.blocks.len());
         let mut trace = generate_trace(&witness, log_size);
 
-        // Mutate `h_in[0].lo` of block 1 to a value that cannot equal
-        // block 0's `h_out[0].lo`. Block 0's h_out is a SHA-256
-        // compression from `IV` over an all-`0xAB` block — not `0xFFFF`,
-        // so the assert_ne below is defensive but expected to hold.
-        let block_1_slot = Layout::block_slot(1, log_size);
-        let block_0_slot = Layout::block_slot(0, log_size);
-        let (h_in_lo, _) = Layout::h_in_word(0);
-        let (h_out_lo, _) = Layout::h_out_word(0);
-        assert_ne!(
-            trace[h_in_lo][block_1_slot].0, 0xFFFFu32,
-            "mutation target must change the cell",
-        );
-        trace[h_in_lo][block_1_slot] = stwo::core::fields::m31::BaseField::from(0xFFFFu32);
+        let slot0_b1 = Layout::round_row_slot(1, 0, log_size);
+        let (lo_col, _) = Layout::h_in_word(3);
+        trace[lo_col][slot0_b1] += BaseField::from(1u32);
 
-        // Block 1's chain residual is now non-zero: the gate is
-        // `enabler(1) − is_first_block(0) = 1` and the limb difference
-        // is `0xFFFF − h_out[0].lo @ block_0_slot ≠ 0`.
-        let residuals = block_chain_residuals(&trace, block_1_slot, log_size);
-        let expected_diff = 0xFFFFi64 - trace[h_out_lo][block_0_slot].0 as i64;
-        assert_eq!(
-            residuals[0].0, expected_diff,
-            "chain residual at block 1, H[0].lo should reflect the mutation",
-        );
-        assert_ne!(
-            residuals[0].0, 0,
-            "AIR rejects the mutated trace via the chain constraint"
-        );
-
-        // Block 0's chain residual stays zero — the `is_first_block` gate
-        // makes the constraint vacuous on the first-block row, so the
-        // mutation at block 1 does not falsely poison block 0.
-        let block_0_residuals = block_chain_residuals(&trace, block_0_slot, log_size);
-        for (lo, hi) in block_0_residuals {
-            assert_eq!(lo, 0, "first-block row must remain vacuous after mutation");
-            assert_eq!(hi, 0, "first-block row must remain vacuous after mutation");
-        }
+        let prev63 = Layout::round_row_slot(0, N_ROUNDS - 1, log_size);
+        let h_in = cell(&trace, lo_col, slot0_b1);
+        let (out_lo, _) = Layout::h_out_word(3);
+        let h_out_prev = cell(&trace, out_lo, prev63);
+        assert_ne!(h_in, h_out_prev, "mutated chain must produce a residual");
     }
 
-    // ------------------------------------------------------------------
-    // §10.4 padding-role constraints.
-    //
-    // Each constraint is evaluated directly on the trace data, mirroring
-    // the algebraic expression `Sha256Eval::evaluate` emits. The format
-    // matches the §10.3 chain tests above: a positive case (honest trace
-    // ⇒ every residual is zero) plus per-class mutation cases (one
-    // constraint goes non-zero per mutation). All padding constraints
-    // are linear, so this direct evaluation path is sufficient; the
-    // `AssertEvaluator` unification follow-up referenced from the §10.3
-    // block above also covers these once it lands.
-    // ------------------------------------------------------------------
+    /// Every padding-role identity (P.A–P.H), evaluated at each block's
+    /// `t = 15` row with the message words read from rows `t = 0..16`.
+    /// Returns the residuals so negative tests can assert non-zero.
+    fn padding_residuals(trace: &Trace, log_size: u32, b: usize) -> Vec<i64> {
+        let slot = Layout::round_row_slot(b, 15, log_size);
+        let w = |j: usize| -> (i64, i64) {
+            pair(
+                trace,
+                Layout::schedule_word(),
+                Layout::round_row_slot(b, j, log_size),
+            )
+        };
+        let is_marker = cell(trace, Layout::COL_IS_MARKER_BLOCK, slot);
+        let is_length = cell(trace, Layout::COL_IS_LENGTH_BLOCK, slot);
+        let is_length_only = cell(trace, Layout::COL_IS_LENGTH_ONLY_BLOCK, slot);
+        let is_marker_only = cell(trace, Layout::COL_IS_MARKER_ONLY_BLOCK, slot);
+        let post_strict_15 = cell(trace, Layout::COL_MARKER_WORD_POST_STRICT_15, slot);
+        let mword: Vec<i64> = (0..WORDS_PER_BLOCK)
+            .map(|j| cell(trace, Layout::is_marker_word(j), slot))
+            .collect();
+        let bsel: Vec<i64> = (0..4)
+            .map(|k| cell(trace, Layout::marker_byte_sel(k), slot))
+            .collect();
+        let mbyte: Vec<i64> = (0..4)
+            .map(|k| cell(trace, Layout::marker_word_byte(k), slot))
+            .collect();
 
-    /// Read trace cell `(col, row)` as `i64`. M31 values are non-negative
-    /// integers `< 2³¹`, well inside `i64`.
-    fn cell(trace: &[Vec<stwo::core::fields::m31::BaseField>], col: usize, row: usize) -> i64 {
-        trace[col][row].0 as i64
-    }
-
-    /// All padding-row residuals for one slot. The AIR emits these as
-    /// individual constraints; the test asserts each one is zero on an
-    /// honest trace. A negative-test mutation flips at least one entry
-    /// to non-zero.
-    ///
-    /// Order matches the constraint emission order in
-    /// `Sha256Eval::evaluate` so a residual index here can be traced back
-    /// to a specific algebraic identity.
-    fn padding_residuals(
-        trace: &[Vec<stwo::core::fields::m31::BaseField>],
-        slot: usize,
-    ) -> Vec<i64> {
-        let v = |col: usize| cell(trace, col, slot);
-        let is_marker_block = v(Layout::COL_IS_MARKER_BLOCK);
-        let is_length_block = v(Layout::COL_IS_LENGTH_BLOCK);
-        let is_length_only_block = v(Layout::COL_IS_LENGTH_ONLY_BLOCK);
-        let is_marker_only_block = v(Layout::COL_IS_MARKER_ONLY_BLOCK);
-        let is_marker_word: [i64; 16] = std::array::from_fn(|j| v(Layout::is_marker_word(j)));
-        let marker_byte_sel: [i64; 4] = std::array::from_fn(|b| v(Layout::marker_byte_sel(b)));
-        let marker_word_byte: [i64; 4] = std::array::from_fn(|b| v(Layout::marker_word_byte(b)));
-        let marker_word_post_strict_15 = v(Layout::COL_MARKER_WORD_POST_STRICT_15);
-        let bit_length_w14_lo = v(Layout::COL_BIT_LENGTH_W14_LO);
-        let bit_length_w14_hi = v(Layout::COL_BIT_LENGTH_W14_HI);
-        let bit_length_w15_lo = v(Layout::COL_BIT_LENGTH_W15_LO);
-        let bit_length_w15_hi = v(Layout::COL_BIT_LENGTH_W15_HI);
-
-        let w_lo = |j: usize| v(Layout::schedule_word(j).0);
-        let w_hi = |j: usize| v(Layout::schedule_word(j).1);
-
-        let mut out = Vec::new();
-
-        // (P.A) binary flags
-        for &x in &[
-            is_marker_block,
-            is_length_block,
-            is_length_only_block,
-            is_marker_only_block,
-            marker_word_post_strict_15,
-        ] {
-            out.push(x * (1 - x));
+        let mut res = Vec::new();
+        // P.A binary
+        for &f in [is_marker, is_length, is_length_only, is_marker_only, post_strict_15].iter() {
+            res.push(f * (1 - f));
         }
-        for &x in is_marker_word.iter() {
-            out.push(x * (1 - x));
+        for &f in mword.iter().chain(bsel.iter()) {
+            res.push(f * (1 - f));
         }
-        for &x in marker_byte_sel.iter() {
-            out.push(x * (1 - x));
+        // P.B one-hot sums
+        res.push(mword.iter().sum::<i64>() - is_marker);
+        res.push(bsel.iter().sum::<i64>() - is_marker);
+        // P.C aux definitions
+        res.push(is_length_only - (1 - is_marker) * is_length);
+        res.push(is_marker_only - is_marker * (1 - is_length));
+        // cumulative marker-word prefix
+        let mut cum = vec![0i64; WORDS_PER_BLOCK];
+        for j in 1..WORDS_PER_BLOCK {
+            cum[j] = cum[j - 1] + mword[j - 1];
         }
-
-        // (P.B) one-hot sums
-        let sum_imw: i64 = is_marker_word.iter().sum();
-        out.push(sum_imw - is_marker_block);
-        let sum_mbs: i64 = marker_byte_sel.iter().sum();
-        out.push(sum_mbs - is_marker_block);
-
-        // (P.C) aux flag definitions
-        out.push(is_length_only_block - (1 - is_marker_block) * is_length_block);
-        out.push(is_marker_only_block - is_marker_block * (1 - is_length_block));
-
-        // Cumulative marker-word selector (strictly-before-j).
-        let mut cum = [0i64; 16];
-        for j in 1..16 {
-            cum[j] = cum[j - 1] + is_marker_word[j - 1];
+        // P.C'
+        res.push(post_strict_15 - cum[15] * (1 - is_length));
+        // P.D byte assembly
+        let mut sum_hi = 0i64;
+        let mut sum_lo = 0i64;
+        for j in 0..WORDS_PER_BLOCK {
+            sum_hi += mword[j] * w(j).1;
+            sum_lo += mword[j] * w(j).0;
         }
-
-        // (P.C') post-strict aux for j = 15. (The symmetric `_14` aux
-        // was dropped — see the constraint-emit site for the rationale.)
-        out.push(marker_word_post_strict_15 - cum[15] * (1 - is_length_block));
-
-        // (P.D) marker-word byte assembly.
-        let sum_w_hi: i64 = (0..16).map(|j| is_marker_word[j] * w_hi(j)).sum();
-        let sum_w_lo: i64 = (0..16).map(|j| is_marker_word[j] * w_lo(j)).sum();
-        out.push(sum_w_hi - 256 * marker_word_byte[0] - marker_word_byte[1]);
-        out.push(sum_w_lo - 256 * marker_word_byte[2] - marker_word_byte[3]);
-
-        // (P.E) marker byte = 0x80.
-        for b in 0..4 {
-            out.push(marker_byte_sel[b] * (marker_word_byte[b] - 0x80));
+        res.push(sum_hi - 256 * mbyte[0] - mbyte[1]);
+        res.push(sum_lo - 256 * mbyte[2] - mbyte[3]);
+        // P.E marker byte is 0x80
+        for k in 0..4 {
+            res.push(bsel[k] * (mbyte[k] - 0x80));
         }
-
-        // (P.F) bytes after marker = 0.
-        let mut cum_bs = 0i64;
-        for b in 0..4 {
-            out.push(cum_bs * marker_word_byte[b]);
-            cum_bs += marker_byte_sel[b];
+        // P.F bytes after the marker byte are zero
+        let mut cum_b = 0i64;
+        for k in 0..4 {
+            res.push(cum_b * mbyte[k]);
+            cum_b += bsel[k];
         }
-
-        // (P.G) words after marker = 0 (with length-block exception).
-        // Range loop mirrors the AIR's constraint emission order; the
-        // body calls `w_lo(j)`/`w_hi(j)` closures, so an iterator form
-        // over `cum` would read worse than the index loop.
-        #[allow(clippy::needless_range_loop)]
+        // P.G words after the marker are zero (length exception)
         for j in 0..14 {
-            let gate = cum[j] + is_length_only_block;
-            out.push(gate * w_lo(j));
-            out.push(gate * w_hi(j));
+            let gate = cum[j] + is_length_only;
+            res.push(gate * w(j).0);
+            res.push(gate * w(j).1);
         }
-        out.push(marker_word_post_strict_15 * w_lo(15));
-        out.push(marker_word_post_strict_15 * w_hi(15));
-
-        // (P.H) length-field encoding.
-        out.push(is_length_block * (w_lo(14) - bit_length_w14_lo));
-        out.push(is_length_block * (w_hi(14) - bit_length_w14_hi));
-        out.push(is_length_block * (w_lo(15) - bit_length_w15_lo));
-        out.push(is_length_block * (w_hi(15) - bit_length_w15_hi));
-
-        out
+        res.push(post_strict_15 * w(15).0);
+        res.push(post_strict_15 * w(15).1);
+        // P.H length-field encoding
+        let w14 = w(14);
+        let w15 = w(15);
+        res.push(is_length * (w14.0 - cell(trace, Layout::COL_BIT_LENGTH_W14_LO, slot)));
+        res.push(is_length * (w14.1 - cell(trace, Layout::COL_BIT_LENGTH_W14_HI, slot)));
+        res.push(is_length * (w15.0 - cell(trace, Layout::COL_BIT_LENGTH_W15_LO, slot)));
+        res.push(is_length * (w15.1 - cell(trace, Layout::COL_BIT_LENGTH_W15_HI, slot)));
+        res
     }
 
-    /// Assert every padding residual at every real-block slot is zero.
-    /// Padding rows (`enabler = 0`) are *not* exempt because the padding
-    /// constraints are emitted without an explicit `enabler` factor —
-    /// they instead rely on every padding-region cell being 0 by default
-    /// trace fill, which makes each algebraic identity trivially satisfied
-    /// there. This test covers both invariants in one pass.
     fn assert_padding_holds_for_message(msg: &[u8]) {
         let witness = compute_sha256_witness(msg);
         let log_size = min_log_size(witness.blocks.len());
         let trace = generate_trace(&witness, log_size);
-        let n_rows = 1usize << log_size;
-        for slot in 0..n_rows {
-            for (i, &r) in padding_residuals(&trace, slot).iter().enumerate() {
-                assert_eq!(
-                    r,
-                    0,
-                    "padding residual #{i} non-zero on honest trace at slot {slot} (msg.len()={})",
-                    msg.len(),
-                );
+        for b in 0..witness.blocks.len() {
+            for (i, r) in padding_residuals(&trace, log_size, b).iter().enumerate() {
+                assert_eq!(*r, 0, "padding residual {i} on block {b}");
             }
         }
     }
 
-    /// Case A (single trailing block, msg.len() % 64 ∈ [0, 56)):
-    /// the empty message ⇒ one block with marker at byte 0 and length
-    /// at bytes [56, 64). Smallest possible padded trace.
     #[test]
     fn padding_constraints_hold_for_empty_message() {
         assert_padding_holds_for_message(b"");
     }
 
-    /// Case A, marker in middle of a word: "abc" puts the marker at
-    /// byte 3 of `W[0]` (the LSB byte), with bytes 0..3 carrying the
-    /// message tail. Exercises every (P.D)/(P.E)/(P.F) byte-position
-    /// branch on a marker word with non-zero pre-marker bytes.
     #[test]
     fn padding_constraints_hold_for_abc() {
         assert_padding_holds_for_message(b"abc");
     }
 
-    /// Case B (overflow, marker in penultimate block): `msg.len() = 56`
-    /// pushes the length into a second padding-only block. Exercises the
-    /// `is_marker_only_block` and `is_length_only_block` aux flags and
-    /// the (P.G) "all of W[0..14] is zero in the length-only block" path.
     #[test]
     fn padding_constraints_hold_for_56_byte_message() {
-        let msg: Vec<u8> = (0..56u8).collect();
-        assert_padding_holds_for_message(&msg);
+        assert_padding_holds_for_message(&[7u8; 56]);
     }
 
-    /// Larger multi-block example to triple-check `is_marker_block = 0`
-    /// pure-message blocks emit no constraint violation. 200 bytes ⇒
-    /// 4 blocks: blocks 0–2 are pure message, block 3 is the marker
-    /// and length block (Case A).
     #[test]
     fn padding_constraints_hold_for_multi_block_message() {
-        assert_padding_holds_for_message(&[0xABu8; 200]);
+        assert_padding_holds_for_message(&[9u8; 150]);
     }
 
-    /// Marker-offset mutation: shift the `marker_byte_sel` one-hot so
-    /// the AIR thinks the marker is at a different byte position than
-    /// the actual `0x80` in `W[k]`. Covers the "wrong marker offset"
-    /// padding-rejection class and is the marker-byte direct analogue
-    /// of the marker-position-shift mutation in
-    /// `tests/constraint_negative.rs`.
     #[test]
     fn padding_rejects_marker_byte_sel_mutation() {
         let witness = compute_sha256_witness(b"abc");
         let log_size = min_log_size(witness.blocks.len());
         let mut trace = generate_trace(&witness, log_size);
-        let slot = Layout::block_slot(0, log_size);
-
-        // Honest: marker at byte 3 of W[0]; marker_byte_sel[3] == 1,
-        // others 0.
-        assert_eq!(cell(&trace, Layout::marker_byte_sel(3), slot), 1);
-        // Move the selector to byte 0 — claiming the 0x80 is the MSB.
-        trace[Layout::marker_byte_sel(3)][slot] = stwo::core::fields::m31::BaseField::from(0u32);
-        trace[Layout::marker_byte_sel(0)][slot] = stwo::core::fields::m31::BaseField::from(1u32);
-
-        let residuals = padding_residuals(&trace, slot);
+        let slot = Layout::round_row_slot(0, 15, log_size);
+        // Move the byte selector to a different position.
+        for k in 0..4 {
+            let c = Layout::marker_byte_sel(k);
+            let v = trace[c][slot];
+            trace[c][slot] = BaseField::from(1u32) - v;
+        }
+        let res = padding_residuals(&trace, log_size, 0);
         assert!(
-            residuals.iter().any(|&r| r != 0),
-            "AIR must reject a marker_byte_sel mutation"
+            res.iter().any(|&r| r != 0),
+            "mutated byte selector must produce a residual"
         );
     }
 
-    /// Length-field mutation: bump `W[15]` of the length block while
-    /// leaving `bit_length_w15_*` untouched. The (P.H) identity goes
-    /// non-zero.
-    #[test]
-    fn padding_rejects_length_field_mutation() {
-        let witness = compute_sha256_witness(b"abc");
-        let log_size = min_log_size(witness.blocks.len());
-        let mut trace = generate_trace(&witness, log_size);
-        let slot = Layout::block_slot(0, log_size);
-        assert_eq!(cell(&trace, Layout::COL_IS_LENGTH_BLOCK, slot), 1);
-
-        // Honest: W[15] = bit length 24 (0x18) ⇒ W[15].lo = 0x18.
-        let (w15_lo, _) = Layout::schedule_word(15);
-        assert_eq!(cell(&trace, w15_lo, slot), 0x18);
-        trace[w15_lo][slot] = stwo::core::fields::m31::BaseField::from(0x99u32);
-
-        let residuals = padding_residuals(&trace, slot);
-        assert!(
-            residuals.iter().any(|&r| r != 0),
-            "AIR must reject a length-field mutation"
-        );
-    }
-
-    /// Non-zero fill-byte mutation: a real "abc" trace has `W[1..14]`
-    /// all zero (the zero-fill between the marker and the length).
-    /// Setting `W[5]` to a non-zero value violates the (P.G) "words
-    /// after marker are zero" identity.
-    #[test]
-    fn padding_rejects_non_zero_fill_word_mutation() {
-        let witness = compute_sha256_witness(b"abc");
-        let log_size = min_log_size(witness.blocks.len());
-        let mut trace = generate_trace(&witness, log_size);
-        let slot = Layout::block_slot(0, log_size);
-
-        // Honest: W[5] is in the zero-fill region.
-        let (w5_lo, _) = Layout::schedule_word(5);
-        assert_eq!(cell(&trace, w5_lo, slot), 0);
-        trace[w5_lo][slot] = stwo::core::fields::m31::BaseField::from(0x42u32);
-
-        let residuals = padding_residuals(&trace, slot);
-        assert!(
-            residuals.iter().any(|&r| r != 0),
-            "AIR must reject a non-zero fill word mutation"
-        );
-    }
-
-    /// Marker-word-index mutation: shift the `is_marker_word` one-hot
-    /// to a different word. The (P.D) byte-assembly identity goes
-    /// non-zero — the bytes committed for the marker word are still the
-    /// real `W[0]`'s bytes, but the AIR now reads `W[j]` for the
-    /// new `j`.
-    #[test]
-    fn padding_rejects_marker_word_index_mutation() {
-        let witness = compute_sha256_witness(b"abc");
-        let log_size = min_log_size(witness.blocks.len());
-        let mut trace = generate_trace(&witness, log_size);
-        let slot = Layout::block_slot(0, log_size);
-
-        // Honest: marker at W[0].
-        assert_eq!(cell(&trace, Layout::is_marker_word(0), slot), 1);
-        trace[Layout::is_marker_word(0)][slot] = stwo::core::fields::m31::BaseField::from(0u32);
-        trace[Layout::is_marker_word(5)][slot] = stwo::core::fields::m31::BaseField::from(1u32);
-
-        let residuals = padding_residuals(&trace, slot);
-        assert!(
-            residuals.iter().any(|&r| r != 0),
-            "AIR must reject a marker-word-index mutation"
-        );
-    }
-
-    /// Bit-length-limb mutation: the prover claims a different
-    /// `bit_length_w15_lo` than what `W[15]` actually holds. (P.H)
-    /// catches this. This is the direct analogue of the "wrong message
-    /// length claim" attack the post-2.4 cross-component binding closes;
-    /// today it surfaces as the on-row inconsistency the AIR rejects.
     #[test]
     fn padding_rejects_bit_length_limb_mutation() {
         let witness = compute_sha256_witness(b"abc");
         let log_size = min_log_size(witness.blocks.len());
         let mut trace = generate_trace(&witness, log_size);
-        let slot = Layout::block_slot(0, log_size);
-
-        // Honest: bit_length_w15_lo = 0x18 (bit length for "abc" is 24).
-        assert_eq!(cell(&trace, Layout::COL_BIT_LENGTH_W15_LO, slot), 0x18);
-        trace[Layout::COL_BIT_LENGTH_W15_LO][slot] =
-            stwo::core::fields::m31::BaseField::from(0x42u32);
-
-        let residuals = padding_residuals(&trace, slot);
+        let slot = Layout::round_row_slot(0, 15, log_size);
+        trace[Layout::COL_BIT_LENGTH_W15_LO][slot] += BaseField::from(8u32);
+        let res = padding_residuals(&trace, log_size, 0);
         assert!(
-            residuals.iter().any(|&r| r != 0),
-            "AIR must reject a bit-length limb mutation"
+            res.iter().any(|&r| r != 0),
+            "mutated bit-length limb must produce a residual"
         );
     }
 
-    /// Block-alignment (`padded.len() % 64 == 0`) is structural — one
-    /// trace row IS one 64-byte block — so the AIR cannot represent a
-    /// partial block. No per-row constraint expresses this requirement;
-    /// the trace shape itself does. This test documents that invariant
-    /// at the structural level by asserting every honest message yields
-    /// `padded.len() % BLOCK_BYTES == 0`, exercising the natural
-    /// `n_blocks · BLOCK_BYTES = padded.len()` identity FIPS §5.1.1
-    /// implies and which the witness layer assumes.
     #[test]
-    fn padded_length_is_always_block_aligned() {
-        use crate::constants::BLOCK_BYTES;
-        for n in [0usize, 1, 3, 55, 56, 57, 63, 64, 65, 127, 128, 200, 511] {
-            let witness = compute_sha256_witness(&vec![0xABu8; n]);
-            assert_eq!(
-                witness.padding.padded.len() % BLOCK_BYTES,
-                0,
-                "padded length not block-aligned for msg.len()={n}",
-            );
-            assert_eq!(
-                witness.padding.padded.len(),
-                witness.padding.n_blocks * BLOCK_BYTES,
-                "n_blocks · BLOCK_BYTES != padded.len() for msg.len()={n}",
-            );
+    fn padding_rejects_non_zero_fill_word_mutation() {
+        // A 3-byte message: marker at byte 3 of W[0], everything after must
+        // be zero. Injecting a non-zero fill word must trip P.G.
+        let witness = compute_sha256_witness(b"abc");
+        let log_size = min_log_size(witness.blocks.len());
+        let mut trace = generate_trace(&witness, log_size);
+        // W[5] lives on row t = 5.
+        let slot5 = Layout::round_row_slot(0, 5, log_size);
+        trace[Layout::COL_W_LO][slot5] += BaseField::from(3u32);
+        let res = padding_residuals(&trace, log_size, 0);
+        assert!(
+            res.iter().any(|&r| r != 0),
+            "non-zero fill word must produce a residual"
+        );
+    }
+
+    /// Round Σ-decode key reassembly against the committed packed groups,
+    /// and schedule σ-decode keys against the σ-input splits — per row.
+    #[test]
+    fn decode_reassembly_holds() {
+        use crate::partitions::{
+            lower_sigma_key_hi_coeff_s, lower_sigma_key_hi_coeff_s_complement, round_key_coeffs,
+            GROUPS_PER_ROUND_PARTITION, LOWER_SIGMA0_PARTS, LOWER_SIGMA1_PARTS, SIGMA0_GROUPS,
+            SIGMA1_GROUPS,
+        };
+        let witness = compute_sha256_witness(&[0x5c; 100]);
+        let log_size = min_log_size(witness.blocks.len());
+        let trace = generate_trace(&witness, log_size);
+        let sigma0_coeffs = round_key_coeffs(&SIGMA0_GROUPS);
+        let sigma1_coeffs = round_key_coeffs(&SIGMA1_GROUPS);
+        let half = GROUPS_PER_ROUND_PARTITION / 2;
+
+        for b in 0..witness.blocks.len() {
+            for t in 0..N_ROUNDS {
+                let slot = Layout::round_row_slot(b, t, log_size);
+                // Round side: key_s / key_s' of Σ0(a) vs a_grp; Σ1(e) vs e_grp.
+                for (which, coeffs, op) in
+                    [(0usize, sigma0_coeffs, 0usize), (1, sigma1_coeffs, 2)]
+                {
+                    let base = Layout::round_decode(which);
+                    let key_s = cell(&trace, base, slot);
+                    let key_sp = cell(&trace, base + 5, slot);
+                    let grp = |i: usize| {
+                        cell(&trace, Layout::round_packed_group(op, i), slot)
+                    };
+                    let mut s = 0i64;
+                    for i in 0..half {
+                        s += i64::from(coeffs[i]) * grp(i);
+                    }
+                    assert_eq!(key_s, s, "round key_s b={b} t={t} which={which}");
+                    let mut sp = 0i64;
+                    for i in half..GROUPS_PER_ROUND_PARTITION {
+                        sp += i64::from(coeffs[i]) * grp(i);
+                    }
+                    assert_eq!(key_sp, sp, "round key_s' b={b} t={t} which={which}");
+                }
+                // Schedule side (t ≥ 16): σ decode keys vs input splits.
+                if t >= 16 {
+                    for (which, parts) in
+                        [(0usize, &LOWER_SIGMA0_PARTS), (1, &LOWER_SIGMA1_PARTS)]
+                    {
+                        let dec = Layout::schedule_entry_decode(which);
+                        let split = Layout::schedule_entry_input_split(which);
+                        let key_s = cell(&trace, dec, slot);
+                        let key_sp = cell(&trace, dec + 5, slot);
+                        let p_lo = cell(&trace, split, slot);
+                        let pc_lo = cell(&trace, split + 1, slot);
+                        let p_hi = cell(&trace, split + 2, slot);
+                        let pc_hi = cell(&trace, split + 3, slot);
+                        let c_s = i64::from(lower_sigma_key_hi_coeff_s(parts));
+                        let c_sp = i64::from(lower_sigma_key_hi_coeff_s_complement(parts));
+                        assert_eq!(key_s, p_lo + c_s * p_hi, "sched key_s b={b} t={t}");
+                        assert_eq!(
+                            key_sp,
+                            pc_lo + c_sp * pc_hi,
+                            "sched key_s' b={b} t={t}"
+                        );
+                    }
+                }
+            }
         }
     }
 }

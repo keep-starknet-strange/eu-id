@@ -77,6 +77,8 @@
 pub mod credential;
 pub mod fixtures;
 pub mod generator;
+#[cfg(test)]
+mod shape_dump;
 
 pub use credential::Credential;
 pub use generator::{IssuerKey, PipelineWitness, Policy, SignedCredential};

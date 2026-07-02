@@ -36,7 +36,7 @@ use crate::components::{
 };
 use crate::constraints::Sha256Eval;
 use crate::field_exposure::FieldExposure;
-use crate::interaction::{generate_interaction_trace, sha_lookups_per_block, InteractionClaim};
+use crate::interaction::{generate_interaction_trace, sha_lookups_per_row, InteractionClaim};
 use crate::multiplicities::{
     decode_multiplicities, maj_ch_multiplicities, range_k_multiplicities,
     round_split_pack_multiplicities, sigma_split_pack_multiplicities, xor_8_multiplicities,
@@ -650,13 +650,13 @@ fn interaction_trace_log_sizes(
     // base-field columns at the same log_size.
     const EXT: usize = SECURE_EXTENSION_DEGREE;
 
-    // Sha256Eval consumer: `sha_lookups_per_block(expose_digest, field_exposure)`
-    // lookups per block (W=6: 3720, plus the digest yield when that provider is
-    // on, plus the field provider's two `Range16` byte range-checks per exposed
-    // byte column and one yield per exposed window byte) → `ceil(n/2)` paired
-    // columns. Sized at log_n_rows. See `interaction::sha256_interaction` for the
-    // per-block lookup-count breakdown.
-    let sha_cols = num_paired_cols(sha_lookups_per_block(expose_digest, field_exposure));
+    // Sha256Eval consumer: `sha_lookups_per_row(expose_digest, field_exposure)`
+    // lookup sites per row (W=6: 106, plus the digest yield when that provider
+    // is on, plus the field provider's two `Range16` byte range-checks per
+    // exposed byte column and one yield per exposed window byte) → `ceil(n/2)`
+    // paired columns. Sized at log_n_rows. See `interaction::sha256_interaction`
+    // for the per-row site breakdown.
+    let sha_cols = num_paired_cols(sha_lookups_per_row(expose_digest, field_exposure));
     out.extend(std::iter::repeat_n(log_n_rows, sha_cols * EXT));
     // 8 decode producers: 1 lookup each → 1 column each at log_size 16.
     for _ in DECODE_TABLES {

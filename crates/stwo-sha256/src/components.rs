@@ -176,6 +176,28 @@ pub fn is_first_row_column_id() -> PreProcessedColumnId {
     id("is_first_row")
 }
 
+/// IDs of the 9 round-cyclic preprocessed columns of the rotated
+/// one-row-per-round layout, all at the main trace's `log_n_rows` and all
+/// functions of `t = natural_row mod 64` alone: `k_lo`/`k_hi` (the round
+/// constant `K[t]`'s 16-bit limbs), the `is_round_{0,1,2,3,15,63}`
+/// indicators (working-state boundary selects, padding-row gate,
+/// finalization gate), and `is_schedule` (`t ≥ 16` — the schedule-family
+/// gate). Emission order here matches
+/// `crate::preprocessed::generate_preprocessed_trace`.
+pub fn round_cyclic_column_ids() -> [PreProcessedColumnId; 9] {
+    [
+        id("k_lo"),
+        id("k_hi"),
+        id("is_round_0"),
+        id("is_round_1"),
+        id("is_round_2"),
+        id("is_round_3"),
+        id("is_round_15"),
+        id("is_round_63"),
+        id("is_schedule"),
+    ]
+}
+
 /// IDs of the 5 preprocessed columns of one decode table.
 /// Order matches `crate::relations::SIGMA_DECODE_REL_SIZE`'s row shape:
 /// `(key, o_main_lo, o_main_hi, o2_partial_lo, o2_partial_hi)`.
@@ -660,6 +682,10 @@ pub fn all_preprocessed_column_ids() -> Vec<PreProcessedColumnId> {
     // producer component), so it lives at the tail of the ID list and is
     // not allocated to any of the 22 producer components.
     out.push(is_first_row_column_id());
+    // 9 round-cyclic columns of the rotated layout (K limbs + round
+    // indicators + schedule gate), also consumer-read via
+    // `get_preprocessed_column` and sized to the main trace.
+    out.extend(round_cyclic_column_ids());
     out
 }
 

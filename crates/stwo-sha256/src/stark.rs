@@ -39,7 +39,7 @@ use crate::witness::compute_sha256_witness;
 #[derive(Clone, Debug)]
 pub struct ProverConfig {
     /// `log2` of the SHA-256 component's trace row count. Each row is one
-    /// padded block.
+    /// round of one padded block (64 rows per block).
     ///
     /// **Must satisfy `log_n_rows ≥ trace::min_log_size(witness.blocks.len())`**
     /// or [`prove_sha256`] returns [`Sha256ProveError::TraceTooSmall`]. The
@@ -60,9 +60,9 @@ pub struct ProverConfig {
     /// without re-generating the preprocessed tables — useful when
     /// batching variable-length messages into a single component.
     ///
-    /// **`Default` sets this to `LOG_N_LANES = 4`** — the SIMD floor,
-    /// fitting at most 16 padded blocks (~1 KiB of message). Larger
-    /// messages must override; see the recipe above.
+    /// **`Default` sets this to `min_log_size(1) = 7`** — one padded block
+    /// (64 rows) plus padding. Larger messages must override; see the
+    /// recipe above.
     pub log_n_rows: u32,
     /// Group width `W` for the packed `Maj`/`Ch` table. The default is
     /// `MAX_ROUND_GROUP_BITS = 6`: the round partitions subdivide their two
@@ -80,7 +80,7 @@ pub struct ProverConfig {
 impl Default for ProverConfig {
     fn default() -> Self {
         Self {
-            log_n_rows: LOG_N_LANES, // = 4
+            log_n_rows: crate::trace::min_log_size(1), // = 7: one block + padding
             group_width: crate::partitions::MAX_ROUND_GROUP_BITS,
             pcs_config: PcsConfig::default(),
         }

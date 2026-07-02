@@ -64,23 +64,33 @@ use crate::tables::{
 use crate::trace::{h_out_digest_bytes, Layout};
 use crate::types::Sha256Witness;
 
-/// Consumer-side lookups the main `Sha256Eval` fires per block, **excluding**
-/// the optional digest yield. Breakdown (W=6), matching the firing order in
-/// [`write_block_lookups`] and `crate::constraints::Sha256Eval::evaluate`:
-///   8 (h_in aux split-pack) + 48·18 (schedule entries) + 64·44 (rounds)
-///   + 16 (finalization carries) + 16 (terminal `Range_16`) = 3720.
-pub const SHA_LOOKUPS_PER_BLOCK_BASE: usize = 3720;
+/// Lookup sites the main `Sha256Eval` fires per **row**, **excluding** the
+/// optional digest yield. Breakdown (W=6), matching the firing order in
+/// [`write_round_row_lookups`] and `crate::constraints::Sha256Eval::evaluate`:
+///   8 (h_in aux split-pack, t = 0 rows)
+/// + 18 (schedule family: 2 σ-decode wirings = 12, 2 σ-input splits = 4,
+///       Range_4 carry pair = 2; t ≥ 16 rows)
+/// + 48 (round family: 2 Σ-decode wirings = 12, 8 Maj + 8 Ch = 16,
+///       round split-packs = 12 — the `a`/`e` operands each have two
+///       complementary-gated sites (t ≥ 1 vs t = 0) so tuples read
+///       committed cells — plus 4 carry pairs = 8; every row)
+/// + 16 (finalization carries, t = 63 rows)
+/// + 16 (terminal `Range_16`, t = 63 rows)
+/// = 106. A site that does not fire on a given row holds the neutral
+/// fraction `(0, 1)`.
+pub const SHA_LOOKUPS_PER_ROW_BASE: usize = 106;
 
-/// Total consumer-side lookups `Sha256Eval` fires per block. The digest
-/// provider adds exactly one width-32 yield when `expose_digest` is set;
-/// the credential-field provider adds, per exposed byte column, two
-/// `Range16` byte range-checks (the `[0, 256)` pin) plus one width-3 yield per
-/// exposed window byte — i.e. `2·n_columns + n_yields`. All are zero for the
-/// standalone AIR. Both the interaction generator here and `crate::air`'s
-/// interaction-column sizing read this so the two never drift.
+/// Total lookup sites `Sha256Eval` fires per row. The digest provider adds
+/// exactly one width-32 yield site when `expose_digest` is set; the
+/// credential-field provider adds, per exposed byte column, two `Range16`
+/// byte range-checks (the `[0, 256)` pin) plus one width-3 yield per exposed
+/// window byte — i.e. `2·n_columns + n_yields` (all firing on `t = 15` rows,
+/// gated to block 0). All are zero for the standalone AIR. Both the
+/// interaction generator here and `crate::air`'s interaction-column sizing
+/// read this so the two never drift.
 #[inline]
-pub fn sha_lookups_per_block(expose_digest: bool, field_exposure: &FieldExposure) -> usize {
-    SHA_LOOKUPS_PER_BLOCK_BASE
+pub fn sha_lookups_per_row(expose_digest: bool, field_exposure: &FieldExposure) -> usize {
+    SHA_LOOKUPS_PER_ROW_BASE
         + usize::from(expose_digest)
         + 2 * field_exposure.n_columns()
         + field_exposure.n_yields()
@@ -552,88 +562,60 @@ fn sha256_interaction(
 ) {
     let n_rows = 1usize << log_size;
     let n_blocks = witness.blocks.len();
-    // `is_last_block` matches the AIR gate `enabler · (1 − enabler_next)`:
-    // set on the final block only when a padding successor exists. See
-    // `crate::trace::generate_trace`. The field provider gates on the symmetric
-    // `is_first_block` (block 0), which needs no padding successor.
-    let has_padding = n_blocks < n_rows;
+    // `is_last_block` matches the AIR gate `enabler · is_round_63 ·
+    // (1 − enabler_next)`: set on the final block's t = 63 row only when a
+    // padding successor exists (guaranteed by `crate::trace::min_log_size`).
+    // The field provider gates on the symmetric `is_first_block` (block 0),
+    // which needs no padding successor.
+    let has_padding = n_blocks * crate::trace::ROWS_PER_BLOCK < n_rows;
     let last_block_idx = n_blocks.saturating_sub(1);
 
-    // Pre-allocate per-lookup fraction vectors. Each filled with `(0, 1)`
-    // for padding rows up front; real-block rows overwrite below.
-    //
-    // Count of lookups per block (matches `Sha256Eval::evaluate` exactly):
-    //   - 4 round-side split-pack on h_in aux (1 per b_init/c_init/f_init/g_init, lo+hi each = 8 lookups)
-    //   - per schedule entry (48):
-    //       2 σ-decode (each = 2 decode lookups + 4 xor_8 lookups = 6 lookups per σ) ⇒ 12
-    //       2 σ-input split-pack (lo+hi each = 4 lookups) ⇒ 4
-    //       2 carry-range lookups on `(carry_lo, carry_hi)` against `Range_4` ⇒ 2
-    //     ⇒ 18 per entry
-    //   - per round (64):
-    //       2 Σ-decode ⇒ 12
-    //       8 Maj + 8 Ch ⇒ 16   (W=6: one lookup per group position, 8 groups)
-    //       4 round-side split-pack (a, maj_out, e, ch_out — lo+hi each = 8) ⇒ 8
-    //       4 carry-range lookups (2 × `Range_5` for T1; 2 × `Range_2` × 3 families) ⇒ 8
-    //     ⇒ 44 per round
-    //   - finalization: 8 mod-2³² adds × 2 carries × 1 `Range_2` lookup each ⇒ 16
-    //   - terminal `Range_16` on `h_out`: 8 words × 2 limbs ⇒ 16
-    //
-    // Total per block = 8 + 48·18 + 64·44 + 16 + 16
-    //                 = 8 + 864 + 2816 + 16 + 16 = 3720 (= SHA_LOOKUPS_PER_BLOCK_BASE).
-    //
-    // When `expose_digest` is set the digest provider appends exactly
-    // one width-32 yield after the terminal `Range_16` block — the only
-    // provider-side (negative-multiplicity) term the SHA module emits — so the
-    // count becomes `sha_lookups_per_block(true) = 3721`. The yield's
-    // numerator is `−is_last_block`, zero on every block but the final one, so
-    // intermediate/padding blocks contribute `(0, denom)` and do not perturb
-    // the sum; only the final block's `−1/combine(digest)` survives, leaving
-    // the module's claimed sum non-zero until a consumer requires it.
-    //
-    // Note the split-pack *lookup count* is unchanged from W=7 (still one
-    // lo+hi pair per operand); only each split-pack row's *width* grew
-    // (4 → 5 cells). The +256 over the old 3464 is purely the 4 extra
-    // Maj + 4 extra Ch lookups per round × 64 rounds.
-    //
-    // We allocate one Vec<Frac> per lookup index (`lookup_idx`) of length
-    // `n_rows`, default-filled, then fill real-block rows below.
-    let lookups_per_block = sha_lookups_per_block(expose_digest, field_exposure);
-    let mut all_lookups: Vec<Vec<Frac>> = (0..lookups_per_block)
+    // One fraction vector per lookup site (`lookup_idx`), each of length
+    // `n_rows`, default-filled with the neutral `(0, 1)`; real rows
+    // overwrite the sites that fire on them. See
+    // [`SHA_LOOKUPS_PER_ROW_BASE`] for the per-row site breakdown.
+    let lookups_per_row = sha_lookups_per_row(expose_digest, field_exposure);
+    let mut all_lookups: Vec<Vec<Frac>> = (0..lookups_per_row)
         .map(|_| vec![(SecureField::zero(), SecureField::one()); n_rows])
         .collect();
 
     for (block_idx, block) in witness.blocks.iter().enumerate() {
-        let slot = Layout::block_slot(block_idx, log_size);
         let is_last_block = block_idx == last_block_idx && has_padding;
         let is_first_block = block_idx == 0;
-        let mut cursor = 0usize;
-        write_block_lookups(
-            &mut all_lookups,
-            &mut cursor,
-            slot,
-            block,
-            relations,
-            expose_digest,
-            is_last_block,
-            field_exposure,
-            is_first_block,
-        );
-        debug_assert_eq!(cursor, lookups_per_block, "block lookup miscount");
+        for t in 0..crate::constants::N_ROUNDS {
+            let slot = Layout::round_row_slot(block_idx, t, log_size);
+            let mut cursor = 0usize;
+            write_round_row_lookups(
+                &mut all_lookups,
+                &mut cursor,
+                slot,
+                block,
+                t,
+                relations,
+                expose_digest,
+                is_last_block,
+                field_exposure,
+                is_first_block,
+            );
+            debug_assert_eq!(cursor, lookups_per_row, "row lookup miscount");
+        }
     }
 
     build_interaction_columns(log_size, all_lookups)
 }
 
-/// Write every lookup for one block at its trace slot, in **exactly** the
-/// `Sha256Eval::evaluate` firing order. Bumps `cursor` past each lookup
-/// so the same lookup index always lands at the same column across
-/// blocks.
+/// Write every lookup site for one `(block, round t)` row at its trace
+/// slot, in **exactly** the `Sha256Eval::evaluate` firing order. Bumps
+/// `cursor` past each site so the same site index always lands at the same
+/// fraction column across rows; sites that do not fire on this row keep
+/// their neutral `(0, 1)` fill and the cursor skips over them.
 #[allow(clippy::too_many_arguments)]
-fn write_block_lookups(
+fn write_round_row_lookups(
     all: &mut [Vec<Frac>],
     cursor: &mut usize,
     slot: usize,
     block: &crate::types::BlockWitness,
+    t: usize,
     relations: &Sha256Relations,
     expose_digest: bool,
     is_last_block: bool,
@@ -645,75 +627,68 @@ fn write_block_lookups(
     let (sigma0_lo_idx, sigma0_hi_idx) = round_groups_half_indices(&SIGMA0_GROUPS);
     let (sigma1_lo_idx, sigma1_hi_idx) = round_groups_half_indices(&SIGMA1_GROUPS);
 
-    // ---- 1. h_in aux split-pack lookups (4 operands × 2 halves = 8) ----
+    // ---- 1. h_in aux split-pack sites (4 operands × 2 halves = 8) ----
     //
-    // Order in Sha256Eval::evaluate: b_init, c_init, f_init, g_init —
-    // each fires wire_round_split_pack(word, grp, rel_lo, rel_hi).
-    // Each wire_round_split_pack emits 2 lookups (lo then hi).
-    for op_idx in 0..4 {
-        let (word, lo_rel_tag, hi_rel_tag) = match op_idx {
-            0 => (block.h_in[1].to_u32(), RelTag::Sigma0Lo, RelTag::Sigma0Hi),
-            1 => (block.h_in[2].to_u32(), RelTag::Sigma0Lo, RelTag::Sigma0Hi),
-            2 => (block.h_in[5].to_u32(), RelTag::Sigma1Lo, RelTag::Sigma1Hi),
-            3 => (block.h_in[6].to_u32(), RelTag::Sigma1Lo, RelTag::Sigma1Hi),
-            _ => unreachable!(),
-        };
-        // op_idx 0,1 are the Σ0 partition; 2,3 the Σ1 partition.
-        let (lo_idx, hi_idx): (&[usize], &[usize]) = if op_idx < 2 {
-            (&sigma0_lo_idx, &sigma0_hi_idx)
-        } else {
-            (&sigma1_lo_idx, &sigma1_hi_idx)
-        };
-        write_round_split_pack_pair(
-            all,
-            cursor,
-            slot,
-            word,
-            relations,
-            lo_rel_tag,
-            hi_rel_tag,
-            // 8-element packed-group values come from the aux witness.
-            match op_idx {
-                0 => block.aux_split_pack.b_init.vals,
-                1 => block.aux_split_pack.c_init.vals,
-                2 => block.aux_split_pack.f_init.vals,
-                3 => block.aux_split_pack.g_init.vals,
+    // Fire on t = 0 rows (multiplicity `enabler · is_round_0`). Order in
+    // Sha256Eval::evaluate: b_init, c_init, f_init, g_init.
+    if t == 0 {
+        for op_idx in 0..4 {
+            let (word, lo_rel_tag, hi_rel_tag) = match op_idx {
+                0 => (block.h_in[1].to_u32(), RelTag::Sigma0Lo, RelTag::Sigma0Hi),
+                1 => (block.h_in[2].to_u32(), RelTag::Sigma0Lo, RelTag::Sigma0Hi),
+                2 => (block.h_in[5].to_u32(), RelTag::Sigma1Lo, RelTag::Sigma1Hi),
+                3 => (block.h_in[6].to_u32(), RelTag::Sigma1Lo, RelTag::Sigma1Hi),
                 _ => unreachable!(),
-            },
-            lo_idx,
-            hi_idx,
-        );
+            };
+            let (lo_idx, hi_idx): (&[usize], &[usize]) = if op_idx < 2 {
+                (&sigma0_lo_idx, &sigma0_hi_idx)
+            } else {
+                (&sigma1_lo_idx, &sigma1_hi_idx)
+            };
+            write_round_split_pack_pair(
+                all,
+                cursor,
+                slot,
+                word,
+                relations,
+                lo_rel_tag,
+                hi_rel_tag,
+                match op_idx {
+                    0 => block.aux_split_pack.b_init.vals,
+                    1 => block.aux_split_pack.c_init.vals,
+                    2 => block.aux_split_pack.f_init.vals,
+                    3 => block.aux_split_pack.g_init.vals,
+                    _ => unreachable!(),
+                },
+                lo_idx,
+                hi_idx,
+            );
+        }
+    } else {
+        *cursor += 8;
     }
 
-    // ---- 2. Schedule entries (48 × 16 lookups) ----
-    for entry in &block.schedule_entries {
-        // σ0(W[t-15]) decode wiring fires:
-        //   - S-side lookup (5 cells)
-        //   - S′-side lookup (5 cells)
-        //   - 4 chunk-wise xor_8 lookups
-        // = 6 lookups
-        let dec_sigma0 = &entry.lower_sigma0_decode;
+    // ---- 2. Schedule family (18 sites; t ≥ 16 rows) ----
+    if t >= 16 {
+        let entry = &block.schedule_entries[t - 16];
         write_sigma_decode_lookups(
             all,
             cursor,
             slot,
-            dec_sigma0,
+            &entry.lower_sigma0_decode,
             RelTag::LowerSigma0DecodeS,
             RelTag::LowerSigma0DecodeSPrime,
             relations,
         );
-        let dec_sigma1 = &entry.lower_sigma1_decode;
         write_sigma_decode_lookups(
             all,
             cursor,
             slot,
-            dec_sigma1,
+            &entry.lower_sigma1_decode,
             RelTag::LowerSigma1DecodeS,
             RelTag::LowerSigma1DecodeSPrime,
             relations,
         );
-
-        // σ-input split-and-pack: 4 lookups (lo+hi for σ0, lo+hi for σ1).
         write_sigma_input_split_lookups(
             all,
             cursor,
@@ -734,10 +709,6 @@ fn write_block_lookups(
             RelTag::LowerSigma1SplitLo,
             RelTag::LowerSigma1SplitHi,
         );
-
-        // Schedule-recurrence carry range-check (4-addend add → `Range_4`).
-        // Matches `emit_mod_2_32_add_linear` in `Sha256Eval` for the
-        // `W[t] = σ1 + W[t-7] + σ0 + W[t-16]` recurrence.
         write_carry_range_pair(
             all,
             cursor,
@@ -746,66 +717,84 @@ fn write_block_lookups(
             RangeKind::Range4,
             entry.carries,
         );
+    } else {
+        *cursor += 18;
     }
 
-    // ---- 3. Rounds (64 × 32 lookups) ----
-    //
-    // Mirror Sha256Eval::evaluate: §8.1 reuse-chain across rounds.
-    let mut b_grp = block.aux_split_pack.b_init.vals;
-    let mut c_grp = block.aux_split_pack.c_init.vals;
-    let mut f_grp = block.aux_split_pack.f_init.vals;
-    let mut g_grp = block.aux_split_pack.g_init.vals;
+    // ---- 3. Round family (48 sites; every real row) ----
+    let round = &block.rounds[t];
+    write_sigma_decode_lookups(
+        all,
+        cursor,
+        slot,
+        &round.sigma0_decode,
+        RelTag::Sigma0DecodeS,
+        RelTag::Sigma0DecodeSPrime,
+        relations,
+    );
+    write_sigma_decode_lookups(
+        all,
+        cursor,
+        slot,
+        &round.sigma1_decode,
+        RelTag::Sigma1DecodeS,
+        RelTag::Sigma1DecodeSPrime,
+        relations,
+    );
 
-    for round in &block.rounds {
-        // 2 Σ-decode wirings (Σ0(a) and Σ1(e)) — 6 lookups each ⇒ 12.
-        write_sigma_decode_lookups(
-            all,
-            cursor,
-            slot,
-            &round.sigma0_decode,
-            RelTag::Sigma0DecodeS,
-            RelTag::Sigma0DecodeSPrime,
-            relations,
-        );
-        write_sigma_decode_lookups(
-            all,
-            cursor,
-            slot,
-            &round.sigma1_decode,
-            RelTag::Sigma1DecodeS,
-            RelTag::Sigma1DecodeSPrime,
-            relations,
-        );
+    // 8 Maj + 8 Ch. The §8.1 reuse operands come from the same sources the
+    // trace writer commits into the `b`/`c`/`f`/`g` duplicate columns.
+    let aux = &block.aux_split_pack;
+    let a_grp = round.maj_ch.a_grp.vals;
+    let maj_grp = round.maj_ch.maj_grp.vals;
+    let e_grp = round.maj_ch.e_grp.vals;
+    let ch_grp = round.maj_ch.ch_grp.vals;
+    let b_grp = match t {
+        0 => aux.b_init.vals,
+        _ => block.rounds[t - 1].maj_ch.a_grp.vals,
+    };
+    let c_grp = match t {
+        0 => aux.c_init.vals,
+        1 => aux.b_init.vals,
+        _ => block.rounds[t - 2].maj_ch.a_grp.vals,
+    };
+    let f_grp = match t {
+        0 => aux.f_init.vals,
+        _ => block.rounds[t - 1].maj_ch.e_grp.vals,
+    };
+    let g_grp = match t {
+        0 => aux.g_init.vals,
+        1 => aux.f_init.vals,
+        _ => block.rounds[t - 2].maj_ch.e_grp.vals,
+    };
+    for i in 0..GROUPS_PER_ROUND_PARTITION {
+        let denom = relations.maj.combine(&[
+            BaseField::from(a_grp[i]),
+            BaseField::from(b_grp[i]),
+            BaseField::from(c_grp[i]),
+            BaseField::from(maj_grp[i]),
+        ]);
+        all[*cursor][slot] = (SecureField::one(), denom);
+        *cursor += 1;
+    }
+    for i in 0..GROUPS_PER_ROUND_PARTITION {
+        let denom = relations.ch.combine(&[
+            BaseField::from(e_grp[i]),
+            BaseField::from(f_grp[i]),
+            BaseField::from(g_grp[i]),
+            BaseField::from(ch_grp[i]),
+        ]);
+        all[*cursor][slot] = (SecureField::one(), denom);
+        *cursor += 1;
+    }
 
-        // 8 Maj + 8 Ch.
-        let a_grp = round.maj_ch.a_grp.vals;
-        let maj_grp = round.maj_ch.maj_grp.vals;
-        let e_grp = round.maj_ch.e_grp.vals;
-        let ch_grp = round.maj_ch.ch_grp.vals;
-        for i in 0..GROUPS_PER_ROUND_PARTITION {
-            let denom = relations.maj.combine(&[
-                BaseField::from(a_grp[i]),
-                BaseField::from(b_grp[i]),
-                BaseField::from(c_grp[i]),
-                BaseField::from(maj_grp[i]),
-            ]);
-            all[*cursor][slot] = (SecureField::one(), denom);
-            *cursor += 1;
-        }
-        for i in 0..GROUPS_PER_ROUND_PARTITION {
-            let denom = relations.ch.combine(&[
-                BaseField::from(e_grp[i]),
-                BaseField::from(f_grp[i]),
-                BaseField::from(g_grp[i]),
-                BaseField::from(ch_grp[i]),
-            ]);
-            all[*cursor][slot] = (SecureField::one(), denom);
-            *cursor += 1;
-        }
-
-        // 4 round-side split-pack: a, maj_out (Σ0 partition), e, ch_out (Σ1 partition).
-        // Each emits 2 lookups (lo + hi).
-        let a_word = round.state_in[0].to_u32(); // a
+    // Round split-packs (12 sites). The `a`/`e` operands have two
+    // complementary-gated sites each: the t ≥ 1 site keys the input word
+    // as the previous row's `a_new`/`e_new`, the t = 0 site keys it as
+    // `h_in[0]`/`h_in[4]` — value-wise both equal `state_in`. Exactly one
+    // of the pair fires per row.
+    let a_word = round.state_in[0].to_u32();
+    if t != 0 {
         write_round_split_pack_pair(
             all,
             cursor,
@@ -818,21 +807,38 @@ fn write_block_lookups(
             &sigma0_lo_idx,
             &sigma0_hi_idx,
         );
-        let maj_word = round.maj.to_u32();
-        let maj_packed = pack_round_groups(maj_word, &SIGMA0_GROUPS);
+        *cursor += 2; // skip the t = 0 twin
+    } else {
+        *cursor += 2; // skip the t ≥ 1 twin
         write_round_split_pack_pair(
             all,
             cursor,
             slot,
-            maj_word,
+            a_word,
             relations,
             RelTag::Sigma0Lo,
             RelTag::Sigma0Hi,
-            maj_packed,
+            a_grp,
             &sigma0_lo_idx,
             &sigma0_hi_idx,
         );
-        let e_word = round.state_in[4].to_u32(); // e
+    }
+    let maj_word = round.maj.to_u32();
+    let maj_packed = pack_round_groups(maj_word, &SIGMA0_GROUPS);
+    write_round_split_pack_pair(
+        all,
+        cursor,
+        slot,
+        maj_word,
+        relations,
+        RelTag::Sigma0Lo,
+        RelTag::Sigma0Hi,
+        maj_packed,
+        &sigma0_lo_idx,
+        &sigma0_hi_idx,
+    );
+    let e_word = round.state_in[4].to_u32();
+    if t != 0 {
         write_round_split_pack_pair(
             all,
             cursor,
@@ -845,149 +851,142 @@ fn write_block_lookups(
             &sigma1_lo_idx,
             &sigma1_hi_idx,
         );
-        let ch_word = round.ch.to_u32();
-        let ch_packed = pack_round_groups(ch_word, &SIGMA1_GROUPS);
+        *cursor += 2;
+    } else {
+        *cursor += 2;
         write_round_split_pack_pair(
             all,
             cursor,
             slot,
-            ch_word,
+            e_word,
             relations,
             RelTag::Sigma1Lo,
             RelTag::Sigma1Hi,
-            ch_packed,
+            e_grp,
             &sigma1_lo_idx,
             &sigma1_hi_idx,
         );
+    }
+    let ch_word = round.ch.to_u32();
+    let ch_packed = pack_round_groups(ch_word, &SIGMA1_GROUPS);
+    write_round_split_pack_pair(
+        all,
+        cursor,
+        slot,
+        ch_word,
+        relations,
+        RelTag::Sigma1Lo,
+        RelTag::Sigma1Hi,
+        ch_packed,
+        &sigma1_lo_idx,
+        &sigma1_hi_idx,
+    );
 
-        // Carry range-checks for the four mod-2³² adds of this round.
-        // Order matches `Sha256Eval::evaluate`'s `emit_mod_2_32_add_linear`
-        // sequence: T1 (5-addend, `Range_5`), T2/e_new/a_new (2-addend each,
-        // `Range_2`).
-        write_carry_range_pair(
-            all,
-            cursor,
-            slot,
-            relations,
-            RangeKind::Range5,
-            round.t1_carries,
-        );
-        write_carry_range_pair(
-            all,
-            cursor,
-            slot,
-            relations,
-            RangeKind::Range2,
-            round.t2_carries,
-        );
-        write_carry_range_pair(
-            all,
-            cursor,
-            slot,
-            relations,
-            RangeKind::Range2,
-            round.e_new_carries,
-        );
-        write_carry_range_pair(
-            all,
-            cursor,
-            slot,
-            relations,
-            RangeKind::Range2,
-            round.a_new_carries,
-        );
+    // Carry range-checks for the four mod-2³² adds of this round.
+    write_carry_range_pair(
+        all,
+        cursor,
+        slot,
+        relations,
+        RangeKind::Range5,
+        round.t1_carries,
+    );
+    write_carry_range_pair(
+        all,
+        cursor,
+        slot,
+        relations,
+        RangeKind::Range2,
+        round.t2_carries,
+    );
+    write_carry_range_pair(
+        all,
+        cursor,
+        slot,
+        relations,
+        RangeKind::Range2,
+        round.e_new_carries,
+    );
+    write_carry_range_pair(
+        all,
+        cursor,
+        slot,
+        relations,
+        RangeKind::Range2,
+        round.a_new_carries,
+    );
 
-        // §8.1 chain advance: b ← a, c ← b, f ← e, g ← f.
-        let prev_b = b_grp;
-        b_grp = a_grp;
-        c_grp = prev_b;
-        let prev_f = f_grp;
-        f_grp = e_grp;
-        g_grp = prev_f;
+    // ---- 4/5. Finalization carries + terminal `Range_16` (t = 63 rows) ----
+    if t == crate::constants::N_ROUNDS - 1 {
+        for c in &block.finalization_carries {
+            write_carry_range_pair(all, cursor, slot, relations, RangeKind::Range2, *c);
+        }
+        for h in &block.h_out {
+            write_range_check(all, cursor, slot, relations, RangeKind::Range16, h.lo);
+            write_range_check(all, cursor, slot, relations, RangeKind::Range16, h.hi);
+        }
+    } else {
+        *cursor += 16 + 16;
     }
 
-    // ---- 4. Finalization carry range-checks (8 × Range_2 pairs) ----
-    for c in &block.finalization_carries {
-        write_carry_range_pair(all, cursor, slot, relations, RangeKind::Range2, *c);
-    }
-
-    // ---- 5. Terminal `Range_16` on every `h_out` limb (8 × 2) ----
-    for h in &block.h_out {
-        write_range_check(all, cursor, slot, relations, RangeKind::Range16, h.lo);
-        write_range_check(all, cursor, slot, relations, RangeKind::Range16, h.hi);
-    }
-
-    // ---- 6. Digest yield (provider side, final block only) ----
-    //
-    // Mirrors the `if self.expose_digest { add_to_relation(...) }` tail of
-    // `Sha256Eval::evaluate`: a single width-32 yield on the `Sha256Digest`
-    // channel with multiplicity `−is_last_block`. The 32 cells are this
-    // block's `h_out` bytes in `h_out_digest_bytes` order — identical to the
-    // byte columns the constraint reads — so producer and consumer combine the
-    // same tuple. On non-final blocks the numerator is `0` (the frac is
-    // `(0, denom)`), so only the final block contributes `−1/combine(digest)`.
+    // ---- 6. Digest yield (provider side, final block's t = 63 row) ----
     if expose_digest {
-        let bytes = h_out_digest_bytes(&block.h_out);
-        let values: [BaseField; DIGEST_BYTES] = std::array::from_fn(|i| BaseField::from(bytes[i]));
-        let denom = relations.digest.digest.combine(&values);
-        let num = -SecureField::from(BaseField::from(u32::from(is_last_block)));
-        all[*cursor][slot] = (num, denom);
+        if t == crate::constants::N_ROUNDS - 1 {
+            let bytes = h_out_digest_bytes(&block.h_out);
+            let values: [BaseField; DIGEST_BYTES] =
+                std::array::from_fn(|i| BaseField::from(bytes[i]));
+            let denom = relations.digest.digest.combine(&values);
+            let num = -SecureField::from(BaseField::from(u32::from(is_last_block)));
+            all[*cursor][slot] = (num, denom);
+        }
         *cursor += 1;
     }
 
-    // ---- 7. Credential-field range-checks + yields (provider side, first block) ----
+    // ---- 7. Credential-field range-checks + yields (t = 15 rows, block 0) ----
     //
-    // Mirrors the field tail of `Sha256Eval::evaluate`, in the same order:
-    //   7a. two `Range16` byte range-checks per exposed byte column (the
-    //       `[0, 256)` pin, multiplicity `is_first_block`), then
-    //   7b. one width-3 `(field_id, byte_index, value)` yield per exposed window
-    //       byte on the `Sha256Field` channel (multiplicity `−is_first_block`).
-    // Every byte value is read from this block's covered message word in
-    // `word_be_bytes` order — identical to the columns the constraint reads — so
-    // producer and consumer combine the same tuple. On non-first blocks the
-    // numerator is `0`, so only block 0 contributes; the matching `Range16`
-    // producer increments are in `range_k_multiplicities`.
+    // Same order as the constraint side: 7a. two `Range16` per exposed byte
+    // (multiplicity `is_first_block@−15`), then 7b. one width-3 yield per
+    // window byte (`−is_first_block@−15`).
     if !field_exposure.is_empty() {
-        // Cache each covered word's big-endian bytes once, keyed by decomposed
-        // word slot (same order the constraint/trace use).
-        let word_bytes: Vec<[u32; crate::constants::WORD_BYTES]> = field_exposure
-            .decomposed_words()
-            .iter()
-            .map(|&w| {
-                let limb = block.schedule[w];
-                word_be_bytes(limb.lo, limb.hi)
-            })
-            .collect();
-        let is_first_sf = SecureField::from(BaseField::from(u32::from(is_first_block)));
+        if t == 15 {
+            let word_bytes: Vec<[u32; crate::constants::WORD_BYTES]> = field_exposure
+                .decomposed_words()
+                .iter()
+                .map(|&w| {
+                    let limb = block.schedule[w];
+                    word_be_bytes(limb.lo, limb.hi)
+                })
+                .collect();
+            let is_first_sf = SecureField::from(BaseField::from(u32::from(is_first_block)));
 
-        // 7a. Range-check every exposed byte to `[0, 256)` — word-slot major,
-        // byte minor (the `field_bytes` order on the constraint side).
-        for bytes in &word_bytes {
-            for &b in bytes {
-                all[*cursor][slot] = (is_first_sf, combine_range(relations, RangeKind::Range16, b));
-                *cursor += 1;
-                all[*cursor][slot] = (
-                    is_first_sf,
-                    combine_range(relations, RangeKind::Range16, b + BYTE_RANGE_CHECK_OFFSET),
-                );
+            for bytes in &word_bytes {
+                for &b in bytes {
+                    all[*cursor][slot] =
+                        (is_first_sf, combine_range(relations, RangeKind::Range16, b));
+                    *cursor += 1;
+                    all[*cursor][slot] = (
+                        is_first_sf,
+                        combine_range(relations, RangeKind::Range16, b + BYTE_RANGE_CHECK_OFFSET),
+                    );
+                    *cursor += 1;
+                }
+            }
+            for y in field_exposure.yields() {
+                let slot_idx = field_exposure.yield_column_slot(y);
+                let word_slot = slot_idx / crate::constants::WORD_BYTES;
+                let byte_in_word = slot_idx % crate::constants::WORD_BYTES;
+                let value = word_bytes[word_slot][byte_in_word];
+                let tuple = [
+                    BaseField::from(y.field_id),
+                    BaseField::from(y.byte_index),
+                    BaseField::from(value),
+                ];
+                let denom = relations.field.field.combine(&tuple);
+                all[*cursor][slot] = (-is_first_sf, denom);
                 *cursor += 1;
             }
-        }
-
-        // 7b. Yield each window byte (`−is_first_block`).
-        for y in field_exposure.yields() {
-            let slot_idx = field_exposure.yield_column_slot(y);
-            let word_slot = slot_idx / crate::constants::WORD_BYTES;
-            let byte_in_word = slot_idx % crate::constants::WORD_BYTES;
-            let value = word_bytes[word_slot][byte_in_word];
-            let tuple = [
-                BaseField::from(y.field_id),
-                BaseField::from(y.byte_index),
-                BaseField::from(value),
-            ];
-            let denom = relations.field.field.combine(&tuple);
-            all[*cursor][slot] = (-is_first_sf, denom);
-            *cursor += 1;
+        } else {
+            *cursor += 2 * field_exposure.n_columns() + field_exposure.n_yields();
         }
     }
 }

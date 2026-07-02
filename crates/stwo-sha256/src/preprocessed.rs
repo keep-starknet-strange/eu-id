@@ -34,9 +34,10 @@
 //!   zero elsewhere. The AIR pins `is_first_block ≡ is_first_row`, which
 //!   anchors the §10.3 chain at block 0's IV binding (docs/research/sha256-air-design.md §11 L2).
 //!
-//! Total committed columns (round-side split-pack is now 5 cols each at
-//! `W = 6` — `key + 4` packed sub-groups):
-//! `8·5 + 5 + 3 + 4·5 + 4·3 + 4·1 + 1 = 40 + 5 + 3 + 20 + 12 + 4 + 1 = 85`.
+//! Total committed columns (round-side split-pack is 5 cols each at
+//! `W = 6` — `key + 4` packed sub-groups; the trailing `+ 9` is the
+//! round-cyclic block of the rotated one-row-per-round layout):
+//! `8·5 + 5 + 3 + 4·5 + 4·3 + 4·1 + 1 + 9 = 94`.
 
 use stwo::core::fields::m31::BaseField;
 use stwo::core::poly::circle::CanonicCoset;
@@ -68,7 +69,7 @@ pub const fn maj_ch_log_size(group_width: u32) -> u32 {
 
 /// Aggregate of one preprocessed-tree commit input: the column
 /// evaluations, their stable IDs, and their log sizes — all three of
-/// length 85 (see [`tests::total_preprocessed_columns_is_85`]) and aligned
+/// length 94 (see [`tests::total_preprocessed_columns_is_94`]) and aligned
 /// index-for-index.
 pub type PreprocessedTrace = (
     Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
@@ -114,6 +115,8 @@ pub fn preprocessed_log_sizes(group_width: u32, log_n_rows: u32) -> Vec<u32> {
     }
     // 1 is_first_row selector at the main trace's log_n_rows.
     log_sizes.push(log_n_rows);
+    // 9 round-cyclic columns at the main trace's log_n_rows.
+    log_sizes.extend(std::iter::repeat_n(log_n_rows, 9));
     log_sizes
 }
 
@@ -249,7 +252,7 @@ pub fn generate_preprocessed_trace(group_width: u32, log_n_rows: u32) -> Preproc
     {
         let domain = CanonicCoset::new(log_n_rows).circle_domain();
         let n_rows = 1usize << log_n_rows;
-        let first_slot = Layout::block_slot(0, log_n_rows);
+        let first_slot = Layout::row_slot(0, log_n_rows);
         debug_assert_eq!(first_slot, 0);
         let col: BaseColumn = (0..n_rows)
             .map(|i| {
@@ -262,6 +265,42 @@ pub fn generate_preprocessed_trace(group_width: u32, log_n_rows: u32) -> Preproc
             .collect();
         evals.push(CircleEvaluation::new(domain, col));
         log_sizes.push(log_n_rows);
+    }
+
+    // ---- 9 round-cyclic columns at the main trace's log_n_rows ----
+    //
+    // Each is a function of `t = natural_row mod 64` alone. Values are laid
+    // out in storage order: storage slot `s` holds `f(natural(s) mod 64)`,
+    // where `natural ↔ storage` is the same `Layout::row_slot` bijection the
+    // trace writer uses — computed here by filling a natural-order buffer
+    // and scattering through `row_slot`. Order matches
+    // `components::round_cyclic_column_ids`:
+    // `k_lo, k_hi, is_round_0, _1, _2, _3, _15, _63, is_schedule`.
+    {
+        use crate::constants::{K, N_ROUNDS};
+        let domain = CanonicCoset::new(log_n_rows).circle_domain();
+        let n_rows = 1usize << log_n_rows;
+        let fns: [Box<dyn Fn(usize) -> u32>; 9] = [
+            Box::new(|t| K[t] & 0xFFFF),
+            Box::new(|t| K[t] >> 16),
+            Box::new(|t| u32::from(t == 0)),
+            Box::new(|t| u32::from(t == 1)),
+            Box::new(|t| u32::from(t == 2)),
+            Box::new(|t| u32::from(t == 3)),
+            Box::new(|t| u32::from(t == 15)),
+            Box::new(|t| u32::from(t == N_ROUNDS - 1)),
+            Box::new(|t| u32::from(t >= 16)),
+        ];
+        for f in fns {
+            let mut vals = vec![BaseField::from(0u32); n_rows];
+            for natural in 0..n_rows {
+                vals[Layout::row_slot(natural, log_n_rows)] =
+                    BaseField::from(f(natural % N_ROUNDS));
+            }
+            let col: BaseColumn = vals.into_iter().collect();
+            evals.push(CircleEvaluation::new(domain, col));
+            log_sizes.push(log_n_rows);
+        }
     }
 
     let ids = all_preprocessed_column_ids();
@@ -295,17 +334,17 @@ mod tests {
     use stwo::prover::backend::simd::m31::LOG_N_LANES;
     use stwo::prover::backend::Column;
 
-    /// Total column count: 8·5 + 5 + 3 + 4·5 + 4·3 + 4·1 + 1 = 85. Catches
+    /// Total column count: 8·5 + 5 + 3 + 4·5 + 4·3 + 4·1 + 1 + 9 = 94. Catches
     /// any regression in the per-table layout. The trailing `+ 1` is the
     /// `is_first_row` selector emitted at the main trace's `log_n_rows`.
     /// (Round-side split-pack is 5 cols each at `W = 6`: `key + 4` groups.)
     #[test]
-    fn total_preprocessed_columns_is_85() {
+    fn total_preprocessed_columns_is_94() {
         let log_n_rows = LOG_N_LANES;
         let (evals, ids, log_sizes) = generate_preprocessed_trace(MAX_ROUND_GROUP_BITS, log_n_rows);
-        assert_eq!(evals.len(), 85);
-        assert_eq!(ids.len(), 85);
-        assert_eq!(log_sizes.len(), 85);
+        assert_eq!(evals.len(), 94);
+        assert_eq!(ids.len(), 94);
+        assert_eq!(log_sizes.len(), 94);
     }
 
     /// First eight tables (40 columns) are decode tables at log_size = 16.
@@ -325,7 +364,7 @@ mod tests {
                 3 * w
             } else if (80..83).contains(&i) {
                 LOG_N_LANES
-            } else if i == 84 {
+            } else if i >= 84 {
                 log_n_rows
             } else {
                 16
@@ -342,8 +381,8 @@ mod tests {
     fn is_first_row_selector_is_one_at_index_zero() {
         let log_n_rows = LOG_N_LANES;
         let (evals, _, _) = generate_preprocessed_trace(MAX_ROUND_GROUP_BITS, log_n_rows);
-        // The selector is the last column (index 84).
-        let selector = evals.last().expect("at least one preprocessed column");
+        // The selector is column 84 (followed by the 9 round-cyclic columns).
+        let selector = &evals[84];
         let n_rows = 1usize << log_n_rows;
         for i in 0..n_rows {
             let expected = if i == 0 { 1u32 } else { 0u32 };
@@ -389,11 +428,11 @@ mod tests {
         for w in MAX_ROUND_GROUP_BITS..=crate::tables::MAX_GROUP_WIDTH {
             for log_n_rows in [LOG_N_LANES, 20, 30] {
                 let meta = preprocessed_log_sizes(w, log_n_rows);
-                assert_eq!(meta.len(), 85, "w={w}, l={log_n_rows}");
+                assert_eq!(meta.len(), 94, "w={w}, l={log_n_rows}");
                 for &ls in &meta[40..45] {
                     assert_eq!(ls, 3 * w, "Maj/Ch log_size at w={w}");
                 }
-                assert_eq!(*meta.last().unwrap(), log_n_rows, "selector log_size");
+                assert_eq!(meta[84..].iter().filter(|&&l| l == log_n_rows).count(), 10, "selector + cyclic log_sizes");
             }
         }
     }
