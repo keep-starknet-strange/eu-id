@@ -68,12 +68,19 @@
 
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::EvalAtRow;
-use stwo_p256_utils::constants::{LIMB_BITS, N_LIMBS};
+use stwo_p256_utils::constants::N_LIMBS;
 
-use crate::constants::{P256_B, P256_MODULUS};
 use crate::limbs::{P256EvalBigInt, P256M31BigInt};
 use crate::projective_air::ConsumedMulLimbsView;
 use crate::types::U256;
+
+// Phase 2: the generic signed-carry reduction machinery now lives in the
+// hinted-mul silo (`hinted_mul::formula_bind`); re-export it here so this
+// module (Phase-3-doomed) and `mixed_add_formula.rs` keep compiling unchanged.
+pub(crate) use crate::components::hinted_mul::formula_bind::{
+    add_combo_reduction, bind_equal, constant_bigint, curve_b_bigint, modulus_bigint, one_bigint,
+    read_bigint, solve_combo_reduction, term, M31Term, ReductionWitness,
+};
 
 /// Number of silo muls whose operands the Double formula binds via the
 /// signed-carry reduction idiom (multi-term / coefficient ≠ 1 combos).
@@ -84,18 +91,29 @@ pub(crate) const DOUBLE_OUTPUT_REDUCTIONS: usize = 3;
 pub(crate) const DOUBLE_TOTAL_REDUCTIONS: usize =
     DOUBLE_OPERAND_REDUCTIONS + DOUBLE_OUTPUT_REDUCTIONS;
 
-/// One signed-carry reduction's witness columns: the integer quotient `q`
-/// (signed, centered-encoded) and the `N_LIMBS` signed carries.
-pub(crate) struct ReductionWitness<E: EvalAtRow> {
-    pub q: E::F,
-    pub carries: [E::F; N_LIMBS],
+/// Committed working values + reduction witnesses for the Double formula.
+///
+/// Read order (must match the base-trace writer in `trace.rs`):
+/// `x3, y3, z3` bigints, then the [`DOUBLE_TOTAL_REDUCTIONS`] reduction
+/// witnesses in canonical order (the 10 operand reductions, then `x3`,`y3`,`z3`
+/// output reductions).
+pub(crate) struct DoubleFormulaColumns<E: EvalAtRow> {
+    pub x3: P256EvalBigInt<E>,
+    pub y3: P256EvalBigInt<E>,
+    pub z3: P256EvalBigInt<E>,
+    pub reductions: [ReductionWitness<E>; DOUBLE_TOTAL_REDUCTIONS],
 }
 
-impl<E: EvalAtRow> ReductionWitness<E> {
+impl<E: EvalAtRow> DoubleFormulaColumns<E> {
     pub(crate) fn read(eval: &mut E) -> Self {
+        let x3 = read_bigint(eval);
+        let y3 = read_bigint(eval);
+        let z3 = read_bigint(eval);
         Self {
-            q: eval.next_trace_mask(),
-            carries: core::array::from_fn(|_| eval.next_trace_mask()),
+            x3,
+            y3,
+            z3,
+            reductions: core::array::from_fn(|_| ReductionWitness::read(eval)),
         }
     }
 }
@@ -104,153 +122,6 @@ impl<E: EvalAtRow> ReductionWitness<E> {
 /// per-reduction `(q + N_LIMBS carries)` columns.
 pub(crate) const DOUBLE_FORMULA_COLUMNS: usize =
     3 * N_LIMBS + DOUBLE_TOTAL_REDUCTIONS * (1 + N_LIMBS);
-
-pub(crate) const SHARED_FORMULA_TOTAL_REDUCTIONS: usize = 18;
-pub(crate) const SHARED_FORMULA_GATE_COLUMNS: usize = 2;
-pub(crate) const SHARED_FORMULA_COLUMNS: usize =
-    3 * N_LIMBS + SHARED_FORMULA_TOTAL_REDUCTIONS * (1 + N_LIMBS) + SHARED_FORMULA_GATE_COLUMNS;
-pub(crate) const SHARED_FORMULA_GATE_OFFSET_IN_BLOCK: usize =
-    SHARED_FORMULA_COLUMNS - SHARED_FORMULA_GATE_COLUMNS;
-
-/// Superset formula block shared by Double and MixedAdd rows.
-///
-/// Double rows use the first [`DOUBLE_TOTAL_REDUCTIONS`] reduction slots. The
-/// remaining reduction slots and the witnessed MixedAdd gate columns are
-/// explicitly zero-forced by the consumer AIR, so sharing the block removes
-/// duplicated columns without introducing free witness space.
-pub(crate) struct SharedFormulaColumns<E: EvalAtRow> {
-    pub x3: P256EvalBigInt<E>,
-    pub y3: P256EvalBigInt<E>,
-    pub z3: P256EvalBigInt<E>,
-    pub reductions: [ReductionWitness<E>; SHARED_FORMULA_TOTAL_REDUCTIONS],
-    pub mixed_active_col: E::F,
-    pub formula_gate_col: E::F,
-}
-
-impl<E: EvalAtRow> SharedFormulaColumns<E> {
-    pub(crate) fn read(eval: &mut E) -> Self {
-        let x3 = read_bigint(eval);
-        let y3 = read_bigint(eval);
-        let z3 = read_bigint(eval);
-        let reductions = core::array::from_fn(|_| ReductionWitness::read(eval));
-        let mixed_active_col = eval.next_trace_mask();
-        let formula_gate_col = eval.next_trace_mask();
-        Self {
-            x3,
-            y3,
-            z3,
-            reductions,
-            mixed_active_col,
-            formula_gate_col,
-        }
-    }
-}
-
-pub(crate) fn read_bigint<E: EvalAtRow>(eval: &mut E) -> P256EvalBigInt<E> {
-    P256EvalBigInt::<E>::from_limbs(core::array::from_fn(|_| eval.next_trace_mask()))
-}
-
-pub(crate) fn modulus_bigint() -> P256M31BigInt {
-    P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_MODULUS))
-}
-
-pub(crate) fn curve_b_bigint() -> P256M31BigInt {
-    P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_B))
-}
-
-/// The reduced field constant `1` as a [`P256M31BigInt`] (= the projective `z`
-/// coordinate of any affine accumulator, since the consumer's `lhs`/`rhs` are
-/// affine points lifted with `z = 1`).
-pub(crate) fn one_bigint() -> P256M31BigInt {
-    P256M31BigInt::from_u256(&U256::from_le_u64s(&[1, 0, 0, 0]))
-}
-
-fn fixed_limb<E: EvalAtRow>(value: &P256M31BigInt, index: usize) -> E::F {
-    E::F::from(value.limbs()[index])
-}
-
-/// A signed-integer-coefficient term `coeff · src` of a reduction's right-hand
-/// linear combination. `src` limbs are committed field values.
-pub(crate) struct ComboTerm<'a, E: EvalAtRow> {
-    pub coeff: i64,
-    pub src: &'a P256EvalBigInt<E>,
-}
-
-/// Constrain `target ≡ Σ_j coeff_j · src_j (mod p)` over 13-bit limbs with the
-/// signed-carry reduction idiom (mirrors `final_add`'s `add_sub_reduction`,
-/// generalized to arbitrary signed integer coefficients).
-///
-/// Per limb `i` (gated):
-/// `Σ_j coeff_j·src_j.limb[i] − target.limb[i] − q·p_i + prev_carry − 2^13·carry_i = 0`,
-/// with `prev_carry_0 = 0` and `carry_{N−1} = 0`. Summed with limb weights this
-/// telescopes to the exact integer identity `Σ coeff·src = target + q·p`, hence
-/// `target ≡ combo (mod p)`. Degree 2 (`gate · recurrence`, `recurrence` linear
-/// in the witnesses since `q·p_i` has a constant `p_i`).
-///
-/// The caller is responsible for range-checking `target`'s limbs and `q`/`carry`
-/// columns; this routine only emits the recurrence + final-carry-zero constraint.
-pub(crate) fn add_combo_reduction<E: EvalAtRow>(
-    eval: &mut E,
-    gate: &E::F,
-    target: &P256EvalBigInt<E>,
-    terms: &[ComboTerm<'_, E>],
-    witness: &ReductionWitness<E>,
-) {
-    let zero = E::F::from(M31::from_u32_unchecked(0));
-    let limb_base = E::F::from(M31::from_u32_unchecked(1u32 << LIMB_BITS));
-    let modulus = modulus_bigint();
-    for i in 0..N_LIMBS {
-        let prev = if i == 0 {
-            zero.clone()
-        } else {
-            witness.carries[i - 1].clone()
-        };
-        // Σ_j coeff_j · src_j.limb[i]
-        let mut combo = zero.clone();
-        for term in terms {
-            let limb = term.src.limbs()[i].clone();
-            combo += signed_coeff_mul::<E>(term.coeff, limb);
-        }
-        let recurrence =
-            combo - target.limbs()[i].clone() - witness.q.clone() * fixed_limb::<E>(&modulus, i)
-                + prev
-                - limb_base.clone() * witness.carries[i].clone();
-        eval.add_constraint(gate.clone() * recurrence);
-    }
-    eval.add_constraint(gate.clone() * witness.carries[N_LIMBS - 1].clone());
-}
-
-/// `coeff · limb` for a signed integer `coeff`, expressed in `E::F`
-/// (`coeff < 0` ⟹ subtract `|coeff| · limb`).
-fn signed_coeff_mul<E: EvalAtRow>(coeff: i64, limb: E::F) -> E::F {
-    let magnitude = E::F::from(M31::from_u32_unchecked(coeff.unsigned_abs() as u32));
-    let scaled = magnitude * limb;
-    if coeff < 0 {
-        E::F::from(M31::from_u32_unchecked(0)) - scaled
-    } else {
-        scaled
-    }
-}
-
-/// Limb-wise equality `target == src` over all `N_LIMBS` limbs, gated. Used for
-/// the operand bindings whose combo is a single reduced source with coefficient
-/// `+1` (the silo and the source are then equal as integers, degree 1).
-pub(crate) fn bind_equal<E: EvalAtRow>(
-    eval: &mut E,
-    gate: &E::F,
-    target: &P256EvalBigInt<E>,
-    src: &P256EvalBigInt<E>,
-) {
-    for i in 0..N_LIMBS {
-        eval.add_constraint(gate.clone() * (target.limbs()[i].clone() - src.limbs()[i].clone()));
-    }
-}
-
-/// A reduced field constant (`1`, `b`) materialized as a [`P256EvalBigInt`] so
-/// it can be a [`bind_equal`] source.
-pub(crate) fn constant_bigint<E: EvalAtRow>(value: &P256M31BigInt) -> P256EvalBigInt<E> {
-    P256EvalBigInt::<E>::from_limbs(core::array::from_fn(|i| E::F::from(value.limbs()[i])))
-}
 
 /// Bind the full Double-op coordinate formula on this consumer row.
 ///
@@ -418,10 +289,6 @@ pub(crate) fn bind_double_formula<E: EvalAtRow>(
     }
 }
 
-pub(crate) fn term<'a, E: EvalAtRow>(coeff: i64, src: &'a P256EvalBigInt<E>) -> ComboTerm<'a, E> {
-    ComboTerm { coeff, src }
-}
-
 // ===========================================================================
 // Prover-side witness generation
 // ===========================================================================
@@ -437,68 +304,6 @@ pub(crate) struct DoubleFormulaWitness {
     pub y3: P256M31BigInt,
     pub z3: P256M31BigInt,
     pub reductions: [(i64, [i64; N_LIMBS]); DOUBLE_TOTAL_REDUCTIONS],
-}
-
-/// One M31 reduction source term `coeff · src`.
-pub(crate) struct M31Term<'a> {
-    pub coeff: i64,
-    pub src: &'a P256M31BigInt,
-}
-
-/// Solve `Σ coeff_j·src_j ≡ target (mod p)` for the signed quotient `q` and the
-/// signed carries: per limb `Σ coeff_j·src_j.limb[i] − target.limb[i] − q·p_i +
-/// prev − 2^13·carry_i = 0`, final carry 0. `q` is determined as
-/// `(Σcoeff·src_value − target_value) / p`; we then verify the carry chain
-/// closes. Returns `None` if no valid `(q, carries)` exists (a prover bug).
-pub(crate) fn solve_combo_reduction(
-    target: &P256M31BigInt,
-    terms: &[M31Term<'_>],
-    modulus: &P256M31BigInt,
-) -> Option<(i64, [i64; N_LIMBS])> {
-    let base = 1i64 << LIMB_BITS;
-    // q = (combo_value - target_value) / p over the integers. Compute the combo
-    // and target as big integers via limb weights in i128 (260-bit fits i128? no
-    // — 2^260 > i128). Instead derive q from the limb recurrence directly: run
-    // the carry chain symbolically with q unknown is awkward, so we search a
-    // small signed window for q (the combos' value/p ratio is bounded by the
-    // coefficient magnitudes, |q| ≤ ~16).
-    let coeff_sum: i64 = terms.iter().map(|t| t.coeff.abs()).sum();
-    let q_bound = coeff_sum + 2;
-    for q in -q_bound..=q_bound {
-        if let Some(carries) = try_combo_carries(target, terms, modulus, q, base) {
-            return Some((q, carries));
-        }
-    }
-    None
-}
-
-fn try_combo_carries(
-    target: &P256M31BigInt,
-    terms: &[M31Term<'_>],
-    modulus: &P256M31BigInt,
-    q: i64,
-    base: i64,
-) -> Option<[i64; N_LIMBS]> {
-    let mut carries = [0i64; N_LIMBS];
-    let mut prev = 0i64;
-    for (i, carry) in carries.iter_mut().enumerate() {
-        let mut combo = 0i64;
-        for t in terms {
-            combo += t.coeff * i64::from(t.src.limbs()[i].0);
-        }
-        let total =
-            combo - i64::from(target.limbs()[i].0) - q * i64::from(modulus.limbs()[i].0) + prev;
-        if total % base != 0 {
-            return None;
-        }
-        *carry = total / base;
-        prev = *carry;
-    }
-    if carries[N_LIMBS - 1] == 0 {
-        Some(carries)
-    } else {
-        None
-    }
 }
 
 /// Extract the M31 limbs of mul `k`'s result `R_k` from the flat consumed-mul

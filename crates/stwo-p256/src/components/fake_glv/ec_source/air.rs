@@ -145,6 +145,7 @@ impl FakeGlvProjectiveSourceProofClaim {
             &FakeGlvProjectiveSourceInteractionClaim::zero(),
             &FakeGlvPrimitiveEcRowRelation::dummy(),
             &ProjectiveRcbMulComponentRelations::dummy(),
+            &crate::components::hinted_mul::EcOpHeaderRelation::dummy(),
             &RangeCheckRelation::dummy(),
             &RangeCheckRelation::dummy(),
             &GammaDigestRelation::dummy(),
@@ -163,6 +164,7 @@ impl FakeGlvProjectiveSourceProofClaim {
             &FakeGlvProjectiveSourceInteractionClaim::zero(),
             &FakeGlvPrimitiveEcRowRelation::dummy(),
             &ProjectiveRcbMulComponentRelations::dummy(),
+            &crate::components::hinted_mul::EcOpHeaderRelation::dummy(),
             &RangeCheckRelation::dummy(),
             &RangeCheckRelation::dummy(),
             &GammaDigestRelation::dummy(),
@@ -181,6 +183,7 @@ impl FakeGlvProjectiveSourceProofClaim {
             &FakeGlvProjectiveSourceInteractionClaim::zero(),
             &FakeGlvPrimitiveEcRowRelation::dummy(),
             &ProjectiveRcbMulComponentRelations::dummy(),
+            &crate::components::hinted_mul::EcOpHeaderRelation::dummy(),
             &RangeCheckRelation::dummy(),
             &RangeCheckRelation::dummy(),
             &GammaDigestRelation::dummy(),
@@ -272,6 +275,7 @@ impl FakeGlvProjectiveSourceComponents {
         interaction_claim: &FakeGlvProjectiveSourceInteractionClaim,
         relation: &FakeGlvPrimitiveEcRowRelation,
         mul_relations: &ProjectiveRcbMulComponentRelations,
+        header: &crate::components::hinted_mul::EcOpHeaderRelation,
         range13: &RangeCheckRelation,
         signed_carry: &RangeCheckRelation,
         gamma_digest: &GammaDigestRelation,
@@ -294,6 +298,7 @@ impl FakeGlvProjectiveSourceComponents {
                     log_size,
                     relation: relation.clone(),
                     mul_result: mul_relations.mul_result.clone(),
+                    header: header.clone(),
                     gamma_digest: gamma_digest.clone(),
                     gamma_challenge: gamma_challenge.clone(),
                 },
@@ -444,6 +449,8 @@ pub struct FakeGlvProjectiveSourceEval {
     /// The hinted provider's wide mul relation (operands/results consumed
     /// per `(source, mul, role, limbs)` tuple).
     pub mul_result: crate::projective_air::ProjectiveRcbMulResultRelation,
+    /// EC-op header link: PROVIDED (`−has_muls`) here, CONSUMED by the silo.
+    pub header: crate::components::hinted_mul::EcOpHeaderRelation,
     /// γ-digest reshape (docs/gamma-digest-design.md): the formula blocks'
     /// range13 + signed-carry values are bound into two per-row digests
     /// yielded on this relation; the tall expander components re-expand them
@@ -658,6 +665,22 @@ impl FrameworkEval for FakeGlvProjectiveSourceEval {
             &signed_carry_values,
         );
 
+        // EC-op header YIELD (−has_muls): tuple
+        // (source_index, op, output_inf, lhs_inf, rhs_inf), consumed 1:1 by the
+        // silo group header. Infinity-operand MixedAdd rows have has_muls = 0 and
+        // no silo group, so they yield nothing — the relation nets to zero.
+        eval.add_to_relation(RelationEntry::new(
+            &self.header,
+            -E::EF::from(consumed_muls.has_muls.clone()),
+            &[
+                source_index.clone(),
+                op.clone(),
+                output.inf(),
+                lhs.inf(),
+                rhs.inf(),
+            ],
+        ));
+
         eval.finalize_logup_batched(&fake_glv_consumer_logup_batching());
         eval
     }
@@ -815,9 +838,10 @@ const PROJECTIVE_RCB_MUL_RESULT_ROLES: [u32; 3] = [
 pub(crate) const FAKE_GLV_CONSUMER_LOGUP_BATCH: usize = 2;
 
 /// Total LogUp entries the consumer eval emits (EC-row consume + wide mul
-/// consumes + the two γ-digest yields), in emission order.
+/// consumes + the two γ-digest yields + the EC-op header yield), in emission
+/// order.
 pub(crate) fn fake_glv_consumer_logup_entries() -> usize {
-    1 + (PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS / (3 * N_LIMBS)) * 3 + 2
+    1 + (PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS / (3 * N_LIMBS)) * 3 + 2 + 1
 }
 
 /// Consumer logup batching: pairs, except the operand-dedup slots whose
@@ -926,6 +950,7 @@ pub(crate) fn gen_fake_glv_projective_source_consumer_interaction_trace(
     base: &[M31ColumnEval],
     ec_row_relation: &FakeGlvPrimitiveEcRowRelation,
     mul_result_relation: &ProjectiveRcbMulResultRelation,
+    header_relation: &crate::components::hinted_mul::EcOpHeaderRelation,
     gamma_digest_relation: &GammaDigestRelation,
     gamma_challenge: &GammaChallenge,
 ) -> FakeGlvProjectiveSourceConsumerInteraction {
@@ -1004,29 +1029,98 @@ pub(crate) fn gen_fake_glv_projective_source_consumer_interaction_trace(
                 numerator[lane] = -SecureField::from(active);
                 denominator[lane] = gamma_digest_relation.combine(&tuple);
             }
-            (
-                PackedQM31::from_array(numerator),
-                PackedQM31::from_array(denominator),
-            )
-        },
+            numerators.push(PackedQM31::from_array(numerator));
+            denominators.push(PackedQM31::from_array(denominator));
+        }
+        entries.push((numerators, denominators));
+    }
+
+    // EC-op header YIELD (−has_muls): tuple
+    // (source_index, op, output_inf, lhs_inf, rhs_inf). Appended LAST, matching
+    // the eval's emission order.
+    let lhs_inf_col = 5 + PREPARED_TABLE_EC_POINT_COLUMNS - 1;
+    let rhs_inf_col = 5 + 2 * PREPARED_TABLE_EC_POINT_COLUMNS - 1;
+    let output_inf_col = 5 + 3 * PREPARED_TABLE_EC_POINT_COLUMNS - 1;
+    let header_numerators: Vec<PackedQM31> = (0..vec_rows)
+        .map(|vec_row| -PackedQM31::from(base[FAKE_GLV_PRIMITIVE_EC_HAS_MULS_COL].data[vec_row]))
+        .collect();
+    entries.push((
+        header_numerators,
+        (0..vec_rows)
+            .map(|vec_row| {
+                header_relation.combine(&[
+                    base[1].data[vec_row],
+                    base[4].data[vec_row],
+                    base[output_inf_col].data[vec_row],
+                    base[lhs_inf_col].data[vec_row],
+                    base[rhs_inf_col].data[vec_row],
+                ])
+            })
+            .collect(),
+    ));
+
+    assert_eq!(entries.len(), fake_glv_consumer_logup_entries());
+    let mut logup = LogupTraceGenerator::new(log_size);
+    crate::range_checks::write_logup_columns_with_batching(
+        &mut logup,
+        &entries,
+        &fake_glv_consumer_logup_batching(),
     );
     let (columns, _total) = logup.finalize_last();
 
     // Sub-sums (unpacked `SecureField`): the EC-row consumer sum, mul-result
-    // consumer sum, and the γ-digest yield sum. Computed analytically so the
-    // proof's `relation_balances()` can net each relation independently.
+    // consumer sum, the γ-digest yield sum, and the header yield sum. Computed
+    // analytically so the proof's `relation_balances()` can net each relation
+    // independently.
     let (ec_row_sum, mul_result_sum) =
         fake_glv_projective_source_consumer_sums(base, ec_row_relation, mul_result_relation);
     let gamma_yield_sum = instances
         .iter()
         .map(|instance| gamma_digest_yield_sum(instance, gamma_challenge, gamma_digest_relation))
         .sum();
+    let header_yield_sum = fake_glv_projective_source_header_yield_sum(
+        base,
+        header_relation,
+        lhs_inf_col,
+        rhs_inf_col,
+        output_inf_col,
+    );
     FakeGlvProjectiveSourceConsumerInteraction {
         columns,
         ec_row_sum,
         mul_result_sum,
         gamma_yield_sum,
+        header_yield_sum,
     }
+}
+
+/// Analytic header-yield sum (−has_muls over active op rows with muls), matching
+/// the eval's header yield entry. Gated by `has_muls != 0`.
+fn fake_glv_projective_source_header_yield_sum(
+    base: &[M31ColumnEval],
+    header_relation: &crate::components::hinted_mul::EcOpHeaderRelation,
+    lhs_inf_col: usize,
+    rhs_inf_col: usize,
+    output_inf_col: usize,
+) -> SecureField {
+    let log_size = base[0].domain.log_size();
+    let mut denominators = Vec::new();
+    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+        for lane in 0..(1 << LOG_N_LANES) {
+            let has_muls = base[FAKE_GLV_PRIMITIVE_EC_HAS_MULS_COL].data[vec_row].to_array()[lane];
+            if has_muls == M31::from_u32_unchecked(0) {
+                continue;
+            }
+            denominators.push(header_relation.combine(&[
+                base[1].data[vec_row].to_array()[lane],
+                base[4].data[vec_row].to_array()[lane],
+                base[output_inf_col].data[vec_row].to_array()[lane],
+                base[lhs_inf_col].data[vec_row].to_array()[lane],
+                base[rhs_inf_col].data[vec_row].to_array()[lane],
+            ]));
+        }
+    }
+    -crate::range_checks::batched_inverse_sum(&denominators)
 }
 
 /// Output of the fake-GLV projective-source consumer interaction-trace
@@ -1038,6 +1132,9 @@ pub(crate) struct FakeGlvProjectiveSourceConsumerInteraction {
     /// Σ of the two γ-digest yields (−active); balances against the tall
     /// expanders' `digest_use_sum`s.
     pub gamma_yield_sum: SecureField,
+    /// Σ of the EC-op header yields (−has_muls); balances against the silo's
+    /// header consume.
+    pub header_yield_sum: SecureField,
 }
 
 /// Base-trace column indices the Range13 USES read for the MixedAdd formula, in

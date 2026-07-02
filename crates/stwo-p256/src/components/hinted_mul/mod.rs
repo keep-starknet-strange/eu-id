@@ -88,6 +88,22 @@
 //! today, so the EC-formula consumers are untouched.
 
 pub mod air;
+pub mod formula_bind;
 pub mod trace;
 pub mod wide;
 pub mod witness;
+
+use stwo_constraint_framework::relation;
+
+/// Header relation linking each projective-source consumer op row to its silo
+/// group header. Tuple: `(source_index, op, output_inf, lhs_inf, rhs_inf)`.
+///
+/// PROVIDED (`−has_muls`) by each projective-source consumer (fake_glv
+/// ec_source + prepared_table) on every op row that emits silo muls; CONSUMED
+/// (`+is_proj_mul_0`) by the silo (hinted_mul) group-header row (the
+/// `mul_index == 0` row of each proj group). Infinity-operand MixedAdd rows
+/// have `has_muls = 0` and no silo group, so they contribute nothing to either
+/// side — the relation nets to zero 1:1 across all proj groups.
+pub const EC_OP_HEADER_RELATION_ARITY: usize = 5;
+
+relation!(EcOpHeaderRelation, EC_OP_HEADER_RELATION_ARITY);

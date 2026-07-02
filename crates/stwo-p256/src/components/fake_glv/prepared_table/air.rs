@@ -365,6 +365,8 @@ pub struct PreparedTableProjectiveSourceEval {
     /// The hinted provider's wide mul relation (operands/results consumed
     /// per `(source, mul, role, limbs)` tuple).
     pub mul_result: crate::projective_air::ProjectiveRcbMulResultRelation,
+    /// EC-op header link: PROVIDED (`−has_muls`) here, CONSUMED by the silo.
+    pub header: crate::components::hinted_mul::EcOpHeaderRelation,
     /// γ-digest reshape (docs/gamma-digest-design.md): the formula blocks'
     /// range13 + signed-carry values are bound into two per-row digests
     /// yielded on this relation; the tall expander components re-expand them
@@ -577,6 +579,21 @@ impl FrameworkEval for PreparedTableProjectiveSourceEval {
             crate::range_checks::encode_signed_carry(0),
             &signed_carry_values,
         );
+
+        // EC-op header YIELD (−has_muls): tuple
+        // (source_index, op, output_inf, lhs_inf, rhs_inf), consumed 1:1 by the
+        // silo group header. Same tuple/order as the fake-GLV source.
+        eval.add_to_relation(RelationEntry::new(
+            &self.header,
+            -E::EF::from(consumed_muls.has_muls.clone()),
+            &[
+                source_index.clone(),
+                op.clone(),
+                output.inf(),
+                lhs.inf(),
+                rhs.inf(),
+            ],
+        ));
 
         eval.finalize_logup_batched(
             &crate::components::fake_glv::prepared_table::interaction::prepared_consumer_logup_batching(),

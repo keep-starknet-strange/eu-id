@@ -89,6 +89,15 @@ pub struct ProjectiveRcbAirRow {
     pub op: ProjectiveEcOp,
     pub output_projective: ProjectivePoint,
     pub muls: Vec<ProjectiveRcbMulRow>,
+    /// Infinity flags of the source EC op's affine operands/output, copied from
+    /// the `ProjectiveEcRow`'s `PreparedAffinePoint`s (`inf.0 == 1`). Threaded
+    /// through the silo schedule for the `EcOpHeaderRelation` header tuple
+    /// `(source_index, op, output_inf, lhs_inf, rhs_inf)`. Only meaningful for
+    /// proj-scope rows; final_add / public_key_curve constructors fill `false`
+    /// (their flags are never read).
+    pub lhs_inf: bool,
+    pub rhs_inf: bool,
+    pub output_inf: bool,
 }
 
 /// Number of mul-result limb values one EC op contributes to a projective-source
@@ -254,6 +263,9 @@ impl ProjectiveRcbAirRow {
             op: row.op,
             output_projective,
             muls,
+            lhs_inf: row.lhs_affine.inf.0 == 1,
+            rhs_inf: row.rhs_affine.inf.0 == 1,
+            output_inf: row.output_affine.inf.0 == 1,
         })
     }
 

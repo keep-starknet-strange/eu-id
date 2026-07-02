@@ -231,6 +231,10 @@ impl FinalAddClaim {
             op: ProjectiveEcOp::Double,
             output_projective: ProjectivePoint::infinity(),
             muls,
+            // Header flags are never read for final_add's non-proj source range.
+            lhs_inf: false,
+            rhs_inf: false,
+            output_inf: false,
         };
         let mul_trace = ProjectiveRcbAirTraceClaim {
             rows: vec![air_row],

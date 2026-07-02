@@ -547,9 +547,10 @@ const PROJECTIVE_RCB_MUL_RESULT_ROLES: [u32; 3] = [
 pub(crate) const PREPARED_CONSUMER_LOGUP_BATCH: usize = 2;
 
 /// Total LogUp entries the consumer eval emits (EC-row consume + wide mul
-/// consumes + the two γ-digest yields), in emission order.
+/// consumes + the two γ-digest yields + the EC-op header yield), in emission
+/// order.
 pub(crate) fn prepared_consumer_logup_entries() -> usize {
-    1 + (PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS / (3 * N_LIMBS)) * 3 + 2
+    1 + (PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS / (3 * N_LIMBS)) * 3 + 2 + 1
 }
 
 /// Consumer logup batching: pairs, except the operand-dedup slots whose
@@ -638,6 +639,7 @@ pub(crate) fn gen_prepared_table_projective_source_consumer_interaction_trace(
     base: &[M31ColumnEval],
     ec_row_relation: &PreparedTableEcRowRelation,
     mul_result_relation: &ProjectiveRcbMulResultRelation,
+    header_relation: &crate::components::hinted_mul::EcOpHeaderRelation,
     gamma_digest_relation: &GammaDigestRelation,
     gamma_challenge: &GammaChallenge,
 ) -> PreparedTableProjectiveSourceConsumerInteraction {
@@ -714,11 +716,45 @@ pub(crate) fn gen_prepared_table_projective_source_consumer_interaction_trace(
                 numerator[lane] = -SecureField::from(active);
                 denominator[lane] = gamma_digest_relation.combine(&tuple);
             }
-            (
-                PackedQM31::from_array(numerator),
-                PackedQM31::from_array(denominator),
-            )
-        },
+            numerators.push(PackedQM31::from_array(numerator));
+            denominators.push(PackedQM31::from_array(denominator));
+        }
+        entries.push((numerators, denominators));
+    }
+
+    // EC-op header YIELD (−has_muls): tuple
+    // (source_index, op, output_inf, lhs_inf, rhs_inf). The metadata prefix is 6
+    // columns (`table_index` follows `op`), so points start at column 6; inf is
+    // the last (offset 40) of each 41-column point.
+    let lhs_inf_col = 6 + PREPARED_TABLE_EC_POINT_COLUMNS - 1;
+    let rhs_inf_col = 6 + 2 * PREPARED_TABLE_EC_POINT_COLUMNS - 1;
+    let output_inf_col = 6 + 3 * PREPARED_TABLE_EC_POINT_COLUMNS - 1;
+    let header_numerators: Vec<PackedQM31> = (0..vec_rows)
+        .map(|vec_row| {
+            -PackedQM31::from(base[PREPARED_TABLE_PROJECTIVE_SOURCE_HAS_MULS_COL].data[vec_row])
+        })
+        .collect();
+    entries.push((
+        header_numerators,
+        (0..vec_rows)
+            .map(|vec_row| {
+                header_relation.combine(&[
+                    base[1].data[vec_row],
+                    base[4].data[vec_row],
+                    base[output_inf_col].data[vec_row],
+                    base[lhs_inf_col].data[vec_row],
+                    base[rhs_inf_col].data[vec_row],
+                ])
+            })
+            .collect(),
+    ));
+
+    assert_eq!(entries.len(), prepared_consumer_logup_entries());
+    let mut logup = LogupTraceGenerator::new(log_size);
+    crate::range_checks::write_logup_columns_with_batching(
+        &mut logup,
+        &entries,
+        &prepared_consumer_logup_batching(),
     );
     let (columns, _total) = logup.finalize_last();
 
@@ -728,12 +764,50 @@ pub(crate) fn gen_prepared_table_projective_source_consumer_interaction_trace(
         .iter()
         .map(|instance| gamma_digest_yield_sum(instance, gamma_challenge, gamma_digest_relation))
         .sum();
+    let header_yield_sum = prepared_table_projective_source_header_yield_sum(
+        base,
+        header_relation,
+        lhs_inf_col,
+        rhs_inf_col,
+        output_inf_col,
+    );
     PreparedTableProjectiveSourceConsumerInteraction {
         columns,
         ec_row_sum,
         mul_result_sum,
         gamma_yield_sum,
+        header_yield_sum,
     }
+}
+
+/// Analytic header-yield sum (−has_muls over active op rows with muls), matching
+/// the eval's header yield entry. Gated by `has_muls != 0`.
+fn prepared_table_projective_source_header_yield_sum(
+    base: &[M31ColumnEval],
+    header_relation: &crate::components::hinted_mul::EcOpHeaderRelation,
+    lhs_inf_col: usize,
+    rhs_inf_col: usize,
+    output_inf_col: usize,
+) -> SecureField {
+    let log_size = base[0].domain.log_size();
+    let mut denominators = Vec::new();
+    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+        for lane in 0..(1 << LOG_N_LANES) {
+            let has_muls =
+                base[PREPARED_TABLE_PROJECTIVE_SOURCE_HAS_MULS_COL].data[vec_row].to_array()[lane];
+            if has_muls == M31::from_u32_unchecked(0) {
+                continue;
+            }
+            denominators.push(header_relation.combine(&[
+                base[1].data[vec_row].to_array()[lane],
+                base[4].data[vec_row].to_array()[lane],
+                base[output_inf_col].data[vec_row].to_array()[lane],
+                base[lhs_inf_col].data[vec_row].to_array()[lane],
+                base[rhs_inf_col].data[vec_row].to_array()[lane],
+            ]));
+        }
+    }
+    -crate::range_checks::batched_inverse_sum(&denominators)
 }
 
 /// Output of the prepared-table projective-source consumer interaction-trace
@@ -744,6 +818,9 @@ pub(crate) struct PreparedTableProjectiveSourceConsumerInteraction {
     pub mul_result_sum: SecureField,
     /// Σ of the two γ-digest yields (−active).
     pub gamma_yield_sum: SecureField,
+    /// Σ of the EC-op header yields (−has_muls); balances against the silo's
+    /// header consume.
+    pub header_yield_sum: SecureField,
 }
 
 /// Base-trace column indices the Range13 USES read for the MixedAdd formula, in

@@ -986,11 +986,12 @@ fn current_p256_proof_pipeline_rejects_public_key_off_curve_in_air() {
         .extend_from_projective_rcb(
             &proof.claim.final_add.mul_trace,
             proof.claim.final_add.hinted_source_offset,
+            false,
         )
         .expect("final-add muls re-extend");
     let pkc_slice = public_key_on_curve_slice_claim(&proof.claim).expect("2*G slice claim builds");
     hinted
-        .extend_from_projective_rcb(&pkc_slice.mul_trace, pkc_slice.hinted_source_offset)
+        .extend_from_projective_rcb(&pkc_slice.mul_trace, pkc_slice.hinted_source_offset, false)
         .expect("curve-check muls re-extend");
     proof.claim.hinted_mul_trace = hinted;
 

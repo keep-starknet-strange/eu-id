@@ -37,6 +37,7 @@ use crate::components::hinted_mul::trace::{
     hinted_mul_signed_uses, HintedMulRelations, HintedMulTraceClaim,
 };
 use crate::components::hinted_mul::witness::HintedMulWitnessError;
+use crate::components::hinted_mul::EcOpHeaderRelation;
 use crate::ecdsa::ecdsa_verify;
 use crate::fake_glv_chain::{FakeGlvChainClaim, FakeGlvChainError, FakeGlvPrimitiveEcTraceClaim};
 use crate::fake_glv_chain_continuity::{
@@ -263,8 +264,11 @@ impl P256ProofClaim {
         )?;
         let mut hinted_mul_trace =
             HintedMulTraceClaim::from_projective_rcb(&projective_rcb_air_trace)?;
-        hinted_mul_trace
-            .extend_from_projective_rcb(&final_add.mul_trace, final_add.hinted_source_offset)?;
+        hinted_mul_trace.extend_from_projective_rcb(
+            &final_add.mul_trace,
+            final_add.hinted_source_offset,
+            false,
+        )?;
         // Public-key curve-check muls ride the hinted provider right after.
         let public_key_curve_slice = public_key_slice_from_check(
             &public_key_check,
@@ -273,6 +277,7 @@ impl P256ProofClaim {
         hinted_mul_trace.extend_from_projective_rcb(
             &public_key_curve_slice.mul_trace,
             public_key_curve_slice.hinted_source_offset,
+            false,
         )?;
         let prepared_use_counts =
             PreparedPointUseCountClaim::from_selector_claim(&fake_glv_selectors)?;
@@ -390,6 +395,7 @@ impl P256ProofClaim {
         hinted_mul_trace.extend_from_projective_rcb(
             &base.final_add.mul_trace,
             base.final_add.hinted_source_offset,
+            false,
         )?;
         let public_key_curve_slice = public_key_slice_from_check(
             &base.public_key_check,
@@ -398,6 +404,7 @@ impl P256ProofClaim {
         hinted_mul_trace.extend_from_projective_rcb(
             &public_key_curve_slice.mul_trace,
             public_key_curve_slice.hinted_source_offset,
+            false,
         )?;
         let prepared_trace = prepared_table.prepared_point_trace(&base.prepared_use_counts)?;
 
@@ -1018,6 +1025,11 @@ struct P256CurrentAirRelations {
     public_key_on_curve: PublicKeyCurveSliceRelations,
     projective_rcb_air: ProjectiveRcbMulComponentRelations,
     hinted_signed_h: RangeCheckRelation,
+    /// Phase-2: silo formula reduction carries, signed table at the projective
+    /// bound. A distinct relation instance from the (still-live) consumer
+    /// signed-carry providers; dedups only the preprocessed value/active columns
+    /// by equation name.
+    hinted_signed_formula: RangeCheckRelation,
     hinted_challenge: HintedMulChallenge,
     /// γ-digest reshape: the digest relation + post-base-commit challenge
     /// shared by every adopting wide component and its tall expanders.
@@ -1029,6 +1041,11 @@ struct P256CurrentAirRelations {
     /// Final EC-addition sub-graph relations (mul engine + result + output).
     /// `hint` is the same `final_check_hint` relation as above.
     final_add: FinalAddRelations,
+    /// EC-op header link: silo (hinted_mul) consumes the header tuple on each
+    /// proj group header row; the projective-source consumers (fake_glv
+    /// ec_source + prepared_table) provide it. Placed OUTSIDE the
+    /// scalar_mod_mul-related fields; drawn LAST to minimize transcript churn.
+    ec_op_header: EcOpHeaderRelation,
 }
 
 fn p256_gamma_max_padded_values() -> usize {
@@ -1087,6 +1104,7 @@ impl P256CurrentAirRelations {
             ),
             projective_rcb_air: ProjectiveRcbMulComponentRelations::dummy(),
             hinted_signed_h: RangeCheckRelation::dummy(),
+            hinted_signed_formula: RangeCheckRelation::dummy(),
             hinted_challenge: HintedMulChallenge::from_z(SecureField::from(
                 M31::from_u32_unchecked(2),
             )),
@@ -1111,6 +1129,7 @@ impl P256CurrentAirRelations {
                     p256_gamma_max_padded_values(),
                 ),
             },
+            ec_op_header: EcOpHeaderRelation::dummy(),
         }
     }
 
@@ -1186,6 +1205,11 @@ impl P256CurrentAirRelations {
                 gamma_digest: gamma_digest.clone(),
                 gamma_challenge: gamma_challenge.clone(),
             },
+            // Drawn LAST (after all scalar_mod_mul + final_add relations).
+            ec_op_header: EcOpHeaderRelation::draw(channel),
+            // Phase-2 silo formula signed-carry relation, appended after the
+            // header relation (the very end of the draw order).
+            hinted_signed_formula: RangeCheckRelation::draw(channel),
         }
     }
 }
@@ -1273,6 +1297,7 @@ impl P256CurrentAirComponents {
                     final_check_hint: Some(relations.final_check_hint.clone()),
                 },
                 &relations.projective_rcb_air,
+                &relations.ec_op_header,
                 &relations.prepared_table_projective_range13,
                 &relations.prepared_table_projective_signed_carry,
                 &relations.gamma_digest,
@@ -1286,6 +1311,7 @@ impl P256CurrentAirComponents {
                 &interaction_claim.fake_glv_projective_source,
                 &relations.fake_glv_projective_source,
                 &relations.projective_rcb_air,
+                &relations.ec_op_header,
                 &relations.fake_glv_projective_range13,
                 &relations.fake_glv_projective_signed_carry,
                 &relations.gamma_digest,
@@ -1373,14 +1399,15 @@ impl P256CurrentAirComponents {
                     gamma_signed: interaction_claim.hinted_mul.gamma_signed,
                     range13: interaction_claim.hinted_mul.range13,
                     signed_h: interaction_claim.hinted_mul.signed_h,
+                    signed_formula: interaction_claim.hinted_mul.signed_formula,
                 },
                 &relations.hinted_challenge,
                 &HintedMulRelations {
                     range13: relations.projective_rcb_air.range13.clone(),
                     signed_h: relations.hinted_signed_h.clone(),
                     mul_result: relations.projective_rcb_air.mul_result.clone(),
-                    gamma_digest: relations.gamma_digest.clone(),
-                    gamma_challenge: relations.gamma_challenge.clone(),
+                    header: relations.ec_op_header.clone(),
+                    signed_formula: relations.hinted_signed_formula.clone(),
                 },
             ),
             final_add: FinalAddComponents::new(
@@ -1946,6 +1973,13 @@ impl P256ProofDraft {
             .gen_multiplicity_trace(hinted_mul_range13_uses(&self.claim.hinted_mul_trace));
         let hinted_signed_h_multiplicity = hinted_mul_signed_table_claim()
             .gen_multiplicity_trace(hinted_mul_signed_uses(&self.claim.hinted_mul_trace));
+        // Phase-2 formula signed-carry provider multiplicity (projective bound).
+        let hinted_signed_formula_multiplicity =
+            crate::projective_air::projective_rcb_signed_carry_claim().gen_multiplicity_trace(
+                crate::components::hinted_mul::trace::hinted_mul_formula_signed_uses(
+                    &self.claim.hinted_mul_trace,
+                ),
+            );
         let final_add =
             gen_final_add_base_trace(&self.claim.final_add, claim.final_add.log_sizes())?;
 
@@ -1992,6 +2026,7 @@ impl P256ProofDraft {
         columns.extend(hinted_gamma_signed_base.clone());
         columns.push(hinted_range13_multiplicity.clone());
         columns.push(hinted_signed_h_multiplicity.clone());
+        columns.push(hinted_signed_formula_multiplicity.clone());
         columns.extend(final_add);
 
         Ok(P256CurrentAirBaseTrace {
@@ -2025,6 +2060,7 @@ impl P256ProofDraft {
             hinted_mul_base,
             hinted_range13_multiplicity,
             hinted_signed_h_multiplicity,
+            hinted_signed_formula_multiplicity,
         })
     }
 
@@ -2087,6 +2123,7 @@ impl P256ProofDraft {
             &base.prepared_table_consumer,
             &relations.prepared_table,
             &relations.projective_rcb_air.mul_result,
+            &relations.ec_op_header,
             &relations.gamma_digest,
             &relations.gamma_challenge,
         );
@@ -2137,6 +2174,7 @@ impl P256ProofDraft {
             &base.fake_glv_projective_consumer,
             &relations.fake_glv_projective_source,
             &relations.projective_rcb_air.mul_result,
+            &relations.ec_op_header,
             &relations.gamma_digest,
             &relations.gamma_challenge,
         );
@@ -2272,31 +2310,8 @@ impl P256ProofDraft {
                 range13: relations.projective_rcb_air.range13.clone(),
                 signed_h: relations.hinted_signed_h.clone(),
                 mul_result: relations.projective_rcb_air.mul_result.clone(),
-                gamma_digest: relations.gamma_digest.clone(),
-                gamma_challenge: relations.gamma_challenge.clone(),
-            },
-        );
-        let [hinted_gamma_range13_instance, hinted_gamma_signed_instance] =
-            hinted_mul_gamma_instances(&self.claim.hinted_mul_trace);
-        let (
-            (hinted_gamma_range13_interaction, hinted_gamma_range13_claim),
-            (hinted_gamma_signed_interaction, hinted_gamma_signed_claim),
-        ) = rayon::join(
-            || {
-                gen_gamma_tall_interaction_trace(
-                    &hinted_gamma_range13_instance,
-                    &relations.gamma_challenge,
-                    &relations.gamma_digest,
-                    &relations.projective_rcb_air.range13,
-                )
-            },
-            || {
-                gen_gamma_tall_interaction_trace(
-                    &hinted_gamma_signed_instance,
-                    &relations.gamma_challenge,
-                    &relations.gamma_digest,
-                    &relations.hinted_signed_h,
-                )
+                header: relations.ec_op_header.clone(),
+                signed_formula: relations.hinted_signed_formula.clone(),
             },
         );
         let (hinted_range13_interaction, hinted_range13_provider) =
@@ -2310,6 +2325,12 @@ impl P256ProofDraft {
                 &base.hinted_signed_h_multiplicity,
                 &hinted_mul_signed_table_claim().gen_value_column(),
                 &relations.hinted_signed_h,
+            );
+        let (hinted_signed_formula_interaction, hinted_signed_formula_provider) =
+            crate::range_checks::RangeCheckInteractionClaim::gen_interaction_trace(
+                &base.hinted_signed_formula_multiplicity,
+                &crate::projective_air::projective_rcb_signed_carry_claim().gen_value_column(),
+                &relations.hinted_signed_formula,
             );
         let (final_add_interaction, final_add_claim) = gen_final_add_interaction_trace(
             &self.claim.final_add,
@@ -2366,6 +2387,7 @@ impl P256ProofDraft {
         columns.extend(hinted_gamma_signed_interaction);
         columns.extend(hinted_range13_interaction);
         columns.extend(hinted_signed_h_interaction);
+        columns.extend(hinted_signed_formula_interaction);
         columns.extend(final_add_interaction);
 
         Ok((
@@ -2381,7 +2403,10 @@ impl P256ProofDraft {
                         claimed_sum: prepared_pinned_claim.claimed_sum,
                     },
                     consumer: crate::components::ComponentInteractionClaim {
-                        claimed_sum: prepared_consumer_claimed_sum,
+                        claimed_sum: prepared_consumer.ec_row_sum
+                            + prepared_consumer.mul_result_sum
+                            + prepared_consumer.gamma_yield_sum
+                            + prepared_consumer.header_yield_sum,
                     },
                     gamma_range13: prepared_gamma_range13_claim,
                     gamma_signed: prepared_gamma_signed_claim,
@@ -2394,7 +2419,10 @@ impl P256ProofDraft {
                         claimed_sum: fake_glv_provider_claim.claimed_sum,
                     },
                     consumer: crate::components::ComponentInteractionClaim {
-                        claimed_sum: fake_glv_consumer_claimed_sum,
+                        claimed_sum: fake_glv_consumer.ec_row_sum
+                            + fake_glv_consumer.mul_result_sum
+                            + fake_glv_consumer.gamma_yield_sum
+                            + fake_glv_consumer.header_yield_sum,
                     },
                     gamma_range13: fake_glv_gamma_range13_claim,
                     gamma_signed: fake_glv_gamma_signed_claim,
@@ -2450,6 +2478,7 @@ impl P256ProofDraft {
                     gamma_signed: hinted_gamma_signed_claim,
                     range13: hinted_range13_provider.claimed_sum,
                     signed_h: hinted_signed_h_provider.claimed_sum,
+                    signed_formula: hinted_signed_formula_provider.claimed_sum,
                 },
                 final_add: final_add_claim,
             },
@@ -2532,6 +2561,7 @@ struct P256CurrentAirBaseTrace {
     hinted_mul_base: ColumnVec<M31ColumnEval>,
     hinted_range13_multiplicity: M31ColumnEval,
     hinted_signed_h_multiplicity: M31ColumnEval,
+    hinted_signed_formula_multiplicity: M31ColumnEval,
 }
 
 /// All `ScalarModMul` instances merged into a single component set, block-major
