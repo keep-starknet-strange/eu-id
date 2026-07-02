@@ -907,9 +907,20 @@ mod tests {
         ];
 
         for (name, log_size, declared_bound, max_degree) in components {
+            // stwo's SubDomain composition evaluates the quotient on a domain
+            // of `2^declared` points; a degree-`d` constraint's quotient has
+            // degree `(d − 1) · 2^log_size`, so the bound must satisfy
+            // `declared ≥ log_size + ceil(log2(d − 1))` (min +1 for the FRI
+            // headroom). In particular `log_size + 1` covers d ≤ 3 — the
+            // pair-batched LogUp recurrence degree.
+            let required = log_size
+                + (max_degree.saturating_sub(1))
+                    .next_power_of_two()
+                    .trailing_zeros()
+                    .max(1);
             assert!(
-                declared_bound >= log_size + max_degree.next_power_of_two().trailing_zeros(),
-                "{name} declared bound does not cover expression degree"
+                declared_bound >= required,
+                "{name} declared bound {declared_bound} does not cover expression degree {max_degree} (requires {required})"
             );
         }
     }

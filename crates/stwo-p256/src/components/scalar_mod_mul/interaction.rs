@@ -683,11 +683,13 @@ mod tests {
         assert_eq!(traces.accumulators[0].domain.size(), 128);
         assert_eq!(traces.reduction_digits[0].domain.size(), 64);
 
-        assert_eq!(traces.canonical_scalars.len(), 60 * 4);
-        assert_eq!(traces.ab_chunks.len(), 9 * 4);
-        assert_eq!(traces.qn_chunks.len(), 7 * 4);
-        assert_eq!(traces.accumulators.len(), 31 * 4);
-        assert_eq!(traces.reduction_digits.len(), 6 * 4);
+        // Pair-batched widths: `ceil(solo_entries / 2)` SecureField columns,
+        // each expanding to 4 base-field columns.
+        assert_eq!(traces.canonical_scalars.len(), 30 * 4);
+        assert_eq!(traces.ab_chunks.len(), 5 * 4);
+        assert_eq!(traces.qn_chunks.len(), 4 * 4);
+        assert_eq!(traces.accumulators.len(), 16 * 4);
+        assert_eq!(traces.reduction_digits.len(), 3 * 4);
 
         assert_ne!(
             claim.canonical_scalars,
