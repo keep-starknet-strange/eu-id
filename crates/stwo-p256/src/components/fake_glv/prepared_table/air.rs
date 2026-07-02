@@ -18,10 +18,8 @@ use crate::prepared_point::{PREPARED_BASE_COUNT, TABLE16_INDEX};
 use crate::projective_air::ConsumedMulLimbs;
 use crate::types::U256;
 
-use super::super::ec_source::double_formula::{
-    bind_double_formula, SharedFormulaColumns, DOUBLE_TOTAL_REDUCTIONS,
-};
-use super::super::ec_source::mixed_add_formula::bind_mixed_add_formula;
+use super::super::ec_source::double_formula::{bind_double_formula, DOUBLE_TOTAL_REDUCTIONS};
+use super::super::ec_source::mixed_add_formula::{bind_mixed_add_formula, MixedAddFormulaColumns};
 use super::*;
 
 #[derive(Clone)]
@@ -397,10 +395,12 @@ impl FrameworkEval for PreparedTableProjectiveSourceEval {
         // C5 plumbing: consumed silo mul limbs (read after the points, matching
         // the base-trace layout).
         let mut consumed_muls = ConsumedMulLimbs::<E>::read(&mut eval);
-        // C5-2: one shared formula block. Double rows use the first 13
-        // reduction slots; MixedAdd rows use all 18 slots plus the two
-        // witnessed gate columns.
-        let formula_columns = SharedFormulaColumns::<E>::read(&mut eval);
+        // C5-2: the SHARED formula block (MixedAdd shape; the Double formula's
+        // columns are a strict prefix view of the same cells — the two ops'
+        // gates are mutually exclusive per row), read LAST (matching the
+        // base-trace layout appended after the consumed-mul block).
+        let mixed_columns = MixedAddFormulaColumns::<E>::read(&mut eval);
+        let double_columns = mixed_columns.double_view();
         let one = E::F::from(M31::from_u32_unchecked(1));
 
         eval.add_constraint(active.clone() * (active.clone() - one.clone()));
@@ -435,13 +435,7 @@ impl FrameworkEval for PreparedTableProjectiveSourceEval {
             y2: rhs.y_bigint(),
             output_x: output.x_bigint(),
             output_y: output.y_bigint(),
-            output_inf: output.inf(),
-            x3: formula_columns.x3.clone(),
-            y3: formula_columns.y3.clone(),
-            z3_double: formula_columns.z3.clone(),
-            z3_mixed: P256EvalBigInt::<E>::from_limbs(core::array::from_fn(|_| {
-                E::F::from(M31::from_u32_unchecked(0))
-            })),
+            z3: mixed_columns.z3.clone(),
         });
 
         let relation_values = prepared_table_ec_row_relation_values(
@@ -470,11 +464,14 @@ impl FrameworkEval for PreparedTableProjectiveSourceEval {
         // MixedAdd (op==0) and padding (active==0) are unaffected.
         let double_active = active.clone() * op.clone();
         let muls_view = consumed_muls.view();
-        // The binders COLLECT their range13 values; together with the signed
-        // reduction carries they feed the two γ-digest yields below (fixed
-        // order: Double block then MixedAdd block).
+        // The MixedAdd binder COLLECTS the range13 values; together with the
+        // signed reduction carries of the shared block they feed the two
+        // γ-digest yields below. The Double binder's collected values
+        // duplicate shared cells the MixedAdd-order list already digests
+        // once — they are discarded.
         let mut range13_values: Vec<E::F> = Vec::new();
         let mut signed_carry_values: Vec<E::F> = Vec::new();
+        let mut shared_cell_duplicates: Vec<E::F> = Vec::new();
         bind_double_formula(
             &mut eval,
             &double_active,
@@ -484,9 +481,12 @@ impl FrameworkEval for PreparedTableProjectiveSourceEval {
             &output.y_bigint(),
             &output.inf(),
             &muls_view,
-            &formula_columns,
-            &mut range13_values,
+            &double_columns,
+            &mut shared_cell_duplicates,
         );
+        // The shared block's cells hold whichever op's witness is active;
+        // padding hygiene and the digest collection happen once, below.
+        drop(shared_cell_duplicates);
 
         // C5-2: constrain the MixedAdd-op coordinate formula. `mixed_active`
         // (= active·(1−op)) is 1 only on active MixedAdd rows; the formula is
@@ -510,39 +510,36 @@ impl FrameworkEval for PreparedTableProjectiveSourceEval {
             &formula_columns,
             &mut range13_values,
         );
-        range13_values.clear();
-        for limb in lhs
-            .x_bigint()
-            .limbs()
-            .iter()
-            .chain(lhs.y_bigint().limbs())
-            .chain(rhs.x_bigint().limbs())
-            .chain(rhs.y_bigint().limbs())
-            .chain(output.x_bigint().limbs())
-            .chain(output.y_bigint().limbs())
-            .chain(formula_columns.x3.limbs())
-            .chain(formula_columns.y3.limbs())
-            .chain(formula_columns.z3.limbs())
-        {
-            range13_values.push(limb.clone());
-        }
-        for reduction in &formula_columns.reductions {
+        // Collect the shared block's reduction carries for the signed-carry
+        // digest (once — both formulas' witnesses live in the same cells).
+        for reduction in &mixed_columns.reductions {
             for carry in &reduction.carries {
                 signed_carry_values.push(carry.clone());
             }
         }
-        let no_muls = one.clone() - consumed_muls.has_muls.clone();
-        for value in formula_columns
+        // Padding hygiene: the shared prefix is zero on padding rows; on
+        // active rows it is constrained by whichever formula's gate is up.
+        let inactive = one.clone() - active.clone();
+        for value in mixed_columns
             .x3
             .limbs()
             .iter()
             .chain(formula_columns.y3.limbs())
             .chain(formula_columns.z3.limbs())
         {
-            eval.add_constraint(no_muls.clone() * value.clone());
+            eval.add_constraint(inactive.clone() * value.clone());
         }
-        for reduction in &formula_columns.reductions {
-            eval.add_constraint(no_muls.clone() * reduction.q.clone());
+        for reduction in &mixed_columns.reductions[..DOUBLE_TOTAL_REDUCTIONS] {
+            eval.add_constraint(inactive.clone() * reduction.q.clone());
+            for carry in &reduction.carries {
+                eval.add_constraint(inactive.clone() * carry.clone());
+            }
+        }
+        // The MixedAdd-only reduction suffix is zero on every non-MixedAdd row
+        // (Double rows use only the shared prefix).
+        let not_mixed = one.clone() - mixed_active.clone();
+        for reduction in &mixed_columns.reductions[DOUBLE_TOTAL_REDUCTIONS..] {
+            eval.add_constraint(not_mixed.clone() * reduction.q.clone());
             for carry in &reduction.carries {
                 eval.add_constraint(no_muls.clone() * carry.clone());
             }

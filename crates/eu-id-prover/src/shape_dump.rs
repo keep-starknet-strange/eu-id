@@ -131,6 +131,20 @@ fn shape_dump() {
         m.mix_claimed_sums(channel);
     }
     tb.commit(channel);
+
+    // Debug: per-family claimed-sum totals (imbalance hunting).
+    {
+        let mut grand = stwo::core::fields::qm31::QM31::from(stwo::core::fields::m31::M31::from(0u32));
+        for (name, m) in modules.iter() {
+            let s: stwo::core::fields::qm31::QM31 = m
+                .claimed_sums()
+                .into_iter()
+                .fold(grand - grand, |a, b| a + b);
+            println!("  module {name} claimed-sum total = {s:?}");
+            grand = grand + s;
+        }
+        println!("  GRAND claimed-sum total = {grand:?}");
+    }
     let preprocessed_ids: Vec<PreProcessedColumnId> = modules
         .iter()
         .flat_map(|(_, m)| m.preprocessed_column_ids())
@@ -158,4 +172,16 @@ fn shape_dump() {
             );
         }
     }
+
+    drop(modules);
+    let ic = p256.interaction_claim();
+    println!(
+        "  p256.prepared_table_projective_source.total = {:?}",
+        ic.prepared_table_projective_source.total()
+    );
+    println!(
+        "  p256.fake_glv_projective_source.total = {:?}",
+        ic.fake_glv_projective_source.total()
+    );
+    println!("  p256.final_add.total = {:?}", ic.final_add.total());
 }

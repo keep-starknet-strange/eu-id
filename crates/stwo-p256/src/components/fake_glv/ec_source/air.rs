@@ -32,7 +32,9 @@ use crate::projective_air::{
 };
 use stwo::prover::backend::simd::m31::N_LANES;
 
-use super::double_formula::{bind_double_formula, SharedFormulaColumns, DOUBLE_TOTAL_REDUCTIONS};
+use super::double_formula::{
+    bind_double_formula, DOUBLE_TOTAL_REDUCTIONS,
+};
 use super::mixed_add_formula::{
     bind_mixed_add_formula, MIXED_ADD_FORMULA_COLUMNS, MIXED_ADD_TOTAL_REDUCTIONS,
 };
@@ -88,9 +90,13 @@ pub const FAKE_GLV_PROJECTIVE_SOURCE_CONSUMER_TRACE_COLUMNS: usize =
     FAKE_GLV_PRIMITIVE_EC_SOURCE_TRACE_COLUMNS
         + CONSUMED_MUL_LIMBS_COLUMNS
         + MIXED_ADD_FORMULA_COLUMNS;
-/// Column index where the shared C5-2 formula block begins (after the
-/// consumed-mul block). The first `N_LIMBS` columns are the `x3` working value
-/// (then `y3`, `z3`, then the reduction witnesses).
+/// Column index where the SHARED formula block begins (after the consumed-mul
+/// block). The Double and MixedAdd formulas overlay the same cells — their
+/// gates (`active·op` vs `active·(1−op)`) are mutually exclusive per row and
+/// the Double block's shape is a strict prefix of the MixedAdd block's. The
+/// first `N_LIMBS` columns are the `x3` working value (then `y3`, `z3`, then
+/// the reduction witnesses; MixedAdd's witnessed gate columns sit at the
+/// block's tail).
 pub const FAKE_GLV_PROJECTIVE_FORMULA_OFFSET: usize =
     FAKE_GLV_PRIMITIVE_EC_SOURCE_TRACE_COLUMNS + CONSUMED_MUL_LIMBS_COLUMNS;
 /// Column index of the consumed-mul block's `has_muls` flag (the limb columns
@@ -472,10 +478,12 @@ impl FrameworkEval for FakeGlvProjectiveSourceEval {
         // equal to the silo's proven values; C5-2 (below) binds their operands
         // and the output to the Double-op coordinate formula.
         let mut consumed_muls = ConsumedMulLimbs::<E>::read(&mut eval);
-        // C5-2: one shared formula block. Double rows use the first 13
-        // reduction slots; MixedAdd rows use all 18 slots plus the two
-        // witnessed gate columns.
-        let formula_columns = SharedFormulaColumns::<E>::read(&mut eval);
+        // C5-2: the SHARED formula block (MixedAdd shape; the Double formula's
+        // columns are a strict prefix view of the same cells — the two ops'
+        // gates are mutually exclusive per row), read after the consumed-mul
+        // block.
+        let mixed_columns = MixedAddFormulaColumns::<E>::read(&mut eval);
+        let double_columns = mixed_columns.double_view();
         let one = E::F::from(M31::from_u32_unchecked(1));
 
         eval.add_constraint(active.clone() * (active.clone() - one.clone()));
@@ -510,13 +518,7 @@ impl FrameworkEval for FakeGlvProjectiveSourceEval {
             y2: rhs.y_bigint(),
             output_x: output.x_bigint(),
             output_y: output.y_bigint(),
-            output_inf: output.inf(),
-            x3: formula_columns.x3.clone(),
-            y3: formula_columns.y3.clone(),
-            z3_double: formula_columns.z3.clone(),
-            z3_mixed: crate::limbs::P256EvalBigInt::<E>::from_limbs(core::array::from_fn(|_| {
-                E::F::from(M31::from_u32_unchecked(0))
-            })),
+            z3: mixed_columns.z3.clone(),
         });
 
         let relation_values = fake_glv_primitive_ec_row_relation_values(
@@ -541,6 +543,9 @@ impl FrameworkEval for FakeGlvProjectiveSourceEval {
         // γ-digest sinks from the shared superset block.
         let mut range13_values: Vec<E::F> = Vec::new();
         let mut signed_carry_values: Vec<E::F> = Vec::new();
+        // The Double binder's collected values duplicate shared cells that the
+        // MixedAdd-order list below already digests once — discard them.
+        let mut shared_cell_duplicates: Vec<E::F> = Vec::new();
         let double_active = active.clone() * op.clone();
         let muls_view = consumed_muls.view();
         bind_double_formula(
@@ -552,9 +557,13 @@ impl FrameworkEval for FakeGlvProjectiveSourceEval {
             &output.y_bigint(),
             &output.inf(),
             &muls_view,
-            &formula_columns,
-            &mut range13_values,
+            &double_columns,
+            &mut shared_cell_duplicates,
         );
+        // The shared block's cells hold whichever op's witness is active;
+        // padding hygiene ((1 − active)-zeroing) and the digest collection
+        // both happen once, after the MixedAdd binder below.
+        drop(shared_cell_duplicates);
 
         // C5-2b: constrain the MixedAdd-op coordinate formula. `mixed_active`
         // (= active·(1−op)) is 1 only on active MixedAdd rows (op==0 ==
@@ -579,46 +588,37 @@ impl FrameworkEval for FakeGlvProjectiveSourceEval {
             &formula_columns,
             &mut range13_values,
         );
-        // Replace the binder-local concatenated value lists with the shared
-        // superset list. This keeps all active formula values checked while
-        // avoiding duplicate x3/y3/z3 and reduction-carry columns.
-        range13_values.clear();
-        for limb in lhs
-            .x_bigint()
-            .limbs()
-            .iter()
-            .chain(lhs.y_bigint().limbs())
-            .chain(rhs.x_bigint().limbs())
-            .chain(rhs.y_bigint().limbs())
-            .chain(output.x_bigint().limbs())
-            .chain(output.y_bigint().limbs())
-            .chain(formula_columns.x3.limbs())
-            .chain(formula_columns.y3.limbs())
-            .chain(formula_columns.z3.limbs())
-        {
-            range13_values.push(limb.clone());
-        }
-        for reduction in &formula_columns.reductions {
+        // Collect the shared block's reduction carries for the signed-carry
+        // digest (once — both formulas' witnesses live in the same cells).
+        for reduction in &mixed_columns.reductions {
             for carry in &reduction.carries {
                 signed_carry_values.push(carry.clone());
             }
         }
-        // The shared formula block is live only when the silo emitted muls
-        // (Double or finite-operand MixedAdd). This also tightens the previous
-        // no-op MixedAdd case, where witness convention zeroed the block but
-        // the AIR did not force it.
-        let no_muls = one.clone() - consumed_muls.has_muls.clone();
-        for value in formula_columns
+        // Padding hygiene: the shared prefix (working values + the reduction
+        // slots both formulas use) is zero on padding rows; on active rows it
+        // is constrained by whichever formula's gate is up.
+        let inactive = one.clone() - active.clone();
+        for value in mixed_columns
             .x3
             .limbs()
             .iter()
             .chain(formula_columns.y3.limbs())
             .chain(formula_columns.z3.limbs())
         {
-            eval.add_constraint(no_muls.clone() * value.clone());
+            eval.add_constraint(inactive.clone() * value.clone());
         }
-        for reduction in &formula_columns.reductions {
-            eval.add_constraint(no_muls.clone() * reduction.q.clone());
+        for reduction in &mixed_columns.reductions[..DOUBLE_TOTAL_REDUCTIONS] {
+            eval.add_constraint(inactive.clone() * reduction.q.clone());
+            for carry in &reduction.carries {
+                eval.add_constraint(inactive.clone() * carry.clone());
+            }
+        }
+        // The MixedAdd-only reduction suffix is zero on every non-MixedAdd row
+        // (Double rows use only the shared prefix).
+        let not_mixed = one.clone() - mixed_active.clone();
+        for reduction in &mixed_columns.reductions[DOUBLE_TOTAL_REDUCTIONS..] {
+            eval.add_constraint(not_mixed.clone() * reduction.q.clone());
             for carry in &reduction.carries {
                 eval.add_constraint(no_muls.clone() * carry.clone());
             }
@@ -847,11 +847,7 @@ fn fake_glv_consumed_mul_gen_layout() -> crate::projective_air::ConsumedMulGenLa
         y2_col: 5 + PREPARED_TABLE_EC_POINT_COLUMNS + N_LIMBS,
         output_x_col: 5 + 2 * PREPARED_TABLE_EC_POINT_COLUMNS,
         output_y_col: 5 + 2 * PREPARED_TABLE_EC_POINT_COLUMNS + N_LIMBS,
-        output_inf_col: 5 + 2 * PREPARED_TABLE_EC_POINT_COLUMNS + 2 * N_LIMBS,
-        x3_col: FAKE_GLV_PROJECTIVE_FORMULA_OFFSET,
-        y3_col: FAKE_GLV_PROJECTIVE_FORMULA_OFFSET + N_LIMBS,
-        z3_double_col: FAKE_GLV_PROJECTIVE_FORMULA_OFFSET + 2 * N_LIMBS,
-        z3_mixed_col: None,
+        z3_col: FAKE_GLV_PROJECTIVE_FORMULA_OFFSET + 2 * N_LIMBS,
         mul_limb_offset: FAKE_GLV_PRIMITIVE_EC_MUL_LIMB_OFFSET,
     }
 }
@@ -859,12 +855,14 @@ fn fake_glv_consumed_mul_gen_layout() -> crate::projective_air::ConsumedMulGenLa
 /// Range13 digest value order: the shared superset needed by both formula
 /// kinds: lhs, rhs, output, and the shared x3/y3/z3 working values.
 pub(crate) fn fake_glv_gamma_range13_columns() -> Vec<usize> {
-    mixed_add_formula_range13_use_columns()
+    let columns = mixed_add_formula_range13_use_columns();
+    columns
 }
 
 /// Signed-carry digest value order: all shared reduction carry slots.
 pub(crate) fn fake_glv_gamma_signed_carry_columns() -> Vec<usize> {
-    mixed_add_formula_signed_carry_use_columns()
+    let columns = mixed_add_formula_signed_carry_use_columns();
+    columns
 }
 
 /// Largest lane-padded digest value-list length across this component's two
@@ -1053,7 +1051,7 @@ fn mixed_add_formula_range13_use_columns() -> Vec<usize> {
     let rhs_y = rhs_x + N_LIMBS;
     let output_x = 5 + 2 * PREPARED_TABLE_EC_POINT_COLUMNS;
     let output_y = output_x + N_LIMBS;
-    // x3, y3, z3 are the first 3·N_LIMBS columns of the shared formula block.
+    // x3, y3, z3 are the first 3·N_LIMBS columns of the MixedAdd-formula block.
     let x3 = FAKE_GLV_PROJECTIVE_FORMULA_OFFSET;
     let mut cols = Vec::with_capacity(9 * N_LIMBS);
     for start in [
@@ -1253,41 +1251,40 @@ fn fake_glv_projective_source_trace_values(
         column += 1;
     }
     debug_assert_eq!(column, FAKE_GLV_PROJECTIVE_FORMULA_OFFSET);
-    // C5-2: one shared formula block. Double rows write the first 13 reduction
-    // slots and leave the mixed-only suffix/gates zero; finite MixedAdd rows
-    // write the full superset; no-op MixedAdd rows leave the block zero except
-    // for the witnessed `mixed_active=1, formula_gate=0` columns.
+    // The SHARED formula block: the Double witness (a strict prefix of the
+    // block) on Double rows, the MixedAdd witness on FINITE-operand MixedAdd
+    // rows. An infinity-operand MixedAdd (`has_muls = 0`) is a 0-mul no-op
+    // whose formula is gated off — its cells stay zero (the no-op
+    // `output = lhs` constraint needs no witness columns); padding rows stay
+    // all-zero. The two witnessed gate columns at the block's tail are
+    // constrained on EVERY row to `mixed_active = active·(1−op)` and
+    // `formula_gate = mixed_active·(1−rhs.inf)`: `(1, 1)` on a finite-mul
+    // MixedAdd row (written by `mixed_add_formula_trace_values`), `(1, 0)` on
+    // a no-op MixedAdd, `(0, 0)` on Double and padding rows (the zero
+    // default).
     let is_mixed = row.op == crate::projective::ProjectiveEcOp::MixedAdd;
     if row.op == crate::projective::ProjectiveEcOp::Double {
         let witness =
             super::double_formula::solve_double_formula_witness(&mul_limbs, &row.output_projective)
                 .ok_or(FakeGlvChainError::ProjectiveSourceInvalid)?;
-        for value in super::double_formula::double_formula_shared_trace_values(&witness) {
-            values[column] = value;
-            column += 1;
+        for (offset, value) in super::double_formula::double_formula_trace_values(&witness)
+            .into_iter()
+            .enumerate()
+        {
+            values[column + offset] = value;
         }
+        column += MIXED_ADD_FORMULA_COLUMNS;
     } else if is_mixed && has_muls {
         let witness = super::mixed_add_formula::solve_mixed_add_formula_witness(
             &mul_limbs,
             &row.output_projective,
         )
         .ok_or(FakeGlvChainError::ProjectiveSourceInvalid)?;
-        // `mixed_add_formula_trace_values` already writes the two witnessed gate
-        // columns as `(mixed_active, formula_gate) = (1, 1)` for this finite-mul
-        // MixedAdd row.
         for value in super::mixed_add_formula::mixed_add_formula_trace_values(&witness) {
             values[column] = value;
             column += 1;
         }
     } else {
-        // No witness block (Double / padding / infinity-operand no-op MixedAdd):
-        // the x3/y3/z3 + reduction cells stay zero. But the two witnessed gate
-        // columns are constrained on EVERY row to `mixed_active = active·(1−op)`
-        // and `formula_gate = mixed_active·(1−rhs.inf)`, so they must be written
-        // here too: a no-op MixedAdd (op == MIXED_ADD, has_muls == false ⇔
-        // rhs.inf == 1) has `mixed_active = 1`, `formula_gate = 0`; a Double has
-        // both `0`. (Padding rows are produced by the all-zero `resize`, where
-        // `active = 0` ⇒ both gates `0`, matching the definition.)
         let gate_base = column + super::mixed_add_formula::MIXED_ADD_GATE_OFFSET_IN_BLOCK;
         let gates = super::mixed_add_formula::mixed_add_gate_trace_values(is_mixed, false);
         values[gate_base] = gates[0];

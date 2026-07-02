@@ -620,9 +620,11 @@ fn prepared_table_projective_source_trace_values(
         column += 1;
     }
     debug_assert_eq!(column, PREPARED_TABLE_PROJECTIVE_SOURCE_FORMULA_OFFSET);
-    // C5-2: one shared formula block. Double rows write the first 13 reduction
-    // slots and leave the mixed-only suffix/gates zero; finite MixedAdd rows
-    // write the full superset.
+    // The SHARED formula block: the Double witness (a strict prefix of the
+    // block) on Double rows, the MixedAdd witness on finite-operand MixedAdd
+    // rows; the two witnessed gate columns at the block's tail are
+    // constrained on EVERY row, so the no-witness branch still writes them
+    // ((0, 0) on Double rows is the zero default).
     let is_mixed = projective_row.op == crate::projective::ProjectiveEcOp::MixedAdd;
     if projective_row.op == crate::projective::ProjectiveEcOp::Double {
         let witness = double_formula::solve_double_formula_witness(
@@ -630,10 +632,13 @@ fn prepared_table_projective_source_trace_values(
             &projective_row.output_projective,
         )
         .ok_or(PreparedTableError::ProjectiveSourceInvalid)?;
-        for value in double_formula::double_formula_shared_trace_values(&witness) {
-            values[column] = value;
-            column += 1;
+        for (offset, value) in double_formula::double_formula_trace_values(&witness)
+            .into_iter()
+            .enumerate()
+        {
+            values[column + offset] = value;
         }
+        column += mixed_add_formula::MIXED_ADD_FORMULA_COLUMNS;
     } else if is_mixed && has_muls {
         let witness = mixed_add_formula::solve_mixed_add_formula_witness(
             &mul_limbs,

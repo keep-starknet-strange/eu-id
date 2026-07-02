@@ -578,11 +578,7 @@ fn prepared_consumed_mul_gen_layout() -> crate::projective_air::ConsumedMulGenLa
         y2_col: 6 + PREPARED_TABLE_EC_POINT_COLUMNS + N_LIMBS,
         output_x_col: 6 + 2 * PREPARED_TABLE_EC_POINT_COLUMNS,
         output_y_col: 6 + 2 * PREPARED_TABLE_EC_POINT_COLUMNS + N_LIMBS,
-        output_inf_col: 6 + 2 * PREPARED_TABLE_EC_POINT_COLUMNS + 2 * N_LIMBS,
-        x3_col: PREPARED_TABLE_PROJECTIVE_SOURCE_FORMULA_OFFSET,
-        y3_col: PREPARED_TABLE_PROJECTIVE_SOURCE_FORMULA_OFFSET + N_LIMBS,
-        z3_double_col: PREPARED_TABLE_PROJECTIVE_SOURCE_FORMULA_OFFSET + 2 * N_LIMBS,
-        z3_mixed_col: None,
+        z3_col: PREPARED_TABLE_PROJECTIVE_SOURCE_FORMULA_OFFSET + 2 * N_LIMBS,
         mul_limb_offset: PREPARED_TABLE_PROJECTIVE_SOURCE_MUL_LIMB_OFFSET,
     }
 }
@@ -590,12 +586,14 @@ fn prepared_consumed_mul_gen_layout() -> crate::projective_air::ConsumedMulGenLa
 /// Range13 digest value order: the shared superset needed by both formula
 /// kinds: lhs, rhs, output, and the shared x3/y3/z3 working values.
 pub(crate) fn prepared_gamma_range13_columns() -> Vec<usize> {
-    prepared_mixed_add_formula_range13_use_columns()
+    let columns = prepared_mixed_add_formula_range13_use_columns();
+    columns
 }
 
 /// Signed-carry digest value order: all shared reduction carry slots.
 pub(crate) fn prepared_gamma_signed_carry_columns() -> Vec<usize> {
-    prepared_mixed_add_formula_signed_carry_use_columns()
+    let columns = prepared_mixed_add_formula_signed_carry_use_columns();
+    columns
 }
 
 /// The two γ-digest tall layouts for `rows` scheduled prepared-table rows.

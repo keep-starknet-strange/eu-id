@@ -88,8 +88,10 @@ pub const PREPARED_TABLE_PROJECTIVE_SOURCE_HAS_MULS_COL: usize =
 /// Column index where the C5 consumed-mul LIMB block begins (after `has_muls`).
 pub const PREPARED_TABLE_PROJECTIVE_SOURCE_MUL_LIMB_OFFSET: usize =
     PREPARED_TABLE_PROJECTIVE_SOURCE_HAS_MULS_COL + 1;
-/// Column index where the shared C5-2 formula block begins (after the
-/// consumed-mul block).
+/// Column index where the SHARED formula block begins (after the consumed-mul
+/// block). The Double and MixedAdd formulas overlay the same cells — their
+/// gates are mutually exclusive per row and the Double block's shape is a
+/// strict prefix of the MixedAdd block's.
 pub const PREPARED_TABLE_PROJECTIVE_SOURCE_FORMULA_OFFSET: usize =
     1 + 5 + 3 * PREPARED_TABLE_EC_POINT_COLUMNS + crate::projective_air::CONSUMED_MUL_LIMBS_COLUMNS;
 

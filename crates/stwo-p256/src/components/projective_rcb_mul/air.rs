@@ -65,7 +65,7 @@ pub const fn consumed_mul_slot_kept(mul: usize, role: usize) -> bool {
 /// `op·a + (1−op)·b` mix of distinct columns): their LogUp entries must sit in
 /// solo batches (denominator degree 2 + cumulative term = 3, the `log_size+1`
 /// ceiling). The other dropped slots are constants, shared columns, or the
-/// degree-1 `z3_double + z3_mixed` sum (inactive block zero-forced).
+/// degree-1 shared-block `z3` read.
 pub const fn consumed_mul_slot_degree2(mul: usize, role: usize) -> bool {
     matches!(
         (mul, role),
@@ -121,9 +121,9 @@ pub const CONSUMED_MUL_LIMBS_COLUMNS: usize = 1 + CONSUMED_MUL_KEPT_SLOTS * N_LI
 
 /// The row columns the dropped operand slots' consume expressions read.
 /// `op` selects the formula kind (1 = Double, 0 = MixedAdd); the points are
-/// the EC row's committed coordinates; `z3_double`/`z3_mixed` are the two
-/// formula blocks' working `z3` values (the inactive block is zero-forced, so
-/// their SUM is the active kind's `z3` — degree 1).
+/// the EC row's committed coordinates; `z3` is the SHARED formula block's
+/// working `z3` value (the Double and MixedAdd formulas overlay the same
+/// cells, so the one column set holds the active kind's `z3` — degree 1).
 pub struct ConsumedMulWiring<E: EvalAtRow> {
     pub op: E::F,
     pub x1: P256EvalBigInt<E>,
@@ -132,11 +132,7 @@ pub struct ConsumedMulWiring<E: EvalAtRow> {
     pub y2: P256EvalBigInt<E>,
     pub output_x: P256EvalBigInt<E>,
     pub output_y: P256EvalBigInt<E>,
-    pub output_inf: E::F,
-    pub x3: P256EvalBigInt<E>,
-    pub y3: P256EvalBigInt<E>,
-    pub z3_double: P256EvalBigInt<E>,
-    pub z3_mixed: P256EvalBigInt<E>,
+    pub z3: P256EvalBigInt<E>,
 }
 
 impl<E: EvalAtRow> ConsumedMulLimbs<E> {
@@ -201,9 +197,7 @@ impl<E: EvalAtRow> ConsumedMulLimbs<E> {
         };
         let consts =
             |c: &[M31; N_LIMBS]| -> [E::F; N_LIMBS] { core::array::from_fn(|i| E::F::from(c[i])) };
-        let z3_sum: [E::F; N_LIMBS] = core::array::from_fn(|i| {
-            wiring.z3_double.limbs()[i].clone() + wiring.z3_mixed.limbs()[i].clone()
-        });
+        let z3_shared = shared(&wiring.z3);
         let r2 = P256EvalBigInt::<E>::from_limbs(self.limbs[2][2].clone());
 
         self.limbs[0][0] = shared(&wiring.x1);
@@ -217,14 +211,9 @@ impl<E: EvalAtRow> ConsumedMulLimbs<E> {
         self.limbs[5][0] = consts(&b);
         self.limbs[5][1] = pick_const(&r2, &one_limbs);
         self.limbs[13][0] = shared(&wiring.output_x);
-        self.limbs[13][1] = z3_sum.clone();
-        let out_finite = one - wiring.output_inf.clone();
-        self.limbs[13][2] =
-            core::array::from_fn(|i| out_finite.clone() * wiring.x3.limbs()[i].clone());
+        self.limbs[13][1] = z3_shared.clone();
         self.limbs[14][0] = shared(&wiring.output_y);
-        self.limbs[14][1] = z3_sum;
-        self.limbs[14][2] =
-            core::array::from_fn(|i| out_finite.clone() * wiring.y3.limbs()[i].clone());
+        self.limbs[14][1] = z3_shared;
     }
 
     /// Constrain the committed `has_muls` flag: boolean, zero on padding, and

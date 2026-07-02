@@ -168,11 +168,7 @@ pub(crate) struct ConsumedMulGenLayout {
     pub y2_col: usize,
     pub output_x_col: usize,
     pub output_y_col: usize,
-    pub output_inf_col: usize,
-    pub x3_col: usize,
-    pub y3_col: usize,
-    pub z3_double_col: usize,
-    pub z3_mixed_col: Option<usize>,
+    pub z3_col: usize,
     /// First kept-limb column (right after the `has_muls` flag).
     pub mul_limb_offset: usize,
 }
@@ -221,12 +217,9 @@ pub(crate) fn consumed_mul_slot_packed_limbs(
                     + one_minus_op * one_limb(limb)
             }
             (13, 0) => column(layout.output_x_col, limb),
-            (13, 1) | (14, 1) => match layout.z3_mixed_col {
-                Some(z3_mixed_col) => {
-                    column(layout.z3_double_col, limb) + column(z3_mixed_col, limb)
-                }
-                None => column(layout.z3_double_col, limb),
-            },
+            (13, 1) | (14, 1) => {
+                column(layout.z3_col, limb)
+            }
             (14, 0) => column(layout.output_y_col, limb),
             (13, 2) => out_finite * column(layout.x3_col, limb),
             (14, 2) => out_finite * column(layout.y3_col, limb),
