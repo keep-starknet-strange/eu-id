@@ -58,7 +58,9 @@ use crate::scalar::scalar_mod_mul::providers::LookupProviderClaims;
 #[cfg(test)]
 use crate::scalar::scalar_mod_mul::relation::ScalarModMulLookupRelations;
 #[cfg(test)]
-use crate::scalar::scalar_mod_mul::{ScalarModMulClaim, ScalarModMulTraceRows};
+use crate::scalar::scalar_mod_mul::{
+    ScalarModMulClaim, ScalarModMulMergedRows, ScalarModMulTraceRows,
+};
 
 #[cfg(test)]
 const TEST_MUL_ID: u32 = 3;
@@ -173,7 +175,7 @@ fn scalar(value: u64) -> [u64; 4] {
 /// (preprocessed, base, interaction), allocate all components against the same
 /// preprocessed-column list, print each component name, then run
 /// `assert_constraints_on_trace` component by component.
-pub fn assert_scalar_mod_mul_constraints(rows: &ScalarModMulTraceRows) {
+pub fn assert_scalar_mod_mul_constraints(rows: &ScalarModMulMergedRows) {
     let lookup_claims = LookupProviderClaims::scalar_mod_mul();
     let claim = ScalarModMulClaim::from_rows(rows);
 
@@ -278,7 +280,7 @@ fn honest_scalar_mod_mul_rows() -> ScalarModMulTraceRows {
 
 #[test]
 fn scalar_mod_mul_debug_assert_constraints_pass_for_honest_trace() {
-    let rows = honest_scalar_mod_mul_rows();
+    let rows = ScalarModMulMergedRows::new(vec![honest_scalar_mod_mul_rows()]);
     assert!(ScalarModMulRelationAudit::from_rows(&rows).is_balanced());
     assert_scalar_mod_mul_constraints(&rows);
 }
@@ -287,7 +289,7 @@ fn scalar_mod_mul_debug_assert_constraints_pass_for_honest_trace() {
 fn scalar_mod_mul_debug_canonical_mutation_breaks_relation_balance() {
     let mut rows = honest_scalar_mod_mul_rows();
     rows.canonical_scalars[0].value[0] += M31::from_u32_unchecked(1);
-    let audit = ScalarModMulRelationAudit::from_rows(&rows);
+    let audit = ScalarModMulRelationAudit::from_rows(&ScalarModMulMergedRows::new(vec![rows]));
     assert!(!audit.is_balanced());
     assert!(audit.scalar_limb.nonzero_entries() > 0);
 }
@@ -296,7 +298,7 @@ fn scalar_mod_mul_debug_canonical_mutation_breaks_relation_balance() {
 fn scalar_mod_mul_debug_ab_chunk_mutation_breaks_relation_balance() {
     let mut rows = honest_scalar_mod_mul_rows();
     rows.ab_chunks[0].digits[0] += M31::from_u32_unchecked(1);
-    let audit = ScalarModMulRelationAudit::from_rows(&rows);
+    let audit = ScalarModMulRelationAudit::from_rows(&ScalarModMulMergedRows::new(vec![rows]));
     assert!(!audit.is_balanced());
     assert!(audit.product_chunk_digit.nonzero_entries() > 0);
 }
@@ -305,7 +307,7 @@ fn scalar_mod_mul_debug_ab_chunk_mutation_breaks_relation_balance() {
 fn scalar_mod_mul_debug_qn_chunk_mutation_breaks_relation_balance() {
     let mut rows = honest_scalar_mod_mul_rows();
     rows.qn_chunks[0].quotient_limbs[0] += M31::from_u32_unchecked(1);
-    let audit = ScalarModMulRelationAudit::from_rows(&rows);
+    let audit = ScalarModMulRelationAudit::from_rows(&ScalarModMulMergedRows::new(vec![rows]));
     assert!(!audit.is_balanced());
     assert!(audit.scalar_limb.nonzero_entries() > 0);
 }
@@ -314,7 +316,7 @@ fn scalar_mod_mul_debug_qn_chunk_mutation_breaks_relation_balance() {
 fn scalar_mod_mul_debug_accumulator_mutation_breaks_relation_balance() {
     let mut rows = honest_scalar_mod_mul_rows();
     rows.accumulators[0].terms[0] += M31::from_u32_unchecked(1);
-    let audit = ScalarModMulRelationAudit::from_rows(&rows);
+    let audit = ScalarModMulRelationAudit::from_rows(&ScalarModMulMergedRows::new(vec![rows]));
     assert!(!audit.is_balanced());
     assert!(audit.product_chunk_digit.nonzero_entries() > 0);
 }
@@ -323,7 +325,7 @@ fn scalar_mod_mul_debug_accumulator_mutation_breaks_relation_balance() {
 fn scalar_mod_mul_debug_reduction_mutation_breaks_relation_balance() {
     let mut rows = honest_scalar_mod_mul_rows();
     rows.reduction_digits[0].result_limb += M31::from_u32_unchecked(1);
-    let audit = ScalarModMulRelationAudit::from_rows(&rows);
+    let audit = ScalarModMulRelationAudit::from_rows(&ScalarModMulMergedRows::new(vec![rows]));
     assert!(!audit.is_balanced());
     assert!(audit.scalar_limb.nonzero_entries() > 0);
 }

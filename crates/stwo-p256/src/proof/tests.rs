@@ -12,7 +12,7 @@ use crate::scalar::scalar_mod_mul::layout::{
 };
 use crate::scalar::scalar_mod_mul::schedule::ScalarModMulFixedSchedule;
 use crate::scalar::scalar_mod_mul::{
-    SCALAR_MOD_MUL_SPLIT_CHUNK_DIGITS, SCALAR_MOD_MUL_SPLIT_CHUNK_TERMS,
+    ScalarModMulMergedRows, SCALAR_MOD_MUL_SPLIT_CHUNK_DIGITS, SCALAR_MOD_MUL_SPLIT_CHUNK_TERMS,
 };
 use crate::types::{field_modulus, AffinePoint, Signature, U256};
 use core::cmp::Ordering;
@@ -1746,8 +1746,8 @@ fn scalar_setup_mod_mul_pcs_diagnostic() {
     .expect("zero branch pipeline builds");
     let rows = scalar_setup_mod_mul_rows(&proof.claim).expect("scalar mod-mul rows generate");
 
-    for rows in &rows {
-        prove_scalar_mod_mul_rows_for_diagnostic(rows);
+    for instance in rows {
+        prove_scalar_mod_mul_rows_for_diagnostic(&ScalarModMulMergedRows::new(vec![instance]));
     }
 }
 
@@ -1772,8 +1772,8 @@ fn scalar_setup_mod_mul_ab_row_order_diagnostic() {
     .expect("zero branch pipeline builds");
     let rows = scalar_setup_mod_mul_rows(&proof.claim).expect("scalar mod-mul rows generate");
 
-    for rows in &rows {
-        assert_ab_schedule_base_row_order(rows);
+    for instance in rows {
+        assert_ab_schedule_base_row_order(&ScalarModMulMergedRows::new(vec![instance]));
     }
 }
 
@@ -1786,12 +1786,13 @@ fn scalar_setup_mod_mul_ab_decomposition_row_order_diagnostic() {
     .expect("zero branch pipeline builds");
     let rows = scalar_setup_mod_mul_rows(&proof.claim).expect("scalar mod-mul rows generate");
 
-    for rows in &rows {
-        assert_ab_decomposition_columns(rows);
+    for instance in rows {
+        assert_ab_decomposition_columns(&ScalarModMulMergedRows::new(vec![instance]));
     }
 }
 
-fn assert_ab_schedule_base_row_order(rows: &ScalarModMulTraceRows) {
+fn assert_ab_schedule_base_row_order(rows: &ScalarModMulMergedRows) {
+    let mul_id = rows.instances[0].mul_id;
     let traces = ScalarModMulFamilyTraces::from_rows(rows);
     let schedule = ScalarModMulFixedSchedule::from_rows(rows);
     let trace_evals = traces.to_circle_evaluations();
@@ -1818,22 +1819,21 @@ fn assert_ab_schedule_base_row_order(rows: &ScalarModMulTraceRows) {
     for (base_col, schedule_col, name) in comparisons {
         assert_eq!(
             traces.ab_chunks.columns[base_col], schedule.ab_chunks[schedule_col].values,
-            "logical AB {name} column mismatch for mul_id={} base_col={base_col} schedule_col={schedule_col}",
-            rows.mul_id,
+            "logical AB {name} column mismatch for mul_id={mul_id} base_col={base_col} schedule_col={schedule_col}",
         );
         assert_eq!(
             trace_evals.ab_chunks[base_col].values.to_cpu(),
             schedule_evals.ab_chunks[schedule_col].values.to_cpu(),
-            "storage-order AB {name} column mismatch for mul_id={} base_col={base_col} schedule_col={schedule_col}",
-            rows.mul_id,
+            "storage-order AB {name} column mismatch for mul_id={mul_id} base_col={base_col} schedule_col={schedule_col}",
         );
     }
 }
 
-fn assert_ab_decomposition_columns(rows: &ScalarModMulTraceRows) {
+fn assert_ab_decomposition_columns(rows: &ScalarModMulMergedRows) {
+    let mul_id = rows.instances[0].mul_id;
     let traces = ScalarModMulFamilyTraces::from_rows(rows);
     assert_ab_decomposition_column_set(
-        rows.mul_id,
+        mul_id,
         "logical",
         traces.ab_chunks.columns.iter().map(Vec::as_slice).collect(),
     );
@@ -1845,7 +1845,7 @@ fn assert_ab_decomposition_columns(rows: &ScalarModMulTraceRows) {
         .map(|column| column.values.to_cpu())
         .collect::<Vec<_>>();
     assert_ab_decomposition_column_set(
-        rows.mul_id,
+        mul_id,
         "storage",
         storage_columns.iter().map(Vec::as_slice).collect(),
     );
@@ -1874,8 +1874,9 @@ fn assert_ab_decomposition_column_set(mul_id: u32, order: &str, columns: Vec<&[M
     }
 }
 
-fn prove_scalar_mod_mul_rows_for_diagnostic(rows: &ScalarModMulTraceRows) {
-    eprintln!("prove scalar_mod_mul {} aggregate", rows.mul_id);
+fn prove_scalar_mod_mul_rows_for_diagnostic(rows: &ScalarModMulMergedRows) {
+    let mul_id = rows.instances[0].mul_id;
+    eprintln!("prove scalar_mod_mul {mul_id} aggregate");
     let lookup_claims = LookupProviderClaims::scalar_mod_mul();
     let claim = ScalarModMulClaim::from_rows(rows);
     let ids = scalar_mod_mul_preprocessed_column_ids(&claim, &lookup_claims);
@@ -1893,7 +1894,7 @@ fn prove_scalar_mod_mul_rows_for_diagnostic(rows: &ScalarModMulTraceRows) {
     let config = p256_stark_slice_low_ram_config(max_constraint_log_degree_bound);
     eprintln!(
         "scalar_mod_mul {} pcs max_bound={} blowup={} lifting={:?}",
-        rows.mul_id,
+        mul_id,
         max_constraint_log_degree_bound,
         config.fri_config.log_blowup_factor,
         config.lifting_log_size
@@ -2194,9 +2195,7 @@ fn assert_current_air_constraints(proof: &P256ProofDraft) {
         &components.fake_glv_selector_air.selector,
         &trace,
     );
-    for (index, scalar_mod_mul) in components.scalar_setup_mod_muls.iter().enumerate() {
-        assert_scalar_mod_mul_components_named(index, scalar_mod_mul, &trace);
-    }
+    assert_scalar_mod_mul_components_named(0, &components.scalar_mod_muls, &trace);
     assert_component_named(
         "prepared_table_projective_source.provider",
         &components.prepared_table_projective_source.provider,
@@ -2449,12 +2448,10 @@ fn current_p256_air_shape_diagnostic() {
         proof.claim.projective_rcb_air_trace.mul_row_count(),
     );
 
-    for (index, scalar_mod_mul) in components.scalar_setup_mod_muls.iter().enumerate() {
-        print_component_shape(
-            &format!("scalar_setup_mod_mul_{index}"),
-            scalar_mod_mul_component_bounds(scalar_mod_mul),
-        );
-    }
+    print_component_shape(
+        "scalar_mod_mul",
+        scalar_mod_mul_component_bounds(&components.scalar_mod_muls),
+    );
     print_component_shape(
         "prepared_table_projective_source",
         components
@@ -2549,18 +2546,10 @@ fn current_p256_air_shape_diagnostic() {
             &slice.signed_carry,
         ]
     }
-    for (index, slice) in components.scalar_setup_mod_muls.iter().enumerate() {
-        print_component_shape(
-            &format!("scalar_setup_mod_mul_{index}"),
-            wrapper_bounds(mod_mul_components(slice)),
-        );
-    }
-    for (index, slice) in components.fake_glv_scalar_mod_muls.iter().enumerate() {
-        print_component_shape(
-            &format!("fake_glv_scalar_mod_mul_{index}"),
-            wrapper_bounds(mod_mul_components(slice)),
-        );
-    }
+    print_component_shape(
+        "scalar_mod_mul",
+        wrapper_bounds(mod_mul_components(&components.scalar_mod_muls)),
+    );
     print_component_shape(
         "prepared_point_range7",
         stwo::core::air::Component::trace_log_degree_bounds(&components.prepared_point_range7),

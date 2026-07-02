@@ -59,8 +59,8 @@ pub use schedule::{
 };
 pub use trace::{
     CanonicalScalarTraceRow, ProductDigitAccumulatorTraceRow, QnProductChunkTraceRow,
-    ScalarModMulRelationCounts, ScalarModMulTraceError, ScalarModMulTraceRows,
-    ScalarReductionDigitTraceRow, VariableProductChunkTraceRow,
+    ScalarModMulMergedRows, ScalarModMulRelationCounts, ScalarModMulTraceError,
+    ScalarModMulTraceRows, ScalarReductionDigitTraceRow, VariableProductChunkTraceRow,
 };
 
 pub const SCALAR_MOD_MUL_SPLIT_CHUNK_TERMS: usize = FNMUL_CHUNK_TERMS;

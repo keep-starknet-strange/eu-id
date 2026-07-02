@@ -9,21 +9,25 @@ use crate::range_checks::decode_signed_carry;
 use super::accumulator::for_each_digit_contribution;
 use super::columns::{m31_column_eval, padded_log_size, M31ColumnEval};
 use super::{
-    product_chunk_pairs, ProductSide, ScalarModMulLimbRole, ScalarModMulTraceRows,
-    PRODUCT_DIGIT_ACCUMULATOR_TERMS, PRODUCT_SCALAR_LIMB_USE_COUNT, ROLE_RESULT,
-    SCALAR_MOD_MUL_SPLIT_CHUNK_DIGITS, SCALAR_MOD_MUL_SPLIT_CHUNK_TERMS,
+    product_chunk_pairs, ProductSide, ScalarModMulLimbRole, ScalarModMulMergedRows,
+    ScalarModMulTraceRows, PRODUCT_DIGIT_ACCUMULATOR_TERMS, PRODUCT_SCALAR_LIMB_USE_COUNT,
+    ROLE_RESULT, SCALAR_MOD_MUL_SPLIT_CHUNK_DIGITS, SCALAR_MOD_MUL_SPLIT_CHUNK_TERMS,
 };
 
-pub const CANONICAL_SCALAR_TRACE_COLUMNS: usize = 3 + 3 * N_LIMBS;
+// Each trace-bearing sub-component appends a `mul_id` base column LAST so the
+// four merged instances key their LogUp tuples by their own mul_id. The column
+// carries no polynomial constraint; LogUp balance pins it.
+pub const CANONICAL_SCALAR_TRACE_COLUMNS: usize = 3 + 3 * N_LIMBS + 1;
 pub const PRODUCT_METADATA_TRACE_COLUMNS: usize =
     3 + 3 * SCALAR_MOD_MUL_SPLIT_CHUNK_TERMS + SCALAR_MOD_MUL_SPLIT_CHUNK_DIGITS;
 pub const AB_PRODUCT_CHUNK_TRACE_COLUMNS: usize = PRODUCT_METADATA_TRACE_COLUMNS
     + 3 * SCALAR_MOD_MUL_SPLIT_CHUNK_TERMS
-    + SCALAR_MOD_MUL_SPLIT_CHUNK_DIGITS;
+    + SCALAR_MOD_MUL_SPLIT_CHUNK_DIGITS
+    + 1;
 pub const QN_PRODUCT_CHUNK_TRACE_COLUMNS: usize =
-    2 * SCALAR_MOD_MUL_SPLIT_CHUNK_TERMS + SCALAR_MOD_MUL_SPLIT_CHUNK_DIGITS;
-pub const PRODUCT_DIGIT_ACCUMULATOR_TRACE_COLUMNS: usize = PRODUCT_DIGIT_ACCUMULATOR_TERMS + 1;
-pub const SCALAR_REDUCTION_DIGIT_TRACE_COLUMNS: usize = 5;
+    2 * SCALAR_MOD_MUL_SPLIT_CHUNK_TERMS + SCALAR_MOD_MUL_SPLIT_CHUNK_DIGITS + 1;
+pub const PRODUCT_DIGIT_ACCUMULATOR_TRACE_COLUMNS: usize = PRODUCT_DIGIT_ACCUMULATOR_TERMS + 1 + 1;
+pub const SCALAR_REDUCTION_DIGIT_TRACE_COLUMNS: usize = 5 + 1;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScalarModMulColumnTrace<const W: usize> {
@@ -33,14 +37,17 @@ pub struct ScalarModMulColumnTrace<const W: usize> {
 }
 
 impl<const W: usize> ScalarModMulColumnTrace<W> {
-    fn from_rows<R>(rows: &[R], mut encode: impl FnMut(&R) -> [M31; W]) -> Self {
-        let active_rows = rows.len();
+    fn from_rows<R>(
+        active_rows: usize,
+        rows: impl Iterator<Item = (u32, R)>,
+        mut encode: impl FnMut(u32, R) -> [M31; W],
+    ) -> Self {
         let log_size = padded_log_size(active_rows);
         let padded_rows = 1usize << log_size;
         let mut columns = std::array::from_fn(|_| vec![M31::from_u32_unchecked(0); padded_rows]);
 
-        for (row_index, row) in rows.iter().enumerate() {
-            for (col_index, value) in encode(row).into_iter().enumerate() {
+        for (row_index, (mul_id, row)) in rows.enumerate() {
+            for (col_index, value) in encode(mul_id, row).into_iter().enumerate() {
                 columns[col_index][row_index] = value;
             }
         }
@@ -81,17 +88,27 @@ pub struct ScalarModMulFamilyColumnEvals {
 }
 
 impl ScalarModMulFamilyTraces {
-    pub fn from_rows(rows: &ScalarModMulTraceRows) -> Self {
+    pub fn from_rows(rows: &ScalarModMulMergedRows) -> Self {
         Self {
-            canonical_scalars: canonical_column_trace(&rows.canonical_scalars),
-            ab_chunks: ScalarModMulColumnTrace::from_rows(&rows.ab_chunks, ab_chunk_columns),
-            qn_chunks: ScalarModMulColumnTrace::from_rows(&rows.qn_chunks, qn_chunk_columns),
+            canonical_scalars: canonical_column_trace(rows),
+            ab_chunks: ScalarModMulColumnTrace::from_rows(
+                rows.ab_chunks_len(),
+                rows.ab_chunks(),
+                ab_chunk_columns,
+            ),
+            qn_chunks: ScalarModMulColumnTrace::from_rows(
+                rows.qn_chunks_len(),
+                rows.qn_chunks(),
+                qn_chunk_columns,
+            ),
             accumulators: ScalarModMulColumnTrace::from_rows(
-                &rows.accumulators,
+                rows.accumulators_len(),
+                rows.accumulators(),
                 accumulator_columns,
             ),
             reduction_digits: ScalarModMulColumnTrace::from_rows(
-                &rows.reduction_digits,
+                rows.reduction_len(),
+                rows.reduction_digits(),
                 reduction_columns,
             ),
         }
@@ -115,20 +132,20 @@ pub struct ScalarModMulLookupUses {
 }
 
 impl ScalarModMulLookupUses {
-    pub fn from_rows(rows: &ScalarModMulTraceRows) -> Self {
+    pub fn from_rows(rows: &ScalarModMulMergedRows) -> Self {
         let mut uses = Self::default();
 
-        for row in &rows.canonical_scalars {
+        for (_, row) in rows.canonical_scalars() {
             uses.range13.extend(row.value);
             uses.range13.extend(row.slack);
         }
-        for row in &rows.ab_chunks {
+        for (_, row) in rows.ab_chunks() {
             uses.range13.extend([row.digits[0], row.digits[1]]);
         }
-        for row in &rows.qn_chunks {
+        for (_, row) in rows.qn_chunks() {
             uses.range13.extend([row.digits[0], row.digits[1]]);
         }
-        for row in &rows.reduction_digits {
+        for (_, row) in rows.reduction_digits() {
             uses.signed_carry.push(decode_signed_carry(row.carry));
         }
 
@@ -145,12 +162,14 @@ pub struct ScalarModMulRelationAudit {
 }
 
 impl ScalarModMulRelationAudit {
-    pub fn from_rows(rows: &ScalarModMulTraceRows) -> Self {
+    pub fn from_rows(rows: &ScalarModMulMergedRows) -> Self {
         let mut audit = Self::default();
-        audit.add_scalar_limb_terms(rows);
-        audit.add_product_chunk_digit_terms(rows);
-        audit.add_product_digit_terms(rows);
-        audit.add_reduction_carry_terms(rows);
+        for instance in &rows.instances {
+            audit.add_scalar_limb_terms(instance);
+            audit.add_product_chunk_digit_terms(instance);
+            audit.add_product_digit_terms(instance);
+            audit.add_reduction_carry_terms(instance);
+        }
         audit
     }
 
@@ -348,6 +367,7 @@ impl RelationBalance {
 }
 
 fn canonical_columns(
+    mul_id: u32,
     row: &super::CanonicalScalarTraceRow,
 ) -> [M31; CANONICAL_SCALAR_TRACE_COLUMNS] {
     let mut columns = [M31::from_u32_unchecked(0); CANONICAL_SCALAR_TRACE_COLUMNS];
@@ -356,7 +376,8 @@ fn canonical_columns(
     columns[2] = M31::from_u32_unchecked(canonical_limb_multiplicity(row.role));
     columns[3..3 + N_LIMBS].copy_from_slice(&row.value);
     columns[3 + N_LIMBS..3 + 2 * N_LIMBS].copy_from_slice(&row.slack);
-    columns[3 + 2 * N_LIMBS..].copy_from_slice(&row.carries);
+    columns[3 + 2 * N_LIMBS..3 + 3 * N_LIMBS].copy_from_slice(&row.carries);
+    columns[CANONICAL_SCALAR_TRACE_COLUMNS - 1] = M31::from_u32_unchecked(mul_id);
     columns
 }
 
@@ -370,16 +391,16 @@ fn canonical_limb_multiplicity(role: ScalarModMulLimbRole) -> u32 {
 }
 
 fn canonical_column_trace(
-    rows: &[super::CanonicalScalarTraceRow],
+    rows: &ScalarModMulMergedRows,
 ) -> ScalarModMulColumnTrace<CANONICAL_SCALAR_TRACE_COLUMNS> {
-    let active_rows = rows.len();
+    let active_rows = rows.canonical_len();
     let log_size = padded_log_size(active_rows);
     let padded_rows = 1usize << log_size;
     let padding = canonical_padding_columns();
     let mut columns = std::array::from_fn(|index| vec![padding[index]; padded_rows]);
 
-    for (row_index, row) in rows.iter().enumerate() {
-        for (col_index, value) in canonical_columns(row).into_iter().enumerate() {
+    for (row_index, (mul_id, row)) in rows.canonical_scalars().enumerate() {
+        for (col_index, value) in canonical_columns(mul_id, row).into_iter().enumerate() {
             columns[col_index][row_index] = value;
         }
     }
@@ -397,15 +418,17 @@ fn canonical_padding_columns() -> [M31; CANONICAL_SCALAR_TRACE_COLUMNS] {
     columns[3..3 + N_LIMBS].copy_from_slice(&padding.value.map(M31::from_u32_unchecked));
     columns[3 + N_LIMBS..3 + 2 * N_LIMBS]
         .copy_from_slice(&padding.slack.map(M31::from_u32_unchecked));
-    columns[3 + 2 * N_LIMBS..].copy_from_slice(
+    columns[3 + 2 * N_LIMBS..3 + 3 * N_LIMBS].copy_from_slice(
         &padding
             .carries
             .map(|carry| M31::from_u32_unchecked(carry as u32)),
     );
+    // mul_id padding column stays 0 (numerator is 0 on padding rows).
     columns
 }
 
 fn ab_chunk_columns(
+    mul_id: u32,
     row: &super::VariableProductChunkTraceRow,
 ) -> [M31; AB_PRODUCT_CHUNK_TRACE_COLUMNS] {
     let mut columns = [M31::from_u32_unchecked(0); AB_PRODUCT_CHUNK_TRACE_COLUMNS];
@@ -422,6 +445,7 @@ fn ab_chunk_columns(
         offset += 3;
     }
     columns[offset..offset + SCALAR_MOD_MUL_SPLIT_CHUNK_DIGITS].copy_from_slice(&row.digits);
+    columns[AB_PRODUCT_CHUNK_TRACE_COLUMNS - 1] = M31::from_u32_unchecked(mul_id);
     columns
 }
 
@@ -450,7 +474,10 @@ fn fill_product_metadata_columns(columns: &mut [M31], coeff: usize, chunk: usize
     }
 }
 
-fn qn_chunk_columns(row: &super::QnProductChunkTraceRow) -> [M31; QN_PRODUCT_CHUNK_TRACE_COLUMNS] {
+fn qn_chunk_columns(
+    mul_id: u32,
+    row: &super::QnProductChunkTraceRow,
+) -> [M31; QN_PRODUCT_CHUNK_TRACE_COLUMNS] {
     let order_limbs = stwo_p256_utils::scalar_arithmetic::words_to_limbs(&P256_ORDER);
     let (pairs, _) = product_chunk_pairs(row.coeff, row.chunk);
     let mut columns = [M31::from_u32_unchecked(0); QN_PRODUCT_CHUNK_TRACE_COLUMNS];
@@ -461,19 +488,23 @@ fn qn_chunk_columns(row: &super::QnProductChunkTraceRow) -> [M31; QN_PRODUCT_CHU
         offset += 2;
     }
     columns[offset..offset + SCALAR_MOD_MUL_SPLIT_CHUNK_DIGITS].copy_from_slice(&row.digits);
+    columns[QN_PRODUCT_CHUNK_TRACE_COLUMNS - 1] = M31::from_u32_unchecked(mul_id);
     columns
 }
 
 fn accumulator_columns(
+    mul_id: u32,
     row: &super::ProductDigitAccumulatorTraceRow,
 ) -> [M31; PRODUCT_DIGIT_ACCUMULATOR_TRACE_COLUMNS] {
     let mut columns = [M31::from_u32_unchecked(0); PRODUCT_DIGIT_ACCUMULATOR_TRACE_COLUMNS];
     columns[..PRODUCT_DIGIT_ACCUMULATOR_TERMS].copy_from_slice(&row.terms);
     columns[PRODUCT_DIGIT_ACCUMULATOR_TERMS] = row.product_digit;
+    columns[PRODUCT_DIGIT_ACCUMULATOR_TRACE_COLUMNS - 1] = M31::from_u32_unchecked(mul_id);
     columns
 }
 
 fn reduction_columns(
+    mul_id: u32,
     row: &super::ScalarReductionDigitTraceRow,
 ) -> [M31; SCALAR_REDUCTION_DIGIT_TRACE_COLUMNS] {
     [
@@ -482,6 +513,7 @@ fn reduction_columns(
         row.result_limb,
         row.prev_carry,
         row.carry,
+        M31::from_u32_unchecked(mul_id),
     ]
 }
 
@@ -507,10 +539,14 @@ mod tests {
         [value, 0, 0, 0]
     }
 
-    fn test_rows() -> ScalarModMulTraceRows {
+    fn single_test_rows() -> ScalarModMulTraceRows {
         let trace = ScalarFieldMulTrace::new("test_mul", &scalar(7), &scalar(11), &P256_ORDER)
             .expect("valid scalar mod-mul trace");
         ScalarModMulTraceRows::new(3, &trace).expect("trace rows generate")
+    }
+
+    fn test_rows() -> ScalarModMulMergedRows {
+        ScalarModMulMergedRows::new(vec![single_test_rows()])
     }
 
     #[test]
@@ -538,10 +574,18 @@ mod tests {
             QN_PRODUCT_CHUNK_TRACE_COLUMNS
         );
         assert_eq!(traces.qn_chunks.padded_rows(), 256);
-        assert_eq!(traces.accumulators.columns.len(), 31);
+        // 30 accumulator base columns + mul_id.
+        assert_eq!(
+            traces.accumulators.columns.len(),
+            PRODUCT_DIGIT_ACCUMULATOR_TRACE_COLUMNS
+        );
         assert_eq!(traces.accumulators.active_rows, 80);
         assert_eq!(traces.accumulators.padded_rows(), 128);
-        assert_eq!(traces.reduction_digits.columns.len(), 5);
+        // 5 reduction base columns + mul_id.
+        assert_eq!(
+            traces.reduction_digits.columns.len(),
+            SCALAR_REDUCTION_DIGIT_TRACE_COLUMNS
+        );
         assert_eq!(traces.reduction_digits.active_rows, 40);
         assert_eq!(traces.reduction_digits.padded_rows(), 64);
     }
@@ -573,8 +617,9 @@ mod tests {
 
     #[test]
     fn scalar_mod_mul_relation_audit_detects_mutated_tuple_value() {
-        let mut rows = test_rows();
-        rows.accumulators[0].terms[0] += M31::from_u32_unchecked(1);
+        let mut single = single_test_rows();
+        single.accumulators[0].terms[0] += M31::from_u32_unchecked(1);
+        let rows = ScalarModMulMergedRows::new(vec![single]);
         let audit = ScalarModMulRelationAudit::from_rows(&rows);
 
         assert!(!audit.is_balanced());

@@ -127,6 +127,73 @@ pub struct ScalarModMulTraceRows {
     pub reduction_digits: Vec<ScalarReductionDigitTraceRow>,
 }
 
+/// Vertical concatenation of several `ScalarModMulTraceRows` instances into a
+/// single merged component set. Each sub-family's rows are laid out block-major
+/// (instance 0's rows, then instance 1's, ...); every row carries the `mul_id`
+/// of its originating instance so the merged LogUp tuples stay keyed per
+/// instance. Per-instance row counts are input-independent, so the merged
+/// schedule remains a valid preprocessed (circuit-fixed) trace.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScalarModMulMergedRows {
+    pub instances: Vec<ScalarModMulTraceRows>,
+}
+
+impl ScalarModMulMergedRows {
+    pub fn new(instances: Vec<ScalarModMulTraceRows>) -> Self {
+        Self { instances }
+    }
+
+    pub fn canonical_scalars(&self) -> impl Iterator<Item = (u32, &CanonicalScalarTraceRow)> {
+        self.instances
+            .iter()
+            .flat_map(|inst| inst.canonical_scalars.iter().map(move |row| (inst.mul_id, row)))
+    }
+
+    pub fn ab_chunks(&self) -> impl Iterator<Item = (u32, &VariableProductChunkTraceRow)> {
+        self.instances
+            .iter()
+            .flat_map(|inst| inst.ab_chunks.iter().map(move |row| (inst.mul_id, row)))
+    }
+
+    pub fn qn_chunks(&self) -> impl Iterator<Item = (u32, &QnProductChunkTraceRow)> {
+        self.instances
+            .iter()
+            .flat_map(|inst| inst.qn_chunks.iter().map(move |row| (inst.mul_id, row)))
+    }
+
+    pub fn accumulators(&self) -> impl Iterator<Item = (u32, &ProductDigitAccumulatorTraceRow)> {
+        self.instances
+            .iter()
+            .flat_map(|inst| inst.accumulators.iter().map(move |row| (inst.mul_id, row)))
+    }
+
+    pub fn reduction_digits(&self) -> impl Iterator<Item = (u32, &ScalarReductionDigitTraceRow)> {
+        self.instances
+            .iter()
+            .flat_map(|inst| inst.reduction_digits.iter().map(move |row| (inst.mul_id, row)))
+    }
+
+    pub fn canonical_len(&self) -> usize {
+        self.instances.iter().map(|inst| inst.canonical_scalars.len()).sum()
+    }
+
+    pub fn ab_chunks_len(&self) -> usize {
+        self.instances.iter().map(|inst| inst.ab_chunks.len()).sum()
+    }
+
+    pub fn qn_chunks_len(&self) -> usize {
+        self.instances.iter().map(|inst| inst.qn_chunks.len()).sum()
+    }
+
+    pub fn accumulators_len(&self) -> usize {
+        self.instances.iter().map(|inst| inst.accumulators.len()).sum()
+    }
+
+    pub fn reduction_len(&self) -> usize {
+        self.instances.iter().map(|inst| inst.reduction_digits.len()).sum()
+    }
+}
+
 impl ScalarModMulTraceRows {
     pub fn new(mul_id: u32, trace: &ScalarFieldMulTrace) -> Result<Self, ScalarModMulTraceError> {
         trace.verify()?;
