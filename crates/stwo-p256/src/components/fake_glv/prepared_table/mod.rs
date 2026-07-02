@@ -7,9 +7,6 @@ use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 use stwo_p256_utils::constants::N_LIMBS;
 
-use crate::components::gamma_digest::{
-    GammaChallenge, GammaDigestRelation, GammaTallComponent, GammaTallEval,
-};
 use crate::prepared_point::TABLE16_INDEX;
 use crate::projective::ProjectiveEcOp;
 
@@ -76,24 +73,11 @@ pub const PREPARED_TABLE_EC_ROW_TRACE_COLUMNS: usize = 1
     + 2
     + 3 * PREPARED_TABLE_EC_POINT_COLUMNS
     + PREPARED_TABLE_EC_NEG_AUX_COLUMNS;
-pub const PREPARED_TABLE_PROJECTIVE_SOURCE_TRACE_COLUMNS: usize = 1
-    + 5
-    + 3 * PREPARED_TABLE_EC_POINT_COLUMNS
-    + crate::projective_air::CONSUMED_MUL_LIMBS_COLUMNS
-    + super::ec_source::mixed_add_formula::MIXED_ADD_FORMULA_COLUMNS;
-/// Column index of the C5 consumed-mul block's `has_muls` flag (appended LAST so
-/// existing relation-value column offsets are unchanged; limbs follow at `+ 1`).
-pub const PREPARED_TABLE_PROJECTIVE_SOURCE_HAS_MULS_COL: usize =
+/// Consumer base-trace width: metadata (`active`, `source_index`, `sig_id`,
+/// `cert_id`, `op`, `table_index`) plus the three committed points. The old
+/// consumed-mul + formula blocks moved into the hinted_mul silo (Phase 3).
+pub const PREPARED_TABLE_PROJECTIVE_SOURCE_TRACE_COLUMNS: usize =
     1 + 5 + 3 * PREPARED_TABLE_EC_POINT_COLUMNS;
-/// Column index where the C5 consumed-mul LIMB block begins (after `has_muls`).
-pub const PREPARED_TABLE_PROJECTIVE_SOURCE_MUL_LIMB_OFFSET: usize =
-    PREPARED_TABLE_PROJECTIVE_SOURCE_HAS_MULS_COL + 1;
-/// Column index where the SHARED formula block begins (after the consumed-mul
-/// block). The Double and MixedAdd formulas overlay the same cells — their
-/// gates are mutually exclusive per row and the Double block's shape is a
-/// strict prefix of the MixedAdd block's.
-pub const PREPARED_TABLE_PROJECTIVE_SOURCE_FORMULA_OFFSET: usize =
-    1 + 5 + 3 * PREPARED_TABLE_EC_POINT_COLUMNS + crate::projective_air::CONSUMED_MUL_LIMBS_COLUMNS;
 
 const PREPARED_TABLE_EC_ROW_INDEX_COLUMN: &str = "p256_prepared_table_ec_row_index";
 
@@ -103,15 +87,6 @@ pub type PreparedTableProjectiveSourceComponent =
 pub struct PreparedTableProjectiveSourceComponents {
     pub provider: PreparedTableEcRowComponent,
     pub consumer: PreparedTableProjectiveSourceComponent,
-    /// γ-digest tall expanders (range13 kind, signed kind).
-    pub gamma_range13: GammaTallComponent,
-    pub gamma_signed: GammaTallComponent,
-    /// C5-2: self-contained Range13 provider for the prepared-table formula
-    /// coordinate limb range checks (mirrors the fake-GLV projective source).
-    pub range13: crate::range_checks::RangeCheckComponent,
-    /// C5-2: self-contained signed-carry provider for the prepared-table
-    /// formula reduction carries.
-    pub signed_carry: crate::range_checks::SignedCarryRangeComponent,
 }
 
 impl PreparedTableProjectiveSourceComponents {
@@ -119,28 +94,18 @@ impl PreparedTableProjectiveSourceComponents {
     pub fn new(
         allocator: &mut TraceLocationAllocator,
         log_size: u32,
-        rows: u32,
         interaction_claim: &PreparedTableProjectiveSourceInteractionClaim,
         relation: &PreparedTableEcRowRelation,
         mul_relations: &crate::projective_air::ProjectiveRcbMulComponentRelations,
         header: &crate::components::hinted_mul::EcOpHeaderRelation,
-        range13: &crate::range_checks::RangeCheckRelation,
-        signed_carry: &crate::range_checks::RangeCheckRelation,
-        gamma_digest: &GammaDigestRelation,
-        gamma_challenge: &GammaChallenge,
     ) -> Self {
         Self::new_inner(
             allocator,
             log_size,
-            rows,
             interaction_claim,
             relation,
             mul_relations,
             header,
-            range13,
-            signed_carry,
-            gamma_digest,
-            gamma_challenge,
             None,
         )
     }
@@ -152,17 +117,12 @@ impl PreparedTableProjectiveSourceComponents {
     pub fn new_pinned(
         allocator: &mut TraceLocationAllocator,
         log_size: u32,
-        rows: u32,
         provider_claimed_sum: SecureField,
         consumer_interaction: &PreparedTableProjectiveSourceInteractionClaim,
         relation: &PreparedTableEcRowRelation,
         pinning: &PreparedTablePinningRelations,
         mul_relations: &crate::projective_air::ProjectiveRcbMulComponentRelations,
         header: &crate::components::hinted_mul::EcOpHeaderRelation,
-        range13: &crate::range_checks::RangeCheckRelation,
-        signed_carry: &crate::range_checks::RangeCheckRelation,
-        gamma_digest: &GammaDigestRelation,
-        gamma_challenge: &GammaChallenge,
     ) -> Self {
         let interaction_claim = PreparedTableProjectiveSourceInteractionClaim {
             provider: crate::components::ComponentInteractionClaim {
@@ -173,15 +133,10 @@ impl PreparedTableProjectiveSourceComponents {
         Self::new_inner(
             allocator,
             log_size,
-            rows,
             &interaction_claim,
             relation,
             mul_relations,
             header,
-            range13,
-            signed_carry,
-            gamma_digest,
-            gamma_challenge,
             Some(pinning.clone()),
         )
     }
@@ -190,18 +145,12 @@ impl PreparedTableProjectiveSourceComponents {
     fn new_inner(
         allocator: &mut TraceLocationAllocator,
         log_size: u32,
-        rows: u32,
         interaction_claim: &PreparedTableProjectiveSourceInteractionClaim,
         relation: &PreparedTableEcRowRelation,
         mul_relations: &crate::projective_air::ProjectiveRcbMulComponentRelations,
         header: &crate::components::hinted_mul::EcOpHeaderRelation,
-        range13: &crate::range_checks::RangeCheckRelation,
-        signed_carry: &crate::range_checks::RangeCheckRelation,
-        gamma_digest: &GammaDigestRelation,
-        gamma_challenge: &GammaChallenge,
         pinning: Option<PreparedTablePinningRelations>,
     ) -> Self {
-        let [gamma_range13_layout, gamma_signed_layout] = prepared_gamma_layouts(rows as usize);
         Self {
             provider: PreparedTableEcRowComponent::new(
                 allocator,
@@ -219,47 +168,8 @@ impl PreparedTableProjectiveSourceComponents {
                     relation: relation.clone(),
                     mul_result: mul_relations.mul_result.clone(),
                     header: header.clone(),
-                    gamma_digest: gamma_digest.clone(),
-                    gamma_challenge: gamma_challenge.clone(),
                 },
                 interaction_claim.consumer.claimed_sum,
-            ),
-            gamma_range13: GammaTallComponent::new(
-                allocator,
-                GammaTallEval {
-                    layout: gamma_range13_layout,
-                    challenge: gamma_challenge.clone(),
-                    digest: gamma_digest.clone(),
-                    range: range13.clone(),
-                },
-                interaction_claim.gamma_range13.claimed_sum,
-            ),
-            gamma_signed: GammaTallComponent::new(
-                allocator,
-                GammaTallEval {
-                    layout: gamma_signed_layout,
-                    challenge: gamma_challenge.clone(),
-                    digest: gamma_digest.clone(),
-                    range: signed_carry.clone(),
-                },
-                interaction_claim.gamma_signed.claimed_sum,
-            ),
-            range13: crate::range_checks::RangeCheckComponent::new(
-                allocator,
-                crate::range_checks::RangeCheckEval::new(
-                    range13.clone(),
-                    crate::range_checks::RANGE13_BITS,
-                ),
-                interaction_claim.range13.claimed_sum,
-            ),
-            signed_carry: crate::range_checks::SignedCarryRangeComponent::new(
-                allocator,
-                crate::range_checks::SignedCarryRangeEval::new(
-                    signed_carry.clone(),
-                    crate::projective_air::projective_rcb_signed_carry_log_size(),
-                    crate::projective_air::PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
-                ),
-                interaction_claim.signed_carry.claimed_sum,
             ),
         }
     }
@@ -268,10 +178,6 @@ impl PreparedTableProjectiveSourceComponents {
         vec![
             &self.provider as &dyn Component,
             &self.consumer as &dyn Component,
-            &self.gamma_range13 as &dyn Component,
-            &self.gamma_signed as &dyn Component,
-            &self.range13 as &dyn Component,
-            &self.signed_carry as &dyn Component,
         ]
     }
 
@@ -279,10 +185,6 @@ impl PreparedTableProjectiveSourceComponents {
         vec![
             &self.provider as &dyn ComponentProver<SimdBackend>,
             &self.consumer as &dyn ComponentProver<SimdBackend>,
-            &self.gamma_range13 as &dyn ComponentProver<SimdBackend>,
-            &self.gamma_signed as &dyn ComponentProver<SimdBackend>,
-            &self.range13 as &dyn ComponentProver<SimdBackend>,
-            &self.signed_carry as &dyn ComponentProver<SimdBackend>,
         ]
     }
 

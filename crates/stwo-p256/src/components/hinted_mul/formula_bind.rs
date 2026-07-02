@@ -45,19 +45,6 @@ pub(crate) struct ReductionWitness<E: EvalAtRow> {
     pub carries: [E::F; N_LIMBS],
 }
 
-impl<E: EvalAtRow> ReductionWitness<E> {
-    pub(crate) fn read(eval: &mut E) -> Self {
-        Self {
-            q: eval.next_trace_mask(),
-            carries: core::array::from_fn(|_| eval.next_trace_mask()),
-        }
-    }
-}
-
-pub(crate) fn read_bigint<E: EvalAtRow>(eval: &mut E) -> P256EvalBigInt<E> {
-    P256EvalBigInt::<E>::from_limbs(core::array::from_fn(|_| eval.next_trace_mask()))
-}
-
 pub(crate) fn modulus_bigint() -> P256M31BigInt {
     P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_MODULUS))
 }
@@ -95,39 +82,6 @@ pub(crate) fn signed_coeff_mul<E: EvalAtRow>(coeff: i64, limb: E::F) -> E::F {
     } else {
         scaled
     }
-}
-
-/// Constrain `target ≡ Σ_j coeff_j · src_j (mod p)` over 13-bit limbs with the
-/// signed-carry reduction idiom. See `double_formula.rs` docs for the soundness
-/// argument (unchanged). Degree 2 (`gate · recurrence`).
-pub(crate) fn add_combo_reduction<E: EvalAtRow>(
-    eval: &mut E,
-    gate: &E::F,
-    target: &P256EvalBigInt<E>,
-    terms: &[ComboTerm<'_, E>],
-    witness: &ReductionWitness<E>,
-) {
-    let zero = E::F::from(M31::from_u32_unchecked(0));
-    let limb_base = E::F::from(M31::from_u32_unchecked(1u32 << LIMB_BITS));
-    let modulus = modulus_bigint();
-    for i in 0..N_LIMBS {
-        let prev = if i == 0 {
-            zero.clone()
-        } else {
-            witness.carries[i - 1].clone()
-        };
-        let mut combo = zero.clone();
-        for term in terms {
-            let limb = term.src.limbs()[i].clone();
-            combo += signed_coeff_mul::<E>(term.coeff, limb);
-        }
-        let recurrence =
-            combo - target.limbs()[i].clone() - witness.q.clone() * fixed_limb::<E>(&modulus, i)
-                + prev
-                - limb_base.clone() * witness.carries[i].clone();
-        eval.add_constraint(gate.clone() * recurrence);
-    }
-    eval.add_constraint(gate.clone() * witness.carries[N_LIMBS - 1].clone());
 }
 
 /// Muxed signed-carry reduction: constrain
@@ -175,18 +129,6 @@ pub(crate) fn add_muxed_combo_reduction<E: EvalAtRow>(
         eval.add_constraint(gate.clone() * recurrence);
     }
     eval.add_constraint(gate.clone() * witness.carries[N_LIMBS - 1].clone());
-}
-
-/// Limb-wise equality `target == src` over all `N_LIMBS` limbs, gated.
-pub(crate) fn bind_equal<E: EvalAtRow>(
-    eval: &mut E,
-    gate: &E::F,
-    target: &P256EvalBigInt<E>,
-    src: &P256EvalBigInt<E>,
-) {
-    for i in 0..N_LIMBS {
-        eval.add_constraint(gate.clone() * (target.limbs()[i].clone() - src.limbs()[i].clone()));
-    }
 }
 
 /// Muxed pure equality: `gate·(op·(x − srcD) + (1−op)·(x − srcM))` per limb,

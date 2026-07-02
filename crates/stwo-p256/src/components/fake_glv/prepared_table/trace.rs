@@ -18,7 +18,6 @@ use crate::prepared_point::{
     PREPARED_BASE_COUNT, TABLE16_INDEX,
 };
 use crate::projective::ProjectiveEcTraceClaim;
-use crate::projective_air::projective_rcb_op_mul_limbs;
 use crate::types::{AffinePoint, U256};
 
 use crate::scalar::cert_bind::{CertScalarInputClaim, CertScalarInputRow, CERT_ID_U1_GENERATOR};
@@ -27,7 +26,6 @@ use crate::scalar::fake_glv_selector::{FakeGlvSelectorClaim, FakeGlvSelectorRow}
 use crate::scalar::fake_glv_selector_lookup::Selector16DecodeEntry;
 use crate::scalar::scalar_mod_mul::columns::{m31_column_eval, padded_log_size, M31ColumnEval};
 
-use super::super::ec_source::{double_formula, mixed_add_formula};
 use super::*;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -315,15 +313,10 @@ impl PreparedTableProjectiveSourceProofClaim {
         let _ = PreparedTableProjectiveSourceComponents::new(
             &mut allocator,
             self.log_size,
-            self.rows,
             &PreparedTableProjectiveSourceInteractionClaim::zero(),
             &PreparedTableEcRowRelation::dummy(),
             &crate::projective_air::ProjectiveRcbMulComponentRelations::dummy(),
             &crate::components::hinted_mul::EcOpHeaderRelation::dummy(),
-            &crate::range_checks::RangeCheckRelation::dummy(),
-            &crate::range_checks::RangeCheckRelation::dummy(),
-            &crate::components::gamma_digest::GammaDigestRelation::dummy(),
-            &prepared_dummy_gamma_challenge(),
         );
         allocator.preprocessed_columns().clone()
     }
@@ -333,15 +326,10 @@ impl PreparedTableProjectiveSourceProofClaim {
         let components = PreparedTableProjectiveSourceComponents::new(
             &mut allocator,
             self.log_size,
-            self.rows,
             &PreparedTableProjectiveSourceInteractionClaim::zero(),
             &PreparedTableEcRowRelation::dummy(),
             &crate::projective_air::ProjectiveRcbMulComponentRelations::dummy(),
             &crate::components::hinted_mul::EcOpHeaderRelation::dummy(),
-            &crate::range_checks::RangeCheckRelation::dummy(),
-            &crate::range_checks::RangeCheckRelation::dummy(),
-            &crate::components::gamma_digest::GammaDigestRelation::dummy(),
-            &prepared_dummy_gamma_challenge(),
         );
         components.trace_log_degree_bounds()
     }
@@ -351,50 +339,19 @@ impl PreparedTableProjectiveSourceProofClaim {
         let components = PreparedTableProjectiveSourceComponents::new(
             &mut allocator,
             self.log_size,
-            self.rows,
             &PreparedTableProjectiveSourceInteractionClaim::zero(),
             &PreparedTableEcRowRelation::dummy(),
             &crate::projective_air::ProjectiveRcbMulComponentRelations::dummy(),
             &crate::components::hinted_mul::EcOpHeaderRelation::dummy(),
-            &crate::range_checks::RangeCheckRelation::dummy(),
-            &crate::range_checks::RangeCheckRelation::dummy(),
-            &crate::components::gamma_digest::GammaDigestRelation::dummy(),
-            &prepared_dummy_gamma_challenge(),
         );
         components.max_constraint_log_degree_bound()
     }
 }
 
-/// Dummy γ challenge for preprocessed-id / degree-bound queries.
-pub(crate) fn prepared_dummy_gamma_challenge() -> crate::components::gamma_digest::GammaChallenge {
-    crate::components::gamma_digest::GammaChallenge::from_gamma(
-        stwo::core::fields::qm31::SecureField::from(M31::from_u32_unchecked(2)),
-        crate::components::gamma_digest::gamma_padded_values(
-            super::interaction::prepared_gamma_range13_columns().len(),
-        )
-        .max(crate::components::gamma_digest::gamma_padded_values(
-            super::interaction::prepared_gamma_signed_carry_columns().len(),
-        )),
-    )
-}
-
 pub(crate) fn gen_prepared_table_ec_row_preprocessed_trace(
     log_size: u32,
-    rows: u32,
     ids: &[PreProcessedColumnId],
 ) -> Result<ColumnVec<M31ColumnEval>, PreparedTableError> {
-    let gamma_layouts = super::interaction::prepared_gamma_layouts(rows as usize);
-    // C5-2 preprocessed columns the self-contained Range13 / signed-carry
-    // providers declare (shared by id with the silo's, deduplicated globally).
-    let range13_value_id =
-        crate::range_checks::range_check_value_column_id(crate::range_checks::RANGE13_BITS);
-    let signed_carry_value_id = crate::range_checks::signed_carry_value_column_id(
-        crate::projective_air::PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
-    );
-    let signed_carry_active_id = crate::range_checks::signed_carry_active_column_id(
-        crate::projective_air::PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
-    );
-    let signed_carry_claim = crate::projective_air::projective_rcb_signed_carry_claim();
     ids.iter()
         .map(|id| {
             if id == &prepared_table_ec_row_index_column_id() {
@@ -404,19 +361,6 @@ pub(crate) fn gen_prepared_table_ec_row_preprocessed_trace(
                         .map(|index| M31::from_u32_unchecked(index as u32))
                         .collect(),
                 ))
-            } else if id == &range13_value_id {
-                Ok(
-                    crate::range_checks::RangeCheckClaim::new(crate::range_checks::RANGE13_BITS)
-                        .gen_preprocessed_column(),
-                )
-            } else if id == &signed_carry_value_id {
-                Ok(signed_carry_claim.gen_value_column())
-            } else if id == &signed_carry_active_id {
-                Ok(signed_carry_claim.gen_active_column())
-            } else if let Some(column) = gamma_layouts.iter().find_map(|layout| {
-                crate::components::gamma_digest::gamma_tall_preprocessed_column(layout, id)
-            }) {
-                Ok(column)
             } else {
                 Err(PreparedTableError::PreprocessedColumnMissing)
             }
@@ -478,7 +422,7 @@ pub(crate) fn gen_prepared_table_projective_source_base_trace(
                 projective_row,
             )
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Vec<_>>();
     rows.resize(
         padded_rows,
         [M31::from_u32_unchecked(0); PREPARED_TABLE_PROJECTIVE_SOURCE_TRACE_COLUMNS],
@@ -582,7 +526,7 @@ fn prepared_table_projective_source_trace_values(
     source_index: usize,
     prepared_row: &PreparedTableEcRow,
     projective_row: &crate::projective::ProjectiveEcRow,
-) -> Result<[M31; PREPARED_TABLE_PROJECTIVE_SOURCE_TRACE_COLUMNS], PreparedTableError> {
+) -> [M31; PREPARED_TABLE_PROJECTIVE_SOURCE_TRACE_COLUMNS] {
     let mut values = [M31::from_u32_unchecked(0); PREPARED_TABLE_PROJECTIVE_SOURCE_TRACE_COLUMNS];
     let mut column = 0;
     values[column] = M31::from_u32_unchecked(1);
@@ -609,58 +553,8 @@ fn prepared_table_projective_source_trace_values(
         values[column] = value;
         column += 1;
     }
-    debug_assert_eq!(column, PREPARED_TABLE_PROJECTIVE_SOURCE_HAS_MULS_COL);
-    // C5 plumbing: the `has_muls` flag, then the silo's proven mul limbs for this
-    // prepared-table op in canonical order. (Prepared-table ops use finite base
-    // operands, so `has_muls` is 1, but the flag keeps the consumer robust.)
-    let (mul_limbs, has_muls) = projective_rcb_op_mul_limbs(source_index, projective_row)
-        .map_err(|_| PreparedTableError::ProjectiveSourceInvalid)?;
-    values[column] = M31::from_u32_unchecked(has_muls as u32);
-    column += 1;
-    // Operand dedup: only the KEPT slots are committed.
-    for value in crate::projective_air::projective_rcb_kept_mul_limbs(&mul_limbs) {
-        values[column] = value;
-        column += 1;
-    }
-    debug_assert_eq!(column, PREPARED_TABLE_PROJECTIVE_SOURCE_FORMULA_OFFSET);
-    // The SHARED formula block: the Double witness (a strict prefix of the
-    // block) on Double rows, the MixedAdd witness on finite-operand MixedAdd
-    // rows; the two witnessed gate columns at the block's tail are
-    // constrained on EVERY row, so the no-witness branch still writes them
-    // ((0, 0) on Double rows is the zero default).
-    let is_mixed = projective_row.op == crate::projective::ProjectiveEcOp::MixedAdd;
-    if projective_row.op == crate::projective::ProjectiveEcOp::Double {
-        let witness = double_formula::solve_double_formula_witness(
-            &mul_limbs,
-            &projective_row.output_projective,
-        )
-        .ok_or(PreparedTableError::ProjectiveSourceInvalid)?;
-        for (offset, value) in double_formula::double_formula_trace_values(&witness)
-            .into_iter()
-            .enumerate()
-        {
-            values[column + offset] = value;
-        }
-        column += mixed_add_formula::MIXED_ADD_FORMULA_COLUMNS;
-    } else if is_mixed && has_muls {
-        let witness = mixed_add_formula::solve_mixed_add_formula_witness(
-            &mul_limbs,
-            &projective_row.output_projective,
-        )
-        .ok_or(PreparedTableError::ProjectiveSourceInvalid)?;
-        for value in mixed_add_formula::mixed_add_formula_trace_values(&witness) {
-            values[column] = value;
-            column += 1;
-        }
-    } else {
-        let gate_base = column + mixed_add_formula::MIXED_ADD_GATE_OFFSET_IN_BLOCK;
-        let gates = mixed_add_formula::mixed_add_gate_trace_values(is_mixed, false);
-        values[gate_base] = gates[0];
-        values[gate_base + 1] = gates[1];
-        column += mixed_add_formula::MIXED_ADD_FORMULA_COLUMNS;
-    }
     debug_assert_eq!(column, PREPARED_TABLE_PROJECTIVE_SOURCE_TRACE_COLUMNS);
-    Ok(values)
+    values
 }
 
 #[derive(Clone, Debug)]

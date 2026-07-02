@@ -239,10 +239,34 @@ impl FrameworkEval for HintedMulEval {
             eval.add_constraint((one_ef.clone() - is_proj_0.clone()) * flag.clone());
         }
 
-        // PROVIDE (yield, `-active`) the mul's operand/result limbs under the
-        // silo's external relation, so consumers are untouched by the swap.
+        // PROVIDE (yield) the mul's operand/result limbs under the silo's
+        // external relation. Per-slot provide masks (Phase 3): the two
+        // projective-source consumers now consume ONLY 6 narrow slots per proj
+        // group — (mul 0/1, LHS+RHS) and (mul 13/14, LHS) — while final_add and
+        // public_key_curve (the non-proj source ranges) still consume every
+        // slot. `wide = active − Σ_k is_proj_k` is 1 exactly on active non-proj
+        // rows (the one-hots partition active proj rows), so the per-role
+        // numerators mirror the consumption union exactly:
+        //   LHS:    wide + is_proj_{0,1,13,14}  = active − Σ_{k=2..12} is_proj_k
+        //   RHS:    wide + is_proj_{0,1}        = active − Σ_{k=2..14} is_proj_k
+        //   RESULT: wide                        = active − Σ_{k=0..14} is_proj_k
+        // All degree 1 (preprocessed columns only).
+        let proj_sum = |range: core::ops::RangeInclusive<usize>| -> E::F {
+            let mut sum = E::F::from(M31::from_u32_unchecked(0));
+            for k in range {
+                sum += is_proj[k].clone();
+            }
+            sum
+        };
+        let lhs_numerator = active.clone() - proj_sum(2..=12);
+        let rhs_numerator = active.clone() - proj_sum(2..=14);
+        let result_numerator = active.clone() - proj_sum(0..=14);
         let result = &groups[2].1;
-        for (role, limbs) in [(0u32, &a), (1u32, &b), (2u32, result)] {
+        for (role, limbs, numerator) in [
+            (0u32, &a, lhs_numerator),
+            (1u32, &b, rhs_numerator),
+            (2u32, result, result_numerator),
+        ] {
             let mut values = Vec::with_capacity(3 + N_LIMBS);
             values.push(source_index.clone());
             values.push(mul_index.clone());
@@ -250,7 +274,7 @@ impl FrameworkEval for HintedMulEval {
             values.extend(limbs.iter().cloned());
             eval.add_to_relation(RelationEntry::new(
                 &self.mul_result,
-                -E::EF::from(active.clone()),
+                -E::EF::from(numerator),
                 &values,
             ));
         }

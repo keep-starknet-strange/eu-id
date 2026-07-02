@@ -500,6 +500,26 @@ pub fn gen_hinted_mul_interaction_trace(
     // `is_proj_mul_0` doubles as the header consume numerator (schedule offset 3
     // is `is_proj_mul_0` — see `gen_hinted_mul_schedule_columns`).
     let is_proj_mul_0 = &schedule[3];
+    // Per-slot provide-mask numerators (Phase 3), mirroring the eval:
+    //   LHS:    active − Σ_{k=2..12} is_proj_k
+    //   RHS:    active − Σ_{k=2..14} is_proj_k
+    //   RESULT: active − Σ_{k=0..14} is_proj_k
+    let masked_numerator = |range: core::ops::RangeInclusive<usize>| -> Vec<PackedM31> {
+        (0..vec_rows)
+            .map(|vec_row| {
+                let mut numerator = active.data[vec_row];
+                for k in range.clone() {
+                    numerator -= schedule[3 + k].data[vec_row];
+                }
+                numerator
+            })
+            .collect()
+    };
+    let provide_numerators: [Vec<PackedM31>; 3] = [
+        masked_numerator(2..=12),
+        masked_numerator(2..=14),
+        masked_numerator(0..=14),
+    ];
 
     // Entry descriptors in the exact `evaluate` emission order: every committed
     // column in column order (Range13 for limbs, the signed table for h_hi),
@@ -561,28 +581,30 @@ pub fn gen_hinted_mul_interaction_trace(
         }
     }
 
-    // Per-entry (numerator column, sign, packed denominators). Independent →
+    // Per-entry (numerator lanes, sign, packed denominators). Independent →
     // rayon.
     use rayon::prelude::*;
-    let entries: Vec<(&M31ColumnEval, i64, Vec<PackedQM31>)> = descriptors
+    let active_lanes: Vec<PackedM31> = (0..vec_rows).map(|r| active.data[r]).collect();
+    let header_lanes: Vec<PackedM31> = (0..vec_rows).map(|r| is_proj_mul_0.data[r]).collect();
+    let entries: Vec<(Vec<PackedM31>, i64, Vec<PackedQM31>)> = descriptors
         .par_iter()
         .map(|kind| match kind {
             EntryKind::Range13(column) => (
-                active,
+                active_lanes.clone(),
                 1i64,
                 (0..vec_rows)
                     .map(|vec_row| relations.range13.combine(&[base[*column].data[vec_row]]))
                     .collect(),
             ),
             EntryKind::SignedH(column) => (
-                active,
+                active_lanes.clone(),
                 1i64,
                 (0..vec_rows)
                     .map(|vec_row| relations.signed_h.combine(&[base[*column].data[vec_row]]))
                     .collect(),
             ),
             EntryKind::SignedFormula(column) => (
-                active,
+                active_lanes.clone(),
                 1i64,
                 (0..vec_rows)
                     .map(|vec_row| {
@@ -591,7 +613,7 @@ pub fn gen_hinted_mul_interaction_trace(
                     .collect(),
             ),
             EntryKind::Provide { role, column } => (
-                active,
+                provide_numerators[*role as usize].clone(),
                 -1i64,
                 (0..vec_rows)
                     .map(|vec_row| {
@@ -611,7 +633,7 @@ pub fn gen_hinted_mul_interaction_trace(
             // (source_index, op, output_inf, lhs_inf, rhs_inf) — the flag
             // columns live on the header row itself (offset 0).
             EntryKind::Header => (
-                is_proj_mul_0,
+                header_lanes.clone(),
                 1i64,
                 (0..vec_rows)
                     .map(|vec_row| {
@@ -633,8 +655,8 @@ pub fn gen_hinted_mul_interaction_trace(
     // exactly the layout `finalize_logup_in_pairs` expects. Each entry supplies
     // its own numerator column (active-based or is_proj_mul_0), sign-scaled.
     let mut logup = LogupTraceGenerator::new(log_size);
-    let numer = |col: &M31ColumnEval, sign: i64, vec_row: usize| {
-        PackedQM31::from(col.data[vec_row]) * signed_secure(sign)
+    let numer = |lanes: &[PackedM31], sign: i64, vec_row: usize| {
+        PackedQM31::from(lanes[vec_row]) * signed_secure(sign)
     };
     for pair in entries.chunks(2) {
         let mut col = logup.new_col();
@@ -677,6 +699,19 @@ pub(crate) fn hinted_mul_result_provider_sum(
         let mut values = Vec::new();
         push_row_values(&scheduled.witness, &mut values);
         for (role, base_column) in roles {
+            // Per-slot provide masks: proj rows provide only the narrowly
+            // consumed slots (LHS at mul 0/1/13/14, RHS at mul 0/1, RESULT
+            // never); non-proj rows provide all three roles.
+            if scheduled.proj_scope {
+                let provided = match role {
+                    0 => matches!(scheduled.mul_index, 0 | 1 | 13 | 14),
+                    1 => matches!(scheduled.mul_index, 0 | 1),
+                    _ => false,
+                };
+                if !provided {
+                    continue;
+                }
+            }
             let mut tuple = Vec::with_capacity(3 + N_LIMBS);
             tuple.push(M31::from_u32_unchecked(scheduled.source_index));
             tuple.push(M31::from_u32_unchecked(scheduled.mul_index));
