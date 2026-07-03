@@ -16,6 +16,7 @@
 use eu_id_prover::credential::Credential;
 use eu_id_prover::generator::{sign_credential, IssuerKey};
 use eu_id_prover::{fixtures, prove, verify, Error, PipelineWitness, Proof};
+use std::time::Instant;
 
 /// Drive a pipeline witness through the five-module combined prover.
 fn prove_pipeline(pw: &PipelineWitness) -> Result<Proof, Error> {
@@ -33,6 +34,44 @@ fn prove_pipeline(pw: &PipelineWitness) -> Result<Proof, Error> {
         &pw.nat_public,
         &pw.nat_private,
     )
+}
+
+#[test]
+#[ignore = "WO-1.6 diagnostic: proves the same witness twice and prints cache warm-up timing"]
+fn wo_1_6_repeated_prove_timing() {
+    let pw = fixtures::valid_over_18().pipeline_witness();
+    assert!(pw.check_consistency().all_ok());
+
+    let first_start = Instant::now();
+    let first = prove_pipeline(&pw).expect("first proof generates");
+    let first_ms = first_start.elapsed().as_secs_f64() * 1000.0;
+
+    let second_start = Instant::now();
+    let second = prove_pipeline(&pw).expect("second proof generates");
+    let second_ms = second_start.elapsed().as_secs_f64() * 1000.0;
+
+    let first_bytes = bincode::serialize(&first).expect("first proof serializes");
+    let second_bytes = bincode::serialize(&second).expect("second proof serializes");
+    assert_eq!(first_bytes, second_bytes, "cached proof bytes must match");
+
+    eprintln!(
+        "WO-1.6 repeated prove timing: first_ms={first_ms:.3} second_ms={second_ms:.3} delta_ms={:.3}",
+        first_ms - second_ms
+    );
+}
+
+#[test]
+#[ignore = "WO-1.6 diagnostic: proves twice to assert cache byte identity"]
+fn wo_1_6_repeated_prove_bytes_identical() {
+    let pw = fixtures::valid_over_18().pipeline_witness();
+    assert!(pw.check_consistency().all_ok());
+
+    let first = prove_pipeline(&pw).expect("first proof generates");
+    let second = prove_pipeline(&pw).expect("second proof generates");
+
+    let first_bytes = bincode::serialize(&first).expect("first proof serializes");
+    let second_bytes = bincode::serialize(&second).expect("second proof serializes");
+    assert_eq!(first_bytes, second_bytes, "cached proof bytes must match");
 }
 
 /// The honest end-to-end witness: a signed credential whose holder is over 18 and

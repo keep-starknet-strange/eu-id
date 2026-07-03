@@ -25,6 +25,9 @@
 
 pub mod relations;
 
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+
 use num_traits::Zero;
 use stwo::core::air::Component;
 use stwo::core::channel::{Blake2sChannel, Channel};
@@ -36,6 +39,7 @@ use stwo::core::vcs_lifted::blake2_merkle::{Blake2sMerkleChannel, Blake2sMerkleH
 use stwo::core::verifier::{verify as stark_verify, VerificationError};
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::poly::circle::PolyOps;
+use stwo::prover::poly::twiddles::TwiddleTree;
 use stwo::prover::{
     prove as stark_prove, CommitmentSchemeProver, ComponentProver, ProvingError, TreeBuilder,
 };
@@ -52,6 +56,24 @@ pub type Ch = Blake2sChannel;
 
 /// The hasher carried inside the emitted [`StarkProof`] (`Mc::H`).
 pub type Hasher = Blake2sMerkleHasher;
+
+static TWIDDLE_CACHE: OnceLock<Mutex<HashMap<u32, &'static TwiddleTree<SimdBackend>>>> =
+    OnceLock::new();
+
+fn cached_twiddles(twiddle_log_size: u32) -> &'static TwiddleTree<SimdBackend> {
+    let cache = TWIDDLE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache.lock().expect("twiddle cache poisoned");
+    if let Some(twiddles) = cache.get(&twiddle_log_size) {
+        return twiddles;
+    }
+    let twiddles = Box::leak(Box::new(SimdBackend::precompute_twiddles(
+        CanonicCoset::new(twiddle_log_size)
+            .circle_domain()
+            .half_coset,
+    )));
+    cache.insert(twiddle_log_size, twiddles);
+    twiddles
+}
 
 /// The per-tree column log-sizes a module contributes, in commit order.
 ///
@@ -195,11 +217,7 @@ pub fn prove(
         .lifting_log_size
         .unwrap_or(max_constraint_log_degree_bound + config.fri_config.log_blowup_factor);
 
-    let twiddles = SimdBackend::precompute_twiddles(
-        CanonicCoset::new(twiddle_log_size)
-            .circle_domain()
-            .half_coset,
-    );
+    let twiddles = cached_twiddles(twiddle_log_size);
 
     let channel = &mut Ch::default();
     config.mix_into(channel);
