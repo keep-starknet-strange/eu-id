@@ -1538,6 +1538,13 @@ fn add_u256(a: &U256, b: &U256) -> U256 {
 fn monolithic_interaction_claim(
     draft: &P256ProofDraft,
 ) -> (P256CurrentAirInteractionClaim, P256CurrentAirRelations) {
+    monolithic_interaction_claim_with_base_mutation(draft, |_| {})
+}
+
+fn monolithic_interaction_claim_with_base_mutation(
+    draft: &P256ProofDraft,
+    mutate_base: impl FnOnce(&mut P256CurrentAirBaseTrace),
+) -> (P256CurrentAirInteractionClaim, P256CurrentAirRelations) {
     let proof_claim = P256CurrentAirProofClaim::from_claim(&draft.claim);
     let ids = proof_claim.preprocessed_column_ids();
     let max_bound = proof_claim.max_constraint_log_degree_bound(&ids);
@@ -1564,6 +1571,7 @@ fn monolithic_interaction_claim(
     let mut base = draft
         .gen_current_air_base_trace(&proof_claim)
         .expect("base trace");
+    mutate_base(&mut base);
     let base_columns = std::mem::take(&mut base.columns);
     let mut tree_builder = commitment_scheme.tree_builder();
     tree_builder.extend_evals(base_columns);
@@ -1667,6 +1675,16 @@ fn column_to_values(column: &crate::scalar::scalar_mod_mul::columns::M31ColumnEv
         out.extend_from_slice(&packed.to_array());
     }
     out
+}
+
+fn column_from_values_like(
+    column: &crate::scalar::scalar_mod_mul::columns::M31ColumnEval,
+    values: Vec<M31>,
+) -> crate::scalar::scalar_mod_mul::columns::M31ColumnEval {
+    stwo::prover::poly::circle::CircleEvaluation::new(
+        column.domain,
+        stwo::prover::backend::simd::column::BaseColumn::from_iter(values),
+    )
 }
 
 /// C5-2a-ii IN-AIR oracle: forging a Double-op `output_affine.x` limb on the
@@ -1897,6 +1915,39 @@ fn monolithic_rejects_mutated_public_r() {
     draft.claim.public_inputs.instances[0].r =
         bump_limb0(&draft.claim.public_inputs.instances[0].r);
     let err = monolithic_balance_outcome(&draft).expect_err("mutated public r must reject");
+    assert!(
+        matches!(
+            err,
+            P256ProofError::RelationImbalance {
+                relation: "LookupSum"
+            }
+        ),
+        "expected LookupSum imbalance, got {err:?}"
+    );
+}
+
+/// WO-2.5 oracle: the monolith has one shared projective signed-carry provider
+/// for public-key-curve and final-add consumers. Corrupting that shared
+/// multiplicity column must unbalance the aggregate LogUp sum.
+#[test]
+fn monolithic_rejects_corrupted_shared_projective_signed_carry_multiplicity() {
+    let draft = valid_draft_for_balance(7, 11);
+    monolithic_balance_outcome(&draft).expect("honest draft balances");
+
+    let (interaction_claim, relations) =
+        monolithic_interaction_claim_with_base_mutation(&draft, |base| {
+            let column = &base.projective_signed_carry_multiplicity;
+            let mut values = column_to_values(column);
+            let row = values
+                .iter()
+                .position(|&value| value != M31::from_u32_unchecked(0))
+                .expect("shared signed-carry provider has live multiplicity");
+            values[row] += M31::from_u32_unchecked(1);
+            base.projective_signed_carry_multiplicity = column_from_values_like(column, values);
+        });
+    let err = interaction_claim
+        .verify_balanced(&draft.claim.public_inputs.instances, &relations)
+        .expect_err("corrupted shared signed-carry multiplicity must reject");
     assert!(
         matches!(
             err,

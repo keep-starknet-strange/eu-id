@@ -69,6 +69,23 @@ pub fn gen_final_add_interaction_trace(
     relations: &FinalAddRelations,
     log_sizes: FinalAddLogSizes,
 ) -> Result<(Vec<M31ColumnEval>, FinalAddInteractionClaim), FinalAddError> {
+    gen_final_add_interaction_trace_with_signed_carry_provider(claim, relations, log_sizes, true)
+}
+
+pub(crate) fn gen_final_add_interaction_trace_without_signed_carry_provider(
+    claim: &FinalAddClaim,
+    relations: &FinalAddRelations,
+    log_sizes: FinalAddLogSizes,
+) -> Result<(Vec<M31ColumnEval>, FinalAddInteractionClaim), FinalAddError> {
+    gen_final_add_interaction_trace_with_signed_carry_provider(claim, relations, log_sizes, false)
+}
+
+fn gen_final_add_interaction_trace_with_signed_carry_provider(
+    claim: &FinalAddClaim,
+    relations: &FinalAddRelations,
+    log_sizes: FinalAddLogSizes,
+    include_signed_carry_provider: bool,
+) -> Result<(Vec<M31ColumnEval>, FinalAddInteractionClaim), FinalAddError> {
     let mut columns = Vec::new();
 
     // Check family (consumers + output provider). The four muls are proven by
@@ -114,16 +131,24 @@ pub fn gen_final_add_interaction_trace(
     );
     columns.extend(range13_trace);
 
-    let signed_carry = final_add_signed_carry_claim();
-    let signed_carry_values = signed_carry.gen_value_column();
-    let signed_carry_multiplicity =
-        signed_carry.gen_multiplicity_trace(final_add_signed_carry_uses(claim)?);
-    let (signed_carry_trace, signed_carry_claim) =
+    let (signed_carry_trace, signed_carry_claim) = if include_signed_carry_provider {
+        let signed_carry = final_add_signed_carry_claim();
+        let signed_carry_values = signed_carry.gen_value_column();
+        let signed_carry_multiplicity =
+            signed_carry.gen_multiplicity_trace(final_add_signed_carry_uses(claim)?);
         RangeCheckInteractionClaim::gen_interaction_trace(
             &signed_carry_multiplicity,
             &signed_carry_values,
             &relations.signed_carry,
-        );
+        )
+    } else {
+        (
+            Vec::new(),
+            RangeCheckInteractionClaim {
+                claimed_sum: secure_zero(),
+            },
+        )
+    };
     columns.extend(signed_carry_trace);
 
     Ok((
