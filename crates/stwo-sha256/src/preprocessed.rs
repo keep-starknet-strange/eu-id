@@ -39,6 +39,9 @@
 //! round-cyclic block of the rotated one-row-per-round layout):
 //! `8·5 + 5 + 3 + 4·5 + 4·3 + 4·1 + 1 + 9 = 94`.
 
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+
 use stwo::core::fields::m31::BaseField;
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::prover::backend::simd::column::BaseColumn;
@@ -76,6 +79,9 @@ pub type PreprocessedTrace = (
     Vec<PreProcessedColumnId>,
     Vec<u32>,
 );
+
+static PREPROCESSED_TRACE_CACHE: OnceLock<Mutex<HashMap<(u32, u32), PreprocessedTrace>>> =
+    OnceLock::new();
 
 /// Log sizes of every preprocessed column, in canonical order —
 /// **metadata only**, allocating no `BaseColumn`/`CircleEvaluation`.
@@ -131,6 +137,21 @@ pub fn preprocessed_log_sizes(group_width: u32, log_n_rows: u32) -> Vec<u32> {
 /// `is_first_row` selector column is sized to it and is `1` at storage
 /// index `Layout::block_slot(0, log_n_rows) = 0`, `0` elsewhere.
 pub fn generate_preprocessed_trace(group_width: u32, log_n_rows: u32) -> PreprocessedTrace {
+    let cache = PREPROCESSED_TRACE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = (group_width, log_n_rows);
+    {
+        let cache = cache.lock().expect("SHA preprocessed cache poisoned");
+        if let Some(trace) = cache.get(&key) {
+            return trace.clone();
+        }
+    }
+
+    let trace = generate_preprocessed_trace_uncached(group_width, log_n_rows);
+    let mut cache = cache.lock().expect("SHA preprocessed cache poisoned");
+    cache.entry(key).or_insert_with(|| trace.clone()).clone()
+}
+
+fn generate_preprocessed_trace_uncached(group_width: u32, log_n_rows: u32) -> PreprocessedTrace {
     let mut evals = Vec::new();
     let mut log_sizes = Vec::new();
 
