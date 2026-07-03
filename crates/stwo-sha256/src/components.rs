@@ -445,12 +445,16 @@ impl FrameworkEval for Xor8Eval {
         let z = eval.get_preprocessed_column(cols[2].clone());
         let mult = eval.next_trace_mask();
 
+        #[cfg(not(feature = "gkr-spike"))]
         eval.add_to_relation(RelationEntry::new(
             &self.relations.xor_8,
             -E::EF::from(mult),
             &[x, y, z],
         ));
+        #[cfg(feature = "gkr-spike")]
+        let _ = (x, y, z, mult);
 
+        #[cfg(not(feature = "gkr-spike"))]
         eval.finalize_logup_in_pairs();
         eval
     }

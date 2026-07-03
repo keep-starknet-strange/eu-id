@@ -29,5 +29,11 @@ Shape: `cargo test -p eu-id-prover --release shape_dump -- --ignored --nocapture
 | 2026-07-02 | 1f461ac8 | WO-1.1 hint/draft generation (RAYON_NUM_THREADS=1) | `hint_gen_timing` checked vs optimized median | 323.335 ms | 157.269 ms |
 | 2026-07-02 | 1f461ac8 | WO-1.1 hint/draft generation (default Rayon) | `hint_gen_timing` checked vs optimized median | 192.371 ms | 58.347 ms |
 | 2026-07-02 | 1f461ac8 | WO-1.1 blocked acceptance check (Q-002) | BM_ECDSAZKProver_equiv/1 (1-thread; draft prebuilt by harness) | 1.894 s | 1.874 s |
+| 2026-07-02 | 81e946e9 | WO-S1 `xor_8` GKR spike (blocked on MLE tie-back Q-003) | BM_ShaZK_equiv/1/prove (1-thread) | 1.0652 s | 1.0478 s |
+| 2026-07-02 | 81e946e9 | WO-S1 `xor_8` GKR spike (blocked on MLE tie-back Q-003) | BM_ShaZK_equiv/1/verify | 612.77 µs | 764.98 µs |
+| 2026-07-02 | 81e946e9 | WO-S1 `xor_8` GKR spike (blocked on MLE tie-back Q-003) | shape_dump total cells | 28,488,480 | 28,222,240 |
+| 2026-07-02 | 81e946e9 | WO-S1 `xor_8` GKR spike (blocked on MLE tie-back Q-003) | shape_dump sha256 interaction cells | 5,800,640 | 5,534,400 |
+| 2026-07-02 | 81e946e9 | WO-S1 `xor_8` GKR spike (blocked on MLE tie-back Q-003) | standalone SHA proof bytes | 60,045 | 73,749 |
+| 2026-07-02 | 81e946e9 | WO-S1 `xor_8` GKR spike (blocked on MLE tie-back Q-003) | `xor_8` GKR wire proof bytes | 0 | 18,824 |
 
 WO-1.8 note: `target-cpu=native` was measured with `RUSTFLAGS="-C target-cpu=native"` instead of committed `.cargo/config.toml`, because CI builds this repo on `ubuntu-latest` and would consume committed Cargo config. LTO/CU1 is scoped to `[profile.bench]`; putting it in `[profile.release]` made `cargo test --workspace --release` fail in the P-256 monolithic proof gate with `ProofLayer("Constraints not satisfied.")`.

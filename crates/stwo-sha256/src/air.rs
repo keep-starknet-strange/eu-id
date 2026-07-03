@@ -671,7 +671,9 @@ fn interaction_trace_log_sizes(
         maj_ch_log_size(group_width),
         num_paired_cols(2) * EXT,
     ));
-    // xor_8: 1 lookup → 1 column at log_size 16.
+    // xor_8: 1 lookup → 1 column at log_size 16. Under the GKR spike this
+    // producer-side LogUp column is replaced by the side GKR argument.
+    #[cfg(not(feature = "gkr-spike"))]
     out.extend(std::iter::repeat_n(LOG_SIZE_16, num_paired_cols(1) * EXT));
     // 4 round split-pack: 1 lookup each.
     for _ in ROUND_SPLIT_TABLES {

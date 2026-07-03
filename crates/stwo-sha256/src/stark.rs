@@ -18,6 +18,8 @@
 //! breaks the verifier's challenge re-derivation.
 
 use num_traits::Zero;
+#[cfg(feature = "gkr-spike")]
+use stwo::core::channel::Blake2sChannel;
 use stwo::core::pcs::PcsConfig;
 use stwo::core::proof::StarkProof;
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleHasher;
@@ -26,7 +28,13 @@ use stwo::prover::backend::simd::m31::LOG_N_LANES;
 
 use crate::air::{Sha256Prover, Sha256Verifier};
 use crate::constants::DIGEST_BYTES;
+#[cfg(feature = "gkr-spike")]
+use crate::gkr_spike::{
+    prove_xor_8_gkr, verify_xor_8_gkr, xor_8_output_claims_balance, Xor8GkrProofWire,
+};
 use crate::interaction::InteractionClaim;
+#[cfg(feature = "gkr-spike")]
+use crate::relations::Sha256Relations;
 use crate::types::{Digest, Sha256Witness};
 use crate::witness::compute_sha256_witness;
 
@@ -126,6 +134,9 @@ pub struct Sha256Proof {
     /// The underlying Stwo STARK proof (Merkle commitments, FRI proof,
     /// OODS values, PoW nonce).
     pub stark_proof: StarkProof<Blake2sMerkleHasher>,
+    /// Feature-gated side proof replacing the committed `xor_8` LogUp columns.
+    #[cfg(feature = "gkr-spike")]
+    pub xor_8_gkr_proof: Xor8GkrProofWire,
 }
 
 /// Errors that can be returned by [`prove_sha256`].
@@ -188,6 +199,10 @@ pub enum Sha256VerifyError {
     /// out-of-memory allocation on the verify path (the trace row count is
     /// `2^log_n_rows`).
     UnsupportedLogNRows { log_n_rows: u32, min: u32, max: u32 },
+    #[cfg(feature = "gkr-spike")]
+    Xor8GkrUnbalanced,
+    #[cfg(feature = "gkr-spike")]
+    Xor8GkrRejected(String),
 }
 
 impl core::fmt::Display for Sha256VerifyError {
@@ -214,6 +229,10 @@ impl core::fmt::Display for Sha256VerifyError {
                 f,
                 "proof.log_n_rows = {log_n_rows} outside supported range [{min}, {max}]"
             ),
+            #[cfg(feature = "gkr-spike")]
+            Self::Xor8GkrUnbalanced => write!(f, "xor_8 GKR output claims do not balance"),
+            #[cfg(feature = "gkr-spike")]
+            Self::Xor8GkrRejected(msg) => write!(f, "xor_8 GKR proof rejected: {msg}"),
         }
     }
 }
@@ -277,6 +296,17 @@ fn prove_sha256_inner(
     let mut prover = Sha256Prover::new(witness, log_n_rows, group_width);
     let stark_proof = air_core::prove(&mut [&mut prover], pcs_config)?;
     let interaction_claim = prover.interaction_claim().clone();
+    #[cfg(feature = "gkr-spike")]
+    let xor_8_gkr_proof = {
+        let relations = Sha256Relations::draw(&mut Blake2sChannel::default());
+        let gkr = prove_xor_8_gkr(
+            &relations,
+            witness,
+            log_n_rows,
+            &mut Blake2sChannel::default(),
+        );
+        Xor8GkrProofWire::from(&gkr.proof)
+    };
 
     let digest = witness.digest_from_blocks();
     Ok(Sha256Proof {
@@ -287,6 +317,8 @@ fn prove_sha256_inner(
         interaction_claim,
         pcs_config,
         stark_proof,
+        #[cfg(feature = "gkr-spike")]
+        xor_8_gkr_proof,
     })
 }
 
@@ -344,6 +376,16 @@ pub fn verify_sha256_proof(proof: &Sha256Proof) -> Result<(), Sha256VerifyError>
     // `LogupSumNonZero` rather than a generic structural rejection.
     if !proof.interaction_claim.total().is_zero() {
         return Err(Sha256VerifyError::LogupSumNonZero);
+    }
+
+    #[cfg(feature = "gkr-spike")]
+    {
+        let xor_8_gkr_proof = proof.xor_8_gkr_proof.clone().into();
+        if !xor_8_output_claims_balance(&xor_8_gkr_proof) {
+            return Err(Sha256VerifyError::Xor8GkrUnbalanced);
+        }
+        verify_xor_8_gkr(&xor_8_gkr_proof, &mut Blake2sChannel::default())
+            .map_err(|e| Sha256VerifyError::Xor8GkrRejected(format!("{e:?}")))?;
     }
 
     // The transcript re-derivation, tree commitments, and component

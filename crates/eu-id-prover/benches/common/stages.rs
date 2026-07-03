@@ -103,7 +103,22 @@ pub fn verify_sha(proof: &Sha256Proof) {
 }
 
 pub fn sha_proof_bytes(proof: &Sha256Proof) -> usize {
+    #[cfg(feature = "gkr-spike")]
+    {
+        return bincode::serialize(&(&proof.stark_proof, &proof.xor_8_gkr_proof))
+            .map(|b| b.len())
+            .unwrap_or(0);
+    }
+
+    #[cfg(not(feature = "gkr-spike"))]
     bincode::serialize(&proof.stark_proof)
+        .map(|b| b.len())
+        .unwrap_or(0)
+}
+
+#[cfg(feature = "gkr-spike")]
+pub fn sha_xor_8_gkr_proof_bytes(proof: &Sha256Proof) -> usize {
+    bincode::serialize(&proof.xor_8_gkr_proof)
         .map(|b| b.len())
         .unwrap_or(0)
 }

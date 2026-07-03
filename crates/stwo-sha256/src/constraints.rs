@@ -1343,17 +1343,22 @@ fn wire_sigma_decode<E: EvalAtRow>(
     // / `o2_chunks_combined` (the trace writer keeps them in the
     // `(lo.b0, lo.b1, hi.b0, hi.b1)` order documented on
     // [`crate::trace::SIGMA_DECODE_COLS`]).
-    for i in 0..4 {
-        eval.add_to_relation(RelationEntry::new(
-            rel_xor_8,
-            lookup_mult.clone(),
-            &[
-                decode.o2_chunks_s[i].clone(),
-                decode.o2_chunks_s_complement[i].clone(),
-                decode.o2_chunks_combined[i].clone(),
-            ],
-        ));
+    #[cfg(not(feature = "gkr-spike"))]
+    {
+        for i in 0..4 {
+            eval.add_to_relation(RelationEntry::new(
+                rel_xor_8,
+                lookup_mult.clone(),
+                &[
+                    decode.o2_chunks_s[i].clone(),
+                    decode.o2_chunks_s_complement[i].clone(),
+                    decode.o2_chunks_combined[i].clone(),
+                ],
+            ));
+        }
     }
+    #[cfg(feature = "gkr-spike")]
+    let _ = (rel_xor_8, lookup_mult);
 }
 
 /// Emit the two linear chunk-bind constraints: `limb_lo = b0_lo + 256·b1_lo`

@@ -96,6 +96,8 @@ use serde::{Deserialize, Serialize};
 
 use air_core::relations::{field_id, SharedDigestRelation, SharedFieldRelation};
 use air_core::{Air, AirProver};
+#[cfg(feature = "gkr-spike")]
+use stwo::core::channel::Blake2sChannel;
 use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::QM31;
 use stwo::core::pcs::PcsConfig;
@@ -129,7 +131,13 @@ pub use stwo_p256::types::AffinePoint;
 
 use stwo_sha256::air::{Sha256Prover, Sha256Verifier};
 use stwo_sha256::field_exposure::FieldExposure;
+#[cfg(feature = "gkr-spike")]
+use stwo_sha256::gkr_spike::{
+    prove_xor_8_gkr, verify_xor_8_gkr, xor_8_output_claims_balance, Xor8GkrProofWire,
+};
 use stwo_sha256::interaction::InteractionClaim as Sha256InteractionClaim;
+#[cfg(feature = "gkr-spike")]
+use stwo_sha256::relations::Sha256Relations;
 use stwo_sha256::types::Sha256Witness;
 
 /// A single STARK proof over the composed P256 + SHA + digest-bind modules, plus
@@ -148,6 +156,8 @@ pub struct Proof {
     sha_log_n_rows: u32,
     sha_group_width: u32,
     sha_interaction_claim: Sha256InteractionClaim,
+    #[cfg(feature = "gkr-spike")]
+    sha_xor_8_gkr_proof: Xor8GkrProofWire,
     // Digest-bind bridge reconstruction data.
     bridge_log_size: u32,
     bridge_interaction_claim: DigestBindInteractionClaim,
@@ -201,6 +211,12 @@ pub enum Error {
     /// The shared STARK verifier rejected the proof (includes a broken global
     /// LogUp balance — e.g. the signed digest does not equal `SHA-256(C)`).
     Verify(String),
+    /// The feature-gated SHA `xor_8` GKR output claims did not cancel.
+    #[cfg(feature = "gkr-spike")]
+    ShaXor8GkrUnbalanced,
+    /// The feature-gated SHA `xor_8` side GKR proof was malformed or rejected.
+    #[cfg(feature = "gkr-spike")]
+    ShaXor8GkrRejected(String),
     /// The proof was produced under a PCS config that does not match the pinned
     /// security profile (e.g. a prover-weakened FRI/grinding setting). Rejected
     /// before the STARK check, so a low-query proof cannot be inherited.
@@ -450,9 +466,22 @@ pub fn prove_with_column_breakdown(
     // column); neither aliases SHA's `sha256_range_*`, P256's `p256_*`, or the
     // bridge's `digest_bind_*` ids in the shared allocator. The verifier must use
     // this same order.
-    let stark_proof =
-        prove_with_parallel_p256_sha(&mut p256, &mut sha, &mut bridge, &mut age, &mut nat, config)
-            .map_err(|e| Error::Prove(format!("{e:?}")))?;
+    let stark_proof = {
+        let mut modules: [&mut dyn AirProver; 5] =
+            [&mut p256, &mut sha, &mut bridge, &mut age, &mut nat];
+        air_core::prove(&mut modules, config).map_err(|e| Error::Prove(format!("{e:?}")))?
+    };
+    #[cfg(feature = "gkr-spike")]
+    let sha_xor_8_gkr_proof = {
+        let relations = Sha256Relations::draw(&mut Blake2sChannel::default());
+        let gkr = prove_xor_8_gkr(
+            &relations,
+            sha_witness,
+            sha_log_n_rows,
+            &mut Blake2sChannel::default(),
+        );
+        Xor8GkrProofWire::from(&gkr.proof)
+    };
 
     let proof = Proof {
         stark_proof,
@@ -461,6 +490,8 @@ pub fn prove_with_column_breakdown(
         sha_log_n_rows,
         sha_group_width,
         sha_interaction_claim: sha.interaction_claim().clone(),
+        #[cfg(feature = "gkr-spike")]
+        sha_xor_8_gkr_proof,
         bridge_log_size: bridge_log,
         bridge_interaction_claim: bridge.interaction_claim().clone(),
         // Claimed sums are populated by the modules' interaction phase during the
@@ -751,6 +782,16 @@ fn verify_stark(proof: &Proof) -> Result<(), Error> {
             got: proof.stark_proof.config,
             expected: expected_config,
         });
+    }
+
+    #[cfg(feature = "gkr-spike")]
+    {
+        let sha_xor_8_gkr_proof = proof.sha_xor_8_gkr_proof.clone().into();
+        if !xor_8_output_claims_balance(&sha_xor_8_gkr_proof) {
+            return Err(Error::ShaXor8GkrUnbalanced);
+        }
+        verify_xor_8_gkr(&sha_xor_8_gkr_proof, &mut Blake2sChannel::default())
+            .map_err(|e| Error::ShaXor8GkrRejected(format!("{e:?}")))?;
     }
 
     // Same module order as the prover.

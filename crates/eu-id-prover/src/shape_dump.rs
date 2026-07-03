@@ -4,7 +4,7 @@
 //! `cargo test -p eu-id-prover --release shape_dump -- --nocapture --ignored`
 
 use air_core::relations::{SharedDigestRelation, SharedFieldRelation};
-use air_core::{Air, AirProver, Ch, Mc};
+use air_core::{AirProver, Ch, Mc};
 use predicates::nat::NationalityPredicate;
 use predicates::{AgeRangeCheck, PredicateProver};
 use stwo::core::pcs::PcsConfig;
@@ -18,6 +18,7 @@ use stwo_p256::components::digest_bind::module::DigestBindProver;
 use stwo_p256::components::digest_bind::SharedScalarZRelation;
 use stwo_p256::proof::air::P256Prover;
 use stwo_sha256::air::Sha256Prover;
+use stwo_sha256::stark::{prove_sha256_from_witness, ProverConfig};
 
 use crate::{bridge_log_size, bridge_rows, credential_exposure, fixtures};
 
@@ -35,6 +36,26 @@ fn tree_stats(name: &str, sizes: &[u32]) -> (usize, u64) {
 fn shape_dump() {
     let pw = fixtures::valid_over_18().pipeline_witness();
     let draft = pw.p256_draft.as_ref().expect("valid fixture has a draft");
+    let sha_proof = prove_sha256_from_witness(
+        &pw.sha_witness,
+        &ProverConfig {
+            log_n_rows: pw.sha_log_n_rows,
+            group_width: pw.sha_group_width,
+            pcs_config: PcsConfig::default(),
+        },
+    )
+    .expect("shape dump SHA proof");
+    let sha_stark_bytes = bincode::serialize(&sha_proof.stark_proof)
+        .expect("serialize SHA STARK proof")
+        .len();
+    println!("  sha standalone STARK proof bytes = {sha_stark_bytes}");
+    #[cfg(feature = "gkr-spike")]
+    {
+        let sha_gkr_bytes = bincode::serialize(&sha_proof.xor_8_gkr_proof)
+            .expect("serialize SHA xor_8 GKR proof")
+            .len();
+        println!("  sha xor_8 GKR proof bytes = {sha_gkr_bytes}");
+    }
 
     // Mirror `prove()`'s module construction exactly.
     let scalar_z_handle = SharedScalarZRelation::new();
@@ -87,7 +108,10 @@ fn shape_dump() {
         grand.0 += p.0 + t.0 + i.0;
         grand.1 += p.1 + t.1 + i.1;
     }
-    println!("  GRAND TOTAL      cols={:>6}  cells={:>10}", grand.0, grand.1);
+    println!(
+        "  GRAND TOTAL      cols={:>6}  cells={:>10}",
+        grand.0, grand.1
+    );
 
     // Per-component breakdown needs built components, which need claimed sums
     // from the interaction phase — so run the real commit phases (everything
@@ -104,7 +128,10 @@ fn shape_dump() {
     );
     let channel = &mut Ch::default();
     let mut commitment_scheme = CommitmentSchemeProver::<SimdBackend, Mc>::new(config, &twiddles);
-    if modules.iter().any(|(_, m)| m.store_polynomial_coefficients()) {
+    if modules
+        .iter()
+        .any(|(_, m)| m.store_polynomial_coefficients())
+    {
         commitment_scheme.set_store_polynomials_coefficients();
     }
     let mut tb = commitment_scheme.tree_builder();
@@ -134,7 +161,8 @@ fn shape_dump() {
 
     // Debug: per-family claimed-sum totals (imbalance hunting).
     {
-        let mut grand = stwo::core::fields::qm31::QM31::from(stwo::core::fields::m31::M31::from(0u32));
+        let mut grand =
+            stwo::core::fields::qm31::QM31::from(stwo::core::fields::m31::M31::from(0u32));
         for (name, m) in modules.iter() {
             let s: stwo::core::fields::qm31::QM31 = m
                 .claimed_sums()

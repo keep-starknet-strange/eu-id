@@ -3,6 +3,9 @@ name = "air-core"
 version.workspace = true
 edition.workspace = true
 
+[features]
+gkr-spike = []
+
 [dependencies]
 stwo = { workspace = true }
 stwo-constraint-framework = { workspace = true }
