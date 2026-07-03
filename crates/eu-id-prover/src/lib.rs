@@ -122,14 +122,14 @@ use stwo_p256::components::digest_bind::module::{
 use stwo_p256::components::digest_bind::witness::DigestBindRow;
 use stwo_p256::components::digest_bind::SharedScalarZRelation;
 use stwo_p256::limbs::P256M31BigInt;
-use stwo_p256::proof::air::{P256Prover, P256Verifier};
+use stwo_p256::proof::air::{P256ColumnTask, P256Prover, P256Verifier};
 use stwo_p256::proof::{P256CurrentAirInteractionClaim, P256CurrentAirProofClaim, P256ProofDraft};
 use stwo_p256::public_inputs::PublicEcdsaInstance;
 // Re-exported: `AffinePoint` is the type of `PublicStatement::issuer_key`, so a
 // relying party needs it in scope to build a statement.
 pub use stwo_p256::types::AffinePoint;
 
-use stwo_sha256::air::{Sha256Prover, Sha256Verifier};
+use stwo_sha256::air::{Sha256ColumnTask, Sha256Prover, Sha256Verifier};
 use stwo_sha256::field_exposure::FieldExposure;
 #[cfg(feature = "gkr-spike")]
 use stwo_sha256::gkr_spike::Xor8GkrProofWire;
@@ -398,16 +398,50 @@ fn prepare_proof_modules<'a>(
     let digest_handle = SharedDigestRelation::new();
     let field_handle = SharedFieldRelation::new();
 
-    let p256 = P256Prover::new(p256_draft)
-        .map_err(Error::P256Prepare)?
+    let field_exposure = credential_exposure();
+    let (p256_prepared, sha_prepared) =
+        if std::env::var("EU_ID_DISABLE_TRACE_FANOUT").ok().as_deref() == Some("1")
+            || rayon::current_num_threads() == 1
+        {
+            (
+                P256ColumnTask::new(p256_draft).run(),
+                Sha256ColumnTask::new(
+                    sha_witness,
+                    sha_log_n_rows,
+                    sha_group_width,
+                    field_exposure.clone(),
+                )
+                .run(),
+            )
+        } else {
+            rayon::join(
+                || P256ColumnTask::new(p256_draft).run(),
+                || {
+                    Sha256ColumnTask::new(
+                        sha_witness,
+                        sha_log_n_rows,
+                        sha_group_width,
+                        field_exposure.clone(),
+                    )
+                    .run()
+                },
+            )
+        };
+
+    let p256 = P256Prover::from_prepared(p256_draft, p256_prepared.map_err(Error::P256Prepare)?)
         .with_z_binding(scalar_z_handle.clone());
     // SHA both yields its digest (P256↔SHA bridge) and exposes the DOB +
     // nationality byte windows (age/nat↔credential bridges) on the
     // shared field channel.
-    let sha = Sha256Prover::new(sha_witness, sha_log_n_rows, sha_group_width)
-        .with_digest_handle(digest_handle.clone())
-        .with_field_handle(exposure, field_handle.clone())
-        .with_prepared_traces(sha_prepared);
+    let sha = Sha256Prover::new_with_prepared(
+        sha_witness,
+        sha_log_n_rows,
+        sha_group_width,
+        field_exposure.clone(),
+        sha_prepared,
+    )
+    .with_digest_handle(digest_handle.clone())
+    .with_field_handle(field_exposure, field_handle.clone());
 
     let instances = p256.proof_claim().public_inputs.instances.clone();
     let rows = bridge_rows(&instances);

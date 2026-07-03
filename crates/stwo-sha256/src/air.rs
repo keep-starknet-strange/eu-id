@@ -198,6 +198,8 @@ pub struct Sha256Prover<'a> {
     digest_handle: Option<air_core::relations::SharedDigestRelation>,
     field_exposure: FieldExposure,
     field_handle: Option<air_core::relations::SharedFieldRelation>,
+    preprocessed: Option<Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>>,
+    base: Option<Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>>,
     relations: Option<Sha256Relations>,
     interaction_claim: Option<InteractionClaim>,
     components: Option<Sha256Components>,
@@ -207,6 +209,48 @@ pub struct Sha256Prover<'a> {
     xor_8_gkr_artifact: Option<stwo::prover::lookups::gkr_verifier::GkrArtifact>,
     #[cfg(feature = "gkr-spike")]
     xor_8_mle_component: Option<MleEvalProverComponent<Xor8MultiplicityOracle>>,
+}
+
+/// Send-only Stage-1 task input for preparing SHA preprocessed/base columns.
+pub struct Sha256ColumnTask<'a> {
+    witness: &'a Sha256Witness,
+    log_n_rows: u32,
+    group_width: u32,
+    field_exposure: FieldExposure,
+}
+
+/// Prepared SHA preprocessed/base columns returned by [`Sha256ColumnTask`].
+pub struct Sha256PreparedColumns {
+    preprocessed: Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
+    base: Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
+}
+
+impl<'a> Sha256ColumnTask<'a> {
+    pub fn new(
+        witness: &'a Sha256Witness,
+        log_n_rows: u32,
+        group_width: u32,
+        field_exposure: FieldExposure,
+    ) -> Self {
+        Self {
+            witness,
+            log_n_rows,
+            group_width,
+            field_exposure,
+        }
+    }
+
+    pub fn run(self) -> Sha256PreparedColumns {
+        let (preprocessed, _ids, _log_sizes) =
+            generate_preprocessed_trace(self.group_width, self.log_n_rows);
+        let base = build_base_trace(
+            self.witness,
+            self.log_n_rows,
+            self.group_width,
+            &self.field_exposure,
+        );
+        Sha256PreparedColumns { preprocessed, base }
+    }
 }
 
 impl<'a> Sha256Prover<'a> {
@@ -219,6 +263,8 @@ impl<'a> Sha256Prover<'a> {
             digest_handle: None,
             field_exposure: FieldExposure::empty(),
             field_handle: None,
+            preprocessed: None,
+            base: None,
             relations: None,
             interaction_claim: None,
             components: None,
@@ -231,21 +277,18 @@ impl<'a> Sha256Prover<'a> {
         }
     }
 
-    pub fn prepare_traces(
-        witness: &Sha256Witness,
+    pub fn new_with_prepared(
+        witness: &'a Sha256Witness,
         log_n_rows: u32,
         group_width: u32,
-        field_exposure: &FieldExposure,
-    ) -> PreparedSha256Traces {
-        let (preprocessed, _ids, _log_sizes) = generate_preprocessed_trace(group_width, log_n_rows);
-        let base = build_base_trace(witness, log_n_rows, group_width, field_exposure);
-        PreparedSha256Traces { preprocessed, base }
-    }
-
-    pub fn with_prepared_traces(mut self, prepared: PreparedSha256Traces) -> Self {
-        self.preprocessed = Some(prepared.preprocessed);
-        self.base = Some(prepared.base);
-        self
+        field_exposure: FieldExposure,
+        prepared: Sha256PreparedColumns,
+    ) -> Self {
+        let mut prover = Self::new(witness, log_n_rows, group_width);
+        prover.field_exposure = field_exposure;
+        prover.preprocessed = Some(prepared.preprocessed);
+        prover.base = Some(prepared.base);
+        prover
     }
 
     /// Enable the cross-component digest provider: the module yields

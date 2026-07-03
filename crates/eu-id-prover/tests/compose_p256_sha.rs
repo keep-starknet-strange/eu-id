@@ -74,6 +74,26 @@ fn wo_1_6_repeated_prove_bytes_identical() {
     assert_eq!(first_bytes, second_bytes, "cached proof bytes must match");
 }
 
+#[test]
+#[ignore = "WO-1.2 diagnostic: proves serial task path and default fan-out path to assert byte identity"]
+fn wo_1_2_trace_fanout_proof_bytes_identical() {
+    let pw = fixtures::valid_over_18().pipeline_witness();
+    assert!(pw.check_consistency().all_ok());
+
+    std::env::set_var("EU_ID_DISABLE_TRACE_FANOUT", "1");
+    let serial = prove_pipeline(&pw).expect("serial task path proof generates");
+    std::env::remove_var("EU_ID_DISABLE_TRACE_FANOUT");
+
+    let parallel = prove_pipeline(&pw).expect("default fan-out proof generates");
+
+    let serial_bytes = bincode::serialize(&serial).expect("serial proof serializes");
+    let parallel_bytes = bincode::serialize(&parallel).expect("parallel proof serializes");
+    assert_eq!(
+        serial_bytes, parallel_bytes,
+        "trace fan-out must preserve proof bytes"
+    );
+}
+
 /// The honest end-to-end witness: a signed credential whose holder is over 18 and
 /// whose nationality is accepted. Drives all five modules — P256, SHA-256, the
 /// digest bridge, the **credential-bound** age module, and nationality — and

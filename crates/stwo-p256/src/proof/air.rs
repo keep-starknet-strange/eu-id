@@ -135,10 +135,13 @@ pub struct P256Prover<'a> {
     scalar_z: Option<ScalarZRelation>,
 }
 
-/// P-256 proof metadata and trace columns materialized before the module is
-/// wired to cross-module relation handles.
-pub struct PreparedP256Prover<'a> {
+/// Send-only Stage-1 task input for preparing P-256 preprocessed/base columns.
+pub struct P256ColumnTask<'a> {
     draft: &'a P256ProofDraft,
+}
+
+/// Prepared P-256 preprocessed/base columns returned by [`P256ColumnTask`].
+pub struct P256PreparedColumns {
     proof_claim: P256CurrentAirProofClaim,
     ids: Vec<PreProcessedColumnId>,
     max_constraint_bound: u32,
@@ -146,38 +149,20 @@ pub struct PreparedP256Prover<'a> {
     base: P256CurrentAirBaseTrace,
 }
 
-pub struct P256InteractionJob<'a> {
-    draft: &'a P256ProofDraft,
-    base: &'a P256CurrentAirBaseTrace,
-    relations: &'a P256CurrentAirRelations,
-}
-
-pub struct PreparedP256Interaction {
-    columns: ColumnVec<M31ColumnEval>,
-    claim: P256CurrentAirInteractionClaim,
-}
-
-impl P256InteractionJob<'_> {
-    pub fn materialize(self) -> Result<PreparedP256Interaction, P256ProofError> {
-        let (columns, claim) = self
-            .draft
-            .gen_current_air_interaction_trace(self.base, self.relations)?;
-        Ok(PreparedP256Interaction { columns, claim })
+impl<'a> P256ColumnTask<'a> {
+    pub fn new(draft: &'a P256ProofDraft) -> Self {
+        Self { draft }
     }
-}
 
-impl<'a> P256Prover<'a> {
-    pub fn prepare(draft: &'a P256ProofDraft) -> Result<PreparedP256Prover<'a>, P256ProofError> {
-        let proof_claim = P256CurrentAirProofClaim::from_claim(&draft.claim);
+    pub fn run(self) -> Result<P256PreparedColumns, P256ProofError> {
+        let proof_claim = P256CurrentAirProofClaim::from_claim(&self.draft.claim);
         let ids = proof_claim.preprocessed_column_ids();
         let max_constraint_bound = proof_claim.max_constraint_log_degree_bound(&ids);
-        // The fallible trace generation happens up front so the wrapper can
-        // surface it; the in-phase `write_*` methods only move the prepared
-        // evaluations into the shared trees.
-        let preprocessed = draft.gen_current_air_preprocessed_trace(&proof_claim, &ids)?;
-        let base = draft.gen_current_air_base_trace(&proof_claim)?;
-        Ok(PreparedP256Prover {
-            draft,
+        let preprocessed = self
+            .draft
+            .gen_current_air_preprocessed_trace(&proof_claim, &ids)?;
+        let base = self.draft.gen_current_air_base_trace(&proof_claim)?;
+        Ok(P256PreparedColumns {
             proof_claim,
             ids,
             max_constraint_bound,
@@ -185,14 +170,19 @@ impl<'a> P256Prover<'a> {
             base,
         })
     }
+}
 
+impl<'a> P256Prover<'a> {
     pub fn new(draft: &'a P256ProofDraft) -> Result<Self, P256ProofError> {
-        Self::prepare(draft).map(Self::from_prepared)
+        Ok(Self::from_prepared(
+            draft,
+            P256ColumnTask::new(draft).run()?,
+        ))
     }
 
-    pub fn from_prepared(prepared: PreparedP256Prover<'a>) -> Self {
+    pub fn from_prepared(draft: &'a P256ProofDraft, prepared: P256PreparedColumns) -> Self {
         Self {
-            draft: prepared.draft,
+            draft,
             proof_claim: prepared.proof_claim,
             ids: prepared.ids,
             max_constraint_bound: prepared.max_constraint_bound,

@@ -38,6 +38,7 @@ bincode = "1"
 p256 = { version = "0.13", features = ["ecdsa"] }
 ecdsa = { version = "0.16", features = ["signing", "verifying"] }
 sha2 = "0.10"
+rayon = "1"
 
 [dev-dependencies]
 # Laptop benchmark (`benches/identity_bench.rs`, `examples/bench_report.rs`):
