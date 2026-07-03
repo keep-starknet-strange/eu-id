@@ -1040,10 +1040,8 @@ struct P256CurrentAirRelations {
     projective_signed_carry: RangeCheckRelation,
     projective_rcb_air: ProjectiveRcbMulComponentRelations,
     hinted_signed_h: RangeCheckRelation,
-    /// Phase-2: silo formula reduction carries, signed table at the projective
-    /// bound. A distinct relation instance from the shared projective
-    /// signed-carry provider used by public-key-curve/final-add consumers;
-    /// dedups only the preprocessed value/active columns by equation name.
+    /// Phase-2 silo formula reduction carries use the same equation/bound as
+    /// the projective signed-carry table, so they share the provider relation.
     hinted_signed_formula: RangeCheckRelation,
     hinted_challenge: HintedMulChallenge,
     /// Per-cert proven `s2_sign_bit` provided by `fake_glv_scalar`, consumed by
@@ -1120,7 +1118,7 @@ impl P256CurrentAirRelations {
                 mul_result: ProjectiveRcbMulComponentRelations::dummy().mul_result,
             },
             hinted_signed_h: RangeCheckRelation::dummy(),
-            hinted_signed_formula: RangeCheckRelation::dummy(),
+            hinted_signed_formula: projective_signed_carry.clone(),
             hinted_challenge: HintedMulChallenge::from_z(SecureField::from(
                 M31::from_u32_unchecked(2),
             )),
@@ -1130,7 +1128,7 @@ impl P256CurrentAirRelations {
                 // instances are value-identical, mirroring the draw path).
                 mul_result: ProjectiveRcbMulComponentRelations::dummy().mul_result,
                 range13,
-                signed_carry: projective_signed_carry,
+                signed_carry: projective_signed_carry.clone(),
                 hint: FinalCheckHintRelation::dummy(),
                 output: FinalAddOutputRelation::dummy(),
                 sign: FinalAddSignRelation::dummy(),
@@ -1208,7 +1206,7 @@ impl P256CurrentAirRelations {
                 // hinted rows, so the consumer must use the same instance.
                 mul_result: projective_rcb_air_relations.mul_result.clone(),
                 range13,
-                signed_carry: projective_signed_carry,
+                signed_carry: projective_signed_carry.clone(),
                 // Shared with the prepared-table provider above.
                 hint: final_check_hint,
                 output: FinalAddOutputRelation::draw(channel),
@@ -1219,9 +1217,7 @@ impl P256CurrentAirRelations {
             },
             // Drawn LAST (after all scalar_mod_mul + final_add relations).
             ec_op_header: EcOpHeaderRelation::draw(channel),
-            // Phase-2 silo formula signed-carry relation, appended after the
-            // header relation (the very end of the draw order).
-            hinted_signed_formula: RangeCheckRelation::draw(channel),
+            hinted_signed_formula: projective_signed_carry.clone(),
         }
     }
 }
@@ -1416,7 +1412,7 @@ impl P256CurrentAirComponents {
                 ),
                 interaction_claim.projective_signed_carry.claimed_sum,
             ),
-            hinted_mul: HintedMulSliceComponents::new_without_range13_provider(
+            hinted_mul: HintedMulSliceComponents::new_without_range13_and_signed_formula_provider(
                 allocator,
                 claim.hinted_mul,
                 &HintedMulSliceClaimedSums {
@@ -1975,16 +1971,14 @@ impl P256ProofDraft {
             RangeCheckClaim::new(RANGE13_BITS).gen_multiplicity_trace(range13_uses);
         let hinted_signed_h_multiplicity = hinted_mul_signed_table_claim()
             .gen_multiplicity_trace(hinted_mul_signed_uses(&self.claim.hinted_mul_trace));
-        // Phase-2 formula signed-carry provider multiplicity (projective bound).
-        let hinted_signed_formula_multiplicity =
-            crate::projective_air::projective_rcb_signed_carry_claim().gen_multiplicity_trace(
-                crate::components::hinted_mul::trace::hinted_mul_formula_signed_uses(
-                    &self.claim.hinted_mul_trace,
-                ),
-            );
         let mut projective_signed_carry_uses =
             public_key_on_curve_signed_carry_uses(&public_key_slice_claim);
         projective_signed_carry_uses.extend(final_add_signed_carry_uses(&self.claim.final_add)?);
+        projective_signed_carry_uses.extend(
+            crate::components::hinted_mul::trace::hinted_mul_formula_signed_uses(
+                &self.claim.hinted_mul_trace,
+            ),
+        );
         let projective_signed_carry_multiplicity = projective_rcb_signed_carry_claim()
             .gen_multiplicity_trace(projective_signed_carry_uses);
         let final_add = gen_final_add_base_trace_without_range13_and_signed_carry_provider(
@@ -2022,7 +2016,6 @@ impl P256ProofDraft {
         columns.push(projective_signed_carry_multiplicity.clone());
         columns.extend(hinted_mul_base.clone());
         columns.push(hinted_signed_h_multiplicity.clone());
-        columns.push(hinted_signed_formula_multiplicity.clone());
         columns.extend(final_add);
 
         Ok(P256CurrentAirBaseTrace {
@@ -2053,7 +2046,6 @@ impl P256ProofDraft {
             projective_signed_carry_multiplicity,
             hinted_mul_base,
             hinted_signed_h_multiplicity,
-            hinted_signed_formula_multiplicity,
         })
     }
 
@@ -2245,12 +2237,6 @@ impl P256ProofDraft {
                 &hinted_mul_signed_table_claim().gen_value_column(),
                 &relations.hinted_signed_h,
             );
-        let (hinted_signed_formula_interaction, hinted_signed_formula_provider) =
-            crate::range_checks::RangeCheckInteractionClaim::gen_interaction_trace(
-                &base.hinted_signed_formula_multiplicity,
-                &crate::projective_air::projective_rcb_signed_carry_claim().gen_value_column(),
-                &relations.hinted_signed_formula,
-            );
         let (final_add_interaction, final_add_claim) =
             gen_final_add_interaction_trace_without_range13_and_signed_carry_provider(
                 &self.claim.final_add,
@@ -2286,7 +2272,6 @@ impl P256ProofDraft {
         columns.extend(projective_signed_carry_interaction);
         columns.extend(hinted_interaction);
         columns.extend(hinted_signed_h_interaction);
-        columns.extend(hinted_signed_formula_interaction);
         columns.extend(final_add_interaction);
 
         Ok((
@@ -2367,7 +2352,7 @@ impl P256ProofDraft {
                     claimed_sum: hinted_claim.claimed_sum,
                     range13: zero(),
                     signed_h: hinted_signed_h_provider.claimed_sum,
-                    signed_formula: hinted_signed_formula_provider.claimed_sum,
+                    signed_formula: zero(),
                 },
                 final_add: final_add_claim,
             },
@@ -2447,7 +2432,6 @@ struct P256CurrentAirBaseTrace {
     projective_signed_carry_multiplicity: M31ColumnEval,
     hinted_mul_base: ColumnVec<M31ColumnEval>,
     hinted_signed_h_multiplicity: M31ColumnEval,
-    hinted_signed_formula_multiplicity: M31ColumnEval,
 }
 
 /// All `ScalarModMul` instances merged into a single component set, block-major

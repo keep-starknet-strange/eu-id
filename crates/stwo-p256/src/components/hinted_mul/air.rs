@@ -555,7 +555,7 @@ pub struct HintedMulSliceComponents {
     pub check: HintedMulComponent,
     pub range13: Option<FrameworkComponent<RangeCheckEval>>,
     pub signed_h: FrameworkComponent<SignedCarryRangeEval>,
-    pub signed_formula: FrameworkComponent<SignedCarryRangeEval>,
+    pub signed_formula: Option<FrameworkComponent<SignedCarryRangeEval>>,
 }
 
 impl HintedMulSliceComponents {
@@ -566,17 +566,33 @@ impl HintedMulSliceComponents {
         challenge: &HintedMulChallenge,
         relations: &HintedMulRelations,
     ) -> Self {
-        Self::new_inner(allocator, log_size, claimed_sums, challenge, relations, true)
+        Self::new_inner(
+            allocator,
+            log_size,
+            claimed_sums,
+            challenge,
+            relations,
+            true,
+            true,
+        )
     }
 
-    pub(crate) fn new_without_range13_provider(
+    pub(crate) fn new_without_range13_and_signed_formula_provider(
         allocator: &mut TraceLocationAllocator,
         log_size: u32,
         claimed_sums: &HintedMulSliceClaimedSums,
         challenge: &HintedMulChallenge,
         relations: &HintedMulRelations,
     ) -> Self {
-        Self::new_inner(allocator, log_size, claimed_sums, challenge, relations, false)
+        Self::new_inner(
+            allocator,
+            log_size,
+            claimed_sums,
+            challenge,
+            relations,
+            false,
+            false,
+        )
     }
 
     fn new_inner(
@@ -586,6 +602,7 @@ impl HintedMulSliceComponents {
         challenge: &HintedMulChallenge,
         relations: &HintedMulRelations,
         include_range13_provider: bool,
+        include_signed_formula_provider: bool,
     ) -> Self {
         Self {
             check: HintedMulComponent::new(
@@ -615,7 +632,7 @@ impl HintedMulSliceComponents {
                 ),
                 claimed_sums.signed_h,
             ),
-            signed_formula: FrameworkComponent::new(
+            signed_formula: include_signed_formula_provider.then(|| FrameworkComponent::new(
                 allocator,
                 SignedCarryRangeEval::new(
                     relations.signed_formula.clone(),
@@ -623,7 +640,7 @@ impl HintedMulSliceComponents {
                     crate::projective_air::PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
                 ),
                 claimed_sums.signed_formula,
-            ),
+            )),
         }
     }
 
@@ -633,7 +650,9 @@ impl HintedMulSliceComponents {
             components.push(range13);
         }
         components.push(&self.signed_h);
-        components.push(&self.signed_formula);
+        if let Some(signed_formula) = &self.signed_formula {
+            components.push(signed_formula);
+        }
         components
     }
 
@@ -643,7 +662,9 @@ impl HintedMulSliceComponents {
             components.push(range13);
         }
         components.push(&self.signed_h);
-        components.push(&self.signed_formula);
+        if let Some(signed_formula) = &self.signed_formula {
+            components.push(signed_formula);
+        }
         components
     }
 }

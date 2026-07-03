@@ -1963,9 +1963,10 @@ fn monolithic_rejects_mutated_public_r() {
     );
 }
 
-/// WO-2.5 oracle: the monolith has one shared projective signed-carry provider
-/// for public-key-curve and final-add consumers. Corrupting that shared
-/// multiplicity column must unbalance the aggregate LogUp sum.
+/// WO-2.5/WO-3.2 oracle: the monolith has one shared projective signed-carry
+/// provider for public-key-curve, final-add, and hinted formula consumers.
+/// Corrupting that shared multiplicity column must unbalance the aggregate
+/// LogUp sum.
 #[test]
 fn monolithic_rejects_corrupted_shared_projective_signed_carry_multiplicity() {
     let draft = valid_draft_for_balance(7, 11);
