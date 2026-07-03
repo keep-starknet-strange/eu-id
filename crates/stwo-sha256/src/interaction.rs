@@ -46,22 +46,20 @@ use crate::components::{
 };
 use crate::constants::DIGEST_BYTES;
 use crate::field_exposure::{word_be_bytes, FieldExposure, BYTE_RANGE_CHECK_OFFSET};
-#[cfg(not(feature = "gkr-spike"))]
-use crate::multiplicities::xor_8_multiplicities;
 use crate::multiplicities::{
     decode_multiplicities, maj_ch_multiplicities, range_k_multiplicities,
-    round_split_pack_multiplicities, sigma_split_pack_multiplicities, MajChMultiplicities,
+    round_split_pack_multiplicities, sigma_split_pack_multiplicities, xor_8_multiplicities,
+    MajChMultiplicities,
 };
 use crate::partitions::{
     pack_round_groups, round_groups_half_indices, GROUPS_PER_ROUND_PARTITION, SIGMA0_GROUPS,
     SIGMA1_GROUPS,
 };
 use crate::relations::Sha256Relations;
-#[cfg(not(feature = "gkr-spike"))]
-use crate::tables::build_xor_8_table;
 use crate::tables::{
     build_decode_table, build_maj_ch_table, build_round_split_pack_table,
-    build_sigma_split_pack_table, Half, Half16, LowerSigmaPartition, RoundPartition,
+    build_sigma_split_pack_table, build_xor_8_table, Half, Half16, LowerSigmaPartition,
+    RoundPartition,
 };
 use crate::trace::{h_out_digest_bytes, Layout};
 use crate::types::Sha256Witness;
@@ -81,8 +79,6 @@ use crate::types::Sha256Witness;
 /// = 106. A site that does not fire on a given row holds the neutral
 /// fraction `(0, 1)`.
 pub const SHA_LOOKUPS_PER_ROW_BASE: usize = 106;
-#[cfg(feature = "gkr-spike")]
-pub const SHA_XOR_8_LOOKUPS_PER_ROW: usize = 16;
 
 /// Total lookup sites `Sha256Eval` fires per row. The digest provider adds
 /// exactly one width-32 yield site when `expose_digest` is set; the
@@ -95,8 +91,6 @@ pub const SHA_XOR_8_LOOKUPS_PER_ROW: usize = 16;
 #[inline]
 pub fn sha_lookups_per_row(expose_digest: bool, field_exposure: &FieldExposure) -> usize {
     let base = SHA_LOOKUPS_PER_ROW_BASE;
-    #[cfg(feature = "gkr-spike")]
-    let base = base - SHA_XOR_8_LOOKUPS_PER_ROW;
     base + usize::from(expose_digest) + 2 * field_exposure.n_columns() + field_exposure.n_yields()
 }
 
@@ -404,7 +398,6 @@ fn maj_ch_interaction(
     build_interaction_columns(log_size, vec![maj_frac, ch_frac])
 }
 
-#[cfg(not(feature = "gkr-spike"))]
 fn xor_8_interaction(
     relations: &Sha256Relations,
     witness: &Sha256Witness,
@@ -673,7 +666,7 @@ fn write_round_row_lookups(
         *cursor += 8;
     }
 
-    // ---- 2. Schedule family (18 sites; t ≥ 16 rows; 10 under gkr-spike) ----
+    // ---- 2. Schedule family (18 sites; t ≥ 16 rows) ----
     if t >= 16 {
         let entry = &block.schedule_entries[t - 16];
         write_sigma_decode_lookups(
@@ -723,7 +716,7 @@ fn write_round_row_lookups(
             entry.carries,
         );
     } else {
-        *cursor += if cfg!(feature = "gkr-spike") { 10 } else { 18 };
+        *cursor += 18;
     }
 
     // ---- 3. Round family (48 sites; every real row) ----
@@ -1141,20 +1134,15 @@ fn write_sigma_decode_lookups(
         dec.o2_chunks_combined.hi.b0,
         dec.o2_chunks_combined.hi.b1,
     ];
-    #[cfg(not(feature = "gkr-spike"))]
-    {
-        for i in 0..4 {
-            let denom = relations.xor_8.combine(&[
-                BaseField::from(chunks_s[i]),
-                BaseField::from(chunks_sp[i]),
-                BaseField::from(chunks_combined[i]),
-            ]);
-            all[*cursor][slot] = (SecureField::one(), denom);
-            *cursor += 1;
-        }
+    for i in 0..4 {
+        let denom = relations.xor_8.combine(&[
+            BaseField::from(chunks_s[i]),
+            BaseField::from(chunks_sp[i]),
+            BaseField::from(chunks_combined[i]),
+        ]);
+        all[*cursor][slot] = (SecureField::one(), denom);
+        *cursor += 1;
     }
-    #[cfg(feature = "gkr-spike")]
-    let _ = (relations, chunks_s, chunks_sp, chunks_combined);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1290,12 +1278,11 @@ pub fn generate_interaction_trace(
         claimed_sum: mc_sum,
     };
     // 1 xor_8.
-    #[cfg(not(feature = "gkr-spike"))]
     let (xor_trace, xor_sum) = xor_8_interaction(relations, witness);
     #[cfg(not(feature = "gkr-spike"))]
     combined.extend(xor_trace);
     #[cfg(feature = "gkr-spike")]
-    let xor_sum = SecureField::zero();
+    let _ = xor_trace;
     let xor_8 = ComponentClaim {
         claimed_sum: xor_sum,
     };

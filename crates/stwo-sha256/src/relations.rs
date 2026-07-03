@@ -45,6 +45,10 @@
 //! extension-field key the LogUp interaction column reads.
 
 use stwo::core::channel::Channel;
+#[cfg(feature = "gkr-spike")]
+use stwo::core::fields::m31::BaseField;
+#[cfg(feature = "gkr-spike")]
+use stwo::core::fields::qm31::SecureField;
 use stwo_constraint_framework::relation;
 
 /// Row width of each `Σ`/`σ` decode table: `(key, o_main_lo, o_main_hi,
@@ -135,6 +139,39 @@ relation!(ChRelation, MAJ_CH_REL_SIZE);
 pub const XOR_8_REL_SIZE: usize = 3;
 
 relation!(Xor8Relation, XOR_8_REL_SIZE);
+
+#[cfg(feature = "gkr-spike")]
+impl Xor8Relation {
+    /// Evaluate the fixed `(x, y, x ^ y)` table denominator MLE at `point`.
+    ///
+    /// The table row order is `index = y * 256 + x`; Stwo's MLE recursion
+    /// consumes the most significant index bit first, so point coordinates
+    /// `0..8` are `y[7..0]` and `8..16` are `x[7..0]`.
+    pub fn eval_fixed_table_denominator_mle(&self, point: &[SecureField]) -> SecureField {
+        assert_eq!(point.len(), XOR_8_REL_SIZE + 13);
+
+        let mut y = SecureField::from(BaseField::from(0));
+        for bit in 0..8 {
+            y += SecureField::from(BaseField::from(1u32 << bit)) * point[7 - bit];
+        }
+
+        let mut x = SecureField::from(BaseField::from(0));
+        for bit in 0..8 {
+            x += SecureField::from(BaseField::from(1u32 << bit)) * point[15 - bit];
+        }
+
+        let mut z = SecureField::from(BaseField::from(0));
+        for bit in 0..8 {
+            let xb = point[15 - bit];
+            let yb = point[7 - bit];
+            let xor_bit = xb + yb - SecureField::from(BaseField::from(2)) * xb * yb;
+            z += SecureField::from(BaseField::from(1u32 << bit)) * xor_bit;
+        }
+
+        self.0.alpha_powers[0] * x + self.0.alpha_powers[1] * y + self.0.alpha_powers[2] * z
+            - self.0.z
+    }
+}
 
 /// Row width of a **round-partition** split-and-pack table: `(key,
 /// packed_group_0, …, packed_group_3)`. Four packed groups because the

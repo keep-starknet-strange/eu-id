@@ -96,8 +96,6 @@ use serde::{Deserialize, Serialize};
 
 use air_core::relations::{field_id, SharedDigestRelation, SharedFieldRelation};
 use air_core::{Air, AirProver};
-#[cfg(feature = "gkr-spike")]
-use stwo::core::channel::Blake2sChannel;
 use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::QM31;
 use stwo::core::pcs::PcsConfig;
@@ -132,12 +130,8 @@ pub use stwo_p256::types::AffinePoint;
 use stwo_sha256::air::{Sha256Prover, Sha256Verifier};
 use stwo_sha256::field_exposure::FieldExposure;
 #[cfg(feature = "gkr-spike")]
-use stwo_sha256::gkr_spike::{
-    prove_xor_8_gkr, verify_xor_8_gkr, xor_8_output_claims_balance, Xor8GkrProofWire,
-};
+use stwo_sha256::gkr_spike::Xor8GkrProofWire;
 use stwo_sha256::interaction::InteractionClaim as Sha256InteractionClaim;
-#[cfg(feature = "gkr-spike")]
-use stwo_sha256::relations::Sha256Relations;
 use stwo_sha256::types::Sha256Witness;
 
 /// A single STARK proof over the composed P256 + SHA + digest-bind modules, plus
@@ -472,16 +466,7 @@ pub fn prove_with_column_breakdown(
         air_core::prove(&mut modules, config).map_err(|e| Error::Prove(format!("{e:?}")))?
     };
     #[cfg(feature = "gkr-spike")]
-    let sha_xor_8_gkr_proof = {
-        let relations = Sha256Relations::draw(&mut Blake2sChannel::default());
-        let gkr = prove_xor_8_gkr(
-            &relations,
-            sha_witness,
-            sha_log_n_rows,
-            &mut Blake2sChannel::default(),
-        );
-        Xor8GkrProofWire::from(&gkr.proof)
-    };
+    let sha_xor_8_gkr_proof = sha.xor_8_gkr_proof().clone();
 
     let proof = Proof {
         stark_proof,
@@ -742,13 +727,16 @@ fn verify_stark(proof: &Proof) -> Result<(), Error> {
         proof.p256_interaction_claim.clone(),
     )
     .with_z_binding(scalar_z_handle.clone());
-    let mut sha = Sha256Verifier::new(
+    let sha = Sha256Verifier::new(
         proof.sha_log_n_rows,
         proof.sha_group_width,
         proof.sha_interaction_claim.clone(),
-    )
-    .with_digest_handle(digest_handle.clone())
-    .with_field_handle(credential_exposure(), field_handle.clone());
+    );
+    #[cfg(feature = "gkr-spike")]
+    let sha = sha.with_xor_8_gkr_proof(proof.sha_xor_8_gkr_proof.clone());
+    let mut sha = sha
+        .with_digest_handle(digest_handle.clone())
+        .with_field_handle(credential_exposure(), field_handle.clone());
     let mut bridge = DigestBindVerifier::new(
         proof.bridge_log_size,
         proof.bridge_interaction_claim.clone(),
@@ -782,16 +770,6 @@ fn verify_stark(proof: &Proof) -> Result<(), Error> {
             got: proof.stark_proof.config,
             expected: expected_config,
         });
-    }
-
-    #[cfg(feature = "gkr-spike")]
-    {
-        let sha_xor_8_gkr_proof = proof.sha_xor_8_gkr_proof.clone().into();
-        if !xor_8_output_claims_balance(&sha_xor_8_gkr_proof) {
-            return Err(Error::ShaXor8GkrUnbalanced);
-        }
-        verify_xor_8_gkr(&sha_xor_8_gkr_proof, &mut Blake2sChannel::default())
-            .map_err(|e| Error::ShaXor8GkrRejected(format!("{e:?}")))?;
     }
 
     // Same module order as the prover.

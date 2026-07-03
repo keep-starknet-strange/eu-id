@@ -55,6 +55,8 @@ pub mod constants;
 pub mod constraints;
 pub mod field_exposure;
 #[cfg(feature = "gkr-spike")]
+pub mod gkr_lookups;
+#[cfg(feature = "gkr-spike")]
 pub mod gkr_spike;
 pub mod headroom;
 pub mod interaction;

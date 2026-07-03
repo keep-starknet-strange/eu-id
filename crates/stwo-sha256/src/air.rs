@@ -15,18 +15,32 @@
 //! mix identically, so the round trip is self-consistent.
 
 use air_core::{Air, AirProver, TreeLayout};
+#[cfg(feature = "gkr-spike")]
+use num_traits::Zero;
+#[cfg(feature = "gkr-spike")]
+use stwo::core::air::accumulation::PointEvaluationAccumulator;
 use stwo::core::air::Component;
 use stwo::core::channel::{Blake2sChannel, Channel};
 use stwo::core::fields::m31::BaseField;
+#[cfg(feature = "gkr-spike")]
+use stwo::core::fields::qm31::SecureField;
 use stwo::core::fields::qm31::{QM31, SECURE_EXTENSION_DEGREE};
+#[cfg(feature = "gkr-spike")]
+use stwo::core::pcs::{TreeSubspan, TreeVec};
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
+#[cfg(feature = "gkr-spike")]
+use stwo::core::verifier::VerificationError;
 use stwo::prover::backend::simd::column::BaseColumn;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::poly::circle::CircleEvaluation;
 use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::{ComponentProver, TreeBuilder};
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
+#[cfg(feature = "gkr-spike")]
+use stwo_constraint_framework::EvalAtRow;
+#[cfg(feature = "gkr-spike")]
+use stwo_constraint_framework::PointEvaluator;
 use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 
 use crate::components::{
@@ -36,6 +50,16 @@ use crate::components::{
 };
 use crate::constraints::Sha256Eval;
 use crate::field_exposure::FieldExposure;
+#[cfg(feature = "gkr-spike")]
+use crate::gkr_lookups::mle_eval::{
+    build_trace as build_mle_eval_trace, MleCoeffColumnOracle, MleEvalProverComponent,
+    MleEvalVerifierComponent,
+};
+#[cfg(feature = "gkr-spike")]
+use crate::gkr_spike::{
+    prove_xor_8_gkr, verify_xor_8_gkr, xor_8_multiplicity_mle, xor_8_table_claim_matches,
+    xor_8_table_denominator_mle_eval, Xor8GkrProofWire,
+};
 use crate::interaction::{generate_interaction_trace, sha_lookups_per_row, InteractionClaim};
 use crate::multiplicities::{
     decode_multiplicities, maj_ch_multiplicities, range_k_multiplicities,
@@ -120,6 +144,51 @@ pub fn flatten_claimed_sums(claim: &InteractionClaim) -> Vec<QM31> {
     out
 }
 
+#[cfg(feature = "gkr-spike")]
+const XOR_8_MLE_EVAL_TRACE_INDEX: usize = 3;
+#[cfg(feature = "gkr-spike")]
+const XOR_8_MLE_EVAL_TRACE_COLS: usize = SECURE_EXTENSION_DEGREE * 2;
+#[cfg(feature = "gkr-spike")]
+const XOR_8_POST_INTERACTION_PAD_LOG_SIZE: u32 = 19;
+
+#[cfg(feature = "gkr-spike")]
+#[derive(Clone)]
+struct Xor8MultiplicityOracle {
+    trace_locations: Vec<TreeSubspan>,
+    log_size: u32,
+}
+
+#[cfg(feature = "gkr-spike")]
+impl Xor8MultiplicityOracle {
+    fn new(component: &FrameworkComponent<Xor8Eval>) -> Self {
+        Self {
+            trace_locations: component.trace_locations().to_vec(),
+            log_size: LOG_SIZE_16,
+        }
+    }
+}
+
+#[cfg(feature = "gkr-spike")]
+impl MleCoeffColumnOracle for Xor8MultiplicityOracle {
+    fn evaluate_at_point(
+        &self,
+        _point: stwo::core::circle::CirclePoint<SecureField>,
+        mask: &TreeVec<stwo::core::ColumnVec<Vec<SecureField>>>,
+    ) -> SecureField {
+        let mut accumulator =
+            PointEvaluationAccumulator::new(SecureField::from(BaseField::from(1)));
+        let mut eval = PointEvaluator::new(
+            mask.sub_tree(&self.trace_locations),
+            &mut accumulator,
+            SecureField::from(BaseField::from(1)),
+            self.log_size,
+            SecureField::zero(),
+        );
+
+        eval.next_trace_mask()
+    }
+}
+
 /// Prover-side module: built from the witness and the public size surface.
 pub struct Sha256Prover<'a> {
     witness: &'a Sha256Witness,
@@ -132,8 +201,12 @@ pub struct Sha256Prover<'a> {
     relations: Option<Sha256Relations>,
     interaction_claim: Option<InteractionClaim>,
     components: Option<Sha256Components>,
-    preprocessed: Option<Vec<Sha256ColumnEval>>,
-    base: Option<Vec<Sha256ColumnEval>>,
+    #[cfg(feature = "gkr-spike")]
+    xor_8_gkr_proof: Option<Xor8GkrProofWire>,
+    #[cfg(feature = "gkr-spike")]
+    xor_8_gkr_artifact: Option<stwo::prover::lookups::gkr_verifier::GkrArtifact>,
+    #[cfg(feature = "gkr-spike")]
+    xor_8_mle_component: Option<MleEvalProverComponent<Xor8MultiplicityOracle>>,
 }
 
 impl<'a> Sha256Prover<'a> {
@@ -149,8 +222,12 @@ impl<'a> Sha256Prover<'a> {
             relations: None,
             interaction_claim: None,
             components: None,
-            preprocessed: None,
-            base: None,
+            #[cfg(feature = "gkr-spike")]
+            xor_8_gkr_proof: None,
+            #[cfg(feature = "gkr-spike")]
+            xor_8_gkr_artifact: None,
+            #[cfg(feature = "gkr-spike")]
+            xor_8_mle_component: None,
         }
     }
 
@@ -236,6 +313,13 @@ impl<'a> Sha256Prover<'a> {
             .expect("interaction claim is set during the interaction phase")
     }
 
+    #[cfg(feature = "gkr-spike")]
+    pub fn xor_8_gkr_proof(&self) -> &Xor8GkrProofWire {
+        self.xor_8_gkr_proof
+            .as_ref()
+            .expect("xor_8 GKR proof is set during the post-interaction phase")
+    }
+
     fn relations(&self) -> &Sha256Relations {
         self.relations
             .as_ref()
@@ -314,10 +398,47 @@ impl Air for Sha256Prover<'_> {
             self.expose_digest,
             &self.field_exposure,
         ));
+        #[cfg(feature = "gkr-spike")]
+        {
+            let artifact = self
+                .xor_8_gkr_artifact
+                .as_ref()
+                .expect("xor_8 GKR artifact is set before component build");
+            let claim = -artifact.claims_to_verify_by_instance[0][0];
+            let oracle = Xor8MultiplicityOracle::new(&self.built_components().xor_8);
+            self.xor_8_mle_component = Some(MleEvalProverComponent::generate_with_pad_column(
+                allocator,
+                oracle,
+                &artifact.ood_point,
+                xor_8_multiplicity_mle(self.witness),
+                claim,
+                XOR_8_MLE_EVAL_TRACE_INDEX,
+                XOR_8_POST_INTERACTION_PAD_LOG_SIZE,
+            ));
+        }
     }
 
     fn components(&self) -> Vec<&dyn Component> {
-        self.built_components().components()
+        let out = self.built_components().components();
+        #[cfg(feature = "gkr-spike")]
+        {
+            let mut out = out;
+            out.push(
+                self.xor_8_mle_component
+                    .as_ref()
+                    .expect("xor_8 MLE component is built") as &dyn Component,
+            );
+            out
+        }
+        #[cfg(not(feature = "gkr-spike"))]
+        out
+    }
+
+    #[cfg(feature = "gkr-spike")]
+    fn post_interaction_log_sizes(&self) -> Vec<u32> {
+        let mut sizes = vec![LOG_SIZE_16; XOR_8_MLE_EVAL_TRACE_COLS];
+        sizes.push(XOR_8_POST_INTERACTION_PAD_LOG_SIZE);
+        sizes
     }
 }
 
@@ -360,8 +481,58 @@ impl AirProver for Sha256Prover<'_> {
         self.write_prepared_interaction(tb, prepared);
     }
 
+    #[cfg(feature = "gkr-spike")]
+    fn prove_post_interaction(&mut self, channel: &mut Blake2sChannel) {
+        let gkr = prove_xor_8_gkr(self.relations(), self.witness, self.log_n_rows, channel);
+        assert!(
+            xor_8_table_claim_matches(&gkr.proof, self.interaction_claim().xor_8.claimed_sum),
+            "xor_8 GKR table output must match the uncommitted producer claimed sum",
+        );
+        let denominator_claim = gkr.artifact.claims_to_verify_by_instance[0][1];
+        assert_eq!(
+            denominator_claim,
+            xor_8_table_denominator_mle_eval(self.relations(), &gkr.artifact.ood_point),
+            "xor_8 fixed-table denominator claim must be verifier-derivable",
+        );
+        self.xor_8_gkr_proof = Some(Xor8GkrProofWire::from(&gkr.proof));
+        self.xor_8_gkr_artifact = Some(gkr.artifact);
+    }
+
+    #[cfg(feature = "gkr-spike")]
+    fn write_post_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>) {
+        let artifact = self
+            .xor_8_gkr_artifact
+            .as_ref()
+            .expect("xor_8 GKR artifact is set before MLE trace write");
+        let claim = -artifact.claims_to_verify_by_instance[0][0];
+        let trace = build_mle_eval_trace(
+            &xor_8_multiplicity_mle(self.witness),
+            &artifact.ood_point,
+            claim,
+        );
+        assert!(
+            trace.iter().all(|col| col.domain.log_size() == LOG_SIZE_16),
+            "xor_8 MLE tie-back trace must be committed at log 16",
+        );
+        tb.extend_evals(trace);
+        tb.extend_evals(vec![zero_base_eval(XOR_8_POST_INTERACTION_PAD_LOG_SIZE)]);
+    }
+
     fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
-        self.built_components().component_provers()
+        let out = self.built_components().component_provers();
+        #[cfg(feature = "gkr-spike")]
+        {
+            let mut out = out;
+            out.push(
+                self.xor_8_mle_component
+                    .as_ref()
+                    .expect("xor_8 MLE component is built")
+                    as &dyn ComponentProver<SimdBackend>,
+            );
+            out
+        }
+        #[cfg(not(feature = "gkr-spike"))]
+        out
     }
 }
 
@@ -377,6 +548,12 @@ pub struct Sha256Verifier {
     interaction_claim: InteractionClaim,
     relations: Option<Sha256Relations>,
     components: Option<Sha256Components>,
+    #[cfg(feature = "gkr-spike")]
+    xor_8_gkr_proof: Option<Xor8GkrProofWire>,
+    #[cfg(feature = "gkr-spike")]
+    xor_8_gkr_artifact: Option<stwo::prover::lookups::gkr_verifier::GkrArtifact>,
+    #[cfg(feature = "gkr-spike")]
+    xor_8_mle_component: Option<MleEvalVerifierComponent<Xor8MultiplicityOracle>>,
 }
 
 impl Sha256Verifier {
@@ -391,7 +568,19 @@ impl Sha256Verifier {
             interaction_claim,
             relations: None,
             components: None,
+            #[cfg(feature = "gkr-spike")]
+            xor_8_gkr_proof: None,
+            #[cfg(feature = "gkr-spike")]
+            xor_8_gkr_artifact: None,
+            #[cfg(feature = "gkr-spike")]
+            xor_8_mle_component: None,
         }
+    }
+
+    #[cfg(feature = "gkr-spike")]
+    pub fn with_xor_8_gkr_proof(mut self, proof: Xor8GkrProofWire) -> Self {
+        self.xor_8_gkr_proof = Some(proof);
+        self
     }
 
     /// Match a [`Sha256Prover::with_digest_provider`] proof: reconstruct the
@@ -494,10 +683,85 @@ impl Air for Sha256Verifier {
             self.expose_digest,
             &self.field_exposure,
         ));
+        #[cfg(feature = "gkr-spike")]
+        {
+            let artifact = self
+                .xor_8_gkr_artifact
+                .as_ref()
+                .expect("xor_8 GKR artifact is set before component build");
+            let claim = -artifact.claims_to_verify_by_instance[0][0];
+            let oracle = Xor8MultiplicityOracle::new(&self.built_components().xor_8);
+            self.xor_8_mle_component = Some(MleEvalVerifierComponent::new_with_pad_column(
+                allocator,
+                oracle,
+                &artifact.ood_point,
+                claim,
+                XOR_8_MLE_EVAL_TRACE_INDEX,
+                XOR_8_POST_INTERACTION_PAD_LOG_SIZE,
+            ));
+        }
     }
 
     fn components(&self) -> Vec<&dyn Component> {
-        self.built_components().components()
+        let out = self.built_components().components();
+        #[cfg(feature = "gkr-spike")]
+        {
+            let mut out = out;
+            out.push(
+                self.xor_8_mle_component
+                    .as_ref()
+                    .expect("xor_8 MLE component is built") as &dyn Component,
+            );
+            out
+        }
+        #[cfg(not(feature = "gkr-spike"))]
+        out
+    }
+
+    #[cfg(feature = "gkr-spike")]
+    fn post_interaction_log_sizes(&self) -> Vec<u32> {
+        let mut sizes = vec![LOG_SIZE_16; XOR_8_MLE_EVAL_TRACE_COLS];
+        sizes.push(XOR_8_POST_INTERACTION_PAD_LOG_SIZE);
+        sizes
+    }
+
+    #[cfg(feature = "gkr-spike")]
+    fn verify_post_interaction(
+        &mut self,
+        channel: &mut Blake2sChannel,
+    ) -> Result<(), VerificationError> {
+        let proof = self
+            .xor_8_gkr_proof
+            .as_ref()
+            .expect("xor_8 GKR proof is supplied before verification")
+            .clone()
+            .into();
+        if !xor_8_table_claim_matches(&proof, self.interaction_claim.xor_8.claimed_sum) {
+            return Err(VerificationError::InvalidStructure(
+                "xor_8 GKR table output does not match producer claimed sum".into(),
+            ));
+        }
+        let artifact = verify_xor_8_gkr(&proof, channel).map_err(|e| {
+            VerificationError::InvalidStructure(format!("xor_8 GKR rejected: {e:?}"))
+        })?;
+        if artifact.claims_to_verify_by_instance.len() != 1
+            || artifact.claims_to_verify_by_instance[0].len() != 2
+            || artifact.n_variables_by_instance != [LOG_SIZE_16 as usize]
+        {
+            return Err(VerificationError::InvalidStructure(
+                "xor_8 GKR artifact shape mismatch".into(),
+            ));
+        }
+        let denominator_claim = artifact.claims_to_verify_by_instance[0][1];
+        if denominator_claim
+            != xor_8_table_denominator_mle_eval(self.relations(), &artifact.ood_point)
+        {
+            return Err(VerificationError::InvalidStructure(
+                "xor_8 GKR fixed-table denominator claim mismatch".into(),
+            ));
+        }
+        self.xor_8_gkr_artifact = Some(artifact);
+        Ok(())
     }
 }
 
@@ -558,6 +822,13 @@ fn mult_col_to_eval(
     debug_assert_eq!(mults.len(), 1usize << log_size);
     let domain = CanonicCoset::new(log_size).circle_domain();
     let col: BaseColumn = mults.iter().map(|&m| BaseField::from(m)).collect();
+    CircleEvaluation::new(domain, col)
+}
+
+#[cfg(feature = "gkr-spike")]
+fn zero_base_eval(log_size: u32) -> CircleEvaluation<SimdBackend, BaseField, BitReversedOrder> {
+    let domain = CanonicCoset::new(log_size).circle_domain();
+    let col: BaseColumn = std::iter::repeat_n(BaseField::zero(), 1usize << log_size).collect();
     CircleEvaluation::new(domain, col)
 }
 

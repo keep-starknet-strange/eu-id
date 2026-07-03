@@ -59,7 +59,7 @@ Report table (append to this file): | metric | feature off | feature on | delta 
 
 Implementation summary: `gkr-spike` is plumbed through `stwo-sha256`, `air-core`, and `eu-id-prover`; `xor_8` producer interaction columns and 16 consumer lookup sites are skipped under the feature; a 17-instance side GKR proof covers the table and consumer fractions; standalone SHA and combined `eu-id-prover::Proof` serialize the feature-gated GKR wire proof. The GKR proof is verified for output-claim balance and by `partially_verify_batch`.
 
-Soundness status: **blocked on Q-003**. This is a working spike and measurement, not a fully sound replacement. The GKR verifier artifact's input-layer claims are not yet MLE-bound to the committed STARK multiplicity/base-trace columns, and the GKR phase is not yet inserted into the shared `air-core` transcript with a follow-on MLE-eval commitment tree. Table denominators are recomputed from the local `build_xor_8_table()` data, but the current verifier still does not check the artifact claims against committed columns or a succinct table eval.
+Soundness status: **S1-A accepted by Q-003 as a mechanics milestone only; S1-B remains required in this WO**. This is a working spike and measurement, not a fully sound replacement. The GKR verifier artifact's input-layer claims are not yet MLE-bound to the committed STARK multiplicity/base-trace columns, and the GKR phase is not yet inserted into the shared `air-core` transcript with a follow-on MLE-eval commitment tree. Table denominators are recomputed from the local `build_xor_8_table()` data, but the current verifier still does not check the artifact claims against committed columns or a succinct table eval.
 
 | metric | feature off | feature on | delta |
 |---|---:|---:|---:|
@@ -70,11 +70,30 @@ Soundness status: **blocked on Q-003**. This is a working spike and measurement,
 | standalone SHA proof bytes | 60,045 | 73,749 | +13,704 |
 | `xor_8` GKR wire proof bytes | 0 | 18,824 | +18,824 |
 
-Extrapolation to all ~23 SHA table components: the single `xor_8` move removed 266,240 committed cells, but payload grew because this GKR proof is additive and the removed STARK proof bytes are smaller than the side proof. Linear extrapolation is not reliable: larger/merged tables may amortize GKR overhead better, while many independent small GKR instances would likely worsen proof bytes and verifier cost.
+Extrapolation to all ~23 SHA table components: the single `xor_8` move removed 266,240 committed cells, but payload grew because this GKR proof is additive and the removed STARK proof bytes are smaller than the side proof. Linear extrapolation is not reliable: larger/merged tables may amortize GKR overhead better, while many independent small GKR instances would likely worsen proof bytes and verifier cost. Per Q-003, this 1-block result mostly confirms the four table-side interaction columns moved; Phase 4's larger prize is moving consumer-side fraction columns in tall components, such as `hinted_mul`'s log13 interaction columns.
 
 Verifier-cost verdict vs the <=2x gate: accepted for spike measurement only. Verify regressed from 0.613 ms to 0.765 ms, still 1.25x feature-off for this table and under the 2x gate, but this excludes the missing MLE tie-back verification work.
 
 Recursion-impact note: fewer committed interaction columns should help Blake2s/Merkle query work in recursion, but the GKR sumcheck verification and future MLE tie-back add new recursive arithmetic. Net recursion impact is ambiguous until the tie-back is implemented and measured.
+
+## S1-B1 attempt — 2026-07-03
+
+Implemented the Q-004 table-side-only shape locally: consumer `xor_8` LogUp remains committed; the producer table interaction columns remain removed; the producer claimed sum is still computed and mixed; a single table-side GKR proof runs after tree 2; the fixed-table denominator claim is verifier-evaluated; and the multiplicity numerator claim is tied back through the vendored MLE-eval component in a new post-interaction tree.
+
+Focused checks passed:
+- `cargo check -p stwo-sha256 --features gkr-spike`
+- `cargo check -p eu-id-prover --features gkr-spike`
+- `cargo test -p stwo-sha256 --features gkr-spike gkr_spike::tests::xor_8_gkr_round_trip_balances_one_block -- --exact --nocapture`
+- `cargo test -p stwo-sha256 --features gkr-spike gkr_spike::tests::xor_8_table_denominator_mle_matches_bruteforce_eval -- --exact --nocapture`
+- `cargo test -p stwo-sha256 --features gkr-spike gkr_spike::tests::vendored_mle_eval_component_proves_and_verifies_random_mle -- --exact --nocapture`
+
+Final Q-006 verdict: **tie-back-incomplete, stop the spike here**. The bounded symmetry checklist found:
+- Prover and verifier both declare the post-interaction log-19 pad column with an empty mask; the pad removes the original lifted-decommit OOB (`len 8192 index 10240`).
+- Isolated diagnostics show the same boundary: natural-bound higher-log pad/fourth-tree MLE reproductions fail constraints, while forcing the MLE component to the pad/global bound reaches the pinned-Stwo lifted-domain OOB path (`len 4 index 5` in the small reproduction). These diagnostics are kept as ignored tests.
+- The integrated SHA proof still rejects with `Fri(FirstLayerCommitmentInvalid { error: RootMismatch })` under `cargo test -p stwo-sha256 --features gkr-spike --release prove_and_verify_abc -- --exact --ignored --nocapture`.
+- The remaining asymmetry is the committed `xor_8` multiplicity oracle sampling: the MLE tie-back needs that polynomial at the MLE component's shifted trace point, but the current framework obtains it through the existing `Xor8Eval` component mask. Re-owning that column in a global-bound component is the multi-day rewrite Q-006 explicitly moved out of this WO.
+
+Integration verdict for Phase 4 pricing: the pinned Stwo rev's PCS assumes per-tree max = global max (pad workaround exists, ~0.5 M cells), and the example MLE-eval component's natural-domain quotient model does not drop into this multi-size proof cleanly. A sound tie-back requires rewriting it as a global-bound FrameworkComponent-style component, or an upstream Stwo change.
 
 ## Risks / unknowns (with evidence)
 - **`MleEvalProverComponent` is example code, not library API** (`crates/examples/src/xor/gkr_lookups/mle_eval.rs`, 54 KB) — likely needs vendoring into our tree and adapting to our `air-core` Module traits. Biggest unknown of the spike; budget half the week.

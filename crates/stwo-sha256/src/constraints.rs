@@ -191,14 +191,12 @@ impl FrameworkEval for Sha256Eval {
         // `a_grp` / `e_grp` are additionally read at offsets −1/−2: the
         // select constraints pin the committed `b`/`c`/`f`/`g` duplicates
         // to them (§8.1 reuse chain).
-        let a_grp_m: [[E::F; 3]; GROUPS_PER_ROUND_PARTITION] = std::array::from_fn(|_| {
-            eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1, -2])
-        });
+        let a_grp_m: [[E::F; 3]; GROUPS_PER_ROUND_PARTITION] =
+            std::array::from_fn(|_| eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1, -2]));
         let maj_grp: [E::F; GROUPS_PER_ROUND_PARTITION] =
             std::array::from_fn(|_| eval.next_trace_mask());
-        let e_grp_m: [[E::F; 3]; GROUPS_PER_ROUND_PARTITION] = std::array::from_fn(|_| {
-            eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1, -2])
-        });
+        let e_grp_m: [[E::F; 3]; GROUPS_PER_ROUND_PARTITION] =
+            std::array::from_fn(|_| eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1, -2]));
         let ch_grp: [E::F; GROUPS_PER_ROUND_PARTITION] =
             std::array::from_fn(|_| eval.next_trace_mask());
         let b_grp: [E::F; GROUPS_PER_ROUND_PARTITION] =
@@ -753,8 +751,7 @@ impl FrameworkEval for Sha256Eval {
         // successor is padding — guaranteed by `min_log_size`).
         let is_last_block = eval.next_trace_mask();
         eval.add_constraint(
-            is_last_block.clone()
-                - gate_r63.clone() * (E::F::one() - enabler_next.clone()),
+            is_last_block.clone() - gate_r63.clone() * (E::F::one() - enabler_next.clone()),
         );
 
         // Digest byte view (t = 63 rows): per state word `j` the cells are
@@ -1343,22 +1340,17 @@ fn wire_sigma_decode<E: EvalAtRow>(
     // / `o2_chunks_combined` (the trace writer keeps them in the
     // `(lo.b0, lo.b1, hi.b0, hi.b1)` order documented on
     // [`crate::trace::SIGMA_DECODE_COLS`]).
-    #[cfg(not(feature = "gkr-spike"))]
-    {
-        for i in 0..4 {
-            eval.add_to_relation(RelationEntry::new(
-                rel_xor_8,
-                lookup_mult.clone(),
-                &[
-                    decode.o2_chunks_s[i].clone(),
-                    decode.o2_chunks_s_complement[i].clone(),
-                    decode.o2_chunks_combined[i].clone(),
-                ],
-            ));
-        }
+    for i in 0..4 {
+        eval.add_to_relation(RelationEntry::new(
+            rel_xor_8,
+            lookup_mult.clone(),
+            &[
+                decode.o2_chunks_s[i].clone(),
+                decode.o2_chunks_s_complement[i].clone(),
+                decode.o2_chunks_combined[i].clone(),
+            ],
+        ));
     }
-    #[cfg(feature = "gkr-spike")]
-    let _ = (rel_xor_8, lookup_mult);
 }
 
 /// Emit the two linear chunk-bind constraints: `limb_lo = b0_lo + 256·b1_lo`
@@ -1546,12 +1538,7 @@ mod tests {
     }
 
     /// Assert one mod-2³² limb-add identity: `Σ addends = result + carries`.
-    fn assert_add(
-        addends: &[(i64, i64)],
-        result: (i64, i64),
-        carries: (i64, i64),
-        ctx: &str,
-    ) {
+    fn assert_add(addends: &[(i64, i64)], result: (i64, i64), carries: (i64, i64), ctx: &str) {
         let sum_lo: i64 = addends.iter().map(|a| a.0).sum();
         let sum_hi: i64 = addends.iter().map(|a| a.1).sum();
         assert_eq!(sum_lo, result.0 + (carries.0 << 16), "lo residual: {ctx}");
@@ -1605,10 +1592,7 @@ mod tests {
                 let slot = Layout::round_row_slot(b, t, log_size);
                 let d = state_word(&trace, log_size, b, t, 4, 0, a_new_c);
                 let h_state = state_word(&trace, log_size, b, t, 4, 4, e_new_c);
-                let k_t = (
-                    i64::from(K[t] & 0xFFFF),
-                    i64::from(K[t] >> 16),
-                );
+                let k_t = (i64::from(K[t] & 0xFFFF), i64::from(K[t] >> 16));
                 let w_t = pair(&trace, w_c, slot);
                 let sigma0 = pair(&trace, sigma0_c, slot);
                 let sigma1 = pair(&trace, sigma1_c, slot);
@@ -1650,9 +1634,8 @@ mod tests {
                     let s0 = (cell(&trace, e[0], slot), cell(&trace, e[1], slot));
                     let s1 = (cell(&trace, e[2], slot), cell(&trace, e[3], slot));
                     let carries = (cell(&trace, e[4], slot), cell(&trace, e[5], slot));
-                    let at = |k: usize| {
-                        pair(&trace, w_c, Layout::round_row_slot(b, t - k, log_size))
-                    };
+                    let at =
+                        |k: usize| pair(&trace, w_c, Layout::round_row_slot(b, t - k, log_size));
                     assert_add(
                         &[s1, at(7), s0, at(16)],
                         w_t,
@@ -1806,7 +1789,15 @@ mod tests {
 
         let mut res = Vec::new();
         // P.A binary
-        for &f in [is_marker, is_length, is_length_only, is_marker_only, post_strict_15].iter() {
+        for &f in [
+            is_marker,
+            is_length,
+            is_length_only,
+            is_marker_only,
+            post_strict_15,
+        ]
+        .iter()
+        {
             res.push(f * (1 - f));
         }
         for &f in mword.iter().chain(bsel.iter()) {
@@ -1963,15 +1954,12 @@ mod tests {
             for t in 0..N_ROUNDS {
                 let slot = Layout::round_row_slot(b, t, log_size);
                 // Round side: key_s / key_s' of Σ0(a) vs a_grp; Σ1(e) vs e_grp.
-                for (which, coeffs, op) in
-                    [(0usize, sigma0_coeffs, 0usize), (1, sigma1_coeffs, 2)]
+                for (which, coeffs, op) in [(0usize, sigma0_coeffs, 0usize), (1, sigma1_coeffs, 2)]
                 {
                     let base = Layout::round_decode(which);
                     let key_s = cell(&trace, base, slot);
                     let key_sp = cell(&trace, base + 5, slot);
-                    let grp = |i: usize| {
-                        cell(&trace, Layout::round_packed_group(op, i), slot)
-                    };
+                    let grp = |i: usize| cell(&trace, Layout::round_packed_group(op, i), slot);
                     let mut s = 0i64;
                     for i in 0..half {
                         s += i64::from(coeffs[i]) * grp(i);
@@ -1985,8 +1973,7 @@ mod tests {
                 }
                 // Schedule side (t ≥ 16): σ decode keys vs input splits.
                 if t >= 16 {
-                    for (which, parts) in
-                        [(0usize, &LOWER_SIGMA0_PARTS), (1, &LOWER_SIGMA1_PARTS)]
+                    for (which, parts) in [(0usize, &LOWER_SIGMA0_PARTS), (1, &LOWER_SIGMA1_PARTS)]
                     {
                         let dec = Layout::schedule_entry_decode(which);
                         let split = Layout::schedule_entry_input_split(which);
@@ -1999,11 +1986,7 @@ mod tests {
                         let c_s = i64::from(lower_sigma_key_hi_coeff_s(parts));
                         let c_sp = i64::from(lower_sigma_key_hi_coeff_s_complement(parts));
                         assert_eq!(key_s, p_lo + c_s * p_hi, "sched key_s b={b} t={t}");
-                        assert_eq!(
-                            key_sp,
-                            pc_lo + c_sp * pc_hi,
-                            "sched key_s' b={b} t={t}"
-                        );
+                        assert_eq!(key_sp, pc_lo + c_sp * pc_hi, "sched key_s' b={b} t={t}");
                     }
                 }
             }

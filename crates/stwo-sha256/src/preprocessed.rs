@@ -432,7 +432,11 @@ mod tests {
                 for &ls in &meta[40..45] {
                     assert_eq!(ls, 3 * w, "Maj/Ch log_size at w={w}");
                 }
-                assert_eq!(meta[84..].iter().filter(|&&l| l == log_n_rows).count(), 10, "selector + cyclic log_sizes");
+                assert_eq!(
+                    meta[84..].iter().filter(|&&l| l == log_n_rows).count(),
+                    10,
+                    "selector + cyclic log_sizes"
+                );
             }
         }
     }

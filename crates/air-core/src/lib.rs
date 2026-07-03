@@ -108,6 +108,18 @@ pub trait Air {
     /// Borrow the built verifier-side components, in commit order. Call only
     /// after [`Air::build_components`].
     fn components(&self) -> Vec<&dyn Component>;
+
+    /// Optional post-interaction tree column log-sizes. Feature-gated lookup
+    /// arguments use this for MLE tie-back traces committed after tree 2.
+    fn post_interaction_log_sizes(&self) -> Vec<u32> {
+        Vec::new()
+    }
+
+    /// Optional verifier-side post-interaction transcript work, replayed after
+    /// tree 2 is committed and before the post-interaction tree is committed.
+    fn verify_post_interaction(&mut self, _channel: &mut Ch) -> Result<(), VerificationError> {
+        Ok(())
+    }
 }
 
 /// The prover-only extension: a module that holds a witness and can write its
@@ -149,6 +161,15 @@ pub trait AirProver: Air {
     /// append them, and stash this module's claimed sums (read back via
     /// [`Air::claimed_sums`]).
     fn write_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, Mc>);
+
+    /// Optional prover-side post-interaction transcript work, run after tree 2
+    /// is committed. Any proof messages mixed here are therefore bound to all
+    /// committed GKR inputs: trace/multiplicity columns, relation randomness,
+    /// claimed sums, and interaction columns.
+    fn prove_post_interaction(&mut self, _channel: &mut Ch) {}
+
+    /// Optional phase 3 — append post-interaction tie-back columns.
+    fn write_post_interaction(&mut self, _tb: &mut TreeBuilder<SimdBackend, Mc>) {}
 
     /// Borrow the built prover-side components, in commit order. Call only
     /// after [`Air::build_components`].
@@ -223,6 +244,24 @@ pub fn prove(
     }
     tb.commit(channel);
 
+    // Optional post-tree-2 transcript block. GKR lookup proofs live here:
+    // their inputs are already committed (trees 1/2 plus relation draws), and
+    // any MLE-eval tie-back columns are committed immediately after the GKR
+    // proof messages so the verifier replays the same Fiat-Shamir order.
+    for m in modules.iter_mut() {
+        m.prove_post_interaction(channel);
+    }
+    if modules
+        .iter()
+        .any(|m| !m.post_interaction_log_sizes().is_empty())
+    {
+        let mut tb = commitment_scheme.tree_builder();
+        for m in modules.iter_mut() {
+            m.write_post_interaction(&mut tb);
+        }
+        tb.commit(channel);
+    }
+
     // Build every module's components against one shared allocator seeded with
     // the concatenated preprocessed column ids (commit order), then collect the
     // borrowed prover-component refs for the single prove call.
@@ -236,7 +275,6 @@ pub fn prove(
     }
     let component_refs: Vec<&dyn ComponentProver<SimdBackend>> =
         modules.iter().flat_map(|m| m.prover_components()).collect();
-
     stark_prove::<SimdBackend, Mc>(&component_refs, channel, commitment_scheme)
 }
 
@@ -289,6 +327,17 @@ pub fn verify(
         .flat_map(|m| m.layout().interaction)
         .collect();
     commitment_scheme.commit(proof.commitments[2], &interaction_sizes, channel);
+
+    for m in modules.iter_mut() {
+        m.verify_post_interaction(channel)?;
+    }
+    let post_interaction_sizes: Vec<u32> = modules
+        .iter()
+        .flat_map(|m| m.post_interaction_log_sizes())
+        .collect();
+    if !post_interaction_sizes.is_empty() {
+        commitment_scheme.commit(proof.commitments[3], &post_interaction_sizes, channel);
+    }
 
     // Build every module's components against one shared allocator (same seeding
     // as the prover), then collect the borrowed component refs to verify.
