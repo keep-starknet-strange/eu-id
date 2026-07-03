@@ -84,6 +84,7 @@ Shape: `cargo test -p eu-id-prover --release shape_dump -- --ignored --nocapture
 | 2026-07-03 | 85feb27c | WO-1.6 prove twiddle cache | repeated prove timing (same witness) | first 814.184 ms | second 826.154 ms |
 | 2026-07-03 | 85feb27c | WO-1.6 prove twiddle cache | repeated proof bytes | — | identical |
 | 2026-07-03 | 85feb27c | WO-1.6 prove twiddle cache | BM_ECDSAZKProver_equiv/1 cold path (1-thread) | 1.8129 s | 1.8059 s |
+| 2026-07-03 | b4a0752d | WO-1.11 witness-gen round 2 | `hint_gen_timing` optimized median (RAYON_NUM_THREADS=1, BENCH-LOCK) | 157.269 ms | 134.850 ms |
 
 WO-1.8 note: `target-cpu=native` was measured with `RUSTFLAGS="-C target-cpu=native"` instead of committed `.cargo/config.toml`, because CI builds this repo on `ubuntu-latest` and would consume committed Cargo config. LTO/CU1 is scoped to `[profile.bench]`; putting it in `[profile.release]` made `cargo test --workspace --release` fail in the P-256 monolithic proof gate with `ProofLayer("Constraints not satisfied.")`.
 
@@ -96,3 +97,5 @@ WO-2.5 note: public-key-curve and final-add now share one projective signed-carr
 WO-3.5 note: hand-CSE touched `hinted_mul`, scalar-mod-mul `Ab`/`Qn`, and SHA main-round evals only; proof bytes for `valid_over_18` were byte-identical before/after. Searches under `crates/` found no tracing subscriber/harness for the requested `CompositionPolynomialGeneration` span, so Q-011 asks whether to add one as follow-up.
 
 WO-1.6 note: only the twiddle cache was implemented. The repeated-prove byte equality guard passed, but the second prove was slower in two diagnostics (`818.426ms → 856.221ms`, then `814.184ms → 826.154ms`), so Q-012 asks whether to stop here or pursue broader preprocessed-column caches.
+
+WO-1.11 note: final-check witness generation now reuses the prepared-table scalar-mul outputs in the optimized trusted draft path instead of recomputing `u·base` and `3R` checks. Temporary stage timing showed the top single-thread medians before the change were approximately `hinted_mul_from_projective_rcb` 48.2 ms, `projective_rcb_air_trace` 30.6 ms, `prepared_table` 24.3 ms, `final_check` 23.6 ms, and `projective_ec_trace` 20.2 ms. After the change, `final_check` was ~0.04 ms and the remaining top stages were `hinted_mul_from_projective_rcb` ~49.0 ms, `projective_rcb_air_trace` ~31.2 ms, `prepared_table` ~24.5 ms, and `projective_ec_trace` ~20.5 ms. The 30 ms target is not reachable with remaining single-thread witness orchestration alone; it needs WO-1.2 parallelism or an AIR/witness restructure.
