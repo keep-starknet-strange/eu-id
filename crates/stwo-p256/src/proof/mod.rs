@@ -1471,18 +1471,18 @@ fn p256_stark_slice_low_ram_config(max_constraint_log_degree_bound: u32) -> PcsC
 }
 
 fn p256_stark_monolithic_profile_config(_max_constraint_log_degree_bound: u32) -> PcsConfig {
-    // 96-bit conjectured target: pow_bits + log_blowup * n_queries = 20 + 2*38 = 96.
-    // Re-targeted from 128-bit (n_queries = 54) to match StarkWare's production
-    // Cairo security level. Proof size is ~linear in n_queries (every query opens
-    // every committed column across all modules), so 54 -> 38 trims ~30% of the
-    // query-linear proof mass at no AIR cost. log_blowup is held at 2 so
+    // 128-bit target: pow_bits + log_blowup * n_queries = 10 + 2*59 = 128.
+    // Matches Longfellow's 128-bit benchmark parameter (user sign-off
+    // 2026-07-03). pow_bits is cut 20 -> 10 because grinding is single-threaded
+    // on the target mobile prover: ~2^20 hashes on the critical path is too
+    // heavy, and 10 bits shaves it ~1000x; the security is made up with FRI
+    // queries instead. Proof size is ~linear in n_queries (every query opens
+    // every committed column across all modules). log_blowup is held at 2 so
     // commitment/FFT memory is unchanged from the calibrated on-device baseline
-    // (raising it is the axis that made SHA W=7 OOM). Grinding trades a one-off
-    // ~2^20 prover hash search for 10 fewer FRI queries; queries dominate proof
-    // size.
-    let fri_config = FriConfig::new(5, 2, 38, 1);
+    // (raising it is the axis that made SHA W=7 OOM).
+    let fri_config = FriConfig::new(5, 2, 59, 1);
     PcsConfig {
-        pow_bits: 20,
+        pow_bits: 10,
         fri_config,
         lifting_log_size: None,
     }
