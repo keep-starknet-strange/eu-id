@@ -573,14 +573,14 @@ fn build_base_trace(
     let mut base_trace: Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>> =
         Vec::new();
 
-    let sha_main = crate::trace::generate_trace_with_fields(witness, log_n_rows, field_exposure);
+    let sha_main =
+        crate::trace::generate_trace_base_columns_with_fields(witness, log_n_rows, field_exposure);
     debug_assert_eq!(
         sha_main.len(),
         Layout::total_cols_with_fields(field_exposure.n_columns())
     );
     let sha_domain = CanonicCoset::new(log_n_rows).circle_domain();
-    for col_vec in sha_main {
-        let col: BaseColumn = col_vec.into_iter().collect();
+    for col in sha_main {
         base_trace.push(CircleEvaluation::new(sha_domain, col));
     }
 

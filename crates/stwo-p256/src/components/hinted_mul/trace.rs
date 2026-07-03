@@ -3,9 +3,12 @@
 //! lockstep with `HintedMulEval::evaluate`).
 
 use stwo::core::fields::m31::M31;
-use stwo::core::fields::qm31::{SecureField, SECURE_EXTENSION_DEGREE};
+use stwo::core::fields::qm31::SecureField;
+use stwo::core::poly::circle::CanonicCoset;
+use stwo::core::utils::{bit_reverse_index, circle_domain_index_to_coset_index};
 use stwo::core::ColumnVec;
-use stwo::prover::backend::simd::m31::{PackedM31, LOG_N_LANES};
+use stwo::prover::backend::simd::column::BaseColumn;
+use stwo::prover::backend::simd::m31::{PackedM31, LOG_N_LANES, N_LANES};
 use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{LogupTraceGenerator, Relation};
@@ -88,8 +91,7 @@ impl HintedMulTraceClaim {
             .par_iter()
             .map(|row| {
                 let op_double = matches!(row.op, crate::projective::ProjectiveEcOp::Double);
-                let (lhs_inf, rhs_inf, output_inf) =
-                    (row.lhs_inf, row.rhs_inf, row.output_inf);
+                let (lhs_inf, rhs_inf, output_inf) = (row.lhs_inf, row.rhs_inf, row.output_inf);
                 // Phase-2: solve the whole group's per-row formula cells once,
                 // by interpreting the shared spec table. Only proj-scope groups
                 // (which carry the full 15 muls) get real cells; every other row
@@ -110,14 +112,12 @@ impl HintedMulTraceClaim {
                             (a, b, r)
                         })
                         .collect();
-                    let out_x = *crate::limbs::P256M31BigInt::from_u256(
-                        &row.output_projective.x.to_u256(),
-                    )
-                    .limbs();
-                    let out_y = *crate::limbs::P256M31BigInt::from_u256(
-                        &row.output_projective.y.to_u256(),
-                    )
-                    .limbs();
+                    let out_x =
+                        *crate::limbs::P256M31BigInt::from_u256(&row.output_projective.x.to_u256())
+                            .limbs();
+                    let out_y =
+                        *crate::limbs::P256M31BigInt::from_u256(&row.output_projective.y.to_u256())
+                            .limbs();
                     Some(
                         super::formula_bind::solve_group_formula(
                             &group_muls,
@@ -125,10 +125,12 @@ impl HintedMulTraceClaim {
                             &out_x,
                             &out_y,
                         )
-                        .ok_or(super::witness::HintedMulWitnessError::ResultMismatch {
-                            source_index: row.source_index,
-                            mul_index: 0,
-                        })?,
+                        .ok_or(
+                            super::witness::HintedMulWitnessError::ResultMismatch {
+                                source_index: row.source_index,
+                                mul_index: 0,
+                            },
+                        )?,
                     )
                 } else {
                     None
@@ -275,6 +277,14 @@ pub const HINTED_MUL_SCHEDULE_COLUMNS: usize = 3 + HINTED_MUL_PROJ_MUL_COLUMNS;
 /// Schedule columns (per-circuit constants once the mul list shape is fixed):
 /// `active`, `source_index`, `mul_index`, then `is_proj_mul_0..14`.
 pub fn gen_hinted_mul_schedule_columns(claim: &HintedMulTraceClaim) -> ColumnVec<M31ColumnEval> {
+    if rayon::current_num_threads() == 1 {
+        gen_hinted_mul_schedule_columns_scalar(claim)
+    } else {
+        gen_hinted_mul_schedule_columns_packed(claim)
+    }
+}
+
+fn gen_hinted_mul_schedule_columns_scalar(claim: &HintedMulTraceClaim) -> ColumnVec<M31ColumnEval> {
     let log_size = claim.log_size();
     let rows = 1usize << log_size;
     let mut active = vec![M31::from_u32_unchecked(0); rows];
@@ -302,9 +312,58 @@ pub fn gen_hinted_mul_schedule_columns(claim: &HintedMulTraceClaim) -> ColumnVec
     columns
 }
 
+fn gen_hinted_mul_schedule_columns_packed(claim: &HintedMulTraceClaim) -> ColumnVec<M31ColumnEval> {
+    use rayon::prelude::*;
+
+    let log_size = claim.log_size();
+    let zero = M31::from_u32_unchecked(0);
+    let one = M31::from_u32_unchecked(1);
+    let schedule_value = |column: usize, row: usize| -> M31 {
+        let Some(scheduled) = claim.rows.get(row) else {
+            return zero;
+        };
+        match column {
+            0 => one,
+            1 => M31::from_u32_unchecked(scheduled.source_index),
+            2 => M31::from_u32_unchecked(scheduled.mul_index),
+            column => {
+                let mul_index = column - 3;
+                if scheduled.proj_scope && scheduled.mul_index as usize == mul_index {
+                    one
+                } else {
+                    zero
+                }
+            }
+        }
+    };
+
+    if rayon::current_num_threads() == 1 {
+        (0..HINTED_MUL_SCHEDULE_COLUMNS)
+            .map(|column| {
+                packed_m31_eval_from_coset_rows(log_size, |row| schedule_value(column, row))
+            })
+            .collect()
+    } else {
+        (0..HINTED_MUL_SCHEDULE_COLUMNS)
+            .into_par_iter()
+            .map(|column| {
+                packed_m31_eval_from_coset_rows(log_size, |row| schedule_value(column, row))
+            })
+            .collect()
+    }
+}
+
 /// Base trace in [`HINTED_MUL_TRACE_COLUMNS`] layout. Padding rows are
 /// all-zero, which satisfies the (ungated) carry identities trivially.
 pub fn gen_hinted_mul_base_trace(claim: &HintedMulTraceClaim) -> ColumnVec<M31ColumnEval> {
+    if rayon::current_num_threads() == 1 {
+        gen_hinted_mul_base_trace_scalar(claim)
+    } else {
+        gen_hinted_mul_base_trace_packed(claim)
+    }
+}
+
+fn gen_hinted_mul_base_trace_scalar(claim: &HintedMulTraceClaim) -> ColumnVec<M31ColumnEval> {
     let log_size = claim.log_size();
     let rows = 1usize << log_size;
     let mut columns = vec![vec![M31::from_u32_unchecked(0); rows]; HINTED_MUL_TRACE_COLUMNS];
@@ -353,93 +412,82 @@ pub fn gen_hinted_mul_base_trace(claim: &HintedMulTraceClaim) -> ColumnVec<M31Co
         .collect()
 }
 
-pub fn hinted_mul_gamma_range13_columns() -> Vec<usize> {
-    let mut columns = Vec::with_capacity(HINTED_MUL_RANGE13_VALUES_PER_ROW);
-    let mut cursor = 0usize;
-    for _ in 0..2 * N_LIMBS {
-        columns.push(cursor);
-        cursor += 1;
-    }
-    for _ in 0..3 {
-        for _ in 0..HINTED_MUL_Q_LIMBS + N_LIMBS + HINTED_MUL_H_COEFFS {
-            columns.push(cursor);
-            cursor += 1;
-        }
-        cursor += HINTED_MUL_H_COEFFS;
-    }
-    debug_assert_eq!(columns.len(), HINTED_MUL_RANGE13_VALUES_PER_ROW);
-    columns
+fn gen_hinted_mul_base_trace_packed(claim: &HintedMulTraceClaim) -> ColumnVec<M31ColumnEval> {
+    use rayon::prelude::*;
+
+    let log_size = claim.log_size();
+    let zero = M31::from_u32_unchecked(0);
+    let row_values = claim
+        .rows
+        .par_iter()
+        .map(|scheduled| {
+            let mut row = vec![zero; HINTED_MUL_TRACE_COLUMNS];
+            let mut values = Vec::with_capacity(HINTED_MUL_WITNESS_COLUMNS);
+            push_row_values(&scheduled.witness, &mut values);
+            debug_assert_eq!(values.len(), HINTED_MUL_WITNESS_COLUMNS);
+            row[..HINTED_MUL_WITNESS_COLUMNS].copy_from_slice(&values);
+            if scheduled.proj_scope && scheduled.mul_index == 0 {
+                for (i, flag) in [
+                    scheduled.op_double,
+                    scheduled.output_inf,
+                    scheduled.lhs_inf,
+                    scheduled.rhs_inf,
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    row[hinted_mul_flag_column(i)] = M31::from_u32_unchecked(u32::from(flag));
+                }
+            }
+            let cells = &scheduled.formula;
+            for (i, &limb) in cells.out_val.iter().enumerate() {
+                row[hinted_mul_out_val_column(i)] = limb;
+            }
+            for (s, (q, carries)) in [&cells.slot0, &cells.slot1].into_iter().enumerate() {
+                row[hinted_mul_slot_q_column(s)] = encode_signed_carry(*q);
+                for (i, &carry) in carries.iter().enumerate() {
+                    row[hinted_mul_slot_carry_column(s, i)] = encode_signed_carry(carry);
+                }
+            }
+            row
+        })
+        .collect::<Vec<_>>();
+
+    (0..HINTED_MUL_TRACE_COLUMNS)
+        .into_par_iter()
+        .map(|column| {
+            packed_m31_eval_from_coset_rows(log_size, |row| {
+                row_values
+                    .get(row)
+                    .map(|values| values[column])
+                    .unwrap_or(zero)
+            })
+        })
+        .collect()
 }
 
-pub fn hinted_mul_gamma_signed_columns() -> Vec<usize> {
-    let mut columns = Vec::with_capacity(HINTED_MUL_SIGNED_VALUES_PER_ROW);
-    let mut cursor = 2 * N_LIMBS;
-    for _ in 0..3 {
-        cursor += HINTED_MUL_Q_LIMBS + N_LIMBS + HINTED_MUL_H_COEFFS;
-        for _ in 0..HINTED_MUL_H_COEFFS {
-            columns.push(cursor);
-            cursor += 1;
-        }
+fn packed_m31_eval_from_coset_rows(
+    log_size: u32,
+    value_at_coset_row: impl Fn(usize) -> M31 + Sync,
+) -> M31ColumnEval {
+    if log_size < LOG_N_LANES {
+        let values = (0..(1usize << log_size)).map(value_at_coset_row).collect();
+        return m31_column_eval(log_size, values);
     }
-    debug_assert_eq!(columns.len(), HINTED_MUL_SIGNED_VALUES_PER_ROW);
-    columns
-}
 
-pub fn hinted_mul_gamma_max_padded_values() -> usize {
-    gamma_padded_values(HINTED_MUL_RANGE13_VALUES_PER_ROW)
-        .max(gamma_padded_values(HINTED_MUL_SIGNED_VALUES_PER_ROW))
-}
-
-pub fn hinted_mul_gamma_layouts(rows: usize) -> [GammaTallLayout; 2] {
-    [
-        GammaTallLayout {
-            tag: GAMMA_TAG_HINTED_MUL_RANGE13,
-            group_count: rows,
-            values_per_group: HINTED_MUL_RANGE13_VALUES_PER_ROW,
-        },
-        GammaTallLayout {
-            tag: GAMMA_TAG_HINTED_MUL_SIGNED,
-            group_count: rows,
-            values_per_group: HINTED_MUL_SIGNED_VALUES_PER_ROW,
-        },
-    ]
-}
-
-pub fn hinted_mul_gamma_instances(claim: &HintedMulTraceClaim) -> [GammaTallInstance; 2] {
-    let range13_columns = hinted_mul_gamma_range13_columns();
-    let signed_columns = hinted_mul_gamma_signed_columns();
-    let mut range13_groups = Vec::with_capacity(claim.rows.len());
-    let mut signed_groups = Vec::with_capacity(claim.rows.len());
-    for scheduled in &claim.rows {
-        let mut values = Vec::with_capacity(HINTED_MUL_TRACE_COLUMNS);
-        push_row_values(&scheduled.witness, &mut values);
-        range13_groups.push(
-            range13_columns
-                .iter()
-                .map(|&column| values[column])
-                .collect(),
-        );
-        signed_groups.push(
-            signed_columns
-                .iter()
-                .map(|&column| values[column])
-                .collect(),
-        );
-    }
-    [
-        GammaTallInstance::new(
-            GAMMA_TAG_HINTED_MUL_RANGE13,
-            HINTED_MUL_RANGE13_VALUES_PER_ROW,
-            M31::from_u32_unchecked(0),
-            range13_groups,
-        ),
-        GammaTallInstance::new(
-            GAMMA_TAG_HINTED_MUL_SIGNED,
-            HINTED_MUL_SIGNED_VALUES_PER_ROW,
-            encode_signed_carry(0),
-            signed_groups,
-        ),
-    ]
+    let packed_rows = 1usize << (log_size - LOG_N_LANES);
+    let data = (0..packed_rows)
+        .map(|packed_row| {
+            PackedM31::from_array(core::array::from_fn(|lane| {
+                let storage_index = packed_row * N_LANES + lane;
+                let circle_index = bit_reverse_index(storage_index, log_size);
+                let coset_index = circle_domain_index_to_coset_index(circle_index, log_size);
+                value_at_coset_row(coset_index)
+            }))
+        })
+        .collect();
+    let domain = CanonicCoset::new(log_size).circle_domain();
+    M31ColumnEval::new(domain, BaseColumn::from_simd(data))
 }
 
 /// The committed M31 values of one witness, in column order. This is the
@@ -531,7 +579,10 @@ pub fn gen_hinted_mul_interaction_trace(
     enum EntryKind {
         Range13(usize),
         SignedH(usize),
-        Provide { role: u32, column: usize },
+        Provide {
+            role: u32,
+            column: usize,
+        },
         Header,
         /// Phase-2 formula reduction carry, signed table at the projective bound.
         SignedFormula(usize),
@@ -608,7 +659,9 @@ pub fn gen_hinted_mul_interaction_trace(
                 1i64,
                 (0..vec_rows)
                     .map(|vec_row| {
-                        relations.signed_formula.combine(&[base[*column].data[vec_row]])
+                        relations
+                            .signed_formula
+                            .combine(&[base[*column].data[vec_row]])
                     })
                     .collect(),
             ),
@@ -827,4 +880,115 @@ fn signed_secure(sign: i64) -> PackedQM31 {
         M31::from_u32_unchecked((((1i64 << 31) - 1) + sign) as u32)
     };
     PackedQM31::from(PackedM31::broadcast(value))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::witness::HintedMulWitness;
+    use super::*;
+
+    fn synthetic_claim(muls: usize) -> HintedMulTraceClaim {
+        let rows = (0..muls)
+            .map(|i| {
+                let mut a = [0u32; N_LIMBS];
+                let mut b = [0u32; N_LIMBS];
+                for k in 0..N_LIMBS {
+                    a[k] = ((i as u32 + 1) * 2741 + 97 * k as u32) % 8192;
+                    b[k] = ((i as u32 + 3) * 4099 + 53 * k as u32) % 8192;
+                }
+                HintedMulScheduledRow {
+                    source_index: i as u32 / 4,
+                    mul_index: i as u32 % 4,
+                    witness: HintedMulWitness::new(&a, &b).expect("witness builds"),
+                    op_double: false,
+                    lhs_inf: false,
+                    rhs_inf: false,
+                    output_inf: false,
+                    proj_scope: false,
+                    formula: super::super::formula_bind::FormulaRowCells::default(),
+                }
+            })
+            .collect();
+        HintedMulTraceClaim { rows }
+    }
+
+    fn projective_claim() -> HintedMulTraceClaim {
+        let trace = super::super::formula_bind::sample_projective_trace();
+        let rcb =
+            crate::projective_air::ProjectiveRcbAirTraceClaim::from_projective_trace_lite(&trace)
+                .expect("proj rcb claim");
+        HintedMulTraceClaim::from_projective_rcb(&rcb).expect("hinted claim builds")
+    }
+
+    fn assert_columns_equal(expected: &[M31ColumnEval], actual: &[M31ColumnEval]) {
+        assert_eq!(expected.len(), actual.len(), "column count");
+        for (i, (expected, actual)) in expected.iter().zip(actual).enumerate() {
+            assert_eq!(
+                expected.domain, actual.domain,
+                "domain mismatch at column {i}"
+            );
+            assert_eq!(
+                expected.data.len(),
+                actual.data.len(),
+                "packed rows at column {i}"
+            );
+            for (row, (expected, actual)) in expected.data.iter().zip(&actual.data).enumerate() {
+                assert_eq!(
+                    expected.to_array(),
+                    actual.to_array(),
+                    "data mismatch at column {i}, packed row {row}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn packed_hinted_mul_schedule_matches_scalar_writer() {
+        let claim = synthetic_claim(37);
+        assert_columns_equal(
+            &gen_hinted_mul_schedule_columns_scalar(&claim),
+            &gen_hinted_mul_schedule_columns_packed(&claim),
+        );
+    }
+
+    #[test]
+    fn packed_hinted_mul_base_matches_scalar_writer() {
+        let claim = projective_claim();
+        assert_columns_equal(
+            &gen_hinted_mul_base_trace_scalar(&claim),
+            &gen_hinted_mul_base_trace_packed(&claim),
+        );
+    }
+
+    fn best_of(count: usize, mut f: impl FnMut()) -> std::time::Duration {
+        (0..count)
+            .map(|_| {
+                let start = std::time::Instant::now();
+                f();
+                start.elapsed()
+            })
+            .min()
+            .expect("count > 0")
+    }
+
+    #[test]
+    #[ignore]
+    fn hinted_mul_trace_writer_timing() {
+        let claim = synthetic_claim(8192);
+        let schedule_scalar = best_of(5, || {
+            std::hint::black_box(gen_hinted_mul_schedule_columns_scalar(&claim));
+        });
+        let schedule_packed = best_of(5, || {
+            std::hint::black_box(gen_hinted_mul_schedule_columns_packed(&claim));
+        });
+        let base_scalar = best_of(5, || {
+            std::hint::black_box(gen_hinted_mul_base_trace_scalar(&claim));
+        });
+        let base_packed = best_of(5, || {
+            std::hint::black_box(gen_hinted_mul_base_trace_packed(&claim));
+        });
+        eprintln!(
+            "hinted_mul schedule scalar={schedule_scalar:?} packed={schedule_packed:?}; base scalar={base_scalar:?} packed={base_packed:?}"
+        );
+    }
 }

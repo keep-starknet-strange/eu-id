@@ -1965,6 +1965,7 @@ dependencies = [
  "air-core",
  "hex",
  "num-traits",
+ "rayon",
  "serde",
  "sha2",
  "stwo",

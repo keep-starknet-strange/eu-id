@@ -79,8 +79,11 @@
 //! `key_s` / `key_s_complement` from these four values.
 
 use stwo::core::fields::m31::{BaseField, M31};
-use stwo::core::utils::bit_reverse_index;
-use stwo::core::utils::coset_index_to_circle_domain_index;
+use stwo::core::utils::{
+    bit_reverse_index, circle_domain_index_to_coset_index, coset_index_to_circle_domain_index,
+};
+use stwo::prover::backend::simd::column::BaseColumn;
+use stwo::prover::backend::simd::m31::{PackedM31, LOG_N_LANES, N_LANES};
 
 use crate::constants::{DIGEST_BYTES, N_ROUNDS, N_STATE_WORDS};
 use crate::field_exposure::FieldExposure;
@@ -500,6 +503,15 @@ pub fn generate_trace_with_fields(
     log_size: u32,
     field_exposure: &FieldExposure,
 ) -> Vec<Vec<BaseField>> {
+    generate_trace_with_fields_packed(witness, log_size, field_exposure)
+}
+
+#[cfg(test)]
+fn generate_trace_with_fields_scalar(
+    witness: &Sha256Witness,
+    log_size: u32,
+    field_exposure: &FieldExposure,
+) -> Vec<Vec<BaseField>> {
     let n_rows = 1usize << log_size;
     let n_real_rows = witness.blocks.len() * ROWS_PER_BLOCK;
     assert!(
@@ -550,6 +562,126 @@ pub fn generate_trace_with_fields(
     cols
 }
 
+fn generate_trace_with_fields_packed(
+    witness: &Sha256Witness,
+    log_size: u32,
+    field_exposure: &FieldExposure,
+) -> Vec<Vec<BaseField>> {
+    generate_trace_base_columns_with_fields(witness, log_size, field_exposure)
+        .into_iter()
+        .map(BaseColumn::into_cpu_vec)
+        .collect()
+}
+
+pub(crate) fn generate_trace_base_columns_with_fields(
+    witness: &Sha256Witness,
+    log_size: u32,
+    field_exposure: &FieldExposure,
+) -> Vec<BaseColumn> {
+    if log_size < LOG_N_LANES || rayon::current_num_threads() == 1 {
+        return generate_trace_with_fields_scalar_fallback(witness, log_size, field_exposure)
+            .into_iter()
+            .map(|values| values.into_iter().collect())
+            .collect();
+    }
+
+    use rayon::prelude::*;
+
+    let n_rows = 1usize << log_size;
+    let n_real_rows = witness.blocks.len() * ROWS_PER_BLOCK;
+    assert!(
+        n_real_rows <= n_rows,
+        "trace too small: {} blocks × {ROWS_PER_BLOCK} rounds > {} rows",
+        witness.blocks.len(),
+        n_rows
+    );
+
+    let total_cols = Layout::total_cols_with_fields(field_exposure.n_columns());
+    let last_block_idx = witness.blocks.len().saturating_sub(1);
+    let has_padding = n_real_rows < n_rows;
+    let row_values = (0..n_real_rows)
+        .into_par_iter()
+        .map(|row_idx| {
+            let block_idx = row_idx / ROWS_PER_BLOCK;
+            let t = row_idx % ROWS_PER_BLOCK;
+            let mut values = vec![BaseField::from(0u32); total_cols];
+            write_round_row_values(
+                &mut values,
+                &witness.blocks[block_idx],
+                t,
+                block_idx == 0,
+                block_idx == last_block_idx && has_padding,
+                field_exposure,
+            );
+            values
+        })
+        .collect::<Vec<_>>();
+
+    let packed_rows = 1usize << (log_size - LOG_N_LANES);
+    (0..total_cols)
+        .into_par_iter()
+        .map(|column| {
+            let data = (0..packed_rows)
+                .map(|packed_row| {
+                    PackedM31::from_array(core::array::from_fn(|lane| {
+                        let storage_index = packed_row * N_LANES + lane;
+                        let circle_index = bit_reverse_index(storage_index, log_size);
+                        let coset_index =
+                            circle_domain_index_to_coset_index(circle_index, log_size);
+                        if column == Layout::COL_ENABLER_STEP && has_padding && coset_index == 0 {
+                            return BaseField::from(1u32);
+                        }
+                        row_values
+                            .get(coset_index)
+                            .map(|row| row[column])
+                            .unwrap_or(BaseField::from(0u32))
+                    }))
+                })
+                .collect();
+            BaseColumn::from_simd(data)
+        })
+        .collect()
+}
+
+fn generate_trace_with_fields_scalar_fallback(
+    witness: &Sha256Witness,
+    log_size: u32,
+    field_exposure: &FieldExposure,
+) -> Vec<Vec<BaseField>> {
+    let n_rows = 1usize << log_size;
+    let n_real_rows = witness.blocks.len() * ROWS_PER_BLOCK;
+    assert!(
+        n_real_rows <= n_rows,
+        "trace too small: {} blocks × {ROWS_PER_BLOCK} rounds > {} rows",
+        witness.blocks.len(),
+        n_rows
+    );
+
+    let total_cols = Layout::total_cols_with_fields(field_exposure.n_columns());
+    let mut cols = vec![vec![BaseField::from(0u32); n_rows]; total_cols];
+    let last_block_idx = witness.blocks.len().saturating_sub(1);
+    let has_padding = n_real_rows < n_rows;
+    for (block_idx, block) in witness.blocks.iter().enumerate() {
+        for t in 0..N_ROUNDS {
+            let slot = Layout::round_row_slot(block_idx, t, log_size);
+            write_round_row(
+                &mut cols,
+                slot,
+                block,
+                t,
+                block_idx == 0,
+                block_idx == last_block_idx && has_padding,
+                field_exposure,
+            );
+        }
+    }
+    if has_padding {
+        let first_slot = Layout::row_slot(0, log_size);
+        cols[Layout::COL_ENABLER_STEP][first_slot] = BaseField::from(1u32);
+    }
+    cols
+}
+
 /// Write all columns of one `(block, round t)` row from one `BlockWitness`.
 #[allow(clippy::too_many_arguments)]
 fn write_round_row(
@@ -561,11 +693,35 @@ fn write_round_row(
     is_last_block: bool,
     field_exposure: &FieldExposure,
 ) {
-    cols[Layout::COL_ENABLER][row] = BaseField::from(1u32);
+    let mut values = vec![BaseField::from(0u32); cols.len()];
+    write_round_row_values(
+        &mut values,
+        block,
+        t,
+        is_first_block,
+        is_last_block,
+        field_exposure,
+    );
+    for (column, value) in cols.iter_mut().zip(values) {
+        column[row] = value;
+    }
+}
+
+/// Write all columns of one `(block, round t)` row into a row-major buffer.
+#[allow(clippy::too_many_arguments)]
+fn write_round_row_values(
+    row: &mut [BaseField],
+    block: &BlockWitness,
+    t: usize,
+    is_first_block: bool,
+    is_last_block: bool,
+    field_exposure: &FieldExposure,
+) {
+    row[Layout::COL_ENABLER] = BaseField::from(1u32);
 
     // The row's schedule word.
-    cols[Layout::COL_W_LO][row] = m31(block.schedule[t].lo);
-    cols[Layout::COL_W_HI][row] = m31(block.schedule[t].hi);
+    row[Layout::COL_W_LO] = m31(block.schedule[t].lo);
+    row[Layout::COL_W_HI] = m31(block.schedule[t].hi);
 
     // Round family.
     let round = &block.rounds[t];
@@ -581,8 +737,8 @@ fn write_round_row(
         round.e_new,
     ];
     for (i, lw) in limb_pairs.iter().enumerate() {
-        cols[r[2 * i]][row] = m31(lw.lo);
-        cols[r[2 * i + 1]][row] = m31(lw.hi);
+        row[r[2 * i]] = m31(lw.lo);
+        row[r[2 * i + 1]] = m31(lw.hi);
     }
     let carry_pairs: [AddCarries; 4] = [
         round.t1_carries,
@@ -591,43 +747,39 @@ fn write_round_row(
         round.a_new_carries,
     ];
     for (i, c) in carry_pairs.iter().enumerate() {
-        cols[r[16 + 2 * i]][row] = m31(c.lo);
-        cols[r[16 + 2 * i + 1]][row] = m31(c.hi);
+        row[r[16 + 2 * i]] = m31(c.lo);
+        row[r[16 + 2 * i + 1]] = m31(c.hi);
     }
-    write_sigma_decode_block(cols, row, Layout::round_decode(0), &round.sigma0_decode);
-    write_sigma_decode_block(cols, row, Layout::round_decode(1), &round.sigma1_decode);
-    write_round_maj_ch(cols, row, block, t);
+    write_sigma_decode_block_row(row, Layout::round_decode(0), &round.sigma0_decode);
+    write_sigma_decode_block_row(row, Layout::round_decode(1), &round.sigma1_decode);
+    write_round_maj_ch_row(row, block, t);
 
     // Schedule family (t ≥ 16).
     if t >= 16 {
         let entry = &block.schedule_entries[t - 16];
         let [s0_lo, s0_hi, s1_lo, s1_hi, c_lo, c_hi] = Layout::schedule_entry();
-        cols[s0_lo][row] = m31(entry.lower_sigma0.lo);
-        cols[s0_hi][row] = m31(entry.lower_sigma0.hi);
-        cols[s1_lo][row] = m31(entry.lower_sigma1.lo);
-        cols[s1_hi][row] = m31(entry.lower_sigma1.hi);
-        cols[c_lo][row] = m31(entry.carries.lo);
-        cols[c_hi][row] = m31(entry.carries.hi);
-        write_sigma_decode_block(
-            cols,
+        row[s0_lo] = m31(entry.lower_sigma0.lo);
+        row[s0_hi] = m31(entry.lower_sigma0.hi);
+        row[s1_lo] = m31(entry.lower_sigma1.lo);
+        row[s1_hi] = m31(entry.lower_sigma1.hi);
+        row[c_lo] = m31(entry.carries.lo);
+        row[c_hi] = m31(entry.carries.hi);
+        write_sigma_decode_block_row(
             row,
             Layout::schedule_entry_decode(0),
             &entry.lower_sigma0_decode,
         );
-        write_sigma_decode_block(
-            cols,
+        write_sigma_decode_block_row(
             row,
             Layout::schedule_entry_decode(1),
             &entry.lower_sigma1_decode,
         );
-        write_sigma_input_split_block(
-            cols,
+        write_sigma_input_split_block_row(
             row,
             Layout::schedule_entry_input_split(0),
             &entry.lower_sigma0_input_split,
         );
-        write_sigma_input_split_block(
-            cols,
+        write_sigma_input_split_block_row(
             row,
             Layout::schedule_entry_input_split(1),
             &entry.lower_sigma1_input_split,
@@ -636,31 +788,31 @@ fn write_round_row(
 
     // t = 0 family: block-input state + §8.1 initial splits.
     if t == 0 {
-        cols[Layout::COL_IS_FIRST_BLOCK][row] = BaseField::from(is_first_block as u32);
+        row[Layout::COL_IS_FIRST_BLOCK] = BaseField::from(is_first_block as u32);
         for j in 0..N_STATE_WORDS {
             let (lo, hi) = Layout::h_in_word(j);
-            cols[lo][row] = m31(block.h_in[j].lo);
-            cols[hi][row] = m31(block.h_in[j].hi);
+            row[lo] = m31(block.h_in[j].lo);
+            row[hi] = m31(block.h_in[j].hi);
         }
-        write_h_in_aux_grp(cols, row, &block.aux_split_pack);
+        write_h_in_aux_grp_row(row, &block.aux_split_pack);
     }
 
     // t = 63 family: finalization + digest view.
     if t == N_ROUNDS - 1 {
         for (j, c) in block.finalization_carries.iter().enumerate() {
             let (lo, hi) = Layout::final_carry(j);
-            cols[lo][row] = m31(c.lo);
-            cols[hi][row] = m31(c.hi);
+            row[lo] = m31(c.lo);
+            row[hi] = m31(c.hi);
         }
         for j in 0..N_STATE_WORDS {
             let (lo, hi) = Layout::h_out_word(j);
-            cols[lo][row] = m31(block.h_out[j].lo);
-            cols[hi][row] = m31(block.h_out[j].hi);
+            row[lo] = m31(block.h_out[j].lo);
+            row[hi] = m31(block.h_out[j].hi);
         }
-        cols[Layout::COL_IS_LAST_BLOCK][row] = BaseField::from(is_last_block as u32);
+        row[Layout::COL_IS_LAST_BLOCK] = BaseField::from(is_last_block as u32);
         let digest_bytes = h_out_digest_bytes(&block.h_out);
         for (idx, &byte) in digest_bytes.iter().enumerate() {
-            cols[Layout::digest_byte(idx)][row] = m31(byte);
+            row[Layout::digest_byte(idx)] = m31(byte);
         }
     }
 
@@ -668,12 +820,12 @@ fn write_round_row(
     // Both inspect message words, which are the `W` columns of rows
     // `t = 0..16` — read in the AIR via mask offsets `0..−15` from here.
     if t == 15 {
-        write_padding_row(cols, row, &block.padding_row);
+        write_padding_row_values(row, &block.padding_row);
         for (word_slot, &word_idx) in field_exposure.decomposed_words().iter().enumerate() {
             let limb = block.schedule[word_idx];
             let bytes = crate::field_exposure::word_be_bytes(limb.lo, limb.hi);
             for (b, &byte) in bytes.iter().enumerate() {
-                cols[Layout::field_byte_col(word_slot * BYTES_PER_WORD + b)][row] = m31(byte);
+                row[Layout::field_byte_col(word_slot * BYTES_PER_WORD + b)] = m31(byte);
             }
         }
     }
@@ -686,59 +838,33 @@ fn m31(x: u32) -> BaseField {
     M31::from(x)
 }
 
-/// Lay out one [`SigmaDecodeWitness`] into `SIGMA_DECODE_COLS` contiguous
-/// columns starting at `base`. The order matches the per-σ-application read
-/// order documented on [`SIGMA_DECODE_COLS`] above and the lookup-tuple
-/// shape used by the AIR's `add_to_relation` calls.
-fn write_sigma_decode_block(
-    cols: &mut [Vec<BaseField>],
-    row: usize,
-    base: usize,
-    d: &SigmaDecodeWitness,
-) {
-    // S-side decode-table lookup tuple (5 cells, read as one slice).
-    cols[base][row] = m31(d.key_s);
-    cols[base + 1][row] = m31(d.o_main_s.lo);
-    cols[base + 2][row] = m31(d.o_main_s.hi);
-    cols[base + 3][row] = m31(d.o2_partial_s.lo);
-    cols[base + 4][row] = m31(d.o2_partial_s.hi);
-    // S′-side decode-table lookup tuple (5 cells).
-    cols[base + 5][row] = m31(d.key_s_complement);
-    cols[base + 6][row] = m31(d.o_main_s_complement.lo);
-    cols[base + 7][row] = m31(d.o_main_s_complement.hi);
-    cols[base + 8][row] = m31(d.o2_partial_s_complement.lo);
-    cols[base + 9][row] = m31(d.o2_partial_s_complement.hi);
-    // O2-combined limbs.
-    cols[base + 10][row] = m31(d.o2_combined.lo);
-    cols[base + 11][row] = m31(d.o2_combined.hi);
-    // Byte chunks of the three O2 values — input to the chunk-wise `xor_8`
-    // lookup. The chunk-bind linear constraints pin each `(b0, b1)` pair to
-    // its limb.
-    write_chunk_quad(cols, row, base + 12, d.o2_chunks_s);
-    write_chunk_quad(cols, row, base + 16, d.o2_chunks_s_complement);
-    write_chunk_quad(cols, row, base + 20, d.o2_chunks_combined);
+fn write_sigma_decode_block_row(row: &mut [BaseField], base: usize, d: &SigmaDecodeWitness) {
+    row[base] = m31(d.key_s);
+    row[base + 1] = m31(d.o_main_s.lo);
+    row[base + 2] = m31(d.o_main_s.hi);
+    row[base + 3] = m31(d.o2_partial_s.lo);
+    row[base + 4] = m31(d.o2_partial_s.hi);
+    row[base + 5] = m31(d.key_s_complement);
+    row[base + 6] = m31(d.o_main_s_complement.lo);
+    row[base + 7] = m31(d.o_main_s_complement.hi);
+    row[base + 8] = m31(d.o2_partial_s_complement.lo);
+    row[base + 9] = m31(d.o2_partial_s_complement.hi);
+    row[base + 10] = m31(d.o2_combined.lo);
+    row[base + 11] = m31(d.o2_combined.hi);
+    write_chunk_quad_row(row, base + 12, d.o2_chunks_s);
+    write_chunk_quad_row(row, base + 16, d.o2_chunks_s_complement);
+    write_chunk_quad_row(row, base + 20, d.o2_chunks_combined);
 }
 
-/// Write one [`LimbPairBytes`] (4 byte cells: `lo.b0, lo.b1, hi.b0, hi.b1`)
-/// starting at `base`.
 #[inline]
-fn write_chunk_quad(cols: &mut [Vec<BaseField>], row: usize, base: usize, chunks: LimbPairBytes) {
-    cols[base][row] = m31(chunks.lo.b0);
-    cols[base + 1][row] = m31(chunks.lo.b1);
-    cols[base + 2][row] = m31(chunks.hi.b0);
-    cols[base + 3][row] = m31(chunks.hi.b1);
+fn write_chunk_quad_row(row: &mut [BaseField], base: usize, chunks: LimbPairBytes) {
+    row[base] = m31(chunks.lo.b0);
+    row[base + 1] = m31(chunks.lo.b1);
+    row[base + 2] = m31(chunks.hi.b0);
+    row[base + 3] = m31(chunks.hi.b1);
 }
 
-/// Write the round family's Maj/Ch packed-group block — 8 operands × 8 cells
-/// each, in the fixed operand order `[a, maj_out, e, ch_out, b, c, f, g]`
-/// and the partition's `groups_in_order` enumeration. The §8.1 reuse chain
-/// supplies `b`/`c`/`f`/`g`: `b_grp(t) = a_grp(t−1)`, `c_grp(t) =
-/// a_grp(t−2)`, with the first rounds seeded from the block's aux splits
-/// (`b_init`/`c_init`; e-side symmetric). The values are duplicated here so
-/// the AIR's Maj/Ch lookup tuples read committed cells; a select constraint
-/// pins each duplicate to its originating cell via mask offsets. The AIR's
-/// read loop walks the columns in exactly this order.
-fn write_round_maj_ch(cols: &mut [Vec<BaseField>], row: usize, block: &BlockWitness, t: usize) {
+fn write_round_maj_ch_row(row: &mut [BaseField], block: &BlockWitness, t: usize) {
     let maj_ch = &block.rounds[t].maj_ch;
     let aux = &block.aux_split_pack;
     let b_grp = match t {
@@ -771,65 +897,51 @@ fn write_round_maj_ch(cols: &mut [Vec<BaseField>], row: usize, block: &BlockWitn
     ];
     for (operand_idx, operand) in operands.iter().enumerate() {
         for (group_idx, &v) in operand.vals.iter().enumerate() {
-            cols[Layout::round_packed_group(operand_idx, group_idx)][row] = m31(v);
+            row[Layout::round_packed_group(operand_idx, group_idx)] = m31(v);
         }
     }
 }
 
-/// Write the per-block auxiliary split-and-pack block — the §8.1 reuse
-/// chain's initial values for `b`, `c`, `f`, `g` (on the `t = 0` row).
-/// Operand order is fixed: `[b_init = h_in[1]_a-side, c_init =
-/// h_in[2]_a-side, f_init = h_in[5]_e-side, g_init = h_in[6]_e-side]`,
-/// matching [`Layout::h_in_aux_grp`].
-fn write_h_in_aux_grp(cols: &mut [Vec<BaseField>], row: usize, aux: &BlockAuxSplitPackWitness) {
+fn write_h_in_aux_grp_row(row: &mut [BaseField], aux: &BlockAuxSplitPackWitness) {
     let operands: [&RoundPackedGroups; H_IN_AUX_OPERANDS] =
         [&aux.b_init, &aux.c_init, &aux.f_init, &aux.g_init];
     for (aux_idx, operand) in operands.iter().enumerate() {
         for (group_idx, &v) in operand.vals.iter().enumerate() {
-            cols[Layout::h_in_aux_grp(aux_idx, group_idx)][row] = m31(v);
+            row[Layout::h_in_aux_grp(aux_idx, group_idx)] = m31(v);
         }
     }
 }
 
-/// Write one σ-input split-and-pack block — the 4 packed values
-/// `(packed_s_lo, packed_s_complement_lo, packed_s_hi, packed_s_complement_hi)`.
-/// The AIR reads them in this order and fires two σ split-and-pack
-/// lookups (one per half) keyed on the word's `(lo, hi)` limbs.
-fn write_sigma_input_split_block(
-    cols: &mut [Vec<BaseField>],
-    row: usize,
+fn write_sigma_input_split_block_row(
+    row: &mut [BaseField],
     base: usize,
     w: &SigmaInputSplitPackWitness,
 ) {
-    cols[base][row] = m31(w.packed_s_lo);
-    cols[base + 1][row] = m31(w.packed_s_complement_lo);
-    cols[base + 2][row] = m31(w.packed_s_hi);
-    cols[base + 3][row] = m31(w.packed_s_complement_hi);
+    row[base] = m31(w.packed_s_lo);
+    row[base + 1] = m31(w.packed_s_complement_lo);
+    row[base + 2] = m31(w.packed_s_hi);
+    row[base + 3] = m31(w.packed_s_complement_hi);
 }
 
-/// Write the per-block padding-role witness — `PADDING_ROW_COLS` cells in
-/// the column order documented on [`PADDING_ROW_COLS`], on the block's
-/// `t = 15` row. The AIR reads them in the same order, so this writer's
-/// cell sequence is the load-bearing layout contract.
-fn write_padding_row(cols: &mut [Vec<BaseField>], row: usize, p: &PaddingRowWitness) {
-    cols[Layout::COL_IS_MARKER_BLOCK][row] = m31(p.is_marker_block);
-    cols[Layout::COL_IS_LENGTH_BLOCK][row] = m31(p.is_length_block);
-    cols[Layout::COL_IS_LENGTH_ONLY_BLOCK][row] = m31(p.is_length_only_block);
-    cols[Layout::COL_IS_MARKER_ONLY_BLOCK][row] = m31(p.is_marker_only_block);
+fn write_padding_row_values(row: &mut [BaseField], p: &PaddingRowWitness) {
+    row[Layout::COL_IS_MARKER_BLOCK] = m31(p.is_marker_block);
+    row[Layout::COL_IS_LENGTH_BLOCK] = m31(p.is_length_block);
+    row[Layout::COL_IS_LENGTH_ONLY_BLOCK] = m31(p.is_length_only_block);
+    row[Layout::COL_IS_MARKER_ONLY_BLOCK] = m31(p.is_marker_only_block);
     for (j, &v) in p.is_marker_word.iter().enumerate() {
-        cols[Layout::is_marker_word(j)][row] = m31(v);
+        row[Layout::is_marker_word(j)] = m31(v);
     }
     for (b, &v) in p.marker_byte_sel.iter().enumerate() {
-        cols[Layout::marker_byte_sel(b)][row] = m31(v);
+        row[Layout::marker_byte_sel(b)] = m31(v);
     }
     for (b, &v) in p.marker_word_byte.iter().enumerate() {
-        cols[Layout::marker_word_byte(b)][row] = m31(v);
+        row[Layout::marker_word_byte(b)] = m31(v);
     }
-    cols[Layout::COL_MARKER_WORD_POST_STRICT_15][row] = m31(p.marker_word_post_strict_15);
-    cols[Layout::COL_BIT_LENGTH_W14_LO][row] = m31(p.bit_length_w14_lo);
-    cols[Layout::COL_BIT_LENGTH_W14_HI][row] = m31(p.bit_length_w14_hi);
-    cols[Layout::COL_BIT_LENGTH_W15_LO][row] = m31(p.bit_length_w15_lo);
-    cols[Layout::COL_BIT_LENGTH_W15_HI][row] = m31(p.bit_length_w15_hi);
+    row[Layout::COL_MARKER_WORD_POST_STRICT_15] = m31(p.marker_word_post_strict_15);
+    row[Layout::COL_BIT_LENGTH_W14_LO] = m31(p.bit_length_w14_lo);
+    row[Layout::COL_BIT_LENGTH_W14_HI] = m31(p.bit_length_w14_hi);
+    row[Layout::COL_BIT_LENGTH_W15_LO] = m31(p.bit_length_w15_lo);
+    row[Layout::COL_BIT_LENGTH_W15_HI] = m31(p.bit_length_w15_hi);
 }
 
 /// Required `log_size` for `n_blocks` blocks (smallest power of two
@@ -941,12 +1053,14 @@ mod tests {
                 let slot = Layout::round_row_slot(b, t, log_size);
                 let expected = u32::from(b == 0 && t == 0);
                 assert_eq!(
-                    trace[Layout::COL_IS_FIRST_BLOCK][slot].0, expected,
+                    trace[Layout::COL_IS_FIRST_BLOCK][slot].0,
+                    expected,
                     "is_first_block at ({b}, {t})"
                 );
                 let expected_last = u32::from(b == n_blocks - 1 && t == N_ROUNDS - 1);
                 assert_eq!(
-                    trace[Layout::COL_IS_LAST_BLOCK][slot].0, expected_last,
+                    trace[Layout::COL_IS_LAST_BLOCK][slot].0,
+                    expected_last,
                     "is_last_block at ({b}, {t})"
                 );
             }
@@ -1116,5 +1230,47 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn packed_trace_writer_matches_scalar_writer_with_field_exposure() {
+        let witness = compute_sha256_witness(&[0x44; 180]);
+        let log_size = min_log_size(witness.blocks.len());
+        let exposure = FieldExposure::from_preimage_windows(&[(7, 5, 4), (8, 9, 2)]);
+
+        assert_eq!(
+            generate_trace_with_fields_scalar(&witness, log_size, &exposure),
+            generate_trace_with_fields_packed(&witness, log_size, &exposure)
+        );
+    }
+
+    fn best_of(count: usize, mut f: impl FnMut()) -> std::time::Duration {
+        (0..count)
+            .map(|_| {
+                let start = std::time::Instant::now();
+                f();
+                start.elapsed()
+            })
+            .min()
+            .expect("count > 0")
+    }
+
+    #[test]
+    #[ignore]
+    fn sha_trace_writer_timing() {
+        let witness = compute_sha256_witness(&[0x55; 2048]);
+        let log_size = min_log_size(witness.blocks.len());
+        let exposure = FieldExposure::from_preimage_windows(&[(7, 5, 4), (8, 9, 2)]);
+        let scalar = best_of(5, || {
+            std::hint::black_box(generate_trace_with_fields_scalar(
+                &witness, log_size, &exposure,
+            ));
+        });
+        let packed = best_of(5, || {
+            std::hint::black_box(generate_trace_with_fields_packed(
+                &witness, log_size, &exposure,
+            ));
+        });
+        eprintln!("sha trace scalar={scalar:?} packed={packed:?}");
     }
 }
