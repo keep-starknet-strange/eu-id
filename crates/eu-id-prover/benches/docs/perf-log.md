@@ -29,6 +29,7 @@ Shape: `cargo test -p eu-id-prover --release shape_dump -- --ignored --nocapture
 | 2026-07-02 | 1f461ac8 | WO-1.1 hint/draft generation (RAYON_NUM_THREADS=1) | `hint_gen_timing` checked vs optimized median | 323.335 ms | 157.269 ms |
 | 2026-07-02 | 1f461ac8 | WO-1.1 hint/draft generation (default Rayon) | `hint_gen_timing` checked vs optimized median | 192.371 ms | 58.347 ms |
 | 2026-07-02 | 1f461ac8 | WO-1.1 blocked acceptance check (Q-002) | BM_ECDSAZKProver_equiv/1 (1-thread; draft prebuilt by harness) | 1.894 s | 1.874 s |
+| 2026-07-03 | 237969dd | WO-1.1 close-out (Q-002) | identity_e2e/prove_identity (RAYON_NUM_THREADS=1; witness build inside loop) | bench absent before close-out | 2.6204 s |
 | 2026-07-02 | a1224ae7 | WO-S1 `xor_8` GKR spike (blocked on MLE tie-back Q-003) | BM_ShaZK_equiv/1/prove (1-thread) | 1.0652 s | 1.0478 s |
 | 2026-07-02 | a1224ae7 | WO-S1 `xor_8` GKR spike (blocked on MLE tie-back Q-003) | BM_ShaZK_equiv/1/verify | 612.77 µs | 764.98 µs |
 | 2026-07-02 | a1224ae7 | WO-S1 `xor_8` GKR spike (blocked on MLE tie-back Q-003) | shape_dump total cells | 28,488,480 | 28,222,240 |
@@ -105,6 +106,8 @@ Shape: `cargo test -p eu-id-prover --release shape_dump -- --ignored --nocapture
 WO-1.8 note: `target-cpu=native` was measured with `RUSTFLAGS="-C target-cpu=native"` instead of committed `.cargo/config.toml`, because CI builds this repo on `ubuntu-latest` and would consume committed Cargo config. LTO/CU1 is scoped to `[profile.bench]`; putting it in `[profile.release]` made `cargo test --workspace --release` fail in the P-256 monolithic proof gate with `ProofLayer("Constraints not satisfied.")`.
 
 WO-1.4 note: P-256 trace writers use the scalar path when `RAYON_NUM_THREADS=1`, because direct packed/rayon generation is faster only with a multi-thread Rayon pool. The single-thread ECDSA prover result is therefore noise-level unchanged; the measurable accepted movement is SHA/33 and the parallel pipeline.
+
+WO-1.1 close-out note: Q-002 accepted `hint_gen_timing` as the WO metric because `BM_ECDSAZKProver_equiv/*` intentionally prebuilds the draft. The added `identity_e2e/prove_identity` benchmark times the relying-party path with witness build inside the measured loop; no pre-WO-1.1 value exists for that bench group in-tree, so the row records the current product metric and the accepted hint-gen before/after rows above remain the WO speedup evidence.
 
 WO-0 note: `wo30-128bit` fast-forwarded to `d27d9bb1`, setting the combined P-256 profile to `pow_bits = 10` and `n_queries = 59` for the signed-off 128-bit target. Benchmarks were run under `tasks/parity/BENCH-LOCK`; combined proof bytes came from `eu-id prove --fixture valid_over_18`.
 
