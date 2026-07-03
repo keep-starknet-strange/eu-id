@@ -20,29 +20,63 @@ impl ProjectiveEcTraceClaim {
         prepared: &PreparedTableEcTraceClaim,
         fake_glv: &FakeGlvPrimitiveEcTraceClaim,
     ) -> Result<Self, ProjectiveEcError> {
-        let mut rows = Vec::with_capacity(prepared.rows.len() + fake_glv.rows.len());
-        rows.extend(prepared.rows.iter().map(|row| {
-            let op = match row.kind {
-                PreparedTableEcRowKind::DoubleP | PreparedTableEcRowKind::DoubleR => {
-                    ProjectiveEcOp::Double
-                }
-                PreparedTableEcRowKind::AddP2P
-                | PreparedTableEcRowKind::AddR2R
-                | PreparedTableEcRowKind::Base(_)
-                | PreparedTableEcRowKind::Table16 => ProjectiveEcOp::MixedAdd,
-            };
-            ProjectiveEcRow::new(row.sig_id, row.cert_id, op, &row.lhs, &row.rhs, &row.output)
-        }));
-        rows.extend(fake_glv.rows.iter().map(|row| {
-            let op = match row.op {
-                FakeGlvPrimitiveEcOp::Double => ProjectiveEcOp::Double,
-                FakeGlvPrimitiveEcOp::Add => ProjectiveEcOp::MixedAdd,
-            };
-            ProjectiveEcRow::new(row.sig_id, row.cert_id, op, &row.lhs, &row.rhs, &row.output)
-        }));
+        Self::from_native_traces_inner(prepared, fake_glv, true)
+    }
+
+    pub(crate) fn from_native_traces_trusted(
+        prepared: &PreparedTableEcTraceClaim,
+        fake_glv: &FakeGlvPrimitiveEcTraceClaim,
+    ) -> Result<Self, ProjectiveEcError> {
+        Self::from_native_traces_inner(prepared, fake_glv, false)
+    }
+
+    fn from_native_traces_inner(
+        prepared: &PreparedTableEcTraceClaim,
+        fake_glv: &FakeGlvPrimitiveEcTraceClaim,
+        verify: bool,
+    ) -> Result<Self, ProjectiveEcError> {
+        use rayon::prelude::*;
+        let mut rows = prepared
+            .rows
+            .par_iter()
+            .map(|row| {
+                let op = match row.kind {
+                    PreparedTableEcRowKind::DoubleP | PreparedTableEcRowKind::DoubleR => {
+                        ProjectiveEcOp::Double
+                    }
+                    PreparedTableEcRowKind::AddP2P
+                    | PreparedTableEcRowKind::AddR2R
+                    | PreparedTableEcRowKind::Base(_)
+                    | PreparedTableEcRowKind::Table16 => ProjectiveEcOp::MixedAdd,
+                };
+                ProjectiveEcRow::new(row.sig_id, row.cert_id, op, &row.lhs, &row.rhs, &row.output)
+            })
+            .collect::<Vec<_>>();
+        rows.extend(
+            fake_glv
+                .rows
+                .par_iter()
+                .map(|row| {
+                    let op = match row.op {
+                        FakeGlvPrimitiveEcOp::Double => ProjectiveEcOp::Double,
+                        FakeGlvPrimitiveEcOp::Add => ProjectiveEcOp::MixedAdd,
+                    };
+                    ProjectiveEcRow::new(
+                        row.sig_id,
+                        row.cert_id,
+                        op,
+                        &row.lhs,
+                        &row.rhs,
+                        &row.output,
+                    )
+                })
+                .collect::<Vec<_>>(),
+        );
 
         let claim = Self { rows };
-        claim.verify()?;
+        if verify {
+            claim.verify()?;
+        }
         Ok(claim)
     }
 

@@ -222,25 +222,25 @@ impl P256ProofClaim {
         let selector_requests = SelectorLookupRequests::from_selector_claim(&fake_glv_selectors)?;
         let prepared_table =
             PreparedTableClaim::from_claims(&cert_inputs, &fake_glv_scalars, &fake_glv_selectors)?;
-        let prepared_table_ec_trace = PreparedTableEcTraceClaim::from_claims(
+        let prepared_table_ec_trace = PreparedTableEcTraceClaim::from_claims_trusted(
             &cert_inputs,
             &fake_glv_scalars,
             &fake_glv_selectors,
             &prepared_table,
         )?;
-        let fake_glv_chain = FakeGlvChainClaim::from_claims(
+        let fake_glv_chain = FakeGlvChainClaim::from_claims_trusted(
             &cert_inputs,
             &fake_glv_scalars,
             &fake_glv_selectors,
             &prepared_table,
         )?;
-        let fake_glv_ec_trace = FakeGlvPrimitiveEcTraceClaim::from_chain(&fake_glv_chain)?;
-        let projective_ec_trace = ProjectiveEcTraceClaim::from_native_traces(
+        let fake_glv_ec_trace = FakeGlvPrimitiveEcTraceClaim::from_chain_trusted(&fake_glv_chain)?;
+        let projective_ec_trace = ProjectiveEcTraceClaim::from_native_traces_trusted(
             &prepared_table_ec_trace,
             &fake_glv_ec_trace,
         )?;
         let projective_rcb_air_trace =
-            ProjectiveRcbAirTraceClaim::from_projective_trace_lite(&projective_ec_trace)?;
+            ProjectiveRcbAirTraceClaim::from_projective_trace_lite_trusted(&projective_ec_trace)?;
         let final_check = FinalEcdsaCheckClaim::from_claims(
             &public_inputs,
             &cert_inputs,
@@ -1177,7 +1177,6 @@ impl P256CurrentAirRelations {
         }
     }
 }
-
 
 /// γ-power table size for the SHARED gamma challenge: the max over the
 /// REMAINING γ-digest users (final_add + public_key_curve) now that the two

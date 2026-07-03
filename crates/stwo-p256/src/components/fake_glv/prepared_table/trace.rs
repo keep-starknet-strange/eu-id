@@ -49,12 +49,16 @@ impl PreparedTableClaim {
             });
         }
 
-        let certs = cert_inputs
-            .rows
-            .iter()
-            .zip(&fake_glv_scalars.rows)
-            .zip(&selectors.rows)
-            .map(|((cert, fake_glv), selector)| PreparedTableCert::new(cert, fake_glv, selector))
+        use rayon::prelude::*;
+        let certs = (0..cert_inputs.rows.len())
+            .into_par_iter()
+            .map(|index| {
+                PreparedTableCert::new(
+                    &cert_inputs.rows[index],
+                    &fake_glv_scalars.rows[index],
+                    &selectors.rows[index],
+                )
+            })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self { certs })
     }
@@ -124,6 +128,25 @@ impl PreparedTableEcTraceClaim {
         selectors: &FakeGlvSelectorClaim,
         table: &PreparedTableClaim,
     ) -> Result<Self, PreparedTableError> {
+        Self::from_claims_inner(cert_inputs, fake_glv_scalars, selectors, table, true)
+    }
+
+    pub(crate) fn from_claims_trusted(
+        cert_inputs: &CertScalarInputClaim,
+        fake_glv_scalars: &FakeGlvScalarHintClaim,
+        selectors: &FakeGlvSelectorClaim,
+        table: &PreparedTableClaim,
+    ) -> Result<Self, PreparedTableError> {
+        Self::from_claims_inner(cert_inputs, fake_glv_scalars, selectors, table, false)
+    }
+
+    fn from_claims_inner(
+        cert_inputs: &CertScalarInputClaim,
+        fake_glv_scalars: &FakeGlvScalarHintClaim,
+        selectors: &FakeGlvSelectorClaim,
+        table: &PreparedTableClaim,
+        verify: bool,
+    ) -> Result<Self, PreparedTableError> {
         if cert_inputs.rows.len() != fake_glv_scalars.rows.len()
             || cert_inputs.rows.len() != selectors.rows.len()
             || cert_inputs.rows.len() != table.certs.len()
@@ -136,20 +159,24 @@ impl PreparedTableEcTraceClaim {
             });
         }
 
-        let mut rows = Vec::new();
-        for (((cert, fake_glv), selector), table_cert) in cert_inputs
-            .rows
-            .iter()
-            .zip(&fake_glv_scalars.rows)
-            .zip(&selectors.rows)
-            .zip(&table.certs)
-        {
-            rows.extend(prepared_table_ec_rows_for_cert(
-                cert, fake_glv, selector, table_cert,
-            )?);
-        }
+        use rayon::prelude::*;
+        let rows_by_cert = (0..cert_inputs.rows.len())
+            .into_par_iter()
+            .map(|index| {
+                prepared_table_ec_rows_for_cert_inner(
+                    &cert_inputs.rows[index],
+                    &fake_glv_scalars.rows[index],
+                    &selectors.rows[index],
+                    &table.certs[index],
+                    verify,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let rows = rows_by_cert.into_iter().flatten().collect();
         let claim = Self { rows };
-        claim.verify()?;
+        if verify {
+            claim.verify()?;
+        }
         Ok(claim)
     }
 
@@ -689,6 +716,8 @@ pub struct PreparedTableCert {
     pub sig_id: M31,
     pub cert_id: M31,
     pub cert_active: M31,
+    pub p3: PreparedAffinePoint,
+    pub r: PreparedAffinePoint,
     pub base: [PreparedAffinePoint; PREPARED_BASE_COUNT],
     pub r3: PreparedAffinePoint,
     pub table16: PreparedAffinePoint,
@@ -708,6 +737,8 @@ impl PreparedTableCert {
                 sig_id: cert.sig_id,
                 cert_id: cert.cert_id,
                 cert_active: cert.cert_active,
+                p3: PreparedAffinePoint::infinity(),
+                r: PreparedAffinePoint::infinity(),
                 base: core::array::from_fn(|_| PreparedAffinePoint::infinity()),
                 r3: PreparedAffinePoint::infinity(),
                 table16: PreparedAffinePoint::infinity(),
@@ -724,20 +755,10 @@ impl PreparedTableCert {
                 cert_id: cert.cert_id.0,
             })?;
         let r = signed_hint_point(&h, fake_glv.hint.s2_sign_bit)?;
-        let p3 = scalar_mul(&U256::from_le_u64s(&[3, 0, 0, 0]), &p).ok_or(
-            PreparedTableError::MissingTriplePoint {
-                point: "P",
-                sig_id: cert.sig_id.0,
-                cert_id: cert.cert_id.0,
-            },
-        )?;
-        let r3 = scalar_mul(&U256::from_le_u64s(&[3, 0, 0, 0]), &r).ok_or(
-            PreparedTableError::MissingTriplePoint {
-                point: "R",
-                sig_id: cert.sig_id.0,
-                cert_id: cert.cert_id.0,
-            },
-        )?;
+        let p3 = triple_point(&p);
+        let r3 = triple_point(&r);
+        let p3_prepared = prepared(Some(p3.clone()));
+        let r_prepared = prepared(Some(r.clone()));
 
         let base = [
             prepared(add_optional_points(
@@ -775,6 +796,8 @@ impl PreparedTableCert {
             sig_id: cert.sig_id,
             cert_id: cert.cert_id,
             cert_active: cert.cert_active,
+            p3: p3_prepared,
+            r: r_prepared,
             base,
             r3: prepared(Some(r3)),
             table16,
@@ -800,20 +823,10 @@ impl PreparedTableCert {
             y: cert.base_y.to_u256(),
         };
         let r = r_override;
-        let p3 = scalar_mul(&U256::from_le_u64s(&[3, 0, 0, 0]), &p).ok_or(
-            PreparedTableError::MissingTriplePoint {
-                point: "P",
-                sig_id: cert.sig_id.0,
-                cert_id: cert.cert_id.0,
-            },
-        )?;
-        let r3 = scalar_mul(&U256::from_le_u64s(&[3, 0, 0, 0]), &r).ok_or(
-            PreparedTableError::MissingTriplePoint {
-                point: "R",
-                sig_id: cert.sig_id.0,
-                cert_id: cert.cert_id.0,
-            },
-        )?;
+        let p3 = triple_point(&p);
+        let r3 = triple_point(&r);
+        let p3_prepared = prepared(Some(p3.clone()));
+        let r_prepared = prepared(Some(r.clone()));
 
         let base = [
             prepared(add_optional_points(
@@ -851,6 +864,8 @@ impl PreparedTableCert {
             sig_id: cert.sig_id,
             cert_id: cert.cert_id,
             cert_active: cert.cert_active,
+            p3: p3_prepared,
+            r: r_prepared,
             base,
             r3: prepared(Some(r3)),
             table16,
@@ -867,6 +882,8 @@ impl PreparedTableCert {
         for point in &self.base {
             point.verify()?;
         }
+        self.p3.verify()?;
+        self.r.verify()?;
         self.r3.verify()?;
         self.table16.verify()?;
         Ok(())
@@ -1080,11 +1097,22 @@ fn require_unique_output(
     }
 }
 
+#[cfg(test)]
 fn prepared_table_ec_rows_for_cert(
     cert: &CertScalarInputRow,
     fake_glv: &FakeGlvScalarHintRow,
     selector: &FakeGlvSelectorRow,
     table: &PreparedTableCert,
+) -> Result<Vec<PreparedTableEcRow>, PreparedTableError> {
+    prepared_table_ec_rows_for_cert_inner(cert, fake_glv, selector, table, true)
+}
+
+fn prepared_table_ec_rows_for_cert_inner(
+    cert: &CertScalarInputRow,
+    fake_glv: &FakeGlvScalarHintRow,
+    selector: &FakeGlvSelectorRow,
+    table: &PreparedTableCert,
+    verify_outputs: bool,
 ) -> Result<Vec<PreparedTableEcRow>, PreparedTableError> {
     require_same_id("fake_glv", cert, fake_glv.sig_id, fake_glv.cert_id)?;
     require_same_id("selector", cert, selector.sig_id, selector.cert_id)?;
@@ -1107,27 +1135,11 @@ fn prepared_table_ec_rows_for_cert(
         x: cert.base_x.to_u256(),
         y: cert.base_y.to_u256(),
     });
-    let h = scalar_mul(
-        &cert.scalar.to_u256(),
-        &p.to_option().expect("base point finite"),
-    )
-    .ok_or(PreparedTableError::MissingHintPoint {
-        sig_id: cert.sig_id.0,
-        cert_id: cert.cert_id.0,
-    })?;
-    let r = PreparedAffinePoint::from_affine(signed_hint_point(&h, fake_glv.hint.s2_sign_bit)?);
+    let r = table.r.clone();
 
     let mut rows = Vec::new();
     let p3 = if cert.cert_id.0 == CERT_ID_U1_GENERATOR {
-        PreparedAffinePoint::from_affine(
-            scalar_mul(&U256::from_le_u64s(&[3, 0, 0, 0]), &p.to_option().unwrap()).ok_or(
-                PreparedTableError::MissingTriplePoint {
-                    point: "P",
-                    sig_id: cert.sig_id.0,
-                    cert_id: cert.cert_id.0,
-                },
-            )?,
-        )
+        table.p3.clone()
     } else {
         let p2 = prepared(double_optional(p.to_option()));
         rows.push(PreparedTableEcRow::double(
@@ -1187,8 +1199,9 @@ fn prepared_table_ec_rows_for_cert(
             rhs.clone(),
             output.clone(),
         ));
-        let expected = prepared(add_optional_points(lhs.to_option(), rhs.to_option()));
-        if output != expected {
+        if verify_outputs
+            && output != prepared(add_optional_points(lhs.to_option(), rhs.to_option()))
+        {
             return Err(PreparedTableError::PreparedTableOutputMismatch {
                 sig_id: sig_id.0,
                 cert_id: cert_id.0,
@@ -1211,11 +1224,13 @@ fn prepared_table_ec_rows_for_cert(
         table.r3.clone(),
         table.table16.clone(),
     ));
-    let expected_table16 = prepared(add_optional_points(
-        selected.to_option(),
-        table.r3.to_option(),
-    ));
-    if table.table16 != expected_table16 {
+    if verify_outputs
+        && table.table16
+            != prepared(add_optional_points(
+                selected.to_option(),
+                table.r3.to_option(),
+            ))
+    {
         return Err(PreparedTableError::PreparedTableOutputMismatch {
             sig_id: sig_id.0,
             cert_id: cert_id.0,
@@ -1249,15 +1264,7 @@ fn prepared_table_ec_rows_for_cert_with_r_override(
 
     let mut rows = Vec::new();
     let p3 = if cert.cert_id.0 == CERT_ID_U1_GENERATOR {
-        PreparedAffinePoint::from_affine(
-            scalar_mul(&U256::from_le_u64s(&[3, 0, 0, 0]), &p.to_option().unwrap()).ok_or(
-                PreparedTableError::MissingTriplePoint {
-                    point: "P",
-                    sig_id: cert.sig_id.0,
-                    cert_id: cert.cert_id.0,
-                },
-            )?,
-        )
+        table.p3.clone()
     } else {
         let p2 = prepared(double_optional(p.to_option()));
         rows.push(PreparedTableEcRow::double(
@@ -1505,6 +1512,11 @@ pub(crate) fn add_optional_points(
 
 fn double_optional(point: Option<AffinePoint>) -> Option<AffinePoint> {
     point.map(|point| point_double(&point).output)
+}
+
+fn triple_point(point: &AffinePoint) -> AffinePoint {
+    let doubled = point_double(point).output;
+    point_add(&doubled, point).output
 }
 
 fn negate_optional(point: Option<AffinePoint>) -> Option<AffinePoint> {

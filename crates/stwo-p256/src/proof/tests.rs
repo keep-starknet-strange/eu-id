@@ -466,6 +466,176 @@ fn arbitrary_full_width_u_scalars_build_a_current_air_claim() {
         .expect("arbitrary full-width valid signature should build a proof draft");
 }
 
+#[test]
+fn fake_glv_hint_gen_serial_parallel_draft_equality() {
+    let input = valid_real_input_with_u_scalars(scalar_near_order(123), scalar_near_order(456));
+    assert!(
+        ecdsa_verify(&input),
+        "synthetic arbitrary-width input must be valid",
+    );
+
+    let serial_pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .expect("serial rayon pool builds");
+    let parallel_pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .expect("parallel rayon pool builds");
+
+    let serial = serial_pool.install(|| {
+        P256ProofDraft::from_inputs_with_arbitrary_fake_glv_hints(vec![input.clone()])
+            .expect("serial draft builds")
+    });
+    let parallel = parallel_pool.install(|| {
+        P256ProofDraft::from_inputs_with_arbitrary_fake_glv_hints(vec![input])
+            .expect("parallel draft builds")
+    });
+
+    assert_eq!(
+        format!("{:?}", serial.claim),
+        format!("{:?}", parallel.claim)
+    );
+}
+
+fn checked_draft_from_inputs_with_arbitrary_fake_glv_hints(
+    inputs: Vec<EcdsaVerifyInput>,
+) -> Result<P256ProofDraft, P256ProofError> {
+    let public_inputs = PublicEcdsaInputClaim::from_inputs(&inputs);
+    let scalar_setup = ScalarSetupClaim::from_public_inputs(&public_inputs)?;
+    let cert_inputs = CertScalarInputClaim::from_scalar_setup(&scalar_setup)?;
+    let hints = cert_inputs
+        .rows
+        .iter()
+        .map(|row| FakeGlvScalarHint::decompose(&row.scalar))
+        .collect::<Result<Vec<_>, _>>()?;
+    let claim = checked_claim_from_inputs_with_hints(&inputs, hints)?;
+    P256ProofDraft::from_claim(inputs, claim)
+}
+
+fn checked_claim_from_inputs_with_hints(
+    inputs: &[EcdsaVerifyInput],
+    fake_glv_hints: Vec<FakeGlvScalarHint>,
+) -> Result<P256ProofClaim, P256ProofError> {
+    let public_inputs = PublicEcdsaInputClaim::from_inputs(inputs);
+    let public_key_check = PublicKeyOnCurveClaim::from_public_inputs(&public_inputs)?;
+    let scalar_setup = ScalarSetupClaim::from_public_inputs(&public_inputs)?;
+    let cert_inputs = CertScalarInputClaim::from_scalar_setup(&scalar_setup)?;
+    let fake_glv_scalars = FakeGlvScalarHintClaim::from_cert_inputs(&cert_inputs, fake_glv_hints)?;
+    let fake_glv_selectors = FakeGlvSelectorClaim::from_scalar_hints(&fake_glv_scalars)?;
+    let selector_requests = SelectorLookupRequests::from_selector_claim(&fake_glv_selectors)?;
+    let prepared_table =
+        PreparedTableClaim::from_claims(&cert_inputs, &fake_glv_scalars, &fake_glv_selectors)?;
+    let prepared_table_ec_trace = PreparedTableEcTraceClaim::from_claims(
+        &cert_inputs,
+        &fake_glv_scalars,
+        &fake_glv_selectors,
+        &prepared_table,
+    )?;
+    let fake_glv_chain = FakeGlvChainClaim::from_claims(
+        &cert_inputs,
+        &fake_glv_scalars,
+        &fake_glv_selectors,
+        &prepared_table,
+    )?;
+    let fake_glv_ec_trace = FakeGlvPrimitiveEcTraceClaim::from_chain(&fake_glv_chain)?;
+    let projective_ec_trace =
+        ProjectiveEcTraceClaim::from_native_traces(&prepared_table_ec_trace, &fake_glv_ec_trace)?;
+    let projective_rcb_air_trace =
+        ProjectiveRcbAirTraceClaim::from_projective_trace_lite(&projective_ec_trace)?;
+    let final_check = FinalEcdsaCheckClaim::from_claims(
+        &public_inputs,
+        &cert_inputs,
+        &fake_glv_scalars,
+        &fake_glv_chain,
+    )?;
+    let hinted_source_offset = projective_rcb_air_trace.rows.len() as u32;
+    let final_add =
+        final_add_claim_from_final_check(&final_check, &fake_glv_scalars, hinted_source_offset)?;
+    let mut hinted_mul_trace = HintedMulTraceClaim::from_projective_rcb(&projective_rcb_air_trace)?;
+    hinted_mul_trace.extend_from_projective_rcb(
+        &final_add.mul_trace,
+        final_add.hinted_source_offset,
+        false,
+    )?;
+    let public_key_curve_slice = public_key_slice_from_check(
+        &public_key_check,
+        hinted_source_offset + final_add.mul_trace.rows.len() as u32,
+    )?;
+    hinted_mul_trace.extend_from_projective_rcb(
+        &public_key_curve_slice.mul_trace,
+        public_key_curve_slice.hinted_source_offset,
+        false,
+    )?;
+    let prepared_use_counts = PreparedPointUseCountClaim::from_selector_claim(&fake_glv_selectors)?;
+    let prepared_trace = prepared_table.prepared_point_trace(&prepared_use_counts)?;
+
+    Ok(P256ProofClaim {
+        public_inputs,
+        public_key_check,
+        scalar_setup,
+        cert_inputs,
+        fake_glv_scalars,
+        fake_glv_selectors,
+        selector_requests,
+        prepared_table,
+        prepared_table_ec_trace,
+        fake_glv_chain,
+        fake_glv_ec_trace,
+        projective_ec_trace,
+        projective_rcb_air_trace,
+        hinted_mul_trace,
+        final_check,
+        final_add,
+        prepared_use_counts,
+        prepared_trace,
+    })
+}
+
+fn median_duration<F>(runs: usize, mut f: F) -> std::time::Duration
+where
+    F: FnMut(),
+{
+    let mut durations = Vec::with_capacity(runs);
+    for _ in 0..runs {
+        let start = std::time::Instant::now();
+        f();
+        durations.push(start.elapsed());
+    }
+    durations.sort();
+    durations[runs / 2]
+}
+
+#[test]
+#[ignore = "timing helper for WO-1.1; run explicitly with --ignored --nocapture"]
+fn hint_gen_timing() {
+    const RUNS: usize = 10;
+
+    let input = valid_real_input_with_u_scalars(scalar_near_order(123), scalar_near_order(456));
+    assert!(
+        ecdsa_verify(&input),
+        "synthetic arbitrary-width input must be valid",
+    );
+
+    let checked_median = median_duration(RUNS, || {
+        checked_draft_from_inputs_with_arbitrary_fake_glv_hints(vec![input.clone()])
+            .expect("checked timed draft builds");
+    });
+    let optimized_median = median_duration(RUNS, || {
+        P256ProofDraft::from_inputs_with_arbitrary_fake_glv_hints(vec![input.clone()])
+            .expect("timed draft builds");
+    });
+    let checked_ms = checked_median.as_secs_f64() * 1000.0;
+    let optimized_ms = optimized_median.as_secs_f64() * 1000.0;
+    println!(
+        "hint_gen_timing,runs={},checked_median_ms={:.3},optimized_median_ms={:.3},speedup={:.2}x",
+        RUNS,
+        checked_ms,
+        optimized_ms,
+        checked_ms / optimized_ms
+    );
+}
+
 /// End-to-end: prove + verify a real `p256`-crate signature through the
 /// monolithic current AIR via the production arbitrary-fake-GLV path.
 ///

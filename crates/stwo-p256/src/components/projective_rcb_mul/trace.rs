@@ -41,15 +41,32 @@ impl ProjectiveRcbAirTraceClaim {
     pub fn from_projective_trace_lite(
         trace: &ProjectiveEcTraceClaim,
     ) -> Result<Self, ProjectiveRcbAirError> {
+        Self::from_projective_trace_lite_inner(trace, true)
+    }
+
+    pub(crate) fn from_projective_trace_lite_trusted(
+        trace: &ProjectiveEcTraceClaim,
+    ) -> Result<Self, ProjectiveRcbAirError> {
+        Self::from_projective_trace_lite_inner(trace, false)
+    }
+
+    fn from_projective_trace_lite_inner(
+        trace: &ProjectiveEcTraceClaim,
+        verify: bool,
+    ) -> Result<Self, ProjectiveRcbAirError> {
         use rayon::prelude::*;
         let rows = trace
             .rows
             .par_iter()
             .enumerate()
-            .map(|(source_index, row)| ProjectiveRcbAirRow::from_projective_row(source_index, row))
+            .map(|(source_index, row)| {
+                ProjectiveRcbAirRow::from_projective_row_inner(source_index, row, verify)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let claim = Self { rows };
-        claim.verify_against_projective_trace(trace)?;
+        if verify {
+            claim.verify_against_projective_trace(trace)?;
+        }
         Ok(claim)
     }
 
@@ -104,7 +121,17 @@ impl ProjectiveRcbAirRow {
         source_index: usize,
         row: &ProjectiveEcRow,
     ) -> Result<Self, ProjectiveRcbAirError> {
-        row.verify()?;
+        Self::from_projective_row_inner(source_index, row, true)
+    }
+
+    fn from_projective_row_inner(
+        source_index: usize,
+        row: &ProjectiveEcRow,
+        verify: bool,
+    ) -> Result<Self, ProjectiveRcbAirError> {
+        if verify {
+            row.verify()?;
+        }
         let lhs = ProjectivePoint::from_prepared(&row.lhs_affine);
         let mut muls = Vec::with_capacity(PROJECTIVE_RCB_MAX_MUL_ROWS_PER_OP);
         let output_projective = match row.op {
