@@ -12,6 +12,7 @@ edition.workspace = true
 # pipeline — the laptop benchmark quantifies the delta.
 parallel = ["stwo-sha256/parallel"]
 gkr-spike = ["air-core/gkr-spike", "stwo-sha256/gkr-spike"]
+fri-sweep = ["stwo/tracing"]
 
 [dependencies]
 air-core = { path = "../air-core" }
@@ -55,6 +56,8 @@ mimalloc = { workspace = true }
 # FFI transport compressor (`bzip2` best) so the recorded over-the-wire size and
 # compression ratio match the real Bluetooth payload (`crates/sdk` uses 0.6).
 bzip2 = "0.6"
+tracing = "0.1"
+tracing-subscriber = "0.3"
 
 [[bench]]
 name = "identity_bench"
@@ -63,6 +66,10 @@ harness = false
 [[bench]]
 name = "longfellow_equiv_bench"
 harness = false
+
+[[example]]
+name = "fri_sweep"
+required-features = ["fri-sweep"]
 
 [lints]
 workspace = true

@@ -108,6 +108,8 @@ use stwo::prover::{prove as stark_prove, CommitmentSchemeProver, ComponentProver
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::TraceLocationAllocator;
 
+use predicates::age::strategy::range_check::air::RangeCheckProver;
+use predicates::nat::air::NatProver;
 use predicates::nat::NationalityPredicate;
 use predicates::{
     AgeRangeCheck, DateOfBirth, NatPrivateInput, NatPublicInput, PredicateProver,
@@ -368,37 +370,41 @@ impl ModuleColumns {
     }
 }
 
-/// Like [`prove`], but also returns each module's committed-column counts in
-/// commit order — the per-module attribution input for the proof-size
-/// byte-breakdown. The counts come from the **same** module instances that
-/// produce the proof, so they cannot drift from what was committed.
-#[allow(clippy::too_many_arguments)]
-pub fn prove_with_column_breakdown(
-    p256_draft: &P256ProofDraft,
-    sha_witness: &Sha256Witness,
+struct PreparedProofModules<'a> {
+    p256: P256Prover<'a>,
+    sha: Sha256Prover<'a>,
+    bridge: DigestBindProver,
+    age: RangeCheckProver,
+    nat: NatProver,
     sha_log_n_rows: u32,
     sha_group_width: u32,
-    age_public: &AgePublicInput,
+    bridge_log: u32,
+    age_public: &'a AgePublicInput,
+    nat_public: &'a NatPublicInput,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_proof_modules<'a>(
+    p256_draft: &'a P256ProofDraft,
+    sha_witness: &'a Sha256Witness,
+    sha_log_n_rows: u32,
+    sha_group_width: u32,
+    age_public: &'a AgePublicInput,
     age_dob: &DateOfBirth,
-    nat_public: &NatPublicInput,
+    nat_public: &'a NatPublicInput,
     nat_private: &NatPrivateInput,
-) -> Result<(Proof, Vec<ModuleColumns>), Error> {
+) -> Result<PreparedProofModules<'a>, Error> {
     let scalar_z_handle = SharedScalarZRelation::new();
     let digest_handle = SharedDigestRelation::new();
     let field_handle = SharedFieldRelation::new();
 
-    let exposure = credential_exposure();
-    let (p256_prepared, sha_prepared) = rayon::join(
-        || P256Prover::prepare(p256_draft),
-        || Sha256Prover::prepare_traces(sha_witness, sha_log_n_rows, sha_group_width, &exposure),
-    );
-
-    let mut p256 = P256Prover::from_prepared(p256_prepared.map_err(Error::P256Prepare)?)
+    let p256 = P256Prover::new(p256_draft)
+        .map_err(Error::P256Prepare)?
         .with_z_binding(scalar_z_handle.clone());
     // SHA both yields its digest (P256↔SHA bridge) and exposes the DOB +
     // nationality byte windows (age/nat↔credential bridges) on the
     // shared field channel.
-    let mut sha = Sha256Prover::new(sha_witness, sha_log_n_rows, sha_group_width)
+    let sha = Sha256Prover::new(sha_witness, sha_log_n_rows, sha_group_width)
         .with_digest_handle(digest_handle.clone())
         .with_field_handle(exposure, field_handle.clone())
         .with_prepared_traces(sha_prepared);
@@ -406,7 +412,7 @@ pub fn prove_with_column_breakdown(
     let instances = p256.proof_claim().public_inputs.instances.clone();
     let rows = bridge_rows(&instances);
     let bridge_log = bridge_log_size(rows.len());
-    let mut bridge = DigestBindProver::new(rows, bridge_log, scalar_z_handle, digest_handle);
+    let bridge = DigestBindProver::new(rows, bridge_log, scalar_z_handle, digest_handle);
 
     // The predicate modules. `range_check` is the canonical age strategy for the
     // combined proof (the standalone default); the bit-decomposition strategy
@@ -421,16 +427,45 @@ pub fn prove_with_column_breakdown(
     // proves ∈ the accepted set is provably the signed credential's. A prover can
     // no longer attest age from a date — or membership from a code — the
     // credential does not contain.
-    let mut age = AgeRangeCheck::new(PcsConfig::default())
+    let age = AgeRangeCheck::new(PcsConfig::default())
         .prover(age_public, age_dob)
         .map_err(Error::AgePrepare)?
         .with_dob_binding(field_handle.clone());
-    let mut nat = NationalityPredicate::new(PcsConfig::default())
+    let nat = NationalityPredicate::new(PcsConfig::default())
         .prover(nat_public, nat_private)
         .map_err(Error::NatPrepare)?
         .with_nat_binding(field_handle.clone());
 
-    let config = p256.pcs_config();
+    Ok(PreparedProofModules {
+        p256,
+        sha,
+        bridge,
+        age,
+        nat,
+        sha_log_n_rows,
+        sha_group_width,
+        bridge_log,
+        age_public,
+        nat_public,
+    })
+}
+
+fn prove_prepared_with_config(
+    mut prepared: PreparedProofModules<'_>,
+    config: PcsConfig,
+) -> Result<(Proof, Vec<ModuleColumns>), Error> {
+    let PreparedProofModules {
+        ref mut p256,
+        ref mut sha,
+        ref mut bridge,
+        ref mut age,
+        ref mut nat,
+        sha_log_n_rows,
+        sha_group_width,
+        bridge_log,
+        age_public,
+        nat_public,
+    } = prepared;
 
     // Capture each module's committed-column counts before the modules are
     // borrowed into the prove slice. `layout()` is available right after
@@ -461,8 +496,7 @@ pub fn prove_with_column_breakdown(
     // bridge's `digest_bind_*` ids in the shared allocator. The verifier must use
     // this same order.
     let stark_proof = {
-        let mut modules: [&mut dyn AirProver; 5] =
-            [&mut p256, &mut sha, &mut bridge, &mut age, &mut nat];
+        let mut modules: [&mut dyn AirProver; 5] = [p256, sha, bridge, age, nat];
         air_core::prove(&mut modules, config).map_err(|e| Error::Prove(format!("{e:?}")))?
     };
     #[cfg(feature = "gkr-spike")]
@@ -489,123 +523,62 @@ pub fn prove_with_column_breakdown(
     Ok((proof, column_breakdown))
 }
 
-fn prove_with_parallel_p256_sha(
-    p256: &mut P256Prover<'_>,
-    sha: &mut Sha256Prover<'_>,
-    bridge: &mut DigestBindProver,
-    age: &mut dyn AirProver,
-    nat: &mut dyn AirProver,
+/// Like [`prove`], but also returns each module's committed-column counts in
+/// commit order — the per-module attribution input for the proof-size
+/// byte-breakdown. The counts come from the **same** module instances that
+/// produce the proof, so they cannot drift from what was committed.
+#[allow(clippy::too_many_arguments)]
+pub fn prove_with_column_breakdown(
+    p256_draft: &P256ProofDraft,
+    sha_witness: &Sha256Witness,
+    sha_log_n_rows: u32,
+    sha_group_width: u32,
+    age_public: &AgePublicInput,
+    age_dob: &DateOfBirth,
+    nat_public: &NatPublicInput,
+    nat_private: &NatPrivateInput,
+) -> Result<(Proof, Vec<ModuleColumns>), Error> {
+    let prepared = prepare_proof_modules(
+        p256_draft,
+        sha_witness,
+        sha_log_n_rows,
+        sha_group_width,
+        age_public,
+        age_dob,
+        nat_public,
+        nat_private,
+    )?;
+    let config = prepared.p256.pcs_config();
+    prove_prepared_with_config(prepared, config)
+}
+
+/// FRI-sweep harness only (WO-3.3). Production config changes remain sanctioned-change-only (HANDOVER rule).
+#[cfg(feature = "fri-sweep")]
+#[allow(clippy::too_many_arguments)]
+pub fn prove_with_column_breakdown_and_config(
+    p256_draft: &P256ProofDraft,
+    sha_witness: &Sha256Witness,
+    sha_log_n_rows: u32,
+    sha_group_width: u32,
+    age_public: &AgePublicInput,
+    age_dob: &DateOfBirth,
+    nat_public: &NatPublicInput,
+    nat_private: &NatPrivateInput,
     config: PcsConfig,
-) -> Result<StarkProof<Blake2sMerkleHasher>, ProvingError> {
-    let max_constraint_log_degree_bound = [
-        p256.max_constraint_log_degree_bound(),
-        sha.max_constraint_log_degree_bound(),
-        bridge.max_constraint_log_degree_bound(),
-        age.max_constraint_log_degree_bound(),
-        nat.max_constraint_log_degree_bound(),
-    ]
-    .into_iter()
-    .max()
-    .expect("at least one module");
-    let twiddle_log_size = config
-        .lifting_log_size
-        .unwrap_or(max_constraint_log_degree_bound + config.fri_config.log_blowup_factor);
-
-    let twiddles = SimdBackend::precompute_twiddles(
-        CanonicCoset::new(twiddle_log_size)
-            .circle_domain()
-            .half_coset,
-    );
-
-    let channel = &mut air_core::Ch::default();
-    config.mix_into(channel);
-
-    let mut commitment_scheme =
-        CommitmentSchemeProver::<SimdBackend, air_core::Mc>::new(config, &twiddles);
-    if p256.store_polynomial_coefficients()
-        || sha.store_polynomial_coefficients()
-        || bridge.store_polynomial_coefficients()
-        || age.store_polynomial_coefficients()
-        || nat.store_polynomial_coefficients()
-    {
-        commitment_scheme.set_store_polynomials_coefficients();
-    }
-
-    let mut tb = commitment_scheme.tree_builder();
-    p256.write_preprocessed(&mut tb);
-    sha.write_preprocessed(&mut tb);
-    bridge.write_preprocessed(&mut tb);
-    age.write_preprocessed(&mut tb);
-    nat.write_preprocessed(&mut tb);
-    tb.commit(channel);
-
-    p256.mix_public(channel);
-    sha.mix_public(channel);
-    bridge.mix_public(channel);
-    age.mix_public(channel);
-    nat.mix_public(channel);
-
-    let mut tb = commitment_scheme.tree_builder();
-    p256.write_trace(&mut tb);
-    sha.write_trace(&mut tb);
-    bridge.write_trace(&mut tb);
-    age.write_trace(&mut tb);
-    nat.write_trace(&mut tb);
-    tb.commit(channel);
-
-    p256.draw_relations(channel);
-    sha.draw_relations(channel);
-    bridge.draw_relations(channel);
-    age.draw_relations(channel);
-    nat.draw_relations(channel);
-
-    let p256_job = p256.interaction_job();
-    let sha_job = sha.interaction_job();
-    let (p256_interaction, sha_interaction) = rayon::join(
-        || {
-            p256_job
-                .materialize()
-                .expect("interaction trace generates for a validated draft")
-        },
-        || sha_job.materialize(),
-    );
-
-    let mut tb = commitment_scheme.tree_builder();
-    p256.write_prepared_interaction(&mut tb, p256_interaction);
-    sha.write_prepared_interaction(&mut tb, sha_interaction);
-    bridge.write_interaction(&mut tb);
-    age.write_interaction(&mut tb);
-    nat.write_interaction(&mut tb);
-
-    p256.mix_claimed_sums(channel);
-    sha.mix_claimed_sums(channel);
-    bridge.mix_claimed_sums(channel);
-    age.mix_claimed_sums(channel);
-    nat.mix_claimed_sums(channel);
-    tb.commit(channel);
-
-    let mut preprocessed_ids: Vec<PreProcessedColumnId> = Vec::new();
-    preprocessed_ids.extend(p256.preprocessed_column_ids());
-    preprocessed_ids.extend(sha.preprocessed_column_ids());
-    preprocessed_ids.extend(bridge.preprocessed_column_ids());
-    preprocessed_ids.extend(age.preprocessed_column_ids());
-    preprocessed_ids.extend(nat.preprocessed_column_ids());
-    let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&preprocessed_ids);
-
-    p256.build_components(&mut allocator);
-    sha.build_components(&mut allocator);
-    bridge.build_components(&mut allocator);
-    age.build_components(&mut allocator);
-    nat.build_components(&mut allocator);
-
-    let mut component_refs: Vec<&dyn ComponentProver<SimdBackend>> = Vec::new();
-    component_refs.extend(p256.prover_components());
-    component_refs.extend(sha.prover_components());
-    component_refs.extend(bridge.prover_components());
-    component_refs.extend(age.prover_components());
-    component_refs.extend(nat.prover_components());
-
-    stark_prove::<SimdBackend, air_core::Mc>(&component_refs, channel, commitment_scheme)
+) -> Result<(Proof, Vec<ModuleColumns>), Error> {
+    let prepared = prepare_proof_modules(
+        p256_draft,
+        sha_witness,
+        sha_log_n_rows,
+        sha_group_width,
+        age_public,
+        age_dob,
+        nat_public,
+        nat_private,
+    )?;
+    let (proof, columns) = prove_prepared_with_config(prepared, config)?;
+    verify_stark_with_config(&proof, Some(config))?;
+    Ok((proof, columns))
 }
 
 /// Prove an identity statement from a credential, an issuer signing key, and a
@@ -718,6 +691,13 @@ pub fn verify_identity(proof: &Proof, statement: &PublicStatement) -> Result<(),
 /// binding *first*: both [`verify`] and [`verify_identity`] bind, then delegate
 /// here.
 fn verify_stark(proof: &Proof) -> Result<(), Error> {
+    verify_stark_with_config(proof, None)
+}
+
+fn verify_stark_with_config(
+    proof: &Proof,
+    expected_config_override: Option<PcsConfig>,
+) -> Result<(), Error> {
     let scalar_z_handle = SharedScalarZRelation::new();
     let digest_handle = SharedDigestRelation::new();
     let field_handle = SharedFieldRelation::new();
@@ -764,7 +744,7 @@ fn verify_stark(proof: &Proof) -> Result<(), Error> {
     // than inherit it — the standalone P256 verifier (`verify_current_air`) does
     // the same. Checked before the STARK verification so a low-query proof never
     // reaches it.
-    let expected_config = p256.expected_pcs_config();
+    let expected_config = expected_config_override.unwrap_or_else(|| p256.expected_pcs_config());
     if proof.stark_proof.config != expected_config {
         return Err(Error::WeakConfig {
             got: proof.stark_proof.config,
