@@ -576,9 +576,23 @@ pub fn prove_with_column_breakdown_and_config(
         nat_public,
         nat_private,
     )?;
-    let (proof, columns) = prove_prepared_with_config(prepared, config)?;
-    verify_stark_with_config(&proof, Some(config))?;
-    Ok((proof, columns))
+    prove_prepared_with_config(prepared, config)
+}
+
+/// FRI-sweep harness only (WO-3.3/WO-3.1). Production verification remains pinned to P256's sanctioned config.
+#[cfg(feature = "fri-sweep")]
+pub fn verify_with_config(
+    proof: &Proof,
+    expected_instances: &[PublicEcdsaInstance<M31>],
+    config: PcsConfig,
+) -> Result<(), Error> {
+    if !instances_match_ignoring_z(
+        &proof.p256_claim.public_inputs.instances,
+        expected_instances,
+    ) {
+        return Err(Error::P256InstanceMismatch);
+    }
+    verify_stark_with_config(proof, Some(config))
 }
 
 /// Prove an identity statement from a credential, an issuer signing key, and a

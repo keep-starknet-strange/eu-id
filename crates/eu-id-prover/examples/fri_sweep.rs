@@ -7,7 +7,7 @@ use std::env;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::Instant;
 
-use eu_id_prover::{fixtures, prove_with_column_breakdown_and_config};
+use eu_id_prover::{fixtures, prove_with_column_breakdown_and_config, verify_with_config};
 use stwo::core::fri::FriConfig;
 use stwo::core::pcs::PcsConfig;
 use stwo::tracing::SpanAccumulator;
@@ -31,7 +31,8 @@ struct Case {
 #[derive(Clone, Debug)]
 struct Row {
     case: Case,
-    median_ms: f64,
+    prove_ms: f64,
+    verify_ms: f64,
     proof_bytes: usize,
     composition_ms: f64,
     verified: bool,
@@ -124,21 +125,25 @@ fn run_case(
     case: Case,
     samples: usize,
 ) -> Result<Row, String> {
-    let mut timings = Vec::with_capacity(samples);
+    let mut prove_timings = Vec::with_capacity(samples);
+    let mut verify_timings = Vec::with_capacity(samples);
     let mut proof_bytes = None;
     let mut composition_ms = 0.0;
 
     for _ in 0..samples {
         let sample = run_sample(draft, witness, case)?;
-        timings.push(sample.elapsed_ms);
+        prove_timings.push(sample.prove_ms);
+        verify_timings.push(sample.verify_ms);
         proof_bytes = Some(sample.proof_bytes);
         composition_ms += sample.composition_ms;
     }
 
-    timings.sort_by(f64::total_cmp);
+    prove_timings.sort_by(f64::total_cmp);
+    verify_timings.sort_by(f64::total_cmp);
     Ok(Row {
         case,
-        median_ms: timings[timings.len() / 2],
+        prove_ms: prove_timings[prove_timings.len() / 2],
+        verify_ms: verify_timings[verify_timings.len() / 2],
         proof_bytes: proof_bytes.unwrap_or(0),
         composition_ms: composition_ms / samples as f64,
         verified: true,
@@ -146,7 +151,8 @@ fn run_case(
 }
 
 struct Sample {
-    elapsed_ms: f64,
+    prove_ms: f64,
+    verify_ms: f64,
     proof_bytes: usize,
     composition_ms: f64,
 }
@@ -160,7 +166,7 @@ fn run_sample(
     let subscriber = Registry::default().with(collector.clone());
     let _guard = tracing::subscriber::set_default(subscriber);
 
-    let start = Instant::now();
+    let prove_start = Instant::now();
     let (proof, _) = prove_with_column_breakdown_and_config(
         draft,
         &witness.sha_witness,
@@ -173,14 +179,22 @@ fn run_sample(
         pcs_config(case),
     )
     .map_err(|error| format!("{error:?}"))?;
-    let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let prove_ms = prove_start.elapsed().as_secs_f64() * 1000.0;
+
+    let expected = proof.p256_instances().to_vec();
+    let verify_start = Instant::now();
+    verify_with_config(&proof, &expected, pcs_config(case))
+        .map_err(|error| format!("{error:?}"))?;
+    let verify_ms = verify_start.elapsed().as_secs_f64() * 1000.0;
+
     let proof_bytes = bincode::serialize(&proof)
         .map_err(|error| error.to_string())?
         .len();
     let composition_ms = span_ms(&collector.export_csv(), "CompositionPolynomialGeneration");
 
     Ok(Sample {
-        elapsed_ms,
+        prove_ms,
+        verify_ms,
         proof_bytes,
         composition_ms,
     })
@@ -223,17 +237,19 @@ fn span_ms(csv: &str, label: &str) -> f64 {
 }
 
 fn print_csv(rows: &[Row], failures: &[(Case, String)]) {
-    println!("status,pow_bits,log_blowup,n_queries,log_last_layer,fold_step,median_ms,proof_bytes,composition_ms,verified,error");
+    println!("status,pow_bits,log_blowup,n_queries,log_last_layer,fold_step,prove_ms,verify_ms,total_ms,proof_bytes,composition_ms,verified,error");
     for row in rows {
         let c = row.case;
         println!(
-            "ok,{},{},{},{},{},{:.3},{},{:.3},{},",
+            "ok,{},{},{},{},{},{:.3},{:.3},{:.3},{},{:.3},{},",
             c.pow_bits,
             c.log_blowup,
             c.n_queries,
             c.log_last_layer,
             c.fold_step,
-            row.median_ms,
+            row.prove_ms,
+            row.verify_ms,
+            row.prove_ms + row.verify_ms,
             row.proof_bytes,
             row.composition_ms,
             row.verified
@@ -241,7 +257,7 @@ fn print_csv(rows: &[Row], failures: &[(Case, String)]) {
     }
     for (case, error) in failures {
         println!(
-            "err,{},{},{},{},{},,,,,{}",
+            "err,{},{},{},{},{},,,,,,,{}",
             case.pow_bits,
             case.log_blowup,
             case.n_queries,
@@ -257,21 +273,22 @@ fn print_pareto(rows: &[Row]) {
     pareto.sort_by(|a, b| {
         a.proof_bytes
             .cmp(&b.proof_bytes)
-            .then_with(|| a.median_ms.total_cmp(&b.median_ms))
+            .then_with(|| a.prove_ms.total_cmp(&b.prove_ms))
     });
 
-    println!("\n| pow | blowup | queries | last | fold | median ms | proof bytes | composition ms | current |");
-    println!("|---:|---:|---:|---:|---:|---:|---:|---:|:---:|");
+    println!("\n| pow | blowup | queries | last | fold | prove ms | verify ms | proof bytes | composition ms | current |");
+    println!("|---:|---:|---:|---:|---:|---:|---:|---:|---:|:---:|");
     for row in pareto {
         let c = row.case;
         println!(
-            "| {} | {} | {} | {} | {} | {:.3} | {} | {:.3} | {} |",
+            "| {} | {} | {} | {} | {} | {:.3} | {:.3} | {} | {:.3} | {} |",
             c.pow_bits,
             c.log_blowup,
             c.n_queries,
             c.log_last_layer,
             c.fold_step,
-            row.median_ms,
+            row.prove_ms,
+            row.verify_ms,
             row.proof_bytes,
             row.composition_ms,
             if is_current(c) { "yes" } else { "" }
@@ -290,7 +307,7 @@ fn print_recommendation(rows: &[Row]) {
         .min_by(|a, b| {
             a.proof_bytes
                 .cmp(&b.proof_bytes)
-                .then_with(|| a.median_ms.total_cmp(&b.median_ms))
+                .then_with(|| a.prove_ms.total_cmp(&b.prove_ms))
         })
     else {
         eprintln!("no successful sweep rows");
@@ -306,16 +323,21 @@ fn print_recommendation(rows: &[Row]) {
         recommended.case.fold_step
     );
     println!(
-        "current_vs_recommended: current_ms={:.3}, recommended_ms={:.3}, current_bytes={}, recommended_bytes={}",
-        current.median_ms, recommended.median_ms, current.proof_bytes, recommended.proof_bytes
+        "current_vs_recommended: current_prove_ms={:.3}, recommended_prove_ms={:.3}, current_verify_ms={:.3}, recommended_verify_ms={:.3}, current_bytes={}, recommended_bytes={}",
+        current.prove_ms,
+        recommended.prove_ms,
+        current.verify_ms,
+        recommended.verify_ms,
+        current.proof_bytes,
+        recommended.proof_bytes
     );
 }
 
 fn is_pareto(candidate: &Row, rows: &[Row]) -> bool {
     !rows.iter().any(|other| {
         other.proof_bytes <= candidate.proof_bytes
-            && other.median_ms <= candidate.median_ms
-            && (other.proof_bytes < candidate.proof_bytes || other.median_ms < candidate.median_ms)
+            && other.prove_ms <= candidate.prove_ms
+            && (other.proof_bytes < candidate.proof_bytes || other.prove_ms < candidate.prove_ms)
     })
 }
 
