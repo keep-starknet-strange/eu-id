@@ -26,8 +26,8 @@ Shape: `cargo test -p eu-id-prover --release shape_dump -- --ignored --nocapture
 | 2026-07-02 | e72cc328 | WO-1.8 +bench mimalloc | pipeline/prove (parallel) | 716 ms | 700 ms |
 | 2026-07-02 | 80dabe23 | WO-1.7 SHA coefficient retention | contended sha/prove soak | wedged 4x at sha/prove | 3 x 30 min clean: 41/48/46 iterations |
 | 2026-07-02 | 80dabe23 | WO-1.7 exact parallel bench | identity_bench `--features parallel -- 'prove'` | wedge at sha/prove | passed; sha/prove 263 ms, pipeline/prove 690 ms |
-| 2026-07-02 | 4ee92b6b | WO-1.1 hint/draft generation (RAYON_NUM_THREADS=1) | `hint_gen_timing` checked vs optimized median | 323.335 ms | 157.269 ms |
-| 2026-07-02 | 4ee92b6b | WO-1.1 hint/draft generation (default Rayon) | `hint_gen_timing` checked vs optimized median | 192.371 ms | 58.347 ms |
-| 2026-07-02 | 4ee92b6b | WO-1.1 blocked acceptance check (Q-002) | BM_ECDSAZKProver_equiv/1 (1-thread; draft prebuilt by harness) | 1.894 s | 1.874 s |
+| 2026-07-02 | 1f461ac8 | WO-1.1 hint/draft generation (RAYON_NUM_THREADS=1) | `hint_gen_timing` checked vs optimized median | 323.335 ms | 157.269 ms |
+| 2026-07-02 | 1f461ac8 | WO-1.1 hint/draft generation (default Rayon) | `hint_gen_timing` checked vs optimized median | 192.371 ms | 58.347 ms |
+| 2026-07-02 | 1f461ac8 | WO-1.1 blocked acceptance check (Q-002) | BM_ECDSAZKProver_equiv/1 (1-thread; draft prebuilt by harness) | 1.894 s | 1.874 s |
 
 WO-1.8 note: `target-cpu=native` was measured with `RUSTFLAGS="-C target-cpu=native"` instead of committed `.cargo/config.toml`, because CI builds this repo on `ubuntu-latest` and would consume committed Cargo config. LTO/CU1 is scoped to `[profile.bench]`; putting it in `[profile.release]` made `cargo test --workspace --release` fail in the P-256 monolithic proof gate with `ProofLayer("Constraints not satisfied.")`.
