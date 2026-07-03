@@ -91,10 +91,13 @@ Shape: `cargo test -p eu-id-prover --release shape_dump -- --ignored --nocapture
 | 2026-07-03 | 8dbe5038 | WO-3.2b shared projective signed-carry provider | BM_ECDSAZKProver_equiv/1 (1-thread) | 1.7761 s | 1.7048 s |
 | 2026-07-03 | 8dbe5038 | WO-3.2b shared projective signed-carry provider | shape_dump p256 cells | 13,099,056 | 11,788,336 |
 | 2026-07-03 | 8dbe5038 | WO-3.2b shared projective signed-carry provider | shape_dump total cells | 27,013,920 | 25,703,200 |
-| 2026-07-03 | 693e8596 | WO-3.3 FRI sweep harness | current production config prove time (`pow=10, blowup=2, queries=59, last=5, fold=1`) | — | 3.122511 s |
-| 2026-07-03 | 693e8596 | WO-3.3 FRI sweep harness | recommended smallest-proof Pareto prove time (`pow=20, blowup=3, queries=36, last=5, fold=2`) | 3.122511 s | 4.436177 s |
-| 2026-07-03 | 693e8596 | WO-3.3 FRI sweep harness | proof bytes current → recommended | 2,302,954 | 1,482,322 |
-| 2026-07-03 | 693e8596 | WO-3.3 FRI sweep harness | `CompositionPolynomialGeneration` span current → recommended | 917.782 ms | 906.681 ms |
+| 2026-07-03 | 1755fd22 | WO-3.3 FRI sweep harness | current production config prove / verify (`pow=10, blowup=2, queries=59, last=5, fold=1`) | — | 3.031992 s / 20.866 ms |
+| 2026-07-03 | 1755fd22 | WO-3.3 FRI sweep harness | recommended smallest-proof Pareto prove / verify (`pow=20, blowup=3, queries=36, last=5, fold=2`) | 3.031992 s / 20.866 ms | 4.194932 s / 17.844 ms |
+| 2026-07-03 | 1755fd22 | WO-3.3 FRI sweep harness | proof bytes current → recommended | 2,302,954 | 1,482,322 |
+| 2026-07-03 | 1755fd22 | WO-3.3 FRI sweep harness | `CompositionPolynomialGeneration` span current → recommended | 909.354 ms | 879.103 ms |
+| 2026-07-03 | 1755fd22 | WO-3.1 blowup 2→1 eval | prove time (`pow=10,last=5,fold=1`, 128-bit) | blowup 2 / q59: 3.031992 s | blowup 1 / q118: 2.350327 s |
+| 2026-07-03 | 1755fd22 | WO-3.1 blowup 2→1 eval | proof bytes (`pow=10,last=5,fold=1`, 128-bit) | blowup 2 / q59: 2,302,954 | blowup 1 / q118: 4,243,266 |
+| 2026-07-03 | 1755fd22 | WO-3.1 blowup 2→1 eval | verify time (`pow=10,last=5,fold=1`, 128-bit) | blowup 2 / q59: 20.866 ms | blowup 1 / q118: 28.929 ms |
 
 WO-1.8 note: `target-cpu=native` was measured with `RUSTFLAGS="-C target-cpu=native"` instead of committed `.cargo/config.toml`, because CI builds this repo on `ubuntu-latest` and would consume committed Cargo config. LTO/CU1 is scoped to `[profile.bench]`; putting it in `[profile.release]` made `cargo test --workspace --release` fail in the P-256 monolithic proof gate with `ProofLayer("Constraints not satisfied.")`.
 
@@ -114,4 +117,6 @@ WO-3.2a note: the five log-13 range13 provider relations were unified into one s
 
 WO-3.2b note: the hinted formula signed-carry provider premise passed because it already used `projective_rcb_signed_carry_claim()` / `PROJECTIVE_RCB_SIGNED_CARRY_EQUATION`, matching the projective signed-carry equation, bound, and log size. The merge shares the projective signed-carry provider across public-key-curve, final-add, and hinted formula consumers. The architect estimate was ~1.8M cells assuming a full duplicate provider including two preprocessed columns; those preprocessed IDs were already deduped, so the measured reduction is 1,310,720 cells: one base multiplicity column plus four interaction columns at log 18.
 
-WO-3.3 note: `examples/fri_sweep.rs` is feature-gated behind `fri-sweep` and uses a sweep-only `prove_with_column_breakdown_and_config`; the production wrapper still computes `p256.pcs_config()` and no production profile change was committed. Release BENCH-LOCK command: `RAYON_NUM_THREADS=1 FRI_SWEEP_SAMPLES=1 cargo run -p eu-id-prover --release --example fri_sweep --features fri-sweep`. The `fold_step=2` probe verified, so both fold steps were included. The recommended row is the smallest-proof Pareto point, not a speed win: it reduces proof bytes by 820,632 (35.63%) but is 1.313666s slower than current in the one-sample sweep.
+WO-3.3 note: `examples/fri_sweep.rs` is feature-gated behind `fri-sweep` and uses sweep-only explicit config prove/verify helpers; the production wrapper still computes `p256.pcs_config()` and no production profile change was committed. Release BENCH-LOCK command: `RAYON_NUM_THREADS=1 FRI_SWEEP_SAMPLES=1 cargo run -p eu-id-prover --release --example fri_sweep --features fri-sweep`. The `fold_step=2` probe verified, so both fold steps were included. The recommended row is the smallest-proof Pareto point, not a speed win: it reduces proof bytes by 820,632 (35.63%) but regresses prove time by 1.162940s versus current in the one-sample sweep.
+
+WO-3.1 note: the live source is the post-WO-0 128-bit profile (`pow_bits=10`, `FriConfig::new(5, 2, 59, 1)`). The fair blowup-1 comparison keeps `pow_bits=10`, `log_last_layer=5`, and `fold_step=1`, requiring 118 queries for 128-bit security. Blowup 1 improved one-sample prove time by 22.48%, but proof bytes grew by 1,940,312 bytes (84.25%) and verify time grew by 38.63%. Because no architect proof-size ceiling or production-config ack exists, WO-3.1 verdict is reject/no-change.
