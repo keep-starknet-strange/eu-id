@@ -1996,6 +1996,40 @@ fn monolithic_rejects_corrupted_shared_projective_signed_carry_multiplicity() {
     );
 }
 
+/// WO-3.2 oracle: scalar-setup/final-check, scalar-mod-mul,
+/// public-key-curve, hinted-mul, and final-add all consume one shared range13
+/// provider. Corrupting that provider multiplicity must reject the whole
+/// monolithic proof.
+#[test]
+fn monolithic_rejects_corrupted_shared_range13_multiplicity() {
+    let draft = valid_draft_for_balance(7, 11);
+    monolithic_balance_outcome(&draft).expect("honest draft balances");
+
+    let (interaction_claim, relations) =
+        monolithic_interaction_claim_with_base_mutation(&draft, |base| {
+            let column = &base.range13_multiplicity;
+            let mut values = column_to_values(column);
+            let row = values
+                .iter()
+                .position(|&value| value != M31::from_u32_unchecked(0))
+                .expect("shared range13 provider has live multiplicity");
+            values[row] += M31::from_u32_unchecked(1);
+            base.range13_multiplicity = column_from_values_like(column, values);
+        });
+    let err = interaction_claim
+        .verify_balanced(&draft.claim.public_inputs.instances, &relations)
+        .expect_err("corrupted shared range13 multiplicity must reject");
+    assert!(
+        matches!(
+            err,
+            P256ProofError::RelationImbalance {
+                relation: "LookupSum"
+            }
+        ),
+        "expected LookupSum imbalance, got {err:?}"
+    );
+}
+
 #[test]
 #[ignore = "proves scalar setup mod-mul rows through PCS for degree/profile diagnostics"]
 fn scalar_setup_mod_mul_pcs_diagnostic() {
@@ -2176,7 +2210,7 @@ fn prove_scalar_mod_mul_rows_for_diagnostic(rows: &ScalarModMulMergedRows) {
     tree_builder.commit(&mut channel);
 
     claim.mix_into(&mut channel);
-    let base = gen_scalar_mod_mul_base_trace(rows, &lookup_claims);
+    let base = crate::scalar::scalar_mod_mul::claim::gen_base_trace(rows, &lookup_claims);
     let mut tree_builder = commitment_scheme.tree_builder();
     tree_builder.extend_evals(base);
     tree_builder.commit(&mut channel);
@@ -2184,7 +2218,12 @@ fn prove_scalar_mod_mul_rows_for_diagnostic(rows: &ScalarModMulMergedRows) {
     let relations = ScalarModMulLookupRelations::draw(&mut channel);
     let claim = ScalarModMulClaim::from_rows(rows);
     let (interaction, interaction_claim) =
-        gen_scalar_mod_mul_interaction_trace(rows, &claim, &lookup_claims, &relations);
+        crate::scalar::scalar_mod_mul::claim::gen_interaction_trace(
+            rows,
+            &claim,
+            &lookup_claims,
+            &relations,
+        );
     interaction_claim.scalar_mod_mul.mix_into(&mut channel);
     interaction_claim.range13.mix_into(&mut channel);
     interaction_claim.signed_carry.mix_into(&mut channel);
@@ -2368,7 +2407,11 @@ fn scalar_mod_mul_max_constraint_log_degree_bound(components: &ScalarModMulCompo
         components
             .reduction_digits
             .max_constraint_log_degree_bound(),
-        components.range13.max_constraint_log_degree_bound(),
+        components
+            .range13
+            .as_ref()
+            .expect("standalone scalar-mod-mul has range13 provider")
+            .max_constraint_log_degree_bound(),
         components.signed_carry.max_constraint_log_degree_bound(),
     ]
     .into_iter()
@@ -2379,15 +2422,18 @@ fn scalar_mod_mul_max_constraint_log_degree_bound(components: &ScalarModMulCompo
 fn scalar_mod_mul_component_provers(
     components: &ScalarModMulComponents,
 ) -> Vec<&dyn ComponentProver<SimdBackend>> {
-    vec![
+    let mut provers: Vec<&dyn ComponentProver<SimdBackend>> = vec![
         &components.canonical as &dyn ComponentProver<SimdBackend>,
         &components.ab_chunks as &dyn ComponentProver<SimdBackend>,
         &components.qn_chunks as &dyn ComponentProver<SimdBackend>,
         &components.accumulators as &dyn ComponentProver<SimdBackend>,
         &components.reduction_digits as &dyn ComponentProver<SimdBackend>,
-        &components.range13 as &dyn ComponentProver<SimdBackend>,
-        &components.signed_carry as &dyn ComponentProver<SimdBackend>,
-    ]
+    ];
+    if let Some(range13) = &components.range13 {
+        provers.push(range13 as &dyn ComponentProver<SimdBackend>);
+    }
+    provers.push(&components.signed_carry as &dyn ComponentProver<SimdBackend>);
+    provers
 }
 
 fn assert_current_air_constraints(proof: &P256ProofDraft) {
@@ -2424,11 +2470,6 @@ fn assert_current_air_constraints(proof: &P256ProofDraft) {
     let trace = commitment_scheme.trace_domain_evaluations();
 
     assert_component_named("scalar_setup.setup", &components.scalar_setup.setup, &trace);
-    assert_component_named(
-        "scalar_setup.range13",
-        &components.scalar_setup.range13,
-        &trace,
-    );
     assert_component_named(
         "scalar_setup.range9",
         &components.scalar_setup.range9,
@@ -2545,8 +2586,8 @@ fn assert_current_air_constraints(proof: &P256ProofDraft) {
         &components.final_check.check,
         &trace,
     );
+    assert_component_named("shared.range13", &components.range13, &trace);
     assert_component_named("hinted_mul.check", &components.hinted_mul.check, &trace);
-    assert_component_named("hinted_mul.range13", &components.hinted_mul.range13, &trace);
     assert_component_named(
         "hinted_mul.signed_h",
         &components.hinted_mul.signed_h,
@@ -2584,11 +2625,13 @@ fn assert_scalar_mod_mul_components_named(
         &components.reduction_digits,
         trace,
     );
-    assert_component_named(
-        &format!("scalar_setup_mod_mul_{index}.range13"),
-        &components.range13,
-        trace,
-    );
+    if let Some(range13) = &components.range13 {
+        assert_component_named(
+            &format!("scalar_setup_mod_mul_{index}.range13"),
+            range13,
+            trace,
+        );
+    }
     assert_component_named(
         &format!("scalar_setup_mod_mul_{index}.signed_carry"),
         &components.signed_carry,
@@ -2768,8 +2811,8 @@ fn current_p256_air_shape_diagnostic() {
         stwo::core::air::Component::trace_log_degree_bounds(&components.hinted_mul.check),
     );
     print_component_shape(
-        "hinted_mul.range13",
-        stwo::core::air::Component::trace_log_degree_bounds(&components.hinted_mul.range13),
+        "shared.range13",
+        stwo::core::air::Component::trace_log_degree_bounds(&components.range13),
     );
     print_component_shape(
         "hinted_mul.signed_h",
@@ -2795,15 +2838,18 @@ fn current_p256_air_shape_diagnostic() {
         wrapper_bounds(components.fake_glv_selector_air.components()),
     );
     fn mod_mul_components(slice: &ScalarModMulComponents) -> Vec<&dyn stwo::core::air::Component> {
-        vec![
+        let mut components: Vec<&dyn stwo::core::air::Component> = vec![
             &slice.canonical,
             &slice.ab_chunks,
             &slice.qn_chunks,
             &slice.accumulators,
             &slice.reduction_digits,
-            &slice.range13,
-            &slice.signed_carry,
-        ]
+        ];
+        if let Some(range13) = &slice.range13 {
+            components.push(range13);
+        }
+        components.push(&slice.signed_carry);
+        components
     }
     print_component_shape(
         "scalar_mod_mul",
@@ -2845,18 +2891,18 @@ fn print_component_shape(name: &str, bounds: TreeVec<ColumnVec<u32>>) {
 }
 
 fn scalar_mod_mul_component_bounds(components: &ScalarModMulComponents) -> TreeVec<ColumnVec<u32>> {
-    TreeVec::concat_cols(
-        [
-            components.canonical.trace_log_degree_bounds(),
-            components.ab_chunks.trace_log_degree_bounds(),
-            components.qn_chunks.trace_log_degree_bounds(),
-            components.accumulators.trace_log_degree_bounds(),
-            components.reduction_digits.trace_log_degree_bounds(),
-            components.range13.trace_log_degree_bounds(),
-            components.signed_carry.trace_log_degree_bounds(),
-        ]
-        .into_iter(),
-    )
+    let mut bounds = vec![
+        components.canonical.trace_log_degree_bounds(),
+        components.ab_chunks.trace_log_degree_bounds(),
+        components.qn_chunks.trace_log_degree_bounds(),
+        components.accumulators.trace_log_degree_bounds(),
+        components.reduction_digits.trace_log_degree_bounds(),
+    ];
+    if let Some(range13) = &components.range13 {
+        bounds.push(range13.trace_log_degree_bounds());
+    }
+    bounds.push(components.signed_carry.trace_log_degree_bounds());
+    TreeVec::concat_cols(bounds.into_iter())
 }
 
 #[test]

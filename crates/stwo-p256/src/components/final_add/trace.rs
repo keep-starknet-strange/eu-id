@@ -1156,16 +1156,30 @@ pub fn gen_final_add_base_trace(
     gen_final_add_base_trace_with_signed_carry_provider(claim, log_sizes, true)
 }
 
-pub(crate) fn gen_final_add_base_trace_without_signed_carry_provider(
+pub(crate) fn gen_final_add_base_trace_without_range13_and_signed_carry_provider(
     claim: &FinalAddClaim,
     log_sizes: FinalAddLogSizes,
 ) -> Result<Vec<M31ColumnEval>, FinalAddError> {
-    gen_final_add_base_trace_with_signed_carry_provider(claim, log_sizes, false)
+    gen_final_add_base_trace_with_range_providers(claim, log_sizes, false, false)
 }
 
 fn gen_final_add_base_trace_with_signed_carry_provider(
     claim: &FinalAddClaim,
     log_sizes: FinalAddLogSizes,
+    include_signed_carry_provider: bool,
+) -> Result<Vec<M31ColumnEval>, FinalAddError> {
+    gen_final_add_base_trace_with_range_providers(
+        claim,
+        log_sizes,
+        true,
+        include_signed_carry_provider,
+    )
+}
+
+fn gen_final_add_base_trace_with_range_providers(
+    claim: &FinalAddClaim,
+    log_sizes: FinalAddLogSizes,
+    include_range13_provider: bool,
     include_signed_carry_provider: bool,
 ) -> Result<Vec<M31ColumnEval>, FinalAddError> {
     let mut columns = Vec::new();
@@ -1180,8 +1194,10 @@ fn gen_final_add_base_trace_with_signed_carry_provider(
     columns.extend(crate::components::gamma_digest::gen_gamma_tall_base_trace(
         &gamma_signed_instance,
     ));
-    let range13 = RangeCheckClaim::new(RANGE13_BITS);
-    columns.push(range13.gen_multiplicity_trace(final_add_range13_uses(claim)));
+    if include_range13_provider {
+        let range13 = RangeCheckClaim::new(RANGE13_BITS);
+        columns.push(range13.gen_multiplicity_trace(final_add_range13_uses(claim)));
+    }
     if include_signed_carry_provider {
         let signed_carry = final_add_signed_carry_claim();
         columns.push(signed_carry.gen_multiplicity_trace(final_add_signed_carry_uses(claim)?));

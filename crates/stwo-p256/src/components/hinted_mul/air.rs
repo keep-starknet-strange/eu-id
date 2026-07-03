@@ -553,9 +553,7 @@ impl HintedMulEval {
 /// bound).
 pub struct HintedMulSliceComponents {
     pub check: HintedMulComponent,
-    pub gamma_range13: GammaTallComponent,
-    pub gamma_signed: GammaTallComponent,
-    pub range13: FrameworkComponent<RangeCheckEval>,
+    pub range13: Option<FrameworkComponent<RangeCheckEval>>,
     pub signed_h: FrameworkComponent<SignedCarryRangeEval>,
     pub signed_formula: FrameworkComponent<SignedCarryRangeEval>,
 }
@@ -568,8 +566,27 @@ impl HintedMulSliceComponents {
         challenge: &HintedMulChallenge,
         relations: &HintedMulRelations,
     ) -> Self {
-        let [gamma_range13_layout, gamma_signed_layout] =
-            hinted_mul_gamma_layouts(claim.rows as usize);
+        Self::new_inner(allocator, log_size, claimed_sums, challenge, relations, true)
+    }
+
+    pub(crate) fn new_without_range13_provider(
+        allocator: &mut TraceLocationAllocator,
+        log_size: u32,
+        claimed_sums: &HintedMulSliceClaimedSums,
+        challenge: &HintedMulChallenge,
+        relations: &HintedMulRelations,
+    ) -> Self {
+        Self::new_inner(allocator, log_size, claimed_sums, challenge, relations, false)
+    }
+
+    fn new_inner(
+        allocator: &mut TraceLocationAllocator,
+        log_size: u32,
+        claimed_sums: &HintedMulSliceClaimedSums,
+        challenge: &HintedMulChallenge,
+        relations: &HintedMulRelations,
+        include_range13_provider: bool,
+    ) -> Self {
         Self {
             check: HintedMulComponent::new(
                 allocator,
@@ -584,31 +601,11 @@ impl HintedMulSliceComponents {
                 },
                 claimed_sums.check,
             ),
-            gamma_range13: GammaTallComponent::new(
-                allocator,
-                GammaTallEval {
-                    layout: gamma_range13_layout,
-                    challenge: relations.gamma_challenge.clone(),
-                    digest: relations.gamma_digest.clone(),
-                    range: relations.range13.clone(),
-                },
-                claimed_sums.gamma_range13.claimed_sum,
-            ),
-            gamma_signed: GammaTallComponent::new(
-                allocator,
-                GammaTallEval {
-                    layout: gamma_signed_layout,
-                    challenge: relations.gamma_challenge.clone(),
-                    digest: relations.gamma_digest.clone(),
-                    range: relations.signed_h.clone(),
-                },
-                claimed_sums.gamma_signed.claimed_sum,
-            ),
-            range13: FrameworkComponent::new(
+            range13: include_range13_provider.then(|| FrameworkComponent::new(
                 allocator,
                 RangeCheckEval::new(relations.range13.clone(), RANGE13_BITS),
                 claimed_sums.range13,
-            ),
+            )),
             signed_h: FrameworkComponent::new(
                 allocator,
                 SignedCarryRangeEval::new(
@@ -631,21 +628,23 @@ impl HintedMulSliceComponents {
     }
 
     pub fn component_provers(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
-        vec![
-            &self.check,
-            &self.range13,
-            &self.signed_h,
-            &self.signed_formula,
-        ]
+        let mut components: Vec<&dyn ComponentProver<SimdBackend>> = vec![&self.check];
+        if let Some(range13) = &self.range13 {
+            components.push(range13);
+        }
+        components.push(&self.signed_h);
+        components.push(&self.signed_formula);
+        components
     }
 
     pub fn components(&self) -> Vec<&dyn stwo::core::air::Component> {
-        vec![
-            &self.check,
-            &self.range13,
-            &self.signed_h,
-            &self.signed_formula,
-        ]
+        let mut components: Vec<&dyn stwo::core::air::Component> = vec![&self.check];
+        if let Some(range13) = &self.range13 {
+            components.push(range13);
+        }
+        components.push(&self.signed_h);
+        components.push(&self.signed_formula);
+        components
     }
 }
 

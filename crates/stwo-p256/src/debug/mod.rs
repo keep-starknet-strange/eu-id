@@ -132,7 +132,9 @@ fn assert_scalar_components(trace: TreeVec<Vec<&Vec<M31>>>, components: &ScalarM
     assert_component(&components.reduction_digits, &trace);
 
     println!("range13");
-    assert_component(&components.range13, &trace);
+    if let Some(range13) = &components.range13 {
+        assert_component(range13, &trace);
+    }
 
     println!("signed_carry");
     assert_component(&components.signed_carry, &trace);

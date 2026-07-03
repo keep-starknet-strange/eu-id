@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
-use stwo::core::channel::Channel;
+use stwo::core::{
+    channel::Channel,
+    fields::{m31::M31, qm31::SecureField},
+};
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::TraceLocationAllocator;
 
@@ -77,7 +80,7 @@ pub(crate) struct ScalarModMulComponents {
     pub(crate) qn_chunks: QnProductChunkComponent,
     pub(crate) accumulators: ProductDigitAccumulatorComponent,
     pub(crate) reduction_digits: ScalarReductionDigitComponent,
-    pub(crate) range13: RangeCheckComponent,
+    pub(crate) range13: Option<RangeCheckComponent>,
     pub(crate) signed_carry: SignedCarryRangeComponent,
 }
 
@@ -88,6 +91,41 @@ impl ScalarModMulComponents {
         interaction_claim: &ScalarModMulProofSliceInteractionClaim,
         lookup_claims: &LookupProviderClaims,
         relations: &ScalarModMulLookupRelations,
+    ) -> Self {
+        Self::new_inner(
+            allocator,
+            claim,
+            interaction_claim,
+            lookup_claims,
+            relations,
+            true,
+        )
+    }
+
+    pub(crate) fn new_without_range13_provider(
+        allocator: &mut TraceLocationAllocator,
+        claim: &ScalarModMulClaim,
+        interaction_claim: &ScalarModMulProofSliceInteractionClaim,
+        lookup_claims: &LookupProviderClaims,
+        relations: &ScalarModMulLookupRelations,
+    ) -> Self {
+        Self::new_inner(
+            allocator,
+            claim,
+            interaction_claim,
+            lookup_claims,
+            relations,
+            false,
+        )
+    }
+
+    fn new_inner(
+        allocator: &mut TraceLocationAllocator,
+        claim: &ScalarModMulClaim,
+        interaction_claim: &ScalarModMulProofSliceInteractionClaim,
+        lookup_claims: &LookupProviderClaims,
+        relations: &ScalarModMulLookupRelations,
+        include_range13_provider: bool,
     ) -> Self {
         let scalar_relations = relations.scalar_mod_mul();
         Self {
@@ -132,11 +170,11 @@ impl ScalarModMulComponents {
                 },
                 interaction_claim.scalar_mod_mul.reduction_digits,
             ),
-            range13: RangeCheckComponent::new(
+            range13: include_range13_provider.then(|| RangeCheckComponent::new(
                 allocator,
                 RangeCheckEval::new(relations.range13.clone(), lookup_claims.range13.log_size),
                 interaction_claim.range13.claimed_sum,
-            ),
+            )),
             signed_carry: SignedCarryRangeComponent::new(
                 allocator,
                 SignedCarryRangeEval::new(
@@ -225,9 +263,29 @@ pub(crate) fn gen_preprocessed_trace(
         .collect()
 }
 
+#[cfg(test)]
 pub(crate) fn gen_base_trace(
     rows: &ScalarModMulMergedRows,
     lookup_claims: &LookupProviderClaims,
+) -> Vec<M31ColumnEval> {
+    gen_base_trace_inner(rows, lookup_claims, true)
+}
+
+pub(crate) fn gen_base_trace_without_range13_provider(
+    rows: &ScalarModMulMergedRows,
+    lookup_claims: &LookupProviderClaims,
+) -> Vec<M31ColumnEval> {
+    gen_base_trace_inner(rows, lookup_claims, false)
+}
+
+pub(crate) fn range13_uses(rows: &ScalarModMulMergedRows) -> Vec<M31> {
+    ScalarModMulLookupUses::from_rows(rows).range13
+}
+
+fn gen_base_trace_inner(
+    rows: &ScalarModMulMergedRows,
+    lookup_claims: &LookupProviderClaims,
+    include_range13_provider: bool,
 ) -> Vec<M31ColumnEval> {
     let family_traces = ScalarModMulFamilyTraces::from_rows(rows).to_circle_evaluations();
     let lookup_traces =
@@ -239,16 +297,38 @@ pub(crate) fn gen_base_trace(
     trace.extend(family_traces.qn_chunks);
     trace.extend(family_traces.accumulators);
     trace.extend(family_traces.reduction_digits);
-    trace.push(lookup_traces.range13_multiplicity);
+    if include_range13_provider {
+        trace.push(lookup_traces.range13_multiplicity);
+    }
     trace.push(lookup_traces.signed_carry_multiplicity);
     trace
 }
 
+#[cfg(test)]
 pub(crate) fn gen_interaction_trace(
     rows: &ScalarModMulMergedRows,
     claim: &ScalarModMulClaim,
     lookup_claims: &LookupProviderClaims,
     relations: &ScalarModMulLookupRelations,
+) -> (Vec<M31ColumnEval>, ScalarModMulProofSliceInteractionClaim) {
+    gen_interaction_trace_inner(rows, claim, lookup_claims, relations, true)
+}
+
+pub(crate) fn gen_interaction_trace_without_range13_provider(
+    rows: &ScalarModMulMergedRows,
+    claim: &ScalarModMulClaim,
+    lookup_claims: &LookupProviderClaims,
+    relations: &ScalarModMulLookupRelations,
+) -> (Vec<M31ColumnEval>, ScalarModMulProofSliceInteractionClaim) {
+    gen_interaction_trace_inner(rows, claim, lookup_claims, relations, false)
+}
+
+fn gen_interaction_trace_inner(
+    rows: &ScalarModMulMergedRows,
+    claim: &ScalarModMulClaim,
+    lookup_claims: &LookupProviderClaims,
+    relations: &ScalarModMulLookupRelations,
+    include_range13_provider: bool,
 ) -> (Vec<M31ColumnEval>, ScalarModMulProofSliceInteractionClaim) {
     let scalar_relations = relations.scalar_mod_mul();
     let (scalar_trace, scalar_claim) = ScalarModMulInteractionTraces::from_rows(
@@ -258,11 +338,20 @@ pub(crate) fn gen_interaction_trace(
     );
     let lookup_traces =
         LookupProviderTraces::from_uses(lookup_claims, ScalarModMulLookupUses::from_rows(rows));
-    let (range13_trace, range13_claim) = RangeCheckInteractionClaim::gen_interaction_trace(
-        &lookup_traces.range13_multiplicity,
-        &lookup_traces.range13_value,
-        &relations.range13,
-    );
+    let (range13_trace, range13_claim) = if include_range13_provider {
+        RangeCheckInteractionClaim::gen_interaction_trace(
+            &lookup_traces.range13_multiplicity,
+            &lookup_traces.range13_value,
+            &relations.range13,
+        )
+    } else {
+        (
+            Vec::new(),
+            RangeCheckInteractionClaim {
+                claimed_sum: SecureField::from(M31::from_u32_unchecked(0)),
+            },
+        )
+    };
     let (signed_carry_trace, signed_carry_claim) =
         RangeCheckInteractionClaim::gen_interaction_trace(
             &lookup_traces.signed_carry_multiplicity,

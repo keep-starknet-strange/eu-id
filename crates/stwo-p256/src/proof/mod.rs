@@ -22,6 +22,9 @@ use stwo_constraint_framework::{
 };
 
 use crate::components::final_add::final_add_gamma_max_padded_values;
+use crate::components::final_add::trace::{
+    final_add_range13_uses, gen_final_add_base_trace_without_range13_and_signed_carry_provider,
+};
 use crate::components::gamma_digest::{GammaChallenge, GammaDigestRelation};
 use crate::components::hinted_mul::air::{
     gen_hinted_mul_slice_preprocessed_trace, hinted_mul_signed_table_claim, HintedMulChallenge,
@@ -84,8 +87,7 @@ use crate::fake_glv_prepared_point_source::{
 };
 use crate::final_add_air::{
     final_add_preprocessed_columns, final_add_signed_carry_uses,
-    gen_final_add_base_trace_without_signed_carry_provider,
-    gen_final_add_interaction_trace_without_signed_carry_provider, FinalAddClaim,
+    gen_final_add_interaction_trace_without_range13_and_signed_carry_provider, FinalAddClaim,
     FinalAddComponents, FinalAddError, FinalAddInteractionClaim, FinalAddOutputRelation,
     FinalAddProofClaim, FinalAddRelations, FinalAddSignRelation,
 };
@@ -122,9 +124,10 @@ use crate::public_inputs::{
 };
 use crate::public_key_check::{PublicKeyOnCurveClaim, PublicKeyOnCurveError};
 use crate::public_key_curve_air::{
-    gen_slice_base_trace_without_signed_carry_provider as gen_public_key_on_curve_base_trace_without_signed_carry_provider,
-    gen_slice_interaction_trace_without_signed_carry_provider as gen_public_key_on_curve_interaction_trace_without_signed_carry_provider,
+    gen_slice_base_trace_without_range13_and_signed_carry_provider as gen_public_key_on_curve_base_trace_without_range13_and_signed_carry_provider,
+    gen_slice_interaction_trace_without_range13_and_signed_carry_provider as gen_public_key_on_curve_interaction_trace_without_range13_and_signed_carry_provider,
     gen_slice_preprocessed_trace as gen_public_key_on_curve_preprocessed_trace,
+    slice_range13_uses as public_key_on_curve_range13_uses,
     slice_signed_carry_uses as public_key_on_curve_signed_carry_uses, PublicKeyCurveSliceClaim,
     PublicKeyCurveSliceComponents, PublicKeyCurveSliceError, PublicKeyCurveSliceInteractionClaim,
     PublicKeyCurveSliceProofClaim, PublicKeyCurveSliceRelations, PublicKeyPointRelation,
@@ -162,10 +165,11 @@ use crate::scalar::fake_glv_signed_selector_operand::{
     FakeGlvSignedSelectorOperandRelation,
 };
 use crate::scalar::scalar_mod_mul::claim::{
-    gen_base_trace as gen_scalar_mod_mul_base_trace,
-    gen_interaction_trace as gen_scalar_mod_mul_interaction_trace,
+    gen_base_trace_without_range13_provider as gen_scalar_mod_mul_base_trace_without_range13_provider,
+    gen_interaction_trace_without_range13_provider as gen_scalar_mod_mul_interaction_trace_without_range13_provider,
     gen_preprocessed_trace as gen_scalar_mod_mul_preprocessed_trace,
-    preprocessed_column_ids as scalar_mod_mul_preprocessed_column_ids, ScalarModMulComponents,
+    preprocessed_column_ids as scalar_mod_mul_preprocessed_column_ids,
+    range13_uses as scalar_mod_mul_range13_uses, ScalarModMulComponents,
 };
 use crate::scalar::scalar_mod_mul::columns::M31ColumnEval;
 use crate::scalar::scalar_mod_mul::interaction_claim::{
@@ -177,9 +181,11 @@ use crate::scalar::scalar_mod_mul::{
     ScalarModMulClaim, ScalarModMulMergedRows, ScalarModMulTraceError, ScalarModMulTraceRows,
 };
 use crate::scalar::setup_air::{
-    gen_scalar_setup_air_base_trace, gen_scalar_setup_air_interaction_trace,
-    gen_scalar_setup_air_lookup_provider_base_trace, gen_scalar_setup_air_preprocessed_trace,
-    scalar_setup_air_preprocessed_column_ids, ScalarSetupAirComponents,
+    gen_scalar_setup_air_base_trace,
+    gen_scalar_setup_air_interaction_trace_without_range13_provider,
+    gen_scalar_setup_air_lookup_provider_base_trace_without_range13_provider,
+    gen_scalar_setup_air_preprocessed_trace, scalar_setup_air_preprocessed_column_ids,
+    scalar_setup_range13_uses_from_base, ScalarSetupAirComponents,
     ScalarSetupAirInteractionClaim, ScalarSetupAirProofClaim, ScalarSetupAirRelations,
     ScalarSetupClaim, ScalarSetupClaimError, ScalarSetupOutputRelation,
 };
@@ -717,6 +723,7 @@ pub struct P256CurrentAirInteractionClaim {
     pub fake_glv_prepared_point_source: FakeGlvPreparedPointSourceInteractionClaim,
     pub prepared_point_range7: RangeCheckInteractionClaim,
     pub final_check: FinalCheckAirInteractionClaim,
+    pub range13: RangeCheckInteractionClaim,
     pub public_key_on_curve: PublicKeyCurveSliceInteractionClaim,
     pub projective_signed_carry: RangeCheckInteractionClaim,
     pub hinted_mul: HintedMulProofInteractionClaim,
@@ -746,6 +753,9 @@ impl P256CurrentAirInteractionClaim {
                 claimed_sum: zero(),
             },
             final_check: FinalCheckAirInteractionClaim::zero(),
+            range13: RangeCheckInteractionClaim {
+                claimed_sum: zero(),
+            },
             public_key_on_curve: PublicKeyCurveSliceInteractionClaim::zero_claim(),
             projective_signed_carry: RangeCheckInteractionClaim {
                 claimed_sum: zero(),
@@ -777,6 +787,7 @@ impl P256CurrentAirInteractionClaim {
         self.fake_glv_prepared_point_source.mix_into(channel);
         self.prepared_point_range7.mix_into(channel);
         self.final_check.mix_into(channel);
+        self.range13.mix_into(channel);
         self.public_key_on_curve.mix_into_monolithic(channel);
         self.projective_signed_carry.mix_into(channel);
         self.hinted_mul.mix_into(channel);
@@ -807,6 +818,7 @@ impl P256CurrentAirInteractionClaim {
             + self.fake_glv_prepared_point_source.component_claimed_sum()
             + self.prepared_point_range7.claimed_sum
             + self.final_check.claimed_sum
+            + self.range13.claimed_sum
             + self.public_key_on_curve.total()
             + self.projective_signed_carry.claimed_sum
             + self.hinted_mul.total()
@@ -886,6 +898,7 @@ impl P256CurrentAirInteractionClaim {
                 "ProjectiveSignedCarryProvider",
                 self.projective_signed_carry.claimed_sum,
             ),
+            ("Range13Provider", self.range13.claimed_sum),
             (
                 "FakeGlvPreparedPointSourceProvider",
                 self.fake_glv_prepared_point_source.provider.claimed_sum,
@@ -997,6 +1010,7 @@ struct P256CurrentAirRelations {
     cert_scalar_input: CertScalarInputRelation,
     fake_glv_scalar: FakeGlvScalarRelation,
     scalar_mod_mul: ScalarModMulLookupRelations,
+    range13: RangeCheckRelation,
     scalar_setup: ScalarSetupAirRelations,
     prepared_table: PreparedTableEcRowRelation,
     /// Binds prepared-table P-cells to `cert.base` (full table pinning).
@@ -1056,13 +1070,14 @@ impl P256CurrentAirRelations {
         let cert_scalar_input = CertScalarInputRelation::dummy();
         let fake_glv_scalar = FakeGlvScalarRelation::dummy();
         let scalar_mod_mul = ScalarModMulLookupRelations::dummy();
+        let range13 = RangeCheckRelation::dummy();
         let public_key_point = PublicKeyPointRelation::dummy();
         let projective_signed_carry = RangeCheckRelation::dummy();
         let scalar_setup = ScalarSetupAirRelations {
             public_inputs: public_inputs.clone(),
             output: scalar_setup_output.clone(),
             scalar_mod_mul: scalar_mod_mul.clone(),
-            range13: RangeCheckRelation::dummy(),
+            range13: range13.clone(),
             range9: RangeCheckRelation::dummy(),
             signed_carry: RangeCheckRelation::dummy(),
             public_key_point: public_key_point.clone(),
@@ -1073,6 +1088,7 @@ impl P256CurrentAirRelations {
             cert_scalar_input,
             fake_glv_scalar,
             scalar_mod_mul,
+            range13: range13.clone(),
             scalar_setup,
             prepared_table: PreparedTableEcRowRelation::dummy(),
             cert_base: CertBaseRelation::dummy(),
@@ -1090,6 +1106,7 @@ impl P256CurrentAirRelations {
             public_key_on_curve: PublicKeyCurveSliceRelations::dummy_with_point(
                 public_key_point,
                 ProjectiveRcbMulComponentRelations::dummy().mul_result,
+                range13.clone(),
                 projective_signed_carry.clone(),
                 GammaDigestRelation::dummy(),
                 GammaChallenge::from_gamma(
@@ -1098,7 +1115,10 @@ impl P256CurrentAirRelations {
                 ),
             ),
             projective_signed_carry: projective_signed_carry.clone(),
-            projective_rcb_air: ProjectiveRcbMulComponentRelations::dummy(),
+            projective_rcb_air: ProjectiveRcbMulComponentRelations {
+                range13: range13.clone(),
+                mul_result: ProjectiveRcbMulComponentRelations::dummy().mul_result,
+            },
             hinted_signed_h: RangeCheckRelation::dummy(),
             hinted_signed_formula: RangeCheckRelation::dummy(),
             hinted_challenge: HintedMulChallenge::from_z(SecureField::from(
@@ -1109,7 +1129,7 @@ impl P256CurrentAirRelations {
                 // SHARED with the hinted-mul provider relation above (dummy
                 // instances are value-identical, mirroring the draw path).
                 mul_result: ProjectiveRcbMulComponentRelations::dummy().mul_result,
-                range13: RangeCheckRelation::dummy(),
+                range13,
                 signed_carry: projective_signed_carry,
                 hint: FinalCheckHintRelation::dummy(),
                 output: FinalAddOutputRelation::dummy(),
@@ -1126,17 +1146,19 @@ impl P256CurrentAirRelations {
 
     fn draw(channel: &mut impl Channel) -> Self {
         let projective_rcb_air_relations = ProjectiveRcbMulComponentRelations::draw(channel);
+        let range13 = projective_rcb_air_relations.range13.clone();
         let public_inputs = PublicEcdsaInstanceRelation::draw(channel);
         let scalar_setup_output = ScalarSetupOutputRelation::draw(channel);
         let cert_scalar_input = CertScalarInputRelation::draw(channel);
         let fake_glv_scalar = FakeGlvScalarRelation::draw(channel);
-        let scalar_mod_mul = ScalarModMulLookupRelations::draw(channel);
+        let mut scalar_mod_mul = ScalarModMulLookupRelations::draw(channel);
+        scalar_mod_mul.range13 = range13.clone();
         let public_key_point = PublicKeyPointRelation::draw(channel);
         let scalar_setup = ScalarSetupAirRelations {
             public_inputs: public_inputs.clone(),
             output: scalar_setup_output.clone(),
             scalar_mod_mul: scalar_mod_mul.clone(),
-            range13: RangeCheckRelation::draw(channel),
+            range13: range13.clone(),
             range9: RangeCheckRelation::draw(channel),
             signed_carry: RangeCheckRelation::draw(channel),
             public_key_point: public_key_point.clone(),
@@ -1152,6 +1174,7 @@ impl P256CurrentAirRelations {
             cert_scalar_input,
             fake_glv_scalar,
             scalar_mod_mul,
+            range13: range13.clone(),
             scalar_setup,
             prepared_table: PreparedTableEcRowRelation::draw(channel),
             cert_base: CertBaseRelation::draw(channel),
@@ -1170,6 +1193,7 @@ impl P256CurrentAirRelations {
                 channel,
                 public_key_point,
                 projective_rcb_air_relations.mul_result.clone(),
+                range13.clone(),
                 projective_signed_carry.clone(),
                 gamma_digest.clone(),
                 gamma_challenge.clone(),
@@ -1183,7 +1207,7 @@ impl P256CurrentAirRelations {
                 // SHARED with the hinted-mul provider: final-add's muls are
                 // hinted rows, so the consumer must use the same instance.
                 mul_result: projective_rcb_air_relations.mul_result.clone(),
-                range13: RangeCheckRelation::draw(channel),
+                range13,
                 signed_carry: projective_signed_carry,
                 // Shared with the prepared-table provider above.
                 hint: final_check_hint,
@@ -1226,6 +1250,7 @@ struct P256CurrentAirComponents {
     fake_glv_prepared_point_source: FakeGlvPreparedPointSourceComponents,
     prepared_point_range7: RangeCheckComponent,
     final_check: FinalCheckAirComponents,
+    range13: RangeCheckComponent,
     public_key_on_curve: PublicKeyCurveSliceComponents,
     projective_signed_carry: SignedCarryRangeComponent,
     hinted_mul: HintedMulSliceComponents,
@@ -1241,7 +1266,7 @@ impl P256CurrentAirComponents {
     ) -> Self {
         let scalar_lookup_claims = LookupProviderClaims::scalar_mod_mul();
         Self {
-            scalar_setup: ScalarSetupAirComponents::new(
+            scalar_setup: ScalarSetupAirComponents::new_without_range13_provider(
                 allocator,
                 claim.scalar_setup,
                 &interaction_claim.scalar_setup,
@@ -1270,7 +1295,7 @@ impl P256CurrentAirComponents {
                 &interaction_claim.fake_glv_selector_air,
                 &relations.fake_glv_scalar,
             ),
-            scalar_mod_muls: ScalarModMulComponents::new(
+            scalar_mod_muls: ScalarModMulComponents::new_without_range13_provider(
                 allocator,
                 &claim.scalar_mod_muls,
                 &interaction_claim.scalar_mod_muls,
@@ -1369,7 +1394,13 @@ impl P256CurrentAirComponents {
                     final_add_output: &relations.final_add.output,
                 },
             ),
-            public_key_on_curve: PublicKeyCurveSliceComponents::new_without_signed_carry_provider(
+            range13: RangeCheckComponent::new(
+                allocator,
+                RangeCheckEval::new(relations.range13.clone(), RANGE13_BITS),
+                interaction_claim.range13.claimed_sum,
+            ),
+            public_key_on_curve:
+                PublicKeyCurveSliceComponents::new_without_range13_and_signed_carry_provider(
                 allocator,
                 claim.public_key_on_curve.log_sizes(),
                 &interaction_claim.public_key_on_curve,
@@ -1385,7 +1416,7 @@ impl P256CurrentAirComponents {
                 ),
                 interaction_claim.projective_signed_carry.claimed_sum,
             ),
-            hinted_mul: HintedMulSliceComponents::new(
+            hinted_mul: HintedMulSliceComponents::new_without_range13_provider(
                 allocator,
                 claim.hinted_mul,
                 &HintedMulSliceClaimedSums {
@@ -1405,7 +1436,7 @@ impl P256CurrentAirComponents {
                     signed_formula: relations.hinted_signed_formula.clone(),
                 },
             ),
-            final_add: FinalAddComponents::new_without_signed_carry_provider(
+            final_add: FinalAddComponents::new_without_range13_and_signed_carry_provider(
                 allocator,
                 claim.final_add.log_sizes(),
                 &interaction_claim.final_add,
@@ -1425,7 +1456,9 @@ impl P256CurrentAirComponents {
         components.push(&self.scalar_mod_muls.qn_chunks as &dyn Component);
         components.push(&self.scalar_mod_muls.accumulators as &dyn Component);
         components.push(&self.scalar_mod_muls.reduction_digits as &dyn Component);
-        components.push(&self.scalar_mod_muls.range13 as &dyn Component);
+        if let Some(range13) = &self.scalar_mod_muls.range13 {
+            components.push(range13 as &dyn Component);
+        }
         components.push(&self.scalar_mod_muls.signed_carry as &dyn Component);
         components.extend(self.prepared_table_projective_source.components());
         components.extend(self.fake_glv_projective_source.components());
@@ -1438,6 +1471,7 @@ impl P256CurrentAirComponents {
         components.extend(self.fake_glv_prepared_point_source.components());
         components.push(&self.prepared_point_range7 as &dyn Component);
         components.extend(self.final_check.components());
+        components.push(&self.range13 as &dyn Component);
         components.extend(self.public_key_on_curve.components());
         components.push(&self.projective_signed_carry as &dyn Component);
         components.extend(self.hinted_mul.components());
@@ -1457,7 +1491,9 @@ impl P256CurrentAirComponents {
         components.push(&self.scalar_mod_muls.accumulators as &dyn ComponentProver<SimdBackend>);
         components
             .push(&self.scalar_mod_muls.reduction_digits as &dyn ComponentProver<SimdBackend>);
-        components.push(&self.scalar_mod_muls.range13 as &dyn ComponentProver<SimdBackend>);
+        if let Some(range13) = &self.scalar_mod_muls.range13 {
+            components.push(range13 as &dyn ComponentProver<SimdBackend>);
+        }
         components.push(&self.scalar_mod_muls.signed_carry as &dyn ComponentProver<SimdBackend>);
         components.extend(self.prepared_table_projective_source.component_provers());
         components.extend(self.fake_glv_projective_source.component_provers());
@@ -1470,6 +1506,7 @@ impl P256CurrentAirComponents {
         components.extend(self.fake_glv_prepared_point_source.component_provers());
         components.push(&self.prepared_point_range7 as &dyn ComponentProver<SimdBackend>);
         components.extend(self.final_check.component_provers());
+        components.push(&self.range13 as &dyn ComponentProver<SimdBackend>);
         components.extend(self.public_key_on_curve.component_provers());
         components.push(&self.projective_signed_carry as &dyn ComponentProver<SimdBackend>);
         components.extend(self.hinted_mul.component_provers());
@@ -1800,16 +1837,17 @@ impl P256ProofDraft {
         // scalar_setup providers' multiplicities.
         let final_check =
             gen_final_check_air_base_trace(&self.claim.final_check, claim.final_check);
-        // Public-key-on-curve sub-graph base trace. The monolith keeps its
-        // range13 provider local but shares the projective signed-carry
-        // provider with final-add below.
+        // Public-key-on-curve sub-graph base trace. The monolith shares its
+        // range13 and projective signed-carry providers with top-level
+        // provider components.
         let public_key_slice_claim = public_key_on_curve_slice_claim(&self.claim)?;
-        let public_key_on_curve = gen_public_key_on_curve_base_trace_without_signed_carry_provider(
-            &public_key_slice_claim,
-        )?;
-        let scalar_setup_lookup_providers = gen_scalar_setup_air_lookup_provider_base_trace(
+        let public_key_on_curve =
+            gen_public_key_on_curve_base_trace_without_range13_and_signed_carry_provider(
+                &public_key_slice_claim,
+            )?;
+        let scalar_setup_lookup_providers =
+            gen_scalar_setup_air_lookup_provider_base_trace_without_range13_provider(
             &scalar_setup,
-            crate::final_check_air::final_check_range13_uses_from_base(&final_check),
             crate::final_check_air::final_check_range9_uses_from_base(&final_check),
             crate::final_check_air::final_check_signed_carry_uses_from_base(&final_check),
         );
@@ -1830,8 +1868,10 @@ impl P256ProofDraft {
         );
         let scalar_lookup_claims = LookupProviderClaims::scalar_mod_mul();
         let scalar_mod_mul_rows = merged_scalar_mod_mul_rows(&self.claim)?;
-        let scalar_mod_muls =
-            gen_scalar_mod_mul_base_trace(&scalar_mod_mul_rows, &scalar_lookup_claims);
+        let scalar_mod_muls = gen_scalar_mod_mul_base_trace_without_range13_provider(
+            &scalar_mod_mul_rows,
+            &scalar_lookup_claims,
+        );
         let prepared_table_provider = gen_prepared_table_ec_row_base_trace(
             &self.claim.prepared_table_ec_trace,
             claim.prepared_table_projective_source.log_size,
@@ -1923,12 +1963,16 @@ impl P256ProofDraft {
                     }),
             );
         let hinted_mul_base = gen_hinted_mul_base_trace(&self.claim.hinted_mul_trace);
-        let [hinted_gamma_range13_instance, hinted_gamma_signed_instance] =
-            hinted_mul_gamma_instances(&self.claim.hinted_mul_trace);
-        let hinted_gamma_range13_base = gen_gamma_tall_base_trace(&hinted_gamma_range13_instance);
-        let hinted_gamma_signed_base = gen_gamma_tall_base_trace(&hinted_gamma_signed_instance);
-        let hinted_range13_multiplicity = RangeCheckClaim::new(RANGE13_BITS)
-            .gen_multiplicity_trace(hinted_mul_range13_uses(&self.claim.hinted_mul_trace));
+        let mut range13_uses = scalar_setup_range13_uses_from_base(&scalar_setup);
+        range13_uses.extend(crate::final_check_air::final_check_range13_uses_from_base(
+            &final_check,
+        ));
+        range13_uses.extend(scalar_mod_mul_range13_uses(&scalar_mod_mul_rows));
+        range13_uses.extend(public_key_on_curve_range13_uses(&public_key_slice_claim));
+        range13_uses.extend(hinted_mul_range13_uses(&self.claim.hinted_mul_trace));
+        range13_uses.extend(final_add_range13_uses(&self.claim.final_add));
+        let range13_multiplicity =
+            RangeCheckClaim::new(RANGE13_BITS).gen_multiplicity_trace(range13_uses);
         let hinted_signed_h_multiplicity = hinted_mul_signed_table_claim()
             .gen_multiplicity_trace(hinted_mul_signed_uses(&self.claim.hinted_mul_trace));
         // Phase-2 formula signed-carry provider multiplicity (projective bound).
@@ -1943,7 +1987,7 @@ impl P256ProofDraft {
         projective_signed_carry_uses.extend(final_add_signed_carry_uses(&self.claim.final_add)?);
         let projective_signed_carry_multiplicity = projective_rcb_signed_carry_claim()
             .gen_multiplicity_trace(projective_signed_carry_uses);
-        let final_add = gen_final_add_base_trace_without_signed_carry_provider(
+        let final_add = gen_final_add_base_trace_without_range13_and_signed_carry_provider(
             &self.claim.final_add,
             claim.final_add.log_sizes(),
         )?;
@@ -1973,12 +2017,10 @@ impl P256ProofDraft {
         columns.extend(prepared_point_consumer.clone());
         columns.push(prepared_point_range7_multiplicity.clone());
         columns.extend(final_check.clone());
+        columns.push(range13_multiplicity.clone());
         columns.extend(public_key_on_curve.clone());
         columns.push(projective_signed_carry_multiplicity.clone());
         columns.extend(hinted_mul_base.clone());
-        columns.extend(hinted_gamma_range13_base.clone());
-        columns.extend(hinted_gamma_signed_base.clone());
-        columns.push(hinted_range13_multiplicity.clone());
         columns.push(hinted_signed_h_multiplicity.clone());
         columns.push(hinted_signed_formula_multiplicity.clone());
         columns.extend(final_add);
@@ -2006,10 +2048,10 @@ impl P256ProofDraft {
             prepared_point_consumer,
             prepared_point_range7_multiplicity,
             final_check,
+            range13_multiplicity,
             public_key_slice_claim,
             projective_signed_carry_multiplicity,
             hinted_mul_base,
-            hinted_range13_multiplicity,
             hinted_signed_h_multiplicity,
             hinted_signed_formula_multiplicity,
         })
@@ -2020,10 +2062,10 @@ impl P256ProofDraft {
         base: &P256CurrentAirBaseTrace,
         relations: &P256CurrentAirRelations,
     ) -> Result<(ColumnVec<M31ColumnEval>, P256CurrentAirInteractionClaim), P256ProofError> {
-        let (scalar_setup_interaction, scalar_setup_claim) = gen_scalar_setup_air_interaction_trace(
+        let (scalar_setup_interaction, scalar_setup_claim) =
+            gen_scalar_setup_air_interaction_trace_without_range13_provider(
             &base.scalar_setup,
             &relations.scalar_setup,
-            crate::final_check_air::final_check_range13_uses_from_base(&base.final_check),
             crate::final_check_air::final_check_range9_uses_from_base(&base.final_check),
             crate::final_check_air::final_check_signed_carry_uses_from_base(&base.final_check),
         );
@@ -2052,7 +2094,7 @@ impl P256ProofDraft {
         let scalar_mod_mul_claim =
             ScalarModMulClaim::from_rows_with_external_limb_links(&scalar_mod_mul_rows);
         let (scalar_mod_mul_interaction, scalar_mod_mul_interaction_claim) =
-            gen_scalar_mod_mul_interaction_trace(
+            gen_scalar_mod_mul_interaction_trace_without_range13_provider(
                 &scalar_mod_mul_rows,
                 &scalar_mod_mul_claim,
                 &scalar_lookup_claims,
@@ -2166,8 +2208,14 @@ impl P256ProofDraft {
                 final_add_output: &relations.final_add.output,
             },
         );
+        let (range13_interaction, range13_claim) =
+            RangeCheckInteractionClaim::gen_interaction_trace(
+                &base.range13_multiplicity,
+                &RangeCheckClaim::new(RANGE13_BITS).gen_preprocessed_column(),
+                &relations.range13,
+            );
         let (public_key_on_curve_interaction, public_key_on_curve_claim) =
-            gen_public_key_on_curve_interaction_trace_without_signed_carry_provider(
+            gen_public_key_on_curve_interaction_trace_without_range13_and_signed_carry_provider(
                 &base.public_key_slice_claim,
                 &relations.public_key_on_curve,
                 true,
@@ -2191,12 +2239,6 @@ impl P256ProofDraft {
                 signed_formula: relations.hinted_signed_formula.clone(),
             },
         );
-        let (hinted_range13_interaction, hinted_range13_provider) =
-            crate::range_checks::RangeCheckInteractionClaim::gen_interaction_trace(
-                &base.hinted_range13_multiplicity,
-                &RangeCheckClaim::new(RANGE13_BITS).gen_preprocessed_column(),
-                &relations.projective_rcb_air.range13,
-            );
         let (hinted_signed_h_interaction, hinted_signed_h_provider) =
             crate::range_checks::RangeCheckInteractionClaim::gen_interaction_trace(
                 &base.hinted_signed_h_multiplicity,
@@ -2210,7 +2252,7 @@ impl P256ProofDraft {
                 &relations.hinted_signed_formula,
             );
         let (final_add_interaction, final_add_claim) =
-            gen_final_add_interaction_trace_without_signed_carry_provider(
+            gen_final_add_interaction_trace_without_range13_and_signed_carry_provider(
                 &self.claim.final_add,
                 &relations.final_add,
                 FinalAddProofClaim::from_claim(&self.claim.final_add).log_sizes(),
@@ -2239,12 +2281,10 @@ impl P256ProofDraft {
         columns.extend(prepared_point_consumer_interaction);
         columns.extend(prepared_point_range7_interaction);
         columns.extend(final_check_interaction);
+        columns.extend(range13_interaction);
         columns.extend(public_key_on_curve_interaction);
         columns.extend(projective_signed_carry_interaction);
         columns.extend(hinted_interaction);
-        columns.extend(hinted_gamma_range13_interaction);
-        columns.extend(hinted_gamma_signed_interaction);
-        columns.extend(hinted_range13_interaction);
         columns.extend(hinted_signed_h_interaction);
         columns.extend(hinted_signed_formula_interaction);
         columns.extend(final_add_interaction);
@@ -2320,13 +2360,12 @@ impl P256ProofDraft {
                 },
                 prepared_point_range7: prepared_point_range7_claim,
                 final_check: final_check_claim,
+                range13: range13_claim,
                 public_key_on_curve: public_key_on_curve_claim,
                 projective_signed_carry: projective_signed_carry_claim,
                 hinted_mul: HintedMulProofInteractionClaim {
                     claimed_sum: hinted_claim.claimed_sum,
-                    gamma_range13: hinted_gamma_range13_claim,
-                    gamma_signed: hinted_gamma_signed_claim,
-                    range13: hinted_range13_provider.claimed_sum,
+                    range13: zero(),
                     signed_h: hinted_signed_h_provider.claimed_sum,
                     signed_formula: hinted_signed_formula_provider.claimed_sum,
                 },
@@ -2403,10 +2442,10 @@ struct P256CurrentAirBaseTrace {
     prepared_point_consumer: ColumnVec<M31ColumnEval>,
     prepared_point_range7_multiplicity: M31ColumnEval,
     final_check: ColumnVec<M31ColumnEval>,
+    range13_multiplicity: M31ColumnEval,
     public_key_slice_claim: PublicKeyCurveSliceClaim,
     projective_signed_carry_multiplicity: M31ColumnEval,
     hinted_mul_base: ColumnVec<M31ColumnEval>,
-    hinted_range13_multiplicity: M31ColumnEval,
     hinted_signed_h_multiplicity: M31ColumnEval,
     hinted_signed_formula_multiplicity: M31ColumnEval,
 }

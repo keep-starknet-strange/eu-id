@@ -225,7 +225,7 @@ pub struct FinalAddComponents {
     check: FinalAddCheckComponent,
     gamma_range13: crate::components::gamma_digest::GammaTallComponent,
     gamma_signed: crate::components::gamma_digest::GammaTallComponent,
-    range13: RangeCheckComponent,
+    range13: Option<RangeCheckComponent>,
     signed_carry: Option<SignedCarryRangeComponent>,
 }
 
@@ -242,10 +242,11 @@ impl FinalAddComponents {
             interaction_claim,
             relations,
             true,
+            true,
         )
     }
 
-    pub(crate) fn new_without_signed_carry_provider(
+    pub(crate) fn new_without_range13_and_signed_carry_provider(
         allocator: &mut TraceLocationAllocator,
         log_sizes: FinalAddLogSizes,
         interaction_claim: &FinalAddInteractionClaim,
@@ -257,6 +258,7 @@ impl FinalAddComponents {
             interaction_claim,
             relations,
             false,
+            false,
         )
     }
 
@@ -265,6 +267,7 @@ impl FinalAddComponents {
         log_sizes: FinalAddLogSizes,
         interaction_claim: &FinalAddInteractionClaim,
         relations: &FinalAddRelations,
+        include_range13_provider: bool,
         include_signed_carry_provider: bool,
     ) -> Self {
         Self {
@@ -302,11 +305,11 @@ impl FinalAddComponents {
                 },
                 interaction_claim.gamma_signed.claimed_sum,
             ),
-            range13: RangeCheckComponent::new(
+            range13: include_range13_provider.then(|| RangeCheckComponent::new(
                 allocator,
                 RangeCheckEval::new(relations.range13.clone(), RANGE13_BITS),
                 interaction_claim.range13.claimed_sum,
-            ),
+            )),
             signed_carry: include_signed_carry_provider.then(|| {
                 SignedCarryRangeComponent::new(
                     allocator,
@@ -326,8 +329,10 @@ impl FinalAddComponents {
             &self.check as &dyn Component,
             &self.gamma_range13 as &dyn Component,
             &self.gamma_signed as &dyn Component,
-            &self.range13 as &dyn Component,
         ];
+        if let Some(range13) = &self.range13 {
+            components.push(range13 as &dyn Component);
+        }
         if let Some(signed_carry) = &self.signed_carry {
             components.push(signed_carry as &dyn Component);
         }
@@ -339,8 +344,10 @@ impl FinalAddComponents {
             &self.check as &dyn ComponentProver<SimdBackend>,
             &self.gamma_range13 as &dyn ComponentProver<SimdBackend>,
             &self.gamma_signed as &dyn ComponentProver<SimdBackend>,
-            &self.range13 as &dyn ComponentProver<SimdBackend>,
         ];
+        if let Some(range13) = &self.range13 {
+            components.push(range13 as &dyn ComponentProver<SimdBackend>);
+        }
         if let Some(signed_carry) = &self.signed_carry {
             components.push(signed_carry as &dyn ComponentProver<SimdBackend>);
         }

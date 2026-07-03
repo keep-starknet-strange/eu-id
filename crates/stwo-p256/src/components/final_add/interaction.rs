@@ -72,18 +72,34 @@ pub fn gen_final_add_interaction_trace(
     gen_final_add_interaction_trace_with_signed_carry_provider(claim, relations, log_sizes, true)
 }
 
-pub(crate) fn gen_final_add_interaction_trace_without_signed_carry_provider(
+pub(crate) fn gen_final_add_interaction_trace_without_range13_and_signed_carry_provider(
     claim: &FinalAddClaim,
     relations: &FinalAddRelations,
     log_sizes: FinalAddLogSizes,
 ) -> Result<(Vec<M31ColumnEval>, FinalAddInteractionClaim), FinalAddError> {
-    gen_final_add_interaction_trace_with_signed_carry_provider(claim, relations, log_sizes, false)
+    gen_final_add_interaction_trace_with_range_providers(claim, relations, log_sizes, false, false)
 }
 
 fn gen_final_add_interaction_trace_with_signed_carry_provider(
     claim: &FinalAddClaim,
     relations: &FinalAddRelations,
     log_sizes: FinalAddLogSizes,
+    include_signed_carry_provider: bool,
+) -> Result<(Vec<M31ColumnEval>, FinalAddInteractionClaim), FinalAddError> {
+    gen_final_add_interaction_trace_with_range_providers(
+        claim,
+        relations,
+        log_sizes,
+        true,
+        include_signed_carry_provider,
+    )
+}
+
+fn gen_final_add_interaction_trace_with_range_providers(
+    claim: &FinalAddClaim,
+    relations: &FinalAddRelations,
+    log_sizes: FinalAddLogSizes,
+    include_range13_provider: bool,
     include_signed_carry_provider: bool,
 ) -> Result<(Vec<M31ColumnEval>, FinalAddInteractionClaim), FinalAddError> {
     let mut columns = Vec::new();
@@ -121,14 +137,23 @@ fn gen_final_add_interaction_trace_with_signed_carry_provider(
     columns.extend(gamma_signed_trace);
 
     // Shared range providers.
-    let range13 = RangeCheckClaim::new(RANGE13_BITS);
-    let range13_values = range13.gen_preprocessed_column();
-    let range13_multiplicity = range13.gen_multiplicity_trace(final_add_range13_uses(claim));
-    let (range13_trace, range13_claim) = RangeCheckInteractionClaim::gen_interaction_trace(
-        &range13_multiplicity,
-        &range13_values,
-        &relations.range13,
-    );
+    let (range13_trace, range13_claim) = if include_range13_provider {
+        let range13 = RangeCheckClaim::new(RANGE13_BITS);
+        let range13_values = range13.gen_preprocessed_column();
+        let range13_multiplicity = range13.gen_multiplicity_trace(final_add_range13_uses(claim));
+        RangeCheckInteractionClaim::gen_interaction_trace(
+            &range13_multiplicity,
+            &range13_values,
+            &relations.range13,
+        )
+    } else {
+        (
+            Vec::new(),
+            RangeCheckInteractionClaim {
+                claimed_sum: secure_zero(),
+            },
+        )
+    };
     columns.extend(range13_trace);
 
     let (signed_carry_trace, signed_carry_claim) = if include_signed_carry_provider {
