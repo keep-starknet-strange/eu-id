@@ -277,10 +277,16 @@ impl FrameworkEval for Sha256Eval {
             std::array::from_fn(|i| f_init[i][0].clone());
         let h_in_word =
             |j: usize| -> (E::F, E::F) { (h_in_lo[j][0].clone(), h_in_hi[j][0].clone()) };
+        let h_in_0 = h_in_word(0);
+        let h_in_1 = h_in_word(1);
+        let h_in_2 = h_in_word(2);
+        let h_in_4 = h_in_word(4);
+        let h_in_5 = h_in_word(5);
+        let h_in_6 = h_in_word(6);
         wire_round_split_pack::<E>(
             &mut eval,
             gate_r0.clone(),
-            &h_in_word(1),
+            &h_in_1,
             &b_init_now,
             &sigma0_lo_idx,
             &sigma0_hi_idx,
@@ -290,7 +296,7 @@ impl FrameworkEval for Sha256Eval {
         wire_round_split_pack::<E>(
             &mut eval,
             gate_r0.clone(),
-            &h_in_word(2),
+            &h_in_2,
             &c_init,
             &sigma0_lo_idx,
             &sigma0_hi_idx,
@@ -300,7 +306,7 @@ impl FrameworkEval for Sha256Eval {
         wire_round_split_pack::<E>(
             &mut eval,
             gate_r0.clone(),
-            &h_in_word(5),
+            &h_in_5,
             &f_init_now,
             &sigma1_lo_idx,
             &sigma1_hi_idx,
@@ -310,7 +316,7 @@ impl FrameworkEval for Sha256Eval {
         wire_round_split_pack::<E>(
             &mut eval,
             gate_r0.clone(),
-            &h_in_word(6),
+            &h_in_6,
             &g_init,
             &sigma1_lo_idx,
             &sigma1_hi_idx,
@@ -549,7 +555,7 @@ impl FrameworkEval for Sha256Eval {
         wire_round_split_pack::<E>(
             &mut eval,
             gate_r0.clone(),
-            &h_in_word(0),
+            &h_in_0,
             &a_grp,
             &sigma0_lo_idx,
             &sigma0_hi_idx,
@@ -579,7 +585,7 @@ impl FrameworkEval for Sha256Eval {
         wire_round_split_pack::<E>(
             &mut eval,
             gate_r0.clone(),
-            &h_in_word(4),
+            &h_in_4,
             &e_grp,
             &sigma1_lo_idx,
             &sigma1_hi_idx,

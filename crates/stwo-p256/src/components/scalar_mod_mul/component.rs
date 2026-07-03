@@ -136,26 +136,12 @@ impl FrameworkEval for AbProductChunkEval {
         let mut product_sum = E::F::from(M31::from_u32_unchecked(0));
         for (term_index, (lhs, rhs, product)) in terms.iter().enumerate() {
             let term_active = meta.term_active[term_index].clone();
+            let unused_gate = one::<E>() - term_active.clone();
             if SCALAR_MOD_MUL_ENABLE_AB_TERM_PRODUCT_CONSTRAINTS {
                 eval.add_constraint(product.clone() - lhs.clone() * rhs.clone());
-                constrain_unused(
-                    &mut eval,
-                    meta.active.clone(),
-                    term_active.clone(),
-                    lhs.clone(),
-                );
-                constrain_unused(
-                    &mut eval,
-                    meta.active.clone(),
-                    term_active.clone(),
-                    rhs.clone(),
-                );
-                constrain_unused(
-                    &mut eval,
-                    meta.active.clone(),
-                    term_active.clone(),
-                    product.clone(),
-                );
+                constrain_unused_with_gate(&mut eval, unused_gate.clone(), lhs.clone());
+                constrain_unused_with_gate(&mut eval, unused_gate.clone(), rhs.clone());
+                constrain_unused_with_gate(&mut eval, unused_gate.clone(), product.clone());
             }
             product_sum += product.clone();
             if SCALAR_MOD_MUL_ENABLE_AB_SCALAR_LIMB_RELATIONS {
@@ -229,38 +215,19 @@ impl FrameworkEval for QnProductChunkEval {
         let mut product_sum = E::F::from(M31::from_u32_unchecked(0));
         for (term_index, (quotient_limb, product)) in quotient_terms.iter().enumerate() {
             let term_active = meta.term_active[term_index].clone();
+            let unused_gate = one::<E>() - term_active.clone();
             let n_limb = eval.get_preprocessed_column(
                 ScalarModMulScheduleColumnIds::qn_modulus_limb(term_index),
             );
             if SCALAR_MOD_MUL_ENABLE_QN_ARITHMETIC {
                 eval.add_constraint(product.clone() - quotient_limb.clone() * n_limb);
-                constrain_unused(
-                    &mut eval,
-                    meta.active.clone(),
-                    term_active.clone(),
-                    quotient_limb.clone(),
-                );
-                constrain_unused(
-                    &mut eval,
-                    meta.active.clone(),
-                    term_active.clone(),
-                    product.clone(),
-                );
+                constrain_unused_with_gate(&mut eval, unused_gate.clone(), quotient_limb.clone());
+                constrain_unused_with_gate(&mut eval, unused_gate.clone(), product.clone());
             }
             product_sum += product.clone();
             if SCALAR_MOD_MUL_ENABLE_QN_ARITHMETIC {
-                constrain_unused(
-                    &mut eval,
-                    meta.active.clone(),
-                    term_active.clone(),
-                    quotient_limb.clone(),
-                );
-                constrain_unused(
-                    &mut eval,
-                    meta.active.clone(),
-                    term_active.clone(),
-                    product.clone(),
-                );
+                constrain_unused_with_gate(&mut eval, unused_gate.clone(), quotient_limb.clone());
+                constrain_unused_with_gate(&mut eval, unused_gate.clone(), product.clone());
             }
             if SCALAR_MOD_MUL_ENABLE_QN_RELATIONS {
                 consume_scalar_limb_dynamic(
@@ -641,7 +608,11 @@ fn finish_product_chunk_dynamic<E: EvalAtRow>(
 
 fn constrain_unused<E: EvalAtRow>(eval: &mut E, active: E::F, term_active: E::F, value: E::F) {
     let _ = active;
-    eval.add_constraint((one::<E>() - term_active) * value);
+    constrain_unused_with_gate(eval, one::<E>() - term_active, value);
+}
+
+fn constrain_unused_with_gate<E: EvalAtRow>(eval: &mut E, unused_gate: E::F, value: E::F) {
+    eval.add_constraint(unused_gate * value);
 }
 
 fn consume_scalar_limb_dynamic<E: EvalAtRow>(
@@ -1036,9 +1007,11 @@ mod tests {
             &stwo_p256_utils::scalar_arithmetic::P256_ORDER,
         )
         .expect("valid scalar mod-mul trace");
-        let rows = ScalarModMulMergedRows::new(vec![
-            ScalarModMulTraceRows::new(TEST_FORGERY_MUL_ID, &trace).expect("trace rows generate"),
-        ]);
+        let rows = ScalarModMulMergedRows::new(vec![ScalarModMulTraceRows::new(
+            TEST_FORGERY_MUL_ID,
+            &trace,
+        )
+        .expect("trace rows generate")]);
         let honest = ScalarModMulFamilyTraces::from_rows(&rows);
         let schedule = ScalarModMulFixedSchedule::from_rows(&rows);
         for column in &schedule.ab_chunks {

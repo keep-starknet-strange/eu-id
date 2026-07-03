@@ -57,8 +57,9 @@ const B_OFFS: [isize; B_OFFS_N] = [0, -1, -2, -4];
 const R_OFFS_N: usize = 13;
 const R_OFFS: [isize; R_OFFS_N] = [0, -1, -2, -3, -4, -5, -6, -7, -8, -9, -10, -11, -12];
 const OP_OFFS_N: usize = 15;
-const OP_OFFS: [isize; OP_OFFS_N] =
-    [0, -1, -2, -3, -4, -5, -6, -7, -8, -9, -10, -11, -12, -13, -14];
+const OP_OFFS: [isize; OP_OFFS_N] = [
+    0, -1, -2, -3, -4, -5, -6, -7, -8, -9, -10, -11, -12, -13, -14,
+];
 const OINF_OFFS_N: usize = 3;
 const OINF_OFFS: [isize; OINF_OFFS_N] = [0, -13, -14];
 
@@ -226,7 +227,9 @@ impl FrameworkEval for HintedMulEval {
         // boolean-constrained (deg 2, trivially satisfied by the one-hot
         // schedule and by all-zero padding).
         let is_proj: Vec<E::F> = (0..HINTED_MUL_PROJ_MUL_COLUMNS)
-            .map(|k| eval.get_preprocessed_column(hinted_mul_schedule_proj_mul_id(self.log_size, k)))
+            .map(|k| {
+                eval.get_preprocessed_column(hinted_mul_schedule_proj_mul_id(self.log_size, k))
+            })
             .collect();
         for flag in &is_proj {
             eval.add_constraint(flag.clone() * (one_ef.clone() - flag.clone()));
@@ -251,16 +254,15 @@ impl FrameworkEval for HintedMulEval {
         //   RHS:    wide + is_proj_{0,1}        = active − Σ_{k=2..14} is_proj_k
         //   RESULT: wide                        = active − Σ_{k=0..14} is_proj_k
         // All degree 1 (preprocessed columns only).
-        let proj_sum = |range: core::ops::RangeInclusive<usize>| -> E::F {
-            let mut sum = E::F::from(M31::from_u32_unchecked(0));
-            for k in range {
-                sum += is_proj[k].clone();
-            }
-            sum
-        };
-        let lhs_numerator = active.clone() - proj_sum(2..=12);
-        let rhs_numerator = active.clone() - proj_sum(2..=14);
-        let result_numerator = active.clone() - proj_sum(0..=14);
+        let mut proj_2_12 = E::F::from(M31::from_u32_unchecked(0));
+        for flag in is_proj.iter().take(13).skip(2) {
+            proj_2_12 += flag.clone();
+        }
+        let proj_13_14 = is_proj[13].clone() + is_proj[14].clone();
+        let proj_0_1 = is_proj[0].clone() + is_proj[1].clone();
+        let lhs_numerator = active.clone() - proj_2_12.clone();
+        let rhs_numerator = active.clone() - proj_2_12.clone() - proj_13_14.clone();
+        let result_numerator = active.clone() - proj_0_1 - proj_2_12 - proj_13_14;
         let result = &groups[2].1;
         for (role, limbs, numerator) in [
             (0u32, &a, lhs_numerator),
@@ -340,7 +342,16 @@ impl FrameworkEval for HintedMulEval {
         );
 
         // ---- Phase 2: per-mul_index EC-formula binding ----
-        self.evaluate_formula(&mut eval, &active, &is_proj, &a_masks, &b_masks, &r_masks, &op_masks, &oinf_masks);
+        self.evaluate_formula(
+            &mut eval,
+            &active,
+            &is_proj,
+            &a_masks,
+            &b_masks,
+            &r_masks,
+            &op_masks,
+            &oinf_masks,
+        );
 
         eval.finalize_logup_in_pairs();
         eval
@@ -373,7 +384,7 @@ impl HintedMulEval {
     ) {
         use super::formula_bind::{
             add_muxed_combo_reduction, add_muxed_equality, constant_bigint, curve_b_bigint,
-            one_bigint, term, ReductionWitness, RedTarget, Src, FORMULA_SPEC,
+            one_bigint, term, RedTarget, ReductionWitness, Src, FORMULA_SPEC,
         };
         use crate::limbs::P256EvalBigInt;
 
@@ -421,11 +432,11 @@ impl HintedMulEval {
             }
         };
 
+        let own_a: [E::F; N_LIMBS] = core::array::from_fn(|i| a_masks[i][0].clone());
+        let own_b: [E::F; N_LIMBS] = core::array::from_fn(|i| b_masks[i][0].clone());
         for (k, spec) in FORMULA_SPEC.iter().enumerate() {
             let gate = is_proj[k].clone();
             let op_k = op_masks[k].clone(); // op@−k (OP_OFFS[k] == −k).
-            let own_a: [E::F; N_LIMBS] = core::array::from_fn(|i| a_masks[i][0].clone());
-            let own_b: [E::F; N_LIMBS] = core::array::from_fn(|i| b_masks[i][0].clone());
             let slot0_target = match spec.slot0.map(|r| r.target) {
                 Some(RedTarget::OwnA) => own_a.clone(),
                 Some(RedTarget::OutVal) => out_val.clone(),
@@ -490,9 +501,7 @@ impl HintedMulEval {
                     .zip(&m_srcs)
                     .map(|(st, s)| term(st.coeff, s))
                     .collect();
-                add_muxed_combo_reduction(
-                    eval, &gate, &op_k, &own_b, &d_terms, &m_terms, &slot1,
-                );
+                add_muxed_combo_reduction(eval, &gate, &op_k, &own_b, &d_terms, &m_terms, &slot1);
             }
 
             // Pure muxed equalities.
@@ -701,7 +710,12 @@ impl HintedMulProofInteractionClaim {
     }
 
     pub fn mix_into(&self, channel: &mut impl Channel) {
-        channel.mix_felts(&[self.claimed_sum, self.range13, self.signed_h, self.signed_formula]);
+        channel.mix_felts(&[
+            self.claimed_sum,
+            self.range13,
+            self.signed_h,
+            self.signed_formula,
+        ]);
     }
 
     pub(crate) fn total(&self) -> SecureField {
@@ -728,7 +742,9 @@ pub fn hinted_mul_slice_preprocessed_ids(log_size: u32) -> Vec<PreProcessedColum
         hinted_mul_schedule_source_index_id(log_size),
         hinted_mul_schedule_mul_index_id(log_size),
     ];
-    ids.extend((0..HINTED_MUL_PROJ_MUL_COLUMNS).map(|k| hinted_mul_schedule_proj_mul_id(log_size, k)));
+    ids.extend(
+        (0..HINTED_MUL_PROJ_MUL_COLUMNS).map(|k| hinted_mul_schedule_proj_mul_id(log_size, k)),
+    );
     ids.push(range_check_value_column_id(RANGE13_BITS));
     ids.push(crate::range_checks::signed_carry_value_column_id(
         &signed.equation_name,
@@ -995,10 +1011,9 @@ mod tests {
     /// LIVE on these rows.
     fn sample_proj_claim() -> HintedMulTraceClaim {
         let trace = super::super::formula_bind::sample_projective_trace();
-        let rcb = crate::projective_air::ProjectiveRcbAirTraceClaim::from_projective_trace_lite(
-            &trace,
-        )
-        .expect("proj rcb claim");
+        let rcb =
+            crate::projective_air::ProjectiveRcbAirTraceClaim::from_projective_trace_lite(&trace)
+                .expect("proj rcb claim");
         HintedMulTraceClaim::from_projective_rcb(&rcb).expect("hinted claim builds")
     }
 
@@ -1110,8 +1125,8 @@ mod tests {
         let signed_multiplicity =
             signed_claim.gen_multiplicity_trace(hinted_mul_signed_uses(&claim));
         let formula_signed_claim = crate::projective_air::projective_rcb_signed_carry_claim();
-        let formula_signed_multiplicity = formula_signed_claim
-            .gen_multiplicity_trace(hinted_mul_formula_signed_uses(&claim));
+        let formula_signed_multiplicity =
+            formula_signed_claim.gen_multiplicity_trace(hinted_mul_formula_signed_uses(&claim));
         let mut base_tree = base.clone();
         base_tree.extend(gamma_range13_base);
         base_tree.extend(gamma_signed_base);
