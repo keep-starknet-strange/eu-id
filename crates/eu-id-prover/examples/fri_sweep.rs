@@ -71,6 +71,9 @@ fn main() {
                         n_queries: min_queries(pow_bits, log_blowup),
                         fold_step,
                     };
+                    if !should_run_case(case) {
+                        continue;
+                    }
                     match run_case(draft, &witness, case, samples) {
                         Ok(row) => rows.push(row),
                         Err(error) => failures.push((case, error)),
@@ -346,4 +349,20 @@ fn is_current(case: Case) -> bool {
         && case.log_blowup == CURRENT_LOG_BLOWUP
         && case.log_last_layer == CURRENT_LAST_LAYER
         && case.fold_step == CURRENT_FOLD_STEP
+}
+
+fn is_q015_candidate(case: Case) -> bool {
+    case.pow_bits == 10
+        && case.log_blowup == 2
+        && case.n_queries == 59
+        && case.log_last_layer == 1
+        && case.fold_step == 2
+}
+
+fn should_run_case(case: Case) -> bool {
+    if env::var("FRI_SWEEP_Q015_CONFIRM").ok().as_deref() == Some("1") {
+        is_current(case) || is_q015_candidate(case)
+    } else {
+        true
+    }
 }

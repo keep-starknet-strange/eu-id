@@ -1549,7 +1549,9 @@ fn p256_stark_monolithic_profile_config(_max_constraint_log_degree_bound: u32) -
     // every committed column across all modules). log_blowup is held at 2 so
     // commitment/FFT memory is unchanged from the calibrated on-device baseline
     // (raising it is the axis that made SHA W=7 OOM).
-    let fri_config = FriConfig::new(5, 2, 59, 1);
+    // Q-015 N=5 confirmation selected the same 128-bit security split with a
+    // cheaper FRI schedule: last-layer 1 and fold-step 2.
+    let fri_config = FriConfig::new(1, 2, 59, 2);
     PcsConfig {
         pow_bits: 10,
         fri_config,
