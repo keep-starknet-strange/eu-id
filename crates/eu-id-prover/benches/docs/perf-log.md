@@ -73,10 +73,10 @@ Shape: `cargo test -p eu-id-prover --release shape_dump -- --ignored --nocapture
 | 2026-07-03 | d27d9bb1 | WO-0 128-bit baseline | shape_dump p256 cells | — | 14,573,616 |
 | 2026-07-03 | d27d9bb1 | WO-0 128-bit baseline | shape_dump sha256 cells | — | 13,843,104 |
 | 2026-07-03 | d27d9bb1 | WO-0 128-bit baseline | shape_dump total cells | — | 28,488,480 |
-| 2026-07-03 | a3bf1075 | WO-2.5 signed-carry provider dedup | BM_ECDSAZKProver_equiv/1 (1-thread) | 1.8981 s | 1.8923 s |
-| 2026-07-03 | a3bf1075 | WO-2.5 signed-carry provider dedup | pipeline/prove (parallel identity_bench) | 652.95 ms | 647.99 ms |
-| 2026-07-03 | a3bf1075 | WO-2.5 signed-carry provider dedup | shape_dump p256 cells | 14,573,616 | 13,262,896 |
-| 2026-07-03 | a3bf1075 | WO-2.5 signed-carry provider dedup | shape_dump total cells | 28,488,480 | 27,177,760 |
+| 2026-07-03 | 49979dc7 | WO-2.5 signed-carry provider dedup | BM_ECDSAZKProver_equiv/1 (1-thread) | 1.8981 s | 1.8923 s |
+| 2026-07-03 | 49979dc7 | WO-2.5 signed-carry provider dedup | pipeline/prove (parallel identity_bench) | 652.95 ms | 647.99 ms |
+| 2026-07-03 | 49979dc7 | WO-2.5 signed-carry provider dedup | shape_dump p256 cells | 14,573,616 | 13,262,896 |
+| 2026-07-03 | 49979dc7 | WO-2.5 signed-carry provider dedup | shape_dump total cells | 28,488,480 | 27,177,760 |
 
 WO-1.8 note: `target-cpu=native` was measured with `RUSTFLAGS="-C target-cpu=native"` instead of committed `.cargo/config.toml`, because CI builds this repo on `ubuntu-latest` and would consume committed Cargo config. LTO/CU1 is scoped to `[profile.bench]`; putting it in `[profile.release]` made `cargo test --workspace --release` fail in the P-256 monolithic proof gate with `ProofLayer("Constraints not satisfied.")`.
 
