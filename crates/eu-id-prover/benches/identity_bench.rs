@@ -18,7 +18,8 @@
 use std::time::Duration;
 
 use criterion::{criterion_group, criterion_main, Criterion};
-use eu_id_prover::fixtures;
+use eu_id_prover::generator::IssuerKey;
+use eu_id_prover::{fixtures, prove_identity};
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -29,7 +30,8 @@ mod stages;
 fn bench_identity(c: &mut Criterion) {
     // One honest over-18 credential drives every stage. Proving cost is
     // independent of the credential's values, so a single fixture is enough.
-    let witness = fixtures::valid_over_18().pipeline_witness();
+    let fixture = fixtures::valid_over_18();
+    let witness = fixture.pipeline_witness();
 
     bench_stage(
         c,
@@ -100,6 +102,20 @@ fn bench_identity(c: &mut Criterion) {
             )
         },
     );
+
+    if should_register("identity_e2e", "prove_identity") {
+        let mut group = c.benchmark_group("identity_e2e");
+        group.sample_size(10);
+        group.warm_up_time(Duration::from_millis(500));
+        let issuer = IssuerKey::demo();
+        group.bench_function("prove_identity", |b| {
+            b.iter(|| {
+                prove_identity(&fixture.signed.credential, &issuer, &fixture.policy)
+                    .expect("identity proof generates")
+            })
+        });
+        group.finish();
+    }
 }
 
 criterion_group!(benches, bench_identity);
