@@ -43,7 +43,39 @@ Shape: `cargo test -p eu-id-prover --release shape_dump -- --ignored --nocapture
 | 2026-07-03 | 6b3273e0 | WO-1.4 SIMD trace writers | BM_ShaZK_equiv/33/prove (1-thread) | 1.154 s | 1.1421 s |
 | 2026-07-03 | 6b3273e0 | WO-1.4 SIMD trace writers | pipeline/prove (parallel) | 690 ms | 663.79 ms |
 | 2026-07-03 | 6b3273e0 | WO-1.4 SIMD trace writers | shape_dump total cells | 28,488,480 | 28,488,480 |
+| 2026-07-03 | d27d9bb1 | WO-0 128-bit baseline | BM_ShaZK_equiv/1/prove (1-thread) | — | 1.1069 s |
+| 2026-07-03 | d27d9bb1 | WO-0 128-bit baseline | BM_ShaZK_equiv/1/verify (1-thread) | — | 637.73 µs |
+| 2026-07-03 | d27d9bb1 | WO-0 128-bit baseline | BM_ShaZK_equiv/2/prove (1-thread) | — | 1.1167 s |
+| 2026-07-03 | d27d9bb1 | WO-0 128-bit baseline | BM_ShaZK_equiv/2/verify (1-thread) | — | 633.44 µs |
+| 2026-07-03 | d27d9bb1 | WO-0 128-bit baseline | BM_ShaZK_equiv/4/prove (1-thread) | — | 1.0756 s |
+| 2026-07-03 | d27d9bb1 | WO-0 128-bit baseline | BM_ShaZK_equiv/4/verify (1-thread) | — | 618.73 µs |
+| 2026-07-03 | d27d9bb1 | WO-0 128-bit baseline | BM_ShaZK_equiv/8/prove (1-thread) | — | 1.1134 s |
+| 2026-07-03 | d27d9bb1 | WO-0 128-bit baseline | BM_ShaZK_equiv/8/verify (1-thread) | — | 641.06 µs |
+| 2026-07-03 | d27d9bb1 | WO-0 128-bit baseline | BM_ShaZK_equiv/16/prove (1-thread) | — | 1.1664 s |
+| 2026-07-03 | d27d9bb1 | WO-0 128-bit baseline | BM_ShaZK_equiv/16/verify (1-thread) | — | 645.96 µs |
+| 2026-07-03 | d27d9bb1 | WO-0 128-bit baseline | BM_ShaZK_equiv/32/prove (1-thread) | — | 1.2097 s |
+| 2026-07-03 | d27d9bb1 | WO-0 128-bit baseline | BM_ShaZK_equiv/32/verify (1-thread) | — | 635.06 µs |
+| 2026-07-03 | d27d9bb1 | WO-0 128-bit baseline | BM_ShaZK_equiv/33/prove (1-thread) | — | 1.1994 s |
+| 2026-07-03 | d27d9bb1 | WO-0 128-bit baseline | BM_ShaZK_equiv/33/verify (1-thread) | — | 635.27 µs |
+| 2026-07-03 | d27d9bb1 | WO-0 128-bit baseline | BM_ECDSAZKProver_equiv/1 (1-thread) | — | 1.8981 s |
+| 2026-07-03 | d27d9bb1 | WO-0 128-bit baseline | BM_ECDSAZKVerifier_equiv/1 (1-thread) | — | 14.393 ms |
+| 2026-07-03 | d27d9bb1 | WO-0 128-bit baseline | BM_ECDSAZKProver_equiv/2 (1-thread) | — | 3.7211 s |
+| 2026-07-03 | d27d9bb1 | WO-0 128-bit baseline | BM_ECDSAZKVerifier_equiv/2 (1-thread; known 2-sig verifier bug did not fire in this run) | — | 28.901 ms |
+| 2026-07-03 | d27d9bb1 | WO-0 128-bit baseline | BM_ECDSAZKProver_equiv/3 (1-thread) | — | 5.6217 s |
+| 2026-07-03 | d27d9bb1 | WO-0 128-bit baseline | BM_ECDSAZKVerifier_equiv/3 (1-thread) | — | 43.239 ms |
+| 2026-07-03 | d27d9bb1 | WO-0 128-bit baseline | sha/prove (parallel identity_bench) | — | 276.33 ms |
+| 2026-07-03 | d27d9bb1 | WO-0 128-bit baseline | p256/prove (parallel identity_bench) | — | 404.57 ms |
+| 2026-07-03 | d27d9bb1 | WO-0 128-bit baseline | age/prove (parallel identity_bench) | — | 9.4577 ms |
+| 2026-07-03 | d27d9bb1 | WO-0 128-bit baseline | nat/prove (parallel identity_bench) | — | 2.0385 ms |
+| 2026-07-03 | d27d9bb1 | WO-0 128-bit baseline | pipeline/prove (parallel identity_bench) | — | 652.95 ms |
+| 2026-07-03 | d27d9bb1 | WO-0 128-bit baseline | combined proof bincode bytes | 1,601,906 | 2,318,946 |
+| 2026-07-03 | d27d9bb1 | WO-0 128-bit baseline | sha standalone STARK proof bytes | — | 60,045 |
+| 2026-07-03 | d27d9bb1 | WO-0 128-bit baseline | shape_dump p256 cells | — | 14,573,616 |
+| 2026-07-03 | d27d9bb1 | WO-0 128-bit baseline | shape_dump sha256 cells | — | 13,843,104 |
+| 2026-07-03 | d27d9bb1 | WO-0 128-bit baseline | shape_dump total cells | — | 28,488,480 |
 
 WO-1.8 note: `target-cpu=native` was measured with `RUSTFLAGS="-C target-cpu=native"` instead of committed `.cargo/config.toml`, because CI builds this repo on `ubuntu-latest` and would consume committed Cargo config. LTO/CU1 is scoped to `[profile.bench]`; putting it in `[profile.release]` made `cargo test --workspace --release` fail in the P-256 monolithic proof gate with `ProofLayer("Constraints not satisfied.")`.
 
 WO-1.4 note: P-256 trace writers use the scalar path when `RAYON_NUM_THREADS=1`, because direct packed/rayon generation is faster only with a multi-thread Rayon pool. The single-thread ECDSA prover result is therefore noise-level unchanged; the measurable accepted movement is SHA/33 and the parallel pipeline.
+
+WO-0 note: `wo30-128bit` fast-forwarded to `d27d9bb1`, setting the combined P-256 profile to `pow_bits = 10` and `n_queries = 59` for the signed-off 128-bit target. Benchmarks were run under `tasks/parity/BENCH-LOCK`; combined proof bytes came from `eu-id prove --fixture valid_over_18`.
