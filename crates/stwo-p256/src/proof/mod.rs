@@ -246,11 +246,12 @@ impl P256ProofClaim {
         )?;
         let projective_rcb_air_trace =
             ProjectiveRcbAirTraceClaim::from_projective_trace_lite_trusted(&projective_ec_trace)?;
-        let final_check = FinalEcdsaCheckClaim::from_claims(
+        let final_check = FinalEcdsaCheckClaim::from_claims_with_prepared_table_trusted(
             &public_inputs,
             &cert_inputs,
             &fake_glv_scalars,
             &fake_glv_chain,
+            &prepared_table,
         )?;
         // Final-add's four muls ride the hinted provider on source indices
         // just past the ladder ops.

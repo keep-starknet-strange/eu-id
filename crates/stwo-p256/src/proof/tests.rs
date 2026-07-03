@@ -498,6 +498,43 @@ fn fake_glv_hint_gen_serial_parallel_draft_equality() {
     );
 }
 
+#[test]
+fn fake_glv_hint_gen_serial_parallel_two_signature_draft_equality() {
+    let inputs = vec![
+        valid_real_input_with_u_scalars(scalar_near_order(123), scalar_near_order(456)),
+        valid_real_input_with_u_scalars(scalar_near_order(789), scalar_near_order(1011)),
+    ];
+    for input in &inputs {
+        assert!(
+            ecdsa_verify(input),
+            "synthetic arbitrary-width input must be valid",
+        );
+    }
+
+    let serial_pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .expect("serial rayon pool builds");
+    let parallel_pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .expect("parallel rayon pool builds");
+
+    let serial = serial_pool.install(|| {
+        P256ProofDraft::from_inputs_with_arbitrary_fake_glv_hints(inputs.clone())
+            .expect("serial draft builds")
+    });
+    let parallel = parallel_pool.install(|| {
+        P256ProofDraft::from_inputs_with_arbitrary_fake_glv_hints(inputs)
+            .expect("parallel draft builds")
+    });
+
+    assert_eq!(
+        format!("{:?}", serial.claim),
+        format!("{:?}", parallel.claim)
+    );
+}
+
 fn checked_draft_from_inputs_with_arbitrary_fake_glv_hints(
     inputs: Vec<EcdsaVerifyInput>,
 ) -> Result<P256ProofDraft, P256ProofError> {
