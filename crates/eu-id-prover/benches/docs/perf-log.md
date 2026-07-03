@@ -81,6 +81,9 @@ Shape: `cargo test -p eu-id-prover --release shape_dump -- --ignored --nocapture
 | 2026-07-03 | b4183edc | WO-3.5 hand-CSE hot evals | BM_ECDSAZKProver_equiv/1 (1-thread) | 1.8923 s | 1.8129 s |
 | 2026-07-03 | b4183edc | WO-3.5 hand-CSE hot evals | BM_ShaZK_equiv/33/prove (1-thread) | 1.1994 s | 1.1966 s |
 | 2026-07-03 | b4183edc | WO-3.5 hand-CSE hot evals | composition-span timing | no local harness found | not measured (Q-011) |
+| 2026-07-03 | 85feb27c | WO-1.6 prove twiddle cache | repeated prove timing (same witness) | first 814.184 ms | second 826.154 ms |
+| 2026-07-03 | 85feb27c | WO-1.6 prove twiddle cache | repeated proof bytes | — | identical |
+| 2026-07-03 | 85feb27c | WO-1.6 prove twiddle cache | BM_ECDSAZKProver_equiv/1 cold path (1-thread) | 1.8129 s | 1.8059 s |
 
 WO-1.8 note: `target-cpu=native` was measured with `RUSTFLAGS="-C target-cpu=native"` instead of committed `.cargo/config.toml`, because CI builds this repo on `ubuntu-latest` and would consume committed Cargo config. LTO/CU1 is scoped to `[profile.bench]`; putting it in `[profile.release]` made `cargo test --workspace --release` fail in the P-256 monolithic proof gate with `ProofLayer("Constraints not satisfied.")`.
 
@@ -91,3 +94,5 @@ WO-0 note: `wo30-128bit` fast-forwarded to `d27d9bb1`, setting the combined P-25
 WO-2.5 note: public-key-curve and final-add now share one projective signed-carry provider relation/table; scalar-setup remains separate because it uses a different equation. The WO predicted a ~1.83M-cell drop by counting value/active preprocessed columns, but those IDs were already globally deduped at WO-0, so the measured reduction is 1,310,720 cells: one duplicate provider's base multiplicity column plus four interaction columns at log 18.
 
 WO-3.5 note: hand-CSE touched `hinted_mul`, scalar-mod-mul `Ab`/`Qn`, and SHA main-round evals only; proof bytes for `valid_over_18` were byte-identical before/after. Searches under `crates/` found no tracing subscriber/harness for the requested `CompositionPolynomialGeneration` span, so Q-011 asks whether to add one as follow-up.
+
+WO-1.6 note: only the twiddle cache was implemented. The repeated-prove byte equality guard passed, but the second prove was slower in two diagnostics (`818.426ms → 856.221ms`, then `814.184ms → 826.154ms`), so Q-012 asks whether to stop here or pursue broader preprocessed-column caches.
