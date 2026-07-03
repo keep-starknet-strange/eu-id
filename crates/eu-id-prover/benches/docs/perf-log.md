@@ -35,5 +35,15 @@ Shape: `cargo test -p eu-id-prover --release shape_dump -- --ignored --nocapture
 | 2026-07-02 | a1224ae7 | WO-S1 `xor_8` GKR spike (blocked on MLE tie-back Q-003) | shape_dump sha256 interaction cells | 5,800,640 | 5,534,400 |
 | 2026-07-02 | a1224ae7 | WO-S1 `xor_8` GKR spike (blocked on MLE tie-back Q-003) | standalone SHA proof bytes | 60,045 | 73,749 |
 | 2026-07-02 | a1224ae7 | WO-S1 `xor_8` GKR spike (blocked on MLE tie-back Q-003) | `xor_8` GKR wire proof bytes | 0 | 18,824 |
+| 2026-07-03 | 6b3273e0 | WO-1.4 SIMD trace writers | hinted_mul schedule writer timing (default Rayon, ignored test) | 192.584 µs | 82.5 µs |
+| 2026-07-03 | 6b3273e0 | WO-1.4 SIMD trace writers | hinted_mul base writer timing (default Rayon, ignored test) | 23.062542 ms | 3.015083 ms |
+| 2026-07-03 | 6b3273e0 | WO-1.4 SIMD trace writers | SHA trace writer timing (default Rayon, ignored test) | 4.628708 ms | 868.75 µs |
+| 2026-07-03 | 6b3273e0 | WO-1.4 SIMD trace writers | BM_ECDSAZKProver_equiv/1 (1-thread) | 1.894 s | 1.9128 s |
+| 2026-07-03 | 6b3273e0 | WO-1.4 SIMD trace writers | BM_ShaZK_equiv/1/prove (1-thread) | 1.055 s | 1.0529 s |
+| 2026-07-03 | 6b3273e0 | WO-1.4 SIMD trace writers | BM_ShaZK_equiv/33/prove (1-thread) | 1.154 s | 1.1421 s |
+| 2026-07-03 | 6b3273e0 | WO-1.4 SIMD trace writers | pipeline/prove (parallel) | 690 ms | 663.79 ms |
+| 2026-07-03 | 6b3273e0 | WO-1.4 SIMD trace writers | shape_dump total cells | 28,488,480 | 28,488,480 |
 
 WO-1.8 note: `target-cpu=native` was measured with `RUSTFLAGS="-C target-cpu=native"` instead of committed `.cargo/config.toml`, because CI builds this repo on `ubuntu-latest` and would consume committed Cargo config. LTO/CU1 is scoped to `[profile.bench]`; putting it in `[profile.release]` made `cargo test --workspace --release` fail in the P-256 monolithic proof gate with `ProofLayer("Constraints not satisfied.")`.
+
+WO-1.4 note: P-256 trace writers use the scalar path when `RAYON_NUM_THREADS=1`, because direct packed/rayon generation is faster only with a multi-thread Rayon pool. The single-thread ECDSA prover result is therefore noise-level unchanged; the measurable accepted movement is SHA/33 and the parallel pipeline.
