@@ -87,10 +87,11 @@ use stwo::prover::backend::simd::m31::{PackedM31, LOG_N_LANES, N_LANES};
 
 use crate::constants::{DIGEST_BYTES, N_ROUNDS, N_STATE_WORDS};
 use crate::field_exposure::FieldExposure;
+use crate::native::{lower_sigma0, lower_sigma1};
 use crate::partitions::GROUPS_PER_ROUND_PARTITION;
 use crate::types::{
-    AddCarries, BlockAuxSplitPackWitness, BlockWitness, LimbPairBytes, PaddingRowWitness,
-    RoundPackedGroups, Sha256Witness, SigmaDecodeWitness, SigmaInputSplitPackWitness, WordLimbs,
+    AddCarries, BlockAuxSplitPackWitness, PaddingRowWitness, RoundPackedGroups, Sha256Witness,
+    SigmaInputSplitPackWitness, WordLimbs,
 };
 
 use crate::constants::WORD_BYTES as BYTES_PER_WORD;
@@ -101,41 +102,35 @@ pub const WORDS_PER_BLOCK: usize = 16;
 /// Rows one block occupies in the rotated layout: one per round.
 pub const ROWS_PER_BLOCK: usize = N_ROUNDS;
 
-/// Columns per σ-application's decoded intermediates (§9.3 of the design):
-/// `key_s, o_main_s (lo, hi), o2_partial_s (lo, hi), key_s_complement,
-///  o_main_s_complement (lo, hi), o2_partial_s_complement (lo, hi),
-///  o2_combined (lo, hi), 3 × 4-byte chunk sets`.
-///
-/// The leading 5 cells (`key_s + o_main_s + o2_partial_s`) match the row
-/// shape of the `S`-side decode table and the trailing 5 cells of the first
-/// half (`key_s_complement + …`) match the `S′`-side table — so the
-/// constraint loop's `add_to_relation` keys read in column order without
-/// re-permutation.
-pub const SIGMA_DECODE_COLS: usize = 5 + 5 + 2 + 4 + 4 + 4;
-/// Operands committed by the per-round Maj/Ch packed-group block:
-/// the four *fresh* operands `a, maj_out, e, ch_out`, then the §8.1
-/// reuse-chain operands `b, c, f, g`. The `b`/`c`/`f`/`g` cells duplicate
-/// prior rows' `a`/`e` group values (or the `t = 0` row's aux splits) —
-/// they are committed so the Maj/Ch lookup tuples read degree-1 cells; a
-/// select constraint pins each to its originating cell via mask offsets.
-pub const ROUND_MAJ_CH_OPERANDS: usize = 8;
-/// Columns per round dedicated to the Maj/Ch packed-group lookup
-/// inputs/outputs. `8 operands · 8 groups = 64`. Each cell is one packed
-/// value in `[0, 2^|group|) ⊆ [0, 2^MAX_ROUND_GROUP_BITS)`.
-pub const ROUND_MAJ_CH_COLS: usize = ROUND_MAJ_CH_OPERANDS * GROUPS_PER_ROUND_PARTITION;
+/// Bits per SHA-256 word, committed LSB-first.
+pub const WORD_BIT_COLS: usize = 32;
+/// Round operand bit columns. The hybrid AIR keeps operand aliases as
+/// committed bits so Maj/Ch formulas stay degree 3 even on boundary rows.
+/// Operand order: `[a, b, c, e, f, g]`.
+pub const ROUND_BIT_OPERANDS: usize = 6;
+pub const ROUND_OPERAND_BIT_COLS: usize = ROUND_BIT_OPERANDS * WORD_BIT_COLS;
+/// Packed output groups retained for round split-pack lookups. The bits of
+/// `Maj` and `Ch` are virtual expressions; these committed packed groups keep
+/// the surviving split-pack lookup keys degree 1.
+pub const ROUND_OUTPUT_GROUP_OPERANDS: usize = 2;
+pub const ROUND_OUTPUT_GROUP_COLS: usize = ROUND_OUTPUT_GROUP_OPERANDS * GROUPS_PER_ROUND_PARTITION;
+/// Schedule lower-sigma output bits. The formulas are ungated; only their
+/// linear recomposition into `s0`/`s1` is gated on active schedule rows.
+pub const SCHEDULE_SIGMA_OUTPUT_BIT_COLS: usize = 2 * WORD_BIT_COLS;
 /// Columns per σ-input split-and-pack block: four packed values
 /// `(packed_s_lo, packed_s_complement_lo, packed_s_hi, packed_s_complement_hi)`.
 /// The AIR fires one σ split-and-pack lookup per half against the
 /// partition's table (rows `(key=word.lo|hi, packed_s, packed_s')`).
 pub const SIGMA_INPUT_SPLIT_COLS: usize = 4;
 /// Columns of the round family: 8 word-results × 2 limbs + 4 carry pairs
-/// × 2 ends = 24, then two σ-decodes (one for `Σ0(a)`, one for `Σ1(e)`),
-/// then the Maj/Ch packed-group block.
-pub const ROUND_COLS: usize = 8 * 2 + 4 * 2 + 2 * SIGMA_DECODE_COLS + ROUND_MAJ_CH_COLS;
+/// × 2 ends = 24, then committed operand bits and packed Maj/Ch output
+/// groups for the surviving split-pack lookups.
+pub const ROUND_COLS: usize = 8 * 2 + 4 * 2 + ROUND_OPERAND_BIT_COLS + ROUND_OUTPUT_GROUP_COLS;
 /// Columns of the schedule family (live for `t ≥ 16`):
-/// `σ0`, `σ1`, carries (= 6), then two σ-decodes (one for `σ0(W[t-15])`,
-/// one for `σ1(W[t-2])`), then two σ-input split-and-pack blocks.
-pub const SCHEDULE_ENTRY_COLS: usize = 6 + 2 * SIGMA_DECODE_COLS + 2 * SIGMA_INPUT_SPLIT_COLS;
+/// `σ0`, `σ1`, carries (= 6), lower-sigma output bits, then two σ-input
+/// split-and-pack blocks.
+pub const SCHEDULE_ENTRY_COLS: usize =
+    6 + SCHEDULE_SIGMA_OUTPUT_BIT_COLS + 2 * SIGMA_INPUT_SPLIT_COLS;
 /// Per-block auxiliary split-and-pack operands for the §8.1 reuse chain:
 /// `[b_init = h_in[1]_a-side, c_init = h_in[2]_a-side, f_init = h_in[5]_e-side,
 ///   g_init = h_in[6]_e-side]`. `h_in[0]`/`h_in[4]` are covered by
@@ -184,8 +179,11 @@ impl Layout {
     /// The row's schedule word `W[t]`, `(lo, hi)`.
     pub const COL_W_LO: usize = 1;
     pub const COL_W_HI: usize = 2;
+    /// LSB-first bit decomposition of the row's schedule word `W[t]`.
+    pub const COL_W_BITS_START: usize = Self::COL_W_HI + 1;
+    pub const COL_W_BITS_END: usize = Self::COL_W_BITS_START + WORD_BIT_COLS;
     /// Round family — live on every real row.
-    pub const COL_ROUND_START: usize = Self::COL_W_HI + 1;
+    pub const COL_ROUND_START: usize = Self::COL_W_BITS_END;
     pub const COL_ROUND_END: usize = Self::COL_ROUND_START + ROUND_COLS;
     /// Schedule family — live on rows with `t ≥ 16`.
     pub const COL_SCHED_ENTRY_START: usize = Self::COL_ROUND_END;
@@ -302,48 +300,42 @@ impl Layout {
 
     /// Columns of the schedule family's leading cells, in order:
     /// `σ0_lo, σ0_hi, σ1_lo, σ1_hi, carry_lo, carry_hi`. Live on rows with
-    /// `t ≥ 16`; the decode blocks are addressed by
-    /// [`Self::schedule_entry_decode`].
+    /// `t ≥ 16`.
     #[inline]
     pub const fn schedule_entry() -> [usize; 6] {
         let base = Self::COL_SCHED_ENTRY_START;
         [base, base + 1, base + 2, base + 3, base + 4, base + 5]
     }
 
-    /// Start column of one σ-decode block of the schedule family. `which` is
-    /// `0` for `σ0(W[t-15])`, `1` for `σ1(W[t-2])` — the order written by
-    /// [`write_round_row`] and read by `constraints::Sha256Eval`.
+    /// Column of one bit in the row's schedule word.
     #[inline]
-    pub const fn schedule_entry_decode(which: usize) -> usize {
-        Self::COL_SCHED_ENTRY_START + 6 + which * SIGMA_DECODE_COLS
+    pub const fn w_bit(bit: usize) -> usize {
+        Self::COL_W_BITS_START + bit
     }
 
-    /// Start column of one σ-decode block of the round family. `which` is `0`
-    /// for `Σ0(a)`, `1` for `Σ1(e)` — matching the witness field order and
-    /// the AIR read order. The 24 cells starting here are a single
-    /// `SigmaDecodeWitness`, laid out per [`SIGMA_DECODE_COLS`] above.
+    /// Column of a round operand bit. Operand order is `[a, b, c, e, f, g]`.
     #[inline]
-    pub const fn round_decode(which: usize) -> usize {
-        Self::COL_ROUND_START + 24 + which * SIGMA_DECODE_COLS
+    pub const fn round_operand_bit(operand_idx: usize, bit: usize) -> usize {
+        Self::COL_ROUND_START + 24 + operand_idx * WORD_BIT_COLS + bit
     }
 
-    /// Start column of the round family's Maj/Ch packed-group block — 32
-    /// cells laid out as 4 operands × 8 groups, in `write_round_maj_ch`
-    /// order. `b`/`c`/`f`/`g` are not present here; the AIR aliases them
-    /// via mask offsets on prior rows (§8.1 reuse chain).
+    /// Start column of the round family's packed output groups: `Maj`, `Ch`.
     #[inline]
-    pub const fn round_maj_ch_base() -> usize {
-        Self::COL_ROUND_START + 24 + 2 * SIGMA_DECODE_COLS
+    pub const fn round_output_group_base() -> usize {
+        Self::COL_ROUND_START + 24 + ROUND_OPERAND_BIT_COLS
     }
 
-    /// Column of one operand's packed-group cell within the round family.
-    ///
-    /// `operand_idx ∈ [0, 8)` indexes the operands in the fixed order
-    /// `[a, maj_out, e, ch_out, b, c, f, g]`. `group_idx ∈ [0, 8)` indexes
-    /// the groups in the partition's `groups_in_order` enumeration.
+    /// Column of one packed output group. Output order is `[Maj, Ch]`.
     #[inline]
-    pub const fn round_packed_group(operand_idx: usize, group_idx: usize) -> usize {
-        Self::round_maj_ch_base() + operand_idx * GROUPS_PER_ROUND_PARTITION + group_idx
+    pub const fn round_output_group(output_idx: usize, group_idx: usize) -> usize {
+        Self::round_output_group_base() + output_idx * GROUPS_PER_ROUND_PARTITION + group_idx
+    }
+
+    /// Column of a lower-sigma output bit in the schedule family. `which` is
+    /// `0` for `σ0(W[t-15])`, `1` for `σ1(W[t-2])`.
+    #[inline]
+    pub const fn schedule_sigma_bit(which: usize, bit: usize) -> usize {
+        Self::COL_SCHED_ENTRY_START + 6 + which * WORD_BIT_COLS + bit
     }
 
     /// Column of one packed-group cell within the per-block auxiliary
@@ -368,7 +360,10 @@ impl Layout {
     /// `(packed_s_lo, packed_s_complement_lo, packed_s_hi, packed_s_complement_hi)`.
     #[inline]
     pub const fn schedule_entry_input_split(which: usize) -> usize {
-        Self::COL_SCHED_ENTRY_START + 6 + 2 * SIGMA_DECODE_COLS + which * SIGMA_INPUT_SPLIT_COLS
+        Self::COL_SCHED_ENTRY_START
+            + 6
+            + SCHEDULE_SIGMA_OUTPUT_BIT_COLS
+            + which * SIGMA_INPUT_SPLIT_COLS
     }
 
     /// The round family's leading columns, in order:
@@ -532,14 +527,16 @@ fn generate_trace_with_fields_scalar(
     // with the constraint either way.
     let last_block_idx = witness.blocks.len().saturating_sub(1);
     let has_padding = n_real_rows < n_rows;
-    for (block_idx, block) in witness.blocks.iter().enumerate() {
+    for block_idx in 0..witness.blocks.len() {
         for t in 0..N_ROUNDS {
             let slot = Layout::round_row_slot(block_idx, t, log_size);
             write_round_row(
                 &mut cols,
                 slot,
-                block,
+                witness,
+                block_idx,
                 t,
+                n_rows,
                 block_idx == 0,
                 block_idx == last_block_idx && has_padding,
                 field_exposure,
@@ -558,6 +555,7 @@ fn generate_trace_with_fields_scalar(
         let first_slot = Layout::row_slot(0, log_size);
         cols[Layout::COL_ENABLER_STEP][first_slot] = BaseField::from(1u32);
     }
+    fill_schedule_sigma_bits_columns(&mut cols, log_size);
 
     cols
 }
@@ -599,16 +597,21 @@ pub(crate) fn generate_trace_base_columns_with_fields(
     let total_cols = Layout::total_cols_with_fields(field_exposure.n_columns());
     let last_block_idx = witness.blocks.len().saturating_sub(1);
     let has_padding = n_real_rows < n_rows;
-    let row_values = (0..n_real_rows)
+    let mut row_values = (0..n_rows)
         .into_par_iter()
         .map(|row_idx| {
+            if row_idx >= n_real_rows {
+                return vec![BaseField::from(0u32); total_cols];
+            }
             let block_idx = row_idx / ROWS_PER_BLOCK;
             let t = row_idx % ROWS_PER_BLOCK;
             let mut values = vec![BaseField::from(0u32); total_cols];
             write_round_row_values(
                 &mut values,
-                &witness.blocks[block_idx],
+                witness,
+                block_idx,
                 t,
+                n_rows,
                 block_idx == 0,
                 block_idx == last_block_idx && has_padding,
                 field_exposure,
@@ -616,6 +619,7 @@ pub(crate) fn generate_trace_base_columns_with_fields(
             values
         })
         .collect::<Vec<_>>();
+    fill_schedule_sigma_bits_rows(&mut row_values);
 
     let packed_rows = 1usize << (log_size - LOG_N_LANES);
     (0..total_cols)
@@ -631,10 +635,7 @@ pub(crate) fn generate_trace_base_columns_with_fields(
                         if column == Layout::COL_ENABLER_STEP && has_padding && coset_index == 0 {
                             return BaseField::from(1u32);
                         }
-                        row_values
-                            .get(coset_index)
-                            .map(|row| row[column])
-                            .unwrap_or(BaseField::from(0u32))
+                        row_values[coset_index][column]
                     }))
                 })
                 .collect();
@@ -661,14 +662,16 @@ fn generate_trace_with_fields_scalar_fallback(
     let mut cols = vec![vec![BaseField::from(0u32); n_rows]; total_cols];
     let last_block_idx = witness.blocks.len().saturating_sub(1);
     let has_padding = n_real_rows < n_rows;
-    for (block_idx, block) in witness.blocks.iter().enumerate() {
+    for block_idx in 0..witness.blocks.len() {
         for t in 0..N_ROUNDS {
             let slot = Layout::round_row_slot(block_idx, t, log_size);
             write_round_row(
                 &mut cols,
                 slot,
-                block,
+                witness,
+                block_idx,
                 t,
+                n_rows,
                 block_idx == 0,
                 block_idx == last_block_idx && has_padding,
                 field_exposure,
@@ -679,6 +682,7 @@ fn generate_trace_with_fields_scalar_fallback(
         let first_slot = Layout::row_slot(0, log_size);
         cols[Layout::COL_ENABLER_STEP][first_slot] = BaseField::from(1u32);
     }
+    fill_schedule_sigma_bits_columns(&mut cols, log_size);
     cols
 }
 
@@ -687,8 +691,10 @@ fn generate_trace_with_fields_scalar_fallback(
 fn write_round_row(
     cols: &mut [Vec<BaseField>],
     row: usize,
-    block: &BlockWitness,
+    witness: &Sha256Witness,
+    block_idx: usize,
     t: usize,
+    n_rows: usize,
     is_first_block: bool,
     is_last_block: bool,
     field_exposure: &FieldExposure,
@@ -696,8 +702,10 @@ fn write_round_row(
     let mut values = vec![BaseField::from(0u32); cols.len()];
     write_round_row_values(
         &mut values,
-        block,
+        witness,
+        block_idx,
         t,
+        n_rows,
         is_first_block,
         is_last_block,
         field_exposure,
@@ -711,17 +719,22 @@ fn write_round_row(
 #[allow(clippy::too_many_arguments)]
 fn write_round_row_values(
     row: &mut [BaseField],
-    block: &BlockWitness,
+    witness: &Sha256Witness,
+    block_idx: usize,
     t: usize,
+    n_rows: usize,
     is_first_block: bool,
     is_last_block: bool,
     field_exposure: &FieldExposure,
 ) {
+    let block = &witness.blocks[block_idx];
+    let natural_row = block_idx * ROWS_PER_BLOCK + t;
     row[Layout::COL_ENABLER] = BaseField::from(1u32);
 
     // The row's schedule word.
     row[Layout::COL_W_LO] = m31(block.schedule[t].lo);
     row[Layout::COL_W_HI] = m31(block.schedule[t].hi);
+    write_word_bits_row(row, Layout::COL_W_BITS_START, block.schedule[t].to_u32());
 
     // Round family.
     let round = &block.rounds[t];
@@ -750,11 +763,14 @@ fn write_round_row_values(
         row[r[16 + 2 * i]] = m31(c.lo);
         row[r[16 + 2 * i + 1]] = m31(c.hi);
     }
-    write_sigma_decode_block_row(row, Layout::round_decode(0), &round.sigma0_decode);
-    write_sigma_decode_block_row(row, Layout::round_decode(1), &round.sigma1_decode);
-    write_round_maj_ch_row(row, block, t);
+    write_round_operand_bits_row(row, round);
+    write_round_output_groups_row(row, round);
 
     // Schedule family (t ≥ 16).
+    let sched_sigma0_word = lower_sigma0(schedule_word_at_offset(witness, natural_row, n_rows, 15));
+    let sched_sigma1_word = lower_sigma1(schedule_word_at_offset(witness, natural_row, n_rows, 2));
+    write_word_bits_row(row, Layout::schedule_sigma_bit(0, 0), sched_sigma0_word);
+    write_word_bits_row(row, Layout::schedule_sigma_bit(1, 0), sched_sigma1_word);
     if t >= 16 {
         let entry = &block.schedule_entries[t - 16];
         let [s0_lo, s0_hi, s1_lo, s1_hi, c_lo, c_hi] = Layout::schedule_entry();
@@ -764,16 +780,6 @@ fn write_round_row_values(
         row[s1_hi] = m31(entry.lower_sigma1.hi);
         row[c_lo] = m31(entry.carries.lo);
         row[c_hi] = m31(entry.carries.hi);
-        write_sigma_decode_block_row(
-            row,
-            Layout::schedule_entry_decode(0),
-            &entry.lower_sigma0_decode,
-        );
-        write_sigma_decode_block_row(
-            row,
-            Layout::schedule_entry_decode(1),
-            &entry.lower_sigma1_decode,
-        );
         write_sigma_input_split_block_row(
             row,
             Layout::schedule_entry_input_split(0),
@@ -838,68 +844,103 @@ fn m31(x: u32) -> BaseField {
     M31::from(x)
 }
 
-fn write_sigma_decode_block_row(row: &mut [BaseField], base: usize, d: &SigmaDecodeWitness) {
-    row[base] = m31(d.key_s);
-    row[base + 1] = m31(d.o_main_s.lo);
-    row[base + 2] = m31(d.o_main_s.hi);
-    row[base + 3] = m31(d.o2_partial_s.lo);
-    row[base + 4] = m31(d.o2_partial_s.hi);
-    row[base + 5] = m31(d.key_s_complement);
-    row[base + 6] = m31(d.o_main_s_complement.lo);
-    row[base + 7] = m31(d.o_main_s_complement.hi);
-    row[base + 8] = m31(d.o2_partial_s_complement.lo);
-    row[base + 9] = m31(d.o2_partial_s_complement.hi);
-    row[base + 10] = m31(d.o2_combined.lo);
-    row[base + 11] = m31(d.o2_combined.hi);
-    write_chunk_quad_row(row, base + 12, d.o2_chunks_s);
-    write_chunk_quad_row(row, base + 16, d.o2_chunks_s_complement);
-    write_chunk_quad_row(row, base + 20, d.o2_chunks_combined);
-}
-
 #[inline]
-fn write_chunk_quad_row(row: &mut [BaseField], base: usize, chunks: LimbPairBytes) {
-    row[base] = m31(chunks.lo.b0);
-    row[base + 1] = m31(chunks.lo.b1);
-    row[base + 2] = m31(chunks.hi.b0);
-    row[base + 3] = m31(chunks.hi.b1);
+fn write_word_bits_row(row: &mut [BaseField], base: usize, word: u32) {
+    for bit in 0..WORD_BIT_COLS {
+        row[base + bit] = m31((word >> bit) & 1);
+    }
 }
 
-fn write_round_maj_ch_row(row: &mut [BaseField], block: &BlockWitness, t: usize) {
-    let maj_ch = &block.rounds[t].maj_ch;
-    let aux = &block.aux_split_pack;
-    let b_grp = match t {
-        0 => &aux.b_init,
-        _ => &block.rounds[t - 1].maj_ch.a_grp,
-    };
-    let c_grp = match t {
-        0 => &aux.c_init,
-        1 => &aux.b_init,
-        _ => &block.rounds[t - 2].maj_ch.a_grp,
-    };
-    let f_grp = match t {
-        0 => &aux.f_init,
-        _ => &block.rounds[t - 1].maj_ch.e_grp,
-    };
-    let g_grp = match t {
-        0 => &aux.g_init,
-        1 => &aux.f_init,
-        _ => &block.rounds[t - 2].maj_ch.e_grp,
-    };
-    let operands: [&RoundPackedGroups; ROUND_MAJ_CH_OPERANDS] = [
-        &maj_ch.a_grp,
-        &maj_ch.maj_grp,
-        &maj_ch.e_grp,
-        &maj_ch.ch_grp,
-        b_grp,
-        c_grp,
-        f_grp,
-        g_grp,
+fn write_round_operand_bits_row(row: &mut [BaseField], round: &crate::types::RoundWitness) {
+    let words = [
+        round.state_in[0].to_u32(),
+        round.state_in[1].to_u32(),
+        round.state_in[2].to_u32(),
+        round.state_in[4].to_u32(),
+        round.state_in[5].to_u32(),
+        round.state_in[6].to_u32(),
     ];
+    for (operand_idx, &word) in words.iter().enumerate() {
+        write_word_bits_row(row, Layout::round_operand_bit(operand_idx, 0), word);
+    }
+}
+
+fn write_round_output_groups_row(row: &mut [BaseField], round: &crate::types::RoundWitness) {
+    let operands: [&RoundPackedGroups; ROUND_OUTPUT_GROUP_OPERANDS] =
+        [&round.maj_ch.maj_grp, &round.maj_ch.ch_grp];
     for (operand_idx, operand) in operands.iter().enumerate() {
         for (group_idx, &v) in operand.vals.iter().enumerate() {
-            row[Layout::round_packed_group(operand_idx, group_idx)] = m31(v);
+            row[Layout::round_output_group(operand_idx, group_idx)] = m31(v);
         }
     }
+}
+
+fn schedule_word_at_offset(
+    witness: &Sha256Witness,
+    natural_row: usize,
+    n_rows: usize,
+    back: usize,
+) -> u32 {
+    let n_real_rows = witness.blocks.len() * ROWS_PER_BLOCK;
+    let target = (natural_row + n_rows - back) % n_rows;
+    if target >= n_real_rows {
+        return 0;
+    }
+    let block_idx = target / ROWS_PER_BLOCK;
+    let t = target % ROWS_PER_BLOCK;
+    witness.blocks[block_idx].schedule[t].to_u32()
+}
+
+fn fill_schedule_sigma_bits_rows(rows: &mut [Vec<BaseField>]) {
+    let n_rows = rows.len();
+    for row_idx in 0..n_rows {
+        let w_m15 = word_from_row_bits(&rows[(row_idx + n_rows - 15) % n_rows]);
+        let w_m2 = word_from_row_bits(&rows[(row_idx + n_rows - 2) % n_rows]);
+        write_word_bits_row(
+            &mut rows[row_idx],
+            Layout::schedule_sigma_bit(0, 0),
+            lower_sigma0(w_m15),
+        );
+        write_word_bits_row(
+            &mut rows[row_idx],
+            Layout::schedule_sigma_bit(1, 0),
+            lower_sigma1(w_m2),
+        );
+    }
+}
+
+fn fill_schedule_sigma_bits_columns(cols: &mut [Vec<BaseField>], log_size: u32) {
+    let n_rows = 1usize << log_size;
+    for storage_row in 0..n_rows {
+        let coset_index =
+            circle_domain_index_to_coset_index(bit_reverse_index(storage_row, log_size), log_size);
+        let word_at_offset = |back: usize| {
+            let target_coset = (coset_index + n_rows - back) % n_rows;
+            let target_storage = bit_reverse_index(
+                coset_index_to_circle_domain_index(target_coset, log_size),
+                log_size,
+            );
+            let mut word = 0u32;
+            for bit in 0..WORD_BIT_COLS {
+                word |= cols[Layout::w_bit(bit)][target_storage].0 << bit;
+            }
+            word
+        };
+        let s0 = lower_sigma0(word_at_offset(15));
+        let s1 = lower_sigma1(word_at_offset(2));
+        for bit in 0..WORD_BIT_COLS {
+            cols[Layout::schedule_sigma_bit(0, bit)][storage_row] = m31((s0 >> bit) & 1);
+            cols[Layout::schedule_sigma_bit(1, bit)][storage_row] = m31((s1 >> bit) & 1);
+        }
+    }
+}
+
+fn word_from_row_bits(row: &[BaseField]) -> u32 {
+    let mut word = 0u32;
+    for bit in 0..WORD_BIT_COLS {
+        word |= row[Layout::w_bit(bit)].0 << bit;
+    }
+    word
 }
 
 fn write_h_in_aux_grp_row(row: &mut [BaseField], aux: &BlockAuxSplitPackWitness) {
@@ -1143,6 +1184,7 @@ mod tests {
     fn layout_total_cols_matches_expected_breakdown() {
         let expected = 1 // enabler
             + 2 // W
+            + WORD_BIT_COLS
             + ROUND_COLS
             + SCHEDULE_ENTRY_COLS
             + 1 // is_first_block
@@ -1155,10 +1197,9 @@ mod tests {
             + PADDING_ROW_COLS
             + 1; // enabler_step
         assert_eq!(Layout::TOTAL_COLS, expected);
-        assert_eq!(ROUND_COLS, 136);
-        assert_eq!(SCHEDULE_ENTRY_COLS, 62);
-        // The headline: ~349 base columns (down from 9,746).
-        assert_eq!(Layout::TOTAL_COLS, 349);
+        assert_eq!(ROUND_COLS, 232);
+        assert_eq!(SCHEDULE_ENTRY_COLS, 78);
+        assert_eq!(Layout::TOTAL_COLS, 493);
     }
 
     /// Round family, schedule family, and boundary families round-trip a
@@ -1179,10 +1220,14 @@ mod tests {
                 let r = Layout::round_col();
                 assert_eq!(trace[r[12]][slot].0, block.rounds[t].a_new.lo);
                 assert_eq!(trace[r[13]][slot].0, block.rounds[t].a_new.hi);
-                // Maj/Ch group 0 of operand 0 (a).
+                // a bit 0 and Maj output group 0.
                 assert_eq!(
-                    trace[Layout::round_packed_group(0, 0)][slot].0,
-                    block.rounds[t].maj_ch.a_grp.vals[0]
+                    trace[Layout::round_operand_bit(0, 0)][slot].0,
+                    block.rounds[t].state_in[0].to_u32() & 1
+                );
+                assert_eq!(
+                    trace[Layout::round_output_group(0, 0)][slot].0,
+                    block.rounds[t].maj_ch.maj_grp.vals[0]
                 );
                 // Schedule family: σ0 output limb.
                 if t >= 16 {
@@ -1190,10 +1235,6 @@ mod tests {
                     assert_eq!(
                         trace[s0_lo][slot].0,
                         block.schedule_entries[t - 16].lower_sigma0.lo
-                    );
-                    assert_eq!(
-                        trace[Layout::schedule_entry_decode(0)][slot].0,
-                        block.schedule_entries[t - 16].lower_sigma0_decode.key_s
                     );
                     assert_eq!(
                         trace[Layout::schedule_entry_input_split(1)][slot].0,

@@ -38,17 +38,15 @@ fn sha_air_uses_typed_relation_multiplicities() {
 /// Pin `Layout::TOTAL_COLS` to the claimed total so any future
 /// column-count drift fails closed against the test-plan value.
 ///
-/// The rotated one-row-per-round layout at `W = 6`: enabler (1) + `W` (2) +
-/// round family (136 = 24 word/carry cells + 2×24 Σ-decode + 8 operands × 8
-/// packed groups) + schedule family (62) + `is_first_block` (1) + `h_in`
-/// (16) + aux splits (32) + finalization carries (16) + `h_out` (16) +
-/// `is_last_block` (1) + digest bytes (32) + padding-role (33) +
-/// `enabler_step` (1) = 349. (The wide one-row-per-block layout this
-/// replaced was 9 909.)
+/// Hybrid one-row-per-round layout at `W = 6`: enabler (1) + `W` limbs (2) +
+/// W bits (32) + round family (232) + schedule family (78) +
+/// `is_first_block` (1) + `h_in` (16) + aux splits (32) + finalization
+/// carries (16) + `h_out` (16) + `is_last_block` (1) + digest bytes (32) +
+/// padding-role (33) + `enabler_step` (1) = 493.
 #[test]
-fn total_cols_equals_349_at_w6() {
+fn total_cols_equals_493_at_w6_hybrid() {
     println!("Layout::TOTAL_COLS = {}", Layout::TOTAL_COLS);
-    assert_eq!(Layout::TOTAL_COLS, 349);
+    assert_eq!(Layout::TOTAL_COLS, 493);
     assert_eq!(PADDING_ROW_COLS, 33);
     assert_eq!(DIGEST_BYTES, 32);
 }

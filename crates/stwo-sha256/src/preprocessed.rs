@@ -51,13 +51,10 @@ use stwo::prover::poly::BitReversedOrder;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 
 use crate::components::{
-    all_preprocessed_column_ids, range_log_size, DECODE_TABLES, RANGE_TABLES, ROUND_SPLIT_TABLES,
+    all_preprocessed_column_ids, range_log_size, RANGE_TABLES, ROUND_SPLIT_TABLES,
     SIGMA_SPLIT_TABLES,
 };
-use crate::tables::{
-    build_decode_table, build_maj_ch_table, build_round_split_pack_table,
-    build_sigma_split_pack_table, build_xor_8_table, RoundPartition,
-};
+use crate::tables::{build_round_split_pack_table, build_sigma_split_pack_table, RoundPartition};
 use crate::tables_local::{range_16, range_2, range_4, range_5};
 use crate::trace::Layout;
 
@@ -99,14 +96,7 @@ static PREPROCESSED_TRACE_CACHE: OnceLock<Mutex<HashMap<(u32, u32), Preprocessed
 /// [`tests::metadata_log_sizes_match_built_columns`].
 pub fn preprocessed_log_sizes(group_width: u32, log_n_rows: u32) -> Vec<u32> {
     let mut log_sizes = Vec::new();
-    // 8 σ/Σ decode tables × 5 columns, each at LOG_SIZE_16.
-    for _ in DECODE_TABLES {
-        log_sizes.extend(std::iter::repeat_n(LOG_SIZE_16, 5));
-    }
-    // 1 packed Maj/Ch table × 5 columns at maj_ch_log_size(group_width).
-    log_sizes.extend(std::iter::repeat_n(maj_ch_log_size(group_width), 5));
-    // 1 xor_8 table × 3 columns at LOG_SIZE_16.
-    log_sizes.extend(std::iter::repeat_n(LOG_SIZE_16, 3));
+    let _ = group_width;
     // 4 round-side split-pack tables × 5 columns at LOG_SIZE_16.
     for _ in ROUND_SPLIT_TABLES {
         log_sizes.extend(std::iter::repeat_n(LOG_SIZE_16, 5));
@@ -155,56 +145,7 @@ fn generate_preprocessed_trace_uncached(group_width: u32, log_n_rows: u32) -> Pr
     let mut evals = Vec::new();
     let mut log_sizes = Vec::new();
 
-    // ---- 8 σ/Σ decode tables, in canonical order ----
-    for &(f, h) in DECODE_TABLES {
-        let rows = build_decode_table(f, h);
-        let domain = CanonicCoset::new(LOG_SIZE_16).circle_domain();
-        // Five columns: key, o_main_lo, o_main_hi, o2_partial_lo, o2_partial_hi.
-        let key_col: BaseColumn = rows.iter().map(|r| BaseField::from(r.key)).collect();
-        let omain_lo: BaseColumn = rows.iter().map(|r| BaseField::from(r.o_main_lo)).collect();
-        let omain_hi: BaseColumn = rows.iter().map(|r| BaseField::from(r.o_main_hi)).collect();
-        let o2_lo: BaseColumn = rows
-            .iter()
-            .map(|r| BaseField::from(r.o2_partial_lo))
-            .collect();
-        let o2_hi: BaseColumn = rows
-            .iter()
-            .map(|r| BaseField::from(r.o2_partial_hi))
-            .collect();
-        for col in [key_col, omain_lo, omain_hi, o2_lo, o2_hi] {
-            evals.push(CircleEvaluation::new(domain, col));
-            log_sizes.push(LOG_SIZE_16);
-        }
-    }
-
-    // ---- 1 packed Maj/Ch table ----
-    {
-        let log_size = maj_ch_log_size(group_width);
-        let domain = CanonicCoset::new(log_size).circle_domain();
-        let rows = build_maj_ch_table(group_width);
-        let a_col: BaseColumn = rows.iter().map(|r| BaseField::from(r.a)).collect();
-        let b_col: BaseColumn = rows.iter().map(|r| BaseField::from(r.b)).collect();
-        let c_col: BaseColumn = rows.iter().map(|r| BaseField::from(r.c)).collect();
-        let maj_col: BaseColumn = rows.iter().map(|r| BaseField::from(r.maj_val)).collect();
-        let ch_col: BaseColumn = rows.iter().map(|r| BaseField::from(r.ch_val)).collect();
-        for col in [a_col, b_col, c_col, maj_col, ch_col] {
-            evals.push(CircleEvaluation::new(domain, col));
-            log_sizes.push(log_size);
-        }
-    }
-
-    // ---- 1 xor_8 table ----
-    {
-        let domain = CanonicCoset::new(LOG_SIZE_16).circle_domain();
-        let rows = build_xor_8_table();
-        let x_col: BaseColumn = rows.iter().map(|r| BaseField::from(r.x)).collect();
-        let y_col: BaseColumn = rows.iter().map(|r| BaseField::from(r.y)).collect();
-        let z_col: BaseColumn = rows.iter().map(|r| BaseField::from(r.z)).collect();
-        for col in [x_col, y_col, z_col] {
-            evals.push(CircleEvaluation::new(domain, col));
-            log_sizes.push(LOG_SIZE_16);
-        }
-    }
+    let _ = group_width;
 
     // ---- 4 round-side split-and-pack tables ----
     for &(p, h) in ROUND_SPLIT_TABLES {
@@ -355,37 +296,32 @@ mod tests {
     use stwo::prover::backend::simd::m31::LOG_N_LANES;
     use stwo::prover::backend::Column;
 
-    /// Total column count: 8·5 + 5 + 3 + 4·5 + 4·3 + 4·1 + 1 + 9 = 94. Catches
+    /// Total column count: 4·5 + 4·3 + 4·1 + 1 + 9 = 46. Catches
     /// any regression in the per-table layout. The trailing `+ 1` is the
     /// `is_first_row` selector emitted at the main trace's `log_n_rows`.
     /// (Round-side split-pack is 5 cols each at `W = 6`: `key + 4` groups.)
     #[test]
-    fn total_preprocessed_columns_is_94() {
+    fn total_preprocessed_columns_is_46() {
         let log_n_rows = LOG_N_LANES;
         let (evals, ids, log_sizes) = generate_preprocessed_trace(MAX_ROUND_GROUP_BITS, log_n_rows);
-        assert_eq!(evals.len(), 94);
-        assert_eq!(ids.len(), 94);
-        assert_eq!(log_sizes.len(), 94);
+        assert_eq!(evals.len(), 46);
+        assert_eq!(ids.len(), 46);
+        assert_eq!(log_sizes.len(), 46);
     }
 
-    /// First eight tables (40 columns) are decode tables at log_size = 16.
-    /// Next 5 columns are Maj/Ch at log_size = 3W. The next 35 columns are
-    /// xor_8 (3) + round split-pack (4×5) + σ split-pack (4×3) at log_size
-    /// 16. Then 4 `Range_k` columns — three at `LOG_N_LANES = 4` (for
-    /// Range_2/4/5, padded to 16 rows) and one at log_size 16 (Range_16,
-    /// 2¹⁶ rows). The trailing column (index 84) is `is_first_row` at the
-    /// main trace's `log_n_rows`.
+    /// Split-pack columns occupy 0..32 at log_size 16. Then 4 `Range_k`
+    /// columns — three at `LOG_N_LANES = 4` (for Range_2/4/5, padded to 16
+    /// rows) and one at log_size 16 (Range_16, 2¹⁶ rows). The trailing
+    /// column (index 36) is `is_first_row` at the main trace's `log_n_rows`.
     #[test]
     fn log_sizes_lay_out_correctly() {
         let w = MAX_ROUND_GROUP_BITS;
         let log_n_rows = LOG_N_LANES;
         let (_, _, log_sizes) = generate_preprocessed_trace(w, log_n_rows);
         for (i, &ls) in log_sizes.iter().enumerate() {
-            let expected = if (40..45).contains(&i) {
-                3 * w
-            } else if (80..83).contains(&i) {
+            let expected = if (32..35).contains(&i) {
                 LOG_N_LANES
-            } else if i >= 84 {
+            } else if i >= 36 {
                 log_n_rows
             } else {
                 16
@@ -402,8 +338,8 @@ mod tests {
     fn is_first_row_selector_is_one_at_index_zero() {
         let log_n_rows = LOG_N_LANES;
         let (evals, _, _) = generate_preprocessed_trace(MAX_ROUND_GROUP_BITS, log_n_rows);
-        // The selector is column 84 (followed by the 9 round-cyclic columns).
-        let selector = &evals[84];
+        // The selector is column 36 (followed by the 9 round-cyclic columns).
+        let selector = &evals[36];
         let n_rows = 1usize << log_n_rows;
         for i in 0..n_rows {
             let expected = if i == 0 { 1u32 } else { 0u32 };
@@ -442,19 +378,16 @@ mod tests {
 
     /// [`preprocessed_log_sizes`] is pure metadata (no table build), so its
     /// shape is checked cheaply across the whole `group_width` range and for
-    /// large `log_n_rows`: 85 columns, the Maj/Ch block (cols 40..45) sized
-    /// to `3·W`, and the trailing selector sized to `log_n_rows`.
+    /// large `log_n_rows`: 46 columns, with the trailing selector/cyclic
+    /// columns sized to `log_n_rows`.
     #[test]
     fn metadata_log_sizes_shape_for_all_widths() {
         for w in MAX_ROUND_GROUP_BITS..=crate::tables::MAX_GROUP_WIDTH {
             for log_n_rows in [LOG_N_LANES, 20, 30] {
                 let meta = preprocessed_log_sizes(w, log_n_rows);
-                assert_eq!(meta.len(), 94, "w={w}, l={log_n_rows}");
-                for &ls in &meta[40..45] {
-                    assert_eq!(ls, 3 * w, "Maj/Ch log_size at w={w}");
-                }
+                assert_eq!(meta.len(), 46, "w={w}, l={log_n_rows}");
                 assert_eq!(
-                    meta[84..].iter().filter(|&&l| l == log_n_rows).count(),
+                    meta[36..].iter().filter(|&&l| l == log_n_rows).count(),
                     10,
                     "selector + cyclic log_sizes"
                 );
@@ -472,11 +405,10 @@ mod tests {
     /// position against what `generate_preprocessed_trace` emits.
     #[test]
     fn emitted_columns_match_documented_field_order() {
-        use crate::partitions::{SigmaFn, SIGMA0_GROUPS};
-        use crate::tables::{Half, Half16, LowerSigmaPartition};
+        use crate::partitions::SIGMA0_GROUPS;
+        use crate::tables::{Half16, LowerSigmaPartition};
 
-        let w = MAX_ROUND_GROUP_BITS;
-        let (evals, _, _) = generate_preprocessed_trace(w, LOG_N_LANES);
+        let (evals, _, _) = generate_preprocessed_trace(MAX_ROUND_GROUP_BITS, LOG_N_LANES);
 
         let col_eq = |idx: usize, expected: &[u32], label: &str| {
             let ev = &evals[idx];
@@ -486,41 +418,7 @@ mod tests {
             }
         };
 
-        // decode table 0 (DECODE_TABLES[0] = Σ0,S) → cols 0..5.
-        let d = build_decode_table(SigmaFn::Sigma0, Half::S);
-        col_eq(
-            0,
-            &d.iter().map(|r| r.key).collect::<Vec<_>>(),
-            "decode.key",
-        );
-        col_eq(
-            1,
-            &d.iter().map(|r| r.o_main_lo).collect::<Vec<_>>(),
-            "decode.o_main_lo",
-        );
-        col_eq(
-            2,
-            &d.iter().map(|r| r.o_main_hi).collect::<Vec<_>>(),
-            "decode.o_main_hi",
-        );
-        col_eq(
-            3,
-            &d.iter().map(|r| r.o2_partial_lo).collect::<Vec<_>>(),
-            "decode.o2_lo",
-        );
-        col_eq(
-            4,
-            &d.iter().map(|r| r.o2_partial_hi).collect::<Vec<_>>(),
-            "decode.o2_hi",
-        );
-
-        // xor_8 → cols 45..48.
-        let xr = build_xor_8_table();
-        col_eq(45, &xr.iter().map(|r| r.x).collect::<Vec<_>>(), "xor.x");
-        col_eq(46, &xr.iter().map(|r| r.y).collect::<Vec<_>>(), "xor.y");
-        col_eq(47, &xr.iter().map(|r| r.z).collect::<Vec<_>>(), "xor.z");
-
-        // round-side split-pack table 0 (Σ0&Maj, Lo) → cols 48..53 (5 cols
+        // round-side split-pack table 0 (Σ0&Maj, Lo) → cols 0..5 (5 cols
         // at W=6: key + 4 sub-groups).
         let rsp = build_round_split_pack_table(
             &SIGMA0_GROUPS,
@@ -528,85 +426,49 @@ mod tests {
             Half16::Lo,
         );
         col_eq(
-            48,
+            0,
             &rsp.iter().map(|r| r.key).collect::<Vec<_>>(),
             "round_split.key",
         );
         col_eq(
-            49,
+            1,
             &rsp.iter().map(|r| r.groups[0]).collect::<Vec<_>>(),
             "round_split.g0",
         );
         col_eq(
-            50,
+            2,
             &rsp.iter().map(|r| r.groups[1]).collect::<Vec<_>>(),
             "round_split.g1",
         );
         col_eq(
-            51,
+            3,
             &rsp.iter().map(|r| r.groups[2]).collect::<Vec<_>>(),
             "round_split.g2",
         );
         col_eq(
-            52,
+            4,
             &rsp.iter().map(|r| r.groups[3]).collect::<Vec<_>>(),
             "round_split.g3",
         );
 
-        // σ-side split-pack table 0 (LowerSigma0, Lo) → cols 68..71 (after
-        // the 4 round-side tables now occupy cols 48..68).
+        // σ-side split-pack table 0 (LowerSigma0, Lo) → cols 20..23 (after
+        // the 4 round-side tables occupy cols 0..20).
         let ssp =
             build_sigma_split_pack_table(LowerSigmaPartition::LowerSigma0.parts(), Half16::Lo);
         col_eq(
-            68,
+            20,
             &ssp.iter().map(|r| r.key).collect::<Vec<_>>(),
             "sigma_split.key",
         );
         col_eq(
-            69,
+            21,
             &ssp.iter().map(|r| r.groups[0]).collect::<Vec<_>>(),
             "sigma_split.s",
         );
         col_eq(
-            70,
+            22,
             &ssp.iter().map(|r| r.groups[1]).collect::<Vec<_>>(),
             "sigma_split.sp",
         );
-
-        // Maj/Ch → cols 40..45: (a, b, c, maj, ch). Re-deriving the full
-        // 2^(3W) table would be wasteful, so pin the column order via two
-        // representative rows (row index = (a·2^W + b)·2^W + c, natural order):
-        //   row 1        = (0,0,1): maj=0, ch=1
-        //   row 2^(2W)+1 = (1,0,1): maj=1, ch=0
-        let n2 = (1usize << w) * (1usize << w);
-        let check_maj_ch = |row: usize, a: u32, b: u32, c: u32, maj: u32, ch: u32| {
-            assert_eq!(
-                evals[40].values.at(row),
-                BaseField::from(a),
-                "maj_ch.a[{row}]"
-            );
-            assert_eq!(
-                evals[41].values.at(row),
-                BaseField::from(b),
-                "maj_ch.b[{row}]"
-            );
-            assert_eq!(
-                evals[42].values.at(row),
-                BaseField::from(c),
-                "maj_ch.c[{row}]"
-            );
-            assert_eq!(
-                evals[43].values.at(row),
-                BaseField::from(maj),
-                "maj_ch.maj[{row}]"
-            );
-            assert_eq!(
-                evals[44].values.at(row),
-                BaseField::from(ch),
-                "maj_ch.ch[{row}]"
-            );
-        };
-        check_maj_ch(1, 0, 0, 1, 0, 1);
-        check_maj_ch(n2 + 1, 1, 0, 1, 1, 0);
     }
 }

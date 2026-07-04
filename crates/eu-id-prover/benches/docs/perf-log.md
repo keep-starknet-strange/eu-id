@@ -266,5 +266,18 @@ WO-M3 mdoc coprocessor note (2026-07-04): Q-M1-004 authorized moving the issuer 
 | 2026-07-04 | perf/a1r-typed-mults-redo worktree | WO-A1R typed SHA multiplicities | BM_ShaZK_equiv/1/verify (RAYON_NUM_THREADS=1) | 636.92 us | 634.46 us (-0.39%) |
 | 2026-07-04 | perf/a1r-typed-mults-redo worktree | WO-A1R typed SHA multiplicities | BM_ShaZK_equiv/33/prove (RAYON_NUM_THREADS=1) | 1.1036 s | 1.1151 s (+1.04%) |
 | 2026-07-04 | perf/a1r-typed-mults-redo worktree | WO-A1R typed SHA multiplicities | BM_ShaZK_equiv/33/verify (RAYON_NUM_THREADS=1) | 631.44 us | 633.22 us (+0.28%) |
+| 2026-07-04 | feat/a3-hybrid-sha worktree | WO-A3 hybrid SHA | shape_dump SHA cells | 13,843,104 | 5,200,544 (-8,642,560; -62.43%) |
+| 2026-07-04 | feat/a3-hybrid-sha worktree | WO-A3 hybrid SHA | shape_dump total identity cells | 37,500,240 | 28,857,680 (-8,642,560; -23.05%) |
+| 2026-07-04 | feat/a3-hybrid-sha worktree | WO-A3 hybrid SHA | BM_ShaZK_equiv/1/prove (RAYON_NUM_THREADS=1) | 1.0113 s | 327.12 ms (-67.65%; 3.09x) |
+| 2026-07-04 | feat/a3-hybrid-sha worktree | WO-A3 hybrid SHA | BM_ShaZK_equiv/1/verify (RAYON_NUM_THREADS=1) | 619.67 us | 679.37 us (+9.63% vs Phase 0 baseline; Criterion vs previous +7.57%) |
+| 2026-07-04 | feat/a3-hybrid-sha worktree | WO-A3 hybrid SHA | BM_ShaZK_equiv/33/prove (RAYON_NUM_THREADS=1) | 1.1028 s | 423.85 ms (-61.56%; 2.60x) |
+| 2026-07-04 | feat/a3-hybrid-sha worktree | WO-A3 hybrid SHA | BM_ShaZK_equiv/33/verify (RAYON_NUM_THREADS=1) | 618.97 us | 683.94 us (+10.50% vs Phase 0 baseline; Criterion vs previous +9.73%) |
 
 WO-A1R note: converted the 19 remaining SHA `RelationEntry::new` call sites to typed `RelationEntry::base`; no `unit`, `neg_unit`, or extension-field `new` sites remained in `crates/stwo-sha256`. Parent measurements used `feat/proof-reductions` at `fac1cd4c`; after measurements used the `perf/a1r-typed-mults-redo` worktree before commit. Criterion filters were run separately for block counts 1 and 33 under `RAYON_NUM_THREADS=1`.
+
+WO-A3 note: the proof path removes decode, MajCh, and xor_8 table producers/consumers while
+retaining split-pack, range, limb-addition, carry, digest, and field-exposure logic. Degree
+audit required committed duplicate `b/c/f/g` operand bit columns instead of using selector
+expressions inside Maj/Ch formulas; the duplicate bits are tied to shifted `a/e` bits through
+linear alias constraints. Schedule lower-sigma output bits are filled for every domain row so
+ungated sigma formulas remain degree-safe across wraparound and padding rows.

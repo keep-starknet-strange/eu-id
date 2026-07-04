@@ -661,15 +661,6 @@ pub type RangeKComponent = FrameworkComponent<RangeKEval>;
 /// both sides in sync or the verifier will read the wrong column.
 pub fn all_preprocessed_column_ids() -> Vec<PreProcessedColumnId> {
     let mut out = Vec::new();
-    // 8 decode tables in the order `Sha256Relations::draw`/`SigmaDecodeRelations::draw` uses.
-    for (f, h) in DECODE_TABLES {
-        out.extend(decode_column_ids(*f, *h));
-    }
-    // 1 Maj/Ch table — column IDs depend only on table identity, not on
-    // `group_width` (which sets the table's row count, not its columns).
-    out.extend(maj_ch_column_ids());
-    // 1 xor_8 table.
-    out.extend(xor_8_column_ids());
     // 4 round-side split-pack tables, then 4 σ-side.
     for (p, h) in ROUND_SPLIT_TABLES {
         out.extend(round_split_pack_column_ids(*p, *h));
