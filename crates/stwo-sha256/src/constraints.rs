@@ -474,9 +474,9 @@ impl FrameworkEval for Sha256Eval {
 
         // Maj/Ch lookups — tuples read only committed cells; the reuse
         // duplicates are pinned by the select constraints below.
-        let maj_ch_mult = E::EF::from(enabler.clone());
+        let maj_ch_mult = enabler.clone();
         for i in 0..GROUPS_PER_ROUND_PARTITION {
-            eval.add_to_relation(RelationEntry::new(
+            eval.add_to_relation(RelationEntry::base(
                 &self.relations.maj,
                 maj_ch_mult.clone(),
                 &[
@@ -488,7 +488,7 @@ impl FrameworkEval for Sha256Eval {
             ));
         }
         for i in 0..GROUPS_PER_ROUND_PARTITION {
-            eval.add_to_relation(RelationEntry::new(
+            eval.add_to_relation(RelationEntry::base(
                 &self.relations.ch,
                 maj_ch_mult.clone(),
                 &[
@@ -782,9 +782,9 @@ impl FrameworkEval for Sha256Eval {
             );
         }
         if self.expose_digest {
-            eval.add_to_relation(RelationEntry::new(
+            eval.add_to_relation(RelationEntry::base(
                 &self.relations.digest.digest,
-                -E::EF::from(is_last_block.clone()),
+                -is_last_block.clone(),
                 &digest_bytes,
             ));
         }
@@ -996,9 +996,9 @@ impl FrameworkEval for Sha256Eval {
                     E::F::from(M31::from(y.byte_index)),
                     field_bytes[slot].clone(),
                 ];
-                eval.add_to_relation(RelationEntry::new(
+                eval.add_to_relation(RelationEntry::base(
                     &self.relations.field.field,
-                    -E::EF::from(is_first_block_m15.clone()),
+                    -is_first_block_m15.clone(),
                     &tuple,
                 ));
             }
@@ -1074,8 +1074,8 @@ fn wire_round_split_pack<E: EvalAtRow>(
     // 130-or-so consumer lookups all keyed on the all-zero row of the
     // table — which the producer's multiplicity column doesn't account
     // for, breaking the LogUp sum-to-zero balance.
-    let mult = E::EF::from(enabler);
-    eval.add_to_relation(RelationEntry::new(
+    let mult = enabler;
+    eval.add_to_relation(RelationEntry::base(
         rel_lo,
         mult.clone(),
         &[
@@ -1086,7 +1086,7 @@ fn wire_round_split_pack<E: EvalAtRow>(
             grp[lo_idx[3]].clone(),
         ],
     ));
-    eval.add_to_relation(RelationEntry::new(
+    eval.add_to_relation(RelationEntry::base(
         rel_hi,
         mult,
         &[
@@ -1114,8 +1114,8 @@ fn wire_sigma_input_split<E: EvalAtRow>(
     rel_lo: &impl Relation<E::F, E::EF>,
     rel_hi: &impl Relation<E::F, E::EF>,
 ) {
-    let mult = E::EF::from(enabler);
-    eval.add_to_relation(RelationEntry::new(
+    let mult = enabler;
+    eval.add_to_relation(RelationEntry::base(
         rel_lo,
         mult.clone(),
         &[
@@ -1124,7 +1124,7 @@ fn wire_sigma_input_split<E: EvalAtRow>(
             split.packed_s_complement_lo.clone(),
         ],
     ));
-    eval.add_to_relation(RelationEntry::new(
+    eval.add_to_relation(RelationEntry::base(
         rel_hi,
         mult,
         &[
@@ -1280,14 +1280,14 @@ fn wire_sigma_decode<E: EvalAtRow>(
     // (1) S-side decode-table lookup — "use" the row at multiplicity
     // `enabler` (1 on real rows, 0 on padding so the all-zero key on a
     // padding row doesn't pollute the producer's LogUp balance).
-    let lookup_mult = E::EF::from(enabler.clone());
-    eval.add_to_relation(RelationEntry::new(
+    let lookup_mult = enabler.clone();
+    eval.add_to_relation(RelationEntry::base(
         rel_s,
         lookup_mult.clone(),
         &decode.s_values,
     ));
     // (2) S′-side decode-table lookup.
-    eval.add_to_relation(RelationEntry::new(
+    eval.add_to_relation(RelationEntry::base(
         rel_s_complement,
         lookup_mult.clone(),
         &decode.s_complement_values,
@@ -1347,7 +1347,7 @@ fn wire_sigma_decode<E: EvalAtRow>(
     // `(lo.b0, lo.b1, hi.b0, hi.b1)` order documented on
     // [`crate::trace::SIGMA_DECODE_COLS`]).
     for i in 0..4 {
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             rel_xor_8,
             lookup_mult.clone(),
             &[
@@ -1479,18 +1479,24 @@ fn wire_range_check<E: EvalAtRow>(
     relations: &Sha256Relations,
 ) {
     use crate::components::RangeKind;
-    let mult = E::EF::from(enabler);
+    let mult = enabler;
     match kind {
-        RangeKind::Range2 => {
-            eval.add_to_relation(RelationEntry::new(&relations.range.range_2, mult, &[value]))
-        }
-        RangeKind::Range4 => {
-            eval.add_to_relation(RelationEntry::new(&relations.range.range_4, mult, &[value]))
-        }
-        RangeKind::Range5 => {
-            eval.add_to_relation(RelationEntry::new(&relations.range.range_5, mult, &[value]))
-        }
-        RangeKind::Range16 => eval.add_to_relation(RelationEntry::new(
+        RangeKind::Range2 => eval.add_to_relation(RelationEntry::base(
+            &relations.range.range_2,
+            mult,
+            &[value],
+        )),
+        RangeKind::Range4 => eval.add_to_relation(RelationEntry::base(
+            &relations.range.range_4,
+            mult,
+            &[value],
+        )),
+        RangeKind::Range5 => eval.add_to_relation(RelationEntry::base(
+            &relations.range.range_5,
+            mult,
+            &[value],
+        )),
+        RangeKind::Range16 => eval.add_to_relation(RelationEntry::base(
             &relations.range.range_16,
             mult,
             &[value],

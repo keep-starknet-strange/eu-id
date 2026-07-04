@@ -239,3 +239,10 @@ WO-S4/Q-024 note: production SHA GKR tie-back is reverted on current Stwo becaus
 GKR-v2 diagnostic (2026-07-04): fused PackedQM31 fraction-add measures 3.8 ns/eff-mult on NEON => ~38 ns/term floor vs <=17 ns break-even. Local stwo GKR acceleration for the SHA tables is closed on mobile-class hardware by arithmetic, not by implementation. Cost of learning this: half a day (the Q-028 kill-switch), vs the +226 ms production regression it would have replayed.
 
 GKR-v2 close-out (2026-07-04): Q-030 chooses stop/no production fusion. The extra Stwo comparison measured the existing `Fraction` abstraction within 3-4% of hand-fused PackedQM31 fraction-add (`log20` median 13.018 ms existing vs 12.563 ms fused), so production fusion is review risk without a consumer. Useful deliverables are the Stwo mixed-height/global-lift correctness fix and `gkr_fraction_add` diagnostic bench; eu-id remains full LogUp with the reopener gates preserved.
+
+| 2026-07-04 | perf/a1r-typed-mults-redo worktree | WO-A1R typed SHA multiplicities | BM_ShaZK_equiv/1/prove (RAYON_NUM_THREADS=1) | 1.0296 s | 1.0194 s (-0.99%) |
+| 2026-07-04 | perf/a1r-typed-mults-redo worktree | WO-A1R typed SHA multiplicities | BM_ShaZK_equiv/1/verify (RAYON_NUM_THREADS=1) | 636.92 us | 634.46 us (-0.39%) |
+| 2026-07-04 | perf/a1r-typed-mults-redo worktree | WO-A1R typed SHA multiplicities | BM_ShaZK_equiv/33/prove (RAYON_NUM_THREADS=1) | 1.1036 s | 1.1151 s (+1.04%) |
+| 2026-07-04 | perf/a1r-typed-mults-redo worktree | WO-A1R typed SHA multiplicities | BM_ShaZK_equiv/33/verify (RAYON_NUM_THREADS=1) | 631.44 us | 633.22 us (+0.28%) |
+
+WO-A1R note: converted the 19 remaining SHA `RelationEntry::new` call sites to typed `RelationEntry::base`; no `unit`, `neg_unit`, or extension-field `new` sites remained in `crates/stwo-sha256`. Parent measurements used `feat/proof-reductions` at `fac1cd4c`; after measurements used the `perf/a1r-typed-mults-redo` worktree before commit. Criterion filters were run separately for block counts 1 and 33 under `RAYON_NUM_THREADS=1`.
