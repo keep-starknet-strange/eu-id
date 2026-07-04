@@ -5,6 +5,19 @@ Worktree: `/Users/lucas/eu-id/.claude/worktrees/wo-m1-coprocessor-merge` on `cod
 Base: `feat/proof-reductions@7af53303`.
 Scope guard: Q-M1-003 ACKED the default-on flip after WO-M2 moved both credential and nonce signatures through the coprocessor. Keep the legacy P256 AIR path reachable with `--no-default-features`; retire default-path P256 wiring only after the Phase 4 audit records what remains.
 
+## WO-M3 mdoc Coprocessor Plan
+
+Source: `/Users/lucas/eu-id/tasks/parity/mailbox/answers/Q-M1-004.md`.
+Branch: `codex/wo-m3-mdoc-coprocessor`.
+
+- [x] Read Q-M1-004 and branch from `codex/wo-m1-coprocessor-merge`.
+- [x] Replace mdoc issuer/device P256 AIR + private digest bridges with SHA + shared `PublicDigestBind` + one final coprocessor binding module.
+- [x] Update `MdocCircuitProof` to remove P256 AIR claims/private bridge claims and carry issuer/device public binds plus one `ImplementedCircuitBundle`.
+- [x] Reuse the M2 batch coprocessor API with statement absorb order issuer then device.
+- [x] Add required mdoc negatives: statement order, cross-signature swap, missing/tampered bundle, SHA/public-z mismatch, cross-slot z swap, identity-bundle replay, and fork/join/rejoin guards.
+- [x] Run focused mdoc verification and same-run mdoc AIR vs coprocessor gates.
+- [x] Update perf/status/task artifacts and commit WO-M3.
+
 ## Phase 4 Default-On Plan
 
 Source: `/Users/lucas/eu-id/tasks/parity/mailbox/answers/Q-M1-003.md`.
@@ -65,6 +78,30 @@ Decision: default-on flip deferred until both credential and nonce P256 AIRs lea
 - [x] Commit Phase 3 task/report artifacts after verification.
 
 ## Review
+
+WO-M3 default-path mdoc now replaces issuer/device P256 AIR and private digest
+bridges with public digest binds plus one final transcript-bound coprocessor
+bundle. Legacy P256 AIR mdoc remains available with `--no-default-features`.
+
+Verification completed:
+
+- `rtk proxy cargo check -p eu-id-prover`
+- `rtk proxy cargo check -p eu-id-prover --no-default-features`
+- `rtk proxy cargo test -p eu-id-prover --no-run`
+- `rtk proxy cargo test -p eu-id-prover --no-default-features --no-run`
+- `rtk proxy cargo test -p eu-id-prover --test mdoc_support`
+- `rtk proxy cargo test -p eu-id-prover --no-default-features --test mdoc_support`
+- `rtk proxy cargo test -p eu-id-prover mdoc_coprocessor_ -- --ignored`
+- `rtk proxy cargo test -p eu-id-prover --test mdoc_support isolated_mdoc_circuit_profile_proves_and_verifies -- --ignored`
+- `rtk proxy cargo test -p eu-id-prover --no-default-features --test mdoc_support isolated_mdoc_circuit_profile_proves_and_verifies -- --ignored`
+- `rtk proxy cargo check -p eu-id-prover --example mdoc_perf_probe`
+- `rtk proxy cargo check -p eu-id-prover --no-default-features --example mdoc_perf_probe`
+
+Perf probe, `RAYON_NUM_THREADS=1 BENCH_ITERS=5`: mdoc prove 7,866 ms
+legacy -> 5,266 ms default coprocessor; proof bytes 4,563,243 -> 1,834,614;
+verify 40 ms -> 46 ms; shape cells 79,988,576 -> 56,296,064. `BENCH-LOCK`
+was requested by Q-M1-004, but no `BENCH-LOCK` file exists in this worktree or
+the main checkout.
 
 - Current feature-on code is not Phase 2-complete: it proves the full P256 AIR path, then appends a coprocessor bundle after the STARK. Verifier checks both, so no P256 work is removed.
 - Q-017 selects public statement binding for v1. Therefore the smallest Phase 2 bridge is a `PublicDigestBind` requiring SHA's digest bytes against the public credential `z`; no cross-field MAC or MLE argument is in scope.
