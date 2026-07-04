@@ -46,9 +46,8 @@ use stwo_constraint_framework::PointEvaluator;
 use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 
 use crate::components::{
-    all_preprocessed_column_ids, range_log_size, MajChEval, RangeKEval, RoundSplitPackEval,
-    Sha256Relations, SigmaDecodeEval, SigmaSplitPackEval, Xor8Eval, DECODE_TABLES, RANGE_TABLES,
-    ROUND_SPLIT_TABLES, SIGMA_SPLIT_TABLES,
+    all_preprocessed_column_ids, range_log_size, RangeKEval, RoundSplitPackEval, Sha256Relations,
+    SigmaSplitPackEval, RANGE_TABLES, ROUND_SPLIT_TABLES, SIGMA_SPLIT_TABLES,
 };
 use crate::constraints::Sha256Eval;
 use crate::field_exposure::FieldExposure;
@@ -64,12 +63,9 @@ use crate::gkr_spike::{
 };
 use crate::interaction::{generate_interaction_trace, sha_lookups_per_row, InteractionClaim};
 use crate::multiplicities::{
-    decode_multiplicities, maj_ch_multiplicities, range_k_multiplicities,
-    round_split_pack_multiplicities, sigma_split_pack_multiplicities, xor_8_multiplicities,
+    range_k_multiplicities, round_split_pack_multiplicities, sigma_split_pack_multiplicities,
 };
-use crate::preprocessed::{
-    generate_preprocessed_trace, maj_ch_log_size, preprocessed_log_sizes, LOG_SIZE_16,
-};
+use crate::preprocessed::{generate_preprocessed_trace, preprocessed_log_sizes, LOG_SIZE_16};
 use crate::trace::Layout;
 use crate::types::Sha256Witness;
 
@@ -137,9 +133,6 @@ fn layout(
 pub fn flatten_claimed_sums(claim: &InteractionClaim) -> Vec<QM31> {
     let mut out = Vec::new();
     out.push(claim.sha256.claimed_sum);
-    out.extend(claim.decode.iter().map(|c| c.claimed_sum));
-    out.push(claim.maj_ch.claimed_sum);
-    out.push(claim.xor_8.claimed_sum);
     out.extend(claim.round_split_pack.iter().map(|c| c.claimed_sum));
     out.extend(claim.sigma_split_pack.iter().map(|c| c.claimed_sum));
     out.extend(claim.range.iter().map(|c| c.claimed_sum));
@@ -489,11 +482,8 @@ impl Air for Sha256Prover<'_> {
 
 impl AirProver for Sha256Prover<'_> {
     fn max_log_size(&self) -> u32 {
-        // The packed Maj/Ch table (`3W` rows) is the largest committed domain;
-        // it dominates `LOG_SIZE_16` and the trace's own `log_n_rows`.
-        maj_ch_log_size(self.group_width)
-            .max(LOG_SIZE_16)
-            .max(self.log_n_rows)
+        let _ = self.group_width;
+        LOG_SIZE_16.max(self.log_n_rows)
     }
 
     fn store_polynomial_coefficients(&self) -> bool {
@@ -918,21 +908,8 @@ fn build_base_trace(
         base_trace.push(CircleEvaluation::new(sha_domain, col));
     }
 
+    let _ = group_width;
     // Multiplicity columns — same order as `Sha256Components::component_provers`.
-    for &(f, h) in DECODE_TABLES {
-        let mults = decode_multiplicities(witness, f, h);
-        base_trace.push(mult_col_to_eval(&mults, LOG_SIZE_16));
-    }
-    {
-        let mc = maj_ch_multiplicities(witness, group_width);
-        let log_size = maj_ch_log_size(group_width);
-        base_trace.push(mult_col_to_eval(&mc.maj, log_size));
-        base_trace.push(mult_col_to_eval(&mc.ch, log_size));
-    }
-    {
-        let mults = xor_8_multiplicities(witness);
-        base_trace.push(mult_col_to_eval(&mults, LOG_SIZE_16));
-    }
     for &(p, h) in ROUND_SPLIT_TABLES {
         let mults = round_split_pack_multiplicities(witness, p, h);
         base_trace.push(mult_col_to_eval(&mults, LOG_SIZE_16));
@@ -956,12 +933,7 @@ fn base_trace_log_sizes(log_n_rows: u32, group_width: u32, n_field_cols: usize) 
     // Base columns + the dynamic credential-field byte tail, all at the
     // trace's `log_n_rows`. Empty exposure leaves this at `Layout::TOTAL_COLS`.
     let mut out = vec![log_n_rows; Layout::total_cols_with_fields(n_field_cols)];
-    // 8 decode mults, each at log_size 16.
-    out.extend(std::iter::repeat_n(LOG_SIZE_16, DECODE_TABLES.len()));
-    // 2 Maj/Ch mults, each at log_size 3W.
-    out.extend(std::iter::repeat_n(maj_ch_log_size(group_width), 2));
-    // xor_8 mult.
-    out.push(LOG_SIZE_16);
+    let _ = group_width;
     // 4 round + 4 σ split-pack mults.
     out.extend(std::iter::repeat_n(LOG_SIZE_16, ROUND_SPLIT_TABLES.len()));
     out.extend(std::iter::repeat_n(LOG_SIZE_16, SIGMA_SPLIT_TABLES.len()));
@@ -989,26 +961,14 @@ fn interaction_trace_log_sizes(
     const EXT: usize = SECURE_EXTENSION_DEGREE;
 
     // Sha256Eval consumer: `sha_lookups_per_row(expose_digest, field_exposure)`
-    // lookup sites per row (W=6: 106, plus the digest yield when that provider
+    // lookup sites per row (W=6 hybrid: 66, plus the digest yield when that provider
     // is on, plus the field provider's two `Range16` byte range-checks per
     // exposed byte column and one yield per exposed window byte) → `ceil(n/2)`
     // paired columns. Sized at log_n_rows. See `interaction::sha256_interaction`
     // for the per-row site breakdown.
     let sha_cols = num_paired_cols(sha_lookups_per_row(expose_digest, field_exposure));
     out.extend(std::iter::repeat_n(log_n_rows, sha_cols * EXT));
-    // 8 decode producers: 1 lookup each → 1 column each at log_size 16.
-    for _ in DECODE_TABLES {
-        out.extend(std::iter::repeat_n(LOG_SIZE_16, num_paired_cols(1) * EXT));
-    }
-    // Maj/Ch: 2 lookups → 1 paired column at log_size 3W.
-    out.extend(std::iter::repeat_n(
-        maj_ch_log_size(group_width),
-        num_paired_cols(2) * EXT,
-    ));
-    // xor_8: 1 lookup → 1 column at log_size 16. Under the GKR spike this
-    // producer-side LogUp column is replaced by the side GKR argument.
-    #[cfg(not(feature = "gkr-spike"))]
-    out.extend(std::iter::repeat_n(LOG_SIZE_16, num_paired_cols(1) * EXT));
+    let _ = group_width;
     // 4 round split-pack: 1 lookup each.
     for _ in ROUND_SPLIT_TABLES {
         out.extend(std::iter::repeat_n(LOG_SIZE_16, num_paired_cols(1) * EXT));
@@ -1037,9 +997,6 @@ const fn num_paired_cols(n_lookups: usize) -> usize {
 /// Aggregate of every `FrameworkComponent` in the proof, in commit order.
 struct Sha256Components {
     sha256: FrameworkComponent<Sha256Eval>,
-    decode: Vec<FrameworkComponent<SigmaDecodeEval>>, // 8
-    maj_ch: FrameworkComponent<MajChEval>,
-    xor_8: FrameworkComponent<Xor8Eval>,
     round_split_pack: Vec<FrameworkComponent<RoundSplitPackEval>>, // 4
     sigma_split_pack: Vec<FrameworkComponent<SigmaSplitPackEval>>, // 4
     range: Vec<FrameworkComponent<RangeKEval>>,                    // 4
@@ -1070,35 +1027,7 @@ impl Sha256Components {
             claim.sha256.claimed_sum,
         );
 
-        let mut decode = Vec::with_capacity(8);
-        for (i, &(f, h)) in DECODE_TABLES.iter().enumerate() {
-            decode.push(FrameworkComponent::new(
-                allocator,
-                SigmaDecodeEval {
-                    log_size: LOG_SIZE_16,
-                    f,
-                    half: h,
-                    relations: relations.clone(),
-                },
-                claim.decode[i].claimed_sum,
-            ));
-        }
-        let maj_ch = FrameworkComponent::new(
-            allocator,
-            MajChEval {
-                log_size: maj_ch_log_size(group_width),
-                relations: relations.clone(),
-            },
-            claim.maj_ch.claimed_sum,
-        );
-        let xor_8 = FrameworkComponent::new(
-            allocator,
-            Xor8Eval {
-                log_size: LOG_SIZE_16,
-                relations: relations.clone(),
-            },
-            claim.xor_8.claimed_sum,
-        );
+        let _ = group_width;
         let mut round_split_pack = Vec::with_capacity(4);
         for (i, &(p, h)) in ROUND_SPLIT_TABLES.iter().enumerate() {
             round_split_pack.push(FrameworkComponent::new(
@@ -1140,9 +1069,6 @@ impl Sha256Components {
 
         Self {
             sha256,
-            decode,
-            maj_ch,
-            xor_8,
             round_split_pack,
             sigma_split_pack,
             range,
@@ -1154,9 +1080,6 @@ impl Sha256Components {
     fn components(&self) -> Vec<&dyn Component> {
         let mut out: Vec<&dyn Component> = Vec::new();
         out.push(&self.sha256);
-        out.extend(self.decode.iter().map(|c| c as &dyn Component));
-        out.push(&self.maj_ch);
-        out.push(&self.xor_8);
         out.extend(self.round_split_pack.iter().map(|c| c as &dyn Component));
         out.extend(self.sigma_split_pack.iter().map(|c| c as &dyn Component));
         out.extend(self.range.iter().map(|c| c as &dyn Component));
@@ -1168,13 +1091,6 @@ impl Sha256Components {
     fn component_provers(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
         let mut out: Vec<&dyn ComponentProver<SimdBackend>> = Vec::new();
         out.push(&self.sha256);
-        out.extend(
-            self.decode
-                .iter()
-                .map(|c| c as &dyn ComponentProver<SimdBackend>),
-        );
-        out.push(&self.maj_ch);
-        out.push(&self.xor_8);
         out.extend(
             self.round_split_pack
                 .iter()

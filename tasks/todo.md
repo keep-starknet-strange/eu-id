@@ -1,3 +1,207 @@
+# WO-A3 Hybrid SHA Implementation
+
+Source of truth: `/Users/lucas/eu-id/tasks/parity/WO-A3-hybrid-sha-impl.md`.
+Worktree: `/Users/lucas/eu-id/.claude/worktrees/a3-hybrid-sha` on `feat/a3-hybrid-sha`.
+Base: `05e7dd51` (`perf/a1r-typed-mults-redo`), because WO-A3 must land after WO-A1R.
+Scope guard: edit SHA only; never touch P-256, predicates, proof-format/versioning, additions/carry logic, split-pack tables, range_k tables, or SHA degree bounds.
+
+- [x] Read WO-A3, A2 report, A2 Phase 2 formulas, current SHA constraints/trace layout, and lessons.
+- [x] Create post-A1R worktree and branch.
+- [x] Phase 0: run fresh shape dump and record SHA/table cells.
+- [x] Phase 0: run `BM_ShaZK_equiv/{1,33}` single-thread baseline.
+- [x] Phase 0: recompute hybrid projection and G0 go/no-go.
+- [x] If G0 fails or formulas are ambiguous, file mailbox question and schedule a wakeup.
+- [x] Phase 1: write layout manifest, bit-column plan, degree worksheet, relation diff, and count estimate before code.
+- [x] Phase 2 S1: implement Maj/Ch bit gadgets, tests, gates, bench checkpoint.
+- [x] Phase 2 S2: implement Sigma/sigma bit gadgets, tests, gates, bench checkpoint.
+- [x] Phase 2 S3: delete proof-path xor_8/decode/MajCh table paths, tests, gates, bench checkpoint.
+- [x] Phase 3: final accounting, perf-log rows, `tasks/parity/STATUS.md`.
+
+## Review
+
+- Started from A1R commit `05e7dd51`, where SHA has 19 typed `RelationEntry::base`
+  sites and no SHA-local `RelationEntry::new` sites.
+- Required gadget formulas are only the A2 Phase 2 formulas: booleanity, xor2/xor3,
+  Ch, Maj, and limb-add/recomposition. WO-A3 keeps additions/carry logic, split-pack,
+  and range_k unchanged.
+- Phase 0 shape dump (`RAYON_NUM_THREADS=1 cargo test -p eu-id-prover --release shape_dump -- --ignored --nocapture`):
+  SHA module remains `13,843,104` cells, with `6,292,784` preprocessed,
+  `1,749,680` trace, and `5,800,640` interaction cells. The expensive table floor
+  is unchanged from A2: decode `5,242,880`, maj_ch `2,883,584`, xor_8 `524,288`,
+  total removed-by-hybrid table cells `8,650,752`.
+- Phase 0 baselines (`RAYON_NUM_THREADS=1 cargo bench -p eu-id-prover --bench longfellow_equiv_bench`):
+  - `BM_ShaZK_equiv/1/prove`: `1.0113 s`; verify `619.67 us`.
+  - `BM_ShaZK_equiv/33/prove`: `1.1028 s`; verify `618.97 us`.
+- G0 arithmetic:
+  - Marginal/block: `(1102.8 - 1011.3) / 32 = 2.859375 ms/block`.
+  - Fixed floor: `1011.3 - 2.859375 = 1008.440625 ms`.
+  - Hybrid removal saving: `8,650,752 * 72 ns = 622.854144 ms`.
+  - Added bit-gadget cost: `11,264 * 72 ns = 0.811008 ms/block`.
+  - Projected hybrid at 1 block: `1011.3 - 622.854144 + 0.811008 = 389.256864 ms`.
+  - G0 speedup: `1011.3 / 389.256864 = 2.60x`, which clears the `>= 1.5x` gate.
+
+## Phase 1 Design Artifact
+
+### Layout manifest
+
+Current one-row-per-round trace layout:
+
+- `Layout::TOTAL_COLS = 349`; base trace reports 380 columns after dynamic exposure.
+- Round family currently carries 136 columns:
+  - 24 limb/carry columns before decode/table witnesses.
+  - 48 sigma-decode table witness columns (`2 * SIGMA_DECODE_COLS`).
+  - 64 Maj/Ch packed-group table witness columns (`ROUND_MAJ_CH_OPERANDS * GROUPS_PER_ROUND_PARTITION`).
+- Schedule entry family currently carries 62 columns:
+  - 6 limb/carry columns.
+  - 48 lower-sigma decode table witness columns.
+  - 8 sigma-input split-pack columns. These stay.
+
+Hybrid deletes the table-witness portions:
+
+- Remove round sigma-decode witnesses: `-48` trace columns.
+- Remove round Maj/Ch packed-group witnesses: `-64` trace columns.
+- Remove schedule sigma-decode witnesses: `-48` trace columns.
+- Keep all limb-addition, carry, round split-pack, sigma input split-pack, and range columns.
+- Remove producer multiplicity/base/interactions for the 8 decode tables, the packed Maj/Ch
+  table, and xor_8. Keep round split-pack, sigma split-pack, range_k, digest, and field
+  relations.
+
+### Bit-column plan
+
+Conservative patchable plan, matching the WO wording that every decomposed operand bit is
+committed once and boolean-constrained:
+
+- Round rows:
+  - Input operand bits: `a,b,c,e,f,g = 6 * 32 = 192` bit columns.
+  - Output gadget bits: `Sigma0,Sigma1,Maj,Ch = 4 * 32 = 128` bit columns.
+  - Total round bit columns: `320`.
+  - Recompose `a,b,c,e,f,g` bits to the same round words currently feeding split-pack/table
+    constraints. Recompose output bits to existing `sigma0`, `sigma1`, `maj`, and `ch`
+    limb columns.
+  - Rotations are pure column wiring over the operand bit columns; no rotate tables.
+- Schedule rows:
+  - Input operand bits: `W[t-15],W[t-2] = 2 * 32 = 64` bit columns.
+  - Output gadget bits: `sigma0,sigma1 = 2 * 32 = 64` bit columns.
+  - Total schedule bit columns: `128`.
+  - Recompose active schedule outputs to existing `s0` and `s1` limb columns. Keep existing
+    sigma input split-pack lookups for `W[t-15]` and `W[t-2]`.
+
+The A2 estimate counted only output gadget bits (`128 * 64 + 64 * 48 = 11,264 cells/block`).
+This conservative plan adds operand bits too:
+
+- Round cells/block: `320 * 64 = 20,480`.
+- Schedule cells/block: `128 * 48 = 6,144`.
+- Total bit cells/block: `26,624`.
+- Drift from A2 estimate: `26,624 / 11,264 = 2.36x`, which exceeds the WO's `>2x`
+  reconcile threshold even though the total payoff remains strong.
+
+Projected payoff with conservative bit cells:
+
+- Added bit-gadget cost: `26,624 * 72 ns = 1.916928 ms/block`.
+- Projected hybrid at 1 block: `1011.3 - 622.854144 + 1.916928 = 390.362784 ms`.
+- Projected G0 speedup remains `1011.3 / 390.362784 = 2.59x`.
+
+### Degree worksheet
+
+Allowed formulas from A2 Phase 2:
+
+- Booleanity: `x^2 - x`, degree 2.
+- 2-way XOR: `x + y - 2xy`, degree 2.
+- 3-way XOR: `x + y + z - 2(xy + yz + zx) + 4xyz`, degree 3.
+- `Ch(e,f,g) = e*f + (1-e)*g`, degree 2.
+- `Maj(a,b,c) = a*b + a*c + b*c - 2*a*b*c`, degree 3.
+- Recomposition to existing 16-bit limbs is linear in bit columns.
+
+Degree-sensitive selector plan:
+
+- Do not multiply degree-3 sigma/Maj formulas by `gate_sched` or another non-constant selector.
+  That would exceed the current `log_size + 1` degree bound.
+- Prefer ungated formula constraints for rows where the input/output bit columns are live.
+- Gate only linear recomposition constraints to limb columns. `enabler * linear` is degree 2;
+  `gate_sched * linear` is degree 3 because `gate_sched = enabler * is_sched`.
+- Schedule sigma formula constraints are the unsettled point: if they are constrained ungated
+  for all rows, inactive `t < 16` rows can carry formula-valid sigma output bits that are not
+  recomposed into `s0/s1`. That is degree-safe but needs confirmation as a soundness/layout
+  contract. Gating the degree-3 formula directly is not allowed.
+
+### Relation contract diff
+
+Consumer lookup removals from `Sha256Eval` / interaction trace:
+
+- Remove all `wire_sigma_decode` / `write_sigma_decode_lookups` sites:
+  - Round family: 2 sigma wirings per row, 12 lookup slots.
+  - Schedule family: 2 lower-sigma wirings on `t >= 16`, 12 reserved lookup slots.
+- Remove packed Maj/Ch consumer sites: 8 Maj + 8 Ch lookup slots per row.
+- New `SHA_LOOKUPS_PER_ROW_BASE` target after table deletion: `106 - 12 - 12 - 16 = 66`
+  before digest/field exposure additions.
+
+Producer/component removals:
+
+- Delete 8 `SigmaDecodeEval` producer components and their multiplicity columns.
+- Delete `MajChEval` and its 2 multiplicity columns.
+- Delete `Xor8Eval` and its multiplicity column, including the `gkr-spike` xor_8 side path.
+- Remove `InteractionClaim.decode`, `InteractionClaim.maj_ch`, and `InteractionClaim.xor_8`;
+  update `flatten_claimed_sums`, layout log-size accounting, component order, preprocessed IDs,
+  proof docs, and serialization round trips accordingly.
+
+Kept relations/components:
+
+- `RoundSplitPackEval`, `SigmaSplitPackEval`, and all `RangeKEval` components.
+- Existing SHA limb additions and carry range checks.
+- Digest and field exposure providers.
+
+### Stop/reconcile item
+
+Before coding, ask Claude whether the conservative committed operand-bit plan is the intended
+WO-A3 design or whether the A2 estimate assumed a valid reuse path that avoids committing input
+operand bits. Also confirm the degree-safe schedule-sigma strategy: ungated formula constraints
+with recomposition gated only on `t >= 16`, versus an alternate selector arrangement.
+
+Filed `/Users/lucas/eu-id/tasks/parity/mailbox/questions/Q-A3-001-hybrid-bit-plan-degree-and-count.md`
+and scheduled the thread heartbeat `check-wo-a3-claude-mailbox-answer` to check for the answer.
+
+Claude answered Q-A3-001 on 2026-07-04. The answer approved the degree-safe schedule plan:
+sigma formulas are ungated over boolean bit columns, and only the linear `s0`/`s1`
+recomposition is gated on active schedule rows. The answer also recommended reusing only
+`a`, `e`, and `W` bit columns with row offsets for `b/c/f/g`.
+
+During implementation, direct selector expressions for `b/c/f/g` inside Maj/Ch would have
+multiplied the degree-3 formulas past the SHA degree budget. The landed design therefore
+duplicates committed operand bits for `b/c/f/g` and constrains them back to shifted `a/e`
+bits with selector-gated linear aliases. This costs more trace columns than the ideal reuse
+plan but preserves degree without changing split-pack, range, additions, or carry logic.
+
+## Phase 2/3 Review
+
+- Trace layout moved from 349 to 493 SHA columns. New committed columns are W bits,
+  six round operand bit columns (`a,b,c,e,f,g`), packed Maj/Ch output groups, and
+  lower-sigma output bits for schedule rows.
+- Proof-path decode, MajCh, and xor_8 table producers/consumers were removed. The SHA
+  main interaction budget moved from 106 to 66 lookup slots per row. Preprocessed SHA
+  columns moved from 94 to 46, and SHA component count moved from 23 to 13.
+- Schedule lower-sigma output bits are filled for every domain row, including wraparound
+  and padding rows, so ungated formula constraints always have satisfying witnesses.
+- Shape dump after implementation:
+  - SHA standalone STARK proof bytes: `55,817`.
+  - SHA cells: `13,843,104 -> 5,200,544` (`-8,642,560`, `-62.43%`).
+  - Total identity cells: `37,500,240 -> 28,857,680` (`-8,642,560`, `-23.05%`).
+- Benchmarks after implementation (`RAYON_NUM_THREADS=1`):
+  - `BM_ShaZK_equiv/1/prove`: `1.0113 s -> 327.12 ms` (`3.09x`, `-67.65%`).
+  - `BM_ShaZK_equiv/1/verify`: `619.67 us -> 679.37 us` (`+9.63%`).
+  - `BM_ShaZK_equiv/33/prove`: `1.1028 s -> 423.85 ms` (`2.60x`, `-61.56%`).
+  - `BM_ShaZK_equiv/33/verify`: `618.97 us -> 683.94 us` (`+10.50%`).
+- Verification completed so far:
+  - `rtk proxy cargo check -p stwo-sha256`: passed.
+  - `rtk proxy cargo test -p stwo-sha256 --no-run`: passed.
+  - `rtk proxy cargo test -p stwo-sha256`: passed.
+  - `rtk proxy cargo test -p stwo-sha256 --release prove_and_verify_abc -- --exact --ignored --nocapture`: passed.
+  - `rtk proxy env RAYON_NUM_THREADS=1 cargo test -p eu-id-prover --release shape_dump -- --ignored --nocapture`: passed.
+  - `rtk proxy cargo fmt --all -- --check`: passed.
+  - `rtk proxy cargo clippy -p stwo-sha256 --lib -- -D warnings`: passed.
+  - `rtk proxy env RAYON_NUM_THREADS=1 cargo bench -p eu-id-prover --bench longfellow_equiv_bench -- 'BM_ShaZK_equiv/1/'`: passed.
+  - `rtk proxy env RAYON_NUM_THREADS=1 cargo bench -p eu-id-prover --bench longfellow_equiv_bench -- 'BM_ShaZK_equiv/33/'`: passed.
+  - `rtk proxy cargo test -p eu-id-prover --release --test nonce_signature -- --include-ignored`: passed, 7 passed.
+
 # WO-A1R Typed Multiplicity Migration Redo
 
 Source of truth: `tasks/parity/WO-A1R-typed-mults-redo.md`.
