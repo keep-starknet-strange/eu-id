@@ -141,6 +141,46 @@ the main checkout.
 - Phase 4 report-driver perf (`BENCH_ITERS=3`, `RAYON_NUM_THREADS=1`): legacy `pipeline_e2e` prove `4817 ms`, verify `39 ms`, proof `3,916,615` bytes; default coprocessor `pipeline_e2e` prove `2515 ms`, verify `40 ms`, proof `1,240,046` bytes. Proof-byte swing is `-2,676,569` bytes; verify swing is `+1 ms`.
 - P256 AIR retirement audit: default `eu-id-prover` identity composition has no `P256Prover`/`P256Verifier` modules; the constructors in `src/lib.rs` are under `#[cfg(not(feature = "ec-coprocessor"))]`. Remaining `stwo-p256` references are legacy `--no-default-features` product proof code, statement/type/native ECDSA helpers, isolated mdoc AIR profile, `shape_dump`, standalone benches, tests, and `eu-id-ffi`'s standalone P256 benchmark.
 
+# WO-A1R Typed Multiplicity Migration Redo
+
+Source of truth: `tasks/parity/WO-A1R-typed-mults-redo.md`.
+Worktree: `/Users/lucas/eu-id/.claude/worktrees/a1r-typed-mults-redo` on `perf/a1r-typed-mults-redo`.
+Base: `feat/proof-reductions` because local `main` still pins Stwo `e128672`, while this branch has the post-rotation typed constructor API required by the WO.
+Scope: only `crates/stwo-sha256/` `RelationEntry::new` call sites, a focused structural guard, and this task log.
+
+- [x] Detect and re-plan around the stale local `main` dependency pin mismatch.
+- [x] Inventory all 19 remaining SHA `RelationEntry::new` call sites.
+- [x] Add a focused structural regression that fails while generic SHA relation constructors remain.
+- [x] Convert base-field multiplicities to typed constructors without changing constraints.
+- [x] Verify no SHA-local `RelationEntry::new` call sites remain.
+- [ ] Run required proof, clippy, fmt, and benchmark gates.
+- [ ] Commit with per-constructor counts and record results here.
+
+## Review
+
+- Initial worktree from `main` was stopped because `Cargo.toml` pinned Stwo `e1286720...`,
+  where `RelationEntry::base` is unavailable. Redo worktree starts from
+  `feat/proof-reductions` at `fac1cd4c`, matching the task's post-rotation SHA scope.
+- Explorer inventory classified all 19 remaining SHA call sites as `RelationEntry::base`;
+  no genuinely extension-field multiplicities need to remain as `new`.
+- Red/green guard:
+  `rtk cargo test -p stwo-sha256 sha_air_uses_typed_relation_multiplicities -- --nocapture`
+  failed before migration, then passed after the 19 constructor swaps.
+- Source scan: `rtk grep "RelationEntry::new" crates/stwo-sha256/src` reports 0.
+- Verification so far:
+  - Fresh `rtk cargo test -p stwo-sha256`: passed, 135 passed / 13 ignored.
+  - Fresh `rtk cargo test -p stwo-sha256 --release prove_and_verify_abc -- --exact --ignored --nocapture`: passed.
+  - Fresh `rtk cargo test -p eu-id-prover --release --test nonce_signature -- --include-ignored`: passed, 7 passed.
+  - Fresh `rtk cargo fmt --all -- --check`: passed.
+  - `rtk cargo clippy -p stwo-sha256 --lib -- -D warnings`: passed.
+  - Fresh `rtk cargo clippy --workspace --all-targets -- -D warnings`: failed on pre-existing out-of-scope warnings in
+    `air-core`, `stwo-p256`, and old SHA test/helper code; this WO's scope forbids those unrelated fixes.
+- Benchmarks (`RAYON_NUM_THREADS=1 cargo bench -p eu-id-prover --bench longfellow_equiv_bench`):
+  - `BM_ShaZK_equiv/1/prove`: 1.0296 s -> 1.0194 s (-0.99%).
+  - `BM_ShaZK_equiv/1/verify`: 636.92 us -> 634.46 us (-0.39%).
+  - `BM_ShaZK_equiv/33/prove`: 1.1036 s -> 1.1151 s (+1.04%).
+  - `BM_ShaZK_equiv/33/verify`: 631.44 us -> 633.22 us (+0.28%).
+
 # Merge & Cleanup Plan
 
 Source of truth: `tasks/merge-plan.md`.

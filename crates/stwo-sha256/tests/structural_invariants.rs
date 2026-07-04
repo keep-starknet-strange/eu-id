@@ -13,6 +13,28 @@ use stwo_sha256::witness::{
     split_pack_multiplicities_for_block,
 };
 
+#[test]
+fn sha_air_uses_typed_relation_multiplicities() {
+    let sources = [
+        ("components.rs", include_str!("../src/components.rs")),
+        ("constraints.rs", include_str!("../src/constraints.rs")),
+    ];
+    let mut offenders = Vec::new();
+    for (file, source) in sources {
+        for (line_idx, line) in source.lines().enumerate() {
+            if line.contains("RelationEntry::new") {
+                offenders.push(format!("{file}:{}: {}", line_idx + 1, line.trim()));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "SHA relation entries should use unit/neg_unit/base constructors:\n{}",
+        offenders.join("\n")
+    );
+}
+
 /// Pin `Layout::TOTAL_COLS` to the claimed total so any future
 /// column-count drift fails closed against the test-plan value.
 ///
