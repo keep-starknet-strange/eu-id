@@ -51,8 +51,8 @@ use stwo::prover::poly::BitReversedOrder;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 
 use crate::components::{
-    all_preprocessed_column_ids, range_log_size, RANGE_TABLES, ROUND_SPLIT_TABLES,
-    SIGMA_SPLIT_TABLES,
+    all_preprocessed_column_ids, range_log_size, shared_table_preprocessed_column_ids,
+    RANGE_TABLES, ROUND_SPLIT_TABLES, SIGMA_SPLIT_TABLES,
 };
 use crate::tables::{build_round_split_pack_table, build_sigma_split_pack_table, RoundPartition};
 use crate::tables_local::{range_16, range_2, range_4, range_5};
@@ -76,6 +76,29 @@ pub type PreprocessedTrace = (
     Vec<PreProcessedColumnId>,
     Vec<u32>,
 );
+
+pub fn shared_table_preprocessed_log_sizes() -> Vec<u32> {
+    let mut log_sizes = Vec::new();
+    for _ in ROUND_SPLIT_TABLES {
+        log_sizes.extend(std::iter::repeat_n(LOG_SIZE_16, 5));
+    }
+    for _ in SIGMA_SPLIT_TABLES {
+        log_sizes.extend(std::iter::repeat_n(LOG_SIZE_16, 3));
+    }
+    for &kind in RANGE_TABLES {
+        log_sizes.push(range_log_size(kind));
+    }
+    log_sizes
+}
+
+pub fn generate_shared_table_preprocessed_trace() -> PreprocessedTrace {
+    let (evals, _ids, _log_sizes) = generate_shared_table_preprocessed_trace_uncached();
+    let ids = shared_table_preprocessed_column_ids();
+    let log_sizes = shared_table_preprocessed_log_sizes();
+    debug_assert_eq!(evals.len(), ids.len());
+    debug_assert_eq!(evals.len(), log_sizes.len());
+    (evals, ids, log_sizes)
+}
 
 static PREPROCESSED_TRACE_CACHE: OnceLock<Mutex<HashMap<(u32, u32), PreprocessedTrace>>> =
     OnceLock::new();
@@ -276,6 +299,60 @@ fn generate_preprocessed_trace_uncached(group_width: u32, log_n_rows: u32) -> Pr
     (evals, ids, log_sizes)
 }
 
+fn generate_shared_table_preprocessed_trace_uncached() -> PreprocessedTrace {
+    let mut evals = Vec::new();
+    let mut log_sizes = Vec::new();
+
+    for &(p, h) in ROUND_SPLIT_TABLES {
+        let domain = CanonicCoset::new(LOG_SIZE_16).circle_domain();
+        let groups = match p {
+            RoundPartition::Sigma0AndMaj => crate::partitions::SIGMA0_GROUPS,
+            RoundPartition::Sigma1AndCh => crate::partitions::SIGMA1_GROUPS,
+        };
+        let s_mask = p.s_mask();
+        let rows = build_round_split_pack_table(&groups, s_mask, h);
+        let key_col: BaseColumn = rows.iter().map(|r| BaseField::from(r.key)).collect();
+        let g0_col: BaseColumn = rows.iter().map(|r| BaseField::from(r.groups[0])).collect();
+        let g1_col: BaseColumn = rows.iter().map(|r| BaseField::from(r.groups[1])).collect();
+        let g2_col: BaseColumn = rows.iter().map(|r| BaseField::from(r.groups[2])).collect();
+        let g3_col: BaseColumn = rows.iter().map(|r| BaseField::from(r.groups[3])).collect();
+        for col in [key_col, g0_col, g1_col, g2_col, g3_col] {
+            evals.push(CircleEvaluation::new(domain, col));
+            log_sizes.push(LOG_SIZE_16);
+        }
+    }
+
+    for &(p, h) in SIGMA_SPLIT_TABLES {
+        let domain = CanonicCoset::new(LOG_SIZE_16).circle_domain();
+        let rows = build_sigma_split_pack_table(p.parts(), h);
+        let key_col: BaseColumn = rows.iter().map(|r| BaseField::from(r.key)).collect();
+        let s_col: BaseColumn = rows.iter().map(|r| BaseField::from(r.groups[0])).collect();
+        let sp_col: BaseColumn = rows.iter().map(|r| BaseField::from(r.groups[1])).collect();
+        for col in [key_col, s_col, sp_col] {
+            evals.push(CircleEvaluation::new(domain, col));
+            log_sizes.push(LOG_SIZE_16);
+        }
+    }
+
+    for &kind in RANGE_TABLES {
+        let log_size = range_log_size(kind);
+        let domain = CanonicCoset::new(log_size).circle_domain();
+        let rows = range_rows(kind);
+        let n_rows = 1usize << log_size;
+        let col: BaseColumn = (0..n_rows)
+            .map(|i| BaseField::from(rows.get(i).copied().unwrap_or(0)))
+            .collect();
+        evals.push(CircleEvaluation::new(domain, col));
+        log_sizes.push(log_size);
+    }
+
+    (
+        evals,
+        shared_table_preprocessed_column_ids(),
+        shared_table_preprocessed_log_sizes(),
+    )
+}
+
 /// Row content of one `Range_k` preprocessed table — the values `[0, k)`
 /// from `crate::tables_local`. Returned in canonical order so the
 /// preprocessed trace and the multiplicity column line up by index.
@@ -470,5 +547,33 @@ mod tests {
             &ssp.iter().map(|r| r.groups[1]).collect::<Vec<_>>(),
             "sigma_split.sp",
         );
+    }
+
+    #[test]
+    fn shared_table_columns_match_regular_table_content_with_distinct_ids() {
+        let (regular_evals, regular_ids, regular_log_sizes) =
+            generate_preprocessed_trace(MAX_ROUND_GROUP_BITS, LOG_N_LANES);
+        let (shared_evals, shared_ids, shared_log_sizes) =
+            generate_shared_table_preprocessed_trace();
+
+        assert_eq!(shared_evals.len(), 36);
+        assert_eq!(shared_ids.len(), shared_evals.len());
+        assert_eq!(shared_log_sizes.len(), shared_evals.len());
+
+        for i in 0..shared_evals.len() {
+            assert_ne!(
+                shared_ids[i], regular_ids[i],
+                "shared table id {i} must use the sha_shared namespace",
+            );
+            assert_eq!(
+                shared_log_sizes[i], regular_log_sizes[i],
+                "shared table log size {i}",
+            );
+            assert_eq!(
+                shared_evals[i].values.as_slice(),
+                regular_evals[i].values.as_slice(),
+                "shared table content {i}",
+            );
+        }
     }
 }

@@ -166,7 +166,7 @@ impl InteractionClaim {
 /// One (numerator, denominator) at a particular row. Numerator carries
 /// the lookup's multiplicity (positive on the consumer side, negative on
 /// the producer); denominator is `combine(values) = sum α^i · v_i − z`.
-type Frac = (SecureField, SecureField);
+pub(crate) type Frac = (SecureField, SecureField);
 
 /// Build one interaction trace for a component from its list of
 /// row-iterators. `lookups[k]` is the k-th lookup the component fires —
@@ -174,7 +174,7 @@ type Frac = (SecureField, SecureField);
 ///
 /// Pairs of consecutive lookups share one interaction column, matching
 /// `finalize_logup_in_pairs`. Odd counts get a final single-lookup column.
-fn build_interaction_columns(
+pub(crate) fn build_interaction_columns(
     log_size: u32,
     lookups: Vec<Vec<Frac>>,
 ) -> (
@@ -248,7 +248,7 @@ fn build_interaction_columns(
 /// Build one (numerator = -mult, denominator = combine(row)) per row of a
 /// producer-side table. The values arg gives the row content as
 /// `[F; N]` per row.
-fn producer_frac_column<R, const N: usize>(
+pub(crate) fn producer_frac_column<R, const N: usize>(
     rel: &R,
     mults: &[u32],
     rows: impl Iterator<Item = [BaseField; N]>,
@@ -929,6 +929,51 @@ pub fn generate_interaction_trace(
     Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     InteractionClaim,
 ) {
+    generate_interaction_trace_inner(
+        relations,
+        witness,
+        sha256_log_size,
+        group_width,
+        expose_digest,
+        field_exposure,
+        true,
+    )
+}
+
+pub fn generate_consumer_interaction_trace(
+    relations: &Sha256Relations,
+    witness: &Sha256Witness,
+    sha256_log_size: u32,
+    group_width: u32,
+    expose_digest: bool,
+    field_exposure: &FieldExposure,
+) -> (
+    Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
+    InteractionClaim,
+) {
+    generate_interaction_trace_inner(
+        relations,
+        witness,
+        sha256_log_size,
+        group_width,
+        expose_digest,
+        field_exposure,
+        false,
+    )
+}
+
+fn generate_interaction_trace_inner(
+    relations: &Sha256Relations,
+    witness: &Sha256Witness,
+    sha256_log_size: u32,
+    group_width: u32,
+    expose_digest: bool,
+    field_exposure: &FieldExposure,
+    include_table_providers: bool,
+) -> (
+    Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
+    InteractionClaim,
+) {
     let mut combined = Vec::new();
 
     // Sha256Eval consumer first — its slot in the proof's component list.
@@ -950,24 +995,30 @@ pub fn generate_interaction_trace(
     let _ = group_width;
     // 4 round-side split-pack.
     let mut round_split_pack = Vec::with_capacity(4);
-    for &(p, h) in ROUND_SPLIT_TABLES {
-        let (t, s) = round_split_pack_interaction(relations, witness, p, h);
-        combined.extend(t);
-        round_split_pack.push(ComponentClaim { claimed_sum: s });
+    if include_table_providers {
+        for &(p, h) in ROUND_SPLIT_TABLES {
+            let (t, s) = round_split_pack_interaction(relations, witness, p, h);
+            combined.extend(t);
+            round_split_pack.push(ComponentClaim { claimed_sum: s });
+        }
     }
     // 4 σ-side split-pack.
     let mut sigma_split_pack = Vec::with_capacity(4);
-    for &(p, h) in SIGMA_SPLIT_TABLES {
-        let (t, s) = sigma_split_pack_interaction(relations, witness, p, h);
-        combined.extend(t);
-        sigma_split_pack.push(ComponentClaim { claimed_sum: s });
+    if include_table_providers {
+        for &(p, h) in SIGMA_SPLIT_TABLES {
+            let (t, s) = sigma_split_pack_interaction(relations, witness, p, h);
+            combined.extend(t);
+            sigma_split_pack.push(ComponentClaim { claimed_sum: s });
+        }
     }
     // 4 range producers (Range_2, Range_4, Range_5, Range_16).
     let mut range = Vec::with_capacity(4);
-    for &kind in RANGE_TABLES {
-        let (t, s) = range_k_interaction(relations, witness, kind, field_exposure);
-        combined.extend(t);
-        range.push(ComponentClaim { claimed_sum: s });
+    if include_table_providers {
+        for &kind in RANGE_TABLES {
+            let (t, s) = range_k_interaction(relations, witness, kind, field_exposure);
+            combined.extend(t);
+            range.push(ComponentClaim { claimed_sum: s });
+        }
     }
 
     let claim = InteractionClaim {

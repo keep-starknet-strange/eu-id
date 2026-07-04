@@ -50,6 +50,10 @@ use stwo_p256::{
 use stwo_sha256::air::{Sha256Prover, Sha256Verifier};
 use stwo_sha256::field_exposure::FieldExposure;
 use stwo_sha256::interaction::InteractionClaim as Sha256InteractionClaim;
+use stwo_sha256::relations::SharedShaTableRelations;
+use stwo_sha256::shared_tables::{
+    ShaTableMultiplicities, ShaTablesInteractionClaim, ShaTablesProver, ShaTablesVerifier,
+};
 use stwo_sha256::trace::min_log_size;
 use stwo_sha256::witness::compute_sha256_witness;
 
@@ -208,6 +212,7 @@ pub fn demo_mdoc_module_shapes() -> Result<Vec<MdocModuleShape>, Error> {
     let nat_digest = SharedDigestRelation::new();
     let birth_field = SharedFieldRelation::new();
     let nat_field = SharedFieldRelation::new();
+    let sha_table_relations = SharedShaTableRelations::new();
     #[cfg(not(feature = "ec-coprocessor"))]
     let issuer_scalar_z = SharedScalarZRelation::new();
     #[cfg(not(feature = "ec-coprocessor"))]
@@ -233,16 +238,27 @@ pub fn demo_mdoc_module_shapes() -> Result<Vec<MdocModuleShape>, Error> {
         .map_err(Error::P256Prepare)?
         .with_preprocessed_namespace("mdoc/device")
         .with_z_binding(device_scalar_z.clone());
+    let sha_table_multiplicities = ShaTableMultiplicities::from_consumers(&[
+        (&issuer_sha_witness, FieldExposure::empty()),
+        (&device_sha_witness, FieldExposure::empty()),
+        (&birth_sha_witness, birth_exposure.clone()),
+        (&nat_sha_witness, nat_exposure.clone()),
+    ]);
+    let sha_tables = ShaTablesProver::new(sha_table_multiplicities, sha_table_relations.clone());
     let issuer_sha = Sha256Prover::new(&issuer_sha_witness, shared_sha_log, SHA_GROUP_WIDTH)
+        .with_shared_tables(sha_table_relations.clone())
         .with_digest_handle(issuer_digest.clone());
     let device_sha = Sha256Prover::new(&device_sha_witness, shared_sha_log, SHA_GROUP_WIDTH)
+        .with_shared_tables(sha_table_relations.clone())
         .with_digest_handle(device_digest.clone());
     let birth_sha = Sha256Prover::new(&birth_sha_witness, shared_sha_log, SHA_GROUP_WIDTH)
+        .with_shared_tables(sha_table_relations.clone())
         .with_digest_handle(birth_digest.clone())
-        .with_field_handle(birth_exposure, birth_field.clone());
+        .with_field_handle(birth_exposure.clone(), birth_field.clone());
     let nat_sha = Sha256Prover::new(&nat_sha_witness, shared_sha_log, SHA_GROUP_WIDTH)
+        .with_shared_tables(sha_table_relations.clone())
         .with_digest_handle(nat_digest.clone())
-        .with_field_handle(nat_exposure, nat_field.clone());
+        .with_field_handle(nat_exposure.clone(), nat_field.clone());
 
     #[cfg(not(feature = "ec-coprocessor"))]
     let issuer_bridge_rows = crate::bridge_rows(&issuer_p256.proof_claim().public_inputs.instances);
@@ -306,6 +322,10 @@ pub fn demo_mdoc_module_shapes() -> Result<Vec<MdocModuleShape>, Error> {
     #[cfg(not(feature = "ec-coprocessor"))]
     let shapes = vec![
         MdocModuleShape {
+            name: "mdoc_sha_tables",
+            layout: sha_tables.layout(),
+        },
+        MdocModuleShape {
             name: "mdoc_issuer_p256",
             layout: issuer_p256.layout(),
         },
@@ -356,6 +376,10 @@ pub fn demo_mdoc_module_shapes() -> Result<Vec<MdocModuleShape>, Error> {
     ];
     #[cfg(feature = "ec-coprocessor")]
     let shapes = vec![
+        MdocModuleShape {
+            name: "mdoc_sha_tables",
+            layout: sha_tables.layout(),
+        },
         MdocModuleShape {
             name: "mdoc_issuer_sha",
             layout: issuer_sha.layout(),
@@ -1227,6 +1251,7 @@ fn policy_date_tuple(policy: &Policy) -> Result<(u16, u8, u8), MdocError> {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct MdocCircuitProof {
     pub stark_proof: StarkProof<Blake2sMerkleHasher>,
+    sha_tables_interaction_claim: ShaTablesInteractionClaim,
     #[cfg(not(feature = "ec-coprocessor"))]
     issuer_p256_claim: P256CurrentAirProofClaim,
     #[cfg(not(feature = "ec-coprocessor"))]
@@ -1602,6 +1627,7 @@ pub fn prove_mdoc_circuit(
     let nat_digest = SharedDigestRelation::new();
     let birth_field = SharedFieldRelation::new();
     let nat_field = SharedFieldRelation::new();
+    let sha_table_relations = SharedShaTableRelations::new();
     #[cfg(not(feature = "ec-coprocessor"))]
     let issuer_scalar_z = SharedScalarZRelation::new();
     #[cfg(not(feature = "ec-coprocessor"))]
@@ -1633,14 +1659,26 @@ pub fn prove_mdoc_circuit(
         .map_err(Error::P256Prepare)?
         .with_preprocessed_namespace("mdoc/device")
         .with_z_binding(device_scalar_z.clone());
+    let sha_table_multiplicities = ShaTableMultiplicities::from_consumers(&[
+        (&issuer_sha_witness, FieldExposure::empty()),
+        (&device_sha_witness, FieldExposure::empty()),
+        (&birth_sha_witness, birth_exposure.clone()),
+        (&nat_sha_witness, nat_exposure.clone()),
+    ]);
+    let mut sha_tables =
+        ShaTablesProver::new(sha_table_multiplicities, sha_table_relations.clone());
     let mut issuer_sha = Sha256Prover::new(&issuer_sha_witness, shared_sha_log, SHA_GROUP_WIDTH)
+        .with_shared_tables(sha_table_relations.clone())
         .with_digest_handle(issuer_digest.clone());
     let mut device_sha = Sha256Prover::new(&device_sha_witness, shared_sha_log, SHA_GROUP_WIDTH)
+        .with_shared_tables(sha_table_relations.clone())
         .with_digest_handle(device_digest.clone());
     let mut birth_sha = Sha256Prover::new(&birth_sha_witness, shared_sha_log, SHA_GROUP_WIDTH)
+        .with_shared_tables(sha_table_relations.clone())
         .with_digest_handle(birth_digest.clone())
         .with_field_handle(birth_exposure.clone(), birth_field.clone());
     let mut nat_sha = Sha256Prover::new(&nat_sha_witness, shared_sha_log, SHA_GROUP_WIDTH)
+        .with_shared_tables(sha_table_relations.clone())
         .with_digest_handle(nat_digest.clone())
         .with_field_handle(nat_exposure.clone(), nat_field.clone());
 
@@ -1711,7 +1749,8 @@ pub fn prove_mdoc_circuit(
     let config = crate::coprocessor_bridge_pcs_config();
     let stark_proof = {
         #[cfg(not(feature = "ec-coprocessor"))]
-        let mut modules: [&mut dyn AirProver; 12] = [
+        let mut modules: [&mut dyn AirProver; 13] = [
+            &mut sha_tables,
             &mut issuer_p256,
             &mut issuer_sha,
             &mut issuer_bridge,
@@ -1726,7 +1765,8 @@ pub fn prove_mdoc_circuit(
             &mut nat,
         ];
         #[cfg(feature = "ec-coprocessor")]
-        let mut modules: [&mut dyn AirProver; 11] = [
+        let mut modules: [&mut dyn AirProver; 12] = [
+            &mut sha_tables,
             &mut issuer_sha,
             &mut issuer_public_digest_bind,
             &mut device_sha,
@@ -1746,6 +1786,7 @@ pub fn prove_mdoc_circuit(
 
     Ok(MdocCircuitProof {
         stark_proof,
+        sha_tables_interaction_claim: sha_tables.interaction_claim().clone(),
         #[cfg(not(feature = "ec-coprocessor"))]
         issuer_p256_claim: issuer_p256.proof_claim().clone(),
         #[cfg(not(feature = "ec-coprocessor"))]
@@ -1818,6 +1859,7 @@ pub fn verify_mdoc_circuit(
     let nat_digest = SharedDigestRelation::new();
     let birth_field = SharedFieldRelation::new();
     let nat_field = SharedFieldRelation::new();
+    let sha_table_relations = SharedShaTableRelations::new();
     #[cfg(not(feature = "ec-coprocessor"))]
     let issuer_scalar_z = SharedScalarZRelation::new();
     #[cfg(not(feature = "ec-coprocessor"))]
@@ -1847,17 +1889,23 @@ pub fn verify_mdoc_circuit(
         });
     }
 
+    let mut sha_tables = ShaTablesVerifier::new(
+        proof.sha_tables_interaction_claim.clone(),
+        sha_table_relations.clone(),
+    );
     let mut issuer_sha = Sha256Verifier::new(
         proof.issuer_sha_log_n_rows,
         SHA_GROUP_WIDTH,
         proof.issuer_sha_interaction_claim.clone(),
     )
+    .with_shared_tables(sha_table_relations.clone())
     .with_digest_handle(issuer_digest.clone());
     let mut device_sha = Sha256Verifier::new(
         proof.device_sha_log_n_rows,
         SHA_GROUP_WIDTH,
         proof.device_sha_interaction_claim.clone(),
     )
+    .with_shared_tables(sha_table_relations.clone())
     .with_digest_handle(device_digest.clone());
 
     let birth_exposure = FieldExposure::from_preimage_windows(&[(
@@ -1875,6 +1923,7 @@ pub fn verify_mdoc_circuit(
         SHA_GROUP_WIDTH,
         proof.birth_sha_interaction_claim.clone(),
     )
+    .with_shared_tables(sha_table_relations.clone())
     .with_digest_handle(birth_digest.clone())
     .with_field_handle(birth_exposure, birth_field.clone());
     let mut nat_sha = Sha256Verifier::new(
@@ -1882,6 +1931,7 @@ pub fn verify_mdoc_circuit(
         SHA_GROUP_WIDTH,
         proof.nat_sha_interaction_claim.clone(),
     )
+    .with_shared_tables(sha_table_relations.clone())
     .with_digest_handle(nat_digest.clone())
     .with_field_handle(nat_exposure, nat_field.clone());
 
@@ -1940,7 +1990,8 @@ pub fn verify_mdoc_circuit(
     };
 
     #[cfg(not(feature = "ec-coprocessor"))]
-    let mut modules: [&mut dyn Air; 12] = [
+    let mut modules: [&mut dyn Air; 13] = [
+        &mut sha_tables,
         &mut issuer_p256,
         &mut issuer_sha,
         &mut issuer_bridge,
@@ -1955,7 +2006,8 @@ pub fn verify_mdoc_circuit(
         &mut nat,
     ];
     #[cfg(feature = "ec-coprocessor")]
-    let mut modules: [&mut dyn Air; 11] = [
+    let mut modules: [&mut dyn Air; 12] = [
+        &mut sha_tables,
         &mut issuer_sha,
         &mut issuer_public_digest_bind,
         &mut device_sha,
@@ -1969,6 +2021,42 @@ pub fn verify_mdoc_circuit(
         &mut coprocessor,
     ];
     air_core::verify(&mut modules, &proof.stark_proof).map_err(|e| Error::Verify(format!("{e:?}")))
+}
+
+#[cfg(test)]
+mod mdoc_sha_table_tests {
+    use super::*;
+
+    #[test]
+    fn mdoc_module_shape_starts_with_shared_sha_tables() {
+        let shapes = demo_mdoc_module_shapes().expect("mdoc shapes build");
+        assert_eq!(
+            shapes.first().map(|shape| shape.name),
+            Some("mdoc_sha_tables"),
+            "the shared SHA table provider must draw relations before SHA consumers",
+        );
+        #[cfg(not(feature = "ec-coprocessor"))]
+        assert_eq!(shapes.len(), 13);
+        #[cfg(feature = "ec-coprocessor")]
+        assert_eq!(shapes.len(), 12);
+    }
+
+    #[test]
+    #[ignore = "slow: proves isolated mdoc circuit profile"]
+    fn shared_sha_table_provider_claim_is_bound() {
+        let fixture = demo_mdoc_circuit_fixture();
+        let mut proof =
+            prove_mdoc_circuit(&fixture.extracted, &fixture.statement).expect("mdoc proves");
+        verify_mdoc_circuit(&proof, &fixture.statement).expect("mdoc verifies before tamper");
+
+        proof.sha_tables_interaction_claim.round_split_pack[0].claimed_sum =
+            -proof.sha_tables_interaction_claim.round_split_pack[0].claimed_sum;
+
+        assert!(
+            verify_mdoc_circuit(&proof, &fixture.statement).is_err(),
+            "tampered shared SHA table provider claim unexpectedly verified",
+        );
+    }
 }
 
 #[cfg(all(test, feature = "ec-coprocessor"))]

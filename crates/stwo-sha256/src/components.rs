@@ -58,10 +58,17 @@ pub use crate::relations::Sha256Relations;
 /// Keeps these from colliding with the ECDSA stream's tables when the
 /// integration crate combines both AIRs into one proof.
 pub const ID_PREFIX: &str = "sha256_";
+pub const SHARED_ID_PREFIX: &str = "sha_shared_";
 
 fn id(name: &str) -> PreProcessedColumnId {
     PreProcessedColumnId {
         id: format!("{ID_PREFIX}{name}"),
+    }
+}
+
+fn shared_id(name: &str) -> PreProcessedColumnId {
+    PreProcessedColumnId {
+        id: format!("{SHARED_ID_PREFIX}{name}"),
     }
 }
 
@@ -166,6 +173,10 @@ pub fn range_column_id(kind: RangeKind) -> PreProcessedColumnId {
     id(kind.tag())
 }
 
+pub fn shared_range_column_id(kind: RangeKind) -> PreProcessedColumnId {
+    shared_id(kind.tag())
+}
+
 /// Preprocessed-column ID of the single-cell `is_first_row` selector
 /// committed at the main `Sha256Eval` trace's `log_n_rows`. The selector
 /// is `1` at storage index `Layout::block_slot(0, log_n_rows) = 0` and
@@ -245,6 +256,20 @@ pub fn round_split_pack_column_ids(p: RoundPartition, h: Half16) -> [PreProcesse
     ]
 }
 
+pub fn shared_round_split_pack_column_ids(
+    p: RoundPartition,
+    h: Half16,
+) -> [PreProcessedColumnId; 5] {
+    let t = round_split_tag(p, h);
+    [
+        shared_id(&format!("{t}_key")),
+        shared_id(&format!("{t}_g0")),
+        shared_id(&format!("{t}_g1")),
+        shared_id(&format!("{t}_g2")),
+        shared_id(&format!("{t}_g3")),
+    ]
+}
+
 /// IDs of the 3 preprocessed columns of one σ-side split-and-pack table.
 /// Order: `(key, packed_s, packed_s_complement)` matching
 /// `crate::relations::SIGMA_SPLIT_PACK_REL_SIZE`.
@@ -254,6 +279,18 @@ pub fn sigma_split_pack_column_ids(p: LowerSigmaPartition, h: Half16) -> [PrePro
         id(&format!("{t}_key")),
         id(&format!("{t}_s")),
         id(&format!("{t}_sp")),
+    ]
+}
+
+pub fn shared_sigma_split_pack_column_ids(
+    p: LowerSigmaPartition,
+    h: Half16,
+) -> [PreProcessedColumnId; 3] {
+    let t = sigma_split_tag(p, h);
+    [
+        shared_id(&format!("{t}_key")),
+        shared_id(&format!("{t}_s")),
+        shared_id(&format!("{t}_sp")),
     ]
 }
 
@@ -473,6 +510,7 @@ pub struct RoundSplitPackEval {
     pub partition: RoundPartition,
     pub half: Half16,
     pub relations: Sha256Relations,
+    pub shared_tables: bool,
 }
 
 impl FrameworkEval for RoundSplitPackEval {
@@ -483,7 +521,11 @@ impl FrameworkEval for RoundSplitPackEval {
         self.log_size + 1
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let cols = round_split_pack_column_ids(self.partition, self.half);
+        let cols = if self.shared_tables {
+            shared_round_split_pack_column_ids(self.partition, self.half)
+        } else {
+            round_split_pack_column_ids(self.partition, self.half)
+        };
         let key = eval.get_preprocessed_column(cols[0].clone());
         let g0 = eval.get_preprocessed_column(cols[1].clone());
         let g1 = eval.get_preprocessed_column(cols[2].clone());
@@ -536,6 +578,7 @@ pub struct SigmaSplitPackEval {
     pub partition: LowerSigmaPartition,
     pub half: Half16,
     pub relations: Sha256Relations,
+    pub shared_tables: bool,
 }
 
 impl FrameworkEval for SigmaSplitPackEval {
@@ -546,7 +589,11 @@ impl FrameworkEval for SigmaSplitPackEval {
         self.log_size + 1
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let cols = sigma_split_pack_column_ids(self.partition, self.half);
+        let cols = if self.shared_tables {
+            shared_sigma_split_pack_column_ids(self.partition, self.half)
+        } else {
+            sigma_split_pack_column_ids(self.partition, self.half)
+        };
         let key = eval.get_preprocessed_column(cols[0].clone());
         let packed_s = eval.get_preprocessed_column(cols[1].clone());
         let packed_sp = eval.get_preprocessed_column(cols[2].clone());
@@ -612,6 +659,7 @@ pub struct RangeKEval {
     pub log_size: u32,
     pub kind: RangeKind,
     pub relations: Sha256Relations,
+    pub shared_tables: bool,
 }
 
 impl FrameworkEval for RangeKEval {
@@ -622,7 +670,11 @@ impl FrameworkEval for RangeKEval {
         self.log_size + 1
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let value = eval.get_preprocessed_column(range_column_id(self.kind));
+        let value = eval.get_preprocessed_column(if self.shared_tables {
+            shared_range_column_id(self.kind)
+        } else {
+            range_column_id(self.kind)
+        });
         let mult = eval.next_trace_mask();
         let neg = -mult;
 
@@ -681,6 +733,27 @@ pub fn all_preprocessed_column_ids() -> Vec<PreProcessedColumnId> {
     // indicators + schedule gate), also consumer-read via
     // `get_preprocessed_column` and sized to the main trace.
     out.extend(round_cyclic_column_ids());
+    out
+}
+
+pub fn consumer_preprocessed_column_ids() -> Vec<PreProcessedColumnId> {
+    let mut out = Vec::new();
+    out.push(is_first_row_column_id());
+    out.extend(round_cyclic_column_ids());
+    out
+}
+
+pub fn shared_table_preprocessed_column_ids() -> Vec<PreProcessedColumnId> {
+    let mut out = Vec::new();
+    for (p, h) in ROUND_SPLIT_TABLES {
+        out.extend(shared_round_split_pack_column_ids(*p, *h));
+    }
+    for (p, h) in SIGMA_SPLIT_TABLES {
+        out.extend(shared_sigma_split_pack_column_ids(*p, *h));
+    }
+    for &kind in RANGE_TABLES {
+        out.push(shared_range_column_id(kind));
+    }
     out
 }
 

@@ -65,6 +65,7 @@ pub mod native;
 pub mod partitions;
 pub mod preprocessed;
 pub mod relations;
+pub mod shared_tables;
 pub mod stark;
 pub mod tables;
 pub mod tables_local;
