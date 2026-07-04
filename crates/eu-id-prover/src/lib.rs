@@ -148,6 +148,7 @@ use predicates::{
 use stwo_p256::components::digest_bind::module::{
     DigestBindInteractionClaim, DigestBindProver, DigestBindVerifier,
 };
+#[cfg(any(not(feature = "ec-coprocessor"), test))]
 use stwo_p256::components::digest_bind::witness::DigestBindRow;
 #[cfg(not(feature = "ec-coprocessor"))]
 use stwo_p256::components::digest_bind::SharedScalarZRelation;
@@ -510,6 +511,7 @@ impl PublicStatement {
 
 /// Bridge trace size: enough rows for one active row per ECDSA instance, at the
 /// SIMD minimum of `2^4 = 16` rows.
+#[cfg(any(not(feature = "ec-coprocessor"), test))]
 fn bridge_log_size(n_instances: usize) -> u32 {
     let needed = (n_instances.max(1) as u32)
         .next_power_of_two()
@@ -542,6 +544,7 @@ fn credential_exposure() -> FieldExposure {
 
 /// Per-instance `(sig_id, z)` rows the bridge binds, sourced from the proven
 /// public instances.
+#[cfg(any(not(feature = "ec-coprocessor"), test))]
 fn bridge_rows(instances: &[PublicEcdsaInstance<M31>]) -> Vec<DigestBindRow> {
     instances
         .iter()
@@ -606,6 +609,29 @@ fn mix_coprocessor_statements(
     channel: &mut air_core::Ch,
     inputs: &[&stwo_p256::types::EcdsaVerifyInput],
 ) -> Result<(), String> {
+    match inputs {
+        [credential, nonce] => mix_coprocessor_tagged_statements(
+            channel,
+            &[
+                (b"credential".as_slice(), *credential),
+                (b"nonce".as_slice(), *nonce),
+            ],
+        ),
+        _ => {
+            let tagged: Vec<_> = inputs
+                .iter()
+                .map(|input| (b"extra".as_slice(), *input))
+                .collect();
+            mix_coprocessor_tagged_statements(channel, &tagged)
+        }
+    }
+}
+
+#[cfg(feature = "ec-coprocessor")]
+fn mix_coprocessor_tagged_statements(
+    channel: &mut air_core::Ch,
+    tagged_inputs: &[(&[u8], &stwo_p256::types::EcdsaVerifyInput)],
+) -> Result<(), String> {
     mix_channel_bytes(channel, b"eu-id-ec-coproc-v1");
     mix_channel_bytes(channel, b"s4-ecdsa-circuit-shape-v1");
     let shapes = ec_coprocessor::implemented_circuit_transcript_shapes_from_stwo()
@@ -621,13 +647,8 @@ fn mix_coprocessor_statements(
     }
 
     mix_channel_bytes(channel, b"eu-id-ec-coproc-statements-v2");
-    channel.mix_u64(inputs.len() as u64);
-    for (index, input) in inputs.iter().enumerate() {
-        let tag = match index {
-            0 => b"credential".as_slice(),
-            1 => b"nonce".as_slice(),
-            _ => b"extra".as_slice(),
-        };
+    channel.mix_u64(tagged_inputs.len() as u64);
+    for (tag, input) in tagged_inputs {
         mix_channel_bytes(channel, tag);
         for segment in ec_coprocessor::statement_transcript_segments_from_stwo(input)
             .map_err(|err| format!("{err:?}"))?
