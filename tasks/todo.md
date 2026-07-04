@@ -14,7 +14,7 @@ Source: `/Users/lucas/eu-id/tasks/parity/mailbox/answers/Q-M1-003.md`.
 - [x] Run default coprocessor verification and legacy `--no-default-features` verification.
 - [x] Run BENCH-LOCK default-on/off benches and append perf-log + STATUS rows.
 - [x] Mechanically audit remaining P256 AIR / `stwo-p256` references and document what stays behind legacy/diagnostic surfaces.
-- [ ] Commit the Phase 4 default-on series.
+- [x] Commit the Phase 4 default-on series.
 
 ## WO-M2 Nonce Coprocessor Plan
 
