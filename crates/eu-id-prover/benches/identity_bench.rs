@@ -95,9 +95,10 @@ fn bench_identity(c: &mut Criterion) {
         || {
             let proof = stages::prove_pipeline(&witness);
             let instances = stages::pipeline_instances(&proof);
+            let nonce_instances = stages::pipeline_nonce_instances(&proof);
             let proof_bytes = stages::pipeline_proof_bytes(&proof);
             (
-                move || stages::verify_pipeline(&proof, &instances),
+                move || stages::verify_pipeline(&proof, &instances, &nonce_instances),
                 proof_bytes,
             )
         },
@@ -110,8 +111,13 @@ fn bench_identity(c: &mut Criterion) {
         let issuer = IssuerKey::demo();
         group.bench_function("prove_identity", |b| {
             b.iter(|| {
-                prove_identity(&fixture.signed.credential, &issuer, &fixture.policy)
-                    .expect("identity proof generates")
+                prove_identity(
+                    &fixture.signed.credential,
+                    &issuer,
+                    &fixture.policy,
+                    &fixtures::demo_nonce_statement(),
+                )
+                .expect("identity proof generates")
             })
         });
         group.finish();

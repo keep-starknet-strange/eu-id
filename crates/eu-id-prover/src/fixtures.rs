@@ -25,12 +25,54 @@
 //! recomputes it from the witness + reference oracles, and the tests assert the
 //! two agree, so the catalogue can never silently drift from reality.
 
+use ecdsa::signature::Signer;
+use p256::ecdsa::{Signature as P256Signature, SigningKey};
 use predicates::{Date, DateOfBirth};
+use stwo_p256::types::{AffinePoint, Signature, U256};
 
 use crate::credential::Credential;
 use crate::generator::{
     credential_dob, sign_credential, IssuerKey, PipelineWitness, Policy, SignedCredential,
 };
+use crate::nonce::{nonce_signature_message, NonceSignatureStatement};
+
+/// The deterministic device key the fixtures sign the holder nonce with (seed
+/// `[11; 32]`). Shared by the FFI/tests so every combined-proof caller builds an
+/// identical, self-consistent [`NonceSignatureStatement`].
+const DEMO_NONCE: &[u8] = b"fixture-nonce-001";
+
+/// A self-consistent holder nonce signature: the deterministic demo device key
+/// signing `SHA-256(domain || nonce)`. The natural companion to a fixture
+/// credential when driving the full six-module combined proof.
+pub fn demo_nonce_statement() -> NonceSignatureStatement {
+    signed_nonce_statement(DEMO_NONCE)
+}
+
+/// Build a nonce statement for an arbitrary nonce, signed by the demo device key
+/// (seed `[11; 32]`). Mirrors the marshalling `tests/nonce_signature.rs` uses.
+pub fn signed_nonce_statement(nonce: &[u8]) -> NonceSignatureStatement {
+    let signing_key = SigningKey::from_bytes((&[11u8; 32]).into()).expect("valid signing key");
+    let message = nonce_signature_message(nonce);
+    let signature: P256Signature = signing_key.sign(&message);
+    let encoded = signing_key.verifying_key().to_encoded_point(false);
+
+    let r: [u8; 32] = signature.r().to_bytes().into();
+    let s: [u8; 32] = signature.s().to_bytes().into();
+    let x: [u8; 32] = encoded.x().expect("x")[..].try_into().expect("x len");
+    let y: [u8; 32] = encoded.y().expect("y")[..].try_into().expect("y len");
+
+    NonceSignatureStatement {
+        device_key: AffinePoint {
+            x: U256(x),
+            y: U256(y),
+        },
+        nonce: nonce.to_vec(),
+        signature: Signature {
+            r: U256(r),
+            s: U256(s),
+        },
+    }
+}
 
 /// What the combined bound proof should conclude about a fixture, broken out by
 /// the property each relation is responsible for.

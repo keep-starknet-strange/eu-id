@@ -474,8 +474,16 @@ pub fn prove_identity(
         let credential = mapping::to_credential(&witness, &policy, statement.predicate_mode)?;
         let issuer = eu_id_prover::IssuerKey::demo();
 
-        let proof = eu_id_prover::prove_identity(&credential, &issuer, &policy)
-            .map_err(map_prover_error)?;
+        // The folded holder nonce signature is the fixed demo device-key
+        // signature (mapping decision 4); the mdoc SessionTranscript nonce stays
+        // envelope-bound.
+        let proof = eu_id_prover::prove_identity(
+            &credential,
+            &issuer,
+            &policy,
+            &eu_id_prover::fixtures::demo_nonce_statement(),
+        )
+        .map_err(map_prover_error)?;
         let stark_proof_bincode = bincode::serialize(&proof)
             .map_err(|e| ZkError::Prove(format!("failed to serialize proof: {e}")))?;
         let stark_proof = compress_stark_proof_for_ffi(&stark_proof_bincode)?;

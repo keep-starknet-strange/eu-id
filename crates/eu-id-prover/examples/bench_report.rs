@@ -419,7 +419,10 @@ fn measure_pipeline(w: &PipelineWitness, iters: u32) -> StageResult {
     });
     let proof = stages::prove_pipeline(w);
     let instances = stages::pipeline_instances(&proof);
-    let verify_ms = median(timed(iters, || stages::verify_pipeline(&proof, &instances)));
+    let nonce_instances = stages::pipeline_nonce_instances(&proof);
+    let verify_ms = median(timed(iters, || {
+        stages::verify_pipeline(&proof, &instances, &nonce_instances)
+    }));
     result(
         "pipeline",
         prove_ms,
@@ -435,12 +438,13 @@ fn measure_pipeline_e2e(fixture: &fixtures::Fixture, iters: u32) -> StageResult 
     let issuer = IssuerKey::demo();
     let credential = fixture.signed.credential;
     let policy = fixture.policy.clone();
-    let statement = PublicStatement::new(issuer.public_key(), policy.clone());
+    let nonce = fixtures::demo_nonce_statement();
+    let statement = PublicStatement::new(issuer.public_key(), policy.clone(), nonce.clone());
 
     let (prove_ms, peak) = isolated_prove(iters, || {
-        black_box(prove_identity(&credential, &issuer, &policy).expect("e2e proves"));
+        black_box(prove_identity(&credential, &issuer, &policy, &nonce).expect("e2e proves"));
     });
-    let proof = prove_identity(&credential, &issuer, &policy).expect("e2e proves");
+    let proof = prove_identity(&credential, &issuer, &policy, &nonce).expect("e2e proves");
     let proof_bytes = bincode::serialize(&proof).map(|b| b.len()).unwrap_or(0);
     let verify_ms = median(timed(iters, || {
         verify_identity(&proof, &statement).expect("e2e verifies");
@@ -490,8 +494,14 @@ fn report_byte_breakdown() -> ByteBreakdown {
         .p256_draft
         .as_ref()
         .expect("honest fixture carries a valid P256 draft");
+    let nonce_draft =
+        stwo_p256::proof::P256ProofDraft::from_inputs_with_arbitrary_fake_glv_hints(vec![
+            fixtures::demo_nonce_statement().ecdsa_input(),
+        ])
+        .expect("demo nonce builds a proof draft");
     let (proof, cols): (Proof, Vec<ModuleColumns>) = prove_with_column_breakdown(
         draft,
+        &nonce_draft,
         &witness.sha_witness,
         witness.sha_log_n_rows,
         witness.sha_group_width,

@@ -20,6 +20,8 @@ use stwo_p256::proof::air::P256Prover;
 use stwo_sha256::air::Sha256Prover;
 use stwo_sha256::stark::{prove_sha256_from_witness, ProverConfig};
 
+use stwo_p256::proof::P256ProofDraft;
+
 use crate::{bridge_log_size, bridge_rows, credential_exposure, fixtures};
 
 fn tree_stats(name: &str, sizes: &[u32]) -> (usize, u64) {
@@ -29,6 +31,19 @@ fn tree_stats(name: &str, sizes: &[u32]) -> (usize, u64) {
     let max = sizes.iter().max().copied().unwrap_or(0);
     println!("    {name:<14} cols={cols:>6}  cells={cells:>10}  log_size min/max={min}/{max}");
     (cols, cells)
+}
+
+fn layout_stats(name: &str, layout: &air_core::TreeLayout) -> (usize, u64) {
+    println!("  module {name}");
+    let p = tree_stats("preprocessed", &layout.preprocessed);
+    let t = tree_stats("trace", &layout.trace);
+    let i = tree_stats("interaction", &layout.interaction);
+    println!(
+        "    TOTAL          cols={:>6}  cells={:>10}",
+        p.0 + t.0 + i.0,
+        p.1 + t.1 + i.1
+    );
+    (p.0 + t.0 + i.0, p.1 + t.1 + i.1)
 }
 
 #[test]
@@ -49,13 +64,6 @@ fn shape_dump() {
         .expect("serialize SHA STARK proof")
         .len();
     println!("  sha standalone STARK proof bytes = {sha_stark_bytes}");
-    #[cfg(feature = "gkr-spike")]
-    {
-        let sha_gkr_bytes = bincode::serialize(&sha_proof.xor_8_gkr_proof)
-            .expect("serialize SHA xor_8 GKR proof")
-            .len();
-        println!("  sha xor_8 GKR proof bytes = {sha_gkr_bytes}");
-    }
 
     // Mirror `prove()`'s module construction exactly.
     let scalar_z_handle = SharedScalarZRelation::new();
@@ -65,6 +73,12 @@ fn shape_dump() {
     let mut p256 = P256Prover::new(draft)
         .expect("p256 prover")
         .with_z_binding(scalar_z_handle.clone());
+    let nonce_statement = fixtures::demo_nonce_statement();
+    let nonce_draft = P256ProofDraft::from_inputs_with_arbitrary_fake_glv_hints(vec![
+        nonce_statement.ecdsa_input(),
+    ])
+    .expect("nonce draft");
+    let mut nonce_p256 = P256Prover::new(&nonce_draft).expect("nonce p256 prover");
     let mut sha = Sha256Prover::new(&pw.sha_witness, pw.sha_log_n_rows, pw.sha_group_width)
         .with_digest_handle(digest_handle.clone())
         .with_field_handle(credential_exposure(), field_handle.clone());
@@ -84,8 +98,9 @@ fn shape_dump() {
         .with_nat_binding(field_handle.clone());
 
     let config = p256.pcs_config();
-    let mut modules: [(&str, &mut dyn AirProver); 5] = [
+    let mut modules: [(&str, &mut dyn AirProver); 6] = [
         ("p256", &mut p256),
+        ("nonce_p256", &mut nonce_p256),
         ("sha256", &mut sha),
         ("digest_bind", &mut bridge),
         ("age", &mut age),
@@ -94,23 +109,59 @@ fn shape_dump() {
 
     println!("\n=== per-module committed columns (from Air::layout) ===");
     let mut grand = (0usize, 0u64);
+    let mut grand_post = (0usize, 0u64);
     for (name, m) in modules.iter() {
         let layout = m.layout();
-        println!("  module {name}");
-        let p = tree_stats("preprocessed", &layout.preprocessed);
-        let t = tree_stats("trace", &layout.trace);
-        let i = tree_stats("interaction", &layout.interaction);
-        println!(
-            "    TOTAL          cols={:>6}  cells={:>10}",
-            p.0 + t.0 + i.0,
-            p.1 + t.1 + i.1
-        );
-        grand.0 += p.0 + t.0 + i.0;
-        grand.1 += p.1 + t.1 + i.1;
+        let stats = layout_stats(name, &layout);
+        grand.0 += stats.0;
+        grand.1 += stats.1;
+        let post_interaction = m.post_interaction_log_sizes();
+        if !post_interaction.is_empty() {
+            println!("    optional post-interaction tree");
+            let post_stats = tree_stats("post", &post_interaction);
+            grand_post.0 += post_stats.0;
+            grand_post.1 += post_stats.1;
+        }
     }
     println!(
         "  GRAND TOTAL      cols={:>6}  cells={:>10}",
         grand.0, grand.1
+    );
+    if grand_post.0 != 0 {
+        println!(
+            "  GRAND + POST     cols={:>6}  cells={:>10}",
+            grand.0 + grand_post.0,
+            grand.1 + grand_post.1
+        );
+    }
+
+    println!("\n=== mdoc per-module committed columns (from Air::layout) ===");
+    let mut mdoc_grand = (0usize, 0u64);
+    for shape in crate::mdoc::demo_mdoc_module_shapes().expect("mdoc module shapes") {
+        let stats = layout_stats(shape.name, &shape.layout);
+        mdoc_grand.0 += stats.0;
+        mdoc_grand.1 += stats.1;
+    }
+    println!(
+        "  MDOC GRAND TOTAL cols={:>6}  cells={:>10}",
+        mdoc_grand.0, mdoc_grand.1
+    );
+    let mdoc_waste = crate::mdoc::demo_mdoc_sizing_waste().expect("mdoc sizing waste");
+    println!("\n=== mdoc Phase 0b sizing waste ===");
+    for row in &mdoc_waste.sha {
+        println!(
+            "  sha {:<12} natural_log={} shared_log={} wasted_cells={}",
+            row.name, row.natural_log, row.shared_log, row.wasted_cells
+        );
+    }
+    println!("  sha total wasted cells = {}", mdoc_waste.sha_wasted_cells);
+    println!(
+        "  p256 namespaced content-identical preprocessed cells = {}",
+        mdoc_waste.p256_namespaced_identical_preprocessed_cells
+    );
+    println!(
+        "  combined accepted waste cells = {}",
+        mdoc_waste.combined_wasted_cells()
     );
 
     // Per-component breakdown needs built components, which need claimed sums
@@ -158,6 +209,19 @@ fn shape_dump() {
         m.mix_claimed_sums(channel);
     }
     tb.commit(channel);
+    for (_, m) in modules.iter_mut() {
+        m.prove_post_interaction(channel);
+    }
+    if modules
+        .iter()
+        .any(|(_, m)| !m.post_interaction_log_sizes().is_empty())
+    {
+        let mut tb = commitment_scheme.tree_builder();
+        for (_, m) in modules.iter_mut() {
+            m.write_post_interaction(&mut tb);
+        }
+        tb.commit(channel);
+    }
 
     // Debug: per-family claimed-sum totals (imbalance hunting).
     {
@@ -173,9 +237,11 @@ fn shape_dump() {
         }
         println!("  GRAND claimed-sum total = {grand:?}");
     }
+    let mut seen_preprocessed_ids = std::collections::HashSet::new();
     let preprocessed_ids: Vec<PreProcessedColumnId> = modules
         .iter()
         .flat_map(|(_, m)| m.preprocessed_column_ids())
+        .filter(|id| seen_preprocessed_ids.insert(id.clone()))
         .collect();
     let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&preprocessed_ids);
     for (_, m) in modules.iter_mut() {

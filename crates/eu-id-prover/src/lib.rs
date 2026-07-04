@@ -1,11 +1,22 @@
 //! End-to-end `eu-id` prover: composes the per-circuit `air_core` modules into
 //! a single STARK proof.
 //!
-//! This is the standalone library the `eu-id-ffi` C-ABI surface wraps. It drives the
-//! P256 ECDSA module, the SHA-256 module, the **digest-bind bridge**, and the
-//! **age** and **nationality** predicate modules through one [`air_core::prove`]
-//! call — one channel, one commitment scheme, one proof — and verifies the
-//! global LogUp balance.
+//! This is the standalone library the `eu-id-ffi` C-ABI surface wraps. It drives
+//! the credential P256 ECDSA module, a second **nonce** P256 ECDSA module (the
+//! holder-presence device-key signature), the SHA-256 module, the **digest-bind
+//! bridge**, and the **age** and **nationality** predicate modules through one
+//! [`air_core::prove`] call — one channel, one commitment scheme, one proof —
+//! and verifies the global LogUp balance.
+//!
+//! ## Holder presence: the nonce P-256 module
+//!
+//! Alongside the credential signature, the proof carries a second P-256 module
+//! proving the holder's device key signed `SHA-256(domain || nonce)` (see
+//! [`nonce`]). It is folded into the same STARK — no z-binding, no preprocessed
+//! namespace — so a single proof attests both "this credential was issued to me"
+//! and "I am present now, signing this fresh nonce". The verifier binds it in
+//! full (including `z`, recomputed from the public nonce) against
+//! [`PublicStatement::nonce`].
 //!
 //! ## Cross-bound: the signature is over the hash of this preimage
 //!
@@ -77,11 +88,17 @@
 pub mod credential;
 pub mod fixtures;
 pub mod generator;
+pub mod mdoc;
+pub mod nonce;
 #[cfg(test)]
 mod shape_dump;
 
 pub use credential::Credential;
 pub use generator::{IssuerKey, PipelineWitness, Policy, SignedCredential};
+pub use nonce::{
+    nonce_signature_message, prove_nonce_signature, verify_nonce_signature, NonceSignatureProof,
+    NonceSignatureStatement,
+};
 // `Policy::current_date` is a `predicates::Date`; re-export it so a relying
 // party (e.g. the FFI benchmark harness) can build a `Policy` — and thus a
 // `PublicStatement` — without depending on `predicates` directly.
@@ -121,6 +138,7 @@ use stwo_p256::components::digest_bind::module::{
 };
 use stwo_p256::components::digest_bind::witness::DigestBindRow;
 use stwo_p256::components::digest_bind::SharedScalarZRelation;
+use stwo_p256::ecdsa::ecdsa_verify;
 use stwo_p256::limbs::P256M31BigInt;
 use stwo_p256::proof::air::{P256ColumnTask, P256Prover, P256Verifier};
 use stwo_p256::proof::{P256CurrentAirInteractionClaim, P256CurrentAirProofClaim, P256ProofDraft};
@@ -131,8 +149,6 @@ pub use stwo_p256::types::AffinePoint;
 
 use stwo_sha256::air::{Sha256ColumnTask, Sha256Prover, Sha256Verifier};
 use stwo_sha256::field_exposure::FieldExposure;
-#[cfg(feature = "gkr-spike")]
-use stwo_sha256::gkr_spike::Xor8GkrProofWire;
 use stwo_sha256::interaction::InteractionClaim as Sha256InteractionClaim;
 use stwo_sha256::types::Sha256Witness;
 
@@ -145,15 +161,17 @@ use stwo_sha256::types::Sha256Witness;
 pub struct Proof {
     /// The one shared STARK proof.
     pub stark_proof: StarkProof<Blake2sMerkleHasher>,
-    // P256 module reconstruction data.
+    // Credential P256 module reconstruction data.
     p256_claim: P256CurrentAirProofClaim,
     p256_interaction_claim: P256CurrentAirInteractionClaim,
+    // Nonce P256 module reconstruction data (the holder device-key signature). No
+    // z-binding: its `z` is a public value the verifier recomputes from the nonce.
+    nonce_p256_claim: P256CurrentAirProofClaim,
+    nonce_p256_interaction_claim: P256CurrentAirInteractionClaim,
     // SHA module reconstruction data.
     sha_log_n_rows: u32,
     sha_group_width: u32,
     sha_interaction_claim: Sha256InteractionClaim,
-    #[cfg(feature = "gkr-spike")]
-    sha_xor_8_gkr_proof: Xor8GkrProofWire,
     // Digest-bind bridge reconstruction data.
     bridge_log_size: u32,
     bridge_interaction_claim: DigestBindInteractionClaim,
@@ -175,6 +193,14 @@ impl Proof {
     /// explicitly.
     pub fn p256_instances(&self) -> &[PublicEcdsaInstance<M31>] {
         &self.p256_claim.public_inputs.instances
+    }
+
+    /// The public ECDSA instances the nonce P256 module proves over — the holder
+    /// device-key signature. Unlike the credential instances, these are bound in
+    /// full (`z` included). [`verify`] takes the expected nonce statement
+    /// explicitly.
+    pub fn nonce_p256_instances(&self) -> &[PublicEcdsaInstance<M31>] {
+        &self.nonce_p256_claim.public_inputs.instances
     }
 }
 
@@ -225,10 +251,12 @@ pub enum Error {
 }
 
 /// The relying party's public statement — the only thing [`verify_identity`]
-/// checks a [`Proof`] against. Exactly `{ issuer key Q, current date, age
-/// threshold, accepted nationality set }`: the date of birth, the nationality,
-/// and the digest `z` are proven equal to the signed credential's, never
-/// supplied here.
+/// checks a [`Proof`] against. `{ issuer key Q, current date, age threshold,
+/// accepted nationality set, holder nonce signature }`: the date of birth, the
+/// nationality, and the credential digest `z` are proven equal to the signed
+/// credential's, never supplied here. The nonce signature *is* supplied — the
+/// verifier recomputes its `z` from the public nonce and binds the nonce P-256
+/// module against the full instance.
 #[derive(Clone, Debug)]
 pub struct PublicStatement {
     /// The issuer public key `Q` the credential must be signed under. The
@@ -238,12 +266,22 @@ pub struct PublicStatement {
     /// The verifier policy: reference date, minimum age, and accepted
     /// nationality set. Maps directly to the age / nationality public inputs.
     pub policy: Policy,
+    /// The holder-presence nonce signature: the device key, the fresh nonce, and
+    /// the signature over `SHA-256(domain || nonce)`. The verifier recomputes the
+    /// message hash `z` from the nonce and binds the nonce P-256 module against
+    /// the full instance (`z` included).
+    pub nonce: NonceSignatureStatement,
 }
 
 impl PublicStatement {
-    /// Build a statement from a trusted issuer key and a policy.
-    pub fn new(issuer_key: AffinePoint, policy: Policy) -> Self {
-        Self { issuer_key, policy }
+    /// Build a statement from a trusted issuer key, a policy, and the holder's
+    /// nonce signature.
+    pub fn new(issuer_key: AffinePoint, policy: Policy, nonce: NonceSignatureStatement) -> Self {
+        Self {
+            issuer_key,
+            policy,
+            nonce,
+        }
     }
 }
 
@@ -291,10 +329,11 @@ fn bridge_rows(instances: &[PublicEcdsaInstance<M31>]) -> Vec<DigestBindRow> {
         .collect()
 }
 
-/// Prove the identity statement as **one** STARK proof over five modules.
+/// Prove the identity statement as **one** STARK proof over six modules.
 ///
-/// Drives the P256 ECDSA module, the SHA-256 module, the digest-bind bridge, and
-/// the age and nationality predicate modules through a single [`air_core::prove`]
+/// Drives the credential P256 ECDSA module, the nonce P256 ECDSA module, the
+/// SHA-256 module, the digest-bind bridge, and the age and nationality predicate
+/// modules through a single [`air_core::prove`]
 /// against one channel and commitment scheme. The proof is governed by P256's
 /// (security-calibrated) PCS config; the orchestrator sizes twiddles from the
 /// largest module constraint bound (P256's) and enables the lifting path P256
@@ -311,6 +350,7 @@ fn bridge_rows(instances: &[PublicEcdsaInstance<M31>]) -> Vec<DigestBindRow> {
 #[allow(clippy::too_many_arguments)]
 pub fn prove(
     p256_draft: &P256ProofDraft,
+    nonce_p256_draft: &P256ProofDraft,
     sha_witness: &Sha256Witness,
     sha_log_n_rows: u32,
     sha_group_width: u32,
@@ -321,6 +361,7 @@ pub fn prove(
 ) -> Result<Proof, Error> {
     prove_with_column_breakdown(
         p256_draft,
+        nonce_p256_draft,
         sha_witness,
         sha_log_n_rows,
         sha_group_width,
@@ -342,7 +383,8 @@ pub fn prove(
 /// attribution matches the committed columns exactly.
 #[derive(Clone, Debug)]
 pub struct ModuleColumns {
-    /// Module label, in commit order (`p256`, `sha`, `bridge`, `age`, `nat`).
+    /// Module label, in commit order (`p256`, `nonce_p256`, `sha`, `bridge`,
+    /// `age`, `nat`).
     pub name: &'static str,
     /// Columns in tree 0 (preprocessed).
     pub preprocessed: usize,
@@ -372,6 +414,7 @@ impl ModuleColumns {
 
 struct PreparedProofModules<'a> {
     p256: P256Prover<'a>,
+    nonce_p256: P256Prover<'a>,
     sha: Sha256Prover<'a>,
     bridge: DigestBindProver,
     age: RangeCheckProver,
@@ -386,6 +429,7 @@ struct PreparedProofModules<'a> {
 #[allow(clippy::too_many_arguments)]
 fn prepare_proof_modules<'a>(
     p256_draft: &'a P256ProofDraft,
+    nonce_p256_draft: &'a P256ProofDraft,
     sha_witness: &'a Sha256Witness,
     sha_log_n_rows: u32,
     sha_group_width: u32,
@@ -430,6 +474,10 @@ fn prepare_proof_modules<'a>(
 
     let p256 = P256Prover::from_prepared(p256_draft, p256_prepared.map_err(Error::P256Prepare)?)
         .with_z_binding(scalar_z_handle.clone());
+    // The nonce (holder-presence) P256 module: no z-binding — its `z` is a public
+    // value the verifier recomputes from the nonce — and no preprocessed
+    // namespace, exactly like the credential module minus the digest bridge.
+    let nonce_p256 = P256Prover::new(nonce_p256_draft).map_err(Error::P256Prepare)?;
     // SHA both yields its digest (P256↔SHA bridge) and exposes the DOB +
     // nationality byte windows (age/nat↔credential bridges) on the
     // shared field channel.
@@ -472,6 +520,7 @@ fn prepare_proof_modules<'a>(
 
     Ok(PreparedProofModules {
         p256,
+        nonce_p256,
         sha,
         bridge,
         age,
@@ -490,6 +539,7 @@ fn prove_prepared_with_config(
 ) -> Result<(Proof, Vec<ModuleColumns>), Error> {
     let PreparedProofModules {
         ref mut p256,
+        ref mut nonce_p256,
         ref mut sha,
         ref mut bridge,
         ref mut age,
@@ -508,6 +558,7 @@ fn prove_prepared_with_config(
     // width-linear streams by them.
     let column_breakdown = vec![
         ModuleColumns::of("p256", &p256.layout()),
+        ModuleColumns::of("nonce_p256", &nonce_p256.layout()),
         ModuleColumns::of("sha", &sha.layout()),
         ModuleColumns::of("bridge", &bridge.layout()),
         ModuleColumns::of("age", &age.layout()),
@@ -516,10 +567,12 @@ fn prove_prepared_with_config(
 
     // Module order is load-bearing: it fixes the transcript, the tree-column /
     // preprocessed-id concatenation, and the order the shared relations are
-    // drawn. P256 draws ScalarZ, SHA draws the digest + the credential-field
-    // relation, the bridge reads ScalarZ + the digest, and age + nat read the
-    // field relation — so every consumer follows SHA (and the bridge follows its
-    // two producers). Age and nat append after the binding cluster.
+    // drawn. The credential P256 draws ScalarZ, SHA draws the digest + the
+    // credential-field relation, the bridge reads ScalarZ + the digest, and age +
+    // nat read the field relation — so every consumer follows SHA (and the bridge
+    // follows its two producers). The nonce P256 module sits right after the
+    // credential P256 module and draws none of the shared relations (no
+    // z-binding); age and nat append after the binding cluster.
     //
     // The credential bindings ride the cross-module `Sha256Field` LogUp channel
     // (drawn from the transcript), not a preprocessed column, so they add no
@@ -530,21 +583,18 @@ fn prove_prepared_with_config(
     // bridge's `digest_bind_*` ids in the shared allocator. The verifier must use
     // this same order.
     let stark_proof = {
-        let mut modules: [&mut dyn AirProver; 5] = [p256, sha, bridge, age, nat];
+        let mut modules: [&mut dyn AirProver; 6] = [p256, nonce_p256, sha, bridge, age, nat];
         air_core::prove(&mut modules, config).map_err(|e| Error::Prove(format!("{e:?}")))?
     };
-    #[cfg(feature = "gkr-spike")]
-    let sha_xor_8_gkr_proof = sha.xor_8_gkr_proof().clone();
-
     let proof = Proof {
         stark_proof,
         p256_claim: p256.proof_claim().clone(),
         p256_interaction_claim: p256.interaction_claim().clone(),
+        nonce_p256_claim: nonce_p256.proof_claim().clone(),
+        nonce_p256_interaction_claim: nonce_p256.interaction_claim().clone(),
         sha_log_n_rows,
         sha_group_width,
         sha_interaction_claim: sha.interaction_claim().clone(),
-        #[cfg(feature = "gkr-spike")]
-        sha_xor_8_gkr_proof,
         bridge_log_size: bridge_log,
         bridge_interaction_claim: bridge.interaction_claim().clone(),
         // Claimed sums are populated by the modules' interaction phase during the
@@ -564,6 +614,7 @@ fn prove_prepared_with_config(
 #[allow(clippy::too_many_arguments)]
 pub fn prove_with_column_breakdown(
     p256_draft: &P256ProofDraft,
+    nonce_p256_draft: &P256ProofDraft,
     sha_witness: &Sha256Witness,
     sha_log_n_rows: u32,
     sha_group_width: u32,
@@ -574,6 +625,7 @@ pub fn prove_with_column_breakdown(
 ) -> Result<(Proof, Vec<ModuleColumns>), Error> {
     let prepared = prepare_proof_modules(
         p256_draft,
+        nonce_p256_draft,
         sha_witness,
         sha_log_n_rows,
         sha_group_width,
@@ -591,6 +643,7 @@ pub fn prove_with_column_breakdown(
 #[allow(clippy::too_many_arguments)]
 pub fn prove_with_column_breakdown_and_config(
     p256_draft: &P256ProofDraft,
+    nonce_p256_draft: &P256ProofDraft,
     sha_witness: &Sha256Witness,
     sha_log_n_rows: u32,
     sha_group_width: u32,
@@ -602,6 +655,7 @@ pub fn prove_with_column_breakdown_and_config(
 ) -> Result<(Proof, Vec<ModuleColumns>), Error> {
     let prepared = prepare_proof_modules(
         p256_draft,
+        nonce_p256_draft,
         sha_witness,
         sha_log_n_rows,
         sha_group_width,
@@ -618,12 +672,16 @@ pub fn prove_with_column_breakdown_and_config(
 pub fn verify_with_config(
     proof: &Proof,
     expected_instances: &[PublicEcdsaInstance<M31>],
+    expected_nonce_instances: &[PublicEcdsaInstance<M31>],
     config: PcsConfig,
 ) -> Result<(), Error> {
     if !instances_match_ignoring_z(
         &proof.p256_claim.public_inputs.instances,
         expected_instances,
     ) {
+        return Err(Error::P256InstanceMismatch);
+    }
+    if proof.nonce_p256_claim.public_inputs.instances != expected_nonce_instances {
         return Err(Error::P256InstanceMismatch);
     }
     verify_stark_with_config(proof, Some(config))
@@ -633,7 +691,8 @@ pub fn verify_with_config(
 /// policy — the relying-party-facing entry point.
 ///
 /// Signs `credential` with `issuer` (real ES256, so `z = SHA-256(C)`), composes
-/// the pipeline witness, and drives all five modules through [`prove`]. The
+/// the pipeline witness, prechecks + drafts the holder `nonce` signature, and
+/// drives all six modules through [`prove`]. The
 /// returned [`Proof`] is bound: `z == SHA-256(C)`, and the date of birth /
 /// nationality the predicates reason about are the credential's signed bytes.
 /// Proving a false statement fails here — e.g. an under-age date of birth is
@@ -645,12 +704,25 @@ pub fn prove_identity(
     credential: &Credential,
     issuer: &IssuerKey,
     policy: &Policy,
+    nonce: &NonceSignatureStatement,
 ) -> Result<Proof, Error> {
     let signed = generator::sign_credential(credential, issuer);
     let witness = PipelineWitness::build(signed, policy.clone());
     let draft = witness.p256_draft.as_ref().ok_or(Error::SignatureInvalid)?;
+
+    // The holder-presence nonce signature: prechecked natively (so a bad device
+    // signature is rejected here, not deep in trace generation) then drafted as a
+    // second P256 module.
+    let nonce_input = nonce.ecdsa_input();
+    if !ecdsa_verify(&nonce_input) {
+        return Err(Error::SignatureInvalid);
+    }
+    let nonce_draft = P256ProofDraft::from_inputs_with_arbitrary_fake_glv_hints(vec![nonce_input])
+        .map_err(Error::P256Prepare)?;
+
     prove(
         draft,
+        &nonce_draft,
         &witness.sha_witness,
         witness.sha_log_n_rows,
         witness.sha_group_width,
@@ -679,19 +751,30 @@ fn instances_match_ignoring_z(
         })
 }
 
-/// Verify a [`Proof`], binding the P256 module to the caller's expected ECDSA
-/// statement (issuer key + signature, **not** `z`).
+/// Verify a [`Proof`], binding the credential P256 module to the caller's
+/// expected ECDSA statement (issuer key + signature, **not** `z`) and the nonce
+/// P256 module to `expected_nonce_instances` (full equality, `z` included).
 ///
-/// This is the lower-level verify against an explicit ECDSA instance list.
+/// This is the lower-level verify against explicit ECDSA instance lists.
 /// Relying parties should prefer [`verify_identity`], which checks the small
-/// public statement `{ Q, policy }` instead.
-pub fn verify(proof: &Proof, expected_instances: &[PublicEcdsaInstance<M31>]) -> Result<(), Error> {
-    // Caller-argument binding for the P256 statement, minus `z` (internally
-    // bound to the SHA digest).
+/// public statement `{ Q, policy, nonce }` instead.
+pub fn verify(
+    proof: &Proof,
+    expected_instances: &[PublicEcdsaInstance<M31>],
+    expected_nonce_instances: &[PublicEcdsaInstance<M31>],
+) -> Result<(), Error> {
+    // Caller-argument binding for the credential P256 statement, minus `z`
+    // (internally bound to the SHA digest).
     if !instances_match_ignoring_z(
         &proof.p256_claim.public_inputs.instances,
         expected_instances,
     ) {
+        return Err(Error::P256InstanceMismatch);
+    }
+    // The nonce P256 statement is bound in FULL — `z` included — because the
+    // holder's message hash is a public value the verifier recomputes from the
+    // nonce, not an internally proven digest.
+    if proof.nonce_p256_claim.public_inputs.instances != expected_nonce_instances {
         return Err(Error::P256InstanceMismatch);
     }
     verify_stark(proof)
@@ -702,10 +785,12 @@ pub fn verify(proof: &Proof, expected_instances: &[PublicEcdsaInstance<M31>]) ->
 ///
 /// Caller-argument binding for the full statement: the issuer key `Q` against the
 /// ECDSA instance's public-key limbs, the reference date + threshold against the
-/// age public input, and the accepted set against the nationality public input.
-/// `z`, the date of birth, and the nationality are not supplied — they are proven
-/// equal to the credential's. Then checks the shared STARK (the global LogUp
-/// balance). Returns `Ok(())` iff every check passes.
+/// age public input, the accepted set against the nationality public input, and
+/// the holder nonce signature against the nonce P256 module's instance (full
+/// equality, including the `z` the verifier recomputes from the nonce). The
+/// credential `z`, the date of birth, and the nationality are not supplied — they
+/// are proven equal to the credential's. Then checks the shared STARK (the global
+/// LogUp balance). Returns `Ok(())` iff every check passes.
 pub fn verify_identity(proof: &Proof, statement: &PublicStatement) -> Result<(), Error> {
     // Issuer key: every ECDSA instance's public-key limbs must equal `Q`. The
     // MVP proves a single signature, so there is exactly one instance; an empty
@@ -731,10 +816,22 @@ pub fn verify_identity(proof: &Proof, statement: &PublicStatement) -> Result<(),
         return Err(Error::NatPolicyMismatch);
     }
 
+    // Holder nonce signature: the nonce P256 module must prove exactly the
+    // instance the verifier reconstructs from the public nonce — including `z`,
+    // recomputed host-side as `SHA-256(domain || nonce)`. There is exactly one
+    // instance; any other length or value is a mismatch.
+    let expected_nonce = [PublicEcdsaInstance::from_input(
+        0,
+        &statement.nonce.ecdsa_input(),
+    )];
+    if proof.nonce_p256_claim.public_inputs.instances != expected_nonce {
+        return Err(Error::P256InstanceMismatch);
+    }
+
     verify_stark(proof)
 }
 
-/// Rebuild the five verifier modules from the proof and check the shared STARK
+/// Rebuild the six verifier modules from the proof and check the shared STARK
 /// (the global LogUp balance). The caller does any public-input / statement
 /// binding *first*: both [`verify`] and [`verify_identity`] bind, then delegate
 /// here.
@@ -755,13 +852,17 @@ fn verify_stark_with_config(
         proof.p256_interaction_claim.clone(),
     )
     .with_z_binding(scalar_z_handle.clone());
+    // The nonce (holder-presence) P256 module — no z-binding, mirroring the
+    // prover.
+    let mut nonce_p256 = P256Verifier::new(
+        proof.nonce_p256_claim.clone(),
+        proof.nonce_p256_interaction_claim.clone(),
+    );
     let sha = Sha256Verifier::new(
         proof.sha_log_n_rows,
         proof.sha_group_width,
         proof.sha_interaction_claim.clone(),
     );
-    #[cfg(feature = "gkr-spike")]
-    let sha = sha.with_xor_8_gkr_proof(proof.sha_xor_8_gkr_proof.clone());
     let mut sha = sha
         .with_digest_handle(digest_handle.clone())
         .with_field_handle(credential_exposure(), field_handle.clone());
@@ -799,8 +900,23 @@ fn verify_stark_with_config(
             expected: expected_config,
         });
     }
+    // The nonce module must expect the same PCS config as the credential module —
+    // otherwise the two P256 modules disagree on the shared proof's security
+    // profile.
+    if nonce_p256.expected_pcs_config() != p256.expected_pcs_config() {
+        return Err(Error::Verify(
+            "nonce P-256 module uses a different verifier PCS config".to_string(),
+        ));
+    }
 
     // Same module order as the prover.
-    let mut modules: [&mut dyn Air; 5] = [&mut p256, &mut sha, &mut bridge, &mut age, &mut nat];
+    let mut modules: [&mut dyn Air; 6] = [
+        &mut p256,
+        &mut nonce_p256,
+        &mut sha,
+        &mut bridge,
+        &mut age,
+        &mut nat,
+    ];
     air_core::verify(&mut modules, &proof.stark_proof).map_err(|e| Error::Verify(format!("{e:?}")))
 }

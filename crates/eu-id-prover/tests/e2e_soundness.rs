@@ -44,6 +44,15 @@ use eu_id_prover::{
     Proof, PublicStatement,
 };
 use stwo_p256::proof::{P256ProofDraft, P256ProofError};
+
+/// A self-consistent holder nonce draft for driving the lower-level combined
+/// prover: the demo device key signing the demo nonce.
+fn nonce_draft() -> P256ProofDraft {
+    P256ProofDraft::from_inputs_with_arbitrary_fake_glv_hints(vec![fixtures::demo_nonce_statement(
+    )
+    .ecdsa_input()])
+    .expect("demo nonce builds a proof draft")
+}
 use stwo_p256::types::{AffinePoint, EcdsaVerifyInput, Signature, U256};
 
 // ---------------------------------------------------------------------------
@@ -90,6 +99,7 @@ fn prove_pipeline(pw: &PipelineWitness) -> Result<Proof, Error> {
         .expect("a valid signature builds a P256 draft");
     prove(
         draft,
+        &nonce_draft(),
         &pw.sha_witness,
         pw.sha_log_n_rows,
         pw.sha_group_width,
@@ -101,9 +111,14 @@ fn prove_pipeline(pw: &PipelineWitness) -> Result<Proof, Error> {
 }
 
 /// The relying party's public statement for a policy: the demo issuer's *public*
-/// key (the trusted anchor) plus the policy. Rebuilt independently of any proof.
+/// key (the trusted anchor), the policy, and the demo holder nonce signature.
+/// Rebuilt independently of any proof.
 fn demo_statement(policy: &Policy) -> PublicStatement {
-    PublicStatement::new(IssuerKey::demo().public_key(), policy.clone())
+    PublicStatement::new(
+        IssuerKey::demo().public_key(),
+        policy.clone(),
+        fixtures::demo_nonce_statement(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -172,6 +187,7 @@ fn honest_credential_verifies_against_its_bound_statement() {
         &fixture.signed.credential,
         &IssuerKey::demo(),
         &fixture.policy,
+        &fixtures::demo_nonce_statement(),
     )
     .expect("an honest over-18 credential proves");
 
@@ -199,6 +215,7 @@ fn rejects_digest_mismatch() {
 
     let proof = prove(
         &draft,
+        &nonce_draft(),
         &pw.sha_witness,
         pw.sha_log_n_rows,
         pw.sha_group_width,
@@ -210,8 +227,9 @@ fn rejects_digest_mismatch() {
     .expect("the prover accepts the mismatch — the imbalance is a verify-time check");
 
     let expected = proof.p256_instances().to_vec();
+    let expected_nonce = proof.nonce_p256_instances().to_vec();
     assert!(
-        verify(&proof, &expected).is_err(),
+        verify(&proof, &expected, &expected_nonce).is_err(),
         "signing one message while hashing another must be rejected",
     );
 }
@@ -231,8 +249,9 @@ fn rejects_dob_not_matching_credential() {
 
     let proof = prove_pipeline(&f.pipeline_witness()).expect("the prover accepts the mismatch");
     let expected = proof.p256_instances().to_vec();
+    let expected_nonce = proof.nonce_p256_instances().to_vec();
     assert!(
-        verify(&proof, &expected).is_err(),
+        verify(&proof, &expected, &expected_nonce).is_err(),
         "an age proved from a DOB the credential does not contain must be rejected",
     );
 }
@@ -253,8 +272,9 @@ fn rejects_nationality_not_matching_credential() {
 
     let proof = prove_pipeline(&f.pipeline_witness()).expect("the prover accepts the mismatch");
     let expected = proof.p256_instances().to_vec();
+    let expected_nonce = proof.nonce_p256_instances().to_vec();
     assert!(
-        verify(&proof, &expected).is_err(),
+        verify(&proof, &expected, &expected_nonce).is_err(),
         "a nationality proved from a code the credential does not contain must be rejected",
     );
 }
@@ -274,6 +294,7 @@ fn rejects_wrong_issuer_key() {
         &fixture.signed.credential,
         &IssuerKey::demo(),
         &fixture.policy,
+        &fixtures::demo_nonce_statement(),
     )
     .expect("an honest credential proves");
 
@@ -283,7 +304,11 @@ fn rejects_wrong_issuer_key() {
 
     // A statement naming a different issuer key is rejected, with a distinct error.
     let wrong_issuer = IssuerKey::from_seed(&[9u8; 32]).public_key();
-    let wrong = PublicStatement::new(wrong_issuer, fixture.policy.clone());
+    let wrong = PublicStatement::new(
+        wrong_issuer,
+        fixture.policy.clone(),
+        fixtures::demo_nonce_statement(),
+    );
     assert!(
         matches!(
             verify_identity(&proof, &wrong),
@@ -307,6 +332,7 @@ fn rejects_weakened_pcs_config() {
         &fixture.signed.credential,
         &IssuerKey::demo(),
         &fixture.policy,
+        &fixtures::demo_nonce_statement(),
     )
     .expect("an honest credential proves");
 
@@ -370,6 +396,7 @@ fn rejects_under_age() {
         &fixture.signed.credential,
         &IssuerKey::demo(),
         &fixture.policy,
+        &fixtures::demo_nonce_statement(),
     );
     assert!(
         matches!(result, Err(Error::AgePrepare(_))),
@@ -389,6 +416,7 @@ fn rejects_nationality_outside_accepted_set() {
         &fixture.signed.credential,
         &IssuerKey::demo(),
         &fixture.policy,
+        &fixtures::demo_nonce_statement(),
     );
     assert!(
         matches!(result, Err(Error::NatPrepare(_))),

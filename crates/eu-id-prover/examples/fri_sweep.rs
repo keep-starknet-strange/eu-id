@@ -169,9 +169,16 @@ fn run_sample(
     let subscriber = Registry::default().with(collector.clone());
     let _guard = tracing::subscriber::set_default(subscriber);
 
+    let nonce_draft =
+        stwo_p256::proof::P256ProofDraft::from_inputs_with_arbitrary_fake_glv_hints(vec![
+            eu_id_prover::fixtures::demo_nonce_statement().ecdsa_input(),
+        ])
+        .map_err(|error| format!("{error:?}"))?;
+
     let prove_start = Instant::now();
     let (proof, _) = prove_with_column_breakdown_and_config(
         draft,
+        &nonce_draft,
         &witness.sha_witness,
         witness.sha_log_n_rows,
         witness.sha_group_width,
@@ -185,8 +192,9 @@ fn run_sample(
     let prove_ms = prove_start.elapsed().as_secs_f64() * 1000.0;
 
     let expected = proof.p256_instances().to_vec();
+    let expected_nonce = proof.nonce_p256_instances().to_vec();
     let verify_start = Instant::now();
-    verify_with_config(&proof, &expected, pcs_config(case))
+    verify_with_config(&proof, &expected, &expected_nonce, pcs_config(case))
         .map_err(|error| format!("{error:?}"))?;
     let verify_ms = verify_start.elapsed().as_secs_f64() * 1000.0;
 

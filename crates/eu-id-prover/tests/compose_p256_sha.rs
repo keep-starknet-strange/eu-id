@@ -17,8 +17,18 @@ use eu_id_prover::credential::Credential;
 use eu_id_prover::generator::{sign_credential, IssuerKey};
 use eu_id_prover::{fixtures, prove, verify, Error, PipelineWitness, Proof};
 use std::time::Instant;
+use stwo_p256::proof::P256ProofDraft;
 
-/// Drive a pipeline witness through the five-module combined prover.
+/// A self-consistent holder nonce draft: the demo device key signing the demo
+/// nonce.
+fn nonce_draft() -> P256ProofDraft {
+    P256ProofDraft::from_inputs_with_arbitrary_fake_glv_hints(vec![fixtures::demo_nonce_statement(
+    )
+    .ecdsa_input()])
+    .expect("demo nonce builds a proof draft")
+}
+
+/// Drive a pipeline witness through the six-module combined prover.
 fn prove_pipeline(pw: &PipelineWitness) -> Result<Proof, Error> {
     let draft = pw
         .p256_draft
@@ -26,6 +36,7 @@ fn prove_pipeline(pw: &PipelineWitness) -> Result<Proof, Error> {
         .expect("a valid signature builds a P256 draft");
     prove(
         draft,
+        &nonce_draft(),
         &pw.sha_witness,
         pw.sha_log_n_rows,
         pw.sha_group_width,
@@ -109,15 +120,20 @@ fn composes_all_modules_for_an_honest_credential() {
         "fixture witness must be self-consistent"
     );
 
-    let proof = prove_pipeline(&pw).expect("five-module proof generates");
+    let proof = prove_pipeline(&pw).expect("six-module proof generates");
 
     let expected = proof.p256_instances().to_vec();
-    verify(&proof, &expected).expect("five-module bound proof verifies");
+    let expected_nonce = proof.nonce_p256_instances().to_vec();
+    verify(&proof, &expected, &expected_nonce).expect("six-module bound proof verifies");
 
     // Caller-argument binding: a mismatched expected statement is rejected.
     assert!(
-        verify(&proof, &[]).is_err(),
-        "an empty expected statement must be rejected",
+        verify(&proof, &[], &expected_nonce).is_err(),
+        "an empty expected credential statement must be rejected",
+    );
+    assert!(
+        verify(&proof, &expected, &[]).is_err(),
+        "an empty expected nonce statement must be rejected",
     );
 }
 
@@ -130,7 +146,8 @@ fn binds_exactly_18_credential() {
     let pw = fixtures::valid_exactly_18().pipeline_witness();
     let proof = prove_pipeline(&pw).expect("exactly-18 proof generates");
     let expected = proof.p256_instances().to_vec();
-    verify(&proof, &expected).expect("exactly-18 bound proof verifies");
+    let expected_nonce = proof.nonce_p256_instances().to_vec();
+    verify(&proof, &expected, &expected_nonce).expect("exactly-18 bound proof verifies");
 }
 
 /// Boundary case through the bound path: a leap-day date of birth (born
@@ -150,5 +167,6 @@ fn binds_leap_year_credential() {
 
     let proof = prove_pipeline(&pw).expect("leap-year proof generates");
     let expected = proof.p256_instances().to_vec();
-    verify(&proof, &expected).expect("leap-year bound proof verifies");
+    let expected_nonce = proof.nonce_p256_instances().to_vec();
+    verify(&proof, &expected, &expected_nonce).expect("leap-year bound proof verifies");
 }

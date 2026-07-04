@@ -47,12 +47,22 @@ pub(crate) fn issuer_key() -> AffinePoint {
 }
 
 /// Map a [`ZkPublicStatement`] to the prover's [`PublicStatement`]: the demo
-/// issuer key plus the policy derived from the request parameters. Symmetric —
-/// the verifier rebuilds the identical statement from its own request.
+/// issuer key, the policy derived from the request parameters, and the fixed demo
+/// holder nonce signature. Symmetric — the verifier rebuilds the identical
+/// statement from its own request.
+///
+/// The holder-presence nonce signature the STARK now folds in is a fixed demo
+/// device-key signature (decision 4); the mdoc `SessionTranscript` nonce carried
+/// in [`ZkPublicStatement`] stays envelope-bound (not STARK-bound). Binding a
+/// real device key is the mdoc device-key milestone.
 pub(crate) fn to_public_statement(
     statement: &ZkPublicStatement,
 ) -> Result<PublicStatement, ZkError> {
-    Ok(PublicStatement::new(issuer_key(), to_policy(statement)?))
+    Ok(PublicStatement::new(
+        issuer_key(),
+        to_policy(statement)?,
+        eu_id_prover::fixtures::demo_nonce_statement(),
+    ))
 }
 
 /// Map a [`ZkPublicStatement`] to the prover's [`Policy`] — reference date,

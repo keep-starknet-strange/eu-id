@@ -22,7 +22,11 @@ use eu_id_prover::{
 /// The relying party's statement for a policy: the demo issuer's *public* key
 /// (the trusted anchor) plus the policy. Rebuilt independently of any proof.
 fn demo_statement(policy: &Policy) -> PublicStatement {
-    PublicStatement::new(IssuerKey::demo().public_key(), policy.clone())
+    PublicStatement::new(
+        IssuerKey::demo().public_key(),
+        policy.clone(),
+        fixtures::demo_nonce_statement(),
+    )
 }
 
 /// The headline happy path: prove an honest credential through `prove_identity`
@@ -35,6 +39,7 @@ fn prove_identity_then_verify_identity_round_trips() {
         &fixture.signed.credential,
         &IssuerKey::demo(),
         &fixture.policy,
+        &fixtures::demo_nonce_statement(),
     )
     .expect("honest credential proves");
 
@@ -54,6 +59,7 @@ fn verify_identity_binds_the_full_statement() {
         &fixture.signed.credential,
         &IssuerKey::demo(),
         &fixture.policy,
+        &fixtures::demo_nonce_statement(),
     )
     .expect("honest credential proves");
 
@@ -62,7 +68,11 @@ fn verify_identity_binds_the_full_statement() {
 
     // Wrong issuer key Q (a different signing key's public key).
     let wrong_issuer = IssuerKey::from_seed(&[9u8; 32]).public_key();
-    let wrong_q = PublicStatement::new(wrong_issuer, fixture.policy.clone());
+    let wrong_q = PublicStatement::new(
+        wrong_issuer,
+        fixture.policy.clone(),
+        fixtures::demo_nonce_statement(),
+    );
     assert!(
         matches!(
             verify_identity(&proof, &wrong_q),
@@ -104,6 +114,7 @@ fn proof_round_trips_through_bincode() {
         &fixture.signed.credential,
         &IssuerKey::demo(),
         &fixture.policy,
+        &fixtures::demo_nonce_statement(),
     )
     .expect("honest credential proves");
 
@@ -125,6 +136,7 @@ fn prove_identity_rejects_under_age() {
         &fixture.signed.credential,
         &IssuerKey::demo(),
         &fixture.policy,
+        &fixtures::demo_nonce_statement(),
     );
     assert!(
         matches!(result, Err(Error::AgePrepare(_))),

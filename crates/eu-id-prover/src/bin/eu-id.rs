@@ -12,8 +12,8 @@
 //!
 //! `prove` signs the fixture's credential with the built-in **demo issuer** and
 //! the fixture's policy, then writes the bincode-serialized proof. `verify`
-//! rebuilds the public statement `{ issuer Q, policy }` *independently* of the
-//! proof and checks the proof against it.
+//! rebuilds the public statement `{ issuer Q, policy, holder nonce }`
+//! *independently* of the proof and checks the proof against it.
 //!
 //! By default `verify` uses the demo issuer's key and the fixture's policy, so an
 //! honest proof verifies. The override flags perturb the *expected* statement to
@@ -92,6 +92,7 @@ fn cmd_prove(args: &[String]) {
         &fixture.signed.credential,
         &IssuerKey::demo(),
         &fixture.policy,
+        &fixtures::demo_nonce_statement(),
     )
     .unwrap_or_else(|e| {
         // A false statement (e.g. under-age) is rejected at witness
@@ -143,7 +144,10 @@ fn expected_statement(args: &[String], fixture: &Fixture) -> PublicStatement {
         }
     };
 
-    PublicStatement::new(issuer_key, policy)
+    // The holder nonce signature is deterministic (the demo device key over the
+    // demo nonce), so the verify side rebuilds the same statement the prove side
+    // used. Overriding it is a follow-on flag.
+    PublicStatement::new(issuer_key, policy, fixtures::demo_nonce_statement())
 }
 
 fn cmd_verify(args: &[String]) {
