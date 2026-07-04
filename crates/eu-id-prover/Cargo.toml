@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [features]
+default = ["ec-coprocessor"]
 # Forward Stwo's rayon paths to the SHA module. Cargo unifies the single `stwo`
 # dependency, so this also turns on the shared STARK prover's parallel paths for
 # the whole composition. Off by default: the honest baseline is single-threaded.

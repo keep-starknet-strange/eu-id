@@ -3,7 +3,18 @@
 Source of truth: `/Users/lucas/eu-id/tasks/parity/s4/WO-M1-coprocessor-mainline-merge.md`.
 Worktree: `/Users/lucas/eu-id/.claude/worktrees/wo-m1-coprocessor-merge` on `codex/wo-m1-coprocessor-merge`.
 Base: `feat/proof-reductions@7af53303`.
-Scope guard: implement feature-on coprocessor pipeline integration with default OFF. Do not flip `ec-coprocessor` into default features or retire `stwo-p256` until the Phase 3 architect ack exists.
+Scope guard: Q-M1-003 ACKED the default-on flip after WO-M2 moved both credential and nonce signatures through the coprocessor. Keep the legacy P256 AIR path reachable with `--no-default-features`; retire default-path P256 wiring only after the Phase 4 audit records what remains.
+
+## Phase 4 Default-On Plan
+
+Source: `/Users/lucas/eu-id/tasks/parity/mailbox/answers/Q-M1-003.md`.
+
+- [x] Read Q-M1-003 and record the default-on authorization plus v1 caveats.
+- [x] Flip `ec-coprocessor` into the default `eu-id-prover` feature set.
+- [x] Run default coprocessor verification and legacy `--no-default-features` verification.
+- [x] Run BENCH-LOCK default-on/off benches and append perf-log + STATUS rows.
+- [x] Mechanically audit remaining P256 AIR / `stwo-p256` references and document what stays behind legacy/diagnostic surfaces.
+- [ ] Commit the Phase 4 default-on series.
 
 ## WO-M2 Nonce Coprocessor Plan
 
@@ -86,6 +97,12 @@ Decision: default-on flip deferred until both credential and nonce P256 AIRs lea
 - WO-M2 perf under BENCH-LOCK (`RAYON_NUM_THREADS=1`): Criterion `identity_e2e/prove_identity` feature OFF `3.2879 s` midpoint (`[3.2698, 3.3082] s`) vs feature ON `1.9022 s` midpoint (`[1.8969, 1.9078] s`), delta `-1.3857 s` / `-42.1%`.
 - WO-M2 report-driver perf under BENCH-LOCK (`BENCH_ITERS=3`, `RAYON_NUM_THREADS=1`): `pipeline_e2e` feature OFF prove `4914 ms`, verify `39 ms`, proof `3,916,615` bytes; feature ON prove `2587 ms`, verify `42 ms`, proof `1,240,046` bytes. Proof-byte swing is `-2,676,569` bytes; verify swing is `+3 ms`.
 - Filed `/Users/lucas/eu-id/tasks/parity/mailbox/questions/Q-M1-003-wo-m2-nonce-coprocessor-flip-ack.md` with the WO-M2 report and the single default-on flip ack request. The default-on flip remains unapplied.
+- Q-M1-003 answered: default-on flip ACKED with the v1 caveats to ship verbatim: public `z,r,s` makes presentations linkable across verifiers, and `V1_NON_ZK` Ligero openings remain non-ZK until v2 masked rows re-derive parameters.
+- Phase 4 default flip implemented: `eu-id-prover` default features now include `ec-coprocessor`; legacy two-P256-AIR product proof remains reachable with `--no-default-features`.
+- Phase 4 verification passed: `rtk proxy cargo fmt --check`; `rtk proxy cargo test -p eu-id-prover`; `rtk proxy cargo test -p eu-id-prover --no-default-features`; `rtk proxy make test-ec-coprocessor-ignored`; `rtk proxy cargo test -p stwo-p256 --lib -- --skip proof::tests::` (`277 passed`, `1 ignored`, `58 filtered out`); and final full-suite `rtk proxy cargo test --workspace` passed after the slow `stwo-p256` proof tests completed.
+- Phase 4 BENCH-LOCK (`RAYON_NUM_THREADS=1`) results: Criterion `identity_e2e/prove_identity` legacy `--no-default-features` midpoint `3.1921 s` (`[3.1765, 3.2124] s`) vs default coprocessor midpoint `1.8609 s` (`[1.8479, 1.8756] s`), delta `-1.3312 s` / `-41.7%`.
+- Phase 4 report-driver perf (`BENCH_ITERS=3`, `RAYON_NUM_THREADS=1`): legacy `pipeline_e2e` prove `4817 ms`, verify `39 ms`, proof `3,916,615` bytes; default coprocessor `pipeline_e2e` prove `2515 ms`, verify `40 ms`, proof `1,240,046` bytes. Proof-byte swing is `-2,676,569` bytes; verify swing is `+1 ms`.
+- P256 AIR retirement audit: default `eu-id-prover` identity composition has no `P256Prover`/`P256Verifier` modules; the constructors in `src/lib.rs` are under `#[cfg(not(feature = "ec-coprocessor"))]`. Remaining `stwo-p256` references are legacy `--no-default-features` product proof code, statement/type/native ECDSA helpers, isolated mdoc AIR profile, `shape_dump`, standalone benches, tests, and `eu-id-ffi`'s standalone P256 benchmark.
 
 # Merge & Cleanup Plan
 
