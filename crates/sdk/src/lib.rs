@@ -424,10 +424,13 @@ fn map_prover_error(e: eu_id_prover::Error) -> ZkError {
             "the holder's nationality is not in the accepted set [{e:?}]"
         )),
         // Other witness-generation / proving failures (bad signature, internal).
-        P256Prepare(_) | SignatureInvalid | Prove(_) => ZkError::Prove(format!("{e:?}")),
+        P256Prepare(_) | SignatureInvalid | Prove(_) | CoprocessorWitness(_) => {
+            ZkError::Prove(format!("{e:?}"))
+        }
         // Verifier-side rejections (only reachable from the verify path).
         P256InstanceMismatch | IssuerKeyMismatch | AgePolicyMismatch | NatPolicyMismatch
-        | WeakConfig { .. } | Verify(_) => ZkError::Verify(format!("{e:?}")),
+        | WeakConfig { .. } | CoprocessorMissing | CoprocessorInstanceCount { .. }
+        | CoprocessorProof(_) | Verify(_) => ZkError::Verify(format!("{e:?}")),
     }
 }
 

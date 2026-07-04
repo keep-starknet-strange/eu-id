@@ -239,3 +239,18 @@ WO-S4/Q-024 note: production SHA GKR tie-back is reverted on current Stwo becaus
 GKR-v2 diagnostic (2026-07-04): fused PackedQM31 fraction-add measures 3.8 ns/eff-mult on NEON => ~38 ns/term floor vs <=17 ns break-even. Local stwo GKR acceleration for the SHA tables is closed on mobile-class hardware by arithmetic, not by implementation. Cost of learning this: half a day (the Q-028 kill-switch), vs the +226 ms production regression it would have replayed.
 
 GKR-v2 close-out (2026-07-04): Q-030 chooses stop/no production fusion. The extra Stwo comparison measured the existing `Fraction` abstraction within 3-4% of hand-fused PackedQM31 fraction-add (`log20` median 13.018 ms existing vs 12.563 ms fused), so production fusion is review risk without a consumer. Useful deliverables are the Stwo mixed-height/global-lift correctness fix and `gkr_fraction_add` diagnostic bench; eu-id remains full LogUp with the reopener gates preserved.
+
+| 2026-07-04 | TBD | WO-M1 Phase 4 default-on flip | `identity_e2e/prove_identity` legacy `--no-default-features` -> default coprocessor (RAYON_NUM_THREADS=1, BENCH-LOCK) | 3.1921 s | 1.8609 s |
+| 2026-07-04 | TBD | WO-M1 Phase 4 default-on flip | `pipeline_e2e` prove, legacy -> default coprocessor (BENCH_ITERS=3, RAYON_NUM_THREADS=1) | 4817 ms | 2515 ms |
+| 2026-07-04 | TBD | WO-M1 Phase 4 default-on flip | `pipeline_e2e` verify, legacy -> default coprocessor | 39 ms | 40 ms |
+| 2026-07-04 | TBD | WO-M1 Phase 4 default-on flip | proof bytes, legacy -> default coprocessor | 3,916,615 | 1,240,046 |
+
+WO-M1 Phase 4 default-on note (2026-07-04): Q-M1-003 authorized flipping `ec-coprocessor` into the `eu-id-prover` default after WO-M2 moved both credential and nonce ECDSA statements through one transcript-bound coprocessor bundle. Final head-to-head table, benches of record:
+
+| era | feature mode | `identity_e2e/prove_identity` | `pipeline_e2e` prove | `pipeline_e2e` verify | proof bytes |
+|---|---|---:|---:|---:|---:|
+| AIR-optimized product baseline | `--no-default-features` legacy P256 AIR | 3.1921 s | 4817 ms | 39 ms | 3,916,615 |
+| credential-coprocessor checkpoint | `--features ec-coprocessor` before WO-M2 | 2.6246 s | 3787 ms | 41 ms | 2,610,867 |
+| full coprocessor era | default features | 1.8609 s | 2515 ms | 40 ms | 1,240,046 |
+
+Default-on v1 caveats ship with the flip: public `z,r,s` exposes linkable presentations across verifiers, and `V1_NON_ZK` Ligero openings are non-ZK until v2 masked rows re-derive parameters. Mechanical retirement audit: the default identity composition no longer constructs `P256Prover`/`P256Verifier`; those product-path modules are under `#[cfg(not(feature = "ec-coprocessor"))]`. Remaining `stwo-p256` references are legacy no-default product proof code, statement/type/native ECDSA helpers, isolated mdoc AIR profile, `shape_dump`, standalone benches/tests, and the FFI standalone P256 benchmark.
