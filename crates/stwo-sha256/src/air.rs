@@ -527,6 +527,42 @@ impl AirProver for Sha256Prover<'_> {
         }
     }
 
+    fn write_selected_preprocessed(
+        &mut self,
+        tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>,
+        selected_ids: &[PreProcessedColumnId],
+    ) {
+        // Partial-write support for cross-instance dedup: when several SHA modules
+        // share one composition (e.g. the mdoc circuit's four instances), the
+        // orchestrator commits each preprocessed column once and asks later
+        // instances for only their non-duplicate subset — possibly none.
+        let ids = all_preprocessed_column_ids();
+        let preprocessed = self.preprocessed.take().unwrap_or_else(|| {
+            let (preprocessed_evals, _ids, _log_sizes) =
+                generate_preprocessed_trace(self.group_width, self.log_n_rows);
+            preprocessed_evals
+        });
+        if selected_ids == ids.as_slice() {
+            tb.extend_evals(preprocessed);
+            return;
+        }
+        let selected: Vec<_> = selected_ids
+            .iter()
+            .map(|selected_id| {
+                ids.iter()
+                    .zip(&preprocessed)
+                    .find_map(|(id, column)| (id == selected_id).then(|| column.clone()))
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "selected preprocessed column {} is not owned by this SHA-256 module",
+                            selected_id.id
+                        )
+                    })
+            })
+            .collect();
+        tb.extend_evals(selected);
+    }
+
     fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>) {
         let base = self.base.take().unwrap_or_else(|| {
             build_base_trace(
