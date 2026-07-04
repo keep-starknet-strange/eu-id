@@ -147,6 +147,103 @@ use stwo_p256::public_inputs::PublicEcdsaInstance;
 // relying party needs it in scope to build a statement.
 pub use stwo_p256::types::AffinePoint;
 
+#[cfg(feature = "ec-coprocessor")]
+pub mod ec_coprocessor {
+    use eu_id_ec_coprocessor::ecdsa::{
+        generate_witness, implemented_circuit_family_labels, implemented_circuit_gate_count,
+        prove_implemented_circuit_bundle, prove_implemented_circuit_proofs,
+        verify_implemented_circuit_bundle, verify_implemented_circuit_proofs,
+        verify_implemented_circuits, verify_witness, EcdsaInput as S4EcdsaInput,
+        ImplementedCircuitBundle, ImplementedCircuitProofError, ImplementedCircuitProofs, Witness,
+        WitnessError,
+    };
+    use eu_id_ec_coprocessor::sumcheck::InputClaims;
+    use eu_id_ec_coprocessor::CircuitError;
+    use stwo::core::fields::m31::M31;
+    use stwo_p256::public_inputs::PublicEcdsaInstance;
+    use stwo_p256::types::EcdsaVerifyInput;
+
+    pub fn input_from_stwo(input: &EcdsaVerifyInput) -> S4EcdsaInput {
+        S4EcdsaInput {
+            z: input.message_hash.0,
+            r: input.signature.r.0,
+            s: input.signature.s.0,
+            qx: input.public_key.x.0,
+            qy: input.public_key.y.0,
+        }
+    }
+
+    pub fn generate_witness_from_stwo(input: &EcdsaVerifyInput) -> Result<Witness, WitnessError> {
+        generate_witness(&input_from_stwo(input))
+    }
+
+    pub fn verify_witness_from_stwo(
+        input: &EcdsaVerifyInput,
+        witness: &Witness,
+    ) -> Result<(), WitnessError> {
+        verify_witness(&input_from_stwo(input), witness)
+    }
+
+    pub fn verify_implemented_circuits_from_stwo(
+        input: &EcdsaVerifyInput,
+        witness: &Witness,
+    ) -> Result<(), WitnessError> {
+        verify_implemented_circuits(&input_from_stwo(input), witness)
+    }
+
+    pub fn prove_implemented_circuit_proofs_from_stwo(
+        input: &EcdsaVerifyInput,
+        witness: &Witness,
+        commitment_root: [u8; 32],
+    ) -> Result<ImplementedCircuitProofs, ImplementedCircuitProofError> {
+        prove_implemented_circuit_proofs(&input_from_stwo(input), witness, commitment_root)
+    }
+
+    pub fn verify_implemented_circuit_proofs_from_stwo(
+        proofs: &ImplementedCircuitProofs,
+        commitment_root: [u8; 32],
+    ) -> Result<Vec<InputClaims>, ImplementedCircuitProofError> {
+        verify_implemented_circuit_proofs(proofs, commitment_root)
+    }
+
+    pub fn implemented_circuit_family_labels_from_stwo() -> Result<Vec<&'static [u8]>, CircuitError>
+    {
+        implemented_circuit_family_labels()
+    }
+
+    pub fn implemented_circuit_gate_count_from_stwo() -> Result<usize, CircuitError> {
+        implemented_circuit_gate_count()
+    }
+
+    pub fn prove_implemented_circuit_bundle_from_stwo(
+        input: &EcdsaVerifyInput,
+        witness: &Witness,
+    ) -> Result<ImplementedCircuitBundle, ImplementedCircuitProofError> {
+        prove_implemented_circuit_bundle(&input_from_stwo(input), witness)
+    }
+
+    pub fn verify_implemented_circuit_bundle_from_stwo(
+        input: &EcdsaVerifyInput,
+        bundle: &ImplementedCircuitBundle,
+    ) -> Result<Vec<InputClaims>, ImplementedCircuitProofError> {
+        verify_implemented_circuit_bundle(&input_from_stwo(input), bundle)
+    }
+
+    pub fn verify_implemented_circuit_bundle_from_public_instance(
+        instance: &PublicEcdsaInstance<M31>,
+        bundle: &ImplementedCircuitBundle,
+    ) -> Result<Vec<InputClaims>, ImplementedCircuitProofError> {
+        let input = S4EcdsaInput {
+            z: instance.z.to_u256().0,
+            r: instance.r.to_u256().0,
+            s: instance.s.to_u256().0,
+            qx: instance.pub_x.to_u256().0,
+            qy: instance.pub_y.to_u256().0,
+        };
+        verify_implemented_circuit_bundle(&input, bundle)
+    }
+}
+
 use stwo_sha256::air::{Sha256ColumnTask, Sha256Prover, Sha256Verifier};
 use stwo_sha256::field_exposure::FieldExposure;
 use stwo_sha256::interaction::InteractionClaim as Sha256InteractionClaim;
@@ -162,6 +259,8 @@ pub struct Proof {
     /// The one shared STARK proof.
     pub stark_proof: StarkProof<Blake2sMerkleHasher>,
     // Credential P256 module reconstruction data.
+    #[cfg(feature = "ec-coprocessor")]
+    coprocessor_bundle: Option<eu_id_ec_coprocessor::ecdsa::ImplementedCircuitBundle>,
     p256_claim: P256CurrentAirProofClaim,
     p256_interaction_claim: P256CurrentAirInteractionClaim,
     // Nonce P256 module reconstruction data (the holder device-key signature). No
@@ -202,6 +301,13 @@ impl Proof {
     pub fn nonce_p256_instances(&self) -> &[PublicEcdsaInstance<M31>] {
         &self.nonce_p256_claim.public_inputs.instances
     }
+
+    #[cfg(feature = "ec-coprocessor")]
+    pub fn coprocessor_bundle(
+        &self,
+    ) -> Option<&eu_id_ec_coprocessor::ecdsa::ImplementedCircuitBundle> {
+        self.coprocessor_bundle.as_ref()
+    }
 }
 
 /// Errors from composing or verifying the combined proof.
@@ -230,6 +336,19 @@ pub enum Error {
     /// A freshly signed credential did not yield a natively-verifying ECDSA
     /// witness (no proof draft) — should not happen for a well-formed issuer key.
     SignatureInvalid,
+    #[cfg(feature = "ec-coprocessor")]
+    /// The feature-gated EC coprocessor payload is missing from a relying-party
+    /// proof.
+    CoprocessorMissing,
+    #[cfg(feature = "ec-coprocessor")]
+    /// The current S4-lite coprocessor payload binds one ECDSA instance.
+    CoprocessorInstanceCount { actual: usize },
+    #[cfg(feature = "ec-coprocessor")]
+    /// S4-lite witness generation failed for the existing P256 input.
+    CoprocessorWitness(eu_id_ec_coprocessor::ecdsa::WitnessError),
+    #[cfg(feature = "ec-coprocessor")]
+    /// S4-lite proof generation or verification failed.
+    CoprocessorProof(eu_id_ec_coprocessor::ecdsa::ImplementedCircuitProofError),
     /// The shared STARK verifier rejected the proof (includes a broken global
     /// LogUp balance — e.g. the signed digest does not equal `SHA-256(C)`).
     Verify(String),
@@ -588,6 +707,8 @@ fn prove_prepared_with_config(
     };
     let proof = Proof {
         stark_proof,
+        #[cfg(feature = "ec-coprocessor")]
+        coprocessor_bundle: None,
         p256_claim: p256.proof_claim().clone(),
         p256_interaction_claim: p256.interaction_claim().clone(),
         nonce_p256_claim: nonce_p256.proof_claim().clone(),
@@ -720,7 +841,7 @@ pub fn prove_identity(
     let nonce_draft = P256ProofDraft::from_inputs_with_arbitrary_fake_glv_hints(vec![nonce_input])
         .map_err(Error::P256Prepare)?;
 
-    prove(
+    let proof = prove(
         draft,
         &nonce_draft,
         &witness.sha_witness,
@@ -730,7 +851,25 @@ pub fn prove_identity(
         &witness.age_dob,
         &witness.nat_public,
         &witness.nat_private,
-    )
+    )?;
+    #[cfg(feature = "ec-coprocessor")]
+    {
+        let mut proof = proof;
+        let s4_witness = ec_coprocessor::generate_witness_from_stwo(&witness.signed.ecdsa_input)
+            .map_err(Error::CoprocessorWitness)?;
+        proof.coprocessor_bundle = Some(
+            ec_coprocessor::prove_implemented_circuit_bundle_from_stwo(
+                &witness.signed.ecdsa_input,
+                &s4_witness,
+            )
+            .map_err(Error::CoprocessorProof)?,
+        );
+        Ok(proof)
+    }
+    #[cfg(not(feature = "ec-coprocessor"))]
+    {
+        Ok(proof)
+    }
 }
 
 /// Whether the proof's instances match the caller's expected statement, **except
@@ -777,6 +916,8 @@ pub fn verify(
     if proof.nonce_p256_claim.public_inputs.instances != expected_nonce_instances {
         return Err(Error::P256InstanceMismatch);
     }
+    #[cfg(feature = "ec-coprocessor")]
+    verify_coprocessor_payload(proof)?;
     verify_stark(proof)
 }
 
@@ -828,7 +969,27 @@ pub fn verify_identity(proof: &Proof, statement: &PublicStatement) -> Result<(),
         return Err(Error::P256InstanceMismatch);
     }
 
+    #[cfg(feature = "ec-coprocessor")]
+    verify_coprocessor_payload(proof)?;
+
     verify_stark(proof)
+}
+
+#[cfg(feature = "ec-coprocessor")]
+fn verify_coprocessor_payload(proof: &Proof) -> Result<(), Error> {
+    let bundle = proof
+        .coprocessor_bundle
+        .as_ref()
+        .ok_or(Error::CoprocessorMissing)?;
+    let instances = &proof.p256_claim.public_inputs.instances;
+    if instances.len() != 1 {
+        return Err(Error::CoprocessorInstanceCount {
+            actual: instances.len(),
+        });
+    }
+    ec_coprocessor::verify_implemented_circuit_bundle_from_public_instance(&instances[0], bundle)
+        .map(|_| ())
+        .map_err(Error::CoprocessorProof)
 }
 
 /// Rebuild the six verifier modules from the proof and check the shared STARK
@@ -919,4 +1080,114 @@ fn verify_stark_with_config(
         &mut nat,
     ];
     air_core::verify(&mut modules, &proof.stark_proof).map_err(|e| Error::Verify(format!("{e:?}")))
+}
+
+#[cfg(all(test, feature = "ec-coprocessor"))]
+mod ec_coprocessor_tests {
+    use crate::credential::Credential;
+    use crate::ec_coprocessor::{
+        generate_witness_from_stwo, implemented_circuit_family_labels_from_stwo,
+        implemented_circuit_gate_count_from_stwo, prove_implemented_circuit_bundle_from_stwo,
+        prove_implemented_circuit_proofs_from_stwo, verify_implemented_circuit_bundle_from_stwo,
+        verify_implemented_circuit_proofs_from_stwo, verify_implemented_circuits_from_stwo,
+        verify_witness_from_stwo,
+    };
+    use crate::generator::{sign_credential, IssuerKey};
+    use crate::{fixtures, prove_identity, verify, verify_identity, Error, Proof, PublicStatement};
+    use eu_id_ec_coprocessor::Fp;
+
+    #[test]
+    fn feature_gated_s4_witness_adapter_accepts_real_signed_input() {
+        let credential = Credential::new(2000, 1, 1, 276);
+        let signed = sign_credential(&credential, &IssuerKey::demo());
+
+        let witness = generate_witness_from_stwo(&signed.ecdsa_input).unwrap();
+
+        verify_witness_from_stwo(&signed.ecdsa_input, &witness).unwrap();
+        verify_implemented_circuits_from_stwo(&signed.ecdsa_input, &witness).unwrap();
+        let proofs =
+            prove_implemented_circuit_proofs_from_stwo(&signed.ecdsa_input, &witness, [5u8; 32])
+                .unwrap();
+        let claims = verify_implemented_circuit_proofs_from_stwo(&proofs, [5u8; 32]).unwrap();
+        assert_eq!(
+            claims.len(),
+            implemented_circuit_family_labels_from_stwo().unwrap().len()
+        );
+        assert!(implemented_circuit_gate_count_from_stwo().unwrap() <= 35_000);
+    }
+
+    #[test]
+    #[ignore = "full S4-lite bundle proves every implemented ECDSA circuit"]
+    fn feature_gated_s4_bundle_adapter_accepts_real_signed_input() {
+        let credential = Credential::new(2000, 1, 1, 276);
+        let signed = sign_credential(&credential, &IssuerKey::demo());
+        let witness = generate_witness_from_stwo(&signed.ecdsa_input).unwrap();
+
+        let bundle =
+            prove_implemented_circuit_bundle_from_stwo(&signed.ecdsa_input, &witness).unwrap();
+
+        let claims =
+            verify_implemented_circuit_bundle_from_stwo(&signed.ecdsa_input, &bundle).unwrap();
+        assert_eq!(
+            claims.len(),
+            implemented_circuit_family_labels_from_stwo().unwrap().len()
+        );
+    }
+
+    #[test]
+    #[ignore = "full S4-lite bundle proves every implemented ECDSA circuit"]
+    fn feature_gated_s4_bundle_adapter_rejects_wrong_caller_input() {
+        let credential = Credential::new(2000, 1, 1, 276);
+        let signed = sign_credential(&credential, &IssuerKey::demo());
+        let witness = generate_witness_from_stwo(&signed.ecdsa_input).unwrap();
+        let bundle =
+            prove_implemented_circuit_bundle_from_stwo(&signed.ecdsa_input, &witness).unwrap();
+
+        let other_credential = Credential::new(1999, 12, 31, 250);
+        let other_signed = sign_credential(&other_credential, &IssuerKey::demo());
+
+        assert!(
+            verify_implemented_circuit_bundle_from_stwo(&other_signed.ecdsa_input, &bundle)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn feature_gated_prove_identity_carries_serialized_coprocessor_bundle() {
+        let fixture = fixtures::valid_over_18();
+        let issuer = IssuerKey::demo();
+
+        let proof = prove_identity(&fixture.signed.credential, &issuer, &fixture.policy).unwrap();
+        assert!(proof.coprocessor_bundle().is_some());
+
+        let bytes = bincode::serialize(&proof).unwrap();
+        let mut restored: Proof = bincode::deserialize(&bytes).unwrap();
+        assert!(restored.coprocessor_bundle().is_some());
+
+        let statement = PublicStatement::new(issuer.public_key(), fixture.policy.clone());
+        verify_identity(&restored, &statement).unwrap();
+
+        let bundle = restored.coprocessor_bundle.as_mut().unwrap();
+        bundle.openings[0].column[0] = bundle.openings[0].column[0] + Fp::ONE;
+        assert!(matches!(
+            verify_identity(&restored, &statement),
+            Err(Error::CoprocessorProof(_))
+        ));
+    }
+
+    #[test]
+    fn feature_gated_verify_rejects_missing_coprocessor_bundle() {
+        let fixture = fixtures::valid_over_18();
+        let issuer = IssuerKey::demo();
+        let mut proof =
+            prove_identity(&fixture.signed.credential, &issuer, &fixture.policy).unwrap();
+        let expected = proof.p256_instances().to_vec();
+
+        proof.coprocessor_bundle = None;
+
+        assert!(matches!(
+            verify(&proof, &expected),
+            Err(Error::CoprocessorMissing)
+        ));
+    }
 }

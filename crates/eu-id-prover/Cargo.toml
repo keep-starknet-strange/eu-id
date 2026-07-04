@@ -13,9 +13,11 @@ edition.workspace = true
 parallel = ["stwo-sha256/parallel"]
 gkr-spike = ["air-core/gkr-spike", "stwo-sha256/gkr-spike"]
 fri-sweep = ["stwo/tracing"]
+ec-coprocessor = ["dep:eu-id-ec-coprocessor"]
 
 [dependencies]
 air-core = { path = "../air-core" }
+eu-id-ec-coprocessor = { path = "../eu-id-ec-coprocessor", optional = true }
 stwo-p256 = { path = "../stwo-p256" }
 stwo-sha256 = { path = "../stwo-sha256" }
 predicates = { path = "../predicates" }
