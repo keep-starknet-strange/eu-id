@@ -5,11 +5,11 @@ Target checkout: `/Users/lucas/eu-id` on `feat/proof-reductions`.
 
 - [x] M0: Re-verify worktree inventory before touching files.
 - [x] M0: Write and commit the merge-freeze notice.
-- [ ] M1: Run the full pre-commit gate list once.
-- [ ] M1: Commit main checkout changes in the plan's grouped order.
-- [ ] M2: Merge `codex/full-mdoc-plan` if its worktree is clean; otherwise record skip.
-- [ ] M3: Merge `s4-lite` if its worktree is clean; otherwise record skip.
-- [ ] M4: Park GKR-v2 work, prune eligible stale worktrees, and remove the freeze notice.
+- [x] M1: Run the full pre-commit gate list once.
+- [x] M1: Commit main checkout changes in the plan's grouped order.
+- [x] M2: Merge `codex/full-mdoc-plan` if its worktree is clean; otherwise record skip.
+- [x] M3: Merge `s4-lite` if its worktree is clean; otherwise record skip.
+- [x] M4: Park GKR-v2 work, prune eligible stale worktrees, and remove the freeze notice.
 - [ ] M5: Run final verification, update `tasks/parity/STATUS.md`, and report commits/skips.
 
 ## Review
@@ -18,6 +18,13 @@ Target checkout: `/Users/lucas/eu-id` on `feat/proof-reductions`.
 - `codex/full-mdoc-plan` and `s4-lite` were dirty at inventory time, so their merge
   preconditions are not met unless they reach a clean quiet point before M2/M3.
 - Freeze notice committed before M1 gates.
+- M1 gates passed before grouped commits. Main checkout commits landed for mdoc,
+  nonce monolith, mdoc perf, docs/tasks, and the WO sweep.
+- M2 skipped: `codex/full-mdoc-plan` branch tip is already an ancestor, but its
+  worktree remains dirty.
+- M3 skipped: `s4-lite` branch tip is already an ancestor, but its worktree remains dirty.
+- M4 parked SHA GKR implementation files on `spike/gkr-v2` at `1847bc06` and left
+  active/dirty worktrees in place.
 
 # WO-A2 SHA Design-Space Sweep
 
