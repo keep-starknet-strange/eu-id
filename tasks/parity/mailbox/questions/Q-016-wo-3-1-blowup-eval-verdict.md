@@ -1,7 +1,7 @@
 # Q-016 — WO-3.1 blowup 2→1 verdict
 
 Date: 2026-07-03
-Status: open
+Status: answered
 WO: WO-3.1 blowup 2→1 evaluation
 Blocking: no
 

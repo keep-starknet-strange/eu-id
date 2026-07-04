@@ -305,11 +305,13 @@ impl FinalAddComponents {
                 },
                 interaction_claim.gamma_signed.claimed_sum,
             ),
-            range13: include_range13_provider.then(|| RangeCheckComponent::new(
-                allocator,
-                RangeCheckEval::new(relations.range13.clone(), RANGE13_BITS),
-                interaction_claim.range13.claimed_sum,
-            )),
+            range13: include_range13_provider.then(|| {
+                RangeCheckComponent::new(
+                    allocator,
+                    RangeCheckEval::new(relations.range13.clone(), RANGE13_BITS),
+                    interaction_claim.range13.claimed_sum,
+                )
+            }),
             signed_carry: include_signed_carry_provider.then(|| {
                 SignedCarryRangeComponent::new(
                     allocator,

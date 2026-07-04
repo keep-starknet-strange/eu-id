@@ -170,8 +170,7 @@ fn prepared_table_ec_row_constraints_pass_for_honest_trace() {
         .expect("valid ec trace");
     let claim = PreparedTableEcRowProofClaim::from_trace(&trace);
     let ids = claim.preprocessed_column_ids();
-    let preprocessed =
-        gen_prepared_table_ec_row_preprocessed_trace(claim.log_size, &ids).unwrap();
+    let preprocessed = gen_prepared_table_ec_row_preprocessed_trace(claim.log_size, &ids).unwrap();
     let base = gen_prepared_table_ec_row_base_trace(&trace, claim.log_size).unwrap();
     let mut channel = Blake2sChannel::default();
     let relation = PreparedTableEcRowRelation::draw(&mut channel);
@@ -489,7 +488,7 @@ impl stwo_constraint_framework::EvalAtRow for RecordingSourceEvaluator<'_> {
 
     fn finalize_logup_in_pairs(&mut self) {}
 
-    fn finalize_logup_batched(&mut self, _batching: &Vec<usize>) {}
+    fn finalize_logup_batched(&mut self, _batch_size: usize) {}
 }
 
 /// Whether every polynomial constraint of `PreparedTableProjectiveSourceEval`

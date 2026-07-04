@@ -31,9 +31,7 @@ use stwo_constraint_framework::{
     RelationEntry, INTERACTION_TRACE_IDX,
 };
 
-use crate::range_checks::{
-    consecutive_batching, write_generated_logup_columns_with_batching, RangeCheckRelation,
-};
+use crate::range_checks::{write_batched_logup_columns, RangeCheckRelation};
 use crate::scalar::scalar_mod_mul::columns::{m31_column_eval, padded_log_size, M31ColumnEval};
 
 /// Values per tall-expander row (`K` in the design doc). 8 keeps the tall
@@ -130,7 +128,7 @@ pub fn yield_gamma_digest<E: EvalAtRow>(
     tuple.push(E::F::from(M31::from_u32_unchecked(tag)));
     tuple.push(row_index);
     tuple.extend(coords);
-    eval.add_to_relation(RelationEntry::new(relation, -E::EF::from(presence), &tuple));
+    eval.add_to_relation(RelationEntry::base(relation, -presence, &tuple));
 }
 
 /// Sum of the γ powers covering the lane-padding tail: `γ^0 + … + γ^(P−L−1)`.
@@ -436,9 +434,9 @@ impl FrameworkEval for GammaTallEval {
         // K range uses: every scheduled lane value is consumed exactly once
         // (the numerator is preprocessed — no witness gate can skip a check).
         for value in &values {
-            eval.add_to_relation(RelationEntry::new(
+            eval.add_to_relation(RelationEntry::base(
                 &self.range,
-                E::EF::from(in_group.clone()),
+                in_group.clone(),
                 std::slice::from_ref(value),
             ));
         }
@@ -447,9 +445,9 @@ impl FrameworkEval for GammaTallEval {
         tuple.push(E::F::from(M31::from_u32_unchecked(tag)));
         tuple.push(row_id);
         tuple.extend(coords.iter().map(|pair| pair[1].clone()));
-        eval.add_to_relation(RelationEntry::new(&self.digest, E::EF::from(end), &tuple));
+        eval.add_to_relation(RelationEntry::base(&self.digest, end, &tuple));
 
-        eval.finalize_logup_batched(&consecutive_batching(GAMMA_DIGEST_LANES + 1, 2));
+        eval.finalize_logup_batched(2);
         eval
     }
 }

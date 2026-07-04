@@ -39,11 +39,7 @@ impl FrameworkEval for RangeCheckEval {
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         let value = eval.get_preprocessed_column(range_check_value_column_id(self.log_size));
         let multiplicity = eval.next_trace_mask();
-        eval.add_to_relation(RelationEntry::new(
-            &self.relation,
-            -E::EF::from(multiplicity),
-            &[value],
-        ));
+        eval.add_to_relation(RelationEntry::base(&self.relation, -multiplicity, &[value]));
         eval.finalize_logup_in_pairs();
         eval
     }
@@ -103,11 +99,7 @@ impl FrameworkEval for SignedCarryRangeEval {
 
         eval.add_constraint(active.clone() * (active.clone() - one.clone()));
         eval.add_constraint((one - active) * multiplicity.clone());
-        eval.add_to_relation(RelationEntry::new(
-            &self.relation,
-            -E::EF::from(multiplicity),
-            &[value],
-        ));
+        eval.add_to_relation(RelationEntry::base(&self.relation, -multiplicity, &[value]));
         eval.finalize_logup_in_pairs();
         eval
     }

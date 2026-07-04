@@ -9,11 +9,7 @@ use stwo::core::{
     ColumnVec,
 };
 use stwo::prover::{
-    backend::simd::{
-        m31::{PackedM31, LOG_N_LANES},
-        qm31::PackedQM31,
-        SimdBackend,
-    },
+    backend::simd::{m31::PackedM31, qm31::PackedQM31, SimdBackend},
     ComponentProver,
 };
 use stwo_constraint_framework::{
@@ -187,9 +183,9 @@ impl FrameworkEval for FakeGlvSelectorAirEval {
         for value in scalar.iter().cloned().chain(row.values()) {
             eval.add_constraint((one.clone() - active.clone()) * value);
         }
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             &self.scalar_relation,
-            E::EF::from(active.clone()),
+            active.clone(),
             &scalar,
         ));
         constrain_selector_from_scalar(&mut eval, active, &scalar, &row);
@@ -509,15 +505,12 @@ pub(crate) fn gen_fake_glv_selector_air_interaction_trace(
     assert_eq!(base.len(), FAKE_GLV_SELECTOR_TRACE_COLUMNS);
     let log_size = base[0].domain.log_size();
     let mut logup = LogupTraceGenerator::new(log_size);
-    let mut col = logup.new_col();
-    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
-        col.write_frac(
-            vec_row,
+    logup.col_from_fn(|vec_row| {
+        (
             PackedQM31::from(base[0].data[vec_row]),
             relation.combine(&scalar_packed_values_from_selector_base(base, vec_row)),
-        );
-    }
-    col.finalize_col();
+        )
+    });
     let (trace, claimed_sum) = logup.finalize_last();
     (trace, FakeGlvSelectorAirInteractionClaim { claimed_sum })
 }

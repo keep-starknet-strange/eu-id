@@ -4,10 +4,7 @@ use stwo::{
         utils::{bit_reverse_index, coset_index_to_circle_domain_index},
         ColumnVec,
     },
-    prover::backend::simd::{
-        m31::{LOG_N_LANES, N_LANES},
-        qm31::PackedQM31,
-    },
+    prover::backend::simd::{m31::N_LANES, qm31::PackedQM31},
 };
 use stwo_constraint_framework::{LogupTraceGenerator, Relation};
 use stwo_p256_utils::constants::N_LIMBS;
@@ -153,8 +150,7 @@ fn gen_family_interaction_trace(
 
     let mut logup = LogupTraceGenerator::new(log_size);
     for batch in 0..batch_count {
-        let mut col = logup.new_col();
-        for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+        logup.col_from_fn(|vec_row| {
             let mut numerators = [SecureField::from(M31::from_u32_unchecked(0)); N_LANES];
             let mut denominators = [SecureField::from(M31::from_u32_unchecked(1)); N_LANES];
             for lane in 0..N_LANES {
@@ -171,13 +167,11 @@ fn gen_family_interaction_trace(
                 numerators[lane] = numerator;
                 denominators[lane] = denominator;
             }
-            col.write_frac(
-                vec_row,
+            (
                 PackedQM31::from_array(numerators),
                 PackedQM31::from_array(denominators),
-            );
-        }
-        col.finalize_col();
+            )
+        });
     }
 
     logup.finalize_last()

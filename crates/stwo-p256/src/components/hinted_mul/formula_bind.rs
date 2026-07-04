@@ -122,10 +122,9 @@ pub(crate) fn add_muxed_combo_reduction<E: EvalAtRow>(
             combo_m += signed_coeff_mul::<E>(t.coeff, t.src.limbs()[i].clone());
         }
         let muxed = op_expr.clone() * combo_d + not_op.clone() * combo_m;
-        let recurrence = muxed - target[i].clone()
-            - witness.q.clone() * fixed_limb::<E>(&modulus, i)
-            + prev
-            - limb_base.clone() * witness.carries[i].clone();
+        let recurrence =
+            muxed - target[i].clone() - witness.q.clone() * fixed_limb::<E>(&modulus, i) + prev
+                - limb_base.clone() * witness.carries[i].clone();
         eval.add_constraint(gate.clone() * recurrence);
     }
     eval.add_constraint(gate.clone() * witness.carries[N_LIMBS - 1].clone());
@@ -757,7 +756,13 @@ mod tests {
             let muls: Vec<_> = row
                 .muls
                 .iter()
-                .map(|m| (*m.trace.lhs.limbs(), *m.trace.rhs.limbs(), *m.trace.result.limbs()))
+                .map(|m| {
+                    (
+                        *m.trace.lhs.limbs(),
+                        *m.trace.rhs.limbs(),
+                        *m.trace.result.limbs(),
+                    )
+                })
                 .collect();
             let out_x = *P256M31BigInt::from_u256(&row.output_projective.x.to_u256()).limbs();
             let out_y = *P256M31BigInt::from_u256(&row.output_projective.y.to_u256()).limbs();

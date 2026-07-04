@@ -36,6 +36,76 @@ Shape: `cargo test -p eu-id-prover --release shape_dump -- --ignored --nocapture
 | 2026-07-02 | a1224ae7 | WO-S1 `xor_8` GKR spike (blocked on MLE tie-back Q-003) | shape_dump sha256 interaction cells | 5,800,640 | 5,534,400 |
 | 2026-07-02 | a1224ae7 | WO-S1 `xor_8` GKR spike (blocked on MLE tie-back Q-003) | standalone SHA proof bytes | 60,045 | 73,749 |
 | 2026-07-02 | a1224ae7 | WO-S1 `xor_8` GKR spike (blocked on MLE tie-back Q-003) | `xor_8` GKR wire proof bytes | 0 | 18,824 |
+| 2026-07-03 | worktree | Item 3 Phase 1 `xor_8` GKR tie-back (RAYON_NUM_THREADS=1) | BM_ShaZK_equiv/1/prove | 1.0046 s | 1.2835 s |
+| 2026-07-03 | worktree | Item 3 Phase 1 `xor_8` GKR tie-back (RAYON_NUM_THREADS=1) | BM_ShaZK_equiv/1/verify | 846.76 µs | 880.82 µs |
+| 2026-07-03 | worktree | Item 3 Phase 1 `xor_8` GKR tie-back | shape_dump composed total cells | 37,500,240 | 37,238,096 |
+| 2026-07-03 | worktree | Item 3 Phase 1 `xor_8` GKR tie-back | shape_dump sha256 interaction cells | 5,800,640 | 5,538,496 |
+| 2026-07-03 | worktree | Item 3 Phase 1 `xor_8` GKR tie-back | sha standalone STARK proof bytes | 60,045 | 58,897 |
+| 2026-07-03 | worktree | Item 3 Phase 1 `xor_8` GKR tie-back | `xor_8` GKR wire proof bytes | 0 | 9,992 |
+| 2026-07-03 | worktree | Item 3 Phase 1 `xor_8` GKR tie-back | SHA STARK+GKR payload bytes | 60,045 | 68,889 |
+| 2026-07-04 | worktree | Item 3 Phase 2 sigma-decode GKR tie-back (cumulative; RAYON_NUM_THREADS=1) | BM_ShaZK_equiv/1/prove | 1.0046 s | 1.3491 s |
+| 2026-07-04 | worktree | Item 3 Phase 2 sigma-decode GKR tie-back (cumulative; RAYON_NUM_THREADS=1) | BM_ShaZK_equiv/1/verify | 846.76 µs | 1.1752 ms |
+| 2026-07-04 | worktree | Item 3 Phase 2 sigma-decode GKR tie-back (cumulative) | shape_dump composed total cells | 37,500,240 | 37,238,096 |
+| 2026-07-04 | worktree | Item 3 Phase 2 sigma-decode GKR tie-back (cumulative) | shape_dump sha256 interaction cells | 5,800,640 | 5,538,496 |
+| 2026-07-04 | worktree | Item 3 Phase 2 sigma-decode GKR tie-back (cumulative) | sha standalone STARK proof bytes | 60,045 | 63,233 |
+| 2026-07-04 | worktree | Item 3 Phase 2 sigma-decode GKR tie-back (cumulative) | `xor_8` GKR wire proof bytes | 0 | 9,992 |
+| 2026-07-04 | worktree | Item 3 Phase 2 sigma-decode GKR tie-back (cumulative) | sigma-decode GKR wire proof bytes | 0 | 18,392 |
+| 2026-07-04 | worktree | Item 3 Phase 2 sigma-decode GKR tie-back (cumulative) | SHA STARK+GKR payload bytes | 60,045 | 91,617 |
+| 2026-07-04 | worktree | Item 3 Phase 2 split-pack GKR tie-back (cumulative; RAYON_NUM_THREADS=1) | BM_ShaZK_equiv/1/prove | 1.0046 s | 1.4686 s |
+| 2026-07-04 | worktree | Item 3 Phase 2 split-pack GKR tie-back (cumulative; RAYON_NUM_THREADS=1) | BM_ShaZK_equiv/1/verify | 846.76 µs | 1.5943 ms |
+| 2026-07-04 | worktree | Item 3 Phase 2 split-pack GKR tie-back (cumulative) | shape_dump composed total cells | 37,500,240 | 37,238,096 |
+| 2026-07-04 | worktree | Item 3 Phase 2 split-pack GKR tie-back (cumulative) | shape_dump sha256 interaction cells | 5,800,640 | 5,538,496 |
+| 2026-07-04 | worktree | Item 3 Phase 2 split-pack GKR tie-back (cumulative) | sha standalone STARK proof bytes | 60,045 | 63,713 |
+| 2026-07-04 | worktree | Item 3 Phase 2 split-pack GKR tie-back (cumulative) | `xor_8` GKR wire proof bytes | 0 | 9,992 |
+| 2026-07-04 | worktree | Item 3 Phase 2 split-pack GKR tie-back (cumulative) | sigma-decode GKR wire proof bytes | 0 | 18,392 |
+| 2026-07-04 | worktree | Item 3 Phase 2 split-pack GKR tie-back (cumulative) | split-pack GKR wire proof bytes | 0 | 18,392 |
+| 2026-07-04 | worktree | Item 3 Phase 2 split-pack GKR tie-back (cumulative) | SHA STARK+GKR payload bytes | 60,045 | 110,489 |
+| 2026-07-04 | worktree | Item 3 Phase 2 `maj_ch` GKR tie-back (cumulative; RAYON_NUM_THREADS=1) | BM_ShaZK_equiv/1/prove | 1.0046 s | 1.6705 s |
+| 2026-07-04 | worktree | Item 3 Phase 2 `maj_ch` GKR tie-back (cumulative; RAYON_NUM_THREADS=1) | BM_ShaZK_equiv/1/verify | 846.76 µs | 1.7869 ms |
+| 2026-07-04 | worktree | Item 3 Phase 2 `maj_ch` GKR tie-back (cumulative) | shape_dump composed total cells | 37,500,240 | 37,238,096 |
+| 2026-07-04 | worktree | Item 3 Phase 2 `maj_ch` GKR tie-back (cumulative) | shape_dump sha256 interaction cells | 5,800,640 | 5,538,496 |
+| 2026-07-04 | worktree | Item 3 Phase 2 `maj_ch` GKR tie-back (cumulative) | sha standalone STARK proof bytes | 60,045 | 64,193 |
+| 2026-07-04 | worktree | Item 3 Phase 2 `maj_ch` GKR tie-back (cumulative) | `xor_8` GKR wire proof bytes | 0 | 9,992 |
+| 2026-07-04 | worktree | Item 3 Phase 2 `maj_ch` GKR tie-back (cumulative) | sigma-decode GKR wire proof bytes | 0 | 18,392 |
+| 2026-07-04 | worktree | Item 3 Phase 2 `maj_ch` GKR tie-back (cumulative) | split-pack GKR wire proof bytes | 0 | 18,392 |
+| 2026-07-04 | worktree | Item 3 Phase 2 `maj_ch` GKR tie-back (cumulative) | `maj_ch` GKR wire proof bytes | 0 | 13,872 |
+| 2026-07-04 | worktree | Item 3 Phase 2 `maj_ch` GKR tie-back (cumulative) | SHA STARK+GKR payload bytes | 60,045 | 124,841 |
+| 2026-07-04 | worktree | Item 3 Phase 2 decode/split/`maj_ch` actual conversion (cumulative; RAYON_NUM_THREADS=1) | BM_ShaZK_equiv/1/prove | 1.0046 s | 1.2735 s |
+| 2026-07-04 | worktree | Item 3 Phase 2 decode/split/`maj_ch` actual conversion (cumulative; RAYON_NUM_THREADS=1) | BM_ShaZK_equiv/1/verify | 846.76 us | 1.7339 ms |
+| 2026-07-04 | worktree | Item 3 Phase 2 decode/split/`maj_ch` actual conversion (cumulative) | shape_dump composed total cells | 37,500,240 | 31,995,216 |
+| 2026-07-04 | worktree | Item 3 Phase 2 decode/split/`maj_ch` actual conversion (cumulative) | shape_dump sha256 interaction cells | 5,800,640 | 295,616 |
+| 2026-07-04 | worktree | Item 3 Phase 2 decode/split/`maj_ch` actual conversion (cumulative) | sha standalone STARK proof bytes | 60,045 | 58,561 |
+| 2026-07-04 | worktree | Item 3 Phase 2 decode/split/`maj_ch` actual conversion (cumulative) | `xor_8` GKR wire proof bytes | 0 | 9,992 |
+| 2026-07-04 | worktree | Item 3 Phase 2 decode/split/`maj_ch` actual conversion (cumulative) | sigma-decode GKR wire proof bytes | 0 | 18,392 |
+| 2026-07-04 | worktree | Item 3 Phase 2 decode/split/`maj_ch` actual conversion (cumulative) | split-pack GKR wire proof bytes | 0 | 18,392 |
+| 2026-07-04 | worktree | Item 3 Phase 2 decode/split/`maj_ch` actual conversion (cumulative) | `maj_ch` GKR wire proof bytes | 0 | 13,872 |
+| 2026-07-04 | worktree | Item 3 Phase 2 decode/split/`maj_ch` actual conversion (cumulative) | SHA STARK+GKR payload bytes | 60,045 | 119,209 |
+| 2026-07-04 | worktree | Item 3 Phase 2 unified converted-SHA GKR batch (RAYON_NUM_THREADS=1) | BM_ShaZK_equiv/1/prove | 1.2735 s | 1.5040 s |
+| 2026-07-04 | worktree | Item 3 Phase 2 unified converted-SHA GKR batch (RAYON_NUM_THREADS=1) | BM_ShaZK_equiv/1/verify | 1.7339 ms | 1.5584 ms |
+| 2026-07-04 | worktree | Item 3 Phase 2 unified converted-SHA GKR batch | shape_dump composed total cells | 31,995,216 | 31,995,216 |
+| 2026-07-04 | worktree | Item 3 Phase 2 unified converted-SHA GKR batch | shape_dump sha256 interaction cells | 295,616 | 295,616 |
+| 2026-07-04 | worktree | Item 3 Phase 2 unified converted-SHA GKR batch | sha standalone STARK proof bytes | 58,561 | 57,489 |
+| 2026-07-04 | worktree | Item 3 Phase 2 unified converted-SHA GKR batch | converted SHA GKR wire proof bytes | 60,648 | 34,272 |
+| 2026-07-04 | worktree | Item 3 Phase 2 unified converted-SHA GKR batch | SHA STARK+GKR payload bytes | 119,209 | 91,761 |
+| 2026-07-04 | worktree | Item 3 Phase 2 P-3 same-height log16 tie-back merge (RAYON_NUM_THREADS=1) | BM_ShaZK_equiv/1/prove | 1.5040 s | 1.2311 s |
+| 2026-07-04 | worktree | Item 3 Phase 2 P-3 same-height log16 tie-back merge (RAYON_NUM_THREADS=1) | BM_ShaZK_equiv/1/verify | 1.5584 ms | 1.2466 ms |
+| 2026-07-04 | worktree | Item 3 Phase 2 P-3 same-height log16 tie-back merge | shape_dump SHA post-interaction cols | 33 | 17 |
+| 2026-07-04 | worktree | Item 3 Phase 2 P-3 same-height log16 tie-back merge | shape_dump SHA post-interaction cells | 4,194,304 | 3,145,728 |
+| 2026-07-04 | worktree | Item 3 Phase 2 P-3 same-height log16 tie-back merge | shape_dump GRAND+POST cells | 36,189,520 | 35,140,944 |
+| 2026-07-04 | worktree | Item 3 Phase 2 P-3 same-height log16 tie-back merge | sha standalone STARK proof bytes | 57,489 | 58,961 |
+| 2026-07-04 | worktree | Item 3 Phase 2 P-3 same-height log16 tie-back merge | converted SHA GKR wire proof bytes | 34,272 | 34,272 |
+| 2026-07-04 | worktree | Item 3 Phase 2 P-3 same-height log16 tie-back merge | SHA STARK+GKR payload bytes | 91,761 | 93,233 |
+| 2026-07-04 | worktree | Item 3 Q-024 production GKR revert | sha standalone STARK proof bytes (`gkr-spike` shape dump) | 58,961 + 34,272 GKR wire | 60,045, no GKR wire |
+| 2026-07-04 | worktree | Item 3 Q-024 production GKR revert | shape_dump sha256 interaction cells (`gkr-spike`) | 295,616 + 3,145,728 post cells | 5,800,640, no post tree |
+| 2026-07-04 | worktree | Item 3 Q-024 production GKR revert | shape_dump composed cells (`gkr-spike`) | 35,140,944 GRAND+POST | 37,500,240 GRAND, no post tree |
+| 2026-07-04 | worktree | Item 3 Q-024 production GKR revert (RAYON_NUM_THREADS=1, feature-off) | BM_ShaZK_equiv/1/prove | 1.2311 s | 993.73 ms |
+| 2026-07-04 | worktree | Item 3 Q-024 production GKR revert (RAYON_NUM_THREADS=1, feature-off) | BM_ShaZK_equiv/1/verify | 1.2466 ms | 608.68 µs |
+| 2026-07-04 | worktree | Item 3 Q-024/Q-026 disposition | production path | measured GKR net-negative | full LogUp tables; GKR kept as spike/upstream reopener only |
+| 2026-07-04 | worktree | Item 3 predicate P-1 gate | age range-check table cells, removed vs tie-back | 13,936 removed | 18,816 tie-back; skip |
+| 2026-07-04 | worktree | Item 3 predicate P-1 gate | age bit-decomposition table cells, removed vs tie-back | 13,056 removed | 17,408 tie-back; skip |
+| 2026-07-04 | worktree | Item 3 predicate P-1 gate | nationality table cells, removed vs tie-back | 80 removed | 128 tie-back; skip |
+| 2026-07-04 | worktree | Item 3 digest_bind P-1 gate | digest_bind range8 cells, removed vs tie-back | 1,280 removed | 2,048 tie-back; skip |
+| 2026-07-04 | worktree | Item 3 digest_bind P-1 gate | digest_bind range13 cells, removed vs tie-back | 40,960 removed | 65,536 tie-back; skip |
 | 2026-07-03 | 6b3273e0 | WO-1.4 SIMD trace writers | hinted_mul schedule writer timing (default Rayon, ignored test) | 192.584 µs | 82.5 µs |
 | 2026-07-03 | 6b3273e0 | WO-1.4 SIMD trace writers | hinted_mul base writer timing (default Rayon, ignored test) | 23.062542 ms | 3.015083 ms |
 | 2026-07-03 | 6b3273e0 | WO-1.4 SIMD trace writers | SHA trace writer timing (default Rayon, ignored test) | 4.628708 ms | 868.75 µs |
@@ -109,6 +179,14 @@ Shape: `cargo test -p eu-id-prover --release shape_dump -- --ignored --nocapture
 | 2026-07-03 | f1127b17 | WO-1.2 Stage 1 trace fan-out | proof bytes serial task path vs default fan-out | — | identical |
 | 2026-07-03 | f1127b17 | WO-1.2 Stage 1 trace fan-out | BM_ECDSAZKProver_equiv/1 (RAYON_NUM_THREADS=1) | 1.7048 s | 2.1876 s median, Criterion no-change on rerun |
 | 2026-07-03 | f1127b17 | WO-1.2 Stage 1 trace fan-out | pipeline/prove (default threads) | 647.99 ms | 533.90 ms |
+| 2026-07-03 | worktree | mdoc Phase 0 baseline | mdoc/prove (RAYON_NUM_THREADS=1) | bench absent | 5.0325 s |
+| 2026-07-03 | worktree | mdoc Phase 0 baseline | mdoc/verify (RAYON_NUM_THREADS=1) | bench absent | 28.089 ms |
+| 2026-07-03 | worktree | mdoc Phase 0 baseline | mdoc proof bincode bytes | bench absent | 4,563,243 |
+| 2026-07-03 | worktree | mdoc Phase 0 baseline | mdoc shape_dump total cells | shape absent | 79,988,576 |
+| 2026-07-03 | worktree | mdoc Phase 0b guard + accepted sizing waste | mdoc/prove (RAYON_NUM_THREADS=1) | 5.0325 s | 5.0498 s, Criterion no-change |
+| 2026-07-03 | worktree | mdoc Phase 0b guard + accepted sizing waste | mdoc/verify (RAYON_NUM_THREADS=1) | 28.089 ms | 27.798 ms, Criterion no-change |
+| 2026-07-03 | worktree | mdoc Phase 0b guard + accepted sizing waste | mdoc proof bincode bytes | 4,563,243 | 4,563,243 |
+| 2026-07-03 | worktree | mdoc Phase 0b accepted SHA/P256 waste | accepted waste cells | known waste unpriced | 529,792 |
 
 WO-1.8 note: `target-cpu=native` was measured with `RUSTFLAGS="-C target-cpu=native"` instead of committed `.cargo/config.toml`, because CI builds this repo on `ubuntu-latest` and would consume committed Cargo config. LTO/CU1 is scoped to `[profile.bench]`; putting it in `[profile.release]` made `cargo test --workspace --release` fail in the P-256 monolithic proof gate with `ProofLayer("Constraints not satisfied.")`.
 
@@ -139,3 +217,25 @@ WO-3.3 Q-015 note: architect rejected the smallest-proof row and sanctioned `pow
 WO-3.1 note: the fair blowup-1 comparison kept `pow_bits=10`, `log_last_layer=5`, and `fold_step=1`, requiring 118 queries for 128-bit security. Blowup 1 improved one-sample prove time by 22.48%, but proof bytes grew by 1,940,312 bytes (84.25%) and verify time grew by 38.63%. Q-016 confirms reject/no-change because the blowup-1 proof is 4.24 MB, above the interim mobile proof-size ceiling of 2.5 MB; a server/desktop fast profile is a future variant outside this queue.
 
 WO-1.2 note: implemented Q-014 Stage 1 only. P256 and SHA expose Send-only column tasks for preprocessed/base trace preparation; `eu-id-prover` runs those tasks with `rayon::join` when the Rayon pool has more than one worker, then assembles the non-Send provers and appends/commits columns serially in the original module order. `RAYON_NUM_THREADS=1` is forced down the serial task path. The first single-thread bench after the change reported a regression, but the immediate rerun reported "No change in performance detected"; the recorded median was noisy/thermally high. The default-thread desktop path improved `pipeline/prove` by 17.607%. Interaction fan-out is intentionally descoped.
+
+mdoc Phase 0 note: `mdoc_bench` runs the isolated EUID mdoc profile-v1 fixture through `prove_mdoc_circuit` / `verify_mdoc_circuit`; setup/extraction happens outside Criterion's measured loop. Command: `RAYON_NUM_THREADS=1 cargo bench -p eu-id-prover --bench mdoc_bench`. Shape command: `cargo test -p eu-id-prover --release shape_dump -- --ignored --nocapture`. The 12-module mdoc shape totals were: issuer P256 11,792,688 cells; issuer SHA 14,057,248; issuer bridge 54,160; device P256 11,792,688; device SHA 14,057,248; device bridge 54,160; birth-date SHA 14,081,824; birth-date digest bind 592; nationality SHA 14,079,776; nationality digest bind 592; age 17,312; nationality predicate 288; grand total 79,988,576 cells.
+
+mdoc Phase 0b note: Q-001 accepted SHA option 1 + P256 option 1 after pricing the waste and adding a preprocessed-ID/content invariant guard in `air-core::prove`. Natural SHA logs for the fixture are issuer 9, device 7, birth-date 8, nationality 8; `shared_sha_log` is 9. The accepted SHA trace+interaction padding waste is 529,792 cells: issuer 0, device 216,960, birth-date 156,928, nationality 155,904. The P256 `mdoc/device` namespace currently prefixes only hinted-mul schedule IDs; content-identical namespaced preprocessed duplication is 0 cells. Combined accepted waste is below the 1,000,000-cell threshold, so SHA/P256 refactors are not Phase 0b gates.
+| 2026-07-04 | s4-lite worktree (architect harness) | S4 coprocessor v1 vs AIR — first head-to-head | coprocessor prove (1-thread, N=5 median) | — | 6,752 ms |
+| 2026-07-04 | s4-lite worktree (architect harness) | S4 coprocessor v1 | coprocessor verify | — | 405.7 ms |
+| 2026-07-04 | s4-lite worktree (architect harness) | S4 coprocessor v1 | witness gen (native field) | — | 24.7 ms |
+| 2026-07-04 | s4-lite worktree (architect harness) | S4 coprocessor v1 | bundle bytes | — | 2,469,504 |
+
+S4 head-to-head note (architect, 2026-07-04): harness = scratchpad/coproc-bench (path-dep on s4-lite worktree, same signature construction as longfellow_equiv, release+fat-LTO+native, BENCH-LOCK held). CONTEXT FOR THE 6.75s: the G1 (field ≤25ns/mult) and G2 (sumcheck ≤20ms) gates were SKIPPED during the build sprint; the crate uses p256 expose-field constant-time arithmetic (G1 would have rejected it); Ligero row encoding is naive Lagrange at the enlarged Q-020 parameters (its own §4 warned 250-600ms even at 25ns). Treat 6.75s as ungated-v1, not the track's floor — but the ≤25ms budget claim is UNVERIFIED until the gates run.
+
+| 2026-07-04 | feat/proof-reductions (working tree) | mdoc Phase 0b — budget confirmation (no functional change) | mdoc `prove_mdoc_circuit` (1-thread, release, N=5 median) | — | 1,797 ms |
+| 2026-07-04 | feat/proof-reductions (working tree) | mdoc Phase 0b — budget confirmation | POC `prove_identity` monolith (1-thread, release, N=5 median) | — | 1,118 ms |
+| 2026-07-04 | feat/proof-reductions (working tree) | mdoc Phase 0b — budget confirmation | mdoc / POC prove ratio (the ≤2.0× gate) | — | 1.61× |
+
+mdoc Phase 0b budget-confirmation note (2026-07-04): the 5-6s vs 2.9s figure in the task premise was a cross-machine artifact; on a quiet box, same build/conditions, both proves are far lower and the RATIO is the gate. Measured medians (temp probe, 5 reps each, removed after): mdoc 1,797 ms (min 1,738), POC 1,118 ms (min 1,084) → **1.61× < 2.0× budget, PASS**. Diagnosis (measurement-first): the four SHA modules are ~70% of the 79.99M-cell circuit; the single largest cost is the per-instance SHA table-provider (multiplicity) columns — 19 components at log-16/18, **~7.47M cells per instance × 4 = ~29.9M cells (37% of the circuit)** — exactly Q-001's SHA option 3 (multi-message SHA module), which is out of scope. The three ranked fixes yield no net win, all confirmed by measurement: (a) per-instance SHA `log_n_rows` conflicts with tree-0 preprocessed dedup — the ~6.3M-cell σ/Σ/xor/split-pack tables are already deduped at fixed LOG_SIZE_16, and only 10 log-dependent columns (`is_first_row` + 9 round-cyclic) share a log-independent id whose content differs by log, so per-instance sizing trips `assert_preprocessed_id_content_invariant`; it would save 529,792 padding cells (0.66%) only by 4×-duplicating the 6.3M table set — a regression. Rejected. (b) table-provider consolidation is the real prize but requires a multi-message SHA witness surface that does not exist (blocks currently chain to one digest) — >1 day, soundness-sensitive; parked per Q-001. (c) the `mdoc/device` P256 namespace is REQUIRED, not waste: measured 18 of 215 preprocessed columns (the log-13 hinted-mul schedule set) differ between the issuer and device signatures, so dropping it aliases the device onto the issuer schedule. Net: Q-001's option 1 + option 1 confirmed; only two clarifying `mdoc.rs` comments added recording these measurements. Combined accepted waste stays 529,792 cells (< 1.0M threshold).
+
+WO-S4/Q-024 note: production SHA GKR tie-back is reverted on current Stwo because the metric of record is single-thread SHA prove wall time, and the P-3 merged path measured `1.0046 s -> 1.2311 s` despite lower committed cells. Q-025 root cause: marginal SHA interaction columns cost roughly 8-15 ns/cell, while current Stwo LogUp-GKR costs roughly 80 ns/term serial plus a post tie-back tree. Q-026 better-GKR design was copied to `/Users/lucas/stwo/better-gkr.md`; reopening requires upstream/any Stwo build measuring <= 6 ns/term on 2^16 LogUp-GKR, feature-on `BM_ShaZK_equiv/1/prove` beating feature-off by >= 3% with N=5 BENCH-LOCK, and payload under the 2.5 MB ceiling.
+
+GKR-v2 diagnostic (2026-07-04): fused PackedQM31 fraction-add measures 3.8 ns/eff-mult on NEON => ~38 ns/term floor vs <=17 ns break-even. Local stwo GKR acceleration for the SHA tables is closed on mobile-class hardware by arithmetic, not by implementation. Cost of learning this: half a day (the Q-028 kill-switch), vs the +226 ms production regression it would have replayed.
+
+GKR-v2 close-out (2026-07-04): Q-030 chooses stop/no production fusion. The extra Stwo comparison measured the existing `Fraction` abstraction within 3-4% of hand-fused PackedQM31 fraction-add (`log20` median 13.018 ms existing vs 12.563 ms fused), so production fusion is review risk without a consumer. Useful deliverables are the Stwo mixed-height/global-lift correctness fix and `gkr_fraction_add` diagnostic bench; eu-id remains full LogUp with the reopener gates preserved.

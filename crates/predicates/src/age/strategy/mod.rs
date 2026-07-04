@@ -55,6 +55,14 @@ mod tests {
                 }
 
                 #[test]
+                fn proves_and_verifies_with_day_and_month_borrow() {
+                    let predicate = validating_predicate();
+                    let public = PublicInput::new(Date { year: 2026, month: 7, day: 3 }, 18);
+                    let proof = predicate.prove(&public, &dob(1990, 7, 15)).unwrap();
+                    predicate.verify(&proof).unwrap();
+                }
+
+                #[test]
                 fn proves_and_verifies_with_custom_bounds() {
                     let predicate = validating_predicate();
                     let bounds = AgeBounds {

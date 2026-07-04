@@ -26,7 +26,7 @@ pub type DayDeltaTableComponent = range_check::Component;
 ///                                            C >= 13
 ///     Field Size => 16 (power of 2)
 pub fn month_delta_range_check() -> RangeCheck {
-    RangeCheck(13)
+    RangeCheck(15)
 }
 
 pub type MonthDeltaTableComponent = range_check::Component;

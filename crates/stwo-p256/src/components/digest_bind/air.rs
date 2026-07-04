@@ -114,9 +114,9 @@ impl FrameworkEval for DigestBindEval {
         let mut scalar_z_values = Vec::with_capacity(SCALAR_Z_RELATION_ARITY);
         scalar_z_values.push(sig_id);
         scalar_z_values.extend(z.iter().cloned());
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             &self.scalar_z,
-            E::EF::from(active.clone()),
+            active.clone(),
             &scalar_z_values,
         ));
 
@@ -125,11 +125,7 @@ impl FrameworkEval for DigestBindEval {
         // relation. Cancels in the global balance iff the byte strings match,
         // i.e. iff z == SHA-256(C).
         if self.expose_digest {
-            eval.add_to_relation(RelationEntry::new(
-                &self.digest,
-                E::EF::from(active),
-                &bytes,
-            ));
+            eval.add_to_relation(RelationEntry::base(&self.digest, active, &bytes));
         }
 
         eval.finalize_logup_in_pairs();

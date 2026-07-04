@@ -185,9 +185,9 @@ use crate::scalar::setup_air::{
     gen_scalar_setup_air_interaction_trace_without_range13_provider,
     gen_scalar_setup_air_lookup_provider_base_trace_without_range13_provider,
     gen_scalar_setup_air_preprocessed_trace, scalar_setup_air_preprocessed_column_ids,
-    scalar_setup_range13_uses_from_base, ScalarSetupAirComponents,
-    ScalarSetupAirInteractionClaim, ScalarSetupAirProofClaim, ScalarSetupAirRelations,
-    ScalarSetupClaim, ScalarSetupClaimError, ScalarSetupOutputRelation,
+    scalar_setup_range13_uses_from_base, ScalarSetupAirComponents, ScalarSetupAirInteractionClaim,
+    ScalarSetupAirProofClaim, ScalarSetupAirRelations, ScalarSetupClaim, ScalarSetupClaimError,
+    ScalarSetupOutputRelation,
 };
 use crate::types::EcdsaVerifyInput;
 
@@ -660,9 +660,34 @@ impl P256CurrentAirProofClaim {
         interaction_claim: &P256CurrentAirInteractionClaim,
         relations: &P256CurrentAirRelations,
     ) -> TreeVec<ColumnVec<u32>> {
+        self.trace_log_degree_bounds_inner(ids, interaction_claim, relations, None)
+    }
+
+    fn trace_log_degree_bounds_with_hinted_mul_preprocessed_namespace(
+        &self,
+        ids: &[PreProcessedColumnId],
+        interaction_claim: &P256CurrentAirInteractionClaim,
+        relations: &P256CurrentAirRelations,
+        namespace: Option<&str>,
+    ) -> TreeVec<ColumnVec<u32>> {
+        self.trace_log_degree_bounds_inner(ids, interaction_claim, relations, namespace)
+    }
+
+    fn trace_log_degree_bounds_inner(
+        &self,
+        ids: &[PreProcessedColumnId],
+        interaction_claim: &P256CurrentAirInteractionClaim,
+        relations: &P256CurrentAirRelations,
+        hinted_mul_preprocessed_namespace: Option<&str>,
+    ) -> TreeVec<ColumnVec<u32>> {
         let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(ids);
-        let components =
-            P256CurrentAirComponents::new(&mut allocator, self, interaction_claim, relations);
+        let components = P256CurrentAirComponents::new_with_hinted_mul_preprocessed_namespace(
+            &mut allocator,
+            self,
+            interaction_claim,
+            relations,
+            hinted_mul_preprocessed_namespace,
+        );
         let component_list = components.components();
         let mut bounds = components.trace_log_degree_bounds();
         let mut preprocessed_bounds = vec![0; ids.len()];
@@ -694,12 +719,29 @@ impl P256CurrentAirProofClaim {
     }
 
     fn max_constraint_log_degree_bound(&self, ids: &[PreProcessedColumnId]) -> u32 {
+        self.max_constraint_log_degree_bound_inner(ids, None)
+    }
+
+    fn max_constraint_log_degree_bound_with_hinted_mul_preprocessed_namespace(
+        &self,
+        ids: &[PreProcessedColumnId],
+        namespace: Option<&str>,
+    ) -> u32 {
+        self.max_constraint_log_degree_bound_inner(ids, namespace)
+    }
+
+    fn max_constraint_log_degree_bound_inner(
+        &self,
+        ids: &[PreProcessedColumnId],
+        hinted_mul_preprocessed_namespace: Option<&str>,
+    ) -> u32 {
         let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(ids);
-        let components = P256CurrentAirComponents::new(
+        let components = P256CurrentAirComponents::new_with_hinted_mul_preprocessed_namespace(
             &mut allocator,
             self,
             &P256CurrentAirInteractionClaim::zero_for_claim(self),
             &P256CurrentAirRelations::dummy(),
+            hinted_mul_preprocessed_namespace,
         );
         components.max_constraint_log_degree_bound()
     }
@@ -1260,6 +1302,26 @@ impl P256CurrentAirComponents {
         interaction_claim: &P256CurrentAirInteractionClaim,
         relations: &P256CurrentAirRelations,
     ) -> Self {
+        Self::new_inner(allocator, claim, interaction_claim, relations, None)
+    }
+
+    fn new_with_hinted_mul_preprocessed_namespace(
+        allocator: &mut TraceLocationAllocator,
+        claim: &P256CurrentAirProofClaim,
+        interaction_claim: &P256CurrentAirInteractionClaim,
+        relations: &P256CurrentAirRelations,
+        namespace: Option<&str>,
+    ) -> Self {
+        Self::new_inner(allocator, claim, interaction_claim, relations, namespace)
+    }
+
+    fn new_inner(
+        allocator: &mut TraceLocationAllocator,
+        claim: &P256CurrentAirProofClaim,
+        interaction_claim: &P256CurrentAirInteractionClaim,
+        relations: &P256CurrentAirRelations,
+        hinted_mul_preprocessed_namespace: Option<&str>,
+    ) -> Self {
         let scalar_lookup_claims = LookupProviderClaims::scalar_mod_mul();
         Self {
             scalar_setup: ScalarSetupAirComponents::new_without_range13_provider(
@@ -1397,12 +1459,12 @@ impl P256CurrentAirComponents {
             ),
             public_key_on_curve:
                 PublicKeyCurveSliceComponents::new_without_range13_and_signed_carry_provider(
-                allocator,
-                claim.public_key_on_curve.log_sizes(),
-                &interaction_claim.public_key_on_curve,
-                &relations.public_key_on_curve,
-                true,
-            ),
+                    allocator,
+                    claim.public_key_on_curve.log_sizes(),
+                    &interaction_claim.public_key_on_curve,
+                    &relations.public_key_on_curve,
+                    true,
+                ),
             projective_signed_carry: SignedCarryRangeComponent::new(
                 allocator,
                 SignedCarryRangeEval::new(
@@ -1412,7 +1474,7 @@ impl P256CurrentAirComponents {
                 ),
                 interaction_claim.projective_signed_carry.claimed_sum,
             ),
-            hinted_mul: HintedMulSliceComponents::new_without_range13_and_signed_formula_provider(
+            hinted_mul: HintedMulSliceComponents::new_without_range13_and_signed_formula_provider_with_preprocessed_namespace(
                 allocator,
                 claim.hinted_mul,
                 &HintedMulSliceClaimedSums {
@@ -1431,6 +1493,7 @@ impl P256CurrentAirComponents {
                     header: relations.ec_op_header.clone(),
                     signed_formula: relations.hinted_signed_formula.clone(),
                 },
+                hinted_mul_preprocessed_namespace,
             ),
             final_add: FinalAddComponents::new_without_range13_and_signed_carry_provider(
                 allocator,
@@ -1845,10 +1908,10 @@ impl P256ProofDraft {
             )?;
         let scalar_setup_lookup_providers =
             gen_scalar_setup_air_lookup_provider_base_trace_without_range13_provider(
-            &scalar_setup,
-            crate::final_check_air::final_check_range9_uses_from_base(&final_check),
-            crate::final_check_air::final_check_signed_carry_uses_from_base(&final_check),
-        );
+                &scalar_setup,
+                crate::final_check_air::final_check_range9_uses_from_base(&final_check),
+                crate::final_check_air::final_check_signed_carry_uses_from_base(&final_check),
+            );
         let cert_scalar_inputs = gen_cert_scalar_input_air_base_trace(
             &self.claim.scalar_setup,
             &self.claim.cert_inputs,
@@ -2058,11 +2121,11 @@ impl P256ProofDraft {
     ) -> Result<(ColumnVec<M31ColumnEval>, P256CurrentAirInteractionClaim), P256ProofError> {
         let (scalar_setup_interaction, scalar_setup_claim) =
             gen_scalar_setup_air_interaction_trace_without_range13_provider(
-            &base.scalar_setup,
-            &relations.scalar_setup,
-            crate::final_check_air::final_check_range9_uses_from_base(&base.final_check),
-            crate::final_check_air::final_check_signed_carry_uses_from_base(&base.final_check),
-        );
+                &base.scalar_setup,
+                &relations.scalar_setup,
+                crate::final_check_air::final_check_range9_uses_from_base(&base.final_check),
+                crate::final_check_air::final_check_signed_carry_uses_from_base(&base.final_check),
+            );
         let (cert_scalar_input_interaction, cert_scalar_input_claim) =
             gen_cert_scalar_input_air_interaction_trace(
                 &base.cert_scalar_inputs,

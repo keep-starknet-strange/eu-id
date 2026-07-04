@@ -26,7 +26,9 @@
 //!   structured [`super::P256CurrentAirInteractionClaim::mix_into`], reproduced
 //!   via [`Air::mix_claimed_sums`].
 
-use air_core::{Air, AirProver, TreeLayout};
+use air_core::{
+    fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint, TreeLayout,
+};
 use stwo::core::air::Component;
 use stwo::core::channel::Blake2sChannel;
 use stwo::core::fields::m31::M31;
@@ -42,6 +44,7 @@ use stwo_constraint_framework::TraceLocationAllocator;
 use crate::components::digest_bind::{
     scalar_z_provider_claimed_sum, ScalarZRelation, SharedScalarZRelation,
 };
+use crate::components::hinted_mul::air::namespace_hinted_mul_schedule_ids;
 use crate::public_inputs::PublicEcdsaInstance;
 use crate::scalar::scalar_mod_mul::columns::M31ColumnEval;
 
@@ -133,6 +136,7 @@ pub struct P256Prover<'a> {
     bind_z: bool,
     scalar_z_handle: Option<SharedScalarZRelation>,
     scalar_z: Option<ScalarZRelation>,
+    hinted_mul_preprocessed_namespace: Option<String>,
 }
 
 /// Send-only Stage-1 task input for preparing P-256 preprocessed/base columns.
@@ -194,6 +198,7 @@ impl<'a> P256Prover<'a> {
             bind_z: false,
             scalar_z_handle: None,
             scalar_z: None,
+            hinted_mul_preprocessed_namespace: None,
         }
     }
 
@@ -205,6 +210,16 @@ impl<'a> P256Prover<'a> {
     pub fn with_z_binding(mut self, handle: SharedScalarZRelation) -> Self {
         self.bind_z = true;
         self.scalar_z_handle = Some(handle);
+        self
+    }
+
+    /// Prefix this module's preprocessed column ids so multiple P-256 modules
+    /// with witness-dependent hinted-mul schedule columns do not alias in a
+    /// shared `air_core::prove` preprocessed tree. The verifier must apply the
+    /// same namespace before building components.
+    pub fn with_preprocessed_namespace(mut self, namespace: &str) -> Self {
+        self.ids = namespace_hinted_mul_schedule_ids(Some(namespace), self.ids);
+        self.hinted_mul_preprocessed_namespace = Some(namespace.to_string());
         self
     }
 
@@ -289,6 +304,7 @@ impl Air for P256Prover<'_> {
             &self.proof_claim,
             &self.ids,
             self.interaction_claim.as_ref(),
+            self.hinted_mul_preprocessed_namespace.as_deref(),
         )
     }
 
@@ -319,12 +335,15 @@ impl Air for P256Prover<'_> {
     }
 
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
-        self.components = Some(P256CurrentAirComponents::new(
-            allocator,
-            &self.proof_claim,
-            self.interaction_claim(),
-            self.relations(),
-        ));
+        self.components = Some(
+            P256CurrentAirComponents::new_with_hinted_mul_preprocessed_namespace(
+                allocator,
+                &self.proof_claim,
+                self.interaction_claim(),
+                self.relations(),
+                self.hinted_mul_preprocessed_namespace.as_deref(),
+            ),
+        );
     }
 
     fn components(&self) -> Vec<&dyn Component> {
@@ -344,11 +363,50 @@ impl AirProver for P256Prover<'_> {
     }
 
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>) {
+        let ids = self.ids.clone();
+        self.write_selected_preprocessed(tb, &ids);
+    }
+
+    fn preprocessed_column_fingerprints(&mut self) -> Vec<PreprocessedColumnFingerprint> {
+        fingerprint_preprocessed_columns(
+            "stwo_p256::P256Prover",
+            &self.ids,
+            self.preprocessed
+                .as_ref()
+                .expect("preprocessed trace generated in P256Prover::new"),
+        )
+    }
+
+    fn write_selected_preprocessed(
+        &mut self,
+        tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>,
+        selected_ids: &[PreProcessedColumnId],
+    ) {
         let preprocessed = self
             .preprocessed
             .take()
             .expect("preprocessed trace generated in P256Prover::new");
-        tb.extend_evals(preprocessed);
+        if selected_ids == self.ids.as_slice() {
+            tb.extend_evals(preprocessed);
+            return;
+        }
+
+        let selected = selected_ids
+            .iter()
+            .map(|selected_id| {
+                self.ids
+                    .iter()
+                    .zip(&preprocessed)
+                    .find_map(|(id, column)| (id == selected_id).then(|| column.clone()))
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "selected preprocessed column {} is not owned by this P256 module",
+                            selected_id.id
+                        )
+                    })
+            })
+            .collect();
+        tb.extend_evals(selected);
     }
 
     fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>) {
@@ -385,6 +443,7 @@ pub struct P256Verifier {
     bind_z: bool,
     scalar_z_handle: Option<SharedScalarZRelation>,
     scalar_z: Option<ScalarZRelation>,
+    hinted_mul_preprocessed_namespace: Option<String>,
 }
 
 impl P256Verifier {
@@ -402,6 +461,7 @@ impl P256Verifier {
             bind_z: false,
             scalar_z_handle: None,
             scalar_z: None,
+            hinted_mul_preprocessed_namespace: None,
         }
     }
 
@@ -413,7 +473,11 @@ impl P256Verifier {
     /// submitting a weakened FRI/grinding setting.
     pub fn expected_pcs_config(&self) -> PcsConfig {
         p256_stark_monolithic_profile_config(
-            self.proof_claim.max_constraint_log_degree_bound(&self.ids),
+            self.proof_claim
+                .max_constraint_log_degree_bound_with_hinted_mul_preprocessed_namespace(
+                    &self.ids,
+                    self.hinted_mul_preprocessed_namespace.as_deref(),
+                ),
         )
     }
 
@@ -423,6 +487,13 @@ impl P256Verifier {
     pub fn with_z_binding(mut self, handle: SharedScalarZRelation) -> Self {
         self.bind_z = true;
         self.scalar_z_handle = Some(handle);
+        self
+    }
+
+    /// Match [`P256Prover::with_preprocessed_namespace`].
+    pub fn with_preprocessed_namespace(mut self, namespace: &str) -> Self {
+        self.ids = namespace_hinted_mul_schedule_ids(Some(namespace), self.ids);
+        self.hinted_mul_preprocessed_namespace = Some(namespace.to_string());
         self
     }
 
@@ -457,7 +528,12 @@ impl Air for P256Verifier {
     }
 
     fn layout(&self) -> TreeLayout {
-        layout(&self.proof_claim, &self.ids, Some(&self.interaction_claim))
+        layout(
+            &self.proof_claim,
+            &self.ids,
+            Some(&self.interaction_claim),
+            self.hinted_mul_preprocessed_namespace.as_deref(),
+        )
     }
 
     fn claimed_sums(&self) -> Vec<QM31> {
@@ -482,12 +558,15 @@ impl Air for P256Verifier {
     }
 
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
-        self.components = Some(P256CurrentAirComponents::new(
-            allocator,
-            &self.proof_claim,
-            &self.interaction_claim,
-            self.relations(),
-        ));
+        self.components = Some(
+            P256CurrentAirComponents::new_with_hinted_mul_preprocessed_namespace(
+                allocator,
+                &self.proof_claim,
+                &self.interaction_claim,
+                self.relations(),
+                self.hinted_mul_preprocessed_namespace.as_deref(),
+            ),
+        );
     }
 
     fn components(&self) -> Vec<&dyn Component> {
@@ -503,6 +582,7 @@ fn layout(
     proof_claim: &P256CurrentAirProofClaim,
     ids: &[PreProcessedColumnId],
     interaction_claim: Option<&P256CurrentAirInteractionClaim>,
+    hinted_mul_preprocessed_namespace: Option<&str>,
 ) -> TreeLayout {
     let owned;
     let interaction_claim = match interaction_claim {
@@ -512,10 +592,11 @@ fn layout(
             &owned
         }
     };
-    let bounds = proof_claim.trace_log_degree_bounds(
+    let bounds = proof_claim.trace_log_degree_bounds_with_hinted_mul_preprocessed_namespace(
         ids,
         interaction_claim,
         &P256CurrentAirRelations::dummy(),
+        hinted_mul_preprocessed_namespace,
     );
     TreeLayout {
         preprocessed: bounds[0].clone(),

@@ -106,3 +106,9 @@ hitting P = −P (vertical slope, dᵢ = 0). These are measure-zero over honest 
 - **C14 wrap flag: CONFIRMED sound.** n > 2^255 ⇒ 2n > 2^256 > p ⇒ R.x < p < 2n; k ∈ {0,1} suffices. No wider quotient needed.
 - **C9/C10 (~48% of budget): review-first item at ack time.** The 26 quads/step estimate must be re-derived against BL2's actual gate charging (slope inverse + conditional-add mux) before the 35k PASS is trusted; a 2x error here is the only threat to the gate.
 - **C15 edge policy: the blinded-accumulator completeness claim needs a written argument** (random blinding start ⇒ each exceptional event u1≡0 / u1G=±u2Q / per-step P=−P has negligible probability over the blinding; regenerate on failure). Two paragraphs, part of the ack review — the mechanism is standard but "asserted" is not "argued".
+
+## RESULT (builder-measured, 2026-07-04, S4-lite implemented families)
+Current implemented BL2 ECDSA circuit families build to 9,903 sparse quad terms. This is below both the 33,000 mailbox threshold and the 35,000 gate.
+
+Machine-readable (parsed by gates.rs):
+- measured_quad_count: 9903

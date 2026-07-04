@@ -283,9 +283,9 @@ impl FrameworkEval for FakeGlvPrimitiveEcRowProviderEval {
             &rhs,
             &output,
         );
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             &self.relation,
-            -E::EF::from(active),
+            -active,
             &relation_values,
         ));
         eval.finalize_logup();
@@ -312,10 +312,10 @@ impl FrameworkEval for FakeGlvProjectiveSourceEval {
     }
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        // +2 supports the batched logup columns (batch 4 ⟹ constraint degree
-        // ≤ 5 = 2^2 + 1). The per-component bound is capped by the committed
-        // LDE size (log_size + log_blowup = +2), so batch 4 is the ceiling at
-        // the current 4x blowup.
+        // Must stay at +1: the prove pipeline rejects a per-component bound of
+        // `log_size + 2` (OODS composition check fails even with degree-3
+        // constraints), so every constraint here is kept at degree <= 3 by
+        // solo LogUp batching (see FAKE_GLV_CONSUMER_LOGUP_BATCH).
         self.log_size + 1
     }
 
@@ -358,9 +358,9 @@ impl FrameworkEval for FakeGlvProjectiveSourceEval {
             &rhs,
             &output,
         );
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             &self.relation,
-            E::EF::from(active.clone()),
+            active.clone(),
             &relation_values,
         ));
         // The 6 narrow mul-result consumes (`+gate`): pin the consumer's own
@@ -397,9 +397,9 @@ impl FrameworkEval for FakeGlvProjectiveSourceEval {
         // (source_index, op, output_inf, lhs_inf, rhs_inf), consumed 1:1 by the
         // silo group header. Infinity-operand MixedAdd rows have gate = 0 and
         // no silo group, so they yield nothing — the relation nets to zero.
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             &self.header,
-            -E::EF::from(gate),
+            -gate,
             &[
                 source_index.clone(),
                 op.clone(),
@@ -409,7 +409,7 @@ impl FrameworkEval for FakeGlvProjectiveSourceEval {
             ],
         ));
 
-        eval.finalize_logup_batched(&fake_glv_consumer_logup_batching());
+        eval.finalize_logup_batched(FAKE_GLV_CONSUMER_LOGUP_BATCH);
         eval
     }
 }
@@ -507,14 +507,12 @@ pub(crate) fn gen_fake_glv_primitive_ec_source_interaction_trace(
     assert_eq!(base.len(), FAKE_GLV_PRIMITIVE_EC_SOURCE_TRACE_COLUMNS);
     let log_size = base[0].domain.log_size();
     let mut logup = LogupTraceGenerator::new(log_size);
-    let mut col = logup.new_col();
-    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+    logup.col_from_fn(|vec_row| {
         let values = fake_glv_primitive_ec_row_packed_relation_values(base, vec_row);
         let numerator = -PackedQM31::from(base[0].data[vec_row]);
         let denominator: PackedQM31 = relation.combine(&values);
-        col.write_frac(vec_row, numerator, denominator);
-    }
-    col.finalize_col();
+        (numerator, denominator)
+    });
     let (trace, claimed_sum) = logup.finalize_last();
     (trace, FakeGlvPrimitiveEcRowInteractionClaim { claimed_sum })
 }
@@ -527,25 +525,17 @@ pub(crate) fn gen_fake_glv_primitive_ec_source_interaction_trace(
 //   7. the `EcOpHeaderRelation` yield (−gate),
 // where `gate = active − (1−op)·rhs.inf` (the group-existence gate).
 //
-// LogUp batch size: 2 fractions per interaction column (degree <= 3 at the
-// `log_size + 1` bound), with the two degree-2 op-mux consume entries
-// (M0.rhs at index 2, M1.rhs at index 4) in solo batches.
-pub(crate) const FAKE_GLV_CONSUMER_LOGUP_BATCH: usize = 2;
+// LogUp batch size: 1 fraction per interaction column. The op-mux consume
+// entries (M0.rhs at index 2, M1.rhs at index 4) have degree-2 tuple values;
+// pairing them with a neighbor pushes the logup constraint past degree 3,
+// which overflows the `log_size + 1` bound. `finalize_logup_batched` only
+// supports a uniform batch size, so everything goes solo.
+pub(crate) const FAKE_GLV_CONSUMER_LOGUP_BATCH: usize = 1;
 
 /// Total LogUp entries the consumer eval emits (EC-row consume + 6 narrow mul
 /// consumes + the EC-op header yield), in emission order.
 pub(crate) fn fake_glv_consumer_logup_entries() -> usize {
     1 + NARROW_MUL_CONSUME_SLOTS.len() + 1
-}
-
-/// Consumer logup batching: pairs, except the op-mux slots (M0.rhs, M1.rhs)
-/// whose consume values are degree-2 mixes — those sit in solo batches.
-pub(crate) fn fake_glv_consumer_logup_batching() -> Vec<usize> {
-    crate::range_checks::batching_with_solo(
-        fake_glv_consumer_logup_entries(),
-        FAKE_GLV_CONSUMER_LOGUP_BATCH,
-        &[2, 4],
-    )
 }
 
 /// The fake-GLV consumer's narrow-consume column layout (5 metadata columns;
@@ -627,10 +617,10 @@ pub(crate) fn gen_fake_glv_projective_source_consumer_interaction_trace(
 
     assert_eq!(entries.len(), fake_glv_consumer_logup_entries());
     let mut logup = LogupTraceGenerator::new(log_size);
-    crate::range_checks::write_logup_columns_with_batching(
+    crate::range_checks::write_batched_logup_columns(
         &mut logup,
         &entries,
-        &fake_glv_consumer_logup_batching(),
+        FAKE_GLV_CONSUMER_LOGUP_BATCH,
     );
     let (columns, _total) = logup.finalize_last();
 

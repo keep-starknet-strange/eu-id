@@ -1,7 +1,7 @@
 ---
 wo: WO-2.1
 blocking: true
-status: open
+status: answered
 ---
 ## Question
 For WO-2.1, should the SHA split-table merge steps be abandoned/re-scoped because the current table contents are not identical, or should we implement a different merged component shape with relation-specific output columns?

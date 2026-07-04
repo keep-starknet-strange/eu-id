@@ -108,6 +108,7 @@ type HintedMulEvalGroup<F> = (Vec<F>, Vec<F>, Vec<F>, Vec<F>);
 #[derive(Clone)]
 pub struct HintedMulEval {
     pub log_size: u32,
+    pub preprocessed_namespace: Option<String>,
     pub challenge: HintedMulChallenge,
     pub range13: RangeCheckRelation,
     pub signed_h: RangeCheckRelation,
@@ -128,13 +129,9 @@ impl FrameworkEval for HintedMulEval {
     }
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let active = eval.get_preprocessed_column(hinted_mul_schedule_active_id(self.log_size));
-        let source_index =
-            eval.get_preprocessed_column(hinted_mul_schedule_source_index_id(self.log_size));
-        let mul_index =
-            eval.get_preprocessed_column(hinted_mul_schedule_mul_index_id(self.log_size));
-        let row_index =
-            eval.get_preprocessed_column(hinted_mul_schedule_row_index_id(self.log_size));
+        let active = eval.get_preprocessed_column(self.schedule_active_id());
+        let source_index = eval.get_preprocessed_column(self.schedule_source_index_id());
+        let mul_index = eval.get_preprocessed_column(self.schedule_mul_index_id());
 
         // Base columns in `push_row_values` order. Every limb is range-checked
         // as it is read, which keeps the logup emission order identical to the
@@ -227,9 +224,7 @@ impl FrameworkEval for HintedMulEval {
         // boolean-constrained (deg 2, trivially satisfied by the one-hot
         // schedule and by all-zero padding).
         let is_proj: Vec<E::F> = (0..HINTED_MUL_PROJ_MUL_COLUMNS)
-            .map(|k| {
-                eval.get_preprocessed_column(hinted_mul_schedule_proj_mul_id(self.log_size, k))
-            })
+            .map(|k| eval.get_preprocessed_column(self.schedule_proj_mul_id(k)))
             .collect();
         for flag in &is_proj {
             eval.add_constraint(flag.clone() * (one_ef.clone() - flag.clone()));
@@ -274,18 +269,14 @@ impl FrameworkEval for HintedMulEval {
             values.push(mul_index.clone());
             values.push(E::F::from(M31::from_u32_unchecked(role)));
             values.extend(limbs.iter().cloned());
-            eval.add_to_relation(RelationEntry::new(
-                &self.mul_result,
-                -E::EF::from(numerator),
-                &values,
-            ));
+            eval.add_to_relation(RelationEntry::base(&self.mul_result, -numerator, &values));
         }
         // CONSUME (+is_proj_0) the EC-op header tuple on each proj group's
         // header row (mul_index == 0): (source_index, op, output_inf, lhs_inf,
         // rhs_inf). The flags live on the header row itself, so read at offset 0.
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             &self.header,
-            E::EF::from(is_proj_0.clone()),
+            is_proj_0.clone(),
             &[
                 source_index.clone(),
                 flags[0].clone(),
@@ -355,6 +346,28 @@ impl FrameworkEval for HintedMulEval {
 
         eval.finalize_logup_in_pairs();
         eval
+    }
+}
+
+impl HintedMulEval {
+    fn namespace_id(&self, id: PreProcessedColumnId) -> PreProcessedColumnId {
+        namespace_hinted_mul_schedule_id(self.preprocessed_namespace.as_deref(), id)
+    }
+
+    fn schedule_active_id(&self) -> PreProcessedColumnId {
+        self.namespace_id(hinted_mul_schedule_active_id(self.log_size))
+    }
+
+    fn schedule_source_index_id(&self) -> PreProcessedColumnId {
+        self.namespace_id(hinted_mul_schedule_source_index_id(self.log_size))
+    }
+
+    fn schedule_mul_index_id(&self) -> PreProcessedColumnId {
+        self.namespace_id(hinted_mul_schedule_mul_index_id(self.log_size))
+    }
+
+    fn schedule_proj_mul_id(&self, k: usize) -> PreProcessedColumnId {
+        self.namespace_id(hinted_mul_schedule_proj_mul_id(self.log_size, k))
     }
 }
 
@@ -574,15 +587,17 @@ impl HintedMulSliceComponents {
             relations,
             true,
             true,
+            None,
         )
     }
 
-    pub(crate) fn new_without_range13_and_signed_formula_provider(
+    pub(crate) fn new_without_range13_and_signed_formula_provider_with_preprocessed_namespace(
         allocator: &mut TraceLocationAllocator,
         log_size: u32,
         claimed_sums: &HintedMulSliceClaimedSums,
         challenge: &HintedMulChallenge,
         relations: &HintedMulRelations,
+        namespace: Option<&str>,
     ) -> Self {
         Self::new_inner(
             allocator,
@@ -592,6 +607,7 @@ impl HintedMulSliceComponents {
             relations,
             false,
             false,
+            namespace,
         )
     }
 
@@ -603,12 +619,14 @@ impl HintedMulSliceComponents {
         relations: &HintedMulRelations,
         include_range13_provider: bool,
         include_signed_formula_provider: bool,
+        preprocessed_namespace: Option<&str>,
     ) -> Self {
         Self {
             check: HintedMulComponent::new(
                 allocator,
                 HintedMulEval {
-                    log_size: claim.log_size,
+                    log_size,
+                    preprocessed_namespace: preprocessed_namespace.map(str::to_string),
                     challenge: challenge.clone(),
                     range13: relations.range13.clone(),
                     signed_h: relations.signed_h.clone(),
@@ -618,11 +636,13 @@ impl HintedMulSliceComponents {
                 },
                 claimed_sums.check,
             ),
-            range13: include_range13_provider.then(|| FrameworkComponent::new(
-                allocator,
-                RangeCheckEval::new(relations.range13.clone(), RANGE13_BITS),
-                claimed_sums.range13,
-            )),
+            range13: include_range13_provider.then(|| {
+                FrameworkComponent::new(
+                    allocator,
+                    RangeCheckEval::new(relations.range13.clone(), RANGE13_BITS),
+                    claimed_sums.range13,
+                )
+            }),
             signed_h: FrameworkComponent::new(
                 allocator,
                 SignedCarryRangeEval::new(
@@ -632,15 +652,17 @@ impl HintedMulSliceComponents {
                 ),
                 claimed_sums.signed_h,
             ),
-            signed_formula: include_signed_formula_provider.then(|| FrameworkComponent::new(
-                allocator,
-                SignedCarryRangeEval::new(
-                    relations.signed_formula.clone(),
-                    crate::projective_air::projective_rcb_signed_carry_log_size(),
-                    crate::projective_air::PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
-                ),
-                claimed_sums.signed_formula,
-            )),
+            signed_formula: include_signed_formula_provider.then(|| {
+                FrameworkComponent::new(
+                    allocator,
+                    SignedCarryRangeEval::new(
+                        relations.signed_formula.clone(),
+                        crate::projective_air::projective_rcb_signed_carry_log_size(),
+                        crate::projective_air::PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
+                    ),
+                    claimed_sums.signed_formula,
+                )
+            }),
         }
     }
 
@@ -783,6 +805,31 @@ pub fn hinted_mul_slice_preprocessed_ids(log_size: u32) -> Vec<PreProcessedColum
         &formula_signed.equation_name,
     ));
     ids
+}
+
+pub fn namespace_hinted_mul_schedule_ids(
+    namespace: Option<&str>,
+    ids: Vec<PreProcessedColumnId>,
+) -> Vec<PreProcessedColumnId> {
+    ids.into_iter()
+        .map(|id| namespace_hinted_mul_schedule_id(namespace, id))
+        .collect()
+}
+
+fn namespace_hinted_mul_schedule_id(
+    namespace: Option<&str>,
+    id: PreProcessedColumnId,
+) -> PreProcessedColumnId {
+    let Some(namespace) = namespace else {
+        return id;
+    };
+    if id.id.starts_with("hinted_mul_schedule_") {
+        PreProcessedColumnId {
+            id: format!("{namespace}/{}", id.id),
+        }
+    } else {
+        id
+    }
 }
 
 pub fn gen_hinted_mul_slice_preprocessed_trace(

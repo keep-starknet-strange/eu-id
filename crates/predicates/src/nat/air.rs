@@ -14,7 +14,9 @@ use crate::nat::table::NatTableComponent;
 use crate::nat::types::{PublicInput, Witness};
 use crate::nat::witness::WitnessData;
 use air_core::relations::{FieldBytesRelation, SharedFieldRelation};
-use air_core::{Air, AirProver, TreeLayout};
+use air_core::{
+    fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint, TreeLayout,
+};
 use stwo::core::air::Component;
 use stwo::core::channel::Blake2sChannel;
 use stwo::core::fields::qm31::QM31;
@@ -168,6 +170,14 @@ impl AirProver for NatProver {
 
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>) {
         self.preprocessed.extend_evals(tb);
+    }
+
+    fn preprocessed_column_fingerprints(&mut self) -> Vec<PreprocessedColumnFingerprint> {
+        fingerprint_preprocessed_columns(
+            "predicates::NatProver",
+            &preprocessed_column_ids(&self.public),
+            &self.preprocessed.acceptable,
+        )
     }
 
     fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>) {

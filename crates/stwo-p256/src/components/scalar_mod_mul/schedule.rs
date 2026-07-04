@@ -447,9 +447,7 @@ fn m31(value: u32) -> M31 {
 mod tests {
     use stwo_p256_utils::scalar_arithmetic::{ScalarFieldMulTrace, P256_ORDER};
 
-    use super::super::{
-        ScalarModMulTraceRows, ROLE_A, ROLE_B, ROLE_QUOTIENT, ROLE_RESULT,
-    };
+    use super::super::{ScalarModMulTraceRows, ROLE_A, ROLE_B, ROLE_QUOTIENT, ROLE_RESULT};
     use super::*;
 
     fn scalar(value: u64) -> [u64; 4] {
@@ -460,7 +458,7 @@ mod tests {
         let trace = ScalarFieldMulTrace::new("test_mul", &scalar(7), &scalar(11), &P256_ORDER)
             .expect("valid scalar mod-mul trace");
         ScalarModMulMergedRows::new(vec![
-            ScalarModMulTraceRows::new(3, &trace).expect("trace rows generate"),
+            ScalarModMulTraceRows::new(3, &trace).expect("trace rows generate")
         ])
     }
 

@@ -77,14 +77,12 @@ pub(crate) fn gen_prepared_table_ec_row_interaction_trace(
     assert_eq!(base.len(), PREPARED_TABLE_EC_ROW_TRACE_COLUMNS);
     let log_size = base[0].domain.log_size();
     let mut logup = LogupTraceGenerator::new(log_size);
-    let mut col = logup.new_col();
-    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+    logup.col_from_fn(|vec_row| {
         let values = prepared_table_ec_row_packed_relation_values(base, vec_row);
         let numerator = -PackedQM31::from(base[0].data[vec_row]);
         let denominator: PackedQM31 = relation.combine(&values);
-        col.write_frac(vec_row, numerator, denominator);
-    }
-    col.finalize_col();
+        (numerator, denominator)
+    });
     let (trace, claimed_sum) = logup.finalize_last();
     (trace, PreparedTableEcRowInteractionClaim { claimed_sum })
 }
@@ -498,25 +496,17 @@ fn prepared_table_ec_row_unpacked_relation_values(
 // where `gate = active − (1−op)·rhs.inf` (the group-existence gate, ≡ the old
 // `has_muls`).
 //
-// LogUp batch size: 2 fractions per interaction column (degree <= 3 at the
-// `log_size + 1` bound), with the two degree-2 op-mux consume entries
-// (M0.rhs at index 2, M1.rhs at index 4) in solo batches.
-pub(crate) const PREPARED_CONSUMER_LOGUP_BATCH: usize = 2;
+// LogUp batch size: 1 fraction per interaction column. The op-mux consume
+// entries (M0.rhs at index 2, M1.rhs at index 4) have degree-2 tuple values;
+// pairing them with a neighbor pushes the logup constraint past degree 3,
+// which overflows the `log_size + 1` bound. `finalize_logup_batched` only
+// supports a uniform batch size, so everything goes solo.
+pub(crate) const PREPARED_CONSUMER_LOGUP_BATCH: usize = 1;
 
 /// Total LogUp entries the consumer eval emits (EC-row consume + 6 narrow mul
 /// consumes + the EC-op header yield), in emission order.
 pub(crate) fn prepared_consumer_logup_entries() -> usize {
     1 + NARROW_MUL_CONSUME_SLOTS.len() + 1
-}
-
-/// Consumer logup batching: pairs, except the op-mux slots (M0.rhs, M1.rhs)
-/// whose consume values are degree-2 mixes — those sit in solo batches.
-pub(crate) fn prepared_consumer_logup_batching() -> Vec<usize> {
-    crate::range_checks::batching_with_solo(
-        prepared_consumer_logup_entries(),
-        PREPARED_CONSUMER_LOGUP_BATCH,
-        &[2, 4],
-    )
 }
 
 /// Gen-side point column offsets for the narrow mul consumes.
@@ -737,10 +727,10 @@ pub(crate) fn gen_prepared_table_projective_source_consumer_interaction_trace(
 
     assert_eq!(entries.len(), prepared_consumer_logup_entries());
     let mut logup = LogupTraceGenerator::new(log_size);
-    crate::range_checks::write_logup_columns_with_batching(
+    crate::range_checks::write_batched_logup_columns(
         &mut logup,
         &entries,
-        &prepared_consumer_logup_batching(),
+        PREPARED_CONSUMER_LOGUP_BATCH,
     );
     let (columns, _total) = logup.finalize_last();
 

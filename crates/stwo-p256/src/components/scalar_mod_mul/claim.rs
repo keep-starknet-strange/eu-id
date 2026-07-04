@@ -170,11 +170,13 @@ impl ScalarModMulComponents {
                 },
                 interaction_claim.scalar_mod_mul.reduction_digits,
             ),
-            range13: include_range13_provider.then(|| RangeCheckComponent::new(
-                allocator,
-                RangeCheckEval::new(relations.range13.clone(), lookup_claims.range13.log_size),
-                interaction_claim.range13.claimed_sum,
-            )),
+            range13: include_range13_provider.then(|| {
+                RangeCheckComponent::new(
+                    allocator,
+                    RangeCheckEval::new(relations.range13.clone(), lookup_claims.range13.log_size),
+                    interaction_claim.range13.claimed_sum,
+                )
+            }),
             signed_carry: SignedCarryRangeComponent::new(
                 allocator,
                 SignedCarryRangeEval::new(
@@ -391,8 +393,9 @@ mod tests {
     fn test_rows() -> ScalarModMulMergedRows {
         let trace = ScalarFieldMulTrace::new("test_mul", &scalar(7), &scalar(11), &P256_ORDER)
             .expect("valid scalar mod-mul trace");
-        ScalarModMulMergedRows::new(vec![super::super::ScalarModMulTraceRows::new(3, &trace)
-            .expect("trace rows generate")])
+        ScalarModMulMergedRows::new(vec![
+            super::super::ScalarModMulTraceRows::new(3, &trace).expect("trace rows generate")
+        ])
     }
 
     #[test]

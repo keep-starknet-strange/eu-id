@@ -59,11 +59,7 @@ use stwo::core::{
     utils::{bit_reverse_index, coset_index_to_circle_domain_index},
     ColumnVec,
 };
-use stwo::prover::backend::simd::{
-    m31::{LOG_N_LANES, N_LANES},
-    qm31::PackedQM31,
-    SimdBackend,
-};
+use stwo::prover::backend::simd::{m31::N_LANES, qm31::PackedQM31, SimdBackend};
 use stwo::prover::ComponentProver;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{
@@ -696,11 +692,7 @@ fn consume_mul_limbs<E: EvalAtRow>(
     values.push(E::F::from(M31::from_u32_unchecked(mul_index)));
     values.push(E::F::from(M31::from_u32_unchecked(role)));
     values.extend(limbs.iter().cloned());
-    eval.add_to_relation(RelationEntry::new(
-        relation,
-        E::EF::from(active.clone()),
-        &values,
-    ));
+    eval.add_to_relation(RelationEntry::base(relation, active.clone(), &values));
 }
 
 /// Consume `mul 3`'s lhs as the fixed constant `3` (limb 0 = 3, rest 0). This
@@ -719,11 +711,7 @@ fn consume_three_constant<E: EvalAtRow>(
         let value = if limb_index == 0 { 3 } else { 0 };
         values.push(E::F::from(M31::from_u32_unchecked(value)));
     }
-    eval.add_to_relation(RelationEntry::new(
-        relation,
-        E::EF::from(active.clone()),
-        &values,
-    ));
+    eval.add_to_relation(RelationEntry::base(relation, active.clone(), &values));
 }
 
 /// Consume the binding tuple `[sig_id, x.., y..]` (use, `+active`) on the
@@ -738,9 +726,9 @@ fn consume_public_key_point<E: EvalAtRow>(
     values.push(columns.sig_id.clone());
     values.extend(columns.x.limbs().iter().cloned());
     values.extend(columns.y.limbs().iter().cloned());
-    eval.add_to_relation(RelationEntry::new(
+    eval.add_to_relation(RelationEntry::base(
         relation,
-        E::EF::from(columns.active.clone()),
+        columns.active.clone(),
         &values,
     ));
 }
@@ -1030,11 +1018,13 @@ impl PublicKeyCurveSliceComponents {
                 },
                 interaction_claim.gamma_signed.claimed_sum,
             ),
-            range13: include_range13_provider.then(|| RangeCheckComponent::new(
-                allocator,
-                RangeCheckEval::new(relations.range13.clone(), RANGE13_BITS),
-                interaction_claim.range13.claimed_sum,
-            )),
+            range13: include_range13_provider.then(|| {
+                RangeCheckComponent::new(
+                    allocator,
+                    RangeCheckEval::new(relations.range13.clone(), RANGE13_BITS),
+                    interaction_claim.range13.claimed_sum,
+                )
+            }),
             signed_carry: include_signed_carry_provider.then(|| {
                 SignedCarryRangeComponent::new(
                     allocator,
@@ -1519,8 +1509,7 @@ fn gen_curve_check_interaction_trace(
 
     let mut logup = LogupTraceGenerator::new(log_size);
     for column in (0..fraction_count).step_by(2) {
-        let mut col = logup.new_col();
-        for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+        logup.col_from_fn(|vec_row| {
             let mut numerators = [secure_zero(); N_LANES];
             let mut denominators = [secure_one(); N_LANES];
             for lane in 0..N_LANES {
@@ -1535,13 +1524,11 @@ fn gen_curve_check_interaction_trace(
                 numerators[lane] = numerator;
                 denominators[lane] = denominator;
             }
-            col.write_frac(
-                vec_row,
+            (
                 PackedQM31::from_array(numerators),
                 PackedQM31::from_array(denominators),
-            );
-        }
-        col.finalize_col();
+            )
+        });
     }
     let (trace, curve_sum) = logup.finalize_last();
     (trace, curve_sum, mul_result_sum, gamma_yield_sum)

@@ -12,7 +12,9 @@ use crate::age::strategy::range_check::preprocessed::Preprocessed;
 use crate::age::strategy::range_check::witness::WitnessData;
 use crate::age::types::{PublicInput, Witness};
 use air_core::relations::{FieldBytesRelation, SharedFieldRelation};
-use air_core::{Air, AirProver, TreeLayout};
+use air_core::{
+    fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint, TreeLayout,
+};
 use stwo::core::air::Component;
 use stwo::core::channel::Blake2sChannel;
 use stwo::core::fields::qm31::QM31;
@@ -176,6 +178,20 @@ impl AirProver for RangeCheckProver {
 
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>) {
         self.preprocessed.extend_evals(tb);
+    }
+
+    fn preprocessed_column_fingerprints(&mut self) -> Vec<PreprocessedColumnFingerprint> {
+        let mut columns = Vec::new();
+        columns.extend(self.preprocessed.cal_trace.clone());
+        columns.extend(self.preprocessed.valid_day_trace.clone());
+        columns.extend(self.preprocessed.day_delta_table.clone());
+        columns.extend(self.preprocessed.month_delta_table.clone());
+        columns.extend(self.preprocessed.year_delta_table.clone());
+        fingerprint_preprocessed_columns(
+            "predicates::RangeCheckProver",
+            &preprocessed_column_ids(&self.public.bounds),
+            &columns,
+        )
     }
 
     fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>) {
@@ -490,6 +506,46 @@ mod binding_tests {
             .with_dob_binding(handle_v);
         let mut modules: [&mut dyn Air; 2] = [&mut provider_v, &mut age_v];
         air_core::verify(&mut modules, &proof).expect("bound age verifies against matching yields");
+    }
+
+    #[test]
+    fn bound_age_balances_with_day_and_month_borrow() {
+        let public = PublicInput::new(
+            Date {
+                year: 2026,
+                month: 7,
+                day: 3,
+            },
+            18,
+        );
+        let dob = DateOfBirth(Date {
+            year: 1990,
+            month: 7,
+            day: 15,
+        });
+
+        let handle = SharedFieldRelation::new();
+        let mut provider = DobProvider::new(dob_bytes(1990, 7, 15), handle.clone());
+        let mut age = AgeRangeCheck::new(PcsConfig::default())
+            .prover(&public, &dob)
+            .unwrap()
+            .with_dob_binding(handle);
+
+        let proof = {
+            let mut modules: [&mut dyn AirProver; 2] = [&mut provider, &mut age];
+            air_core::prove(&mut modules, PcsConfig::default()).expect("bound age proves")
+        };
+        let sums = age.claimed_sums();
+
+        let handle_v = SharedFieldRelation::new();
+        let mut provider_v = DobProvider::new(dob_bytes(1990, 7, 15), handle_v.clone());
+        let mut age_v = AgeRangeCheck::new(PcsConfig::default())
+            .verifier(&public, &sums)
+            .unwrap()
+            .with_dob_binding(handle_v);
+        let mut modules: [&mut dyn Air; 2] = [&mut provider_v, &mut age_v];
+        air_core::verify(&mut modules, &proof)
+            .expect("borrowed DOB date verifies against matching yields");
     }
 
     /// When the producer yields a *different* date of birth than the age module

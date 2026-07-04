@@ -33,9 +33,7 @@ fn append_entry(
 
 fn write_paired_entries(logup: &mut LogupTraceGenerator, entries: &[LogupEntry]) {
     for chunk in entries.chunks(2) {
-        let n_packed = chunk[0].0.len();
-        let mut col_gen = logup.new_col();
-        for packed_row in 0..n_packed {
+        logup.col_from_fn(|packed_row| {
             let mut numerator = chunk[0].0[packed_row];
             let mut denominator = chunk[0].1[packed_row];
             if let Some((next_numerators, next_denominators)) = chunk.get(1) {
@@ -44,9 +42,8 @@ fn write_paired_entries(logup: &mut LogupTraceGenerator, entries: &[LogupEntry])
                 numerator = numerator * d + n * denominator;
                 denominator *= d;
             }
-            col_gen.write_frac(packed_row, numerator, denominator);
-        }
-        col_gen.finalize_col();
+            (numerator, denominator)
+        });
     }
 }
 
@@ -153,81 +150,66 @@ impl InteractionTraces {
 
         // Calendar table
         let mut logup_gen = LogupTraceGenerator::new(cal_log_size);
-        let mut col_gen = logup_gen.new_col();
-        for vec_row in 0..(1 << (cal_log_size - LOG_N_LANES)) {
+        logup_gen.col_from_fn(|vec_row| {
             let max_days_val: PackedM31 = preprocessed.cal_trace[0].values.data[vec_row];
             let index_val: PackedM31 = preprocessed.cal_trace[1].values.data[vec_row];
             let mult_val: PackedM31 = witness_data.cal_mult_trace[0].values.data[vec_row];
-            col_gen.write_frac(
-                vec_row,
+            (
                 PackedQM31::from(-mult_val),
                 lookup_elements.calendar.combine(&[index_val, max_days_val]),
-            );
-        }
-        col_gen.finalize_col();
+            )
+        });
         let (cal_interaction, cal_claimed_sum) = logup_gen.finalize_last();
 
         // Valid-day table
         let mut logup_gen = LogupTraceGenerator::new(valid_day_log_size);
-        let mut col_gen = logup_gen.new_col();
-        for vec_row in 0..(1 << (valid_day_log_size - LOG_N_LANES)) {
+        logup_gen.col_from_fn(|vec_row| {
             let max_days_val: PackedM31 = preprocessed.valid_day_trace[0].values.data[vec_row];
             let day_val: PackedM31 = preprocessed.valid_day_trace[1].values.data[vec_row];
             let mult_val: PackedM31 = witness_data.valid_day_mult_trace[0].values.data[vec_row];
-            col_gen.write_frac(
-                vec_row,
+            (
                 PackedQM31::from(-mult_val),
                 lookup_elements.valid_day.combine(&[max_days_val, day_val]),
-            );
-        }
-        col_gen.finalize_col();
+            )
+        });
         let (valid_day_interaction, valid_day_claimed_sum) = logup_gen.finalize_last();
 
         // Day delta table
         let day_delta_log_size = Preprocessed::day_range().log_size();
         let mut logup_gen = LogupTraceGenerator::new(day_delta_log_size);
-        let mut col_gen = logup_gen.new_col();
-        for vec_row in 0..(1 << (day_delta_log_size - LOG_N_LANES)) {
+        logup_gen.col_from_fn(|vec_row| {
             let value: PackedM31 = preprocessed.day_delta_table[0].values.data[vec_row];
             let mult: PackedM31 = witness_data.day_delta_mult_trace[0].values.data[vec_row];
-            col_gen.write_frac(
-                vec_row,
+            (
                 PackedQM31::from(-mult),
                 lookup_elements.day_delta.combine(&[value]),
-            );
-        }
-        col_gen.finalize_col();
+            )
+        });
         let (day_delta_interaction, day_delta_claimed_sum) = logup_gen.finalize_last();
 
         // Month delta table
         let month_delta_log_size = Preprocessed::month_range().log_size();
         let mut logup_gen = LogupTraceGenerator::new(month_delta_log_size);
-        let mut col_gen = logup_gen.new_col();
-        for vec_row in 0..(1 << (month_delta_log_size - LOG_N_LANES)) {
+        logup_gen.col_from_fn(|vec_row| {
             let value: PackedM31 = preprocessed.month_delta_table[0].values.data[vec_row];
             let mult: PackedM31 = witness_data.month_delta_mult_trace[0].values.data[vec_row];
-            col_gen.write_frac(
-                vec_row,
+            (
                 PackedQM31::from(-mult),
                 lookup_elements.month_delta.combine(&[value]),
-            );
-        }
-        col_gen.finalize_col();
+            )
+        });
         let (month_delta_interaction, month_delta_claimed_sum) = logup_gen.finalize_last();
 
         // Year delta table
         let mut logup_gen = LogupTraceGenerator::new(year_delta_log_sz);
-        let mut col_gen = logup_gen.new_col();
-        for vec_row in 0..(1 << (year_delta_log_sz - LOG_N_LANES)) {
+        logup_gen.col_from_fn(|vec_row| {
             let value: PackedM31 = preprocessed.year_delta_table[0].values.data[vec_row];
             let mult: PackedM31 = witness_data.year_delta_mult_trace[0].values.data[vec_row];
-            col_gen.write_frac(
-                vec_row,
+            (
                 PackedQM31::from(-mult),
                 lookup_elements.year_delta.combine(&[value]),
-            );
-        }
-        col_gen.finalize_col();
+            )
+        });
         let (year_delta_interaction, year_delta_claimed_sum) = logup_gen.finalize_last();
 
         Self {

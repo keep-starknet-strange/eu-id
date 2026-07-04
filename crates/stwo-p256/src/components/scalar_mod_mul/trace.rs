@@ -144,9 +144,11 @@ impl ScalarModMulMergedRows {
     }
 
     pub fn canonical_scalars(&self) -> impl Iterator<Item = (u32, &CanonicalScalarTraceRow)> {
-        self.instances
-            .iter()
-            .flat_map(|inst| inst.canonical_scalars.iter().map(move |row| (inst.mul_id, row)))
+        self.instances.iter().flat_map(|inst| {
+            inst.canonical_scalars
+                .iter()
+                .map(move |row| (inst.mul_id, row))
+        })
     }
 
     pub fn ab_chunks(&self) -> impl Iterator<Item = (u32, &VariableProductChunkTraceRow)> {
@@ -168,13 +170,18 @@ impl ScalarModMulMergedRows {
     }
 
     pub fn reduction_digits(&self) -> impl Iterator<Item = (u32, &ScalarReductionDigitTraceRow)> {
-        self.instances
-            .iter()
-            .flat_map(|inst| inst.reduction_digits.iter().map(move |row| (inst.mul_id, row)))
+        self.instances.iter().flat_map(|inst| {
+            inst.reduction_digits
+                .iter()
+                .map(move |row| (inst.mul_id, row))
+        })
     }
 
     pub fn canonical_len(&self) -> usize {
-        self.instances.iter().map(|inst| inst.canonical_scalars.len()).sum()
+        self.instances
+            .iter()
+            .map(|inst| inst.canonical_scalars.len())
+            .sum()
     }
 
     pub fn ab_chunks_len(&self) -> usize {
@@ -186,11 +193,17 @@ impl ScalarModMulMergedRows {
     }
 
     pub fn accumulators_len(&self) -> usize {
-        self.instances.iter().map(|inst| inst.accumulators.len()).sum()
+        self.instances
+            .iter()
+            .map(|inst| inst.accumulators.len())
+            .sum()
     }
 
     pub fn reduction_len(&self) -> usize {
-        self.instances.iter().map(|inst| inst.reduction_digits.len()).sum()
+        self.instances
+            .iter()
+            .map(|inst| inst.reduction_digits.len())
+            .sum()
     }
 }
 

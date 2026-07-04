@@ -30,6 +30,10 @@ impl FrameworkEval for PreparedTableEcRowEval {
     }
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
+        // Must stay at +1: the prove pipeline rejects a per-component bound of
+        // `log_size + 2` (OODS composition check fails even with degree-3
+        // constraints), so every constraint here is kept at degree <= 3 by
+        // solo LogUp batching (see PREPARED_CONSUMER_LOGUP_BATCH).
         self.log_size + 1
     }
 
@@ -125,9 +129,9 @@ impl FrameworkEval for PreparedTableEcRowEval {
             &rhs,
             &output,
         );
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             &self.relation,
-            -E::EF::from(active.clone()),
+            -active.clone(),
             &relation_values,
         ));
 
@@ -298,12 +302,12 @@ fn add_pinning_emissions<E: EvalAtRow>(
         };
         let numerator = signed_numerator::<E>(gate, entry.mult);
         match entry.relation {
-            PinRelation::CertBase => eval.add_to_relation(RelationEntry::new(
+            PinRelation::CertBase => eval.add_to_relation(RelationEntry::base(
                 &pinning.cert_base,
                 numerator,
                 &cert_base_relation_values::<E::F>(sig_id, cert_id, point),
             )),
-            PinRelation::Canonical(role) => eval.add_to_relation(RelationEntry::new(
+            PinRelation::Canonical(role) => eval.add_to_relation(RelationEntry::base(
                 &pinning.canonical,
                 numerator,
                 &canonical_relation_values::<E::F>(sig_id, cert_id, role, point),
@@ -318,9 +322,9 @@ fn add_pinning_emissions<E: EvalAtRow>(
     // the canonical-pinned `R_i`, so this forwards an already-bound value.
     if let Some(final_check_hint) = &pinning.final_check_hint {
         let gate = active.clone() * kind_flags[PREPARED_TABLE_EC_KIND_DOUBLE_R].clone();
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             final_check_hint,
-            -E::EF::from(gate),
+            -gate,
             &final_check_hint_relation_values::<E::F>(sig_id, cert_id, lhs),
         ));
     }
@@ -341,10 +345,10 @@ fn final_check_hint_relation_values<F: Clone + From<M31>>(
     })
 }
 
-/// `mult · gate` as an extension-field numerator (`mult` may be negative).
-fn signed_numerator<E: EvalAtRow>(gate: E::F, mult: i32) -> E::EF {
+/// `mult · gate` as a base-field numerator (`mult` may be negative).
+fn signed_numerator<E: EvalAtRow>(gate: E::F, mult: i32) -> E::F {
     let magnitude = E::F::from(M31::from_u32_unchecked(mult.unsigned_abs()));
-    let scaled = E::EF::from(gate * magnitude);
+    let scaled = gate * magnitude;
     if mult < 0 {
         -scaled
     } else {
@@ -421,9 +425,9 @@ impl FrameworkEval for PreparedTableProjectiveSourceEval {
             &rhs,
             &output,
         );
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             &self.relation,
-            E::EF::from(active.clone()),
+            active.clone(),
             &relation_values,
         ));
         // The 6 narrow mul-result consumes (`+gate`): pin the consumer's own
@@ -447,17 +451,21 @@ impl FrameworkEval for PreparedTableProjectiveSourceEval {
         let (lhs_x, lhs_y) = (lhs.x_bigint(), lhs.y_bigint());
         let (out_x, out_y) = (output.x_bigint(), output.y_bigint());
         for i in 0..N_LIMBS {
-            eval.add_constraint(noop.clone() * (out_x.limbs()[i].clone() - lhs_x.limbs()[i].clone()));
-            eval.add_constraint(noop.clone() * (out_y.limbs()[i].clone() - lhs_y.limbs()[i].clone()));
+            eval.add_constraint(
+                noop.clone() * (out_x.limbs()[i].clone() - lhs_x.limbs()[i].clone()),
+            );
+            eval.add_constraint(
+                noop.clone() * (out_y.limbs()[i].clone() - lhs_y.limbs()[i].clone()),
+            );
         }
         eval.add_constraint(noop.clone() * (output.inf() - lhs.inf()));
 
         // EC-op header YIELD (−gate): tuple
         // (source_index, op, output_inf, lhs_inf, rhs_inf), consumed 1:1 by the
         // silo group header. Same tuple/order as the fake-GLV source.
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             &self.header,
-            -E::EF::from(gate),
+            -gate,
             &[
                 source_index.clone(),
                 op.clone(),
@@ -468,7 +476,7 @@ impl FrameworkEval for PreparedTableProjectiveSourceEval {
         ));
 
         eval.finalize_logup_batched(
-            &crate::components::fake_glv::prepared_table::interaction::prepared_consumer_logup_batching(),
+            crate::components::fake_glv::prepared_table::interaction::PREPARED_CONSUMER_LOGUP_BATCH,
         );
         eval
     }
@@ -484,8 +492,7 @@ impl FrameworkEval for PreparedTableProjectiveSourceEval {
 /// matching the silo's per-group operand layout (Double: M0 = x1·x1,
 /// MixedAdd: M0 = x1·x2, …; M13/M14 lhs = affine output coords). The numerator
 /// is the group-existence `gate`; the silo provides exactly these slots on proj
-/// rows (per-slot provide masks). The two op-mux entries (M0.rhs, M1.rhs) have
-/// degree-2 tuple values and sit in solo logup batches.
+/// rows (per-slot provide masks).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn add_projective_source_narrow_mul_consumes<E: EvalAtRow>(
     eval: &mut E,
@@ -503,13 +510,12 @@ pub(crate) fn add_projective_source_narrow_mul_consumes<E: EvalAtRow>(
     let (rhs_x, rhs_y) = (rhs.x_bigint(), rhs.y_bigint());
     let (out_x, out_y) = (output.x_bigint(), output.y_bigint());
     let own = |a: &crate::limbs::P256BigInt<E::F>| -> Vec<E::F> { a.limbs().to_vec() };
-    let mix = |a: &crate::limbs::P256BigInt<E::F>,
-               b: &crate::limbs::P256BigInt<E::F>|
-     -> Vec<E::F> {
-        (0..N_LIMBS)
-            .map(|i| op.clone() * a.limbs()[i].clone() + mixed.clone() * b.limbs()[i].clone())
-            .collect()
-    };
+    let mix =
+        |a: &crate::limbs::P256BigInt<E::F>, b: &crate::limbs::P256BigInt<E::F>| -> Vec<E::F> {
+            (0..N_LIMBS)
+                .map(|i| op.clone() * a.limbs()[i].clone() + mixed.clone() * b.limbs()[i].clone())
+                .collect()
+        };
     let slots: [(u32, u32, Vec<E::F>); 6] = [
         (0, PROJECTIVE_RCB_MUL_ROLE_LHS, own(&lhs_x)),
         (0, PROJECTIVE_RCB_MUL_ROLE_RHS, mix(&lhs_x, &rhs_x)),
@@ -524,11 +530,7 @@ pub(crate) fn add_projective_source_narrow_mul_consumes<E: EvalAtRow>(
         values.push(E::F::from(M31::from_u32_unchecked(mul)));
         values.push(E::F::from(M31::from_u32_unchecked(role)));
         values.extend(limbs);
-        eval.add_to_relation(RelationEntry::new(
-            relation,
-            E::EF::from(gate.clone()),
-            &values,
-        ));
+        eval.add_to_relation(RelationEntry::base(relation, gate.clone(), &values));
     }
 }
 

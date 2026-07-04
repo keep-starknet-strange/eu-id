@@ -881,9 +881,9 @@ impl FrameworkEval for Sha256Eval {
         let byte_base = E::F::from(M31::from(1u32 << 8));
         let mut sum_w_hi = E::F::from(M31::from(0u32));
         let mut sum_w_lo = E::F::from(M31::from(0u32));
-        for j in 0..WORDS_PER_BLOCK {
-            sum_w_hi += is_marker_word[j].clone() * w_msg(j).1.clone();
-            sum_w_lo += is_marker_word[j].clone() * w_msg(j).0.clone();
+        for (j, is_marker) in is_marker_word.iter().enumerate().take(WORDS_PER_BLOCK) {
+            sum_w_hi += is_marker.clone() * w_msg(j).1.clone();
+            sum_w_lo += is_marker.clone() * w_msg(j).0.clone();
         }
         eval.add_constraint(
             sum_w_hi
@@ -914,8 +914,8 @@ impl FrameworkEval for Sha256Eval {
         // (P.G) Words strictly after the marker word are zero (length-field
         // exception; see the wide-layout derivation for the W[14]/W[15]
         // case analysis).
-        for j in 0..14 {
-            let gate = cum_marker_word[j].clone() + is_length_only_block.clone();
+        for (j, cum_marker) in cum_marker_word.iter().enumerate().take(14) {
+            let gate = cum_marker.clone() + is_length_only_block.clone();
             eval.add_constraint(gate.clone() * w_msg(j).0.clone());
             eval.add_constraint(gate * w_msg(j).1.clone());
         }

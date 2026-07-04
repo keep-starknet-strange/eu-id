@@ -1,6 +1,7 @@
 # Q-010 — WO-3.2 dust inventory drift + merge-group ack request
 
 Date: 2026-07-03
+Status: answered
 WO: WO-3.2 component-dust merge
 
 ## Context

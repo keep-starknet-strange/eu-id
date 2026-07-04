@@ -712,23 +712,18 @@ pub fn gen_hinted_mul_interaction_trace(
         PackedQM31::from(lanes[vec_row]) * signed_secure(sign)
     };
     for pair in entries.chunks(2) {
-        let mut col = logup.new_col();
-        for vec_row in 0..vec_rows {
-            let (frac_n, frac_d) = match pair {
-                [(c1, s1, d1), (c2, s2, d2)] => {
-                    let n1 = numer(c1, *s1, vec_row);
-                    let n2 = numer(c2, *s2, vec_row);
-                    (
-                        n1 * d2[vec_row] + n2 * d1[vec_row],
-                        d1[vec_row] * d2[vec_row],
-                    )
-                }
-                [(c1, s1, d1)] => (numer(c1, *s1, vec_row), d1[vec_row]),
-                _ => unreachable!(),
-            };
-            col.write_frac(vec_row, frac_n, frac_d);
-        }
-        col.finalize_col();
+        logup.col_from_fn(|vec_row| match pair {
+            [(c1, s1, d1), (c2, s2, d2)] => {
+                let n1 = numer(c1, *s1, vec_row);
+                let n2 = numer(c2, *s2, vec_row);
+                (
+                    n1 * d2[vec_row] + n2 * d1[vec_row],
+                    d1[vec_row] * d2[vec_row],
+                )
+            }
+            [(c1, s1, d1)] => (numer(c1, *s1, vec_row), d1[vec_row]),
+            _ => unreachable!(),
+        });
     }
     let (trace, claimed_sum) = logup.finalize_last();
 

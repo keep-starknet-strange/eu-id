@@ -24,8 +24,8 @@ lto = "fat"
 codegen-units = 1
 
 [workspace.dependencies]
-stwo = { git = "https://github.com/starkware-libs/stwo.git", rev = "e1286720e5a6352cae79cc1201c322d5e02ab52f", features = ["prover"] }
-stwo-constraint-framework = { git = "https://github.com/starkware-libs/stwo.git", rev = "e1286720e5a6352cae79cc1201c322d5e02ab52f", features = ["prover"] }
+stwo = { git = "https://github.com/0xLucqs/stwo.git", rev = "116b03c010988d1837222594bd290a086db2a1a9", features = ["prover"] }
+stwo-constraint-framework = { git = "https://github.com/0xLucqs/stwo.git", rev = "116b03c010988d1837222594bd290a086db2a1a9", features = ["prover"] }
 serde = { version = "1", features = ["derive"] }
 num-traits = "0.2"
 mimalloc = "0.1"
@@ -36,3 +36,7 @@ mimalloc = "0.1"
 # which escalates every lint below to a hard error in CI.
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
+
+[patch."https://github.com/0xLucqs/stwo.git"]
+stwo = { path = "/private/tmp/stwo-dev-copy/crates/stwo" }
+stwo-constraint-framework = { path = "/private/tmp/stwo-dev-copy/crates/constraint-framework" }

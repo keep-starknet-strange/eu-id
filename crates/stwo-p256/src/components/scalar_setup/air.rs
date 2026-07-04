@@ -32,11 +32,11 @@ use crate::public_inputs::{
 };
 use crate::public_key_curve_air::{PublicKeyPointRelation, PUBLIC_KEY_POINT_ARITY};
 use crate::range_checks::{
-    add_range_check, consecutive_batching, decode_signed_carry, encode_signed_carry,
-    range_check_value_column_id, signed_carry_active_column_id, signed_carry_value_column_id,
-    write_logup_columns_with_batching, RangeCheckClaim, RangeCheckComponent, RangeCheckEval,
-    RangeCheckInteractionClaim, RangeCheckRelation, SignedCarryRangeClaim,
-    SignedCarryRangeComponent, SignedCarryRangeEval, RANGE13_BITS, RANGE9_BITS,
+    add_range_check, decode_signed_carry, encode_signed_carry, range_check_value_column_id,
+    signed_carry_active_column_id, signed_carry_value_column_id, write_batched_logup_columns,
+    RangeCheckClaim, RangeCheckComponent, RangeCheckEval, RangeCheckInteractionClaim,
+    RangeCheckRelation, SignedCarryRangeClaim, SignedCarryRangeComponent, SignedCarryRangeEval,
+    RANGE13_BITS, RANGE9_BITS,
 };
 use crate::scalar::scalar_mod_mul::columns::{m31_column_eval, padded_log_size, M31ColumnEval};
 use crate::scalar::scalar_mod_mul::relation::ScalarModMulLookupRelations;
@@ -198,10 +198,6 @@ const SCALAR_SETUP_LOGUP_BATCH: usize = 2;
 const SCALAR_SETUP_LOGUP_ENTRIES: usize = 3 + 16 * N_LIMBS;
 const SCALAR_SETUP_SIGNED_CARRY_EQUATION: &str = "scalar_setup_digest";
 
-fn scalar_setup_logup_batching() -> Vec<usize> {
-    consecutive_batching(SCALAR_SETUP_LOGUP_ENTRIES, SCALAR_SETUP_LOGUP_BATCH)
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScalarSetupAirProofClaim {
     pub log_size: u32,
@@ -304,11 +300,13 @@ impl ScalarSetupAirComponents {
                 },
                 interaction_claim.claimed_sum,
             ),
-            range13: include_range13_provider.then(|| RangeCheckComponent::new(
-                allocator,
-                RangeCheckEval::new(relations.range13.clone(), RANGE13_BITS),
-                interaction_claim.range13_provider.claimed_sum,
-            )),
+            range13: include_range13_provider.then(|| {
+                RangeCheckComponent::new(
+                    allocator,
+                    RangeCheckEval::new(relations.range13.clone(), RANGE13_BITS),
+                    interaction_claim.range13_provider.claimed_sum,
+                )
+            }),
             range9: RangeCheckComponent::new(
                 allocator,
                 RangeCheckEval::new(relations.range9.clone(), RANGE9_BITS),
@@ -463,9 +461,9 @@ impl FrameworkEval for ScalarSetupAirEval {
             pub_x: public.pub_x.clone(),
             pub_y: public.pub_y.clone(),
         };
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             &self.output_relation,
-            -E::EF::from(active.clone()),
+            -active.clone(),
             &output.relation_values(),
         ));
 
@@ -1040,7 +1038,7 @@ pub(crate) fn gen_scalar_setup_air_interaction_trace_without_range13_provider(
 
     assert_eq!(entries.len(), SCALAR_SETUP_LOGUP_ENTRIES);
     let mut logup = LogupTraceGenerator::new(log_size);
-    write_logup_columns_with_batching(&mut logup, &entries, &scalar_setup_logup_batching());
+    write_batched_logup_columns(&mut logup, &entries, SCALAR_SETUP_LOGUP_BATCH);
     let (mut trace, claimed_sum) = logup.finalize_last();
 
     let providers = scalar_setup_lookup_provider_claims();
@@ -1093,7 +1091,7 @@ fn add_public_key_point_provider<E: EvalAtRow>(
     values.push(public.sig_id.clone());
     values.extend(public.pub_x.limbs().iter().cloned());
     values.extend(public.pub_y.limbs().iter().cloned());
-    eval.add_to_relation(RelationEntry::new(relation, -E::EF::from(gate), &values));
+    eval.add_to_relation(RelationEntry::base(relation, -gate, &values));
 }
 
 fn read_public_instance<E: EvalAtRow>(eval: &mut E) -> PublicEcdsaInstance<E::F> {
@@ -1227,9 +1225,9 @@ fn add_scalar_limb_link<E: EvalAtRow>(
 ) {
     let two = E::F::from(M31::from_u32_unchecked(2));
     let mul_id = sig_id * two + E::F::from(M31::from_u32_unchecked(mul_offset));
-    eval.add_to_relation(RelationEntry::new(
+    eval.add_to_relation(RelationEntry::base(
         relation,
-        E::EF::from(gate),
+        gate,
         &[
             mul_id,
             E::F::from(M31::from_u32_unchecked(role)),

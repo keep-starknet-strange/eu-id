@@ -174,14 +174,7 @@ fn provide_scalar_limb<E: EvalAtRow>(
         return;
     }
     let scaled_gate = gate * E::F::from(M31::from_u32_unchecked(multiplicity));
-    add_scalar_limb_relation(
-        eval,
-        relation,
-        -E::EF::from(scaled_gate),
-        mul_id,
-        limb,
-        limb_value,
-    );
+    add_scalar_limb_relation(eval, relation, -scaled_gate, mul_id, limb, limb_value);
 }
 
 fn consume_scalar_limb<E: EvalAtRow>(
@@ -193,14 +186,7 @@ fn consume_scalar_limb<E: EvalAtRow>(
     limb_index: usize,
     limb_value: E::F,
 ) {
-    add_scalar_limb_relation(
-        eval,
-        relation,
-        E::EF::from(gate),
-        mul_id,
-        (role, limb_index),
-        limb_value,
-    );
+    add_scalar_limb_relation(eval, relation, gate, mul_id, (role, limb_index), limb_value);
 }
 
 fn provide_product_chunk_digit<E: EvalAtRow>(
@@ -215,7 +201,7 @@ fn provide_product_chunk_digit<E: EvalAtRow>(
     add_product_chunk_digit_relation(
         eval,
         relation,
-        -E::EF::from(gate),
+        -gate,
         mul_id,
         meta,
         digit_offset,
@@ -235,7 +221,7 @@ fn consume_product_chunk_digit<E: EvalAtRow>(
     add_product_chunk_digit_relation(
         eval,
         relation,
-        E::EF::from(gate),
+        gate,
         mul_id,
         meta,
         digit_offset,
@@ -255,7 +241,7 @@ fn provide_product_digit<E: EvalAtRow>(
     add_product_digit_relation(
         eval,
         relation,
-        -E::EF::from(gate),
+        -gate,
         mul_id,
         side,
         digit_index,
@@ -272,15 +258,7 @@ fn consume_product_digit<E: EvalAtRow>(
     digit_index: usize,
     digit_value: E::F,
 ) {
-    add_product_digit_relation(
-        eval,
-        relation,
-        E::EF::from(gate),
-        mul_id,
-        side,
-        digit_index,
-        digit_value,
-    );
+    add_product_digit_relation(eval, relation, gate, mul_id, side, digit_index, digit_value);
 }
 
 fn provide_reduction_carry<E: EvalAtRow>(
@@ -291,14 +269,7 @@ fn provide_reduction_carry<E: EvalAtRow>(
     digit_index: usize,
     carry_value: E::F,
 ) {
-    add_reduction_carry_relation(
-        eval,
-        relation,
-        -E::EF::from(gate),
-        mul_id,
-        digit_index,
-        carry_value,
-    );
+    add_reduction_carry_relation(eval, relation, -gate, mul_id, digit_index, carry_value);
 }
 
 fn consume_reduction_carry<E: EvalAtRow>(
@@ -309,20 +280,13 @@ fn consume_reduction_carry<E: EvalAtRow>(
     digit_index: usize,
     carry_value: E::F,
 ) {
-    add_reduction_carry_relation(
-        eval,
-        relation,
-        E::EF::from(gate),
-        mul_id,
-        digit_index,
-        carry_value,
-    );
+    add_reduction_carry_relation(eval, relation, gate, mul_id, digit_index, carry_value);
 }
 
 fn add_scalar_limb_relation<E: EvalAtRow>(
     eval: &mut E,
     relation: &ScalarLimbRelation,
-    numerator: E::EF,
+    numerator: E::F,
     mul_id: E::F,
     limb: (u32, usize),
     limb_value: E::F,
@@ -333,7 +297,7 @@ fn add_scalar_limb_relation<E: EvalAtRow>(
         E::F::from(M31::from_u32_unchecked(limb.1 as u32)),
         limb_value,
     ];
-    eval.add_to_relation(RelationEntry::new(relation, numerator, &values));
+    eval.add_to_relation(RelationEntry::base(relation, numerator, &values));
 }
 
 #[derive(Clone, Copy)]
@@ -346,7 +310,7 @@ struct ProductChunkCoordinate {
 fn add_product_chunk_digit_relation<E: EvalAtRow>(
     eval: &mut E,
     relation: &ScalarProductChunkDigitRelation,
-    numerator: E::EF,
+    numerator: E::F,
     mul_id: E::F,
     meta: ProductChunkCoordinate,
     digit_offset: usize,
@@ -360,13 +324,13 @@ fn add_product_chunk_digit_relation<E: EvalAtRow>(
         E::F::from(M31::from_u32_unchecked(digit_offset as u32)),
         digit_value,
     ];
-    eval.add_to_relation(RelationEntry::new(relation, numerator, &values));
+    eval.add_to_relation(RelationEntry::base(relation, numerator, &values));
 }
 
 fn add_product_digit_relation<E: EvalAtRow>(
     eval: &mut E,
     relation: &ScalarProductDigitRelation,
-    numerator: E::EF,
+    numerator: E::F,
     mul_id: E::F,
     side: u32,
     digit_index: usize,
@@ -378,13 +342,13 @@ fn add_product_digit_relation<E: EvalAtRow>(
         E::F::from(M31::from_u32_unchecked(digit_index as u32)),
         digit_value,
     ];
-    eval.add_to_relation(RelationEntry::new(relation, numerator, &values));
+    eval.add_to_relation(RelationEntry::base(relation, numerator, &values));
 }
 
 fn add_reduction_carry_relation<E: EvalAtRow>(
     eval: &mut E,
     relation: &ScalarReductionCarryRelation,
-    numerator: E::EF,
+    numerator: E::F,
     mul_id: E::F,
     digit_index: usize,
     carry_value: E::F,
@@ -394,7 +358,7 @@ fn add_reduction_carry_relation<E: EvalAtRow>(
         E::F::from(M31::from_u32_unchecked(digit_index as u32)),
         carry_value,
     ];
-    eval.add_to_relation(RelationEntry::new(relation, numerator, &values));
+    eval.add_to_relation(RelationEntry::base(relation, numerator, &values));
 }
 
 fn add_chunk_digit_constraints<E: EvalAtRow>(

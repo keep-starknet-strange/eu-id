@@ -11,7 +11,9 @@ use crate::age::strategy::bit_decomposition::lookup_elements::LookupElements;
 use crate::age::strategy::bit_decomposition::preprocessed::Preprocessed;
 use crate::age::strategy::bit_decomposition::witness::WitnessData;
 use crate::age::types::{PublicInput, Witness};
-use air_core::{Air, AirProver, TreeLayout};
+use air_core::{
+    fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint, TreeLayout,
+};
 use stwo::core::air::Component;
 use stwo::core::channel::Blake2sChannel;
 use stwo::core::fields::qm31::QM31;
@@ -123,6 +125,17 @@ impl AirProver for BitDecompositionProver {
 
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>) {
         self.preprocessed.extend_evals(tb);
+    }
+
+    fn preprocessed_column_fingerprints(&mut self) -> Vec<PreprocessedColumnFingerprint> {
+        let mut columns = Vec::new();
+        columns.extend(self.preprocessed.cal_trace.clone());
+        columns.extend(self.preprocessed.valid_day_trace.clone());
+        fingerprint_preprocessed_columns(
+            "predicates::BitDecompositionProver",
+            &preprocessed_column_ids(&self.public.bounds),
+            &columns,
+        )
     }
 
     fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>) {

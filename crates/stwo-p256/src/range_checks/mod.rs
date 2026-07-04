@@ -27,11 +27,7 @@ pub mod trace;
 pub use component::{
     RangeCheckComponent, RangeCheckEval, SignedCarryRangeComponent, SignedCarryRangeEval,
 };
-pub use interaction::{
-    batching_with_solo, consecutive_batching, write_batched_logup_columns,
-    write_generated_batched_logup_columns, write_generated_logup_columns_with_batching,
-    write_logup_columns_with_batching, RangeCheckInteractionClaim,
-};
+pub use interaction::{write_batched_logup_columns, RangeCheckInteractionClaim};
 pub use trace::{ColumnEval, RangeCheckClaim, SignedCarryRangeClaim};
 
 use stwo::core::fields::m31::M31;
@@ -131,7 +127,7 @@ pub fn add_range_check<E: EvalAtRow>(
     gate: E::F,
     value: E::F,
 ) {
-    eval.add_to_relation(RelationEntry::new(relation, E::EF::from(gate), &[value]));
+    eval.add_to_relation(RelationEntry::base(relation, gate, &[value]));
 }
 
 #[cfg(test)]

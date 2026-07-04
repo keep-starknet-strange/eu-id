@@ -1,6 +1,7 @@
 # Q-013 — WO-3.3 needs ack on sweep-only PcsConfig override plumbing
 
 Date: 2026-07-03
+Status: answered
 WO: WO-3.3 FRI config sweep
 
 The WO requires a sweep harness that proves the combined identity fixture under candidate `PcsConfig`s without changing the production profile. I inspected the current path:

@@ -86,9 +86,9 @@ impl FrameworkEval for CanonicalScalarEval {
         let scalar_limb_multiplicity =
             multiplicity.clone() + active.clone() * external_multiplicity;
         for (limb_index, limb) in value.limbs().iter().enumerate() {
-            eval.add_to_relation(RelationEntry::new(
+            eval.add_to_relation(RelationEntry::base(
                 &self.relations.scalar_limb,
-                -E::EF::from(scalar_limb_multiplicity.clone()),
+                -scalar_limb_multiplicity.clone(),
                 &[
                     mul_id.clone(),
                     role.clone(),
@@ -309,7 +309,7 @@ impl FrameworkEval for ProductDigitAccumulatorEval {
                 add_product_chunk_digit_relation_dynamic(
                     &mut eval,
                     &self.relations.product_chunk_digit,
-                    E::EF::from(term_active),
+                    term_active,
                     mul_id.clone(),
                     side.clone(),
                     coeff,
@@ -327,7 +327,7 @@ impl FrameworkEval for ProductDigitAccumulatorEval {
             add_product_digit_relation_dynamic(
                 &mut eval,
                 &self.relations.product_digit,
-                -E::EF::from(active),
+                -active,
                 mul_id,
                 side,
                 digit,
@@ -376,7 +376,7 @@ impl FrameworkEval for ScalarReductionDigitEval {
             add_product_digit_relation_dynamic(
                 &mut eval,
                 &self.relations.product_digit,
-                E::EF::from(active.clone()),
+                active.clone(),
                 mul_id.clone(),
                 constant(SIDE_AB),
                 digit.clone(),
@@ -385,15 +385,15 @@ impl FrameworkEval for ScalarReductionDigitEval {
             add_product_digit_relation_dynamic(
                 &mut eval,
                 &self.relations.product_digit,
-                E::EF::from(active.clone()),
+                active.clone(),
                 mul_id.clone(),
                 constant(SIDE_QN),
                 digit.clone(),
                 qn_digit.clone(),
             );
-            eval.add_to_relation(RelationEntry::new(
+            eval.add_to_relation(RelationEntry::base(
                 &self.relations.scalar_limb,
-                E::EF::from(has_result_limb.clone()),
+                has_result_limb.clone(),
                 &[
                     mul_id.clone(),
                     constant(ROLE_RESULT),
@@ -414,7 +414,7 @@ impl FrameworkEval for ScalarReductionDigitEval {
             add_reduction_carry_relation_dynamic(
                 &mut eval,
                 &self.relations.reduction_carry,
-                E::EF::from(has_prev_carry),
+                has_prev_carry,
                 mul_id.clone(),
                 digit.clone() - one::<E>(),
                 prev_carry.clone(),
@@ -441,7 +441,7 @@ impl FrameworkEval for ScalarReductionDigitEval {
             add_reduction_carry_relation_dynamic(
                 &mut eval,
                 &self.relations.reduction_carry,
-                -E::EF::from(has_next_carry),
+                -has_next_carry,
                 mul_id,
                 digit,
                 carry,
@@ -594,7 +594,7 @@ fn finish_product_chunk_dynamic<E: EvalAtRow>(
             add_product_chunk_digit_relation_dynamic(
                 eval,
                 &relations.product_chunk_digit,
-                -E::EF::from(digit_active[offset].clone()),
+                -digit_active[offset].clone(),
                 mul_id.clone(),
                 constant(side),
                 coeff.clone(),
@@ -626,14 +626,14 @@ fn consume_scalar_limb_dynamic<E: EvalAtRow>(
 ) {
     let values: [E::F; SCALAR_LIMB_RELATION_ARITY] =
         [mul_id, constant(role), limb_index, limb_value];
-    eval.add_to_relation(RelationEntry::new(relation, E::EF::from(gate), &values));
+    eval.add_to_relation(RelationEntry::base(relation, gate, &values));
 }
 
 #[allow(clippy::too_many_arguments)]
 fn add_product_chunk_digit_relation_dynamic<E: EvalAtRow>(
     eval: &mut E,
     relation: &ScalarProductChunkDigitRelation,
-    numerator: E::EF,
+    numerator: E::F,
     mul_id: E::F,
     side: E::F,
     coeff: E::F,
@@ -642,32 +642,32 @@ fn add_product_chunk_digit_relation_dynamic<E: EvalAtRow>(
     value: E::F,
 ) {
     let values = [mul_id, side, coeff, chunk, offset, value];
-    eval.add_to_relation(RelationEntry::new(relation, numerator, &values));
+    eval.add_to_relation(RelationEntry::base(relation, numerator, &values));
 }
 
 fn add_product_digit_relation_dynamic<E: EvalAtRow>(
     eval: &mut E,
     relation: &ScalarProductDigitRelation,
-    numerator: E::EF,
+    numerator: E::F,
     mul_id: E::F,
     side: E::F,
     digit: E::F,
     value: E::F,
 ) {
     let values = [mul_id, side, digit, value];
-    eval.add_to_relation(RelationEntry::new(relation, numerator, &values));
+    eval.add_to_relation(RelationEntry::base(relation, numerator, &values));
 }
 
 fn add_reduction_carry_relation_dynamic<E: EvalAtRow>(
     eval: &mut E,
     relation: &ScalarReductionCarryRelation,
-    numerator: E::EF,
+    numerator: E::F,
     mul_id: E::F,
     digit: E::F,
     value: E::F,
 ) {
     let values = [mul_id, digit, value];
-    eval.add_to_relation(RelationEntry::new(relation, numerator, &values));
+    eval.add_to_relation(RelationEntry::base(relation, numerator, &values));
 }
 
 fn constant<F: From<M31>>(value: u32) -> F {

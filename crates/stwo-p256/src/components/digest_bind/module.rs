@@ -24,7 +24,9 @@
 //! item 5).
 
 use air_core::relations::DigestBytesRelation;
-use air_core::{Air, AirProver, TreeLayout};
+use air_core::{
+    fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint, TreeLayout,
+};
 use serde::{Deserialize, Serialize};
 use stwo::core::air::Component;
 use stwo::core::channel::{Blake2sChannel, Channel};
@@ -85,11 +87,7 @@ impl FrameworkEval for NamespacedRangeEval {
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         let value = eval.get_preprocessed_column(self.value_id.clone());
         let multiplicity = eval.next_trace_mask();
-        eval.add_to_relation(RelationEntry::new(
-            &self.relation,
-            -E::EF::from(multiplicity),
-            &[value],
-        ));
+        eval.add_to_relation(RelationEntry::base(&self.relation, -multiplicity, &[value]));
         eval.finalize_logup_in_pairs();
         eval
     }
@@ -324,9 +322,50 @@ impl AirProver for DigestBindProver {
     }
 
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
+        let ids = preprocessed_ids();
+        self.write_selected_preprocessed(tb, &ids);
+    }
+
+    fn preprocessed_column_fingerprints(&mut self) -> Vec<PreprocessedColumnFingerprint> {
+        let columns = vec![
+            RangeCheckClaim::new(BYTE_RANGE_BITS).gen_preprocessed_column(),
+            RangeCheckClaim::new(CARRY_RANGE_BITS).gen_preprocessed_column(),
+        ];
+        fingerprint_preprocessed_columns(
+            "stwo_p256::DigestBindProver",
+            &preprocessed_ids(),
+            &columns,
+        )
+    }
+
+    fn write_selected_preprocessed(
+        &mut self,
+        tb: &mut TreeBuilder<SimdBackend, air_core::Mc>,
+        selected_ids: &[PreProcessedColumnId],
+    ) {
         let byte_table = RangeCheckClaim::new(BYTE_RANGE_BITS).gen_preprocessed_column();
         let carry_table = RangeCheckClaim::new(CARRY_RANGE_BITS).gen_preprocessed_column();
-        tb.extend_evals(vec![byte_table, carry_table]);
+        let ids = preprocessed_ids();
+        let columns = vec![byte_table, carry_table];
+        if selected_ids == ids.as_slice() {
+            tb.extend_evals(columns);
+            return;
+        }
+        let selected = selected_ids
+            .iter()
+            .map(|selected_id| {
+                ids.iter()
+                    .zip(&columns)
+                    .find_map(|(id, column)| (id == selected_id).then(|| column.clone()))
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "selected preprocessed column {} is not owned by this digest bridge",
+                            selected_id.id
+                        )
+                    })
+            })
+            .collect();
+        tb.extend_evals(selected);
     }
 
     fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {

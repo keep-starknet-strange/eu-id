@@ -1,7 +1,7 @@
 ---
 wo: WO-1.8
 blocking: false
-status: open
+status: answered
 ---
 ## Question
 Should WO-1.8 keep `lto = "fat"` and `codegen-units = 1` in `[profile.bench]` only, rather than `[profile.release]`, because release LTO breaks the P-256 monolithic proof gate?

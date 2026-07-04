@@ -1,4 +1,5 @@
 WO: WO-1.2 cross-module fan-out
+Status: answered
 
 ## Blocker
 

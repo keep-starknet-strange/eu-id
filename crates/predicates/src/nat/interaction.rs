@@ -33,9 +33,7 @@ fn append_entry(
 
 fn write_paired_entries(logup: &mut LogupTraceGenerator, entries: &[LogupEntry]) {
     for chunk in entries.chunks(2) {
-        let n_packed = chunk[0].0.len();
-        let mut col_gen = logup.new_col();
-        for packed_row in 0..n_packed {
+        logup.col_from_fn(|packed_row| {
             let mut numerator = chunk[0].0[packed_row];
             let mut denominator = chunk[0].1[packed_row];
             if let Some((next_numerators, next_denominators)) = chunk.get(1) {
@@ -44,9 +42,8 @@ fn write_paired_entries(logup: &mut LogupTraceGenerator, entries: &[LogupEntry])
                 numerator = numerator * d + n * denominator;
                 denominator *= d;
             }
-            col_gen.write_frac(packed_row, numerator, denominator);
-        }
-        col_gen.finalize_col();
+            (numerator, denominator)
+        });
     }
 }
 
@@ -104,17 +101,14 @@ impl InteractionTraces {
         let (nat_interaction, nat_claimed_sum) = logup_gen.finalize_last();
 
         let mut logup_gen = LogupTraceGenerator::new(acceptable_nat_log_size);
-        let mut col_gen = logup_gen.new_col();
-        for vec_row in 0..(1 << (acceptable_nat_log_size - LOG_N_LANES)) {
+        logup_gen.col_from_fn(|vec_row| {
             let nat_val: PackedM31 = preprocessed.acceptable[0].values.data[vec_row];
             let mult_val: PackedM31 = witness_data.table_mult_trace[0].values.data[vec_row];
-            col_gen.write_frac(
-                vec_row,
+            (
                 PackedQM31::from(-mult_val),
                 lookup_elements.nat_table.combine(&[nat_val]),
-            );
-        }
-        col_gen.finalize_col();
+            )
+        });
         let (table_interaction, table_claimed_sum) = logup_gen.finalize_last();
 
         Self {
