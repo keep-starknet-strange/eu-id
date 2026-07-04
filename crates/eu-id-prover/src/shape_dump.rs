@@ -78,7 +78,9 @@ fn shape_dump() {
         nonce_statement.ecdsa_input(),
     ])
     .expect("nonce draft");
-    let mut nonce_p256 = P256Prover::new(&nonce_draft).expect("nonce p256 prover");
+    let mut nonce_p256 = P256Prover::new(&nonce_draft)
+        .expect("nonce p256 prover")
+        .with_preprocessed_namespace(crate::NONCE_P256_PREPROCESSED_NAMESPACE);
     let mut sha = Sha256Prover::new(&pw.sha_witness, pw.sha_log_n_rows, pw.sha_group_width)
         .with_digest_handle(digest_handle.clone())
         .with_field_handle(credential_exposure(), field_handle.clone());
