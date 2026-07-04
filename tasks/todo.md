@@ -1,3 +1,53 @@
+# WO-M1 Coprocessor Mainline Merge
+
+Source of truth: `/Users/lucas/eu-id/tasks/parity/s4/WO-M1-coprocessor-mainline-merge.md`.
+Worktree: `/Users/lucas/eu-id/.claude/worktrees/wo-m1-coprocessor-merge` on `codex/wo-m1-coprocessor-merge`.
+Base: `feat/proof-reductions@7af53303`.
+Scope guard: implement feature-on coprocessor pipeline integration with default OFF. Do not flip `ec-coprocessor` into default features or retire `stwo-p256` until the Phase 3 architect ack exists.
+
+## Preconditions / Drift
+
+- [x] Read WO-M1, BL6, Q-017, Q-027, G3, current `eu-id-prover`, mdoc `PublicDigestBind`, and lessons.
+- [x] Check main checkout status. Main is not quiet only because ignored task ledger rows are modified in `tasks/parity/STATUS.md`; the original "84-file mdoc track" blocker is stale.
+- [x] Confirm Phase 1 crate landing is already in history: `40b57444 merge: eu-id-ec-coprocessor v1 (feature-gated, default off)`.
+- [x] Confirm `s4-lite` worktree is clean at `66b16c03`.
+- [x] Run precondition gate: `rtk proxy cargo test -p eu-id-ec-coprocessor`.
+- [x] Run feature-off baseline gate after local changes: default proof path remains green and byte shape/default module order unchanged.
+
+## Implementation Plan
+
+- [x] Phase 2.1: promote mdoc's `PublicDigestBind` to a shared `crates/eu-id-prover/src/public_digest_bind.rs` module; do not fork/copy the component.
+- [x] Phase 2.2: add seed-fork/rejoin transcript binding: absorb Q-017 statement into `air_core::Ch`, draw 32-byte seed, run coprocessor from `CoprocessorChannel::from_seed`, then rejoin with a hash of the serialized bundle.
+- [x] Phase 2.3: delete `CoprocessorChannel::default()`/`Default` so unseeded coprocessor transcripts are unrepresentable.
+- [x] Phase 2.4: under `ec-coprocessor`, change `prove_with_column_breakdown` to remove the credential P256 AIR module and replace the digest bridge with public-z digest bind. Keep the nonce P256 AIR module because WO-M1 Phase 4 explicitly says nonce retirement is a separate architect question.
+- [x] Phase 2.5: update `Proof`/verifier reconstruction so feature-on proofs carry the public credential instance plus coprocessor bundle and rebuild SHA/public-digest-bind/predicates/nonce only.
+- [x] Phase 2.6: fix feature-on tests for the current nonce-aware API and add negatives for missing/tampered/swapped coprocessor payload and public-z mismatch.
+- [x] Phase 2.6: add/extend transcript-order tests for post-statement, post-seed, and post-rejoin digests; add negative tests for bundle-byte tamper and wrong statement/seed order.
+- [x] Phase 2.7: run feature-on verification gates: `rtk proxy cargo test -p eu-id-prover --features ec-coprocessor` and focused ignored e2e if needed.
+- [ ] Phase 3 prep: append task/perf/status rows and mailbox the remaining campaign results only if the implemented feature-on path is green. Do not self-certify default flip.
+- [x] Wait for `/Users/lucas/eu-id/tasks/parity/mailbox/answers/Q-M1-001.md` before removing the credential P256 AIR module.
+
+## Review
+
+- Current feature-on code is not Phase 2-complete: it proves the full P256 AIR path, then appends a coprocessor bundle after the STARK. Verifier checks both, so no P256 work is removed.
+- Q-017 selects public statement binding for v1. Therefore the smallest Phase 2 bridge is a `PublicDigestBind` requiring SHA's digest bytes against the public credential `z`; no cross-field MAC or MLE argument is in scope.
+- The existing mdoc `PublicDigestBind` is private inside `mdoc.rs`. Q-M1-001 rejects a forked copy; promote/import the component so mdoc and WO-M1 use one implementation.
+- Nonce still uses `stwo-p256` in the monolithic proof today. Per WO-M1 Phase 4, deleting that AIR path is a STOP/architect question, so this implementation keeps `nonce_p256` in both feature modes.
+- Precondition gate `rtk proxy cargo test -p eu-id-ec-coprocessor` passed: 84 executed tests passed, 12 ignored full-bundle tests remained ignored.
+- Red baseline `rtk proxy cargo test -p eu-id-prover --features ec-coprocessor` fails to compile because feature-gated tests still call pre-nonce APIs.
+- Filed `/Users/lucas/eu-id/tasks/parity/mailbox/questions/Q-M1-001-coprocessor-transcript-hook.md` because removing the credential P256 AIR while leaving `eu-id-ec-coprocessor` on its independent `CoprocessorChannel` would violate Q-017/BL6 shared-transcript order.
+- Q-M1-001 answered: refactor first; no intermediate unbound feature path. Approved bridge is seed-fork + rejoin from `air_core::Ch`; delete unbound `CoprocessorChannel::default`; keep nonce P256 AIR; fix stale feature-on tests in this series.
+- Coprocessor channel/API phase landed locally: `CoprocessorChannel::from_seed(seed, b"eu-id-ec-coproc-v1")` is now the only proof transcript constructor, standalone callers pass fixed test/bench seeds, and `rtk proxy cargo test -p eu-id-ec-coprocessor` passed with 84 executed tests and 12 ignored full-bundle tests.
+- Promoted mdoc's `PublicDigestBind` into `crates/eu-id-prover/src/public_digest_bind.rs` and imported it from `mdoc.rs`; `rtk proxy cargo check -p eu-id-prover` passed on the default feature set.
+- Feature-on identity proof now uses module order `nonce_p256, sha, public_digest_bind, age, nat, coprocessor`; the credential P256 AIR and scalar-z digest bridge are not in the `ec-coprocessor` module list. The coprocessor post-interaction hook absorbs the Q-017 statement/shape into `air_core::Ch`, draws the 32-byte seed, proves/verifies the bundle from that seed, then rejoins by mixing `Blake2s256(bincode(bundle))`.
+- Feature-on `Proof` carries `credential_instances`, `public_digest_bind_interaction_claim`, and the coprocessor bundle instead of credential P256 claims. Nonce P256 claims remain unchanged.
+- Added feature tests for nonce-aware APIs, missing bundle rejection, one-byte serialized bundle tamper rejection, fork/join prover-vs-verifier snapshots, and wrong seed-order rejection. For the seed checkpoint, the test records the drawn 32-byte seed because Stwo's `draw_u32s()` advances the draw counter without changing the channel digest.
+- Verification passed: `rtk proxy cargo fmt --check`; `rtk proxy rg -n "impl Default for CoprocessorChannel|CoprocessorChannel::default" crates` returned no matches; `rtk proxy cargo test -p eu-id-ec-coprocessor` passed with 84 executed tests and 12 ignored full-bundle tests; `rtk proxy cargo test -p eu-id-prover` passed; `rtk proxy cargo test -p eu-id-prover --features ec-coprocessor` passed; focused ignored `feature_gated_coprocessor_fork_join_digests_match_prover_and_verifier -- --ignored` passed.
+- Review follow-up fixed: CI now runs `make test-ec-coprocessor` on push/PR and `make test-ec-coprocessor-ignored` on the scheduled proof job, so default-off coprocessor hooks and ignored fork/join guards are compiled and executed mechanically. The Makefile owns both targets.
+- Added two rejoin placement guards: `feature_gated_coprocessor_rejoin_changes_next_stark_challenge` and `feature_gated_coprocessor_rejoin_digest_changes_on_bundle_byte_tamper`.
+- Mutation drill performed: temporarily made `mix_coprocessor_rejoin` a no-op, then `rtk proxy cargo test -p eu-id-prover --features ec-coprocessor feature_gated_coprocessor_rejoin_ -- --ignored` failed both rejoin guards. Restored the real rejoin and reran the same command successfully.
+- Additional review follow-up verification passed: `rtk proxy cargo fmt --check`; `rtk proxy make test-ec-coprocessor`; `rtk proxy make test-ec-coprocessor-ignored`. `rtk proxy git diff --name-only | rg "^crates/stwo-p256"` returned no matches.
+
 # Merge & Cleanup Plan
 
 Source of truth: `tasks/merge-plan.md`.

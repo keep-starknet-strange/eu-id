@@ -10,7 +10,7 @@ use crate::sumcheck::{
     circuit_otp_pad_values, proof_otp_pad_values, prove_circuit, prove_evaluated_circuit,
     verify_circuit, CircuitSumcheckProof, InputClaims, SumcheckError,
 };
-use crate::{Circuit, CircuitError, CoprocessorChannel, Fp, Layer, Mle, QuadTerm};
+use crate::{Circuit, CircuitError, CoprocessorChannel, Fp, Layer, Mle, QuadTerm, TranscriptSeed};
 use p256::elliptic_curve::ff::PrimeField;
 use p256::elliptic_curve::group::Group;
 use p256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
@@ -101,6 +101,13 @@ const C14_R_PRIME_INDEX: u32 = 3;
 const C14_SIGNATURE_R_INDEX: u32 = 4;
 const C15_FLAGS_START_INDEX: u32 = 5;
 const IMPLEMENTED_BUNDLE_LIGERO_LABEL: &[u8] = b"s4-ecdsa-implemented-bundle";
+const COPROCESSOR_TRANSCRIPT_DOMAIN: &[u8] = b"eu-id-ec-coproc-v1";
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CircuitTranscriptShape {
+    pub label: &'static [u8],
+    pub layers: Vec<(usize, usize)>,
+}
 
 const P256_B_BE: [u8; 32] = [
     0x5a, 0xc6, 0x35, 0xd8, 0xaa, 0x3a, 0x93, 0xe7, 0xb3, 0xeb, 0xbd, 0x55, 0x76, 0x98, 0x86, 0xbc,
@@ -396,6 +403,7 @@ pub fn prove_implemented_circuit_proofs(
     input: &EcdsaInput,
     witness: &Witness,
     commitment_root: [u8; 32],
+    transcript_seed: TranscriptSeed,
 ) -> Result<ImplementedCircuitProofs, ImplementedCircuitProofError> {
     verify_witness(input, witness).map_err(ImplementedCircuitProofError::Witness)?;
     let mut proofs = Vec::new();
@@ -406,7 +414,8 @@ pub fn prove_implemented_circuit_proofs(
             .circuit
             .evaluate_input(instance.input)
             .map_err(ImplementedCircuitProofError::Circuit)?;
-        let mut channel = CoprocessorChannel::default();
+        let mut channel =
+            CoprocessorChannel::from_seed(transcript_seed, COPROCESSOR_TRANSCRIPT_DOMAIN);
         channel.mix_bytes(instance.label);
         proofs.push(
             prove_circuit(&instance.circuit, &layers, commitment_root, &mut channel)
@@ -419,6 +428,7 @@ pub fn prove_implemented_circuit_proofs(
 pub fn verify_implemented_circuit_proofs(
     proofs: &ImplementedCircuitProofs,
     commitment_root: [u8; 32],
+    transcript_seed: TranscriptSeed,
 ) -> Result<Vec<InputClaims>, ImplementedCircuitProofError> {
     let circuits =
         implemented_circuit_verifier_instances().map_err(ImplementedCircuitProofError::Circuit)?;
@@ -433,7 +443,8 @@ pub fn verify_implemented_circuit_proofs(
         .into_iter()
         .zip(&proofs.proofs)
         .map(|(instance, proof)| {
-            let mut channel = CoprocessorChannel::default();
+            let mut channel =
+                CoprocessorChannel::from_seed(transcript_seed, COPROCESSOR_TRANSCRIPT_DOMAIN);
             channel.mix_bytes(instance.label);
             verify_circuit(&instance.circuit, proof, commitment_root, &mut channel)
                 .map_err(ImplementedCircuitProofError::Sumcheck)
@@ -444,13 +455,16 @@ pub fn verify_implemented_circuit_proofs(
 pub fn prove_implemented_circuit_bundle(
     input: &EcdsaInput,
     witness: &Witness,
+    transcript_seed: TranscriptSeed,
 ) -> Result<ImplementedCircuitBundle, ImplementedCircuitProofError> {
-    prove_implemented_circuit_bundle_profiled(input, witness).map(|(bundle, _)| bundle)
+    prove_implemented_circuit_bundle_profiled(input, witness, transcript_seed)
+        .map(|(bundle, _)| bundle)
 }
 
 pub fn prove_implemented_circuit_bundle_profiled(
     input: &EcdsaInput,
     witness: &Witness,
+    transcript_seed: TranscriptSeed,
 ) -> Result<(ImplementedCircuitBundle, ImplementedCircuitProveProfile), ImplementedCircuitProofError>
 {
     let mut profile = ImplementedCircuitProveProfile::default();
@@ -459,7 +473,7 @@ pub fn prove_implemented_circuit_bundle_profiled(
     verify_witness(input, witness).map_err(ImplementedCircuitProofError::Witness)?;
     profile.witness_check = start.elapsed();
     let (bundle, inner_profile) =
-        prove_implemented_circuit_bundle_unchecked_profiled(input, witness)?;
+        prove_implemented_circuit_bundle_unchecked_profiled(input, witness, transcript_seed)?;
     profile.circuit_build = inner_profile.circuit_build;
     profile.ligero_row_encode = inner_profile.ligero_row_encode;
     profile.ligero_merkle_build = inner_profile.ligero_merkle_build;
@@ -482,6 +496,7 @@ pub fn prove_implemented_circuit_bundle_profiled(
 pub fn prove_implemented_circuit_bundle_unchecked_profiled(
     input: &EcdsaInput,
     witness: &Witness,
+    transcript_seed: TranscriptSeed,
 ) -> Result<(ImplementedCircuitBundle, ImplementedCircuitProveProfile), ImplementedCircuitProofError>
 {
     let mut profile = ImplementedCircuitProveProfile::default();
@@ -517,6 +532,7 @@ pub fn prove_implemented_circuit_bundle_unchecked_profiled(
         IMPLEMENTED_BUNDLE_LIGERO_LABEL,
         root,
         ligero_row_count(committed_values.len(), params.row_len),
+        transcript_seed,
     );
     let start = Instant::now();
     let proximity_claim = commitment
@@ -525,7 +541,12 @@ pub fn prove_implemented_circuit_bundle_unchecked_profiled(
     profile.ligero_proximity_claim = start.elapsed();
 
     let start = Instant::now();
-    let proximity_indices = ligero_proximity_indices(IMPLEMENTED_BUNDLE_LIGERO_LABEL, root, params);
+    let proximity_indices = ligero_proximity_indices(
+        IMPLEMENTED_BUNDLE_LIGERO_LABEL,
+        root,
+        params,
+        transcript_seed,
+    );
     let proximity_openings = commitment
         .open_columns(&proximity_indices)
         .map_err(ImplementedCircuitProofError::Ligero)?;
@@ -541,7 +562,8 @@ pub fn prove_implemented_circuit_bundle_unchecked_profiled(
             .circuit
             .evaluate_input(instance.input)
             .map_err(ImplementedCircuitProofError::Circuit)?;
-        let mut channel = CoprocessorChannel::default();
+        let mut channel =
+            CoprocessorChannel::from_seed(transcript_seed, COPROCESSOR_TRANSCRIPT_DOMAIN);
         channel.mix_bytes(instance.label);
         mix_ecdsa_statement(input, &mut channel).map_err(ImplementedCircuitProofError::Witness)?;
         let family_start = Instant::now();
@@ -568,13 +590,16 @@ pub fn prove_implemented_circuit_bundle_unchecked_profiled(
 pub fn verify_implemented_circuit_bundle(
     input: &EcdsaInput,
     bundle: &ImplementedCircuitBundle,
+    transcript_seed: TranscriptSeed,
 ) -> Result<Vec<InputClaims>, ImplementedCircuitProofError> {
-    verify_implemented_circuit_bundle_profiled(input, bundle).map(|(claims, _)| claims)
+    verify_implemented_circuit_bundle_profiled(input, bundle, transcript_seed)
+        .map(|(claims, _)| claims)
 }
 
 pub fn verify_implemented_circuit_bundle_profiled(
     input: &EcdsaInput,
     bundle: &ImplementedCircuitBundle,
+    transcript_seed: TranscriptSeed,
 ) -> Result<(Vec<InputClaims>, ImplementedCircuitVerifyProfile), ImplementedCircuitProofError> {
     let mut profile = ImplementedCircuitVerifyProfile::default();
     let setup_start = Instant::now();
@@ -603,12 +628,14 @@ pub fn verify_implemented_circuit_bundle_profiled(
         IMPLEMENTED_BUNDLE_LIGERO_LABEL,
         bundle.root,
         ligero_row_count(committed_len, bundle.params.row_len),
+        transcript_seed,
     );
     verify_ligero_proximity_indices(
         IMPLEMENTED_BUNDLE_LIGERO_LABEL,
         bundle.root,
         bundle.params,
         &bundle.proximity_openings,
+        transcript_seed,
     )?;
     let proximity_match = verify_openings(
         bundle.root,
@@ -661,7 +688,8 @@ pub fn verify_implemented_circuit_bundle_profiled(
         .enumerate()
     {
         debug_assert_eq!(instance.label, expected.label);
-        let mut channel = CoprocessorChannel::default();
+        let mut channel =
+            CoprocessorChannel::from_seed(transcript_seed, COPROCESSOR_TRANSCRIPT_DOMAIN);
         channel.mix_bytes(instance.label);
         mix_ecdsa_statement(input, &mut channel).map_err(ImplementedCircuitProofError::Witness)?;
         let start = Instant::now();
@@ -1059,16 +1087,26 @@ fn ligero_row_count(values: usize, row_len: usize) -> usize {
     values.div_ceil(row_len)
 }
 
-fn ligero_proximity_gamma(label: &[u8], root: [u8; 32], rows: usize) -> Vec<Fp> {
-    let mut channel = CoprocessorChannel::default();
+fn ligero_proximity_gamma(
+    label: &[u8],
+    root: [u8; 32],
+    rows: usize,
+    transcript_seed: TranscriptSeed,
+) -> Vec<Fp> {
+    let mut channel = CoprocessorChannel::from_seed(transcript_seed, COPROCESSOR_TRANSCRIPT_DOMAIN);
     channel.mix_bytes(label);
     channel.mix_bytes(&root);
     channel.mix_bytes(b"s4-ligero-proximity-gamma");
     (0..rows).map(|_| channel.draw_fp()).collect()
 }
 
-fn ligero_proximity_indices(label: &[u8], root: [u8; 32], params: LigeroParams) -> Vec<usize> {
-    let mut channel = CoprocessorChannel::default();
+fn ligero_proximity_indices(
+    label: &[u8],
+    root: [u8; 32],
+    params: LigeroParams,
+    transcript_seed: TranscriptSeed,
+) -> Vec<usize> {
+    let mut channel = CoprocessorChannel::from_seed(transcript_seed, COPROCESSOR_TRANSCRIPT_DOMAIN);
     channel.mix_bytes(label);
     channel.mix_bytes(&root);
     channel.mix_bytes(b"s4-ligero-proximity-indices");
@@ -1090,8 +1128,9 @@ fn verify_ligero_proximity_indices(
     root: [u8; 32],
     params: LigeroParams,
     openings: &[ColumnOpening],
+    transcript_seed: TranscriptSeed,
 ) -> Result<(), ImplementedCircuitProofError> {
-    let expected = ligero_proximity_indices(label, root, params);
+    let expected = ligero_proximity_indices(label, root, params, transcript_seed);
     let actual = openings
         .iter()
         .map(|opening| opening.index)
@@ -1123,6 +1162,22 @@ pub fn implemented_circuit_family_labels() -> Result<Vec<&'static [u8]>, Circuit
     Ok(implemented_circuit_verifier_instances()?
         .into_iter()
         .map(|instance| instance.label)
+        .collect())
+}
+
+pub fn implemented_circuit_transcript_shapes() -> Result<Vec<CircuitTranscriptShape>, CircuitError>
+{
+    Ok(implemented_circuit_verifier_instances()?
+        .into_iter()
+        .map(|instance| CircuitTranscriptShape {
+            label: instance.label,
+            layers: instance
+                .circuit
+                .layers()
+                .iter()
+                .map(|layer| (layer.out_log_size(), layer.next_log_size()))
+                .collect(),
+        })
         .collect())
 }
 
@@ -2258,27 +2313,37 @@ fn mix_ecdsa_statement(
     input: &EcdsaInput,
     channel: &mut CoprocessorChannel,
 ) -> Result<(), WitnessError> {
-    channel.mix_bytes(b"s4-ecdsa-public-statement-v1");
-    for bytes in [input.z, input.r, input.s, input.qx, input.qy] {
-        channel.mix_bytes(&bytes);
+    for segment in ecdsa_statement_transcript_segments(input)? {
+        channel.mix_bytes(&segment);
     }
-
-    mix_blind_statement_point(channel, 0, ProjectivePoint::GENERATOR)?;
-    let public_key = parse_public_key(input.qx, input.qy)?;
-    mix_blind_statement_point(channel, 0, ProjectivePoint::from(public_key))?;
     Ok(())
 }
 
-fn mix_blind_statement_point(
-    channel: &mut CoprocessorChannel,
+pub fn ecdsa_statement_transcript_segments(
+    input: &EcdsaInput,
+) -> Result<Vec<Vec<u8>>, WitnessError> {
+    let mut segments = Vec::with_capacity(15);
+    segments.push(b"s4-ecdsa-public-statement-v1".to_vec());
+    for bytes in [input.z, input.r, input.s, input.qx, input.qy] {
+        segments.push(bytes.to_vec());
+    }
+
+    push_blind_statement_point_segments(&mut segments, 0, ProjectivePoint::GENERATOR)?;
+    let public_key = parse_public_key(input.qx, input.qy)?;
+    push_blind_statement_point_segments(&mut segments, 0, ProjectivePoint::from(public_key))?;
+    Ok(segments)
+}
+
+fn push_blind_statement_point_segments(
+    segments: &mut Vec<Vec<u8>>,
     blind_index: u64,
     base: ProjectivePoint,
 ) -> Result<(), WitnessError> {
-    channel.mix_bytes(&blind_index.to_be_bytes());
+    segments.push(blind_index.to_be_bytes().to_vec());
     let (bx, by) = projective_point_coords(base)?;
     let (dx, dy) = projective_point_coords(double_256(base))?;
     for value in [bx, by, dx, dy] {
-        channel.mix_fp(value);
+        segments.push(value.to_bytes_be().to_vec());
     }
     Ok(())
 }

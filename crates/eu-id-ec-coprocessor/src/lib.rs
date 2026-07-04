@@ -12,7 +12,7 @@ pub mod mle;
 pub mod rs;
 pub mod sumcheck;
 
-pub use channel::CoprocessorChannel;
+pub use channel::{CoprocessorChannel, TranscriptSeed};
 pub use circuit::{Circuit, CircuitError, Layer, QuadTerm};
 pub use field::Fp;
 pub use mle::{eq_eval, Mle, MleError};

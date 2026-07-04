@@ -2,22 +2,24 @@ use blake2::{Blake2s256, Digest};
 
 use crate::Fp;
 
+pub type TranscriptSeed = [u8; 32];
+
 #[derive(Clone, Debug)]
 pub struct CoprocessorChannel {
     state: Blake2s256,
     counter: u64,
 }
 
-impl Default for CoprocessorChannel {
-    fn default() -> Self {
-        Self {
-            state: Blake2s256::new(),
-            counter: 0,
-        }
-    }
-}
-
 impl CoprocessorChannel {
+    pub fn from_seed(seed: TranscriptSeed, domain: &[u8]) -> Self {
+        let mut state = Blake2s256::new();
+        state.update((seed.len() as u64).to_be_bytes());
+        state.update(seed);
+        state.update((domain.len() as u64).to_be_bytes());
+        state.update(domain);
+        Self { state, counter: 0 }
+    }
+
     pub fn mix_bytes(&mut self, bytes: &[u8]) {
         self.state.update((bytes.len() as u64).to_be_bytes());
         self.state.update(bytes);
