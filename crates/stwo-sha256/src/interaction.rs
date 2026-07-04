@@ -67,6 +67,8 @@ use crate::types::Sha256Witness;
 /// Lookup sites the main `Sha256Eval` fires per **row**, **excluding** the
 /// optional digest yield. Breakdown (W=6), matching the firing order in
 /// [`write_round_row_lookups`] and `crate::constraints::Sha256Eval::evaluate`:
+///
+/// ```text
 ///   8 (h_in aux split-pack, t = 0 rows)
 /// + 18 (schedule family: 2 σ-decode wirings = 12, 2 σ-input splits = 4,
 ///       Range_4 carry pair = 2; t ≥ 16 rows)
@@ -76,8 +78,10 @@ use crate::types::Sha256Witness;
 ///       committed cells — plus 4 carry pairs = 8; every row)
 /// + 16 (finalization carries, t = 63 rows)
 /// + 16 (terminal `Range_16`, t = 63 rows)
-/// = 106. A site that does not fire on a given row holds the neutral
-/// fraction `(0, 1)`.
+/// = 106
+/// ```
+///
+/// A site that does not fire on a given row holds the neutral fraction `(0, 1)`.
 pub const SHA_LOOKUPS_PER_ROW_BASE: usize = 106;
 
 /// Total lookup sites `Sha256Eval` fires per row. The digest provider adds

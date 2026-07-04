@@ -14,7 +14,9 @@
 //! component's sum individually. Both `air_core::prove` and `air_core::verify`
 //! mix identically, so the round trip is self-consistent.
 
-use air_core::{Air, AirProver, TreeLayout};
+use air_core::{
+    fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint, TreeLayout,
+};
 #[cfg(feature = "gkr-spike")]
 use num_traits::Zero;
 #[cfg(feature = "gkr-spike")]
@@ -505,6 +507,24 @@ impl AirProver for Sha256Prover<'_> {
             preprocessed_evals
         });
         tb.extend_evals(preprocessed);
+    }
+
+    fn preprocessed_column_fingerprints(&mut self) -> Vec<PreprocessedColumnFingerprint> {
+        // Fingerprint exactly what `write_preprocessed` will commit: the caller-provided
+        // evals when set, otherwise the (cached) generated trace. Do not `take` — the
+        // evals must still be available for the later `write_preprocessed` call.
+        let ids = all_preprocessed_column_ids();
+        match &self.preprocessed {
+            Some(evals) => {
+                fingerprint_preprocessed_columns("stwo_sha256::Sha256Prover", &ids, evals)
+            }
+            None => {
+                let (evals, gen_ids, _log_sizes) =
+                    generate_preprocessed_trace(self.group_width, self.log_n_rows);
+                debug_assert_eq!(ids, gen_ids);
+                fingerprint_preprocessed_columns("stwo_sha256::Sha256Prover", &ids, &evals)
+            }
+        }
     }
 
     fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>) {
