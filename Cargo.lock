@@ -1994,6 +1994,7 @@ name = "stwo-sha256"
 version = "0.1.0"
 dependencies = [
  "air-core",
+ "bincode",
  "hex",
  "num-traits",
  "rayon",

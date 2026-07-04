@@ -1290,6 +1290,61 @@ pub struct MdocCircuitProof {
     nat_claimed_sums: Vec<QM31>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MdocProofByteBreakdown {
+    pub proof_bytes: usize,
+    pub stark_proof_bytes: usize,
+    pub coprocessor_bundle_bytes: Option<usize>,
+    pub non_stark_metadata_bytes: usize,
+    pub stark: MdocStarkProofByteBreakdown,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MdocStarkProofByteBreakdown {
+    pub config: usize,
+    pub commitments: usize,
+    pub sampled_values: usize,
+    pub decommitments: usize,
+    pub queried_values: usize,
+    pub proof_of_work: usize,
+    pub fri_proof: usize,
+}
+
+pub fn mdoc_proof_byte_breakdown(proof: &MdocCircuitProof) -> MdocProofByteBreakdown {
+    let stark = &proof.stark_proof.0;
+    let proof_bytes = bincode_len(proof);
+    let stark_proof_bytes = bincode_len(&proof.stark_proof);
+    #[cfg(feature = "ec-coprocessor")]
+    let coprocessor_bundle_bytes = proof.coprocessor_bundle.as_ref().map(bincode_len);
+    #[cfg(not(feature = "ec-coprocessor"))]
+    let coprocessor_bundle_bytes = None;
+    let non_stark_metadata_bytes = proof_bytes
+        .saturating_sub(stark_proof_bytes)
+        .saturating_sub(coprocessor_bundle_bytes.unwrap_or(0));
+
+    MdocProofByteBreakdown {
+        proof_bytes,
+        stark_proof_bytes,
+        coprocessor_bundle_bytes,
+        non_stark_metadata_bytes,
+        stark: MdocStarkProofByteBreakdown {
+            config: bincode_len(&stark.config),
+            commitments: bincode_len(&stark.commitments),
+            sampled_values: bincode_len(&stark.sampled_values),
+            decommitments: bincode_len(&stark.decommitments),
+            queried_values: bincode_len(&stark.queried_values),
+            proof_of_work: bincode_len(&stark.proof_of_work),
+            fri_proof: bincode_len(&stark.fri_proof),
+        },
+    }
+}
+
+fn bincode_len<T: Serialize>(value: &T) -> usize {
+    bincode::serialize(value)
+        .expect("mdoc proof byte breakdown value serializes")
+        .len()
+}
+
 fn sha_params(bytes: &[u8]) -> (stwo_sha256::types::Sha256Witness, u32) {
     let witness = compute_sha256_witness(bytes);
     let log_n_rows = min_log_size(witness.blocks.len());
@@ -2020,7 +2075,15 @@ pub fn verify_mdoc_circuit(
         &mut nat,
         &mut coprocessor,
     ];
-    air_core::verify(&mut modules, &proof.stark_proof).map_err(|e| Error::Verify(format!("{e:?}")))
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        air_core::verify(&mut modules, &proof.stark_proof)
+    })) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(Error::Verify(format!("{error:?}"))),
+        Err(_) => Err(Error::Verify(
+            "malformed mdoc proof panicked during verification".to_string(),
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -2056,6 +2119,92 @@ mod mdoc_sha_table_tests {
             verify_mdoc_circuit(&proof, &fixture.statement).is_err(),
             "tampered shared SHA table provider claim unexpectedly verified",
         );
+    }
+
+    #[test]
+    #[ignore = "slow: proves isolated mdoc circuit profile"]
+    fn shared_sha_table_mdoc_digest_and_field_swaps_reject() {
+        let fixture = demo_mdoc_circuit_fixture();
+        let proof =
+            prove_mdoc_circuit(&fixture.extracted, &fixture.statement).expect("mdoc proves");
+        verify_mdoc_circuit(&proof, &fixture.statement).expect("mdoc verifies before tamper");
+
+        let mut digest_swap = fixture.statement.clone();
+        std::mem::swap(
+            &mut digest_swap.birth_date_digest,
+            &mut digest_swap.nationality_digest,
+        );
+        assert!(
+            verify_mdoc_circuit(&proof, &digest_swap).is_err(),
+            "birth/nationality digest swap unexpectedly verified",
+        );
+
+        if fixture.statement.birth_date_value_offset != fixture.statement.nationality_value_offset {
+            let mut field_exposure_swap = fixture.statement.clone();
+            std::mem::swap(
+                &mut field_exposure_swap.birth_date_value_offset,
+                &mut field_exposure_swap.nationality_value_offset,
+            );
+            assert!(
+                verify_mdoc_circuit(&proof, &field_exposure_swap).is_err(),
+                "birth/nationality field exposure swap unexpectedly verified",
+            );
+        } else {
+            let mut birth_offset_tamper = fixture.statement.clone();
+            birth_offset_tamper.birth_date_value_offset += 1;
+            assert!(
+                verify_mdoc_circuit(&proof, &birth_offset_tamper).is_err(),
+                "birth-date field exposure offset tamper unexpectedly verified",
+            );
+
+            let mut nat_offset_tamper = fixture.statement.clone();
+            nat_offset_tamper.nationality_value_offset += 1;
+            assert!(
+                verify_mdoc_circuit(&proof, &nat_offset_tamper).is_err(),
+                "nationality field exposure offset tamper unexpectedly verified",
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "slow: proves isolated mdoc circuit profile"]
+    fn malformed_shared_sha_table_provider_claim_rejects_without_panic() {
+        let fixture = demo_mdoc_circuit_fixture();
+        let mut proof =
+            prove_mdoc_circuit(&fixture.extracted, &fixture.statement).expect("mdoc proves");
+        verify_mdoc_circuit(&proof, &fixture.statement).expect("mdoc verifies before tamper");
+
+        proof.sha_tables_interaction_claim.round_split_pack.clear();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            verify_mdoc_circuit(&proof, &fixture.statement)
+        }));
+        assert!(
+            matches!(result, Ok(Err(Error::Verify(_)))),
+            "malformed shared SHA table claim should reject gracefully, got {result:?}",
+        );
+    }
+
+    #[test]
+    fn mdoc_sha_witnesses_match_native_digest_for_all_four_messages() {
+        let fixture = demo_mdoc_circuit_fixture();
+        let extracted = &fixture.extracted;
+        let cases = [
+            ("issuer", extracted.issuer_sig_structure.as_slice()),
+            ("device", extracted.device_sig_structure.as_slice()),
+            ("birth_date", extracted.birth_date_item.as_slice()),
+            ("nationality", extracted.nationality_item.as_slice()),
+        ];
+
+        for (name, message) in cases {
+            let (witness, _log_n_rows) = sha_params(message);
+            let native: [u8; 32] = Sha256::digest(message).into();
+            assert_eq!(witness.digest.0, native, "{name} digest");
+            assert_eq!(
+                witness.digest_from_blocks().0,
+                native,
+                "{name} digest from block chain",
+            );
+        }
     }
 }
 

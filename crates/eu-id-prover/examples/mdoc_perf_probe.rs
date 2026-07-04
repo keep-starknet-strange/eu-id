@@ -8,7 +8,8 @@ use std::hint::black_box;
 use std::time::{Duration, Instant};
 
 use eu_id_prover::mdoc::{
-    demo_mdoc_circuit_fixture, demo_mdoc_module_shapes, prove_mdoc_circuit, verify_mdoc_circuit,
+    demo_mdoc_circuit_fixture, demo_mdoc_module_shapes, mdoc_proof_byte_breakdown,
+    prove_mdoc_circuit, verify_mdoc_circuit, MdocProofByteBreakdown,
 };
 use serde::Serialize;
 use stwo::core::pcs::PcsConfig;
@@ -24,6 +25,7 @@ struct Report {
     pcs_config: PcsConfig,
     shape_cells: u64,
     modules: Vec<ModuleShape>,
+    byte_breakdown: MdocProofByteBreakdown,
 }
 
 #[derive(Serialize)]
@@ -87,6 +89,7 @@ fn main() {
         pcs_config: proof.stark_proof.config,
         shape_cells,
         modules,
+        byte_breakdown: mdoc_proof_byte_breakdown(&proof),
     };
     println!("{}", serde_json::to_string_pretty(&report).unwrap());
 }

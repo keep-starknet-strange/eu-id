@@ -192,7 +192,13 @@ Branch: `codex/wo-m5-sha-table-provider-dedup`.
 
 Implementation: `stwo-sha256` now has a generic shared SHA table provider module for the surviving A3 fixed tables: round split-pack, sigma split-pack, and range tables. Standalone SHA keeps the old constructor/path; mdoc opts into `with_shared_tables` and adds `mdoc_sha_tables` as the first module. The shared relations contain no message identity; digest, field-exposure, and main SHA traces remain per-message.
 
-Measured mdoc A/B against `801ea3a5` with `RAYON_NUM_THREADS=1 BENCH_ITERS=3 cargo run -p eu-id-prover --release --features ec-coprocessor --example mdoc_perf_probe`: prove `2133 ms -> 996 ms`, verify `45 ms -> 45 ms`, proof bytes `1,809,542 -> 1,759,326`, cells `21,824,128 -> 6,487,840`. Shape gate is inside the WO band; prove is inside the 0.7-1.0s band at the upper edge. Full identity/SHA Criterion unchanged gates were not rerun; the implementation is opt-in and no identity assembly or standalone SHA constructor path was edited.
+Review follow-up: Q-M1-009's CONCERNS list is closed in this worktree. The first WO-M5 implementation was committed as `34512349` before the fixes. The follow-up adds verifier panic containment for malformed shared-provider claims, explicit mdoc digest/field-exposure negatives, a shared-provider claimed-sum tamper negative, a standalone SHA proof-byte pin, and a proof-size breakdown emitted by `mdoc_perf_probe`.
+
+Lock-backed mdoc A/B against `801ea3a5` with `RAYON_NUM_THREADS=1 BENCH_ITERS=5 cargo run -p eu-id-prover --release --features ec-coprocessor --example mdoc_perf_probe`: prove `2108 ms -> 994 ms`, verify `45 ms -> 45 ms`, proof bytes `1,809,542 -> 1,759,326`, cells `21,824,128 -> 6,487,840`. Shape gate is inside the WO band; prove is inside the 0.7-1.0s band at the upper edge.
+
+Candidate mdoc proof-byte breakdown: total `1,759,326`; STARK proof `971,649`; coprocessor bundle `787,032`; non-STARK metadata `645`. Inner STARK fields: config `25`, commitments `136`, sampled values `98,400`, decommitments `85,672`, queried values `719,596`, proof-of-work `8`, FRI proof `67,812`.
+
+Unchanged gates: `pipeline_e2e` under the same lock is stable at baseline `1201 ms` vs candidate `1200 ms`, proof bytes identical at `1,186,186`, verify `41 ms -> 42 ms`. Standalone SHA Criterion filters stayed within noise: `BM_ShaZK_equiv/1/prove` baseline `324.74 ms`, candidate warm rerun `330.64 ms` with "No change in performance detected"; `BM_ShaZK_equiv/33/prove` baseline `426.17 ms`, candidate `430.16 ms`.
 
 Verification passed:
 
@@ -207,8 +213,17 @@ Verification passed:
 - `rtk proxy cargo test -p eu-id-prover --test mdoc_support isolated_mdoc_circuit_profile_proves_and_verifies -- --ignored --nocapture`
 - `rtk proxy cargo test -p eu-id-prover shared_sha_table_provider_claim_is_bound --lib -- --ignored --nocapture`
 - `rtk proxy cargo test -p eu-id-prover --features ec-coprocessor shared_sha_table_provider_claim_is_bound --lib -- --ignored --nocapture`
+- `rtk proxy cargo test -p eu-id-prover shared_sha_table_mdoc_digest_and_field_swaps_reject --lib -- --ignored --nocapture`
+- `rtk proxy cargo test -p eu-id-prover malformed_shared_sha_table_provider_claim_rejects_without_panic --lib -- --ignored --nocapture`
+- `rtk proxy cargo test -p stwo-sha256 --test shared_tables_composition shared_sha_table_union_with_heterogeneous_messages_balances -- --ignored --nocapture`
+- `rtk proxy cargo test -p stwo-sha256 --test shared_tables_composition corrupt_shared_sha_table_provider_claim_rejects -- --ignored --nocapture`
+- `rtk proxy cargo test -p stwo-sha256 --test shared_tables_composition standalone_sha_proof_bytes_unchanged_by_shared_tables_feature -- --ignored --nocapture`
 - `rtk proxy cargo test -p eu-id-prover --release --features ec-coprocessor shape_dump -- --ignored --nocapture`
 - `rtk proxy env RAYON_NUM_THREADS=1 BENCH_ITERS=3 cargo run -p eu-id-prover --release --features ec-coprocessor --example mdoc_perf_probe`
+- `rtk proxy env RAYON_NUM_THREADS=1 BENCH_ITERS=5 cargo run -p eu-id-prover --release --features ec-coprocessor --example mdoc_perf_probe`
+- `rtk proxy env RAYON_NUM_THREADS=1 BENCH_ITERS=5 BENCH_STAGE=pipeline_e2e cargo run -p eu-id-prover --release --features ec-coprocessor --example bench_report`
+- `rtk proxy env RAYON_NUM_THREADS=1 cargo bench -p eu-id-prover --bench longfellow_equiv_bench BM_ShaZK_equiv/1/prove`
+- `rtk proxy env RAYON_NUM_THREADS=1 cargo bench -p eu-id-prover --bench longfellow_equiv_bench BM_ShaZK_equiv/33/prove`
 
 ## WO-A3 Hybrid SHA Snapshot
 

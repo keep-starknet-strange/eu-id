@@ -23,6 +23,7 @@ serde = { workspace = true }
 [dev-dependencies]
 sha2 = "0.10"
 hex = "0.4"
+bincode = "1"
 
 [lints]
 workspace = true
