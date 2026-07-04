@@ -13,6 +13,7 @@ use p256::ecdsa::{Signature, SigningKey};
 use sha2::{Digest as _, Sha256};
 
 const RUNS: usize = 5;
+const BENCH_SEED: [u8; 32] = [7u8; 32];
 
 fn main() {
     let input = signed_input();
@@ -133,7 +134,7 @@ fn run_once(input: &EcdsaInput) -> Sample {
     #[cfg(feature = "count-ops")]
     reset_fp_mul_count();
     let (bundle, prove_profile) =
-        prove_implemented_circuit_bundle_unchecked_profiled(input, &witness)
+        prove_implemented_circuit_bundle_unchecked_profiled(input, &witness, BENCH_SEED)
             .expect("bundle proof accepts fixture");
     let prove_duration = start.elapsed();
     #[cfg(feature = "count-ops")]
@@ -155,7 +156,8 @@ fn run_once(input: &EcdsaInput) -> Sample {
     #[cfg(feature = "count-ops")]
     reset_fp_mul_count();
     let (_, verify_profile) =
-        verify_implemented_circuit_bundle_profiled(input, &bundle).expect("bundle verifies");
+        verify_implemented_circuit_bundle_profiled(input, &bundle, BENCH_SEED)
+            .expect("bundle verifies");
     let verify_duration = start.elapsed();
     #[cfg(feature = "count-ops")]
     let verify_muls = fp_mul_count();

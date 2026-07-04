@@ -395,7 +395,7 @@ fn draw_point(channel: &mut CoprocessorChannel, len: usize) -> Vec<Fp> {
 }
 
 fn otp_pad_pair(layer_index: usize, kind: &[u8], item_index: usize) -> [Fp; 2] {
-    let mut channel = CoprocessorChannel::default();
+    let mut channel = CoprocessorChannel::from_seed([0u8; 32], b"eu-id-ec-coproc-otp-pad-pair-v1");
     channel.mix_bytes(b"eu-id-ec-coproc-otp-pad-pair-v1");
     channel.mix_bytes(&(layer_index as u64).to_be_bytes());
     channel.mix_bytes(kind);

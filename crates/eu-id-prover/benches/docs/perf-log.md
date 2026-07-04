@@ -12,6 +12,10 @@ Shape: `cargo test -p eu-id-prover --release shape_dump -- --ignored --nocapture
 | 2026-07-02 | 8cb0a461 | baseline | BM_ShaZK_equiv/33 (1-thread) | — | 383 ms |
 | 2026-07-02 | 8cb0a461 | baseline | pipeline/prove (12-core parallel) | — | 820 ms |
 | 2026-07-02 | 8cb0a461 | baseline | shape_dump total cells | — | 28,488,480 |
+| 2026-07-04 | worktree | WO-M5 shared mdoc SHA table provider (RAYON_NUM_THREADS=1, BENCH_ITERS=3) | mdoc_perf_probe prove | 2133 ms | 996 ms |
+| 2026-07-04 | worktree | WO-M5 shared mdoc SHA table provider (RAYON_NUM_THREADS=1, BENCH_ITERS=3) | mdoc_perf_probe verify | 45 ms | 45 ms |
+| 2026-07-04 | worktree | WO-M5 shared mdoc SHA table provider (RAYON_NUM_THREADS=1, BENCH_ITERS=3) | mdoc proof bytes | 1,809,542 | 1,759,326 |
+| 2026-07-04 | worktree | WO-M5 shared mdoc SHA table provider | mdoc shape cells | 21,824,128 | 6,487,840 |
 | 2026-07-02 | e72cc328 | WO-1.8 +bench LTO/CU1 | BM_ECDSAZKProver_equiv/1 (1-thread) | 2.258 s | 1.911 s |
 | 2026-07-02 | e72cc328 | WO-1.8 +bench LTO/CU1 | BM_ShaZK_equiv/1 (1-thread) | 1.393 s | 1.161 s |
 | 2026-07-02 | e72cc328 | WO-1.8 +bench LTO/CU1 | BM_ShaZK_equiv/33 (1-thread) | 1.525 s | 1.284 s |
@@ -239,3 +243,46 @@ WO-S4/Q-024 note: production SHA GKR tie-back is reverted on current Stwo becaus
 GKR-v2 diagnostic (2026-07-04): fused PackedQM31 fraction-add measures 3.8 ns/eff-mult on NEON => ~38 ns/term floor vs <=17 ns break-even. Local stwo GKR acceleration for the SHA tables is closed on mobile-class hardware by arithmetic, not by implementation. Cost of learning this: half a day (the Q-028 kill-switch), vs the +226 ms production regression it would have replayed.
 
 GKR-v2 close-out (2026-07-04): Q-030 chooses stop/no production fusion. The extra Stwo comparison measured the existing `Fraction` abstraction within 3-4% of hand-fused PackedQM31 fraction-add (`log20` median 13.018 ms existing vs 12.563 ms fused), so production fusion is review risk without a consumer. Useful deliverables are the Stwo mixed-height/global-lift correctness fix and `gkr_fraction_add` diagnostic bench; eu-id remains full LogUp with the reopener gates preserved.
+
+| 2026-07-04 | perf/a1r-typed-mults-redo worktree | WO-A1R typed SHA multiplicities | BM_ShaZK_equiv/1/prove (RAYON_NUM_THREADS=1) | 1.0296 s | 1.0194 s (-0.99%) |
+| 2026-07-04 | perf/a1r-typed-mults-redo worktree | WO-A1R typed SHA multiplicities | BM_ShaZK_equiv/1/verify (RAYON_NUM_THREADS=1) | 636.92 us | 634.46 us (-0.39%) |
+| 2026-07-04 | perf/a1r-typed-mults-redo worktree | WO-A1R typed SHA multiplicities | BM_ShaZK_equiv/33/prove (RAYON_NUM_THREADS=1) | 1.1036 s | 1.1151 s (+1.04%) |
+| 2026-07-04 | perf/a1r-typed-mults-redo worktree | WO-A1R typed SHA multiplicities | BM_ShaZK_equiv/33/verify (RAYON_NUM_THREADS=1) | 631.44 us | 633.22 us (+0.28%) |
+| 2026-07-04 | feat/a3-hybrid-sha worktree | WO-A3 hybrid SHA | shape_dump SHA cells | 13,843,104 | 5,200,544 (-8,642,560; -62.43%) |
+| 2026-07-04 | feat/a3-hybrid-sha worktree | WO-A3 hybrid SHA | shape_dump total identity cells | 37,500,240 | 28,857,680 (-8,642,560; -23.05%) |
+| 2026-07-04 | feat/a3-hybrid-sha worktree | WO-A3 hybrid SHA | BM_ShaZK_equiv/1/prove (RAYON_NUM_THREADS=1) | 1.0113 s | 327.12 ms (-67.65%; 3.09x) |
+| 2026-07-04 | feat/a3-hybrid-sha worktree | WO-A3 hybrid SHA | BM_ShaZK_equiv/1/verify (RAYON_NUM_THREADS=1) | 619.67 us | 679.37 us (+9.63% vs Phase 0 baseline; Criterion vs previous +7.57%) |
+| 2026-07-04 | feat/a3-hybrid-sha worktree | WO-A3 hybrid SHA | BM_ShaZK_equiv/33/prove (RAYON_NUM_THREADS=1) | 1.1028 s | 423.85 ms (-61.56%; 2.60x) |
+| 2026-07-04 | feat/a3-hybrid-sha worktree | WO-A3 hybrid SHA | BM_ShaZK_equiv/33/verify (RAYON_NUM_THREADS=1) | 618.97 us | 683.94 us (+10.50% vs Phase 0 baseline; Criterion vs previous +9.73%) |
+
+WO-A1R note: converted the 19 remaining SHA `RelationEntry::new` call sites to typed `RelationEntry::base`; no `unit`, `neg_unit`, or extension-field `new` sites remained in `crates/stwo-sha256`. Parent measurements used `feat/proof-reductions` at `fac1cd4c`; after measurements used the `perf/a1r-typed-mults-redo` worktree before commit. Criterion filters were run separately for block counts 1 and 33 under `RAYON_NUM_THREADS=1`.
+
+WO-A3 note: the proof path removes decode, MajCh, and xor_8 table producers/consumers while retaining split-pack, range, limb-addition, carry, digest, and field-exposure logic. Degree audit required committed duplicate `b/c/f/g` operand bit columns instead of using selector expressions inside Maj/Ch formulas; the duplicate bits are tied to shifted `a/e` bits through linear alias constraints. Schedule lower-sigma output bits are filled for every domain row so ungated sigma formulas remain degree-safe across wraparound and padding rows.
+
+| 2026-07-04 | codex/m4-a3-integration | M4 A3-on-coprocessor convergence | `identity_e2e/prove_identity` (RAYON_NUM_THREADS=1, same-worktree A/B) | 1.8708 s | 922.60 ms (-50.68%) |
+| 2026-07-04 | codex/m4-a3-integration | M4 A3-on-coprocessor convergence | `pipeline_e2e` prove (BENCH_ITERS=5, RAYON_NUM_THREADS=1) | 2536 ms | 1194 ms (-52.9%) |
+| 2026-07-04 | codex/m4-a3-integration | M4 A3-on-coprocessor convergence | `pipeline_e2e` verify | 41 ms | 41 ms |
+| 2026-07-04 | codex/m4-a3-integration | M4 A3-on-coprocessor convergence | `pipeline_e2e` proof bytes | 1,240,046 | 1,186,186 (-53,860) |
+| 2026-07-04 | codex/m4-a3-integration | M4 A3-on-coprocessor convergence | mdoc prove (BENCH_ITERS=5, RAYON_NUM_THREADS=1) | 5248 ms | 2089 ms (-60.2%) |
+| 2026-07-04 | codex/m4-a3-integration | M4 A3-on-coprocessor convergence | mdoc verify | 45 ms | 45 ms |
+| 2026-07-04 | codex/m4-a3-integration | M4 A3-on-coprocessor convergence | mdoc proof bytes | 1,834,614 | 1,809,542 (-25,072) |
+| 2026-07-04 | codex/m4-a3-integration | M4 A3-on-coprocessor convergence | mdoc committed shape cells | 56,296,064 | 21,824,128 (-34,471,936; -61.2%) |
+| 2026-07-04 | codex/m4-a3-integration | M4 A3-on-coprocessor convergence | identity SHA cells | 13,843,104 | 5,200,544 (-8,642,560; -62.4%) |
+| 2026-07-04 | codex/m4-a3-integration | M4 A3-on-coprocessor convergence | identity total cells | 37,500,240 | 28,857,680 (-8,642,560; -23.1%) |
+| 2026-07-04 | codex/m4-a3-integration | M4 A3-on-coprocessor convergence | `BM_ShaZK_equiv/1/prove` | 1.0217 s | 324.35 ms (-68.25%) |
+| 2026-07-04 | codex/m4-a3-integration | M4 A3-on-coprocessor convergence | `BM_ShaZK_equiv/1/verify` | 646.15 us | 668.77 us (+3.5%) |
+| 2026-07-04 | codex/m4-a3-integration | M4 A3-on-coprocessor convergence | `BM_ShaZK_equiv/33/prove` | 1.1069 s | 421.16 ms (-61.95%) |
+| 2026-07-04 | codex/m4-a3-integration | M4 A3-on-coprocessor convergence | `BM_ShaZK_equiv/33/verify` | 667.42 us | 676.70 us (+1.4%) |
+
+M4 A3-on-coprocessor note (2026-07-04): Q-M1-005 directed a merge of `feat/a3-hybrid-sha` onto `codex/wo-m3-mdoc-coprocessor` via child branch `codex/m4-a3-integration`, preserving A3 history. Incoming history was limited to A1R typed multiplicities plus A3 SHA changes; conflicts were mechanical perf/status/todo unions only, with no `eu-id-ec-coprocessor`, `stwo-p256`, fork/join, `public_digest_bind.rs`, or toolchain conflict. Same-worktree A/B was run under `/Users/lucas/eu-id/tasks/parity/BENCH-LOCK`; both branches used `nightly-2026-01-15`. Baseline = `codex/wo-m3-mdoc-coprocessor`; candidate = `codex/m4-a3-integration`. Candidate SHA/1 midpoint `324.35 ms` is below A3's `327 ms` reference and clears the >15% regression tripwire. Candidate mdoc prove `2089 ms` lands inside the Q-M1-005 `1.9-2.6 s` sanity band; candidate identity `922.60 ms` lands inside the `0.9-1.2 s` band.
+
+| 2026-07-04 | codex/wo-m5-sha-table-provider-dedup | WO-M5 shared SHA table provider review follow-up | mdoc prove (BENCH-LOCK, BENCH_ITERS=5, RAYON_NUM_THREADS=1) | 2108 ms | 994 ms (-52.8%) |
+| 2026-07-04 | codex/wo-m5-sha-table-provider-dedup | WO-M5 shared SHA table provider review follow-up | mdoc verify | 45 ms | 45 ms |
+| 2026-07-04 | codex/wo-m5-sha-table-provider-dedup | WO-M5 shared SHA table provider review follow-up | mdoc proof bytes | 1,809,542 | 1,759,326 (-50,216) |
+| 2026-07-04 | codex/wo-m5-sha-table-provider-dedup | WO-M5 shared SHA table provider review follow-up | mdoc committed shape cells | 21,824,128 | 6,487,840 (-15,336,288; -70.3%) |
+| 2026-07-04 | codex/wo-m5-sha-table-provider-dedup | WO-M5 unchanged identity gate | `pipeline_e2e` prove (BENCH-LOCK, BENCH_ITERS=5, RAYON_NUM_THREADS=1) | 1201 ms | 1200 ms |
+| 2026-07-04 | codex/wo-m5-sha-table-provider-dedup | WO-M5 unchanged identity gate | `pipeline_e2e` proof bytes | 1,186,186 | 1,186,186 |
+| 2026-07-04 | codex/wo-m5-sha-table-provider-dedup | WO-M5 unchanged SHA gate | `BM_ShaZK_equiv/1/prove` (RAYON_NUM_THREADS=1) | 324.74 ms | 330.64 ms (Criterion: no change) |
+| 2026-07-04 | codex/wo-m5-sha-table-provider-dedup | WO-M5 unchanged SHA gate | `BM_ShaZK_equiv/33/prove` (RAYON_NUM_THREADS=1) | 426.17 ms | 430.16 ms |
+
+WO-M5 note (2026-07-04): baseline is `801ea3a5`; candidate is the review-follow-up worktree after baseline commit `34512349`. `mdoc_perf_probe` now emits proof-byte decomposition: total `1,759,326`, STARK `971,649`, coprocessor bundle `787,032`, metadata `645`; inner STARK fields are config `25`, commitments `136`, sampled values `98,400`, decommitments `85,672`, queried values `719,596`, proof-of-work `8`, and FRI proof `67,812`. The review follow-up adds explicit shared-provider claimed-sum tamper, digest/field-exposure tamper, malformed-provider no-panic rejection, and standalone SHA proof-byte pin gates.

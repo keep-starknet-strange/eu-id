@@ -44,6 +44,7 @@
 //! `add_to_relation` can collapse a `&[F]` slice of `N` cells into the
 //! extension-field key the LogUp interaction column reads.
 
+use air_core::relations::SharedRelation;
 use stwo::core::channel::Channel;
 #[cfg(feature = "gkr-spike")]
 use stwo::core::fields::m31::BaseField;
@@ -252,6 +253,48 @@ impl Default for SplitPackRelations {
     }
 }
 
+#[derive(Clone, Default)]
+pub struct SharedSplitPackRelations {
+    pub sigma0_lo: SharedRelation<Sigma0SplitPackLo>,
+    pub sigma0_hi: SharedRelation<Sigma0SplitPackHi>,
+    pub sigma1_lo: SharedRelation<Sigma1SplitPackLo>,
+    pub sigma1_hi: SharedRelation<Sigma1SplitPackHi>,
+    pub lower_sigma0_lo: SharedRelation<LowerSigma0SplitPackLo>,
+    pub lower_sigma0_hi: SharedRelation<LowerSigma0SplitPackHi>,
+    pub lower_sigma1_lo: SharedRelation<LowerSigma1SplitPackLo>,
+    pub lower_sigma1_hi: SharedRelation<LowerSigma1SplitPackHi>,
+}
+
+impl SharedSplitPackRelations {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set(&self, relations: &SplitPackRelations) {
+        self.sigma0_lo.set(relations.sigma0_lo.clone());
+        self.sigma0_hi.set(relations.sigma0_hi.clone());
+        self.sigma1_lo.set(relations.sigma1_lo.clone());
+        self.sigma1_hi.set(relations.sigma1_hi.clone());
+        self.lower_sigma0_lo.set(relations.lower_sigma0_lo.clone());
+        self.lower_sigma0_hi.set(relations.lower_sigma0_hi.clone());
+        self.lower_sigma1_lo.set(relations.lower_sigma1_lo.clone());
+        self.lower_sigma1_hi.set(relations.lower_sigma1_hi.clone());
+    }
+
+    pub fn get(&self) -> SplitPackRelations {
+        SplitPackRelations {
+            sigma0_lo: self.sigma0_lo.get(),
+            sigma0_hi: self.sigma0_hi.get(),
+            sigma1_lo: self.sigma1_lo.get(),
+            sigma1_hi: self.sigma1_hi.get(),
+            lower_sigma0_lo: self.lower_sigma0_lo.get(),
+            lower_sigma0_hi: self.lower_sigma0_hi.get(),
+            lower_sigma1_lo: self.lower_sigma1_lo.get(),
+            lower_sigma1_hi: self.lower_sigma1_hi.get(),
+        }
+    }
+}
+
 /// Row width of every `Range_k` channel: a single base-field value pinned
 /// to `[0, k)`. The lookup tuple passed to `add_to_relation` is a 1-cell
 /// slice — the carry limb (for mod-2³² adds) or the terminal 16-bit limb
@@ -322,6 +365,53 @@ impl RangeRelations {
 impl Default for RangeRelations {
     fn default() -> Self {
         Self::dummy()
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct SharedRangeRelations {
+    pub range_2: SharedRelation<Range2Relation>,
+    pub range_4: SharedRelation<Range4Relation>,
+    pub range_5: SharedRelation<Range5Relation>,
+    pub range_16: SharedRelation<Range16Relation>,
+}
+
+impl SharedRangeRelations {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set(&self, relations: &RangeRelations) {
+        self.range_2.set(relations.range_2.clone());
+        self.range_4.set(relations.range_4.clone());
+        self.range_5.set(relations.range_5.clone());
+        self.range_16.set(relations.range_16.clone());
+    }
+
+    pub fn get(&self) -> RangeRelations {
+        RangeRelations {
+            range_2: self.range_2.get(),
+            range_4: self.range_4.get(),
+            range_5: self.range_5.get(),
+            range_16: self.range_16.get(),
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct SharedShaTableRelations {
+    pub split_pack: SharedSplitPackRelations,
+    pub range: SharedRangeRelations,
+}
+
+impl SharedShaTableRelations {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set(&self, split_pack: &SplitPackRelations, range: &RangeRelations) {
+        self.split_pack.set(split_pack);
+        self.range.set(range);
     }
 }
 
@@ -503,6 +593,35 @@ impl Sha256Relations {
             digest: DigestRelation::draw(channel),
             // Drawn last (after the digest), same reasoning: additive, so the
             // field channel never perturbs an earlier channel's challenge.
+            field: FieldRelation::draw(channel),
+        }
+    }
+
+    pub fn draw_sha_tables_provider(channel: &mut impl Channel) -> Self {
+        Self {
+            sigma_decode: SigmaDecodeRelations::dummy(),
+            maj: MajRelation::dummy(),
+            ch: ChRelation::dummy(),
+            xor_8: Xor8Relation::dummy(),
+            split_pack: SplitPackRelations::draw(channel),
+            range: RangeRelations::draw(channel),
+            digest: DigestRelation::dummy(),
+            field: FieldRelation::dummy(),
+        }
+    }
+
+    pub fn draw_with_shared_tables(
+        channel: &mut impl Channel,
+        shared: &SharedShaTableRelations,
+    ) -> Self {
+        Self {
+            sigma_decode: SigmaDecodeRelations::dummy(),
+            maj: MajRelation::dummy(),
+            ch: ChRelation::dummy(),
+            xor_8: Xor8Relation::dummy(),
+            split_pack: shared.split_pack.get(),
+            range: shared.range.get(),
+            digest: DigestRelation::draw(channel),
             field: FieldRelation::draw(channel),
         }
     }

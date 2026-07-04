@@ -6,12 +6,8 @@
 
 use std::collections::HashMap;
 
-use air_core::relations::{
-    field_id, DigestBytesRelation, SharedDigestRelation, SharedFieldRelation,
-};
-use air_core::{
-    fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint, TreeLayout,
-};
+use air_core::relations::{field_id, SharedDigestRelation, SharedFieldRelation};
+use air_core::{Air, AirProver, TreeLayout};
 use ciborium::value::Value;
 use ecdsa::signature::{Signer, Verifier};
 use p256::ecdsa::{Signature as P256Signature, SigningKey, VerifyingKey};
@@ -20,44 +16,49 @@ use predicates::nat::NationalityPredicate;
 use predicates::{AgeRangeCheck, DateOfBirth, PredicateProver, PredicateVerifier};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use stwo::core::air::Component;
-use stwo::core::channel::{Blake2sChannel, Channel};
+#[cfg(not(feature = "ec-coprocessor"))]
 use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::QM31;
 use stwo::core::pcs::PcsConfig;
-use stwo::core::poly::circle::CanonicCoset;
 use stwo::core::proof::StarkProof;
-use stwo::core::utils::{bit_reverse_index, coset_index_to_circle_domain_index};
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleHasher;
-use stwo::prover::backend::simd::column::BaseColumn;
-use stwo::prover::backend::simd::m31::{PackedM31, LOG_N_LANES};
-use stwo::prover::backend::simd::qm31::PackedQM31;
+#[cfg(feature = "ec-coprocessor")]
+use stwo::core::{air::Component, channel::Blake2sChannel, verifier::VerificationError};
+#[cfg(feature = "ec-coprocessor")]
 use stwo::prover::backend::simd::SimdBackend;
-use stwo::prover::poly::circle::CircleEvaluation;
-use stwo::prover::poly::BitReversedOrder;
+#[cfg(feature = "ec-coprocessor")]
 use stwo::prover::{ComponentProver, TreeBuilder};
-use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
+#[cfg(feature = "ec-coprocessor")]
 use stwo_constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation, RelationEntry,
-    TraceLocationAllocator,
+    preprocessed_columns::PreProcessedColumnId, TraceLocationAllocator,
 };
+#[cfg(not(feature = "ec-coprocessor"))]
 use stwo_p256::components::digest_bind::module::{
     DigestBindInteractionClaim, DigestBindProver, DigestBindVerifier,
 };
+#[cfg(not(feature = "ec-coprocessor"))]
 use stwo_p256::components::digest_bind::SharedScalarZRelation;
+#[cfg(not(feature = "ec-coprocessor"))]
+use stwo_p256::public_inputs::PublicEcdsaInstance;
 use stwo_p256::types::{AffinePoint, EcdsaVerifyInput, Signature, U256};
+use stwo_p256::{proof::air::P256Prover, proof::P256ProofDraft};
+#[cfg(not(feature = "ec-coprocessor"))]
 use stwo_p256::{
-    proof::air::{P256Prover, P256Verifier},
-    proof::{P256CurrentAirInteractionClaim, P256CurrentAirProofClaim, P256ProofDraft},
-    public_inputs::PublicEcdsaInstance,
+    proof::air::P256Verifier,
+    proof::{P256CurrentAirInteractionClaim, P256CurrentAirProofClaim},
 };
 use stwo_sha256::air::{Sha256Prover, Sha256Verifier};
 use stwo_sha256::field_exposure::FieldExposure;
 use stwo_sha256::interaction::InteractionClaim as Sha256InteractionClaim;
+use stwo_sha256::relations::SharedShaTableRelations;
+use stwo_sha256::shared_tables::{
+    ShaTableMultiplicities, ShaTablesInteractionClaim, ShaTablesProver, ShaTablesVerifier,
+};
 use stwo_sha256::trace::min_log_size;
 use stwo_sha256::witness::compute_sha256_witness;
 
 use crate::generator::{Policy, SHA_GROUP_WIDTH};
+use crate::public_digest_bind::{PublicDigestBind, PublicDigestBindInteractionClaim};
 use crate::Error;
 
 const MDOC_PROFILE_VERSION: &str = "1.0";
@@ -193,7 +194,9 @@ pub fn demo_mdoc_module_shapes() -> Result<Vec<MdocModuleShape>, Error> {
     let extracted = &fixture.extracted;
     let statement = &fixture.statement;
 
+    #[cfg(not(feature = "ec-coprocessor"))]
     let issuer_draft = single_p256_draft(statement.issuer_input.clone())?;
+    #[cfg(not(feature = "ec-coprocessor"))]
     let device_draft = single_p256_draft(statement.device_input.clone())?;
     let (issuer_sha_witness, issuer_sha_log) = sha_params(&extracted.issuer_sig_structure);
     let (device_sha_witness, device_sha_log) = sha_params(&extracted.device_sig_structure);
@@ -203,14 +206,17 @@ pub fn demo_mdoc_module_shapes() -> Result<Vec<MdocModuleShape>, Error> {
         .into_iter()
         .max()
         .expect("sha log list is non-empty");
-    let issuer_scalar_z = SharedScalarZRelation::new();
     let issuer_digest = SharedDigestRelation::new();
-    let device_scalar_z = SharedScalarZRelation::new();
     let device_digest = SharedDigestRelation::new();
     let birth_digest = SharedDigestRelation::new();
     let nat_digest = SharedDigestRelation::new();
     let birth_field = SharedFieldRelation::new();
     let nat_field = SharedFieldRelation::new();
+    let sha_table_relations = SharedShaTableRelations::new();
+    #[cfg(not(feature = "ec-coprocessor"))]
+    let issuer_scalar_z = SharedScalarZRelation::new();
+    #[cfg(not(feature = "ec-coprocessor"))]
+    let device_scalar_z = SharedScalarZRelation::new();
 
     let birth_exposure = FieldExposure::from_preimage_windows(&[(
         field_id::DOB,
@@ -223,42 +229,72 @@ pub fn demo_mdoc_module_shapes() -> Result<Vec<MdocModuleShape>, Error> {
         2,
     )]);
 
+    #[cfg(not(feature = "ec-coprocessor"))]
     let issuer_p256 = P256Prover::new(&issuer_draft)
         .map_err(Error::P256Prepare)?
         .with_z_binding(issuer_scalar_z.clone());
+    #[cfg(not(feature = "ec-coprocessor"))]
     let device_p256 = P256Prover::new(&device_draft)
         .map_err(Error::P256Prepare)?
         .with_preprocessed_namespace("mdoc/device")
         .with_z_binding(device_scalar_z.clone());
+    let sha_table_multiplicities = ShaTableMultiplicities::from_consumers(&[
+        (&issuer_sha_witness, FieldExposure::empty()),
+        (&device_sha_witness, FieldExposure::empty()),
+        (&birth_sha_witness, birth_exposure.clone()),
+        (&nat_sha_witness, nat_exposure.clone()),
+    ]);
+    let sha_tables = ShaTablesProver::new(sha_table_multiplicities, sha_table_relations.clone());
     let issuer_sha = Sha256Prover::new(&issuer_sha_witness, shared_sha_log, SHA_GROUP_WIDTH)
+        .with_shared_tables(sha_table_relations.clone())
         .with_digest_handle(issuer_digest.clone());
     let device_sha = Sha256Prover::new(&device_sha_witness, shared_sha_log, SHA_GROUP_WIDTH)
+        .with_shared_tables(sha_table_relations.clone())
         .with_digest_handle(device_digest.clone());
     let birth_sha = Sha256Prover::new(&birth_sha_witness, shared_sha_log, SHA_GROUP_WIDTH)
+        .with_shared_tables(sha_table_relations.clone())
         .with_digest_handle(birth_digest.clone())
-        .with_field_handle(birth_exposure, birth_field.clone());
+        .with_field_handle(birth_exposure.clone(), birth_field.clone());
     let nat_sha = Sha256Prover::new(&nat_sha_witness, shared_sha_log, SHA_GROUP_WIDTH)
+        .with_shared_tables(sha_table_relations.clone())
         .with_digest_handle(nat_digest.clone())
-        .with_field_handle(nat_exposure, nat_field.clone());
+        .with_field_handle(nat_exposure.clone(), nat_field.clone());
 
+    #[cfg(not(feature = "ec-coprocessor"))]
     let issuer_bridge_rows = crate::bridge_rows(&issuer_p256.proof_claim().public_inputs.instances);
+    #[cfg(not(feature = "ec-coprocessor"))]
     let issuer_bridge_log = crate::bridge_log_size(issuer_bridge_rows.len());
+    #[cfg(not(feature = "ec-coprocessor"))]
     let issuer_bridge = DigestBindProver::new(
         issuer_bridge_rows,
         issuer_bridge_log,
         issuer_scalar_z,
         issuer_digest.clone(),
     );
+    #[cfg(not(feature = "ec-coprocessor"))]
     let device_bridge_rows = crate::bridge_rows(&device_p256.proof_claim().public_inputs.instances);
+    #[cfg(not(feature = "ec-coprocessor"))]
     let device_bridge_log = crate::bridge_log_size(device_bridge_rows.len());
+    #[cfg(not(feature = "ec-coprocessor"))]
     let device_bridge = DigestBindProver::new(
         device_bridge_rows,
         device_bridge_log,
         device_scalar_z,
         device_digest.clone(),
     );
+    #[cfg(feature = "ec-coprocessor")]
+    let issuer_public_digest_bind =
+        PublicDigestBind::new(statement.issuer_input.message_hash.0, issuer_digest.clone());
+    #[cfg(feature = "ec-coprocessor")]
+    let device_public_digest_bind =
+        PublicDigestBind::new(statement.device_input.message_hash.0, device_digest.clone());
     let birth_digest_bind = PublicDigestBind::new(statement.birth_date_digest, birth_digest);
     let nat_digest_bind = PublicDigestBind::new(statement.nationality_digest, nat_digest);
+    #[cfg(feature = "ec-coprocessor")]
+    let coprocessor = MdocCoprocessorBindingProver::new(
+        statement.issuer_input.clone(),
+        statement.device_input.clone(),
+    )?;
 
     let age_public = statement.policy.age_public_input();
     let nat_public = statement.policy.nat_public_input();
@@ -283,7 +319,12 @@ pub fn demo_mdoc_module_shapes() -> Result<Vec<MdocModuleShape>, Error> {
         .map_err(Error::NatPrepare)?
         .with_nat_binding(nat_field);
 
-    Ok(vec![
+    #[cfg(not(feature = "ec-coprocessor"))]
+    let shapes = vec![
+        MdocModuleShape {
+            name: "mdoc_sha_tables",
+            layout: sha_tables.layout(),
+        },
         MdocModuleShape {
             name: "mdoc_issuer_p256",
             layout: issuer_p256.layout(),
@@ -332,7 +373,59 @@ pub fn demo_mdoc_module_shapes() -> Result<Vec<MdocModuleShape>, Error> {
             name: "mdoc_nat",
             layout: nat.layout(),
         },
-    ])
+    ];
+    #[cfg(feature = "ec-coprocessor")]
+    let shapes = vec![
+        MdocModuleShape {
+            name: "mdoc_sha_tables",
+            layout: sha_tables.layout(),
+        },
+        MdocModuleShape {
+            name: "mdoc_issuer_sha",
+            layout: issuer_sha.layout(),
+        },
+        MdocModuleShape {
+            name: "mdoc_issuer_public_digest_bind",
+            layout: issuer_public_digest_bind.layout(),
+        },
+        MdocModuleShape {
+            name: "mdoc_device_sha",
+            layout: device_sha.layout(),
+        },
+        MdocModuleShape {
+            name: "mdoc_device_public_digest_bind",
+            layout: device_public_digest_bind.layout(),
+        },
+        MdocModuleShape {
+            name: "mdoc_birth_sha",
+            layout: birth_sha.layout(),
+        },
+        MdocModuleShape {
+            name: "mdoc_birth_digest_bind",
+            layout: birth_digest_bind.layout(),
+        },
+        MdocModuleShape {
+            name: "mdoc_nat_sha",
+            layout: nat_sha.layout(),
+        },
+        MdocModuleShape {
+            name: "mdoc_nat_digest_bind",
+            layout: nat_digest_bind.layout(),
+        },
+        MdocModuleShape {
+            name: "mdoc_age",
+            layout: age.layout(),
+        },
+        MdocModuleShape {
+            name: "mdoc_nat",
+            layout: nat.layout(),
+        },
+        MdocModuleShape {
+            name: "mdoc_coprocessor",
+            layout: coprocessor.layout(),
+        },
+    ];
+    Ok(shapes)
 }
 
 pub fn demo_mdoc_sizing_waste() -> Result<MdocSizingWaste, Error> {
@@ -1155,13 +1248,24 @@ fn policy_date_tuple(policy: &Policy) -> Result<(u16, u8, u8), MdocError> {
     ))
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct MdocCircuitProof {
     pub stark_proof: StarkProof<Blake2sMerkleHasher>,
+    sha_tables_interaction_claim: ShaTablesInteractionClaim,
+    #[cfg(not(feature = "ec-coprocessor"))]
     issuer_p256_claim: P256CurrentAirProofClaim,
+    #[cfg(not(feature = "ec-coprocessor"))]
     issuer_p256_interaction_claim: P256CurrentAirInteractionClaim,
+    #[cfg(not(feature = "ec-coprocessor"))]
     device_p256_claim: P256CurrentAirProofClaim,
+    #[cfg(not(feature = "ec-coprocessor"))]
     device_p256_interaction_claim: P256CurrentAirInteractionClaim,
+    #[cfg(feature = "ec-coprocessor")]
+    issuer_public_digest_bind_interaction_claim: PublicDigestBindInteractionClaim,
+    #[cfg(feature = "ec-coprocessor")]
+    device_public_digest_bind_interaction_claim: PublicDigestBindInteractionClaim,
+    #[cfg(feature = "ec-coprocessor")]
+    coprocessor_bundle: Option<eu_id_ec_coprocessor::ecdsa::ImplementedCircuitBundle>,
     issuer_sha_log_n_rows: u32,
     issuer_sha_interaction_claim: Sha256InteractionClaim,
     device_sha_log_n_rows: u32,
@@ -1170,9 +1274,13 @@ pub struct MdocCircuitProof {
     birth_sha_interaction_claim: Sha256InteractionClaim,
     nat_sha_log_n_rows: u32,
     nat_sha_interaction_claim: Sha256InteractionClaim,
+    #[cfg(not(feature = "ec-coprocessor"))]
     issuer_bridge_log_size: u32,
+    #[cfg(not(feature = "ec-coprocessor"))]
     issuer_bridge_interaction_claim: DigestBindInteractionClaim,
+    #[cfg(not(feature = "ec-coprocessor"))]
     device_bridge_log_size: u32,
+    #[cfg(not(feature = "ec-coprocessor"))]
     device_bridge_interaction_claim: DigestBindInteractionClaim,
     birth_digest_bind_interaction_claim: PublicDigestBindInteractionClaim,
     nat_digest_bind_interaction_claim: PublicDigestBindInteractionClaim,
@@ -1182,265 +1290,59 @@ pub struct MdocCircuitProof {
     nat_claimed_sums: Vec<QM31>,
 }
 
-struct PublicDigestBind {
-    digest: [u8; 32],
-    digest_handle: SharedDigestRelation,
-    interaction_claim: Option<PublicDigestBindInteractionClaim>,
-    component: Option<PublicDigestBindComponent>,
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MdocProofByteBreakdown {
+    pub proof_bytes: usize,
+    pub stark_proof_bytes: usize,
+    pub coprocessor_bundle_bytes: Option<usize>,
+    pub non_stark_metadata_bytes: usize,
+    pub stark: MdocStarkProofByteBreakdown,
 }
-
-impl PublicDigestBind {
-    fn new(digest: [u8; 32], digest_handle: SharedDigestRelation) -> Self {
-        Self {
-            digest,
-            digest_handle,
-            interaction_claim: None,
-            component: None,
-        }
-    }
-
-    fn verifier(
-        digest: [u8; 32],
-        digest_handle: SharedDigestRelation,
-        interaction_claim: PublicDigestBindInteractionClaim,
-    ) -> Self {
-        Self {
-            digest,
-            digest_handle,
-            interaction_claim: Some(interaction_claim),
-            component: None,
-        }
-    }
-
-    fn relation(&self) -> DigestBytesRelation {
-        self.digest_handle.get()
-    }
-
-    fn interaction_claim(&self) -> &PublicDigestBindInteractionClaim {
-        self.interaction_claim
-            .as_ref()
-            .expect("public digest bind interaction claim is set")
-    }
-}
-
-const PUBLIC_DIGEST_LOG_SIZE: u32 = LOG_N_LANES;
-const PUBLIC_DIGEST_TRACE_COLS: usize = 32;
-const PUBLIC_DIGEST_INTERACTION_COLS: usize = 4;
-
-type PublicDigestColumnEval = CircleEvaluation<SimdBackend, M31, BitReversedOrder>;
-type PublicDigestBindComponent = FrameworkComponent<PublicDigestBindEval>;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct PublicDigestBindInteractionClaim {
-    claimed_sum: QM31,
+pub struct MdocStarkProofByteBreakdown {
+    pub config: usize,
+    pub commitments: usize,
+    pub sampled_values: usize,
+    pub decommitments: usize,
+    pub queried_values: usize,
+    pub proof_of_work: usize,
+    pub fri_proof: usize,
 }
 
-#[derive(Clone)]
-struct PublicDigestBindEval {
-    digest: [u8; 32],
-    relation: DigestBytesRelation,
-}
+pub fn mdoc_proof_byte_breakdown(proof: &MdocCircuitProof) -> MdocProofByteBreakdown {
+    let stark = &proof.stark_proof.0;
+    let proof_bytes = bincode_len(proof);
+    let stark_proof_bytes = bincode_len(&proof.stark_proof);
+    #[cfg(feature = "ec-coprocessor")]
+    let coprocessor_bundle_bytes = proof.coprocessor_bundle.as_ref().map(bincode_len);
+    #[cfg(not(feature = "ec-coprocessor"))]
+    let coprocessor_bundle_bytes = None;
+    let non_stark_metadata_bytes = proof_bytes
+        .saturating_sub(stark_proof_bytes)
+        .saturating_sub(coprocessor_bundle_bytes.unwrap_or(0));
 
-fn public_digest_active_id() -> PreProcessedColumnId {
-    PreProcessedColumnId {
-        id: "mdoc/public_digest_bind_active".to_string(),
-    }
-}
-
-fn m31_const<E: EvalAtRow>(value: u32) -> E::F {
-    E::F::from(M31::from_u32_unchecked(value))
-}
-
-fn coset_order_to_circle_domain_order(log_size: u32, values: Vec<M31>) -> Vec<M31> {
-    let mut ordered = vec![M31::from_u32_unchecked(0); 1usize << log_size];
-    for (coset_index, value) in values.into_iter().enumerate() {
-        let row = bit_reverse_index(
-            coset_index_to_circle_domain_index(coset_index, log_size),
-            log_size,
-        );
-        ordered[row] = value;
-    }
-    ordered
-}
-
-fn public_digest_column_eval(log_size: u32, coset_values: Vec<M31>) -> PublicDigestColumnEval {
-    CircleEvaluation::new(
-        CanonicCoset::new(log_size).circle_domain(),
-        BaseColumn::from_iter(coset_order_to_circle_domain_order(log_size, coset_values)),
-    )
-}
-
-fn public_digest_active_column() -> PublicDigestColumnEval {
-    let mut values = vec![M31::from_u32_unchecked(0); 1usize << PUBLIC_DIGEST_LOG_SIZE];
-    values[0] = M31::from_u32_unchecked(1);
-    public_digest_column_eval(PUBLIC_DIGEST_LOG_SIZE, values)
-}
-
-fn public_digest_base_trace(digest: &[u8; 32]) -> Vec<PublicDigestColumnEval> {
-    (0..PUBLIC_DIGEST_TRACE_COLS)
-        .map(|index| {
-            let mut values = vec![M31::from_u32_unchecked(0); 1usize << PUBLIC_DIGEST_LOG_SIZE];
-            values[0] = M31::from_u32_unchecked(u32::from(digest[index]));
-            public_digest_column_eval(PUBLIC_DIGEST_LOG_SIZE, values)
-        })
-        .collect()
-}
-
-fn public_digest_interaction_trace(
-    digest: &[u8; 32],
-    relation: &DigestBytesRelation,
-) -> (
-    Vec<PublicDigestColumnEval>,
-    PublicDigestBindInteractionClaim,
-) {
-    let base = public_digest_base_trace(digest);
-    let active = public_digest_active_column();
-    let n_vec_rows = 1usize << (PUBLIC_DIGEST_LOG_SIZE - LOG_N_LANES);
-    let mut logup = LogupTraceGenerator::new(PUBLIC_DIGEST_LOG_SIZE);
-    logup.col_from_fn(|vec_row| {
-        let numerator = PackedQM31::from(active.data[vec_row]);
-        let mut values = [PackedM31::broadcast(M31::from_u32_unchecked(0)); 32];
-        for index in 0..32 {
-            values[index] = base[index].data[vec_row];
-        }
-        let denominator = relation.combine(&values);
-        (numerator, denominator)
-    });
-    debug_assert_eq!(n_vec_rows, 1);
-    let (trace, claimed_sum) = logup.finalize_last();
-    (trace, PublicDigestBindInteractionClaim { claimed_sum })
-}
-
-impl FrameworkEval for PublicDigestBindEval {
-    fn log_size(&self) -> u32 {
-        PUBLIC_DIGEST_LOG_SIZE
-    }
-
-    fn max_constraint_log_degree_bound(&self) -> u32 {
-        PUBLIC_DIGEST_LOG_SIZE + 1
-    }
-
-    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let active = eval.get_preprocessed_column(public_digest_active_id());
-        let one = m31_const::<E>(1);
-        eval.add_constraint(active.clone() * (active.clone() - one.clone()));
-
-        let mut values = Vec::with_capacity(32);
-        for &byte in &self.digest {
-            let value = eval.next_trace_mask();
-            let expected = m31_const::<E>(u32::from(byte));
-            eval.add_constraint(
-                active.clone() * (value.clone() - expected)
-                    + (one.clone() - active.clone()) * value.clone(),
-            );
-            values.push(value);
-        }
-        eval.add_to_relation(RelationEntry::new(
-            &self.relation,
-            E::EF::from(active),
-            &values,
-        ));
-        eval.finalize_logup();
-        eval
+    MdocProofByteBreakdown {
+        proof_bytes,
+        stark_proof_bytes,
+        coprocessor_bundle_bytes,
+        non_stark_metadata_bytes,
+        stark: MdocStarkProofByteBreakdown {
+            config: bincode_len(&stark.config),
+            commitments: bincode_len(&stark.commitments),
+            sampled_values: bincode_len(&stark.sampled_values),
+            decommitments: bincode_len(&stark.decommitments),
+            queried_values: bincode_len(&stark.queried_values),
+            proof_of_work: bincode_len(&stark.proof_of_work),
+            fri_proof: bincode_len(&stark.fri_proof),
+        },
     }
 }
 
-impl Air for PublicDigestBind {
-    fn mix_public(&self, channel: &mut Blake2sChannel) {
-        for &byte in &self.digest {
-            channel.mix_u64(u64::from(byte));
-        }
-    }
-
-    fn draw_relations(&mut self, _channel: &mut Blake2sChannel) {}
-
-    fn layout(&self) -> TreeLayout {
-        TreeLayout {
-            preprocessed: vec![PUBLIC_DIGEST_LOG_SIZE],
-            trace: vec![PUBLIC_DIGEST_LOG_SIZE; PUBLIC_DIGEST_TRACE_COLS],
-            interaction: vec![PUBLIC_DIGEST_LOG_SIZE; PUBLIC_DIGEST_INTERACTION_COLS],
-        }
-    }
-
-    fn claimed_sums(&self) -> Vec<QM31> {
-        vec![self.interaction_claim().claimed_sum]
-    }
-
-    fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
-        vec![public_digest_active_id()]
-    }
-
-    fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
-        self.component = Some(PublicDigestBindComponent::new(
-            allocator,
-            PublicDigestBindEval {
-                digest: self.digest,
-                relation: self.relation(),
-            },
-            self.interaction_claim().claimed_sum,
-        ));
-    }
-
-    fn components(&self) -> Vec<&dyn Component> {
-        vec![self
-            .component
-            .as_ref()
-            .expect("public digest bind component is built")]
-    }
-}
-
-impl AirProver for PublicDigestBind {
-    fn max_log_size(&self) -> u32 {
-        PUBLIC_DIGEST_LOG_SIZE
-    }
-
-    fn max_constraint_log_degree_bound(&self) -> u32 {
-        PUBLIC_DIGEST_LOG_SIZE + 1
-    }
-
-    fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
-        self.write_selected_preprocessed(tb, &[public_digest_active_id()]);
-    }
-
-    fn preprocessed_column_fingerprints(&mut self) -> Vec<PreprocessedColumnFingerprint> {
-        fingerprint_preprocessed_columns(
-            "eu_id_prover::mdoc::PublicDigestBind",
-            &[public_digest_active_id()],
-            &[public_digest_active_column()],
-        )
-    }
-
-    fn write_selected_preprocessed(
-        &mut self,
-        tb: &mut TreeBuilder<SimdBackend, air_core::Mc>,
-        selected_ids: &[PreProcessedColumnId],
-    ) {
-        if selected_ids == [public_digest_active_id()] {
-            tb.extend_evals(vec![public_digest_active_column()]);
-        } else {
-            assert!(
-                selected_ids.is_empty(),
-                "unexpected public digest bind preprocessed selection"
-            );
-        }
-    }
-
-    fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
-        tb.extend_evals(public_digest_base_trace(&self.digest));
-    }
-
-    fn write_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
-        let (trace, claim) = public_digest_interaction_trace(&self.digest, &self.relation());
-        tb.extend_evals(trace);
-        self.interaction_claim = Some(claim);
-    }
-
-    fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
-        vec![self
-            .component
-            .as_ref()
-            .expect("public digest bind component is built")]
-    }
+fn bincode_len<T: Serialize>(value: &T) -> usize {
+    bincode::serialize(value)
+        .expect("mdoc proof byte breakdown value serializes")
+        .len()
 }
 
 fn sha_params(bytes: &[u8]) -> (stwo_sha256::types::Sha256Witness, u32) {
@@ -1570,6 +1472,7 @@ fn trace_and_interaction_cells(layout: &TreeLayout) -> u64 {
         .sum()
 }
 
+#[cfg(not(feature = "ec-coprocessor"))]
 fn expected_instance(input: &EcdsaVerifyInput) -> PublicEcdsaInstance<M31> {
     PublicEcdsaInstance::from_input(0, input)
 }
@@ -1580,6 +1483,155 @@ fn ecdsa_inputs_equal(left: &EcdsaVerifyInput, right: &EcdsaVerifyInput) -> bool
         && left.signature.s.0 == right.signature.s.0
         && left.public_key.x.0 == right.public_key.x.0
         && left.public_key.y.0 == right.public_key.y.0
+}
+
+#[cfg(feature = "ec-coprocessor")]
+struct MdocCoprocessorBindingProver {
+    issuer_input: EcdsaVerifyInput,
+    device_input: EcdsaVerifyInput,
+    issuer_witness: eu_id_ec_coprocessor::ecdsa::Witness,
+    device_witness: eu_id_ec_coprocessor::ecdsa::Witness,
+    bundle: Option<eu_id_ec_coprocessor::ecdsa::ImplementedCircuitBundle>,
+}
+
+#[cfg(feature = "ec-coprocessor")]
+impl MdocCoprocessorBindingProver {
+    fn new(issuer_input: EcdsaVerifyInput, device_input: EcdsaVerifyInput) -> Result<Self, Error> {
+        let issuer_witness = crate::ec_coprocessor::generate_witness_from_stwo(&issuer_input)
+            .map_err(Error::CoprocessorWitness)?;
+        let device_witness = crate::ec_coprocessor::generate_witness_from_stwo(&device_input)
+            .map_err(Error::CoprocessorWitness)?;
+        Ok(Self {
+            issuer_input,
+            device_input,
+            issuer_witness,
+            device_witness,
+            bundle: None,
+        })
+    }
+}
+
+#[cfg(feature = "ec-coprocessor")]
+impl Air for MdocCoprocessorBindingProver {
+    fn mix_public(&self, _channel: &mut Blake2sChannel) {}
+    fn draw_relations(&mut self, _channel: &mut Blake2sChannel) {}
+
+    fn layout(&self) -> TreeLayout {
+        TreeLayout {
+            preprocessed: Vec::new(),
+            trace: Vec::new(),
+            interaction: Vec::new(),
+        }
+    }
+
+    fn claimed_sums(&self) -> Vec<QM31> {
+        Vec::new()
+    }
+
+    fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
+        Vec::new()
+    }
+
+    fn build_components(&mut self, _allocator: &mut TraceLocationAllocator) {}
+
+    fn components(&self) -> Vec<&dyn Component> {
+        Vec::new()
+    }
+}
+
+#[cfg(feature = "ec-coprocessor")]
+impl AirProver for MdocCoprocessorBindingProver {
+    fn max_log_size(&self) -> u32 {
+        0
+    }
+
+    fn write_preprocessed(&mut self, _tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {}
+    fn write_trace(&mut self, _tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {}
+    fn write_interaction(&mut self, _tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {}
+
+    fn prove_post_interaction(&mut self, channel: &mut air_core::Ch) {
+        crate::mix_coprocessor_tagged_statements(
+            channel,
+            &[
+                (b"issuer".as_slice(), &self.issuer_input),
+                (b"device".as_slice(), &self.device_input),
+            ],
+        )
+        .expect("mdoc coprocessor statements mix");
+        let seed = crate::draw_coprocessor_seed(channel);
+        let inputs = [self.issuer_input.clone(), self.device_input.clone()];
+        let witnesses = [self.issuer_witness.clone(), self.device_witness.clone()];
+        let bundle = crate::ec_coprocessor::prove_implemented_circuit_bundle_batch_from_stwo(
+            &inputs, &witnesses, seed,
+        )
+        .expect("mdoc coprocessor bundle proves both checked witnesses");
+        crate::mix_coprocessor_rejoin(channel, &bundle).expect("mdoc coprocessor rejoin mixes");
+        self.bundle = Some(bundle);
+    }
+
+    fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
+        Vec::new()
+    }
+}
+
+#[cfg(feature = "ec-coprocessor")]
+struct MdocCoprocessorBindingVerifier {
+    issuer_input: EcdsaVerifyInput,
+    device_input: EcdsaVerifyInput,
+    bundle: eu_id_ec_coprocessor::ecdsa::ImplementedCircuitBundle,
+}
+
+#[cfg(feature = "ec-coprocessor")]
+impl Air for MdocCoprocessorBindingVerifier {
+    fn mix_public(&self, _channel: &mut Blake2sChannel) {}
+    fn draw_relations(&mut self, _channel: &mut Blake2sChannel) {}
+
+    fn layout(&self) -> TreeLayout {
+        TreeLayout {
+            preprocessed: Vec::new(),
+            trace: Vec::new(),
+            interaction: Vec::new(),
+        }
+    }
+
+    fn claimed_sums(&self) -> Vec<QM31> {
+        Vec::new()
+    }
+
+    fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
+        Vec::new()
+    }
+
+    fn build_components(&mut self, _allocator: &mut TraceLocationAllocator) {}
+
+    fn components(&self) -> Vec<&dyn Component> {
+        Vec::new()
+    }
+
+    fn verify_post_interaction(
+        &mut self,
+        channel: &mut air_core::Ch,
+    ) -> Result<(), VerificationError> {
+        crate::mix_coprocessor_tagged_statements(
+            channel,
+            &[
+                (b"issuer".as_slice(), &self.issuer_input),
+                (b"device".as_slice(), &self.device_input),
+            ],
+        )
+        .map_err(VerificationError::InvalidStructure)?;
+        let seed = crate::draw_coprocessor_seed(channel);
+        let inputs = [self.issuer_input.clone(), self.device_input.clone()];
+        crate::ec_coprocessor::verify_implemented_circuit_bundle_batch_from_stwo(
+            &inputs,
+            &self.bundle,
+            seed,
+        )
+        .map_err(|err| VerificationError::InvalidStructure(format!("{err:?}")))?;
+        crate::mix_coprocessor_rejoin(channel, &self.bundle)
+            .map_err(VerificationError::InvalidStructure)?;
+        Ok(())
+    }
 }
 
 pub fn prove_mdoc_circuit(
@@ -1599,7 +1651,9 @@ pub fn prove_mdoc_circuit(
         return Err(Error::P256InstanceMismatch);
     }
 
+    #[cfg(not(feature = "ec-coprocessor"))]
     let issuer_draft = single_p256_draft(statement.issuer_input.clone())?;
+    #[cfg(not(feature = "ec-coprocessor"))]
     let device_draft = single_p256_draft(statement.device_input.clone())?;
     // All four SHA instances share one `log_n_rows`. This is NOT the wasteful
     // choice the phase-0b plan assumed: the bulk SHA preprocessed (σ/Σ decode,
@@ -1622,14 +1676,17 @@ pub fn prove_mdoc_circuit(
         .into_iter()
         .max()
         .expect("sha log list is non-empty");
-    let issuer_scalar_z = SharedScalarZRelation::new();
     let issuer_digest = SharedDigestRelation::new();
-    let device_scalar_z = SharedScalarZRelation::new();
     let device_digest = SharedDigestRelation::new();
     let birth_digest = SharedDigestRelation::new();
     let nat_digest = SharedDigestRelation::new();
     let birth_field = SharedFieldRelation::new();
     let nat_field = SharedFieldRelation::new();
+    let sha_table_relations = SharedShaTableRelations::new();
+    #[cfg(not(feature = "ec-coprocessor"))]
+    let issuer_scalar_z = SharedScalarZRelation::new();
+    #[cfg(not(feature = "ec-coprocessor"))]
+    let device_scalar_z = SharedScalarZRelation::new();
 
     let birth_exposure = FieldExposure::from_preimage_windows(&[(
         field_id::DOB,
@@ -1642,6 +1699,7 @@ pub fn prove_mdoc_circuit(
         2,
     )]);
 
+    #[cfg(not(feature = "ec-coprocessor"))]
     let mut issuer_p256 = P256Prover::new(&issuer_draft)
         .map_err(Error::P256Prepare)?
         .with_z_binding(issuer_scalar_z.clone());
@@ -1651,41 +1709,71 @@ pub fn prove_mdoc_circuit(
     // Without the namespace the device module would alias onto the issuer's
     // schedule under air-core first-writer-wins tree-0 dedup, binding the wrong
     // constraints. Two genuinely distinct signatures cannot share the schedule.
+    #[cfg(not(feature = "ec-coprocessor"))]
     let mut device_p256 = P256Prover::new(&device_draft)
         .map_err(Error::P256Prepare)?
         .with_preprocessed_namespace("mdoc/device")
         .with_z_binding(device_scalar_z.clone());
+    let sha_table_multiplicities = ShaTableMultiplicities::from_consumers(&[
+        (&issuer_sha_witness, FieldExposure::empty()),
+        (&device_sha_witness, FieldExposure::empty()),
+        (&birth_sha_witness, birth_exposure.clone()),
+        (&nat_sha_witness, nat_exposure.clone()),
+    ]);
+    let mut sha_tables =
+        ShaTablesProver::new(sha_table_multiplicities, sha_table_relations.clone());
     let mut issuer_sha = Sha256Prover::new(&issuer_sha_witness, shared_sha_log, SHA_GROUP_WIDTH)
+        .with_shared_tables(sha_table_relations.clone())
         .with_digest_handle(issuer_digest.clone());
     let mut device_sha = Sha256Prover::new(&device_sha_witness, shared_sha_log, SHA_GROUP_WIDTH)
+        .with_shared_tables(sha_table_relations.clone())
         .with_digest_handle(device_digest.clone());
     let mut birth_sha = Sha256Prover::new(&birth_sha_witness, shared_sha_log, SHA_GROUP_WIDTH)
+        .with_shared_tables(sha_table_relations.clone())
         .with_digest_handle(birth_digest.clone())
         .with_field_handle(birth_exposure.clone(), birth_field.clone());
     let mut nat_sha = Sha256Prover::new(&nat_sha_witness, shared_sha_log, SHA_GROUP_WIDTH)
+        .with_shared_tables(sha_table_relations.clone())
         .with_digest_handle(nat_digest.clone())
         .with_field_handle(nat_exposure.clone(), nat_field.clone());
 
+    #[cfg(not(feature = "ec-coprocessor"))]
     let issuer_bridge_rows = crate::bridge_rows(&issuer_p256.proof_claim().public_inputs.instances);
+    #[cfg(not(feature = "ec-coprocessor"))]
     let issuer_bridge_log = crate::bridge_log_size(issuer_bridge_rows.len());
+    #[cfg(not(feature = "ec-coprocessor"))]
     let mut issuer_bridge = DigestBindProver::new(
         issuer_bridge_rows,
         issuer_bridge_log,
         issuer_scalar_z,
         issuer_digest.clone(),
     );
+    #[cfg(not(feature = "ec-coprocessor"))]
     let device_bridge_rows = crate::bridge_rows(&device_p256.proof_claim().public_inputs.instances);
+    #[cfg(not(feature = "ec-coprocessor"))]
     let device_bridge_log = crate::bridge_log_size(device_bridge_rows.len());
+    #[cfg(not(feature = "ec-coprocessor"))]
     let mut device_bridge = DigestBindProver::new(
         device_bridge_rows,
         device_bridge_log,
         device_scalar_z,
         device_digest.clone(),
     );
+    #[cfg(feature = "ec-coprocessor")]
+    let mut issuer_public_digest_bind =
+        PublicDigestBind::new(statement.issuer_input.message_hash.0, issuer_digest.clone());
+    #[cfg(feature = "ec-coprocessor")]
+    let mut device_public_digest_bind =
+        PublicDigestBind::new(statement.device_input.message_hash.0, device_digest.clone());
     let mut birth_digest_bind =
         PublicDigestBind::new(statement.birth_date_digest, birth_digest.clone());
     let mut nat_digest_bind =
         PublicDigestBind::new(statement.nationality_digest, nat_digest.clone());
+    #[cfg(feature = "ec-coprocessor")]
+    let mut coprocessor = MdocCoprocessorBindingProver::new(
+        statement.issuer_input.clone(),
+        statement.device_input.clone(),
+    )?;
 
     let age_public = statement.policy.age_public_input();
     let nat_public = statement.policy.nat_public_input();
@@ -1710,9 +1798,14 @@ pub fn prove_mdoc_circuit(
         .map_err(Error::NatPrepare)?
         .with_nat_binding(nat_field.clone());
 
+    #[cfg(not(feature = "ec-coprocessor"))]
     let config = issuer_p256.pcs_config();
+    #[cfg(feature = "ec-coprocessor")]
+    let config = crate::coprocessor_bridge_pcs_config();
     let stark_proof = {
-        let mut modules: [&mut dyn AirProver; 12] = [
+        #[cfg(not(feature = "ec-coprocessor"))]
+        let mut modules: [&mut dyn AirProver; 13] = [
+            &mut sha_tables,
             &mut issuer_p256,
             &mut issuer_sha,
             &mut issuer_bridge,
@@ -1726,15 +1819,47 @@ pub fn prove_mdoc_circuit(
             &mut age,
             &mut nat,
         ];
+        #[cfg(feature = "ec-coprocessor")]
+        let mut modules: [&mut dyn AirProver; 12] = [
+            &mut sha_tables,
+            &mut issuer_sha,
+            &mut issuer_public_digest_bind,
+            &mut device_sha,
+            &mut device_public_digest_bind,
+            &mut birth_sha,
+            &mut birth_digest_bind,
+            &mut nat_sha,
+            &mut nat_digest_bind,
+            &mut age,
+            &mut nat,
+            &mut coprocessor,
+        ];
         air_core::prove(&mut modules, config).map_err(|e| Error::Prove(format!("{e:?}")))?
     };
+    #[cfg(feature = "ec-coprocessor")]
+    let coprocessor_bundle = coprocessor.bundle.take().ok_or(Error::CoprocessorMissing)?;
 
     Ok(MdocCircuitProof {
         stark_proof,
+        sha_tables_interaction_claim: sha_tables.interaction_claim().clone(),
+        #[cfg(not(feature = "ec-coprocessor"))]
         issuer_p256_claim: issuer_p256.proof_claim().clone(),
+        #[cfg(not(feature = "ec-coprocessor"))]
         issuer_p256_interaction_claim: issuer_p256.interaction_claim().clone(),
+        #[cfg(not(feature = "ec-coprocessor"))]
         device_p256_claim: device_p256.proof_claim().clone(),
+        #[cfg(not(feature = "ec-coprocessor"))]
         device_p256_interaction_claim: device_p256.interaction_claim().clone(),
+        #[cfg(feature = "ec-coprocessor")]
+        issuer_public_digest_bind_interaction_claim: issuer_public_digest_bind
+            .interaction_claim()
+            .clone(),
+        #[cfg(feature = "ec-coprocessor")]
+        device_public_digest_bind_interaction_claim: device_public_digest_bind
+            .interaction_claim()
+            .clone(),
+        #[cfg(feature = "ec-coprocessor")]
+        coprocessor_bundle: Some(coprocessor_bundle),
         issuer_sha_log_n_rows: shared_sha_log,
         issuer_sha_interaction_claim: issuer_sha.interaction_claim().clone(),
         device_sha_log_n_rows: shared_sha_log,
@@ -1743,9 +1868,13 @@ pub fn prove_mdoc_circuit(
         birth_sha_interaction_claim: birth_sha.interaction_claim().clone(),
         nat_sha_log_n_rows: shared_sha_log,
         nat_sha_interaction_claim: nat_sha.interaction_claim().clone(),
+        #[cfg(not(feature = "ec-coprocessor"))]
         issuer_bridge_log_size: issuer_bridge_log,
+        #[cfg(not(feature = "ec-coprocessor"))]
         issuer_bridge_interaction_claim: issuer_bridge.interaction_claim().clone(),
+        #[cfg(not(feature = "ec-coprocessor"))]
         device_bridge_log_size: device_bridge_log,
+        #[cfg(not(feature = "ec-coprocessor"))]
         device_bridge_interaction_claim: device_bridge.interaction_claim().clone(),
         birth_digest_bind_interaction_claim: birth_digest_bind.interaction_claim().clone(),
         nat_digest_bind_interaction_claim: nat_digest_bind.interaction_claim().clone(),
@@ -1760,11 +1889,13 @@ pub fn verify_mdoc_circuit(
     proof: &MdocCircuitProof,
     statement: &MdocCircuitStatement,
 ) -> Result<(), Error> {
+    #[cfg(not(feature = "ec-coprocessor"))]
     if proof.issuer_p256_claim.public_inputs.instances.as_slice()
         != [expected_instance(&statement.issuer_input)]
     {
         return Err(Error::P256InstanceMismatch);
     }
+    #[cfg(not(feature = "ec-coprocessor"))]
     if proof.device_p256_claim.public_inputs.instances.as_slice()
         != [expected_instance(&statement.device_input)]
     {
@@ -1777,44 +1908,59 @@ pub fn verify_mdoc_circuit(
         return Err(Error::NatPolicyMismatch);
     }
 
-    let issuer_scalar_z = SharedScalarZRelation::new();
     let issuer_digest = SharedDigestRelation::new();
-    let device_scalar_z = SharedScalarZRelation::new();
     let device_digest = SharedDigestRelation::new();
     let birth_digest = SharedDigestRelation::new();
     let nat_digest = SharedDigestRelation::new();
     let birth_field = SharedFieldRelation::new();
     let nat_field = SharedFieldRelation::new();
+    let sha_table_relations = SharedShaTableRelations::new();
+    #[cfg(not(feature = "ec-coprocessor"))]
+    let issuer_scalar_z = SharedScalarZRelation::new();
+    #[cfg(not(feature = "ec-coprocessor"))]
+    let device_scalar_z = SharedScalarZRelation::new();
 
+    #[cfg(not(feature = "ec-coprocessor"))]
     let mut issuer_p256 = P256Verifier::new(
         proof.issuer_p256_claim.clone(),
         proof.issuer_p256_interaction_claim.clone(),
     )
     .with_z_binding(issuer_scalar_z.clone());
+    #[cfg(not(feature = "ec-coprocessor"))]
     let mut device_p256 = P256Verifier::new(
         proof.device_p256_claim.clone(),
         proof.device_p256_interaction_claim.clone(),
     )
     .with_preprocessed_namespace("mdoc/device")
     .with_z_binding(device_scalar_z.clone());
-    if proof.stark_proof.config != issuer_p256.expected_pcs_config() {
+    #[cfg(not(feature = "ec-coprocessor"))]
+    let expected_pcs_config = issuer_p256.expected_pcs_config();
+    #[cfg(feature = "ec-coprocessor")]
+    let expected_pcs_config = crate::coprocessor_bridge_pcs_config();
+    if proof.stark_proof.config != expected_pcs_config {
         return Err(Error::WeakConfig {
             got: proof.stark_proof.config,
-            expected: issuer_p256.expected_pcs_config(),
+            expected: expected_pcs_config,
         });
     }
 
+    let mut sha_tables = ShaTablesVerifier::new(
+        proof.sha_tables_interaction_claim.clone(),
+        sha_table_relations.clone(),
+    );
     let mut issuer_sha = Sha256Verifier::new(
         proof.issuer_sha_log_n_rows,
         SHA_GROUP_WIDTH,
         proof.issuer_sha_interaction_claim.clone(),
     )
+    .with_shared_tables(sha_table_relations.clone())
     .with_digest_handle(issuer_digest.clone());
     let mut device_sha = Sha256Verifier::new(
         proof.device_sha_log_n_rows,
         SHA_GROUP_WIDTH,
         proof.device_sha_interaction_claim.clone(),
     )
+    .with_shared_tables(sha_table_relations.clone())
     .with_digest_handle(device_digest.clone());
 
     let birth_exposure = FieldExposure::from_preimage_windows(&[(
@@ -1832,6 +1978,7 @@ pub fn verify_mdoc_circuit(
         SHA_GROUP_WIDTH,
         proof.birth_sha_interaction_claim.clone(),
     )
+    .with_shared_tables(sha_table_relations.clone())
     .with_digest_handle(birth_digest.clone())
     .with_field_handle(birth_exposure, birth_field.clone());
     let mut nat_sha = Sha256Verifier::new(
@@ -1839,20 +1986,35 @@ pub fn verify_mdoc_circuit(
         SHA_GROUP_WIDTH,
         proof.nat_sha_interaction_claim.clone(),
     )
+    .with_shared_tables(sha_table_relations.clone())
     .with_digest_handle(nat_digest.clone())
     .with_field_handle(nat_exposure, nat_field.clone());
 
+    #[cfg(not(feature = "ec-coprocessor"))]
     let mut issuer_bridge = DigestBindVerifier::new(
         proof.issuer_bridge_log_size,
         proof.issuer_bridge_interaction_claim.clone(),
         issuer_scalar_z,
         issuer_digest,
     );
+    #[cfg(not(feature = "ec-coprocessor"))]
     let mut device_bridge = DigestBindVerifier::new(
         proof.device_bridge_log_size,
         proof.device_bridge_interaction_claim.clone(),
         device_scalar_z,
         device_digest,
+    );
+    #[cfg(feature = "ec-coprocessor")]
+    let mut issuer_public_digest_bind = PublicDigestBind::verifier(
+        statement.issuer_input.message_hash.0,
+        issuer_digest,
+        proof.issuer_public_digest_bind_interaction_claim.clone(),
+    );
+    #[cfg(feature = "ec-coprocessor")]
+    let mut device_public_digest_bind = PublicDigestBind::verifier(
+        statement.device_input.message_hash.0,
+        device_digest,
+        proof.device_public_digest_bind_interaction_claim.clone(),
     );
     let mut birth_digest_bind = PublicDigestBind::verifier(
         statement.birth_date_digest,
@@ -1872,8 +2034,19 @@ pub fn verify_mdoc_circuit(
         .verifier(&proof.nat_public, &proof.nat_claimed_sums)
         .map_err(Error::NatPrepare)?
         .with_nat_binding(nat_field.clone());
+    #[cfg(feature = "ec-coprocessor")]
+    let mut coprocessor = MdocCoprocessorBindingVerifier {
+        issuer_input: statement.issuer_input.clone(),
+        device_input: statement.device_input.clone(),
+        bundle: proof
+            .coprocessor_bundle
+            .clone()
+            .ok_or(Error::CoprocessorMissing)?,
+    };
 
-    let mut modules: [&mut dyn Air; 12] = [
+    #[cfg(not(feature = "ec-coprocessor"))]
+    let mut modules: [&mut dyn Air; 13] = [
+        &mut sha_tables,
         &mut issuer_p256,
         &mut issuer_sha,
         &mut issuer_bridge,
@@ -1887,7 +2060,337 @@ pub fn verify_mdoc_circuit(
         &mut age,
         &mut nat,
     ];
-    air_core::verify(&mut modules, &proof.stark_proof).map_err(|e| Error::Verify(format!("{e:?}")))
+    #[cfg(feature = "ec-coprocessor")]
+    let mut modules: [&mut dyn Air; 12] = [
+        &mut sha_tables,
+        &mut issuer_sha,
+        &mut issuer_public_digest_bind,
+        &mut device_sha,
+        &mut device_public_digest_bind,
+        &mut birth_sha,
+        &mut birth_digest_bind,
+        &mut nat_sha,
+        &mut nat_digest_bind,
+        &mut age,
+        &mut nat,
+        &mut coprocessor,
+    ];
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        air_core::verify(&mut modules, &proof.stark_proof)
+    })) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(Error::Verify(format!("{error:?}"))),
+        Err(_) => Err(Error::Verify(
+            "malformed mdoc proof panicked during verification".to_string(),
+        )),
+    }
+}
+
+#[cfg(test)]
+mod mdoc_sha_table_tests {
+    use super::*;
+
+    #[test]
+    fn mdoc_module_shape_starts_with_shared_sha_tables() {
+        let shapes = demo_mdoc_module_shapes().expect("mdoc shapes build");
+        assert_eq!(
+            shapes.first().map(|shape| shape.name),
+            Some("mdoc_sha_tables"),
+            "the shared SHA table provider must draw relations before SHA consumers",
+        );
+        #[cfg(not(feature = "ec-coprocessor"))]
+        assert_eq!(shapes.len(), 13);
+        #[cfg(feature = "ec-coprocessor")]
+        assert_eq!(shapes.len(), 12);
+    }
+
+    #[test]
+    #[ignore = "slow: proves isolated mdoc circuit profile"]
+    fn shared_sha_table_provider_claim_is_bound() {
+        let fixture = demo_mdoc_circuit_fixture();
+        let mut proof =
+            prove_mdoc_circuit(&fixture.extracted, &fixture.statement).expect("mdoc proves");
+        verify_mdoc_circuit(&proof, &fixture.statement).expect("mdoc verifies before tamper");
+
+        proof.sha_tables_interaction_claim.round_split_pack[0].claimed_sum =
+            -proof.sha_tables_interaction_claim.round_split_pack[0].claimed_sum;
+
+        assert!(
+            verify_mdoc_circuit(&proof, &fixture.statement).is_err(),
+            "tampered shared SHA table provider claim unexpectedly verified",
+        );
+    }
+
+    #[test]
+    #[ignore = "slow: proves isolated mdoc circuit profile"]
+    fn shared_sha_table_mdoc_digest_and_field_swaps_reject() {
+        let fixture = demo_mdoc_circuit_fixture();
+        let proof =
+            prove_mdoc_circuit(&fixture.extracted, &fixture.statement).expect("mdoc proves");
+        verify_mdoc_circuit(&proof, &fixture.statement).expect("mdoc verifies before tamper");
+
+        let mut digest_swap = fixture.statement.clone();
+        std::mem::swap(
+            &mut digest_swap.birth_date_digest,
+            &mut digest_swap.nationality_digest,
+        );
+        assert!(
+            verify_mdoc_circuit(&proof, &digest_swap).is_err(),
+            "birth/nationality digest swap unexpectedly verified",
+        );
+
+        if fixture.statement.birth_date_value_offset != fixture.statement.nationality_value_offset {
+            let mut field_exposure_swap = fixture.statement.clone();
+            std::mem::swap(
+                &mut field_exposure_swap.birth_date_value_offset,
+                &mut field_exposure_swap.nationality_value_offset,
+            );
+            assert!(
+                verify_mdoc_circuit(&proof, &field_exposure_swap).is_err(),
+                "birth/nationality field exposure swap unexpectedly verified",
+            );
+        } else {
+            let mut birth_offset_tamper = fixture.statement.clone();
+            birth_offset_tamper.birth_date_value_offset += 1;
+            assert!(
+                verify_mdoc_circuit(&proof, &birth_offset_tamper).is_err(),
+                "birth-date field exposure offset tamper unexpectedly verified",
+            );
+
+            let mut nat_offset_tamper = fixture.statement.clone();
+            nat_offset_tamper.nationality_value_offset += 1;
+            assert!(
+                verify_mdoc_circuit(&proof, &nat_offset_tamper).is_err(),
+                "nationality field exposure offset tamper unexpectedly verified",
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "slow: proves isolated mdoc circuit profile"]
+    fn malformed_shared_sha_table_provider_claim_rejects_without_panic() {
+        let fixture = demo_mdoc_circuit_fixture();
+        let mut proof =
+            prove_mdoc_circuit(&fixture.extracted, &fixture.statement).expect("mdoc proves");
+        verify_mdoc_circuit(&proof, &fixture.statement).expect("mdoc verifies before tamper");
+
+        proof.sha_tables_interaction_claim.round_split_pack.clear();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            verify_mdoc_circuit(&proof, &fixture.statement)
+        }));
+        assert!(
+            matches!(result, Ok(Err(Error::Verify(_)))),
+            "malformed shared SHA table claim should reject gracefully, got {result:?}",
+        );
+    }
+
+    #[test]
+    fn mdoc_sha_witnesses_match_native_digest_for_all_four_messages() {
+        let fixture = demo_mdoc_circuit_fixture();
+        let extracted = &fixture.extracted;
+        let cases = [
+            ("issuer", extracted.issuer_sig_structure.as_slice()),
+            ("device", extracted.device_sig_structure.as_slice()),
+            ("birth_date", extracted.birth_date_item.as_slice()),
+            ("nationality", extracted.nationality_item.as_slice()),
+        ];
+
+        for (name, message) in cases {
+            let (witness, _log_n_rows) = sha_params(message);
+            let native: [u8; 32] = Sha256::digest(message).into();
+            assert_eq!(witness.digest.0, native, "{name} digest");
+            assert_eq!(
+                witness.digest_from_blocks().0,
+                native,
+                "{name} digest from block chain",
+            );
+        }
+    }
+}
+
+#[cfg(all(test, feature = "ec-coprocessor"))]
+mod coprocessor_tests {
+    use super::*;
+    use crate::{fixtures, prove_identity, Error, IssuerKey};
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct TestCoprocessorDigests {
+        post_statement: [u8; 32],
+        post_seed: [u8; 32],
+        post_rejoin: [u8; 32],
+    }
+
+    fn verified_mdoc_proof() -> (MdocCircuitProof, MdocCircuitStatement) {
+        let fixture = demo_mdoc_circuit_fixture();
+        let proof =
+            prove_mdoc_circuit(&fixture.extracted, &fixture.statement).expect("mdoc proves");
+        verify_mdoc_circuit(&proof, &fixture.statement).expect("mdoc verifies");
+        (proof, fixture.statement)
+    }
+
+    fn assert_verify_rejects(proof: &MdocCircuitProof, statement: &MdocCircuitStatement) {
+        assert!(
+            verify_mdoc_circuit(proof, statement).is_err(),
+            "tampered mdoc proof unexpectedly verified"
+        );
+    }
+
+    fn tampered_bundle(
+        bundle: &eu_id_ec_coprocessor::ecdsa::ImplementedCircuitBundle,
+    ) -> eu_id_ec_coprocessor::ecdsa::ImplementedCircuitBundle {
+        let original_hash = crate::coprocessor_bundle_hash(bundle).expect("bundle hashes");
+        let mut bytes = bincode::serialize(bundle).expect("bundle serializes");
+        for index in (0..bytes.len()).rev() {
+            bytes[index] ^= 1;
+            if let Ok(candidate) = bincode::deserialize(&bytes) {
+                if crate::coprocessor_bundle_hash(&candidate).expect("candidate hashes")
+                    != original_hash
+                {
+                    return candidate;
+                }
+            }
+            bytes[index] ^= 1;
+        }
+        panic!("one serialized bundle byte can be tampered");
+    }
+
+    fn mdoc_coprocessor_digests(
+        issuer_tag: &'static [u8],
+        issuer_input: &EcdsaVerifyInput,
+        device_tag: &'static [u8],
+        device_input: &EcdsaVerifyInput,
+        bundle: &eu_id_ec_coprocessor::ecdsa::ImplementedCircuitBundle,
+    ) -> TestCoprocessorDigests {
+        let mut channel = air_core::Ch::default();
+        crate::mix_coprocessor_tagged_statements(
+            &mut channel,
+            &[(issuer_tag, issuer_input), (device_tag, device_input)],
+        )
+        .expect("mdoc tagged statements mix");
+        let post_statement = crate::channel_digest(&channel);
+        let post_seed = crate::draw_coprocessor_seed(&mut channel);
+        crate::mix_coprocessor_rejoin(&mut channel, bundle).expect("mdoc rejoin mixes");
+        let post_rejoin = crate::channel_digest(&channel);
+        TestCoprocessorDigests {
+            post_statement,
+            post_seed,
+            post_rejoin,
+        }
+    }
+
+    #[test]
+    #[ignore = "slow: proves isolated mdoc circuit with coprocessor bundle"]
+    fn mdoc_coprocessor_rejects_required_negative_mutations() {
+        let (proof, statement) = verified_mdoc_proof();
+
+        let mut missing_bundle = proof.clone();
+        missing_bundle.coprocessor_bundle = None;
+        assert!(matches!(
+            verify_mdoc_circuit(&missing_bundle, &statement),
+            Err(Error::CoprocessorMissing)
+        ));
+
+        let mut tampered = proof.clone();
+        tampered.coprocessor_bundle =
+            Some(tampered_bundle(proof.coprocessor_bundle.as_ref().unwrap()));
+        assert_verify_rejects(&tampered, &statement);
+
+        let mut issuer_z_mismatch = statement.clone();
+        issuer_z_mismatch.issuer_input.message_hash.0[0] ^= 1;
+        assert_verify_rejects(&proof, &issuer_z_mismatch);
+
+        let mut device_z_mismatch = statement.clone();
+        device_z_mismatch.device_input.message_hash.0[0] ^= 1;
+        assert_verify_rejects(&proof, &device_z_mismatch);
+
+        let mut cross_slot_z = statement.clone();
+        std::mem::swap(
+            &mut cross_slot_z.issuer_input.message_hash,
+            &mut cross_slot_z.device_input.message_hash,
+        );
+        assert_verify_rejects(&proof, &cross_slot_z);
+
+        let mut cross_signature = statement.clone();
+        std::mem::swap(
+            &mut cross_signature.issuer_input,
+            &mut cross_signature.device_input,
+        );
+        assert_verify_rejects(&proof, &cross_signature);
+
+        let identity_fixture = fixtures::valid_over_18();
+        let issuer = IssuerKey::demo();
+        let nonce = fixtures::demo_nonce_statement();
+        let identity_proof = prove_identity(
+            &identity_fixture.signed.credential,
+            &issuer,
+            &identity_fixture.policy,
+            &nonce,
+        )
+        .expect("identity proves");
+        let mut replayed_identity_bundle = proof.clone();
+        replayed_identity_bundle.coprocessor_bundle =
+            Some(identity_proof.coprocessor_bundle().unwrap().clone());
+        assert_verify_rejects(&replayed_identity_bundle, &statement);
+    }
+
+    #[test]
+    #[ignore = "slow: proves isolated mdoc circuit with coprocessor bundle"]
+    fn mdoc_coprocessor_statement_order_and_rejoin_guards_are_bound() {
+        let (proof, statement) = verified_mdoc_proof();
+        let bundle = proof.coprocessor_bundle.as_ref().unwrap();
+
+        let canonical = mdoc_coprocessor_digests(
+            b"issuer",
+            &statement.issuer_input,
+            b"device",
+            &statement.device_input,
+            bundle,
+        );
+        let swapped_statement_order = mdoc_coprocessor_digests(
+            b"device",
+            &statement.device_input,
+            b"issuer",
+            &statement.issuer_input,
+            bundle,
+        );
+        assert_ne!(canonical, swapped_statement_order);
+
+        let tampered_rejoin = mdoc_coprocessor_digests(
+            b"issuer",
+            &statement.issuer_input,
+            b"device",
+            &statement.device_input,
+            &tampered_bundle(bundle),
+        );
+        assert_ne!(canonical.post_rejoin, tampered_rejoin.post_rejoin);
+
+        let mut without_rejoin = air_core::Ch::default();
+        crate::mix_coprocessor_tagged_statements(
+            &mut without_rejoin,
+            &[
+                (b"issuer".as_slice(), &statement.issuer_input),
+                (b"device".as_slice(), &statement.device_input),
+            ],
+        )
+        .expect("mdoc tagged statements mix");
+        let _seed = crate::draw_coprocessor_seed(&mut without_rejoin);
+        let without_rejoin_next = crate::draw_coprocessor_seed(&mut without_rejoin);
+
+        let mut with_rejoin = air_core::Ch::default();
+        crate::mix_coprocessor_tagged_statements(
+            &mut with_rejoin,
+            &[
+                (b"issuer".as_slice(), &statement.issuer_input),
+                (b"device".as_slice(), &statement.device_input),
+            ],
+        )
+        .expect("mdoc tagged statements mix");
+        let _seed = crate::draw_coprocessor_seed(&mut with_rejoin);
+        crate::mix_coprocessor_rejoin(&mut with_rejoin, bundle).expect("mdoc rejoin mixes");
+        let with_rejoin_next = crate::draw_coprocessor_seed(&mut with_rejoin);
+
+        assert_ne!(with_rejoin_next, without_rejoin_next);
+    }
 }
 
 fn numeric_country(alpha2: &str) -> Result<u32, MdocError> {

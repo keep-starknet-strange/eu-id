@@ -42,14 +42,12 @@ use stwo::prover::poly::BitReversedOrder;
 use stwo_constraint_framework::{LogupTraceGenerator, Relation};
 
 use crate::components::{
-    range_log_size, RangeKind, DECODE_TABLES, RANGE_TABLES, ROUND_SPLIT_TABLES, SIGMA_SPLIT_TABLES,
+    range_log_size, RangeKind, RANGE_TABLES, ROUND_SPLIT_TABLES, SIGMA_SPLIT_TABLES,
 };
 use crate::constants::DIGEST_BYTES;
 use crate::field_exposure::{word_be_bytes, FieldExposure, BYTE_RANGE_CHECK_OFFSET};
 use crate::multiplicities::{
-    decode_multiplicities, maj_ch_multiplicities, range_k_multiplicities,
-    round_split_pack_multiplicities, sigma_split_pack_multiplicities, xor_8_multiplicities,
-    MajChMultiplicities,
+    range_k_multiplicities, round_split_pack_multiplicities, sigma_split_pack_multiplicities,
 };
 use crate::partitions::{
     pack_round_groups, round_groups_half_indices, GROUPS_PER_ROUND_PARTITION, SIGMA0_GROUPS,
@@ -57,8 +55,7 @@ use crate::partitions::{
 };
 use crate::relations::Sha256Relations;
 use crate::tables::{
-    build_decode_table, build_maj_ch_table, build_round_split_pack_table,
-    build_sigma_split_pack_table, build_xor_8_table, Half, Half16, LowerSigmaPartition,
+    build_round_split_pack_table, build_sigma_split_pack_table, Half16, LowerSigmaPartition,
     RoundPartition,
 };
 use crate::trace::{h_out_digest_bytes, Layout};
@@ -70,19 +67,18 @@ use crate::types::Sha256Witness;
 ///
 /// ```text
 ///   8 (h_in aux split-pack, t = 0 rows)
-/// + 18 (schedule family: 2 σ-decode wirings = 12, 2 σ-input splits = 4,
+/// +  6 (schedule family: 2 σ-input splits = 4,
 ///       Range_4 carry pair = 2; t ≥ 16 rows)
-/// + 48 (round family: 2 Σ-decode wirings = 12, 8 Maj + 8 Ch = 16,
-///       round split-packs = 12 — the `a`/`e` operands each have two
+/// + 20 (round family: round split-packs = 12 — the `a`/`e` operands each have two
 ///       complementary-gated sites (t ≥ 1 vs t = 0) so tuples read
 ///       committed cells — plus 4 carry pairs = 8; every row)
 /// + 16 (finalization carries, t = 63 rows)
 /// + 16 (terminal `Range_16`, t = 63 rows)
-/// = 106
+/// = 66
 /// ```
 ///
 /// A site that does not fire on a given row holds the neutral fraction `(0, 1)`.
-pub const SHA_LOOKUPS_PER_ROW_BASE: usize = 106;
+pub const SHA_LOOKUPS_PER_ROW_BASE: usize = 66;
 
 /// Total lookup sites `Sha256Eval` fires per row. The digest provider adds
 /// exactly one width-32 yield site when `expose_digest` is set; the
@@ -123,9 +119,6 @@ impl ComponentClaim {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InteractionClaim {
     pub sha256: ComponentClaim,
-    pub decode: Vec<ComponentClaim>, // 8
-    pub maj_ch: ComponentClaim,
-    pub xor_8: ComponentClaim,
     pub round_split_pack: Vec<ComponentClaim>, // 4
     pub sigma_split_pack: Vec<ComponentClaim>, // 4
     pub range: Vec<ComponentClaim>,            // 4: Range_2, Range_4, Range_5, Range_16
@@ -137,11 +130,6 @@ impl InteractionClaim {
     /// (currently none). Used as the soundness backbone.
     pub fn total(&self) -> SecureField {
         let mut s = self.sha256.claimed_sum;
-        for c in &self.decode {
-            s += c.claimed_sum;
-        }
-        s += self.maj_ch.claimed_sum;
-        s += self.xor_8.claimed_sum;
         for c in &self.round_split_pack {
             s += c.claimed_sum;
         }
@@ -159,11 +147,6 @@ impl InteractionClaim {
     /// agree.
     pub fn mix_into(&self, channel: &mut impl Channel) {
         self.sha256.mix_into(channel);
-        for c in &self.decode {
-            c.mix_into(channel);
-        }
-        self.maj_ch.mix_into(channel);
-        self.xor_8.mix_into(channel);
         for c in &self.round_split_pack {
             c.mix_into(channel);
         }
@@ -183,7 +166,7 @@ impl InteractionClaim {
 /// One (numerator, denominator) at a particular row. Numerator carries
 /// the lookup's multiplicity (positive on the consumer side, negative on
 /// the producer); denominator is `combine(values) = sum α^i · v_i − z`.
-type Frac = (SecureField, SecureField);
+pub(crate) type Frac = (SecureField, SecureField);
 
 /// Build one interaction trace for a component from its list of
 /// row-iterators. `lookups[k]` is the k-th lookup the component fires —
@@ -191,7 +174,7 @@ type Frac = (SecureField, SecureField);
 ///
 /// Pairs of consecutive lookups share one interaction column, matching
 /// `finalize_logup_in_pairs`. Odd counts get a final single-lookup column.
-fn build_interaction_columns(
+pub(crate) fn build_interaction_columns(
     log_size: u32,
     lookups: Vec<Vec<Frac>>,
 ) -> (
@@ -265,7 +248,7 @@ fn build_interaction_columns(
 /// Build one (numerator = -mult, denominator = combine(row)) per row of a
 /// producer-side table. The values arg gives the row content as
 /// `[F; N]` per row.
-fn producer_frac_column<R, const N: usize>(
+pub(crate) fn producer_frac_column<R, const N: usize>(
     rel: &R,
     mults: &[u32],
     rows: impl Iterator<Item = [BaseField; N]>,
@@ -290,141 +273,6 @@ where
 // ---------------------------------------------------------------------------
 // Producer-side per-table interaction columns
 // ---------------------------------------------------------------------------
-
-/// Build the interaction trace for one decode table.
-fn decode_interaction(
-    relations: &Sha256Relations,
-    witness: &Sha256Witness,
-    f: crate::partitions::SigmaFn,
-    half: Half,
-) -> (
-    ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
-    SecureField,
-) {
-    let mults = decode_multiplicities(witness, f, half);
-    let rows = build_decode_table(f, half);
-    let log_size = crate::preprocessed::LOG_SIZE_16;
-    let frac_col: Vec<Frac> = match (f, half) {
-        (crate::partitions::SigmaFn::Sigma0, Half::S) => producer_frac_column(
-            &relations.sigma_decode.sigma0_s,
-            &mults,
-            rows.into_iter().map(decode_row_to_felts),
-        ),
-        (crate::partitions::SigmaFn::Sigma0, Half::SComplement) => producer_frac_column(
-            &relations.sigma_decode.sigma0_s_complement,
-            &mults,
-            rows.into_iter().map(decode_row_to_felts),
-        ),
-        (crate::partitions::SigmaFn::Sigma1, Half::S) => producer_frac_column(
-            &relations.sigma_decode.sigma1_s,
-            &mults,
-            rows.into_iter().map(decode_row_to_felts),
-        ),
-        (crate::partitions::SigmaFn::Sigma1, Half::SComplement) => producer_frac_column(
-            &relations.sigma_decode.sigma1_s_complement,
-            &mults,
-            rows.into_iter().map(decode_row_to_felts),
-        ),
-        (crate::partitions::SigmaFn::LowerSigma0, Half::S) => producer_frac_column(
-            &relations.sigma_decode.lower_sigma0_s,
-            &mults,
-            rows.into_iter().map(decode_row_to_felts),
-        ),
-        (crate::partitions::SigmaFn::LowerSigma0, Half::SComplement) => producer_frac_column(
-            &relations.sigma_decode.lower_sigma0_s_complement,
-            &mults,
-            rows.into_iter().map(decode_row_to_felts),
-        ),
-        (crate::partitions::SigmaFn::LowerSigma1, Half::S) => producer_frac_column(
-            &relations.sigma_decode.lower_sigma1_s,
-            &mults,
-            rows.into_iter().map(decode_row_to_felts),
-        ),
-        (crate::partitions::SigmaFn::LowerSigma1, Half::SComplement) => producer_frac_column(
-            &relations.sigma_decode.lower_sigma1_s_complement,
-            &mults,
-            rows.into_iter().map(decode_row_to_felts),
-        ),
-    };
-
-    build_interaction_columns(log_size, vec![frac_col])
-}
-
-fn decode_row_to_felts(r: crate::tables::DecodeRow) -> [BaseField; 5] {
-    [
-        BaseField::from(r.key),
-        BaseField::from(r.o_main_lo),
-        BaseField::from(r.o_main_hi),
-        BaseField::from(r.o2_partial_lo),
-        BaseField::from(r.o2_partial_hi),
-    ]
-}
-
-/// Build the interaction trace for the packed Maj/Ch table — 2 lookups
-/// (Maj, Ch) batch into one interaction column.
-fn maj_ch_interaction(
-    relations: &Sha256Relations,
-    witness: &Sha256Witness,
-    group_width: u32,
-) -> (
-    ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
-    SecureField,
-) {
-    let MajChMultiplicities { maj, ch } = maj_ch_multiplicities(witness, group_width);
-    let rows = build_maj_ch_table(group_width);
-    let log_size = crate::preprocessed::maj_ch_log_size(group_width);
-
-    let maj_frac = producer_frac_column(
-        &relations.maj,
-        &maj,
-        rows.iter().map(|r| {
-            [
-                BaseField::from(r.a),
-                BaseField::from(r.b),
-                BaseField::from(r.c),
-                BaseField::from(r.maj_val),
-            ]
-        }),
-    );
-    let ch_frac = producer_frac_column(
-        &relations.ch,
-        &ch,
-        rows.iter().map(|r| {
-            [
-                BaseField::from(r.a),
-                BaseField::from(r.b),
-                BaseField::from(r.c),
-                BaseField::from(r.ch_val),
-            ]
-        }),
-    );
-
-    build_interaction_columns(log_size, vec![maj_frac, ch_frac])
-}
-
-fn xor_8_interaction(
-    relations: &Sha256Relations,
-    witness: &Sha256Witness,
-) -> (
-    ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
-    SecureField,
-) {
-    let mults = xor_8_multiplicities(witness);
-    let rows = build_xor_8_table();
-    let log_size = crate::preprocessed::LOG_SIZE_16;
-    let frac = producer_frac_column(
-        &relations.xor_8,
-        &mults,
-        rows.iter().map(|r| {
-            [
-                BaseField::from(r.x),
-                BaseField::from(r.y),
-                BaseField::from(r.z),
-            ]
-        }),
-    );
-    build_interaction_columns(log_size, vec![frac])
-}
 
 fn round_split_pack_interaction(
     relations: &Sha256Relations,
@@ -670,27 +518,9 @@ fn write_round_row_lookups(
         *cursor += 8;
     }
 
-    // ---- 2. Schedule family (18 sites; t ≥ 16 rows) ----
+    // ---- 2. Schedule family (6 sites; t ≥ 16 rows) ----
     if t >= 16 {
         let entry = &block.schedule_entries[t - 16];
-        write_sigma_decode_lookups(
-            all,
-            cursor,
-            slot,
-            &entry.lower_sigma0_decode,
-            RelTag::LowerSigma0DecodeS,
-            RelTag::LowerSigma0DecodeSPrime,
-            relations,
-        );
-        write_sigma_decode_lookups(
-            all,
-            cursor,
-            slot,
-            &entry.lower_sigma1_decode,
-            RelTag::LowerSigma1DecodeS,
-            RelTag::LowerSigma1DecodeSPrime,
-            relations,
-        );
         write_sigma_input_split_lookups(
             all,
             cursor,
@@ -720,75 +550,14 @@ fn write_round_row_lookups(
             entry.carries,
         );
     } else {
-        *cursor += 18;
+        *cursor += 6;
     }
 
-    // ---- 3. Round family (48 sites; every real row) ----
+    // ---- 3. Round family (20 sites; every real row) ----
     let round = &block.rounds[t];
-    write_sigma_decode_lookups(
-        all,
-        cursor,
-        slot,
-        &round.sigma0_decode,
-        RelTag::Sigma0DecodeS,
-        RelTag::Sigma0DecodeSPrime,
-        relations,
-    );
-    write_sigma_decode_lookups(
-        all,
-        cursor,
-        slot,
-        &round.sigma1_decode,
-        RelTag::Sigma1DecodeS,
-        RelTag::Sigma1DecodeSPrime,
-        relations,
-    );
 
-    // 8 Maj + 8 Ch. The §8.1 reuse operands come from the same sources the
-    // trace writer commits into the `b`/`c`/`f`/`g` duplicate columns.
-    let aux = &block.aux_split_pack;
     let a_grp = round.maj_ch.a_grp.vals;
-    let maj_grp = round.maj_ch.maj_grp.vals;
     let e_grp = round.maj_ch.e_grp.vals;
-    let ch_grp = round.maj_ch.ch_grp.vals;
-    let b_grp = match t {
-        0 => aux.b_init.vals,
-        _ => block.rounds[t - 1].maj_ch.a_grp.vals,
-    };
-    let c_grp = match t {
-        0 => aux.c_init.vals,
-        1 => aux.b_init.vals,
-        _ => block.rounds[t - 2].maj_ch.a_grp.vals,
-    };
-    let f_grp = match t {
-        0 => aux.f_init.vals,
-        _ => block.rounds[t - 1].maj_ch.e_grp.vals,
-    };
-    let g_grp = match t {
-        0 => aux.g_init.vals,
-        1 => aux.f_init.vals,
-        _ => block.rounds[t - 2].maj_ch.e_grp.vals,
-    };
-    for i in 0..GROUPS_PER_ROUND_PARTITION {
-        let denom = relations.maj.combine(&[
-            BaseField::from(a_grp[i]),
-            BaseField::from(b_grp[i]),
-            BaseField::from(c_grp[i]),
-            BaseField::from(maj_grp[i]),
-        ]);
-        all[*cursor][slot] = (SecureField::one(), denom);
-        *cursor += 1;
-    }
-    for i in 0..GROUPS_PER_ROUND_PARTITION {
-        let denom = relations.ch.combine(&[
-            BaseField::from(e_grp[i]),
-            BaseField::from(f_grp[i]),
-            BaseField::from(g_grp[i]),
-            BaseField::from(ch_grp[i]),
-        ]);
-        all[*cursor][slot] = (SecureField::one(), denom);
-        *cursor += 1;
-    }
 
     // Round split-packs (12 sites). The `a`/`e` operands have two
     // complementary-gated sites each: the t ≥ 1 site keys the input word
@@ -996,14 +765,6 @@ fn write_round_row_lookups(
 /// Internal tag for which split-pack relation a write targets.
 #[derive(Copy, Clone)]
 enum RelTag {
-    Sigma0DecodeS,
-    Sigma0DecodeSPrime,
-    Sigma1DecodeS,
-    Sigma1DecodeSPrime,
-    LowerSigma0DecodeS,
-    LowerSigma0DecodeSPrime,
-    LowerSigma1DecodeS,
-    LowerSigma1DecodeSPrime,
     Sigma0Lo,
     Sigma0Hi,
     Sigma1Lo,
@@ -1016,20 +777,6 @@ enum RelTag {
 
 fn combine_with_tag(relations: &Sha256Relations, tag: RelTag, values: &[BaseField]) -> SecureField {
     match tag {
-        RelTag::Sigma0DecodeS => relations.sigma_decode.sigma0_s.combine(values),
-        RelTag::Sigma0DecodeSPrime => relations.sigma_decode.sigma0_s_complement.combine(values),
-        RelTag::Sigma1DecodeS => relations.sigma_decode.sigma1_s.combine(values),
-        RelTag::Sigma1DecodeSPrime => relations.sigma_decode.sigma1_s_complement.combine(values),
-        RelTag::LowerSigma0DecodeS => relations.sigma_decode.lower_sigma0_s.combine(values),
-        RelTag::LowerSigma0DecodeSPrime => relations
-            .sigma_decode
-            .lower_sigma0_s_complement
-            .combine(values),
-        RelTag::LowerSigma1DecodeS => relations.sigma_decode.lower_sigma1_s.combine(values),
-        RelTag::LowerSigma1DecodeSPrime => relations
-            .sigma_decode
-            .lower_sigma1_s_complement
-            .combine(values),
         RelTag::Sigma0Lo => relations.split_pack.sigma0_lo.combine(values),
         RelTag::Sigma0Hi => relations.split_pack.sigma0_hi.combine(values),
         RelTag::Sigma1Lo => relations.split_pack.sigma1_lo.combine(values),
@@ -1079,74 +826,6 @@ fn write_carry_range_pair(
 ) {
     write_range_check(all, cursor, slot, relations, kind, carries.lo);
     write_range_check(all, cursor, slot, relations, kind, carries.hi);
-}
-
-fn write_sigma_decode_lookups(
-    all: &mut [Vec<Frac>],
-    cursor: &mut usize,
-    slot: usize,
-    dec: &crate::types::SigmaDecodeWitness,
-    s_tag: RelTag,
-    sp_tag: RelTag,
-    relations: &Sha256Relations,
-) {
-    // (1) S-side decode lookup (5 cells).
-    let s_vals = [
-        BaseField::from(dec.key_s),
-        BaseField::from(dec.o_main_s.lo),
-        BaseField::from(dec.o_main_s.hi),
-        BaseField::from(dec.o2_partial_s.lo),
-        BaseField::from(dec.o2_partial_s.hi),
-    ];
-    all[*cursor][slot] = (
-        SecureField::one(),
-        combine_with_tag(relations, s_tag, &s_vals),
-    );
-    *cursor += 1;
-
-    // (2) S′-side decode lookup.
-    let sp_vals = [
-        BaseField::from(dec.key_s_complement),
-        BaseField::from(dec.o_main_s_complement.lo),
-        BaseField::from(dec.o_main_s_complement.hi),
-        BaseField::from(dec.o2_partial_s_complement.lo),
-        BaseField::from(dec.o2_partial_s_complement.hi),
-    ];
-    all[*cursor][slot] = (
-        SecureField::one(),
-        combine_with_tag(relations, sp_tag, &sp_vals),
-    );
-    *cursor += 1;
-
-    // (3) 4 chunk-wise xor_8 lookups: (chunks_s[i], chunks_s'[i], chunks_combined[i])
-    // for i in (lo.b0, lo.b1, hi.b0, hi.b1).
-    let chunks_s = [
-        dec.o2_chunks_s.lo.b0,
-        dec.o2_chunks_s.lo.b1,
-        dec.o2_chunks_s.hi.b0,
-        dec.o2_chunks_s.hi.b1,
-    ];
-    let chunks_sp = [
-        dec.o2_chunks_s_complement.lo.b0,
-        dec.o2_chunks_s_complement.lo.b1,
-        dec.o2_chunks_s_complement.hi.b0,
-        dec.o2_chunks_s_complement.hi.b1,
-    ];
-    let chunks_combined = [
-        dec.o2_chunks_combined.lo.b0,
-        dec.o2_chunks_combined.lo.b1,
-        dec.o2_chunks_combined.hi.b0,
-        dec.o2_chunks_combined.hi.b1,
-    ];
-    for i in 0..4 {
-        let denom = relations.xor_8.combine(&[
-            BaseField::from(chunks_s[i]),
-            BaseField::from(chunks_sp[i]),
-            BaseField::from(chunks_combined[i]),
-        ]);
-        all[*cursor][slot] = (SecureField::one(), denom);
-        *cursor += 1;
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1250,6 +929,51 @@ pub fn generate_interaction_trace(
     Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     InteractionClaim,
 ) {
+    generate_interaction_trace_inner(
+        relations,
+        witness,
+        sha256_log_size,
+        group_width,
+        expose_digest,
+        field_exposure,
+        true,
+    )
+}
+
+pub fn generate_consumer_interaction_trace(
+    relations: &Sha256Relations,
+    witness: &Sha256Witness,
+    sha256_log_size: u32,
+    group_width: u32,
+    expose_digest: bool,
+    field_exposure: &FieldExposure,
+) -> (
+    Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
+    InteractionClaim,
+) {
+    generate_interaction_trace_inner(
+        relations,
+        witness,
+        sha256_log_size,
+        group_width,
+        expose_digest,
+        field_exposure,
+        false,
+    )
+}
+
+fn generate_interaction_trace_inner(
+    relations: &Sha256Relations,
+    witness: &Sha256Witness,
+    sha256_log_size: u32,
+    group_width: u32,
+    expose_digest: bool,
+    field_exposure: &FieldExposure,
+    include_table_providers: bool,
+) -> (
+    Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
+    InteractionClaim,
+) {
     let mut combined = Vec::new();
 
     // Sha256Eval consumer first — its slot in the proof's component list.
@@ -1268,55 +992,37 @@ pub fn generate_interaction_trace(
         claimed_sum: sha_sum,
     };
 
-    // 8 decode producers.
-    let mut decode = Vec::with_capacity(8);
-    for &(f, h) in DECODE_TABLES {
-        let (t, s) = decode_interaction(relations, witness, f, h);
-        combined.extend(t);
-        decode.push(ComponentClaim { claimed_sum: s });
-    }
-    // 1 Maj/Ch.
-    let (mc_trace, mc_sum) = maj_ch_interaction(relations, witness, group_width);
-    combined.extend(mc_trace);
-    let maj_ch = ComponentClaim {
-        claimed_sum: mc_sum,
-    };
-    // 1 xor_8.
-    let (xor_trace, xor_sum) = xor_8_interaction(relations, witness);
-    #[cfg(not(feature = "gkr-spike"))]
-    combined.extend(xor_trace);
-    #[cfg(feature = "gkr-spike")]
-    let _ = xor_trace;
-    let xor_8 = ComponentClaim {
-        claimed_sum: xor_sum,
-    };
+    let _ = group_width;
     // 4 round-side split-pack.
     let mut round_split_pack = Vec::with_capacity(4);
-    for &(p, h) in ROUND_SPLIT_TABLES {
-        let (t, s) = round_split_pack_interaction(relations, witness, p, h);
-        combined.extend(t);
-        round_split_pack.push(ComponentClaim { claimed_sum: s });
+    if include_table_providers {
+        for &(p, h) in ROUND_SPLIT_TABLES {
+            let (t, s) = round_split_pack_interaction(relations, witness, p, h);
+            combined.extend(t);
+            round_split_pack.push(ComponentClaim { claimed_sum: s });
+        }
     }
     // 4 σ-side split-pack.
     let mut sigma_split_pack = Vec::with_capacity(4);
-    for &(p, h) in SIGMA_SPLIT_TABLES {
-        let (t, s) = sigma_split_pack_interaction(relations, witness, p, h);
-        combined.extend(t);
-        sigma_split_pack.push(ComponentClaim { claimed_sum: s });
+    if include_table_providers {
+        for &(p, h) in SIGMA_SPLIT_TABLES {
+            let (t, s) = sigma_split_pack_interaction(relations, witness, p, h);
+            combined.extend(t);
+            sigma_split_pack.push(ComponentClaim { claimed_sum: s });
+        }
     }
     // 4 range producers (Range_2, Range_4, Range_5, Range_16).
     let mut range = Vec::with_capacity(4);
-    for &kind in RANGE_TABLES {
-        let (t, s) = range_k_interaction(relations, witness, kind, field_exposure);
-        combined.extend(t);
-        range.push(ComponentClaim { claimed_sum: s });
+    if include_table_providers {
+        for &kind in RANGE_TABLES {
+            let (t, s) = range_k_interaction(relations, witness, kind, field_exposure);
+            combined.extend(t);
+            range.push(ComponentClaim { claimed_sum: s });
+        }
     }
 
     let claim = InteractionClaim {
         sha256,
-        decode,
-        maj_ch,
-        xor_8,
         round_split_pack,
         sigma_split_pack,
         range,

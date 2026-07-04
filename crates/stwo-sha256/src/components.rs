@@ -58,10 +58,17 @@ pub use crate::relations::Sha256Relations;
 /// Keeps these from colliding with the ECDSA stream's tables when the
 /// integration crate combines both AIRs into one proof.
 pub const ID_PREFIX: &str = "sha256_";
+pub const SHARED_ID_PREFIX: &str = "sha_shared_";
 
 fn id(name: &str) -> PreProcessedColumnId {
     PreProcessedColumnId {
         id: format!("{ID_PREFIX}{name}"),
+    }
+}
+
+fn shared_id(name: &str) -> PreProcessedColumnId {
+    PreProcessedColumnId {
+        id: format!("{SHARED_ID_PREFIX}{name}"),
     }
 }
 
@@ -166,6 +173,10 @@ pub fn range_column_id(kind: RangeKind) -> PreProcessedColumnId {
     id(kind.tag())
 }
 
+pub fn shared_range_column_id(kind: RangeKind) -> PreProcessedColumnId {
+    shared_id(kind.tag())
+}
+
 /// Preprocessed-column ID of the single-cell `is_first_row` selector
 /// committed at the main `Sha256Eval` trace's `log_n_rows`. The selector
 /// is `1` at storage index `Layout::block_slot(0, log_n_rows) = 0` and
@@ -245,6 +256,20 @@ pub fn round_split_pack_column_ids(p: RoundPartition, h: Half16) -> [PreProcesse
     ]
 }
 
+pub fn shared_round_split_pack_column_ids(
+    p: RoundPartition,
+    h: Half16,
+) -> [PreProcessedColumnId; 5] {
+    let t = round_split_tag(p, h);
+    [
+        shared_id(&format!("{t}_key")),
+        shared_id(&format!("{t}_g0")),
+        shared_id(&format!("{t}_g1")),
+        shared_id(&format!("{t}_g2")),
+        shared_id(&format!("{t}_g3")),
+    ]
+}
+
 /// IDs of the 3 preprocessed columns of one σ-side split-and-pack table.
 /// Order: `(key, packed_s, packed_s_complement)` matching
 /// `crate::relations::SIGMA_SPLIT_PACK_REL_SIZE`.
@@ -254,6 +279,18 @@ pub fn sigma_split_pack_column_ids(p: LowerSigmaPartition, h: Half16) -> [PrePro
         id(&format!("{t}_key")),
         id(&format!("{t}_s")),
         id(&format!("{t}_sp")),
+    ]
+}
+
+pub fn shared_sigma_split_pack_column_ids(
+    p: LowerSigmaPartition,
+    h: Half16,
+) -> [PreProcessedColumnId; 3] {
+    let t = sigma_split_tag(p, h);
+    [
+        shared_id(&format!("{t}_key")),
+        shared_id(&format!("{t}_s")),
+        shared_id(&format!("{t}_sp")),
     ]
 }
 
@@ -296,7 +333,7 @@ impl FrameworkEval for SigmaDecodeEval {
         // through a small `dyn Relation`-style closure. Stwo's
         // `add_to_relation` is generic on `R: Relation<…>`; we can't pass
         // a `&dyn Relation` so we inline the 8-way match.
-        let neg_mult = -E::EF::from(mult);
+        let neg_mult = -mult;
         use crate::relations::*;
         match (self.f, self.half) {
             (SigmaFn::Sigma0, Half::S) => emit::<E, Sigma0DecodeS>(
@@ -360,10 +397,10 @@ impl FrameworkEval for SigmaDecodeEval {
 fn emit<E: EvalAtRow, R: Relation<E::F, E::EF>>(
     eval: &mut E,
     rel: &R,
-    mult: E::EF,
+    mult: E::F,
     values: &[E::F],
 ) {
-    eval.add_to_relation(RelationEntry::new(rel, mult, values));
+    eval.add_to_relation(RelationEntry::base(rel, mult, values));
 }
 
 pub type SigmaDecodeComponent = FrameworkComponent<SigmaDecodeEval>;
@@ -402,14 +439,14 @@ impl FrameworkEval for MajChEval {
         let mult_maj = eval.next_trace_mask();
         let mult_ch = eval.next_trace_mask();
 
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             &self.relations.maj,
-            -E::EF::from(mult_maj),
+            -mult_maj,
             &[a.clone(), b.clone(), c.clone(), maj_val],
         ));
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             &self.relations.ch,
-            -E::EF::from(mult_ch),
+            -mult_ch,
             &[a, b, c, ch_val],
         ));
 
@@ -446,9 +483,9 @@ impl FrameworkEval for Xor8Eval {
         let mult = eval.next_trace_mask();
 
         #[cfg(not(feature = "gkr-spike"))]
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             &self.relations.xor_8,
-            -E::EF::from(mult),
+            -mult,
             &[x, y, z],
         ));
         #[cfg(feature = "gkr-spike")]
@@ -473,6 +510,7 @@ pub struct RoundSplitPackEval {
     pub partition: RoundPartition,
     pub half: Half16,
     pub relations: Sha256Relations,
+    pub shared_tables: bool,
 }
 
 impl FrameworkEval for RoundSplitPackEval {
@@ -483,7 +521,11 @@ impl FrameworkEval for RoundSplitPackEval {
         self.log_size + 1
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let cols = round_split_pack_column_ids(self.partition, self.half);
+        let cols = if self.shared_tables {
+            shared_round_split_pack_column_ids(self.partition, self.half)
+        } else {
+            round_split_pack_column_ids(self.partition, self.half)
+        };
         let key = eval.get_preprocessed_column(cols[0].clone());
         let g0 = eval.get_preprocessed_column(cols[1].clone());
         let g1 = eval.get_preprocessed_column(cols[2].clone());
@@ -491,7 +533,7 @@ impl FrameworkEval for RoundSplitPackEval {
         let g3 = eval.get_preprocessed_column(cols[4].clone());
         let mult = eval.next_trace_mask();
         let values = [key, g0, g1, g2, g3];
-        let neg = -E::EF::from(mult);
+        let neg = -mult;
         use crate::relations::*;
         match (self.partition, self.half) {
             (RoundPartition::Sigma0AndMaj, Half16::Lo) => emit::<E, Sigma0SplitPackLo>(
@@ -536,6 +578,7 @@ pub struct SigmaSplitPackEval {
     pub partition: LowerSigmaPartition,
     pub half: Half16,
     pub relations: Sha256Relations,
+    pub shared_tables: bool,
 }
 
 impl FrameworkEval for SigmaSplitPackEval {
@@ -546,13 +589,17 @@ impl FrameworkEval for SigmaSplitPackEval {
         self.log_size + 1
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let cols = sigma_split_pack_column_ids(self.partition, self.half);
+        let cols = if self.shared_tables {
+            shared_sigma_split_pack_column_ids(self.partition, self.half)
+        } else {
+            sigma_split_pack_column_ids(self.partition, self.half)
+        };
         let key = eval.get_preprocessed_column(cols[0].clone());
         let packed_s = eval.get_preprocessed_column(cols[1].clone());
         let packed_sp = eval.get_preprocessed_column(cols[2].clone());
         let mult = eval.next_trace_mask();
         let values = [key, packed_s, packed_sp];
-        let neg = -E::EF::from(mult);
+        let neg = -mult;
         use crate::relations::*;
         match (self.partition, self.half) {
             (LowerSigmaPartition::LowerSigma0, Half16::Lo) => emit::<E, LowerSigma0SplitPackLo>(
@@ -612,6 +659,7 @@ pub struct RangeKEval {
     pub log_size: u32,
     pub kind: RangeKind,
     pub relations: Sha256Relations,
+    pub shared_tables: bool,
 }
 
 impl FrameworkEval for RangeKEval {
@@ -622,9 +670,13 @@ impl FrameworkEval for RangeKEval {
         self.log_size + 1
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let value = eval.get_preprocessed_column(range_column_id(self.kind));
+        let value = eval.get_preprocessed_column(if self.shared_tables {
+            shared_range_column_id(self.kind)
+        } else {
+            range_column_id(self.kind)
+        });
         let mult = eval.next_trace_mask();
-        let neg = -E::EF::from(mult);
+        let neg = -mult;
 
         use crate::relations::*;
         let values = [value];
@@ -661,15 +713,6 @@ pub type RangeKComponent = FrameworkComponent<RangeKEval>;
 /// both sides in sync or the verifier will read the wrong column.
 pub fn all_preprocessed_column_ids() -> Vec<PreProcessedColumnId> {
     let mut out = Vec::new();
-    // 8 decode tables in the order `Sha256Relations::draw`/`SigmaDecodeRelations::draw` uses.
-    for (f, h) in DECODE_TABLES {
-        out.extend(decode_column_ids(*f, *h));
-    }
-    // 1 Maj/Ch table — column IDs depend only on table identity, not on
-    // `group_width` (which sets the table's row count, not its columns).
-    out.extend(maj_ch_column_ids());
-    // 1 xor_8 table.
-    out.extend(xor_8_column_ids());
     // 4 round-side split-pack tables, then 4 σ-side.
     for (p, h) in ROUND_SPLIT_TABLES {
         out.extend(round_split_pack_column_ids(*p, *h));
@@ -690,6 +733,27 @@ pub fn all_preprocessed_column_ids() -> Vec<PreProcessedColumnId> {
     // indicators + schedule gate), also consumer-read via
     // `get_preprocessed_column` and sized to the main trace.
     out.extend(round_cyclic_column_ids());
+    out
+}
+
+pub fn consumer_preprocessed_column_ids() -> Vec<PreProcessedColumnId> {
+    let mut out = Vec::new();
+    out.push(is_first_row_column_id());
+    out.extend(round_cyclic_column_ids());
+    out
+}
+
+pub fn shared_table_preprocessed_column_ids() -> Vec<PreProcessedColumnId> {
+    let mut out = Vec::new();
+    for (p, h) in ROUND_SPLIT_TABLES {
+        out.extend(shared_round_split_pack_column_ids(*p, *h));
+    }
+    for (p, h) in SIGMA_SPLIT_TABLES {
+        out.extend(shared_sigma_split_pack_column_ids(*p, *h));
+    }
+    for &kind in RANGE_TABLES {
+        out.push(shared_range_column_id(kind));
+    }
     out
 }
 

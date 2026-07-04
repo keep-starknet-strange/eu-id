@@ -43,12 +43,12 @@ fn honest_multilinear_sumcheck_accepts() {
         .iter()
         .copied()
         .fold(Fp::ZERO, |acc, value| acc + value);
-    let mut prover_channel = CoprocessorChannel::default();
+    let mut prover_channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
     prover_channel.mix_bytes(b"sumcheck-test");
 
     let proof = prove_sum(values.clone(), claimed_sum, &mut prover_channel).unwrap();
 
-    let mut verifier_channel = CoprocessorChannel::default();
+    let mut verifier_channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
     verifier_channel.mix_bytes(b"sumcheck-test");
     assert!(verify_sum(&proof, claimed_sum, &values, &mut verifier_channel).unwrap());
 }
@@ -60,12 +60,12 @@ fn tampered_round_polynomial_rejects() {
         .iter()
         .copied()
         .fold(Fp::ZERO, |acc, value| acc + value);
-    let mut prover_channel = CoprocessorChannel::default();
+    let mut prover_channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
     prover_channel.mix_bytes(b"sumcheck-test");
     let mut proof = prove_sum(values.clone(), claimed_sum, &mut prover_channel).unwrap();
     proof.rounds[0][0] = proof.rounds[0][0] + Fp::ONE;
 
-    let mut verifier_channel = CoprocessorChannel::default();
+    let mut verifier_channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
     verifier_channel.mix_bytes(b"sumcheck-test");
     assert!(!verify_sum(&proof, claimed_sum, &values, &mut verifier_channel).unwrap());
 }
@@ -78,11 +78,11 @@ fn same_seed_produces_identical_proof() {
         .copied()
         .fold(Fp::ZERO, |acc, value| acc + value);
 
-    let mut a = CoprocessorChannel::default();
+    let mut a = CoprocessorChannel::from_seed([0u8; 32], b"test");
     a.mix_bytes(b"same-seed");
     let proof_a = prove_sum(values.clone(), claimed_sum, &mut a).unwrap();
 
-    let mut b = CoprocessorChannel::default();
+    let mut b = CoprocessorChannel::from_seed([0u8; 32], b"test");
     b.mix_bytes(b"same-seed");
     let proof_b = prove_sum(values, claimed_sum, &mut b).unwrap();
 
@@ -93,7 +93,7 @@ fn same_seed_produces_identical_proof() {
 fn circuit_sumcheck_exports_input_claims_for_bl3() {
     let (circuit, witness) = small_satisfied_circuit();
     let commitment_root = [9u8; 32];
-    let mut prover_channel = CoprocessorChannel::default();
+    let mut prover_channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
 
     let proof = prove_circuit(&circuit, &witness, commitment_root, &mut prover_channel).unwrap();
 
@@ -119,7 +119,7 @@ fn circuit_sumcheck_exports_input_claims_for_bl3() {
         "proof pads must match the circuit-shaped committed pad layout"
     );
 
-    let mut verifier_channel = CoprocessorChannel::default();
+    let mut verifier_channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
     let input_claims =
         verify_circuit(&circuit, &proof, commitment_root, &mut verifier_channel).unwrap();
     let input_mle = Mle::new(witness.last().unwrap().clone());
@@ -134,11 +134,11 @@ fn circuit_sumcheck_exports_input_claims_for_bl3() {
 fn circuit_sumcheck_recurses_to_input_claims_across_layers() {
     let (circuit, witness) = two_layer_satisfied_circuit();
     let commitment_root = [7u8; 32];
-    let mut prover_channel = CoprocessorChannel::default();
+    let mut prover_channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
 
     let proof = prove_circuit(&circuit, &witness, commitment_root, &mut prover_channel).unwrap();
 
-    let mut verifier_channel = CoprocessorChannel::default();
+    let mut verifier_channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
     let input_claims =
         verify_circuit(&circuit, &proof, commitment_root, &mut verifier_channel).unwrap();
     let input_mle = Mle::new(witness.last().unwrap().clone());
@@ -153,12 +153,12 @@ fn circuit_sumcheck_recurses_to_input_claims_across_layers() {
 fn circuit_sumcheck_rejects_wrong_final_input_claim() {
     let (circuit, witness) = small_satisfied_circuit();
     let commitment_root = [9u8; 32];
-    let mut prover_channel = CoprocessorChannel::default();
+    let mut prover_channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
     let mut proof =
         prove_circuit(&circuit, &witness, commitment_root, &mut prover_channel).unwrap();
     proof.input_claims.values[0] = proof.input_claims.values[0] + Fp::ONE;
 
-    let mut verifier_channel = CoprocessorChannel::default();
+    let mut verifier_channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
 
     assert!(verify_circuit(&circuit, &proof, commitment_root, &mut verifier_channel).is_err());
 }
@@ -166,10 +166,10 @@ fn circuit_sumcheck_rejects_wrong_final_input_claim() {
 #[test]
 fn circuit_sumcheck_rejects_wrong_commitment_root() {
     let (circuit, witness) = small_satisfied_circuit();
-    let mut prover_channel = CoprocessorChannel::default();
+    let mut prover_channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
     let proof = prove_circuit(&circuit, &witness, [9u8; 32], &mut prover_channel).unwrap();
 
-    let mut verifier_channel = CoprocessorChannel::default();
+    let mut verifier_channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
 
     assert!(verify_circuit(&circuit, &proof, [8u8; 32], &mut verifier_channel).is_err());
 }
@@ -178,12 +178,12 @@ fn circuit_sumcheck_rejects_wrong_commitment_root() {
 fn circuit_sumcheck_rejects_tampered_round_polynomial() {
     let (circuit, witness) = small_satisfied_circuit();
     let commitment_root = [9u8; 32];
-    let mut prover_channel = CoprocessorChannel::default();
+    let mut prover_channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
     let mut proof =
         prove_circuit(&circuit, &witness, commitment_root, &mut prover_channel).unwrap();
     proof.layers[0].rounds[0][1] = proof.layers[0].rounds[0][1] + Fp::ONE;
 
-    let mut verifier_channel = CoprocessorChannel::default();
+    let mut verifier_channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
 
     assert!(verify_circuit(&circuit, &proof, commitment_root, &mut verifier_channel).is_err());
 }
@@ -192,12 +192,12 @@ fn circuit_sumcheck_rejects_tampered_round_polynomial() {
 fn circuit_sumcheck_rejects_tampered_otp_round_pad() {
     let (circuit, witness) = small_satisfied_circuit();
     let commitment_root = [9u8; 32];
-    let mut prover_channel = CoprocessorChannel::default();
+    let mut prover_channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
     let mut proof =
         prove_circuit(&circuit, &witness, commitment_root, &mut prover_channel).unwrap();
     proof.layers[0].round_pads[0][0] = proof.layers[0].round_pads[0][0] + Fp::ONE;
 
-    let mut verifier_channel = CoprocessorChannel::default();
+    let mut verifier_channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
 
     assert!(verify_circuit(&circuit, &proof, commitment_root, &mut verifier_channel).is_err());
 }
@@ -206,12 +206,12 @@ fn circuit_sumcheck_rejects_tampered_otp_round_pad() {
 fn circuit_sumcheck_rejects_tampered_otp_claim_pad_product() {
     let (circuit, witness) = small_satisfied_circuit();
     let commitment_root = [9u8; 32];
-    let mut prover_channel = CoprocessorChannel::default();
+    let mut prover_channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
     let mut proof =
         prove_circuit(&circuit, &witness, commitment_root, &mut prover_channel).unwrap();
     proof.layers[0].claim_pads[2] = proof.layers[0].claim_pads[2] + Fp::ONE;
 
-    let mut verifier_channel = CoprocessorChannel::default();
+    let mut verifier_channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
 
     assert!(verify_circuit(&circuit, &proof, commitment_root, &mut verifier_channel).is_err());
 }

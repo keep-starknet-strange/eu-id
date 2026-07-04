@@ -46,9 +46,9 @@ use stwo_constraint_framework::PointEvaluator;
 use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 
 use crate::components::{
-    all_preprocessed_column_ids, range_log_size, MajChEval, RangeKEval, RoundSplitPackEval,
-    Sha256Relations, SigmaDecodeEval, SigmaSplitPackEval, Xor8Eval, DECODE_TABLES, RANGE_TABLES,
-    ROUND_SPLIT_TABLES, SIGMA_SPLIT_TABLES,
+    all_preprocessed_column_ids, consumer_preprocessed_column_ids, range_log_size, RangeKEval,
+    RoundSplitPackEval, Sha256Relations, SigmaSplitPackEval, RANGE_TABLES, ROUND_SPLIT_TABLES,
+    SIGMA_SPLIT_TABLES,
 };
 use crate::constraints::Sha256Eval;
 use crate::field_exposure::FieldExposure;
@@ -62,14 +62,15 @@ use crate::gkr_spike::{
     prove_xor_8_gkr, verify_xor_8_gkr, xor_8_multiplicity_mle, xor_8_table_claim_matches,
     xor_8_table_denominator_mle_eval, Xor8GkrProofWire,
 };
-use crate::interaction::{generate_interaction_trace, sha_lookups_per_row, InteractionClaim};
+use crate::interaction::{
+    generate_consumer_interaction_trace, generate_interaction_trace, sha_lookups_per_row,
+    InteractionClaim,
+};
 use crate::multiplicities::{
-    decode_multiplicities, maj_ch_multiplicities, range_k_multiplicities,
-    round_split_pack_multiplicities, sigma_split_pack_multiplicities, xor_8_multiplicities,
+    range_k_multiplicities, round_split_pack_multiplicities, sigma_split_pack_multiplicities,
 };
-use crate::preprocessed::{
-    generate_preprocessed_trace, maj_ch_log_size, preprocessed_log_sizes, LOG_SIZE_16,
-};
+use crate::preprocessed::{generate_preprocessed_trace, preprocessed_log_sizes, LOG_SIZE_16};
+use crate::relations::SharedShaTableRelations;
 use crate::trace::Layout;
 use crate::types::Sha256Witness;
 
@@ -118,15 +119,26 @@ fn layout(
     group_width: u32,
     expose_digest: bool,
     field_exposure: &FieldExposure,
+    shared_tables: bool,
 ) -> TreeLayout {
     TreeLayout {
-        preprocessed: preprocessed_log_sizes(group_width, log_n_rows),
-        trace: base_trace_log_sizes(log_n_rows, group_width, field_exposure.n_columns()),
+        preprocessed: if shared_tables {
+            consumer_preprocessed_log_sizes(log_n_rows)
+        } else {
+            preprocessed_log_sizes(group_width, log_n_rows)
+        },
+        trace: base_trace_log_sizes(
+            log_n_rows,
+            group_width,
+            field_exposure.n_columns(),
+            !shared_tables,
+        ),
         interaction: interaction_trace_log_sizes(
             log_n_rows,
             group_width,
             expose_digest,
             field_exposure,
+            !shared_tables,
         ),
     }
 }
@@ -137,9 +149,6 @@ fn layout(
 pub fn flatten_claimed_sums(claim: &InteractionClaim) -> Vec<QM31> {
     let mut out = Vec::new();
     out.push(claim.sha256.claimed_sum);
-    out.extend(claim.decode.iter().map(|c| c.claimed_sum));
-    out.push(claim.maj_ch.claimed_sum);
-    out.push(claim.xor_8.claimed_sum);
     out.extend(claim.round_split_pack.iter().map(|c| c.claimed_sum));
     out.extend(claim.sigma_split_pack.iter().map(|c| c.claimed_sum));
     out.extend(claim.range.iter().map(|c| c.claimed_sum));
@@ -200,6 +209,7 @@ pub struct Sha256Prover<'a> {
     digest_handle: Option<air_core::relations::SharedDigestRelation>,
     field_exposure: FieldExposure,
     field_handle: Option<air_core::relations::SharedFieldRelation>,
+    shared_tables: Option<SharedShaTableRelations>,
     preprocessed: Option<Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>>,
     base: Option<Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>>,
     relations: Option<Sha256Relations>,
@@ -250,6 +260,7 @@ impl<'a> Sha256ColumnTask<'a> {
             self.log_n_rows,
             self.group_width,
             &self.field_exposure,
+            true,
         );
         Sha256PreparedColumns { preprocessed, base }
     }
@@ -265,6 +276,7 @@ impl<'a> Sha256Prover<'a> {
             digest_handle: None,
             field_exposure: FieldExposure::empty(),
             field_handle: None,
+            shared_tables: None,
             preprocessed: None,
             base: None,
             relations: None,
@@ -343,6 +355,15 @@ impl<'a> Sha256Prover<'a> {
         self
     }
 
+    pub fn with_shared_tables(mut self, shared: SharedShaTableRelations) -> Self {
+        self.shared_tables = Some(shared);
+        self
+    }
+
+    fn uses_shared_tables(&self) -> bool {
+        self.shared_tables.is_some()
+    }
+
     fn built_components(&self) -> &Sha256Components {
         self.components
             .as_ref()
@@ -399,12 +420,17 @@ impl Air for Sha256Prover<'_> {
             self.group_width,
             self.expose_digest,
             &self.field_exposure,
+            self.uses_shared_tables(),
         )
         .mix_into(channel);
     }
 
     fn draw_relations(&mut self, channel: &mut Blake2sChannel) {
-        let relations = Sha256Relations::draw(channel);
+        let relations = if let Some(shared) = &self.shared_tables {
+            Sha256Relations::draw_with_shared_tables(channel, shared)
+        } else {
+            Sha256Relations::draw(channel)
+        };
         // Share the drawn digest / field relations with the consumer modules, if
         // composed.
         if let Some(handle) = &self.digest_handle {
@@ -422,6 +448,7 @@ impl Air for Sha256Prover<'_> {
             self.group_width,
             self.expose_digest,
             &self.field_exposure,
+            self.uses_shared_tables(),
         )
     }
 
@@ -430,7 +457,11 @@ impl Air for Sha256Prover<'_> {
     }
 
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
-        all_preprocessed_column_ids()
+        if self.uses_shared_tables() {
+            consumer_preprocessed_column_ids()
+        } else {
+            all_preprocessed_column_ids()
+        }
     }
 
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
@@ -442,6 +473,7 @@ impl Air for Sha256Prover<'_> {
             self.group_width,
             self.expose_digest,
             &self.field_exposure,
+            !self.uses_shared_tables(),
         ));
         #[cfg(feature = "gkr-spike")]
         {
@@ -489,11 +521,8 @@ impl Air for Sha256Prover<'_> {
 
 impl AirProver for Sha256Prover<'_> {
     fn max_log_size(&self) -> u32 {
-        // The packed Maj/Ch table (`3W` rows) is the largest committed domain;
-        // it dominates `LOG_SIZE_16` and the trace's own `log_n_rows`.
-        maj_ch_log_size(self.group_width)
-            .max(LOG_SIZE_16)
-            .max(self.log_n_rows)
+        let _ = self.group_width;
+        LOG_SIZE_16.max(self.log_n_rows)
     }
 
     fn store_polynomial_coefficients(&self) -> bool {
@@ -501,11 +530,28 @@ impl AirProver for Sha256Prover<'_> {
     }
 
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>) {
-        let preprocessed = self.preprocessed.take().unwrap_or_else(|| {
-            let (preprocessed_evals, _ids, _log_sizes) =
-                generate_preprocessed_trace(self.group_width, self.log_n_rows);
-            preprocessed_evals
-        });
+        let ids = self.preprocessed_column_ids();
+        let preprocessed = match self.preprocessed.take() {
+            Some(evals) if !self.uses_shared_tables() => evals,
+            Some(evals) => {
+                let full_ids = all_preprocessed_column_ids();
+                ids.iter()
+                    .map(|selected_id| {
+                        full_ids
+                            .iter()
+                            .zip(&evals)
+                            .find_map(|(id, column)| (id == selected_id).then(|| column.clone()))
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "selected preprocessed column {} is not owned by this SHA-256 module",
+                                    selected_id.id
+                                )
+                            })
+                    })
+                    .collect()
+            }
+            None => generated_preprocessed_for_ids(self.group_width, self.log_n_rows, &ids),
+        };
         tb.extend_evals(preprocessed);
     }
 
@@ -513,15 +559,32 @@ impl AirProver for Sha256Prover<'_> {
         // Fingerprint exactly what `write_preprocessed` will commit: the caller-provided
         // evals when set, otherwise the (cached) generated trace. Do not `take` — the
         // evals must still be available for the later `write_preprocessed` call.
-        let ids = all_preprocessed_column_ids();
+        let ids = self.preprocessed_column_ids();
         match &self.preprocessed {
-            Some(evals) => {
+            Some(evals) if !self.uses_shared_tables() => {
                 fingerprint_preprocessed_columns("stwo_sha256::Sha256Prover", &ids, evals)
             }
+            Some(evals) => {
+                let full_ids = all_preprocessed_column_ids();
+                let selected: Vec<_> = ids
+                    .iter()
+                    .map(|selected_id| {
+                        full_ids
+                            .iter()
+                            .zip(evals)
+                            .find_map(|(id, column)| (id == selected_id).then(|| column.clone()))
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "selected preprocessed column {} is not owned by this SHA-256 module",
+                                    selected_id.id
+                                )
+                            })
+                    })
+                    .collect();
+                fingerprint_preprocessed_columns("stwo_sha256::Sha256Prover", &ids, &selected)
+            }
             None => {
-                let (evals, gen_ids, _log_sizes) =
-                    generate_preprocessed_trace(self.group_width, self.log_n_rows);
-                debug_assert_eq!(ids, gen_ids);
+                let evals = generated_preprocessed_for_ids(self.group_width, self.log_n_rows, &ids);
                 fingerprint_preprocessed_columns("stwo_sha256::Sha256Prover", &ids, &evals)
             }
         }
@@ -536,12 +599,28 @@ impl AirProver for Sha256Prover<'_> {
         // share one composition (e.g. the mdoc circuit's four instances), the
         // orchestrator commits each preprocessed column once and asks later
         // instances for only their non-duplicate subset — possibly none.
-        let ids = all_preprocessed_column_ids();
-        let preprocessed = self.preprocessed.take().unwrap_or_else(|| {
-            let (preprocessed_evals, _ids, _log_sizes) =
-                generate_preprocessed_trace(self.group_width, self.log_n_rows);
-            preprocessed_evals
-        });
+        let ids = self.preprocessed_column_ids();
+        let preprocessed = match self.preprocessed.take() {
+            Some(evals) if !self.uses_shared_tables() => evals,
+            Some(evals) => {
+                let full_ids = all_preprocessed_column_ids();
+                ids.iter()
+                    .map(|selected_id| {
+                        full_ids
+                            .iter()
+                            .zip(&evals)
+                            .find_map(|(id, column)| (id == selected_id).then(|| column.clone()))
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "selected preprocessed column {} is not owned by this SHA-256 module",
+                                    selected_id.id
+                                )
+                            })
+                    })
+                    .collect()
+            }
+            None => generated_preprocessed_for_ids(self.group_width, self.log_n_rows, &ids),
+        };
         if selected_ids == ids.as_slice() {
             tb.extend_evals(preprocessed);
             return;
@@ -570,14 +649,34 @@ impl AirProver for Sha256Prover<'_> {
                 self.log_n_rows,
                 self.group_width,
                 &self.field_exposure,
+                !self.uses_shared_tables(),
             )
         });
         tb.extend_evals(base);
     }
 
     fn write_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>) {
-        let prepared = self.interaction_job().materialize();
-        self.write_prepared_interaction(tb, prepared);
+        let (interaction_evals, interaction_claim) = if self.uses_shared_tables() {
+            generate_consumer_interaction_trace(
+                self.relations(),
+                self.witness,
+                self.log_n_rows,
+                self.group_width,
+                self.expose_digest,
+                &self.field_exposure,
+            )
+        } else {
+            generate_interaction_trace(
+                self.relations(),
+                self.witness,
+                self.log_n_rows,
+                self.group_width,
+                self.expose_digest,
+                &self.field_exposure,
+            )
+        };
+        tb.extend_evals(interaction_evals);
+        self.interaction_claim = Some(interaction_claim);
     }
 
     #[cfg(feature = "gkr-spike")]
@@ -644,6 +743,7 @@ pub struct Sha256Verifier {
     digest_handle: Option<air_core::relations::SharedDigestRelation>,
     field_exposure: FieldExposure,
     field_handle: Option<air_core::relations::SharedFieldRelation>,
+    shared_tables: Option<SharedShaTableRelations>,
     interaction_claim: InteractionClaim,
     relations: Option<Sha256Relations>,
     components: Option<Sha256Components>,
@@ -664,6 +764,7 @@ impl Sha256Verifier {
             digest_handle: None,
             field_exposure: FieldExposure::empty(),
             field_handle: None,
+            shared_tables: None,
             interaction_claim,
             relations: None,
             components: None,
@@ -720,6 +821,15 @@ impl Sha256Verifier {
         self
     }
 
+    pub fn with_shared_tables(mut self, shared: SharedShaTableRelations) -> Self {
+        self.shared_tables = Some(shared);
+        self
+    }
+
+    fn uses_shared_tables(&self) -> bool {
+        self.shared_tables.is_some()
+    }
+
     fn relations(&self) -> &Sha256Relations {
         self.relations
             .as_ref()
@@ -740,12 +850,17 @@ impl Air for Sha256Verifier {
             self.group_width,
             self.expose_digest,
             &self.field_exposure,
+            self.uses_shared_tables(),
         )
         .mix_into(channel);
     }
 
     fn draw_relations(&mut self, channel: &mut Blake2sChannel) {
-        let relations = Sha256Relations::draw(channel);
+        let relations = if let Some(shared) = &self.shared_tables {
+            Sha256Relations::draw_with_shared_tables(channel, shared)
+        } else {
+            Sha256Relations::draw(channel)
+        };
         if let Some(handle) = &self.digest_handle {
             handle.set(relations.digest.digest.clone());
         }
@@ -761,6 +876,7 @@ impl Air for Sha256Verifier {
             self.group_width,
             self.expose_digest,
             &self.field_exposure,
+            self.uses_shared_tables(),
         )
     }
 
@@ -769,7 +885,11 @@ impl Air for Sha256Verifier {
     }
 
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
-        all_preprocessed_column_ids()
+        if self.uses_shared_tables() {
+            consumer_preprocessed_column_ids()
+        } else {
+            all_preprocessed_column_ids()
+        }
     }
 
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
@@ -781,6 +901,7 @@ impl Air for Sha256Verifier {
             self.group_width,
             self.expose_digest,
             &self.field_exposure,
+            !self.uses_shared_tables(),
         ));
         #[cfg(feature = "gkr-spike")]
         {
@@ -885,6 +1006,10 @@ struct Stmt0 {
     /// rejects.
     n_field_columns: u32,
     n_field_yields: u32,
+    /// Whether fixed SHA table providers are supplied by a sibling module.
+    /// Only the enabled case is mixed so the legacy standalone transcript
+    /// remains byte-identical.
+    shared_tables: bool,
 }
 impl Stmt0 {
     fn new(
@@ -892,6 +1017,7 @@ impl Stmt0 {
         group_width: u32,
         expose_digest: bool,
         field_exposure: &FieldExposure,
+        shared_tables: bool,
     ) -> Self {
         Self {
             log_n_rows,
@@ -899,6 +1025,7 @@ impl Stmt0 {
             expose_digest,
             n_field_columns: field_exposure.n_columns() as u32,
             n_field_yields: field_exposure.n_yields() as u32,
+            shared_tables,
         }
     }
 
@@ -908,6 +1035,9 @@ impl Stmt0 {
         channel.mix_u64(u64::from(self.expose_digest));
         channel.mix_u64(u64::from(self.n_field_columns));
         channel.mix_u64(u64::from(self.n_field_yields));
+        if self.shared_tables {
+            channel.mix_u64(1);
+        }
     }
 }
 
@@ -939,6 +1069,7 @@ fn build_base_trace(
     log_n_rows: u32,
     group_width: u32,
     field_exposure: &FieldExposure,
+    include_table_providers: bool,
 ) -> Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>> {
     let mut base_trace: Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>> =
         Vec::new();
@@ -954,21 +1085,11 @@ fn build_base_trace(
         base_trace.push(CircleEvaluation::new(sha_domain, col));
     }
 
+    let _ = group_width;
+    if !include_table_providers {
+        return base_trace;
+    }
     // Multiplicity columns — same order as `Sha256Components::component_provers`.
-    for &(f, h) in DECODE_TABLES {
-        let mults = decode_multiplicities(witness, f, h);
-        base_trace.push(mult_col_to_eval(&mults, LOG_SIZE_16));
-    }
-    {
-        let mc = maj_ch_multiplicities(witness, group_width);
-        let log_size = maj_ch_log_size(group_width);
-        base_trace.push(mult_col_to_eval(&mc.maj, log_size));
-        base_trace.push(mult_col_to_eval(&mc.ch, log_size));
-    }
-    {
-        let mults = xor_8_multiplicities(witness);
-        base_trace.push(mult_col_to_eval(&mults, LOG_SIZE_16));
-    }
     for &(p, h) in ROUND_SPLIT_TABLES {
         let mults = round_split_pack_multiplicities(witness, p, h);
         base_trace.push(mult_col_to_eval(&mults, LOG_SIZE_16));
@@ -988,16 +1109,19 @@ fn build_base_trace(
 /// log_sizes of every base-trace column in commit order. The Sha256Eval
 /// block first (`TOTAL_COLS` × `log_n_rows`), then one mult col per
 /// producer component.
-fn base_trace_log_sizes(log_n_rows: u32, group_width: u32, n_field_cols: usize) -> Vec<u32> {
+fn base_trace_log_sizes(
+    log_n_rows: u32,
+    group_width: u32,
+    n_field_cols: usize,
+    include_table_providers: bool,
+) -> Vec<u32> {
     // Base columns + the dynamic credential-field byte tail, all at the
     // trace's `log_n_rows`. Empty exposure leaves this at `Layout::TOTAL_COLS`.
     let mut out = vec![log_n_rows; Layout::total_cols_with_fields(n_field_cols)];
-    // 8 decode mults, each at log_size 16.
-    out.extend(std::iter::repeat_n(LOG_SIZE_16, DECODE_TABLES.len()));
-    // 2 Maj/Ch mults, each at log_size 3W.
-    out.extend(std::iter::repeat_n(maj_ch_log_size(group_width), 2));
-    // xor_8 mult.
-    out.push(LOG_SIZE_16);
+    let _ = group_width;
+    if !include_table_providers {
+        return out;
+    }
     // 4 round + 4 σ split-pack mults.
     out.extend(std::iter::repeat_n(LOG_SIZE_16, ROUND_SPLIT_TABLES.len()));
     out.extend(std::iter::repeat_n(LOG_SIZE_16, SIGMA_SPLIT_TABLES.len()));
@@ -1017,6 +1141,7 @@ fn interaction_trace_log_sizes(
     group_width: u32,
     expose_digest: bool,
     field_exposure: &FieldExposure,
+    include_table_providers: bool,
 ) -> Vec<u32> {
     let mut out = Vec::new();
 
@@ -1025,26 +1150,17 @@ fn interaction_trace_log_sizes(
     const EXT: usize = SECURE_EXTENSION_DEGREE;
 
     // Sha256Eval consumer: `sha_lookups_per_row(expose_digest, field_exposure)`
-    // lookup sites per row (W=6: 106, plus the digest yield when that provider
+    // lookup sites per row (W=6 hybrid: 66, plus the digest yield when that provider
     // is on, plus the field provider's two `Range16` byte range-checks per
     // exposed byte column and one yield per exposed window byte) → `ceil(n/2)`
     // paired columns. Sized at log_n_rows. See `interaction::sha256_interaction`
     // for the per-row site breakdown.
     let sha_cols = num_paired_cols(sha_lookups_per_row(expose_digest, field_exposure));
     out.extend(std::iter::repeat_n(log_n_rows, sha_cols * EXT));
-    // 8 decode producers: 1 lookup each → 1 column each at log_size 16.
-    for _ in DECODE_TABLES {
-        out.extend(std::iter::repeat_n(LOG_SIZE_16, num_paired_cols(1) * EXT));
+    let _ = group_width;
+    if !include_table_providers {
+        return out;
     }
-    // Maj/Ch: 2 lookups → 1 paired column at log_size 3W.
-    out.extend(std::iter::repeat_n(
-        maj_ch_log_size(group_width),
-        num_paired_cols(2) * EXT,
-    ));
-    // xor_8: 1 lookup → 1 column at log_size 16. Under the GKR spike this
-    // producer-side LogUp column is replaced by the side GKR argument.
-    #[cfg(not(feature = "gkr-spike"))]
-    out.extend(std::iter::repeat_n(LOG_SIZE_16, num_paired_cols(1) * EXT));
     // 4 round split-pack: 1 lookup each.
     for _ in ROUND_SPLIT_TABLES {
         out.extend(std::iter::repeat_n(LOG_SIZE_16, num_paired_cols(1) * EXT));
@@ -1063,6 +1179,32 @@ fn interaction_trace_log_sizes(
     out
 }
 
+fn consumer_preprocessed_log_sizes(log_n_rows: u32) -> Vec<u32> {
+    std::iter::repeat_n(log_n_rows, 10).collect()
+}
+
+fn generated_preprocessed_for_ids(
+    group_width: u32,
+    log_n_rows: u32,
+    selected_ids: &[PreProcessedColumnId],
+) -> Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>> {
+    let (evals, ids, _log_sizes) = generate_preprocessed_trace(group_width, log_n_rows);
+    selected_ids
+        .iter()
+        .map(|selected_id| {
+            ids.iter()
+                .zip(&evals)
+                .find_map(|(id, column)| (id == selected_id).then(|| column.clone()))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "selected preprocessed column {} is not owned by this SHA-256 module",
+                        selected_id.id
+                    )
+                })
+        })
+        .collect()
+}
+
 /// Number of interaction columns produced by `n_lookups` lookups under
 /// pair-batching: `ceil(n_lookups / 2)`.
 #[inline]
@@ -1073,9 +1215,6 @@ const fn num_paired_cols(n_lookups: usize) -> usize {
 /// Aggregate of every `FrameworkComponent` in the proof, in commit order.
 struct Sha256Components {
     sha256: FrameworkComponent<Sha256Eval>,
-    decode: Vec<FrameworkComponent<SigmaDecodeEval>>, // 8
-    maj_ch: FrameworkComponent<MajChEval>,
-    xor_8: FrameworkComponent<Xor8Eval>,
     round_split_pack: Vec<FrameworkComponent<RoundSplitPackEval>>, // 4
     sigma_split_pack: Vec<FrameworkComponent<SigmaSplitPackEval>>, // 4
     range: Vec<FrameworkComponent<RangeKEval>>,                    // 4
@@ -1090,6 +1229,7 @@ impl Sha256Components {
         group_width: u32,
         expose_digest: bool,
         field_exposure: &FieldExposure,
+        include_table_providers: bool,
     ) -> Self {
         // The shared TraceLocationAllocator (seeded by the orchestrator with
         // every module's `preprocessed_column_ids` in commit order) runs the
@@ -1106,79 +1246,57 @@ impl Sha256Components {
             claim.sha256.claimed_sum,
         );
 
-        let mut decode = Vec::with_capacity(8);
-        for (i, &(f, h)) in DECODE_TABLES.iter().enumerate() {
-            decode.push(FrameworkComponent::new(
-                allocator,
-                SigmaDecodeEval {
-                    log_size: LOG_SIZE_16,
-                    f,
-                    half: h,
-                    relations: relations.clone(),
-                },
-                claim.decode[i].claimed_sum,
-            ));
-        }
-        let maj_ch = FrameworkComponent::new(
-            allocator,
-            MajChEval {
-                log_size: maj_ch_log_size(group_width),
-                relations: relations.clone(),
-            },
-            claim.maj_ch.claimed_sum,
-        );
-        let xor_8 = FrameworkComponent::new(
-            allocator,
-            Xor8Eval {
-                log_size: LOG_SIZE_16,
-                relations: relations.clone(),
-            },
-            claim.xor_8.claimed_sum,
-        );
+        let _ = group_width;
         let mut round_split_pack = Vec::with_capacity(4);
-        for (i, &(p, h)) in ROUND_SPLIT_TABLES.iter().enumerate() {
-            round_split_pack.push(FrameworkComponent::new(
-                allocator,
-                RoundSplitPackEval {
-                    log_size: LOG_SIZE_16,
-                    partition: p,
-                    half: h,
-                    relations: relations.clone(),
-                },
-                claim.round_split_pack[i].claimed_sum,
-            ));
+        if include_table_providers {
+            for (i, &(p, h)) in ROUND_SPLIT_TABLES.iter().enumerate() {
+                round_split_pack.push(FrameworkComponent::new(
+                    allocator,
+                    RoundSplitPackEval {
+                        log_size: LOG_SIZE_16,
+                        partition: p,
+                        half: h,
+                        relations: relations.clone(),
+                        shared_tables: false,
+                    },
+                    claim.round_split_pack[i].claimed_sum,
+                ));
+            }
         }
         let mut sigma_split_pack = Vec::with_capacity(4);
-        for (i, &(p, h)) in SIGMA_SPLIT_TABLES.iter().enumerate() {
-            sigma_split_pack.push(FrameworkComponent::new(
-                allocator,
-                SigmaSplitPackEval {
-                    log_size: LOG_SIZE_16,
-                    partition: p,
-                    half: h,
-                    relations: relations.clone(),
-                },
-                claim.sigma_split_pack[i].claimed_sum,
-            ));
+        if include_table_providers {
+            for (i, &(p, h)) in SIGMA_SPLIT_TABLES.iter().enumerate() {
+                sigma_split_pack.push(FrameworkComponent::new(
+                    allocator,
+                    SigmaSplitPackEval {
+                        log_size: LOG_SIZE_16,
+                        partition: p,
+                        half: h,
+                        relations: relations.clone(),
+                        shared_tables: false,
+                    },
+                    claim.sigma_split_pack[i].claimed_sum,
+                ));
+            }
         }
         let mut range = Vec::with_capacity(4);
-        for (i, &kind) in RANGE_TABLES.iter().enumerate() {
-            range.push(FrameworkComponent::new(
-                allocator,
-                RangeKEval {
-                    log_size: range_log_size(kind),
-                    kind,
-                    relations: relations.clone(),
-                },
-                claim.range[i].claimed_sum,
-            ));
+        if include_table_providers {
+            for (i, &kind) in RANGE_TABLES.iter().enumerate() {
+                range.push(FrameworkComponent::new(
+                    allocator,
+                    RangeKEval {
+                        log_size: range_log_size(kind),
+                        kind,
+                        relations: relations.clone(),
+                        shared_tables: false,
+                    },
+                    claim.range[i].claimed_sum,
+                ));
+            }
         }
 
         Self {
             sha256,
-            decode,
-            maj_ch,
-            xor_8,
             round_split_pack,
             sigma_split_pack,
             range,
@@ -1190,9 +1308,6 @@ impl Sha256Components {
     fn components(&self) -> Vec<&dyn Component> {
         let mut out: Vec<&dyn Component> = Vec::new();
         out.push(&self.sha256);
-        out.extend(self.decode.iter().map(|c| c as &dyn Component));
-        out.push(&self.maj_ch);
-        out.push(&self.xor_8);
         out.extend(self.round_split_pack.iter().map(|c| c as &dyn Component));
         out.extend(self.sigma_split_pack.iter().map(|c| c as &dyn Component));
         out.extend(self.range.iter().map(|c| c as &dyn Component));
@@ -1204,13 +1319,6 @@ impl Sha256Components {
     fn component_provers(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
         let mut out: Vec<&dyn ComponentProver<SimdBackend>> = Vec::new();
         out.push(&self.sha256);
-        out.extend(
-            self.decode
-                .iter()
-                .map(|c| c as &dyn ComponentProver<SimdBackend>),
-        );
-        out.push(&self.maj_ch);
-        out.push(&self.xor_8);
         out.extend(
             self.round_split_pack
                 .iter()
