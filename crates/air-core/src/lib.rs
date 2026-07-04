@@ -25,12 +25,14 @@
 
 pub mod relations;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher as _};
 use std::sync::{Mutex, OnceLock};
 
 use num_traits::Zero;
 use stwo::core::air::Component;
 use stwo::core::channel::{Blake2sChannel, Channel};
+use stwo::core::fields::m31::BaseField;
 use stwo::core::fields::qm31::QM31;
 use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
 use stwo::core::poly::circle::CanonicCoset;
@@ -38,8 +40,9 @@ use stwo::core::proof::StarkProof;
 use stwo::core::vcs_lifted::blake2_merkle::{Blake2sMerkleChannel, Blake2sMerkleHasher};
 use stwo::core::verifier::{verify as stark_verify, VerificationError};
 use stwo::prover::backend::simd::SimdBackend;
-use stwo::prover::poly::circle::PolyOps;
+use stwo::prover::poly::circle::{CircleEvaluation, PolyOps};
 use stwo::prover::poly::twiddles::TwiddleTree;
+use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::{
     prove as stark_prove, CommitmentSchemeProver, ComponentProver, ProvingError, TreeBuilder,
 };
@@ -57,6 +60,16 @@ pub type Ch = Blake2sChannel;
 /// The hasher carried inside the emitted [`StarkProof`] (`Mc::H`).
 pub type Hasher = Blake2sMerkleHasher;
 
+pub type PreprocessedColumnEval = CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreprocessedColumnFingerprint {
+    pub id: PreProcessedColumnId,
+    pub module: &'static str,
+    pub log_size: u32,
+    pub hash: u64,
+}
+
 static TWIDDLE_CACHE: OnceLock<Mutex<HashMap<u32, &'static TwiddleTree<SimdBackend>>>> =
     OnceLock::new();
 
@@ -73,6 +86,115 @@ fn cached_twiddles(twiddle_log_size: u32) -> &'static TwiddleTree<SimdBackend> {
     )));
     cache.insert(twiddle_log_size, twiddles);
     twiddles
+}
+
+fn unique_preprocessed_ids(
+    ids: impl IntoIterator<Item = PreProcessedColumnId>,
+) -> Vec<PreProcessedColumnId> {
+    let mut seen = HashSet::new();
+    let mut unique = Vec::new();
+    for id in ids {
+        if seen.insert(id.clone()) {
+            unique.push(id);
+        }
+    }
+    unique
+}
+
+fn select_first_preprocessed_ids(
+    module_ids: &[Vec<PreProcessedColumnId>],
+) -> (Vec<PreProcessedColumnId>, Vec<Vec<PreProcessedColumnId>>) {
+    let mut seen = HashSet::new();
+    let mut unique = Vec::new();
+    let mut selected_by_module = Vec::with_capacity(module_ids.len());
+
+    for ids in module_ids {
+        let mut selected = Vec::new();
+        for id in ids {
+            if seen.insert(id.clone()) {
+                unique.push(id.clone());
+                selected.push(id.clone());
+            }
+        }
+        selected_by_module.push(selected);
+    }
+
+    (unique, selected_by_module)
+}
+
+pub fn fingerprint_preprocessed_columns(
+    module: &'static str,
+    ids: &[PreProcessedColumnId],
+    columns: &[PreprocessedColumnEval],
+) -> Vec<PreprocessedColumnFingerprint> {
+    assert_eq!(
+        ids.len(),
+        columns.len(),
+        "{module} preprocessed ids and columns must have the same length"
+    );
+
+    ids.iter()
+        .zip(columns)
+        .map(|(id, column)| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            column.domain.log_size().hash(&mut hasher);
+            column.values.length.hash(&mut hasher);
+            for value in column.values.as_slice() {
+                value.0.hash(&mut hasher);
+            }
+            PreprocessedColumnFingerprint {
+                id: id.clone(),
+                module,
+                log_size: column.domain.log_size(),
+                hash: hasher.finish(),
+            }
+        })
+        .collect()
+}
+
+fn assert_preprocessed_id_content_invariant(modules: &mut [&mut dyn AirProver]) {
+    let mut seen = HashMap::<PreProcessedColumnId, PreprocessedColumnFingerprint>::new();
+
+    for module in modules.iter_mut() {
+        for fingerprint in module.preprocessed_column_fingerprints() {
+            match seen.get(&fingerprint.id) {
+                Some(first)
+                    if first.log_size != fingerprint.log_size || first.hash != fingerprint.hash =>
+                {
+                    panic!(
+                        "preprocessed column id '{}' has different content in modules '{}' and '{}'",
+                        fingerprint.id.id, first.module, fingerprint.module
+                    );
+                }
+                Some(_) => {}
+                None => {
+                    seen.insert(fingerprint.id.clone(), fingerprint);
+                }
+            }
+        }
+    }
+}
+
+fn unique_preprocessed_layout(
+    module_specs: impl IntoIterator<Item = (Vec<PreProcessedColumnId>, Vec<u32>)>,
+) -> Vec<u32> {
+    let mut seen = HashSet::new();
+    let mut layout = Vec::new();
+
+    for (ids, sizes) in module_specs {
+        assert_eq!(
+            ids.len(),
+            sizes.len(),
+            "preprocessed ids and layout sizes must have the same length"
+        );
+        for (id, size) in ids.into_iter().zip(sizes) {
+            if seen.insert(id) {
+                layout.push(size);
+            }
+        }
+    }
+
+    layout
 }
 
 /// The per-tree column log-sizes a module contributes, in commit order.
@@ -176,6 +298,34 @@ pub trait AirProver: Air {
     /// Phase 0 — append preprocessed columns to the shared tree.
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, Mc>);
 
+    /// Fingerprint preprocessed column content before tree-0 dedup. Equal
+    /// preprocessed IDs must imply equal fixed-column content; otherwise
+    /// first-writer-wins tree assembly aliases one module's constraints to
+    /// another module's table.
+    fn preprocessed_column_fingerprints(&mut self) -> Vec<PreprocessedColumnFingerprint> {
+        let ids = self.preprocessed_column_ids();
+        assert!(
+            ids.is_empty(),
+            "AirProver with preprocessed columns must expose preprocessed fingerprints"
+        );
+        Vec::new()
+    }
+
+    /// Phase 0 variant used when another earlier module already committed some
+    /// deterministic preprocessed columns with the same IDs.
+    fn write_selected_preprocessed(
+        &mut self,
+        tb: &mut TreeBuilder<SimdBackend, Mc>,
+        selected_ids: &[PreProcessedColumnId],
+    ) {
+        assert_eq!(
+            selected_ids,
+            self.preprocessed_column_ids().as_slice(),
+            "module does not support partial preprocessed writes"
+        );
+        self.write_preprocessed(tb);
+    }
+
     /// Phase 1 — append main witness + multiplicity columns to the shared tree.
     fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, Mc>);
 
@@ -222,17 +372,24 @@ pub fn prove(
     let channel = &mut Ch::default();
     config.mix_into(channel);
 
-    let mut commitment_scheme = CommitmentSchemeProver::<SimdBackend, Mc>::new(config, &twiddles);
-    // If any module needs committed polynomials kept in coefficient form,
-    // enable it for the shared scheme.
+    let mut commitment_scheme = CommitmentSchemeProver::<SimdBackend, Mc>::new(config, twiddles);
+    // If any module needs committed polynomials kept in coefficient form (the
+    // P256 lifting path), enable it for the shared scheme.
     if modules.iter().any(|m| m.store_polynomial_coefficients()) {
         commitment_scheme.set_store_polynomials_coefficients();
     }
 
-    // Tree 0: every module's preprocessed columns.
+    // Tree 0: deterministic preprocessed columns, committed once per id.
+    assert_preprocessed_id_content_invariant(modules);
+    let module_preprocessed_ids: Vec<Vec<PreProcessedColumnId>> = modules
+        .iter()
+        .map(|m| m.preprocessed_column_ids())
+        .collect();
+    let (preprocessed_ids, selected_preprocessed_ids) =
+        select_first_preprocessed_ids(&module_preprocessed_ids);
     let mut tb = commitment_scheme.tree_builder();
-    for m in modules.iter_mut() {
-        m.write_preprocessed(&mut tb);
+    for (module, selected_ids) in modules.iter_mut().zip(&selected_preprocessed_ids) {
+        module.write_selected_preprocessed(&mut tb, selected_ids);
     }
     tb.commit(channel);
 
@@ -281,12 +438,9 @@ pub fn prove(
     }
 
     // Build every module's components against one shared allocator seeded with
-    // the concatenated preprocessed column ids (commit order), then collect the
-    // borrowed prover-component refs for the single prove call.
-    let preprocessed_ids: Vec<PreProcessedColumnId> = modules
-        .iter()
-        .flat_map(|m| m.preprocessed_column_ids())
-        .collect();
+    // unique preprocessed column ids. Repeated deterministic tables resolve to
+    // the first matching id here so the constraint framework's static allocator
+    // stays well-defined for repeated modules.
     let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&preprocessed_ids);
     for m in modules.iter_mut() {
         m.build_components(&mut allocator);
@@ -307,11 +461,12 @@ pub fn verify(
 
     let commitment_scheme = &mut CommitmentSchemeVerifier::<Mc>::new(config);
 
-    // Tree 0: preprocessed columns of every module.
-    let preprocessed_sizes: Vec<u32> = modules
-        .iter()
-        .flat_map(|m| m.layout().preprocessed)
-        .collect();
+    // Tree 0: deterministic preprocessed columns, committed once per id.
+    let preprocessed_sizes = unique_preprocessed_layout(
+        modules
+            .iter()
+            .map(|m| (m.preprocessed_column_ids(), m.layout().preprocessed)),
+    );
     commitment_scheme.commit(proof.commitments[0], &preprocessed_sizes, channel);
 
     for m in modules.iter() {
@@ -359,10 +514,8 @@ pub fn verify(
 
     // Build every module's components against one shared allocator (same seeding
     // as the prover), then collect the borrowed component refs to verify.
-    let preprocessed_ids: Vec<PreProcessedColumnId> = modules
-        .iter()
-        .flat_map(|m| m.preprocessed_column_ids())
-        .collect();
+    let preprocessed_ids =
+        unique_preprocessed_ids(modules.iter().flat_map(|m| m.preprocessed_column_ids()));
     let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&preprocessed_ids);
     for m in modules.iter_mut() {
         m.build_components(&mut allocator);
@@ -370,4 +523,114 @@ pub fn verify(
     let component_refs: Vec<&dyn Component> = modules.iter().flat_map(|m| m.components()).collect();
 
     stark_verify(&component_refs, channel, commitment_scheme, proof.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use stwo::core::fields::m31::M31;
+    use stwo::prover::backend::simd::column::BaseColumn;
+
+    struct FingerprintOnlyProver {
+        module: &'static str,
+        id: PreProcessedColumnId,
+        column: PreprocessedColumnEval,
+    }
+
+    impl FingerprintOnlyProver {
+        fn new(module: &'static str, id: &str, values: &[u32]) -> Self {
+            let log_size = values.len().ilog2();
+            assert_eq!(1usize << log_size, values.len());
+            let domain = CanonicCoset::new(log_size).circle_domain();
+            let column = CircleEvaluation::new(
+                domain,
+                BaseColumn::from_iter(values.iter().copied().map(M31::from_u32_unchecked)),
+            );
+            Self {
+                module,
+                id: PreProcessedColumnId { id: id.to_string() },
+                column,
+            }
+        }
+    }
+
+    impl Air for FingerprintOnlyProver {
+        fn mix_public(&self, _channel: &mut Ch) {}
+
+        fn draw_relations(&mut self, _channel: &mut Ch) {}
+
+        fn layout(&self) -> TreeLayout {
+            TreeLayout {
+                preprocessed: vec![self.column.domain.log_size()],
+                trace: Vec::new(),
+                interaction: Vec::new(),
+            }
+        }
+
+        fn claimed_sums(&self) -> Vec<QM31> {
+            Vec::new()
+        }
+
+        fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
+            vec![self.id.clone()]
+        }
+
+        fn build_components(&mut self, _allocator: &mut TraceLocationAllocator) {}
+
+        fn components(&self) -> Vec<&dyn Component> {
+            Vec::new()
+        }
+    }
+
+    impl AirProver for FingerprintOnlyProver {
+        fn max_log_size(&self) -> u32 {
+            self.column.domain.log_size()
+        }
+
+        fn write_preprocessed(&mut self, _tb: &mut TreeBuilder<SimdBackend, Mc>) {
+            unreachable!("invariant tests do not commit columns")
+        }
+
+        fn preprocessed_column_fingerprints(&mut self) -> Vec<PreprocessedColumnFingerprint> {
+            fingerprint_preprocessed_columns(
+                self.module,
+                &[self.id.clone()],
+                &[self.column.clone()],
+            )
+        }
+
+        fn write_trace(&mut self, _tb: &mut TreeBuilder<SimdBackend, Mc>) {}
+
+        fn write_interaction(&mut self, _tb: &mut TreeBuilder<SimdBackend, Mc>) {}
+
+        fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn preprocessed_invariant_accepts_duplicate_id_with_equal_content() {
+        let mut first = FingerprintOnlyProver::new("first", "shared", &[1, 2]);
+        let mut second = FingerprintOnlyProver::new("second", "shared", &[1, 2]);
+        assert_preprocessed_id_content_invariant(&mut [&mut first, &mut second]);
+    }
+
+    #[test]
+    fn preprocessed_invariant_rejects_duplicate_id_with_different_content() {
+        let mut first = FingerprintOnlyProver::new("first", "shared", &[1, 2]);
+        let mut second = FingerprintOnlyProver::new("second", "shared", &[1, 3]);
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert_preprocessed_id_content_invariant(&mut [&mut first, &mut second]);
+        }))
+        .expect_err("duplicate id with different content must panic");
+        let message = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .expect("panic has a string message");
+        assert!(message.contains("shared"));
+        assert!(message.contains("first"));
+        assert!(message.contains("second"));
+    }
 }

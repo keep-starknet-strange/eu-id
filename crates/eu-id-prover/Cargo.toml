@@ -20,8 +20,7 @@ stwo-p256 = { path = "../stwo-p256" }
 stwo-sha256 = { path = "../stwo-sha256" }
 predicates = { path = "../predicates" }
 stwo = { workspace = true }
-stwo-constraint-framework = { workspace = true }
-rayon = { workspace = true }
+stwo-constraint-framework = { workspace = true, features = ["parallel"] }
 
 # Proof (de)serialization for the `eu-id` CLI: `prove` writes a proof file,
 # `verify` reads it back. The combined `Proof` derives serde over the per-module
@@ -39,6 +38,8 @@ p256 = { version = "0.13", features = ["ecdsa"] }
 ecdsa = { version = "0.16", features = ["signing", "verifying"] }
 sha2 = "0.10"
 rayon = "1"
+ciborium = "0.2.2"
+celes = "2.8.2"
 
 [dev-dependencies]
 # Laptop benchmark (`benches/identity_bench.rs`, `examples/bench_report.rs`):
@@ -47,9 +48,6 @@ rayon = "1"
 # uses, so the per-stage memory numbers are directly comparable; serde_json to
 # emit the machine-readable results file.
 criterion = { version = "0.5", features = ["html_reports"] }
-# Shape diagnostic (`src/shape_dump.rs`): allocator + preprocessed ids to build
-# components outside `air_core::prove`.
-stwo-constraint-framework = { workspace = true, features = ["parallel"] }
 memory-stats = "1.2"
 serde_json = "1"
 mimalloc = { workspace = true }
@@ -66,6 +64,10 @@ harness = false
 
 [[bench]]
 name = "longfellow_equiv_bench"
+harness = false
+
+[[bench]]
+name = "mdoc_bench"
 harness = false
 
 [[example]]
