@@ -1,145 +1,246 @@
-# WO-M1 Coprocessor Mainline Merge
+# WO-A3 Hybrid SHA Implementation
 
-Source of truth: `/Users/lucas/eu-id/tasks/parity/s4/WO-M1-coprocessor-mainline-merge.md`.
-Worktree: `/Users/lucas/eu-id/.claude/worktrees/wo-m1-coprocessor-merge` on `codex/wo-m1-coprocessor-merge`.
-Base: `feat/proof-reductions@7af53303`.
-Scope guard: Q-M1-003 ACKED the default-on flip after WO-M2 moved both credential and nonce signatures through the coprocessor. Keep the legacy P256 AIR path reachable with `--no-default-features`; retire default-path P256 wiring only after the Phase 4 audit records what remains.
+Source of truth: `/Users/lucas/eu-id/tasks/parity/WO-A3-hybrid-sha-impl.md`.
+Worktree: `/Users/lucas/eu-id/.claude/worktrees/a3-hybrid-sha` on `feat/a3-hybrid-sha`.
+Base: `05e7dd51` (`perf/a1r-typed-mults-redo`), because WO-A3 must land after WO-A1R.
+Scope guard: edit SHA only; never touch P-256, predicates, proof-format/versioning, additions/carry logic, split-pack tables, range_k tables, or SHA degree bounds.
 
-## WO-M3 mdoc Coprocessor Plan
-
-Source: `/Users/lucas/eu-id/tasks/parity/mailbox/answers/Q-M1-004.md`.
-Branch: `codex/wo-m3-mdoc-coprocessor`.
-
-- [x] Read Q-M1-004 and branch from `codex/wo-m1-coprocessor-merge`.
-- [x] Replace mdoc issuer/device P256 AIR + private digest bridges with SHA + shared `PublicDigestBind` + one final coprocessor binding module.
-- [x] Update `MdocCircuitProof` to remove P256 AIR claims/private bridge claims and carry issuer/device public binds plus one `ImplementedCircuitBundle`.
-- [x] Reuse the M2 batch coprocessor API with statement absorb order issuer then device.
-- [x] Add required mdoc negatives: statement order, cross-signature swap, missing/tampered bundle, SHA/public-z mismatch, cross-slot z swap, identity-bundle replay, and fork/join/rejoin guards.
-- [x] Run focused mdoc verification and same-run mdoc AIR vs coprocessor gates.
-- [x] Update perf/status/task artifacts and commit WO-M3.
-
-## Phase 4 Default-On Plan
-
-Source: `/Users/lucas/eu-id/tasks/parity/mailbox/answers/Q-M1-003.md`.
-
-- [x] Read Q-M1-003 and record the default-on authorization plus v1 caveats.
-- [x] Flip `ec-coprocessor` into the default `eu-id-prover` feature set.
-- [x] Run default coprocessor verification and legacy `--no-default-features` verification.
-- [x] Run BENCH-LOCK default-on/off benches and append perf-log + STATUS rows.
-- [x] Mechanically audit remaining P256 AIR / `stwo-p256` references and document what stays behind legacy/diagnostic surfaces.
-- [x] Commit the Phase 4 default-on series.
-
-## WO-M2 Nonce Coprocessor Plan
-
-Source: `/Users/lucas/eu-id/tasks/parity/mailbox/answers/Q-M1-002.md`.
-Decision: default-on flip deferred until both credential and nonce P256 AIRs leave the feature-on STARK in one migration.
-
-- [x] Extend feature-on coprocessor binding to absorb both statements in order: credential first, nonce second.
-- [x] Replace feature-on `nonce_p256` STARK module with nonce coprocessor verification; keep nonce P256 AIR on the default feature-off path.
-- [x] Preserve verifier pre-STARK nonce binding: expected nonce instance must match the proof's public nonce instance before any STARK/coprocessor verification.
-- [x] Add transcript-order negative for swapped credential/nonce statement order.
-- [x] Add cross-signature swap negative: nonce proof presented as credential proof rejects.
-- [x] Run focused feature-on/default tests and scheduled ignored coprocessor target.
-- [x] Report WO-M2 measured perf and request the single default-on flip ack covering both P256 removals.
-
-## Preconditions / Drift
-
-- [x] Read WO-M1, BL6, Q-017, Q-027, G3, current `eu-id-prover`, mdoc `PublicDigestBind`, and lessons.
-- [x] Check main checkout status. Main is not quiet only because ignored task ledger rows are modified in `tasks/parity/STATUS.md`; the original "84-file mdoc track" blocker is stale.
-- [x] Confirm Phase 1 crate landing is already in history: `40b57444 merge: eu-id-ec-coprocessor v1 (feature-gated, default off)`.
-- [x] Confirm `s4-lite` worktree is clean at `66b16c03`.
-- [x] Run precondition gate: `rtk proxy cargo test -p eu-id-ec-coprocessor`.
-- [x] Run feature-off baseline gate after local changes: default proof path remains green and byte shape/default module order unchanged.
-
-## Implementation Plan
-
-- [x] Phase 2.1: promote mdoc's `PublicDigestBind` to a shared `crates/eu-id-prover/src/public_digest_bind.rs` module; do not fork/copy the component.
-- [x] Phase 2.2: add seed-fork/rejoin transcript binding: absorb Q-017 statement into `air_core::Ch`, draw 32-byte seed, run coprocessor from `CoprocessorChannel::from_seed`, then rejoin with a hash of the serialized bundle.
-- [x] Phase 2.3: delete `CoprocessorChannel::default()`/`Default` so unseeded coprocessor transcripts are unrepresentable.
-- [x] Phase 2.4: under `ec-coprocessor`, change `prove_with_column_breakdown` to remove the credential P256 AIR module and replace the digest bridge with public-z digest bind. Keep the nonce P256 AIR module because WO-M1 Phase 4 explicitly says nonce retirement is a separate architect question.
-- [x] Phase 2.5: update `Proof`/verifier reconstruction so feature-on proofs carry the public credential instance plus coprocessor bundle and rebuild SHA/public-digest-bind/predicates/nonce only.
-- [x] Phase 2.6: fix feature-on tests for the current nonce-aware API and add negatives for missing/tampered/swapped coprocessor payload and public-z mismatch.
-- [x] Phase 2.6: add/extend transcript-order tests for post-statement, post-seed, and post-rejoin digests; add negative tests for bundle-byte tamper and wrong statement/seed order.
-- [x] Phase 2.7: run feature-on verification gates: `rtk proxy cargo test -p eu-id-prover --features ec-coprocessor` and focused ignored e2e if needed.
-- [x] Phase 3 prep: append task/perf/status rows and mailbox the remaining campaign results only if the implemented feature-on path is green. Do not self-certify default flip.
-- [x] Wait for `/Users/lucas/eu-id/tasks/parity/mailbox/answers/Q-M1-001.md` before removing the credential P256 AIR module.
-
-## Phase 3 Campaign
-
-- [x] Run G4-row/per-family coprocessor soundness suite: `rtk proxy cargo test -p eu-id-ec-coprocessor --release`.
-- [x] Run full-bundle ignored coprocessor negatives: `rtk proxy cargo test -p eu-id-ec-coprocessor --release -- --ignored`.
-- [x] Run feature-on normal CI target: `rtk proxy make test-ec-coprocessor`.
-- [x] Run feature-on scheduled ignored CI target: `rtk proxy make test-ec-coprocessor-ignored`.
-- [x] Run transcript-order focused guard after the full target: `rtk proxy cargo test -p eu-id-prover --features ec-coprocessor feature_gated_coprocessor_ -- --ignored`.
-- [x] Take `tasks/parity/BENCH-LOCK` and run all Phase 3 perf gates with `RAYON_NUM_THREADS=1`.
-- [x] Measure `identity_e2e/prove_identity` feature OFF and ON.
-- [x] Measure proof bytes and verify time feature OFF and ON.
-- [x] Write Phase 3 mailbox report with the v1 caveats and no default-on flip.
-- [x] Commit Phase 3 task/report artifacts after verification.
+- [x] Read WO-A3, A2 report, A2 Phase 2 formulas, current SHA constraints/trace layout, and lessons.
+- [x] Create post-A1R worktree and branch.
+- [x] Phase 0: run fresh shape dump and record SHA/table cells.
+- [x] Phase 0: run `BM_ShaZK_equiv/{1,33}` single-thread baseline.
+- [x] Phase 0: recompute hybrid projection and G0 go/no-go.
+- [x] If G0 fails or formulas are ambiguous, file mailbox question and schedule a wakeup.
+- [x] Phase 1: write layout manifest, bit-column plan, degree worksheet, relation diff, and count estimate before code.
+- [x] Phase 2 S1: implement Maj/Ch bit gadgets, tests, gates, bench checkpoint.
+- [x] Phase 2 S2: implement Sigma/sigma bit gadgets, tests, gates, bench checkpoint.
+- [x] Phase 2 S3: delete proof-path xor_8/decode/MajCh table paths, tests, gates, bench checkpoint.
+- [x] Phase 3: final accounting, perf-log rows, `tasks/parity/STATUS.md`.
 
 ## Review
 
-WO-M3 default-path mdoc now replaces issuer/device P256 AIR and private digest
-bridges with public digest binds plus one final transcript-bound coprocessor
-bundle. Legacy P256 AIR mdoc remains available with `--no-default-features`.
+- Started from A1R commit `05e7dd51`, where SHA has 19 typed `RelationEntry::base`
+  sites and no SHA-local `RelationEntry::new` sites.
+- Required gadget formulas are only the A2 Phase 2 formulas: booleanity, xor2/xor3,
+  Ch, Maj, and limb-add/recomposition. WO-A3 keeps additions/carry logic, split-pack,
+  and range_k unchanged.
+- Phase 0 shape dump (`RAYON_NUM_THREADS=1 cargo test -p eu-id-prover --release shape_dump -- --ignored --nocapture`):
+  SHA module remains `13,843,104` cells, with `6,292,784` preprocessed,
+  `1,749,680` trace, and `5,800,640` interaction cells. The expensive table floor
+  is unchanged from A2: decode `5,242,880`, maj_ch `2,883,584`, xor_8 `524,288`,
+  total removed-by-hybrid table cells `8,650,752`.
+- Phase 0 baselines (`RAYON_NUM_THREADS=1 cargo bench -p eu-id-prover --bench longfellow_equiv_bench`):
+  - `BM_ShaZK_equiv/1/prove`: `1.0113 s`; verify `619.67 us`.
+  - `BM_ShaZK_equiv/33/prove`: `1.1028 s`; verify `618.97 us`.
+- G0 arithmetic:
+  - Marginal/block: `(1102.8 - 1011.3) / 32 = 2.859375 ms/block`.
+  - Fixed floor: `1011.3 - 2.859375 = 1008.440625 ms`.
+  - Hybrid removal saving: `8,650,752 * 72 ns = 622.854144 ms`.
+  - Added bit-gadget cost: `11,264 * 72 ns = 0.811008 ms/block`.
+  - Projected hybrid at 1 block: `1011.3 - 622.854144 + 0.811008 = 389.256864 ms`.
+  - G0 speedup: `1011.3 / 389.256864 = 2.60x`, which clears the `>= 1.5x` gate.
 
-Verification completed:
+## Phase 1 Design Artifact
 
-- `rtk proxy cargo check -p eu-id-prover`
-- `rtk proxy cargo check -p eu-id-prover --no-default-features`
-- `rtk proxy cargo test -p eu-id-prover --no-run`
-- `rtk proxy cargo test -p eu-id-prover --no-default-features --no-run`
-- `rtk proxy cargo test -p eu-id-prover --test mdoc_support`
-- `rtk proxy cargo test -p eu-id-prover --no-default-features --test mdoc_support`
-- `rtk proxy cargo test -p eu-id-prover mdoc_coprocessor_ -- --ignored`
-- `rtk proxy cargo test -p eu-id-prover --test mdoc_support isolated_mdoc_circuit_profile_proves_and_verifies -- --ignored`
-- `rtk proxy cargo test -p eu-id-prover --no-default-features --test mdoc_support isolated_mdoc_circuit_profile_proves_and_verifies -- --ignored`
-- `rtk proxy cargo check -p eu-id-prover --example mdoc_perf_probe`
-- `rtk proxy cargo check -p eu-id-prover --no-default-features --example mdoc_perf_probe`
+### Layout manifest
 
-Perf probe, `RAYON_NUM_THREADS=1 BENCH_ITERS=5`: mdoc prove 7,866 ms
-legacy -> 5,266 ms default coprocessor; proof bytes 4,563,243 -> 1,834,614;
-verify 40 ms -> 46 ms; shape cells 79,988,576 -> 56,296,064. `BENCH-LOCK`
-was requested by Q-M1-004, but no `BENCH-LOCK` file exists in this worktree or
-the main checkout.
+Current one-row-per-round trace layout:
 
-- Current feature-on code is not Phase 2-complete: it proves the full P256 AIR path, then appends a coprocessor bundle after the STARK. Verifier checks both, so no P256 work is removed.
-- Q-017 selects public statement binding for v1. Therefore the smallest Phase 2 bridge is a `PublicDigestBind` requiring SHA's digest bytes against the public credential `z`; no cross-field MAC or MLE argument is in scope.
-- The existing mdoc `PublicDigestBind` is private inside `mdoc.rs`. Q-M1-001 rejects a forked copy; promote/import the component so mdoc and WO-M1 use one implementation.
-- Nonce still uses `stwo-p256` in the monolithic proof today. Per WO-M1 Phase 4, deleting that AIR path is a STOP/architect question, so this implementation keeps `nonce_p256` in both feature modes.
-- Precondition gate `rtk proxy cargo test -p eu-id-ec-coprocessor` passed: 84 executed tests passed, 12 ignored full-bundle tests remained ignored.
-- Red baseline `rtk proxy cargo test -p eu-id-prover --features ec-coprocessor` fails to compile because feature-gated tests still call pre-nonce APIs.
-- Filed `/Users/lucas/eu-id/tasks/parity/mailbox/questions/Q-M1-001-coprocessor-transcript-hook.md` because removing the credential P256 AIR while leaving `eu-id-ec-coprocessor` on its independent `CoprocessorChannel` would violate Q-017/BL6 shared-transcript order.
-- Q-M1-001 answered: refactor first; no intermediate unbound feature path. Approved bridge is seed-fork + rejoin from `air_core::Ch`; delete unbound `CoprocessorChannel::default`; keep nonce P256 AIR; fix stale feature-on tests in this series.
-- Coprocessor channel/API phase landed locally: `CoprocessorChannel::from_seed(seed, b"eu-id-ec-coproc-v1")` is now the only proof transcript constructor, standalone callers pass fixed test/bench seeds, and `rtk proxy cargo test -p eu-id-ec-coprocessor` passed with 84 executed tests and 12 ignored full-bundle tests.
-- Promoted mdoc's `PublicDigestBind` into `crates/eu-id-prover/src/public_digest_bind.rs` and imported it from `mdoc.rs`; `rtk proxy cargo check -p eu-id-prover` passed on the default feature set.
-- Feature-on identity proof now uses module order `nonce_p256, sha, public_digest_bind, age, nat, coprocessor`; the credential P256 AIR and scalar-z digest bridge are not in the `ec-coprocessor` module list. The coprocessor post-interaction hook absorbs the Q-017 statement/shape into `air_core::Ch`, draws the 32-byte seed, proves/verifies the bundle from that seed, then rejoins by mixing `Blake2s256(bincode(bundle))`.
-- Feature-on `Proof` carries `credential_instances`, `public_digest_bind_interaction_claim`, and the coprocessor bundle instead of credential P256 claims. Nonce P256 claims remain unchanged.
-- Added feature tests for nonce-aware APIs, missing bundle rejection, one-byte serialized bundle tamper rejection, fork/join prover-vs-verifier snapshots, and wrong seed-order rejection. For the seed checkpoint, the test records the drawn 32-byte seed because Stwo's `draw_u32s()` advances the draw counter without changing the channel digest.
-- Verification passed: `rtk proxy cargo fmt --check`; `rtk proxy rg -n "impl Default for CoprocessorChannel|CoprocessorChannel::default" crates` returned no matches; `rtk proxy cargo test -p eu-id-ec-coprocessor` passed with 84 executed tests and 12 ignored full-bundle tests; `rtk proxy cargo test -p eu-id-prover` passed; `rtk proxy cargo test -p eu-id-prover --features ec-coprocessor` passed; focused ignored `feature_gated_coprocessor_fork_join_digests_match_prover_and_verifier -- --ignored` passed.
-- Review follow-up fixed: CI now runs `make test-ec-coprocessor` on push/PR and `make test-ec-coprocessor-ignored` on the scheduled proof job, so default-off coprocessor hooks and ignored fork/join guards are compiled and executed mechanically. The Makefile owns both targets.
-- Added two rejoin placement guards: `feature_gated_coprocessor_rejoin_changes_next_stark_challenge` and `feature_gated_coprocessor_rejoin_digest_changes_on_bundle_byte_tamper`.
-- Mutation drill performed: temporarily made `mix_coprocessor_rejoin` a no-op, then `rtk proxy cargo test -p eu-id-prover --features ec-coprocessor feature_gated_coprocessor_rejoin_ -- --ignored` failed both rejoin guards. Restored the real rejoin and reran the same command successfully.
-- Additional review follow-up verification passed: `rtk proxy cargo fmt --check`; `rtk proxy make test-ec-coprocessor`; `rtk proxy make test-ec-coprocessor-ignored`. `rtk proxy git diff --name-only | rg "^crates/stwo-p256"` returned no matches.
-- Phase 3 found and fixed a default feature-off gate blocker before taking final measurements: `identity_e2e/prove_identity` and `identity_api::prove_identity_then_verify_identity_round_trips` panicked because the credential and nonce P256 modules shared witness-dependent hinted-mul schedule preprocessed ids. The nonce P256 module now uses the stable `nonce_p256` preprocessed namespace in both prover and verifier.
-- Phase 3 soundness campaign passed: `rtk proxy cargo test -p eu-id-ec-coprocessor --release` (G4-row/per-family suite), `rtk proxy cargo test -p eu-id-ec-coprocessor --release -- --ignored` (12 full-bundle negatives), `rtk proxy make test-ec-coprocessor`, `rtk proxy make test-ec-coprocessor-ignored`, and focused `rtk proxy cargo test -p eu-id-prover --features ec-coprocessor feature_gated_coprocessor_ -- --ignored`.
-- Phase 3 perf under BENCH-LOCK (`RAYON_NUM_THREADS=1`): Criterion `identity_e2e/prove_identity` feature OFF `3.2904 s` midpoint (`[3.2866, 3.2939] s`) vs feature ON `2.6246 s` midpoint (`[2.6168, 2.6321] s`), delta `-0.6658 s` / `-20.2%`.
-- Phase 3 report-driver perf under BENCH-LOCK (`BENCH_ITERS=3`, `RAYON_NUM_THREADS=1`): `pipeline_e2e` feature OFF prove `4956 ms`, verify `39 ms`, proof `3,916,615` bytes; feature ON prove `3787 ms`, verify `41 ms`, proof `2,610,867` bytes. Proof-byte swing is `-1,305,748` bytes (`-1275.1 KiB`); verify swing is `+2 ms`.
-- Phase 3 post-fix verification passed: `rtk proxy cargo fmt --check`, `rtk proxy cargo test -p eu-id-prover`, `rtk proxy cargo test -p eu-id-prover --test identity_api --release -- --ignored`, `rtk proxy make test-ec-coprocessor`, and `rtk proxy make test-ec-coprocessor-ignored`.
-- Filed `/Users/lucas/eu-id/tasks/parity/mailbox/questions/Q-M1-002-coprocessor-phase3-report-default-flip-ack.md` with the Phase 3 report, measured perf gates, the nonce namespace blocker/fix, v1 caveats, and the default-on ack request. The default-on flip remains unapplied.
-- Q-M1-002 answered: technical gates ACKED, but default-on flip DEFERRED until nonce also goes through the coprocessor. WO-M2 scope is both P256 AIRs leaving the feature-on STARK in one migration.
-- WO-M2 implemented locally: feature-on module order is `sha, public_digest_bind, age, nat, coprocessor`; the proof carries public credential and nonce ECDSA instances plus one shared coprocessor bundle for both signatures. Feature-off still uses credential P256 AIR + nonce P256 AIR.
-- WO-M2 transcript binding: the coprocessor fork absorbs both statements before seed draw in credential-then-nonce order. Added swapped-statement-order digest negative and cross-signature swap rejection.
-- WO-M2 verification passed: `rtk proxy cargo test -p eu-id-prover --features ec-coprocessor`, focused `rtk proxy cargo test -p eu-id-prover --features ec-coprocessor feature_gated_coprocessor_ -- --ignored`, `rtk proxy cargo test -p eu-id-prover`, `rtk proxy cargo test -p eu-id-ec-coprocessor`, and `rtk proxy make test-ec-coprocessor-ignored`.
-- WO-M2 perf under BENCH-LOCK (`RAYON_NUM_THREADS=1`): Criterion `identity_e2e/prove_identity` feature OFF `3.2879 s` midpoint (`[3.2698, 3.3082] s`) vs feature ON `1.9022 s` midpoint (`[1.8969, 1.9078] s`), delta `-1.3857 s` / `-42.1%`.
-- WO-M2 report-driver perf under BENCH-LOCK (`BENCH_ITERS=3`, `RAYON_NUM_THREADS=1`): `pipeline_e2e` feature OFF prove `4914 ms`, verify `39 ms`, proof `3,916,615` bytes; feature ON prove `2587 ms`, verify `42 ms`, proof `1,240,046` bytes. Proof-byte swing is `-2,676,569` bytes; verify swing is `+3 ms`.
-- Filed `/Users/lucas/eu-id/tasks/parity/mailbox/questions/Q-M1-003-wo-m2-nonce-coprocessor-flip-ack.md` with the WO-M2 report and the single default-on flip ack request. The default-on flip remains unapplied.
-- Q-M1-003 answered: default-on flip ACKED with the v1 caveats to ship verbatim: public `z,r,s` makes presentations linkable across verifiers, and `V1_NON_ZK` Ligero openings remain non-ZK until v2 masked rows re-derive parameters.
-- Phase 4 default flip implemented: `eu-id-prover` default features now include `ec-coprocessor`; legacy two-P256-AIR product proof remains reachable with `--no-default-features`.
-- Phase 4 verification passed: `rtk proxy cargo fmt --check`; `rtk proxy cargo test -p eu-id-prover`; `rtk proxy cargo test -p eu-id-prover --no-default-features`; `rtk proxy make test-ec-coprocessor-ignored`; `rtk proxy cargo test -p stwo-p256 --lib -- --skip proof::tests::` (`277 passed`, `1 ignored`, `58 filtered out`); and final full-suite `rtk proxy cargo test --workspace` passed after the slow `stwo-p256` proof tests completed.
-- Phase 4 BENCH-LOCK (`RAYON_NUM_THREADS=1`) results: Criterion `identity_e2e/prove_identity` legacy `--no-default-features` midpoint `3.1921 s` (`[3.1765, 3.2124] s`) vs default coprocessor midpoint `1.8609 s` (`[1.8479, 1.8756] s`), delta `-1.3312 s` / `-41.7%`.
-- Phase 4 report-driver perf (`BENCH_ITERS=3`, `RAYON_NUM_THREADS=1`): legacy `pipeline_e2e` prove `4817 ms`, verify `39 ms`, proof `3,916,615` bytes; default coprocessor `pipeline_e2e` prove `2515 ms`, verify `40 ms`, proof `1,240,046` bytes. Proof-byte swing is `-2,676,569` bytes; verify swing is `+1 ms`.
-- P256 AIR retirement audit: default `eu-id-prover` identity composition has no `P256Prover`/`P256Verifier` modules; the constructors in `src/lib.rs` are under `#[cfg(not(feature = "ec-coprocessor"))]`. Remaining `stwo-p256` references are legacy `--no-default-features` product proof code, statement/type/native ECDSA helpers, isolated mdoc AIR profile, `shape_dump`, standalone benches, tests, and `eu-id-ffi`'s standalone P256 benchmark.
+- `Layout::TOTAL_COLS = 349`; base trace reports 380 columns after dynamic exposure.
+- Round family currently carries 136 columns:
+  - 24 limb/carry columns before decode/table witnesses.
+  - 48 sigma-decode table witness columns (`2 * SIGMA_DECODE_COLS`).
+  - 64 Maj/Ch packed-group table witness columns (`ROUND_MAJ_CH_OPERANDS * GROUPS_PER_ROUND_PARTITION`).
+- Schedule entry family currently carries 62 columns:
+  - 6 limb/carry columns.
+  - 48 lower-sigma decode table witness columns.
+  - 8 sigma-input split-pack columns. These stay.
+
+Hybrid deletes the table-witness portions:
+
+- Remove round sigma-decode witnesses: `-48` trace columns.
+- Remove round Maj/Ch packed-group witnesses: `-64` trace columns.
+- Remove schedule sigma-decode witnesses: `-48` trace columns.
+- Keep all limb-addition, carry, round split-pack, sigma input split-pack, and range columns.
+- Remove producer multiplicity/base/interactions for the 8 decode tables, the packed Maj/Ch
+  table, and xor_8. Keep round split-pack, sigma split-pack, range_k, digest, and field
+  relations.
+
+### Bit-column plan
+
+Conservative patchable plan, matching the WO wording that every decomposed operand bit is
+committed once and boolean-constrained:
+
+- Round rows:
+  - Input operand bits: `a,b,c,e,f,g = 6 * 32 = 192` bit columns.
+  - Output gadget bits: `Sigma0,Sigma1,Maj,Ch = 4 * 32 = 128` bit columns.
+  - Total round bit columns: `320`.
+  - Recompose `a,b,c,e,f,g` bits to the same round words currently feeding split-pack/table
+    constraints. Recompose output bits to existing `sigma0`, `sigma1`, `maj`, and `ch`
+    limb columns.
+  - Rotations are pure column wiring over the operand bit columns; no rotate tables.
+- Schedule rows:
+  - Input operand bits: `W[t-15],W[t-2] = 2 * 32 = 64` bit columns.
+  - Output gadget bits: `sigma0,sigma1 = 2 * 32 = 64` bit columns.
+  - Total schedule bit columns: `128`.
+  - Recompose active schedule outputs to existing `s0` and `s1` limb columns. Keep existing
+    sigma input split-pack lookups for `W[t-15]` and `W[t-2]`.
+
+The A2 estimate counted only output gadget bits (`128 * 64 + 64 * 48 = 11,264 cells/block`).
+This conservative plan adds operand bits too:
+
+- Round cells/block: `320 * 64 = 20,480`.
+- Schedule cells/block: `128 * 48 = 6,144`.
+- Total bit cells/block: `26,624`.
+- Drift from A2 estimate: `26,624 / 11,264 = 2.36x`, which exceeds the WO's `>2x`
+  reconcile threshold even though the total payoff remains strong.
+
+Projected payoff with conservative bit cells:
+
+- Added bit-gadget cost: `26,624 * 72 ns = 1.916928 ms/block`.
+- Projected hybrid at 1 block: `1011.3 - 622.854144 + 1.916928 = 390.362784 ms`.
+- Projected G0 speedup remains `1011.3 / 390.362784 = 2.59x`.
+
+### Degree worksheet
+
+Allowed formulas from A2 Phase 2:
+
+- Booleanity: `x^2 - x`, degree 2.
+- 2-way XOR: `x + y - 2xy`, degree 2.
+- 3-way XOR: `x + y + z - 2(xy + yz + zx) + 4xyz`, degree 3.
+- `Ch(e,f,g) = e*f + (1-e)*g`, degree 2.
+- `Maj(a,b,c) = a*b + a*c + b*c - 2*a*b*c`, degree 3.
+- Recomposition to existing 16-bit limbs is linear in bit columns.
+
+Degree-sensitive selector plan:
+
+- Do not multiply degree-3 sigma/Maj formulas by `gate_sched` or another non-constant selector.
+  That would exceed the current `log_size + 1` degree bound.
+- Prefer ungated formula constraints for rows where the input/output bit columns are live.
+- Gate only linear recomposition constraints to limb columns. `enabler * linear` is degree 2;
+  `gate_sched * linear` is degree 3 because `gate_sched = enabler * is_sched`.
+- Schedule sigma formula constraints are the unsettled point: if they are constrained ungated
+  for all rows, inactive `t < 16` rows can carry formula-valid sigma output bits that are not
+  recomposed into `s0/s1`. That is degree-safe but needs confirmation as a soundness/layout
+  contract. Gating the degree-3 formula directly is not allowed.
+
+### Relation contract diff
+
+Consumer lookup removals from `Sha256Eval` / interaction trace:
+
+- Remove all `wire_sigma_decode` / `write_sigma_decode_lookups` sites:
+  - Round family: 2 sigma wirings per row, 12 lookup slots.
+  - Schedule family: 2 lower-sigma wirings on `t >= 16`, 12 reserved lookup slots.
+- Remove packed Maj/Ch consumer sites: 8 Maj + 8 Ch lookup slots per row.
+- New `SHA_LOOKUPS_PER_ROW_BASE` target after table deletion: `106 - 12 - 12 - 16 = 66`
+  before digest/field exposure additions.
+
+Producer/component removals:
+
+- Delete 8 `SigmaDecodeEval` producer components and their multiplicity columns.
+- Delete `MajChEval` and its 2 multiplicity columns.
+- Delete `Xor8Eval` and its multiplicity column, including the `gkr-spike` xor_8 side path.
+- Remove `InteractionClaim.decode`, `InteractionClaim.maj_ch`, and `InteractionClaim.xor_8`;
+  update `flatten_claimed_sums`, layout log-size accounting, component order, preprocessed IDs,
+  proof docs, and serialization round trips accordingly.
+
+Kept relations/components:
+
+- `RoundSplitPackEval`, `SigmaSplitPackEval`, and all `RangeKEval` components.
+- Existing SHA limb additions and carry range checks.
+- Digest and field exposure providers.
+
+### Stop/reconcile item
+
+Before coding, ask Claude whether the conservative committed operand-bit plan is the intended
+WO-A3 design or whether the A2 estimate assumed a valid reuse path that avoids committing input
+operand bits. Also confirm the degree-safe schedule-sigma strategy: ungated formula constraints
+with recomposition gated only on `t >= 16`, versus an alternate selector arrangement.
+
+Filed `/Users/lucas/eu-id/tasks/parity/mailbox/questions/Q-A3-001-hybrid-bit-plan-degree-and-count.md`
+and scheduled the thread heartbeat `check-wo-a3-claude-mailbox-answer` to check for the answer.
+
+Claude answered Q-A3-001 on 2026-07-04. The answer approved the degree-safe schedule plan:
+sigma formulas are ungated over boolean bit columns, and only the linear `s0`/`s1`
+recomposition is gated on active schedule rows. The answer also recommended reusing only
+`a`, `e`, and `W` bit columns with row offsets for `b/c/f/g`.
+
+During implementation, direct selector expressions for `b/c/f/g` inside Maj/Ch would have
+multiplied the degree-3 formulas past the SHA degree budget. The landed design therefore
+duplicates committed operand bits for `b/c/f/g` and constrains them back to shifted `a/e`
+bits with selector-gated linear aliases. This costs more trace columns than the ideal reuse
+plan but preserves degree without changing split-pack, range, additions, or carry logic.
+
+## Phase 2/3 Review
+
+- Trace layout moved from 349 to 493 SHA columns. New committed columns are W bits,
+  six round operand bit columns (`a,b,c,e,f,g`), packed Maj/Ch output groups, and
+  lower-sigma output bits for schedule rows.
+- Proof-path decode, MajCh, and xor_8 table producers/consumers were removed. The SHA
+  main interaction budget moved from 106 to 66 lookup slots per row. Preprocessed SHA
+  columns moved from 94 to 46, and SHA component count moved from 23 to 13.
+- Schedule lower-sigma output bits are filled for every domain row, including wraparound
+  and padding rows, so ungated formula constraints always have satisfying witnesses.
+- Shape dump after implementation:
+  - SHA standalone STARK proof bytes: `55,817`.
+  - SHA cells: `13,843,104 -> 5,200,544` (`-8,642,560`, `-62.43%`).
+  - Total identity cells: `37,500,240 -> 28,857,680` (`-8,642,560`, `-23.05%`).
+- Benchmarks after implementation (`RAYON_NUM_THREADS=1`):
+  - `BM_ShaZK_equiv/1/prove`: `1.0113 s -> 327.12 ms` (`3.09x`, `-67.65%`).
+  - `BM_ShaZK_equiv/1/verify`: `619.67 us -> 679.37 us` (`+9.63%`).
+  - `BM_ShaZK_equiv/33/prove`: `1.1028 s -> 423.85 ms` (`2.60x`, `-61.56%`).
+  - `BM_ShaZK_equiv/33/verify`: `618.97 us -> 683.94 us` (`+10.50%`).
+- Verification completed so far:
+  - `rtk proxy cargo check -p stwo-sha256`: passed.
+  - `rtk proxy cargo test -p stwo-sha256 --no-run`: passed.
+  - `rtk proxy cargo test -p stwo-sha256`: passed.
+  - `rtk proxy cargo test -p stwo-sha256 --release prove_and_verify_abc -- --exact --ignored --nocapture`: passed.
+  - `rtk proxy env RAYON_NUM_THREADS=1 cargo test -p eu-id-prover --release shape_dump -- --ignored --nocapture`: passed.
+  - `rtk proxy cargo fmt --all -- --check`: passed.
+  - `rtk proxy cargo clippy -p stwo-sha256 --lib -- -D warnings`: passed.
+  - `rtk proxy env RAYON_NUM_THREADS=1 cargo bench -p eu-id-prover --bench longfellow_equiv_bench -- 'BM_ShaZK_equiv/1/'`: passed.
+  - `rtk proxy env RAYON_NUM_THREADS=1 cargo bench -p eu-id-prover --bench longfellow_equiv_bench -- 'BM_ShaZK_equiv/33/'`: passed.
+  - `rtk proxy cargo test -p eu-id-prover --release --test nonce_signature -- --include-ignored`: passed, 7 passed.
+
+# WO-A1R Typed Multiplicity Migration Redo
+
+Source of truth: `tasks/parity/WO-A1R-typed-mults-redo.md`.
+Worktree: `/Users/lucas/eu-id/.claude/worktrees/a1r-typed-mults-redo` on `perf/a1r-typed-mults-redo`.
+Base: `feat/proof-reductions` because local `main` still pins Stwo `e128672`, while this branch has the post-rotation typed constructor API required by the WO.
+Scope: only `crates/stwo-sha256/` `RelationEntry::new` call sites, a focused structural guard, and this task log.
+
+- [x] Detect and re-plan around the stale local `main` dependency pin mismatch.
+- [x] Inventory all 19 remaining SHA `RelationEntry::new` call sites.
+- [x] Add a focused structural regression that fails while generic SHA relation constructors remain.
+- [x] Convert base-field multiplicities to typed constructors without changing constraints.
+- [x] Verify no SHA-local `RelationEntry::new` call sites remain.
+- [ ] Run required proof, clippy, fmt, and benchmark gates.
+- [ ] Commit with per-constructor counts and record results here.
+
+## Review
+
+- Initial worktree from `main` was stopped because `Cargo.toml` pinned Stwo `e1286720...`,
+  where `RelationEntry::base` is unavailable. Redo worktree starts from
+  `feat/proof-reductions` at `fac1cd4c`, matching the task's post-rotation SHA scope.
+- Explorer inventory classified all 19 remaining SHA call sites as `RelationEntry::base`;
+  no genuinely extension-field multiplicities need to remain as `new`.
+- Red/green guard:
+  `rtk cargo test -p stwo-sha256 sha_air_uses_typed_relation_multiplicities -- --nocapture`
+  failed before migration, then passed after the 19 constructor swaps.
+- Source scan: `rtk grep "RelationEntry::new" crates/stwo-sha256/src` reports 0.
+- Verification so far:
+  - Fresh `rtk cargo test -p stwo-sha256`: passed, 135 passed / 13 ignored.
+  - Fresh `rtk cargo test -p stwo-sha256 --release prove_and_verify_abc -- --exact --ignored --nocapture`: passed.
+  - Fresh `rtk cargo test -p eu-id-prover --release --test nonce_signature -- --include-ignored`: passed, 7 passed.
+  - Fresh `rtk cargo fmt --all -- --check`: passed.
+  - `rtk cargo clippy -p stwo-sha256 --lib -- -D warnings`: passed.
+  - Fresh `rtk cargo clippy --workspace --all-targets -- -D warnings`: failed on pre-existing out-of-scope warnings in
+    `air-core`, `stwo-p256`, and old SHA test/helper code; this WO's scope forbids those unrelated fixes.
+- Benchmarks (`RAYON_NUM_THREADS=1 cargo bench -p eu-id-prover --bench longfellow_equiv_bench`):
+  - `BM_ShaZK_equiv/1/prove`: 1.0296 s -> 1.0194 s (-0.99%).
+  - `BM_ShaZK_equiv/1/verify`: 636.92 us -> 634.46 us (-0.39%).
+  - `BM_ShaZK_equiv/33/prove`: 1.1036 s -> 1.1151 s (+1.04%).
+  - `BM_ShaZK_equiv/33/verify`: 631.44 us -> 633.22 us (+0.28%).
 
 # Merge & Cleanup Plan
 

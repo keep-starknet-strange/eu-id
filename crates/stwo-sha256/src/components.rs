@@ -296,7 +296,7 @@ impl FrameworkEval for SigmaDecodeEval {
         // through a small `dyn Relation`-style closure. Stwo's
         // `add_to_relation` is generic on `R: Relation<…>`; we can't pass
         // a `&dyn Relation` so we inline the 8-way match.
-        let neg_mult = -E::EF::from(mult);
+        let neg_mult = -mult;
         use crate::relations::*;
         match (self.f, self.half) {
             (SigmaFn::Sigma0, Half::S) => emit::<E, Sigma0DecodeS>(
@@ -360,10 +360,10 @@ impl FrameworkEval for SigmaDecodeEval {
 fn emit<E: EvalAtRow, R: Relation<E::F, E::EF>>(
     eval: &mut E,
     rel: &R,
-    mult: E::EF,
+    mult: E::F,
     values: &[E::F],
 ) {
-    eval.add_to_relation(RelationEntry::new(rel, mult, values));
+    eval.add_to_relation(RelationEntry::base(rel, mult, values));
 }
 
 pub type SigmaDecodeComponent = FrameworkComponent<SigmaDecodeEval>;
@@ -402,14 +402,14 @@ impl FrameworkEval for MajChEval {
         let mult_maj = eval.next_trace_mask();
         let mult_ch = eval.next_trace_mask();
 
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             &self.relations.maj,
-            -E::EF::from(mult_maj),
+            -mult_maj,
             &[a.clone(), b.clone(), c.clone(), maj_val],
         ));
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             &self.relations.ch,
-            -E::EF::from(mult_ch),
+            -mult_ch,
             &[a, b, c, ch_val],
         ));
 
@@ -446,9 +446,9 @@ impl FrameworkEval for Xor8Eval {
         let mult = eval.next_trace_mask();
 
         #[cfg(not(feature = "gkr-spike"))]
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             &self.relations.xor_8,
-            -E::EF::from(mult),
+            -mult,
             &[x, y, z],
         ));
         #[cfg(feature = "gkr-spike")]
@@ -491,7 +491,7 @@ impl FrameworkEval for RoundSplitPackEval {
         let g3 = eval.get_preprocessed_column(cols[4].clone());
         let mult = eval.next_trace_mask();
         let values = [key, g0, g1, g2, g3];
-        let neg = -E::EF::from(mult);
+        let neg = -mult;
         use crate::relations::*;
         match (self.partition, self.half) {
             (RoundPartition::Sigma0AndMaj, Half16::Lo) => emit::<E, Sigma0SplitPackLo>(
@@ -552,7 +552,7 @@ impl FrameworkEval for SigmaSplitPackEval {
         let packed_sp = eval.get_preprocessed_column(cols[2].clone());
         let mult = eval.next_trace_mask();
         let values = [key, packed_s, packed_sp];
-        let neg = -E::EF::from(mult);
+        let neg = -mult;
         use crate::relations::*;
         match (self.partition, self.half) {
             (LowerSigmaPartition::LowerSigma0, Half16::Lo) => emit::<E, LowerSigma0SplitPackLo>(
@@ -624,7 +624,7 @@ impl FrameworkEval for RangeKEval {
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         let value = eval.get_preprocessed_column(range_column_id(self.kind));
         let mult = eval.next_trace_mask();
-        let neg = -E::EF::from(mult);
+        let neg = -mult;
 
         use crate::relations::*;
         let values = [value];
@@ -661,15 +661,6 @@ pub type RangeKComponent = FrameworkComponent<RangeKEval>;
 /// both sides in sync or the verifier will read the wrong column.
 pub fn all_preprocessed_column_ids() -> Vec<PreProcessedColumnId> {
     let mut out = Vec::new();
-    // 8 decode tables in the order `Sha256Relations::draw`/`SigmaDecodeRelations::draw` uses.
-    for (f, h) in DECODE_TABLES {
-        out.extend(decode_column_ids(*f, *h));
-    }
-    // 1 Maj/Ch table — column IDs depend only on table identity, not on
-    // `group_width` (which sets the table's row count, not its columns).
-    out.extend(maj_ch_column_ids());
-    // 1 xor_8 table.
-    out.extend(xor_8_column_ids());
     // 4 round-side split-pack tables, then 4 σ-side.
     for (p, h) in ROUND_SPLIT_TABLES {
         out.extend(round_split_pack_column_ids(*p, *h));

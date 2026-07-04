@@ -240,24 +240,22 @@ GKR-v2 diagnostic (2026-07-04): fused PackedQM31 fraction-add measures 3.8 ns/ef
 
 GKR-v2 close-out (2026-07-04): Q-030 chooses stop/no production fusion. The extra Stwo comparison measured the existing `Fraction` abstraction within 3-4% of hand-fused PackedQM31 fraction-add (`log20` median 13.018 ms existing vs 12.563 ms fused), so production fusion is review risk without a consumer. Useful deliverables are the Stwo mixed-height/global-lift correctness fix and `gkr_fraction_add` diagnostic bench; eu-id remains full LogUp with the reopener gates preserved.
 
-| 2026-07-04 | fc307618 | WO-M1 Phase 4 default-on flip | `identity_e2e/prove_identity` legacy `--no-default-features` -> default coprocessor (RAYON_NUM_THREADS=1, BENCH-LOCK) | 3.1921 s | 1.8609 s |
-| 2026-07-04 | fc307618 | WO-M1 Phase 4 default-on flip | `pipeline_e2e` prove, legacy -> default coprocessor (BENCH_ITERS=3, RAYON_NUM_THREADS=1) | 4817 ms | 2515 ms |
-| 2026-07-04 | fc307618 | WO-M1 Phase 4 default-on flip | `pipeline_e2e` verify, legacy -> default coprocessor | 39 ms | 40 ms |
-| 2026-07-04 | fc307618 | WO-M1 Phase 4 default-on flip | proof bytes, legacy -> default coprocessor | 3,916,615 | 1,240,046 |
+| 2026-07-04 | perf/a1r-typed-mults-redo worktree | WO-A1R typed SHA multiplicities | BM_ShaZK_equiv/1/prove (RAYON_NUM_THREADS=1) | 1.0296 s | 1.0194 s (-0.99%) |
+| 2026-07-04 | perf/a1r-typed-mults-redo worktree | WO-A1R typed SHA multiplicities | BM_ShaZK_equiv/1/verify (RAYON_NUM_THREADS=1) | 636.92 us | 634.46 us (-0.39%) |
+| 2026-07-04 | perf/a1r-typed-mults-redo worktree | WO-A1R typed SHA multiplicities | BM_ShaZK_equiv/33/prove (RAYON_NUM_THREADS=1) | 1.1036 s | 1.1151 s (+1.04%) |
+| 2026-07-04 | perf/a1r-typed-mults-redo worktree | WO-A1R typed SHA multiplicities | BM_ShaZK_equiv/33/verify (RAYON_NUM_THREADS=1) | 631.44 us | 633.22 us (+0.28%) |
+| 2026-07-04 | feat/a3-hybrid-sha worktree | WO-A3 hybrid SHA | shape_dump SHA cells | 13,843,104 | 5,200,544 (-8,642,560; -62.43%) |
+| 2026-07-04 | feat/a3-hybrid-sha worktree | WO-A3 hybrid SHA | shape_dump total identity cells | 37,500,240 | 28,857,680 (-8,642,560; -23.05%) |
+| 2026-07-04 | feat/a3-hybrid-sha worktree | WO-A3 hybrid SHA | BM_ShaZK_equiv/1/prove (RAYON_NUM_THREADS=1) | 1.0113 s | 327.12 ms (-67.65%; 3.09x) |
+| 2026-07-04 | feat/a3-hybrid-sha worktree | WO-A3 hybrid SHA | BM_ShaZK_equiv/1/verify (RAYON_NUM_THREADS=1) | 619.67 us | 679.37 us (+9.63% vs Phase 0 baseline; Criterion vs previous +7.57%) |
+| 2026-07-04 | feat/a3-hybrid-sha worktree | WO-A3 hybrid SHA | BM_ShaZK_equiv/33/prove (RAYON_NUM_THREADS=1) | 1.1028 s | 423.85 ms (-61.56%; 2.60x) |
+| 2026-07-04 | feat/a3-hybrid-sha worktree | WO-A3 hybrid SHA | BM_ShaZK_equiv/33/verify (RAYON_NUM_THREADS=1) | 618.97 us | 683.94 us (+10.50% vs Phase 0 baseline; Criterion vs previous +9.73%) |
 
-WO-M1 Phase 4 default-on note (2026-07-04): Q-M1-003 authorized flipping `ec-coprocessor` into the `eu-id-prover` default after WO-M2 moved both credential and nonce ECDSA statements through one transcript-bound coprocessor bundle. Final head-to-head table, benches of record:
+WO-A1R note: converted the 19 remaining SHA `RelationEntry::new` call sites to typed `RelationEntry::base`; no `unit`, `neg_unit`, or extension-field `new` sites remained in `crates/stwo-sha256`. Parent measurements used `feat/proof-reductions` at `fac1cd4c`; after measurements used the `perf/a1r-typed-mults-redo` worktree before commit. Criterion filters were run separately for block counts 1 and 33 under `RAYON_NUM_THREADS=1`.
 
-| era | feature mode | `identity_e2e/prove_identity` | `pipeline_e2e` prove | `pipeline_e2e` verify | proof bytes |
-|---|---|---:|---:|---:|---:|
-| AIR-optimized product baseline | `--no-default-features` legacy P256 AIR | 3.1921 s | 4817 ms | 39 ms | 3,916,615 |
-| credential-coprocessor checkpoint | `--features ec-coprocessor` before WO-M2 | 2.6246 s | 3787 ms | 41 ms | 2,610,867 |
-| full coprocessor era | default features | 1.8609 s | 2515 ms | 40 ms | 1,240,046 |
-
-Default-on v1 caveats ship with the flip: public `z,r,s` exposes linkable presentations across verifiers, and `V1_NON_ZK` Ligero openings are non-ZK until v2 masked rows re-derive parameters. Mechanical retirement audit: the default identity composition no longer constructs `P256Prover`/`P256Verifier`; those product-path modules are under `#[cfg(not(feature = "ec-coprocessor"))]`. Remaining `stwo-p256` references are legacy no-default product proof code, statement/type/native ECDSA helpers, isolated mdoc AIR profile, `shape_dump`, standalone benches/tests, and the FFI standalone P256 benchmark.
-
-| 2026-07-04 | worktree | WO-M3 mdoc coprocessor integration | mdoc `prove_mdoc_circuit`, legacy `--no-default-features` -> default coprocessor (BENCH_ITERS=5, RAYON_NUM_THREADS=1) | 7,866 ms | 5,266 ms |
-| 2026-07-04 | worktree | WO-M3 mdoc coprocessor integration | mdoc `verify_mdoc_circuit`, legacy -> default coprocessor | 40 ms | 46 ms |
-| 2026-07-04 | worktree | WO-M3 mdoc coprocessor integration | mdoc proof bincode bytes, legacy -> default coprocessor | 4,563,243 | 1,834,614 |
-| 2026-07-04 | worktree | WO-M3 mdoc coprocessor integration | mdoc committed shape cells, legacy -> default coprocessor | 79,988,576 | 56,296,064 |
-
-WO-M3 mdoc coprocessor note (2026-07-04): Q-M1-004 authorized moving the issuer and device mdoc signatures from P256 AIR + private digest bridges to the same transcript-bound coprocessor pattern as identity. The feature-on module order is issuer SHA, issuer public digest bind, device SHA, device public digest bind, birth-date SHA/bind, nationality SHA/bind, age, nationality, and the final coprocessor binding module. The A/B command was `RAYON_NUM_THREADS=1 BENCH_ITERS=5 cargo run -p eu-id-prover --release [--no-default-features] --example mdoc_perf_probe`; `BENCH-LOCK` was requested by the WO but no `BENCH-LOCK` file exists in this worktree or the main checkout. Deltas: prove -2,600 ms (-33.1%), verify +6 ms, proof bytes -2,728,629 (-59.8%), shape cells -23,692,512 (-29.6%). The remaining default STARK shape is the four SHA modules: 56,276,096 of 56,296,064 cells (99.96% of in-STARK cells, excluding the external coprocessor bundle).
+WO-A3 note: the proof path removes decode, MajCh, and xor_8 table producers/consumers while
+retaining split-pack, range, limb-addition, carry, digest, and field-exposure logic. Degree
+audit required committed duplicate `b/c/f/g` operand bit columns instead of using selector
+expressions inside Maj/Ch formulas; the duplicate bits are tied to shifted `a/e` bits through
+linear alias constraints. Schedule lower-sigma output bits are filled for every domain row so
+ungated sigma formulas remain degree-safe across wraparound and padding rows.
