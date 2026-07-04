@@ -112,6 +112,7 @@ pub use predicates::all_nationality_codes;
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(not(feature = "ec-coprocessor"))]
 const NONCE_P256_PREPROCESSED_NAMESPACE: &str = "nonce_p256";
 
 use air_core::relations::{field_id, SharedDigestRelation, SharedFieldRelation};
@@ -120,6 +121,8 @@ use air_core::{Air, AirProver};
 use blake2::{Blake2s256, Digest as BlakeDigest};
 use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::QM31;
+#[cfg(feature = "ec-coprocessor")]
+use stwo::core::fri::FriConfig;
 use stwo::core::pcs::PcsConfig;
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::core::proof::StarkProof;
@@ -151,9 +154,10 @@ use stwo_p256::components::digest_bind::SharedScalarZRelation;
 use stwo_p256::ecdsa::ecdsa_verify;
 use stwo_p256::limbs::P256M31BigInt;
 #[cfg(not(feature = "ec-coprocessor"))]
-use stwo_p256::proof::air::P256ColumnTask;
-use stwo_p256::proof::air::{P256Prover, P256Verifier};
-use stwo_p256::proof::{P256CurrentAirInteractionClaim, P256CurrentAirProofClaim, P256ProofDraft};
+use stwo_p256::proof::air::{P256ColumnTask, P256Prover, P256Verifier};
+use stwo_p256::proof::P256ProofDraft;
+#[cfg(not(feature = "ec-coprocessor"))]
+use stwo_p256::proof::{P256CurrentAirInteractionClaim, P256CurrentAirProofClaim};
 use stwo_p256::public_inputs::PublicEcdsaInstance;
 // Re-exported: `AffinePoint` is the type of `PublicStatement::issuer_key`, so a
 // relying party needs it in scope to build a statement.
@@ -167,8 +171,9 @@ pub mod ec_coprocessor {
     use eu_id_ec_coprocessor::ecdsa::{
         ecdsa_statement_transcript_segments, generate_witness, implemented_circuit_family_labels,
         implemented_circuit_gate_count, implemented_circuit_transcript_shapes,
-        prove_implemented_circuit_bundle, prove_implemented_circuit_proofs,
-        verify_implemented_circuit_bundle, verify_implemented_circuit_proofs,
+        prove_implemented_circuit_bundle, prove_implemented_circuit_bundle_batch,
+        prove_implemented_circuit_proofs, verify_implemented_circuit_bundle,
+        verify_implemented_circuit_bundle_batch, verify_implemented_circuit_proofs,
         verify_implemented_circuits, verify_witness, CircuitTranscriptShape,
         EcdsaInput as S4EcdsaInput, ImplementedCircuitBundle, ImplementedCircuitProofError,
         ImplementedCircuitProofs, Witness, WitnessError,
@@ -257,12 +262,30 @@ pub mod ec_coprocessor {
         prove_implemented_circuit_bundle(&input_from_stwo(input), witness, transcript_seed)
     }
 
+    pub fn prove_implemented_circuit_bundle_batch_from_stwo(
+        inputs: &[EcdsaVerifyInput],
+        witnesses: &[Witness],
+        transcript_seed: TranscriptSeed,
+    ) -> Result<ImplementedCircuitBundle, ImplementedCircuitProofError> {
+        let inputs = inputs.iter().map(input_from_stwo).collect::<Vec<_>>();
+        prove_implemented_circuit_bundle_batch(&inputs, witnesses, transcript_seed)
+    }
+
     pub fn verify_implemented_circuit_bundle_from_stwo(
         input: &EcdsaVerifyInput,
         bundle: &ImplementedCircuitBundle,
         transcript_seed: TranscriptSeed,
     ) -> Result<Vec<InputClaims>, ImplementedCircuitProofError> {
         verify_implemented_circuit_bundle(&input_from_stwo(input), bundle, transcript_seed)
+    }
+
+    pub fn verify_implemented_circuit_bundle_batch_from_stwo(
+        inputs: &[EcdsaVerifyInput],
+        bundle: &ImplementedCircuitBundle,
+        transcript_seed: TranscriptSeed,
+    ) -> Result<Vec<Vec<InputClaims>>, ImplementedCircuitProofError> {
+        let inputs = inputs.iter().map(input_from_stwo).collect::<Vec<_>>();
+        verify_implemented_circuit_bundle_batch(&inputs, bundle, transcript_seed)
     }
 
     pub fn verify_implemented_circuit_bundle_from_public_instance(
@@ -286,6 +309,12 @@ use stwo_sha256::field_exposure::FieldExposure;
 use stwo_sha256::interaction::InteractionClaim as Sha256InteractionClaim;
 use stwo_sha256::types::Sha256Witness;
 
+#[cfg(feature = "ec-coprocessor")]
+#[derive(Clone, Serialize, Deserialize)]
+struct CoprocessorBundles {
+    signatures: eu_id_ec_coprocessor::ecdsa::ImplementedCircuitBundle,
+}
+
 /// A single STARK proof over the composed P256 + SHA + digest-bind modules, plus
 /// the public claims the verifier needs to reconstruct each module.
 ///
@@ -296,7 +325,7 @@ pub struct Proof {
     /// The one shared STARK proof.
     pub stark_proof: StarkProof<Blake2sMerkleHasher>,
     #[cfg(feature = "ec-coprocessor")]
-    coprocessor_bundle: Option<eu_id_ec_coprocessor::ecdsa::ImplementedCircuitBundle>,
+    coprocessor_bundles: Option<CoprocessorBundles>,
     // Credential P256 module reconstruction data.
     #[cfg(feature = "ec-coprocessor")]
     credential_instances: Vec<PublicEcdsaInstance<M31>>,
@@ -304,9 +333,14 @@ pub struct Proof {
     p256_claim: P256CurrentAirProofClaim,
     #[cfg(not(feature = "ec-coprocessor"))]
     p256_interaction_claim: P256CurrentAirInteractionClaim,
-    // Nonce P256 module reconstruction data (the holder device-key signature). No
-    // z-binding: its `z` is a public value the verifier recomputes from the nonce.
+    // Nonce P256 module reconstruction data (the holder device-key signature).
+    // Feature-off proves this as a P256 AIR module; feature-on verifies it in the
+    // EC coprocessor and carries only the public instance for statement binding.
+    #[cfg(feature = "ec-coprocessor")]
+    nonce_instances: Vec<PublicEcdsaInstance<M31>>,
+    #[cfg(not(feature = "ec-coprocessor"))]
     nonce_p256_claim: P256CurrentAirProofClaim,
+    #[cfg(not(feature = "ec-coprocessor"))]
     nonce_p256_interaction_claim: P256CurrentAirInteractionClaim,
     // SHA module reconstruction data.
     sha_log_n_rows: u32,
@@ -346,11 +380,37 @@ impl Proof {
         }
     }
 
+    /// The public ECDSA instances the nonce P256 module proves over — the holder
+    /// device-key signature. Unlike the credential instances, these are bound in
+    /// full (`z` included). [`verify`] takes the expected nonce statement
+    /// explicitly.
+    pub fn nonce_p256_instances(&self) -> &[PublicEcdsaInstance<M31>] {
+        #[cfg(feature = "ec-coprocessor")]
+        {
+            &self.nonce_instances
+        }
+        #[cfg(not(feature = "ec-coprocessor"))]
+        {
+            &self.nonce_p256_claim.public_inputs.instances
+        }
+    }
+
     #[cfg(feature = "ec-coprocessor")]
     pub fn coprocessor_bundle(
         &self,
     ) -> Option<&eu_id_ec_coprocessor::ecdsa::ImplementedCircuitBundle> {
-        self.coprocessor_bundle.as_ref()
+        self.coprocessor_bundles
+            .as_ref()
+            .map(|bundles| &bundles.signatures)
+    }
+
+    #[cfg(feature = "ec-coprocessor")]
+    pub fn nonce_coprocessor_bundle(
+        &self,
+    ) -> Option<&eu_id_ec_coprocessor::ecdsa::ImplementedCircuitBundle> {
+        self.coprocessor_bundles
+            .as_ref()
+            .map(|bundles| &bundles.signatures)
     }
 }
 
@@ -492,6 +552,19 @@ fn bridge_rows(instances: &[PublicEcdsaInstance<M31>]) -> Vec<DigestBindRow> {
         .collect()
 }
 
+#[cfg(feature = "ec-coprocessor")]
+fn coprocessor_bridge_pcs_config() -> PcsConfig {
+    // Match stwo-p256's sanctioned monolithic profile without constructing a
+    // P256 AIR module on the feature path. The coprocessor removes both P256
+    // AIRs, but the shared proof keeps the same 128-bit FRI/Pow split until an
+    // architect-approved profile change says otherwise.
+    PcsConfig {
+        pow_bits: 10,
+        fri_config: FriConfig::new(1, 2, 59, 2),
+        lifting_log_size: None,
+    }
+}
+
 #[cfg(all(test, feature = "ec-coprocessor"))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CoprocessorForkJoinDigests {
@@ -529,9 +602,9 @@ fn channel_digest(channel: &air_core::Ch) -> [u8; 32] {
 }
 
 #[cfg(feature = "ec-coprocessor")]
-fn mix_coprocessor_main_statement(
+fn mix_coprocessor_statements(
     channel: &mut air_core::Ch,
-    input: &stwo_p256::types::EcdsaVerifyInput,
+    inputs: &[&stwo_p256::types::EcdsaVerifyInput],
 ) -> Result<(), String> {
     mix_channel_bytes(channel, b"eu-id-ec-coproc-v1");
     mix_channel_bytes(channel, b"s4-ecdsa-circuit-shape-v1");
@@ -547,10 +620,20 @@ fn mix_coprocessor_main_statement(
         }
     }
 
-    for segment in ec_coprocessor::statement_transcript_segments_from_stwo(input)
-        .map_err(|err| format!("{err:?}"))?
-    {
-        mix_channel_bytes(channel, &segment);
+    mix_channel_bytes(channel, b"eu-id-ec-coproc-statements-v2");
+    channel.mix_u64(inputs.len() as u64);
+    for (index, input) in inputs.iter().enumerate() {
+        let tag = match index {
+            0 => b"credential".as_slice(),
+            1 => b"nonce".as_slice(),
+            _ => b"extra".as_slice(),
+        };
+        mix_channel_bytes(channel, tag);
+        for segment in ec_coprocessor::statement_transcript_segments_from_stwo(input)
+            .map_err(|err| format!("{err:?}"))?
+        {
+            mix_channel_bytes(channel, &segment);
+        }
     }
     Ok(())
 }
@@ -579,22 +662,31 @@ fn mix_coprocessor_rejoin(
 
 #[cfg(feature = "ec-coprocessor")]
 struct CoprocessorBindingProver {
-    input: stwo_p256::types::EcdsaVerifyInput,
-    witness: eu_id_ec_coprocessor::ecdsa::Witness,
-    bundle: Option<eu_id_ec_coprocessor::ecdsa::ImplementedCircuitBundle>,
+    credential_input: stwo_p256::types::EcdsaVerifyInput,
+    nonce_input: stwo_p256::types::EcdsaVerifyInput,
+    credential_witness: eu_id_ec_coprocessor::ecdsa::Witness,
+    nonce_witness: eu_id_ec_coprocessor::ecdsa::Witness,
+    bundles: Option<CoprocessorBundles>,
     #[cfg(test)]
     digests: Option<CoprocessorForkJoinDigests>,
 }
 
 #[cfg(feature = "ec-coprocessor")]
 impl CoprocessorBindingProver {
-    fn new(input: stwo_p256::types::EcdsaVerifyInput) -> Result<Self, Error> {
-        let witness = ec_coprocessor::generate_witness_from_stwo(&input)
+    fn new(
+        credential_input: stwo_p256::types::EcdsaVerifyInput,
+        nonce_input: stwo_p256::types::EcdsaVerifyInput,
+    ) -> Result<Self, Error> {
+        let credential_witness = ec_coprocessor::generate_witness_from_stwo(&credential_input)
+            .map_err(Error::CoprocessorWitness)?;
+        let nonce_witness = ec_coprocessor::generate_witness_from_stwo(&nonce_input)
             .map_err(Error::CoprocessorWitness)?;
         Ok(Self {
-            input,
-            witness,
-            bundle: None,
+            credential_input,
+            nonce_input,
+            credential_witness,
+            nonce_witness,
+            bundles: None,
             #[cfg(test)]
             digests: None,
         })
@@ -645,23 +737,24 @@ impl AirProver for CoprocessorBindingProver {
     fn write_interaction(&mut self, _tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {}
 
     fn prove_post_interaction(&mut self, channel: &mut air_core::Ch) {
-        mix_coprocessor_main_statement(channel, &self.input)
-            .expect("coprocessor main statement mixes");
+        mix_coprocessor_statements(channel, &[&self.credential_input, &self.nonce_input])
+            .expect("coprocessor statements mix");
         #[cfg(test)]
         let post_statement = channel_digest(channel);
         let seed = draw_coprocessor_seed(channel);
         #[cfg(test)]
         let post_seed = seed;
-        let bundle = ec_coprocessor::prove_implemented_circuit_bundle_from_stwo(
-            &self.input,
-            &self.witness,
-            seed,
+        let inputs = [self.credential_input.clone(), self.nonce_input.clone()];
+        let witnesses = [self.credential_witness.clone(), self.nonce_witness.clone()];
+        let signatures = ec_coprocessor::prove_implemented_circuit_bundle_batch_from_stwo(
+            &inputs, &witnesses, seed,
         )
-        .expect("coprocessor bundle proves from checked witness");
-        mix_coprocessor_rejoin(channel, &bundle).expect("coprocessor rejoin mixes");
+        .expect("coprocessor bundle proves both checked witnesses");
+        let bundles = CoprocessorBundles { signatures };
+        mix_coprocessor_rejoin(channel, &bundles.signatures).expect("coprocessor rejoin mixes");
         #[cfg(test)]
         let post_rejoin = channel_digest(channel);
-        self.bundle = Some(bundle);
+        self.bundles = Some(bundles);
         #[cfg(test)]
         {
             self.digests = Some(CoprocessorForkJoinDigests {
@@ -679,8 +772,9 @@ impl AirProver for CoprocessorBindingProver {
 
 #[cfg(feature = "ec-coprocessor")]
 struct CoprocessorBindingVerifier {
-    input: stwo_p256::types::EcdsaVerifyInput,
-    bundle: eu_id_ec_coprocessor::ecdsa::ImplementedCircuitBundle,
+    credential_input: stwo_p256::types::EcdsaVerifyInput,
+    nonce_input: stwo_p256::types::EcdsaVerifyInput,
+    bundles: CoprocessorBundles,
     #[cfg(test)]
     digests: Option<CoprocessorForkJoinDigests>,
 }
@@ -688,28 +782,46 @@ struct CoprocessorBindingVerifier {
 #[cfg(feature = "ec-coprocessor")]
 impl CoprocessorBindingVerifier {
     fn new(
-        instances: &[PublicEcdsaInstance<M31>],
-        bundle: eu_id_ec_coprocessor::ecdsa::ImplementedCircuitBundle,
+        credential_instances: &[PublicEcdsaInstance<M31>],
+        nonce_instances: &[PublicEcdsaInstance<M31>],
+        bundles: CoprocessorBundles,
     ) -> Result<Self, Error> {
-        if instances.len() != 1 {
+        if credential_instances.len() != 1 {
             return Err(Error::CoprocessorInstanceCount {
-                actual: instances.len(),
+                actual: credential_instances.len(),
             });
         }
-        let instance = &instances[0];
+        if nonce_instances.len() != 1 {
+            return Err(Error::CoprocessorInstanceCount {
+                actual: nonce_instances.len(),
+            });
+        }
+        let credential = &credential_instances[0];
+        let nonce = &nonce_instances[0];
         Ok(Self {
-            input: stwo_p256::types::EcdsaVerifyInput {
-                message_hash: stwo_p256::types::U256(instance.z.to_u256().0),
+            credential_input: stwo_p256::types::EcdsaVerifyInput {
+                message_hash: stwo_p256::types::U256(credential.z.to_u256().0),
                 signature: stwo_p256::types::Signature {
-                    r: stwo_p256::types::U256(instance.r.to_u256().0),
-                    s: stwo_p256::types::U256(instance.s.to_u256().0),
+                    r: stwo_p256::types::U256(credential.r.to_u256().0),
+                    s: stwo_p256::types::U256(credential.s.to_u256().0),
                 },
                 public_key: AffinePoint {
-                    x: stwo_p256::types::U256(instance.pub_x.to_u256().0),
-                    y: stwo_p256::types::U256(instance.pub_y.to_u256().0),
+                    x: stwo_p256::types::U256(credential.pub_x.to_u256().0),
+                    y: stwo_p256::types::U256(credential.pub_y.to_u256().0),
                 },
             },
-            bundle,
+            nonce_input: stwo_p256::types::EcdsaVerifyInput {
+                message_hash: stwo_p256::types::U256(nonce.z.to_u256().0),
+                signature: stwo_p256::types::Signature {
+                    r: stwo_p256::types::U256(nonce.r.to_u256().0),
+                    s: stwo_p256::types::U256(nonce.s.to_u256().0),
+                },
+                public_key: AffinePoint {
+                    x: stwo_p256::types::U256(nonce.pub_x.to_u256().0),
+                    y: stwo_p256::types::U256(nonce.pub_y.to_u256().0),
+                },
+            },
+            bundles,
             #[cfg(test)]
             digests: None,
         })
@@ -750,20 +862,21 @@ impl Air for CoprocessorBindingVerifier {
         &mut self,
         channel: &mut air_core::Ch,
     ) -> Result<(), VerificationError> {
-        mix_coprocessor_main_statement(channel, &self.input)
+        mix_coprocessor_statements(channel, &[&self.credential_input, &self.nonce_input])
             .map_err(VerificationError::InvalidStructure)?;
         #[cfg(test)]
         let post_statement = channel_digest(channel);
         let seed = draw_coprocessor_seed(channel);
         #[cfg(test)]
         let post_seed = seed;
-        ec_coprocessor::verify_implemented_circuit_bundle_from_stwo(
-            &self.input,
-            &self.bundle,
+        let inputs = [self.credential_input.clone(), self.nonce_input.clone()];
+        ec_coprocessor::verify_implemented_circuit_bundle_batch_from_stwo(
+            &inputs,
+            &self.bundles.signatures,
             seed,
         )
         .map_err(|err| VerificationError::InvalidStructure(format!("{err:?}")))?;
-        mix_coprocessor_rejoin(channel, &self.bundle)
+        mix_coprocessor_rejoin(channel, &self.bundles.signatures)
             .map_err(VerificationError::InvalidStructure)?;
         #[cfg(test)]
         let post_rejoin = channel_digest(channel);
@@ -865,6 +978,7 @@ impl ModuleColumns {
 struct PreparedProofModules<'a> {
     #[cfg(not(feature = "ec-coprocessor"))]
     p256: P256Prover<'a>,
+    #[cfg(not(feature = "ec-coprocessor"))]
     nonce_p256: P256Prover<'a>,
     sha: Sha256Prover<'a>,
     #[cfg(not(feature = "ec-coprocessor"))]
@@ -875,6 +989,8 @@ struct PreparedProofModules<'a> {
     coprocessor: CoprocessorBindingProver,
     #[cfg(feature = "ec-coprocessor")]
     credential_instances: Vec<PublicEcdsaInstance<M31>>,
+    #[cfg(feature = "ec-coprocessor")]
+    nonce_instances: Vec<PublicEcdsaInstance<M31>>,
     age: RangeCheckProver,
     nat: NatProver,
     sha_log_n_rows: u32,
@@ -950,6 +1066,7 @@ fn prepare_proof_modules<'a>(
     // value the verifier recomputes from the nonce. It still needs a
     // preprocessed namespace because hinted-mul schedule columns are
     // witness-dependent and may differ from the credential signature.
+    #[cfg(not(feature = "ec-coprocessor"))]
     let nonce_p256 = P256Prover::new(nonce_p256_draft)
         .map_err(Error::P256Prepare)?
         .with_preprocessed_namespace(NONCE_P256_PREPROCESSED_NAMESPACE);
@@ -976,17 +1093,31 @@ fn prepare_proof_modules<'a>(
     };
 
     #[cfg(feature = "ec-coprocessor")]
-    let (credential_instances, public_digest_bind, coprocessor) = {
+    let (credential_instances, nonce_instances, public_digest_bind, coprocessor) = {
         let credential_instances = p256_draft.claim.public_inputs.instances.clone();
+        let nonce_instances = nonce_p256_draft.claim.public_inputs.instances.clone();
         if credential_instances.len() != 1 || p256_draft.inputs.len() != 1 {
             return Err(Error::CoprocessorInstanceCount {
                 actual: credential_instances.len(),
             });
         }
+        if nonce_instances.len() != 1 || nonce_p256_draft.inputs.len() != 1 {
+            return Err(Error::CoprocessorInstanceCount {
+                actual: nonce_instances.len(),
+            });
+        }
         let public_z = p256_draft.inputs[0].message_hash.0;
         let public_digest_bind = PublicDigestBind::new(public_z, digest_handle);
-        let coprocessor = CoprocessorBindingProver::new(p256_draft.inputs[0].clone())?;
-        (credential_instances, public_digest_bind, coprocessor)
+        let coprocessor = CoprocessorBindingProver::new(
+            p256_draft.inputs[0].clone(),
+            nonce_p256_draft.inputs[0].clone(),
+        )?;
+        (
+            credential_instances,
+            nonce_instances,
+            public_digest_bind,
+            coprocessor,
+        )
     };
 
     // The predicate modules. `range_check` is the canonical age strategy for the
@@ -1014,6 +1145,7 @@ fn prepare_proof_modules<'a>(
     Ok(PreparedProofModules {
         #[cfg(not(feature = "ec-coprocessor"))]
         p256,
+        #[cfg(not(feature = "ec-coprocessor"))]
         nonce_p256,
         sha,
         #[cfg(not(feature = "ec-coprocessor"))]
@@ -1024,6 +1156,8 @@ fn prepare_proof_modules<'a>(
         coprocessor,
         #[cfg(feature = "ec-coprocessor")]
         credential_instances,
+        #[cfg(feature = "ec-coprocessor")]
+        nonce_instances,
         age,
         nat,
         sha_log_n_rows,
@@ -1042,6 +1176,7 @@ fn prove_prepared_with_config(
     let PreparedProofModules {
         #[cfg(not(feature = "ec-coprocessor"))]
         ref mut p256,
+        #[cfg(not(feature = "ec-coprocessor"))]
         ref mut nonce_p256,
         ref mut sha,
         #[cfg(not(feature = "ec-coprocessor"))]
@@ -1052,6 +1187,8 @@ fn prove_prepared_with_config(
         ref mut coprocessor,
         #[cfg(feature = "ec-coprocessor")]
         ref credential_instances,
+        #[cfg(feature = "ec-coprocessor")]
+        ref nonce_instances,
         ref mut age,
         ref mut nat,
         sha_log_n_rows,
@@ -1078,7 +1215,6 @@ fn prove_prepared_with_config(
     ];
     #[cfg(feature = "ec-coprocessor")]
     let column_breakdown = vec![
-        ModuleColumns::of("nonce_p256", &nonce_p256.layout()),
         ModuleColumns::of("sha", &sha.layout()),
         ModuleColumns::of("public_digest_bind", &public_digest_bind.layout()),
         ModuleColumns::of("age", &age.layout()),
@@ -1107,23 +1243,29 @@ fn prove_prepared_with_config(
         #[cfg(not(feature = "ec-coprocessor"))]
         let mut modules: [&mut dyn AirProver; 6] = [p256, nonce_p256, sha, bridge, age, nat];
         #[cfg(feature = "ec-coprocessor")]
-        let mut modules: [&mut dyn AirProver; 6] =
-            [nonce_p256, sha, public_digest_bind, age, nat, coprocessor];
+        let mut modules: [&mut dyn AirProver; 5] = [sha, public_digest_bind, age, nat, coprocessor];
         air_core::prove(&mut modules, config).map_err(|e| Error::Prove(format!("{e:?}")))?
     };
     #[cfg(feature = "ec-coprocessor")]
-    let coprocessor_bundle = coprocessor.bundle.take().ok_or(Error::CoprocessorMissing)?;
+    let coprocessor_bundles = coprocessor
+        .bundles
+        .take()
+        .ok_or(Error::CoprocessorMissing)?;
     let proof = Proof {
         stark_proof,
         #[cfg(feature = "ec-coprocessor")]
-        coprocessor_bundle: Some(coprocessor_bundle),
+        coprocessor_bundles: Some(coprocessor_bundles),
         #[cfg(feature = "ec-coprocessor")]
         credential_instances: credential_instances.clone(),
+        #[cfg(feature = "ec-coprocessor")]
+        nonce_instances: nonce_instances.clone(),
         #[cfg(not(feature = "ec-coprocessor"))]
         p256_claim: p256.proof_claim().clone(),
         #[cfg(not(feature = "ec-coprocessor"))]
         p256_interaction_claim: p256.interaction_claim().clone(),
+        #[cfg(not(feature = "ec-coprocessor"))]
         nonce_p256_claim: nonce_p256.proof_claim().clone(),
+        #[cfg(not(feature = "ec-coprocessor"))]
         nonce_p256_interaction_claim: nonce_p256.interaction_claim().clone(),
         sha_log_n_rows,
         sha_group_width,
@@ -1174,7 +1316,7 @@ pub fn prove_with_column_breakdown(
     #[cfg(not(feature = "ec-coprocessor"))]
     let config = prepared.p256.pcs_config();
     #[cfg(feature = "ec-coprocessor")]
-    let config = prepared.nonce_p256.pcs_config();
+    let config = coprocessor_bridge_pcs_config();
     prove_prepared_with_config(prepared, config)
 }
 
@@ -1218,7 +1360,7 @@ pub fn verify_with_config(
     if !instances_match_ignoring_z(proof.p256_instances(), expected_instances) {
         return Err(Error::P256InstanceMismatch);
     }
-    if proof.nonce_p256_claim.public_inputs.instances != expected_nonce_instances {
+    if proof.nonce_p256_instances() != expected_nonce_instances {
         return Err(Error::P256InstanceMismatch);
     }
     verify_stark_with_config(proof, Some(config))
@@ -1308,7 +1450,7 @@ pub fn verify(
     // The nonce P256 statement is bound in FULL — `z` included — because the
     // holder's message hash is a public value the verifier recomputes from the
     // nonce, not an internally proven digest.
-    if proof.nonce_p256_claim.public_inputs.instances != expected_nonce_instances {
+    if proof.nonce_p256_instances() != expected_nonce_instances {
         return Err(Error::P256InstanceMismatch);
     }
     verify_stark(proof)
@@ -1358,7 +1500,7 @@ pub fn verify_identity(proof: &Proof, statement: &PublicStatement) -> Result<(),
         0,
         &statement.nonce.ecdsa_input(),
     )];
-    if proof.nonce_p256_claim.public_inputs.instances != expected_nonce {
+    if proof.nonce_p256_instances() != expected_nonce {
         return Err(Error::P256InstanceMismatch);
     }
     verify_stark(proof)
@@ -1388,7 +1530,9 @@ fn verify_stark_with_config(
     )
     .with_z_binding(scalar_z_handle.clone());
     // The nonce (holder-presence) P256 module — no z-binding, mirroring the
-    // prover.
+    // prover. Feature-on verifies this statement through the coprocessor, so no
+    // P256 verifier module is reconstructed.
+    #[cfg(not(feature = "ec-coprocessor"))]
     let mut nonce_p256 = P256Verifier::new(
         proof.nonce_p256_claim.clone(),
         proof.nonce_p256_interaction_claim.clone(),
@@ -1426,8 +1570,9 @@ fn verify_stark_with_config(
     #[cfg(feature = "ec-coprocessor")]
     let mut coprocessor = CoprocessorBindingVerifier::new(
         proof.p256_instances(),
+        proof.nonce_p256_instances(),
         proof
-            .coprocessor_bundle
+            .coprocessor_bundles
             .clone()
             .ok_or(Error::CoprocessorMissing)?,
     )?;
@@ -1455,7 +1600,7 @@ fn verify_stark_with_config(
     #[cfg(not(feature = "ec-coprocessor"))]
     let expected_pcs_config = p256.expected_pcs_config();
     #[cfg(feature = "ec-coprocessor")]
-    let expected_pcs_config = nonce_p256.expected_pcs_config();
+    let expected_pcs_config = coprocessor_bridge_pcs_config();
     let expected_config = expected_config_override.unwrap_or(expected_pcs_config);
     if proof.stark_proof.config != expected_config {
         return Err(Error::WeakConfig {
@@ -1484,8 +1629,7 @@ fn verify_stark_with_config(
         &mut nat,
     ];
     #[cfg(feature = "ec-coprocessor")]
-    let mut modules: [&mut dyn Air; 6] = [
-        &mut nonce_p256,
+    let mut modules: [&mut dyn Air; 5] = [
         &mut sha,
         &mut public_digest_bind,
         &mut age,
@@ -1507,9 +1651,9 @@ mod ec_coprocessor_tests {
     };
     use crate::generator::{sign_credential, IssuerKey};
     use crate::{
-        channel_digest, coprocessor_bundle_hash, draw_coprocessor_seed,
-        mix_coprocessor_main_statement, mix_coprocessor_rejoin, CoprocessorBindingProver,
-        CoprocessorBindingVerifier, CoprocessorForkJoinDigests,
+        channel_digest, coprocessor_bundle_hash, draw_coprocessor_seed, mix_coprocessor_rejoin,
+        mix_coprocessor_statements, CoprocessorBindingProver, CoprocessorBindingVerifier,
+        CoprocessorBundles, CoprocessorForkJoinDigests,
     };
     use crate::{fixtures, prove_identity, verify, verify_identity, Error, Proof, PublicStatement};
     use air_core::{Air, AirProver};
@@ -1588,15 +1732,16 @@ mod ec_coprocessor_tests {
         channel.mix_u64(0x4d315f7072656669);
     }
 
-    fn wrong_order_digests(
-        input: &stwo_p256::types::EcdsaVerifyInput,
+    fn swapped_statement_order_digests(
+        credential_input: &stwo_p256::types::EcdsaVerifyInput,
+        nonce_input: &stwo_p256::types::EcdsaVerifyInput,
         bundle: &eu_id_ec_coprocessor::ecdsa::ImplementedCircuitBundle,
     ) -> CoprocessorForkJoinDigests {
         let mut channel = air_core::Ch::default();
         transcript_prefix(&mut channel);
-        let post_seed = draw_coprocessor_seed(&mut channel);
-        mix_coprocessor_main_statement(&mut channel, input).unwrap();
+        mix_coprocessor_statements(&mut channel, &[nonce_input, credential_input]).unwrap();
         let post_statement = channel_digest(&channel);
+        let post_seed = draw_coprocessor_seed(&mut channel);
         mix_coprocessor_rejoin(&mut channel, bundle).unwrap();
         let post_rejoin = channel_digest(&channel);
         CoprocessorForkJoinDigests {
@@ -1620,16 +1765,21 @@ mod ec_coprocessor_tests {
     fn feature_gated_coprocessor_fork_join_digests_match_prover_and_verifier() {
         let credential = Credential::new(2000, 1, 1, 276);
         let signed = sign_credential(&credential, &IssuerKey::demo());
-        let mut prover = CoprocessorBindingProver::new(signed.ecdsa_input.clone()).unwrap();
+        let nonce_input = fixtures::demo_nonce_statement().ecdsa_input();
+        let mut prover =
+            CoprocessorBindingProver::new(signed.ecdsa_input.clone(), nonce_input.clone()).unwrap();
         let mut prover_channel = air_core::Ch::default();
         transcript_prefix(&mut prover_channel);
 
         prover.prove_post_interaction(&mut prover_channel);
-        let bundle = prover.bundle.clone().unwrap();
+        let bundles = prover.bundles.clone().unwrap();
+        let bundle = bundles.signatures.clone();
         let prover_digests = prover.digests.clone().unwrap();
 
         let instance = PublicEcdsaInstance::from_input(0, &signed.ecdsa_input);
-        let mut verifier = CoprocessorBindingVerifier::new(&[instance], bundle.clone()).unwrap();
+        let nonce_instance = PublicEcdsaInstance::from_input(0, &nonce_input);
+        let mut verifier =
+            CoprocessorBindingVerifier::new(&[instance], &[nonce_instance], bundles).unwrap();
         let mut verifier_channel = air_core::Ch::default();
         transcript_prefix(&mut verifier_channel);
 
@@ -1640,7 +1790,7 @@ mod ec_coprocessor_tests {
 
         assert_eq!(prover_digests, verifier_digests);
         assert_ne!(
-            wrong_order_digests(&signed.ecdsa_input, &bundle),
+            swapped_statement_order_digests(&signed.ecdsa_input, &nonce_input, &bundle),
             prover_digests
         );
     }
@@ -1650,7 +1800,9 @@ mod ec_coprocessor_tests {
     fn feature_gated_coprocessor_rejoin_changes_next_stark_challenge() {
         let credential = Credential::new(2000, 1, 1, 276);
         let signed = sign_credential(&credential, &IssuerKey::demo());
-        let mut prover = CoprocessorBindingProver::new(signed.ecdsa_input.clone()).unwrap();
+        let nonce_input = fixtures::demo_nonce_statement().ecdsa_input();
+        let mut prover =
+            CoprocessorBindingProver::new(signed.ecdsa_input.clone(), nonce_input.clone()).unwrap();
         let mut with_rejoin = air_core::Ch::default();
         transcript_prefix(&mut with_rejoin);
         prover.prove_post_interaction(&mut with_rejoin);
@@ -1658,7 +1810,8 @@ mod ec_coprocessor_tests {
 
         let mut without_rejoin = air_core::Ch::default();
         transcript_prefix(&mut without_rejoin);
-        mix_coprocessor_main_statement(&mut without_rejoin, &signed.ecdsa_input).unwrap();
+        mix_coprocessor_statements(&mut without_rejoin, &[&signed.ecdsa_input, &nonce_input])
+            .unwrap();
         let _seed = draw_coprocessor_seed(&mut without_rejoin);
         let without_rejoin_next = draw_coprocessor_seed(&mut without_rejoin);
 
@@ -1670,11 +1823,13 @@ mod ec_coprocessor_tests {
     fn feature_gated_coprocessor_rejoin_digest_changes_on_bundle_byte_tamper() {
         let credential = Credential::new(2000, 1, 1, 276);
         let signed = sign_credential(&credential, &IssuerKey::demo());
-        let mut prover = CoprocessorBindingProver::new(signed.ecdsa_input.clone()).unwrap();
+        let nonce_input = fixtures::demo_nonce_statement().ecdsa_input();
+        let mut prover =
+            CoprocessorBindingProver::new(signed.ecdsa_input.clone(), nonce_input).unwrap();
         let mut channel = air_core::Ch::default();
         transcript_prefix(&mut channel);
         prover.prove_post_interaction(&mut channel);
-        let bundle = prover.bundle.clone().unwrap();
+        let bundle = prover.bundles.clone().unwrap().signatures;
 
         let mut bundle_bytes = bincode::serialize(&bundle).unwrap();
         let mut tampered_bundle = None;
@@ -1704,10 +1859,12 @@ mod ec_coprocessor_tests {
         let proof =
             prove_identity(&fixture.signed.credential, &issuer, &fixture.policy, &nonce).unwrap();
         assert!(proof.coprocessor_bundle().is_some());
+        assert!(proof.nonce_coprocessor_bundle().is_some());
 
         let bytes = bincode::serialize(&proof).unwrap();
         let mut restored: Proof = bincode::deserialize(&bytes).unwrap();
         assert!(restored.coprocessor_bundle().is_some());
+        assert!(restored.nonce_coprocessor_bundle().is_some());
 
         let statement = PublicStatement::new(issuer.public_key(), fixture.policy.clone(), nonce);
         verify_identity(&restored, &statement).unwrap();
@@ -1730,7 +1887,9 @@ mod ec_coprocessor_tests {
             coprocessor_bundle_hash(&tampered_bundle).unwrap(),
             original_hash
         );
-        restored.coprocessor_bundle = Some(tampered_bundle);
+        restored.coprocessor_bundles = Some(CoprocessorBundles {
+            signatures: tampered_bundle,
+        });
         assert!(matches!(
             verify_identity(&restored, &statement),
             Err(Error::Verify(_))
@@ -1747,11 +1906,28 @@ mod ec_coprocessor_tests {
         let expected = proof.p256_instances().to_vec();
         let expected_nonce = [PublicEcdsaInstance::from_input(0, &nonce.ecdsa_input())];
 
-        proof.coprocessor_bundle = None;
+        proof.coprocessor_bundles = None;
 
         assert!(matches!(
             verify(&proof, &expected, &expected_nonce),
             Err(Error::CoprocessorMissing)
+        ));
+    }
+
+    #[test]
+    fn feature_gated_verify_rejects_cross_signature_swap_before_stark() {
+        let fixture = fixtures::valid_over_18();
+        let issuer = IssuerKey::demo();
+        let nonce = fixtures::demo_nonce_statement();
+        let mut proof =
+            prove_identity(&fixture.signed.credential, &issuer, &fixture.policy, &nonce).unwrap();
+        let statement = PublicStatement::new(issuer.public_key(), fixture.policy.clone(), nonce);
+
+        std::mem::swap(&mut proof.credential_instances, &mut proof.nonce_instances);
+
+        assert!(matches!(
+            verify_identity(&proof, &statement),
+            Err(Error::IssuerKeyMismatch) | Err(Error::P256InstanceMismatch)
         ));
     }
 }

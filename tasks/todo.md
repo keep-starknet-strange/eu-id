@@ -5,6 +5,19 @@ Worktree: `/Users/lucas/eu-id/.claude/worktrees/wo-m1-coprocessor-merge` on `cod
 Base: `feat/proof-reductions@7af53303`.
 Scope guard: implement feature-on coprocessor pipeline integration with default OFF. Do not flip `ec-coprocessor` into default features or retire `stwo-p256` until the Phase 3 architect ack exists.
 
+## WO-M2 Nonce Coprocessor Plan
+
+Source: `/Users/lucas/eu-id/tasks/parity/mailbox/answers/Q-M1-002.md`.
+Decision: default-on flip deferred until both credential and nonce P256 AIRs leave the feature-on STARK in one migration.
+
+- [x] Extend feature-on coprocessor binding to absorb both statements in order: credential first, nonce second.
+- [x] Replace feature-on `nonce_p256` STARK module with nonce coprocessor verification; keep nonce P256 AIR on the default feature-off path.
+- [x] Preserve verifier pre-STARK nonce binding: expected nonce instance must match the proof's public nonce instance before any STARK/coprocessor verification.
+- [x] Add transcript-order negative for swapped credential/nonce statement order.
+- [x] Add cross-signature swap negative: nonce proof presented as credential proof rejects.
+- [x] Run focused feature-on/default tests and scheduled ignored coprocessor target.
+- [x] Report WO-M2 measured perf and request the single default-on flip ack covering both P256 removals.
+
 ## Preconditions / Drift
 
 - [x] Read WO-M1, BL6, Q-017, Q-027, G3, current `eu-id-prover`, mdoc `PublicDigestBind`, and lessons.
@@ -66,6 +79,13 @@ Scope guard: implement feature-on coprocessor pipeline integration with default 
 - Phase 3 report-driver perf under BENCH-LOCK (`BENCH_ITERS=3`, `RAYON_NUM_THREADS=1`): `pipeline_e2e` feature OFF prove `4956 ms`, verify `39 ms`, proof `3,916,615` bytes; feature ON prove `3787 ms`, verify `41 ms`, proof `2,610,867` bytes. Proof-byte swing is `-1,305,748` bytes (`-1275.1 KiB`); verify swing is `+2 ms`.
 - Phase 3 post-fix verification passed: `rtk proxy cargo fmt --check`, `rtk proxy cargo test -p eu-id-prover`, `rtk proxy cargo test -p eu-id-prover --test identity_api --release -- --ignored`, `rtk proxy make test-ec-coprocessor`, and `rtk proxy make test-ec-coprocessor-ignored`.
 - Filed `/Users/lucas/eu-id/tasks/parity/mailbox/questions/Q-M1-002-coprocessor-phase3-report-default-flip-ack.md` with the Phase 3 report, measured perf gates, the nonce namespace blocker/fix, v1 caveats, and the default-on ack request. The default-on flip remains unapplied.
+- Q-M1-002 answered: technical gates ACKED, but default-on flip DEFERRED until nonce also goes through the coprocessor. WO-M2 scope is both P256 AIRs leaving the feature-on STARK in one migration.
+- WO-M2 implemented locally: feature-on module order is `sha, public_digest_bind, age, nat, coprocessor`; the proof carries public credential and nonce ECDSA instances plus one shared coprocessor bundle for both signatures. Feature-off still uses credential P256 AIR + nonce P256 AIR.
+- WO-M2 transcript binding: the coprocessor fork absorbs both statements before seed draw in credential-then-nonce order. Added swapped-statement-order digest negative and cross-signature swap rejection.
+- WO-M2 verification passed: `rtk proxy cargo test -p eu-id-prover --features ec-coprocessor`, focused `rtk proxy cargo test -p eu-id-prover --features ec-coprocessor feature_gated_coprocessor_ -- --ignored`, `rtk proxy cargo test -p eu-id-prover`, `rtk proxy cargo test -p eu-id-ec-coprocessor`, and `rtk proxy make test-ec-coprocessor-ignored`.
+- WO-M2 perf under BENCH-LOCK (`RAYON_NUM_THREADS=1`): Criterion `identity_e2e/prove_identity` feature OFF `3.2879 s` midpoint (`[3.2698, 3.3082] s`) vs feature ON `1.9022 s` midpoint (`[1.8969, 1.9078] s`), delta `-1.3857 s` / `-42.1%`.
+- WO-M2 report-driver perf under BENCH-LOCK (`BENCH_ITERS=3`, `RAYON_NUM_THREADS=1`): `pipeline_e2e` feature OFF prove `4914 ms`, verify `39 ms`, proof `3,916,615` bytes; feature ON prove `2587 ms`, verify `42 ms`, proof `1,240,046` bytes. Proof-byte swing is `-2,676,569` bytes; verify swing is `+3 ms`.
+- Filed `/Users/lucas/eu-id/tasks/parity/mailbox/questions/Q-M1-003-wo-m2-nonce-coprocessor-flip-ack.md` with the WO-M2 report and the single default-on flip ack request. The default-on flip remains unapplied.
 
 # Merge & Cleanup Plan
 
