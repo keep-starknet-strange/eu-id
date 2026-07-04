@@ -12,11 +12,11 @@
 //!
 //! Alongside the credential signature, the proof carries a second P-256 module
 //! proving the holder's device key signed `SHA-256(domain || nonce)` (see
-//! [`nonce`]). It is folded into the same STARK — no z-binding, no preprocessed
-//! namespace — so a single proof attests both "this credential was issued to me"
-//! and "I am present now, signing this fresh nonce". The verifier binds it in
-//! full (including `z`, recomputed from the public nonce) against
-//! [`PublicStatement::nonce`].
+//! [`nonce`]). It is folded into the same STARK with its own preprocessed
+//! namespace and no z-binding, so a single proof attests both "this credential
+//! was issued to me" and "I am present now, signing this fresh nonce". The
+//! verifier binds it in full (including `z`, recomputed from the public nonce)
+//! against [`PublicStatement::nonce`].
 //!
 //! ## Cross-bound: the signature is over the hash of this preimage
 //!
@@ -111,6 +111,8 @@ pub use predicates::Date;
 pub use predicates::all_nationality_codes;
 
 use serde::{Deserialize, Serialize};
+
+const NONCE_P256_PREPROCESSED_NAMESPACE: &str = "nonce_p256";
 
 use air_core::relations::{field_id, SharedDigestRelation, SharedFieldRelation};
 use air_core::{Air, AirProver};
@@ -953,9 +955,12 @@ fn prepare_proof_modules<'a>(
     let p256 = P256Prover::from_prepared(p256_draft, p256_prepared.map_err(Error::P256Prepare)?)
         .with_z_binding(scalar_z_handle.clone());
     // The nonce (holder-presence) P256 module: no z-binding — its `z` is a public
-    // value the verifier recomputes from the nonce — and no preprocessed
-    // namespace, exactly like the credential module minus the digest bridge.
-    let nonce_p256 = P256Prover::new(nonce_p256_draft).map_err(Error::P256Prepare)?;
+    // value the verifier recomputes from the nonce. It still needs a
+    // preprocessed namespace because hinted-mul schedule columns are
+    // witness-dependent and may differ from the credential signature.
+    let nonce_p256 = P256Prover::new(nonce_p256_draft)
+        .map_err(Error::P256Prepare)?
+        .with_preprocessed_namespace(NONCE_P256_PREPROCESSED_NAMESPACE);
     // SHA both yields its digest (P256↔SHA bridge) and exposes the DOB +
     // nationality byte windows (age/nat↔credential bridges) on the
     // shared field channel.
@@ -1395,7 +1400,8 @@ fn verify_stark_with_config(
     let mut nonce_p256 = P256Verifier::new(
         proof.nonce_p256_claim.clone(),
         proof.nonce_p256_interaction_claim.clone(),
-    );
+    )
+    .with_preprocessed_namespace(NONCE_P256_PREPROCESSED_NAMESPACE);
     let sha = Sha256Verifier::new(
         proof.sha_log_n_rows,
         proof.sha_group_width,

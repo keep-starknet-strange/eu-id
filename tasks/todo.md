@@ -24,8 +24,21 @@ Scope guard: implement feature-on coprocessor pipeline integration with default 
 - [x] Phase 2.6: fix feature-on tests for the current nonce-aware API and add negatives for missing/tampered/swapped coprocessor payload and public-z mismatch.
 - [x] Phase 2.6: add/extend transcript-order tests for post-statement, post-seed, and post-rejoin digests; add negative tests for bundle-byte tamper and wrong statement/seed order.
 - [x] Phase 2.7: run feature-on verification gates: `rtk proxy cargo test -p eu-id-prover --features ec-coprocessor` and focused ignored e2e if needed.
-- [ ] Phase 3 prep: append task/perf/status rows and mailbox the remaining campaign results only if the implemented feature-on path is green. Do not self-certify default flip.
+- [x] Phase 3 prep: append task/perf/status rows and mailbox the remaining campaign results only if the implemented feature-on path is green. Do not self-certify default flip.
 - [x] Wait for `/Users/lucas/eu-id/tasks/parity/mailbox/answers/Q-M1-001.md` before removing the credential P256 AIR module.
+
+## Phase 3 Campaign
+
+- [x] Run G4-row/per-family coprocessor soundness suite: `rtk proxy cargo test -p eu-id-ec-coprocessor --release`.
+- [x] Run full-bundle ignored coprocessor negatives: `rtk proxy cargo test -p eu-id-ec-coprocessor --release -- --ignored`.
+- [x] Run feature-on normal CI target: `rtk proxy make test-ec-coprocessor`.
+- [x] Run feature-on scheduled ignored CI target: `rtk proxy make test-ec-coprocessor-ignored`.
+- [x] Run transcript-order focused guard after the full target: `rtk proxy cargo test -p eu-id-prover --features ec-coprocessor feature_gated_coprocessor_ -- --ignored`.
+- [x] Take `tasks/parity/BENCH-LOCK` and run all Phase 3 perf gates with `RAYON_NUM_THREADS=1`.
+- [x] Measure `identity_e2e/prove_identity` feature OFF and ON.
+- [x] Measure proof bytes and verify time feature OFF and ON.
+- [x] Write Phase 3 mailbox report with the v1 caveats and no default-on flip.
+- [x] Commit Phase 3 task/report artifacts after verification.
 
 ## Review
 
@@ -47,6 +60,12 @@ Scope guard: implement feature-on coprocessor pipeline integration with default 
 - Added two rejoin placement guards: `feature_gated_coprocessor_rejoin_changes_next_stark_challenge` and `feature_gated_coprocessor_rejoin_digest_changes_on_bundle_byte_tamper`.
 - Mutation drill performed: temporarily made `mix_coprocessor_rejoin` a no-op, then `rtk proxy cargo test -p eu-id-prover --features ec-coprocessor feature_gated_coprocessor_rejoin_ -- --ignored` failed both rejoin guards. Restored the real rejoin and reran the same command successfully.
 - Additional review follow-up verification passed: `rtk proxy cargo fmt --check`; `rtk proxy make test-ec-coprocessor`; `rtk proxy make test-ec-coprocessor-ignored`. `rtk proxy git diff --name-only | rg "^crates/stwo-p256"` returned no matches.
+- Phase 3 found and fixed a default feature-off gate blocker before taking final measurements: `identity_e2e/prove_identity` and `identity_api::prove_identity_then_verify_identity_round_trips` panicked because the credential and nonce P256 modules shared witness-dependent hinted-mul schedule preprocessed ids. The nonce P256 module now uses the stable `nonce_p256` preprocessed namespace in both prover and verifier.
+- Phase 3 soundness campaign passed: `rtk proxy cargo test -p eu-id-ec-coprocessor --release` (G4-row/per-family suite), `rtk proxy cargo test -p eu-id-ec-coprocessor --release -- --ignored` (12 full-bundle negatives), `rtk proxy make test-ec-coprocessor`, `rtk proxy make test-ec-coprocessor-ignored`, and focused `rtk proxy cargo test -p eu-id-prover --features ec-coprocessor feature_gated_coprocessor_ -- --ignored`.
+- Phase 3 perf under BENCH-LOCK (`RAYON_NUM_THREADS=1`): Criterion `identity_e2e/prove_identity` feature OFF `3.2904 s` midpoint (`[3.2866, 3.2939] s`) vs feature ON `2.6246 s` midpoint (`[2.6168, 2.6321] s`), delta `-0.6658 s` / `-20.2%`.
+- Phase 3 report-driver perf under BENCH-LOCK (`BENCH_ITERS=3`, `RAYON_NUM_THREADS=1`): `pipeline_e2e` feature OFF prove `4956 ms`, verify `39 ms`, proof `3,916,615` bytes; feature ON prove `3787 ms`, verify `41 ms`, proof `2,610,867` bytes. Proof-byte swing is `-1,305,748` bytes (`-1275.1 KiB`); verify swing is `+2 ms`.
+- Phase 3 post-fix verification passed: `rtk proxy cargo fmt --check`, `rtk proxy cargo test -p eu-id-prover`, `rtk proxy cargo test -p eu-id-prover --test identity_api --release -- --ignored`, `rtk proxy make test-ec-coprocessor`, and `rtk proxy make test-ec-coprocessor-ignored`.
+- Filed `/Users/lucas/eu-id/tasks/parity/mailbox/questions/Q-M1-002-coprocessor-phase3-report-default-flip-ack.md` with the Phase 3 report, measured perf gates, the nonce namespace blocker/fix, v1 caveats, and the default-on ack request. The default-on flip remains unapplied.
 
 # Merge & Cleanup Plan
 
