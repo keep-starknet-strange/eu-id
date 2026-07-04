@@ -24,6 +24,8 @@ use stwo_p256::proof::P256ProofDraft;
 
 use crate::{bridge_log_size, bridge_rows, credential_exposure, fixtures};
 
+const NONCE_P256_PREPROCESSED_NAMESPACE: &str = "nonce_p256";
+
 fn tree_stats(name: &str, sizes: &[u32]) -> (usize, u64) {
     let cols = sizes.len();
     let cells: u64 = sizes.iter().map(|&s| 1u64 << s).sum();
@@ -80,7 +82,7 @@ fn shape_dump() {
     .expect("nonce draft");
     let mut nonce_p256 = P256Prover::new(&nonce_draft)
         .expect("nonce p256 prover")
-        .with_preprocessed_namespace(crate::NONCE_P256_PREPROCESSED_NAMESPACE);
+        .with_preprocessed_namespace(NONCE_P256_PREPROCESSED_NAMESPACE);
     let mut sha = Sha256Prover::new(&pw.sha_witness, pw.sha_log_n_rows, pw.sha_group_width)
         .with_digest_handle(digest_handle.clone())
         .with_field_handle(credential_exposure(), field_handle.clone());
