@@ -240,10 +240,10 @@ GKR-v2 diagnostic (2026-07-04): fused PackedQM31 fraction-add measures 3.8 ns/ef
 
 GKR-v2 close-out (2026-07-04): Q-030 chooses stop/no production fusion. The extra Stwo comparison measured the existing `Fraction` abstraction within 3-4% of hand-fused PackedQM31 fraction-add (`log20` median 13.018 ms existing vs 12.563 ms fused), so production fusion is review risk without a consumer. Useful deliverables are the Stwo mixed-height/global-lift correctness fix and `gkr_fraction_add` diagnostic bench; eu-id remains full LogUp with the reopener gates preserved.
 
-| 2026-07-04 | TBD | WO-M1 Phase 4 default-on flip | `identity_e2e/prove_identity` legacy `--no-default-features` -> default coprocessor (RAYON_NUM_THREADS=1, BENCH-LOCK) | 3.1921 s | 1.8609 s |
-| 2026-07-04 | TBD | WO-M1 Phase 4 default-on flip | `pipeline_e2e` prove, legacy -> default coprocessor (BENCH_ITERS=3, RAYON_NUM_THREADS=1) | 4817 ms | 2515 ms |
-| 2026-07-04 | TBD | WO-M1 Phase 4 default-on flip | `pipeline_e2e` verify, legacy -> default coprocessor | 39 ms | 40 ms |
-| 2026-07-04 | TBD | WO-M1 Phase 4 default-on flip | proof bytes, legacy -> default coprocessor | 3,916,615 | 1,240,046 |
+| 2026-07-04 | fc307618 | WO-M1 Phase 4 default-on flip | `identity_e2e/prove_identity` legacy `--no-default-features` -> default coprocessor (RAYON_NUM_THREADS=1, BENCH-LOCK) | 3.1921 s | 1.8609 s |
+| 2026-07-04 | fc307618 | WO-M1 Phase 4 default-on flip | `pipeline_e2e` prove, legacy -> default coprocessor (BENCH_ITERS=3, RAYON_NUM_THREADS=1) | 4817 ms | 2515 ms |
+| 2026-07-04 | fc307618 | WO-M1 Phase 4 default-on flip | `pipeline_e2e` verify, legacy -> default coprocessor | 39 ms | 40 ms |
+| 2026-07-04 | fc307618 | WO-M1 Phase 4 default-on flip | proof bytes, legacy -> default coprocessor | 3,916,615 | 1,240,046 |
 
 WO-M1 Phase 4 default-on note (2026-07-04): Q-M1-003 authorized flipping `ec-coprocessor` into the `eu-id-prover` default after WO-M2 moved both credential and nonce ECDSA statements through one transcript-bound coprocessor bundle. Final head-to-head table, benches of record:
 
