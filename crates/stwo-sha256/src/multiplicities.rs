@@ -154,6 +154,22 @@ pub struct MajChMultiplicities {
     pub ch: Vec<u32>,
 }
 
+pub fn sum_multiplicity_vectors(vectors: impl IntoIterator<Item = Vec<u32>>) -> Vec<u32> {
+    let mut iter = vectors.into_iter();
+    let mut acc = iter.next().unwrap_or_default();
+    for v in iter {
+        assert_eq!(
+            acc.len(),
+            v.len(),
+            "cannot sum multiplicity vectors of different lengths"
+        );
+        for (a, b) in acc.iter_mut().zip(v) {
+            *a += b;
+        }
+    }
+    acc
+}
+
 /// Build the per-row multiplicity vector for the generic `xor_8` table.
 ///
 /// The table has 2¹⁶ rows indexed by `(y, x) → y · 256 + x` (matching
@@ -693,5 +709,47 @@ mod tests {
             sigma_sum(LowerSigmaPartition::LowerSigma1, Half16::Hi),
             totals.lower_sigma1_hi
         );
+    }
+
+    #[test]
+    fn shared_table_multiplicities_sum_per_consumer_vectors() {
+        use crate::components::{RANGE_TABLES, ROUND_SPLIT_TABLES, SIGMA_SPLIT_TABLES};
+        let first = compute_sha256_witness(b"abc");
+        let second = compute_sha256_witness(&[0x42u8; 200]);
+        let consumers = [
+            (&first, FieldExposure::empty()),
+            (&second, FieldExposure::empty()),
+        ];
+
+        let shared = crate::shared_tables::ShaTableMultiplicities::from_consumers(&consumers);
+
+        for (i, &(p, h)) in ROUND_SPLIT_TABLES.iter().enumerate() {
+            let expected: Vec<u32> = round_split_pack_multiplicities(&first, p, h)
+                .into_iter()
+                .zip(round_split_pack_multiplicities(&second, p, h))
+                .map(|(a, b)| a + b)
+                .collect();
+            assert_eq!(shared.round_split_pack[i], expected);
+        }
+        for (i, &(p, h)) in SIGMA_SPLIT_TABLES.iter().enumerate() {
+            let expected: Vec<u32> = sigma_split_pack_multiplicities(&first, p, h)
+                .into_iter()
+                .zip(sigma_split_pack_multiplicities(&second, p, h))
+                .map(|(a, b)| a + b)
+                .collect();
+            assert_eq!(shared.sigma_split_pack[i], expected);
+        }
+        for (i, &kind) in RANGE_TABLES.iter().enumerate() {
+            let expected: Vec<u32> = range_k_multiplicities(&first, kind, &FieldExposure::empty())
+                .into_iter()
+                .zip(range_k_multiplicities(
+                    &second,
+                    kind,
+                    &FieldExposure::empty(),
+                ))
+                .map(|(a, b)| a + b)
+                .collect();
+            assert_eq!(shared.range[i], expected);
+        }
     }
 }

@@ -12,6 +12,10 @@ Shape: `cargo test -p eu-id-prover --release shape_dump -- --ignored --nocapture
 | 2026-07-02 | 8cb0a461 | baseline | BM_ShaZK_equiv/33 (1-thread) | — | 383 ms |
 | 2026-07-02 | 8cb0a461 | baseline | pipeline/prove (12-core parallel) | — | 820 ms |
 | 2026-07-02 | 8cb0a461 | baseline | shape_dump total cells | — | 28,488,480 |
+| 2026-07-04 | worktree | WO-M5 shared mdoc SHA table provider (RAYON_NUM_THREADS=1, BENCH_ITERS=3) | mdoc_perf_probe prove | 2133 ms | 996 ms |
+| 2026-07-04 | worktree | WO-M5 shared mdoc SHA table provider (RAYON_NUM_THREADS=1, BENCH_ITERS=3) | mdoc_perf_probe verify | 45 ms | 45 ms |
+| 2026-07-04 | worktree | WO-M5 shared mdoc SHA table provider (RAYON_NUM_THREADS=1, BENCH_ITERS=3) | mdoc proof bytes | 1,809,542 | 1,759,326 |
+| 2026-07-04 | worktree | WO-M5 shared mdoc SHA table provider | mdoc shape cells | 21,824,128 | 6,487,840 |
 | 2026-07-02 | e72cc328 | WO-1.8 +bench LTO/CU1 | BM_ECDSAZKProver_equiv/1 (1-thread) | 2.258 s | 1.911 s |
 | 2026-07-02 | e72cc328 | WO-1.8 +bench LTO/CU1 | BM_ShaZK_equiv/1 (1-thread) | 1.393 s | 1.161 s |
 | 2026-07-02 | e72cc328 | WO-1.8 +bench LTO/CU1 | BM_ShaZK_equiv/33 (1-thread) | 1.525 s | 1.284 s |

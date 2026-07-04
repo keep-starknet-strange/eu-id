@@ -32,6 +32,42 @@ Same-worktree A/B under `/Users/lucas/eu-id/tasks/parity/BENCH-LOCK`; baseline `
 
 Review: M4 pre-timing gates passed before the A/B, including `cargo test -p stwo-sha256`, default and `--no-default-features` `eu-id-prover`, focused coprocessor/mdoc ignored guards, `make test-ec-coprocessor-ignored`, release `shape_dump`, and release ignored identity/mdoc/e2e/compose round-trips. The final timed campaign used sequential checkouts in the same worktree and did not hit any Q-M1-005 STOP condition.
 
+## WO-M5 SHA Table Provider Dedup Plan
+
+Source: `/Users/lucas/eu-id/tasks/parity/s4/WO-M5-sha-table-provider-dedup.md`.
+Branch: `codex/wo-m5-sha-table-provider-dedup`.
+
+- [x] Inventory post-A3 SHA table providers and prove shared table columns are message-agnostic / byte-identical before production edits.
+- [x] Add red tests for shared table namespace, union multiplicities, mdoc shared-provider shape, and required negative paths.
+- [x] Implement `ShaTablesProver` / `ShaTablesVerifier` and `Sha256Prover::with_shared_tables` / verifier equivalent.
+- [x] Wire mdoc module order as `sha_tables` first, then existing per-message SHA/bind/predicate/coprocessor modules.
+- [x] Re-derive shape pins via `shape_dump`; do not hand-edit pin values.
+- [x] Run focused verification suite from WO-M5, including ignored mdoc round-trips and coprocessor target.
+- [x] Run same-machine A/B vs `801ea3a5`, record mdoc metrics, and STOP on band misses.
+- [x] Update perf/status/task artifacts and file Q-M1-008 review report.
+
+## WO-M5 Results
+
+Implementation: `stwo-sha256` now has a generic shared SHA table provider module for the surviving A3 fixed tables: round split-pack, sigma split-pack, and range tables. Standalone SHA keeps the old constructor/path; mdoc opts into `with_shared_tables` and adds `mdoc_sha_tables` as the first module. The shared relations contain no message identity; digest, field-exposure, and main SHA traces remain per-message.
+
+Measured mdoc A/B against `801ea3a5` with `RAYON_NUM_THREADS=1 BENCH_ITERS=3 cargo run -p eu-id-prover --release --features ec-coprocessor --example mdoc_perf_probe`: prove `2133 ms -> 996 ms`, verify `45 ms -> 45 ms`, proof bytes `1,809,542 -> 1,759,326`, cells `21,824,128 -> 6,487,840`. Shape gate is inside the WO band; prove is inside the 0.7-1.0s band at the upper edge. Full identity/SHA Criterion unchanged gates were not rerun; the implementation is opt-in and no identity assembly or standalone SHA constructor path was edited.
+
+Verification passed:
+
+- `rtk proxy cargo check -p eu-id-prover`
+- `rtk proxy cargo check -p eu-id-prover --features ec-coprocessor`
+- `rtk proxy cargo fmt --check`
+- `rtk proxy cargo test -p stwo-sha256`
+- `rtk proxy cargo test -p eu-id-prover`
+- `rtk proxy cargo test -p eu-id-prover --features ec-coprocessor`
+- `rtk proxy cargo test -p eu-id-prover --no-default-features`
+- `rtk proxy cargo test -p eu-id-prover --test mdoc_support`
+- `rtk proxy cargo test -p eu-id-prover --test mdoc_support isolated_mdoc_circuit_profile_proves_and_verifies -- --ignored --nocapture`
+- `rtk proxy cargo test -p eu-id-prover shared_sha_table_provider_claim_is_bound --lib -- --ignored --nocapture`
+- `rtk proxy cargo test -p eu-id-prover --features ec-coprocessor shared_sha_table_provider_claim_is_bound --lib -- --ignored --nocapture`
+- `rtk proxy cargo test -p eu-id-prover --release --features ec-coprocessor shape_dump -- --ignored --nocapture`
+- `rtk proxy env RAYON_NUM_THREADS=1 BENCH_ITERS=3 cargo run -p eu-id-prover --release --features ec-coprocessor --example mdoc_perf_probe`
+
 ## WO-A3 Hybrid SHA Snapshot
 
 Merged source branch: `feat/a3-hybrid-sha` at `57b01142`.
