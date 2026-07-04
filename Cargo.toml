@@ -5,6 +5,7 @@ members = [
     "crates/stwo-p256-utils",
     "crates/stwo-sha256",
     "crates/predicates",
+    "crates/eu-id-ec-coprocessor",
     "crates/eu-id-prover",
     "crates/eu-id-ffi",
     "crates/sdk",

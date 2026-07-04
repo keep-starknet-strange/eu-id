@@ -724,6 +724,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "eu-id-ec-coprocessor"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "blake2",
+ "ecdsa",
+ "p256",
+ "serde",
+ "sha2",
+ "stwo-p256-utils",
+]
+
+[[package]]
 name = "eu-id-ffi"
 version = "0.1.0"
 dependencies = [
@@ -747,6 +760,7 @@ dependencies = [
  "bzip2",
  "criterion",
  "ecdsa",
+ "eu-id-ec-coprocessor",
  "memory-stats",
  "mimalloc",
  "p256",
