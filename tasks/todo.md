@@ -25,6 +25,8 @@ Target checkout: `/Users/lucas/eu-id` on `feat/proof-reductions`.
 - M3 skipped: `s4-lite` branch tip is already an ancestor, but its worktree remains dirty.
 - M4 parked SHA GKR implementation files on `spike/gkr-v2` at `1847bc06` and left
   active/dirty worktrees in place.
+- M5 stopped on the final release nonce gate. Filed
+  `tasks/mdoc-mailbox/questions/Q-002-final-merge-gate-preprocessed-fingerprints.md`.
 
 # WO-A2 SHA Design-Space Sweep
 
