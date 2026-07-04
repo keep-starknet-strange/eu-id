@@ -27,6 +27,8 @@ use p256::elliptic_curve::sec1::ToEncodedPoint;
 use p256::{AffinePoint, ProjectivePoint};
 use sha2::{Digest as _, Sha256};
 
+const TEST_SEED: [u8; 32] = [9u8; 32];
+
 fn scalar(value: u64) -> [u8; 32] {
     let mut bytes = [0u8; 32];
     bytes[24..32].copy_from_slice(&value.to_be_bytes());
@@ -540,11 +542,12 @@ fn implemented_circuit_proofs_accept_honest_witness() {
     let witness = generate_witness(&input).unwrap();
     let commitment_root = [3u8; 32];
 
-    let proofs = prove_implemented_circuit_proofs(&input, &witness, commitment_root).unwrap();
+    let proofs =
+        prove_implemented_circuit_proofs(&input, &witness, commitment_root, TEST_SEED).unwrap();
 
     let labels = implemented_circuit_family_labels().unwrap();
     assert_eq!(proofs.proofs.len(), labels.len());
-    let claims = verify_implemented_circuit_proofs(&proofs, commitment_root).unwrap();
+    let claims = verify_implemented_circuit_proofs(&proofs, commitment_root, TEST_SEED).unwrap();
     assert_eq!(claims.len(), labels.len());
     assert_eq!(labels[0], b"s4-ecdsa-c1-input-limbs");
     assert_eq!(labels[8], b"s4-ecdsa-c14-c15-final-check");
@@ -554,9 +557,9 @@ fn implemented_circuit_proofs_accept_honest_witness() {
 fn implemented_circuit_proofs_reject_wrong_commitment_root() {
     let input = signed_input();
     let witness = generate_witness(&input).unwrap();
-    let proofs = prove_implemented_circuit_proofs(&input, &witness, [3u8; 32]).unwrap();
+    let proofs = prove_implemented_circuit_proofs(&input, &witness, [3u8; 32], TEST_SEED).unwrap();
 
-    assert!(verify_implemented_circuit_proofs(&proofs, [4u8; 32]).is_err());
+    assert!(verify_implemented_circuit_proofs(&proofs, [4u8; 32], TEST_SEED).is_err());
 }
 
 #[test]
@@ -566,11 +569,11 @@ fn implemented_circuit_provers_reject_mismatched_input_and_witness() {
     let alternate_witness = generate_witness(&alternate).unwrap();
 
     assert!(
-        prove_implemented_circuit_proofs(&input, &alternate_witness, [3u8; 32]).is_err(),
+        prove_implemented_circuit_proofs(&input, &alternate_witness, [3u8; 32], TEST_SEED).is_err(),
         "standalone BL2 proof prover must reject a witness from another statement"
     );
     assert!(
-        prove_implemented_circuit_bundle(&input, &alternate_witness).is_err(),
+        prove_implemented_circuit_bundle(&input, &alternate_witness, TEST_SEED).is_err(),
         "BL2+BL3 bundle prover must reject a witness from another statement"
     );
 }
@@ -583,11 +586,11 @@ fn implemented_circuit_provers_reject_unsatisfied_witness_mutation() {
         witness.values[layout_range(LayoutSlot::InputLimbs).start] + Fp::ONE;
 
     assert!(
-        prove_implemented_circuit_proofs(&input, &witness, [3u8; 32]).is_err(),
+        prove_implemented_circuit_proofs(&input, &witness, [3u8; 32], TEST_SEED).is_err(),
         "standalone BL2 proof prover must reject unsatisfied circuit witnesses"
     );
     assert!(
-        prove_implemented_circuit_bundle(&input, &witness).is_err(),
+        prove_implemented_circuit_bundle(&input, &witness, TEST_SEED).is_err(),
         "BL2+BL3 bundle prover must reject unsatisfied circuit witnesses"
     );
 }
@@ -606,11 +609,11 @@ fn implemented_circuit_provers_reject_native_witness_mismatch_even_if_covered_ci
         .expect("current implemented families do not yet cover C9 transition algebra");
 
     assert!(
-        prove_implemented_circuit_proofs(&input, &witness, [3u8; 32]).is_err(),
+        prove_implemented_circuit_proofs(&input, &witness, [3u8; 32], TEST_SEED).is_err(),
         "standalone BL2 proof prover must reject witnesses that fail the native checker"
     );
     assert!(
-        prove_implemented_circuit_bundle(&input, &witness).is_err(),
+        prove_implemented_circuit_bundle(&input, &witness, TEST_SEED).is_err(),
         "BL2+BL3 bundle prover must reject witnesses that fail the native checker"
     );
 }
@@ -620,7 +623,7 @@ fn implemented_circuit_provers_reject_native_witness_mismatch_even_if_covered_ci
 fn implemented_circuit_bundle_carries_ligero_proximity_openings() {
     let input = signed_input();
     let witness = generate_witness(&input).unwrap();
-    let bundle = prove_implemented_circuit_bundle(&input, &witness).unwrap();
+    let bundle = prove_implemented_circuit_bundle(&input, &witness, TEST_SEED).unwrap();
 
     assert_eq!(bundle.proximity_openings.len(), bundle.params.openings);
     assert!(bundle.params.openings > 0);
@@ -630,10 +633,10 @@ fn implemented_circuit_bundle_carries_ligero_proximity_openings() {
 fn implemented_circuit_bundle_rejects_corrupt_ligero_opening() {
     let input = signed_input();
     let witness = generate_witness(&input).unwrap();
-    let mut bundle = prove_implemented_circuit_bundle(&input, &witness).unwrap();
+    let mut bundle = prove_implemented_circuit_bundle(&input, &witness, TEST_SEED).unwrap();
     bundle.openings[0].column[0] = bundle.openings[0].column[0] + Fp::ONE;
 
-    assert!(verify_implemented_circuit_bundle(&input, &bundle).is_err());
+    assert!(verify_implemented_circuit_bundle(&input, &bundle, TEST_SEED).is_err());
 }
 
 #[test]
@@ -641,10 +644,10 @@ fn implemented_circuit_bundle_rejects_corrupt_ligero_opening() {
 fn implemented_circuit_bundle_rejects_corrupt_ligero_proximity_claim() {
     let input = signed_input();
     let witness = generate_witness(&input).unwrap();
-    let mut bundle = prove_implemented_circuit_bundle(&input, &witness).unwrap();
+    let mut bundle = prove_implemented_circuit_bundle(&input, &witness, TEST_SEED).unwrap();
     bundle.proximity_claim.combined_row[0] = bundle.proximity_claim.combined_row[0] + Fp::ONE;
 
-    assert!(verify_implemented_circuit_bundle(&input, &bundle).is_err());
+    assert!(verify_implemented_circuit_bundle(&input, &bundle, TEST_SEED).is_err());
 }
 
 #[test]
@@ -652,10 +655,10 @@ fn implemented_circuit_bundle_rejects_corrupt_ligero_proximity_claim() {
 fn implemented_circuit_bundle_rejects_prover_selected_ligero_proximity_columns() {
     let input = signed_input();
     let witness = generate_witness(&input).unwrap();
-    let mut bundle = prove_implemented_circuit_bundle(&input, &witness).unwrap();
+    let mut bundle = prove_implemented_circuit_bundle(&input, &witness, TEST_SEED).unwrap();
     bundle.proximity_openings.reverse();
 
-    assert!(verify_implemented_circuit_bundle(&input, &bundle).is_err());
+    assert!(verify_implemented_circuit_bundle(&input, &bundle, TEST_SEED).is_err());
 }
 
 #[test]
@@ -663,7 +666,7 @@ fn implemented_circuit_bundle_rejects_prover_selected_ligero_proximity_columns()
 fn implemented_circuit_bundle_rejects_prover_selected_ligero_params() {
     let input = signed_input();
     let witness = generate_witness(&input).unwrap();
-    let mut bundle = prove_implemented_circuit_bundle(&input, &witness).unwrap();
+    let mut bundle = prove_implemented_circuit_bundle(&input, &witness, TEST_SEED).unwrap();
     bundle.params = LigeroParams {
         row_len: 32,
         degree_bound: 36,
@@ -672,19 +675,19 @@ fn implemented_circuit_bundle_rejects_prover_selected_ligero_params() {
         proximity_radius: 0,
     };
 
-    assert!(verify_implemented_circuit_bundle(&input, &bundle).is_err());
+    assert!(verify_implemented_circuit_bundle(&input, &bundle, TEST_SEED).is_err());
 }
 
 #[test]
 fn implemented_circuit_bundle_rejects_wrong_caller_input_binding() {
     let input = signed_input();
     let witness = generate_witness(&input).unwrap();
-    let bundle = prove_implemented_circuit_bundle(&input, &witness).unwrap();
+    let bundle = prove_implemented_circuit_bundle(&input, &witness, TEST_SEED).unwrap();
 
     let mut wrong_input = input;
     wrong_input.r[31] ^= 1;
 
-    assert!(verify_implemented_circuit_bundle(&wrong_input, &bundle).is_err());
+    assert!(verify_implemented_circuit_bundle(&wrong_input, &bundle, TEST_SEED).is_err());
 }
 
 #[test]
@@ -692,13 +695,13 @@ fn implemented_circuit_bundle_rejects_wrong_caller_input_binding() {
 fn implemented_circuit_bundle_rejects_spliced_c14_entry() {
     let input = signed_input();
     let witness = generate_witness(&input).unwrap();
-    let mut bundle = prove_implemented_circuit_bundle(&input, &witness).unwrap();
+    let mut bundle = prove_implemented_circuit_bundle(&input, &witness, TEST_SEED).unwrap();
     let alternate = alternate_signed_input();
     let alternate_witness = generate_witness(&alternate).unwrap();
 
     bundle.entries[8] = c14_bundle_entry(&alternate, &alternate_witness);
 
-    assert!(verify_implemented_circuit_bundle(&input, &bundle).is_err());
+    assert!(verify_implemented_circuit_bundle(&input, &bundle, TEST_SEED).is_err());
 }
 
 #[test]
@@ -706,12 +709,12 @@ fn implemented_circuit_bundle_rejects_spliced_c14_entry() {
 fn implemented_circuit_bundle_rejects_spliced_c2_entry() {
     let input = signed_input();
     let witness = generate_witness(&input).unwrap();
-    let mut bundle = prove_implemented_circuit_bundle(&input, &witness).unwrap();
+    let mut bundle = prove_implemented_circuit_bundle(&input, &witness, TEST_SEED).unwrap();
     let alternate = alternate_signed_input();
 
     bundle.entries[1] = c2_bundle_entry(&alternate);
 
-    assert!(verify_implemented_circuit_bundle(&input, &bundle).is_err());
+    assert!(verify_implemented_circuit_bundle(&input, &bundle, TEST_SEED).is_err());
 }
 
 #[test]
@@ -719,13 +722,13 @@ fn implemented_circuit_bundle_rejects_spliced_c2_entry() {
 fn implemented_circuit_bundle_rejects_spliced_c3_entry() {
     let input = signed_input();
     let witness = generate_witness(&input).unwrap();
-    let mut bundle = prove_implemented_circuit_bundle(&input, &witness).unwrap();
+    let mut bundle = prove_implemented_circuit_bundle(&input, &witness, TEST_SEED).unwrap();
     let alternate = alternate_signed_input();
     let alternate_witness = generate_witness(&alternate).unwrap();
 
     bundle.entries[2] = c3_bundle_entry(&alternate, &alternate_witness);
 
-    assert!(verify_implemented_circuit_bundle(&input, &bundle).is_err());
+    assert!(verify_implemented_circuit_bundle(&input, &bundle, TEST_SEED).is_err());
 }
 
 #[test]
@@ -733,13 +736,13 @@ fn implemented_circuit_bundle_rejects_spliced_c3_entry() {
 fn implemented_circuit_bundle_rejects_spliced_c6_entry() {
     let input = signed_input();
     let witness = generate_witness(&input).unwrap();
-    let mut bundle = prove_implemented_circuit_bundle(&input, &witness).unwrap();
+    let mut bundle = prove_implemented_circuit_bundle(&input, &witness, TEST_SEED).unwrap();
     let alternate = alternate_signed_input();
     let alternate_witness = generate_witness(&alternate).unwrap();
 
     bundle.entries[3] = c6_bundle_entry(&alternate_witness);
 
-    assert!(verify_implemented_circuit_bundle(&input, &bundle).is_err());
+    assert!(verify_implemented_circuit_bundle(&input, &bundle, TEST_SEED).is_err());
 }
 
 #[test]
@@ -747,13 +750,13 @@ fn implemented_circuit_bundle_rejects_spliced_c6_entry() {
 fn implemented_circuit_bundle_rejects_spliced_c9_c10_entry() {
     let input = signed_input();
     let witness = generate_witness(&input).unwrap();
-    let mut bundle = prove_implemented_circuit_bundle(&input, &witness).unwrap();
+    let mut bundle = prove_implemented_circuit_bundle(&input, &witness, TEST_SEED).unwrap();
     let alternate = alternate_signed_input();
     let alternate_witness = generate_witness(&alternate).unwrap();
 
     bundle.entries[4] = c9_c10_bundle_entry(&alternate_witness);
 
-    assert!(verify_implemented_circuit_bundle(&input, &bundle).is_err());
+    assert!(verify_implemented_circuit_bundle(&input, &bundle, TEST_SEED).is_err());
 }
 
 #[test]
@@ -761,13 +764,13 @@ fn implemented_circuit_bundle_rejects_spliced_c9_c10_entry() {
 fn implemented_circuit_bundle_rejects_spliced_c13_entry() {
     let input = signed_input();
     let witness = generate_witness(&input).unwrap();
-    let mut bundle = prove_implemented_circuit_bundle(&input, &witness).unwrap();
+    let mut bundle = prove_implemented_circuit_bundle(&input, &witness, TEST_SEED).unwrap();
     let alternate = alternate_signed_input();
     let alternate_witness = generate_witness(&alternate).unwrap();
 
     bundle.entries[7] = c13_bundle_entry(&alternate, &alternate_witness);
 
-    assert!(verify_implemented_circuit_bundle(&input, &bundle).is_err());
+    assert!(verify_implemented_circuit_bundle(&input, &bundle, TEST_SEED).is_err());
 }
 
 #[test]
@@ -775,18 +778,19 @@ fn implemented_circuit_bundle_rejects_spliced_c13_entry() {
 fn implemented_circuit_bundle_rejects_legacy_entry_without_statement_absorb() {
     let input = signed_input();
     let witness = generate_witness(&input).unwrap();
-    let mut bundle = prove_implemented_circuit_bundle(&input, &witness).unwrap();
+    let mut bundle = prove_implemented_circuit_bundle(&input, &witness, TEST_SEED).unwrap();
 
     bundle.entries[8] = c14_legacy_transcript_bundle_entry(&input, &witness);
 
-    assert!(verify_implemented_circuit_bundle(&input, &bundle).is_err());
+    assert!(verify_implemented_circuit_bundle(&input, &bundle, TEST_SEED).is_err());
 }
 
 #[test]
 fn implemented_circuit_bundle_accepts_honest_witness() {
     let input = signed_input();
     let witness = generate_witness(&input).unwrap();
-    let (bundle, profile) = prove_implemented_circuit_bundle_profiled(&input, &witness).unwrap();
+    let (bundle, profile) =
+        prove_implemented_circuit_bundle_profiled(&input, &witness, TEST_SEED).unwrap();
 
     assert_eq!(bundle.entries.len(), 9);
     assert_eq!(bundle.params, v1_ligero_params());
@@ -798,7 +802,7 @@ fn implemented_circuit_bundle_accepts_honest_witness() {
         bundle.proximity_claim.combined_row.len(),
         bundle.params.degree_bound
     );
-    verify_implemented_circuit_bundle(&input, &bundle).unwrap();
+    verify_implemented_circuit_bundle(&input, &bundle, TEST_SEED).unwrap();
 }
 
 #[test]
@@ -806,16 +810,16 @@ fn implemented_circuit_bundle_accepts_honest_witness() {
 fn implemented_circuit_bundle_rejects_wrong_caller_input() {
     let input = signed_input();
     let witness = generate_witness(&input).unwrap();
-    let bundle = prove_implemented_circuit_bundle(&input, &witness).unwrap();
+    let bundle = prove_implemented_circuit_bundle(&input, &witness, TEST_SEED).unwrap();
     let mut wrong_input = input;
     wrong_input.r[31] ^= 1;
 
-    assert!(verify_implemented_circuit_bundle(&wrong_input, &bundle).is_err());
+    assert!(verify_implemented_circuit_bundle(&wrong_input, &bundle, TEST_SEED).is_err());
 }
 
 fn c2_bundle_entry(input: &EcdsaInput) -> ImplementedCircuitBundleEntry {
     let witness = generate_witness(input).unwrap();
-    prove_implemented_circuit_bundle(input, &witness)
+    prove_implemented_circuit_bundle(input, &witness, TEST_SEED)
         .unwrap()
         .entries[1]
         .clone()
@@ -825,7 +829,7 @@ fn c3_bundle_entry(
     input: &EcdsaInput,
     witness: &eu_id_ec_coprocessor::ecdsa::Witness,
 ) -> ImplementedCircuitBundleEntry {
-    prove_implemented_circuit_bundle(input, witness)
+    prove_implemented_circuit_bundle(input, witness, TEST_SEED)
         .unwrap()
         .entries[2]
         .clone()
@@ -835,7 +839,7 @@ fn c6_bundle_entry(
     witness: &eu_id_ec_coprocessor::ecdsa::Witness,
 ) -> ImplementedCircuitBundleEntry {
     let input = alternate_signed_input();
-    prove_implemented_circuit_bundle(&input, witness)
+    prove_implemented_circuit_bundle(&input, witness, TEST_SEED)
         .unwrap()
         .entries[3]
         .clone()
@@ -845,7 +849,7 @@ fn c9_c10_bundle_entry(
     witness: &eu_id_ec_coprocessor::ecdsa::Witness,
 ) -> ImplementedCircuitBundleEntry {
     let input = alternate_signed_input();
-    prove_implemented_circuit_bundle(&input, witness)
+    prove_implemented_circuit_bundle(&input, witness, TEST_SEED)
         .unwrap()
         .entries[4]
         .clone()
@@ -855,7 +859,7 @@ fn c13_bundle_entry(
     input: &EcdsaInput,
     witness: &eu_id_ec_coprocessor::ecdsa::Witness,
 ) -> ImplementedCircuitBundleEntry {
-    prove_implemented_circuit_bundle(input, witness)
+    prove_implemented_circuit_bundle(input, witness, TEST_SEED)
         .unwrap()
         .entries[7]
         .clone()
@@ -865,7 +869,7 @@ fn c14_bundle_entry(
     input: &EcdsaInput,
     witness: &eu_id_ec_coprocessor::ecdsa::Witness,
 ) -> ImplementedCircuitBundleEntry {
-    prove_implemented_circuit_bundle(input, witness)
+    prove_implemented_circuit_bundle(input, witness, TEST_SEED)
         .unwrap()
         .entries[8]
         .clone()
@@ -912,7 +916,7 @@ fn c14_legacy_transcript_bundle_entry(
     let proximity_openings = commitment.open_columns(&proximity_indices).unwrap();
     let openings = commitment.open_systematic_columns().unwrap();
     let layers = circuit.evaluate_input(circuit_input).unwrap();
-    let mut channel = CoprocessorChannel::default();
+    let mut channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
     channel.mix_bytes(b"s4-ecdsa-c14-c15-final-check");
     let proof = prove_circuit(&circuit, &layers, root, &mut channel).unwrap();
 
@@ -920,7 +924,7 @@ fn c14_legacy_transcript_bundle_entry(
 }
 
 fn ligero_proximity_gamma(label: &[u8], root: [u8; 32], rows: usize) -> Vec<Fp> {
-    let mut channel = CoprocessorChannel::default();
+    let mut channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
     channel.mix_bytes(label);
     channel.mix_bytes(&root);
     channel.mix_bytes(b"s4-ligero-proximity-gamma");
@@ -928,7 +932,7 @@ fn ligero_proximity_gamma(label: &[u8], root: [u8; 32], rows: usize) -> Vec<Fp> 
 }
 
 fn ligero_proximity_indices(label: &[u8], root: [u8; 32], params: LigeroParams) -> Vec<usize> {
-    let mut channel = CoprocessorChannel::default();
+    let mut channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
     channel.mix_bytes(label);
     channel.mix_bytes(&root);
     channel.mix_bytes(b"s4-ligero-proximity-indices");

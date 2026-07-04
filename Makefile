@@ -28,7 +28,7 @@ NATIONALITY ?=
 ACCEPTABLE  ?=
 
 .DEFAULT_GOAL := help
-.PHONY: help dev build run test check fmt bench bench-predicates bench-identity bench-report bench-breakdown bench-mobile prove verify \
+.PHONY: help dev build run test test-ec-coprocessor test-ec-coprocessor-ignored check fmt bench bench-predicates bench-identity bench-report bench-breakdown bench-mobile prove verify \
         prove-age verify-age \
         prove-nat verify-nat \
         profile-prove-age-rc profile-verify-age-rc \
@@ -43,6 +43,8 @@ help:
 	@echo "  make build         compile the whole workspace"
 	@echo "  make run           run the demo prover CLI"
 	@echo "  make test          run the workspace test suite in release mode"
+	@echo "  make test-ec-coprocessor          run feature-on coprocessor tests"
+	@echo "  make test-ec-coprocessor-ignored  run scheduled feature-on ignored tests"
 	@echo "  make check         clippy + rustfmt — identical to the CI lint step"
 	@echo "  make fmt           apply rustfmt across the workspace"
 	@echo "  make bench             laptop criterion benchmark suite"
@@ -101,6 +103,12 @@ run:
 
 test:
 	cargo test --workspace --release
+
+test-ec-coprocessor:
+	cargo test -p eu-id-prover --features ec-coprocessor
+
+test-ec-coprocessor-ignored:
+	cargo test -p eu-id-prover --features ec-coprocessor --release -- --ignored
 
 check:
 	@bash scripts/check.sh

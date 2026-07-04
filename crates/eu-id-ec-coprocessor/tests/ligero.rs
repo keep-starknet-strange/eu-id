@@ -185,7 +185,7 @@ fn systematic_openings_accept_bl2_sumcheck_input_claims() {
         proximity_radius: 0,
     };
     let commitment = commit_witness(&input_layer, params).unwrap();
-    let mut prover_channel = CoprocessorChannel::default();
+    let mut prover_channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
     let proof = eu_id_ec_coprocessor::sumcheck::prove_circuit(
         &circuit,
         &witness,
@@ -193,7 +193,7 @@ fn systematic_openings_accept_bl2_sumcheck_input_claims() {
         &mut prover_channel,
     )
     .unwrap();
-    let mut verifier_channel = CoprocessorChannel::default();
+    let mut verifier_channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
     let claims = eu_id_ec_coprocessor::sumcheck::verify_circuit(
         &circuit,
         &proof,

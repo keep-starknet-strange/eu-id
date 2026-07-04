@@ -29,6 +29,7 @@ stwo-constraint-framework = { workspace = true, features = ["parallel"] }
 # claims (P256 / SHA / bridge claim trees made serde-serializable for this).
 serde = { workspace = true }
 bincode = "1"
+blake2 = "0.10"
 
 # Reference oracles. These back the POC's native credential generator and its
 # end-to-end self-validation (the SPEC's "property-based testing against a
