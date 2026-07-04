@@ -253,9 +253,21 @@ GKR-v2 close-out (2026-07-04): Q-030 chooses stop/no production fusion. The extr
 
 WO-A1R note: converted the 19 remaining SHA `RelationEntry::new` call sites to typed `RelationEntry::base`; no `unit`, `neg_unit`, or extension-field `new` sites remained in `crates/stwo-sha256`. Parent measurements used `feat/proof-reductions` at `fac1cd4c`; after measurements used the `perf/a1r-typed-mults-redo` worktree before commit. Criterion filters were run separately for block counts 1 and 33 under `RAYON_NUM_THREADS=1`.
 
-WO-A3 note: the proof path removes decode, MajCh, and xor_8 table producers/consumers while
-retaining split-pack, range, limb-addition, carry, digest, and field-exposure logic. Degree
-audit required committed duplicate `b/c/f/g` operand bit columns instead of using selector
-expressions inside Maj/Ch formulas; the duplicate bits are tied to shifted `a/e` bits through
-linear alias constraints. Schedule lower-sigma output bits are filled for every domain row so
-ungated sigma formulas remain degree-safe across wraparound and padding rows.
+WO-A3 note: the proof path removes decode, MajCh, and xor_8 table producers/consumers while retaining split-pack, range, limb-addition, carry, digest, and field-exposure logic. Degree audit required committed duplicate `b/c/f/g` operand bit columns instead of using selector expressions inside Maj/Ch formulas; the duplicate bits are tied to shifted `a/e` bits through linear alias constraints. Schedule lower-sigma output bits are filled for every domain row so ungated sigma formulas remain degree-safe across wraparound and padding rows.
+
+| 2026-07-04 | codex/m4-a3-integration | M4 A3-on-coprocessor convergence | `identity_e2e/prove_identity` (RAYON_NUM_THREADS=1, same-worktree A/B) | 1.8708 s | 922.60 ms (-50.68%) |
+| 2026-07-04 | codex/m4-a3-integration | M4 A3-on-coprocessor convergence | `pipeline_e2e` prove (BENCH_ITERS=5, RAYON_NUM_THREADS=1) | 2536 ms | 1194 ms (-52.9%) |
+| 2026-07-04 | codex/m4-a3-integration | M4 A3-on-coprocessor convergence | `pipeline_e2e` verify | 41 ms | 41 ms |
+| 2026-07-04 | codex/m4-a3-integration | M4 A3-on-coprocessor convergence | `pipeline_e2e` proof bytes | 1,240,046 | 1,186,186 (-53,860) |
+| 2026-07-04 | codex/m4-a3-integration | M4 A3-on-coprocessor convergence | mdoc prove (BENCH_ITERS=5, RAYON_NUM_THREADS=1) | 5248 ms | 2089 ms (-60.2%) |
+| 2026-07-04 | codex/m4-a3-integration | M4 A3-on-coprocessor convergence | mdoc verify | 45 ms | 45 ms |
+| 2026-07-04 | codex/m4-a3-integration | M4 A3-on-coprocessor convergence | mdoc proof bytes | 1,834,614 | 1,809,542 (-25,072) |
+| 2026-07-04 | codex/m4-a3-integration | M4 A3-on-coprocessor convergence | mdoc committed shape cells | 56,296,064 | 21,824,128 (-34,471,936; -61.2%) |
+| 2026-07-04 | codex/m4-a3-integration | M4 A3-on-coprocessor convergence | identity SHA cells | 13,843,104 | 5,200,544 (-8,642,560; -62.4%) |
+| 2026-07-04 | codex/m4-a3-integration | M4 A3-on-coprocessor convergence | identity total cells | 37,500,240 | 28,857,680 (-8,642,560; -23.1%) |
+| 2026-07-04 | codex/m4-a3-integration | M4 A3-on-coprocessor convergence | `BM_ShaZK_equiv/1/prove` | 1.0217 s | 324.35 ms (-68.25%) |
+| 2026-07-04 | codex/m4-a3-integration | M4 A3-on-coprocessor convergence | `BM_ShaZK_equiv/1/verify` | 646.15 us | 668.77 us (+3.5%) |
+| 2026-07-04 | codex/m4-a3-integration | M4 A3-on-coprocessor convergence | `BM_ShaZK_equiv/33/prove` | 1.1069 s | 421.16 ms (-61.95%) |
+| 2026-07-04 | codex/m4-a3-integration | M4 A3-on-coprocessor convergence | `BM_ShaZK_equiv/33/verify` | 667.42 us | 676.70 us (+1.4%) |
+
+M4 A3-on-coprocessor note (2026-07-04): Q-M1-005 directed a merge of `feat/a3-hybrid-sha` onto `codex/wo-m3-mdoc-coprocessor` via child branch `codex/m4-a3-integration`, preserving A3 history. Incoming history was limited to A1R typed multiplicities plus A3 SHA changes; conflicts were mechanical perf/status/todo unions only, with no `eu-id-ec-coprocessor`, `stwo-p256`, fork/join, `public_digest_bind.rs`, or toolchain conflict. Same-worktree A/B was run under `/Users/lucas/eu-id/tasks/parity/BENCH-LOCK`; both branches used `nightly-2026-01-15`. Baseline = `codex/wo-m3-mdoc-coprocessor`; candidate = `codex/m4-a3-integration`. Candidate SHA/1 midpoint `324.35 ms` is below A3's `327 ms` reference and clears the >15% regression tripwire. Candidate mdoc prove `2089 ms` lands inside the Q-M1-005 `1.9-2.6 s` sanity band; candidate identity `922.60 ms` lands inside the `0.9-1.2 s` band.

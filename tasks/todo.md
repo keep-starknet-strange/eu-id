@@ -5,17 +5,112 @@ Worktree: `/Users/lucas/eu-id/.claude/worktrees/a3-hybrid-sha` on `feat/a3-hybri
 Base: `05e7dd51` (`perf/a1r-typed-mults-redo`), because WO-A3 must land after WO-A1R.
 Scope guard: edit SHA only; never touch P-256, predicates, proof-format/versioning, additions/carry logic, split-pack tables, range_k tables, or SHA degree bounds.
 
-- [x] Read WO-A3, A2 report, A2 Phase 2 formulas, current SHA constraints/trace layout, and lessons.
-- [x] Create post-A1R worktree and branch.
-- [x] Phase 0: run fresh shape dump and record SHA/table cells.
-- [x] Phase 0: run `BM_ShaZK_equiv/{1,33}` single-thread baseline.
-- [x] Phase 0: recompute hybrid projection and G0 go/no-go.
-- [x] If G0 fails or formulas are ambiguous, file mailbox question and schedule a wakeup.
-- [x] Phase 1: write layout manifest, bit-column plan, degree worksheet, relation diff, and count estimate before code.
-- [x] Phase 2 S1: implement Maj/Ch bit gadgets, tests, gates, bench checkpoint.
-- [x] Phase 2 S2: implement Sigma/sigma bit gadgets, tests, gates, bench checkpoint.
-- [x] Phase 2 S3: delete proof-path xor_8/decode/MajCh table paths, tests, gates, bench checkpoint.
-- [x] Phase 3: final accounting, perf-log rows, `tasks/parity/STATUS.md`.
+## M4 A3 Hybrid SHA Integration Plan
+
+Source: `/Users/lucas/eu-id/tasks/parity/mailbox/answers/Q-M1-005.md`.
+Branch: `codex/m4-a3-integration`.
+
+- [x] Read Q-M1-005 and create child branch from `codex/wo-m3-mdoc-coprocessor`.
+- [x] Inspect incoming A3 history before merge: only A1R typed multiplicities and A3 SHA commits touch `crates/stwo-sha256` plus perf/task artifacts.
+- [x] Merge `feat/a3-hybrid-sha` preserving reviewed A3 history.
+- [x] Resolve mechanical perf/status/todo conflicts as union; STOP on any `eu-id-ec-coprocessor`, `stwo-p256`, fork/join, `public_digest_bind.rs`, or toolchain conflict.
+- [x] Run pre-timing verification gates from Q-M1-005, including ignored coprocessor/mdoc/identity guards and a fresh `shape_dump` with SHA modules near 5.20M cells.
+- [x] Recreate `/Users/lucas/eu-id/tasks/parity/BENCH-LOCK` and run same-worktree sequential A/B: baseline `codex/wo-m3-mdoc-coprocessor` vs candidate `codex/m4-a3-integration`.
+- [x] Record identity, mdoc, SHA standalone, proof bytes, verify times, and shape totals; STOP if SHA/1 is >15% worse than A3's 327ms result.
+- [x] Update STATUS/perf/task artifacts and commit M4 integration.
+
+## M4 A3-on-Coprocessor Results
+
+Same-worktree A/B under `/Users/lucas/eu-id/tasks/parity/BENCH-LOCK`; baseline `codex/wo-m3-mdoc-coprocessor`, candidate `codex/m4-a3-integration`; both branches use `nightly-2026-01-15`.
+
+- `identity_e2e/prove_identity`: `1.8708 s -> 922.60 ms`.
+- `pipeline_e2e`: prove `2536 ms -> 1194 ms`, verify `41 ms -> 41 ms`, proof bytes `1,240,046 -> 1,186,186`.
+- mdoc: prove `5248 ms -> 2089 ms`, verify `45 ms -> 45 ms`, proof bytes `1,834,614 -> 1,809,542`, cells `56,296,064 -> 21,824,128`.
+- SHA standalone: `BM_ShaZK_equiv/1/prove` `1.0217 s -> 324.35 ms`; `BM_ShaZK_equiv/33/prove` `1.1069 s -> 421.16 ms`.
+- Shape: identity SHA cells `13,843,104 -> 5,200,544`; identity total cells `37,500,240 -> 28,857,680`.
+- Tripwire: candidate SHA/1 `324.35 ms` is below A3's `327 ms` reference, so no STOP condition fired.
+
+Review: M4 pre-timing gates passed before the A/B, including `cargo test -p stwo-sha256`, default and `--no-default-features` `eu-id-prover`, focused coprocessor/mdoc ignored guards, `make test-ec-coprocessor-ignored`, release `shape_dump`, and release ignored identity/mdoc/e2e/compose round-trips. The final timed campaign used sequential checkouts in the same worktree and did not hit any Q-M1-005 STOP condition.
+
+## WO-A3 Hybrid SHA Snapshot
+
+Merged source branch: `feat/a3-hybrid-sha` at `57b01142`.
+
+- A1R converted the remaining SHA relation entries to typed multiplicities.
+- A3 removes proof-path decode, MajCh, and xor_8 table producers/consumers while keeping split-pack, range, limb-addition, carry, digest, and field-exposure logic.
+- Recorded A3 worktree result: SHA cells `13,843,104 -> 5,200,544`; `BM_ShaZK_equiv/1/prove` `1.0113s -> 327.12ms`; `BM_ShaZK_equiv/33/prove` `1.1028s -> 423.85ms`; verify regresses about 10%.
+
+## WO-M3 mdoc Coprocessor Plan
+
+Source: `/Users/lucas/eu-id/tasks/parity/mailbox/answers/Q-M1-004.md`.
+Branch: `codex/wo-m3-mdoc-coprocessor`.
+
+- [x] Read Q-M1-004 and branch from `codex/wo-m1-coprocessor-merge`.
+- [x] Replace mdoc issuer/device P256 AIR + private digest bridges with SHA + shared `PublicDigestBind` + one final coprocessor binding module.
+- [x] Update `MdocCircuitProof` to remove P256 AIR claims/private bridge claims and carry issuer/device public binds plus one `ImplementedCircuitBundle`.
+- [x] Reuse the M2 batch coprocessor API with statement absorb order issuer then device.
+- [x] Add required mdoc negatives: statement order, cross-signature swap, missing/tampered bundle, SHA/public-z mismatch, cross-slot z swap, identity-bundle replay, and fork/join/rejoin guards.
+- [x] Run focused mdoc verification and same-run mdoc AIR vs coprocessor gates.
+- [x] Update perf/status/task artifacts and commit WO-M3.
+
+## Phase 4 Default-On Plan
+
+Source: `/Users/lucas/eu-id/tasks/parity/mailbox/answers/Q-M1-003.md`.
+
+- [x] Read Q-M1-003 and record the default-on authorization plus v1 caveats.
+- [x] Flip `ec-coprocessor` into the default `eu-id-prover` feature set.
+- [x] Run default coprocessor verification and legacy `--no-default-features` verification.
+- [x] Run BENCH-LOCK default-on/off benches and append perf-log + STATUS rows.
+- [x] Mechanically audit remaining P256 AIR / `stwo-p256` references and document what stays behind legacy/diagnostic surfaces.
+- [x] Commit the Phase 4 default-on series.
+
+## WO-M2 Nonce Coprocessor Plan
+
+Source: `/Users/lucas/eu-id/tasks/parity/mailbox/answers/Q-M1-002.md`.
+Decision: default-on flip deferred until both credential and nonce P256 AIRs leave the feature-on STARK in one migration.
+
+- [x] Extend feature-on coprocessor binding to absorb both statements in order: credential first, nonce second.
+- [x] Replace feature-on `nonce_p256` STARK module with nonce coprocessor verification; keep nonce P256 AIR on the default feature-off path.
+- [x] Preserve verifier pre-STARK nonce binding: expected nonce instance must match the proof's public nonce instance before any STARK/coprocessor verification.
+- [x] Add transcript-order negative for swapped credential/nonce statement order.
+- [x] Add cross-signature swap negative: nonce proof presented as credential proof rejects.
+- [x] Run focused feature-on/default tests and scheduled ignored coprocessor target.
+- [x] Report WO-M2 measured perf and request the single default-on flip ack covering both P256 removals.
+
+## Preconditions / Drift
+
+- [x] Read WO-M1, BL6, Q-017, Q-027, G3, current `eu-id-prover`, mdoc `PublicDigestBind`, and lessons.
+- [x] Check main checkout status. Main is not quiet only because ignored task ledger rows are modified in `tasks/parity/STATUS.md`; the original "84-file mdoc track" blocker is stale.
+- [x] Confirm Phase 1 crate landing is already in history: `40b57444 merge: eu-id-ec-coprocessor v1 (feature-gated, default off)`.
+- [x] Confirm `s4-lite` worktree is clean at `66b16c03`.
+- [x] Run precondition gate: `rtk proxy cargo test -p eu-id-ec-coprocessor`.
+- [x] Run feature-off baseline gate after local changes: default proof path remains green and byte shape/default module order unchanged.
+
+## Implementation Plan
+
+- [x] Phase 2.1: promote mdoc's `PublicDigestBind` to a shared `crates/eu-id-prover/src/public_digest_bind.rs` module; do not fork/copy the component.
+- [x] Phase 2.2: add seed-fork/rejoin transcript binding: absorb Q-017 statement into `air_core::Ch`, draw 32-byte seed, run coprocessor from `CoprocessorChannel::from_seed`, then rejoin with a hash of the serialized bundle.
+- [x] Phase 2.3: delete `CoprocessorChannel::default()`/`Default` so unseeded coprocessor transcripts are unrepresentable.
+- [x] Phase 2.4: under `ec-coprocessor`, change `prove_with_column_breakdown` to remove the credential P256 AIR module and replace the digest bridge with public-z digest bind. Keep the nonce P256 AIR module because WO-M1 Phase 4 explicitly says nonce retirement is a separate architect question.
+- [x] Phase 2.5: update `Proof`/verifier reconstruction so feature-on proofs carry the public credential instance plus coprocessor bundle and rebuild SHA/public-digest-bind/predicates/nonce only.
+- [x] Phase 2.6: fix feature-on tests for the current nonce-aware API and add negatives for missing/tampered/swapped coprocessor payload and public-z mismatch.
+- [x] Phase 2.6: add/extend transcript-order tests for post-statement, post-seed, and post-rejoin digests; add negative tests for bundle-byte tamper and wrong statement/seed order.
+- [x] Phase 2.7: run feature-on verification gates: `rtk proxy cargo test -p eu-id-prover --features ec-coprocessor` and focused ignored e2e if needed.
+- [x] Phase 3 prep: append task/perf/status rows and mailbox the remaining campaign results only if the implemented feature-on path is green. Do not self-certify default flip.
+- [x] Wait for `/Users/lucas/eu-id/tasks/parity/mailbox/answers/Q-M1-001.md` before removing the credential P256 AIR module.
+
+## Phase 3 Campaign
+
+- [x] Run G4-row/per-family coprocessor soundness suite: `rtk proxy cargo test -p eu-id-ec-coprocessor --release`.
+- [x] Run full-bundle ignored coprocessor negatives: `rtk proxy cargo test -p eu-id-ec-coprocessor --release -- --ignored`.
+- [x] Run feature-on normal CI target: `rtk proxy make test-ec-coprocessor`.
+- [x] Run feature-on scheduled ignored CI target: `rtk proxy make test-ec-coprocessor-ignored`.
+- [x] Run transcript-order focused guard after the full target: `rtk proxy cargo test -p eu-id-prover --features ec-coprocessor feature_gated_coprocessor_ -- --ignored`.
+- [x] Take `tasks/parity/BENCH-LOCK` and run all Phase 3 perf gates with `RAYON_NUM_THREADS=1`.
+- [x] Measure `identity_e2e/prove_identity` feature OFF and ON.
+- [x] Measure proof bytes and verify time feature OFF and ON.
+- [x] Write Phase 3 mailbox report with the v1 caveats and no default-on flip.
+- [x] Commit Phase 3 task/report artifacts after verification.
 
 ## Review
 
