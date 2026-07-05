@@ -32,7 +32,7 @@ impl NationalityPredicate {
 impl NationalityPredicate {
     /// Check the acceptable set is well-formed.
     fn validate(&self, public: &PublicInput) -> Result<(), Error> {
-        if public.acceptable.len() < 2 {
+        if public.acceptable.is_empty() {
             return Err(InputError::AcceptableSetTooSmall.into());
         }
         match public.kind {
@@ -242,15 +242,12 @@ mod tests {
     // --- Error cases ---
 
     #[test]
-    fn validate_rejects_singleton_acceptable_set() {
+    fn proves_and_verifies_singleton_acceptable_set() {
         let p = predicate();
-        let err = p
-            .prove(&PublicInput::new(vec![276]), &private(&[276]))
-            .unwrap_err();
-        assert!(matches!(
-            err,
-            Error::Input(InputError::AcceptableSetTooSmall)
-        ));
+        let public = PublicInput::new(vec![276]);
+        let proof = p.prove(&public, &private(&[276])).unwrap();
+        p.verify(&proof).unwrap();
+        assert_eq!(proof.public.acceptable, vec![276]);
     }
 
     #[test]

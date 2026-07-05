@@ -284,5 +284,8 @@ M4 A3-on-coprocessor note (2026-07-04): Q-M1-005 directed a merge of `feat/a3-hy
 | 2026-07-04 | codex/wo-m5-sha-table-provider-dedup | WO-M5 unchanged identity gate | `pipeline_e2e` proof bytes | 1,186,186 | 1,186,186 |
 | 2026-07-04 | codex/wo-m5-sha-table-provider-dedup | WO-M5 unchanged SHA gate | `BM_ShaZK_equiv/1/prove` (RAYON_NUM_THREADS=1) | 324.74 ms | 330.64 ms (Criterion: no change) |
 | 2026-07-04 | codex/wo-m5-sha-table-provider-dedup | WO-M5 unchanged SHA gate | `BM_ShaZK_equiv/33/prove` (RAYON_NUM_THREADS=1) | 426.17 ms | 430.16 ms |
+| 2026-07-06 | worktree | mdoc Phase V real pyMDOC PID vector gate | `real_vector_pid_pymdoc_end_to_end` prove (RAYON_NUM_THREADS=1, release, ignored) | — | 1412 ms |
+| 2026-07-06 | worktree | mdoc Phase V real pyMDOC PID vector gate | `real_vector_pid_pymdoc_end_to_end` verify (RAYON_NUM_THREADS=1, release, ignored) | — | 55 ms |
+| 2026-07-06 | worktree | mdoc Phase V real pyMDOC PID vector gate | real pyMDOC PID mdoc proof bytes | — | 2,534,210 |
 
 WO-M5 note (2026-07-04): baseline is `801ea3a5`; candidate is the review-follow-up worktree after baseline commit `34512349`. `mdoc_perf_probe` now emits proof-byte decomposition: total `1,759,326`, STARK `971,649`, coprocessor bundle `787,032`, metadata `645`; inner STARK fields are config `25`, commitments `136`, sampled values `98,400`, decommitments `85,672`, queried values `719,596`, proof-of-work `8`, and FRI proof `67,812`. The review follow-up adds explicit shared-provider claimed-sum tamper, digest/field-exposure tamper, malformed-provider no-panic rejection, and standalone SHA proof-byte pin gates.

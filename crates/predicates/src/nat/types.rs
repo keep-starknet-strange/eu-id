@@ -98,7 +98,7 @@ pub enum Error {
 
 #[derive(Debug, thiserror::Error)]
 pub enum InputError {
-    #[error("acceptable set must contain at least 2 nationalities")]
+    #[error("acceptable set must contain at least 1 nationality")]
     AcceptableSetTooSmall,
     #[error("invalid ISO 3166-1 nationality code: {0}")]
     InvalidNationalityCode(u32),

@@ -1,12 +1,15 @@
 use ecdsa::signature::Signer;
 use p256::ecdsa::{Signature as P256Signature, SigningKey};
+use p256::pkcs8::DecodePrivateKey;
 use sha2::{Digest as _, Sha256};
+use std::time::Instant;
 
 use ciborium::value::Value;
 use eu_id_prover::mdoc::{
     demo_mdoc_sizing_waste, device_authentication_bytes, device_authentication_sig_structure_hash,
-    extract_pid_mdoc, openid4vp_session_transcript, prove_mdoc_circuit, verify_mdoc_circuit,
-    MdocBirthDateBinding, MdocCircuitStatement, MdocError, MdocNationalityBinding, MdocPidRequest,
+    extract_pid_mdoc, mdoc_proof_byte_breakdown, openid4vp_session_transcript, prove_mdoc_circuit,
+    verify_mdoc_circuit, MdocBirthDateBinding, MdocCircuitStatement, MdocError,
+    MdocNationalityBinding, MdocPidRequest,
 };
 use eu_id_prover::{Date, Policy};
 use stwo_p256::types::{AffinePoint, Signature, U256};
@@ -17,6 +20,14 @@ const BIRTH_DATE: &str = "birth_date";
 const NATIONALITY: &str = "nationality";
 const PROTECTED_ES256: &[u8] = &[0xA1, 0x01, 0x26];
 const PHASE_0B_REFACTOR_THRESHOLD_CELLS: u64 = 1_000_000;
+const X5CHAIN_LABEL: i128 = 33;
+const CBOR_TAG_ENCODED_CBOR: u64 = 24;
+const CBOR_TAG_FULL_DATE: u64 = 1004;
+const MIN_SALT_LEN: usize = 16;
+const REAL_VECTOR_BIRTH_DATE_OFFSET: usize = 69;
+const DER_SEQUENCE: u8 = 0x30;
+const DER_LONG_FORM: u8 = 0x80;
+const DER_LEN_MASK: u8 = 0x7F;
 
 struct MdocFixture {
     doc: Vec<u8>,
@@ -130,6 +141,193 @@ fn compact_signature(sig: &P256Signature) -> Vec<u8> {
     out.extend_from_slice(&sig.r().to_bytes());
     out.extend_from_slice(&sig.s().to_bytes());
     out
+}
+
+fn real_vector_document(session_transcript: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let issuer_signed = include_bytes!("vectors/pid_pymdoc_v1/issuer_signed.cbor");
+    let issuer_signed_value: Value =
+        ciborium::de::from_reader(&issuer_signed[..]).expect("real issuerSigned decodes");
+    assert_real_vector_preconditions(&issuer_signed_value);
+
+    let device_key =
+        SigningKey::from_pkcs8_pem(include_str!("vectors/pid_pymdoc_v1/device_key.pem"))
+            .expect("real vector device key decodes");
+    let device_auth_payload =
+        device_authentication_bytes(session_transcript, DOCTYPE).expect("device auth bytes");
+    let (device_signature, _, _) = cose_sign1(
+        &device_key,
+        PROTECTED_ES256,
+        map(Vec::new()),
+        &device_auth_payload,
+    );
+    let device_signed = map(vec![(
+        "deviceAuth".into(),
+        map(vec![("deviceSignature".into(), device_signature)]),
+    )]);
+
+    let mut document = Vec::new();
+    document.push(0xA3);
+    document.extend(cbor("docType".into()));
+    document.extend(cbor(DOCTYPE.into()));
+    document.extend(cbor("issuerSigned".into()));
+    document.extend_from_slice(issuer_signed);
+    document.extend(cbor("deviceSigned".into()));
+    document.extend(cbor(device_signed));
+
+    let trusted_root =
+        split_concatenated_der(include_bytes!("vectors/pid_pymdoc_v1/issuer_chain.der"))
+            .last()
+            .expect("real vector issuer chain has a root")
+            .clone();
+
+    (document, trusted_root)
+}
+
+fn split_concatenated_der(bytes: &[u8]) -> Vec<Vec<u8>> {
+    let mut rest = bytes;
+    let mut out = Vec::new();
+    while !rest.is_empty() {
+        let len = der_tlv_len(rest);
+        out.push(rest[..len].to_vec());
+        rest = &rest[len..];
+    }
+    out
+}
+
+fn der_tlv_len(bytes: &[u8]) -> usize {
+    assert!(bytes.len() >= 2, "DER TLV needs tag and length");
+    assert_eq!(bytes[0], DER_SEQUENCE, "certificate must be a DER sequence");
+    let first_len = bytes[1];
+    if first_len & DER_LONG_FORM == 0 {
+        return 2 + usize::from(first_len);
+    }
+    let len_len = usize::from(first_len & DER_LEN_MASK);
+    assert!(len_len > 0, "DER indefinite length is not allowed");
+    assert!(bytes.len() >= 2 + len_len, "DER long length is truncated");
+    let mut len = 0usize;
+    for byte in &bytes[2..2 + len_len] {
+        len = (len << 8) | usize::from(*byte);
+    }
+    2 + len_len + len
+}
+
+fn assert_real_vector_preconditions(issuer_signed: &Value) {
+    let issuer_signed = value_map(issuer_signed, "issuerSigned");
+    let issuer_auth = value_array(map_text(issuer_signed, "issuerAuth"), "issuerAuth");
+    assert_eq!(
+        value_bytes(&issuer_auth[0], "issuerAuth.protected"),
+        PROTECTED_ES256
+    );
+
+    let unprotected = value_map(&issuer_auth[1], "issuerAuth.unprotected");
+    assert!(
+        map_int(unprotected, X5CHAIN_LABEL).is_some(),
+        "issuerAuth unprotected header must carry x5chain label 33"
+    );
+
+    let payload = value_bytes(&issuer_auth[2], "issuerAuth.payload");
+    let mso_value: Value = ciborium::de::from_reader(payload).expect("MSO payload decodes");
+    let mso_bytes = match mso_value {
+        Value::Tag(CBOR_TAG_ENCODED_CBOR, tagged) => {
+            value_bytes(&tagged, "MobileSecurityObjectBytes").to_vec()
+        }
+        _ => payload.to_vec(),
+    };
+    let mso_value: Value = ciborium::de::from_reader(&mso_bytes[..]).expect("MSO decodes");
+    let mso = value_map(&mso_value, "MobileSecurityObject");
+    assert_eq!(
+        value_text(map_text(mso, "digestAlgorithm"), "digestAlgorithm"),
+        "SHA-256"
+    );
+
+    let namespaces = value_map(map_text(issuer_signed, "nameSpaces"), "nameSpaces");
+    let items = value_array(map_text(namespaces, NAMESPACE), NAMESPACE);
+    let mut saw_birth_date = false;
+    let mut saw_nationality = false;
+    for item in items {
+        let item_bytes = match item {
+            Value::Tag(CBOR_TAG_ENCODED_CBOR, tagged) => {
+                value_bytes(tagged, "IssuerSignedItemBytes")
+            }
+            Value::Bytes(bytes) => bytes.as_slice(),
+            _ => panic!("IssuerSignedItemBytes must be tag-24 or bstr"),
+        };
+        let item_value: Value =
+            ciborium::de::from_reader(item_bytes).expect("IssuerSignedItem decodes");
+        let item = value_map(&item_value, "IssuerSignedItem");
+        assert!(
+            value_bytes(map_text(item, "random"), "random").len() >= MIN_SALT_LEN,
+            "IssuerSignedItem salt must be at least 16 bytes"
+        );
+        let element = value_text(map_text(item, "elementIdentifier"), "elementIdentifier");
+        if element == BIRTH_DATE {
+            saw_birth_date = true;
+            let Value::Tag(CBOR_TAG_FULL_DATE, value) = map_text(item, "elementValue") else {
+                panic!("birth_date must be tag-1004 full-date");
+            };
+            assert_eq!(value_text(value, "birth_date"), "1985-05-05");
+            assert_eq!(
+                item_bytes
+                    .windows(b"1985-05-05".len())
+                    .position(|window| window == b"1985-05-05"),
+                Some(REAL_VECTOR_BIRTH_DATE_OFFSET)
+            );
+        }
+        if element == NATIONALITY {
+            saw_nationality = true;
+            assert_eq!(
+                value_text(map_text(item, "elementValue"), "nationality"),
+                "DE"
+            );
+        }
+    }
+    assert!(saw_birth_date, "real vector must contain birth_date");
+    assert!(saw_nationality, "real vector must contain nationality");
+}
+
+fn value_map<'a>(value: &'a Value, label: &str) -> &'a [(Value, Value)] {
+    match value {
+        Value::Map(entries) => entries,
+        _ => panic!("{label} must be a map"),
+    }
+}
+
+fn value_array<'a>(value: &'a Value, label: &str) -> &'a [Value] {
+    match value {
+        Value::Array(items) => items,
+        _ => panic!("{label} must be an array"),
+    }
+}
+
+fn value_bytes<'a>(value: &'a Value, label: &str) -> &'a [u8] {
+    match value {
+        Value::Bytes(bytes) => bytes,
+        _ => panic!("{label} must be bytes"),
+    }
+}
+
+fn value_text<'a>(value: &'a Value, label: &str) -> &'a str {
+    match value {
+        Value::Text(text) => text,
+        _ => panic!("{label} must be text"),
+    }
+}
+
+fn map_text<'a>(map: &'a [(Value, Value)], key: &str) -> &'a Value {
+    map.iter()
+        .find_map(|(candidate, value)| {
+            (candidate == &Value::Text(key.to_string())).then_some(value)
+        })
+        .unwrap_or_else(|| panic!("missing map key {key}"))
+}
+
+fn map_int<'a>(map: &'a [(Value, Value)], key: i128) -> Option<&'a Value> {
+    map.iter().find_map(|(candidate, value)| {
+        let Value::Integer(candidate) = candidate else {
+            return None;
+        };
+        (i128::from(*candidate) == key).then_some(value)
+    })
 }
 
 fn der_tlv(tag: u8, value: Vec<u8>) -> Vec<u8> {
@@ -1167,6 +1365,63 @@ fn isolated_mdoc_circuit_profile_proves_and_verifies() {
     let proof = prove_mdoc_circuit(&extracted, &statement).expect("mdoc circuit proves");
 
     verify_mdoc_circuit(&proof, &statement).expect("mdoc circuit verifies");
+}
+
+#[test]
+#[ignore = "slow: proves real pyMDOC PID vector end-to-end"]
+fn real_vector_pid_pymdoc_end_to_end() {
+    // Q-002's "no hand-crafted fake vector" rule is satisfied by consuming the
+    // byte-frozen issuer half from pyMDOC-CBOR; this test only builds the
+    // wallet-side deviceSigned presentation over the Phase-E-exact payload.
+    let session_transcript = openid4vp_session_transcript(b"phase-v-real-vector-handover");
+    let (document, trusted_root) = real_vector_document(&session_transcript);
+    let mut request = request(session_transcript);
+    request.trusted_issuer_certificates.push(trusted_root);
+
+    let extracted = extract_pid_mdoc(&document, &request).expect("real PID mdoc extracts");
+    assert_eq!(extracted.birth_date, "1985-05-05");
+    assert_eq!(extracted.nationalities, vec![276]);
+    assert_eq!(
+        &extracted.birth_date_item[extracted.birth_date_value_offset
+            ..extracted.birth_date_value_offset + b"1985-05-05".len()],
+        b"1985-05-05"
+    );
+    assert_eq!(
+        extracted.birth_date_binding,
+        MdocBirthDateBinding::Text(*b"1985-05-05")
+    );
+    assert_eq!(
+        extracted.nationality_binding,
+        MdocNationalityBinding::Alpha2(*b"DE")
+    );
+
+    let policy = Policy {
+        current_date: Date {
+            year: 2026,
+            month: 7,
+            day: 1,
+        },
+        min_age_years: 18,
+        accepted_nationalities: Vec::new(),
+        accepted_nationalities_alpha2: vec![*b"DE"],
+    };
+    let statement =
+        MdocCircuitStatement::from_extracted(&extracted, policy).expect("statement builds");
+
+    let prove_start = Instant::now();
+    let proof = prove_mdoc_circuit(&extracted, &statement).expect("real PID mdoc proves");
+    let prove_elapsed = prove_start.elapsed();
+
+    let verify_start = Instant::now();
+    verify_mdoc_circuit(&proof, &statement).expect("real PID mdoc verifies");
+    let verify_elapsed = verify_start.elapsed();
+
+    let bytes = mdoc_proof_byte_breakdown(&proof).proof_bytes;
+    println!(
+        "phase_v_real_vector prove_ms={} verify_ms={} proof_bytes={bytes}",
+        prove_elapsed.as_millis(),
+        verify_elapsed.as_millis()
+    );
 }
 
 #[test]
