@@ -9,7 +9,7 @@ use crate::age::strategy::range_check::components::{components, preprocessed_col
 use crate::age::strategy::range_check::interaction::InteractionTraces;
 use crate::age::strategy::range_check::lookup_elements::LookupElements;
 use crate::age::strategy::range_check::preprocessed::Preprocessed;
-use crate::age::strategy::range_check::witness::WitnessData;
+use crate::age::strategy::range_check::witness::{DobBindingMode, WitnessData};
 use crate::age::types::{PublicInput, Witness};
 use air_core::relations::{FieldBytesRelation, SharedFieldRelation};
 use air_core::{
@@ -25,12 +25,12 @@ use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::TraceLocationAllocator;
 
 /// Column layout shared by both prover and verifier: it depends on the public
-/// input (its bounds) and whether the DOB binding is wired (`bind_dob`),
-/// never on the witness values. Binding adds three trace columns (the
-/// `bind_active` selector + the two birth-year bytes) and four LogUp fractions
-/// (the DOB-byte requires) to the age component. The age component pairs
-/// consecutive LogUp fractions.
-fn layout(public: &PublicInput, bind_dob: bool) -> TreeLayout {
+/// input (its bounds) and the DOB binding mode (`dob_binding_mode`), never on
+/// the witness values. Binding adds mode-specific trace columns (the
+/// `bind_active` selector plus the exposed bytes) and one LogUp fraction per
+/// exposed DOB byte to the age component. The age component pairs consecutive
+/// LogUp fractions.
+fn layout(public: &PublicInput, dob_binding_mode: Option<DobBindingMode>) -> TreeLayout {
     let bounds = &public.bounds;
     let cal = calendar_log_size(bounds);
     let valid_day = valid_date_ranges()[0].domain.log_size();
@@ -38,11 +38,15 @@ fn layout(public: &PublicInput, bind_dob: bool) -> TreeLayout {
     let month = Preprocessed::month_range().log_size();
     let year = Preprocessed::year_range(bounds).log_size();
     let witness = WitnessData::log_size();
-    // The age component: 9 (+3 binding) trace columns and 5 (+4 binding)
-    // logical LogUp fractions, paired into secure columns, each four M31
-    // (`SECURE_EXTENSION_DEGREE`).
-    let age_trace_cols = if bind_dob { 12 } else { 9 };
-    let logical_age_lookups = if bind_dob { 9usize } else { 5 };
+    // The age component: 9 base trace columns plus mode-specific binding columns
+    // and 5 base logical LogUp fractions plus one field require per exposed DOB
+    // byte, paired into secure columns, each four M31 (`SECURE_EXTENSION_DEGREE`).
+    let age_trace_cols = 9 + dob_binding_mode
+        .map(DobBindingMode::trace_columns)
+        .unwrap_or(0);
+    let logical_age_lookups = 5 + dob_binding_mode
+        .map(DobBindingMode::field_bytes)
+        .unwrap_or(0);
     let age_interaction_cols = logical_age_lookups.div_ceil(2) * 4;
     TreeLayout {
         // Tree 0: calendar (2), valid-day (2), day/month/year delta tables (1 each).
@@ -84,6 +88,7 @@ pub struct RangeCheckProver {
     /// Shared `Sha256Field` channel when the DOB binding is wired. `None`
     /// for a standalone age proof (the module stays internally balanced).
     dob_binding: Option<SharedFieldRelation>,
+    dob_binding_mode: Option<DobBindingMode>,
     lookup_elements: Option<LookupElements>,
     claimed_sums: Vec<QM31>,
     components: Option<RangeCheckComponents>,
@@ -92,13 +97,14 @@ pub struct RangeCheckProver {
 impl RangeCheckProver {
     pub fn new(public: &PublicInput, witness: &Witness) -> Self {
         let preprocessed = Preprocessed::new(&public.bounds);
-        let witness_data = WitnessData::new(witness, &preprocessed, false);
+        let witness_data = WitnessData::new(witness, &preprocessed, None);
         Self {
             public: *public,
             witness: witness.clone(),
             preprocessed,
             witness_data,
             dob_binding: None,
+            dob_binding_mode: None,
             lookup_elements: None,
             claimed_sums: Vec::new(),
             components: None,
@@ -111,8 +117,27 @@ impl RangeCheckProver {
     /// the witness with the binding columns. The matching [`RangeCheckVerifier`]
     /// must set the same handle.
     pub fn with_dob_binding(mut self, handle: SharedFieldRelation) -> Self {
-        self.witness_data = WitnessData::new(&self.witness, &self.preprocessed, true);
+        self.witness_data = WitnessData::new(
+            &self.witness,
+            &self.preprocessed,
+            Some(DobBindingMode::Packed),
+        );
         self.dob_binding = Some(handle);
+        self.dob_binding_mode = Some(DobBindingMode::Packed);
+        self
+    }
+
+    /// Bind a text-form `YYYY-MM-DD` DOB window to the credential: expose the ten
+    /// ASCII bytes on the shared `Sha256Field` channel and constrain them into the
+    /// packed birth date in-circuit. Matched by [`RangeCheckVerifier::with_text_dob_binding`].
+    pub fn with_text_dob_binding(mut self, handle: SharedFieldRelation) -> Self {
+        self.witness_data = WitnessData::new(
+            &self.witness,
+            &self.preprocessed,
+            Some(DobBindingMode::Text),
+        );
+        self.dob_binding = Some(handle);
+        self.dob_binding_mode = Some(DobBindingMode::Text);
         self
     }
 
@@ -145,7 +170,7 @@ impl Air for RangeCheckProver {
     }
 
     fn layout(&self) -> TreeLayout {
-        layout(&self.public, self.dob_binding.is_some())
+        layout(&self.public, self.dob_binding_mode)
     }
 
     fn claimed_sums(&self) -> Vec<QM31> {
@@ -163,6 +188,7 @@ impl Air for RangeCheckProver {
             self.relations().clone(),
             &self.claimed_sums,
             self.dob_relation(),
+            self.dob_binding_mode,
         ));
     }
 
@@ -227,6 +253,7 @@ impl AirProver for RangeCheckProver {
 pub struct RangeCheckVerifier {
     public: PublicInput,
     dob_binding: Option<SharedFieldRelation>,
+    dob_binding_mode: Option<DobBindingMode>,
     lookup_elements: Option<LookupElements>,
     claimed_sums: Vec<QM31>,
     components: Option<RangeCheckComponents>,
@@ -237,6 +264,7 @@ impl RangeCheckVerifier {
         Self {
             public: *public,
             dob_binding: None,
+            dob_binding_mode: None,
             lookup_elements: None,
             claimed_sums,
             components: None,
@@ -248,6 +276,14 @@ impl RangeCheckVerifier {
     /// the bound component (the extra columns + the require terms).
     pub fn with_dob_binding(mut self, handle: SharedFieldRelation) -> Self {
         self.dob_binding = Some(handle);
+        self.dob_binding_mode = Some(DobBindingMode::Packed);
+        self
+    }
+
+    /// Match a [`RangeCheckProver::with_text_dob_binding`] proof.
+    pub fn with_text_dob_binding(mut self, handle: SharedFieldRelation) -> Self {
+        self.dob_binding = Some(handle);
+        self.dob_binding_mode = Some(DobBindingMode::Text);
         self
     }
 
@@ -278,7 +314,7 @@ impl Air for RangeCheckVerifier {
     }
 
     fn layout(&self) -> TreeLayout {
-        layout(&self.public, self.dob_binding.is_some())
+        layout(&self.public, self.dob_binding_mode)
     }
 
     fn claimed_sums(&self) -> Vec<QM31> {
@@ -296,6 +332,7 @@ impl Air for RangeCheckVerifier {
             self.relations().clone(),
             &self.claimed_sums,
             self.dob_relation(),
+            self.dob_binding_mode,
         ));
     }
 
@@ -322,12 +359,14 @@ fn build_components(
     lookup_elements: LookupElements,
     claimed_sums: &[QM31],
     dob_binding: Option<FieldBytesRelation>,
+    dob_binding_mode: Option<DobBindingMode>,
 ) -> RangeCheckComponents {
     components(
         allocator,
         public,
         lookup_elements,
         dob_binding,
+        dob_binding_mode,
         claimed_sums[0],
         claimed_sums[1],
         claimed_sums[2],
@@ -377,20 +416,27 @@ mod binding_tests {
         [year >> 8, year & 0xFF, month, day]
     }
 
+    fn dob_text_bytes(year: u32, month: u32, day: u32) -> Vec<u32> {
+        format!("{year:04}-{month:02}-{day:02}")
+            .bytes()
+            .map(u32::from)
+            .collect()
+    }
+
     /// A trace-less module that plays the SHA field provider: it draws the shared
     /// `Sha256Field` relation, shares it, and yields `−1/combine(DOB, i, byte)`
-    /// for the four DOB bytes — exactly the term SHA contributes for the DOB
-    /// window (`−is_first_block`, one yield per byte).
+    /// for the DOB bytes — exactly the term SHA contributes for the DOB window
+    /// (one yield per byte).
     struct DobProvider {
-        bytes: [u32; 4],
+        bytes: Vec<u32>,
         handle: SharedFieldRelation,
         relation: Option<FieldBytesRelation>,
     }
 
     impl DobProvider {
-        fn new(bytes: [u32; 4], handle: SharedFieldRelation) -> Self {
+        fn new(bytes: impl Into<Vec<u32>>, handle: SharedFieldRelation) -> Self {
             Self {
-                bytes,
+                bytes: bytes.into(),
                 handle,
                 relation: None,
             }
@@ -592,5 +638,116 @@ mod binding_tests {
             air_core::verify(&mut modules, &proof).is_err(),
             "a DOB that differs from the yielded credential bytes must be rejected",
         );
+    }
+
+    /// The text-form DOB binding balances when the ten `YYYY-MM-DD` bytes the
+    /// producer yields recompose to the date the age module proves.
+    #[test]
+    fn bound_age_balances_against_matching_text_dob_yields() {
+        let public = PublicInput::new(
+            Date {
+                year: 2026,
+                month: 7,
+                day: 3,
+            },
+            18,
+        );
+        let dob = DateOfBirth(Date {
+            year: 1990,
+            month: 7,
+            day: 15,
+        });
+
+        let handle = SharedFieldRelation::new();
+        let mut provider = DobProvider::new(dob_text_bytes(1990, 7, 15), handle.clone());
+        let mut age = AgeRangeCheck::new(PcsConfig::default())
+            .prover(&public, &dob)
+            .unwrap()
+            .with_text_dob_binding(handle);
+
+        let proof = {
+            let mut modules: [&mut dyn AirProver; 2] = [&mut provider, &mut age];
+            air_core::prove(&mut modules, PcsConfig::default()).expect("text-bound age proves")
+        };
+        let sums = age.claimed_sums();
+
+        let handle_v = SharedFieldRelation::new();
+        let mut provider_v = DobProvider::new(dob_text_bytes(1990, 7, 15), handle_v.clone());
+        let mut age_v = AgeRangeCheck::new(PcsConfig::default())
+            .verifier(&public, &sums)
+            .unwrap()
+            .with_text_dob_binding(handle_v);
+        let mut modules: [&mut dyn Air; 2] = [&mut provider_v, &mut age_v];
+        air_core::verify(&mut modules, &proof).expect("text DOB verifies against matching yields");
+    }
+
+    /// A corrupted digit byte (a non-`0..9` ASCII character) breaks the require
+    /// balance — the verifier rejects.
+    #[test]
+    fn bound_age_rejects_text_dob_digit_corruption() {
+        let public = over_18_public();
+        let dob = DateOfBirth(Date {
+            year: 2000,
+            month: 1,
+            day: 1,
+        });
+        let mut credential_bytes = dob_text_bytes(2000, 1, 1);
+        credential_bytes[2] = b'A' as u32;
+
+        let handle = SharedFieldRelation::new();
+        let mut provider = DobProvider::new(credential_bytes.clone(), handle.clone());
+        let mut age = AgeRangeCheck::new(PcsConfig::default())
+            .prover(&public, &dob)
+            .unwrap()
+            .with_text_dob_binding(handle);
+        let proof = {
+            let mut modules: [&mut dyn AirProver; 2] = [&mut provider, &mut age];
+            air_core::prove(&mut modules, PcsConfig::default()).expect("prover accepts imbalance")
+        };
+        let sums = age.claimed_sums();
+
+        let handle_v = SharedFieldRelation::new();
+        let mut provider_v = DobProvider::new(credential_bytes, handle_v.clone());
+        let mut age_v = AgeRangeCheck::new(PcsConfig::default())
+            .verifier(&public, &sums)
+            .unwrap()
+            .with_text_dob_binding(handle_v);
+        let mut modules: [&mut dyn Air; 2] = [&mut provider_v, &mut age_v];
+        assert!(air_core::verify(&mut modules, &proof).is_err());
+    }
+
+    /// A wrong separator byte (not `-` at position 4) breaks the require balance
+    /// — the verifier rejects.
+    #[test]
+    fn bound_age_rejects_text_dob_separator_corruption() {
+        let public = over_18_public();
+        let dob = DateOfBirth(Date {
+            year: 2000,
+            month: 1,
+            day: 1,
+        });
+        let mut credential_bytes = dob_text_bytes(2000, 1, 1);
+        credential_bytes[4] = b'/' as u32;
+
+        let handle = SharedFieldRelation::new();
+        let mut provider = DobProvider::new(credential_bytes.clone(), handle.clone());
+        let mut age = AgeRangeCheck::new(PcsConfig::default())
+            .prover(&public, &dob)
+            .unwrap()
+            .with_text_dob_binding(handle);
+        let proof = {
+            let mut modules: [&mut dyn AirProver; 2] = [&mut provider, &mut age];
+            air_core::prove(&mut modules, PcsConfig::default()).expect("prover accepts imbalance")
+        };
+        let sums = age.claimed_sums();
+
+        let handle_v = SharedFieldRelation::new();
+        let mut provider_v = DobProvider::new(credential_bytes, handle_v.clone());
+        let mut age_v = AgeRangeCheck::new(PcsConfig::default())
+            .verifier(&public, &sums)
+            .unwrap()
+            .with_text_dob_binding(handle_v);
+        let mut modules: [&mut dyn Air; 2] = [&mut provider_v, &mut age_v];
+        assert!(air_core::verify(&mut modules, &proof).is_err());
     }
 }

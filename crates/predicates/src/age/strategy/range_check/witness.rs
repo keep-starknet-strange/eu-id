@@ -13,6 +13,35 @@ use stwo::prover::poly::circle::CircleEvaluation;
 use stwo::prover::TreeBuilder;
 
 const LOG_SIZE: u32 = 5;
+pub(crate) const DOB_TEXT_LEN: usize = 10;
+pub(crate) const DOB_TEXT_DIGITS: usize = 8;
+pub(crate) const DOB_TEXT_DIGIT_BITS: usize = 4;
+
+/// How the credential DOB is exposed to the age module: packed 4-byte
+/// `[year_hi, year_lo, month, day]` or a 10-byte `YYYY-MM-DD` text window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DobBindingMode {
+    Packed,
+    Text,
+}
+
+impl DobBindingMode {
+    /// Extra witness trace columns the binding contributes (after the 9 base).
+    pub fn trace_columns(self) -> usize {
+        match self {
+            Self::Packed => 3,
+            Self::Text => 1 + DOB_TEXT_LEN + DOB_TEXT_DIGITS * DOB_TEXT_DIGIT_BITS,
+        }
+    }
+
+    /// Exposed DOB byte requires the binding emits on the shared field channel.
+    pub fn field_bytes(self) -> usize {
+        match self {
+            Self::Packed => 4,
+            Self::Text => DOB_TEXT_LEN,
+        }
+    }
+}
 
 pub struct WitnessData {
     pub witness_trace: Trace,
@@ -28,12 +57,13 @@ pub struct WitnessData {
     pub day_delta_val: u32,
     pub month_delta_val: u32,
     pub year_delta_val: u32,
-    /// The four credential DOB byte values `[year_hi, year_lo, month, day]` when
-    /// the credential binding is wired (`Some`) — the require tuples the interaction
-    /// trace emits against the shared `Sha256Field` channel. `None` for a
-    /// standalone age proof, where [`witness_trace`](Self::witness_trace) holds
-    /// only the nine base columns.
-    pub dob_bytes: Option<[u32; 4]>,
+    /// Credential DOB byte values when the credential binding is wired (`Some`)
+    /// — either four packed bytes `[year_hi, year_lo, month, day]` or ten text
+    /// bytes `YYYY-MM-DD`. These are the require tuples the interaction trace
+    /// emits against the shared `Sha256Field` channel. `None` for a standalone
+    /// age proof, where [`witness_trace`](Self::witness_trace) holds only the
+    /// nine base columns.
+    pub dob_bytes: Option<Vec<u32>>,
 }
 
 /// Trace column index of the single-row binding selector `bind_active` (the
@@ -42,7 +72,11 @@ pub struct WitnessData {
 pub const BIND_ACTIVE_COL: usize = 9;
 
 impl WitnessData {
-    pub fn new(witness: &Witness, preprocessed: &Preprocessed, bind_dob: bool) -> Self {
+    pub fn new(
+        witness: &Witness,
+        preprocessed: &Preprocessed,
+        dob_binding_mode: Option<DobBindingMode>,
+    ) -> Self {
         let dob_max_days = max_days_at(witness.dob.month, witness.dob.year);
         let table_index = (witness.dob.year - witness.public.bounds.min_supported_year) * 12
             + witness.dob.month
@@ -89,15 +123,10 @@ impl WitnessData {
         // u16 birth year): byte 0 is the high byte, byte 1 the low byte, then the
         // single month/day bytes — the same four bytes SHA yields for the DOB
         // window (`docs/credential-format.md`).
-        let dob_bytes = bind_dob.then_some([
-            witness.dob.year >> 8,
-            witness.dob.year & 0xFF,
-            witness.dob.month,
-            witness.dob.day,
-        ]);
+        let dob_bytes = dob_binding_mode.map(|mode| dob_field_bytes(witness, mode));
 
         Self {
-            witness_trace: gen_trace(witness, bind_dob),
+            witness_trace: gen_trace(witness, dob_binding_mode),
             cal_mult_trace,
             valid_day_mult_trace,
             day_delta_mult_trace,
@@ -130,8 +159,12 @@ impl WitnessData {
     }
 }
 
-fn gen_trace(witness: &Witness, bind_dob: bool) -> Trace {
-    let mut cols = Vec::with_capacity(if bind_dob { 12 } else { 9 });
+fn gen_trace(witness: &Witness, dob_binding_mode: Option<DobBindingMode>) -> Trace {
+    let mut cols = Vec::with_capacity(
+        9 + dob_binding_mode
+            .map(DobBindingMode::trace_columns)
+            .unwrap_or(0),
+    );
     push_repeated_column(&mut cols, witness.dob.day, LOG_SIZE);
     push_repeated_column(&mut cols, witness.dob.month, LOG_SIZE);
     push_repeated_column(&mut cols, witness.dob.year, LOG_SIZE);
@@ -161,13 +194,65 @@ fn gen_trace(witness: &Witness, bind_dob: bool) -> Trace {
     // packed `birth_year`. Repeated so the always-on reconciliation holds on
     // every row; the global LogUp balance forces the selected row's bytes to the
     // credential's signed bytes.
-    if bind_dob {
+    if let Some(mode) = dob_binding_mode {
         push_single_active(&mut cols, LOG_SIZE);
-        push_repeated_column(&mut cols, witness.dob.year >> 8, LOG_SIZE);
-        push_repeated_column(&mut cols, witness.dob.year & 0xFF, LOG_SIZE);
+        match mode {
+            DobBindingMode::Packed => {
+                push_repeated_column(&mut cols, witness.dob.year >> 8, LOG_SIZE);
+                push_repeated_column(&mut cols, witness.dob.year & 0xFF, LOG_SIZE);
+            }
+            DobBindingMode::Text => {
+                let text = dob_text_bytes(witness);
+                for &byte in &text {
+                    push_repeated_column(&mut cols, u32::from(byte), LOG_SIZE);
+                }
+                // Per-digit 4-bit decomposition: the eval reconstructs each ASCII
+                // digit from these bits and caps it at 9, replacing a dedicated
+                // range table for the 4-bit check.
+                for (i, &byte) in text_digit_bytes(&text).iter().enumerate() {
+                    let digit = byte - b'0';
+                    debug_assert!(digit <= 9, "generated DOB digit {i} must be decimal");
+                    for bit in 0..DOB_TEXT_DIGIT_BITS {
+                        push_repeated_column(&mut cols, u32::from((digit >> bit) & 1), LOG_SIZE);
+                    }
+                }
+            }
+        }
     }
 
     cols
+}
+
+/// The exposed DOB bytes for `mode`: packed big-endian `[year_hi, year_lo,
+/// month, day]` or the ten `YYYY-MM-DD` text bytes.
+pub fn dob_field_bytes(witness: &Witness, mode: DobBindingMode) -> Vec<u32> {
+    match mode {
+        DobBindingMode::Packed => vec![
+            witness.dob.year >> 8,
+            witness.dob.year & 0xFF,
+            witness.dob.month,
+            witness.dob.day,
+        ],
+        DobBindingMode::Text => dob_text_bytes(witness).into_iter().map(u32::from).collect(),
+    }
+}
+
+fn dob_text_bytes(witness: &Witness) -> [u8; DOB_TEXT_LEN] {
+    format!(
+        "{:04}-{:02}-{:02}",
+        witness.dob.year, witness.dob.month, witness.dob.day
+    )
+    .as_bytes()
+    .try_into()
+    .expect("formatted DOB text has YYYY-MM-DD length")
+}
+
+/// The eight digit bytes of a `YYYY-MM-DD` window, skipping the two `-`
+/// separators at positions 4 and 7.
+fn text_digit_bytes(text: &[u8; DOB_TEXT_LEN]) -> [u8; DOB_TEXT_DIGITS] {
+    [
+        text[0], text[1], text[2], text[3], text[5], text[6], text[8], text[9],
+    ]
 }
 
 /// A column that is `1` on exactly one row and `0` on the rest — the

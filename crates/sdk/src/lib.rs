@@ -7,31 +7,28 @@
 //! format is structurally impossible to drift — there is no second
 //! implementation to disagree with.
 //!
-//! Everything here is mdoc-agnostic: callers pass already-extracted raw bytes
-//! (issuer key, signature, MSO, item bytes, …) and get back a proof or verdict.
-//! No Multipaz / verifier-core types leak in.
+//! The product API is the mdoc PID path: [`prove_mdoc_pid`] accepts the full
+//! wallet-returned CBOR document plus verifier trust roots, calls
+//! `eu_id_prover::prove_mdoc`, and returns a proof envelope that
+//! [`verify_mdoc_pid`] checks through `eu_id_prover::verify_mdoc`.
 //!
 //! ## What the proof binds (§9.2)
-//! `prove_identity` runs the real STWO combined prover (`eu_id_prover`) over the
-//! POC credential and returns a [`ProofEnvelope`]: the bzip2-compressed,
-//! bincode-serialized STARK `Proof` **plus** the canonical-CBOR bytes of the
-//! full [`ZkPublicStatement`].
-//! The two layers bind complementary things:
+//! `prove_mdoc_pid` runs the product mdoc prover and returns an
+//! [`MdocProofEnvelope`]: the bzip2-compressed, bincode-serialized mdoc proof,
+//! the verifier-facing mdoc statement, and the canonical-CBOR bytes of the full
+//! [`ZkPublicStatement`]. The two layers bind complementary things:
 //!
-//! - **The STARK** binds `{ demo issuer key Q, age public input, nat public
-//!   input }` — i.e. the age threshold + reference date and the accepted
-//!   nationality set, plus (internally) that the signature is over `SHA-256(C)`
-//!   and that the DOB / nationality the predicates reason about are the signed
-//!   credential's bytes.
-//! - **The envelope** binds everything the STARK does *not* cover but the mdoc
-//!   contract carries: `nonce` (the `SessionTranscript` freshness / anti-replay
-//!   value), `doctype`, `namespace`, `spec_id`, and `version`. `verify_identity`
-//!   rejects (fail-closed `ok = false`) if the envelope's statement bytes drift
-//!   from the verifier's own [`encode_statement`].
+//! - **The mdoc proof** binds the issuer key, policy, session transcript, issuer
+//!   and device `(r, s)` signatures, and statement offsets. Attribute digests
+//!   and the device key are private witness values bound in-circuit.
+//! - **The envelope** binds the SDK contract fields (`nonce` /
+//!   `SessionTranscript`, `doctype`, `namespace`, `spec_id`, and `version`) so
+//!   verifier-side request drift is rejected before the inner proof is trusted.
 //!
-//! This preserves the stub's "the statement survived transport" guarantee on top
-//! of the real proof, so freshness / doctype are not silently dropped when the
-//! stub body is swapped out.
+//! The legacy [`prove_identity`] / [`verify_identity`] functions remain for the
+//! 11-byte POC credential path and its parity/transport tests. They still use the
+//! demo issuer and demo nonce mapping by design; new product callers should use
+//! the mdoc PID functions.
 //!
 //! The combined prover overflows a small default thread stack (`EXC_BAD_ACCESS`
 //! on device — see ROADMAP_E2E §7.2), so both entry points run the heavy work on
@@ -288,6 +285,15 @@ pub struct ZkWitness {
     pub digest_ids: std::collections::HashMap<String, u32>,
 }
 
+/// The PRIVATE witness for the product mdoc proof path.
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct ZkMdocWitness {
+    /// Full CBOR mdoc document returned by the wallet.
+    pub document: Vec<u8>,
+    /// Trusted issuer root certificates accepted for COSE header 33 `x5chain`.
+    pub trusted_issuer_certificates: Vec<Vec<u8>>,
+}
+
 /// The verdict returned by [`verify_identity`].
 #[derive(uniffi::Record, Clone, Debug)]
 pub struct ZkVerifyResult {
@@ -379,6 +385,13 @@ struct ProofEnvelope {
     stark_proof: Vec<u8>,
 }
 
+#[derive(Serialize, Deserialize)]
+struct MdocProofEnvelope {
+    statement_bytes: Vec<u8>,
+    mdoc_statement: eu_id_prover::MdocStatement,
+    stark_proof: Vec<u8>,
+}
+
 /// Stack size for the dedicated prover/verifier thread. The combined prover
 /// overflows the small default worker-thread stack with `EXC_BAD_ACCESS`; 32 MiB
 /// is the headroom the FFI harness established on device (ROADMAP_E2E §7.2).
@@ -424,7 +437,7 @@ fn map_prover_error(e: eu_id_prover::Error) -> ZkError {
             "the holder's nationality is not in the accepted set [{e:?}]"
         )),
         // Other witness-generation / proving failures (bad signature, internal).
-        P256Prepare(_) | SignatureInvalid | Prove(_) | CoprocessorWitness(_) => {
+        P256Prepare(_) | SignatureInvalid | Prove(_) | Mdoc(_) | CoprocessorWitness(_) => {
             ZkError::Prove(format!("{e:?}"))
         }
         // Verifier-side rejections (only reachable from the verify path).
@@ -552,6 +565,115 @@ pub fn verify_identity(
     })
 }
 
+fn mdoc_request(
+    statement: &ZkPublicStatement,
+    witness: &ZkMdocWitness,
+) -> eu_id_prover::MdocPidRequest {
+    let contract = zk_contract_v1();
+    eu_id_prover::MdocPidRequest {
+        doctype: statement.doctype.clone(),
+        namespace: statement.namespace.clone(),
+        birth_date_element: contract.element_birth_date,
+        nationality_element: contract.element_nationality,
+        session_transcript: statement.nonce.clone(),
+        trusted_issuer_certificates: witness.trusted_issuer_certificates.clone(),
+    }
+}
+
+fn mdoc_statement_matches_public_statement(
+    mdoc_statement: &eu_id_prover::MdocStatement,
+    statement: &ZkPublicStatement,
+) -> Result<bool, ZkError> {
+    let policy = mapping::to_policy(statement)?;
+    if mdoc_statement.policy != policy {
+        return Ok(false);
+    }
+
+    let issuer_x: [u8; 32] = statement
+        .issuer_key_x
+        .as_slice()
+        .try_into()
+        .map_err(|_| ZkError::InvalidInput("issuer_key_x must be 32 bytes".to_string()))?;
+    let issuer_y: [u8; 32] = statement
+        .issuer_key_y
+        .as_slice()
+        .try_into()
+        .map_err(|_| ZkError::InvalidInput("issuer_key_y must be 32 bytes".to_string()))?;
+    if mdoc_statement.issuer_input.public_key.x.0 != issuer_x
+        || mdoc_statement.issuer_input.public_key.y.0 != issuer_y
+    {
+        return Ok(false);
+    }
+
+    let expected_device_hash = eu_id_prover::mdoc::device_authentication_sig_structure_hash(
+        &statement.nonce,
+        &statement.doctype,
+    )
+    .map_err(|e| ZkError::InvalidInput(format!("invalid DeviceAuthentication input: {e:?}")))?;
+    if mdoc_statement.device_input.message_hash.0 != expected_device_hash {
+        return Ok(false);
+    }
+
+    Ok(true)
+}
+
+#[uniffi::export]
+pub fn prove_mdoc_pid(
+    statement: ZkPublicStatement,
+    witness: ZkMdocWitness,
+) -> Result<Vec<u8>, ZkError> {
+    on_large_stack(move || {
+        let policy = mapping::to_policy(&statement)?;
+        let request = mdoc_request(&statement, &witness);
+        let (proof, mdoc_statement) = eu_id_prover::prove_mdoc(&witness.document, &request, policy)
+            .map_err(map_prover_error)?;
+        let stark_proof_bincode = bincode::serialize(&proof)
+            .map_err(|e| ZkError::Prove(format!("failed to serialize mdoc proof: {e}")))?;
+        let stark_proof = compress_stark_proof_for_ffi(&stark_proof_bincode)?;
+
+        let envelope = MdocProofEnvelope {
+            statement_bytes: encode_statement(&statement),
+            mdoc_statement,
+            stark_proof,
+        };
+        bincode::serialize(&envelope)
+            .map_err(|e| ZkError::Prove(format!("failed to serialize mdoc proof envelope: {e}")))
+    })
+}
+
+#[uniffi::export]
+pub fn verify_mdoc_pid(
+    statement: ZkPublicStatement,
+    proof: Vec<u8>,
+) -> Result<ZkVerifyResult, ZkError> {
+    on_large_stack(move || {
+        let envelope: MdocProofEnvelope = match bincode::deserialize(&proof) {
+            Ok(envelope) => envelope,
+            Err(_) => return Ok(ZkVerifyResult { ok: false }),
+        };
+        if envelope.statement_bytes != encode_statement(&statement) {
+            return Ok(ZkVerifyResult { ok: false });
+        }
+        if !mdoc_statement_matches_public_statement(&envelope.mdoc_statement, &statement)? {
+            return Ok(ZkVerifyResult { ok: false });
+        }
+
+        let stark_proof_bincode = match decompress_stark_proof_from_ffi(&envelope.stark_proof) {
+            Ok(bytes) => bytes,
+            Err(_) => return Ok(ZkVerifyResult { ok: false }),
+        };
+        let stark_proof: eu_id_prover::MdocProof = match bincode::deserialize(&stark_proof_bincode)
+        {
+            Ok(stark_proof) => stark_proof,
+            Err(_) => return Ok(ZkVerifyResult { ok: false }),
+        };
+
+        Ok(ZkVerifyResult {
+            ok: eu_id_prover::verify_mdoc(&stark_proof, &envelope.mdoc_statement).is_ok(),
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -585,6 +707,88 @@ mod tests {
             nationalities: vec![300],
             digest_ids: std::collections::HashMap::new(),
         }
+    }
+
+    fn honest_mdoc_statement() -> (ZkPublicStatement, eu_id_prover::mdoc::MdocCircuitStatement) {
+        let fixture = eu_id_prover::mdoc::demo_mdoc_circuit_fixture();
+        let issuer_key = fixture.statement.issuer_input.public_key.clone();
+        (
+            ZkPublicStatement {
+                spec_id: "stwo-euid-pid-v1".to_string(),
+                version: 1,
+                doctype: "eu.europa.ec.eudi.pid.1".to_string(),
+                namespace: "eu.europa.ec.eudi.pid.1".to_string(),
+                issuer_key_x: issuer_key.x.0.to_vec(),
+                issuer_key_y: issuer_key.y.0.to_vec(),
+                today_epoch_day: 20637, // 2026-07-03
+                nonce: fixture.request.session_transcript,
+                predicate_mode: PredicateMode::And,
+                age_threshold_years: Some(18),
+                accepted_numeric_countries: Some(vec![276, 250]), // DE, FR
+                nat_mode: NatMode::Any,
+            },
+            fixture.statement,
+        )
+    }
+
+    fn canonical_v2_mdoc_sdk_fixture() -> (ZkPublicStatement, ZkMdocWitness) {
+        let fixture = eu_id_prover::mdoc::demo_mdoc_circuit_fixture();
+        let issuer_key = fixture.statement.issuer_input.public_key.clone();
+        (
+            ZkPublicStatement {
+                spec_id: "stwo-euid-pid-v1".to_string(),
+                version: 1,
+                doctype: fixture.request.doctype,
+                namespace: fixture.request.namespace,
+                issuer_key_x: issuer_key.x.0.to_vec(),
+                issuer_key_y: issuer_key.y.0.to_vec(),
+                today_epoch_day: 20637, // 2026-07-03
+                nonce: fixture.request.session_transcript,
+                predicate_mode: PredicateMode::And,
+                age_threshold_years: Some(fixture.statement.policy.min_age_years),
+                accepted_numeric_countries: Some(
+                    fixture.statement.policy.accepted_nationalities.clone(),
+                ),
+                nat_mode: NatMode::Any,
+            },
+            ZkMdocWitness {
+                document: fixture.document,
+                trusted_issuer_certificates: fixture.request.trusted_issuer_certificates,
+            },
+        )
+    }
+
+    #[test]
+    fn mdoc_statement_match_recomputes_phase_e_device_authentication_hash() {
+        let (statement, mdoc_statement) = honest_mdoc_statement();
+        assert!(mdoc_statement_matches_public_statement(&mdoc_statement, &statement).unwrap());
+
+        let mut changed_transcript = statement.clone();
+        changed_transcript.nonce = eu_id_prover::mdoc::openid4vp_session_transcript(b"other");
+        assert!(
+            !mdoc_statement_matches_public_statement(&mdoc_statement, &changed_transcript).unwrap(),
+            "transcript drift must change the expected device-auth hash"
+        );
+
+        let mut changed_doctype = statement.clone();
+        changed_doctype.doctype = "wrong.doctype".to_string();
+        assert!(
+            !mdoc_statement_matches_public_statement(&mdoc_statement, &changed_doctype).unwrap(),
+            "docType drift must change the expected device-auth hash"
+        );
+    }
+
+    #[test]
+    #[ignore = "runs the product mdoc STWO prover over the canonical v2 fixture"]
+    fn mdoc_pid_public_api_round_trips_canonical_v2_fixture() {
+        let (statement, witness) = canonical_v2_mdoc_sdk_fixture();
+        let proof = prove_mdoc_pid(statement.clone(), witness).expect("mdoc PID proof builds");
+        assert!(
+            verify_mdoc_pid(statement, proof)
+                .expect("mdoc PID verification returns")
+                .ok,
+            "canonical v2 fixture must verify through the SDK public mdoc API"
+        );
     }
 
     /// An honest statement: today 2020-01-01, age threshold 18, accepted set

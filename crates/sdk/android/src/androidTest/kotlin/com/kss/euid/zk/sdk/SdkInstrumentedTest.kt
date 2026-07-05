@@ -12,8 +12,8 @@ import org.junit.runner.RunWith
  * the test device's ABI. Run with `./gradlew connectedAndroidTest` (needs a
  * running emulator/device).
  *
- * These assert the STUB contract: prove returns the canonical statement bytes,
- * and verify accepts iff the proof equals that encoding.
+ * These assert the legacy POC contract exposed by proveIdentity/verifyIdentity.
+ * The promoted product path is proveMdocPid/verifyMdocPid.
  */
 @RunWith(AndroidJUnit4::class)
 class SdkInstrumentedTest {

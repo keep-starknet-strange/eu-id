@@ -10,7 +10,7 @@ pub mod types;
 pub mod witness;
 
 use air::{NatProver, NatVerifier};
-use types::{Error, InputError, PrivateInput, Proof, PublicInput, Witness};
+use types::{Error, InputError, PrivateInput, Proof, PublicInput, PublicInputKind, Witness};
 
 use crate::nat::nationalities::Nationality;
 use crate::predicate::{PredicateProver, PredicateVerifier};
@@ -32,14 +32,29 @@ impl NationalityPredicate {
 impl NationalityPredicate {
     /// Check the acceptable set is well-formed.
     fn validate(&self, public: &PublicInput) -> Result<(), Error> {
-        if public.acceptable.len() < 2 {
+        if public.acceptable.is_empty() {
             return Err(InputError::AcceptableSetTooSmall.into());
         }
-        // Nationality enum variants are ordered by numeric code (iso-preset sorts by code).
-        let valid_codes: Vec<u32> = Nationality::iter().map(|n| n as u32).collect();
-        for &code in &public.acceptable {
-            if valid_codes.binary_search(&code).is_err() {
-                return Err(InputError::InvalidNationalityCode(code).into());
+        match public.kind {
+            PublicInputKind::IsoNumeric => {
+                // Nationality enum variants are ordered by numeric code (iso-preset sorts by code).
+                let valid_codes: Vec<u32> = Nationality::iter().map(|n| n as u32).collect();
+                for &code in &public.acceptable {
+                    if valid_codes.binary_search(&code).is_err() {
+                        return Err(InputError::InvalidNationalityCode(code).into());
+                    }
+                }
+            }
+            PublicInputKind::Alpha2 => {
+                // Each code is two uppercase ASCII letters packed as `256*b0 + b1`.
+                for &code in &public.acceptable {
+                    let [first, second] = u16::try_from(code)
+                        .map(u16::to_be_bytes)
+                        .map_err(|_| InputError::InvalidNationalityCode(code))?;
+                    if !first.is_ascii_uppercase() || !second.is_ascii_uppercase() {
+                        return Err(InputError::InvalidNationalityCode(code).into());
+                    }
+                }
             }
         }
         Ok(())
@@ -181,18 +196,58 @@ mod tests {
         assert_eq!(public.acceptable, vec![250, 276, 300]);
     }
 
+    // --- Alpha-2 (mdoc) path ---
+
+    fn alpha2(code: &[u8; 2]) -> u32 {
+        u32::from(u16::from_be_bytes(*code))
+    }
+
+    #[test]
+    fn proves_and_verifies_alpha2_public_input() {
+        let p = predicate();
+        let public = PublicInput::new_alpha2(vec![alpha2(b"FR"), alpha2(b"DE")]);
+
+        let proof = p.prove(&public, &private(&[alpha2(b"DE")])).unwrap();
+
+        p.verify(&proof).unwrap();
+        assert_eq!(proof.public.acceptable, vec![alpha2(b"DE"), alpha2(b"FR")]);
+    }
+
+    #[test]
+    fn alpha2_rejects_nationality_not_in_acceptable_set() {
+        let p = predicate();
+        let public = PublicInput::new_alpha2(vec![alpha2(b"FR"), alpha2(b"DE")]);
+        // Prover holds US, which is a valid alpha-2 code but not accepted.
+        let err = p.prove(&public, &private(&[alpha2(b"US")])).unwrap_err();
+        assert!(matches!(err, Error::Input(InputError::NoMatch)));
+    }
+
+    #[test]
+    fn validate_rejects_non_alpha2_code_in_alpha2_mode() {
+        let p = predicate();
+        let invalid = alpha2(b"D1");
+        let err = p
+            .prove(
+                &PublicInput::new_alpha2(vec![alpha2(b"DE"), invalid]),
+                &private(&[alpha2(b"DE")]),
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            Error::Input(InputError::InvalidNationalityCode(code)) if code == invalid
+        ));
+    }
+
     // --- Error cases ---
 
     #[test]
-    fn validate_rejects_singleton_acceptable_set() {
+    fn proves_and_verifies_singleton_acceptable_set() {
         let p = predicate();
-        let err = p
-            .prove(&PublicInput::new(vec![276]), &private(&[276]))
-            .unwrap_err();
-        assert!(matches!(
-            err,
-            Error::Input(InputError::AcceptableSetTooSmall)
-        ));
+        let public = PublicInput::new(vec![276]);
+        let proof = p.prove(&public, &private(&[276])).unwrap();
+        p.verify(&proof).unwrap();
+        assert_eq!(proof.public.acceptable, vec![276]);
     }
 
     #[test]

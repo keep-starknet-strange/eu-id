@@ -154,15 +154,15 @@ component-dust lesson) — implement ONE multi-window bind component whose rows 
 extracts the right key; untrusted root ⇒ reject.
 
 ## Phase F — Promotion & retirement
-- Export the mdoc API as the product path: `eu_id_prover::{prove_mdoc, verify_mdoc}`
+- [x] Export the mdoc API as the product path: `eu_id_prover::{prove_mdoc, verify_mdoc}`
   (thin renames over the circuit fns), wire `crates/sdk` to it (replacing the
   POC+demo-nonce mapping), keep `prove_identity` (POC) untouched for benchmarks.
-- The nonce module is NOT part of the mdoc path (device auth subsumes it — and
+- [x] The nonce module is NOT part of the mdoc path (device auth subsumes it — and
   unlike the nonce, D3 proves key origin). It stays in the POC path only.
-- Final statement surface (document in `docs/mdoc-credential-format.md`): public =
+- [x] Final statement surface (document in `docs/mdoc-credential-format.md`): public =
   issuer key (or trusted root), policy, session transcript, `(r,s)` ×2, offsets;
   witness = everything else including digests and device key.
-- Update README status; perf-log row per phase landed (Phase 0 harness).
+- [x] Update README status; perf-log row per phase landed (Phase 0 harness).
 **Acceptance:** SDK end-to-end test proves+verifies a canonical v2 fixture through
 the public API; full workspace tests green; perf-log shows the phase-by-phase cost.
 

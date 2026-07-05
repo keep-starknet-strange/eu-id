@@ -1,7 +1,18 @@
-//! End-to-end `eu-id` prover: composes the per-circuit `air_core` modules into
-//! a single STARK proof.
+//! End-to-end `eu-id` prover.
 //!
-//! This is the standalone library the `eu-id-ffi` C-ABI surface wraps. It drives
+//! The product path is the ISO mdoc API: [`prove_mdoc`] parses a PID mdoc,
+//! checks the verifier request and host-side trust material, builds the public
+//! mdoc statement, and proves it; [`verify_mdoc`] verifies that proof against
+//! the statement. The mdoc path uses ISO device authentication for freshness, so
+//! it does not include the legacy nonce module.
+//!
+//! The older [`prove_identity`] / [`verify_identity`] API is retained as the
+//! 11-byte proof-of-concept path for parity benchmarks and regression tests. It
+//! composes the per-circuit `air_core` modules into a single STARK proof and
+//! still includes the nonce P-256 module described below.
+//!
+//! This is the standalone library the `eu-id-ffi` C-ABI surface wraps. The POC
+//! identity path drives
 //! the credential P256 ECDSA module, a second **nonce** P256 ECDSA module (the
 //! holder-presence device-key signature), the SHA-256 module, the **digest-bind
 //! bridge**, and the **age** and **nationality** predicate modules through one
@@ -55,7 +66,7 @@
 //! accepted set is the one encoded in the signed credential — a prover can no
 //! longer prove membership for a code `C` does not contain.
 //!
-//! ## Relying-party API & public statement
+//! ## Legacy POC API & public statement
 //!
 //! [`prove_identity`] takes a credential, the issuer signing key, and a
 //! [`Policy`] (reference date, age threshold, accepted set), signs the
@@ -89,6 +100,8 @@ pub mod credential;
 pub mod fixtures;
 pub mod generator;
 pub mod mdoc;
+mod mdoc_validity;
+mod mdoc_window_bind;
 pub mod nonce;
 mod public_digest_bind;
 #[cfg(test)]
@@ -96,6 +109,9 @@ mod shape_dump;
 
 pub use credential::Credential;
 pub use generator::{IssuerKey, PipelineWitness, Policy, SignedCredential};
+pub use mdoc::{
+    MdocCircuitProof as MdocProof, MdocCircuitStatement as MdocStatement, MdocPidRequest,
+};
 pub use nonce::{
     nonce_signature_message, prove_nonce_signature, verify_nonce_signature, NonceSignatureProof,
     NonceSignatureStatement,
@@ -111,6 +127,24 @@ pub use predicates::Date;
 pub use predicates::all_nationality_codes;
 
 use serde::{Deserialize, Serialize};
+
+/// Build and prove the product mdoc circuit from the full document, verifier
+/// request, and public policy. Returns both the proof and verifier statement.
+pub fn prove_mdoc(
+    document: &[u8],
+    request: &MdocPidRequest,
+    policy: Policy,
+) -> Result<(MdocProof, MdocStatement), Error> {
+    let extracted = mdoc::extract_pid_mdoc(document, request).map_err(Error::Mdoc)?;
+    let statement = MdocStatement::from_extracted(&extracted, policy).map_err(Error::Mdoc)?;
+    let proof = mdoc::prove_mdoc_circuit(&extracted, &statement)?;
+    Ok((proof, statement))
+}
+
+/// Verify a product mdoc proof against its public mdoc statement.
+pub fn verify_mdoc(proof: &MdocProof, statement: &MdocStatement) -> Result<(), Error> {
+    mdoc::verify_mdoc_circuit(proof, statement)
+}
 
 #[cfg(not(feature = "ec-coprocessor"))]
 const NONCE_P256_PREPROCESSED_NAMESPACE: &str = "nonce_p256";
@@ -425,6 +459,8 @@ pub enum Error {
     /// Nationality predicate preparation (input validation or witness generation)
     /// failed.
     NatPrepare(predicates::NatError),
+    /// mdoc extraction or statement construction failed before proving.
+    Mdoc(mdoc::MdocError),
     /// The shared STARK prover failed.
     Prove(String),
     /// The verifier's expected ECDSA statement (issuer key + signature) does not

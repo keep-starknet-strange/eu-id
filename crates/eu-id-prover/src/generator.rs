@@ -18,6 +18,7 @@
 
 use ecdsa::signature::{Signer, Verifier};
 use p256::ecdsa::{Signature as P256Signature, SigningKey, VerifyingKey};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use predicates::{
@@ -148,14 +149,19 @@ pub fn sign_credential(credential: &Credential, issuer: &IssuerKey) -> SignedCre
 /// The relying party's public policy — exactly the statement the combined
 /// verifier will check against. The date of birth, the nationality, and the
 /// digest are *proven*, never supplied.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Policy {
     /// Reference "today" the age check is evaluated against.
     pub current_date: Date,
     /// Minimum age in years (the PRD headline is 18).
     pub min_age_years: u32,
-    /// Accepted nationality set (ISO-3166-1 numeric codes).
+    /// Accepted nationality set (ISO-3166-1 numeric codes). Used by the POC /
+    /// profile-v1 numeric nationality path.
     pub accepted_nationalities: Vec<u32>,
+    /// Accepted nationality set as ISO 3166-1 alpha-2 ASCII codes. Used by the
+    /// profile-v2 text path, where the exposed window carries the two ASCII
+    /// bytes directly. Empty for the numeric path.
+    pub accepted_nationalities_alpha2: Vec<[u8; 2]>,
 }
 
 impl Policy {
@@ -164,9 +170,20 @@ impl Policy {
         AgePublicInput::new(self.current_date, self.min_age_years)
     }
 
-    /// The nationality predicate's public input for this policy.
+    /// The nationality predicate's public input for this policy (numeric path).
     pub fn nat_public_input(&self) -> NatPublicInput {
         NatPublicInput::new(self.accepted_nationalities.clone())
+    }
+
+    /// The nationality predicate's public input over ISO 3166-1 alpha-2 codes,
+    /// each packed as `256*b0 + b1` (profile-v2 text path).
+    pub fn nat_alpha2_public_input(&self) -> NatPublicInput {
+        NatPublicInput::new_alpha2(
+            self.accepted_nationalities_alpha2
+                .iter()
+                .map(|code| u32::from(u16::from_be_bytes(*code)))
+                .collect(),
+        )
     }
 
     /// The cutoff date a date of birth must be on-or-before to satisfy the age
@@ -430,6 +447,7 @@ mod tests {
             },
             min_age_years: 18,
             accepted_nationalities: vec![276, 250, 380, 724],
+            accepted_nationalities_alpha2: Vec::new(),
         }
     }
 

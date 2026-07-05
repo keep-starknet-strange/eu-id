@@ -1,25 +1,25 @@
-//! The pure, proving-free translation layer between the SDK's mdoc-shaped
-//! UniFFI contract types ([`ZkPublicStatement`], [`ZkWitness`]) and the
-//! prover's relying-party types (`PublicStatement`, `Credential`, `Policy`).
+//! Legacy POC translation layer between the SDK's mdoc-shaped UniFFI contract
+//! types ([`ZkPublicStatement`], [`ZkWitness`]) and the prover's 11-byte
+//! relying-party types (`PublicStatement`, `Credential`, `Policy`).
 //!
 //! Everything here is deterministic and side-effect-free: it *constructs* the
-//! prover's types but never proves or verifies — swapping the stub prove/verify
-//! bodies for real STWO calls is §9.2. This layer is what the soundness of the
-//! whole consumer path rests on, because it must produce **byte-identical**
-//! policy inputs on the prove (wallet) and verify (verifier) sides:
+//! prover's legacy POC types but never proves or verifies. The product mdoc PID
+//! API bypasses this module and calls `eu_id_prover::prove_mdoc` /
+//! `eu_id_prover::verify_mdoc` with the full CBOR document. This legacy layer
+//! must still produce **byte-identical** policy inputs on the prove (wallet) and
+//! verify (verifier) sides:
 //! `verify_identity`'s caller-argument binding rejects any `Policy` drift. Both
 //! sides call the *same* [`to_policy`] / [`to_public_statement`] over the same
 //! request parameters, so that symmetry holds by construction — neither depends
 //! on the private held values.
 //!
-//! ## Intermediate-iteration decisions (ROADMAP_E2E §9 "two contracts")
+//! ## Legacy POC decisions (ROADMAP_E2E §9 "two contracts")
 //! 1. **Issuer key.** The statement's `issuer_key_x/y` are **ignored**; the
 //!    proof binds the deterministic [`IssuerKey::demo`] (the POC re-signs the
-//!    11-byte credential). Binding the real EU issuer key is mdoc-in-circuit
-//!    (§8.1).
+//!    11-byte credential). The product mdoc path binds the real issuer key.
 //! 2. **Attribute source.** The cleartext `birth_date` / `nationalities` the app
 //!    extracted are trusted as-is; the signature / MSO / item bytes in the
-//!    witness are unused this iteration.
+//!    witness are unused on this legacy POC path.
 //! 3. **Predicate-mode neutralization.** `And` proves both predicates for real;
 //!    `Age` neutralizes nationality with the **universal accepted set** (every
 //!    assigned ISO code — trivially satisfiable *and* reconstructible by a
@@ -54,7 +54,7 @@ pub(crate) fn issuer_key() -> AffinePoint {
 /// The holder-presence nonce signature the STARK now folds in is a fixed demo
 /// device-key signature (decision 4); the mdoc `SessionTranscript` nonce carried
 /// in [`ZkPublicStatement`] stays envelope-bound (not STARK-bound). Binding a
-/// real device key is the mdoc device-key milestone.
+/// real device key is handled by the product mdoc path.
 pub(crate) fn to_public_statement(
     statement: &ZkPublicStatement,
 ) -> Result<PublicStatement, ZkError> {
@@ -111,11 +111,31 @@ pub(crate) fn to_policy(statement: &ZkPublicStatement) -> Result<Policy, ZkError
         all_nationality_codes()
     };
 
+    let accepted_nationalities_alpha2 = accepted_alpha2_set(&accepted_nationalities)?;
+
     Ok(Policy {
         current_date: current,
         min_age_years,
         accepted_nationalities,
+        accepted_nationalities_alpha2,
     })
+}
+
+fn accepted_alpha2_set(accepted_numeric: &[u32]) -> Result<Vec<[u8; 2]>, ZkError> {
+    accepted_numeric
+        .iter()
+        .map(|code| {
+            let country = celes::Country::from_value(
+                usize::try_from(*code).map_err(|_| invalid("country code out of range"))?,
+            )
+            .map_err(|_| invalid(format!("unknown ISO-3166 numeric code {code}")))?;
+            country
+                .alpha2
+                .as_bytes()
+                .try_into()
+                .map_err(|_| invalid(format!("country {code} has malformed alpha-2 code")))
+        })
+        .collect()
 }
 
 /// Map a [`ZkWitness`] to the prover's private [`Credential`] (prove side only).
@@ -176,6 +196,7 @@ fn validate_min_age(current: Date, min_age: u32) -> Result<(), ZkError> {
         current_date: current,
         min_age_years: 0,
         accepted_nationalities: Vec::new(),
+        accepted_nationalities_alpha2: Vec::new(),
     }
     .age_public_input()
     .bounds

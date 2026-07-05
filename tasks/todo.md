@@ -1,4 +1,136 @@
-# WO-A3 Hybrid SHA Implementation
+# Phase F Promotion and Retirement
+
+Source: `/Users/lucas/eu-id/tasks/mdoc-v2-port-plan.md`, §4-F, and
+`tasks/mdoc-full-impl-plan.md`, Phase F.
+Worktree: `/Users/lucas/eu-id/.claude/worktrees/mdoc-v2-port`.
+Branch: `feat/mdoc-v2-port`.
+Baseline verified: `1e7677d6 test(mdoc): add real pyMDOC PID vector gate`, clean worktree.
+
+- [x] Verify branch, HEAD, and clean worktree before edits.
+- [x] Read Phase F scope, full implementation plan, current todo ledger, and lessons.
+- [x] Confirm `eu_id_prover::{prove_mdoc, verify_mdoc}` are the product mdoc API and keep `prove_identity` as the POC benchmark path.
+- [x] Confirm the SDK public mdoc path uses `eu_id_prover::{prove_mdoc, verify_mdoc}` without the POC demo-nonce mapping.
+- [x] Add SDK end-to-end coverage proving and verifying a canonical v2 fixture through the public mdoc API.
+- [x] Document the final mdoc public/witness statement surface and nonce retirement boundary.
+- [x] Update README/status, perf-log audit rows, and `tasks/mdoc-full-impl-plan.md` Phase F status.
+- [x] Run focused, workspace, release proof, real-vector, dedup/fingerprint, and fmt gates as feasible.
+- [x] Commit exactly one Phase F commit; do not merge and do not push.
+
+## Phase F Review
+
+Implemented Phase F as promotion/default cleanup:
+
+- `eu_id_prover::{prove_mdoc, verify_mdoc}` are documented as the product mdoc API and remain thin wrappers over extraction, statement construction, `prove_mdoc_circuit`, and `verify_mdoc_circuit`.
+- `crates/sdk` product mdoc API (`prove_mdoc_pid` / `verify_mdoc_pid`) is documented as the SDK product path and already routes through `eu_id_prover::{prove_mdoc, verify_mdoc}`. The legacy SDK `prove_identity` / `verify_identity` functions are left intact for the 11-byte POC/demo-nonce path.
+- Added ignored SDK release test `mdoc_pid_public_api_round_trips_canonical_v2_fixture`, proving and verifying the canonical profile-v2 demo fixture through the SDK public mdoc API.
+- Updated README and `docs/mdoc-credential-format.md` to describe the promoted mdoc product path, host-side x5chain trust-root check, ISO `DeviceAuthenticationBytes`, final public/witness statement surface, and nonce retirement boundary.
+- Marked Phase F in `tasks/mdoc-full-impl-plan.md`. Phase V perf rows were already present. Phase D perf rows now record the orchestrator-measured release `mdoc_perf_probe` result: prove 1,160 ms, verify 50 ms, proof bytes 2,441,494, shape cells 7,617,136.
+
+Verification:
+- GREEN: `rtk proxy cargo test -p air-core preprocessed_invariant`
+- GREEN: `rtk proxy cargo test -p sdk`
+- GREEN: `rtk proxy env RAYON_NUM_THREADS=1 cargo test -p sdk --release mdoc_pid_public_api_round_trips_canonical_v2_fixture -- --ignored --nocapture`
+- GREEN: `rtk proxy cargo test -p eu-id-prover --test mdoc_support`
+- GREEN: `rtk proxy env RAYON_NUM_THREADS=1 cargo test -p eu-id-prover --release --test mdoc_support isolated_mdoc_circuit_profile_proves_and_verifies -- --ignored --nocapture`
+- GREEN: `rtk proxy env RAYON_NUM_THREADS=1 cargo test -p eu-id-prover --release --test mdoc_support real_vector_pid_pymdoc_end_to_end -- --ignored --nocapture` (current print: prove 1438 ms, verify 55 ms, proof 2,534,210 bytes; existing Phase V row left unduplicated)
+- GREEN: `rtk proxy cargo test --workspace` (existing `eu-id-ec-coprocessor` test warnings only)
+- GREEN: `rtk proxy cargo fmt --check`
+
+# Phase V Real pyMDOC PID Vector Gate
+
+Source: `/Users/lucas/eu-id/tasks/mdoc-v2-port-plan.md`, §4-V.
+Q-002: `/Users/lucas/eu-id/.claude/worktrees/mdoc-full-plan/tasks/mdoc-mailbox/answers/Q-002-real-vector-gate-upstream-mismatch.md`, Steps 3-4.
+Worktree: `/Users/lucas/eu-id/.claude/worktrees/mdoc-v2-port`.
+Branch: `feat/mdoc-v2-port`.
+Baseline verified: `46736d73 feat(mdoc): port phase E ISO device auth + x5chain (spec-exact DeviceAuthenticationBytes)`, clean worktree.
+
+- [x] Verify branch, HEAD, and clean worktree before edits.
+- [x] Read Phase V scope and Q-002 Steps 3-4; `tasks/lessons.md` is absent in this worktree.
+- [x] Bring the frozen pyMDOC PID vector and reproducer/check scripts from `2e5b91c7`.
+- [x] Add ignored release test `real_vector_pid_pymdoc_end_to_end` with test-time `deviceSigned`.
+- [x] Verify the new test fails meaningfully before any implementation fix, where practical.
+- [x] Run extraction/prove/verify on the vendored vector with age >= 18, nationality `DE`, policy date 2026-07-01.
+- [x] Record Phase V prove/verify wall-clock and proof size in the perf log.
+- [x] Run focused and workspace verification, then create exactly one Phase V commit.
+
+## Phase V Review
+
+Implemented the real pyMDOC PID vector gate without patching the frozen vector.
+The test builds only the wallet-side `deviceSigned` at runtime from the
+vendored device private key over Phase-E-exact `DeviceAuthenticationBytes`; the
+outer document embeds the raw `issuer_signed.cbor` bytes directly.
+
+RED progression:
+- `UntrustedIssuerCertificate`: pyMDOC embeds the DS leaf in x5chain and ships
+  the IACA root in `issuer_chain.der`; extractor now accepts an embedded
+  leaf/intermediate chain whose final embedded cert verifies under a supplied
+  trusted root.
+- `WrongType("MobileSecurityObject")`: issuerAuth payload can be
+  `#6.24(bstr .cbor MSO)`; parser now unwraps that shape.
+- `InvalidCoseKey("expected ES256 P-256 key")`: deviceKeyInfo can omit optional
+  COSE `alg`; parser keeps kty/crv/x/y required and rejects extra fields.
+- `WrongType("IssuerSignedItemBytes")`: namespace entries can be actual tag-24
+  bstr data items; parser now accepts those plus the existing bstr fixture form.
+- `WrongType("birth_date elementValue")`: `birth_date` can be tag-1004
+  full-date; parser maps it to the existing text-date binding.
+- `NatPrepare(Input(AcceptableSetTooSmall))`: Phase V policy is singleton
+  alpha-2 `[DE]`; nationality predicate now accepts non-empty singleton sets.
+
+Perf row recorded in
+`crates/eu-id-prover/benches/docs/perf-log.md`: `RAYON_NUM_THREADS=1` release
+ignored gate, prove 1412 ms, verify 55 ms, proof 2,534,210 bytes.
+
+Verification so far:
+- RED: `rtk proxy cargo test -p eu-id-prover --release --test mdoc_support real_vector_pid_pymdoc_end_to_end -- --ignored --nocapture`
+- GREEN: `rtk proxy env RAYON_NUM_THREADS=1 cargo test -p eu-id-prover --release --test mdoc_support real_vector_pid_pymdoc_end_to_end -- --ignored --nocapture`
+- GREEN: `rtk proxy cargo test -p predicates proves_and_verifies_singleton_acceptable_set`
+- GREEN: `rtk proxy cargo test -p eu-id-prover --test mdoc_support`
+- GREEN: `rtk proxy cargo fmt --check`
+- GREEN: `rtk proxy cargo test --workspace` (warnings only in existing
+  `eu-id-ec-coprocessor` test code)
+
+# Phase E ISO DeviceAuthentication + x5chain
+
+Source: `/Users/lucas/eu-id/tasks/mdoc-v2-port-plan.md`, §4-E.
+Worktree: `/Users/lucas/eu-id/.claude/worktrees/mdoc-v2-port`.
+Branch: `feat/mdoc-v2-port`.
+Baseline verified: `f286d3c9 feat(mdoc): port phase D in-circuit MSO bindings`, clean worktree.
+
+- [x] Verify branch, HEAD, and clean worktree before edits.
+- [x] Read the Phase E scope, current lessons, and reference diff for design context.
+- [x] Add failing tests for spec-exact `DeviceAuthenticationBytes = #6.24(bstr .cbor DeviceAuthentication)`.
+- [x] Add/port a transcript/docType mutation test that flips the device-auth hash or rejects extraction.
+- [x] Port DeviceAuthentication helper/extraction/demo support onto the current shared-SHA/coprocessor backend.
+- [x] Add host-side x5chain leaf parse + trusted-root check only; keep in-circuit x509 out of scope.
+- [x] Run focused red/green tests, then format and workspace verification.
+- [x] Record review notes and create the required single commit.
+
+## Phase E Review
+
+Implemented spec-exact DeviceAuthentication payload construction:
+`DeviceAuthenticationBytes` is an outer tag-24 bstr wrapping the
+`DeviceAuthentication` array, and OpenID4VP transcripts are encoded as
+`[null, null, ["OpenID4VPHandover", sha256(handover_info)]]` data items rather
+than opaque bytes. Demo mdoc fixtures and test fixtures now sign those exact
+bytes. SDK mdoc verification recomputes the expected device-auth Sig_structure
+hash from the public transcript and docType before accepting the embedded mdoc
+statement.
+
+x5chain support is host-only: issuerAuth unprotected label 33 is parsed as a
+leaf/root chain, certificate signatures are checked between adjacent certs, the
+final DER must match a supplied trusted root, and only the leaf SPKI is used as
+the issuer key. No x509 logic was added to the circuit.
+
+Verification:
+- RED: `rtk proxy cargo test -p eu-id-prover --test mdoc_support device_authentication_bytes_are_tag24_wrapped_and_embed_session_transcript_array` failed for missing helpers/trust-root field before implementation.
+- RED: `rtk proxy cargo test -p sdk mdoc_statement_match_recomputes_phase_e_device_authentication_hash` failed for missing SDK mdoc recompute path before implementation.
+- GREEN: `rtk proxy cargo test -p eu-id-prover --test mdoc_support`
+- GREEN: `rtk proxy cargo test -p sdk`
+- GREEN: `rtk proxy cargo fmt --check`
+- GREEN: `rtk proxy cargo test --workspace`
+- GREEN: `rtk proxy cargo test -p eu-id-prover --no-default-features --test mdoc_support` (existing no-default public-digest warnings only).
+
+# WO-M1 Coprocessor Mainline Merge
 
 Source of truth: `/Users/lucas/eu-id/tasks/parity/WO-A3-hybrid-sha-impl.md`.
 Worktree: `/Users/lucas/eu-id/.claude/worktrees/a3-hybrid-sha` on `feat/a3-hybrid-sha`.
