@@ -10,7 +10,7 @@ use stwo_constraint_framework::TraceLocationAllocator;
 /// Preprocessed column ids this predicate contributes, in commit order. The
 /// orchestrator concatenates these to seed the shared allocator.
 pub fn preprocessed_column_ids(public: &PublicInput) -> Vec<PreProcessedColumnId> {
-    vec![acceptable_col_id(&public.acceptable)]
+    vec![acceptable_col_id(public)]
 }
 
 pub fn components(
