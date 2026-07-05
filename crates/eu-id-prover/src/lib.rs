@@ -1,7 +1,18 @@
-//! End-to-end `eu-id` prover: composes the per-circuit `air_core` modules into
-//! a single STARK proof.
+//! End-to-end `eu-id` prover.
 //!
-//! This is the standalone library the `eu-id-ffi` C-ABI surface wraps. It drives
+//! The product path is the ISO mdoc API: [`prove_mdoc`] parses a PID mdoc,
+//! checks the verifier request and host-side trust material, builds the public
+//! mdoc statement, and proves it; [`verify_mdoc`] verifies that proof against
+//! the statement. The mdoc path uses ISO device authentication for freshness, so
+//! it does not include the legacy nonce module.
+//!
+//! The older [`prove_identity`] / [`verify_identity`] API is retained as the
+//! 11-byte proof-of-concept path for parity benchmarks and regression tests. It
+//! composes the per-circuit `air_core` modules into a single STARK proof and
+//! still includes the nonce P-256 module described below.
+//!
+//! This is the standalone library the `eu-id-ffi` C-ABI surface wraps. The POC
+//! identity path drives
 //! the credential P256 ECDSA module, a second **nonce** P256 ECDSA module (the
 //! holder-presence device-key signature), the SHA-256 module, the **digest-bind
 //! bridge**, and the **age** and **nationality** predicate modules through one
@@ -55,7 +66,7 @@
 //! accepted set is the one encoded in the signed credential — a prover can no
 //! longer prove membership for a code `C` does not contain.
 //!
-//! ## Relying-party API & public statement
+//! ## Legacy POC API & public statement
 //!
 //! [`prove_identity`] takes a credential, the issuer signing key, and a
 //! [`Policy`] (reference date, age threshold, accepted set), signs the

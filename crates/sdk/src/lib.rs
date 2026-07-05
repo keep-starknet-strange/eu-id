@@ -7,31 +7,28 @@
 //! format is structurally impossible to drift — there is no second
 //! implementation to disagree with.
 //!
-//! Everything here is mdoc-agnostic: callers pass already-extracted raw bytes
-//! (issuer key, signature, MSO, item bytes, …) and get back a proof or verdict.
-//! No Multipaz / verifier-core types leak in.
+//! The product API is the mdoc PID path: [`prove_mdoc_pid`] accepts the full
+//! wallet-returned CBOR document plus verifier trust roots, calls
+//! `eu_id_prover::prove_mdoc`, and returns a proof envelope that
+//! [`verify_mdoc_pid`] checks through `eu_id_prover::verify_mdoc`.
 //!
 //! ## What the proof binds (§9.2)
-//! `prove_identity` runs the real STWO combined prover (`eu_id_prover`) over the
-//! POC credential and returns a [`ProofEnvelope`]: the bzip2-compressed,
-//! bincode-serialized STARK `Proof` **plus** the canonical-CBOR bytes of the
-//! full [`ZkPublicStatement`].
-//! The two layers bind complementary things:
+//! `prove_mdoc_pid` runs the product mdoc prover and returns an
+//! [`MdocProofEnvelope`]: the bzip2-compressed, bincode-serialized mdoc proof,
+//! the verifier-facing mdoc statement, and the canonical-CBOR bytes of the full
+//! [`ZkPublicStatement`]. The two layers bind complementary things:
 //!
-//! - **The STARK** binds `{ demo issuer key Q, age public input, nat public
-//!   input }` — i.e. the age threshold + reference date and the accepted
-//!   nationality set, plus (internally) that the signature is over `SHA-256(C)`
-//!   and that the DOB / nationality the predicates reason about are the signed
-//!   credential's bytes.
-//! - **The envelope** binds everything the STARK does *not* cover but the mdoc
-//!   contract carries: `nonce` (the `SessionTranscript` freshness / anti-replay
-//!   value), `doctype`, `namespace`, `spec_id`, and `version`. `verify_identity`
-//!   rejects (fail-closed `ok = false`) if the envelope's statement bytes drift
-//!   from the verifier's own [`encode_statement`].
+//! - **The mdoc proof** binds the issuer key, policy, session transcript, issuer
+//!   and device `(r, s)` signatures, and statement offsets. Attribute digests
+//!   and the device key are private witness values bound in-circuit.
+//! - **The envelope** binds the SDK contract fields (`nonce` /
+//!   `SessionTranscript`, `doctype`, `namespace`, `spec_id`, and `version`) so
+//!   verifier-side request drift is rejected before the inner proof is trusted.
 //!
-//! This preserves the stub's "the statement survived transport" guarantee on top
-//! of the real proof, so freshness / doctype are not silently dropped when the
-//! stub body is swapped out.
+//! The legacy [`prove_identity`] / [`verify_identity`] functions remain for the
+//! 11-byte POC credential path and its parity/transport tests. They still use the
+//! demo issuer and demo nonce mapping by design; new product callers should use
+//! the mdoc PID functions.
 //!
 //! The combined prover overflows a small default thread stack (`EXC_BAD_ACCESS`
 //! on device — see ROADMAP_E2E §7.2), so both entry points run the heavy work on
@@ -734,6 +731,33 @@ mod tests {
         )
     }
 
+    fn canonical_v2_mdoc_sdk_fixture() -> (ZkPublicStatement, ZkMdocWitness) {
+        let fixture = eu_id_prover::mdoc::demo_mdoc_circuit_fixture();
+        let issuer_key = fixture.statement.issuer_input.public_key.clone();
+        (
+            ZkPublicStatement {
+                spec_id: "stwo-euid-pid-v1".to_string(),
+                version: 1,
+                doctype: fixture.request.doctype,
+                namespace: fixture.request.namespace,
+                issuer_key_x: issuer_key.x.0.to_vec(),
+                issuer_key_y: issuer_key.y.0.to_vec(),
+                today_epoch_day: 20637, // 2026-07-03
+                nonce: fixture.request.session_transcript,
+                predicate_mode: PredicateMode::And,
+                age_threshold_years: Some(fixture.statement.policy.min_age_years),
+                accepted_numeric_countries: Some(
+                    fixture.statement.policy.accepted_nationalities.clone(),
+                ),
+                nat_mode: NatMode::Any,
+            },
+            ZkMdocWitness {
+                document: fixture.document,
+                trusted_issuer_certificates: fixture.request.trusted_issuer_certificates,
+            },
+        )
+    }
+
     #[test]
     fn mdoc_statement_match_recomputes_phase_e_device_authentication_hash() {
         let (statement, mdoc_statement) = honest_mdoc_statement();
@@ -751,6 +775,19 @@ mod tests {
         assert!(
             !mdoc_statement_matches_public_statement(&mdoc_statement, &changed_doctype).unwrap(),
             "docType drift must change the expected device-auth hash"
+        );
+    }
+
+    #[test]
+    #[ignore = "runs the product mdoc STWO prover over the canonical v2 fixture"]
+    fn mdoc_pid_public_api_round_trips_canonical_v2_fixture() {
+        let (statement, witness) = canonical_v2_mdoc_sdk_fixture();
+        let proof = prove_mdoc_pid(statement.clone(), witness).expect("mdoc PID proof builds");
+        assert!(
+            verify_mdoc_pid(statement, proof)
+                .expect("mdoc PID verification returns")
+                .ok,
+            "canonical v2 fixture must verify through the SDK public mdoc API"
         );
     }
 

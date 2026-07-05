@@ -1352,7 +1352,7 @@ fn statement_rejects_mispointed_value_window() {
 }
 
 #[test]
-#[ignore = "slow: proves isolated mdoc circuit profile"]
+#[ignore = "slow: proves product mdoc circuit profile"]
 fn isolated_mdoc_circuit_profile_proves_and_verifies() {
     let session_transcript = test_session_transcript();
     let fixture = circuit_fixture(&session_transcript);

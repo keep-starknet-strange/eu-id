@@ -1,3 +1,41 @@
+# Phase F Promotion and Retirement
+
+Source: `/Users/lucas/eu-id/tasks/mdoc-v2-port-plan.md`, §4-F, and
+`tasks/mdoc-full-impl-plan.md`, Phase F.
+Worktree: `/Users/lucas/eu-id/.claude/worktrees/mdoc-v2-port`.
+Branch: `feat/mdoc-v2-port`.
+Baseline verified: `1e7677d6 test(mdoc): add real pyMDOC PID vector gate`, clean worktree.
+
+- [x] Verify branch, HEAD, and clean worktree before edits.
+- [x] Read Phase F scope, full implementation plan, current todo ledger, and lessons.
+- [x] Confirm `eu_id_prover::{prove_mdoc, verify_mdoc}` are the product mdoc API and keep `prove_identity` as the POC benchmark path.
+- [x] Confirm the SDK public mdoc path uses `eu_id_prover::{prove_mdoc, verify_mdoc}` without the POC demo-nonce mapping.
+- [x] Add SDK end-to-end coverage proving and verifying a canonical v2 fixture through the public mdoc API.
+- [x] Document the final mdoc public/witness statement surface and nonce retirement boundary.
+- [x] Update README/status, perf-log audit rows, and `tasks/mdoc-full-impl-plan.md` Phase F status.
+- [x] Run focused, workspace, release proof, real-vector, dedup/fingerprint, and fmt gates as feasible.
+- [x] Commit exactly one Phase F commit; do not merge and do not push.
+
+## Phase F Review
+
+Implemented Phase F as promotion/default cleanup:
+
+- `eu_id_prover::{prove_mdoc, verify_mdoc}` are documented as the product mdoc API and remain thin wrappers over extraction, statement construction, `prove_mdoc_circuit`, and `verify_mdoc_circuit`.
+- `crates/sdk` product mdoc API (`prove_mdoc_pid` / `verify_mdoc_pid`) is documented as the SDK product path and already routes through `eu_id_prover::{prove_mdoc, verify_mdoc}`. The legacy SDK `prove_identity` / `verify_identity` functions are left intact for the 11-byte POC/demo-nonce path.
+- Added ignored SDK release test `mdoc_pid_public_api_round_trips_canonical_v2_fixture`, proving and verifying the canonical profile-v2 demo fixture through the SDK public mdoc API.
+- Updated README and `docs/mdoc-credential-format.md` to describe the promoted mdoc product path, host-side x5chain trust-root check, ISO `DeviceAuthenticationBytes`, final public/witness statement surface, and nonce retirement boundary.
+- Marked Phase F in `tasks/mdoc-full-impl-plan.md`. Phase V perf rows were already present. Phase D had no numeric perf row in `f286d3c9`; added a clearly labeled audit/backfill row without inventing D-only timing.
+
+Verification:
+- GREEN: `rtk proxy cargo test -p air-core preprocessed_invariant`
+- GREEN: `rtk proxy cargo test -p sdk`
+- GREEN: `rtk proxy env RAYON_NUM_THREADS=1 cargo test -p sdk --release mdoc_pid_public_api_round_trips_canonical_v2_fixture -- --ignored --nocapture`
+- GREEN: `rtk proxy cargo test -p eu-id-prover --test mdoc_support`
+- GREEN: `rtk proxy env RAYON_NUM_THREADS=1 cargo test -p eu-id-prover --release --test mdoc_support isolated_mdoc_circuit_profile_proves_and_verifies -- --ignored --nocapture`
+- GREEN: `rtk proxy env RAYON_NUM_THREADS=1 cargo test -p eu-id-prover --release --test mdoc_support real_vector_pid_pymdoc_end_to_end -- --ignored --nocapture` (current print: prove 1438 ms, verify 55 ms, proof 2,534,210 bytes; existing Phase V row left unduplicated)
+- GREEN: `rtk proxy cargo test --workspace` (existing `eu-id-ec-coprocessor` test warnings only)
+- GREEN: `rtk proxy cargo fmt --check`
+
 # Phase V Real pyMDOC PID Vector Gate
 
 Source: `/Users/lucas/eu-id/tasks/mdoc-v2-port-plan.md`, §4-V.

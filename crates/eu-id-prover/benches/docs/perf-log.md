@@ -284,6 +284,7 @@ M4 A3-on-coprocessor note (2026-07-04): Q-M1-005 directed a merge of `feat/a3-hy
 | 2026-07-04 | codex/wo-m5-sha-table-provider-dedup | WO-M5 unchanged identity gate | `pipeline_e2e` proof bytes | 1,186,186 | 1,186,186 |
 | 2026-07-04 | codex/wo-m5-sha-table-provider-dedup | WO-M5 unchanged SHA gate | `BM_ShaZK_equiv/1/prove` (RAYON_NUM_THREADS=1) | 324.74 ms | 330.64 ms (Criterion: no change) |
 | 2026-07-04 | codex/wo-m5-sha-table-provider-dedup | WO-M5 unchanged SHA gate | `BM_ShaZK_equiv/33/prove` (RAYON_NUM_THREADS=1) | 426.17 ms | 430.16 ms |
+| 2026-07-06 | f286d3c9 | mdoc Phase D in-circuit MSO bindings | perf-log audit at Phase F start | no Phase D row was present | backfilled audit row; no D-only timing preserved |
 | 2026-07-06 | worktree | mdoc Phase V real pyMDOC PID vector gate | `real_vector_pid_pymdoc_end_to_end` prove (RAYON_NUM_THREADS=1, release, ignored) | — | 1412 ms |
 | 2026-07-06 | worktree | mdoc Phase V real pyMDOC PID vector gate | `real_vector_pid_pymdoc_end_to_end` verify (RAYON_NUM_THREADS=1, release, ignored) | — | 55 ms |
 | 2026-07-06 | worktree | mdoc Phase V real pyMDOC PID vector gate | real pyMDOC PID mdoc proof bytes | — | 2,534,210 |
