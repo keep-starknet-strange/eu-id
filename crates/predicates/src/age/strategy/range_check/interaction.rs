@@ -122,13 +122,14 @@ impl InteractionTraces {
             )
         });
 
-        // The credential-field binding: require the four DOB bytes on the shared
-        // `Sha256Field` channel, one solo column per byte. The numerator is the
-        // `bind_active` selector (1 on a single row), so each byte is required
-        // exactly once — matching SHA's single `−is_first_block` yield. Appended
-        // after the statement's own five fractions so those columns are
-        // unchanged; the eval emits the same order before paired finalization.
-        if let (Some(field), Some(bytes)) = (dob_field, witness_data.dob_bytes) {
+        // The credential-field binding: require the packed DOB bytes or the ten
+        // text DOB bytes on the shared `Sha256Field` channel, one solo column per
+        // byte. The numerator is the `bind_active` selector (1 on a single row),
+        // so each byte is required exactly once — matching SHA's single
+        // `−is_first_block` yield. Appended after the statement's own five
+        // fractions so those columns are unchanged; the eval emits the same order
+        // before paired finalization.
+        if let (Some(field), Some(bytes)) = (dob_field, witness_data.dob_bytes.as_ref()) {
             let bind_active = &witness_data.witness_trace[BIND_ACTIVE_COL];
             for (byte_index, &value) in bytes.iter().enumerate() {
                 append_entry(&mut age_entries, n_packed, |packed_row| {

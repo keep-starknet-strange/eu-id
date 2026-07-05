@@ -8,6 +8,7 @@ use crate::age::strategy::range_check::lookup_elements::LookupElements;
 use crate::age::strategy::range_check::preprocessed::{
     DayDeltaTableComponent, MonthDeltaTableComponent, Preprocessed, YearDeltaTableComponent,
 };
+use crate::age::strategy::range_check::witness::DobBindingMode;
 use crate::{AgeBounds, PublicInput};
 use air_core::relations::FieldBytesRelation;
 use stwo::core::fields::qm31::QM31;
@@ -34,6 +35,7 @@ pub fn components(
     public: &PublicInput,
     lookup_elements: LookupElements,
     dob_binding: Option<FieldBytesRelation>,
+    dob_binding_mode: Option<DobBindingMode>,
     age_claimed_sum: QM31,
     cal_claimed_sum: QM31,
     valid_day_claimed_sum: QM31,
@@ -54,6 +56,7 @@ pub fn components(
             public: *public,
             lookup_elements: lookup_elements.clone(),
             dob_binding,
+            dob_binding_mode,
         },
         age_claimed_sum,
     );
