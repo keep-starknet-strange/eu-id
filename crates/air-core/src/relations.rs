@@ -130,6 +130,32 @@ pub mod field_id {
     /// The nationality window (`code_hi, code_lo`), bound by the nationality
     /// predicate.
     pub const NATIONALITY: u32 = 1;
+    /// The `birth_date` `elementIdentifier` window (10 ASCII bytes), pinned to
+    /// the public constant by the mdoc MSO window-bind component (Phase D1).
+    pub const MDOC_BIRTH_DATE_ELEMENT_ID: u32 = 2;
+    /// The `nationality` `elementIdentifier` window (11 ASCII bytes), pinned to
+    /// the public constant (Phase D1).
+    pub const MDOC_NATIONALITY_ELEMENT_ID: u32 = 3;
+    /// The `valueDigests[ns][birth_digestID]` window (32 bytes) in the issuer
+    /// MSO preimage, bound to the birth_date item SHA digest (Phase D2).
+    pub const MDOC_BIRTH_DATE_DIGEST: u32 = 4;
+    /// The `valueDigests[ns][nat_digestID]` window (32 bytes) in the issuer MSO
+    /// preimage, bound to the nationality item SHA digest (Phase D2).
+    pub const MDOC_NATIONALITY_DIGEST: u32 = 5;
+    /// The `deviceKey` COSE_Key `-2` (x) coordinate window (32 bytes) in the
+    /// issuer MSO preimage, bound to the device signature's public key x
+    /// coordinate (Phase D3).
+    pub const MDOC_DEVICE_KEY_X: u32 = 6;
+    /// The `deviceKey` COSE_Key `-3` (y) coordinate window (32 bytes) in the
+    /// issuer MSO preimage, bound to the device signature's public key y
+    /// coordinate (Phase D3).
+    pub const MDOC_DEVICE_KEY_Y: u32 = 7;
+    /// The `validityInfo.validFrom` full-date window (10 ASCII bytes) in the
+    /// issuer MSO preimage, bound and compared to the public policy date.
+    pub const MDOC_VALID_FROM: u32 = 8;
+    /// The `validityInfo.validUntil` full-date window (10 ASCII bytes) in the
+    /// issuer MSO preimage, bound and compared to the public policy date.
+    pub const MDOC_VALID_UNTIL: u32 = 9;
 }
 
 #[cfg(test)]
@@ -193,6 +219,20 @@ mod tests {
 
     #[test]
     fn credential_field_ids_are_distinct() {
-        assert_ne!(field_id::DOB, field_id::NATIONALITY);
+        let ids = [
+            field_id::DOB,
+            field_id::NATIONALITY,
+            field_id::MDOC_BIRTH_DATE_ELEMENT_ID,
+            field_id::MDOC_NATIONALITY_ELEMENT_ID,
+            field_id::MDOC_BIRTH_DATE_DIGEST,
+            field_id::MDOC_NATIONALITY_DIGEST,
+            field_id::MDOC_DEVICE_KEY_X,
+            field_id::MDOC_DEVICE_KEY_Y,
+            field_id::MDOC_VALID_FROM,
+            field_id::MDOC_VALID_UNTIL,
+        ];
+        for (index, id) in ids.iter().enumerate() {
+            assert!(!ids[index + 1..].contains(id));
+        }
     }
 }

@@ -395,7 +395,7 @@ fn policy_on(year: u32, month: u32, day: u32) -> Policy {
         current_date: Date { year, month, day },
         min_age_years: 18,
         accepted_nationalities: vec![276, 250],
-        accepted_nationalities_alpha2: Vec::new(),
+        accepted_nationalities_alpha2: vec![*b"DE", *b"FR"],
     }
 }
 
@@ -854,6 +854,83 @@ fn statement_accepts_text_nationality() {
 }
 
 #[test]
+fn statement_carries_mso_binding_offsets() {
+    let session_transcript = b"session-transcript-123".to_vec();
+    let fixture = valid_fixture(&session_transcript);
+    let extracted =
+        extract_pid_mdoc(&fixture.doc, &request(session_transcript)).expect("mdoc extracts");
+    let statement = MdocCircuitStatement::from_extracted(&extracted, policy_on(2026, 7, 3))
+        .expect("statement builds");
+
+    assert_eq!(
+        &extracted.birth_date_item
+            [statement.birth_date_element_offset..statement.birth_date_element_offset + 10],
+        b"birth_date"
+    );
+    assert_eq!(
+        &extracted.nationality_item
+            [statement.nationality_element_offset..statement.nationality_element_offset + 11],
+        b"nationality"
+    );
+    assert_eq!(
+        &extracted.issuer_sig_structure
+            [statement.mso_device_key_x_offset..statement.mso_device_key_x_offset + 32],
+        &extracted.device_key.x.0
+    );
+    assert_eq!(
+        &extracted.issuer_sig_structure
+            [statement.mso_device_key_y_offset..statement.mso_device_key_y_offset + 32],
+        &extracted.device_key.y.0
+    );
+    assert_eq!(
+        &extracted.issuer_sig_structure
+            [statement.mso_valid_from_date_offset..statement.mso_valid_from_date_offset + 10],
+        b"2026-01-01"
+    );
+    assert_eq!(
+        &extracted.issuer_sig_structure
+            [statement.mso_valid_until_date_offset..statement.mso_valid_until_date_offset + 10],
+        b"2030-01-01"
+    );
+}
+
+#[test]
+#[ignore = "slow: proves rejection for validity-window policy tamper"]
+fn prove_rejects_policy_after_valid_until_when_statement_guard_is_bypassed() {
+    let session_transcript = b"session-transcript-123".to_vec();
+    let options = FixtureOptions {
+        validity_info: Some(validity_info(
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00Z",
+            "2026-07-02T00:00:00Z",
+        )),
+        ..FixtureOptions::default()
+    };
+    let fixture = fixture_with_options(
+        &session_transcript,
+        "1990-07-15".into(),
+        "DE".into(),
+        options,
+    );
+    let extracted =
+        extract_pid_mdoc(&fixture.doc, &request(session_transcript)).expect("mdoc extracts");
+    let mut statement = MdocCircuitStatement::from_extracted(&extracted, policy_on(2026, 7, 1))
+        .expect("statement builds while credential is valid");
+    assert_eq!(statement.valid_until, (2026, 7, 2));
+    statement.policy.current_date = Date {
+        year: 2026,
+        month: 7,
+        day: 3,
+    };
+
+    match prove_mdoc_circuit(&extracted, &statement) {
+        Err(eu_id_prover::Error::Prove(_)) => {}
+        Err(other) => panic!("expected validity proof rejection, got {other:?}"),
+        Ok(_) => panic!("expired policy date proved unexpectedly"),
+    }
+}
+
+#[test]
 fn statement_rejects_mispointed_value_window() {
     // Profile v2 drops the "window in the first SHA-256 block" rule; the only
     // host-side guard is byte-equality at the prover-supplied offset, so a
@@ -888,4 +965,53 @@ fn isolated_mdoc_circuit_profile_proves_and_verifies() {
     let proof = prove_mdoc_circuit(&extracted, &statement).expect("mdoc circuit proves");
 
     verify_mdoc_circuit(&proof, &statement).expect("mdoc circuit verifies");
+}
+
+#[test]
+#[ignore = "slow: proves rejection for digest membership tamper"]
+fn digest_membership_offset_swap_rejects_in_proof() {
+    let session_transcript = b"session-transcript-123".to_vec();
+    let fixture = valid_fixture(&session_transcript);
+    let extracted =
+        extract_pid_mdoc(&fixture.doc, &request(session_transcript)).expect("mdoc extracts");
+    let mut statement = MdocCircuitStatement::from_extracted(&extracted, policy_on(2026, 7, 3))
+        .expect("statement builds");
+    std::mem::swap(
+        &mut statement.mso_birth_date_digest_offset,
+        &mut statement.mso_nationality_digest_offset,
+    );
+
+    match prove_mdoc_circuit(&extracted, &statement) {
+        Err(eu_id_prover::Error::Prove(_)) => {}
+        Err(other) => panic!("expected proof rejection, got {other:?}"),
+        Ok(proof) => {
+            assert!(
+                verify_mdoc_circuit(&proof, &statement).is_err(),
+                "digest membership offset swap verified unexpectedly"
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "slow: proves rejection for deviceKey binding tamper"]
+fn device_key_binding_offset_rejects_in_proof() {
+    let session_transcript = b"session-transcript-123".to_vec();
+    let fixture = valid_fixture(&session_transcript);
+    let extracted =
+        extract_pid_mdoc(&fixture.doc, &request(session_transcript)).expect("mdoc extracts");
+    let mut statement = MdocCircuitStatement::from_extracted(&extracted, policy_on(2026, 7, 3))
+        .expect("statement builds");
+    statement.mso_device_key_x_offset += 1;
+
+    match prove_mdoc_circuit(&extracted, &statement) {
+        Err(eu_id_prover::Error::Prove(_)) => {}
+        Err(other) => panic!("expected proof rejection, got {other:?}"),
+        Ok(proof) => {
+            assert!(
+                verify_mdoc_circuit(&proof, &statement).is_err(),
+                "mispointed MSO device-key offset verified unexpectedly"
+            );
+        }
+    }
 }
