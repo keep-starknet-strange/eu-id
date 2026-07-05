@@ -5,7 +5,7 @@ use sha2::{Digest as _, Sha256};
 use ciborium::value::Value;
 use eu_id_prover::mdoc::{
     demo_mdoc_sizing_waste, extract_pid_mdoc, prove_mdoc_circuit, verify_mdoc_circuit,
-    MdocCircuitStatement, MdocError, MdocPidRequest,
+    MdocBirthDateBinding, MdocCircuitStatement, MdocError, MdocNationalityBinding, MdocPidRequest,
 };
 use eu_id_prover::{Date, Policy};
 use stwo_p256::types::{AffinePoint, Signature, U256};
@@ -40,6 +40,7 @@ struct FixtureOptions {
     birth_random: Vec<u8>,
     nationality_random: Vec<u8>,
     tag24_bstr: bool,
+    canonical_item_order: bool,
     value_last: bool,
     protected: Vec<u8>,
     device_unprotected: Value,
@@ -60,11 +61,12 @@ impl Default for FixtureOptions {
             birth_random: vec![7; 16],
             nationality_random: vec![9; 16],
             tag24_bstr: true,
+            canonical_item_order: true,
             value_last: false,
             protected: PROTECTED_ES256.to_vec(),
             device_unprotected: map(Vec::new()),
             extra_device_key_field: false,
-            mso_version: "1.0".to_string(),
+            mso_version: "2.0".to_string(),
             mso_doctype: DOCTYPE.to_string(),
             validity_info: Some(validity_info(
                 "2026-01-01T00:00:00Z",
@@ -145,9 +147,17 @@ fn issuer_signed_item(
     value: Value,
     random: Vec<u8>,
     tag24_bstr: bool,
+    canonical_item_order: bool,
     value_last: bool,
 ) -> Vec<u8> {
-    let entries = if value_last {
+    let entries = if canonical_item_order {
+        vec![
+            ("random".into(), Value::Bytes(random)),
+            ("digestID".into(), Value::from(digest_id)),
+            ("elementValue".into(), value),
+            ("elementIdentifier".into(), element.into()),
+        ]
+    } else if value_last {
         vec![
             ("digestID".into(), Value::from(digest_id)),
             ("random".into(), Value::Bytes(random)),
@@ -268,6 +278,7 @@ fn fixture_with_options(
         birth_date_value,
         options.birth_random,
         options.tag24_bstr,
+        options.canonical_item_order,
         options.value_last,
     );
     let nationality_item = issuer_signed_item(
@@ -276,6 +287,7 @@ fn fixture_with_options(
         nationality_value,
         options.nationality_random,
         options.tag24_bstr,
+        options.canonical_item_order,
         options.value_last,
     );
     let mut birth_digest: [u8; 32] = Sha256::digest(&birth_date_item).into();
@@ -383,6 +395,7 @@ fn policy_on(year: u32, month: u32, day: u32) -> Policy {
         current_date: Date { year, month, day },
         min_age_years: 18,
         accepted_nationalities: vec![276, 250],
+        accepted_nationalities_alpha2: Vec::new(),
     }
 }
 
@@ -559,9 +572,30 @@ fn rejects_short_salt() {
 }
 
 #[test]
-fn rejects_issuer_signed_item_key_order() {
+fn accepts_legacy_noncanonical_issuer_signed_item_key_order() {
     let session_transcript = b"session-transcript-123".to_vec();
     let options = FixtureOptions {
+        canonical_item_order: false,
+        value_last: true,
+        mso_version: "1.0".to_string(),
+        ..FixtureOptions::default()
+    };
+    let fixture = fixture_with_options(
+        &session_transcript,
+        "1990-07-15".into(),
+        "DE".into(),
+        options,
+    );
+
+    extract_pid_mdoc(&fixture.doc, &request(session_transcript))
+        .expect("legacy alternate-order IssuerSignedItem parses");
+}
+
+#[test]
+fn rejects_v2_noncanonical_issuer_signed_item_order() {
+    let session_transcript = b"session-transcript-123".to_vec();
+    let options = FixtureOptions {
+        canonical_item_order: false,
         value_last: true,
         ..FixtureOptions::default()
     };
@@ -573,11 +607,11 @@ fn rejects_issuer_signed_item_key_order() {
     );
 
     let err = extract_pid_mdoc(&fixture.doc, &request(session_transcript))
-        .expect_err("key order rejects");
+        .expect_err("v2 noncanonical IssuerSignedItem order rejects");
 
     assert_eq!(
         err,
-        MdocError::UnsupportedCircuitValue("IssuerSignedItem key order")
+        MdocError::UnsupportedCircuitValue("IssuerSignedItem canonical key order")
     );
 }
 
@@ -706,10 +740,11 @@ fn rejects_mso_doctype_mismatch() {
 }
 
 #[test]
-fn rejects_mso_version_mismatch() {
+fn rejects_unsupported_mso_version() {
+    // Profile v1 ("1.0") and v2 ("2.0") are accepted; anything else is rejected.
     let session_transcript = b"session-transcript-123".to_vec();
     let options = FixtureOptions {
-        mso_version: "2.0".to_string(),
+        mso_version: "3.0".to_string(),
         ..FixtureOptions::default()
     };
     let fixture = fixture_with_options(
@@ -720,9 +755,9 @@ fn rejects_mso_version_mismatch() {
     );
 
     let err = extract_pid_mdoc(&fixture.doc, &request(session_transcript))
-        .expect_err("MSO version mismatch rejects");
+        .expect_err("unsupported MSO version rejects");
 
-    assert_eq!(err, MdocError::UnsupportedMsoVersion("2.0".to_string()));
+    assert_eq!(err, MdocError::UnsupportedMsoVersion("3.0".to_string()));
 }
 
 #[test]
@@ -778,23 +813,27 @@ fn statement_rejects_not_yet_valid_credential() {
 }
 
 #[test]
-fn statement_rejects_text_birth_date() {
+fn statement_accepts_text_birth_date() {
+    // Profile v2: a text (`tstr`) `YYYY-MM-DD` birth date builds a valid
+    // statement with a `Text` binding (v1 rejected text values).
     let session_transcript = b"session-transcript-123".to_vec();
     let fixture = valid_fixture(&session_transcript);
     let extracted = extract_pid_mdoc(&fixture.doc, &request(session_transcript))
-        .expect("text birth date extracts for review");
+        .expect("text birth date extracts");
 
-    let err = MdocCircuitStatement::from_extracted(&extracted, policy_on(2026, 7, 3))
-        .expect_err("text birth date rejects for circuit");
+    let statement = MdocCircuitStatement::from_extracted(&extracted, policy_on(2026, 7, 3))
+        .expect("text birth date builds a v2 statement");
 
-    assert_eq!(
-        err,
-        MdocError::UnsupportedCircuitValue("element value bytes at offset")
-    );
+    assert!(matches!(
+        statement.birth_date_binding,
+        MdocBirthDateBinding::Text(_)
+    ));
 }
 
 #[test]
-fn statement_rejects_text_nationality() {
+fn statement_accepts_text_nationality() {
+    // Profile v2: an alpha-2 (`tstr`) nationality builds a valid statement with
+    // an `Alpha2` binding (v1 rejected text values).
     let session_transcript = b"session-transcript-123".to_vec();
     let fixture = fixture_with_options(
         &session_transcript,
@@ -803,31 +842,35 @@ fn statement_rejects_text_nationality() {
         FixtureOptions::default(),
     );
     let extracted = extract_pid_mdoc(&fixture.doc, &request(session_transcript))
-        .expect("text nationality extracts for review");
+        .expect("text nationality extracts");
 
-    let err = MdocCircuitStatement::from_extracted(&extracted, policy_on(2026, 7, 3))
-        .expect_err("text nationality rejects for circuit");
+    let statement = MdocCircuitStatement::from_extracted(&extracted, policy_on(2026, 7, 3))
+        .expect("text nationality builds a v2 statement");
 
-    assert_eq!(
-        err,
-        MdocError::UnsupportedCircuitValue("element value bytes at offset")
-    );
+    assert!(matches!(
+        statement.nationality_binding,
+        MdocNationalityBinding::Alpha2(_)
+    ));
 }
 
 #[test]
-fn statement_rejects_value_window_past_first_block() {
+fn statement_rejects_mispointed_value_window() {
+    // Profile v2 drops the "window in the first SHA-256 block" rule; the only
+    // host-side guard is byte-equality at the prover-supplied offset, so a
+    // mispointed offset (whose bytes do not match the parsed value) still
+    // rejects.
     let session_transcript = b"session-transcript-123".to_vec();
     let fixture = circuit_fixture(&session_transcript);
     let mut extracted =
         extract_pid_mdoc(&fixture.doc, &request(session_transcript)).expect("binary mdoc extracts");
-    extracted.birth_date_value_offset = 65;
+    extracted.birth_date_value_offset += 1;
 
     let err = MdocCircuitStatement::from_extracted(&extracted, policy_on(2026, 7, 3))
-        .expect_err("block-1 value window rejects");
+        .expect_err("mispointed value window rejects");
 
     assert_eq!(
         err,
-        MdocError::UnsupportedCircuitValue("value window must lie in first SHA-256 block")
+        MdocError::UnsupportedCircuitValue("element value bytes at offset")
     );
 }
 

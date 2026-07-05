@@ -115,6 +115,7 @@ pub(crate) fn to_policy(statement: &ZkPublicStatement) -> Result<Policy, ZkError
         current_date: current,
         min_age_years,
         accepted_nationalities,
+        accepted_nationalities_alpha2: Vec::new(),
     })
 }
 
@@ -176,6 +177,7 @@ fn validate_min_age(current: Date, min_age: u32) -> Result<(), ZkError> {
         current_date: current,
         min_age_years: 0,
         accepted_nationalities: Vec::new(),
+        accepted_nationalities_alpha2: Vec::new(),
     }
     .age_public_input()
     .bounds
