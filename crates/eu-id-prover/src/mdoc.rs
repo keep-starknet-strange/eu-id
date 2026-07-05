@@ -61,11 +61,15 @@ use crate::generator::{Policy, SHA_GROUP_WIDTH};
 use crate::public_digest_bind::{PublicDigestBind, PublicDigestBindInteractionClaim};
 use crate::Error;
 
-const MDOC_PROFILE_VERSION: &str = "1.0";
+/// Legacy profile: `elementValue` packed as a fixed-width CBOR `bstr`.
+const MDOC_PROFILE_VERSION_V1: &str = "1.0";
+/// Profile v2: canonical (RFC 8949 core deterministic) CBOR, text-form values.
+const MDOC_PROFILE_VERSION_V2: &str = "2.0";
+/// The profile the demo fixture emits and the parser advertises by default.
+const MDOC_PROFILE_VERSION: &str = MDOC_PROFILE_VERSION_V2;
 const PID_DOCTYPE: &str = "eu.europa.ec.eudi.pid.1";
 const PID_NAMESPACE: &str = "eu.europa.ec.eudi.pid.1";
 const ES256_PROTECTED_HEADER: &[u8] = &[0xA1, 0x01, 0x26];
-const SHA256_FIRST_BLOCK_LEN: usize = 64;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MdocPidRequest {
@@ -84,6 +88,8 @@ pub struct ExtractedPidMdoc {
     pub nationalities: Vec<u32>,
     pub birth_date_bytes: [u8; 4],
     pub nationality_bytes: [u8; 2],
+    pub birth_date_binding: MdocBirthDateBinding,
+    pub nationality_binding: MdocNationalityBinding,
     pub birth_date_value_offset: usize,
     pub nationality_value_offset: usize,
     pub signed_at: (u16, u8, u8),
@@ -101,6 +107,48 @@ pub struct ExtractedPidMdoc {
     pub device_sig_structure: Vec<u8>,
     pub issuer_ecdsa_input: EcdsaVerifyInput,
     pub device_ecdsa_input: EcdsaVerifyInput,
+}
+
+/// How the `birth_date` element value is encoded in the item preimage. The
+/// window bytes exposed to the age predicate differ per encoding: `Packed`
+/// exposes the 4 raw big-endian date bytes; `Text` exposes the 10 ASCII bytes
+/// of the canonical `YYYY-MM-DD` tstr (profile v2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MdocBirthDateBinding {
+    Packed([u8; 4]),
+    Text([u8; 10]),
+}
+
+impl MdocBirthDateBinding {
+    fn as_bytes(&self) -> &[u8] {
+        match self {
+            Self::Packed(bytes) => bytes,
+            Self::Text(bytes) => bytes,
+        }
+    }
+}
+
+/// How the `nationality` element value is encoded in the item preimage.
+/// `Numeric` exposes the 2 raw big-endian country-code bytes; `Alpha2` exposes
+/// the 2 ASCII bytes of the ISO 3166-1 alpha-2 code (profile v2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MdocNationalityBinding {
+    Numeric([u8; 2]),
+    Alpha2([u8; 2]),
+}
+
+impl MdocNationalityBinding {
+    fn as_bytes(&self) -> &[u8] {
+        match self {
+            Self::Numeric(bytes) | Self::Alpha2(bytes) => bytes,
+        }
+    }
+
+    fn code(&self) -> u32 {
+        match self {
+            Self::Numeric(bytes) | Self::Alpha2(bytes) => u32::from(u16::from_be_bytes(*bytes)),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -180,6 +228,7 @@ pub fn demo_mdoc_circuit_fixture() -> DemoMdocCircuitFixture {
             },
             min_age_years: 18,
             accepted_nationalities: vec![276, 250],
+            accepted_nationalities_alpha2: vec![*b"DE", *b"FR"],
         },
     )
     .expect("demo mdoc statement builds");
@@ -218,16 +267,8 @@ pub fn demo_mdoc_module_shapes() -> Result<Vec<MdocModuleShape>, Error> {
     #[cfg(not(feature = "ec-coprocessor"))]
     let device_scalar_z = SharedScalarZRelation::new();
 
-    let birth_exposure = FieldExposure::from_preimage_windows(&[(
-        field_id::DOB,
-        statement.birth_date_value_offset,
-        4,
-    )]);
-    let nat_exposure = FieldExposure::from_preimage_windows(&[(
-        field_id::NATIONALITY,
-        statement.nationality_value_offset,
-        2,
-    )]);
+    let birth_exposure = birth_date_exposure(statement);
+    let nat_exposure = nationality_exposure(statement);
 
     #[cfg(not(feature = "ec-coprocessor"))]
     let issuer_p256 = P256Prover::new(&issuer_draft)
@@ -297,7 +338,7 @@ pub fn demo_mdoc_module_shapes() -> Result<Vec<MdocModuleShape>, Error> {
     )?;
 
     let age_public = statement.policy.age_public_input();
-    let nat_public = statement.policy.nat_public_input();
+    let nat_public = nat_public_input_for(statement);
     let age_dob = DateOfBirth(predicates::Date {
         year: u32::from(u16::from_be_bytes([
             extracted.birth_date_bytes[0],
@@ -306,14 +347,16 @@ pub fn demo_mdoc_module_shapes() -> Result<Vec<MdocModuleShape>, Error> {
         month: u32::from(extracted.birth_date_bytes[2]),
         day: u32::from(extracted.birth_date_bytes[3]),
     });
-    let nat_code = u32::from(u16::from_be_bytes(extracted.nationality_bytes));
     let nat_private = predicates::NatPrivateInput {
-        nationalities: vec![nat_code],
+        nationalities: vec![statement.nationality_binding.code()],
     };
     let age = AgeRangeCheck::new(PcsConfig::default())
         .prover(&age_public, &age_dob)
-        .map_err(Error::AgePrepare)?
-        .with_dob_binding(birth_field);
+        .map_err(Error::AgePrepare)?;
+    let age = match statement.birth_date_binding {
+        MdocBirthDateBinding::Packed(_) => age.with_dob_binding(birth_field),
+        MdocBirthDateBinding::Text(_) => age.with_text_dob_binding(birth_field),
+    };
     let nat = NationalityPredicate::new(PcsConfig::default())
         .prover(&nat_public, &nat_private)
         .map_err(Error::NatPrepare)?
@@ -464,7 +507,7 @@ pub fn extract_pid_mdoc(
     )?;
 
     let mso = parse_mso(&issuer_auth.payload, &request.namespace)?;
-    if mso.version != MDOC_PROFILE_VERSION {
+    if !is_supported_mdoc_profile_version(&mso.version) {
         return Err(MdocError::UnsupportedMsoVersion(mso.version));
     }
     if mso.doc_type != request.doctype {
@@ -473,9 +516,9 @@ pub fn extract_pid_mdoc(
     let device_key = mso.device_key;
 
     let namespace_items = namespace_items(issuer_signed, &request.namespace)?;
-    let birth_date_item = find_item(namespace_items, &request.birth_date_element)?
+    let birth_date_item = find_item(namespace_items, &request.birth_date_element, &mso.version)?
         .ok_or_else(|| MdocError::ElementMissing(request.birth_date_element.clone()))?;
-    let nationality_item = find_item(namespace_items, &request.nationality_element)?
+    let nationality_item = find_item(namespace_items, &request.nationality_element, &mso.version)?
         .ok_or_else(|| MdocError::ElementMissing(request.nationality_element.clone()))?;
 
     let parsed_birth = parse_birth_date_value(&birth_date_item)?;
@@ -537,6 +580,8 @@ pub fn extract_pid_mdoc(
         nationalities: vec![parsed_nat.numeric],
         birth_date_bytes: parsed_birth.bytes,
         nationality_bytes: parsed_nat.bytes,
+        birth_date_binding: parsed_birth.binding,
+        nationality_binding: parsed_nat.binding,
         birth_date_value_offset: parsed_birth.offset,
         nationality_value_offset: parsed_nat.offset,
         signed_at: mso.signed_at,
@@ -561,6 +606,7 @@ pub fn extract_pid_mdoc(
 struct ParsedBirthDateValue {
     display: String,
     bytes: [u8; 4],
+    binding: MdocBirthDateBinding,
     offset: usize,
 }
 
@@ -568,6 +614,7 @@ struct ParsedBirthDateValue {
 struct ParsedNationalityValue {
     numeric: u32,
     bytes: [u8; 2],
+    binding: MdocNationalityBinding,
     offset: usize,
 }
 
@@ -608,6 +655,11 @@ fn parse_birth_date_value(item: &ParsedItem) -> Result<ParsedBirthDateValue, Mdo
             Ok(ParsedBirthDateValue {
                 display,
                 bytes: [(year >> 8) as u8, (year & 0xFF) as u8, month, day],
+                binding: MdocBirthDateBinding::Text(
+                    value_bytes.try_into().map_err(|_| {
+                        MdocError::UnsupportedCircuitValue("birth_date text length")
+                    })?,
+                ),
                 offset,
             })
         }
@@ -625,6 +677,7 @@ fn parse_birth_date_value(item: &ParsedItem) -> Result<ParsedBirthDateValue, Mdo
             Ok(ParsedBirthDateValue {
                 display: format!("{year:04}-{month:02}-{day:02}"),
                 bytes: raw,
+                binding: MdocBirthDateBinding::Packed(raw),
                 offset,
             })
         }
@@ -643,6 +696,11 @@ fn parse_nationality_value(item: &ParsedItem) -> Result<ParsedNationalityValue, 
             Ok(ParsedNationalityValue {
                 numeric,
                 bytes,
+                binding: MdocNationalityBinding::Alpha2(
+                    alpha2.as_bytes().try_into().map_err(|_| {
+                        MdocError::UnsupportedCircuitValue("nationality text length")
+                    })?,
+                ),
                 offset,
             })
         }
@@ -658,6 +716,7 @@ fn parse_nationality_value(item: &ParsedItem) -> Result<ParsedNationalityValue, 
             Ok(ParsedNationalityValue {
                 numeric,
                 bytes: raw,
+                binding: MdocNationalityBinding::Numeric(raw),
                 offset,
             })
         }
@@ -696,6 +755,37 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|candidate| candidate == needle)
+}
+
+/// Field exposure over the `birth_date` item preimage. The window length tracks
+/// the binding form (4 raw bytes for v1 packed, 10 ASCII bytes for v2 text), and
+/// the multi-block constructor tolerates a window straddling a SHA-256 block
+/// boundary.
+fn birth_date_exposure(statement: &MdocCircuitStatement) -> FieldExposure {
+    FieldExposure::from_preimage_windows_multi(&[(
+        field_id::DOB,
+        statement.birth_date_value_offset,
+        statement.birth_date_binding.as_bytes().len(),
+    )])
+}
+
+/// Field exposure over the `nationality` item preimage (2 bytes in both the
+/// numeric and alpha-2 forms).
+fn nationality_exposure(statement: &MdocCircuitStatement) -> FieldExposure {
+    FieldExposure::from_preimage_windows_multi(&[(
+        field_id::NATIONALITY,
+        statement.nationality_value_offset,
+        statement.nationality_binding.as_bytes().len(),
+    )])
+}
+
+/// The nationality public input matching the statement's binding form: the
+/// alpha-2 code space for the v2 text path, the ISO-numeric space otherwise.
+fn nat_public_input_for(statement: &MdocCircuitStatement) -> predicates::NatPublicInput {
+    match statement.nationality_binding {
+        MdocNationalityBinding::Numeric(_) => statement.policy.nat_public_input(),
+        MdocNationalityBinding::Alpha2(_) => statement.policy.nat_alpha2_public_input(),
+    }
 }
 
 fn decode_value(bytes: &[u8]) -> Result<Value, MdocError> {
@@ -754,18 +844,15 @@ fn demo_mdoc_document(session_transcript: &[u8]) -> Vec<u8> {
     let issuer_cose_key = demo_cose_key(&issuer_signing_key);
     let device_cose_key = demo_cose_key(&device_signing_key);
 
+    // Profile v2: canonical CBOR items with text-form (`tstr`) element values.
     let birth_date_item = demo_issuer_signed_item(
         7,
         "birth_date",
-        Value::Bytes(vec![0x07, 0xC6, 7, 15]),
+        Value::Text("1990-07-15".to_string()),
         vec![7; 16],
     );
-    let nationality_item = demo_issuer_signed_item(
-        9,
-        "nationality",
-        Value::Bytes(276u16.to_be_bytes().to_vec()),
-        vec![9; 16],
-    );
+    let nationality_item =
+        demo_issuer_signed_item(9, "nationality", Value::Text("DE".to_string()), vec![9; 16]);
     let birth_digest: [u8; 32] = Sha256::digest(&birth_date_item).into();
     let nat_digest: [u8; 32] = Sha256::digest(&nationality_item).into();
 
@@ -859,10 +946,13 @@ fn demo_issuer_signed_item(
     value: Value,
     random: Vec<u8>,
 ) -> Vec<u8> {
+    // Profile v2 canonical (RFC 8949 core deterministic) key order:
+    // shortest-encoded-key-first ⇒ `random, digestID, elementValue,
+    // elementIdentifier` (7, 8, 12, 17 bytes of key text respectively).
     let item = Value::Map(vec![
-        ("elementValue".into(), value),
-        ("digestID".into(), Value::from(digest_id)),
         ("random".into(), Value::Bytes(random)),
+        ("digestID".into(), Value::from(digest_id)),
+        ("elementValue".into(), value),
         ("elementIdentifier".into(), element.into()),
     ]);
     encode_value(Value::Tag(24, Box::new(Value::Bytes(encode_value(item)))))
@@ -994,10 +1084,14 @@ fn namespace_items<'a>(
     Ok(items)
 }
 
-fn find_item(items: &[Value], element: &str) -> Result<Option<ParsedItem>, MdocError> {
+fn find_item(
+    items: &[Value],
+    element: &str,
+    profile_version: &str,
+) -> Result<Option<ParsedItem>, MdocError> {
     for item in items {
         let item_bytes = expect_bytes(item, "IssuerSignedItemBytes")?;
-        let parsed = parse_issuer_signed_item_bytes(item_bytes)?;
+        let parsed = parse_issuer_signed_item_bytes(item_bytes, profile_version)?;
         if parsed.element == element {
             return Ok(Some(parsed));
         }
@@ -1005,7 +1099,10 @@ fn find_item(items: &[Value], element: &str) -> Result<Option<ParsedItem>, MdocE
     Ok(None)
 }
 
-fn parse_issuer_signed_item_bytes(bytes: &[u8]) -> Result<ParsedItem, MdocError> {
+fn parse_issuer_signed_item_bytes(
+    bytes: &[u8],
+    profile_version: &str,
+) -> Result<ParsedItem, MdocError> {
     let value = decode_value(bytes)?;
     let Value::Tag(24, inner) = value else {
         return Err(MdocError::WrongType("IssuerSignedItemBytes tag 24"));
@@ -1013,7 +1110,7 @@ fn parse_issuer_signed_item_bytes(bytes: &[u8]) -> Result<ParsedItem, MdocError>
     let item_bytes = expect_bytes(&inner, "IssuerSignedItemBytes")?;
     let item_value = decode_value(item_bytes)?;
     let item = expect_map(&item_value, "IssuerSignedItem")?;
-    ensure_issuer_signed_item_key_order(item)?;
+    ensure_issuer_signed_item_key_order(item, profile_version)?;
     let digest_id = u32_field(item, "digestID")?;
     let element = text_field(item, "elementIdentifier")?.to_string();
     let random_len = expect_bytes(value_field(item, "random")?, "random")?.len();
@@ -1029,17 +1126,39 @@ fn parse_issuer_signed_item_bytes(bytes: &[u8]) -> Result<ParsedItem, MdocError>
     })
 }
 
-fn ensure_issuer_signed_item_key_order(item: &[(Value, Value)]) -> Result<(), MdocError> {
-    const EXPECTED: [&str; 4] = ["elementValue", "digestID", "random", "elementIdentifier"];
-    if item.len() != EXPECTED.len() {
+/// Require the four `IssuerSignedItem` keys. Profile v1 accepts legacy key
+/// ordering; profile v2 requires the RFC 8949 canonical order used by the
+/// canonical-CBOR profile.
+fn ensure_issuer_signed_item_key_order(
+    item: &[(Value, Value)],
+    profile_version: &str,
+) -> Result<(), MdocError> {
+    const KEY_SET: [&str; 4] = ["elementValue", "digestID", "random", "elementIdentifier"];
+    const V2_CANONICAL: [&str; 4] = ["random", "digestID", "elementValue", "elementIdentifier"];
+    if item.len() != KEY_SET.len() {
         return Err(MdocError::UnsupportedCircuitValue(
-            "IssuerSignedItem key order",
+            "IssuerSignedItem key set",
         ));
     }
-    for ((key, _), expected) in item.iter().zip(EXPECTED) {
-        if key != &Value::Text(expected.to_string()) {
+    for expected in KEY_SET {
+        let present = item
+            .iter()
+            .any(|(key, _)| key == &Value::Text(expected.to_string()));
+        if !present {
             return Err(MdocError::UnsupportedCircuitValue(
-                "IssuerSignedItem key order",
+                "IssuerSignedItem key set",
+            ));
+        }
+    }
+    if profile_version == MDOC_PROFILE_VERSION_V2 {
+        let canonical = item
+            .iter()
+            .map(|(key, _)| key)
+            .zip(V2_CANONICAL)
+            .all(|(key, expected)| key == &Value::Text(expected.to_string()));
+        if !canonical {
+            return Err(MdocError::UnsupportedCircuitValue(
+                "IssuerSignedItem canonical key order",
             ));
         }
     }
@@ -1141,6 +1260,8 @@ pub struct MdocCircuitStatement {
     pub device_input: EcdsaVerifyInput,
     pub birth_date_digest: [u8; 32],
     pub nationality_digest: [u8; 32],
+    pub birth_date_binding: MdocBirthDateBinding,
+    pub nationality_binding: MdocNationalityBinding,
     pub birth_date_value_offset: usize,
     pub nationality_value_offset: usize,
     pub policy: Policy,
@@ -1154,15 +1275,15 @@ impl MdocCircuitStatement {
         if extracted.namespace != PID_NAMESPACE {
             return Err(MdocError::NamespaceMissing);
         }
-        ensure_first_block_value_window(
+        ensure_value_window(
             &extracted.birth_date_item,
             extracted.birth_date_value_offset,
-            &extracted.birth_date_bytes,
+            extracted.birth_date_binding.as_bytes(),
         )?;
-        ensure_first_block_value_window(
+        ensure_value_window(
             &extracted.nationality_item,
             extracted.nationality_value_offset,
-            &extracted.nationality_bytes,
+            extracted.nationality_binding.as_bytes(),
         )?;
         let current_date = policy_date_tuple(&policy)?;
         if current_date < extracted.valid_from {
@@ -1181,7 +1302,7 @@ impl MdocCircuitStatement {
             .get("nationality")
             .ok_or_else(|| MdocError::ElementMissing("nationality".to_string()))?;
         let mso = parse_mso(&extracted.mso, &extracted.namespace)?;
-        if mso.version != MDOC_PROFILE_VERSION {
+        if !is_supported_mdoc_profile_version(&mso.version) {
             return Err(MdocError::UnsupportedMsoVersion(mso.version));
         }
         if mso.doc_type != extracted.doctype {
@@ -1207,6 +1328,8 @@ impl MdocCircuitStatement {
             device_input: extracted.device_ecdsa_input.clone(),
             birth_date_digest,
             nationality_digest,
+            birth_date_binding: extracted.birth_date_binding,
+            nationality_binding: extracted.nationality_binding,
             birth_date_value_offset: extracted.birth_date_value_offset,
             nationality_value_offset: extracted.nationality_value_offset,
             policy,
@@ -1214,25 +1337,27 @@ impl MdocCircuitStatement {
     }
 }
 
-fn ensure_first_block_value_window(
+/// Assert that `item[offset..offset+expected.len()] == expected`.
+///
+/// Profile v2 drops the v1 "window lies in the first SHA-256 block" rule: the
+/// Phase A multi-block field exposure resolves a window straddling a 64-byte
+/// block boundary, so the only host-side requirement is byte-equality at the
+/// prover-supplied offset.
+fn ensure_value_window(item: &[u8], offset: usize, expected: &[u8]) -> Result<(), MdocError> {
+    ensure_value_window_with_message(item, offset, expected, "element value bytes at offset")
+}
+
+fn ensure_value_window_with_message(
     item: &[u8],
     offset: usize,
     expected: &[u8],
+    mismatch_message: &'static str,
 ) -> Result<(), MdocError> {
     let end = offset
         .checked_add(expected.len())
-        .ok_or(MdocError::UnsupportedCircuitValue(
-            "element value bytes at offset",
-        ))?;
-    if end > SHA256_FIRST_BLOCK_LEN {
-        return Err(MdocError::UnsupportedCircuitValue(
-            "value window must lie in first SHA-256 block",
-        ));
-    }
+        .ok_or(MdocError::UnsupportedCircuitValue(mismatch_message))?;
     if item.get(offset..end) != Some(expected) {
-        return Err(MdocError::UnsupportedCircuitValue(
-            "element value bytes at offset",
-        ));
+        return Err(MdocError::UnsupportedCircuitValue(mismatch_message));
     }
     Ok(())
 }
@@ -1371,16 +1496,8 @@ fn mdoc_sizing_waste(
         .max()
         .expect("sha log list is non-empty");
 
-    let birth_exposure = FieldExposure::from_preimage_windows(&[(
-        field_id::DOB,
-        statement.birth_date_value_offset,
-        4,
-    )]);
-    let nat_exposure = FieldExposure::from_preimage_windows(&[(
-        field_id::NATIONALITY,
-        statement.nationality_value_offset,
-        2,
-    )]);
+    let birth_exposure = birth_date_exposure(statement);
+    let nat_exposure = nationality_exposure(statement);
 
     let sha = vec![
         sha_sizing_waste(
@@ -1688,16 +1805,8 @@ pub fn prove_mdoc_circuit(
     #[cfg(not(feature = "ec-coprocessor"))]
     let device_scalar_z = SharedScalarZRelation::new();
 
-    let birth_exposure = FieldExposure::from_preimage_windows(&[(
-        field_id::DOB,
-        statement.birth_date_value_offset,
-        4,
-    )]);
-    let nat_exposure = FieldExposure::from_preimage_windows(&[(
-        field_id::NATIONALITY,
-        statement.nationality_value_offset,
-        2,
-    )]);
+    let birth_exposure = birth_date_exposure(statement);
+    let nat_exposure = nationality_exposure(statement);
 
     #[cfg(not(feature = "ec-coprocessor"))]
     let mut issuer_p256 = P256Prover::new(&issuer_draft)
@@ -1776,7 +1885,7 @@ pub fn prove_mdoc_circuit(
     )?;
 
     let age_public = statement.policy.age_public_input();
-    let nat_public = statement.policy.nat_public_input();
+    let nat_public = nat_public_input_for(statement);
     let age_dob = DateOfBirth(predicates::Date {
         year: u32::from(u16::from_be_bytes([
             extracted.birth_date_bytes[0],
@@ -1785,14 +1894,16 @@ pub fn prove_mdoc_circuit(
         month: u32::from(extracted.birth_date_bytes[2]),
         day: u32::from(extracted.birth_date_bytes[3]),
     });
-    let nat_code = u32::from(u16::from_be_bytes(extracted.nationality_bytes));
     let nat_private = predicates::NatPrivateInput {
-        nationalities: vec![nat_code],
+        nationalities: vec![statement.nationality_binding.code()],
     };
-    let mut age = AgeRangeCheck::new(PcsConfig::default())
+    let age = AgeRangeCheck::new(PcsConfig::default())
         .prover(&age_public, &age_dob)
-        .map_err(Error::AgePrepare)?
-        .with_dob_binding(birth_field.clone());
+        .map_err(Error::AgePrepare)?;
+    let mut age = match statement.birth_date_binding {
+        MdocBirthDateBinding::Packed(_) => age.with_dob_binding(birth_field.clone()),
+        MdocBirthDateBinding::Text(_) => age.with_text_dob_binding(birth_field.clone()),
+    };
     let mut nat = NationalityPredicate::new(PcsConfig::default())
         .prover(&nat_public, &nat_private)
         .map_err(Error::NatPrepare)?
@@ -1904,7 +2015,7 @@ pub fn verify_mdoc_circuit(
     if proof.age_public != statement.policy.age_public_input() {
         return Err(Error::AgePolicyMismatch);
     }
-    if proof.nat_public != statement.policy.nat_public_input() {
+    if proof.nat_public != nat_public_input_for(statement) {
         return Err(Error::NatPolicyMismatch);
     }
 
@@ -1963,16 +2074,8 @@ pub fn verify_mdoc_circuit(
     .with_shared_tables(sha_table_relations.clone())
     .with_digest_handle(device_digest.clone());
 
-    let birth_exposure = FieldExposure::from_preimage_windows(&[(
-        field_id::DOB,
-        statement.birth_date_value_offset,
-        4,
-    )]);
-    let nat_exposure = FieldExposure::from_preimage_windows(&[(
-        field_id::NATIONALITY,
-        statement.nationality_value_offset,
-        2,
-    )]);
+    let birth_exposure = birth_date_exposure(statement);
+    let nat_exposure = nationality_exposure(statement);
     let mut birth_sha = Sha256Verifier::new(
         proof.birth_sha_log_n_rows,
         SHA_GROUP_WIDTH,
@@ -2026,10 +2129,13 @@ pub fn verify_mdoc_circuit(
         nat_digest.clone(),
         proof.nat_digest_bind_interaction_claim.clone(),
     );
-    let mut age = AgeRangeCheck::new(PcsConfig::default())
+    let age = AgeRangeCheck::new(PcsConfig::default())
         .verifier(&proof.age_public, &proof.age_claimed_sums)
-        .map_err(Error::AgePrepare)?
-        .with_dob_binding(birth_field.clone());
+        .map_err(Error::AgePrepare)?;
+    let mut age = match statement.birth_date_binding {
+        MdocBirthDateBinding::Packed(_) => age.with_dob_binding(birth_field.clone()),
+        MdocBirthDateBinding::Text(_) => age.with_text_dob_binding(birth_field.clone()),
+    };
     let mut nat = NationalityPredicate::new(PcsConfig::default())
         .verifier(&proof.nat_public, &proof.nat_claimed_sums)
         .map_err(Error::NatPrepare)?
@@ -2391,6 +2497,10 @@ mod coprocessor_tests {
 
         assert_ne!(with_rejoin_next, without_rejoin_next);
     }
+}
+
+fn is_supported_mdoc_profile_version(version: &str) -> bool {
+    matches!(version, MDOC_PROFILE_VERSION_V1 | MDOC_PROFILE_VERSION_V2)
 }
 
 fn numeric_country(alpha2: &str) -> Result<u32, MdocError> {

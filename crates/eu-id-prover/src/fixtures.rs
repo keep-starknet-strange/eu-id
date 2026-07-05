@@ -160,6 +160,7 @@ pub fn demo_policy() -> Policy {
         },
         min_age_years: 18,
         accepted_nationalities: vec![276, 250, 380, 724],
+        accepted_nationalities_alpha2: Vec::new(),
     }
 }
 

@@ -448,6 +448,7 @@ pub unsafe extern "C" fn eu_id_bench_identity(
         },
         min_age_years: input.min_age_years,
         accepted_nationalities: accepted,
+        accepted_nationalities_alpha2: Vec::new(),
     };
     let iters = iters.max(1);
 
