@@ -141,6 +141,59 @@ the main checkout.
 - Phase 4 report-driver perf (`BENCH_ITERS=3`, `RAYON_NUM_THREADS=1`): legacy `pipeline_e2e` prove `4817 ms`, verify `39 ms`, proof `3,916,615` bytes; default coprocessor `pipeline_e2e` prove `2515 ms`, verify `40 ms`, proof `1,240,046` bytes. Proof-byte swing is `-2,676,569` bytes; verify swing is `+1 ms`.
 - P256 AIR retirement audit: default `eu-id-prover` identity composition has no `P256Prover`/`P256Verifier` modules; the constructors in `src/lib.rs` are under `#[cfg(not(feature = "ec-coprocessor"))]`. Remaining `stwo-p256` references are legacy `--no-default-features` product proof code, statement/type/native ECDSA helpers, isolated mdoc AIR profile, `shape_dump`, standalone benches, tests, and `eu-id-ffi`'s standalone P256 benchmark.
 
+# Phase V Real pyMDOC PID Vector Gate
+
+Source: `/Users/lucas/eu-id/tasks/mdoc-v2-port-plan.md`, §4-V.
+Q-002: `/Users/lucas/eu-id/.claude/worktrees/mdoc-full-plan/tasks/mdoc-mailbox/answers/Q-002-real-vector-gate-upstream-mismatch.md`, Steps 3-4.
+Worktree: `/Users/lucas/eu-id/.claude/worktrees/mdoc-v2-port`.
+Branch: `feat/mdoc-v2-port`.
+Baseline verified: `46736d73 feat(mdoc): port phase E ISO device auth + x5chain (spec-exact DeviceAuthenticationBytes)`, clean worktree.
+
+- [x] Verify branch, HEAD, and clean worktree before edits.
+- [x] Read Phase V scope and Q-002 Steps 3-4; `tasks/lessons.md` is absent in this worktree.
+- [x] Bring the frozen pyMDOC PID vector and reproducer/check scripts from `2e5b91c7`.
+- [x] Add ignored release test `real_vector_pid_pymdoc_end_to_end` with test-time `deviceSigned`.
+- [x] Verify the new test fails meaningfully before any implementation fix, where practical.
+- [x] Run extraction/prove/verify on the vendored vector with age >= 18, nationality `DE`, policy date 2026-07-01.
+- [x] Record Phase V prove/verify wall-clock and proof size in the perf log.
+- [x] Run focused and workspace verification, then create exactly one Phase V commit.
+
+## Phase V Review
+
+Implemented the real pyMDOC PID vector gate without patching the frozen vector.
+The test builds only the wallet-side `deviceSigned` at runtime from the
+vendored device private key over Phase-E-exact `DeviceAuthenticationBytes`; the
+outer document embeds the raw `issuer_signed.cbor` bytes directly.
+
+RED progression:
+- `UntrustedIssuerCertificate`: pyMDOC embeds the DS leaf in x5chain and ships
+  the IACA root in `issuer_chain.der`; extractor now accepts an embedded
+  leaf/intermediate chain whose final embedded cert verifies under a supplied
+  trusted root.
+- `WrongType("MobileSecurityObject")`: issuerAuth payload can be
+  `#6.24(bstr .cbor MSO)`; parser now unwraps that shape.
+- `InvalidCoseKey("expected ES256 P-256 key")`: deviceKeyInfo can omit optional
+  COSE `alg`; parser keeps kty/crv/x/y required and rejects extra fields.
+- `WrongType("IssuerSignedItemBytes")`: namespace entries can be actual tag-24
+  bstr data items; parser now accepts those plus the existing bstr fixture form.
+- `WrongType("birth_date elementValue")`: `birth_date` can be tag-1004
+  full-date; parser maps it to the existing text-date binding.
+- `NatPrepare(Input(AcceptableSetTooSmall))`: Phase V policy is singleton
+  alpha-2 `[DE]`; nationality predicate now accepts non-empty singleton sets.
+
+Perf row recorded in
+`crates/eu-id-prover/benches/docs/perf-log.md`: `RAYON_NUM_THREADS=1` release
+ignored gate, prove 1412 ms, verify 55 ms, proof 2,534,210 bytes.
+
+Verification so far:
+- RED: `rtk proxy cargo test -p eu-id-prover --release --test mdoc_support real_vector_pid_pymdoc_end_to_end -- --ignored --nocapture`
+- GREEN: `rtk proxy env RAYON_NUM_THREADS=1 cargo test -p eu-id-prover --release --test mdoc_support real_vector_pid_pymdoc_end_to_end -- --ignored --nocapture`
+- GREEN: `rtk proxy cargo test -p predicates proves_and_verifies_singleton_acceptable_set`
+- GREEN: `rtk proxy cargo test -p eu-id-prover --test mdoc_support`
+- GREEN: `rtk proxy cargo fmt --check`
+- GREEN: `rtk proxy cargo test --workspace` (warnings only in existing
+  `eu-id-ec-coprocessor` test code)
+
 # Phase E ISO DeviceAuthentication + x5chain
 
 Source: `/Users/lucas/eu-id/tasks/mdoc-v2-port-plan.md`, §4-E.

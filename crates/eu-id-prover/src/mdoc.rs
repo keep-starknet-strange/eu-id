@@ -77,6 +77,8 @@ const MDOC_PROFILE_VERSION: &str = MDOC_PROFILE_VERSION_V2;
 const PID_DOCTYPE: &str = "eu.europa.ec.eudi.pid.1";
 const PID_NAMESPACE: &str = "eu.europa.ec.eudi.pid.1";
 const ES256_PROTECTED_HEADER: &[u8] = &[0xA1, 0x01, 0x26];
+const CBOR_TAG_ENCODED_CBOR: u64 = 24;
+const CBOR_TAG_FULL_DATE: u64 = 1004;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MdocPidRequest {
@@ -677,22 +679,10 @@ struct ParsedItem {
 
 fn parse_birth_date_value(item: &ParsedItem) -> Result<ParsedBirthDateValue, MdocError> {
     match &item.value {
-        Value::Text(text) => {
-            let (year, month, day) = parse_birth_date_text(text)?;
-            let display = text.clone();
-            let value_bytes = text.as_bytes();
-            let offset = find_subslice(&item.bytes, value_bytes)
-                .ok_or(MdocError::UnsupportedCircuitValue("birth_date text offset"))?;
-            Ok(ParsedBirthDateValue {
-                display,
-                bytes: [(year >> 8) as u8, (year & 0xFF) as u8, month, day],
-                binding: MdocBirthDateBinding::Text(
-                    value_bytes.try_into().map_err(|_| {
-                        MdocError::UnsupportedCircuitValue("birth_date text length")
-                    })?,
-                ),
-                offset,
-            })
+        Value::Text(text) => parse_birth_date_text_value(item, text),
+        Value::Tag(CBOR_TAG_FULL_DATE, inner) => {
+            let text = expect_text(inner, "birth_date elementValue")?;
+            parse_birth_date_text_value(item, text)
         }
         Value::Bytes(bytes) => {
             let raw: [u8; 4] = bytes
@@ -714,6 +704,26 @@ fn parse_birth_date_value(item: &ParsedItem) -> Result<ParsedBirthDateValue, Mdo
         }
         _ => Err(MdocError::WrongType("birth_date elementValue")),
     }
+}
+
+fn parse_birth_date_text_value(
+    item: &ParsedItem,
+    text: &str,
+) -> Result<ParsedBirthDateValue, MdocError> {
+    let (year, month, day) = parse_birth_date_text(text)?;
+    let value_bytes = text.as_bytes();
+    let offset = find_subslice(&item.bytes, value_bytes)
+        .ok_or(MdocError::UnsupportedCircuitValue("birth_date text offset"))?;
+    Ok(ParsedBirthDateValue {
+        display: text.to_string(),
+        bytes: [(year >> 8) as u8, (year & 0xFF) as u8, month, day],
+        binding: MdocBirthDateBinding::Text(
+            value_bytes
+                .try_into()
+                .map_err(|_| MdocError::UnsupportedCircuitValue("birth_date text length"))?,
+        ),
+        offset,
+    })
 }
 
 fn parse_nationality_value(item: &ParsedItem) -> Result<ParsedNationalityValue, MdocError> {
@@ -1179,6 +1189,13 @@ fn demo_cose_sign1(signing_key: &SigningKey, unprotected: Value, payload: &[u8])
 
 fn parse_mso(bytes: &[u8], namespace: &str) -> Result<ParsedMso, MdocError> {
     let value = decode_value(bytes)?;
+    let value = match value {
+        Value::Tag(CBOR_TAG_ENCODED_CBOR, inner) => {
+            let mso_bytes = expect_bytes(&inner, "MobileSecurityObjectBytes")?;
+            decode_value(mso_bytes)?
+        }
+        value => value,
+    };
     let mso = expect_map(&value, "MobileSecurityObject")?;
     let version = text_field(mso, "version")?.to_string();
     let doc_type = text_field(mso, "docType")?.to_string();
@@ -1291,13 +1308,24 @@ fn find_item(
     profile_version: &str,
 ) -> Result<Option<ParsedItem>, MdocError> {
     for item in items {
-        let item_bytes = expect_bytes(item, "IssuerSignedItemBytes")?;
-        let parsed = parse_issuer_signed_item_bytes(item_bytes, profile_version)?;
+        let item_bytes = issuer_signed_item_bytes(item)?;
+        let parsed = parse_issuer_signed_item_bytes(&item_bytes, profile_version)?;
         if parsed.element == element {
             return Ok(Some(parsed));
         }
     }
     Ok(None)
+}
+
+fn issuer_signed_item_bytes(item: &Value) -> Result<Vec<u8>, MdocError> {
+    match item {
+        Value::Bytes(bytes) => Ok(bytes.clone()),
+        Value::Tag(CBOR_TAG_ENCODED_CBOR, inner) => {
+            expect_bytes(inner, "IssuerSignedItemBytes")?;
+            Ok(encode_value(item.clone()))
+        }
+        _ => Err(MdocError::WrongType("IssuerSignedItemBytes")),
+    }
 }
 
 fn parse_issuer_signed_item_bytes(
@@ -1390,13 +1418,16 @@ fn validate_item_digest(
 
 fn parse_cose_key(value: &Value) -> Result<AffinePoint, MdocError> {
     let key = expect_map(value, "COSE_Key")?;
-    if key.len() != 5 {
+    if !(4..=5).contains(&key.len()) {
         return Err(MdocError::InvalidCoseKey("expected ES256 P-256 key"));
     }
     let kty = int_field(key, 1, "COSE_Key.kty")?;
-    let alg = int_field(key, 3, "COSE_Key.alg")?;
     let crv = int_field(key, -1, "COSE_Key.crv")?;
-    if kty != 2 || alg != -7 || crv != 1 {
+    let alg = value_int_key(key, 3)
+        .map(value_i128)
+        .transpose()
+        .map_err(|_| MdocError::InvalidCoseKey("expected ES256 P-256 key"))?;
+    if kty != 2 || alg.is_some_and(|alg| alg != -7) || crv != 1 {
         return Err(MdocError::InvalidCoseKey("expected ES256 P-256 key"));
     }
     let x = expect_32(bytes_int_field(key, -2, "COSE_Key.x")?, "COSE_Key.x")?;
@@ -1429,16 +1460,33 @@ fn issuer_key_from_x5chain(
     for pair in parsed_chain.windows(2) {
         verify_certificate_signature(&pair[0], &pair[1])?;
     }
-    let root = chain
+    let chain_anchor = chain
         .last()
         .ok_or(MdocError::InvalidCertificate("empty x5chain"))?;
-    if !trusted_roots
-        .iter()
-        .any(|trusted_root| trusted_root.as_slice() == *root)
-    {
+    let parsed_anchor = parsed_chain
+        .last()
+        .ok_or(MdocError::InvalidCertificate("empty x5chain"))?;
+    if !is_trusted_x5chain_anchor(*chain_anchor, parsed_anchor, trusted_roots)? {
         return Err(MdocError::UntrustedIssuerCertificate);
     }
     affine_point_from_spki(parsed_chain[0].spki_der)
+}
+
+fn is_trusted_x5chain_anchor(
+    anchor_der: &[u8],
+    anchor: &ParsedCertificate<'_>,
+    trusted_roots: &[Vec<u8>],
+) -> Result<bool, MdocError> {
+    for trusted_root in trusted_roots {
+        if trusted_root.as_slice() == anchor_der {
+            return Ok(true);
+        }
+        let trusted_root = parse_x509_certificate(trusted_root)?;
+        if verify_certificate_signature(anchor, &trusted_root).is_ok() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn x5chain_certificates(value: &Value) -> Result<Vec<&[u8]>, MdocError> {
