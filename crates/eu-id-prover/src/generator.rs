@@ -18,6 +18,7 @@
 
 use ecdsa::signature::{Signer, Verifier};
 use p256::ecdsa::{Signature as P256Signature, SigningKey, VerifyingKey};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use predicates::{
@@ -148,7 +149,7 @@ pub fn sign_credential(credential: &Credential, issuer: &IssuerKey) -> SignedCre
 /// The relying party's public policy — exactly the statement the combined
 /// verifier will check against. The date of birth, the nationality, and the
 /// digest are *proven*, never supplied.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Policy {
     /// Reference "today" the age check is evaluated against.
     pub current_date: Date,

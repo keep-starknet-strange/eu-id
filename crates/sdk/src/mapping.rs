@@ -111,12 +111,31 @@ pub(crate) fn to_policy(statement: &ZkPublicStatement) -> Result<Policy, ZkError
         all_nationality_codes()
     };
 
+    let accepted_nationalities_alpha2 = accepted_alpha2_set(&accepted_nationalities)?;
+
     Ok(Policy {
         current_date: current,
         min_age_years,
         accepted_nationalities,
-        accepted_nationalities_alpha2: Vec::new(),
+        accepted_nationalities_alpha2,
     })
+}
+
+fn accepted_alpha2_set(accepted_numeric: &[u32]) -> Result<Vec<[u8; 2]>, ZkError> {
+    accepted_numeric
+        .iter()
+        .map(|code| {
+            let country = celes::Country::from_value(
+                usize::try_from(*code).map_err(|_| invalid("country code out of range"))?,
+            )
+            .map_err(|_| invalid(format!("unknown ISO-3166 numeric code {code}")))?;
+            country
+                .alpha2
+                .as_bytes()
+                .try_into()
+                .map_err(|_| invalid(format!("country {code} has malformed alpha-2 code")))
+        })
+        .collect()
 }
 
 /// Map a [`ZkWitness`] to the prover's private [`Credential`] (prove side only).

@@ -140,6 +140,48 @@ the main checkout.
 - Phase 4 BENCH-LOCK (`RAYON_NUM_THREADS=1`) results: Criterion `identity_e2e/prove_identity` legacy `--no-default-features` midpoint `3.1921 s` (`[3.1765, 3.2124] s`) vs default coprocessor midpoint `1.8609 s` (`[1.8479, 1.8756] s`), delta `-1.3312 s` / `-41.7%`.
 - Phase 4 report-driver perf (`BENCH_ITERS=3`, `RAYON_NUM_THREADS=1`): legacy `pipeline_e2e` prove `4817 ms`, verify `39 ms`, proof `3,916,615` bytes; default coprocessor `pipeline_e2e` prove `2515 ms`, verify `40 ms`, proof `1,240,046` bytes. Proof-byte swing is `-2,676,569` bytes; verify swing is `+1 ms`.
 - P256 AIR retirement audit: default `eu-id-prover` identity composition has no `P256Prover`/`P256Verifier` modules; the constructors in `src/lib.rs` are under `#[cfg(not(feature = "ec-coprocessor"))]`. Remaining `stwo-p256` references are legacy `--no-default-features` product proof code, statement/type/native ECDSA helpers, isolated mdoc AIR profile, `shape_dump`, standalone benches, tests, and `eu-id-ffi`'s standalone P256 benchmark.
+
+# Phase E ISO DeviceAuthentication + x5chain
+
+Source: `/Users/lucas/eu-id/tasks/mdoc-v2-port-plan.md`, §4-E.
+Worktree: `/Users/lucas/eu-id/.claude/worktrees/mdoc-v2-port`.
+Branch: `feat/mdoc-v2-port`.
+Baseline verified: `f286d3c9 feat(mdoc): port phase D in-circuit MSO bindings`, clean worktree.
+
+- [x] Verify branch, HEAD, and clean worktree before edits.
+- [x] Read the Phase E scope, current lessons, and reference diff for design context.
+- [x] Add failing tests for spec-exact `DeviceAuthenticationBytes = #6.24(bstr .cbor DeviceAuthentication)`.
+- [x] Add/port a transcript/docType mutation test that flips the device-auth hash or rejects extraction.
+- [x] Port DeviceAuthentication helper/extraction/demo support onto the current shared-SHA/coprocessor backend.
+- [x] Add host-side x5chain leaf parse + trusted-root check only; keep in-circuit x509 out of scope.
+- [x] Run focused red/green tests, then format and workspace verification.
+- [x] Record review notes and create the required single commit.
+
+## Phase E Review
+
+Implemented spec-exact DeviceAuthentication payload construction:
+`DeviceAuthenticationBytes` is an outer tag-24 bstr wrapping the
+`DeviceAuthentication` array, and OpenID4VP transcripts are encoded as
+`[null, null, ["OpenID4VPHandover", sha256(handover_info)]]` data items rather
+than opaque bytes. Demo mdoc fixtures and test fixtures now sign those exact
+bytes. SDK mdoc verification recomputes the expected device-auth Sig_structure
+hash from the public transcript and docType before accepting the embedded mdoc
+statement.
+
+x5chain support is host-only: issuerAuth unprotected label 33 is parsed as a
+leaf/root chain, certificate signatures are checked between adjacent certs, the
+final DER must match a supplied trusted root, and only the leaf SPKI is used as
+the issuer key. No x509 logic was added to the circuit.
+
+Verification:
+- RED: `rtk proxy cargo test -p eu-id-prover --test mdoc_support device_authentication_bytes_are_tag24_wrapped_and_embed_session_transcript_array` failed for missing helpers/trust-root field before implementation.
+- RED: `rtk proxy cargo test -p sdk mdoc_statement_match_recomputes_phase_e_device_authentication_hash` failed for missing SDK mdoc recompute path before implementation.
+- GREEN: `rtk proxy cargo test -p eu-id-prover --test mdoc_support`
+- GREEN: `rtk proxy cargo test -p sdk`
+- GREEN: `rtk proxy cargo fmt --check`
+- GREEN: `rtk proxy cargo test --workspace`
+- GREEN: `rtk proxy cargo test -p eu-id-prover --no-default-features --test mdoc_support` (existing no-default public-digest warnings only).
+
 # WO-A3 Hybrid SHA Implementation
 
 Source of truth: `/Users/lucas/eu-id/tasks/parity/WO-A3-hybrid-sha-impl.md`.

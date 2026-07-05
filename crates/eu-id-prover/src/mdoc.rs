@@ -11,6 +11,7 @@ use air_core::{Air, AirProver, TreeLayout};
 use ciborium::value::Value;
 use ecdsa::signature::{Signer, Verifier};
 use p256::ecdsa::{Signature as P256Signature, SigningKey, VerifyingKey};
+use p256::pkcs8::DecodePublicKey;
 use p256::EncodedPoint;
 use predicates::nat::NationalityPredicate;
 use predicates::{AgeRangeCheck, DateOfBirth, PredicateProver, PredicateVerifier};
@@ -84,6 +85,7 @@ pub struct MdocPidRequest {
     pub birth_date_element: String,
     pub nationality_element: String,
     pub session_transcript: Vec<u8>,
+    pub trusted_issuer_certificates: Vec<Vec<u8>>,
 }
 
 #[derive(Clone, Debug)]
@@ -170,6 +172,8 @@ pub enum MdocError {
     DeviceAuthPayloadMismatch,
     InvalidCoseKey(&'static str),
     InvalidCoseSign1(&'static str),
+    InvalidCertificate(&'static str),
+    UntrustedIssuerCertificate,
     InvalidSignature(&'static str),
     InvalidNationality(String),
     UnsupportedCircuitValue(&'static str),
@@ -182,6 +186,8 @@ pub enum MdocError {
 
 #[derive(Clone, Debug)]
 pub struct DemoMdocCircuitFixture {
+    pub document: Vec<u8>,
+    pub request: MdocPidRequest,
     pub extracted: ExtractedPidMdoc,
     pub statement: MdocCircuitStatement,
 }
@@ -214,7 +220,7 @@ impl MdocSizingWaste {
 
 /// Deterministic EUID mdoc profile-v1 fixture used by benches and FFI timing.
 pub fn demo_mdoc_circuit_fixture() -> DemoMdocCircuitFixture {
-    let session_transcript = b"session-transcript-123".to_vec();
+    let session_transcript = openid4vp_session_transcript(b"session-transcript-123");
     let document = demo_mdoc_document(&session_transcript);
     let request = MdocPidRequest {
         doctype: PID_DOCTYPE.to_string(),
@@ -222,6 +228,7 @@ pub fn demo_mdoc_circuit_fixture() -> DemoMdocCircuitFixture {
         birth_date_element: "birth_date".to_string(),
         nationality_element: "nationality".to_string(),
         session_transcript,
+        trusted_issuer_certificates: Vec::new(),
     };
     let extracted = extract_pid_mdoc(&document, &request).expect("demo mdoc extracts");
     let statement = MdocCircuitStatement::from_extracted(
@@ -239,6 +246,8 @@ pub fn demo_mdoc_circuit_fixture() -> DemoMdocCircuitFixture {
     )
     .expect("demo mdoc statement builds");
     DemoMdocCircuitFixture {
+        document,
+        request,
         extracted,
         statement,
     }
@@ -515,10 +524,10 @@ pub fn extract_pid_mdoc(
 
     let issuer_signed = map_field(doc_map, "issuerSigned")?;
     let issuer_auth = parse_cose_sign1(value_field(issuer_signed, "issuerAuth")?)?;
-    let issuer_key = parse_cose_key(value_field(
+    let issuer_key = issuer_key_from_unprotected(
         expect_map(&issuer_auth.unprotected, "issuerAuth.unprotected")?,
-        "issuerKey",
-    )?)?;
+        request,
+    )?;
     verify_signature(
         &issuer_key,
         &issuer_auth.sig_structure,
@@ -560,7 +569,9 @@ pub fn extract_pid_mdoc(
     let device_signed = map_field(doc_map, "deviceSigned")?;
     let device_auth = map_field(device_signed, "deviceAuth")?;
     let device_signature = parse_cose_sign1(value_field(device_auth, "deviceSignature")?)?;
-    if device_signature.payload != request.session_transcript {
+    let expected_device_payload =
+        device_authentication_bytes(&request.session_transcript, &request.doctype)?;
+    if device_signature.payload != expected_device_payload {
         return Err(MdocError::DeviceAuthPayloadMismatch);
     }
     verify_signature(
@@ -982,6 +993,49 @@ fn sig_structure(protected: &[u8], payload: &[u8]) -> Vec<u8> {
     ]))
 }
 
+pub fn openid4vp_session_transcript(handover_info: &[u8]) -> Vec<u8> {
+    encode_value(Value::Array(vec![
+        Value::Null,
+        Value::Null,
+        Value::Array(vec![
+            "OpenID4VPHandover".into(),
+            Value::Bytes(Sha256::digest(handover_info).to_vec()),
+        ]),
+    ]))
+}
+
+pub fn device_authentication_bytes(
+    session_transcript: &[u8],
+    doc_type: &str,
+) -> Result<Vec<u8>, MdocError> {
+    let session_transcript = decode_value(session_transcript)?;
+    if !matches!(session_transcript, Value::Array(_)) {
+        return Err(MdocError::WrongType("SessionTranscript"));
+    }
+
+    let device_namespaces = encode_value(Value::Map(Vec::new()));
+    let device_namespaces_bytes =
+        encode_value(Value::Tag(24, Box::new(Value::Bytes(device_namespaces))));
+    let device_authentication = encode_value(Value::Array(vec![
+        "DeviceAuthentication".into(),
+        session_transcript,
+        doc_type.into(),
+        Value::Bytes(device_namespaces_bytes),
+    ]));
+    Ok(encode_value(Value::Tag(
+        24,
+        Box::new(Value::Bytes(device_authentication)),
+    )))
+}
+
+pub fn device_authentication_sig_structure_hash(
+    session_transcript: &[u8],
+    doc_type: &str,
+) -> Result<[u8; 32], MdocError> {
+    let payload = device_authentication_bytes(session_transcript, doc_type)?;
+    Ok(Sha256::digest(sig_structure(ES256_PROTECTED_HEADER, &payload)).into())
+}
+
 fn demo_mdoc_document(session_transcript: &[u8]) -> Vec<u8> {
     let issuer_signing_key =
         SigningKey::from_bytes((&[7u8; 32]).into()).expect("demo issuer signing key");
@@ -1038,7 +1092,8 @@ fn demo_mdoc_document(session_transcript: &[u8]) -> Vec<u8> {
     let device_signature = demo_cose_sign1(
         &device_signing_key,
         Value::Map(Vec::new()),
-        session_transcript,
+        &device_authentication_bytes(session_transcript, PID_DOCTYPE)
+            .expect("demo device auth payload builds"),
     );
 
     encode_value(Value::Map(vec![
@@ -1352,6 +1407,201 @@ fn parse_cose_key(value: &Value) -> Result<AffinePoint, MdocError> {
     })
 }
 
+fn issuer_key_from_unprotected(
+    unprotected: &[(Value, Value)],
+    request: &MdocPidRequest,
+) -> Result<AffinePoint, MdocError> {
+    if let Some(x5chain) = value_int_key(unprotected, 33) {
+        return issuer_key_from_x5chain(x5chain, &request.trusted_issuer_certificates);
+    }
+    parse_cose_key(value_field(unprotected, "issuerKey")?)
+}
+
+fn issuer_key_from_x5chain(
+    value: &Value,
+    trusted_roots: &[Vec<u8>],
+) -> Result<AffinePoint, MdocError> {
+    let chain = x5chain_certificates(value)?;
+    let parsed_chain = chain
+        .iter()
+        .map(|certificate| parse_x509_certificate(certificate))
+        .collect::<Result<Vec<_>, _>>()?;
+    for pair in parsed_chain.windows(2) {
+        verify_certificate_signature(&pair[0], &pair[1])?;
+    }
+    let root = chain
+        .last()
+        .ok_or(MdocError::InvalidCertificate("empty x5chain"))?;
+    if !trusted_roots
+        .iter()
+        .any(|trusted_root| trusted_root.as_slice() == *root)
+    {
+        return Err(MdocError::UntrustedIssuerCertificate);
+    }
+    affine_point_from_spki(parsed_chain[0].spki_der)
+}
+
+fn x5chain_certificates(value: &Value) -> Result<Vec<&[u8]>, MdocError> {
+    match value {
+        Value::Bytes(certificate) => Ok(vec![certificate.as_slice()]),
+        Value::Array(certificates) => {
+            if certificates.is_empty() {
+                return Err(MdocError::InvalidCertificate("empty x5chain"));
+            }
+            certificates
+                .iter()
+                .map(|certificate| expect_bytes(certificate, "x5chain certificate"))
+                .collect()
+        }
+        _ => Err(MdocError::WrongType("x5chain")),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ParsedCertificate<'a> {
+    tbs_der: &'a [u8],
+    spki_der: &'a [u8],
+    signature_der: &'a [u8],
+}
+
+#[derive(Clone, Copy)]
+struct DerTlv<'a> {
+    tag: u8,
+    value: &'a [u8],
+    full: &'a [u8],
+}
+
+fn parse_x509_certificate(certificate: &[u8]) -> Result<ParsedCertificate<'_>, MdocError> {
+    let mut certificate_input = certificate;
+    let certificate = der_read_tlv(&mut certificate_input, "certificate")?;
+    if certificate.tag != 0x30 || !certificate_input.is_empty() {
+        return Err(MdocError::InvalidCertificate("certificate sequence"));
+    }
+
+    let mut certificate_fields = certificate.value;
+    let tbs = der_read_tlv(&mut certificate_fields, "certificate.tbsCertificate")?;
+    if tbs.tag != 0x30 {
+        return Err(MdocError::InvalidCertificate("tbsCertificate sequence"));
+    }
+    let _signature_algorithm =
+        der_read_tlv(&mut certificate_fields, "certificate.signatureAlgorithm")?;
+    let signature = der_read_tlv(&mut certificate_fields, "certificate.signatureValue")?;
+    if signature.tag != 0x03 || !certificate_fields.is_empty() {
+        return Err(MdocError::InvalidCertificate("certificate signature"));
+    }
+    let signature_der = der_bit_string_bytes(signature, "certificate.signatureValue")?;
+
+    let spki_der = certificate_spki_der(tbs.value)?;
+    Ok(ParsedCertificate {
+        tbs_der: tbs.full,
+        spki_der,
+        signature_der,
+    })
+}
+
+fn certificate_spki_der(tbs_certificate: &[u8]) -> Result<&[u8], MdocError> {
+    let mut fields = tbs_certificate;
+    let first = der_read_tlv(&mut fields, "tbsCertificate.first")?;
+    if first.tag != 0xA0 {
+        fields = tbs_certificate;
+    }
+    for field in [
+        "tbsCertificate.serialNumber",
+        "tbsCertificate.signature",
+        "tbsCertificate.issuer",
+        "tbsCertificate.validity",
+        "tbsCertificate.subject",
+    ] {
+        let _ = der_read_tlv(&mut fields, field)?;
+    }
+    let spki = der_read_tlv(&mut fields, "tbsCertificate.subjectPublicKeyInfo")?;
+    if spki.tag != 0x30 {
+        return Err(MdocError::InvalidCertificate(
+            "subjectPublicKeyInfo sequence",
+        ));
+    }
+    Ok(spki.full)
+}
+
+fn der_read_tlv<'a>(input: &mut &'a [u8], label: &'static str) -> Result<DerTlv<'a>, MdocError> {
+    if input.len() < 2 {
+        return Err(MdocError::InvalidCertificate(label));
+    }
+    let original = *input;
+    let tag = original[0];
+    let first_len = original[1];
+    let (len, len_len) = if first_len & 0x80 == 0 {
+        (usize::from(first_len), 1)
+    } else {
+        let len_len = usize::from(first_len & 0x7F);
+        if len_len == 0 || len_len > std::mem::size_of::<usize>() || original.len() < 2 + len_len {
+            return Err(MdocError::InvalidCertificate(label));
+        }
+        let mut len = 0usize;
+        for byte in &original[2..2 + len_len] {
+            len = len
+                .checked_mul(256)
+                .and_then(|value| value.checked_add(usize::from(*byte)))
+                .ok_or(MdocError::InvalidCertificate(label))?;
+        }
+        (len, 1 + len_len)
+    };
+    let header_len = 1 + len_len;
+    let end = header_len
+        .checked_add(len)
+        .ok_or(MdocError::InvalidCertificate(label))?;
+    if original.len() < end {
+        return Err(MdocError::InvalidCertificate(label));
+    }
+    let value = &original[header_len..end];
+    let full = &original[..end];
+    *input = &original[end..];
+    Ok(DerTlv { tag, value, full })
+}
+
+fn der_bit_string_bytes<'a>(
+    bit_string: DerTlv<'a>,
+    label: &'static str,
+) -> Result<&'a [u8], MdocError> {
+    if bit_string.value.first() != Some(&0) {
+        return Err(MdocError::InvalidCertificate(label));
+    }
+    Ok(&bit_string.value[1..])
+}
+
+fn verify_certificate_signature(
+    certificate: &ParsedCertificate<'_>,
+    issuer: &ParsedCertificate<'_>,
+) -> Result<(), MdocError> {
+    let issuer_key = VerifyingKey::from_public_key_der(issuer.spki_der)
+        .map_err(|_| MdocError::InvalidCertificate("issuer subjectPublicKeyInfo"))?;
+    let signature = P256Signature::from_der(certificate.signature_der)
+        .map_err(|_| MdocError::InvalidCertificate("certificate signature DER"))?;
+    issuer_key
+        .verify(certificate.tbs_der, &signature)
+        .map_err(|_| MdocError::InvalidSignature("issuer x5chain"))
+}
+
+fn affine_point_from_spki(spki_der: &[u8]) -> Result<AffinePoint, MdocError> {
+    let verifying_key = VerifyingKey::from_public_key_der(spki_der)
+        .map_err(|_| MdocError::InvalidCertificate("subjectPublicKeyInfo"))?;
+    let encoded = verifying_key.to_encoded_point(false);
+    let x: [u8; 32] = encoded.x().ok_or(MdocError::InvalidCertificate(
+        "subjectPublicKeyInfo x coordinate",
+    ))?[..]
+        .try_into()
+        .map_err(|_| MdocError::InvalidCertificate("subjectPublicKeyInfo x coordinate"))?;
+    let y: [u8; 32] = encoded.y().ok_or(MdocError::InvalidCertificate(
+        "subjectPublicKeyInfo y coordinate",
+    ))?[..]
+        .try_into()
+        .map_err(|_| MdocError::InvalidCertificate("subjectPublicKeyInfo y coordinate"))?;
+    Ok(AffinePoint {
+        x: U256(x),
+        y: U256(y),
+    })
+}
+
 fn verify_signature(
     public_key: &AffinePoint,
     message: &[u8],
@@ -1400,7 +1650,7 @@ fn ecdsa_input(
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MdocCircuitStatement {
     pub issuer_input: EcdsaVerifyInput,
     pub device_input: EcdsaVerifyInput,
@@ -2862,6 +3112,15 @@ fn value_field<'a>(map: &'a [(Value, Value)], field: &'static str) -> Result<&'a
     map.iter()
         .find_map(|(key, value)| (key == &Value::Text(field.to_string())).then_some(value))
         .ok_or(MdocError::MissingField(field))
+}
+
+fn value_int_key(map: &[(Value, Value)], key: i128) -> Option<&Value> {
+    map.iter().find_map(|(candidate, value)| {
+        value_i128(candidate)
+            .ok()
+            .filter(|candidate| *candidate == key)
+            .map(|_| value)
+    })
 }
 
 fn map_field<'a>(

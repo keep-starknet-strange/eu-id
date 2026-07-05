@@ -4,7 +4,8 @@ use sha2::{Digest as _, Sha256};
 
 use ciborium::value::Value;
 use eu_id_prover::mdoc::{
-    demo_mdoc_sizing_waste, extract_pid_mdoc, prove_mdoc_circuit, verify_mdoc_circuit,
+    demo_mdoc_sizing_waste, device_authentication_bytes, device_authentication_sig_structure_hash,
+    extract_pid_mdoc, openid4vp_session_transcript, prove_mdoc_circuit, verify_mdoc_circuit,
     MdocBirthDateBinding, MdocCircuitStatement, MdocError, MdocNationalityBinding, MdocPidRequest,
 };
 use eu_id_prover::{Date, Policy};
@@ -43,6 +44,7 @@ struct FixtureOptions {
     canonical_item_order: bool,
     value_last: bool,
     protected: Vec<u8>,
+    issuer_unprotected: Option<Value>,
     device_unprotected: Value,
     extra_device_key_field: bool,
     mso_version: String,
@@ -64,6 +66,7 @@ impl Default for FixtureOptions {
             canonical_item_order: true,
             value_last: false,
             protected: PROTECTED_ES256.to_vec(),
+            issuer_unprotected: None,
             device_unprotected: map(Vec::new()),
             extra_device_key_field: false,
             mso_version: "2.0".to_string(),
@@ -129,6 +132,87 @@ fn compact_signature(sig: &P256Signature) -> Vec<u8> {
     out
 }
 
+fn der_tlv(tag: u8, value: Vec<u8>) -> Vec<u8> {
+    let mut out = vec![tag];
+    if value.len() < 128 {
+        out.push(value.len() as u8);
+    } else {
+        let len_bytes = (value.len() as u64).to_be_bytes();
+        let first = len_bytes
+            .iter()
+            .position(|byte| *byte != 0)
+            .unwrap_or(len_bytes.len() - 1);
+        out.push(0x80 | u8::try_from(len_bytes.len() - first).expect("DER length byte count"));
+        out.extend_from_slice(&len_bytes[first..]);
+    }
+    out.extend(value);
+    out
+}
+
+fn der_sequence(fields: Vec<Vec<u8>>) -> Vec<u8> {
+    der_tlv(0x30, fields.concat())
+}
+
+fn der_integer_u64(value: u64) -> Vec<u8> {
+    let bytes = value.to_be_bytes();
+    let first = bytes
+        .iter()
+        .position(|byte| *byte != 0)
+        .unwrap_or(bytes.len() - 1);
+    let mut value_bytes = bytes[first..].to_vec();
+    if value_bytes[0] & 0x80 != 0 {
+        value_bytes.insert(0, 0);
+    }
+    der_tlv(0x02, value_bytes)
+}
+
+fn der_bit_string(bytes: &[u8]) -> Vec<u8> {
+    let mut value = Vec::with_capacity(bytes.len() + 1);
+    value.push(0);
+    value.extend_from_slice(bytes);
+    der_tlv(0x03, value)
+}
+
+fn ecdsa_with_sha256_algorithm_identifier() -> Vec<u8> {
+    der_sequence(vec![der_tlv(
+        0x06,
+        vec![0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x02],
+    )])
+}
+
+fn p256_subject_public_key_info(signing_key: &SigningKey) -> Vec<u8> {
+    let point = signing_key.verifying_key().to_encoded_point(false);
+    der_sequence(vec![
+        der_sequence(vec![
+            der_tlv(0x06, vec![0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01]),
+            der_tlv(0x06, vec![0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07]),
+        ]),
+        der_bit_string(point.as_bytes()),
+    ])
+}
+
+fn self_signed_certificate_der(signing_key: &SigningKey) -> Vec<u8> {
+    let signature_algorithm = ecdsa_with_sha256_algorithm_identifier();
+    let tbs = der_sequence(vec![
+        der_tlv(0xA0, der_integer_u64(2)),
+        der_integer_u64(1),
+        signature_algorithm.clone(),
+        der_sequence(Vec::new()),
+        der_sequence(vec![
+            der_tlv(0x17, b"260101000000Z".to_vec()),
+            der_tlv(0x17, b"300101000000Z".to_vec()),
+        ]),
+        der_sequence(Vec::new()),
+        p256_subject_public_key_info(signing_key),
+    ]);
+    let sig: P256Signature = signing_key.sign(&tbs);
+    der_sequence(vec![
+        tbs,
+        signature_algorithm,
+        der_bit_string(sig.to_der().as_bytes()),
+    ])
+}
+
 fn tdate(text: &str) -> Value {
     Value::Tag(0, Box::new(text.into()))
 }
@@ -187,6 +271,10 @@ fn sig_structure(protected: &[u8], payload: &[u8]) -> Vec<u8> {
         Value::Bytes(Vec::new()),
         Value::Bytes(payload.to_vec()),
     ]))
+}
+
+fn test_session_transcript() -> Vec<u8> {
+    openid4vp_session_transcript(b"session-transcript-123")
 }
 
 fn cose_sign1(
@@ -326,17 +414,22 @@ fn fixture_with_options(
     }
     let mso = cbor(map(mso_entries));
 
+    let issuer_unprotected = options
+        .issuer_unprotected
+        .unwrap_or_else(|| map(vec![("issuerKey".into(), issuer_cose_key)]));
     let (issuer_auth, issuer_sig_structure, issuer_signature) = cose_sign1(
         &issuer_signing_key,
         &options.protected,
-        map(vec![("issuerKey".into(), issuer_cose_key)]),
+        issuer_unprotected,
         &mso,
     );
+    let device_auth_payload =
+        device_authentication_bytes(session_transcript, DOCTYPE).expect("device auth bytes");
     let (device_signature_cose, device_sig_structure, device_signature) = cose_sign1(
         &device_signing_key,
         &options.protected,
         options.device_unprotected,
-        session_transcript,
+        &device_auth_payload,
     );
 
     let doc = cbor(map(vec![
@@ -387,6 +480,7 @@ fn request(session_transcript: Vec<u8>) -> MdocPidRequest {
         birth_date_element: BIRTH_DATE.to_string(),
         nationality_element: NATIONALITY.to_string(),
         session_transcript,
+        trusted_issuer_certificates: Vec::new(),
     }
 }
 
@@ -400,8 +494,81 @@ fn policy_on(year: u32, month: u32, day: u32) -> Policy {
 }
 
 #[test]
+fn device_authentication_bytes_are_tag24_wrapped_and_embed_session_transcript_array() {
+    let transcript = openid4vp_session_transcript(b"handover-info");
+    let payload = device_authentication_bytes(&transcript, DOCTYPE).expect("payload builds");
+
+    let Value::Tag(24, tagged) =
+        ciborium::de::from_reader::<Value, _>(&payload[..]).expect("payload decodes")
+    else {
+        panic!("DeviceAuthenticationBytes must be CBOR tag 24");
+    };
+    let Value::Bytes(device_auth_cbor) = *tagged else {
+        panic!("DeviceAuthenticationBytes tag must wrap a bstr");
+    };
+    let Value::Array(device_auth) = ciborium::de::from_reader::<Value, _>(&device_auth_cbor[..])
+        .expect("DeviceAuthentication decodes")
+    else {
+        panic!("DeviceAuthentication must be an array");
+    };
+
+    assert_eq!(device_auth.len(), 4);
+    assert_eq!(
+        device_auth[0],
+        Value::Text("DeviceAuthentication".to_string())
+    );
+    assert!(
+        matches!(device_auth[1], Value::Array(_)),
+        "SessionTranscript must be embedded as a CBOR array data item, not opaque bytes"
+    );
+    assert_eq!(device_auth[2], Value::Text(DOCTYPE.to_string()));
+
+    let Value::Bytes(device_namespaces_bytes) = &device_auth[3] else {
+        panic!("DeviceNameSpacesBytes must be a bstr");
+    };
+    assert!(
+        matches!(
+            ciborium::de::from_reader::<Value, _>(&device_namespaces_bytes[..])
+                .expect("DeviceNameSpacesBytes decodes"),
+            Value::Tag(24, _)
+        ),
+        "DeviceNameSpacesBytes must carry tag-24 wrapped namespaces"
+    );
+
+    let Value::Array(transcript_array) = &device_auth[1] else {
+        unreachable!("checked above");
+    };
+    assert_eq!(transcript_array.len(), 3);
+    assert_eq!(transcript_array[0], Value::Null);
+    assert_eq!(transcript_array[1], Value::Null);
+    assert!(matches!(&transcript_array[2], Value::Array(handover) if handover.len() == 2));
+}
+
+#[test]
+fn transcript_and_doctype_mutations_change_device_authentication_hash() {
+    let transcript = openid4vp_session_transcript(b"handover-info");
+    let other_transcript = openid4vp_session_transcript(b"other-handover-info");
+
+    let expected =
+        device_authentication_sig_structure_hash(&transcript, DOCTYPE).expect("hash builds");
+
+    assert_ne!(
+        expected,
+        device_authentication_sig_structure_hash(&other_transcript, DOCTYPE)
+            .expect("hash builds for other transcript"),
+        "transcript mutation must change the detached-payload signature hash"
+    );
+    assert_ne!(
+        expected,
+        device_authentication_sig_structure_hash(&transcript, "wrong.doctype")
+            .expect("hash builds for other docType"),
+        "docType mutation must change the detached-payload signature hash"
+    );
+}
+
+#[test]
 fn extracts_pid_items_mso_device_key_and_signatures() {
-    let session_transcript = b"session-transcript-123".to_vec();
+    let session_transcript = test_session_transcript();
     let fixture = valid_fixture(&session_transcript);
 
     let extracted =
@@ -459,7 +626,7 @@ fn phase0b_sizing_waste_stays_below_refactor_threshold() {
 
 #[test]
 fn rejects_item_digest_mismatch() {
-    let session_transcript = b"session-transcript-123".to_vec();
+    let session_transcript = test_session_transcript();
     let fixture = valid_fixture_with_birth_digest(&session_transcript, Some([0xAA; 32]));
 
     let err = extract_pid_mdoc(&fixture.doc, &request(session_transcript))
@@ -476,17 +643,20 @@ fn rejects_item_digest_mismatch() {
 
 #[test]
 fn rejects_wrong_session_transcript() {
-    let fixture = valid_fixture(b"session-transcript-123");
+    let fixture = valid_fixture(&test_session_transcript());
 
-    let err = extract_pid_mdoc(&fixture.doc, &request(b"session-transcript-456".to_vec()))
-        .expect_err("wrong transcript rejects");
+    let err = extract_pid_mdoc(
+        &fixture.doc,
+        &request(openid4vp_session_transcript(b"session-transcript-456")),
+    )
+    .expect_err("wrong transcript rejects");
 
     assert!(matches!(err, MdocError::DeviceAuthPayloadMismatch));
 }
 
 #[test]
 fn rejects_wrong_requested_doctype() {
-    let session_transcript = b"session-transcript-123".to_vec();
+    let session_transcript = test_session_transcript();
     let fixture = valid_fixture(&session_transcript);
     let mut request = request(session_transcript);
     request.doctype = "wrong.doctype".to_string();
@@ -498,7 +668,7 @@ fn rejects_wrong_requested_doctype() {
 
 #[test]
 fn rejects_non_profile_requested_namespace() {
-    let session_transcript = b"session-transcript-123".to_vec();
+    let session_transcript = test_session_transcript();
     let fixture = valid_fixture(&session_transcript);
     let mut request = request(session_transcript);
     request.namespace = "wrong.namespace".to_string();
@@ -509,8 +679,40 @@ fn rejects_non_profile_requested_namespace() {
 }
 
 #[test]
+fn issuer_x5chain_requires_trusted_root_and_supplies_issuer_key() {
+    let session_transcript = test_session_transcript();
+    let issuer_signing_key =
+        SigningKey::from_bytes((&[7u8; 32]).into()).expect("issuer signing key");
+    let issuer_certificate = self_signed_certificate_der(&issuer_signing_key);
+    let fixture = fixture_with_options(
+        &session_transcript,
+        "1990-07-15".into(),
+        "DE".into(),
+        FixtureOptions {
+            issuer_unprotected: Some(map(vec![(
+                Value::from(33),
+                Value::Bytes(issuer_certificate.clone()),
+            )])),
+            ..FixtureOptions::default()
+        },
+    );
+
+    let err = extract_pid_mdoc(&fixture.doc, &request(session_transcript.clone()))
+        .expect_err("untrusted root rejects");
+    assert_eq!(err, MdocError::UntrustedIssuerCertificate);
+
+    let mut trusted_request = request(session_transcript);
+    trusted_request
+        .trusted_issuer_certificates
+        .push(issuer_certificate);
+    let extracted =
+        extract_pid_mdoc(&fixture.doc, &trusted_request).expect("trusted x5chain extracts");
+    assert_eq!(extracted.issuer_key, fixture.issuer_key);
+}
+
+#[test]
 fn rejects_non_bstr_tag24() {
-    let session_transcript = b"session-transcript-123".to_vec();
+    let session_transcript = test_session_transcript();
     let options = FixtureOptions {
         tag24_bstr: false,
         ..FixtureOptions::default()
@@ -530,7 +732,7 @@ fn rejects_non_bstr_tag24() {
 
 #[test]
 fn rejects_bad_protected_header() {
-    let session_transcript = b"session-transcript-123".to_vec();
+    let session_transcript = test_session_transcript();
     let options = FixtureOptions {
         protected: vec![0xA1, 0x01, 0x27],
         ..FixtureOptions::default()
@@ -553,7 +755,7 @@ fn rejects_bad_protected_header() {
 
 #[test]
 fn rejects_short_salt() {
-    let session_transcript = b"session-transcript-123".to_vec();
+    let session_transcript = test_session_transcript();
     let options = FixtureOptions {
         birth_random: vec![7; 8],
         ..FixtureOptions::default()
@@ -573,7 +775,7 @@ fn rejects_short_salt() {
 
 #[test]
 fn accepts_legacy_noncanonical_issuer_signed_item_key_order() {
-    let session_transcript = b"session-transcript-123".to_vec();
+    let session_transcript = test_session_transcript();
     let options = FixtureOptions {
         canonical_item_order: false,
         value_last: true,
@@ -593,7 +795,7 @@ fn accepts_legacy_noncanonical_issuer_signed_item_key_order() {
 
 #[test]
 fn rejects_v2_noncanonical_issuer_signed_item_order() {
-    let session_transcript = b"session-transcript-123".to_vec();
+    let session_transcript = test_session_transcript();
     let options = FixtureOptions {
         canonical_item_order: false,
         value_last: true,
@@ -617,7 +819,7 @@ fn rejects_v2_noncanonical_issuer_signed_item_order() {
 
 #[test]
 fn rejects_digest_id_over_u32() {
-    let session_transcript = b"session-transcript-123".to_vec();
+    let session_transcript = test_session_transcript();
     let options = FixtureOptions {
         birth_item_digest_id: u64::from(u32::MAX) + 1,
         ..FixtureOptions::default()
@@ -637,7 +839,7 @@ fn rejects_digest_id_over_u32() {
 
 #[test]
 fn rejects_device_unprotected_not_map() {
-    let session_transcript = b"session-transcript-123".to_vec();
+    let session_transcript = test_session_transcript();
     let options = FixtureOptions {
         device_unprotected: "not-a-map".into(),
         ..FixtureOptions::default()
@@ -657,7 +859,7 @@ fn rejects_device_unprotected_not_map() {
 
 #[test]
 fn rejects_extra_cose_key_field() {
-    let session_transcript = b"session-transcript-123".to_vec();
+    let session_transcript = test_session_transcript();
     let options = FixtureOptions {
         extra_device_key_field: true,
         ..FixtureOptions::default()
@@ -677,7 +879,7 @@ fn rejects_extra_cose_key_field() {
 
 #[test]
 fn rejects_missing_validity_info() {
-    let session_transcript = b"session-transcript-123".to_vec();
+    let session_transcript = test_session_transcript();
     let options = FixtureOptions {
         validity_info: None,
         ..FixtureOptions::default()
@@ -697,7 +899,7 @@ fn rejects_missing_validity_info() {
 
 #[test]
 fn rejects_malformed_tdate() {
-    let session_transcript = b"session-transcript-123".to_vec();
+    let session_transcript = test_session_transcript();
     let options = FixtureOptions {
         validity_info: Some(map(vec![
             ("signed".into(), tdate("bad")),
@@ -721,7 +923,7 @@ fn rejects_malformed_tdate() {
 
 #[test]
 fn rejects_mso_doctype_mismatch() {
-    let session_transcript = b"session-transcript-123".to_vec();
+    let session_transcript = test_session_transcript();
     let options = FixtureOptions {
         mso_doctype: "wrong.doctype".to_string(),
         ..FixtureOptions::default()
@@ -742,7 +944,7 @@ fn rejects_mso_doctype_mismatch() {
 #[test]
 fn rejects_unsupported_mso_version() {
     // Profile v1 ("1.0") and v2 ("2.0") are accepted; anything else is rejected.
-    let session_transcript = b"session-transcript-123".to_vec();
+    let session_transcript = test_session_transcript();
     let options = FixtureOptions {
         mso_version: "3.0".to_string(),
         ..FixtureOptions::default()
@@ -762,7 +964,7 @@ fn rejects_unsupported_mso_version() {
 
 #[test]
 fn statement_rejects_expired_credential() {
-    let session_transcript = b"session-transcript-123".to_vec();
+    let session_transcript = test_session_transcript();
     let options = FixtureOptions {
         validity_info: Some(validity_info(
             "2026-01-01T00:00:00Z",
@@ -788,7 +990,7 @@ fn statement_rejects_expired_credential() {
 
 #[test]
 fn statement_rejects_not_yet_valid_credential() {
-    let session_transcript = b"session-transcript-123".to_vec();
+    let session_transcript = test_session_transcript();
     let options = FixtureOptions {
         validity_info: Some(validity_info(
             "2026-01-01T00:00:00Z",
@@ -816,7 +1018,7 @@ fn statement_rejects_not_yet_valid_credential() {
 fn statement_accepts_text_birth_date() {
     // Profile v2: a text (`tstr`) `YYYY-MM-DD` birth date builds a valid
     // statement with a `Text` binding (v1 rejected text values).
-    let session_transcript = b"session-transcript-123".to_vec();
+    let session_transcript = test_session_transcript();
     let fixture = valid_fixture(&session_transcript);
     let extracted = extract_pid_mdoc(&fixture.doc, &request(session_transcript))
         .expect("text birth date extracts");
@@ -834,7 +1036,7 @@ fn statement_accepts_text_birth_date() {
 fn statement_accepts_text_nationality() {
     // Profile v2: an alpha-2 (`tstr`) nationality builds a valid statement with
     // an `Alpha2` binding (v1 rejected text values).
-    let session_transcript = b"session-transcript-123".to_vec();
+    let session_transcript = test_session_transcript();
     let fixture = fixture_with_options(
         &session_transcript,
         Value::Bytes(vec![0x07, 0xC6, 7, 15]),
@@ -855,7 +1057,7 @@ fn statement_accepts_text_nationality() {
 
 #[test]
 fn statement_carries_mso_binding_offsets() {
-    let session_transcript = b"session-transcript-123".to_vec();
+    let session_transcript = test_session_transcript();
     let fixture = valid_fixture(&session_transcript);
     let extracted =
         extract_pid_mdoc(&fixture.doc, &request(session_transcript)).expect("mdoc extracts");
@@ -897,7 +1099,7 @@ fn statement_carries_mso_binding_offsets() {
 #[test]
 #[ignore = "slow: proves rejection for validity-window policy tamper"]
 fn prove_rejects_policy_after_valid_until_when_statement_guard_is_bypassed() {
-    let session_transcript = b"session-transcript-123".to_vec();
+    let session_transcript = test_session_transcript();
     let options = FixtureOptions {
         validity_info: Some(validity_info(
             "2026-01-01T00:00:00Z",
@@ -936,7 +1138,7 @@ fn statement_rejects_mispointed_value_window() {
     // host-side guard is byte-equality at the prover-supplied offset, so a
     // mispointed offset (whose bytes do not match the parsed value) still
     // rejects.
-    let session_transcript = b"session-transcript-123".to_vec();
+    let session_transcript = test_session_transcript();
     let fixture = circuit_fixture(&session_transcript);
     let mut extracted =
         extract_pid_mdoc(&fixture.doc, &request(session_transcript)).expect("binary mdoc extracts");
@@ -954,7 +1156,7 @@ fn statement_rejects_mispointed_value_window() {
 #[test]
 #[ignore = "slow: proves isolated mdoc circuit profile"]
 fn isolated_mdoc_circuit_profile_proves_and_verifies() {
-    let session_transcript = b"session-transcript-123".to_vec();
+    let session_transcript = test_session_transcript();
     let fixture = circuit_fixture(&session_transcript);
     let extracted = extract_pid_mdoc(&fixture.doc, &request(session_transcript))
         .expect("circuit profile mdoc extracts");
@@ -970,7 +1172,7 @@ fn isolated_mdoc_circuit_profile_proves_and_verifies() {
 #[test]
 #[ignore = "slow: proves rejection for digest membership tamper"]
 fn digest_membership_offset_swap_rejects_in_proof() {
-    let session_transcript = b"session-transcript-123".to_vec();
+    let session_transcript = test_session_transcript();
     let fixture = valid_fixture(&session_transcript);
     let extracted =
         extract_pid_mdoc(&fixture.doc, &request(session_transcript)).expect("mdoc extracts");
@@ -996,7 +1198,7 @@ fn digest_membership_offset_swap_rejects_in_proof() {
 #[test]
 #[ignore = "slow: proves rejection for deviceKey binding tamper"]
 fn device_key_binding_offset_rejects_in_proof() {
-    let session_transcript = b"session-transcript-123".to_vec();
+    let session_transcript = test_session_transcript();
     let fixture = valid_fixture(&session_transcript);
     let extracted =
         extract_pid_mdoc(&fixture.doc, &request(session_transcript)).expect("mdoc extracts");
