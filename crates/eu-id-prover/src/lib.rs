@@ -98,6 +98,9 @@ mod shape_dump;
 
 pub use credential::Credential;
 pub use generator::{IssuerKey, PipelineWitness, Policy, SignedCredential};
+pub use mdoc::{
+    MdocCircuitProof as MdocProof, MdocCircuitStatement as MdocStatement, MdocPidRequest,
+};
 pub use nonce::{
     nonce_signature_message, prove_nonce_signature, verify_nonce_signature, NonceSignatureProof,
     NonceSignatureStatement,
@@ -113,6 +116,24 @@ pub use predicates::Date;
 pub use predicates::all_nationality_codes;
 
 use serde::{Deserialize, Serialize};
+
+/// Build and prove the product mdoc circuit from the full document, verifier
+/// request, and public policy. Returns both the proof and verifier statement.
+pub fn prove_mdoc(
+    document: &[u8],
+    request: &MdocPidRequest,
+    policy: Policy,
+) -> Result<(MdocProof, MdocStatement), Error> {
+    let extracted = mdoc::extract_pid_mdoc(document, request).map_err(Error::Mdoc)?;
+    let statement = MdocStatement::from_extracted(&extracted, policy).map_err(Error::Mdoc)?;
+    let proof = mdoc::prove_mdoc_circuit(&extracted, &statement)?;
+    Ok((proof, statement))
+}
+
+/// Verify a product mdoc proof against its public mdoc statement.
+pub fn verify_mdoc(proof: &MdocProof, statement: &MdocStatement) -> Result<(), Error> {
+    mdoc::verify_mdoc_circuit(proof, statement)
+}
 
 #[cfg(not(feature = "ec-coprocessor"))]
 const NONCE_P256_PREPROCESSED_NAMESPACE: &str = "nonce_p256";
@@ -427,6 +448,8 @@ pub enum Error {
     /// Nationality predicate preparation (input validation or witness generation)
     /// failed.
     NatPrepare(predicates::NatError),
+    /// mdoc extraction or statement construction failed before proving.
+    Mdoc(mdoc::MdocError),
     /// The shared STARK prover failed.
     Prove(String),
     /// The verifier's expected ECDSA statement (issuer key + signature) does not

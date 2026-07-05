@@ -288,6 +288,15 @@ pub struct ZkWitness {
     pub digest_ids: std::collections::HashMap<String, u32>,
 }
 
+/// The PRIVATE witness for the product mdoc proof path.
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct ZkMdocWitness {
+    /// Full CBOR mdoc document returned by the wallet.
+    pub document: Vec<u8>,
+    /// Trusted issuer root certificates accepted for COSE header 33 `x5chain`.
+    pub trusted_issuer_certificates: Vec<Vec<u8>>,
+}
+
 /// The verdict returned by [`verify_identity`].
 #[derive(uniffi::Record, Clone, Debug)]
 pub struct ZkVerifyResult {
@@ -379,6 +388,13 @@ struct ProofEnvelope {
     stark_proof: Vec<u8>,
 }
 
+#[derive(Serialize, Deserialize)]
+struct MdocProofEnvelope {
+    statement_bytes: Vec<u8>,
+    mdoc_statement: eu_id_prover::MdocStatement,
+    stark_proof: Vec<u8>,
+}
+
 /// Stack size for the dedicated prover/verifier thread. The combined prover
 /// overflows the small default worker-thread stack with `EXC_BAD_ACCESS`; 32 MiB
 /// is the headroom the FFI harness established on device (ROADMAP_E2E §7.2).
@@ -424,7 +440,7 @@ fn map_prover_error(e: eu_id_prover::Error) -> ZkError {
             "the holder's nationality is not in the accepted set [{e:?}]"
         )),
         // Other witness-generation / proving failures (bad signature, internal).
-        P256Prepare(_) | SignatureInvalid | Prove(_) | CoprocessorWitness(_) => {
+        P256Prepare(_) | SignatureInvalid | Prove(_) | Mdoc(_) | CoprocessorWitness(_) => {
             ZkError::Prove(format!("{e:?}"))
         }
         // Verifier-side rejections (only reachable from the verify path).
@@ -552,6 +568,115 @@ pub fn verify_identity(
     })
 }
 
+fn mdoc_request(
+    statement: &ZkPublicStatement,
+    witness: &ZkMdocWitness,
+) -> eu_id_prover::MdocPidRequest {
+    let contract = zk_contract_v1();
+    eu_id_prover::MdocPidRequest {
+        doctype: statement.doctype.clone(),
+        namespace: statement.namespace.clone(),
+        birth_date_element: contract.element_birth_date,
+        nationality_element: contract.element_nationality,
+        session_transcript: statement.nonce.clone(),
+        trusted_issuer_certificates: witness.trusted_issuer_certificates.clone(),
+    }
+}
+
+fn mdoc_statement_matches_public_statement(
+    mdoc_statement: &eu_id_prover::MdocStatement,
+    statement: &ZkPublicStatement,
+) -> Result<bool, ZkError> {
+    let policy = mapping::to_policy(statement)?;
+    if mdoc_statement.policy != policy {
+        return Ok(false);
+    }
+
+    let issuer_x: [u8; 32] = statement
+        .issuer_key_x
+        .as_slice()
+        .try_into()
+        .map_err(|_| ZkError::InvalidInput("issuer_key_x must be 32 bytes".to_string()))?;
+    let issuer_y: [u8; 32] = statement
+        .issuer_key_y
+        .as_slice()
+        .try_into()
+        .map_err(|_| ZkError::InvalidInput("issuer_key_y must be 32 bytes".to_string()))?;
+    if mdoc_statement.issuer_input.public_key.x.0 != issuer_x
+        || mdoc_statement.issuer_input.public_key.y.0 != issuer_y
+    {
+        return Ok(false);
+    }
+
+    let expected_device_hash = eu_id_prover::mdoc::device_authentication_sig_structure_hash(
+        &statement.nonce,
+        &statement.doctype,
+    )
+    .map_err(|e| ZkError::InvalidInput(format!("invalid DeviceAuthentication input: {e:?}")))?;
+    if mdoc_statement.device_input.message_hash.0 != expected_device_hash {
+        return Ok(false);
+    }
+
+    Ok(true)
+}
+
+#[uniffi::export]
+pub fn prove_mdoc_pid(
+    statement: ZkPublicStatement,
+    witness: ZkMdocWitness,
+) -> Result<Vec<u8>, ZkError> {
+    on_large_stack(move || {
+        let policy = mapping::to_policy(&statement)?;
+        let request = mdoc_request(&statement, &witness);
+        let (proof, mdoc_statement) = eu_id_prover::prove_mdoc(&witness.document, &request, policy)
+            .map_err(map_prover_error)?;
+        let stark_proof_bincode = bincode::serialize(&proof)
+            .map_err(|e| ZkError::Prove(format!("failed to serialize mdoc proof: {e}")))?;
+        let stark_proof = compress_stark_proof_for_ffi(&stark_proof_bincode)?;
+
+        let envelope = MdocProofEnvelope {
+            statement_bytes: encode_statement(&statement),
+            mdoc_statement,
+            stark_proof,
+        };
+        bincode::serialize(&envelope)
+            .map_err(|e| ZkError::Prove(format!("failed to serialize mdoc proof envelope: {e}")))
+    })
+}
+
+#[uniffi::export]
+pub fn verify_mdoc_pid(
+    statement: ZkPublicStatement,
+    proof: Vec<u8>,
+) -> Result<ZkVerifyResult, ZkError> {
+    on_large_stack(move || {
+        let envelope: MdocProofEnvelope = match bincode::deserialize(&proof) {
+            Ok(envelope) => envelope,
+            Err(_) => return Ok(ZkVerifyResult { ok: false }),
+        };
+        if envelope.statement_bytes != encode_statement(&statement) {
+            return Ok(ZkVerifyResult { ok: false });
+        }
+        if !mdoc_statement_matches_public_statement(&envelope.mdoc_statement, &statement)? {
+            return Ok(ZkVerifyResult { ok: false });
+        }
+
+        let stark_proof_bincode = match decompress_stark_proof_from_ffi(&envelope.stark_proof) {
+            Ok(bytes) => bytes,
+            Err(_) => return Ok(ZkVerifyResult { ok: false }),
+        };
+        let stark_proof: eu_id_prover::MdocProof = match bincode::deserialize(&stark_proof_bincode)
+        {
+            Ok(stark_proof) => stark_proof,
+            Err(_) => return Ok(ZkVerifyResult { ok: false }),
+        };
+
+        Ok(ZkVerifyResult {
+            ok: eu_id_prover::verify_mdoc(&stark_proof, &envelope.mdoc_statement).is_ok(),
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -585,6 +710,48 @@ mod tests {
             nationalities: vec![300],
             digest_ids: std::collections::HashMap::new(),
         }
+    }
+
+    fn honest_mdoc_statement() -> (ZkPublicStatement, eu_id_prover::mdoc::MdocCircuitStatement) {
+        let fixture = eu_id_prover::mdoc::demo_mdoc_circuit_fixture();
+        let issuer_key = fixture.statement.issuer_input.public_key.clone();
+        (
+            ZkPublicStatement {
+                spec_id: "stwo-euid-pid-v1".to_string(),
+                version: 1,
+                doctype: "eu.europa.ec.eudi.pid.1".to_string(),
+                namespace: "eu.europa.ec.eudi.pid.1".to_string(),
+                issuer_key_x: issuer_key.x.0.to_vec(),
+                issuer_key_y: issuer_key.y.0.to_vec(),
+                today_epoch_day: 20637, // 2026-07-03
+                nonce: fixture.request.session_transcript,
+                predicate_mode: PredicateMode::And,
+                age_threshold_years: Some(18),
+                accepted_numeric_countries: Some(vec![276, 250]), // DE, FR
+                nat_mode: NatMode::Any,
+            },
+            fixture.statement,
+        )
+    }
+
+    #[test]
+    fn mdoc_statement_match_recomputes_phase_e_device_authentication_hash() {
+        let (statement, mdoc_statement) = honest_mdoc_statement();
+        assert!(mdoc_statement_matches_public_statement(&mdoc_statement, &statement).unwrap());
+
+        let mut changed_transcript = statement.clone();
+        changed_transcript.nonce = eu_id_prover::mdoc::openid4vp_session_transcript(b"other");
+        assert!(
+            !mdoc_statement_matches_public_statement(&mdoc_statement, &changed_transcript).unwrap(),
+            "transcript drift must change the expected device-auth hash"
+        );
+
+        let mut changed_doctype = statement.clone();
+        changed_doctype.doctype = "wrong.doctype".to_string();
+        assert!(
+            !mdoc_statement_matches_public_statement(&mdoc_statement, &changed_doctype).unwrap(),
+            "docType drift must change the expected device-auth hash"
+        );
     }
 
     /// An honest statement: today 2020-01-01, age threshold 18, accepted set

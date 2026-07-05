@@ -1,4 +1,45 @@
-# WO-A3 Hybrid SHA Implementation
+# Phase E ISO DeviceAuthentication + x5chain
+
+Source: `/Users/lucas/eu-id/tasks/mdoc-v2-port-plan.md`, §4-E.
+Worktree: `/Users/lucas/eu-id/.claude/worktrees/mdoc-v2-port`.
+Branch: `feat/mdoc-v2-port`.
+Baseline verified: `f286d3c9 feat(mdoc): port phase D in-circuit MSO bindings`, clean worktree.
+
+- [x] Verify branch, HEAD, and clean worktree before edits.
+- [x] Read the Phase E scope, current lessons, and reference diff for design context.
+- [x] Add failing tests for spec-exact `DeviceAuthenticationBytes = #6.24(bstr .cbor DeviceAuthentication)`.
+- [x] Add/port a transcript/docType mutation test that flips the device-auth hash or rejects extraction.
+- [x] Port DeviceAuthentication helper/extraction/demo support onto the current shared-SHA/coprocessor backend.
+- [x] Add host-side x5chain leaf parse + trusted-root check only; keep in-circuit x509 out of scope.
+- [x] Run focused red/green tests, then format and workspace verification.
+- [x] Record review notes and create the required single commit.
+
+## Phase E Review
+
+Implemented spec-exact DeviceAuthentication payload construction:
+`DeviceAuthenticationBytes` is an outer tag-24 bstr wrapping the
+`DeviceAuthentication` array, and OpenID4VP transcripts are encoded as
+`[null, null, ["OpenID4VPHandover", sha256(handover_info)]]` data items rather
+than opaque bytes. Demo mdoc fixtures and test fixtures now sign those exact
+bytes. SDK mdoc verification recomputes the expected device-auth Sig_structure
+hash from the public transcript and docType before accepting the embedded mdoc
+statement.
+
+x5chain support is host-only: issuerAuth unprotected label 33 is parsed as a
+leaf/root chain, certificate signatures are checked between adjacent certs, the
+final DER must match a supplied trusted root, and only the leaf SPKI is used as
+the issuer key. No x509 logic was added to the circuit.
+
+Verification:
+- RED: `rtk proxy cargo test -p eu-id-prover --test mdoc_support device_authentication_bytes_are_tag24_wrapped_and_embed_session_transcript_array` failed for missing helpers/trust-root field before implementation.
+- RED: `rtk proxy cargo test -p sdk mdoc_statement_match_recomputes_phase_e_device_authentication_hash` failed for missing SDK mdoc recompute path before implementation.
+- GREEN: `rtk proxy cargo test -p eu-id-prover --test mdoc_support`
+- GREEN: `rtk proxy cargo test -p sdk`
+- GREEN: `rtk proxy cargo fmt --check`
+- GREEN: `rtk proxy cargo test --workspace`
+- GREEN: `rtk proxy cargo test -p eu-id-prover --no-default-features --test mdoc_support` (existing no-default public-digest warnings only).
+
+# WO-M1 Coprocessor Mainline Merge
 
 Source of truth: `/Users/lucas/eu-id/tasks/parity/WO-A3-hybrid-sha-impl.md`.
 Worktree: `/Users/lucas/eu-id/.claude/worktrees/a3-hybrid-sha` on `feat/a3-hybrid-sha`.
