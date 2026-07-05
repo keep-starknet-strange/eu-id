@@ -89,6 +89,8 @@ pub mod credential;
 pub mod fixtures;
 pub mod generator;
 pub mod mdoc;
+mod mdoc_validity;
+mod mdoc_window_bind;
 pub mod nonce;
 mod public_digest_bind;
 #[cfg(test)]

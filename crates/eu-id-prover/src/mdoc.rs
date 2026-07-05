@@ -58,6 +58,12 @@ use stwo_sha256::trace::min_log_size;
 use stwo_sha256::witness::compute_sha256_witness;
 
 use crate::generator::{Policy, SHA_GROUP_WIDTH};
+use crate::mdoc_validity::{
+    mdoc_validity_rows, MdocValidityBind, MdocValidityInteractionClaim, MdocValidityRow,
+};
+use crate::mdoc_window_bind::{
+    mdoc_window_bind_rows, MdocWindowBind, MdocWindowBindInteractionClaim, MdocWindowBindRow,
+};
 use crate::public_digest_bind::{PublicDigestBind, PublicDigestBindInteractionClaim};
 use crate::Error;
 
@@ -259,6 +265,7 @@ pub fn demo_mdoc_module_shapes() -> Result<Vec<MdocModuleShape>, Error> {
     let device_digest = SharedDigestRelation::new();
     let birth_digest = SharedDigestRelation::new();
     let nat_digest = SharedDigestRelation::new();
+    let issuer_field = SharedFieldRelation::new();
     let birth_field = SharedFieldRelation::new();
     let nat_field = SharedFieldRelation::new();
     let sha_table_relations = SharedShaTableRelations::new();
@@ -267,6 +274,7 @@ pub fn demo_mdoc_module_shapes() -> Result<Vec<MdocModuleShape>, Error> {
     #[cfg(not(feature = "ec-coprocessor"))]
     let device_scalar_z = SharedScalarZRelation::new();
 
+    let issuer_exposure = issuer_mso_exposure(statement);
     let birth_exposure = birth_date_exposure(statement);
     let nat_exposure = nationality_exposure(statement);
 
@@ -280,7 +288,7 @@ pub fn demo_mdoc_module_shapes() -> Result<Vec<MdocModuleShape>, Error> {
         .with_preprocessed_namespace("mdoc/device")
         .with_z_binding(device_scalar_z.clone());
     let sha_table_multiplicities = ShaTableMultiplicities::from_consumers(&[
-        (&issuer_sha_witness, FieldExposure::empty()),
+        (&issuer_sha_witness, issuer_exposure.clone()),
         (&device_sha_witness, FieldExposure::empty()),
         (&birth_sha_witness, birth_exposure.clone()),
         (&nat_sha_witness, nat_exposure.clone()),
@@ -288,7 +296,8 @@ pub fn demo_mdoc_module_shapes() -> Result<Vec<MdocModuleShape>, Error> {
     let sha_tables = ShaTablesProver::new(sha_table_multiplicities, sha_table_relations.clone());
     let issuer_sha = Sha256Prover::new(&issuer_sha_witness, shared_sha_log, SHA_GROUP_WIDTH)
         .with_shared_tables(sha_table_relations.clone())
-        .with_digest_handle(issuer_digest.clone());
+        .with_digest_handle(issuer_digest.clone())
+        .with_field_handle(issuer_exposure.clone(), issuer_field.clone());
     let device_sha = Sha256Prover::new(&device_sha_witness, shared_sha_log, SHA_GROUP_WIDTH)
         .with_shared_tables(sha_table_relations.clone())
         .with_digest_handle(device_digest.clone());
@@ -329,8 +338,19 @@ pub fn demo_mdoc_module_shapes() -> Result<Vec<MdocModuleShape>, Error> {
     #[cfg(feature = "ec-coprocessor")]
     let device_public_digest_bind =
         PublicDigestBind::new(statement.device_input.message_hash.0, device_digest.clone());
-    let birth_digest_bind = PublicDigestBind::new(statement.birth_date_digest, birth_digest);
-    let nat_digest_bind = PublicDigestBind::new(statement.nationality_digest, nat_digest);
+    let mdoc_window_bind = MdocWindowBind::new(
+        mdoc_window_bind_rows_from(statement, Some(&extracted.issuer_sig_structure)),
+        issuer_field.clone(),
+        birth_field.clone(),
+        nat_field.clone(),
+        birth_digest.clone(),
+        nat_digest.clone(),
+    );
+    let mdoc_validity = MdocValidityBind::new(
+        statement.policy.current_date,
+        mdoc_validity_rows_from(statement, Some(&extracted.issuer_sig_structure)),
+        issuer_field,
+    );
     #[cfg(feature = "ec-coprocessor")]
     let coprocessor = MdocCoprocessorBindingProver::new(
         statement.issuer_input.clone(),
@@ -397,16 +417,16 @@ pub fn demo_mdoc_module_shapes() -> Result<Vec<MdocModuleShape>, Error> {
             layout: birth_sha.layout(),
         },
         MdocModuleShape {
-            name: "mdoc_birth_digest_bind",
-            layout: birth_digest_bind.layout(),
-        },
-        MdocModuleShape {
             name: "mdoc_nat_sha",
             layout: nat_sha.layout(),
         },
         MdocModuleShape {
-            name: "mdoc_nat_digest_bind",
-            layout: nat_digest_bind.layout(),
+            name: "mdoc_window_bind",
+            layout: mdoc_window_bind.layout(),
+        },
+        MdocModuleShape {
+            name: "mdoc_validity",
+            layout: mdoc_validity.layout(),
         },
         MdocModuleShape {
             name: "mdoc_age",
@@ -444,16 +464,16 @@ pub fn demo_mdoc_module_shapes() -> Result<Vec<MdocModuleShape>, Error> {
             layout: birth_sha.layout(),
         },
         MdocModuleShape {
-            name: "mdoc_birth_digest_bind",
-            layout: birth_digest_bind.layout(),
-        },
-        MdocModuleShape {
             name: "mdoc_nat_sha",
             layout: nat_sha.layout(),
         },
         MdocModuleShape {
-            name: "mdoc_nat_digest_bind",
-            layout: nat_digest_bind.layout(),
+            name: "mdoc_window_bind",
+            layout: mdoc_window_bind.layout(),
+        },
+        MdocModuleShape {
+            name: "mdoc_validity",
+            layout: mdoc_validity.layout(),
         },
         MdocModuleShape {
             name: "mdoc_age",
@@ -757,26 +777,152 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|candidate| candidate == needle)
 }
 
-/// Field exposure over the `birth_date` item preimage. The window length tracks
-/// the binding form (4 raw bytes for v1 packed, 10 ASCII bytes for v2 text), and
-/// the multi-block constructor tolerates a window straddling a SHA-256 block
-/// boundary.
-fn birth_date_exposure(statement: &MdocCircuitStatement) -> FieldExposure {
-    FieldExposure::from_preimage_windows_multi(&[(
-        field_id::DOB,
-        statement.birth_date_value_offset,
-        statement.birth_date_binding.as_bytes().len(),
-    )])
+fn full_date_text_bytes(date: (u16, u8, u8)) -> [u8; 10] {
+    format!("{:04}-{:02}-{:02}", date.0, date.1, date.2)
+        .as_bytes()
+        .try_into()
+        .expect("formatted full-date has YYYY-MM-DD length")
 }
 
-/// Field exposure over the `nationality` item preimage (2 bytes in both the
-/// numeric and alpha-2 forms).
+fn labeled_tdate_date_offset(
+    mso: &[u8],
+    label: &[u8],
+    date: (u16, u8, u8),
+    error: &'static str,
+) -> Result<usize, MdocError> {
+    let label_offset =
+        find_subslice(mso, label).ok_or(MdocError::UnsupportedCircuitValue(error))?;
+    let date_bytes = full_date_text_bytes(date);
+    let search_start = label_offset + label.len();
+    let relative = find_subslice(&mso[search_start..], &date_bytes)
+        .ok_or(MdocError::UnsupportedCircuitValue(error))?;
+    Ok(search_start + relative)
+}
+
+/// Field exposure over the `birth_date` item preimage: the value window
+/// (consumed by the age predicate) plus the `elementIdentifier` window (D1,
+/// consumed by the MSO window-bind component). The window length tracks the
+/// binding form (4 raw bytes for v1 packed, 10 ASCII bytes for v2 text), and the
+/// multi-block constructor tolerates a window straddling a SHA-256 block
+/// boundary.
+fn birth_date_exposure(statement: &MdocCircuitStatement) -> FieldExposure {
+    FieldExposure::from_preimage_windows_multi(&[
+        (
+            field_id::DOB,
+            statement.birth_date_value_offset,
+            statement.birth_date_binding.as_bytes().len(),
+        ),
+        (
+            field_id::MDOC_BIRTH_DATE_ELEMENT_ID,
+            statement.birth_date_element_offset,
+            b"birth_date".len(),
+        ),
+    ])
+}
+
+/// Field exposure over the `nationality` item preimage: the value window
+/// (2 bytes) plus the `elementIdentifier` window (D1).
 fn nationality_exposure(statement: &MdocCircuitStatement) -> FieldExposure {
-    FieldExposure::from_preimage_windows_multi(&[(
-        field_id::NATIONALITY,
-        statement.nationality_value_offset,
-        statement.nationality_binding.as_bytes().len(),
-    )])
+    FieldExposure::from_preimage_windows_multi(&[
+        (
+            field_id::NATIONALITY,
+            statement.nationality_value_offset,
+            statement.nationality_binding.as_bytes().len(),
+        ),
+        (
+            field_id::MDOC_NATIONALITY_ELEMENT_ID,
+            statement.nationality_element_offset,
+            b"nationality".len(),
+        ),
+    ])
+}
+
+/// Field exposure over the issuer `Sig_structure` preimage: the two 32-byte
+/// `valueDigests` windows (D2) and the two 32-byte deviceKey coordinate windows
+/// (D3), all consumed by the MSO window-bind component.
+fn issuer_mso_exposure(statement: &MdocCircuitStatement) -> FieldExposure {
+    FieldExposure::from_preimage_windows_multi(&[
+        (
+            field_id::MDOC_BIRTH_DATE_DIGEST,
+            statement.mso_birth_date_digest_offset,
+            32,
+        ),
+        (
+            field_id::MDOC_NATIONALITY_DIGEST,
+            statement.mso_nationality_digest_offset,
+            32,
+        ),
+        (
+            field_id::MDOC_DEVICE_KEY_X,
+            statement.mso_device_key_x_offset,
+            32,
+        ),
+        (
+            field_id::MDOC_DEVICE_KEY_Y,
+            statement.mso_device_key_y_offset,
+            32,
+        ),
+        (
+            field_id::MDOC_VALID_FROM,
+            statement.mso_valid_from_date_offset,
+            10,
+        ),
+        (
+            field_id::MDOC_VALID_UNTIL,
+            statement.mso_valid_until_date_offset,
+            10,
+        ),
+    ])
+}
+
+/// Build the six window-bind rows. On the prover the digest witness bytes are
+/// read from the issuer preimage at the two digest offsets; the verifier passes
+/// `None` (the digest bytes are reconstructed through the shared LogUp
+/// relations, not asserted host-side).
+fn mdoc_window_bind_rows_from(
+    statement: &MdocCircuitStatement,
+    issuer_sig_structure: Option<&[u8]>,
+) -> Vec<MdocWindowBindRow> {
+    let digest_witnesses = issuer_sig_structure.map(|preimage| {
+        let birth = preimage
+            [statement.mso_birth_date_digest_offset..statement.mso_birth_date_digest_offset + 32]
+            .try_into()
+            .expect("birth digest window length");
+        let nat = preimage
+            [statement.mso_nationality_digest_offset..statement.mso_nationality_digest_offset + 32]
+            .try_into()
+            .expect("nationality digest window length");
+        (birth, nat)
+    });
+    mdoc_window_bind_rows(
+        b"birth_date",
+        b"nationality",
+        &statement.device_input.public_key.x.0,
+        &statement.device_input.public_key.y.0,
+        digest_witnesses,
+    )
+}
+
+fn mdoc_validity_rows_from(
+    statement: &MdocCircuitStatement,
+    issuer_sig_structure: Option<&[u8]>,
+) -> Vec<MdocValidityRow> {
+    let dates = issuer_sig_structure.map(|preimage| {
+        let valid_from = preimage
+            [statement.mso_valid_from_date_offset..statement.mso_valid_from_date_offset + 10]
+            .try_into()
+            .expect("validFrom window length");
+        let valid_until = preimage
+            [statement.mso_valid_until_date_offset..statement.mso_valid_until_date_offset + 10]
+            .try_into()
+            .expect("validUntil window length");
+        (valid_from, valid_until)
+    });
+    let (valid_from, valid_until) = dates.unwrap_or((
+        full_date_text_bytes(statement.valid_from),
+        full_date_text_bytes(statement.valid_until),
+    ));
+    mdoc_validity_rows(valid_from, valid_until)
 }
 
 /// The nationality public input matching the statement's binding form: the
@@ -1258,12 +1404,36 @@ fn ecdsa_input(
 pub struct MdocCircuitStatement {
     pub issuer_input: EcdsaVerifyInput,
     pub device_input: EcdsaVerifyInput,
-    pub birth_date_digest: [u8; 32],
-    pub nationality_digest: [u8; 32],
     pub birth_date_binding: MdocBirthDateBinding,
     pub nationality_binding: MdocNationalityBinding,
     pub birth_date_value_offset: usize,
     pub nationality_value_offset: usize,
+    /// Offset of the `"birth_date"` `elementIdentifier` window in the birth_date
+    /// item preimage (D1).
+    pub birth_date_element_offset: usize,
+    /// Offset of the `"nationality"` `elementIdentifier` window in the
+    /// nationality item preimage (D1).
+    pub nationality_element_offset: usize,
+    /// Offset of the birth_date `valueDigests` 32-byte window in the issuer
+    /// `Sig_structure` preimage (D2).
+    pub mso_birth_date_digest_offset: usize,
+    /// Offset of the nationality `valueDigests` 32-byte window in the issuer
+    /// `Sig_structure` preimage (D2).
+    pub mso_nationality_digest_offset: usize,
+    /// Offset of the deviceKey x-coordinate 32-byte window in the issuer
+    /// `Sig_structure` preimage (D3).
+    pub mso_device_key_x_offset: usize,
+    /// Offset of the deviceKey y-coordinate 32-byte window in the issuer
+    /// `Sig_structure` preimage (D3).
+    pub mso_device_key_y_offset: usize,
+    pub valid_from: (u16, u8, u8),
+    pub valid_until: (u16, u8, u8),
+    /// Offset of the `validityInfo.validFrom` `YYYY-MM-DD` date window in the
+    /// issuer `Sig_structure` preimage (validity binding).
+    pub mso_valid_from_date_offset: usize,
+    /// Offset of the `validityInfo.validUntil` `YYYY-MM-DD` date window in the
+    /// issuer `Sig_structure` preimage (validity binding).
+    pub mso_valid_until_date_offset: usize,
     pub policy: Policy,
 }
 
@@ -1323,15 +1493,116 @@ impl MdocCircuitStatement {
                     digest_id: nationality_digest_id,
                 })?;
 
+        // Phase D: locate the windows the in-circuit MSO bindings pin. The two
+        // digests and the device key are no longer public inputs; they are
+        // bound in-circuit from these prover-supplied offsets. Each offset is a
+        // hint whose *content* the window-bind component pins, and the
+        // surrounding bytes are covered by the issuer signature — so a
+        // mispointed offset must still exhibit issuer-signed bytes.
+        let birth_date_element_offset = find_subslice(&extracted.birth_date_item, b"birth_date")
+            .ok_or(MdocError::UnsupportedCircuitValue(
+                "birth_date elementIdentifier offset",
+            ))?;
+        let nationality_element_offset = find_subslice(&extracted.nationality_item, b"nationality")
+            .ok_or(MdocError::UnsupportedCircuitValue(
+                "nationality elementIdentifier offset",
+            ))?;
+        let mso_birth_date_digest_offset =
+            find_subslice(&extracted.issuer_sig_structure, &birth_date_digest).ok_or(
+                MdocError::UnsupportedCircuitValue("birth_date digest offset"),
+            )?;
+        let mso_nationality_digest_offset =
+            find_subslice(&extracted.issuer_sig_structure, &nationality_digest).ok_or(
+                MdocError::UnsupportedCircuitValue("nationality digest offset"),
+            )?;
+        let mso_device_key_x_offset =
+            find_subslice(&extracted.issuer_sig_structure, &extracted.device_key.x.0)
+                .ok_or(MdocError::UnsupportedCircuitValue("device key x offset"))?;
+        let mso_device_key_y_offset =
+            find_subslice(&extracted.issuer_sig_structure, &extracted.device_key.y.0)
+                .ok_or(MdocError::UnsupportedCircuitValue("device key y offset"))?;
+        let mso_payload_offset = find_subslice(&extracted.issuer_sig_structure, &extracted.mso)
+            .ok_or(MdocError::UnsupportedCircuitValue("MSO payload offset"))?;
+        let mso_valid_from_date_offset = mso_payload_offset
+            + labeled_tdate_date_offset(
+                &extracted.mso,
+                b"validFrom",
+                extracted.valid_from,
+                "validFrom date offset",
+            )?;
+        let mso_valid_until_date_offset = mso_payload_offset
+            + labeled_tdate_date_offset(
+                &extracted.mso,
+                b"validUntil",
+                extracted.valid_until,
+                "validUntil date offset",
+            )?;
+        ensure_value_window_with_message(
+            &extracted.birth_date_item,
+            birth_date_element_offset,
+            b"birth_date",
+            "birth_date elementIdentifier offset",
+        )?;
+        ensure_value_window_with_message(
+            &extracted.nationality_item,
+            nationality_element_offset,
+            b"nationality",
+            "nationality elementIdentifier offset",
+        )?;
+        ensure_value_window_with_message(
+            &extracted.issuer_sig_structure,
+            mso_birth_date_digest_offset,
+            &birth_date_digest,
+            "birth_date digest offset",
+        )?;
+        ensure_value_window_with_message(
+            &extracted.issuer_sig_structure,
+            mso_nationality_digest_offset,
+            &nationality_digest,
+            "nationality digest offset",
+        )?;
+        ensure_value_window_with_message(
+            &extracted.issuer_sig_structure,
+            mso_device_key_x_offset,
+            &extracted.device_key.x.0,
+            "device key x offset",
+        )?;
+        ensure_value_window_with_message(
+            &extracted.issuer_sig_structure,
+            mso_device_key_y_offset,
+            &extracted.device_key.y.0,
+            "device key y offset",
+        )?;
+        ensure_value_window_with_message(
+            &extracted.issuer_sig_structure,
+            mso_valid_from_date_offset,
+            &full_date_text_bytes(extracted.valid_from),
+            "validFrom date offset",
+        )?;
+        ensure_value_window_with_message(
+            &extracted.issuer_sig_structure,
+            mso_valid_until_date_offset,
+            &full_date_text_bytes(extracted.valid_until),
+            "validUntil date offset",
+        )?;
+
         Ok(Self {
             issuer_input: extracted.issuer_ecdsa_input.clone(),
             device_input: extracted.device_ecdsa_input.clone(),
-            birth_date_digest,
-            nationality_digest,
             birth_date_binding: extracted.birth_date_binding,
             nationality_binding: extracted.nationality_binding,
             birth_date_value_offset: extracted.birth_date_value_offset,
             nationality_value_offset: extracted.nationality_value_offset,
+            birth_date_element_offset,
+            nationality_element_offset,
+            mso_birth_date_digest_offset,
+            mso_nationality_digest_offset,
+            mso_device_key_x_offset,
+            mso_device_key_y_offset,
+            valid_from: extracted.valid_from,
+            valid_until: extracted.valid_until,
+            mso_valid_from_date_offset,
+            mso_valid_until_date_offset,
             policy,
         })
     }
@@ -1363,6 +1634,9 @@ fn ensure_value_window_with_message(
 }
 
 fn policy_date_tuple(policy: &Policy) -> Result<(u16, u8, u8), MdocError> {
+    if policy.current_date.year > 9999 {
+        return Err(MdocError::InvalidTdate("policy.current_date"));
+    }
     Ok((
         u16::try_from(policy.current_date.year)
             .map_err(|_| MdocError::InvalidTdate("policy.current_date"))?,
@@ -1407,8 +1681,8 @@ pub struct MdocCircuitProof {
     device_bridge_log_size: u32,
     #[cfg(not(feature = "ec-coprocessor"))]
     device_bridge_interaction_claim: DigestBindInteractionClaim,
-    birth_digest_bind_interaction_claim: PublicDigestBindInteractionClaim,
-    nat_digest_bind_interaction_claim: PublicDigestBindInteractionClaim,
+    mdoc_window_bind_interaction_claim: MdocWindowBindInteractionClaim,
+    mdoc_validity_interaction_claim: MdocValidityInteractionClaim,
     age_public: predicates::PublicInput,
     age_claimed_sums: Vec<QM31>,
     nat_public: predicates::NatPublicInput,
@@ -1496,6 +1770,7 @@ fn mdoc_sizing_waste(
         .max()
         .expect("sha log list is non-empty");
 
+    let issuer_exposure = issuer_mso_exposure(statement);
     let birth_exposure = birth_date_exposure(statement);
     let nat_exposure = nationality_exposure(statement);
 
@@ -1505,7 +1780,7 @@ fn mdoc_sizing_waste(
             &issuer_sha_witness,
             issuer_sha_log,
             shared_sha_log,
-            FieldExposure::empty(),
+            issuer_exposure,
         ),
         sha_sizing_waste(
             "device",
@@ -1797,6 +2072,7 @@ pub fn prove_mdoc_circuit(
     let device_digest = SharedDigestRelation::new();
     let birth_digest = SharedDigestRelation::new();
     let nat_digest = SharedDigestRelation::new();
+    let issuer_field = SharedFieldRelation::new();
     let birth_field = SharedFieldRelation::new();
     let nat_field = SharedFieldRelation::new();
     let sha_table_relations = SharedShaTableRelations::new();
@@ -1805,6 +2081,7 @@ pub fn prove_mdoc_circuit(
     #[cfg(not(feature = "ec-coprocessor"))]
     let device_scalar_z = SharedScalarZRelation::new();
 
+    let issuer_exposure = issuer_mso_exposure(statement);
     let birth_exposure = birth_date_exposure(statement);
     let nat_exposure = nationality_exposure(statement);
 
@@ -1824,7 +2101,7 @@ pub fn prove_mdoc_circuit(
         .with_preprocessed_namespace("mdoc/device")
         .with_z_binding(device_scalar_z.clone());
     let sha_table_multiplicities = ShaTableMultiplicities::from_consumers(&[
-        (&issuer_sha_witness, FieldExposure::empty()),
+        (&issuer_sha_witness, issuer_exposure.clone()),
         (&device_sha_witness, FieldExposure::empty()),
         (&birth_sha_witness, birth_exposure.clone()),
         (&nat_sha_witness, nat_exposure.clone()),
@@ -1833,7 +2110,8 @@ pub fn prove_mdoc_circuit(
         ShaTablesProver::new(sha_table_multiplicities, sha_table_relations.clone());
     let mut issuer_sha = Sha256Prover::new(&issuer_sha_witness, shared_sha_log, SHA_GROUP_WIDTH)
         .with_shared_tables(sha_table_relations.clone())
-        .with_digest_handle(issuer_digest.clone());
+        .with_digest_handle(issuer_digest.clone())
+        .with_field_handle(issuer_exposure.clone(), issuer_field.clone());
     let mut device_sha = Sha256Prover::new(&device_sha_witness, shared_sha_log, SHA_GROUP_WIDTH)
         .with_shared_tables(sha_table_relations.clone())
         .with_digest_handle(device_digest.clone());
@@ -1874,10 +2152,19 @@ pub fn prove_mdoc_circuit(
     #[cfg(feature = "ec-coprocessor")]
     let mut device_public_digest_bind =
         PublicDigestBind::new(statement.device_input.message_hash.0, device_digest.clone());
-    let mut birth_digest_bind =
-        PublicDigestBind::new(statement.birth_date_digest, birth_digest.clone());
-    let mut nat_digest_bind =
-        PublicDigestBind::new(statement.nationality_digest, nat_digest.clone());
+    let mut mdoc_window_bind = MdocWindowBind::new(
+        mdoc_window_bind_rows_from(statement, Some(&extracted.issuer_sig_structure)),
+        issuer_field.clone(),
+        birth_field.clone(),
+        nat_field.clone(),
+        birth_digest.clone(),
+        nat_digest.clone(),
+    );
+    let mut mdoc_validity = MdocValidityBind::new(
+        statement.policy.current_date,
+        mdoc_validity_rows_from(statement, Some(&extracted.issuer_sig_structure)),
+        issuer_field.clone(),
+    );
     #[cfg(feature = "ec-coprocessor")]
     let mut coprocessor = MdocCoprocessorBindingProver::new(
         statement.issuer_input.clone(),
@@ -1924,9 +2211,9 @@ pub fn prove_mdoc_circuit(
             &mut device_sha,
             &mut device_bridge,
             &mut birth_sha,
-            &mut birth_digest_bind,
             &mut nat_sha,
-            &mut nat_digest_bind,
+            &mut mdoc_window_bind,
+            &mut mdoc_validity,
             &mut age,
             &mut nat,
         ];
@@ -1938,9 +2225,9 @@ pub fn prove_mdoc_circuit(
             &mut device_sha,
             &mut device_public_digest_bind,
             &mut birth_sha,
-            &mut birth_digest_bind,
             &mut nat_sha,
-            &mut nat_digest_bind,
+            &mut mdoc_window_bind,
+            &mut mdoc_validity,
             &mut age,
             &mut nat,
             &mut coprocessor,
@@ -1987,8 +2274,8 @@ pub fn prove_mdoc_circuit(
         device_bridge_log_size: device_bridge_log,
         #[cfg(not(feature = "ec-coprocessor"))]
         device_bridge_interaction_claim: device_bridge.interaction_claim().clone(),
-        birth_digest_bind_interaction_claim: birth_digest_bind.interaction_claim().clone(),
-        nat_digest_bind_interaction_claim: nat_digest_bind.interaction_claim().clone(),
+        mdoc_window_bind_interaction_claim: mdoc_window_bind.interaction_claim().clone(),
+        mdoc_validity_interaction_claim: mdoc_validity.interaction_claim().clone(),
         age_public,
         age_claimed_sums: age.claimed_sums(),
         nat_public,
@@ -2023,6 +2310,7 @@ pub fn verify_mdoc_circuit(
     let device_digest = SharedDigestRelation::new();
     let birth_digest = SharedDigestRelation::new();
     let nat_digest = SharedDigestRelation::new();
+    let issuer_field = SharedFieldRelation::new();
     let birth_field = SharedFieldRelation::new();
     let nat_field = SharedFieldRelation::new();
     let sha_table_relations = SharedShaTableRelations::new();
@@ -2065,7 +2353,8 @@ pub fn verify_mdoc_circuit(
         proof.issuer_sha_interaction_claim.clone(),
     )
     .with_shared_tables(sha_table_relations.clone())
-    .with_digest_handle(issuer_digest.clone());
+    .with_digest_handle(issuer_digest.clone())
+    .with_field_handle(issuer_mso_exposure(statement), issuer_field.clone());
     let mut device_sha = Sha256Verifier::new(
         proof.device_sha_log_n_rows,
         SHA_GROUP_WIDTH,
@@ -2119,15 +2408,20 @@ pub fn verify_mdoc_circuit(
         device_digest,
         proof.device_public_digest_bind_interaction_claim.clone(),
     );
-    let mut birth_digest_bind = PublicDigestBind::verifier(
-        statement.birth_date_digest,
+    let mut mdoc_window_bind = MdocWindowBind::verifier(
+        mdoc_window_bind_rows_from(statement, None),
+        issuer_field.clone(),
+        birth_field.clone(),
+        nat_field.clone(),
         birth_digest.clone(),
-        proof.birth_digest_bind_interaction_claim.clone(),
-    );
-    let mut nat_digest_bind = PublicDigestBind::verifier(
-        statement.nationality_digest,
         nat_digest.clone(),
-        proof.nat_digest_bind_interaction_claim.clone(),
+        proof.mdoc_window_bind_interaction_claim.clone(),
+    );
+    let mut mdoc_validity = MdocValidityBind::verifier(
+        statement.policy.current_date,
+        mdoc_validity_rows_from(statement, None),
+        issuer_field,
+        proof.mdoc_validity_interaction_claim.clone(),
     );
     let age = AgeRangeCheck::new(PcsConfig::default())
         .verifier(&proof.age_public, &proof.age_claimed_sums)
@@ -2160,9 +2454,9 @@ pub fn verify_mdoc_circuit(
         &mut device_sha,
         &mut device_bridge,
         &mut birth_sha,
-        &mut birth_digest_bind,
         &mut nat_sha,
-        &mut nat_digest_bind,
+        &mut mdoc_window_bind,
+        &mut mdoc_validity,
         &mut age,
         &mut nat,
     ];
@@ -2174,9 +2468,9 @@ pub fn verify_mdoc_circuit(
         &mut device_sha,
         &mut device_public_digest_bind,
         &mut birth_sha,
-        &mut birth_digest_bind,
         &mut nat_sha,
-        &mut nat_digest_bind,
+        &mut mdoc_window_bind,
+        &mut mdoc_validity,
         &mut age,
         &mut nat,
         &mut coprocessor,
@@ -2204,6 +2498,8 @@ mod mdoc_sha_table_tests {
             Some("mdoc_sha_tables"),
             "the shared SHA table provider must draw relations before SHA consumers",
         );
+        // Phase D folds the two per-digest binds into one MdocWindowBind, then
+        // adds the validity-window comparator as its own issuer-field consumer.
         #[cfg(not(feature = "ec-coprocessor"))]
         assert_eq!(shapes.len(), 13);
         #[cfg(feature = "ec-coprocessor")]
@@ -2235,14 +2531,18 @@ mod mdoc_sha_table_tests {
             prove_mdoc_circuit(&fixture.extracted, &fixture.statement).expect("mdoc proves");
         verify_mdoc_circuit(&proof, &fixture.statement).expect("mdoc verifies before tamper");
 
-        let mut digest_swap = fixture.statement.clone();
+        // Phase D: the digests are bound in-circuit from the issuer MSO
+        // preimage, not carried in the statement. Swapping the two digest window
+        // offsets points each digest bind at the other's bytes, so the
+        // window↔item-SHA LogUp no longer balances.
+        let mut digest_offset_swap = fixture.statement.clone();
         std::mem::swap(
-            &mut digest_swap.birth_date_digest,
-            &mut digest_swap.nationality_digest,
+            &mut digest_offset_swap.mso_birth_date_digest_offset,
+            &mut digest_offset_swap.mso_nationality_digest_offset,
         );
         assert!(
-            verify_mdoc_circuit(&proof, &digest_swap).is_err(),
-            "birth/nationality digest swap unexpectedly verified",
+            verify_mdoc_circuit(&proof, &digest_offset_swap).is_err(),
+            "birth/nationality digest offset swap unexpectedly verified",
         );
 
         if fixture.statement.birth_date_value_offset != fixture.statement.nationality_value_offset {
@@ -2270,6 +2570,55 @@ mod mdoc_sha_table_tests {
                 "nationality field exposure offset tamper unexpectedly verified",
             );
         }
+    }
+
+    /// Phase D: each of the three in-circuit MSO bind surfaces (D1 element-id
+    /// pin, D2 digest membership, D3 device-key origin) rejects when its window
+    /// offset is moved off the genuine bytes.
+    #[test]
+    #[ignore = "slow: proves isolated mdoc circuit profile"]
+    fn mdoc_window_bind_offset_tampers_reject() {
+        let fixture = demo_mdoc_circuit_fixture();
+        let proof =
+            prove_mdoc_circuit(&fixture.extracted, &fixture.statement).expect("mdoc proves");
+        verify_mdoc_circuit(&proof, &fixture.statement).expect("mdoc verifies before tamper");
+
+        // D1: birth_date elementIdentifier window (the exposed field bytes no
+        // longer spell "birth_date" at the shifted offset).
+        let mut d1 = fixture.statement.clone();
+        d1.birth_date_element_offset += 1;
+        assert!(
+            verify_mdoc_circuit(&proof, &d1).is_err(),
+            "D1 element-id offset tamper unexpectedly verified",
+        );
+
+        // D2: birth_date valueDigests window in the issuer preimage.
+        let mut d2 = fixture.statement.clone();
+        d2.mso_birth_date_digest_offset += 1;
+        assert!(
+            verify_mdoc_circuit(&proof, &d2).is_err(),
+            "D2 digest-window offset tamper unexpectedly verified",
+        );
+
+        // D3: deviceKey x-coordinate window in the issuer preimage. Moving the
+        // offset breaks the byte-equality against the coprocessor's proven
+        // device public key x.
+        let mut d3 = fixture.statement.clone();
+        d3.mso_device_key_x_offset += 1;
+        assert!(
+            verify_mdoc_circuit(&proof, &d3).is_err(),
+            "D3 device-key-window offset tamper unexpectedly verified",
+        );
+
+        // Validity: validUntil full-date window in the issuer preimage. Moving
+        // the offset breaks the in-circuit date parser/comparison against the
+        // public policy date.
+        let mut validity = fixture.statement.clone();
+        validity.mso_valid_until_date_offset += 1;
+        assert!(
+            verify_mdoc_circuit(&proof, &validity).is_err(),
+            "validity-window offset tamper unexpectedly verified",
+        );
     }
 
     #[test]

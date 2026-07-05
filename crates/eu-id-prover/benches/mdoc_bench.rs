@@ -1,7 +1,7 @@
 //! Laptop criterion benchmark for the isolated mdoc prover.
 //!
 //! Times prove and verify for the full isolated mdoc STARK over the deterministic
-//! EUID mdoc profile-v1 fixture. The fixture is built once outside the measured
+//! EUID mdoc profile-v2 fixture. The fixture is built once outside the measured
 //! window, matching `identity_bench`.
 
 use std::time::Duration;
