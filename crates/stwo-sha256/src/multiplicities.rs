@@ -344,8 +344,9 @@ pub fn sigma_split_pack_multiplicities(
 ///     carry-limb pair (2 limbs × 8 words per block).
 ///   - One `Range_16` increment per terminal `h_out` limb (2 limbs × 8
 ///     words per block), plus — when `field_exposure` is non-empty — two
-///     increments per exposed first-block field byte (the byte and the byte +
-///     [`BYTE_RANGE_CHECK_OFFSET`] of the `[0, 256)` range-check).
+///     increments per exposed field byte column in each target block (the byte
+///     and the byte + [`BYTE_RANGE_CHECK_OFFSET`] of the `[0, 256)`
+///     range-check).
 ///
 /// `field_exposure` affects only `Range16`; every other kind ignores it.
 pub fn range_k_multiplicities(
@@ -396,19 +397,35 @@ pub fn range_k_multiplicities(
         }
     }
 
-    // Field-byte range-checks: each exposed byte `b` is pinned to
+    // Field-byte range-checks: each exposed byte column `b` is pinned to
     // `[0, 256)` by two consumer-side `Range16` lookups (on `b` and on
-    // `b + BYTE_RANGE_CHECK_OFFSET`), fired on the first block only — matching
-    // the `is_first_block`-gated `wire_range_check` loop in
-    // `Sha256Eval::evaluate` and section 7a of `interaction::write_block_lookups`.
-    // Count them here so the `Range16` producer absorbs them.
+    // `b + BYTE_RANGE_CHECK_OFFSET`). Block-0 legacy exposure fires once on
+    // block 0. Multi-block exposure fires once per target-block selector,
+    // matching `Sha256Eval::evaluate` and section 7 of
+    // `interaction::write_round_row_lookups`. Count them here so the `Range16`
+    // producer absorbs them.
     if matches!(kind, RangeKind::Range16) {
-        if let Some(block0) = witness.blocks.first() {
-            for &word_idx in &field_exposure.decomposed_words() {
-                let limb = block0.schedule[word_idx];
-                for b in word_be_bytes(limb.lo, limb.hi) {
-                    bump(&mut mults, b);
-                    bump(&mut mults, b + BYTE_RANGE_CHECK_OFFSET);
+        if field_exposure.needs_block_witness() {
+            for block_idx in field_exposure.target_blocks() {
+                let Some(block) = witness.blocks.get(block_idx) else {
+                    continue;
+                };
+                for &word_idx in &field_exposure.decomposed_words() {
+                    let limb = block.schedule[word_idx];
+                    for b in word_be_bytes(limb.lo, limb.hi) {
+                        bump(&mut mults, b);
+                        bump(&mut mults, b + BYTE_RANGE_CHECK_OFFSET);
+                    }
+                }
+            }
+        } else if !field_exposure.is_empty() {
+            if let Some(block0) = witness.blocks.first() {
+                for &word_idx in &field_exposure.decomposed_words() {
+                    let limb = block0.schedule[word_idx];
+                    for b in word_be_bytes(limb.lo, limb.hi) {
+                        bump(&mut mults, b);
+                        bump(&mut mults, b + BYTE_RANGE_CHECK_OFFSET);
+                    }
                 }
             }
         }
@@ -545,9 +562,9 @@ mod tests {
         let empty = range_k_multiplicities(&w, RangeKind::Range16, &FieldExposure::empty());
         let with = range_k_multiplicities(&w, RangeKind::Range16, &exposure);
 
-        // Two added lookups per exposed byte column.
+        // Two added lookups per exposed byte column in the one target block.
         let added = with.iter().sum::<u32>() - empty.iter().sum::<u32>();
-        assert_eq!(added, 2 * exposure.n_columns() as u32);
+        assert_eq!(added, 2 * exposure.n_byte_columns() as u32);
 
         // Each first-block field byte `b` bumps row `b` and row `b + OFFSET`.
         let block0 = &w.blocks[0];
@@ -560,6 +577,52 @@ mod tests {
                 );
                 let hi = (b + BYTE_RANGE_CHECK_OFFSET) as usize;
                 assert!(with[hi] > empty[hi], "row b+OFFSET={hi} must be bumped");
+            }
+        }
+    }
+
+    /// The multi-block producer bumps `Range16` twice per exposed byte column
+    /// for **each** target block — matching the per-target-block selector loop
+    /// on the consumer side.
+    #[test]
+    fn range_16_counts_multi_block_field_byte_checks() {
+        use crate::components::RangeKind;
+        use air_core::relations::field_id;
+
+        let msg: Vec<u8> = (0..150).map(|i| (i % 251) as u8).collect();
+        let w = compute_sha256_witness(&msg);
+        assert_eq!(w.blocks.len(), 3, "test message must span 3 blocks");
+        let exposure = FieldExposure::from_preimage_windows_multi(&[
+            (field_id::DOB, 5, 4),
+            (field_id::NATIONALITY, 64 + 9, 2),
+            (99, 128 + 12, 3),
+        ]);
+
+        let empty = range_k_multiplicities(&w, RangeKind::Range16, &FieldExposure::empty());
+        let with = range_k_multiplicities(&w, RangeKind::Range16, &exposure);
+
+        let added = with.iter().sum::<u32>() - empty.iter().sum::<u32>();
+        assert_eq!(
+            added,
+            2 * exposure.n_byte_columns() as u32 * exposure.target_blocks().len() as u32,
+            "two Range16 lookups per exposed byte column for each target block selector",
+        );
+
+        for block_idx in exposure.target_blocks() {
+            let block = &w.blocks[block_idx];
+            for &word_idx in &exposure.decomposed_words() {
+                let limb = block.schedule[word_idx];
+                for b in word_be_bytes(limb.lo, limb.hi) {
+                    assert!(
+                        with[b as usize] > empty[b as usize],
+                        "block {block_idx} row {b} must be bumped",
+                    );
+                    let hi = (b + BYTE_RANGE_CHECK_OFFSET) as usize;
+                    assert!(
+                        with[hi] > empty[hi],
+                        "block {block_idx} row b+OFFSET={hi} must be bumped",
+                    );
+                }
             }
         }
     }
