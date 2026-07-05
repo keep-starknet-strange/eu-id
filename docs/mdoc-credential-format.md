@@ -1,26 +1,28 @@
 # EUID mdoc Credential Format (v1 + v2)
 
-> **Frozen isolated profile contract.** This document mirrors
-> `tasks/mdoc-credential-format-spec.md` sections 1-3. The implementation lives
-> in `crates/eu-id-prover/src/mdoc.rs`. The profile is intentionally isolated
-> from the current simplified identity full flow until mdoc integration is
-> explicitly started.
+> **Product mdoc proof contract.** The implementation lives in
+> `crates/eu-id-prover/src/mdoc.rs` and is exported through
+> `eu_id_prover::{prove_mdoc, verify_mdoc}`. The older 11-byte credential proof
+> remains separate as the POC benchmark path.
 
 ## Purpose & Scope
 
 The EUID mdoc profile is the constrained ISO/IEC 18013-5-shaped credential
-format accepted by the isolated mdoc proof path. Profile v1 (packed `bstr`
+format accepted by the product mdoc proof path. Profile v1 (packed `bstr`
 values, `"1.0"`) and profile v2 (canonical CBOR, text values, `"2.0"`) are both
 accepted; v2 is what real wallets emit. It proves:
 
 - issuer COSE_Sign1 ES256 signature over the Mobile Security Object,
-- device-auth COSE_Sign1 ES256 signature over the requested session transcript,
+- device-auth COSE_Sign1 ES256 signature over the requested
+  `DeviceAuthenticationBytes`,
 - SHA-256 digests for disclosed issuer-signed items,
 - age and nationality predicates bound to disclosed item bytes.
 
-This profile does not add identity/FFI wiring, in-circuit CBOR parsing,
-in-circuit text parsing, x5chain validation, revocation, SD-JWT support, or the
-old 11-byte proof-of-concept credential path.
+This profile does not add in-circuit CBOR parsing, in-circuit x509 chain
+validation, revocation, SD-JWT support, or privacy masking for public
+signatures. x5chain validation is host-side against verifier-supplied trusted
+roots. The old 11-byte proof-of-concept credential path is intentionally
+separate and keeps its nonce module for parity benchmarks.
 
 ## Document Shape
 
@@ -34,8 +36,11 @@ The top-level document is a CBOR map with:
 namespace is `eu.europa.ec.eudi.pid.1`, and it must equal the requested
 namespace. Extra namespace items are allowed.
 
-`deviceSigned.deviceAuth.deviceSignature` is a COSE_Sign1 whose payload must be
-byte-equal to the request session transcript.
+`deviceSigned.deviceAuth.deviceSignature` is a COSE_Sign1 over
+`DeviceAuthenticationBytes = #6.24(bstr .cbor DeviceAuthentication)`, where
+`DeviceAuthentication = ["DeviceAuthentication", SessionTranscript, docType,
+DeviceNameSpacesBytes]`. The verifier recomputes that payload from its own
+session transcript and docType.
 
 ## IssuerSignedItemBytes
 
@@ -95,9 +100,13 @@ The signed structure is:
 cbor(["Signature1", protected, b"", payload])
 ```
 
-The issuer key is carried in `issuerAuth.unprotected["issuerKey"]`; the device
-key is carried in `MobileSecurityObject.deviceKeyInfo.deviceKey`. Both are
-strict ES256 P-256 COSE keys with `1:2`, `3:-7`, `-1:1`, `-2:x`, and `-3:y`.
+The issuer key is either carried directly in
+`issuerAuth.unprotected["issuerKey"]` or extracted host-side from
+`issuerAuth.unprotected[33]` (`x5chain`) after the chain verifies to a
+verifier-supplied trusted root. The device key is carried in
+`MobileSecurityObject.deviceKeyInfo.deviceKey`. Both keys are strict ES256
+P-256 COSE keys with `1:2`, `-1:1`, `-2:x`, and `-3:y`; `3:-7` is accepted
+when present.
 
 ## Mobile Security Object
 
@@ -118,9 +127,9 @@ Each validity value is CBOR tag 0 over an exact 20-character UTC timestamp:
 YYYY-MM-DDTHH:MM:SSZ
 ```
 
-The isolated statement builder checks `validFrom <= policy.current_date <=
-validUntil` using date-only comparison. `signed` is parsed and stored for
-review but is not policy-checked.
+The statement builder checks `validFrom <= policy.current_date <= validUntil`
+using date-only comparison. `signed` is parsed and stored for review but is not
+policy-checked.
 
 ## Statement Invariants
 
@@ -153,6 +162,7 @@ SHA modules expose from their preimages:
   from the issuer preimage, parsed in-circuit, and compared against the public
   policy date with non-negative date-key slack.
 
-Consequently the public statement carries the issuer key, policy, session
-transcript, the two `(r, s)` signatures, and the prover-supplied window offsets;
-the digests and device key are witness, proven — not trusted.
+Consequently the public statement carries the issuer key or trusted-root
+anchored issuer key, policy, session transcript, the two `(r, s)` signatures,
+and the prover-supplied window offsets. Everything else is witness, including
+the item digests, MSO bytes, disclosed item bytes, parsed dates, and device key.

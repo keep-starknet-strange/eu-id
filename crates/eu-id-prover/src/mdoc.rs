@@ -1,8 +1,10 @@
-//! Isolated host-side EUID mdoc profile v1 support.
+//! Product EUID PID mdoc proof path.
 //!
-//! This module parses the frozen isolated PID mdoc profile into reviewable
-//! witness material. It intentionally does not call the current identity proof
-//! APIs; integration into that flow is a later explicit step.
+//! This module parses the constrained ISO/IEC 18013-5 PID profile, prepares the
+//! mdoc statement/witness, and proves issuer signature, ISO device
+//! authentication, MSO digest membership, validity, device-key origin, and the
+//! age/nationality predicates in one verifier-facing proof. The legacy nonce
+//! module is not part of this path; the device-auth signature binds freshness.
 
 use std::collections::HashMap;
 
@@ -220,7 +222,7 @@ impl MdocSizingWaste {
     }
 }
 
-/// Deterministic EUID mdoc profile-v1 fixture used by benches and FFI timing.
+/// Deterministic EUID mdoc profile-v2 fixture used by benches and SDK tests.
 pub fn demo_mdoc_circuit_fixture() -> DemoMdocCircuitFixture {
     let session_transcript = openid4vp_session_transcript(b"session-transcript-123");
     let document = demo_mdoc_document(&session_transcript);
@@ -2805,7 +2807,7 @@ mod mdoc_sha_table_tests {
     }
 
     #[test]
-    #[ignore = "slow: proves isolated mdoc circuit profile"]
+    #[ignore = "slow: proves product mdoc circuit profile"]
     fn shared_sha_table_provider_claim_is_bound() {
         let fixture = demo_mdoc_circuit_fixture();
         let mut proof =
@@ -2822,7 +2824,7 @@ mod mdoc_sha_table_tests {
     }
 
     #[test]
-    #[ignore = "slow: proves isolated mdoc circuit profile"]
+    #[ignore = "slow: proves product mdoc circuit profile"]
     fn shared_sha_table_mdoc_digest_and_field_swaps_reject() {
         let fixture = demo_mdoc_circuit_fixture();
         let proof =
@@ -2874,7 +2876,7 @@ mod mdoc_sha_table_tests {
     /// pin, D2 digest membership, D3 device-key origin) rejects when its window
     /// offset is moved off the genuine bytes.
     #[test]
-    #[ignore = "slow: proves isolated mdoc circuit profile"]
+    #[ignore = "slow: proves product mdoc circuit profile"]
     fn mdoc_window_bind_offset_tampers_reject() {
         let fixture = demo_mdoc_circuit_fixture();
         let proof =
@@ -2920,7 +2922,7 @@ mod mdoc_sha_table_tests {
     }
 
     #[test]
-    #[ignore = "slow: proves isolated mdoc circuit profile"]
+    #[ignore = "slow: proves product mdoc circuit profile"]
     fn malformed_shared_sha_table_provider_claim_rejects_without_panic() {
         let fixture = demo_mdoc_circuit_fixture();
         let mut proof =
@@ -3032,7 +3034,7 @@ mod coprocessor_tests {
     }
 
     #[test]
-    #[ignore = "slow: proves isolated mdoc circuit with coprocessor bundle"]
+    #[ignore = "slow: proves product mdoc circuit with coprocessor bundle"]
     fn mdoc_coprocessor_rejects_required_negative_mutations() {
         let (proof, statement) = verified_mdoc_proof();
 
@@ -3087,7 +3089,7 @@ mod coprocessor_tests {
     }
 
     #[test]
-    #[ignore = "slow: proves isolated mdoc circuit with coprocessor bundle"]
+    #[ignore = "slow: proves product mdoc circuit with coprocessor bundle"]
     fn mdoc_coprocessor_statement_order_and_rejoin_guards_are_bound() {
         let (proof, statement) = verified_mdoc_proof();
         let bundle = proof.coprocessor_bundle.as_ref().unwrap();
