@@ -167,7 +167,7 @@ Implemented Phase F as promotion/default cleanup:
 - `crates/sdk` product mdoc API (`prove_mdoc_pid` / `verify_mdoc_pid`) is documented as the SDK product path and already routes through `eu_id_prover::{prove_mdoc, verify_mdoc}`. The legacy SDK `prove_identity` / `verify_identity` functions are left intact for the 11-byte POC/demo-nonce path.
 - Added ignored SDK release test `mdoc_pid_public_api_round_trips_canonical_v2_fixture`, proving and verifying the canonical profile-v2 demo fixture through the SDK public mdoc API.
 - Updated README and `docs/mdoc-credential-format.md` to describe the promoted mdoc product path, host-side x5chain trust-root check, ISO `DeviceAuthenticationBytes`, final public/witness statement surface, and nonce retirement boundary.
-- Marked Phase F in `tasks/mdoc-full-impl-plan.md`. Phase V perf rows were already present. Phase D had no numeric perf row in `f286d3c9`; added a clearly labeled audit/backfill row without inventing D-only timing.
+- Marked Phase F in `tasks/mdoc-full-impl-plan.md`. Phase V perf rows were already present. Phase D perf rows now record the orchestrator-measured release `mdoc_perf_probe` result: prove 1,160 ms, verify 50 ms, proof bytes 2,441,494, shape cells 7,617,136.
 
 Verification:
 - GREEN: `rtk proxy cargo test -p air-core preprocessed_invariant`
