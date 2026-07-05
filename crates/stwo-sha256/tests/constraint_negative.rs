@@ -52,11 +52,12 @@ use stwo_constraint_framework::{
     EvalAtRow, FrameworkEval, Relation, RelationEntry, ORIGINAL_TRACE_IDX,
 };
 
+use air_core::relations::field_id;
 use stwo_sha256::components::{is_first_row_column_id, round_cyclic_column_ids};
 use stwo_sha256::constraints::Sha256Eval;
 use stwo_sha256::field_exposure::FieldExposure;
 use stwo_sha256::relations::Sha256Relations;
-use stwo_sha256::trace::{generate_trace, min_log_size, Layout};
+use stwo_sha256::trace::{generate_trace, generate_trace_with_fields, min_log_size, Layout};
 use stwo_sha256::witness::compute_sha256_witness;
 
 // ---------------------------------------------------------------------------
@@ -254,7 +255,11 @@ impl EvalAtRow for LinearConstraintCollector<'_> {
 /// non-zero residual collected. An empty return value means the AIR's
 /// linear constraint layer accepts the trace; a non-empty return means
 /// the AIR rejects.
-fn collect_constraint_residuals(trace: &[Vec<BaseField>], log_size: u32) -> Vec<Residual> {
+fn collect_constraint_residuals_with_fields(
+    trace: &[Vec<BaseField>],
+    log_size: u32,
+    field_exposure: FieldExposure,
+) -> Vec<Residual> {
     let eval = Sha256Eval {
         log_size,
         relations: Sha256Relations::dummy(),
@@ -262,10 +267,7 @@ fn collect_constraint_residuals(trace: &[Vec<BaseField>], log_size: u32) -> Vec<
         // does not affect this linear-residual collector either way; keep it
         // off to mirror the standalone (self-balancing) AIR.
         expose_digest: false,
-        // No credential field exposed: the linear-residual collector targets the
-        // base AIR. The field byte-decomposition would add columns this harness
-        // doesn't synthesise, so leave it empty.
-        field_exposure: FieldExposure::empty(),
+        field_exposure,
     };
     let n_rows = 1usize << log_size;
     let mut all = Vec::new();
@@ -275,6 +277,10 @@ fn collect_constraint_residuals(trace: &[Vec<BaseField>], log_size: u32) -> Vec<
         all.extend(collector.non_zero);
     }
     all
+}
+
+fn collect_constraint_residuals(trace: &[Vec<BaseField>], log_size: u32) -> Vec<Residual> {
+    collect_constraint_residuals_with_fields(trace, log_size, FieldExposure::empty())
 }
 
 /// Honest-trace sanity: every linear constraint `Sha256Eval::evaluate`
@@ -310,6 +316,103 @@ fn honest_multi_block_trace_yields_no_residuals() {
         "honest multi-block trace produced {} non-zero residuals: {:?}",
         residuals.len(),
         residuals.first(),
+    );
+}
+
+#[test]
+fn honest_multi_block_field_exposure_trace_yields_no_residuals() {
+    let message = [0xABu8; 200];
+    let witness = compute_sha256_witness(&message);
+    assert!(witness.blocks.len() >= 2, "need multi-block message");
+    let log_size = min_log_size(witness.blocks.len());
+    let exposure = FieldExposure::from_preimage_windows_multi(&[
+        (field_id::DOB, 62, 4),
+        (field_id::NATIONALITY, 70, 3),
+    ]);
+    let trace = generate_trace_with_fields(&witness, log_size, &exposure);
+    let residuals = collect_constraint_residuals_with_fields(&trace, log_size, exposure);
+    assert!(
+        residuals.is_empty(),
+        "honest multi-block field trace produced {} non-zero residuals: {:?}",
+        residuals.len(),
+        residuals.first(),
+    );
+}
+
+#[test]
+fn honest_large_multi_block_field_exposure_trace_yields_no_residuals() {
+    // Opaque field tags (2, 3): the SHA producer is agnostic to their meaning.
+    // Two 32-byte windows spanning blocks 1 and 2.
+    let message = [0xABu8; 220];
+    let witness = compute_sha256_witness(&message);
+    assert!(witness.blocks.len() >= 3, "need at least three blocks");
+    let log_size = min_log_size(witness.blocks.len());
+    let exposure = FieldExposure::from_preimage_windows_multi(&[(2, 96, 32), (3, 128, 32)]);
+    let trace = generate_trace_with_fields(&witness, log_size, &exposure);
+    let residuals = collect_constraint_residuals_with_fields(&trace, log_size, exposure);
+    assert!(
+        residuals.is_empty(),
+        "honest large multi-block field trace produced {} non-zero residuals: {:?}",
+        residuals.len(),
+        residuals.first(),
+    );
+}
+
+#[test]
+fn rejects_field_selector_on_wrong_block() {
+    let message = [0xABu8; 200];
+    let witness = compute_sha256_witness(&message);
+    assert!(witness.blocks.len() >= 2, "need multi-block message");
+    let log_size = min_log_size(witness.blocks.len());
+    let exposure = FieldExposure::from_preimage_windows_multi(&[(field_id::NATIONALITY, 70, 2)]);
+    let mut trace = generate_trace_with_fields(&witness, log_size, &exposure);
+
+    assert!(
+        collect_constraint_residuals_with_fields(&trace, log_size, exposure.clone()).is_empty(),
+        "baseline should be clean before mutation",
+    );
+
+    let selector_slot = exposure
+        .selector_column_slot(0)
+        .expect("nonzero-block exposure has selector columns");
+    let selector_col = Layout::field_byte_col(selector_slot);
+    let wrong_slot = Layout::round_row_slot(0, 15, log_size);
+    trace[selector_col][wrong_slot] = BaseField::from(1u32);
+
+    let residuals = collect_constraint_residuals_with_fields(&trace, log_size, exposure);
+    assert!(
+        !residuals.is_empty(),
+        "AIR must reject a field selector enabled on the wrong SHA block",
+    );
+}
+
+#[test]
+fn rejects_frozen_field_block_counter() {
+    let message = [0xABu8; 200];
+    let witness = compute_sha256_witness(&message);
+    assert!(witness.blocks.len() >= 2, "need multi-block message");
+    let log_size = min_log_size(witness.blocks.len());
+    let exposure = FieldExposure::from_preimage_windows_multi(&[(field_id::NATIONALITY, 70, 2)]);
+    let mut trace = generate_trace_with_fields(&witness, log_size, &exposure);
+
+    assert!(
+        collect_constraint_residuals_with_fields(&trace, log_size, exposure.clone()).is_empty(),
+        "baseline should be clean before mutation",
+    );
+
+    let counter_slot = exposure
+        .block_counter_column_slot()
+        .expect("nonzero-block exposure has a block counter");
+    let counter_col = Layout::field_byte_col(counter_slot);
+    for t in 0..stwo_sha256::constants::N_ROUNDS {
+        let slot = Layout::round_row_slot(1, t, log_size);
+        trace[counter_col][slot] = BaseField::from(0u32);
+    }
+
+    let residuals = collect_constraint_residuals_with_fields(&trace, log_size, exposure);
+    assert!(
+        !residuals.is_empty(),
+        "AIR must reject a block counter that fails to increment at a SHA block boundary",
     );
 }
 
