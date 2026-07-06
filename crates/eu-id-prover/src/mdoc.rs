@@ -93,6 +93,50 @@ pub struct MdocPidRequest {
     pub trusted_issuer_certificates: Vec<Vec<u8>>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MdocDisclosureMode {
+    ValueEquality(Vec<u8>),
+    AgeOver,
+    Alpha2Set,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MdocRequestedAttribute {
+    pub element_identifier: String,
+    pub mode: MdocDisclosureMode,
+}
+
+impl MdocPidRequest {
+    pub fn eudi_pid(session_transcript: Vec<u8>) -> Self {
+        Self {
+            doctype: PID_DOCTYPE.to_string(),
+            namespace: PID_NAMESPACE.to_string(),
+            birth_date_element: "birth_date".to_string(),
+            nationality_element: "nationality".to_string(),
+            session_transcript,
+            trusted_issuer_certificates: Vec::new(),
+        }
+    }
+
+    pub fn with_trusted_issuer_certificates(mut self, certificates: Vec<Vec<u8>>) -> Self {
+        self.trusted_issuer_certificates = certificates;
+        self
+    }
+
+    pub fn disclosed_attributes(&self) -> Vec<MdocRequestedAttribute> {
+        vec![
+            MdocRequestedAttribute {
+                element_identifier: self.birth_date_element.clone(),
+                mode: MdocDisclosureMode::AgeOver,
+            },
+            MdocRequestedAttribute {
+                element_identifier: self.nationality_element.clone(),
+                mode: MdocDisclosureMode::Alpha2Set,
+            },
+        ]
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ExtractedPidMdoc {
     pub doctype: String,
@@ -269,19 +313,25 @@ pub fn demo_mdoc_module_shapes() -> Result<Vec<MdocModuleShape>, Error> {
     let device_draft = single_p256_draft(statement.device_input.clone())?;
     let (issuer_sha_witness, issuer_sha_log) = sha_params(&extracted.issuer_sig_structure);
     let (device_sha_witness, device_sha_log) = sha_params(&extracted.device_sig_structure);
-    let (birth_sha_witness, birth_sha_log) = sha_params(&extracted.birth_date_item);
-    let (nat_sha_witness, nat_sha_log) = sha_params(&extracted.nationality_item);
-    let shared_sha_log = [issuer_sha_log, device_sha_log, birth_sha_log, nat_sha_log]
-        .into_iter()
+    let attribute_items = [&extracted.birth_date_item, &extracted.nationality_item];
+    let attribute_sha_params: Vec<_> = attribute_items
+        .iter()
+        .map(|item| sha_params(item))
+        .collect();
+    let shared_sha_log = std::iter::once(issuer_sha_log)
+        .chain(std::iter::once(device_sha_log))
+        .chain(attribute_sha_params.iter().map(|(_, log)| *log))
         .max()
         .expect("sha log list is non-empty");
     let issuer_digest = SharedDigestRelation::new();
     let device_digest = SharedDigestRelation::new();
-    let birth_digest = SharedDigestRelation::new();
-    let nat_digest = SharedDigestRelation::new();
+    let attribute_digests: Vec<_> = (0..attribute_sha_params.len())
+        .map(|_| SharedDigestRelation::new())
+        .collect();
     let issuer_field = SharedFieldRelation::new();
-    let birth_field = SharedFieldRelation::new();
-    let nat_field = SharedFieldRelation::new();
+    let attribute_fields: Vec<_> = (0..attribute_sha_params.len())
+        .map(|_| SharedFieldRelation::new())
+        .collect();
     let sha_table_relations = SharedShaTableRelations::new();
     #[cfg(not(feature = "ec-coprocessor"))]
     let issuer_scalar_z = SharedScalarZRelation::new();
@@ -289,8 +339,10 @@ pub fn demo_mdoc_module_shapes() -> Result<Vec<MdocModuleShape>, Error> {
     let device_scalar_z = SharedScalarZRelation::new();
 
     let issuer_exposure = issuer_mso_exposure(statement);
-    let birth_exposure = birth_date_exposure(statement);
-    let nat_exposure = nationality_exposure(statement);
+    let attribute_exposures = vec![
+        birth_date_exposure(statement),
+        nationality_exposure(statement),
+    ];
 
     #[cfg(not(feature = "ec-coprocessor"))]
     let issuer_p256 = P256Prover::new(&issuer_draft)
@@ -301,12 +353,14 @@ pub fn demo_mdoc_module_shapes() -> Result<Vec<MdocModuleShape>, Error> {
         .map_err(Error::P256Prepare)?
         .with_preprocessed_namespace("mdoc/device")
         .with_z_binding(device_scalar_z.clone());
-    let sha_table_multiplicities = ShaTableMultiplicities::from_consumers(&[
+    let mut sha_consumers = vec![
         (&issuer_sha_witness, issuer_exposure.clone()),
         (&device_sha_witness, FieldExposure::empty()),
-        (&birth_sha_witness, birth_exposure.clone()),
-        (&nat_sha_witness, nat_exposure.clone()),
-    ]);
+    ];
+    for ((witness, _), exposure) in attribute_sha_params.iter().zip(attribute_exposures.iter()) {
+        sha_consumers.push((witness, exposure.clone()));
+    }
+    let sha_table_multiplicities = ShaTableMultiplicities::from_consumers(&sha_consumers);
     let sha_tables = ShaTablesProver::new(sha_table_multiplicities, sha_table_relations.clone());
     let issuer_sha = Sha256Prover::new(&issuer_sha_witness, shared_sha_log, SHA_GROUP_WIDTH)
         .with_shared_tables(sha_table_relations.clone())
@@ -315,14 +369,20 @@ pub fn demo_mdoc_module_shapes() -> Result<Vec<MdocModuleShape>, Error> {
     let device_sha = Sha256Prover::new(&device_sha_witness, shared_sha_log, SHA_GROUP_WIDTH)
         .with_shared_tables(sha_table_relations.clone())
         .with_digest_handle(device_digest.clone());
-    let birth_sha = Sha256Prover::new(&birth_sha_witness, shared_sha_log, SHA_GROUP_WIDTH)
-        .with_shared_tables(sha_table_relations.clone())
-        .with_digest_handle(birth_digest.clone())
-        .with_field_handle(birth_exposure.clone(), birth_field.clone());
-    let nat_sha = Sha256Prover::new(&nat_sha_witness, shared_sha_log, SHA_GROUP_WIDTH)
-        .with_shared_tables(sha_table_relations.clone())
-        .with_digest_handle(nat_digest.clone())
-        .with_field_handle(nat_exposure.clone(), nat_field.clone());
+    let attribute_sha: Vec<_> = attribute_sha_params
+        .iter()
+        .zip(attribute_exposures.iter())
+        .zip(attribute_digests.iter())
+        .zip(attribute_fields.iter())
+        .map(
+            |((((witness, _), exposure), digest_handle), field_handle)| {
+                Sha256Prover::new(witness, shared_sha_log, SHA_GROUP_WIDTH)
+                    .with_shared_tables(sha_table_relations.clone())
+                    .with_digest_handle(digest_handle.clone())
+                    .with_field_handle(exposure.clone(), field_handle.clone())
+            },
+        )
+        .collect();
 
     #[cfg(not(feature = "ec-coprocessor"))]
     let issuer_bridge_rows = crate::bridge_rows(&issuer_p256.proof_claim().public_inputs.instances);
@@ -355,10 +415,10 @@ pub fn demo_mdoc_module_shapes() -> Result<Vec<MdocModuleShape>, Error> {
     let mdoc_window_bind = MdocWindowBind::new(
         mdoc_window_bind_rows_from(statement, Some(&extracted.issuer_sig_structure)),
         issuer_field.clone(),
-        birth_field.clone(),
-        nat_field.clone(),
-        birth_digest.clone(),
-        nat_digest.clone(),
+        attribute_fields[0].clone(),
+        attribute_fields[1].clone(),
+        attribute_digests[0].clone(),
+        attribute_digests[1].clone(),
     );
     let mdoc_validity = MdocValidityBind::new(
         statement.policy.current_date,
@@ -388,13 +448,13 @@ pub fn demo_mdoc_module_shapes() -> Result<Vec<MdocModuleShape>, Error> {
         .prover(&age_public, &age_dob)
         .map_err(Error::AgePrepare)?;
     let age = match statement.birth_date_binding {
-        MdocBirthDateBinding::Packed(_) => age.with_dob_binding(birth_field),
-        MdocBirthDateBinding::Text(_) => age.with_text_dob_binding(birth_field),
+        MdocBirthDateBinding::Packed(_) => age.with_dob_binding(attribute_fields[0].clone()),
+        MdocBirthDateBinding::Text(_) => age.with_text_dob_binding(attribute_fields[0].clone()),
     };
     let nat = NationalityPredicate::new(PcsConfig::default())
         .prover(&nat_public, &nat_private)
         .map_err(Error::NatPrepare)?
-        .with_nat_binding(nat_field);
+        .with_nat_binding(attribute_fields[1].clone());
 
     #[cfg(not(feature = "ec-coprocessor"))]
     let shapes = vec![
@@ -428,11 +488,11 @@ pub fn demo_mdoc_module_shapes() -> Result<Vec<MdocModuleShape>, Error> {
         },
         MdocModuleShape {
             name: "mdoc_birth_sha",
-            layout: birth_sha.layout(),
+            layout: attribute_sha[0].layout(),
         },
         MdocModuleShape {
             name: "mdoc_nat_sha",
-            layout: nat_sha.layout(),
+            layout: attribute_sha[1].layout(),
         },
         MdocModuleShape {
             name: "mdoc_window_bind",
@@ -475,11 +535,11 @@ pub fn demo_mdoc_module_shapes() -> Result<Vec<MdocModuleShape>, Error> {
         },
         MdocModuleShape {
             name: "mdoc_birth_sha",
-            layout: birth_sha.layout(),
+            layout: attribute_sha[0].layout(),
         },
         MdocModuleShape {
             name: "mdoc_nat_sha",
-            layout: nat_sha.layout(),
+            layout: attribute_sha[1].layout(),
         },
         MdocModuleShape {
             name: "mdoc_window_bind",
@@ -2142,10 +2202,8 @@ pub struct MdocCircuitProof {
     issuer_sha_interaction_claim: Sha256InteractionClaim,
     device_sha_log_n_rows: u32,
     device_sha_interaction_claim: Sha256InteractionClaim,
-    birth_sha_log_n_rows: u32,
-    birth_sha_interaction_claim: Sha256InteractionClaim,
-    nat_sha_log_n_rows: u32,
-    nat_sha_interaction_claim: Sha256InteractionClaim,
+    attribute_sha_log_n_rows: Vec<u32>,
+    attribute_sha_interaction_claims: Vec<Sha256InteractionClaim>,
     #[cfg(not(feature = "ec-coprocessor"))]
     issuer_bridge_log_size: u32,
     #[cfg(not(feature = "ec-coprocessor"))]
@@ -2535,19 +2593,25 @@ pub fn prove_mdoc_circuit(
     // `mdoc_sizing_waste`. Equal sizing is the correct, cheaper choice.
     let (issuer_sha_witness, issuer_sha_log) = sha_params(&extracted.issuer_sig_structure);
     let (device_sha_witness, device_sha_log) = sha_params(&extracted.device_sig_structure);
-    let (birth_sha_witness, birth_sha_log) = sha_params(&extracted.birth_date_item);
-    let (nat_sha_witness, nat_sha_log) = sha_params(&extracted.nationality_item);
-    let shared_sha_log = [issuer_sha_log, device_sha_log, birth_sha_log, nat_sha_log]
-        .into_iter()
+    let attribute_items = [&extracted.birth_date_item, &extracted.nationality_item];
+    let attribute_sha_params: Vec<_> = attribute_items
+        .iter()
+        .map(|item| sha_params(item))
+        .collect();
+    let shared_sha_log = std::iter::once(issuer_sha_log)
+        .chain(std::iter::once(device_sha_log))
+        .chain(attribute_sha_params.iter().map(|(_, log)| *log))
         .max()
         .expect("sha log list is non-empty");
     let issuer_digest = SharedDigestRelation::new();
     let device_digest = SharedDigestRelation::new();
-    let birth_digest = SharedDigestRelation::new();
-    let nat_digest = SharedDigestRelation::new();
+    let attribute_digests: Vec<_> = (0..attribute_sha_params.len())
+        .map(|_| SharedDigestRelation::new())
+        .collect();
     let issuer_field = SharedFieldRelation::new();
-    let birth_field = SharedFieldRelation::new();
-    let nat_field = SharedFieldRelation::new();
+    let attribute_fields: Vec<_> = (0..attribute_sha_params.len())
+        .map(|_| SharedFieldRelation::new())
+        .collect();
     let sha_table_relations = SharedShaTableRelations::new();
     #[cfg(not(feature = "ec-coprocessor"))]
     let issuer_scalar_z = SharedScalarZRelation::new();
@@ -2555,8 +2619,10 @@ pub fn prove_mdoc_circuit(
     let device_scalar_z = SharedScalarZRelation::new();
 
     let issuer_exposure = issuer_mso_exposure(statement);
-    let birth_exposure = birth_date_exposure(statement);
-    let nat_exposure = nationality_exposure(statement);
+    let attribute_exposures = vec![
+        birth_date_exposure(statement),
+        nationality_exposure(statement),
+    ];
 
     #[cfg(not(feature = "ec-coprocessor"))]
     let mut issuer_p256 = P256Prover::new(&issuer_draft)
@@ -2573,12 +2639,14 @@ pub fn prove_mdoc_circuit(
         .map_err(Error::P256Prepare)?
         .with_preprocessed_namespace("mdoc/device")
         .with_z_binding(device_scalar_z.clone());
-    let sha_table_multiplicities = ShaTableMultiplicities::from_consumers(&[
+    let mut sha_consumers = vec![
         (&issuer_sha_witness, issuer_exposure.clone()),
         (&device_sha_witness, FieldExposure::empty()),
-        (&birth_sha_witness, birth_exposure.clone()),
-        (&nat_sha_witness, nat_exposure.clone()),
-    ]);
+    ];
+    for ((witness, _), exposure) in attribute_sha_params.iter().zip(attribute_exposures.iter()) {
+        sha_consumers.push((witness, exposure.clone()));
+    }
+    let sha_table_multiplicities = ShaTableMultiplicities::from_consumers(&sha_consumers);
     let mut sha_tables =
         ShaTablesProver::new(sha_table_multiplicities, sha_table_relations.clone());
     let mut issuer_sha = Sha256Prover::new(&issuer_sha_witness, shared_sha_log, SHA_GROUP_WIDTH)
@@ -2588,14 +2656,22 @@ pub fn prove_mdoc_circuit(
     let mut device_sha = Sha256Prover::new(&device_sha_witness, shared_sha_log, SHA_GROUP_WIDTH)
         .with_shared_tables(sha_table_relations.clone())
         .with_digest_handle(device_digest.clone());
-    let mut birth_sha = Sha256Prover::new(&birth_sha_witness, shared_sha_log, SHA_GROUP_WIDTH)
-        .with_shared_tables(sha_table_relations.clone())
-        .with_digest_handle(birth_digest.clone())
-        .with_field_handle(birth_exposure.clone(), birth_field.clone());
-    let mut nat_sha = Sha256Prover::new(&nat_sha_witness, shared_sha_log, SHA_GROUP_WIDTH)
-        .with_shared_tables(sha_table_relations.clone())
-        .with_digest_handle(nat_digest.clone())
-        .with_field_handle(nat_exposure.clone(), nat_field.clone());
+    let mut attribute_sha = Vec::with_capacity(attribute_sha_params.len());
+    for index in 0..attribute_sha_params.len() {
+        attribute_sha.push(
+            Sha256Prover::new(
+                &attribute_sha_params[index].0,
+                shared_sha_log,
+                SHA_GROUP_WIDTH,
+            )
+            .with_shared_tables(sha_table_relations.clone())
+            .with_digest_handle(attribute_digests[index].clone())
+            .with_field_handle(
+                attribute_exposures[index].clone(),
+                attribute_fields[index].clone(),
+            ),
+        );
+    }
 
     #[cfg(not(feature = "ec-coprocessor"))]
     let issuer_bridge_rows = crate::bridge_rows(&issuer_p256.proof_claim().public_inputs.instances);
@@ -2628,10 +2704,10 @@ pub fn prove_mdoc_circuit(
     let mut mdoc_window_bind = MdocWindowBind::new(
         mdoc_window_bind_rows_from(statement, Some(&extracted.issuer_sig_structure)),
         issuer_field.clone(),
-        birth_field.clone(),
-        nat_field.clone(),
-        birth_digest.clone(),
-        nat_digest.clone(),
+        attribute_fields[0].clone(),
+        attribute_fields[1].clone(),
+        attribute_digests[0].clone(),
+        attribute_digests[1].clone(),
     );
     let mut mdoc_validity = MdocValidityBind::new(
         statement.policy.current_date,
@@ -2661,13 +2737,13 @@ pub fn prove_mdoc_circuit(
         .prover(&age_public, &age_dob)
         .map_err(Error::AgePrepare)?;
     let mut age = match statement.birth_date_binding {
-        MdocBirthDateBinding::Packed(_) => age.with_dob_binding(birth_field.clone()),
-        MdocBirthDateBinding::Text(_) => age.with_text_dob_binding(birth_field.clone()),
+        MdocBirthDateBinding::Packed(_) => age.with_dob_binding(attribute_fields[0].clone()),
+        MdocBirthDateBinding::Text(_) => age.with_text_dob_binding(attribute_fields[0].clone()),
     };
     let mut nat = NationalityPredicate::new(PcsConfig::default())
         .prover(&nat_public, &nat_private)
         .map_err(Error::NatPrepare)?
-        .with_nat_binding(nat_field.clone());
+        .with_nat_binding(attribute_fields[1].clone());
 
     #[cfg(not(feature = "ec-coprocessor"))]
     let config = issuer_p256.pcs_config();
@@ -2675,7 +2751,7 @@ pub fn prove_mdoc_circuit(
     let config = crate::coprocessor_bridge_pcs_config();
     let stark_proof = {
         #[cfg(not(feature = "ec-coprocessor"))]
-        let mut modules: [&mut dyn AirProver; 13] = [
+        let mut modules: Vec<&mut dyn AirProver> = vec![
             &mut sha_tables,
             &mut issuer_p256,
             &mut issuer_sha,
@@ -2683,29 +2759,26 @@ pub fn prove_mdoc_circuit(
             &mut device_p256,
             &mut device_sha,
             &mut device_bridge,
-            &mut birth_sha,
-            &mut nat_sha,
-            &mut mdoc_window_bind,
-            &mut mdoc_validity,
-            &mut age,
-            &mut nat,
         ];
         #[cfg(feature = "ec-coprocessor")]
-        let mut modules: [&mut dyn AirProver; 12] = [
+        let mut modules: Vec<&mut dyn AirProver> = vec![
             &mut sha_tables,
             &mut issuer_sha,
             &mut issuer_public_digest_bind,
             &mut device_sha,
             &mut device_public_digest_bind,
-            &mut birth_sha,
-            &mut nat_sha,
-            &mut mdoc_window_bind,
-            &mut mdoc_validity,
-            &mut age,
-            &mut nat,
-            &mut coprocessor,
         ];
-        air_core::prove(&mut modules, config).map_err(|e| Error::Prove(format!("{e:?}")))?
+        for sha in &mut attribute_sha {
+            modules.push(sha);
+        }
+        modules.push(&mut mdoc_window_bind);
+        modules.push(&mut mdoc_validity);
+        modules.push(&mut age);
+        modules.push(&mut nat);
+        #[cfg(feature = "ec-coprocessor")]
+        modules.push(&mut coprocessor);
+        air_core::prove(modules.as_mut_slice(), config)
+            .map_err(|e| Error::Prove(format!("{e:?}")))?
     };
     #[cfg(feature = "ec-coprocessor")]
     let coprocessor_bundle = coprocessor.bundle.take().ok_or(Error::CoprocessorMissing)?;
@@ -2735,10 +2808,11 @@ pub fn prove_mdoc_circuit(
         issuer_sha_interaction_claim: issuer_sha.interaction_claim().clone(),
         device_sha_log_n_rows: shared_sha_log,
         device_sha_interaction_claim: device_sha.interaction_claim().clone(),
-        birth_sha_log_n_rows: shared_sha_log,
-        birth_sha_interaction_claim: birth_sha.interaction_claim().clone(),
-        nat_sha_log_n_rows: shared_sha_log,
-        nat_sha_interaction_claim: nat_sha.interaction_claim().clone(),
+        attribute_sha_log_n_rows: vec![shared_sha_log; attribute_sha.len()],
+        attribute_sha_interaction_claims: attribute_sha
+            .iter()
+            .map(|sha| sha.interaction_claim().clone())
+            .collect(),
         #[cfg(not(feature = "ec-coprocessor"))]
         issuer_bridge_log_size: issuer_bridge_log,
         #[cfg(not(feature = "ec-coprocessor"))]
@@ -2781,11 +2855,19 @@ pub fn verify_mdoc_circuit(
 
     let issuer_digest = SharedDigestRelation::new();
     let device_digest = SharedDigestRelation::new();
-    let birth_digest = SharedDigestRelation::new();
-    let nat_digest = SharedDigestRelation::new();
+    let attribute_count = proof.attribute_sha_interaction_claims.len();
+    if attribute_count != proof.attribute_sha_log_n_rows.len() || attribute_count != 2 {
+        return Err(Error::Verify(
+            "mdoc proof carries an unsupported attribute count".to_string(),
+        ));
+    }
+    let attribute_digests: Vec<_> = (0..attribute_count)
+        .map(|_| SharedDigestRelation::new())
+        .collect();
     let issuer_field = SharedFieldRelation::new();
-    let birth_field = SharedFieldRelation::new();
-    let nat_field = SharedFieldRelation::new();
+    let attribute_fields: Vec<_> = (0..attribute_count)
+        .map(|_| SharedFieldRelation::new())
+        .collect();
     let sha_table_relations = SharedShaTableRelations::new();
     #[cfg(not(feature = "ec-coprocessor"))]
     let issuer_scalar_z = SharedScalarZRelation::new();
@@ -2836,24 +2918,26 @@ pub fn verify_mdoc_circuit(
     .with_shared_tables(sha_table_relations.clone())
     .with_digest_handle(device_digest.clone());
 
-    let birth_exposure = birth_date_exposure(statement);
-    let nat_exposure = nationality_exposure(statement);
-    let mut birth_sha = Sha256Verifier::new(
-        proof.birth_sha_log_n_rows,
-        SHA_GROUP_WIDTH,
-        proof.birth_sha_interaction_claim.clone(),
-    )
-    .with_shared_tables(sha_table_relations.clone())
-    .with_digest_handle(birth_digest.clone())
-    .with_field_handle(birth_exposure, birth_field.clone());
-    let mut nat_sha = Sha256Verifier::new(
-        proof.nat_sha_log_n_rows,
-        SHA_GROUP_WIDTH,
-        proof.nat_sha_interaction_claim.clone(),
-    )
-    .with_shared_tables(sha_table_relations.clone())
-    .with_digest_handle(nat_digest.clone())
-    .with_field_handle(nat_exposure, nat_field.clone());
+    let attribute_exposures = vec![
+        birth_date_exposure(statement),
+        nationality_exposure(statement),
+    ];
+    let mut attribute_sha = Vec::with_capacity(attribute_count);
+    for index in 0..attribute_count {
+        attribute_sha.push(
+            Sha256Verifier::new(
+                proof.attribute_sha_log_n_rows[index],
+                SHA_GROUP_WIDTH,
+                proof.attribute_sha_interaction_claims[index].clone(),
+            )
+            .with_shared_tables(sha_table_relations.clone())
+            .with_digest_handle(attribute_digests[index].clone())
+            .with_field_handle(
+                attribute_exposures[index].clone(),
+                attribute_fields[index].clone(),
+            ),
+        );
+    }
 
     #[cfg(not(feature = "ec-coprocessor"))]
     let mut issuer_bridge = DigestBindVerifier::new(
@@ -2884,10 +2968,10 @@ pub fn verify_mdoc_circuit(
     let mut mdoc_window_bind = MdocWindowBind::verifier(
         mdoc_window_bind_rows_from(statement, None),
         issuer_field.clone(),
-        birth_field.clone(),
-        nat_field.clone(),
-        birth_digest.clone(),
-        nat_digest.clone(),
+        attribute_fields[0].clone(),
+        attribute_fields[1].clone(),
+        attribute_digests[0].clone(),
+        attribute_digests[1].clone(),
         proof.mdoc_window_bind_interaction_claim.clone(),
     );
     let mut mdoc_validity = MdocValidityBind::verifier(
@@ -2900,13 +2984,13 @@ pub fn verify_mdoc_circuit(
         .verifier(&proof.age_public, &proof.age_claimed_sums)
         .map_err(Error::AgePrepare)?;
     let mut age = match statement.birth_date_binding {
-        MdocBirthDateBinding::Packed(_) => age.with_dob_binding(birth_field.clone()),
-        MdocBirthDateBinding::Text(_) => age.with_text_dob_binding(birth_field.clone()),
+        MdocBirthDateBinding::Packed(_) => age.with_dob_binding(attribute_fields[0].clone()),
+        MdocBirthDateBinding::Text(_) => age.with_text_dob_binding(attribute_fields[0].clone()),
     };
     let mut nat = NationalityPredicate::new(PcsConfig::default())
         .verifier(&proof.nat_public, &proof.nat_claimed_sums)
         .map_err(Error::NatPrepare)?
-        .with_nat_binding(nat_field.clone());
+        .with_nat_binding(attribute_fields[1].clone());
     #[cfg(feature = "ec-coprocessor")]
     let mut coprocessor = MdocCoprocessorBindingVerifier {
         issuer_input: statement.issuer_input.clone(),
@@ -2918,7 +3002,7 @@ pub fn verify_mdoc_circuit(
     };
 
     #[cfg(not(feature = "ec-coprocessor"))]
-    let mut modules: [&mut dyn Air; 13] = [
+    let mut modules: Vec<&mut dyn Air> = vec![
         &mut sha_tables,
         &mut issuer_p256,
         &mut issuer_sha,
@@ -2926,30 +3010,26 @@ pub fn verify_mdoc_circuit(
         &mut device_p256,
         &mut device_sha,
         &mut device_bridge,
-        &mut birth_sha,
-        &mut nat_sha,
-        &mut mdoc_window_bind,
-        &mut mdoc_validity,
-        &mut age,
-        &mut nat,
     ];
     #[cfg(feature = "ec-coprocessor")]
-    let mut modules: [&mut dyn Air; 12] = [
+    let mut modules: Vec<&mut dyn Air> = vec![
         &mut sha_tables,
         &mut issuer_sha,
         &mut issuer_public_digest_bind,
         &mut device_sha,
         &mut device_public_digest_bind,
-        &mut birth_sha,
-        &mut nat_sha,
-        &mut mdoc_window_bind,
-        &mut mdoc_validity,
-        &mut age,
-        &mut nat,
-        &mut coprocessor,
     ];
+    for sha in &mut attribute_sha {
+        modules.push(sha);
+    }
+    modules.push(&mut mdoc_window_bind);
+    modules.push(&mut mdoc_validity);
+    modules.push(&mut age);
+    modules.push(&mut nat);
+    #[cfg(feature = "ec-coprocessor")]
+    modules.push(&mut coprocessor);
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        air_core::verify(&mut modules, &proof.stark_proof)
+        air_core::verify(modules.as_mut_slice(), &proof.stark_proof)
     })) {
         Ok(Ok(())) => Ok(()),
         Ok(Err(error)) => Err(Error::Verify(format!("{error:?}"))),
