@@ -4,8 +4,22 @@ use crate::Fp;
 
 const V1_DEGREE_BOUND: usize = 64;
 const V1_CODEWORD_LEN: usize = 512;
+const V2A_ROW_DEGREE_BOUND: usize = 234;
+const V2A_CLAIM_DEGREE_BOUND: usize = 297;
+const V2A_WEIGHT_DEGREE_BOUND: usize = 64;
+const V2A_CODEWORD_LEN: usize = 2048;
+const V2B_ROW_DEGREE_BOUND: usize = 289;
+const V2B_CLAIM_DEGREE_BOUND: usize = 352;
+const V2B_WEIGHT_DEGREE_BOUND: usize = 64;
+const V2B_CODEWORD_LEN: usize = 1024;
 
 static V1_ENCODER: OnceLock<RsEncoder> = OnceLock::new();
+static V2A_ROW_ENCODER: OnceLock<RsEncoder> = OnceLock::new();
+static V2A_CLAIM_ENCODER: OnceLock<RsEncoder> = OnceLock::new();
+static V2A_WEIGHT_ENCODER: OnceLock<RsEncoder> = OnceLock::new();
+static V2B_ROW_ENCODER: OnceLock<RsEncoder> = OnceLock::new();
+static V2B_CLAIM_ENCODER: OnceLock<RsEncoder> = OnceLock::new();
+static V2B_WEIGHT_ENCODER: OnceLock<RsEncoder> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RsError {
@@ -16,8 +30,8 @@ pub enum RsError {
 }
 
 pub fn rs_encode(message: &[Fp], codeword_len: usize) -> Result<Vec<Fp>, RsError> {
-    if message.len() == V1_DEGREE_BOUND && codeword_len == V1_CODEWORD_LEN {
-        return Ok(v1_encoder().encode(message).expect("length checked"));
+    if let Some(encoder) = cached_encoder(message.len(), codeword_len) {
+        return Ok(encoder.encode(message).expect("length checked"));
     }
     RsEncoder::new(message.len(), codeword_len)?.encode(message)
 }
@@ -27,8 +41,8 @@ pub fn rs_encode_padded(
     message_len: usize,
     codeword_len: usize,
 ) -> Result<Vec<Fp>, RsError> {
-    if message_len == V1_DEGREE_BOUND && codeword_len == V1_CODEWORD_LEN {
-        return v1_encoder().encode_padded(message_prefix);
+    if let Some(encoder) = cached_encoder(message_len, codeword_len) {
+        return encoder.encode_padded(message_prefix);
     }
     RsEncoder::new(message_len, codeword_len)?.encode_padded(message_prefix)
 }
@@ -44,8 +58,8 @@ pub fn is_codeword(codeword: &[Fp], message_len: usize) -> Result<bool, RsError>
 }
 
 pub fn rs_evaluate(message: &[Fp], codeword_len: usize, index: usize) -> Result<Fp, RsError> {
-    if message.len() == V1_DEGREE_BOUND && codeword_len == V1_CODEWORD_LEN {
-        return v1_encoder().evaluate(message, index);
+    if let Some(encoder) = cached_encoder(message.len(), codeword_len) {
+        return encoder.evaluate(message, index);
     }
     RsEncoder::new(message.len(), codeword_len)?.evaluate(message, index)
 }
@@ -61,6 +75,37 @@ fn v1_encoder() -> &'static RsEncoder {
     V1_ENCODER.get_or_init(|| {
         RsEncoder::new(V1_DEGREE_BOUND, V1_CODEWORD_LEN).expect("static v1 RS params are valid")
     })
+}
+
+fn cached_encoder(message_len: usize, codeword_len: usize) -> Option<&'static RsEncoder> {
+    match (message_len, codeword_len) {
+        (V1_DEGREE_BOUND, V1_CODEWORD_LEN) => Some(v1_encoder()),
+        (V2A_ROW_DEGREE_BOUND, V2A_CODEWORD_LEN) => Some(V2A_ROW_ENCODER.get_or_init(|| {
+            RsEncoder::new(V2A_ROW_DEGREE_BOUND, V2A_CODEWORD_LEN)
+                .expect("static v2 A row RS params are valid")
+        })),
+        (V2A_CLAIM_DEGREE_BOUND, V2A_CODEWORD_LEN) => Some(V2A_CLAIM_ENCODER.get_or_init(|| {
+            RsEncoder::new(V2A_CLAIM_DEGREE_BOUND, V2A_CODEWORD_LEN)
+                .expect("static v2 A claim RS params are valid")
+        })),
+        (V2A_WEIGHT_DEGREE_BOUND, V2A_CODEWORD_LEN) => Some(V2A_WEIGHT_ENCODER.get_or_init(|| {
+            RsEncoder::new(V2A_WEIGHT_DEGREE_BOUND, V2A_CODEWORD_LEN)
+                .expect("static v2 A weight RS params are valid")
+        })),
+        (V2B_ROW_DEGREE_BOUND, V2B_CODEWORD_LEN) => Some(V2B_ROW_ENCODER.get_or_init(|| {
+            RsEncoder::new(V2B_ROW_DEGREE_BOUND, V2B_CODEWORD_LEN)
+                .expect("static v2 B row RS params are valid")
+        })),
+        (V2B_CLAIM_DEGREE_BOUND, V2B_CODEWORD_LEN) => Some(V2B_CLAIM_ENCODER.get_or_init(|| {
+            RsEncoder::new(V2B_CLAIM_DEGREE_BOUND, V2B_CODEWORD_LEN)
+                .expect("static v2 B claim RS params are valid")
+        })),
+        (V2B_WEIGHT_DEGREE_BOUND, V2B_CODEWORD_LEN) => Some(V2B_WEIGHT_ENCODER.get_or_init(|| {
+            RsEncoder::new(V2B_WEIGHT_DEGREE_BOUND, V2B_CODEWORD_LEN)
+                .expect("static v2 B weight RS params are valid")
+        })),
+        _ => None,
+    }
 }
 
 impl RsEncoder {

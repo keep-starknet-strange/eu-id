@@ -74,8 +74,8 @@ fn main() {
         summary.sumcheck_rounds_total, summary.sumcheck_rounds_max_per_layer
     );
     println!(
-        "ligero_systematic_columns={} ligero_proximity_columns={} ligero_combined_row_felts={}",
-        summary.systematic_columns, summary.proximity_columns, summary.combined_row_felts
+        "ligero_claim_polynomial_felts={} ligero_proximity_columns={} ligero_combined_row_felts={}",
+        summary.claim_polynomial_felts, summary.proximity_columns, summary.combined_row_felts
     );
     #[cfg(feature = "count-ops")]
     println!(
@@ -196,7 +196,7 @@ fn run_once(input: &EcdsaInput) -> Sample {
 struct BundleShape {
     sumcheck_rounds_total: usize,
     sumcheck_rounds_max_per_layer: usize,
-    systematic_columns: usize,
+    claim_polynomial_felts: usize,
     proximity_columns: usize,
     combined_row_felts: usize,
 }
@@ -205,7 +205,7 @@ impl BundleShape {
     fn from_bundle(bundle: &ImplementedCircuitBundle) -> Self {
         let mut sumcheck_rounds_total = 0;
         let mut sumcheck_rounds_max_per_layer = 0;
-        let systematic_columns = bundle.openings.len();
+        let claim_polynomial_felts = bundle.claim_batch.coefficients.len();
         let proximity_columns = bundle.proximity_openings.len();
         let combined_row_felts = bundle.proximity_claim.combined_row.len();
 
@@ -220,7 +220,7 @@ impl BundleShape {
         Self {
             sumcheck_rounds_total,
             sumcheck_rounds_max_per_layer,
-            systematic_columns,
+            claim_polynomial_felts,
             proximity_columns,
             combined_row_felts,
         }

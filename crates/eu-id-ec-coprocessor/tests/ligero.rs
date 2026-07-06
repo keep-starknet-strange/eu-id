@@ -1,6 +1,6 @@
 use eu_id_ec_coprocessor::ligero::{
-    commit_witness, v1_ligero_params, verify_input_claims_from_systematic_openings,
-    verify_openings, LigeroParams,
+    commit_witness, v1_ligero_params, v2_ligero_params, v2_ligero_params_b,
+    verify_input_claims_from_systematic_openings_with_len, verify_openings, LigeroParams,
 };
 use eu_id_ec_coprocessor::merkle::{commit_columns, verify_column, ColumnOpening};
 use eu_id_ec_coprocessor::rs::{is_codeword, rs_encode};
@@ -89,6 +89,7 @@ fn ligero_commit_open_verify_accepts_known_columns() {
     let commitment = commit_witness(&values, params).unwrap();
     let indices = [0usize, 3, 7];
     let openings = commitment.open_columns(&indices).unwrap();
+    assert_eq!(openings[0].column.len(), 5);
     let gamma = [Fp::from_u64(2), Fp::from_u64(3), Fp::from_u64(5)];
     let claim = commitment.proximity_claim(&gamma).unwrap();
 
@@ -132,6 +133,43 @@ fn ligero_opening_verifier_rejects_corrupt_combined_row() {
 }
 
 #[test]
+fn ligero_proximity_claim_is_masked_for_same_witness() {
+    let params = LigeroParams {
+        row_len: 4,
+        degree_bound: 7,
+        codeword_len: 16,
+        openings: 2,
+        proximity_radius: 0,
+    };
+    let values = (1u64..=8).map(Fp::from_u64).collect::<Vec<_>>();
+    let gamma = [Fp::from_u64(7), Fp::from_u64(11)];
+
+    let first = commit_witness(&values, params).unwrap();
+    let second = commit_witness(&values, params).unwrap();
+    let first_claim = first.proximity_claim(&gamma).unwrap();
+    let second_claim = second.proximity_claim(&gamma).unwrap();
+
+    assert_ne!(first.root(), second.root());
+    assert_ne!(first_claim.combined_row, second_claim.combined_row);
+    assert!(verify_openings(
+        first.root(),
+        params,
+        &first.open_columns(&[1usize, 6]).unwrap(),
+        &first_claim,
+        &gamma
+    )
+    .unwrap());
+    assert!(verify_openings(
+        second.root(),
+        params,
+        &second.open_columns(&[1usize, 6]).unwrap(),
+        &second_claim,
+        &gamma
+    )
+    .unwrap());
+}
+
+#[test]
 fn systematic_openings_verify_bl2_input_claims_against_committed_witness() {
     let params = LigeroParams {
         row_len: 4,
@@ -157,11 +195,12 @@ fn systematic_openings_verify_bl2_input_claims_against_committed_witness() {
         ],
     };
 
-    assert!(verify_input_claims_from_systematic_openings(
+    assert!(verify_input_claims_from_systematic_openings_with_len(
         commitment.root(),
         params,
         &openings,
         &claims,
+        8,
     )
     .unwrap());
 }
@@ -202,11 +241,12 @@ fn systematic_openings_accept_bl2_sumcheck_input_claims() {
     )
     .unwrap();
 
-    assert!(verify_input_claims_from_systematic_openings(
+    assert!(verify_input_claims_from_systematic_openings_with_len(
         commitment.root(),
         params,
         &commitment.open_systematic_columns().unwrap(),
         &claims,
+        input_layer.len(),
     )
     .unwrap());
 }
@@ -237,36 +277,49 @@ fn systematic_openings_reject_bad_input_claim_and_corrupt_column() {
         ],
     };
     claims.values[0] = claims.values[0] + Fp::ONE;
-    assert!(!verify_input_claims_from_systematic_openings(
+    assert!(!verify_input_claims_from_systematic_openings_with_len(
         commitment.root(),
         params,
         &openings,
         &claims,
+        8,
     )
     .unwrap());
 
     let mut corrupt_openings = openings;
     corrupt_openings[0].column[0] = corrupt_openings[0].column[0] + Fp::ONE;
-    assert!(!verify_input_claims_from_systematic_openings(
+    assert!(!verify_input_claims_from_systematic_openings_with_len(
         commitment.root(),
         params,
         &corrupt_openings,
         &claims,
+        8,
     )
     .unwrap());
 }
 
 #[test]
-fn pinned_v1_ligero_params_meet_q027_non_zk_soundness_bounds() {
-    let params = v1_ligero_params();
+fn q007_v2_ligero_params_meet_zk_soundness_bounds() {
+    let legacy = v1_ligero_params();
+    assert!(legacy.validate().is_err());
 
-    assert_eq!(params.row_len, 64);
-    assert_eq!(params.degree_bound, 64);
-    assert_eq!(params.codeword_len, 512);
-    assert_eq!(params.openings, 160);
-    assert_eq!(params.proximity_radius, 223);
-    params.validate().unwrap();
-    assert!(params.degree_bound >= params.row_len);
-    assert!(params.openings >= 156);
-    assert!(params.soundness_error() <= 2f64.powi(-128));
+    let option_a = v2_ligero_params();
+    assert_eq!(option_a.row_len, 64);
+    assert_eq!(option_a.degree_bound, 234);
+    assert_eq!(option_a.codeword_len, 2048);
+    assert_eq!(option_a.openings, 170);
+    assert_eq!(option_a.proximity_radius, 875);
+    option_a.validate().unwrap();
+    assert!(option_a.degree_bound >= option_a.row_len + option_a.openings);
+    assert!(option_a.soundness_error() <= 2f64.powi(-128));
+
+    let option_b = v2_ligero_params_b();
+    assert_eq!(option_b.row_len, 64);
+    assert_eq!(option_b.degree_bound, 289);
+    assert_eq!(option_b.codeword_len, 1024);
+    assert_eq!(option_b.openings, 225);
+    assert_eq!(option_b.proximity_radius, 335);
+    option_b.validate().unwrap();
+    assert!(option_b.degree_bound >= option_b.row_len + option_b.openings);
+    assert!(option_b.soundness_error() <= 2f64.powi(-128));
 }

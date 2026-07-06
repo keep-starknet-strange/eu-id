@@ -318,6 +318,10 @@ M4 A3-on-coprocessor note (2026-07-04): Q-M1-005 directed a merge of `feat/a3-hy
 | 2026-07-06 | worktree | mdoc P3 Longfellow EUAV vector (Criterion, RAYON_NUM_THREADS=1, security=128) | mdoc/verify/longfellow_euav11_N1_prod128 | — | 44.529 ms |
 | 2026-07-06 | worktree | mdoc P3 Longfellow EUAV vector (Criterion, RAYON_NUM_THREADS=1, security=110) | mdoc/verify/longfellow_euav11_N1_parity110 | — | 43.939 ms |
 | 2026-07-06 | worktree | mdoc P3 Longfellow EUAV vector | longfellow_euav11_N1 proof bytes, 128 -> 110 security | 2,196,362 | 2,019,174 |
+| 2026-07-06 | worktree | P4a Ligero v2 witness-hiding openings (Q-008 A') | `bench_bundle` prove median (release, runs=5) | — | 937.605 ms |
+| 2026-07-06 | worktree | P4a Ligero v2 witness-hiding openings (Q-008 A') | `bench_bundle` verify median (release, runs=5) | — | 111.131 ms |
+| 2026-07-06 | worktree | P4a Ligero v2 witness-hiding openings (Q-008 A') | serialized coprocessor bundle bytes | — | 944,758 |
+| 2026-07-06 | worktree | P4a Ligero v2 witness-hiding openings (Q-008 A') | Ligero rows / committed values / opened columns | — | 154 rows / 9,679 values / 170 columns |
 
 P3 Longfellow note (2026-07-06): vectors are byte extracts from Google
 Longfellow `mdoc_examples.h` at `d8ad8f65187c7c364a3c2181ad484bcab03f0ec2`
@@ -332,5 +336,14 @@ and `... -- longfellow_euav11`. Release e2e gates also passed for mDL N=1,
 mDL N=2, and EUAV #11 at 128-bit production config. A local checkout did not
 contain published Pixel-9 mdoc proof numbers, so no Longfellow device-factor
 comparison row is recorded here.
+
+P4a Ligero note (2026-07-06): implements Q-008's corrected masked linear-claim
+protocol with `ell=64,k=234,n=2048,t=170,e=875`, no witness systematic
+openings, a degree-`<k` proximity mask row, and a degree-`<k+ell-1` claim
+blind row. The committed vector is the verifier-facing coprocessor circuit
+input and deterministic pad vectors; sumcheck input claims, pad-vector claims,
+public caller bindings, and cross-family consistency coordinates are checked
+through one masked Ligero claim batch. Command:
+`cargo run -p eu-id-ec-coprocessor --release --example bench_bundle`.
 
 WO-M5 note (2026-07-04): baseline is `801ea3a5`; candidate is the review-follow-up worktree after baseline commit `34512349`. `mdoc_perf_probe` now emits proof-byte decomposition: total `1,759,326`, STARK `971,649`, coprocessor bundle `787,032`, metadata `645`; inner STARK fields are config `25`, commitments `136`, sampled values `98,400`, decommitments `85,672`, queried values `719,596`, proof-of-work `8`, and FRI proof `67,812`. The review follow-up adds explicit shared-provider claimed-sum tamper, digest/field-exposure tamper, malformed-provider no-panic rejection, and standalone SHA proof-byte pin gates.

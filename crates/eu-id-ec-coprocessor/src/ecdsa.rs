@@ -2,10 +2,10 @@ use core::ops::Range;
 use std::time::{Duration, Instant};
 
 use crate::ligero::{
-    commit_witness_profiled, v1_ligero_params, verify_openings, LigeroError, LigeroParams,
-    LigeroProximityClaim,
+    commit_witness_profiled, v2_ligero_params, verify_claim_batch, verify_openings,
+    LigeroClaimBatch, LigeroError, LigeroLinearClaim, LigeroParams, LigeroProximityClaim,
 };
-use crate::merkle::{verify_column, ColumnOpening};
+use crate::merkle::ColumnOpening;
 use crate::sumcheck::{
     circuit_otp_pad_values, proof_otp_pad_values, prove_circuit, prove_evaluated_circuit,
     verify_circuit, CircuitSumcheckProof, InputClaims, SumcheckError,
@@ -176,9 +176,10 @@ pub struct ImplementedCircuitProofs {
 pub struct ImplementedCircuitBundle {
     pub params: LigeroParams,
     pub root: [u8; 32],
-    pub openings: Vec<ColumnOpening>,
     pub proximity_openings: Vec<ColumnOpening>,
     pub proximity_claim: LigeroProximityClaim,
+    pub claim_batch: LigeroClaimBatch,
+    pub consistency_claim_values: Vec<Fp>,
     pub entries: Vec<ImplementedCircuitBundleEntry>,
 }
 
@@ -532,13 +533,7 @@ pub fn prove_implemented_circuit_bundle_batch_unchecked_profiled(
         );
     }
 
-    let mut committed_values = Vec::new();
-    for (witness, instances) in witnesses.iter().zip(&all_instances) {
-        committed_values.extend_from_slice(&witness.values);
-        for instance in instances {
-            committed_values.extend(circuit_otp_pad_values(&instance.circuit));
-        }
-    }
+    let (committed_values, all_layouts) = prover_committed_values(&all_instances);
     profile.circuit_build = start.elapsed();
     profile.committed_values = committed_values.len();
     profile.committed_nonzero_values = committed_values
@@ -581,18 +576,15 @@ pub fn prove_implemented_circuit_bundle_batch_unchecked_profiled(
     let proximity_openings = commitment
         .open_columns(&proximity_indices)
         .map_err(ImplementedCircuitProofError::Ligero)?;
-    let openings = commitment
-        .open_systematic_columns()
-        .map_err(ImplementedCircuitProofError::Ligero)?;
     profile.ligero_openings = start.elapsed();
 
     let mut entries = Vec::new();
     let start = Instant::now();
-    for (signature_index, (input, instances)) in inputs.iter().zip(all_instances).enumerate() {
-        for (family_index, instance) in instances.into_iter().enumerate() {
+    for (signature_index, (input, instances)) in inputs.iter().zip(&all_instances).enumerate() {
+        for (family_index, instance) in instances.iter().enumerate() {
             let layers = instance
                 .circuit
-                .evaluate_input(instance.input)
+                .evaluate_input(instance.input.clone())
                 .map_err(ImplementedCircuitProofError::Circuit)?;
             let mut channel =
                 CoprocessorChannel::from_seed(transcript_seed, COPROCESSOR_TRANSCRIPT_DOMAIN);
@@ -608,14 +600,23 @@ pub fn prove_implemented_circuit_bundle_batch_unchecked_profiled(
         }
     }
     profile.sumcheck = start.elapsed();
+    let (claim_batch, consistency_claim_values) = prover_claim_batch(
+        &commitment,
+        inputs,
+        &all_instances,
+        &all_layouts,
+        &entries,
+        transcript_seed,
+    )?;
 
     Ok((
         ImplementedCircuitBundle {
             params,
             root,
-            openings,
             proximity_openings,
             proximity_claim,
+            claim_batch,
+            consistency_claim_values,
             entries,
         },
         profile,
@@ -664,11 +665,9 @@ pub fn prove_implemented_circuit_bundle_unchecked_profiled(
     let start = Instant::now();
     let instances = implemented_circuit_instances(input, witness)
         .map_err(ImplementedCircuitProofError::Witness)?;
+    let all_instances = vec![instances];
 
-    let mut committed_values = witness.values.clone();
-    for instance in &instances {
-        committed_values.extend(circuit_otp_pad_values(&instance.circuit));
-    }
+    let (committed_values, all_layouts) = prover_committed_values(&all_instances);
     profile.circuit_build = start.elapsed();
     profile.committed_values = committed_values.len();
     profile.committed_nonzero_values = committed_values
@@ -711,20 +710,18 @@ pub fn prove_implemented_circuit_bundle_unchecked_profiled(
     let proximity_openings = commitment
         .open_columns(&proximity_indices)
         .map_err(ImplementedCircuitProofError::Ligero)?;
-    let openings = commitment
-        .open_systematic_columns()
-        .map_err(ImplementedCircuitProofError::Ligero)?;
     profile.ligero_openings = start.elapsed();
 
     let mut entries = Vec::new();
     let start = Instant::now();
-    for (index, instance) in instances.into_iter().enumerate() {
+    for (index, instance) in all_instances[0].iter().enumerate() {
         let layers = instance
             .circuit
-            .evaluate_input(instance.input)
+            .evaluate_input(instance.input.clone())
             .map_err(ImplementedCircuitProofError::Circuit)?;
         let mut channel =
             CoprocessorChannel::from_seed(transcript_seed, COPROCESSOR_TRANSCRIPT_DOMAIN);
+        mix_bundle_signature_index(0, &mut channel);
         channel.mix_bytes(instance.label);
         mix_ecdsa_statement(input, &mut channel).map_err(ImplementedCircuitProofError::Witness)?;
         let family_start = Instant::now();
@@ -734,14 +731,24 @@ pub fn prove_implemented_circuit_bundle_unchecked_profiled(
         entries.push(ImplementedCircuitBundleEntry { proof });
     }
     profile.sumcheck = start.elapsed();
+    let single_input = [*input];
+    let (claim_batch, consistency_claim_values) = prover_claim_batch(
+        &commitment,
+        &single_input,
+        &all_instances,
+        &all_layouts,
+        &entries,
+        transcript_seed,
+    )?;
 
     Ok((
         ImplementedCircuitBundle {
             params,
             root,
-            openings,
             proximity_openings,
             proximity_claim,
+            claim_batch,
+            consistency_claim_values,
             entries,
         },
         profile,
@@ -787,21 +794,13 @@ pub fn verify_implemented_circuit_bundle_batch_profiled(
     let mut signature_layouts = Vec::with_capacity(inputs.len());
     let mut offset = 0;
     for _ in inputs {
-        let witness_offset = offset;
-        offset += LAYOUT_LEN;
         let (layouts, next_offset) = verifier_bundle_pad_layouts(&circuits, offset);
-        signature_layouts.push((witness_offset, layouts));
+        signature_layouts.push(layouts);
         offset = next_offset;
     }
     let committed_len = offset;
     if bundle.params != implemented_circuit_ligero_params(committed_len) {
         return Err(ImplementedCircuitProofError::ProximityOpeningRejected);
-    }
-    let opened_rows = systematic_opening_row_count(bundle.params, &bundle.openings)?;
-    if committed_len > opened_rows * bundle.params.row_len {
-        return Err(ImplementedCircuitProofError::Ligero(
-            LigeroError::WrongPointLength,
-        ));
     }
     profile.setup = setup_start.elapsed();
 
@@ -832,30 +831,10 @@ pub fn verify_implemented_circuit_bundle_batch_profiled(
     }
     profile.ligero_proximity = start.elapsed();
 
-    let start = Instant::now();
-    for opening in &bundle.openings {
-        if !verify_column(bundle.root, opening)
-            .map_err(|err| ImplementedCircuitProofError::Ligero(LigeroError::Merkle(err)))?
-        {
-            return Err(ImplementedCircuitProofError::InputClaimOpeningRejected);
-        }
-    }
-    let opened_values = systematic_opened_values(bundle.params, &bundle.openings)?;
-    profile.systematic_reconstruct = start.elapsed();
-
+    let mut linear_claims = Vec::new();
+    let mut consistency_cursor = 0usize;
     let mut all_claims = Vec::with_capacity(inputs.len());
-    for (signature_index, (input, (witness_offset, layouts))) in
-        inputs.iter().zip(signature_layouts).enumerate()
-    {
-        let opened_witness_values = opened_values
-            .get(witness_offset..witness_offset + LAYOUT_LEN)
-            .ok_or(ImplementedCircuitProofError::InputClaimOpeningRejected)?
-            .to_vec();
-        let opened_witness = Witness {
-            values: opened_witness_values,
-        };
-        let expected_instances = implemented_circuit_instances(input, &opened_witness)
-            .map_err(ImplementedCircuitProofError::Witness)?;
+    for (signature_index, (input, layouts)) in inputs.iter().zip(&signature_layouts).enumerate() {
         let mut verified_claims = Vec::with_capacity(circuits.len());
         let mut u_scalars_from_c3 = None;
         let mut u_scalars_from_c6 = None;
@@ -866,17 +845,15 @@ pub fn verify_implemented_circuit_bundle_batch_profiled(
         let mut c12_boundaries = None;
         let mut c13_boundary_values = None;
         let mut rx_from_c14 = None;
-        for (family_index, (((instance, expected), layout), entry)) in circuits
+        for (family_index, ((instance, layout), entry)) in circuits
             .iter()
-            .zip(&expected_instances)
-            .zip(&layouts)
+            .zip(layouts)
             .zip(
                 &bundle.entries
                     [signature_index * circuits.len()..(signature_index + 1) * circuits.len()],
             )
             .enumerate()
         {
-            debug_assert_eq!(instance.label, expected.label);
             let mut channel =
                 CoprocessorChannel::from_seed(transcript_seed, COPROCESSOR_TRANSCRIPT_DOMAIN);
             mix_bundle_signature_index(signature_index, &mut channel);
@@ -890,59 +867,157 @@ pub fn verify_implemented_circuit_bundle_batch_profiled(
             profile.sumcheck += elapsed;
             profile.sumcheck_by_family[family_index] += elapsed;
 
-            let values = expected.input.as_slice();
-            let committed_pads = opened_values
-                .get(layout.pad_offset..layout.pad_offset + layout.pad_len)
-                .ok_or(ImplementedCircuitProofError::InputClaimOpeningRejected)?;
             let start = Instant::now();
-            if !verify_input_claims_from_values(values, &claims)? {
-                return Err(ImplementedCircuitProofError::InputClaimOpeningRejected);
-            }
+            add_input_claims(&mut linear_claims, layout, &claims);
+            add_pad_claims(
+                &mut linear_claims,
+                layout,
+                &proof_otp_pad_values(&entry.proof),
+                bundle.root,
+                transcript_seed,
+            )?;
             profile.input_claims += start.elapsed();
 
             let start = Instant::now();
-            verify_committed_otp_pads(&instance.circuit, &entry.proof, committed_pads)?;
-            if family_index == 0 {
-                verify_c1_caller_input_binding(input, values)?;
-            }
             match instance.label {
+                b"s4-ecdsa-c1-input-limbs" => {
+                    add_c1_public_claims(&mut linear_claims, input, layout)?
+                }
                 b"s4-ecdsa-c2-canonicality" => {
-                    verify_c2_caller_input_binding(input, values)?;
+                    add_c2_public_claims(&mut linear_claims, input, layout)?;
                 }
                 b"s4-ecdsa-c3-c5-scalar-setup" => {
-                    verify_c3_caller_input_binding(input, values)?;
-                    u_scalars_from_c3 =
-                        Some((values[C3_U1_INDEX as usize], values[C3_U2_INDEX as usize]));
+                    add_c3_public_claims(&mut linear_claims, input, layout)?;
+                    u_scalars_from_c3 = Some((
+                        take_private_value(
+                            &mut linear_claims,
+                            bundle,
+                            &mut consistency_cursor,
+                            layout,
+                            C3_U1_INDEX as usize,
+                        )?,
+                        take_private_value(
+                            &mut linear_claims,
+                            bundle,
+                            &mut consistency_cursor,
+                            layout,
+                            C3_U2_INDEX as usize,
+                        )?,
+                    ));
                 }
                 b"s4-ecdsa-c6-scalar-bits" => {
-                    u_scalars_from_c6 =
-                        Some((values[C6_U1_INDEX as usize], values[C6_U2_INDEX as usize]));
+                    u_scalars_from_c6 = Some((
+                        take_private_value(
+                            &mut linear_claims,
+                            bundle,
+                            &mut consistency_cursor,
+                            layout,
+                            C6_U1_INDEX as usize,
+                        )?,
+                        take_private_value(
+                            &mut linear_claims,
+                            bundle,
+                            &mut consistency_cursor,
+                            layout,
+                            C6_U2_INDEX as usize,
+                        )?,
+                    ));
                 }
                 b"s4-ecdsa-c9-c10-accumulator-on-curve" => {
-                    accumulator_endpoints_from_c9_c10 = Some(c9_c10_accumulator_endpoints(values)?);
+                    accumulator_endpoints_from_c9_c10 = Some(take_c9_c10_accumulator_endpoints(
+                        &mut linear_claims,
+                        bundle,
+                        &mut consistency_cursor,
+                        layout,
+                    )?);
                 }
                 b"s4-ecdsa-c11-final-add" => {
-                    add_inputs_from_c11 = Some((
-                        (values[C11_AX_INDEX as usize], values[C11_AY_INDEX as usize]),
-                        (values[C11_BX_INDEX as usize], values[C11_BY_INDEX as usize]),
-                    ));
-                    denom_inv_from_c11 = Some(values[C11_DENOM_INV_INDEX as usize]);
-                    final_from_c11 =
-                        Some((values[C11_RX_INDEX as usize], values[C11_RY_INDEX as usize]));
+                    let ax = take_private_value(
+                        &mut linear_claims,
+                        bundle,
+                        &mut consistency_cursor,
+                        layout,
+                        C11_AX_INDEX as usize,
+                    )?;
+                    let ay = take_private_value(
+                        &mut linear_claims,
+                        bundle,
+                        &mut consistency_cursor,
+                        layout,
+                        C11_AY_INDEX as usize,
+                    )?;
+                    let bx = take_private_value(
+                        &mut linear_claims,
+                        bundle,
+                        &mut consistency_cursor,
+                        layout,
+                        C11_BX_INDEX as usize,
+                    )?;
+                    let by = take_private_value(
+                        &mut linear_claims,
+                        bundle,
+                        &mut consistency_cursor,
+                        layout,
+                        C11_BY_INDEX as usize,
+                    )?;
+                    let rx = take_private_value(
+                        &mut linear_claims,
+                        bundle,
+                        &mut consistency_cursor,
+                        layout,
+                        C11_RX_INDEX as usize,
+                    )?;
+                    let ry = take_private_value(
+                        &mut linear_claims,
+                        bundle,
+                        &mut consistency_cursor,
+                        layout,
+                        C11_RY_INDEX as usize,
+                    )?;
+                    let denom_inv = take_private_value(
+                        &mut linear_claims,
+                        bundle,
+                        &mut consistency_cursor,
+                        layout,
+                        C11_DENOM_INV_INDEX as usize,
+                    )?;
+                    add_inputs_from_c11 = Some(((ax, ay), (bx, by)));
+                    denom_inv_from_c11 = Some(denom_inv);
+                    final_from_c11 = Some((rx, ry));
                 }
                 b"s4-ecdsa-c12-final-on-curve" => {
-                    c12_boundaries = Some(c12_boundary_values_from_openings(values)?);
+                    c12_boundaries = Some(take_c12_boundary_values(
+                        &mut linear_claims,
+                        bundle,
+                        &mut consistency_cursor,
+                        layout,
+                    )?);
                 }
                 b"s4-ecdsa-c13-slope-inverses" => {
-                    c13_boundary_values = Some(c13_boundary_values_from_openings(values)?);
+                    c13_boundary_values = Some(take_c13_boundary_values(
+                        &mut linear_claims,
+                        bundle,
+                        &mut consistency_cursor,
+                        layout,
+                    )?);
                 }
                 b"s4-ecdsa-c14-c15-final-check" => {
                     let signature_r = Fp::from_bytes_be(input.r)
                         .ok_or(ImplementedCircuitProofError::InputBindingRejected)?;
-                    if values[C14_SIGNATURE_R_INDEX as usize] != signature_r {
-                        return Err(ImplementedCircuitProofError::InputBindingRejected);
-                    }
-                    rx_from_c14 = Some(values[C14_RX_INDEX as usize]);
+                    add_fixed_claim(
+                        &mut linear_claims,
+                        layout.input_offset,
+                        layout.input_len,
+                        C14_SIGNATURE_R_INDEX as usize,
+                        signature_r,
+                    );
+                    rx_from_c14 = Some(take_private_value(
+                        &mut linear_claims,
+                        bundle,
+                        &mut consistency_cursor,
+                        layout,
+                        C14_RX_INDEX as usize,
+                    )?);
                 }
                 _ => {}
             }
@@ -974,6 +1049,30 @@ pub fn verify_implemented_circuit_bundle_batch_profiled(
         profile.consistency += start.elapsed();
         all_claims.push(verified_claims);
     }
+    if consistency_cursor != bundle.consistency_claim_values.len() {
+        return Err(ImplementedCircuitProofError::InputClaimOpeningRejected);
+    }
+    let start = Instant::now();
+    let claim_gamma = ligero_claim_gamma(
+        IMPLEMENTED_BUNDLE_LIGERO_LABEL,
+        bundle.root,
+        linear_claims.len(),
+        transcript_seed,
+    );
+    if !verify_claim_batch(
+        bundle.root,
+        bundle.params,
+        committed_len,
+        &bundle.proximity_openings,
+        &bundle.claim_batch,
+        &linear_claims,
+        &claim_gamma,
+    )
+    .map_err(ImplementedCircuitProofError::Ligero)?
+    {
+        return Err(ImplementedCircuitProofError::InputClaimOpeningRejected);
+    }
+    profile.systematic_reconstruct = start.elapsed();
     Ok((all_claims, profile))
 }
 
@@ -982,187 +1081,12 @@ pub fn verify_implemented_circuit_bundle_profiled(
     bundle: &ImplementedCircuitBundle,
     transcript_seed: TranscriptSeed,
 ) -> Result<(Vec<InputClaims>, ImplementedCircuitVerifyProfile), ImplementedCircuitProofError> {
-    let mut profile = ImplementedCircuitVerifyProfile::default();
-    let setup_start = Instant::now();
-    let circuits =
-        implemented_circuit_verifier_instances().map_err(ImplementedCircuitProofError::Circuit)?;
-    if bundle.entries.len() != circuits.len() {
-        return Err(ImplementedCircuitProofError::WrongProofCount {
-            expected: circuits.len(),
-            actual: bundle.entries.len(),
-        });
-    }
-    let (pad_layouts, committed_len) = verifier_bundle_pad_layouts(&circuits, LAYOUT_LEN);
-    if bundle.params != implemented_circuit_ligero_params(committed_len) {
-        return Err(ImplementedCircuitProofError::ProximityOpeningRejected);
-    }
-    let opened_rows = systematic_opening_row_count(bundle.params, &bundle.openings)?;
-    if committed_len > opened_rows * bundle.params.row_len {
-        return Err(ImplementedCircuitProofError::Ligero(
-            LigeroError::WrongPointLength,
-        ));
-    }
-    profile.setup = setup_start.elapsed();
-
-    let start = Instant::now();
-    let proximity_gamma = ligero_proximity_gamma(
-        IMPLEMENTED_BUNDLE_LIGERO_LABEL,
-        bundle.root,
-        ligero_row_count(committed_len, bundle.params.row_len),
-        transcript_seed,
-    );
-    verify_ligero_proximity_indices(
-        IMPLEMENTED_BUNDLE_LIGERO_LABEL,
-        bundle.root,
-        bundle.params,
-        &bundle.proximity_openings,
-        transcript_seed,
-    )?;
-    let proximity_match = verify_openings(
-        bundle.root,
-        bundle.params,
-        &bundle.proximity_openings,
-        &bundle.proximity_claim,
-        &proximity_gamma,
-    )
-    .map_err(ImplementedCircuitProofError::Ligero)?;
-    if !proximity_match {
-        return Err(ImplementedCircuitProofError::ProximityOpeningRejected);
-    }
-    profile.ligero_proximity = start.elapsed();
-
-    let start = Instant::now();
-    for opening in &bundle.openings {
-        if !verify_column(bundle.root, opening)
-            .map_err(|err| ImplementedCircuitProofError::Ligero(LigeroError::Merkle(err)))?
-        {
-            return Err(ImplementedCircuitProofError::InputClaimOpeningRejected);
-        }
-    }
-    let opened_values = systematic_opened_values(bundle.params, &bundle.openings)?;
-    profile.systematic_reconstruct = start.elapsed();
-
-    let opened_witness_values = opened_values
-        .get(..LAYOUT_LEN)
-        .ok_or(ImplementedCircuitProofError::InputClaimOpeningRejected)?
-        .to_vec();
-    let opened_witness = Witness {
-        values: opened_witness_values,
-    };
-    let expected_instances = implemented_circuit_instances(input, &opened_witness)
-        .map_err(ImplementedCircuitProofError::Witness)?;
-    let mut verified_claims = Vec::with_capacity(bundle.entries.len());
-    let mut u_scalars_from_c3 = None;
-    let mut u_scalars_from_c6 = None;
-    let mut accumulator_endpoints_from_c9_c10 = None;
-    let mut add_inputs_from_c11 = None;
-    let mut denom_inv_from_c11 = None;
-    let mut final_from_c11 = None;
-    let mut c12_boundaries = None;
-    let mut c13_boundary_values = None;
-    let mut rx_from_c14 = None;
-    for (index, (((instance, entry), expected), layout)) in circuits
-        .into_iter()
-        .zip(&bundle.entries)
-        .zip(&expected_instances)
-        .zip(&pad_layouts)
-        .enumerate()
-    {
-        debug_assert_eq!(instance.label, expected.label);
-        let mut channel =
-            CoprocessorChannel::from_seed(transcript_seed, COPROCESSOR_TRANSCRIPT_DOMAIN);
-        channel.mix_bytes(instance.label);
-        mix_ecdsa_statement(input, &mut channel).map_err(ImplementedCircuitProofError::Witness)?;
-        let start = Instant::now();
-        let claims = verify_circuit(&instance.circuit, &entry.proof, bundle.root, &mut channel)
-            .map_err(ImplementedCircuitProofError::Sumcheck)?;
-        let elapsed = start.elapsed();
-        profile.sumcheck += elapsed;
-        profile.sumcheck_by_family[index] = elapsed;
-
-        let values = expected.input.as_slice();
-        let committed_pads = opened_values
-            .get(layout.pad_offset..layout.pad_offset + layout.pad_len)
-            .ok_or(ImplementedCircuitProofError::InputClaimOpeningRejected)?;
-        let start = Instant::now();
-        if !verify_input_claims_from_values(values, &claims)? {
-            return Err(ImplementedCircuitProofError::InputClaimOpeningRejected);
-        }
-        profile.input_claims += start.elapsed();
-
-        let start = Instant::now();
-        verify_committed_otp_pads(&instance.circuit, &entry.proof, committed_pads)?;
-        if index == 0 {
-            verify_c1_caller_input_binding(input, values)?;
-        }
-        match instance.label {
-            b"s4-ecdsa-c2-canonicality" => {
-                verify_c2_caller_input_binding(input, &values)?;
-            }
-            b"s4-ecdsa-c3-c5-scalar-setup" => {
-                verify_c3_caller_input_binding(input, &values)?;
-                u_scalars_from_c3 =
-                    Some((values[C3_U1_INDEX as usize], values[C3_U2_INDEX as usize]));
-            }
-            b"s4-ecdsa-c6-scalar-bits" => {
-                u_scalars_from_c6 =
-                    Some((values[C6_U1_INDEX as usize], values[C6_U2_INDEX as usize]));
-            }
-            b"s4-ecdsa-c9-c10-accumulator-on-curve" => {
-                accumulator_endpoints_from_c9_c10 = Some(c9_c10_accumulator_endpoints(&values)?);
-            }
-            b"s4-ecdsa-c11-final-add" => {
-                add_inputs_from_c11 = Some((
-                    (values[C11_AX_INDEX as usize], values[C11_AY_INDEX as usize]),
-                    (values[C11_BX_INDEX as usize], values[C11_BY_INDEX as usize]),
-                ));
-                denom_inv_from_c11 = Some(values[C11_DENOM_INV_INDEX as usize]);
-                final_from_c11 =
-                    Some((values[C11_RX_INDEX as usize], values[C11_RY_INDEX as usize]));
-            }
-            b"s4-ecdsa-c12-final-on-curve" => {
-                c12_boundaries = Some(c12_boundary_values_from_openings(&values)?);
-            }
-            b"s4-ecdsa-c13-slope-inverses" => {
-                c13_boundary_values = Some(c13_boundary_values_from_openings(&values)?);
-            }
-            b"s4-ecdsa-c14-c15-final-check" => {
-                let signature_r = Fp::from_bytes_be(input.r)
-                    .ok_or(ImplementedCircuitProofError::InputBindingRejected)?;
-                if values[C14_SIGNATURE_R_INDEX as usize] != signature_r {
-                    return Err(ImplementedCircuitProofError::InputBindingRejected);
-                }
-                rx_from_c14 = Some(values[C14_RX_INDEX as usize]);
-            }
-            _ => {}
-        }
-        profile.consistency += start.elapsed();
-        verified_claims.push(claims);
-    }
-    let start = Instant::now();
-    verify_u_scalar_cross_family(u_scalars_from_c3, u_scalars_from_c6)?;
-    verify_accumulator_endpoint_cross_family(
-        accumulator_endpoints_from_c9_c10,
-        c12_boundaries.map(|boundaries| boundaries.raw_accumulators),
-    )?;
-    verify_corrected_endpoint_cross_family(
-        c12_boundaries.map(|boundaries| boundaries.corrected_endpoints),
-        add_inputs_from_c11,
-    )?;
-    verify_c13_boundary_cross_family(
-        input,
-        add_inputs_from_c11,
-        denom_inv_from_c11,
-        final_from_c11,
-        c13_boundary_values,
-    )?;
-    verify_final_point_cross_family(
-        final_from_c11,
-        c12_boundaries.map(|boundaries| boundaries.final_point),
-        rx_from_c14,
-    )?;
-    profile.consistency += start.elapsed();
-    Ok((verified_claims, profile))
+    let (mut claims, profile) =
+        verify_implemented_circuit_bundle_batch_profiled(&[*input], bundle, transcript_seed)?;
+    let claims = claims
+        .pop()
+        .ok_or(ImplementedCircuitProofError::InputClaimOpeningRejected)?;
+    Ok((claims, profile))
 }
 
 fn verify_u_scalar_cross_family(
@@ -1176,28 +1100,6 @@ fn verify_u_scalar_cross_family(
         return Err(ImplementedCircuitProofError::CrossFamilyBindingRejected);
     }
     Ok(())
-}
-
-fn verify_input_claims_from_values(
-    values: &[Fp],
-    claims: &InputClaims,
-) -> Result<bool, ImplementedCircuitProofError> {
-    let mle = Mle::new(values.to_vec());
-    for (point, value) in claims.points.iter().zip(claims.values) {
-        if point.len() != mle.num_vars() {
-            return Err(ImplementedCircuitProofError::Ligero(
-                LigeroError::WrongPointLength,
-            ));
-        }
-        if mle
-            .eval_at(point)
-            .map_err(|err| ImplementedCircuitProofError::Ligero(LigeroError::Mle(err)))?
-            != value
-        {
-            return Ok(false);
-        }
-    }
-    Ok(true)
 }
 
 fn verify_accumulator_endpoint_cross_family(
@@ -1275,195 +1177,6 @@ fn verify_final_point_cross_family(
     Ok(())
 }
 
-fn c9_c10_accumulator_endpoints(
-    values: &[Fp],
-) -> Result<((Fp, Fp), (Fp, Fp)), ImplementedCircuitProofError> {
-    let u1 = c9_c10_point(values, C9_C10_ACCUMULATOR_POINTS_PER_SCALAR - 1)?;
-    let u2 = c9_c10_point(values, C9_C10_ACCUMULATOR_POINT_COUNT - 1)?;
-    Ok((u1, u2))
-}
-
-fn c12_boundary_values_from_openings(
-    values: &[Fp],
-) -> Result<C12BoundaryValues, ImplementedCircuitProofError> {
-    Ok(C12BoundaryValues {
-        raw_accumulators: (
-            c12_point(values, C9_C10_ACCUMULATOR_POINTS_PER_SCALAR - 1)?,
-            c12_point(values, C9_C10_ACCUMULATOR_POINT_COUNT - 1)?,
-        ),
-        corrected_endpoints: (
-            c12_point(values, C12_ACCUMULATOR_POINT_COUNT)?,
-            c12_point(values, C12_ACCUMULATOR_POINT_COUNT + 1)?,
-        ),
-        final_point: c12_point(values, C12_FINAL_POINT_INDEX)?,
-    })
-}
-
-fn c13_boundary_values_from_openings(
-    values: &[Fp],
-) -> Result<C13BoundaryValues, ImplementedCircuitProofError> {
-    Ok(C13BoundaryValues {
-        final_add_denominator: c13_denominator(values, C13_FINAL_ADD_DENOM_INDEX)?,
-        final_add_inverse: c13_inverse(values, C13_FINAL_ADD_DENOM_INDEX)?,
-    })
-}
-
-fn c13_denominator(values: &[Fp], index: usize) -> Result<Fp, ImplementedCircuitProofError> {
-    values
-        .get(C13_DENOMS_START_INDEX as usize + index)
-        .copied()
-        .ok_or(ImplementedCircuitProofError::InputClaimOpeningRejected)
-}
-
-fn c13_inverse(values: &[Fp], index: usize) -> Result<Fp, ImplementedCircuitProofError> {
-    values
-        .get(C13_INVS_START_INDEX as usize + index)
-        .copied()
-        .ok_or(ImplementedCircuitProofError::InputClaimOpeningRejected)
-}
-
-fn c9_c10_point(
-    values: &[Fp],
-    point_index: usize,
-) -> Result<(Fp, Fp), ImplementedCircuitProofError> {
-    let x = C9_C10_POINTS_START_INDEX as usize + point_index * 3;
-    let y = x + 1;
-    match (values.get(x), values.get(y)) {
-        (Some(&x), Some(&y)) => Ok((x, y)),
-        _ => Err(ImplementedCircuitProofError::InputClaimOpeningRejected),
-    }
-}
-
-fn c12_point(values: &[Fp], point_index: usize) -> Result<(Fp, Fp), ImplementedCircuitProofError> {
-    let x = C12_POINTS_START_INDEX as usize + point_index * 3;
-    let y = x + 1;
-    match (values.get(x), values.get(y)) {
-        (Some(&x), Some(&y)) => Ok((x, y)),
-        _ => Err(ImplementedCircuitProofError::InputClaimOpeningRejected),
-    }
-}
-
-fn verify_c2_caller_input_binding(
-    input: &EcdsaInput,
-    values: &[Fp],
-) -> Result<(), ImplementedCircuitProofError> {
-    let expected = [
-        (C2_R_INDEX as usize, input.r),
-        (C2_S_INDEX as usize, input.s),
-        (C2_QX_INDEX as usize, input.qx),
-        (C2_QY_INDEX as usize, input.qy),
-    ];
-    for (index, bytes) in expected {
-        let expected_value =
-            Fp::from_bytes_be(bytes).ok_or(ImplementedCircuitProofError::InputBindingRejected)?;
-        if values.get(index) != Some(&expected_value) {
-            return Err(ImplementedCircuitProofError::InputBindingRejected);
-        }
-    }
-    Ok(())
-}
-
-fn verify_c3_caller_input_binding(
-    input: &EcdsaInput,
-    values: &[Fp],
-) -> Result<(), ImplementedCircuitProofError> {
-    let expected = [
-        (C3_Z_INDEX as usize, input.z),
-        (C3_R_INDEX as usize, input.r),
-        (C3_S_INDEX as usize, input.s),
-    ];
-    for (index, bytes) in expected {
-        let expected_value =
-            Fp::from_bytes_be(bytes).ok_or(ImplementedCircuitProofError::InputBindingRejected)?;
-        if values.get(index) != Some(&expected_value) {
-            return Err(ImplementedCircuitProofError::InputBindingRejected);
-        }
-    }
-    Ok(())
-}
-
-fn verify_c1_caller_input_binding(
-    input: &EcdsaInput,
-    values: &[Fp],
-) -> Result<(), ImplementedCircuitProofError> {
-    let expected = [
-        Fp::from_bytes_be(input.z).ok_or(ImplementedCircuitProofError::InputBindingRejected)?,
-        Fp::from_bytes_be(input.r).ok_or(ImplementedCircuitProofError::InputBindingRejected)?,
-        Fp::from_bytes_be(input.s).ok_or(ImplementedCircuitProofError::InputBindingRejected)?,
-        Fp::from_bytes_be(input.qx).ok_or(ImplementedCircuitProofError::InputBindingRejected)?,
-        Fp::from_bytes_be(input.qy).ok_or(ImplementedCircuitProofError::InputBindingRejected)?,
-    ];
-    for (offset, expected_value) in expected.into_iter().enumerate() {
-        if values.get(C1_VALUES_START_INDEX as usize + offset) != Some(&expected_value) {
-            return Err(ImplementedCircuitProofError::InputBindingRejected);
-        }
-    }
-    Ok(())
-}
-
-fn verify_committed_otp_pads(
-    circuit: &Circuit,
-    proof: &CircuitSumcheckProof,
-    committed_pads: &[Fp],
-) -> Result<(), ImplementedCircuitProofError> {
-    let proof_pads = proof_otp_pad_values(proof);
-    let expected_pads = circuit_otp_pad_values(circuit);
-    if proof_pads != expected_pads {
-        return Err(ImplementedCircuitProofError::InputClaimOpeningRejected);
-    }
-    if committed_pads != proof_pads.as_slice() {
-        return Err(ImplementedCircuitProofError::InputClaimOpeningRejected);
-    }
-    Ok(())
-}
-
-fn systematic_opened_values(
-    params: LigeroParams,
-    openings: &[ColumnOpening],
-) -> Result<Vec<Fp>, ImplementedCircuitProofError> {
-    let rows = systematic_opening_row_count(params, openings)?;
-    let mut sorted = openings.to_vec();
-    sorted.sort_by_key(|opening| opening.index);
-
-    let mut values = Vec::with_capacity(rows * params.row_len);
-    for row in 0..rows {
-        for opening in &sorted {
-            values.push(opening.column[row]);
-        }
-    }
-    Ok(values)
-}
-
-fn systematic_opening_row_count(
-    params: LigeroParams,
-    openings: &[ColumnOpening],
-) -> Result<usize, ImplementedCircuitProofError> {
-    if openings.len() != params.row_len {
-        return Err(ImplementedCircuitProofError::Ligero(
-            LigeroError::WrongOpeningCount,
-        ));
-    }
-    let mut sorted = openings.to_vec();
-    sorted.sort_by_key(|opening| opening.index);
-    for (expected, opening) in sorted.iter().enumerate() {
-        if opening.index != expected {
-            return Err(ImplementedCircuitProofError::Ligero(
-                LigeroError::ColumnOutOfRange,
-            ));
-        }
-    }
-
-    let rows = sorted.first().map(|opening| opening.column.len()).ok_or(
-        ImplementedCircuitProofError::Ligero(LigeroError::WrongOpeningCount),
-    )?;
-    if sorted.iter().any(|opening| opening.column.len() != rows) {
-        return Err(ImplementedCircuitProofError::Ligero(
-            LigeroError::WrongGammaLength,
-        ));
-    }
-    Ok(rows)
-}
-
 fn ligero_row_count(values: usize, row_len: usize) -> usize {
     values.div_ceil(row_len)
 }
@@ -1479,6 +1192,19 @@ fn ligero_proximity_gamma(
     channel.mix_bytes(&root);
     channel.mix_bytes(b"s4-ligero-proximity-gamma");
     (0..rows).map(|_| channel.draw_fp()).collect()
+}
+
+fn ligero_claim_gamma(
+    label: &[u8],
+    root: [u8; 32],
+    claims: usize,
+    transcript_seed: TranscriptSeed,
+) -> Vec<Fp> {
+    let mut channel = CoprocessorChannel::from_seed(transcript_seed, COPROCESSOR_TRANSCRIPT_DOMAIN);
+    channel.mix_bytes(label);
+    channel.mix_bytes(&root);
+    channel.mix_bytes(b"s4-ligero-claim-gamma");
+    (0..claims).map(|_| channel.draw_fp()).collect()
 }
 
 fn ligero_proximity_indices(
@@ -1497,7 +1223,7 @@ fn ligero_proximity_indices(
         let mut word = [0u8; 8];
         word.copy_from_slice(&bytes[24..]);
         let index = (u64::from_be_bytes(word) as usize) % params.codeword_len;
-        if !indices.contains(&index) {
+        if index >= params.row_len && !indices.contains(&index) {
             indices.push(index);
         }
     }
@@ -1576,7 +1302,7 @@ fn circuit_gate_count(circuit: &Circuit) -> usize {
 }
 
 fn implemented_circuit_ligero_params(_input_len: usize) -> LigeroParams {
-    let params = v1_ligero_params();
+    let params = v2_ligero_params();
     debug_assert!(params.validate().is_ok());
     debug_assert!(params.soundness_error() <= 2f64.powi(-128));
     params
@@ -1596,6 +1322,8 @@ struct VerifierCircuitInstance {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct BundleCircuitLayout {
+    input_offset: usize,
+    input_len: usize,
     pad_offset: usize,
     pad_len: usize,
 }
@@ -1607,14 +1335,461 @@ fn verifier_bundle_pad_layouts(
     let mut offset = witness_len;
     let mut layouts = Vec::with_capacity(circuits.len());
     for instance in circuits {
+        let input_len = verifier_circuit_input_len(&instance.circuit);
+        let input_offset = offset;
+        offset += input_len;
         let pad_len = circuit_otp_pad_values(&instance.circuit).len();
         layouts.push(BundleCircuitLayout {
+            input_offset,
+            input_len,
             pad_offset: offset,
             pad_len,
         });
         offset += pad_len;
     }
     (layouts, offset)
+}
+
+fn prover_committed_values(
+    all_instances: &[Vec<ProverCircuitInstance>],
+) -> (Vec<Fp>, Vec<Vec<BundleCircuitLayout>>) {
+    let mut committed_values = Vec::new();
+    let mut all_layouts = Vec::with_capacity(all_instances.len());
+    for instances in all_instances {
+        let mut layouts = Vec::with_capacity(instances.len());
+        for instance in instances {
+            let input_offset = committed_values.len();
+            committed_values.extend_from_slice(&instance.input);
+            let input_len = instance.input.len();
+            let pads = circuit_otp_pad_values(&instance.circuit);
+            let pad_offset = committed_values.len();
+            let pad_len = pads.len();
+            committed_values.extend(pads);
+            layouts.push(BundleCircuitLayout {
+                input_offset,
+                input_len,
+                pad_offset,
+                pad_len,
+            });
+        }
+        all_layouts.push(layouts);
+    }
+    (committed_values, all_layouts)
+}
+
+fn verifier_circuit_input_len(circuit: &Circuit) -> usize {
+    1usize << circuit.layers().last().expect("non-empty").next_log_size()
+}
+
+fn prover_claim_batch(
+    commitment: &crate::ligero::LigeroCommitment,
+    inputs: &[EcdsaInput],
+    all_instances: &[Vec<ProverCircuitInstance>],
+    all_layouts: &[Vec<BundleCircuitLayout>],
+    entries: &[ImplementedCircuitBundleEntry],
+    transcript_seed: TranscriptSeed,
+) -> Result<(LigeroClaimBatch, Vec<Fp>), ImplementedCircuitProofError> {
+    let mut claims = Vec::new();
+    let mut consistency_values = Vec::new();
+    let circuits_per_signature = all_instances.first().map(|v| v.len()).unwrap_or(0);
+    for (signature_index, ((input, instances), layouts)) in inputs
+        .iter()
+        .zip(all_instances.iter())
+        .zip(all_layouts.iter())
+        .enumerate()
+    {
+        for (family_index, (instance, layout)) in instances.iter().zip(layouts).enumerate() {
+            let entry = &entries[signature_index * circuits_per_signature + family_index];
+            add_input_claims(&mut claims, layout, &entry.proof.input_claims);
+            add_pad_claims(
+                &mut claims,
+                layout,
+                &proof_otp_pad_values(&entry.proof),
+                commitment.root(),
+                transcript_seed,
+            )?;
+            add_prover_family_fixed_claims(
+                &mut claims,
+                &mut consistency_values,
+                input,
+                instance.label,
+                layout,
+                &instance.input,
+            )?;
+        }
+    }
+    let gamma = ligero_claim_gamma(
+        IMPLEMENTED_BUNDLE_LIGERO_LABEL,
+        commitment.root(),
+        claims.len(),
+        transcript_seed,
+    );
+    let batch = commitment
+        .claim_batch(&claims, &gamma)
+        .map_err(ImplementedCircuitProofError::Ligero)?;
+    Ok((batch, consistency_values))
+}
+
+fn add_input_claims(
+    claims: &mut Vec<LigeroLinearClaim>,
+    layout: &BundleCircuitLayout,
+    input_claims: &InputClaims,
+) {
+    for (point, value) in input_claims.points.iter().cloned().zip(input_claims.values) {
+        claims.push(LigeroLinearClaim {
+            offset: layout.input_offset,
+            len: layout.input_len,
+            point,
+            value,
+        });
+    }
+}
+
+fn add_pad_claims(
+    claims: &mut Vec<LigeroLinearClaim>,
+    layout: &BundleCircuitLayout,
+    pads: &[Fp],
+    root: [u8; 32],
+    transcript_seed: TranscriptSeed,
+) -> Result<(), ImplementedCircuitProofError> {
+    debug_assert_eq!(layout.pad_len, pads.len());
+    if pads.is_empty() {
+        return Ok(());
+    }
+    let point = pad_claim_point(layout.pad_offset, layout.pad_len, root, transcript_seed);
+    let value = Mle::new(pads.to_vec())
+        .eval_at(&point)
+        .map_err(|err| ImplementedCircuitProofError::Ligero(LigeroError::Mle(err)))?;
+    claims.push(LigeroLinearClaim {
+        offset: layout.pad_offset,
+        len: layout.pad_len,
+        point,
+        value,
+    });
+    Ok(())
+}
+
+fn add_prover_family_fixed_claims(
+    claims: &mut Vec<LigeroLinearClaim>,
+    consistency_values: &mut Vec<Fp>,
+    input: &EcdsaInput,
+    label: &[u8],
+    layout: &BundleCircuitLayout,
+    values: &[Fp],
+) -> Result<(), ImplementedCircuitProofError> {
+    match label {
+        b"s4-ecdsa-c1-input-limbs" => add_c1_public_claims(claims, input, layout)?,
+        b"s4-ecdsa-c2-canonicality" => add_c2_public_claims(claims, input, layout)?,
+        b"s4-ecdsa-c3-c5-scalar-setup" => {
+            add_c3_public_claims(claims, input, layout)?;
+            add_private_value(
+                claims,
+                consistency_values,
+                layout,
+                C3_U1_INDEX as usize,
+                values,
+            )?;
+            add_private_value(
+                claims,
+                consistency_values,
+                layout,
+                C3_U2_INDEX as usize,
+                values,
+            )?;
+        }
+        b"s4-ecdsa-c6-scalar-bits" => {
+            add_private_value(
+                claims,
+                consistency_values,
+                layout,
+                C6_U1_INDEX as usize,
+                values,
+            )?;
+            add_private_value(
+                claims,
+                consistency_values,
+                layout,
+                C6_U2_INDEX as usize,
+                values,
+            )?;
+        }
+        b"s4-ecdsa-c9-c10-accumulator-on-curve" => {
+            for point in [
+                C9_C10_ACCUMULATOR_POINTS_PER_SCALAR - 1,
+                C9_C10_ACCUMULATOR_POINT_COUNT - 1,
+            ] {
+                let x = C9_C10_POINTS_START_INDEX as usize + point * 3;
+                add_private_value(claims, consistency_values, layout, x, values)?;
+                add_private_value(claims, consistency_values, layout, x + 1, values)?;
+            }
+        }
+        b"s4-ecdsa-c11-final-add" => {
+            for index in [
+                C11_AX_INDEX,
+                C11_AY_INDEX,
+                C11_BX_INDEX,
+                C11_BY_INDEX,
+                C11_RX_INDEX,
+                C11_RY_INDEX,
+                C11_DENOM_INV_INDEX,
+            ] {
+                add_private_value(claims, consistency_values, layout, index as usize, values)?;
+            }
+        }
+        b"s4-ecdsa-c12-final-on-curve" => {
+            for point in [
+                C9_C10_ACCUMULATOR_POINTS_PER_SCALAR - 1,
+                C9_C10_ACCUMULATOR_POINT_COUNT - 1,
+                C12_ACCUMULATOR_POINT_COUNT,
+                C12_ACCUMULATOR_POINT_COUNT + 1,
+                C12_FINAL_POINT_INDEX,
+            ] {
+                let x = C12_POINTS_START_INDEX as usize + point * 3;
+                add_private_value(claims, consistency_values, layout, x, values)?;
+                add_private_value(claims, consistency_values, layout, x + 1, values)?;
+            }
+        }
+        b"s4-ecdsa-c13-slope-inverses" => {
+            add_private_value(
+                claims,
+                consistency_values,
+                layout,
+                C13_DENOMS_START_INDEX as usize + C13_FINAL_ADD_DENOM_INDEX,
+                values,
+            )?;
+            add_private_value(
+                claims,
+                consistency_values,
+                layout,
+                C13_INVS_START_INDEX as usize + C13_FINAL_ADD_DENOM_INDEX,
+                values,
+            )?;
+        }
+        b"s4-ecdsa-c14-c15-final-check" => {
+            let signature_r = Fp::from_bytes_be(input.r)
+                .ok_or(ImplementedCircuitProofError::InputBindingRejected)?;
+            add_fixed_claim(
+                claims,
+                layout.input_offset,
+                layout.input_len,
+                C14_SIGNATURE_R_INDEX as usize,
+                signature_r,
+            );
+            add_private_value(
+                claims,
+                consistency_values,
+                layout,
+                C14_RX_INDEX as usize,
+                values,
+            )?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn add_c1_public_claims(
+    claims: &mut Vec<LigeroLinearClaim>,
+    input: &EcdsaInput,
+    layout: &BundleCircuitLayout,
+) -> Result<(), ImplementedCircuitProofError> {
+    for (offset, bytes) in [input.z, input.r, input.s, input.qx, input.qy]
+        .into_iter()
+        .enumerate()
+    {
+        let value =
+            Fp::from_bytes_be(bytes).ok_or(ImplementedCircuitProofError::InputBindingRejected)?;
+        add_fixed_claim(
+            claims,
+            layout.input_offset,
+            layout.input_len,
+            C1_VALUES_START_INDEX as usize + offset,
+            value,
+        );
+    }
+    Ok(())
+}
+
+fn add_c2_public_claims(
+    claims: &mut Vec<LigeroLinearClaim>,
+    input: &EcdsaInput,
+    layout: &BundleCircuitLayout,
+) -> Result<(), ImplementedCircuitProofError> {
+    for (index, bytes) in [
+        (C2_R_INDEX as usize, input.r),
+        (C2_S_INDEX as usize, input.s),
+        (C2_QX_INDEX as usize, input.qx),
+        (C2_QY_INDEX as usize, input.qy),
+    ] {
+        let value =
+            Fp::from_bytes_be(bytes).ok_or(ImplementedCircuitProofError::InputBindingRejected)?;
+        add_fixed_claim(claims, layout.input_offset, layout.input_len, index, value);
+    }
+    Ok(())
+}
+
+fn add_c3_public_claims(
+    claims: &mut Vec<LigeroLinearClaim>,
+    input: &EcdsaInput,
+    layout: &BundleCircuitLayout,
+) -> Result<(), ImplementedCircuitProofError> {
+    for (index, bytes) in [
+        (C3_Z_INDEX as usize, input.z),
+        (C3_R_INDEX as usize, input.r),
+        (C3_S_INDEX as usize, input.s),
+    ] {
+        let value =
+            Fp::from_bytes_be(bytes).ok_or(ImplementedCircuitProofError::InputBindingRejected)?;
+        add_fixed_claim(claims, layout.input_offset, layout.input_len, index, value);
+    }
+    Ok(())
+}
+
+fn add_private_value(
+    claims: &mut Vec<LigeroLinearClaim>,
+    consistency_values: &mut Vec<Fp>,
+    layout: &BundleCircuitLayout,
+    index: usize,
+    values: &[Fp],
+) -> Result<Fp, ImplementedCircuitProofError> {
+    let value = values
+        .get(index)
+        .copied()
+        .ok_or(ImplementedCircuitProofError::InputClaimOpeningRejected)?;
+    consistency_values.push(value);
+    add_fixed_claim(claims, layout.input_offset, layout.input_len, index, value);
+    Ok(value)
+}
+
+fn take_private_value(
+    claims: &mut Vec<LigeroLinearClaim>,
+    bundle: &ImplementedCircuitBundle,
+    cursor: &mut usize,
+    layout: &BundleCircuitLayout,
+    index: usize,
+) -> Result<Fp, ImplementedCircuitProofError> {
+    let value = bundle
+        .consistency_claim_values
+        .get(*cursor)
+        .copied()
+        .ok_or(ImplementedCircuitProofError::InputClaimOpeningRejected)?;
+    *cursor += 1;
+    add_fixed_claim(claims, layout.input_offset, layout.input_len, index, value);
+    Ok(value)
+}
+
+fn take_c9_c10_accumulator_endpoints(
+    claims: &mut Vec<LigeroLinearClaim>,
+    bundle: &ImplementedCircuitBundle,
+    cursor: &mut usize,
+    layout: &BundleCircuitLayout,
+) -> Result<((Fp, Fp), (Fp, Fp)), ImplementedCircuitProofError> {
+    let mut read_point = |point: usize| {
+        let x = C9_C10_POINTS_START_INDEX as usize + point * 3;
+        Ok((
+            take_private_value(claims, bundle, cursor, layout, x)?,
+            take_private_value(claims, bundle, cursor, layout, x + 1)?,
+        ))
+    };
+    Ok((
+        read_point(C9_C10_ACCUMULATOR_POINTS_PER_SCALAR - 1)?,
+        read_point(C9_C10_ACCUMULATOR_POINT_COUNT - 1)?,
+    ))
+}
+
+fn take_c12_boundary_values(
+    claims: &mut Vec<LigeroLinearClaim>,
+    bundle: &ImplementedCircuitBundle,
+    cursor: &mut usize,
+    layout: &BundleCircuitLayout,
+) -> Result<C12BoundaryValues, ImplementedCircuitProofError> {
+    let mut read_point = |point: usize| {
+        let x = C12_POINTS_START_INDEX as usize + point * 3;
+        Ok((
+            take_private_value(claims, bundle, cursor, layout, x)?,
+            take_private_value(claims, bundle, cursor, layout, x + 1)?,
+        ))
+    };
+    Ok(C12BoundaryValues {
+        raw_accumulators: (
+            read_point(C9_C10_ACCUMULATOR_POINTS_PER_SCALAR - 1)?,
+            read_point(C9_C10_ACCUMULATOR_POINT_COUNT - 1)?,
+        ),
+        corrected_endpoints: (
+            read_point(C12_ACCUMULATOR_POINT_COUNT)?,
+            read_point(C12_ACCUMULATOR_POINT_COUNT + 1)?,
+        ),
+        final_point: read_point(C12_FINAL_POINT_INDEX)?,
+    })
+}
+
+fn take_c13_boundary_values(
+    claims: &mut Vec<LigeroLinearClaim>,
+    bundle: &ImplementedCircuitBundle,
+    cursor: &mut usize,
+    layout: &BundleCircuitLayout,
+) -> Result<C13BoundaryValues, ImplementedCircuitProofError> {
+    Ok(C13BoundaryValues {
+        final_add_denominator: take_private_value(
+            claims,
+            bundle,
+            cursor,
+            layout,
+            C13_DENOMS_START_INDEX as usize + C13_FINAL_ADD_DENOM_INDEX,
+        )?,
+        final_add_inverse: take_private_value(
+            claims,
+            bundle,
+            cursor,
+            layout,
+            C13_INVS_START_INDEX as usize + C13_FINAL_ADD_DENOM_INDEX,
+        )?,
+    })
+}
+
+fn add_fixed_claim(
+    claims: &mut Vec<LigeroLinearClaim>,
+    offset: usize,
+    len: usize,
+    index: usize,
+    value: Fp,
+) {
+    claims.push(LigeroLinearClaim {
+        offset,
+        len,
+        point: fixed_point(len, index),
+        value,
+    });
+}
+
+fn fixed_point(len: usize, index: usize) -> Vec<Fp> {
+    debug_assert!(index < len);
+    let vars = len.next_power_of_two().ilog2() as usize;
+    (0..vars)
+        .map(|bit| {
+            if ((index >> bit) & 1) == 1 {
+                Fp::ONE
+            } else {
+                Fp::ZERO
+            }
+        })
+        .collect()
+}
+
+fn pad_claim_point(
+    pad_offset: usize,
+    pad_len: usize,
+    root: [u8; 32],
+    transcript_seed: TranscriptSeed,
+) -> Vec<Fp> {
+    let vars = pad_len.next_power_of_two().ilog2() as usize;
+    let mut channel = CoprocessorChannel::from_seed(transcript_seed, COPROCESSOR_TRANSCRIPT_DOMAIN);
+    channel.mix_bytes(IMPLEMENTED_BUNDLE_LIGERO_LABEL);
+    channel.mix_bytes(&root);
+    channel.mix_bytes(b"s4-ligero-pad-claim-point");
+    channel.mix_bytes(&(pad_offset as u64).to_be_bytes());
+    channel.mix_bytes(&(pad_len as u64).to_be_bytes());
+    (0..vars).map(|_| channel.draw_fp()).collect()
 }
 
 fn implemented_circuit_instances(
