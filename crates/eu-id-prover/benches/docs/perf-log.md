@@ -203,6 +203,11 @@ Shape: `cargo test -p eu-id-prover --release shape_dump -- --ignored --nocapture
 | 2026-07-06 | worktree | mdoc P1 N-attribute variants (RAYON_NUM_THREADS=1, production config, security=128-bit target) | mdoc proof bincode bytes/N2 | bench absent | 2,587,822 |
 | 2026-07-06 | worktree | mdoc P1 N-attribute variants (RAYON_NUM_THREADS=1, production config, security=128-bit target) | mdoc proof bincode bytes/N3 | bench absent | 3,018,558 |
 | 2026-07-06 | worktree | mdoc P1 N-attribute variants (RAYON_NUM_THREADS=1, production config, security=128-bit target) | mdoc proof bincode bytes/N4 | bench absent | 3,335,958 |
+| 2026-07-06 | worktree | mdoc P4b Q-011 tall GF(2^128) MAC spike (`RAYON_NUM_THREADS=1`, production PCS) | `mdoc_mac_spike` prove | 290 ms wide spike | 636 ms |
+| 2026-07-06 | worktree | mdoc P4b Q-011 tall GF(2^128) MAC spike (`RAYON_NUM_THREADS=1`, production PCS) | `mdoc_mac_spike` verify | 45 ms wide spike | 2 ms |
+| 2026-07-06 | worktree | mdoc P4b Q-011 tall GF(2^128) MAC spike (`RAYON_NUM_THREADS=1`, production PCS) | `mdoc_mac_spike` proof bytes | 6,155,589 wide spike | 282,237 |
+| 2026-07-06 | worktree | mdoc P4b Q-011 tall GF(2^128) MAC spike (`RAYON_NUM_THREADS=1`, production PCS) | `mdoc_mac_spike` queried values bytes | 5,349,480 wide spike | 164,496 |
+| 2026-07-06 | worktree | mdoc P4b Q-011 gate comparison (`BENCH_ITERS=1`, same tree) | mdoc baseline proof bytes / projected baseline+spike | 3,591,076 baseline; 8,977,690 ceiling | 3,873,313 projected, 1.08x |
 
 WO-1.8 note: `target-cpu=native` was measured with `RUSTFLAGS="-C target-cpu=native"` instead of committed `.cargo/config.toml`, because CI builds this repo on `ubuntu-latest` and would consume committed Cargo config. LTO/CU1 is scoped to `[profile.bench]`; putting it in `[profile.release]` made `cargo test --workspace --release` fail in the P-256 monolithic proof gate with `ProofLayer("Constraints not satisfied.")`.
 
