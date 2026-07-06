@@ -331,6 +331,11 @@ M4 A3-on-coprocessor note (2026-07-04): Q-M1-005 directed a merge of `feat/a3-hy
 | 2026-07-06 | worktree | P4b Q-010 M31 GF(2^128) MAC spike (RAYON_NUM_THREADS=1, production PCS) | six-half MAC spike proof bytes | — | 6,155,589 |
 | 2026-07-06 | worktree | P4b Q-010 M31 GF(2^128) MAC spike (RAYON_NUM_THREADS=1, production PCS) | six-half MAC spike trace+interaction / preprocessed cells | — | 532,688 / 2,064 |
 | 2026-07-06 | worktree | P4b Q-010 M31 GF(2^128) MAC spike (RAYON_NUM_THREADS=1, production PCS) | same-tree current mdoc baseline prove / proof bytes | — | 3,214 ms / 3,587,428 |
+| 2026-07-06 | worktree | P4b Q-012 split M31 GF(2^128) MAC spike (RAYON_NUM_THREADS=1, production PCS) | six-half split MAC spike prove / verify | — | 1285 ms / 3 ms |
+| 2026-07-06 | worktree | P4b Q-012 split M31 GF(2^128) MAC spike (RAYON_NUM_THREADS=1, production PCS) | six-half split MAC spike proof bytes | — | 486,225 |
+| 2026-07-06 | worktree | P4b Q-012 split M31 GF(2^128) MAC spike (RAYON_NUM_THREADS=1, production PCS) | split MAC trace+interaction / post-interaction / preprocessed cells | — | 6,399,232 / 2,097,152 / 2,474,752 |
+| 2026-07-06 | worktree | P4b Q-012 split M31 GF(2^128) MAC spike (`/usr/bin/time -l`) | max RSS / peak memory footprint | — | 262,930,432 / 261,243,408 bytes |
+| 2026-07-06 | worktree | P4b Q-012 split M31 GF(2^128) MAC spike projection | composed proof bytes vs 3,591,076-byte baseline | — | 4,077,301 (1.14x; below 5.4M target and 8,968,570 hard ceiling) |
 
 P3 Longfellow note (2026-07-06): vectors are byte extracts from Google
 Longfellow `mdoc_examples.h` at `d8ad8f65187c7c364a3c2181ad484bcab03f0ec2`
@@ -364,5 +369,21 @@ Command: `RAYON_NUM_THREADS=1 cargo run -p eu-id-prover --release --example
 mdoc_mac_spike`. The direct bit-column shape clears the prove-time gate but
 trips the proof-size stop condition: queried values alone are 5,349,480 bytes,
 so Q-011 asks for the next design before product integration.
+
+P4b Q-012 split MAC spike note (2026-07-06): Q-012 superseded the direct
+all-in-one MAC layout with a split shape: `a_p * x` stays in base LogUp
+lookups, the `S_j = x * alpha^j` ladder is base-tree and lookup-free, and the
+`a_v * x` running accumulator lives in post-interaction tree 3 with no relation
+terms. The same example now draws `a_v` from the channel, absorbs the derived
+tags, checks final public tags, and binds lookup operand `b` to the committed
+`x` bit columns. Command:
+`RAYON_NUM_THREADS=1 cargo run -p eu-id-prover --release --example
+mdoc_mac_spike`; peak RSS command:
+`/usr/bin/time -l env RAYON_NUM_THREADS=1 cargo run -p eu-id-prover --release
+--example mdoc_mac_spike`. Result: proof 486,225 bytes, prove 1285 ms, verify
+3 ms, max RSS 262,930,432 bytes. Conservative composed projection against the
+3,591,076-byte non-ZK product baseline is 4,077,301 bytes, below both the 5.4M
+target and the 8,968,570 hard ceiling, so the split gate is accepted for product
+wiring.
 
 WO-M5 note (2026-07-04): baseline is `801ea3a5`; candidate is the review-follow-up worktree after baseline commit `34512349`. `mdoc_perf_probe` now emits proof-byte decomposition: total `1,759,326`, STARK `971,649`, coprocessor bundle `787,032`, metadata `645`; inner STARK fields are config `25`, commitments `136`, sampled values `98,400`, decommitments `85,672`, queried values `719,596`, proof-of-work `8`, and FRI proof `67,812`. The review follow-up adds explicit shared-provider claimed-sum tamper, digest/field-exposure tamper, malformed-provider no-panic rejection, and standalone SHA proof-byte pin gates.

@@ -1,7 +1,10 @@
-//! Measured Q-011 re-spike for the mdoc P4b Longfellow GF(2^128) MAC binding.
+//! Measured Q-012 split re-spike for the mdoc P4b Longfellow GF(2^128) MAC binding.
 //!
 //! This stays standalone: it prices the M31-side six-half MAC load before the
-//! product mdoc circuit is rewired.
+//! product mdoc circuit is rewired. The split follows Q-012: lookup-backed
+//! `a_p * x` and `x * alpha^j` witnesses live in the base tree; all
+//! `a_v`-dependent accumulator columns live in the post-interaction tree and
+//! emit no LogUp relation terms.
 
 use std::time::Instant;
 
@@ -39,13 +42,23 @@ const TABLE_LOG_SIZE: u32 = 8;
 const REDUCE_TABLE_LOG_SIZE: u32 = 13;
 const PRODUCT_POSITIONS: usize = 63;
 const REDUCE_TABLE_ROWS: usize = PRODUCT_POSITIONS * 128;
-const CONSUMER_PREPROCESSED_COLS: usize = 3 + GF_BITS;
+const CONSUMER_PREPROCESSED_COLS: usize = 6 + MACS_PER_PROOF + NIBBLES_PER_HALF + GF_BITS;
 const TABLE_PREPROCESSED_COLS: usize = 3;
 const REDUCE_TABLE_PREPROCESSED_COLS: usize = 2 + GF_BITS;
-const CONSUMER_TRACE_COLS: usize = 4 + GF_BITS + GF_BITS + GF_BITS;
+const CONSUMER_TRACE_COLS: usize = 4 + GF_BITS + GF_BITS + GF_BITS + GF_BITS + GF_BITS + GF_BITS;
+const POST_TRACE_COLS: usize = 2 * GF_BITS;
 const TABLE_TRACE_COLS: usize = 1;
 const REDUCE_TABLE_TRACE_COLS: usize = 1;
 const INTERACTION_COLS_PER_FRACTION: usize = 4;
+const CHECK_NEW_COLUMN_BOOLS: bool = true;
+const CHECK_NEW_SELECTOR_BOOLS: bool = false;
+const CHECK_B_NIBBLE_CONSTRAINT: bool = true;
+const CHECK_P_FINAL_CONSTRAINT: bool = true;
+const CHECK_X_P_CARRY_CONSTRAINTS: bool = true;
+const CHECK_S_CONSTRAINTS: bool = true;
+const CHECK_POST_COLUMN_CONSTRAINTS: bool = true;
+const CHECK_POST_CONSTRAINTS: bool = true;
+const CHECK_POST_FINAL_TAG: bool = true;
 
 type MacColumnEval = CircleEvaluation<SimdBackend, M31, BitReversedOrder>;
 type ConsumerComponent = FrameworkComponent<MacConsumerEval>;
@@ -62,9 +75,9 @@ struct MacHalfWitness {
 }
 
 struct MacSpike {
-    av: [u8; HALF_BYTES],
     rows: [MacHalfWitness; MACS_PER_PROOF],
-    tags: [[u8; HALF_BYTES]; MACS_PER_PROOF],
+    av: Option<[u8; HALF_BYTES]>,
+    tags: Option<[[u8; HALF_BYTES]; MACS_PER_PROOF]>,
     clmul_relation: Option<Clmul4Relation>,
     reduce_relation: Option<ReduceRelation>,
     consumer_claim: Option<QM31>,
@@ -78,9 +91,9 @@ struct MacSpike {
 impl Clone for MacSpike {
     fn clone(&self) -> Self {
         Self {
-            av: self.av,
             rows: self.rows.clone(),
             tags: self.tags,
+            av: self.av,
             clmul_relation: None,
             reduce_relation: None,
             consumer_claim: self.consumer_claim,
@@ -97,6 +110,8 @@ impl Clone for MacSpike {
 struct MacConsumerEval {
     clmul_relation: Clmul4Relation,
     reduce_relation: ReduceRelation,
+    av: [u8; HALF_BYTES],
+    tags: [[u8; HALF_BYTES]; MACS_PER_PROOF],
 }
 
 #[derive(Clone)]
@@ -115,12 +130,14 @@ struct Report {
     mac_halves: usize,
     active_rows: usize,
     consumer_trace_columns: usize,
+    post_interaction_trace_columns: usize,
     consumer_preprocessed_columns: usize,
     clmul_table_trace_columns: usize,
     clmul_table_preprocessed_columns: usize,
     reduce_table_trace_columns: usize,
     reduce_table_preprocessed_columns: usize,
     trace_and_interaction_cells: u64,
+    post_interaction_cells: u64,
     preprocessed_cells: u64,
     prove_ms: u128,
     verify_ms: u128,
@@ -147,6 +164,7 @@ fn main() {
     let preprocessed_cells = cells(&prover.layout().preprocessed);
     let trace_and_interaction_cells =
         cells(&prover.layout().trace) + cells(&prover.layout().interaction);
+    let post_interaction_cells = cells(&prover.post_interaction_log_sizes());
 
     let start = Instant::now();
     let mut prover_modules: [&mut dyn AirProver; 1] = [&mut prover];
@@ -169,6 +187,7 @@ fn main() {
         prover.consumer_claim.expect("consumer claim set"),
         prover.clmul_table_claim.expect("clmul table claim set"),
         prover.reduce_table_claim.expect("reduce table claim set"),
+        prover.tags.expect("MAC tags set"),
     );
     let start = Instant::now();
     let mut verifier_modules: [&mut dyn Air; 1] = [&mut verifier];
@@ -180,12 +199,14 @@ fn main() {
         mac_halves: MACS_PER_PROOF,
         active_rows: ACTIVE_ROWS,
         consumer_trace_columns: CONSUMER_TRACE_COLS,
+        post_interaction_trace_columns: POST_TRACE_COLS,
         consumer_preprocessed_columns: CONSUMER_PREPROCESSED_COLS,
         clmul_table_trace_columns: TABLE_TRACE_COLS,
         clmul_table_preprocessed_columns: TABLE_PREPROCESSED_COLS,
         reduce_table_trace_columns: REDUCE_TABLE_TRACE_COLS,
         reduce_table_preprocessed_columns: REDUCE_TABLE_PREPROCESSED_COLS,
         trace_and_interaction_cells,
+        post_interaction_cells,
         preprocessed_cells,
         prove_ms,
         verify_ms,
@@ -198,7 +219,9 @@ fn main() {
 
 fn assert_component_shape(spike: &MacSpike) {
     let zero = QM31::from_u32_unchecked(0, 0, 0, 0);
-    let mut module = spike.clone().with_claims(zero, zero, zero);
+    let mut module = spike
+        .clone()
+        .with_claims(zero, zero, zero, [[0; HALF_BYTES]; MACS_PER_PROOF]);
     let mut channel = Blake2sChannel::default();
     module.draw_relations(&mut channel);
     let mut allocator =
@@ -214,23 +237,25 @@ fn assert_component_shape(spike: &MacSpike) {
         CONSUMER_TRACE_COLS,
         "consumer component trace column count"
     );
+    if CHECK_POST_COLUMN_CONSTRAINTS || CHECK_POST_CONSTRAINTS {
+        assert_eq!(
+            consumer_logs[3].len(),
+            POST_TRACE_COLS,
+            "consumer post-interaction column count"
+        );
+    }
 }
 
 impl MacSpike {
     fn fixture() -> Self {
-        let av = pseudo_bytes(0xA5);
         let rows = std::array::from_fn(|i| MacHalfWitness {
             ap: pseudo_bytes(0x31u8.wrapping_add(i as u8 * 17)),
             x: pseudo_bytes(0xC7u8.wrapping_add(i as u8 * 29)),
         });
-        let tags = std::array::from_fn(|i| {
-            let key = xor_128(&rows[i].ap, &av);
-            gf128_mul(&key, &rows[i].x)
-        });
         Self {
-            av,
             rows,
-            tags,
+            av: None,
+            tags: None,
             clmul_relation: None,
             reduce_relation: None,
             consumer_claim: None,
@@ -247,10 +272,12 @@ impl MacSpike {
         consumer_claim: QM31,
         clmul_table_claim: QM31,
         reduce_table_claim: QM31,
+        tags: [[u8; HALF_BYTES]; MACS_PER_PROOF],
     ) -> Self {
         self.consumer_claim = Some(consumer_claim);
         self.clmul_table_claim = Some(clmul_table_claim);
         self.reduce_table_claim = Some(reduce_table_claim);
+        self.tags = Some(tags);
         self
     }
 
@@ -269,16 +296,11 @@ impl MacSpike {
 
 impl Air for MacSpike {
     fn mix_public(&self, channel: &mut Blake2sChannel) {
-        channel.mix_u64(0x4d44_4f43_4d41_4302);
+        channel.mix_u64(0x4d44_4f43_4d41_4303);
         channel.mix_u64(MACS_PER_PROOF as u64);
-        for byte in self.av {
-            channel.mix_u64(u64::from(byte));
-        }
-        for tag in self.tags {
-            for byte in tag {
-                channel.mix_u64(u64::from(byte));
-            }
-        }
+        channel.mix_u64(GF_BITS as u64);
+        channel.mix_u64(PRODUCTS_PER_MAC as u64);
+        channel.mix_u64(POST_TRACE_COLS as u64);
     }
 
     fn draw_relations(&mut self, channel: &mut Blake2sChannel) {
@@ -325,7 +347,12 @@ impl Air for MacSpike {
         ids.push(mac_col_id("consumer/active"));
         ids.push(mac_col_id("consumer/first"));
         ids.push(mac_col_id("consumer/last"));
-        ids.extend((0..GF_BITS).map(|i| mac_col_id(&format!("consumer/tag_bit_{i}"))));
+        ids.push(mac_col_id("consumer/post_active"));
+        ids.push(mac_col_id("consumer/post_first"));
+        ids.push(mac_col_id("consumer/post_last"));
+        ids.extend((0..MACS_PER_PROOF).map(|i| mac_col_id(&format!("consumer/mac_{i}"))));
+        ids.extend((0..NIBBLES_PER_HALF).map(|i| mac_col_id(&format!("consumer/x_nibble_{i}"))));
+        ids.extend((0..GF_BITS).map(|i| mac_col_id(&format!("consumer/step_{i}"))));
         ids.push(mac_col_id("clmul_4/a"));
         ids.push(mac_col_id("clmul_4/b"));
         ids.push(mac_col_id("clmul_4/product"));
@@ -336,11 +363,15 @@ impl Air for MacSpike {
     }
 
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
+        let av = self.av.unwrap_or([0; HALF_BYTES]);
+        let tags = self.tags.unwrap_or([[0; HALF_BYTES]; MACS_PER_PROOF]);
         self.consumer_component = Some(ConsumerComponent::new(
             allocator,
             MacConsumerEval {
                 clmul_relation: self.clmul_relation().clone(),
                 reduce_relation: self.reduce_relation().clone(),
+                av,
+                tags,
             },
             self.consumer_claim.expect("consumer claim set"),
         ));
@@ -373,6 +404,25 @@ impl Air for MacSpike {
                 .expect("reduce table component built"),
         ]
     }
+
+    fn post_interaction_log_sizes(&self) -> Vec<u32> {
+        if CHECK_POST_COLUMN_CONSTRAINTS || CHECK_POST_CONSTRAINTS {
+            std::iter::repeat_n(CONSUMER_LOG_SIZE, POST_TRACE_COLS).collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn verify_post_interaction(
+        &mut self,
+        channel: &mut Blake2sChannel,
+    ) -> Result<(), stwo::core::verifier::VerificationError> {
+        let av = draw_av(channel);
+        let tags = self.tags.expect("MAC tags supplied before verification");
+        mix_av_and_tags(channel, &av, &tags);
+        self.av = Some(av);
+        Ok(())
+    }
 }
 
 impl AirProver for MacSpike {
@@ -385,34 +435,28 @@ impl AirProver for MacSpike {
     }
 
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
-        tb.extend_evals(preprocessed_trace(&self.tags));
+        tb.extend_evals(preprocessed_trace());
     }
 
     fn preprocessed_column_fingerprints(&mut self) -> Vec<PreprocessedColumnFingerprint> {
         fingerprint_preprocessed_columns(
             "eu_id_prover::mdoc_mac_spike",
             &self.preprocessed_column_ids(),
-            &preprocessed_trace(&self.tags),
+            &preprocessed_trace(),
         )
     }
 
     fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
-        let (consumer, clmul_multiplicities, reduce_multiplicities) =
-            consumer_trace(&self.rows, &self.av);
+        let (consumer, clmul_multiplicities, reduce_multiplicities) = consumer_trace(&self.rows);
         tb.extend_evals(consumer);
         tb.extend_evals(clmul_table_trace(&clmul_multiplicities));
         tb.extend_evals(reduce_table_trace(&reduce_multiplicities));
     }
 
     fn write_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
-        let (_consumer, clmul_multiplicities, reduce_multiplicities) =
-            consumer_trace(&self.rows, &self.av);
-        let (consumer_trace, consumer_claim) = consumer_interaction_trace(
-            &self.rows,
-            &self.av,
-            self.clmul_relation(),
-            self.reduce_relation(),
-        );
+        let (_consumer, clmul_multiplicities, reduce_multiplicities) = consumer_trace(&self.rows);
+        let (consumer_trace, consumer_claim) =
+            consumer_interaction_trace(&self.rows, self.clmul_relation(), self.reduce_relation());
         let (clmul_table_trace, clmul_table_claim) =
             clmul_table_interaction_trace(&clmul_multiplicities, self.clmul_relation());
         let (reduce_table_trace, reduce_table_claim) =
@@ -420,9 +464,27 @@ impl AirProver for MacSpike {
         tb.extend_evals(consumer_trace);
         tb.extend_evals(clmul_table_trace);
         tb.extend_evals(reduce_table_trace);
+        assert_eq!(
+            consumer_claim + clmul_table_claim + reduce_table_claim,
+            QM31::from_u32_unchecked(0, 0, 0, 0),
+            "MAC spike LogUp claims must cancel"
+        );
         self.consumer_claim = Some(consumer_claim);
         self.clmul_table_claim = Some(clmul_table_claim);
         self.reduce_table_claim = Some(reduce_table_claim);
+    }
+
+    fn prove_post_interaction(&mut self, channel: &mut Blake2sChannel) {
+        let av = draw_av(channel);
+        let tags = mac_tags(&self.rows, &av);
+        mix_av_and_tags(channel, &av, &tags);
+        self.av = Some(av);
+        self.tags = Some(tags);
+    }
+
+    fn write_post_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
+        let av = self.av.expect("a_v set before post-interaction trace");
+        tb.extend_evals(post_interaction_trace(&self.rows, &av));
     }
 
     fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
@@ -453,17 +515,45 @@ impl FrameworkEval for MacConsumerEval {
         let active = eval.get_preprocessed_column(mac_col_id("consumer/active"));
         let first = eval.get_preprocessed_column(mac_col_id("consumer/first"));
         let last = eval.get_preprocessed_column(mac_col_id("consumer/last"));
+        let post_active = eval.get_preprocessed_column(mac_col_id("consumer/post_active"));
+        let post_first = eval.get_preprocessed_column(mac_col_id("consumer/post_first"));
+        let post_last = eval.get_preprocessed_column(mac_col_id("consumer/post_last"));
+        let mac_selectors = (0..MACS_PER_PROOF)
+            .map(|i| eval.get_preprocessed_column(mac_col_id(&format!("consumer/mac_{i}"))))
+            .collect::<Vec<_>>();
+        let nibble_selectors = (0..NIBBLES_PER_HALF)
+            .map(|i| eval.get_preprocessed_column(mac_col_id(&format!("consumer/x_nibble_{i}"))))
+            .collect::<Vec<_>>();
+        let step_selectors = (0..GF_BITS)
+            .map(|i| eval.get_preprocessed_column(mac_col_id(&format!("consumer/step_{i}"))))
+            .collect::<Vec<_>>();
         let one = m31_const::<E>(1);
 
         eval.add_constraint(active.clone() * (active.clone() - one.clone()));
         eval.add_constraint(first.clone() * (first.clone() - one.clone()));
         eval.add_constraint(last.clone() * (last.clone() - one.clone()));
+        eval.add_constraint(post_active.clone() * (post_active.clone() - one.clone()));
+        eval.add_constraint(post_first.clone() * (post_first.clone() - one.clone()));
+        eval.add_constraint(post_last.clone() * (post_last.clone() - one.clone()));
         eval.add_constraint(first.clone() * (one.clone() - active.clone()));
         eval.add_constraint(last.clone() * (one.clone() - active.clone()));
-
-        let tag_bits = (0..GF_BITS)
-            .map(|i| eval.get_preprocessed_column(mac_col_id(&format!("consumer/tag_bit_{i}"))))
-            .collect::<Vec<_>>();
+        eval.add_constraint(post_first.clone() * (one.clone() - post_active.clone()));
+        eval.add_constraint(post_last.clone() * (one.clone() - post_active.clone()));
+        for selector in &mac_selectors {
+            if CHECK_NEW_SELECTOR_BOOLS {
+                eval.add_constraint(selector.clone() * (selector.clone() - one.clone()));
+            }
+        }
+        for selector in &nibble_selectors {
+            if CHECK_NEW_SELECTOR_BOOLS {
+                eval.add_constraint(selector.clone() * (selector.clone() - one.clone()));
+            }
+        }
+        for selector in &step_selectors {
+            if CHECK_NEW_SELECTOR_BOOLS {
+                eval.add_constraint(selector.clone() * (selector.clone() - one.clone()));
+            }
+        }
 
         let a = eval.next_trace_mask();
         let b = eval.next_trace_mask();
@@ -474,6 +564,80 @@ impl FrameworkEval for MacConsumerEval {
             .collect::<Vec<_>>();
         let carry_bits = (0..GF_BITS)
             .map(|_| eval.next_trace_mask())
+            .collect::<Vec<_>>();
+        let acc_pairs = (0..GF_BITS)
+            .map(|_| {
+                eval.next_interaction_mask(stwo_constraint_framework::ORIGINAL_TRACE_IDX, [0, -1])
+            })
+            .collect::<Vec<_>>();
+        let p_pairs = (0..GF_BITS)
+            .map(|_| {
+                eval.next_interaction_mask(stwo_constraint_framework::ORIGINAL_TRACE_IDX, [0, -1])
+            })
+            .collect::<Vec<_>>();
+        let x_pairs = (0..GF_BITS)
+            .map(|_| {
+                eval.next_interaction_mask(stwo_constraint_framework::ORIGINAL_TRACE_IDX, [0, -1])
+            })
+            .collect::<Vec<_>>();
+        let s_pairs = (0..GF_BITS)
+            .map(|_| {
+                eval.next_interaction_mask(stwo_constraint_framework::ORIGINAL_TRACE_IDX, [0, -1])
+            })
+            .collect::<Vec<_>>();
+        let post_acc_pairs = if CHECK_POST_COLUMN_CONSTRAINTS || CHECK_POST_CONSTRAINTS {
+            (0..GF_BITS)
+                .map(|_| eval.next_interaction_mask(3, [0, -1]))
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let post_term_bits = if CHECK_POST_COLUMN_CONSTRAINTS || CHECK_POST_CONSTRAINTS {
+            (0..GF_BITS)
+                .map(|_| eval.next_interaction_mask::<1>(3, [0])[0].clone())
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let acc_bits = acc_pairs
+            .iter()
+            .map(|pair| pair[0].clone())
+            .collect::<Vec<_>>();
+        let acc_prev_bits = acc_pairs
+            .iter()
+            .map(|pair| pair[1].clone())
+            .collect::<Vec<_>>();
+        let p_bits = p_pairs
+            .iter()
+            .map(|pair| pair[0].clone())
+            .collect::<Vec<_>>();
+        let p_prev_bits = p_pairs
+            .iter()
+            .map(|pair| pair[1].clone())
+            .collect::<Vec<_>>();
+        let x_bits = x_pairs
+            .iter()
+            .map(|pair| pair[0].clone())
+            .collect::<Vec<_>>();
+        let x_prev_bits = x_pairs
+            .iter()
+            .map(|pair| pair[1].clone())
+            .collect::<Vec<_>>();
+        let s_bits = s_pairs
+            .iter()
+            .map(|pair| pair[0].clone())
+            .collect::<Vec<_>>();
+        let s_prev_bits = s_pairs
+            .iter()
+            .map(|pair| pair[1].clone())
+            .collect::<Vec<_>>();
+        let post_acc_bits = post_acc_pairs
+            .iter()
+            .map(|pair| pair[0].clone())
+            .collect::<Vec<_>>();
+        let post_acc_prev_bits = post_acc_pairs
+            .iter()
+            .map(|pair| pair[1].clone())
             .collect::<Vec<_>>();
 
         eval.add_constraint((one.clone() - active.clone()) * a.clone());
@@ -487,6 +651,54 @@ impl FrameworkEval for MacConsumerEval {
         for bit in &carry_bits {
             eval.add_constraint(bit.clone() * (bit.clone() - one.clone()));
             eval.add_constraint((one.clone() - active.clone()) * bit.clone());
+        }
+        for bit in &acc_bits {
+            eval.add_constraint(bit.clone() * (bit.clone() - one.clone()));
+            eval.add_constraint((one.clone() - active.clone()) * bit.clone());
+        }
+        for bit in &p_bits {
+            if CHECK_NEW_COLUMN_BOOLS {
+                eval.add_constraint(bit.clone() * (bit.clone() - one.clone()));
+            }
+        }
+        for bit in &x_bits {
+            if CHECK_NEW_COLUMN_BOOLS {
+                eval.add_constraint(bit.clone() * (bit.clone() - one.clone()));
+            }
+        }
+        for bit in &s_bits {
+            if CHECK_NEW_COLUMN_BOOLS {
+                eval.add_constraint(bit.clone() * (bit.clone() - one.clone()));
+                eval.add_constraint((one.clone() - post_active.clone()) * bit.clone());
+            }
+        }
+        for bit in &post_acc_bits {
+            if CHECK_POST_COLUMN_CONSTRAINTS {
+                eval.add_constraint(bit.clone() * (bit.clone() - one.clone()));
+            }
+        }
+        for bit in &post_term_bits {
+            if CHECK_POST_COLUMN_CONSTRAINTS {
+                eval.add_constraint(bit.clone() * (bit.clone() - one.clone()));
+            }
+        }
+
+        let mut x_nibble = Vec::with_capacity(NIBBLES_PER_HALF);
+        for nibble in 0..NIBBLES_PER_HALF {
+            let bit = nibble * 4;
+            x_nibble.push(nibble_expr::<E>(
+                &x_bits[bit],
+                &x_bits[bit + 1],
+                &x_bits[bit + 2],
+                &x_bits[bit + 3],
+            ));
+        }
+        let mut expected_b = m31_const::<E>(0);
+        for (selector, nibble_value) in nibble_selectors.iter().zip(&x_nibble) {
+            expected_b += selector.clone() * nibble_value.clone();
+        }
+        if CHECK_B_NIBBLE_CONSTRAINT {
+            eval.add_constraint(active.clone() * (b.clone() - expected_b));
         }
 
         let clmul_denominator: E::EF = self.clmul_relation.combine(&[a, b, product.clone()]);
@@ -503,8 +715,8 @@ impl FrameworkEval for MacConsumerEval {
         ));
 
         for bit_index in 0..GF_BITS {
-            let [acc, prev_acc] =
-                eval.next_interaction_mask(stwo_constraint_framework::ORIGINAL_TRACE_IDX, [0, -1]);
+            let acc = acc_bits[bit_index].clone();
+            let prev_acc = acc_prev_bits[bit_index].clone();
             eval.add_constraint(acc.clone() * (acc.clone() - one.clone()));
             eval.add_constraint((one.clone() - active.clone()) * acc.clone());
 
@@ -513,7 +725,74 @@ impl FrameworkEval for MacConsumerEval {
             eval.add_constraint((active.clone() - first.clone()) * (carry.clone() - prev_acc));
             let expected = xor_expr::<E>(carry, contribution_bits[bit_index].clone());
             eval.add_constraint(acc.clone() - expected);
-            eval.add_constraint(last.clone() * (acc - tag_bits[bit_index].clone()));
+            eval.add_constraint(acc_bits[bit_index].clone() - acc.clone());
+            if CHECK_P_FINAL_CONSTRAINT {
+                eval.add_constraint(last.clone() * (acc - p_bits[bit_index].clone()));
+            }
+        }
+
+        for bit_index in 0..GF_BITS {
+            if CHECK_X_P_CARRY_CONSTRAINTS {
+                eval.add_constraint(
+                    (active.clone() - first.clone())
+                        * (p_bits[bit_index].clone() - p_prev_bits[bit_index].clone()),
+                );
+                eval.add_constraint(
+                    (active.clone() - first.clone())
+                        * (x_bits[bit_index].clone() - x_prev_bits[bit_index].clone()),
+                );
+            }
+            if CHECK_S_CONSTRAINTS {
+                eval.add_constraint(
+                    post_first.clone() * (s_bits[bit_index].clone() - x_bits[bit_index].clone()),
+                );
+            }
+        }
+
+        if CHECK_S_CONSTRAINTS {
+            for bit_index in 0..GF_BITS {
+                let expected = mul_x_bit_expr::<E>(bit_index, &s_prev_bits);
+                eval.add_constraint(
+                    (post_active.clone() - post_first.clone())
+                        * (s_bits[bit_index].clone() - expected),
+                );
+            }
+        }
+
+        let av_bits = bytes_to_bits(&self.av);
+        let mut av_row_bit = m31_const::<E>(0);
+        for (selector, bit) in step_selectors.iter().zip(av_bits) {
+            if bit {
+                av_row_bit += selector.clone();
+            }
+        }
+        let tag_bits = self
+            .tags
+            .iter()
+            .map(bytes_to_bits)
+            .collect::<Vec<[bool; GF_BITS]>>();
+        if CHECK_POST_CONSTRAINTS {
+            for bit_index in 0..GF_BITS {
+                let av_term = post_term_bits[bit_index].clone();
+                eval.add_constraint(
+                    av_term.clone() - av_row_bit.clone() * s_bits[bit_index].clone(),
+                );
+                let expected = post_first.clone() * av_term.clone()
+                    + (one.clone() - post_first.clone())
+                        * xor_expr::<E>(post_acc_prev_bits[bit_index].clone(), av_term);
+                eval.add_constraint(post_acc_bits[bit_index].clone() - expected);
+                let mut tag_bit = m31_const::<E>(0);
+                for (mac_index, selector) in mac_selectors.iter().enumerate() {
+                    if tag_bits[mac_index][bit_index] {
+                        tag_bit += selector.clone();
+                    }
+                }
+                let final_bit =
+                    xor_expr::<E>(p_bits[bit_index].clone(), post_acc_bits[bit_index].clone());
+                if CHECK_POST_FINAL_TAG {
+                    eval.add_constraint(post_last.clone() * (final_bit - tag_bit));
+                }
+            }
         }
 
         eval.finalize_logup();
@@ -572,21 +851,26 @@ impl FrameworkEval for ReduceTableEval {
     }
 }
 
-fn preprocessed_trace(tags: &[[u8; HALF_BYTES]; MACS_PER_PROOF]) -> Vec<MacColumnEval> {
+fn preprocessed_trace() -> Vec<MacColumnEval> {
     let mut columns =
         vec![vec![M31::from_u32_unchecked(0); 1 << CONSUMER_LOG_SIZE]; CONSUMER_PREPROCESSED_COLS];
     for mac_index in 0..MACS_PER_PROOF {
-        let tag_bits = bytes_to_bits(&tags[mac_index]);
         for product_index in 0..PRODUCTS_PER_MAC {
             let row = mac_index * PRODUCTS_PER_MAC + product_index;
             columns[0][row] = M31::from_u32_unchecked(1);
             columns[1][row] = M31::from_u32_unchecked(u32::from(product_index == 0));
             columns[2][row] =
                 M31::from_u32_unchecked(u32::from(product_index == PRODUCTS_PER_MAC - 1));
-            for bit in 0..GF_BITS {
-                columns[3 + bit][row] = M31::from_u32_unchecked(u32::from(
-                    product_index == PRODUCTS_PER_MAC - 1 && tag_bits[bit],
-                ));
+            let post_index = product_index;
+            columns[3][row] = M31::from_u32_unchecked(u32::from(post_index < GF_BITS));
+            columns[4][row] = M31::from_u32_unchecked(u32::from(post_index == 0));
+            columns[5][row] = M31::from_u32_unchecked(u32::from(post_index == GF_BITS - 1));
+            columns[6 + mac_index][row] = M31::from_u32_unchecked(1);
+            let x_nibble = product_index % NIBBLES_PER_HALF;
+            columns[6 + MACS_PER_PROOF + x_nibble][row] = M31::from_u32_unchecked(1);
+            if product_index < GF_BITS {
+                columns[6 + MACS_PER_PROOF + NIBBLES_PER_HALF + product_index][row] =
+                    M31::from_u32_unchecked(1);
             }
         }
     }
@@ -633,16 +917,18 @@ fn preprocessed_trace(tags: &[[u8; HALF_BYTES]; MACS_PER_PROOF]) -> Vec<MacColum
 
 fn consumer_trace(
     rows: &[MacHalfWitness; MACS_PER_PROOF],
-    av: &[u8; HALF_BYTES],
 ) -> (Vec<MacColumnEval>, [u32; 256], [u32; REDUCE_TABLE_ROWS]) {
     let mut columns =
         vec![vec![M31::from_u32_unchecked(0); 1 << CONSUMER_LOG_SIZE]; CONSUMER_TRACE_COLS];
     let mut clmul_multiplicities = [0u32; 256];
     let mut reduce_multiplicities = [0u32; REDUCE_TABLE_ROWS];
     for (mac_index, row) in rows.iter().enumerate() {
-        let key = xor_128(&row.ap, av);
-        let key_nibbles = bytes_to_nibbles(&key);
+        let key_nibbles = bytes_to_nibbles(&row.ap);
         let msg_nibbles = bytes_to_nibbles(&row.x);
+        let x_bits = bytes_to_bits(&row.x);
+        let p = gf128_mul(&row.ap, &row.x);
+        let p_bits = bytes_to_bits(&p);
+        let ladder = s_ladder(&row.x);
         let mut acc = [false; GF_BITS];
         for i in 0..NIBBLES_PER_HALF {
             for j in 0..NIBBLES_PER_HALF {
@@ -669,13 +955,18 @@ fn consumer_trace(
                 for bit_index in 0..GF_BITS {
                     columns[4 + GF_BITS + GF_BITS + bit_index][out_row] =
                         M31::from_u32_unchecked(u32::from(acc[bit_index]));
+                    columns[4 + 3 * GF_BITS + bit_index][out_row] =
+                        M31::from_u32_unchecked(u32::from(p_bits[bit_index]));
+                    columns[4 + 4 * GF_BITS + bit_index][out_row] =
+                        M31::from_u32_unchecked(u32::from(x_bits[bit_index]));
+                    if product_index < GF_BITS {
+                        columns[4 + 5 * GF_BITS + bit_index][out_row] =
+                            M31::from_u32_unchecked(u32::from(ladder[product_index][bit_index]));
+                    }
                 }
             }
         }
-        debug_assert_eq!(
-            bits_to_bytes(&acc),
-            gf128_mul(&xor_128(&row.ap, av), &row.x)
-        );
+        debug_assert_eq!(bits_to_bytes(&acc), p);
     }
     (
         columns
@@ -713,7 +1004,6 @@ fn reduce_table_trace(multiplicities: &[u32; REDUCE_TABLE_ROWS]) -> Vec<MacColum
 
 fn consumer_interaction_trace(
     rows: &[MacHalfWitness; MACS_PER_PROOF],
-    av: &[u8; HALF_BYTES],
     clmul_relation: &Clmul4Relation,
     reduce_relation: &ReduceRelation,
 ) -> (Vec<MacColumnEval>, QM31) {
@@ -724,8 +1014,7 @@ fn consumer_interaction_trace(
         let product_index = row % PRODUCTS_PER_MAC;
         let i = product_index / NIBBLES_PER_HALF;
         let j = product_index % NIBBLES_PER_HALF;
-        let key = xor_128(&rows[mac].ap, av);
-        let a = bytes_to_nibbles(&key)[i];
+        let a = bytes_to_nibbles(&rows[mac].ap)[i];
         let b = bytes_to_nibbles(&rows[mac].x)[j];
         let product = clmul4(a, b);
         let position = i + j;
@@ -770,8 +1059,7 @@ fn clmul_table_interaction_trace(
     multiplicities: &[u32; 256],
     relation: &Clmul4Relation,
 ) -> (Vec<MacColumnEval>, QM31) {
-    let preprocessed =
-        preprocessed_trace(&[[[0u8; HALF_BYTES]; MACS_PER_PROOF][0]; MACS_PER_PROOF]);
+    let preprocessed = preprocessed_trace();
     let table_start = CONSUMER_PREPROCESSED_COLS;
     let mult = clmul_table_trace(multiplicities);
     let mut logup = LogupTraceGenerator::new(TABLE_LOG_SIZE);
@@ -792,8 +1080,7 @@ fn reduce_table_interaction_trace(
     multiplicities: &[u32; REDUCE_TABLE_ROWS],
     relation: &ReduceRelation,
 ) -> (Vec<MacColumnEval>, QM31) {
-    let preprocessed =
-        preprocessed_trace(&[[[0u8; HALF_BYTES]; MACS_PER_PROOF][0]; MACS_PER_PROOF]);
+    let preprocessed = preprocessed_trace();
     let table_start = CONSUMER_PREPROCESSED_COLS + TABLE_PREPROCESSED_COLS;
     let mult = reduce_table_trace(multiplicities);
     let mut logup = LogupTraceGenerator::new(REDUCE_TABLE_LOG_SIZE);
@@ -807,6 +1094,78 @@ fn reduce_table_interaction_trace(
         (numerator, denominator)
     });
     logup.finalize_last()
+}
+
+fn post_interaction_trace(
+    rows: &[MacHalfWitness; MACS_PER_PROOF],
+    av: &[u8; HALF_BYTES],
+) -> Vec<MacColumnEval> {
+    let mut columns =
+        vec![vec![M31::from_u32_unchecked(0); 1 << CONSUMER_LOG_SIZE]; POST_TRACE_COLS];
+    let av_bits = bytes_to_bits(av);
+    let mut last_acc = [false; GF_BITS];
+    for (mac_index, row) in rows.iter().enumerate() {
+        let ladder = s_ladder(&row.x);
+        let mut acc = [false; GF_BITS];
+        for step in 0..PRODUCTS_PER_MAC {
+            let out_row = mac_index * PRODUCTS_PER_MAC + step;
+            for bit in 0..GF_BITS {
+                let term = step < GF_BITS && av_bits[step] && ladder[step][bit];
+                if term {
+                    acc[bit] ^= true;
+                }
+                columns[bit][out_row] = M31::from_u32_unchecked(u32::from(acc[bit]));
+                columns[GF_BITS + bit][out_row] = M31::from_u32_unchecked(u32::from(term));
+            }
+        }
+        last_acc = acc;
+        let p = gf128_mul(&row.ap, &row.x);
+        let ax = bits_to_bytes(&acc);
+        debug_assert_eq!(xor_128(&p, &ax), gf128_mul(&xor_128(&row.ap, av), &row.x));
+    }
+    for row in ACTIVE_ROWS..(1 << CONSUMER_LOG_SIZE) {
+        for bit in 0..GF_BITS {
+            columns[bit][row] = M31::from_u32_unchecked(u32::from(last_acc[bit]));
+            columns[GF_BITS + bit][row] = M31::from_u32_unchecked(0);
+        }
+    }
+    columns
+        .into_iter()
+        .map(|values| column_eval(CONSUMER_LOG_SIZE, values))
+        .collect()
+}
+
+fn mac_tags(
+    rows: &[MacHalfWitness; MACS_PER_PROOF],
+    av: &[u8; HALF_BYTES],
+) -> [[u8; HALF_BYTES]; MACS_PER_PROOF] {
+    std::array::from_fn(|i| gf128_mul(&xor_128(&rows[i].ap, av), &rows[i].x))
+}
+
+fn draw_av(channel: &mut Blake2sChannel) -> [u8; HALF_BYTES] {
+    channel.mix_u64(0x5034_424d_4143_4156);
+    let words = channel.draw_u32s();
+    let mut av = [0u8; HALF_BYTES];
+    for (chunk, word) in av.chunks_exact_mut(4).zip(words.into_iter().take(4)) {
+        chunk.copy_from_slice(&word.to_le_bytes());
+    }
+    av
+}
+
+fn mix_av_and_tags(
+    channel: &mut Blake2sChannel,
+    av: &[u8; HALF_BYTES],
+    tags: &[[u8; HALF_BYTES]; MACS_PER_PROOF],
+) {
+    channel.mix_u64(0x5034_424d_4143_5447);
+    for byte in av {
+        channel.mix_u64(u64::from(*byte));
+    }
+    for tag in tags {
+        for byte in tag {
+            channel.mix_u64(u64::from(*byte));
+        }
+    }
 }
 
 fn column_eval(log_size: u32, values: Vec<M31>) -> MacColumnEval {
@@ -866,6 +1225,22 @@ fn clmul4(a: u8, b: u8) -> u8 {
 
 fn xor_expr<E: EvalAtRow>(a: E::F, b: E::F) -> E::F {
     a.clone() + b.clone() - m31_const::<E>(2) * a * b
+}
+
+fn nibble_expr<E: EvalAtRow>(b0: &E::F, b1: &E::F, b2: &E::F, b3: &E::F) -> E::F {
+    b0.clone()
+        + m31_const::<E>(2) * b1.clone()
+        + m31_const::<E>(4) * b2.clone()
+        + m31_const::<E>(8) * b3.clone()
+}
+
+fn mul_x_bit_expr<E: EvalAtRow>(bit_index: usize, prev: &[E::F]) -> E::F {
+    let high = prev[GF_BITS - 1].clone();
+    match bit_index {
+        0 => high,
+        1 | 2 | 7 => xor_expr::<E>(prev[bit_index - 1].clone(), high),
+        _ => prev[bit_index - 1].clone(),
+    }
 }
 
 fn mac_col_id(id: &str) -> PreProcessedColumnId {
@@ -942,6 +1317,23 @@ fn gf128_mul(left: &[u8; HALF_BYTES], right: &[u8; HALF_BYTES]) -> [u8; HALF_BYT
     let mut out = [false; GF_BITS];
     out.copy_from_slice(&coeffs[..GF_BITS]);
     bits_to_bytes(&out)
+}
+
+fn s_ladder(x: &[u8; HALF_BYTES]) -> [[bool; GF_BITS]; GF_BITS] {
+    let mut out = [[false; GF_BITS]; GF_BITS];
+    out[0] = bytes_to_bits(x);
+    for step in 1..GF_BITS {
+        let prev = out[step - 1];
+        let high = prev[GF_BITS - 1];
+        out[step][0] = high;
+        for bit in 1..GF_BITS {
+            out[step][bit] = prev[bit - 1];
+        }
+        out[step][1] ^= high;
+        out[step][2] ^= high;
+        out[step][7] ^= high;
+    }
+    out
 }
 
 fn cells(logs: &[u32]) -> u64 {
