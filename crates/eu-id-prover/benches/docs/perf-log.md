@@ -191,6 +191,18 @@ Shape: `cargo test -p eu-id-prover --release shape_dump -- --ignored --nocapture
 | 2026-07-03 | worktree | mdoc Phase 0b guard + accepted sizing waste | mdoc/verify (RAYON_NUM_THREADS=1) | 28.089 ms | 27.798 ms, Criterion no-change |
 | 2026-07-03 | worktree | mdoc Phase 0b guard + accepted sizing waste | mdoc proof bincode bytes | 4,563,243 | 4,563,243 |
 | 2026-07-03 | worktree | mdoc Phase 0b accepted SHA/P256 waste | accepted waste cells | known waste unpriced | 529,792 |
+| 2026-07-06 | worktree | mdoc P1 N-attribute variants (RAYON_NUM_THREADS=1, production config, security=128-bit target) | mdoc/prove/N1 | bench absent | 846.78 ms |
+| 2026-07-06 | worktree | mdoc P1 N-attribute variants (RAYON_NUM_THREADS=1, production config, security=128-bit target) | mdoc/prove/N2 | bench absent | 763.97 ms |
+| 2026-07-06 | worktree | mdoc P1 N-attribute variants (RAYON_NUM_THREADS=1, production config, security=128-bit target) | mdoc/prove/N3 | bench absent | 1.0409 s |
+| 2026-07-06 | worktree | mdoc P1 N-attribute variants (RAYON_NUM_THREADS=1, production config, security=128-bit target) | mdoc/prove/N4 | bench absent | 1.1055 s |
+| 2026-07-06 | worktree | mdoc P1 N-attribute variants (RAYON_NUM_THREADS=1, production config, security=128-bit target) | mdoc/verify/N1 | bench absent | 41.968 ms |
+| 2026-07-06 | worktree | mdoc P1 N-attribute variants (RAYON_NUM_THREADS=1, production config, security=128-bit target) | mdoc/verify/N2 | bench absent | 43.873 ms |
+| 2026-07-06 | worktree | mdoc P1 N-attribute variants (RAYON_NUM_THREADS=1, production config, security=128-bit target) | mdoc/verify/N3 | bench absent | 45.945 ms |
+| 2026-07-06 | worktree | mdoc P1 N-attribute variants (RAYON_NUM_THREADS=1, production config, security=128-bit target) | mdoc/verify/N4 | bench absent | 49.358 ms |
+| 2026-07-06 | worktree | mdoc P1 N-attribute variants (RAYON_NUM_THREADS=1, production config, security=128-bit target) | mdoc proof bincode bytes/N1 | bench absent | 2,192,650 |
+| 2026-07-06 | worktree | mdoc P1 N-attribute variants (RAYON_NUM_THREADS=1, production config, security=128-bit target) | mdoc proof bincode bytes/N2 | bench absent | 2,587,822 |
+| 2026-07-06 | worktree | mdoc P1 N-attribute variants (RAYON_NUM_THREADS=1, production config, security=128-bit target) | mdoc proof bincode bytes/N3 | bench absent | 3,018,558 |
+| 2026-07-06 | worktree | mdoc P1 N-attribute variants (RAYON_NUM_THREADS=1, production config, security=128-bit target) | mdoc proof bincode bytes/N4 | bench absent | 3,335,958 |
 
 WO-1.8 note: `target-cpu=native` was measured with `RUSTFLAGS="-C target-cpu=native"` instead of committed `.cargo/config.toml`, because CI builds this repo on `ubuntu-latest` and would consume committed Cargo config. LTO/CU1 is scoped to `[profile.bench]`; putting it in `[profile.release]` made `cargo test --workspace --release` fail in the P-256 monolithic proof gate with `ProofLayer("Constraints not satisfied.")`.
 

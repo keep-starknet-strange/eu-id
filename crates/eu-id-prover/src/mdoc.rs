@@ -65,8 +65,7 @@ use crate::mdoc_validity::{
     mdoc_validity_rows, MdocValidityBind, MdocValidityInteractionClaim, MdocValidityRow,
 };
 use crate::mdoc_window_bind::{
-    mdoc_window_bind_rows, MdocFieldSource, MdocWindowBind, MdocWindowBindInteractionClaim,
-    MdocWindowBindRow,
+    MdocFieldSource, MdocWindowBind, MdocWindowBindInteractionClaim, MdocWindowBindRow,
 };
 use crate::public_digest_bind::{PublicDigestBind, PublicDigestBindInteractionClaim};
 use crate::Error;
@@ -82,6 +81,12 @@ const PID_NAMESPACE: &str = "eu.europa.ec.eudi.pid.1";
 const ES256_PROTECTED_HEADER: &[u8] = &[0xA1, 0x01, 0x26];
 const CBOR_TAG_ENCODED_CBOR: u64 = 24;
 const CBOR_TAG_FULL_DATE: u64 = 1004;
+const MDOC_ATTRIBUTE_ELEMENT_ID_BASE: u32 = 16;
+const MDOC_ATTRIBUTE_VALUE_BASE: u32 = 20;
+const MDOC_ATTRIBUTE_DIGEST_BASE: u32 = 24;
+const MDOC_ATTRIBUTE_DIGEST_ANCHOR_BASE: u32 = 28;
+const MDOC_ATTRIBUTE_VALUE_HEAD_BASE: u32 = 32;
+const MDOC_ATTRIBUTE_ELEMENT_ANCHOR_BASE: u32 = 36;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MdocPidRequest {
@@ -105,6 +110,16 @@ pub enum MdocDisclosureMode {
 pub struct MdocRequestedAttribute {
     pub element_identifier: String,
     pub mode: MdocDisclosureMode,
+}
+
+#[derive(Clone, Debug)]
+pub struct ExtractedMdocAttribute {
+    pub request: MdocRequestedAttribute,
+    pub digest_id: u32,
+    pub item: Vec<u8>,
+    pub element_identifier_offset: usize,
+    pub value_offset: usize,
+    pub value: Vec<u8>,
 }
 
 impl MdocPidRequest {
@@ -156,13 +171,31 @@ fn validate_requested_attributes(attributes: &[MdocRequestedAttribute]) -> Resul
                         len: bytes.len(),
                     });
                 }
+                if attribute.element_identifier.len() > 32 {
+                    return Err(MdocError::ElementIdentifierTooLong {
+                        element: attribute.element_identifier.clone(),
+                        len: attribute.element_identifier.len(),
+                    });
+                }
             }
             MdocDisclosureMode::AgeOver => {
+                if attribute.element_identifier.len() > 32 {
+                    return Err(MdocError::ElementIdentifierTooLong {
+                        element: attribute.element_identifier.clone(),
+                        len: attribute.element_identifier.len(),
+                    });
+                }
                 if std::mem::replace(&mut age_seen, true) {
                     return Err(MdocError::DuplicatePredicateMode("AgeOver"));
                 }
             }
             MdocDisclosureMode::Alpha2Set => {
+                if attribute.element_identifier.len() > 32 {
+                    return Err(MdocError::ElementIdentifierTooLong {
+                        element: attribute.element_identifier.clone(),
+                        len: attribute.element_identifier.len(),
+                    });
+                }
                 if std::mem::replace(&mut alpha2_seen, true) {
                     return Err(MdocError::DuplicatePredicateMode("Alpha2Set"));
                 }
@@ -177,6 +210,7 @@ pub struct ExtractedPidMdoc {
     pub doctype: String,
     pub namespace: String,
     pub attributes: Vec<MdocRequestedAttribute>,
+    pub extracted_attributes: Vec<ExtractedMdocAttribute>,
     pub birth_date: String,
     pub nationalities: Vec<u32>,
     pub birth_date_bytes: [u8; 4],
@@ -270,6 +304,8 @@ pub enum MdocError {
     InvalidAttributeCount { count: usize },
     DuplicatePredicateMode(&'static str),
     ValueEqualityTooLong { element: String, len: usize },
+    ElementIdentifierTooLong { element: String, len: usize },
+    ValueEqualityMismatch { element: String },
 }
 
 #[derive(Clone, Debug)]
@@ -308,9 +344,28 @@ impl MdocSizingWaste {
 
 /// Deterministic EUID mdoc profile-v2 fixture used by benches and SDK tests.
 pub fn demo_mdoc_circuit_fixture() -> DemoMdocCircuitFixture {
+    let request = MdocPidRequest::eudi_pid(openid4vp_session_transcript(b"session-transcript-123"));
+    demo_mdoc_circuit_fixture_for_request(request)
+}
+
+pub fn demo_mdoc_circuit_fixture_with_attributes(
+    attributes: Vec<MdocRequestedAttribute>,
+) -> DemoMdocCircuitFixture {
     let session_transcript = openid4vp_session_transcript(b"session-transcript-123");
-    let document = demo_mdoc_document(&session_transcript);
-    let request = MdocPidRequest::eudi_pid(session_transcript);
+    let mut request = MdocPidRequest::eudi_pid(session_transcript);
+    request.attributes = attributes;
+    demo_mdoc_circuit_fixture_for_request(request)
+}
+
+fn demo_mdoc_circuit_fixture_for_request(request: MdocPidRequest) -> DemoMdocCircuitFixture {
+    let session_transcript = request.session_transcript.clone();
+    let include_extra_items = request.attributes.iter().any(|attribute| {
+        matches!(
+            attribute.element_identifier.as_str(),
+            "family_name" | "age_over_18"
+        )
+    });
+    let document = demo_mdoc_document(&session_transcript, include_extra_items);
     let extracted = extract_pid_mdoc(&document, &request).expect("demo mdoc extracts");
     let statement = MdocCircuitStatement::from_extracted(
         &extracted,
@@ -345,7 +400,11 @@ pub fn demo_mdoc_module_shapes() -> Result<Vec<MdocModuleShape>, Error> {
     let device_draft = single_p256_draft(statement.device_input.clone())?;
     let (issuer_sha_witness, issuer_sha_log) = sha_params(&extracted.issuer_sig_structure);
     let (device_sha_witness, device_sha_log) = sha_params(&extracted.device_sig_structure);
-    let attribute_items = [&extracted.birth_date_item, &extracted.nationality_item];
+    let attribute_items: Vec<_> = extracted
+        .extracted_attributes
+        .iter()
+        .map(|attribute| attribute.item.as_slice())
+        .collect();
     let attribute_sha_params: Vec<_> = attribute_items
         .iter()
         .map(|item| sha_params(item))
@@ -371,10 +430,9 @@ pub fn demo_mdoc_module_shapes() -> Result<Vec<MdocModuleShape>, Error> {
     let device_scalar_z = SharedScalarZRelation::new();
 
     let issuer_exposure = issuer_mso_exposure(statement);
-    let attribute_exposures = vec![
-        birth_date_exposure(statement),
-        nationality_exposure(statement),
-    ];
+    let attribute_exposures: Vec<_> = (0..statement.attributes.len())
+        .map(|index| attribute_exposure(statement, index))
+        .collect();
 
     #[cfg(not(feature = "ec-coprocessor"))]
     let issuer_p256 = P256Prover::new(&issuer_draft)
@@ -444,13 +502,11 @@ pub fn demo_mdoc_module_shapes() -> Result<Vec<MdocModuleShape>, Error> {
     #[cfg(feature = "ec-coprocessor")]
     let device_public_digest_bind =
         PublicDigestBind::new(statement.device_input.message_hash.0, device_digest.clone());
-    let mdoc_window_bind = MdocWindowBind::new(
+    let mdoc_window_bind = MdocWindowBind::new_for_attributes(
         mdoc_window_bind_rows_from(statement, Some(&extracted.issuer_sig_structure)),
         issuer_field.clone(),
-        attribute_fields[0].clone(),
-        attribute_fields[1].clone(),
-        attribute_digests[0].clone(),
-        attribute_digests[1].clone(),
+        attribute_fields.clone(),
+        attribute_digests.clone(),
     );
     let mdoc_validity = MdocValidityBind::new(
         statement.policy.current_date,
@@ -479,14 +535,23 @@ pub fn demo_mdoc_module_shapes() -> Result<Vec<MdocModuleShape>, Error> {
     let age = AgeRangeCheck::new(PcsConfig::default())
         .prover(&age_public, &age_dob)
         .map_err(Error::AgePrepare)?;
+    let age_field = attribute_fields[statement
+        .age_attribute_index
+        .expect("demo mdoc carries an AgeOver attribute")]
+    .clone();
     let age = match statement.birth_date_binding {
-        MdocBirthDateBinding::Packed(_) => age.with_dob_binding(attribute_fields[0].clone()),
-        MdocBirthDateBinding::Text(_) => age.with_text_dob_binding(attribute_fields[0].clone()),
+        MdocBirthDateBinding::Packed(_) => age.with_dob_binding(age_field),
+        MdocBirthDateBinding::Text(_) => age.with_text_dob_binding(age_field),
     };
     let nat = NationalityPredicate::new(PcsConfig::default())
         .prover(&nat_public, &nat_private)
         .map_err(Error::NatPrepare)?
-        .with_nat_binding(attribute_fields[1].clone());
+        .with_nat_binding(
+            attribute_fields[statement
+                .nationality_attribute_index
+                .expect("demo mdoc carries an Alpha2Set attribute")]
+            .clone(),
+        );
 
     #[cfg(not(feature = "ec-coprocessor"))]
     let shapes = vec![
@@ -608,16 +673,10 @@ pub fn extract_pid_mdoc(
 ) -> Result<ExtractedPidMdoc, MdocError> {
     let requested_attributes = request.disclosed_attributes();
     validate_requested_attributes(&requested_attributes)?;
-    if request.doctype != PID_DOCTYPE {
-        return Err(MdocError::DoctypeMismatch);
-    }
-    if request.namespace != PID_NAMESPACE {
-        return Err(MdocError::NamespaceMissing);
-    }
     let doc = decode_value(document)?;
     let doc_map = expect_map(&doc, "document")?;
     let doctype = text_field(doc_map, "docType")?.to_string();
-    if doctype != PID_DOCTYPE || doctype != request.doctype {
+    if doctype != request.doctype {
         return Err(MdocError::DoctypeMismatch);
     }
 
@@ -644,26 +703,86 @@ pub fn extract_pid_mdoc(
     let device_key = mso.device_key;
 
     let namespace_items = namespace_items(issuer_signed, &request.namespace)?;
-    let birth_date_item = find_item(namespace_items, &request.birth_date_element, &mso.version)?
-        .ok_or_else(|| MdocError::ElementMissing(request.birth_date_element.clone()))?;
-    let nationality_item = find_item(namespace_items, &request.nationality_element, &mso.version)?
-        .ok_or_else(|| MdocError::ElementMissing(request.nationality_element.clone()))?;
+    let mut extracted_attributes = Vec::with_capacity(requested_attributes.len());
+    for attribute in &requested_attributes {
+        let item = find_item(namespace_items, &attribute.element_identifier, &mso.version)?
+            .ok_or_else(|| MdocError::ElementMissing(attribute.element_identifier.clone()))?;
+        validate_item_digest(
+            &mso.value_digests,
+            &attribute.element_identifier,
+            item.digest_id,
+            &item.bytes,
+        )?;
+        let element_identifier_offset =
+            find_subslice(&item.bytes, attribute.element_identifier.as_bytes()).ok_or(
+                MdocError::UnsupportedCircuitValue("attribute elementIdentifier offset"),
+            )?;
+        let value = encode_value(item.value.clone());
+        if let MdocDisclosureMode::ValueEquality(expected) = &attribute.mode {
+            if &value != expected {
+                return Err(MdocError::ValueEqualityMismatch {
+                    element: attribute.element_identifier.clone(),
+                });
+            }
+        }
+        let value_offset = find_subslice(&item.bytes, &value)
+            .ok_or(MdocError::UnsupportedCircuitValue("attribute value offset"))?;
+        extracted_attributes.push(ExtractedMdocAttribute {
+            request: attribute.clone(),
+            digest_id: item.digest_id,
+            item: item.bytes,
+            element_identifier_offset,
+            value_offset,
+            value,
+        });
+    }
+    let birth_date_element = requested_attributes.iter().find_map(|attribute| {
+        matches!(attribute.mode, MdocDisclosureMode::AgeOver)
+            .then_some(attribute.element_identifier.as_str())
+    });
+    let nationality_element = requested_attributes.iter().find_map(|attribute| {
+        matches!(attribute.mode, MdocDisclosureMode::Alpha2Set)
+            .then_some(attribute.element_identifier.as_str())
+    });
+    let birth_date_item = if let Some(element) = birth_date_element {
+        Some(
+            find_item(namespace_items, element, &mso.version)?
+                .ok_or_else(|| MdocError::ElementMissing(element.to_string()))?,
+        )
+    } else {
+        None
+    };
+    let nationality_item = if let Some(element) = nationality_element {
+        Some(
+            find_item(namespace_items, element, &mso.version)?
+                .ok_or_else(|| MdocError::ElementMissing(element.to_string()))?,
+        )
+    } else {
+        None
+    };
 
-    let parsed_birth = parse_birth_date_value(&birth_date_item)?;
-    let parsed_nat = parse_nationality_value(&nationality_item)?;
-
-    validate_item_digest(
-        &mso.value_digests,
-        &request.birth_date_element,
-        birth_date_item.digest_id,
-        &birth_date_item.bytes,
-    )?;
-    validate_item_digest(
-        &mso.value_digests,
-        &request.nationality_element,
-        nationality_item.digest_id,
-        &nationality_item.bytes,
-    )?;
+    let parsed_birth = if let Some(item) = &birth_date_item {
+        validate_item_digest(
+            &mso.value_digests,
+            birth_date_element.expect("AgeOver element is present"),
+            item.digest_id,
+            &item.bytes,
+        )?;
+        parse_birth_date_value(item)?
+    } else {
+        ParsedBirthDateValue::default()
+    };
+    let parsed_nat = if let Some(item) = &nationality_item {
+        validate_item_digest(
+            &mso.value_digests,
+            nationality_element.expect("Alpha2Set element is present"),
+            item.digest_id,
+            &item.bytes,
+        )?;
+        parse_nationality_value(item)?
+    } else {
+        ParsedNationalityValue::default()
+    };
 
     let device_signed = map_field(doc_map, "deviceSigned")?;
     let device_auth = map_field(device_signed, "deviceAuth")?;
@@ -681,14 +800,18 @@ pub fn extract_pid_mdoc(
     )?;
 
     let mut digest_ids = HashMap::new();
-    digest_ids.insert(
-        request.birth_date_element.clone(),
-        birth_date_item.digest_id,
-    );
-    digest_ids.insert(
-        request.nationality_element.clone(),
-        nationality_item.digest_id,
-    );
+    for attribute in &extracted_attributes {
+        digest_ids.insert(
+            attribute.request.element_identifier.clone(),
+            attribute.digest_id,
+        );
+    }
+    if let (Some(element), Some(item)) = (birth_date_element, &birth_date_item) {
+        digest_ids.insert(element.to_string(), item.digest_id);
+    }
+    if let (Some(element), Some(item)) = (nationality_element, &nationality_item) {
+        digest_ids.insert(element.to_string(), item.digest_id);
+    }
 
     let issuer_signature = signature_from_compact(&issuer_auth.signature_bytes)?;
     let device_signature_value = signature_from_compact(&device_signature.signature_bytes)?;
@@ -707,6 +830,7 @@ pub fn extract_pid_mdoc(
         doctype,
         namespace: request.namespace.clone(),
         attributes: requested_attributes,
+        extracted_attributes,
         birth_date: parsed_birth.display,
         nationalities: vec![parsed_nat.numeric],
         birth_date_bytes: parsed_birth.bytes,
@@ -719,8 +843,8 @@ pub fn extract_pid_mdoc(
         valid_from: mso.valid_from,
         valid_until: mso.valid_until,
         digest_ids,
-        birth_date_item: birth_date_item.bytes,
-        nationality_item: nationality_item.bytes,
+        birth_date_item: birth_date_item.map(|item| item.bytes).unwrap_or_default(),
+        nationality_item: nationality_item.map(|item| item.bytes).unwrap_or_default(),
         mso: issuer_auth.payload,
         issuer_key,
         device_key,
@@ -741,12 +865,34 @@ struct ParsedBirthDateValue {
     offset: usize,
 }
 
+impl Default for ParsedBirthDateValue {
+    fn default() -> Self {
+        Self {
+            display: String::new(),
+            bytes: [0; 4],
+            binding: MdocBirthDateBinding::Text(*b"0000-00-00"),
+            offset: 0,
+        }
+    }
+}
+
 #[derive(Clone)]
 struct ParsedNationalityValue {
     numeric: u32,
     bytes: [u8; 2],
     binding: MdocNationalityBinding,
     offset: usize,
+}
+
+impl Default for ParsedNationalityValue {
+    fn default() -> Self {
+        Self {
+            numeric: 0,
+            bytes: [0; 2],
+            binding: MdocNationalityBinding::Alpha2([0; 2]),
+            offset: 0,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -968,52 +1114,77 @@ fn anchor_before_offset(
 /// multi-block constructor tolerates a window straddling a SHA-256 block
 /// boundary.
 fn birth_date_exposure(statement: &MdocCircuitStatement) -> FieldExposure {
-    FieldExposure::from_preimage_windows_multi(&[
-        (
-            field_id::DOB,
-            statement.birth_date_value_offset,
-            statement.birth_date_binding.as_bytes().len(),
-        ),
-        (
-            field_id::MDOC_BIRTH_DATE_ELEMENT_ID,
-            statement.birth_date_element_offset,
-            b"birth_date".len(),
-        ),
-    ])
+    let Some(index) = statement.age_attribute_index else {
+        return FieldExposure::empty();
+    };
+    attribute_exposure(statement, index)
 }
 
 /// Field exposure over the `nationality` item preimage: the value window
 /// (2 bytes) plus the `elementIdentifier` window (D1).
 fn nationality_exposure(statement: &MdocCircuitStatement) -> FieldExposure {
-    FieldExposure::from_preimage_windows_multi(&[
-        (
+    let Some(index) = statement.nationality_attribute_index else {
+        return FieldExposure::empty();
+    };
+    attribute_exposure(statement, index)
+}
+
+fn attribute_exposure(statement: &MdocCircuitStatement, index: usize) -> FieldExposure {
+    let attribute = &statement.attributes[index];
+    let mut windows = vec![(
+        MdocStatementAttribute::element_field_id(index),
+        attribute.element_identifier_offset,
+        attribute.element_identifier.len(),
+    )];
+    windows.push((
+        MdocStatementAttribute::element_anchor_field_id(index),
+        attribute.element_identifier_anchor_offset,
+        attribute.element_identifier_anchor.len(),
+    ));
+    match &attribute.mode {
+        MdocDisclosureMode::AgeOver => windows.push((
+            field_id::DOB,
+            statement.birth_date_value_offset,
+            statement.birth_date_binding.as_bytes().len(),
+        )),
+        MdocDisclosureMode::Alpha2Set => windows.push((
             field_id::NATIONALITY,
             statement.nationality_value_offset,
             statement.nationality_binding.as_bytes().len(),
-        ),
-        (
-            field_id::MDOC_NATIONALITY_ELEMENT_ID,
-            statement.nationality_element_offset,
-            b"nationality".len(),
-        ),
-    ])
+        )),
+        MdocDisclosureMode::ValueEquality(_) => windows.push((
+            MdocStatementAttribute::value_field_id(index),
+            attribute.value_offset,
+            attribute.value.len(),
+        )),
+    }
+    if matches!(attribute.mode, MdocDisclosureMode::ValueEquality(_)) {
+        windows.push((
+            MdocStatementAttribute::value_head_field_id(index),
+            attribute.value_offset,
+            attribute.value_head.len(),
+        ));
+    }
+    FieldExposure::from_preimage_windows_multi(&windows)
 }
 
 /// Field exposure over the issuer `Sig_structure` preimage: the two 32-byte
 /// `valueDigests` windows (D2) and the two 32-byte deviceKey coordinate windows
 /// (D3), all consumed by the MSO window-bind component.
 fn issuer_mso_exposure(statement: &MdocCircuitStatement) -> FieldExposure {
-    FieldExposure::from_preimage_windows_multi(&[
-        (
-            field_id::MDOC_BIRTH_DATE_DIGEST,
-            statement.mso_birth_date_digest_offset,
-            32,
-        ),
-        (
-            field_id::MDOC_NATIONALITY_DIGEST,
-            statement.mso_nationality_digest_offset,
-            32,
-        ),
+    let mut windows: Vec<_> = statement
+        .attributes
+        .iter()
+        .enumerate()
+        .map(|(index, attribute)| {
+            (
+                MdocStatementAttribute::digest_field_id(index),
+                attribute.mso_digest_offset,
+                32,
+            )
+        })
+        .collect();
+    windows.extend([
         (
             field_id::MDOC_DEVICE_KEY_X,
             statement.mso_device_key_x_offset,
@@ -1034,16 +1205,21 @@ fn issuer_mso_exposure(statement: &MdocCircuitStatement) -> FieldExposure {
             statement.mso_valid_until_date_offset,
             10,
         ),
-        (
-            field_id::MDOC_BIRTH_DATE_DIGEST_ANCHOR,
-            statement.mso_birth_date_digest_anchor_offset,
-            statement.mso_birth_date_digest_anchor.len(),
-        ),
-        (
-            field_id::MDOC_NATIONALITY_DIGEST_ANCHOR,
-            statement.mso_nationality_digest_anchor_offset,
-            statement.mso_nationality_digest_anchor.len(),
-        ),
+    ]);
+    windows.extend(
+        statement
+            .attributes
+            .iter()
+            .enumerate()
+            .map(|(index, attribute)| {
+                (
+                    MdocStatementAttribute::digest_anchor_field_id(index),
+                    attribute.mso_digest_anchor_offset,
+                    attribute.mso_digest_anchor.len(),
+                )
+            }),
+    );
+    windows.extend([
         (
             field_id::MDOC_DEVICE_KEY_X_ANCHOR,
             statement.mso_device_key_x_anchor_offset,
@@ -1064,7 +1240,8 @@ fn issuer_mso_exposure(statement: &MdocCircuitStatement) -> FieldExposure {
             statement.mso_valid_until_anchor_offset,
             statement.mso_valid_until_anchor.len(),
         ),
-    ])
+    ]);
+    FieldExposure::from_preimage_windows_multi(&windows)
 }
 
 /// Build the six window-bind rows. On the prover the digest witness bytes are
@@ -1075,34 +1252,58 @@ fn mdoc_window_bind_rows_from(
     statement: &MdocCircuitStatement,
     issuer_sig_structure: Option<&[u8]>,
 ) -> Vec<MdocWindowBindRow> {
-    let digest_witnesses = issuer_sig_structure.map(|preimage| {
-        let birth = preimage
-            [statement.mso_birth_date_digest_offset..statement.mso_birth_date_digest_offset + 32]
-            .try_into()
-            .expect("birth digest window length");
-        let nat = preimage
-            [statement.mso_nationality_digest_offset..statement.mso_nationality_digest_offset + 32]
-            .try_into()
-            .expect("nationality digest window length");
-        (birth, nat)
-    });
-    let mut rows = mdoc_window_bind_rows(
-        b"birth_date",
-        b"nationality",
-        &statement.device_input.public_key.x.0,
-        &statement.device_input.public_key.y.0,
-        digest_witnesses,
-    );
+    let mut rows = Vec::new();
+    for (index, attribute) in statement.attributes.iter().enumerate() {
+        rows.push(MdocWindowBindRow::constant(
+            MdocStatementAttribute::element_field_id(index),
+            MdocFieldSource::AttributeItem(index),
+            attribute.element_identifier.as_bytes(),
+        ));
+        rows.push(MdocWindowBindRow::constant(
+            MdocStatementAttribute::element_anchor_field_id(index),
+            MdocFieldSource::AttributeItem(index),
+            &attribute.element_identifier_anchor,
+        ));
+        if let MdocDisclosureMode::ValueEquality(_) = &attribute.mode {
+            rows.push(MdocWindowBindRow::constant(
+                MdocStatementAttribute::value_field_id(index),
+                MdocFieldSource::AttributeItem(index),
+                &attribute.value,
+            ));
+            rows.push(MdocWindowBindRow::constant(
+                MdocStatementAttribute::value_head_field_id(index),
+                MdocFieldSource::AttributeItem(index),
+                &attribute.value_head,
+            ));
+        }
+        let digest = issuer_sig_structure
+            .map(|preimage| {
+                preimage[attribute.mso_digest_offset..attribute.mso_digest_offset + 32]
+                    .try_into()
+                    .expect("attribute digest window length")
+            })
+            .unwrap_or([0u8; 32]);
+        rows.push(MdocWindowBindRow::digest(
+            MdocStatementAttribute::digest_field_id(index),
+            index,
+            digest,
+        ));
+        rows.push(MdocWindowBindRow::constant(
+            MdocStatementAttribute::digest_anchor_field_id(index),
+            MdocFieldSource::IssuerMso,
+            &attribute.mso_digest_anchor,
+        ));
+    }
     rows.extend([
         MdocWindowBindRow::constant(
-            field_id::MDOC_BIRTH_DATE_DIGEST_ANCHOR,
+            field_id::MDOC_DEVICE_KEY_X,
             MdocFieldSource::IssuerMso,
-            &statement.mso_birth_date_digest_anchor,
+            &statement.device_input.public_key.x.0,
         ),
         MdocWindowBindRow::constant(
-            field_id::MDOC_NATIONALITY_DIGEST_ANCHOR,
+            field_id::MDOC_DEVICE_KEY_Y,
             MdocFieldSource::IssuerMso,
-            &statement.mso_nationality_digest_anchor,
+            &statement.device_input.public_key.y.0,
         ),
         MdocWindowBindRow::constant(
             field_id::MDOC_DEVICE_KEY_X_ANCHOR,
@@ -1167,6 +1368,66 @@ fn encode_value(value: Value) -> Vec<u8> {
     let mut out = Vec::new();
     ciborium::ser::into_writer(&value, &mut out).expect("CBOR serialization into Vec");
     out
+}
+
+fn cbor_value_head(value: &[u8]) -> Result<Vec<u8>, MdocError> {
+    if value.is_empty() {
+        return Err(MdocError::UnsupportedCircuitValue(
+            "attribute value CBOR head",
+        ));
+    }
+    match value[0] {
+        0xF4 | 0xF5 => Ok(value[..1].to_vec()),
+        0x60..=0x77 => Ok(value[..1].to_vec()),
+        0x78 => {
+            if value.len() < 2 {
+                return Err(MdocError::UnsupportedCircuitValue(
+                    "attribute value CBOR head",
+                ));
+            }
+            Ok(value[..2].to_vec())
+        }
+        0x79 => {
+            if value.len() < 3 {
+                return Err(MdocError::UnsupportedCircuitValue(
+                    "attribute value CBOR head",
+                ));
+            }
+            Ok(value[..3].to_vec())
+        }
+        0xD9 if value.get(1..3) == Some(&[0x03, 0xEC]) => {
+            let inner = value.get(3).ok_or(MdocError::UnsupportedCircuitValue(
+                "attribute value CBOR head",
+            ))?;
+            match inner {
+                0x60..=0x77 => Ok(value[..4].to_vec()),
+                0x78 => {
+                    if value.len() < 5 {
+                        return Err(MdocError::UnsupportedCircuitValue(
+                            "attribute value CBOR head",
+                        ));
+                    }
+                    Ok(value[..5].to_vec())
+                }
+                _ => Err(MdocError::UnsupportedCircuitValue(
+                    "attribute value CBOR head",
+                )),
+            }
+        }
+        _ => Err(MdocError::UnsupportedCircuitValue(
+            "attribute value CBOR head",
+        )),
+    }
+}
+
+fn cbor_text_value_head(text: &str) -> Result<Vec<u8>, MdocError> {
+    cbor_value_head(&encode_value(Value::Text(text.to_string())))
+}
+
+fn element_identifier_anchor_bytes(element_identifier: &str) -> Result<Vec<u8>, MdocError> {
+    let mut anchor = encode_value(Value::Text("elementIdentifier".to_string()));
+    anchor.extend_from_slice(&cbor_text_value_head(element_identifier)?);
+    Ok(anchor)
 }
 
 fn parse_cose_sign1(value: &Value) -> Result<CoseSign1, MdocError> {
@@ -1250,7 +1511,7 @@ pub fn device_authentication_sig_structure_hash(
     Ok(Sha256::digest(sig_structure(ES256_PROTECTED_HEADER, &payload)).into())
 }
 
-fn demo_mdoc_document(session_transcript: &[u8]) -> Vec<u8> {
+fn demo_mdoc_document(session_transcript: &[u8], include_extra_items: bool) -> Vec<u8> {
     let issuer_signing_key =
         SigningKey::from_bytes((&[7u8; 32]).into()).expect("demo issuer signing key");
     let device_signing_key =
@@ -1269,6 +1530,34 @@ fn demo_mdoc_document(session_transcript: &[u8]) -> Vec<u8> {
         demo_issuer_signed_item(9, "nationality", Value::Text("DE".to_string()), vec![9; 16]);
     let birth_digest: [u8; 32] = Sha256::digest(&birth_date_item).into();
     let nat_digest: [u8; 32] = Sha256::digest(&nationality_item).into();
+    let mut value_digest_entries = vec![
+        (Value::from(7), Value::Bytes(birth_digest.to_vec())),
+        (Value::from(9), Value::Bytes(nat_digest.to_vec())),
+    ];
+    let mut namespace_items = vec![
+        Value::Bytes(birth_date_item),
+        Value::Bytes(nationality_item),
+    ];
+    if include_extra_items {
+        let family_name_item = demo_issuer_signed_item(
+            11,
+            "family_name",
+            Value::Text("Mustermann".to_string()),
+            vec![11; 16],
+        );
+        let age_over_18_item =
+            demo_issuer_signed_item(13, "age_over_18", Value::Bool(true), vec![13; 16]);
+        let family_name_digest: [u8; 32] = Sha256::digest(&family_name_item).into();
+        let age_over_18_digest: [u8; 32] = Sha256::digest(&age_over_18_item).into();
+        value_digest_entries.extend([
+            (Value::from(11), Value::Bytes(family_name_digest.to_vec())),
+            (Value::from(13), Value::Bytes(age_over_18_digest.to_vec())),
+        ]);
+        namespace_items.extend([
+            Value::Bytes(family_name_item),
+            Value::Bytes(age_over_18_item),
+        ]);
+    }
 
     let mso = encode_value(Value::Map(vec![
         ("version".into(), MDOC_PROFILE_VERSION.into()),
@@ -1278,10 +1567,7 @@ fn demo_mdoc_document(session_transcript: &[u8]) -> Vec<u8> {
             "valueDigests".into(),
             Value::Map(vec![(
                 PID_NAMESPACE.into(),
-                Value::Map(vec![
-                    (Value::from(7), Value::Bytes(birth_digest.to_vec())),
-                    (Value::from(9), Value::Bytes(nat_digest.to_vec())),
-                ]),
+                Value::Map(value_digest_entries),
             )]),
         ),
         (
@@ -1317,13 +1603,7 @@ fn demo_mdoc_document(session_transcript: &[u8]) -> Vec<u8> {
             Value::Map(vec![
                 (
                     "nameSpaces".into(),
-                    Value::Map(vec![(
-                        PID_NAMESPACE.into(),
-                        Value::Array(vec![
-                            Value::Bytes(birth_date_item),
-                            Value::Bytes(nationality_item),
-                        ]),
-                    )]),
+                    Value::Map(vec![(PID_NAMESPACE.into(), Value::Array(namespace_items))]),
                 ),
                 ("issuerAuth".into(), issuer_auth),
             ]),
@@ -1906,6 +2186,9 @@ fn ecdsa_input(
 pub struct MdocCircuitStatement {
     pub issuer_input: EcdsaVerifyInput,
     pub device_input: EcdsaVerifyInput,
+    pub attributes: Vec<MdocStatementAttribute>,
+    pub age_attribute_index: Option<usize>,
+    pub nationality_attribute_index: Option<usize>,
     pub birth_date_binding: MdocBirthDateBinding,
     pub nationality_binding: MdocNationalityBinding,
     pub birth_date_value_offset: usize,
@@ -1951,25 +2234,51 @@ pub struct MdocCircuitStatement {
     pub policy: Policy,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MdocStatementAttribute {
+    pub element_identifier: String,
+    pub mode: MdocDisclosureMode,
+    pub element_identifier_offset: usize,
+    pub element_identifier_anchor_offset: usize,
+    pub element_identifier_anchor: Vec<u8>,
+    pub value_offset: usize,
+    pub value: Vec<u8>,
+    pub value_head: Vec<u8>,
+    pub digest_id: u32,
+    pub mso_digest_offset: usize,
+    pub mso_digest_anchor_offset: usize,
+    pub mso_digest_anchor: Vec<u8>,
+}
+
+impl MdocStatementAttribute {
+    fn element_field_id(index: usize) -> u32 {
+        MDOC_ATTRIBUTE_ELEMENT_ID_BASE + index as u32
+    }
+
+    fn value_field_id(index: usize) -> u32 {
+        MDOC_ATTRIBUTE_VALUE_BASE + index as u32
+    }
+
+    fn digest_field_id(index: usize) -> u32 {
+        MDOC_ATTRIBUTE_DIGEST_BASE + index as u32
+    }
+
+    fn digest_anchor_field_id(index: usize) -> u32 {
+        MDOC_ATTRIBUTE_DIGEST_ANCHOR_BASE + index as u32
+    }
+
+    fn value_head_field_id(index: usize) -> u32 {
+        MDOC_ATTRIBUTE_VALUE_HEAD_BASE + index as u32
+    }
+
+    fn element_anchor_field_id(index: usize) -> u32 {
+        MDOC_ATTRIBUTE_ELEMENT_ANCHOR_BASE + index as u32
+    }
+}
+
 impl MdocCircuitStatement {
     pub fn from_extracted(extracted: &ExtractedPidMdoc, policy: Policy) -> Result<Self, MdocError> {
         validate_requested_attributes(&extracted.attributes)?;
-        if extracted.doctype != PID_DOCTYPE {
-            return Err(MdocError::DoctypeMismatch);
-        }
-        if extracted.namespace != PID_NAMESPACE {
-            return Err(MdocError::NamespaceMissing);
-        }
-        ensure_value_window(
-            &extracted.birth_date_item,
-            extracted.birth_date_value_offset,
-            extracted.birth_date_binding.as_bytes(),
-        )?;
-        ensure_value_window(
-            &extracted.nationality_item,
-            extracted.nationality_value_offset,
-            extracted.nationality_binding.as_bytes(),
-        )?;
         let current_date = policy_date_tuple(&policy)?;
         if current_date < extracted.valid_from {
             return Err(MdocError::CredentialNotYetValid);
@@ -1978,14 +2287,6 @@ impl MdocCircuitStatement {
             return Err(MdocError::CredentialExpired);
         }
 
-        let birth_date_digest_id = *extracted
-            .digest_ids
-            .get("birth_date")
-            .ok_or_else(|| MdocError::ElementMissing("birth_date".to_string()))?;
-        let nationality_digest_id = *extracted
-            .digest_ids
-            .get("nationality")
-            .ok_or_else(|| MdocError::ElementMissing("nationality".to_string()))?;
         let mso = parse_mso(&extracted.mso, &extracted.namespace)?;
         if !is_supported_mdoc_profile_version(&mso.version) {
             return Err(MdocError::UnsupportedMsoVersion(mso.version));
@@ -1993,20 +2294,78 @@ impl MdocCircuitStatement {
         if mso.doc_type != extracted.doctype {
             return Err(MdocError::DoctypeMismatch);
         }
-        let birth_date_digest = *mso
-            .value_digests
-            .get(&birth_date_digest_id)
-            .ok_or_else(|| MdocError::ItemDigestMismatch {
-                element: "birth_date".to_string(),
-                digest_id: birth_date_digest_id,
+        let mut statement_attributes = Vec::with_capacity(extracted.extracted_attributes.len());
+        for attribute in &extracted.extracted_attributes {
+            let digest = *mso.value_digests.get(&attribute.digest_id).ok_or_else(|| {
+                MdocError::ItemDigestMismatch {
+                    element: attribute.request.element_identifier.clone(),
+                    digest_id: attribute.digest_id,
+                }
             })?;
-        let nationality_digest =
-            *mso.value_digests
-                .get(&nationality_digest_id)
-                .ok_or_else(|| MdocError::ItemDigestMismatch {
-                    element: "nationality".to_string(),
-                    digest_id: nationality_digest_id,
-                })?;
+            let mso_digest_offset = find_subslice(&extracted.issuer_sig_structure, &digest).ok_or(
+                MdocError::UnsupportedCircuitValue("attribute digest offset"),
+            )?;
+            let mso_digest_anchor = digest_anchor_bytes(attribute.digest_id);
+            let mso_digest_anchor_offset = anchor_before_offset(
+                &extracted.issuer_sig_structure,
+                mso_digest_offset,
+                &mso_digest_anchor,
+                "attribute digest anchor offset",
+            )?;
+            ensure_value_window_with_message(
+                &attribute.item,
+                attribute.element_identifier_offset,
+                attribute.request.element_identifier.as_bytes(),
+                "attribute elementIdentifier offset",
+            )?;
+            let element_identifier_anchor =
+                element_identifier_anchor_bytes(&attribute.request.element_identifier)?;
+            let element_identifier_anchor_offset = anchor_before_offset(
+                &attribute.item,
+                attribute.element_identifier_offset,
+                &element_identifier_anchor,
+                "attribute elementIdentifier anchor offset",
+            )?;
+            ensure_value_window_with_message(
+                &attribute.item,
+                attribute.value_offset,
+                &attribute.value,
+                "attribute value offset",
+            )?;
+            ensure_value_window_with_message(
+                &extracted.issuer_sig_structure,
+                mso_digest_offset,
+                &digest,
+                "attribute digest offset",
+            )?;
+            statement_attributes.push(MdocStatementAttribute {
+                element_identifier: attribute.request.element_identifier.clone(),
+                mode: attribute.request.mode.clone(),
+                element_identifier_offset: attribute.element_identifier_offset,
+                element_identifier_anchor_offset,
+                element_identifier_anchor,
+                value_offset: attribute.value_offset,
+                value: attribute.value.clone(),
+                value_head: if matches!(
+                    attribute.request.mode,
+                    MdocDisclosureMode::ValueEquality(_)
+                ) {
+                    cbor_value_head(&attribute.value)?
+                } else {
+                    Vec::new()
+                },
+                digest_id: attribute.digest_id,
+                mso_digest_offset,
+                mso_digest_anchor_offset,
+                mso_digest_anchor,
+            });
+        }
+        let age_attribute_index = statement_attributes
+            .iter()
+            .position(|attribute| matches!(attribute.mode, MdocDisclosureMode::AgeOver));
+        let nationality_attribute_index = statement_attributes
+            .iter()
+            .position(|attribute| matches!(attribute.mode, MdocDisclosureMode::Alpha2Set));
 
         // Phase D: locate the windows the in-circuit MSO bindings pin. The two
         // digests and the device key are no longer public inputs; they are
@@ -2014,22 +2373,52 @@ impl MdocCircuitStatement {
         // hint whose *content* the window-bind component pins, and the
         // surrounding bytes are covered by the issuer signature — so a
         // mispointed offset must still exhibit issuer-signed bytes.
-        let birth_date_element_offset = find_subslice(&extracted.birth_date_item, b"birth_date")
-            .ok_or(MdocError::UnsupportedCircuitValue(
-                "birth_date elementIdentifier offset",
-            ))?;
-        let nationality_element_offset = find_subslice(&extracted.nationality_item, b"nationality")
-            .ok_or(MdocError::UnsupportedCircuitValue(
-                "nationality elementIdentifier offset",
-            ))?;
-        let mso_birth_date_digest_offset =
-            find_subslice(&extracted.issuer_sig_structure, &birth_date_digest).ok_or(
-                MdocError::UnsupportedCircuitValue("birth_date digest offset"),
+        if age_attribute_index.is_some() {
+            ensure_value_window(
+                &extracted.birth_date_item,
+                extracted.birth_date_value_offset,
+                extracted.birth_date_binding.as_bytes(),
             )?;
-        let mso_nationality_digest_offset =
-            find_subslice(&extracted.issuer_sig_structure, &nationality_digest).ok_or(
-                MdocError::UnsupportedCircuitValue("nationality digest offset"),
+        }
+        if nationality_attribute_index.is_some() {
+            ensure_value_window(
+                &extracted.nationality_item,
+                extracted.nationality_value_offset,
+                extracted.nationality_binding.as_bytes(),
             )?;
+        }
+        let (
+            birth_date_element_offset,
+            mso_birth_date_digest_offset,
+            mso_birth_date_digest_anchor_offset,
+            mso_birth_date_digest_anchor,
+        ) = age_attribute_index
+            .map(|index| {
+                let attribute = &statement_attributes[index];
+                (
+                    attribute.element_identifier_offset,
+                    attribute.mso_digest_offset,
+                    attribute.mso_digest_anchor_offset,
+                    attribute.mso_digest_anchor.clone(),
+                )
+            })
+            .unwrap_or((0, 0, 0, Vec::new()));
+        let (
+            nationality_element_offset,
+            mso_nationality_digest_offset,
+            mso_nationality_digest_anchor_offset,
+            mso_nationality_digest_anchor,
+        ) = nationality_attribute_index
+            .map(|index| {
+                let attribute = &statement_attributes[index];
+                (
+                    attribute.element_identifier_offset,
+                    attribute.mso_digest_offset,
+                    attribute.mso_digest_anchor_offset,
+                    attribute.mso_digest_anchor.clone(),
+                )
+            })
+            .unwrap_or((0, 0, 0, Vec::new()));
         let mso_device_key_x_offset =
             find_subslice(&extracted.issuer_sig_structure, &extracted.device_key.x.0)
                 .ok_or(MdocError::UnsupportedCircuitValue("device key x offset"))?;
@@ -2052,20 +2441,6 @@ impl MdocCircuitStatement {
                 extracted.valid_until,
                 "validUntil date offset",
             )?;
-        let mso_birth_date_digest_anchor = digest_anchor_bytes(birth_date_digest_id);
-        let mso_birth_date_digest_anchor_offset = anchor_before_offset(
-            &extracted.issuer_sig_structure,
-            mso_birth_date_digest_offset,
-            &mso_birth_date_digest_anchor,
-            "birth_date digest anchor offset",
-        )?;
-        let mso_nationality_digest_anchor = digest_anchor_bytes(nationality_digest_id);
-        let mso_nationality_digest_anchor_offset = anchor_before_offset(
-            &extracted.issuer_sig_structure,
-            mso_nationality_digest_offset,
-            &mso_nationality_digest_anchor,
-            "nationality digest anchor offset",
-        )?;
         let mso_device_key_x_anchor = vec![0x21, 0x58, 0x20];
         let mso_device_key_x_anchor_offset = anchor_before_offset(
             &extracted.issuer_sig_structure,
@@ -2095,30 +2470,6 @@ impl MdocCircuitStatement {
             "validUntil anchor offset",
         )?;
         ensure_value_window_with_message(
-            &extracted.birth_date_item,
-            birth_date_element_offset,
-            b"birth_date",
-            "birth_date elementIdentifier offset",
-        )?;
-        ensure_value_window_with_message(
-            &extracted.nationality_item,
-            nationality_element_offset,
-            b"nationality",
-            "nationality elementIdentifier offset",
-        )?;
-        ensure_value_window_with_message(
-            &extracted.issuer_sig_structure,
-            mso_birth_date_digest_offset,
-            &birth_date_digest,
-            "birth_date digest offset",
-        )?;
-        ensure_value_window_with_message(
-            &extracted.issuer_sig_structure,
-            mso_nationality_digest_offset,
-            &nationality_digest,
-            "nationality digest offset",
-        )?;
-        ensure_value_window_with_message(
             &extracted.issuer_sig_structure,
             mso_device_key_x_offset,
             &extracted.device_key.x.0,
@@ -2146,6 +2497,9 @@ impl MdocCircuitStatement {
         Ok(Self {
             issuer_input: extracted.issuer_ecdsa_input.clone(),
             device_input: extracted.device_ecdsa_input.clone(),
+            attributes: statement_attributes,
+            age_attribute_index,
+            nationality_attribute_index,
             birth_date_binding: extracted.birth_date_binding,
             nationality_binding: extracted.nationality_binding,
             birth_date_value_offset: extracted.birth_date_value_offset,
@@ -2250,10 +2604,10 @@ pub struct MdocCircuitProof {
     device_bridge_interaction_claim: DigestBindInteractionClaim,
     mdoc_window_bind_interaction_claim: MdocWindowBindInteractionClaim,
     mdoc_validity_interaction_claim: MdocValidityInteractionClaim,
-    age_public: predicates::PublicInput,
-    age_claimed_sums: Vec<QM31>,
-    nat_public: predicates::NatPublicInput,
-    nat_claimed_sums: Vec<QM31>,
+    age_public: Option<predicates::PublicInput>,
+    age_claimed_sums: Option<Vec<QM31>>,
+    nat_public: Option<predicates::NatPublicInput>,
+    nat_claimed_sums: Option<Vec<QM31>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2629,7 +2983,11 @@ pub fn prove_mdoc_circuit(
     // `mdoc_sizing_waste`. Equal sizing is the correct, cheaper choice.
     let (issuer_sha_witness, issuer_sha_log) = sha_params(&extracted.issuer_sig_structure);
     let (device_sha_witness, device_sha_log) = sha_params(&extracted.device_sig_structure);
-    let attribute_items = [&extracted.birth_date_item, &extracted.nationality_item];
+    let attribute_items: Vec<_> = extracted
+        .extracted_attributes
+        .iter()
+        .map(|attribute| attribute.item.as_slice())
+        .collect();
     let attribute_sha_params: Vec<_> = attribute_items
         .iter()
         .map(|item| sha_params(item))
@@ -2655,10 +3013,9 @@ pub fn prove_mdoc_circuit(
     let device_scalar_z = SharedScalarZRelation::new();
 
     let issuer_exposure = issuer_mso_exposure(statement);
-    let attribute_exposures = vec![
-        birth_date_exposure(statement),
-        nationality_exposure(statement),
-    ];
+    let attribute_exposures: Vec<_> = (0..statement.attributes.len())
+        .map(|index| attribute_exposure(statement, index))
+        .collect();
 
     #[cfg(not(feature = "ec-coprocessor"))]
     let mut issuer_p256 = P256Prover::new(&issuer_draft)
@@ -2737,13 +3094,11 @@ pub fn prove_mdoc_circuit(
     #[cfg(feature = "ec-coprocessor")]
     let mut device_public_digest_bind =
         PublicDigestBind::new(statement.device_input.message_hash.0, device_digest.clone());
-    let mut mdoc_window_bind = MdocWindowBind::new(
+    let mut mdoc_window_bind = MdocWindowBind::new_for_attributes(
         mdoc_window_bind_rows_from(statement, Some(&extracted.issuer_sig_structure)),
         issuer_field.clone(),
-        attribute_fields[0].clone(),
-        attribute_fields[1].clone(),
-        attribute_digests[0].clone(),
-        attribute_digests[1].clone(),
+        attribute_fields.clone(),
+        attribute_digests.clone(),
     );
     let mut mdoc_validity = MdocValidityBind::new(
         statement.policy.current_date,
@@ -2769,17 +3124,31 @@ pub fn prove_mdoc_circuit(
     let nat_private = predicates::NatPrivateInput {
         nationalities: vec![statement.nationality_binding.code()],
     };
-    let age = AgeRangeCheck::new(PcsConfig::default())
-        .prover(&age_public, &age_dob)
-        .map_err(Error::AgePrepare)?;
-    let mut age = match statement.birth_date_binding {
-        MdocBirthDateBinding::Packed(_) => age.with_dob_binding(attribute_fields[0].clone()),
-        MdocBirthDateBinding::Text(_) => age.with_text_dob_binding(attribute_fields[0].clone()),
+    let mut age = if let Some(index) = statement.age_attribute_index {
+        let age = AgeRangeCheck::new(PcsConfig::default())
+            .prover(&age_public, &age_dob)
+            .map_err(Error::AgePrepare)?;
+        Some(match statement.birth_date_binding {
+            MdocBirthDateBinding::Packed(_) => {
+                age.with_dob_binding(attribute_fields[index].clone())
+            }
+            MdocBirthDateBinding::Text(_) => {
+                age.with_text_dob_binding(attribute_fields[index].clone())
+            }
+        })
+    } else {
+        None
     };
-    let mut nat = NationalityPredicate::new(PcsConfig::default())
-        .prover(&nat_public, &nat_private)
-        .map_err(Error::NatPrepare)?
-        .with_nat_binding(attribute_fields[1].clone());
+    let mut nat = if let Some(index) = statement.nationality_attribute_index {
+        Some(
+            NationalityPredicate::new(PcsConfig::default())
+                .prover(&nat_public, &nat_private)
+                .map_err(Error::NatPrepare)?
+                .with_nat_binding(attribute_fields[index].clone()),
+        )
+    } else {
+        None
+    };
 
     #[cfg(not(feature = "ec-coprocessor"))]
     let config = issuer_p256.pcs_config();
@@ -2809,8 +3178,12 @@ pub fn prove_mdoc_circuit(
         }
         modules.push(&mut mdoc_window_bind);
         modules.push(&mut mdoc_validity);
-        modules.push(&mut age);
-        modules.push(&mut nat);
+        if let Some(age) = age.as_mut() {
+            modules.push(age);
+        }
+        if let Some(nat) = nat.as_mut() {
+            modules.push(nat);
+        }
         #[cfg(feature = "ec-coprocessor")]
         modules.push(&mut coprocessor);
         air_core::prove(modules.as_mut_slice(), config)
@@ -2859,10 +3232,10 @@ pub fn prove_mdoc_circuit(
         device_bridge_interaction_claim: device_bridge.interaction_claim().clone(),
         mdoc_window_bind_interaction_claim: mdoc_window_bind.interaction_claim().clone(),
         mdoc_validity_interaction_claim: mdoc_validity.interaction_claim().clone(),
-        age_public,
-        age_claimed_sums: age.claimed_sums(),
-        nat_public,
-        nat_claimed_sums: nat.claimed_sums(),
+        age_public: age.as_ref().map(|_| age_public),
+        age_claimed_sums: age.as_ref().map(|age| age.claimed_sums()),
+        nat_public: nat.as_ref().map(|_| nat_public),
+        nat_claimed_sums: nat.as_ref().map(|nat| nat.claimed_sums()),
     })
 }
 
@@ -2882,17 +3255,27 @@ pub fn verify_mdoc_circuit(
     {
         return Err(Error::P256InstanceMismatch);
     }
-    if proof.age_public != statement.policy.age_public_input() {
+    if proof.age_public
+        != statement
+            .age_attribute_index
+            .map(|_| statement.policy.age_public_input())
+    {
         return Err(Error::AgePolicyMismatch);
     }
-    if proof.nat_public != nat_public_input_for(statement) {
+    if proof.nat_public
+        != statement
+            .nationality_attribute_index
+            .map(|_| nat_public_input_for(statement))
+    {
         return Err(Error::NatPolicyMismatch);
     }
 
     let issuer_digest = SharedDigestRelation::new();
     let device_digest = SharedDigestRelation::new();
     let attribute_count = proof.attribute_sha_interaction_claims.len();
-    if attribute_count != proof.attribute_sha_log_n_rows.len() || attribute_count != 2 {
+    if attribute_count != proof.attribute_sha_log_n_rows.len()
+        || attribute_count != statement.attributes.len()
+    {
         return Err(Error::Verify(
             "mdoc proof carries an unsupported attribute count".to_string(),
         ));
@@ -2954,10 +3337,9 @@ pub fn verify_mdoc_circuit(
     .with_shared_tables(sha_table_relations.clone())
     .with_digest_handle(device_digest.clone());
 
-    let attribute_exposures = vec![
-        birth_date_exposure(statement),
-        nationality_exposure(statement),
-    ];
+    let attribute_exposures: Vec<_> = (0..statement.attributes.len())
+        .map(|index| attribute_exposure(statement, index))
+        .collect();
     let mut attribute_sha = Vec::with_capacity(attribute_count);
     for index in 0..attribute_count {
         attribute_sha.push(
@@ -3001,13 +3383,11 @@ pub fn verify_mdoc_circuit(
         device_digest,
         proof.device_public_digest_bind_interaction_claim.clone(),
     );
-    let mut mdoc_window_bind = MdocWindowBind::verifier(
+    let mut mdoc_window_bind = MdocWindowBind::verifier_for_attributes(
         mdoc_window_bind_rows_from(statement, None),
         issuer_field.clone(),
-        attribute_fields[0].clone(),
-        attribute_fields[1].clone(),
-        attribute_digests[0].clone(),
-        attribute_digests[1].clone(),
+        attribute_fields.clone(),
+        attribute_digests.clone(),
         proof.mdoc_window_bind_interaction_claim.clone(),
     );
     let mut mdoc_validity = MdocValidityBind::verifier(
@@ -3016,17 +3396,41 @@ pub fn verify_mdoc_circuit(
         issuer_field,
         proof.mdoc_validity_interaction_claim.clone(),
     );
-    let age = AgeRangeCheck::new(PcsConfig::default())
-        .verifier(&proof.age_public, &proof.age_claimed_sums)
-        .map_err(Error::AgePrepare)?;
-    let mut age = match statement.birth_date_binding {
-        MdocBirthDateBinding::Packed(_) => age.with_dob_binding(attribute_fields[0].clone()),
-        MdocBirthDateBinding::Text(_) => age.with_text_dob_binding(attribute_fields[0].clone()),
+    let mut age = if let Some(index) = statement.age_attribute_index {
+        let public = proof.age_public.as_ref().ok_or(Error::AgePolicyMismatch)?;
+        let claimed_sums = proof
+            .age_claimed_sums
+            .as_ref()
+            .ok_or(Error::AgePolicyMismatch)?;
+        let age = AgeRangeCheck::new(PcsConfig::default())
+            .verifier(public, claimed_sums)
+            .map_err(Error::AgePrepare)?;
+        Some(match statement.birth_date_binding {
+            MdocBirthDateBinding::Packed(_) => {
+                age.with_dob_binding(attribute_fields[index].clone())
+            }
+            MdocBirthDateBinding::Text(_) => {
+                age.with_text_dob_binding(attribute_fields[index].clone())
+            }
+        })
+    } else {
+        None
     };
-    let mut nat = NationalityPredicate::new(PcsConfig::default())
-        .verifier(&proof.nat_public, &proof.nat_claimed_sums)
-        .map_err(Error::NatPrepare)?
-        .with_nat_binding(attribute_fields[1].clone());
+    let mut nat = if let Some(index) = statement.nationality_attribute_index {
+        let public = proof.nat_public.as_ref().ok_or(Error::NatPolicyMismatch)?;
+        let claimed_sums = proof
+            .nat_claimed_sums
+            .as_ref()
+            .ok_or(Error::NatPolicyMismatch)?;
+        Some(
+            NationalityPredicate::new(PcsConfig::default())
+                .verifier(public, claimed_sums)
+                .map_err(Error::NatPrepare)?
+                .with_nat_binding(attribute_fields[index].clone()),
+        )
+    } else {
+        None
+    };
     #[cfg(feature = "ec-coprocessor")]
     let mut coprocessor = MdocCoprocessorBindingVerifier {
         issuer_input: statement.issuer_input.clone(),
@@ -3060,8 +3464,12 @@ pub fn verify_mdoc_circuit(
     }
     modules.push(&mut mdoc_window_bind);
     modules.push(&mut mdoc_validity);
-    modules.push(&mut age);
-    modules.push(&mut nat);
+    if let Some(age) = age.as_mut() {
+        modules.push(age);
+    }
+    if let Some(nat) = nat.as_mut() {
+        modules.push(nat);
+    }
     #[cfg(feature = "ec-coprocessor")]
     modules.push(&mut coprocessor);
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

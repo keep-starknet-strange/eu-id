@@ -43,6 +43,14 @@ struct MdocFixture {
 }
 
 #[derive(Clone)]
+struct ExtraItem {
+    digest_id: u64,
+    element: String,
+    value: Value,
+    random: Vec<u8>,
+}
+
+#[derive(Clone)]
 struct FixtureOptions {
     birth_item_digest_id: u64,
     nationality_item_digest_id: u64,
@@ -51,6 +59,7 @@ struct FixtureOptions {
     birth_digest_override: Option<[u8; 32]>,
     birth_random: Vec<u8>,
     nationality_random: Vec<u8>,
+    extra_items: Vec<ExtraItem>,
     tag24_bstr: bool,
     canonical_item_order: bool,
     value_last: bool,
@@ -58,6 +67,8 @@ struct FixtureOptions {
     issuer_unprotected: Option<Value>,
     device_unprotected: Value,
     extra_device_key_field: bool,
+    doc_doctype: String,
+    namespace: String,
     mso_version: String,
     mso_doctype: String,
     validity_info: Option<Value>,
@@ -73,6 +84,7 @@ impl Default for FixtureOptions {
             birth_digest_override: None,
             birth_random: vec![7; 16],
             nationality_random: vec![9; 16],
+            extra_items: Vec::new(),
             tag24_bstr: true,
             canonical_item_order: true,
             value_last: false,
@@ -80,6 +92,8 @@ impl Default for FixtureOptions {
             issuer_unprotected: None,
             device_unprotected: map(Vec::new()),
             extra_device_key_field: false,
+            doc_doctype: DOCTYPE.to_string(),
+            namespace: NAMESPACE.to_string(),
             mso_version: "2.0".to_string(),
             mso_doctype: DOCTYPE.to_string(),
             validity_info: Some(validity_info(
@@ -576,11 +590,44 @@ fn fixture_with_options(
         options.canonical_item_order,
         options.value_last,
     );
+    let extra_items: Vec<_> = options
+        .extra_items
+        .iter()
+        .map(|item| {
+            let bytes = issuer_signed_item(
+                item.digest_id,
+                &item.element,
+                item.value.clone(),
+                item.random.clone(),
+                options.tag24_bstr,
+                options.canonical_item_order,
+                options.value_last,
+            );
+            let digest: [u8; 32] = Sha256::digest(&bytes).into();
+            (item.digest_id, bytes, digest)
+        })
+        .collect();
     let mut birth_digest: [u8; 32] = Sha256::digest(&birth_date_item).into();
     if let Some(override_digest) = options.birth_digest_override {
         birth_digest = override_digest;
     }
     let nat_digest: [u8; 32] = Sha256::digest(&nationality_item).into();
+
+    let mut value_digest_entries = vec![
+        (
+            Value::from(options.birth_mso_digest_id),
+            Value::Bytes(birth_digest.to_vec()),
+        ),
+        (
+            Value::from(options.nationality_mso_digest_id),
+            Value::Bytes(nat_digest.to_vec()),
+        ),
+    ];
+    value_digest_entries.extend(
+        extra_items
+            .iter()
+            .map(|(digest_id, _, digest)| (Value::from(*digest_id), Value::Bytes(digest.to_vec()))),
+    );
 
     let mut mso_entries = vec![
         ("version".into(), options.mso_version.into()),
@@ -589,17 +636,8 @@ fn fixture_with_options(
         (
             "valueDigests".into(),
             map(vec![(
-                NAMESPACE.into(),
-                map(vec![
-                    (
-                        Value::from(options.birth_mso_digest_id),
-                        Value::Bytes(birth_digest.to_vec()),
-                    ),
-                    (
-                        Value::from(options.nationality_mso_digest_id),
-                        Value::Bytes(nat_digest.to_vec()),
-                    ),
-                ]),
+                options.namespace.clone().into(),
+                map(value_digest_entries),
             )]),
         ),
         (
@@ -621,8 +659,8 @@ fn fixture_with_options(
         issuer_unprotected,
         &mso,
     );
-    let device_auth_payload =
-        device_authentication_bytes(session_transcript, DOCTYPE).expect("device auth bytes");
+    let device_auth_payload = device_authentication_bytes(session_transcript, &options.doc_doctype)
+        .expect("device auth bytes");
     let (device_signature_cose, device_sig_structure, device_signature) = cose_sign1(
         &device_signing_key,
         &options.protected,
@@ -630,19 +668,26 @@ fn fixture_with_options(
         &device_auth_payload,
     );
 
+    let mut namespace_items = vec![
+        Value::Bytes(birth_date_item.clone()),
+        Value::Bytes(nationality_item.clone()),
+    ];
+    namespace_items.extend(
+        extra_items
+            .iter()
+            .map(|(_, bytes, _)| Value::Bytes(bytes.clone())),
+    );
+
     let doc = cbor(map(vec![
-        ("docType".into(), DOCTYPE.into()),
+        ("docType".into(), options.doc_doctype.clone().into()),
         (
             "issuerSigned".into(),
             map(vec![
                 (
                     "nameSpaces".into(),
                     map(vec![(
-                        NAMESPACE.into(),
-                        Value::Array(vec![
-                            Value::Bytes(birth_date_item.clone()),
-                            Value::Bytes(nationality_item.clone()),
-                        ]),
+                        options.namespace.into(),
+                        Value::Array(namespace_items),
                     )]),
                 ),
                 ("issuerAuth".into(), issuer_auth),
@@ -1352,6 +1397,332 @@ fn rejects_oversized_value_equality_window() {
             len: 33
         }
     );
+}
+
+#[test]
+fn value_equality_n1_statement_builds_for_bool() {
+    let session_transcript = test_session_transcript();
+    let fixture = fixture_with_options(
+        &session_transcript,
+        "1990-07-15".into(),
+        "DE".into(),
+        FixtureOptions {
+            extra_items: vec![ExtraItem {
+                digest_id: 11,
+                element: "age_over_18".to_string(),
+                value: Value::Bool(true),
+                random: vec![11; 16],
+            }],
+            ..FixtureOptions::default()
+        },
+    );
+    let mut request = request(session_transcript);
+    request.attributes = vec![MdocRequestedAttribute {
+        element_identifier: "age_over_18".to_string(),
+        mode: MdocDisclosureMode::ValueEquality(cbor(Value::Bool(true))),
+    }];
+
+    let extracted = extract_pid_mdoc(&fixture.doc, &request).expect("N=1 extracts");
+    let statement = MdocCircuitStatement::from_extracted(&extracted, policy_on(2026, 7, 3))
+        .expect("N=1 builds");
+
+    assert_eq!(statement.attributes.len(), 1);
+    assert!(statement.age_attribute_index.is_none());
+    assert!(statement.nationality_attribute_index.is_none());
+    assert_eq!(statement.attributes[0].value, cbor(Value::Bool(true)));
+    assert_eq!(statement.attributes[0].value_head, cbor(Value::Bool(true)));
+}
+
+#[test]
+fn mixed_n3_statement_builds_with_value_equality() {
+    let session_transcript = test_session_transcript();
+    let fixture = fixture_with_options(
+        &session_transcript,
+        "1990-07-15".into(),
+        "DE".into(),
+        FixtureOptions {
+            extra_items: vec![ExtraItem {
+                digest_id: 11,
+                element: "family_name".to_string(),
+                value: "Mustermann".into(),
+                random: vec![11; 16],
+            }],
+            ..FixtureOptions::default()
+        },
+    );
+    let mut request = request(session_transcript);
+    request.attributes.push(MdocRequestedAttribute {
+        element_identifier: "family_name".to_string(),
+        mode: MdocDisclosureMode::ValueEquality(cbor("Mustermann".into())),
+    });
+
+    let extracted = extract_pid_mdoc(&fixture.doc, &request).expect("N=3 extracts");
+    let statement = MdocCircuitStatement::from_extracted(&extracted, policy_on(2026, 7, 3))
+        .expect("N=3 builds");
+
+    assert_eq!(statement.attributes.len(), 3);
+    assert_eq!(statement.age_attribute_index, Some(0));
+    assert_eq!(statement.nationality_attribute_index, Some(1));
+    assert_eq!(statement.attributes[2].value, cbor("Mustermann".into()));
+    assert_eq!(statement.attributes[2].value_head, vec![0x6A]);
+}
+
+#[test]
+fn mixed_n4_statement_builds_with_value_equality_remainder() {
+    let session_transcript = test_session_transcript();
+    let fixture = fixture_with_options(
+        &session_transcript,
+        "1990-07-15".into(),
+        "DE".into(),
+        FixtureOptions {
+            extra_items: vec![
+                ExtraItem {
+                    digest_id: 11,
+                    element: "family_name".to_string(),
+                    value: "Mustermann".into(),
+                    random: vec![11; 16],
+                },
+                ExtraItem {
+                    digest_id: 13,
+                    element: "age_over_18".to_string(),
+                    value: Value::Bool(true),
+                    random: vec![13; 16],
+                },
+            ],
+            ..FixtureOptions::default()
+        },
+    );
+    let mut request = request(session_transcript);
+    request.attributes.extend([
+        MdocRequestedAttribute {
+            element_identifier: "family_name".to_string(),
+            mode: MdocDisclosureMode::ValueEquality(cbor("Mustermann".into())),
+        },
+        MdocRequestedAttribute {
+            element_identifier: "age_over_18".to_string(),
+            mode: MdocDisclosureMode::ValueEquality(cbor(Value::Bool(true))),
+        },
+    ]);
+
+    let extracted = extract_pid_mdoc(&fixture.doc, &request).expect("N=4 extracts");
+    let statement = MdocCircuitStatement::from_extracted(&extracted, policy_on(2026, 7, 3))
+        .expect("N=4 builds");
+
+    assert_eq!(statement.attributes.len(), 4);
+    assert_eq!(statement.age_attribute_index, Some(0));
+    assert_eq!(statement.nationality_attribute_index, Some(1));
+    assert_eq!(statement.attributes[2].value_head, vec![0x6A]);
+    assert_eq!(statement.attributes[3].value_head, vec![0xF5]);
+}
+
+#[test]
+fn value_equality_statement_uses_request_profile() {
+    let session_transcript = test_session_transcript();
+    let doctype = "org.iso.18013.5.1.mDL".to_string();
+    let namespace = "org.iso.18013.5.1".to_string();
+    let fixture = fixture_with_options(
+        &session_transcript,
+        "1990-07-15".into(),
+        "DE".into(),
+        FixtureOptions {
+            doc_doctype: doctype.clone(),
+            namespace: namespace.clone(),
+            mso_doctype: doctype.clone(),
+            extra_items: vec![ExtraItem {
+                digest_id: 11,
+                element: "family_name".to_string(),
+                value: "Mustermann".into(),
+                random: vec![11; 16],
+            }],
+            ..FixtureOptions::default()
+        },
+    );
+    let mut request = request(session_transcript);
+    request.doctype = doctype;
+    request.namespace = namespace;
+    request.attributes = vec![MdocRequestedAttribute {
+        element_identifier: "family_name".to_string(),
+        mode: MdocDisclosureMode::ValueEquality(cbor("Mustermann".into())),
+    }];
+
+    let extracted = extract_pid_mdoc(&fixture.doc, &request).expect("custom profile extracts");
+    let statement = MdocCircuitStatement::from_extracted(&extracted, policy_on(2026, 7, 3))
+        .expect("custom profile statement builds");
+
+    assert_eq!(statement.attributes.len(), 1);
+    assert!(statement.age_attribute_index.is_none());
+    assert!(statement.nationality_attribute_index.is_none());
+    assert_eq!(statement.attributes[0].element_identifier, "family_name");
+}
+
+#[test]
+fn wrong_value_equality_rejects() {
+    let session_transcript = test_session_transcript();
+    let fixture = fixture_with_options(
+        &session_transcript,
+        "1990-07-15".into(),
+        "DE".into(),
+        FixtureOptions {
+            extra_items: vec![ExtraItem {
+                digest_id: 11,
+                element: "family_name".to_string(),
+                value: "Mustermann".into(),
+                random: vec![11; 16],
+            }],
+            ..FixtureOptions::default()
+        },
+    );
+    let mut request = request(session_transcript);
+    request.attributes = vec![MdocRequestedAttribute {
+        element_identifier: "family_name".to_string(),
+        mode: MdocDisclosureMode::ValueEquality(cbor("Erika".into())),
+    }];
+
+    let err = extract_pid_mdoc(&fixture.doc, &request).expect_err("wrong value rejects");
+
+    assert_eq!(
+        err,
+        MdocError::ValueEqualityMismatch {
+            element: "family_name".to_string()
+        }
+    );
+}
+
+#[test]
+fn truncated_value_equality_rejects() {
+    let session_transcript = test_session_transcript();
+    let fixture = fixture_with_options(
+        &session_transcript,
+        "1990-07-15".into(),
+        "DE".into(),
+        FixtureOptions {
+            extra_items: vec![ExtraItem {
+                digest_id: 11,
+                element: "family_name".to_string(),
+                value: "Mustermann".into(),
+                random: vec![11; 16],
+            }],
+            ..FixtureOptions::default()
+        },
+    );
+    let mut request = request(session_transcript);
+    request.attributes = vec![MdocRequestedAttribute {
+        element_identifier: "family_name".to_string(),
+        mode: MdocDisclosureMode::ValueEquality(vec![0x6A, b'M', b'u']),
+    }];
+
+    let err = extract_pid_mdoc(&fixture.doc, &request).expect_err("truncated value rejects");
+
+    assert_eq!(
+        err,
+        MdocError::ValueEqualityMismatch {
+            element: "family_name".to_string()
+        }
+    );
+}
+
+#[test]
+#[ignore = "slow: proves N=1 value-equality mdoc profile"]
+fn value_equality_n1_proves_and_verifies() {
+    let session_transcript = test_session_transcript();
+    let fixture = fixture_with_options(
+        &session_transcript,
+        "1990-07-15".into(),
+        "DE".into(),
+        FixtureOptions {
+            extra_items: vec![ExtraItem {
+                digest_id: 11,
+                element: "age_over_18".to_string(),
+                value: Value::Bool(true),
+                random: vec![11; 16],
+            }],
+            ..FixtureOptions::default()
+        },
+    );
+    let mut request = request(session_transcript);
+    request.attributes = vec![MdocRequestedAttribute {
+        element_identifier: "age_over_18".to_string(),
+        mode: MdocDisclosureMode::ValueEquality(cbor(Value::Bool(true))),
+    }];
+    let extracted = extract_pid_mdoc(&fixture.doc, &request).expect("N=1 extracts");
+    let statement = MdocCircuitStatement::from_extracted(&extracted, policy_on(2026, 7, 3))
+        .expect("N=1 builds");
+
+    let proof = prove_mdoc_circuit(&extracted, &statement).expect("N=1 proves");
+
+    verify_mdoc_circuit(&proof, &statement).expect("N=1 verifies");
+}
+
+#[test]
+#[ignore = "slow: proves rejection for ValueEquality elementIdentifier anchor tamper"]
+fn value_equality_element_identifier_anchor_offset_rejects_in_proof() {
+    let session_transcript = test_session_transcript();
+    let fixture = fixture_with_options(
+        &session_transcript,
+        "1990-07-15".into(),
+        "DE".into(),
+        FixtureOptions {
+            extra_items: vec![ExtraItem {
+                digest_id: 11,
+                element: "age_over_18".to_string(),
+                value: Value::Bool(true),
+                random: vec![11; 16],
+            }],
+            ..FixtureOptions::default()
+        },
+    );
+    let mut request = request(session_transcript);
+    request.attributes = vec![MdocRequestedAttribute {
+        element_identifier: "age_over_18".to_string(),
+        mode: MdocDisclosureMode::ValueEquality(cbor(Value::Bool(true))),
+    }];
+    let extracted = extract_pid_mdoc(&fixture.doc, &request).expect("N=1 extracts");
+    let mut statement = MdocCircuitStatement::from_extracted(&extracted, policy_on(2026, 7, 3))
+        .expect("N=1 builds");
+    statement.attributes[0].element_identifier_anchor_offset += 1;
+
+    match prove_mdoc_circuit(&extracted, &statement) {
+        Err(eu_id_prover::Error::Prove(_)) => {}
+        Err(other) => panic!("expected proof rejection, got {other:?}"),
+        Ok(proof) => {
+            assert!(
+                verify_mdoc_circuit(&proof, &statement).is_err(),
+                "mispointed ValueEquality elementIdentifier anchor verified unexpectedly"
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "slow: proves N=3 mixed mdoc profile"]
+fn mixed_n3_proves_and_verifies() {
+    let session_transcript = test_session_transcript();
+    let fixture = fixture_with_options(
+        &session_transcript,
+        "1990-07-15".into(),
+        "DE".into(),
+        FixtureOptions {
+            extra_items: vec![ExtraItem {
+                digest_id: 11,
+                element: "family_name".to_string(),
+                value: "Mustermann".into(),
+                random: vec![11; 16],
+            }],
+            ..FixtureOptions::default()
+        },
+    );
+    let mut request = request(session_transcript);
+    request.attributes.push(MdocRequestedAttribute {
+        element_identifier: "family_name".to_string(),
+        mode: MdocDisclosureMode::ValueEquality(cbor("Mustermann".into())),
+    });
+    let extracted = extract_pid_mdoc(&fixture.doc, &request).expect("N=3 extracts");
+    let statement = MdocCircuitStatement::from_extracted(&extracted, policy_on(2026, 7, 3))
+        .expect("N=3 builds");
+
+    let proof = prove_mdoc_circuit(&extracted, &statement).expect("N=3 proves");
+
+    verify_mdoc_circuit(&proof, &statement).expect("N=3 verifies");
 }
 
 #[test]
