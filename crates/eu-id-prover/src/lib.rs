@@ -207,11 +207,13 @@ pub mod ec_coprocessor {
         ecdsa_statement_transcript_segments, generate_witness, implemented_circuit_family_labels,
         implemented_circuit_gate_count, implemented_circuit_transcript_shapes,
         prove_implemented_circuit_bundle, prove_implemented_circuit_bundle_batch,
-        prove_implemented_circuit_proofs, verify_implemented_circuit_bundle,
-        verify_implemented_circuit_bundle_batch, verify_implemented_circuit_proofs,
+        prove_implemented_circuit_bundle_batch_with_projection, prove_implemented_circuit_proofs,
+        verify_implemented_circuit_bundle, verify_implemented_circuit_bundle_batch,
+        verify_implemented_circuit_bundle_batch_with_projection, verify_implemented_circuit_proofs,
         verify_implemented_circuits, verify_witness, CircuitTranscriptShape,
-        EcdsaInput as S4EcdsaInput, ImplementedCircuitBundle, ImplementedCircuitProofError,
-        ImplementedCircuitProofs, Witness, WitnessError,
+        EcdsaInput as S4EcdsaInput, EcdsaPublicProjection as S4EcdsaPublicProjection,
+        ImplementedCircuitBundle, ImplementedCircuitProofError, ImplementedCircuitProofs, Witness,
+        WitnessError,
     };
     use eu_id_ec_coprocessor::sumcheck::InputClaims;
     use eu_id_ec_coprocessor::{CircuitError, TranscriptSeed};
@@ -227,6 +229,18 @@ pub mod ec_coprocessor {
             qx: input.public_key.x.0,
             qy: input.public_key.y.0,
         }
+    }
+
+    pub fn full_projection_from_stwo(input: &EcdsaVerifyInput) -> S4EcdsaPublicProjection {
+        S4EcdsaPublicProjection::full(&input_from_stwo(input))
+    }
+
+    pub fn issuer_key_projection_from_stwo(input: &EcdsaVerifyInput) -> S4EcdsaPublicProjection {
+        S4EcdsaPublicProjection::issuer_key_only(input.public_key.x.0, input.public_key.y.0)
+    }
+
+    pub fn message_hash_projection_from_stwo(input: &EcdsaVerifyInput) -> S4EcdsaPublicProjection {
+        S4EcdsaPublicProjection::message_hash_only(input.message_hash.0)
     }
 
     pub fn generate_witness_from_stwo(input: &EcdsaVerifyInput) -> Result<Witness, WitnessError> {
@@ -289,6 +303,12 @@ pub mod ec_coprocessor {
         ecdsa_statement_transcript_segments(&input_from_stwo(input))
     }
 
+    pub fn public_projection_transcript_segments(
+        projection: &S4EcdsaPublicProjection,
+    ) -> Vec<Vec<u8>> {
+        eu_id_ec_coprocessor::ecdsa::ecdsa_public_projection_transcript_segments(projection)
+    }
+
     pub fn prove_implemented_circuit_bundle_from_stwo(
         input: &EcdsaVerifyInput,
         witness: &Witness,
@@ -306,6 +326,21 @@ pub mod ec_coprocessor {
         prove_implemented_circuit_bundle_batch(&inputs, witnesses, transcript_seed)
     }
 
+    pub fn prove_implemented_circuit_bundle_batch_with_projection_from_stwo(
+        inputs: &[EcdsaVerifyInput],
+        projections: &[S4EcdsaPublicProjection],
+        witnesses: &[Witness],
+        transcript_seed: TranscriptSeed,
+    ) -> Result<ImplementedCircuitBundle, ImplementedCircuitProofError> {
+        let inputs = inputs.iter().map(input_from_stwo).collect::<Vec<_>>();
+        prove_implemented_circuit_bundle_batch_with_projection(
+            &inputs,
+            projections,
+            witnesses,
+            transcript_seed,
+        )
+    }
+
     pub fn verify_implemented_circuit_bundle_from_stwo(
         input: &EcdsaVerifyInput,
         bundle: &ImplementedCircuitBundle,
@@ -321,6 +356,18 @@ pub mod ec_coprocessor {
     ) -> Result<Vec<Vec<InputClaims>>, ImplementedCircuitProofError> {
         let inputs = inputs.iter().map(input_from_stwo).collect::<Vec<_>>();
         verify_implemented_circuit_bundle_batch(&inputs, bundle, transcript_seed)
+    }
+
+    pub fn verify_implemented_circuit_bundle_batch_with_projection_from_stwo(
+        projections: &[S4EcdsaPublicProjection],
+        bundle: &ImplementedCircuitBundle,
+        transcript_seed: TranscriptSeed,
+    ) -> Result<Vec<Vec<InputClaims>>, ImplementedCircuitProofError> {
+        verify_implemented_circuit_bundle_batch_with_projection(
+            projections,
+            bundle,
+            transcript_seed,
+        )
     }
 
     pub fn verify_implemented_circuit_bundle_from_public_instance(
@@ -689,6 +736,36 @@ fn mix_coprocessor_tagged_statements(
         for segment in ec_coprocessor::statement_transcript_segments_from_stwo(input)
             .map_err(|err| format!("{err:?}"))?
         {
+            mix_channel_bytes(channel, &segment);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "ec-coprocessor")]
+fn mix_coprocessor_tagged_projections(
+    channel: &mut air_core::Ch,
+    tagged_projections: &[(&[u8], &eu_id_ec_coprocessor::ecdsa::EcdsaPublicProjection)],
+) -> Result<(), String> {
+    mix_channel_bytes(channel, b"eu-id-ec-coproc-v1");
+    mix_channel_bytes(channel, b"s4-ecdsa-circuit-shape-v1");
+    let shapes = ec_coprocessor::implemented_circuit_transcript_shapes_from_stwo()
+        .map_err(|err| format!("{err:?}"))?;
+    channel.mix_u64(shapes.len() as u64);
+    for shape in shapes {
+        mix_channel_bytes(channel, shape.label);
+        channel.mix_u64(shape.layers.len() as u64);
+        for (out_log_size, next_log_size) in shape.layers {
+            channel.mix_u64(out_log_size as u64);
+            channel.mix_u64(next_log_size as u64);
+        }
+    }
+
+    mix_channel_bytes(channel, b"eu-id-ec-coproc-public-projections-v1");
+    channel.mix_u64(tagged_projections.len() as u64);
+    for (tag, projection) in tagged_projections {
+        mix_channel_bytes(channel, tag);
+        for segment in ec_coprocessor::public_projection_transcript_segments(projection) {
             mix_channel_bytes(channel, &segment);
         }
     }

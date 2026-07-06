@@ -8,10 +8,11 @@ use eu_id_ec_coprocessor::ecdsa::{
     c1_input_limbs_input, c2_canonicality_input, c3_c5_scalar_setup_input, c6_scalar_bits_input,
     c9_c10_accumulator_on_curve_input, generate_witness, implemented_circuit_family_labels,
     implemented_circuit_gate_count, layout_range, prove_implemented_circuit_bundle,
+    prove_implemented_circuit_bundle_batch_with_projection,
     prove_implemented_circuit_bundle_profiled, prove_implemented_circuit_proofs,
-    verify_implemented_circuit_bundle, verify_implemented_circuit_proofs,
-    verify_implemented_circuits, verify_witness, EcdsaInput, ImplementedCircuitBundleEntry,
-    LayoutSlot, WitnessError,
+    verify_implemented_circuit_bundle, verify_implemented_circuit_bundle_batch_with_projection,
+    verify_implemented_circuit_proofs, verify_implemented_circuits, verify_witness, EcdsaInput,
+    EcdsaPublicProjection, ImplementedCircuitBundleEntry, LayoutSlot, WitnessError,
 };
 use eu_id_ec_coprocessor::ligero::{commit_witness, v2_ligero_params, LigeroParams};
 use eu_id_ec_coprocessor::sumcheck::{circuit_otp_pad_values, prove_circuit};
@@ -866,6 +867,68 @@ fn implemented_circuit_bundle_rejects_wrong_caller_input() {
     wrong_input.r[31] ^= 1;
 
     assert!(verify_implemented_circuit_bundle(&wrong_input, &bundle, TEST_SEED).is_err());
+}
+
+#[test]
+#[ignore = "release gate: full P4b public projection bundle proof"]
+fn implemented_circuit_bundle_accepts_p4b_public_projection() {
+    let issuer = signed_input();
+    let device = alternate_signed_input();
+    let witnesses = [
+        generate_witness(&issuer).unwrap(),
+        generate_witness(&device).unwrap(),
+    ];
+    let issuer_public = EcdsaPublicProjection::issuer_key_only(issuer.qx, issuer.qy);
+    let device_public = EcdsaPublicProjection::message_hash_only(device.z);
+    let projections = [issuer_public, device_public];
+    let bundle = prove_implemented_circuit_bundle_batch_with_projection(
+        &[issuer, device],
+        &projections,
+        &witnesses,
+        TEST_SEED,
+    )
+    .unwrap();
+
+    verify_implemented_circuit_bundle_batch_with_projection(&projections, &bundle, TEST_SEED)
+        .unwrap();
+}
+
+#[test]
+#[ignore = "release gate: full P4b public projection bundle proof"]
+fn implemented_circuit_bundle_rejects_wrong_p4b_public_projection() {
+    let issuer = signed_input();
+    let device = alternate_signed_input();
+    let witnesses = [
+        generate_witness(&issuer).unwrap(),
+        generate_witness(&device).unwrap(),
+    ];
+    let issuer_public = EcdsaPublicProjection::issuer_key_only(issuer.qx, issuer.qy);
+    let device_public = EcdsaPublicProjection::message_hash_only(device.z);
+    let bundle = prove_implemented_circuit_bundle_batch_with_projection(
+        &[issuer, device],
+        &[issuer_public, device_public],
+        &witnesses,
+        TEST_SEED,
+    )
+    .unwrap();
+
+    let mut wrong_issuer_q = issuer_public;
+    wrong_issuer_q.qx.as_mut().unwrap()[31] ^= 1;
+    assert!(verify_implemented_circuit_bundle_batch_with_projection(
+        &[wrong_issuer_q, device_public],
+        &bundle,
+        TEST_SEED,
+    )
+    .is_err());
+
+    let mut wrong_device_z = device_public;
+    wrong_device_z.z.as_mut().unwrap()[31] ^= 1;
+    assert!(verify_implemented_circuit_bundle_batch_with_projection(
+        &[issuer_public, wrong_device_z],
+        &bundle,
+        TEST_SEED,
+    )
+    .is_err());
 }
 
 fn c2_bundle_entry(input: &EcdsaInput) -> ImplementedCircuitBundleEntry {
