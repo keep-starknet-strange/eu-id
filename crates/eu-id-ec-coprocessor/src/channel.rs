@@ -1,5 +1,6 @@
 use blake2::{Blake2s256, Digest};
 
+use crate::mac::{Gf128, GF128_BYTES};
 use crate::Fp;
 
 pub type TranscriptSeed = [u8; 32];
@@ -37,5 +38,16 @@ impl CoprocessorChannel {
         let mut bytes = [0u8; 32];
         bytes.copy_from_slice(&digest);
         Fp::random(bytes)
+    }
+
+    pub fn draw_gf128(&mut self, label: &[u8]) -> Gf128 {
+        self.mix_bytes(label);
+        let mut hasher = self.state.clone();
+        hasher.update(self.counter.to_be_bytes());
+        self.counter += 1;
+        let digest = hasher.finalize();
+        let mut out = [0u8; GF128_BYTES];
+        out.copy_from_slice(&digest[..GF128_BYTES]);
+        out
     }
 }

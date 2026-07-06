@@ -7,6 +7,7 @@ pub mod field;
 #[cfg(test)]
 mod gates;
 pub mod ligero;
+pub mod mac;
 pub mod merkle;
 pub mod mle;
 pub mod rs;
