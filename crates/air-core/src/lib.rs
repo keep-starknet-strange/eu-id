@@ -547,10 +547,42 @@ pub fn compute_preprocessed_root(
         return *root;
     }
 
+    let root = compute_preprocessed_root_uncached(modules, config);
+
+    cache
+        .lock()
+        .expect("preprocessed root cache poisoned")
+        .insert(key, root);
+    root
+}
+
+/// [`compute_preprocessed_root`] without the per-shape cache: every call
+/// rebuilds and commits tree 0.
+///
+/// Required whenever a preprocessed column's CONTENT is not determined by its
+/// id — e.g. the legacy P256 hinted-mul schedule columns, which reuse one id
+/// across witnesses while their content follows the signature. The cached
+/// variant would return the first witness's root for every later one (a
+/// fail-closed completeness bug, not a soundness one — but a bug). Use the
+/// cached variant only where the id→content invariant of [`prove`] holds
+/// across every call in the process.
+pub fn compute_preprocessed_root_uncached(
+    modules: &mut [&mut dyn AirProver],
+    config: PcsConfig,
+) -> CommitmentRoot {
+    let module_preprocessed_ids: Vec<Vec<PreProcessedColumnId>> = modules
+        .iter()
+        .map(|m| m.preprocessed_column_ids())
+        .collect();
+
     // Exactly the prove()-side tree-0 path: interpolate + blow up + Merkle
     // commit the deduplicated preprocessed columns. The twiddles only need to
     // cover the largest committed LDE domain (tree 0 is the only tree built).
-    let max_preprocessed_log_size = key.0.iter().map(|(_, size)| *size).max().unwrap_or(0);
+    let max_preprocessed_log_size = modules
+        .iter()
+        .flat_map(|m| m.layout().preprocessed)
+        .max()
+        .unwrap_or(0);
     let twiddles = cached_twiddles(max_preprocessed_log_size + config.fri_config.log_blowup_factor);
     let channel = &mut Ch::default();
     config.mix_into(channel);
@@ -561,13 +593,7 @@ pub fn compute_preprocessed_root(
         module.write_selected_preprocessed(&mut tb, selected_ids);
     }
     tb.commit(channel);
-    let root = commitment_scheme.roots()[0];
-
-    cache
-        .lock()
-        .expect("preprocessed root cache poisoned")
-        .insert(key, root);
-    root
+    commitment_scheme.roots()[0]
 }
 
 /// Re-derive the transcript for every module and verify the single STARK proof.

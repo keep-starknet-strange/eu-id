@@ -366,6 +366,9 @@ mod tests {
         let channel = &mut Blake2sChannel::default();
         let commitment_scheme =
             &mut CommitmentSchemeVerifier::<Blake2sMerkleChannel>::new(proof.config);
+        // F-ROOT note: tree 0 is EMPTY here (`&[]`, no preprocessed columns) and
+        // this is a #[cfg(test)] spike — no preprocessed content exists to
+        // forge, so no root pin is needed.
         commitment_scheme.commit(proof.commitments[0], &[], channel);
         commitment_scheme.commit(proof.commitments[1], &log_sizes[1], channel);
         commitment_scheme.commit(proof.commitments[2], &log_sizes[2], channel);
@@ -453,6 +456,9 @@ mod tests {
         let channel = &mut Blake2sChannel::default();
         let commitment_scheme =
             &mut CommitmentSchemeVerifier::<Blake2sMerkleChannel>::new(proof.config);
+        // F-ROOT note: tree 0 is EMPTY here (`&[]`, no preprocessed columns) and
+        // this is a #[cfg(test)] spike — no preprocessed content exists to
+        // forge, so no root pin is needed.
         commitment_scheme.commit(proof.commitments[0], &[], channel);
         commitment_scheme.commit(proof.commitments[1], &log_sizes[1], channel);
         commitment_scheme.commit(proof.commitments[2], &log_sizes[2], channel);
@@ -544,6 +550,9 @@ mod tests {
         let channel = &mut Blake2sChannel::default();
         let commitment_scheme =
             &mut CommitmentSchemeVerifier::<Blake2sMerkleChannel>::new(proof.config);
+        // F-ROOT note: tree 0 is EMPTY here (`&[]`, no preprocessed columns) and
+        // this is a #[cfg(test)] spike — no preprocessed content exists to
+        // forge, so no root pin is needed.
         commitment_scheme.commit(proof.commitments[0], &[], channel);
         commitment_scheme.commit(proof.commitments[1], &log_sizes[1], channel);
         commitment_scheme.commit(proof.commitments[2], &log_sizes[2], channel);

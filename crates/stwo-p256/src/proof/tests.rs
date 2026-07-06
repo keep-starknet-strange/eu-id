@@ -40,7 +40,10 @@ fn verify_self_bound<MC: MerkleChannel>(
     proof: P256CurrentAirProof<MC::H>,
 ) -> Result<(), P256ProofError> {
     let expected = proof.claim.public_inputs.instances.clone();
-    verify_current_air_monolithic::<MC>(proof, &expected)
+    // No preprocessed-root pin (`None`): these tests exercise deeper failure
+    // layers. The pin gate itself is covered by
+    // `current_p256_monolithic_verifier_pins_the_preprocessed_root`.
+    verify_current_air_monolithic::<MC>(proof, &expected, None)
 }
 
 fn stwo_p256_source_files() -> Vec<std::path::PathBuf> {
@@ -904,9 +907,12 @@ fn current_p256_monolithic_verifier_rejects_mismatched_expected_instances() {
     let mut wrong_expected = monolithic.claim.public_inputs.instances.clone();
     let r = &mut wrong_expected[0].r;
     r.limbs_mut()[0] = M31::from_u32_unchecked(r.limbs()[0].0 ^ 1);
-    let err =
-        verify_current_air_monolithic::<Blake2sMerkleChannel>(monolithic.clone(), &wrong_expected)
-            .expect_err("proof of a different statement than the caller expected must reject");
+    let err = verify_current_air_monolithic::<Blake2sMerkleChannel>(
+        monolithic.clone(),
+        &wrong_expected,
+        None,
+    )
+    .expect_err("proof of a different statement than the caller expected must reject");
     assert!(
         matches!(err, P256ProofError::PublicInstanceMismatch),
         "expected PublicInstanceMismatch, got {err:?}"
@@ -914,8 +920,55 @@ fn current_p256_monolithic_verifier_rejects_mismatched_expected_instances() {
 
     // The same proof verifies when the caller passes the matching statement.
     let correct_expected = monolithic.claim.public_inputs.instances.clone();
-    verify_current_air_monolithic::<Blake2sMerkleChannel>(monolithic, &correct_expected)
+    verify_current_air_monolithic::<Blake2sMerkleChannel>(monolithic, &correct_expected, None)
         .expect("proof of exactly the caller's expected statement must verify");
+}
+
+/// The F-ROOT pin on the monolithic verifier: a caller-pinned tree-0
+/// (preprocessed) root must gate the proof BEFORE any transcript work. The
+/// honest proof verifies against the independently-derived root; a proof
+/// whose tree-0 root differs is rejected with `PreprocessedRootMismatch`.
+#[test]
+fn current_p256_monolithic_verifier_pins_the_preprocessed_root() {
+    let draft = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+        valid_real_input_with_small_u_scalars(7, 11),
+    ])
+    .expect("current pipeline builds");
+    let monolithic = draft
+        .prove_current_air_monolithic::<Blake2sMerkleChannel>()
+        .expect("current AIR monolithic proof proves");
+    let expected = monolithic.claim.public_inputs.instances.clone();
+
+    // The verifier's own derivation of the tree-0 root: rebuild the prover
+    // module from the draft (a relying party rebuilds it from its expected
+    // statement) and run exactly the prover's tree-0 commit path.
+    let expected_root = crate::proof::air::current_air_preprocessed_root(&draft)
+        .expect("expected preprocessed root computes");
+    assert_eq!(
+        expected_root, monolithic.stark_proof.commitments[0],
+        "the derived tree-0 root must match the honest prover's commitment"
+    );
+
+    verify_current_air_monolithic::<Blake2sMerkleChannel>(
+        monolithic.clone(),
+        &expected,
+        Some(expected_root),
+    )
+    .expect("honest proof verifies against the derived preprocessed root");
+
+    // A tampered tree-0 root must be rejected fail-closed, before the STARK.
+    let mut tampered = monolithic;
+    tampered.stark_proof.0.commitments[0].0[0] ^= 1;
+    let err = verify_current_air_monolithic::<Blake2sMerkleChannel>(
+        tampered,
+        &expected,
+        Some(expected_root),
+    )
+    .expect_err("a mismatched preprocessed root must reject");
+    assert!(
+        matches!(err, P256ProofError::PreprocessedRootMismatch { .. }),
+        "expected PreprocessedRootMismatch, got {err:?}"
+    );
 }
 
 /// The verifier must pin its PCS config: `stark_proof.config` is

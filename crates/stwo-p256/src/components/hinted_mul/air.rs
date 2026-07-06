@@ -1310,6 +1310,10 @@ mod tests {
         .map_err(|error| format!("prove failed: {error}"))?;
 
         // Verify with a fresh transcript mirroring the same draw order.
+        // F-ROOT note: the tree-0 root below is absorbed unpinned, which is fine
+        // ONLY because this is a #[cfg(test)] prove-then-verify self-check over a
+        // locally-built proof — never a production verifier. Production paths pin
+        // the root (air_core::verify_with_expected_preprocessed_root).
         let mut channel = Blake2sChannel::default();
         let commitment_scheme_verifier =
             &mut stwo::core::pcs::CommitmentSchemeVerifier::<Blake2sMerkleChannel>::new(config);

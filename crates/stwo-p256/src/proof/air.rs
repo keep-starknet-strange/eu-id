@@ -81,6 +81,45 @@ pub fn verify_current_air(
     proof: P256CurrentAirProof<Blake2sMerkleHasher>,
     expected_instances: &[PublicEcdsaInstance<M31>],
 ) -> Result<(), P256ProofError> {
+    verify_current_air_with_preprocessed_root(proof, expected_instances, None)
+}
+
+/// Compute the expected tree-0 (preprocessed) commitment root for a draft, by
+/// running exactly the prover's tree-0 path over [`P256Prover`]. A relying
+/// party derives the draft from its OWN expected statement
+/// (`P256ProofDraft::from_inputs_with_arbitrary_fake_glv_hints` is a
+/// deterministic function of the inputs) — never from the proof — and passes
+/// the result to [`verify_current_air_with_preprocessed_root`].
+///
+/// Uses the UNCACHED computation deliberately: the hinted-mul schedule
+/// preprocessed columns are witness-dependent but keep one column id across
+/// witnesses, so the id-keyed cache in `air_core::compute_preprocessed_root`
+/// would return the first witness's root for every later one.
+pub fn current_air_preprocessed_root(
+    draft: &P256ProofDraft,
+) -> Result<air_core::CommitmentRoot, P256ProofError> {
+    let mut prover = P256Prover::new(draft)?;
+    let config = p256_stark_monolithic_profile_config(prover.max_constraint_bound);
+    Ok(air_core::compute_preprocessed_root_uncached(
+        &mut [&mut prover],
+        config,
+    ))
+}
+
+/// [`verify_current_air`], with the tree-0 (preprocessed) commitment root
+/// pinned — the F-ROOT fix. On `Some(expected)`, the proof's
+/// `stark_proof.commitments[0]` must equal `expected`, checked fail-closed
+/// BEFORE the root is absorbed into the transcript, so a forged preprocessed
+/// tree (range tables, hinted-mul schedules, constants) is rejected up front
+/// with [`P256ProofError::PreprocessedRootMismatch`]. Callers obtain
+/// `expected` from [`current_air_preprocessed_root`] over their own trusted
+/// statement, never from the proof. `None` keeps the legacy unpinned behavior
+/// for self-proving tests only.
+pub fn verify_current_air_with_preprocessed_root(
+    proof: P256CurrentAirProof<Blake2sMerkleHasher>,
+    expected_instances: &[PublicEcdsaInstance<M31>],
+    expected_preprocessed_root: Option<air_core::CommitmentRoot>,
+) -> Result<(), P256ProofError> {
     let P256CurrentAirProof {
         claim,
         interaction_claim,
@@ -113,8 +152,20 @@ pub fn verify_current_air(
     }
 
     let mut verifier = P256Verifier::new(claim, interaction_claim);
-    air_core::verify(&mut [&mut verifier], &stark_proof)
-        .map_err(|error| P256ProofError::ProofLayer(error.to_string()))
+    air_core::verify_with_expected_preprocessed_root(
+        &mut [&mut verifier],
+        &stark_proof,
+        expected_preprocessed_root,
+    )
+    .map_err(|error| match error {
+        air_core::VerifyError::PreprocessedRootMismatch { got, expected } => {
+            P256ProofError::PreprocessedRootMismatch {
+                got: format!("{got:?}"),
+                expected: format!("{expected:?}"),
+            }
+        }
+        air_core::VerifyError::Stark(error) => P256ProofError::ProofLayer(error.to_string()),
+    })
 }
 
 /// Prover-side module: built from a draft, owns its traces and components.

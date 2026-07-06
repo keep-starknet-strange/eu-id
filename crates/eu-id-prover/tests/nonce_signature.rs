@@ -56,6 +56,36 @@ fn nonce_signature_proof_verifies() {
     verify_nonce_signature(&proof, &statement).expect("nonce signature verifies");
 }
 
+/// The F-ROOT pin on the standalone nonce path: the verifier derives the
+/// expected tree-0 (preprocessed) root from the statement alone and pins it.
+/// The honest proof verifies against the derived root; any other pinned root
+/// is rejected with `PreprocessedRootMismatch` before the STARK check.
+#[test]
+#[ignore = "slow: proves one P-256 nonce signature plus a tree-0 rebuild"]
+fn nonce_signature_proof_pins_the_preprocessed_root() {
+    let statement = signed_nonce_statement(b"session-123");
+    let proof = prove_nonce_signature(&statement).expect("nonce signature proves");
+
+    // The verifier's own derivation — from the statement, never the proof.
+    let expected_root = eu_id_prover::nonce_expected_preprocessed_root(&statement)
+        .expect("expected preprocessed root computes");
+
+    eu_id_prover::verify_nonce_signature_with_preprocessed_root(&proof, &statement, expected_root)
+        .expect("honest proof verifies against the derived preprocessed root");
+
+    let mut wrong_root = expected_root;
+    wrong_root.0[0] ^= 1;
+    assert!(
+        matches!(
+            eu_id_prover::verify_nonce_signature_with_preprocessed_root(
+                &proof, &statement, wrong_root,
+            ),
+            Err(Error::PreprocessedRootMismatch { .. })
+        ),
+        "a mismatched preprocessed root must be rejected before the STARK check",
+    );
+}
+
 #[test]
 #[ignore = "slow: proves one P-256 nonce signature"]
 fn nonce_signature_proof_rejects_wrong_nonce() {
