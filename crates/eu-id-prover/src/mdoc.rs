@@ -22,6 +22,7 @@ use sha2::{Digest as _, Sha256};
 #[cfg(not(feature = "ec-coprocessor"))]
 use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::QM31;
+use stwo::core::fri::FriConfig;
 use stwo::core::pcs::PcsConfig;
 use stwo::core::proof::StarkProof;
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleHasher;
@@ -97,6 +98,14 @@ pub struct MdocPidRequest {
     pub nationality_element: String,
     pub session_transcript: Vec<u8>,
     pub trusted_issuer_certificates: Vec<Vec<u8>>,
+    pub trusted_issuer_public_keys: Vec<AffinePoint>,
+    pub device_authentication_profile: MdocDeviceAuthenticationProfile,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MdocDeviceAuthenticationProfile {
+    Iso180135,
+    LongfellowLegacy,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -141,11 +150,26 @@ impl MdocPidRequest {
             nationality_element: "nationality".to_string(),
             session_transcript,
             trusted_issuer_certificates: Vec::new(),
+            trusted_issuer_public_keys: Vec::new(),
+            device_authentication_profile: MdocDeviceAuthenticationProfile::Iso180135,
         }
     }
 
     pub fn with_trusted_issuer_certificates(mut self, certificates: Vec<Vec<u8>>) -> Self {
         self.trusted_issuer_certificates = certificates;
+        self
+    }
+
+    pub fn with_trusted_issuer_public_keys(mut self, public_keys: Vec<AffinePoint>) -> Self {
+        self.trusted_issuer_public_keys = public_keys;
+        self
+    }
+
+    pub fn with_device_authentication_profile(
+        mut self,
+        profile: MdocDeviceAuthenticationProfile,
+    ) -> Self {
+        self.device_authentication_profile = profile;
         self
     }
 
@@ -674,7 +698,7 @@ pub fn extract_pid_mdoc(
     let requested_attributes = request.disclosed_attributes();
     validate_requested_attributes(&requested_attributes)?;
     let doc = decode_value(document)?;
-    let doc_map = expect_map(&doc, "document")?;
+    let doc_map = document_map(&doc)?;
     let doctype = text_field(doc_map, "docType")?.to_string();
     if doctype != request.doctype {
         return Err(MdocError::DoctypeMismatch);
@@ -786,9 +810,11 @@ pub fn extract_pid_mdoc(
 
     let device_signed = map_field(doc_map, "deviceSigned")?;
     let device_auth = map_field(device_signed, "deviceAuth")?;
-    let device_signature = parse_cose_sign1(value_field(device_auth, "deviceSignature")?)?;
-    let expected_device_payload =
-        device_authentication_bytes(&request.session_transcript, &request.doctype)?;
+    let expected_device_payload = expected_device_authentication_bytes(request)?;
+    let device_signature = parse_cose_sign1_with_detached_payload(
+        value_field(device_auth, "deviceSignature")?,
+        &expected_device_payload,
+    )?;
     if device_signature.payload != expected_device_payload {
         return Err(MdocError::DeviceAuthPayloadMismatch);
     }
@@ -855,6 +881,23 @@ pub fn extract_pid_mdoc(
         issuer_ecdsa_input,
         device_ecdsa_input,
     })
+}
+
+fn document_map(value: &Value) -> Result<&[(Value, Value)], MdocError> {
+    let map = expect_map(value, "document")?;
+    if value_field(map, "docType").is_ok() {
+        return Ok(map);
+    }
+    if let Ok(status) = value_field(map, "status") {
+        if value_i128(status)? != 0 {
+            return Err(MdocError::WrongType("DeviceResponse.status"));
+        }
+    }
+    let documents = expect_array(value_field(map, "documents")?, "DeviceResponse.documents")?;
+    let first_document = documents
+        .first()
+        .ok_or(MdocError::MissingField("documents"))?;
+    expect_map(first_document, "DeviceResponse.documents[0]")
 }
 
 #[derive(Clone)]
@@ -1431,6 +1474,20 @@ fn element_identifier_anchor_bytes(element_identifier: &str) -> Result<Vec<u8>, 
 }
 
 fn parse_cose_sign1(value: &Value) -> Result<CoseSign1, MdocError> {
+    parse_cose_sign1_inner(value, None)
+}
+
+fn parse_cose_sign1_with_detached_payload(
+    value: &Value,
+    detached_payload: &[u8],
+) -> Result<CoseSign1, MdocError> {
+    parse_cose_sign1_inner(value, Some(detached_payload))
+}
+
+fn parse_cose_sign1_inner(
+    value: &Value,
+    detached_payload: Option<&[u8]>,
+) -> Result<CoseSign1, MdocError> {
     let Value::Array(items) = value else {
         return Err(MdocError::WrongType("COSE_Sign1"));
     };
@@ -1446,7 +1503,12 @@ fn parse_cose_sign1(value: &Value) -> Result<CoseSign1, MdocError> {
     }
     expect_map(&items[1], "COSE_Sign1.unprotected")?;
     let unprotected = items[1].clone();
-    let payload = expect_bytes(&items[2], "COSE_Sign1.payload")?.to_vec();
+    let payload = match (&items[2], detached_payload) {
+        (Value::Bytes(payload), _) => payload.clone(),
+        (Value::Null, Some(detached_payload)) => detached_payload.to_vec(),
+        (Value::Null, None) => return Err(MdocError::InvalidCoseSign1("detached payload")),
+        _ => return Err(MdocError::WrongType("COSE_Sign1.payload")),
+    };
     let signature_bytes = expect_bytes(&items[3], "COSE_Sign1.signature")?.to_vec();
     signature_from_compact(&signature_bytes)?;
     let sig_structure = sig_structure(&protected, &payload);
@@ -1497,6 +1559,42 @@ pub fn device_authentication_bytes(
         doc_type.into(),
         Value::Bytes(device_namespaces_bytes),
     ]));
+    Ok(encode_value(Value::Tag(
+        24,
+        Box::new(Value::Bytes(device_authentication)),
+    )))
+}
+
+fn expected_device_authentication_bytes(request: &MdocPidRequest) -> Result<Vec<u8>, MdocError> {
+    match request.device_authentication_profile {
+        MdocDeviceAuthenticationProfile::Iso180135 => {
+            device_authentication_bytes(&request.session_transcript, &request.doctype)
+        }
+        MdocDeviceAuthenticationProfile::LongfellowLegacy => {
+            longfellow_legacy_device_authentication_bytes(
+                &request.session_transcript,
+                &request.doctype,
+            )
+        }
+    }
+}
+
+fn longfellow_legacy_device_authentication_bytes(
+    session_transcript: &[u8],
+    doc_type: &str,
+) -> Result<Vec<u8>, MdocError> {
+    let session_transcript_value = decode_value(session_transcript)?;
+    if !matches!(session_transcript_value, Value::Array(_)) {
+        return Err(MdocError::WrongType("SessionTranscript"));
+    }
+    let mut device_authentication = encode_value(Value::Array(vec!["DeviceAuthentication".into()]));
+    device_authentication[0] = 0x84;
+    device_authentication.extend_from_slice(session_transcript);
+    device_authentication.extend_from_slice(&encode_value(Value::Text(doc_type.to_string())));
+    device_authentication.extend_from_slice(&encode_value(Value::Tag(
+        24,
+        Box::new(Value::Bytes(encode_value(Value::Map(Vec::new())))),
+    )));
     Ok(encode_value(Value::Tag(
         24,
         Box::new(Value::Bytes(device_authentication)),
@@ -1927,14 +2025,28 @@ fn issuer_key_from_unprotected(
     request: &MdocPidRequest,
 ) -> Result<AffinePoint, MdocError> {
     if let Some(x5chain) = value_int_key(unprotected, 33) {
-        return issuer_key_from_x5chain(x5chain, &request.trusted_issuer_certificates);
+        return issuer_key_from_x5chain(
+            x5chain,
+            &request.trusted_issuer_certificates,
+            &request.trusted_issuer_public_keys,
+        );
     }
-    parse_cose_key(value_field(unprotected, "issuerKey")?)
+    let issuer_key = parse_cose_key(value_field(unprotected, "issuerKey")?)?;
+    if !request.trusted_issuer_public_keys.is_empty()
+        && !request
+            .trusted_issuer_public_keys
+            .iter()
+            .any(|trusted| trusted == &issuer_key)
+    {
+        return Err(MdocError::UntrustedIssuerCertificate);
+    }
+    Ok(issuer_key)
 }
 
 fn issuer_key_from_x5chain(
     value: &Value,
     trusted_roots: &[Vec<u8>],
+    trusted_public_keys: &[AffinePoint],
 ) -> Result<AffinePoint, MdocError> {
     let chain = x5chain_certificates(value)?;
     let parsed_chain = chain
@@ -1943,6 +2055,13 @@ fn issuer_key_from_x5chain(
         .collect::<Result<Vec<_>, _>>()?;
     for pair in parsed_chain.windows(2) {
         verify_certificate_signature(&pair[0], &pair[1])?;
+    }
+    let issuer_key = affine_point_from_spki(parsed_chain[0].spki_der)?;
+    if trusted_public_keys
+        .iter()
+        .any(|trusted| trusted == &issuer_key)
+    {
+        return Ok(issuer_key);
     }
     let chain_anchor = chain
         .last()
@@ -1953,7 +2072,7 @@ fn issuer_key_from_x5chain(
     if !is_trusted_x5chain_anchor(*chain_anchor, parsed_anchor, trusted_roots)? {
         return Err(MdocError::UntrustedIssuerCertificate);
     }
-    affine_point_from_spki(parsed_chain[0].spki_der)
+    Ok(issuer_key)
 }
 
 fn is_trusted_x5chain_anchor(
@@ -2951,6 +3070,14 @@ pub fn prove_mdoc_circuit(
     extracted: &ExtractedPidMdoc,
     statement: &MdocCircuitStatement,
 ) -> Result<MdocCircuitProof, Error> {
+    prove_mdoc_circuit_with_pcs_config(extracted, statement, mdoc_production_pcs_config())
+}
+
+pub fn prove_mdoc_circuit_with_pcs_config(
+    extracted: &ExtractedPidMdoc,
+    statement: &MdocCircuitStatement,
+    config: PcsConfig,
+) -> Result<MdocCircuitProof, Error> {
     if statement.birth_date_value_offset != extracted.birth_date_value_offset
         || statement.nationality_value_offset != extracted.nationality_value_offset
     {
@@ -3150,10 +3277,6 @@ pub fn prove_mdoc_circuit(
         None
     };
 
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let config = issuer_p256.pcs_config();
-    #[cfg(feature = "ec-coprocessor")]
-    let config = crate::coprocessor_bridge_pcs_config();
     let stark_proof = {
         #[cfg(not(feature = "ec-coprocessor"))]
         let mut modules: Vec<&mut dyn AirProver> = vec![
@@ -3243,6 +3366,14 @@ pub fn verify_mdoc_circuit(
     proof: &MdocCircuitProof,
     statement: &MdocCircuitStatement,
 ) -> Result<(), Error> {
+    verify_mdoc_circuit_with_pcs_config(proof, statement, mdoc_production_pcs_config())
+}
+
+pub fn verify_mdoc_circuit_with_pcs_config(
+    proof: &MdocCircuitProof,
+    statement: &MdocCircuitStatement,
+    expected_pcs_config: PcsConfig,
+) -> Result<(), Error> {
     #[cfg(not(feature = "ec-coprocessor"))]
     if proof.issuer_p256_claim.public_inputs.instances.as_slice()
         != [expected_instance(&statement.issuer_input)]
@@ -3306,10 +3437,6 @@ pub fn verify_mdoc_circuit(
     )
     .with_preprocessed_namespace("mdoc/device")
     .with_z_binding(device_scalar_z.clone());
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let expected_pcs_config = issuer_p256.expected_pcs_config();
-    #[cfg(feature = "ec-coprocessor")]
-    let expected_pcs_config = crate::coprocessor_bridge_pcs_config();
     if proof.stark_proof.config != expected_pcs_config {
         return Err(Error::WeakConfig {
             got: proof.stark_proof.config,
@@ -3480,6 +3607,22 @@ pub fn verify_mdoc_circuit(
         Err(_) => Err(Error::Verify(
             "malformed mdoc proof panicked during verification".to_string(),
         )),
+    }
+}
+
+pub fn mdoc_production_pcs_config() -> PcsConfig {
+    PcsConfig {
+        pow_bits: 10,
+        fri_config: FriConfig::new(1, 2, 59, 2),
+        lifting_log_size: None,
+    }
+}
+
+pub fn mdoc_longfellow_parity_pcs_config() -> PcsConfig {
+    PcsConfig {
+        pow_bits: 10,
+        fri_config: FriConfig::new(1, 2, 50, 2),
+        lifting_log_size: None,
     }
 }
 
@@ -3928,6 +4071,13 @@ fn expect_map<'a>(
 fn expect_text<'a>(value: &'a Value, field: &'static str) -> Result<&'a str, MdocError> {
     match value {
         Value::Text(text) => Ok(text),
+        _ => Err(MdocError::WrongType(field)),
+    }
+}
+
+fn expect_array<'a>(value: &'a Value, field: &'static str) -> Result<&'a [Value], MdocError> {
+    match value {
+        Value::Array(items) => Ok(items),
         _ => Err(MdocError::WrongType(field)),
     }
 }

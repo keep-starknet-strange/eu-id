@@ -8,8 +8,9 @@ use ciborium::value::Value;
 use eu_id_prover::mdoc::{
     demo_mdoc_sizing_waste, device_authentication_bytes, device_authentication_sig_structure_hash,
     extract_pid_mdoc, mdoc_proof_byte_breakdown, openid4vp_session_transcript, prove_mdoc_circuit,
-    verify_mdoc_circuit, MdocBirthDateBinding, MdocCircuitStatement, MdocDisclosureMode, MdocError,
-    MdocNationalityBinding, MdocPidRequest, MdocRequestedAttribute,
+    verify_mdoc_circuit, MdocBirthDateBinding, MdocCircuitStatement,
+    MdocDeviceAuthenticationProfile, MdocDisclosureMode, MdocError, MdocNationalityBinding,
+    MdocPidRequest, MdocRequestedAttribute,
 };
 use eu_id_prover::{Date, Policy};
 use stwo_p256::types::{AffinePoint, Signature, U256};
@@ -23,6 +24,10 @@ const PHASE_0B_REFACTOR_THRESHOLD_CELLS: u64 = 1_000_000;
 const X5CHAIN_LABEL: i128 = 33;
 const CBOR_TAG_ENCODED_CBOR: u64 = 24;
 const CBOR_TAG_FULL_DATE: u64 = 1004;
+const LONGFELLOW_MDL_DOCTYPE: &str = "org.iso.18013.5.1.mDL";
+const LONGFELLOW_MDL_NAMESPACE: &str = "org.iso.18013.5.1";
+const LONGFELLOW_EUAV_DOCTYPE: &str = "eu.europa.ec.av.1";
+const LONGFELLOW_EUAV_NAMESPACE: &str = "eu.europa.ec.av.1";
 const MIN_SALT_LEN: usize = 16;
 const REAL_VECTOR_BIRTH_DATE_OFFSET: usize = 69;
 const DER_SEQUENCE: u8 = 0x30;
@@ -195,6 +200,100 @@ fn real_vector_document(session_transcript: &[u8]) -> (Vec<u8>, Vec<u8>) {
             .clone();
 
     (document, trusted_root)
+}
+
+struct LongfellowVector {
+    name: &'static str,
+    mdoc: &'static [u8],
+    transcript: &'static [u8],
+    issuer_pk_json: &'static str,
+    now: &'static str,
+    doctype: &'static str,
+    namespace: &'static str,
+}
+
+fn longfellow_mdl3() -> LongfellowVector {
+    LongfellowVector {
+        name: "longfellow_mdl3",
+        mdoc: include_bytes!("vectors/longfellow_mdl3/mdoc.cbor"),
+        transcript: include_bytes!("vectors/longfellow_mdl3/transcript.bin"),
+        issuer_pk_json: include_str!("vectors/longfellow_mdl3/issuer_pk.json"),
+        now: include_str!("vectors/longfellow_mdl3/now.txt"),
+        doctype: LONGFELLOW_MDL_DOCTYPE,
+        namespace: LONGFELLOW_MDL_NAMESPACE,
+    }
+}
+
+fn longfellow_euav11() -> LongfellowVector {
+    LongfellowVector {
+        name: "longfellow_euav11",
+        mdoc: include_bytes!("vectors/longfellow_euav11/mdoc.cbor"),
+        transcript: include_bytes!("vectors/longfellow_euav11/transcript.bin"),
+        issuer_pk_json: include_str!("vectors/longfellow_euav11/issuer_pk.json"),
+        now: include_str!("vectors/longfellow_euav11/now.txt"),
+        doctype: LONGFELLOW_EUAV_DOCTYPE,
+        namespace: LONGFELLOW_EUAV_NAMESPACE,
+    }
+}
+
+fn longfellow_request(
+    vector: &LongfellowVector,
+    attributes: Vec<MdocRequestedAttribute>,
+) -> MdocPidRequest {
+    MdocPidRequest {
+        doctype: vector.doctype.to_string(),
+        namespace: vector.namespace.to_string(),
+        attributes,
+        birth_date_element: "birth_date".to_string(),
+        nationality_element: "nationality".to_string(),
+        session_transcript: vector.transcript.to_vec(),
+        trusted_issuer_certificates: Vec::new(),
+        trusted_issuer_public_keys: vec![longfellow_issuer_public_key(vector.issuer_pk_json)],
+        device_authentication_profile: MdocDeviceAuthenticationProfile::LongfellowLegacy,
+    }
+}
+
+fn longfellow_issuer_public_key(json: &str) -> AffinePoint {
+    let value: serde_json::Value = serde_json::from_str(json).expect("issuer_pk.json parses");
+    AffinePoint {
+        x: U256(hex_32(value["x"].as_str().expect("issuer x hex"))),
+        y: U256(hex_32(value["y"].as_str().expect("issuer y hex"))),
+    }
+}
+
+fn hex_32(hex: &str) -> [u8; 32] {
+    let hex = hex.strip_prefix("0x").unwrap_or(hex);
+    assert_eq!(hex.len(), 64, "expected 32-byte hex string");
+    let mut out = [0u8; 32];
+    for (index, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).expect("hex byte parses");
+    }
+    out
+}
+
+fn policy_from_longfellow_now(vector: &LongfellowVector) -> Policy {
+    let bytes = vector.now.trim().as_bytes();
+    assert_eq!(bytes[4], b'-');
+    assert_eq!(bytes[7], b'-');
+    Policy {
+        current_date: Date {
+            year: std::str::from_utf8(&bytes[0..4])
+                .expect("year utf8")
+                .parse()
+                .expect("year parses"),
+            month: std::str::from_utf8(&bytes[5..7])
+                .expect("month utf8")
+                .parse()
+                .expect("month parses"),
+            day: std::str::from_utf8(&bytes[8..10])
+                .expect("day utf8")
+                .parse()
+                .expect("day parses"),
+        },
+        min_age_years: 18,
+        accepted_nationalities: Vec::new(),
+        accepted_nationalities_alpha2: Vec::new(),
+    }
 }
 
 fn split_concatenated_der(bytes: &[u8]) -> Vec<Vec<u8>> {
@@ -1853,6 +1952,198 @@ fn real_vector_pid_pymdoc_end_to_end() {
         prove_elapsed.as_millis(),
         verify_elapsed.as_millis()
     );
+}
+
+#[test]
+fn longfellow_vectors_extract_and_match_inventory() {
+    let mdl = longfellow_mdl3();
+    assert_longfellow_inventory(
+        &mdl,
+        &[
+            ("age_over_18", "bool:true"),
+            ("birth_date", "tag1004:1971-09-01"),
+            ("family_name", "text:Mustermann"),
+            ("height", "uint:175"),
+            ("issue_date", "tag1004:2024-03-15"),
+        ],
+    );
+    let mdl_request = longfellow_request(
+        &mdl,
+        vec![
+            MdocRequestedAttribute {
+                element_identifier: "age_over_18".to_string(),
+                mode: MdocDisclosureMode::ValueEquality(cbor(Value::Bool(true))),
+            },
+            MdocRequestedAttribute {
+                element_identifier: "birth_date".to_string(),
+                mode: MdocDisclosureMode::AgeOver,
+            },
+        ],
+    );
+    let mdl_extracted = extract_pid_mdoc(mdl.mdoc, &mdl_request).expect("mDL extracts");
+    assert_eq!(mdl_extracted.doctype, LONGFELLOW_MDL_DOCTYPE);
+    assert_eq!(mdl_extracted.birth_date, "1971-09-01");
+    assert_eq!(
+        mdl_extracted.birth_date_binding,
+        MdocBirthDateBinding::Text(*b"1971-09-01")
+    );
+    MdocCircuitStatement::from_extracted(&mdl_extracted, policy_from_longfellow_now(&mdl))
+        .expect("mDL statement builds");
+
+    let euav = longfellow_euav11();
+    assert_longfellow_inventory(&euav, &[("age_over_18", "bool:true")]);
+    let euav_request = longfellow_request(
+        &euav,
+        vec![MdocRequestedAttribute {
+            element_identifier: "age_over_18".to_string(),
+            mode: MdocDisclosureMode::ValueEquality(cbor(Value::Bool(true))),
+        }],
+    );
+    let euav_extracted = extract_pid_mdoc(euav.mdoc, &euav_request).expect("EUAV extracts");
+    assert_eq!(euav_extracted.doctype, LONGFELLOW_EUAV_DOCTYPE);
+    MdocCircuitStatement::from_extracted(&euav_extracted, policy_from_longfellow_now(&euav))
+        .expect("EUAV statement builds");
+}
+
+#[test]
+#[ignore = "slow: proves Longfellow mDL N=1 vector end-to-end"]
+fn longfellow_mdl3_n1_age_over_18_end_to_end() {
+    let vector = longfellow_mdl3();
+    longfellow_vector_end_to_end(
+        &vector,
+        vec![MdocRequestedAttribute {
+            element_identifier: "age_over_18".to_string(),
+            mode: MdocDisclosureMode::ValueEquality(cbor(Value::Bool(true))),
+        }],
+    );
+}
+
+#[test]
+#[ignore = "slow: proves Longfellow mDL N=2 vector end-to-end"]
+fn longfellow_mdl3_n2_age_over_18_birth_date_end_to_end() {
+    let vector = longfellow_mdl3();
+    longfellow_vector_end_to_end(
+        &vector,
+        vec![
+            MdocRequestedAttribute {
+                element_identifier: "age_over_18".to_string(),
+                mode: MdocDisclosureMode::ValueEquality(cbor(Value::Bool(true))),
+            },
+            MdocRequestedAttribute {
+                element_identifier: "birth_date".to_string(),
+                mode: MdocDisclosureMode::AgeOver,
+            },
+        ],
+    );
+}
+
+#[test]
+#[ignore = "slow: proves Longfellow EUAV #11 vector end-to-end"]
+fn longfellow_euav11_age_over_18_end_to_end() {
+    let vector = longfellow_euav11();
+    longfellow_vector_end_to_end(
+        &vector,
+        vec![MdocRequestedAttribute {
+            element_identifier: "age_over_18".to_string(),
+            mode: MdocDisclosureMode::ValueEquality(cbor(Value::Bool(true))),
+        }],
+    );
+}
+
+fn longfellow_vector_end_to_end(
+    vector: &LongfellowVector,
+    attributes: Vec<MdocRequestedAttribute>,
+) {
+    let request = longfellow_request(vector, attributes);
+    let extracted = extract_pid_mdoc(vector.mdoc, &request).expect("Longfellow vector extracts");
+    let statement =
+        MdocCircuitStatement::from_extracted(&extracted, policy_from_longfellow_now(vector))
+            .expect("Longfellow statement builds");
+
+    let prove_start = Instant::now();
+    let proof = prove_mdoc_circuit(&extracted, &statement).expect("Longfellow mdoc proves");
+    let prove_elapsed = prove_start.elapsed();
+
+    let verify_start = Instant::now();
+    verify_mdoc_circuit(&proof, &statement).expect("Longfellow mdoc verifies");
+    let verify_elapsed = verify_start.elapsed();
+
+    let bytes = mdoc_proof_byte_breakdown(&proof).proof_bytes;
+    println!(
+        "longfellow_vector={} n={} security_bits={} prove_ms={} verify_ms={} proof_bytes={bytes}",
+        vector.name,
+        statement.attributes.len(),
+        proof.stark_proof.config.security_bits(),
+        prove_elapsed.as_millis(),
+        verify_elapsed.as_millis()
+    );
+}
+
+fn assert_longfellow_inventory(vector: &LongfellowVector, expected: &[(&str, &str)]) {
+    let response: Value = ciborium::de::from_reader(vector.mdoc).expect("DeviceResponse decodes");
+    let response = value_map(&response, "DeviceResponse");
+    assert_eq!(
+        value_text(map_text(response, "version"), "DeviceResponse.version"),
+        "1.0"
+    );
+    let documents = value_array(map_text(response, "documents"), "documents");
+    assert_eq!(
+        documents.len(),
+        1,
+        "Longfellow vector must carry one document"
+    );
+    let document = value_map(&documents[0], "document");
+    assert_eq!(
+        value_text(map_text(document, "docType"), "docType"),
+        vector.doctype
+    );
+    let issuer_signed = value_map(map_text(document, "issuerSigned"), "issuerSigned");
+    let namespaces = value_map(map_text(issuer_signed, "nameSpaces"), "nameSpaces");
+    let items = value_array(map_text(namespaces, vector.namespace), vector.namespace);
+    assert_eq!(
+        items.len(),
+        expected.len(),
+        "unexpected namespace item count"
+    );
+
+    let mut actual = Vec::new();
+    for item in items {
+        let item = issuer_signed_item_map(item);
+        let element = value_text(map_text(&item, "elementIdentifier"), "elementIdentifier");
+        actual.push((
+            element.to_string(),
+            longfellow_value_label(map_text(&item, "elementValue")),
+        ));
+    }
+    actual.sort();
+    let mut expected: Vec<_> = expected
+        .iter()
+        .map(|(element, label)| ((*element).to_string(), (*label).to_string()))
+        .collect();
+    expected.sort();
+    assert_eq!(actual, expected);
+}
+
+fn issuer_signed_item_map(value: &Value) -> Vec<(Value, Value)> {
+    let bytes = match value {
+        Value::Tag(CBOR_TAG_ENCODED_CBOR, inner) => value_bytes(inner, "IssuerSignedItemBytes"),
+        Value::Bytes(bytes) => bytes,
+        _ => panic!("IssuerSignedItemBytes must be tag24 or bstr"),
+    };
+    let item: Value = ciborium::de::from_reader(bytes).expect("IssuerSignedItem decodes");
+    value_map(&item, "IssuerSignedItem").to_vec()
+}
+
+fn longfellow_value_label(value: &Value) -> String {
+    match value {
+        Value::Bool(true) => "bool:true".to_string(),
+        Value::Integer(integer) => format!("uint:{}", i128::from(*integer)),
+        Value::Text(text) => format!("text:{text}"),
+        Value::Tag(CBOR_TAG_FULL_DATE, inner) => {
+            format!("tag1004:{}", value_text(inner, "tag1004 full-date"))
+        }
+        _ => panic!("unexpected Longfellow elementValue {value:?}"),
+    }
 }
 
 #[test]
