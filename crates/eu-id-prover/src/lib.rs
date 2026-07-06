@@ -100,17 +100,25 @@ pub mod credential;
 pub mod fixtures;
 pub mod generator;
 pub mod mdoc;
+#[cfg(feature = "ec-coprocessor")]
+pub(crate) mod mdoc_mac;
 mod mdoc_validity;
 mod mdoc_window_bind;
 pub mod nonce;
+#[cfg(feature = "ec-coprocessor")]
 mod public_digest_bind;
 #[cfg(test)]
 mod shape_dump;
 
 pub use credential::Credential;
 pub use generator::{IssuerKey, PipelineWitness, Policy, SignedCredential};
+#[cfg(not(feature = "ec-coprocessor"))]
 pub use mdoc::{
     MdocCircuitProof as MdocProof, MdocCircuitStatement as MdocStatement, MdocPidRequest,
+};
+#[cfg(feature = "ec-coprocessor")]
+pub use mdoc::{
+    MdocCircuitProof as MdocProof, MdocPidRequest, MdocPublicStatement as MdocStatement,
 };
 pub use nonce::{
     nonce_signature_message, prove_nonce_signature, verify_nonce_signature, NonceSignatureProof,
@@ -136,14 +144,29 @@ pub fn prove_mdoc(
     policy: Policy,
 ) -> Result<(MdocProof, MdocStatement), Error> {
     let extracted = mdoc::extract_pid_mdoc(document, request).map_err(Error::Mdoc)?;
-    let statement = MdocStatement::from_extracted(&extracted, policy).map_err(Error::Mdoc)?;
+    let statement =
+        mdoc::MdocCircuitStatement::from_extracted(&extracted, policy).map_err(Error::Mdoc)?;
     let proof = mdoc::prove_mdoc_circuit(&extracted, &statement)?;
-    Ok((proof, statement))
+    #[cfg(feature = "ec-coprocessor")]
+    {
+        Ok((proof, MdocStatement::from_circuit(&statement)))
+    }
+    #[cfg(not(feature = "ec-coprocessor"))]
+    {
+        Ok((proof, statement))
+    }
 }
 
 /// Verify a product mdoc proof against its public mdoc statement.
 pub fn verify_mdoc(proof: &MdocProof, statement: &MdocStatement) -> Result<(), Error> {
-    mdoc::verify_mdoc_circuit(proof, statement)
+    #[cfg(feature = "ec-coprocessor")]
+    {
+        mdoc::verify_mdoc_public_statement(proof, statement)
+    }
+    #[cfg(not(feature = "ec-coprocessor"))]
+    {
+        mdoc::verify_mdoc_circuit(proof, statement)
+    }
 }
 
 #[cfg(not(feature = "ec-coprocessor"))]
@@ -339,6 +362,92 @@ pub mod ec_coprocessor {
             witnesses,
             transcript_seed,
         )
+    }
+
+    pub fn prove_mdoc_p4b_circuit_bundle_from_stwo(
+        issuer_input: &EcdsaVerifyInput,
+        issuer_projection: &S4EcdsaPublicProjection,
+        issuer_witness: &Witness,
+        device_input: &EcdsaVerifyInput,
+        device_projection: &S4EcdsaPublicProjection,
+        device_witness: &Witness,
+        mac_key_shares: &eu_id_ec_coprocessor::ecdsa::MdocP4bMacKeyShares,
+        transcript_seed: TranscriptSeed,
+    ) -> Result<ImplementedCircuitBundle, ImplementedCircuitProofError> {
+        eu_id_ec_coprocessor::ecdsa::prove_mdoc_p4b_circuit_bundle(
+            &input_from_stwo(issuer_input),
+            issuer_projection,
+            issuer_witness,
+            &input_from_stwo(device_input),
+            device_projection,
+            device_witness,
+            mac_key_shares,
+            transcript_seed,
+        )
+    }
+
+    pub fn prove_mdoc_p4b_circuit_bundle_from_stwo_profiled(
+        issuer_input: &EcdsaVerifyInput,
+        issuer_projection: &S4EcdsaPublicProjection,
+        issuer_witness: &Witness,
+        device_input: &EcdsaVerifyInput,
+        device_projection: &S4EcdsaPublicProjection,
+        device_witness: &Witness,
+        mac_key_shares: &eu_id_ec_coprocessor::ecdsa::MdocP4bMacKeyShares,
+        transcript_seed: TranscriptSeed,
+    ) -> Result<
+        (
+            ImplementedCircuitBundle,
+            eu_id_ec_coprocessor::ecdsa::MdocP4bProveProfile,
+        ),
+        ImplementedCircuitProofError,
+    > {
+        eu_id_ec_coprocessor::ecdsa::prove_mdoc_p4b_circuit_bundle_profiled(
+            &input_from_stwo(issuer_input),
+            issuer_projection,
+            issuer_witness,
+            &input_from_stwo(device_input),
+            device_projection,
+            device_witness,
+            mac_key_shares,
+            transcript_seed,
+        )
+    }
+
+    pub fn verify_mdoc_p4b_circuit_bundle_from_stwo(
+        issuer_projection: &S4EcdsaPublicProjection,
+        device_projection: &S4EcdsaPublicProjection,
+        bundle: &ImplementedCircuitBundle,
+        transcript_seed: TranscriptSeed,
+    ) -> Result<(), ImplementedCircuitProofError> {
+        eu_id_ec_coprocessor::ecdsa::verify_mdoc_p4b_circuit_bundle(
+            issuer_projection,
+            device_projection,
+            bundle,
+            transcript_seed,
+        )
+    }
+
+    pub fn verify_mdoc_p4b_circuit_bundle_from_stwo_profiled(
+        issuer_projection: &S4EcdsaPublicProjection,
+        device_projection: &S4EcdsaPublicProjection,
+        bundle: &ImplementedCircuitBundle,
+        transcript_seed: TranscriptSeed,
+    ) -> Result<eu_id_ec_coprocessor::ecdsa::MdocP4bVerifyProfile, ImplementedCircuitProofError>
+    {
+        eu_id_ec_coprocessor::ecdsa::verify_mdoc_p4b_circuit_bundle_profiled(
+            issuer_projection,
+            device_projection,
+            bundle,
+            transcript_seed,
+        )
+    }
+
+    pub fn mdoc_p4b_av_from_bundle(
+        bundle: &ImplementedCircuitBundle,
+        transcript_seed: TranscriptSeed,
+    ) -> eu_id_ec_coprocessor::mac::Gf128 {
+        eu_id_ec_coprocessor::ecdsa::mdoc_p4b_av_from_root(transcript_seed, bundle.root)
     }
 
     pub fn verify_implemented_circuit_bundle_from_stwo(

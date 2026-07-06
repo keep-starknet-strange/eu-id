@@ -612,8 +612,8 @@ fn mdoc_statement_matches_public_statement(
         .as_slice()
         .try_into()
         .map_err(|_| ZkError::InvalidInput("issuer_key_y must be 32 bytes".to_string()))?;
-    if mdoc_statement.issuer_input.public_key.x.0 != issuer_x
-        || mdoc_statement.issuer_input.public_key.y.0 != issuer_y
+    if mdoc_statement.issuer_public_key.x.0 != issuer_x
+        || mdoc_statement.issuer_public_key.y.0 != issuer_y
     {
         return Ok(false);
     }
@@ -623,7 +623,7 @@ fn mdoc_statement_matches_public_statement(
         &statement.doctype,
     )
     .map_err(|e| ZkError::InvalidInput(format!("invalid DeviceAuthentication input: {e:?}")))?;
-    if mdoc_statement.device_input.message_hash.0 != expected_device_hash {
+    if mdoc_statement.device_message_hash.0 != expected_device_hash {
         return Ok(false);
     }
 
@@ -722,7 +722,7 @@ mod tests {
         }
     }
 
-    fn honest_mdoc_statement() -> (ZkPublicStatement, eu_id_prover::mdoc::MdocCircuitStatement) {
+    fn honest_mdoc_statement() -> (ZkPublicStatement, eu_id_prover::MdocStatement) {
         let fixture = eu_id_prover::mdoc::demo_mdoc_circuit_fixture();
         let issuer_key = fixture.statement.issuer_input.public_key.clone();
         (
@@ -740,7 +740,7 @@ mod tests {
                 accepted_numeric_countries: Some(vec![276, 250]), // DE, FR
                 nat_mode: NatMode::Any,
             },
-            fixture.statement,
+            eu_id_prover::MdocStatement::from_circuit(&fixture.statement),
         )
     }
 
@@ -788,6 +788,55 @@ mod tests {
         assert!(
             !mdoc_statement_matches_public_statement(&mdoc_statement, &changed_doctype).unwrap(),
             "docType drift must change the expected device-auth hash"
+        );
+    }
+
+    #[test]
+    fn mdoc_public_statement_serialization_omits_private_signature_and_device_key_material() {
+        let fixture = eu_id_prover::mdoc::demo_mdoc_circuit_fixture();
+        let public = eu_id_prover::MdocStatement::from_circuit(&fixture.statement);
+        let encoded = bincode::serialize(&public).expect("public mdoc statement serializes");
+        assert!(
+            !encoded
+                .windows(32)
+                .any(|window| window == fixture.statement.issuer_input.message_hash.0),
+            "issuer z must not be serialized in the public mdoc statement"
+        );
+        assert!(
+            !encoded
+                .windows(32)
+                .any(|window| window == fixture.statement.issuer_input.signature.r.0),
+            "issuer r must not be serialized in the public mdoc statement"
+        );
+        assert!(
+            !encoded
+                .windows(32)
+                .any(|window| window == fixture.statement.issuer_input.signature.s.0),
+            "issuer s must not be serialized in the public mdoc statement"
+        );
+        assert!(
+            !encoded
+                .windows(32)
+                .any(|window| window == fixture.statement.device_input.public_key.x.0),
+            "device qx must not be serialized in the public mdoc statement"
+        );
+        assert!(
+            !encoded
+                .windows(32)
+                .any(|window| window == fixture.statement.device_input.public_key.y.0),
+            "device qy must not be serialized in the public mdoc statement"
+        );
+        assert!(
+            !encoded
+                .windows(32)
+                .any(|window| window == fixture.statement.device_input.signature.r.0),
+            "device r must not be serialized in the public mdoc statement"
+        );
+        assert!(
+            !encoded
+                .windows(32)
+                .any(|window| window == fixture.statement.device_input.signature.s.0),
+            "device s must not be serialized in the public mdoc statement"
         );
     }
 

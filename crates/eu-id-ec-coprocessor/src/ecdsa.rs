@@ -3,14 +3,18 @@ use std::time::{Duration, Instant};
 
 use crate::ligero::{
     commit_witness_profiled, v2_ligero_params, verify_claim_batch, verify_openings,
-    LigeroClaimBatch, LigeroError, LigeroLinearClaim, LigeroParams, LigeroProximityClaim,
+    verify_split_claim_batch, verify_split_openings, LigeroClaimBatch, LigeroError,
+    LigeroLinearClaim, LigeroParams, LigeroProximityClaim,
 };
+use crate::mac::{bytes_to_bits, gf128_tag, Gf128, GF128_BITS};
 use crate::merkle::ColumnOpening;
 use crate::sumcheck::{
     circuit_otp_pad_values, proof_otp_pad_values, prove_circuit, prove_evaluated_circuit,
-    verify_circuit, CircuitSumcheckProof, InputClaims, SumcheckError,
+    prove_evaluated_circuit_sorted_sparse, verify_circuit, verify_circuit_sorted_sparse,
+    CircuitSumcheckProof, InputClaims, SumcheckError,
 };
 use crate::{Circuit, CircuitError, CoprocessorChannel, Fp, Layer, Mle, QuadTerm, TranscriptSeed};
+use blake2::{Blake2s256, Digest};
 use p256::elliptic_curve::ff::PrimeField;
 use p256::elliptic_curve::group::Group;
 use p256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
@@ -41,6 +45,39 @@ pub const C13_SLOPE_INVERSES_INPUT_LOG_SIZE: usize = 12;
 pub const C13_SLOPE_INVERSES_OUTPUT_LOG_SIZE: usize = 11;
 pub const C14_C15_INPUT_LOG_SIZE: usize = 3;
 pub const C14_C15_OUTPUT_LOG_SIZE: usize = 3;
+pub const MAC_HALF_GROUP_A_INPUT_LOG_SIZE: usize = 9;
+pub const MAC_HALF_GROUP_B_INPUT_LOG_SIZE: usize = 11;
+pub const MAC_HALF_INPUT_LOG_SIZE: usize = 11;
+pub const MAC_HALF_TREE_LOG_SIZE: usize = 11;
+pub const MAC_HALF_TREE_BLOCK_SIZE: usize = 1;
+const MAC_HALF_PRODUCT_COEFFS: usize = 2 * GF128_BITS - 1;
+pub const MAC_HALF_PARITY_Q_BITS: usize = 9;
+pub const MAC_HALF_PARITY_MAX_S: usize = 632;
+const MAC_HALF_BOOL_CONSTRAINTS: usize = 2 * GF128_BITS + GF128_BITS * MAC_HALF_PARITY_Q_BITS;
+const MAC_HALF_TAG_CONSTRAINTS: usize = GF128_BITS;
+const MAC_HALF_LOCAL_CONSTRAINTS: usize = MAC_HALF_BOOL_CONSTRAINTS + MAC_HALF_TAG_CONSTRAINTS;
+const MAC_BATCH_GROUP_A_INPUT_LOG_SIZE: usize = 13;
+const MAC_BATCH_GROUP_B_INPUT_LOG_SIZE: usize = 13;
+const MAC_BATCH_INPUT_LOG_SIZE: usize = 14;
+const MAC_BATCH_TREE_LOG_SIZE: usize = 14;
+const MAC_BATCH_HALF_GROUP_A_INPUT_STRIDE: usize = 1usize << MAC_HALF_GROUP_A_INPUT_LOG_SIZE;
+const MAC_BATCH_HALF_GROUP_B_INPUT_STRIDE: usize = GF128_BITS * MAC_HALF_PARITY_Q_BITS;
+const MAC_HALF_GROUP_B_INPUT_START: usize = 1usize << MAC_HALF_GROUP_A_INPUT_LOG_SIZE;
+const MAC_BATCH_GROUP_B_INPUT_START: usize = 1usize << MAC_BATCH_GROUP_A_INPUT_LOG_SIZE;
+const MAC_BATCH_OUTPUT_STRIDE: usize = GF128_BITS + MAC_HALF_LOCAL_CONSTRAINTS;
+const MAC_BATCH_TREE_HALF_WIDTH: usize = mac_half_tree_width();
+pub const MAC_HALF_CONST_ONE_INDEX: usize = 0;
+pub const MAC_HALF_X_BITS_START: usize = 1;
+pub const MAC_HALF_AP_BITS_START: usize = MAC_HALF_X_BITS_START + GF128_BITS;
+pub const MAC_HALF_Q_BITS_START: usize = MAC_HALF_GROUP_B_INPUT_START;
+pub const MAC_HALF_USED_INPUTS: usize = MAC_HALF_Q_BITS_START + GF128_BITS * MAC_HALF_PARITY_Q_BITS;
+pub const MAC_HALF_GROUP_A_USED_INPUTS: usize = MAC_HALF_AP_BITS_START + GF128_BITS;
+pub const MAC_HALF_GROUP_B_USED_INPUTS: usize = GF128_BITS * MAC_HALF_PARITY_Q_BITS;
+pub const MAC_HALF_COMMITTED_PRIVATE_INPUTS: usize =
+    (MAC_HALF_GROUP_A_USED_INPUTS - 1) + MAC_HALF_GROUP_B_USED_INPUTS;
+pub const MDOC_P4B_MAC_HALF_COUNT: usize = 6;
+pub const MDOC_P4B_MAC_COMMITTED_PRIVATE_INPUTS: usize =
+    MDOC_P4B_MAC_HALF_COUNT * MAC_HALF_COMMITTED_PRIVATE_INPUTS;
 pub const IMPLEMENTED_CIRCUIT_FAMILY_COUNT: usize = 9;
 
 const C6_CONST_ONE_INDEX: u32 = 0;
@@ -131,6 +168,7 @@ pub enum LayoutSlot {
     FinalPoint,
     FinalReduction,
     InfinityFlags,
+    MacHalf,
 }
 
 pub fn layout_range(slot: LayoutSlot) -> Range<usize> {
@@ -150,6 +188,7 @@ pub fn layout_range(slot: LayoutSlot) -> Range<usize> {
         LayoutSlot::FinalPoint => 2673..2675,
         LayoutSlot::FinalReduction => 2675..2677,
         LayoutSlot::InfinityFlags => 2677..2680,
+        LayoutSlot::MacHalf => 0..0,
     }
 }
 
@@ -212,12 +251,24 @@ pub struct ImplementedCircuitProofs {
 pub struct ImplementedCircuitBundle {
     pub params: LigeroParams,
     pub root: [u8; 32],
+    #[serde(default)]
+    pub root_b: Option<[u8; 32]>,
     pub proximity_openings: Vec<ColumnOpening>,
+    #[serde(default)]
+    pub proximity_openings_b: Vec<ColumnOpening>,
     pub proximity_claim: LigeroProximityClaim,
+    #[serde(default)]
+    pub proximity_claim_b: Option<LigeroProximityClaim>,
     pub claim_batch: LigeroClaimBatch,
+    #[serde(default)]
+    pub claim_batch_b: Option<LigeroClaimBatch>,
     pub consistency_claim_values: Vec<Fp>,
+    pub mac_tags: Vec<Gf128>,
     pub entries: Vec<ImplementedCircuitBundleEntry>,
 }
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MdocP4bMacKeyShares(pub [Gf128; MDOC_P4B_MAC_HALF_COUNT]);
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ImplementedCircuitBundleEntry {
@@ -249,6 +300,55 @@ pub struct ImplementedCircuitVerifyProfile {
     pub input_claims: Duration,
     pub consistency: Duration,
     pub sumcheck_by_family: [Duration; IMPLEMENTED_CIRCUIT_FAMILY_COUNT],
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MdocP4bProveProfile {
+    pub witness_check: Duration,
+    pub circuit_build: Duration,
+    pub ligero_row_encode: Duration,
+    pub ligero_merkle_build: Duration,
+    pub ligero_proximity_claim: Duration,
+    pub ligero_openings: Duration,
+    pub sumcheck: Duration,
+    pub claim_batch: Duration,
+    pub row_inventory: MdocP4bRowInventory,
+    pub sumcheck_by_instance: Vec<MdocP4bInstanceTiming>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MdocP4bVerifyProfile {
+    pub setup: Duration,
+    pub ligero_proximity: Duration,
+    pub sumcheck: Duration,
+    pub input_claims: Duration,
+    pub consistency: Duration,
+    pub claim_batch: Duration,
+    pub sumcheck_by_instance: Vec<MdocP4bInstanceTiming>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MdocP4bInstanceTiming {
+    pub role: &'static str,
+    pub label: String,
+    pub elapsed: Duration,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MdocP4bRowInventory {
+    pub row_len: usize,
+    pub committed_values: usize,
+    pub committed_rows: usize,
+    pub encoded_rows_total: usize,
+    pub ecdsa_input_values: usize,
+    pub ecdsa_input_rows: usize,
+    pub mac_input_values: usize,
+    pub mac_input_rows: usize,
+    pub otp_pad_values: usize,
+    pub otp_pad_rows: usize,
+    pub blind_rows: usize,
+    pub linear_claims: usize,
+    pub linear_claim_touched_rows: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -711,10 +811,15 @@ pub fn prove_implemented_circuit_bundle_batch_unchecked_with_projection_profiled
         ImplementedCircuitBundle {
             params,
             root,
+            root_b: None,
             proximity_openings,
+            proximity_openings_b: Vec::new(),
             proximity_claim,
+            proximity_claim_b: None,
             claim_batch,
+            claim_batch_b: None,
             consistency_claim_values,
+            mac_tags: Vec::new(),
             entries,
         },
         profile,
@@ -844,10 +949,229 @@ pub fn prove_implemented_circuit_bundle_unchecked_profiled(
         ImplementedCircuitBundle {
             params,
             root,
+            root_b: None,
             proximity_openings,
+            proximity_openings_b: Vec::new(),
             proximity_claim,
+            proximity_claim_b: None,
             claim_batch,
+            claim_batch_b: None,
             consistency_claim_values,
+            mac_tags: Vec::new(),
+            entries,
+        },
+        profile,
+    ))
+}
+
+pub fn prove_mdoc_p4b_circuit_bundle(
+    issuer_input: &EcdsaInput,
+    issuer_projection: &EcdsaPublicProjection,
+    issuer_witness: &Witness,
+    device_input: &EcdsaInput,
+    device_projection: &EcdsaPublicProjection,
+    device_witness: &Witness,
+    mac_key_shares: &MdocP4bMacKeyShares,
+    transcript_seed: TranscriptSeed,
+) -> Result<ImplementedCircuitBundle, ImplementedCircuitProofError> {
+    prove_mdoc_p4b_circuit_bundle_profiled(
+        issuer_input,
+        issuer_projection,
+        issuer_witness,
+        device_input,
+        device_projection,
+        device_witness,
+        mac_key_shares,
+        transcript_seed,
+    )
+    .map(|(bundle, _)| bundle)
+}
+
+pub fn prove_mdoc_p4b_circuit_bundle_profiled(
+    issuer_input: &EcdsaInput,
+    issuer_projection: &EcdsaPublicProjection,
+    issuer_witness: &Witness,
+    device_input: &EcdsaInput,
+    device_projection: &EcdsaPublicProjection,
+    device_witness: &Witness,
+    mac_key_shares: &MdocP4bMacKeyShares,
+    transcript_seed: TranscriptSeed,
+) -> Result<(ImplementedCircuitBundle, MdocP4bProveProfile), ImplementedCircuitProofError> {
+    let mut profile = MdocP4bProveProfile::default();
+    let start = Instant::now();
+    verify_witness(issuer_input, issuer_witness).map_err(ImplementedCircuitProofError::Witness)?;
+    verify_witness(device_input, device_witness).map_err(ImplementedCircuitProofError::Witness)?;
+    profile.witness_check = start.elapsed();
+
+    let start = Instant::now();
+    let mut instances = Vec::new();
+    for instance in implemented_circuit_instances(issuer_input, issuer_witness)
+        .map_err(ImplementedCircuitProofError::Witness)?
+    {
+        instances.push(MdocP4bProverInstance::ecdsa(0, instance));
+    }
+    for instance in implemented_circuit_instances(device_input, device_witness)
+        .map_err(ImplementedCircuitProofError::Witness)?
+    {
+        instances.push(MdocP4bProverInstance::ecdsa(1, instance));
+    }
+    let mac_values = mdoc_p4b_mac_values(issuer_input, device_input);
+    let mac_tags_placeholder = vec![[0u8; 16]; MDOC_P4B_MAC_HALF_COUNT];
+    let circuit = build_mac_batch_circuit(&[0u8; 16], &mac_tags_placeholder)
+        .map_err(ImplementedCircuitProofError::Circuit)?;
+    let input = mac_batch_group_a_input(mac_key_shares, &mac_values)
+        .map_err(ImplementedCircuitProofError::Witness)?;
+    instances.push(MdocP4bProverInstance {
+        label: MDOC_P4B_MAC_BATCH_LABEL,
+        role: MdocP4bCircuitRole::MacBatch,
+        circuit,
+        input,
+    });
+
+    let (committed_values, layouts) = mdoc_p4b_committed_values(&instances);
+    let params = implemented_circuit_ligero_params(committed_values.len());
+    profile.circuit_build = start.elapsed();
+    let (commitment, commit_profile) = commit_witness_profiled(&committed_values, params)
+        .map_err(ImplementedCircuitProofError::Ligero)?;
+    profile.ligero_row_encode = commit_profile.row_encode;
+    profile.ligero_merkle_build = commit_profile.merkle_build;
+    profile.row_inventory = mdoc_p4b_row_inventory(
+        params,
+        committed_values.len(),
+        commit_profile.rows,
+        &instances,
+        &layouts,
+        None,
+    );
+    let root = commitment.root();
+    let av = draw_mdoc_p4b_av(transcript_seed, root);
+    let mac_tags = mac_key_shares
+        .0
+        .iter()
+        .zip(mac_values.iter())
+        .map(|(ap, x)| gf128_tag(ap, &av, x))
+        .collect::<Vec<_>>();
+    let committed_values_b = mac_batch_group_b_input(mac_key_shares, &av, &mac_values, &mac_tags)
+        .map_err(ImplementedCircuitProofError::Witness)?;
+    let params_b = implemented_circuit_ligero_params(committed_values_b.len());
+    debug_assert_eq!(params, params_b);
+    let (commitment_b, commit_profile_b) = commit_witness_profiled(&committed_values_b, params_b)
+        .map_err(ImplementedCircuitProofError::Ligero)?;
+    profile.ligero_row_encode += commit_profile_b.row_encode;
+    profile.ligero_merkle_build += commit_profile_b.merkle_build;
+    let root_b = commitment_b.root();
+    let full_root = mdoc_p4b_full_root(root, root_b);
+
+    let group_a_rows = ligero_row_count(committed_values.len(), params.row_len);
+    let group_b_rows = ligero_row_count(committed_values_b.len(), params.row_len);
+    let gamma = ligero_proximity_gamma(
+        IMPLEMENTED_BUNDLE_LIGERO_LABEL,
+        full_root,
+        group_a_rows + group_b_rows,
+        transcript_seed,
+    );
+    let start = Instant::now();
+    let proximity_claim = commitment
+        .split_proximity_claim(&commitment_b, &gamma)
+        .map_err(ImplementedCircuitProofError::Ligero)?;
+    profile.ligero_proximity_claim = start.elapsed();
+    let start = Instant::now();
+    let proximity_indices = ligero_proximity_indices(
+        IMPLEMENTED_BUNDLE_LIGERO_LABEL,
+        full_root,
+        params,
+        transcript_seed,
+    );
+    let proximity_openings = commitment
+        .open_columns(&proximity_indices)
+        .map_err(ImplementedCircuitProofError::Ligero)?;
+    let proximity_openings_b = commitment_b
+        .open_columns(&proximity_indices)
+        .map_err(ImplementedCircuitProofError::Ligero)?;
+    profile.ligero_openings = start.elapsed();
+
+    let projections = [*issuer_projection, *device_projection];
+    let mut entries = Vec::with_capacity(instances.len());
+    let sumcheck_start = Instant::now();
+    for instance in &instances {
+        let circuit = match instance.role {
+            MdocP4bCircuitRole::MacBatch => build_mac_batch_circuit(&av, &mac_tags)
+                .map_err(ImplementedCircuitProofError::Circuit)?,
+            _ => instance.circuit.clone(),
+        };
+        let input = match instance.role {
+            MdocP4bCircuitRole::MacBatch => {
+                mac_batch_input_with_av(mac_key_shares, &av, &mac_values, &mac_tags)
+                    .map_err(ImplementedCircuitProofError::Witness)?
+            }
+            _ => instance.input.clone(),
+        };
+        let layers = circuit
+            .evaluate_input(input)
+            .map_err(ImplementedCircuitProofError::Circuit)?;
+        let mut channel = mdoc_p4b_instance_channel(
+            transcript_seed,
+            full_root,
+            instance.label,
+            instance.role,
+            &projections,
+            &av,
+            &mac_tags,
+        );
+        let instance_start = Instant::now();
+        let proof = match instance.role {
+            MdocP4bCircuitRole::MacBatch => {
+                prove_evaluated_circuit_sorted_sparse(&circuit, &layers, full_root, &mut channel)
+            }
+            _ => prove_evaluated_circuit(&circuit, &layers, full_root, &mut channel),
+        }
+        .map_err(ImplementedCircuitProofError::Sumcheck)?;
+        profile.sumcheck_by_instance.push(mdoc_p4b_instance_timing(
+            instance.role,
+            instance.label,
+            instance_start.elapsed(),
+        ));
+        entries.push(ImplementedCircuitBundleEntry { proof });
+    }
+    profile.sumcheck = sumcheck_start.elapsed();
+
+    let claim_start = Instant::now();
+    let (claim_batch, consistency_claim_values, claim_inventory) = mdoc_p4b_prover_claim_batch(
+        &commitment,
+        &commitment_b,
+        params,
+        &instances,
+        &layouts,
+        &entries,
+        &projections,
+        committed_values.len(),
+        &committed_values_b,
+        full_root,
+        transcript_seed,
+    )?;
+    profile.claim_batch = claim_start.elapsed();
+    profile.row_inventory = mdoc_p4b_row_inventory(
+        params,
+        committed_values.len(),
+        commit_profile.rows,
+        &instances,
+        &layouts,
+        Some(claim_inventory),
+    );
+
+    Ok((
+        ImplementedCircuitBundle {
+            params,
+            root,
+            root_b: Some(root_b),
+            proximity_openings,
+            proximity_openings_b,
+            proximity_claim,
+            proximity_claim_b: None,
+            claim_batch,
+            claim_batch_b: None,
+            consistency_claim_values,
+            mac_tags,
             entries,
         },
         profile,
@@ -883,6 +1207,260 @@ pub fn verify_implemented_circuit_bundle_batch_with_projection(
         transcript_seed,
     )
     .map(|(claims, _)| claims)
+}
+
+pub fn verify_mdoc_p4b_circuit_bundle(
+    issuer_projection: &EcdsaPublicProjection,
+    device_projection: &EcdsaPublicProjection,
+    bundle: &ImplementedCircuitBundle,
+    transcript_seed: TranscriptSeed,
+) -> Result<(), ImplementedCircuitProofError> {
+    verify_mdoc_p4b_circuit_bundle_profiled(
+        issuer_projection,
+        device_projection,
+        bundle,
+        transcript_seed,
+    )
+    .map(|_| ())
+}
+
+pub fn verify_mdoc_p4b_circuit_bundle_profiled(
+    issuer_projection: &EcdsaPublicProjection,
+    device_projection: &EcdsaPublicProjection,
+    bundle: &ImplementedCircuitBundle,
+    transcript_seed: TranscriptSeed,
+) -> Result<MdocP4bVerifyProfile, ImplementedCircuitProofError> {
+    let mut profile = MdocP4bVerifyProfile::default();
+    let setup_start = Instant::now();
+    if bundle.mac_tags.len() != MDOC_P4B_MAC_HALF_COUNT {
+        return Err(ImplementedCircuitProofError::WrongProofCount {
+            expected: MDOC_P4B_MAC_HALF_COUNT,
+            actual: bundle.mac_tags.len(),
+        });
+    }
+    let root_b = bundle
+        .root_b
+        .ok_or(ImplementedCircuitProofError::ProximityOpeningRejected)?;
+    let full_root = mdoc_p4b_full_root(bundle.root, root_b);
+    let av = draw_mdoc_p4b_av(transcript_seed, bundle.root);
+    let projections = [*issuer_projection, *device_projection];
+    let circuits = mdoc_p4b_verifier_instances(&av, &bundle.mac_tags)?;
+    if bundle.entries.len() != circuits.len() {
+        return Err(ImplementedCircuitProofError::WrongProofCount {
+            expected: circuits.len(),
+            actual: bundle.entries.len(),
+        });
+    }
+    let (layouts, committed_len) = mdoc_p4b_verifier_bundle_pad_layouts(&circuits, 0);
+    if bundle.params != implemented_circuit_ligero_params(committed_len) {
+        return Err(ImplementedCircuitProofError::ProximityOpeningRejected);
+    }
+    let committed_len_b = 1usize << MAC_BATCH_GROUP_B_INPUT_LOG_SIZE;
+    profile.setup = setup_start.elapsed();
+
+    let start = Instant::now();
+    let proximity_gamma = ligero_proximity_gamma(
+        IMPLEMENTED_BUNDLE_LIGERO_LABEL,
+        full_root,
+        ligero_row_count(committed_len, bundle.params.row_len)
+            + ligero_row_count(committed_len_b, bundle.params.row_len),
+        transcript_seed,
+    );
+    verify_ligero_proximity_indices(
+        IMPLEMENTED_BUNDLE_LIGERO_LABEL,
+        full_root,
+        bundle.params,
+        &bundle.proximity_openings,
+        transcript_seed,
+    )?;
+    verify_ligero_proximity_indices(
+        IMPLEMENTED_BUNDLE_LIGERO_LABEL,
+        full_root,
+        bundle.params,
+        &bundle.proximity_openings_b,
+        transcript_seed,
+    )?;
+    let proximity_match = verify_split_openings(
+        bundle.root,
+        root_b,
+        bundle.params,
+        committed_len,
+        committed_len_b,
+        &bundle.proximity_openings,
+        &bundle.proximity_openings_b,
+        &bundle.proximity_claim,
+        &proximity_gamma,
+    )
+    .map_err(ImplementedCircuitProofError::Ligero)?;
+    if !proximity_match {
+        return Err(ImplementedCircuitProofError::ProximityOpeningRejected);
+    }
+    profile.ligero_proximity = start.elapsed();
+
+    let mut linear_claims = Vec::new();
+    let mut consistency_cursor = 0usize;
+    let mut issuer_z = None;
+    let mut device_qx = None;
+    let mut device_qy = None;
+    let mut mac_halves = [None; MDOC_P4B_MAC_HALF_COUNT];
+    let mut signer_state = [MdocP4bEcdsaConsistency::default(); 2];
+
+    for ((instance, layout), entry) in circuits
+        .iter()
+        .zip(layouts.iter())
+        .zip(bundle.entries.iter())
+    {
+        let mut channel = mdoc_p4b_instance_channel(
+            transcript_seed,
+            full_root,
+            instance.label,
+            instance.role,
+            &projections,
+            &av,
+            &bundle.mac_tags,
+        );
+        let start = Instant::now();
+        let claims = match instance.role {
+            MdocP4bCircuitRole::MacBatch => verify_circuit_sorted_sparse(
+                &instance.circuit,
+                &entry.proof,
+                full_root,
+                &mut channel,
+            ),
+            _ => verify_circuit(&instance.circuit, &entry.proof, full_root, &mut channel),
+        }
+        .map_err(ImplementedCircuitProofError::Sumcheck)?;
+        let elapsed = start.elapsed();
+        profile.sumcheck += elapsed;
+        profile.sumcheck_by_instance.push(mdoc_p4b_instance_timing(
+            instance.role,
+            instance.label,
+            elapsed,
+        ));
+        let start = Instant::now();
+        match instance.role {
+            MdocP4bCircuitRole::MacBatch => take_mac_split_input_claims(
+                &mut linear_claims,
+                bundle,
+                &mut consistency_cursor,
+                layout,
+                ligero_row_count(committed_len, bundle.params.row_len) * bundle.params.row_len,
+                &claims,
+            )?,
+            _ => add_input_claims(&mut linear_claims, layout, &claims),
+        }
+        add_pad_claims(
+            &mut linear_claims,
+            layout,
+            &proof_otp_pad_values(&entry.proof),
+            full_root,
+            transcript_seed,
+        )?;
+        profile.input_claims += start.elapsed();
+        let start = Instant::now();
+        match instance.role {
+            MdocP4bCircuitRole::IssuerEcdsa => {
+                mdoc_p4b_take_ecdsa_claims(
+                    &mut linear_claims,
+                    bundle,
+                    &mut consistency_cursor,
+                    layout,
+                    issuer_projection,
+                    &mut signer_state[0],
+                    instance.label,
+                )?;
+                if instance.label == b"s4-ecdsa-c3-c5-scalar-setup" {
+                    issuer_z = Some(take_private_value(
+                        &mut linear_claims,
+                        bundle,
+                        &mut consistency_cursor,
+                        layout,
+                        C3_Z_INDEX as usize,
+                    )?);
+                }
+            }
+            MdocP4bCircuitRole::DeviceEcdsa => {
+                mdoc_p4b_take_ecdsa_claims(
+                    &mut linear_claims,
+                    bundle,
+                    &mut consistency_cursor,
+                    layout,
+                    device_projection,
+                    &mut signer_state[1],
+                    instance.label,
+                )?;
+                if instance.label == b"s4-ecdsa-c2-canonicality" {
+                    device_qx = Some(take_private_value(
+                        &mut linear_claims,
+                        bundle,
+                        &mut consistency_cursor,
+                        layout,
+                        C2_QX_INDEX as usize,
+                    )?);
+                    device_qy = Some(take_private_value(
+                        &mut linear_claims,
+                        bundle,
+                        &mut consistency_cursor,
+                        layout,
+                        C2_QY_INDEX as usize,
+                    )?);
+                }
+            }
+            MdocP4bCircuitRole::MacBatch => {
+                for (index, slot) in mac_halves.iter_mut().enumerate() {
+                    add_mac_half_public_const_claim(&mut linear_claims, layout, index);
+                    *slot = Some(take_mac_half_x_recompose_claim(
+                        &mut linear_claims,
+                        bundle,
+                        &mut consistency_cursor,
+                        layout,
+                        index,
+                    )?);
+                }
+            }
+        }
+        profile.consistency += start.elapsed();
+    }
+    if consistency_cursor != bundle.consistency_claim_values.len() {
+        return Err(ImplementedCircuitProofError::InputClaimOpeningRejected);
+    }
+
+    let start = Instant::now();
+    for state in signer_state {
+        state.verify()?;
+    }
+    verify_mdoc_p4b_native_mac_consistency(issuer_z, device_qx, device_qy, mac_halves)?;
+    profile.consistency += start.elapsed();
+
+    let start = Instant::now();
+    let claim_gamma = ligero_claim_gamma(
+        IMPLEMENTED_BUNDLE_LIGERO_LABEL,
+        full_root,
+        linear_claims.len(),
+        transcript_seed,
+    );
+    if !verify_split_claim_batch(
+        bundle.root,
+        root_b,
+        bundle.params,
+        committed_len,
+        committed_len_b,
+        &bundle.proximity_openings,
+        &bundle.proximity_openings_b,
+        &bundle.claim_batch,
+        &linear_claims,
+        &claim_gamma,
+    )
+    .map_err(ImplementedCircuitProofError::Ligero)?
+    {
+        return Err(ImplementedCircuitProofError::InputClaimOpeningRejected);
+    }
+    profile.claim_batch = start.elapsed();
+    Ok(profile)
+}
+
+pub fn mdoc_p4b_av_from_root(transcript_seed: TranscriptSeed, root: [u8; 32]) -> Gf128 {
+    draw_mdoc_p4b_av(transcript_seed, root)
 }
 
 pub fn verify_implemented_circuit_bundle_batch_profiled(
@@ -1365,9 +1943,76 @@ fn verify_ligero_proximity_indices(
     Ok(())
 }
 
+fn mdoc_p4b_full_root(root_a: [u8; 32], root_b: [u8; 32]) -> [u8; 32] {
+    let mut hasher = Blake2s256::new();
+    hasher.update(b"eu-id-s4-mdoc-p4b-two-root-v1");
+    hasher.update(root_a);
+    hasher.update(root_b);
+    let digest = hasher.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    out
+}
+
 fn mix_bundle_signature_index(signature_index: usize, channel: &mut CoprocessorChannel) {
     channel.mix_bytes(b"s4-ecdsa-bundle-signature-index");
     channel.mix_bytes(&(signature_index as u64).to_be_bytes());
+}
+
+fn draw_mdoc_p4b_av(transcript_seed: TranscriptSeed, root: [u8; 32]) -> Gf128 {
+    let mut channel = CoprocessorChannel::from_seed(transcript_seed, COPROCESSOR_TRANSCRIPT_DOMAIN);
+    channel.mix_bytes(b"s4-mdoc-p4b-mac-public");
+    channel.mix_bytes(&root);
+    channel.draw_gf128(b"eu-id-p4b-mac-av")
+}
+
+fn mdoc_p4b_instance_channel(
+    transcript_seed: TranscriptSeed,
+    root: [u8; 32],
+    label: &[u8],
+    role: MdocP4bCircuitRole,
+    projections: &[EcdsaPublicProjection; 2],
+    av: &Gf128,
+    mac_tags: &[Gf128],
+) -> CoprocessorChannel {
+    let mut channel = CoprocessorChannel::from_seed(transcript_seed, COPROCESSOR_TRANSCRIPT_DOMAIN);
+    match role {
+        MdocP4bCircuitRole::IssuerEcdsa => {
+            mix_bundle_signature_index(0, &mut channel);
+            channel.mix_bytes(label);
+            mix_ecdsa_public_projection(&projections[0], &mut channel);
+        }
+        MdocP4bCircuitRole::DeviceEcdsa => {
+            mix_bundle_signature_index(1, &mut channel);
+            channel.mix_bytes(label);
+            mix_ecdsa_public_projection(&projections[1], &mut channel);
+        }
+        MdocP4bCircuitRole::MacBatch => {
+            channel.mix_bytes(b"s4-mdoc-p4b-mac-public");
+            channel.mix_bytes(&root);
+            channel.mix_bytes(av);
+            channel.mix_bytes(&(mac_tags.len() as u64).to_be_bytes());
+            for tag in mac_tags {
+                channel.mix_bytes(tag);
+            }
+            channel.mix_bytes(label);
+        }
+    }
+    channel
+}
+
+fn mdoc_p4b_mac_values(issuer_input: &EcdsaInput, device_input: &EcdsaInput) -> [Gf128; 6] {
+    let [issuer_z_lo, issuer_z_hi] = gf128_halves_from_be32(issuer_input.z);
+    let [device_qx_lo, device_qx_hi] = gf128_halves_from_be32(device_input.qx);
+    let [device_qy_lo, device_qy_hi] = gf128_halves_from_be32(device_input.qy);
+    [
+        issuer_z_lo,
+        issuer_z_hi,
+        device_qx_lo,
+        device_qx_hi,
+        device_qy_lo,
+        device_qy_hi,
+    ]
 }
 
 pub fn implemented_circuit_gate_count() -> Result<usize, CircuitError> {
@@ -1438,6 +2083,90 @@ struct VerifierCircuitInstance {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MdocP4bCircuitRole {
+    IssuerEcdsa,
+    DeviceEcdsa,
+    MacBatch,
+}
+
+struct MdocP4bProverInstance {
+    label: &'static [u8],
+    role: MdocP4bCircuitRole,
+    circuit: Circuit,
+    input: Vec<Fp>,
+}
+
+impl MdocP4bProverInstance {
+    fn ecdsa(signature_index: usize, instance: ProverCircuitInstance) -> Self {
+        Self {
+            label: instance.label,
+            role: if signature_index == 0 {
+                MdocP4bCircuitRole::IssuerEcdsa
+            } else {
+                MdocP4bCircuitRole::DeviceEcdsa
+            },
+            circuit: instance.circuit,
+            input: instance.input,
+        }
+    }
+}
+
+struct MdocP4bVerifierInstance {
+    label: &'static [u8],
+    role: MdocP4bCircuitRole,
+    circuit: Circuit,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct MdocP4bClaimInventory {
+    linear_claims: usize,
+    linear_claim_touched_rows: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct MdocP4bEcdsaConsistency {
+    u_scalars_from_c3: Option<(Fp, Fp)>,
+    u_scalars_from_c6: Option<(Fp, Fp)>,
+    accumulator_endpoints_from_c9_c10: Option<((Fp, Fp), (Fp, Fp))>,
+    add_inputs_from_c11: Option<((Fp, Fp), (Fp, Fp))>,
+    denom_inv_from_c11: Option<Fp>,
+    final_from_c11: Option<(Fp, Fp)>,
+    c12_boundaries: Option<C12BoundaryValues>,
+    c13_boundary_values: Option<C13BoundaryValues>,
+    rx_from_c14: Option<Fp>,
+}
+
+impl MdocP4bEcdsaConsistency {
+    fn verify(self) -> Result<(), ImplementedCircuitProofError> {
+        verify_u_scalar_cross_family(self.u_scalars_from_c3, self.u_scalars_from_c6)?;
+        verify_accumulator_endpoint_cross_family(
+            self.accumulator_endpoints_from_c9_c10,
+            self.c12_boundaries
+                .map(|boundaries| boundaries.raw_accumulators),
+        )?;
+        verify_corrected_endpoint_cross_family(
+            self.c12_boundaries
+                .map(|boundaries| boundaries.corrected_endpoints),
+            self.add_inputs_from_c11,
+        )?;
+        verify_c13_boundary_cross_family(
+            self.add_inputs_from_c11,
+            self.denom_inv_from_c11,
+            self.final_from_c11,
+            self.c13_boundary_values,
+        )?;
+        verify_final_point_cross_family(
+            self.final_from_c11,
+            self.c12_boundaries.map(|boundaries| boundaries.final_point),
+            self.rx_from_c14,
+        )?;
+        Ok(())
+    }
+}
+
+const MDOC_P4B_MAC_BATCH_LABEL: &[u8] = b"s4-mdoc-p4b-mac-batch";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct BundleCircuitLayout {
     input_offset: usize,
     input_len: usize,
@@ -1453,6 +2182,31 @@ fn verifier_bundle_pad_layouts(
     let mut layouts = Vec::with_capacity(circuits.len());
     for instance in circuits {
         let input_len = verifier_circuit_input_len(&instance.circuit);
+        let input_offset = offset;
+        offset += input_len;
+        let pad_len = circuit_otp_pad_values(&instance.circuit).len();
+        layouts.push(BundleCircuitLayout {
+            input_offset,
+            input_len,
+            pad_offset: offset,
+            pad_len,
+        });
+        offset += pad_len;
+    }
+    (layouts, offset)
+}
+
+fn mdoc_p4b_verifier_bundle_pad_layouts(
+    circuits: &[MdocP4bVerifierInstance],
+    witness_len: usize,
+) -> (Vec<BundleCircuitLayout>, usize) {
+    let mut offset = witness_len;
+    let mut layouts = Vec::with_capacity(circuits.len());
+    for instance in circuits {
+        let input_len = match instance.role {
+            MdocP4bCircuitRole::MacBatch => 1usize << MAC_BATCH_GROUP_A_INPUT_LOG_SIZE,
+            _ => verifier_circuit_input_len(&instance.circuit),
+        };
         let input_offset = offset;
         offset += input_len;
         let pad_len = circuit_otp_pad_values(&instance.circuit).len();
@@ -1494,8 +2248,152 @@ fn prover_committed_values(
     (committed_values, all_layouts)
 }
 
+fn mdoc_p4b_committed_values(
+    instances: &[MdocP4bProverInstance],
+) -> (Vec<Fp>, Vec<BundleCircuitLayout>) {
+    let mut committed_values = Vec::new();
+    let mut layouts = Vec::with_capacity(instances.len());
+    for instance in instances {
+        let input_offset = committed_values.len();
+        committed_values.extend_from_slice(&instance.input);
+        let input_len = instance.input.len();
+        let pads = circuit_otp_pad_values(&instance.circuit);
+        let pad_offset = committed_values.len();
+        let pad_len = pads.len();
+        committed_values.extend(pads);
+        layouts.push(BundleCircuitLayout {
+            input_offset,
+            input_len,
+            pad_offset,
+            pad_len,
+        });
+    }
+    (committed_values, layouts)
+}
+
+fn mdoc_p4b_row_inventory(
+    params: LigeroParams,
+    committed_values: usize,
+    encoded_rows_total: usize,
+    instances: &[MdocP4bProverInstance],
+    layouts: &[BundleCircuitLayout],
+    claim_inventory: Option<MdocP4bClaimInventory>,
+) -> MdocP4bRowInventory {
+    let mut ecdsa_input_values = 0usize;
+    let mut mac_input_values = 0usize;
+    let mut otp_pad_values = 0usize;
+    let mut ecdsa_input_rows = 0usize;
+    let mut mac_input_rows = 0usize;
+    let mut otp_pad_rows = 0usize;
+
+    for (instance, layout) in instances.iter().zip(layouts) {
+        match instance.role {
+            MdocP4bCircuitRole::IssuerEcdsa | MdocP4bCircuitRole::DeviceEcdsa => {
+                ecdsa_input_values += layout.input_len;
+                ecdsa_input_rows +=
+                    row_span_count(layout.input_offset, layout.input_len, params.row_len);
+            }
+            MdocP4bCircuitRole::MacBatch => {
+                mac_input_values += layout.input_len;
+                mac_input_rows +=
+                    row_span_count(layout.input_offset, layout.input_len, params.row_len);
+            }
+        }
+        otp_pad_values += layout.pad_len;
+        otp_pad_rows += row_span_count(layout.pad_offset, layout.pad_len, params.row_len);
+    }
+
+    let claim_inventory = claim_inventory.unwrap_or_default();
+    MdocP4bRowInventory {
+        row_len: params.row_len,
+        committed_values,
+        committed_rows: committed_values.div_ceil(params.row_len),
+        encoded_rows_total,
+        ecdsa_input_values,
+        ecdsa_input_rows,
+        mac_input_values,
+        mac_input_rows,
+        otp_pad_values,
+        otp_pad_rows,
+        blind_rows: 2,
+        linear_claims: claim_inventory.linear_claims,
+        linear_claim_touched_rows: claim_inventory.linear_claim_touched_rows,
+    }
+}
+
+fn row_span_count(offset: usize, len: usize, row_len: usize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    ((offset % row_len) + len).div_ceil(row_len)
+}
+
+fn linear_claim_touched_rows(claims: &[LigeroLinearClaim], row_len: usize) -> usize {
+    let mut rows = Vec::new();
+    for claim in claims {
+        let start = claim.offset / row_len;
+        let end = (claim.offset + claim.len).div_ceil(row_len);
+        rows.extend(start..end);
+    }
+    rows.sort_unstable();
+    rows.dedup();
+    rows.len()
+}
+
+fn mdoc_p4b_instance_timing(
+    role: MdocP4bCircuitRole,
+    label: &'static [u8],
+    elapsed: Duration,
+) -> MdocP4bInstanceTiming {
+    MdocP4bInstanceTiming {
+        role: mdoc_p4b_role_name(role),
+        label: String::from_utf8_lossy(label).into_owned(),
+        elapsed,
+    }
+}
+
+fn mdoc_p4b_role_name(role: MdocP4bCircuitRole) -> &'static str {
+    match role {
+        MdocP4bCircuitRole::IssuerEcdsa => "issuer_ecdsa",
+        MdocP4bCircuitRole::DeviceEcdsa => "device_ecdsa",
+        MdocP4bCircuitRole::MacBatch => "mac_batch",
+    }
+}
+
 fn verifier_circuit_input_len(circuit: &Circuit) -> usize {
     1usize << circuit.layers().last().expect("non-empty").next_log_size()
+}
+
+fn mdoc_p4b_verifier_instances(
+    av: &Gf128,
+    mac_tags: &[Gf128],
+) -> Result<Vec<MdocP4bVerifierInstance>, ImplementedCircuitProofError> {
+    let mut instances = Vec::new();
+    for instance in
+        implemented_circuit_verifier_instances().map_err(ImplementedCircuitProofError::Circuit)?
+    {
+        instances.push(MdocP4bVerifierInstance {
+            label: instance.label,
+            role: MdocP4bCircuitRole::IssuerEcdsa,
+            circuit: instance.circuit,
+        });
+    }
+    for instance in
+        implemented_circuit_verifier_instances().map_err(ImplementedCircuitProofError::Circuit)?
+    {
+        instances.push(MdocP4bVerifierInstance {
+            label: instance.label,
+            role: MdocP4bCircuitRole::DeviceEcdsa,
+            circuit: instance.circuit,
+        });
+    }
+    instances.push(MdocP4bVerifierInstance {
+        label: MDOC_P4B_MAC_BATCH_LABEL,
+        role: MdocP4bCircuitRole::MacBatch,
+        circuit: build_mac_batch_circuit(av, mac_tags)
+            .map_err(ImplementedCircuitProofError::Circuit)?,
+    });
+    Ok(instances)
 }
 
 fn prover_claim_batch(
@@ -1547,6 +2445,118 @@ fn prover_claim_batch(
     Ok((batch, consistency_values))
 }
 
+fn mdoc_p4b_prover_claim_batch(
+    commitment: &crate::ligero::LigeroCommitment,
+    commitment_b: &crate::ligero::LigeroCommitment,
+    params: LigeroParams,
+    instances: &[MdocP4bProverInstance],
+    layouts: &[BundleCircuitLayout],
+    entries: &[ImplementedCircuitBundleEntry],
+    projections: &[EcdsaPublicProjection; 2],
+    committed_len_a: usize,
+    group_b_values: &[Fp],
+    transcript_root: [u8; 32],
+    transcript_seed: TranscriptSeed,
+) -> Result<(LigeroClaimBatch, Vec<Fp>, MdocP4bClaimInventory), ImplementedCircuitProofError> {
+    let mut claims = Vec::new();
+    let mut consistency_values = Vec::new();
+    let group_b_offset = ligero_row_count(committed_len_a, params.row_len) * params.row_len;
+    for ((instance, layout), entry) in instances.iter().zip(layouts).zip(entries) {
+        match instance.role {
+            MdocP4bCircuitRole::MacBatch => add_mac_split_input_claims(
+                &mut claims,
+                &mut consistency_values,
+                layout,
+                group_b_offset,
+                &instance.input,
+                group_b_values,
+                &entry.proof.input_claims,
+            )?,
+            _ => add_input_claims(&mut claims, layout, &entry.proof.input_claims),
+        }
+        add_pad_claims(
+            &mut claims,
+            layout,
+            &proof_otp_pad_values(&entry.proof),
+            transcript_root,
+            transcript_seed,
+        )?;
+        match instance.role {
+            MdocP4bCircuitRole::IssuerEcdsa => {
+                add_prover_family_fixed_claims(
+                    &mut claims,
+                    &mut consistency_values,
+                    &projections[0],
+                    instance.label,
+                    layout,
+                    &instance.input,
+                )?;
+                if instance.label == b"s4-ecdsa-c3-c5-scalar-setup" {
+                    add_private_value(
+                        &mut claims,
+                        &mut consistency_values,
+                        layout,
+                        C3_Z_INDEX as usize,
+                        &instance.input,
+                    )?;
+                }
+            }
+            MdocP4bCircuitRole::DeviceEcdsa => {
+                add_prover_family_fixed_claims(
+                    &mut claims,
+                    &mut consistency_values,
+                    &projections[1],
+                    instance.label,
+                    layout,
+                    &instance.input,
+                )?;
+                if instance.label == b"s4-ecdsa-c2-canonicality" {
+                    add_private_value(
+                        &mut claims,
+                        &mut consistency_values,
+                        layout,
+                        C2_QX_INDEX as usize,
+                        &instance.input,
+                    )?;
+                    add_private_value(
+                        &mut claims,
+                        &mut consistency_values,
+                        layout,
+                        C2_QY_INDEX as usize,
+                        &instance.input,
+                    )?;
+                }
+            }
+            MdocP4bCircuitRole::MacBatch => {
+                for half in 0..MDOC_P4B_MAC_HALF_COUNT {
+                    add_mac_half_public_const_claim(&mut claims, layout, half);
+                    add_mac_half_x_recompose_claim(
+                        &mut claims,
+                        &mut consistency_values,
+                        layout,
+                        &instance.input,
+                        half,
+                    )?;
+                }
+            }
+        }
+    }
+    let gamma = ligero_claim_gamma(
+        IMPLEMENTED_BUNDLE_LIGERO_LABEL,
+        transcript_root,
+        claims.len(),
+        transcript_seed,
+    );
+    let batch = commitment
+        .split_claim_batch(commitment_b, &claims, &gamma)
+        .map_err(ImplementedCircuitProofError::Ligero)?;
+    let inventory = MdocP4bClaimInventory {
+        linear_claims: claims.len(),
+        linear_claim_touched_rows: linear_claim_touched_rows(&claims, params.row_len),
+    };
+    Ok((batch, consistency_values, inventory))
+}
+
 fn add_input_claims(
     claims: &mut Vec<LigeroLinearClaim>,
     layout: &BundleCircuitLayout,
@@ -1560,6 +2570,95 @@ fn add_input_claims(
             value,
         });
     }
+}
+
+fn add_mac_split_input_claims(
+    claims: &mut Vec<LigeroLinearClaim>,
+    consistency_values: &mut Vec<Fp>,
+    layout_a: &BundleCircuitLayout,
+    group_b_offset: usize,
+    values_a: &[Fp],
+    values_b: &[Fp],
+    input_claims: &InputClaims,
+) -> Result<(), ImplementedCircuitProofError> {
+    let mle_a = Mle::new(values_a.to_vec());
+    let mle_b = Mle::new(values_b.to_vec());
+    for (point, value) in input_claims.points.iter().zip(input_claims.values) {
+        if point.len() != MAC_BATCH_INPUT_LOG_SIZE {
+            return Err(ImplementedCircuitProofError::InputClaimOpeningRejected);
+        }
+        let split = point[MAC_BATCH_GROUP_A_INPUT_LOG_SIZE];
+        let subpoint = point[..MAC_BATCH_GROUP_A_INPUT_LOG_SIZE].to_vec();
+        let value_a = mle_a
+            .eval_at(&subpoint)
+            .map_err(|_| ImplementedCircuitProofError::InputClaimOpeningRejected)?;
+        let value_b = mle_b
+            .eval_at(&subpoint)
+            .map_err(|_| ImplementedCircuitProofError::InputClaimOpeningRejected)?;
+        if (Fp::ONE - split) * value_a + split * value_b != value {
+            return Err(ImplementedCircuitProofError::InputClaimOpeningRejected);
+        }
+        consistency_values.push(value_a);
+        consistency_values.push(value_b);
+        claims.push(LigeroLinearClaim {
+            offset: layout_a.input_offset,
+            len: layout_a.input_len,
+            point: subpoint.clone(),
+            value: value_a,
+        });
+        claims.push(LigeroLinearClaim {
+            offset: group_b_offset,
+            len: values_b.len(),
+            point: subpoint,
+            value: value_b,
+        });
+    }
+    Ok(())
+}
+
+fn take_mac_split_input_claims(
+    claims: &mut Vec<LigeroLinearClaim>,
+    bundle: &ImplementedCircuitBundle,
+    cursor: &mut usize,
+    layout_a: &BundleCircuitLayout,
+    group_b_offset: usize,
+    input_claims: &InputClaims,
+) -> Result<(), ImplementedCircuitProofError> {
+    for (point, value) in input_claims.points.iter().zip(input_claims.values) {
+        if point.len() != MAC_BATCH_INPUT_LOG_SIZE {
+            return Err(ImplementedCircuitProofError::InputClaimOpeningRejected);
+        }
+        let value_a = bundle
+            .consistency_claim_values
+            .get(*cursor)
+            .copied()
+            .ok_or(ImplementedCircuitProofError::InputClaimOpeningRejected)?;
+        *cursor += 1;
+        let value_b = bundle
+            .consistency_claim_values
+            .get(*cursor)
+            .copied()
+            .ok_or(ImplementedCircuitProofError::InputClaimOpeningRejected)?;
+        *cursor += 1;
+        let split = point[MAC_BATCH_GROUP_A_INPUT_LOG_SIZE];
+        if (Fp::ONE - split) * value_a + split * value_b != value {
+            return Err(ImplementedCircuitProofError::InputClaimOpeningRejected);
+        }
+        let subpoint = point[..MAC_BATCH_GROUP_A_INPUT_LOG_SIZE].to_vec();
+        claims.push(LigeroLinearClaim {
+            offset: layout_a.input_offset,
+            len: layout_a.input_len,
+            point: subpoint.clone(),
+            value: value_a,
+        });
+        claims.push(LigeroLinearClaim {
+            offset: group_b_offset,
+            len: 1usize << MAC_BATCH_GROUP_B_INPUT_LOG_SIZE,
+            point: subpoint,
+            value: value_b,
+        });
+    }
+    Ok(())
 }
 
 fn add_pad_claims(
@@ -1802,6 +2901,99 @@ fn add_private_value(
     Ok(value)
 }
 
+fn add_mac_half_public_const_claim(
+    claims: &mut Vec<LigeroLinearClaim>,
+    layout: &BundleCircuitLayout,
+    half: usize,
+) {
+    let offset = mac_batch_half_group_a_input_offset(half);
+    add_fixed_claim(
+        claims,
+        layout.input_offset,
+        layout.input_len,
+        offset + MAC_HALF_CONST_ONE_INDEX,
+        Fp::ONE,
+    );
+}
+
+fn add_mac_half_x_recompose_claim(
+    claims: &mut Vec<LigeroLinearClaim>,
+    consistency_values: &mut Vec<Fp>,
+    layout: &BundleCircuitLayout,
+    values: &[Fp],
+    half: usize,
+) -> Result<Fp, ImplementedCircuitProofError> {
+    let offset = mac_batch_half_group_a_input_offset(half);
+    let value = mac_half_x_recomposed_value(values, offset)?;
+    let (point, scale) = mac_half_x_recompose_claim_point();
+    consistency_values.push(value);
+    claims.push(LigeroLinearClaim {
+        offset: layout.input_offset + offset + MAC_HALF_X_BITS_START,
+        len: GF128_BITS,
+        point,
+        value: value * scale,
+    });
+    Ok(value)
+}
+
+fn take_mac_half_x_recompose_claim(
+    claims: &mut Vec<LigeroLinearClaim>,
+    bundle: &ImplementedCircuitBundle,
+    cursor: &mut usize,
+    layout: &BundleCircuitLayout,
+    half: usize,
+) -> Result<Fp, ImplementedCircuitProofError> {
+    let value = bundle
+        .consistency_claim_values
+        .get(*cursor)
+        .copied()
+        .ok_or(ImplementedCircuitProofError::InputClaimOpeningRejected)?;
+    *cursor += 1;
+    let (point, scale) = mac_half_x_recompose_claim_point();
+    let offset = mac_batch_half_group_a_input_offset(half);
+    claims.push(LigeroLinearClaim {
+        offset: layout.input_offset + offset + MAC_HALF_X_BITS_START,
+        len: GF128_BITS,
+        point,
+        value: value * scale,
+    });
+    Ok(value)
+}
+
+fn mac_half_x_recomposed_value(
+    values: &[Fp],
+    offset: usize,
+) -> Result<Fp, ImplementedCircuitProofError> {
+    let mut out = Fp::ZERO;
+    let mut power = Fp::ONE;
+    for bit in 0..GF128_BITS {
+        let value = values
+            .get(offset + MAC_HALF_X_BITS_START + bit)
+            .copied()
+            .ok_or(ImplementedCircuitProofError::InputClaimOpeningRejected)?;
+        out = out + power * value;
+        power = power + power;
+    }
+    Ok(out)
+}
+
+fn mac_half_x_recompose_claim_point() -> (Vec<Fp>, Fp) {
+    let mut point = Vec::with_capacity(GF128_BITS.ilog2() as usize);
+    let mut scale = Fp::ONE;
+    for bit in 0..GF128_BITS.ilog2() {
+        let mut ratio = Fp::ONE;
+        for _ in 0..(1usize << bit) {
+            ratio = ratio + ratio;
+        }
+        let denom_inv = (Fp::ONE + ratio)
+            .inverse()
+            .expect("1 + 2^j is non-zero in Fp256");
+        point.push(ratio * denom_inv);
+        scale = scale * denom_inv;
+    }
+    (point, scale)
+}
+
 fn take_private_value(
     claims: &mut Vec<LigeroLinearClaim>,
     bundle: &ImplementedCircuitBundle,
@@ -1886,6 +3078,98 @@ fn take_c13_boundary_values(
             C13_INVS_START_INDEX as usize + C13_FINAL_ADD_DENOM_INDEX,
         )?,
     })
+}
+
+fn mdoc_p4b_take_ecdsa_claims(
+    claims: &mut Vec<LigeroLinearClaim>,
+    bundle: &ImplementedCircuitBundle,
+    cursor: &mut usize,
+    layout: &BundleCircuitLayout,
+    projection: &EcdsaPublicProjection,
+    state: &mut MdocP4bEcdsaConsistency,
+    label: &[u8],
+) -> Result<(), ImplementedCircuitProofError> {
+    match label {
+        b"s4-ecdsa-c1-input-limbs" => add_c1_public_claims(claims, projection, layout)?,
+        b"s4-ecdsa-c2-canonicality" => {
+            add_c2_public_claims(claims, projection, layout)?;
+        }
+        b"s4-ecdsa-c3-c5-scalar-setup" => {
+            add_c3_public_claims(claims, projection, layout)?;
+            state.u_scalars_from_c3 = Some((
+                take_private_value(claims, bundle, cursor, layout, C3_U1_INDEX as usize)?,
+                take_private_value(claims, bundle, cursor, layout, C3_U2_INDEX as usize)?,
+            ));
+        }
+        b"s4-ecdsa-c6-scalar-bits" => {
+            state.u_scalars_from_c6 = Some((
+                take_private_value(claims, bundle, cursor, layout, C6_U1_INDEX as usize)?,
+                take_private_value(claims, bundle, cursor, layout, C6_U2_INDEX as usize)?,
+            ));
+        }
+        b"s4-ecdsa-c9-c10-accumulator-on-curve" => {
+            state.accumulator_endpoints_from_c9_c10 = Some(take_c9_c10_accumulator_endpoints(
+                claims, bundle, cursor, layout,
+            )?);
+        }
+        b"s4-ecdsa-c11-final-add" => {
+            let ax = take_private_value(claims, bundle, cursor, layout, C11_AX_INDEX as usize)?;
+            let ay = take_private_value(claims, bundle, cursor, layout, C11_AY_INDEX as usize)?;
+            let bx = take_private_value(claims, bundle, cursor, layout, C11_BX_INDEX as usize)?;
+            let by = take_private_value(claims, bundle, cursor, layout, C11_BY_INDEX as usize)?;
+            let rx = take_private_value(claims, bundle, cursor, layout, C11_RX_INDEX as usize)?;
+            let ry = take_private_value(claims, bundle, cursor, layout, C11_RY_INDEX as usize)?;
+            let denom_inv =
+                take_private_value(claims, bundle, cursor, layout, C11_DENOM_INV_INDEX as usize)?;
+            state.add_inputs_from_c11 = Some(((ax, ay), (bx, by)));
+            state.denom_inv_from_c11 = Some(denom_inv);
+            state.final_from_c11 = Some((rx, ry));
+        }
+        b"s4-ecdsa-c12-final-on-curve" => {
+            state.c12_boundaries = Some(take_c12_boundary_values(claims, bundle, cursor, layout)?);
+        }
+        b"s4-ecdsa-c13-slope-inverses" => {
+            state.c13_boundary_values =
+                Some(take_c13_boundary_values(claims, bundle, cursor, layout)?);
+        }
+        b"s4-ecdsa-c14-c15-final-check" => {
+            add_c14_public_claims(claims, projection, layout)?;
+            state.rx_from_c14 = Some(take_private_value(
+                claims,
+                bundle,
+                cursor,
+                layout,
+                C14_RX_INDEX as usize,
+            )?);
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn verify_mdoc_p4b_native_mac_consistency(
+    issuer_z: Option<Fp>,
+    device_qx: Option<Fp>,
+    device_qy: Option<Fp>,
+    mac_halves: [Option<Fp>; MDOC_P4B_MAC_HALF_COUNT],
+) -> Result<(), ImplementedCircuitProofError> {
+    let read = |index: usize| {
+        mac_halves[index].ok_or(ImplementedCircuitProofError::CrossFamilyBindingRejected)
+    };
+    let issuer_z = issuer_z.ok_or(ImplementedCircuitProofError::CrossFamilyBindingRejected)?;
+    let device_qx = device_qx.ok_or(ImplementedCircuitProofError::CrossFamilyBindingRejected)?;
+    let device_qy = device_qy.ok_or(ImplementedCircuitProofError::CrossFamilyBindingRejected)?;
+
+    if read(0)? + two_pow_128() * read(1)? != issuer_z {
+        return Err(ImplementedCircuitProofError::CrossFamilyBindingRejected);
+    }
+    if read(2)? + two_pow_128() * read(3)? != device_qx {
+        return Err(ImplementedCircuitProofError::CrossFamilyBindingRejected);
+    }
+    if read(4)? + two_pow_128() * read(5)? != device_qy {
+        return Err(ImplementedCircuitProofError::CrossFamilyBindingRejected);
+    }
+    Ok(())
 }
 
 fn add_fixed_claim(
@@ -2038,6 +3322,779 @@ fn implemented_circuit_verifier_instances() -> Result<Vec<VerifierCircuitInstanc
             circuit: build_c14_c15_final_check_circuit()?,
         },
     ])
+}
+
+pub fn build_mac_half_circuit(av: &Gf128, tag: &Gf128) -> Result<Circuit, CircuitError> {
+    let av_bits = bytes_to_bits(av);
+    let tag_bits = bytes_to_bits(tag);
+    let local_constraints = mac_half_local_constraint_count();
+    let mut layers = Vec::new();
+    layers.push(mac_half_final_layer(local_constraints)?);
+    let mut block_size = 1usize;
+    while block_size < MAC_HALF_TREE_BLOCK_SIZE {
+        layers.push(mac_half_reduce_tree_layer(
+            block_size * 2,
+            local_constraints,
+        )?);
+        block_size *= 2;
+    }
+    layers.push(mac_half_product_reduce_layer(&tag_bits, local_constraints)?);
+    layers.push(mac_half_input_layer(&av_bits)?);
+    Circuit::new(layers)
+}
+
+fn build_mac_batch_circuit(av: &Gf128, tags: &[Gf128]) -> Result<Circuit, CircuitError> {
+    if tags.len() != MDOC_P4B_MAC_HALF_COUNT {
+        return Err(CircuitError::InvalidTermIndex);
+    }
+    let av_bits = bytes_to_bits(av);
+    let tag_bits: [[bool; GF128_BITS]; MDOC_P4B_MAC_HALF_COUNT] =
+        std::array::from_fn(|index| bytes_to_bits(&tags[index]));
+    let local_constraints = mac_half_local_constraint_count();
+    let mut layers = Vec::new();
+    layers.push(mac_batch_final_layer(local_constraints)?);
+    let mut block_size = 1usize;
+    while block_size < MAC_HALF_TREE_BLOCK_SIZE {
+        layers.push(mac_batch_reduce_tree_layer(
+            block_size * 2,
+            local_constraints,
+        )?);
+        block_size *= 2;
+    }
+    layers.push(mac_batch_product_reduce_layer(
+        &tag_bits,
+        local_constraints,
+    )?);
+    layers.push(mac_batch_input_layer(&av_bits)?);
+    Circuit::new(layers)
+}
+
+pub fn mac_half_input(ap: &Gf128, x: &Gf128) -> Result<Vec<Fp>, WitnessError> {
+    mac_half_input_with_av(ap, &[0u8; 16], x)
+}
+
+pub fn mac_half_input_with_av(ap: &Gf128, av: &Gf128, x: &Gf128) -> Result<Vec<Fp>, WitnessError> {
+    let mut input = vec![Fp::ZERO; 1usize << MAC_HALF_INPUT_LOG_SIZE];
+    let group_a = mac_half_group_a_input(ap, x)?;
+    input[..group_a.len()].copy_from_slice(&group_a);
+    let tag = gf128_tag(ap, av, x);
+    let group_b = mac_half_group_b_input(ap, av, x, &tag)?;
+    input[MAC_HALF_GROUP_B_INPUT_START..MAC_HALF_GROUP_B_INPUT_START + group_b.len()]
+        .copy_from_slice(&group_b);
+    Ok(input)
+}
+
+fn mac_half_group_a_input(ap: &Gf128, x: &Gf128) -> Result<Vec<Fp>, WitnessError> {
+    let ap_bits = bytes_to_bits(ap);
+    let x_bits = bytes_to_bits(x);
+    let mut input = vec![Fp::ZERO; 1usize << MAC_HALF_GROUP_A_INPUT_LOG_SIZE];
+
+    input[MAC_HALF_CONST_ONE_INDEX] = Fp::ONE;
+    for bit in 0..GF128_BITS {
+        input[MAC_HALF_X_BITS_START + bit] = fp_bit(x_bits[bit]);
+        input[MAC_HALF_AP_BITS_START + bit] = fp_bit(ap_bits[bit]);
+    }
+    Ok(input)
+}
+
+fn mac_half_group_b_input(
+    ap: &Gf128,
+    av: &Gf128,
+    x: &Gf128,
+    tag: &Gf128,
+) -> Result<Vec<Fp>, WitnessError> {
+    let ap_bits = bytes_to_bits(ap);
+    let av_bits = bytes_to_bits(av);
+    let x_bits = bytes_to_bits(x);
+    let tag_bits = bytes_to_bits(tag);
+    let q_bits = mac_half_q_witness(&ap_bits, &av_bits, &x_bits, &tag_bits);
+    let mut input = vec![Fp::ZERO; MAC_HALF_GROUP_B_USED_INPUTS];
+    for bit in 0..GF128_BITS {
+        for q_bit in 0..MAC_HALF_PARITY_Q_BITS {
+            input[mac_half_group_b_q_bit_index(bit, q_bit)] = fp_bit(q_bits[bit][q_bit]);
+        }
+    }
+    Ok(input)
+}
+
+fn mac_batch_group_a_input(
+    mac_key_shares: &MdocP4bMacKeyShares,
+    mac_values: &[Gf128; MDOC_P4B_MAC_HALF_COUNT],
+) -> Result<Vec<Fp>, WitnessError> {
+    let mut input = vec![Fp::ZERO; 1usize << MAC_BATCH_GROUP_A_INPUT_LOG_SIZE];
+    for half in 0..MDOC_P4B_MAC_HALF_COUNT {
+        let offset = mac_batch_half_group_a_input_offset(half);
+        let half_input = mac_half_group_a_input(&mac_key_shares.0[half], &mac_values[half])?;
+        input[offset..offset + half_input.len()].copy_from_slice(&half_input);
+    }
+    Ok(input)
+}
+
+fn mac_batch_group_b_input(
+    mac_key_shares: &MdocP4bMacKeyShares,
+    av: &Gf128,
+    mac_values: &[Gf128; MDOC_P4B_MAC_HALF_COUNT],
+    mac_tags: &[Gf128],
+) -> Result<Vec<Fp>, WitnessError> {
+    if mac_tags.len() != MDOC_P4B_MAC_HALF_COUNT {
+        return Err(WitnessError::LayoutMismatch);
+    }
+    let mut input = vec![Fp::ZERO; 1usize << MAC_BATCH_GROUP_B_INPUT_LOG_SIZE];
+    for half in 0..MDOC_P4B_MAC_HALF_COUNT {
+        let offset = mac_batch_half_group_b_input_offset(half);
+        let half_input = mac_half_group_b_input(
+            &mac_key_shares.0[half],
+            av,
+            &mac_values[half],
+            &mac_tags[half],
+        )?;
+        input[offset..offset + half_input.len()].copy_from_slice(&half_input);
+    }
+    Ok(input)
+}
+
+fn mac_batch_input_with_av(
+    mac_key_shares: &MdocP4bMacKeyShares,
+    av: &Gf128,
+    mac_values: &[Gf128; MDOC_P4B_MAC_HALF_COUNT],
+    mac_tags: &[Gf128],
+) -> Result<Vec<Fp>, WitnessError> {
+    let mut input = vec![Fp::ZERO; 1usize << MAC_BATCH_INPUT_LOG_SIZE];
+    let group_a = mac_batch_group_a_input(mac_key_shares, mac_values)?;
+    input[..group_a.len()].copy_from_slice(&group_a);
+    let group_b = mac_batch_group_b_input(mac_key_shares, av, mac_values, mac_tags)?;
+    input[MAC_BATCH_GROUP_B_INPUT_START..MAC_BATCH_GROUP_B_INPUT_START + group_b.len()]
+        .copy_from_slice(&group_b);
+    Ok(input)
+}
+
+pub fn gf128_halves_from_be32(value: [u8; 32]) -> [Gf128; 2] {
+    let mut lo = [0u8; 16];
+    let mut hi = [0u8; 16];
+    for index in 0..16 {
+        lo[index] = value[31 - index];
+        hi[index] = value[15 - index];
+    }
+    [lo, hi]
+}
+
+pub fn recompose_gf128_halves(lo: &Gf128, hi: &Gf128) -> Fp {
+    let lo_bits = bytes_to_bits(lo);
+    let hi_bits = bytes_to_bits(hi);
+    fp_from_bits_le(&lo_bits) + two_pow_128() * fp_from_bits_le(&hi_bits)
+}
+
+fn mac_half_input_layer(av_bits: &[bool; GF128_BITS]) -> Result<Layer, CircuitError> {
+    let av_fold = av_linear_fold_slots(av_bits);
+    let mut terms = Vec::with_capacity(28_000);
+    add_linear(
+        &mut terms,
+        mac_half_tree_const_index(),
+        MAC_HALF_CONST_ONE_INDEX,
+        Fp::ONE,
+    );
+    for ap_bit in 0..GF128_BITS {
+        for x_bit in 0..GF128_BITS {
+            add_quadratic(
+                &mut terms,
+                mac_half_product_coeff_index(ap_bit + x_bit),
+                MAC_HALF_AP_BITS_START + ap_bit,
+                MAC_HALF_X_BITS_START + x_bit,
+                Fp::ONE,
+            );
+        }
+    }
+    for (out_bit, leaves) in av_fold.iter().enumerate() {
+        for (x_bit, present) in leaves.iter().copied().enumerate() {
+            if present {
+                add_linear(
+                    &mut terms,
+                    mac_half_tree_l_index(out_bit),
+                    MAC_HALF_X_BITS_START + x_bit,
+                    Fp::ONE,
+                );
+            }
+        }
+    }
+    for bit in 0..GF128_BITS {
+        for q_bit in 0..MAC_HALF_PARITY_Q_BITS {
+            add_linear(
+                &mut terms,
+                mac_half_tree_qsum_index(bit),
+                mac_half_q_bit_index(bit, q_bit),
+                Fp::from_u64(1u64 << q_bit),
+            );
+        }
+    }
+    let mut local = mac_half_tree_local_start();
+    for bit in 0..GF128_BITS {
+        add_bool_constraint(&mut terms, local, MAC_HALF_X_BITS_START + bit);
+        local += 1;
+        add_bool_constraint(&mut terms, local, MAC_HALF_AP_BITS_START + bit);
+        local += 1;
+        for q_bit in 0..MAC_HALF_PARITY_Q_BITS {
+            add_bool_constraint(&mut terms, local, mac_half_q_bit_index(bit, q_bit));
+            local += 1;
+        }
+    }
+    debug_assert_eq!(
+        local,
+        mac_half_tree_local_start() + MAC_HALF_BOOL_CONSTRAINTS
+    );
+
+    Layer::new(MAC_HALF_TREE_LOG_SIZE, MAC_HALF_INPUT_LOG_SIZE, terms)
+}
+
+fn mac_batch_input_layer(av_bits: &[bool; GF128_BITS]) -> Result<Layer, CircuitError> {
+    let av_fold = av_linear_fold_slots(av_bits);
+    let mut terms = Vec::with_capacity(MDOC_P4B_MAC_HALF_COUNT * 28_000);
+    for half in 0..MDOC_P4B_MAC_HALF_COUNT {
+        let input_offset = mac_batch_half_group_a_input_offset(half);
+        let b_input_offset = mac_batch_half_group_b_full_input_offset(half);
+        add_linear(
+            &mut terms,
+            mac_batch_tree_const_index(half),
+            input_offset + MAC_HALF_CONST_ONE_INDEX,
+            Fp::ONE,
+        );
+        for ap_bit in 0..GF128_BITS {
+            for x_bit in 0..GF128_BITS {
+                add_quadratic(
+                    &mut terms,
+                    mac_batch_product_coeff_index(half, ap_bit + x_bit),
+                    input_offset + MAC_HALF_AP_BITS_START + ap_bit,
+                    input_offset + MAC_HALF_X_BITS_START + x_bit,
+                    Fp::ONE,
+                );
+            }
+        }
+        for (out_bit, leaves) in av_fold.iter().enumerate() {
+            for (x_bit, present) in leaves.iter().copied().enumerate() {
+                if present {
+                    add_linear(
+                        &mut terms,
+                        mac_batch_tree_l_index(half, out_bit),
+                        input_offset + MAC_HALF_X_BITS_START + x_bit,
+                        Fp::ONE,
+                    );
+                }
+            }
+        }
+        for bit in 0..GF128_BITS {
+            for q_bit in 0..MAC_HALF_PARITY_Q_BITS {
+                add_linear(
+                    &mut terms,
+                    mac_batch_tree_qsum_index(half, bit),
+                    b_input_offset + mac_half_group_b_q_bit_index(bit, q_bit),
+                    Fp::from_u64(1u64 << q_bit),
+                );
+            }
+        }
+        let mut local = mac_batch_tree_local_start(half);
+        for bit in 0..GF128_BITS {
+            add_bool_constraint(
+                &mut terms,
+                local,
+                input_offset + MAC_HALF_X_BITS_START + bit,
+            );
+            local += 1;
+            add_bool_constraint(
+                &mut terms,
+                local,
+                input_offset + MAC_HALF_AP_BITS_START + bit,
+            );
+            local += 1;
+            for q_bit in 0..MAC_HALF_PARITY_Q_BITS {
+                add_bool_constraint(
+                    &mut terms,
+                    local,
+                    b_input_offset + mac_half_group_b_q_bit_index(bit, q_bit),
+                );
+                local += 1;
+            }
+        }
+        debug_assert_eq!(
+            local,
+            mac_batch_tree_local_start(half) + MAC_HALF_BOOL_CONSTRAINTS
+        );
+    }
+
+    Layer::new(MAC_BATCH_TREE_LOG_SIZE, MAC_BATCH_INPUT_LOG_SIZE, terms)
+}
+
+fn mac_half_product_reduce_layer(
+    tag_bits: &[bool; GF128_BITS],
+    local_constraints: usize,
+) -> Result<Layer, CircuitError> {
+    let mut terms =
+        Vec::with_capacity(GF128_BITS * 10 + MAC_HALF_PRODUCT_COEFFS * 3 + local_constraints);
+    add_linear(
+        &mut terms,
+        mac_half_tree_const_index(),
+        mac_half_tree_const_index(),
+        Fp::ONE,
+    );
+    for bit in 0..GF128_BITS {
+        let tag_pin = mac_half_tree_local_start() + MAC_HALF_BOOL_CONSTRAINTS + bit;
+        for power in 0..MAC_HALF_PRODUCT_COEFFS {
+            if monomial_reduction_bits(power).contains(&bit) {
+                add_linear(
+                    &mut terms,
+                    tag_pin,
+                    mac_half_product_coeff_index(power),
+                    Fp::ONE,
+                );
+            }
+        }
+        add_linear(&mut terms, tag_pin, mac_half_tree_l_index(bit), Fp::ONE);
+        add_linear(
+            &mut terms,
+            tag_pin,
+            mac_half_tree_qsum_index(bit),
+            -Fp::from_u64(2),
+        );
+        if tag_bits[bit] {
+            add_constant(&mut terms, tag_pin, -Fp::ONE);
+        }
+    }
+    for index in 0..local_constraints {
+        add_linear(
+            &mut terms,
+            mac_half_tree_local_start() + index,
+            mac_half_tree_local_start() + index,
+            Fp::ONE,
+        );
+    }
+
+    Layer::new(MAC_HALF_TREE_LOG_SIZE, MAC_HALF_TREE_LOG_SIZE, terms)
+}
+
+fn mac_batch_product_reduce_layer(
+    tag_bits: &[[bool; GF128_BITS]; MDOC_P4B_MAC_HALF_COUNT],
+    local_constraints: usize,
+) -> Result<Layer, CircuitError> {
+    let mut terms = Vec::with_capacity(
+        MDOC_P4B_MAC_HALF_COUNT
+            * (GF128_BITS * 10 + MAC_HALF_PRODUCT_COEFFS * 3 + local_constraints),
+    );
+    for half in 0..MDOC_P4B_MAC_HALF_COUNT {
+        add_linear(
+            &mut terms,
+            mac_batch_tree_const_index(half),
+            mac_batch_tree_const_index(half),
+            Fp::ONE,
+        );
+        for bit in 0..GF128_BITS {
+            let tag_pin = mac_batch_tree_local_start(half) + MAC_HALF_BOOL_CONSTRAINTS + bit;
+            for power in 0..MAC_HALF_PRODUCT_COEFFS {
+                if monomial_reduction_bits(power).contains(&bit) {
+                    add_linear(
+                        &mut terms,
+                        tag_pin,
+                        mac_batch_product_coeff_index(half, power),
+                        Fp::ONE,
+                    );
+                }
+            }
+            add_linear(
+                &mut terms,
+                tag_pin,
+                mac_batch_tree_l_index(half, bit),
+                Fp::ONE,
+            );
+            add_linear(
+                &mut terms,
+                tag_pin,
+                mac_batch_tree_qsum_index(half, bit),
+                -Fp::from_u64(2),
+            );
+            if tag_bits[half][bit] {
+                add_constant(&mut terms, tag_pin, -Fp::ONE);
+            }
+        }
+        for index in 0..local_constraints {
+            add_linear(
+                &mut terms,
+                mac_batch_tree_local_start(half) + index,
+                mac_batch_tree_local_start(half) + index,
+                Fp::ONE,
+            );
+        }
+    }
+
+    Layer::new(MAC_BATCH_TREE_LOG_SIZE, MAC_BATCH_TREE_LOG_SIZE, terms)
+}
+
+fn mac_half_reduce_tree_layer(
+    previous_block_size: usize,
+    local_constraints: usize,
+) -> Result<Layer, CircuitError> {
+    debug_assert!(previous_block_size.is_power_of_two());
+    debug_assert!(previous_block_size >= 2);
+    let next_block_size = previous_block_size / 2;
+    let mut terms = Vec::with_capacity(GF128_BITS * next_block_size * 4 + local_constraints);
+    add_linear(
+        &mut terms,
+        mac_half_tree_const_index(),
+        mac_half_tree_const_index(),
+        Fp::ONE,
+    );
+    for bit in 0..GF128_BITS {
+        for slot in 0..next_block_size {
+            add_xor_value(
+                &mut terms,
+                mac_half_tree_value_index(bit, slot),
+                mac_half_tree_value_index(bit, 2 * slot),
+                mac_half_tree_value_index(bit, 2 * slot + 1),
+                mac_half_tree_const_index(),
+            );
+        }
+    }
+    for index in 0..local_constraints {
+        add_linear(
+            &mut terms,
+            mac_half_tree_local_start() + index,
+            mac_half_tree_local_start() + index,
+            Fp::ONE,
+        );
+    }
+
+    Layer::new(MAC_HALF_TREE_LOG_SIZE, MAC_HALF_TREE_LOG_SIZE, terms)
+}
+
+fn mac_batch_reduce_tree_layer(
+    previous_block_size: usize,
+    local_constraints: usize,
+) -> Result<Layer, CircuitError> {
+    debug_assert!(previous_block_size.is_power_of_two());
+    debug_assert!(previous_block_size >= 2);
+    let next_block_size = previous_block_size / 2;
+    let mut terms = Vec::with_capacity(
+        MDOC_P4B_MAC_HALF_COUNT * (GF128_BITS * next_block_size * 4 + local_constraints),
+    );
+    for half in 0..MDOC_P4B_MAC_HALF_COUNT {
+        add_linear(
+            &mut terms,
+            mac_batch_tree_const_index(half),
+            mac_batch_tree_const_index(half),
+            Fp::ONE,
+        );
+        for bit in 0..GF128_BITS {
+            for slot in 0..next_block_size {
+                add_xor_value(
+                    &mut terms,
+                    mac_batch_tree_value_index(half, bit, slot),
+                    mac_batch_tree_value_index(half, bit, 2 * slot),
+                    mac_batch_tree_value_index(half, bit, 2 * slot + 1),
+                    mac_batch_tree_const_index(half),
+                );
+            }
+        }
+        for index in 0..local_constraints {
+            add_linear(
+                &mut terms,
+                mac_batch_tree_local_start(half) + index,
+                mac_batch_tree_local_start(half) + index,
+                Fp::ONE,
+            );
+        }
+    }
+
+    Layer::new(MAC_BATCH_TREE_LOG_SIZE, MAC_BATCH_TREE_LOG_SIZE, terms)
+}
+
+fn mac_half_final_layer(local_constraints: usize) -> Result<Layer, CircuitError> {
+    let mut terms = Vec::with_capacity(local_constraints);
+    for index in 0..local_constraints {
+        add_linear(
+            &mut terms,
+            index,
+            mac_half_tree_local_start() + index,
+            Fp::ONE,
+        );
+    }
+
+    Layer::new(MAC_HALF_INPUT_LOG_SIZE, MAC_HALF_TREE_LOG_SIZE, terms)
+}
+
+fn mac_batch_final_layer(local_constraints: usize) -> Result<Layer, CircuitError> {
+    let mut terms = Vec::with_capacity(MDOC_P4B_MAC_HALF_COUNT * local_constraints);
+    for half in 0..MDOC_P4B_MAC_HALF_COUNT {
+        let output_offset = half * MAC_BATCH_OUTPUT_STRIDE;
+        for index in 0..local_constraints {
+            add_linear(
+                &mut terms,
+                output_offset + index,
+                mac_batch_tree_local_start(half) + index,
+                Fp::ONE,
+            );
+        }
+    }
+
+    Layer::new(MAC_BATCH_INPUT_LOG_SIZE, MAC_BATCH_TREE_LOG_SIZE, terms)
+}
+
+fn mac_half_local_constraint_count() -> usize {
+    MAC_HALF_LOCAL_CONSTRAINTS
+}
+
+const fn mac_half_tree_width() -> usize {
+    1 + MAC_HALF_PRODUCT_COEFFS + GF128_BITS + GF128_BITS + MAC_HALF_LOCAL_CONSTRAINTS
+}
+
+fn mac_half_q_bit_index(bit: usize, q_bit: usize) -> usize {
+    debug_assert!(bit < GF128_BITS);
+    debug_assert!(q_bit < MAC_HALF_PARITY_Q_BITS);
+    MAC_HALF_Q_BITS_START + bit * MAC_HALF_PARITY_Q_BITS + q_bit
+}
+
+fn mac_half_group_b_q_bit_index(bit: usize, q_bit: usize) -> usize {
+    debug_assert!(bit < GF128_BITS);
+    debug_assert!(q_bit < MAC_HALF_PARITY_Q_BITS);
+    bit * MAC_HALF_PARITY_Q_BITS + q_bit
+}
+
+fn mac_half_tree_const_index() -> usize {
+    0
+}
+
+fn mac_half_product_coeff_index(power: usize) -> usize {
+    debug_assert!(power < MAC_HALF_PRODUCT_COEFFS);
+    1 + power
+}
+
+fn mac_half_tree_values_start() -> usize {
+    1 + MAC_HALF_PRODUCT_COEFFS
+}
+
+fn mac_half_tree_l_index(bit: usize) -> usize {
+    debug_assert!(bit < GF128_BITS);
+    mac_half_tree_values_start() + bit
+}
+
+fn mac_half_tree_value_index(bit: usize, slot: usize) -> usize {
+    debug_assert!(bit < GF128_BITS);
+    debug_assert!(slot < MAC_HALF_TREE_BLOCK_SIZE);
+    mac_half_tree_l_index(bit)
+}
+
+fn mac_half_tree_u_start() -> usize {
+    mac_half_tree_values_start() + GF128_BITS
+}
+
+fn mac_half_tree_qsum_start() -> usize {
+    mac_half_tree_u_start()
+}
+
+fn mac_half_tree_qsum_index(bit: usize) -> usize {
+    debug_assert!(bit < GF128_BITS);
+    mac_half_tree_qsum_start() + bit
+}
+
+fn mac_half_tree_local_start() -> usize {
+    mac_half_tree_qsum_start() + GF128_BITS
+}
+
+fn mac_batch_half_group_a_input_offset(half: usize) -> usize {
+    debug_assert!(half < MDOC_P4B_MAC_HALF_COUNT);
+    half * MAC_BATCH_HALF_GROUP_A_INPUT_STRIDE
+}
+
+fn mac_batch_half_group_b_input_offset(half: usize) -> usize {
+    debug_assert!(half < MDOC_P4B_MAC_HALF_COUNT);
+    half * MAC_BATCH_HALF_GROUP_B_INPUT_STRIDE
+}
+
+fn mac_batch_half_group_b_full_input_offset(half: usize) -> usize {
+    MAC_BATCH_GROUP_B_INPUT_START + mac_batch_half_group_b_input_offset(half)
+}
+
+fn mac_batch_tree_half_start(half: usize) -> usize {
+    debug_assert!(half < MDOC_P4B_MAC_HALF_COUNT);
+    half * MAC_BATCH_TREE_HALF_WIDTH
+}
+
+fn mac_batch_tree_const_index(half: usize) -> usize {
+    mac_batch_tree_half_start(half)
+}
+
+fn mac_batch_product_coeff_index(half: usize, power: usize) -> usize {
+    mac_batch_tree_half_start(half) + mac_half_product_coeff_index(power)
+}
+
+fn mac_batch_tree_value_index(half: usize, bit: usize, slot: usize) -> usize {
+    debug_assert!(bit < GF128_BITS);
+    debug_assert!(slot < MAC_HALF_TREE_BLOCK_SIZE);
+    mac_batch_tree_half_start(half) + mac_half_tree_value_index(bit, slot)
+}
+
+fn mac_batch_tree_l_index(half: usize, bit: usize) -> usize {
+    mac_batch_tree_half_start(half) + mac_half_tree_l_index(bit)
+}
+
+fn mac_batch_tree_qsum_index(half: usize, bit: usize) -> usize {
+    mac_batch_tree_half_start(half) + mac_half_tree_qsum_index(bit)
+}
+
+fn mac_batch_tree_local_start(half: usize) -> usize {
+    mac_batch_tree_half_start(half) + mac_half_tree_local_start()
+}
+
+fn monomial_reduction_bits(power: usize) -> Vec<usize> {
+    let mut coeffs = [false; 255];
+    coeffs[power] = true;
+    for high in (GF128_BITS..255).rev() {
+        if coeffs[high] {
+            for offset in [0usize, 1, 2, 7] {
+                coeffs[high - GF128_BITS + offset] ^= true;
+            }
+        }
+    }
+    coeffs[..GF128_BITS]
+        .iter()
+        .enumerate()
+        .filter_map(|(index, bit)| bit.then_some(index))
+        .collect()
+}
+
+fn mac_half_q_witness(
+    ap_bits: &[bool; GF128_BITS],
+    av_bits: &[bool; GF128_BITS],
+    x_bits: &[bool; GF128_BITS],
+    tag_bits: &[bool; GF128_BITS],
+) -> [[bool; MAC_HALF_PARITY_Q_BITS]; GF128_BITS] {
+    let mut counts = [0usize; GF128_BITS];
+    for ap_bit in 0..GF128_BITS {
+        if !ap_bits[ap_bit] {
+            continue;
+        }
+        for x_bit in 0..GF128_BITS {
+            if !x_bits[x_bit] {
+                continue;
+            }
+            for out_bit in monomial_reduction_bits(ap_bit + x_bit) {
+                counts[out_bit] += 1;
+            }
+        }
+    }
+    let av_fold = av_linear_fold_slots(av_bits);
+    for out_bit in 0..GF128_BITS {
+        for x_bit in 0..GF128_BITS {
+            if av_fold[out_bit][x_bit] && x_bits[x_bit] {
+                counts[out_bit] += 1;
+            }
+        }
+    }
+
+    std::array::from_fn(|bit| {
+        let tag = usize::from(tag_bits[bit]);
+        debug_assert_eq!(counts[bit] & 1, tag);
+        let q = (counts[bit] - tag) / 2;
+        debug_assert!(q < (1usize << MAC_HALF_PARITY_Q_BITS));
+        std::array::from_fn(|q_bit| ((q >> q_bit) & 1) == 1)
+    })
+}
+
+fn av_linear_fold_slots(av_bits: &[bool; GF128_BITS]) -> [[bool; GF128_BITS]; GF128_BITS] {
+    let mut slots = [[false; GF128_BITS]; GF128_BITS];
+    for av_bit in 0..GF128_BITS {
+        if !av_bits[av_bit] {
+            continue;
+        }
+        for x_bit in 0..GF128_BITS {
+            for out_bit in monomial_reduction_bits(av_bit + x_bit) {
+                slots[out_bit][x_bit] ^= true;
+            }
+        }
+    }
+    slots
+}
+
+#[cfg(test)]
+fn mac_reduction_max_weight() -> usize {
+    (0..GF128_BITS)
+        .map(|bit| {
+            (0..MAC_HALF_PRODUCT_COEFFS)
+                .filter(|&power| monomial_reduction_bits(power).contains(&bit))
+                .map(|power| usize::min(power + 1, MAC_HALF_PRODUCT_COEFFS - power))
+                .sum::<usize>()
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+fn mac_product_coeff_max_weight() -> usize {
+    (0..MAC_HALF_PRODUCT_COEFFS)
+        .map(|power| usize::min(power + 1, MAC_HALF_PRODUCT_COEFFS - power))
+        .max()
+        .unwrap_or(0)
+}
+
+fn add_bool_constraint(terms: &mut Vec<QuadTerm>, out: usize, wire: usize) {
+    add_quadratic(terms, out, wire, wire, Fp::ONE);
+    add_linear(terms, out, wire, -Fp::ONE);
+}
+
+fn add_xor_value(terms: &mut Vec<QuadTerm>, out: usize, left: usize, right: usize, one: usize) {
+    add_linear_with_one(terms, out, left, Fp::ONE, one);
+    add_linear_with_one(terms, out, right, Fp::ONE, one);
+    add_quadratic(terms, out, left, right, -Fp::from_u64(2));
+}
+
+fn fp_from_bits_le(bits: &[bool; GF128_BITS]) -> Fp {
+    let mut acc = Fp::ZERO;
+    let mut power = Fp::ONE;
+    for bit in bits {
+        if *bit {
+            acc = acc + power;
+        }
+        power = power + power;
+    }
+    acc
+}
+
+fn fp_bit(bit: bool) -> Fp {
+    if bit {
+        Fp::ONE
+    } else {
+        Fp::ZERO
+    }
+}
+
+fn two_pow_128() -> Fp {
+    let mut power = Fp::ONE;
+    for _ in 0..GF128_BITS {
+        power = power + power;
+    }
+    power
+}
+
+fn add_linear(terms: &mut Vec<QuadTerm>, out: usize, wire: usize, coeff: Fp) {
+    add_linear_with_one(terms, out, wire, coeff, MAC_HALF_CONST_ONE_INDEX);
+}
+
+fn add_constant(terms: &mut Vec<QuadTerm>, out: usize, coeff: Fp) {
+    add_quadratic(
+        terms,
+        out,
+        MAC_HALF_CONST_ONE_INDEX,
+        MAC_HALF_CONST_ONE_INDEX,
+        coeff,
+    );
+}
+
+fn add_linear_with_one(terms: &mut Vec<QuadTerm>, out: usize, wire: usize, coeff: Fp, one: usize) {
+    add_quadratic(terms, out, wire, one, coeff);
+}
+
+fn add_quadratic(terms: &mut Vec<QuadTerm>, out: usize, left: usize, right: usize, coeff: Fp) {
+    terms.push(QuadTerm {
+        out: out as u32,
+        l: left as u32,
+        r: right as u32,
+        coeff,
+    });
 }
 
 pub fn build_c1_input_limbs_circuit() -> Result<Circuit, CircuitError> {
@@ -3182,5 +5239,197 @@ fn require_circuit_satisfied(
     match circuit.is_satisfied(&layers) {
         Ok(true) => Ok(()),
         Ok(false) | Err(_) => Err(WitnessError::ConstraintViolation { slot }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sumcheck::{
+        prove_evaluated_circuit_sorted_sparse_profiled, verify_circuit_sorted_sparse_profiled,
+    };
+
+    fn p4b_microbench_input(seed: u8) -> EcdsaInput {
+        EcdsaInput {
+            z: [seed; 32],
+            r: [seed.wrapping_add(1); 32],
+            s: [seed.wrapping_add(2); 32],
+            qx: [seed.wrapping_add(3); 32],
+            qy: [seed.wrapping_add(4); 32],
+        }
+    }
+
+    fn p4b_microbench_key_shares() -> MdocP4bMacKeyShares {
+        MdocP4bMacKeyShares(std::array::from_fn(|half| {
+            let mut share = [0u8; 16];
+            for (byte_index, byte) in share.iter_mut().enumerate() {
+                *byte = 0x51u8
+                    .wrapping_add(half as u8 * 17)
+                    .wrapping_add(byte_index as u8 * 13);
+            }
+            share
+        }))
+    }
+
+    fn gf128_basis(bit: usize) -> Gf128 {
+        let mut out = [0u8; 16];
+        out[bit / 8] = 1 << (bit % 8);
+        out
+    }
+
+    #[test]
+    fn q024_mac_reduction_bounds_are_pinned() {
+        assert_eq!(
+            mac_product_coeff_max_weight(),
+            GF128_BITS,
+            "each unreduced C_t coefficient is a sum of at most 128 products"
+        );
+        assert_eq!(
+            mac_reduction_max_weight(),
+            MAC_HALF_PARITY_MAX_S - GF128_BITS,
+            "Q024 q-bit layout depends on the exact pentanomial fanout bound"
+        );
+        assert!(
+            (1usize << MAC_HALF_PARITY_Q_BITS) > MAC_HALF_PARITY_MAX_S / 2,
+            "q bits must cover every possible (W_k + V_k - tag_k) / 2"
+        );
+    }
+
+    #[test]
+    fn q021_av_fold_matrix_matches_gf128_mul_basis_bits() {
+        let av = draw_mdoc_p4b_av([9u8; 32], [3u8; 32]);
+        let av_bits = bytes_to_bits(&av);
+        let fold = av_linear_fold_slots(&av_bits);
+
+        for x_bit in 0..GF128_BITS {
+            let product_bits = bytes_to_bits(&crate::mac::gf128_mul(&av, &gf128_basis(x_bit)));
+            for out_bit in 0..GF128_BITS {
+                assert_eq!(
+                    fold[out_bit][x_bit], product_bits[out_bit],
+                    "a_v*x fold matrix mismatch at output bit {out_bit}, x bit {x_bit}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "microbench: isolated P4b MAC batch sumcheck prove/verify timing"]
+    fn mdoc_p4b_mac_batch_sumcheck_microbench() {
+        let issuer = p4b_microbench_input(11);
+        let device = p4b_microbench_input(29);
+        let issuer_public = EcdsaPublicProjection::issuer_key_only(issuer.qx, issuer.qy);
+        let device_public = EcdsaPublicProjection::message_hash_only(device.z);
+        let projections = [issuer_public, device_public];
+        let transcript_seed = [7u8; 32];
+        let root = [31u8; 32];
+        let av = draw_mdoc_p4b_av(transcript_seed, root);
+        let mac_values = mdoc_p4b_mac_values(&issuer, &device);
+        let key_shares = p4b_microbench_key_shares();
+        let mac_tags = key_shares
+            .0
+            .iter()
+            .zip(mac_values.iter())
+            .map(|(ap, x)| gf128_tag(ap, &av, x))
+            .collect::<Vec<_>>();
+        let circuit = build_mac_batch_circuit(&av, &mac_tags).unwrap();
+        let input = mac_batch_input_with_av(&key_shares, &av, &mac_values, &mac_tags).unwrap();
+        let layers = circuit.evaluate_input(input).unwrap();
+        assert!(circuit.is_satisfied(&layers).unwrap());
+
+        let mut generic_channel = mdoc_p4b_instance_channel(
+            transcript_seed,
+            root,
+            MDOC_P4B_MAC_BATCH_LABEL,
+            MdocP4bCircuitRole::MacBatch,
+            &projections,
+            &av,
+            &mac_tags,
+        );
+        let generic_start = Instant::now();
+        let generic =
+            prove_evaluated_circuit(&circuit, &layers, root, &mut generic_channel).unwrap();
+        let generic_prove = generic_start.elapsed();
+
+        let mut sparse_channel = mdoc_p4b_instance_channel(
+            transcript_seed,
+            root,
+            MDOC_P4B_MAC_BATCH_LABEL,
+            MdocP4bCircuitRole::MacBatch,
+            &projections,
+            &av,
+            &mac_tags,
+        );
+        let sparse_start = Instant::now();
+        let (sparse, prove_profile) = prove_evaluated_circuit_sorted_sparse_profiled(
+            &circuit,
+            &layers,
+            root,
+            &mut sparse_channel,
+        )
+        .unwrap();
+        let sparse_prove = sparse_start.elapsed();
+        assert_eq!(
+            bincode::serialize(&generic).unwrap(),
+            bincode::serialize(&sparse).unwrap(),
+            "sorted sparse MAC proof must be byte-identical to generic"
+        );
+
+        let mut verify_channel = mdoc_p4b_instance_channel(
+            transcript_seed,
+            root,
+            MDOC_P4B_MAC_BATCH_LABEL,
+            MdocP4bCircuitRole::MacBatch,
+            &projections,
+            &av,
+            &mac_tags,
+        );
+        let verify_start = Instant::now();
+        let (claims, verify_profile) =
+            verify_circuit_sorted_sparse_profiled(&circuit, &sparse, root, &mut verify_channel)
+                .unwrap();
+        let sparse_verify = verify_start.elapsed();
+        assert_eq!(claims, sparse.input_claims);
+
+        let prove_terms = prove_profile
+            .layers
+            .iter()
+            .map(|layer| layer.terms)
+            .sum::<usize>();
+        let verify_terms = verify_profile
+            .layers
+            .iter()
+            .map(|layer| layer.terms)
+            .sum::<usize>();
+        eprintln!(
+            "mdoc_p4b_mac_batch_sumcheck_microbench generic_prove_ms={} sparse_prove_ms={} sparse_verify_ms={} prove_terms={} verify_terms={}",
+            generic_prove.as_millis(),
+            sparse_prove.as_millis(),
+            sparse_verify.as_millis(),
+            prove_terms,
+            verify_terms
+        );
+        for layer in &prove_profile.layers {
+            eprintln!(
+                "prove_layer={} terms={} left_nnz={} right_nnz={} build_left_ms={} left_rounds_ms={} build_right_ms={} right_rounds_ms={}",
+                layer.layer_index,
+                layer.terms,
+                layer.left_initial_nnz,
+                layer.right_initial_nnz,
+                layer.build_left.as_millis(),
+                layer.left_rounds.as_millis(),
+                layer.build_right.as_millis(),
+                layer.right_rounds.as_millis()
+            );
+        }
+        for layer in &verify_profile.layers {
+            eprintln!(
+                "verify_layer={} terms={} left_rounds_ms={} right_rounds_ms={} final_eval_ms={}",
+                layer.layer_index,
+                layer.terms,
+                layer.left_rounds.as_millis(),
+                layer.right_rounds.as_millis(),
+                layer.final_eval.as_millis()
+            );
+        }
     }
 }
