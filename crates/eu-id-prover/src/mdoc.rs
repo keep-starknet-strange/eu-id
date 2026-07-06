@@ -87,6 +87,7 @@ const CBOR_TAG_FULL_DATE: u64 = 1004;
 pub struct MdocPidRequest {
     pub doctype: String,
     pub namespace: String,
+    pub attributes: Vec<MdocRequestedAttribute>,
     pub birth_date_element: String,
     pub nationality_element: String,
     pub session_transcript: Vec<u8>,
@@ -111,6 +112,16 @@ impl MdocPidRequest {
         Self {
             doctype: PID_DOCTYPE.to_string(),
             namespace: PID_NAMESPACE.to_string(),
+            attributes: vec![
+                MdocRequestedAttribute {
+                    element_identifier: "birth_date".to_string(),
+                    mode: MdocDisclosureMode::AgeOver,
+                },
+                MdocRequestedAttribute {
+                    element_identifier: "nationality".to_string(),
+                    mode: MdocDisclosureMode::Alpha2Set,
+                },
+            ],
             birth_date_element: "birth_date".to_string(),
             nationality_element: "nationality".to_string(),
             session_transcript,
@@ -124,23 +135,48 @@ impl MdocPidRequest {
     }
 
     pub fn disclosed_attributes(&self) -> Vec<MdocRequestedAttribute> {
-        vec![
-            MdocRequestedAttribute {
-                element_identifier: self.birth_date_element.clone(),
-                mode: MdocDisclosureMode::AgeOver,
-            },
-            MdocRequestedAttribute {
-                element_identifier: self.nationality_element.clone(),
-                mode: MdocDisclosureMode::Alpha2Set,
-            },
-        ]
+        self.attributes.clone()
     }
+}
+
+fn validate_requested_attributes(attributes: &[MdocRequestedAttribute]) -> Result<(), MdocError> {
+    if !(1..=crate::mdoc_window_bind::MDOC_MAX_DISCLOSED_ATTRIBUTES).contains(&attributes.len()) {
+        return Err(MdocError::InvalidAttributeCount {
+            count: attributes.len(),
+        });
+    }
+    let mut age_seen = false;
+    let mut alpha2_seen = false;
+    for attribute in attributes {
+        match &attribute.mode {
+            MdocDisclosureMode::ValueEquality(bytes) => {
+                if bytes.len() > 32 {
+                    return Err(MdocError::ValueEqualityTooLong {
+                        element: attribute.element_identifier.clone(),
+                        len: bytes.len(),
+                    });
+                }
+            }
+            MdocDisclosureMode::AgeOver => {
+                if std::mem::replace(&mut age_seen, true) {
+                    return Err(MdocError::DuplicatePredicateMode("AgeOver"));
+                }
+            }
+            MdocDisclosureMode::Alpha2Set => {
+                if std::mem::replace(&mut alpha2_seen, true) {
+                    return Err(MdocError::DuplicatePredicateMode("Alpha2Set"));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
 pub struct ExtractedPidMdoc {
     pub doctype: String,
     pub namespace: String,
+    pub attributes: Vec<MdocRequestedAttribute>,
     pub birth_date: String,
     pub nationalities: Vec<u32>,
     pub birth_date_bytes: [u8; 4],
@@ -231,6 +267,9 @@ pub enum MdocError {
     CredentialNotYetValid,
     CredentialExpired,
     SaltTooShort { len: usize },
+    InvalidAttributeCount { count: usize },
+    DuplicatePredicateMode(&'static str),
+    ValueEqualityTooLong { element: String, len: usize },
 }
 
 #[derive(Clone, Debug)]
@@ -271,14 +310,7 @@ impl MdocSizingWaste {
 pub fn demo_mdoc_circuit_fixture() -> DemoMdocCircuitFixture {
     let session_transcript = openid4vp_session_transcript(b"session-transcript-123");
     let document = demo_mdoc_document(&session_transcript);
-    let request = MdocPidRequest {
-        doctype: PID_DOCTYPE.to_string(),
-        namespace: PID_NAMESPACE.to_string(),
-        birth_date_element: "birth_date".to_string(),
-        nationality_element: "nationality".to_string(),
-        session_transcript,
-        trusted_issuer_certificates: Vec::new(),
-    };
+    let request = MdocPidRequest::eudi_pid(session_transcript);
     let extracted = extract_pid_mdoc(&document, &request).expect("demo mdoc extracts");
     let statement = MdocCircuitStatement::from_extracted(
         &extracted,
@@ -574,6 +606,8 @@ pub fn extract_pid_mdoc(
     document: &[u8],
     request: &MdocPidRequest,
 ) -> Result<ExtractedPidMdoc, MdocError> {
+    let requested_attributes = request.disclosed_attributes();
+    validate_requested_attributes(&requested_attributes)?;
     if request.doctype != PID_DOCTYPE {
         return Err(MdocError::DoctypeMismatch);
     }
@@ -672,6 +706,7 @@ pub fn extract_pid_mdoc(
     Ok(ExtractedPidMdoc {
         doctype,
         namespace: request.namespace.clone(),
+        attributes: requested_attributes,
         birth_date: parsed_birth.display,
         nationalities: vec![parsed_nat.numeric],
         birth_date_bytes: parsed_birth.bytes,
@@ -1918,6 +1953,7 @@ pub struct MdocCircuitStatement {
 
 impl MdocCircuitStatement {
     pub fn from_extracted(extracted: &ExtractedPidMdoc, policy: Policy) -> Result<Self, MdocError> {
+        validate_requested_attributes(&extracted.attributes)?;
         if extracted.doctype != PID_DOCTYPE {
             return Err(MdocError::DoctypeMismatch);
         }

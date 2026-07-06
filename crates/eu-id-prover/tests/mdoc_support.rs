@@ -8,8 +8,8 @@ use ciborium::value::Value;
 use eu_id_prover::mdoc::{
     demo_mdoc_sizing_waste, device_authentication_bytes, device_authentication_sig_structure_hash,
     extract_pid_mdoc, mdoc_proof_byte_breakdown, openid4vp_session_transcript, prove_mdoc_circuit,
-    verify_mdoc_circuit, MdocBirthDateBinding, MdocCircuitStatement, MdocError,
-    MdocNationalityBinding, MdocPidRequest,
+    verify_mdoc_circuit, MdocBirthDateBinding, MdocCircuitStatement, MdocDisclosureMode, MdocError,
+    MdocNationalityBinding, MdocPidRequest, MdocRequestedAttribute,
 };
 use eu_id_prover::{Date, Policy};
 use stwo_p256::types::{AffinePoint, Signature, U256};
@@ -1308,6 +1308,49 @@ fn statement_carries_mso_binding_offsets() {
     assert_eq!(
         statement.mso_valid_until_anchor,
         [b"\x6AvalidUntil".as_slice(), &[0xC0, 0x74]].concat()
+    );
+}
+
+#[test]
+fn rejects_duplicate_age_over_modes() {
+    let session_transcript = test_session_transcript();
+    let fixture = valid_fixture(&session_transcript);
+    let mut request = request(session_transcript);
+    request.attributes = vec![
+        MdocRequestedAttribute {
+            element_identifier: BIRTH_DATE.to_string(),
+            mode: MdocDisclosureMode::AgeOver,
+        },
+        MdocRequestedAttribute {
+            element_identifier: "age_over_18".to_string(),
+            mode: MdocDisclosureMode::AgeOver,
+        },
+    ];
+
+    let err = extract_pid_mdoc(&fixture.doc, &request).expect_err("duplicate AgeOver rejects");
+
+    assert_eq!(err, MdocError::DuplicatePredicateMode("AgeOver"));
+}
+
+#[test]
+fn rejects_oversized_value_equality_window() {
+    let session_transcript = test_session_transcript();
+    let fixture = valid_fixture(&session_transcript);
+    let mut request = request(session_transcript);
+    request.attributes = vec![MdocRequestedAttribute {
+        element_identifier: "family_name".to_string(),
+        mode: MdocDisclosureMode::ValueEquality(vec![b'A'; 33]),
+    }];
+
+    let err =
+        extract_pid_mdoc(&fixture.doc, &request).expect_err("oversized value equality rejects");
+
+    assert_eq!(
+        err,
+        MdocError::ValueEqualityTooLong {
+            element: "family_name".to_string(),
+            len: 33
+        }
     );
 }
 
