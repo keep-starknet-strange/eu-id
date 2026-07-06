@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::ecdsa::implemented_circuit_gate_count;
-use crate::ligero::{v1_ligero_params, V1_MIN_OPENINGS, V1_NON_ZK};
+use crate::ligero::{v1_ligero_params, v2_ligero_params, v2_ligero_params_b, V2_ZK_OPENINGS};
 
 const G1_FIELD_BENCH: &str = "WO-G1-field-bench.md";
 const G2_SUMCHECK_BENCH: &str = "WO-G2-sumcheck-bench.md";
@@ -34,23 +34,27 @@ fn g2_sumcheck_bench_result_is_recorded_and_meets_gate() {
 }
 
 #[test]
-fn q027_pinned_ligero_params_meet_v1_non_zk_soundness_gate() {
-    let params = v1_ligero_params();
-
-    assert_eq!(params.row_len, 64);
-    assert_eq!(params.degree_bound, 64);
-    assert_eq!(params.codeword_len, 512);
-    assert_eq!(params.openings, 160);
-    assert_eq!(params.proximity_radius, 223);
-    assert!(V1_NON_ZK, "Q-027 tuple is valid only for the v1 non-ZK commitment");
-    assert!(params.degree_bound >= params.row_len);
-    assert!(params.openings >= V1_MIN_OPENINGS);
-    params.validate().unwrap();
+fn q007_ligero_v2_params_meet_zk_soundness_gate() {
+    let legacy = v1_ligero_params();
     assert!(
-        params.soundness_error() <= 2f64.powi(-128),
-        "Q-027 soundness error {} exceeds 2^-128",
-        params.soundness_error()
+        legacy.validate().is_err(),
+        "legacy v1 tuple must fail k >= ell + t after P4a"
     );
+
+    for (name, params) in [("A", v2_ligero_params()), ("B", v2_ligero_params_b())] {
+        assert_eq!(params.row_len, 64);
+        assert!(
+            V2_ZK_OPENINGS,
+            "P4a only claims witness-hiding openings; signature statement values remain public until P4b"
+        );
+        assert!(params.degree_bound >= params.row_len + params.openings);
+        params.validate().unwrap();
+        assert!(
+            params.soundness_error() <= 2f64.powi(-128),
+            "Q-007 option {name} soundness error {} exceeds 2^-128",
+            params.soundness_error()
+        );
+    }
 }
 
 #[test]

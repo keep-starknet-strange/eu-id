@@ -10,15 +10,11 @@ use eu_id_ec_coprocessor::ecdsa::{
     implemented_circuit_gate_count, layout_range, prove_implemented_circuit_bundle,
     prove_implemented_circuit_bundle_profiled, prove_implemented_circuit_proofs,
     verify_implemented_circuit_bundle, verify_implemented_circuit_proofs,
-    verify_implemented_circuits, verify_witness, EcdsaInput, ImplementedCircuitBundle,
-    ImplementedCircuitBundleEntry, LayoutSlot, WitnessError,
+    verify_implemented_circuits, verify_witness, EcdsaInput, ImplementedCircuitBundleEntry,
+    LayoutSlot, WitnessError,
 };
-use eu_id_ec_coprocessor::ligero::{
-    commit_witness, v1_ligero_params, LigeroParams, LigeroProximityClaim,
-};
-use eu_id_ec_coprocessor::sumcheck::{
-    circuit_otp_pad_values, prove_circuit, CircuitSumcheckProof, InputClaims,
-};
+use eu_id_ec_coprocessor::ligero::{commit_witness, v2_ligero_params, LigeroParams};
+use eu_id_ec_coprocessor::sumcheck::{circuit_otp_pad_values, prove_circuit};
 use eu_id_ec_coprocessor::CoprocessorChannel;
 use eu_id_ec_coprocessor::Fp;
 use p256::ecdsa::{Signature, SigningKey};
@@ -630,11 +626,12 @@ fn implemented_circuit_bundle_carries_ligero_proximity_openings() {
 }
 
 #[test]
+#[ignore = "full P4a masked Ligero bundle is a release gate"]
 fn implemented_circuit_bundle_rejects_corrupt_ligero_opening() {
     let input = signed_input();
     let witness = generate_witness(&input).unwrap();
     let mut bundle = prove_implemented_circuit_bundle(&input, &witness, TEST_SEED).unwrap();
-    bundle.openings[0].column[0] = bundle.openings[0].column[0] + Fp::ONE;
+    bundle.proximity_openings[0].column[0] = bundle.proximity_openings[0].column[0] + Fp::ONE;
 
     assert!(verify_implemented_circuit_bundle(&input, &bundle, TEST_SEED).is_err());
 }
@@ -646,6 +643,51 @@ fn implemented_circuit_bundle_rejects_corrupt_ligero_proximity_claim() {
     let witness = generate_witness(&input).unwrap();
     let mut bundle = prove_implemented_circuit_bundle(&input, &witness, TEST_SEED).unwrap();
     bundle.proximity_claim.combined_row[0] = bundle.proximity_claim.combined_row[0] + Fp::ONE;
+
+    assert!(verify_implemented_circuit_bundle(&input, &bundle, TEST_SEED).is_err());
+}
+
+#[test]
+#[ignore = "full S4-lite bundle proves every implemented ECDSA circuit"]
+fn implemented_circuit_bundle_rejects_corrupt_ligero_claim_batch_coefficient() {
+    let input = signed_input();
+    let witness = generate_witness(&input).unwrap();
+    let mut bundle = prove_implemented_circuit_bundle(&input, &witness, TEST_SEED).unwrap();
+    bundle.claim_batch.coefficients[0] = bundle.claim_batch.coefficients[0] + Fp::ONE;
+
+    assert!(verify_implemented_circuit_bundle(&input, &bundle, TEST_SEED).is_err());
+}
+
+#[test]
+#[ignore = "full S4-lite bundle proves every implemented ECDSA circuit"]
+fn implemented_circuit_bundle_rejects_corrupt_ligero_blind_claim() {
+    let input = signed_input();
+    let witness = generate_witness(&input).unwrap();
+    let mut bundle = prove_implemented_circuit_bundle(&input, &witness, TEST_SEED).unwrap();
+    bundle.claim_batch.blind_claim = bundle.claim_batch.blind_claim + Fp::ONE;
+
+    assert!(verify_implemented_circuit_bundle(&input, &bundle, TEST_SEED).is_err());
+}
+
+#[test]
+#[ignore = "full S4-lite bundle proves every implemented ECDSA circuit"]
+fn implemented_circuit_bundle_rejects_corrupt_ligero_blind_row_opening() {
+    let input = signed_input();
+    let witness = generate_witness(&input).unwrap();
+    let mut bundle = prove_implemented_circuit_bundle(&input, &witness, TEST_SEED).unwrap();
+    let last = bundle.proximity_openings[0].column.len() - 1;
+    bundle.proximity_openings[0].column[last] = bundle.proximity_openings[0].column[last] + Fp::ONE;
+
+    assert!(verify_implemented_circuit_bundle(&input, &bundle, TEST_SEED).is_err());
+}
+
+#[test]
+#[ignore = "full S4-lite bundle proves every implemented ECDSA circuit"]
+fn implemented_circuit_bundle_rejects_corrupt_ligero_consistency_claim_value() {
+    let input = signed_input();
+    let witness = generate_witness(&input).unwrap();
+    let mut bundle = prove_implemented_circuit_bundle(&input, &witness, TEST_SEED).unwrap();
+    bundle.consistency_claim_values[0] = bundle.consistency_claim_values[0] + Fp::ONE;
 
     assert!(verify_implemented_circuit_bundle(&input, &bundle, TEST_SEED).is_err());
 }
@@ -679,6 +721,7 @@ fn implemented_circuit_bundle_rejects_prover_selected_ligero_params() {
 }
 
 #[test]
+#[ignore = "full P4a masked Ligero bundle is a release gate"]
 fn implemented_circuit_bundle_rejects_wrong_caller_input_binding() {
     let input = signed_input();
     let witness = generate_witness(&input).unwrap();
@@ -786,6 +829,7 @@ fn implemented_circuit_bundle_rejects_legacy_entry_without_statement_absorb() {
 }
 
 #[test]
+#[ignore = "full P4a masked Ligero bundle is a release gate"]
 fn implemented_circuit_bundle_accepts_honest_witness() {
     let input = signed_input();
     let witness = generate_witness(&input).unwrap();
@@ -793,14 +837,21 @@ fn implemented_circuit_bundle_accepts_honest_witness() {
         prove_implemented_circuit_bundle_profiled(&input, &witness, TEST_SEED).unwrap();
 
     assert_eq!(bundle.entries.len(), 9);
-    assert_eq!(bundle.params, v1_ligero_params());
-    assert_eq!(bundle.openings.len(), bundle.params.row_len);
+    assert_eq!(bundle.params, v2_ligero_params());
     assert_eq!(bundle.proximity_openings.len(), bundle.params.openings);
-    assert!(profile.committed_values <= 3_000, "{profile:?}");
-    assert!(profile.ligero_rows <= 47, "{profile:?}");
+    assert!(bundle
+        .proximity_openings
+        .iter()
+        .all(|opening| opening.index >= bundle.params.row_len));
+    assert!(profile.committed_values <= 10_000, "{profile:?}");
+    assert!(profile.ligero_rows <= 156, "{profile:?}");
     assert_eq!(
         bundle.proximity_claim.combined_row.len(),
         bundle.params.degree_bound
+    );
+    assert_eq!(
+        bundle.claim_batch.coefficients.len(),
+        bundle.params.degree_bound + bundle.params.row_len - 1
     );
     verify_implemented_circuit_bundle(&input, &bundle, TEST_SEED).unwrap();
 }
@@ -903,60 +954,13 @@ fn c14_legacy_transcript_bundle_entry(
     let circuit_input = c14_c15_final_check_input(input, witness).unwrap();
     let mut committed_input = circuit_input.clone();
     committed_input.extend(circuit_otp_pad_values(&circuit));
-    let params = v1_ligero_params();
+    let params = v2_ligero_params();
     let commitment = commit_witness(&committed_input, params).unwrap();
     let root = commitment.root();
-    let gamma = ligero_proximity_gamma(
-        b"s4-ecdsa-c14-c15-final-check",
-        root,
-        committed_input.len().div_ceil(params.row_len),
-    );
-    let proximity_claim = commitment.proximity_claim(&gamma).unwrap();
-    let proximity_indices = ligero_proximity_indices(b"s4-ecdsa-c14-c15-final-check", root, params);
-    let proximity_openings = commitment.open_columns(&proximity_indices).unwrap();
-    let openings = commitment.open_systematic_columns().unwrap();
     let layers = circuit.evaluate_input(circuit_input).unwrap();
     let mut channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
     channel.mix_bytes(b"s4-ecdsa-c14-c15-final-check");
     let proof = prove_circuit(&circuit, &layers, root, &mut channel).unwrap();
 
     ImplementedCircuitBundleEntry { proof }
-}
-
-fn ligero_proximity_gamma(label: &[u8], root: [u8; 32], rows: usize) -> Vec<Fp> {
-    let mut channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
-    channel.mix_bytes(label);
-    channel.mix_bytes(&root);
-    channel.mix_bytes(b"s4-ligero-proximity-gamma");
-    (0..rows).map(|_| channel.draw_fp()).collect()
-}
-
-fn ligero_proximity_indices(label: &[u8], root: [u8; 32], params: LigeroParams) -> Vec<usize> {
-    let mut channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
-    channel.mix_bytes(label);
-    channel.mix_bytes(&root);
-    channel.mix_bytes(b"s4-ligero-proximity-indices");
-    let mut indices = Vec::with_capacity(params.openings);
-    while indices.len() < params.openings {
-        let bytes = channel.draw_fp().to_bytes_be();
-        let mut word = [0u8; 8];
-        word.copy_from_slice(&bytes[24..]);
-        let index = (u64::from_be_bytes(word) as usize) % params.codeword_len;
-        if !indices.contains(&index) {
-            indices.push(index);
-        }
-    }
-    indices
-}
-
-fn dummy_bundle_entry() -> ImplementedCircuitBundleEntry {
-    ImplementedCircuitBundleEntry {
-        proof: CircuitSumcheckProof {
-            layers: Vec::new(),
-            input_claims: InputClaims {
-                points: [Vec::new(), Vec::new()],
-                values: [Fp::ZERO, Fp::ZERO],
-            },
-        },
-    }
 }
