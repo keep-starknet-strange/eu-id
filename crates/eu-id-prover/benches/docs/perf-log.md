@@ -322,6 +322,10 @@ M4 A3-on-coprocessor note (2026-07-04): Q-M1-005 directed a merge of `feat/a3-hy
 | 2026-07-06 | worktree | P4a Ligero v2 witness-hiding openings (Q-008 A') | `bench_bundle` verify median (release, runs=5) | — | 111.131 ms |
 | 2026-07-06 | worktree | P4a Ligero v2 witness-hiding openings (Q-008 A') | serialized coprocessor bundle bytes | — | 944,758 |
 | 2026-07-06 | worktree | P4a Ligero v2 witness-hiding openings (Q-008 A') | Ligero rows / committed values / opened columns | — | 154 rows / 9,679 values / 170 columns |
+| 2026-07-06 | worktree | P4b Q-010 M31 GF(2^128) MAC spike (RAYON_NUM_THREADS=1, production PCS) | six-half MAC spike prove / verify | — | 290 ms / 45 ms |
+| 2026-07-06 | worktree | P4b Q-010 M31 GF(2^128) MAC spike (RAYON_NUM_THREADS=1, production PCS) | six-half MAC spike proof bytes | — | 6,155,589 |
+| 2026-07-06 | worktree | P4b Q-010 M31 GF(2^128) MAC spike (RAYON_NUM_THREADS=1, production PCS) | six-half MAC spike trace+interaction / preprocessed cells | — | 532,688 / 2,064 |
+| 2026-07-06 | worktree | P4b Q-010 M31 GF(2^128) MAC spike (RAYON_NUM_THREADS=1, production PCS) | same-tree current mdoc baseline prove / proof bytes | — | 3,214 ms / 3,587,428 |
 
 P3 Longfellow note (2026-07-06): vectors are byte extracts from Google
 Longfellow `mdoc_examples.h` at `d8ad8f65187c7c364a3c2181ad484bcab03f0ec2`
@@ -345,5 +349,15 @@ input and deterministic pad vectors; sumcheck input claims, pad-vector claims,
 public caller bindings, and cross-family consistency coordinates are checked
 through one masked Ligero claim batch. Command:
 `cargo run -p eu-id-ec-coprocessor --release --example bench_bundle`.
+
+P4b MAC spike note (2026-07-06): Q-010 required measuring the full six
+GF(2^128)-half M31 MAC load before product integration. The tracked spike
+example `mdoc_mac_spike` constrains private message bytes, byte→bit
+decomposition, private `a_p` bits, public `a_v`, and public tags with a
+bitwise schoolbook multiply reduced by `x^128 + x^7 + x^2 + x + 1`.
+Command: `RAYON_NUM_THREADS=1 cargo run -p eu-id-prover --release --example
+mdoc_mac_spike`. The direct bit-column shape clears the prove-time gate but
+trips the proof-size stop condition: queried values alone are 5,349,480 bytes,
+so Q-011 asks for the next design before product integration.
 
 WO-M5 note (2026-07-04): baseline is `801ea3a5`; candidate is the review-follow-up worktree after baseline commit `34512349`. `mdoc_perf_probe` now emits proof-byte decomposition: total `1,759,326`, STARK `971,649`, coprocessor bundle `787,032`, metadata `645`; inner STARK fields are config `25`, commitments `136`, sampled values `98,400`, decommitments `85,672`, queried values `719,596`, proof-of-work `8`, and FRI proof `67,812`. The review follow-up adds explicit shared-provider claimed-sum tamper, digest/field-exposure tamper, malformed-provider no-panic rejection, and standalone SHA proof-byte pin gates.
