@@ -664,6 +664,17 @@ pub enum Error {
         /// The pinned config the combined proof must be produced under.
         expected: PcsConfig,
     },
+    /// The proof's tree-0 (preprocessed) commitment root does not match the
+    /// verifier-derived expected root — a forged preprocessed tree (range
+    /// tables, schedules, constants; the F-ROOT finding). Rejected before the
+    /// STARK check. The Blake2s root pin is the tree-0 soundness anchor; the
+    /// prover-side 64-bit `DefaultHasher` fingerprint guard is not.
+    PreprocessedRootMismatch {
+        /// The tree-0 root embedded in the proof.
+        got: air_core::CommitmentRoot,
+        /// The root the verifier derived independently.
+        expected: air_core::CommitmentRoot,
+    },
 }
 
 /// The relying party's public statement — the only thing [`verify_identity`]
@@ -1606,7 +1617,7 @@ pub fn verify_with_config(
     if proof.nonce_p256_instances() != expected_nonce_instances {
         return Err(Error::P256InstanceMismatch);
     }
-    verify_stark_with_config(proof, Some(config))
+    verify_stark_with_config(proof, Some(config), None)
 }
 
 /// Prove an identity statement from a credential, an issuer signing key, and a
@@ -1711,6 +1722,35 @@ pub fn verify(
 /// are proven equal to the credential's. Then checks the shared STARK (the global
 /// LogUp balance). Returns `Ok(())` iff every check passes.
 pub fn verify_identity(proof: &Proof, statement: &PublicStatement) -> Result<(), Error> {
+    verify_identity_impl(proof, statement, None)
+}
+
+/// [`verify_identity`], with the tree-0 (preprocessed) commitment root pinned —
+/// the F-ROOT fix. The caller supplies the expected root, computed once via
+/// [`identity_expected_preprocessed_root`] (or a per-profile constant generated
+/// the same way) — never taken from the proof. A proof carrying a forged
+/// preprocessed tree (range tables, schedules, constants) is rejected with
+/// [`Error::PreprocessedRootMismatch`] before the STARK check.
+///
+/// # Soundness
+///
+/// The Blake2s root pin is the tree-0 soundness anchor: it binds the contents,
+/// order, and sizes of every preprocessed column cryptographically. The
+/// prover-side 64-bit `DefaultHasher` fingerprint guard is NOT a soundness pin;
+/// do not downgrade this check to it.
+pub fn verify_identity_with_preprocessed_root(
+    proof: &Proof,
+    statement: &PublicStatement,
+    expected_preprocessed_root: air_core::CommitmentRoot,
+) -> Result<(), Error> {
+    verify_identity_impl(proof, statement, Some(expected_preprocessed_root))
+}
+
+fn verify_identity_impl(
+    proof: &Proof,
+    statement: &PublicStatement,
+    expected_preprocessed_root: Option<air_core::CommitmentRoot>,
+) -> Result<(), Error> {
     // Issuer key: every ECDSA instance's public-key limbs must equal `Q`. The
     // MVP proves a single signature, so there is exactly one instance; an empty
     // instance list never satisfies a concrete issuer.
@@ -1746,7 +1786,80 @@ pub fn verify_identity(proof: &Proof, statement: &PublicStatement) -> Result<(),
     if proof.nonce_p256_instances() != expected_nonce {
         return Err(Error::P256InstanceMismatch);
     }
-    verify_stark(proof)
+    verify_stark_with_config(proof, None, expected_preprocessed_root)
+}
+
+/// Compute the expected tree-0 (preprocessed) commitment root for the identity
+/// pipeline, by constructing the same prover-side modules [`prove_identity`]
+/// uses and running exactly the prover's tree-0 commit path
+/// ([`air_core::compute_preprocessed_root`]). Pass the result to
+/// [`verify_identity_with_preprocessed_root`]; roots are cached per shape, so
+/// repeated verifies in one process pay the rebuild once.
+///
+/// Under the default `ec-coprocessor` feature every preprocessed column is a
+/// deterministic function of the pipeline shape (SHA log-rows, policy tables),
+/// so any sample credential of the deployed shape yields the profile's root —
+/// suitable for generating a pinned per-profile constant. In the legacy
+/// (non-coprocessor) build the P256 hinted-mul schedule preprocessed columns
+/// depend on the signature, so the computed root pins that specific witness's
+/// schedule, not a deployment-wide constant.
+///
+/// # Soundness
+///
+/// This root — not the prover-side 64-bit `DefaultHasher` column fingerprint —
+/// is the tree-0 soundness pin. Do not downgrade the pin to the fingerprint.
+pub fn identity_expected_preprocessed_root(
+    credential: &Credential,
+    issuer: &IssuerKey,
+    policy: &Policy,
+    nonce: &NonceSignatureStatement,
+) -> Result<air_core::CommitmentRoot, Error> {
+    let signed = generator::sign_credential(credential, issuer);
+    let witness = PipelineWitness::build(signed, policy.clone());
+    let draft = witness.p256_draft.as_ref().ok_or(Error::SignatureInvalid)?;
+
+    let nonce_input = nonce.ecdsa_input();
+    if !ecdsa_verify(&nonce_input) {
+        return Err(Error::SignatureInvalid);
+    }
+    let nonce_draft = P256ProofDraft::from_inputs_with_arbitrary_fake_glv_hints(vec![nonce_input])
+        .map_err(Error::P256Prepare)?;
+
+    let mut prepared = prepare_proof_modules(
+        draft,
+        &nonce_draft,
+        &witness.sha_witness,
+        witness.sha_log_n_rows,
+        witness.sha_group_width,
+        &witness.age_public,
+        &witness.age_dob,
+        &witness.nat_public,
+        &witness.nat_private,
+    )?;
+    #[cfg(not(feature = "ec-coprocessor"))]
+    let config = prepared.p256.pcs_config();
+    #[cfg(feature = "ec-coprocessor")]
+    let config = coprocessor_bridge_pcs_config();
+
+    // Same module order as `prove` — the tree-0 dedup and commit order match.
+    #[cfg(not(feature = "ec-coprocessor"))]
+    let mut modules: [&mut dyn AirProver; 6] = [
+        &mut prepared.p256,
+        &mut prepared.nonce_p256,
+        &mut prepared.sha,
+        &mut prepared.bridge,
+        &mut prepared.age,
+        &mut prepared.nat,
+    ];
+    #[cfg(feature = "ec-coprocessor")]
+    let mut modules: [&mut dyn AirProver; 5] = [
+        &mut prepared.sha,
+        &mut prepared.public_digest_bind,
+        &mut prepared.age,
+        &mut prepared.nat,
+        &mut prepared.coprocessor,
+    ];
+    Ok(air_core::compute_preprocessed_root(&mut modules, config))
 }
 
 /// Rebuild the six verifier modules from the proof and check the shared STARK
@@ -1754,12 +1867,13 @@ pub fn verify_identity(proof: &Proof, statement: &PublicStatement) -> Result<(),
 /// binding *first*: both [`verify`] and [`verify_identity`] bind, then delegate
 /// here.
 fn verify_stark(proof: &Proof) -> Result<(), Error> {
-    verify_stark_with_config(proof, None)
+    verify_stark_with_config(proof, None, None)
 }
 
 fn verify_stark_with_config(
     proof: &Proof,
     expected_config_override: Option<PcsConfig>,
+    expected_preprocessed_root: Option<air_core::CommitmentRoot>,
 ) -> Result<(), Error> {
     #[cfg(not(feature = "ec-coprocessor"))]
     let scalar_z_handle = SharedScalarZRelation::new();
@@ -1879,7 +1993,17 @@ fn verify_stark_with_config(
         &mut nat,
         &mut coprocessor,
     ];
-    air_core::verify(&mut modules, &proof.stark_proof).map_err(|e| Error::Verify(format!("{e:?}")))
+    air_core::verify_with_expected_preprocessed_root(
+        &mut modules,
+        &proof.stark_proof,
+        expected_preprocessed_root,
+    )
+    .map_err(|e| match e {
+        air_core::VerifyError::PreprocessedRootMismatch { got, expected } => {
+            Error::PreprocessedRootMismatch { got, expected }
+        }
+        air_core::VerifyError::Stark(e) => Error::Verify(format!("{e:?}")),
+    })
 }
 
 #[cfg(all(test, feature = "ec-coprocessor"))]
