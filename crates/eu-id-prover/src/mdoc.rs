@@ -65,7 +65,8 @@ use crate::mdoc_validity::{
     mdoc_validity_rows, MdocValidityBind, MdocValidityInteractionClaim, MdocValidityRow,
 };
 use crate::mdoc_window_bind::{
-    mdoc_window_bind_rows, MdocWindowBind, MdocWindowBindInteractionClaim, MdocWindowBindRow,
+    mdoc_window_bind_rows, MdocFieldSource, MdocWindowBind, MdocWindowBindInteractionClaim,
+    MdocWindowBindRow,
 };
 use crate::public_digest_bind::{PublicDigestBind, PublicDigestBindInteractionClaim};
 use crate::Error;
@@ -822,6 +823,49 @@ fn labeled_tdate_date_offset(
     Ok(search_start + relative)
 }
 
+fn cbor_uint_key(value: u32) -> Vec<u8> {
+    match value {
+        0..=23 => vec![value as u8],
+        24..=0xFF => vec![0x18, value as u8],
+        0x100..=0xFFFF => {
+            let bytes = (value as u16).to_be_bytes();
+            vec![0x19, bytes[0], bytes[1]]
+        }
+        _ => {
+            let bytes = value.to_be_bytes();
+            vec![0x1A, bytes[0], bytes[1], bytes[2], bytes[3]]
+        }
+    }
+}
+
+fn digest_anchor_bytes(digest_id: u32) -> Vec<u8> {
+    let mut anchor = cbor_uint_key(digest_id);
+    anchor.extend_from_slice(&[0x58, 0x20]);
+    anchor
+}
+
+fn cbor_tdate_anchor_bytes(label: &str) -> Vec<u8> {
+    assert!(label.len() < 24, "short text label expected");
+    let mut anchor = Vec::with_capacity(1 + label.len() + 2);
+    anchor.push(0x60 + label.len() as u8);
+    anchor.extend_from_slice(label.as_bytes());
+    anchor.extend_from_slice(&[0xC0, 0x74]);
+    anchor
+}
+
+fn anchor_before_offset(
+    preimage: &[u8],
+    value_offset: usize,
+    anchor: &[u8],
+    error: &'static str,
+) -> Result<usize, MdocError> {
+    let anchor_offset = value_offset
+        .checked_sub(anchor.len())
+        .ok_or(MdocError::UnsupportedCircuitValue(error))?;
+    ensure_value_window_with_message(preimage, anchor_offset, anchor, error)?;
+    Ok(anchor_offset)
+}
+
 /// Field exposure over the `birth_date` item preimage: the value window
 /// (consumed by the age predicate) plus the `elementIdentifier` window (D1,
 /// consumed by the MSO window-bind component). The window length tracks the
@@ -895,6 +939,36 @@ fn issuer_mso_exposure(statement: &MdocCircuitStatement) -> FieldExposure {
             statement.mso_valid_until_date_offset,
             10,
         ),
+        (
+            field_id::MDOC_BIRTH_DATE_DIGEST_ANCHOR,
+            statement.mso_birth_date_digest_anchor_offset,
+            statement.mso_birth_date_digest_anchor.len(),
+        ),
+        (
+            field_id::MDOC_NATIONALITY_DIGEST_ANCHOR,
+            statement.mso_nationality_digest_anchor_offset,
+            statement.mso_nationality_digest_anchor.len(),
+        ),
+        (
+            field_id::MDOC_DEVICE_KEY_X_ANCHOR,
+            statement.mso_device_key_x_anchor_offset,
+            statement.mso_device_key_x_anchor.len(),
+        ),
+        (
+            field_id::MDOC_DEVICE_KEY_Y_ANCHOR,
+            statement.mso_device_key_y_anchor_offset,
+            statement.mso_device_key_y_anchor.len(),
+        ),
+        (
+            field_id::MDOC_VALID_FROM_ANCHOR,
+            statement.mso_valid_from_anchor_offset,
+            statement.mso_valid_from_anchor.len(),
+        ),
+        (
+            field_id::MDOC_VALID_UNTIL_ANCHOR,
+            statement.mso_valid_until_anchor_offset,
+            statement.mso_valid_until_anchor.len(),
+        ),
     ])
 }
 
@@ -917,13 +991,46 @@ fn mdoc_window_bind_rows_from(
             .expect("nationality digest window length");
         (birth, nat)
     });
-    mdoc_window_bind_rows(
+    let mut rows = mdoc_window_bind_rows(
         b"birth_date",
         b"nationality",
         &statement.device_input.public_key.x.0,
         &statement.device_input.public_key.y.0,
         digest_witnesses,
-    )
+    );
+    rows.extend([
+        MdocWindowBindRow::constant(
+            field_id::MDOC_BIRTH_DATE_DIGEST_ANCHOR,
+            MdocFieldSource::IssuerMso,
+            &statement.mso_birth_date_digest_anchor,
+        ),
+        MdocWindowBindRow::constant(
+            field_id::MDOC_NATIONALITY_DIGEST_ANCHOR,
+            MdocFieldSource::IssuerMso,
+            &statement.mso_nationality_digest_anchor,
+        ),
+        MdocWindowBindRow::constant(
+            field_id::MDOC_DEVICE_KEY_X_ANCHOR,
+            MdocFieldSource::IssuerMso,
+            &statement.mso_device_key_x_anchor,
+        ),
+        MdocWindowBindRow::constant(
+            field_id::MDOC_DEVICE_KEY_Y_ANCHOR,
+            MdocFieldSource::IssuerMso,
+            &statement.mso_device_key_y_anchor,
+        ),
+        MdocWindowBindRow::constant(
+            field_id::MDOC_VALID_FROM_ANCHOR,
+            MdocFieldSource::IssuerMso,
+            &statement.mso_valid_from_anchor,
+        ),
+        MdocWindowBindRow::constant(
+            field_id::MDOC_VALID_UNTIL_ANCHOR,
+            MdocFieldSource::IssuerMso,
+            &statement.mso_valid_until_anchor,
+        ),
+    ]);
+    rows
 }
 
 fn mdoc_validity_rows_from(
@@ -1717,23 +1824,35 @@ pub struct MdocCircuitStatement {
     /// Offset of the birth_date `valueDigests` 32-byte window in the issuer
     /// `Sig_structure` preimage (D2).
     pub mso_birth_date_digest_offset: usize,
+    pub mso_birth_date_digest_anchor_offset: usize,
+    pub mso_birth_date_digest_anchor: Vec<u8>,
     /// Offset of the nationality `valueDigests` 32-byte window in the issuer
     /// `Sig_structure` preimage (D2).
     pub mso_nationality_digest_offset: usize,
+    pub mso_nationality_digest_anchor_offset: usize,
+    pub mso_nationality_digest_anchor: Vec<u8>,
     /// Offset of the deviceKey x-coordinate 32-byte window in the issuer
     /// `Sig_structure` preimage (D3).
     pub mso_device_key_x_offset: usize,
+    pub mso_device_key_x_anchor_offset: usize,
+    pub mso_device_key_x_anchor: Vec<u8>,
     /// Offset of the deviceKey y-coordinate 32-byte window in the issuer
     /// `Sig_structure` preimage (D3).
     pub mso_device_key_y_offset: usize,
+    pub mso_device_key_y_anchor_offset: usize,
+    pub mso_device_key_y_anchor: Vec<u8>,
     pub valid_from: (u16, u8, u8),
     pub valid_until: (u16, u8, u8),
     /// Offset of the `validityInfo.validFrom` `YYYY-MM-DD` date window in the
     /// issuer `Sig_structure` preimage (validity binding).
     pub mso_valid_from_date_offset: usize,
+    pub mso_valid_from_anchor_offset: usize,
+    pub mso_valid_from_anchor: Vec<u8>,
     /// Offset of the `validityInfo.validUntil` `YYYY-MM-DD` date window in the
     /// issuer `Sig_structure` preimage (validity binding).
     pub mso_valid_until_date_offset: usize,
+    pub mso_valid_until_anchor_offset: usize,
+    pub mso_valid_until_anchor: Vec<u8>,
     pub policy: Policy,
 }
 
@@ -1837,6 +1956,48 @@ impl MdocCircuitStatement {
                 extracted.valid_until,
                 "validUntil date offset",
             )?;
+        let mso_birth_date_digest_anchor = digest_anchor_bytes(birth_date_digest_id);
+        let mso_birth_date_digest_anchor_offset = anchor_before_offset(
+            &extracted.issuer_sig_structure,
+            mso_birth_date_digest_offset,
+            &mso_birth_date_digest_anchor,
+            "birth_date digest anchor offset",
+        )?;
+        let mso_nationality_digest_anchor = digest_anchor_bytes(nationality_digest_id);
+        let mso_nationality_digest_anchor_offset = anchor_before_offset(
+            &extracted.issuer_sig_structure,
+            mso_nationality_digest_offset,
+            &mso_nationality_digest_anchor,
+            "nationality digest anchor offset",
+        )?;
+        let mso_device_key_x_anchor = vec![0x21, 0x58, 0x20];
+        let mso_device_key_x_anchor_offset = anchor_before_offset(
+            &extracted.issuer_sig_structure,
+            mso_device_key_x_offset,
+            &mso_device_key_x_anchor,
+            "device key x anchor offset",
+        )?;
+        let mso_device_key_y_anchor = vec![0x22, 0x58, 0x20];
+        let mso_device_key_y_anchor_offset = anchor_before_offset(
+            &extracted.issuer_sig_structure,
+            mso_device_key_y_offset,
+            &mso_device_key_y_anchor,
+            "device key y anchor offset",
+        )?;
+        let mso_valid_from_anchor = cbor_tdate_anchor_bytes("validFrom");
+        let mso_valid_from_anchor_offset = anchor_before_offset(
+            &extracted.issuer_sig_structure,
+            mso_valid_from_date_offset,
+            &mso_valid_from_anchor,
+            "validFrom anchor offset",
+        )?;
+        let mso_valid_until_anchor = cbor_tdate_anchor_bytes("validUntil");
+        let mso_valid_until_anchor_offset = anchor_before_offset(
+            &extracted.issuer_sig_structure,
+            mso_valid_until_date_offset,
+            &mso_valid_until_anchor,
+            "validUntil anchor offset",
+        )?;
         ensure_value_window_with_message(
             &extracted.birth_date_item,
             birth_date_element_offset,
@@ -1896,13 +2057,25 @@ impl MdocCircuitStatement {
             birth_date_element_offset,
             nationality_element_offset,
             mso_birth_date_digest_offset,
+            mso_birth_date_digest_anchor_offset,
+            mso_birth_date_digest_anchor,
             mso_nationality_digest_offset,
+            mso_nationality_digest_anchor_offset,
+            mso_nationality_digest_anchor,
             mso_device_key_x_offset,
+            mso_device_key_x_anchor_offset,
+            mso_device_key_x_anchor,
             mso_device_key_y_offset,
+            mso_device_key_y_anchor_offset,
+            mso_device_key_y_anchor,
             valid_from: extracted.valid_from,
             valid_until: extracted.valid_until,
             mso_valid_from_date_offset,
+            mso_valid_from_anchor_offset,
+            mso_valid_from_anchor,
             mso_valid_until_date_offset,
+            mso_valid_until_anchor_offset,
+            mso_valid_until_anchor,
             policy,
         })
     }
