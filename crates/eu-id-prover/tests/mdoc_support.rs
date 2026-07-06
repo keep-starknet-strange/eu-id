@@ -672,14 +672,7 @@ fn fixture_with_options(
 }
 
 fn request(session_transcript: Vec<u8>) -> MdocPidRequest {
-    MdocPidRequest {
-        doctype: DOCTYPE.to_string(),
-        namespace: NAMESPACE.to_string(),
-        birth_date_element: BIRTH_DATE.to_string(),
-        nationality_element: NATIONALITY.to_string(),
-        session_transcript,
-        trusted_issuer_certificates: Vec::new(),
-    }
+    MdocPidRequest::eudi_pid(session_transcript)
 }
 
 fn policy_on(year: u32, month: u32, day: u32) -> Policy {
