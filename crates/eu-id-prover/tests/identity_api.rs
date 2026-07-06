@@ -16,7 +16,8 @@
 
 use eu_id_prover::generator::IssuerKey;
 use eu_id_prover::{
-    fixtures, prove_identity, verify_identity, Error, Policy, Proof, PublicStatement,
+    fixtures, identity_expected_preprocessed_root, prove_identity, verify_identity,
+    verify_identity_with_preprocessed_root, Error, Policy, Proof, PublicStatement,
 };
 
 /// The relying party's statement for a policy: the demo issuer's *public* key
@@ -123,6 +124,56 @@ fn proof_round_trips_through_bincode() {
 
     verify_identity(&restored, &demo_statement(&fixture.policy))
         .expect("a deserialized proof verifies against its statement");
+}
+
+/// The F-ROOT pin end to end: the verifier derives the expected tree-0
+/// (preprocessed) root independently via `identity_expected_preprocessed_root`
+/// and pins it. The honest proof verifies against the derived root; any other
+/// pinned root is rejected with `PreprocessedRootMismatch` before the STARK
+/// check.
+#[test]
+#[ignore = "slow: full identity STARK prove/verify plus a tree-0 rebuild; run with --release --ignored"]
+fn verify_identity_pins_the_preprocessed_root() {
+    let fixture = fixtures::valid_over_18();
+    let proof = prove_identity(
+        &fixture.signed.credential,
+        &IssuerKey::demo(),
+        &fixture.policy,
+        &fixtures::demo_nonce_statement(),
+    )
+    .expect("honest credential proves");
+
+    // The verifier's own derivation of the tree-0 root — from trusted module
+    // constructions, never from the proof.
+    let expected_root = identity_expected_preprocessed_root(
+        &fixture.signed.credential,
+        &IssuerKey::demo(),
+        &fixture.policy,
+        &fixtures::demo_nonce_statement(),
+    )
+    .expect("expected preprocessed root computes");
+
+    verify_identity_with_preprocessed_root(
+        &proof,
+        &demo_statement(&fixture.policy),
+        expected_root,
+    )
+    .expect("honest proof verifies against the derived preprocessed root");
+
+    // A proof whose tree-0 root does not match the pin is rejected fail-closed.
+    let mut wrong_root = expected_root;
+    wrong_root.0[0] ^= 1;
+    assert!(
+        matches!(
+            verify_identity_with_preprocessed_root(
+                &proof,
+                &demo_statement(&fixture.policy),
+                wrong_root,
+            ),
+            Err(Error::PreprocessedRootMismatch { .. })
+        ),
+        "a mismatched preprocessed root must be rejected before the STARK check",
+    );
 }
 
 /// A false statement cannot be proved: `prove_identity` for an under-age
