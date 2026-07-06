@@ -573,6 +573,16 @@ fn mdoc_request(
     eu_id_prover::MdocPidRequest {
         doctype: statement.doctype.clone(),
         namespace: statement.namespace.clone(),
+        attributes: vec![
+            eu_id_prover::mdoc::MdocRequestedAttribute {
+                element_identifier: contract.element_birth_date.clone(),
+                mode: eu_id_prover::mdoc::MdocDisclosureMode::AgeOver,
+            },
+            eu_id_prover::mdoc::MdocRequestedAttribute {
+                element_identifier: contract.element_nationality.clone(),
+                mode: eu_id_prover::mdoc::MdocDisclosureMode::Alpha2Set,
+            },
+        ],
         birth_date_element: contract.element_birth_date,
         nationality_element: contract.element_nationality,
         session_transcript: statement.nonce.clone(),
