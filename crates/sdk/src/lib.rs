@@ -587,6 +587,9 @@ fn mdoc_request(
         nationality_element: contract.element_nationality,
         session_transcript: statement.nonce.clone(),
         trusted_issuer_certificates: witness.trusted_issuer_certificates.clone(),
+        trusted_issuer_public_keys: Vec::new(),
+        device_authentication_profile:
+            eu_id_prover::mdoc::MdocDeviceAuthenticationProfile::Iso180135,
     }
 }
 
