@@ -113,7 +113,8 @@ pub use mdoc::{
     MdocCircuitProof as MdocProof, MdocCircuitStatement as MdocStatement, MdocPidRequest,
 };
 pub use nonce::{
-    nonce_signature_message, prove_nonce_signature, verify_nonce_signature, NonceSignatureProof,
+    nonce_expected_preprocessed_root, nonce_signature_message, prove_nonce_signature,
+    verify_nonce_signature, verify_nonce_signature_with_preprocessed_root, NonceSignatureProof,
     NonceSignatureStatement,
 };
 // `Policy::current_date` is a `predicates::Date`; re-export it so a relying
@@ -1612,6 +1613,17 @@ pub fn verify(
 /// credential `z`, the date of birth, and the nationality are not supplied — they
 /// are proven equal to the credential's. Then checks the shared STARK (the global
 /// LogUp balance). Returns `Ok(())` iff every check passes.
+///
+/// The tree-0 (preprocessed) root is NOT pinned here — the F-ROOT legacy
+/// behavior. A single tier-1 profile constant is impossible today: the
+/// tree-0 shape follows the caller's policy and predicate mode (the SDK
+/// legitimately verifies age-only / nat-only / varying-policy proofs, each
+/// with its own root), and the verifier cannot rebuild the prover modules
+/// from the statement alone. Callers that know their full profile pin via
+/// [`verify_identity_with_preprocessed_root`] with a root from
+/// [`identity_expected_preprocessed_root`]; tier-1 default pinning lands
+/// once the deployment's message-size / policy envelope is normalized
+/// (tasks/froot-pinning-design.md, Tier 1).
 pub fn verify_identity(proof: &Proof, statement: &PublicStatement) -> Result<(), Error> {
     verify_identity_impl(proof, statement, None)
 }

@@ -135,7 +135,7 @@ fn proof_round_trips_through_bincode() {
 #[ignore = "slow: full identity STARK prove/verify plus a tree-0 rebuild; run with --release --ignored"]
 fn verify_identity_pins_the_preprocessed_root() {
     let fixture = fixtures::valid_over_18();
-    let proof = prove_identity(
+    let mut proof = prove_identity(
         &fixture.signed.credential,
         &IssuerKey::demo(),
         &fixture.policy,
@@ -173,6 +173,20 @@ fn verify_identity_pins_the_preprocessed_root() {
             Err(Error::PreprocessedRootMismatch { .. })
         ),
         "a mismatched preprocessed root must be rejected before the STARK check",
+    );
+
+    // A proof whose tree-0 root is TAMPERED is rejected against the honest pin.
+    proof.stark_proof.0.commitments[0].0[0] ^= 1;
+    assert!(
+        matches!(
+            verify_identity_with_preprocessed_root(
+                &proof,
+                &demo_statement(&fixture.policy),
+                expected_root,
+            ),
+            Err(Error::PreprocessedRootMismatch { .. })
+        ),
+        "a tampered tree-0 root must be rejected before the STARK check",
     );
 }
 
