@@ -15,7 +15,7 @@
 //! five log-4 dust components) follows the Phase D perf rule.
 
 use air_core::relations::{
-    field_id, DigestBytesRelation, FieldBytesRelation, SharedDigestRelation, SharedFieldRelation,
+    DigestBytesRelation, FieldBytesRelation, SharedDigestRelation, SharedFieldRelation,
 };
 use air_core::{
     fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint, TreeLayout,
@@ -114,44 +114,6 @@ impl MdocWindowBindRow {
     }
 }
 
-/// Build the six bind rows for the prover: the `digest` argument supplies the
-/// witness digest bytes read from the issuer preimage windows; the verifier
-/// passes `None` (zeros — the digest bytes are reconstructed by the LogUp
-/// relation, not asserted host-side).
-pub(crate) fn mdoc_window_bind_rows(
-    birth_date_element: &[u8],
-    nationality_element: &[u8],
-    device_key_x: &[u8; 32],
-    device_key_y: &[u8; 32],
-    digest_witnesses: Option<([u8; 32], [u8; 32])>,
-) -> Vec<MdocWindowBindRow> {
-    let (birth_digest, nat_digest) = digest_witnesses.unwrap_or(([0u8; 32], [0u8; 32]));
-    vec![
-        MdocWindowBindRow::constant(
-            field_id::MDOC_BIRTH_DATE_ELEMENT_ID,
-            MdocFieldSource::AttributeItem(0),
-            birth_date_element,
-        ),
-        MdocWindowBindRow::constant(
-            field_id::MDOC_NATIONALITY_ELEMENT_ID,
-            MdocFieldSource::AttributeItem(1),
-            nationality_element,
-        ),
-        MdocWindowBindRow::digest(field_id::MDOC_BIRTH_DATE_DIGEST, 0, birth_digest),
-        MdocWindowBindRow::digest(field_id::MDOC_NATIONALITY_DIGEST, 1, nat_digest),
-        MdocWindowBindRow::constant(
-            field_id::MDOC_DEVICE_KEY_X,
-            MdocFieldSource::IssuerMso,
-            device_key_x,
-        ),
-        MdocWindowBindRow::constant(
-            field_id::MDOC_DEVICE_KEY_Y,
-            MdocFieldSource::IssuerMso,
-            device_key_y,
-        ),
-    ]
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct MdocWindowBindInteractionClaim {
     pub(crate) claimed_sum: QM31,
@@ -167,23 +129,6 @@ pub(crate) struct MdocWindowBind {
 }
 
 impl MdocWindowBind {
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
-        rows: Vec<MdocWindowBindRow>,
-        issuer_field_handle: SharedFieldRelation,
-        birth_field_handle: SharedFieldRelation,
-        nat_field_handle: SharedFieldRelation,
-        birth_digest_handle: SharedDigestRelation,
-        nat_digest_handle: SharedDigestRelation,
-    ) -> Self {
-        Self::new_for_attributes(
-            rows,
-            issuer_field_handle,
-            vec![birth_field_handle, nat_field_handle],
-            vec![birth_digest_handle, nat_digest_handle],
-        )
-    }
-
     pub(crate) fn new_for_attributes(
         rows: Vec<MdocWindowBindRow>,
         issuer_field_handle: SharedFieldRelation,
@@ -203,25 +148,6 @@ impl MdocWindowBind {
             interaction_claim: None,
             component: None,
         }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn verifier(
-        rows: Vec<MdocWindowBindRow>,
-        issuer_field_handle: SharedFieldRelation,
-        birth_field_handle: SharedFieldRelation,
-        nat_field_handle: SharedFieldRelation,
-        birth_digest_handle: SharedDigestRelation,
-        nat_digest_handle: SharedDigestRelation,
-        interaction_claim: MdocWindowBindInteractionClaim,
-    ) -> Self {
-        Self::verifier_for_attributes(
-            rows,
-            issuer_field_handle,
-            vec![birth_field_handle, nat_field_handle],
-            vec![birth_digest_handle, nat_digest_handle],
-            interaction_claim,
-        )
     }
 
     pub(crate) fn verifier_for_attributes(
