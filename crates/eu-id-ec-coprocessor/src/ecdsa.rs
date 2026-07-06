@@ -162,6 +162,42 @@ pub struct EcdsaInput {
     pub qy: [u8; 32],
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct EcdsaPublicProjection {
+    pub z: Option<[u8; 32]>,
+    pub r: Option<[u8; 32]>,
+    pub s: Option<[u8; 32]>,
+    pub qx: Option<[u8; 32]>,
+    pub qy: Option<[u8; 32]>,
+}
+
+impl EcdsaPublicProjection {
+    pub fn full(input: &EcdsaInput) -> Self {
+        Self {
+            z: Some(input.z),
+            r: Some(input.r),
+            s: Some(input.s),
+            qx: Some(input.qx),
+            qy: Some(input.qy),
+        }
+    }
+
+    pub fn issuer_key_only(qx: [u8; 32], qy: [u8; 32]) -> Self {
+        Self {
+            qx: Some(qx),
+            qy: Some(qy),
+            ..Self::default()
+        }
+    }
+
+    pub fn message_hash_only(z: [u8; 32]) -> Self {
+        Self {
+            z: Some(z),
+            ..Self::default()
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Witness {
     pub values: Vec<Fp>,
@@ -472,8 +508,39 @@ pub fn prove_implemented_circuit_bundle_batch(
         .map(|(bundle, _)| bundle)
 }
 
+pub fn prove_implemented_circuit_bundle_batch_with_projection(
+    inputs: &[EcdsaInput],
+    projections: &[EcdsaPublicProjection],
+    witnesses: &[Witness],
+    transcript_seed: TranscriptSeed,
+) -> Result<ImplementedCircuitBundle, ImplementedCircuitProofError> {
+    prove_implemented_circuit_bundle_batch_with_projection_profiled(
+        inputs,
+        projections,
+        witnesses,
+        transcript_seed,
+    )
+    .map(|(bundle, _)| bundle)
+}
+
 pub fn prove_implemented_circuit_bundle_batch_profiled(
     inputs: &[EcdsaInput],
+    witnesses: &[Witness],
+    transcript_seed: TranscriptSeed,
+) -> Result<(ImplementedCircuitBundle, ImplementedCircuitProveProfile), ImplementedCircuitProofError>
+{
+    let projections: Vec<_> = inputs.iter().map(EcdsaPublicProjection::full).collect();
+    prove_implemented_circuit_bundle_batch_with_projection_profiled(
+        inputs,
+        &projections,
+        witnesses,
+        transcript_seed,
+    )
+}
+
+pub fn prove_implemented_circuit_bundle_batch_with_projection_profiled(
+    inputs: &[EcdsaInput],
+    projections: &[EcdsaPublicProjection],
     witnesses: &[Witness],
     transcript_seed: TranscriptSeed,
 ) -> Result<(ImplementedCircuitBundle, ImplementedCircuitProveProfile), ImplementedCircuitProofError>
@@ -484,6 +551,12 @@ pub fn prove_implemented_circuit_bundle_batch_profiled(
             witnesses: witnesses.len(),
         });
     }
+    if inputs.len() != projections.len() {
+        return Err(ImplementedCircuitProofError::SignatureCountMismatch {
+            inputs: inputs.len(),
+            witnesses: projections.len(),
+        });
+    }
 
     let mut profile = ImplementedCircuitProveProfile::default();
     let start = Instant::now();
@@ -491,11 +564,13 @@ pub fn prove_implemented_circuit_bundle_batch_profiled(
         verify_witness(input, witness).map_err(ImplementedCircuitProofError::Witness)?;
     }
     profile.witness_check = start.elapsed();
-    let (bundle, inner_profile) = prove_implemented_circuit_bundle_batch_unchecked_profiled(
-        inputs,
-        witnesses,
-        transcript_seed,
-    )?;
+    let (bundle, inner_profile) =
+        prove_implemented_circuit_bundle_batch_unchecked_with_projection_profiled(
+            inputs,
+            projections,
+            witnesses,
+            transcript_seed,
+        )?;
     profile.circuit_build = inner_profile.circuit_build;
     profile.ligero_row_encode = inner_profile.ligero_row_encode;
     profile.ligero_merkle_build = inner_profile.ligero_merkle_build;
@@ -516,10 +591,32 @@ pub fn prove_implemented_circuit_bundle_batch_unchecked_profiled(
     transcript_seed: TranscriptSeed,
 ) -> Result<(ImplementedCircuitBundle, ImplementedCircuitProveProfile), ImplementedCircuitProofError>
 {
+    let projections: Vec<_> = inputs.iter().map(EcdsaPublicProjection::full).collect();
+    prove_implemented_circuit_bundle_batch_unchecked_with_projection_profiled(
+        inputs,
+        &projections,
+        witnesses,
+        transcript_seed,
+    )
+}
+
+pub fn prove_implemented_circuit_bundle_batch_unchecked_with_projection_profiled(
+    inputs: &[EcdsaInput],
+    projections: &[EcdsaPublicProjection],
+    witnesses: &[Witness],
+    transcript_seed: TranscriptSeed,
+) -> Result<(ImplementedCircuitBundle, ImplementedCircuitProveProfile), ImplementedCircuitProofError>
+{
     if inputs.len() != witnesses.len() {
         return Err(ImplementedCircuitProofError::SignatureCountMismatch {
             inputs: inputs.len(),
             witnesses: witnesses.len(),
+        });
+    }
+    if inputs.len() != projections.len() {
+        return Err(ImplementedCircuitProofError::SignatureCountMismatch {
+            inputs: inputs.len(),
+            witnesses: projections.len(),
         });
     }
 
@@ -580,7 +677,9 @@ pub fn prove_implemented_circuit_bundle_batch_unchecked_profiled(
 
     let mut entries = Vec::new();
     let start = Instant::now();
-    for (signature_index, (input, instances)) in inputs.iter().zip(&all_instances).enumerate() {
+    for (signature_index, (projection, instances)) in
+        projections.iter().zip(&all_instances).enumerate()
+    {
         for (family_index, instance) in instances.iter().enumerate() {
             let layers = instance
                 .circuit
@@ -590,8 +689,7 @@ pub fn prove_implemented_circuit_bundle_batch_unchecked_profiled(
                 CoprocessorChannel::from_seed(transcript_seed, COPROCESSOR_TRANSCRIPT_DOMAIN);
             mix_bundle_signature_index(signature_index, &mut channel);
             channel.mix_bytes(instance.label);
-            mix_ecdsa_statement(input, &mut channel)
-                .map_err(ImplementedCircuitProofError::Witness)?;
+            mix_ecdsa_public_projection(projection, &mut channel);
             let family_start = Instant::now();
             let proof = prove_evaluated_circuit(&instance.circuit, &layers, root, &mut channel)
                 .map_err(ImplementedCircuitProofError::Sumcheck)?;
@@ -602,7 +700,7 @@ pub fn prove_implemented_circuit_bundle_batch_unchecked_profiled(
     profile.sumcheck = start.elapsed();
     let (claim_batch, consistency_claim_values) = prover_claim_batch(
         &commitment,
-        inputs,
+        projections,
         &all_instances,
         &all_layouts,
         &entries,
@@ -723,7 +821,8 @@ pub fn prove_implemented_circuit_bundle_unchecked_profiled(
             CoprocessorChannel::from_seed(transcript_seed, COPROCESSOR_TRANSCRIPT_DOMAIN);
         mix_bundle_signature_index(0, &mut channel);
         channel.mix_bytes(instance.label);
-        mix_ecdsa_statement(input, &mut channel).map_err(ImplementedCircuitProofError::Witness)?;
+        let projection = EcdsaPublicProjection::full(input);
+        mix_ecdsa_public_projection(&projection, &mut channel);
         let family_start = Instant::now();
         let proof = prove_evaluated_circuit(&instance.circuit, &layers, root, &mut channel)
             .map_err(ImplementedCircuitProofError::Sumcheck)?;
@@ -731,10 +830,10 @@ pub fn prove_implemented_circuit_bundle_unchecked_profiled(
         entries.push(ImplementedCircuitBundleEntry { proof });
     }
     profile.sumcheck = start.elapsed();
-    let single_input = [*input];
+    let single_projection = [EcdsaPublicProjection::full(input)];
     let (claim_batch, consistency_claim_values) = prover_claim_batch(
         &commitment,
-        &single_input,
+        &single_projection,
         &all_instances,
         &all_layouts,
         &entries,
@@ -773,8 +872,35 @@ pub fn verify_implemented_circuit_bundle_batch(
         .map(|(claims, _)| claims)
 }
 
+pub fn verify_implemented_circuit_bundle_batch_with_projection(
+    projections: &[EcdsaPublicProjection],
+    bundle: &ImplementedCircuitBundle,
+    transcript_seed: TranscriptSeed,
+) -> Result<Vec<Vec<InputClaims>>, ImplementedCircuitProofError> {
+    verify_implemented_circuit_bundle_batch_with_projection_profiled(
+        projections,
+        bundle,
+        transcript_seed,
+    )
+    .map(|(claims, _)| claims)
+}
+
 pub fn verify_implemented_circuit_bundle_batch_profiled(
     inputs: &[EcdsaInput],
+    bundle: &ImplementedCircuitBundle,
+    transcript_seed: TranscriptSeed,
+) -> Result<(Vec<Vec<InputClaims>>, ImplementedCircuitVerifyProfile), ImplementedCircuitProofError>
+{
+    let projections: Vec<_> = inputs.iter().map(EcdsaPublicProjection::full).collect();
+    verify_implemented_circuit_bundle_batch_with_projection_profiled(
+        &projections,
+        bundle,
+        transcript_seed,
+    )
+}
+
+pub fn verify_implemented_circuit_bundle_batch_with_projection_profiled(
+    projections: &[EcdsaPublicProjection],
     bundle: &ImplementedCircuitBundle,
     transcript_seed: TranscriptSeed,
 ) -> Result<(Vec<Vec<InputClaims>>, ImplementedCircuitVerifyProfile), ImplementedCircuitProofError>
@@ -783,7 +909,7 @@ pub fn verify_implemented_circuit_bundle_batch_profiled(
     let setup_start = Instant::now();
     let circuits =
         implemented_circuit_verifier_instances().map_err(ImplementedCircuitProofError::Circuit)?;
-    let expected_entries = inputs.len() * circuits.len();
+    let expected_entries = projections.len() * circuits.len();
     if bundle.entries.len() != expected_entries {
         return Err(ImplementedCircuitProofError::WrongProofCount {
             expected: expected_entries,
@@ -791,9 +917,9 @@ pub fn verify_implemented_circuit_bundle_batch_profiled(
         });
     }
 
-    let mut signature_layouts = Vec::with_capacity(inputs.len());
+    let mut signature_layouts = Vec::with_capacity(projections.len());
     let mut offset = 0;
-    for _ in inputs {
+    for _ in projections {
         let (layouts, next_offset) = verifier_bundle_pad_layouts(&circuits, offset);
         signature_layouts.push(layouts);
         offset = next_offset;
@@ -833,8 +959,10 @@ pub fn verify_implemented_circuit_bundle_batch_profiled(
 
     let mut linear_claims = Vec::new();
     let mut consistency_cursor = 0usize;
-    let mut all_claims = Vec::with_capacity(inputs.len());
-    for (signature_index, (input, layouts)) in inputs.iter().zip(&signature_layouts).enumerate() {
+    let mut all_claims = Vec::with_capacity(projections.len());
+    for (signature_index, (projection, layouts)) in
+        projections.iter().zip(&signature_layouts).enumerate()
+    {
         let mut verified_claims = Vec::with_capacity(circuits.len());
         let mut u_scalars_from_c3 = None;
         let mut u_scalars_from_c6 = None;
@@ -858,8 +986,7 @@ pub fn verify_implemented_circuit_bundle_batch_profiled(
                 CoprocessorChannel::from_seed(transcript_seed, COPROCESSOR_TRANSCRIPT_DOMAIN);
             mix_bundle_signature_index(signature_index, &mut channel);
             channel.mix_bytes(instance.label);
-            mix_ecdsa_statement(input, &mut channel)
-                .map_err(ImplementedCircuitProofError::Witness)?;
+            mix_ecdsa_public_projection(projection, &mut channel);
             let start = Instant::now();
             let claims = verify_circuit(&instance.circuit, &entry.proof, bundle.root, &mut channel)
                 .map_err(ImplementedCircuitProofError::Sumcheck)?;
@@ -881,13 +1008,13 @@ pub fn verify_implemented_circuit_bundle_batch_profiled(
             let start = Instant::now();
             match instance.label {
                 b"s4-ecdsa-c1-input-limbs" => {
-                    add_c1_public_claims(&mut linear_claims, input, layout)?
+                    add_c1_public_claims(&mut linear_claims, projection, layout)?
                 }
                 b"s4-ecdsa-c2-canonicality" => {
-                    add_c2_public_claims(&mut linear_claims, input, layout)?;
+                    add_c2_public_claims(&mut linear_claims, projection, layout)?;
                 }
                 b"s4-ecdsa-c3-c5-scalar-setup" => {
-                    add_c3_public_claims(&mut linear_claims, input, layout)?;
+                    add_c3_public_claims(&mut linear_claims, projection, layout)?;
                     u_scalars_from_c3 = Some((
                         take_private_value(
                             &mut linear_claims,
@@ -1002,15 +1129,7 @@ pub fn verify_implemented_circuit_bundle_batch_profiled(
                     )?);
                 }
                 b"s4-ecdsa-c14-c15-final-check" => {
-                    let signature_r = Fp::from_bytes_be(input.r)
-                        .ok_or(ImplementedCircuitProofError::InputBindingRejected)?;
-                    add_fixed_claim(
-                        &mut linear_claims,
-                        layout.input_offset,
-                        layout.input_len,
-                        C14_SIGNATURE_R_INDEX as usize,
-                        signature_r,
-                    );
+                    add_c14_public_claims(&mut linear_claims, projection, layout)?;
                     rx_from_c14 = Some(take_private_value(
                         &mut linear_claims,
                         bundle,
@@ -1035,7 +1154,6 @@ pub fn verify_implemented_circuit_bundle_batch_profiled(
             add_inputs_from_c11,
         )?;
         verify_c13_boundary_cross_family(
-            input,
             add_inputs_from_c11,
             denom_inv_from_c11,
             final_from_c11,
@@ -1142,7 +1260,6 @@ struct C12BoundaryValues {
 }
 
 fn verify_c13_boundary_cross_family(
-    _input: &EcdsaInput,
     c11_add: Option<((Fp, Fp), (Fp, Fp))>,
     c11_add_inverse: Option<Fp>,
     c11_final: Option<(Fp, Fp)>,
@@ -1383,7 +1500,7 @@ fn verifier_circuit_input_len(circuit: &Circuit) -> usize {
 
 fn prover_claim_batch(
     commitment: &crate::ligero::LigeroCommitment,
-    inputs: &[EcdsaInput],
+    projections: &[EcdsaPublicProjection],
     all_instances: &[Vec<ProverCircuitInstance>],
     all_layouts: &[Vec<BundleCircuitLayout>],
     entries: &[ImplementedCircuitBundleEntry],
@@ -1392,7 +1509,7 @@ fn prover_claim_batch(
     let mut claims = Vec::new();
     let mut consistency_values = Vec::new();
     let circuits_per_signature = all_instances.first().map(|v| v.len()).unwrap_or(0);
-    for (signature_index, ((input, instances), layouts)) in inputs
+    for (signature_index, ((projection, instances), layouts)) in projections
         .iter()
         .zip(all_instances.iter())
         .zip(all_layouts.iter())
@@ -1411,7 +1528,7 @@ fn prover_claim_batch(
             add_prover_family_fixed_claims(
                 &mut claims,
                 &mut consistency_values,
-                input,
+                projection,
                 instance.label,
                 layout,
                 &instance.input,
@@ -1472,16 +1589,16 @@ fn add_pad_claims(
 fn add_prover_family_fixed_claims(
     claims: &mut Vec<LigeroLinearClaim>,
     consistency_values: &mut Vec<Fp>,
-    input: &EcdsaInput,
+    projection: &EcdsaPublicProjection,
     label: &[u8],
     layout: &BundleCircuitLayout,
     values: &[Fp],
 ) -> Result<(), ImplementedCircuitProofError> {
     match label {
-        b"s4-ecdsa-c1-input-limbs" => add_c1_public_claims(claims, input, layout)?,
-        b"s4-ecdsa-c2-canonicality" => add_c2_public_claims(claims, input, layout)?,
+        b"s4-ecdsa-c1-input-limbs" => add_c1_public_claims(claims, projection, layout)?,
+        b"s4-ecdsa-c2-canonicality" => add_c2_public_claims(claims, projection, layout)?,
         b"s4-ecdsa-c3-c5-scalar-setup" => {
-            add_c3_public_claims(claims, input, layout)?;
+            add_c3_public_claims(claims, projection, layout)?;
             add_private_value(
                 claims,
                 consistency_values,
@@ -1566,15 +1683,7 @@ fn add_prover_family_fixed_claims(
             )?;
         }
         b"s4-ecdsa-c14-c15-final-check" => {
-            let signature_r = Fp::from_bytes_be(input.r)
-                .ok_or(ImplementedCircuitProofError::InputBindingRejected)?;
-            add_fixed_claim(
-                claims,
-                layout.input_offset,
-                layout.input_len,
-                C14_SIGNATURE_R_INDEX as usize,
-                signature_r,
-            );
+            add_c14_public_claims(claims, projection, layout)?;
             add_private_value(
                 claims,
                 consistency_values,
@@ -1590,12 +1699,19 @@ fn add_prover_family_fixed_claims(
 
 fn add_c1_public_claims(
     claims: &mut Vec<LigeroLinearClaim>,
-    input: &EcdsaInput,
+    projection: &EcdsaPublicProjection,
     layout: &BundleCircuitLayout,
 ) -> Result<(), ImplementedCircuitProofError> {
-    for (offset, bytes) in [input.z, input.r, input.s, input.qx, input.qy]
-        .into_iter()
-        .enumerate()
+    for (offset, bytes) in [
+        projection.z,
+        projection.r,
+        projection.s,
+        projection.qx,
+        projection.qy,
+    ]
+    .into_iter()
+    .enumerate()
+    .filter_map(|(offset, bytes)| bytes.map(|bytes| (offset, bytes)))
     {
         let value =
             Fp::from_bytes_be(bytes).ok_or(ImplementedCircuitProofError::InputBindingRejected)?;
@@ -1612,15 +1728,18 @@ fn add_c1_public_claims(
 
 fn add_c2_public_claims(
     claims: &mut Vec<LigeroLinearClaim>,
-    input: &EcdsaInput,
+    projection: &EcdsaPublicProjection,
     layout: &BundleCircuitLayout,
 ) -> Result<(), ImplementedCircuitProofError> {
     for (index, bytes) in [
-        (C2_R_INDEX as usize, input.r),
-        (C2_S_INDEX as usize, input.s),
-        (C2_QX_INDEX as usize, input.qx),
-        (C2_QY_INDEX as usize, input.qy),
-    ] {
+        (C2_R_INDEX as usize, projection.r),
+        (C2_S_INDEX as usize, projection.s),
+        (C2_QX_INDEX as usize, projection.qx),
+        (C2_QY_INDEX as usize, projection.qy),
+    ]
+    .into_iter()
+    .filter_map(|(index, bytes)| bytes.map(|bytes| (index, bytes)))
+    {
         let value =
             Fp::from_bytes_be(bytes).ok_or(ImplementedCircuitProofError::InputBindingRejected)?;
         add_fixed_claim(claims, layout.input_offset, layout.input_len, index, value);
@@ -1630,17 +1749,39 @@ fn add_c2_public_claims(
 
 fn add_c3_public_claims(
     claims: &mut Vec<LigeroLinearClaim>,
-    input: &EcdsaInput,
+    projection: &EcdsaPublicProjection,
     layout: &BundleCircuitLayout,
 ) -> Result<(), ImplementedCircuitProofError> {
     for (index, bytes) in [
-        (C3_Z_INDEX as usize, input.z),
-        (C3_R_INDEX as usize, input.r),
-        (C3_S_INDEX as usize, input.s),
-    ] {
+        (C3_Z_INDEX as usize, projection.z),
+        (C3_R_INDEX as usize, projection.r),
+        (C3_S_INDEX as usize, projection.s),
+    ]
+    .into_iter()
+    .filter_map(|(index, bytes)| bytes.map(|bytes| (index, bytes)))
+    {
         let value =
             Fp::from_bytes_be(bytes).ok_or(ImplementedCircuitProofError::InputBindingRejected)?;
         add_fixed_claim(claims, layout.input_offset, layout.input_len, index, value);
+    }
+    Ok(())
+}
+
+fn add_c14_public_claims(
+    claims: &mut Vec<LigeroLinearClaim>,
+    projection: &EcdsaPublicProjection,
+    layout: &BundleCircuitLayout,
+) -> Result<(), ImplementedCircuitProofError> {
+    if let Some(r) = projection.r {
+        let signature_r =
+            Fp::from_bytes_be(r).ok_or(ImplementedCircuitProofError::InputBindingRejected)?;
+        add_fixed_claim(
+            claims,
+            layout.input_offset,
+            layout.input_len,
+            C14_SIGNATURE_R_INDEX as usize,
+            signature_r,
+        );
     }
     Ok(())
 }
@@ -2870,43 +3011,43 @@ fn ladder_denominators_from_witness(
     Ok(denominators)
 }
 
-fn mix_ecdsa_statement(
-    input: &EcdsaInput,
-    channel: &mut CoprocessorChannel,
-) -> Result<(), WitnessError> {
-    for segment in ecdsa_statement_transcript_segments(input)? {
-        channel.mix_bytes(&segment);
-    }
-    Ok(())
-}
-
 pub fn ecdsa_statement_transcript_segments(
     input: &EcdsaInput,
 ) -> Result<Vec<Vec<u8>>, WitnessError> {
-    let mut segments = Vec::with_capacity(15);
-    segments.push(b"s4-ecdsa-public-statement-v1".to_vec());
-    for bytes in [input.z, input.r, input.s, input.qx, input.qy] {
-        segments.push(bytes.to_vec());
-    }
-
-    push_blind_statement_point_segments(&mut segments, 0, ProjectivePoint::GENERATOR)?;
-    let public_key = parse_public_key(input.qx, input.qy)?;
-    push_blind_statement_point_segments(&mut segments, 0, ProjectivePoint::from(public_key))?;
-    Ok(segments)
+    let projection = EcdsaPublicProjection::full(input);
+    Ok(ecdsa_public_projection_transcript_segments(&projection))
 }
 
-fn push_blind_statement_point_segments(
-    segments: &mut Vec<Vec<u8>>,
-    blind_index: u64,
-    base: ProjectivePoint,
-) -> Result<(), WitnessError> {
-    segments.push(blind_index.to_be_bytes().to_vec());
-    let (bx, by) = projective_point_coords(base)?;
-    let (dx, dy) = projective_point_coords(double_256(base))?;
-    for value in [bx, by, dx, dy] {
-        segments.push(value.to_bytes_be().to_vec());
+fn mix_ecdsa_public_projection(
+    projection: &EcdsaPublicProjection,
+    channel: &mut CoprocessorChannel,
+) {
+    for segment in ecdsa_public_projection_transcript_segments(projection) {
+        channel.mix_bytes(&segment);
     }
-    Ok(())
+}
+
+pub fn ecdsa_public_projection_transcript_segments(
+    projection: &EcdsaPublicProjection,
+) -> Vec<Vec<u8>> {
+    let mut segments = Vec::with_capacity(7);
+    segments.push(b"s4-ecdsa-public-projection-v1".to_vec());
+    for value in [
+        projection.z,
+        projection.r,
+        projection.s,
+        projection.qx,
+        projection.qy,
+    ] {
+        match value {
+            Some(bytes) => {
+                segments.push(vec![1]);
+                segments.push(bytes.to_vec());
+            }
+            None => segments.push(vec![0]),
+        }
+    }
+    segments
 }
 
 fn double_256(mut point: ProjectivePoint) -> ProjectivePoint {

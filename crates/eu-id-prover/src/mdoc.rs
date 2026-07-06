@@ -2982,21 +2982,30 @@ impl AirProver for MdocCoprocessorBindingProver {
     fn write_interaction(&mut self, _tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {}
 
     fn prove_post_interaction(&mut self, channel: &mut air_core::Ch) {
-        crate::mix_coprocessor_tagged_statements(
+        let issuer_projection =
+            crate::ec_coprocessor::issuer_key_projection_from_stwo(&self.issuer_input);
+        let device_projection =
+            crate::ec_coprocessor::message_hash_projection_from_stwo(&self.device_input);
+        crate::mix_coprocessor_tagged_projections(
             channel,
             &[
-                (b"issuer".as_slice(), &self.issuer_input),
-                (b"device".as_slice(), &self.device_input),
+                (b"issuer".as_slice(), &issuer_projection),
+                (b"device".as_slice(), &device_projection),
             ],
         )
-        .expect("mdoc coprocessor statements mix");
+        .expect("mdoc coprocessor public projections mix");
         let seed = crate::draw_coprocessor_seed(channel);
         let inputs = [self.issuer_input.clone(), self.device_input.clone()];
         let witnesses = [self.issuer_witness.clone(), self.device_witness.clone()];
-        let bundle = crate::ec_coprocessor::prove_implemented_circuit_bundle_batch_from_stwo(
-            &inputs, &witnesses, seed,
-        )
-        .expect("mdoc coprocessor bundle proves both checked witnesses");
+        let projections = [issuer_projection, device_projection];
+        let bundle =
+            crate::ec_coprocessor::prove_implemented_circuit_bundle_batch_with_projection_from_stwo(
+                &inputs,
+                &projections,
+                &witnesses,
+                seed,
+            )
+            .expect("mdoc coprocessor bundle proves both checked witnesses");
         crate::mix_coprocessor_rejoin(channel, &bundle).expect("mdoc coprocessor rejoin mixes");
         self.bundle = Some(bundle);
     }
@@ -3044,18 +3053,22 @@ impl Air for MdocCoprocessorBindingVerifier {
         &mut self,
         channel: &mut air_core::Ch,
     ) -> Result<(), VerificationError> {
-        crate::mix_coprocessor_tagged_statements(
+        let issuer_projection =
+            crate::ec_coprocessor::issuer_key_projection_from_stwo(&self.issuer_input);
+        let device_projection =
+            crate::ec_coprocessor::message_hash_projection_from_stwo(&self.device_input);
+        crate::mix_coprocessor_tagged_projections(
             channel,
             &[
-                (b"issuer".as_slice(), &self.issuer_input),
-                (b"device".as_slice(), &self.device_input),
+                (b"issuer".as_slice(), &issuer_projection),
+                (b"device".as_slice(), &device_projection),
             ],
         )
         .map_err(VerificationError::InvalidStructure)?;
         let seed = crate::draw_coprocessor_seed(channel);
-        let inputs = [self.issuer_input.clone(), self.device_input.clone()];
-        crate::ec_coprocessor::verify_implemented_circuit_bundle_batch_from_stwo(
-            &inputs,
+        let projections = [issuer_projection, device_projection];
+        crate::ec_coprocessor::verify_implemented_circuit_bundle_batch_with_projection_from_stwo(
+            &projections,
             &self.bundle,
             seed,
         )
