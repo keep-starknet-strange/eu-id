@@ -565,6 +565,27 @@ pub fn verify_identity(
     })
 }
 
+/// The disclosed-attribute set the SDK's mdoc PID path always requests, in a
+/// fixed order: `birth_date` under `AgeOver` then `nationality` under
+/// `Alpha2Set`. Single source of truth shared by the prove side (to build the
+/// request) and the verify side (to pin the envelope statement's disclosed set),
+/// so the two cannot drift. Every supported predicate mode discloses both
+/// attributes — the mode only tunes the policy (neutralization), never which
+/// attributes are proven — so both legs are always present.
+fn expected_mdoc_attributes() -> Vec<eu_id_prover::mdoc::MdocRequestedAttribute> {
+    let contract = zk_contract_v1();
+    vec![
+        eu_id_prover::mdoc::MdocRequestedAttribute {
+            element_identifier: contract.element_birth_date,
+            mode: eu_id_prover::mdoc::MdocDisclosureMode::AgeOver,
+        },
+        eu_id_prover::mdoc::MdocRequestedAttribute {
+            element_identifier: contract.element_nationality,
+            mode: eu_id_prover::mdoc::MdocDisclosureMode::Alpha2Set,
+        },
+    ]
+}
+
 fn mdoc_request(
     statement: &ZkPublicStatement,
     witness: &ZkMdocWitness,
@@ -573,16 +594,7 @@ fn mdoc_request(
     eu_id_prover::MdocPidRequest {
         doctype: statement.doctype.clone(),
         namespace: statement.namespace.clone(),
-        attributes: vec![
-            eu_id_prover::mdoc::MdocRequestedAttribute {
-                element_identifier: contract.element_birth_date.clone(),
-                mode: eu_id_prover::mdoc::MdocDisclosureMode::AgeOver,
-            },
-            eu_id_prover::mdoc::MdocRequestedAttribute {
-                element_identifier: contract.element_nationality.clone(),
-                mode: eu_id_prover::mdoc::MdocDisclosureMode::Alpha2Set,
-            },
-        ],
+        attributes: expected_mdoc_attributes(),
         birth_date_element: contract.element_birth_date,
         nationality_element: contract.element_nationality,
         session_transcript: statement.nonce.clone(),
@@ -624,6 +636,41 @@ fn mdoc_statement_matches_public_statement(
     )
     .map_err(|e| ZkError::InvalidInput(format!("invalid DeviceAuthentication input: {e:?}")))?;
     if mdoc_statement.device_message_hash.0 != expected_device_hash {
+        return Ok(false);
+    }
+
+    // Caller-arg binding (mirrors the historical P-256 fix): the disclosed
+    // attribute set, predicate-leg activation, element identity, and disclosure
+    // modes are all prover-supplied fields of the envelope statement. The policy
+    // check above binds only the *values* (min_age, accepted set); it does NOT
+    // force the predicate to actually be proven. Pin these fields to the SDK's
+    // OWN request so a prover cannot
+    //   - drop the age (or nationality) leg by leaving its index `None`, which
+    //     makes the circuit gate `proof.age_public == index.map(..)` trivially
+    //     pass without the predicate ever being enforced (C1); or
+    //   - prove a predicate over the wrong signed element, e.g. `issue_date`
+    //     instead of `birth_date` (C2).
+    // Fail-closed on ANY divergence from the expected set.
+    let expected = expected_mdoc_attributes();
+    if mdoc_statement.attributes.len() != expected.len() {
+        return Ok(false);
+    }
+    for (got, want) in mdoc_statement.attributes.iter().zip(expected.iter()) {
+        if got.element_identifier != want.element_identifier || got.mode != want.mode {
+            return Ok(false);
+        }
+    }
+    // Both legs are always requested (see `expected_mdoc_attributes`), so both
+    // indices must be `Some` and point at the matching disclosed attribute.
+    let expected_age_index = expected
+        .iter()
+        .position(|a| matches!(a.mode, eu_id_prover::mdoc::MdocDisclosureMode::AgeOver));
+    let expected_nat_index = expected
+        .iter()
+        .position(|a| matches!(a.mode, eu_id_prover::mdoc::MdocDisclosureMode::Alpha2Set));
+    if mdoc_statement.age_attribute_index != expected_age_index
+        || mdoc_statement.nationality_attribute_index != expected_nat_index
+    {
         return Ok(false);
     }
 
@@ -837,6 +884,158 @@ mod tests {
                 .windows(32)
                 .any(|window| window == fixture.statement.device_input.signature.s.0),
             "device s must not be serialized in the public mdoc statement"
+        );
+    }
+
+    #[test]
+    fn mdoc_verify_rejects_dropped_predicate_leg() {
+        // C1: a proof that never proved the age (or nationality) predicate leaves
+        // its attribute index `None`; the circuit gate then passes trivially. The
+        // SDK guard must reject it even though policy / issuer / device all match.
+        let (statement, honest) = honest_mdoc_statement();
+        assert!(
+            mdoc_statement_matches_public_statement(&honest, &statement).unwrap(),
+            "honest And statement (both legs present) must be accepted"
+        );
+
+        let mut age_dropped = honest.clone();
+        age_dropped.age_attribute_index = None;
+        assert!(
+            !mdoc_statement_matches_public_statement(&age_dropped, &statement).unwrap(),
+            "dropping the age predicate leg (index None) must be rejected"
+        );
+
+        let mut nat_dropped = honest.clone();
+        nat_dropped.nationality_attribute_index = None;
+        assert!(
+            !mdoc_statement_matches_public_statement(&nat_dropped, &statement).unwrap(),
+            "dropping the nationality predicate leg (index None) must be rejected"
+        );
+    }
+
+    #[test]
+    fn mdoc_verify_rejects_element_substitution() {
+        // C2: prove the age predicate over the wrong signed element (e.g.
+        // `issue_date` instead of `birth_date`). The disclosed element identity
+        // must be pinned to the requested contract element.
+        let (statement, honest) = honest_mdoc_statement();
+        let age_index = honest
+            .age_attribute_index
+            .expect("honest statement discloses the age attribute");
+
+        let mut wrong_element = honest.clone();
+        wrong_element.attributes[age_index].element_identifier = "issue_date".to_string();
+        assert!(
+            !mdoc_statement_matches_public_statement(&wrong_element, &statement).unwrap(),
+            "age predicate over the wrong element_identifier must be rejected"
+        );
+
+        let mut wrong_mode = honest.clone();
+        wrong_mode.attributes[age_index].mode =
+            eu_id_prover::mdoc::MdocDisclosureMode::ValueEquality(vec![0x01]);
+        assert!(
+            !mdoc_statement_matches_public_statement(&wrong_mode, &statement).unwrap(),
+            "age leg disclosed under the wrong mode must be rejected"
+        );
+    }
+
+    #[test]
+    fn mdoc_verify_rejects_attribute_count_mismatch() {
+        // Fail-closed on an unexpected disclosed-attribute count (extra or fewer
+        // legs than the SDK's own request).
+        let (statement, honest) = honest_mdoc_statement();
+
+        let mut extra = honest.clone();
+        let extra_attr = extra.attributes[0].clone();
+        extra.attributes.push(extra_attr);
+        assert!(
+            !mdoc_statement_matches_public_statement(&extra, &statement).unwrap(),
+            "an extra disclosed attribute must be rejected"
+        );
+
+        let mut truncated = honest.clone();
+        truncated.attributes.truncate(1);
+        assert!(
+            !mdoc_statement_matches_public_statement(&truncated, &statement).unwrap(),
+            "a missing disclosed attribute must be rejected"
+        );
+    }
+
+    #[test]
+    #[ignore = "runs the product mdoc STWO prover: reproduces the C1 attack end-to-end"]
+    fn mdoc_verify_pid_rejects_c1_dropped_age_predicate_end_to_end() {
+        // End-to-end C1: build a genuine issuer-signed proof that discloses ONLY
+        // the nationality attribute (age omitted), then present it against a
+        // mode=And request that demands the age predicate. Pre-fix this returned
+        // ok=true (age never proven); post-fix the SDK guard rejects it.
+        let demo = eu_id_prover::mdoc::demo_mdoc_circuit_fixture();
+        let issuer_key = demo.statement.issuer_input.public_key.clone();
+
+        // Attacker request: nationality only — no AgeOver leg.
+        let nat_only_request = eu_id_prover::MdocPidRequest {
+            doctype: demo.request.doctype.clone(),
+            namespace: demo.request.namespace.clone(),
+            attributes: vec![eu_id_prover::mdoc::MdocRequestedAttribute {
+                element_identifier: "nationality".to_string(),
+                mode: eu_id_prover::mdoc::MdocDisclosureMode::Alpha2Set,
+            }],
+            birth_date_element: "birth_date".to_string(),
+            nationality_element: "nationality".to_string(),
+            session_transcript: demo.request.session_transcript.clone(),
+            trusted_issuer_certificates: demo.request.trusted_issuer_certificates.clone(),
+            trusted_issuer_public_keys: Vec::new(),
+            device_authentication_profile:
+                eu_id_prover::mdoc::MdocDeviceAuthenticationProfile::Iso180135,
+        };
+        // Policy whose min_age matches what the mode=And verifier will demand, so
+        // the SDK policy-equality check passes.
+        let policy = eu_id_prover::Policy {
+            current_date: eu_id_prover::Date {
+                year: 2026,
+                month: 7,
+                day: 3,
+            },
+            min_age_years: 18,
+            accepted_nationalities: vec![276, 250],
+            accepted_nationalities_alpha2: vec![*b"DE", *b"FR"],
+        };
+        let (proof, mdoc_statement) =
+            eu_id_prover::prove_mdoc(&demo.document, &nat_only_request, policy)
+                .expect("nationality-only mdoc proves");
+        assert!(
+            mdoc_statement.age_attribute_index.is_none(),
+            "attack precondition: age predicate leg absent"
+        );
+
+        let stark_proof_bincode = bincode::serialize(&proof).unwrap();
+        let stark_proof = compress_stark_proof_for_ffi(&stark_proof_bincode).unwrap();
+
+        let claimed_statement = ZkPublicStatement {
+            spec_id: "stwo-euid-pid-v1".to_string(),
+            version: 1,
+            doctype: demo.request.doctype.clone(),
+            namespace: demo.request.namespace.clone(),
+            issuer_key_x: issuer_key.x.0.to_vec(),
+            issuer_key_y: issuer_key.y.0.to_vec(),
+            today_epoch_day: 20637, // 2026-07-03
+            nonce: demo.request.session_transcript.clone(),
+            predicate_mode: PredicateMode::And,
+            age_threshold_years: Some(18),
+            accepted_numeric_countries: Some(vec![276, 250]),
+            nat_mode: NatMode::Any,
+        };
+        let envelope = MdocProofEnvelope {
+            statement_bytes: encode_statement(&claimed_statement),
+            mdoc_statement,
+            stark_proof,
+        };
+        let proof_bytes = bincode::serialize(&envelope).unwrap();
+
+        assert!(
+            !verify_mdoc_pid(claimed_statement, proof_bytes)
+                .expect("verification returns")
+                .ok,
+            "C1 attack (age predicate never proven) must be rejected end-to-end"
         );
     }
 
