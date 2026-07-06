@@ -156,6 +156,18 @@ pub mod field_id {
     /// The `validityInfo.validUntil` full-date window (10 ASCII bytes) in the
     /// issuer MSO preimage, bound and compared to the public policy date.
     pub const MDOC_VALID_UNTIL: u32 = 9;
+    /// Local CBOR anchor before the birth-date digest value.
+    pub const MDOC_BIRTH_DATE_DIGEST_ANCHOR: u32 = 10;
+    /// Local CBOR anchor before the nationality digest value.
+    pub const MDOC_NATIONALITY_DIGEST_ANCHOR: u32 = 11;
+    /// Local CBOR anchor before the deviceKey x-coordinate value.
+    pub const MDOC_DEVICE_KEY_X_ANCHOR: u32 = 12;
+    /// Local CBOR anchor before the deviceKey y-coordinate value.
+    pub const MDOC_DEVICE_KEY_Y_ANCHOR: u32 = 13;
+    /// Local CBOR anchor before the validityInfo.validFrom date text.
+    pub const MDOC_VALID_FROM_ANCHOR: u32 = 14;
+    /// Local CBOR anchor before the validityInfo.validUntil date text.
+    pub const MDOC_VALID_UNTIL_ANCHOR: u32 = 15;
 }
 
 #[cfg(test)]
@@ -230,6 +242,12 @@ mod tests {
             field_id::MDOC_DEVICE_KEY_Y,
             field_id::MDOC_VALID_FROM,
             field_id::MDOC_VALID_UNTIL,
+            field_id::MDOC_BIRTH_DATE_DIGEST_ANCHOR,
+            field_id::MDOC_NATIONALITY_DIGEST_ANCHOR,
+            field_id::MDOC_DEVICE_KEY_X_ANCHOR,
+            field_id::MDOC_DEVICE_KEY_Y_ANCHOR,
+            field_id::MDOC_VALID_FROM_ANCHOR,
+            field_id::MDOC_VALID_UNTIL_ANCHOR,
         ];
         for (index, id) in ids.iter().enumerate() {
             assert!(!ids[index + 1..].contains(id));

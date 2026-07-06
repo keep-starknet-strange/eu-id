@@ -1292,6 +1292,30 @@ fn statement_carries_mso_binding_offsets() {
             [statement.mso_valid_until_date_offset..statement.mso_valid_until_date_offset + 10],
         b"2030-01-01"
     );
+    assert_eq!(
+        &extracted.issuer_sig_structure[statement.mso_birth_date_digest_anchor_offset
+            ..statement.mso_birth_date_digest_anchor_offset
+                + statement.mso_birth_date_digest_anchor.len()],
+        statement.mso_birth_date_digest_anchor.as_slice()
+    );
+    assert_eq!(statement.mso_birth_date_digest_anchor, vec![7, 0x58, 0x20]);
+    assert_eq!(
+        &extracted.issuer_sig_structure[statement.mso_nationality_digest_anchor_offset
+            ..statement.mso_nationality_digest_anchor_offset
+                + statement.mso_nationality_digest_anchor.len()],
+        statement.mso_nationality_digest_anchor.as_slice()
+    );
+    assert_eq!(statement.mso_nationality_digest_anchor, vec![9, 0x58, 0x20]);
+    assert_eq!(statement.mso_device_key_x_anchor, vec![0x21, 0x58, 0x20]);
+    assert_eq!(statement.mso_device_key_y_anchor, vec![0x22, 0x58, 0x20]);
+    assert_eq!(
+        statement.mso_valid_from_anchor,
+        [b"\x69validFrom".as_slice(), &[0xC0, 0x74]].concat()
+    );
+    assert_eq!(
+        statement.mso_valid_until_anchor,
+        [b"\x6AvalidUntil".as_slice(), &[0xC0, 0x74]].concat()
+    );
 }
 
 #[test]
@@ -1468,6 +1492,75 @@ fn device_key_binding_offset_rejects_in_proof() {
             assert!(
                 verify_mdoc_circuit(&proof, &statement).is_err(),
                 "mispointed MSO device-key offset verified unexpectedly"
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "slow: proves rejection for digest anchor tamper"]
+fn digest_membership_anchor_offset_rejects_in_proof() {
+    let session_transcript = test_session_transcript();
+    let fixture = valid_fixture(&session_transcript);
+    let extracted =
+        extract_pid_mdoc(&fixture.doc, &request(session_transcript)).expect("mdoc extracts");
+    let mut statement = MdocCircuitStatement::from_extracted(&extracted, policy_on(2026, 7, 3))
+        .expect("statement builds");
+    statement.mso_birth_date_digest_anchor_offset += 1;
+
+    match prove_mdoc_circuit(&extracted, &statement) {
+        Err(eu_id_prover::Error::Prove(_)) => {}
+        Err(other) => panic!("expected proof rejection, got {other:?}"),
+        Ok(proof) => {
+            assert!(
+                verify_mdoc_circuit(&proof, &statement).is_err(),
+                "mispointed digest anchor verified unexpectedly"
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "slow: proves rejection for deviceKey anchor tamper"]
+fn device_key_anchor_offset_rejects_in_proof() {
+    let session_transcript = test_session_transcript();
+    let fixture = valid_fixture(&session_transcript);
+    let extracted =
+        extract_pid_mdoc(&fixture.doc, &request(session_transcript)).expect("mdoc extracts");
+    let mut statement = MdocCircuitStatement::from_extracted(&extracted, policy_on(2026, 7, 3))
+        .expect("statement builds");
+    statement.mso_device_key_x_anchor_offset += 1;
+
+    match prove_mdoc_circuit(&extracted, &statement) {
+        Err(eu_id_prover::Error::Prove(_)) => {}
+        Err(other) => panic!("expected proof rejection, got {other:?}"),
+        Ok(proof) => {
+            assert!(
+                verify_mdoc_circuit(&proof, &statement).is_err(),
+                "mispointed deviceKey anchor verified unexpectedly"
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "slow: proves rejection for validity anchor tamper"]
+fn validity_anchor_offset_rejects_in_proof() {
+    let session_transcript = test_session_transcript();
+    let fixture = valid_fixture(&session_transcript);
+    let extracted =
+        extract_pid_mdoc(&fixture.doc, &request(session_transcript)).expect("mdoc extracts");
+    let mut statement = MdocCircuitStatement::from_extracted(&extracted, policy_on(2026, 7, 3))
+        .expect("statement builds");
+    statement.mso_valid_from_anchor_offset += 1;
+
+    match prove_mdoc_circuit(&extracted, &statement) {
+        Err(eu_id_prover::Error::Prove(_)) => {}
+        Err(other) => panic!("expected proof rejection, got {other:?}"),
+        Ok(proof) => {
+            assert!(
+                verify_mdoc_circuit(&proof, &statement).is_err(),
+                "mispointed validity anchor verified unexpectedly"
             );
         }
     }
