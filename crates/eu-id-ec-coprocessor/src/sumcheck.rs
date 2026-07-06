@@ -1,6 +1,11 @@
 use crate::{Circuit, CircuitError, CoprocessorChannel, Fp, Layer, Mle};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::OnceLock;
+use std::time::Duration;
+use std::time::Instant;
+
+const SPARSE_PREFIX_EQ_TERM_THRESHOLD: usize = 50_000;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct InputClaims {
@@ -12,6 +17,24 @@ pub struct InputClaims {
 pub struct CircuitSumcheckProof {
     pub layers: Vec<CircuitLayerProof>,
     pub input_claims: InputClaims,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct SparseCircuitSumcheckProfile {
+    pub layers: Vec<SparseCircuitLayerProfile>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct SparseCircuitLayerProfile {
+    pub layer_index: usize,
+    pub terms: usize,
+    pub left_initial_nnz: usize,
+    pub right_initial_nnz: usize,
+    pub build_left: Duration,
+    pub left_rounds: Duration,
+    pub build_right: Duration,
+    pub right_rounds: Duration,
+    pub final_eval: Duration,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -131,6 +154,26 @@ pub(crate) fn prove_evaluated_circuit(
     prove_circuit_inner(circuit, witness, commitment_root, channel)
 }
 
+pub(crate) fn prove_evaluated_circuit_sorted_sparse(
+    circuit: &Circuit,
+    witness: &[Vec<Fp>],
+    commitment_root: [u8; 32],
+    channel: &mut CoprocessorChannel,
+) -> Result<CircuitSumcheckProof, SumcheckError> {
+    prove_evaluated_circuit_sorted_sparse_profiled(circuit, witness, commitment_root, channel)
+        .map(|(proof, _)| proof)
+}
+
+pub(crate) fn prove_evaluated_circuit_sorted_sparse_profiled(
+    circuit: &Circuit,
+    witness: &[Vec<Fp>],
+    commitment_root: [u8; 32],
+    channel: &mut CoprocessorChannel,
+) -> Result<(CircuitSumcheckProof, SparseCircuitSumcheckProfile), SumcheckError> {
+    validate_evaluated_witness(circuit, witness)?;
+    prove_circuit_inner_sorted_sparse(circuit, witness, commitment_root, channel)
+}
+
 fn prove_circuit_inner(
     circuit: &Circuit,
     witness: &[Vec<Fp>],
@@ -213,6 +256,118 @@ fn prove_circuit_inner(
             values: claims,
         },
     })
+}
+
+fn prove_circuit_inner_sorted_sparse(
+    circuit: &Circuit,
+    witness: &[Vec<Fp>],
+    commitment_root: [u8; 32],
+    channel: &mut CoprocessorChannel,
+) -> Result<(CircuitSumcheckProof, SparseCircuitSumcheckProfile), SumcheckError> {
+    mix_circuit_domain(circuit, commitment_root, channel);
+    let output_log_size = circuit.layers()[0].out_log_size();
+    let initial_point = draw_point(channel, output_log_size);
+    let mut points = [initial_point.clone(), initial_point];
+    let mut claims = [Fp::ZERO, Fp::ZERO];
+    let mut layer_proofs = Vec::with_capacity(circuit.layers().len());
+    let mut profile = SparseCircuitSumcheckProfile::default();
+
+    for (layer_index, (layer, next_values)) in
+        circuit.layers().iter().zip(&witness[1..]).enumerate()
+    {
+        let alpha = channel.draw_fp();
+        let build_start = Instant::now();
+        let mut round_state = SortedSparseLayerRoundState::new(layer, next_values, &points, alpha);
+        let mut layer_profile = SparseCircuitLayerProfile {
+            layer_index,
+            terms: round_state.terms.len(),
+            left_initial_nnz: round_state.left_coeff.len(),
+            right_initial_nnz: round_state.right_values.len(),
+            build_left: build_start.elapsed(),
+            ..SparseCircuitLayerProfile::default()
+        };
+        let mut claim = alpha * claims[0] + (Fp::ONE - alpha) * claims[1];
+        let mut sumcheck_point = Vec::with_capacity(2 * layer.next_log_size());
+        let mut rounds = Vec::with_capacity(2 * layer.next_log_size());
+        let mut round_pads = Vec::with_capacity(2 * layer.next_log_size());
+        let two_inverse = fp_two_inverse();
+
+        for round_index in 0..2 * layer.next_log_size() {
+            let phase_start = Instant::now();
+            let [p0, p2] = round_state.round_evals_0_2(round_index);
+            let evals = [p0, claim - p0, p2];
+            debug_assert_eq!(evals[0] + evals[1], claim);
+            let pad_pair = otp_pad_pair(layer_index, b"P", round_index);
+            let transmitted = [evals[0] - pad_pair[0], evals[2] - pad_pair[1]];
+            for eval in transmitted {
+                channel.mix_fp(eval);
+            }
+            let challenge = channel.draw_fp();
+            claim = lagrange_eval_0_1_2([evals[0], evals[1], evals[2]], challenge, two_inverse);
+            let build_right = round_state.absorb_challenge(round_index, challenge);
+            let elapsed = phase_start.elapsed();
+            if round_index < layer.next_log_size() {
+                layer_profile.left_rounds += elapsed.saturating_sub(build_right);
+            } else {
+                layer_profile.right_rounds += elapsed;
+            }
+            layer_profile.build_right += build_right;
+            sumcheck_point.push(challenge);
+            rounds.push(transmitted);
+            round_pads.push(pad_pair);
+        }
+
+        #[cfg(debug_assertions)]
+        {
+            let next_mle = Mle::new(next_values.clone());
+            let (left, right) = split_sumcheck_point(&sumcheck_point, layer.next_log_size());
+            let next_claims = round_state.final_claims();
+            debug_assert_eq!(
+                next_claims[0],
+                next_mle
+                    .eval_at(left)
+                    .expect("left point matches next layer")
+            );
+            debug_assert_eq!(
+                next_claims[1],
+                next_mle
+                    .eval_at(right)
+                    .expect("right point matches next layer")
+            );
+        }
+
+        let (left, right) = split_sumcheck_point(&sumcheck_point, layer.next_log_size());
+        let next_claims = round_state.final_claims();
+        let claim_pair = otp_pad_pair(layer_index, b"W", 0);
+        let claim_pads = [claim_pair[0], claim_pair[1], Fp::ZERO];
+        let claim_pads = [claim_pads[0], claim_pads[1], claim_pads[0] * claim_pads[1]];
+        let masked_next_claims = [
+            next_claims[0] - claim_pads[0],
+            next_claims[1] - claim_pads[1],
+        ];
+        channel.mix_fp(masked_next_claims[0]);
+        channel.mix_fp(masked_next_claims[1]);
+        layer_proofs.push(CircuitLayerProof {
+            rounds,
+            round_pads,
+            claim_pads,
+            next_claims: masked_next_claims,
+        });
+        points = [left.to_vec(), right.to_vec()];
+        claims = next_claims;
+        profile.layers.push(layer_profile);
+    }
+
+    Ok((
+        CircuitSumcheckProof {
+            layers: layer_proofs,
+            input_claims: InputClaims {
+                points,
+                values: claims,
+            },
+        },
+        profile,
+    ))
 }
 
 fn validate_evaluated_witness(circuit: &Circuit, witness: &[Vec<Fp>]) -> Result<(), SumcheckError> {
@@ -341,6 +496,127 @@ pub fn verify_circuit(
     Ok(input_claims)
 }
 
+pub(crate) fn verify_circuit_sorted_sparse(
+    circuit: &Circuit,
+    proof: &CircuitSumcheckProof,
+    commitment_root: [u8; 32],
+    channel: &mut CoprocessorChannel,
+) -> Result<InputClaims, SumcheckError> {
+    verify_circuit_sorted_sparse_profiled(circuit, proof, commitment_root, channel)
+        .map(|(claims, _)| claims)
+}
+
+pub(crate) fn verify_circuit_sorted_sparse_profiled(
+    circuit: &Circuit,
+    proof: &CircuitSumcheckProof,
+    commitment_root: [u8; 32],
+    channel: &mut CoprocessorChannel,
+) -> Result<(InputClaims, SparseCircuitSumcheckProfile), SumcheckError> {
+    if proof.layers.len() != circuit.layers().len() {
+        return Err(SumcheckError::LayerCountMismatch {
+            expected: circuit.layers().len(),
+            actual: proof.layers.len(),
+        });
+    }
+    if proof_otp_pad_values(proof) != circuit_otp_pad_values(circuit) {
+        return Err(SumcheckError::Rejected);
+    }
+
+    mix_circuit_domain(circuit, commitment_root, channel);
+    let output_log_size = circuit.layers()[0].out_log_size();
+    let initial_point = draw_point(channel, output_log_size);
+    let mut points = [initial_point.clone(), initial_point];
+    let mut claims = [Fp::ZERO, Fp::ZERO];
+    let mut profile = SparseCircuitSumcheckProfile::default();
+
+    for (layer_index, (layer, layer_proof)) in
+        circuit.layers().iter().zip(&proof.layers).enumerate()
+    {
+        let expected_rounds = 2 * layer.next_log_size();
+        if layer_proof.rounds.len() != expected_rounds {
+            return Err(SumcheckError::RoundCountMismatch {
+                expected: expected_rounds,
+                actual: layer_proof.rounds.len(),
+            });
+        }
+        if layer_proof.round_pads.len() != expected_rounds {
+            return Err(SumcheckError::RoundCountMismatch {
+                expected: expected_rounds,
+                actual: layer_proof.round_pads.len(),
+            });
+        }
+        if layer_proof.claim_pads[0] * layer_proof.claim_pads[1] != layer_proof.claim_pads[2] {
+            return Err(SumcheckError::Rejected);
+        }
+
+        let alpha = channel.draw_fp();
+        let mut claim = alpha * claims[0] + (Fp::ONE - alpha) * claims[1];
+        let mut sumcheck_point = Vec::with_capacity(expected_rounds);
+        let two_inverse = fp_two_inverse();
+        let mut layer_profile = SparseCircuitLayerProfile {
+            layer_index,
+            terms: layer.terms().len(),
+            ..SparseCircuitLayerProfile::default()
+        };
+        for (round_index, ([p0_hat, p2_hat], [d_p0, d_p2])) in layer_proof
+            .rounds
+            .iter()
+            .copied()
+            .zip(layer_proof.round_pads.iter().copied())
+            .enumerate()
+        {
+            let phase_start = Instant::now();
+            let p0 = p0_hat + d_p0;
+            let p2 = p2_hat + d_p2;
+            let p1 = claim - p0;
+            let evals = [p0, p1, p2];
+            if evals[0] + evals[1] != claim {
+                return Err(SumcheckError::Rejected);
+            }
+            for eval in [p0_hat, p2_hat] {
+                channel.mix_fp(eval);
+            }
+            let challenge = channel.draw_fp();
+            claim = lagrange_eval_0_1_2(evals, challenge, two_inverse);
+            sumcheck_point.push(challenge);
+            if round_index < layer.next_log_size() {
+                layer_profile.left_rounds += phase_start.elapsed();
+            } else {
+                layer_profile.right_rounds += phase_start.elapsed();
+            }
+        }
+
+        let (left, right) = split_sumcheck_point(&sumcheck_point, layer.next_log_size());
+        let final_start = Instant::now();
+        let [q0, q1] = q_tilde_eval_pair_by_terms(layer, &points, left, right)
+            .map_err(SumcheckError::Circuit)?;
+        layer_profile.final_eval = final_start.elapsed();
+        let next_claims = [
+            layer_proof.next_claims[0] + layer_proof.claim_pads[0],
+            layer_proof.next_claims[1] + layer_proof.claim_pads[1],
+        ];
+        let expected = (alpha * q0 + (Fp::ONE - alpha) * q1) * next_claims[0] * next_claims[1];
+        if claim != expected {
+            return Err(SumcheckError::Rejected);
+        }
+
+        channel.mix_fp(layer_proof.next_claims[0]);
+        channel.mix_fp(layer_proof.next_claims[1]);
+        points = [left.to_vec(), right.to_vec()];
+        claims = next_claims;
+        profile.layers.push(layer_profile);
+    }
+
+    let input_claims = InputClaims {
+        points,
+        values: claims,
+    };
+    if proof.input_claims != input_claims {
+        return Err(SumcheckError::Rejected);
+    }
+    Ok((input_claims, profile))
+}
+
 pub fn circuit_otp_pad_values(circuit: &Circuit) -> Vec<Fp> {
     let mut values = Vec::new();
     for (layer_index, layer) in circuit.layers().iter().enumerate() {
@@ -421,10 +697,17 @@ struct RightPhaseTerm {
     eq: Fp,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LeftPhaseTerm {
+    l: u32,
+    q_right: Fp,
+    eq: Fp,
+}
+
 struct LayerRoundState {
     next_log_size: usize,
     terms: Vec<RoundTerm>,
-    left_eq: Vec<Fp>,
+    left_phase_terms: Vec<LeftPhaseTerm>,
     right_phase_terms: Vec<RightPhaseTerm>,
     left_folded: Vec<Fp>,
     right_folded: Vec<Fp>,
@@ -434,18 +717,18 @@ impl LayerRoundState {
     fn new(layer: &Layer, next_mle: &Mle, output_points: &[Vec<Fp>; 2], alpha: Fp) -> Self {
         let output_lookup = output_lookup(layer, output_points, alpha);
         let terms = compressed_round_terms(layer, &output_lookup);
-        let term_count = terms.len();
+        let left_phase_terms = left_phase_terms(&terms, next_mle.values());
         Self {
             next_log_size: layer.next_log_size(),
             terms,
-            left_eq: vec![Fp::ONE; term_count],
+            left_phase_terms,
             right_phase_terms: Vec::new(),
             left_folded: next_mle.values().to_vec(),
             right_folded: next_mle.values().to_vec(),
         }
     }
 
-    fn round_evals_0_2(&self, round_index: usize) -> [Fp; 2] {
+    fn round_evals_0_2(&mut self, round_index: usize) -> [Fp; 2] {
         if round_index < self.next_log_size {
             self.left_round_evals_0_2(round_index)
         } else {
@@ -455,8 +738,8 @@ impl LayerRoundState {
 
     fn absorb_challenge(&mut self, round_index: usize, challenge: Fp) {
         if round_index < self.next_log_size {
-            for (eq, term) in self.left_eq.iter_mut().zip(&self.terms) {
-                *eq = *eq * bit_eq(term.l, round_index, challenge);
+            for term in &mut self.left_phase_terms {
+                term.eq = term.eq * bit_eq(term.l, round_index, challenge);
             }
             fold_one_in_place(&mut self.left_folded, challenge);
             if round_index + 1 == self.next_log_size {
@@ -473,10 +756,12 @@ impl LayerRoundState {
     }
 
     fn left_round_evals_0_2(&self, round_index: usize) -> [Fp; 2] {
-        let left_at_two = fold_at_two(&self.left_folded);
         let mut evals = [Fp::ZERO; 2];
-        for (term_index, term) in self.terms.iter().enumerate() {
-            let q_right = term.q * self.right_folded[term.r as usize] * self.left_eq[term_index];
+        for term in &self.left_phase_terms {
+            if term.q_right == Fp::ZERO {
+                continue;
+            }
+            let q_right = term.q_right * term.eq;
             let left_index = (term.l as usize) >> (round_index + 1);
             let left_bit = (term.l >> round_index) & 1;
 
@@ -484,7 +769,8 @@ impl LayerRoundState {
                 evals[0] = evals[0] + q_right * self.left_folded[left_index * 2];
             }
 
-            let mut left = left_at_two[left_index];
+            let left_pair = &self.left_folded[left_index * 2..left_index * 2 + 2];
+            let mut left = left_pair[1] + left_pair[1] - left_pair[0];
             left = if left_bit == 1 { left + left } else { -left };
             evals[1] = evals[1] + q_right * left;
         }
@@ -492,7 +778,6 @@ impl LayerRoundState {
     }
 
     fn right_round_evals_0_2(&self, round_index: usize) -> [Fp; 2] {
-        let right_at_two = fold_at_two(&self.right_folded);
         let mut evals = [Fp::ZERO; 2];
         for term in &self.right_phase_terms {
             let q_left = term.q * term.eq;
@@ -503,7 +788,8 @@ impl LayerRoundState {
                 evals[0] = evals[0] + q_left * self.right_folded[right_index * 2];
             }
 
-            let mut right = right_at_two[right_index];
+            let right_pair = &self.right_folded[right_index * 2..right_index * 2 + 2];
+            let mut right = right_pair[1] + right_pair[1] - right_pair[0];
             right = if right_bit == 1 {
                 right + right
             } else {
@@ -515,14 +801,18 @@ impl LayerRoundState {
     }
 
     fn bind_right_phase_terms(&mut self, left_scalar: Fp) {
+        let mut left_eq_by_index = vec![Fp::ZERO; 1usize << self.next_log_size];
+        for term in &self.left_phase_terms {
+            left_eq_by_index[term.l as usize] = term.eq;
+        }
         let mut by_r = vec![Fp::ZERO; self.right_folded.len()];
         let mut active = Vec::new();
-        for (term_index, term) in self.terms.iter().enumerate() {
+        for term in &self.terms {
             let r = term.r as usize;
             if by_r[r] == Fp::ZERO {
                 active.push(term.r);
             }
-            by_r[r] = by_r[r] + term.q * self.left_eq[term_index] * left_scalar;
+            by_r[r] = by_r[r] + term.q * left_eq_by_index[term.l as usize] * left_scalar;
         }
         self.right_phase_terms.clear();
         self.right_phase_terms.reserve(active.len());
@@ -541,14 +831,250 @@ impl LayerRoundState {
     }
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct SortedSparseVec {
+    entries: Vec<(u32, Fp)>,
+    scratch: Vec<(u32, Fp)>,
+}
+
+impl SortedSparseVec {
+    fn from_dense_nonzero(values: &[Fp]) -> Self {
+        Self {
+            entries: values
+                .iter()
+                .copied()
+                .enumerate()
+                .filter_map(|(index, value)| (value != Fp::ZERO).then_some((index as u32, value)))
+                .collect(),
+            scratch: Vec::new(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn fold(&mut self, challenge: Fp) {
+        self.scratch.clear();
+        self.scratch.reserve(self.entries.len().div_ceil(2));
+        let mut index = 0usize;
+        while index < self.entries.len() {
+            let pair = self.entries[index].0 >> 1;
+            let mut even = Fp::ZERO;
+            let mut odd = Fp::ZERO;
+            while index < self.entries.len() && (self.entries[index].0 >> 1) == pair {
+                if (self.entries[index].0 & 1) == 0 {
+                    even = self.entries[index].1;
+                } else {
+                    odd = self.entries[index].1;
+                }
+                index += 1;
+            }
+            let folded = even + challenge * (odd - even);
+            if folded != Fp::ZERO {
+                self.scratch.push((pair, folded));
+            }
+        }
+        std::mem::swap(&mut self.entries, &mut self.scratch);
+    }
+
+    fn final_value(&self) -> Fp {
+        debug_assert!(self.entries.iter().all(|(index, _)| *index == 0));
+        self.entries
+            .iter()
+            .fold(Fp::ZERO, |acc, (_, value)| acc + *value)
+    }
+}
+
+struct SortedSparseLayerRoundState {
+    next_log_size: usize,
+    terms: Vec<RoundTerm>,
+    left_challenges: Vec<Fp>,
+    left_coeff: SortedSparseVec,
+    right_coeff: SortedSparseVec,
+    left_values: SortedSparseVec,
+    right_values: SortedSparseVec,
+}
+
+impl SortedSparseLayerRoundState {
+    fn new(layer: &Layer, next_values: &[Fp], output_points: &[Vec<Fp>; 2], alpha: Fp) -> Self {
+        let terms = round_terms_for_sparse_layer(layer, output_points, alpha);
+        let next_size = 1usize << layer.next_log_size();
+        let left_coeff = sorted_left_coefficients(&terms, next_values, next_size);
+        let left_values = SortedSparseVec::from_dense_nonzero(next_values);
+        let right_values = SortedSparseVec::from_dense_nonzero(next_values);
+        Self {
+            next_log_size: layer.next_log_size(),
+            terms,
+            left_challenges: Vec::with_capacity(layer.next_log_size()),
+            left_coeff,
+            right_coeff: SortedSparseVec::default(),
+            left_values,
+            right_values,
+        }
+    }
+
+    fn round_evals_0_2(&mut self, round_index: usize) -> [Fp; 2] {
+        if round_index < self.next_log_size {
+            sorted_sparse_round_evals_0_2(&self.left_coeff.entries, &self.left_values.entries)
+        } else {
+            sorted_sparse_round_evals_0_2(&self.right_coeff.entries, &self.right_values.entries)
+        }
+    }
+
+    fn absorb_challenge(&mut self, round_index: usize, challenge: Fp) -> Duration {
+        if round_index < self.next_log_size {
+            self.left_challenges.push(challenge);
+            self.left_coeff.fold(challenge);
+            self.left_values.fold(challenge);
+            if round_index + 1 == self.next_log_size {
+                let start = Instant::now();
+                self.bind_right_phase_terms();
+                start.elapsed()
+            } else {
+                Duration::ZERO
+            }
+        } else {
+            self.right_coeff.fold(challenge);
+            self.right_values.fold(challenge);
+            Duration::ZERO
+        }
+    }
+
+    fn bind_right_phase_terms(&mut self) {
+        let left_scalar = self.left_values.final_value();
+        let next_size = 1usize << self.next_log_size;
+        let mut buckets = vec![Fp::ZERO; next_size];
+        if self.terms.len() <= SPARSE_PREFIX_EQ_TERM_THRESHOLD {
+            for term in &self.terms {
+                buckets[term.r as usize] = buckets[term.r as usize]
+                    + term.q * prefix_eq(term.l, &self.left_challenges) * left_scalar;
+            }
+        } else {
+            let left_eq = eq_table(&self.left_challenges);
+            for term in &self.terms {
+                buckets[term.r as usize] =
+                    buckets[term.r as usize] + term.q * left_eq[term.l as usize] * left_scalar;
+            }
+        }
+        self.right_coeff = SortedSparseVec::from_dense_nonzero(&buckets);
+    }
+
+    fn final_claims(&self) -> [Fp; 2] {
+        [
+            self.left_values.final_value(),
+            self.right_values.final_value(),
+        ]
+    }
+}
+
+fn sorted_sparse_round_evals_0_2(coeff: &[(u32, Fp)], values: &[(u32, Fp)]) -> [Fp; 2] {
+    let mut coeff_index = 0usize;
+    let mut value_index = 0usize;
+    let mut evals = [Fp::ZERO; 2];
+    while coeff_index < coeff.len() || value_index < values.len() {
+        let coeff_pair = coeff
+            .get(coeff_index)
+            .map(|(index, _)| index >> 1)
+            .unwrap_or(u32::MAX);
+        let value_pair = values
+            .get(value_index)
+            .map(|(index, _)| index >> 1)
+            .unwrap_or(u32::MAX);
+        let pair = coeff_pair.min(value_pair);
+        let coeff_pair_values = take_sparse_pair(coeff, &mut coeff_index, pair);
+        let value_pair_values = take_sparse_pair(values, &mut value_index, pair);
+        let [a0, a1] = coeff_pair_values;
+        if a0 == Fp::ZERO && a1 == Fp::ZERO {
+            continue;
+        }
+        let [w0, w1] = value_pair_values;
+        evals[0] = evals[0] + a0 * w0;
+        let line_at_2 = w1 + w1 - w0;
+        evals[1] = evals[1] + a0 * -line_at_2 + a1 * (line_at_2 + line_at_2);
+    }
+    evals
+}
+
+fn take_sparse_pair(entries: &[(u32, Fp)], index: &mut usize, pair: u32) -> [Fp; 2] {
+    let mut values = [Fp::ZERO; 2];
+    while *index < entries.len() && (entries[*index].0 >> 1) == pair {
+        values[(entries[*index].0 & 1) as usize] = entries[*index].1;
+        *index += 1;
+    }
+    values
+}
+
+fn left_phase_terms(terms: &[RoundTerm], next_values: &[Fp]) -> Vec<LeftPhaseTerm> {
+    let mut by_left = HashMap::with_capacity(terms.len());
+    let mut keys = Vec::with_capacity(terms.len());
+    for term in terms {
+        let entry = by_left.entry(term.l).or_insert_with(|| {
+            keys.push(term.l);
+            Fp::ZERO
+        });
+        *entry = *entry + term.q * next_values[term.r as usize];
+    }
+
+    keys.into_iter()
+        .map(|l| LeftPhaseTerm {
+            l,
+            q_right: by_left[&l],
+            eq: Fp::ONE,
+        })
+        .collect()
+}
+
+fn sorted_left_coefficients(
+    terms: &[RoundTerm],
+    next_values: &[Fp],
+    next_size: usize,
+) -> SortedSparseVec {
+    let mut buckets = vec![Fp::ZERO; next_size];
+    for term in terms {
+        let right = next_values
+            .get(term.r as usize)
+            .copied()
+            .unwrap_or(Fp::ZERO);
+        if right != Fp::ZERO {
+            buckets[term.l as usize] = buckets[term.l as usize] + term.q * right;
+        }
+    }
+    SortedSparseVec::from_dense_nonzero(&buckets)
+}
+
 fn compressed_round_terms(layer: &Layer, output_lookup: &[Fp]) -> Vec<RoundTerm> {
-    let mut terms = Vec::with_capacity(layer.terms().len());
-    let mut zero_zero_q = Fp::ZERO;
+    let mut by_pair = HashMap::with_capacity(layer.terms().len());
+    let mut keys = Vec::with_capacity(layer.terms().len());
     for term in layer.terms() {
         let q = term.coeff * output_lookup[term.out as usize];
-        if term.l == 0 && term.r == 0 {
-            zero_zero_q = zero_zero_q + q;
-        } else {
+        let key = ((term.l as u64) << 32) | term.r as u64;
+        let entry = by_pair.entry(key).or_insert_with(|| {
+            keys.push(key);
+            Fp::ZERO
+        });
+        *entry = *entry + q;
+    }
+
+    let mut terms = Vec::with_capacity(keys.len());
+    for key in keys {
+        let q = by_pair[&key];
+        if q != Fp::ZERO {
+            terms.push(RoundTerm {
+                l: (key >> 32) as u32,
+                r: key as u32,
+                q,
+            });
+        }
+    }
+    terms
+}
+
+fn round_terms_with_output_lookup(layer: &Layer, output_lookup: &[Fp]) -> Vec<RoundTerm> {
+    let mut terms = Vec::with_capacity(layer.terms().len());
+    for term in layer.terms() {
+        let q = term.coeff * output_lookup[term.out as usize];
+        if q != Fp::ZERO {
             terms.push(RoundTerm {
                 l: term.l,
                 r: term.r,
@@ -556,22 +1082,41 @@ fn compressed_round_terms(layer: &Layer, output_lookup: &[Fp]) -> Vec<RoundTerm>
             });
         }
     }
-    if zero_zero_q != Fp::ZERO {
-        terms.push(RoundTerm {
-            l: 0,
-            r: 0,
-            q: zero_zero_q,
-        });
-    }
     terms
 }
 
-fn output_lookup(layer: &Layer, output_points: &[Vec<Fp>; 2], alpha: Fp) -> Vec<Fp> {
-    (0..1u32 << layer.out_log_size())
-        .map(|index| {
-            alpha * index_eq(index, &output_points[0])
-                + (Fp::ONE - alpha) * index_eq(index, &output_points[1])
-        })
+fn round_terms_for_sparse_layer(
+    layer: &Layer,
+    output_points: &[Vec<Fp>; 2],
+    alpha: Fp,
+) -> Vec<RoundTerm> {
+    if layer.terms().len() <= SPARSE_PREFIX_EQ_TERM_THRESHOLD {
+        let mut terms = Vec::with_capacity(layer.terms().len());
+        for term in layer.terms() {
+            let output_eval = alpha * prefix_eq(term.out, &output_points[0])
+                + (Fp::ONE - alpha) * prefix_eq(term.out, &output_points[1]);
+            let q = term.coeff * output_eval;
+            if q != Fp::ZERO {
+                terms.push(RoundTerm {
+                    l: term.l,
+                    r: term.r,
+                    q,
+                });
+            }
+        }
+        terms
+    } else {
+        let output_lookup = output_lookup(layer, output_points, alpha);
+        round_terms_with_output_lookup(layer, &output_lookup)
+    }
+}
+
+fn output_lookup(_layer: &Layer, output_points: &[Vec<Fp>; 2], alpha: Fp) -> Vec<Fp> {
+    let left = eq_table(&output_points[0]);
+    let right = eq_table(&output_points[1]);
+    left.into_iter()
+        .zip(right)
+        .map(|(l, r)| alpha * l + (Fp::ONE - alpha) * r)
         .collect()
 }
 
@@ -606,11 +1151,59 @@ fn q_tilde_eval_pair(
         });
     }
 
+    let output_0_eq = eq_table(&output_points[0]);
+    let output_1_eq = eq_table(&output_points[1]);
+    let left_eq = eq_table(left);
+    let right_eq = eq_table(right);
     let mut out = [Fp::ZERO; 2];
     for term in layer.terms() {
-        let lr = term.coeff * prefix_eq(term.l, left) * prefix_eq(term.r, right);
-        out[0] = out[0] + lr * prefix_eq(term.out, &output_points[0]);
-        out[1] = out[1] + lr * prefix_eq(term.out, &output_points[1]);
+        let lr = term.coeff * left_eq[term.l as usize] * right_eq[term.r as usize];
+        out[0] = out[0] + lr * output_0_eq[term.out as usize];
+        out[1] = out[1] + lr * output_1_eq[term.out as usize];
+    }
+    Ok(out)
+}
+
+fn q_tilde_eval_pair_by_terms(
+    layer: &Layer,
+    output_points: &[Vec<Fp>; 2],
+    left: &[Fp],
+    right: &[Fp],
+) -> Result<[Fp; 2], CircuitError> {
+    if output_points[0].len() != layer.out_log_size() {
+        return Err(CircuitError::WrongPointLength {
+            expected: layer.out_log_size(),
+            actual: output_points[0].len(),
+        });
+    }
+    if output_points[1].len() != layer.out_log_size() {
+        return Err(CircuitError::WrongPointLength {
+            expected: layer.out_log_size(),
+            actual: output_points[1].len(),
+        });
+    }
+    if left.len() != layer.next_log_size() {
+        return Err(CircuitError::WrongPointLength {
+            expected: layer.next_log_size(),
+            actual: left.len(),
+        });
+    }
+    if right.len() != layer.next_log_size() {
+        return Err(CircuitError::WrongPointLength {
+            expected: layer.next_log_size(),
+            actual: right.len(),
+        });
+    }
+
+    let output_0_eq = eq_table(&output_points[0]);
+    let output_1_eq = eq_table(&output_points[1]);
+    let left_eq = eq_table(left);
+    let right_eq = eq_table(right);
+    let mut out = [Fp::ZERO; 2];
+    for term in layer.terms() {
+        let lr = term.coeff * left_eq[term.l as usize] * right_eq[term.r as usize];
+        out[0] = out[0] + lr * output_0_eq[term.out as usize];
+        out[1] = out[1] + lr * output_1_eq[term.out as usize];
     }
     Ok(out)
 }
@@ -625,16 +1218,19 @@ fn fold_one_in_place(values: &mut Vec<Fp>, challenge: Fp) {
     values.truncate(half);
 }
 
-fn fold_at_two(values: &[Fp]) -> Vec<Fp> {
-    let mut at_two = Vec::with_capacity(values.len() / 2);
-    for pair in values.chunks_exact(2) {
-        at_two.push(pair[1] + pair[1] - pair[0]);
+fn eq_table(point: &[Fp]) -> Vec<Fp> {
+    let mut values = vec![Fp::ONE];
+    for &challenge in point {
+        let keep = Fp::ONE - challenge;
+        let current_len = values.len();
+        values.reserve(current_len);
+        for index in 0..current_len {
+            let value = values[index];
+            values[index] = value * keep;
+            values.push(value * challenge);
+        }
     }
-    at_two
-}
-
-fn index_eq(index: u32, point: &[Fp]) -> Fp {
-    prefix_eq(index, point)
+    values
 }
 
 fn bit_eq(index: u32, bit: usize, point: Fp) -> Fp {
@@ -683,4 +1279,85 @@ fn fold_adjacent(values: &[Fp], challenge: Fp) -> Vec<Fp> {
         .chunks_exact(2)
         .map(|pair| pair[0] + challenge * (pair[1] - pair[0]))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::QuadTerm;
+
+    fn term(out: u32, l: u32, r: u32, coeff: u64) -> QuadTerm {
+        QuadTerm {
+            out,
+            l,
+            r,
+            coeff: Fp::from_u64(coeff),
+        }
+    }
+
+    fn sparse_satisfied_circuit() -> (Circuit, Vec<Vec<Fp>>) {
+        let layer = Layer::new(
+            2,
+            3,
+            vec![
+                term(0, 0, 1, 1),
+                term(1, 2, 0, 3),
+                term(2, 4, 5, 7),
+                term(3, 6, 0, 11),
+            ],
+        )
+        .unwrap();
+        let circuit = Circuit::new(vec![layer]).unwrap();
+        let mut input = vec![Fp::ZERO; 8];
+        input[1] = Fp::from_u64(7);
+        input[2] = Fp::from_u64(3);
+        input[5] = Fp::from_u64(9);
+        input[6] = Fp::from_u64(4);
+        let witness = circuit.evaluate_input(input).unwrap();
+        (circuit, witness)
+    }
+
+    #[test]
+    fn sparse_prover_is_byte_identical_to_generic_fixture() {
+        let (circuit, witness) = sparse_satisfied_circuit();
+        let root = [42u8; 32];
+        let mut generic_channel = CoprocessorChannel::from_seed([3u8; 32], b"sparse-pin");
+        let generic =
+            prove_evaluated_circuit(&circuit, &witness, root, &mut generic_channel).unwrap();
+
+        let mut sparse_channel = CoprocessorChannel::from_seed([3u8; 32], b"sparse-pin");
+        let sparse =
+            prove_evaluated_circuit_sorted_sparse(&circuit, &witness, root, &mut sparse_channel)
+                .unwrap();
+
+        let generic_bytes = bincode::serialize(&generic).unwrap();
+        let sparse_bytes = bincode::serialize(&sparse).unwrap();
+        assert_eq!(generic_bytes, sparse_bytes);
+    }
+
+    #[test]
+    fn sparse_verifier_matches_generic_accept_and_reject() {
+        let (circuit, witness) = sparse_satisfied_circuit();
+        let root = [17u8; 32];
+        let mut prover_channel = CoprocessorChannel::from_seed([5u8; 32], b"sparse-diff");
+        let proof =
+            prove_evaluated_circuit_sorted_sparse(&circuit, &witness, root, &mut prover_channel)
+                .unwrap();
+
+        let mut generic_channel = CoprocessorChannel::from_seed([5u8; 32], b"sparse-diff");
+        let generic_claims = verify_circuit(&circuit, &proof, root, &mut generic_channel).unwrap();
+        let mut sparse_channel = CoprocessorChannel::from_seed([5u8; 32], b"sparse-diff");
+        let sparse_claims =
+            verify_circuit_sorted_sparse(&circuit, &proof, root, &mut sparse_channel).unwrap();
+        assert_eq!(generic_claims, sparse_claims);
+
+        let mut tampered = proof;
+        tampered.layers[0].rounds[0][0] = tampered.layers[0].rounds[0][0] + Fp::ONE;
+        let mut generic_channel = CoprocessorChannel::from_seed([5u8; 32], b"sparse-diff");
+        let mut sparse_channel = CoprocessorChannel::from_seed([5u8; 32], b"sparse-diff");
+        assert!(verify_circuit(&circuit, &tampered, root, &mut generic_channel).is_err());
+        assert!(
+            verify_circuit_sorted_sparse(&circuit, &tampered, root, &mut sparse_channel).is_err()
+        );
+    }
 }

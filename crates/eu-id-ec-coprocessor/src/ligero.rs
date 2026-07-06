@@ -262,6 +262,51 @@ impl LigeroCommitment {
         Ok(LigeroProximityClaim { combined_row })
     }
 
+    pub fn split_proximity_claim(
+        &self,
+        other: &Self,
+        gamma: &[Fp],
+    ) -> Result<LigeroProximityClaim, LigeroError> {
+        if self.params != other.params {
+            return Err(LigeroError::InvalidRowLength);
+        }
+        if gamma.is_empty() {
+            return Err(LigeroError::EmptyGamma);
+        }
+        if gamma.len() != self.witness_rows + other.witness_rows {
+            return Err(LigeroError::WrongGammaLength);
+        }
+
+        let mask_a = &self.encoded_rows[self.proximity_mask_row];
+        let mask_b = &other.encoded_rows[other.proximity_mask_row];
+        let mut combined_row = mask_a[..self.params.degree_bound].to_vec();
+        for (out, value) in combined_row
+            .iter_mut()
+            .zip(&mask_b[..other.params.degree_bound])
+        {
+            *out = *out + *value;
+        }
+        for (coeff, row) in gamma[..self.witness_rows]
+            .iter()
+            .copied()
+            .zip(&self.encoded_rows[..self.witness_rows])
+        {
+            for (out, value) in combined_row.iter_mut().zip(row) {
+                *out = *out + coeff * *value;
+            }
+        }
+        for (coeff, row) in gamma[self.witness_rows..]
+            .iter()
+            .copied()
+            .zip(&other.encoded_rows[..other.witness_rows])
+        {
+            for (out, value) in combined_row.iter_mut().zip(row) {
+                *out = *out + coeff * *value;
+            }
+        }
+        Ok(LigeroProximityClaim { combined_row })
+    }
+
     pub fn claim_batch(
         &self,
         claims: &[LigeroLinearClaim],
@@ -277,18 +322,11 @@ impl LigeroCommitment {
         let blind_row = &self.encoded_rows[self.claim_blind_row];
         let mut coefficients = blind_row[..claim_degree_bound].to_vec();
 
-        for (claim, coeff) in claims.iter().zip(gamma.iter().copied()) {
-            validate_linear_claim(self.params, self.witness_rows, claim)?;
-            for row in 0..self.witness_rows {
-                let weights = row_weight_values(self.params, claim, row);
-                if weights.iter().any(|&weight| weight != Fp::ZERO) {
-                    let weight_evals =
-                        weight_evaluations(self.params, &weights, 0..claim_degree_bound)?;
-                    for x in 0..claim_degree_bound {
-                        let row_value = self.encoded_rows[row][x];
-                        coefficients[x] = coefficients[x] + coeff * weight_evals[x] * row_value;
-                    }
-                }
+        for (row, weights) in batched_row_weights(self.params, self.witness_rows, claims, gamma)? {
+            let weight_evals = weight_evaluations(self.params, &weights, 0..claim_degree_bound)?;
+            for x in 0..claim_degree_bound {
+                let row_value = self.encoded_rows[row][x];
+                coefficients[x] = coefficients[x] + weight_evals[x] * row_value;
             }
         }
 
@@ -301,6 +339,211 @@ impl LigeroCommitment {
             blind_claim,
         })
     }
+
+    pub fn split_claim_batch(
+        &self,
+        other: &Self,
+        claims: &[LigeroLinearClaim],
+        gamma: &[Fp],
+    ) -> Result<LigeroClaimBatch, LigeroError> {
+        if self.params != other.params {
+            return Err(LigeroError::InvalidRowLength);
+        }
+        if claims.is_empty() || gamma.is_empty() {
+            return Err(LigeroError::EmptyGamma);
+        }
+        if claims.len() != gamma.len() {
+            return Err(LigeroError::WrongGammaLength);
+        }
+        let claim_degree_bound = self.params.claim_degree_bound();
+        let blind_a = &self.encoded_rows[self.claim_blind_row];
+        let blind_b = &other.encoded_rows[other.claim_blind_row];
+        let mut coefficients = blind_a[..claim_degree_bound].to_vec();
+        for (out, value) in coefficients.iter_mut().zip(&blind_b[..claim_degree_bound]) {
+            *out = *out + *value;
+        }
+
+        let combined_rows = self.witness_rows + other.witness_rows;
+        for (row, weights) in batched_row_weights(self.params, combined_rows, claims, gamma)? {
+            let weight_evals = weight_evaluations(self.params, &weights, 0..claim_degree_bound)?;
+            let encoded_row = if row < self.witness_rows {
+                &self.encoded_rows[row]
+            } else {
+                &other.encoded_rows[row - self.witness_rows]
+            };
+            for x in 0..claim_degree_bound {
+                coefficients[x] = coefficients[x] + weight_evals[x] * encoded_row[x];
+            }
+        }
+
+        let blind_claim = blind_a[..self.params.row_len]
+            .iter()
+            .chain(&blind_b[..self.params.row_len])
+            .copied()
+            .fold(Fp::ZERO, |acc, value| acc + value);
+        Ok(LigeroClaimBatch {
+            coefficients,
+            blind_claim,
+        })
+    }
+}
+
+pub fn verify_split_openings(
+    root_a: [u8; 32],
+    root_b: [u8; 32],
+    params: LigeroParams,
+    committed_len_a: usize,
+    committed_len_b: usize,
+    openings_a: &[ColumnOpening],
+    openings_b: &[ColumnOpening],
+    claim: &LigeroProximityClaim,
+    gamma: &[Fp],
+) -> Result<bool, LigeroError> {
+    params.validate()?;
+    if openings_a.len() != params.openings || openings_b.len() != params.openings {
+        return Err(LigeroError::WrongOpeningCount);
+    }
+    if openings_a.len() != openings_b.len() {
+        return Err(LigeroError::WrongOpeningCount);
+    }
+    if gamma.is_empty() {
+        return Err(LigeroError::EmptyGamma);
+    }
+    if claim.combined_row.len() != params.degree_bound {
+        return Err(LigeroError::WrongClaimLength);
+    }
+    let rows_a = committed_len_a.div_ceil(params.row_len);
+    let rows_b = committed_len_b.div_ceil(params.row_len);
+    if gamma.len() != rows_a + rows_b {
+        return Err(LigeroError::WrongGammaLength);
+    }
+
+    for (opening_a, opening_b) in openings_a.iter().zip(openings_b) {
+        if opening_a.index != opening_b.index {
+            return Err(LigeroError::ColumnOutOfRange);
+        }
+        if opening_a.index >= params.codeword_len {
+            return Err(LigeroError::ColumnOutOfRange);
+        }
+        if opening_a.column.len() != rows_a + 2 || opening_b.column.len() != rows_b + 2 {
+            return Err(LigeroError::WrongGammaLength);
+        }
+        if !verify_column(root_a, opening_a).map_err(LigeroError::Merkle)?
+            || !verify_column(root_b, opening_b).map_err(LigeroError::Merkle)?
+        {
+            return Ok(false);
+        }
+        let mask_value = opening_a.column[rows_a] + opening_b.column[rows_b];
+        let combined_a = gamma[..rows_a]
+            .iter()
+            .copied()
+            .zip(&opening_a.column[..rows_a])
+            .fold(mask_value, |acc, (coeff, value)| acc + coeff * *value);
+        let combined = gamma[rows_a..]
+            .iter()
+            .copied()
+            .zip(&opening_b.column[..rows_b])
+            .fold(combined_a, |acc, (coeff, value)| acc + coeff * *value);
+        let expected = rs_evaluate(&claim.combined_row, params.codeword_len, opening_a.index)
+            .map_err(LigeroError::Rs)?;
+        if expected != combined {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+pub fn verify_split_claim_batch(
+    root_a: [u8; 32],
+    root_b: [u8; 32],
+    params: LigeroParams,
+    committed_len_a: usize,
+    committed_len_b: usize,
+    openings_a: &[ColumnOpening],
+    openings_b: &[ColumnOpening],
+    batch: &LigeroClaimBatch,
+    claims: &[LigeroLinearClaim],
+    gamma: &[Fp],
+) -> Result<bool, LigeroError> {
+    params.validate()?;
+    if openings_a.len() != params.openings || openings_b.len() != params.openings {
+        return Err(LigeroError::WrongOpeningCount);
+    }
+    if openings_a.len() != openings_b.len() {
+        return Err(LigeroError::WrongOpeningCount);
+    }
+    if claims.is_empty() || gamma.is_empty() {
+        return Err(LigeroError::EmptyGamma);
+    }
+    if claims.len() != gamma.len() {
+        return Err(LigeroError::WrongGammaLength);
+    }
+    let claim_degree_bound = params.claim_degree_bound();
+    if batch.coefficients.len() != claim_degree_bound {
+        return Err(LigeroError::WrongClaimLength);
+    }
+    let rows_a = committed_len_a.div_ceil(params.row_len);
+    let rows_b = committed_len_b.div_ceil(params.row_len);
+    let combined_rows = rows_a + rows_b;
+    let batched_row_weights = batched_row_weights(params, combined_rows, claims, gamma)?;
+    let opening_indices = openings_a
+        .iter()
+        .map(|opening| opening.index)
+        .collect::<Vec<_>>();
+    let row_weights_at_openings = batched_row_weights
+        .iter()
+        .map(|(row, weights)| {
+            Ok::<_, LigeroError>((
+                *row,
+                weight_evaluations(params, weights, opening_indices.iter().copied())?,
+            ))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    for (opening_position, (opening_a, opening_b)) in openings_a.iter().zip(openings_b).enumerate()
+    {
+        if opening_a.index != opening_b.index {
+            return Err(LigeroError::ColumnOutOfRange);
+        }
+        if opening_a.index >= params.codeword_len {
+            return Err(LigeroError::ColumnOutOfRange);
+        }
+        if opening_a.column.len() != rows_a + 2 || opening_b.column.len() != rows_b + 2 {
+            return Err(LigeroError::WrongGammaLength);
+        }
+        if !verify_column(root_a, opening_a).map_err(LigeroError::Merkle)?
+            || !verify_column(root_b, opening_b).map_err(LigeroError::Merkle)?
+        {
+            return Ok(false);
+        }
+        let blind_value = opening_a.column[rows_a + 1] + opening_b.column[rows_b + 1];
+        let mut combined = blind_value;
+        for (row, weights_at_openings) in &row_weights_at_openings {
+            let value = if *row < rows_a {
+                opening_a.column[*row]
+            } else {
+                opening_b.column[*row - rows_a]
+            };
+            combined = combined + weights_at_openings[opening_position] * value;
+        }
+        let expected = rs_evaluate(&batch.coefficients, params.codeword_len, opening_a.index)
+            .map_err(LigeroError::Rs)?;
+        if expected != combined {
+            return Ok(false);
+        }
+    }
+
+    let q_sum = batch.coefficients[..params.row_len]
+        .iter()
+        .copied()
+        .fold(Fp::ZERO, |acc, value| acc + value);
+    let claim_sum = claims
+        .iter()
+        .zip(gamma.iter().copied())
+        .fold(batch.blind_claim, |acc, (claim, coeff)| {
+            acc + coeff * claim.value
+        });
+    Ok(q_sum == claim_sum)
 }
 
 pub fn verify_input_claims_from_systematic_openings(
@@ -461,9 +704,7 @@ pub fn verify_claim_batch(
     }
     let committed_rows = committed_len.div_ceil(params.row_len);
     let expected_rows = committed_rows + 2;
-    for claim in claims {
-        validate_linear_claim(params, committed_rows, claim)?;
-    }
+    let batched_row_weights = batched_row_weights(params, committed_rows, claims, gamma)?;
     for opening in openings {
         if opening.index >= params.codeword_len {
             return Err(LigeroError::ColumnOutOfRange);
@@ -476,20 +717,13 @@ pub fn verify_claim_batch(
         .iter()
         .map(|opening| opening.index)
         .collect::<Vec<_>>();
-    let claim_row_weights = claims
+    let row_weights_at_openings = batched_row_weights
         .iter()
-        .map(|claim| {
-            let mut rows = Vec::new();
-            for row in 0..committed_rows {
-                let weights = row_weight_values(params, claim, row);
-                if weights.iter().any(|&weight| weight != Fp::ZERO) {
-                    rows.push((
-                        row,
-                        weight_evaluations(params, &weights, opening_indices.iter().copied())?,
-                    ));
-                }
-            }
-            Ok::<_, LigeroError>(rows)
+        .map(|(row, weights)| {
+            Ok::<_, LigeroError>((
+                *row,
+                weight_evaluations(params, weights, opening_indices.iter().copied())?,
+            ))
         })
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -505,13 +739,8 @@ pub fn verify_claim_batch(
         }
         let blind_value = opening.column[committed_rows + 1];
         let mut combined = blind_value;
-        for (weights_by_row, coeff) in claim_row_weights.iter().zip(gamma.iter().copied()) {
-            let mut weighted_rows = Fp::ZERO;
-            for (row, weights_at_openings) in weights_by_row {
-                weighted_rows =
-                    weighted_rows + weights_at_openings[opening_position] * opening.column[*row];
-            }
-            combined = combined + coeff * weighted_rows;
+        for (row, weights_at_openings) in &row_weights_at_openings {
+            combined = combined + weights_at_openings[opening_position] * opening.column[*row];
         }
         let expected = rs_evaluate(&batch.coefficients, params.codeword_len, opening.index)
             .map_err(LigeroError::Rs)?;
@@ -551,6 +780,7 @@ fn validate_linear_claim(
     Ok(())
 }
 
+#[cfg(test)]
 fn row_weight_values(params: LigeroParams, claim: &LigeroLinearClaim, row: usize) -> Vec<Fp> {
     (0..params.row_len)
         .map(|column| {
@@ -558,6 +788,39 @@ fn row_weight_values(params: LigeroParams, claim: &LigeroLinearClaim, row: usize
             linear_claim_weight(claim, global)
         })
         .collect()
+}
+
+fn batched_row_weights(
+    params: LigeroParams,
+    committed_rows: usize,
+    claims: &[LigeroLinearClaim],
+    gamma: &[Fp],
+) -> Result<Vec<(usize, Vec<Fp>)>, LigeroError> {
+    if claims.is_empty() || gamma.is_empty() {
+        return Err(LigeroError::EmptyGamma);
+    }
+    if claims.len() != gamma.len() {
+        return Err(LigeroError::WrongGammaLength);
+    }
+
+    let mut rows = vec![vec![Fp::ZERO; params.row_len]; committed_rows];
+    for (claim, coeff) in claims.iter().zip(gamma.iter().copied()) {
+        validate_linear_claim(params, committed_rows, claim)?;
+        let start = claim.offset / params.row_len;
+        let end = (claim.offset + claim.len).div_ceil(params.row_len);
+        for (row, weights) in rows.iter_mut().enumerate().take(end).skip(start) {
+            for (column, out) in weights.iter_mut().enumerate() {
+                let global = row * params.row_len + column;
+                *out = *out + coeff * linear_claim_weight(claim, global);
+            }
+        }
+    }
+
+    Ok(rows
+        .into_iter()
+        .enumerate()
+        .filter(|(_, weights)| weights.iter().any(|&weight| weight != Fp::ZERO))
+        .collect())
 }
 
 fn weight_evaluations(
@@ -587,4 +850,121 @@ fn linear_claim_weight(claim: &LigeroLinearClaim, global_index: usize) -> Fp {
                 acc * (Fp::ONE - challenge)
             }
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rs::{
+        reset_rs_encode_padded_call_count, rs_encode_padded_call_count,
+        rs_encode_padded_v2a_cached_call_counts,
+    };
+    use std::sync::Mutex;
+
+    static RS_COUNTER_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn small_params() -> LigeroParams {
+        LigeroParams {
+            row_len: 4,
+            degree_bound: 8,
+            codeword_len: 32,
+            openings: 3,
+            proximity_radius: 1,
+        }
+    }
+
+    fn claim_for(values: &[Fp], offset: usize, point: Vec<Fp>) -> LigeroLinearClaim {
+        let len = 1usize << point.len();
+        let value = Mle::new(values[offset..offset + len].to_vec())
+            .eval_at(&point)
+            .unwrap();
+        LigeroLinearClaim {
+            offset,
+            len,
+            point,
+            value,
+        }
+    }
+
+    #[test]
+    fn batched_row_weights_match_separate_claim_weights() {
+        let params = small_params();
+        let claims = vec![
+            LigeroLinearClaim {
+                offset: 0,
+                len: 8,
+                point: vec![Fp::from_u64(3), Fp::from_u64(5), Fp::from_u64(7)],
+                value: Fp::ZERO,
+            },
+            LigeroLinearClaim {
+                offset: 4,
+                len: 4,
+                point: vec![Fp::from_u64(11), Fp::from_u64(13)],
+                value: Fp::ZERO,
+            },
+        ];
+        let gamma = [Fp::from_u64(17), Fp::from_u64(19)];
+
+        let batched = batched_row_weights(params, 3, &claims, &gamma).unwrap();
+
+        for (row, weights) in batched {
+            let mut expected = vec![Fp::ZERO; params.row_len];
+            for (claim, coeff) in claims.iter().zip(gamma) {
+                for (out, weight) in expected
+                    .iter_mut()
+                    .zip(row_weight_values(params, claim, row))
+                {
+                    *out = *out + coeff * weight;
+                }
+            }
+            assert_eq!(weights, expected);
+        }
+    }
+
+    #[test]
+    fn verifier_claim_batch_does_not_rs_encode() {
+        let _lock = RS_COUNTER_TEST_LOCK.lock().unwrap();
+        let params = small_params();
+        let values = (0..12)
+            .map(|value| Fp::from_u64(value + 1))
+            .collect::<Vec<_>>();
+        let claims = vec![
+            claim_for(&values, 0, vec![Fp::from_u64(3), Fp::from_u64(5)]),
+            claim_for(&values, 4, vec![Fp::from_u64(7), Fp::from_u64(11)]),
+        ];
+        let gamma = [Fp::from_u64(13), Fp::from_u64(17)];
+        let (commitment, _) = commit_witness_profiled(&values, params).unwrap();
+        let batch = commitment.claim_batch(&claims, &gamma).unwrap();
+        let openings = commitment.open_columns(&[8, 13, 21]).unwrap();
+
+        reset_rs_encode_padded_call_count();
+        assert!(verify_claim_batch(
+            commitment.root(),
+            params,
+            values.len(),
+            &openings,
+            &batch,
+            &claims,
+            &gamma,
+        )
+        .unwrap());
+        assert_eq!(rs_encode_padded_call_count(), 0);
+    }
+
+    #[test]
+    fn v2_commit_rows_use_cached_rs_encoder() {
+        let _lock = RS_COUNTER_TEST_LOCK.lock().unwrap();
+        let params = v2_ligero_params();
+        let values = (0..params.row_len * 3 + 7)
+            .map(|value| Fp::from_u64(value as u64 + 1))
+            .collect::<Vec<_>>();
+
+        reset_rs_encode_padded_call_count();
+        let (_commitment, profile) = commit_witness_profiled(&values, params).unwrap();
+        let (row_cached, claim_cached) = rs_encode_padded_v2a_cached_call_counts();
+
+        assert_eq!(profile.rows, 6);
+        assert_eq!(row_cached, 5);
+        assert_eq!(claim_cached, 1);
+    }
 }

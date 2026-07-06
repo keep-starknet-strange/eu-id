@@ -10,9 +10,11 @@ use eu_id_ec_coprocessor::ecdsa::{
     implemented_circuit_gate_count, layout_range, prove_implemented_circuit_bundle,
     prove_implemented_circuit_bundle_batch_with_projection,
     prove_implemented_circuit_bundle_profiled, prove_implemented_circuit_proofs,
-    verify_implemented_circuit_bundle, verify_implemented_circuit_bundle_batch_with_projection,
-    verify_implemented_circuit_proofs, verify_implemented_circuits, verify_witness, EcdsaInput,
-    EcdsaPublicProjection, ImplementedCircuitBundleEntry, LayoutSlot, WitnessError,
+    prove_mdoc_p4b_circuit_bundle, verify_implemented_circuit_bundle,
+    verify_implemented_circuit_bundle_batch_with_projection, verify_implemented_circuit_proofs,
+    verify_implemented_circuits, verify_mdoc_p4b_circuit_bundle, verify_witness, EcdsaInput,
+    EcdsaPublicProjection, ImplementedCircuitBundleEntry, LayoutSlot, MdocP4bMacKeyShares,
+    WitnessError, MDOC_P4B_MAC_COMMITTED_PRIVATE_INPUTS,
 };
 use eu_id_ec_coprocessor::ligero::{commit_witness, v2_ligero_params, LigeroParams};
 use eu_id_ec_coprocessor::sumcheck::{circuit_otp_pad_values, prove_circuit};
@@ -929,6 +931,144 @@ fn implemented_circuit_bundle_rejects_wrong_p4b_public_projection() {
         TEST_SEED,
     )
     .is_err());
+}
+
+#[test]
+#[ignore = "release gate: full P4b mdoc MAC-bound bundle proof"]
+fn mdoc_p4b_bundle_accepts_honest_mac_tags_and_rejects_tag_tamper() {
+    let issuer = signed_input();
+    let device = alternate_signed_input();
+    let issuer_witness = generate_witness(&issuer).unwrap();
+    let device_witness = generate_witness(&device).unwrap();
+    let issuer_public = EcdsaPublicProjection::issuer_key_only(issuer.qx, issuer.qy);
+    let device_public = EcdsaPublicProjection::message_hash_only(device.z);
+    let mac_key_shares = test_mac_key_shares();
+
+    let bundle = prove_mdoc_p4b_circuit_bundle(
+        &issuer,
+        &issuer_public,
+        &issuer_witness,
+        &device,
+        &device_public,
+        &device_witness,
+        &mac_key_shares,
+        TEST_SEED,
+    )
+    .unwrap();
+
+    assert_eq!(bundle.mac_tags.len(), 6);
+    assert_eq!(
+        MDOC_P4B_MAC_COMMITTED_PRIVATE_INPUTS, 8448,
+        "Q-021 requires six halves of x, a_p, u, and q parity-witness bits"
+    );
+    verify_mdoc_p4b_circuit_bundle(&issuer_public, &device_public, &bundle, TEST_SEED).unwrap();
+
+    let mut tampered = bundle.clone();
+    tampered.mac_tags[0][0] ^= 1;
+    assert!(
+        verify_mdoc_p4b_circuit_bundle(&issuer_public, &device_public, &tampered, TEST_SEED)
+            .is_err()
+    );
+
+    let mut tampered_root_b = bundle.clone();
+    tampered_root_b.root_b.as_mut().unwrap()[0] ^= 1;
+    assert!(
+        verify_mdoc_p4b_circuit_bundle(&issuer_public, &device_public, &tampered_root_b, TEST_SEED)
+            .is_err(),
+        "Q022 root_B is part of the full transcript root and must be binding"
+    );
+
+    let mut missing_root_b = bundle.clone();
+    missing_root_b.root_b = None;
+    assert!(
+        verify_mdoc_p4b_circuit_bundle(&issuer_public, &device_public, &missing_root_b, TEST_SEED)
+            .is_err(),
+        "Q022 verifier must require the second MAC witness commitment"
+    );
+
+    let mut tampered_b_opening = bundle;
+    tampered_b_opening.proximity_openings_b[0].column[0] =
+        tampered_b_opening.proximity_openings_b[0].column[0] + Fp::ONE;
+    assert!(
+        verify_mdoc_p4b_circuit_bundle(
+            &issuer_public,
+            &device_public,
+            &tampered_b_opening,
+            TEST_SEED
+        )
+        .is_err(),
+        "Q022 Group B openings must be verified against root_B"
+    );
+}
+
+#[test]
+#[ignore = "release gate: full P4b mdoc MAC-bound bundle proof"]
+fn mdoc_p4b_bundle_rejects_spliced_mac_batch_entry() {
+    let issuer = signed_input();
+    let device = alternate_signed_input();
+    let issuer_witness = generate_witness(&issuer).unwrap();
+    let device_witness = generate_witness(&device).unwrap();
+    let issuer_public = EcdsaPublicProjection::issuer_key_only(issuer.qx, issuer.qy);
+    let device_public = EcdsaPublicProjection::message_hash_only(device.z);
+
+    let bundle = prove_mdoc_p4b_circuit_bundle(
+        &issuer,
+        &issuer_public,
+        &issuer_witness,
+        &device,
+        &device_public,
+        &device_witness,
+        &test_mac_key_shares(),
+        TEST_SEED,
+    )
+    .unwrap();
+    let alternate_bundle = prove_mdoc_p4b_circuit_bundle(
+        &issuer,
+        &issuer_public,
+        &issuer_witness,
+        &device,
+        &device_public,
+        &device_witness,
+        &alternate_mac_key_shares(),
+        TEST_SEED,
+    )
+    .unwrap();
+
+    assert_eq!(bundle.entries.len(), 19);
+    verify_mdoc_p4b_circuit_bundle(&issuer_public, &device_public, &bundle, TEST_SEED).unwrap();
+
+    let mut spliced = bundle;
+    let mac_batch_index = spliced.entries.len() - 1;
+    spliced.entries[mac_batch_index] = alternate_bundle.entries[mac_batch_index].clone();
+    assert!(
+        verify_mdoc_p4b_circuit_bundle(&issuer_public, &device_public, &spliced, TEST_SEED)
+            .is_err(),
+        "MAC batch sumcheck entry from a different root/key-share transcript unexpectedly verified"
+    );
+}
+
+fn test_mac_key_shares() -> MdocP4bMacKeyShares {
+    MdocP4bMacKeyShares(std::array::from_fn(|index| {
+        let mut share = [0u8; 16];
+        for (byte_index, byte) in share.iter_mut().enumerate() {
+            *byte = 0x41u8
+                .wrapping_add(index as u8 * 19)
+                .wrapping_add(byte_index as u8 * 7);
+        }
+        share
+    }))
+}
+
+fn alternate_mac_key_shares() -> MdocP4bMacKeyShares {
+    MdocP4bMacKeyShares(std::array::from_fn(|index| {
+        let mut share = [0u8; 16];
+        for (byte_index, byte) in share.iter_mut().enumerate() {
+            *byte = 0xb3u8
+                .wrapping_sub(index as u8 * 11)
+                .wrapping_add(byte_index as u8 * 5);
+        }
+        share
+    }))
 }
 
 fn c2_bundle_entry(input: &EcdsaInput) -> ImplementedCircuitBundleEntry {

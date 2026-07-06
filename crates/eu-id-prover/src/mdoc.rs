@@ -7,12 +7,15 @@
 //! module is not part of this path; the device-auth signature binds freshness.
 
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use air_core::relations::{field_id, SharedDigestRelation, SharedFieldRelation};
 use air_core::{Air, AirProver, TreeLayout};
 use ciborium::value::Value;
 use ecdsa::signature::{Signer, Verifier};
 use p256::ecdsa::{Signature as P256Signature, SigningKey, VerifyingKey};
+#[cfg(feature = "ec-coprocessor")]
+use p256::elliptic_curve::rand_core::{OsRng, RngCore};
 use p256::pkcs8::DecodePublicKey;
 use p256::EncodedPoint;
 use predicates::nat::NationalityPredicate;
@@ -62,12 +65,17 @@ use stwo_sha256::trace::min_log_size;
 use stwo_sha256::witness::compute_sha256_witness;
 
 use crate::generator::{Policy, SHA_GROUP_WIDTH};
+#[cfg(feature = "ec-coprocessor")]
+use crate::mdoc_mac::{
+    MdocMacBind, MdocMacInteractionClaim, MdocP4bMacPublic, MdocP4bMacSharedState,
+};
 use crate::mdoc_validity::{
     mdoc_validity_rows, MdocValidityBind, MdocValidityInteractionClaim, MdocValidityRow,
 };
 use crate::mdoc_window_bind::{
     MdocFieldSource, MdocWindowBind, MdocWindowBindInteractionClaim, MdocWindowBindRow,
 };
+#[cfg(feature = "ec-coprocessor")]
 use crate::public_digest_bind::{PublicDigestBind, PublicDigestBindInteractionClaim};
 use crate::Error;
 
@@ -521,9 +529,6 @@ pub fn demo_mdoc_module_shapes() -> Result<Vec<MdocModuleShape>, Error> {
         device_digest.clone(),
     );
     #[cfg(feature = "ec-coprocessor")]
-    let issuer_public_digest_bind =
-        PublicDigestBind::new(statement.issuer_input.message_hash.0, issuer_digest.clone());
-    #[cfg(feature = "ec-coprocessor")]
     let device_public_digest_bind =
         PublicDigestBind::new(statement.device_input.message_hash.0, device_digest.clone());
     let mdoc_window_bind = MdocWindowBind::new_for_attributes(
@@ -535,12 +540,26 @@ pub fn demo_mdoc_module_shapes() -> Result<Vec<MdocModuleShape>, Error> {
     let mdoc_validity = MdocValidityBind::new(
         statement.policy.current_date,
         mdoc_validity_rows_from(statement, Some(&extracted.issuer_sig_structure)),
-        issuer_field,
+        issuer_field.clone(),
+    );
+    #[cfg(feature = "ec-coprocessor")]
+    let mac_key_shares = random_mdoc_p4b_mac_key_shares();
+    #[cfg(feature = "ec-coprocessor")]
+    let mac_state = MdocP4bMacSharedState::default();
+    #[cfg(feature = "ec-coprocessor")]
+    let mdoc_mac = MdocMacBind::prover(
+        &mac_key_shares,
+        mdoc_p4b_mac_values(statement),
+        mac_state.clone(),
+        issuer_digest.clone(),
+        issuer_field.clone(),
     );
     #[cfg(feature = "ec-coprocessor")]
     let coprocessor = MdocCoprocessorBindingProver::new(
         statement.issuer_input.clone(),
         statement.device_input.clone(),
+        mac_key_shares,
+        mac_state,
     )?;
 
     let age_public = statement.policy.age_public_input();
@@ -643,10 +662,6 @@ pub fn demo_mdoc_module_shapes() -> Result<Vec<MdocModuleShape>, Error> {
             layout: issuer_sha.layout(),
         },
         MdocModuleShape {
-            name: "mdoc_issuer_public_digest_bind",
-            layout: issuer_public_digest_bind.layout(),
-        },
-        MdocModuleShape {
             name: "mdoc_device_sha",
             layout: device_sha.layout(),
         },
@@ -681,6 +696,10 @@ pub fn demo_mdoc_module_shapes() -> Result<Vec<MdocModuleShape>, Error> {
         MdocModuleShape {
             name: "mdoc_coprocessor",
             layout: coprocessor.layout(),
+        },
+        MdocModuleShape {
+            name: "mdoc_mac",
+            layout: mdoc_mac.layout(),
         },
     ];
     Ok(shapes)
@@ -1287,6 +1306,24 @@ fn issuer_mso_exposure(statement: &MdocCircuitStatement) -> FieldExposure {
     FieldExposure::from_preimage_windows_multi(&windows)
 }
 
+#[cfg(feature = "ec-coprocessor")]
+fn mdoc_p4b_mac_values(statement: &MdocCircuitStatement) -> [eu_id_ec_coprocessor::mac::Gf128; 6] {
+    let [issuer_z_lo, issuer_z_hi] =
+        eu_id_ec_coprocessor::ecdsa::gf128_halves_from_be32(statement.issuer_input.message_hash.0);
+    let [device_qx_lo, device_qx_hi] =
+        eu_id_ec_coprocessor::ecdsa::gf128_halves_from_be32(statement.device_input.public_key.x.0);
+    let [device_qy_lo, device_qy_hi] =
+        eu_id_ec_coprocessor::ecdsa::gf128_halves_from_be32(statement.device_input.public_key.y.0);
+    [
+        issuer_z_lo,
+        issuer_z_hi,
+        device_qx_lo,
+        device_qx_hi,
+        device_qy_lo,
+        device_qy_hi,
+    ]
+}
+
 /// Build the six window-bind rows. On the prover the digest witness bytes are
 /// read from the issuer preimage at the two digest offsets; the verifier passes
 /// `None` (the digest bytes are reconstructed through the shared LogUp
@@ -1337,6 +1374,7 @@ fn mdoc_window_bind_rows_from(
             &attribute.mso_digest_anchor,
         ));
     }
+    #[cfg(not(feature = "ec-coprocessor"))]
     rows.extend([
         MdocWindowBindRow::constant(
             field_id::MDOC_DEVICE_KEY_X,
@@ -1348,6 +1386,8 @@ fn mdoc_window_bind_rows_from(
             MdocFieldSource::IssuerMso,
             &statement.device_input.public_key.y.0,
         ),
+    ]);
+    rows.extend([
         MdocWindowBindRow::constant(
             field_id::MDOC_DEVICE_KEY_X_ANCHOR,
             MdocFieldSource::IssuerMso,
@@ -2354,6 +2394,134 @@ pub struct MdocCircuitStatement {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MdocPublicStatement {
+    pub issuer_public_key: AffinePoint,
+    pub device_message_hash: U256,
+    pub attributes: Vec<MdocStatementAttribute>,
+    pub age_attribute_index: Option<usize>,
+    pub nationality_attribute_index: Option<usize>,
+    pub birth_date_binding: MdocBirthDateBinding,
+    pub nationality_binding: MdocNationalityBinding,
+    pub birth_date_value_offset: usize,
+    pub nationality_value_offset: usize,
+    pub birth_date_element_offset: usize,
+    pub nationality_element_offset: usize,
+    pub mso_birth_date_digest_offset: usize,
+    pub mso_birth_date_digest_anchor_offset: usize,
+    pub mso_birth_date_digest_anchor: Vec<u8>,
+    pub mso_nationality_digest_offset: usize,
+    pub mso_nationality_digest_anchor_offset: usize,
+    pub mso_nationality_digest_anchor: Vec<u8>,
+    pub mso_device_key_x_offset: usize,
+    pub mso_device_key_x_anchor_offset: usize,
+    pub mso_device_key_x_anchor: Vec<u8>,
+    pub mso_device_key_y_offset: usize,
+    pub mso_device_key_y_anchor_offset: usize,
+    pub mso_device_key_y_anchor: Vec<u8>,
+    pub valid_from: (u16, u8, u8),
+    pub valid_until: (u16, u8, u8),
+    pub mso_valid_from_date_offset: usize,
+    pub mso_valid_from_anchor_offset: usize,
+    pub mso_valid_from_anchor: Vec<u8>,
+    pub mso_valid_until_date_offset: usize,
+    pub mso_valid_until_anchor_offset: usize,
+    pub mso_valid_until_anchor: Vec<u8>,
+    pub policy: Policy,
+}
+
+impl MdocPublicStatement {
+    pub fn from_circuit(statement: &MdocCircuitStatement) -> Self {
+        Self {
+            issuer_public_key: statement.issuer_input.public_key.clone(),
+            device_message_hash: statement.device_input.message_hash.clone(),
+            attributes: statement.attributes.clone(),
+            age_attribute_index: statement.age_attribute_index,
+            nationality_attribute_index: statement.nationality_attribute_index,
+            birth_date_binding: statement.birth_date_binding,
+            nationality_binding: statement.nationality_binding,
+            birth_date_value_offset: statement.birth_date_value_offset,
+            nationality_value_offset: statement.nationality_value_offset,
+            birth_date_element_offset: statement.birth_date_element_offset,
+            nationality_element_offset: statement.nationality_element_offset,
+            mso_birth_date_digest_offset: statement.mso_birth_date_digest_offset,
+            mso_birth_date_digest_anchor_offset: statement.mso_birth_date_digest_anchor_offset,
+            mso_birth_date_digest_anchor: statement.mso_birth_date_digest_anchor.clone(),
+            mso_nationality_digest_offset: statement.mso_nationality_digest_offset,
+            mso_nationality_digest_anchor_offset: statement.mso_nationality_digest_anchor_offset,
+            mso_nationality_digest_anchor: statement.mso_nationality_digest_anchor.clone(),
+            mso_device_key_x_offset: statement.mso_device_key_x_offset,
+            mso_device_key_x_anchor_offset: statement.mso_device_key_x_anchor_offset,
+            mso_device_key_x_anchor: statement.mso_device_key_x_anchor.clone(),
+            mso_device_key_y_offset: statement.mso_device_key_y_offset,
+            mso_device_key_y_anchor_offset: statement.mso_device_key_y_anchor_offset,
+            mso_device_key_y_anchor: statement.mso_device_key_y_anchor.clone(),
+            valid_from: statement.valid_from,
+            valid_until: statement.valid_until,
+            mso_valid_from_date_offset: statement.mso_valid_from_date_offset,
+            mso_valid_from_anchor_offset: statement.mso_valid_from_anchor_offset,
+            mso_valid_from_anchor: statement.mso_valid_from_anchor.clone(),
+            mso_valid_until_date_offset: statement.mso_valid_until_date_offset,
+            mso_valid_until_anchor_offset: statement.mso_valid_until_anchor_offset,
+            mso_valid_until_anchor: statement.mso_valid_until_anchor.clone(),
+            policy: statement.policy.clone(),
+        }
+    }
+
+    #[cfg(feature = "ec-coprocessor")]
+    fn verifier_circuit_statement(&self) -> MdocCircuitStatement {
+        let zero_sig = Signature {
+            r: U256([0u8; 32]),
+            s: U256([0u8; 32]),
+        };
+        MdocCircuitStatement {
+            issuer_input: EcdsaVerifyInput {
+                message_hash: U256([0u8; 32]),
+                signature: zero_sig.clone(),
+                public_key: self.issuer_public_key.clone(),
+            },
+            device_input: EcdsaVerifyInput {
+                message_hash: self.device_message_hash.clone(),
+                signature: zero_sig,
+                public_key: AffinePoint {
+                    x: U256([0u8; 32]),
+                    y: U256([0u8; 32]),
+                },
+            },
+            attributes: self.attributes.clone(),
+            age_attribute_index: self.age_attribute_index,
+            nationality_attribute_index: self.nationality_attribute_index,
+            birth_date_binding: self.birth_date_binding,
+            nationality_binding: self.nationality_binding,
+            birth_date_value_offset: self.birth_date_value_offset,
+            nationality_value_offset: self.nationality_value_offset,
+            birth_date_element_offset: self.birth_date_element_offset,
+            nationality_element_offset: self.nationality_element_offset,
+            mso_birth_date_digest_offset: self.mso_birth_date_digest_offset,
+            mso_birth_date_digest_anchor_offset: self.mso_birth_date_digest_anchor_offset,
+            mso_birth_date_digest_anchor: self.mso_birth_date_digest_anchor.clone(),
+            mso_nationality_digest_offset: self.mso_nationality_digest_offset,
+            mso_nationality_digest_anchor_offset: self.mso_nationality_digest_anchor_offset,
+            mso_nationality_digest_anchor: self.mso_nationality_digest_anchor.clone(),
+            mso_device_key_x_offset: self.mso_device_key_x_offset,
+            mso_device_key_x_anchor_offset: self.mso_device_key_x_anchor_offset,
+            mso_device_key_x_anchor: self.mso_device_key_x_anchor.clone(),
+            mso_device_key_y_offset: self.mso_device_key_y_offset,
+            mso_device_key_y_anchor_offset: self.mso_device_key_y_anchor_offset,
+            mso_device_key_y_anchor: self.mso_device_key_y_anchor.clone(),
+            valid_from: self.valid_from,
+            valid_until: self.valid_until,
+            mso_valid_from_date_offset: self.mso_valid_from_date_offset,
+            mso_valid_from_anchor_offset: self.mso_valid_from_anchor_offset,
+            mso_valid_from_anchor: self.mso_valid_from_anchor.clone(),
+            mso_valid_until_date_offset: self.mso_valid_until_date_offset,
+            mso_valid_until_anchor_offset: self.mso_valid_until_anchor_offset,
+            mso_valid_until_anchor: self.mso_valid_until_anchor.clone(),
+            policy: self.policy.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MdocStatementAttribute {
     pub element_identifier: String,
     pub mode: MdocDisclosureMode,
@@ -2702,11 +2870,11 @@ pub struct MdocCircuitProof {
     #[cfg(not(feature = "ec-coprocessor"))]
     device_p256_interaction_claim: P256CurrentAirInteractionClaim,
     #[cfg(feature = "ec-coprocessor")]
-    issuer_public_digest_bind_interaction_claim: PublicDigestBindInteractionClaim,
-    #[cfg(feature = "ec-coprocessor")]
     device_public_digest_bind_interaction_claim: PublicDigestBindInteractionClaim,
     #[cfg(feature = "ec-coprocessor")]
     coprocessor_bundle: Option<eu_id_ec_coprocessor::ecdsa::ImplementedCircuitBundle>,
+    #[cfg(feature = "ec-coprocessor")]
+    mdoc_mac_interaction_claim: MdocMacInteractionClaim,
     issuer_sha_log_n_rows: u32,
     issuer_sha_interaction_claim: Sha256InteractionClaim,
     device_sha_log_n_rows: u32,
@@ -2727,6 +2895,30 @@ pub struct MdocCircuitProof {
     age_claimed_sums: Option<Vec<QM31>>,
     nat_public: Option<predicates::NatPublicInput>,
     nat_claimed_sums: Option<Vec<QM31>>,
+    #[cfg(feature = "ec-coprocessor")]
+    #[serde(skip)]
+    p4b_prove_profile: Option<eu_id_ec_coprocessor::ecdsa::MdocP4bProveProfile>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MdocCircuitProveProfile {
+    pub total: Duration,
+    #[cfg(feature = "ec-coprocessor")]
+    pub p4b: Option<eu_id_ec_coprocessor::ecdsa::MdocP4bProveProfile>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MdocCircuitVerifyProfile {
+    pub total: Duration,
+    #[cfg(feature = "ec-coprocessor")]
+    pub p4b: Option<eu_id_ec_coprocessor::ecdsa::MdocP4bVerifyProfile>,
+}
+
+impl MdocCircuitProof {
+    #[cfg(feature = "ec-coprocessor")]
+    pub fn p4b_prove_profile(&self) -> Option<&eu_id_ec_coprocessor::ecdsa::MdocP4bProveProfile> {
+        self.p4b_prove_profile.as_ref()
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2923,12 +3115,29 @@ struct MdocCoprocessorBindingProver {
     device_input: EcdsaVerifyInput,
     issuer_witness: eu_id_ec_coprocessor::ecdsa::Witness,
     device_witness: eu_id_ec_coprocessor::ecdsa::Witness,
+    mac_key_shares: eu_id_ec_coprocessor::ecdsa::MdocP4bMacKeyShares,
+    mac_state: MdocP4bMacSharedState,
     bundle: Option<eu_id_ec_coprocessor::ecdsa::ImplementedCircuitBundle>,
+    profile: Option<eu_id_ec_coprocessor::ecdsa::MdocP4bProveProfile>,
+}
+
+#[cfg(feature = "ec-coprocessor")]
+fn random_mdoc_p4b_mac_key_shares() -> eu_id_ec_coprocessor::ecdsa::MdocP4bMacKeyShares {
+    eu_id_ec_coprocessor::ecdsa::MdocP4bMacKeyShares(std::array::from_fn(|_| {
+        let mut share = [0u8; 16];
+        OsRng.fill_bytes(&mut share);
+        share
+    }))
 }
 
 #[cfg(feature = "ec-coprocessor")]
 impl MdocCoprocessorBindingProver {
-    fn new(issuer_input: EcdsaVerifyInput, device_input: EcdsaVerifyInput) -> Result<Self, Error> {
+    fn new(
+        issuer_input: EcdsaVerifyInput,
+        device_input: EcdsaVerifyInput,
+        mac_key_shares: eu_id_ec_coprocessor::ecdsa::MdocP4bMacKeyShares,
+        mac_state: MdocP4bMacSharedState,
+    ) -> Result<Self, Error> {
         let issuer_witness = crate::ec_coprocessor::generate_witness_from_stwo(&issuer_input)
             .map_err(Error::CoprocessorWitness)?;
         let device_witness = crate::ec_coprocessor::generate_witness_from_stwo(&device_input)
@@ -2938,7 +3147,10 @@ impl MdocCoprocessorBindingProver {
             device_input,
             issuer_witness,
             device_witness,
+            mac_key_shares,
+            mac_state,
             bundle: None,
+            profile: None,
         })
     }
 }
@@ -2995,19 +3207,26 @@ impl AirProver for MdocCoprocessorBindingProver {
         )
         .expect("mdoc coprocessor public projections mix");
         let seed = crate::draw_coprocessor_seed(channel);
-        let inputs = [self.issuer_input.clone(), self.device_input.clone()];
-        let witnesses = [self.issuer_witness.clone(), self.device_witness.clone()];
-        let projections = [issuer_projection, device_projection];
-        let bundle =
-            crate::ec_coprocessor::prove_implemented_circuit_bundle_batch_with_projection_from_stwo(
-                &inputs,
-                &projections,
-                &witnesses,
+        let (bundle, profile) =
+            crate::ec_coprocessor::prove_mdoc_p4b_circuit_bundle_from_stwo_profiled(
+                &self.issuer_input,
+                &issuer_projection,
+                &self.issuer_witness,
+                &self.device_input,
+                &device_projection,
+                &self.device_witness,
+                &self.mac_key_shares,
                 seed,
             )
-            .expect("mdoc coprocessor bundle proves both checked witnesses");
+            .expect("mdoc P4b coprocessor bundle proves MAC-bound witnesses");
+        let av = crate::ec_coprocessor::mdoc_p4b_av_from_bundle(&bundle, seed);
+        self.mac_state.publish(MdocP4bMacPublic {
+            av,
+            tags: bundle.mac_tags.clone(),
+        });
         crate::mix_coprocessor_rejoin(channel, &bundle).expect("mdoc coprocessor rejoin mixes");
         self.bundle = Some(bundle);
+        self.profile = Some(profile);
     }
 
     fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
@@ -3020,6 +3239,8 @@ struct MdocCoprocessorBindingVerifier {
     issuer_input: EcdsaVerifyInput,
     device_input: EcdsaVerifyInput,
     bundle: eu_id_ec_coprocessor::ecdsa::ImplementedCircuitBundle,
+    mac_state: MdocP4bMacSharedState,
+    profile: Option<eu_id_ec_coprocessor::ecdsa::MdocP4bVerifyProfile>,
 }
 
 #[cfg(feature = "ec-coprocessor")]
@@ -3066,15 +3287,21 @@ impl Air for MdocCoprocessorBindingVerifier {
         )
         .map_err(VerificationError::InvalidStructure)?;
         let seed = crate::draw_coprocessor_seed(channel);
-        let projections = [issuer_projection, device_projection];
-        crate::ec_coprocessor::verify_implemented_circuit_bundle_batch_with_projection_from_stwo(
-            &projections,
+        let profile = crate::ec_coprocessor::verify_mdoc_p4b_circuit_bundle_from_stwo_profiled(
+            &issuer_projection,
+            &device_projection,
             &self.bundle,
             seed,
         )
         .map_err(|err| VerificationError::InvalidStructure(format!("{err:?}")))?;
+        let av = crate::ec_coprocessor::mdoc_p4b_av_from_bundle(&self.bundle, seed);
+        self.mac_state.publish(MdocP4bMacPublic {
+            av,
+            tags: self.bundle.mac_tags.clone(),
+        });
         crate::mix_coprocessor_rejoin(channel, &self.bundle)
             .map_err(VerificationError::InvalidStructure)?;
+        self.profile = Some(profile);
         Ok(())
     }
 }
@@ -3229,9 +3456,6 @@ pub fn prove_mdoc_circuit_with_pcs_config(
         device_digest.clone(),
     );
     #[cfg(feature = "ec-coprocessor")]
-    let mut issuer_public_digest_bind =
-        PublicDigestBind::new(statement.issuer_input.message_hash.0, issuer_digest.clone());
-    #[cfg(feature = "ec-coprocessor")]
     let mut device_public_digest_bind =
         PublicDigestBind::new(statement.device_input.message_hash.0, device_digest.clone());
     let mut mdoc_window_bind = MdocWindowBind::new_for_attributes(
@@ -3246,9 +3470,23 @@ pub fn prove_mdoc_circuit_with_pcs_config(
         issuer_field.clone(),
     );
     #[cfg(feature = "ec-coprocessor")]
+    let mac_key_shares = random_mdoc_p4b_mac_key_shares();
+    #[cfg(feature = "ec-coprocessor")]
+    let mac_state = MdocP4bMacSharedState::default();
+    #[cfg(feature = "ec-coprocessor")]
+    let mut mdoc_mac = MdocMacBind::prover(
+        &mac_key_shares,
+        mdoc_p4b_mac_values(statement),
+        mac_state.clone(),
+        issuer_digest.clone(),
+        issuer_field.clone(),
+    );
+    #[cfg(feature = "ec-coprocessor")]
     let mut coprocessor = MdocCoprocessorBindingProver::new(
         statement.issuer_input.clone(),
         statement.device_input.clone(),
+        mac_key_shares,
+        mac_state,
     )?;
 
     let age_public = statement.policy.age_public_input();
@@ -3305,7 +3543,6 @@ pub fn prove_mdoc_circuit_with_pcs_config(
         let mut modules: Vec<&mut dyn AirProver> = vec![
             &mut sha_tables,
             &mut issuer_sha,
-            &mut issuer_public_digest_bind,
             &mut device_sha,
             &mut device_public_digest_bind,
         ];
@@ -3322,11 +3559,15 @@ pub fn prove_mdoc_circuit_with_pcs_config(
         }
         #[cfg(feature = "ec-coprocessor")]
         modules.push(&mut coprocessor);
+        #[cfg(feature = "ec-coprocessor")]
+        modules.push(&mut mdoc_mac);
         air_core::prove(modules.as_mut_slice(), config)
             .map_err(|e| Error::Prove(format!("{e:?}")))?
     };
     #[cfg(feature = "ec-coprocessor")]
     let coprocessor_bundle = coprocessor.bundle.take().ok_or(Error::CoprocessorMissing)?;
+    #[cfg(feature = "ec-coprocessor")]
+    let p4b_prove_profile = coprocessor.profile.take();
 
     Ok(MdocCircuitProof {
         stark_proof,
@@ -3340,15 +3581,13 @@ pub fn prove_mdoc_circuit_with_pcs_config(
         #[cfg(not(feature = "ec-coprocessor"))]
         device_p256_interaction_claim: device_p256.interaction_claim().clone(),
         #[cfg(feature = "ec-coprocessor")]
-        issuer_public_digest_bind_interaction_claim: issuer_public_digest_bind
-            .interaction_claim()
-            .clone(),
-        #[cfg(feature = "ec-coprocessor")]
         device_public_digest_bind_interaction_claim: device_public_digest_bind
             .interaction_claim()
             .clone(),
         #[cfg(feature = "ec-coprocessor")]
         coprocessor_bundle: Some(coprocessor_bundle),
+        #[cfg(feature = "ec-coprocessor")]
+        mdoc_mac_interaction_claim: mdoc_mac.interaction_claim().clone(),
         issuer_sha_log_n_rows: shared_sha_log,
         issuer_sha_interaction_claim: issuer_sha.interaction_claim().clone(),
         device_sha_log_n_rows: shared_sha_log,
@@ -3372,6 +3611,8 @@ pub fn prove_mdoc_circuit_with_pcs_config(
         age_claimed_sums: age.as_ref().map(|age| age.claimed_sums()),
         nat_public: nat.as_ref().map(|_| nat_public),
         nat_claimed_sums: nat.as_ref().map(|nat| nat.claimed_sums()),
+        #[cfg(feature = "ec-coprocessor")]
+        p4b_prove_profile,
     })
 }
 
@@ -3382,11 +3623,29 @@ pub fn verify_mdoc_circuit(
     verify_mdoc_circuit_with_pcs_config(proof, statement, mdoc_production_pcs_config())
 }
 
+#[cfg(feature = "ec-coprocessor")]
+pub fn verify_mdoc_public_statement(
+    proof: &MdocCircuitProof,
+    statement: &MdocPublicStatement,
+) -> Result<(), Error> {
+    let verifier_statement = statement.verifier_circuit_statement();
+    verify_mdoc_circuit_with_pcs_config(proof, &verifier_statement, mdoc_production_pcs_config())
+}
+
 pub fn verify_mdoc_circuit_with_pcs_config(
     proof: &MdocCircuitProof,
     statement: &MdocCircuitStatement,
     expected_pcs_config: PcsConfig,
 ) -> Result<(), Error> {
+    verify_mdoc_circuit_with_pcs_config_profiled(proof, statement, expected_pcs_config).map(|_| ())
+}
+
+pub fn verify_mdoc_circuit_with_pcs_config_profiled(
+    proof: &MdocCircuitProof,
+    statement: &MdocCircuitStatement,
+    expected_pcs_config: PcsConfig,
+) -> Result<MdocCircuitVerifyProfile, Error> {
+    let total_start = Instant::now();
     #[cfg(not(feature = "ec-coprocessor"))]
     if proof.issuer_p256_claim.public_inputs.instances.as_slice()
         != [expected_instance(&statement.issuer_input)]
@@ -3512,12 +3771,6 @@ pub fn verify_mdoc_circuit_with_pcs_config(
         device_digest,
     );
     #[cfg(feature = "ec-coprocessor")]
-    let mut issuer_public_digest_bind = PublicDigestBind::verifier(
-        statement.issuer_input.message_hash.0,
-        issuer_digest,
-        proof.issuer_public_digest_bind_interaction_claim.clone(),
-    );
-    #[cfg(feature = "ec-coprocessor")]
     let mut device_public_digest_bind = PublicDigestBind::verifier(
         statement.device_input.message_hash.0,
         device_digest,
@@ -3533,7 +3786,7 @@ pub fn verify_mdoc_circuit_with_pcs_config(
     let mut mdoc_validity = MdocValidityBind::verifier(
         statement.policy.current_date,
         mdoc_validity_rows_from(statement, None),
-        issuer_field,
+        issuer_field.clone(),
         proof.mdoc_validity_interaction_claim.clone(),
     );
     let mut age = if let Some(index) = statement.age_attribute_index {
@@ -3572,6 +3825,15 @@ pub fn verify_mdoc_circuit_with_pcs_config(
         None
     };
     #[cfg(feature = "ec-coprocessor")]
+    let mac_state = MdocP4bMacSharedState::default();
+    #[cfg(feature = "ec-coprocessor")]
+    let mut mdoc_mac = MdocMacBind::verifier(
+        mac_state.clone(),
+        issuer_digest.clone(),
+        issuer_field.clone(),
+        proof.mdoc_mac_interaction_claim.clone(),
+    );
+    #[cfg(feature = "ec-coprocessor")]
     let mut coprocessor = MdocCoprocessorBindingVerifier {
         issuer_input: statement.issuer_input.clone(),
         device_input: statement.device_input.clone(),
@@ -3579,6 +3841,8 @@ pub fn verify_mdoc_circuit_with_pcs_config(
             .coprocessor_bundle
             .clone()
             .ok_or(Error::CoprocessorMissing)?,
+        mac_state,
+        profile: None,
     };
 
     #[cfg(not(feature = "ec-coprocessor"))]
@@ -3595,7 +3859,6 @@ pub fn verify_mdoc_circuit_with_pcs_config(
     let mut modules: Vec<&mut dyn Air> = vec![
         &mut sha_tables,
         &mut issuer_sha,
-        &mut issuer_public_digest_bind,
         &mut device_sha,
         &mut device_public_digest_bind,
     ];
@@ -3612,10 +3875,16 @@ pub fn verify_mdoc_circuit_with_pcs_config(
     }
     #[cfg(feature = "ec-coprocessor")]
     modules.push(&mut coprocessor);
+    #[cfg(feature = "ec-coprocessor")]
+    modules.push(&mut mdoc_mac);
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         air_core::verify(modules.as_mut_slice(), &proof.stark_proof)
     })) {
-        Ok(Ok(())) => Ok(()),
+        Ok(Ok(())) => Ok(MdocCircuitVerifyProfile {
+            total: total_start.elapsed(),
+            #[cfg(feature = "ec-coprocessor")]
+            p4b: coprocessor.profile.take(),
+        }),
         Ok(Err(error)) => Err(Error::Verify(format!("{error:?}"))),
         Err(_) => Err(Error::Verify(
             "malformed mdoc proof panicked during verification".to_string(),
@@ -3657,6 +3926,32 @@ mod mdoc_sha_table_tests {
         assert_eq!(shapes.len(), 13);
         #[cfg(feature = "ec-coprocessor")]
         assert_eq!(shapes.len(), 12);
+    }
+
+    #[test]
+    #[cfg(feature = "ec-coprocessor")]
+    fn mdoc_mac_shape_stays_under_q014_budget() {
+        let shapes = demo_mdoc_module_shapes().expect("mdoc shapes build");
+        let mdoc_mac = shapes
+            .iter()
+            .find(|shape| shape.name == "mdoc_mac")
+            .expect("mdoc_mac module shape");
+        let cells: u64 = mdoc_mac
+            .layout
+            .preprocessed
+            .iter()
+            .chain(&mdoc_mac.layout.trace)
+            .chain(&mdoc_mac.layout.interaction)
+            .map(|&log_size| 1u64 << log_size)
+            .sum();
+        assert_eq!(
+            cells, 278_224,
+            "mdoc_mac should stay in the log-10 bit-serial layout"
+        );
+        assert!(
+            cells <= 1_200_000,
+            "Q014 mdoc_mac cell budget exceeded: {cells}"
+        );
     }
 
     #[test]
@@ -3836,10 +4131,14 @@ mod coprocessor_tests {
         (proof, fixture.statement)
     }
 
-    fn assert_verify_rejects(proof: &MdocCircuitProof, statement: &MdocCircuitStatement) {
+    fn assert_verify_rejects(
+        label: &str,
+        proof: &MdocCircuitProof,
+        statement: &MdocCircuitStatement,
+    ) {
         assert!(
             verify_mdoc_circuit(proof, statement).is_err(),
-            "tampered mdoc proof unexpectedly verified"
+            "{label} unexpectedly verified"
         );
     }
 
@@ -3891,6 +4190,22 @@ mod coprocessor_tests {
     fn mdoc_coprocessor_rejects_required_negative_mutations() {
         let (proof, statement) = verified_mdoc_proof();
 
+        let public_statement = MdocPublicStatement::from_circuit(&statement);
+        verify_mdoc_public_statement(&proof, &public_statement)
+            .expect("reduced public statement verifies");
+        let mut wrong_issuer_key = public_statement.clone();
+        wrong_issuer_key.issuer_public_key.x.0[0] ^= 1;
+        assert!(
+            verify_mdoc_public_statement(&proof, &wrong_issuer_key).is_err(),
+            "issuer public key mutation unexpectedly verified"
+        );
+        let mut wrong_device_z = public_statement.clone();
+        wrong_device_z.device_message_hash.0[0] ^= 1;
+        assert!(
+            verify_mdoc_public_statement(&proof, &wrong_device_z).is_err(),
+            "device z mutation unexpectedly verified"
+        );
+
         let mut missing_bundle = proof.clone();
         missing_bundle.coprocessor_bundle = None;
         assert!(matches!(
@@ -3901,29 +4216,51 @@ mod coprocessor_tests {
         let mut tampered = proof.clone();
         tampered.coprocessor_bundle =
             Some(tampered_bundle(proof.coprocessor_bundle.as_ref().unwrap()));
-        assert_verify_rejects(&tampered, &statement);
+        assert_verify_rejects(
+            "serialized coprocessor bundle tamper",
+            &tampered,
+            &statement,
+        );
 
-        let mut issuer_z_mismatch = statement.clone();
-        issuer_z_mismatch.issuer_input.message_hash.0[0] ^= 1;
-        assert_verify_rejects(&proof, &issuer_z_mismatch);
+        let mut mac_tag_tamper = proof.clone();
+        let bundle = mac_tag_tamper
+            .coprocessor_bundle
+            .as_mut()
+            .expect("mdoc proof has a coprocessor bundle");
+        bundle.mac_tags[0][0] ^= 1;
+        assert_verify_rejects("MAC tag tamper", &mac_tag_tamper, &statement);
+
+        let mut mac_claim_tamper = proof.clone();
+        mac_claim_tamper.mdoc_mac_interaction_claim.binding += QM31::from_u32_unchecked(1, 0, 0, 0);
+        assert_verify_rejects("MAC binding claim tamper", &mac_claim_tamper, &statement);
+
+        let mut mac_consumer_claim_tamper = proof.clone();
+        mac_consumer_claim_tamper
+            .mdoc_mac_interaction_claim
+            .consumer += QM31::from_u32_unchecked(1, 0, 0, 0);
+        assert_verify_rejects(
+            "MAC consumer claim tamper",
+            &mac_consumer_claim_tamper,
+            &statement,
+        );
 
         let mut device_z_mismatch = statement.clone();
         device_z_mismatch.device_input.message_hash.0[0] ^= 1;
-        assert_verify_rejects(&proof, &device_z_mismatch);
+        assert_verify_rejects("device z mismatch", &proof, &device_z_mismatch);
 
         let mut cross_slot_z = statement.clone();
         std::mem::swap(
             &mut cross_slot_z.issuer_input.message_hash,
             &mut cross_slot_z.device_input.message_hash,
         );
-        assert_verify_rejects(&proof, &cross_slot_z);
+        assert_verify_rejects("cross-slot z swap", &proof, &cross_slot_z);
 
         let mut cross_signature = statement.clone();
         std::mem::swap(
             &mut cross_signature.issuer_input,
             &mut cross_signature.device_input,
         );
-        assert_verify_rejects(&proof, &cross_signature);
+        assert_verify_rejects("cross-signature swap", &proof, &cross_signature);
 
         let identity_fixture = fixtures::valid_over_18();
         let issuer = IssuerKey::demo();
@@ -3938,7 +4275,11 @@ mod coprocessor_tests {
         let mut replayed_identity_bundle = proof.clone();
         replayed_identity_bundle.coprocessor_bundle =
             Some(identity_proof.coprocessor_bundle().unwrap().clone());
-        assert_verify_rejects(&replayed_identity_bundle, &statement);
+        assert_verify_rejects(
+            "identity coprocessor bundle replay",
+            &replayed_identity_bundle,
+            &statement,
+        );
     }
 
     #[test]

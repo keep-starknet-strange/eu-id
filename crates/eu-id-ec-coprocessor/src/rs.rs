@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
 use crate::Fp;
@@ -20,6 +22,14 @@ static V2A_WEIGHT_ENCODER: OnceLock<RsEncoder> = OnceLock::new();
 static V2B_ROW_ENCODER: OnceLock<RsEncoder> = OnceLock::new();
 static V2B_CLAIM_ENCODER: OnceLock<RsEncoder> = OnceLock::new();
 static V2B_WEIGHT_ENCODER: OnceLock<RsEncoder> = OnceLock::new();
+#[cfg(test)]
+static RS_ENCODE_PADDED_CALLS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static RS_ENCODE_PADDED_CACHED_CALLS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static RS_ENCODE_PADDED_V2A_ROW_CACHED_CALLS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static RS_ENCODE_PADDED_V2A_CLAIM_CACHED_CALLS: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RsError {
@@ -41,10 +51,49 @@ pub fn rs_encode_padded(
     message_len: usize,
     codeword_len: usize,
 ) -> Result<Vec<Fp>, RsError> {
+    #[cfg(test)]
+    RS_ENCODE_PADDED_CALLS.fetch_add(1, Ordering::Relaxed);
     if let Some(encoder) = cached_encoder(message_len, codeword_len) {
+        #[cfg(test)]
+        record_cached_encoder_hit(message_len, codeword_len);
         return encoder.encode_padded(message_prefix);
     }
     RsEncoder::new(message_len, codeword_len)?.encode_padded(message_prefix)
+}
+
+#[cfg(test)]
+fn record_cached_encoder_hit(message_len: usize, codeword_len: usize) {
+    RS_ENCODE_PADDED_CACHED_CALLS.fetch_add(1, Ordering::Relaxed);
+    match (message_len, codeword_len) {
+        (V2A_ROW_DEGREE_BOUND, V2A_CODEWORD_LEN) => {
+            RS_ENCODE_PADDED_V2A_ROW_CACHED_CALLS.fetch_add(1, Ordering::Relaxed);
+        }
+        (V2A_CLAIM_DEGREE_BOUND, V2A_CODEWORD_LEN) => {
+            RS_ENCODE_PADDED_V2A_CLAIM_CACHED_CALLS.fetch_add(1, Ordering::Relaxed);
+        }
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn reset_rs_encode_padded_call_count() {
+    RS_ENCODE_PADDED_CALLS.store(0, Ordering::Relaxed);
+    RS_ENCODE_PADDED_CACHED_CALLS.store(0, Ordering::Relaxed);
+    RS_ENCODE_PADDED_V2A_ROW_CACHED_CALLS.store(0, Ordering::Relaxed);
+    RS_ENCODE_PADDED_V2A_CLAIM_CACHED_CALLS.store(0, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(crate) fn rs_encode_padded_call_count() -> usize {
+    RS_ENCODE_PADDED_CALLS.load(Ordering::Relaxed)
+}
+
+#[cfg(test)]
+pub(crate) fn rs_encode_padded_v2a_cached_call_counts() -> (usize, usize) {
+    (
+        RS_ENCODE_PADDED_V2A_ROW_CACHED_CALLS.load(Ordering::Relaxed),
+        RS_ENCODE_PADDED_V2A_CLAIM_CACHED_CALLS.load(Ordering::Relaxed),
+    )
 }
 
 pub fn is_codeword(codeword: &[Fp], message_len: usize) -> Result<bool, RsError> {
