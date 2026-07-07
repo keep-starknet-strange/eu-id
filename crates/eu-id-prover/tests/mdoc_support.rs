@@ -7,8 +7,9 @@ use std::time::Instant;
 use ciborium::value::Value;
 use eu_id_prover::mdoc::{
     demo_mdoc_sizing_waste, device_authentication_bytes, device_authentication_sig_structure_hash,
-    extract_pid_mdoc, mdoc_proof_byte_breakdown, openid4vp_session_transcript, prove_mdoc_circuit,
-    verify_mdoc_circuit, MdocBirthDateBinding, MdocCircuitStatement,
+    extract_pid_mdoc, mdoc_production_pcs_config, mdoc_proof_byte_breakdown,
+    openid4vp_session_transcript, prove_mdoc_circuit, verify_mdoc_circuit,
+    verify_mdoc_circuit_with_pcs_config, MdocBirthDateBinding, MdocCircuitStatement,
     MdocDeviceAuthenticationProfile, MdocDisclosureMode, MdocError, MdocNationalityBinding,
     MdocPidRequest, MdocRequestedAttribute,
 };
@@ -2262,4 +2263,57 @@ fn validity_anchor_offset_rejects_in_proof() {
             );
         }
     }
+}
+
+/// WO-P3 pow/query rebalance negative: an honest proof produced at the pinned
+/// production config (pow_bits 20, n_queries 54) verifies, but the same proof
+/// re-labeled with the OLD config (pow_bits 10, n_queries 59) is rejected by the
+/// verifier's `expected_pcs_config` equality gate *before* any STARK check. This
+/// keeps a low-grinding old-config proof from being inherited after the
+/// rebalance.
+#[test]
+#[ignore = "slow: full mdoc STARK prove/verify; run with --release --ignored"]
+fn rejects_old_pcs_config_after_pow_query_rebalance() {
+    use stwo::core::fri::FriConfig;
+    use stwo::core::pcs::PcsConfig;
+
+    let session_transcript = test_session_transcript();
+    let fixture = valid_fixture(&session_transcript);
+    let extracted =
+        extract_pid_mdoc(&fixture.doc, &request(session_transcript)).expect("mdoc extracts");
+    let statement = MdocCircuitStatement::from_extracted(&extracted, policy_on(2026, 7, 3))
+        .expect("statement builds");
+
+    let mut proof = prove_mdoc_circuit(&extracted, &statement).expect("honest mdoc proves");
+
+    // Sanity: it verifies at the pinned (rebalanced) config.
+    verify_mdoc_circuit(&proof, &statement).expect("proof verifies at the pinned config");
+    assert_eq!(
+        proof.stark_proof.config,
+        mdoc_production_pcs_config(),
+        "prover must emit the rebalanced production config",
+    );
+
+    // The pre-rebalance config that a stale prover would have emitted.
+    let old_config = PcsConfig {
+        pow_bits: 10,
+        fri_config: FriConfig::new(1, 2, 59, 2),
+        lifting_log_size: None,
+    };
+    assert_ne!(
+        old_config,
+        mdoc_production_pcs_config(),
+        "old config must differ from the rebalanced pin",
+    );
+
+    // Re-label the honest proof with the old (pre-rebalance) config and verify
+    // against the current production pin: the config equality gate must reject it
+    // before any STARK check.
+    proof.stark_proof.0.config = old_config;
+    let rejected =
+        verify_mdoc_circuit_with_pcs_config(&proof, &statement, mdoc_production_pcs_config());
+    assert!(
+        matches!(rejected, Err(eu_id_prover::Error::WeakConfig { .. })),
+        "an old-config proof must be rejected by the config pin, got {rejected:?}",
+    );
 }

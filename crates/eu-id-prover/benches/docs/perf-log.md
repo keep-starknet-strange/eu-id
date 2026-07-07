@@ -358,6 +358,9 @@ M4 A3-on-coprocessor note (2026-07-04): Q-M1-005 directed a merge of `feat/a3-hy
 | 2026-07-06 | worktree | P4b Q-012 split M31 GF(2^128) MAC spike (RAYON_NUM_THREADS=1, production PCS) | split MAC trace+interaction / post-interaction / preprocessed cells | — | 6,399,232 / 2,097,152 / 2,474,752 |
 | 2026-07-06 | worktree | P4b Q-012 split M31 GF(2^128) MAC spike (`/usr/bin/time -l`) | max RSS / peak memory footprint | — | 262,930,432 / 261,243,408 bytes |
 | 2026-07-06 | worktree | P4b Q-012 split M31 GF(2^128) MAC spike projection | composed proof bytes vs 3,591,076-byte baseline | — | 4,077,301 (1.14x; below 5.4M target and 8,968,570 hard ceiling) |
+| 2026-07-06 | working tree @ 9e1ac686 | P4b Q-025 circle-FFT Ligero (BENCH_ITERS=1, RAYON_NUM_THREADS=1, release) | `mdoc_perf_probe` prove / verify | 4,450 ms / 264 ms | 1,986 ms / 720 ms |
+| 2026-07-06 | working tree @ 9e1ac686 | P4b Q-025 circle-FFT Ligero | rs_encode / merkle / sumcheck / claim_batch prove ms | 2,810 / — / — / — | 202 / 89 / 156 / 313 |
+| 2026-07-06 | working tree @ 9e1ac686 | P4b Q-025 circle-FFT Ligero | proof bytes / max RSS / peak footprint | 5.26 MB / 472.8 MB / 441.1 MB | 5,269,517 / 434,241,536 / 401,474,208 |
 
 P3 Longfellow note (2026-07-06): vectors are byte extracts from Google
 Longfellow `mdoc_examples.h` at `d8ad8f65187c7c364a3c2181ad484bcab03f0ec2`
@@ -408,4 +411,146 @@ mdoc_mac_spike`; peak RSS command:
 target and the 8,968,570 hard ceiling, so the split gate is accepted for product
 wiring.
 
+Q-025 note (2026-07-06): circle-FFT Ligero integration (systematic-by-
+interpolation, k=256/claim-322/e=862, ≈2^-134) plus the C-p4b-blind-claim
+soundness fix (sum-zero blind row, verifier requires blind_claim == 0,
+compensating-forgery negatives on both code paths). Prove gate GREEN:
+1,986 ms ≤ ~2.0-2.1 s target; RS encode 2,810 → 202 ms. Verify (informational
+per Q-024 gate re-weight) rose 264 → 720 ms, dominated by claim-batch
+`circle_evaluate` basis products (562 touched rows × 170 columns × ~384 muls);
+known headroom: precompute the 322-entry basis vector once per opened column
+(~5× on that term) — do not spend on it without a gate change.
+
 WO-M5 note (2026-07-04): baseline is `801ea3a5`; candidate is the review-follow-up worktree after baseline commit `34512349`. `mdoc_perf_probe` now emits proof-byte decomposition: total `1,759,326`, STARK `971,649`, coprocessor bundle `787,032`, metadata `645`; inner STARK fields are config `25`, commitments `136`, sampled values `98,400`, decommitments `85,672`, queried values `719,596`, proof-of-work `8`, and FRI proof `67,812`. The review follow-up adds explicit shared-provider claimed-sum tamper, digest/field-exposure tamper, malformed-provider no-panic rejection, and standalone SHA proof-byte pin gates.
+
+WO-P6 note (2026-07-07): Ligero aspect-ratio re-sweep to ℓ=128 (`v3_circle_params`:
+row_len 128, degree_bound 512, codeword_len 4096, claim bound 642, e=1726,
+openings t=168). Production path (`implemented_circuit_ligero_params`) switched
+v2→v3; verifier config-pin (`bundle.params != implemented_circuit_ligero_params`)
+rejects v2-params proofs automatically. Soundness 2^-132.61 (t=168 exact
+minimum), dominated by proximity `(1-1726/4096)^168`; pins:
+`v3_soundness_error_meets_target`, `v3_verifier_rejects_v2_params_batch`.
+`circle_fft.rs` parametrized by `CircleGeom` (L64/L128 coexist; Tables cached
+per log_n, DataWindow per geom). Probe (RAYON_NUM_THREADS=1, BENCH_ITERS=3,
+median of 3 runs): proof_bytes 5,118,117 → **3,604,953 (3.60 MB ≤ 3.7 MB)**;
+openings A+B 3.21 → **1.67 MB**; prove_ms_median 1,788 → **1,872 (+84 ms,
+≤ +120 gate)**; claim_batch 114 → 164 ms (ℓ² weight interpolation growth);
+rs_encode 166 → 204 ms warm (368 cold: two new FFT tables at 4096/1024).
+Command: `RAYON_NUM_THREADS=1 BENCH_ITERS=3 cargo run --release -p eu-id-prover
+--example mdoc_perf_probe`. ℓ=256 assessment (paper): t=168 (same e/n=0.4214),
+projected proof ~2.77 MB (openings ~0.84 MB), prove +~50-100 ms over ℓ=128
+from the further-grown ℓ² interpolation — deferred, not built.
+
+WO-P5 phase 2 note (2026-07-07): shared-SHA producer-table fraction batching.
+R0 (byte-identical): added `ShaTablesProver::component_shapes()` + additive probe
+`component_shapes` JSON so the phase-0 dump emits TRUE per-component rows (named
+`sp_sigma0_lo`, `range_16`, …) reconciling exactly to the module totals; zero
+proving-code change. R2 (the −1M lever): the 12 producer tables were UNBATCHED —
+each called `build_interaction_columns(log_size, vec![frac])` with ONE fraction
+(shared_tables.rs:436/470/502 pre-change), i.e. one `SecureField` column per
+producer (dump: 36 base interaction cols/log16 = 9 producers × 4, + 12/log4 =
+3 × 4). Fix: `PRODUCER_PAIRS` co-locates same-log₂ producers into one
+`SharedProducerPairEval` component each (MajChEval pattern: 2× `add_to_relation`
++ `finalize_logup_in_pairs`), pairing 9 log₂16 → 4 pairs + range₁₆ single and
+3 log₂4 → range₂+range₄ pair + range₅ single. Relations/fractions/multiplicities
+byte-identical; only column packaging changes; D≤3 preserved (log_size+1).
+Interaction base cols log16 36→20, log4 12→8. Probe (RAYON_NUM_THREADS=1,
+BENCH_ITERS=3): shape_cells 8,161,328 → **7,112,688 (−1,048,640, exactly the
+−1.0…−1.05 M prediction)**; mdoc_sha_tables interaction 2,359,488 → 1,310,848;
+prove_ms_median 1,969 → **1,742 (−227 ms, ≤ baseline−150 gate ✓; predicted
+−90…−150)**; queried_values 1,487,856 → 1,483,376; proof_bytes 3,593,065 →
+3,601,593 (+8.5 KB claim reshaping, ≤ 3.7 MB). Suites: stwo-sha256 125+15+3
+green (incl. `shared_tables_composition` claim-tamper on the paired claim),
+eu-id-prover --lib 21 + mdoc_support 36 green, shared-SHA claim-tamper /
+malformed-claim negatives green. R3 (multiplicity packing) SKIPPED: sibling
+producers carry DISTINCT dense length-2^16 multiplicity vectors (round₀ ≠ round₁
+usage counts), unshareable without new demux constraint machinery — net-negative
+for ≤0.3 M. **shape_cells 7.11 M lands 0.11 M above the ≤7.0 M gate: honest
+outcome — with R1 struck (already batched) the last 0.11 M rides the
+preprocessed side (2,162,688 cells/log16), which is decision D-2 (content-aware
+table redesign, architect/Lucas), out of phase-2 scope.** Pre-existing A-004
+window-bind offset negatives (`mdoc_window_bind_offset_tampers_reject`,
+`shared_sha_table_mdoc_digest_and_field_swaps_reject`) fail identically before
+and after — Phase-D offset-binding gap, orthogonal to interaction packaging.
+
+## WO-P4 hasher bake-off (measure-only) — 2026-07-07
+
+**No production change.** Decision data for parity-plan §3.4; input to Lucas +
+the recursion roadmap, NOT a decision. Bench: ignored test
+`crates/eu-id-ec-coprocessor/tests/hasher_bakeoff.rs`, run
+`RAYON_NUM_THREADS=1 cargo test -p eu-id-ec-coprocessor --release --test
+hasher_bakeoff -- --ignored --nocapture`. Best-of-3, single-thread, M-class.
+
+**Methodology (kernel-replay, 3 sentences).** We do NOT re-run stwo; we replay
+each tree's exact `hash_node` call pattern — for every hash invocation the real
+tree performs we hash a buffer of the exact byte length that node consumes
+(child digests + M31 column words for the stwo mixed tree; domain-sep +
+index/len + 32-byte field limbs for the coprocessor tree). Node counts and byte
+volumes come from a fresh single-thread probe (`prove_ms_median` 1,723;
+`merkle_commit_ms` 79; log_blowup 2; per-tree base cols preprocessed {16:33,4:3}
+/ trace {16:9,4:3} / interaction {16:20,4:8}; coprocessor v3 = 4096 codeword
+columns × 219 committed rows). This isolates the hash-kernel cost (what a swap
+changes) and deliberately excludes stwo's SIMD column-packing and channel
+absorbs (caveats below).
+
+**Real tree shapes measured:**
+- stwo STARK trees (×3, committed/blowup domain, height 18): **1,572,861 hash
+  invocations, 115.3 MB hashed input.**
+- coprocessor Ligero v3 (`merkle.rs`, `commit_columns`): 4096 leaves + 4095
+  internal = **8,191 invocations, 29.2 MB** (leaf-dominated: 4096 × ~7 KB).
+
+**SHA-256 hardware check:** 1.98–2.23 GB/s single-thread (asserted ≥ 1.5 GB/s)
+⇒ ARMv8 SHA crypto extension confirmed active (`sha2` + `asm` feature, dev-only).
+
+**ms/tree (best-of-3, two runs shown to bracket noise):**
+
+| hasher       | stark_trees ms | coproc ms |
+|--------------|---------------:|----------:|
+| Blake2s      |   234.5 / 244.7 |  44.0 / 47.5 |
+| Blake3       |   163.5 / 171.0 |  23.3 / 24.8 |
+| SHA-256 (hw) |    74.9 /  81.2 |  12.4 / 13.4 |
+
+**Projected probe Δ vs Blake2s** (scale the measured baselines — stark
+tree-commit ≈ 293 ms = 17% of 1,723 prove; coproc merkle = 79 ms measured — by
+each hasher's kernel ratio; negative = faster):
+
+| hasher       | stark Δms | coproc Δms | **total prove Δms** |
+|--------------|----------:|-----------:|--------------------:|
+| Blake2s      |       0.0 |        0.0 |                 0.0 |
+| Blake3       |     −88   |     −37    |            **≈ −126** |
+| SHA-256 (hw) |    −196   |     −57    |            **≈ −253** |
+
+**Caveats.** (1) Kernel-replay upper-bounds the achievable swing: stwo's real
+committer packs 16 M31 lanes/SIMD word and amortizes hasher setup, so the *in
+situ* stark share is smaller than the raw 235 ms kernel — the projection
+correctly anchors to the *measured* 293 ms commit share, but treat the −196 ms
+as a ceiling, not a promise. (2) Channel absorbs EXCLUDED — a few KB of
+transcript per commit, negligible vs the tree kernels and not cheaply isolated
+here; a hasher swap moves them the same direction (SHA-256/Blake3 faster), so
+excluding them is conservative for the win. (3) Digests kept at 32 B for all
+three; the coprocessor and stwo `Blake2sMerkleHasher` (vcs_lifted, non-M31) both
+emit 32-byte roots today, so no width change is modeled.
+
+**Recursion-friendliness (tiebreaker per WO-B0 cancellation note).**
+- **Blake2s:** recursion AIR exists in-repo TODAY (64,621 blocks); the recursion
+  roadmap assumes it. Zero raw-prove win but zero recursion risk.
+- **SHA-256:** hardware support (measured 2 GB/s) AND an in-repo SHA-256 AIR
+  family (`stwo-sha256`, the very tables this prove already builds). Both a
+  recursion path AND the biggest raw win.
+- **Blake3:** neither a hardware crypto-ext path here nor an in-repo AIR. Middle
+  raw win, but a recursion adoption would require a new AIR from scratch.
+
+**Recommendation (input to Lucas, not a decision).**
+- Ranked by **(a) raw prove win:** SHA-256 (≈ −253 ms) > Blake3 (≈ −126 ms) >
+  Blake2s (0).
+- Ranked by **(b) recursion-friendliness:** Blake2s (AIR ships today) ≈ SHA-256
+  (AIR + hardware both in-repo) > Blake3 (nothing in-repo).
+- **Combined:** SHA-256 is the standout — it is simultaneously the largest raw
+  win AND the only candidate that pairs hardware acceleration with an in-repo
+  AIR family, so it dominates Blake3 on both axes and beats Blake2s on raw win
+  while matching it on recursion-readiness. The single blocker is that the
+  current recursion AIR is Blake2s-specific; adopting SHA-256 means the
+  recursion layer retargets to the existing `stwo-sha256` family. **If recursion
+  stays Blake2s, keep Blake2s** (the ≈ −253 ms is unbankable without a channel/
+  merkle-hasher swap that the recursion AIR would then have to follow). Landing
+  is BLOCKED on Lucas + the recursion-roadmap decision either way.

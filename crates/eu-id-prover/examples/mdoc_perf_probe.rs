@@ -36,7 +36,75 @@ struct Report {
 #[derive(Serialize)]
 struct ModuleShape {
     name: &'static str,
+    /// Retained original field: total committed cells across all trees.
     cells: u64,
+    preprocessed_cells: u64,
+    trace_cells: u64,
+    interaction_cells: u64,
+    total_cells: u64,
+    /// Per-column detail, one entry per (tree, log_size) bucket, in commit
+    /// order. `n_columns` columns of `2^log_size` cells each in that tree.
+    /// Stable/greppable names: "<module>/<tree>/log<log_size>".
+    columns: Vec<ComponentColumns>,
+    /// TRUE per-component rows for modules that aggregate multiple producer
+    /// tables under one layout (today: only `mdoc_sha_tables`). Each row names
+    /// the actual table (`sp_sigma0_lo`, `range_16`, …) and reconciles exactly
+    /// to the module's `(tree, log_size)` buckets in `columns`. Empty for
+    /// single-component modules. Additive — does not replace `columns`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    component_shapes: Vec<ComponentShapeRow>,
+}
+
+/// One producer table's committed shape, named by the table it serves.
+#[derive(Serialize)]
+struct ComponentShapeRow {
+    name: String,
+    log_size: u32,
+    preprocessed_columns: usize,
+    trace_columns: usize,
+    interaction_columns: usize,
+    /// Total committed cells this component owns across all three trees.
+    cells: u64,
+}
+
+/// A group of same-shaped committed columns the architect ranks reductions from.
+/// `tree` is one of "preprocessed" | "trace" | "interaction".
+#[derive(Serialize)]
+struct ComponentColumns {
+    name: String,
+    tree: &'static str,
+    n_columns: usize,
+    log_size: u32,
+    cells: u64,
+}
+
+/// Bucket a single tree's column log-sizes into greppable (log_size -> count)
+/// groups, preserving ascending log_size order for stable diffs.
+fn tree_columns(
+    module: &str,
+    tree: &'static str,
+    log_sizes: &[u32],
+) -> (Vec<ComponentColumns>, u64) {
+    let mut counts: std::collections::BTreeMap<u32, usize> = std::collections::BTreeMap::new();
+    for &log_size in log_sizes {
+        *counts.entry(log_size).or_default() += 1;
+    }
+    let mut cells_total = 0u64;
+    let groups = counts
+        .into_iter()
+        .map(|(log_size, n_columns)| {
+            let cells = (n_columns as u64) * (1u64 << log_size);
+            cells_total += cells;
+            ComponentColumns {
+                name: format!("{module}/{tree}/log{log_size}"),
+                tree,
+                n_columns,
+                log_size,
+                cells,
+            }
+        })
+        .collect();
+    (groups, cells_total)
 }
 
 #[cfg(feature = "ec-coprocessor")]
@@ -145,12 +213,63 @@ fn main() {
     let modules = demo_mdoc_module_shapes()
         .expect("mdoc module shapes")
         .into_iter()
-        .map(|shape| ModuleShape {
-            name: shape.name,
-            cells: shape_cells(&shape.layout),
+        .map(|shape| {
+            let (pre, preprocessed_cells) =
+                tree_columns(shape.name, "preprocessed", &shape.layout.preprocessed);
+            let (trace, trace_cells) = tree_columns(shape.name, "trace", &shape.layout.trace);
+            let (inter, interaction_cells) =
+                tree_columns(shape.name, "interaction", &shape.layout.interaction);
+            let total_cells = preprocessed_cells + trace_cells + interaction_cells;
+            let columns = pre.into_iter().chain(trace).chain(inter).collect();
+            let component_shapes: Vec<ComponentShapeRow> = shape
+                .components
+                .iter()
+                .map(|c| {
+                    let rows = 1u64 << c.log_size;
+                    let cols =
+                        (c.preprocessed_columns + c.trace_columns + c.interaction_columns) as u64;
+                    ComponentShapeRow {
+                        name: c.name.to_string(),
+                        log_size: c.log_size,
+                        preprocessed_columns: c.preprocessed_columns,
+                        trace_columns: c.trace_columns,
+                        interaction_columns: c.interaction_columns,
+                        cells: cols * rows,
+                    }
+                })
+                .collect();
+            // Per-component rows must reconcile exactly to the module totals.
+            if !component_shapes.is_empty() {
+                let sum: u64 = component_shapes.iter().map(|c| c.cells).sum();
+                assert_eq!(
+                    sum, total_cells,
+                    "module {} per-component cells ({sum}) must equal module total ({total_cells})",
+                    shape.name,
+                );
+            }
+            ModuleShape {
+                name: shape.name,
+                cells: total_cells,
+                preprocessed_cells,
+                trace_cells,
+                interaction_cells,
+                total_cells,
+                columns,
+                component_shapes,
+            }
         })
         .collect::<Vec<_>>();
-    let shape_cells = modules.iter().map(|module| module.cells).sum();
+    let shape_cells: u64 = modules.iter().map(|module| module.total_cells).sum();
+    // Reconcile the module-total sum against the top-level total. These are the
+    // same arithmetic; a mismatch means the per-tree partition dropped columns.
+    let module_total_sum: u64 = modules.iter().map(|module| module.total_cells).sum();
+    assert_eq!(
+        module_total_sum, shape_cells,
+        "sum of module total_cells ({module_total_sum}) must equal shape_cells ({shape_cells})",
+    );
+    eprintln!(
+        "shape_cells reconciliation: top_level={shape_cells} module_total_sum={module_total_sum}",
+    );
 
     let report = Report {
         feature_mode: if cfg!(feature = "ec-coprocessor") {
@@ -178,16 +297,6 @@ fn main() {
 fn median(values: &mut [Duration]) -> Duration {
     values.sort_unstable();
     values[values.len() / 2]
-}
-
-fn shape_cells(layout: &air_core::TreeLayout) -> u64 {
-    layout
-        .preprocessed
-        .iter()
-        .chain(&layout.trace)
-        .chain(&layout.interaction)
-        .map(|&log_size| 1u64 << log_size)
-        .sum()
 }
 
 #[cfg(feature = "ec-coprocessor")]
