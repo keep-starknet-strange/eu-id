@@ -351,6 +351,35 @@ pub struct DemoMdocCircuitFixture {
 pub struct MdocModuleShape {
     pub name: &'static str,
     pub layout: TreeLayout,
+    /// TRUE per-component committed shape, when the module aggregates multiple
+    /// distinct producer tables under one [`TreeLayout`] (today: only the
+    /// shared-SHA table module). Empty for single-component modules, whose
+    /// `layout` buckets already identify the component 1:1.
+    pub components: Vec<stwo_sha256::shared_tables::ShaTableComponentShape>,
+}
+
+impl MdocModuleShape {
+    /// Single-component module: its `layout` buckets identify the component 1:1.
+    fn single(name: &'static str, layout: TreeLayout) -> Self {
+        Self {
+            name,
+            layout,
+            components: Vec::new(),
+        }
+    }
+
+    /// Multi-component module carrying TRUE per-producer shapes.
+    fn with_components(
+        name: &'static str,
+        layout: TreeLayout,
+        components: Vec<stwo_sha256::shared_tables::ShaTableComponentShape>,
+    ) -> Self {
+        Self {
+            name,
+            layout,
+            components,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -598,109 +627,45 @@ pub fn demo_mdoc_module_shapes() -> Result<Vec<MdocModuleShape>, Error> {
 
     #[cfg(not(feature = "ec-coprocessor"))]
     let shapes = vec![
-        MdocModuleShape {
-            name: "mdoc_sha_tables",
-            layout: sha_tables.layout(),
-        },
-        MdocModuleShape {
-            name: "mdoc_issuer_p256",
-            layout: issuer_p256.layout(),
-        },
-        MdocModuleShape {
-            name: "mdoc_issuer_sha",
-            layout: issuer_sha.layout(),
-        },
-        MdocModuleShape {
-            name: "mdoc_issuer_bridge",
-            layout: issuer_bridge.layout(),
-        },
-        MdocModuleShape {
-            name: "mdoc_device_p256",
-            layout: device_p256.layout(),
-        },
-        MdocModuleShape {
-            name: "mdoc_device_sha",
-            layout: device_sha.layout(),
-        },
-        MdocModuleShape {
-            name: "mdoc_device_bridge",
-            layout: device_bridge.layout(),
-        },
-        MdocModuleShape {
-            name: "mdoc_birth_sha",
-            layout: attribute_sha[0].layout(),
-        },
-        MdocModuleShape {
-            name: "mdoc_nat_sha",
-            layout: attribute_sha[1].layout(),
-        },
-        MdocModuleShape {
-            name: "mdoc_window_bind",
-            layout: mdoc_window_bind.layout(),
-        },
-        MdocModuleShape {
-            name: "mdoc_validity",
-            layout: mdoc_validity.layout(),
-        },
-        MdocModuleShape {
-            name: "mdoc_age",
-            layout: age.layout(),
-        },
-        MdocModuleShape {
-            name: "mdoc_nat",
-            layout: nat.layout(),
-        },
+        MdocModuleShape::with_components(
+            "mdoc_sha_tables",
+            sha_tables.layout(),
+            sha_tables.component_shapes(),
+        ),
+        MdocModuleShape::single("mdoc_issuer_p256", issuer_p256.layout()),
+        MdocModuleShape::single("mdoc_issuer_sha", issuer_sha.layout()),
+        MdocModuleShape::single("mdoc_issuer_bridge", issuer_bridge.layout()),
+        MdocModuleShape::single("mdoc_device_p256", device_p256.layout()),
+        MdocModuleShape::single("mdoc_device_sha", device_sha.layout()),
+        MdocModuleShape::single("mdoc_device_bridge", device_bridge.layout()),
+        MdocModuleShape::single("mdoc_birth_sha", attribute_sha[0].layout()),
+        MdocModuleShape::single("mdoc_nat_sha", attribute_sha[1].layout()),
+        MdocModuleShape::single("mdoc_window_bind", mdoc_window_bind.layout()),
+        MdocModuleShape::single("mdoc_validity", mdoc_validity.layout()),
+        MdocModuleShape::single("mdoc_age", age.layout()),
+        MdocModuleShape::single("mdoc_nat", nat.layout()),
     ];
     #[cfg(feature = "ec-coprocessor")]
     let shapes = vec![
-        MdocModuleShape {
-            name: "mdoc_sha_tables",
-            layout: sha_tables.layout(),
-        },
-        MdocModuleShape {
-            name: "mdoc_issuer_sha",
-            layout: issuer_sha.layout(),
-        },
-        MdocModuleShape {
-            name: "mdoc_device_sha",
-            layout: device_sha.layout(),
-        },
-        MdocModuleShape {
-            name: "mdoc_device_public_digest_bind",
-            layout: device_public_digest_bind.layout(),
-        },
-        MdocModuleShape {
-            name: "mdoc_birth_sha",
-            layout: attribute_sha[0].layout(),
-        },
-        MdocModuleShape {
-            name: "mdoc_nat_sha",
-            layout: attribute_sha[1].layout(),
-        },
-        MdocModuleShape {
-            name: "mdoc_window_bind",
-            layout: mdoc_window_bind.layout(),
-        },
-        MdocModuleShape {
-            name: "mdoc_validity",
-            layout: mdoc_validity.layout(),
-        },
-        MdocModuleShape {
-            name: "mdoc_age",
-            layout: age.layout(),
-        },
-        MdocModuleShape {
-            name: "mdoc_nat",
-            layout: nat.layout(),
-        },
-        MdocModuleShape {
-            name: "mdoc_coprocessor",
-            layout: coprocessor.layout(),
-        },
-        MdocModuleShape {
-            name: "mdoc_mac",
-            layout: mdoc_mac.layout(),
-        },
+        MdocModuleShape::with_components(
+            "mdoc_sha_tables",
+            sha_tables.layout(),
+            sha_tables.component_shapes(),
+        ),
+        MdocModuleShape::single("mdoc_issuer_sha", issuer_sha.layout()),
+        MdocModuleShape::single("mdoc_device_sha", device_sha.layout()),
+        MdocModuleShape::single(
+            "mdoc_device_public_digest_bind",
+            device_public_digest_bind.layout(),
+        ),
+        MdocModuleShape::single("mdoc_birth_sha", attribute_sha[0].layout()),
+        MdocModuleShape::single("mdoc_nat_sha", attribute_sha[1].layout()),
+        MdocModuleShape::single("mdoc_window_bind", mdoc_window_bind.layout()),
+        MdocModuleShape::single("mdoc_validity", mdoc_validity.layout()),
+        MdocModuleShape::single("mdoc_age", age.layout()),
+        MdocModuleShape::single("mdoc_nat", nat.layout()),
+        MdocModuleShape::single("mdoc_coprocessor", coprocessor.layout()),
+        MdocModuleShape::single("mdoc_mac", mdoc_mac.layout()),
     ];
     Ok(shapes)
 }
@@ -2928,6 +2893,22 @@ pub struct MdocProofByteBreakdown {
     pub coprocessor_bundle_bytes: Option<usize>,
     pub non_stark_metadata_bytes: usize,
     pub stark: MdocStarkProofByteBreakdown,
+    pub coprocessor_bundle: Option<MdocCoprocessorBundleByteBreakdown>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MdocCoprocessorBundleByteBreakdown {
+    pub params_and_roots: usize,
+    pub proximity_openings: usize,
+    pub proximity_openings_b: usize,
+    pub proximity_claim: usize,
+    pub claim_batch: usize,
+    pub consistency_claim_values: usize,
+    pub mac_tags: usize,
+    pub entries: usize,
+    pub entry_count: usize,
+    pub opening_count: usize,
+    pub opened_column_rows: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2952,6 +2933,32 @@ pub fn mdoc_proof_byte_breakdown(proof: &MdocCircuitProof) -> MdocProofByteBreak
     let non_stark_metadata_bytes = proof_bytes
         .saturating_sub(stark_proof_bytes)
         .saturating_sub(coprocessor_bundle_bytes.unwrap_or(0));
+    #[cfg(feature = "ec-coprocessor")]
+    let coprocessor_bundle =
+        proof
+            .coprocessor_bundle
+            .as_ref()
+            .map(|bundle| MdocCoprocessorBundleByteBreakdown {
+                params_and_roots: bincode_len(&bundle.params)
+                    + bincode_len(&bundle.root)
+                    + bincode_len(&bundle.root_b),
+                proximity_openings: bincode_len(&bundle.proximity_openings),
+                proximity_openings_b: bincode_len(&bundle.proximity_openings_b),
+                proximity_claim: bincode_len(&bundle.proximity_claim),
+                claim_batch: bincode_len(&bundle.claim_batch),
+                consistency_claim_values: bincode_len(&bundle.consistency_claim_values),
+                mac_tags: bincode_len(&bundle.mac_tags),
+                entries: bincode_len(&bundle.entries),
+                entry_count: bundle.entries.len(),
+                opening_count: bundle.proximity_openings.len(),
+                opened_column_rows: bundle
+                    .proximity_openings
+                    .first()
+                    .map(|opening| opening.column.len())
+                    .unwrap_or(0),
+            });
+    #[cfg(not(feature = "ec-coprocessor"))]
+    let coprocessor_bundle = None;
 
     MdocProofByteBreakdown {
         proof_bytes,
@@ -2967,6 +2974,7 @@ pub fn mdoc_proof_byte_breakdown(proof: &MdocCircuitProof) -> MdocProofByteBreak
             proof_of_work: bincode_len(&stark.proof_of_work),
             fri_proof: bincode_len(&stark.fri_proof),
         },
+        coprocessor_bundle,
     }
 }
 
@@ -3893,9 +3901,14 @@ pub fn verify_mdoc_circuit_with_pcs_config_profiled(
 }
 
 pub fn mdoc_production_pcs_config() -> PcsConfig {
+    // WO-P3 pow/query rebalance: pow_bits 20 + n_queries 54 keeps 54·2 + 20 =
+    // 128-bit security (log_blowup 2), trading ~5 FRI queries (≈135 KB of
+    // queried_values) for cheap grinding. The verifier pins this exact config
+    // (see verify_mdoc_circuit_with_pcs_config) so an old-config proof is
+    // rejected.
     PcsConfig {
-        pow_bits: 10,
-        fri_config: FriConfig::new(1, 2, 59, 2),
+        pow_bits: 20,
+        fri_config: FriConfig::new(1, 2, 54, 2),
         lifting_log_size: None,
     }
 }
@@ -3962,8 +3975,8 @@ mod mdoc_sha_table_tests {
             prove_mdoc_circuit(&fixture.extracted, &fixture.statement).expect("mdoc proves");
         verify_mdoc_circuit(&proof, &fixture.statement).expect("mdoc verifies before tamper");
 
-        proof.sha_tables_interaction_claim.round_split_pack[0].claimed_sum =
-            -proof.sha_tables_interaction_claim.round_split_pack[0].claimed_sum;
+        proof.sha_tables_interaction_claim.pairs[0].claimed_sum =
+            -proof.sha_tables_interaction_claim.pairs[0].claimed_sum;
 
         assert!(
             verify_mdoc_circuit(&proof, &fixture.statement).is_err(),
@@ -4077,7 +4090,7 @@ mod mdoc_sha_table_tests {
             prove_mdoc_circuit(&fixture.extracted, &fixture.statement).expect("mdoc proves");
         verify_mdoc_circuit(&proof, &fixture.statement).expect("mdoc verifies before tamper");
 
-        proof.sha_tables_interaction_claim.round_split_pack.clear();
+        proof.sha_tables_interaction_claim.pairs.clear();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             verify_mdoc_circuit(&proof, &fixture.statement)
         }));
