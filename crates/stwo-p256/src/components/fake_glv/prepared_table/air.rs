@@ -9,7 +9,7 @@ use stwo_constraint_framework::{EvalAtRow, FrameworkEval, RelationEntry};
 use stwo_p256_utils::constants::{LIMB_BITS, N_LIMBS};
 
 use crate::constants::{P256_3GX, P256_3GY, P256_MODULUS};
-use crate::limbs::{P256EvalBigInt, P256M31BigInt};
+use crate::limbs::P256M31BigInt;
 use crate::prepared_point::{PREPARED_BASE_COUNT, TABLE16_INDEX};
 use crate::projective_air::{PROJECTIVE_RCB_MUL_ROLE_LHS, PROJECTIVE_RCB_MUL_ROLE_RHS};
 use crate::types::U256;

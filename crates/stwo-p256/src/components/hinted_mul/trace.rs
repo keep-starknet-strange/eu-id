@@ -14,10 +14,6 @@ use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{LogupTraceGenerator, Relation};
 use stwo_p256_utils::constants::N_LIMBS;
 
-use crate::components::gamma_digest::{
-    gamma_padded_values, GammaChallenge, GammaDigestRelation, GammaTallInstance, GammaTallLayout,
-    GAMMA_TAG_HINTED_MUL_RANGE13, GAMMA_TAG_HINTED_MUL_SIGNED,
-};
 use crate::components::projective_rcb_mul::relation::ProjectiveRcbMulResultRelation;
 use crate::range_checks::{encode_signed_carry, RangeCheckRelation};
 use crate::scalar::scalar_mod_mul::columns::{m31_column_eval, padded_log_size, M31ColumnEval};
@@ -856,9 +852,6 @@ pub fn hinted_mul_signed_uses(claim: &HintedMulTraceClaim) -> Vec<i64> {
                 uses.push(split_carry(coeff).1);
             }
         }
-        let pad_count = gamma_padded_values(HINTED_MUL_SIGNED_VALUES_PER_ROW)
-            - HINTED_MUL_SIGNED_VALUES_PER_ROW;
-        uses.extend(std::iter::repeat_n(0, pad_count));
     }
     uses
 }
