@@ -182,7 +182,6 @@ use stwo::core::fields::qm31::QM31;
 #[cfg(feature = "ec-coprocessor")]
 use stwo::core::fri::FriConfig;
 use stwo::core::pcs::PcsConfig;
-use stwo::core::poly::circle::CanonicCoset;
 use stwo::core::proof::StarkProof;
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleHasher;
 #[cfg(feature = "ec-coprocessor")]

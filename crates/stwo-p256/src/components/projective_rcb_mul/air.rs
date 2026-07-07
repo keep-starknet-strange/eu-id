@@ -27,30 +27,3 @@ pub const fn projective_rcb_signed_carry_log_size() -> u32 {
         .next_power_of_two()
         .ilog2()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn consumed_mul_layout_drops_affine_normalization_results() {
-        assert!(!consumed_mul_slot_kept(
-            13,
-            PROJECTIVE_RCB_MUL_ROLE_RESULT as usize
-        ));
-        assert!(!consumed_mul_slot_kept(
-            14,
-            PROJECTIVE_RCB_MUL_ROLE_RESULT as usize
-        ));
-        assert!(consumed_mul_slot_degree2(
-            13,
-            PROJECTIVE_RCB_MUL_ROLE_RESULT as usize
-        ));
-        assert!(consumed_mul_slot_degree2(
-            14,
-            PROJECTIVE_RCB_MUL_ROLE_RESULT as usize
-        ));
-        assert_eq!(CONSUMED_MUL_KEPT_SLOTS, 29);
-        assert_eq!(CONSUMED_MUL_LIMBS_COLUMNS, 1 + 29 * N_LIMBS);
-    }
-}

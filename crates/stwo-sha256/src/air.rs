@@ -74,43 +74,6 @@ use crate::relations::SharedShaTableRelations;
 use crate::trace::Layout;
 use crate::types::Sha256Witness;
 
-type Sha256ColumnEval = CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>;
-
-/// SHA trace columns materialized before the module is wired to shared relation
-/// handles.
-pub struct PreparedSha256Traces {
-    preprocessed: Vec<Sha256ColumnEval>,
-    base: Vec<Sha256ColumnEval>,
-}
-
-pub struct Sha256InteractionJob<'a> {
-    relations: &'a Sha256Relations,
-    witness: &'a Sha256Witness,
-    log_n_rows: u32,
-    group_width: u32,
-    expose_digest: bool,
-    field_exposure: &'a FieldExposure,
-}
-
-pub struct PreparedSha256Interaction {
-    columns: Vec<Sha256ColumnEval>,
-    claim: InteractionClaim,
-}
-
-impl Sha256InteractionJob<'_> {
-    pub fn materialize(self) -> PreparedSha256Interaction {
-        let (columns, claim) = generate_interaction_trace(
-            self.relations,
-            self.witness,
-            self.log_n_rows,
-            self.group_width,
-            self.expose_digest,
-            self.field_exposure,
-        );
-        PreparedSha256Interaction { columns, claim }
-    }
-}
-
 /// Column log-sizes per tree, shared by prover and verifier — they depend
 /// only on the public size surface (`log_n_rows`, `group_width`), never on the
 /// witness.
@@ -390,26 +353,6 @@ impl<'a> Sha256Prover<'a> {
         self.relations
             .as_ref()
             .expect("relations are drawn before they are used")
-    }
-
-    pub fn interaction_job(&self) -> Sha256InteractionJob<'_> {
-        Sha256InteractionJob {
-            relations: self.relations(),
-            witness: self.witness,
-            log_n_rows: self.log_n_rows,
-            group_width: self.group_width,
-            expose_digest: self.expose_digest,
-            field_exposure: &self.field_exposure,
-        }
-    }
-
-    pub fn write_prepared_interaction(
-        &mut self,
-        tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>,
-        prepared: PreparedSha256Interaction,
-    ) {
-        tb.extend_evals(prepared.columns);
-        self.interaction_claim = Some(prepared.claim);
     }
 }
 

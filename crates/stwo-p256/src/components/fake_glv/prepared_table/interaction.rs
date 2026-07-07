@@ -151,67 +151,65 @@ pub(crate) fn gen_prepared_table_ec_row_pinned_interaction_trace(
     assert_eq!(base.len(), PREPARED_TABLE_EC_ROW_TRACE_COLUMNS);
     let log_size = base[0].domain.log_size();
     let n_vec_rows = 1 << (log_size - LOG_N_LANES);
+    let mut entries = Vec::new();
+
+    // Entry 0: the existing PreparedTableEcRowRelation yield (-active).
+    append_packed_entry(&mut entries, n_vec_rows, |vec_row| {
+        let values = prepared_table_ec_row_packed_relation_values(base, vec_row);
+        (
+            -PackedQM31::from(base[0].data[vec_row]),
+            relation.combine(&values),
+        )
+    });
 
     let three_g_x = P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_3GX));
     let three_g_y = P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_3GY));
 
-    let entry_count = 1 + PIN_SCHEDULE.len() + usize::from(final_check_hint.is_some());
-    let final_check_entry = 1 + PIN_SCHEDULE.len();
-    let mut logup = LogupTraceGenerator::new(log_size);
-    write_generated_batched_logup_columns(
-        &mut logup,
-        entry_count,
-        n_vec_rows,
-        2,
-        |entry_index, vec_row| {
-            if entry_index == 0 {
-                let values = prepared_table_ec_row_packed_relation_values(base, vec_row);
-                return (
-                    -PackedQM31::from(base[0].data[vec_row]),
-                    relation.combine(&values),
-                );
+    // Entries 1..=30: the pinning schedule, one fraction per entry.
+    for entry in PIN_SCHEDULE {
+        append_packed_entry(&mut entries, n_vec_rows, |vec_row| {
+            let sig = base[PREPARED_TABLE_EC_COL_SIG_ID].data[vec_row];
+            let cert = base[PREPARED_TABLE_EC_COL_CERT_ID].data[vec_row];
+            let active = base[0].data[vec_row];
+            // Gate = product of kind flags (× is_cert0 = active - cert_id).
+            let mut gate = PackedM31::broadcast(M31::from_u32_unchecked(1));
+            for &k in entry.kinds {
+                gate *= base[PREPARED_TABLE_EC_COL_KIND_FLAGS + k].data[vec_row];
             }
-
-            if entry_index < final_check_entry {
-                let entry = &PIN_SCHEDULE[entry_index - 1];
-                let sig = base[PREPARED_TABLE_EC_COL_SIG_ID].data[vec_row];
-                let cert = base[PREPARED_TABLE_EC_COL_CERT_ID].data[vec_row];
-                let active = base[0].data[vec_row];
-                // Gate = product of kind flags (× is_cert0 = active - cert_id).
-                let mut gate = PackedM31::broadcast(M31::from_u32_unchecked(1));
-                for &k in entry.kinds {
-                    gate *= base[PREPARED_TABLE_EC_COL_KIND_FLAGS + k].data[vec_row];
-                }
-                if entry.cert0_only {
-                    gate *= active - cert;
-                }
-                let magnitude =
-                    PackedM31::broadcast(M31::from_u32_unchecked(entry.mult.unsigned_abs()));
-                let scaled = PackedQM31::from(gate * magnitude);
-                let numerator = if entry.mult < 0 { -scaled } else { scaled };
-                let denominator: PackedQM31 = match entry.relation {
-                    PinRelation::CertBase => {
-                        let offset = pin_point_column_offset(entry.point)
-                            .expect("CertBase entries use a trace point");
-                        cert_base.combine(&cert_base_packed_tuple(base, vec_row, sig, cert, offset))
-                    }
-                    PinRelation::Canonical(role) => {
-                        let tuple = match pin_point_column_offset(entry.point) {
-                            Some(offset) => canonical_packed_tuple_from_columns(
-                                base, vec_row, sig, cert, role, offset,
-                            ),
-                            None => canonical_packed_tuple_const(
-                                sig, cert, role, &three_g_x, &three_g_y,
-                            ),
-                        };
-                        canonical.combine(&tuple)
-                    }
-                };
-                return (numerator, denominator);
+            if entry.cert0_only {
+                gate *= active - cert;
             }
+            let magnitude =
+                PackedM31::broadcast(M31::from_u32_unchecked(entry.mult.unsigned_abs()));
+            let scaled = PackedQM31::from(gate * magnitude);
+            let numerator = if entry.mult < 0 { -scaled } else { scaled };
+            let denominator: PackedQM31 = match entry.relation {
+                PinRelation::CertBase => {
+                    let offset = pin_point_column_offset(entry.point)
+                        .expect("CertBase entries use a trace point");
+                    cert_base.combine(&cert_base_packed_tuple(base, vec_row, sig, cert, offset))
+                }
+                PinRelation::Canonical(role) => {
+                    let tuple = match pin_point_column_offset(entry.point) {
+                        Some(offset) => canonical_packed_tuple_from_columns(
+                            base, vec_row, sig, cert, role, offset,
+                        ),
+                        None => {
+                            canonical_packed_tuple_const(sig, cert, role, &three_g_x, &three_g_y)
+                        }
+                    };
+                    canonical.combine(&tuple)
+                }
+            };
+            (numerator, denominator)
+        });
+    }
 
-            assert_eq!(entry_index, final_check_entry);
-            let final_check_hint = final_check_hint.expect("final-check hint entry has relation");
+    // Optional FinalCheckHint entry: yield `R_i` (= `lhs`) gated `active *
+    // DoubleR_flag`, multiplicity `-1`. Emitted iff a relation is supplied, in
+    // lockstep with the AIR's `if let Some(final_check_hint)` emission.
+    if let Some(final_check_hint) = final_check_hint {
+        append_packed_entry(&mut entries, n_vec_rows, |vec_row| {
             let sig = base[PREPARED_TABLE_EC_COL_SIG_ID].data[vec_row];
             let cert = base[PREPARED_TABLE_EC_COL_CERT_ID].data[vec_row];
             let active = base[0].data[vec_row];
@@ -227,8 +225,11 @@ pub(crate) fn gen_prepared_table_ec_row_pinned_interaction_trace(
                 PREPARED_TABLE_EC_COL_LHS,
             ));
             (numerator, denominator)
-        },
-    );
+        });
+    }
+
+    let mut logup = LogupTraceGenerator::new(log_size);
+    write_batched_logup_columns(&mut logup, &entries, 2);
     let (trace, claimed_sum) = logup.finalize_last();
 
     let mut final_check_hint_claimed_sum = secure_zero();
@@ -259,6 +260,23 @@ pub(crate) fn gen_prepared_table_ec_row_pinned_interaction_trace(
             },
         },
     )
+}
+
+type LogupEntry = (Vec<PackedQM31>, Vec<PackedQM31>);
+
+fn append_packed_entry(
+    entries: &mut Vec<LogupEntry>,
+    vec_rows: usize,
+    fraction: impl Fn(usize) -> (PackedQM31, PackedQM31),
+) {
+    let mut numerators = Vec::with_capacity(vec_rows);
+    let mut denominators = Vec::with_capacity(vec_rows);
+    for vec_row in 0..vec_rows {
+        let (numerator, denominator) = fraction(vec_row);
+        numerators.push(numerator);
+        denominators.push(denominator);
+    }
+    entries.push((numerators, denominators));
 }
 
 #[cfg(test)]

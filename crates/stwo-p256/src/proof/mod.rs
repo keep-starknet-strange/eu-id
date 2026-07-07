@@ -33,8 +33,7 @@ use crate::components::hinted_mul::air::{
 };
 use crate::components::hinted_mul::trace::{
     gen_hinted_mul_base_trace, gen_hinted_mul_interaction_trace, gen_hinted_mul_schedule_columns,
-    hinted_mul_gamma_instances, hinted_mul_gamma_max_padded_values, hinted_mul_range13_uses,
-    hinted_mul_signed_uses, HintedMulRelations, HintedMulTraceClaim,
+    hinted_mul_range13_uses, hinted_mul_signed_uses, HintedMulRelations, HintedMulTraceClaim,
 };
 use crate::components::hinted_mul::witness::HintedMulWitnessError;
 use crate::components::hinted_mul::EcOpHeaderRelation;
@@ -1099,10 +1098,6 @@ struct P256CurrentAirRelations {
     ec_op_header: EcOpHeaderRelation,
 }
 
-fn p256_gamma_max_padded_values() -> usize {
-    fake_glv_gamma_max_padded_values().max(hinted_mul_gamma_max_padded_values())
-}
-
 impl P256CurrentAirRelations {
     fn dummy() -> Self {
         let public_inputs = PublicEcdsaInstanceRelation::dummy();
@@ -1476,11 +1471,9 @@ impl P256CurrentAirComponents {
             ),
             hinted_mul: HintedMulSliceComponents::new_without_range13_and_signed_formula_provider_with_preprocessed_namespace(
                 allocator,
-                claim.hinted_mul,
+                claim.hinted_mul.log_size,
                 &HintedMulSliceClaimedSums {
                     check: interaction_claim.hinted_mul.claimed_sum,
-                    gamma_range13: interaction_claim.hinted_mul.gamma_range13,
-                    gamma_signed: interaction_claim.hinted_mul.gamma_signed,
                     range13: interaction_claim.hinted_mul.range13,
                     signed_h: interaction_claim.hinted_mul.signed_h,
                     signed_formula: interaction_claim.hinted_mul.signed_formula,
@@ -1707,6 +1700,7 @@ impl P256ProofDraft {
         let mut channel = MC::C::default();
         let mut commitment_scheme =
             CommitmentSchemeProver::<SimdBackend, MC>::new(config, &twiddles);
+        commitment_scheme.set_store_polynomials_coefficients();
 
         let preprocessed = self.gen_current_air_preprocessed_trace(&proof_claim, &ids)?;
         let mut tree_builder = commitment_scheme.tree_builder();

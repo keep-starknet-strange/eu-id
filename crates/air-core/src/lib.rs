@@ -293,9 +293,8 @@ pub trait AirProver: Air {
 
     /// Whether the commitment scheme must retain committed polynomials in
     /// coefficient form (`set_store_polynomials_coefficients`). Off by default;
-    /// diagnostic modules may turn it on when they need coefficient-level
-    /// inspection. If any module in a `prove` call needs it, the orchestrator
-    /// enables it for the whole proof.
+    /// the P256 module turns it on for its lifting path. If any module in a
+    /// `prove` call needs it, the orchestrator enables it for the whole proof.
     fn store_polynomial_coefficients(&self) -> bool {
         false
     }

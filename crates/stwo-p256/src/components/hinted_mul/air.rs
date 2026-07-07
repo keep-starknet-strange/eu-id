@@ -23,16 +23,11 @@ use stwo_constraint_framework::{
 use stwo_p256_utils::constants::{LIMB_BITS, N_LIMBS};
 use stwo_p256_utils::scalar_arithmetic::words_to_limbs;
 
-use crate::components::gamma_digest::{
-    gamma_tall_preprocessed_ids, gen_gamma_tall_preprocessed_trace, yield_gamma_digest,
-    GammaDigestRelation, GammaTallComponent, GammaTallEval, GammaTallInteractionClaim,
-    GAMMA_TAG_HINTED_MUL_RANGE13, GAMMA_TAG_HINTED_MUL_SIGNED,
-};
 use crate::components::projective_rcb_mul::relation::ProjectiveRcbMulResultRelation;
 use crate::constants::P256_MODULUS;
 use crate::range_checks::{
-    range_check_value_column_id, RangeCheckClaim, RangeCheckEval, RangeCheckRelation,
-    SignedCarryRangeClaim, SignedCarryRangeEval, RANGE13_BITS,
+    add_range_check, range_check_value_column_id, RangeCheckClaim, RangeCheckEval,
+    RangeCheckRelation, SignedCarryRangeClaim, SignedCarryRangeEval, RANGE13_BITS,
 };
 
 use super::trace::{
@@ -147,7 +142,7 @@ impl FrameworkEval for HintedMulEval {
             (0..count)
                 .map(|_| {
                     let mask = eval.next_trace_mask();
-                    range13_values.push(mask.clone());
+                    add_range_check(eval, &self.range13, active.clone(), mask.clone());
                     mask
                 })
                 .collect()
@@ -195,7 +190,7 @@ impl FrameworkEval for HintedMulEval {
             let h_hi: Vec<E::F> = (0..HINTED_MUL_H_COEFFS)
                 .map(|_| {
                     let mask = eval.next_trace_mask();
-                    signed_values.push(mask.clone());
+                    add_range_check(&mut eval, &self.signed_h, active.clone(), mask.clone());
                     mask
                 })
                 .collect();
@@ -574,7 +569,7 @@ pub struct HintedMulSliceComponents {
 impl HintedMulSliceComponents {
     pub fn new(
         allocator: &mut TraceLocationAllocator,
-        claim: HintedMulProofClaim,
+        log_size: u32,
         claimed_sums: &HintedMulSliceClaimedSums,
         challenge: &HintedMulChallenge,
         relations: &HintedMulRelations,
@@ -693,8 +688,6 @@ impl HintedMulSliceComponents {
 
 pub struct HintedMulSliceClaimedSums {
     pub check: SecureField,
-    pub gamma_range13: GammaTallInteractionClaim,
-    pub gamma_signed: GammaTallInteractionClaim,
     pub range13: SecureField,
     pub signed_h: SecureField,
     pub signed_formula: SecureField,
@@ -704,20 +697,17 @@ pub struct HintedMulSliceClaimedSums {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HintedMulProofClaim {
     pub log_size: u32,
-    pub rows: u32,
 }
 
 impl HintedMulProofClaim {
     pub fn from_trace(claim: &HintedMulTraceClaim) -> Self {
         Self {
             log_size: claim.log_size(),
-            rows: claim.rows.len() as u32,
         }
     }
 
     pub fn mix_into(&self, channel: &mut impl Channel) {
         channel.mix_u64(self.log_size as u64);
-        channel.mix_u64(self.rows as u64);
     }
 
     pub fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
@@ -730,8 +720,6 @@ impl HintedMulProofClaim {
 pub struct HintedMulProofInteractionClaim {
     /// Total logup sum of the check component (its own claimed_sum).
     pub claimed_sum: SecureField,
-    pub gamma_range13: GammaTallInteractionClaim,
-    pub gamma_signed: GammaTallInteractionClaim,
     pub range13: SecureField,
     pub signed_h: SecureField,
     /// Phase-2 formula signed-carry provider sum.
@@ -743,8 +731,6 @@ impl HintedMulProofInteractionClaim {
         let zero = SecureField::from(M31::from_u32_unchecked(0));
         Self {
             claimed_sum: zero,
-            gamma_range13: GammaTallInteractionClaim::zero(),
-            gamma_signed: GammaTallInteractionClaim::zero(),
             range13: zero,
             signed_h: zero,
             signed_formula: zero,
@@ -836,9 +822,6 @@ pub fn gen_hinted_mul_slice_preprocessed_trace(
     claim: &HintedMulTraceClaim,
 ) -> stwo::core::ColumnVec<crate::scalar::scalar_mod_mul::columns::M31ColumnEval> {
     let mut columns = gen_hinted_mul_schedule_columns(claim);
-    for layout in hinted_mul_gamma_layouts(claim.rows.len()) {
-        columns.extend(gen_gamma_tall_preprocessed_trace(&layout));
-    }
     columns.push(RangeCheckClaim::new(RANGE13_BITS).gen_preprocessed_column());
     let signed = hinted_mul_signed_table_claim();
     columns.push(signed.gen_value_column());
@@ -872,9 +855,6 @@ mod tests {
     };
     use super::super::witness::HintedMulWitness;
     use super::*;
-    use crate::components::gamma_digest::{
-        gen_gamma_tall_base_trace, gen_gamma_tall_interaction_trace,
-    };
     use crate::debug::MockCommitmentScheme;
     use crate::range_checks::RangeCheckInteractionClaim;
 
@@ -953,14 +933,9 @@ mod tests {
         );
         let components = HintedMulSliceComponents::new(
             &mut allocator,
-            HintedMulProofClaim {
-                log_size,
-                rows: claim.rows.len() as u32,
-            },
+            log_size,
             &HintedMulSliceClaimedSums {
                 check: interaction_claim.claimed_sum,
-                gamma_range13: GammaTallInteractionClaim::zero(),
-                gamma_signed: GammaTallInteractionClaim::zero(),
                 range13: SecureField::from(M31::from_u32_unchecked(0)),
                 signed_h: SecureField::from(M31::from_u32_unchecked(0)),
                 signed_formula: SecureField::from(M31::from_u32_unchecked(0)),
@@ -988,48 +963,6 @@ mod tests {
             },
             components.check.claimed_sum(),
         );
-    }
-
-    #[test]
-    fn hinted_mul_slice_uses_gamma_digest_for_range_lookups() {
-        let claim = test_claim(3030);
-        let log_size = claim.log_size();
-        let relations = dummy_relations();
-        let challenge = HintedMulChallenge::from_z(SecureField::from(M31::from_u32_unchecked(17)));
-        let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(
-            &hinted_mul_slice_preprocessed_ids(log_size),
-        );
-        let components = HintedMulSliceComponents::new(
-            &mut allocator,
-            HintedMulProofClaim {
-                log_size,
-                rows: claim.rows.len() as u32,
-            },
-            &HintedMulSliceClaimedSums {
-                check: SecureField::from(M31::from_u32_unchecked(0)),
-                gamma_range13: GammaTallInteractionClaim::zero(),
-                gamma_signed: GammaTallInteractionClaim::zero(),
-                range13: SecureField::from(M31::from_u32_unchecked(0)),
-                signed_h: SecureField::from(M31::from_u32_unchecked(0)),
-            },
-            &challenge,
-            &relations,
-        );
-
-        assert_eq!(
-            components.components().len(),
-            5,
-            "check + two gamma tall expanders + two range providers"
-        );
-
-        let check_bounds = stwo::core::air::Component::trace_log_degree_bounds(&components.check);
-        assert_eq!(check_bounds[2].len(), 12);
-
-        let gamma_logs: Vec<u32> = components.components()[1..3]
-            .iter()
-            .map(|component| component.trace_log_degree_bounds()[1][0])
-            .collect();
-        assert_eq!(gamma_logs, vec![17, 16]);
     }
 
     /// Full standalone PCS prove + verify. This is also the dedicated stwo
@@ -1182,9 +1115,6 @@ mod tests {
         // Base tree: check columns, then the (deterministic, pre-randomness)
         // provider multiplicities, in component-allocation order.
         let base = gen_hinted_mul_base_trace(&claim);
-        let [gamma_range13_instance, gamma_signed_instance] = hinted_mul_gamma_instances(&claim);
-        let gamma_range13_base = gen_gamma_tall_base_trace(&gamma_range13_instance);
-        let gamma_signed_base = gen_gamma_tall_base_trace(&gamma_signed_instance);
         let range13_claim = RangeCheckClaim::new(RANGE13_BITS);
         let range13_multiplicity =
             range13_claim.gen_multiplicity_trace(hinted_mul_range13_uses(&claim));
@@ -1195,8 +1125,6 @@ mod tests {
         let formula_signed_multiplicity =
             formula_signed_claim.gen_multiplicity_trace(hinted_mul_formula_signed_uses(&claim));
         let mut base_tree = base.clone();
-        base_tree.extend(gamma_range13_base);
-        base_tree.extend(gamma_signed_base);
         base_tree.push(range13_multiplicity.clone());
         base_tree.push(signed_multiplicity.clone());
         base_tree.push(formula_signed_multiplicity.clone());
@@ -1218,18 +1146,6 @@ mod tests {
         let schedule = gen_hinted_mul_schedule_columns(&claim);
         let (check_interaction, interaction_claim) =
             gen_hinted_mul_interaction_trace(&claim, &base, &schedule, &relations);
-        let (gamma_range13_interaction, gamma_range13_claim) = gen_gamma_tall_interaction_trace(
-            &gamma_range13_instance,
-            &relations.gamma_challenge,
-            &relations.gamma_digest,
-            &relations.range13,
-        );
-        let (gamma_signed_interaction, gamma_signed_claim) = gen_gamma_tall_interaction_trace(
-            &gamma_signed_instance,
-            &relations.gamma_challenge,
-            &relations.gamma_digest,
-            &relations.signed_h,
-        );
         let (range13_interaction, range13_provider) =
             RangeCheckInteractionClaim::gen_interaction_trace(
                 &range13_multiplicity,
@@ -1270,8 +1186,6 @@ mod tests {
         }
 
         let mut interaction_tree = check_interaction;
-        interaction_tree.extend(gamma_range13_interaction);
-        interaction_tree.extend(gamma_signed_interaction);
         interaction_tree.extend(range13_interaction);
         interaction_tree.extend(signed_interaction);
         interaction_tree.extend(formula_signed_interaction);
@@ -1285,8 +1199,6 @@ mod tests {
 
         let claimed_sums = HintedMulSliceClaimedSums {
             check: interaction_claim.claimed_sum,
-            gamma_range13: gamma_range13_claim,
-            gamma_signed: gamma_signed_claim,
             range13: range13_provider.claimed_sum,
             signed_h: signed_provider.claimed_sum,
             signed_formula: formula_signed_provider.claimed_sum,
@@ -1294,10 +1206,7 @@ mod tests {
         let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
         let components = HintedMulSliceComponents::new(
             &mut allocator,
-            HintedMulProofClaim {
-                log_size,
-                rows: claim.rows.len() as u32,
-            },
+            log_size,
             &claimed_sums,
             &challenge,
             &relations,
@@ -1331,10 +1240,7 @@ mod tests {
         let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
         let components = HintedMulSliceComponents::new(
             &mut allocator,
-            HintedMulProofClaim {
-                log_size,
-                rows: claim.rows.len() as u32,
-            },
+            log_size,
             &claimed_sums,
             &verifier_challenge,
             &verifier_relations,

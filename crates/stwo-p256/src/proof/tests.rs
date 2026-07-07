@@ -2739,35 +2739,6 @@ fn current_p256_proof_size_diagnostic() {
 }
 
 #[test]
-fn projective_source_consumers_commit_one_formula_block() {
-    use crate::components::fake_glv::ec_source::air::{
-        FAKE_GLV_PRIMITIVE_EC_SOURCE_TRACE_COLUMNS,
-        FAKE_GLV_PROJECTIVE_SOURCE_CONSUMER_TRACE_COLUMNS,
-    };
-    use crate::components::fake_glv::ec_source::mixed_add_formula::MIXED_ADD_FORMULA_COLUMNS;
-    use crate::components::fake_glv::prepared_table::{
-        PREPARED_TABLE_EC_POINT_COLUMNS, PREPARED_TABLE_PROJECTIVE_SOURCE_TRACE_COLUMNS,
-    };
-    use crate::projective_air::CONSUMED_MUL_LIMBS_COLUMNS;
-
-    assert_eq!(
-        FAKE_GLV_PROJECTIVE_SOURCE_CONSUMER_TRACE_COLUMNS,
-        FAKE_GLV_PRIMITIVE_EC_SOURCE_TRACE_COLUMNS
-            + CONSUMED_MUL_LIMBS_COLUMNS
-            + MIXED_ADD_FORMULA_COLUMNS,
-        "fake-GLV projective source should commit one shared formula block"
-    );
-    assert_eq!(
-        PREPARED_TABLE_PROJECTIVE_SOURCE_TRACE_COLUMNS,
-        1 + 5
-            + 3 * PREPARED_TABLE_EC_POINT_COLUMNS
-            + CONSUMED_MUL_LIMBS_COLUMNS
-            + MIXED_ADD_FORMULA_COLUMNS,
-        "prepared-table projective source should commit one shared formula block"
-    );
-}
-
-#[test]
 #[ignore = "prints current AIR row/column shape for performance diagnostics"]
 fn current_p256_air_shape_diagnostic() {
     let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
