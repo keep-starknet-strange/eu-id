@@ -129,7 +129,7 @@ fn corrupt_shared_sha_table_provider_claim_rejects() {
         .expect("honest shared SHA table composition proves");
 
     let mut corrupted_claim = sha_tables.interaction_claim().clone();
-    corrupted_claim.round_split_pack[0].claimed_sum += SecureField::from(BaseField::from(1));
+    corrupted_claim.pairs[0].claimed_sum += SecureField::from(BaseField::from(1));
 
     let shared = SharedShaTableRelations::new();
     let mut table_verifier = ShaTablesVerifier::new(corrupted_claim, shared.clone());
