@@ -16,7 +16,9 @@ use eu_id_ec_coprocessor::ecdsa::{
     EcdsaPublicProjection, ImplementedCircuitBundleEntry, LayoutSlot, MdocP4bMacKeyShares,
     WitnessError, MDOC_P4B_MAC_COMMITTED_PRIVATE_INPUTS,
 };
-use eu_id_ec_coprocessor::ligero::{commit_witness, v2_ligero_params, LigeroParams};
+use eu_id_ec_coprocessor::ligero::{
+    commit_witness, v2_ligero_params, v3_circle_params, LigeroCode, LigeroParams,
+};
 use eu_id_ec_coprocessor::sumcheck::{circuit_otp_pad_values, prove_circuit};
 use eu_id_ec_coprocessor::CoprocessorChannel;
 use eu_id_ec_coprocessor::Fp;
@@ -718,6 +720,7 @@ fn implemented_circuit_bundle_rejects_prover_selected_ligero_params() {
         codeword_len: 128,
         openings: 4,
         proximity_radius: 0,
+        code: LigeroCode::Rs,
     };
 
     assert!(verify_implemented_circuit_bundle(&input, &bundle, TEST_SEED).is_err());
@@ -840,7 +843,7 @@ fn implemented_circuit_bundle_accepts_honest_witness() {
         prove_implemented_circuit_bundle_profiled(&input, &witness, TEST_SEED).unwrap();
 
     assert_eq!(bundle.entries.len(), 9);
-    assert_eq!(bundle.params, v2_ligero_params());
+    assert_eq!(bundle.params, v3_circle_params());
     assert_eq!(bundle.proximity_openings.len(), bundle.params.openings);
     assert!(bundle
         .proximity_openings
@@ -854,7 +857,7 @@ fn implemented_circuit_bundle_accepts_honest_witness() {
     );
     assert_eq!(
         bundle.claim_batch.coefficients.len(),
-        bundle.params.degree_bound + bundle.params.row_len - 1
+        bundle.params.claim_degree_bound()
     );
     verify_implemented_circuit_bundle(&input, &bundle, TEST_SEED).unwrap();
 }

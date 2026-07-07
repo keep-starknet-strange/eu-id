@@ -10,13 +10,16 @@ count-ops = []
 [dependencies]
 blake2 = "0.10"
 p256 = { version = "0.13", features = ["ecdsa", "expose-field"] }
+rand_chacha = "0.3"
+rayon = "1"
 serde = { workspace = true }
 stwo-p256-utils = { path = "../stwo-p256-utils" }
 
 [dev-dependencies]
 bincode = "1"
+blake3 = "1"
 ecdsa = { version = "0.16", features = ["signing"] }
-sha2 = "0.10"
+sha2 = { version = "0.10", features = ["asm"] }
 
 [lints]
 workspace = true
