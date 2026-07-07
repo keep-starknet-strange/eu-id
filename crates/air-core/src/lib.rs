@@ -38,6 +38,7 @@ use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::core::proof::StarkProof;
 use stwo::core::vcs_lifted::blake2_merkle::{Blake2sMerkleChannel, Blake2sMerkleHasher};
+use stwo::core::vcs_lifted::MerkleHasherLifted;
 use stwo::core::verifier::{verify as stark_verify, VerificationError};
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::poly::circle::{CircleEvaluation, PolyOps};
@@ -59,6 +60,10 @@ pub type Ch = Blake2sChannel;
 
 /// The hasher carried inside the emitted [`StarkProof`] (`Mc::H`).
 pub type Hasher = Blake2sMerkleHasher;
+
+/// The commitment-root type carried in `StarkProof::commitments` (a Blake2s
+/// Merkle root under the current [`Hasher`] alias).
+pub type CommitmentRoot = <Hasher as MerkleHasherLifted>::Hash;
 
 pub type PreprocessedColumnEval = CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>;
 
@@ -450,11 +455,195 @@ pub fn prove(
     stark_prove::<SimdBackend, Mc>(&component_refs, channel, commitment_scheme)
 }
 
+/// Errors from [`verify_with_expected_preprocessed_root`].
+#[derive(Debug)]
+pub enum VerifyError {
+    /// The proof's tree-0 (preprocessed) commitment root does not equal the
+    /// verifier-derived expected root. Rejected fail-closed, before any
+    /// transcript or STARK work — a forged preprocessed table (range table,
+    /// schedule, constant column) never reaches the STARK verifier.
+    PreprocessedRootMismatch {
+        /// The tree-0 root embedded in the proof (`proof.commitments[0]`).
+        got: CommitmentRoot,
+        /// The root the verifier derived independently.
+        expected: CommitmentRoot,
+    },
+    /// The underlying STARK verifier rejected the proof.
+    Stark(VerificationError),
+}
+
+impl From<VerificationError> for VerifyError {
+    fn from(error: VerificationError) -> Self {
+        Self::Stark(error)
+    }
+}
+
+/// Shape key for the preprocessed-root cache: the deduplicated `(column id,
+/// log_size)` list in tree-0 commit order, plus the FRI blow-up factor (the
+/// Merkle tree commits the blown-up LDE, so the root depends on it). The full
+/// key is stored — no key hashing — so cache hits are exact by construction,
+/// with no collision surface at all (strictly stronger than hashing the list).
+type PreprocessedShapeKey = (Vec<(String, u32)>, u32);
+
+static PREPROCESSED_ROOT_CACHE: OnceLock<Mutex<HashMap<PreprocessedShapeKey, CommitmentRoot>>> =
+    OnceLock::new();
+
+/// Compute the expected tree-0 (preprocessed) commitment root for a module set,
+/// by running exactly the [`prove`]-side tree-0 path: dedup the preprocessed ids
+/// first-writer-wins, write the selected columns into a fresh commitment
+/// scheme, and commit. Production verifiers compute this once (from their own
+/// trusted module constructions — never from prover-supplied data) and pass it
+/// to [`verify_with_expected_preprocessed_root`].
+///
+/// Roots are cached per shape (ordered unique `(id, log_size)` list + FRI
+/// blow-up) in a process-global map, so repeated verifies at one shape pay the
+/// rebuild once. The cache trusts that a preprocessed column id determines its
+/// content — the same invariant [`prove`] enforces via
+/// `assert_preprocessed_id_content_invariant` — so only feed this function
+/// verifier-side (trusted) module constructions.
+///
+/// # Soundness
+///
+/// This root pin is the soundness anchor for tree 0: the Blake2s Merkle root
+/// cryptographically binds the contents, order, and sizes of every preprocessed
+/// column at once. The prover-side `PreprocessedColumnFingerprint` guard uses a
+/// 64-bit `DefaultHasher` and is **NOT** a soundness pin — it is a dev-time
+/// dedup guard only. Do not downgrade this pin to that fingerprint.
+pub fn compute_preprocessed_root(
+    modules: &mut [&mut dyn AirProver],
+    config: PcsConfig,
+) -> CommitmentRoot {
+    let module_preprocessed_ids: Vec<Vec<PreProcessedColumnId>> = modules
+        .iter()
+        .map(|m| m.preprocessed_column_ids())
+        .collect();
+    let module_preprocessed_sizes: Vec<Vec<u32>> =
+        modules.iter().map(|m| m.layout().preprocessed).collect();
+
+    // The shape key mirrors the tree-0 dedup: unique (id, log_size) in commit
+    // order. Module identity is positional — the ordered list pins it.
+    let mut seen = HashSet::new();
+    let mut unique_columns = Vec::new();
+    for (ids, sizes) in module_preprocessed_ids.iter().zip(&module_preprocessed_sizes) {
+        assert_eq!(
+            ids.len(),
+            sizes.len(),
+            "preprocessed ids and layout sizes must have the same length"
+        );
+        for (id, size) in ids.iter().zip(sizes) {
+            if seen.insert(id.clone()) {
+                unique_columns.push((id.id.clone(), *size));
+            }
+        }
+    }
+    let key: PreprocessedShapeKey = (unique_columns, config.fri_config.log_blowup_factor);
+
+    let cache = PREPROCESSED_ROOT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(root) = cache
+        .lock()
+        .expect("preprocessed root cache poisoned")
+        .get(&key)
+    {
+        return *root;
+    }
+
+    let root = compute_preprocessed_root_uncached(modules, config);
+
+    cache
+        .lock()
+        .expect("preprocessed root cache poisoned")
+        .insert(key, root);
+    root
+}
+
+/// [`compute_preprocessed_root`] without the per-shape cache: every call
+/// rebuilds and commits tree 0.
+///
+/// Required whenever a preprocessed column's CONTENT is not determined by its
+/// id — e.g. the legacy P256 hinted-mul schedule columns, which reuse one id
+/// across witnesses while their content follows the signature. The cached
+/// variant would return the first witness's root for every later one (a
+/// fail-closed completeness bug, not a soundness one — but a bug). Use the
+/// cached variant only where the id→content invariant of [`prove`] holds
+/// across every call in the process.
+pub fn compute_preprocessed_root_uncached(
+    modules: &mut [&mut dyn AirProver],
+    config: PcsConfig,
+) -> CommitmentRoot {
+    let module_preprocessed_ids: Vec<Vec<PreProcessedColumnId>> = modules
+        .iter()
+        .map(|m| m.preprocessed_column_ids())
+        .collect();
+
+    // Exactly the prove()-side tree-0 path: interpolate + blow up + Merkle
+    // commit the deduplicated preprocessed columns. The twiddles only need to
+    // cover the largest committed LDE domain (tree 0 is the only tree built).
+    let max_preprocessed_log_size = modules
+        .iter()
+        .flat_map(|m| m.layout().preprocessed)
+        .max()
+        .unwrap_or(0);
+    let twiddles = cached_twiddles(max_preprocessed_log_size + config.fri_config.log_blowup_factor);
+    let channel = &mut Ch::default();
+    config.mix_into(channel);
+    let mut commitment_scheme = CommitmentSchemeProver::<SimdBackend, Mc>::new(config, twiddles);
+    let (_, selected_preprocessed_ids) = select_first_preprocessed_ids(&module_preprocessed_ids);
+    let mut tb = commitment_scheme.tree_builder();
+    for (module, selected_ids) in modules.iter_mut().zip(&selected_preprocessed_ids) {
+        module.write_selected_preprocessed(&mut tb, selected_ids);
+    }
+    tb.commit(channel);
+    commitment_scheme.roots()[0]
+}
+
 /// Re-derive the transcript for every module and verify the single STARK proof.
+///
+/// Equivalent to [`verify_with_expected_preprocessed_root`] with `None`: the
+/// tree-0 root is absorbed from the proof without a content check. Production
+/// callers must pin the root via the pinned entry point — see the F-ROOT
+/// finding (tasks/audits/2026-07-05-backend-soundness.md).
 pub fn verify(
     modules: &mut [&mut dyn Air],
     proof: &StarkProof<Hasher>,
 ) -> Result<(), VerificationError> {
+    verify_with_expected_preprocessed_root(modules, proof, None).map_err(|error| match error {
+        VerifyError::Stark(error) => error,
+        VerifyError::PreprocessedRootMismatch { .. } => {
+            unreachable!("no expected root was supplied")
+        }
+    })
+}
+
+/// [`verify`], with the tree-0 (preprocessed) commitment root pinned.
+///
+/// On `Some(expected)`, the proof's `commitments[0]` must equal `expected` —
+/// checked BEFORE the root is absorbed into the transcript, so a forged
+/// preprocessed tree (range tables, schedules, constants) is rejected
+/// fail-closed with [`VerifyError::PreprocessedRootMismatch`]. Callers obtain
+/// `expected` from [`compute_preprocessed_root`] over their own trusted module
+/// constructions (or from a pinned per-profile constant generated the same
+/// way), never from the proof.
+///
+/// # Soundness
+///
+/// This pin is the tree-0 soundness anchor: the Blake2s Merkle root binds the
+/// contents, order, and sizes of every preprocessed column cryptographically.
+/// The prover-side 64-bit `DefaultHasher` fingerprint guard
+/// (`PreprocessedColumnFingerprint`) is NOT a soundness pin and must never be
+/// substituted for this check. On `None`, the legacy unpinned behavior is kept
+/// for shape-exploratory tests only.
+pub fn verify_with_expected_preprocessed_root(
+    modules: &mut [&mut dyn Air],
+    proof: &StarkProof<Hasher>,
+    expected_preprocessed_root: Option<CommitmentRoot>,
+) -> Result<(), VerifyError> {
+    if let Some(expected) = expected_preprocessed_root {
+        let got = proof.commitments[0];
+        if got != expected {
+            return Err(VerifyError::PreprocessedRootMismatch { got, expected });
+        }
+    }
+
     let config = proof.config;
     let channel = &mut Ch::default();
     config.mix_into(channel);
@@ -487,7 +676,8 @@ pub fn verify(
     if claimed_sums.iter().fold(QM31::zero(), |acc, &s| acc + s) != QM31::zero() {
         return Err(VerificationError::InvalidStructure(
             "LogUp claimed sums do not cancel".into(),
-        ));
+        )
+        .into());
     }
 
     for m in modules.iter() {
@@ -522,7 +712,12 @@ pub fn verify(
     }
     let component_refs: Vec<&dyn Component> = modules.iter().flat_map(|m| m.components()).collect();
 
-    stark_verify(&component_refs, channel, commitment_scheme, proof.clone())
+    Ok(stark_verify(
+        &component_refs,
+        channel,
+        commitment_scheme,
+        proof.clone(),
+    )?)
 }
 
 #[cfg(test)]
@@ -632,5 +827,288 @@ mod tests {
         assert!(message.contains("shared"));
         assert!(message.contains("first"));
         assert!(message.contains("second"));
+    }
+
+    use stwo::prover::backend::simd::qm31::PackedQM31;
+    use stwo_constraint_framework::{
+        relation, EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation,
+        RelationEntry,
+    };
+
+    relation!(TableRelation, 1);
+
+    /// Minimal provable fixture for the preprocessed-root pin: one preprocessed
+    /// "table" column and one trace column constrained equal to it. A doctored
+    /// prover that alters a table cell (and its matching trace cell) satisfies
+    /// every constraint — exactly the F-ROOT attack the root pin must reject.
+    /// The zero-numerator logup entry only gives the module a real interaction
+    /// column (the shared STARK requires a non-degenerate tree structure); it
+    /// contributes nothing to any sum.
+    #[derive(Clone)]
+    struct TableEval {
+        log_size: u32,
+        id: PreProcessedColumnId,
+        relation: TableRelation,
+    }
+
+    impl FrameworkEval for TableEval {
+        fn log_size(&self) -> u32 {
+            self.log_size
+        }
+
+        fn max_constraint_log_degree_bound(&self) -> u32 {
+            self.log_size + 1
+        }
+
+        fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+            let table = eval.get_preprocessed_column(self.id.clone());
+            let value = eval.next_trace_mask();
+            eval.add_constraint(value.clone() - table);
+            eval.add_to_relation(RelationEntry::new(
+                &self.relation,
+                E::EF::zero(),
+                &[value],
+            ));
+            eval.finalize_logup();
+            eval
+        }
+    }
+
+    struct TableModule {
+        id: PreProcessedColumnId,
+        log_size: u32,
+        values: Vec<M31>,
+        relation: Option<TableRelation>,
+        component: Option<FrameworkComponent<TableEval>>,
+    }
+
+    impl TableModule {
+        /// `tweak` alters one table cell — the doctored (F-ROOT attacking)
+        /// prover, whose trace matches its forged table so constraints hold.
+        fn new(id: &str, log_size: u32, tweak: Option<(usize, u32)>) -> Self {
+            let mut values: Vec<M31> = (0..1u32 << log_size)
+                .map(M31::from_u32_unchecked)
+                .collect();
+            if let Some((index, value)) = tweak {
+                values[index] = M31::from_u32_unchecked(value);
+            }
+            Self {
+                id: PreProcessedColumnId { id: id.to_string() },
+                log_size,
+                values,
+                relation: None,
+                component: None,
+            }
+        }
+
+        fn column(&self) -> PreprocessedColumnEval {
+            CircleEvaluation::new(
+                CanonicCoset::new(self.log_size).circle_domain(),
+                BaseColumn::from_iter(self.values.iter().copied()),
+            )
+        }
+    }
+
+    impl Air for TableModule {
+        fn mix_public(&self, _channel: &mut Ch) {}
+
+        fn draw_relations(&mut self, channel: &mut Ch) {
+            self.relation = Some(TableRelation::draw(channel));
+        }
+
+        fn layout(&self) -> TreeLayout {
+            TreeLayout {
+                preprocessed: vec![self.log_size],
+                trace: vec![self.log_size],
+                interaction: vec![self.log_size; 4],
+            }
+        }
+
+        fn claimed_sums(&self) -> Vec<QM31> {
+            Vec::new()
+        }
+
+        fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
+            vec![self.id.clone()]
+        }
+
+        fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
+            self.component = Some(FrameworkComponent::new(
+                allocator,
+                TableEval {
+                    log_size: self.log_size,
+                    id: self.id.clone(),
+                    relation: self.relation.clone().expect("relation is drawn"),
+                },
+                QM31::zero(),
+            ));
+        }
+
+        fn components(&self) -> Vec<&dyn Component> {
+            vec![self.component.as_ref().expect("component is built")]
+        }
+    }
+
+    impl AirProver for TableModule {
+        fn max_log_size(&self) -> u32 {
+            self.log_size
+        }
+
+        fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, Mc>) {
+            tb.extend_evals(vec![self.column()]);
+        }
+
+        fn preprocessed_column_fingerprints(&mut self) -> Vec<PreprocessedColumnFingerprint> {
+            fingerprint_preprocessed_columns(
+                "table",
+                std::slice::from_ref(&self.id),
+                &[self.column()],
+            )
+        }
+
+        fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, Mc>) {
+            // The trace equals the (possibly forged) table, so the equality
+            // constraint holds for honest and doctored provers alike.
+            tb.extend_evals(vec![self.column()]);
+        }
+
+        fn write_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, Mc>) {
+            let relation = self.relation.clone().expect("relation is drawn");
+            let column = self.column();
+            let mut logup = LogupTraceGenerator::new(self.log_size);
+            logup.col_from_fn(|vec_row| {
+                (PackedQM31::zero(), relation.combine(&[column.data[vec_row]]))
+            });
+            let (trace, claimed_sum) = logup.finalize_last();
+            assert_eq!(claimed_sum, QM31::zero());
+            tb.extend_evals(trace);
+        }
+
+        fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
+            vec![self.component.as_ref().expect("component is built")]
+        }
+    }
+
+    const TABLE_LOG_SIZE: u32 = 4;
+
+    fn honest_provers() -> (TableModule, TableModule) {
+        (
+            TableModule::new("froot/a", TABLE_LOG_SIZE, None),
+            TableModule::new("froot/b", TABLE_LOG_SIZE, None),
+        )
+    }
+
+    fn honest_root() -> CommitmentRoot {
+        let (mut a, mut b) = honest_provers();
+        compute_preprocessed_root(&mut [&mut a, &mut b], PcsConfig::default())
+    }
+
+    fn prove_tables(a: &mut TableModule, b: &mut TableModule) -> StarkProof<Hasher> {
+        prove(&mut [&mut *a, &mut *b], PcsConfig::default()).expect("table fixture proves")
+    }
+
+    fn verify_tables_pinned(
+        proof: &StarkProof<Hasher>,
+        expected_root: Option<CommitmentRoot>,
+    ) -> Result<(), VerifyError> {
+        let (mut a, mut b) = honest_provers();
+        verify_with_expected_preprocessed_root(&mut [&mut a, &mut b], proof, expected_root)
+    }
+
+    /// Back-compat + happy path: the unpinned `verify` and a `None` pin keep the
+    /// old behavior, and the pinned verify accepts the honest proof against the
+    /// independently recomputed root.
+    #[test]
+    fn preprocessed_root_pin_accepts_honest_proof() {
+        let (mut a, mut b) = honest_provers();
+        let proof = prove_tables(&mut a, &mut b);
+
+        let (mut va, mut vb) = honest_provers();
+        verify(&mut [&mut va, &mut vb], &proof).expect("unpinned verify accepts");
+        verify_tables_pinned(&proof, None).expect("None pin keeps the old behavior");
+        verify_tables_pinned(&proof, Some(honest_root())).expect("pinned verify accepts");
+    }
+
+    /// A doctored proof whose tree-0 root field is tampered is rejected with
+    /// `PreprocessedRootMismatch` before any STARK work.
+    #[test]
+    fn preprocessed_root_pin_rejects_tampered_commitment() {
+        let (mut a, mut b) = honest_provers();
+        let mut proof = prove_tables(&mut a, &mut b);
+        proof.0.commitments[0].0[0] ^= 1;
+
+        match verify_tables_pinned(&proof, Some(honest_root())) {
+            Err(VerifyError::PreprocessedRootMismatch { got, expected }) => {
+                assert_eq!(got, proof.0.commitments[0]);
+                assert_eq!(expected, honest_root());
+            }
+            other => panic!("expected PreprocessedRootMismatch, got {other:?}"),
+        }
+    }
+
+    /// THE F-ROOT attack: a doctored prover alters one preprocessed table cell
+    /// (and its matching trace cell) and commits honestly over the forged data.
+    /// Every constraint holds, so the unpinned verifier accepts the forged
+    /// table — the audited gap. The root pin closes it.
+    #[test]
+    fn preprocessed_root_pin_closes_the_froot_attack() {
+        let mut evil_a = TableModule::new("froot/a", TABLE_LOG_SIZE, Some((7, 999)));
+        let mut evil_b = TableModule::new("froot/b", TABLE_LOG_SIZE, None);
+        let forged_proof = prove_tables(&mut evil_a, &mut evil_b);
+
+        // Without the pin the forged table verifies: the verifier derives only
+        // the layout, never the content. This is the F-ROOT finding.
+        let (mut va, mut vb) = honest_provers();
+        verify(&mut [&mut va, &mut vb], &forged_proof)
+            .expect("unpinned verify accepts the forged table (the F-ROOT gap)");
+
+        // With the pin the forged tree-0 root differs from the derived one.
+        match verify_tables_pinned(&forged_proof, Some(honest_root())) {
+            Err(VerifyError::PreprocessedRootMismatch { got, expected }) => {
+                assert_ne!(got, expected);
+            }
+            other => panic!("expected PreprocessedRootMismatch, got {other:?}"),
+        }
+    }
+
+    /// Shape-key discrimination: different shapes get different cache entries
+    /// and different roots, and shape A's root rejects a proof at shape B.
+    #[test]
+    fn preprocessed_root_cache_discriminates_shapes() {
+        let root_a = honest_root();
+
+        // Same ids, larger tables — a different shape, and a different root.
+        let taller = || {
+            (
+                TableModule::new("froot/a", TABLE_LOG_SIZE + 1, None),
+                TableModule::new("froot/b", TABLE_LOG_SIZE + 1, None),
+            )
+        };
+        let (mut ta, mut tb_) = taller();
+        let root_b = compute_preprocessed_root(&mut [&mut ta, &mut tb_], PcsConfig::default());
+        assert_ne!(root_a, root_b, "distinct shapes must yield distinct roots");
+
+        // The cache returns stable per-shape roots on a second computation.
+        let (mut ta2, mut tb2) = taller();
+        assert_eq!(
+            compute_preprocessed_root(&mut [&mut ta2, &mut tb2], PcsConfig::default()),
+            root_b
+        );
+
+        // A proof at shape B never matches shape A's root.
+        let (mut pa, mut pb) = taller();
+        let proof_b = prove_tables(&mut pa, &mut pb);
+        let (mut va, mut vb) = taller();
+        match verify_with_expected_preprocessed_root(
+            &mut [&mut va, &mut vb],
+            &proof_b,
+            Some(root_a),
+        ) {
+            Err(VerifyError::PreprocessedRootMismatch { got, expected }) => {
+                assert_eq!(got, root_b);
+                assert_eq!(expected, root_a);
+            }
+            other => panic!("expected PreprocessedRootMismatch, got {other:?}"),
+        }
     }
 }

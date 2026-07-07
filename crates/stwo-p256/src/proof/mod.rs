@@ -2714,9 +2714,19 @@ fn negate_prepared(
     }
 }
 
+/// `expected_preprocessed_root` is the F-ROOT pin: on `Some(expected)`, the
+/// proof's tree-0 (preprocessed) commitment root must equal `expected` —
+/// checked fail-closed BEFORE the root is absorbed into the transcript, so a
+/// forged preprocessed tree (range tables, hinted-mul schedules, constants)
+/// is rejected up front. Callers derive `expected` from their own trusted
+/// data (e.g. rebuild the draft from the statement and run the prover's
+/// tree-0 path — see `proof::air::current_air_preprocessed_root`), never from
+/// the proof. `None` keeps the legacy unpinned behavior for self-proving
+/// benchmarks and shape-exploratory tests only.
 pub fn verify_current_air_monolithic<MC>(
     proof: P256CurrentAirProof<MC::H>,
     expected_instances: &[PublicEcdsaInstance<M31>],
+    expected_preprocessed_root: Option<<MC::H as MerkleHasherLifted>::Hash>,
 ) -> Result<(), P256ProofError>
 where
     MC: MerkleChannel,
@@ -2726,6 +2736,17 @@ where
         interaction_claim,
         stark_proof,
     } = proof;
+    // F-ROOT pin: compare the prover-supplied tree-0 root against the caller's
+    // independently-derived expected root before ANY transcript work.
+    if let Some(expected) = expected_preprocessed_root {
+        let got = stark_proof.commitments[0];
+        if got != expected {
+            return Err(P256ProofError::PreprocessedRootMismatch {
+                got: format!("{got:?}"),
+                expected: format!("{expected:?}"),
+            });
+        }
+    }
     // Caller-argument binding. The O1 fix below ties the proof to its OWN
     // embedded `claim.public_inputs.instances` (recomputed provider sums against
     // STARK-bound consumers), but this function returns only `Result<(), _>`: a
@@ -2970,6 +2991,19 @@ pub enum P256ProofError {
     /// party that trusts `Ok(())` would accept a valid proof of ANY signature
     /// the prover chose, not the one the caller intended.
     PublicInstanceMismatch,
+    /// The proof's tree-0 (preprocessed) commitment root does not equal the
+    /// caller-supplied expected root — the F-ROOT pin
+    /// (tasks/audits/2026-07-05-backend-soundness.md). Rejected fail-closed,
+    /// BEFORE the root is absorbed into the transcript, so a forged
+    /// preprocessed tree (range tables, schedules, constants) never reaches
+    /// the STARK verifier. Roots are Debug-formatted strings because the
+    /// verifiers carrying this error are generic over the Merkle channel.
+    PreprocessedRootMismatch {
+        /// The tree-0 root embedded in the proof (`stark_proof.commitments[0]`).
+        got: String,
+        /// The root the caller derived independently.
+        expected: String,
+    },
     ProofLayer(String),
 }
 

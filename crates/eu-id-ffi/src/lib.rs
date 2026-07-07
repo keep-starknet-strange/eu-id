@@ -296,10 +296,15 @@ fn run_bench_p256(input: EcdsaVerifyInput, iters: u32) -> EuIdP256Bench {
             prove_samples.push(t0.elapsed().as_millis() as u64);
 
             // Bind verification to the statement the proof itself embeds — the
-            // same self-binding the crate's own end-to-end tests use.
+            // same self-binding the crate's own end-to-end tests use. No
+            // preprocessed-root pin (`None`) for the same reason: this is a
+            // self-proving benchmark, not a relying-party verifier. Production
+            // verifiers derive the root independently and pass `Some` (see
+            // `stwo_p256::proof::air::current_air_preprocessed_root`).
             let expected = proof.claim.public_inputs.instances.clone();
             let t1 = Instant::now();
-            let outcome = verify_current_air_monolithic::<Blake2sMerkleChannel>(proof, &expected);
+            let outcome =
+                verify_current_air_monolithic::<Blake2sMerkleChannel>(proof, &expected, None);
             verify_samples.push(t1.elapsed().as_millis() as u64);
             if let Err(err) = outcome {
                 eprintln!("p256 verify error: {err:?}");
