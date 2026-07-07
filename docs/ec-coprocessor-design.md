@@ -2,7 +2,8 @@
 
 Status: draft, 2026-07-06. Covers `crates/eu-id-ec-coprocessor` and its binding into the
 mdoc prover (`crates/eu-id-prover/src/mdoc_mac.rs`, `mdoc.rs`) as of branch
-`feat/proof-reductions`.
+`feat/proof-reductions` @ `9e1ac686` plus working-tree changes (the C-p4b-blind-claim
+fix in `ligero.rs` and the new `circle_fft.rs` module, both uncommitted).
 
 ---
 
@@ -18,7 +19,8 @@ system whose native field is the P-256 base field Fp itself**. Curve arithmetic 
 costs one quadratic gate per field multiplication instead of hundreds of limb columns.
 The design is Longfellow-style: a layered arithmetic circuit, proven with a GKR-type
 sumcheck, with the witness committed under a Ligero polynomial commitment
-(Reed-Solomon + Merkle).
+(Reed-Solomon + Merkle; a circle-FFT encoding front-end that removes the dominant
+RS-encode cost is specified and partially landed — §5.6).
 
 That leaves one problem: the ECDSA public inputs (message hashes, public keys) are
 *witnesses of the outer M31 proof*. Two independent proofs about "some" values prove
@@ -177,7 +179,9 @@ The flat witness is split into rows of ℓ = `row_len` = 64 field elements. Each
    n − k + 1.
 
 Two extra random rows are appended and encoded: a **proximity mask row** (degree < k)
-and a **claim blind row** (degree < k + ℓ − 1). The n columns of the resulting matrix
+and a **claim blind row** (degree < k + ℓ − 1, drawn uniform and then one slot adjusted
+so its systematic-prefix sum is exactly zero — the C-p4b-blind-claim fix, §5.3,
+`ligero.rs:195-205`). The n columns of the resulting matrix
 are Merkle-committed with BLAKE2s (leaf = full column, domain-separated leaf/node
 hashes, `merkle.rs:124-141`). The root is the witness commitment, and it is absorbed
 into the Fiat-Shamir channel **before any sumcheck or Ligero challenge is drawn**
@@ -224,12 +228,38 @@ Batched with fresh γ (`ligero.rs:310-341`, verification `:686-767`):
   Σ_{x=0}^{ℓ−1} W_row(x)·P_row(x) is exactly the weighted witness sum, so
 
   ```
-  Σ_{x<ℓ} q(x)  ==  blind_claim + Σ_c γ_c · value_c
+  Σ_{x<ℓ} q(x)  ==  blind_claim + Σ_c γ_c · value_c      with blind_claim REQUIRED == 0
   ```
 
-  (`ligero.rs:756-766`). If any claimed value is wrong, the true q' and the claimed q
-  are distinct polynomials of degree < k + ℓ − 1, so they disagree on all but
-  (k + ℓ − 1) of the n columns and the t random openings catch it.
+  If any claimed value is wrong, the true q′ and the claimed q are distinct
+  polynomials of degree < k + ℓ − 1, so they disagree on all but (k + ℓ − 1) of the n
+  columns and the t random openings catch it.
+
+**C-p4b-blind-claim (CRITICAL, found 2026-07-06 in the Q-025 review, fixed in-tree).**
+The check above only binds anything because `blind_claim` is forced to a public
+constant. In the original protocol `blind_claim` was a *prover-sent scalar* whose sole
+use was this equation; the column checks bind `q` to blind + Σ γ·W·rows, so q_sum is
+honest — but a prover claiming wrong values could simply send
+`blind_claim′ = q_sum − Σ γ_c·(fake value_c)` and pass every check. Since γ is drawn
+before `blind_claim` is sent, Fiat-Shamir did not prevent it. The claim batch — the
+only link between the sumcheck's input claims and the commitment — was vacuous:
+commit garbage, run the sumcheck on a fake witness, compensate via `blind_claim`.
+
+The fix (Q-025 prescription, landed in the working tree): at commit time the blind
+row is drawn uniform and one slot is adjusted so Σ_{x<ℓ} blind(x) = 0
+(`ligero.rs:195-205`); the verifier **requires `blind_claim == 0`** in both
+`verify_claim_batch` and `verify_split_claim_batch` (`ligero.rs:496-499`, `:723`);
+and a real negative test tampers a claim value *with* the compensating blind_claim
+and must reject (`ligero.rs:978-1009`). Hiding is unaffected — the blind row stays
+uniform on the sum-zero subspace, and the one functional it no longer masks
+(Σ γ·value) is public anyway. The `blind_claim` field survives (pinned to zero) only
+until the circle-FFT version bump deletes it (§5.6).
+
+The mdoc P4b integration additionally uses a **split (two-root) row-group variant**
+of both the proximity test and the claim batch (Q-024): rows are partitioned into two
+groups with separate Merkle roots, and `split_claim_batch` /
+`verify_split_claim_batch` span the combined rows with the same algebra and the same
+blind-claim rule.
 
 ### 5.4 Zero-knowledge
 
@@ -237,7 +267,7 @@ Batched with fresh γ (`ligero.rs:310-341`, verification `:686-767`):
   witness rows are individually uniform.
 - The proximity mask row makes the γ-combination response uniform.
 - The claim blind row makes the batched polynomial q uniform subject to the single
-  checked sum, and the transmitted `blind_claim` offsets the value equation.
+  checked sum-zero functional (which reveals only the public value Σ γ·value).
 
 This is the standard Ligero hiding argument; masking is information-theoretic, sourced
 from OS randomness independent of the transcript.
@@ -262,6 +292,77 @@ enforcing the preconditions (2e < n − (k+ℓ−1), n > 2k + e, k ≥ ℓ + t, 
 
 Both live parameter sets are gated by tests asserting ε ≤ 2^−128
 (`tests/ligero.rs:314,324`).
+
+### 5.6 Circle-FFT encoding front-end (P4b MAC-bundle prove-time lever, Q-025)
+
+**Why.** RS encoding dominates the P4b MAC bundle's prove time: at the current
+checkpoint (`9e1ac686`, single-thread release probe) the bundle proves in ~4.45 s of
+which **~2.81 s is RS encode** (proof ~5.26 MB, verify ~264 ms). The cause is
+structural: the multiplicative group of Fp has 2-adicity 1 (p − 1 = 2·odd), so no
+radix-2 multiplicative FFT domain exists and the equispaced-domain encoder must use
+O(k·n)-class finite-difference/Lagrange extension. But the **circle group**
+C(Fp) = {(x, y) : x² + y² = 1} has order p + 1 = 2^96·(2^160 − 2^128 + 2^96 + 1) —
+2-adic subgroups up to 2^96 — so a stwo-style **circle FFT works over Fp** and makes
+encoding O(n log n). Projected effect: encode 2.81 s → ~0.10 s, bundle prove
+~1.75–1.9 s, under the parity gate.
+
+**Why it is not just an encoder swap.** A naive swap (encode/evaluate through the
+circle basis) was tried and correctly rejected: circle-FFT messages are
+*coefficients*, not evaluations. The whole claim-batch protocol (§5.3) rests on one
+fixed, claim-independent extraction functional — "sum the batch polynomial over the
+systematic prefix" — which is what allows the blind row to be committed with that
+functional pre-zeroed. In a coefficient-basis code any direct extraction functional
+becomes claim-dependent (it moves with the MLE point), and a claim-dependent
+functional cannot be pre-zeroed on a blind row committed before the claim points
+exist: every such design either leaks or reopens exactly the C-p4b-blind-claim hole.
+The conclusion (Q-025): keep the fixed functional and **put the data back into
+evaluation positions** — an encoding-front-end change, not a claim-protocol change.
+
+**The design: systematic-by-interpolation.** Fixed public setup (precomputed tables,
+`src/circle_fft.rs`):
+
+- **D2048** — codeword domain of size 2048 (points of order 4096), `CIRCLE_CODEWORD_LEN`;
+- **D256** — message domain of size 256 (generator of order 512), disjoint from D2048
+  by construction (order check asserted), `CIRCLE_ROW_MESSAGE_LEN`;
+- **S_data ⊂ D256** — 64 designated data slots (`CIRCLE_DATA_SLOTS`), with the 64×64
+  interpolation inverse M64⁻¹ precomputed and asserted invertible.
+
+Per-row commit path: 64 data values into the S_data slots + **192** random pad values
+into the remaining D256 slots (pad budget 170 → 192, still ≥ t; same pad-channel
+rules) → IFFT₂₅₆ → 256 coefficients → zero-pad → FFT₂₀₄₈ → codeword. Rows are then
+evaluation-systematic again: R(s_j) = data_j by construction.
+
+Protocol deltas versus §5.2–5.3:
+
+- **Proximity**: prover sends the combined *coefficients* (length 256); verifier
+  checks `circle_evaluate(combined, i)` against the γ-combined opened symbols. No
+  codeword-membership check is needed — every coefficient vector is a valid message.
+- **Claim batch**: the batch message is the 322 coefficients of
+  Q = blind + Σ_r W_r·R_r, where W_r interpolates the γ-batched row weights at S_data
+  (w_coeffs_r = M64⁻¹·ω_r, `circle_weight_coeffs`). Per opened column i:
+  `circle_evaluate(Q, i) == blind_symbol(i) + Σ_r circle_evaluate(w_coeffs_r, i)·column[r]`.
+  The systematic-prefix sum check becomes
+  `Σ_{s∈S_data} Q(s) == Σ_c γ_c·value_c` (`circle_data_sum`), with the blind row's
+  S_data-sum zeroed at commit time — the `blind_claim` field is **deleted** in this
+  version; no prover-supplied scalar remains in the equation.
+- **Parameter fork** (validate()/soundness_error() forked for the circle variant):
+  k 234 → **256**, claim degree bound **322** (function space F_d = {P(x) + y·Q(x)};
+  the y² = 1 − x² fold makes the product bound a + b + 2, not a + b − 1),
+  e 875 → **862** (2e < 2048 − 322). Soundness: (1 − 862/2048)^170 ≈ 2^−134,
+  (2·256/2048)^170 = 2^−340, (322/2048)^170 ≈ 2^−453 ⇒ **ε ≈ 2^−134**, above the
+  2^−132 target. ℓ = 64, t = 170, n = 2048 unchanged, so matrix height, Merkle shape
+  and proof-size class are unchanged (batch coefficients 297 → 322, +25 Fp ≈ 800 B,
+  minus the deleted field).
+
+**Status.** `src/circle_fft.rs` (638 lines: domains, LOG_N-parametrized fft/ifft,
+`circle_encode`, `circle_evaluate`, `circle_encode_row`, `circle_data_sum`,
+`circle_weight_coeffs`) is in the tree and exported from `lib.rs`, but the Ligero
+encoder swap and the parameter fork are **not yet wired** — sequencing per Q-025 is
+blind-claim fix → fixture re-pin → circle integration. Landing gates: basis
+round-trip (IFFT₂₅₆ → pad → FFT₂₀₄₈ → `circle_evaluate`) agreeing at random columns
+*and* at all 64 S_data points; D256 ∩ D2048 = ∅ assert; M64⁻¹ existence; tail-zero
+assert on batch coefficients [322..]; and the compensating-blind-claim forgery
+negative re-run on the circle path.
 
 ## 6. The ECDSA circuits
 
@@ -491,7 +592,9 @@ The end-to-end argument, stated as a chain — each step conditions on the previ
 3. **Evaluation correctness.** Any false `LigeroLinearClaim` (sumcheck input claim or
    verifier-computed fixed claim) survives the claim batch with probability bounded by
    the remaining ε_ligero terms (distinct low-degree polynomials agree on few
-   columns) plus 1/p for the γ batching collision.
+   columns) plus 1/p for the γ batching collision. This step **requires the
+   verifier-enforced `blind_claim == 0`** together with the commit-time sum-zero
+   blind row — without it the step is void (C-p4b-blind-claim, §5.3).
 4. **Sumcheck.** Given correct input-layer MLE evaluations, a false "output layer is
    zero" claim survives layer-by-layer with probability ≤ Σᵢ (2·2dᵢ + O(1))/p
    ≈ 2^−240s — Schwartz–Zippel over degree-2 round polynomials plus the α-blend and
@@ -523,9 +626,23 @@ Budget summary (per proved bundle, dominant terms):
 The 2026-07-05/06 backend audit (`tasks/audits/2026-07-05-backend-soundness.md`)
 reviewed the coprocessor, the γ-digest sharing, and this Ligero accounting at
 e9e3c007 and found no confirmed breaks; the "2^−132 exact" figure there corresponds
-to the v2 parameter regime above.
+to the v2 parameter regime above. One day later the Q-025 design review found the
+C-p4b-blind-claim hole (§5.3) that the audit's negative tests had missed — they
+tampered claim values without compensating the blind scalar. The hole is fixed in
+the working tree; the episode is a concrete reminder that this table measures the
+protocol *as specified*, and that negative tests must model an adversary who uses
+every prover-chosen message. The planned circle-FFT parameter fork lands at
+ε ≈ 2^−134 (§5.6), keeping the same overall class.
 
 ## 10. Residual gaps and hardening items
+
+**Recently closed:** C-p4b-blind-claim (CRITICAL, prover-chosen `blind_claim` made
+the claim batch vacuous — full coprocessor binding bypass) is fixed in the working
+tree: sum-zero blind row, verifier-enforced `blind_claim == 0` in both batch
+verifiers, compensating-forgery negative test. Details in §5.3. Follow-through items:
+the fix changes proof bytes (fixture re-pin required), and the now-redundant
+`blind_claim` field is deleted only at the circle-FFT version bump (§5.6) — until
+then any new verifier path must remember to enforce the zero check.
 
 Honest inventory of what is *not* enforced in-circuit today. None is a confirmed
 break, but each is a place where soundness currently leans on something outside the
@@ -579,7 +696,8 @@ proof.
 | `src/circuit.rs`, `src/gates.rs` | layered circuit, `QuadTerm` gates, witness evaluation |
 | `src/mle.rs` | multilinear extension, O(2^n) fold evaluation |
 | `src/sumcheck.rs` | GKR layer reduction, two-claim α-blend, degree-2 rounds, pads |
-| `src/rs.rs` | systematic equispaced Reed-Solomon encoder, cached per (k, n) |
+| `src/rs.rs` | systematic equispaced Reed-Solomon encoder (finite-difference), cached per (k, n) |
+| `src/circle_fft.rs` | circle-FFT encoder over Fp (D2048/D256/S_data, systematic-by-interpolation; not yet wired into Ligero — §5.6) |
 | `src/merkle.rs` | column-leaf BLAKE2s Merkle tree |
 | `src/ligero.rs` | commitment, proximity test, claim batch, parameters + `soundness_error()` |
 | `src/ecdsa.rs` | witness layout, circuit families C1–C15, public projections, GF(2^128) halves |
