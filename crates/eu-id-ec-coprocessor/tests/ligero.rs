@@ -1,6 +1,7 @@
 use eu_id_ec_coprocessor::ligero::{
     commit_witness, v1_ligero_params, v2_ligero_params, v2_ligero_params_b,
-    verify_input_claims_from_systematic_openings_with_len, verify_openings, LigeroParams,
+    verify_input_claims_from_systematic_openings_with_len, verify_openings, LigeroCode,
+    LigeroParams,
 };
 use eu_id_ec_coprocessor::merkle::{commit_columns, verify_column, ColumnOpening};
 use eu_id_ec_coprocessor::rs::{is_codeword, rs_encode};
@@ -84,6 +85,7 @@ fn ligero_commit_open_verify_accepts_known_columns() {
         codeword_len: 16,
         openings: 3,
         proximity_radius: 0,
+        code: LigeroCode::Rs,
     };
     let values = (1u64..=10).map(Fp::from_u64).collect::<Vec<_>>();
     let commitment = commit_witness(&values, params).unwrap();
@@ -104,6 +106,7 @@ fn ligero_proximity_claim_sends_message_row_not_full_codeword() {
         codeword_len: 16,
         openings: 3,
         proximity_radius: 0,
+        code: LigeroCode::Rs,
     };
     let values = (1u64..=10).map(Fp::from_u64).collect::<Vec<_>>();
     let commitment = commit_witness(&values, params).unwrap();
@@ -121,6 +124,7 @@ fn ligero_opening_verifier_rejects_corrupt_combined_row() {
         codeword_len: 16,
         openings: 2,
         proximity_radius: 0,
+        code: LigeroCode::Rs,
     };
     let values = (1u64..=8).map(Fp::from_u64).collect::<Vec<_>>();
     let commitment = commit_witness(&values, params).unwrap();
@@ -140,6 +144,7 @@ fn ligero_proximity_claim_is_masked_for_same_witness() {
         codeword_len: 16,
         openings: 2,
         proximity_radius: 0,
+        code: LigeroCode::Rs,
     };
     let values = (1u64..=8).map(Fp::from_u64).collect::<Vec<_>>();
     let gamma = [Fp::from_u64(7), Fp::from_u64(11)];
@@ -177,6 +182,7 @@ fn systematic_openings_verify_bl2_input_claims_against_committed_witness() {
         codeword_len: 16,
         openings: 0,
         proximity_radius: 0,
+        code: LigeroCode::Rs,
     };
     let values = (1u64..=8).map(Fp::from_u64).collect::<Vec<_>>();
     let commitment = commit_witness(&values, params).unwrap();
@@ -222,6 +228,7 @@ fn systematic_openings_accept_bl2_sumcheck_input_claims() {
         codeword_len: 8,
         openings: 0,
         proximity_radius: 0,
+        code: LigeroCode::Rs,
     };
     let commitment = commit_witness(&input_layer, params).unwrap();
     let mut prover_channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
@@ -259,6 +266,7 @@ fn systematic_openings_reject_bad_input_claim_and_corrupt_column() {
         codeword_len: 16,
         openings: 0,
         proximity_radius: 0,
+        code: LigeroCode::Rs,
     };
     let values = (1u64..=8).map(Fp::from_u64).collect::<Vec<_>>();
     let commitment = commit_witness(&values.clone(), params).unwrap();

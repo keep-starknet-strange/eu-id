@@ -2,7 +2,7 @@ use core::ops::Range;
 use std::time::{Duration, Instant};
 
 use crate::ligero::{
-    commit_witness_profiled, v2_ligero_params, verify_claim_batch, verify_openings,
+    commit_witness_profiled, v3_circle_params, verify_claim_batch, verify_openings,
     verify_split_claim_batch, verify_split_openings, LigeroClaimBatch, LigeroError,
     LigeroLinearClaim, LigeroParams, LigeroProximityClaim,
 };
@@ -2064,7 +2064,10 @@ fn circuit_gate_count(circuit: &Circuit) -> usize {
 }
 
 fn implemented_circuit_ligero_params(_input_len: usize) -> LigeroParams {
-    let params = v2_ligero_params();
+    // WO-P6: circle-FFT code at ℓ=128 (k = 512, claim bound 642, e = 1726,
+    // t = 168, ≈2^-132.6). Halves the row count vs v2 (ℓ=64), shrinking the
+    // per-column openings that dominate proof size.
+    let params = v3_circle_params();
     debug_assert!(params.validate().is_ok());
     debug_assert!(params.soundness_error() <= 2f64.powi(-128));
     params
