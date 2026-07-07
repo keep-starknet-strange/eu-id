@@ -703,6 +703,179 @@ impl FrameworkEval for RangeKEval {
 pub type RangeKComponent = FrameworkComponent<RangeKEval>;
 
 // ---------------------------------------------------------------------------
+// Paired shared-table producer component (R2 fraction batching)
+// ---------------------------------------------------------------------------
+
+/// One shared-SHA producer table, identified by which lookup it serves. Used
+/// to co-locate two same-`log_size` producers in a single component so their
+/// LogUp fractions pair into one `SecureField` interaction column
+/// (`finalize_logup_in_pairs`), halving the committed interaction width for
+/// the paired half. The producer's preprocessed columns, multiplicity column,
+/// relation, and fraction are byte-for-byte identical to the standalone
+/// `RoundSplitPackEval` / `SigmaSplitPackEval` / `RangeKEval` forms — only the
+/// column packaging changes.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum SharedProducer {
+    RoundSplit(RoundPartition, Half16),
+    SigmaSplit(LowerSigmaPartition, Half16),
+    Range(RangeKind),
+}
+
+impl SharedProducer {
+    /// `log2` of this producer's committed row count.
+    pub fn log_size(self) -> u32 {
+        match self {
+            SharedProducer::RoundSplit(..) | SharedProducer::SigmaSplit(..) => {
+                crate::preprocessed::LOG_SIZE_16
+            }
+            SharedProducer::Range(kind) => range_log_size(kind),
+        }
+    }
+
+    /// Read this producer's shared preprocessed columns + its multiplicity
+    /// column and push its single `add_to_relation` entry. Does NOT finalize —
+    /// the owning [`SharedProducerPairEval`] finalizes once for the pair, so
+    /// consecutive producers share one interaction column.
+    fn emit_entry<E: EvalAtRow>(self, eval: &mut E, relations: &Sha256Relations) {
+        use crate::relations::*;
+        match self {
+            SharedProducer::RoundSplit(p, h) => {
+                let cols = shared_round_split_pack_column_ids(p, h);
+                let key = eval.get_preprocessed_column(cols[0].clone());
+                let g0 = eval.get_preprocessed_column(cols[1].clone());
+                let g1 = eval.get_preprocessed_column(cols[2].clone());
+                let g2 = eval.get_preprocessed_column(cols[3].clone());
+                let g3 = eval.get_preprocessed_column(cols[4].clone());
+                let mult = eval.next_trace_mask();
+                let values = [key, g0, g1, g2, g3];
+                let neg = -mult;
+                match (p, h) {
+                    (RoundPartition::Sigma0AndMaj, Half16::Lo) => emit::<E, Sigma0SplitPackLo>(
+                        eval,
+                        &relations.split_pack.sigma0_lo,
+                        neg,
+                        &values,
+                    ),
+                    (RoundPartition::Sigma0AndMaj, Half16::Hi) => emit::<E, Sigma0SplitPackHi>(
+                        eval,
+                        &relations.split_pack.sigma0_hi,
+                        neg,
+                        &values,
+                    ),
+                    (RoundPartition::Sigma1AndCh, Half16::Lo) => emit::<E, Sigma1SplitPackLo>(
+                        eval,
+                        &relations.split_pack.sigma1_lo,
+                        neg,
+                        &values,
+                    ),
+                    (RoundPartition::Sigma1AndCh, Half16::Hi) => emit::<E, Sigma1SplitPackHi>(
+                        eval,
+                        &relations.split_pack.sigma1_hi,
+                        neg,
+                        &values,
+                    ),
+                }
+            }
+            SharedProducer::SigmaSplit(p, h) => {
+                let cols = shared_sigma_split_pack_column_ids(p, h);
+                let key = eval.get_preprocessed_column(cols[0].clone());
+                let packed_s = eval.get_preprocessed_column(cols[1].clone());
+                let packed_sp = eval.get_preprocessed_column(cols[2].clone());
+                let mult = eval.next_trace_mask();
+                let values = [key, packed_s, packed_sp];
+                let neg = -mult;
+                match (p, h) {
+                    (LowerSigmaPartition::LowerSigma0, Half16::Lo) => {
+                        emit::<E, LowerSigma0SplitPackLo>(
+                            eval,
+                            &relations.split_pack.lower_sigma0_lo,
+                            neg,
+                            &values,
+                        )
+                    }
+                    (LowerSigmaPartition::LowerSigma0, Half16::Hi) => {
+                        emit::<E, LowerSigma0SplitPackHi>(
+                            eval,
+                            &relations.split_pack.lower_sigma0_hi,
+                            neg,
+                            &values,
+                        )
+                    }
+                    (LowerSigmaPartition::LowerSigma1, Half16::Lo) => {
+                        emit::<E, LowerSigma1SplitPackLo>(
+                            eval,
+                            &relations.split_pack.lower_sigma1_lo,
+                            neg,
+                            &values,
+                        )
+                    }
+                    (LowerSigmaPartition::LowerSigma1, Half16::Hi) => {
+                        emit::<E, LowerSigma1SplitPackHi>(
+                            eval,
+                            &relations.split_pack.lower_sigma1_hi,
+                            neg,
+                            &values,
+                        )
+                    }
+                }
+            }
+            SharedProducer::Range(kind) => {
+                let value = eval.get_preprocessed_column(shared_range_column_id(kind));
+                let mult = eval.next_trace_mask();
+                let neg = -mult;
+                let values = [value];
+                match kind {
+                    RangeKind::Range2 => {
+                        emit::<E, Range2Relation>(eval, &relations.range.range_2, neg, &values)
+                    }
+                    RangeKind::Range4 => {
+                        emit::<E, Range4Relation>(eval, &relations.range.range_4, neg, &values)
+                    }
+                    RangeKind::Range5 => {
+                        emit::<E, Range5Relation>(eval, &relations.range.range_5, neg, &values)
+                    }
+                    RangeKind::Range16 => {
+                        emit::<E, Range16Relation>(eval, &relations.range.range_16, neg, &values)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One component owning one or two same-`log_size` shared-SHA producers whose
+/// fractions pair into a single interaction column. A one-producer instance is
+/// the odd remainder and behaves exactly like the corresponding standalone
+/// producer eval.
+#[derive(Clone)]
+pub struct SharedProducerPairEval {
+    pub log_size: u32,
+    /// 1 or 2 producers, all of `log_size`. Read in this order; the trace and
+    /// interaction generators must lay their multiplicity/fraction columns in
+    /// the same order (see `shared_tables::PRODUCER_PAIRS`).
+    pub producers: Vec<SharedProducer>,
+    pub relations: Sha256Relations,
+}
+
+impl FrameworkEval for SharedProducerPairEval {
+    fn log_size(&self) -> u32 {
+        self.log_size
+    }
+    fn max_constraint_log_degree_bound(&self) -> u32 {
+        self.log_size + 1
+    }
+    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+        for &producer in &self.producers {
+            producer.emit_entry(&mut eval, &self.relations);
+        }
+        eval.finalize_logup_in_pairs();
+        eval
+    }
+}
+
+pub type SharedProducerPairComponent = FrameworkComponent<SharedProducerPairEval>;
+
+// ---------------------------------------------------------------------------
 // Aggregate IDs
 // ---------------------------------------------------------------------------
 
