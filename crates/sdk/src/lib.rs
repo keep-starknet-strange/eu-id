@@ -42,6 +42,7 @@ use bzip2::write::BzEncoder;
 use bzip2::Compression;
 use ciborium::value::Value;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 uniffi::setup_scaffolding!();
 
@@ -154,6 +155,74 @@ pub struct ZkContract {
     pub result_nat_in_set: String,
 }
 
+const TS13_SYSTEM_ID: &str = "stwo-euid-v1";
+const TS13_LONGFELLOW_SYSTEM_ID: &str = "longfellow-libzk-v1";
+const TS13_CREDENTIAL_FORMAT: &str = "mso_mdoc_zk";
+const TS13_UNSUPPORTED_JWT_FORMAT: &str = "zk-jwt";
+const TS13_DEVICE_AUTH_PROFILE: &str = "iso18013-5";
+const TS13_PID_DOCTYPE: &str = "eu.europa.ec.eudi.pid.1";
+const TS13_PID_NAMESPACE: &str = "eu.europa.ec.eudi.pid.1";
+const TS13_MAX_MDOC_BYTES: u32 = 16_384;
+const TS13_NUM_ATTRIBUTES: u32 = 1;
+const TS13_MAX_ATTRIBUTE_BYTES: u32 = 32;
+const TS13_POTENTIAL_ISSUERS: u32 = 1;
+const TS13_REVOCATION_ENABLED: bool = true;
+const TS13_REVOCATION_ID_WIDTH_BYTES: u32 = 8;
+
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Ts13DisclosureKind {
+    Equality,
+    Extension,
+}
+
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ts13PresentationRequest {
+    pub credential_format: String,
+    pub zk_system_id: String,
+    pub doctype: String,
+    pub namespace: String,
+    pub circuit_hash: String,
+    pub preprocessed_root: Vec<u8>,
+    pub num_attributes: u32,
+    pub max_mdoc_bytes: u32,
+    pub max_attribute_bytes: u32,
+    pub potential_issuers: u32,
+    pub revocation_enabled: bool,
+    pub revocation_id_width_bytes: u32,
+    pub device_auth_profile: String,
+    pub current_date_epoch_day: i32,
+    pub session_transcript: Vec<u8>,
+    pub trusted_issuer_hashes: Vec<String>,
+    pub revocation_public_key_x: Vec<u8>,
+    pub revocation_public_key_y: Vec<u8>,
+    pub revocation_epoch: u32,
+}
+
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ts13DisclosedAttribute {
+    pub namespace: String,
+    pub name: String,
+    pub value_cbor: Vec<u8>,
+    pub disclosure: Ts13DisclosureKind,
+}
+
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ts13ZkDocument {
+    pub doc_type: String,
+    pub zk_system_id: String,
+    pub circuit_hash: String,
+    pub preprocessed_root: Vec<u8>,
+    pub request_binding_hash: String,
+    pub disclosed_attributes: Vec<Ts13DisclosedAttribute>,
+    pub proof: Vec<u8>,
+}
+
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MdocRequestProfile {
+    ProductDefault,
+    Ts13AgeOver18Equality,
+}
+
 /// The frozen contract constants. Single source of truth for both apps.
 #[uniffi::export]
 pub fn zk_contract_v1() -> ZkContract {
@@ -172,6 +241,226 @@ pub fn zk_contract_v1() -> ZkContract {
         param_num_attributes: "num_attributes".to_string(),
         param_circuit_hash: "circuit_hash".to_string(),
         result_nat_in_set: "nationality_in_set".to_string(),
+    }
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn cbor_bytes(value: Value) -> Vec<u8> {
+    let mut out = Vec::new();
+    ciborium::ser::into_writer(&value, &mut out)
+        .expect("CBOR serialization of TS13 metadata is infallible");
+    out
+}
+
+fn ts13_tuple_value(request: &Ts13PresentationRequest) -> Value {
+    Value::Map(vec![
+        ("system".into(), request.zk_system_id.as_str().into()),
+        (
+            "credential_format".into(),
+            request.credential_format.as_str().into(),
+        ),
+        ("doctype".into(), request.doctype.as_str().into()),
+        ("namespace".into(), request.namespace.as_str().into()),
+        ("num_attributes".into(), Value::from(request.num_attributes)),
+        ("max_mdoc_bytes".into(), Value::from(request.max_mdoc_bytes)),
+        (
+            "max_attribute_bytes".into(),
+            Value::from(request.max_attribute_bytes),
+        ),
+        (
+            "potential_issuers".into(),
+            Value::from(request.potential_issuers),
+        ),
+        (
+            "revocation_enabled".into(),
+            Value::Bool(request.revocation_enabled),
+        ),
+        (
+            "revocation_id_width_bytes".into(),
+            Value::from(request.revocation_id_width_bytes),
+        ),
+        (
+            "device_auth_profile".into(),
+            request.device_auth_profile.as_str().into(),
+        ),
+    ])
+}
+
+fn ts13_request_binding_hash(request: &Ts13PresentationRequest) -> String {
+    let value = Value::Map(vec![
+        ("tuple".into(), ts13_tuple_value(request)),
+        ("circuit_hash".into(), request.circuit_hash.as_str().into()),
+        (
+            "preprocessed_root".into(),
+            Value::Bytes(request.preprocessed_root.clone()),
+        ),
+        (
+            "current_date_epoch_day".into(),
+            Value::from(request.current_date_epoch_day),
+        ),
+        (
+            "session_transcript".into(),
+            Value::Bytes(request.session_transcript.clone()),
+        ),
+        (
+            "trusted_issuer_hashes".into(),
+            Value::Array(
+                request
+                    .trusted_issuer_hashes
+                    .iter()
+                    .map(|hash| hash.as_str().into())
+                    .collect(),
+            ),
+        ),
+        (
+            "revocation_public_key_x".into(),
+            Value::Bytes(request.revocation_public_key_x.clone()),
+        ),
+        (
+            "revocation_public_key_y".into(),
+            Value::Bytes(request.revocation_public_key_y.clone()),
+        ),
+        (
+            "revocation_epoch".into(),
+            Value::from(request.revocation_epoch),
+        ),
+    ]);
+    hex_sha256(&cbor_bytes(value))
+}
+
+#[uniffi::export]
+pub fn ts13_default_circuit_hash() -> String {
+    eu_id_prover::ts13::ts13_default_circuit_hash()
+}
+
+#[uniffi::export]
+pub fn ts13_default_preprocessed_root() -> Vec<u8> {
+    eu_id_prover::ts13::ts13_default_preprocessed_root().to_vec()
+}
+
+fn ts13_tuple_is_supported(request: &Ts13PresentationRequest) -> bool {
+    request.doctype == TS13_PID_DOCTYPE
+        && request.namespace == TS13_PID_NAMESPACE
+        && request.num_attributes == TS13_NUM_ATTRIBUTES
+        && request.max_mdoc_bytes == TS13_MAX_MDOC_BYTES
+        && request.max_attribute_bytes == TS13_MAX_ATTRIBUTE_BYTES
+        && request.potential_issuers == TS13_POTENTIAL_ISSUERS
+        && request.revocation_enabled == TS13_REVOCATION_ENABLED
+        && request.revocation_id_width_bytes == TS13_REVOCATION_ID_WIDTH_BYTES
+        && request.device_auth_profile == TS13_DEVICE_AUTH_PROFILE
+}
+
+#[uniffi::export]
+pub fn ts13_validate_presentation_request(
+    request: &Ts13PresentationRequest,
+) -> Result<(), ZkError> {
+    if request.credential_format == TS13_UNSUPPORTED_JWT_FORMAT {
+        return Err(ZkError::InvalidInput(
+            "unsupported zk-jwt TS13 credential format".to_string(),
+        ));
+    }
+    if request.credential_format != TS13_CREDENTIAL_FORMAT {
+        return Err(ZkError::InvalidInput(format!(
+            "unsupported TS13 credential format: {}",
+            request.credential_format
+        )));
+    }
+    if request.zk_system_id != TS13_SYSTEM_ID {
+        if request.zk_system_id == TS13_LONGFELLOW_SYSTEM_ID {
+            return Err(ZkError::InvalidInput(
+                "unsupported system: longfellow-libzk-v1 is libzk-only".to_string(),
+            ));
+        }
+        return Err(ZkError::InvalidInput(format!(
+            "unsupported zkSystemId: {}",
+            request.zk_system_id
+        )));
+    }
+    if !ts13_tuple_is_supported(request) {
+        return Err(ZkError::InvalidInput(
+            "unsupported TS13 tuple; no circuit_hash lookup entry".to_string(),
+        ));
+    }
+    let expected_hash = ts13_default_circuit_hash();
+    if request.circuit_hash != expected_hash {
+        return Err(ZkError::InvalidInput(format!(
+            "unknown circuit_hash: {}",
+            request.circuit_hash
+        )));
+    }
+    if request.preprocessed_root.len() != 32 {
+        return Err(ZkError::InvalidInput(
+            "preprocessed_root must be 32 bytes".to_string(),
+        ));
+    }
+    if request.trusted_issuer_hashes.len() != request.potential_issuers as usize {
+        return Err(ZkError::InvalidInput(
+            "trusted issuer set does not match TS13 tuple".to_string(),
+        ));
+    }
+    if request
+        .trusted_issuer_hashes
+        .iter()
+        .any(|hash| hash.is_empty())
+    {
+        return Err(ZkError::InvalidInput(
+            "trusted issuer hashes must be non-empty".to_string(),
+        ));
+    }
+    if request.revocation_public_key_x.len() != 32 || request.revocation_public_key_y.len() != 32 {
+        return Err(ZkError::InvalidInput(
+            "revocation public key coordinates must be 32 bytes".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[uniffi::export]
+pub fn ts13_build_zk_document(
+    request: Ts13PresentationRequest,
+    disclosed_attributes: Vec<Ts13DisclosedAttribute>,
+    proof: Vec<u8>,
+) -> Result<Ts13ZkDocument, ZkError> {
+    ts13_validate_presentation_request(&request)?;
+    Ok(Ts13ZkDocument {
+        doc_type: request.doctype.clone(),
+        zk_system_id: request.zk_system_id.clone(),
+        circuit_hash: request.circuit_hash.clone(),
+        preprocessed_root: request.preprocessed_root.clone(),
+        request_binding_hash: ts13_request_binding_hash(&request),
+        disclosed_attributes,
+        proof,
+    })
+}
+
+#[uniffi::export]
+pub fn ts13_verify_zk_document(
+    request: &Ts13PresentationRequest,
+    document: &Ts13ZkDocument,
+) -> Result<bool, ZkError> {
+    if ts13_validate_presentation_request(request).is_err() {
+        return Ok(false);
+    }
+    Ok(document.doc_type == request.doctype
+        && document.zk_system_id == request.zk_system_id
+        && document.circuit_hash == request.circuit_hash
+        && document.preprocessed_root == request.preprocessed_root
+        && document.request_binding_hash == ts13_request_binding_hash(request))
+}
+
+pub fn ts13_disclosure_kind(
+    attribute: &eu_id_prover::mdoc::MdocRequestedAttribute,
+) -> Ts13DisclosureKind {
+    match attribute.mode {
+        eu_id_prover::mdoc::MdocDisclosureMode::ValueEquality(_) => Ts13DisclosureKind::Equality,
+        eu_id_prover::mdoc::MdocDisclosureMode::AgeOver
+        | eu_id_prover::mdoc::MdocDisclosureMode::Alpha2Set => Ts13DisclosureKind::Extension,
     }
 }
 
@@ -575,17 +864,31 @@ pub fn verify_identity(
 /// attributes — the mode only tunes the policy (neutralization), never which
 /// attributes are proven — so both legs are always present.
 fn expected_mdoc_attributes() -> Vec<eu_id_prover::mdoc::MdocRequestedAttribute> {
+    expected_mdoc_attributes_for_profile(MdocRequestProfile::ProductDefault)
+}
+
+fn expected_mdoc_attributes_for_profile(
+    profile: MdocRequestProfile,
+) -> Vec<eu_id_prover::mdoc::MdocRequestedAttribute> {
     let contract = zk_contract_v1();
-    vec![
-        eu_id_prover::mdoc::MdocRequestedAttribute {
-            element_identifier: contract.element_birth_date,
-            mode: eu_id_prover::mdoc::MdocDisclosureMode::AgeOver,
-        },
-        eu_id_prover::mdoc::MdocRequestedAttribute {
-            element_identifier: contract.element_nationality,
-            mode: eu_id_prover::mdoc::MdocDisclosureMode::Alpha2Set,
-        },
-    ]
+    match profile {
+        MdocRequestProfile::ProductDefault => vec![
+            eu_id_prover::mdoc::MdocRequestedAttribute {
+                element_identifier: contract.element_birth_date,
+                mode: eu_id_prover::mdoc::MdocDisclosureMode::AgeOver,
+            },
+            eu_id_prover::mdoc::MdocRequestedAttribute {
+                element_identifier: contract.element_nationality,
+                mode: eu_id_prover::mdoc::MdocDisclosureMode::Alpha2Set,
+            },
+        ],
+        MdocRequestProfile::Ts13AgeOver18Equality => {
+            vec![eu_id_prover::mdoc::MdocRequestedAttribute {
+                element_identifier: result_age_over(18),
+                mode: eu_id_prover::mdoc::MdocDisclosureMode::ValueEquality(vec![0xf5]),
+            }]
+        }
+    }
 }
 
 fn mdoc_request(
@@ -739,6 +1042,222 @@ pub fn verify_mdoc_pid(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ts13_request() -> Ts13PresentationRequest {
+        Ts13PresentationRequest {
+            credential_format: "mso_mdoc_zk".to_string(),
+            zk_system_id: "stwo-euid-v1".to_string(),
+            doctype: "eu.europa.ec.eudi.pid.1".to_string(),
+            namespace: "eu.europa.ec.eudi.pid.1".to_string(),
+            circuit_hash: ts13_default_circuit_hash(),
+            preprocessed_root: ts13_default_preprocessed_root(),
+            num_attributes: 1,
+            max_mdoc_bytes: 16_384,
+            max_attribute_bytes: 32,
+            potential_issuers: 1,
+            revocation_enabled: true,
+            revocation_id_width_bytes: 8,
+            device_auth_profile: "iso18013-5".to_string(),
+            current_date_epoch_day: 20_637,
+            session_transcript: vec![1, 2, 3, 4],
+            trusted_issuer_hashes: vec!["issuer-root-sha256".to_string()],
+            revocation_public_key_x: vec![0x11; 32],
+            revocation_public_key_y: vec![0x22; 32],
+            revocation_epoch: 42,
+        }
+    }
+
+    #[test]
+    fn ts13_presentation_round_trip() {
+        let request = ts13_request();
+        let disclosed = vec![Ts13DisclosedAttribute {
+            namespace: request.namespace.clone(),
+            name: "age_over_18".to_string(),
+            value_cbor: vec![0xf5],
+            disclosure: Ts13DisclosureKind::Equality,
+        }];
+
+        let document =
+            ts13_build_zk_document(request.clone(), disclosed.clone(), b"proof".to_vec()).unwrap();
+
+        assert_eq!(document.doc_type, request.doctype);
+        assert_eq!(document.zk_system_id, "stwo-euid-v1");
+        assert_eq!(document.circuit_hash, request.circuit_hash);
+        assert_eq!(document.disclosed_attributes, disclosed);
+        assert!(ts13_verify_zk_document(&request, &document).unwrap());
+    }
+
+    #[test]
+    fn ts13_presentation_rejects_unknown_zk_system_id() {
+        let mut request = ts13_request();
+        request.zk_system_id = "unknown-zk-system".to_string();
+
+        assert!(matches!(
+            ts13_validate_presentation_request(&request),
+            Err(ZkError::InvalidInput(message)) if message.contains("zkSystemId")
+        ));
+    }
+
+    #[test]
+    fn ts13_presentation_rejects_longfellow_only_request() {
+        let mut request = ts13_request();
+        request.zk_system_id = "longfellow-libzk-v1".to_string();
+
+        assert!(matches!(
+            ts13_validate_presentation_request(&request),
+            Err(ZkError::InvalidInput(message)) if message.contains("libzk-only")
+        ));
+    }
+
+    #[test]
+    fn ts13_presentation_rejects_unknown_circuit_hash() {
+        let mut request = ts13_request();
+        request.circuit_hash = "00".repeat(32);
+
+        assert!(matches!(
+            ts13_validate_presentation_request(&request),
+            Err(ZkError::InvalidInput(message)) if message.contains("circuit_hash")
+        ));
+    }
+
+    #[test]
+    fn ts13_presentation_rejects_tuple_mismatch() {
+        let request = ts13_request();
+        let document =
+            ts13_build_zk_document(request.clone(), Vec::new(), b"proof".to_vec()).unwrap();
+        let mut other_request = request;
+        other_request.max_mdoc_bytes += 1;
+
+        assert!(!ts13_verify_zk_document(&other_request, &document).unwrap());
+    }
+
+    #[test]
+    fn ts13_presentation_rejects_caller_policy_drift() {
+        let request = ts13_request();
+        let document =
+            ts13_build_zk_document(request.clone(), Vec::new(), b"proof".to_vec()).unwrap();
+        let mut other_request = request;
+        other_request.current_date_epoch_day += 1;
+
+        assert!(!ts13_verify_zk_document(&other_request, &document).unwrap());
+    }
+
+    #[test]
+    fn ts13_presentation_rejects_revocation_policy_drift() {
+        let request = ts13_request();
+        let document =
+            ts13_build_zk_document(request.clone(), Vec::new(), b"proof".to_vec()).unwrap();
+        let mut other_request = request.clone();
+        other_request.revocation_epoch += 1;
+        assert!(!ts13_verify_zk_document(&other_request, &document).unwrap());
+
+        let mut other_request = request.clone();
+        other_request.revocation_public_key_x[0] ^= 1;
+        assert!(!ts13_verify_zk_document(&other_request, &document).unwrap());
+
+        let mut other_request = request;
+        other_request
+            .trusted_issuer_hashes
+            .push("extra".to_string());
+        assert!(!ts13_verify_zk_document(&other_request, &document).unwrap());
+    }
+
+    #[test]
+    fn ts13_presentation_rejects_preprocessed_root_drift() {
+        let request = ts13_request();
+        let document =
+            ts13_build_zk_document(request.clone(), Vec::new(), b"proof".to_vec()).unwrap();
+        assert_eq!(document.preprocessed_root, request.preprocessed_root);
+
+        let mut other_request = request;
+        other_request.preprocessed_root[0] ^= 1;
+
+        assert!(!ts13_verify_zk_document(&other_request, &document).unwrap());
+    }
+
+    #[test]
+    fn ts13_presentation_rejects_malformed_preprocessed_root() {
+        let mut request = ts13_request();
+        request.preprocessed_root.pop();
+
+        assert!(matches!(
+            ts13_validate_presentation_request(&request),
+            Err(ZkError::InvalidInput(message)) if message.contains("preprocessed_root")
+        ));
+    }
+
+    #[test]
+    fn ts13_presentation_rejects_zk_jwt_unsupported() {
+        let mut request = ts13_request();
+        request.credential_format = "zk-jwt".to_string();
+
+        assert!(matches!(
+            ts13_validate_presentation_request(&request),
+            Err(ZkError::InvalidInput(message)) if message.contains("unsupported zk-jwt")
+        ));
+    }
+
+    #[test]
+    fn circuit_hash_sdk_lookup_fail_closed() {
+        let mut request = ts13_request();
+        request.num_attributes = 2;
+
+        assert!(matches!(
+            ts13_validate_presentation_request(&request),
+            Err(ZkError::InvalidInput(message)) if message.contains("unsupported TS13 tuple")
+        ));
+    }
+
+    #[test]
+    fn ts13_sdk_labels_extension_predicates() {
+        let equality = eu_id_prover::mdoc::MdocRequestedAttribute {
+            element_identifier: "age_over_18".to_string(),
+            mode: eu_id_prover::mdoc::MdocDisclosureMode::ValueEquality(vec![0xf5]),
+        };
+        let age_extension = eu_id_prover::mdoc::MdocRequestedAttribute {
+            element_identifier: "birth_date".to_string(),
+            mode: eu_id_prover::mdoc::MdocDisclosureMode::AgeOver,
+        };
+        let nat_extension = eu_id_prover::mdoc::MdocRequestedAttribute {
+            element_identifier: "nationality".to_string(),
+            mode: eu_id_prover::mdoc::MdocDisclosureMode::Alpha2Set,
+        };
+
+        assert_eq!(
+            ts13_disclosure_kind(&equality),
+            Ts13DisclosureKind::Equality
+        );
+        assert_eq!(
+            ts13_disclosure_kind(&age_extension),
+            Ts13DisclosureKind::Extension
+        );
+        assert_eq!(
+            ts13_disclosure_kind(&nat_extension),
+            Ts13DisclosureKind::Extension
+        );
+    }
+
+    #[test]
+    fn ts13_sdk_value_equality_request_maps_to_prover() {
+        let ts13_attrs =
+            expected_mdoc_attributes_for_profile(MdocRequestProfile::Ts13AgeOver18Equality);
+        assert_eq!(ts13_attrs.len(), 1);
+        assert_eq!(ts13_attrs[0].element_identifier, "age_over_18");
+        assert!(matches!(
+            ts13_attrs[0].mode,
+            eu_id_prover::mdoc::MdocDisclosureMode::ValueEquality(ref bytes) if bytes == &vec![0xf5]
+        ));
+
+        let default_attrs =
+            expected_mdoc_attributes_for_profile(MdocRequestProfile::ProductDefault);
+        assert_eq!(default_attrs.len(), 2);
+        assert!(default_attrs
+            .iter()
+            .any(|attr| matches!(attr.mode, eu_id_prover::mdoc::MdocDisclosureMode::AgeOver)));
+        assert!(default_attrs
+            .iter()
+            .all(|attr| attr.element_identifier != "age_over_18"));
+    }
 
     fn sample_statement() -> ZkPublicStatement {
         ZkPublicStatement {

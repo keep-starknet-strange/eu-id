@@ -47,6 +47,7 @@ bincode = "1"
 # FFI transport compression: the SDK keeps its exported byte API stable while
 # compressing the inner bincode `Proof` payload carried in `ProofEnvelope`.
 bzip2 = "0.6"
+sha2 = "0.10"
 
 [[bin]]
 # Bundled binding generator. Run as:
