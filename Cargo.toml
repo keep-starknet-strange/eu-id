@@ -9,6 +9,8 @@ members = [
     "crates/eu-id-prover",
     "crates/eu-id-ffi",
     "crates/sdk",
+    "crates/stwo-keccak",
+    "crates/stwo-mldsa",
 ]
 resolver = "2"
 
