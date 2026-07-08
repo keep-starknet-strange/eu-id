@@ -206,3 +206,30 @@ fn wrong_padding_position_changes_output() {
     assert_eq!(proof.output, expected);
     assert!(verify_shake256(&proof).is_ok());
 }
+
+/// Preprocessed-root pin (F-ROOT hardening): `verify_shake256` recomputes the
+/// tree-0 root from the public message/shape and rejects a forged preprocessed
+/// tree fail-closed, before any STARK work.
+///
+/// Control: the honest proof's committed tree-0 root equals the derived root.
+/// Negative: flipping a byte of `commitments[0]` is caught at the pin — not at
+/// a downstream constraint.
+#[test]
+fn preprocessed_root_pin_rejects_tampered_root() {
+    let mut proof = honest();
+    // Control leg: unmutated verifies.
+    verify_shake256(&proof).expect("control must verify before tamper");
+    // Sanity: the derived root equals the committed one.
+    let derived =
+        stwo_keccak::shake256_expected_preprocessed_root(&proof, proof.stark_proof.config);
+    assert_eq!(
+        derived, proof.stark_proof.0.commitments[0],
+        "derived root must equal the honest committed tree-0 root"
+    );
+    // Tamper the committed preprocessed root.
+    proof.stark_proof.0.commitments[0].0[0] ^= 1;
+    assert!(
+        verify_shake256(&proof).is_err(),
+        "tampered preprocessed root must reject at the pin"
+    );
+}

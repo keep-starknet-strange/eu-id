@@ -27,7 +27,8 @@ use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 
 use air_core::{
-    fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint, TreeLayout,
+    fingerprint_preprocessed_columns, Air, AirProver, CommitmentRoot, PreprocessedColumnFingerprint,
+    TreeLayout,
 };
 
 use crate::constants::N_BYTES_IN_STATE;
@@ -629,6 +630,34 @@ pub fn prove_shake256(
     })
 }
 
+/// Compute the expected tree-0 (preprocessed) commitment root for a standalone
+/// SHAKE-256 proof, by rebuilding the prover-side [`KeccakProver`] from the
+/// public message + shape and running the prover's tree-0 commit path
+/// ([`air_core::compute_preprocessed_root_uncached`]). The keccak round-cyclic
+/// tables + range tables are shape-determined, but the padded per-instance
+/// preprocessed layout is sized to the proof's `shape` (a public field), so the
+/// uncached variant is used to pin this specific shape's tree exactly (mirroring
+/// the `stwo-mldsa` standalone pin and the P-256 hinted-mul schedule case). The
+/// witness rebuilt here materializes only shape-derived preprocessed content.
+///
+/// # Soundness
+///
+/// This root is the tree-0 soundness anchor (F-ROOT class): the Blake2s Merkle
+/// root binds the contents, order, and sizes of every preprocessed table.
+/// [`verify_shake256`] recomputes it from the public message/shape and rejects
+/// fail-closed on mismatch, so a forged preprocessed tree never reaches the
+/// STARK verifier.
+pub fn shake256_expected_preprocessed_root(proof: &KeccakProof, config: PcsConfig) -> CommitmentRoot {
+    let witness = build_witness(&proof.message, proof.shape.n_squeeze);
+    let mut prover = KeccakProver {
+        witness,
+        relations: None,
+        ic: None,
+        components: None,
+    };
+    air_core::compute_preprocessed_root_uncached(&mut [&mut prover], config)
+}
+
 pub fn verify_shake256(proof: &KeccakProof) -> Result<(), VerificationError> {
     // Global logup sum is checked by air_core::verify; add an early structural
     // check for a friendlier error.
@@ -651,5 +680,19 @@ pub fn verify_shake256(proof: &KeccakProof) -> Result<(), VerificationError> {
         relations: None,
         components: None,
     };
-    air_core::verify(&mut [&mut verifier], &proof.stark_proof)
+    // Pin the preprocessed (tree-0) root before any transcript work: recompute
+    // it from the public message/shape and reject a forged preprocessed tree
+    // fail-closed (F-ROOT hardening).
+    let expected_root = shake256_expected_preprocessed_root(proof, proof.stark_proof.config);
+    air_core::verify_with_expected_preprocessed_root(
+        &mut [&mut verifier],
+        &proof.stark_proof,
+        Some(expected_root),
+    )
+    .map_err(|error| match error {
+        air_core::VerifyError::Stark(error) => error,
+        air_core::VerifyError::PreprocessedRootMismatch { .. } => {
+            VerificationError::InvalidStructure("keccak preprocessed root mismatch (forged tree-0)".into())
+        }
+    })
 }

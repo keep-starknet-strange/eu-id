@@ -361,6 +361,39 @@ M4 A3-on-coprocessor note (2026-07-04): Q-M1-005 directed a merge of `feat/a3-hy
 | 2026-07-06 | working tree @ 9e1ac686 | P4b Q-025 circle-FFT Ligero (BENCH_ITERS=1, RAYON_NUM_THREADS=1, release) | `mdoc_perf_probe` prove / verify | 4,450 ms / 264 ms | 1,986 ms / 720 ms |
 | 2026-07-06 | working tree @ 9e1ac686 | P4b Q-025 circle-FFT Ligero | rs_encode / merkle / sumcheck / claim_batch prove ms | 2,810 / — / — / — | 202 / 89 / 156 / 313 |
 | 2026-07-06 | working tree @ 9e1ac686 | P4b Q-025 circle-FFT Ligero | proof bytes / max RSS / peak footprint | 5.26 MB / 472.8 MB / 441.1 MB | 5,269,517 / 434,241,536 / 401,474,208 |
+| 2026-07-08 | worktree @ 6b4c7b03 (feat/mldsa) | M8 ML-DSA-65 standalone statement (RAYON_NUM_THREADS=1, release, PcsConfig::default 1 KiB) | `composed::composed_numbers` cells / perms | — | 5,846,928 / 17 |
+| 2026-07-08 | worktree @ 6b4c7b03 (feat/mldsa) | M8 ML-DSA-65 standalone statement | prove / verify ms | — | 879 / 25 |
+| 2026-07-08 | worktree @ 6b4c7b03 (feat/mldsa) | M8 ML-DSA-65 standalone statement | proof bytes (1 KiB) | — | 1,572,537 (1.57 MB) |
+| 2026-07-08 | worktree @ 6b4c7b03 (feat/mldsa) | M8 ML-DSA-65 mdoc e2e (`--no-default-features`, RAYON_NUM_THREADS=1, RUST_MIN_STACK=512M, release) | prove / verify ms | — | 3,915 / ~73 |
+| 2026-07-08 | worktree @ 6b4c7b03 (feat/mldsa) | M8 ML-DSA-65 mdoc e2e | proof bytes raw / bzip2 transport | — | 10,270,671 / 6,994,238 |
+| 2026-07-08 | worktree @ 6b4c7b03 (feat/mldsa) | M8 P-256 non-copro mdoc (`--no-default-features`, reference row) | prove / verify ms | — | 4,532 / 51 |
+| 2026-07-08 | worktree @ 6b4c7b03 (feat/mldsa) | M8 P-256 non-copro mdoc (reference row) | proof bytes raw / bzip2 transport | — | 4,956,064 / 3,866,546 |
+
+M8 ML-DSA-65 note (2026-07-08): pure-mode (A1 rejected — ML-DSA absorbs the
+full ISO 18013-5 `Sig_structure`, not a digest). Standalone numbers from
+`RAYON_NUM_THREADS=1 RUST_MIN_STACK=536870912 cargo test -p stwo-mldsa --release
+--test composed composed_numbers -- --ignored --test-threads=1 --nocapture`.
+mdoc e2e from `... cargo test -p eu-id-prover --no-default-features --release
+--test mdoc_mldsa mldsa_mdoc_proves_and_verifies_end_to_end -- --test-threads=1
+--nocapture`. The bzip2 transport size is the house metric
+(`bzip2::Compression::best()`, matching `sdk::compress_stark_proof_for_ffi` and
+`bench_report.rs::bzip2_best`). ML-DSA mdoc is 2.07x larger raw / 1.81x larger
+over-the-wire than the P-256 non-copro mdoc; bzip2 recovers ~32% on ML-DSA
+(vs ~22% on P-256), so the delta narrows over the wire. Proof-size dissection
+(`mdoc_proof_byte_breakdown`) of the 10.27 MB proof: `queried_values`
+9,081,672 B (88.5%), `sampled_values` 1,013,440 B (9.9%), `decommitments`
+90,408 B (0.9%) — top-3 = 98.4%; both dominant fields are width-linear
+(`n_queries x committed_column_bytes` / OODS column values), and the in-circuit
+ML-DSA issuer roughly doubles committed column count vs the P-256 issuer draft.
+Cheapest identified lever (quantified only, NOT scheduled): column-width
+reduction in the keccak / `mldsa_coeffs` modules; FRI-param levers already
+rejected for the mdoc profile (WO-3.1, blowup-1 grew bytes 84%). 6.99 MB wire
+size is a server/desktop-profile artifact (above the 2.5 MB mobile ceiling).
+Prove-time single-sample noise: the e2e test read 3,915 ms; a median-of-3 probe
+under concurrent load read 4,345 ms — verify/bytes/breakdown are load-stable.
+M8 also pins the tree-0 preprocessed root (F-ROOT) on both the standalone
+(`stwo_mldsa::statement::verify_mldsa`) and hosted
+(`eu_id_prover::mdoc::verify_mdoc_circuit_with_preprocessed_root`) verify paths.
 
 P3 Longfellow note (2026-07-06): vectors are byte extracts from Google
 Longfellow `mdoc_examples.h` at `d8ad8f65187c7c364a3c2181ad484bcab03f0ec2`

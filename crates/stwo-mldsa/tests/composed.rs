@@ -196,6 +196,42 @@ fn composed_negative_f_wrong_pk_rho() {
 }
 
 // =====================================================================
+// Preprocessed-root pin (F-ROOT hardening): `verify_mldsa` recomputes the
+// tree-0 root from the public input and rejects a forged preprocessed tree
+// fail-closed, before any STARK work.
+// =====================================================================
+
+/// Control: an honest proof's committed tree-0 root equals the root
+/// `verify_mldsa` derives from the public input, so verify accepts.
+#[test]
+fn composed_preprocessed_root_pin_control() {
+    let msg = big_msg("froot-control", 1024);
+    let (w, input) = witness_and_input(8101, &msg);
+    let proof = prove_mldsa(w, input, PcsConfig::default()).expect("prove");
+    verify_mldsa(&proof).expect("honest proof must verify under the root pin");
+}
+
+/// Negative: tamper the proof's tree-0 (preprocessed) commitment root. The pin
+/// recomputes the honest root from `proof.input` and rejects the mismatch
+/// fail-closed — the forged tree never reaches the STARK verifier. This is the
+/// F-ROOT class: a forged range table / schedule / constant column would carry
+/// a different tree-0 root, caught here.
+#[test]
+fn composed_preprocessed_root_pin_rejects_tampered_root() {
+    let msg = big_msg("froot-neg", 1024);
+    let (w, input) = witness_and_input(8102, &msg);
+    let mut proof = prove_mldsa(w, input, PcsConfig::default()).expect("prove");
+    // Sanity: unmutated verifies (shares the seed with the mutation below).
+    verify_mldsa(&proof).expect("control leg must verify before tamper");
+    // Flip one byte of the committed preprocessed root.
+    proof.stark_proof.0.commitments[0].0[0] ^= 1;
+    assert!(
+        verify_mldsa(&proof).is_err(),
+        "tampered preprocessed root must reject at the pin (not just constraints)"
+    );
+}
+
+// =====================================================================
 // Numbers (ignored): cells, perms, prove/verify ms, proof bytes.
 // =====================================================================
 

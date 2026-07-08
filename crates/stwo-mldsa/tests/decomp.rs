@@ -76,6 +76,7 @@ fn decomp_seeds_honest_without_mutation() {
         (6001u64, &b"drop-digit"[..]),
         (6002, b"flip-hint"),
         (6003, b"w-tamper"),
+        (6005, b"w0-range"),
     ] {
         let (w, _) = witness_and_input(seed, msg);
         let proof = prove_decomp(w, PcsConfig::default())
@@ -148,4 +149,20 @@ fn negative_hint_weight_over_omega() {
     }
     assert!(cur >= target, "must reach ω+1 hints");
     assert!(rejected(w), "Σh = ω+1 must be rejected by the accumulator gate");
+}
+
+/// w0 out of centered range (§5 row I-3a): push one `w0` above γ2. The
+/// [DECOMP] centered-range gate is the exact two-sided rc `a = w0+γ2−1`,
+/// `b = γ2−w0`, both required in `[0, 2γ2)`. Setting `w0 = γ2+1` makes
+/// `b = γ2 − (γ2+1) = −1`, which has no row in the range table ⇒ reject.
+#[test]
+fn negative_w0_out_of_range() {
+    let (mut w, _) = witness_and_input(6005, b"w0-range");
+    // γ2 is the upper bound of the centered window (w0 ∈ (−γ2, γ2]); one past it
+    // is out of range on the `b = γ2 − w0` side.
+    w.decomp.w0[0][0] = stwo_mldsa::constants::GAMMA2 as i32 + 1;
+    assert!(
+        rejected(w),
+        "w0 = γ2+1 must be rejected by the centered-range lookup"
+    );
 }

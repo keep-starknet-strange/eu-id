@@ -22,4 +22,6 @@ pub mod tables;
 pub mod tables_air;
 pub mod utils;
 
-pub use stark::{prove_shake256, verify_shake256, KeccakProof};
+pub use stark::{
+    prove_shake256, shake256_expected_preprocessed_root, verify_shake256, KeccakProof,
+};
