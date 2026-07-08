@@ -2842,12 +2842,13 @@ fn longfellow_vector_end_to_end(
 
     let bytes = mdoc_proof_byte_breakdown(&proof).proof_bytes;
     println!(
-        "longfellow_vector={} n={} security_bits={} prove_ms={} verify_ms={} proof_bytes={bytes}",
+        "longfellow_vector={} n={} security_bits={} prove_ms={} verify_ms={} proof_bytes={bytes} preprocessed_root={}",
         vector.name,
         statement.attributes.len(),
         proof.stark_proof.config.security_bits(),
         prove_elapsed.as_millis(),
-        verify_elapsed.as_millis()
+        verify_elapsed.as_millis(),
+        hex_bytes(&proof.stark_proof.commitments[0].0)
     );
 }
 

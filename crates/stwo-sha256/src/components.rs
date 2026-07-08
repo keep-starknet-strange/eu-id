@@ -414,19 +414,31 @@ fn emit<E: EvalAtRow, R: Relation<E::F, E::EF>>(
 
 /// Class-D blinded yield of one shared-table producer row (Q-015 §4b).
 ///
-/// Emits TWO entries against the same relation and the same `values`:
-/// - `-mult` (the normal yield), and
-/// - `+is_dummy · mult` (the cancelling twin).
+/// Emits ONE gated entry against the relation: numerator `-(1 − is_dummy)·mult`
+/// at the row key.
 ///
-/// On a real row (`is_dummy = 0`) only `-mult` fires — identical to the
-/// unblinded producer. On a dummy row (`is_dummy = 1`) the pair sums to
-/// `(-m + m)/(z − combine(values)) = 0` for ANY committed `m`, so the fresh
-/// random blind multiplicities on the reserved upper half never touch the
-/// global LogUp balance. Both entries read the same committed multiplicity
-/// cell and the same preprocessed key, so a malicious prover gets no free
-/// claimed-sum term (P4b blind_claim-hole caution). `is_dummy · mult` is
-/// preprocessed × trace = degree 2, within the `D ≤ 3` budget under
-/// `max_constraint_log_degree_bound = blind_log_size + 1`.
+/// On a real row (`is_dummy = 0`) the numerator is `-mult` — identical to the
+/// unblinded producer. On a dummy row (`is_dummy = 1`) the numerator is
+/// identically `0`, so the dummy row contributes nothing to the LogUp sum for
+/// ANY committed `m`. The fresh random blind multiplicities on the reserved
+/// upper half therefore stay in the COMMITTED multiplicity column exactly as
+/// before (same masking: same blind region, same column, same openings masked)
+/// while costing no second fraction — this is what the earlier cancelling PAIR
+/// (`-mult` and `+is_dummy·mult`) achieved at twice the interaction/quotient
+/// cost.
+///
+/// Soundness: `is_dummy` is PREPROCESSED (trusted), so a malicious prover
+/// cannot un-gate a dummy row to emit a real key — on the whole dummy region
+/// the emitted numerator is forced to `0`. Dummy keys (`≥ 2^16`, unreachable by
+/// honest consumers) therefore remain unreachable, and the resulting LogUp
+/// balance is exactly that of the unblinded table. Both the key and the gate
+/// come from committed/preprocessed data the verifier reconstructs, so there is
+/// no free claimed-sum term (P4b blind_claim-hole caution).
+///
+/// Degree: `(1 − is_dummy)·mult` = preprocessed × trace = degree 2, within the
+/// `D ≤ 3` budget under `max_constraint_log_degree_bound = blind_log_size + 1`.
+/// One fraction per producer (down from two) also LOWERS the batched LogUp
+/// denominator degree relative to the pair form.
 fn emit_blind<E: EvalAtRow, R: Relation<E::F, E::EF>>(
     eval: &mut E,
     rel: &R,
@@ -434,8 +446,10 @@ fn emit_blind<E: EvalAtRow, R: Relation<E::F, E::EF>>(
     is_dummy: E::F,
     values: &[E::F],
 ) {
-    eval.add_to_relation(RelationEntry::base(rel, -mult.clone(), values));
-    eval.add_to_relation(RelationEntry::base(rel, is_dummy * mult, values));
+    // `-(1 − is_dummy)·mult`, kept in the base field (degree 2: preprocessed ×
+    // trace). `base` promotes the base-field numerator to `E::EF`.
+    let one = <E::F as num_traits::One>::one();
+    eval.add_to_relation(RelationEntry::base(rel, -((one - is_dummy) * mult), values));
 }
 
 pub type SigmaDecodeComponent = FrameworkComponent<SigmaDecodeEval>;

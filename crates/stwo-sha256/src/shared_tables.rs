@@ -29,7 +29,7 @@ use crate::components::{
 };
 use crate::field_exposure::FieldExposure;
 use crate::interaction::{
-    build_interaction_columns, producer_blind_frac_columns, ComponentClaim, Frac,
+    build_interaction_columns, producer_blind_frac_column, ComponentClaim, Frac,
 };
 use crate::multiplicities::{
     range_k_multiplicities, round_split_pack_multiplicities, sigma_split_pack_multiplicities,
@@ -70,7 +70,9 @@ impl ShaTablesInteractionClaim {
 /// (`shared_table_trace`), interaction/trace log-size layout, and component
 /// registration (`ShaTablesComponents`). The 9 log₂16 producers pair into
 /// 4 pairs + 1 single (range₁₆); the 3 log₂4 range tables pair into 1 pair +
-/// 1 single. Interaction base columns: 12 producers → 8 columns (from 12).
+/// 1 single = 7 chunks. Under Class-D single-gated blinding each producer emits
+/// ONE fraction, so each chunk yields exactly one paired interaction column:
+/// 12 producers → 7 interaction columns (was 12 under the cancelling-pair form).
 const PRODUCER_PAIRS: &[&[SharedProducer]] = &[
     &[
         SharedProducer::RoundSplit(RoundPartition::Sigma0AndMaj, Half16::Lo),
@@ -169,11 +171,11 @@ impl ShaTableMultiplicities {
 /// Class-D multiplicity blinding (Q-015 §4b / p4c Class D): double the committed
 /// domain by appending `real.len()` fresh random M31 cells over the reserved
 /// dummy-key upper half. The stored (blinded) vector is committed as the
-/// multiplicity column AND read to build the interaction fraction, so both see
-/// the SAME random cells — a requirement of the no-free-claimed-sum twin
-/// (`emit_blind`). Randomness is host CSPRNG, never transcript-derived: the mask
-/// must be secret from the verifier. The dummy cells never touch the LogUp
-/// balance because `emit_blind`'s `+is_dummy·mult` twin zeroes each dummy row.
+/// multiplicity column; the interaction fraction reads the SAME committed cells.
+/// Randomness is host CSPRNG, never transcript-derived: the mask must be secret
+/// from the verifier. The dummy cells never touch the LogUp balance because
+/// `emit_blind` gates the numerator by `(1 − is_dummy)`, forcing it to `0` on
+/// every dummy row regardless of the random multiplicity committed there.
 fn blind_extend(real: Vec<u32>) -> Vec<u32> {
     use rand::{rngs::OsRng, RngCore};
     let real_len = real.len();
@@ -274,10 +276,12 @@ impl ShaTablesProver {
                     log_size: chunk[0].blind_log_size(),
                     preprocessed_columns,
                     trace_columns: chunk.len(),
-                    // Class D: each producer emits two fractions paired into its
-                    // own interaction column, so a chunk owns one paired column
-                    // per producer (not one for the whole chunk).
-                    interaction_columns: chunk.len() * SECURE_EXTENSION_DEGREE,
+                    // Class D (single gated fraction): each producer emits ONE
+                    // gated fraction `-(1 − is_dummy)·mult`, so a 2-producer
+                    // chunk's two fractions pair into ONE interaction column and
+                    // a 1-producer chunk gets one column too — one paired column
+                    // per chunk regardless of producer count.
+                    interaction_columns: SECURE_EXTENSION_DEGREE,
                 }
             })
             .collect()
@@ -475,20 +479,18 @@ fn shared_table_trace_log_sizes() -> Vec<u32> {
 }
 
 /// One `SecureField` (= `SECURE_EXTENSION_DEGREE` base columns) interaction
-/// column per PRODUCER, in flattened `PRODUCER_PAIRS` order. Under Class-D
-/// blinding each producer emits TWO fractions (`-mult` and `+is_dummy·mult`)
-/// which pair into a single column (`finalize_logup_in_pairs`), so a producer
-/// no longer shares its column with its chunk-mate — each producer owns one
-/// paired interaction column at its blinded log size.
+/// column per CHUNK, in `PRODUCER_PAIRS` order. Under Class-D single-gated
+/// blinding each producer emits ONE fraction `-(1 − is_dummy)·mult`, so a
+/// 2-producer chunk's two fractions pair into one column
+/// (`finalize_logup_in_pairs`) and a 1-producer chunk gets one column — one
+/// paired interaction column per chunk at the chunk's blinded log size.
 fn shared_table_interaction_log_sizes() -> Vec<u32> {
     let mut out = Vec::new();
     for chunk in PRODUCER_PAIRS {
-        for producer in chunk.iter() {
-            out.extend(std::iter::repeat_n(
-                producer.blind_log_size(),
-                SECURE_EXTENSION_DEGREE,
-            ));
-        }
+        out.extend(std::iter::repeat_n(
+            chunk[0].blind_log_size(),
+            SECURE_EXTENSION_DEGREE,
+        ));
     }
     out
 }
@@ -552,16 +554,15 @@ fn shared_table_interaction_trace(
     // (registration order) and `shared_table_trace` (multiplicity write order).
     for chunk in PRODUCER_PAIRS {
         let log_size = chunk[0].blind_log_size();
-        // Class D: each producer contributes TWO fractions (`-mult`, `+is_dummy·mult`)
-        // in that order, matching the two `add_to_relation` calls `emit_blind`
-        // fires in `SharedProducer::emit_entry`. `build_interaction_columns`
-        // pairs consecutive fractions, so `[p0_neg, p0_twin, p1_neg, p1_twin]`
-        // pairs each producer's neg with its own twin — the p256 Class-D layout.
-        let mut fracs: Vec<Vec<Frac>> = Vec::with_capacity(chunk.len() * 2);
+        // Class D (single gated fraction): each producer contributes ONE
+        // fraction `-(1 − is_dummy)·mult`, matching the single `add_to_relation`
+        // call `emit_blind` fires in `SharedProducer::emit_entry`.
+        // `build_interaction_columns` pairs consecutive fractions, so a
+        // 2-producer chunk `[p0, p1]` pairs into one column and a 1-producer
+        // chunk gets its own column.
+        let mut fracs: Vec<Vec<Frac>> = Vec::with_capacity(chunk.len());
         for &producer in chunk.iter() {
-            let (neg, twin) = producer_frac(relations, multiplicities, producer);
-            fracs.push(neg);
-            fracs.push(twin);
+            fracs.push(producer_frac(relations, multiplicities, producer));
         }
         let (trace, sum) = build_interaction_columns(log_size, fracs);
         combined.extend(trace);
@@ -571,18 +572,17 @@ fn shared_table_interaction_trace(
     (combined, ShaTablesInteractionClaim { pairs: pair_claims })
 }
 
-/// The Class-D blinded LogUp fractions `(neg, twin)` of one shared-table
-/// producer over the doubled domain: real rows from the table, then reserved
-/// dummy rows with unreachable keys `≥ 2^16`. `neg` is `-mult/combine(row)`;
-/// `twin` is `+is_dummy·mult/combine(row)` (nonzero only on the dummy upper
-/// half). The two are pushed consecutively so `finalize_logup_in_pairs` nets
-/// them to `0` on every dummy row (see [`producer_blind_frac_columns`] and
-/// `emit_blind`).
+/// The Class-D single gated LogUp fraction of one shared-table producer over
+/// the doubled domain: real rows from the table, then reserved dummy rows with
+/// unreachable keys `≥ 2^16`. The numerator is `-(1 − is_dummy)·mult/combine(row)`
+/// — `-mult` on real rows, `0` on the dummy upper half — so the fresh random
+/// blind multiplicity there never enters the LogUp sum (see
+/// [`producer_blind_frac_column`] and `emit_blind`).
 fn producer_frac(
     relations: &Sha256Relations,
     multiplicities: &ShaTableMultiplicities,
     producer: SharedProducer,
-) -> (Vec<Frac>, Vec<Frac>) {
+) -> Vec<Frac> {
     let real_len = 1usize << producer.log_size();
     match producer {
         SharedProducer::RoundSplit(p, h) => {
@@ -595,25 +595,25 @@ fn producer_frac(
             let rows = build_round_split_pack_table(&groups, p.s_mask(), h);
             let row_iter = round_split_blind_rows(rows, real_len);
             match (p, h) {
-                (RoundPartition::Sigma0AndMaj, Half16::Lo) => producer_blind_frac_columns(
+                (RoundPartition::Sigma0AndMaj, Half16::Lo) => producer_blind_frac_column(
                     &relations.split_pack.sigma0_lo,
                     mults,
                     real_len,
                     row_iter,
                 ),
-                (RoundPartition::Sigma0AndMaj, Half16::Hi) => producer_blind_frac_columns(
+                (RoundPartition::Sigma0AndMaj, Half16::Hi) => producer_blind_frac_column(
                     &relations.split_pack.sigma0_hi,
                     mults,
                     real_len,
                     row_iter,
                 ),
-                (RoundPartition::Sigma1AndCh, Half16::Lo) => producer_blind_frac_columns(
+                (RoundPartition::Sigma1AndCh, Half16::Lo) => producer_blind_frac_column(
                     &relations.split_pack.sigma1_lo,
                     mults,
                     real_len,
                     row_iter,
                 ),
-                (RoundPartition::Sigma1AndCh, Half16::Hi) => producer_blind_frac_columns(
+                (RoundPartition::Sigma1AndCh, Half16::Hi) => producer_blind_frac_column(
                     &relations.split_pack.sigma1_hi,
                     mults,
                     real_len,
@@ -627,25 +627,25 @@ fn producer_frac(
             let rows = build_sigma_split_pack_table(p.parts(), h);
             let row_iter = sigma_split_blind_rows(rows, real_len);
             match (p, h) {
-                (LowerSigmaPartition::LowerSigma0, Half16::Lo) => producer_blind_frac_columns(
+                (LowerSigmaPartition::LowerSigma0, Half16::Lo) => producer_blind_frac_column(
                     &relations.split_pack.lower_sigma0_lo,
                     mults,
                     real_len,
                     row_iter,
                 ),
-                (LowerSigmaPartition::LowerSigma0, Half16::Hi) => producer_blind_frac_columns(
+                (LowerSigmaPartition::LowerSigma0, Half16::Hi) => producer_blind_frac_column(
                     &relations.split_pack.lower_sigma0_hi,
                     mults,
                     real_len,
                     row_iter,
                 ),
-                (LowerSigmaPartition::LowerSigma1, Half16::Lo) => producer_blind_frac_columns(
+                (LowerSigmaPartition::LowerSigma1, Half16::Lo) => producer_blind_frac_column(
                     &relations.split_pack.lower_sigma1_lo,
                     mults,
                     real_len,
                     row_iter,
                 ),
-                (LowerSigmaPartition::LowerSigma1, Half16::Hi) => producer_blind_frac_columns(
+                (LowerSigmaPartition::LowerSigma1, Half16::Hi) => producer_blind_frac_column(
                     &relations.split_pack.lower_sigma1_hi,
                     mults,
                     real_len,
@@ -660,20 +660,17 @@ fn producer_frac(
             let row_iter = range_blind_rows(k, real_len);
             match kind {
                 RangeKind::Range2 => {
-                    producer_blind_frac_columns(&relations.range.range_2, mults, real_len, row_iter)
+                    producer_blind_frac_column(&relations.range.range_2, mults, real_len, row_iter)
                 }
                 RangeKind::Range4 => {
-                    producer_blind_frac_columns(&relations.range.range_4, mults, real_len, row_iter)
+                    producer_blind_frac_column(&relations.range.range_4, mults, real_len, row_iter)
                 }
                 RangeKind::Range5 => {
-                    producer_blind_frac_columns(&relations.range.range_5, mults, real_len, row_iter)
+                    producer_blind_frac_column(&relations.range.range_5, mults, real_len, row_iter)
                 }
-                RangeKind::Range16 => producer_blind_frac_columns(
-                    &relations.range.range_16,
-                    mults,
-                    real_len,
-                    row_iter,
-                ),
+                RangeKind::Range16 => {
+                    producer_blind_frac_column(&relations.range.range_16, mults, real_len, row_iter)
+                }
             }
         }
     }

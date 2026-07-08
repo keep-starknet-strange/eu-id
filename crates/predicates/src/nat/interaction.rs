@@ -102,19 +102,19 @@ impl InteractionTraces {
         write_paired_entries(&mut logup_gen, &nat_entries);
         let (nat_interaction, nat_claimed_sum) = logup_gen.finalize_last();
 
-        // Class-D blinded accepted-set table: two fractions per row (`-mult`,
-        // `+is_dummy·mult`) paired into one column, mirroring `NatTableEval`.
+        // Class-D blinded accepted-set table: ONE gated fraction per row
+        // `-(1 − is_dummy)·mult` over one column, mirroring `NatTableEval`'s
+        // single `add_to_relation` + `finalize_logup`.
         let table_log_size = preprocessed.acceptable[0].domain.log_size();
+        let one = PackedQM31::broadcast(QM31::from(1));
         let mut logup_gen = LogupTraceGenerator::new(table_log_size);
         logup_gen.col_from_fn(|vec_row| {
             let nat_val: PackedM31 = preprocessed.acceptable[0].values.data[vec_row];
             let dummy_val: PackedM31 = preprocessed.acceptable[1].values.data[vec_row];
             let mult_val: PackedM31 = witness_data.table_mult_trace[0].values.data[vec_row];
             let denom: PackedQM31 = lookup_elements.nat_table.combine(&[nat_val]);
-            let neg_num = -PackedQM31::from(mult_val);
-            let twin_num = PackedQM31::from(dummy_val) * PackedQM31::from(mult_val);
-            // (n0·d1 + n1·d0)/(d0·d1) with d0 = d1 = denom.
-            (neg_num * denom + twin_num * denom, denom * denom)
+            let numerator = -((one - PackedQM31::from(dummy_val)) * PackedQM31::from(mult_val));
+            (numerator, denom)
         });
         let (table_interaction, table_claimed_sum) = logup_gen.finalize_last();
 

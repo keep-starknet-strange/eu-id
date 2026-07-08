@@ -59,29 +59,31 @@ pub type RangeCheckComponent = FrameworkComponent<RangeCheckEval>;
 ///
 /// ## LogUp (balance preserved, blind cells free)
 ///
-/// Two entries per row against the same relation and the same `value`:
-/// - `-multiplicity` (the normal yield);
-/// - `+is_dummy · multiplicity` (the cancelling twin).
+/// ONE gated entry per row against the relation: numerator
+/// `-(1 − is_dummy) · multiplicity` at the same `value`.
 ///
-/// On a real row (`is_dummy = 0`) only the `-multiplicity` yield fires, exactly
-/// as the unblinded table. On a dummy row (`is_dummy = 1`) the two entries sum
-/// to `(-m + m)/(z − combine(dummy)) = 0` for ANY `m`, so the random blind
-/// multiplicities never touch the global balance. Both entries read the same
-/// committed cell and the same preprocessed key, so a malicious prover gets no
-/// free claimed-sum term (the P4b blind_claim-hole caution).
+/// On a real row (`is_dummy = 0`) the numerator is `-multiplicity`, exactly as
+/// the unblinded table. On a dummy row (`is_dummy = 1`) the numerator is
+/// identically `0` for ANY `m`, so the random blind multiplicities never touch
+/// the global balance while staying in the committed multiplicity column as the
+/// mask. This replaces the earlier cancelling PAIR (`-mult` and `+is_dummy·mult`)
+/// with a single fraction at half the interaction/quotient cost.
 ///
 /// ## Soundness (reservation argument)
 ///
 /// Honest consumers only ever emit values proven `< 2^real` (that is the whole
 /// point of a `[0, 2^real)` range check), so no honest use can land on a dummy
 /// key. The dummy region therefore cannot service any consumer; it exists only
-/// to hold the mask. Because the twin makes dummy rows net-zero, a malicious
-/// prover cannot use a dummy row to provide a real key either.
+/// to hold the mask. `is_dummy` is PREPROCESSED (trusted), so a malicious prover
+/// cannot un-gate a dummy row to provide a real key: the numerator is forced to
+/// `0` over the whole dummy region. The resulting balance is exactly the
+/// unblinded table's, and both key and gate come from committed/preprocessed
+/// data, so there is no free claimed-sum term (the P4b blind_claim-hole caution).
 ///
 /// ## Degree
 ///
-/// `is_dummy · multiplicity` is preprocessed × trace = degree 2, within the
-/// `D ≤ 3` budget under `max_constraint_log_degree_bound = log_size + 1`.
+/// `(1 − is_dummy) · multiplicity` is preprocessed × trace = degree 2, within
+/// the `D ≤ 3` budget under `max_constraint_log_degree_bound = log_size + 1`.
 #[derive(Clone, Debug)]
 pub struct BlindRangeCheckEval {
     pub relation: RangeCheckRelation,
@@ -119,20 +121,16 @@ impl FrameworkEval for BlindRangeCheckEval {
         let value = eval.get_preprocessed_column(self.value_id.clone());
         let is_dummy = eval.get_preprocessed_column(self.dummy_id.clone());
         let multiplicity = eval.next_trace_mask();
-        // Normal yield on every row.
+        // Single gated yield: `-(1 − is_dummy)·multiplicity`. `-multiplicity` on
+        // real rows (is_dummy = 0), identically `0` on dummy rows (is_dummy = 1)
+        // for any committed `m`. Degree 2 (preprocessed × trace).
+        let one = E::F::from(M31::from_u32_unchecked(1));
         eval.add_to_relation(RelationEntry::base(
             &self.relation,
-            -multiplicity.clone(),
-            &[value.clone()],
-        ));
-        // Cancelling twin on dummy rows: nets `(-m + m)/(z − dummy) = 0` there,
-        // and `+0` on real rows. Degree 2 (preprocessed × trace).
-        eval.add_to_relation(RelationEntry::base(
-            &self.relation,
-            is_dummy * multiplicity,
+            -((one - is_dummy) * multiplicity),
             &[value],
         ));
-        eval.finalize_logup_in_pairs();
+        eval.finalize_logup();
         eval
     }
 }

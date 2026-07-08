@@ -99,13 +99,29 @@ pub fn shared_table_preprocessed_log_sizes() -> Vec<u32> {
     log_sizes
 }
 
+/// Process-lifetime cache of the shared-table preprocessed trace.
+///
+/// Its content is fully static — the value/group cells and the `is_dummy`
+/// selector depend only on the fixed table layouts, never on any per-proof
+/// witness or randomness (the Class-D fresh blind multiplicities live in the
+/// *committed* multiplicity trace built by `shared_table_trace`, not here). So
+/// the identical `(evals, ids, log_sizes)` triple is reusable across every
+/// prove/verify in one process, mirroring [`PREPROCESSED_TRACE_CACHE`]. Without
+/// this, `write_preprocessed` + `preprocessed_column_fingerprints` (prove) and
+/// the verifier root recompute each rebuilt all 12 doubled tables from scratch.
+static SHARED_TABLE_PREPROCESSED_CACHE: OnceLock<PreprocessedTrace> = OnceLock::new();
+
 pub fn generate_shared_table_preprocessed_trace() -> PreprocessedTrace {
-    let (evals, _ids, _log_sizes) = generate_shared_table_preprocessed_trace_uncached();
-    let ids = shared_table_preprocessed_column_ids();
-    let log_sizes = shared_table_preprocessed_log_sizes();
-    debug_assert_eq!(evals.len(), ids.len());
-    debug_assert_eq!(evals.len(), log_sizes.len());
-    (evals, ids, log_sizes)
+    SHARED_TABLE_PREPROCESSED_CACHE
+        .get_or_init(|| {
+            let (evals, _ids, _log_sizes) = generate_shared_table_preprocessed_trace_uncached();
+            let ids = shared_table_preprocessed_column_ids();
+            let log_sizes = shared_table_preprocessed_log_sizes();
+            debug_assert_eq!(evals.len(), ids.len());
+            debug_assert_eq!(evals.len(), log_sizes.len());
+            (evals, ids, log_sizes)
+        })
+        .clone()
 }
 
 static PREPROCESSED_TRACE_CACHE: OnceLock<Mutex<HashMap<(u32, u32), PreprocessedTrace>>> =

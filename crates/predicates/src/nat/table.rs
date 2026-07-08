@@ -114,18 +114,19 @@ pub fn gen_blind_multiplicity_column(public: &PublicInput, used_row: usize) -> C
 /// Class-D multiplicity-blinded accepted-set table provider (Q-015 §4b).
 ///
 /// Reads the blinded value column (accepted codes on the lower half, reserved
-/// dummy keys on the upper half) and the `is_dummy` selector, then emits two
-/// entries per row against the shared relation and the same value:
-/// - `-multiplicity` (the membership yield);
-/// - `+is_dummy · multiplicity` (the cancelling twin).
+/// dummy keys on the upper half) and the `is_dummy` selector, then emits ONE
+/// gated entry per row against the shared relation and the same value: numerator
+/// `-(1 − is_dummy) · multiplicity`.
 ///
-/// On a real row (`is_dummy = 0`) only the `-multiplicity` yield fires — exactly
-/// the unblinded table. On a dummy row the pair nets `0` for ANY random `m`, so
-/// the blind multiplicities never touch the global balance. The dummy keys are
-/// unreachable by honest membership uses (every valid code is `< 2^24`), so no
-/// consumer can be serviced by a dummy row; a malicious prover gets no free
-/// term because both entries read the same committed cell and preprocessed key.
-/// `is_dummy · multiplicity` is preprocessed × trace = degree 2, within `D ≤ 3`.
+/// On a real row (`is_dummy = 0`) the numerator is `-multiplicity` — exactly the
+/// unblinded table. On a dummy row it is identically `0` for ANY random `m`, so
+/// the blind multiplicities never touch the global balance while staying in the
+/// committed multiplicity column as the mask. The dummy keys are unreachable by
+/// honest membership uses (every valid code is `< 2^24`), so no consumer can be
+/// serviced by a dummy row; `is_dummy` is preprocessed (trusted), so a malicious
+/// prover cannot un-gate a dummy row, and both key and gate come from
+/// committed/preprocessed data, so there is no free term.
+/// `(1 − is_dummy) · multiplicity` is preprocessed × trace = degree 2, within `D ≤ 3`.
 #[derive(Clone)]
 pub struct NatTableEval {
     pub public: PublicInput,
@@ -147,19 +148,15 @@ impl FrameworkEval for NatTableEval {
         let acc_nat_code = eval.get_preprocessed_column(acceptable_col_id(&self.public));
         let is_dummy = eval.get_preprocessed_column(acceptable_dummy_col_id(&self.public));
         let mult = eval.next_trace_mask();
-        // Normal membership yield on every row.
+        // Single gated membership yield `-(1 − is_dummy)·mult`: `-m` on real rows
+        // (is_dummy = 0), identically `0` on dummy rows for any committed `m`.
+        let one = E::F::from(M31::from_u32_unchecked(1));
         eval.add_to_relation(RelationEntry::new(
             &self.lookup_elements,
-            -E::EF::from(mult.clone()),
+            -E::EF::from((one - is_dummy) * mult),
             std::slice::from_ref(&acc_nat_code),
         ));
-        // Cancelling twin on dummy rows: nets `(−m + m)/(z − dummy) = 0` there.
-        eval.add_to_relation(RelationEntry::new(
-            &self.lookup_elements,
-            E::EF::from(is_dummy * mult),
-            &[acc_nat_code],
-        ));
-        eval.finalize_logup_in_pairs();
+        eval.finalize_logup();
         eval
     }
 }

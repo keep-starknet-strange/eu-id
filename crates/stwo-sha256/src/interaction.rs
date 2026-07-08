@@ -273,39 +273,38 @@ where
     out
 }
 
-/// Class-D blinded producer fractions (Q-015 §4b). Mirrors the two
-/// `add_to_relation` entries `crate::components::emit_blind` fires per row —
-/// `-mult` and `+is_dummy·mult` — over the doubled (blinded) domain. Returns
-/// `(neg, twin)`: two `Vec<Frac>` of length `mults.len() = 2^(L+1)` sharing the
-/// same per-row denominator `combine(row)`. The caller pushes them consecutively
-/// so `build_interaction_columns` pairs each producer's `neg` with its own
-/// `twin`, netting `0` on every dummy row (`row_idx ≥ real_len`) regardless of
-/// the random blind multiplicity there — the committed running sum then matches
-/// the framework's OODS reconstruction bit-for-bit.
-pub(crate) fn producer_blind_frac_columns<R, const N: usize>(
+/// Class-D blinded producer fraction (Q-015 §4b). Mirrors the SINGLE gated
+/// `add_to_relation` entry `crate::components::emit_blind` fires per row —
+/// numerator `-(1 − is_dummy)·mult` — over the doubled (blinded) domain.
+/// Returns one `Vec<Frac>` of length `mults.len() = 2^(L+1)`: on a real row
+/// (`idx < real_len`) the numerator is `-mult`, identical to the unblinded emit;
+/// on a dummy row (`idx ≥ real_len`, `is_dummy = 1`) the numerator is `0`, so
+/// the fresh random blind multiplicity committed there never enters the LogUp
+/// sum — yet stays in the committed multiplicity column as the mask. The caller
+/// pushes one such fraction per producer so `build_interaction_columns` pairs
+/// two producers' fractions into one interaction column (down from one column
+/// per producer in the old cancelling-pair form).
+pub(crate) fn producer_blind_frac_column<R, const N: usize>(
     rel: &R,
     mults: &[u32],
     real_len: usize,
     rows: impl Iterator<Item = [BaseField; N]>,
-) -> (Vec<Frac>, Vec<Frac>)
+) -> Vec<Frac>
 where
     R: Relation<BaseField, SecureField>,
 {
-    let mut neg = Vec::with_capacity(mults.len());
-    let mut twin = Vec::with_capacity(mults.len());
+    let mut out = Vec::with_capacity(mults.len());
     for (idx, (m, row)) in mults.iter().zip(rows).enumerate() {
         let denom = rel.combine(&row);
-        let mult = SecureField::from(BaseField::from(*m));
-        neg.push((-mult, denom));
-        // `+is_dummy·mult`: is_dummy is 1 on the reserved upper half.
-        let twin_num = if idx >= real_len {
-            mult
-        } else {
+        // Dummy rows are gated to a zero numerator; real rows yield `-mult`.
+        let num = if idx >= real_len {
             SecureField::zero()
+        } else {
+            -SecureField::from(BaseField::from(*m))
         };
-        twin.push((twin_num, denom));
+        out.push((num, denom));
     }
-    (neg, twin)
+    out
 }
 
 // (Padding helper removed — every per-table producer column is sized

@@ -57,16 +57,13 @@ impl RangeCheckInteractionClaim {
     }
 
     /// Class-D blinded interaction trace (Q-015 §4b / p4c Class D). Mirrors
-    /// [`super::component::BlindRangeCheckEval`]: two fractions per row against
-    /// the same relation and `value`, paired into one column
-    /// (`finalize_logup_in_pairs`):
-    /// - `-multiplicity` (normal yield), and
-    /// - `+is_dummy · multiplicity` (cancelling twin).
+    /// [`super::component::BlindRangeCheckEval`]'s SINGLE gated entry against the
+    /// relation and `value`: numerator `-(1 − is_dummy) · multiplicity` over one
+    /// column (`finalize_logup`).
     ///
-    /// Both share the denominator `z − combine(value)`, so the paired fraction
-    /// is `(-m + is_dummy · m)/(z − combine(value))`: `-m` on real rows,
-    /// `0` on dummy rows regardless of the random `m` there. The claimed sum is
-    /// therefore identical to the unblinded table's over the same real uses.
+    /// The numerator is `-m` on real rows (is_dummy = 0) and `0` on dummy rows
+    /// regardless of the random `m` committed there. The claimed sum is therefore
+    /// identical to the unblinded table's over the same real uses.
     pub fn gen_blind_interaction_trace(
         multiplicity: &ColumnEval,
         value: &ColumnEval,
@@ -85,28 +82,17 @@ impl RangeCheckInteractionClaim {
             "is_dummy column must share log_size",
         );
 
-        // Mirror the AIR's two `add_to_relation` entries paired by
-        // `finalize_logup_in_pairs` EXACTLY: build the two fraction vectors and
-        // pair them with `(n0·d1 + n1·d0)/(d0·d1)`. Here d0 = d1 = denom, so the
-        // committed running sum matches the framework's OODS reconstruction
-        // bit-for-bit (a pre-simplified single fraction would commit a
-        // different denominator and desync the verifier).
-        let n_vec_rows = multiplicity.data.len();
-        let mut neg_num = Vec::with_capacity(n_vec_rows);
-        let mut neg_den = Vec::with_capacity(n_vec_rows);
-        let mut twin_num = Vec::with_capacity(n_vec_rows);
-        let mut twin_den = Vec::with_capacity(n_vec_rows);
-        for vec_row in 0..n_vec_rows {
+        // One gated fraction `-(1 − is_dummy)·m / (z − combine(value))`, matching
+        // the eval's single `add_to_relation` + `finalize_logup`.
+        let one = PackedQM31::broadcast(SecureField::from(1));
+        let mut logup = LogupTraceGenerator::new(log_size);
+        logup.col_from_fn(|vec_row| {
             let denom: PackedQM31 = relation.combine(&[value.data[vec_row]]);
             let mult = PackedQM31::from(multiplicity.data[vec_row]);
             let dummy = PackedQM31::from(is_dummy.data[vec_row]);
-            neg_num.push(-mult);
-            neg_den.push(denom);
-            twin_num.push(dummy * mult);
-            twin_den.push(denom);
-        }
-        let mut logup = LogupTraceGenerator::new(log_size);
-        write_batched_logup_columns(&mut logup, &[(neg_num, neg_den), (twin_num, twin_den)], 2);
+            let numerator = -((one - dummy) * mult);
+            (numerator, denom)
+        });
 
         let (interaction_trace, claimed_sum) = logup.finalize_last();
         (interaction_trace, Self { claimed_sum })

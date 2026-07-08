@@ -47,11 +47,10 @@ fn write_paired_entries(logup: &mut LogupTraceGenerator, entries: &[LogupEntry])
 }
 
 /// Build a Class-D blinded delta-table interaction column mirroring
-/// [`crate::range_check::BlindEval`]: two fractions per row against the same
-/// relation and `value`, paired into one column: `-mult` (normal yield) and
-/// `+is_dummy·mult` (cancelling twin). Both share the denominator, so the
-/// paired fraction is `-mult` on real rows and `0` on dummy rows — the claimed
-/// sum is identical to the unblinded table's over the same real uses.
+/// [`crate::range_check::BlindEval`]'s SINGLE gated entry: numerator
+/// `-(1 − is_dummy)·mult` over one column (`finalize_logup`). `-mult` on real
+/// rows and `0` on dummy rows regardless of the random `m` committed there — the
+/// claimed sum is identical to the unblinded table's over the same real uses.
 fn blind_delta_interaction(
     log_size: u32,
     value_col: &crate::types::Column,
@@ -59,16 +58,15 @@ fn blind_delta_interaction(
     mult_col: &crate::types::Column,
     relation: &crate::range_check::RangeCheckLookupElements,
 ) -> (Trace, QM31) {
+    let one = PackedQM31::broadcast(QM31::from(1));
     let mut logup_gen = LogupTraceGenerator::new(log_size);
     logup_gen.col_from_fn(|vec_row| {
         let value: PackedM31 = value_col.values.data[vec_row];
         let dummy: PackedM31 = dummy_col.values.data[vec_row];
         let mult: PackedM31 = mult_col.values.data[vec_row];
         let denom: PackedQM31 = relation.combine(&[value]);
-        let neg_num = -PackedQM31::from(mult);
-        let twin_num = PackedQM31::from(dummy) * PackedQM31::from(mult);
-        // (n0·d1 + n1·d0)/(d0·d1) with d0 = d1 = denom.
-        (neg_num * denom + twin_num * denom, denom * denom)
+        let numerator = -((one - PackedQM31::from(dummy)) * PackedQM31::from(mult));
+        (numerator, denom)
     });
     logup_gen.finalize_last()
 }
