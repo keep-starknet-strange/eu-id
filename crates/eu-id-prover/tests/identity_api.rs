@@ -153,12 +153,8 @@ fn verify_identity_pins_the_preprocessed_root() {
     )
     .expect("expected preprocessed root computes");
 
-    verify_identity_with_preprocessed_root(
-        &proof,
-        &demo_statement(&fixture.policy),
-        expected_root,
-    )
-    .expect("honest proof verifies against the derived preprocessed root");
+    verify_identity_with_preprocessed_root(&proof, &demo_statement(&fixture.policy), expected_root)
+        .expect("honest proof verifies against the derived preprocessed root");
 
     // A proof whose tree-0 root does not match the pin is rejected fail-closed.
     let mut wrong_root = expected_root;

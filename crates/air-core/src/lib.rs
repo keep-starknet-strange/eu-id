@@ -523,7 +523,10 @@ pub fn compute_preprocessed_root(
     // order. Module identity is positional — the ordered list pins it.
     let mut seen = HashSet::new();
     let mut unique_columns = Vec::new();
-    for (ids, sizes) in module_preprocessed_ids.iter().zip(&module_preprocessed_sizes) {
+    for (ids, sizes) in module_preprocessed_ids
+        .iter()
+        .zip(&module_preprocessed_sizes)
+    {
         assert_eq!(
             ids.len(),
             sizes.len(),
@@ -673,10 +676,9 @@ pub fn verify_with_expected_preprocessed_root(
     // across all modules.
     let claimed_sums: Vec<QM31> = modules.iter().flat_map(|m| m.claimed_sums()).collect();
     if claimed_sums.iter().fold(QM31::zero(), |acc, &s| acc + s) != QM31::zero() {
-        return Err(VerificationError::InvalidStructure(
-            "LogUp claimed sums do not cancel".into(),
-        )
-        .into());
+        return Err(
+            VerificationError::InvalidStructure("LogUp claimed sums do not cancel".into()).into(),
+        );
     }
 
     for m in modules.iter() {
@@ -863,11 +865,7 @@ mod tests {
             let table = eval.get_preprocessed_column(self.id.clone());
             let value = eval.next_trace_mask();
             eval.add_constraint(value.clone() - table);
-            eval.add_to_relation(RelationEntry::new(
-                &self.relation,
-                E::EF::zero(),
-                &[value],
-            ));
+            eval.add_to_relation(RelationEntry::new(&self.relation, E::EF::zero(), &[value]));
             eval.finalize_logup();
             eval
         }
@@ -885,9 +883,7 @@ mod tests {
         /// `tweak` alters one table cell — the doctored (F-ROOT attacking)
         /// prover, whose trace matches its forged table so constraints hold.
         fn new(id: &str, log_size: u32, tweak: Option<(usize, u32)>) -> Self {
-            let mut values: Vec<M31> = (0..1u32 << log_size)
-                .map(M31::from_u32_unchecked)
-                .collect();
+            let mut values: Vec<M31> = (0..1u32 << log_size).map(M31::from_u32_unchecked).collect();
             if let Some((index, value)) = tweak {
                 values[index] = M31::from_u32_unchecked(value);
             }
@@ -976,7 +972,10 @@ mod tests {
             let column = self.column();
             let mut logup = LogupTraceGenerator::new(self.log_size);
             logup.col_from_fn(|vec_row| {
-                (PackedQM31::zero(), relation.combine(&[column.data[vec_row]]))
+                (
+                    PackedQM31::zero(),
+                    relation.combine(&[column.data[vec_row]]),
+                )
             });
             let (trace, claimed_sum) = logup.finalize_last();
             assert_eq!(claimed_sum, QM31::zero());

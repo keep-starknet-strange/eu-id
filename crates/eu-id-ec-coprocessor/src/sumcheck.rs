@@ -819,7 +819,8 @@ impl LayerRoundState {
         for r in active {
             let q = by_r[r as usize];
             if q != Fp::ZERO {
-                self.right_phase_terms.push(RightPhaseTerm { r, q, eq: Fp::ONE });
+                self.right_phase_terms
+                    .push(RightPhaseTerm { r, q, eq: Fp::ONE });
             }
         }
     }
