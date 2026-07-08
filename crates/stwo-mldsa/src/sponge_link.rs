@@ -30,6 +30,8 @@ use stwo_constraint_framework::{
     EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation, RelationEntry,
 };
 
+use air_core::relations::FieldBytesRelation;
+
 use crate::air_util::{circle_row_to_coset, col_eval, m31, ColEval};
 use crate::binding::{HashIoRelation, MsgLinkRelation};
 
@@ -153,6 +155,10 @@ pub enum SrcRelation {
     HashIo(HashIoRelation, u32, u32),
     /// `(field_id, byte_index, byte)` on the MsgLink relation (the msg producer).
     MsgLink(MsgLinkRelation, u32),
+    /// `(field_id, byte_index, byte)` on the SHARED [`FieldBytesRelation`] (the
+    /// hosted-mode message source: the host's SHA field-exposure yields the
+    /// Sig_structure bytes under this relation). Same tuple shape as `MsgLink`.
+    FieldBytes(FieldBytesRelation, u32),
 }
 
 fn bridge_pre_id(tag: &str, name: &str) -> PreProcessedColumnId {
@@ -233,15 +239,25 @@ impl BridgeEval {
             }
             entries.push((nums, dens));
         };
-        // source require (−).
+        // source require. Sign is per-relation convention: HashIo/MsgLink
+        // producers yield (+) so the bridge requires (−); the stwo-sha256
+        // field provider emits its FieldBytes tuples with (−) (see
+        // `constraints.rs`' `-selector` yield), so the bridge requires (+).
         push(&|coset| {
             if coset < self.len {
                 let b = m31(bytes[coset] as u32);
-                let den = match &self.src {
-                    SrcRelation::HashIo(r, s, off) => r.combine(&[m31(*s), m31(off + coset as u32), b]),
-                    SrcRelation::MsgLink(r, fid) => r.combine(&[m31(*fid), m31(coset as u32), b]),
+                let (sign, den) = match &self.src {
+                    SrcRelation::HashIo(r, s, off) => {
+                        (-one, r.combine(&[m31(*s), m31(off + coset as u32), b]))
+                    }
+                    SrcRelation::MsgLink(r, fid) => {
+                        (-one, r.combine(&[m31(*fid), m31(coset as u32), b]))
+                    }
+                    SrcRelation::FieldBytes(r, fid) => {
+                        (one, r.combine(&[m31(*fid), m31(coset as u32), b]))
+                    }
                 };
-                (-one, den)
+                (sign, den)
             } else {
                 (zero, one)
             }
@@ -292,6 +308,12 @@ impl FrameworkEval for BridgeEval {
             SrcRelation::MsgLink(r, fid) => {
                 let tuple = [E::F::from(m31(*fid)), idx.clone(), byte.clone()];
                 eval.add_to_relation(RelationEntry::base(r, -active.clone(), &tuple));
+            }
+            SrcRelation::FieldBytes(r, fid) => {
+                // (+active): the stwo-sha256 field provider emits with (−);
+                // see the sign note in `gen_interaction`.
+                let tuple = [E::F::from(m31(*fid)), idx.clone(), byte.clone()];
+                eval.add_to_relation(RelationEntry::base(r, active.clone(), &tuple));
             }
         }
         // Dest yield (+active).

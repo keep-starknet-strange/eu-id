@@ -1292,7 +1292,13 @@ mod tests {
 
     fn honest_mdoc_statement() -> (ZkPublicStatement, eu_id_prover::MdocStatement) {
         let fixture = eu_id_prover::mdoc::demo_mdoc_circuit_fixture();
-        let issuer_key = fixture.statement.issuer_input.public_key.clone();
+        let issuer_key = fixture
+            .statement
+            .issuer_input
+            .as_ecdsa()
+            .expect("demo issuer is P-256")
+            .public_key
+            .clone();
         (
             ZkPublicStatement {
                 spec_id: "stwo-euid-pid-v1".to_string(),
@@ -1314,7 +1320,13 @@ mod tests {
 
     fn canonical_v2_mdoc_sdk_fixture() -> (ZkPublicStatement, ZkMdocWitness) {
         let fixture = eu_id_prover::mdoc::demo_mdoc_circuit_fixture();
-        let issuer_key = fixture.statement.issuer_input.public_key.clone();
+        let issuer_key = fixture
+            .statement
+            .issuer_input
+            .as_ecdsa()
+            .expect("demo issuer is P-256")
+            .public_key
+            .clone();
         (
             ZkPublicStatement {
                 spec_id: "stwo-euid-pid-v1".to_string(),
@@ -1367,19 +1379,39 @@ mod tests {
         assert!(
             !encoded
                 .windows(32)
-                .any(|window| window == fixture.statement.issuer_input.message_hash.0),
+                .any(|window| window == fixture
+                    .statement
+                    .issuer_input
+                    .as_ecdsa()
+                    .expect("demo issuer is P-256")
+                    .message_hash
+                    .0),
             "issuer z must not be serialized in the public mdoc statement"
         );
         assert!(
             !encoded
                 .windows(32)
-                .any(|window| window == fixture.statement.issuer_input.signature.r.0),
+                .any(|window| window == fixture
+                    .statement
+                    .issuer_input
+                    .as_ecdsa()
+                    .expect("demo issuer is P-256")
+                    .signature
+                    .r
+                    .0),
             "issuer r must not be serialized in the public mdoc statement"
         );
         assert!(
             !encoded
                 .windows(32)
-                .any(|window| window == fixture.statement.issuer_input.signature.s.0),
+                .any(|window| window == fixture
+                    .statement
+                    .issuer_input
+                    .as_ecdsa()
+                    .expect("demo issuer is P-256")
+                    .signature
+                    .s
+                    .0),
             "issuer s must not be serialized in the public mdoc statement"
         );
         assert!(
@@ -1490,7 +1522,13 @@ mod tests {
         // mode=And request that demands the age predicate. Pre-fix this returned
         // ok=true (age never proven); post-fix the SDK guard rejects it.
         let demo = eu_id_prover::mdoc::demo_mdoc_circuit_fixture();
-        let issuer_key = demo.statement.issuer_input.public_key.clone();
+        let issuer_key = demo
+            .statement
+            .issuer_input
+            .as_ecdsa()
+            .expect("demo issuer is P-256")
+            .public_key
+            .clone();
 
         // Attacker request: nationality only — no AgeOver leg.
         let nat_only_request = eu_id_prover::MdocPidRequest {

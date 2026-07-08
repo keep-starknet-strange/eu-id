@@ -118,8 +118,16 @@ fn tdate(text: &str) -> Value {
     Value::Tag(0, Box::new(text.into()))
 }
 
-/// The ML-DSA-65-signed PID mdoc fixture. Exported for M2+ tests.
+/// The ML-DSA-65-signed PID mdoc fixture with the demo session transcript —
+/// extractable by `extract_pid_mdoc` with `MdocPidRequest::eudi_pid`.
 pub fn mldsa_pid_fixture() -> MldsaPidFixture {
+    mldsa_pid_fixture_with_transcript(&eu_id_prover::mdoc::openid4vp_session_transcript(
+        b"session-transcript-123",
+    ))
+}
+
+/// The ML-DSA-65-signed PID mdoc fixture. Exported for M2+/M7 tests.
+pub fn mldsa_pid_fixture_with_transcript(session_transcript: &[u8]) -> MldsaPidFixture {
     // Issuer ML-DSA-65 keypair (deterministic seed → reproducible fixture).
     let issuer_sk = SigningKey::<MlDsa65>::from_seed(&MLDSA_ISSUER_SEED.into());
     let issuer_vk = issuer_sk.verifying_key();
@@ -188,7 +196,9 @@ pub fn mldsa_pid_fixture() -> MldsaPidFixture {
     // Disambiguate the `Signer` trait — the ml-dsa oracle pulls in a second
     // `signature` crate version whose `Signer` also matches by name.
     use ecdsa::signature::Signer as _;
-    let device_payload = encode_value(Value::Map(Vec::new()));
+    let device_payload =
+        eu_id_prover::mdoc::device_authentication_bytes(session_transcript, PID_DOCTYPE)
+            .expect("device authentication payload builds");
     let device_sig_struct = sig_structure(&[0xA1, 0x01, 0x26], &device_payload);
     let device_signature: P256Signature = device_sk.sign(&device_sig_struct);
     let mut device_compact = Vec::with_capacity(64);

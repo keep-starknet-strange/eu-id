@@ -20,6 +20,9 @@ ec-coprocessor = ["dep:eu-id-ec-coprocessor"]
 air-core = { path = "../air-core" }
 eu-id-ec-coprocessor = { path = "../eu-id-ec-coprocessor", optional = true }
 stwo-p256 = { path = "../stwo-p256" }
+# ML-DSA-65 issuer-auth statement (M7): COSE alg -49 issuerAuth is parsed,
+# natively pre-checked, and proven in-circuit by the hosted stwo-mldsa module.
+stwo-mldsa = { path = "../stwo-mldsa" }
 stwo-sha256 = { path = "../stwo-sha256" }
 predicates = { path = "../predicates" }
 stwo = { workspace = true }
@@ -62,10 +65,8 @@ bzip2 = "0.6"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 # ML-DSA-65 mdoc fixture (M1): the RustCrypto `ml-dsa` oracle signs the issuer
-# `Sig_structure`, and `stwo-mldsa`'s native reference verifies it. Both are
-# test-only — the shipping mdoc issuerAuth path stays P-256 (that swap is M7).
+# `Sig_structure`; `stwo-mldsa` (now a main dependency) natively verifies it.
 ml-dsa = "0.1.1"
-stwo-mldsa = { path = "../stwo-mldsa" }
 
 [[bench]]
 name = "identity_bench"

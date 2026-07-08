@@ -1489,7 +1489,12 @@ fn extracts_pid_items_mso_device_key_and_signatures() {
     assert_eq!(extracted.issuer_sig_structure, fixture.issuer_sig_structure);
     assert_eq!(extracted.device_sig_structure, fixture.device_sig_structure);
     assert_eq!(
-        extracted.issuer_ecdsa_input.message_hash.0,
+        extracted
+            .issuer_auth_input
+            .as_ecdsa()
+            .expect("demo issuer is P-256")
+            .message_hash
+            .0,
         <[u8; 32]>::from(Sha256::digest(&fixture.issuer_sig_structure))
     );
     assert_eq!(
@@ -1645,7 +1650,7 @@ fn rejects_bad_protected_header() {
 
     assert_eq!(
         err,
-        MdocError::InvalidCoseSign1("protected header must be ES256")
+        MdocError::InvalidCoseSign1("protected header must be ES256 or ML-DSA-65")
     );
 }
 
