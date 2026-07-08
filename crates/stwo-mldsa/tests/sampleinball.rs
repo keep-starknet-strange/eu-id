@@ -1,0 +1,226 @@
+//! M5 acceptance for `sampleinball_fsm` ([CHAL]): standalone prove+verify over
+//! ≥20 oracle ML-DSA-65 signatures, plus S5 §5 negatives. The squeeze stream and
+//! coeffs C-cells are balanced test-side (a hashio producer + a ccell provider);
+//! M6 replaces them with the proven sponge / real coeffs C group.
+
+use ml_dsa::signature::{Keypair, Signer, Verifier};
+use ml_dsa::{EncodedSignature, EncodedVerifyingKey, MlDsa65, SigningKey};
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
+
+use stwo::core::pcs::PcsConfig;
+
+use stwo_mldsa::reference::encoding::{pk_decode, sig_decode};
+use stwo_mldsa::reference::sponge::shake256;
+use stwo_mldsa::sampleinball::proof::{prove_sib, verify_sib};
+use stwo_mldsa::witness::{generate_witness, MlDsaWitness};
+use stwo_mldsa::MlDsaVerifyInput;
+
+fn witness_for(seed: u64, msg: &[u8]) -> MlDsaWitness {
+    let mut rng = StdRng::seed_from_u64(seed);
+    let mut sk_seed = [0u8; 32];
+    rng.fill(&mut sk_seed);
+    let sk = SigningKey::<MlDsa65>::from_seed(&sk_seed.into());
+    let vk = sk.verifying_key();
+    let sig = sk.sign(msg);
+    assert!(vk.verify(msg, &sig).is_ok(), "oracle self-check");
+    let vk_bytes: EncodedVerifyingKey<MlDsa65> = vk.encode();
+    let sig_bytes: EncodedSignature<MlDsa65> = sig.encode();
+    let pk = pk_decode(vk_bytes.as_slice()).expect("pk_decode");
+    let sp = sig_decode(sig_bytes.as_slice()).expect("sig_decode");
+    let (tr_vec, _) = shake256(&[vk_bytes.as_slice()], 64);
+    let mut tr = [0u8; 64];
+    tr.copy_from_slice(&tr_vec);
+    let input = MlDsaVerifyInput::from_decoded(&pk, &sp, tr, msg.to_vec());
+    generate_witness(&input).expect("witness")
+}
+
+/// A witness mutation is REJECTED if proving fails/panics or verify fails.
+fn rejected(witness: MlDsaWitness) -> bool {
+    let w2 = witness.clone();
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        match prove_sib(witness, PcsConfig::default()) {
+            Ok(proof) => verify_sib(&proof, &w2).is_err(),
+            Err(_) => true,
+        }
+    }));
+    r.unwrap_or(true)
+}
+
+// =====================================================================
+// Positive.
+// =====================================================================
+
+#[test]
+fn sib_proves_and_verifies_over_20_signatures() {
+    let mut ok = 0;
+    for i in 0..20u64 {
+        let msg = format!("mldsa-sib-case-{i}").into_bytes();
+        let w = witness_for(7000 + i, &msg);
+        let proof = prove_sib(w.clone(), PcsConfig::default()).expect("prove");
+        verify_sib(&proof, &w).unwrap_or_else(|e| panic!("case {i}: verify failed: {e:?}"));
+        ok += 1;
+    }
+    assert_eq!(ok, 20);
+}
+
+/// Control: the negatives' seeds prove+verify cleanly without mutation.
+#[test]
+fn sib_seeds_honest_without_mutation() {
+    for (seed, msg) in [(8001u64, &b"tau"[..]), (8002, b"c-bind"), (8003, b"rej")] {
+        let w = witness_for(seed, msg);
+        let proof = prove_sib(w.clone(), PcsConfig::default())
+            .unwrap_or_else(|e| panic!("seed {seed}: honest prove failed: {e:?}"));
+        verify_sib(&proof, &w).unwrap_or_else(|e| panic!("seed {seed}: honest verify failed: {e:?}"));
+    }
+}
+
+// =====================================================================
+// Negatives.
+// =====================================================================
+
+/// c with τ+2 nonzeros: add two extra ±1 to c → Σc² = τ+2 ≠ τ, the accumulator
+/// gate rejects (and the c-binding to coeffs breaks).
+#[test]
+fn negative_c_extra_nonzeros() {
+    let mut w = witness_for(8001, b"tau");
+    // Find two zero positions and set them to +1.
+    let mut set = 0;
+    for m in 0..stwo_mldsa::constants::N {
+        if w.digits.c[m] == 0 {
+            w.digits.c[m] = 1;
+            set += 1;
+            if set == 2 {
+                break;
+            }
+        }
+    }
+    assert_eq!(set, 2);
+    assert!(rejected(w), "c with τ+2 nonzeros must be rejected");
+}
+
+/// c-binding tamper: corrupt the emitted `ccell_claimed_sum` so the c-binding
+/// logup no longer cancels. (In standalone the ccell provider reads the same
+/// witness `c` as the FSM, so a witness-level c change moves both sides together;
+/// M6 makes coeffs the independent producer. Here we tamper the proof directly,
+/// proving the c-binding is load-bearing.)
+#[test]
+fn negative_c_binding_tamper() {
+    let w = witness_for(8002, b"c-bind");
+    let mut proof = prove_sib(w.clone(), PcsConfig::default()).expect("prove");
+    proof.ccell_claimed_sum += stwo::core::fields::qm31::SecureField::from(
+        stwo::core::fields::m31::M31::from_u32_unchecked(1),
+    );
+    assert!(verify_sib(&proof, &w).is_err(), "a broken c-binding balance must be rejected");
+}
+
+/// Stream tamper: corrupt the emitted `hashio_claimed_sum` so the stream-consume
+/// logup no longer cancels — the FSM's byte-by-byte stream binding is load-
+/// bearing. (A witness-level stream edit is re-derived consistently by both the
+/// FSM and the test producer; M6's proven sponge is the independent producer.)
+#[test]
+fn negative_stream_binding_tamper() {
+    let w = witness_for(8003, b"rej");
+    let mut proof = prove_sib(w.clone(), PcsConfig::default()).expect("prove");
+    proof.hashio_claimed_sum += stwo::core::fields::qm31::SecureField::from(
+        stwo::core::fields::m31::M31::from_u32_unchecked(1),
+    );
+    assert!(verify_sib(&proof, &w).is_err(), "a broken stream-consume balance must be rejected");
+}
+
+/// c placed at a rejected index (τ+1 nonzeros): set one extra c to −1 → Σc² =
+/// τ+1 ≠ τ, rejected by the accumulator gate (distinct path from the +2 test).
+#[test]
+fn negative_c_one_extra_nonzero() {
+    let mut w = witness_for(8004, b"one-extra");
+    for m in 0..stwo_mldsa::constants::N {
+        if w.digits.c[m] == 0 {
+            w.digits.c[m] = -1;
+            break;
+        }
+    }
+    assert!(rejected(w), "c with τ+1 nonzeros must be rejected by the Σc²=τ gate");
+}
+
+/// PLACEMENT PERMUTATION (the swap-replay hole). Move a ±1 from a slot where
+/// SampleInBall placed it to a slot it never placed one, keeping the multiset of
+/// ±1 values, the support size, AND Σc² = τ all UNCHANGED. Σc² stays τ (we swap a
+/// nonzero with a zero, count preserved), the ternary/support checks stay green,
+/// and the c-binding still cancels (standalone ccell provider reads the same
+/// mutated `c`). ONLY the offline-memory (Mem) swap-replay can catch it: the
+/// replay derives the true placement from the UNCHANGED squeeze stream, so the
+/// SORTED view carries the true final array while the FINAL-read (+) emits the
+/// committed permuted `c` — the internal Mem multiset no longer balances ⇒ reject.
+#[test]
+fn negative_placement_permuted() {
+    let mut w = witness_for(8005, b"placement");
+    // Find p<q with c[p] nonzero and c[q]==0, then SWAP (move the ±1 to q).
+    let n = stwo_mldsa::constants::N;
+    let p = (0..n).find(|&m| w.digits.c[m] != 0).expect("a nonzero coeff");
+    let q = (0..n).find(|&m| w.digits.c[m] == 0).expect("a zero coeff");
+    assert_ne!(p, q);
+    let moved = w.digits.c[p];
+    w.digits.c[p] = 0;
+    w.digits.c[q] = moved;
+    // Σc² is unchanged (still exactly τ nonzeros): confirm the gate that catches
+    // this is the Mem replay, not the accumulator.
+    let sumsq: i128 = w.digits.c.iter().map(|&x| x * x).sum();
+    assert_eq!(sumsq as usize, stwo_mldsa::constants::TAU, "Σc² must stay τ");
+    assert!(rejected(w), "a placement permutation must be rejected by the Mem swap-replay gate");
+}
+
+/// THE REAL ATTACK on the closed gap: a FORGED core access list. Before the
+/// FSM↔memory tie channels (Swap/StepVal/SignBit), the unsorted CORE columns
+/// (u_addr/u_val/u_ts/u_write) were FREE WITNESS — only `u_write` booleanity and
+/// the Mem yield constrained them — so a prover could commit an arbitrary
+/// memory-consistent history and the swap-replay gate was vacuous against a real
+/// adversary (the old `negative_placement_permuted` only exercised the HONEST
+/// generator, which replays the true stream).
+///
+/// Here we bypass the honest replay via the test-attack hook and inject a forged
+/// core list that is (1) internally memory-consistent (passes C8's sorted-view
+/// continuity) and (2) reaches the SAME final array as the committed `c` (so the
+/// Mem internal balance is UNTOUCHED — this is NOT what catches it), yet (3) does
+/// not match the FSM: step 0's READ address is redirected from the accepted byte
+/// `j_0` to a different still-zero cell. The read value (0) and both writes are
+/// unchanged, so the final array and Mem balance hold — but the Swap channel's
+/// read-consume `(step_no, u_addr)` no longer matches the accept-yield
+/// `(idx−(N−τ), byte)`. ONLY the Swap channel rejects this.
+#[test]
+fn negative_forged_access_list() {
+    use stwo_mldsa::sampleinball::{honest_core_accesses, install_forged_core};
+
+    let w = witness_for(8006, b"forged-access");
+    // Honest core list: N init writes (addr=k,val=0,ts=k), then per step
+    // read/write-i/write-j. Index N is step 0's READ: (j_0, old_j=0, ts=N, read).
+    let mut core = honest_core_accesses(&w);
+    let n = stwo_mldsa::constants::N as u32;
+    let (j0, val0, _ts0, is_write0) = core[stwo_mldsa::constants::N];
+    assert!(!is_write0, "index N must be step 0's read");
+    assert_eq!(val0, 0, "step 0 reads a still-zero cell (old_j = 0)");
+    // Redirect the read to a DIFFERENT still-zero address (any cell is 0 at ts=N,
+    // only inits have run) — value stays 0, final array + Mem balance unchanged.
+    let k = (j0 + 1) % n;
+    assert_ne!(k, j0);
+    core[stwo_mldsa::constants::N].0 = k;
+
+    // Sanity: the honest witness proves+verifies WITHOUT the forgery installed.
+    let honest = prove_sib(w.clone(), PcsConfig::default()).expect("honest prove");
+    verify_sib(&honest, &w).expect("honest verify");
+
+    // Install the forgery and assert prove+verify REJECTS (Swap channel imbalance).
+    let guard = install_forged_core(core);
+    let forged_rejected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        match prove_sib(w.clone(), PcsConfig::default()) {
+            Ok(proof) => verify_sib(&proof, &w).is_err(),
+            Err(_) => true,
+        }
+    }))
+    .unwrap_or(true);
+    drop(guard);
+    assert!(
+        forged_rejected,
+        "a forged (FSM-mismatched) core access list must be rejected by the Swap channel"
+    );
+}
+
