@@ -5,8 +5,8 @@ use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{EvalAtRow, FrameworkComponent, FrameworkEval, RelationEntry};
 
 use super::{
-    range_check_value_column_id, signed_carry_active_column_id, signed_carry_value_column_id,
-    RangeCheckRelation,
+    range_check_dummy_column_id, range_check_value_column_id, signed_carry_active_column_id,
+    signed_carry_value_column_id, RangeCheckRelation,
 };
 
 /// Provider for the unary range table `0..2^log_size`.
@@ -46,6 +46,98 @@ impl FrameworkEval for RangeCheckEval {
 }
 
 pub type RangeCheckComponent = FrameworkComponent<RangeCheckEval>;
+
+/// Class-D multiplicity-blinded range-table provider (Q-015 §4b / p4c Class D).
+///
+/// Identical to [`RangeCheckEval`] but over a domain one log larger. The
+/// preprocessed `value` column is `[0, 1, …, 2^(real+1) − 1]` — the lower half
+/// is the real range `[0, 2^real)`, the upper half is the reserved dummy keys
+/// `[2^real, 2^(real+1))` no honest consumer can emit. The preprocessed
+/// `is_dummy` selector is `1` over the dummy region. The committed
+/// multiplicity column carries real counts on the lower half and fresh random
+/// blind cells on the upper half.
+///
+/// ## LogUp (balance preserved, blind cells free)
+///
+/// Two entries per row against the same relation and the same `value`:
+/// - `-multiplicity` (the normal yield);
+/// - `+is_dummy · multiplicity` (the cancelling twin).
+///
+/// On a real row (`is_dummy = 0`) only the `-multiplicity` yield fires, exactly
+/// as the unblinded table. On a dummy row (`is_dummy = 1`) the two entries sum
+/// to `(-m + m)/(z − combine(dummy)) = 0` for ANY `m`, so the random blind
+/// multiplicities never touch the global balance. Both entries read the same
+/// committed cell and the same preprocessed key, so a malicious prover gets no
+/// free claimed-sum term (the P4b blind_claim-hole caution).
+///
+/// ## Soundness (reservation argument)
+///
+/// Honest consumers only ever emit values proven `< 2^real` (that is the whole
+/// point of a `[0, 2^real)` range check), so no honest use can land on a dummy
+/// key. The dummy region therefore cannot service any consumer; it exists only
+/// to hold the mask. Because the twin makes dummy rows net-zero, a malicious
+/// prover cannot use a dummy row to provide a real key either.
+///
+/// ## Degree
+///
+/// `is_dummy · multiplicity` is preprocessed × trace = degree 2, within the
+/// `D ≤ 3` budget under `max_constraint_log_degree_bound = log_size + 1`.
+#[derive(Clone, Debug)]
+pub struct BlindRangeCheckEval {
+    pub relation: RangeCheckRelation,
+    /// The real table width; the committed domain is `real_log_size + 1`.
+    pub real_log_size: u32,
+    /// Preprocessed value-column id (namespaced tables pass their own).
+    pub value_id: PreProcessedColumnId,
+    /// Preprocessed is_dummy selector id (namespaced tables pass their own).
+    pub dummy_id: PreProcessedColumnId,
+}
+
+impl BlindRangeCheckEval {
+    /// Reference table using the generic `p256_range{real}_value` /
+    /// `p256_range{real}_dummy` preprocessed ids.
+    pub fn new(relation: RangeCheckRelation, real_log_size: u32) -> Self {
+        Self {
+            relation,
+            real_log_size,
+            value_id: range_check_value_column_id(real_log_size),
+            dummy_id: range_check_dummy_column_id(real_log_size),
+        }
+    }
+}
+
+impl FrameworkEval for BlindRangeCheckEval {
+    fn log_size(&self) -> u32 {
+        self.real_log_size + 1
+    }
+
+    fn max_constraint_log_degree_bound(&self) -> u32 {
+        self.real_log_size + 2
+    }
+
+    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+        let value = eval.get_preprocessed_column(self.value_id.clone());
+        let is_dummy = eval.get_preprocessed_column(self.dummy_id.clone());
+        let multiplicity = eval.next_trace_mask();
+        // Normal yield on every row.
+        eval.add_to_relation(RelationEntry::base(
+            &self.relation,
+            -multiplicity.clone(),
+            &[value.clone()],
+        ));
+        // Cancelling twin on dummy rows: nets `(-m + m)/(z − dummy) = 0` there,
+        // and `+0` on real rows. Degree 2 (preprocessed × trace).
+        eval.add_to_relation(RelationEntry::base(
+            &self.relation,
+            is_dummy * multiplicity,
+            &[value],
+        ));
+        eval.finalize_logup_in_pairs();
+        eval
+    }
+}
+
+pub type BlindRangeCheckComponent = FrameworkComponent<BlindRangeCheckEval>;
 
 /// Provider for a centered signed-carry table padded to a power of two.
 ///

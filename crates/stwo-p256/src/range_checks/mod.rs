@@ -62,6 +62,17 @@ pub fn range_check_value_column_id(log_size: u32) -> PreProcessedColumnId {
     }
 }
 
+/// Preprocessed `is_dummy` selector for the Class-D blind region of a plain
+/// range table (Q-015 §4b / p4c-degree-inventory Class D). `1` over the upper
+/// half `[2^log_size, 2^(log_size+1))` (reserved dummy keys), `0` over the real
+/// `[0, 2^log_size)` region. Keyed by the *real* `log_size` so a Class-D table
+/// and any non-blinded table of the same width never alias.
+pub fn range_check_dummy_column_id(real_log_size: u32) -> PreProcessedColumnId {
+    PreProcessedColumnId {
+        id: format!("p256_range{real_log_size}_dummy"),
+    }
+}
+
 pub fn signed_carry_value_column_id(equation_name: &str) -> PreProcessedColumnId {
     PreProcessedColumnId {
         id: format!("p256_signed_carry_{equation_name}_value"),

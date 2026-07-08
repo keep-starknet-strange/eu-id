@@ -88,6 +88,74 @@ impl RangeCheckClaim {
         }
         column_eval(self.log_size, multiplicity)
     }
+
+    // ---- Class D multiplicity blinding (Q-015 §4b / p4c Class D) ----
+    //
+    // The committed multiplicity column leaks: each row's count is a function
+    // of the private witness bytes, and every proof-side opening of the column
+    // is a linear functional over the full domain. Class D extends the table
+    // one log larger and fills the new upper half with fresh random
+    // multiplicities over RESERVED dummy keys. Per the masking note Case 1,
+    // >= 2^log_size uniform blind cells (with the full-rank circle-code opening
+    // submatrix) make every opening of the column uniform, masking the real
+    // lower-half counts. The dummy keys `[2^log_size, 2^(log_size+1))` are
+    // UNREACHABLE by honest consumers, which only ever emit values proven
+    // `< 2^log_size`, so soundness is unaffected; balance is preserved by the
+    // intra-component cancelling `+is_dummy*mult` emit in the eval.
+
+    /// `log_size + 1`: the committed row count of the Class-D blinded table.
+    pub fn blind_log_size(&self) -> u32 {
+        self.log_size + 1
+    }
+
+    /// Class-D preprocessed value column `[0, 1, ..., 2^(log_size+1) - 1]`. The
+    /// lower half is the real range `[0, 2^log_size)`; the upper half is the
+    /// reserved dummy keys `[2^log_size, 2^(log_size+1))`.
+    pub fn gen_blind_preprocessed_column(&self) -> ColumnEval {
+        let size = 1u32 << self.blind_log_size();
+        column_eval(
+            self.blind_log_size(),
+            (0..size).map(M31::from_u32_unchecked),
+        )
+    }
+
+    /// Class-D preprocessed `is_dummy` selector: `0` over the real lower half,
+    /// `1` over the dummy upper half.
+    pub fn gen_blind_dummy_column(&self) -> ColumnEval {
+        let real = 1usize << self.log_size;
+        let size = 1usize << self.blind_log_size();
+        column_eval(
+            self.blind_log_size(),
+            (0..size).map(|i| if i < real { M31::zero() } else { M31::one() }),
+        )
+    }
+
+    /// Class-D multiplicity column: real counts over the lower half, fresh
+    /// random blind cells over the dummy upper half. The dummy cells are the
+    /// mask; the eval's `+is_dummy*mult` term makes any value there balance.
+    pub fn gen_blind_multiplicity_trace(
+        &self,
+        uses: impl IntoIterator<Item = M31>,
+        mut rng: impl FnMut() -> M31,
+    ) -> ColumnEval {
+        let real = 1usize << self.log_size;
+        let size = 1usize << self.blind_log_size();
+        let mut multiplicity = vec![M31::zero(); size];
+        for value in uses {
+            let idx = value.0 as usize;
+            assert!(
+                idx < real,
+                "range-check use {} exceeds table size 2^{}",
+                value.0,
+                self.log_size,
+            );
+            multiplicity[idx] += M31::one();
+        }
+        for slot in multiplicity.iter_mut().take(size).skip(real) {
+            *slot = rng();
+        }
+        column_eval(self.blind_log_size(), multiplicity)
+    }
 }
 
 /// Prover-side claim for a [`super::SignedCarryRangeEval`] provider.
