@@ -29,6 +29,8 @@ codegen-units = 1
 [workspace.dependencies]
 stwo = { git = "https://github.com/0xLucqs/stwo.git", rev = "72b638e79263d90815069a4819bb22f3f3fb013c", features = ["prover"] }
 stwo-constraint-framework = { git = "https://github.com/0xLucqs/stwo.git", rev = "72b638e79263d90815069a4819bb22f3f3fb013c", features = ["prover"] }
+stwo-air-utils = { git = "https://github.com/0xLucqs/stwo.git", rev = "72b638e79263d90815069a4819bb22f3f3fb013c" }
+stwo-air-utils-derive = { git = "https://github.com/0xLucqs/stwo.git", rev = "72b638e79263d90815069a4819bb22f3f3fb013c" }
 serde = { version = "1", features = ["derive"] }
 num-traits = "0.2"
 mimalloc = "0.1"
