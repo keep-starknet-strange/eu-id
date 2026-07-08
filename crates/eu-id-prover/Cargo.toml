@@ -61,6 +61,11 @@ mimalloc = { workspace = true }
 bzip2 = "0.6"
 tracing = "0.1"
 tracing-subscriber = "0.3"
+# ML-DSA-65 mdoc fixture (M1): the RustCrypto `ml-dsa` oracle signs the issuer
+# `Sig_structure`, and `stwo-mldsa`'s native reference verifies it. Both are
+# test-only — the shipping mdoc issuerAuth path stays P-256 (that swap is M7).
+ml-dsa = "0.1.1"
+stwo-mldsa = { path = "../stwo-mldsa" }
 
 [[bench]]
 name = "identity_bench"

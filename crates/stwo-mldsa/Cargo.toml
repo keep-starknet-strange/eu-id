@@ -1,0 +1,39 @@
+[package]
+name = "stwo-mldsa"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# SHAKE-128 / SHAKE-256 (Keccak) for ExpandA, SampleInBall, the message-rep
+# hash µ, and the commitment hash c̃. The M1 reference records absorb/squeeze
+# byte streams; the future M3 in-circuit sponge (stwo-keccak) replaces this
+# runtime dependency for the AIR, but the native reference keeps it.
+sha3 = "0.10"
+# Serialize the M2 verification input (mirrors stwo-p256's EcdsaVerifyInput).
+serde = { workspace = true }
+# AIR / STARK stack for the M4 `mldsa_coeffs` component (bivariate-Horner lift).
+stwo.workspace = true
+stwo-constraint-framework.workspace = true
+air-core = { path = "../air-core" }
+# In-circuit SHAKE-256 sponge/keccak (M3/M3b). M6 composes three instances of
+# it (µ / c̃ / SampleInBall chains) into the ML-DSA statement and shares its
+# `HashIoRelation` byte contract with the mldsa cross-component bindings.
+stwo-keccak = { path = "../stwo-keccak" }
+num-traits.workspace = true
+rayon = "1"
+itertools = "0.14"
+
+[dev-dependencies]
+# Oracle cross-check. RustCrypto `ml-dsa` (FIPS 204 final) generates the
+# keypairs + signatures the property test verifies with our reference, and
+# supplies the KAT fallback if the vendored ACVP vectors are unavailable. Our
+# runtime code never depends on it — dev-only.
+ml-dsa = "0.1.1"
+rand = "0.9"
+hex = "0.4"
+serde = { workspace = true }
+serde_json = "1"
+bincode = "1"
+
+[lints]
+workspace = true
