@@ -177,6 +177,15 @@ pub fn shared_range_column_id(kind: RangeKind) -> PreProcessedColumnId {
     shared_id(kind.tag())
 }
 
+/// Class-D `is_dummy` selector id for a shared producer's blinded table
+/// (Q-015 §4b / p4c Class D). `1` over the reserved dummy-key upper half
+/// `[2^L, 2^(L+1))`, `0` over the real lower half `[0, 2^L)`. Keyed by the
+/// producer's stable tag so no two producers alias, and namespaced under
+/// `sha_shared_` so it never collides with the standalone tables.
+pub fn shared_producer_dummy_column_id(producer: SharedProducer) -> PreProcessedColumnId {
+    shared_id(&format!("{}_isdummy", producer.tag()))
+}
+
 /// Preprocessed-column ID of the single-cell `is_first_row` selector
 /// committed at the main `Sha256Eval` trace's `log_n_rows`. The selector
 /// is `1` at storage index `Layout::block_slot(0, log_n_rows) = 0` and
@@ -401,6 +410,32 @@ fn emit<E: EvalAtRow, R: Relation<E::F, E::EF>>(
     values: &[E::F],
 ) {
     eval.add_to_relation(RelationEntry::base(rel, mult, values));
+}
+
+/// Class-D blinded yield of one shared-table producer row (Q-015 §4b).
+///
+/// Emits TWO entries against the same relation and the same `values`:
+/// - `-mult` (the normal yield), and
+/// - `+is_dummy · mult` (the cancelling twin).
+///
+/// On a real row (`is_dummy = 0`) only `-mult` fires — identical to the
+/// unblinded producer. On a dummy row (`is_dummy = 1`) the pair sums to
+/// `(-m + m)/(z − combine(values)) = 0` for ANY committed `m`, so the fresh
+/// random blind multiplicities on the reserved upper half never touch the
+/// global LogUp balance. Both entries read the same committed multiplicity
+/// cell and the same preprocessed key, so a malicious prover gets no free
+/// claimed-sum term (P4b blind_claim-hole caution). `is_dummy · mult` is
+/// preprocessed × trace = degree 2, within the `D ≤ 3` budget under
+/// `max_constraint_log_degree_bound = blind_log_size + 1`.
+fn emit_blind<E: EvalAtRow, R: Relation<E::F, E::EF>>(
+    eval: &mut E,
+    rel: &R,
+    mult: E::F,
+    is_dummy: E::F,
+    values: &[E::F],
+) {
+    eval.add_to_relation(RelationEntry::base(rel, -mult.clone(), values));
+    eval.add_to_relation(RelationEntry::base(rel, is_dummy * mult, values));
 }
 
 pub type SigmaDecodeComponent = FrameworkComponent<SigmaDecodeEval>;
@@ -722,13 +757,31 @@ pub enum SharedProducer {
 }
 
 impl SharedProducer {
-    /// `log2` of this producer's committed row count.
+    /// `log2` of this producer's *real* table row count (lower half).
     pub fn log_size(self) -> u32 {
         match self {
             SharedProducer::RoundSplit(..) | SharedProducer::SigmaSplit(..) => {
                 crate::preprocessed::LOG_SIZE_16
             }
             SharedProducer::Range(kind) => range_log_size(kind),
+        }
+    }
+
+    /// Class-D committed row count: one log above the real width. The upper
+    /// half is the reserved dummy-key region carrying fresh random blind
+    /// multiplicities (Q-015 §4b / p4c Class D). Every committed column of this
+    /// producer — preprocessed value/group cells, `is_dummy` selector,
+    /// multiplicity trace, interaction fraction — lives at this size.
+    pub fn blind_log_size(self) -> u32 {
+        self.log_size() + 1
+    }
+
+    /// Stable per-producer tag, matching its preprocessed-column family.
+    pub fn tag(self) -> &'static str {
+        match self {
+            SharedProducer::RoundSplit(p, h) => round_split_tag(p, h),
+            SharedProducer::SigmaSplit(p, h) => sigma_split_tag(p, h),
+            SharedProducer::Range(kind) => kind.tag(),
         }
     }
 
@@ -746,34 +799,46 @@ impl SharedProducer {
                 let g1 = eval.get_preprocessed_column(cols[2].clone());
                 let g2 = eval.get_preprocessed_column(cols[3].clone());
                 let g3 = eval.get_preprocessed_column(cols[4].clone());
+                let is_dummy = eval.get_preprocessed_column(shared_producer_dummy_column_id(self));
                 let mult = eval.next_trace_mask();
                 let values = [key, g0, g1, g2, g3];
-                let neg = -mult;
                 match (p, h) {
-                    (RoundPartition::Sigma0AndMaj, Half16::Lo) => emit::<E, Sigma0SplitPackLo>(
-                        eval,
-                        &relations.split_pack.sigma0_lo,
-                        neg,
-                        &values,
-                    ),
-                    (RoundPartition::Sigma0AndMaj, Half16::Hi) => emit::<E, Sigma0SplitPackHi>(
-                        eval,
-                        &relations.split_pack.sigma0_hi,
-                        neg,
-                        &values,
-                    ),
-                    (RoundPartition::Sigma1AndCh, Half16::Lo) => emit::<E, Sigma1SplitPackLo>(
-                        eval,
-                        &relations.split_pack.sigma1_lo,
-                        neg,
-                        &values,
-                    ),
-                    (RoundPartition::Sigma1AndCh, Half16::Hi) => emit::<E, Sigma1SplitPackHi>(
-                        eval,
-                        &relations.split_pack.sigma1_hi,
-                        neg,
-                        &values,
-                    ),
+                    (RoundPartition::Sigma0AndMaj, Half16::Lo) => {
+                        emit_blind::<E, Sigma0SplitPackLo>(
+                            eval,
+                            &relations.split_pack.sigma0_lo,
+                            mult,
+                            is_dummy,
+                            &values,
+                        )
+                    }
+                    (RoundPartition::Sigma0AndMaj, Half16::Hi) => {
+                        emit_blind::<E, Sigma0SplitPackHi>(
+                            eval,
+                            &relations.split_pack.sigma0_hi,
+                            mult,
+                            is_dummy,
+                            &values,
+                        )
+                    }
+                    (RoundPartition::Sigma1AndCh, Half16::Lo) => {
+                        emit_blind::<E, Sigma1SplitPackLo>(
+                            eval,
+                            &relations.split_pack.sigma1_lo,
+                            mult,
+                            is_dummy,
+                            &values,
+                        )
+                    }
+                    (RoundPartition::Sigma1AndCh, Half16::Hi) => {
+                        emit_blind::<E, Sigma1SplitPackHi>(
+                            eval,
+                            &relations.split_pack.sigma1_hi,
+                            mult,
+                            is_dummy,
+                            &values,
+                        )
+                    }
                 }
             }
             SharedProducer::SigmaSplit(p, h) => {
@@ -781,39 +846,43 @@ impl SharedProducer {
                 let key = eval.get_preprocessed_column(cols[0].clone());
                 let packed_s = eval.get_preprocessed_column(cols[1].clone());
                 let packed_sp = eval.get_preprocessed_column(cols[2].clone());
+                let is_dummy = eval.get_preprocessed_column(shared_producer_dummy_column_id(self));
                 let mult = eval.next_trace_mask();
                 let values = [key, packed_s, packed_sp];
-                let neg = -mult;
                 match (p, h) {
                     (LowerSigmaPartition::LowerSigma0, Half16::Lo) => {
-                        emit::<E, LowerSigma0SplitPackLo>(
+                        emit_blind::<E, LowerSigma0SplitPackLo>(
                             eval,
                             &relations.split_pack.lower_sigma0_lo,
-                            neg,
+                            mult,
+                            is_dummy,
                             &values,
                         )
                     }
                     (LowerSigmaPartition::LowerSigma0, Half16::Hi) => {
-                        emit::<E, LowerSigma0SplitPackHi>(
+                        emit_blind::<E, LowerSigma0SplitPackHi>(
                             eval,
                             &relations.split_pack.lower_sigma0_hi,
-                            neg,
+                            mult,
+                            is_dummy,
                             &values,
                         )
                     }
                     (LowerSigmaPartition::LowerSigma1, Half16::Lo) => {
-                        emit::<E, LowerSigma1SplitPackLo>(
+                        emit_blind::<E, LowerSigma1SplitPackLo>(
                             eval,
                             &relations.split_pack.lower_sigma1_lo,
-                            neg,
+                            mult,
+                            is_dummy,
                             &values,
                         )
                     }
                     (LowerSigmaPartition::LowerSigma1, Half16::Hi) => {
-                        emit::<E, LowerSigma1SplitPackHi>(
+                        emit_blind::<E, LowerSigma1SplitPackHi>(
                             eval,
                             &relations.split_pack.lower_sigma1_hi,
-                            neg,
+                            mult,
+                            is_dummy,
                             &values,
                         )
                     }
@@ -821,22 +890,38 @@ impl SharedProducer {
             }
             SharedProducer::Range(kind) => {
                 let value = eval.get_preprocessed_column(shared_range_column_id(kind));
+                let is_dummy = eval.get_preprocessed_column(shared_producer_dummy_column_id(self));
                 let mult = eval.next_trace_mask();
-                let neg = -mult;
                 let values = [value];
                 match kind {
-                    RangeKind::Range2 => {
-                        emit::<E, Range2Relation>(eval, &relations.range.range_2, neg, &values)
-                    }
-                    RangeKind::Range4 => {
-                        emit::<E, Range4Relation>(eval, &relations.range.range_4, neg, &values)
-                    }
-                    RangeKind::Range5 => {
-                        emit::<E, Range5Relation>(eval, &relations.range.range_5, neg, &values)
-                    }
-                    RangeKind::Range16 => {
-                        emit::<E, Range16Relation>(eval, &relations.range.range_16, neg, &values)
-                    }
+                    RangeKind::Range2 => emit_blind::<E, Range2Relation>(
+                        eval,
+                        &relations.range.range_2,
+                        mult,
+                        is_dummy,
+                        &values,
+                    ),
+                    RangeKind::Range4 => emit_blind::<E, Range4Relation>(
+                        eval,
+                        &relations.range.range_4,
+                        mult,
+                        is_dummy,
+                        &values,
+                    ),
+                    RangeKind::Range5 => emit_blind::<E, Range5Relation>(
+                        eval,
+                        &relations.range.range_5,
+                        mult,
+                        is_dummy,
+                        &values,
+                    ),
+                    RangeKind::Range16 => emit_blind::<E, Range16Relation>(
+                        eval,
+                        &relations.range.range_16,
+                        mult,
+                        is_dummy,
+                        &values,
+                    ),
                 }
             }
         }
@@ -917,15 +1002,26 @@ pub fn consumer_preprocessed_column_ids() -> Vec<PreProcessedColumnId> {
 }
 
 pub fn shared_table_preprocessed_column_ids() -> Vec<PreProcessedColumnId> {
+    // Class D: each producer contributes its value/group columns followed by
+    // its `is_dummy` selector, in the exact order `SharedProducer::emit_entry`
+    // reads them (value cols via `get_preprocessed_column`, then the dummy
+    // selector). `crate::preprocessed::generate_shared_table_preprocessed_trace`
+    // emits the matching `CircleEvaluation`s in this same per-producer order.
     let mut out = Vec::new();
     for (p, h) in ROUND_SPLIT_TABLES {
+        let producer = SharedProducer::RoundSplit(*p, *h);
         out.extend(shared_round_split_pack_column_ids(*p, *h));
+        out.push(shared_producer_dummy_column_id(producer));
     }
     for (p, h) in SIGMA_SPLIT_TABLES {
+        let producer = SharedProducer::SigmaSplit(*p, *h);
         out.extend(shared_sigma_split_pack_column_ids(*p, *h));
+        out.push(shared_producer_dummy_column_id(producer));
     }
     for &kind in RANGE_TABLES {
+        let producer = SharedProducer::Range(kind);
         out.push(shared_range_column_id(kind));
+        out.push(shared_producer_dummy_column_id(producer));
     }
     out
 }

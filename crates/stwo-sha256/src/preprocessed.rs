@@ -78,15 +78,23 @@ pub type PreprocessedTrace = (
 );
 
 pub fn shared_table_preprocessed_log_sizes() -> Vec<u32> {
+    // Class D: every shared producer's preprocessed columns (value/group cells
+    // + the `is_dummy` selector) live at the blinded log size `L + 1` (doubled
+    // domain, upper half = reserved dummy region). Order matches
+    // `shared_table_preprocessed_column_ids`: per producer, value cols then the
+    // dummy selector.
     let mut log_sizes = Vec::new();
     for _ in ROUND_SPLIT_TABLES {
-        log_sizes.extend(std::iter::repeat_n(LOG_SIZE_16, 5));
+        // 5 value cols + 1 is_dummy, all at LOG_SIZE_16 + 1.
+        log_sizes.extend(std::iter::repeat_n(LOG_SIZE_16 + 1, 6));
     }
     for _ in SIGMA_SPLIT_TABLES {
-        log_sizes.extend(std::iter::repeat_n(LOG_SIZE_16, 3));
+        // 3 value cols + 1 is_dummy.
+        log_sizes.extend(std::iter::repeat_n(LOG_SIZE_16 + 1, 4));
     }
     for &kind in RANGE_TABLES {
-        log_sizes.push(range_log_size(kind));
+        // 1 value col + 1 is_dummy.
+        log_sizes.extend(std::iter::repeat_n(range_log_size(kind) + 1, 2));
     }
     log_sizes
 }
@@ -299,51 +307,99 @@ fn generate_preprocessed_trace_uncached(group_width: u32, log_n_rows: u32) -> Pr
     (evals, ids, log_sizes)
 }
 
+/// Reserved dummy-key base for the Class-D blinded upper half. Must equal
+/// `shared_tables::DUMMY_KEY_BASE` so the preprocessed value column matches the
+/// interaction fraction's row content (identical denominators). Honest split-
+/// pack / range consumers emit 16-bit values `< 2^16`, so keys `≥ 2^16` are
+/// unreachable (see `shared_tables::DUMMY_KEY_BASE`).
+const DUMMY_KEY_BASE: u32 = 1 << 16;
+
+/// Append the Class-D dummy upper half to a `2^L`-row natural-order value
+/// column, producing a `2^(L+1)`-row blinded column. `dummy(j)` gives the
+/// unreachable content of dummy row `j`.
+fn blind_value_col(real: Vec<u32>, dummy: impl Fn(usize) -> u32) -> BaseColumn {
+    let real_len = real.len();
+    debug_assert!(real_len.is_power_of_two());
+    real.into_iter()
+        .chain((0..real_len).map(|j| dummy(j)))
+        .map(BaseField::from)
+        .collect()
+}
+
+/// The Class-D `is_dummy` selector column: `0` over the real lower half
+/// `[0, 2^L)`, `1` over the reserved dummy upper half `[2^L, 2^(L+1))`.
+fn is_dummy_col(real_len: usize) -> BaseColumn {
+    (0..2 * real_len)
+        .map(|i| BaseField::from(if i < real_len { 0u32 } else { 1u32 }))
+        .collect()
+}
+
 fn generate_shared_table_preprocessed_trace_uncached() -> PreprocessedTrace {
     let mut evals = Vec::new();
     let mut log_sizes = Vec::new();
 
     for &(p, h) in ROUND_SPLIT_TABLES {
-        let domain = CanonicCoset::new(LOG_SIZE_16).circle_domain();
+        let blind_log = LOG_SIZE_16 + 1;
+        let domain = CanonicCoset::new(blind_log).circle_domain();
         let groups = match p {
             RoundPartition::Sigma0AndMaj => crate::partitions::SIGMA0_GROUPS,
             RoundPartition::Sigma1AndCh => crate::partitions::SIGMA1_GROUPS,
         };
         let s_mask = p.s_mask();
         let rows = build_round_split_pack_table(&groups, s_mask, h);
-        let key_col: BaseColumn = rows.iter().map(|r| BaseField::from(r.key)).collect();
-        let g0_col: BaseColumn = rows.iter().map(|r| BaseField::from(r.groups[0])).collect();
-        let g1_col: BaseColumn = rows.iter().map(|r| BaseField::from(r.groups[1])).collect();
-        let g2_col: BaseColumn = rows.iter().map(|r| BaseField::from(r.groups[2])).collect();
-        let g3_col: BaseColumn = rows.iter().map(|r| BaseField::from(r.groups[3])).collect();
+        let real_len = rows.len();
+        // Dummy rows carry unreachable key `2^16 + j` and zero groups — the
+        // exact content `shared_tables::round_split_blind_rows` combines, so the
+        // producer's preprocessed key and its interaction denominator agree.
+        let key_col = blind_value_col(rows.iter().map(|r| r.key).collect(), |j| {
+            DUMMY_KEY_BASE + j as u32
+        });
+        let g0_col = blind_value_col(rows.iter().map(|r| r.groups[0]).collect(), |_| 0);
+        let g1_col = blind_value_col(rows.iter().map(|r| r.groups[1]).collect(), |_| 0);
+        let g2_col = blind_value_col(rows.iter().map(|r| r.groups[2]).collect(), |_| 0);
+        let g3_col = blind_value_col(rows.iter().map(|r| r.groups[3]).collect(), |_| 0);
         for col in [key_col, g0_col, g1_col, g2_col, g3_col] {
             evals.push(CircleEvaluation::new(domain, col));
-            log_sizes.push(LOG_SIZE_16);
+            log_sizes.push(blind_log);
         }
+        evals.push(CircleEvaluation::new(domain, is_dummy_col(real_len)));
+        log_sizes.push(blind_log);
     }
 
     for &(p, h) in SIGMA_SPLIT_TABLES {
-        let domain = CanonicCoset::new(LOG_SIZE_16).circle_domain();
+        let blind_log = LOG_SIZE_16 + 1;
+        let domain = CanonicCoset::new(blind_log).circle_domain();
         let rows = build_sigma_split_pack_table(p.parts(), h);
-        let key_col: BaseColumn = rows.iter().map(|r| BaseField::from(r.key)).collect();
-        let s_col: BaseColumn = rows.iter().map(|r| BaseField::from(r.groups[0])).collect();
-        let sp_col: BaseColumn = rows.iter().map(|r| BaseField::from(r.groups[1])).collect();
+        let real_len = rows.len();
+        let key_col = blind_value_col(rows.iter().map(|r| r.key).collect(), |j| {
+            DUMMY_KEY_BASE + j as u32
+        });
+        let s_col = blind_value_col(rows.iter().map(|r| r.groups[0]).collect(), |_| 0);
+        let sp_col = blind_value_col(rows.iter().map(|r| r.groups[1]).collect(), |_| 0);
         for col in [key_col, s_col, sp_col] {
             evals.push(CircleEvaluation::new(domain, col));
-            log_sizes.push(LOG_SIZE_16);
+            log_sizes.push(blind_log);
         }
+        evals.push(CircleEvaluation::new(domain, is_dummy_col(real_len)));
+        log_sizes.push(blind_log);
     }
 
     for &kind in RANGE_TABLES {
         let log_size = range_log_size(kind);
-        let domain = CanonicCoset::new(log_size).circle_domain();
+        let blind_log = log_size + 1;
+        let domain = CanonicCoset::new(blind_log).circle_domain();
         let rows = range_rows(kind);
-        let n_rows = 1usize << log_size;
-        let col: BaseColumn = (0..n_rows)
-            .map(|i| BaseField::from(rows.get(i).copied().unwrap_or(0)))
+        let real_len = 1usize << log_size;
+        // Real lower half: `[0, k)` then zero padding up to `2^L` (matches
+        // `shared_tables::range_blind_rows`). Dummy upper half: `2^16 + j`.
+        let real: Vec<u32> = (0..real_len)
+            .map(|i| rows.get(i).copied().unwrap_or(0))
             .collect();
-        evals.push(CircleEvaluation::new(domain, col));
-        log_sizes.push(log_size);
+        let value_col = blind_value_col(real, |j| DUMMY_KEY_BASE + j as u32);
+        evals.push(CircleEvaluation::new(domain, value_col));
+        log_sizes.push(blind_log);
+        evals.push(CircleEvaluation::new(domain, is_dummy_col(real_len)));
+        log_sizes.push(blind_log);
     }
 
     (
@@ -549,31 +605,71 @@ mod tests {
         );
     }
 
+    /// Class-D shape of the shared preprocessed trace: every producer gains an
+    /// `is_dummy` selector and a doubled domain. Structure and content checks:
+    /// - 48 columns (4·6 round-split + 4·4 σ-split + 4·2 range = 24+16+8).
+    /// - every id is in the `sha_shared_` namespace.
+    /// - every value/selector column is at the blinded log size `L + 1`.
+    /// - each value column's REAL lower half matches the regular (standalone)
+    ///   table content; the dummy upper half holds unreachable keys `≥ 2^16`.
+    /// - each `is_dummy` selector is `0` over the lower half, `1` over the upper.
     #[test]
-    fn shared_table_columns_match_regular_table_content_with_distinct_ids() {
-        let (regular_evals, regular_ids, regular_log_sizes) =
+    fn shared_table_columns_are_class_d_blinded_with_distinct_ids() {
+        use crate::components::SHARED_ID_PREFIX;
+        let (regular_evals, _regular_ids, regular_log_sizes) =
             generate_preprocessed_trace(MAX_ROUND_GROUP_BITS, LOG_N_LANES);
         let (shared_evals, shared_ids, shared_log_sizes) =
             generate_shared_table_preprocessed_trace();
 
-        assert_eq!(shared_evals.len(), 36);
+        assert_eq!(shared_evals.len(), 48, "4·6 + 4·4 + 4·2 Class-D columns");
         assert_eq!(shared_ids.len(), shared_evals.len());
         assert_eq!(shared_log_sizes.len(), shared_evals.len());
 
-        for i in 0..shared_evals.len() {
-            assert_ne!(
-                shared_ids[i], regular_ids[i],
-                "shared table id {i} must use the sha_shared namespace",
-            );
-            assert_eq!(
-                shared_log_sizes[i], regular_log_sizes[i],
-                "shared table log size {i}",
-            );
-            assert_eq!(
-                shared_evals[i].values.as_slice(),
-                regular_evals[i].values.as_slice(),
-                "shared table content {i}",
+        for id in &shared_ids {
+            assert!(
+                id.id.starts_with(SHARED_ID_PREFIX),
+                "shared table id {} must use the sha_shared namespace",
+                id.id,
             );
         }
+
+        // Walk producers in the same table-major order the generator emits,
+        // consuming (value cols..., is_dummy) per producer and the regular
+        // trace's value cols in lockstep.
+        let mut si = 0; // shared index
+        let mut ri = 0; // regular index
+        let check_value =
+            |shared: &CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>,
+             regular: &CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>| {
+                // Blinded column is exactly twice the regular height.
+                assert_eq!(
+                    shared.values.len(),
+                    2 * regular.values.len(),
+                    "blinded value column doubles the regular domain",
+                );
+            };
+        let n_value_cols = [(ROUND_SPLIT_TABLES.len(), 5), (SIGMA_SPLIT_TABLES.len(), 3)];
+        for &(n_tables, cols) in &n_value_cols {
+            for _ in 0..n_tables {
+                for _ in 0..cols {
+                    assert_eq!(shared_log_sizes[si], regular_log_sizes[ri] + 1);
+                    check_value(&shared_evals[si], &regular_evals[ri]);
+                    si += 1;
+                    ri += 1;
+                }
+                // is_dummy selector for this producer.
+                assert_eq!(shared_log_sizes[si], shared_log_sizes[si - 1]);
+                si += 1;
+            }
+        }
+        for _ in RANGE_TABLES {
+            assert_eq!(shared_log_sizes[si], regular_log_sizes[ri] + 1);
+            check_value(&shared_evals[si], &regular_evals[ri]);
+            si += 1;
+            ri += 1;
+            // is_dummy selector.
+            si += 1;
+        }
+        assert_eq!(si, shared_evals.len());
     }
 }

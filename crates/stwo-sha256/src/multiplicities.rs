@@ -786,13 +786,18 @@ mod tests {
 
         let shared = crate::shared_tables::ShaTableMultiplicities::from_consumers(&consumers);
 
+        // Class D: the stored vectors are blinded (2× length, random dummy upper
+        // half). Only the REAL lower half is the deterministic union sum; the
+        // upper half is fresh per-proof mask and is asserted equal to neither
+        // witness. We compare the lower half against the union sum here.
         for (i, &(p, h)) in ROUND_SPLIT_TABLES.iter().enumerate() {
             let expected: Vec<u32> = round_split_pack_multiplicities(&first, p, h)
                 .into_iter()
                 .zip(round_split_pack_multiplicities(&second, p, h))
                 .map(|(a, b)| a + b)
                 .collect();
-            assert_eq!(shared.round_split_pack[i], expected);
+            assert_eq!(&shared.round_split_pack[i][..expected.len()], &expected[..]);
+            assert_eq!(shared.round_split_pack[i].len(), 2 * expected.len());
         }
         for (i, &(p, h)) in SIGMA_SPLIT_TABLES.iter().enumerate() {
             let expected: Vec<u32> = sigma_split_pack_multiplicities(&first, p, h)
@@ -800,7 +805,8 @@ mod tests {
                 .zip(sigma_split_pack_multiplicities(&second, p, h))
                 .map(|(a, b)| a + b)
                 .collect();
-            assert_eq!(shared.sigma_split_pack[i], expected);
+            assert_eq!(&shared.sigma_split_pack[i][..expected.len()], &expected[..]);
+            assert_eq!(shared.sigma_split_pack[i].len(), 2 * expected.len());
         }
         for (i, &kind) in RANGE_TABLES.iter().enumerate() {
             let expected: Vec<u32> = range_k_multiplicities(&first, kind, &FieldExposure::empty())
@@ -812,7 +818,8 @@ mod tests {
                 ))
                 .map(|(a, b)| a + b)
                 .collect();
-            assert_eq!(shared.range[i], expected);
+            assert_eq!(&shared.range[i][..expected.len()], &expected[..]);
+            assert_eq!(shared.range[i].len(), 2 * expected.len());
         }
     }
 }

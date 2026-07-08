@@ -17,6 +17,7 @@ air-core = { path = "../air-core" }
 stwo = { workspace = true }
 stwo-constraint-framework = { workspace = true }
 num-traits = "0.2"
+rand = "0.8"
 rayon = "1"
 serde = { workspace = true }
 
