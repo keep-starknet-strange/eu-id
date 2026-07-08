@@ -19,10 +19,30 @@ accepted; v2 is what real wallets emit. It proves:
 - age and nationality predicates bound to disclosed item bytes.
 
 This profile does not add in-circuit CBOR parsing, in-circuit x509 chain
-validation, revocation, SD-JWT support, or privacy masking for public
-signatures. x5chain validation is host-side against verifier-supplied trusted
-roots. The old 11-byte proof-of-concept credential path is intentionally
-separate and keeps its nonce module for parity benchmarks.
+validation, or SD-JWT / `zk-jwt` support; those requests are rejected
+fail-closed at the TS13 entry point. x5chain validation is host-side against
+verifier-supplied trusted roots.
+
+TS13 sorted-pair non-revocation is supported end-to-end for the MSO-derived
+identifier `id = LE64(SHA-256(MSO bytes)[0..8])`: the strict
+`id_lo < id < id_hi` range check, the id-to-MSO-SHA digest binding, the
+MSO-SHA-preimage-to-issuerAuth-payload linkage, and the revocation-authority
+P-256 sorted-pair signature over `SHA-256(LE64(id_lo) || LE64(id_hi) ||
+LE32(epoch))` are all part of the mdoc STARK when the TS13 revocation layout is
+enabled. The public statement carries only the revocation public key, epoch, and
+a range-layout flag; `id`, `id_lo`, and `id_hi` stay witness.
+
+Zero-knowledge privacy masking is implemented in the product mdoc proof path
+(P4c Classes A–E: perfectly masked blind-row cells, MAC/SHA decoys, 1-active-row
+predicate layouts, Class-D reserved-dummy-key range/SHA tables, and per-prove
+claimed-sum blinder pairs on the private-data modules). The classification,
+simulator sketch, and executable guards are in `tasks/p4c-leakage-table.md`.
+This document states what is implemented; it does not itself assert external
+TS13 compatibility — that claim gates on the release signoff recorded in
+`tasks/audits/2026-07-07-ts13-evidence.md`.
+
+The old 11-byte proof-of-concept credential path is intentionally separate and
+keeps its nonce module for parity benchmarks.
 
 ## Document Shape
 
