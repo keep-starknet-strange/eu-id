@@ -1,4 +1,4 @@
-use ecdsa::signature::Signer;
+use ecdsa::signature::{hazmat::PrehashSigner, Signer};
 use p256::ecdsa::{Signature as P256Signature, SigningKey};
 use p256::pkcs8::DecodePrivateKey;
 use sha2::{Digest as _, Sha256};
@@ -9,9 +9,15 @@ use eu_id_prover::mdoc::{
     demo_mdoc_sizing_waste, device_authentication_bytes, device_authentication_sig_structure_hash,
     extract_pid_mdoc, mdoc_production_pcs_config, mdoc_proof_byte_breakdown,
     openid4vp_session_transcript, prove_mdoc_circuit, verify_mdoc_circuit,
-    verify_mdoc_circuit_with_pcs_config, MdocBirthDateBinding, MdocCircuitStatement,
-    MdocDeviceAuthenticationProfile, MdocDisclosureMode, MdocError, MdocNationalityBinding,
-    MdocPidRequest, MdocRequestedAttribute,
+    verify_mdoc_circuit_with_pcs_config, verify_mdoc_circuit_with_preprocessed_root,
+    MdocBirthDateBinding, MdocCircuitStatement, MdocDeviceAuthenticationProfile,
+    MdocDisclosureMode, MdocError, MdocNationalityBinding, MdocPidRequest, MdocPublicStatement,
+    MdocRequestedAttribute, MdocRevocationPublicInputs, MdocRevocationRangeWitness,
+};
+use eu_id_prover::ts13::{
+    ts13_default_circuit_hash, ts13_default_preprocessed_root, ts13_mso_derived_revocation_id,
+    ts13_revocation_message_hash, Ts13MdocProofArtifact, Ts13MdocProofArtifactError,
+    Ts13RevocationStatement, Ts13RevocationWitness,
 };
 use eu_id_prover::{Date, Policy};
 use stwo_p256::types::{AffinePoint, Signature, U256};
@@ -636,6 +642,560 @@ fn circuit_fixture(session_transcript: &[u8]) -> MdocFixture {
         Value::Bytes(276u16.to_be_bytes().to_vec()), // DE numeric
         None,
     )
+}
+
+fn ts13_revocation_key(seed: u8) -> (SigningKey, AffinePoint) {
+    let signing_key = SigningKey::from_bytes((&[seed; 32]).into()).expect("revocation key");
+    let (_, public_key) = cose_key(&signing_key);
+    (signing_key, public_key)
+}
+
+fn ts13_revocation_witness_for_id(
+    signing_key: &SigningKey,
+    id: u64,
+    id_lo: u64,
+    id_hi: u64,
+    epoch: u32,
+) -> Ts13RevocationWitness {
+    let message_hash = ts13_revocation_message_hash(id_lo, id_hi, epoch);
+    let pair_signature: P256Signature = signing_key
+        .sign_prehash(&message_hash)
+        .expect("revocation prehash signs");
+    Ts13RevocationWitness {
+        id,
+        id_lo,
+        id_hi,
+        epoch,
+        signature: signature(&pair_signature),
+    }
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[test]
+#[ignore = "release gate for TS13 revocation positive path"]
+fn ts13_revocation_non_revoked_end_to_end() {
+    let session_transcript = test_session_transcript();
+    let fixture = valid_fixture(&session_transcript);
+    let extracted = extract_pid_mdoc(&fixture.doc, &request(session_transcript))
+        .expect("mdoc extracts for revocation");
+    let id = ts13_mso_derived_revocation_id(&extracted.mso);
+    let (signing_key, revocation_key) = ts13_revocation_key(23);
+    let statement = Ts13RevocationStatement {
+        revocation_public_key: revocation_key,
+        epoch: 42,
+    };
+    let witness = ts13_revocation_witness_for_id(
+        &signing_key,
+        id,
+        id.saturating_sub(1),
+        id.saturating_add(1),
+        statement.epoch,
+    );
+
+    statement.verify_witness(&extracted, &witness).unwrap();
+}
+
+#[test]
+fn ts13_revocation_sentinel_pair_end_to_end() {
+    let session_transcript = test_session_transcript();
+    let fixture = valid_fixture(&session_transcript);
+    let extracted = extract_pid_mdoc(&fixture.doc, &request(session_transcript))
+        .expect("mdoc extracts for sentinel revocation");
+    let id = ts13_mso_derived_revocation_id(&extracted.mso);
+    assert_ne!(id, 0);
+    assert_ne!(id, u64::MAX);
+    let (signing_key, revocation_key) = ts13_revocation_key(24);
+    let statement = Ts13RevocationStatement {
+        revocation_public_key: revocation_key,
+        epoch: 43,
+    };
+    let witness = ts13_revocation_witness_for_id(&signing_key, id, 0, u64::MAX, statement.epoch);
+
+    statement.verify_witness(&extracted, &witness).unwrap();
+}
+
+#[test]
+fn ts13_revocation_rejects_id_equal_lo() {
+    let session_transcript = test_session_transcript();
+    let fixture = valid_fixture(&session_transcript);
+    let extracted = extract_pid_mdoc(&fixture.doc, &request(session_transcript))
+        .expect("mdoc extracts for revocation");
+    let id = ts13_mso_derived_revocation_id(&extracted.mso);
+    let (signing_key, revocation_key) = ts13_revocation_key(25);
+    let statement = Ts13RevocationStatement {
+        revocation_public_key: revocation_key,
+        epoch: 44,
+    };
+    let witness = ts13_revocation_witness_for_id(&signing_key, id, id, id + 1, statement.epoch);
+
+    assert!(statement.verify_witness(&extracted, &witness).is_err());
+}
+
+#[test]
+fn ts13_revocation_rejects_id_equal_hi() {
+    let session_transcript = test_session_transcript();
+    let fixture = valid_fixture(&session_transcript);
+    let extracted = extract_pid_mdoc(&fixture.doc, &request(session_transcript))
+        .expect("mdoc extracts for revocation");
+    let id = ts13_mso_derived_revocation_id(&extracted.mso);
+    let (signing_key, revocation_key) = ts13_revocation_key(26);
+    let statement = Ts13RevocationStatement {
+        revocation_public_key: revocation_key,
+        epoch: 45,
+    };
+    let witness = ts13_revocation_witness_for_id(&signing_key, id, id - 1, id, statement.epoch);
+
+    assert!(statement.verify_witness(&extracted, &witness).is_err());
+}
+
+#[test]
+fn ts13_revocation_rejects_forged_pair_signature() {
+    let session_transcript = test_session_transcript();
+    let fixture = valid_fixture(&session_transcript);
+    let extracted = extract_pid_mdoc(&fixture.doc, &request(session_transcript))
+        .expect("mdoc extracts for revocation");
+    let id = ts13_mso_derived_revocation_id(&extracted.mso);
+    let (honest_key, revocation_key) = ts13_revocation_key(27);
+    let (forger_key, _) = ts13_revocation_key(28);
+    let statement = Ts13RevocationStatement {
+        revocation_public_key: revocation_key,
+        epoch: 46,
+    };
+    let honest = ts13_revocation_witness_for_id(&honest_key, id, id - 1, id + 1, statement.epoch);
+    statement.verify_witness(&extracted, &honest).unwrap();
+    let forged = ts13_revocation_witness_for_id(&forger_key, id, id - 1, id + 1, statement.epoch);
+
+    assert!(statement.verify_witness(&extracted, &forged).is_err());
+}
+
+#[test]
+fn ts13_revocation_rejects_stale_epoch() {
+    let session_transcript = test_session_transcript();
+    let fixture = valid_fixture(&session_transcript);
+    let extracted = extract_pid_mdoc(&fixture.doc, &request(session_transcript))
+        .expect("mdoc extracts for revocation");
+    let id = ts13_mso_derived_revocation_id(&extracted.mso);
+    let (signing_key, revocation_key) = ts13_revocation_key(29);
+    let statement = Ts13RevocationStatement {
+        revocation_public_key: revocation_key,
+        epoch: 47,
+    };
+    let witness = ts13_revocation_witness_for_id(&signing_key, id, id - 1, id + 1, 46);
+
+    assert!(statement.verify_witness(&extracted, &witness).is_err());
+}
+
+#[test]
+fn ts13_revocation_rejects_missing_caller_binding() {
+    let session_transcript = test_session_transcript();
+    let fixture = valid_fixture(&session_transcript);
+    let extracted = extract_pid_mdoc(&fixture.doc, &request(session_transcript))
+        .expect("mdoc extracts for revocation");
+    let id = ts13_mso_derived_revocation_id(&extracted.mso);
+    let (signing_key, revocation_key) = ts13_revocation_key(30);
+    let (_, wrong_revocation_key) = ts13_revocation_key(31);
+    let statement = Ts13RevocationStatement {
+        revocation_public_key: wrong_revocation_key,
+        epoch: 48,
+    };
+    let witness = ts13_revocation_witness_for_id(&signing_key, id, id - 1, id + 1, 48);
+
+    assert!(statement.verify_witness(&extracted, &witness).is_err());
+    let missing_epoch_statement = Ts13RevocationStatement {
+        revocation_public_key: revocation_key,
+        epoch: 49,
+    };
+    assert!(missing_epoch_statement
+        .verify_witness(&extracted, &witness)
+        .is_err());
+}
+
+#[test]
+fn ts13_revocation_artifact_binds_to_mdoc_mso() {
+    let session_transcript = test_session_transcript();
+    let fixture = valid_fixture(&session_transcript);
+    let extracted = extract_pid_mdoc(&fixture.doc, &request(session_transcript))
+        .expect("mdoc extracts for revocation artifact");
+    let mdoc_statement = MdocCircuitStatement::from_extracted(&extracted, policy_on(2026, 7, 3))
+        .expect("mdoc statement builds for revocation artifact");
+    let id = ts13_mso_derived_revocation_id(&extracted.mso);
+    let (signing_key, revocation_key) = ts13_revocation_key(32);
+    let revocation_statement = Ts13RevocationStatement {
+        revocation_public_key: revocation_key,
+        epoch: 50,
+    };
+    let mdoc_statement = mdoc_statement.with_ts13_revocation((&revocation_statement).into());
+    let witness = ts13_revocation_witness_for_id(
+        &signing_key,
+        id,
+        id - 1,
+        id + 1,
+        revocation_statement.epoch,
+    );
+    let expected_preprocessed_root = ts13_default_preprocessed_root();
+    let artifact = Ts13MdocProofArtifact {
+        circuit_hash: ts13_default_circuit_hash(),
+        preprocessed_root: expected_preprocessed_root,
+        mdoc_proof: b"serialized mdoc proof".to_vec(),
+        revocation_statement,
+        revocation_witness: witness,
+    };
+
+    artifact
+        .verify_revocation_binding(&extracted, expected_preprocessed_root)
+        .unwrap();
+    assert!(matches!(
+        artifact.verify_mdoc_and_revocation(&extracted, &mdoc_statement),
+        Err(Ts13MdocProofArtifactError::ProofDecode)
+    ));
+
+    let mut wrong_hash = artifact.clone();
+    wrong_hash.circuit_hash = "00".repeat(32);
+    assert!(matches!(
+        wrong_hash.verify_revocation_binding(&extracted, expected_preprocessed_root),
+        Err(Ts13MdocProofArtifactError::CircuitHash)
+    ));
+
+    let mut wrong_root = artifact.clone();
+    wrong_root.preprocessed_root[0] ^= 1;
+    assert!(matches!(
+        wrong_root.verify_revocation_binding(&extracted, expected_preprocessed_root),
+        Err(Ts13MdocProofArtifactError::PreprocessedRoot)
+    ));
+
+    let mut empty_proof = artifact.clone();
+    empty_proof.mdoc_proof.clear();
+    assert!(matches!(
+        empty_proof.verify_revocation_binding(&extracted, expected_preprocessed_root),
+        Err(Ts13MdocProofArtifactError::EmptyProof)
+    ));
+
+    let other_fixture = fixture_with_values(
+        &test_session_transcript(),
+        "1991-07-15".into(),
+        "DE".into(),
+        None,
+    );
+    let other_extracted = extract_pid_mdoc(&other_fixture.doc, &request(test_session_transcript()))
+        .expect("other mdoc extracts for artifact mismatch");
+    assert!(matches!(
+        artifact.verify_revocation_binding(&other_extracted, expected_preprocessed_root),
+        Err(Ts13MdocProofArtifactError::Revocation(
+            eu_id_prover::ts13::Ts13RevocationError::DerivedIdMismatch
+        ))
+    ));
+}
+
+#[test]
+fn ts13_revocation_artifact_rejects_statement_without_revocation_policy() {
+    let session_transcript = test_session_transcript();
+    let fixture = valid_fixture(&session_transcript);
+    let extracted = extract_pid_mdoc(&fixture.doc, &request(session_transcript))
+        .expect("mdoc extracts for revocation statement binding");
+    let mdoc_statement = MdocCircuitStatement::from_extracted(&extracted, policy_on(2026, 7, 3))
+        .expect("mdoc statement builds for revocation statement binding");
+    let id = ts13_mso_derived_revocation_id(&extracted.mso);
+    let (signing_key, revocation_key) = ts13_revocation_key(33);
+    let revocation_statement = Ts13RevocationStatement {
+        revocation_public_key: revocation_key,
+        epoch: 51,
+    };
+    let witness = ts13_revocation_witness_for_id(
+        &signing_key,
+        id,
+        id - 1,
+        id + 1,
+        revocation_statement.epoch,
+    );
+    let artifact = Ts13MdocProofArtifact {
+        circuit_hash: ts13_default_circuit_hash(),
+        preprocessed_root: ts13_default_preprocessed_root(),
+        mdoc_proof: b"serialized mdoc proof".to_vec(),
+        revocation_statement,
+        revocation_witness: witness,
+    };
+
+    assert!(matches!(
+        artifact.verify_mdoc_and_revocation(&extracted, &mdoc_statement),
+        Err(Ts13MdocProofArtifactError::StatementRevocationMissing)
+    ));
+}
+
+#[test]
+fn ts13_revocation_artifact_rejects_statement_revocation_policy_drift() {
+    let session_transcript = test_session_transcript();
+    let fixture = valid_fixture(&session_transcript);
+    let extracted = extract_pid_mdoc(&fixture.doc, &request(session_transcript))
+        .expect("mdoc extracts for revocation statement drift");
+    let mdoc_statement = MdocCircuitStatement::from_extracted(&extracted, policy_on(2026, 7, 3))
+        .expect("mdoc statement builds for revocation statement drift");
+    let id = ts13_mso_derived_revocation_id(&extracted.mso);
+    let (signing_key, revocation_key) = ts13_revocation_key(34);
+    let (_, wrong_revocation_key) = ts13_revocation_key(35);
+    let revocation_statement = Ts13RevocationStatement {
+        revocation_public_key: revocation_key,
+        epoch: 52,
+    };
+    let mdoc_statement = mdoc_statement.with_ts13_revocation(MdocRevocationPublicInputs {
+        revocation_public_key: wrong_revocation_key,
+        epoch: revocation_statement.epoch,
+    });
+    let witness = ts13_revocation_witness_for_id(
+        &signing_key,
+        id,
+        id - 1,
+        id + 1,
+        revocation_statement.epoch,
+    );
+    let artifact = Ts13MdocProofArtifact {
+        circuit_hash: ts13_default_circuit_hash(),
+        preprocessed_root: ts13_default_preprocessed_root(),
+        mdoc_proof: b"serialized mdoc proof".to_vec(),
+        revocation_statement,
+        revocation_witness: witness,
+    };
+
+    assert!(matches!(
+        artifact.verify_mdoc_and_revocation(&extracted, &mdoc_statement),
+        Err(Ts13MdocProofArtifactError::StatementRevocationMismatch)
+    ));
+}
+
+#[test]
+#[ignore = "slow: proves TS13 revocation public policy is mixed into the STARK transcript"]
+fn ts13_revocation_public_inputs_are_stark_bound() {
+    let session_transcript = test_session_transcript();
+    let fixture = valid_fixture(&session_transcript);
+    let extracted = extract_pid_mdoc(&fixture.doc, &request(session_transcript))
+        .expect("mdoc extracts for revocation transcript binding");
+    let statement = MdocCircuitStatement::from_extracted(&extracted, policy_on(2026, 7, 3))
+        .expect("mdoc statement builds for revocation transcript binding");
+    let (_, revocation_key) = ts13_revocation_key(36);
+    let (_, wrong_revocation_key) = ts13_revocation_key(37);
+    let statement = statement.with_ts13_revocation(MdocRevocationPublicInputs {
+        revocation_public_key: revocation_key,
+        epoch: 53,
+    });
+    let proof = prove_mdoc_circuit(&extracted, &statement)
+        .expect("mdoc proof builds with TS13 revocation public inputs");
+    verify_mdoc_circuit(&proof, &statement)
+        .expect("mdoc proof verifies with original TS13 revocation public inputs");
+
+    let mut drifted = statement.clone();
+    drifted.ts13_revocation = Some(MdocRevocationPublicInputs {
+        revocation_public_key: wrong_revocation_key,
+        epoch: 53,
+    });
+    assert!(
+        verify_mdoc_circuit(&proof, &drifted).is_err(),
+        "raw mdoc verification must bind revocation public key into the STARK transcript"
+    );
+
+    let mut stale_epoch = statement.clone();
+    stale_epoch.ts13_revocation = Some(MdocRevocationPublicInputs {
+        revocation_public_key: statement
+            .ts13_revocation
+            .as_ref()
+            .expect("statement has revocation inputs")
+            .revocation_public_key
+            .clone(),
+        epoch: 54,
+    });
+    assert!(
+        verify_mdoc_circuit(&proof, &stale_epoch).is_err(),
+        "raw mdoc verification must bind revocation epoch into the STARK transcript"
+    );
+}
+
+#[test]
+#[ignore = "slow: proves TS13 revocation range is constrained by the STARK"]
+fn ts13_revocation_range_rejects_id_equal_lo_in_stark() {
+    let session_transcript = test_session_transcript();
+    let fixture = valid_fixture(&session_transcript);
+    let extracted = extract_pid_mdoc(&fixture.doc, &request(session_transcript))
+        .expect("mdoc extracts for revocation range");
+    let id = ts13_mso_derived_revocation_id(&extracted.mso);
+    let (_, revocation_key) = ts13_revocation_key(38);
+    let statement = MdocCircuitStatement::from_extracted(&extracted, policy_on(2026, 7, 3))
+        .expect("mdoc statement builds for revocation range")
+        .with_ts13_revocation(MdocRevocationPublicInputs {
+            revocation_public_key: revocation_key,
+            epoch: 55,
+        })
+        .with_ts13_revocation_range(MdocRevocationRangeWitness {
+            id,
+            id_lo: id,
+            id_hi: id + 1,
+        });
+
+    assert!(
+        prove_mdoc_circuit(&extracted, &statement).is_err(),
+        "id == id_lo must be rejected by the in-STARK revocation range constraint"
+    );
+}
+
+#[test]
+#[ignore = "slow: proves TS13 revocation id is derived from the MSO hash in the STARK"]
+fn ts13_revocation_range_rejects_id_not_derived_from_mso_in_stark() {
+    let session_transcript = test_session_transcript();
+    let fixture = valid_fixture(&session_transcript);
+    let extracted = extract_pid_mdoc(&fixture.doc, &request(session_transcript))
+        .expect("mdoc extracts for revocation id binding");
+    let derived_id = ts13_mso_derived_revocation_id(&extracted.mso);
+    let wrong_id = if derived_id == 1 { 2 } else { derived_id ^ 1 };
+    let (_, revocation_key) = ts13_revocation_key(40);
+    let statement = MdocCircuitStatement::from_extracted(&extracted, policy_on(2026, 7, 3))
+        .expect("mdoc statement builds for revocation id binding")
+        .with_ts13_revocation(MdocRevocationPublicInputs {
+            revocation_public_key: revocation_key,
+            epoch: 57,
+        })
+        .with_ts13_revocation_range(MdocRevocationRangeWitness {
+            id: wrong_id,
+            id_lo: wrong_id - 1,
+            id_hi: wrong_id + 1,
+        });
+
+    let proof = prove_mdoc_circuit(&extracted, &statement)
+        .expect("wrong but in-range id can still produce a malformed proof candidate");
+    assert!(
+        verify_mdoc_circuit(&proof, &statement).is_err(),
+        "revocation id must be bound to LE64(SHA-256(MSO bytes)[0..8]) in the STARK"
+    );
+}
+
+#[test]
+#[ignore = "slow: proves TS13 MSO SHA preimage is the issuerAuth signed payload"]
+fn ts13_revocation_rejects_mso_sha_preimage_not_issuer_payload_in_stark() {
+    let session_transcript = test_session_transcript();
+    let fixture = valid_fixture(&session_transcript);
+    let mut extracted = extract_pid_mdoc(&fixture.doc, &request(session_transcript))
+        .expect("mdoc extracts for MSO payload binding");
+    let (_, revocation_key) = ts13_revocation_key(41);
+    let statement = MdocCircuitStatement::from_extracted(&extracted, policy_on(2026, 7, 3))
+        .expect("mdoc statement builds for MSO payload binding")
+        .with_ts13_revocation(MdocRevocationPublicInputs {
+            revocation_public_key: revocation_key,
+            epoch: 58,
+        });
+
+    extracted.mso[0] ^= 1;
+    let forged_id = ts13_mso_derived_revocation_id(&extracted.mso);
+    let statement = statement.with_ts13_revocation_range(MdocRevocationRangeWitness {
+        id: forged_id,
+        id_lo: forged_id.saturating_sub(1),
+        id_hi: forged_id.saturating_add(1),
+    });
+
+    let proof = prove_mdoc_circuit(&extracted, &statement)
+        .expect("forged MSO preimage can still produce a malformed proof candidate");
+    assert!(
+        verify_mdoc_circuit(&proof, &statement).is_err(),
+        "MSO SHA preimage must be byte-bound to the issuerAuth signed payload in the STARK"
+    );
+}
+
+#[test]
+#[ignore = "slow: proves TS13 revocation pair signature is verified in the STARK"]
+fn ts13_revocation_pair_signature_verifies_in_stark() {
+    let session_transcript = test_session_transcript();
+    let fixture = valid_fixture(&session_transcript);
+    let extracted = extract_pid_mdoc(&fixture.doc, &request(session_transcript))
+        .expect("mdoc extracts for revocation pair signature");
+    let id = ts13_mso_derived_revocation_id(&extracted.mso);
+    let (signing_key, revocation_key) = ts13_revocation_key(42);
+    let epoch = 59;
+    let witness = ts13_revocation_witness_for_id(
+        &signing_key,
+        id,
+        id.saturating_sub(1),
+        id.saturating_add(1),
+        epoch,
+    );
+    let statement = MdocCircuitStatement::from_extracted(&extracted, policy_on(2026, 7, 3))
+        .expect("mdoc statement builds for revocation pair signature")
+        .with_ts13_revocation(MdocRevocationPublicInputs {
+            revocation_public_key: revocation_key,
+            epoch,
+        })
+        .with_ts13_revocation_range(MdocRevocationRangeWitness {
+            id: witness.id,
+            id_lo: witness.id_lo,
+            id_hi: witness.id_hi,
+        })
+        .with_ts13_revocation_signature(witness.signature.clone());
+
+    let proof =
+        prove_mdoc_circuit(&extracted, &statement).expect("revocation pair signature proof builds");
+    verify_mdoc_circuit(&proof, &statement).expect("revocation pair signature verifies in STARK");
+}
+
+#[test]
+#[ignore = "slow: rejects forged TS13 revocation pair signatures in the STARK"]
+fn ts13_revocation_rejects_forged_pair_signature_in_stark() {
+    let session_transcript = test_session_transcript();
+    let fixture = valid_fixture(&session_transcript);
+    let extracted = extract_pid_mdoc(&fixture.doc, &request(session_transcript))
+        .expect("mdoc extracts for forged revocation pair signature");
+    let id = ts13_mso_derived_revocation_id(&extracted.mso);
+    let (_, revocation_key) = ts13_revocation_key(43);
+    let (forger_key, _) = ts13_revocation_key(44);
+    let epoch = 60;
+    let forged = ts13_revocation_witness_for_id(
+        &forger_key,
+        id,
+        id.saturating_sub(1),
+        id.saturating_add(1),
+        epoch,
+    );
+    let statement = MdocCircuitStatement::from_extracted(&extracted, policy_on(2026, 7, 3))
+        .expect("mdoc statement builds for forged revocation pair signature")
+        .with_ts13_revocation(MdocRevocationPublicInputs {
+            revocation_public_key: revocation_key,
+            epoch,
+        })
+        .with_ts13_revocation_range(MdocRevocationRangeWitness {
+            id: forged.id,
+            id_lo: forged.id_lo,
+            id_hi: forged.id_hi,
+        })
+        .with_ts13_revocation_signature(forged.signature.clone());
+
+    assert!(
+        prove_mdoc_circuit(&extracted, &statement).is_err(),
+        "forged revocation pair signatures must not produce a valid STARK proof"
+    );
+}
+
+#[test]
+fn ts13_public_statement_keeps_revocation_range_layout_without_private_values() {
+    let session_transcript = test_session_transcript();
+    let fixture = valid_fixture(&session_transcript);
+    let extracted = extract_pid_mdoc(&fixture.doc, &request(session_transcript))
+        .expect("mdoc extracts for public revocation range layout");
+    let id = ts13_mso_derived_revocation_id(&extracted.mso);
+    let (_, revocation_key) = ts13_revocation_key(39);
+    let statement = MdocCircuitStatement::from_extracted(&extracted, policy_on(2026, 7, 3))
+        .expect("mdoc statement builds for public revocation range layout")
+        .with_ts13_revocation(MdocRevocationPublicInputs {
+            revocation_public_key: revocation_key,
+            epoch: 56,
+        })
+        .with_ts13_revocation_range(MdocRevocationRangeWitness {
+            id,
+            id_lo: id.saturating_sub(1),
+            id_hi: id.saturating_add(1),
+        });
+
+    let public_statement = MdocPublicStatement::from_circuit(&statement);
+
+    assert!(
+        public_statement.ts13_revocation_range_enabled,
+        "public verification must instantiate the private range gadget without exposing its witness"
+    );
 }
 
 fn fixture_with_values(
@@ -1754,6 +2314,217 @@ fn value_equality_n1_proves_and_verifies() {
 }
 
 #[test]
+#[ignore = "release gate: proves TS13 N=1 tuple and prints evidence measurements"]
+fn ts13_evidence_pack_n1_measurements() {
+    let session_transcript = test_session_transcript();
+    let fixture = fixture_with_options(
+        &session_transcript,
+        "1990-07-15".into(),
+        "DE".into(),
+        FixtureOptions {
+            extra_items: vec![ExtraItem {
+                digest_id: 11,
+                element: "age_over_18".to_string(),
+                value: Value::Bool(true),
+                random: vec![11; 16],
+            }],
+            ..FixtureOptions::default()
+        },
+    );
+    let mut request = request(session_transcript);
+    request.attributes = vec![MdocRequestedAttribute {
+        element_identifier: "age_over_18".to_string(),
+        mode: MdocDisclosureMode::ValueEquality(cbor(Value::Bool(true))),
+    }];
+    let extracted = extract_pid_mdoc(&fixture.doc, &request).expect("TS13 N=1 extracts");
+    let statement = MdocCircuitStatement::from_extracted(&extracted, policy_on(2026, 7, 3))
+        .expect("TS13 N=1 builds");
+    let id = ts13_mso_derived_revocation_id(&extracted.mso);
+    let (signing_key, revocation_key) = ts13_revocation_key(33);
+    let revocation_statement = Ts13RevocationStatement {
+        revocation_public_key: revocation_key,
+        epoch: 51,
+    };
+    let revocation_witness = ts13_revocation_witness_for_id(
+        &signing_key,
+        id,
+        id.saturating_sub(1),
+        id.saturating_add(1),
+        revocation_statement.epoch,
+    );
+    let statement = statement
+        .with_ts13_revocation((&revocation_statement).into())
+        .with_ts13_revocation_range(MdocRevocationRangeWitness {
+            id: revocation_witness.id,
+            id_lo: revocation_witness.id_lo,
+            id_hi: revocation_witness.id_hi,
+        })
+        .with_ts13_revocation_signature(revocation_witness.signature.clone());
+
+    let prove_start = Instant::now();
+    let proof = prove_mdoc_circuit(&extracted, &statement).expect("TS13 N=1 proves");
+    let prove_ms = prove_start.elapsed().as_millis();
+    let expected_preprocessed_root = proof.stark_proof.commitments[0].0;
+
+    let verify_start = Instant::now();
+    verify_mdoc_circuit_with_preprocessed_root(
+        &proof,
+        &statement,
+        proof.stark_proof.commitments[0],
+    )
+    .expect("TS13 N=1 verifies with root pin");
+    let verify_ms = verify_start.elapsed().as_millis();
+
+    let proof_bytes = bincode::serialize(&proof).expect("TS13 mdoc proof serializes");
+    let artifact = Ts13MdocProofArtifact {
+        circuit_hash: ts13_default_circuit_hash(),
+        preprocessed_root: expected_preprocessed_root,
+        mdoc_proof: proof_bytes,
+        revocation_statement,
+        revocation_witness,
+    };
+    artifact
+        .verify_revocation_binding(&extracted, expected_preprocessed_root)
+        .expect("TS13 revocation artifact binds to this mdoc");
+    artifact
+        .verify_mdoc_and_revocation(&extracted, &statement)
+        .expect("TS13 artifact verifies mdoc proof and revocation together");
+
+    let breakdown = mdoc_proof_byte_breakdown(&proof);
+    println!(
+        "ts13_evidence_n1 proof_bytes={} stark_proof_bytes={} non_stark_metadata_bytes={} prove_ms={} verify_ms={} preprocessed_root={} circuit_hash={}",
+        breakdown.proof_bytes,
+        breakdown.stark_proof_bytes,
+        breakdown.non_stark_metadata_bytes,
+        prove_ms,
+        verify_ms,
+        hex_bytes(&expected_preprocessed_root),
+        ts13_default_circuit_hash()
+    );
+}
+
+/// Build a revocation-enabled TS13 N=1 mdoc `(extracted, statement)`. The
+/// revocation path engages the digest-bind bridge, whose range8/range13 tables
+/// carry the Q-015 §4b / p4c Class-D dummy-key multiplicity blinding — so a
+/// revocation proof exercises Class D end-to-end.
+fn ts13_class_d_revocation_case() -> (
+    eu_id_prover::mdoc::ExtractedPidMdoc,
+    eu_id_prover::mdoc::MdocCircuitStatement,
+) {
+    let session_transcript = test_session_transcript();
+    let fixture = fixture_with_options(
+        &session_transcript,
+        "1990-07-15".into(),
+        "DE".into(),
+        FixtureOptions {
+            extra_items: vec![ExtraItem {
+                digest_id: 11,
+                element: "age_over_18".to_string(),
+                value: Value::Bool(true),
+                random: vec![11; 16],
+            }],
+            ..FixtureOptions::default()
+        },
+    );
+    let mut request = request(session_transcript);
+    request.attributes = vec![MdocRequestedAttribute {
+        element_identifier: "age_over_18".to_string(),
+        mode: MdocDisclosureMode::ValueEquality(cbor(Value::Bool(true))),
+    }];
+    let extracted = extract_pid_mdoc(&fixture.doc, &request).expect("class-d case extracts");
+    let statement = MdocCircuitStatement::from_extracted(&extracted, policy_on(2026, 7, 3))
+        .expect("class-d case builds");
+    let id = ts13_mso_derived_revocation_id(&extracted.mso);
+    let (signing_key, revocation_key) = ts13_revocation_key(33);
+    let revocation_statement = Ts13RevocationStatement {
+        revocation_public_key: revocation_key,
+        epoch: 51,
+    };
+    let revocation_witness = ts13_revocation_witness_for_id(
+        &signing_key,
+        id,
+        id.saturating_sub(1),
+        id.saturating_add(1),
+        revocation_statement.epoch,
+    );
+    let statement = statement
+        .with_ts13_revocation((&revocation_statement).into())
+        .with_ts13_revocation_range(MdocRevocationRangeWitness {
+            id: revocation_witness.id,
+            id_lo: revocation_witness.id_lo,
+            id_hi: revocation_witness.id_hi,
+        })
+        .with_ts13_revocation_signature(revocation_witness.signature.clone());
+    (extracted, statement)
+}
+
+/// Class D (Q-015 §4b / p4c): proving the same revocation mdoc witness twice
+/// yields DIFFERENT serialized proofs — the digest-bridge range tables' Class-D
+/// dummy-region multiplicity cells are fresh random per proof — and BOTH proofs
+/// verify. The bridge carries a 2× (log_size + 1) blinded domain for its
+/// range8/range13 tables (asserted directly in the stwo-p256 unit test
+/// `class_d_bridge_range_tables_use_doubled_domain`).
+#[test]
+#[ignore = "slow: proves the revocation mdoc twice to check Class-D multiplicity freshness"]
+fn mdoc_zk_class_d_dummy_key_multiplicities() {
+    let (extracted, statement) = ts13_class_d_revocation_case();
+
+    let first = prove_mdoc_circuit(&extracted, &statement).expect("first class-d mdoc proves");
+    verify_mdoc_circuit(&first, &statement).expect("first class-d mdoc verifies");
+    let second = prove_mdoc_circuit(&extracted, &statement).expect("second class-d mdoc proves");
+    verify_mdoc_circuit(&second, &statement).expect("second class-d mdoc verifies");
+
+    let first_bytes = bincode::serialize(&first).expect("first proof serializes");
+    let second_bytes = bincode::serialize(&second).expect("second proof serializes");
+    assert_ne!(
+        first_bytes, second_bytes,
+        "same-witness revocation proofs must differ (fresh Class-D blind multiplicities)",
+    );
+}
+
+/// Class D (Q-015 §4b / p4c): tampering the cancelling-pair term in a serialized
+/// revocation proof breaks the bridge range table's LogUp boundary at OODS, so
+/// verification fails. Sweeps a byte flip across the serialized proof and
+/// asserts NO tamper verifies (the balance is bound, not a free term).
+#[test]
+#[ignore = "slow: proves Class-D balance tamper is rejected"]
+fn mdoc_zk_class_d_balance_tamper_rejected() {
+    let (extracted, statement) = ts13_class_d_revocation_case();
+
+    let proof = prove_mdoc_circuit(&extracted, &statement).expect("class-d mdoc proves");
+    verify_mdoc_circuit(&proof, &statement).expect("honest class-d mdoc verifies");
+
+    let bytes = bincode::serialize(&proof).expect("proof serializes");
+    // Flip one bit in a spread of positions across the serialized proof (which
+    // includes the revocation-bridge Class-D claimed sums). Every corrupted
+    // proof that still deserializes must fail verification.
+    let mut any_checked = false;
+    for &pos in &[
+        bytes.len() / 4,
+        bytes.len() / 2,
+        (bytes.len() * 3) / 4,
+        bytes.len() - 8,
+    ] {
+        let mut tampered_bytes = bytes.clone();
+        tampered_bytes[pos] ^= 0x01;
+        let Ok(tampered) =
+            bincode::deserialize::<eu_id_prover::mdoc::MdocCircuitProof>(&tampered_bytes)
+        else {
+            continue;
+        };
+        any_checked = true;
+        assert!(
+            verify_mdoc_circuit(&tampered, &statement).is_err(),
+            "a tampered Class-D revocation proof must be rejected (byte {pos})",
+        );
+    }
+    assert!(
+        any_checked,
+        "at least one byte flip must deserialize so the tamper is actually exercised",
+    );
+}
+
+#[test]
 #[ignore = "slow: proves rejection for ValueEquality elementIdentifier anchor tamper"]
 fn value_equality_element_identifier_anchor_offset_rejects_in_proof() {
     let session_transcript = test_session_transcript();
@@ -2315,5 +3086,79 @@ fn rejects_old_pcs_config_after_pow_query_rebalance() {
     assert!(
         matches!(rejected, Err(eu_id_prover::Error::WeakConfig { .. })),
         "an old-config proof must be rejected by the config pin, got {rejected:?}",
+    );
+}
+
+/// Class D for the shared SHA tables (Q-015 §4b / p4c): the SHA split-pack and
+/// range producers that the product mdoc proof consumes are now multiplicity-
+/// blinded — a doubled (`L + 1`) committed domain with a random dummy upper
+/// half. This test pins the two product-level observables:
+/// 1. every shared SHA-table component is committed at the blinded log size
+///    (domain 2× extended) — read directly from the shared prover's shapes;
+/// 2. proving the SAME credential twice yields DIFFERENT product proofs (the
+///    SHA-table dummy multiplicities are fresh per proof) and BOTH verify.
+#[test]
+#[ignore = "slow: proves the product mdoc twice to check Class-D SHA-table blinding"]
+fn mdoc_zk_class_d_sha_tables_dummy_region() {
+    use stwo_sha256::components::RANGE_TABLES;
+    use stwo_sha256::field_exposure::FieldExposure as ShaFieldExposure;
+    use stwo_sha256::relations::SharedShaTableRelations;
+    use stwo_sha256::shared_tables::{ShaTableMultiplicities, ShaTablesProver};
+    use stwo_sha256::witness::compute_sha256_witness;
+
+    // (1) Shape check: the shared SHA-table producers commit blinded domains.
+    // The blinded log size is `LOG_SIZE_16 + 1 = 17` for every producer (all
+    // real tables are padded to 2^16). Build the shared prover from a couple of
+    // heterogeneous witnesses — the shapes are witness-independent.
+    let w0 = compute_sha256_witness(b"abc");
+    let w1 = compute_sha256_witness(&[0x42u8; 200]);
+    let consumers = [
+        (&w0, ShaFieldExposure::empty()),
+        (&w1, ShaFieldExposure::empty()),
+    ];
+    let sha_tables = ShaTablesProver::new(
+        ShaTableMultiplicities::from_consumers(&consumers),
+        SharedShaTableRelations::new(),
+    );
+    let shapes = sha_tables.component_shapes();
+    assert!(!shapes.is_empty(), "shared SHA tables must expose shapes");
+    // The split-pack producers commit at LOG_SIZE_16 (real) → 17 (blinded); the
+    // small range tables (Range2/4/5) are padded to 2^LOG_N_LANES = 2^4 (real) →
+    // 5 (blinded); Range16 is 2^16 → 17. Under Class D every committed domain is
+    // exactly one log above its real width, so every shape's log_size is the
+    // blinded size {5, 17}. Assert each is blinded (never a bare real size).
+    for shape in &shapes {
+        assert!(
+            shape.log_size == 5 || shape.log_size == 17,
+            "shared SHA-table component {} log_size {} is not a Class-D blinded (real+1) size",
+            shape.name,
+            shape.log_size,
+        );
+    }
+    // Explicit per-kind check that the blinded range widths are exactly real+1.
+    for &kind in RANGE_TABLES {
+        let real = stwo_sha256::components::range_log_size(kind);
+        let blind = real + 1;
+        assert!(
+            shapes
+                .iter()
+                .any(|s| s.name.contains(kind.tag()) && s.log_size == blind),
+            "range {kind:?} must appear at its blinded log size {blind}",
+        );
+    }
+
+    // (2) Two same-credential product proofs differ (fresh SHA + bridge dummy
+    // multiplicities) and both verify.
+    let (extracted, statement) = ts13_class_d_revocation_case();
+    let first = prove_mdoc_circuit(&extracted, &statement).expect("first product proof proves");
+    verify_mdoc_circuit(&first, &statement).expect("first product proof verifies");
+    let second = prove_mdoc_circuit(&extracted, &statement).expect("second product proof proves");
+    verify_mdoc_circuit(&second, &statement).expect("second product proof verifies");
+
+    let first_bytes = bincode::serialize(&first).expect("first product proof serializes");
+    let second_bytes = bincode::serialize(&second).expect("second product proof serializes");
+    assert_ne!(
+        first_bytes, second_bytes,
+        "same-credential product proofs must differ (fresh Class-D SHA-table blind multiplicities)",
     );
 }

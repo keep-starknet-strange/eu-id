@@ -96,6 +96,7 @@
 //! `sha2` / the `p256` crate, and [`fixtures`] is the deterministic catalogue of
 //! valid and adversarial witnesses the binding tasks diff against.
 
+pub(crate) mod claimed_sum_blinder;
 pub mod credential;
 pub mod fixtures;
 pub mod generator;
@@ -109,6 +110,7 @@ pub mod nonce;
 mod public_digest_bind;
 #[cfg(test)]
 mod shape_dump;
+pub mod ts13;
 
 pub use credential::Credential;
 pub use generator::{IssuerKey, PipelineWitness, Policy, SignedCredential};
@@ -205,7 +207,6 @@ use predicates::{
 use stwo_p256::components::digest_bind::module::{
     DigestBindInteractionClaim, DigestBindProver, DigestBindVerifier,
 };
-#[cfg(any(not(feature = "ec-coprocessor"), test))]
 use stwo_p256::components::digest_bind::witness::DigestBindRow;
 #[cfg(not(feature = "ec-coprocessor"))]
 use stwo_p256::components::digest_bind::SharedScalarZRelation;
@@ -712,14 +713,13 @@ impl PublicStatement {
     }
 }
 
-/// Bridge trace size: enough rows for one active row per ECDSA instance, at the
-/// SIMD minimum of `2^4 = 16` rows.
-#[cfg(any(not(feature = "ec-coprocessor"), test))]
+/// Bridge trace size: enough rows for one active row per ECDSA instance, with
+/// the Q-015 Class A minimum of 256 blind rows.
 fn bridge_log_size(n_instances: usize) -> u32 {
     let needed = (n_instances.max(1) as u32)
         .next_power_of_two()
         .trailing_zeros();
-    needed.max(4)
+    needed.max(9)
 }
 
 /// The SHA field-exposure spec for the credential bindings: expose the DOB byte
@@ -747,7 +747,6 @@ fn credential_exposure() -> FieldExposure {
 
 /// Per-instance `(sig_id, z)` rows the bridge binds, sourced from the proven
 /// public instances.
-#[cfg(any(not(feature = "ec-coprocessor"), test))]
 fn bridge_rows(instances: &[PublicEcdsaInstance<M31>]) -> Vec<DigestBindRow> {
     instances
         .iter()
@@ -1917,6 +1916,7 @@ fn verify_stark_with_config(
     #[cfg(not(feature = "ec-coprocessor"))]
     let mut bridge = DigestBindVerifier::new(
         proof.bridge_log_size,
+        proof.p256_instances().len(),
         proof.bridge_interaction_claim.clone(),
         scalar_z_handle,
         digest_handle,

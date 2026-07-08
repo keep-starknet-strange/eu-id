@@ -11,6 +11,7 @@ use air_core::relations::{field_id, FieldBytesRelation, SharedFieldRelation};
 use air_core::{
     fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint, TreeLayout,
 };
+use p256::elliptic_curve::rand_core::{OsRng, RngCore};
 use predicates::Date;
 use serde::{Deserialize, Serialize};
 use stwo::core::air::Component;
@@ -32,7 +33,12 @@ use stwo_constraint_framework::{
     TraceLocationAllocator,
 };
 
-const MDOC_VALIDITY_LOG_SIZE: u32 = LOG_N_LANES;
+use crate::claimed_sum_blinder::{
+    add_blinder_relation_entry, blinder_counter_interaction, blinder_denominator, random_qm31,
+    ClaimedSumBlinderEval, ClaimedSumBlinderRelation,
+};
+
+const MDOC_VALIDITY_LOG_SIZE: u32 = 9;
 const DATE_TEXT_LEN: usize = 10;
 const DATE_DIGITS: usize = 8;
 const DIGIT_BITS: usize = 4;
@@ -45,9 +51,12 @@ const MDOC_VALIDITY_TRACE_COLS: usize = DATE_TEXT_LEN
     + DATE_SLACK_BITS
     + 2 * MONTH_RANGE_BITS
     + 2 * DAY_RANGE_BITS;
-const MDOC_VALIDITY_LOOKUPS: usize = DATE_TEXT_LEN;
+// DATE_TEXT_LEN issuer-field lookups + the Q-015 blinder `+m` site.
+const MDOC_VALIDITY_LOOKUPS: usize = DATE_TEXT_LEN + 1;
+// Main component columns plus one column for the Q-015 blinder counterpart
+// component (`−m` on every row).
 const MDOC_VALIDITY_INTERACTION_COLS: usize =
-    MDOC_VALIDITY_LOOKUPS.div_ceil(2) * SECURE_EXTENSION_DEGREE;
+    (MDOC_VALIDITY_LOOKUPS.div_ceil(2) + 1) * SECURE_EXTENSION_DEGREE;
 
 type MdocValidityColumnEval = CircleEvaluation<SimdBackend, M31, BitReversedOrder>;
 type MdocValidityComponent = FrameworkComponent<MdocValidityEval>;
@@ -82,14 +91,23 @@ pub(crate) fn mdoc_validity_rows(
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct MdocValidityInteractionClaim {
     pub(crate) claimed_sum: QM31,
+    /// Q-015 §4b blinder pair (see `claimed_sum_blinder`): `+m/(z−combine(v))`
+    /// shifts `claimed_sum`, the counterpart component publishes
+    /// `blinder_claimed_sum = −2^log_size·m/(z−combine(v))`; the pair cancels
+    /// in the global fold while masking the published split.
+    pub(crate) blinder_v: QM31,
+    pub(crate) blinder_m: QM31,
+    pub(crate) blinder_claimed_sum: QM31,
 }
 
 pub(crate) struct MdocValidityBind {
     policy_date: Date,
     rows: Vec<MdocValidityRow>,
     issuer_field_handle: SharedFieldRelation,
+    blinder_relation: Option<ClaimedSumBlinderRelation>,
     interaction_claim: Option<MdocValidityInteractionClaim>,
     component: Option<MdocValidityComponent>,
+    blinder_component: Option<FrameworkComponent<ClaimedSumBlinderEval>>,
 }
 
 impl MdocValidityBind {
@@ -102,8 +120,10 @@ impl MdocValidityBind {
             policy_date,
             rows,
             issuer_field_handle,
+            blinder_relation: None,
             interaction_claim: None,
             component: None,
+            blinder_component: None,
         }
     }
 
@@ -117,8 +137,10 @@ impl MdocValidityBind {
             policy_date,
             rows,
             issuer_field_handle,
+            blinder_relation: None,
             interaction_claim: Some(interaction_claim),
             component: None,
+            blinder_component: None,
         }
     }
 
@@ -137,6 +159,9 @@ impl MdocValidityBind {
 struct MdocValidityEval {
     policy_date: Date,
     issuer_field_relation: FieldBytesRelation,
+    blinder_relation: ClaimedSumBlinderRelation,
+    blinder_v: QM31,
+    blinder_m: QM31,
 }
 
 fn m31_const<E: EvalAtRow>(value: u32) -> E::F {
@@ -264,6 +289,11 @@ fn mdoc_validity_base_trace(
         vec![M31::from_u32_unchecked(0); 1 << MDOC_VALIDITY_LOG_SIZE];
         MDOC_VALIDITY_TRACE_COLS
     ];
+    for column in &mut columns {
+        for value in column.iter_mut().skip(rows.len()) {
+            *value = random_m31_cell();
+        }
+    }
     for (row_idx, row) in rows.iter().enumerate() {
         let mut col_idx = 0usize;
         for byte in row.bytes {
@@ -323,7 +353,10 @@ fn mdoc_validity_interaction_trace(
     policy_date: Date,
     rows: &[MdocValidityRow],
     issuer_field_relation: &FieldBytesRelation,
-) -> (Vec<MdocValidityColumnEval>, MdocValidityInteractionClaim) {
+    blinder_relation: &ClaimedSumBlinderRelation,
+    blinder_v: QM31,
+    blinder_m: QM31,
+) -> (Vec<MdocValidityColumnEval>, QM31) {
     let preprocessed = mdoc_validity_preprocessed_columns(rows);
     let trace = mdoc_validity_base_trace(policy_date, rows);
     let n_vec_rows = 1usize << (MDOC_VALIDITY_LOG_SIZE - LOG_N_LANES);
@@ -343,6 +376,11 @@ fn mdoc_validity_interaction_trace(
                 .collect(),
         );
     }
+    // Q-015 blinder `+m/(z−combine(v))` on every row, emitted LAST to match
+    // `MdocValidityEval::evaluate`.
+    let blinder_num = PackedQM31::broadcast(blinder_m);
+    let blinder_den = blinder_denominator(blinder_relation, blinder_v);
+    sites.push(vec![(blinder_num, blinder_den); n_vec_rows]);
     let mut logup = LogupTraceGenerator::new(MDOC_VALIDITY_LOG_SIZE);
     let mut site_idx = 0usize;
     while site_idx + 1 < sites.len() {
@@ -359,8 +397,7 @@ fn mdoc_validity_interaction_trace(
         let last = &sites[site_idx];
         logup.col_from_iter((0..n_vec_rows).map(|vec_row| last[vec_row]));
     }
-    let (trace, claimed_sum) = logup.finalize_last();
-    (trace, MdocValidityInteractionClaim { claimed_sum })
+    logup.finalize_last()
 }
 
 impl FrameworkEval for MdocValidityEval {
@@ -402,18 +439,6 @@ impl FrameworkEval for MdocValidityEval {
         let day_upper_bits: [E::F; DAY_RANGE_BITS] =
             std::array::from_fn(|_| eval.next_trace_mask());
 
-        for value in bytes
-            .iter()
-            .chain(digit_bits.iter().flatten())
-            .chain(slack_bits.iter())
-            .chain(month_lower_bits.iter())
-            .chain(month_upper_bits.iter())
-            .chain(day_lower_bits.iter())
-            .chain(day_upper_bits.iter())
-        {
-            eval.add_constraint((one.clone() - active.clone()) * value.clone());
-        }
-
         eval.add_constraint(active.clone() * (bytes[4].clone() - m31_const::<E>(b'-' as u32)));
         eval.add_constraint(active.clone() * (bytes[7].clone() - m31_const::<E>(b'-' as u32)));
 
@@ -422,7 +447,7 @@ impl FrameworkEval for MdocValidityEval {
         for (digit_idx, &byte_pos) in digit_positions.iter().enumerate() {
             let bits = &digit_bits[digit_idx];
             for bit in bits {
-                eval.add_constraint(bit.clone() * (bit.clone() - one.clone()));
+                eval.add_constraint(active.clone() * bit.clone() * (bit.clone() - one.clone()));
             }
             let digit = bytes[byte_pos].clone() - m31_const::<E>(b'0' as u32);
             let recomposed = bits[0].clone()
@@ -430,8 +455,8 @@ impl FrameworkEval for MdocValidityEval {
                 + m31_const::<E>(4) * bits[2].clone()
                 + m31_const::<E>(8) * bits[3].clone();
             eval.add_constraint(active.clone() * (digit.clone() - recomposed));
-            eval.add_constraint(bits[3].clone() * bits[2].clone());
-            eval.add_constraint(bits[3].clone() * bits[1].clone());
+            eval.add_constraint(active.clone() * bits[3].clone() * bits[2].clone());
+            eval.add_constraint(active.clone() * bits[3].clone() * bits[1].clone());
             digits.push(digit);
         }
 
@@ -442,7 +467,7 @@ impl FrameworkEval for MdocValidityEval {
             .chain(day_lower_bits.iter())
             .chain(day_upper_bits.iter())
         {
-            eval.add_constraint(bit.clone() * (bit.clone() - one.clone()));
+            eval.add_constraint(active.clone() * bit.clone() * (bit.clone() - one.clone()));
         }
 
         let year = m31_const::<E>(1000) * digits[0].clone()
@@ -476,6 +501,15 @@ impl FrameworkEval for MdocValidityEval {
                 &[field_id.clone(), m31_const::<E>(byte_idx as u32), value],
             ));
         }
+        // Q-015 blinder `+m/(z−combine(v))`, ungated, emitted LAST to match
+        // the generator's site order.
+        add_blinder_relation_entry(
+            &mut eval,
+            &self.blinder_relation,
+            self.blinder_v,
+            self.blinder_m,
+            false,
+        );
         eval.finalize_logup_in_pairs();
         eval
     }
@@ -492,7 +526,9 @@ impl Air for MdocValidityBind {
         }
     }
 
-    fn draw_relations(&mut self, _channel: &mut Blake2sChannel) {}
+    fn draw_relations(&mut self, channel: &mut Blake2sChannel) {
+        self.blinder_relation = Some(ClaimedSumBlinderRelation::draw(channel));
+    }
 
     fn layout(&self) -> TreeLayout {
         TreeLayout {
@@ -503,7 +539,8 @@ impl Air for MdocValidityBind {
     }
 
     fn claimed_sums(&self) -> Vec<QM31> {
-        vec![self.interaction_claim().claimed_sum]
+        let claim = self.interaction_claim();
+        vec![claim.claimed_sum, claim.blinder_claimed_sum]
     }
 
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
@@ -511,21 +548,43 @@ impl Air for MdocValidityBind {
     }
 
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
+        let claim = self.interaction_claim().clone();
+        let blinder_relation = self
+            .blinder_relation
+            .clone()
+            .expect("mdoc validity blinder relation drawn before components");
         self.component = Some(MdocValidityComponent::new(
             allocator,
             MdocValidityEval {
                 policy_date: self.policy_date,
                 issuer_field_relation: self.issuer_field_relation(),
+                blinder_relation: blinder_relation.clone(),
+                blinder_v: claim.blinder_v,
+                blinder_m: claim.blinder_m,
             },
-            self.interaction_claim().claimed_sum,
+            claim.claimed_sum,
+        ));
+        self.blinder_component = Some(FrameworkComponent::new(
+            allocator,
+            ClaimedSumBlinderEval {
+                log_size: MDOC_VALIDITY_LOG_SIZE,
+                relation: blinder_relation,
+                v: claim.blinder_v,
+                m: claim.blinder_m,
+            },
+            claim.blinder_claimed_sum,
         ));
     }
 
     fn components(&self) -> Vec<&dyn Component> {
-        vec![self
-            .component
-            .as_ref()
-            .expect("mdoc validity component is built")]
+        vec![
+            self.component
+                .as_ref()
+                .expect("mdoc validity component is built"),
+            self.blinder_component
+                .as_ref()
+                .expect("mdoc validity blinder component is built"),
+        ]
     }
 }
 
@@ -575,19 +634,202 @@ impl AirProver for MdocValidityBind {
     }
 
     fn write_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
-        let (trace, claim) = mdoc_validity_interaction_trace(
+        let blinder_v = random_qm31();
+        let blinder_m = random_qm31();
+        let blinder_relation = self
+            .blinder_relation
+            .clone()
+            .expect("mdoc validity blinder relation drawn before interaction");
+        let (trace, claimed_sum) = mdoc_validity_interaction_trace(
             self.policy_date,
             &self.rows,
             &self.issuer_field_relation(),
+            &blinder_relation,
+            blinder_v,
+            blinder_m,
         );
         tb.extend_evals(trace);
-        self.interaction_claim = Some(claim);
+        let (blinder_trace, blinder_claimed_sum) = blinder_counter_interaction(
+            MDOC_VALIDITY_LOG_SIZE,
+            &blinder_relation,
+            blinder_v,
+            blinder_m,
+        );
+        tb.extend_evals(blinder_trace);
+        self.interaction_claim = Some(MdocValidityInteractionClaim {
+            claimed_sum,
+            blinder_v,
+            blinder_m,
+            blinder_claimed_sum,
+        });
     }
 
     fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
-        vec![self
-            .component
-            .as_ref()
-            .expect("mdoc validity component is built")]
+        vec![
+            self.component
+                .as_ref()
+                .expect("mdoc validity component is built"),
+            self.blinder_component
+                .as_ref()
+                .expect("mdoc validity blinder component is built"),
+        ]
+    }
+}
+
+fn random_m31_cell() -> M31 {
+    loop {
+        let value = OsRng.next_u32() & 0x7fff_ffff;
+        if value < 2_147_483_647 {
+            return M31::from_u32_unchecked(value);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    use stwo::prover::backend::simd::m31::N_LANES;
+    use stwo_constraint_framework::{Multiplicity, PREPROCESSED_TRACE_IDX};
+
+    #[derive(Default)]
+    struct RowEval {
+        preprocessed: VecDeque<Vec<M31>>,
+        original: VecDeque<Vec<M31>>,
+        constraints: Vec<QM31>,
+    }
+
+    impl RowEval {
+        fn inactive_validity_row() -> Self {
+            let blind = M31::from_u32_unchecked(2);
+            let zero = M31::from_u32_unchecked(0);
+            let mut row = Self::default();
+
+            for _ in 0..MDOC_VALIDITY_PREPROCESSED_COLS {
+                row.preprocessed.push_back(vec![zero]);
+            }
+            for _ in 0..MDOC_VALIDITY_TRACE_COLS {
+                row.original.push_back(vec![blind]);
+            }
+
+            row
+        }
+
+        fn nonzero_constraints(&self) -> Vec<(usize, QM31)> {
+            self.constraints
+                .iter()
+                .copied()
+                .enumerate()
+                .filter(|(_, value)| *value != QM31::from_u32_unchecked(0, 0, 0, 0))
+                .collect()
+        }
+    }
+
+    impl EvalAtRow for RowEval {
+        type F = M31;
+        type EF = QM31;
+
+        fn next_interaction_mask<const N: usize>(
+            &mut self,
+            interaction: usize,
+            _offsets: [isize; N],
+        ) -> [Self::F; N] {
+            let queue = match interaction {
+                PREPROCESSED_TRACE_IDX => &mut self.preprocessed,
+                stwo_constraint_framework::ORIGINAL_TRACE_IDX => &mut self.original,
+                _ => panic!("unexpected interaction index {interaction}"),
+            };
+            let values = queue
+                .pop_front()
+                .unwrap_or_else(|| panic!("missing mask for interaction {interaction}"));
+            assert_eq!(values.len(), N, "mask arity mismatch");
+            std::array::from_fn(|index| values[index])
+        }
+
+        fn add_constraint<G>(&mut self, constraint: G)
+        where
+            Self::EF: std::ops::Mul<G, Output = Self::EF> + From<G>,
+        {
+            self.constraints.push(QM31::from(constraint));
+        }
+
+        fn combine_ef(values: [Self::F; SECURE_EXTENSION_DEGREE]) -> Self::EF {
+            QM31::from_m31_array(values)
+        }
+
+        fn add_to_relation<R: Relation<Self::F, Self::EF>>(
+            &mut self,
+            _entry: RelationEntry<'_, Self::F, Self::EF, R>,
+        ) {
+        }
+
+        fn write_logup_frac_typed(
+            &mut self,
+            _numerator: Multiplicity<Self::F, Self::EF>,
+            _denominator: Self::EF,
+        ) {
+        }
+
+        fn finalize_logup_in_pairs(&mut self) {}
+    }
+
+    fn trace_fingerprint(trace: &[MdocValidityColumnEval]) -> Vec<[M31; N_LANES]> {
+        trace
+            .iter()
+            .flat_map(|column| column.data.iter().map(|packed| packed.to_array()))
+            .collect()
+    }
+
+    fn test_rows() -> Vec<MdocValidityRow> {
+        mdoc_validity_rows(*b"2020-01-01", *b"2030-12-31")
+    }
+
+    fn test_policy_date() -> Date {
+        Date {
+            year: 2026,
+            month: 7,
+            day: 8,
+        }
+    }
+
+    #[test]
+    fn mdoc_validity_inactive_rows_are_not_zero_or_boolean_pinned() {
+        let eval = MdocValidityEval {
+            policy_date: test_policy_date(),
+            issuer_field_relation: FieldBytesRelation::dummy(),
+            blinder_relation: ClaimedSumBlinderRelation::dummy(),
+            blinder_v: QM31::from_u32_unchecked(1, 2, 3, 4),
+            blinder_m: QM31::from_u32_unchecked(5, 6, 7, 8),
+        };
+        let row = eval.evaluate(RowEval::inactive_validity_row());
+
+        let nonzero = row.nonzero_constraints();
+        assert!(
+            nonzero.is_empty(),
+            "inactive validity row still hits constraints: {nonzero:?}"
+        );
+    }
+
+    #[test]
+    fn mdoc_validity_class_a_has_256_blind_rows_and_fresh_inactive_cells() {
+        assert!(
+            (1usize << MDOC_VALIDITY_LOG_SIZE) - test_rows().len() >= 256,
+            "mdoc validity Class A needs at least 256 blind rows"
+        );
+
+        let rows = test_rows();
+        let first = trace_fingerprint(&mdoc_validity_base_trace(test_policy_date(), &rows));
+        let second = trace_fingerprint(&mdoc_validity_base_trace(test_policy_date(), &rows));
+        let zero = [M31::from_u32_unchecked(0); N_LANES];
+
+        assert!(
+            first.iter().any(|value| *value != zero),
+            "mdoc validity inactive rows are still all zero"
+        );
+        assert_ne!(
+            first, second,
+            "mdoc validity inactive cells must be fresh per trace"
+        );
     }
 }
