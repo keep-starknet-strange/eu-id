@@ -1,11 +1,11 @@
 use crate::age::strategy::range_check::lookup_elements::LookupElements;
+use crate::age::strategy::range_check::preprocessed::active_col_id;
 use crate::age::strategy::range_check::witness::{
     DobBindingMode, WitnessData, DOB_TEXT_DIGITS, DOB_TEXT_DIGIT_BITS, DOB_TEXT_LEN,
 };
 use crate::age::types::PublicInput;
 use crate::utils::field_const;
 use air_core::relations::{field_id, FieldBytesRelation};
-use num_traits::One;
 use stwo::core::fields::m31::BaseField;
 use stwo_constraint_framework::{EvalAtRow, FrameworkComponent, FrameworkEval, RelationEntry};
 
@@ -32,6 +32,13 @@ impl FrameworkEval for AgeRangeCheckEval {
     }
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+        // Class-C: the single-row `active` selector gates every constraint and
+        // lookup use. `2^LOG_SIZE − 1` blind rows carry fresh randomness and are
+        // unconstrained here (`active = 0`). Degree budget: gating a degree-2
+        // constraint by `active` (preprocessed, degree 1) yields degree 3 ≤
+        // `log_size + 1` bound.
+        let active = eval.get_preprocessed_column(active_col_id());
+
         let birth_day = eval.next_trace_mask();
         let birth_month = eval.next_trace_mask();
         let birth_year = eval.next_trace_mask();
@@ -43,13 +50,13 @@ impl FrameworkEval for AgeRangeCheckEval {
         let day_borrow = eval.next_trace_mask();
         let month_borrow = eval.next_trace_mask();
 
-        // Credential-field binding columns. Read here, immediately after
-        // the base witness columns, so they occupy this component's trace slots
-        // `9..12` — the order the witness generator commits them and the
-        // `air_core` allocator assigns. The base-value clones are captured before
-        // the statement constraints below consume `birth_*`.
+        // Credential-field binding columns. Read here, immediately after the
+        // base witness columns, so they occupy this component's trace slots — the
+        // order the witness generator commits them and the `air_core` allocator
+        // assigns. The base-value clones are captured before the statement
+        // constraints below consume `birth_*`. The single-row require selector is
+        // the preprocessed `active` column (no `bind_active` trace column).
         let dob_binding = self.dob_binding.as_ref().map(|relation| {
-            let bind_active = eval.next_trace_mask();
             match self
                 .dob_binding_mode
                 .expect("DOB binding mode must be set with DOB relation")
@@ -59,7 +66,6 @@ impl FrameworkEval for AgeRangeCheckEval {
                     let year_lo = eval.next_trace_mask();
                     DobBindingMasks::Packed {
                         relation,
-                        bind_active,
                         year_hi,
                         year_lo,
                         birth_year: birth_year.clone(),
@@ -74,7 +80,6 @@ impl FrameworkEval for AgeRangeCheckEval {
                         std::array::from_fn(|_| std::array::from_fn(|_| eval.next_trace_mask()));
                     DobBindingMasks::Text {
                         relation,
-                        bind_active,
                         bytes,
                         digit_bits,
                         birth_year: birth_year.clone(),
@@ -85,26 +90,33 @@ impl FrameworkEval for AgeRangeCheckEval {
             }
         });
 
-        eval.add_constraint(day_borrow.clone() * (field_const::<E>(1) - day_borrow.clone()));
-        eval.add_constraint(month_borrow.clone() * (field_const::<E>(1) - month_borrow.clone()));
+        eval.add_constraint(
+            active.clone() * day_borrow.clone() * (field_const::<E>(1) - day_borrow.clone()),
+        );
+        eval.add_constraint(
+            active.clone() * month_borrow.clone() * (field_const::<E>(1) - month_borrow.clone()),
+        );
 
         let cutoff = self.public.cutoff_date();
 
         eval.add_constraint(
-            field_const::<E>(cutoff.day) - birth_day.clone()
-                + field_const::<E>(32) * day_borrow.clone()
-                - day_delta.clone(),
+            active.clone()
+                * (field_const::<E>(cutoff.day) - birth_day.clone()
+                    + field_const::<E>(32) * day_borrow.clone()
+                    - day_delta.clone()),
         );
         eval.add_constraint(
-            field_const::<E>(cutoff.month) - birth_month.clone() - day_borrow.clone()
-                + field_const::<E>(16) * month_borrow.clone()
-                - month_delta.clone(),
+            active.clone()
+                * (field_const::<E>(cutoff.month) - birth_month.clone() - day_borrow.clone()
+                    + field_const::<E>(16) * month_borrow.clone()
+                    - month_delta.clone()),
         );
         eval.add_constraint(
-            field_const::<E>(cutoff.year)
-                - birth_year.clone()
-                - month_borrow.clone()
-                - year_delta.clone(),
+            active.clone()
+                * (field_const::<E>(cutoff.year)
+                    - birth_year.clone()
+                    - month_borrow.clone()
+                    - year_delta.clone()),
         );
 
         let bounds = self.public.bounds;
@@ -112,41 +124,42 @@ impl FrameworkEval for AgeRangeCheckEval {
             * BaseField::from_u32_unchecked(12)
             + birth_month
             - field_const::<E>(1);
+        let use_mult = E::EF::from(active.clone());
         eval.add_to_relation(RelationEntry::new(
             &self.lookup_elements.calendar,
-            E::EF::one(),
+            use_mult.clone(),
             &[table_index, max_days.clone()],
         ));
         eval.add_to_relation(RelationEntry::new(
             &self.lookup_elements.valid_day,
-            E::EF::one(),
+            use_mult.clone(),
             &[max_days, birth_day],
         ));
         eval.add_to_relation(RelationEntry::new(
             &self.lookup_elements.day_delta,
-            E::EF::one(),
+            use_mult.clone(),
             &[day_delta],
         ));
         eval.add_to_relation(RelationEntry::new(
             &self.lookup_elements.month_delta,
-            E::EF::one(),
+            use_mult.clone(),
             &[month_delta],
         ));
         eval.add_to_relation(RelationEntry::new(
             &self.lookup_elements.year_delta,
-            E::EF::one(),
+            use_mult,
             &[year_delta],
         ));
 
-        // Credential-field binding, after the statement's own lookups so
-        // the existing interaction columns are unchanged and the binding
-        // fractions append. `bind_active` is boolean and selects the single row
-        // whose requires fire; the reconciliation ties the packed `birth_year` to
-        // its two exposed bytes (`month`/`day` are single bytes, bound directly);
-        // the four requires cancel SHA's `−is_first_block` yield iff the bytes
-        // the age module reasons about are the credential's signed DOB bytes.
+        // Credential-field binding, after the statement's own lookups so the
+        // existing interaction columns are unchanged and the binding fractions
+        // append. The preprocessed `active` selects the single row whose requires
+        // fire; the reconciliation ties the packed `birth_year` to its two
+        // exposed bytes (`month`/`day` are single bytes, bound directly); the
+        // four requires cancel SHA's `−is_first_block` yield iff the bytes the
+        // age module reasons about are the credential's signed DOB bytes.
         if let Some(binding) = dob_binding {
-            emit_dob_binding(&mut eval, binding);
+            emit_dob_binding(&mut eval, active.clone(), binding);
         }
 
         eval.finalize_logup_in_pairs();
@@ -162,7 +175,6 @@ pub type AgeRangeCheckComponent = FrameworkComponent<AgeRangeCheckEval>;
 enum DobBindingMasks<'a, F> {
     Packed {
         relation: &'a FieldBytesRelation,
-        bind_active: F,
         year_hi: F,
         year_lo: F,
         birth_year: F,
@@ -171,7 +183,6 @@ enum DobBindingMasks<'a, F> {
     },
     Text {
         relation: &'a FieldBytesRelation,
-        bind_active: F,
         bytes: [F; DOB_TEXT_LEN],
         digit_bits: [[F; DOB_TEXT_DIGIT_BITS]; DOB_TEXT_DIGITS],
         birth_year: F,
@@ -180,22 +191,21 @@ enum DobBindingMasks<'a, F> {
     },
 }
 
-fn emit_dob_binding<E: EvalAtRow>(eval: &mut E, binding: DobBindingMasks<'_, E::F>) {
+fn emit_dob_binding<E: EvalAtRow>(eval: &mut E, active: E::F, binding: DobBindingMasks<'_, E::F>) {
     match binding {
         DobBindingMasks::Packed {
             relation,
-            bind_active,
             year_hi,
             year_lo,
             birth_year,
             birth_month,
             birth_day,
         } => {
-            eval.add_constraint(bind_active.clone() * (field_const::<E>(1) - bind_active.clone()));
             eval.add_constraint(
-                birth_year - field_const::<E>(256) * year_hi.clone() - year_lo.clone(),
+                active.clone()
+                    * (birth_year - field_const::<E>(256) * year_hi.clone() - year_lo.clone()),
             );
-            let mult = E::EF::from(bind_active);
+            let mult = E::EF::from(active);
             for (byte_index, value) in [
                 (0u32, year_hi),
                 (1, year_lo),
@@ -207,53 +217,61 @@ fn emit_dob_binding<E: EvalAtRow>(eval: &mut E, binding: DobBindingMasks<'_, E::
         }
         DobBindingMasks::Text {
             relation,
-            bind_active,
             bytes,
             digit_bits,
             birth_year,
             birth_month,
             birth_day,
         } => {
-            eval.add_constraint(bind_active.clone() * (field_const::<E>(1) - bind_active.clone()));
             // The two `-` separators pin positions 4 and 7 to 0x2D.
-            eval.add_constraint(bytes[4].clone() - field_const::<E>(b'-' as u32));
-            eval.add_constraint(bytes[7].clone() - field_const::<E>(b'-' as u32));
+            eval.add_constraint(
+                active.clone() * (bytes[4].clone() - field_const::<E>(b'-' as u32)),
+            );
+            eval.add_constraint(
+                active.clone() * (bytes[7].clone() - field_const::<E>(b'-' as u32)),
+            );
 
             // Recompose each digit from four booleans and cap it at 9 (bits 3&2
-            // and 3&1 cannot both be set) — a range check without a table.
+            // and 3&1 cannot both be set) — a range check without a table. Every
+            // constraint gated by `active`.
             let digit_positions = [0usize, 1, 2, 3, 5, 6, 8, 9];
             let mut digits = Vec::with_capacity(DOB_TEXT_DIGITS);
             for (digit_idx, &byte_pos) in digit_positions.iter().enumerate() {
                 let bits = &digit_bits[digit_idx];
                 for bit in bits {
-                    eval.add_constraint(bit.clone() * (field_const::<E>(1) - bit.clone()));
+                    eval.add_constraint(
+                        active.clone() * bit.clone() * (field_const::<E>(1) - bit.clone()),
+                    );
                 }
                 let digit = bytes[byte_pos].clone() - field_const::<E>(b'0' as u32);
                 let recomposed = bits[0].clone()
                     + field_const::<E>(2) * bits[1].clone()
                     + field_const::<E>(4) * bits[2].clone()
                     + field_const::<E>(8) * bits[3].clone();
-                eval.add_constraint(digit.clone() - recomposed);
-                eval.add_constraint(bits[3].clone() * bits[2].clone());
-                eval.add_constraint(bits[3].clone() * bits[1].clone());
+                eval.add_constraint(active.clone() * (digit.clone() - recomposed));
+                eval.add_constraint(active.clone() * bits[3].clone() * bits[2].clone());
+                eval.add_constraint(active.clone() * bits[3].clone() * bits[1].clone());
                 digits.push(digit);
             }
 
             eval.add_constraint(
-                birth_year
-                    - field_const::<E>(1000) * digits[0].clone()
-                    - field_const::<E>(100) * digits[1].clone()
-                    - field_const::<E>(10) * digits[2].clone()
-                    - digits[3].clone(),
+                active.clone()
+                    * (birth_year
+                        - field_const::<E>(1000) * digits[0].clone()
+                        - field_const::<E>(100) * digits[1].clone()
+                        - field_const::<E>(10) * digits[2].clone()
+                        - digits[3].clone()),
             );
             eval.add_constraint(
-                birth_month - field_const::<E>(10) * digits[4].clone() - digits[5].clone(),
+                active.clone()
+                    * (birth_month - field_const::<E>(10) * digits[4].clone() - digits[5].clone()),
             );
             eval.add_constraint(
-                birth_day - field_const::<E>(10) * digits[6].clone() - digits[7].clone(),
+                active.clone()
+                    * (birth_day - field_const::<E>(10) * digits[6].clone() - digits[7].clone()),
             );
 
-            let mult = E::EF::from(bind_active);
+            let mult = E::EF::from(active);
             for (byte_index, value) in bytes.into_iter().enumerate() {
                 require_dob_byte(eval, relation, mult.clone(), byte_index as u32, value);
             }

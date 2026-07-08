@@ -308,6 +308,29 @@ mod tests {
         assert!(p.verify(&proof).is_err());
     }
 
+    /// Class-D balance-tamper (Q-015 §4b): the blinded accepted-set table's
+    /// contribution to the global LogUp balance is load-bearing. A round-trip
+    /// through the blinded table verifies; shifting the blinded table's claimed
+    /// sum by any nonzero amount breaks the balance and the verifier rejects.
+    /// This proves the dummy-region cancelling twin holds the balance rather than
+    /// leaving free slack a prover could exploit.
+    #[test]
+    fn class_d_blinded_table_balance_tamper_is_rejected() {
+        use stwo::core::fields::qm31::QM31;
+        let p = predicate();
+        // Round-trip through the Class-D blinded NatTable.
+        let proof = p.prove(&eu_set(), &private(&[276])).unwrap();
+        p.verify(&proof).expect("blinded-table round-trip verifies");
+
+        // Shift the blinded table's claimed sum by a nonzero delta.
+        let mut tampered = proof;
+        tampered.table_claimed_sum += QM31::from_u32_unchecked(1, 0, 0, 0);
+        assert!(
+            p.verify(&tampered).is_err(),
+            "a shifted blinded-table claimed sum must break the balance"
+        );
+    }
+
     #[test]
     fn verification_fails_on_mutated_acceptable_set() {
         // Replacing one code changes the preprocessed column commitment

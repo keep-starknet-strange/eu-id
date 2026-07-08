@@ -55,6 +55,23 @@ pub(crate) fn field_const<E: EvalAtRow>(value: u32) -> E::F {
     E::F::from(BaseField::from_u32_unchecked(value))
 }
 
+/// A fresh uniform M31 cell from the host CSPRNG.
+///
+/// Class-C blind rows and Class-D dummy multiplicities (Q-015 p4c) fill their
+/// inactive/dummy cells with these. The randomness is drawn from the OS entropy
+/// source — NEVER from the Fiat-Shamir channel — so the mask stays secret from
+/// the verifier. Rejection-samples the single `2^31 − 1` value that is out of
+/// M31's `[0, 2^31 − 1)` range, giving a uniform draw over the field.
+pub(crate) fn random_m31_cell() -> M31 {
+    use rand::RngCore;
+    loop {
+        let value = rand::rngs::OsRng.next_u32() & 0x7fff_ffff;
+        if value < (1u32 << 31) - 1 {
+            return M31::from_u32_unchecked(value);
+        }
+    }
+}
+
 pub(crate) fn bits_needed(max_value: u32) -> usize {
     if max_value == 0 {
         return 1;

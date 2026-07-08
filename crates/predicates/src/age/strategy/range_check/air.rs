@@ -34,9 +34,10 @@ fn layout(public: &PublicInput, dob_binding_mode: Option<DobBindingMode>) -> Tre
     let bounds = &public.bounds;
     let cal = calendar_log_size(bounds);
     let valid_day = valid_date_ranges()[0].domain.log_size();
-    let day = Preprocessed::day_range().log_size();
-    let month = Preprocessed::month_range().log_size();
-    let year = Preprocessed::year_range(bounds).log_size();
+    // Class-D delta tables commit over the blinded (`log+1`) domain.
+    let day = Preprocessed::day_range().blind_log_size();
+    let month = Preprocessed::month_range().blind_log_size();
+    let year = Preprocessed::year_range(bounds).blind_log_size();
     let witness = WitnessData::log_size();
     // The age component: 9 base trace columns plus mode-specific binding columns
     // and 5 base logical LogUp fractions plus one field require per exposed DOB
@@ -49,14 +50,19 @@ fn layout(public: &PublicInput, dob_binding_mode: Option<DobBindingMode>) -> Tre
         .unwrap_or(0);
     let age_interaction_cols = logical_age_lookups.div_ceil(2) * 4;
     TreeLayout {
-        // Tree 0: calendar (2), valid-day (2), day/month/year delta tables (1 each).
-        preprocessed: vec![cal, cal, valid_day, valid_day, day, month, year],
-        // Tree 1: age witness columns + 5 multiplicity columns.
+        // Tree 0: age `active` selector (over `witness` log), calendar (2),
+        // valid-day (2), and each Class-D delta table's [value, is_dummy] pair.
+        preprocessed: vec![
+            witness, cal, cal, valid_day, valid_day, day, day, month, month, year, year,
+        ],
+        // Tree 1: age witness columns + 5 multiplicity columns (delta mults over
+        // the blinded delta-table domains).
         trace: std::iter::repeat_n(witness, age_trace_cols)
             .chain([cal, valid_day, day, month, year])
             .collect(),
         // Tree 2: age LogUp fractions + cal (4) + valid_day (4) + each delta
-        // table (4).
+        // table (4). The blinded delta tables pair their two fractions into a
+        // single secure column, so their interaction width is unchanged.
         interaction: std::iter::repeat_n(witness, age_interaction_cols)
             .chain(std::iter::repeat_n(cal, 4))
             .chain(std::iter::repeat_n(valid_day, 4))
@@ -199,7 +205,10 @@ impl Air for RangeCheckProver {
 
 impl AirProver for RangeCheckProver {
     fn max_log_size(&self) -> u32 {
-        self.preprocessed.cal_trace[0].domain.log_size()
+        self.preprocessed.cal_trace[0]
+            .domain
+            .log_size()
+            .max(WitnessData::log_size())
     }
 
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>) {
@@ -208,6 +217,7 @@ impl AirProver for RangeCheckProver {
 
     fn preprocessed_column_fingerprints(&mut self) -> Vec<PreprocessedColumnFingerprint> {
         let mut columns = Vec::new();
+        columns.extend(self.preprocessed.active_trace.clone());
         columns.extend(self.preprocessed.cal_trace.clone());
         columns.extend(self.preprocessed.valid_day_trace.clone());
         columns.extend(self.preprocessed.day_delta_table.clone());
