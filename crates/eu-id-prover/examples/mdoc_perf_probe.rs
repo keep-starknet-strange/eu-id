@@ -198,6 +198,7 @@ fn main() {
                 &proof,
                 &fixture.statement,
                 proof.stark_proof.config,
+                None,
             )
             .expect("mdoc circuit verifies");
             verify_times.push(start.elapsed());

@@ -5364,22 +5364,6 @@ pub fn verify_mdoc_circuit(
     verify_mdoc_circuit_with_pcs_config(proof, statement, mdoc_production_pcs_config())
 }
 
-/// [`verify_mdoc_circuit`], with the tree-0 (preprocessed) commitment root
-/// pinned — the F-ROOT fix. The caller supplies `expected_root`, computed once
-/// via [`mdoc_expected_preprocessed_root`], never taken from the proof. A proof
-/// carrying a forged preprocessed tree (SHA/keccak schedules, range tables,
-/// constants) is rejected with [`Error::PreprocessedRootMismatch`] before the
-/// STARK check. Mirrors `verify_identity_with_preprocessed_root`.
-pub fn verify_mdoc_circuit_with_preprocessed_root(
-    proof: &MdocCircuitProof,
-    statement: &MdocCircuitStatement,
-    config: PcsConfig,
-    expected_root: air_core::CommitmentRoot,
-) -> Result<(), Error> {
-    verify_mdoc_circuit_with_pcs_config_profiled(proof, statement, config, Some(expected_root))
-        .map(|_| ())
-}
-
 #[cfg(feature = "ec-coprocessor")]
 pub fn verify_mdoc_public_statement(
     proof: &MdocCircuitProof,
@@ -5398,6 +5382,13 @@ pub fn verify_mdoc_circuit_with_pcs_config(
         .map(|_| ())
 }
 
+/// [`verify_mdoc_circuit`], with the tree-0 (preprocessed) commitment root
+/// pinned — the F-ROOT fix. The caller supplies `expected_preprocessed_root`,
+/// computed once via [`mdoc_expected_preprocessed_root`], never taken from the
+/// proof. A proof carrying a forged preprocessed tree (SHA/keccak schedules,
+/// range tables, constants) is rejected with
+/// [`Error::PreprocessedRootMismatch`] before the STARK check. Mirrors
+/// `verify_identity_with_preprocessed_root`.
 pub fn verify_mdoc_circuit_with_preprocessed_root(
     proof: &MdocCircuitProof,
     statement: &MdocCircuitStatement,
@@ -5432,7 +5423,12 @@ pub fn verify_mdoc_circuit_with_pcs_config_profiled(
     expected_pcs_config: PcsConfig,
     expected_preprocessed_root: Option<air_core::CommitmentRoot>,
 ) -> Result<MdocCircuitVerifyProfile, Error> {
-    verify_mdoc_circuit_with_pcs_config_profiled_impl(proof, statement, expected_pcs_config, None)
+    verify_mdoc_circuit_with_pcs_config_profiled_impl(
+        proof,
+        statement,
+        expected_pcs_config,
+        expected_preprocessed_root,
+    )
 }
 
 fn verify_mdoc_circuit_with_pcs_config_profiled_impl(

@@ -116,7 +116,7 @@ mod hosted_mode {
     use eu_id_prover::mdoc::{
         demo_mdoc_circuit_fixture, mdoc_expected_preprocessed_root, mdoc_production_pcs_config,
         mdoc_proof_byte_breakdown, prove_mdoc_circuit, verify_mdoc_circuit,
-        verify_mdoc_circuit_with_preprocessed_root, IssuerAuthInput,
+        verify_mdoc_circuit_with_pcs_config_and_preprocessed_root, IssuerAuthInput,
     };
     use eu_id_prover::Error;
     use std::time::Instant;
@@ -184,7 +184,7 @@ mod hosted_mode {
         // proof.
         let expected_root = mdoc_expected_preprocessed_root(&extracted, &statement, config)
             .expect("expected preprocessed root computes");
-        verify_mdoc_circuit_with_preprocessed_root(&proof, &statement, config, expected_root)
+        verify_mdoc_circuit_with_pcs_config_and_preprocessed_root(&proof, &statement, config, expected_root)
             .expect("honest proof verifies against the derived preprocessed root");
 
         // Negative: a pin that does NOT match the proof's tree-0 root is
@@ -194,7 +194,7 @@ mod hosted_mode {
         wrong_root.0[0] ^= 1;
         assert!(
             matches!(
-                verify_mdoc_circuit_with_preprocessed_root(
+                verify_mdoc_circuit_with_pcs_config_and_preprocessed_root(
                     &proof,
                     &statement,
                     config,
@@ -229,9 +229,9 @@ mod hosted_mode {
         let root_b = mdoc_expected_preprocessed_root(&extracted_b, &statement_b, config)
             .expect("root B computes");
 
-        verify_mdoc_circuit_with_preprocessed_root(&proof_a, &statement_a, config, root_a)
+        verify_mdoc_circuit_with_pcs_config_and_preprocessed_root(&proof_a, &statement_a, config, root_a)
             .expect("proof A verifies under its own pin");
-        verify_mdoc_circuit_with_preprocessed_root(&proof_b, &statement_b, config, root_b)
+        verify_mdoc_circuit_with_pcs_config_and_preprocessed_root(&proof_b, &statement_b, config, root_b)
             .expect("proof B verifies under its own pin");
     }
 
