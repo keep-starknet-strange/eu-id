@@ -161,8 +161,16 @@ pub enum SrcRelation {
     FieldBytes(FieldBytesRelation, u32),
 }
 
-fn bridge_pre_id(tag: &str, name: &str) -> PreProcessedColumnId {
-    PreProcessedColumnId { id: format!("mldsa_bridge_{tag}_{name}") }
+/// Instance-namespace prefix for preprocessed ids. Empty namespace keeps the
+/// legacy (single-instance) id format; a non-empty namespace makes the ids of
+/// two hosted ML-DSA instances disjoint so air-core tree-0 first-writer-wins
+/// dedup cannot alias one instance's shape-dependent columns to the other's.
+pub(crate) fn ns_prefix(ns: &str) -> String {
+    if ns.is_empty() { String::new() } else { format!("{ns}/") }
+}
+
+fn bridge_pre_id(ns: &str, tag: &str, name: &str) -> PreProcessedColumnId {
+    PreProcessedColumnId { id: format!("{}mldsa_bridge_{tag}_{name}", ns_prefix(ns)) }
 }
 
 /// A HashIo bridge: for each of `len` rows, requires the source tuple (−) and
@@ -171,6 +179,8 @@ fn bridge_pre_id(tag: &str, name: &str) -> PreProcessedColumnId {
 #[derive(Clone)]
 pub struct BridgeEval {
     pub tag: &'static str,
+    /// Instance namespace ("" = legacy single-instance ids).
+    pub ns: String,
     pub log_size: u32,
     pub src: SrcRelation,
     pub dst_stream: u32,
@@ -181,10 +191,10 @@ pub struct BridgeEval {
 
 impl BridgeEval {
     fn active_col(&self) -> PreProcessedColumnId {
-        bridge_pre_id(self.tag, "active")
+        bridge_pre_id(&self.ns, self.tag, "active")
     }
     fn idx_col(&self) -> PreProcessedColumnId {
-        bridge_pre_id(self.tag, "idx")
+        bridge_pre_id(&self.ns, self.tag, "idx")
     }
     pub fn preprocessed_ids(&self) -> Vec<PreProcessedColumnId> {
         vec![self.active_col(), self.idx_col()]
@@ -343,6 +353,8 @@ pub type BridgeComponent = FrameworkComponent<BridgeEval>;
 #[derive(Clone)]
 pub struct SqueezeSinkEval {
     pub tag: &'static str,
+    /// Instance namespace ("" = legacy single-instance ids).
+    pub ns: String,
     pub log_size: u32,
     pub stream: u32,
     pub off: u32,
@@ -352,10 +364,10 @@ pub struct SqueezeSinkEval {
 
 impl SqueezeSinkEval {
     fn active_col(&self) -> PreProcessedColumnId {
-        PreProcessedColumnId { id: format!("mldsa_sink_{}_active", self.tag) }
+        PreProcessedColumnId { id: format!("{}mldsa_sink_{}_active", ns_prefix(&self.ns), self.tag) }
     }
     fn pos_col(&self) -> PreProcessedColumnId {
-        PreProcessedColumnId { id: format!("mldsa_sink_{}_pos", self.tag) }
+        PreProcessedColumnId { id: format!("{}mldsa_sink_{}_pos", ns_prefix(&self.ns), self.tag) }
     }
     pub fn preprocessed_ids(&self) -> Vec<PreProcessedColumnId> {
         vec![self.active_col(), self.pos_col()]

@@ -131,16 +131,25 @@ pub const N_CORE: usize = N + 3 * TAU;
 /// trace row count and the sib log_size.
 pub const N_ACCESSES: usize = N_CORE + N;
 
-fn pre_id(name: &str) -> PreProcessedColumnId {
-    PreProcessedColumnId { id: format!("mldsa_sib_{name}") }
+/// Namespaced preprocessed id: the SIB schedule columns are WITNESS-dependent
+/// (they encode the rejection-sampling schedule of one specific signature), so
+/// two hosted ML-DSA instances must not share them under tree-0 id dedup.
+pub(crate) fn pre_id_ns(ns: &str, name: &str) -> PreProcessedColumnId {
+    PreProcessedColumnId { id: format!("{}mldsa_sib_{name}", crate::sponge_link::ns_prefix(ns)) }
 }
 
 fn sign_mask_name(u: usize) -> String {
     format!("sign_mask_{u}")
 }
 
-/// Preprocessed ids in commit order.
+/// Preprocessed ids in commit order (legacy single-instance ids).
 pub fn sib_preprocessed_ids() -> Vec<PreProcessedColumnId> {
+    sib_preprocessed_ids_ns("")
+}
+
+/// Preprocessed ids in commit order, under an instance namespace.
+pub fn sib_preprocessed_ids_ns(ns: &str) -> Vec<PreProcessedColumnId> {
+    let pre_id = |name: &str| pre_id_ns(ns, name);
     let mut ids = vec![
         pre_id("is_stream"),
         pre_id("is_placement"),
@@ -578,6 +587,8 @@ fn enc_signed(v: i128) -> M31 {
 #[derive(Clone)]
 pub struct SibEval {
     pub log_size: u32,
+    /// Instance namespace ("" = legacy single-instance ids).
+    pub ns: String,
     pub relations: SibRelations,
 }
 
@@ -606,6 +617,9 @@ impl FrameworkEval for SibEval {
         self.log_size + 1
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+        // Shadow the module-level `pre_id` with the instance-namespaced one so
+        // every preprocessed reference below resolves to THIS instance's ids.
+        let pre_id = |name: &str| pre_id_ns(&self.ns, name);
         let is_stream = eval.get_preprocessed_column(pre_id("is_stream"));
         let is_placement = eval.get_preprocessed_column(pre_id("is_placement"));
         let is_c = eval.get_preprocessed_column(pre_id("is_c"));

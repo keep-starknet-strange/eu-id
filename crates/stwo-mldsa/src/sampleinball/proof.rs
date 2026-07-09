@@ -183,7 +183,7 @@ fn build_components(
 ) -> Built {
     let sib = FrameworkComponent::new(
         allocator,
-        SibEval { log_size, relations: relations.clone() },
+        SibEval { log_size, ns: String::new(), relations: relations.clone() },
         sib_claimed_sum,
     );
     let mut rc = Vec::with_capacity(N_RC);

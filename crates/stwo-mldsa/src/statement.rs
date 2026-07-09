@@ -303,7 +303,20 @@ fn native_use_sum(group_evals: &[SecureField], relations: &CoeffsRelations) -> S
 // mix_public (identical both sides).
 // =============================================================================
 
-fn mix_public(channel: &mut Blake2sChannel, input: &MlDsaVerifyInput, sib_stream_len: usize) {
+fn mix_public(
+    channel: &mut Blake2sChannel,
+    input: &MlDsaVerifyInput,
+    sib_stream_len: usize,
+    namespace: &str,
+    private_message: bool,
+) {
+    // Instance role/domain separation: two hosted instances with compatible
+    // shapes must still produce disjoint transcripts, so a device claim tree
+    // can never be replayed against the revocation slot (or vice versa).
+    channel.mix_u64(namespace.len() as u64);
+    for b in namespace.as_bytes() {
+        channel.mix_u64(*b as u64);
+    }
     // ρ bytes.
     for b in &input.rho {
         channel.mix_u64(*b as u64);
@@ -318,10 +331,16 @@ fn mix_public(channel: &mut Blake2sChannel, input: &MlDsaVerifyInput, sib_stream
     for b in &input.tr {
         channel.mix_u64(*b as u64);
     }
-    // message length + bytes.
+    // Message length + bytes. Private-message mode (revocation: the signed
+    // bytes carry the PRIVATE id_lo/id_hi bounds) mixes only the length: the
+    // bytes never appear in the statement and flow exclusively through the
+    // host's FieldBytesRelation into the in-circuit µ absorption, exactly like
+    // the already-private c̃/µ streams below.
     channel.mix_u64(input.message.len() as u64);
-    for b in &input.message {
-        channel.mix_u64(*b as u64);
+    if !private_message {
+        for b in &input.message {
+            channel.mix_u64(*b as u64);
+        }
     }
     // public SIB stream length.
     channel.mix_u64(sib_stream_len as u64);
@@ -357,6 +376,7 @@ fn prefix_eval(input: &MlDsaVerifyInput, hash_io: &HashIoRelation) -> PublicPref
 
 /// The four bridges (order 15..18). `msglink` closes the msg bridge's source.
 fn bridge_evals(
+    ns: &str,
     message_len: usize,
     msglink: &MsgLinkRelation,
     shared_field: Option<&FieldBytesRelation>,
@@ -370,6 +390,7 @@ fn bridge_evals(
     };
     let msg = BridgeEval {
         tag: "msg",
+        ns: ns.to_string(),
         log_size: bridge_log_size(message_len),
         src: msg_src,
         dst_stream: MU_ABSORB,
@@ -380,6 +401,7 @@ fn bridge_evals(
     // 16. µ→c̃ bridge: HashIo(MU_SQUEEZE, off 0) → CT_ABSORB@0, len 64.
     let mu_ct = BridgeEval {
         tag: "mu_ct",
+        ns: ns.to_string(),
         log_size: bridge_log_size(64),
         src: SrcRelation::HashIo(hash_io.clone(), MU_SQUEEZE, 0),
         dst_stream: CT_ABSORB,
@@ -390,6 +412,7 @@ fn bridge_evals(
     // 17. w1Encode bridge: HashIo(STREAM_ID_CTILDE_ABSORB, off 0) → CT_ABSORB@64, len 768.
     let w1enc = BridgeEval {
         tag: "w1enc",
+        ns: ns.to_string(),
         log_size: bridge_log_size(768),
         src: SrcRelation::HashIo(hash_io.clone(), STREAM_ID_CTILDE_ABSORB, 0),
         dst_stream: CT_ABSORB,
@@ -400,6 +423,7 @@ fn bridge_evals(
     // 18. c̃→SIB bridge: HashIo(CT_SQUEEZE, off 0) → SIB_ABSORB@0, len 48.
     let ct_sib = BridgeEval {
         tag: "ct_sib",
+        ns: ns.to_string(),
         log_size: bridge_log_size(48),
         src: SrcRelation::HashIo(hash_io.clone(), CT_SQUEEZE, 0),
         dst_stream: SIB_ABSORB,
@@ -412,6 +436,7 @@ fn bridge_evals(
 
 /// The three squeeze sinks (order 19..21): consume the unused squeeze tails.
 fn sink_evals(
+    ns: &str,
     message_len: usize,
     sib_stream_len: usize,
     hash_io: &HashIoRelation,
@@ -421,6 +446,7 @@ fn sink_evals(
     let mu_len = RATE * sh.mu.n_squeeze - 64;
     let mu = SqueezeSinkEval {
         tag: "mu",
+        ns: ns.to_string(),
         log_size: bridge_log_size(mu_len),
         stream: MU_SQUEEZE,
         off: 64,
@@ -431,6 +457,7 @@ fn sink_evals(
     let ct_len = RATE * sh.ct.n_squeeze - 48;
     let ct = SqueezeSinkEval {
         tag: "ct",
+        ns: ns.to_string(),
         log_size: bridge_log_size(ct_len),
         stream: CT_SQUEEZE,
         off: 48,
@@ -441,6 +468,7 @@ fn sink_evals(
     let sib_len = RATE * sh.sib.n_squeeze - sib_stream_len;
     let sib = SqueezeSinkEval {
         tag: "sib",
+        ns: ns.to_string(),
         log_size: bridge_log_size(sib_len),
         stream: STREAM_ID_SIB_SQUEEZE,
         off: sib_stream_len as u32,
@@ -460,7 +488,11 @@ fn sink_evals(
 /// This is called BEFORE relations are drawn (air-core commits the preprocessed
 /// tree first), so the bridge/sink descriptors use `dummy()` relations — their
 /// `preprocessed_ids()` read only `tag` + public shape, never the relation.
-fn all_preprocessed_ids(input: &MlDsaVerifyInput, sib_stream_len: usize) -> Vec<PreProcessedColumnId> {
+fn all_preprocessed_ids(
+    ns: &str,
+    input: &MlDsaVerifyInput,
+    sib_stream_len: usize,
+) -> Vec<PreProcessedColumnId> {
     let hash_io = HashIoRelation::dummy();
     let msglink = MsgLinkRelation::dummy();
     let mut ids = Vec::new();
@@ -475,17 +507,17 @@ fn all_preprocessed_ids(input: &MlDsaVerifyInput, sib_stream_len: usize) -> Vec<
         ids.push(kind.value_column_id());
     }
     // sib (+ its rc kinds).
-    ids.extend(sampleinball::sib_preprocessed_ids());
+    ids.extend(sampleinball::sib_preprocessed_ids_ns(ns));
     for kind in sib_tables::RcKind::ALL {
         ids.push(kind.value_column_id());
     }
     // keccak tables.
     ids.extend(tables_air::all_preprocessed_column_ids());
     // 4 bridges + 3 sinks.
-    for b in bridge_evals(input.message.len(), &msglink, None, &hash_io) {
+    for b in bridge_evals(ns, input.message.len(), &msglink, None, &hash_io) {
         ids.extend(b.preprocessed_ids());
     }
-    for s in sink_evals(input.message.len(), sib_stream_len, &hash_io) {
+    for s in sink_evals(ns, input.message.len(), sib_stream_len, &hash_io) {
         ids.extend(s.preprocessed_ids());
     }
     ids
@@ -568,10 +600,10 @@ fn gen_all_preprocessed(
         cols.push(sib_tables::gen_table_preprocessed(kind));
     }
     cols.extend(tables_air::generate_preprocessed_trace());
-    for b in bridge_evals(input.message.len(), &msglink, None, &hash_io) {
+    for b in bridge_evals("", input.message.len(), &msglink, None, &hash_io) {
         cols.extend(b.gen_preprocessed());
     }
-    for s in sink_evals(input.message.len(), sib_stream_len, &hash_io) {
+    for s in sink_evals("", input.message.len(), sib_stream_len, &hash_io) {
         cols.extend(s.gen_preprocessed());
     }
     cols
@@ -932,6 +964,7 @@ fn build_keccak_side(witness: &MlDsaWitness, plan: PermIdPlan) -> KeccakSide {
 #[allow(clippy::too_many_arguments)]
 fn build_components(
     allocator: &mut TraceLocationAllocator,
+    ns: &str,
     ctx: &LayoutCtx,
     input: &MlDsaVerifyInput,
     rel: &Relations,
@@ -984,7 +1017,7 @@ fn build_components(
     // 5. sib.
     let sib = FrameworkComponent::new(
         allocator,
-        SibEval { log_size: sib_log_size(ctx.sib_squeezed_len), relations: rel.sib.clone() },
+        SibEval { log_size: sib_log_size(ctx.sib_squeezed_len), ns: ns.to_string(), relations: rel.sib.clone() },
         claims.sib,
     );
     // 6. sib rc ×3.
@@ -1053,14 +1086,14 @@ fn build_components(
         claims.prefix,
     );
     // 15-18. bridges ×4.
-    let bridge_descs = bridge_evals(input.message.len(), &rel.msglink, rel.shared_field.as_ref(), &rel.keccak.hash_io);
+    let bridge_descs = bridge_evals(ns, input.message.len(), &rel.msglink, rel.shared_field.as_ref(), &rel.keccak.hash_io);
     let bridges = bridge_descs
         .into_iter()
         .enumerate()
         .map(|(idx, b)| FrameworkComponent::new(allocator, b, claims.bridges[idx]))
         .collect();
     // 19-21. sinks ×3.
-    let sink_descs = sink_evals(input.message.len(), ctx.sib_stream_len, &rel.keccak.hash_io);
+    let sink_descs = sink_evals(ns, input.message.len(), ctx.sib_stream_len, &rel.keccak.hash_io);
     let sinks = sink_descs
         .into_iter()
         .enumerate()
@@ -1102,6 +1135,14 @@ pub struct MlDsaProver {
     /// Hosted mode: the host's shared message-source relation handle. `None` for
     /// standalone (the self-drawn `msglink` producer).
     shared_field: Option<SharedFieldRelation>,
+    /// Instance namespace: role/domain tag mixed into the transcript and
+    /// prefixed onto every witness/shape-dependent preprocessed id (SIB
+    /// schedule, bridges, sinks). "" = legacy single-instance ids. REQUIRED
+    /// (distinct per instance) when a proof hosts more than one ML-DSA module.
+    namespace: String,
+    /// Private-message mode: mix only `message.len()` into the transcript; the
+    /// bytes flow exclusively through the host's FieldBytesRelation.
+    private_message: bool,
     keccak_side: Option<KeccakSide>,
     relations: Option<Relations>,
     // rc multiplicity columns stashed between write_trace and write_interaction.
@@ -1161,6 +1202,8 @@ impl MlDsaProver {
             sib_squeezed_len,
             ctx,
             shared_field,
+            namespace: String::new(),
+            private_message: false,
             keccak_side: Some(keccak_side),
             relations: None,
             coeffs_rc_mult: Vec::new(),
@@ -1180,6 +1223,20 @@ impl MlDsaProver {
         shared_field: SharedFieldRelation,
     ) -> Self {
         Self::new(witness, input, Some(shared_field))
+    }
+
+    /// Set the instance namespace (see the `namespace` field). Prover and
+    /// verifier must agree per role.
+    pub fn with_instance_namespace(mut self, ns: impl Into<String>) -> Self {
+        self.namespace = ns.into();
+        self
+    }
+
+    /// Enable private-message mode (see the `private_message` field). Prover
+    /// and verifier must agree per role.
+    pub fn with_private_message(mut self) -> Self {
+        self.private_message = true;
+        self
     }
 
     // ---- getters the host stores in its proof struct + uses to reconstruct ----
@@ -1238,7 +1295,7 @@ fn sink_bytes(runs: &[sponge::SpongeRun], sib_stream_len: usize) -> [Vec<u8>; 3]
 
 impl Air for MlDsaProver {
     fn mix_public(&self, channel: &mut Blake2sChannel) {
-        mix_public(channel, &self.input, self.sib_stream_len);
+        mix_public(channel, &self.input, self.sib_stream_len, &self.namespace, self.private_message);
     }
     fn draw_relations(&mut self, channel: &mut Blake2sChannel) {
         self.relations = Some(draw_relations_common(channel, self.shared_field.as_ref()));
@@ -1254,11 +1311,11 @@ impl Air for MlDsaProver {
         channel.mix_felts(&self.claimed_sums());
     }
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
-        all_preprocessed_ids(&self.input, self.sib_stream_len)
+        all_preprocessed_ids(&self.namespace, &self.input, self.sib_stream_len)
     }
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
         let rel = self.relations().clone();
-        self.built = Some(build_components(allocator, &self.ctx, &self.input, &rel, &self.claims));
+        self.built = Some(build_components(allocator, &self.namespace, &self.ctx, &self.input, &rel, &self.claims));
     }
     fn components(&self) -> Vec<&dyn Component> {
         self.built.as_ref().expect("built").ordered()
@@ -1286,8 +1343,41 @@ impl AirProver for MlDsaProver {
             self.sib_squeezed_len,
         ));
     }
+    /// Partial preprocessed writes: with multiple hosted ML-DSA instances, the
+    /// fixed-content tables (coeffs/decomp layout, rc values, keccak tables)
+    /// keep global ids and tree-0 dedups them first-writer-wins, so a later
+    /// instance must write only its namespaced (witness/shape-dependent)
+    /// columns. `selected_ids` is this module's id list filtered to first-seen,
+    /// in commit order (air-core `select_first_preprocessed_ids`).
+    fn write_selected_preprocessed(
+        &mut self,
+        tb: &mut TreeBuilder<SimdBackend, air_core::Mc>,
+        selected_ids: &[PreProcessedColumnId],
+    ) {
+        let ids = all_preprocessed_ids(&self.namespace, &self.input, self.sib_stream_len);
+        let cols = gen_all_preprocessed(
+            &self.witness,
+            &self.input,
+            self.sib_stream_len,
+            self.sib_squeezed_len,
+        );
+        assert_eq!(ids.len(), cols.len(), "mldsa preprocessed ids/cols length mismatch");
+        let selected: std::collections::HashSet<&PreProcessedColumnId> = selected_ids.iter().collect();
+        let (picked_ids, picked_cols): (Vec<_>, Vec<_>) = ids
+            .into_iter()
+            .zip(cols)
+            .filter(|(id, _)| selected.contains(id))
+            .unzip();
+        assert_eq!(
+            picked_ids.as_slice(),
+            selected_ids,
+            "selected preprocessed ids must be this module's ids filtered first-writer-wins, in commit order"
+        );
+        tb.extend_evals(picked_cols);
+    }
+
     fn preprocessed_column_fingerprints(&mut self) -> Vec<PreprocessedColumnFingerprint> {
-        let ids = all_preprocessed_ids(&self.input, self.sib_stream_len);
+        let ids = all_preprocessed_ids(&self.namespace, &self.input, self.sib_stream_len);
         let cols = gen_all_preprocessed(
             &self.witness,
             &self.input,
@@ -1362,7 +1452,7 @@ impl AirProver for MlDsaProver {
 
         // 15-18. bridges base (need the sponge outputs, kept in runs).
         let bbytes = bridge_bytes(&self.input, &self.keccak_side().runs, &self.decomp_w1_bytes);
-        let bridge_descs = bridge_evals(self.input.message.len(), &dummy_msglink, None, &dummy_hash_io);
+        let bridge_descs = bridge_evals(&self.namespace, self.input.message.len(), &dummy_msglink, None, &dummy_hash_io);
         for (b, bytes) in bridge_descs.iter().zip(bbytes.iter()) {
             evals.extend(b.gen_base(bytes));
         }
@@ -1383,7 +1473,7 @@ impl AirProver for MlDsaProver {
 
         // 19-21. sinks base.
         let sbytes = sink_bytes(&self.keccak_side().runs, self.sib_stream_len);
-        let sink_descs = sink_evals(self.input.message.len(), self.sib_stream_len, &dummy_hash_io);
+        let sink_descs = sink_evals(&self.namespace, self.input.message.len(), self.sib_stream_len, &dummy_hash_io);
         for (s, bytes) in sink_descs.iter().zip(sbytes.iter()) {
             evals.extend(s.gen_base(bytes));
         }
@@ -1481,7 +1571,7 @@ impl AirProver for MlDsaProver {
 
         // 15-18. bridges.
         let bbytes = bridge_bytes(&self.input, &self.keccak_side().runs, &self.decomp_w1_bytes);
-        let bridge_descs = bridge_evals(self.input.message.len(), &rel.msglink, rel.shared_field.as_ref(), &rel.keccak.hash_io);
+        let bridge_descs = bridge_evals(&self.namespace, self.input.message.len(), &rel.msglink, rel.shared_field.as_ref(), &rel.keccak.hash_io);
         self.claims.bridges.clear();
         for (b, bytes) in bridge_descs.iter().zip(bbytes.iter()) {
             let (tr, sum) = b.gen_interaction(bytes);
@@ -1491,7 +1581,7 @@ impl AirProver for MlDsaProver {
 
         // 19-21. sinks.
         let sbytes = sink_bytes(&self.keccak_side().runs, self.sib_stream_len);
-        let sink_descs = sink_evals(self.input.message.len(), self.sib_stream_len, &rel.keccak.hash_io);
+        let sink_descs = sink_evals(&self.namespace, self.input.message.len(), self.sib_stream_len, &rel.keccak.hash_io);
         self.claims.sinks.clear();
         for (s, bytes) in sink_descs.iter().zip(sbytes.iter()) {
             let (tr, sum) = s.gen_interaction(bytes);
@@ -1519,6 +1609,10 @@ pub struct MlDsaVerifier {
     ctx: LayoutCtx,
     /// Hosted mode: the host's shared message-source relation handle.
     shared_field: Option<SharedFieldRelation>,
+    /// Instance namespace (must match the prover's per role).
+    namespace: String,
+    /// Private-message mode (must match the prover's per role).
+    private_message: bool,
     group_evals: Vec<SecureField>,
     claims: Claims,
     relations: Option<Relations>,
@@ -1553,6 +1647,8 @@ impl MlDsaVerifier {
             sib_stream_len,
             ctx,
             shared_field,
+            namespace: String::new(),
+            private_message: false,
             group_evals,
             claims,
             relations: None,
@@ -1580,11 +1676,23 @@ impl MlDsaVerifier {
             Some(shared_field),
         )
     }
+
+    /// Set the instance namespace (must match the prover's per role).
+    pub fn with_instance_namespace(mut self, ns: impl Into<String>) -> Self {
+        self.namespace = ns.into();
+        self
+    }
+
+    /// Enable private-message mode (must match the prover's per role).
+    pub fn with_private_message(mut self) -> Self {
+        self.private_message = true;
+        self
+    }
 }
 
 impl Air for MlDsaVerifier {
     fn mix_public(&self, channel: &mut Blake2sChannel) {
-        mix_public(channel, &self.input, self.sib_stream_len);
+        mix_public(channel, &self.input, self.sib_stream_len, &self.namespace, self.private_message);
     }
     fn draw_relations(&mut self, channel: &mut Blake2sChannel) {
         let rel = draw_relations_common(channel, self.shared_field.as_ref());
@@ -1606,11 +1714,11 @@ impl Air for MlDsaVerifier {
         channel.mix_felts(&self.claimed_sums());
     }
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
-        all_preprocessed_ids(&self.input, self.sib_stream_len)
+        all_preprocessed_ids(&self.namespace, &self.input, self.sib_stream_len)
     }
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
         let rel = self.relations().clone();
-        self.built = Some(build_components(allocator, &self.ctx, &self.input, &rel, &self.claims));
+        self.built = Some(build_components(allocator, &self.namespace, &self.ctx, &self.input, &rel, &self.claims));
     }
     fn components(&self) -> Vec<&dyn Component> {
         self.built.as_ref().expect("built").ordered()

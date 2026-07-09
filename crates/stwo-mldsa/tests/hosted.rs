@@ -309,3 +309,153 @@ fn hosted_tampered_message_byte_rejects() {
         "tampered producer bytes must break the swap balance"
     );
 }
+
+// =====================================================================
+// Multi-instance hosting (device + revocation prerequisite): two hosted
+// ML-DSA modules in ONE proof, disjoint instance namespaces, one of them
+// in private-message mode.
+// =====================================================================
+
+/// The claims one hosted instance contributes to the host's proof struct.
+struct InstanceClaims {
+    input: MlDsaVerifyInput,
+    group_evals: Vec<SecureField>,
+    claimed_sums: Vec<SecureField>,
+    sib_stream_len: usize,
+    sib_squeezed_len: usize,
+}
+
+/// Prove `[producer_a, mldsa_a(ns_a), producer_b, mldsa_b(ns_b, private-msg)]`.
+fn prove_two_hosted(
+    seed_a: u64,
+    msg_a: &[u8],
+    ns_a: &str,
+    seed_b: u64,
+    msg_b: &[u8],
+    ns_b: &str,
+) -> (InstanceClaims, InstanceClaims, stwo::core::proof::StarkProof<air_core::Hasher>) {
+    let input_a = oracle_input(seed_a, msg_a);
+    let input_b = oracle_input(seed_b, msg_b);
+    let witness_a = generate_witness(&input_a).expect("witness a");
+    let witness_b = generate_witness(&input_b).expect("witness b");
+
+    let handle_a = SharedFieldRelation::new();
+    let handle_b = SharedFieldRelation::new();
+    let mut producer_a = FieldProducer::new(msg_a.to_vec(), handle_a.clone());
+    let mut producer_b = FieldProducer::new(msg_b.to_vec(), handle_b.clone());
+    let mut mldsa_a = MlDsaProver::hosted(witness_a, input_a.clone(), handle_a)
+        .with_instance_namespace(ns_a);
+    let mut mldsa_b = MlDsaProver::hosted(witness_b, input_b.clone(), handle_b)
+        .with_instance_namespace(ns_b)
+        .with_private_message();
+
+    let stark_proof = air_core::prove(
+        &mut [&mut producer_a, &mut mldsa_a, &mut producer_b, &mut mldsa_b],
+        PcsConfig::default(),
+    )
+    .expect("two-instance prove");
+
+    let claims = |m: &MlDsaProver, input: &MlDsaVerifyInput| InstanceClaims {
+        input: input.clone(),
+        group_evals: m.group_evals().to_vec(),
+        claimed_sums: m.claimed_sums(),
+        sib_stream_len: m.sib_stream_len(),
+        sib_squeezed_len: m.sib_squeezed_len(),
+    };
+    (claims(&mldsa_a, &input_a), claims(&mldsa_b, &input_b), stark_proof)
+}
+
+/// Verify the two-instance composition. Instance B runs in private-message
+/// mode: its verifier-side input carries ZEROED message bytes (only the length
+/// is real) — the bytes reach the µ absorption exclusively through producer_b.
+fn verify_two_hosted(
+    a: &InstanceClaims,
+    ns_a: &str,
+    b: &InstanceClaims,
+    ns_b: &str,
+    producer_a_bytes: Vec<u8>,
+    producer_b_bytes: Vec<u8>,
+    stark_proof: &stwo::core::proof::StarkProof<air_core::Hasher>,
+) -> Result<(), stwo::core::verifier::VerificationError> {
+    let handle_a = SharedFieldRelation::new();
+    let handle_b = SharedFieldRelation::new();
+    let mut producer_a = FieldProducer::new(producer_a_bytes, handle_a.clone());
+    let mut producer_b = FieldProducer::new(producer_b_bytes, handle_b.clone());
+    let mut mldsa_a = MlDsaVerifier::hosted(
+        a.input.clone(),
+        a.group_evals.clone(),
+        a.claimed_sums.clone(),
+        a.sib_stream_len,
+        a.sib_squeezed_len,
+        handle_a,
+    )
+    .with_instance_namespace(ns_a);
+    let mut zeroed_b = b.input.clone();
+    zeroed_b.message = vec![0u8; b.input.message.len()];
+    let mut mldsa_b = MlDsaVerifier::hosted(
+        zeroed_b,
+        b.group_evals.clone(),
+        b.claimed_sums.clone(),
+        b.sib_stream_len,
+        b.sib_squeezed_len,
+        handle_b,
+    )
+    .with_instance_namespace(ns_b)
+    .with_private_message();
+    air_core::verify(
+        &mut [&mut producer_a, &mut mldsa_a, &mut producer_b, &mut mldsa_b],
+        stark_proof,
+    )
+}
+
+#[test]
+fn two_namespaced_hosted_instances_prove_and_verify() {
+    // Different message LENGTHS on purpose: the bridge/sink preprocessed
+    // columns are shape-dependent, so this exercises disjoint ids end to end.
+    let msg_a = b"instance-a: the issuer-style public message".to_vec();
+    let msg_b = b"instance-b-private".to_vec();
+    let (a, b, proof) = prove_two_hosted(111, &msg_a, "test/a", 222, &msg_b, "test/b");
+    verify_two_hosted(&a, "test/a", &b, "test/b", msg_a, msg_b, &proof)
+        .expect("two-instance verify");
+}
+
+#[test]
+fn two_hosted_instances_swapped_claims_reject() {
+    // Same message LENGTH so the swap is not rejected trivially on shape: the
+    // role separation must come from the namespaced transcript + inputs.
+    let msg_a = b"same-length-message-aaaaaaaa".to_vec();
+    let msg_b = b"same-length-message-bbbbbbbb".to_vec();
+    let (a, b, proof) = prove_two_hosted(111, &msg_a, "test/a", 222, &msg_b, "test/b");
+    // Present A's claim tree in B's slot and vice versa (inputs stay put).
+    let swapped_a = InstanceClaims {
+        input: a.input.clone(),
+        group_evals: b.group_evals.clone(),
+        claimed_sums: b.claimed_sums.clone(),
+        sib_stream_len: b.sib_stream_len,
+        sib_squeezed_len: b.sib_squeezed_len,
+    };
+    let swapped_b = InstanceClaims {
+        input: b.input.clone(),
+        group_evals: a.group_evals.clone(),
+        claimed_sums: a.claimed_sums.clone(),
+        sib_stream_len: a.sib_stream_len,
+        sib_squeezed_len: a.sib_squeezed_len,
+    };
+    assert!(
+        verify_two_hosted(&swapped_a, "test/a", &swapped_b, "test/b", msg_a, msg_b, &proof)
+            .is_err(),
+        "cross-instance claim replay must reject"
+    );
+}
+
+/// Two instances under the SAME namespace with different witnesses collide on
+/// the witness-dependent SIB schedule ids; the air-core preprocessed
+/// fingerprint invariant must catch this fail-closed at prove time. This is
+/// the regression documenting that the namespace is load-bearing.
+#[test]
+#[should_panic(expected = "has different content in modules")]
+fn two_instances_same_namespace_panics_on_preprocessed_collision() {
+    let msg_a = b"same-length-message-aaaaaaaa".to_vec();
+    let msg_b = b"same-length-message-bbbbbbbb".to_vec();
+    let _ = prove_two_hosted(111, &msg_a, "test/dup", 222, &msg_b, "test/dup");
+}
