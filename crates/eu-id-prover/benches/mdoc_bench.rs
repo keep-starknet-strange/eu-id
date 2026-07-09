@@ -279,6 +279,7 @@ fn longfellow_case(
         session_transcript: vector.transcript.to_vec(),
         trusted_issuer_certificates: Vec::new(),
         trusted_issuer_public_keys: vec![longfellow_issuer_public_key(vector.issuer_pk_json)],
+        trusted_mldsa_issuer_public_keys: Vec::new(),
         device_authentication_profile: MdocDeviceAuthenticationProfile::LongfellowLegacy,
     };
     let extracted = extract_pid_mdoc(vector.mdoc, &request).expect("Longfellow vector extracts");

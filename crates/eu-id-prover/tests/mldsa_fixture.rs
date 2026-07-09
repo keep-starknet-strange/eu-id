@@ -6,6 +6,12 @@
 //! `alg` id and whose signature is ML-DSA-65 over the standard `Sig_structure`.
 //! The issuer key is an `ml-dsa` (oracle) keypair; the device key stays P-256.
 //!
+//! `mldsa_full_pq_fixture()` additionally builds the fully post-quantum
+//! variant (spec §2a/§4 G1): the device key is an AKP COSE_Key carrying an
+//! ML-DSA-65 public key and the `deviceSignature` is a pure ML-DSA-65
+//! COSE_Sign1; `mldsa_revocation_fixture()` signs the raw 20-byte TS13
+//! revocation message with a third deterministic ML-DSA key (no prehash).
+//!
 //! This is additive fixture support — the shipping mdoc proving/statement path
 //! is untouched (that swap is M7). The fixture exists so M2+ can parse it and
 //! diff a witness against the native `stwo-mldsa` reference verdict.
@@ -33,6 +39,11 @@ const CBOR_TAG_ENCODED_CBOR: u64 = 24;
 /// Deterministic ML-DSA-65 issuer seed for the fixture (distinct from the P-256
 /// demo issuer). Fixed so `mldsa_pid_fixture()` is reproducible.
 const MLDSA_ISSUER_SEED: [u8; 32] = [0x5au8; 32];
+/// Deterministic ML-DSA-65 device seed for the fully-PQ fixture (distinct
+/// from the issuer and revocation seeds).
+const MLDSA_DEVICE_SEED: [u8; 32] = [0x6du8; 32];
+/// Deterministic ML-DSA-65 revocation-authority seed (third fixture seed).
+const MLDSA_REVOCATION_SEED: [u8; 32] = [0x7eu8; 32];
 /// The demo device signing key seed (P-256), matching the P-256 fixtures.
 const DEVICE_SEED: [u8; 32] = [11u8; 32];
 
@@ -91,9 +102,10 @@ fn device_cose_key(signing_key: &P256SigningKey) -> Value {
     ])
 }
 
-/// An issuer ML-DSA COSE_Key: AKP key type carrying the raw public key.
+/// An ML-DSA COSE_Key: AKP key type carrying the raw public key.
 /// (`kty = COSE_KTY_AKP`, `alg = COSE_ALG_ML_DSA_65`, public key in label -1.)
-fn issuer_mldsa_cose_key(pk: &[u8]) -> Value {
+/// Used for both the issuer header key and the fully-PQ device key.
+fn mldsa_cose_key(pk: &[u8]) -> Value {
     Value::Map(vec![
         (Value::from(1), Value::from(COSE_KTY_AKP)),
         (Value::from(3), Value::from(COSE_ALG_ML_DSA_65)),
@@ -127,17 +139,23 @@ pub fn mldsa_pid_fixture() -> MldsaPidFixture {
     ))
 }
 
-/// The ML-DSA-65-signed PID mdoc fixture. Exported for M2+/M7 tests.
-pub fn mldsa_pid_fixture_with_transcript(session_transcript: &[u8]) -> MldsaPidFixture {
+/// The issuer-signed pieces `build_pid_document` produces around a device arm.
+struct IssuerSignedDocument {
+    document: Vec<u8>,
+    issuer_pk: Vec<u8>,
+    issuer_sig_structure: Vec<u8>,
+    issuer_signature: Vec<u8>,
+}
+
+/// Assemble the PID mdoc document (namespace items, MSO, ML-DSA-65-signed
+/// `issuerAuth`) around the given device COSE_Key and `deviceSignature`
+/// COSE_Sign1. Shared by the device-P256 and fully-PQ fixture builders.
+fn build_pid_document(device_key: Value, device_cose_sign1: Value) -> IssuerSignedDocument {
     // Issuer ML-DSA-65 keypair (deterministic seed → reproducible fixture).
     let issuer_sk = SigningKey::<MlDsa65>::from_seed(&MLDSA_ISSUER_SEED.into());
     let issuer_vk = issuer_sk.verifying_key();
     let issuer_pk_bytes: EncodedVerifyingKey<MlDsa65> = issuer_vk.encode();
     let issuer_pk = issuer_pk_bytes.to_vec();
-
-    // Device P-256 key (unchanged from the demo fixture).
-    let device_sk = P256SigningKey::from_bytes((&DEVICE_SEED).into()).expect("device key");
-    let device_key = device_cose_key(&device_sk);
 
     // Namespace items + value digests (same two attributes as the demo).
     let birth_date_item = issuer_signed_item(
@@ -188,28 +206,9 @@ pub fn mldsa_pid_fixture_with_transcript(session_transcript: &[u8]) -> MldsaPidF
 
     let issuer_auth = Value::Array(vec![
         Value::Bytes(protected.clone()),
-        Value::Map(vec![("issuerKey".into(), issuer_mldsa_cose_key(&issuer_pk))]),
+        Value::Map(vec![("issuerKey".into(), mldsa_cose_key(&issuer_pk))]),
         Value::Bytes(mso.clone()),
         Value::Bytes(issuer_signature.clone()),
-    ]);
-
-    // Device signature stays P-256 over the (empty) device-namespaces payload.
-    // Disambiguate the `Signer` trait — the ml-dsa oracle pulls in a second
-    // `signature` crate version whose `Signer` also matches by name.
-    use ecdsa::signature::Signer as _;
-    let device_payload =
-        eu_id_prover::mdoc::device_authentication_bytes(session_transcript, PID_DOCTYPE)
-            .expect("device authentication payload builds");
-    let device_sig_struct = sig_structure(&[0xA1, 0x01, 0x26], &device_payload);
-    let device_signature: P256Signature = device_sk.sign(&device_sig_struct);
-    let mut device_compact = Vec::with_capacity(64);
-    device_compact.extend_from_slice(&device_signature.r().to_bytes());
-    device_compact.extend_from_slice(&device_signature.s().to_bytes());
-    let device_cose_sign1 = Value::Array(vec![
-        Value::Bytes(vec![0xA1, 0x01, 0x26]),
-        Value::Map(Vec::new()),
-        Value::Bytes(device_payload),
-        Value::Bytes(device_compact),
     ]);
 
     let document = encode_value(Value::Map(vec![
@@ -239,12 +238,143 @@ pub fn mldsa_pid_fixture_with_transcript(session_transcript: &[u8]) -> MldsaPidF
         ),
     ]));
 
-    MldsaPidFixture {
+    IssuerSignedDocument {
         document,
         issuer_pk,
-        sig_structure: sig_struct,
+        issuer_sig_structure: sig_struct,
         issuer_signature,
     }
+}
+
+/// The ML-DSA-65-signed PID mdoc fixture. Exported for M2+/M7 tests.
+pub fn mldsa_pid_fixture_with_transcript(session_transcript: &[u8]) -> MldsaPidFixture {
+    // Device P-256 key (unchanged from the demo fixture), signing the (empty)
+    // device-namespaces payload. Disambiguate the `Signer` trait — the ml-dsa
+    // oracle pulls in a second `signature` crate version whose `Signer` also
+    // matches by name.
+    use ecdsa::signature::Signer as _;
+    let device_sk = P256SigningKey::from_bytes((&DEVICE_SEED).into()).expect("device key");
+    let device_payload =
+        eu_id_prover::mdoc::device_authentication_bytes(session_transcript, PID_DOCTYPE)
+            .expect("device authentication payload builds");
+    let device_sig_struct = sig_structure(&[0xA1, 0x01, 0x26], &device_payload);
+    let device_signature: P256Signature = device_sk.sign(&device_sig_struct);
+    let mut device_compact = Vec::with_capacity(64);
+    device_compact.extend_from_slice(&device_signature.r().to_bytes());
+    device_compact.extend_from_slice(&device_signature.s().to_bytes());
+    let device_cose_sign1 = Value::Array(vec![
+        Value::Bytes(vec![0xA1, 0x01, 0x26]),
+        Value::Map(Vec::new()),
+        Value::Bytes(device_payload),
+        Value::Bytes(device_compact),
+    ]);
+
+    let built = build_pid_document(device_cose_key(&device_sk), device_cose_sign1);
+    MldsaPidFixture {
+        document: built.document,
+        issuer_pk: built.issuer_pk,
+        sig_structure: built.issuer_sig_structure,
+        issuer_signature: built.issuer_signature,
+    }
+}
+
+/// Everything a consumer of the fully post-quantum mdoc fixture needs: the
+/// document plus, per role, the public key and the exact signed preimage
+/// (`Sig_structure` for issuer/device; revocation signs the raw 20-byte
+/// message, see [`mldsa_revocation_fixture`]).
+pub struct MldsaFullPqFixture {
+    /// Encoded PID mdoc document (top-level `Value::Map`).
+    pub document: Vec<u8>,
+    /// Issuer ML-DSA-65 public key, encoded (`PK_BYTES` = 1952 bytes).
+    pub issuer_pk: Vec<u8>,
+    /// The COSE `Sig_structure` the issuer signed (payload = MSO).
+    pub issuer_sig_structure: Vec<u8>,
+    /// The ML-DSA-65 issuer signature (`SIG_BYTES` = 3309 bytes).
+    pub issuer_signature: Vec<u8>,
+    /// Device ML-DSA-65 public key, encoded (`PK_BYTES` = 1952 bytes).
+    pub device_pk: Vec<u8>,
+    /// The COSE `Sig_structure` the device signed (payload =
+    /// DeviceAuthentication bytes).
+    pub device_sig_structure: Vec<u8>,
+    /// The ML-DSA-65 device signature (`SIG_BYTES` = 3309 bytes).
+    pub device_signature: Vec<u8>,
+    /// Revocation-authority ML-DSA-65 public key (same key
+    /// [`mldsa_revocation_fixture`] signs with).
+    pub revocation_pk: Vec<u8>,
+}
+
+/// The fully post-quantum PID mdoc fixture with the demo session transcript:
+/// ML-DSA-65 issuer AND ML-DSA-65 device (AKP deviceKey, pure ML-DSA
+/// `deviceSignature`).
+pub fn mldsa_full_pq_fixture() -> MldsaFullPqFixture {
+    mldsa_full_pq_fixture_with_transcript(&eu_id_prover::mdoc::openid4vp_session_transcript(
+        b"session-transcript-123",
+    ))
+}
+
+/// The fully post-quantum PID mdoc fixture (spec §2a). The MSO `deviceKey` is
+/// an AKP COSE_Key (`{1: 7, 3: -49, -1: pk}`) and `deviceSignature` is a
+/// COSE_Sign1 with protected header `A1 01 38 30` whose signature is pure
+/// ML-DSA-65 over the standard `Sig_structure` — mirroring the issuer arm.
+pub fn mldsa_full_pq_fixture_with_transcript(session_transcript: &[u8]) -> MldsaFullPqFixture {
+    // Device ML-DSA-65 keypair (deterministic seed → reproducible fixture).
+    let device_sk = SigningKey::<MlDsa65>::from_seed(&MLDSA_DEVICE_SEED.into());
+    let device_pk_bytes: EncodedVerifyingKey<MlDsa65> = device_sk.verifying_key().encode();
+    let device_pk = device_pk_bytes.to_vec();
+
+    // deviceSignature COSE_Sign1 signed with ML-DSA-65 over the Sig_structure
+    // (same detached DeviceAuthentication payload as the P-256 device arm).
+    let protected = mldsa_protected_header();
+    let device_payload =
+        eu_id_prover::mdoc::device_authentication_bytes(session_transcript, PID_DOCTYPE)
+            .expect("device authentication payload builds");
+    let device_sig_structure = sig_structure(&protected, &device_payload);
+    let signature = device_sk.sign(&device_sig_structure);
+    let sig_bytes: EncodedSignature<MlDsa65> = signature.encode();
+    let device_signature = sig_bytes.to_vec();
+    let device_cose_sign1 = Value::Array(vec![
+        Value::Bytes(protected),
+        Value::Map(Vec::new()),
+        Value::Bytes(device_payload),
+        Value::Bytes(device_signature.clone()),
+    ]);
+
+    let built = build_pid_document(mldsa_cose_key(&device_pk), device_cose_sign1);
+    let revocation_sk = SigningKey::<MlDsa65>::from_seed(&MLDSA_REVOCATION_SEED.into());
+    let revocation_pk_bytes: EncodedVerifyingKey<MlDsa65> = revocation_sk.verifying_key().encode();
+
+    MldsaFullPqFixture {
+        document: built.document,
+        issuer_pk: built.issuer_pk,
+        issuer_sig_structure: built.issuer_sig_structure,
+        issuer_signature: built.issuer_signature,
+        device_pk,
+        device_sig_structure,
+        device_signature,
+        revocation_pk: revocation_pk_bytes.to_vec(),
+    }
+}
+
+/// The raw TS13 revocation message: `LE64(id_lo) ‖ LE64(id_hi) ‖ LE32(epoch)`
+/// (20 bytes). This is what the ML-DSA revocation authority signs — pure
+/// ML-DSA, no SHA-256 prehash (spec §1b/§2a).
+pub fn revocation_message(id_lo: u64, id_hi: u64, epoch: u32) -> [u8; 20] {
+    let mut msg = [0u8; 20];
+    msg[..8].copy_from_slice(&id_lo.to_le_bytes());
+    msg[8..16].copy_from_slice(&id_hi.to_le_bytes());
+    msg[16..].copy_from_slice(&epoch.to_le_bytes());
+    msg
+}
+
+/// An ML-DSA-65 revocation-authority signature over the raw 20-byte message
+/// [`revocation_message`]. Returns `(public_key, signature)` — 1952 and 3309
+/// bytes respectively. Deterministic (third fixture seed).
+pub fn mldsa_revocation_fixture(id_lo: u64, id_hi: u64, epoch: u32) -> (Vec<u8>, Vec<u8>) {
+    let sk = SigningKey::<MlDsa65>::from_seed(&MLDSA_REVOCATION_SEED.into());
+    let pk_bytes: EncodedVerifyingKey<MlDsa65> = sk.verifying_key().encode();
+    let signature = sk.sign(&revocation_message(id_lo, id_hi, epoch));
+    let sig_bytes: EncodedSignature<MlDsa65> = signature.encode();
+    (pk_bytes.to_vec(), sig_bytes.to_vec())
 }
 
 /// A minimal PID mdoc whose `issuerAuth` advertises COSE ES256 (P-256, alg -7).
@@ -298,7 +428,10 @@ fn es256_issuer_rejected_without_p256_feature() {
         .expect_err("ES256 issuer must be rejected without the p256 feature");
     match err {
         MdocError::UnsupportedIssuerAlg(msg) => {
-            assert!(msg.contains("p256"), "message should name the feature: {msg}");
+            assert!(
+                msg.contains("p256"),
+                "message should name the feature: {msg}"
+            );
         }
         other => panic!("expected UnsupportedIssuerAlg, got {other:?}"),
     }
@@ -308,10 +441,7 @@ fn es256_issuer_rejected_without_p256_feature() {
 fn mldsa_fixture_issuer_auth_verifies_natively() {
     let fx = mldsa_pid_fixture();
     assert_eq!(fx.issuer_pk.len(), stwo_mldsa::constants::PK_BYTES);
-    assert_eq!(
-        fx.issuer_signature.len(),
-        stwo_mldsa::constants::SIG_BYTES
-    );
+    assert_eq!(fx.issuer_signature.len(), stwo_mldsa::constants::SIG_BYTES);
 
     // The native stwo-mldsa reference must accept the fixture's issuer signature
     // over the exact Sig_structure preimage.
@@ -360,4 +490,130 @@ fn mldsa_fixture_is_deterministic() {
     let b = mldsa_pid_fixture();
     assert_eq!(a.document, b.document);
     assert_eq!(a.issuer_pk, b.issuer_pk);
+}
+
+/// Rejected iff the reference verifier errors on decode or traces `accepted == false`.
+fn rejects(pk: &[u8], msg: &[u8], sig: &[u8]) -> bool {
+    match verify_internals(pk, msg, sig) {
+        Ok(trace) => !trace.accepted,
+        Err(_) => true,
+    }
+}
+
+#[test]
+fn full_pq_fixture_issuer_and_device_verify_natively() {
+    let fx = mldsa_full_pq_fixture();
+    assert_eq!(fx.issuer_pk.len(), stwo_mldsa::constants::PK_BYTES);
+    assert_eq!(fx.device_pk.len(), stwo_mldsa::constants::PK_BYTES);
+    assert_eq!(fx.issuer_signature.len(), stwo_mldsa::constants::SIG_BYTES);
+    assert_eq!(fx.device_signature.len(), stwo_mldsa::constants::SIG_BYTES);
+
+    let issuer = verify_internals(
+        &fx.issuer_pk,
+        &fx.issuer_sig_structure,
+        &fx.issuer_signature,
+    )
+    .expect("issuer signature decodes");
+    assert!(
+        issuer.accepted,
+        "ML-DSA issuer signature must verify natively: {:?}",
+        issuer.reason
+    );
+    let device = verify_internals(
+        &fx.device_pk,
+        &fx.device_sig_structure,
+        &fx.device_signature,
+    )
+    .expect("device signature decodes");
+    assert!(
+        device.accepted,
+        "ML-DSA device signature must verify natively: {:?}",
+        device.reason
+    );
+}
+
+#[test]
+fn full_pq_fixture_device_key_is_akp_with_anchor() {
+    // The ML-DSA protected header is exactly `{1: -49}` = `A1 01 38 30`.
+    assert_eq!(mldsa_protected_header(), [0xA1, 0x01, 0x38, 0x30]);
+
+    // The document embeds the AKP deviceKey with the CBOR anchor: label `-1`
+    // (`20`) followed by the 1952-byte bstr header (`59 07 A0`) and the raw
+    // device public key (spec §2b).
+    let fx = mldsa_full_pq_fixture();
+    let mut anchored = vec![0x20, 0x59, 0x07, 0xA0];
+    anchored.extend_from_slice(&fx.device_pk);
+    assert!(
+        fx.document
+            .windows(anchored.len())
+            .any(|window| window == anchored),
+        "document must contain `20 59 07 A0 ‖ device_pk`"
+    );
+}
+
+#[test]
+fn full_pq_fixture_rejects_tampered_issuer_signature() {
+    let mut fx = mldsa_full_pq_fixture();
+    // Flip a byte in the z region (past the 48-byte c̃) — must reject.
+    fx.issuer_signature[stwo_mldsa::constants::C_TILDE_BYTES + 200] ^= 0x01;
+    assert!(
+        rejects(
+            &fx.issuer_pk,
+            &fx.issuer_sig_structure,
+            &fx.issuer_signature
+        ),
+        "tampered issuer signature must not verify"
+    );
+}
+
+#[test]
+fn full_pq_fixture_rejects_tampered_device_signature() {
+    let mut fx = mldsa_full_pq_fixture();
+    fx.device_signature[stwo_mldsa::constants::C_TILDE_BYTES + 200] ^= 0x01;
+    assert!(
+        rejects(
+            &fx.device_pk,
+            &fx.device_sig_structure,
+            &fx.device_signature
+        ),
+        "tampered device signature must not verify"
+    );
+}
+
+#[test]
+fn full_pq_fixture_is_deterministic() {
+    let a = mldsa_full_pq_fixture();
+    let b = mldsa_full_pq_fixture();
+    assert_eq!(a.document, b.document);
+    assert_eq!(a.device_pk, b.device_pk);
+    assert_eq!(a.revocation_pk, b.revocation_pk);
+}
+
+#[test]
+fn revocation_fixture_verifies_and_rejects_tamper() {
+    let (pk, sig) = mldsa_revocation_fixture(41, 4141, 7);
+    assert_eq!(pk.len(), stwo_mldsa::constants::PK_BYTES);
+    assert_eq!(sig.len(), stwo_mldsa::constants::SIG_BYTES);
+    assert_eq!(pk, mldsa_full_pq_fixture().revocation_pk);
+
+    let msg = revocation_message(41, 4141, 7);
+    let trace = verify_internals(&pk, &msg, &sig).expect("revocation signature decodes");
+    assert!(
+        trace.accepted,
+        "ML-DSA revocation signature must verify natively: {:?}",
+        trace.reason
+    );
+
+    // Tampered signature must reject.
+    let mut bad_sig = sig.clone();
+    bad_sig[stwo_mldsa::constants::C_TILDE_BYTES + 200] ^= 0x01;
+    assert!(
+        rejects(&pk, &msg, &bad_sig),
+        "tampered revocation signature must not verify"
+    );
+    // A different message (wrong epoch) must reject too — no prehash to hide it.
+    assert!(
+        rejects(&pk, &revocation_message(41, 4141, 8), &sig),
+        "revocation signature must be bound to the exact 20-byte message"
+    );
 }

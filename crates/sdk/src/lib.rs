@@ -905,6 +905,7 @@ fn mdoc_request(
         session_transcript: statement.nonce.clone(),
         trusted_issuer_certificates: witness.trusted_issuer_certificates.clone(),
         trusted_issuer_public_keys: Vec::new(),
+        trusted_mldsa_issuer_public_keys: Vec::new(),
         device_authentication_profile:
             eu_id_prover::mdoc::MdocDeviceAuthenticationProfile::Iso180135,
     }
@@ -1377,9 +1378,8 @@ mod tests {
         let public = eu_id_prover::MdocStatement::from_circuit(&fixture.statement);
         let encoded = bincode::serialize(&public).expect("public mdoc statement serializes");
         assert!(
-            !encoded
-                .windows(32)
-                .any(|window| window == fixture
+            !encoded.windows(32).any(|window| window
+                == fixture
                     .statement
                     .issuer_input
                     .as_ecdsa()
@@ -1389,9 +1389,8 @@ mod tests {
             "issuer z must not be serialized in the public mdoc statement"
         );
         assert!(
-            !encoded
-                .windows(32)
-                .any(|window| window == fixture
+            !encoded.windows(32).any(|window| window
+                == fixture
                     .statement
                     .issuer_input
                     .as_ecdsa()
@@ -1402,9 +1401,8 @@ mod tests {
             "issuer r must not be serialized in the public mdoc statement"
         );
         assert!(
-            !encoded
-                .windows(32)
-                .any(|window| window == fixture
+            !encoded.windows(32).any(|window| window
+                == fixture
                     .statement
                     .issuer_input
                     .as_ecdsa()
@@ -1415,27 +1413,51 @@ mod tests {
             "issuer s must not be serialized in the public mdoc statement"
         );
         assert!(
-            !encoded
-                .windows(32)
-                .any(|window| window == fixture.statement.device_input.public_key.x.0),
+            !encoded.windows(32).any(|window| window
+                == fixture
+                    .statement
+                    .device_input
+                    .as_ecdsa()
+                    .expect("demo device is P-256")
+                    .public_key
+                    .x
+                    .0),
             "device qx must not be serialized in the public mdoc statement"
         );
         assert!(
-            !encoded
-                .windows(32)
-                .any(|window| window == fixture.statement.device_input.public_key.y.0),
+            !encoded.windows(32).any(|window| window
+                == fixture
+                    .statement
+                    .device_input
+                    .as_ecdsa()
+                    .expect("demo device is P-256")
+                    .public_key
+                    .y
+                    .0),
             "device qy must not be serialized in the public mdoc statement"
         );
         assert!(
-            !encoded
-                .windows(32)
-                .any(|window| window == fixture.statement.device_input.signature.r.0),
+            !encoded.windows(32).any(|window| window
+                == fixture
+                    .statement
+                    .device_input
+                    .as_ecdsa()
+                    .expect("demo device is P-256")
+                    .signature
+                    .r
+                    .0),
             "device r must not be serialized in the public mdoc statement"
         );
         assert!(
-            !encoded
-                .windows(32)
-                .any(|window| window == fixture.statement.device_input.signature.s.0),
+            !encoded.windows(32).any(|window| window
+                == fixture
+                    .statement
+                    .device_input
+                    .as_ecdsa()
+                    .expect("demo device is P-256")
+                    .signature
+                    .s
+                    .0),
             "device s must not be serialized in the public mdoc statement"
         );
     }
@@ -1543,6 +1565,7 @@ mod tests {
             session_transcript: demo.request.session_transcript.clone(),
             trusted_issuer_certificates: demo.request.trusted_issuer_certificates.clone(),
             trusted_issuer_public_keys: Vec::new(),
+            trusted_mldsa_issuer_public_keys: Vec::new(),
             device_authentication_profile:
                 eu_id_prover::mdoc::MdocDeviceAuthenticationProfile::Iso180135,
         };

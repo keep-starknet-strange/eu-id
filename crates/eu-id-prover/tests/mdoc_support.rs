@@ -12,7 +12,8 @@ use eu_id_prover::mdoc::{
     verify_mdoc_circuit_with_pcs_config, verify_mdoc_circuit_with_preprocessed_root,
     MdocBirthDateBinding, MdocCircuitStatement, MdocDeviceAuthenticationProfile,
     MdocDisclosureMode, MdocError, MdocNationalityBinding, MdocPidRequest, MdocPublicStatement,
-    MdocRequestedAttribute, MdocRevocationPublicInputs, MdocRevocationRangeWitness,
+    MdocRequestedAttribute, MdocRevocationKey, MdocRevocationPublicInputs,
+    MdocRevocationRangeWitness, MdocRevocationSignature,
 };
 use eu_id_prover::ts13::{
     ts13_default_circuit_hash, ts13_default_preprocessed_root, ts13_mso_derived_revocation_id,
@@ -256,6 +257,7 @@ fn longfellow_request(
         session_transcript: vector.transcript.to_vec(),
         trusted_issuer_certificates: Vec::new(),
         trusted_issuer_public_keys: vec![longfellow_issuer_public_key(vector.issuer_pk_json)],
+        trusted_mldsa_issuer_public_keys: Vec::new(),
         device_authentication_profile: MdocDeviceAuthenticationProfile::LongfellowLegacy,
     }
 }
@@ -644,10 +646,10 @@ fn circuit_fixture(session_transcript: &[u8]) -> MdocFixture {
     )
 }
 
-fn ts13_revocation_key(seed: u8) -> (SigningKey, AffinePoint) {
+fn ts13_revocation_key(seed: u8) -> (SigningKey, MdocRevocationKey) {
     let signing_key = SigningKey::from_bytes((&[seed; 32]).into()).expect("revocation key");
     let (_, public_key) = cose_key(&signing_key);
-    (signing_key, public_key)
+    (signing_key, MdocRevocationKey::Ecdsa(public_key))
 }
 
 fn ts13_revocation_witness_for_id(
@@ -666,7 +668,7 @@ fn ts13_revocation_witness_for_id(
         id_lo,
         id_hi,
         epoch,
-        signature: signature(&pair_signature),
+        signature: MdocRevocationSignature::Ecdsa(signature(&pair_signature)),
     }
 }
 
@@ -1498,7 +1500,12 @@ fn extracts_pid_items_mso_device_key_and_signatures() {
         <[u8; 32]>::from(Sha256::digest(&fixture.issuer_sig_structure))
     );
     assert_eq!(
-        extracted.device_ecdsa_input.message_hash.0,
+        extracted
+            .device_auth_input
+            .as_ecdsa()
+            .expect("demo device is P-256")
+            .message_hash
+            .0,
         <[u8; 32]>::from(Sha256::digest(&fixture.device_sig_structure))
     );
 }

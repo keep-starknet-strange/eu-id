@@ -8,7 +8,7 @@ use stwo_p256::types::{AffinePoint, Signature};
 
 use crate::mdoc::{
     verify_mdoc_circuit_with_preprocessed_root, ExtractedPidMdoc, MdocCircuitProof,
-    MdocCircuitStatement, MdocRevocationPublicInputs,
+    MdocCircuitStatement, MdocRevocationKey, MdocRevocationPublicInputs, MdocRevocationSignature,
 };
 
 // Regenerated 2026-07-08 with the Class-D preprocessed root below (the circuit
@@ -387,7 +387,12 @@ pub fn ts13_p4c_circle_code_rank_check() -> bool {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ts13RevocationStatement {
-    pub revocation_public_key: AffinePoint,
+    /// Scheme-tagged revocation-authority key (P-256 or ML-DSA-65). The scheme
+    /// must match the witness signature's — a mixed pair is rejected
+    /// fail-closed by [`Ts13RevocationStatement::verify_witness`], and the
+    /// mdoc statement validation additionally requires it to match the
+    /// issuer/device scheme.
+    pub revocation_public_key: MdocRevocationKey,
     pub epoch: u32,
 }
 
@@ -397,7 +402,9 @@ pub struct Ts13RevocationWitness {
     pub id_lo: u64,
     pub id_hi: u64,
     pub epoch: u32,
-    pub signature: Signature,
+    /// Scheme-tagged sorted-pair signature: P-256 over the SHA-256 prehash of
+    /// the 20-byte message, or pure ML-DSA-65 over the raw 20 bytes.
+    pub signature: MdocRevocationSignature,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -409,6 +416,8 @@ pub enum Ts13RevocationError {
     InvalidPublicKey,
     InvalidSignatureEncoding,
     InvalidSignature,
+    /// Revocation key and signature schemes differ (fail-closed).
+    SchemeMismatch,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -512,13 +521,36 @@ impl Ts13RevocationStatement {
             return Err(Ts13RevocationError::Epoch);
         }
 
-        let verifying_key = verifying_key_from_affine(&self.revocation_public_key)?;
-        let signature = p256_signature_from_stwo(&witness.signature)?;
-        let message_hash =
-            ts13_revocation_message_hash(witness.id_lo, witness.id_hi, witness.epoch);
-        verifying_key
-            .verify_prehash(&message_hash, &signature)
-            .map_err(|_| Ts13RevocationError::InvalidSignature)
+        // Scheme-matched signature verification; any key/signature scheme
+        // mismatch is rejected fail-closed before touching either arm.
+        match (&self.revocation_public_key, &witness.signature) {
+            (MdocRevocationKey::Ecdsa(public_key), MdocRevocationSignature::Ecdsa(signature)) => {
+                let verifying_key = verifying_key_from_affine(public_key)?;
+                let signature = p256_signature_from_stwo(signature)?;
+                let message_hash =
+                    ts13_revocation_message_hash(witness.id_lo, witness.id_hi, witness.epoch);
+                verifying_key
+                    .verify_prehash(&message_hash, &signature)
+                    .map_err(|_| Ts13RevocationError::InvalidSignature)
+            }
+            // Pure ML-DSA-65 over the RAW 20-byte message — no prehash; the
+            // message's privacy in the mdoc proof comes from the hosted
+            // module's private-message mode, not from a hash indirection.
+            #[cfg(feature = "ml-dsa")]
+            (MdocRevocationKey::MlDsa(public_key), MdocRevocationSignature::MlDsa(signature)) => {
+                let message = ts13_revocation_message(witness.id_lo, witness.id_hi, witness.epoch);
+                let trace = stwo_mldsa::reference::verify::verify_internals(
+                    public_key, &message, signature,
+                )
+                .map_err(|_| Ts13RevocationError::InvalidSignatureEncoding)?;
+                if !trace.accepted {
+                    return Err(Ts13RevocationError::InvalidSignature);
+                }
+                Ok(())
+            }
+            #[cfg(feature = "ml-dsa")]
+            _ => Err(Ts13RevocationError::SchemeMismatch),
+        }
     }
 }
 
@@ -530,12 +562,19 @@ pub fn ts13_mso_derived_revocation_id(mso: &[u8]) -> u64 {
     u64::from_le_bytes(bytes)
 }
 
+/// The raw 20-byte TS13 revocation message `LE64(id_lo) ‖ LE64(id_hi) ‖
+/// LE32(epoch)` — the exact bytes the ML-DSA arm signs (pure, no prehash) and
+/// the P-256 arm prehashes.
+pub fn ts13_revocation_message(id_lo: u64, id_hi: u64, epoch: u32) -> [u8; 20] {
+    let mut message = [0u8; 20];
+    message[..8].copy_from_slice(&id_lo.to_le_bytes());
+    message[8..16].copy_from_slice(&id_hi.to_le_bytes());
+    message[16..].copy_from_slice(&epoch.to_le_bytes());
+    message
+}
+
 pub fn ts13_revocation_message_hash(id_lo: u64, id_hi: u64, epoch: u32) -> [u8; 32] {
-    let mut message = Vec::with_capacity(20);
-    message.extend_from_slice(&id_lo.to_le_bytes());
-    message.extend_from_slice(&id_hi.to_le_bytes());
-    message.extend_from_slice(&epoch.to_le_bytes());
-    Sha256::digest(message).into()
+    Sha256::digest(ts13_revocation_message(id_lo, id_hi, epoch)).into()
 }
 
 fn verifying_key_from_affine(
