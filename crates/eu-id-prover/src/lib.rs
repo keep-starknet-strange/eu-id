@@ -96,6 +96,16 @@
 //! `sha2` / the `p256` crate, and [`fixtures`] is the deterministic catalogue of
 //! valid and adversarial witnesses the binding tasks diff against.
 
+// At least one issuer signature scheme must be compiled in. `p256` gates the
+// issuer P-256 (COSE ES256) proving path; `ml-dsa` gates the ML-DSA-65 (COSE
+// alg -49) path. Device authentication is always P-256 regardless.
+#[cfg(not(any(feature = "p256", feature = "ml-dsa")))]
+compile_error!(
+    "eu-id-prover requires at least one issuer signature scheme feature: \
+     enable `p256` (issuer P-256 / COSE ES256) and/or `ml-dsa` (ML-DSA-65 / COSE alg -49). \
+     The default build enables `ec-coprocessor` (which implies `p256`)."
+);
+
 pub(crate) mod claimed_sum_blinder;
 pub mod credential;
 pub mod fixtures;

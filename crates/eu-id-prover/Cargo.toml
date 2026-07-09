@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-default = ["ec-coprocessor"]
+default = ["ec-coprocessor", "p256"]
 # Forward Stwo's rayon paths to the SHA module. Cargo unifies the single `stwo`
 # dependency, so this also turns on the shared STARK prover's parallel paths for
 # the whole composition. Off by default: the honest baseline is single-threaded.
@@ -14,7 +14,17 @@ default = ["ec-coprocessor"]
 parallel = ["stwo-sha256/parallel"]
 gkr-spike = ["air-core/gkr-spike", "stwo-sha256/gkr-spike"]
 fri-sweep = ["stwo/tracing"]
-ec-coprocessor = ["dep:eu-id-ec-coprocessor"]
+# `ec-coprocessor` is a P-256 issuer proving path, so it implies `p256`.
+ec-coprocessor = ["dep:eu-id-ec-coprocessor", "p256"]
+# Issuer signature schemes. Enabling a feature compiles in that issuer proving
+# path; runtime COSE-alg dispatch operates within the compiled-in set. At least
+# one must be enabled (enforced by a `compile_error!` in lib.rs). NOTE: the
+# `p256` RustCrypto crate stays a MANDATORY dependency regardless — device
+# authentication is always P-256; this feature only gates the *issuer* P-256
+# proving/verify path, not the crate.
+p256 = []
+# ML-DSA-65 issuer path: pulls the hosted in-circuit stwo-mldsa module.
+ml-dsa = ["dep:stwo-mldsa"]
 
 [dependencies]
 air-core = { path = "../air-core" }
@@ -22,7 +32,8 @@ eu-id-ec-coprocessor = { path = "../eu-id-ec-coprocessor", optional = true }
 stwo-p256 = { path = "../stwo-p256" }
 # ML-DSA-65 issuer-auth statement (M7): COSE alg -49 issuerAuth is parsed,
 # natively pre-checked, and proven in-circuit by the hosted stwo-mldsa module.
-stwo-mldsa = { path = "../stwo-mldsa" }
+# Optional: only compiled in under the `ml-dsa` feature.
+stwo-mldsa = { path = "../stwo-mldsa", optional = true }
 stwo-sha256 = { path = "../stwo-sha256" }
 predicates = { path = "../predicates" }
 stwo = { workspace = true }

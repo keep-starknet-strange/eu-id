@@ -12,6 +12,7 @@
 //!
 //! NOTE: heavy proofs must not run concurrently in one process (known
 //! stwo-mldsa constraint) — always pass `--test-threads=1`.
+#![cfg(feature = "ml-dsa")]
 
 use eu_id_prover::generator::Policy;
 use eu_id_prover::mdoc::{
@@ -114,9 +115,9 @@ mod coprocessor_mode {
 mod hosted_mode {
     use super::*;
     use eu_id_prover::mdoc::{
-        demo_mdoc_circuit_fixture, mdoc_expected_preprocessed_root, mdoc_production_pcs_config,
-        mdoc_proof_byte_breakdown, prove_mdoc_circuit, verify_mdoc_circuit,
-        verify_mdoc_circuit_with_pcs_config_and_preprocessed_root, IssuerAuthInput,
+        mdoc_expected_preprocessed_root, mdoc_production_pcs_config, mdoc_proof_byte_breakdown,
+        prove_mdoc_circuit, verify_mdoc_circuit,
+        verify_mdoc_circuit_with_pcs_config_and_preprocessed_root,
     };
     use eu_id_prover::Error;
     use std::time::Instant;
@@ -236,9 +237,12 @@ mod hosted_mode {
     }
 
     /// Cross-mode confusion: an ML-DSA proof presented against a P-256
-    /// (ECDSA) statement must be rejected.
+    /// (ECDSA) statement must be rejected. Needs both issuer schemes compiled in
+    /// (it builds a P-256 demo fixture alongside the ML-DSA one).
+    #[cfg(feature = "p256")]
     #[test]
     fn mldsa_proof_against_ecdsa_statement_rejects() {
+        use eu_id_prover::mdoc::{demo_mdoc_circuit_fixture, IssuerAuthInput};
         let (extracted, statement) = mldsa_extracted_and_statement();
         let proof = prove_mdoc_circuit(&extracted, &statement).expect("ML-DSA mdoc proves");
 

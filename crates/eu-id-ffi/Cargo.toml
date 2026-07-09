@@ -13,6 +13,9 @@ name = "eu_id_ffi"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
+# Default mirrors eu-id-prover: the `ec-coprocessor` P-256 issuer path (implies
+# `p256`). Issuer-scheme selection forwards `p256` / `ml-dsa` to eu-id-prover.
+default = ["ec-coprocessor"]
 # Pass through to multi-threaded Stwo proving (rayon). Off by default. Reaches
 # the SHA module (in the standalone SHA bench and the SHA part of the combined
 # identity bench); the combined proof is P256-dominated and P256 has no rayon
@@ -20,13 +23,17 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 # (Note: stwo itself is already built with parallel because stwo-p256 requires
 # it — see the dependency note below.)
 parallel = ["stwo-sha256/parallel"]
+# Issuer signature-scheme passthroughs to eu-id-prover.
+ec-coprocessor = ["eu-id-prover/ec-coprocessor"]
+p256 = ["eu-id-prover/p256"]
+ml-dsa = ["eu-id-prover/ml-dsa"]
 
 [dependencies]
 # The combined, cross-bound identity prover (`prove_identity`/`verify_identity`)
 # the identity bench wraps, plus the standalone SHA-256 prover the SHA bench
 # wraps. eu-id-prover re-pulls stwo-sha256, but the SHA bench depends on it
 # directly too.
-eu-id-prover = { path = "../eu-id-prover" }
+eu-id-prover = { path = "../eu-id-prover", default-features = false }
 stwo-sha256 = { path = "../stwo-sha256" }
 # P-256 ECDSA verification prover. NOTE: stwo-p256 hardwires stwo's
 # `parallel` feature, and Cargo unifies features across the build graph, so

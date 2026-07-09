@@ -14,6 +14,7 @@
 //! carriers (the `issuerAuth` protected header and the signature bytes) and the
 //! issuer COSE key type. Rebuilt here with `ciborium::Value` directly rather
 //! than reaching into private `mdoc.rs` helpers.
+#![cfg(feature = "ml-dsa")]
 
 use ciborium::value::Value;
 use ml_dsa::signature::{Keypair, Signer};
@@ -243,6 +244,63 @@ pub fn mldsa_pid_fixture_with_transcript(session_transcript: &[u8]) -> MldsaPidF
         issuer_pk,
         sig_structure: sig_struct,
         issuer_signature,
+    }
+}
+
+/// A minimal PID mdoc whose `issuerAuth` advertises COSE ES256 (P-256, alg -7).
+/// Used only by the `not(feature = "p256")` clean-error test below: parsing must
+/// reject it with `UnsupportedIssuerAlg` before any signature check, because the
+/// issuer P-256 proving path is not compiled in.
+#[cfg(not(feature = "p256"))]
+fn es256_issuer_document() -> Vec<u8> {
+    // ES256 protected header `{1: -7}` = `A1 01 26`. The unprotected map, MSO
+    // payload and signature bytes are placeholders — the parser errors on the
+    // issuer alg before it reads any of them.
+    let es256_protected = vec![0xA1u8, 0x01, 0x26];
+    let issuer_auth = Value::Array(vec![
+        Value::Bytes(es256_protected),
+        Value::Map(vec![("issuerKey".into(), Value::Map(Vec::new()))]),
+        Value::Bytes(vec![0u8; 8]),
+        Value::Bytes(vec![0u8; 64]),
+    ]);
+    encode_value(Value::Map(vec![
+        ("docType".into(), PID_DOCTYPE.into()),
+        (
+            "issuerSigned".into(),
+            Value::Map(vec![
+                (
+                    "nameSpaces".into(),
+                    Value::Map(vec![(PID_NAMESPACE.into(), Value::Array(Vec::new()))]),
+                ),
+                ("issuerAuth".into(), issuer_auth),
+            ]),
+        ),
+        (
+            "deviceSigned".into(),
+            Value::Map(vec![(
+                "deviceAuth".into(),
+                Value::Map(vec![("deviceSignature".into(), Value::Array(Vec::new()))]),
+            )]),
+        ),
+    ]))
+}
+
+/// Without the `p256` feature, an ES256 (P-256) issuer must be rejected with a
+/// clean `UnsupportedIssuerAlg` error naming the missing feature — never a panic.
+#[cfg(not(feature = "p256"))]
+#[test]
+fn es256_issuer_rejected_without_p256_feature() {
+    use eu_id_prover::mdoc::{extract_pid_mdoc, MdocError, MdocPidRequest};
+    let request = MdocPidRequest::eudi_pid(eu_id_prover::mdoc::openid4vp_session_transcript(
+        b"session-transcript-123",
+    ));
+    let err = extract_pid_mdoc(&es256_issuer_document(), &request)
+        .expect_err("ES256 issuer must be rejected without the p256 feature");
+    match err {
+        MdocError::UnsupportedIssuerAlg(msg) => {
+            assert!(msg.contains("p256"), "message should name the feature: {msg}");
+        }
+        other => panic!("expected UnsupportedIssuerAlg, got {other:?}"),
     }
 }
 

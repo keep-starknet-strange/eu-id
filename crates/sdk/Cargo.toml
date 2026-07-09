@@ -22,10 +22,18 @@ name = "euid_zk_sdk"
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [features]
+# The SDK statement-binding path (`mdoc_statement_matches_public_statement`) is
+# written against the `ec-coprocessor` `MdocPublicStatement` shape, so the SDK
+# always pulls `eu-id-prover` with its default (`ec-coprocessor`, which implies
+# `p256`). `ml-dsa` forwards through so an ML-DSA issuer scheme can be compiled
+# in alongside; `p256` is forwarded for symmetry (already implied by the copro).
 # Pulls the binding generator (clap, cargo_metadata, …) into the build. Needed
 # ONLY for the `uniffi-bindgen` bin — kept off by default so the SDK cdylib
 # does not link the whole generator toolchain into the `.so`.
 bindgen = ["uniffi/cli"]
+# Issuer signature-scheme passthroughs to eu-id-prover.
+p256 = ["eu-id-prover/p256"]
+ml-dsa = ["eu-id-prover/ml-dsa"]
 
 [dependencies]
 # The prover's relying-party types and entry points. The §9.1 contract mapping
