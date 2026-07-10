@@ -568,7 +568,7 @@ mod tests {
 
         // Each first-block field byte `b` bumps row `b` and row `b + OFFSET`.
         let block0 = &w.blocks[0];
-        for &word_idx in &exposure.decomposed_words() {
+        for &word_idx in exposure.decomposed_words() {
             let limb = block0.schedule[word_idx];
             for b in word_be_bytes(limb.lo, limb.hi) {
                 assert!(
@@ -608,9 +608,9 @@ mod tests {
             "two Range16 lookups per exposed byte column for each target block selector",
         );
 
-        for block_idx in exposure.target_blocks() {
+        for &block_idx in exposure.target_blocks() {
             let block = &w.blocks[block_idx];
-            for &word_idx in &exposure.decomposed_words() {
+            for &word_idx in exposure.decomposed_words() {
                 let limb = block.schedule[word_idx];
                 for b in word_be_bytes(limb.lo, limb.hi) {
                     assert!(
