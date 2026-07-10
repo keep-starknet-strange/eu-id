@@ -71,7 +71,6 @@ use stwo_constraint_framework::{
 };
 
 use crate::air_util::{circle_row_to_coset, col_eval, m31, ColEval};
-use crate::binding::STREAM_ID_SIB_SQUEEZE;
 use crate::constants::{N, TAU};
 use crate::witness::MlDsaWitness;
 use relations::SibRelations;
@@ -589,6 +588,10 @@ pub struct SibEval {
     pub log_size: u32,
     /// Instance namespace ("" = legacy single-instance ids).
     pub ns: String,
+    /// The HashIo stream id the SIB squeeze bytes are consumed from. Per
+    /// instance under a SHARED keccak relation set: `stream_base +`
+    /// [`STREAM_ID_SIB_SQUEEZE`] (the standalone default is the constant).
+    pub sib_stream: u32,
     pub relations: SibRelations,
 }
 
@@ -735,7 +738,7 @@ impl FrameworkEval for SibEval {
         ));
 
         // C3: HashIo consume — (STREAM_ID_SIB_SQUEEZE, byte_pos, byte), require (−).
-        let stream_id = E::F::from(m31(STREAM_ID_SIB_SQUEEZE));
+        let stream_id = E::F::from(m31(self.sib_stream));
         let io_tuple = [stream_id, byte_pos.clone(), byte.clone()];
         eval.add_to_relation(RelationEntry::base(
             &self.relations.hash_io,
@@ -987,6 +990,7 @@ pub struct SibInteraction {
 pub fn gen_sib_interaction(
     witness: &MlDsaWitness,
     log_size: u32,
+    sib_stream: u32,
     relations: &SibRelations,
 ) -> SibInteraction {
     let rows = 1usize << log_size;
@@ -1152,7 +1156,7 @@ pub fn gen_sib_interaction(
     // hashio consume (−)
     push(&|coset| match coset_row[coset] {
         Some(Row::Stream { byte, .. }) => {
-            let tuple = [m31(STREAM_ID_SIB_SQUEEZE), m31(coset as u32), m31(byte)];
+            let tuple = [m31(sib_stream), m31(coset as u32), m31(byte)];
             (-one, relations.hash_io.combine(&tuple))
         }
         _ => (zero, one),

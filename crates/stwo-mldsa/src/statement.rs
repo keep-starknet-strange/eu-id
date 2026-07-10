@@ -9,27 +9,32 @@
 //!   * `decomp` — [DECOMP]+[HINT]; consumes W-cells, yields the 768 `w1Encode`
 //!     bytes into the c̃-absorb stream.
 //!   * `sib`         — SampleInBall FSM; consumes C-cells + the SIB squeeze stream.
-//!   * three SHAKE-256 sponge chains (µ, c̃, SIB) proven by the shared stwo-keccak
-//!     `sponge`/`keccak`/`keccak_round`/`tables` components (disjoint perm ids via
-//!     [`PermIdPlan`]).
 //!   * `msglink`     — the public message-byte producer (M7 swap point).
 //!   * bridges / prefix / sinks ([`crate::sponge_link`]) that move bytes between
 //!     the three HashIo streams and close the squeeze balance.
 //!
+//! Since S1, the three SHAKE-256 sponge chains (µ, c̃, SIB) are NOT proven by
+//! this module: they are jobs of the proof-wide
+//! [`stwo_keccak::service::KeccakServiceProver`], which owns the rotated
+//! sponge + keccak + round + tables ONCE for all hosted instances and
+//! publishes the drawn [`KeccakRelations`] through a
+//! [`SharedKeccakRelations`] handle this module consumes. The instance exposes
+//! its sponge job shapes via [`keccak_job_shapes`] / [`MlDsaProver::keccak_jobs`]
+//! so the host can build the service, and takes an explicit per-instance
+//! `stream_base` so HashIo stream ids stay globally unique under the ONE
+//! shared relation set.
+//!
 //! ## Fixed component commit order (POSITIONAL across every method)
 //!
 //! ```text
-//!  1. coeffs                      11. keccak
-//!  2. coeffs rc tables ×5         12. keccak_round
-//!  3. decomp                      13. keccak tables ×9
-//!  4. decomp rc tables ×4         14. prefix producer
-//!  5. sib                         15. msg bridge
-//!  6. sib rc tables ×3            16. mu→ct bridge
-//!  7. msglink                     17. w1enc bridge
-//!  8. sponge_mu                   18. ct→sib bridge
-//!  9. sponge_ct                   19. mu sink
-//! 10. sponge_sib                  20. ct sink
-//!                                 21. sib sink
+//!  1. coeffs                       8. prefix producer
+//!  2. coeffs rc tables ×5          9. msg bridge
+//!  3. decomp                      10. mu→ct bridge
+//!  4. decomp rc tables ×4         11. w1enc bridge
+//!  5. sib                         12. ct→sib bridge
+//!  6. sib rc tables ×3            13. mu sink
+//!  7. msglink (standalone only)   14. ct sink
+//!                                 15. sib sink
 //! ```
 //!
 //! Any drift between `layout()`, `claimed_sums()`, `write_trace()`,
@@ -46,7 +51,7 @@ use stwo::core::pcs::PcsConfig;
 use stwo::core::proof::StarkProof;
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleHasher;
 use stwo::core::verifier::VerificationError;
-use stwo::prover::backend::simd::m31::{LOG_N_LANES, PackedM31};
+use stwo::prover::backend::simd::m31::LOG_N_LANES;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::{ComponentProver, ProvingError, TreeBuilder};
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
@@ -55,11 +60,9 @@ use stwo_constraint_framework::{FrameworkComponent, Relation, TraceLocationAlloc
 use air_core::relations::{FieldBytesRelation, SharedFieldRelation};
 use air_core::{fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint, TreeLayout};
 
-use stwo_keccak::relations::KeccakRelations;
-use stwo_keccak::sponge::{self, Shape};
-use stwo_keccak::stark::{build_perm_witness, PermWitness};
-use stwo_keccak::tables_air::{self, TableKind};
-use stwo_keccak::{keccak, keccak_round};
+use stwo_keccak::relations::{KeccakRelations, SharedKeccakRelations};
+use stwo_keccak::service::{KeccakServiceProver, KeccakServiceVerifier};
+use stwo_keccak::sponge::Shape;
 
 use crate::air_util::{m31, padded_log_size, ColEval};
 use crate::binding::{
@@ -91,17 +94,30 @@ use crate::sampleinball::{self, SibEval};
 // =============================================================================
 // Composition-layer stream-id namespacing.
 // =============================================================================
+//
+// Since S1 every hosted ML-DSA instance shares ONE drawn HashIo relation (the
+// service's), so stream ids must be globally unique per instance. Each id is
+// `stream_base + OFFSET`; the per-instance `stream_base` is an explicit
+// constructor parameter (deterministic, mixed into the transcript). The
+// offsets keep the legacy single-instance values at `stream_base = 0`. The
+// decomp / sib offsets ([`STREAM_ID_CTILDE_ABSORB`] = 0,
+// [`STREAM_ID_SIB_SQUEEZE`] = 1) live in `binding.rs`. A stream base must
+// therefore be a multiple of at least 16 to keep instances disjoint.
 
-/// µ-chain absorb stream (`tr ‖ 0x00 ‖ 0x00 ‖ M`).
+/// µ-chain absorb stream offset (`tr ‖ 0x00 ‖ 0x00 ‖ M`).
 pub const MU_ABSORB: u32 = 10;
-/// µ-chain squeeze stream.
+/// µ-chain squeeze stream offset.
 pub const MU_SQUEEZE: u32 = 11;
-/// c̃-chain absorb stream (`µ ‖ w1Encode(w1')`).
+/// c̃-chain absorb stream offset (`µ ‖ w1Encode(w1')`).
 pub const CT_ABSORB: u32 = 12;
-/// c̃-chain squeeze stream.
+/// c̃-chain squeeze stream offset.
 pub const CT_SQUEEZE: u32 = 13;
-/// SIB-chain absorb stream (`c̃`).
+/// SIB-chain absorb stream offset (`c̃`).
 pub const SIB_ABSORB: u32 = 14;
+
+/// Minimum spacing between two instances' `stream_base` values (offsets 0..15
+/// are in use per instance).
+pub const STREAM_BASE_STRIDE: u32 = 16;
 
 /// SHAKE-256 rate in bytes (block length of a squeeze).
 const RATE: usize = 136;
@@ -121,6 +137,11 @@ pub const HOSTED_MSG_FIELD_ID: u32 = 0;
 /// (M3 carry-forward): each chain's Keccak-f[1600] permutation ids are offset so
 /// the shared [`stwo_keccak::relations::KeccakStateRelation`] never crosses
 /// chains. The base of chain `n+1` is the running perm count after chain `n`.
+///
+/// Since S1 the assignment is executed by
+/// [`stwo_keccak::sponge_v::JobList::new`] over the proof-wide concatenated
+/// job list (this struct documents the per-instance invariant and remains the
+/// reference for the disjointness argument).
 #[derive(Clone, Copy, Debug)]
 pub struct PermIdPlan {
     pub mu_base: usize,
@@ -168,6 +189,9 @@ pub struct MlDsaProof {
     /// a fixed protocol constant). Public — sizes the sib component's log size.
     /// Reveals nothing secret; it is a length, not a value.
     pub sib_squeezed_len: usize,
+    /// The keccak service module's claimed sums (`[sponge_v, keccak, round,
+    /// tables ×9]`) — the standalone proof composes `[service, mldsa]`.
+    pub service_claimed_sums: Vec<SecureField>,
     pub stark_proof: StarkProof<Blake2sMerkleHasher>,
 }
 
@@ -190,22 +214,32 @@ fn n_squeeze_sib(sib_stream_len: usize) -> usize {
     sib_stream_len.div_ceil(RATE).max(1)
 }
 
-fn shapes(message_len: usize, sib_stream_len: usize) -> Shapes {
-    // First pass at base 0 to count perms, then stamp disjoint bases so the
-    // shared KeccakStateRelation never crosses chains (µ → c̃ → SIB).
-    let mu0 = Shape::new(66 + message_len, 1, MU_ABSORB, MU_SQUEEZE);
-    let ct0 = Shape::new(64 + 768, 1, CT_ABSORB, CT_SQUEEZE);
-    let plan = PermIdPlan::from_shapes(&mu0, &ct0);
-    let mu = Shape::with_perm_id_base(66 + message_len, 1, MU_ABSORB, MU_SQUEEZE, plan.mu_base);
-    let ct = Shape::with_perm_id_base(64 + 768, 1, CT_ABSORB, CT_SQUEEZE, plan.c_tilde_base);
-    let sib = Shape::with_perm_id_base(
+/// The instance's three sponge job shapes, stream ids offset by `stream_base`.
+/// Perm-id bases stay 0 — the proof-wide [`stwo_keccak::sponge_v::JobList`]
+/// stamps the global plan over the concatenated job list.
+fn shapes(message_len: usize, sib_stream_len: usize, stream_base: u32) -> Shapes {
+    let b = stream_base;
+    let mu = Shape::new(66 + message_len, 1, b + MU_ABSORB, b + MU_SQUEEZE);
+    let ct = Shape::new(64 + 768, 1, b + CT_ABSORB, b + CT_SQUEEZE);
+    let sib = Shape::new(
         48,
         n_squeeze_sib(sib_stream_len),
-        SIB_ABSORB,
-        STREAM_ID_SIB_SQUEEZE,
-        plan.sib_base,
+        b + SIB_ABSORB,
+        b + STREAM_ID_SIB_SQUEEZE,
     );
     Shapes { mu, ct, sib }
+}
+
+/// PUBLIC: the sponge job shapes this instance contributes to the proof-wide
+/// keccak service, in job order (µ, c̃, SIB). Both the host's prover and
+/// verifier derive these from public data only.
+pub fn keccak_job_shapes(
+    message_len: usize,
+    sib_stream_len: usize,
+    stream_base: u32,
+) -> Vec<Shape> {
+    let sh = shapes(message_len, sib_stream_len, stream_base);
+    vec![sh.mu, sh.ct, sh.sib]
 }
 
 // =============================================================================
@@ -222,16 +256,6 @@ fn decomp_log_size() -> u32 {
 /// `sib_squeezed_len` is the FULL SIB squeeze length (`136·n_squeeze_sib`).
 fn sib_log_size(sib_squeezed_len: usize) -> u32 {
     padded_log_size((sib_squeezed_len + N).max(sampleinball::N_ACCESSES))
-}
-
-/// keccak claim log size for a total perm count (replicate `stark.rs`).
-fn keccak_log_size(n_perms_total: usize) -> u32 {
-    std::cmp::max((n_perms_total as u32).next_power_of_two().ilog2(), LOG_N_LANES)
-}
-/// round claim log size for a total perm count (replicate `stark.rs`).
-fn round_log_size(n_perms_total: usize) -> u32 {
-    let n = n_perms_total * stwo_keccak::constants::N_ROUNDS;
-    std::cmp::max((n as u32).next_power_of_two().ilog2(), LOG_N_LANES)
 }
 
 // =============================================================================
@@ -257,16 +281,19 @@ struct Relations {
 /// Draw every relation in the identical order both sides use. `wcell` / `ccell`
 /// are drawn once here and threaded into the coeffs (yield) and decomp/sib
 /// (consume) `draw_with` constructors; `keccak.hash_io` is the shared byte-I/O
-/// relation for the sponges, bridges, sinks, prefix, decomp, and sib.
+/// relation for the bridges, sinks, prefix, decomp, and sib — READ from the
+/// keccak service's handle (the service module drew it earlier in module
+/// order), never drawn here.
 fn draw_relations_common(
     channel: &mut Blake2sChannel,
     hosted_field: Option<&SharedFieldRelation>,
+    keccak_handle: &SharedKeccakRelations,
 ) -> Relations {
     let rho_rlc = channel.draw_secure_felt();
     let r = channel.draw_secure_felt();
     let s = channel.draw_secure_felt();
 
-    let keccak = KeccakRelations::draw(channel);
+    let keccak = keccak_handle.get();
 
     let wcell = WCellRelation::draw(channel);
     let ccell = CCellRelation::draw(channel);
@@ -309,6 +336,7 @@ fn mix_public(
     sib_stream_len: usize,
     namespace: &str,
     private_message: bool,
+    stream_base: u32,
 ) {
     // Instance role/domain separation: two hosted instances with compatible
     // shapes must still produce disjoint transcripts, so a device claim tree
@@ -344,15 +372,10 @@ fn mix_public(
     }
     // public SIB stream length.
     channel.mix_u64(sib_stream_len as u64);
-    // Each sponge shape's public scalars (message_len / n_squeeze / stream ids).
-    let sh = shapes(input.message.len(), sib_stream_len);
-    for shape in [sh.mu, sh.ct, sh.sib] {
-        channel.mix_u64(shape.message_len as u64);
-        channel.mix_u64(shape.n_squeeze as u64);
-        channel.mix_u64(shape.absorb_stream_id as u64);
-        channel.mix_u64(shape.squeeze_stream_id as u64);
-        channel.mix_u64(shape.perm_id_base as u64);
-    }
+    // The per-instance stream-id base: pins every HashIo stream id this
+    // instance's bridges/sinks/decomp/sib use under the SHARED relation set.
+    // (The sponge job shapes themselves are mixed ONCE by the keccak service.)
+    channel.mix_u64(stream_base as u64);
     // NOTE: c̃ and µ stay PRIVATE — never mixed; they flow only through HashIo.
     // group_evals are mixed with the claimed sums (post base-commit).
 }
@@ -366,23 +389,34 @@ fn bridge_log_size(len: usize) -> u32 {
 }
 
 /// The public-prefix producer: `tr ‖ 0x00 ‖ 0x00` (66 bytes) into µ-absorb@0.
-fn prefix_eval(input: &MlDsaVerifyInput, hash_io: &HashIoRelation) -> PublicPrefixEval {
+fn prefix_eval(
+    input: &MlDsaVerifyInput,
+    stream_base: u32,
+    hash_io: &HashIoRelation,
+) -> PublicPrefixEval {
     let mut bytes = Vec::with_capacity(66);
     bytes.extend_from_slice(&input.tr);
     bytes.push(0x00);
     bytes.push(0x00);
-    PublicPrefixEval { dst_stream: MU_ABSORB, dst_off: 0, bytes, hash_io: hash_io.clone() }
+    PublicPrefixEval {
+        dst_stream: stream_base + MU_ABSORB,
+        dst_off: 0,
+        bytes,
+        hash_io: hash_io.clone(),
+    }
 }
 
-/// The four bridges (order 15..18). `msglink` closes the msg bridge's source.
+/// The four bridges (order 9..12). `msglink` closes the msg bridge's source.
 fn bridge_evals(
     ns: &str,
     message_len: usize,
+    stream_base: u32,
     msglink: &MsgLinkRelation,
     shared_field: Option<&FieldBytesRelation>,
     hash_io: &HashIoRelation,
 ) -> [BridgeEval; 4] {
-    // 15. msg bridge → MU_ABSORB@66, len |M|. Source is the standalone MsgLink
+    let b = stream_base;
+    // 9. msg bridge → MU_ABSORB@66, len |M|. Source is the standalone MsgLink
     // producer, OR (hosted) the host's shared FieldBytesRelation.
     let msg_src = match shared_field {
         None => SrcRelation::MsgLink(msglink.clone(), MSG_FIELD_ID),
@@ -393,40 +427,40 @@ fn bridge_evals(
         ns: ns.to_string(),
         log_size: bridge_log_size(message_len),
         src: msg_src,
-        dst_stream: MU_ABSORB,
+        dst_stream: b + MU_ABSORB,
         dst_off: 66,
         len: message_len,
         hash_io: hash_io.clone(),
     };
-    // 16. µ→c̃ bridge: HashIo(MU_SQUEEZE, off 0) → CT_ABSORB@0, len 64.
+    // 10. µ→c̃ bridge: HashIo(MU_SQUEEZE, off 0) → CT_ABSORB@0, len 64.
     let mu_ct = BridgeEval {
         tag: "mu_ct",
         ns: ns.to_string(),
         log_size: bridge_log_size(64),
-        src: SrcRelation::HashIo(hash_io.clone(), MU_SQUEEZE, 0),
-        dst_stream: CT_ABSORB,
+        src: SrcRelation::HashIo(hash_io.clone(), b + MU_SQUEEZE, 0),
+        dst_stream: b + CT_ABSORB,
         dst_off: 0,
         len: 64,
         hash_io: hash_io.clone(),
     };
-    // 17. w1Encode bridge: HashIo(STREAM_ID_CTILDE_ABSORB, off 0) → CT_ABSORB@64, len 768.
+    // 11. w1Encode bridge: HashIo(ctilde_absorb, off 0) → CT_ABSORB@64, len 768.
     let w1enc = BridgeEval {
         tag: "w1enc",
         ns: ns.to_string(),
         log_size: bridge_log_size(768),
-        src: SrcRelation::HashIo(hash_io.clone(), STREAM_ID_CTILDE_ABSORB, 0),
-        dst_stream: CT_ABSORB,
+        src: SrcRelation::HashIo(hash_io.clone(), b + STREAM_ID_CTILDE_ABSORB, 0),
+        dst_stream: b + CT_ABSORB,
         dst_off: 64,
         len: 768,
         hash_io: hash_io.clone(),
     };
-    // 18. c̃→SIB bridge: HashIo(CT_SQUEEZE, off 0) → SIB_ABSORB@0, len 48.
+    // 12. c̃→SIB bridge: HashIo(CT_SQUEEZE, off 0) → SIB_ABSORB@0, len 48.
     let ct_sib = BridgeEval {
         tag: "ct_sib",
         ns: ns.to_string(),
         log_size: bridge_log_size(48),
-        src: SrcRelation::HashIo(hash_io.clone(), CT_SQUEEZE, 0),
-        dst_stream: SIB_ABSORB,
+        src: SrcRelation::HashIo(hash_io.clone(), b + CT_SQUEEZE, 0),
+        dst_stream: b + SIB_ABSORB,
         dst_off: 0,
         len: 48,
         hash_io: hash_io.clone(),
@@ -434,43 +468,45 @@ fn bridge_evals(
     [msg, mu_ct, w1enc, ct_sib]
 }
 
-/// The three squeeze sinks (order 19..21): consume the unused squeeze tails.
+/// The three squeeze sinks (order 13..15): consume the unused squeeze tails.
 fn sink_evals(
     ns: &str,
     message_len: usize,
     sib_stream_len: usize,
+    stream_base: u32,
     hash_io: &HashIoRelation,
 ) -> [SqueezeSinkEval; 3] {
-    let sh = shapes(message_len, sib_stream_len);
-    // 19. µ sink: MU_SQUEEZE, off 64, len 136·n_squeeze_mu − 64.
+    let b = stream_base;
+    let sh = shapes(message_len, sib_stream_len, b);
+    // 13. µ sink: MU_SQUEEZE, off 64, len 136·n_squeeze_mu − 64.
     let mu_len = RATE * sh.mu.n_squeeze - 64;
     let mu = SqueezeSinkEval {
         tag: "mu",
         ns: ns.to_string(),
         log_size: bridge_log_size(mu_len),
-        stream: MU_SQUEEZE,
+        stream: b + MU_SQUEEZE,
         off: 64,
         len: mu_len,
         hash_io: hash_io.clone(),
     };
-    // 20. c̃ sink: CT_SQUEEZE, off 48, len 136·n_squeeze_ct − 48.
+    // 14. c̃ sink: CT_SQUEEZE, off 48, len 136·n_squeeze_ct − 48.
     let ct_len = RATE * sh.ct.n_squeeze - 48;
     let ct = SqueezeSinkEval {
         tag: "ct",
         ns: ns.to_string(),
         log_size: bridge_log_size(ct_len),
-        stream: CT_SQUEEZE,
+        stream: b + CT_SQUEEZE,
         off: 48,
         len: ct_len,
         hash_io: hash_io.clone(),
     };
-    // 21. SIB sink: SIB_SQUEEZE, off sib_stream_len, len 136·n_squeeze_sib − sib_stream_len.
+    // 15. SIB sink: SIB_SQUEEZE, off sib_stream_len, len 136·n_squeeze_sib − sib_stream_len.
     let sib_len = RATE * sh.sib.n_squeeze - sib_stream_len;
     let sib = SqueezeSinkEval {
         tag: "sib",
         ns: ns.to_string(),
         log_size: bridge_log_size(sib_len),
-        stream: STREAM_ID_SIB_SQUEEZE,
+        stream: b + STREAM_ID_SIB_SQUEEZE,
         off: sib_stream_len as u32,
         len: sib_len,
         hash_io: hash_io.clone(),
@@ -483,11 +519,13 @@ fn sink_evals(
 // =============================================================================
 
 /// Preprocessed column ids in commit order. msglink + prefix contribute NONE;
-/// sponge/keccak/round contribute NONE; keccak tables + bridges + sinks do.
+/// the keccak side (sponges/keccak/round/tables) lives in the SERVICE module
+/// since S1 and contributes nothing here; bridges + sinks do.
 ///
 /// This is called BEFORE relations are drawn (air-core commits the preprocessed
 /// tree first), so the bridge/sink descriptors use `dummy()` relations — their
-/// `preprocessed_ids()` read only `tag` + public shape, never the relation.
+/// `preprocessed_ids()` read only `tag` + public shape, never the relation (and
+/// never the stream ids, so `stream_base = 0` here is shape-neutral).
 fn all_preprocessed_ids(
     ns: &str,
     input: &MlDsaVerifyInput,
@@ -511,13 +549,11 @@ fn all_preprocessed_ids(
     for kind in sib_tables::RcKind::ALL {
         ids.push(kind.value_column_id());
     }
-    // keccak tables.
-    ids.extend(tables_air::all_preprocessed_column_ids());
     // 4 bridges + 3 sinks.
-    for b in bridge_evals(ns, input.message.len(), &msglink, None, &hash_io) {
+    for b in bridge_evals(ns, input.message.len(), 0, &msglink, None, &hash_io) {
         ids.extend(b.preprocessed_ids());
     }
-    for s in sink_evals(ns, input.message.len(), sib_stream_len, &hash_io) {
+    for s in sink_evals(ns, input.message.len(), sib_stream_len, 0, &hash_io) {
         ids.extend(s.preprocessed_ids());
     }
     ids
@@ -544,7 +580,6 @@ fn all_preprocessed_log_sizes(
     for kind in sib_tables::RcKind::ALL {
         sizes.push(kind.log_size());
     }
-    sizes.extend(tables_air::all_preprocessed_log_sizes());
     for len in bridge_lens(input.message.len()) {
         // each bridge contributes 2 preprocessed cols at its log_size.
         sizes.push(bridge_log_size(len));
@@ -561,7 +596,7 @@ fn bridge_lens(message_len: usize) -> [usize; 4] {
     [message_len, 64, 768, 48]
 }
 fn sink_lens(message_len: usize, sib_stream_len: usize) -> [usize; 3] {
-    let sh = shapes(message_len, sib_stream_len);
+    let sh = shapes(message_len, sib_stream_len, 0);
     [
         RATE * sh.mu.n_squeeze - 64,
         RATE * sh.ct.n_squeeze - 48,
@@ -599,11 +634,10 @@ fn gen_all_preprocessed(
     for kind in sib_tables::RcKind::ALL {
         cols.push(sib_tables::gen_table_preprocessed(kind));
     }
-    cols.extend(tables_air::generate_preprocessed_trace());
-    for b in bridge_evals("", input.message.len(), &msglink, None, &hash_io) {
+    for b in bridge_evals("", input.message.len(), 0, &msglink, None, &hash_io) {
         cols.extend(b.gen_preprocessed());
     }
-    for s in sink_evals("", input.message.len(), sib_stream_len, &hash_io) {
+    for s in sink_evals("", input.message.len(), sib_stream_len, 0, &hash_io) {
         cols.extend(s.gen_preprocessed());
     }
     cols
@@ -612,14 +646,6 @@ fn gen_all_preprocessed(
 // =============================================================================
 // Prover / verifier state.
 // =============================================================================
-
-/// The keccak-side machinery, built once up front on the prover.
-struct KeccakSide {
-    perm: PermWitness,
-    // 3 sponge runs, in mu/ct/sib order.
-    runs: Vec<sponge::SpongeRun>,
-    n_perms_total: usize,
-}
 
 struct Built {
     coeffs: FrameworkComponent<CoeffsEval>,
@@ -631,10 +657,6 @@ struct Built {
     /// Standalone msglink producer; `None` in hosted mode (dropped from the
     /// commit order — the msg bridge sources from the host's shared relation).
     msglink: Option<FrameworkComponent<MsgLinkEval>>,
-    sponges: Vec<sponge::Component>,
-    keccak: keccak::Component,
-    round: keccak_round::Component,
-    tables: Vec<tables_air::Component>,
     prefix: FrameworkComponent<PublicPrefixEval>,
     bridges: Vec<FrameworkComponent<BridgeEval>>,
     sinks: Vec<FrameworkComponent<SqueezeSinkEval>>,
@@ -651,10 +673,6 @@ impl Built {
         if let Some(m) = &self.msglink {
             out.push(m);
         }
-        out.extend(self.sponges.iter().map(|c| c as &dyn Component));
-        out.push(&self.keccak);
-        out.push(&self.round);
-        out.extend(self.tables.iter().map(|c| c as &dyn Component));
         out.push(&self.prefix);
         out.extend(self.bridges.iter().map(|c| c as &dyn Component));
         out.extend(self.sinks.iter().map(|c| c as &dyn Component));
@@ -670,10 +688,6 @@ impl Built {
         if let Some(m) = &self.msglink {
             out.push(m);
         }
-        out.extend(self.sponges.iter().map(|c| c as &dyn ComponentProver<SimdBackend>));
-        out.push(&self.keccak);
-        out.push(&self.round);
-        out.extend(self.tables.iter().map(|c| c as &dyn ComponentProver<SimdBackend>));
         out.push(&self.prefix);
         out.extend(self.bridges.iter().map(|c| c as &dyn ComponentProver<SimdBackend>));
         out.extend(self.sinks.iter().map(|c| c as &dyn ComponentProver<SimdBackend>));
@@ -694,10 +708,6 @@ struct Claims {
     sib: SecureField,
     sib_rc: Vec<SecureField>,
     msglink: SecureField,
-    sponges: Vec<SecureField>,
-    keccak: SecureField,
-    round: SecureField,
-    tables: Vec<SecureField>,
     prefix: SecureField,
     bridges: Vec<SecureField>,
     sinks: Vec<SecureField>,
@@ -715,10 +725,6 @@ impl Claims {
         if !self.hosted {
             v.push(self.msglink);
         }
-        v.extend(self.sponges.iter().copied());
-        v.push(self.keccak);
-        v.push(self.round);
-        v.extend(self.tables.iter().copied());
         v.push(self.prefix);
         v.extend(self.bridges.iter().copied());
         v.extend(self.sinks.iter().copied());
@@ -738,17 +744,13 @@ impl Claims {
         let sib = next();
         let sib_rc = (0..sib_tables::RcKind::ALL.len()).map(|_| next()).collect();
         let msglink = if hosted { SecureField::zero() } else { next() };
-        let sponges = (0..3).map(|_| next()).collect();
-        let keccak = next();
-        let round = next();
-        let tables = (0..TableKind::ALL.len()).map(|_| next()).collect();
         let prefix = next();
         let bridges = (0..4).map(|_| next()).collect();
         let sinks = (0..3).map(|_| next()).collect();
         let native_use = next();
         Self {
             hosted, coeffs, coeffs_rc, decomp, decomp_rc, sib, sib_rc, msglink,
-            sponges, keccak, round, tables, prefix, bridges, sinks, native_use,
+            prefix, bridges, sinks, native_use,
         }
     }
 }
@@ -764,28 +766,15 @@ struct LayoutCtx {
     message_len: usize,
     sib_stream_len: usize,
     sib_squeezed_len: usize,
-    mu_claim: sponge::Claim,
-    ct_claim: sponge::Claim,
-    sib_sponge_claim: sponge::Claim,
-    keccak_claim: keccak::Claim,
-    round_claim: keccak_round::Claim,
 }
 
 impl LayoutCtx {
     fn new(input: &MlDsaVerifyInput, sib_stream_len: usize, sib_squeezed_len: usize, hosted: bool) -> Self {
-        let sh = shapes(input.message.len(), sib_stream_len);
-        let mk = |shape: Shape| sponge::Claim { log_size: LOG_N_LANES, shape };
-        let n_perms_total = sh.mu.n_perms() + sh.ct.n_perms() + sh.sib.n_perms();
         Self {
             hosted,
             message_len: input.message.len(),
             sib_stream_len,
             sib_squeezed_len,
-            mu_claim: mk(sh.mu),
-            ct_claim: mk(sh.ct),
-            sib_sponge_claim: mk(sh.sib),
-            keccak_claim: keccak::Claim { log_size: keccak_log_size(n_perms_total) },
-            round_claim: keccak_round::Claim { log_size: round_log_size(n_perms_total) },
         }
     }
 }
@@ -812,27 +801,14 @@ fn module_trace_layout(ctx: &LayoutCtx) -> Vec<u32> {
     if !ctx.hosted {
         t.extend(vec![msglink::MSGLINK_LOG_SIZE; msglink::N_BASE_COLS]);
     }
-    // 8-10. sponges ×3.
-    for claim in [&ctx.mu_claim, &ctx.ct_claim, &ctx.sib_sponge_claim] {
-        t.extend(claim.log_sizes()[1].clone());
-    }
-    // 11. keccak, 12. round.
-    t.extend(ctx.keccak_claim.log_sizes()[1].clone());
-    t.extend(ctx.round_claim.log_sizes()[1].clone());
-    // 13. keccak tables ×9 (one mult col per relation).
-    for kind in TableKind::ALL {
-        for _ in 0..kind.n_relations() {
-            t.push(kind.log_size());
-        }
-    }
-    // 14. prefix.
+    // 8. prefix.
     t.extend(vec![crate::sponge_link::LINK_LOG_SIZE; PREFIX_BASE_COLS]);
-    // 15-18. bridges ×4.
+    // 9-12. bridges ×4.
     for len in bridge_lens(ctx.message_len) {
         let ls = bridge_log_size(len);
         t.extend(vec![ls; BRIDGE_BASE_COLS]);
     }
-    // 19-21. sinks ×3.
+    // 13-15. sinks ×3.
     for len in sink_lens(ctx.message_len, ctx.sib_stream_len) {
         let ls = bridge_log_size(len);
         t.extend(vec![ls; SINK_BASE_COLS]);
@@ -868,27 +844,14 @@ fn module_interaction_layout(ctx: &LayoutCtx) -> Vec<u32> {
     if !ctx.hosted {
         i.extend(vec![msglink::MSGLINK_LOG_SIZE; msglink::n_interaction_cols(ctx.message_len)]);
     }
-    // 8-10. sponges ×3.
-    for claim in [&ctx.mu_claim, &ctx.ct_claim, &ctx.sib_sponge_claim] {
-        i.extend(claim.log_sizes()[2].clone());
-    }
-    // 11. keccak, 12. round.
-    i.extend(ctx.keccak_claim.log_sizes()[2].clone());
-    i.extend(ctx.round_claim.log_sizes()[2].clone());
-    // 13. keccak tables ×9 (SECURE_EXTENSION_DEGREE paired cols each).
-    for kind in TableKind::ALL {
-        for _ in 0..stwo::core::fields::qm31::SECURE_EXTENSION_DEGREE {
-            i.push(kind.log_size());
-        }
-    }
-    // 14. prefix.
+    // 8. prefix.
     i.extend(vec![crate::sponge_link::LINK_LOG_SIZE; prefix_n_interaction(ctx.message_len)]);
-    // 15-18. bridges ×4.
+    // 9-12. bridges ×4.
     for len in bridge_lens(ctx.message_len) {
         let ls = bridge_log_size(len);
         i.extend(vec![ls; BRIDGE_INTERACTION_COLS]);
     }
-    // 19-21. sinks ×3.
+    // 13-15. sinks ×3.
     for len in sink_lens(ctx.message_len, ctx.sib_stream_len) {
         let ls = bridge_log_size(len);
         i.extend(vec![ls; SINK_INTERACTION_COLS]);
@@ -911,50 +874,25 @@ fn layout_for(ctx: &LayoutCtx, input: &MlDsaVerifyInput) -> TreeLayout {
 }
 
 // =============================================================================
-// Keccak-side assembly (prover only).
+// Sponge outputs (native recompute — the sponges are proven in the SERVICE).
 // =============================================================================
 
-/// Run the three sponges, concatenate their perm inputs (mu, ct, sib order —
-/// perm ids already disjoint via `PermIdPlan`), build the keccak+round witness,
-/// and fold each run's table (xor/conv) uses.
-fn build_keccak_side(witness: &MlDsaWitness, plan: PermIdPlan) -> KeccakSide {
-    let mu = sponge::generate_trace(
-        &witness.sponge.mu_absorbed,
-        1,
-        MU_ABSORB,
-        MU_SQUEEZE,
-        plan.mu_base,
-    );
-    let ct = sponge::generate_trace(
-        &witness.sponge.c_tilde_absorbed,
-        1,
-        CT_ABSORB,
-        CT_SQUEEZE,
-        plan.c_tilde_base,
-    );
-    let n_squeeze_sib_v = n_squeeze_sib(sampleinball::stream_len(witness));
-    let sib = sponge::generate_trace(
-        &witness.sponge.sample_in_ball_absorbed,
-        n_squeeze_sib_v,
-        SIB_ABSORB,
-        STREAM_ID_SIB_SQUEEZE,
-        plan.sib_base,
-    );
+/// The FULL squeeze block stream of a SHAKE-256 job (`136 · n_squeeze` bytes):
+/// what the in-service sponge yields on the job's squeeze stream, and hence
+/// what the bridges + sinks must move/consume.
+fn full_squeeze(absorbed: &[u8], n_squeeze: usize) -> Vec<u8> {
+    crate::reference::sponge::shake256(&[absorbed], RATE * n_squeeze).0
+}
 
-    let mut all_perm_inputs: Vec<[PackedM31; stwo_keccak::constants::N_BYTES_IN_STATE + 1]> =
-        Vec::new();
-    all_perm_inputs.extend_from_slice(&mu.perm_inputs);
-    all_perm_inputs.extend_from_slice(&ct.perm_inputs);
-    all_perm_inputs.extend_from_slice(&sib.perm_inputs);
-    let n_perms_total = all_perm_inputs.len();
-
-    let mut perm = build_perm_witness(&all_perm_inputs);
-    // Add each sponge's xor/conv uses to the shared table multiplicities.
-    for run in [&mu, &ct, &sib] {
-        perm.table_mult.add_sponge(&run.data.xor, &run.data.conv);
-    }
-
-    KeccakSide { perm, runs: vec![mu, ct, sib], n_perms_total }
+/// The three jobs' full squeeze outputs (µ, c̃, SIB order), from the witness's
+/// absorb transcripts.
+fn sponge_outputs(witness: &MlDsaWitness) -> [Vec<u8>; 3] {
+    let n_sq_sib = n_squeeze_sib(sampleinball::stream_len(witness));
+    [
+        full_squeeze(&witness.sponge.mu_absorbed, 1),
+        full_squeeze(&witness.sponge.c_tilde_absorbed, 1),
+        full_squeeze(&witness.sponge.sample_in_ball_absorbed, n_sq_sib),
+    ]
 }
 
 // =============================================================================
@@ -965,6 +903,7 @@ fn build_keccak_side(witness: &MlDsaWitness, plan: PermIdPlan) -> KeccakSide {
 fn build_components(
     allocator: &mut TraceLocationAllocator,
     ns: &str,
+    stream_base: u32,
     ctx: &LayoutCtx,
     input: &MlDsaVerifyInput,
     rel: &Relations,
@@ -996,7 +935,11 @@ fn build_components(
     // 3. decomp.
     let decomp = FrameworkComponent::new(
         allocator,
-        DecompEval { log_size: decomp_log_size(), relations: rel.decomp.clone() },
+        DecompEval {
+            log_size: decomp_log_size(),
+            ct_stream: stream_base + STREAM_ID_CTILDE_ABSORB,
+            relations: rel.decomp.clone(),
+        },
         claims.decomp,
     );
     // 4. decomp rc ×4.
@@ -1017,7 +960,12 @@ fn build_components(
     // 5. sib.
     let sib = FrameworkComponent::new(
         allocator,
-        SibEval { log_size: sib_log_size(ctx.sib_squeezed_len), ns: ns.to_string(), relations: rel.sib.clone() },
+        SibEval {
+            log_size: sib_log_size(ctx.sib_squeezed_len),
+            ns: ns.to_string(),
+            sib_stream: stream_base + STREAM_ID_SIB_SQUEEZE,
+            relations: rel.sib.clone(),
+        },
         claims.sib,
     );
     // 6. sib rc ×3.
@@ -1043,57 +991,21 @@ fn build_components(
             claims.msglink,
         )
     });
-    // 8-10. sponges ×3.
-    let sponges = [&ctx.mu_claim, &ctx.ct_claim, &ctx.sib_sponge_claim]
-        .into_iter()
-        .enumerate()
-        .map(|(idx, claim)| {
-            FrameworkComponent::new(
-                allocator,
-                sponge::Eval { claim: claim.clone(), relations: rel.keccak.clone() },
-                claims.sponges[idx],
-            )
-        })
-        .collect();
-    // 11. keccak.
-    let keccak = FrameworkComponent::new(
-        allocator,
-        keccak::Eval { claim: ctx.keccak_claim, relations: rel.keccak.clone() },
-        claims.keccak,
-    );
-    // 12. round.
-    let round = FrameworkComponent::new(
-        allocator,
-        keccak_round::Eval { claim: ctx.round_claim, relations: rel.keccak.clone() },
-        claims.round,
-    );
-    // 13. keccak tables ×9.
-    let tables = TableKind::ALL
-        .iter()
-        .enumerate()
-        .map(|(idx, kind)| {
-            FrameworkComponent::new(
-                allocator,
-                tables_air::Eval { log_size: kind.log_size(), kind: *kind, relations: rel.keccak.clone() },
-                claims.tables[idx],
-            )
-        })
-        .collect();
-    // 14. prefix.
+    // 8. prefix.
     let prefix = FrameworkComponent::new(
         allocator,
-        prefix_eval(input, &rel.keccak.hash_io),
+        prefix_eval(input, stream_base, &rel.keccak.hash_io),
         claims.prefix,
     );
-    // 15-18. bridges ×4.
-    let bridge_descs = bridge_evals(ns, input.message.len(), &rel.msglink, rel.shared_field.as_ref(), &rel.keccak.hash_io);
+    // 9-12. bridges ×4.
+    let bridge_descs = bridge_evals(ns, input.message.len(), stream_base, &rel.msglink, rel.shared_field.as_ref(), &rel.keccak.hash_io);
     let bridges = bridge_descs
         .into_iter()
         .enumerate()
         .map(|(idx, b)| FrameworkComponent::new(allocator, b, claims.bridges[idx]))
         .collect();
-    // 19-21. sinks ×3.
-    let sink_descs = sink_evals(ns, input.message.len(), ctx.sib_stream_len, &rel.keccak.hash_io);
+    // 13-15. sinks ×3.
+    let sink_descs = sink_evals(ns, input.message.len(), ctx.sib_stream_len, stream_base, &rel.keccak.hash_io);
     let sinks = sink_descs
         .into_iter()
         .enumerate()
@@ -1102,7 +1014,7 @@ fn build_components(
 
     Built {
         coeffs, coeffs_rc, decomp, decomp_rc, sib, sib_rc, msglink,
-        sponges, keccak, round, tables, prefix, bridges, sinks,
+        prefix, bridges, sinks,
     }
 }
 
@@ -1135,15 +1047,21 @@ pub struct MlDsaProver {
     /// Hosted mode: the host's shared message-source relation handle. `None` for
     /// standalone (the self-drawn `msglink` producer).
     shared_field: Option<SharedFieldRelation>,
+    /// The keccak service's shared relations handle (REQUIRED — the service
+    /// module must be composed before this one and draw into it).
+    keccak_handle: SharedKeccakRelations,
     /// Instance namespace: role/domain tag mixed into the transcript and
     /// prefixed onto every witness/shape-dependent preprocessed id (SIB
     /// schedule, bridges, sinks). "" = legacy single-instance ids. REQUIRED
     /// (distinct per instance) when a proof hosts more than one ML-DSA module.
     namespace: String,
+    /// Per-instance stream-id base (multiples of [`STREAM_BASE_STRIDE`]):
+    /// keeps this instance's HashIo stream ids disjoint from every other
+    /// instance under the ONE shared relation set. Mixed into the transcript.
+    stream_base: u32,
     /// Private-message mode: mix only `message.len()` into the transcript; the
     /// bytes flow exclusively through the host's FieldBytesRelation.
     private_message: bool,
-    keccak_side: Option<KeccakSide>,
     relations: Option<Relations>,
     // rc multiplicity columns stashed between write_trace and write_interaction.
     coeffs_rc_mult: Vec<ColEval>,
@@ -1160,39 +1078,27 @@ impl MlDsaProver {
     fn relations(&self) -> &Relations {
         self.relations.as_ref().expect("relations drawn")
     }
-    fn keccak_side(&self) -> &KeccakSide {
-        self.keccak_side.as_ref().expect("keccak side built")
-    }
 
     /// Build a prover. `shared_field = None` → standalone (self-drawn `msglink`
     /// producer, current commit order). `shared_field = Some(handle)` → hosted:
     /// the `msglink` component is dropped and the msg bridge sources the message
     /// bytes from the host's shared [`FieldBytesRelation`] under
-    /// [`HOSTED_MSG_FIELD_ID`]. In hosted mode this module must be composed AFTER
-    /// the host module that draws + sets `handle` (`air_core::prove` runs all
-    /// modules' `draw_relations` before any interaction phase).
+    /// [`HOSTED_MSG_FIELD_ID`]. `keccak_handle` is the proof-wide keccak
+    /// service's relations handle: the service module (built from this
+    /// instance's [`MlDsaProver::keccak_jobs`], among others) MUST be composed
+    /// BEFORE this module so its `draw_relations` populates the handle
+    /// (`air_core::prove` runs all modules' `draw_relations` in module order,
+    /// before any interaction phase).
     pub fn new(
         witness: MlDsaWitness,
         input: MlDsaVerifyInput,
         shared_field: Option<SharedFieldRelation>,
+        keccak_handle: SharedKeccakRelations,
     ) -> Self {
         let hosted = shared_field.is_some();
         let sib_stream_len = sampleinball::stream_len(&witness);
         let sib_squeezed_len = witness.sponge.sample_in_ball_squeezed.len();
-        let sh = shapes(input.message.len(), sib_stream_len);
-        let plan = PermIdPlan::from_shapes(&sh.mu, &sh.ct);
         let ctx = LayoutCtx::new(&input, sib_stream_len, sib_squeezed_len, hosted);
-        let keccak_side = build_keccak_side(&witness, plan);
-
-        // Sanity: the composition's sponge shapes match the built runs.
-        debug_assert_eq!(keccak_side.runs[0].claim.shape, sh.mu);
-        debug_assert_eq!(keccak_side.runs[1].claim.shape, sh.ct);
-        debug_assert_eq!(keccak_side.runs[2].claim.shape, sh.sib);
-        debug_assert_eq!(
-            keccak_side.n_perms_total,
-            sh.mu.n_perms() + sh.ct.n_perms() + sh.sib.n_perms()
-        );
-
         let claims = Claims { hosted, ..Claims::default() };
 
         Self {
@@ -1202,9 +1108,10 @@ impl MlDsaProver {
             sib_squeezed_len,
             ctx,
             shared_field,
+            keccak_handle,
             namespace: String::new(),
+            stream_base: 0,
             private_message: false,
-            keccak_side: Some(keccak_side),
             relations: None,
             coeffs_rc_mult: Vec::new(),
             decomp_rc_mult: Vec::new(),
@@ -1221,8 +1128,29 @@ impl MlDsaProver {
         witness: MlDsaWitness,
         input: MlDsaVerifyInput,
         shared_field: SharedFieldRelation,
+        keccak_handle: SharedKeccakRelations,
     ) -> Self {
-        Self::new(witness, input, Some(shared_field))
+        Self::new(witness, input, Some(shared_field), keccak_handle)
+    }
+
+    /// Set the per-instance stream-id base (see the `stream_base` field).
+    /// Prover and verifier must agree per role; use multiples of
+    /// [`STREAM_BASE_STRIDE`].
+    pub fn with_stream_base(mut self, base: u32) -> Self {
+        self.stream_base = base;
+        self
+    }
+
+    /// The sponge job shapes + witness byte streams this instance contributes
+    /// to the proof-wide keccak service, in job order (µ, c̃, SIB).
+    pub fn keccak_jobs(&self) -> (Vec<Shape>, Vec<Vec<u8>>) {
+        let shapes = keccak_job_shapes(self.input.message.len(), self.sib_stream_len, self.stream_base);
+        let streams = vec![
+            self.witness.sponge.mu_absorbed.clone(),
+            self.witness.sponge.c_tilde_absorbed.clone(),
+            self.witness.sponge.sample_in_ball_absorbed.clone(),
+        ];
+        (shapes, streams)
     }
 
     /// Set the instance namespace (see the `namespace` field). Prover and
@@ -1264,41 +1192,36 @@ impl MlDsaProver {
 }
 
 /// The byte payloads the four bridges move, in bridge order (msg, mu→ct, w1enc,
-/// ct→sib). Requires the sponge runs (for µ/c̃ squeeze bytes) and the decomp
+/// ct→sib). Requires the sponge outputs (for µ/c̃ squeeze bytes) and the decomp
 /// w1Encode bytes.
 fn bridge_bytes(
     input: &MlDsaVerifyInput,
-    runs: &[sponge::SpongeRun],
+    outputs: &[Vec<u8>; 3],
     w1_bytes: &[u8],
 ) -> [Vec<u8>; 4] {
-    let mu_out = &runs[0].output;
-    let ct_out = &runs[1].output;
     [
-        input.message.clone(),        // msg bridge
-        mu_out[..64].to_vec(),        // mu→ct
-        w1_bytes.to_vec(),            // w1enc (768)
-        ct_out[..48].to_vec(),        // ct→sib
+        input.message.clone(),          // msg bridge
+        outputs[0][..64].to_vec(),      // mu→ct
+        w1_bytes.to_vec(),              // w1enc (768)
+        outputs[1][..48].to_vec(),      // ct→sib
     ]
 }
 
 /// The byte payloads the three sinks consume, in sink order (µ, c̃, SIB).
-fn sink_bytes(runs: &[sponge::SpongeRun], sib_stream_len: usize) -> [Vec<u8>; 3] {
-    let mu_out = &runs[0].output;
-    let ct_out = &runs[1].output;
-    let sib_out = &runs[2].output;
+fn sink_bytes(outputs: &[Vec<u8>; 3], sib_stream_len: usize) -> [Vec<u8>; 3] {
     [
-        mu_out[64..].to_vec(),
-        ct_out[48..].to_vec(),
-        sib_out[sib_stream_len..].to_vec(),
+        outputs[0][64..].to_vec(),
+        outputs[1][48..].to_vec(),
+        outputs[2][sib_stream_len..].to_vec(),
     ]
 }
 
 impl Air for MlDsaProver {
     fn mix_public(&self, channel: &mut Blake2sChannel) {
-        mix_public(channel, &self.input, self.sib_stream_len, &self.namespace, self.private_message);
+        mix_public(channel, &self.input, self.sib_stream_len, &self.namespace, self.private_message, self.stream_base);
     }
     fn draw_relations(&mut self, channel: &mut Blake2sChannel) {
-        self.relations = Some(draw_relations_common(channel, self.shared_field.as_ref()));
+        self.relations = Some(draw_relations_common(channel, self.shared_field.as_ref(), &self.keccak_handle));
     }
     fn layout(&self) -> TreeLayout {
         layout_for(&self.ctx, &self.input)
@@ -1315,7 +1238,7 @@ impl Air for MlDsaProver {
     }
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
         let rel = self.relations().clone();
-        self.built = Some(build_components(allocator, &self.namespace, &self.ctx, &self.input, &rel, &self.claims));
+        self.built = Some(build_components(allocator, &self.namespace, self.stream_base, &self.ctx, &self.input, &rel, &self.claims));
     }
     fn components(&self) -> Vec<&dyn Component> {
         self.built.as_ref().expect("built").ordered()
@@ -1328,9 +1251,6 @@ impl AirProver for MlDsaProver {
             .max(decomp_log_size())
             .max(sib_log_size(self.sib_squeezed_len))
             .max(coeffs_tables::RcKind::Rc13.log_size())
-            .max(TableKind::Dense.log_size())
-            .max(self.ctx.round_claim.log_size)
-            .max(self.ctx.keccak_claim.log_size)
     }
     fn max_constraint_log_degree_bound(&self) -> u32 {
         self.max_log_size() + 1
@@ -1405,10 +1325,15 @@ impl AirProver for MlDsaProver {
             .collect();
         evals.extend(self.coeffs_rc_mult.clone());
 
-        // 3. decomp base + 4. rc mult (stash w1Encode bytes for bridge 17).
+        // 3. decomp base + 4. rc mult (stash w1Encode bytes for the w1enc bridge).
         let dls = decomp_log_size();
         evals.extend(decomp::gen_decomp_base_trace(&self.witness, dls));
-        let decomp_dry = decomp::gen_decomp_interaction(&self.witness, dls, &DecompRelations::dummy());
+        let decomp_dry = decomp::gen_decomp_interaction(
+            &self.witness,
+            dls,
+            self.stream_base + STREAM_ID_CTILDE_ABSORB,
+            &DecompRelations::dummy(),
+        );
         self.decomp_w1_bytes = decomp_dry.w1_encode_bytes.clone();
         self.decomp_rc_mult = decomp_tables::RcKind::ALL
             .iter()
@@ -1419,7 +1344,12 @@ impl AirProver for MlDsaProver {
         // 5. sib base + 6. rc mult.
         let sls = sib_log_size(self.sib_squeezed_len);
         evals.extend(sampleinball::gen_sib_base_trace(&self.witness, sls));
-        let sib_dry = sampleinball::gen_sib_interaction(&self.witness, sls, &SibRelations::dummy());
+        let sib_dry = sampleinball::gen_sib_interaction(
+            &self.witness,
+            sls,
+            self.stream_base + STREAM_ID_SIB_SQUEEZE,
+            &SibRelations::dummy(),
+        );
         self.sib_rc_mult = sib_tables::RcKind::ALL
             .iter()
             .map(|kind| sib_tables::gen_table_multiplicities(*kind, sib_dry.rc_uses.for_kind(*kind)))
@@ -1431,49 +1361,39 @@ impl AirProver for MlDsaProver {
             evals.extend(msglink::gen_msglink_base_trace());
         }
 
-        // 8-10. sponge traces ×3 (mem::take out of the runs).
-        let ks = self.keccak_side.as_mut().expect("keccak side built");
-        for run in ks.runs.iter_mut() {
-            evals.extend(std::mem::take(&mut run.trace));
-        }
-
-        // 11. keccak, 12. round, 13. tables.
-        evals.extend(std::mem::take(&mut ks.perm.keccak_trace));
-        evals.extend(std::mem::take(&mut ks.perm.round_trace));
-        evals.extend(tables_air::generate_trace(&ks.perm.table_mult));
-
-        // 14. prefix.
+        // 8. prefix.
         // Base traces run in Tree 1, BEFORE relations are drawn. The prefix /
         // bridge / sink base traces (enabler + byte columns) do NOT depend on any
         // relation, so descriptors are built with `dummy()` relations here.
         let dummy_hash_io = HashIoRelation::dummy();
         let dummy_msglink = MsgLinkRelation::dummy();
-        evals.extend(prefix_eval(&self.input, &dummy_hash_io).gen_base());
+        evals.extend(prefix_eval(&self.input, self.stream_base, &dummy_hash_io).gen_base());
 
-        // 15-18. bridges base (need the sponge outputs, kept in runs).
-        let bbytes = bridge_bytes(&self.input, &self.keccak_side().runs, &self.decomp_w1_bytes);
-        let bridge_descs = bridge_evals(&self.namespace, self.input.message.len(), &dummy_msglink, None, &dummy_hash_io);
+        // 9-12. bridges base (the sponge outputs are recomputed natively — the
+        // sponges themselves are proven in the keccak SERVICE module).
+        let outputs = sponge_outputs(&self.witness);
+        let bbytes = bridge_bytes(&self.input, &outputs, &self.decomp_w1_bytes);
+        let bridge_descs = bridge_evals(&self.namespace, self.input.message.len(), self.stream_base, &dummy_msglink, None, &dummy_hash_io);
         for (b, bytes) in bridge_descs.iter().zip(bbytes.iter()) {
             evals.extend(b.gen_base(bytes));
         }
 
         // PROVER SANITY: the sponge output prefixes match the witness transcript.
-        let runs = &self.keccak_side().runs;
         assert_eq!(
-            runs[0].output[..64],
+            outputs[0][..64],
             self.witness.sponge.mu_squeezed[..64],
             "µ squeeze prefix mismatch"
         );
-        assert_eq!(runs[1].output[..48], self.input.c_tilde[..], "c̃ squeeze prefix mismatch");
+        assert_eq!(outputs[1][..48], self.input.c_tilde[..], "c̃ squeeze prefix mismatch");
         assert_eq!(
-            runs[2].output[..self.sib_stream_len],
+            outputs[2][..self.sib_stream_len],
             self.witness.sponge.sample_in_ball_squeezed[..self.sib_stream_len],
             "SIB squeeze prefix mismatch"
         );
 
-        // 19-21. sinks base.
-        let sbytes = sink_bytes(&self.keccak_side().runs, self.sib_stream_len);
-        let sink_descs = sink_evals(&self.namespace, self.input.message.len(), self.sib_stream_len, &dummy_hash_io);
+        // 13-15. sinks base.
+        let sbytes = sink_bytes(&outputs, self.sib_stream_len);
+        let sink_descs = sink_evals(&self.namespace, self.input.message.len(), self.sib_stream_len, self.stream_base, &dummy_hash_io);
         for (s, bytes) in sink_descs.iter().zip(sbytes.iter()) {
             evals.extend(s.gen_base(bytes));
         }
@@ -1504,7 +1424,12 @@ impl AirProver for MlDsaProver {
 
         // 3. decomp interaction.
         let dls = decomp_log_size();
-        let decomp_int = decomp::gen_decomp_interaction(&self.witness, dls, &rel.decomp);
+        let decomp_int = decomp::gen_decomp_interaction(
+            &self.witness,
+            dls,
+            self.stream_base + STREAM_ID_CTILDE_ABSORB,
+            &rel.decomp,
+        );
         self.claims.decomp = decomp_int.claimed_sum;
         evals.extend(decomp_int.trace);
         // 4. decomp rc ×4.
@@ -1521,7 +1446,12 @@ impl AirProver for MlDsaProver {
 
         // 5. sib interaction.
         let sls = sib_log_size(self.sib_squeezed_len);
-        let sib_int = sampleinball::gen_sib_interaction(&self.witness, sls, &rel.sib);
+        let sib_int = sampleinball::gen_sib_interaction(
+            &self.witness,
+            sls,
+            self.stream_base + STREAM_ID_SIB_SQUEEZE,
+            &rel.sib,
+        );
         self.claims.sib = sib_int.claimed_sum;
         evals.extend(sib_int.trace);
         // 6. sib rc ×3.
@@ -1544,34 +1474,15 @@ impl AirProver for MlDsaProver {
             evals.extend(msg_tr);
         }
 
-        // 8-13. sponges ×3, keccak, round, tables — gather sums into locals to
-        // avoid overlapping the immutable `keccak_side` borrow with `self.claims`.
-        let ks = self.keccak_side.as_ref().expect("keccak side built");
-        let mut sponge_sums = Vec::with_capacity(3);
-        for run in &ks.runs {
-            let (ic, tr) = sponge::generate_interaction_trace(&rel.keccak, &run.data);
-            sponge_sums.push(ic.claimed_sum);
-            evals.extend(tr);
-        }
-        let (keccak_ic, keccak_tr) = keccak::generate_interaction_trace(&rel.keccak, &ks.perm.keccak_data);
-        evals.extend(keccak_tr);
-        let (round_ic, round_tr) = keccak_round::generate_interaction_trace(&rel.keccak, &ks.perm.round_data);
-        evals.extend(round_tr);
-        let (tables_ic, tables_tr) = tables_air::generate_interaction_trace(&rel.keccak, &ks.perm.table_mult);
-        evals.extend(tables_tr);
-        self.claims.sponges = sponge_sums;
-        self.claims.keccak = keccak_ic.claimed_sum;
-        self.claims.round = round_ic.claimed_sum;
-        self.claims.tables = tables_ic.claimed_sums.clone();
-
-        // 14. prefix.
-        let (prefix_tr, prefix_sum) = prefix_eval(&self.input, &rel.keccak.hash_io).gen_interaction();
+        // 8. prefix.
+        let (prefix_tr, prefix_sum) = prefix_eval(&self.input, self.stream_base, &rel.keccak.hash_io).gen_interaction();
         self.claims.prefix = prefix_sum;
         evals.extend(prefix_tr);
 
-        // 15-18. bridges.
-        let bbytes = bridge_bytes(&self.input, &self.keccak_side().runs, &self.decomp_w1_bytes);
-        let bridge_descs = bridge_evals(&self.namespace, self.input.message.len(), &rel.msglink, rel.shared_field.as_ref(), &rel.keccak.hash_io);
+        // 9-12. bridges.
+        let outputs = sponge_outputs(&self.witness);
+        let bbytes = bridge_bytes(&self.input, &outputs, &self.decomp_w1_bytes);
+        let bridge_descs = bridge_evals(&self.namespace, self.input.message.len(), self.stream_base, &rel.msglink, rel.shared_field.as_ref(), &rel.keccak.hash_io);
         self.claims.bridges.clear();
         for (b, bytes) in bridge_descs.iter().zip(bbytes.iter()) {
             let (tr, sum) = b.gen_interaction(bytes);
@@ -1579,9 +1490,9 @@ impl AirProver for MlDsaProver {
             evals.extend(tr);
         }
 
-        // 19-21. sinks.
-        let sbytes = sink_bytes(&self.keccak_side().runs, self.sib_stream_len);
-        let sink_descs = sink_evals(&self.namespace, self.input.message.len(), self.sib_stream_len, &rel.keccak.hash_io);
+        // 13-15. sinks.
+        let sbytes = sink_bytes(&outputs, self.sib_stream_len);
+        let sink_descs = sink_evals(&self.namespace, self.input.message.len(), self.sib_stream_len, self.stream_base, &rel.keccak.hash_io);
         self.claims.sinks.clear();
         for (s, bytes) in sink_descs.iter().zip(sbytes.iter()) {
             let (tr, sum) = s.gen_interaction(bytes);
@@ -1609,8 +1520,13 @@ pub struct MlDsaVerifier {
     ctx: LayoutCtx,
     /// Hosted mode: the host's shared message-source relation handle.
     shared_field: Option<SharedFieldRelation>,
+    /// The keccak service's shared relations handle (must be populated by the
+    /// service module, composed before this one).
+    keccak_handle: SharedKeccakRelations,
     /// Instance namespace (must match the prover's per role).
     namespace: String,
+    /// Per-instance stream-id base (must match the prover's per role).
+    stream_base: u32,
     /// Private-message mode (must match the prover's per role).
     private_message: bool,
     group_evals: Vec<SecureField>,
@@ -1629,8 +1545,8 @@ impl MlDsaVerifier {
     /// standalone; `Some(handle)` → hosted (drops the msglink claim slot, sources
     /// the msg bridge from the host's shared [`FieldBytesRelation`]). The
     /// `group_evals` / `claimed_sums` / `sib_*_len` come from the host's proof
-    /// struct (the mldsa prover's getters). Composed AFTER the host module that
-    /// draws + sets `handle`.
+    /// struct (the mldsa prover's getters). Composed AFTER the keccak service
+    /// module (and, hosted, after the host module that draws + sets `handle`).
     pub fn new(
         input: MlDsaVerifyInput,
         group_evals: Vec<SecureField>,
@@ -1638,6 +1554,7 @@ impl MlDsaVerifier {
         sib_stream_len: usize,
         sib_squeezed_len: usize,
         shared_field: Option<SharedFieldRelation>,
+        keccak_handle: SharedKeccakRelations,
     ) -> Self {
         let hosted = shared_field.is_some();
         let ctx = LayoutCtx::new(&input, sib_stream_len, sib_squeezed_len, hosted);
@@ -1647,7 +1564,9 @@ impl MlDsaVerifier {
             sib_stream_len,
             ctx,
             shared_field,
+            keccak_handle,
             namespace: String::new(),
+            stream_base: 0,
             private_message: false,
             group_evals,
             claims,
@@ -1666,6 +1585,7 @@ impl MlDsaVerifier {
         sib_stream_len: usize,
         sib_squeezed_len: usize,
         shared_field: SharedFieldRelation,
+        keccak_handle: SharedKeccakRelations,
     ) -> Self {
         Self::new(
             input,
@@ -1674,12 +1594,19 @@ impl MlDsaVerifier {
             sib_stream_len,
             sib_squeezed_len,
             Some(shared_field),
+            keccak_handle,
         )
     }
 
     /// Set the instance namespace (must match the prover's per role).
     pub fn with_instance_namespace(mut self, ns: impl Into<String>) -> Self {
         self.namespace = ns.into();
+        self
+    }
+
+    /// Set the per-instance stream-id base (must match the prover's per role).
+    pub fn with_stream_base(mut self, base: u32) -> Self {
+        self.stream_base = base;
         self
     }
 
@@ -1692,10 +1619,10 @@ impl MlDsaVerifier {
 
 impl Air for MlDsaVerifier {
     fn mix_public(&self, channel: &mut Blake2sChannel) {
-        mix_public(channel, &self.input, self.sib_stream_len, &self.namespace, self.private_message);
+        mix_public(channel, &self.input, self.sib_stream_len, &self.namespace, self.private_message, self.stream_base);
     }
     fn draw_relations(&mut self, channel: &mut Blake2sChannel) {
-        let rel = draw_relations_common(channel, self.shared_field.as_ref());
+        let rel = draw_relations_common(channel, self.shared_field.as_ref(), &self.keccak_handle);
         // native_use + folded identity (mirror CoeffsVerifier).
         self.claims.native_use = native_use_sum(&self.group_evals, &rel.coeffs);
         let public = compute_public_evals(&self.input, rel.r, rel.s);
@@ -1718,7 +1645,7 @@ impl Air for MlDsaVerifier {
     }
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
         let rel = self.relations().clone();
-        self.built = Some(build_components(allocator, &self.namespace, &self.ctx, &self.input, &rel, &self.claims));
+        self.built = Some(build_components(allocator, &self.namespace, self.stream_base, &self.ctx, &self.input, &rel, &self.claims));
     }
     fn components(&self) -> Vec<&dyn Component> {
         self.built.as_ref().expect("built").ordered()
@@ -1751,14 +1678,20 @@ pub fn prove_mldsa(
 ) -> Result<MlDsaProof, ProvingError> {
     let sib_stream_len = sampleinball::stream_len(&witness);
     let sib_squeezed_len = witness.sponge.sample_in_ball_squeezed.len();
-    let mut prover = MlDsaProver::new(witness, input.clone(), None);
-    let stark_proof = air_core::prove(&mut [&mut prover], config)?;
+    // The standalone path instantiates a PRIVATE keccak service for this one
+    // instance's three sponge jobs; the composition is `[service, mldsa]`.
+    let handle = SharedKeccakRelations::new();
+    let mut prover = MlDsaProver::new(witness, input.clone(), None, handle.clone());
+    let (job_shapes, job_streams) = prover.keccak_jobs();
+    let mut service = KeccakServiceProver::new(job_shapes, job_streams, handle);
+    let stark_proof = air_core::prove(&mut [&mut service, &mut prover], config)?;
     Ok(MlDsaProof {
         input,
         group_evals: prover.group_evals,
         claimed_sums: prover.claims.ordered(),
         sib_stream_len,
         sib_squeezed_len,
+        service_claimed_sums: service.claimed_sums(),
         stark_proof,
     })
 }
@@ -1784,15 +1717,14 @@ pub fn n_group_evals() -> usize {
 }
 
 /// The exact `claimed_sums` length a HOSTED proof carries (msglink slot
-/// dropped; `native_use` appended last). Hosts gate the flat vector's length
-/// on this before construction — `Claims::from_flat` panics on a short vector.
+/// dropped; `native_use` appended last; the keccak side lives in the SERVICE
+/// module and contributes [`stwo_keccak::service::service_claimed_sums_len`]
+/// separately). Hosts gate the flat vector's length on this before
+/// construction — `Claims::from_flat` panics on a short vector.
 pub fn hosted_claimed_sums_len() -> usize {
     1 + coeffs_tables::RcKind::ALL.len()          // coeffs + rc
         + 1 + decomp_tables::RcKind::ALL.len()    // decomp + rc
         + 1 + sib_tables::RcKind::ALL.len()       // sib + rc
-        + 3                                       // sponges
-        + 1 + 1                                   // keccak + round
-        + TableKind::ALL.len()                    // keccak tables
         + 1                                       // prefix
         + 4 + 3                                   // bridges + sinks
         + 1                                       // native_use
@@ -1828,14 +1760,29 @@ pub fn mldsa_expected_preprocessed_root(
     config: PcsConfig,
 ) -> Result<air_core::CommitmentRoot, WitnessError> {
     let witness = generate_witness(input)?;
-    let mut prover = MlDsaProver::new(witness, input.clone(), None);
+    let handle = SharedKeccakRelations::new();
+    let mut prover = MlDsaProver::new(witness, input.clone(), None, handle.clone());
+    let (job_shapes, job_streams) = prover.keccak_jobs();
+    let mut service = KeccakServiceProver::new(job_shapes, job_streams, handle);
     Ok(air_core::compute_preprocessed_root_uncached(
-        &mut [&mut prover],
+        &mut [&mut service, &mut prover],
         config,
     ))
 }
 
 pub fn verify_mldsa(proof: &MlDsaProof) -> Result<(), VerificationError> {
+    let handle = SharedKeccakRelations::new();
+    let job_shapes = keccak_job_shapes(proof.input.message.len(), proof.sib_stream_len, 0);
+    if proof.service_claimed_sums.len() != stwo_keccak::service::service_claimed_sums_len() {
+        return Err(VerificationError::InvalidStructure(
+            "ML-DSA statement: bad service claimed-sums length".to_string(),
+        ));
+    }
+    let mut service = KeccakServiceVerifier::new(
+        job_shapes,
+        proof.service_claimed_sums.clone(),
+        handle.clone(),
+    );
     let mut verifier = MlDsaVerifier::new(
         proof.input.clone(),
         proof.group_evals.clone(),
@@ -1843,6 +1790,7 @@ pub fn verify_mldsa(proof: &MlDsaProof) -> Result<(), VerificationError> {
         proof.sib_stream_len,
         proof.sib_squeezed_len,
         None,
+        handle,
     );
     // Pin the preprocessed (tree-0) root before any transcript work: recompute
     // it from the public statement shape and reject a forged preprocessed tree
@@ -1856,7 +1804,7 @@ pub fn verify_mldsa(proof: &MlDsaProof) -> Result<(), VerificationError> {
             )
         })?;
     air_core::verify_with_expected_preprocessed_root(
-        &mut [&mut verifier],
+        &mut [&mut service, &mut verifier],
         &proof.stark_proof,
         Some(expected_root),
     )

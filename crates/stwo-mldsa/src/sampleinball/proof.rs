@@ -183,7 +183,7 @@ fn build_components(
 ) -> Built {
     let sib = FrameworkComponent::new(
         allocator,
-        SibEval { log_size, ns: String::new(), relations: relations.clone() },
+        SibEval { log_size, ns: String::new(), sib_stream: STREAM_ID_SIB_SQUEEZE, relations: relations.clone() },
         sib_claimed_sum,
     );
     let mut rc = Vec::with_capacity(N_RC);
@@ -311,7 +311,7 @@ impl AirProver for SibProver {
     fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
         let ls = sib_log_size(&self.witness);
         let mut evals = gen_sib_base_trace(&self.witness, ls);
-        let dry = gen_sib_interaction(&self.witness, ls, &SibRelations::dummy());
+        let dry = gen_sib_interaction(&self.witness, ls, STREAM_ID_SIB_SQUEEZE, &SibRelations::dummy());
         self.stream_bytes = dry.stream_bytes.clone();
         self.rc_mult = RcKind::ALL
             .iter()
@@ -328,7 +328,7 @@ impl AirProver for SibProver {
     fn write_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
         let ls = sib_log_size(&self.witness);
         let relations = self.relations.clone().expect("relations");
-        let interaction = gen_sib_interaction(&self.witness, ls, &relations);
+        let interaction = gen_sib_interaction(&self.witness, ls, STREAM_ID_SIB_SQUEEZE, &relations);
         let mut evals = interaction.trace;
         self.sib_claimed_sum = interaction.claimed_sum;
 

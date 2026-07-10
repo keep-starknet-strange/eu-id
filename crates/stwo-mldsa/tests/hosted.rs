@@ -35,11 +35,14 @@ use air_core::{Air, AirProver, PreprocessedColumnFingerprint, TreeLayout};
 use stwo::prover::backend::simd::m31::{LOG_N_LANES, N_LANES};
 use stwo::prover::backend::simd::qm31::PackedQM31;
 
+use stwo_keccak::relations::SharedKeccakRelations;
+use stwo_keccak::service::{KeccakServiceProver, KeccakServiceVerifier};
 use stwo_mldsa::air_util::{col_eval, m31, ColEval};
 use stwo_mldsa::reference::encoding::{pk_decode, sig_decode};
 use stwo_mldsa::reference::sponge::shake256;
 use stwo_mldsa::statement::{
-    MlDsaProof, MlDsaProver, MlDsaVerifier, HOSTED_MSG_FIELD_ID,
+    keccak_job_shapes, MlDsaProof, MlDsaProver, MlDsaVerifier, HOSTED_MSG_FIELD_ID,
+    STREAM_BASE_STRIDE,
 };
 use stwo_mldsa::witness::generate_witness;
 use stwo_mldsa::MlDsaVerifyInput;
@@ -240,19 +243,25 @@ fn oracle_input(seed: u64, msg: &[u8]) -> MlDsaVerifyInput {
     MlDsaVerifyInput::from_decoded(&pk, &sp, tr, msg.to_vec())
 }
 
-/// Prove the hosted statement: `[field_producer(producer_bytes), hosted_mldsa]`.
-/// `producer_bytes` is what the HOST yields (honest = the message; tamper it to
-/// simulate a mismatched issuer preimage).
+/// Prove the hosted statement: `[keccak_service, field_producer(producer_bytes),
+/// hosted_mldsa]`. `producer_bytes` is what the HOST yields (honest = the
+/// message; tamper it to simulate a mismatched issuer preimage).
 fn prove_hosted(seed: u64, msg: &[u8], producer_bytes: Vec<u8>) -> MlDsaProof {
     let input = oracle_input(seed, msg);
     let witness = generate_witness(&input).expect("witness");
 
     let handle = SharedFieldRelation::new();
+    let keccak_handle = SharedKeccakRelations::new();
     let mut producer = FieldProducer::new(producer_bytes, handle.clone());
-    let mut mldsa = MlDsaProver::hosted(witness, input.clone(), handle);
+    let mut mldsa = MlDsaProver::hosted(witness, input.clone(), handle, keccak_handle.clone());
+    let (job_shapes, job_streams) = mldsa.keccak_jobs();
+    let mut service = KeccakServiceProver::new(job_shapes, job_streams, keccak_handle);
 
-    let stark_proof =
-        air_core::prove(&mut [&mut producer, &mut mldsa], PcsConfig::default()).expect("prove");
+    let stark_proof = air_core::prove(
+        &mut [&mut service, &mut producer, &mut mldsa],
+        PcsConfig::default(),
+    )
+    .expect("prove");
 
     MlDsaProof {
         input,
@@ -260,19 +269,27 @@ fn prove_hosted(seed: u64, msg: &[u8], producer_bytes: Vec<u8>) -> MlDsaProof {
         claimed_sums: mldsa.claimed_sums(),
         sib_stream_len: mldsa.sib_stream_len(),
         sib_squeezed_len: mldsa.sib_squeezed_len(),
+        service_claimed_sums: service.claimed_sums(),
         stark_proof,
     }
 }
 
-/// Verify a hosted proof by reconstructing `[field_producer, hosted_mldsa]`.
+/// Verify a hosted proof by reconstructing `[keccak_service, field_producer,
+/// hosted_mldsa]`.
 fn verify_hosted(
     proof: &MlDsaProof,
     producer_bytes: Vec<u8>,
 ) -> Result<(), stwo::core::verifier::VerificationError> {
     let handle = SharedFieldRelation::new();
+    let keccak_handle = SharedKeccakRelations::new();
     // The producer recomputes its claimed sum in draw_relations from the public
     // bytes, so the same FieldProducer serves verification with no witness.
     let mut producer = FieldProducer::new(producer_bytes, handle.clone());
+    let mut service = KeccakServiceVerifier::new(
+        keccak_job_shapes(proof.input.message.len(), proof.sib_stream_len, 0),
+        proof.service_claimed_sums.clone(),
+        keccak_handle.clone(),
+    );
     let mut mldsa = MlDsaVerifier::hosted(
         proof.input.clone(),
         proof.group_evals.clone(),
@@ -280,8 +297,12 @@ fn verify_hosted(
         proof.sib_stream_len,
         proof.sib_squeezed_len,
         handle,
+        keccak_handle,
     );
-    air_core::verify(&mut [&mut producer, &mut mldsa], &proof.stark_proof)
+    air_core::verify(
+        &mut [&mut service, &mut producer, &mut mldsa],
+        &proof.stark_proof,
+    )
 }
 
 // =====================================================================
@@ -325,7 +346,10 @@ struct InstanceClaims {
     sib_squeezed_len: usize,
 }
 
-/// Prove `[producer_a, mldsa_a(ns_a), producer_b, mldsa_b(ns_b, private-msg)]`.
+/// Prove `[keccak_service(jobs a+b), producer_a, mldsa_a(ns_a, base 0),
+/// producer_b, mldsa_b(ns_b, base 16, private-msg)]`. The ONE service hosts
+/// both instances' sponge jobs; the stream bases keep their HashIo ids
+/// disjoint under the single shared relation set.
 fn prove_two_hosted(
     seed_a: u64,
     msg_a: &[u8],
@@ -333,7 +357,12 @@ fn prove_two_hosted(
     seed_b: u64,
     msg_b: &[u8],
     ns_b: &str,
-) -> (InstanceClaims, InstanceClaims, stwo::core::proof::StarkProof<air_core::Hasher>) {
+) -> (
+    InstanceClaims,
+    InstanceClaims,
+    Vec<SecureField>,
+    stwo::core::proof::StarkProof<air_core::Hasher>,
+) {
     let input_a = oracle_input(seed_a, msg_a);
     let input_b = oracle_input(seed_b, msg_b);
     let witness_a = generate_witness(&input_a).expect("witness a");
@@ -341,16 +370,26 @@ fn prove_two_hosted(
 
     let handle_a = SharedFieldRelation::new();
     let handle_b = SharedFieldRelation::new();
+    let keccak_handle = SharedKeccakRelations::new();
     let mut producer_a = FieldProducer::new(msg_a.to_vec(), handle_a.clone());
     let mut producer_b = FieldProducer::new(msg_b.to_vec(), handle_b.clone());
-    let mut mldsa_a = MlDsaProver::hosted(witness_a, input_a.clone(), handle_a)
+    let mut mldsa_a = MlDsaProver::hosted(witness_a, input_a.clone(), handle_a, keccak_handle.clone())
         .with_instance_namespace(ns_a);
-    let mut mldsa_b = MlDsaProver::hosted(witness_b, input_b.clone(), handle_b)
+    let mut mldsa_b = MlDsaProver::hosted(witness_b, input_b.clone(), handle_b, keccak_handle.clone())
         .with_instance_namespace(ns_b)
+        .with_stream_base(STREAM_BASE_STRIDE)
         .with_private_message();
 
+    let (shapes_a, streams_a) = mldsa_a.keccak_jobs();
+    let (shapes_b, streams_b) = mldsa_b.keccak_jobs();
+    let mut service = KeccakServiceProver::new(
+        [shapes_a, shapes_b].concat(),
+        [streams_a, streams_b].concat(),
+        keccak_handle,
+    );
+
     let stark_proof = air_core::prove(
-        &mut [&mut producer_a, &mut mldsa_a, &mut producer_b, &mut mldsa_b],
+        &mut [&mut service, &mut producer_a, &mut mldsa_a, &mut producer_b, &mut mldsa_b],
         PcsConfig::default(),
     )
     .expect("two-instance prove");
@@ -362,25 +401,40 @@ fn prove_two_hosted(
         sib_stream_len: m.sib_stream_len(),
         sib_squeezed_len: m.sib_squeezed_len(),
     };
-    (claims(&mldsa_a, &input_a), claims(&mldsa_b, &input_b), stark_proof)
+    (
+        claims(&mldsa_a, &input_a),
+        claims(&mldsa_b, &input_b),
+        service.claimed_sums(),
+        stark_proof,
+    )
 }
 
 /// Verify the two-instance composition. Instance B runs in private-message
 /// mode: its verifier-side input carries ZEROED message bytes (only the length
 /// is real) — the bytes reach the µ absorption exclusively through producer_b.
+#[allow(clippy::too_many_arguments)]
 fn verify_two_hosted(
     a: &InstanceClaims,
     ns_a: &str,
     b: &InstanceClaims,
     ns_b: &str,
+    service_claimed_sums: Vec<SecureField>,
     producer_a_bytes: Vec<u8>,
     producer_b_bytes: Vec<u8>,
     stark_proof: &stwo::core::proof::StarkProof<air_core::Hasher>,
 ) -> Result<(), stwo::core::verifier::VerificationError> {
     let handle_a = SharedFieldRelation::new();
     let handle_b = SharedFieldRelation::new();
+    let keccak_handle = SharedKeccakRelations::new();
     let mut producer_a = FieldProducer::new(producer_a_bytes, handle_a.clone());
     let mut producer_b = FieldProducer::new(producer_b_bytes, handle_b.clone());
+    let job_shapes = [
+        keccak_job_shapes(a.input.message.len(), a.sib_stream_len, 0),
+        keccak_job_shapes(b.input.message.len(), b.sib_stream_len, STREAM_BASE_STRIDE),
+    ]
+    .concat();
+    let mut service =
+        KeccakServiceVerifier::new(job_shapes, service_claimed_sums, keccak_handle.clone());
     let mut mldsa_a = MlDsaVerifier::hosted(
         a.input.clone(),
         a.group_evals.clone(),
@@ -388,6 +442,7 @@ fn verify_two_hosted(
         a.sib_stream_len,
         a.sib_squeezed_len,
         handle_a,
+        keccak_handle.clone(),
     )
     .with_instance_namespace(ns_a);
     let mut zeroed_b = b.input.clone();
@@ -399,11 +454,13 @@ fn verify_two_hosted(
         b.sib_stream_len,
         b.sib_squeezed_len,
         handle_b,
+        keccak_handle,
     )
     .with_instance_namespace(ns_b)
+    .with_stream_base(STREAM_BASE_STRIDE)
     .with_private_message();
     air_core::verify(
-        &mut [&mut producer_a, &mut mldsa_a, &mut producer_b, &mut mldsa_b],
+        &mut [&mut service, &mut producer_a, &mut mldsa_a, &mut producer_b, &mut mldsa_b],
         stark_proof,
     )
 }
@@ -414,8 +471,8 @@ fn two_namespaced_hosted_instances_prove_and_verify() {
     // columns are shape-dependent, so this exercises disjoint ids end to end.
     let msg_a = b"instance-a: the issuer-style public message".to_vec();
     let msg_b = b"instance-b-private".to_vec();
-    let (a, b, proof) = prove_two_hosted(111, &msg_a, "test/a", 222, &msg_b, "test/b");
-    verify_two_hosted(&a, "test/a", &b, "test/b", msg_a, msg_b, &proof)
+    let (a, b, svc, proof) = prove_two_hosted(111, &msg_a, "test/a", 222, &msg_b, "test/b");
+    verify_two_hosted(&a, "test/a", &b, "test/b", svc, msg_a, msg_b, &proof)
         .expect("two-instance verify");
 }
 
@@ -425,7 +482,7 @@ fn two_hosted_instances_swapped_claims_reject() {
     // role separation must come from the namespaced transcript + inputs.
     let msg_a = b"same-length-message-aaaaaaaa".to_vec();
     let msg_b = b"same-length-message-bbbbbbbb".to_vec();
-    let (a, b, proof) = prove_two_hosted(111, &msg_a, "test/a", 222, &msg_b, "test/b");
+    let (a, b, svc, proof) = prove_two_hosted(111, &msg_a, "test/a", 222, &msg_b, "test/b");
     // Present A's claim tree in B's slot and vice versa (inputs stay put).
     let swapped_a = InstanceClaims {
         input: a.input.clone(),
@@ -442,7 +499,7 @@ fn two_hosted_instances_swapped_claims_reject() {
         sib_squeezed_len: a.sib_squeezed_len,
     };
     assert!(
-        verify_two_hosted(&swapped_a, "test/a", &swapped_b, "test/b", msg_a, msg_b, &proof)
+        verify_two_hosted(&swapped_a, "test/a", &swapped_b, "test/b", svc, msg_a, msg_b, &proof)
             .is_err(),
         "cross-instance claim replay must reject"
     );

@@ -103,6 +103,49 @@ impl Enabler {
     }
 }
 
+// ───────────────────── Column ordering for row-offset masks ─────────────────
+
+/// A base-field column evaluation over the circle domain (bit-reversed order).
+pub type ColEval = stwo::prover::poly::circle::CircleEvaluation<
+    stwo::prover::backend::simd::SimdBackend,
+    M31,
+    stwo::prover::poly::BitReversedOrder,
+>;
+
+/// Wrap a coset-ordered value vector (length `2^log_size`) into a circle-domain
+/// `CircleEvaluation`, applying the coset→circle-domain permutation the
+/// `[-1, 0]` masks expect (mirror of `stwo-mldsa`'s `air_util::col_eval`).
+pub fn col_eval(log_size: u32, values: Vec<M31>) -> ColEval {
+    use stwo::core::utils::{bit_reverse_index, coset_index_to_circle_domain_index};
+    assert_eq!(values.len(), 1usize << log_size, "column length must be 2^log_size");
+    let mut ordered = vec![M31::zero(); values.len()];
+    for (coset_index, value) in values.into_iter().enumerate() {
+        let row = bit_reverse_index(
+            coset_index_to_circle_domain_index(coset_index, log_size),
+            log_size,
+        );
+        ordered[row] = value;
+    }
+    ColEval::new(
+        stwo::core::poly::circle::CanonicCoset::new(log_size).circle_domain(),
+        stwo::prover::backend::simd::column::BaseColumn::from_iter(ordered),
+    )
+}
+
+/// Map circle-domain (bit-reversed) row → coset index, for packing interaction
+/// columns whose logical order is coset order.
+pub fn circle_row_to_coset(log_size: u32) -> Vec<usize> {
+    use stwo::core::utils::{bit_reverse_index, coset_index_to_circle_domain_index};
+    let rows = 1usize << log_size;
+    let mut lookup = vec![0usize; rows];
+    for coset in 0..rows {
+        let domain_row =
+            bit_reverse_index(coset_index_to_circle_domain_index(coset, log_size), log_size);
+        lookup[domain_row] = coset;
+    }
+    lookup
+}
+
 // ───────────────────────────── Keccak-f[1600] ──────────────────────────────
 
 const KECCAK_RHO: [u32; 24] = [

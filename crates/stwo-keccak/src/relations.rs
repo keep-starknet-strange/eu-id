@@ -124,6 +124,16 @@ relation!(Split7, SPLIT_LOOKUP_ARITY);
 pub const KECCAK_ROUND_ARITY: usize = N_BYTES_IN_U64 + N_BYTES_IN_STATE;
 relation!(KeccakRound, KECCAK_ROUND_ARITY);
 
+/// Shared handle for the ONE drawn [`KeccakRelations`] of a composed proof.
+///
+/// The [`crate::service::KeccakServiceProver`] / `Verifier` module draws the
+/// relations during its `draw_relations` and `set`s them here; consumer modules
+/// (the stwo-mldsa bridges/prefix/sinks/decomp/sib) read the handle back in
+/// their own `draw_relations` (which air-core runs strictly after the
+/// service's, in module order). Same mechanism as
+/// `air_core::relations::SharedFieldRelation`.
+pub type SharedKeccakRelations = air_core::relations::SharedRelation<KeccakRelations>;
+
 /// Every relation the Keccak AIR draws, held together so prove and verify draw
 /// them from the shared transcript in one deterministic order.
 #[derive(Clone, Debug)]

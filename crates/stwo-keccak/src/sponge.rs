@@ -446,7 +446,7 @@ fn state_tuple(perm_id: u32, dir: u32, state: &[u8; N_BYTES_IN_STATE]) -> [Packe
 }
 
 /// Native Keccak-f on a byte-state (all 16 lanes identical), via the u64 path.
-fn native_keccak_f_bytes(state: &mut [u8; N_BYTES_IN_STATE]) {
+pub(crate) fn native_keccak_f_bytes(state: &mut [u8; N_BYTES_IN_STATE]) {
     let mut words = [0u64; 25];
     for (w, word) in words.iter_mut().enumerate() {
         for b in 0..N_BYTES_IN_U64 {

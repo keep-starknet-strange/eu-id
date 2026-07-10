@@ -61,7 +61,6 @@ use stwo_constraint_framework::{
 };
 
 use crate::air_util::{circle_row_to_coset, col_eval, m31, ColEval};
-use crate::binding::STREAM_ID_CTILDE_ABSORB;
 use crate::constants::{GAMMA2, K, N, OMEGA, Q};
 use crate::witness::MlDsaWitness;
 use relations::DecompRelations;
@@ -266,6 +265,10 @@ fn enc_signed(v: i64) -> M31 {
 #[derive(Clone)]
 pub struct DecompEval {
     pub log_size: u32,
+    /// The HashIo stream id the 768 `w1Encode` bytes are yielded into. Per
+    /// instance under a SHARED keccak relation set: `stream_base +`
+    /// [`STREAM_ID_CTILDE_ABSORB`] (the standalone default is the constant).
+    pub ct_stream: u32,
     pub relations: DecompRelations,
 }
 
@@ -435,7 +438,7 @@ impl FrameworkEval for DecompEval {
         // HashIo(STREAM_ID_CTILDE_ABSORB, byte_pos, byte). Emitted BEFORE the
         // hint gate to match the interaction generator's fraction order.
         let byte = lanes[0][L_W1P].clone() + sixteen.clone() * lanes[1][L_W1P].clone();
-        let stream = E::F::from(m31(STREAM_ID_CTILDE_ABSORB));
+        let stream = E::F::from(m31(self.ct_stream));
         let io_tuple = [stream, byte_pos, byte];
         eval.add_to_relation(RelationEntry::base(
             &self.relations.hash_io,
@@ -487,6 +490,7 @@ pub struct DecompInteraction {
 pub fn gen_decomp_interaction(
     witness: &MlDsaWitness,
     log_size: u32,
+    ct_stream: u32,
     relations: &DecompRelations,
 ) -> DecompInteraction {
     let rows = 1usize << log_size;
@@ -616,7 +620,7 @@ pub fn gen_decomp_interaction(
                 let v = lane_vals(witness, *i, 2 * p + lane);
                 byte += (v.w1p as u32) << (4 * lane);
             }
-            let tuple = [m31(STREAM_ID_CTILDE_ABSORB), m31(coset as u32), m31(byte)];
+            let tuple = [m31(ct_stream), m31(coset as u32), m31(byte)];
             (one, relations.hash_io.combine(&tuple))
         }
         None => (zero, one),

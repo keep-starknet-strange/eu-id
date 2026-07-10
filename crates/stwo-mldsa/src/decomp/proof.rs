@@ -168,7 +168,7 @@ fn build_components(
 ) -> Built {
     let decomp = FrameworkComponent::new(
         allocator,
-        DecompEval { log_size: decomp_log_size(), relations: relations.clone() },
+        DecompEval { log_size: decomp_log_size(), ct_stream: STREAM_ID_CTILDE_ABSORB, relations: relations.clone() },
         decomp_claimed_sum,
     );
     let mut rc = Vec::with_capacity(N_RC);
@@ -301,7 +301,7 @@ impl AirProver for DecompProver {
     fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
         let mut evals = gen_decomp_base_trace(&self.witness, decomp_log_size());
         // rc multiplicities from a dry-run interaction (relations not needed).
-        let dry = gen_decomp_interaction(&self.witness, decomp_log_size(), &DecompRelations::dummy());
+        let dry = gen_decomp_interaction(&self.witness, decomp_log_size(), STREAM_ID_CTILDE_ABSORB, &DecompRelations::dummy());
         self.w1_encode_bytes = dry.w1_encode_bytes.clone();
         self.rc_mult = RcKind::ALL
             .iter()
@@ -315,7 +315,7 @@ impl AirProver for DecompProver {
     }
     fn write_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
         let relations = self.relations.clone().expect("relations");
-        let interaction = gen_decomp_interaction(&self.witness, decomp_log_size(), &relations);
+        let interaction = gen_decomp_interaction(&self.witness, decomp_log_size(), STREAM_ID_CTILDE_ABSORB, &relations);
         let mut evals = interaction.trace;
         self.decomp_claimed_sum = interaction.claimed_sum;
 
