@@ -971,7 +971,7 @@ impl FrameworkEval for Sha256Eval {
                         .field_exposure
                         .yields()
                         .iter()
-                        .position(|y| y.block_idx == target_block)
+                        .position(|y| y.block_idx == *target_block)
                         .map(|yield_idx| selectors[yield_idx].clone())
                         .expect("target block has at least one selector");
                     for byte in &field_bytes {

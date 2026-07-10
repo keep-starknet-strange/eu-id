@@ -68,6 +68,12 @@ pub struct FieldByteYield {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FieldExposure {
     yields: Vec<FieldByteYield>,
+    // Memoized sorted-distinct projections of `yields`. `yield_column_slot`
+    // runs inside constraint evaluation (per packed row, per yield), so these
+    // must not be recomputed per call — the old alloc+sort per lookup was
+    // ~10% of single-core prove time.
+    decomposed_words: Vec<usize>,
+    target_blocks: Vec<usize>,
 }
 
 impl FieldExposure {
@@ -133,7 +139,17 @@ impl FieldExposure {
                 });
             }
         }
-        Self { yields }
+        let mut decomposed_words: Vec<usize> = yields.iter().map(|y| y.word_idx).collect();
+        decomposed_words.sort_unstable();
+        decomposed_words.dedup();
+        let mut target_blocks: Vec<usize> = yields.iter().map(|y| y.block_idx).collect();
+        target_blocks.sort_unstable();
+        target_blocks.dedup();
+        Self {
+            yields,
+            decomposed_words,
+            target_blocks,
+        }
     }
 
     /// Whether the provider is off (no field columns, no yields).
@@ -155,21 +171,15 @@ impl FieldExposure {
     /// The distinct message-word indices that must be byte-decomposed, sorted
     /// ascending. Each contributes `WORD_BYTES` byte columns; a yield's column
     /// is found by this word's position here plus its `byte_in_word`.
-    pub fn decomposed_words(&self) -> Vec<usize> {
-        let mut words: Vec<usize> = self.yields.iter().map(|y| y.word_idx).collect();
-        words.sort_unstable();
-        words.dedup();
-        words
+    pub fn decomposed_words(&self) -> &[usize] {
+        &self.decomposed_words
     }
 
     /// The distinct SHA block indices that contain at least one yielded field
     /// byte, sorted ascending. The SHA AIR uses this to allocate one fixed
     /// block selector per target block.
-    pub fn target_blocks(&self) -> Vec<usize> {
-        let mut blocks: Vec<usize> = self.yields.iter().map(|y| y.block_idx).collect();
-        blocks.sort_unstable();
-        blocks.dedup();
-        blocks
+    pub fn target_blocks(&self) -> &[usize] {
+        &self.target_blocks
     }
 
     /// Number of trace byte columns in the exposure (`WORD_BYTES` per distinct

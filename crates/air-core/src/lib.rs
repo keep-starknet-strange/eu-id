@@ -371,7 +371,18 @@ pub fn prove(
         .lifting_log_size
         .unwrap_or(max_constraint_log_degree_bound + config.fri_config.log_blowup_factor);
 
+    let timing = std::env::var_os("AIR_CORE_PROVE_TIMING").is_some();
+    let t_start = std::time::Instant::now();
+    let mut t_last = t_start;
+    let mut phase = |name: &str, t_last: &mut std::time::Instant| {
+        if timing {
+            eprintln!("air-core prove phase {name}: {:?}", t_last.elapsed());
+            *t_last = std::time::Instant::now();
+        }
+    };
+
     let twiddles = cached_twiddles(twiddle_log_size);
+    phase("twiddles", &mut t_last);
 
     let channel = &mut Ch::default();
     config.mix_into(channel);
@@ -395,7 +406,9 @@ pub fn prove(
     for (module, selected_ids) in modules.iter_mut().zip(&selected_preprocessed_ids) {
         module.write_selected_preprocessed(&mut tb, selected_ids);
     }
+    phase("tree0-write", &mut t_last);
     tb.commit(channel);
+    phase("tree0-commit", &mut t_last);
 
     for m in modules.iter() {
         m.mix_public(channel);
@@ -406,7 +419,9 @@ pub fn prove(
     for m in modules.iter_mut() {
         m.write_trace(&mut tb);
     }
+    phase("tree1-write", &mut t_last);
     tb.commit(channel);
+    phase("tree1-commit", &mut t_last);
 
     for m in modules.iter_mut() {
         m.draw_relations(channel);
@@ -418,10 +433,12 @@ pub fn prove(
     for m in modules.iter_mut() {
         m.write_interaction(&mut tb);
     }
+    phase("tree2-write", &mut t_last);
     for m in modules.iter() {
         m.mix_claimed_sums(channel);
     }
     tb.commit(channel);
+    phase("tree2-commit", &mut t_last);
 
     // Optional post-tree-2 transcript block. GKR lookup proofs live here:
     // their inputs are already committed (trees 1/2 plus relation draws), and
@@ -451,7 +468,13 @@ pub fn prove(
     }
     let component_refs: Vec<&dyn ComponentProver<SimdBackend>> =
         modules.iter().flat_map(|m| m.prover_components()).collect();
-    stark_prove::<SimdBackend, Mc>(&component_refs, channel, commitment_scheme)
+    phase("build-components", &mut t_last);
+    let result = stark_prove::<SimdBackend, Mc>(&component_refs, channel, commitment_scheme);
+    phase("stark-prove(composition+FRI+open)", &mut t_last);
+    if timing {
+        eprintln!("air-core prove TOTAL: {:?}", t_start.elapsed());
+    }
+    result
 }
 
 /// Errors from [`verify_with_expected_preprocessed_root`].
