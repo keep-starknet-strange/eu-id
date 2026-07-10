@@ -48,12 +48,6 @@ pub fn service_claimed_sums_len() -> usize {
     3 + TableKind::ALL.len()
 }
 
-fn keccak_log_size(n_perms_total: usize) -> u32 {
-    (n_perms_total as u32)
-        .next_power_of_two()
-        .ilog2()
-        .max(stwo::prover::backend::simd::m31::LOG_N_LANES)
-}
 fn round_log_size(n_perms_total: usize) -> u32 {
     ((n_perms_total * crate::constants::N_ROUNDS) as u32)
         .next_power_of_two()
@@ -113,18 +107,22 @@ impl Built {
 
 fn preprocessed_ids(jobs: &JobList) -> Vec<PreProcessedColumnId> {
     let mut ids = sponge_v::schedule_ids(jobs);
+    ids.extend(keccak::schedule_ids(jobs.n_perms_total()));
     ids.extend(tables_air::all_preprocessed_column_ids());
     ids
 }
 
 fn preprocessed_sizes(jobs: &JobList) -> Vec<u32> {
+    let keccak_claim = keccak::Claim { n_perms: jobs.n_perms_total() };
     let mut sizes = vec![jobs.log_size(); sponge_v::N_SCHEDULE_COLS];
+    sizes.extend(vec![keccak_claim.log_size(); keccak::N_SCHEDULE_COLS]);
     sizes.extend(tables_air::all_preprocessed_log_sizes());
     sizes
 }
 
 fn gen_preprocessed(jobs: &JobList) -> Vec<air_core::PreprocessedColumnEval> {
     let mut cols = sponge_v::gen_schedule_preprocessed(jobs);
+    cols.extend(keccak::gen_schedule_preprocessed(jobs.n_perms_total()));
     cols.extend(tables_air::generate_preprocessed_trace());
     cols
 }
@@ -132,7 +130,7 @@ fn gen_preprocessed(jobs: &JobList) -> Vec<air_core::PreprocessedColumnEval> {
 fn layout_for(jobs: &JobList) -> TreeLayout {
     let ls = jobs.log_size();
     let n = jobs.n_perms_total();
-    let keccak_claim = keccak::Claim { log_size: keccak_log_size(n) };
+    let keccak_claim = keccak::Claim { n_perms: n };
     let round_claim = keccak_round::Claim { log_size: round_log_size(n) };
 
     let mut trace = vec![ls; sponge_v::N_BASE_COLS];
@@ -175,7 +173,7 @@ fn build_components(
     let keccak = FrameworkComponent::new(
         allocator,
         keccak::Eval {
-            claim: keccak::Claim { log_size: keccak_log_size(n) },
+            claim: keccak::Claim { n_perms: n },
             relations: relations.clone(),
         },
         claims.keccak,
@@ -333,7 +331,7 @@ impl AirProver for KeccakServiceProver {
         let n = self.jobs.n_perms_total();
         self.jobs
             .log_size()
-            .max(keccak_log_size(n))
+            .max(keccak::Claim { n_perms: n }.log_size())
             .max(round_log_size(n))
             .max(TableKind::Dense.log_size())
     }

@@ -111,5 +111,11 @@ harness = false
 name = "fri_sweep"
 required-features = ["fri-sweep"]
 
+# Full-PQ mdoc perf probe (S3 campaign gate). Hosted build only:
+# --no-default-features --features "p256,ml-dsa".
+[[example]]
+name = "pq_perf_probe"
+required-features = ["ml-dsa"]
+
 [lints]
 workspace = true

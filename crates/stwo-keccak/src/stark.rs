@@ -98,16 +98,9 @@ pub struct PermWitness {
 /// lookups; callers add each sponge's xor/conv uses via
 /// [`TableMultiplicities::add_sponge`].
 pub fn build_perm_witness(perm_inputs: &[[PackedM31; N_BYTES_IN_STATE + 1]]) -> PermWitness {
-    // keccak permutations from the sponge's requests. The sponge yields each
-    // request from its single lane-0 instance, but keccak proves the perms
-    // packed one-per-lane; both carry the perm_id in the KeccakState tuple, so
-    // they balance regardless of lane position. Repack the splatted per-perm
-    // rows (each currently `[state|perm_id]` on all 16 lanes) into lane-major
-    // vec-rows holding N_LANES distinct perms each.
-    let n_perms = perm_inputs.len();
-    let keccak_inputs = pack_perm_inputs(perm_inputs);
-    let (keccak_claim, keccak_ct, keccak_data) =
-        keccak::Claim::generate_trace(keccak_inputs, n_perms);
+    // keccak boundary rows from the sponge's requests (25 rows per perm; the
+    // rotated wrapper consumes the splatted per-perm rows directly).
+    let (keccak_claim, keccak_trace, keccak_data) = keccak::Claim::generate_trace(perm_inputs);
 
     // keccak_round rows: expand each permutation into 24 round rows
     // `[state(200) | round_index]`.
@@ -145,7 +138,7 @@ pub fn build_perm_witness(perm_inputs: &[[PackedM31; N_BYTES_IN_STATE + 1]]) -> 
 
     PermWitness {
         keccak_claim,
-        keccak_trace: keccak_ct.to_evals().into_iter().collect(),
+        keccak_trace,
         keccak_data,
         round_claim,
         round_trace: round_ct.to_evals().into_iter().collect(),
@@ -182,31 +175,6 @@ fn build_witness(message: &[u8], n_squeeze: usize) -> KeccakWitness {
         table_mult,
         io_data,
     }
-}
-
-/// Repack splatted per-perm `[state|perm_id]` rows (lane 0 is the real data)
-/// into lane-major vec-rows holding `N_LANES` distinct perms each.
-fn pack_perm_inputs(
-    perms: &[[PackedM31; N_BYTES_IN_STATE + 1]],
-) -> Vec<[PackedM31; N_BYTES_IN_STATE + 1]> {
-    use stwo::core::fields::m31::M31;
-    use stwo::prover::backend::simd::m31::N_LANES;
-    let n_vec_rows = perms.len().div_ceil(N_LANES);
-    let mut rows = Vec::with_capacity(n_vec_rows);
-    for vr in 0..n_vec_rows {
-        let mut cols = [[M31::from(0u32); N_LANES]; N_BYTES_IN_STATE + 1];
-        for lane in 0..N_LANES {
-            let idx = vr * N_LANES + lane;
-            if idx >= perms.len() {
-                break;
-            }
-            for c in 0..N_BYTES_IN_STATE + 1 {
-                cols[c][lane] = perms[idx][c].to_array()[0];
-            }
-        }
-        rows.push(std::array::from_fn(|c| PackedM31::from_array(cols[c])));
-    }
-    rows
 }
 
 /// Pack per-lane `(state, round_idx)` instances into `[state|round]` vec-rows,
@@ -320,12 +288,22 @@ fn mix_public_common(
     }
 }
 
-fn preprocessed_ids() -> Vec<PreProcessedColumnId> {
-    tables_air::all_preprocessed_column_ids()
+fn preprocessed_ids(n_perms: usize) -> Vec<PreProcessedColumnId> {
+    let mut ids = keccak::schedule_ids(n_perms);
+    ids.extend(tables_air::all_preprocessed_column_ids());
+    ids
 }
 
-fn tables_layout() -> Vec<u32> {
-    tables_air::all_preprocessed_log_sizes()
+fn preprocessed_layout(keccak_claim: &keccak::Claim) -> Vec<u32> {
+    let mut sizes = vec![keccak_claim.log_size(); keccak::N_SCHEDULE_COLS];
+    sizes.extend(tables_air::all_preprocessed_log_sizes());
+    sizes
+}
+
+fn gen_preprocessed(n_perms: usize) -> Vec<TraceCol> {
+    let mut cols = keccak::gen_schedule_preprocessed(n_perms);
+    cols.extend(tables_air::generate_preprocessed_trace());
+    cols
 }
 
 impl Air for KeccakProver {
@@ -342,7 +320,7 @@ impl Air for KeccakProver {
         self.ic().claimed_sums()
     }
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
-        preprocessed_ids()
+        preprocessed_ids(self.witness.shape.n_perms())
     }
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
         self.components = Some(Components::new(
@@ -364,19 +342,24 @@ impl Air for KeccakProver {
 impl AirProver for KeccakProver {
     fn max_log_size(&self) -> u32 {
         // The largest committed domain across all components — the 2^16 byte-pair
-        // tables dominate for small messages, but the round component can exceed
-        // them for long inputs. Twiddles must cover the max.
+        // tables dominate for small messages, but the round/keccak components can
+        // exceed them for long inputs. Twiddles must cover the max.
         self.witness
             .round_claim
             .log_size
+            .max(self.witness.keccak_claim.log_size())
             .max(tables_air::TableKind::Dense.log_size())
     }
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>) {
-        tb.extend_evals(tables_air::generate_preprocessed_trace());
+        tb.extend_evals(gen_preprocessed(self.witness.shape.n_perms()));
     }
     fn preprocessed_column_fingerprints(&mut self) -> Vec<PreprocessedColumnFingerprint> {
-        let evals = tables_air::generate_preprocessed_trace();
-        fingerprint_preprocessed_columns("stwo_keccak::KeccakProver", &preprocessed_ids(), &evals)
+        let n_perms = self.witness.shape.n_perms();
+        fingerprint_preprocessed_columns(
+            "stwo_keccak::KeccakProver",
+            &preprocessed_ids(n_perms),
+            &gen_preprocessed(n_perms),
+        )
     }
     fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>) {
         let mut evals = Vec::new();
@@ -424,7 +407,7 @@ impl Air for KeccakVerifier {
         self.relations = Some(KeccakRelations::draw(channel));
     }
     fn layout(&self) -> TreeLayout {
-        let keccak_claim = keccak::Claim { log_size: keccak_log_size(&self.shape) };
+        let keccak_claim = keccak::Claim { n_perms: self.shape.n_perms() };
         let round_claim = keccak_round::Claim { log_size: round_log_size(&self.shape) };
         layout_for(&self.shape, &keccak_claim, &round_claim, &self.message, &self.output)
     }
@@ -432,14 +415,14 @@ impl Air for KeccakVerifier {
         self.ic.claimed_sums()
     }
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
-        preprocessed_ids()
+        preprocessed_ids(self.shape.n_perms())
     }
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
         let sponge_claim = sponge::Claim {
             log_size: stwo::prover::backend::simd::m31::LOG_N_LANES,
             shape: self.shape,
         };
-        let keccak_claim = keccak::Claim { log_size: keccak_log_size(&self.shape) };
+        let keccak_claim = keccak::Claim { n_perms: self.shape.n_perms() };
         let round_claim = keccak_round::Claim { log_size: round_log_size(&self.shape) };
         self.components = Some(Components::new(
             allocator,
@@ -457,10 +440,6 @@ impl Air for KeccakVerifier {
     }
 }
 
-fn keccak_log_size(shape: &Shape) -> u32 {
-    let n = shape.n_perms();
-    std::cmp::max((n as u32).next_power_of_two().ilog2(), stwo::prover::backend::simd::m31::LOG_N_LANES)
-}
 fn round_log_size(shape: &Shape) -> u32 {
     let n = shape.n_perms() * crate::constants::N_ROUNDS;
     std::cmp::max((n as u32).next_power_of_two().ilog2(), stwo::prover::backend::simd::m31::LOG_N_LANES)
@@ -508,7 +487,7 @@ fn layout_for(
     }
 
     TreeLayout {
-        preprocessed: tables_layout(),
+        preprocessed: preprocessed_layout(keccak_claim),
         trace,
         interaction,
     }

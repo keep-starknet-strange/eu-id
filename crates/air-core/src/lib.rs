@@ -381,6 +381,31 @@ pub fn prove(
         }
     };
 
+    // Env-gated shape census: per module, per tree, the column count, the
+    // log-size histogram, and the committed cells. QM31 interaction columns
+    // are already expanded to M31 columns in `layout()`, so `cols` here is
+    // directly the proof-size unit (queries × columns).
+    if std::env::var_os("AIR_CORE_SHAPE_DUMP").is_some() {
+        for (index, module) in modules.iter().enumerate() {
+            let layout = module.layout();
+            for (tree, sizes) in [
+                ("preprocessed", &layout.preprocessed),
+                ("trace", &layout.trace),
+                ("interaction", &layout.interaction),
+            ] {
+                let mut hist = std::collections::BTreeMap::<u32, usize>::new();
+                for &s in sizes.iter() {
+                    *hist.entry(s).or_insert(0) += 1;
+                }
+                let cells: u64 = sizes.iter().map(|&s| 1u64 << s).sum();
+                eprintln!(
+                    "air-core shape module={index} tree={tree} cols={} cells={cells} hist={hist:?}",
+                    sizes.len()
+                );
+            }
+        }
+    }
+
     let twiddles = cached_twiddles(twiddle_log_size);
     phase("twiddles", &mut t_last);
 
