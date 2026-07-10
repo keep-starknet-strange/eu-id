@@ -651,7 +651,8 @@ mod hosted_mode {
     /// CM-3 same-arm malformed claim tree: a fully-PQ proof produced for one
     /// statement is presented against a DIFFERENT fully-PQ statement. The
     /// claim trees are bound to statement A's public inputs, so verifying
-    /// under statement B must reject.
+    /// under statement B must reject. Extended for S1: a malformed keccak
+    /// SERVICE claim vector (missing / truncated / value-tampered) rejects.
     #[test]
     fn mldsa_malformed_claim_tree_rejects() {
         let (extracted_a, statement_a) = full_pq_extracted_and_statement_for(b"claim-tree-A");
@@ -661,6 +662,35 @@ mod hosted_mode {
         verify_mdoc_circuit(&proof_a, &statement_a).expect("control: A verifies under A");
         verify_mdoc_circuit(&proof_a, &statement_b)
             .expect_err("proof A must not verify against a different statement B");
+
+        // S1 service claims, presence gate: an ML-DSA statement whose proof
+        // carries NO service claim vector rejects at the shape gate.
+        let mut missing_service = proof_a.clone();
+        missing_service.keccak_service_claimed_sums = None;
+        verify_mdoc_circuit(&missing_service, &statement_a)
+            .expect_err("missing keccak service claim vector must reject");
+
+        // S1 service claims, length gate: a truncated vector rejects BEFORE
+        // construction (no panic path).
+        let mut short_service = proof_a.clone();
+        short_service
+            .keccak_service_claimed_sums
+            .as_mut()
+            .expect("proof carries service claims")
+            .pop();
+        verify_mdoc_circuit(&short_service, &statement_a)
+            .expect_err("truncated keccak service claim vector must reject");
+
+        // S1 service claims, value tamper: swapping two claimed sums keeps the
+        // shape but diverges the transcript / LogUp total → STARK reject.
+        let mut tampered_service = proof_a.clone();
+        tampered_service
+            .keccak_service_claimed_sums
+            .as_mut()
+            .expect("proof carries service claims")
+            .swap(0, 1);
+        verify_mdoc_circuit(&tampered_service, &statement_a)
+            .expect_err("tampered keccak service claimed sums must reject");
     }
 
     /// ZK/A1 smoke: two DISTINCT fully-PQ credentials satisfying the SAME

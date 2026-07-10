@@ -37,5 +37,11 @@ pub mod verifier_native;
 pub mod witness;
 
 pub use reference::{verify, verify_internals, MlDsaError, RejectReason, VerifyTrace};
+
+/// Re-export: the keccak-service types appear in this crate's public hosted
+/// API (`MlDsaProver::hosted` takes a `SharedKeccakRelations`; hosts build the
+/// proof-wide `KeccakServiceProver`/`Verifier`), so hosts get the exact same
+/// crate version without a separate dependency edge.
+pub use stwo_keccak;
 pub use types::MlDsaVerifyInput;
 pub use witness::{generate_witness, MlDsaWitness, WitnessError};

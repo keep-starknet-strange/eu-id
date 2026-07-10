@@ -60,8 +60,13 @@ use stwo_constraint_framework::{
 #[cfg(feature = "ml-dsa")]
 use stwo_mldsa::statement::HOSTED_MSG_FIELD_ID;
 #[cfg(all(feature = "ml-dsa", not(feature = "ec-coprocessor")))]
+use stwo_mldsa::stwo_keccak::relations::SharedKeccakRelations;
+#[cfg(all(feature = "ml-dsa", not(feature = "ec-coprocessor")))]
+use stwo_mldsa::stwo_keccak::service::{KeccakServiceProver, KeccakServiceVerifier};
+#[cfg(all(feature = "ml-dsa", not(feature = "ec-coprocessor")))]
 use stwo_mldsa::statement::{
-    MlDsaProver as MlDsaStatementProver, MlDsaVerifier as MlDsaStatementVerifier,
+    keccak_job_shapes, MlDsaProver as MlDsaStatementProver,
+    MlDsaVerifier as MlDsaStatementVerifier,
 };
 #[cfg(feature = "ml-dsa")]
 use stwo_mldsa::types::MlDsaVerifyInput;
@@ -146,6 +151,23 @@ const MDOC_ISSUER_MLDSA_NAMESPACE: &str = "mdoc/issuer";
 const MDOC_DEVICE_MLDSA_NAMESPACE: &str = "mdoc/device";
 #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
 const MDOC_REVOCATION_MLDSA_NAMESPACE: &str = "mdoc/ts13/revocation";
+/// Per-role HashIo stream-id bases for hosted ML-DSA modules (S1): every
+/// instance shares the ONE keccak-service relation set, so stream ids must be
+/// globally unique. Prover and verifier must agree per role; each base must be
+/// a multiple of [`stwo_mldsa::statement::STREAM_BASE_STRIDE`] (0x100/0x200/
+/// 0x300 all are).
+#[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
+const MDOC_ISSUER_MLDSA_STREAM_BASE: u32 = 0x100;
+#[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
+const MDOC_DEVICE_MLDSA_STREAM_BASE: u32 = 0x200;
+#[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
+const MDOC_REVOCATION_MLDSA_STREAM_BASE: u32 = 0x300;
+#[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
+const _: () = assert!(
+    MDOC_ISSUER_MLDSA_STREAM_BASE % stwo_mldsa::statement::STREAM_BASE_STRIDE == 0
+        && MDOC_DEVICE_MLDSA_STREAM_BASE % stwo_mldsa::statement::STREAM_BASE_STRIDE == 0
+        && MDOC_REVOCATION_MLDSA_STREAM_BASE % stwo_mldsa::statement::STREAM_BASE_STRIDE == 0
+);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MdocPidRequest {
@@ -3931,6 +3953,12 @@ pub struct MdocCircuitProof {
     /// `Some` iff an ML-DSA revocation signature is present (biconditional).
     #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
     pub revocation_mldsa: Option<MdocMlDsaClaims>,
+    /// The proof-wide keccak SERVICE claimed sums (`[sponge_v, keccak, round,
+    /// tables ×9]`) — `Some` iff any hosted ML-DSA instance is present
+    /// (biconditional, gated at verify). The verifier rebuilds the service's
+    /// job shapes from public statement data; only the sums travel here.
+    #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
+    pub keccak_service_claimed_sums: Option<Vec<QM31>>,
     /// `Some` iff the device is P-256 (ES256); `None` for ML-DSA devices.
     #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
     device_p256_claim: Option<P256CurrentAirProofClaim>,
@@ -5690,6 +5718,10 @@ fn prove_or_root_mdoc(
         .map(|_| SharedDigestRelation::new())
         .collect();
     let issuer_field = SharedFieldRelation::new();
+    // The proof-wide keccak service's relations handle (S1): drawn ONCE by the
+    // service module, consumed by every hosted ML-DSA instance.
+    #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
+    let mldsa_keccak_handle = SharedKeccakRelations::new();
     #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
     let device_field = statement
         .device_input
@@ -5796,10 +5828,14 @@ fn prove_or_root_mdoc(
         .map(|input| -> Result<MlDsaStatementProver, Error> {
             let witness = stwo_mldsa::witness::generate_witness(input)
                 .map_err(|error| Error::Prove(format!("mldsa witness: {error:?}")))?;
-            Ok(
-                MlDsaStatementProver::hosted(witness, input.clone(), issuer_field.clone())
-                    .with_instance_namespace(MDOC_ISSUER_MLDSA_NAMESPACE),
+            Ok(MlDsaStatementProver::hosted(
+                witness,
+                input.clone(),
+                issuer_field.clone(),
+                mldsa_keccak_handle.clone(),
             )
+            .with_instance_namespace(MDOC_ISSUER_MLDSA_NAMESPACE)
+            .with_stream_base(MDOC_ISSUER_MLDSA_STREAM_BASE))
         })
         .transpose()?;
     // ML-DSA device: no digest consumer exists (no device bridge), mirror the
@@ -5837,8 +5873,10 @@ fn prove_or_root_mdoc(
                 device_field
                     .clone()
                     .expect("device field relation exists for an ML-DSA device"),
+                mldsa_keccak_handle.clone(),
             )
-            .with_instance_namespace(MDOC_DEVICE_MLDSA_NAMESPACE))
+            .with_instance_namespace(MDOC_DEVICE_MLDSA_NAMESPACE)
+            .with_stream_base(MDOC_DEVICE_MLDSA_STREAM_BASE))
         })
         .transpose()?;
     let mut mso_sha = match (&mso_sha_params, &mso_digest) {
@@ -5896,11 +5934,34 @@ fn prove_or_root_mdoc(
                 revocation_message_field
                     .clone()
                     .expect("revocation field relation exists with a revocation signature"),
+                mldsa_keccak_handle.clone(),
             )
             .with_instance_namespace(MDOC_REVOCATION_MLDSA_NAMESPACE)
+            .with_stream_base(MDOC_REVOCATION_MLDSA_STREAM_BASE)
             .with_private_message())
         })
         .transpose()?;
+    // The ONE proof-wide keccak service (S1): built from the concatenated
+    // sponge jobs of every present hosted ML-DSA instance, in fixed role order
+    // (issuer, device, revocation) — the verifier rebuilds the same list from
+    // public data. Present iff any instance is. Composed BEFORE the first
+    // instance in module order so its `draw_relations` publishes the shared
+    // keccak relations every consumer draws.
+    #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
+    let mut mldsa_keccak_service = {
+        let mut shapes = Vec::new();
+        let mut streams = Vec::new();
+        for prover in [&issuer_mldsa, &device_mldsa, &revocation_mldsa]
+            .into_iter()
+            .flatten()
+        {
+            let (job_shapes, job_streams) = prover.keccak_jobs();
+            shapes.extend(job_shapes);
+            streams.extend(job_streams);
+        }
+        (!shapes.is_empty())
+            .then(|| KeccakServiceProver::new(shapes, streams, mldsa_keccak_handle.clone()))
+    };
     #[cfg(feature = "p256")]
     let mut revocation_p256 = revocation_draft
         .as_ref()
@@ -6111,8 +6172,15 @@ fn prove_or_root_mdoc(
             // P-256 issuer order is EXACTLY the historical one (shape gate);
             // an ML-DSA issuer swaps [issuer_p256, issuer_bridge] for the
             // hosted mldsa module placed right after issuer_sha (which draws
-            // the shared field relation the mldsa msg bridge consumes).
+            // the shared field relation the mldsa msg bridge consumes). The
+            // proof-wide keccak SERVICE sits right after sha_tables — before
+            // every hosted ML-DSA consumer, so its relations draw publishes
+            // the shared handle first.
             let mut modules: Vec<&mut dyn AirProver> = vec![&mut sha_tables];
+            #[cfg(feature = "ml-dsa")]
+            if let Some(mldsa_keccak_service) = mldsa_keccak_service.as_mut() {
+                modules.push(mldsa_keccak_service);
+            }
             #[cfg(feature = "p256")]
             if let Some(issuer_p256) = issuer_p256.as_mut() {
                 modules.push(issuer_p256);
@@ -6237,6 +6305,10 @@ fn prove_or_root_mdoc(
         device_mldsa: device_mldsa.as_ref().map(MdocMlDsaClaims::from_prover),
         #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
         revocation_mldsa: revocation_mldsa.as_ref().map(MdocMlDsaClaims::from_prover),
+        #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
+        keccak_service_claimed_sums: mldsa_keccak_service
+            .as_ref()
+            .map(|service| service.claimed_sums()),
         #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
         device_p256_claim: device_p256
             .as_ref()
@@ -6561,6 +6633,24 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
                 ))
             }
         }
+        // Keccak service claims (S1): present iff ANY hosted ML-DSA instance
+        // is, with the exact `[sponge_v, keccak, round, tables ×9]` length —
+        // shape-gated BEFORE construction (a short vector would panic inside
+        // `ServiceClaims::from_flat`).
+        let any_mldsa_instance = statement.issuer_input.is_mldsa()
+            || statement.device_input.is_mldsa()
+            || has_mldsa_revocation_signature;
+        match (&proof.keccak_service_claimed_sums, any_mldsa_instance) {
+            (Some(sums), true)
+                if sums.len()
+                    == stwo_mldsa::stwo_keccak::service::service_claimed_sums_len() => {}
+            (None, false) => {}
+            _ => {
+                return Err(Error::Verify(
+                    "mdoc proof keccak service claims do not match the statement".to_string(),
+                ))
+            }
+        }
     }
     let mso_digest = has_revocation_range.then(SharedDigestRelation::new);
     let mso_field = has_revocation_range.then(SharedFieldRelation::new);
@@ -6578,6 +6668,9 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
         .map(|_| SharedDigestRelation::new())
         .collect();
     let issuer_field = SharedFieldRelation::new();
+    // The proof-wide keccak service's relations handle (mirror of the prover).
+    #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
+    let mldsa_keccak_handle = SharedKeccakRelations::new();
     let attribute_fields: Vec<_> = (0..attribute_count)
         .map(|_| SharedFieldRelation::new())
         .collect();
@@ -6696,8 +6789,10 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
                 claims.sib_stream_len,
                 claims.sib_squeezed_len,
                 issuer_field.clone(),
+                mldsa_keccak_handle.clone(),
             )
-            .with_instance_namespace(MDOC_ISSUER_MLDSA_NAMESPACE),
+            .with_instance_namespace(MDOC_ISSUER_MLDSA_NAMESPACE)
+            .with_stream_base(MDOC_ISSUER_MLDSA_STREAM_BASE),
         ),
         _ => None,
     };
@@ -6739,8 +6834,10 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
                 device_field
                     .clone()
                     .expect("device field relation exists for an ML-DSA device"),
+                mldsa_keccak_handle.clone(),
             )
-            .with_instance_namespace(MDOC_DEVICE_MLDSA_NAMESPACE),
+            .with_instance_namespace(MDOC_DEVICE_MLDSA_NAMESPACE)
+            .with_stream_base(MDOC_DEVICE_MLDSA_STREAM_BASE),
         ),
         _ => None,
     };
@@ -6804,14 +6901,53 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
                         revocation_message_field
                             .clone()
                             .expect("revocation field relation exists with a revocation signature"),
+                        mldsa_keccak_handle.clone(),
                     )
                     .with_instance_namespace(MDOC_REVOCATION_MLDSA_NAMESPACE)
+                    .with_stream_base(MDOC_REVOCATION_MLDSA_STREAM_BASE)
                     .with_private_message()
                 },
             )
         }
         None => None,
     };
+    // The proof-wide keccak service verifier (S1): job shapes rebuilt from
+    // PUBLIC data only, in the prover's fixed role order (issuer, device,
+    // revocation) — message lengths from the statement (the revocation
+    // message is the fixed 20-byte private-message window), sib stream
+    // lengths from the shape-gated per-role claim trees, stream bases from
+    // the role constants. Claimed sums come from the proof.
+    #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
+    let mut mldsa_keccak_service = proof.keccak_service_claimed_sums.as_ref().map(|sums| {
+        let mut shapes = Vec::new();
+        if let Some(input) = statement.issuer_input.as_mldsa() {
+            let claims = proof.mldsa.as_ref().expect("issuer claim tree gated above");
+            shapes.extend(keccak_job_shapes(
+                input.message.len(),
+                claims.sib_stream_len,
+                MDOC_ISSUER_MLDSA_STREAM_BASE,
+            ));
+        }
+        if let Some(input) = statement.device_input.as_mldsa() {
+            let claims = proof
+                .device_mldsa
+                .as_ref()
+                .expect("device claim tree gated above");
+            shapes.extend(keccak_job_shapes(
+                input.message.len(),
+                claims.sib_stream_len,
+                MDOC_DEVICE_MLDSA_STREAM_BASE,
+            ));
+        }
+        if let Some(claims) = proof.revocation_mldsa.as_ref() {
+            shapes.extend(keccak_job_shapes(
+                TS13_REVOCATION_MESSAGE_LEN,
+                claims.sib_stream_len,
+                MDOC_REVOCATION_MLDSA_STREAM_BASE,
+            ));
+        }
+        KeccakServiceVerifier::new(shapes, sums.clone(), mldsa_keccak_handle.clone())
+    });
 
     let attribute_exposures: Vec<_> = (0..statement.attributes.len())
         .map(|index| attribute_exposure(statement, index))
@@ -7027,8 +7163,14 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
 
     #[cfg(not(feature = "ec-coprocessor"))]
     let mut modules: Vec<&mut dyn Air> = {
-        // Mirror the prover's module order exactly (transcript identity).
+        // Mirror the prover's module order exactly (transcript identity):
+        // the keccak service sits right after sha_tables, before every hosted
+        // ML-DSA consumer.
         let mut modules: Vec<&mut dyn Air> = vec![&mut sha_tables];
+        #[cfg(feature = "ml-dsa")]
+        if let Some(mldsa_keccak_service) = mldsa_keccak_service.as_mut() {
+            modules.push(mldsa_keccak_service);
+        }
         #[cfg(feature = "p256")]
         if let Some(issuer_p256) = issuer_p256.as_mut() {
             modules.push(issuer_p256);

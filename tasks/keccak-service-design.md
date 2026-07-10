@@ -141,3 +141,10 @@ Soundness invariants:
 | S2 FRI/zstd/round-batch | size <1MB | 128-bit budget preserved (queries×log_blowup+pow=128) |
 | S3 round cells + caches | prove <1s | suites green |
 | S4 verify path | verify <100ms cold | suites green |
+
+S1 MEASURED (2026-07-10, mdoc S1 wiring; full-PQ issuer+device+revocation,
+RAYON_NUM_THREADS=1, --release, production PCS): prove 77.14s (baseline 72.7s —
+flat: prove is not column-constant-bound; S3 round cells is the prove lever),
+verify 275.8ms (was 372.7ms, −26%), proof 14,891,983 B (was 34,424,854 B,
+−57%). Gates: mdoc_mldsa 24/24 (p256+ml-dsa) + 18/18 (quantum-only) green,
+credential_pipeline green, quantum-only dep tree clean.
