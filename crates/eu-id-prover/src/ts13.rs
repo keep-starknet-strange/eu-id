@@ -1,9 +1,13 @@
 use ciborium::value::Value;
+#[cfg(feature = "p256")]
 use ecdsa::signature::hazmat::PrehashVerifier;
+#[cfg(feature = "p256")]
 use p256::ecdsa::{Signature as P256Signature, VerifyingKey};
+#[cfg(feature = "p256")]
 use p256::EncodedPoint;
 use sha2::{Digest, Sha256};
 use stwo::core::vcs::blake2_hash::Blake2sHash;
+#[cfg(feature = "p256")]
 use stwo_p256::types::{AffinePoint, Signature};
 
 use crate::mdoc::{
@@ -524,6 +528,7 @@ impl Ts13RevocationStatement {
         // Scheme-matched signature verification; any key/signature scheme
         // mismatch is rejected fail-closed before touching either arm.
         match (&self.revocation_public_key, &witness.signature) {
+            #[cfg(feature = "p256")]
             (MdocRevocationKey::Ecdsa(public_key), MdocRevocationSignature::Ecdsa(signature)) => {
                 let verifying_key = verifying_key_from_affine(public_key)?;
                 let signature = p256_signature_from_stwo(signature)?;
@@ -548,7 +553,7 @@ impl Ts13RevocationStatement {
                 }
                 Ok(())
             }
-            #[cfg(feature = "ml-dsa")]
+            #[cfg(all(feature = "ml-dsa", feature = "p256"))]
             _ => Err(Ts13RevocationError::SchemeMismatch),
         }
     }
@@ -577,6 +582,7 @@ pub fn ts13_revocation_message_hash(id_lo: u64, id_hi: u64, epoch: u32) -> [u8; 
     Sha256::digest(ts13_revocation_message(id_lo, id_hi, epoch)).into()
 }
 
+#[cfg(feature = "p256")]
 fn verifying_key_from_affine(
     public_key: &AffinePoint,
 ) -> Result<VerifyingKey, Ts13RevocationError> {
@@ -588,6 +594,7 @@ fn verifying_key_from_affine(
     VerifyingKey::from_encoded_point(&encoded).map_err(|_| Ts13RevocationError::InvalidPublicKey)
 }
 
+#[cfg(feature = "p256")]
 fn p256_signature_from_stwo(signature: &Signature) -> Result<P256Signature, Ts13RevocationError> {
     let mut bytes = Vec::with_capacity(64);
     bytes.extend_from_slice(&signature.r.0);

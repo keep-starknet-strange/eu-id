@@ -22,11 +22,16 @@ name = "euid_zk_sdk"
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [features]
-# The SDK statement-binding path (`mdoc_statement_matches_public_statement`) is
-# written against the `ec-coprocessor` `MdocPublicStatement` shape, so the SDK
-# always pulls `eu-id-prover` with its default (`ec-coprocessor`, which implies
-# `p256`). `ml-dsa` forwards through so an ML-DSA issuer scheme can be compiled
-# in alongside; `p256` is forwarded for symmetry (already implied by the copro).
+# The default SDK is the classical product: the `ec-coprocessor` P-256 issuer
+# path plus the coprocessor-shaped statement-binding layer
+# (`mdoc_statement_matches_public_statement` is written against
+# `MdocPublicStatement`). The `quantum-safe-mdoc` build swaps the whole
+# classical stack out (G8 gate: no p256 / ecdsa / stwo-p256 /
+# eu-id-ec-coprocessor in the tree) and binds statements against the in-STARK
+# `MdocCircuitStatement` shape instead. At least one of the two must be on.
+default = ["p256-mdoc"]
+p256-mdoc = ["p256", "eu-id-prover/ec-coprocessor"]
+quantum-safe-mdoc = ["ml-dsa", "eu-id-prover/quantum-safe-mdoc"]
 # Pulls the binding generator (clap, cargo_metadata, …) into the build. Needed
 # ONLY for the `uniffi-bindgen` bin — kept off by default so the SDK cdylib
 # does not link the whole generator toolchain into the `.so`.
@@ -41,7 +46,7 @@ ml-dsa = ["eu-id-prover/ml-dsa"]
 # `AffinePoint` from the UniFFI types; Phase F wires the SDK product path
 # through `prove_mdoc` / `verify_mdoc`, so this is now a proving dependency (it
 # drags the whole STWO stack into the cdylib — that footprint is 9.3's concern).
-eu-id-prover = { path = "../eu-id-prover" }
+eu-id-prover = { path = "../eu-id-prover", default-features = false }
 uniffi = { version = "0.29" }
 thiserror = "2.0.18"
 # Deterministic CBOR: we build an explicitly-ordered `ciborium::value::Value`

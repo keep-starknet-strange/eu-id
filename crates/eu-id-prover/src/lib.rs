@@ -108,6 +108,7 @@ compile_error!(
 
 pub(crate) mod claimed_sum_blinder;
 pub mod credential;
+#[cfg(feature = "p256")]
 pub mod fixtures;
 pub mod generator;
 pub mod mdoc;
@@ -115,6 +116,7 @@ pub mod mdoc;
 pub(crate) mod mdoc_mac;
 mod mdoc_validity;
 mod mdoc_window_bind;
+#[cfg(feature = "p256")]
 pub mod nonce;
 #[cfg(feature = "ec-coprocessor")]
 mod public_digest_bind;
@@ -123,7 +125,9 @@ mod shape_dump;
 pub mod ts13;
 
 pub use credential::Credential;
-pub use generator::{IssuerKey, PipelineWitness, Policy, SignedCredential};
+pub use generator::Policy;
+#[cfg(feature = "p256")]
+pub use generator::{IssuerKey, PipelineWitness, SignedCredential};
 #[cfg(not(feature = "ec-coprocessor"))]
 pub use mdoc::{
     MdocCircuitProof as MdocProof, MdocCircuitStatement as MdocStatement, MdocPidRequest,
@@ -132,6 +136,7 @@ pub use mdoc::{
 pub use mdoc::{
     MdocCircuitProof as MdocProof, MdocPidRequest, MdocPublicStatement as MdocStatement,
 };
+#[cfg(feature = "p256")]
 pub use nonce::{
     nonce_expected_preprocessed_root, nonce_signature_message, prove_nonce_signature,
     verify_nonce_signature, verify_nonce_signature_with_preprocessed_root, NonceSignatureProof,
@@ -147,6 +152,7 @@ pub use predicates::Date;
 // set from this without depending on `predicates` directly.
 pub use predicates::all_nationality_codes;
 
+#[cfg(feature = "p256")]
 use serde::{Deserialize, Serialize};
 
 /// Build and prove the product mdoc circuit from the full document, verifier
@@ -182,19 +188,25 @@ pub fn verify_mdoc(proof: &MdocProof, statement: &MdocStatement) -> Result<(), E
     }
 }
 
-#[cfg(not(feature = "ec-coprocessor"))]
+#[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
 const NONCE_P256_PREPROCESSED_NAMESPACE: &str = "nonce_p256";
 
+#[cfg(feature = "p256")]
 use air_core::relations::{field_id, SharedDigestRelation, SharedFieldRelation};
+#[cfg(feature = "p256")]
 use air_core::{Air, AirProver};
 #[cfg(feature = "ec-coprocessor")]
 use blake2::{Blake2s256, Digest as BlakeDigest};
+#[cfg(feature = "p256")]
 use stwo::core::fields::m31::M31;
+#[cfg(feature = "p256")]
 use stwo::core::fields::qm31::QM31;
 #[cfg(feature = "ec-coprocessor")]
 use stwo::core::fri::FriConfig;
 use stwo::core::pcs::PcsConfig;
+#[cfg(feature = "p256")]
 use stwo::core::proof::StarkProof;
+#[cfg(feature = "p256")]
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleHasher;
 #[cfg(feature = "ec-coprocessor")]
 use stwo::core::{air::Component, channel::Channel, verifier::VerificationError};
@@ -205,31 +217,41 @@ use stwo::prover::{ComponentProver, TreeBuilder};
 #[cfg(feature = "ec-coprocessor")]
 use stwo_constraint_framework::TraceLocationAllocator;
 
+#[cfg(feature = "p256")]
 use predicates::age::strategy::range_check::air::RangeCheckProver;
+#[cfg(feature = "p256")]
 use predicates::nat::air::NatProver;
+#[cfg(feature = "p256")]
 use predicates::nat::NationalityPredicate;
+#[cfg(feature = "p256")]
 use predicates::{
     AgeRangeCheck, DateOfBirth, NatPrivateInput, NatPublicInput, PredicateProver,
     PredicateVerifier, PublicInput as AgePublicInput,
 };
 
-#[cfg(not(feature = "ec-coprocessor"))]
+#[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
 use stwo_p256::components::digest_bind::module::{
     DigestBindInteractionClaim, DigestBindProver, DigestBindVerifier,
 };
+#[cfg(feature = "p256")]
 use stwo_p256::components::digest_bind::witness::DigestBindRow;
-#[cfg(not(feature = "ec-coprocessor"))]
+#[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
 use stwo_p256::components::digest_bind::SharedScalarZRelation;
+#[cfg(feature = "p256")]
 use stwo_p256::ecdsa::ecdsa_verify;
+#[cfg(feature = "p256")]
 use stwo_p256::limbs::P256M31BigInt;
-#[cfg(not(feature = "ec-coprocessor"))]
+#[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
 use stwo_p256::proof::air::{P256ColumnTask, P256Prover, P256Verifier};
+#[cfg(feature = "p256")]
 use stwo_p256::proof::P256ProofDraft;
-#[cfg(not(feature = "ec-coprocessor"))]
+#[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
 use stwo_p256::proof::{P256CurrentAirInteractionClaim, P256CurrentAirProofClaim};
+#[cfg(feature = "p256")]
 use stwo_p256::public_inputs::PublicEcdsaInstance;
 // Re-exported: `AffinePoint` is the type of `PublicStatement::issuer_key`, so a
 // relying party needs it in scope to build a statement.
+#[cfg(feature = "p256")]
 pub use stwo_p256::types::AffinePoint;
 
 #[cfg(feature = "ec-coprocessor")]
@@ -506,9 +528,13 @@ pub mod ec_coprocessor {
     }
 }
 
+#[cfg(feature = "p256")]
 use stwo_sha256::air::{Sha256ColumnTask, Sha256Prover, Sha256Verifier};
+#[cfg(feature = "p256")]
 use stwo_sha256::field_exposure::FieldExposure;
+#[cfg(feature = "p256")]
 use stwo_sha256::interaction::InteractionClaim as Sha256InteractionClaim;
+#[cfg(feature = "p256")]
 use stwo_sha256::types::Sha256Witness;
 
 #[cfg(feature = "ec-coprocessor")]
@@ -522,6 +548,7 @@ struct CoprocessorBundles {
 ///
 /// Serde-serializable end to end (the per-module claim trees derive serde), so
 /// the `eu-id` CLI can write a proof in one process and verify it in another.
+#[cfg(feature = "p256")]
 #[derive(Serialize, Deserialize)]
 pub struct Proof {
     /// The one shared STARK proof.
@@ -565,6 +592,7 @@ pub struct Proof {
     nat_claimed_sums: Vec<QM31>,
 }
 
+#[cfg(feature = "p256")]
 impl Proof {
     /// The public ECDSA instances the P256 module proves over. A relying party
     /// compares the issuer key and signature against the statement it intended;
@@ -620,6 +648,7 @@ impl Proof {
 #[derive(Debug)]
 pub enum Error {
     /// P256 draft preparation (trace generation) failed.
+    #[cfg(feature = "p256")]
     P256Prepare(stwo_p256::proof::P256ProofError),
     /// Age predicate preparation (input validation or witness generation) failed.
     AgePrepare(predicates::Error),
@@ -695,6 +724,7 @@ pub enum Error {
 /// credential's, never supplied here. The nonce signature *is* supplied — the
 /// verifier recomputes its `z` from the public nonce and binds the nonce P-256
 /// module against the full instance.
+#[cfg(feature = "p256")]
 #[derive(Clone, Debug)]
 pub struct PublicStatement {
     /// The issuer public key `Q` the credential must be signed under. The
@@ -711,6 +741,7 @@ pub struct PublicStatement {
     pub nonce: NonceSignatureStatement,
 }
 
+#[cfg(feature = "p256")]
 impl PublicStatement {
     /// Build a statement from a trusted issuer key, a policy, and the holder's
     /// nonce signature.
@@ -725,6 +756,7 @@ impl PublicStatement {
 
 /// Bridge trace size: enough rows for one active row per ECDSA instance, with
 /// the Q-015 Class A minimum of 256 blind rows.
+#[cfg(feature = "p256")]
 fn bridge_log_size(n_instances: usize) -> u32 {
     let needed = (n_instances.max(1) as u32)
         .next_power_of_two()
@@ -740,6 +772,7 @@ fn bridge_log_size(n_instances: usize) -> u32 {
 /// balance non-zero, so the exposure stays in lock-step with the wired
 /// consumers; both are now wired. Prover and verifier must build the identical
 /// spec (it is mixed into the SHA transcript).
+#[cfg(feature = "p256")]
 fn credential_exposure() -> FieldExposure {
     FieldExposure::from_preimage_windows(&[
         (
@@ -757,6 +790,7 @@ fn credential_exposure() -> FieldExposure {
 
 /// Per-instance `(sig_id, z)` rows the bridge binds, sourced from the proven
 /// public instances.
+#[cfg(feature = "p256")]
 fn bridge_rows(instances: &[PublicEcdsaInstance<M31>]) -> Vec<DigestBindRow> {
     instances
         .iter()
@@ -1173,6 +1207,7 @@ impl Air for CoprocessorBindingVerifier {
 // credential + policy and is built on top; the explicit form stays public so the
 // negative-test suite can compose deliberately inconsistent witnesses (e.g. hash
 // one message but sign another). The argument count is intentional.
+#[cfg(feature = "p256")]
 #[allow(clippy::too_many_arguments)]
 pub fn prove(
     p256_draft: &P256ProofDraft,
@@ -1207,6 +1242,7 @@ pub fn prove(
 /// the OODS `sampled_values` — to modules by committed-column count. These are
 /// the same per-tree column sizes the verifier commits against, so the
 /// attribution matches the committed columns exactly.
+#[cfg(feature = "p256")]
 #[derive(Clone, Debug)]
 pub struct ModuleColumns {
     /// Module label, in commit order (`p256`, `nonce_p256`, `sha`, `bridge`,
@@ -1220,6 +1256,7 @@ pub struct ModuleColumns {
     pub interaction: usize,
 }
 
+#[cfg(feature = "p256")]
 impl ModuleColumns {
     fn of(name: &'static str, layout: &air_core::TreeLayout) -> Self {
         Self {
@@ -1238,6 +1275,7 @@ impl ModuleColumns {
     }
 }
 
+#[cfg(feature = "p256")]
 struct PreparedProofModules<'a> {
     #[cfg(not(feature = "ec-coprocessor"))]
     p256: P256Prover<'a>,
@@ -1264,6 +1302,7 @@ struct PreparedProofModules<'a> {
     nat_public: &'a NatPublicInput,
 }
 
+#[cfg(feature = "p256")]
 #[allow(clippy::too_many_arguments)]
 fn prepare_proof_modules<'a>(
     p256_draft: &'a P256ProofDraft,
@@ -1432,6 +1471,7 @@ fn prepare_proof_modules<'a>(
     })
 }
 
+#[cfg(feature = "p256")]
 fn prove_prepared_with_config(
     mut prepared: PreparedProofModules<'_>,
     config: PcsConfig,
@@ -1553,6 +1593,7 @@ fn prove_prepared_with_config(
 /// commit order — the per-module attribution input for the proof-size
 /// byte-breakdown. The counts come from the **same** module instances that
 /// produce the proof, so they cannot drift from what was committed.
+#[cfg(feature = "p256")]
 #[allow(clippy::too_many_arguments)]
 pub fn prove_with_column_breakdown(
     p256_draft: &P256ProofDraft,
@@ -1642,6 +1683,7 @@ pub fn verify_with_config(
 ///
 /// Pair the returned proof with [`verify_identity`] against a [`PublicStatement`]
 /// built from the issuer's *public* key and the same policy.
+#[cfg(feature = "p256")]
 pub fn prove_identity(
     credential: &Credential,
     issuer: &IssuerKey,
@@ -1679,6 +1721,7 @@ pub fn prove_identity(
 /// `z`** — the message hash is proven equal to `SHA-256(C)` by the digest
 /// binding, so the relying party supplies only the issuer key `Q = (pub_x,
 /// pub_y)` and the signature `(r, s)`, never `z`.
+#[cfg(feature = "p256")]
 fn instances_match_ignoring_z(
     proof: &[PublicEcdsaInstance<M31>],
     expected: &[PublicEcdsaInstance<M31>],
@@ -1700,6 +1743,7 @@ fn instances_match_ignoring_z(
 /// This is the lower-level verify against explicit ECDSA instance lists.
 /// Relying parties should prefer [`verify_identity`], which checks the small
 /// public statement `{ Q, policy, nonce }` instead.
+#[cfg(feature = "p256")]
 pub fn verify(
     proof: &Proof,
     expected_instances: &[PublicEcdsaInstance<M31>],
@@ -1741,6 +1785,7 @@ pub fn verify(
 /// [`identity_expected_preprocessed_root`]; tier-1 default pinning lands
 /// once the deployment's message-size / policy envelope is normalized
 /// (tasks/froot-pinning-design.md, Tier 1).
+#[cfg(feature = "p256")]
 pub fn verify_identity(proof: &Proof, statement: &PublicStatement) -> Result<(), Error> {
     verify_identity_impl(proof, statement, None)
 }
@@ -1758,6 +1803,7 @@ pub fn verify_identity(proof: &Proof, statement: &PublicStatement) -> Result<(),
 /// order, and sizes of every preprocessed column cryptographically. The
 /// prover-side 64-bit `DefaultHasher` fingerprint guard is NOT a soundness pin;
 /// do not downgrade this check to it.
+#[cfg(feature = "p256")]
 pub fn verify_identity_with_preprocessed_root(
     proof: &Proof,
     statement: &PublicStatement,
@@ -1766,6 +1812,7 @@ pub fn verify_identity_with_preprocessed_root(
     verify_identity_impl(proof, statement, Some(expected_preprocessed_root))
 }
 
+#[cfg(feature = "p256")]
 fn verify_identity_impl(
     proof: &Proof,
     statement: &PublicStatement,
@@ -1828,6 +1875,7 @@ fn verify_identity_impl(
 ///
 /// This root — not the prover-side 64-bit `DefaultHasher` column fingerprint —
 /// is the tree-0 soundness pin. Do not downgrade the pin to the fingerprint.
+#[cfg(feature = "p256")]
 pub fn identity_expected_preprocessed_root(
     credential: &Credential,
     issuer: &IssuerKey,
@@ -1886,10 +1934,12 @@ pub fn identity_expected_preprocessed_root(
 /// (the global LogUp balance). The caller does any public-input / statement
 /// binding *first*: both [`verify`] and [`verify_identity`] bind, then delegate
 /// here.
+#[cfg(feature = "p256")]
 fn verify_stark(proof: &Proof) -> Result<(), Error> {
     verify_stark_with_config(proof, None, None)
 }
 
+#[cfg(feature = "p256")]
 fn verify_stark_with_config(
     proof: &Proof,
     expected_config_override: Option<PcsConfig>,

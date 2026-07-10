@@ -11,7 +11,7 @@ use air_core::relations::{field_id, FieldBytesRelation, SharedFieldRelation};
 use air_core::{
     fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint, TreeLayout,
 };
-use p256::elliptic_curve::rand_core::{OsRng, RngCore};
+use rand_core::{OsRng, RngCore};
 use predicates::Date;
 use serde::{Deserialize, Serialize};
 use stwo::core::air::Component;

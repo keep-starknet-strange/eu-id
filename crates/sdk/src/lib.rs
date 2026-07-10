@@ -35,6 +35,14 @@
 //! a dedicated large-stack thread the SDK owns; the apps call the UniFFI fn
 //! synchronously and do no thread handling of their own.
 
+// The SDK is a product build of exactly one (or both) mdoc schemes; a build
+// with neither has no statement-binding layer at all.
+#[cfg(not(any(feature = "p256-mdoc", feature = "quantum-safe-mdoc")))]
+compile_error!(
+    "the sdk requires at least one mdoc scheme feature: enable `p256-mdoc` \
+     (default, classical P-256/ec-coprocessor) and/or `quantum-safe-mdoc` (ML-DSA-65)."
+);
+
 use std::io::{Read, Write};
 
 use bzip2::read::BzDecoder;
@@ -581,6 +589,10 @@ pub struct ZkMdocWitness {
     pub document: Vec<u8>,
     /// Trusted issuer root certificates accepted for COSE header 33 `x5chain`.
     pub trusted_issuer_certificates: Vec<Vec<u8>>,
+    /// ML-DSA-65 issuer trust pins: FIPS 204 `pkEncode` bytes (1,952 each).
+    /// Required non-empty for an ML-DSA issuer (fail-closed in the prover);
+    /// ignored for a P-256 issuer.
+    pub trusted_mldsa_issuer_public_keys: Vec<Vec<u8>>,
 }
 
 /// The verdict returned by [`verify_identity`].
@@ -666,6 +678,7 @@ fn encode_statement(s: &ZkPublicStatement) -> Vec<u8> {
 /// verifier rebuilds the same bytes from its own statement and rejects on any
 /// drift, so the mdoc freshness / anti-replay nonce is bound even though the
 /// STARK only covers `{ Q, age input, nat input }`.
+#[cfg(feature = "p256-mdoc")]
 #[derive(Serialize, Deserialize)]
 struct ProofEnvelope {
     /// Canonical CBOR of the full public statement (the envelope binding).
@@ -726,13 +739,18 @@ fn map_prover_error(e: eu_id_prover::Error) -> ZkError {
             "the holder's nationality is not in the accepted set [{e:?}]"
         )),
         // Other witness-generation / proving failures (bad signature, internal).
-        P256Prepare(_) | SignatureInvalid | Prove(_) | Mdoc(_) | CoprocessorWitness(_) => {
-            ZkError::Prove(format!("{e:?}"))
-        }
+        SignatureInvalid | Prove(_) | Mdoc(_) => ZkError::Prove(format!("{e:?}")),
+        #[cfg(feature = "p256")]
+        P256Prepare(_) => ZkError::Prove(format!("{e:?}")),
+        #[cfg(feature = "p256-mdoc")]
+        CoprocessorWitness(_) => ZkError::Prove(format!("{e:?}")),
         // Verifier-side rejections (only reachable from the verify path).
         P256InstanceMismatch | IssuerKeyMismatch | AgePolicyMismatch | NatPolicyMismatch
-        | WeakConfig { .. } | CoprocessorMissing | CoprocessorInstanceCount { .. }
-        | CoprocessorProof(_) | Verify(_) | PreprocessedRootMismatch { .. } => {
+        | WeakConfig { .. } | Verify(_) | PreprocessedRootMismatch { .. } => {
+            ZkError::Verify(format!("{e:?}"))
+        }
+        #[cfg(feature = "p256-mdoc")]
+        CoprocessorMissing | CoprocessorInstanceCount { .. } | CoprocessorProof(_) => {
             ZkError::Verify(format!("{e:?}"))
         }
     }
@@ -771,6 +789,7 @@ fn decompress_stark_proof_from_ffi(compressed: &[u8]) -> Result<Vec<u8>, ZkError
 /// A false statement (e.g. under-age) cannot be proven and returns
 /// [`ZkError::Prove`]; a structurally invalid request returns
 /// [`ZkError::InvalidInput`].
+#[cfg(feature = "p256-mdoc")]
 #[uniffi::export]
 pub fn prove_identity(
     statement: ZkPublicStatement,
@@ -815,6 +834,7 @@ pub fn prove_identity(
 /// drift, a malformed proof, or a broken STARK balance — is fail-closed
 /// `ok = false`. A structurally invalid *request* returns
 /// [`ZkError::InvalidInput`]. Runs on a large-stack thread.
+#[cfg(feature = "p256-mdoc")]
 #[uniffi::export]
 pub fn verify_identity(
     statement: ZkPublicStatement,
@@ -904,13 +924,15 @@ fn mdoc_request(
         nationality_element: contract.element_nationality,
         session_transcript: statement.nonce.clone(),
         trusted_issuer_certificates: witness.trusted_issuer_certificates.clone(),
+        #[cfg(feature = "p256")]
         trusted_issuer_public_keys: Vec::new(),
-        trusted_mldsa_issuer_public_keys: Vec::new(),
+        trusted_mldsa_issuer_public_keys: witness.trusted_mldsa_issuer_public_keys.clone(),
         device_authentication_profile:
             eu_id_prover::mdoc::MdocDeviceAuthenticationProfile::Iso180135,
     }
 }
 
+#[cfg(feature = "p256-mdoc")]
 fn mdoc_statement_matches_public_statement(
     mdoc_statement: &eu_id_prover::MdocStatement,
     statement: &ZkPublicStatement,
@@ -957,13 +979,34 @@ fn mdoc_statement_matches_public_statement(
     //   - prove a predicate over the wrong signed element, e.g. `issue_date`
     //     instead of `birth_date` (C2).
     // Fail-closed on ANY divergence from the expected set.
-    let expected = expected_mdoc_attributes();
-    if mdoc_statement.attributes.len() != expected.len() {
+    if !mdoc_disclosed_set_matches(
+        &mdoc_statement.attributes,
+        mdoc_statement.age_attribute_index,
+        mdoc_statement.nationality_attribute_index,
+    ) {
         return Ok(false);
     }
-    for (got, want) in mdoc_statement.attributes.iter().zip(expected.iter()) {
+
+    Ok(true)
+}
+
+/// Pin the envelope statement's disclosed-attribute set, element identity,
+/// disclosure modes, and predicate-leg indices to the SDK's OWN request
+/// (shared by the classical and quantum-safe statement-binding layers — the
+/// fields have the identical shape on both statement types). Fail-closed on
+/// ANY divergence from the expected set.
+fn mdoc_disclosed_set_matches(
+    attributes: &[eu_id_prover::mdoc::MdocStatementAttribute],
+    age_attribute_index: Option<usize>,
+    nationality_attribute_index: Option<usize>,
+) -> bool {
+    let expected = expected_mdoc_attributes();
+    if attributes.len() != expected.len() {
+        return false;
+    }
+    for (got, want) in attributes.iter().zip(expected.iter()) {
         if got.element_identifier != want.element_identifier || got.mode != want.mode {
-            return Ok(false);
+            return false;
         }
     }
     // Both legs are always requested (see `expected_mdoc_attributes`), so both
@@ -974,9 +1017,77 @@ fn mdoc_statement_matches_public_statement(
     let expected_nat_index = expected
         .iter()
         .position(|a| matches!(a.mode, eu_id_prover::mdoc::MdocDisclosureMode::Alpha2Set));
-    if mdoc_statement.age_attribute_index != expected_age_index
-        || mdoc_statement.nationality_attribute_index != expected_nat_index
+    if age_attribute_index != expected_age_index
+        || nationality_attribute_index != expected_nat_index
     {
+        return false;
+    }
+    true
+}
+
+/// Quantum-safe statement binding: the envelope's in-STARK
+/// `MdocCircuitStatement` must match the verifier's OWN request. Same
+/// fail-closed pinning discipline as the classical layer, adapted to the
+/// scheme:
+///
+/// - **Issuer trust anchor.** `ZkPublicStatement.issuer_key_x` carries the
+///   SHA-256 of the issuer's FIPS 204 `pkEncode` bytes and `issuer_key_y`
+///   must be 32 zero bytes (an ML-DSA key has no coordinate pair; the two
+///   existing 32-byte slots are reused as pin ‖ zero-pad). The pk bytes are
+///   RECOMPUTED from the statement's public `(ρ, t1)` — never read from the
+///   prover-supplied `tr` digest.
+/// - **Device binding.** The ML-DSA device arm's public `message` is the full
+///   device `Sig_structure`; its SHA-256 must equal the hash derived from the
+///   verifier's own nonce + doctype.
+/// - **Policy + disclosed set.** Identical to the classical layer.
+#[cfg(all(feature = "quantum-safe-mdoc", not(feature = "p256-mdoc")))]
+fn mdoc_statement_matches_public_statement(
+    mdoc_statement: &eu_id_prover::MdocStatement,
+    statement: &ZkPublicStatement,
+) -> Result<bool, ZkError> {
+    let policy = mapping::to_policy(statement)?;
+    if mdoc_statement.policy != policy {
+        return Ok(false);
+    }
+
+    let issuer_x: [u8; 32] = statement
+        .issuer_key_x
+        .as_slice()
+        .try_into()
+        .map_err(|_| ZkError::InvalidInput("issuer_key_x must be 32 bytes".to_string()))?;
+    let issuer_y: [u8; 32] = statement
+        .issuer_key_y
+        .as_slice()
+        .try_into()
+        .map_err(|_| ZkError::InvalidInput("issuer_key_y must be 32 bytes".to_string()))?;
+    let Some(issuer_pk) = eu_id_prover::mdoc::mdoc_statement_issuer_mldsa_pk(mdoc_statement)
+    else {
+        // A non-ML-DSA issuer statement cannot bind in the quantum-only build.
+        return Ok(false);
+    };
+    let issuer_pk_hash: [u8; 32] = Sha256::digest(&issuer_pk).into();
+    if issuer_pk_hash != issuer_x || issuer_y != [0u8; 32] {
+        return Ok(false);
+    }
+
+    let expected_device_hash = eu_id_prover::mdoc::device_authentication_sig_structure_hash(
+        &statement.nonce,
+        &statement.doctype,
+    )
+    .map_err(|e| ZkError::InvalidInput(format!("invalid DeviceAuthentication input: {e:?}")))?;
+    let Some(device_input) = mdoc_statement.device_input.as_mldsa() else {
+        return Ok(false);
+    };
+    let device_hash: [u8; 32] = Sha256::digest(&device_input.message).into();
+    if device_hash != expected_device_hash {
+        return Ok(false);
+    }
+
+    if !mdoc_disclosed_set_matches(
+        &mdoc_statement.attributes,
+        mdoc_statement.age_attribute_index,
+        mdoc_statement.nationality_attribute_index,
+    ) {
         return Ok(false);
     }
 
@@ -1040,7 +1151,7 @@ pub fn verify_mdoc_pid(
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "p256-mdoc"))]
 mod tests {
     use super::*;
 
@@ -1348,6 +1459,7 @@ mod tests {
             ZkMdocWitness {
                 document: fixture.document,
                 trusted_issuer_certificates: fixture.request.trusted_issuer_certificates,
+                trusted_mldsa_issuer_public_keys: Vec::new(),
             },
         )
     }

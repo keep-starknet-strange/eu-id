@@ -25,6 +25,7 @@
 use ciborium::value::Value;
 use ml_dsa::signature::{Keypair, Signer};
 use ml_dsa::{EncodedSignature, EncodedVerifyingKey, MlDsa65, SigningKey};
+#[cfg(feature = "p256")]
 use p256::ecdsa::{Signature as P256Signature, SigningKey as P256SigningKey};
 use sha2::{Digest, Sha256};
 
@@ -45,11 +46,13 @@ const MLDSA_DEVICE_SEED: [u8; 32] = [0x6du8; 32];
 /// Deterministic ML-DSA-65 revocation-authority seed (third fixture seed).
 const MLDSA_REVOCATION_SEED: [u8; 32] = [0x7eu8; 32];
 /// The demo device signing key seed (P-256), matching the P-256 fixtures.
+#[cfg(feature = "p256")]
 const DEVICE_SEED: [u8; 32] = [11u8; 32];
 
 /// Everything a consumer of the ML-DSA mdoc fixture needs: the full mdoc
 /// document bytes, the raw issuer public key (1952 bytes, for `verify_internals`),
 /// and the `Sig_structure` preimage that was signed plus its ML-DSA signature.
+#[cfg(feature = "p256")]
 pub struct MldsaPidFixture {
     /// Encoded PID mdoc document (top-level `Value::Map`).
     pub document: Vec<u8>,
@@ -89,6 +92,7 @@ fn sig_structure(protected: &[u8], payload: &[u8]) -> Vec<u8> {
 }
 
 /// A P-256 device COSE_Key (`kty EC2`, `alg ES256`), matching the demo fixture.
+#[cfg(feature = "p256")]
 fn device_cose_key(signing_key: &P256SigningKey) -> Value {
     let encoded = signing_key.verifying_key().to_encoded_point(false);
     let x: [u8; 32] = encoded.x().expect("x")[..].try_into().expect("x len");
@@ -133,6 +137,7 @@ fn tdate(text: &str) -> Value {
 
 /// The ML-DSA-65-signed PID mdoc fixture with the demo session transcript —
 /// extractable by `extract_pid_mdoc` with `MdocPidRequest::eudi_pid`.
+#[cfg(feature = "p256")]
 pub fn mldsa_pid_fixture() -> MldsaPidFixture {
     mldsa_pid_fixture_with_transcript(&eu_id_prover::mdoc::openid4vp_session_transcript(
         b"session-transcript-123",
@@ -247,6 +252,7 @@ fn build_pid_document(device_key: Value, device_cose_sign1: Value) -> IssuerSign
 }
 
 /// The ML-DSA-65-signed PID mdoc fixture. Exported for M2+/M7 tests.
+#[cfg(feature = "p256")]
 pub fn mldsa_pid_fixture_with_transcript(session_transcript: &[u8]) -> MldsaPidFixture {
     // Device P-256 key (unchanged from the demo fixture), signing the (empty)
     // device-namespaces payload. Disambiguate the `Signer` trait — the ml-dsa
@@ -437,6 +443,7 @@ fn es256_issuer_rejected_without_p256_feature() {
     }
 }
 
+#[cfg(feature = "p256")]
 #[test]
 fn mldsa_fixture_issuer_auth_verifies_natively() {
     let fx = mldsa_pid_fixture();
@@ -454,6 +461,7 @@ fn mldsa_fixture_issuer_auth_verifies_natively() {
     );
 }
 
+#[cfg(feature = "p256")]
 #[test]
 fn mldsa_fixture_parses_as_cbor_with_mldsa_alg() {
     let fx = mldsa_pid_fixture();
@@ -471,6 +479,7 @@ fn mldsa_fixture_parses_as_cbor_with_mldsa_alg() {
     assert_eq!(*alg, Value::from(COSE_ALG_ML_DSA_65));
 }
 
+#[cfg(feature = "p256")]
 #[test]
 fn mldsa_fixture_rejects_tampered_issuer_signature() {
     let mut fx = mldsa_pid_fixture();
@@ -484,6 +493,7 @@ fn mldsa_fixture_rejects_tampered_issuer_signature() {
     assert!(rejected, "tampered issuer signature must not verify");
 }
 
+#[cfg(feature = "p256")]
 #[test]
 fn mldsa_fixture_is_deterministic() {
     let a = mldsa_pid_fixture();

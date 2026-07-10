@@ -16,12 +16,15 @@ use air_core::{
     fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint, TreeLayout,
 };
 use ciborium::value::Value;
+#[cfg(feature = "p256")]
 use ecdsa::signature::{Signer, Verifier};
+#[cfg(feature = "p256")]
 use p256::ecdsa::{Signature as P256Signature, SigningKey, VerifyingKey};
 #[cfg(feature = "ec-coprocessor")]
-use p256::elliptic_curve::rand_core::{OsRng, RngCore};
+use rand_core::{OsRng, RngCore};
 #[cfg(feature = "p256")]
 use p256::pkcs8::DecodePublicKey;
+#[cfg(feature = "p256")]
 use p256::EncodedPoint;
 use predicates::nat::NationalityPredicate;
 use predicates::{AgeRangeCheck, DateOfBirth, PredicateProver, PredicateVerifier};
@@ -62,13 +65,19 @@ use stwo_mldsa::statement::{
 };
 #[cfg(feature = "ml-dsa")]
 use stwo_mldsa::types::MlDsaVerifyInput;
+#[cfg(feature = "p256")]
 use stwo_p256::components::digest_bind::module::{
     DigestBindInteractionClaim, DigestBindProver, DigestBindVerifier,
 };
+#[cfg(feature = "p256")]
 use stwo_p256::components::digest_bind::SharedScalarZRelation;
+#[cfg(feature = "p256")]
 use stwo_p256::public_inputs::PublicEcdsaInstance;
+#[cfg(feature = "p256")]
 use stwo_p256::types::{AffinePoint, EcdsaVerifyInput, Signature, U256};
+#[cfg(feature = "p256")]
 use stwo_p256::{proof::air::P256Prover, proof::P256ProofDraft};
+#[cfg(feature = "p256")]
 use stwo_p256::{
     proof::air::P256Verifier,
     proof::{P256CurrentAirInteractionClaim, P256CurrentAirProofClaim},
@@ -107,6 +116,7 @@ const MDOC_PROFILE_VERSION_V1: &str = "1.0";
 /// Profile v2: canonical (RFC 8949 core deterministic) CBOR, text-form values.
 const MDOC_PROFILE_VERSION_V2: &str = "2.0";
 /// The profile the demo fixture emits and the parser advertises by default.
+#[cfg(feature = "p256")]
 const MDOC_PROFILE_VERSION: &str = MDOC_PROFILE_VERSION_V2;
 const PID_DOCTYPE: &str = "eu.europa.ec.eudi.pid.1";
 const PID_NAMESPACE: &str = "eu.europa.ec.eudi.pid.1";
@@ -146,6 +156,7 @@ pub struct MdocPidRequest {
     pub nationality_element: String,
     pub session_transcript: Vec<u8>,
     pub trusted_issuer_certificates: Vec<Vec<u8>>,
+    #[cfg(feature = "p256")]
     pub trusted_issuer_public_keys: Vec<AffinePoint>,
     /// ML-DSA-65 issuer trust pins: FIPS 204 `pkEncode` bytes (1,952 each). An
     /// ML-DSA issuer REQUIRES a non-empty pin list and the header AKP key must
@@ -203,6 +214,7 @@ impl MdocPidRequest {
             nationality_element: "nationality".to_string(),
             session_transcript,
             trusted_issuer_certificates: Vec::new(),
+            #[cfg(feature = "p256")]
             trusted_issuer_public_keys: Vec::new(),
             trusted_mldsa_issuer_public_keys: Vec::new(),
             device_authentication_profile: MdocDeviceAuthenticationProfile::Iso180135,
@@ -214,6 +226,7 @@ impl MdocPidRequest {
         self
     }
 
+    #[cfg(feature = "p256")]
     pub fn with_trusted_issuer_public_keys(mut self, public_keys: Vec<AffinePoint>) -> Self {
         self.trusted_issuer_public_keys = public_keys;
         self
@@ -298,6 +311,7 @@ fn validate_requested_attributes(attributes: &[MdocRequestedAttribute]) -> Resul
 /// absorb needs the byte-level statement binding).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum MdocAuthInput {
+    #[cfg(feature = "p256")]
     Ecdsa(EcdsaVerifyInput),
     /// Boxed: an `MlDsaVerifyInput` is ~20 KiB inline (t1/z/hint arrays).
     #[cfg(feature = "ml-dsa")]
@@ -310,6 +324,7 @@ pub type IssuerAuthInput = MdocAuthInput;
 pub type DeviceAuthInput = MdocAuthInput;
 
 impl MdocAuthInput {
+    #[cfg(feature = "p256")]
     pub fn as_ecdsa(&self) -> Option<&EcdsaVerifyInput> {
         match self {
             Self::Ecdsa(input) => Some(input),
@@ -321,6 +336,7 @@ impl MdocAuthInput {
     #[cfg(feature = "ml-dsa")]
     pub fn as_mldsa(&self) -> Option<&MlDsaVerifyInput> {
         match self {
+            #[cfg(feature = "p256")]
             Self::Ecdsa(_) => None,
             Self::MlDsa(input) => Some(input.as_ref()),
         }
@@ -331,6 +347,7 @@ impl MdocAuthInput {
     /// digest-handle selection compiles in every feature combination.
     pub fn is_mldsa(&self) -> bool {
         match self {
+            #[cfg(feature = "p256")]
             Self::Ecdsa(_) => false,
             #[cfg(feature = "ml-dsa")]
             Self::MlDsa(_) => true,
@@ -339,6 +356,7 @@ impl MdocAuthInput {
 
     /// The Ecdsa arm, for call sites that structurally require a P-256 input
     /// (the ec-coprocessor path and P-256-only fixtures).
+    #[cfg(feature = "p256")]
     fn expect_ecdsa(&self, context: &'static str) -> Result<&EcdsaVerifyInput, Error> {
         self.as_ecdsa().ok_or_else(|| {
             Error::Prove(format!(
@@ -371,10 +389,11 @@ type IssuerMlDsaSlot = std::convert::Infallible;
 
 fn auth_inputs_equal(left: &MdocAuthInput, right: &MdocAuthInput) -> bool {
     match (left, right) {
+        #[cfg(feature = "p256")]
         (MdocAuthInput::Ecdsa(l), MdocAuthInput::Ecdsa(r)) => ecdsa_inputs_equal(l, r),
         #[cfg(feature = "ml-dsa")]
         (MdocAuthInput::MlDsa(l), MdocAuthInput::MlDsa(r)) => l == r,
-        #[cfg(feature = "ml-dsa")]
+        #[cfg(all(feature = "ml-dsa", feature = "p256"))]
         _ => false,
     }
 }
@@ -400,9 +419,13 @@ pub struct ExtractedPidMdoc {
     pub birth_date_item: Vec<u8>,
     pub nationality_item: Vec<u8>,
     pub mso: Vec<u8>,
+    #[cfg(feature = "p256")]
     pub issuer_key: AffinePoint,
+    #[cfg(feature = "p256")]
     pub device_key: AffinePoint,
+    #[cfg(feature = "p256")]
     pub issuer_signature: Signature,
+    #[cfg(feature = "p256")]
     pub device_signature: Signature,
     pub issuer_sig_structure: Vec<u8>,
     pub device_sig_structure: Vec<u8>,
@@ -533,6 +556,7 @@ pub struct MdocModuleShape {
 
 impl MdocModuleShape {
     /// Single-component module: its `layout` buckets identify the component 1:1.
+    #[cfg(feature = "p256")]
     fn single(name: &'static str, layout: TreeLayout) -> Self {
         Self {
             name,
@@ -542,6 +566,7 @@ impl MdocModuleShape {
     }
 
     /// Multi-component module carrying TRUE per-producer shapes.
+    #[cfg(feature = "p256")]
     fn with_components(
         name: &'static str,
         layout: TreeLayout,
@@ -577,11 +602,13 @@ impl MdocSizingWaste {
 }
 
 /// Deterministic EUID mdoc profile-v2 fixture used by benches and SDK tests.
+#[cfg(feature = "p256")]
 pub fn demo_mdoc_circuit_fixture() -> DemoMdocCircuitFixture {
     let request = MdocPidRequest::eudi_pid(openid4vp_session_transcript(b"session-transcript-123"));
     demo_mdoc_circuit_fixture_for_request(request)
 }
 
+#[cfg(feature = "p256")]
 pub fn demo_mdoc_circuit_fixture_with_attributes(
     attributes: Vec<MdocRequestedAttribute>,
 ) -> DemoMdocCircuitFixture {
@@ -591,6 +618,7 @@ pub fn demo_mdoc_circuit_fixture_with_attributes(
     demo_mdoc_circuit_fixture_for_request(request)
 }
 
+#[cfg(feature = "p256")]
 fn demo_mdoc_circuit_fixture_for_request(request: MdocPidRequest) -> DemoMdocCircuitFixture {
     let session_transcript = request.session_transcript.clone();
     let include_extra_items = request.attributes.iter().any(|attribute| {
@@ -623,6 +651,7 @@ fn demo_mdoc_circuit_fixture_for_request(request: MdocPidRequest) -> DemoMdocCir
     }
 }
 
+#[cfg(feature = "p256")]
 pub fn demo_mdoc_module_shapes() -> Result<Vec<MdocModuleShape>, Error> {
     let fixture = demo_mdoc_circuit_fixture();
     let extracted = &fixture.extracted;
@@ -867,9 +896,77 @@ pub fn demo_mdoc_module_shapes() -> Result<Vec<MdocModuleShape>, Error> {
     Ok(shapes)
 }
 
+#[cfg(feature = "p256")]
 pub fn demo_mdoc_sizing_waste() -> Result<MdocSizingWaste, Error> {
     let fixture = demo_mdoc_circuit_fixture();
     mdoc_sizing_waste(&fixture.extracted, &fixture.statement)
+}
+
+/// Parse + natively pre-check an ML-DSA-65 issuerAuth (FIPS 204 Algorithm 3,
+/// pure mode, empty context) and build the in-circuit witness. Shared by the
+/// `p256` and quantum-only extraction shells.
+#[cfg(feature = "ml-dsa")]
+fn mldsa_issuer_input(
+    issuer_unprotected: &[(Value, Value)],
+    request: &MdocPidRequest,
+    issuer_auth: &CoseSign1,
+) -> Result<MlDsaVerifyInput, MdocError> {
+    let pk = mldsa_issuer_pk_from_unprotected(issuer_unprotected, request)?;
+    let trace = stwo_mldsa::reference::verify::verify_internals(
+        &pk,
+        &issuer_auth.sig_structure,
+        &issuer_auth.signature_bytes,
+    )
+    .map_err(|_| MdocError::InvalidSignature("issuerAuth"))?;
+    if !trace.accepted {
+        return Err(MdocError::InvalidSignature("issuerAuth"));
+    }
+    let decoded_pk = stwo_mldsa::reference::encoding::pk_decode(&pk)
+        .map_err(|_| MdocError::InvalidCoseKey("ML-DSA-65 public key"))?;
+    let decoded_sig = stwo_mldsa::reference::encoding::sig_decode(&issuer_auth.signature_bytes)
+        .map_err(|_| MdocError::InvalidSignature("issuerAuth"))?;
+    Ok(MlDsaVerifyInput::from_decoded(
+        &decoded_pk,
+        &decoded_sig,
+        trace.tr,
+        issuer_auth.sig_structure.clone(),
+    ))
+}
+
+/// Mirror of [`mldsa_issuer_input`] for the device role: native FIPS 204
+/// pre-check over the device `Sig_structure`, then the decoded in-circuit
+/// input. Rejects the mixed ML-DSA-device / ES256-issuer row fail-closed.
+#[cfg(feature = "ml-dsa")]
+fn mldsa_device_auth_input(
+    pk: &[u8],
+    device_signature: &CoseSign1,
+    issuer_is_mldsa: bool,
+) -> Result<MdocAuthInput, MdocError> {
+    if !issuer_is_mldsa {
+        return Err(MdocError::MixedSignatureSchemes(
+            "ML-DSA-65 device authentication with an ES256 issuer",
+        ));
+    }
+    let trace = stwo_mldsa::reference::verify::verify_internals(
+        pk,
+        &device_signature.sig_structure,
+        &device_signature.signature_bytes,
+    )
+    .map_err(|_| MdocError::InvalidSignature("deviceSignature"))?;
+    if !trace.accepted {
+        return Err(MdocError::InvalidSignature("deviceSignature"));
+    }
+    let decoded_pk = stwo_mldsa::reference::encoding::pk_decode(pk)
+        .map_err(|_| MdocError::InvalidCoseKey("ML-DSA-65 public key"))?;
+    let decoded_sig = stwo_mldsa::reference::encoding::sig_decode(&device_signature.signature_bytes)
+        .map_err(|_| MdocError::InvalidSignature("deviceSignature"))?;
+    let input = MlDsaVerifyInput::from_decoded(
+        &decoded_pk,
+        &decoded_sig,
+        trace.tr,
+        device_signature.sig_structure.clone(),
+    );
+    Ok(MdocAuthInput::MlDsa(Box::new(input)))
 }
 
 pub fn extract_pid_mdoc(
@@ -891,53 +988,21 @@ pub fn extract_pid_mdoc(
     // Issuer-alg dispatch: ES256 keeps the exact P-256 flow; ML-DSA-65 parses
     // the AKP key and natively pre-checks the signature with the stwo-mldsa
     // reference verifier (FIPS 204 Algorithm 3, pure mode, empty context).
+    #[cfg(feature = "p256")]
     let (issuer_key, issuer_mldsa_input) = match issuer_auth.alg {
         CoseAlg::Es256 => {
-            // The issuer P-256 (COSE ES256) proving path is only compiled in
-            // under the `p256` feature; otherwise a clean error, never a panic.
-            // (Device auth stays P-256 unconditionally — see below.)
-            #[cfg(not(feature = "p256"))]
-            {
-                let _ = issuer_unprotected;
-                return Err(MdocError::UnsupportedIssuerAlg(
-                    "P-256 ES256 issuer (COSE alg -7): rebuild eu-id-prover with the `p256` feature",
-                ));
-            }
-            #[cfg(feature = "p256")]
-            {
-                let issuer_key = issuer_key_from_unprotected(issuer_unprotected, request)?;
-                verify_signature(
-                    &issuer_key,
-                    &issuer_auth.sig_structure,
-                    &issuer_auth.signature_bytes,
-                    "issuerAuth",
-                )?;
-                (issuer_key, None::<IssuerMlDsaSlot>)
-            }
+            let issuer_key = issuer_key_from_unprotected(issuer_unprotected, request)?;
+            verify_signature(
+                &issuer_key,
+                &issuer_auth.sig_structure,
+                &issuer_auth.signature_bytes,
+                "issuerAuth",
+            )?;
+            (issuer_key, None::<IssuerMlDsaSlot>)
         }
         #[cfg(feature = "ml-dsa")]
         CoseAlg::MlDsa65 => {
-            let pk = mldsa_issuer_pk_from_unprotected(issuer_unprotected, request)?;
-            let trace = stwo_mldsa::reference::verify::verify_internals(
-                &pk,
-                &issuer_auth.sig_structure,
-                &issuer_auth.signature_bytes,
-            )
-            .map_err(|_| MdocError::InvalidSignature("issuerAuth"))?;
-            if !trace.accepted {
-                return Err(MdocError::InvalidSignature("issuerAuth"));
-            }
-            let decoded_pk = stwo_mldsa::reference::encoding::pk_decode(&pk)
-                .map_err(|_| MdocError::InvalidCoseKey("ML-DSA-65 public key"))?;
-            let decoded_sig =
-                stwo_mldsa::reference::encoding::sig_decode(&issuer_auth.signature_bytes)
-                    .map_err(|_| MdocError::InvalidSignature("issuerAuth"))?;
-            let input = MlDsaVerifyInput::from_decoded(
-                &decoded_pk,
-                &decoded_sig,
-                trace.tr,
-                issuer_auth.sig_structure.clone(),
-            );
+            let input = mldsa_issuer_input(issuer_unprotected, request, &issuer_auth)?;
             // The AffinePoint slot is a zeroed placeholder for ML-DSA issuers;
             // the real key lives in `issuer_auth_input`.
             let zero_key = AffinePoint {
@@ -946,6 +1011,18 @@ pub fn extract_pid_mdoc(
             };
             (zero_key, Some(input))
         }
+    };
+    // Without the `p256` feature the ES256 issuer row is a clean parse-time
+    // rejection (never a panic) and no P-256 key slot exists at all.
+    #[cfg(not(feature = "p256"))]
+    let issuer_mldsa_input = match issuer_auth.alg {
+        CoseAlg::Es256 => {
+            let _ = issuer_unprotected;
+            return Err(MdocError::UnsupportedIssuerAlg(
+                "P-256 ES256 issuer (COSE alg -7): rebuild eu-id-prover with the `p256` feature",
+            ));
+        }
+        CoseAlg::MlDsa65 => Some(mldsa_issuer_input(issuer_unprotected, request, &issuer_auth)?),
     };
 
     let mso = parse_mso(&issuer_auth.payload, &request.namespace)?;
@@ -1053,6 +1130,7 @@ pub fn extract_pid_mdoc(
     // mixed combination — in either direction — is rejected here, before any
     // signature work on the mismatched arm.
     let issuer_is_mldsa = issuer_mldsa_input.is_some();
+    #[cfg(feature = "p256")]
     let (device_key, device_signature_value, device_auth_input) =
         match (&mso.device_key, device_signature.alg) {
             (ParsedDeviceKey::Ec2(device_key), CoseAlg::Es256) => {
@@ -1079,31 +1157,7 @@ pub fn extract_pid_mdoc(
             // the device Sig_structure, then the decoded in-circuit input.
             #[cfg(feature = "ml-dsa")]
             (ParsedDeviceKey::MlDsa(pk), CoseAlg::MlDsa65) => {
-                if !issuer_is_mldsa {
-                    return Err(MdocError::MixedSignatureSchemes(
-                        "ML-DSA-65 device authentication with an ES256 issuer",
-                    ));
-                }
-                let trace = stwo_mldsa::reference::verify::verify_internals(
-                    pk,
-                    &device_signature.sig_structure,
-                    &device_signature.signature_bytes,
-                )
-                .map_err(|_| MdocError::InvalidSignature("deviceSignature"))?;
-                if !trace.accepted {
-                    return Err(MdocError::InvalidSignature("deviceSignature"));
-                }
-                let decoded_pk = stwo_mldsa::reference::encoding::pk_decode(pk)
-                    .map_err(|_| MdocError::InvalidCoseKey("ML-DSA-65 public key"))?;
-                let decoded_sig =
-                    stwo_mldsa::reference::encoding::sig_decode(&device_signature.signature_bytes)
-                        .map_err(|_| MdocError::InvalidSignature("deviceSignature"))?;
-                let input = MlDsaVerifyInput::from_decoded(
-                    &decoded_pk,
-                    &decoded_sig,
-                    trace.tr,
-                    device_signature.sig_structure.clone(),
-                );
+                let input = mldsa_device_auth_input(pk, &device_signature, issuer_is_mldsa)?;
                 // Zeroed AffinePoint/Signature placeholders (see
                 // `ExtractedPidMdoc::device_auth_input`).
                 let zero_key = AffinePoint {
@@ -1114,7 +1168,7 @@ pub fn extract_pid_mdoc(
                     r: U256([0u8; 32]),
                     s: U256([0u8; 32]),
                 };
-                (zero_key, zero_sig, MdocAuthInput::MlDsa(Box::new(input)))
+                (zero_key, zero_sig, input)
             }
             #[cfg(feature = "ml-dsa")]
             _ => {
@@ -1123,6 +1177,19 @@ pub fn extract_pid_mdoc(
                 ))
             }
         };
+    // Quantum-only shell: no P-256 device-key/signature slots exist; the EC2
+    // deviceKey row cannot even parse, and any residual scheme mix rejects.
+    #[cfg(not(feature = "p256"))]
+    let device_auth_input = match (&mso.device_key, device_signature.alg) {
+        (ParsedDeviceKey::MlDsa(pk), CoseAlg::MlDsa65) => {
+            mldsa_device_auth_input(pk, &device_signature, issuer_is_mldsa)?
+        }
+        _ => {
+            return Err(MdocError::MixedSignatureSchemes(
+                "MSO deviceKey scheme does not match the deviceSignature algorithm",
+            ))
+        }
+    };
 
     let mut digest_ids = HashMap::new();
     for attribute in &extracted_attributes {
@@ -1138,6 +1205,7 @@ pub fn extract_pid_mdoc(
         digest_ids.insert(element.to_string(), item.digest_id);
     }
 
+    #[cfg(feature = "p256")]
     let (issuer_signature, issuer_auth_input) = match issuer_mldsa_input {
         None => {
             let signature = signature_from_compact(&issuer_auth.signature_bytes)?;
@@ -1159,6 +1227,10 @@ pub fn extract_pid_mdoc(
             (zero, IssuerAuthInput::MlDsa(Box::new(input)))
         }
     };
+    #[cfg(not(feature = "p256"))]
+    let issuer_auth_input = IssuerAuthInput::MlDsa(Box::new(
+        issuer_mldsa_input.expect("ES256 issuers are rejected at parse without the `p256` feature"),
+    ));
 
     Ok(ExtractedPidMdoc {
         doctype,
@@ -1180,9 +1252,13 @@ pub fn extract_pid_mdoc(
         birth_date_item: birth_date_item.map(|item| item.bytes).unwrap_or_default(),
         nationality_item: nationality_item.map(|item| item.bytes).unwrap_or_default(),
         mso: issuer_auth.payload,
+        #[cfg(feature = "p256")]
         issuer_key,
+        #[cfg(feature = "p256")]
         device_key,
+        #[cfg(feature = "p256")]
         issuer_signature,
+        #[cfg(feature = "p256")]
         device_signature: device_signature_value,
         issuer_sig_structure: issuer_auth.sig_structure,
         device_sig_structure: device_signature.sig_structure,
@@ -1267,6 +1343,7 @@ struct CoseSign1 {
 /// P-256 point (ES256 device auth) or an AKP ML-DSA-65 encoded public key.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ParsedDeviceKey {
+    #[cfg(feature = "p256")]
     Ec2(AffinePoint),
     #[cfg(feature = "ml-dsa")]
     MlDsa(Vec<u8>),
@@ -1482,6 +1559,7 @@ fn anchor_before_offset(
 /// binding form (4 raw bytes for v1 packed, 10 ASCII bytes for v2 text), and the
 /// multi-block constructor tolerates a window straddling a SHA-256 block
 /// boundary.
+#[cfg(feature = "p256")]
 fn birth_date_exposure(statement: &MdocCircuitStatement) -> FieldExposure {
     let Some(index) = statement.age_attribute_index else {
         return FieldExposure::empty();
@@ -1491,6 +1569,7 @@ fn birth_date_exposure(statement: &MdocCircuitStatement) -> FieldExposure {
 
 /// Field exposure over the `nationality` item preimage: the value window
 /// (2 bytes) plus the `elementIdentifier` window (D1).
+#[cfg(feature = "p256")]
 fn nationality_exposure(statement: &MdocCircuitStatement) -> FieldExposure {
     let Some(index) = statement.nationality_attribute_index else {
         return FieldExposure::empty();
@@ -1556,7 +1635,7 @@ fn issuer_mso_exposure(statement: &MdocCircuitStatement) -> FieldExposure {
     // ML-DSA device: no 32-byte coordinate windows exist in the MSO (the AKP
     // key is bound by the host-side canonical byte-equality check over the
     // public issuer Sig_structure instead — see `check_mldsa_device_key_binding`).
-    if statement.device_input.as_ecdsa().is_some() {
+    if !statement.device_input.is_mldsa() {
         windows.extend([
             (
                 field_id::MDOC_DEVICE_KEY_X,
@@ -1602,7 +1681,7 @@ fn issuer_mso_exposure(statement: &MdocCircuitStatement) -> FieldExposure {
                 )
             }),
     );
-    if statement.device_input.as_ecdsa().is_some() {
+    if !statement.device_input.is_mldsa() {
         windows.extend([
             (
                 field_id::MDOC_DEVICE_KEY_X_ANCHOR,
@@ -1706,6 +1785,7 @@ fn ts13_revocation_message_exposure(statement: &MdocCircuitStatement) -> FieldEx
 /// The P-256 in-STARK revocation verification input; `None` when no revocation
 /// signature is present OR the revocation authority is ML-DSA (the ML-DSA arm
 /// is proven by the hosted `revocation_mldsa` module instead).
+#[cfg(feature = "p256")]
 fn ts13_revocation_p256_input(
     statement: &MdocCircuitStatement,
 ) -> Result<Option<EcdsaVerifyInput>, Error> {
@@ -1801,6 +1881,7 @@ fn check_mldsa_device_key_binding(statement: &MdocCircuitStatement) -> Result<()
         .and_then(|payload| payload.as_bytes())
         .ok_or_else(|| bind_err("Sig_structure payload"))?;
     let mso = parse_mso_device_key(payload).map_err(|_| bind_err("MSO deviceKey parse"))?;
+    #[cfg_attr(not(feature = "p256"), allow(irrefutable_let_patterns))]
     let ParsedDeviceKey::MlDsa(mso_pk) = mso else {
         return Err(bind_err("MSO deviceKey is not an AKP ML-DSA-65 key"));
     };
@@ -1956,6 +2037,7 @@ fn mdoc_window_bind_rows_from(
     // ML-DSA device: the coordinate windows/anchors do not exist in the MSO;
     // the exposure side skips them symmetrically (LogUp balance) and the
     // binding is the host-side canonical byte-equality check.
+    #[cfg(feature = "p256")]
     if let Some(device_input) = statement.device_input.as_ecdsa() {
         #[cfg(not(feature = "ec-coprocessor"))]
         rows.extend([
@@ -2151,7 +2233,12 @@ fn parse_cose_sign1_inner(
     let signature_bytes = expect_bytes(&items[3], "COSE_Sign1.signature")?.to_vec();
     match alg {
         CoseAlg::Es256 => {
+            #[cfg(feature = "p256")]
             signature_from_compact(&signature_bytes)?;
+            #[cfg(not(feature = "p256"))]
+            if signature_bytes.len() != 64 {
+                return Err(MdocError::InvalidCoseSign1("ES256 signature length"));
+            }
         }
         #[cfg(feature = "ml-dsa")]
         CoseAlg::MlDsa65 => {
@@ -2259,6 +2346,7 @@ pub fn device_authentication_sig_structure_hash(
     Ok(Sha256::digest(sig_structure(ES256_PROTECTED_HEADER, &payload)).into())
 }
 
+#[cfg(feature = "p256")]
 fn demo_mdoc_document(session_transcript: &[u8], include_extra_items: bool) -> Vec<u8> {
     let issuer_signing_key =
         SigningKey::from_bytes((&[7u8; 32]).into()).expect("demo issuer signing key");
@@ -2366,6 +2454,7 @@ fn demo_mdoc_document(session_transcript: &[u8], include_extra_items: bool) -> V
     ]))
 }
 
+#[cfg(feature = "p256")]
 fn demo_cose_key(signing_key: &SigningKey) -> Value {
     let encoded = signing_key.verifying_key().to_encoded_point(false);
     let x: [u8; 32] = encoded.x().expect("demo key has x coordinate")[..]
@@ -2383,6 +2472,7 @@ fn demo_cose_key(signing_key: &SigningKey) -> Value {
     ])
 }
 
+#[cfg(feature = "p256")]
 fn demo_issuer_signed_item(
     digest_id: u64,
     element: &str,
@@ -2401,10 +2491,12 @@ fn demo_issuer_signed_item(
     encode_value(Value::Tag(24, Box::new(Value::Bytes(encode_value(item)))))
 }
 
+#[cfg(feature = "p256")]
 fn demo_tdate(text: &str) -> Value {
     Value::Tag(0, Box::new(text.into()))
 }
 
+#[cfg(feature = "p256")]
 fn demo_cose_sign1(signing_key: &SigningKey, unprotected: Value, payload: &[u8]) -> Value {
     let sig_structure = sig_structure(ES256_PROTECTED_HEADER, payload);
     let signature: P256Signature = signing_key.sign(&sig_structure);
@@ -2662,9 +2754,17 @@ fn parse_device_cose_key(value: &Value) -> Result<ParsedDeviceKey, MdocError> {
         ));
     }
     let _ = kty;
-    Ok(ParsedDeviceKey::Ec2(parse_cose_key(value)?))
+    #[cfg(feature = "p256")]
+    {
+        Ok(ParsedDeviceKey::Ec2(parse_cose_key(value)?))
+    }
+    #[cfg(not(feature = "p256"))]
+    Err(MdocError::InvalidCoseKey(
+        "EC2 P-256 deviceKey: rebuild eu-id-prover with the `p256` feature",
+    ))
 }
 
+#[cfg(feature = "p256")]
 fn parse_cose_key(value: &Value) -> Result<AffinePoint, MdocError> {
     let key = expect_map(value, "COSE_Key")?;
     if !(4..=5).contains(&key.len()) {
@@ -2711,6 +2811,19 @@ fn issuer_key_from_unprotected(
     Ok(issuer_key)
 }
 
+/// The FIPS 204 `pkEncode` bytes of the statement's ML-DSA issuer key,
+/// recomputed from the PUBLIC `(ρ, t1)` in the statement — never read from the
+/// prover-supplied `tr` digest. A relying party binds its issuer trust anchor
+/// against this (e.g. the SDK's statement-binding layer compares a pinned
+/// SHA-256 of these bytes); `None` for a P-256 issuer statement.
+#[cfg(feature = "ml-dsa")]
+pub fn mdoc_statement_issuer_mldsa_pk(statement: &MdocCircuitStatement) -> Option<Vec<u8>> {
+    statement
+        .issuer_input
+        .as_mldsa()
+        .map(|input| stwo_mldsa::reference::encoding::pk_encode(&input.rho, &input.t1))
+}
+
 /// ML-DSA-65 issuer key from the unprotected `issuerKey` COSE_Key: AKP key
 /// type (`kty = 7`), `alg = -49`, raw 1952-byte public key in label `-1`.
 ///
@@ -2724,9 +2837,13 @@ fn mldsa_issuer_pk_from_unprotected(
     unprotected: &[(Value, Value)],
     request: &MdocPidRequest,
 ) -> Result<Vec<u8>, MdocError> {
+    #[cfg(feature = "p256")]
+    let has_p256_key_pins = !request.trusted_issuer_public_keys.is_empty();
+    #[cfg(not(feature = "p256"))]
+    let has_p256_key_pins = false;
     if value_int_key(unprotected, 33).is_some()
         || !request.trusted_issuer_certificates.is_empty()
-        || !request.trusted_issuer_public_keys.is_empty()
+        || has_p256_key_pins
     {
         return Err(MdocError::InvalidCoseKey(
             "ML-DSA-65 issuer with P-256 trust material is unsupported",
@@ -2985,6 +3102,7 @@ fn affine_point_from_spki(spki_der: &[u8]) -> Result<AffinePoint, MdocError> {
     })
 }
 
+#[cfg(feature = "p256")]
 fn verify_signature(
     public_key: &AffinePoint,
     message: &[u8],
@@ -3005,6 +3123,7 @@ fn verify_signature(
         .map_err(|_| MdocError::InvalidSignature(label))
 }
 
+#[cfg(feature = "p256")]
 fn signature_from_compact(bytes: &[u8]) -> Result<Signature, MdocError> {
     if bytes.len() != 64 {
         return Err(MdocError::InvalidCoseSign1("P-256 signature must be r||s"));
@@ -3021,6 +3140,7 @@ fn signature_from_compact(bytes: &[u8]) -> Result<Signature, MdocError> {
     })
 }
 
+#[cfg(feature = "p256")]
 fn ecdsa_input(
     sig_structure: &[u8],
     signature: Signature,
@@ -3095,6 +3215,7 @@ pub struct MdocCircuitStatement {
     pub policy: Policy,
 }
 
+#[cfg(feature = "p256")]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MdocPublicStatement {
     pub issuer_public_key: AffinePoint,
@@ -3136,6 +3257,7 @@ pub struct MdocPublicStatement {
     pub policy: Policy,
 }
 
+#[cfg(feature = "p256")]
 impl MdocPublicStatement {
     pub fn from_circuit(statement: &MdocCircuitStatement) -> Self {
         Self {
@@ -3267,6 +3389,7 @@ impl MdocPublicStatement {
 /// vice versa) is rejected fail-closed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MdocRevocationKey {
+    #[cfg(feature = "p256")]
     Ecdsa(AffinePoint),
     /// FIPS 204 `pkEncode` bytes (1,952).
     #[cfg(feature = "ml-dsa")]
@@ -3274,6 +3397,7 @@ pub enum MdocRevocationKey {
 }
 
 impl MdocRevocationKey {
+    #[cfg(feature = "p256")]
     pub fn as_ecdsa(&self) -> Option<&AffinePoint> {
         match self {
             Self::Ecdsa(key) => Some(key),
@@ -3285,6 +3409,7 @@ impl MdocRevocationKey {
     #[cfg(feature = "ml-dsa")]
     pub fn as_mldsa(&self) -> Option<&[u8]> {
         match self {
+            #[cfg(feature = "p256")]
             Self::Ecdsa(_) => None,
             Self::MlDsa(pk) => Some(pk),
         }
@@ -3292,6 +3417,7 @@ impl MdocRevocationKey {
 
     pub fn is_mldsa(&self) -> bool {
         match self {
+            #[cfg(feature = "p256")]
             Self::Ecdsa(_) => false,
             #[cfg(feature = "ml-dsa")]
             Self::MlDsa(_) => true,
@@ -3306,6 +3432,7 @@ impl MdocRevocationKey {
 /// the hosted module's private-message mode).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MdocRevocationSignature {
+    #[cfg(feature = "p256")]
     Ecdsa(Signature),
     /// FIPS 204 `sigEncode` bytes (3,309).
     #[cfg(feature = "ml-dsa")]
@@ -3313,6 +3440,7 @@ pub enum MdocRevocationSignature {
 }
 
 impl MdocRevocationSignature {
+    #[cfg(feature = "p256")]
     pub fn as_ecdsa(&self) -> Option<&Signature> {
         match self {
             Self::Ecdsa(signature) => Some(signature),
@@ -3324,6 +3452,7 @@ impl MdocRevocationSignature {
     #[cfg(feature = "ml-dsa")]
     pub fn as_mldsa(&self) -> Option<&[u8]> {
         match self {
+            #[cfg(feature = "p256")]
             Self::Ecdsa(_) => None,
             Self::MlDsa(signature) => Some(signature),
         }
@@ -3331,6 +3460,7 @@ impl MdocRevocationSignature {
 
     pub fn is_mldsa(&self) -> bool {
         match self {
+            #[cfg(feature = "p256")]
             Self::Ecdsa(_) => false,
             #[cfg(feature = "ml-dsa")]
             Self::MlDsa(_) => true,
@@ -3557,7 +3687,9 @@ impl MdocCircuitStatement {
         // host-side (`check_mldsa_device_key_binding`) — the issuer
         // Sig_structure is public statement input there, so no window/offset
         // hint exists to tamper with. Offsets/anchors are zeroed placeholders.
+        #[cfg(feature = "p256")]
         let device_is_ecdsa = extracted.device_auth_input.as_ecdsa().is_some();
+        #[cfg(feature = "p256")]
         let (mso_device_key_x_offset, mso_device_key_y_offset) = if device_is_ecdsa {
             (
                 find_subslice(&extracted.issuer_sig_structure, &extracted.device_key.x.0)
@@ -3568,6 +3700,8 @@ impl MdocCircuitStatement {
         } else {
             (0, 0)
         };
+        #[cfg(not(feature = "p256"))]
+        let (mso_device_key_x_offset, mso_device_key_y_offset) = (0usize, 0usize);
         let mso_payload_offset = find_subslice(&extracted.issuer_sig_structure, &extracted.mso)
             .ok_or(MdocError::UnsupportedCircuitValue("MSO payload offset"))?;
         let mso_valid_from_date_offset = mso_payload_offset
@@ -3584,6 +3718,14 @@ impl MdocCircuitStatement {
                 extracted.valid_until,
                 "validUntil date offset",
             )?;
+        #[cfg(not(feature = "p256"))]
+        let (
+            mso_device_key_x_anchor,
+            mso_device_key_x_anchor_offset,
+            mso_device_key_y_anchor,
+            mso_device_key_y_anchor_offset,
+        ) = (Vec::new(), 0usize, Vec::new(), 0usize);
+        #[cfg(feature = "p256")]
         let (
             mso_device_key_x_anchor,
             mso_device_key_x_anchor_offset,
@@ -3622,6 +3764,7 @@ impl MdocCircuitStatement {
             &mso_valid_until_anchor,
             "validUntil anchor offset",
         )?;
+        #[cfg(feature = "p256")]
         if device_is_ecdsa {
             ensure_value_window_with_message(
                 &extracted.issuer_sig_structure,
@@ -3789,9 +3932,9 @@ pub struct MdocCircuitProof {
     #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
     pub revocation_mldsa: Option<MdocMlDsaClaims>,
     /// `Some` iff the device is P-256 (ES256); `None` for ML-DSA devices.
-    #[cfg(not(feature = "ec-coprocessor"))]
+    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
     device_p256_claim: Option<P256CurrentAirProofClaim>,
-    #[cfg(not(feature = "ec-coprocessor"))]
+    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
     device_p256_interaction_claim: Option<P256CurrentAirInteractionClaim>,
     #[cfg(feature = "ec-coprocessor")]
     device_public_digest_bind_interaction_claim: PublicDigestBindInteractionClaim,
@@ -3809,17 +3952,21 @@ pub struct MdocCircuitProof {
     revocation_sha_interaction_claim: Option<Sha256InteractionClaim>,
     attribute_sha_log_n_rows: Vec<u32>,
     attribute_sha_interaction_claims: Vec<Sha256InteractionClaim>,
+    #[cfg(feature = "p256")]
     revocation_p256_claim: Option<P256CurrentAirProofClaim>,
+    #[cfg(feature = "p256")]
     revocation_p256_interaction_claim: Option<P256CurrentAirInteractionClaim>,
+    #[cfg(feature = "p256")]
     revocation_bridge_log_size: Option<u32>,
+    #[cfg(feature = "p256")]
     revocation_bridge_interaction_claim: Option<DigestBindInteractionClaim>,
     #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
     issuer_bridge_log_size: Option<u32>,
     #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
     issuer_bridge_interaction_claim: Option<DigestBindInteractionClaim>,
-    #[cfg(not(feature = "ec-coprocessor"))]
+    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
     device_bridge_log_size: Option<u32>,
-    #[cfg(not(feature = "ec-coprocessor"))]
+    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
     device_bridge_interaction_claim: Option<DigestBindInteractionClaim>,
     mdoc_window_bind_interaction_claim: MdocWindowBindInteractionClaim,
     mdoc_validity_interaction_claim: MdocValidityInteractionClaim,
@@ -3959,11 +4106,13 @@ fn sha_params(bytes: &[u8]) -> (stwo_sha256::types::Sha256Witness, u32) {
     (witness, log_n_rows)
 }
 
+#[cfg(feature = "p256")]
 fn single_p256_draft(input: EcdsaVerifyInput) -> Result<P256ProofDraft, Error> {
     P256ProofDraft::from_inputs_with_arbitrary_fake_glv_hints(vec![input])
         .map_err(Error::P256Prepare)
 }
 
+#[cfg(feature = "p256")]
 fn mdoc_sizing_waste(
     extracted: &ExtractedPidMdoc,
     statement: &MdocCircuitStatement,
@@ -4049,6 +4198,7 @@ fn mdoc_sizing_waste(
     })
 }
 
+#[cfg(feature = "p256")]
 fn sha_sizing_waste(
     name: &'static str,
     witness: &stwo_sha256::types::Sha256Witness,
@@ -4074,6 +4224,7 @@ fn sha_sizing_waste(
     }
 }
 
+#[cfg(feature = "p256")]
 fn trace_and_interaction_cells(layout: &TreeLayout) -> u64 {
     layout
         .trace
@@ -4083,11 +4234,12 @@ fn trace_and_interaction_cells(layout: &TreeLayout) -> u64 {
         .sum()
 }
 
-#[cfg(not(feature = "ec-coprocessor"))]
+#[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
 fn expected_instance(input: &EcdsaVerifyInput) -> PublicEcdsaInstance<M31> {
     PublicEcdsaInstance::from_input(0, input)
 }
 
+#[cfg(feature = "p256")]
 fn public_instance_key_matches(
     instance: &PublicEcdsaInstance<M31>,
     public_key: &AffinePoint,
@@ -4109,6 +4261,7 @@ fn public_instance_key_matches(
         && instance.pub_y == expected.pub_y
 }
 
+#[cfg(feature = "p256")]
 fn ecdsa_inputs_equal(left: &EcdsaVerifyInput, right: &EcdsaVerifyInput) -> bool {
     left.message_hash.0 == right.message_hash.0
         && left.signature.r.0 == right.signature.r.0
@@ -4133,6 +4286,7 @@ impl Air for MdocRevocationPublicBind {
         // Scheme discriminant + key bytes: a P-256 key and an ML-DSA key can
         // never produce the same transcript (domain separation per arm).
         match &self.inputs.revocation_public_key {
+            #[cfg(feature = "p256")]
             MdocRevocationKey::Ecdsa(key) => {
                 channel.mix_u64(1);
                 for byte in key.x.0 {
@@ -5443,13 +5597,15 @@ fn prove_or_root_mdoc(
         .as_ecdsa()
         .map(|input| single_p256_draft(input.clone()))
         .transpose()?;
-    #[cfg(not(feature = "ec-coprocessor"))]
+    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
     let device_draft = statement
         .device_input
         .as_ecdsa()
         .map(|input| single_p256_draft(input.clone()))
         .transpose()?;
+    #[cfg(feature = "p256")]
     let revocation_p256_input = ts13_revocation_p256_input(statement)?;
+    #[cfg(feature = "p256")]
     let revocation_draft = revocation_p256_input
         .clone()
         .map(single_p256_draft)
@@ -5508,11 +5664,13 @@ fn prove_or_root_mdoc(
     // The device digest/z relations only exist for a P-256 device (their sole
     // consumer is the device bridge); an ML-DSA device gets a field relation
     // for the hosted module's µ-absorb bridge instead.
-    #[cfg(not(feature = "ec-coprocessor"))]
+    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
     let device_digest = statement
         .device_input
         .as_ecdsa()
         .map(|_| SharedDigestRelation::new());
+    #[cfg(all(not(feature = "ec-coprocessor"), not(feature = "p256")))]
+    let device_digest: Option<SharedDigestRelation> = None;
     #[cfg(feature = "ec-coprocessor")]
     let device_digest = SharedDigestRelation::new();
     let mso_digest = statement
@@ -5520,11 +5678,14 @@ fn prove_or_root_mdoc(
         .as_ref()
         .map(|_| SharedDigestRelation::new());
     // Same split per revocation scheme: digest/z only for the P-256 arm.
+    #[cfg(feature = "p256")]
     let revocation_digest = statement
         .ts13_revocation_signature
         .as_ref()
         .and_then(|signature| signature.as_ecdsa())
         .map(|_| SharedDigestRelation::new());
+    #[cfg(not(feature = "p256"))]
+    let revocation_digest: Option<SharedDigestRelation> = None;
     let attribute_digests: Vec<_> = (0..attribute_sha_params.len())
         .map(|_| SharedDigestRelation::new())
         .collect();
@@ -5548,11 +5709,12 @@ fn prove_or_root_mdoc(
     let sha_table_relations = SharedShaTableRelations::new();
     #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
     let issuer_scalar_z = SharedScalarZRelation::new();
-    #[cfg(not(feature = "ec-coprocessor"))]
+    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
     let device_scalar_z = statement
         .device_input
         .as_ecdsa()
         .map(|_| SharedScalarZRelation::new());
+    #[cfg(feature = "p256")]
     let revocation_scalar_z = statement
         .ts13_revocation_signature
         .as_ref()
@@ -5580,7 +5742,7 @@ fn prove_or_root_mdoc(
     // Without the namespace the device module would alias onto the issuer's
     // schedule under air-core first-writer-wins tree-0 dedup, binding the wrong
     // constraints. Two genuinely distinct signatures cannot share the schedule.
-    #[cfg(not(feature = "ec-coprocessor"))]
+    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
     let mut device_p256 = device_draft
         .as_ref()
         .map(|draft| {
@@ -5739,6 +5901,7 @@ fn prove_or_root_mdoc(
             .with_private_message())
         })
         .transpose()?;
+    #[cfg(feature = "p256")]
     let mut revocation_p256 = revocation_draft
         .as_ref()
         .map(|draft| {
@@ -5786,13 +5949,13 @@ fn prove_or_root_mdoc(
             issuer_digest.clone(),
         )
     });
-    #[cfg(not(feature = "ec-coprocessor"))]
+    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
     let device_bridge_log = device_p256.as_ref().map(|device_p256| {
         crate::bridge_log_size(
             crate::bridge_rows(&device_p256.proof_claim().public_inputs.instances).len(),
         )
     });
-    #[cfg(not(feature = "ec-coprocessor"))]
+    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
     let mut device_bridge = device_p256.as_ref().map(|device_p256| {
         let device_bridge_rows =
             crate::bridge_rows(&device_p256.proof_claim().public_inputs.instances);
@@ -5807,7 +5970,9 @@ fn prove_or_root_mdoc(
                 .expect("device digest relation exists for a P-256 device"),
         )
     });
+    #[cfg(feature = "p256")]
     let mut revocation_bridge_log_size = None;
+    #[cfg(feature = "p256")]
     let mut revocation_bridge = match (
         revocation_p256.as_ref(),
         revocation_scalar_z.clone(),
@@ -5964,6 +6129,7 @@ fn prove_or_root_mdoc(
             // P-256 device order is EXACTLY the historical one; an ML-DSA
             // device swaps [device_p256, device_bridge] for the hosted mldsa
             // module placed right after device_sha (shared field draw).
+            #[cfg(feature = "p256")]
             if let Some(device_p256) = device_p256.as_mut() {
                 modules.push(device_p256);
             }
@@ -5972,6 +6138,7 @@ fn prove_or_root_mdoc(
             if let Some(device_mldsa) = device_mldsa.as_mut() {
                 modules.push(device_mldsa);
             }
+            #[cfg(feature = "p256")]
             if let Some(device_bridge) = device_bridge.as_mut() {
                 modules.push(device_bridge);
             }
@@ -5984,6 +6151,7 @@ fn prove_or_root_mdoc(
             &mut device_sha,
             &mut device_public_digest_bind,
         ];
+        #[cfg(feature = "p256")]
         if let Some(revocation_p256) = revocation_p256.as_mut() {
             modules.push(revocation_p256);
         }
@@ -5998,6 +6166,7 @@ fn prove_or_root_mdoc(
         if let Some(revocation_mldsa) = revocation_mldsa.as_mut() {
             modules.push(revocation_mldsa);
         }
+        #[cfg(feature = "p256")]
         if let Some(revocation_bridge) = revocation_bridge.as_mut() {
             modules.push(revocation_bridge);
         }
@@ -6068,11 +6237,11 @@ fn prove_or_root_mdoc(
         device_mldsa: device_mldsa.as_ref().map(MdocMlDsaClaims::from_prover),
         #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
         revocation_mldsa: revocation_mldsa.as_ref().map(MdocMlDsaClaims::from_prover),
-        #[cfg(not(feature = "ec-coprocessor"))]
+        #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
         device_p256_claim: device_p256
             .as_ref()
             .map(|device_p256| device_p256.proof_claim().clone()),
-        #[cfg(not(feature = "ec-coprocessor"))]
+        #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
         device_p256_interaction_claim: device_p256
             .as_ref()
             .map(|device_p256| device_p256.interaction_claim().clone()),
@@ -6099,13 +6268,17 @@ fn prove_or_root_mdoc(
             .iter()
             .map(|sha| sha.interaction_claim().clone())
             .collect(),
+        #[cfg(feature = "p256")]
         revocation_p256_claim: revocation_p256
             .as_ref()
             .map(|p256| p256.proof_claim().clone()),
+        #[cfg(feature = "p256")]
         revocation_p256_interaction_claim: revocation_p256
             .as_ref()
             .map(|p256| p256.interaction_claim().clone()),
+        #[cfg(feature = "p256")]
         revocation_bridge_log_size,
+        #[cfg(feature = "p256")]
         revocation_bridge_interaction_claim: revocation_bridge
             .as_ref()
             .map(|bridge| bridge.interaction_claim().clone()),
@@ -6115,9 +6288,9 @@ fn prove_or_root_mdoc(
         issuer_bridge_interaction_claim: issuer_bridge
             .as_ref()
             .map(|issuer_bridge| issuer_bridge.interaction_claim().clone()),
-        #[cfg(not(feature = "ec-coprocessor"))]
+        #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
         device_bridge_log_size: device_bridge_log,
-        #[cfg(not(feature = "ec-coprocessor"))]
+        #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
         device_bridge_interaction_claim: device_bridge
             .as_ref()
             .map(|device_bridge| device_bridge.interaction_claim().clone()),
@@ -6237,6 +6410,7 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
     // issuer of an uncompiled scheme falls through and is rejected.
     #[cfg(not(feature = "ec-coprocessor"))]
     match &statement.issuer_input {
+        #[cfg(feature = "p256")]
         MdocAuthInput::Ecdsa(issuer_input) => {
             #[cfg(feature = "ml-dsa")]
             if proof.mldsa.is_some() {
@@ -6244,17 +6418,11 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
                     "mdoc proof carries ML-DSA issuer claims for a P-256 issuer".to_string(),
                 ));
             }
-            #[cfg(feature = "p256")]
             match &proof.issuer_p256_claim {
                 Some(issuer_claim)
                     if issuer_claim.public_inputs.instances.as_slice()
                         == [expected_instance(issuer_input)] => {}
                 _ => return Err(Error::P256InstanceMismatch),
-            }
-            #[cfg(not(feature = "p256"))]
-            {
-                let _ = issuer_input;
-                return Err(Error::P256InstanceMismatch);
             }
         }
         #[cfg(feature = "ml-dsa")]
@@ -6278,6 +6446,7 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
     // Device arm ↔ proof shape (same biconditional gate as the issuer).
     #[cfg(not(feature = "ec-coprocessor"))]
     match &statement.device_input {
+        #[cfg(feature = "p256")]
         MdocAuthInput::Ecdsa(device_input) => {
             #[cfg(feature = "ml-dsa")]
             if proof.device_mldsa.is_some() {
@@ -6294,6 +6463,9 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
         }
         #[cfg(feature = "ml-dsa")]
         MdocAuthInput::MlDsa(_) => {
+            // The P-256 device claim slots only exist in `p256` builds; in a
+            // quantum-only build the proof cannot even carry them.
+            #[cfg(feature = "p256")]
             if proof.device_p256_claim.is_some()
                 || proof.device_p256_interaction_claim.is_some()
                 || proof.device_bridge_log_size.is_some()
@@ -6329,10 +6501,13 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
     }
 
     let issuer_digest = SharedDigestRelation::new();
+    #[cfg(feature = "p256")]
     let device_digest = statement
         .device_input
         .as_ecdsa()
         .map(|_| SharedDigestRelation::new());
+    #[cfg(not(feature = "p256"))]
+    let device_digest: Option<SharedDigestRelation> = None;
     #[cfg(feature = "ml-dsa")]
     let device_field = statement
         .device_input
@@ -6342,20 +6517,29 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
     let has_revocation_signature = statement.ts13_revocation_signature.is_some();
     // The P-256 revocation module set exists iff the statement carries a P-256
     // revocation signature; the ML-DSA claim tree iff an ML-DSA one.
+    #[cfg(feature = "p256")]
     let has_p256_revocation_signature = statement
         .ts13_revocation_signature
         .as_ref()
         .is_some_and(|signature| signature.as_ecdsa().is_some());
+    // Without the classical stack the `Ecdsa` revocation arm does not exist.
+    #[cfg(not(feature = "p256"))]
+    let has_p256_revocation_signature = false;
+    #[cfg(feature = "p256")]
+    let p256_revocation_layout_mismatch = proof.revocation_p256_claim.is_some()
+        != has_p256_revocation_signature
+        || proof.revocation_p256_interaction_claim.is_some() != has_p256_revocation_signature
+        || proof.revocation_bridge_log_size.is_some() != has_p256_revocation_signature
+        || proof.revocation_bridge_interaction_claim.is_some() != has_p256_revocation_signature;
+    #[cfg(not(feature = "p256"))]
+    let p256_revocation_layout_mismatch = false;
     if proof.mso_sha_log_n_rows.is_some() != has_revocation_range
         || proof.mso_sha_interaction_claim.is_some() != has_revocation_range
         || proof.mso_payload_bind_interaction_claim.is_some() != has_revocation_range
         || proof.ts13_revocation_range_interaction_claim.is_some() != has_revocation_range
         || proof.revocation_sha_log_n_rows.is_some() != has_revocation_signature
         || proof.revocation_sha_interaction_claim.is_some() != has_revocation_signature
-        || proof.revocation_p256_claim.is_some() != has_p256_revocation_signature
-        || proof.revocation_p256_interaction_claim.is_some() != has_p256_revocation_signature
-        || proof.revocation_bridge_log_size.is_some() != has_p256_revocation_signature
-        || proof.revocation_bridge_interaction_claim.is_some() != has_p256_revocation_signature
+        || p256_revocation_layout_mismatch
     {
         return Err(Error::Verify(
             "mdoc proof revocation layout mismatch".to_string(),
@@ -6400,11 +6584,12 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
     let sha_table_relations = SharedShaTableRelations::new();
     #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
     let issuer_scalar_z = SharedScalarZRelation::new();
-    #[cfg(not(feature = "ec-coprocessor"))]
+    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
     let device_scalar_z = statement
         .device_input
         .as_ecdsa()
         .map(|_| SharedScalarZRelation::new());
+    #[cfg(feature = "p256")]
     let revocation_scalar_z = has_p256_revocation_signature.then(SharedScalarZRelation::new);
 
     #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
@@ -6423,7 +6608,7 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
             ))
         }
     };
-    #[cfg(not(feature = "ec-coprocessor"))]
+    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
     let mut device_p256 = match (
         &proof.device_p256_claim,
         &proof.device_p256_interaction_claim,
@@ -6444,6 +6629,7 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
             ))
         }
     };
+    #[cfg(feature = "p256")]
     let mut revocation_p256 = match (
         proof.revocation_p256_claim.clone(),
         proof.revocation_p256_interaction_claim.clone(),
@@ -6670,7 +6856,7 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
             ))
         }
     };
-    #[cfg(not(feature = "ec-coprocessor"))]
+    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
     let mut device_bridge = match (
         proof.device_bridge_log_size,
         &proof.device_p256_claim,
@@ -6705,6 +6891,7 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
         device_digest.expect("device digest relation exists on the ec-coprocessor path"),
         proof.device_public_digest_bind_interaction_claim.clone(),
     );
+    #[cfg(feature = "p256")]
     let mut revocation_bridge = match (
         proof.revocation_bridge_log_size,
         proof.revocation_bridge_interaction_claim.clone(),
@@ -6855,6 +7042,7 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
         if let Some(issuer_bridge) = issuer_bridge.as_mut() {
             modules.push(issuer_bridge);
         }
+        #[cfg(feature = "p256")]
         if let Some(device_p256) = device_p256.as_mut() {
             modules.push(device_p256);
         }
@@ -6863,6 +7051,7 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
         if let Some(device_mldsa) = device_mldsa.as_mut() {
             modules.push(device_mldsa);
         }
+        #[cfg(feature = "p256")]
         if let Some(device_bridge) = device_bridge.as_mut() {
             modules.push(device_bridge);
         }
@@ -6875,6 +7064,7 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
         &mut device_sha,
         &mut device_public_digest_bind,
     ];
+    #[cfg(feature = "p256")]
     if let Some(revocation_p256) = revocation_p256.as_mut() {
         modules.push(revocation_p256);
     }
@@ -6888,6 +7078,7 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
     if let Some(revocation_mldsa) = revocation_mldsa.as_mut() {
         modules.push(revocation_mldsa);
     }
+    #[cfg(feature = "p256")]
     if let Some(revocation_bridge) = revocation_bridge.as_mut() {
         modules.push(revocation_bridge);
     }

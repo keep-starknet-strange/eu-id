@@ -806,6 +806,7 @@ dependencies = [
  "ml-dsa",
  "p256",
  "predicates",
+ "rand_core 0.6.4",
  "rayon",
  "serde",
  "serde_json",

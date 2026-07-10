@@ -20,7 +20,7 @@ use air_core::relations::{
 use air_core::{
     fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint, TreeLayout,
 };
-use p256::elliptic_curve::rand_core::{OsRng, RngCore};
+use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use stwo::core::air::Component;
 use stwo::core::channel::{Blake2sChannel, Channel};
