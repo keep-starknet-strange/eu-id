@@ -148,3 +148,25 @@ flat: prove is not column-constant-bound; S3 round cells is the prove lever),
 verify 275.8ms (was 372.7ms, −26%), proof 14,891,983 B (was 34,424,854 B,
 −57%). Gates: mdoc_mldsa 24/24 (p256+ml-dsa) + 18/18 (quantum-only) green,
 credential_pipeline green, quantum-only dep tree clean.
+
+S3a MEASURED (2026-07-10, keccak wrapper rotation — one row per round
+boundary, 25 rows/perm, 5,102 → 209 committed cols): prove 21.0s (S2-era
+baseline 20.6s, flat), verify 87ms (was 99ms), proof 13,674,271 B (was
+14,890,143 B, −8.2%). Full stwo-keccak + stwo-mldsa + mdoc_mldsa suites green.
+
+S3b DEAD END (2026-07-10, logup batching sweep): batch-4 finalize needs
+max_constraint_log_degree_bound = log+2, and this stwo fork's lifted
+composition REQUIRES bound == log_size + 1 EXACTLY for every framework
+component — control experiment (UNCHANGED pair batching, bound log+2 only,
+Sha256Eval) fails prove with the OODS ConstraintsNotSatisfied; keccak_round
+at +2 under blowup-1 panics "polynomial's coefficients are not stored"
+(EvaluationMode::ExtendToEvalDomain needs stored coefficients — only the
+P256 lifting path enables that). The M4 trap is therefore GENERIC, not
+Horner-specific. Max legal batch at deg ≤ 3 is pairs — already used
+everywhere. Wider batching requires engine work (fix/enable the
+ExtendToEvalDomain path), not component work.
+
+S3 FRI EXPERIMENT (2026-07-10, log_blowup 3 + 36 queries = 128-bit,
+REVERTED): proof 9,733,783 B (−29%) but prove 31.8s (+51%: tree commits
+double with the extra LDE) and verify 139ms — breaches the <100ms verify
+bound. Production config stays (log_blowup 2, 54 queries, pow 20).
