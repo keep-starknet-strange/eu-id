@@ -126,7 +126,9 @@ fn full_pq_mdoc_extracts_with_mldsa_issuer_and_device_arms() {
     assert_eq!(device.message, extracted.device_sig_structure);
     assert!(statement.issuer_input.is_mldsa());
     assert!(statement.device_input.is_mldsa());
-    // The AffinePoint slots are zeroed placeholders in ML-DSA mode.
+    // The AffinePoint slots are zeroed placeholders in ML-DSA mode (the
+    // slots only exist at all when the classical stack is compiled in).
+    #[cfg(feature = "p256")]
     assert_eq!(extracted.device_key.x.0, [0u8; 32]);
 }
 
@@ -172,6 +174,7 @@ fn mldsa_issuer_trust_pins_fail_closed() {
 
 /// G4 direction 1: ML-DSA issuer + ES256 device (the old M7 mixed fixture)
 /// must now REJECT at extraction — mixed schemes are fail-closed.
+#[cfg(feature = "p256")]
 #[test]
 fn mixed_mode_mldsa_issuer_es256_device_rejects_at_extraction() {
     let session_transcript = openid4vp_session_transcript(b"session-transcript-123");
@@ -320,21 +323,25 @@ fn ts13_mldsa_revocation_native_positive_and_negatives() {
         Err(Ts13RevocationError::InvalidSignature)
     );
 
-    // Scheme mismatch (ML-DSA key, P-256 signature) → fail closed.
-    let mismatched = Ts13RevocationWitness {
-        id,
-        id_lo,
-        id_hi,
-        epoch,
-        signature: MdocRevocationSignature::Ecdsa(stwo_p256::types::Signature {
-            r: stwo_p256::types::U256([1u8; 32]),
-            s: stwo_p256::types::U256([1u8; 32]),
-        }),
-    };
-    assert_eq!(
-        statement.verify_witness(&extracted, &mismatched),
-        Err(Ts13RevocationError::SchemeMismatch)
-    );
+    // Scheme mismatch (ML-DSA key, P-256 signature) → fail closed. Only
+    // expressible when the classical stack is compiled in.
+    #[cfg(feature = "p256")]
+    {
+        let mismatched = Ts13RevocationWitness {
+            id,
+            id_lo,
+            id_hi,
+            epoch,
+            signature: MdocRevocationSignature::Ecdsa(stwo_p256::types::Signature {
+                r: stwo_p256::types::U256([1u8; 32]),
+                s: stwo_p256::types::U256([1u8; 32]),
+            }),
+        };
+        assert_eq!(
+            statement.verify_witness(&extracted, &mismatched),
+            Err(Ts13RevocationError::SchemeMismatch)
+        );
+    }
 }
 
 #[cfg(feature = "ec-coprocessor")]
@@ -377,24 +384,30 @@ mod hosted_mode {
         let (extracted, statement) = full_pq_extracted_and_statement();
 
         // ML-DSA credential + P-256 revocation key → statement-validation
-        // reject (scheme uniformity, G4 third direction).
-        let mixed = statement
-            .clone()
-            .with_ts13_revocation(MdocRevocationPublicInputs {
-                revocation_public_key: MdocRevocationKey::Ecdsa(stwo_p256::types::AffinePoint {
-                    x: stwo_p256::types::U256([3u8; 32]),
-                    y: stwo_p256::types::U256([4u8; 32]),
-                }),
-                epoch: 7,
-            });
-        let err = match prove_mdoc_circuit(&extracted, &mixed) {
-            Err(err) => err,
-            Ok(_) => panic!("mixed schemes must reject"),
-        };
-        assert!(
-            format!("{err:?}").contains("mixes"),
-            "unexpected error: {err:?}"
-        );
+        // reject (scheme uniformity, G4 third direction). Only expressible
+        // when the classical stack is compiled in.
+        #[cfg(feature = "p256")]
+        {
+            let mixed = statement
+                .clone()
+                .with_ts13_revocation(MdocRevocationPublicInputs {
+                    revocation_public_key: MdocRevocationKey::Ecdsa(
+                        stwo_p256::types::AffinePoint {
+                            x: stwo_p256::types::U256([3u8; 32]),
+                            y: stwo_p256::types::U256([4u8; 32]),
+                        },
+                    ),
+                    epoch: 7,
+                });
+            let err = match prove_mdoc_circuit(&extracted, &mixed) {
+                Err(err) => err,
+                Ok(_) => panic!("mixed schemes must reject"),
+            };
+            assert!(
+                format!("{err:?}").contains("mixes"),
+                "unexpected error: {err:?}"
+            );
+        }
 
         // D2: statement + extracted whose device key is NOT the MSO deviceKey
         // (the issuer's own input replayed into the device slot) → the
@@ -519,6 +532,7 @@ mod hosted_mode {
             .revocation_public_key
         {
             MdocRevocationKey::MlDsa(pk) => pk[0] ^= 0x01,
+            #[cfg(feature = "p256")]
             MdocRevocationKey::Ecdsa(_) => panic!("statement carries an ML-DSA revocation key"),
         }
         verify_mdoc_circuit(&proof, &revocation_key_tamper)

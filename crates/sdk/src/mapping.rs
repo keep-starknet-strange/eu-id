@@ -29,11 +29,13 @@
 
 use std::collections::HashSet;
 
-use eu_id_prover::{
-    all_nationality_codes, AffinePoint, Credential, Date, IssuerKey, Policy, PublicStatement,
-};
+use eu_id_prover::{all_nationality_codes, Date, Policy};
+#[cfg(feature = "p256-mdoc")]
+use eu_id_prover::{AffinePoint, Credential, IssuerKey, PublicStatement};
 
-use crate::{PredicateMode, ZkError, ZkPublicStatement, ZkWitness};
+use crate::{PredicateMode, ZkError, ZkPublicStatement};
+#[cfg(feature = "p256-mdoc")]
+use crate::ZkWitness;
 
 /// Build a [`ZkError::InvalidInput`] with an actionable message.
 fn invalid(msg: impl Into<String>) -> ZkError {
@@ -42,6 +44,7 @@ fn invalid(msg: impl Into<String>) -> ZkError {
 
 /// The fixed POC issuer key the proof binds (decision 1). Deterministic, so the
 /// prove and verify sides recover the identical `Q`.
+#[cfg(feature = "p256-mdoc")]
 pub(crate) fn issuer_key() -> AffinePoint {
     IssuerKey::demo().public_key()
 }
@@ -55,6 +58,7 @@ pub(crate) fn issuer_key() -> AffinePoint {
 /// device-key signature (decision 4); the mdoc `SessionTranscript` nonce carried
 /// in [`ZkPublicStatement`] stays envelope-bound (not STARK-bound). Binding a
 /// real device key is handled by the product mdoc path.
+#[cfg(feature = "p256-mdoc")]
 pub(crate) fn to_public_statement(
     statement: &ZkPublicStatement,
 ) -> Result<PublicStatement, ZkError> {
@@ -152,6 +156,7 @@ fn accepted_alpha2_set(accepted_numeric: &[u32]) -> Result<Vec<[u8; 2]>, ZkError
 /// values satisfy the neutralized predicate by construction: `min_age = 0` makes
 /// the age cutoff today (and the bound is inclusive, so a DOB of today passes),
 /// and the universal accepted set contains every assigned code.
+#[cfg(feature = "p256-mdoc")]
 pub(crate) fn to_credential(
     witness: &ZkWitness,
     policy: &Policy,
@@ -181,6 +186,7 @@ pub(crate) fn to_credential(
 /// A deterministic assigned ISO-3166-1 numeric code, used to fill the credential
 /// when the nat predicate is neutralized and the holder discloses no
 /// nationality. Any assigned code is a member of the universal accepted set.
+#[cfg(feature = "p256-mdoc")]
 fn default_assigned_code() -> u16 {
     all_nationality_codes()
         .first()
@@ -236,6 +242,7 @@ fn validate_accepted_set(accepted: &[u32]) -> Result<(), ZkError> {
 /// calendar validity (real day-of-month, age within bounds) is enforced by the
 /// age predicate at prove time, so a structurally-valid but impossible date
 /// surfaces there as a failed prove rather than here.
+#[cfg(feature = "p256-mdoc")]
 fn parse_birth_date(s: &str) -> Result<(u16, u8, u8), ZkError> {
     let parts: Vec<&str> = s.split('-').collect();
     if parts.len() != 3 || parts[0].len() != 4 || parts[1].len() != 2 || parts[2].len() != 2 {
@@ -274,6 +281,7 @@ fn parse_birth_date(s: &str) -> Result<(u16, u8, u8), ZkError> {
 /// error. For age-only mode the accepted set is universal, so the first held
 /// (assigned) code is chosen. The chosen code must be an assigned ISO numeric
 /// (else it is not in any membership table — surfaced as invalid input).
+#[cfg(feature = "p256-mdoc")]
 fn select_nationality(held: &[u32], accepted: &[u32]) -> Result<u16, ZkError> {
     if held.is_empty() {
         return Err(invalid("witness carries no nationalities"));
@@ -327,7 +335,7 @@ fn epoch_day_to_date(epoch_day: i32) -> Result<Date, ZkError> {
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "p256-mdoc"))]
 mod tests {
     use super::*;
     use crate::NatMode;

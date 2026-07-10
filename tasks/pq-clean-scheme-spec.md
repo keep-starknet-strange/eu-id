@@ -196,6 +196,24 @@ Scheme = ML-DSA swaps, per role:
   perf work (shared Keccak lanes across instances, PcsConfig tuning,
   compression) is explicitly follow-up, not part of the soundness scheme.
 
+- §3 as built (2026-07-10): `p256` on eu-id-prover now owns the ENTIRE
+  classical stack (`dep:p256`, `dep:ecdsa`, `dep:stwo-p256` + every P-256
+  code path; the blinders' OS randomness moved from the `p256` re-export to a
+  direct `rand_core` dep). The `eu-id` CLI is `required-features = ["p256"]`.
+  sdk: `default = ["p256-mdoc"]`, `quantum-safe-mdoc` builds an
+  `MdocCircuitStatement`-shaped statement-binding layer where
+  `issuer_key_x` = SHA-256 of the issuer's FIPS 204 `pkEncode` bytes
+  (recomputed from public (ρ, t1) via
+  `eu_id_prover::mdoc::mdoc_statement_issuer_mldsa_pk`, never the
+  prover-supplied `tr`) and `issuer_key_y` = 32 zero bytes; the device arm
+  binds SHA-256 of the public device `Sig_structure` against nonce+doctype.
+  `ZkMdocWitness.trusted_mldsa_issuer_public_keys` forwards to
+  `MdocPidRequest`. NOT available in the quantum-only sdk build: the legacy
+  `prove_identity`/`verify_identity` 11-byte POC surface and the sdk unit-test
+  suite (both classical-fixture-shaped, gated to `p256-mdoc`). eu-id-ffi:
+  quantum-only build keeps the SHA bench only (P-256/identity/mdoc benches
+  gated to `p256`).
+
 ## 4. Executable gates
 
 - [x] G1 native: fixture signs issuer + device + revocation with ML-DSA-65;
@@ -213,7 +231,18 @@ Scheme = ML-DSA swaps, per role:
       id_lo/id_hi bytes (privacy assert).
 - [x] G7 preprocessed-root: two different device signatures ⇒ different
       pinned roots; per-signature pin regression across all three roles.
-- [ ] G8 quantum-only dependency-tree gate + feature-matrix build checks.
+- [x] G8 quantum-only dependency-tree gate + feature-matrix build checks.
+      Executable gate: `scripts/check-quantum-only-deps.sh` (grep over
+      `cargo tree -p eu-id-prover --no-default-features --features
+      quantum-safe-mdoc -e normal`). One documented engine-internal exception:
+      `rfc6979` reaches the tree via the stwo STARK engine's own
+      `starknet-crypto` dependency (present in every stwo build, not part of
+      the credential scheme's public-key crypto); the script allows it iff its
+      sole inverse dependency is `starknet-crypto` and fails on everything
+      else. Feature matrix: eu-id-prover default / quantum-only /
+      `p256,ml-dsa` (lib + tests), sdk default + `--no-default-features
+      --features quantum-safe-mdoc`, eu-id-ffi default + quantum-only — all
+      green 2026-07-10.
 - [x] G9 P-256 regression suites unchanged
       (compose_p256_sha, credential_pipeline, e2e_soundness, identity_api,
       nonce_signature, mdoc_support suites).

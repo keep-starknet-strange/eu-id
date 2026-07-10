@@ -16,23 +16,36 @@
 //! Built before any binding so each later binding task can diff its trace
 //! against a trusted witness rather than a guess.
 
+// The signing oracle and pipeline witness are P-256 constructs; only `Policy`
+// and `SHA_GROUP_WIDTH` are scheme-neutral (the mdoc path consumes them), so
+// everything classical lives behind the `p256` feature.
+#[cfg(feature = "p256")]
 use ecdsa::signature::{Signer, Verifier};
+#[cfg(feature = "p256")]
 use p256::ecdsa::{Signature as P256Signature, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "p256")]
 use sha2::{Digest as _, Sha256};
 
-use predicates::{
-    Date, DateOfBirth, NatPrivateInput, NatPublicInput, PublicInput as AgePublicInput,
-};
+use predicates::{Date, NatPublicInput, PublicInput as AgePublicInput};
+#[cfg(feature = "p256")]
+use predicates::{DateOfBirth, NatPrivateInput};
 
+#[cfg(feature = "p256")]
 use stwo_p256::ecdsa::ecdsa_verify;
+#[cfg(feature = "p256")]
 use stwo_p256::proof::P256ProofDraft;
+#[cfg(feature = "p256")]
 use stwo_p256::types::{AffinePoint, EcdsaVerifyInput, Signature, U256};
 
+#[cfg(feature = "p256")]
 use stwo_sha256::trace::min_log_size;
+#[cfg(feature = "p256")]
 use stwo_sha256::types::Sha256Witness;
+#[cfg(feature = "p256")]
 use stwo_sha256::witness::compute_sha256_witness;
 
+#[cfg(feature = "p256")]
 use crate::credential::Credential;
 
 /// SHA-256 round-group width fed to the SHA module. `MAX_ROUND_GROUP_BITS = 6`
@@ -47,14 +60,17 @@ pub const SHA_GROUP_WIDTH: u32 = 6;
 /// Deterministic demo issuer seed. A fixed seed keeps `Q` (and therefore every
 /// fixture's public statement) reproducible across runs. Not a real key —
 /// this is a POC oracle.
+#[cfg(feature = "p256")]
 pub const DEMO_ISSUER_SEED: [u8; 32] = [7u8; 32];
 
 /// An issuer's ECDSA-P256 signing key. Wraps the `p256` crate so the rest of
 /// the pipeline never touches it directly.
+#[cfg(feature = "p256")]
 pub struct IssuerKey {
     signing_key: SigningKey,
 }
 
+#[cfg(feature = "p256")]
 impl IssuerKey {
     /// Build an issuer key from a 32-byte scalar seed. Panics if the seed is not
     /// a valid P-256 scalar (zero or ≥ n) — callers use fixed, known-good seeds.
@@ -88,6 +104,7 @@ impl IssuerKey {
 /// emits. `message` is the signed preimage `C`; `digest` is `z = SHA-256(C)`;
 /// `ecdsa_input` is the `(z, r, s, Q)` tuple the P256 module ingests.
 #[derive(Clone, Debug)]
+#[cfg(feature = "p256")]
 pub struct SignedCredential {
     pub credential: Credential,
     /// The signed preimage `C` (== `credential.encode()`).
@@ -98,6 +115,7 @@ pub struct SignedCredential {
     pub ecdsa_input: EcdsaVerifyInput,
 }
 
+#[cfg(feature = "p256")]
 impl SignedCredential {
     /// The issuer public key `Q`.
     pub fn issuer_key(&self) -> &AffinePoint {
@@ -121,6 +139,7 @@ impl SignedCredential {
 ///
 /// Real ES256: the `p256` crate hashes `C` with SHA-256 internally and signs the
 /// digest, so the resulting `(r, s)` verifies against `z = SHA-256(C)`.
+#[cfg(feature = "p256")]
 pub fn sign_credential(credential: &Credential, issuer: &IssuerKey) -> SignedCredential {
     let message = credential.encode().to_vec();
     let digest: [u8; 32] = Sha256::digest(&message).into();
@@ -203,6 +222,7 @@ impl Policy {
 /// the credential) so a deliberately *inconsistent* witness can be built — that
 /// is exactly the credential↔predicate mismatch the `tampered_dob_bytes`
 /// fixture models and a later binding relation must reject.
+#[cfg(feature = "p256")]
 pub struct PipelineWitness {
     /// The signed credential (`C`, `z`, `(r, s)`, `Q`).
     pub signed: SignedCredential,
@@ -234,6 +254,7 @@ pub struct PipelineWitness {
     pub nat_private: NatPrivateInput,
 }
 
+#[cfg(feature = "p256")]
 impl PipelineWitness {
     /// Compose an **honest** pipeline witness: the age DOB and nationality code
     /// are taken from the signed credential, so the result is binding-consistent.
@@ -384,6 +405,7 @@ impl PipelineWitness {
 /// A breakdown of which self-consistency invariants a [`PipelineWitness`] holds.
 /// An honest witness has every field `true` ([`Self::all_ok`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(feature = "p256")]
 pub struct ConsistencyReport {
     /// `C` round-trips through encode/decode to the same credential.
     pub encoding_ok: bool,
@@ -398,6 +420,7 @@ pub struct ConsistencyReport {
     pub nat_code_matches_credential: bool,
 }
 
+#[cfg(feature = "p256")]
 impl ConsistencyReport {
     /// True iff every invariant holds.
     pub fn all_ok(&self) -> bool {
@@ -421,6 +444,7 @@ impl ConsistencyReport {
 }
 
 /// The credential's DOB as a predicate [`Date`].
+#[cfg(feature = "p256")]
 pub(crate) fn credential_dob(c: &Credential) -> Date {
     Date {
         year: u32::from(c.birth_year),
@@ -430,11 +454,12 @@ pub(crate) fn credential_dob(c: &Credential) -> Date {
 }
 
 /// The credential's `(DateOfBirth, nationality code)` predicate attributes.
+#[cfg(feature = "p256")]
 fn credential_attributes(c: &Credential) -> (DateOfBirth, u32) {
     (DateOfBirth(credential_dob(c)), u32::from(c.nationality))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "p256"))]
 mod tests {
     use super::*;
 

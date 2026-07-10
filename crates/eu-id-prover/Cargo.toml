@@ -18,18 +18,23 @@ fri-sweep = ["stwo/tracing"]
 ec-coprocessor = ["dep:eu-id-ec-coprocessor", "p256"]
 # Issuer signature schemes. Enabling a feature compiles in that issuer proving
 # path; runtime COSE-alg dispatch operates within the compiled-in set. At least
-# one must be enabled (enforced by a `compile_error!` in lib.rs). NOTE: the
-# `p256` RustCrypto crate stays a MANDATORY dependency regardless — device
-# authentication is always P-256; this feature only gates the *issuer* P-256
-# proving/verify path, not the crate.
-p256 = []
+# one must be enabled (enforced by a `compile_error!` in lib.rs). `p256` owns
+# the ENTIRE classical stack: the RustCrypto `p256`/`ecdsa` oracles, the
+# stwo-p256 in-circuit module, and every P-256 device/revocation/issuer code
+# path. A build without `p256` carries no classical public-key crypto at all
+# (the G8 quantum-only dependency-tree gate enforces this).
+p256 = ["dep:p256", "dep:ecdsa", "dep:stwo-p256"]
 # ML-DSA-65 issuer path: pulls the hosted in-circuit stwo-mldsa module.
 ml-dsa = ["dep:stwo-mldsa"]
+# Quantum-safe product alias: ML-DSA issuer + device + revocation, no
+# classical public-key crypto in the dependency tree when built with
+# --no-default-features.
+quantum-safe-mdoc = ["ml-dsa"]
 
 [dependencies]
 air-core = { path = "../air-core" }
 eu-id-ec-coprocessor = { path = "../eu-id-ec-coprocessor", optional = true }
-stwo-p256 = { path = "../stwo-p256" }
+stwo-p256 = { path = "../stwo-p256", optional = true }
 # ML-DSA-65 issuer-auth statement (M7): COSE alg -49 issuerAuth is parsed,
 # natively pre-checked, and proven in-circuit by the hosted stwo-mldsa module.
 # Optional: only compiled in under the `ml-dsa` feature.
@@ -52,9 +57,13 @@ blake2 = "0.10"
 # `generator`/`fixtures` API on purpose: every later binding task diffs against
 # a trusted witness rather than a guess, and integration tests in `tests/`
 # (which see only the public surface) consume the fixtures.
-p256 = { version = "0.13", features = ["ecdsa"] }
-ecdsa = { version = "0.16", features = ["signing", "verifying"] }
+p256 = { version = "0.13", features = ["ecdsa"], optional = true }
+ecdsa = { version = "0.16", features = ["signing", "verifying"], optional = true }
 sha2 = "0.10"
+# OS randomness for the claimed-sum blinders (scheme-neutral; previously
+# reached through the `p256` crate's rand_core re-export, but the blinders are
+# needed by the quantum-safe build too, so the dependency is direct).
+rand_core = { version = "0.6", features = ["getrandom"] }
 rayon = "1"
 ciborium = "0.2.2"
 celes = "2.8.2"
@@ -78,6 +87,13 @@ tracing-subscriber = "0.3"
 # ML-DSA-65 mdoc fixture (M1): the RustCrypto `ml-dsa` oracle signs the issuer
 # `Sig_structure`; `stwo-mldsa` (now a main dependency) natively verifies it.
 ml-dsa = "0.1.1"
+
+# The `eu-id` CLI drives the legacy P-256 identity pipeline, so it only
+# exists in builds that carry the classical stack.
+[[bin]]
+name = "eu-id"
+path = "src/bin/eu-id.rs"
+required-features = ["p256"]
 
 [[bench]]
 name = "identity_bench"

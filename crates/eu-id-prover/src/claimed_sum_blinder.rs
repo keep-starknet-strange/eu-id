@@ -22,7 +22,7 @@
 //! boundary constraint at OODS, so the pair is bound — there is no free
 //! claimed-sum term (the P4b blind_claim-hole lesson).
 
-use p256::elliptic_curve::rand_core::{OsRng, RngCore};
+use rand_core::{OsRng, RngCore};
 use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::{QM31, SECURE_EXTENSION_DEGREE};
 use stwo::prover::backend::simd::m31::PackedM31;

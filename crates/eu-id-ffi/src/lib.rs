@@ -28,12 +28,17 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "p256")]
 use eu_id_prover::mdoc::{demo_mdoc_circuit_fixture, prove_mdoc_circuit, verify_mdoc_circuit};
+#[cfg(feature = "p256")]
 use eu_id_prover::{
     prove_identity, verify_identity, Credential, Date, IssuerKey, Policy, PublicStatement,
 };
+#[cfg(feature = "p256")]
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
+#[cfg(feature = "p256")]
 use stwo_p256::proof::{verify_current_air_monolithic, P256ProofDraft};
+#[cfg(feature = "p256")]
 use stwo_p256::types::{AffinePoint, EcdsaVerifyInput, Signature, U256};
 use stwo_sha256::stark::{native_digest, prove_sha256, verify_sha256_proof, ProverConfig};
 use stwo_sha256::trace::min_log_size;
@@ -185,6 +190,7 @@ fn run_bench(message: &[u8], iters: u32) -> EuIdBench {
 /// reports `verified == 0` is a soundness red flag, surfaced like a digest
 /// mismatch rather than hidden behind `ok`.
 #[repr(C)]
+#[cfg(feature = "p256")]
 pub struct EuIdP256Bench {
     /// Median wall-clock to build the witness and prove one signature over
     /// `iters` runs, milliseconds.
@@ -199,6 +205,7 @@ pub struct EuIdP256Bench {
     pub ok: i32,
 }
 
+#[cfg(feature = "p256")]
 impl EuIdP256Bench {
     fn failed() -> Self {
         Self {
@@ -227,6 +234,7 @@ impl EuIdP256Bench {
 /// `iters` is clamped to `>= 1`. The returned struct is plain data — there is
 /// nothing to free.
 #[no_mangle]
+#[cfg(feature = "p256")]
 pub unsafe extern "C" fn eu_id_bench_p256(
     z: *const u8,
     r: *const u8,
@@ -266,6 +274,7 @@ pub unsafe extern "C" fn eu_id_bench_p256(
         .unwrap_or_else(|_| EuIdP256Bench::failed())
 }
 
+#[cfg(feature = "p256")]
 fn run_bench_p256(input: EcdsaVerifyInput, iters: u32) -> EuIdP256Bench {
     let mut prove_samples = Vec::with_capacity(iters as usize);
     let mut verify_samples = Vec::with_capacity(iters as usize);
@@ -340,6 +349,7 @@ fn run_bench_p256(input: EcdsaVerifyInput, iters: u32) -> EuIdP256Bench {
 /// verified against the matching public statement — the benchmark measures
 /// proving cost, which does not depend on the issuer key.
 #[repr(C)]
+#[cfg(feature = "p256")]
 pub struct EuIdIdentityInput {
     /// Credential birth year (e.g. `2000`).
     pub birth_year: u16,
@@ -371,6 +381,7 @@ pub struct EuIdIdentityInput {
 /// meaningful, `0` means prove or verify failed (a false statement, a malformed
 /// input, or a panic) and the others are zeroed.
 #[repr(C)]
+#[cfg(feature = "p256")]
 pub struct EuIdIdentityBench {
     /// Median `prove_identity` wall-clock over `iters` runs, milliseconds.
     pub prove_ms: u64,
@@ -385,6 +396,7 @@ pub struct EuIdIdentityBench {
     pub ok: i32,
 }
 
+#[cfg(feature = "p256")]
 impl EuIdIdentityBench {
     fn failed() -> Self {
         Self {
@@ -421,6 +433,7 @@ impl EuIdIdentityBench {
 /// `accepted_len == 0`). The returned struct is plain data — there is nothing to
 /// free.
 #[no_mangle]
+#[cfg(feature = "p256")]
 pub unsafe extern "C" fn eu_id_bench_identity(
     input: *const EuIdIdentityInput,
     iters: u32,
@@ -465,6 +478,7 @@ pub unsafe extern "C" fn eu_id_bench_identity(
     .unwrap_or_else(|_| EuIdIdentityBench::failed())
 }
 
+#[cfg(feature = "p256")]
 fn run_identity_bench(credential: &Credential, policy: &Policy, iters: u32) -> EuIdIdentityBench {
     let issuer = IssuerKey::demo();
     // The holder-presence nonce signature: a fixed, self-consistent device-key
@@ -534,12 +548,14 @@ fn run_identity_bench(credential: &Credential, policy: &Policy, iters: u32) -> E
 /// under the peak-memory sampler, returning the same timing/size shape as
 /// [`eu_id_bench_identity`].
 #[no_mangle]
+#[cfg(feature = "p256")]
 pub unsafe extern "C" fn eu_id_bench_mdoc(iters: u32) -> EuIdIdentityBench {
     let iters = iters.max(1);
     catch_unwind(AssertUnwindSafe(|| run_mdoc_bench(iters)))
         .unwrap_or_else(|_| EuIdIdentityBench::failed())
 }
 
+#[cfg(feature = "p256")]
 fn run_mdoc_bench(iters: u32) -> EuIdIdentityBench {
     let fixture = demo_mdoc_circuit_fixture();
 
@@ -673,6 +689,7 @@ mod tests {
         assert_eq!(r.ok, 0, "null ptr with nonzero len must fail cleanly");
     }
 
+    #[cfg(feature = "p256")]
     #[test]
     fn p256_null_pointer_is_handled() {
         let b = [0u8; 32];
@@ -691,6 +708,7 @@ mod tests {
         assert_eq!(r.verified, 0);
     }
 
+    #[cfg(feature = "p256")]
     #[test]
     fn null_identity_input_is_handled() {
         let r = unsafe { eu_id_bench_identity(std::ptr::null(), 1) };
@@ -700,6 +718,7 @@ mod tests {
     // Validates the big-endian (z, r, s, qx, qy) marshalling contract the Swift
     // caller relies on: a real signature handed in as raw bytes must prove and
     // verify. Release-only — a full STARK prove/verify is slow in debug.
+    #[cfg(feature = "p256")]
     #[test]
     #[cfg_attr(
         debug_assertions,
@@ -742,6 +761,7 @@ mod tests {
     /// honest, over-18, in-set credential proves and verifies, and the sampler /
     /// size fields are populated. `#[ignore]` — a full P256-dominated STARK
     /// prove/verify is slow; run with `--release --ignored`.
+    #[cfg(feature = "p256")]
     #[test]
     #[ignore = "slow: full combined STARK prove/verify (P256-dominated); run with --release --ignored"]
     fn identity_bench_round_trips() {
