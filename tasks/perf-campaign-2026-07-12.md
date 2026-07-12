@@ -20,6 +20,7 @@ Rule: every WO lands with a measured ts13_full_probe number. No number, not done
 | experiment | Ligero ℓ=1024 (N=1) | 4,108 | 654 | 3,002,885 |
 | worktree | STARK fold step 2→3 (N=5) | 3,088 | 162 | 3,228,709 |
 | worktree | virtual SHA field bytes (clean N=1) | 2,666 | 154 | 2,393,589 |
+| experiment | packed M31 transport (N=1) | — | — | 2,267,040 raw / 2,044,623 zstd-12 |
 
 ## Work orders
 
@@ -63,6 +64,9 @@ Rule: every WO lands with a measured ts13_full_probe number. No number, not done
       already boolean/recomposed W bit planes; delete duplicate byte columns,
       byte Range16 lookups, and per-yield selectors. Clean N=1: proof
       −834,944B and prove −630ms versus the same-worktree fold-3 baseline.
+- [x] Packed proof transport — CLOSED NO-GO. Packing 31-bit PCS field limbs
+      saved 126,549B raw but only 17,803B after the SDK's existing zstd layer;
+      a 488-line versioned codec plus seven integration edits was not justified.
 - [x] WO-D — PCS retune on shrunk circuit: sweep blowup 2/3 × queries/pow,
       Ligero ℓ A/B. Ligero ℓ=512/1024 CLOSED NO-GO for production after
       measurement. STARK fold step 3 is the measured production Pareto point:
@@ -411,6 +415,26 @@ wrong-block, padding-selector, counter, and W-bit tamper gates all pass.
 The preprocessed root is unchanged, but the circuit/mask layout is not. The
 published tuple therefore now pins `circuit_revision=2`; its canonical hash is
 `a43f41e4745a053aa519c6140193e4bfc3ba2894f97c1a9a6e2df9e9a3232591`.
+
+## Packed proof transport experiment
+
+A versioned transport-only codec packed the PCS queried M31 values and sampled
+SecureField limbs at 31 bits while leaving the in-memory proof and verifier
+algebra unchanged. On the current virtual-byte TS13 N=1 proof it measured:
+
+| transport | native bincode | packed | delta |
+|---|---:|---:|---:|
+| raw | 2,393,589B | 2,267,040B | −126,549B (−5.29%) |
+| zstd level 12 | 2,062,426B | 2,044,623B | −17,803B (−0.86%) |
+
+The SDK already applies exactly one zstd layer, so the compressed row is the
+product metric. The implementation required a 488-line defensive parser and
+serializer plus integration across the SDK, TS13 artifact, tests, and probes.
+That maintenance and attack-surface cost is disproportionate to a 17.8KB
+payload reduction and does not materially approach 700KB. The experiment was
+removed without a commit. Do not revisit field-bit packing unless the product
+transport stops compressing or a substantially larger structural redundancy is
+identified.
 
 ## WO-C1b redundancy argument
 
