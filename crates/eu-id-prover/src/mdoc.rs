@@ -87,7 +87,8 @@ use stwo_p256::{
     proof::air::P256Verifier,
     proof::{P256CurrentAirInteractionClaim, P256CurrentAirProofClaim},
 };
-use stwo_sha256::air::{Sha256Prover, Sha256Verifier};
+use stwo_sha256::air::{Sha256MultiProver, Sha256MultiVerifier, Sha256Prover, Sha256Verifier};
+use stwo_sha256::slots::{MultiSlotConfig, SlotSpec};
 use stwo_sha256::field_exposure::FieldExposure;
 use stwo_sha256::interaction::InteractionClaim as Sha256InteractionClaim;
 use stwo_sha256::relations::SharedShaTableRelations;
@@ -4139,6 +4140,15 @@ pub struct MdocCircuitProof {
     revocation_sha_interaction_claim: Option<Sha256InteractionClaim>,
     attribute_sha_log_n_rows: Vec<u32>,
     attribute_sha_interaction_claims: Vec<Sha256InteractionClaim>,
+    /// S8 merged multi-slot SHA consumer (revocation + attributes in ONE
+    /// instance) — present iff the composition is fully post-quantum (no
+    /// issuer/device/mso SHA conveyors); biconditional with the legacy
+    /// per-instance revocation/attribute SHA fields being absent (gated at
+    /// verify). `(log_n_rows, slot_log)` fix the public slot schedule; the
+    /// slot list itself is rebuilt from the statement.
+    merged_sha_log_n_rows: Option<u32>,
+    merged_sha_slot_log: Option<u32>,
+    merged_sha_interaction_claim: Option<Sha256InteractionClaim>,
     #[cfg(feature = "p256")]
     revocation_p256_claim: Option<P256CurrentAirProofClaim>,
     #[cfg(feature = "p256")]
@@ -6069,6 +6079,13 @@ fn prove_or_root_mdoc(
         .chain(attribute_sha_params.iter().map(|(_, log)| *log))
         .max()
         .expect("sha log list is non-empty (attributes are 1..=4)");
+    // S8: fully post-quantum composition (no issuer/device/mso SHA
+    // conveyors) — the remaining SHA consumers (revocation + attributes)
+    // merge into ONE multi-slot instance at `slot_log = shared_sha_log`.
+    // See tasks/sha-multimessage-design.md.
+    let merged_sha_active = issuer_sha_params.is_none()
+        && device_sha_params.is_none()
+        && mso_sha_params.is_none();
     let issuer_digest = SharedDigestRelation::new();
     // The device digest/z relations only exist for a P-256 device (their sole
     // consumer is the device bridge); an ML-DSA device gets a field relation
@@ -6279,6 +6296,7 @@ fn prove_or_root_mdoc(
     // hosted module's µ-absorb bridge on the same field relation.
     let mut revocation_sha = revocation_sha_params
         .as_ref()
+        .filter(|_| !merged_sha_active)
         .map(|(revocation_sha_witness, _)| {
             let sha = Sha256Prover::new(revocation_sha_witness, shared_sha_log, SHA_GROUP_WIDTH)
                 .with_shared_tables(sha_table_relations.clone());
@@ -6357,21 +6375,74 @@ fn prove_or_root_mdoc(
         })
         .transpose()?;
     let mut attribute_sha = Vec::with_capacity(attribute_sha_params.len());
-    for index in 0..attribute_sha_params.len() {
-        attribute_sha.push(
-            Sha256Prover::new(
-                &attribute_sha_params[index].0,
-                shared_sha_log,
-                SHA_GROUP_WIDTH,
-            )
-            .with_shared_tables(sha_table_relations.clone())
-            .with_digest_handle(attribute_digests[index].clone())
-            .with_field_handle(
-                attribute_exposures[index].clone(),
-                attribute_fields[index].clone(),
-            ),
-        );
+    if !merged_sha_active {
+        for index in 0..attribute_sha_params.len() {
+            attribute_sha.push(
+                Sha256Prover::new(
+                    &attribute_sha_params[index].0,
+                    shared_sha_log,
+                    SHA_GROUP_WIDTH,
+                )
+                .with_shared_tables(sha_table_relations.clone())
+                .with_digest_handle(attribute_digests[index].clone())
+                .with_field_handle(
+                    attribute_exposures[index].clone(),
+                    attribute_fields[index].clone(),
+                ),
+            );
+        }
     }
+    // S8 merged multi-slot SHA consumer: slot 0 = revocation (when present),
+    // then one slot per attribute — the same handles the per-instance
+    // builders would have taken, so every downstream consumer module is
+    // unchanged.
+    let merged_sha_config = merged_sha_active.then(|| {
+        let mut slot_specs = Vec::new();
+        if revocation_sha_params.is_some() {
+            slot_specs.push(SlotSpec {
+                expose_digest: revocation_digest.is_some(),
+                field_exposure: revocation_exposure.clone(),
+            });
+        }
+        for exposure in &attribute_exposures {
+            slot_specs.push(SlotSpec {
+                expose_digest: true,
+                field_exposure: exposure.clone(),
+            });
+        }
+        MultiSlotConfig::new(shared_sha_log, slot_specs)
+    });
+    let merged_sha_log_n_rows = merged_sha_config
+        .as_ref()
+        .map(|config| config.min_log_n_rows());
+    let mut merged_sha = merged_sha_config.map(|config| {
+        let mut witnesses: Vec<&stwo_sha256::types::Sha256Witness> = Vec::new();
+        if let Some((witness, _)) = &revocation_sha_params {
+            witnesses.push(witness);
+        }
+        for (witness, _) in &attribute_sha_params {
+            witnesses.push(witness);
+        }
+        let log_n_rows = merged_sha_log_n_rows.expect("merged log derived above");
+        let mut prover =
+            Sha256MultiProver::new(witnesses, log_n_rows, config, sha_table_relations.clone());
+        let mut slot = 0usize;
+        if revocation_sha_params.is_some() {
+            if let Some(revocation_digest) = &revocation_digest {
+                prover = prover.with_slot_digest_handle(slot, revocation_digest.clone());
+            }
+            if let Some(revocation_message_field) = &revocation_message_field {
+                prover = prover.with_slot_field_handle(slot, revocation_message_field.clone());
+            }
+            slot += 1;
+        }
+        for index in 0..attribute_sha_params.len() {
+            prover = prover
+                .with_slot_digest_handle(slot + index, attribute_digests[index].clone())
+                .with_slot_field_handle(slot + index, attribute_fields[index].clone());
+        }
+        prover
+    });
 
     #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
     let issuer_bridge_log = issuer_p256.as_ref().map(|issuer_p256| {
@@ -6656,6 +6727,9 @@ fn prove_or_root_mdoc(
         if let Some(revocation_sha) = revocation_sha.as_mut() {
             modules.push(revocation_sha);
         }
+        if let Some(merged_sha) = merged_sha.as_mut() {
+            modules.push(merged_sha);
+        }
         // ML-DSA revocation: hosted module right after its byte provider.
         #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
         if let Some(revocation_mldsa) = revocation_mldsa.as_mut() {
@@ -6770,6 +6844,11 @@ fn prove_or_root_mdoc(
             .map(|sha| sha.interaction_claim().clone()),
         mso_sha_log_n_rows: mso_sha.as_ref().map(|_| shared_sha_log),
         mso_sha_interaction_claim: mso_sha.as_ref().map(|sha| sha.interaction_claim().clone()),
+        merged_sha_log_n_rows,
+        merged_sha_slot_log: merged_sha.as_ref().map(|_| shared_sha_log),
+        merged_sha_interaction_claim: merged_sha
+            .as_ref()
+            .map(|merged_sha| merged_sha.interaction_claim().clone()),
         revocation_sha_log_n_rows: revocation_sha.as_ref().map(|_| shared_sha_log),
         revocation_sha_interaction_claim: revocation_sha
             .as_ref()
@@ -7057,17 +7136,44 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
     // S4 ML-DSA issuer: the MSO SHA conveyor + payload bind do not exist (the
     // digest is host-derived from the public Sig_structure payload).
     let mso_sha_expected = has_revocation_range && !issuer_is_mldsa;
+    // S8: in the fully post-quantum composition the revocation + attribute
+    // SHA consumers travel as ONE merged multi-slot instance; the legacy
+    // per-instance claim fields must then be ABSENT (fail-closed
+    // biconditional, mirrored below for the attribute vectors).
+    let merged_sha_expected =
+        issuer_is_mldsa && statement.device_input.is_mldsa() && !mso_sha_expected;
+    let revocation_sha_expected = has_revocation_signature && !merged_sha_expected;
     if proof.mso_sha_log_n_rows.is_some() != mso_sha_expected
         || proof.mso_sha_interaction_claim.is_some() != mso_sha_expected
         || proof.mso_payload_bind_interaction_claim.is_some() != mso_sha_expected
         || proof.ts13_revocation_range_interaction_claim.is_some() != has_revocation_range
-        || proof.revocation_sha_log_n_rows.is_some() != has_revocation_signature
-        || proof.revocation_sha_interaction_claim.is_some() != has_revocation_signature
+        || proof.revocation_sha_log_n_rows.is_some() != revocation_sha_expected
+        || proof.revocation_sha_interaction_claim.is_some() != revocation_sha_expected
         || p256_revocation_layout_mismatch
     {
         return Err(Error::Verify(
             "mdoc proof revocation layout mismatch".to_string(),
         ));
+    }
+    if proof.merged_sha_log_n_rows.is_some() != merged_sha_expected
+        || proof.merged_sha_slot_log.is_some() != merged_sha_expected
+        || proof.merged_sha_interaction_claim.is_some() != merged_sha_expected
+    {
+        return Err(Error::Verify(
+            "mdoc proof merged SHA layout does not match the statement".to_string(),
+        ));
+    }
+    // Sanity-bound the proof-carried schedule so a malformed proof errors
+    // instead of panicking inside the schedule constructors. The values are
+    // transcript-mixed and layout-determining, so a lie cannot verify.
+    if let (Some(slot_log), Some(log_n_rows)) =
+        (proof.merged_sha_slot_log, proof.merged_sha_log_n_rows)
+    {
+        if !(7..=16).contains(&slot_log) || !(slot_log..=slot_log + 8).contains(&log_n_rows) {
+            return Err(Error::Verify(
+                "mdoc proof merged SHA schedule out of bounds".to_string(),
+            ));
+        }
     }
     // S4: issuer SHA conveyor + in-circuit validity exist iff the issuer is
     // NOT ML-DSA; the per-attribute public digest binds iff it IS.
@@ -7132,9 +7238,18 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
     let mso_field = (has_revocation_range && !issuer_is_mldsa).then(SharedFieldRelation::new);
     let revocation_digest = has_p256_revocation_signature.then(SharedDigestRelation::new);
     let revocation_message_field = has_revocation_signature.then(SharedFieldRelation::new);
-    let attribute_count = proof.attribute_sha_interaction_claims.len();
-    if attribute_count != proof.attribute_sha_log_n_rows.len()
-        || attribute_count != statement.attributes.len()
+    let attribute_count = statement.attributes.len();
+    if merged_sha_expected {
+        if !proof.attribute_sha_interaction_claims.is_empty()
+            || !proof.attribute_sha_log_n_rows.is_empty()
+        {
+            return Err(Error::Verify(
+                "mdoc proof carries per-instance attribute SHA claims alongside the merged                  instance"
+                    .to_string(),
+            ));
+        }
+    } else if attribute_count != proof.attribute_sha_interaction_claims.len()
+        || attribute_count != proof.attribute_sha_log_n_rows.len()
     {
         return Err(Error::Verify(
             "mdoc proof carries an unsupported attribute count".to_string(),
@@ -7427,21 +7542,89 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
         .map(|index| attribute_exposure(statement, index))
         .collect();
     let mut attribute_sha = Vec::with_capacity(attribute_count);
-    for index in 0..attribute_count {
-        attribute_sha.push(
-            Sha256Verifier::new(
-                proof.attribute_sha_log_n_rows[index],
-                SHA_GROUP_WIDTH,
-                proof.attribute_sha_interaction_claims[index].clone(),
-            )
-            .with_shared_tables(sha_table_relations.clone())
-            .with_digest_handle(attribute_digests[index].clone())
-            .with_field_handle(
-                attribute_exposures[index].clone(),
-                attribute_fields[index].clone(),
-            ),
-        );
+    if !merged_sha_expected {
+        for index in 0..attribute_count {
+            attribute_sha.push(
+                Sha256Verifier::new(
+                    proof.attribute_sha_log_n_rows[index],
+                    SHA_GROUP_WIDTH,
+                    proof.attribute_sha_interaction_claims[index].clone(),
+                )
+                .with_shared_tables(sha_table_relations.clone())
+                .with_digest_handle(attribute_digests[index].clone())
+                .with_field_handle(
+                    attribute_exposures[index].clone(),
+                    attribute_fields[index].clone(),
+                ),
+            );
+        }
     }
+    // S8 merged multi-slot SHA verifier: schedule rebuilt from the statement
+    // (slot 0 = revocation when present, then one slot per attribute), size
+    // surface from the shape-gated proof fields, handles identical to the
+    // per-instance wiring.
+    let mut merged_sha = merged_sha_expected
+        .then(|| -> Result<Sha256MultiVerifier, Error> {
+            let mut slot_specs = Vec::new();
+            if has_revocation_signature {
+                slot_specs.push(SlotSpec {
+                    expose_digest: revocation_digest.is_some(),
+                    field_exposure: ts13_revocation_message_exposure(statement),
+                });
+            }
+            for exposure in &attribute_exposures {
+                slot_specs.push(SlotSpec {
+                    expose_digest: true,
+                    field_exposure: exposure.clone(),
+                });
+            }
+            if slot_specs.is_empty() {
+                return Err(Error::Verify(
+                    "mdoc merged SHA instance requires at least one slot".to_string(),
+                ));
+            }
+            let config = MultiSlotConfig::new(
+                proof
+                    .merged_sha_slot_log
+                    .expect("merged slot log shape-gated above"),
+                slot_specs,
+            );
+            let log_n_rows = proof
+                .merged_sha_log_n_rows
+                .expect("merged log shape-gated above");
+            if log_n_rows < config.min_log_n_rows() {
+                return Err(Error::Verify(
+                    "mdoc proof merged SHA log cannot hold the slot schedule".to_string(),
+                ));
+            }
+            let mut verifier = Sha256MultiVerifier::new(
+                log_n_rows,
+                config,
+                sha_table_relations.clone(),
+                proof
+                    .merged_sha_interaction_claim
+                    .clone()
+                    .expect("merged claim shape-gated above"),
+            );
+            let mut slot = 0usize;
+            if has_revocation_signature {
+                if let Some(revocation_digest) = &revocation_digest {
+                    verifier = verifier.with_slot_digest_handle(slot, revocation_digest.clone());
+                }
+                if let Some(revocation_message_field) = &revocation_message_field {
+                    verifier =
+                        verifier.with_slot_field_handle(slot, revocation_message_field.clone());
+                }
+                slot += 1;
+            }
+            for index in 0..attribute_count {
+                verifier = verifier
+                    .with_slot_digest_handle(slot + index, attribute_digests[index].clone())
+                    .with_slot_field_handle(slot + index, attribute_fields[index].clone());
+            }
+            Ok(verifier)
+        })
+        .transpose()?;
 
     #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
     let mut issuer_bridge = match (
@@ -7736,6 +7919,9 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
     }
     if let Some(revocation_sha) = revocation_sha.as_mut() {
         modules.push(revocation_sha);
+    }
+    if let Some(merged_sha) = merged_sha.as_mut() {
+        modules.push(merged_sha);
     }
     #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
     if let Some(revocation_mldsa) = revocation_mldsa.as_mut() {
