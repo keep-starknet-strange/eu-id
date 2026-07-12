@@ -296,3 +296,58 @@ Gates (all green, 2026-07-12, post-S6): mdoc_mldsa p256+ml-dsa 25,
 mdoc_mldsa quantum-safe-mdoc 19 (--no-default-features), stwo-keccak 31,
 stwo-mldsa 74, stwo-sha256 145, credential_pipeline 3 (+1 ignored),
 check-quantum-only-deps clean.
+
+## S6b (2026-07-12) — batch-4 family 4 (sib+decomp) + FRI rebalance (LANDED)
+
+Family sweep after the S6 consumers (skip rule: measured gain < 30 KB):
+
+- **Family 3 (keccak wrapper/tables) — SKIPPED by arithmetic.** keccak.rs
+  boundary wrapper has 4 fracs (pairs = 8 M31 cols, batch-4 saves 4 ≈ <1 KB);
+  the 9 tables_air producers are 1–2 fracs (already ≤1 pair col each);
+  sponge.rs is not in the service composition.
+- **Family 4 (stwo-mldsa sib + decomp) — LANDED (f6a049bb).**
+  `finalize_logup()` (batch 1) → `finalize_logup_batched(4)`, bound log+2:
+  decomp 23 → 6 secure logup cols (−68 M31), sib 27 → 7 (−80 M31). All
+  denominators degree 1 (verified per entry) ⇒ batched constraint degree 5.
+  The `[-1,0]` interaction-mask accumulators (hint_acc, Σc², sorted-pass) are
+  safe at +2 — the uniform composition split already evaluated every
+  component at log_size+split since S6. Writers were already LOGUP_BATCH-
+  chunked; only const/bound/finalize changed. `coeffs` untouched (log+1).
+  Standalone decomp/sib crate tests moved to the blowup-2 pcs_config helper.
+  Measured: proof 1,810,417 → 1,732,609 B (−77.8 KB), prove 5,492 ms,
+  verify 19 ms.
+- **Family 5 remainder (sha256 producers) — SKIPPED by arithmetic.** All
+  remaining pair-batched sha256 evals are producers with 1–5 fracs
+  (single-digit column savings each, ≪100 KB total).
+
+**FRI bake-off (82958f31)** — both pow 20 = 128-bit, measured at f6a049bb:
+
+| schedule | prove ms | verify ms | proof B |
+|---|---|---|---|
+| FriConfig::new(1, 3, 36, 2) | 5,492 | 19 | 1,732,609 |
+| FriConfig::new(1, 4, 27, 2) | 7,654 / 7,715 (n=2) | 18 | 1,390,409 / 1,394,537 |
+
+Kept (1, 4, 27, 2): −340 KB (queried 1,357,400 → 1,035,920, decommit
+64,808 → 53,928, fri 62,260 → 56,548) for +40% prove, verify unchanged
+(proof-size-first rule, verify ≪ 100 ms bound).
+
+### S6b final vs targets (pq_perf_probe, RAYON_NUM_THREADS=1, release)
+
+| metric | S6 | S6b final | target | status |
+|---|---|---|---|---|
+| proof   | 1,810,417 B | ~1,392,000 B | <1,000,000 B | MISS by ~392 KB |
+| prove   | 5,378 ms | ~7,680 ms | <1,000 ms | MISS (blowup-4 trade) |
+| verify  | 18 ms | 18 ms | <100 ms | MET |
+
+Remaining proof gap arithmetic: sampled_values 244 KB + queried 1,036 KB +
+fri 57 KB + decommit 54 KB. Another −392 KB needs column-count reduction
+(the S5 floor items: SHA small-load AIR / sha_tables limb redesign, coeffs
+2-per-row repack) — LogUp batching is exhausted (consumers all batch-4,
+producers 1-frac). Prove <1 s needs the engine FFT-extend lever plus the
+same floor items; the blowup-4 schedule can be flipped back to (1,3,36,2)
+whenever prove time outranks proof size.
+
+Gates (all green, 2026-07-12, post-S6b at 82958f31): mdoc_mldsa
+p256+ml-dsa 25, mdoc_mldsa quantum-safe-mdoc 19, credential_pipeline 3
+(+1 ignored), stwo-keccak 31, stwo-mldsa 74 (+2 ignored), stwo-sha256 145
+(+18 ignored), check-quantum-only-deps clean.
