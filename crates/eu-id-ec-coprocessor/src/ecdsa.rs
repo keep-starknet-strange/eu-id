@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use crate::ligero::{
     commit_witness_profiled, v4_circle_params, verify_claim_batch, verify_openings,
-    verify_split_claim_batch, verify_split_openings, LigeroClaimBatch, LigeroError,
+    verify_split_claim_batch, verify_split_openings, LigeroClaimBatch, LigeroCode, LigeroError,
     LigeroLinearClaim, LigeroParams, LigeroProximityClaim,
 };
 use crate::mac::{bytes_to_bits, gf128_tag, Gf128, GF128_BITS};
@@ -1776,7 +1776,8 @@ fn ligero_proximity_indices(
         let mut word = [0u8; 8];
         word.copy_from_slice(&bytes[24..]);
         let index = (u64::from_be_bytes(word) as usize) % params.codeword_len;
-        if index >= params.row_len && !indices.contains(&index) {
+        let is_sampleable = params.code == LigeroCode::Circle || index >= params.row_len;
+        if is_sampleable && !indices.contains(&index) {
             indices.push(index);
         }
     }
@@ -4741,6 +4742,40 @@ mod tests {
         let mut out = [0u8; 16];
         out[bit / 8] = 1 << (bit % 8);
         out
+    }
+
+    #[test]
+    fn proximity_sampler_uses_full_circle_domain_but_excludes_rs_message_prefix() {
+        let root = [0x51; 32];
+        let seed = [0xA7; 32];
+
+        let circle = v4_circle_params();
+        let circle_indices =
+            ligero_proximity_indices(IMPLEMENTED_BUNDLE_LIGERO_LABEL, root, circle, seed);
+        assert_eq!(circle_indices.len(), circle.openings);
+        assert!(circle_indices
+            .iter()
+            .all(|&index| index < circle.codeword_len));
+        assert_eq!(
+            circle_indices
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            circle.openings,
+            "proximity columns must be distinct"
+        );
+        assert!(
+            circle_indices.iter().any(|&index| index < circle.row_len),
+            "circle code has no systematic prefix, so its sampler must use the full domain"
+        );
+
+        let rs = crate::ligero::v2_ligero_params();
+        let rs_indices = ligero_proximity_indices(IMPLEMENTED_BUNDLE_LIGERO_LABEL, root, rs, seed);
+        assert!(
+            rs_indices.iter().all(|&index| index >= rs.row_len),
+            "RS proximity queries must remain disjoint from systematic openings"
+        );
     }
 
     #[test]

@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use crate::ecdsa::implemented_circuit_gate_count;
-use crate::ligero::{v1_ligero_params, v2_ligero_params, v2_ligero_params_b, V2_ZK_OPENINGS};
+use crate::ligero::{
+    v1_ligero_params, v2_ligero_params, v2_ligero_params_b, v4_circle_params, V2_ZK_OPENINGS,
+};
 
 const G1_FIELD_BENCH: &str = "WO-G1-field-bench.md";
 const G2_SUMCHECK_BENCH: &str = "WO-G2-sumcheck-bench.md";
@@ -55,6 +57,14 @@ fn q007_ligero_v2_params_meet_zk_soundness_gate() {
             params.soundness_error()
         );
     }
+
+    let circle = v4_circle_params();
+    circle.validate().unwrap();
+    assert!(
+        circle.soundness_error() <= 2f64.powi(-132),
+        "production circle soundness error {} exceeds 2^-132",
+        circle.soundness_error()
+    );
 }
 
 #[test]

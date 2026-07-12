@@ -195,7 +195,9 @@ well-defined witness exists.
 - Verifier sends random γ ∈ Fp^(#witness rows).
 - Prover responds with the first k coordinates of `mask_row + Σ γᵢ·rowᵢ`
   (`ligero.rs:243-263`) — a claimed degree-<k polynomial.
-- Verifier samples t = `openings` column indices; for each opened column j it checks
+- Verifier samples t = `openings` distinct column indices. RS sampling excludes
+  its separately opened systematic prefix; Circle sampling covers the full
+  non-systematic codeword domain. For each opened column j it checks
   the Merkle path and that
   `mask[j] + Σ γᵢ·columnᵢ[j] == (claimed polynomial evaluated at j)`
   (`ligero.rs:644-684`).
@@ -589,13 +591,12 @@ The end-to-end argument, stated as a chain — each step conditions on the previ
 4. **Sumcheck.** Given correct input-layer MLE evaluations, a false "output layer is
    zero" claim survives layer-by-layer with probability ≤ Σᵢ (2·2dᵢ + O(1))/p
    ≈ 2^−240s — Schwartz–Zippel over degree-2 round polynomials plus the α-blend and
-   the two initial random points. So the committed witness **satisfies all nine
-   circuit families**.
-5. **Arithmetization.** A satisfying witness with the public inputs pinned by fixed
-   claims is, by §6's constraint inventory, a valid ECDSA verification trace:
-   Q on-curve, u1/u2 correctly derived, ladder correct at every step with all
-   exceptional cases excluded by the inverse hints, R correctly assembled, and
-   R.x ≡ r (mod n). (Residual caveats: §10.)
+   the two initial random points. So the committed inputs satisfy all six
+   implemented circuit families.
+5. **Arithmetization boundary.** Those six families do **not** imply a valid ECDSA
+   verification trace: the accumulator sequence is on-curve but lacks transition
+   and scalar-selection constraints. The proof is unsound for the intended ECDSA
+   statement until the critical §10.1 remediation lands.
 6. **Cross-proof binding.** The MAC (§7.3) forces the coprocessor's z_issuer and
    Q_device to equal the outer proof's committed values except with ≈ 2^−128;
    directly-projected public values are checked by equality.
@@ -607,16 +608,17 @@ Budget summary (per proved bundle, dominant terms):
 
 | Source | Error |
 |---|---|
-| Ligero (v2b / v2a) | 2^−128.6 / 2^−136.7 |
+| Ligero (production v4 Circle, full-domain sampling) | ≈ 2^−132.16 |
 | Merkle / channel collisions (BLAKE2s-256) | ≈ 2^−128 |
 | MAC binding (per proof, incl. grinding resistance) | ≈ 2^−128 |
 | GKR sumcheck (all layers, all families) | ≲ 2^−240 |
 | γ batching, α blends, sampling bias | ≲ 2^−250 |
-| **Total** | **≈ 2^−127 (union bound), i.e. ~128-bit soundness** |
+| **Total for the implemented algebraic relation** | **≈ 2^−127 (union bound)** |
 
 The 2026-07-05/06 backend audit (`tasks/audits/2026-07-05-backend-soundness.md`)
-reviewed the coprocessor, the γ-digest sharing, and this Ligero accounting at
-e9e3c007 and found no confirmed breaks; the "2^−132 exact" figure there corresponds
+reviewed the coprocessor, the γ-digest sharing, and the then-current Ligero accounting
+at e9e3c007. It predates the current ladder-family changes and is stale for claims
+about the intended ECDSA relation; the "2^−132 exact" figure there corresponds
 to the v2 parameter regime above. One day later the Q-025 design review found the
 C-p4b-blind-claim hole (§5.3) that the audit's negative tests had missed — they
 tampered claim values without compensating the blind scalar. The hole is fixed in

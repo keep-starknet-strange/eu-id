@@ -755,7 +755,24 @@ fn implemented_circuit_bundle_accepts_honest_witness() {
     assert!(bundle
         .proximity_openings
         .iter()
-        .all(|opening| opening.index >= bundle.params.row_len));
+        .all(|opening| opening.index < bundle.params.codeword_len));
+    assert_eq!(
+        bundle
+            .proximity_openings
+            .iter()
+            .map(|opening| opening.index)
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        bundle.params.openings,
+        "proximity columns must be distinct"
+    );
+    assert!(
+        bundle
+            .proximity_openings
+            .iter()
+            .any(|opening| opening.index < bundle.params.row_len),
+        "circle proximity sampling must cover its full non-systematic domain"
+    );
     assert!(profile.committed_values <= 10_000, "{profile:?}");
     assert!(profile.ligero_rows <= 156, "{profile:?}");
     assert_eq!(

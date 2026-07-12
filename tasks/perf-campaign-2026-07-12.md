@@ -15,6 +15,7 @@ Rule: every WO lands with a measured ts13_full_probe number. No number, not done
 | 1157d10e | WO-C2 FFT claim-batch verify | 3,148 | 190 | 3,528,173 |
 | 1157d10e | 2026-07-13 takeover re-probe | 3,393 | 198 | 3,527,981 |
 | worktree | WO-C3 delete redundant C13 | 3,315 | 166 | 3,241,093 |
+| worktree | Ligero full-domain sampler fix | 3,252 | 163 | 3,243,317 |
 
 ## Work orders
 
@@ -42,6 +43,9 @@ Rule: every WO lands with a measured ts13_full_probe number. No number, not done
       VERIFIED. Committed values 27,920→15,479; opened rows 112→63; proof
       −286,888B; verify −32ms against the takeover re-probe. See equivalence
       proof below.
+- [x] Ligero Task 4 — restore Circle proximity sampling over the full codeword.
+      The inherited RS-prefix exclusion invalidated the v4 full-domain error
+      calculation; fixed before any larger-row profile sweep.
 - [ ] WO-D — PCS retune on shrunk circuit: sweep blowup 2/3 × queries/pow,
       Ligero ℓ A/B. Last, config-only.
 - [ ] Final: suites + negatives green, pins repinned, docs + memory updated,
@@ -279,6 +283,26 @@ entry checks fail closed; exact gate count is 3,239 quadratic terms. The full
 negative passed. Clippy is clean for changed targets after allowing the crate's
 documented pre-existing lint classes; unsuppressed `-D warnings` remains red on
 those pre-existing issues.
+
+## Ligero full-domain sampler correction
+
+The production Circle code is non-systematic, but `ligero_proximity_indices`
+still excluded indices `[0, row_len)` as if they were the RS systematic prefix.
+The v4 soundness formula uses the full 4,096-column domain. Conditioning queries
+onto only 3,840 columns lets an adversarial error pattern spend up to 256 errors
+in the never-sampled region and degrades the conservative proximity term to
+roughly 116 bits instead of the documented 132.16 bits.
+
+The sampler now applies the prefix exclusion only to `LigeroCode::Rs`; Circle
+draws distinct indices over its full codeword. A deterministic regression pins
+both halves of that rule, the soundness gate now includes production v4, and the
+honest bundle test requires at least one opening in the formerly excluded Circle
+range. All non-ignored tests and all 23 ignored proof/forgery tests pass.
+
+Five-run TS13 measurement after the correction: 3,252ms prove / 163ms verify /
+3,243,317B. Bundle size and row shape are unchanged; the ~2KB STARK variation is
+Merkle/query randomness. This is a soundness restoration with no measurable
+performance cost.
 
 ## WO-C1b redundancy argument
 
