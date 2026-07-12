@@ -199,6 +199,12 @@ Cells: three instances ≈ 0.60 M → merged ≈ 1.23 M (+0.6 M, ≈ +2% prove �
 within the ≤8.5 s budget). Final measured delta goes to
 tasks/keccak-service-design.md §S8.
 
+**MEASURED (2026-07-12, landed):** merged module = 13 + 662 + 524 =
+1,199 cols @ log 10 (projection 1,203). Proof 1,277,409 → ~1,110,700 B
+(−167 KB, −13.1%); verify 17 → 15 ms; prove noise-flat (min run
+7,912 ms vs 7,642 baseline, matching the +2.7% cell model under thermal
+drift). Target <1 MB missed by ~110 KB, exactly per the §6 arithmetic.
+
 ## 7. Self-review (how could a prover cheat if one rail were dropped?)
 
 - Drop `selector·(1−slot_sel)`: cross-slot byte forgery (T2 catches).

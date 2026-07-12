@@ -441,3 +441,57 @@ is not a quantum gate.)
 
 Buying prove back to ~5.4 s costs +356 KB of proof. Both rows share the
 post-S7 column count; flip whenever prove time outranks proof size.
+
+## S8 (2026-07-12) — three log-8 SHA consumers → ONE multi-slot instance (LANDED)
+
+The quantum composition's remaining SHA consumers (revocation m4 671 cols +
+attributes m6/m7 851/816 cols, 2,338 total) merge into ONE slot-scheduled
+`Sha256MultiProver` instance at log 10 (3 uniform 256-row slot regions,
+schedule preprocessed-pinned; per-slot digest/field relations map 1:1 onto
+the existing mdoc handles, consumer modules unchanged). Design + soundness
+rails + adversarial matrix: tasks/sha-multimessage-design.md. P-256 mode
+untouched (separate prover/verifier pair; `Sha256Eval.multi = None` is the
+byte-identical legacy path). Wire format: `merged_sha_*` claim fields,
+biconditional with the legacy per-instance fields (fail-closed both ways).
+
+Measured merged module (AIR_CORE_SHAPE_DUMP): 13 preproc + 662 trace + 524
+interaction = **1,199 cols @ log 10** (projection was 1,203) ⇒ −1,139
+committed cols. Cells 22.85M → 23.48M (+0.63M: 768 rows of load in a
+1,024-row domain — proof size is column-bound, not row-bound).
+
+pq_perf_probe, RAYON_NUM_THREADS=1, --release, production (1,4,26,2)/pow25:
+
+| point | prove ms | verify ms | proof B |
+|---|---|---|---|
+| S7 baseline (re-measured same session) | 7,642 | 17 | 1,277,409 |
+| **S8 merged** (n=3) | 7,912 / 9,453 / 11,185 (min ≈ baseline +3.5%, thermal drift dominates) | 15 | **1,109,688 / 1,110,312 / 1,112,152** |
+| targets | ≤8,500 ~✓ (min-run) | <100 ✓ | <1,000,000 **MISS by ~110 KB** |
+
+Delta: **proof −167 KB (−13.1%)** (queried 935,688→810,360, sampled
+230,600→190,720, decommit −0.9 KB, fri −1.5 KB); verify 17→15 ms; prove
+noise-flat (cell-model prediction +2.7%; the 9.5-11.2 s runs are the same
+machine-wide thermal drift S7 recorded).
+
+**Why the S7 estimate (−270–290 KB) was optimistic:** only the duplicated
+BASE surface dedupes (2×493 trace cols + 2×17 base-site interaction QM31).
+The per-message field tails (20/80/69 cols) and per-slot field/digest
+interaction sites (~456 M31 cols) are witness-carrying and cannot merge.
+<1 MB therefore still needs ~110 KB from the S5 floor items (sha_tables
+limb redesign ≈ −88 cols won't do it alone; coeffs 2/row repack or an
+8-bit range table for field bytes are the candidates).
+
+### Post-S8 FRI frontier (pq_perf_probe, RAYON_NUM_THREADS=1, same session)
+
+| schedule | prove ms | verify ms | proof B |
+|---|---|---|---|
+| (1, 4, 26, 2) pow 25 — production | ~7,900+ (thermal-noisy) | 15 | ~1,110,700 |
+| (1, 3, 36, 2) pow 20 — buy-back   | 5,755 / 5,984 | 17 | 1,419,536 / 1,423,024 |
+
+Gates (all green, 2026-07-12, post-S8): stwo-sha256 152 (+2 new multi_slot,
++5 multi negatives; +19 ignored incl. the multi composition round trip, run
+once explicitly), mdoc_mldsa quantum-safe-mdoc 19/19 (incl. revocation e2e,
+G6 privacy assert, wire round-trip), mdoc_mldsa p256+ml-dsa 25/25,
+credential_pipeline 3 (+1 ignored), mdoc_support 46, compose_p256_sha
+default suite green (3 of its `--ignored` WO-1.x diagnostics assert
+two-prove BYTE IDENTITY and fail by design since Q-015 random decoy
+padding — pre-existing, not S8), check-quantum-only-deps clean.
