@@ -1,14 +1,6 @@
 use ciborium::value::Value;
-#[cfg(feature = "p256")]
-use ecdsa::signature::hazmat::PrehashVerifier;
-#[cfg(feature = "p256")]
-use p256::ecdsa::{Signature as P256Signature, VerifyingKey};
-#[cfg(feature = "p256")]
-use p256::EncodedPoint;
 use sha2::{Digest, Sha256};
 use stwo::core::vcs::blake2_hash::Blake2sHash;
-#[cfg(feature = "p256")]
-use stwo_p256::types::{AffinePoint, Signature};
 
 use crate::mdoc::{
     verify_mdoc_circuit_with_preprocessed_root, ExtractedPidMdoc, MdocCircuitProof,
@@ -38,7 +30,7 @@ pub const TS13_PCS_QUERIES: u32 = 54;
 pub const TS13_PCS_POW_BITS: u32 = 20;
 pub const TS13_STARK_SOUNDNESS_BITS: u32 =
     TS13_PCS_POW_BITS + TS13_PCS_LOG_BLOWUP_FACTOR * TS13_PCS_QUERIES;
-pub const TS13_P256_SOUNDNESS_BITS: u32 = 128;
+pub const TS13_ML_DSA_65_SOUNDNESS_BITS: u32 = 192;
 pub const TS13_SHA256_SOUNDNESS_BITS: u32 = 128;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -192,24 +184,24 @@ pub fn ts13_published_soundness_table() -> Ts13SoundnessTable {
                 rationale: "mdoc production PCS: pow_bits + log_blowup_factor * n_queries",
             },
             Ts13SoundnessComponent {
-                name: "issuer P-256",
-                bits: TS13_P256_SOUNDNESS_BITS,
-                rationale: "ES256 issuerAuth over MobileSecurityObjectBytes",
+                name: "issuer ML-DSA-65",
+                bits: TS13_ML_DSA_65_SOUNDNESS_BITS,
+                rationale: "FIPS 204 category-3 issuerAuth over MobileSecurityObjectBytes",
             },
             Ts13SoundnessComponent {
-                name: "device P-256",
-                bits: TS13_P256_SOUNDNESS_BITS,
-                rationale: "ISO DeviceAuthenticationBytes signature",
+                name: "device ML-DSA-65",
+                bits: TS13_ML_DSA_65_SOUNDNESS_BITS,
+                rationale: "FIPS 204 category-3 DeviceAuthenticationBytes signature",
             },
             Ts13SoundnessComponent {
-                name: "revocation P-256",
-                bits: TS13_P256_SOUNDNESS_BITS,
-                rationale: "sorted-pair revocation authority signature",
+                name: "revocation ML-DSA-65",
+                bits: TS13_ML_DSA_65_SOUNDNESS_BITS,
+                rationale: "FIPS 204 category-3 sorted-pair revocation authority signature",
             },
             Ts13SoundnessComponent {
                 name: "SHA-256 bindings",
                 bits: TS13_SHA256_SOUNDNESS_BITS,
-                rationale: "MSO, item digest, and revocation-message hash bindings",
+                rationale: "MSO-derived revocation id and item digest bindings",
             },
         ],
     }
@@ -391,11 +383,7 @@ pub fn ts13_p4c_circle_code_rank_check() -> bool {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ts13RevocationStatement {
-    /// Scheme-tagged revocation-authority key (P-256 or ML-DSA-65). The scheme
-    /// must match the witness signature's — a mixed pair is rejected
-    /// fail-closed by [`Ts13RevocationStatement::verify_witness`], and the
-    /// mdoc statement validation additionally requires it to match the
-    /// issuer/device scheme.
+    /// ML-DSA-65 revocation-authority key.
     pub revocation_public_key: MdocRevocationKey,
     pub epoch: u32,
 }
@@ -406,8 +394,7 @@ pub struct Ts13RevocationWitness {
     pub id_lo: u64,
     pub id_hi: u64,
     pub epoch: u32,
-    /// Scheme-tagged sorted-pair signature: P-256 over the SHA-256 prehash of
-    /// the 20-byte message, or pure ML-DSA-65 over the raw 20 bytes.
+    /// Pure ML-DSA-65 signature over the raw 20-byte sorted-pair message.
     pub signature: MdocRevocationSignature,
 }
 
@@ -417,11 +404,8 @@ pub enum Ts13RevocationError {
     SentinelId,
     Range,
     Epoch,
-    InvalidPublicKey,
     InvalidSignatureEncoding,
     InvalidSignature,
-    /// Revocation key and signature schemes differ (fail-closed).
-    SchemeMismatch,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -525,37 +509,16 @@ impl Ts13RevocationStatement {
             return Err(Ts13RevocationError::Epoch);
         }
 
-        // Scheme-matched signature verification; any key/signature scheme
-        // mismatch is rejected fail-closed before touching either arm.
-        match (&self.revocation_public_key, &witness.signature) {
-            #[cfg(feature = "p256")]
-            (MdocRevocationKey::Ecdsa(public_key), MdocRevocationSignature::Ecdsa(signature)) => {
-                let verifying_key = verifying_key_from_affine(public_key)?;
-                let signature = p256_signature_from_stwo(signature)?;
-                let message_hash =
-                    ts13_revocation_message_hash(witness.id_lo, witness.id_hi, witness.epoch);
-                verifying_key
-                    .verify_prehash(&message_hash, &signature)
-                    .map_err(|_| Ts13RevocationError::InvalidSignature)
-            }
-            // Pure ML-DSA-65 over the RAW 20-byte message — no prehash; the
-            // message's privacy in the mdoc proof comes from the hosted
-            // module's private-message mode, not from a hash indirection.
-            #[cfg(feature = "ml-dsa")]
-            (MdocRevocationKey::MlDsa(public_key), MdocRevocationSignature::MlDsa(signature)) => {
-                let message = ts13_revocation_message(witness.id_lo, witness.id_hi, witness.epoch);
-                let trace = stwo_mldsa::reference::verify::verify_internals(
-                    public_key, &message, signature,
-                )
+        let MdocRevocationKey::MlDsa(public_key) = &self.revocation_public_key;
+        let MdocRevocationSignature::MlDsa(signature) = &witness.signature;
+        let message = ts13_revocation_message(witness.id_lo, witness.id_hi, witness.epoch);
+        let trace =
+            stwo_mldsa::reference::verify::verify_internals(public_key, &message, signature)
                 .map_err(|_| Ts13RevocationError::InvalidSignatureEncoding)?;
-                if !trace.accepted {
-                    return Err(Ts13RevocationError::InvalidSignature);
-                }
-                Ok(())
-            }
-            #[cfg(all(feature = "ml-dsa", feature = "p256"))]
-            _ => Err(Ts13RevocationError::SchemeMismatch),
+        if !trace.accepted {
+            return Err(Ts13RevocationError::InvalidSignature);
         }
+        Ok(())
     }
 }
 
@@ -568,38 +531,13 @@ pub fn ts13_mso_derived_revocation_id(mso: &[u8]) -> u64 {
 }
 
 /// The raw 20-byte TS13 revocation message `LE64(id_lo) ‖ LE64(id_hi) ‖
-/// LE32(epoch)` — the exact bytes the ML-DSA arm signs (pure, no prehash) and
-/// the P-256 arm prehashes.
+/// LE32(epoch)` — the exact bytes ML-DSA-65 signs (pure, no prehash).
 pub fn ts13_revocation_message(id_lo: u64, id_hi: u64, epoch: u32) -> [u8; 20] {
     let mut message = [0u8; 20];
     message[..8].copy_from_slice(&id_lo.to_le_bytes());
     message[8..16].copy_from_slice(&id_hi.to_le_bytes());
     message[16..].copy_from_slice(&epoch.to_le_bytes());
     message
-}
-
-pub fn ts13_revocation_message_hash(id_lo: u64, id_hi: u64, epoch: u32) -> [u8; 32] {
-    Sha256::digest(ts13_revocation_message(id_lo, id_hi, epoch)).into()
-}
-
-#[cfg(feature = "p256")]
-fn verifying_key_from_affine(
-    public_key: &AffinePoint,
-) -> Result<VerifyingKey, Ts13RevocationError> {
-    let encoded = EncodedPoint::from_affine_coordinates(
-        (&public_key.x.0).into(),
-        (&public_key.y.0).into(),
-        false,
-    );
-    VerifyingKey::from_encoded_point(&encoded).map_err(|_| Ts13RevocationError::InvalidPublicKey)
-}
-
-#[cfg(feature = "p256")]
-fn p256_signature_from_stwo(signature: &Signature) -> Result<P256Signature, Ts13RevocationError> {
-    let mut bytes = Vec::with_capacity(64);
-    bytes.extend_from_slice(&signature.r.0);
-    bytes.extend_from_slice(&signature.s.0);
-    P256Signature::from_slice(&bytes).map_err(|_| Ts13RevocationError::InvalidSignatureEncoding)
 }
 
 const TS13_RANK_FIELD_MODULUS: u64 = 2_147_483_647;
@@ -732,7 +670,7 @@ mod tests {
         assert!(soundness
             .components
             .iter()
-            .any(|component| component.name == "revocation P-256"));
+            .any(|component| component.name == "revocation ML-DSA-65"));
     }
 
     #[test]

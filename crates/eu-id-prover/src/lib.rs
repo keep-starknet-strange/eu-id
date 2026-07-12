@@ -6,7 +6,6 @@
 
 pub(crate) mod claimed_sum_blinder;
 pub mod mdoc;
-mod mdoc_validity;
 mod mdoc_window_bind;
 pub mod policy;
 mod public_digest_bind;

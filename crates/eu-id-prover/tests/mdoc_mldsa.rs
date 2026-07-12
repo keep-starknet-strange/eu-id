@@ -5,18 +5,13 @@
 //! COSE_Key with a pure ML-DSA-65 `deviceSignature`, and the optional TS13
 //! revocation authority signs the raw 20-byte message with ML-DSA-65 (no
 //! prehash; the message stays private via the hosted module's private-message
-//! mode). Mixed signature schemes fail closed in both directions — at
-//! extraction, at statement validation, at prove, and at verify.
+//! mode).
 //!
-//! The hosted composition lives in the in-STARK (non-`ec-coprocessor`) build;
-//! under `ec-coprocessor` an ML-DSA issuer is rejected with a clear error
-//! (device-only P4b bundle pending — tasks/mldsa-todo.md M7). Run with:
-//! `RAYON_NUM_THREADS=1 cargo test -p eu-id-prover --release \
-//!    --no-default-features --features "p256,ml-dsa" --test mdoc_mldsa -- --test-threads=1`
+//! Run with: `RAYON_NUM_THREADS=1 cargo test -p eu-id-prover --release \
+//!    --test mdoc_mldsa -- --test-threads=1`
 //!
 //! NOTE: heavy proofs must not run concurrently in one process (known
 //! stwo-mldsa constraint) — always pass `--test-threads=1`.
-#![cfg(feature = "ml-dsa")]
 
 use eu_id_prover::mdoc::{
     extract_pid_mdoc, openid4vp_session_transcript, ExtractedPidMdoc, MdocCircuitStatement,
@@ -108,7 +103,7 @@ fn with_mldsa_revocation(
 }
 
 // =====================================================================
-// Extraction-level positives and fail-closed negatives (G1, G4, D5).
+// Extraction-level positives and fail-closed negatives (G1, D5).
 // =====================================================================
 
 #[test]
@@ -126,15 +121,10 @@ fn full_pq_mdoc_extracts_with_mldsa_issuer_and_device_arms() {
     assert_eq!(device.message, extracted.device_sig_structure);
     assert!(statement.issuer_input.is_mldsa());
     assert!(statement.device_input.is_mldsa());
-    // The AffinePoint slots are zeroed placeholders in ML-DSA mode (the
-    // slots only exist at all when the classical stack is compiled in).
-    #[cfg(feature = "p256")]
-    assert_eq!(extracted.device_key.x.0, [0u8; 32]);
 }
 
 /// D5: an ML-DSA issuer REQUIRES a non-empty pin list whose member is
-/// byte-equal to the header AKP key; P-256 trust material alongside an ML-DSA
-/// issuer is rejected. A self-carried key is never a trust decision.
+/// byte-equal to the header AKP key. A self-carried key is never a trust decision.
 #[test]
 fn mldsa_issuer_trust_pins_fail_closed() {
     let (fixture, request) = full_pq_fixture_and_request_for(b"session-transcript-123");
@@ -145,7 +135,7 @@ fn mldsa_issuer_trust_pins_fail_closed() {
         .with_trusted_mldsa_issuer_public_keys(Vec::new());
     assert!(matches!(
         extract_pid_mdoc(&fixture.document, &no_pins),
-        Err(MdocError::UntrustedIssuerCertificate)
+        Err(MdocError::UntrustedIssuerKey)
     ));
 
     // Wrong pin (one byte off) → reject.
@@ -156,87 +146,11 @@ fn mldsa_issuer_trust_pins_fail_closed() {
         .with_trusted_mldsa_issuer_public_keys(vec![wrong_pk]);
     assert!(matches!(
         extract_pid_mdoc(&fixture.document, &wrong_pin),
-        Err(MdocError::UntrustedIssuerCertificate)
-    ));
-
-    // P-256 trust material set simultaneously → reject.
-    let mixed_trust = request
-        .clone()
-        .with_trusted_issuer_certificates(vec![vec![0u8; 8]]);
-    assert!(matches!(
-        extract_pid_mdoc(&fixture.document, &mixed_trust),
-        Err(MdocError::InvalidCoseKey(_))
+        Err(MdocError::UntrustedIssuerKey)
     ));
 
     // Control: the correct pin extracts.
     extract_pid_mdoc(&fixture.document, &request).expect("pinned issuer extracts");
-}
-
-/// G4 direction 1: ML-DSA issuer + ES256 device (the old M7 mixed fixture)
-/// must now REJECT at extraction — mixed schemes are fail-closed.
-#[cfg(feature = "p256")]
-#[test]
-fn mixed_mode_mldsa_issuer_es256_device_rejects_at_extraction() {
-    let session_transcript = openid4vp_session_transcript(b"session-transcript-123");
-    let fixture = mldsa_fixture::mldsa_pid_fixture_with_transcript(&session_transcript);
-    let request = MdocPidRequest::eudi_pid(session_transcript)
-        .with_trusted_mldsa_issuer_public_keys(vec![fixture.issuer_pk.clone()]);
-    assert!(matches!(
-        extract_pid_mdoc(&fixture.document, &request),
-        Err(MdocError::MixedSignatureSchemes(_))
-    ));
-}
-
-/// G4 direction 2: ES256 issuer + ML-DSA deviceSignature must reject at
-/// extraction (doctored P-256 demo document whose deviceSignature advertises
-/// COSE alg -49).
-#[cfg(feature = "p256")]
-#[test]
-fn mixed_mode_es256_issuer_mldsa_device_rejects_at_extraction() {
-    use ciborium::value::Value;
-
-    let fixture = eu_id_prover::mdoc::demo_mdoc_circuit_fixture();
-    let mut doc: Value =
-        ciborium::de::from_reader(fixture.document.as_slice()).expect("demo document is CBOR");
-    {
-        let Value::Map(entries) = &mut doc else {
-            panic!("document is a map")
-        };
-        let device_signed = entries
-            .iter_mut()
-            .find(|(key, _)| key == &Value::Text("deviceSigned".into()))
-            .map(|(_, value)| value)
-            .expect("deviceSigned present");
-        let Value::Map(device_signed) = device_signed else {
-            panic!("deviceSigned is a map")
-        };
-        let device_auth = device_signed
-            .iter_mut()
-            .find(|(key, _)| key == &Value::Text("deviceAuth".into()))
-            .map(|(_, value)| value)
-            .expect("deviceAuth present");
-        let Value::Map(device_auth) = device_auth else {
-            panic!("deviceAuth is a map")
-        };
-        let device_signature = device_auth
-            .iter_mut()
-            .find(|(key, _)| key == &Value::Text("deviceSignature".into()))
-            .map(|(_, value)| value)
-            .expect("deviceSignature present");
-        let Value::Array(cose) = device_signature else {
-            panic!("deviceSignature is a COSE_Sign1 array")
-        };
-        // ML-DSA-65 protected header `{1: -49}` + a length-correct signature.
-        cose[0] = Value::Bytes(vec![0xA1, 0x01, 0x38, 0x30]);
-        cose[3] = Value::Bytes(vec![0u8; stwo_mldsa::constants::SIG_BYTES]);
-    }
-    let mut doctored = Vec::new();
-    ciborium::ser::into_writer(&doc, &mut doctored).expect("doctored document encodes");
-
-    assert!(matches!(
-        extract_pid_mdoc(&doctored, &fixture.request),
-        Err(MdocError::MixedSignatureSchemes(_))
-    ));
 }
 
 /// Per-role tamper negatives at extraction (G1): a flipped issuer-signature
@@ -322,51 +236,9 @@ fn ts13_mldsa_revocation_native_positive_and_negatives() {
         statement.verify_witness(&extracted, &witness(id_lo, id_hi, epoch, &bad_sig)),
         Err(Ts13RevocationError::InvalidSignature)
     );
-
-    // Scheme mismatch (ML-DSA key, P-256 signature) → fail closed. Only
-    // expressible when the classical stack is compiled in.
-    #[cfg(feature = "p256")]
-    {
-        let mismatched = Ts13RevocationWitness {
-            id,
-            id_lo,
-            id_hi,
-            epoch,
-            signature: MdocRevocationSignature::Ecdsa(stwo_p256::types::Signature {
-                r: stwo_p256::types::U256([1u8; 32]),
-                s: stwo_p256::types::U256([1u8; 32]),
-            }),
-        };
-        assert_eq!(
-            statement.verify_witness(&extracted, &mismatched),
-            Err(Ts13RevocationError::SchemeMismatch)
-        );
-    }
 }
 
-#[cfg(feature = "ec-coprocessor")]
-mod coprocessor_mode {
-    use super::*;
-    use eu_id_prover::mdoc::prove_mdoc_circuit;
-
-    /// Under `ec-coprocessor`, an ML-DSA credential is rejected with a clear
-    /// error (the P4b bundle is a fixed two-ECDSA MAC format).
-    #[test]
-    fn mldsa_issuer_rejected_with_coprocessor_feature() {
-        let (extracted, statement) = full_pq_extracted_and_statement();
-        let err = match prove_mdoc_circuit(&extracted, &statement) {
-            Err(err) => err,
-            Ok(_) => panic!("ML-DSA credential must be rejected under ec-coprocessor"),
-        };
-        assert!(
-            format!("{err:?}").contains("ML-DSA"),
-            "unexpected error: {err:?}"
-        );
-    }
-}
-
-#[cfg(not(feature = "ec-coprocessor"))]
-mod hosted_mode {
+mod quantum_only {
     use super::*;
     use eu_id_prover::mdoc::{
         mdoc_expected_preprocessed_root, mdoc_production_pcs_config, mdoc_proof_byte_breakdown,
@@ -376,38 +248,10 @@ mod hosted_mode {
     use eu_id_prover::Error;
     use std::time::Instant;
 
-    /// Cheap fail-closed negatives that never reach STARK work: a mixed
-    /// statement (ML-DSA issuer/device + P-256 revocation key) and a D2
-    /// device-key ↔ MSO binding violation both reject at prove entry.
+    /// A device-key ↔ MSO binding violation rejects at prove entry.
     #[test]
-    fn full_pq_statement_scheme_mix_and_binding_tamper_reject_at_prove() {
+    fn full_pq_statement_binding_tamper_rejects_at_prove() {
         let (extracted, statement) = full_pq_extracted_and_statement();
-
-        // ML-DSA credential + P-256 revocation key → statement-validation
-        // reject (scheme uniformity, G4 third direction). Only expressible
-        // when the classical stack is compiled in.
-        #[cfg(feature = "p256")]
-        {
-            let mixed = statement
-                .clone()
-                .with_ts13_revocation(MdocRevocationPublicInputs {
-                    revocation_public_key: MdocRevocationKey::Ecdsa(
-                        stwo_p256::types::AffinePoint {
-                            x: stwo_p256::types::U256([3u8; 32]),
-                            y: stwo_p256::types::U256([4u8; 32]),
-                        },
-                    ),
-                    epoch: 7,
-                });
-            let err = match prove_mdoc_circuit(&extracted, &mixed) {
-                Err(err) => err,
-                Ok(_) => panic!("mixed schemes must reject"),
-            };
-            assert!(
-                format!("{err:?}").contains("mixes"),
-                "unexpected error: {err:?}"
-            );
-        }
 
         // D2: statement + extracted whose device key is NOT the MSO deviceKey
         // (the issuer's own input replayed into the device slot) → the
@@ -532,8 +376,6 @@ mod hosted_mode {
             .revocation_public_key
         {
             MdocRevocationKey::MlDsa(pk) => pk[0] ^= 0x01,
-            #[cfg(feature = "p256")]
-            MdocRevocationKey::Ecdsa(_) => panic!("statement carries an ML-DSA revocation key"),
         }
         verify_mdoc_circuit(&proof, &revocation_key_tamper)
             .expect_err("tampered revocation public key must reject");
@@ -572,8 +414,6 @@ mod hosted_mode {
         use eu_id_prover::mdoc::IssuerAuthInput;
         match &mut tampered.issuer_input {
             IssuerAuthInput::MlDsa(input) => input.message[2] ^= 0x01,
-            #[cfg(feature = "p256")]
-            IssuerAuthInput::Ecdsa(_) => panic!("statement carries an ML-DSA issuer"),
         }
         verify_mdoc_circuit(&proof, &tampered)
             .expect_err("tampered statement issuer message must reject");
@@ -644,30 +484,6 @@ mod hosted_mode {
             root_b,
         )
         .expect("proof B verifies under its own pin");
-    }
-
-    /// Cross-mode confusion: a fully-PQ proof presented against a P-256
-    /// (ECDSA) statement must be rejected, and vice versa. Needs both issuer
-    /// schemes compiled in.
-    #[cfg(feature = "p256")]
-    #[test]
-    fn mldsa_proof_against_ecdsa_statement_rejects() {
-        use eu_id_prover::mdoc::{demo_mdoc_circuit_fixture, IssuerAuthInput};
-        let (extracted, statement) = full_pq_extracted_and_statement();
-        let proof = prove_mdoc_circuit(&extracted, &statement).expect("fully-PQ mdoc proves");
-
-        let p256 = demo_mdoc_circuit_fixture();
-        assert!(matches!(
-            p256.statement.issuer_input,
-            IssuerAuthInput::Ecdsa(_)
-        ));
-        verify_mdoc_circuit(&proof, &p256.statement)
-            .expect_err("ML-DSA proof must not verify against an ECDSA statement");
-
-        let p256_proof =
-            prove_mdoc_circuit(&p256.extracted, &p256.statement).expect("P-256 mdoc proves");
-        verify_mdoc_circuit(&p256_proof, &statement)
-            .expect_err("ECDSA proof must not verify against an ML-DSA statement");
     }
 
     /// CM-3 same-arm malformed claim tree: a fully-PQ proof produced for one

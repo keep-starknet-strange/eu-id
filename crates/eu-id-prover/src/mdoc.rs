@@ -86,7 +86,7 @@ use stwo_p256::{
     proof::air::P256Verifier,
     proof::{P256CurrentAirInteractionClaim, P256CurrentAirProofClaim},
 };
-use stwo_sha256::air::{Sha256MultiProver, Sha256MultiVerifier, Sha256Prover, Sha256Verifier};
+use stwo_sha256::air::{Sha256MultiProver, Sha256MultiVerifier};
 use stwo_sha256::field_exposure::FieldExposure;
 use stwo_sha256::interaction::InteractionClaim as Sha256InteractionClaim;
 use stwo_sha256::relations::SharedShaTableRelations;
@@ -105,13 +105,8 @@ use crate::claimed_sum_blinder::{
 use crate::mdoc_mac::{
     MdocMacBind, MdocMacInteractionClaim, MdocP4bMacPublic, MdocP4bMacSharedState,
 };
-use crate::mdoc_validity::{
-    mdoc_validity_rows, MdocValidityBind, MdocValidityInteractionClaim, MdocValidityRow,
-};
-use crate::mdoc_window_bind::{
-    MdocFieldSource, MdocWindowBind, MdocWindowBindInteractionClaim, MdocWindowBindRow,
-};
-use crate::policy::{Policy, SHA_GROUP_WIDTH};
+use crate::mdoc_window_bind::{MdocWindowBind, MdocWindowBindInteractionClaim, MdocWindowBindRow};
+use crate::policy::Policy;
 #[cfg(any(feature = "ec-coprocessor", feature = "ml-dsa"))]
 use crate::public_digest_bind::{PublicDigestBind, PublicDigestBindInteractionClaim};
 use crate::Error;
@@ -125,7 +120,6 @@ const MDOC_PROFILE_VERSION_V2: &str = "2.0";
 const MDOC_PROFILE_VERSION: &str = MDOC_PROFILE_VERSION_V2;
 const PID_DOCTYPE: &str = "eu.europa.ec.eudi.pid.1";
 const PID_NAMESPACE: &str = "eu.europa.ec.eudi.pid.1";
-const ES256_PROTECTED_HEADER: &[u8] = &[0xA1, 0x01, 0x26];
 /// COSE protected header `{1: -49}` (ML-DSA-65,
 /// `stwo_mldsa::constants::COSE_ALG_ML_DSA_65`): CBOR `A1 01 38 30`.
 const MLDSA_PROTECTED_HEADER: &[u8] = &[0xA1, 0x01, 0x38, 0x30];
@@ -133,11 +127,8 @@ const CBOR_TAG_ENCODED_CBOR: u64 = 24;
 const CBOR_TAG_FULL_DATE: u64 = 1004;
 const MDOC_ATTRIBUTE_ELEMENT_ID_BASE: u32 = 16;
 const MDOC_ATTRIBUTE_VALUE_BASE: u32 = 20;
-const MDOC_ATTRIBUTE_DIGEST_BASE: u32 = 24;
-const MDOC_ATTRIBUTE_DIGEST_ANCHOR_BASE: u32 = 28;
 const MDOC_ATTRIBUTE_VALUE_HEAD_BASE: u32 = 32;
 const MDOC_ATTRIBUTE_ELEMENT_ANCHOR_BASE: u32 = 36;
-const MDOC_MSO_PAYLOAD_FIELD_ID: u32 = 40;
 const MDOC_REVOCATION_MESSAGE_FIELD_ID: u32 = 41;
 const TS13_REVOCATION_MESSAGE_LEN: usize = 20;
 /// Per-role instance namespaces for hosted ML-DSA modules. Prover and verifier
@@ -178,9 +169,6 @@ pub struct MdocPidRequest {
     pub birth_date_element: String,
     pub nationality_element: String,
     pub session_transcript: Vec<u8>,
-    pub trusted_issuer_certificates: Vec<Vec<u8>>,
-    #[cfg(feature = "p256")]
-    pub trusted_issuer_public_keys: Vec<AffinePoint>,
     /// ML-DSA-65 issuer trust pins: FIPS 204 `pkEncode` bytes (1,952 each). An
     /// ML-DSA issuer REQUIRES a non-empty pin list and the header AKP key must
     /// be byte-equal to a member — a self-carried key is never a trust decision
@@ -236,23 +224,9 @@ impl MdocPidRequest {
             birth_date_element: "birth_date".to_string(),
             nationality_element: "nationality".to_string(),
             session_transcript,
-            trusted_issuer_certificates: Vec::new(),
-            #[cfg(feature = "p256")]
-            trusted_issuer_public_keys: Vec::new(),
             trusted_mldsa_issuer_public_keys: Vec::new(),
             device_authentication_profile: MdocDeviceAuthenticationProfile::Iso180135,
         }
-    }
-
-    pub fn with_trusted_issuer_certificates(mut self, certificates: Vec<Vec<u8>>) -> Self {
-        self.trusted_issuer_certificates = certificates;
-        self
-    }
-
-    #[cfg(feature = "p256")]
-    pub fn with_trusted_issuer_public_keys(mut self, public_keys: Vec<AffinePoint>) -> Self {
-        self.trusted_issuer_public_keys = public_keys;
-        self
     }
 
     /// See [`MdocPidRequest::trusted_mldsa_issuer_public_keys`].
@@ -325,19 +299,10 @@ fn validate_requested_attributes(attributes: &[MdocRequestedAttribute]) -> Resul
     Ok(())
 }
 
-/// A scheme-tagged mdoc signature-verification input, shared by the issuer and
-/// device roles: ECDSA P-256 (COSE `ES256`, alg `-7`) or ML-DSA-65 (COSE alg
-/// `-49`). Externally-tagged serde (bincode-safe); the `Ecdsa` arm carries the
-/// exact `EcdsaVerifyInput` shape the P-256 path always used. The ML-DSA arm's
-/// `message` is the full role `Sig_structure` (public to the verifier — unlike
-/// the P-256 arm, which only publishes its SHA-256 hash; the in-circuit SHAKE
-/// absorb needs the byte-level statement binding).
+/// ML-DSA-65 signature-verification input shared by issuer and device roles.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum MdocAuthInput {
-    #[cfg(feature = "p256")]
-    Ecdsa(EcdsaVerifyInput),
-    /// Boxed: an `MlDsaVerifyInput` is ~20 KiB inline (t1/z/hint arrays).
-    #[cfg(feature = "ml-dsa")]
+    /// Boxed because an `MlDsaVerifyInput` is roughly 20 KiB inline.
     MlDsa(Box<MlDsaVerifyInput>),
 }
 
@@ -347,20 +312,8 @@ pub type IssuerAuthInput = MdocAuthInput;
 pub type DeviceAuthInput = MdocAuthInput;
 
 impl MdocAuthInput {
-    #[cfg(feature = "p256")]
-    pub fn as_ecdsa(&self) -> Option<&EcdsaVerifyInput> {
-        match self {
-            Self::Ecdsa(input) => Some(input),
-            #[cfg(feature = "ml-dsa")]
-            Self::MlDsa(_) => None,
-        }
-    }
-
-    #[cfg(feature = "ml-dsa")]
     pub fn as_mldsa(&self) -> Option<&MlDsaVerifyInput> {
         match self {
-            #[cfg(feature = "p256")]
-            Self::Ecdsa(_) => None,
             Self::MlDsa(input) => Some(input.as_ref()),
         }
     }
@@ -369,55 +322,13 @@ impl MdocAuthInput {
     /// when the `ml-dsa` feature is disabled, since the variant cannot exist) so
     /// digest-handle selection compiles in every feature combination.
     pub fn is_mldsa(&self) -> bool {
-        match self {
-            #[cfg(feature = "p256")]
-            Self::Ecdsa(_) => false,
-            #[cfg(feature = "ml-dsa")]
-            Self::MlDsa(_) => true,
-        }
-    }
-
-    /// The Ecdsa arm, for call sites that structurally require a P-256 input
-    /// (the ec-coprocessor path and P-256-only fixtures).
-    #[cfg(feature = "p256")]
-    fn expect_ecdsa(&self, context: &'static str) -> Result<&EcdsaVerifyInput, Error> {
-        self.as_ecdsa().ok_or_else(|| {
-            Error::Prove(format!(
-                "{context}: ML-DSA-65 auth input is not supported on this path"
-            ))
-        })
-    }
-
-    /// Mutable Ecdsa access for the coprocessor negative-mutation tests.
-    #[cfg(all(test, feature = "ec-coprocessor"))]
-    fn expect_ecdsa_mut(&mut self) -> &mut EcdsaVerifyInput {
-        match self {
-            Self::Ecdsa(input) => input,
-            #[cfg(feature = "ml-dsa")]
-            Self::MlDsa(_) => panic!("expected a P-256 auth input"),
-        }
+        true
     }
 }
 
-/// The decoded ML-DSA issuer witness produced during parsing, if any. Aliased so
-/// the issuer-alg dispatch compiles in both feature states: with `ml-dsa` it is
-/// the real witness type; without, an uninhabited placeholder that only ever
-/// holds `None`. Only referenced from the `p256` issuer arm's `None` literal.
-#[cfg(feature = "p256")]
-#[cfg(feature = "ml-dsa")]
-type IssuerMlDsaSlot = MlDsaVerifyInput;
-#[cfg(feature = "p256")]
-#[cfg(not(feature = "ml-dsa"))]
-type IssuerMlDsaSlot = std::convert::Infallible;
-
 fn auth_inputs_equal(left: &MdocAuthInput, right: &MdocAuthInput) -> bool {
     match (left, right) {
-        #[cfg(feature = "p256")]
-        (MdocAuthInput::Ecdsa(l), MdocAuthInput::Ecdsa(r)) => ecdsa_inputs_equal(l, r),
-        #[cfg(feature = "ml-dsa")]
         (MdocAuthInput::MlDsa(l), MdocAuthInput::MlDsa(r)) => l == r,
-        #[cfg(all(feature = "ml-dsa", feature = "p256"))]
-        _ => false,
     }
 }
 
@@ -442,14 +353,6 @@ pub struct ExtractedPidMdoc {
     pub birth_date_item: Vec<u8>,
     pub nationality_item: Vec<u8>,
     pub mso: Vec<u8>,
-    #[cfg(feature = "p256")]
-    pub issuer_key: AffinePoint,
-    #[cfg(feature = "p256")]
-    pub device_key: AffinePoint,
-    #[cfg(feature = "p256")]
-    pub issuer_signature: Signature,
-    #[cfg(feature = "p256")]
-    pub device_signature: Signature,
     pub issuer_sig_structure: Vec<u8>,
     pub device_sig_structure: Vec<u8>,
     /// The issuer-auth verification input (ECDSA or ML-DSA-65). For an ML-DSA
@@ -514,15 +417,11 @@ pub enum MdocError {
     NamespaceMissing,
     ElementMissing(String),
     UnsupportedDigestAlgorithm(String),
-    ItemDigestMismatch {
-        element: String,
-        digest_id: u32,
-    },
+    ItemDigestMismatch { element: String, digest_id: u32 },
     DeviceAuthPayloadMismatch,
     InvalidCoseKey(&'static str),
     InvalidCoseSign1(&'static str),
-    InvalidCertificate(&'static str),
-    UntrustedIssuerCertificate,
+    UntrustedIssuerKey,
     InvalidSignature(&'static str),
     InvalidNationality(String),
     UnsupportedCircuitValue(&'static str),
@@ -530,399 +429,12 @@ pub enum MdocError {
     InvalidTdate(&'static str),
     CredentialNotYetValid,
     CredentialExpired,
-    SaltTooShort {
-        len: usize,
-    },
-    InvalidAttributeCount {
-        count: usize,
-    },
+    SaltTooShort { len: usize },
+    InvalidAttributeCount { count: usize },
     DuplicatePredicateMode(&'static str),
-    ValueEqualityTooLong {
-        element: String,
-        len: usize,
-    },
-    ElementIdentifierTooLong {
-        element: String,
-        len: usize,
-    },
-    ValueEqualityMismatch {
-        element: String,
-    },
-    /// The issuerAuth advertised a COSE algorithm whose issuer proving path is
-    /// not compiled into this build (missing `p256` or `ml-dsa` feature). The
-    /// message names the feature to enable.
-    UnsupportedIssuerAlg(&'static str),
-    /// The (MSO deviceKey scheme, deviceSignature alg, issuer scheme) triple is
-    /// not uniform. Mixed signature schemes fail closed in both directions: a
-    /// partially post-quantum credential has the security of its weakest link,
-    /// so only all-P-256 and all-ML-DSA documents are accepted.
-    MixedSignatureSchemes(&'static str),
-}
-
-#[derive(Clone, Debug)]
-pub struct DemoMdocCircuitFixture {
-    pub document: Vec<u8>,
-    pub request: MdocPidRequest,
-    pub extracted: ExtractedPidMdoc,
-    pub statement: MdocCircuitStatement,
-}
-
-pub struct MdocModuleShape {
-    pub name: &'static str,
-    pub layout: TreeLayout,
-    /// TRUE per-component committed shape, when the module aggregates multiple
-    /// distinct producer tables under one [`TreeLayout`] (today: only the
-    /// shared-SHA table module). Empty for single-component modules, whose
-    /// `layout` buckets already identify the component 1:1.
-    pub components: Vec<stwo_sha256::shared_tables::ShaTableComponentShape>,
-}
-
-impl MdocModuleShape {
-    /// Single-component module: its `layout` buckets identify the component 1:1.
-    #[cfg(feature = "p256")]
-    fn single(name: &'static str, layout: TreeLayout) -> Self {
-        Self {
-            name,
-            layout,
-            components: Vec::new(),
-        }
-    }
-
-    /// Multi-component module carrying TRUE per-producer shapes.
-    #[cfg(feature = "p256")]
-    fn with_components(
-        name: &'static str,
-        layout: TreeLayout,
-        components: Vec<stwo_sha256::shared_tables::ShaTableComponentShape>,
-    ) -> Self {
-        Self {
-            name,
-            layout,
-            components,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MdocShaSizingWaste {
-    pub name: &'static str,
-    pub natural_log: u32,
-    pub shared_log: u32,
-    pub wasted_cells: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MdocSizingWaste {
-    pub sha: Vec<MdocShaSizingWaste>,
-    pub sha_wasted_cells: u64,
-    pub p256_namespaced_identical_preprocessed_cells: u64,
-}
-
-impl MdocSizingWaste {
-    pub fn combined_wasted_cells(&self) -> u64 {
-        self.sha_wasted_cells + self.p256_namespaced_identical_preprocessed_cells
-    }
-}
-
-/// Deterministic EUID mdoc profile-v2 fixture used by benches and SDK tests.
-#[cfg(feature = "p256")]
-pub fn demo_mdoc_circuit_fixture() -> DemoMdocCircuitFixture {
-    let request = MdocPidRequest::eudi_pid(openid4vp_session_transcript(b"session-transcript-123"));
-    demo_mdoc_circuit_fixture_for_request(request)
-}
-
-#[cfg(feature = "p256")]
-pub fn demo_mdoc_circuit_fixture_with_attributes(
-    attributes: Vec<MdocRequestedAttribute>,
-) -> DemoMdocCircuitFixture {
-    let session_transcript = openid4vp_session_transcript(b"session-transcript-123");
-    let mut request = MdocPidRequest::eudi_pid(session_transcript);
-    request.attributes = attributes;
-    demo_mdoc_circuit_fixture_for_request(request)
-}
-
-#[cfg(feature = "p256")]
-fn demo_mdoc_circuit_fixture_for_request(request: MdocPidRequest) -> DemoMdocCircuitFixture {
-    let session_transcript = request.session_transcript.clone();
-    let include_extra_items = request.attributes.iter().any(|attribute| {
-        matches!(
-            attribute.element_identifier.as_str(),
-            "family_name" | "age_over_18"
-        )
-    });
-    let document = demo_mdoc_document(&session_transcript, include_extra_items);
-    let extracted = extract_pid_mdoc(&document, &request).expect("demo mdoc extracts");
-    let statement = MdocCircuitStatement::from_extracted(
-        &extracted,
-        Policy {
-            current_date: predicates::Date {
-                year: 2026,
-                month: 7,
-                day: 3,
-            },
-            min_age_years: 18,
-            accepted_nationalities: vec![276, 250],
-            accepted_nationalities_alpha2: vec![*b"DE", *b"FR"],
-        },
-    )
-    .expect("demo mdoc statement builds");
-    DemoMdocCircuitFixture {
-        document,
-        request,
-        extracted,
-        statement,
-    }
-}
-
-#[cfg(feature = "p256")]
-pub fn demo_mdoc_module_shapes() -> Result<Vec<MdocModuleShape>, Error> {
-    let fixture = demo_mdoc_circuit_fixture();
-    let extracted = &fixture.extracted;
-    let statement = &fixture.statement;
-
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
-    let issuer_draft = single_p256_draft(
-        statement
-            .issuer_input
-            .expect_ecdsa("P-256 shape/sizing probe")?
-            .clone(),
-    )?;
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let device_draft = single_p256_draft(
-        statement
-            .device_input
-            .expect_ecdsa("P-256 shape/sizing probe")?
-            .clone(),
-    )?;
-    let (issuer_sha_witness, issuer_sha_log) = sha_params(&extracted.issuer_sig_structure);
-    let (device_sha_witness, device_sha_log) = sha_params(&extracted.device_sig_structure);
-    let attribute_items: Vec<_> = extracted
-        .extracted_attributes
-        .iter()
-        .map(|attribute| attribute.item.as_slice())
-        .collect();
-    let attribute_sha_params: Vec<_> = attribute_items
-        .iter()
-        .map(|item| sha_params(item))
-        .collect();
-    let shared_sha_log = std::iter::once(issuer_sha_log)
-        .chain(std::iter::once(device_sha_log))
-        .chain(attribute_sha_params.iter().map(|(_, log)| *log))
-        .max()
-        .expect("sha log list is non-empty");
-    let issuer_digest = SharedDigestRelation::new();
-    let device_digest = SharedDigestRelation::new();
-    let attribute_digests: Vec<_> = (0..attribute_sha_params.len())
-        .map(|_| SharedDigestRelation::new())
-        .collect();
-    let issuer_field = SharedFieldRelation::new();
-    let attribute_fields: Vec<_> = (0..attribute_sha_params.len())
-        .map(|_| SharedFieldRelation::new())
-        .collect();
-    let sha_table_relations = SharedShaTableRelations::new();
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
-    let issuer_scalar_z = SharedScalarZRelation::new();
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let device_scalar_z = SharedScalarZRelation::new();
-
-    let issuer_exposure = issuer_mso_exposure(statement);
-    let attribute_exposures: Vec<_> = (0..statement.attributes.len())
-        .map(|index| attribute_exposure(statement, index))
-        .collect();
-
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
-    let issuer_p256 = P256Prover::new(&issuer_draft)
-        .map_err(Error::P256Prepare)?
-        .with_z_binding(issuer_scalar_z.clone());
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let device_p256 = P256Prover::new(&device_draft)
-        .map_err(Error::P256Prepare)?
-        .with_preprocessed_namespace("mdoc/device")
-        .with_z_binding(device_scalar_z.clone());
-    let mut sha_consumers = vec![
-        (&issuer_sha_witness, issuer_exposure.clone()),
-        (&device_sha_witness, FieldExposure::empty()),
-    ];
-    for ((witness, _), exposure) in attribute_sha_params.iter().zip(attribute_exposures.iter()) {
-        sha_consumers.push((witness, exposure.clone()));
-    }
-    let sha_table_multiplicities = ShaTableMultiplicities::from_consumers(&sha_consumers);
-    let sha_tables = ShaTablesProver::new(sha_table_multiplicities, sha_table_relations.clone());
-    let issuer_sha = Sha256Prover::new(&issuer_sha_witness, shared_sha_log, SHA_GROUP_WIDTH)
-        .with_shared_tables(sha_table_relations.clone())
-        .with_digest_handle(issuer_digest.clone())
-        .with_field_handle(issuer_exposure.clone(), issuer_field.clone());
-    let device_sha = Sha256Prover::new(&device_sha_witness, shared_sha_log, SHA_GROUP_WIDTH)
-        .with_shared_tables(sha_table_relations.clone())
-        .with_digest_handle(device_digest.clone());
-    let attribute_sha: Vec<_> = attribute_sha_params
-        .iter()
-        .zip(attribute_exposures.iter())
-        .zip(attribute_digests.iter())
-        .zip(attribute_fields.iter())
-        .map(
-            |((((witness, _), exposure), digest_handle), field_handle)| {
-                Sha256Prover::new(witness, shared_sha_log, SHA_GROUP_WIDTH)
-                    .with_shared_tables(sha_table_relations.clone())
-                    .with_digest_handle(digest_handle.clone())
-                    .with_field_handle(exposure.clone(), field_handle.clone())
-            },
-        )
-        .collect();
-
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
-    let issuer_bridge_rows = crate::bridge_rows(&issuer_p256.proof_claim().public_inputs.instances);
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
-    let issuer_bridge_log = crate::bridge_log_size(issuer_bridge_rows.len());
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
-    let issuer_bridge = DigestBindProver::new(
-        issuer_bridge_rows,
-        issuer_bridge_log,
-        issuer_scalar_z,
-        issuer_digest.clone(),
-    );
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let device_bridge_rows = crate::bridge_rows(&device_p256.proof_claim().public_inputs.instances);
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let device_bridge_log = crate::bridge_log_size(device_bridge_rows.len());
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let device_bridge = DigestBindProver::new(
-        device_bridge_rows,
-        device_bridge_log,
-        device_scalar_z,
-        device_digest.clone(),
-    );
-    #[cfg(feature = "ec-coprocessor")]
-    let device_public_digest_bind = PublicDigestBind::new(
-        statement
-            .device_input
-            .expect_ecdsa("P-256 shape/sizing probe")?
-            .message_hash
-            .0,
-        device_digest.clone(),
-    );
-    let mdoc_window_bind = MdocWindowBind::new_for_attributes(
-        mdoc_window_bind_rows_from(statement, Some(&extracted.issuer_sig_structure)),
-        Some(issuer_field.clone()),
-        attribute_fields.clone(),
-        attribute_digests.clone(),
-    );
-    let mdoc_validity = MdocValidityBind::new(
-        statement.policy.current_date,
-        mdoc_validity_rows_from(statement, Some(&extracted.issuer_sig_structure)),
-        issuer_field.clone(),
-    );
-    #[cfg(feature = "ec-coprocessor")]
-    let mac_key_shares = random_mdoc_p4b_mac_key_shares();
-    #[cfg(feature = "ec-coprocessor")]
-    let mac_state = MdocP4bMacSharedState::default();
-    #[cfg(feature = "ec-coprocessor")]
-    let mdoc_mac = MdocMacBind::prover(
-        &mac_key_shares,
-        mdoc_p4b_mac_values(statement),
-        mac_state.clone(),
-        issuer_digest.clone(),
-        issuer_field.clone(),
-    );
-    #[cfg(feature = "ec-coprocessor")]
-    let coprocessor = MdocCoprocessorBindingProver::new(
-        statement
-            .issuer_input
-            .expect_ecdsa("ec-coprocessor module shapes")?
-            .clone(),
-        statement
-            .device_input
-            .expect_ecdsa("ec-coprocessor module shapes")?
-            .clone(),
-        mac_key_shares,
-        mac_state,
-    )?;
-
-    let age_public = statement.policy.age_public_input();
-    let nat_public = nat_public_input_for(statement);
-    let age_dob = DateOfBirth(predicates::Date {
-        year: u32::from(u16::from_be_bytes([
-            extracted.birth_date_bytes[0],
-            extracted.birth_date_bytes[1],
-        ])),
-        month: u32::from(extracted.birth_date_bytes[2]),
-        day: u32::from(extracted.birth_date_bytes[3]),
-    });
-    let nat_private = predicates::NatPrivateInput {
-        nationalities: vec![statement.nationality_binding.code()],
-    };
-    let age = AgeRangeCheck::new(PcsConfig::default())
-        .prover(&age_public, &age_dob)
-        .map_err(Error::AgePrepare)?;
-    let age_field = attribute_fields[statement
-        .age_attribute_index
-        .expect("demo mdoc carries an AgeOver attribute")]
-    .clone();
-    let age = match statement.birth_date_binding {
-        MdocBirthDateBinding::Packed(_) => age.with_dob_binding(age_field),
-        MdocBirthDateBinding::Text(_) => age.with_text_dob_binding(age_field),
-    };
-    let nat = NationalityPredicate::new(PcsConfig::default())
-        .prover(&nat_public, &nat_private)
-        .map_err(Error::NatPrepare)?
-        .with_nat_binding(
-            attribute_fields[statement
-                .nationality_attribute_index
-                .expect("demo mdoc carries an Alpha2Set attribute")]
-            .clone(),
-        );
-
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let shapes = vec![
-        MdocModuleShape::with_components(
-            "mdoc_sha_tables",
-            sha_tables.layout(),
-            sha_tables.component_shapes(),
-        ),
-        #[cfg(feature = "p256")]
-        MdocModuleShape::single("mdoc_issuer_p256", issuer_p256.layout()),
-        MdocModuleShape::single("mdoc_issuer_sha", issuer_sha.layout()),
-        #[cfg(feature = "p256")]
-        MdocModuleShape::single("mdoc_issuer_bridge", issuer_bridge.layout()),
-        MdocModuleShape::single("mdoc_device_p256", device_p256.layout()),
-        MdocModuleShape::single("mdoc_device_sha", device_sha.layout()),
-        MdocModuleShape::single("mdoc_device_bridge", device_bridge.layout()),
-        MdocModuleShape::single("mdoc_birth_sha", attribute_sha[0].layout()),
-        MdocModuleShape::single("mdoc_nat_sha", attribute_sha[1].layout()),
-        MdocModuleShape::single("mdoc_window_bind", mdoc_window_bind.layout()),
-        MdocModuleShape::single("mdoc_validity", mdoc_validity.layout()),
-        MdocModuleShape::single("mdoc_age", age.layout()),
-        MdocModuleShape::single("mdoc_nat", nat.layout()),
-    ];
-    #[cfg(feature = "ec-coprocessor")]
-    let shapes = vec![
-        MdocModuleShape::with_components(
-            "mdoc_sha_tables",
-            sha_tables.layout(),
-            sha_tables.component_shapes(),
-        ),
-        MdocModuleShape::single("mdoc_issuer_sha", issuer_sha.layout()),
-        MdocModuleShape::single("mdoc_device_sha", device_sha.layout()),
-        MdocModuleShape::single(
-            "mdoc_device_public_digest_bind",
-            device_public_digest_bind.layout(),
-        ),
-        MdocModuleShape::single("mdoc_birth_sha", attribute_sha[0].layout()),
-        MdocModuleShape::single("mdoc_nat_sha", attribute_sha[1].layout()),
-        MdocModuleShape::single("mdoc_window_bind", mdoc_window_bind.layout()),
-        MdocModuleShape::single("mdoc_validity", mdoc_validity.layout()),
-        MdocModuleShape::single("mdoc_age", age.layout()),
-        MdocModuleShape::single("mdoc_nat", nat.layout()),
-        MdocModuleShape::single("mdoc_coprocessor", coprocessor.layout()),
-        MdocModuleShape::single("mdoc_mac", mdoc_mac.layout()),
-    ];
-    Ok(shapes)
-}
-
-#[cfg(feature = "p256")]
-pub fn demo_mdoc_sizing_waste() -> Result<MdocSizingWaste, Error> {
-    let fixture = demo_mdoc_circuit_fixture();
-    mdoc_sizing_waste(&fixture.extracted, &fixture.statement)
+    ValueEqualityTooLong { element: String, len: usize },
+    ElementIdentifierTooLong { element: String, len: usize },
+    ValueEqualityMismatch { element: String },
 }
 
 /// Parse + natively pre-check an ML-DSA-65 issuerAuth (FIPS 204 Algorithm 3,
@@ -963,13 +475,7 @@ fn mldsa_issuer_input(
 fn mldsa_device_auth_input(
     pk: &[u8],
     device_signature: &CoseSign1,
-    issuer_is_mldsa: bool,
 ) -> Result<MdocAuthInput, MdocError> {
-    if !issuer_is_mldsa {
-        return Err(MdocError::MixedSignatureSchemes(
-            "ML-DSA-65 device authentication with an ES256 issuer",
-        ));
-    }
     let trace = stwo_mldsa::reference::verify::verify_internals(
         pk,
         &device_signature.sig_structure,
@@ -1009,49 +515,7 @@ pub fn extract_pid_mdoc(
     let issuer_signed = map_field(doc_map, "issuerSigned")?;
     let issuer_auth = parse_cose_sign1(value_field(issuer_signed, "issuerAuth")?)?;
     let issuer_unprotected = expect_map(&issuer_auth.unprotected, "issuerAuth.unprotected")?;
-    // Issuer-alg dispatch: ES256 keeps the exact P-256 flow; ML-DSA-65 parses
-    // the AKP key and natively pre-checks the signature with the stwo-mldsa
-    // reference verifier (FIPS 204 Algorithm 3, pure mode, empty context).
-    #[cfg(feature = "p256")]
-    let (issuer_key, issuer_mldsa_input) = match issuer_auth.alg {
-        CoseAlg::Es256 => {
-            let issuer_key = issuer_key_from_unprotected(issuer_unprotected, request)?;
-            verify_signature(
-                &issuer_key,
-                &issuer_auth.sig_structure,
-                &issuer_auth.signature_bytes,
-                "issuerAuth",
-            )?;
-            (issuer_key, None::<IssuerMlDsaSlot>)
-        }
-        #[cfg(feature = "ml-dsa")]
-        CoseAlg::MlDsa65 => {
-            let input = mldsa_issuer_input(issuer_unprotected, request, &issuer_auth)?;
-            // The AffinePoint slot is a zeroed placeholder for ML-DSA issuers;
-            // the real key lives in `issuer_auth_input`.
-            let zero_key = AffinePoint {
-                x: U256([0u8; 32]),
-                y: U256([0u8; 32]),
-            };
-            (zero_key, Some(input))
-        }
-    };
-    // Without the `p256` feature the ES256 issuer row is a clean parse-time
-    // rejection (never a panic) and no P-256 key slot exists at all.
-    #[cfg(not(feature = "p256"))]
-    let issuer_mldsa_input = match issuer_auth.alg {
-        CoseAlg::Es256 => {
-            let _ = issuer_unprotected;
-            return Err(MdocError::UnsupportedIssuerAlg(
-                "P-256 ES256 issuer (COSE alg -7): rebuild eu-id-prover with the `p256` feature",
-            ));
-        }
-        CoseAlg::MlDsa65 => Some(mldsa_issuer_input(
-            issuer_unprotected,
-            request,
-            &issuer_auth,
-        )?),
-    };
+    let issuer_mldsa_input = mldsa_issuer_input(issuer_unprotected, request, &issuer_auth)?;
 
     let mso = parse_mso(&issuer_auth.payload, &request.namespace)?;
     if !is_supported_mdoc_profile_version(&mso.version) {
@@ -1153,71 +617,7 @@ pub fn extract_pid_mdoc(
     if device_signature.payload != expected_device_payload {
         return Err(MdocError::DeviceAuthPayloadMismatch);
     }
-    // FAIL-CLOSED scheme matrix over (MSO deviceKey type, deviceSignature alg,
-    // issuer scheme): only the all-P-256 and all-ML-DSA rows are accepted; any
-    // mixed combination — in either direction — is rejected here, before any
-    // signature work on the mismatched arm.
-    let issuer_is_mldsa = issuer_mldsa_input.is_some();
-    #[cfg(feature = "p256")]
-    let (device_key, device_signature_value, device_auth_input) =
-        match (&mso.device_key, device_signature.alg) {
-            (ParsedDeviceKey::Ec2(device_key), CoseAlg::Es256) => {
-                if issuer_is_mldsa {
-                    return Err(MdocError::MixedSignatureSchemes(
-                        "ES256 device authentication with an ML-DSA-65 issuer",
-                    ));
-                }
-                verify_signature(
-                    device_key,
-                    &device_signature.sig_structure,
-                    &device_signature.signature_bytes,
-                    "deviceSignature",
-                )?;
-                let signature = signature_from_compact(&device_signature.signature_bytes)?;
-                let input = MdocAuthInput::Ecdsa(ecdsa_input(
-                    &device_signature.sig_structure,
-                    signature.clone(),
-                    device_key.clone(),
-                ));
-                (device_key.clone(), signature, input)
-            }
-            // Mirror of the issuer ML-DSA arm: native FIPS 204 pre-check over
-            // the device Sig_structure, then the decoded in-circuit input.
-            #[cfg(feature = "ml-dsa")]
-            (ParsedDeviceKey::MlDsa(pk), CoseAlg::MlDsa65) => {
-                let input = mldsa_device_auth_input(pk, &device_signature, issuer_is_mldsa)?;
-                // Zeroed AffinePoint/Signature placeholders (see
-                // `ExtractedPidMdoc::device_auth_input`).
-                let zero_key = AffinePoint {
-                    x: U256([0u8; 32]),
-                    y: U256([0u8; 32]),
-                };
-                let zero_sig = Signature {
-                    r: U256([0u8; 32]),
-                    s: U256([0u8; 32]),
-                };
-                (zero_key, zero_sig, input)
-            }
-            #[cfg(feature = "ml-dsa")]
-            _ => {
-                return Err(MdocError::MixedSignatureSchemes(
-                    "MSO deviceKey scheme does not match the deviceSignature algorithm",
-                ))
-            }
-        };
-    // Quantum-only shell: no P-256 device-key/signature slots exist; the EC2
-    // deviceKey row cannot even parse, and any residual scheme mix rejects.
-    #[cfg(not(feature = "p256"))]
-    let device_auth_input = match (&mso.device_key, device_signature.alg) {
-        (ParsedDeviceKey::MlDsa(pk), CoseAlg::MlDsa65) => {
-            mldsa_device_auth_input(pk, &device_signature, issuer_is_mldsa)?
-        }
-        _ => {
-            return Err(MdocError::MixedSignatureSchemes(
-                "MSO deviceKey scheme does not match the deviceSignature algorithm",
-            ))
-        }
-    };
+    let device_auth_input = mldsa_device_auth_input(&mso.device_key, &device_signature)?;
 
     let mut digest_ids = HashMap::new();
     for attribute in &extracted_attributes {
@@ -1233,32 +633,7 @@ pub fn extract_pid_mdoc(
         digest_ids.insert(element.to_string(), item.digest_id);
     }
 
-    #[cfg(feature = "p256")]
-    let (issuer_signature, issuer_auth_input) = match issuer_mldsa_input {
-        None => {
-            let signature = signature_from_compact(&issuer_auth.signature_bytes)?;
-            let input = IssuerAuthInput::Ecdsa(ecdsa_input(
-                &issuer_auth.sig_structure,
-                signature.clone(),
-                issuer_key.clone(),
-            ));
-            (signature, input)
-        }
-        #[cfg(feature = "ml-dsa")]
-        Some(input) => {
-            // Zeroed placeholder Signature for ML-DSA issuers (see
-            // `ExtractedPidMdoc::issuer_auth_input`).
-            let zero = Signature {
-                r: U256([0u8; 32]),
-                s: U256([0u8; 32]),
-            };
-            (zero, IssuerAuthInput::MlDsa(Box::new(input)))
-        }
-    };
-    #[cfg(not(feature = "p256"))]
-    let issuer_auth_input = IssuerAuthInput::MlDsa(Box::new(
-        issuer_mldsa_input.expect("ES256 issuers are rejected at parse without the `p256` feature"),
-    ));
+    let issuer_auth_input = IssuerAuthInput::MlDsa(Box::new(issuer_mldsa_input));
 
     Ok(ExtractedPidMdoc {
         doctype,
@@ -1280,14 +655,6 @@ pub fn extract_pid_mdoc(
         birth_date_item: birth_date_item.map(|item| item.bytes).unwrap_or_default(),
         nationality_item: nationality_item.map(|item| item.bytes).unwrap_or_default(),
         mso: issuer_auth.payload,
-        #[cfg(feature = "p256")]
-        issuer_key,
-        #[cfg(feature = "p256")]
-        device_key,
-        #[cfg(feature = "p256")]
-        issuer_signature,
-        #[cfg(feature = "p256")]
-        device_signature: device_signature_value,
         issuer_sig_structure: issuer_auth.sig_structure,
         device_sig_structure: device_signature.sig_structure,
         issuer_auth_input,
@@ -1350,38 +717,19 @@ impl Default for ParsedNationalityValue {
     }
 }
 
-/// The COSE `alg` advertised by a `COSE_Sign1` protected header.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CoseAlg {
-    Es256,
-    #[cfg(feature = "ml-dsa")]
-    MlDsa65,
-}
-
 #[derive(Clone)]
 struct CoseSign1 {
-    alg: CoseAlg,
     unprotected: Value,
     payload: Vec<u8>,
     signature_bytes: Vec<u8>,
     sig_structure: Vec<u8>,
 }
 
-/// The MSO `deviceKeyInfo.deviceKey`, scheme-tagged at parse time: an EC2
-/// P-256 point (ES256 device auth) or an AKP ML-DSA-65 encoded public key.
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum ParsedDeviceKey {
-    #[cfg(feature = "p256")]
-    Ec2(AffinePoint),
-    #[cfg(feature = "ml-dsa")]
-    MlDsa(Vec<u8>),
-}
-
 struct ParsedMso {
     version: String,
     doc_type: String,
     value_digests: HashMap<u32, [u8; 32]>,
-    device_key: ParsedDeviceKey,
+    device_key: Vec<u8>,
     signed_at: (u16, u8, u8),
     valid_from: (u16, u8, u8),
     valid_until: (u16, u8, u8),
@@ -1647,111 +995,6 @@ fn attribute_exposure(statement: &MdocCircuitStatement, index: usize) -> FieldEx
 /// Field exposure over the issuer `Sig_structure` preimage: the two 32-byte
 /// `valueDigests` windows (D2) and the two 32-byte deviceKey coordinate windows
 /// (D3), all consumed by the MSO window-bind component.
-fn issuer_mso_exposure(statement: &MdocCircuitStatement) -> FieldExposure {
-    let mut windows: Vec<_> = statement
-        .attributes
-        .iter()
-        .enumerate()
-        .map(|(index, attribute)| {
-            (
-                MdocStatementAttribute::digest_field_id(index),
-                attribute.mso_digest_offset,
-                32,
-            )
-        })
-        .collect();
-    // ML-DSA device: no 32-byte coordinate windows exist in the MSO (the AKP
-    // key is bound by the host-side canonical byte-equality check over the
-    // public issuer Sig_structure instead — see `check_mldsa_device_key_binding`).
-    if !statement.device_input.is_mldsa() {
-        windows.extend([
-            (
-                field_id::MDOC_DEVICE_KEY_X,
-                statement.mso_device_key_x_offset,
-                32,
-            ),
-            (
-                field_id::MDOC_DEVICE_KEY_Y,
-                statement.mso_device_key_y_offset,
-                32,
-            ),
-        ]);
-    }
-    windows.extend([
-        (
-            field_id::MDOC_VALID_FROM,
-            statement.mso_valid_from_date_offset,
-            10,
-        ),
-        (
-            field_id::MDOC_VALID_UNTIL,
-            statement.mso_valid_until_date_offset,
-            10,
-        ),
-    ]);
-    if statement.ts13_revocation_range.is_some() {
-        windows.push((
-            MDOC_MSO_PAYLOAD_FIELD_ID,
-            statement.mso_payload_offset,
-            statement.mso_payload_len,
-        ));
-    }
-    windows.extend(
-        statement
-            .attributes
-            .iter()
-            .enumerate()
-            .map(|(index, attribute)| {
-                (
-                    MdocStatementAttribute::digest_anchor_field_id(index),
-                    attribute.mso_digest_anchor_offset,
-                    attribute.mso_digest_anchor.len(),
-                )
-            }),
-    );
-    if !statement.device_input.is_mldsa() {
-        windows.extend([
-            (
-                field_id::MDOC_DEVICE_KEY_X_ANCHOR,
-                statement.mso_device_key_x_anchor_offset,
-                statement.mso_device_key_x_anchor.len(),
-            ),
-            (
-                field_id::MDOC_DEVICE_KEY_Y_ANCHOR,
-                statement.mso_device_key_y_anchor_offset,
-                statement.mso_device_key_y_anchor.len(),
-            ),
-        ]);
-    }
-    windows.extend([
-        (
-            field_id::MDOC_VALID_FROM_ANCHOR,
-            statement.mso_valid_from_anchor_offset,
-            statement.mso_valid_from_anchor.len(),
-        ),
-        (
-            field_id::MDOC_VALID_UNTIL_ANCHOR,
-            statement.mso_valid_until_anchor_offset,
-            statement.mso_valid_until_anchor.len(),
-        ),
-    ]);
-    // ML-DSA issuer (S4): the Sig_structure is a PUBLIC statement input; its
-    // µ-absorption is fed by the hosted instance's in-module public-message
-    // producer, so NO whole-message window is exposed here any more.
-    FieldExposure::from_preimage_windows_multi(&windows)
-}
-
-fn mso_payload_exposure(statement: &MdocCircuitStatement) -> FieldExposure {
-    if statement.ts13_revocation_range.is_none() {
-        return FieldExposure::empty();
-    }
-    FieldExposure::from_preimage_windows_multi(&[(
-        MDOC_MSO_PAYLOAD_FIELD_ID,
-        0,
-        statement.mso_payload_len,
-    )])
-}
-
 fn ts13_revocation_message_bytes(id_lo: u64, id_hi: u64, epoch: u32) -> [u8; 20] {
     let mut bytes = [0u8; TS13_REVOCATION_MESSAGE_LEN];
     bytes[..8].copy_from_slice(&id_lo.to_le_bytes());
@@ -1760,117 +1003,6 @@ fn ts13_revocation_message_bytes(id_lo: u64, id_hi: u64, epoch: u32) -> [u8; 20]
     bytes
 }
 
-fn ts13_revocation_message_exposure(statement: &MdocCircuitStatement) -> FieldExposure {
-    let Some(signature) = &statement.ts13_revocation_signature else {
-        return FieldExposure::empty();
-    };
-    #[cfg_attr(not(feature = "ml-dsa"), allow(unused_mut))]
-    let mut windows = vec![(
-        MDOC_REVOCATION_MESSAGE_FIELD_ID,
-        0,
-        TS13_REVOCATION_MESSAGE_LEN,
-    )];
-    // ML-DSA revocation: additionally expose the whole 20-byte message under
-    // the hosted-msg field id — the hosted module's µ-absorb bridge consumes
-    // exactly these yields, so the SHAKE-absorbed message IS the
-    // SHA-constrained preimage (same MsgLink swap as the issuer instance).
-    // `MdocRevocationRangeBind` keeps consuming the field id above; the bounds
-    // check never moves host-side.
-    #[cfg(feature = "ml-dsa")]
-    if signature.is_mldsa() {
-        windows.push((HOSTED_MSG_FIELD_ID, 0, TS13_REVOCATION_MESSAGE_LEN));
-    }
-    #[cfg(not(feature = "ml-dsa"))]
-    let _ = signature;
-    FieldExposure::from_preimage_windows_multi(&windows)
-}
-
-/// The P-256 in-STARK revocation verification input; `None` when no revocation
-/// signature is present OR the revocation authority is ML-DSA (the ML-DSA arm
-/// is proven by the hosted `revocation_mldsa` module instead).
-#[cfg(feature = "p256")]
-fn ts13_revocation_p256_input(
-    statement: &MdocCircuitStatement,
-) -> Result<Option<EcdsaVerifyInput>, Error> {
-    let Some(signature) = statement
-        .ts13_revocation_signature
-        .as_ref()
-        .and_then(|signature| signature.as_ecdsa())
-        .cloned()
-    else {
-        return Ok(None);
-    };
-    let revocation = statement.ts13_revocation.as_ref().ok_or_else(|| {
-        Error::Prove("TS13 revocation signature requires public revocation inputs".to_string())
-    })?;
-    let public_key = revocation
-        .revocation_public_key
-        .as_ecdsa()
-        .ok_or_else(|| {
-            Error::Prove(
-                "TS13 P-256 revocation signature requires a P-256 revocation key".to_string(),
-            )
-        })?
-        .clone();
-    let range = statement.ts13_revocation_range.as_ref().ok_or_else(|| {
-        Error::Prove("TS13 revocation signature requires private range witness".to_string())
-    })?;
-    let message = ts13_revocation_message_bytes(range.id_lo, range.id_hi, revocation.epoch);
-    Ok(Some(EcdsaVerifyInput {
-        message_hash: U256(Sha256::digest(message).into()),
-        signature,
-        public_key,
-    }))
-}
-
-/// Enforce signature-scheme uniformity across the statement's roles: the
-/// device arm — and, when present, the revocation key and signature — must
-/// match the issuer's scheme. Checked once on BOTH prove and verify, before
-/// any STARK work, so mixed statements fail closed in every direction.
-fn ensure_statement_scheme_uniformity(statement: &MdocCircuitStatement) -> Result<(), Error> {
-    let issuer_is_mldsa = statement.issuer_input.is_mldsa();
-    if statement.device_input.is_mldsa() != issuer_is_mldsa {
-        return Err(Error::Prove(
-            "mdoc statement mixes issuer and device signature schemes".to_string(),
-        ));
-    }
-    if let Some(revocation) = &statement.ts13_revocation {
-        if revocation.revocation_public_key.is_mldsa() != issuer_is_mldsa {
-            return Err(Error::Prove(
-                "mdoc statement mixes issuer and revocation-key signature schemes".to_string(),
-            ));
-        }
-    }
-    if let Some(signature) = &statement.ts13_revocation_signature {
-        if signature.is_mldsa() != issuer_is_mldsa {
-            return Err(Error::Prove(
-                "mdoc statement mixes issuer and revocation-signature schemes".to_string(),
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// D2 device-key ↔ MSO binding for the ML-DSA scheme, run host-side on BOTH
-/// prove and verify before any STARK work.
-///
-/// # Soundness
-///
-/// In ML-DSA mode the issuer `Sig_structure` and the device public key are
-/// both PUBLIC statement inputs, already mixed into Fiat-Shamir and bound
-/// in-circuit by the issuer instance's µ-absorption — so the binding reduces
-/// to a canonical byte equality: decode the Sig_structure payload (the MSO),
-/// navigate to `deviceKeyInfo.deviceKey` through the CBOR structure (no
-/// prover-supplied offsets exist to tamper with), and require the AKP `-1`
-/// bytes to equal the statement device key's `pkEncode`. Any parse failure or
-/// mismatch rejects.
-/// S4 fail-closed input coherence (prove side only — the verifier has no
-/// extraction): the extracted issuer/device Sig_structures must equal the
-/// statement's public ML-DSA messages byte-for-byte. The in-circuit
-/// µ-absorption sources the STATEMENT bytes via the public-message producers,
-/// so this equality is what ties the extraction-time native signature checks
-/// to the statement actually proven.
-#[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
 fn check_mldsa_extracted_statement_coherence(
     extracted: &ExtractedPidMdoc,
     statement: &MdocCircuitStatement,
@@ -1892,7 +1024,6 @@ fn check_mldsa_extracted_statement_coherence(
     Ok(())
 }
 
-#[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
 fn check_mldsa_device_key_binding(statement: &MdocCircuitStatement) -> Result<(), Error> {
     let (Some(issuer_input), Some(device_input)) = (
         statement.issuer_input.as_mldsa(),
@@ -1912,11 +1043,7 @@ fn check_mldsa_device_key_binding(statement: &MdocCircuitStatement) -> Result<()
         .and_then(|payload| payload.as_bytes())
         .ok_or_else(|| bind_err("Sig_structure payload"))?;
     let mso = parse_mso_device_key(payload).map_err(|_| bind_err("MSO deviceKey parse"))?;
-    #[cfg_attr(not(feature = "p256"), allow(irrefutable_let_patterns))]
-    let ParsedDeviceKey::MlDsa(mso_pk) = mso
-    else {
-        return Err(bind_err("MSO deviceKey is not an AKP ML-DSA-65 key"));
-    };
+    let mso_pk = mso;
     if mso_pk != device_input.encode_pk() {
         return Err(bind_err(
             "MSO deviceKey does not match the statement device public key",
@@ -1929,7 +1056,7 @@ fn check_mldsa_device_key_binding(statement: &MdocCircuitStatement) -> Result<()
 /// `deviceKeyInfo.deviceKey` and parse it. Shares the exact decode helpers the
 /// extraction-time `parse_mso` uses.
 #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
-fn parse_mso_device_key(bytes: &[u8]) -> Result<ParsedDeviceKey, MdocError> {
+fn parse_mso_device_key(bytes: &[u8]) -> Result<Vec<u8>, MdocError> {
     let value = decode_value(bytes)?;
     let value = match value {
         Value::Tag(CBOR_TAG_ENCODED_CBOR, inner) => {
@@ -2161,128 +1288,39 @@ fn mdoc_p4b_mac_values(statement: &MdocCircuitStatement) -> [eu_id_ec_coprocesso
 /// relations, not asserted host-side).
 fn mdoc_window_bind_rows_from(
     statement: &MdocCircuitStatement,
-    issuer_sig_structure: Option<&[u8]>,
+    _issuer_sig_structure: Option<&[u8]>,
 ) -> Vec<MdocWindowBindRow> {
     // S4 ML-DSA issuer: NO in-circuit issuer byte provider exists — every
     // `IssuerMso`-sourced row (digest windows + anchors, validity anchors) is
     // replaced by the host-side checks in `mldsa_public_mso_facts`, and the
     // attribute digests bind to PUBLIC values via `PublicDigestBind`. Only the
     // AttributeItem-sourced rows (private item preimages) remain.
-    let issuer_is_mldsa = statement.issuer_input.is_mldsa();
     let mut rows = Vec::new();
     for (index, attribute) in statement.attributes.iter().enumerate() {
         rows.push(MdocWindowBindRow::constant(
             MdocStatementAttribute::element_field_id(index),
-            MdocFieldSource::AttributeItem(index),
+            index,
             attribute.element_identifier.as_bytes(),
         ));
         rows.push(MdocWindowBindRow::constant(
             MdocStatementAttribute::element_anchor_field_id(index),
-            MdocFieldSource::AttributeItem(index),
+            index,
             &attribute.element_identifier_anchor,
         ));
         if let MdocDisclosureMode::ValueEquality(_) = &attribute.mode {
             rows.push(MdocWindowBindRow::constant(
                 MdocStatementAttribute::value_field_id(index),
-                MdocFieldSource::AttributeItem(index),
+                index,
                 &attribute.value,
             ));
             rows.push(MdocWindowBindRow::constant(
                 MdocStatementAttribute::value_head_field_id(index),
-                MdocFieldSource::AttributeItem(index),
+                index,
                 &attribute.value_head,
             ));
         }
-        if !issuer_is_mldsa {
-            let digest = issuer_sig_structure
-                .map(|preimage| {
-                    preimage[attribute.mso_digest_offset..attribute.mso_digest_offset + 32]
-                        .try_into()
-                        .expect("attribute digest window length")
-                })
-                .unwrap_or([0u8; 32]);
-            rows.push(MdocWindowBindRow::digest(
-                MdocStatementAttribute::digest_field_id(index),
-                index,
-                digest,
-            ));
-            rows.push(MdocWindowBindRow::constant(
-                MdocStatementAttribute::digest_anchor_field_id(index),
-                MdocFieldSource::IssuerMso,
-                &attribute.mso_digest_anchor,
-            ));
-        }
-    }
-    // ML-DSA device: the coordinate windows/anchors do not exist in the MSO;
-    // the exposure side skips them symmetrically (LogUp balance) and the
-    // binding is the host-side canonical byte-equality check.
-    #[cfg(feature = "p256")]
-    if let Some(device_input) = statement.device_input.as_ecdsa() {
-        #[cfg(not(feature = "ec-coprocessor"))]
-        rows.extend([
-            MdocWindowBindRow::constant(
-                field_id::MDOC_DEVICE_KEY_X,
-                MdocFieldSource::IssuerMso,
-                &device_input.public_key.x.0,
-            ),
-            MdocWindowBindRow::constant(
-                field_id::MDOC_DEVICE_KEY_Y,
-                MdocFieldSource::IssuerMso,
-                &device_input.public_key.y.0,
-            ),
-        ]);
-        #[cfg(feature = "ec-coprocessor")]
-        let _ = device_input;
-        rows.extend([
-            MdocWindowBindRow::constant(
-                field_id::MDOC_DEVICE_KEY_X_ANCHOR,
-                MdocFieldSource::IssuerMso,
-                &statement.mso_device_key_x_anchor,
-            ),
-            MdocWindowBindRow::constant(
-                field_id::MDOC_DEVICE_KEY_Y_ANCHOR,
-                MdocFieldSource::IssuerMso,
-                &statement.mso_device_key_y_anchor,
-            ),
-        ]);
-    }
-    if !issuer_is_mldsa {
-        rows.extend([
-            MdocWindowBindRow::constant(
-                field_id::MDOC_VALID_FROM_ANCHOR,
-                MdocFieldSource::IssuerMso,
-                &statement.mso_valid_from_anchor,
-            ),
-            MdocWindowBindRow::constant(
-                field_id::MDOC_VALID_UNTIL_ANCHOR,
-                MdocFieldSource::IssuerMso,
-                &statement.mso_valid_until_anchor,
-            ),
-        ]);
     }
     rows
-}
-
-fn mdoc_validity_rows_from(
-    statement: &MdocCircuitStatement,
-    issuer_sig_structure: Option<&[u8]>,
-) -> Vec<MdocValidityRow> {
-    let dates = issuer_sig_structure.map(|preimage| {
-        let valid_from = preimage
-            [statement.mso_valid_from_date_offset..statement.mso_valid_from_date_offset + 10]
-            .try_into()
-            .expect("validFrom window length");
-        let valid_until = preimage
-            [statement.mso_valid_until_date_offset..statement.mso_valid_until_date_offset + 10]
-            .try_into()
-            .expect("validUntil window length");
-        (valid_from, valid_until)
-    });
-    let (valid_from, valid_until) = dates.unwrap_or((
-        full_date_text_bytes(statement.valid_from),
-        full_date_text_bytes(statement.valid_until),
-    ));
-    mdoc_validity_rows(valid_from, valid_until)
 }
 
 /// The nationality public input matching the statement's binding form: the
@@ -2387,22 +1425,11 @@ fn parse_cose_sign1_inner(
     }
 
     let protected = expect_bytes(&items[0], "COSE_Sign1.protected")?.to_vec();
-    let alg = if protected == ES256_PROTECTED_HEADER {
-        CoseAlg::Es256
-    } else if protected == MLDSA_PROTECTED_HEADER {
-        // COSE alg -49 (ML-DSA-65) is only accepted when the `ml-dsa` feature is
-        // compiled in; otherwise it is a clean parse error, never a panic.
-        #[cfg(not(feature = "ml-dsa"))]
-        return Err(MdocError::UnsupportedIssuerAlg(
-            "ML-DSA-65 (COSE alg -49): rebuild eu-id-prover with the `ml-dsa` feature",
-        ));
-        #[cfg(feature = "ml-dsa")]
-        CoseAlg::MlDsa65
-    } else {
+    if protected != MLDSA_PROTECTED_HEADER {
         return Err(MdocError::InvalidCoseSign1(
-            "protected header must be ES256 or ML-DSA-65",
+            "protected header must be ML-DSA-65",
         ));
-    };
+    }
     expect_map(&items[1], "COSE_Sign1.unprotected")?;
     let unprotected = items[1].clone();
     let payload = match (&items[2], detached_payload) {
@@ -2412,26 +1439,12 @@ fn parse_cose_sign1_inner(
         _ => return Err(MdocError::WrongType("COSE_Sign1.payload")),
     };
     let signature_bytes = expect_bytes(&items[3], "COSE_Sign1.signature")?.to_vec();
-    match alg {
-        CoseAlg::Es256 => {
-            #[cfg(feature = "p256")]
-            signature_from_compact(&signature_bytes)?;
-            #[cfg(not(feature = "p256"))]
-            if signature_bytes.len() != 64 {
-                return Err(MdocError::InvalidCoseSign1("ES256 signature length"));
-            }
-        }
-        #[cfg(feature = "ml-dsa")]
-        CoseAlg::MlDsa65 => {
-            if signature_bytes.len() != stwo_mldsa::constants::SIG_BYTES {
-                return Err(MdocError::InvalidCoseSign1("ML-DSA-65 signature length"));
-            }
-        }
+    if signature_bytes.len() != stwo_mldsa::constants::SIG_BYTES {
+        return Err(MdocError::InvalidCoseSign1("ML-DSA-65 signature length"));
     }
     let sig_structure = sig_structure(&protected, &payload);
 
     Ok(CoseSign1 {
-        alg,
         unprotected,
         payload,
         signature_bytes,
@@ -2524,7 +1537,7 @@ pub fn device_authentication_sig_structure_hash(
     doc_type: &str,
 ) -> Result<[u8; 32], MdocError> {
     let payload = device_authentication_bytes(session_transcript, doc_type)?;
-    Ok(Sha256::digest(sig_structure(ES256_PROTECTED_HEADER, &payload)).into())
+    Ok(Sha256::digest(sig_structure(MLDSA_PROTECTED_HEADER, &payload)).into())
 }
 
 #[cfg(feature = "p256")]
@@ -2921,28 +1934,10 @@ fn validate_item_digest(
     Ok(())
 }
 
-/// Parse the MSO `deviceKey`: EC2 P-256 (existing profile) or, under `ml-dsa`,
-/// an AKP ML-DSA-65 key. Any other key type is rejected; the scheme tag is
-/// checked against the deviceSignature alg and the issuer scheme at extraction
-/// (fail-closed matrix).
-fn parse_device_cose_key(value: &Value) -> Result<ParsedDeviceKey, MdocError> {
+/// Parse the MSO ML-DSA-65 AKP `deviceKey`.
+fn parse_device_cose_key(value: &Value) -> Result<Vec<u8>, MdocError> {
     let key = expect_map(value, "COSE_Key")?;
-    let kty = int_field(key, 1, "COSE_Key.kty")?;
-    #[cfg(feature = "ml-dsa")]
-    if kty == i128::from(stwo_mldsa::constants::COSE_KTY_AKP) {
-        return Ok(ParsedDeviceKey::MlDsa(
-            parse_akp_mldsa_cose_key(key)?.to_vec(),
-        ));
-    }
-    let _ = kty;
-    #[cfg(feature = "p256")]
-    {
-        Ok(ParsedDeviceKey::Ec2(parse_cose_key(value)?))
-    }
-    #[cfg(not(feature = "p256"))]
-    Err(MdocError::InvalidCoseKey(
-        "EC2 P-256 deviceKey: rebuild eu-id-prover with the `p256` feature",
-    ))
+    Ok(parse_akp_mldsa_cose_key(key)?.to_vec())
 }
 
 #[cfg(feature = "p256")]
@@ -3011,25 +2006,11 @@ pub fn mdoc_statement_issuer_mldsa_pk(statement: &MdocCircuitStatement) -> Optio
 /// Trust is FAIL-CLOSED: the request MUST carry a non-empty
 /// `trusted_mldsa_issuer_public_keys` pin list and the header key must be
 /// byte-equal to a member — the self-carried AKP key is never a trust
-/// decision. P-256 trust material (x5chain header / P-256 pins) combined with
-/// an ML-DSA issuer is rejected.
-#[cfg(feature = "ml-dsa")]
+/// decision.
 fn mldsa_issuer_pk_from_unprotected(
     unprotected: &[(Value, Value)],
     request: &MdocPidRequest,
 ) -> Result<Vec<u8>, MdocError> {
-    #[cfg(feature = "p256")]
-    let has_p256_key_pins = !request.trusted_issuer_public_keys.is_empty();
-    #[cfg(not(feature = "p256"))]
-    let has_p256_key_pins = false;
-    if value_int_key(unprotected, 33).is_some()
-        || !request.trusted_issuer_certificates.is_empty()
-        || has_p256_key_pins
-    {
-        return Err(MdocError::InvalidCoseKey(
-            "ML-DSA-65 issuer with P-256 trust material is unsupported",
-        ));
-    }
     let key = expect_map(value_field(unprotected, "issuerKey")?, "COSE_Key")?;
     let pk = parse_akp_mldsa_cose_key(key)?;
     if !request
@@ -3038,7 +2019,7 @@ fn mldsa_issuer_pk_from_unprotected(
         .any(|trusted| trusted.as_slice() == pk)
     {
         // Also the empty-pin-list case: no pins ⇒ nothing is trusted.
-        return Err(MdocError::UntrustedIssuerCertificate);
+        return Err(MdocError::UntrustedIssuerKey);
     }
     Ok(pk.to_vec())
 }
@@ -3046,7 +2027,6 @@ fn mldsa_issuer_pk_from_unprotected(
 /// Parse an AKP ML-DSA-65 COSE_Key map (`kty = 7`, `alg = -49`, raw 1952-byte
 /// public key in label `-1`). Shared by the issuer header key and the MSO
 /// `deviceKey` parser.
-#[cfg(feature = "ml-dsa")]
 fn parse_akp_mldsa_cose_key(key: &[(Value, Value)]) -> Result<&[u8], MdocError> {
     let kty = int_field(key, 1, "COSE_Key.kty")?;
     let alg = int_field(key, 3, "COSE_Key.alg")?;
@@ -3687,14 +2667,6 @@ impl MdocStatementAttribute {
         MDOC_ATTRIBUTE_VALUE_BASE + index as u32
     }
 
-    fn digest_field_id(index: usize) -> u32 {
-        MDOC_ATTRIBUTE_DIGEST_BASE + index as u32
-    }
-
-    fn digest_anchor_field_id(index: usize) -> u32 {
-        MDOC_ATTRIBUTE_DIGEST_ANCHOR_BASE + index as u32
-    }
-
     fn value_head_field_id(index: usize) -> u32 {
         MDOC_ATTRIBUTE_VALUE_HEAD_BASE + index as u32
     }
@@ -4065,7 +3037,6 @@ fn policy_date_tuple(policy: &Policy) -> Result<(u16, u8, u8), MdocError> {
 /// the verifier's rejection paths; soundness never rests on their integrity —
 /// the per-role instance namespace is mixed into the transcript, so a claim
 /// tree presented in the wrong role slot fails verification.
-#[cfg(feature = "ml-dsa")]
 #[derive(Clone, Serialize, Deserialize)]
 pub struct MdocMlDsaClaims {
     pub group_evals: Vec<QM31>,
@@ -4074,7 +3045,6 @@ pub struct MdocMlDsaClaims {
     pub sib_squeezed_len: usize,
 }
 
-#[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
 impl MdocMlDsaClaims {
     fn from_prover(prover: &MlDsaStatementProver) -> Self {
         Self {
@@ -4098,142 +3068,38 @@ impl MdocMlDsaClaims {
 pub struct MdocCircuitProof {
     pub stark_proof: StarkProof<Blake2sMerkleHasher>,
     sha_tables_interaction_claim: ShaTablesInteractionClaim,
-    /// `Some` iff the issuer is P-256 (ES256); `None` for ML-DSA issuers.
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
-    issuer_p256_claim: Option<P256CurrentAirProofClaim>,
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
-    issuer_p256_interaction_claim: Option<P256CurrentAirInteractionClaim>,
-    /// `Some` iff the issuer is ML-DSA-65 (biconditional, gated at verify).
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
     pub mldsa: Option<MdocMlDsaClaims>,
-    /// `Some` iff the device is ML-DSA-65 (biconditional, gated at verify).
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
     pub device_mldsa: Option<MdocMlDsaClaims>,
-    /// `Some` iff an ML-DSA revocation signature is present (biconditional).
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
     pub revocation_mldsa: Option<MdocMlDsaClaims>,
-    /// The proof-wide keccak SERVICE claimed sums (`[sponge_v, keccak, round,
-    /// tables ×9]`) — `Some` iff any hosted ML-DSA instance is present
-    /// (biconditional, gated at verify). The verifier rebuilds the service's
-    /// job shapes from public statement data; only the sums travel here.
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
     pub keccak_service_claimed_sums: Option<Vec<QM31>>,
-    /// `Some` iff the device is P-256 (ES256); `None` for ML-DSA devices.
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
-    device_p256_claim: Option<P256CurrentAirProofClaim>,
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
-    device_p256_interaction_claim: Option<P256CurrentAirInteractionClaim>,
-    #[cfg(feature = "ec-coprocessor")]
-    device_public_digest_bind_interaction_claim: PublicDigestBindInteractionClaim,
-    #[cfg(feature = "ec-coprocessor")]
-    coprocessor_bundle: Option<eu_id_ec_coprocessor::ecdsa::ImplementedCircuitBundle>,
-    #[cfg(feature = "ec-coprocessor")]
-    mdoc_mac_interaction_claim: MdocMacInteractionClaim,
-    /// `None` for an ML-DSA issuer (S4: the public issuer Sig_structure is
-    /// absorbed by the hosted instance's public-message producer; every
-    /// window fact is a host-side check over the public bytes).
-    issuer_sha_log_n_rows: Option<u32>,
-    issuer_sha_interaction_claim: Option<Sha256InteractionClaim>,
-    /// `None` for an ML-DSA device (S4: the public device Sig_structure is
-    /// absorbed by the hosted instance's public-message producer; no SHA
-    /// conveyor exists).
-    device_sha_log_n_rows: Option<u32>,
-    device_sha_interaction_claim: Option<Sha256InteractionClaim>,
-    mso_sha_log_n_rows: Option<u32>,
-    mso_sha_interaction_claim: Option<Sha256InteractionClaim>,
-    revocation_sha_log_n_rows: Option<u32>,
-    revocation_sha_interaction_claim: Option<Sha256InteractionClaim>,
-    attribute_sha_log_n_rows: Vec<u32>,
-    attribute_sha_interaction_claims: Vec<Sha256InteractionClaim>,
-    /// S8 merged multi-slot SHA consumer (revocation + attributes in ONE
-    /// instance) — present iff the composition is fully post-quantum (no
-    /// issuer/device/mso SHA conveyors); biconditional with the legacy
-    /// per-instance revocation/attribute SHA fields being absent (gated at
-    /// verify). `(log_n_rows, slot_log)` fix the public slot schedule; the
-    /// slot list itself is rebuilt from the statement.
     merged_sha_log_n_rows: Option<u32>,
     merged_sha_slot_log: Option<u32>,
     merged_sha_interaction_claim: Option<Sha256InteractionClaim>,
-    #[cfg(feature = "p256")]
-    revocation_p256_claim: Option<P256CurrentAirProofClaim>,
-    #[cfg(feature = "p256")]
-    revocation_p256_interaction_claim: Option<P256CurrentAirInteractionClaim>,
-    #[cfg(feature = "p256")]
-    revocation_bridge_log_size: Option<u32>,
-    #[cfg(feature = "p256")]
-    revocation_bridge_interaction_claim: Option<DigestBindInteractionClaim>,
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
-    issuer_bridge_log_size: Option<u32>,
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
-    issuer_bridge_interaction_claim: Option<DigestBindInteractionClaim>,
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
-    device_bridge_log_size: Option<u32>,
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
-    device_bridge_interaction_claim: Option<DigestBindInteractionClaim>,
     mdoc_window_bind_interaction_claim: MdocWindowBindInteractionClaim,
-    /// `None` for an ML-DSA issuer (S4: validity is a host-side check over
-    /// the public MSO windows on both prove and verify).
-    mdoc_validity_interaction_claim: Option<MdocValidityInteractionClaim>,
-    /// S4 ML-DSA issuer only: per-attribute PUBLIC digest-bind claims (the
-    /// attribute SHA digests pin to the host-derived `valueDigests` values).
-    /// `Some` iff the issuer is ML-DSA, with one claim per statement attribute.
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
     attribute_public_digest_bind_interaction_claims: Option<Vec<PublicDigestBindInteractionClaim>>,
-    mso_payload_bind_interaction_claim: Option<MdocMsoPayloadInteractionClaim>,
     ts13_revocation_range_interaction_claim: Option<MdocRevocationRangeInteractionClaim>,
     age_public: Option<predicates::PublicInput>,
     age_claimed_sums: Option<Vec<QM31>>,
     nat_public: Option<predicates::NatPublicInput>,
     nat_claimed_sums: Option<Vec<QM31>>,
-    #[cfg(feature = "ec-coprocessor")]
-    #[serde(skip)]
-    p4b_prove_profile: Option<eu_id_ec_coprocessor::ecdsa::MdocP4bProveProfile>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct MdocCircuitProveProfile {
     pub total: Duration,
-    #[cfg(feature = "ec-coprocessor")]
-    pub p4b: Option<eu_id_ec_coprocessor::ecdsa::MdocP4bProveProfile>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct MdocCircuitVerifyProfile {
     pub total: Duration,
-    #[cfg(feature = "ec-coprocessor")]
-    pub p4b: Option<eu_id_ec_coprocessor::ecdsa::MdocP4bVerifyProfile>,
-}
-
-impl MdocCircuitProof {
-    #[cfg(feature = "ec-coprocessor")]
-    pub fn p4b_prove_profile(&self) -> Option<&eu_id_ec_coprocessor::ecdsa::MdocP4bProveProfile> {
-        self.p4b_prove_profile.as_ref()
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MdocProofByteBreakdown {
     pub proof_bytes: usize,
     pub stark_proof_bytes: usize,
-    pub coprocessor_bundle_bytes: Option<usize>,
     pub non_stark_metadata_bytes: usize,
     pub stark: MdocStarkProofByteBreakdown,
-    pub coprocessor_bundle: Option<MdocCoprocessorBundleByteBreakdown>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct MdocCoprocessorBundleByteBreakdown {
-    pub params_and_roots: usize,
-    pub proximity_openings: usize,
-    pub proximity_openings_b: usize,
-    pub proximity_claim: usize,
-    pub claim_batch: usize,
-    pub consistency_claim_values: usize,
-    pub mac_tags: usize,
-    pub entries: usize,
-    pub entry_count: usize,
-    pub opening_count: usize,
-    pub opened_column_rows: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -4251,48 +3117,11 @@ pub fn mdoc_proof_byte_breakdown(proof: &MdocCircuitProof) -> MdocProofByteBreak
     let stark = &proof.stark_proof.0;
     let proof_bytes = bincode_len(proof);
     let stark_proof_bytes = bincode_len(&proof.stark_proof);
-    #[cfg(feature = "ec-coprocessor")]
-    let coprocessor_bundle_bytes = proof.coprocessor_bundle.as_ref().map(bincode_len);
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let coprocessor_bundle_bytes = None;
-    #[cfg(feature = "ec-coprocessor")]
-    let coprocessor_bundle_len = coprocessor_bundle_bytes.unwrap_or(0);
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let coprocessor_bundle_len = 0;
-    let non_stark_metadata_bytes = proof_bytes
-        .saturating_sub(stark_proof_bytes)
-        .saturating_sub(coprocessor_bundle_len);
-    #[cfg(feature = "ec-coprocessor")]
-    let coprocessor_bundle =
-        proof
-            .coprocessor_bundle
-            .as_ref()
-            .map(|bundle| MdocCoprocessorBundleByteBreakdown {
-                params_and_roots: bincode_len(&bundle.params)
-                    + bincode_len(&bundle.root)
-                    + bincode_len(&bundle.root_b),
-                proximity_openings: bincode_len(&bundle.proximity_openings),
-                proximity_openings_b: bincode_len(&bundle.proximity_openings_b),
-                proximity_claim: bincode_len(&bundle.proximity_claim),
-                claim_batch: bincode_len(&bundle.claim_batch),
-                consistency_claim_values: bincode_len(&bundle.consistency_claim_values),
-                mac_tags: bincode_len(&bundle.mac_tags),
-                entries: bincode_len(&bundle.entries),
-                entry_count: bundle.entries.len(),
-                opening_count: bundle.proximity_openings.len(),
-                opened_column_rows: bundle
-                    .proximity_openings
-                    .first()
-                    .map(|opening| opening.column.len())
-                    .unwrap_or(0),
-            });
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let coprocessor_bundle = None;
+    let non_stark_metadata_bytes = proof_bytes.saturating_sub(stark_proof_bytes);
 
     MdocProofByteBreakdown {
         proof_bytes,
         stark_proof_bytes,
-        coprocessor_bundle_bytes,
         non_stark_metadata_bytes,
         stark: MdocStarkProofByteBreakdown {
             config: bincode_len(&stark.config),
@@ -4303,7 +3132,6 @@ pub fn mdoc_proof_byte_breakdown(proof: &MdocCircuitProof) -> MdocProofByteBreak
             proof_of_work: bincode_len(&stark.proof_of_work),
             fri_proof: bincode_len(&stark.fri_proof),
         },
-        coprocessor_bundle,
     }
 }
 
@@ -4317,170 +3145,6 @@ fn sha_params(bytes: &[u8]) -> (stwo_sha256::types::Sha256Witness, u32) {
     let witness = compute_sha256_witness(bytes);
     let log_n_rows = min_log_size(witness.blocks.len());
     (witness, log_n_rows)
-}
-
-#[cfg(feature = "p256")]
-fn single_p256_draft(input: EcdsaVerifyInput) -> Result<P256ProofDraft, Error> {
-    P256ProofDraft::from_inputs_with_arbitrary_fake_glv_hints(vec![input])
-        .map_err(Error::P256Prepare)
-}
-
-#[cfg(feature = "p256")]
-fn mdoc_sizing_waste(
-    extracted: &ExtractedPidMdoc,
-    statement: &MdocCircuitStatement,
-) -> Result<MdocSizingWaste, Error> {
-    let issuer_draft = single_p256_draft(
-        statement
-            .issuer_input
-            .expect_ecdsa("P-256 shape/sizing probe")?
-            .clone(),
-    )?;
-    let device_draft = single_p256_draft(
-        statement
-            .device_input
-            .expect_ecdsa("P-256 shape/sizing probe")?
-            .clone(),
-    )?;
-    let (issuer_sha_witness, issuer_sha_log) = sha_params(&extracted.issuer_sig_structure);
-    let (device_sha_witness, device_sha_log) = sha_params(&extracted.device_sig_structure);
-    let (birth_sha_witness, birth_sha_log) = sha_params(&extracted.birth_date_item);
-    let (nat_sha_witness, nat_sha_log) = sha_params(&extracted.nationality_item);
-    let shared_sha_log = [issuer_sha_log, device_sha_log, birth_sha_log, nat_sha_log]
-        .into_iter()
-        .max()
-        .expect("sha log list is non-empty");
-
-    let issuer_exposure = issuer_mso_exposure(statement);
-    let birth_exposure = birth_date_exposure(statement);
-    let nat_exposure = nationality_exposure(statement);
-
-    let sha = vec![
-        sha_sizing_waste(
-            "issuer",
-            &issuer_sha_witness,
-            issuer_sha_log,
-            shared_sha_log,
-            issuer_exposure,
-        ),
-        sha_sizing_waste(
-            "device",
-            &device_sha_witness,
-            device_sha_log,
-            shared_sha_log,
-            FieldExposure::empty(),
-        ),
-        sha_sizing_waste(
-            "birth_date",
-            &birth_sha_witness,
-            birth_sha_log,
-            shared_sha_log,
-            birth_exposure,
-        ),
-        sha_sizing_waste(
-            "nationality",
-            &nat_sha_witness,
-            nat_sha_log,
-            shared_sha_log,
-            nat_exposure,
-        ),
-    ];
-    let sha_wasted_cells = sha.iter().map(|row| row.wasted_cells).sum();
-
-    let mut issuer_p256 = P256Prover::new(&issuer_draft).map_err(Error::P256Prepare)?;
-    let issuer_fingerprints = issuer_p256.preprocessed_column_fingerprints();
-    let mut device_p256 = P256Prover::new(&device_draft)
-        .map_err(Error::P256Prepare)?
-        .with_preprocessed_namespace("mdoc/device");
-    let device_fingerprints = device_p256.preprocessed_column_fingerprints();
-    let p256_namespaced_identical_preprocessed_cells = device_fingerprints
-        .iter()
-        .filter(|fingerprint| fingerprint.id.id.starts_with("mdoc/device/"))
-        .filter(|device| {
-            issuer_fingerprints
-                .iter()
-                .any(|issuer| issuer.log_size == device.log_size && issuer.hash == device.hash)
-        })
-        .map(|fingerprint| 1u64 << fingerprint.log_size)
-        .sum();
-
-    Ok(MdocSizingWaste {
-        sha,
-        sha_wasted_cells,
-        p256_namespaced_identical_preprocessed_cells,
-    })
-}
-
-#[cfg(feature = "p256")]
-fn sha_sizing_waste(
-    name: &'static str,
-    witness: &stwo_sha256::types::Sha256Witness,
-    natural_log: u32,
-    shared_log: u32,
-    field_exposure: FieldExposure,
-) -> MdocShaSizingWaste {
-    let natural = Sha256Prover::new(witness, natural_log, SHA_GROUP_WIDTH)
-        .with_digest_provider()
-        .with_field_provider(field_exposure.clone())
-        .layout();
-    let shared = Sha256Prover::new(witness, shared_log, SHA_GROUP_WIDTH)
-        .with_digest_provider()
-        .with_field_provider(field_exposure)
-        .layout();
-    let natural_cells = trace_and_interaction_cells(&natural);
-    let shared_cells = trace_and_interaction_cells(&shared);
-    MdocShaSizingWaste {
-        name,
-        natural_log,
-        shared_log,
-        wasted_cells: shared_cells.saturating_sub(natural_cells),
-    }
-}
-
-#[cfg(feature = "p256")]
-fn trace_and_interaction_cells(layout: &TreeLayout) -> u64 {
-    layout
-        .trace
-        .iter()
-        .chain(&layout.interaction)
-        .map(|&log_size| 1u64 << log_size)
-        .sum()
-}
-
-#[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
-fn expected_instance(input: &EcdsaVerifyInput) -> PublicEcdsaInstance<M31> {
-    PublicEcdsaInstance::from_input(0, input)
-}
-
-#[cfg(feature = "p256")]
-fn public_instance_key_matches(
-    instance: &PublicEcdsaInstance<M31>,
-    public_key: &AffinePoint,
-) -> bool {
-    let zero_sig = Signature {
-        r: U256([0u8; 32]),
-        s: U256([0u8; 32]),
-    };
-    let expected = PublicEcdsaInstance::from_input(
-        0,
-        &EcdsaVerifyInput {
-            message_hash: U256([0u8; 32]),
-            signature: zero_sig,
-            public_key: public_key.clone(),
-        },
-    );
-    instance.sig_id == expected.sig_id
-        && instance.pub_x == expected.pub_x
-        && instance.pub_y == expected.pub_y
-}
-
-#[cfg(feature = "p256")]
-fn ecdsa_inputs_equal(left: &EcdsaVerifyInput, right: &EcdsaVerifyInput) -> bool {
-    left.message_hash.0 == right.message_hash.0
-        && left.signature.r.0 == right.signature.r.0
-        && left.signature.s.0 == right.signature.s.0
-        && left.public_key.x.0 == right.public_key.x.0
-        && left.public_key.y.0 == right.public_key.y.0
 }
 
 struct MdocRevocationPublicBind {
@@ -4561,398 +3225,17 @@ impl AirProver for MdocRevocationPublicBind {
     }
 }
 
-type MdocMsoPayloadColumnEval = CircleEvaluation<SimdBackend, M31, BitReversedOrder>;
-type MdocMsoPayloadComponent = FrameworkComponent<MdocMsoPayloadEval>;
-
-struct MdocMsoPayloadBind {
-    bytes: Option<Vec<u8>>,
-    len: usize,
-    issuer_field_handle: SharedFieldRelation,
-    mso_field_handle: SharedFieldRelation,
-    blinder_relation: Option<ClaimedSumBlinderRelation>,
-    interaction_claim: Option<MdocMsoPayloadInteractionClaim>,
-    component: Option<MdocMsoPayloadComponent>,
-    blinder_component: Option<FrameworkComponent<ClaimedSumBlinderEval>>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct MdocMsoPayloadInteractionClaim {
-    claimed_sum: QM31,
-    /// Q-015 §4b blinder pair (see `claimed_sum_blinder`).
-    blinder_v: QM31,
-    blinder_m: QM31,
-    blinder_claimed_sum: QM31,
-}
-
-#[derive(Clone)]
-struct MdocMsoPayloadEval {
-    log_size: u32,
-    issuer_field_relation: FieldBytesRelation,
-    mso_field_relation: FieldBytesRelation,
-    blinder_relation: ClaimedSumBlinderRelation,
-    blinder_v: QM31,
-    blinder_m: QM31,
-}
-
-impl MdocMsoPayloadBind {
-    fn prover(
-        bytes: Vec<u8>,
-        issuer_field_handle: SharedFieldRelation,
-        mso_field_handle: SharedFieldRelation,
-    ) -> Self {
-        Self {
-            len: bytes.len(),
-            bytes: Some(bytes),
-            issuer_field_handle,
-            mso_field_handle,
-            blinder_relation: None,
-            interaction_claim: None,
-            component: None,
-            blinder_component: None,
-        }
-    }
-
-    fn verifier(
-        len: usize,
-        issuer_field_handle: SharedFieldRelation,
-        mso_field_handle: SharedFieldRelation,
-        interaction_claim: MdocMsoPayloadInteractionClaim,
-    ) -> Self {
-        Self {
-            bytes: None,
-            len,
-            issuer_field_handle,
-            mso_field_handle,
-            blinder_relation: None,
-            interaction_claim: Some(interaction_claim),
-            component: None,
-            blinder_component: None,
-        }
-    }
-
-    fn log_size(&self) -> u32 {
-        mso_payload_log_size(self.len)
-    }
-
-    fn issuer_field_relation(&self) -> FieldBytesRelation {
-        self.issuer_field_handle.get()
-    }
-
-    fn mso_field_relation(&self) -> FieldBytesRelation {
-        self.mso_field_handle.get()
-    }
-
-    fn interaction_claim(&self) -> &MdocMsoPayloadInteractionClaim {
-        self.interaction_claim
-            .as_ref()
-            .expect("mdoc MSO payload interaction claim is set")
-    }
-}
-
-fn mso_payload_log_size(len: usize) -> u32 {
-    let rows = len.max(1).next_power_of_two();
-    rows.ilog2().max(LOG_N_LANES)
-}
-
-fn mso_payload_col_id(name: &str) -> PreProcessedColumnId {
-    PreProcessedColumnId {
-        id: format!("mdoc/ts13/mso_payload/{name}"),
-    }
-}
-
-fn mso_payload_preprocessed_column_ids() -> Vec<PreProcessedColumnId> {
-    vec![
-        mso_payload_col_id("active"),
-        mso_payload_col_id("byte_index"),
-    ]
-}
-
-fn mso_payload_column_eval(log_size: u32, coset_values: Vec<M31>) -> MdocMsoPayloadColumnEval {
-    let mut ordered = vec![M31::from_u32_unchecked(0); 1usize << log_size];
-    for (coset_index, value) in coset_values.into_iter().enumerate() {
-        let row = bit_reverse_index(
-            coset_index_to_circle_domain_index(coset_index, log_size),
-            log_size,
-        );
-        ordered[row] = value;
-    }
-    CircleEvaluation::new(
-        CanonicCoset::new(log_size).circle_domain(),
-        BaseColumn::from_iter(ordered),
-    )
-}
-
-fn mso_payload_preprocessed_columns(len: usize) -> Vec<MdocMsoPayloadColumnEval> {
-    let log_size = mso_payload_log_size(len);
-    let rows = 1usize << log_size;
-    let mut active = vec![M31::from_u32_unchecked(0); rows];
-    let mut byte_index = vec![M31::from_u32_unchecked(0); rows];
-    for row in 0..len {
-        active[row] = M31::from_u32_unchecked(1);
-        byte_index[row] = M31::from_u32_unchecked(row as u32);
-    }
-    vec![
-        mso_payload_column_eval(log_size, active),
-        mso_payload_column_eval(log_size, byte_index),
-    ]
-}
-
-fn mso_payload_base_trace(bytes: &[u8]) -> Vec<MdocMsoPayloadColumnEval> {
-    let log_size = mso_payload_log_size(bytes.len());
-    let mut values = vec![M31::from_u32_unchecked(0); 1usize << log_size];
-    for (row, &byte) in bytes.iter().enumerate() {
-        values[row] = M31::from_u32_unchecked(u32::from(byte));
-    }
-    vec![mso_payload_column_eval(log_size, values)]
-}
-
-fn mso_payload_interaction_trace(
-    bytes: &[u8],
-    issuer_field_relation: &FieldBytesRelation,
-    mso_field_relation: &FieldBytesRelation,
-    blinder_relation: &ClaimedSumBlinderRelation,
-    blinder_v: QM31,
-    blinder_m: QM31,
-) -> (Vec<MdocMsoPayloadColumnEval>, QM31) {
-    let log_size = mso_payload_log_size(bytes.len());
-    let preprocessed = mso_payload_preprocessed_columns(bytes.len());
-    let trace = mso_payload_base_trace(bytes);
-    let n_vec_rows = 1usize << (log_size - LOG_N_LANES);
-    let mut logup = LogupTraceGenerator::new(log_size);
-    logup.col_from_iter((0..n_vec_rows).map(|vec_row| {
-        let active = preprocessed[0].data[vec_row];
-        let byte_index = preprocessed[1].data[vec_row];
-        let value = trace[0].data[vec_row];
-        let numerator = PackedQM31::from(active);
-        let issuer_denominator: PackedQM31 = issuer_field_relation.combine(&[
-            PackedM31::broadcast(M31::from_u32_unchecked(MDOC_MSO_PAYLOAD_FIELD_ID)),
-            byte_index,
-            value,
-        ]);
-        let mso_denominator: PackedQM31 = mso_field_relation.combine(&[
-            PackedM31::broadcast(M31::from_u32_unchecked(MDOC_MSO_PAYLOAD_FIELD_ID)),
-            byte_index,
-            value,
-        ]);
-        (
-            numerator * mso_denominator + numerator * issuer_denominator,
-            issuer_denominator * mso_denominator,
-        )
-    }));
-    // Q-015 blinder `+m/(z−combine(v))` on every row, emitted LAST to match
-    // `MdocMsoPayloadEval::evaluate` (lone third entry under
-    // `finalize_logup_in_pairs`).
-    let blinder_num = PackedQM31::broadcast(blinder_m);
-    let blinder_den = crate::claimed_sum_blinder::blinder_denominator(blinder_relation, blinder_v);
-    logup.col_from_fn(|_| (blinder_num, blinder_den));
-    logup.finalize_last()
-}
-
-impl FrameworkEval for MdocMsoPayloadEval {
-    fn log_size(&self) -> u32 {
-        self.log_size
-    }
-
-    fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 1
-    }
-
-    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let active = eval.get_preprocessed_column(mso_payload_col_id("active"));
-        let byte_index = eval.get_preprocessed_column(mso_payload_col_id("byte_index"));
-        let value = eval.next_trace_mask();
-        let one = m31_const::<E>(1);
-        eval.add_constraint(active.clone() * (active.clone() - one.clone()));
-        eval.add_constraint((one - active.clone()) * value.clone());
-        let field_id = m31_const::<E>(MDOC_MSO_PAYLOAD_FIELD_ID);
-        eval.add_to_relation(RelationEntry::new(
-            &self.issuer_field_relation,
-            E::EF::from(active.clone()),
-            &[field_id.clone(), byte_index.clone(), value.clone()],
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.mso_field_relation,
-            E::EF::from(active),
-            &[field_id, byte_index, value],
-        ));
-        // Q-015 blinder `+m/(z−combine(v))`, ungated, emitted LAST to match
-        // the generator's column order.
-        add_blinder_relation_entry(
-            &mut eval,
-            &self.blinder_relation,
-            self.blinder_v,
-            self.blinder_m,
-            false,
-        );
-        eval.finalize_logup_in_pairs();
-        eval
-    }
-}
-
-impl Air for MdocMsoPayloadBind {
-    fn mix_public(&self, channel: &mut Blake2sChannel) {
-        channel.mix_u64(0x5453_3133_4d53_4f50);
-        channel.mix_u64(self.len as u64);
-    }
-
-    fn draw_relations(&mut self, channel: &mut Blake2sChannel) {
-        self.blinder_relation = Some(ClaimedSumBlinderRelation::draw(channel));
-    }
-
-    fn layout(&self) -> TreeLayout {
-        TreeLayout {
-            preprocessed: vec![self.log_size(); 2],
-            trace: vec![self.log_size()],
-            // One paired column + the lone Q-015 blinder `+m` column in the
-            // main component, plus the counterpart component's column.
-            interaction: vec![self.log_size(); 3 * SECURE_EXTENSION_DEGREE],
-        }
-    }
-
-    fn claimed_sums(&self) -> Vec<QM31> {
-        let claim = self.interaction_claim();
-        vec![claim.claimed_sum, claim.blinder_claimed_sum]
-    }
-
-    fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
-        mso_payload_preprocessed_column_ids()
-    }
-
-    fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
-        let claim = self.interaction_claim().clone();
-        let blinder_relation = self
-            .blinder_relation
-            .clone()
-            .expect("mdoc MSO payload blinder relation drawn before components");
-        self.component = Some(MdocMsoPayloadComponent::new(
-            allocator,
-            MdocMsoPayloadEval {
-                log_size: self.log_size(),
-                issuer_field_relation: self.issuer_field_relation(),
-                mso_field_relation: self.mso_field_relation(),
-                blinder_relation: blinder_relation.clone(),
-                blinder_v: claim.blinder_v,
-                blinder_m: claim.blinder_m,
-            },
-            claim.claimed_sum,
-        ));
-        self.blinder_component = Some(FrameworkComponent::new(
-            allocator,
-            ClaimedSumBlinderEval {
-                log_size: self.log_size(),
-                relation: blinder_relation,
-                v: claim.blinder_v,
-                m: claim.blinder_m,
-            },
-            claim.blinder_claimed_sum,
-        ));
-    }
-
-    fn components(&self) -> Vec<&dyn Component> {
-        vec![
-            self.component
-                .as_ref()
-                .expect("mdoc MSO payload component is built"),
-            self.blinder_component
-                .as_ref()
-                .expect("mdoc MSO payload blinder component is built"),
-        ]
-    }
-}
-
-impl AirProver for MdocMsoPayloadBind {
-    fn max_log_size(&self) -> u32 {
-        self.log_size()
-    }
-
-    fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size() + 1
-    }
-
-    fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
-        tb.extend_evals(mso_payload_preprocessed_columns(self.len));
-    }
-
-    fn preprocessed_column_fingerprints(&mut self) -> Vec<PreprocessedColumnFingerprint> {
-        fingerprint_preprocessed_columns(
-            "eu_id_prover::mdoc::MdocMsoPayloadBind",
-            &mso_payload_preprocessed_column_ids(),
-            &mso_payload_preprocessed_columns(self.len),
-        )
-    }
-
-    fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
-        tb.extend_evals(mso_payload_base_trace(
-            self.bytes.as_ref().expect("mdoc MSO payload bytes are set"),
-        ));
-    }
-
-    fn write_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
-        let blinder_v = random_qm31();
-        let blinder_m = random_qm31();
-        let blinder_relation = self
-            .blinder_relation
-            .clone()
-            .expect("mdoc MSO payload blinder relation drawn before interaction");
-        let (trace, claimed_sum) = mso_payload_interaction_trace(
-            self.bytes.as_ref().expect("mdoc MSO payload bytes are set"),
-            &self.issuer_field_relation(),
-            &self.mso_field_relation(),
-            &blinder_relation,
-            blinder_v,
-            blinder_m,
-        );
-        tb.extend_evals(trace);
-        let (blinder_trace, blinder_claimed_sum) =
-            blinder_counter_interaction(self.log_size(), &blinder_relation, blinder_v, blinder_m);
-        tb.extend_evals(blinder_trace);
-        self.interaction_claim = Some(MdocMsoPayloadInteractionClaim {
-            claimed_sum,
-            blinder_v,
-            blinder_m,
-            blinder_claimed_sum,
-        });
-    }
-
-    fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
-        vec![
-            self.component
-                .as_ref()
-                .expect("mdoc MSO payload component is built"),
-            self.blinder_component
-                .as_ref()
-                .expect("mdoc MSO payload blinder component is built"),
-        ]
-    }
-}
-
 const MDOC_REVOCATION_RANGE_LOG_SIZE: u32 = LOG_N_LANES;
 const REVOCATION_U64_BYTES: usize = 8;
 const REVOCATION_RANGE_BYTE_COLS: usize = 5 * REVOCATION_U64_BYTES;
 const REVOCATION_RANGE_CARRY_COLS: usize = 2 * REVOCATION_U64_BYTES;
 const REVOCATION_RANGE_DIGEST_TAIL_COLS: usize = 32 - REVOCATION_U64_BYTES;
 
-/// Byte-column indices that need IN-COMPONENT bit pinning (`byte < 256` via 8
-/// boolean bit columns + recomposition). A byte column is exempt when an
-/// external mechanism already pins it:
-///
-/// - `id` bytes (0..8): in Public-digest mode (S4) the eval pins them to the
-///   public `Sha256(MSO)` constants — constants are `< 256` by construction.
-///   In Relation mode the MSO SHA digest provider defers the byte range check
-///   to this consumer, so the bits stay.
-/// - `id_lo`/`id_hi` bytes (8..24): private witness bytes produced directly to
-///   the hosted ML-DSA message relation, so they are always bit-pinned here.
-/// - slack bytes (24..40): witness-only, no external counterpart — always
-///   bit-pinned (unpinned slack bytes would void the borrow-chain range
-///   argument).
 fn revocation_range_bit_byte_indices(public_digest: bool, has_message: bool) -> Vec<usize> {
     let mut indices = Vec::with_capacity(REVOCATION_RANGE_BYTE_COLS);
     if !public_digest {
         indices.extend(0..REVOCATION_U64_BYTES);
     }
-    // The legacy relation-digest path consumes bytes range-checked by SHA.
-    // The quantum public-digest path is itself the provider, so it must pin
-    // its private bytes locally.
     if public_digest || !has_message {
         indices.extend(REVOCATION_U64_BYTES..3 * REVOCATION_U64_BYTES);
     }
@@ -5987,78 +4270,12 @@ fn prove_or_root_mdoc(
     {
         return Err(Error::AuthInputMismatch);
     }
-    ensure_statement_scheme_uniformity(statement)?;
-    // D2: host-side canonical device-key ↔ MSO binding for the ML-DSA scheme,
-    // before any STARK work (the verifier runs the identical check).
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
+    // Host-side checks mirror the verifier and run before any STARK work.
     check_mldsa_device_key_binding(statement)?;
-    // S4: host-side public-MSO facts (attribute digests, validity, MSO digest)
-    // for the ML-DSA scheme — the verifier runs the identical derivation.
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
     let mldsa_mso_facts = mldsa_public_mso_facts(statement)?;
-    // S4 fail-closed input coherence: the public-message producers absorb the
-    // STATEMENT's ML-DSA messages, so a divergent extracted witness copy would
-    // otherwise be silently ignored instead of proven — reject before any
-    // STARK work.
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
     check_mldsa_extracted_statement_coherence(extracted, statement)?;
-    // ML-DSA issuers prove in the in-STARK composition only: the P4b
-    // coprocessor bundle is a fixed two-ECDSA MAC format (device-only bundle
-    // pending — see tasks/mldsa-todo.md M7).
-    #[cfg(feature = "ec-coprocessor")]
-    statement
-        .issuer_input
-        .expect_ecdsa("ec-coprocessor mdoc prove")?;
-    #[cfg(feature = "ec-coprocessor")]
-    statement
-        .device_input
-        .expect_ecdsa("ec-coprocessor mdoc prove")?;
-
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
-    let issuer_draft = statement
-        .issuer_input
-        .as_ecdsa()
-        .map(|input| single_p256_draft(input.clone()))
-        .transpose()?;
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
-    let device_draft = statement
-        .device_input
-        .as_ecdsa()
-        .map(|input| single_p256_draft(input.clone()))
-        .transpose()?;
-    #[cfg(feature = "p256")]
-    let revocation_p256_input = ts13_revocation_p256_input(statement)?;
-    #[cfg(feature = "p256")]
-    let revocation_draft = revocation_p256_input
-        .clone()
-        .map(single_p256_draft)
-        .transpose()?;
-    // All four SHA instances share one `log_n_rows`. This is NOT the wasteful
-    // choice the phase-0b plan assumed: the bulk SHA preprocessed (σ/Σ decode,
-    // xor_8, split-pack tables — the ~6.3M-cell class) sits at the fixed
-    // `LOG_SIZE_16` and is deduped across instances regardless of trace log.
-    // Only 10 preprocessed columns (`is_first_row` + 9 round-cyclic) are sized to
-    // `log_n_rows`, and their column *ids* are log-independent while their
-    // *content* is not — so under air-core first-writer-wins tree-0 dedup all
-    // four instances must agree on the log or the content-invariant assertion
-    // fires. Sizing each instance to its own `min_log_size` would force a
-    // per-instance preprocessed namespace, duplicating the 6.3M-cell table set
-    // ~4× to save only ~0.5M padded trace/interaction cells (<1% of the circuit).
-    // Measured: shared-log waste is 529,792 cells of 79.99M (0.66%); see
-    // `mdoc_sizing_waste`. Equal sizing is the correct, cheaper choice.
-    // S4 ML-DSA: the issuer/device Sig_structures are PUBLIC statement inputs
-    // absorbed by the hosted instances' public-message producers, and the MSO
-    // digest is computed host-side from the public Sig_structure payload — no
-    // SHA byte conveyors exist for any of them.
-    let issuer_is_mldsa = statement.issuer_input.is_mldsa();
-    let issuer_sha_params = (!issuer_is_mldsa).then(|| sha_params(&extracted.issuer_sig_structure));
-    let device_sha_params =
-        (!statement.device_input.is_mldsa()).then(|| sha_params(&extracted.device_sig_structure));
-    let mso_sha_params = statement
-        .ts13_revocation_range
-        .as_ref()
-        .filter(|_| !issuer_is_mldsa)
-        .map(|_| sha_params(&extracted.mso));
+    // Issuer, device, and revocation messages are absorbed directly by hosted
+    // ML-DSA modules. SHA-256 remains only for ISO mdoc attribute digests.
     let revocation_message = match (
         &statement.ts13_revocation_signature,
         &statement.ts13_revocation,
@@ -6071,18 +4288,6 @@ fn prove_or_root_mdoc(
         )),
         _ => None,
     };
-    // Quantum-safe revocation signs the raw 20-byte message. Its range AIR now
-    // provides those private bytes directly to the hosted ML-DSA bridge, so a
-    // SHA instance would compute an unused digest and serve only as a conveyor.
-    // Retain SHA solely for the legacy non-ML-DSA arm until that branch is
-    // deleted from this worktree.
-    let revocation_sha_params = (!issuer_is_mldsa)
-        .then(|| {
-            revocation_message
-                .as_ref()
-                .map(|message| sha_params(message.as_slice()))
-        })
-        .flatten();
     let attribute_items: Vec<_> = extracted
         .extracted_attributes
         .iter()
@@ -6092,61 +4297,21 @@ fn prove_or_root_mdoc(
         .iter()
         .map(|item| sha_params(item))
         .collect();
-    let shared_sha_log = issuer_sha_params
+    let shared_sha_log = attribute_sha_params
         .iter()
         .map(|(_, log)| *log)
-        .chain(device_sha_params.iter().map(|(_, log)| *log))
-        .chain(mso_sha_params.iter().map(|(_, log)| *log))
-        .chain(revocation_sha_params.iter().map(|(_, log)| *log))
-        .chain(attribute_sha_params.iter().map(|(_, log)| *log))
         .max()
         .expect("sha log list is non-empty (attributes are 1..=4)");
     // Fully post-quantum composition: the remaining format-required attribute
     // SHA consumers merge into one multi-slot instance. Revocation is not a
     // SHA slot; its range AIR directly provides the raw signed message.
     // See tasks/sha-multimessage-design.md.
-    let merged_sha_active =
-        issuer_sha_params.is_none() && device_sha_params.is_none() && mso_sha_params.is_none();
-    let issuer_digest = SharedDigestRelation::new();
-    // The device digest/z relations only exist for a P-256 device (their sole
-    // consumer is the device bridge); an ML-DSA device gets a field relation
-    // for the hosted module's µ-absorb bridge instead.
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
-    let device_digest = statement
-        .device_input
-        .as_ecdsa()
-        .map(|_| SharedDigestRelation::new());
-    #[cfg(all(not(feature = "ec-coprocessor"), not(feature = "p256")))]
-    let device_digest: Option<SharedDigestRelation> = None;
-    #[cfg(feature = "ec-coprocessor")]
-    let device_digest = SharedDigestRelation::new();
-    let mso_digest = statement
-        .ts13_revocation_range
-        .as_ref()
-        .filter(|_| !issuer_is_mldsa)
-        .map(|_| SharedDigestRelation::new());
-    // Same split per revocation scheme: digest/z only for the P-256 arm.
-    #[cfg(feature = "p256")]
-    let revocation_digest = statement
-        .ts13_revocation_signature
-        .as_ref()
-        .and_then(|signature| signature.as_ecdsa())
-        .map(|_| SharedDigestRelation::new());
-    #[cfg(not(feature = "p256"))]
-    let revocation_digest: Option<SharedDigestRelation> = None;
     let attribute_digests: Vec<_> = (0..attribute_sha_params.len())
         .map(|_| SharedDigestRelation::new())
         .collect();
-    let issuer_field = SharedFieldRelation::new();
     // The proof-wide keccak service's relations handle (S1): drawn ONCE by the
     // service module, consumed by every hosted ML-DSA instance.
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
     let mldsa_keccak_handle = SharedKeccakRelations::new();
-    let mso_field = statement
-        .ts13_revocation_range
-        .as_ref()
-        .filter(|_| !issuer_is_mldsa)
-        .map(|_| SharedFieldRelation::new());
     let revocation_message_field = statement
         .ts13_revocation_signature
         .as_ref()
@@ -6155,99 +4320,21 @@ fn prove_or_root_mdoc(
         .map(|_| SharedFieldRelation::new())
         .collect();
     let sha_table_relations = SharedShaTableRelations::new();
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
-    let issuer_scalar_z = SharedScalarZRelation::new();
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
-    let device_scalar_z = statement
-        .device_input
-        .as_ecdsa()
-        .map(|_| SharedScalarZRelation::new());
-    #[cfg(feature = "p256")]
-    let revocation_scalar_z = statement
-        .ts13_revocation_signature
-        .as_ref()
-        .and_then(|signature| signature.as_ecdsa())
-        .map(|_| SharedScalarZRelation::new());
-
-    // S4: no issuer SHA conveyor for an ML-DSA issuer — no exposure either.
-    let issuer_exposure = (!issuer_is_mldsa).then(|| issuer_mso_exposure(statement));
-    let mso_exposure = mso_payload_exposure(statement);
-    let revocation_exposure = ts13_revocation_message_exposure(statement);
     let attribute_exposures: Vec<_> = (0..statement.attributes.len())
         .map(|index| attribute_exposure(statement, index))
         .collect();
 
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
-    let mut issuer_p256 = issuer_draft
-        .as_ref()
-        .map(P256Prover::new)
-        .transpose()
-        .map_err(Error::P256Prepare)?
-        .map(|prover| prover.with_z_binding(issuer_scalar_z.clone()));
-    // The `mdoc/device` namespace is REQUIRED, not waste: the hinted-mul schedule
-    // preprocessed columns are witness-dependent (measured: 18 of 215 columns —
-    // the log-13 schedule set — differ between the issuer and device signatures).
-    // Without the namespace the device module would alias onto the issuer's
-    // schedule under air-core first-writer-wins tree-0 dedup, binding the wrong
-    // constraints. Two genuinely distinct signatures cannot share the schedule.
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
-    let mut device_p256 = device_draft
-        .as_ref()
-        .map(|draft| {
-            Ok::<_, Error>(
-                P256Prover::new(draft)
-                    .map_err(Error::P256Prepare)?
-                    .with_preprocessed_namespace("mdoc/device")
-                    .with_z_binding(
-                        device_scalar_z
-                            .clone()
-                            .expect("device z relation exists for a P-256 device"),
-                    ),
-            )
-        })
-        .transpose()?;
-    let mut sha_consumers = Vec::new();
-    if let Some((issuer_sha_witness, _)) = &issuer_sha_params {
-        sha_consumers.push((
-            issuer_sha_witness,
-            issuer_exposure
-                .clone()
-                .expect("issuer exposure exists for a non-ML-DSA issuer"),
-        ));
-    }
-    if let Some((device_sha_witness, _)) = &device_sha_params {
-        sha_consumers.push((device_sha_witness, FieldExposure::empty()));
-    }
-    if let Some((mso_sha_witness, _)) = &mso_sha_params {
-        sha_consumers.push((mso_sha_witness, mso_exposure.clone()));
-    }
-    if let Some((revocation_sha_witness, _)) = &revocation_sha_params {
-        sha_consumers.push((revocation_sha_witness, revocation_exposure.clone()));
-    }
-    for ((witness, _), exposure) in attribute_sha_params.iter().zip(attribute_exposures.iter()) {
-        sha_consumers.push((witness, exposure.clone()));
-    }
+    let sha_consumers: Vec<_> = attribute_sha_params
+        .iter()
+        .zip(&attribute_exposures)
+        .map(|((witness, _), exposure)| (witness, exposure.clone()))
+        .collect();
     let sha_table_multiplicities = ShaTableMultiplicities::from_consumers(&sha_consumers);
     let mut sha_tables =
         ShaTablesProver::new(sha_table_multiplicities, sha_table_relations.clone());
-    // S4: the issuer SHA conveyor exists only for a non-ML-DSA issuer (an
-    // ML-DSA issuer's public Sig_structure is absorbed by its instance's
-    // public-message producer; every window fact is checked host-side).
-    let mut issuer_sha = issuer_sha_params.as_ref().map(|(issuer_sha_witness, _)| {
-        Sha256Prover::new(issuer_sha_witness, shared_sha_log, SHA_GROUP_WIDTH)
-            .with_shared_tables(sha_table_relations.clone())
-            .with_digest_handle(issuer_digest.clone())
-            .with_field_handle(
-                issuer_exposure
-                    .clone()
-                    .expect("issuer exposure exists for a non-ML-DSA issuer"),
-                issuer_field.clone(),
-            )
-    });
     // Hosted in-circuit ML-DSA statement (M7/S4): the issuer Sig_structure is
     // PUBLIC, so the instance runs in public-message mode — its in-module
     // producer feeds the µ-absorption directly (no shared-field msg bridge).
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
     let mut issuer_mldsa = statement
         .issuer_input
         .as_mldsa()
@@ -6263,25 +4350,7 @@ fn prove_or_root_mdoc(
             .with_stream_base(MDOC_ISSUER_MLDSA_STREAM_BASE))
         })
         .transpose()?;
-    // The device SHA conveyor exists only for a P-256 / coprocessor device
-    // (digest handle → device bridge / public digest bind). An ML-DSA device's
-    // Sig_structure is PUBLIC and absorbed by its instance's public-message
-    // producer (S4) — no SHA module at all.
-    let mut device_sha = device_sha_params.as_ref().map(|(device_sha_witness, _)| {
-        let sha = Sha256Prover::new(device_sha_witness, shared_sha_log, SHA_GROUP_WIDTH)
-            .with_shared_tables(sha_table_relations.clone());
-        #[cfg(not(feature = "ec-coprocessor"))]
-        let sha = if let Some(device_digest) = &device_digest {
-            sha.with_digest_handle(device_digest.clone())
-        } else {
-            sha
-        };
-        #[cfg(feature = "ec-coprocessor")]
-        let sha = sha.with_digest_handle(device_digest.clone());
-        sha
-    });
     // Hosted in-circuit ML-DSA device statement, public-message mode (S4).
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
     let mut device_mldsa = statement
         .device_input
         .as_mldsa()
@@ -6297,48 +4366,9 @@ fn prove_or_root_mdoc(
             .with_stream_base(MDOC_DEVICE_MLDSA_STREAM_BASE))
         })
         .transpose()?;
-    let mut mso_sha = match (&mso_sha_params, &mso_digest) {
-        (Some((mso_sha_witness, _)), Some(mso_digest)) => Some({
-            let sha = Sha256Prover::new(mso_sha_witness, shared_sha_log, SHA_GROUP_WIDTH)
-                .with_shared_tables(sha_table_relations.clone())
-                .with_digest_handle(mso_digest.clone());
-            if let Some(mso_field) = &mso_field {
-                sha.with_field_handle(mso_exposure.clone(), mso_field.clone())
-            } else {
-                sha
-            }
-        }),
-        _ => None,
-    };
-    // The revocation SHA module exists whenever a revocation signature does.
-    // Its digest handle only exists for the P-256 arm (consumer: revocation
-    // bridge); the ML-DSA arm keeps it as a pure byte provider (mirror of the
-    // issuer/device treatment) feeding both `MdocRevocationRangeBind` and the
-    // hosted module's µ-absorb bridge on the same field relation.
-    let mut revocation_sha = revocation_sha_params
-        .as_ref()
-        .filter(|_| !merged_sha_active)
-        .map(|(revocation_sha_witness, _)| {
-            let sha = Sha256Prover::new(revocation_sha_witness, shared_sha_log, SHA_GROUP_WIDTH)
-                .with_shared_tables(sha_table_relations.clone());
-            let sha = if let Some(revocation_digest) = &revocation_digest {
-                sha.with_digest_handle(revocation_digest.clone())
-            } else {
-                sha
-            };
-            if let Some(revocation_message_field) = &revocation_message_field {
-                sha.with_field_handle(
-                    revocation_exposure.clone(),
-                    revocation_message_field.clone(),
-                )
-            } else {
-                sha
-            }
-        });
     // Hosted in-circuit ML-DSA revocation statement, private-message mode: the
     // prover's input carries the REAL 20-byte message (from the private range
     // witness); only its LENGTH is mixed into the transcript.
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
     let mut revocation_mldsa = revocation_message
         .as_ref()
         .map(|message| ts13_revocation_mldsa_input(statement, message.to_vec()))
@@ -6366,7 +4396,6 @@ fn prove_or_root_mdoc(
     // public data. Present iff any instance is. Composed BEFORE the first
     // instance in module order so its `draw_relations` publishes the shared
     // keccak relations every consumer draws.
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
     let mut mldsa_keccak_service = {
         let mut shapes = Vec::new();
         let mut streams = Vec::new();
@@ -6381,170 +4410,46 @@ fn prove_or_root_mdoc(
         (!shapes.is_empty())
             .then(|| KeccakServiceProver::new(shapes, streams, mldsa_keccak_handle.clone()))
     };
-    #[cfg(feature = "p256")]
-    let mut revocation_p256 = revocation_draft
-        .as_ref()
-        .map(|draft| {
-            let prover = P256Prover::new(draft).map_err(Error::P256Prepare)?;
-            Ok::<_, Error>(if let Some(revocation_scalar_z) = &revocation_scalar_z {
-                prover
-                    .with_preprocessed_namespace("mdoc/ts13/revocation")
-                    .with_z_binding(revocation_scalar_z.clone())
-            } else {
-                prover.with_preprocessed_namespace("mdoc/ts13/revocation")
-            })
-        })
-        .transpose()?;
-    let mut attribute_sha = Vec::with_capacity(attribute_sha_params.len());
-    if !merged_sha_active {
-        for index in 0..attribute_sha_params.len() {
-            attribute_sha.push(
-                Sha256Prover::new(
-                    &attribute_sha_params[index].0,
-                    shared_sha_log,
-                    SHA_GROUP_WIDTH,
-                )
-                .with_shared_tables(sha_table_relations.clone())
-                .with_digest_handle(attribute_digests[index].clone())
-                .with_field_handle(
-                    attribute_exposures[index].clone(),
-                    attribute_fields[index].clone(),
-                ),
-            );
-        }
-    }
     // Merged multi-slot SHA consumer. In the quantum composition its slots are
     // exactly the hidden attributes; the legacy revocation slot is absent.
-    let merged_sha_config = merged_sha_active.then(|| {
-        let mut slot_specs = Vec::new();
-        if revocation_sha_params.is_some() {
-            slot_specs.push(SlotSpec {
-                expose_digest: revocation_digest.is_some(),
-                field_exposure: revocation_exposure.clone(),
-            });
-        }
-        for exposure in &attribute_exposures {
-            slot_specs.push(SlotSpec {
+    let merged_sha_config = MultiSlotConfig::new(
+        shared_sha_log,
+        attribute_exposures
+            .iter()
+            .cloned()
+            .map(|field_exposure| SlotSpec {
                 expose_digest: true,
-                field_exposure: exposure.clone(),
-            });
-        }
-        MultiSlotConfig::new(shared_sha_log, slot_specs)
-    });
-    let merged_sha_log_n_rows = merged_sha_config
-        .as_ref()
-        .map(|config| config.min_log_n_rows());
-    let mut merged_sha = merged_sha_config.map(|config| {
-        let mut witnesses: Vec<&stwo_sha256::types::Sha256Witness> = Vec::new();
-        if let Some((witness, _)) = &revocation_sha_params {
-            witnesses.push(witness);
-        }
-        for (witness, _) in &attribute_sha_params {
-            witnesses.push(witness);
-        }
-        let log_n_rows = merged_sha_log_n_rows.expect("merged log derived above");
-        let mut prover =
-            Sha256MultiProver::new(witnesses, log_n_rows, config, sha_table_relations.clone());
-        let mut slot = 0usize;
-        if revocation_sha_params.is_some() {
-            if let Some(revocation_digest) = &revocation_digest {
-                prover = prover.with_slot_digest_handle(slot, revocation_digest.clone());
-            }
-            if let Some(revocation_message_field) = &revocation_message_field {
-                prover = prover.with_slot_field_handle(slot, revocation_message_field.clone());
-            }
-            slot += 1;
-        }
+                field_exposure,
+            })
+            .collect(),
+    );
+    let merged_sha_log_n_rows = merged_sha_config.min_log_n_rows();
+    let mut merged_sha = {
+        let witnesses = attribute_sha_params
+            .iter()
+            .map(|(witness, _)| witness)
+            .collect();
+        let mut prover = Sha256MultiProver::new(
+            witnesses,
+            merged_sha_log_n_rows,
+            merged_sha_config,
+            sha_table_relations.clone(),
+        );
         for index in 0..attribute_sha_params.len() {
             prover = prover
-                .with_slot_digest_handle(slot + index, attribute_digests[index].clone())
-                .with_slot_field_handle(slot + index, attribute_fields[index].clone());
+                .with_slot_digest_handle(index, attribute_digests[index].clone())
+                .with_slot_field_handle(index, attribute_fields[index].clone());
         }
         prover
-    });
-
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
-    let issuer_bridge_log = issuer_p256.as_ref().map(|issuer_p256| {
-        crate::bridge_log_size(
-            crate::bridge_rows(&issuer_p256.proof_claim().public_inputs.instances).len(),
-        )
-    });
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
-    let mut issuer_bridge = issuer_p256.as_ref().map(|issuer_p256| {
-        let issuer_bridge_rows =
-            crate::bridge_rows(&issuer_p256.proof_claim().public_inputs.instances);
-        DigestBindProver::new(
-            issuer_bridge_rows,
-            issuer_bridge_log.expect("issuer bridge log derived above"),
-            issuer_scalar_z,
-            issuer_digest.clone(),
-        )
-    });
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
-    let device_bridge_log = device_p256.as_ref().map(|device_p256| {
-        crate::bridge_log_size(
-            crate::bridge_rows(&device_p256.proof_claim().public_inputs.instances).len(),
-        )
-    });
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
-    let mut device_bridge = device_p256.as_ref().map(|device_p256| {
-        let device_bridge_rows =
-            crate::bridge_rows(&device_p256.proof_claim().public_inputs.instances);
-        DigestBindProver::new(
-            device_bridge_rows,
-            device_bridge_log.expect("device bridge log derived above"),
-            device_scalar_z
-                .clone()
-                .expect("device z relation exists for a P-256 device"),
-            device_digest
-                .clone()
-                .expect("device digest relation exists for a P-256 device"),
-        )
-    });
-    #[cfg(feature = "p256")]
-    let mut revocation_bridge_log_size = None;
-    #[cfg(feature = "p256")]
-    let mut revocation_bridge = match (
-        revocation_p256.as_ref(),
-        revocation_scalar_z.clone(),
-        revocation_digest.clone(),
-    ) {
-        (Some(revocation_p256), Some(revocation_scalar_z), Some(revocation_digest)) => {
-            let rows = crate::bridge_rows(&revocation_p256.proof_claim().public_inputs.instances);
-            let log = crate::bridge_log_size(rows.len());
-            revocation_bridge_log_size = Some(log);
-            Some(DigestBindProver::new(
-                rows,
-                log,
-                revocation_scalar_z,
-                revocation_digest,
-            ))
-        }
-        _ => None,
     };
-    #[cfg(feature = "ec-coprocessor")]
-    let mut device_public_digest_bind = PublicDigestBind::new(
-        statement
-            .device_input
-            .expect_ecdsa("ec-coprocessor mdoc prove")?
-            .message_hash
-            .0,
-        device_digest.clone(),
-    );
+
     let mut mdoc_window_bind = MdocWindowBind::new_for_attributes(
-        mdoc_window_bind_rows_from(statement, Some(&extracted.issuer_sig_structure)),
-        (!issuer_is_mldsa).then(|| issuer_field.clone()),
+        mdoc_window_bind_rows_from(statement, None),
         attribute_fields.clone(),
-        if issuer_is_mldsa {
-            Vec::new()
-        } else {
-            attribute_digests.clone()
-        },
     );
     // S4 ML-DSA: attribute digests bind to the PUBLIC `valueDigests` values
     // (host-derived facts) instead of the window-bind digest rows; validity is
     // a host-side check over the public MSO windows.
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
     let mut attribute_public_digest_binds: Vec<PublicDigestBind> = match &mldsa_mso_facts {
         Some(facts) => facts
             .attribute_digests
@@ -6554,52 +4459,6 @@ fn prove_or_root_mdoc(
             .collect(),
         None => Vec::new(),
     };
-    let mut mdoc_validity = (!issuer_is_mldsa).then(|| {
-        MdocValidityBind::new(
-            statement.policy.current_date,
-            mdoc_validity_rows_from(statement, Some(&extracted.issuer_sig_structure)),
-            issuer_field.clone(),
-        )
-    });
-    let mut mso_payload_bind = statement
-        .ts13_revocation_range
-        .as_ref()
-        .filter(|_| !issuer_is_mldsa)
-        .map(|_| {
-            MdocMsoPayloadBind::prover(
-                extracted.mso.clone(),
-                issuer_field.clone(),
-                mso_field
-                    .clone()
-                    .expect("MSO field handle exists when revocation range is set"),
-            )
-        });
-    #[cfg(feature = "ec-coprocessor")]
-    let mac_key_shares = random_mdoc_p4b_mac_key_shares();
-    #[cfg(feature = "ec-coprocessor")]
-    let mac_state = MdocP4bMacSharedState::default();
-    #[cfg(feature = "ec-coprocessor")]
-    let mut mdoc_mac = MdocMacBind::prover(
-        &mac_key_shares,
-        mdoc_p4b_mac_values(statement),
-        mac_state.clone(),
-        issuer_digest.clone(),
-        issuer_field.clone(),
-    );
-    #[cfg(feature = "ec-coprocessor")]
-    let mut coprocessor = MdocCoprocessorBindingProver::new(
-        statement
-            .issuer_input
-            .expect_ecdsa("ec-coprocessor mdoc prove")?
-            .clone(),
-        statement
-            .device_input
-            .expect_ecdsa("ec-coprocessor mdoc prove")?
-            .clone(),
-        mac_key_shares,
-        mac_state,
-    )?;
-
     let age_public = statement.policy.age_public_input();
     let nat_public = nat_public_input_for(statement);
     let age_dob = DateOfBirth(predicates::Date {
@@ -6647,20 +4506,11 @@ fn prove_or_root_mdoc(
         // S4 ML-DSA: the digest is PUBLIC (host-derived from the public
         // Sig_structure payload) — the in-circuit id bytes pin to it as
         // constants; no MSO SHA module / digest relation exists.
-        #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
-        let digest_binding = match &mldsa_mso_facts {
-            Some(facts) => MsoDigestBinding::Public(facts.mso_digest),
-            None => MsoDigestBinding::Relation(
-                mso_digest
-                    .clone()
-                    .expect("MSO digest handle exists when revocation range is set"),
-            ),
-        };
-        #[cfg(not(all(not(feature = "ec-coprocessor"), feature = "ml-dsa")))]
-        let digest_binding = MsoDigestBinding::Relation(
-            mso_digest
-                .clone()
-                .expect("MSO digest handle exists when revocation range is set"),
+        let digest_binding = MsoDigestBinding::Public(
+            mldsa_mso_facts
+                .as_ref()
+                .expect("quantum-safe statements always expose ML-DSA MSO facts")
+                .mso_digest,
         );
         MdocRevocationRangeBind::prover(
             range,
@@ -6676,109 +4526,35 @@ fn prove_or_root_mdoc(
     });
 
     let stark_proof = {
-        #[cfg(not(feature = "ec-coprocessor"))]
-        let mut modules: Vec<&mut dyn AirProver> = {
-            // P-256 issuer order is EXACTLY the historical one (shape gate);
-            // an ML-DSA issuer swaps [issuer_p256, issuer_bridge] for the
-            // hosted mldsa module placed right after issuer_sha (which draws
-            // the shared field relation the mldsa msg bridge consumes). The
-            // proof-wide keccak SERVICE sits right after sha_tables — before
-            // every hosted ML-DSA consumer, so its relations draw publishes
-            // the shared handle first.
-            let mut modules: Vec<&mut dyn AirProver> = vec![&mut sha_tables];
-            #[cfg(feature = "ml-dsa")]
-            if let Some(mldsa_keccak_service) = mldsa_keccak_service.as_mut() {
-                modules.push(mldsa_keccak_service);
-            }
-            #[cfg(feature = "p256")]
-            if let Some(issuer_p256) = issuer_p256.as_mut() {
-                modules.push(issuer_p256);
-            }
-            if let Some(issuer_sha) = issuer_sha.as_mut() {
-                modules.push(issuer_sha);
-            }
-            #[cfg(feature = "ml-dsa")]
-            if let Some(issuer_mldsa) = issuer_mldsa.as_mut() {
-                modules.push(issuer_mldsa);
-            }
-            #[cfg(feature = "p256")]
-            if let Some(issuer_bridge) = issuer_bridge.as_mut() {
-                modules.push(issuer_bridge);
-            }
-            // P-256 device order is EXACTLY the historical one; an ML-DSA
-            // device swaps [device_p256, device_bridge] for the hosted mldsa
-            // module placed right after device_sha (shared field draw).
-            #[cfg(feature = "p256")]
-            if let Some(device_p256) = device_p256.as_mut() {
-                modules.push(device_p256);
-            }
-            if let Some(device_sha) = device_sha.as_mut() {
-                modules.push(device_sha);
-            }
-            #[cfg(feature = "ml-dsa")]
-            if let Some(device_mldsa) = device_mldsa.as_mut() {
-                modules.push(device_mldsa);
-            }
-            #[cfg(feature = "p256")]
-            if let Some(device_bridge) = device_bridge.as_mut() {
-                modules.push(device_bridge);
-            }
-            modules
-        };
-        #[cfg(feature = "ec-coprocessor")]
-        let mut modules: Vec<&mut dyn AirProver> = vec![
-            &mut sha_tables,
-            issuer_sha
-                .as_mut()
-                .expect("ec-coprocessor issuers are P-256 (guarded upstream)"),
-            device_sha
-                .as_mut()
-                .expect("ec-coprocessor devices are P-256 (guarded upstream)"),
-            &mut device_public_digest_bind,
-        ];
-        #[cfg(feature = "p256")]
-        if let Some(revocation_p256) = revocation_p256.as_mut() {
-            modules.push(revocation_p256);
+        // The keccak service draws shared relations before every hosted ML-DSA
+        // consumer. The range AIR publishes the private revocation message
+        // before the revocation verifier consumes it.
+        let mut modules: Vec<&mut dyn AirProver> = vec![&mut sha_tables];
+        if let Some(service) = mldsa_keccak_service.as_mut() {
+            modules.push(service);
         }
-        if let Some(mso_sha) = mso_sha.as_mut() {
-            modules.push(mso_sha);
+        if let Some(issuer) = issuer_mldsa.as_mut() {
+            modules.push(issuer);
         }
-        if let Some(revocation_sha) = revocation_sha.as_mut() {
-            modules.push(revocation_sha);
+        if let Some(device) = device_mldsa.as_mut() {
+            modules.push(device);
         }
-        if let Some(merged_sha) = merged_sha.as_mut() {
-            modules.push(merged_sha);
-        }
+        modules.push(&mut merged_sha);
         // Quantum revocation: the range AIR owns and publishes the private
         // message relation, so it must draw that handle before the hosted
         // ML-DSA bridge reads it.
         if let Some(revocation_range) = ts13_revocation_range.as_mut() {
             modules.push(revocation_range);
         }
-        #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
         if let Some(revocation_mldsa) = revocation_mldsa.as_mut() {
             modules.push(revocation_mldsa);
         }
-        #[cfg(feature = "p256")]
-        if let Some(revocation_bridge) = revocation_bridge.as_mut() {
-            modules.push(revocation_bridge);
-        }
-        for sha in &mut attribute_sha {
-            modules.push(sha);
-        }
         // S4 ML-DSA: per-attribute PUBLIC digest binds, right after their SHA
         // providers (mirror on verify).
-        #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
         for bind in &mut attribute_public_digest_binds {
             modules.push(bind);
         }
         modules.push(&mut mdoc_window_bind);
-        if let Some(mdoc_validity) = mdoc_validity.as_mut() {
-            modules.push(mdoc_validity);
-        }
-        if let Some(mso_payload_bind) = mso_payload_bind.as_mut() {
-            modules.push(mso_payload_bind);
-        }
         if let Some(age) = age.as_mut() {
             modules.push(age);
         }
@@ -6788,10 +4564,6 @@ fn prove_or_root_mdoc(
         if let Some(revocation_public) = ts13_revocation_public.as_mut() {
             modules.push(revocation_public);
         }
-        #[cfg(feature = "ec-coprocessor")]
-        modules.push(&mut coprocessor);
-        #[cfg(feature = "ec-coprocessor")]
-        modules.push(&mut mdoc_mac);
         // Root mode stops at the tree-0 commit — no STARK, no proof. This
         // returns before the borrow of `modules` (and the components it holds)
         // is used to read back interaction claims, so the two paths never
@@ -6813,112 +4585,25 @@ fn prove_or_root_mdoc(
                 .map_err(|e| Error::Prove(format!("{e:?}")))?,
         }
     };
-    #[cfg(feature = "ec-coprocessor")]
-    let coprocessor_bundle = coprocessor.bundle.take().ok_or(Error::CoprocessorMissing)?;
-    #[cfg(feature = "ec-coprocessor")]
-    let p4b_prove_profile = coprocessor.profile.take();
-
     Ok(MdocProveOutcome::Proof(Box::new(MdocCircuitProof {
         stark_proof,
         sha_tables_interaction_claim: sha_tables.interaction_claim().clone(),
-        #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
-        issuer_p256_claim: issuer_p256
-            .as_ref()
-            .map(|issuer_p256| issuer_p256.proof_claim().clone()),
-        #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
-        issuer_p256_interaction_claim: issuer_p256
-            .as_ref()
-            .map(|issuer_p256| issuer_p256.interaction_claim().clone()),
-        #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
         mldsa: issuer_mldsa.as_ref().map(MdocMlDsaClaims::from_prover),
-        #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
         device_mldsa: device_mldsa.as_ref().map(MdocMlDsaClaims::from_prover),
-        #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
         revocation_mldsa: revocation_mldsa.as_ref().map(MdocMlDsaClaims::from_prover),
-        #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
         keccak_service_claimed_sums: mldsa_keccak_service
             .as_ref()
             .map(|service| service.claimed_sums()),
-        #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
-        device_p256_claim: device_p256
-            .as_ref()
-            .map(|device_p256| device_p256.proof_claim().clone()),
-        #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
-        device_p256_interaction_claim: device_p256
-            .as_ref()
-            .map(|device_p256| device_p256.interaction_claim().clone()),
-        #[cfg(feature = "ec-coprocessor")]
-        device_public_digest_bind_interaction_claim: device_public_digest_bind
-            .interaction_claim()
-            .clone(),
-        #[cfg(feature = "ec-coprocessor")]
-        coprocessor_bundle: Some(coprocessor_bundle),
-        #[cfg(feature = "ec-coprocessor")]
-        mdoc_mac_interaction_claim: mdoc_mac.interaction_claim().clone(),
-        issuer_sha_log_n_rows: issuer_sha.as_ref().map(|_| shared_sha_log),
-        issuer_sha_interaction_claim: issuer_sha
-            .as_ref()
-            .map(|sha| sha.interaction_claim().clone()),
-        device_sha_log_n_rows: device_sha.as_ref().map(|_| shared_sha_log),
-        device_sha_interaction_claim: device_sha
-            .as_ref()
-            .map(|sha| sha.interaction_claim().clone()),
-        mso_sha_log_n_rows: mso_sha.as_ref().map(|_| shared_sha_log),
-        mso_sha_interaction_claim: mso_sha.as_ref().map(|sha| sha.interaction_claim().clone()),
-        merged_sha_log_n_rows,
-        merged_sha_slot_log: merged_sha.as_ref().map(|_| shared_sha_log),
-        merged_sha_interaction_claim: merged_sha
-            .as_ref()
-            .map(|merged_sha| merged_sha.interaction_claim().clone()),
-        revocation_sha_log_n_rows: revocation_sha.as_ref().map(|_| shared_sha_log),
-        revocation_sha_interaction_claim: revocation_sha
-            .as_ref()
-            .map(|sha| sha.interaction_claim().clone()),
-        attribute_sha_log_n_rows: vec![shared_sha_log; attribute_sha.len()],
-        attribute_sha_interaction_claims: attribute_sha
-            .iter()
-            .map(|sha| sha.interaction_claim().clone())
-            .collect(),
-        #[cfg(feature = "p256")]
-        revocation_p256_claim: revocation_p256
-            .as_ref()
-            .map(|p256| p256.proof_claim().clone()),
-        #[cfg(feature = "p256")]
-        revocation_p256_interaction_claim: revocation_p256
-            .as_ref()
-            .map(|p256| p256.interaction_claim().clone()),
-        #[cfg(feature = "p256")]
-        revocation_bridge_log_size,
-        #[cfg(feature = "p256")]
-        revocation_bridge_interaction_claim: revocation_bridge
-            .as_ref()
-            .map(|bridge| bridge.interaction_claim().clone()),
-        #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
-        issuer_bridge_log_size: issuer_bridge_log,
-        #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
-        issuer_bridge_interaction_claim: issuer_bridge
-            .as_ref()
-            .map(|issuer_bridge| issuer_bridge.interaction_claim().clone()),
-        #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
-        device_bridge_log_size: device_bridge_log,
-        #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
-        device_bridge_interaction_claim: device_bridge
-            .as_ref()
-            .map(|device_bridge| device_bridge.interaction_claim().clone()),
+        merged_sha_log_n_rows: Some(merged_sha_log_n_rows),
+        merged_sha_slot_log: Some(shared_sha_log),
+        merged_sha_interaction_claim: Some(merged_sha.interaction_claim().clone()),
         mdoc_window_bind_interaction_claim: mdoc_window_bind.interaction_claim().clone(),
-        mdoc_validity_interaction_claim: mdoc_validity
-            .as_ref()
-            .map(|validity| validity.interaction_claim().clone()),
-        #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
-        attribute_public_digest_bind_interaction_claims: issuer_is_mldsa.then(|| {
+        attribute_public_digest_bind_interaction_claims: Some({
             attribute_public_digest_binds
                 .iter()
                 .map(|bind| bind.interaction_claim().clone())
                 .collect()
         }),
-        mso_payload_bind_interaction_claim: mso_payload_bind
-            .as_ref()
-            .map(|bind| bind.interaction_claim().clone()),
         ts13_revocation_range_interaction_claim: ts13_revocation_range
             .as_ref()
             .map(|range| range.interaction_claim().clone()),
@@ -6931,8 +4616,6 @@ fn prove_or_root_mdoc(
         age_claimed_sums: age.as_ref().map(|age| age.claimed_sums()),
         nat_public: nat.as_ref().map(|_| nat_public),
         nat_claimed_sums: nat.as_ref().map(|nat| nat.claimed_sums()),
-        #[cfg(feature = "ec-coprocessor")]
-        p4b_prove_profile,
     })))
 }
 
@@ -7017,98 +4700,22 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
     expected_preprocessed_root: Option<air_core::CommitmentRoot>,
 ) -> Result<MdocCircuitVerifyProfile, Error> {
     let total_start = Instant::now();
-    ensure_statement_scheme_uniformity(statement)?;
-    // D2: host-side canonical device-key ↔ MSO binding for the ML-DSA scheme,
-    // before any STARK work (the prover runs the identical check).
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
     check_mldsa_device_key_binding(statement)?;
-    // S4: host-side public-MSO facts (attribute digests, validity, MSO
-    // digest), identical derivation to the prover — fail-closed before any
-    // STARK work.
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
     let mldsa_mso_facts = mldsa_public_mso_facts(statement)?;
-    let issuer_is_mldsa = statement.issuer_input.is_mldsa();
-    // Per-role statement arm and proof shape must agree BICONDITIONALLY
-    // (rejects ECDSA-statement + ML-DSA-proof cross-mode confusion and vice
-    // versa, per role), and a P-256 claim must carry exactly the statement's
-    // instance. The checks are split per compiled-in scheme;
-    // `issuer_p256_claim`/`mldsa` only exist under `p256`/`ml-dsa`, so an
-    // issuer of an uncompiled scheme falls through and is rejected.
-    #[cfg(not(feature = "ec-coprocessor"))]
-    match &statement.issuer_input {
-        #[cfg(feature = "p256")]
-        MdocAuthInput::Ecdsa(issuer_input) => {
-            #[cfg(feature = "ml-dsa")]
-            if proof.mldsa.is_some() {
-                return Err(Error::Verify(
-                    "mdoc proof carries ML-DSA issuer claims for a P-256 issuer".to_string(),
-                ));
-            }
-            match &proof.issuer_p256_claim {
-                Some(issuer_claim)
-                    if issuer_claim.public_inputs.instances.as_slice()
-                        == [expected_instance(issuer_input)] => {}
-                _ => return Err(Error::P256InstanceMismatch),
-            }
+    match &proof.mldsa {
+        Some(claims) if claims.has_expected_shape() => {}
+        _ => {
+            return Err(Error::Verify(
+                "mdoc proof ML-DSA issuer claim tree has the wrong shape".to_string(),
+            ))
         }
-        #[cfg(feature = "ml-dsa")]
-        MdocAuthInput::MlDsa(_) => match &proof.mldsa {
-            Some(claims) if claims.has_expected_shape() => {}
-            _ => {
-                return Err(Error::Verify(
-                    "mdoc proof ML-DSA claim tree has the wrong shape".to_string(),
-                ))
-            }
-        },
     }
-    #[cfg(feature = "ec-coprocessor")]
-    statement
-        .issuer_input
-        .expect_ecdsa("ec-coprocessor mdoc verify")?;
-    #[cfg(feature = "ec-coprocessor")]
-    statement
-        .device_input
-        .expect_ecdsa("ec-coprocessor mdoc verify")?;
-    // Device arm ↔ proof shape (same biconditional gate as the issuer).
-    #[cfg(not(feature = "ec-coprocessor"))]
-    match &statement.device_input {
-        #[cfg(feature = "p256")]
-        MdocAuthInput::Ecdsa(device_input) => {
-            #[cfg(feature = "ml-dsa")]
-            if proof.device_mldsa.is_some() {
-                return Err(Error::Verify(
-                    "mdoc proof carries ML-DSA device claims for a P-256 device".to_string(),
-                ));
-            }
-            match &proof.device_p256_claim {
-                Some(device_claim)
-                    if device_claim.public_inputs.instances.as_slice()
-                        == [expected_instance(device_input)] => {}
-                _ => return Err(Error::P256InstanceMismatch),
-            }
-        }
-        #[cfg(feature = "ml-dsa")]
-        MdocAuthInput::MlDsa(_) => {
-            // The P-256 device claim slots only exist in `p256` builds; in a
-            // quantum-only build the proof cannot even carry them.
-            #[cfg(feature = "p256")]
-            if proof.device_p256_claim.is_some()
-                || proof.device_p256_interaction_claim.is_some()
-                || proof.device_bridge_log_size.is_some()
-                || proof.device_bridge_interaction_claim.is_some()
-            {
-                return Err(Error::Verify(
-                    "mdoc proof carries P-256 device claims for an ML-DSA device".to_string(),
-                ));
-            }
-            match &proof.device_mldsa {
-                Some(claims) if claims.has_expected_shape() => {}
-                _ => {
-                    return Err(Error::Verify(
-                        "mdoc proof ML-DSA device claim tree has the wrong shape".to_string(),
-                    ))
-                }
-            }
+    match &proof.device_mldsa {
+        Some(claims) if claims.has_expected_shape() => {}
+        _ => {
+            return Err(Error::Verify(
+                "mdoc proof ML-DSA device claim tree has the wrong shape".to_string(),
+            ))
         }
     }
     if proof.age_public
@@ -7126,59 +4733,16 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
         return Err(Error::NatPolicyMismatch);
     }
 
-    let issuer_digest = SharedDigestRelation::new();
-    #[cfg(feature = "p256")]
-    let device_digest = statement
-        .device_input
-        .as_ecdsa()
-        .map(|_| SharedDigestRelation::new());
-    #[cfg(not(feature = "p256"))]
-    let device_digest: Option<SharedDigestRelation> = None;
     let has_revocation_range = statement.ts13_revocation_range.is_some();
     let has_revocation_signature = statement.ts13_revocation_signature.is_some();
-    // The P-256 revocation module set exists iff the statement carries a P-256
-    // revocation signature; the ML-DSA claim tree iff an ML-DSA one.
-    #[cfg(feature = "p256")]
-    let has_p256_revocation_signature = statement
-        .ts13_revocation_signature
-        .as_ref()
-        .is_some_and(|signature| signature.as_ecdsa().is_some());
-    // Without the classical stack the `Ecdsa` revocation arm does not exist.
-    #[cfg(not(feature = "p256"))]
-    let has_p256_revocation_signature = false;
-    #[cfg(feature = "p256")]
-    let p256_revocation_layout_mismatch = proof.revocation_p256_claim.is_some()
-        != has_p256_revocation_signature
-        || proof.revocation_p256_interaction_claim.is_some() != has_p256_revocation_signature
-        || proof.revocation_bridge_log_size.is_some() != has_p256_revocation_signature
-        || proof.revocation_bridge_interaction_claim.is_some() != has_p256_revocation_signature;
-    #[cfg(not(feature = "p256"))]
-    let p256_revocation_layout_mismatch = false;
-    // S4 ML-DSA issuer: the MSO SHA conveyor + payload bind do not exist (the
-    // digest is host-derived from the public Sig_structure payload).
-    let mso_sha_expected = has_revocation_range && !issuer_is_mldsa;
-    // S8: in the fully post-quantum composition the revocation + attribute
-    // SHA consumers travel as ONE merged multi-slot instance; the legacy
-    // per-instance claim fields must then be ABSENT (fail-closed
-    // biconditional, mirrored below for the attribute vectors).
-    let merged_sha_expected =
-        issuer_is_mldsa && statement.device_input.is_mldsa() && !mso_sha_expected;
-    let revocation_sha_expected = has_revocation_signature && !merged_sha_expected;
-    if proof.mso_sha_log_n_rows.is_some() != mso_sha_expected
-        || proof.mso_sha_interaction_claim.is_some() != mso_sha_expected
-        || proof.mso_payload_bind_interaction_claim.is_some() != mso_sha_expected
-        || proof.ts13_revocation_range_interaction_claim.is_some() != has_revocation_range
-        || proof.revocation_sha_log_n_rows.is_some() != revocation_sha_expected
-        || proof.revocation_sha_interaction_claim.is_some() != revocation_sha_expected
-        || p256_revocation_layout_mismatch
-    {
+    if proof.ts13_revocation_range_interaction_claim.is_some() != has_revocation_range {
         return Err(Error::Verify(
             "mdoc proof revocation layout mismatch".to_string(),
         ));
     }
-    if proof.merged_sha_log_n_rows.is_some() != merged_sha_expected
-        || proof.merged_sha_slot_log.is_some() != merged_sha_expected
-        || proof.merged_sha_interaction_claim.is_some() != merged_sha_expected
+    if proof.merged_sha_log_n_rows.is_none()
+        || proof.merged_sha_slot_log.is_none()
+        || proof.merged_sha_interaction_claim.is_none()
     {
         return Err(Error::Verify(
             "mdoc proof merged SHA layout does not match the statement".to_string(),
@@ -7196,173 +4760,43 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
             ));
         }
     }
-    // S4: issuer SHA conveyor + in-circuit validity exist iff the issuer is
-    // NOT ML-DSA; the per-attribute public digest binds iff it IS.
-    if proof.issuer_sha_log_n_rows.is_some() == issuer_is_mldsa
-        || proof.issuer_sha_interaction_claim.is_some() == issuer_is_mldsa
-        || proof.mdoc_validity_interaction_claim.is_some() == issuer_is_mldsa
-    {
-        return Err(Error::Verify(
-            "mdoc proof issuer SHA/validity layout does not match the statement's issuer arm"
-                .to_string(),
-        ));
-    }
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
-    match (
-        &proof.attribute_public_digest_bind_interaction_claims,
-        issuer_is_mldsa,
-    ) {
-        (Some(claims), true) if claims.len() == statement.attributes.len() => {}
-        (None, false) => {}
+    match &proof.attribute_public_digest_bind_interaction_claims {
+        Some(claims) if claims.len() == statement.attributes.len() => {}
         _ => {
             return Err(Error::Verify(
-                "mdoc proof attribute public digest binds do not match the statement".to_string(),
+                "mdoc proof attribute digest-bind shape mismatch".into(),
             ))
         }
     }
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
-    {
-        let has_mldsa_revocation_signature = statement
-            .ts13_revocation_signature
-            .as_ref()
-            .is_some_and(|signature| signature.is_mldsa());
-        match (&proof.revocation_mldsa, has_mldsa_revocation_signature) {
-            (Some(claims), true) if claims.has_expected_shape() => {}
-            (None, false) => {}
-            _ => {
-                return Err(Error::Verify(
-                    "mdoc proof ML-DSA revocation claim tree does not match the statement"
-                        .to_string(),
-                ))
-            }
-        }
-        // Keccak service claims (S1): present iff ANY hosted ML-DSA instance
-        // is, with the exact `[sponge_v, keccak, round, tables ×9]` length —
-        // shape-gated BEFORE construction (a short vector would panic inside
-        // `ServiceClaims::from_flat`).
-        let any_mldsa_instance = statement.issuer_input.is_mldsa()
-            || statement.device_input.is_mldsa()
-            || has_mldsa_revocation_signature;
-        match (&proof.keccak_service_claimed_sums, any_mldsa_instance) {
-            (Some(sums), true)
-                if sums.len() == stwo_mldsa::stwo_keccak::service::service_claimed_sums_len() => {}
-            (None, false) => {}
-            _ => {
-                return Err(Error::Verify(
-                    "mdoc proof keccak service claims do not match the statement".to_string(),
-                ))
-            }
+    match (&proof.revocation_mldsa, has_revocation_signature) {
+        (Some(claims), true) if claims.has_expected_shape() => {}
+        (None, false) => {}
+        _ => {
+            return Err(Error::Verify(
+                "mdoc proof ML-DSA revocation claim tree does not match the statement".to_string(),
+            ))
         }
     }
-    let mso_digest = (has_revocation_range && !issuer_is_mldsa).then(SharedDigestRelation::new);
-    let mso_field = (has_revocation_range && !issuer_is_mldsa).then(SharedFieldRelation::new);
-    let revocation_digest = has_p256_revocation_signature.then(SharedDigestRelation::new);
+    match &proof.keccak_service_claimed_sums {
+        Some(sums)
+            if sums.len() == stwo_mldsa::stwo_keccak::service::service_claimed_sums_len() => {}
+        _ => {
+            return Err(Error::Verify(
+                "mdoc proof keccak service claims do not match the statement".to_string(),
+            ))
+        }
+    }
     let revocation_message_field = has_revocation_signature.then(SharedFieldRelation::new);
     let attribute_count = statement.attributes.len();
-    if merged_sha_expected {
-        if !proof.attribute_sha_interaction_claims.is_empty()
-            || !proof.attribute_sha_log_n_rows.is_empty()
-        {
-            return Err(Error::Verify(
-                "mdoc proof carries per-instance attribute SHA claims alongside the merged                  instance"
-                    .to_string(),
-            ));
-        }
-    } else if attribute_count != proof.attribute_sha_interaction_claims.len()
-        || attribute_count != proof.attribute_sha_log_n_rows.len()
-    {
-        return Err(Error::Verify(
-            "mdoc proof carries an unsupported attribute count".to_string(),
-        ));
-    }
     let attribute_digests: Vec<_> = (0..attribute_count)
         .map(|_| SharedDigestRelation::new())
         .collect();
-    let issuer_field = SharedFieldRelation::new();
     // The proof-wide keccak service's relations handle (mirror of the prover).
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
     let mldsa_keccak_handle = SharedKeccakRelations::new();
     let attribute_fields: Vec<_> = (0..attribute_count)
         .map(|_| SharedFieldRelation::new())
         .collect();
     let sha_table_relations = SharedShaTableRelations::new();
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
-    let issuer_scalar_z = SharedScalarZRelation::new();
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
-    let device_scalar_z = statement
-        .device_input
-        .as_ecdsa()
-        .map(|_| SharedScalarZRelation::new());
-    #[cfg(feature = "p256")]
-    let revocation_scalar_z = has_p256_revocation_signature.then(SharedScalarZRelation::new);
-
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
-    let mut issuer_p256 = match (
-        &proof.issuer_p256_claim,
-        &proof.issuer_p256_interaction_claim,
-    ) {
-        (Some(claim), Some(interaction_claim)) => Some(
-            P256Verifier::new(claim.clone(), interaction_claim.clone())
-                .with_z_binding(issuer_scalar_z.clone()),
-        ),
-        (None, None) => None,
-        _ => {
-            return Err(Error::Verify(
-                "mdoc proof carries a partial issuer P-256 claim".to_string(),
-            ))
-        }
-    };
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
-    let mut device_p256 = match (
-        &proof.device_p256_claim,
-        &proof.device_p256_interaction_claim,
-    ) {
-        (Some(claim), Some(interaction_claim)) => Some(
-            P256Verifier::new(claim.clone(), interaction_claim.clone())
-                .with_preprocessed_namespace("mdoc/device")
-                .with_z_binding(
-                    device_scalar_z
-                        .clone()
-                        .expect("device z relation exists for a P-256 device"),
-                ),
-        ),
-        (None, None) => None,
-        _ => {
-            return Err(Error::Verify(
-                "mdoc proof carries a partial device P-256 claim".to_string(),
-            ))
-        }
-    };
-    #[cfg(feature = "p256")]
-    let mut revocation_p256 = match (
-        proof.revocation_p256_claim.clone(),
-        proof.revocation_p256_interaction_claim.clone(),
-        revocation_scalar_z.clone(),
-    ) {
-        (Some(claim), Some(interaction_claim), Some(revocation_scalar_z)) => {
-            let revocation_key = statement
-                .ts13_revocation
-                .as_ref()
-                .and_then(|revocation| revocation.revocation_public_key.as_ecdsa())
-                .ok_or_else(|| {
-                    Error::Verify(
-                        "revocation P-256 proof requires public P-256 revocation inputs"
-                            .to_string(),
-                    )
-                })?;
-            if claim.public_inputs.instances.len() != 1
-                || !public_instance_key_matches(&claim.public_inputs.instances[0], revocation_key)
-            {
-                return Err(Error::P256InstanceMismatch);
-            }
-            Some(
-                P256Verifier::new(claim, interaction_claim)
-                    .with_preprocessed_namespace("mdoc/ts13/revocation")
-                    .with_z_binding(revocation_scalar_z),
-            )
-        }
-        _ => None,
-    };
     if proof.stark_proof.config != expected_pcs_config {
         return Err(Error::WeakConfig {
             got: proof.stark_proof.config,
@@ -7374,23 +4808,8 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
         proof.sha_tables_interaction_claim.clone(),
         sha_table_relations.clone(),
     );
-    // Mirror the prover (S4): the issuer SHA conveyor exists iff the issuer
-    // is NOT ML-DSA (shape-gated above).
-    let mut issuer_sha = match (
-        proof.issuer_sha_log_n_rows,
-        proof.issuer_sha_interaction_claim.clone(),
-    ) {
-        (Some(log_n_rows), Some(interaction_claim)) => Some(
-            Sha256Verifier::new(log_n_rows, SHA_GROUP_WIDTH, interaction_claim)
-                .with_shared_tables(sha_table_relations.clone())
-                .with_digest_handle(issuer_digest.clone())
-                .with_field_handle(issuer_mso_exposure(statement), issuer_field.clone()),
-        ),
-        _ => None,
-    };
     // Hosted ML-DSA verifier (M7): rebuilt from the statement's public input +
     // the proof's claim tree; composed AFTER `issuer_sha` (shared field draw).
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
     let mut issuer_mldsa = match (statement.issuer_input.as_mldsa(), &proof.mldsa) {
         (Some(input), Some(claims)) => Some(
             MlDsaStatementVerifier::hosted_public(
@@ -7406,35 +4825,8 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
         ),
         _ => None,
     };
-    // Mirror the prover (S4): the device SHA conveyor exists iff the device is
-    // NOT ML-DSA (an ML-DSA device's public Sig_structure is absorbed by its
-    // instance's public-message producer). Biconditional shape gate.
-    let device_sha_expected = !statement.device_input.is_mldsa();
-    if proof.device_sha_log_n_rows.is_some() != device_sha_expected
-        || proof.device_sha_interaction_claim.is_some() != device_sha_expected
-    {
-        return Err(Error::Verify(
-            "mdoc proof device SHA layout does not match the statement's device arm".to_string(),
-        ));
-    }
-    let mut device_sha = match (
-        proof.device_sha_log_n_rows,
-        proof.device_sha_interaction_claim.clone(),
-    ) {
-        (Some(log_n_rows), Some(interaction_claim)) => Some({
-            let sha = Sha256Verifier::new(log_n_rows, SHA_GROUP_WIDTH, interaction_claim)
-                .with_shared_tables(sha_table_relations.clone());
-            if let Some(device_digest) = &device_digest {
-                sha.with_digest_handle(device_digest.clone())
-            } else {
-                sha
-            }
-        }),
-        _ => None,
-    };
     // Hosted ML-DSA device verifier, public-message mode (S4): rebuilt from
     // the statement's public input + the proof's claim tree.
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
     let mut device_mldsa = match (statement.device_input.as_mldsa(), &proof.device_mldsa) {
         (Some(input), Some(claims)) => Some(
             MlDsaStatementVerifier::hosted_public(
@@ -7450,53 +4842,10 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
         ),
         _ => None,
     };
-    let mut mso_sha = match (
-        proof.mso_sha_log_n_rows,
-        proof.mso_sha_interaction_claim.clone(),
-        mso_digest.clone(),
-    ) {
-        (Some(log_n_rows), Some(interaction_claim), Some(mso_digest)) => Some({
-            let sha = Sha256Verifier::new(log_n_rows, SHA_GROUP_WIDTH, interaction_claim)
-                .with_shared_tables(sha_table_relations.clone())
-                .with_digest_handle(mso_digest);
-            if let Some(mso_field) = &mso_field {
-                sha.with_field_handle(mso_payload_exposure(statement), mso_field.clone())
-            } else {
-                sha
-            }
-        }),
-        _ => None,
-    };
-    let mut revocation_sha = match (
-        proof.revocation_sha_log_n_rows,
-        proof.revocation_sha_interaction_claim.clone(),
-    ) {
-        (Some(log_n_rows), Some(interaction_claim)) => {
-            let sha = Sha256Verifier::new(log_n_rows, SHA_GROUP_WIDTH, interaction_claim)
-                .with_shared_tables(sha_table_relations.clone());
-            let sha = if let Some(revocation_digest) = &revocation_digest {
-                sha.with_digest_handle(revocation_digest.clone())
-            } else {
-                sha
-            };
-            Some(
-                if let Some(revocation_message_field) = &revocation_message_field {
-                    sha.with_field_handle(
-                        ts13_revocation_message_exposure(statement),
-                        revocation_message_field.clone(),
-                    )
-                } else {
-                    sha
-                },
-            )
-        }
-        _ => None,
-    };
     // Hosted ML-DSA revocation verifier, private-message mode: the input is
     // rebuilt from the statement's PUBLIC key/signature bytes with 20 ZEROED
     // message bytes — the real id bounds never enter the verifier's inputs,
     // the transcript (only the length is mixed), or the serialized proof.
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
     let mut revocation_mldsa = match &proof.revocation_mldsa {
         Some(claims) => {
             ts13_revocation_mldsa_input(statement, vec![0u8; TS13_REVOCATION_MESSAGE_LEN])?.map(
@@ -7526,7 +4875,6 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
     // message is the fixed 20-byte private-message window), sib stream
     // lengths from the shape-gated per-role claim trees, stream bases from
     // the role constants. Claimed sums come from the proof.
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
     let mut mldsa_keccak_service = proof.keccak_service_claimed_sums.as_ref().map(|sums| {
         let mut shapes = Vec::new();
         if let Some(input) = statement.issuer_input.as_mldsa() {
@@ -7561,187 +4909,57 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
     let attribute_exposures: Vec<_> = (0..statement.attributes.len())
         .map(|index| attribute_exposure(statement, index))
         .collect();
-    let mut attribute_sha = Vec::with_capacity(attribute_count);
-    if !merged_sha_expected {
-        for index in 0..attribute_count {
-            attribute_sha.push(
-                Sha256Verifier::new(
-                    proof.attribute_sha_log_n_rows[index],
-                    SHA_GROUP_WIDTH,
-                    proof.attribute_sha_interaction_claims[index].clone(),
-                )
-                .with_shared_tables(sha_table_relations.clone())
-                .with_digest_handle(attribute_digests[index].clone())
-                .with_field_handle(
-                    attribute_exposures[index].clone(),
-                    attribute_fields[index].clone(),
-                ),
-            );
+    let mut merged_sha = (|| -> Result<Sha256MultiVerifier, Error> {
+        let mut slot_specs = Vec::new();
+        for exposure in &attribute_exposures {
+            slot_specs.push(SlotSpec {
+                expose_digest: true,
+                field_exposure: exposure.clone(),
+            });
         }
-    }
-    // Merged multi-slot SHA verifier: the quantum schedule contains only the
-    // format-required hidden attributes. A legacy revocation slot exists only
-    // when the legacy standalone revocation SHA is expected.
-    let mut merged_sha = merged_sha_expected
-        .then(|| -> Result<Sha256MultiVerifier, Error> {
-            let mut slot_specs = Vec::new();
-            if revocation_sha_expected {
-                slot_specs.push(SlotSpec {
-                    expose_digest: revocation_digest.is_some(),
-                    field_exposure: ts13_revocation_message_exposure(statement),
-                });
-            }
-            for exposure in &attribute_exposures {
-                slot_specs.push(SlotSpec {
-                    expose_digest: true,
-                    field_exposure: exposure.clone(),
-                });
-            }
-            if slot_specs.is_empty() {
-                return Err(Error::Verify(
-                    "mdoc merged SHA instance requires at least one slot".to_string(),
-                ));
-            }
-            let config = MultiSlotConfig::new(
-                proof
-                    .merged_sha_slot_log
-                    .expect("merged slot log shape-gated above"),
-                slot_specs,
-            );
-            let log_n_rows = proof
-                .merged_sha_log_n_rows
-                .expect("merged log shape-gated above");
-            if log_n_rows < config.min_log_n_rows() {
-                return Err(Error::Verify(
-                    "mdoc proof merged SHA log cannot hold the slot schedule".to_string(),
-                ));
-            }
-            let mut verifier = Sha256MultiVerifier::new(
-                log_n_rows,
-                config,
-                sha_table_relations.clone(),
-                proof
-                    .merged_sha_interaction_claim
-                    .clone()
-                    .expect("merged claim shape-gated above"),
-            );
-            let mut slot = 0usize;
-            if revocation_sha_expected {
-                if let Some(revocation_digest) = &revocation_digest {
-                    verifier = verifier.with_slot_digest_handle(slot, revocation_digest.clone());
-                }
-                if let Some(revocation_message_field) = &revocation_message_field {
-                    verifier =
-                        verifier.with_slot_field_handle(slot, revocation_message_field.clone());
-                }
-                slot += 1;
-            }
-            for index in 0..attribute_count {
-                verifier = verifier
-                    .with_slot_digest_handle(slot + index, attribute_digests[index].clone())
-                    .with_slot_field_handle(slot + index, attribute_fields[index].clone());
-            }
-            Ok(verifier)
-        })
-        .transpose()?;
-
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
-    let mut issuer_bridge = match (
-        proof.issuer_bridge_log_size,
-        &proof.issuer_p256_claim,
-        &proof.issuer_bridge_interaction_claim,
-        statement.issuer_input.as_ecdsa(),
-    ) {
-        (Some(log_size), Some(p256_claim), Some(interaction_claim), Some(_)) => {
-            Some(DigestBindVerifier::new(
-                log_size,
-                p256_claim.public_inputs.instances.len(),
-                interaction_claim.clone(),
-                issuer_scalar_z,
-                issuer_digest,
-            ))
-        }
-        (None, None, None, None) => None,
-        _ => {
+        if slot_specs.is_empty() {
             return Err(Error::Verify(
-                "mdoc proof issuer bridge does not match the statement's issuer arm".to_string(),
-            ))
+                "mdoc merged SHA instance requires at least one slot".to_string(),
+            ));
         }
-    };
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "p256"))]
-    let mut device_bridge = match (
-        proof.device_bridge_log_size,
-        &proof.device_p256_claim,
-        &proof.device_bridge_interaction_claim,
-        statement.device_input.as_ecdsa(),
-    ) {
-        (Some(log_size), Some(p256_claim), Some(interaction_claim), Some(_)) => {
-            Some(DigestBindVerifier::new(
-                log_size,
-                p256_claim.public_inputs.instances.len(),
-                interaction_claim.clone(),
-                device_scalar_z.expect("device z relation exists for a P-256 device"),
-                device_digest
-                    .clone()
-                    .expect("device digest relation exists for a P-256 device"),
-            ))
-        }
-        (None, None, None, None) => None,
-        _ => {
-            return Err(Error::Verify(
-                "mdoc proof device bridge does not match the statement's device arm".to_string(),
-            ))
-        }
-    };
-    #[cfg(feature = "ec-coprocessor")]
-    let mut device_public_digest_bind = PublicDigestBind::verifier(
-        statement
-            .device_input
-            .expect_ecdsa("ec-coprocessor mdoc verify")?
-            .message_hash
-            .0,
-        device_digest.expect("device digest relation exists on the ec-coprocessor path"),
-        proof.device_public_digest_bind_interaction_claim.clone(),
-    );
-    #[cfg(feature = "p256")]
-    let mut revocation_bridge = match (
-        proof.revocation_bridge_log_size,
-        proof.revocation_bridge_interaction_claim.clone(),
-        revocation_scalar_z,
-        revocation_digest,
-    ) {
-        (
-            Some(log_size),
-            Some(interaction_claim),
-            Some(revocation_scalar_z),
-            Some(revocation_digest),
-        ) => Some(DigestBindVerifier::new(
-            log_size,
+        let config = MultiSlotConfig::new(
             proof
-                .revocation_p256_claim
-                .as_ref()
-                .map(|claim| claim.public_inputs.instances.len())
-                .unwrap_or(0),
-            interaction_claim,
-            revocation_scalar_z,
-            revocation_digest,
-        )),
-        _ => None,
-    };
+                .merged_sha_slot_log
+                .expect("merged slot log shape-gated above"),
+            slot_specs,
+        );
+        let log_n_rows = proof
+            .merged_sha_log_n_rows
+            .expect("merged log shape-gated above");
+        if log_n_rows < config.min_log_n_rows() {
+            return Err(Error::Verify(
+                "mdoc proof merged SHA log cannot hold the slot schedule".to_string(),
+            ));
+        }
+        let mut verifier = Sha256MultiVerifier::new(
+            log_n_rows,
+            config,
+            sha_table_relations.clone(),
+            proof
+                .merged_sha_interaction_claim
+                .clone()
+                .expect("merged claim shape-gated above"),
+        );
+        for index in 0..attribute_count {
+            verifier = verifier
+                .with_slot_digest_handle(index, attribute_digests[index].clone())
+                .with_slot_field_handle(index, attribute_fields[index].clone());
+        }
+        Ok(verifier)
+    })()?;
+
     let mut mdoc_window_bind = MdocWindowBind::verifier_for_attributes(
         mdoc_window_bind_rows_from(statement, None),
-        (!issuer_is_mldsa).then(|| issuer_field.clone()),
         attribute_fields.clone(),
-        if issuer_is_mldsa {
-            Vec::new()
-        } else {
-            attribute_digests.clone()
-        },
         proof.mdoc_window_bind_interaction_claim.clone(),
     );
     // S4 ML-DSA: per-attribute PUBLIC digest binds against the host-derived
     // `valueDigests` values (mirror of the prover; shape-gated above).
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
     let mut attribute_public_digest_binds: Vec<PublicDigestBind> = match (
         &mldsa_mso_facts,
         &proof.attribute_public_digest_bind_interaction_claims,
@@ -7757,27 +4975,6 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
             .collect(),
         _ => Vec::new(),
     };
-    let mut mdoc_validity = proof.mdoc_validity_interaction_claim.clone().map(|claim| {
-        MdocValidityBind::verifier(
-            statement.policy.current_date,
-            mdoc_validity_rows_from(statement, None),
-            issuer_field.clone(),
-            claim,
-        )
-    });
-    let mut mso_payload_bind = (has_revocation_range && !issuer_is_mldsa).then(|| {
-        MdocMsoPayloadBind::verifier(
-            statement.mso_payload_len,
-            issuer_field.clone(),
-            mso_field
-                .clone()
-                .expect("MSO field handle exists when revocation range is set"),
-            proof
-                .mso_payload_bind_interaction_claim
-                .clone()
-                .expect("MSO payload bind interaction claim exists when range is set"),
-        )
-    });
     let mut age = if let Some(index) = statement.age_attribute_index {
         let public = proof.age_public.as_ref().ok_or(Error::AgePolicyMismatch)?;
         let claimed_sums = proof
@@ -7813,32 +5010,6 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
     } else {
         None
     };
-    #[cfg(feature = "ec-coprocessor")]
-    let mac_state = MdocP4bMacSharedState::default();
-    #[cfg(feature = "ec-coprocessor")]
-    let mut mdoc_mac = MdocMacBind::verifier(
-        mac_state.clone(),
-        issuer_digest.clone(),
-        issuer_field.clone(),
-        proof.mdoc_mac_interaction_claim.clone(),
-    );
-    #[cfg(feature = "ec-coprocessor")]
-    let mut coprocessor = MdocCoprocessorBindingVerifier {
-        issuer_input: statement
-            .issuer_input
-            .expect_ecdsa("ec-coprocessor mdoc verify")?
-            .clone(),
-        device_input: statement
-            .device_input
-            .expect_ecdsa("ec-coprocessor mdoc verify")?
-            .clone(),
-        bundle: proof
-            .coprocessor_bundle
-            .clone()
-            .ok_or(Error::CoprocessorMissing)?,
-        mac_state,
-        profile: None,
-    };
     let mut ts13_revocation_public = statement
         .ts13_revocation
         .clone()
@@ -7846,20 +5017,11 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
     let mut ts13_revocation_range = statement.ts13_revocation_range.as_ref().map(|_| {
         // S4 ML-DSA: the digest binding is the PUBLIC host-derived Sha256 of
         // the Sig_structure payload (mirror of the prover).
-        #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
-        let digest_binding = match &mldsa_mso_facts {
-            Some(facts) => MsoDigestBinding::Public(facts.mso_digest),
-            None => MsoDigestBinding::Relation(
-                mso_digest
-                    .clone()
-                    .expect("MSO digest handle exists when revocation range is set"),
-            ),
-        };
-        #[cfg(not(all(not(feature = "ec-coprocessor"), feature = "ml-dsa")))]
-        let digest_binding = MsoDigestBinding::Relation(
-            mso_digest
-                .clone()
-                .expect("MSO digest handle exists when revocation range is set"),
+        let digest_binding = MsoDigestBinding::Public(
+            mldsa_mso_facts
+                .as_ref()
+                .expect("quantum-safe statements always expose ML-DSA MSO facts")
+                .mso_digest,
         );
         MdocRevocationRangeBind::verifier(
             digest_binding,
@@ -7876,99 +5038,30 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
         )
     });
 
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let mut modules: Vec<&mut dyn Air> = {
-        // Mirror the prover's module order exactly (transcript identity):
-        // the keccak service sits right after sha_tables, before every hosted
-        // ML-DSA consumer.
-        let mut modules: Vec<&mut dyn Air> = vec![&mut sha_tables];
-        #[cfg(feature = "ml-dsa")]
-        if let Some(mldsa_keccak_service) = mldsa_keccak_service.as_mut() {
-            modules.push(mldsa_keccak_service);
-        }
-        #[cfg(feature = "p256")]
-        if let Some(issuer_p256) = issuer_p256.as_mut() {
-            modules.push(issuer_p256);
-        }
-        if let Some(issuer_sha) = issuer_sha.as_mut() {
-            modules.push(issuer_sha);
-        }
-        #[cfg(feature = "ml-dsa")]
-        if let Some(issuer_mldsa) = issuer_mldsa.as_mut() {
-            modules.push(issuer_mldsa);
-        }
-        #[cfg(feature = "p256")]
-        if let Some(issuer_bridge) = issuer_bridge.as_mut() {
-            modules.push(issuer_bridge);
-        }
-        #[cfg(feature = "p256")]
-        if let Some(device_p256) = device_p256.as_mut() {
-            modules.push(device_p256);
-        }
-        if let Some(device_sha) = device_sha.as_mut() {
-            modules.push(device_sha);
-        }
-        #[cfg(feature = "ml-dsa")]
-        if let Some(device_mldsa) = device_mldsa.as_mut() {
-            modules.push(device_mldsa);
-        }
-        #[cfg(feature = "p256")]
-        if let Some(device_bridge) = device_bridge.as_mut() {
-            modules.push(device_bridge);
-        }
-        modules
-    };
-    #[cfg(feature = "ec-coprocessor")]
-    let mut modules: Vec<&mut dyn Air> = vec![
-        &mut sha_tables,
-        issuer_sha
-            .as_mut()
-            .expect("ec-coprocessor issuers are P-256 (guarded upstream)"),
-        device_sha
-            .as_mut()
-            .expect("ec-coprocessor devices are P-256 (guarded upstream)"),
-        &mut device_public_digest_bind,
-    ];
-    #[cfg(feature = "p256")]
-    if let Some(revocation_p256) = revocation_p256.as_mut() {
-        modules.push(revocation_p256);
+    // Mirror the prover's module order exactly (transcript identity).
+    let mut modules: Vec<&mut dyn Air> = vec![&mut sha_tables];
+    if let Some(service) = mldsa_keccak_service.as_mut() {
+        modules.push(service);
     }
-    if let Some(mso_sha) = mso_sha.as_mut() {
-        modules.push(mso_sha);
+    if let Some(issuer) = issuer_mldsa.as_mut() {
+        modules.push(issuer);
     }
-    if let Some(revocation_sha) = revocation_sha.as_mut() {
-        modules.push(revocation_sha);
+    if let Some(device) = device_mldsa.as_mut() {
+        modules.push(device);
     }
-    if let Some(merged_sha) = merged_sha.as_mut() {
-        modules.push(merged_sha);
-    }
+    modules.push(&mut merged_sha);
     if let Some(revocation_range) = ts13_revocation_range.as_mut() {
         modules.push(revocation_range);
     }
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
     if let Some(revocation_mldsa) = revocation_mldsa.as_mut() {
         modules.push(revocation_mldsa);
     }
-    #[cfg(feature = "p256")]
-    if let Some(revocation_bridge) = revocation_bridge.as_mut() {
-        modules.push(revocation_bridge);
-    }
-    for sha in &mut attribute_sha {
-        modules.push(sha);
-    }
     // S4 ML-DSA: per-attribute PUBLIC digest binds, right after their SHA
     // providers (mirror of the prover's module order).
-    #[cfg(all(not(feature = "ec-coprocessor"), feature = "ml-dsa"))]
     for bind in &mut attribute_public_digest_binds {
         modules.push(bind);
     }
     modules.push(&mut mdoc_window_bind);
-    if let Some(mdoc_validity) = mdoc_validity.as_mut() {
-        modules.push(mdoc_validity);
-    }
-    if let Some(mso_payload_bind) = mso_payload_bind.as_mut() {
-        modules.push(mso_payload_bind);
-    }
     if let Some(age) = age.as_mut() {
         modules.push(age);
     }
@@ -7978,10 +5071,6 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
     if let Some(revocation_public) = ts13_revocation_public.as_mut() {
         modules.push(revocation_public);
     }
-    #[cfg(feature = "ec-coprocessor")]
-    modules.push(&mut coprocessor);
-    #[cfg(feature = "ec-coprocessor")]
-    modules.push(&mut mdoc_mac);
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         air_core::verify_with_expected_preprocessed_root(
             modules.as_mut_slice(),
@@ -7991,8 +5080,6 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
     })) {
         Ok(Ok(())) => Ok(MdocCircuitVerifyProfile {
             total: total_start.elapsed(),
-            #[cfg(feature = "ec-coprocessor")]
-            p4b: coprocessor.profile.take(),
         }),
         Ok(Err(air_core::VerifyError::PreprocessedRootMismatch { got, expected })) => {
             Err(Error::PreprocessedRootMismatch { got, expected })
@@ -8720,15 +5807,6 @@ fn value_field<'a>(map: &'a [(Value, Value)], field: &'static str) -> Result<&'a
     map.iter()
         .find_map(|(key, value)| (key == &Value::Text(field.to_string())).then_some(value))
         .ok_or(MdocError::MissingField(field))
-}
-
-fn value_int_key(map: &[(Value, Value)], key: i128) -> Option<&Value> {
-    map.iter().find_map(|(candidate, value)| {
-        value_i128(candidate)
-            .ok()
-            .filter(|candidate| *candidate == key)
-            .map(|_| value)
-    })
 }
 
 fn map_field<'a>(

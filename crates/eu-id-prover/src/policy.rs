@@ -1,9 +1,6 @@
 use predicates::{Date, NatPublicInput, PublicInput as AgePublicInput};
 use serde::{Deserialize, Serialize};
 
-/// SHA-256 round-group width used by the attribute hash component.
-pub(crate) const SHA_GROUP_WIDTH: u32 = 6;
-
 /// The public relying-party policy bound by the proof.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Policy {

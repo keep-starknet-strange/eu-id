@@ -7,25 +7,13 @@
 //! Run (the campaign's iron measurement):
 //! ```sh
 //! AIR_CORE_PROVE_TIMING=1 RAYON_NUM_THREADS=1 cargo run --release \
-//!   -p eu-id-prover --example pq_perf_probe \
-//!   --no-default-features --features "p256,ml-dsa"
+//!   -p eu-id-prover --example pq_perf_probe
 //! ```
 
-#[cfg(not(feature = "ec-coprocessor"))]
 #[allow(dead_code)]
 #[path = "../tests/mldsa_fixture.rs"]
 mod mldsa_fixture;
 
-#[cfg(feature = "ec-coprocessor")]
-fn main() {
-    eprintln!(
-        "pq_perf_probe requires the hosted (non-ec-coprocessor) build: \
-         --no-default-features --features \"p256,ml-dsa\""
-    );
-    std::process::exit(1);
-}
-
-#[cfg(not(feature = "ec-coprocessor"))]
 fn main() {
     use std::time::Instant;
 

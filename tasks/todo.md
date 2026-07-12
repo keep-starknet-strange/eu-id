@@ -13,7 +13,7 @@ Baseline: `ce26b934` (S9)
 - [x] Convert the performance probe and dependency gate to the branch's default quantum build.
 - [x] Delete the legacy identity/nonce/coprocessor product API, SDK/FFI ABI, mobile UI, benches, and tests.
 - [x] Run the focused quantum build/test/dependency/lint gates.
-- [ ] Commit and push Q1.
+- [x] Commit and push the first Q1 checkpoint (`497348e6`).
 
 ## Milestone Q2 — remove the revocation SHA conveyor
 
@@ -24,7 +24,7 @@ Baseline: `ce26b934` (S9)
 - [x] Add a direct-provider message-tamper negative and retain the full revocation privacy/e2e rail.
 - [x] Run focused tests, full quantum gates, shape dump, and single-thread benchmark.
 - [x] Document measured cells/columns/proof/prove/verify changes.
-- [ ] Commit and push Q2.
+- [x] Commit and push Q2 (`497348e6`).
 
 ## Milestone Q3 — attribute-only small-load SHA
 
@@ -61,3 +61,10 @@ Baseline: `ce26b934` (S9)
 - Remaining Q1 work is the internal `eu-id-prover` cfg/type collapse and physical deletion of the
   three excluded classical crate directories. The shipped default product/API/build graph no longer
   exposes them.
+- Second Q1 checkpoint removes the legacy P-256/standalone-SHA/validity/payload assembly from the
+  product prover and verifier, deletes the 800-line `mdoc_validity` AIR, and reduces the active mdoc
+  window binder from 76 to 70 preprocessed columns by retaining only attribute constant windows.
+- Verification for that checkpoint: workspace check and strict all-target clippy pass; all 37 prover
+  tests pass across four suites (335.26 s), and all 13 SDK tests pass. Two consecutive release probes
+  measured 2,717/2,861 ms prove, 17/15 ms verify, and 1,108,810/1,109,450-byte proofs. These are
+  same-session post-change observations, not an A/B attribution against the earlier S9 session.

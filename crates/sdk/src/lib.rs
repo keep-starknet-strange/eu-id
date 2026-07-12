@@ -590,7 +590,6 @@ fn mdoc_request(
         birth_date_element: contract.element_birth_date,
         nationality_element: contract.element_nationality,
         session_transcript: statement.nonce.clone(),
-        trusted_issuer_certificates: Vec::new(),
         trusted_mldsa_issuer_public_keys: witness.trusted_issuer_public_keys.clone(),
         device_authentication_profile:
             eu_id_prover::mdoc::MdocDeviceAuthenticationProfile::Iso180135,
@@ -804,13 +803,12 @@ mod tests {
     }
 
     #[test]
-    fn mdoc_request_forwards_only_mldsa_trust_pins() {
+    fn mdoc_request_forwards_mldsa_trust_pins() {
         let witness = ZkMdocWitness {
             document: vec![0xa0],
             trusted_issuer_public_keys: vec![vec![9; ML_DSA_65_PUBLIC_KEY_BYTES]],
         };
         let request = mdoc_request(&sample_statement(), &witness);
-        assert!(request.trusted_issuer_certificates.is_empty());
         assert_eq!(
             request.trusted_mldsa_issuer_public_keys,
             witness.trusted_issuer_public_keys

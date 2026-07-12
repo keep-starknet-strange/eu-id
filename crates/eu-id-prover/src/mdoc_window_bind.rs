@@ -14,9 +14,7 @@
 //! Implementing all five bind surfaces as one sized-once component (rather than
 //! five log-4 dust components) follows the Phase D perf rule.
 
-use air_core::relations::{
-    DigestBytesRelation, FieldBytesRelation, SharedDigestRelation, SharedFieldRelation,
-};
+use air_core::relations::{FieldBytesRelation, SharedFieldRelation};
 use air_core::{
     fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint, TreeLayout,
 };
@@ -53,69 +51,37 @@ pub(crate) const MDOC_MAX_DISCLOSED_ATTRIBUTES: usize = 4;
 const MDOC_WINDOW_BIND_LOG_SIZE: u32 = 9;
 /// Byte-value witness columns (max window length is a 32-byte digest / coord).
 const MDOC_WINDOW_BIND_TRACE_COLS: usize = 32;
-/// `active`, `field_id`, `constant_active`, four digest selectors, issuer source,
-/// four attribute source selectors, 32 `byte_active`, 32 `expected`.
-const MDOC_WINDOW_BIND_PREPROCESSED_COLS: usize = 76;
-const DIGEST_ACTIVE_START: usize = 3;
-const ISSUER_FIELD_ACTIVE_COL: usize = DIGEST_ACTIVE_START + MDOC_MAX_DISCLOSED_ATTRIBUTES;
-const ATTR_FIELD_ACTIVE_START: usize = ISSUER_FIELD_ACTIVE_COL + 1;
+/// `active`, `field_id`, four attribute source selectors, 32 `byte_active`,
+/// and 32 `expected` byte columns.
+const MDOC_WINDOW_BIND_PREPROCESSED_COLS: usize = 70;
+const ATTR_FIELD_ACTIVE_START: usize = 2;
 const BYTE_ACTIVE_START: usize = ATTR_FIELD_ACTIVE_START + MDOC_MAX_DISCLOSED_ATTRIBUTES;
 const EXPECTED_START: usize = BYTE_ACTIVE_START + 32;
 
 type MdocWindowColumnEval = CircleEvaluation<SimdBackend, M31, BitReversedOrder>;
 type MdocWindowBindComponent = FrameworkComponent<MdocWindowBindEval>;
 
-/// Which SHA field provider a window's bytes are drawn from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum MdocFieldSource {
-    IssuerMso,
-    AttributeItem(usize),
-}
-
-/// The binding target for a row.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum MdocWindowTarget {
-    Constant,
-    Digest(usize),
-}
-
-/// A single window-bind row: `len` window bytes read from `source` (indexed by
-/// `field_id`), bound to `target`. For `Constant` targets the bytes must equal
-/// `expected`; for digest targets the 32-byte `witness` must equal the item SHA
-/// digest carried by the shared digest relation.
+/// A public constant bound to a byte window in one private attribute item.
 #[derive(Clone, Debug)]
 pub(crate) struct MdocWindowBindRow {
     field_id: u32,
-    source: MdocFieldSource,
+    attribute_index: usize,
     len: usize,
-    target: MdocWindowTarget,
     expected: [u8; 32],
     witness: [u8; 32],
 }
 
 impl MdocWindowBindRow {
-    pub(crate) fn constant(field_id: u32, source: MdocFieldSource, bytes: &[u8]) -> Self {
+    pub(crate) fn constant(field_id: u32, attribute_index: usize, bytes: &[u8]) -> Self {
+        assert!(attribute_index < MDOC_MAX_DISCLOSED_ATTRIBUTES);
         let mut expected = [0u8; 32];
         expected[..bytes.len()].copy_from_slice(bytes);
         Self {
             field_id,
-            source,
+            attribute_index,
             len: bytes.len(),
-            target: MdocWindowTarget::Constant,
             expected,
             witness: expected,
-        }
-    }
-
-    pub(crate) fn digest(field_id: u32, attribute_index: usize, bytes: [u8; 32]) -> Self {
-        assert!(attribute_index < MDOC_MAX_DISCLOSED_ATTRIBUTES);
-        Self {
-            field_id,
-            source: MdocFieldSource::IssuerMso,
-            len: 32,
-            target: MdocWindowTarget::Digest(attribute_index),
-            expected: [0u8; 32],
-            witness: bytes,
         }
     }
 }
@@ -131,12 +97,7 @@ pub(crate) struct MdocWindowBindInteractionClaim {
 
 pub(crate) struct MdocWindowBind {
     rows: Vec<MdocWindowBindRow>,
-    /// `None` when the issuer Sig_structure has NO in-circuit byte provider
-    /// (S4 ML-DSA mode: the Sig_structure is public; every `IssuerMso` fact is
-    /// checked host-side and no row may use the issuer source).
-    issuer_field_handle: Option<SharedFieldRelation>,
     attribute_field_handles: Vec<SharedFieldRelation>,
-    attribute_digest_handles: Vec<SharedDigestRelation>,
     blinder_relation: Option<ClaimedSumBlinderRelation>,
     interaction_claim: Option<MdocWindowBindInteractionClaim>,
     component: Option<MdocWindowBindComponent>,
@@ -146,28 +107,13 @@ pub(crate) struct MdocWindowBind {
 impl MdocWindowBind {
     pub(crate) fn new_for_attributes(
         rows: Vec<MdocWindowBindRow>,
-        issuer_field_handle: Option<SharedFieldRelation>,
         attribute_field_handles: Vec<SharedFieldRelation>,
-        attribute_digest_handles: Vec<SharedDigestRelation>,
     ) -> Self {
         assert!(attribute_field_handles.len() <= MDOC_MAX_DISCLOSED_ATTRIBUTES);
-        // S4 ML-DSA mode drops every digest row (the attribute digests bind to
-        // PUBLIC MSO values via `PublicDigestBind`), so the digest handle list
-        // may be empty; otherwise it matches the attribute list 1:1.
-        assert!(
-            attribute_digest_handles.is_empty()
-                || attribute_field_handles.len() == attribute_digest_handles.len()
-        );
-        assert_rows_match_handles(
-            &rows,
-            issuer_field_handle.is_some(),
-            attribute_digest_handles.len(),
-        );
+        assert_rows_match_handles(&rows, attribute_field_handles.len());
         Self {
             rows,
-            issuer_field_handle,
             attribute_field_handles,
-            attribute_digest_handles,
             blinder_relation: None,
             interaction_claim: None,
             component: None,
@@ -177,26 +123,14 @@ impl MdocWindowBind {
 
     pub(crate) fn verifier_for_attributes(
         rows: Vec<MdocWindowBindRow>,
-        issuer_field_handle: Option<SharedFieldRelation>,
         attribute_field_handles: Vec<SharedFieldRelation>,
-        attribute_digest_handles: Vec<SharedDigestRelation>,
         interaction_claim: MdocWindowBindInteractionClaim,
     ) -> Self {
         assert!(attribute_field_handles.len() <= MDOC_MAX_DISCLOSED_ATTRIBUTES);
-        assert!(
-            attribute_digest_handles.is_empty()
-                || attribute_field_handles.len() == attribute_digest_handles.len()
-        );
-        assert_rows_match_handles(
-            &rows,
-            issuer_field_handle.is_some(),
-            attribute_digest_handles.len(),
-        );
+        assert_rows_match_handles(&rows, attribute_field_handles.len());
         Self {
             rows,
-            issuer_field_handle,
             attribute_field_handles,
-            attribute_digest_handles,
             blinder_relation: None,
             interaction_claim: Some(interaction_claim),
             component: None,
@@ -210,12 +144,6 @@ impl MdocWindowBind {
             .expect("mdoc window bind interaction claim is set")
     }
 
-    fn issuer_field_relation(&self) -> Option<FieldBytesRelation> {
-        self.issuer_field_handle
-            .as_ref()
-            .map(SharedFieldRelation::get)
-    }
-
     fn attribute_field_relations(&self) -> Vec<FieldBytesRelation> {
         self.attribute_field_handles
             .iter()
@@ -223,47 +151,23 @@ impl MdocWindowBind {
             .collect()
     }
 
-    fn attribute_digest_relations(&self) -> Vec<DigestBytesRelation> {
-        self.attribute_digest_handles
-            .iter()
-            .map(SharedDigestRelation::get)
-            .collect()
-    }
-
     fn n_lookups(&self) -> usize {
-        // 32 issuer-field (when the issuer source exists) + 32-per-attribute
-        // field + per-digest-handle sites, plus the Q-015 blinder `+m` site.
-        32 * (usize::from(self.issuer_field_handle.is_some()) + self.attribute_field_handles.len())
-            + self.attribute_digest_handles.len()
-            + 1
+        32 * self.attribute_field_handles.len() + 1
     }
 }
 
 /// Fail-closed shape check: a row may only reference a source/target whose
 /// relation handle exists in this composition (otherwise its LogUp site would
 /// silently not be emitted and the balance argument would be vacuous).
-fn assert_rows_match_handles(rows: &[MdocWindowBindRow], has_issuer: bool, n_digests: usize) {
+fn assert_rows_match_handles(rows: &[MdocWindowBindRow], n_attributes: usize) {
     for row in rows {
-        if matches!(row.source, MdocFieldSource::IssuerMso) {
-            assert!(
-                has_issuer,
-                "IssuerMso window row without an issuer field relation"
-            );
-        }
-        if let MdocWindowTarget::Digest(index) = row.target {
-            assert!(
-                index < n_digests,
-                "digest window row without a digest relation"
-            );
-        }
+        assert!(row.attribute_index < n_attributes);
     }
 }
 
 #[derive(Clone)]
 struct MdocWindowBindEval {
-    issuer_field_relation: Option<FieldBytesRelation>,
     attribute_field_relations: Vec<FieldBytesRelation>,
-    attribute_digest_relations: Vec<DigestBytesRelation>,
     blinder_relation: ClaimedSumBlinderRelation,
     blinder_v: QM31,
     blinder_m: QM31,
@@ -302,13 +206,7 @@ fn mdoc_window_bind_preprocessed_column_ids() -> Vec<PreProcessedColumnId> {
     let mut ids = vec![
         mdoc_window_bind_col_id("active"),
         mdoc_window_bind_col_id("field_id"),
-        mdoc_window_bind_col_id("constant_active"),
     ];
-    ids.extend(
-        (0..MDOC_MAX_DISCLOSED_ATTRIBUTES)
-            .map(|i| mdoc_window_bind_col_id(&format!("digest_active_{i}"))),
-    );
-    ids.push(mdoc_window_bind_col_id("issuer_field_active"));
     ids.extend(
         (0..MDOC_MAX_DISCLOSED_ATTRIBUTES)
             .map(|i| mdoc_window_bind_col_id(&format!("attr_field_active_{i}"))),
@@ -326,11 +224,6 @@ fn mdoc_window_bind_preprocessed_columns(rows: &[MdocWindowBindRow]) -> Vec<Mdoc
     for (row_idx, row) in rows.iter().enumerate() {
         columns[0][row_idx] = M31::from_u32_unchecked(1);
         columns[1][row_idx] = M31::from_u32_unchecked(row.field_id);
-        columns[2][row_idx] =
-            M31::from_u32_unchecked(u32::from(row.target == MdocWindowTarget::Constant));
-        if let MdocWindowTarget::Digest(attribute_index) = row.target {
-            columns[DIGEST_ACTIVE_START + attribute_index][row_idx] = M31::from_u32_unchecked(1);
-        }
         for i in 0..32 {
             if i < row.len {
                 columns[BYTE_ACTIVE_START + i][row_idx] = M31::from_u32_unchecked(1);
@@ -338,12 +231,7 @@ fn mdoc_window_bind_preprocessed_columns(rows: &[MdocWindowBindRow]) -> Vec<Mdoc
             columns[EXPECTED_START + i][row_idx] =
                 M31::from_u32_unchecked(u32::from(row.expected[i]));
         }
-        let source_col = match row.source {
-            MdocFieldSource::IssuerMso => ISSUER_FIELD_ACTIVE_COL,
-            MdocFieldSource::AttributeItem(attribute_index) => {
-                ATTR_FIELD_ACTIVE_START + attribute_index
-            }
-        };
+        let source_col = ATTR_FIELD_ACTIVE_START + row.attribute_index;
         columns[source_col][row_idx] = M31::from_u32_unchecked(1);
     }
     columns
@@ -371,9 +259,7 @@ fn mdoc_window_bind_base_trace(rows: &[MdocWindowBindRow]) -> Vec<MdocWindowColu
 
 fn mdoc_window_bind_interaction_trace(
     rows: &[MdocWindowBindRow],
-    issuer_field_relation: Option<&FieldBytesRelation>,
     attribute_field_relations: &[FieldBytesRelation],
-    attribute_digest_relations: &[DigestBytesRelation],
     blinder_relation: &ClaimedSumBlinderRelation,
     blinder_v: QM31,
     blinder_m: QM31,
@@ -381,21 +267,13 @@ fn mdoc_window_bind_interaction_trace(
     let preprocessed = mdoc_window_bind_preprocessed_columns(rows);
     let trace = mdoc_window_bind_base_trace(rows);
     let n_vec_rows = 1usize << (MDOC_WINDOW_BIND_LOG_SIZE - LOG_N_LANES);
-    let mut sites: Vec<Vec<(PackedQM31, PackedQM31)>> = Vec::with_capacity(
-        32 * (usize::from(issuer_field_relation.is_some()) + attribute_field_relations.len())
-            + attribute_digest_relations.len(),
-    );
+    let mut sites: Vec<Vec<(PackedQM31, PackedQM31)>> =
+        Vec::with_capacity(32 * attribute_field_relations.len());
     for byte_idx in 0..32 {
-        let mut source_relations = Vec::with_capacity(1 + attribute_field_relations.len());
-        if let Some(issuer_field_relation) = issuer_field_relation {
-            source_relations.push((ISSUER_FIELD_ACTIVE_COL, issuer_field_relation));
-        }
-        source_relations.extend(
-            attribute_field_relations
-                .iter()
-                .enumerate()
-                .map(|(i, relation)| (ATTR_FIELD_ACTIVE_START + i, relation)),
-        );
+        let source_relations = attribute_field_relations
+            .iter()
+            .enumerate()
+            .map(|(i, relation)| (ATTR_FIELD_ACTIVE_START + i, relation));
         for (source_col, relation) in source_relations {
             sites.push(
                 (0..n_vec_rows)
@@ -414,22 +292,6 @@ fn mdoc_window_bind_interaction_trace(
                     .collect(),
             );
         }
-    }
-    for (attribute_index, relation) in attribute_digest_relations.iter().enumerate() {
-        let active_col = DIGEST_ACTIVE_START + attribute_index;
-        sites.push(
-            (0..n_vec_rows)
-                .map(|vec_row| {
-                    let numerator = PackedQM31::from(preprocessed[active_col].data[vec_row]);
-                    let mut values = [PackedM31::broadcast(M31::from_u32_unchecked(0)); 32];
-                    for (byte_idx, value) in values.iter_mut().enumerate() {
-                        *value = trace[byte_idx].data[vec_row];
-                    }
-                    let denominator = relation.combine(&values);
-                    (numerator, denominator)
-                })
-                .collect(),
-        );
     }
     // Q-015 blinder `+m/(z−combine(v))` on every row, emitted LAST to match
     // `MdocWindowBindEval::evaluate`.
@@ -467,15 +329,6 @@ impl FrameworkEval for MdocWindowBindEval {
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         let active = eval.get_preprocessed_column(mdoc_window_bind_col_id("active"));
         let field_id = eval.get_preprocessed_column(mdoc_window_bind_col_id("field_id"));
-        let constant_active =
-            eval.get_preprocessed_column(mdoc_window_bind_col_id("constant_active"));
-        let digest_active: Vec<E::F> = (0..MDOC_MAX_DISCLOSED_ATTRIBUTES)
-            .map(|i| {
-                eval.get_preprocessed_column(mdoc_window_bind_col_id(&format!("digest_active_{i}")))
-            })
-            .collect();
-        let issuer_field_active =
-            eval.get_preprocessed_column(mdoc_window_bind_col_id("issuer_field_active"));
         let attr_field_active: Vec<E::F> = (0..MDOC_MAX_DISCLOSED_ATTRIBUTES)
             .map(|i| {
                 eval.get_preprocessed_column(mdoc_window_bind_col_id(&format!(
@@ -485,34 +338,17 @@ impl FrameworkEval for MdocWindowBindEval {
             .collect();
         let one = m31_const::<E>(1);
         eval.add_constraint(active.clone() * (active.clone() - one.clone()));
-        eval.add_constraint(constant_active.clone() * (constant_active.clone() - one.clone()));
-        for digest_active in &digest_active {
-            eval.add_constraint(digest_active.clone() * (digest_active.clone() - one.clone()));
-        }
-        eval.add_constraint(
-            issuer_field_active.clone() * (issuer_field_active.clone() - one.clone()),
-        );
         for attr_field_active in &attr_field_active {
             eval.add_constraint(
                 attr_field_active.clone() * (attr_field_active.clone() - one.clone()),
             );
         }
-        let digest_active_sum = digest_active
-            .iter()
-            .cloned()
-            .fold(m31_const::<E>(0), |acc, value| acc + value);
         let attr_field_active_sum = attr_field_active
             .iter()
             .cloned()
             .fold(m31_const::<E>(0), |acc, value| acc + value);
-        eval.add_constraint(
-            active.clone() * (constant_active.clone() + digest_active_sum - one.clone()),
-        );
-        eval.add_constraint(
-            active.clone() * (issuer_field_active.clone() + attr_field_active_sum - one.clone()),
-        );
+        eval.add_constraint(active.clone() * (attr_field_active_sum - one.clone()));
 
-        let mut values = Vec::with_capacity(32);
         for byte_idx in 0..32 {
             let byte_active = eval.get_preprocessed_column(mdoc_window_bind_col_id(&format!(
                 "byte_active_{byte_idx}"
@@ -521,20 +357,12 @@ impl FrameworkEval for MdocWindowBindEval {
                 .get_preprocessed_column(mdoc_window_bind_col_id(&format!("expected_{byte_idx}")));
             let value = eval.next_trace_mask();
             eval.add_constraint(byte_active.clone() * (byte_active.clone() - one.clone()));
-            eval.add_constraint(
-                constant_active.clone() * byte_active.clone() * (value.clone() - expected),
-            );
-            let mut source_relations = Vec::with_capacity(1 + self.attribute_field_relations.len());
-            if let Some(issuer_field_relation) = &self.issuer_field_relation {
-                source_relations.push((issuer_field_active.clone(), issuer_field_relation));
-            }
-            source_relations.extend(
-                attr_field_active
-                    .iter()
-                    .cloned()
-                    .zip(self.attribute_field_relations.iter()),
-            );
-            for (source_active, relation) in source_relations {
+            eval.add_constraint(active.clone() * byte_active.clone() * (value.clone() - expected));
+            for (source_active, relation) in attr_field_active
+                .iter()
+                .cloned()
+                .zip(self.attribute_field_relations.iter())
+            {
                 eval.add_to_relation(RelationEntry::new(
                     relation,
                     E::EF::from(byte_active.clone() * source_active),
@@ -545,13 +373,6 @@ impl FrameworkEval for MdocWindowBindEval {
                     ],
                 ));
             }
-            values.push(value);
-        }
-        for (active, relation) in digest_active
-            .into_iter()
-            .zip(self.attribute_digest_relations.iter())
-        {
-            eval.add_to_relation(RelationEntry::new(relation, E::EF::from(active), &values));
         }
         // Q-015 blinder `+m/(z−combine(v))`, ungated, emitted LAST to match
         // the generator's site order.
@@ -571,18 +392,10 @@ impl Air for MdocWindowBind {
     fn mix_public(&self, channel: &mut Blake2sChannel) {
         for row in &self.rows {
             channel.mix_u64(u64::from(row.field_id));
+            channel.mix_u64(row.attribute_index as u64);
             channel.mix_u64(row.len as u64);
-            match row.target {
-                MdocWindowTarget::Constant => channel.mix_u64(0),
-                MdocWindowTarget::Digest(attribute_index) => {
-                    channel.mix_u64(1);
-                    channel.mix_u64(attribute_index as u64);
-                }
-            }
-            if row.target == MdocWindowTarget::Constant {
-                for &byte in &row.expected[..row.len] {
-                    channel.mix_u64(u64::from(byte));
-                }
+            for &byte in &row.expected[..row.len] {
+                channel.mix_u64(u64::from(byte));
             }
         }
     }
@@ -622,9 +435,7 @@ impl Air for MdocWindowBind {
         self.component = Some(MdocWindowBindComponent::new(
             allocator,
             MdocWindowBindEval {
-                issuer_field_relation: self.issuer_field_relation(),
                 attribute_field_relations: self.attribute_field_relations(),
-                attribute_digest_relations: self.attribute_digest_relations(),
                 blinder_relation: blinder_relation.clone(),
                 blinder_v: claim.blinder_v,
                 blinder_m: claim.blinder_m,
@@ -709,9 +520,7 @@ impl AirProver for MdocWindowBind {
             .expect("mdoc window bind blinder relation drawn before interaction");
         let (trace, claimed_sum) = mdoc_window_bind_interaction_trace(
             &self.rows,
-            self.issuer_field_relation().as_ref(),
             &self.attribute_field_relations(),
-            &self.attribute_digest_relations(),
             &blinder_relation,
             blinder_v,
             blinder_m,
@@ -851,17 +660,15 @@ mod tests {
 
     fn test_rows() -> Vec<MdocWindowBindRow> {
         vec![
-            MdocWindowBindRow::constant(7, MdocFieldSource::IssuerMso, b"abc"),
-            MdocWindowBindRow::digest(8, 0, [0; 32]),
+            MdocWindowBindRow::constant(7, 0, b"abc"),
+            MdocWindowBindRow::constant(8, 0, b"def"),
         ]
     }
 
     #[test]
     fn mdoc_window_bind_inactive_rows_are_not_zero_pinned() {
         let eval = MdocWindowBindEval {
-            issuer_field_relation: Some(FieldBytesRelation::dummy()),
             attribute_field_relations: Vec::new(),
-            attribute_digest_relations: Vec::new(),
             blinder_relation: ClaimedSumBlinderRelation::dummy(),
             blinder_v: QM31::from_u32_unchecked(1, 2, 3, 4),
             blinder_m: QM31::from_u32_unchecked(5, 6, 7, 8),
