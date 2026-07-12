@@ -2,24 +2,23 @@ use eu_id_ec_coprocessor::ecdsa::{layout_range, LayoutSlot, LAYOUT_LEN};
 
 #[test]
 fn witness_layout_matches_g4_inventory() {
-    assert_eq!(LAYOUT_LEN, 2680);
+    assert_eq!(LAYOUT_LEN, 2168);
     assert_eq!(layout_range(LayoutSlot::InputLimbs), 0..100);
     assert_eq!(layout_range(LayoutSlot::ScalarInverses), 100..101);
     assert_eq!(layout_range(LayoutSlot::UScalars), 101..103);
     assert_eq!(layout_range(LayoutSlot::ModNQuotients), 103..106);
-    assert_eq!(layout_range(LayoutSlot::ScalarBits), 106..618);
-    assert_eq!(layout_range(LayoutSlot::U1GAccumulators), 618..1130);
-    assert_eq!(layout_range(LayoutSlot::U2QAccumulators), 1130..1642);
-    assert_eq!(layout_range(LayoutSlot::CorrectedEndpoints), 1642..1646);
-    assert_eq!(layout_range(LayoutSlot::U1GDenominatorInverses), 1646..2159);
-    assert_eq!(layout_range(LayoutSlot::U2QDenominatorInverses), 2159..2672);
+    assert_eq!(layout_range(LayoutSlot::U1GAccumulators), 106..618);
+    assert_eq!(layout_range(LayoutSlot::U2QAccumulators), 618..1130);
+    assert_eq!(layout_range(LayoutSlot::CorrectedEndpoints), 1130..1134);
+    assert_eq!(layout_range(LayoutSlot::U1GDenominatorInverses), 1134..1647);
+    assert_eq!(layout_range(LayoutSlot::U2QDenominatorInverses), 1647..2160);
     assert_eq!(
         layout_range(LayoutSlot::FinalAddDenominatorInverse),
-        2672..2673
+        2160..2161
     );
-    assert_eq!(layout_range(LayoutSlot::FinalPoint), 2673..2675);
-    assert_eq!(layout_range(LayoutSlot::FinalReduction), 2675..2677);
-    assert_eq!(layout_range(LayoutSlot::InfinityFlags), 2677..2680);
+    assert_eq!(layout_range(LayoutSlot::FinalPoint), 2161..2163);
+    assert_eq!(layout_range(LayoutSlot::FinalReduction), 2163..2165);
+    assert_eq!(layout_range(LayoutSlot::InfinityFlags), 2165..2168);
 }
 
 #[test]
@@ -29,7 +28,6 @@ fn layout_ranges_are_contiguous() {
         LayoutSlot::ScalarInverses,
         LayoutSlot::UScalars,
         LayoutSlot::ModNQuotients,
-        LayoutSlot::ScalarBits,
         LayoutSlot::U1GAccumulators,
         LayoutSlot::U2QAccumulators,
         LayoutSlot::CorrectedEndpoints,

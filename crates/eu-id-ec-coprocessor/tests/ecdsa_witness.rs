@@ -152,30 +152,10 @@ fn scalar_setup_hints_fill_frozen_slots_deterministically() {
     let sinv = &first.values[layout_range(LayoutSlot::ScalarInverses)];
     let us = &first.values[layout_range(LayoutSlot::UScalars)];
     let qs = &first.values[layout_range(LayoutSlot::ModNQuotients)];
-    let bits = &first.values[layout_range(LayoutSlot::ScalarBits)];
 
     assert_eq!(sinv, &[Fp::ONE]);
     assert_eq!(us, &[Fp::from_u64(42), Fp::from_u64(77)]);
     assert_eq!(qs, &[Fp::ZERO, Fp::ZERO, Fp::ZERO]);
-
-    for slot in 0..256 {
-        let bit = 255 - slot;
-        let expected = if bit < 64 && (42u64 >> bit) & 1 == 1 {
-            Fp::ONE
-        } else {
-            Fp::ZERO
-        };
-        assert_eq!(bits[slot], expected, "u1 MSB-first slot {slot}");
-    }
-    for slot in 0..256 {
-        let bit = 255 - slot;
-        let expected = if bit < 64 && (77u64 >> bit) & 1 == 1 {
-            Fp::ONE
-        } else {
-            Fp::ZERO
-        };
-        assert_eq!(bits[256 + slot], expected, "u2 MSB-first slot {slot}");
-    }
 }
 
 #[test]
@@ -295,13 +275,6 @@ fn witness_checker_accepts_honest_witness_and_rejects_scalar_mutations() {
     assert!(
         verify_witness(&input, &witness).is_err(),
         "bad u1 must reject"
-    );
-
-    let mut witness = generate_witness(&input).unwrap();
-    witness.values[layout_range(LayoutSlot::ScalarBits).start + 1] = Fp::from_u64(2);
-    assert!(
-        verify_witness(&input, &witness).is_err(),
-        "bad scalar bit must reject"
     );
 
     let mut witness = generate_witness(&input).unwrap();
