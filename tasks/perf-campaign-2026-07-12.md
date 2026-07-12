@@ -16,6 +16,8 @@ Rule: every WO lands with a measured ts13_full_probe number. No number, not done
 | 1157d10e | 2026-07-13 takeover re-probe | 3,393 | 198 | 3,527,981 |
 | worktree | WO-C3 delete redundant C13 | 3,315 | 166 | 3,241,093 |
 | worktree | Ligero full-domain sampler fix | 3,252 | 163 | 3,243,317 |
+| experiment | Ligero ℓ=512 (N=5) | 3,290 | 258 | 3,037,125 |
+| experiment | Ligero ℓ=1024 (N=1) | 4,108 | 654 | 3,002,885 |
 
 ## Work orders
 
@@ -47,7 +49,8 @@ Rule: every WO lands with a measured ts13_full_probe number. No number, not done
       The inherited RS-prefix exclusion invalidated the v4 full-domain error
       calculation; fixed before any larger-row profile sweep.
 - [ ] WO-D — PCS retune on shrunk circuit: sweep blowup 2/3 × queries/pow,
-      Ligero ℓ A/B. Last, config-only.
+      Ligero ℓ A/B. Ligero ℓ=512/1024 CLOSED NO-GO for production after
+      measurement; STARK schedule sweep remains.
 - [ ] Final: suites + negatives green, pins repinned, docs + memory updated,
       single- and multi-thread numbers reported.
 
@@ -303,6 +306,28 @@ Five-run TS13 measurement after the correction: 3,252ms prove / 163ms verify /
 3,243,317B. Bundle size and row shape are unchanged; the ~2KB STARK variation is
 Merkle/query randomness. This is a soundness restoration with no measurable
 performance cost.
+
+## Ligero aspect-ratio re-sweep (post-C13)
+
+After fixing the sampler, temporary compile-time ℓ=512 and ℓ=1024 profiles
+were implemented with full geometry round-trip tests and exact ≥132-bit
+soundness pins. Both use 176 openings; ℓ=512 is `(k,n,e) =
+(1024,8192,3326)` and ℓ=1024 is `(2048,16384,6654)`.
+
+Measured results:
+
+| profile | samples | prove | verify | proof B | coprocessor B |
+|---|---:|---:|---:|---:|---:|
+| production ℓ=256 | 5 | 3,252ms | 163ms | 3,243,317 | 784,863 |
+| ℓ=512 | 5 | 3,290ms | 258ms | 3,037,125 | 578,367 |
+| ℓ=1024 | 1 | 4,108ms | 654ms | 3,002,885 | 542,367 |
+
+ℓ=512 saves 206,192 bytes but regresses verify by 95ms, moving directly away
+from the <100ms target. ℓ=1024 saves only another 34,240 bytes while more than
+doubling the production verify time and adding ~0.8s prove. Neither approaches
+the 700KB target because the unchanged STARK alone is ~2.46MB. Decision: keep
+ℓ=256 production and remove the experimental geometries/features; do not carry
+dormant profile complexity.
 
 ## WO-C1b redundancy argument
 
