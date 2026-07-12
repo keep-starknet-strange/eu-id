@@ -145,6 +145,145 @@ fn gen_lane0_fracs(entries: &[(bool, SecureField)]) -> (Vec<ColEval>, SecureFiel
 }
 
 // =============================================================================
+// Public-message producer: yields a PUBLIC byte stream into µ-absorb (S4).
+// =============================================================================
+
+/// FNV-1a 64-bit over the producer's shape + content, for I-5 content-encoded
+/// preprocessed ids: two producers with different public messages can never
+/// alias under air-core tree-0 first-writer-wins dedup.
+fn fnv1a64(dst_off: u32, bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut eat = |b: u8| {
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    };
+    for b in dst_off.to_le_bytes() {
+        eat(b);
+    }
+    for b in (bytes.len() as u64).to_le_bytes() {
+        eat(b);
+    }
+    for &b in bytes {
+        eat(b);
+    }
+    hash
+}
+
+/// A TALL public-byte producer (S4): one row per message byte, yielding
+/// `(dst_stream, dst_off + i, byte)` (+) into the shared HashIo relation —
+/// exactly what the msg bridge's dest side does, with NO source consumption
+/// and NO committed byte cells. The byte values and positions are PREPROCESSED
+/// content (the message is a PUBLIC statement input).
+///
+/// Soundness (which mechanism is load-bearing): the absorbed message is bound
+/// to the statement by (1) `mix_public` mixing the statement's message bytes
+/// into Fiat–Shamir, and (2) the in-circuit ML-DSA verification itself — an
+/// adversary committing preprocessed content for a different message M′ must
+/// exhibit a signature valid for M′, i.e. forge ML-DSA. The host-side
+/// preprocessed-root pin (mdoc recomputes tree-0 per statement) additionally
+/// pins the committed bytes to the statement fail-closed. The fnv-content ids
+/// only prevent cross-instance dedup aliasing (I-5); they are not the binding.
+///
+/// Every constraint is degree ≤ 2 (`max_constraint_log_degree_bound ==
+/// log_size + 1` — engine requirement).
+#[derive(Clone)]
+pub struct PubMsgEval {
+    /// Instance namespace ("" = single-instance ids).
+    pub ns: String,
+    pub log_size: u32,
+    pub dst_stream: u32,
+    pub dst_off: u32,
+    pub bytes: Vec<u8>,
+    pub hash_io: HashIoRelation,
+}
+
+/// Base column count of the public-message producer (`enabler` only).
+pub const PUBMSG_BASE_COLS: usize = 1;
+/// Interaction columns (one yield, unbatched).
+pub const PUBMSG_INTERACTION_COLS: usize = SECURE_EXTENSION_DEGREE;
+/// Preprocessed column count (`active`, `pos`, `byte`).
+pub const PUBMSG_PREPROCESSED_COLS: usize = 3;
+
+impl PubMsgEval {
+    fn pre_id(&self, name: &str) -> PreProcessedColumnId {
+        // I-5: encode shape + content (fnv of dst_off ‖ len ‖ bytes).
+        PreProcessedColumnId {
+            id: format!(
+                "{}mldsa_pubmsg_{:016x}_{name}",
+                ns_prefix(&self.ns),
+                fnv1a64(self.dst_off, &self.bytes)
+            ),
+        }
+    }
+    pub fn preprocessed_ids(&self) -> Vec<PreProcessedColumnId> {
+        vec![self.pre_id("active"), self.pre_id("pos"), self.pre_id("byte")]
+    }
+    pub fn gen_preprocessed(&self) -> Vec<ColEval> {
+        let rows = 1usize << self.log_size;
+        let mut active = vec![m31(0); rows];
+        let mut pos = vec![m31(0); rows];
+        let mut byte = vec![m31(0); rows];
+        for (i, &b) in self.bytes.iter().enumerate() {
+            active[i] = m31(1);
+            pos[i] = m31(self.dst_off + i as u32);
+            byte[i] = m31(b as u32);
+        }
+        vec![active, pos, byte]
+            .into_iter()
+            .map(|v| col_eval(self.log_size, v))
+            .collect()
+    }
+    /// Base trace: the enabler column (mirrors the preprocessed `active`).
+    pub fn gen_base(&self) -> Vec<ColEval> {
+        let rows = 1usize << self.log_size;
+        let mut enabler = vec![m31(0); rows];
+        for i in 0..self.bytes.len() {
+            enabler[i] = m31(1);
+        }
+        vec![col_eval(self.log_size, enabler)]
+    }
+    pub fn gen_interaction(&self) -> (Vec<ColEval>, SecureField) {
+        gen_single_yield(
+            self.log_size,
+            &self.hash_io,
+            self.bytes.len(),
+            |i| {
+                [
+                    m31(self.dst_stream),
+                    m31(self.dst_off + i as u32),
+                    m31(self.bytes[i] as u32),
+                ]
+            },
+            true, // yield (+) into the absorb stream (the sponge consumes with −)
+        )
+    }
+}
+
+impl FrameworkEval for PubMsgEval {
+    fn log_size(&self) -> u32 {
+        self.log_size
+    }
+    fn max_constraint_log_degree_bound(&self) -> u32 {
+        self.log_size + 1
+    }
+    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+        let active = eval.get_preprocessed_column(self.pre_id("active"));
+        let pos = eval.get_preprocessed_column(self.pre_id("pos"));
+        let byte = eval.get_preprocessed_column(self.pre_id("byte"));
+        let enabler = eval.next_trace_mask();
+        let one = E::F::from(M31::one());
+        eval.add_constraint(enabler.clone() * (one - enabler.clone()));
+        let tuple = [E::F::from(m31(self.dst_stream)), pos, byte];
+        eval.add_to_relation(RelationEntry::base(&self.hash_io, active, &tuple));
+        let _ = enabler;
+        eval.finalize_logup();
+        eval
+    }
+}
+
+pub type PubMsgComponent = FrameworkComponent<PubMsgEval>;
+
+// =============================================================================
 // Bridge: require a byte on a source stream, yield it on a destination stream.
 // =============================================================================
 

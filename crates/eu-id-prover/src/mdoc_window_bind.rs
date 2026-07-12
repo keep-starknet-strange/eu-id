@@ -131,7 +131,10 @@ pub(crate) struct MdocWindowBindInteractionClaim {
 
 pub(crate) struct MdocWindowBind {
     rows: Vec<MdocWindowBindRow>,
-    issuer_field_handle: SharedFieldRelation,
+    /// `None` when the issuer Sig_structure has NO in-circuit byte provider
+    /// (S4 ML-DSA mode: the Sig_structure is public; every `IssuerMso` fact is
+    /// checked host-side and no row may use the issuer source).
+    issuer_field_handle: Option<SharedFieldRelation>,
     attribute_field_handles: Vec<SharedFieldRelation>,
     attribute_digest_handles: Vec<SharedDigestRelation>,
     blinder_relation: Option<ClaimedSumBlinderRelation>,
@@ -143,15 +146,19 @@ pub(crate) struct MdocWindowBind {
 impl MdocWindowBind {
     pub(crate) fn new_for_attributes(
         rows: Vec<MdocWindowBindRow>,
-        issuer_field_handle: SharedFieldRelation,
+        issuer_field_handle: Option<SharedFieldRelation>,
         attribute_field_handles: Vec<SharedFieldRelation>,
         attribute_digest_handles: Vec<SharedDigestRelation>,
     ) -> Self {
         assert!(attribute_field_handles.len() <= MDOC_MAX_DISCLOSED_ATTRIBUTES);
-        assert_eq!(
-            attribute_field_handles.len(),
-            attribute_digest_handles.len()
+        // S4 ML-DSA mode drops every digest row (the attribute digests bind to
+        // PUBLIC MSO values via `PublicDigestBind`), so the digest handle list
+        // may be empty; otherwise it matches the attribute list 1:1.
+        assert!(
+            attribute_digest_handles.is_empty()
+                || attribute_field_handles.len() == attribute_digest_handles.len()
         );
+        assert_rows_match_handles(&rows, issuer_field_handle.is_some(), attribute_digest_handles.len());
         Self {
             rows,
             issuer_field_handle,
@@ -166,16 +173,17 @@ impl MdocWindowBind {
 
     pub(crate) fn verifier_for_attributes(
         rows: Vec<MdocWindowBindRow>,
-        issuer_field_handle: SharedFieldRelation,
+        issuer_field_handle: Option<SharedFieldRelation>,
         attribute_field_handles: Vec<SharedFieldRelation>,
         attribute_digest_handles: Vec<SharedDigestRelation>,
         interaction_claim: MdocWindowBindInteractionClaim,
     ) -> Self {
         assert!(attribute_field_handles.len() <= MDOC_MAX_DISCLOSED_ATTRIBUTES);
-        assert_eq!(
-            attribute_field_handles.len(),
-            attribute_digest_handles.len()
+        assert!(
+            attribute_digest_handles.is_empty()
+                || attribute_field_handles.len() == attribute_digest_handles.len()
         );
+        assert_rows_match_handles(&rows, issuer_field_handle.is_some(), attribute_digest_handles.len());
         Self {
             rows,
             issuer_field_handle,
@@ -194,8 +202,8 @@ impl MdocWindowBind {
             .expect("mdoc window bind interaction claim is set")
     }
 
-    fn issuer_field_relation(&self) -> FieldBytesRelation {
-        self.issuer_field_handle.get()
+    fn issuer_field_relation(&self) -> Option<FieldBytesRelation> {
+        self.issuer_field_handle.as_ref().map(SharedFieldRelation::get)
     }
 
     fn attribute_field_relations(&self) -> Vec<FieldBytesRelation> {
@@ -213,15 +221,32 @@ impl MdocWindowBind {
     }
 
     fn n_lookups(&self) -> usize {
-        // 32 issuer-field + 32-per-attribute field + per-attribute digest
-        // sites, plus the Q-015 blinder `+m` site.
-        32 * (1 + self.attribute_field_handles.len()) + self.attribute_digest_handles.len() + 1
+        // 32 issuer-field (when the issuer source exists) + 32-per-attribute
+        // field + per-digest-handle sites, plus the Q-015 blinder `+m` site.
+        32 * (usize::from(self.issuer_field_handle.is_some())
+            + self.attribute_field_handles.len())
+            + self.attribute_digest_handles.len()
+            + 1
+    }
+}
+
+/// Fail-closed shape check: a row may only reference a source/target whose
+/// relation handle exists in this composition (otherwise its LogUp site would
+/// silently not be emitted and the balance argument would be vacuous).
+fn assert_rows_match_handles(rows: &[MdocWindowBindRow], has_issuer: bool, n_digests: usize) {
+    for row in rows {
+        if matches!(row.source, MdocFieldSource::IssuerMso) {
+            assert!(has_issuer, "IssuerMso window row without an issuer field relation");
+        }
+        if let MdocWindowTarget::Digest(index) = row.target {
+            assert!(index < n_digests, "digest window row without a digest relation");
+        }
     }
 }
 
 #[derive(Clone)]
 struct MdocWindowBindEval {
-    issuer_field_relation: FieldBytesRelation,
+    issuer_field_relation: Option<FieldBytesRelation>,
     attribute_field_relations: Vec<FieldBytesRelation>,
     attribute_digest_relations: Vec<DigestBytesRelation>,
     blinder_relation: ClaimedSumBlinderRelation,
@@ -331,7 +356,7 @@ fn mdoc_window_bind_base_trace(rows: &[MdocWindowBindRow]) -> Vec<MdocWindowColu
 
 fn mdoc_window_bind_interaction_trace(
     rows: &[MdocWindowBindRow],
-    issuer_field_relation: &FieldBytesRelation,
+    issuer_field_relation: Option<&FieldBytesRelation>,
     attribute_field_relations: &[FieldBytesRelation],
     attribute_digest_relations: &[DigestBytesRelation],
     blinder_relation: &ClaimedSumBlinderRelation,
@@ -342,11 +367,14 @@ fn mdoc_window_bind_interaction_trace(
     let trace = mdoc_window_bind_base_trace(rows);
     let n_vec_rows = 1usize << (MDOC_WINDOW_BIND_LOG_SIZE - LOG_N_LANES);
     let mut sites: Vec<Vec<(PackedQM31, PackedQM31)>> = Vec::with_capacity(
-        32 * (1 + attribute_field_relations.len()) + attribute_digest_relations.len(),
+        32 * (usize::from(issuer_field_relation.is_some()) + attribute_field_relations.len())
+            + attribute_digest_relations.len(),
     );
     for byte_idx in 0..32 {
         let mut source_relations = Vec::with_capacity(1 + attribute_field_relations.len());
-        source_relations.push((ISSUER_FIELD_ACTIVE_COL, issuer_field_relation));
+        if let Some(issuer_field_relation) = issuer_field_relation {
+            source_relations.push((ISSUER_FIELD_ACTIVE_COL, issuer_field_relation));
+        }
         source_relations.extend(
             attribute_field_relations
                 .iter()
@@ -482,7 +510,9 @@ impl FrameworkEval for MdocWindowBindEval {
                 constant_active.clone() * byte_active.clone() * (value.clone() - expected),
             );
             let mut source_relations = Vec::with_capacity(1 + self.attribute_field_relations.len());
-            source_relations.push((issuer_field_active.clone(), &self.issuer_field_relation));
+            if let Some(issuer_field_relation) = &self.issuer_field_relation {
+                source_relations.push((issuer_field_active.clone(), issuer_field_relation));
+            }
             source_relations.extend(
                 attr_field_active
                     .iter()
@@ -664,7 +694,7 @@ impl AirProver for MdocWindowBind {
             .expect("mdoc window bind blinder relation drawn before interaction");
         let (trace, claimed_sum) = mdoc_window_bind_interaction_trace(
             &self.rows,
-            &self.issuer_field_relation(),
+            self.issuer_field_relation().as_ref(),
             &self.attribute_field_relations(),
             &self.attribute_digest_relations(),
             &blinder_relation,
@@ -814,7 +844,7 @@ mod tests {
     #[test]
     fn mdoc_window_bind_inactive_rows_are_not_zero_pinned() {
         let eval = MdocWindowBindEval {
-            issuer_field_relation: FieldBytesRelation::dummy(),
+            issuer_field_relation: Some(FieldBytesRelation::dummy()),
             attribute_field_relations: Vec::new(),
             attribute_digest_relations: Vec::new(),
             blinder_relation: ClaimedSumBlinderRelation::dummy(),

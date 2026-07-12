@@ -118,7 +118,7 @@ mod mdoc_validity;
 mod mdoc_window_bind;
 #[cfg(feature = "p256")]
 pub mod nonce;
-#[cfg(feature = "ec-coprocessor")]
+#[cfg(any(feature = "ec-coprocessor", feature = "ml-dsa"))]
 mod public_digest_bind;
 #[cfg(test)]
 mod shape_dump;

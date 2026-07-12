@@ -72,8 +72,9 @@ use crate::binding::{
 use crate::constants::{K, N};
 use crate::msglink::{self, MsgLinkEval, MSG_FIELD_ID};
 use crate::sponge_link::{
-    BridgeEval, PublicPrefixEval, SqueezeSinkEval, SrcRelation, BRIDGE_BASE_COLS,
-    BRIDGE_INTERACTION_COLS, PREFIX_BASE_COLS, SINK_BASE_COLS, SINK_INTERACTION_COLS,
+    BridgeEval, PubMsgEval, PublicPrefixEval, SqueezeSinkEval, SrcRelation, BRIDGE_BASE_COLS,
+    BRIDGE_INTERACTION_COLS, PREFIX_BASE_COLS, PUBMSG_BASE_COLS, PUBMSG_INTERACTION_COLS,
+    SINK_BASE_COLS, SINK_INTERACTION_COLS,
 };
 use crate::types::MlDsaVerifyInput;
 use crate::verifier_native::{compute_public_evals, folded_check, ClaimedEvals};
@@ -406,32 +407,92 @@ fn prefix_eval(
     }
 }
 
-/// The four bridges (order 9..12). `msglink` closes the msg bridge's source.
-fn bridge_evals(
+/// The message slot at commit order 9: a msg BRIDGE (standalone / hosted
+/// private message — source MsgLink or the host's shared FieldBytesRelation),
+/// or the PUBLIC-message producer (S4: hosted public message — the bytes are
+/// preprocessed content, no source consumption, no byte conveyor upstream).
+enum MsgSlot {
+    Bridge(Box<BridgeEval>),
+    Public(PubMsgEval),
+}
+
+impl MsgSlot {
+    fn preprocessed_ids(&self) -> Vec<PreProcessedColumnId> {
+        match self {
+            MsgSlot::Bridge(b) => b.preprocessed_ids(),
+            MsgSlot::Public(p) => p.preprocessed_ids(),
+        }
+    }
+    fn gen_preprocessed(&self) -> Vec<ColEval> {
+        match self {
+            MsgSlot::Bridge(b) => b.gen_preprocessed(),
+            MsgSlot::Public(p) => p.gen_preprocessed(),
+        }
+    }
+    /// Base trace; `message` is the msg-bridge byte payload (unused by the
+    /// public producer, whose bytes are preprocessed).
+    fn gen_base(&self, message: &[u8]) -> Vec<ColEval> {
+        match self {
+            MsgSlot::Bridge(b) => b.gen_base(message),
+            MsgSlot::Public(p) => p.gen_base(),
+        }
+    }
+    fn gen_interaction(&self, message: &[u8]) -> (Vec<ColEval>, SecureField) {
+        match self {
+            MsgSlot::Bridge(b) => b.gen_interaction(message),
+            MsgSlot::Public(p) => p.gen_interaction(),
+        }
+    }
+}
+
+/// The commit-order-9 message slot descriptor. In public-message mode the
+/// producer carries the PUBLIC bytes; otherwise the msg bridge sources from
+/// the standalone MsgLink producer or the host's shared FieldBytesRelation.
+fn msg_slot(
     ns: &str,
-    message_len: usize,
+    message: &[u8],
     stream_base: u32,
+    public_message: bool,
     msglink: &MsgLinkRelation,
     shared_field: Option<&FieldBytesRelation>,
     hash_io: &HashIoRelation,
-) -> [BridgeEval; 4] {
+) -> MsgSlot {
     let b = stream_base;
-    // 9. msg bridge → MU_ABSORB@66, len |M|. Source is the standalone MsgLink
+    if public_message {
+        return MsgSlot::Public(PubMsgEval {
+            ns: ns.to_string(),
+            log_size: bridge_log_size(message.len()),
+            dst_stream: b + MU_ABSORB,
+            dst_off: 66,
+            bytes: message.to_vec(),
+            hash_io: hash_io.clone(),
+        });
+    }
+    // msg bridge → MU_ABSORB@66, len |M|. Source is the standalone MsgLink
     // producer, OR (hosted) the host's shared FieldBytesRelation.
     let msg_src = match shared_field {
         None => SrcRelation::MsgLink(msglink.clone(), MSG_FIELD_ID),
         Some(field) => SrcRelation::FieldBytes(field.clone(), HOSTED_MSG_FIELD_ID),
     };
-    let msg = BridgeEval {
+    MsgSlot::Bridge(Box::new(BridgeEval {
         tag: "msg",
         ns: ns.to_string(),
-        log_size: bridge_log_size(message_len),
+        log_size: bridge_log_size(message.len()),
         src: msg_src,
         dst_stream: b + MU_ABSORB,
         dst_off: 66,
-        len: message_len,
+        len: message.len(),
         hash_io: hash_io.clone(),
-    };
+    }))
+}
+
+/// The three fixed bridges (order 10..12).
+fn bridge_evals(
+    ns: &str,
+    stream_base: u32,
+    hash_io: &HashIoRelation,
+) -> [BridgeEval; 3] {
+    let b = stream_base;
     // 10. µ→c̃ bridge: HashIo(MU_SQUEEZE, off 0) → CT_ABSORB@0, len 64.
     let mu_ct = BridgeEval {
         tag: "mu_ct",
@@ -465,7 +526,7 @@ fn bridge_evals(
         len: 48,
         hash_io: hash_io.clone(),
     };
-    [msg, mu_ct, w1enc, ct_sib]
+    [mu_ct, w1enc, ct_sib]
 }
 
 /// The three squeeze sinks (order 13..15): consume the unused squeeze tails.
@@ -530,6 +591,7 @@ fn all_preprocessed_ids(
     ns: &str,
     input: &MlDsaVerifyInput,
     sib_stream_len: usize,
+    public_message: bool,
 ) -> Vec<PreProcessedColumnId> {
     let hash_io = HashIoRelation::dummy();
     let msglink = MsgLinkRelation::dummy();
@@ -549,8 +611,12 @@ fn all_preprocessed_ids(
     for kind in sib_tables::RcKind::ALL {
         ids.push(kind.value_column_id());
     }
-    // 4 bridges + 3 sinks.
-    for b in bridge_evals(ns, input.message.len(), 0, &msglink, None, &hash_io) {
+    // msg slot + 3 bridges + 3 sinks.
+    ids.extend(
+        msg_slot(ns, &input.message, 0, public_message, &msglink, None, &hash_io)
+            .preprocessed_ids(),
+    );
+    for b in bridge_evals(ns, 0, &hash_io) {
         ids.extend(b.preprocessed_ids());
     }
     for s in sink_evals(ns, input.message.len(), sib_stream_len, 0, &hash_io) {
@@ -563,6 +629,7 @@ fn all_preprocessed_log_sizes(
     input: &MlDsaVerifyInput,
     sib_stream_len: usize,
     sib_squeezed_len: usize,
+    public_message: bool,
 ) -> Vec<u32> {
     let mut sizes = Vec::new();
     let cls = coeffs_log_size();
@@ -580,7 +647,10 @@ fn all_preprocessed_log_sizes(
     for kind in sib_tables::RcKind::ALL {
         sizes.push(kind.log_size());
     }
-    for len in bridge_lens(input.message.len()) {
+    // msg slot: the public producer has 3 preprocessed cols, the bridge 2.
+    let msg_pre_cols = if public_message { PUBMSG_PREPROCESSED_COLS } else { 2 };
+    sizes.extend(vec![bridge_log_size(input.message.len()); msg_pre_cols]);
+    for len in bridge_lens() {
         // each bridge contributes 2 preprocessed cols at its log_size.
         sizes.push(bridge_log_size(len));
         sizes.push(bridge_log_size(len));
@@ -592,8 +662,12 @@ fn all_preprocessed_log_sizes(
     sizes
 }
 
-fn bridge_lens(message_len: usize) -> [usize; 4] {
-    [message_len, 64, 768, 48]
+/// Preprocessed column count of the public-message producer (`active`, `pos`,
+/// `byte`).
+const PUBMSG_PREPROCESSED_COLS: usize = 3;
+
+fn bridge_lens() -> [usize; 3] {
+    [64, 768, 48]
 }
 fn sink_lens(message_len: usize, sib_stream_len: usize) -> [usize; 3] {
     let sh = shapes(message_len, sib_stream_len, 0);
@@ -615,6 +689,7 @@ fn gen_all_preprocessed(
     input: &MlDsaVerifyInput,
     sib_stream_len: usize,
     sib_squeezed_len: usize,
+    public_message: bool,
 ) -> Vec<ColEval> {
     let hash_io = HashIoRelation::dummy();
     let msglink = MsgLinkRelation::dummy();
@@ -634,7 +709,11 @@ fn gen_all_preprocessed(
     for kind in sib_tables::RcKind::ALL {
         cols.push(sib_tables::gen_table_preprocessed(kind));
     }
-    for b in bridge_evals("", input.message.len(), 0, &msglink, None, &hash_io) {
+    cols.extend(
+        msg_slot("", &input.message, 0, public_message, &msglink, None, &hash_io)
+            .gen_preprocessed(),
+    );
+    for b in bridge_evals("", 0, &hash_io) {
         cols.extend(b.gen_preprocessed());
     }
     for s in sink_evals("", input.message.len(), sib_stream_len, 0, &hash_io) {
@@ -647,6 +726,27 @@ fn gen_all_preprocessed(
 // Prover / verifier state.
 // =============================================================================
 
+/// The built commit-order-9 message slot component (see [`MsgSlot`]).
+enum MsgSlotComponent {
+    Bridge(FrameworkComponent<BridgeEval>),
+    Public(FrameworkComponent<PubMsgEval>),
+}
+
+impl MsgSlotComponent {
+    fn as_component(&self) -> &dyn Component {
+        match self {
+            MsgSlotComponent::Bridge(c) => c,
+            MsgSlotComponent::Public(c) => c,
+        }
+    }
+    fn as_prover(&self) -> &dyn ComponentProver<SimdBackend> {
+        match self {
+            MsgSlotComponent::Bridge(c) => c,
+            MsgSlotComponent::Public(c) => c,
+        }
+    }
+}
+
 struct Built {
     coeffs: FrameworkComponent<CoeffsEval>,
     coeffs_rc: Vec<FrameworkComponent<coeffs_tables::RcTableEval>>,
@@ -658,6 +758,8 @@ struct Built {
     /// commit order — the msg bridge sources from the host's shared relation).
     msglink: Option<FrameworkComponent<MsgLinkEval>>,
     prefix: FrameworkComponent<PublicPrefixEval>,
+    /// Commit order 9: the msg bridge OR the public-message producer.
+    msg: MsgSlotComponent,
     bridges: Vec<FrameworkComponent<BridgeEval>>,
     sinks: Vec<FrameworkComponent<SqueezeSinkEval>>,
 }
@@ -674,6 +776,7 @@ impl Built {
             out.push(m);
         }
         out.push(&self.prefix);
+        out.push(self.msg.as_component());
         out.extend(self.bridges.iter().map(|c| c as &dyn Component));
         out.extend(self.sinks.iter().map(|c| c as &dyn Component));
         out
@@ -689,6 +792,7 @@ impl Built {
             out.push(m);
         }
         out.push(&self.prefix);
+        out.push(self.msg.as_prover());
         out.extend(self.bridges.iter().map(|c| c as &dyn ComponentProver<SimdBackend>));
         out.extend(self.sinks.iter().map(|c| c as &dyn ComponentProver<SimdBackend>));
         out
@@ -763,15 +867,25 @@ impl Claims {
 /// `(input, sib_stream_len, sib_squeezed_len)`.
 struct LayoutCtx {
     hosted: bool,
+    /// Hosted PUBLIC-message mode: the msg-bridge slot is the public-message
+    /// producer (S4).
+    public_message: bool,
     message_len: usize,
     sib_stream_len: usize,
     sib_squeezed_len: usize,
 }
 
 impl LayoutCtx {
-    fn new(input: &MlDsaVerifyInput, sib_stream_len: usize, sib_squeezed_len: usize, hosted: bool) -> Self {
+    fn new(
+        input: &MlDsaVerifyInput,
+        sib_stream_len: usize,
+        sib_squeezed_len: usize,
+        hosted: bool,
+        public_message: bool,
+    ) -> Self {
         Self {
             hosted,
+            public_message,
             message_len: input.message.len(),
             sib_stream_len,
             sib_squeezed_len,
@@ -803,8 +917,11 @@ fn module_trace_layout(ctx: &LayoutCtx) -> Vec<u32> {
     }
     // 8. prefix.
     t.extend(vec![crate::sponge_link::LINK_LOG_SIZE; PREFIX_BASE_COLS]);
-    // 9-12. bridges ×4.
-    for len in bridge_lens(ctx.message_len) {
+    // 9. msg slot (public producer: 1 enabler col; bridge: enabler + byte).
+    let msg_cols = if ctx.public_message { PUBMSG_BASE_COLS } else { BRIDGE_BASE_COLS };
+    t.extend(vec![bridge_log_size(ctx.message_len); msg_cols]);
+    // 10-12. bridges ×3.
+    for len in bridge_lens() {
         let ls = bridge_log_size(len);
         t.extend(vec![ls; BRIDGE_BASE_COLS]);
     }
@@ -846,8 +963,11 @@ fn module_interaction_layout(ctx: &LayoutCtx) -> Vec<u32> {
     }
     // 8. prefix.
     i.extend(vec![crate::sponge_link::LINK_LOG_SIZE; prefix_n_interaction(ctx.message_len)]);
-    // 9-12. bridges ×4.
-    for len in bridge_lens(ctx.message_len) {
+    // 9. msg slot (public producer: one yield; bridge: require + yield).
+    let msg_cols = if ctx.public_message { PUBMSG_INTERACTION_COLS } else { BRIDGE_INTERACTION_COLS };
+    i.extend(vec![bridge_log_size(ctx.message_len); msg_cols]);
+    // 10-12. bridges ×3.
+    for len in bridge_lens() {
         let ls = bridge_log_size(len);
         i.extend(vec![ls; BRIDGE_INTERACTION_COLS]);
     }
@@ -867,7 +987,12 @@ fn prefix_n_interaction(_message_len: usize) -> usize {
 
 fn layout_for(ctx: &LayoutCtx, input: &MlDsaVerifyInput) -> TreeLayout {
     TreeLayout {
-        preprocessed: all_preprocessed_log_sizes(input, ctx.sib_stream_len, ctx.sib_squeezed_len),
+        preprocessed: all_preprocessed_log_sizes(
+            input,
+            ctx.sib_stream_len,
+            ctx.sib_squeezed_len,
+            ctx.public_message,
+        ),
         trace: module_trace_layout(ctx),
         interaction: module_interaction_layout(ctx),
     }
@@ -997,12 +1122,29 @@ fn build_components(
         prefix_eval(input, stream_base, &rel.keccak.hash_io),
         claims.prefix,
     );
-    // 9-12. bridges ×4.
-    let bridge_descs = bridge_evals(ns, input.message.len(), stream_base, &rel.msglink, rel.shared_field.as_ref(), &rel.keccak.hash_io);
+    // 9. msg slot (claims slot bridges[0] — positional across modes).
+    let msg = match msg_slot(
+        ns,
+        &input.message,
+        stream_base,
+        ctx.public_message,
+        &rel.msglink,
+        rel.shared_field.as_ref(),
+        &rel.keccak.hash_io,
+    ) {
+        MsgSlot::Bridge(b) => {
+            MsgSlotComponent::Bridge(FrameworkComponent::new(allocator, *b, claims.bridges[0]))
+        }
+        MsgSlot::Public(p) => {
+            MsgSlotComponent::Public(FrameworkComponent::new(allocator, p, claims.bridges[0]))
+        }
+    };
+    // 10-12. bridges ×3 (claims slots bridges[1..=3]).
+    let bridge_descs = bridge_evals(ns, stream_base, &rel.keccak.hash_io);
     let bridges = bridge_descs
         .into_iter()
         .enumerate()
-        .map(|(idx, b)| FrameworkComponent::new(allocator, b, claims.bridges[idx]))
+        .map(|(idx, b)| FrameworkComponent::new(allocator, b, claims.bridges[idx + 1]))
         .collect();
     // 13-15. sinks ×3.
     let sink_descs = sink_evals(ns, input.message.len(), ctx.sib_stream_len, stream_base, &rel.keccak.hash_io);
@@ -1014,7 +1156,7 @@ fn build_components(
 
     Built {
         coeffs, coeffs_rc, decomp, decomp_rc, sib, sib_rc, msglink,
-        prefix, bridges, sinks,
+        prefix, msg, bridges, sinks,
     }
 }
 
@@ -1095,10 +1237,20 @@ impl MlDsaProver {
         shared_field: Option<SharedFieldRelation>,
         keccak_handle: SharedKeccakRelations,
     ) -> Self {
-        let hosted = shared_field.is_some();
+        Self::build(witness, input, shared_field, false, keccak_handle)
+    }
+
+    fn build(
+        witness: MlDsaWitness,
+        input: MlDsaVerifyInput,
+        shared_field: Option<SharedFieldRelation>,
+        public_message: bool,
+        keccak_handle: SharedKeccakRelations,
+    ) -> Self {
+        let hosted = shared_field.is_some() || public_message;
         let sib_stream_len = sampleinball::stream_len(&witness);
         let sib_squeezed_len = witness.sponge.sample_in_ball_squeezed.len();
-        let ctx = LayoutCtx::new(&input, sib_stream_len, sib_squeezed_len, hosted);
+        let ctx = LayoutCtx::new(&input, sib_stream_len, sib_squeezed_len, hosted, public_message);
         let claims = Claims { hosted, ..Claims::default() };
 
         Self {
@@ -1131,6 +1283,19 @@ impl MlDsaProver {
         keccak_handle: SharedKeccakRelations,
     ) -> Self {
         Self::new(witness, input, Some(shared_field), keccak_handle)
+    }
+
+    /// Hosted PUBLIC-message constructor (S4): the message bytes are a PUBLIC
+    /// statement input, yielded into the µ-absorb stream by the in-module
+    /// public-message producer — NO shared field relation, NO upstream byte
+    /// conveyor (SHA) required. Must not be combined with
+    /// [`Self::with_private_message`].
+    pub fn hosted_public(
+        witness: MlDsaWitness,
+        input: MlDsaVerifyInput,
+        keccak_handle: SharedKeccakRelations,
+    ) -> Self {
+        Self::build(witness, input, None, true, keccak_handle)
     }
 
     /// Set the per-instance stream-id base (see the `stream_base` field).
@@ -1191,16 +1356,11 @@ impl MlDsaProver {
     }
 }
 
-/// The byte payloads the four bridges move, in bridge order (msg, mu→ct, w1enc,
-/// ct→sib). Requires the sponge outputs (for µ/c̃ squeeze bytes) and the decomp
-/// w1Encode bytes.
-fn bridge_bytes(
-    input: &MlDsaVerifyInput,
-    outputs: &[Vec<u8>; 3],
-    w1_bytes: &[u8],
-) -> [Vec<u8>; 4] {
+/// The byte payloads the three fixed bridges move, in bridge order (mu→ct,
+/// w1enc, ct→sib). Requires the sponge outputs (for µ/c̃ squeeze bytes) and the
+/// decomp w1Encode bytes. (The msg slot's payload is `input.message`.)
+fn bridge_bytes(outputs: &[Vec<u8>; 3], w1_bytes: &[u8]) -> [Vec<u8>; 3] {
     [
-        input.message.clone(),          // msg bridge
         outputs[0][..64].to_vec(),      // mu→ct
         w1_bytes.to_vec(),              // w1enc (768)
         outputs[1][..48].to_vec(),      // ct→sib
@@ -1234,7 +1394,7 @@ impl Air for MlDsaProver {
         channel.mix_felts(&self.claimed_sums());
     }
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
-        all_preprocessed_ids(&self.namespace, &self.input, self.sib_stream_len)
+        all_preprocessed_ids(&self.namespace, &self.input, self.sib_stream_len, self.ctx.public_message)
     }
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
         let rel = self.relations().clone();
@@ -1261,6 +1421,7 @@ impl AirProver for MlDsaProver {
             &self.input,
             self.sib_stream_len,
             self.sib_squeezed_len,
+            self.ctx.public_message,
         ));
     }
     /// Partial preprocessed writes: with multiple hosted ML-DSA instances, the
@@ -1274,12 +1435,13 @@ impl AirProver for MlDsaProver {
         tb: &mut TreeBuilder<SimdBackend, air_core::Mc>,
         selected_ids: &[PreProcessedColumnId],
     ) {
-        let ids = all_preprocessed_ids(&self.namespace, &self.input, self.sib_stream_len);
+        let ids = all_preprocessed_ids(&self.namespace, &self.input, self.sib_stream_len, self.ctx.public_message);
         let cols = gen_all_preprocessed(
             &self.witness,
             &self.input,
             self.sib_stream_len,
             self.sib_squeezed_len,
+            self.ctx.public_message,
         );
         assert_eq!(ids.len(), cols.len(), "mldsa preprocessed ids/cols length mismatch");
         let selected: std::collections::HashSet<&PreProcessedColumnId> = selected_ids.iter().collect();
@@ -1297,12 +1459,13 @@ impl AirProver for MlDsaProver {
     }
 
     fn preprocessed_column_fingerprints(&mut self) -> Vec<PreprocessedColumnFingerprint> {
-        let ids = all_preprocessed_ids(&self.namespace, &self.input, self.sib_stream_len);
+        let ids = all_preprocessed_ids(&self.namespace, &self.input, self.sib_stream_len, self.ctx.public_message);
         let cols = gen_all_preprocessed(
             &self.witness,
             &self.input,
             self.sib_stream_len,
             self.sib_squeezed_len,
+            self.ctx.public_message,
         );
         fingerprint_preprocessed_columns("mldsa_statement", &ids, &cols)
     }
@@ -1369,11 +1532,22 @@ impl AirProver for MlDsaProver {
         let dummy_msglink = MsgLinkRelation::dummy();
         evals.extend(prefix_eval(&self.input, self.stream_base, &dummy_hash_io).gen_base());
 
-        // 9-12. bridges base (the sponge outputs are recomputed natively — the
-        // sponges themselves are proven in the keccak SERVICE module).
+        // 9. msg slot base + 10-12. bridges base (the sponge outputs are
+        // recomputed natively — the sponges themselves are proven in the
+        // keccak SERVICE module).
         let outputs = sponge_outputs(&self.witness);
-        let bbytes = bridge_bytes(&self.input, &outputs, &self.decomp_w1_bytes);
-        let bridge_descs = bridge_evals(&self.namespace, self.input.message.len(), self.stream_base, &dummy_msglink, None, &dummy_hash_io);
+        let slot = msg_slot(
+            &self.namespace,
+            &self.input.message,
+            self.stream_base,
+            self.ctx.public_message,
+            &dummy_msglink,
+            None,
+            &dummy_hash_io,
+        );
+        evals.extend(slot.gen_base(&self.input.message));
+        let bbytes = bridge_bytes(&outputs, &self.decomp_w1_bytes);
+        let bridge_descs = bridge_evals(&self.namespace, self.stream_base, &dummy_hash_io);
         for (b, bytes) in bridge_descs.iter().zip(bbytes.iter()) {
             evals.extend(b.gen_base(bytes));
         }
@@ -1479,11 +1653,24 @@ impl AirProver for MlDsaProver {
         self.claims.prefix = prefix_sum;
         evals.extend(prefix_tr);
 
-        // 9-12. bridges.
+        // 9. msg slot + 10-12. bridges (claims.bridges[0] is the msg slot —
+        // positional across modes).
         let outputs = sponge_outputs(&self.witness);
-        let bbytes = bridge_bytes(&self.input, &outputs, &self.decomp_w1_bytes);
-        let bridge_descs = bridge_evals(&self.namespace, self.input.message.len(), self.stream_base, &rel.msglink, rel.shared_field.as_ref(), &rel.keccak.hash_io);
         self.claims.bridges.clear();
+        let slot = msg_slot(
+            &self.namespace,
+            &self.input.message,
+            self.stream_base,
+            self.ctx.public_message,
+            &rel.msglink,
+            rel.shared_field.as_ref(),
+            &rel.keccak.hash_io,
+        );
+        let (slot_tr, slot_sum) = slot.gen_interaction(&self.input.message);
+        self.claims.bridges.push(slot_sum);
+        evals.extend(slot_tr);
+        let bbytes = bridge_bytes(&outputs, &self.decomp_w1_bytes);
+        let bridge_descs = bridge_evals(&self.namespace, self.stream_base, &rel.keccak.hash_io);
         for (b, bytes) in bridge_descs.iter().zip(bbytes.iter()) {
             let (tr, sum) = b.gen_interaction(bytes);
             self.claims.bridges.push(sum);
@@ -1556,8 +1743,31 @@ impl MlDsaVerifier {
         shared_field: Option<SharedFieldRelation>,
         keccak_handle: SharedKeccakRelations,
     ) -> Self {
-        let hosted = shared_field.is_some();
-        let ctx = LayoutCtx::new(&input, sib_stream_len, sib_squeezed_len, hosted);
+        Self::build(
+            input,
+            group_evals,
+            claimed_sums,
+            sib_stream_len,
+            sib_squeezed_len,
+            shared_field,
+            false,
+            keccak_handle,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        input: MlDsaVerifyInput,
+        group_evals: Vec<SecureField>,
+        claimed_sums: Vec<SecureField>,
+        sib_stream_len: usize,
+        sib_squeezed_len: usize,
+        shared_field: Option<SharedFieldRelation>,
+        public_message: bool,
+        keccak_handle: SharedKeccakRelations,
+    ) -> Self {
+        let hosted = shared_field.is_some() || public_message;
+        let ctx = LayoutCtx::new(&input, sib_stream_len, sib_squeezed_len, hosted, public_message);
         let claims = Claims::from_flat(&claimed_sums, hosted);
         Self {
             input,
@@ -1594,6 +1804,28 @@ impl MlDsaVerifier {
             sib_stream_len,
             sib_squeezed_len,
             Some(shared_field),
+            keccak_handle,
+        )
+    }
+
+    /// Hosted PUBLIC-message constructor (S4) — mirror of
+    /// [`MlDsaProver::hosted_public`].
+    pub fn hosted_public(
+        input: MlDsaVerifyInput,
+        group_evals: Vec<SecureField>,
+        claimed_sums: Vec<SecureField>,
+        sib_stream_len: usize,
+        sib_squeezed_len: usize,
+        keccak_handle: SharedKeccakRelations,
+    ) -> Self {
+        Self::build(
+            input,
+            group_evals,
+            claimed_sums,
+            sib_stream_len,
+            sib_squeezed_len,
+            None,
+            true,
             keccak_handle,
         )
     }
@@ -1641,7 +1873,7 @@ impl Air for MlDsaVerifier {
         channel.mix_felts(&self.claimed_sums());
     }
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
-        all_preprocessed_ids(&self.namespace, &self.input, self.sib_stream_len)
+        all_preprocessed_ids(&self.namespace, &self.input, self.sib_stream_len, self.ctx.public_message)
     }
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
         let rel = self.relations().clone();
@@ -1706,7 +1938,7 @@ pub fn debug_layout(
     sib_stream_len: usize,
     sib_squeezed_len: usize,
 ) -> TreeLayout {
-    let ctx = LayoutCtx::new(input, sib_stream_len, sib_squeezed_len, false);
+    let ctx = LayoutCtx::new(input, sib_stream_len, sib_squeezed_len, false, false);
     layout_for(&ctx, input)
 }
 

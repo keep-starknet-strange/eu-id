@@ -557,6 +557,25 @@ mod hosted_mode {
         assert!(rejected, "tampered SHA-side Sig_structure byte must reject");
     }
 
+    /// S4 statement-side message tamper: flip one PUBLIC issuer-message byte
+    /// in the statement AFTER proving. The public-message producer's
+    /// preprocessed content (content-hash ids, root-pinned) and the FS-mixed
+    /// message diverge from the proof's transcript → verify must reject.
+    #[test]
+    fn mldsa_mdoc_statement_message_tamper_rejects() {
+        let (extracted, statement) = full_pq_extracted_and_statement();
+        let proof = prove_mdoc_circuit(&extracted, &statement).expect("honest prove");
+        let mut tampered = statement.clone();
+        use eu_id_prover::mdoc::IssuerAuthInput;
+        match &mut tampered.issuer_input {
+            IssuerAuthInput::MlDsa(input) => input.message[2] ^= 0x01,
+            #[cfg(feature = "p256")]
+            IssuerAuthInput::Ecdsa(_) => panic!("statement carries an ML-DSA issuer"),
+        }
+        verify_mdoc_circuit(&proof, &tampered)
+            .expect_err("tampered statement issuer message must reject");
+    }
+
     /// The F-ROOT pin on the fully-PQ mdoc path: the verifier derives the
     /// expected tree-0 (preprocessed) root independently and pins it; a
     /// tampered pin is rejected with `PreprocessedRootMismatch` before the
