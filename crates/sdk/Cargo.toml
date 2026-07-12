@@ -27,9 +27,8 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 bindgen = ["uniffi/cli"]
 
 [dependencies]
-# The SDK is ML-DSA-only. Keep the upstream feature selection here until the
-# prover crate itself finishes collapsing its scheme feature matrix.
-eu-id-prover = { path = "../eu-id-prover", default-features = false, features = ["quantum-safe-mdoc"] }
+# The prover is ML-DSA-only by construction.
+eu-id-prover = { path = "../eu-id-prover" }
 uniffi = { version = "0.29" }
 thiserror = "2.0.18"
 # Deterministic CBOR: we build an explicitly-ordered `ciborium::value::Value`

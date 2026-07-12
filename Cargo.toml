@@ -9,11 +9,6 @@ members = [
     "crates/stwo-keccak",
     "crates/stwo-mldsa",
 ]
-exclude = [
-    "crates/stwo-p256",
-    "crates/stwo-p256-utils",
-    "crates/eu-id-ec-coprocessor",
-]
 resolver = "2"
 
 [workspace.package]

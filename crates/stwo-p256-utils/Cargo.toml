@@ -1,7 +1,0 @@
-[package]
-name = "stwo-p256-utils"
-version.workspace = true
-edition.workspace = true
-description = "P-256 Solinas reduction matrix and limb-width constants for the STARK AIR. No prover dependencies."
-
-[dependencies]

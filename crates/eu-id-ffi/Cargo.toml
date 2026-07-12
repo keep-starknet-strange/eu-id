@@ -5,25 +5,19 @@ edition.workspace = true
 
 # Thin C-ABI surface for the quantum-safe mobile build. The current benchmark
 # entry point measures the standalone SHA-256 prover; the quantum-safe mdoc
-# feature stays enabled so product bindings cannot accidentally pull in the
-# classical dependency graph. iOS links the `staticlib`; Android (later) the
-# `cdylib`.
+# dependency graph. iOS links the `staticlib`; Android (later) the `cdylib`.
 [lib]
 name = "eu_id_ffi"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
-# This branch is quantum-safe by construction; there is no classical fallback.
-default = ["quantum-safe-mdoc"]
 # Pass through to multi-threaded Stwo proving (rayon).
-parallel = ["stwo-sha256/parallel"]
-ml-dsa = ["dep:eu-id-prover", "eu-id-prover/ml-dsa"]
-quantum-safe-mdoc = ["ml-dsa", "eu-id-prover/quantum-safe-mdoc"]
+parallel = ["stwo-sha256/parallel", "eu-id-prover/parallel"]
 
 [dependencies]
 # Keep the quantum-safe prover graph available to future product bindings. The
 # standalone SHA benchmark depends on stwo-sha256 directly.
-eu-id-prover = { path = "../eu-id-prover", default-features = false, optional = true }
+eu-id-prover = { path = "../eu-id-prover" }
 stwo-sha256 = { path = "../stwo-sha256" }
 # Peak-footprint sampler. On Apple `physical_mem` resolves to mach
 # `phys_footprint` — the iOS jetsam metric — the same crate the laptop

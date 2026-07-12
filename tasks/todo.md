@@ -8,12 +8,13 @@ Baseline: `ce26b934` (S9)
 - [x] Publish the clean S9 branch baseline to `origin/feat/quantum-safe`.
 - [x] Audit branch features, classical dependencies, SHA consumers, and campaign floors.
 - [x] Remove P-256/ec-coprocessor crates from the quantum workspace and downstream product manifests.
-- [ ] Remove the final internal scheme aliases/cfg branches from `eu-id-prover` and delete the excluded
-      classical crate directories (the default product/dependency graph is already quantum-only).
+- [x] Remove the final internal scheme aliases/cfg branches from `eu-id-prover` and delete the
+      excluded classical crate directories.
 - [x] Convert the performance probe and dependency gate to the branch's default quantum build.
 - [x] Delete the legacy identity/nonce/coprocessor product API, SDK/FFI ABI, mobile UI, benches, and tests.
 - [x] Run the focused quantum build/test/dependency/lint gates.
-- [x] Commit and push the first Q1 checkpoint (`497348e6`).
+- [x] Commit and push Q1 in coherent checkpoints (initial product split, internal collapse, and final
+      physical divergence).
 
 ## Milestone Q2 — remove the revocation SHA conveyor
 
@@ -68,3 +69,11 @@ Baseline: `ce26b934` (S9)
   tests pass across four suites (335.26 s), and all 13 SDK tests pass. Two consecutive release probes
   measured 2,717/2,861 ms prove, 17/15 ms verify, and 1,108,810/1,109,450-byte proofs. These are
   same-session post-change observations, not an A/B attribution against the earlier S9 session.
+- Final Q1 divergence removes all P-256/ec-coprocessor/ML-DSA selection cfgs and feature aliases,
+  makes ML-DSA unconditional in prover/SDK/FFI manifests, deletes 143 files across the three
+  classical crate trees, removes their workspace exclusions, and regenerates `Cargo.lock` without
+  the classical packages.
+- Final Q1 verification: workspace all-target check, workspace strict clippy, and workspace fmt pass;
+  37 prover tests pass (393.84 s), plus 13 SDK and 2 FFI tests. The broader debug workspace test
+  umbrella was interrupted after exceeding 20 minutes without emitting a result; the product-scoped
+  acceptance rails above completed cleanly.
