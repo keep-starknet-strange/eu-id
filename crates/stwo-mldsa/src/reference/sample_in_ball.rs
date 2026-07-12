@@ -8,7 +8,11 @@
 //! bytes drive Fisher–Yates-style placement.
 
 use crate::constants::{N, TAU};
-use crate::reference::sponge::{shake256, SpongeTranscript};
+use crate::reference::sponge::{Shake256Reader, SpongeTranscript};
+
+/// SHAKE-256 rate in bytes (must match `statement::RATE` /
+/// `stwo_keccak::constants::N_BYTES_IN_RATE`).
+const RATE: usize = 136;
 
 /// Result of `SampleInBall`, with the recorded sponge transcript exposed for
 /// the witness generator.
@@ -27,12 +31,16 @@ pub struct SampleInBallResult {
 /// `s`, then for each `i ∈ [n−τ, n)` a rejection-sampled index `j ≤ i` is drawn
 /// and `c[i] ← c[j]; c[j] ← (−1)^{bit}`.
 pub fn sample_in_ball(c_tilde: &[u8]) -> SampleInBallResult {
-    // Squeeze generously: 8 sign bytes + a stream long enough that the
-    // rejection sampler never exhausts it in practice (τ placements, each
-    // needing on average slightly more than one byte). 8 + 256 is comfortably
-    // beyond the worst realistic case; if it ever ran short we would panic
-    // below rather than return a wrong result.
-    let (stream, transcript) = shake256(&[c_tilde], 8 + 8 * N);
+    // Squeeze on demand, one SHAKE-256 rate block (136 bytes) at a time —
+    // the spec's streaming XOF. The recorded transcript is then block-aligned
+    // to what the sampler actually consumed
+    // (`squeezed.len() == RATE · ceil(consumed_len / RATE)`), which is exactly
+    // the stream the in-circuit sponge job replays (`statement::n_squeeze_sib`)
+    // and what sizes the SIB component's log size. A flat over-squeeze here
+    // (the old `8 + 8·N`) would inflate that component 4× for bytes nothing
+    // ever consumes.
+    let mut reader = Shake256Reader::new(&[c_tilde]);
+    let mut stream = reader.read(RATE);
 
     let mut c = [0i32; N];
     let sign_bits = u64::from_le_bytes(stream[0..8].try_into().expect("8 bytes"));
@@ -42,9 +50,10 @@ pub fn sample_in_ball(c_tilde: &[u8]) -> SampleInBallResult {
     for i in (N - TAU)..N {
         // Rejection-sample j ∈ [0, i].
         let j = loop {
-            let byte = *stream
-                .get(pos)
-                .expect("SampleInBall stream exhausted (increase squeeze length)");
+            if pos == stream.len() {
+                stream.extend(reader.read(RATE));
+            }
+            let byte = stream[pos];
             pos += 1;
             if (byte as usize) <= i {
                 break byte as usize;
@@ -55,6 +64,7 @@ pub fn sample_in_ball(c_tilde: &[u8]) -> SampleInBallResult {
         sign >>= 1;
     }
 
+    let transcript = reader.transcript().clone();
     SampleInBallResult { c, transcript }
 }
 

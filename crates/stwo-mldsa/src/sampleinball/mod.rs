@@ -2,7 +2,7 @@
 //! SHAKE squeeze stream.
 //!
 //! Semantic oracle: [`crate::reference::sample_in_ball`]. The reference squeezes
-//! `8 + 8·N` bytes: the first 8 are the sign source `s`; then for each target
+//! rate blocks on demand: the first 8 bytes are the sign source `s`; then for each target
 //! `i ∈ [N−τ, N)` it rejection-samples `j ← byte` (reject while `byte > i`) and
 //! sets `c[i] = c[j]; c[j] = (−1)^{s&1}; s ≫= 1`.
 //!
@@ -180,7 +180,8 @@ pub fn sib_preprocessed_ids_ns(ns: &str) -> Vec<PreProcessedColumnId> {
 
 /// Honest stream length: the number of squeeze bytes the rejection sampler
 /// actually CONSUMES (8 sign bytes + placement bytes until τ accepts). The
-/// transcript squeezes a generous `8 + 8·N`, but only this prefix drives `c`.
+/// transcript squeezes whole rate blocks on demand, but only this prefix
+/// drives `c`.
 pub fn stream_len(witness: &MlDsaWitness) -> usize {
     let stream = &witness.sponge.sample_in_ball_squeezed;
     let mut i = (N - TAU) as u32;

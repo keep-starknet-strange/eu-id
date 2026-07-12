@@ -186,8 +186,9 @@ pub struct MlDsaProof {
     /// The honest SIB squeeze stream length (public — sizes the SIB squeeze +
     /// its sink; the verifier derives the SIB shape's `n_squeeze` from it).
     pub sib_stream_len: usize,
-    /// The FULL native SIB squeeze length (`witness.sponge.sample_in_ball_squeezed.len()`,
-    /// a fixed protocol constant). Public — sizes the sib component's log size.
+    /// The FULL native SIB squeeze length (`witness.sponge.sample_in_ball_squeezed.len()`
+    /// = `136 · n_squeeze_sib(sib_stream_len)`, block-aligned on-demand squeeze).
+    /// Public — sizes the sib component's log size.
     /// Reveals nothing secret; it is a length, not a value.
     pub sib_squeezed_len: usize,
     /// The keccak service module's claimed sums (`[sponge_v, keccak, round,

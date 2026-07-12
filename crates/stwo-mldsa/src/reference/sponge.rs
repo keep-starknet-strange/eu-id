@@ -73,6 +73,46 @@ pub fn shake128(inputs: &[&[u8]], out_len: usize) -> (Vec<u8>, SpongeTranscript)
     (squeezed, transcript)
 }
 
+/// A streaming SHAKE-256 reader for `SampleInBall`, which squeezes one rate
+/// block at a time until τ coefficients are placed (FIPS 204 Algorithm 29).
+/// Records everything it absorbs and squeezes.
+pub struct Shake256Reader {
+    reader: sha3::Shake256Reader,
+    transcript: SpongeTranscript,
+}
+
+impl Shake256Reader {
+    /// Absorb `inputs`, finalize, and prepare to stream output.
+    pub fn new(inputs: &[&[u8]]) -> Self {
+        let mut hasher = Shake256::default();
+        let mut absorbed = Vec::new();
+        for chunk in inputs {
+            hasher.update(chunk);
+            absorbed.extend_from_slice(chunk);
+        }
+        Self {
+            reader: hasher.finalize_xof(),
+            transcript: SpongeTranscript {
+                absorbed,
+                squeezed: Vec::new(),
+            },
+        }
+    }
+
+    /// Squeeze the next `n` bytes, appending them to the recorded transcript.
+    pub fn read(&mut self, n: usize) -> Vec<u8> {
+        let mut out = vec![0u8; n];
+        self.reader.read(&mut out);
+        self.transcript.squeezed.extend_from_slice(&out);
+        out
+    }
+
+    /// The transcript recorded so far.
+    pub fn transcript(&self) -> &SpongeTranscript {
+        &self.transcript
+    }
+}
+
 /// A streaming SHAKE-128 reader for `RejNTTPoly`, which squeezes an
 /// unbounded stream 3 bytes at a time until 256 coefficients are accepted
 /// (FIPS 204 Algorithm 30). Records everything it absorbs and squeezes.
