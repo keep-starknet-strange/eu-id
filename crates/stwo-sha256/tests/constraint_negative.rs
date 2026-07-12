@@ -53,11 +53,16 @@ use stwo_constraint_framework::{
 };
 
 use air_core::relations::field_id;
-use stwo_sha256::components::{is_first_row_column_id, round_cyclic_column_ids};
-use stwo_sha256::constraints::Sha256Eval;
+use stwo_sha256::components::{
+    is_first_row_column_id, round_cyclic_column_ids, slot_sel_column_id, slot_starts_column_id,
+};
+use stwo_sha256::constraints::{MultiSlotEval, Sha256Eval};
 use stwo_sha256::field_exposure::FieldExposure;
-use stwo_sha256::relations::Sha256Relations;
-use stwo_sha256::trace::{generate_trace, generate_trace_with_fields, min_log_size, Layout};
+use stwo_sha256::relations::{Sha256Relations, SlotIoRelations};
+use stwo_sha256::slots::{MultiSlotConfig, SlotSpec};
+use stwo_sha256::trace::{
+    generate_multi_trace, generate_trace, generate_trace_with_fields, min_log_size, Layout,
+};
 use stwo_sha256::witness::compute_sha256_witness;
 
 // ---------------------------------------------------------------------------
@@ -98,6 +103,9 @@ struct LinearConstraintCollector<'a> {
     constraint_idx: usize,
     /// Non-zero residuals captured this row.
     non_zero: Vec<Residual>,
+    /// Multi-slot schedule fixture: when set, `get_preprocessed_column`
+    /// serves the schedule-encoded `slot_starts` / `slot_sel` columns.
+    multi: Option<&'a MultiSlotConfig>,
 }
 
 impl<'a> LinearConstraintCollector<'a> {
@@ -109,7 +117,19 @@ impl<'a> LinearConstraintCollector<'a> {
             col_index: 0,
             constraint_idx: 0,
             non_zero: Vec::new(),
+            multi: None,
         }
+    }
+
+    fn new_multi(
+        trace: &'a [Vec<BaseField>],
+        log_size: u32,
+        row: usize,
+        config: &'a MultiSlotConfig,
+    ) -> Self {
+        let mut out = Self::new(trace, log_size, row);
+        out.multi = Some(config);
+        out
     }
 }
 
@@ -162,6 +182,24 @@ impl EvalAtRow for LinearConstraintCollector<'_> {
         // mirroring `crate::preprocessed`'s emission. This does **not**
         // advance `col_index` (preprocessed columns live in a separate
         // commitment tree from the main trace).
+        if let Some(config) = self.multi {
+            let natural = circle_domain_index_to_coset_index(
+                bit_reverse_index(self.row, self.log_size),
+                self.log_size,
+            );
+            let slot_rows = config.slot_rows();
+            let n_slots = config.n_slots();
+            if column == slot_starts_column_id(self.log_size, config.slot_log, n_slots) {
+                return BaseField::from(u32::from(
+                    natural % slot_rows == 0 && natural / slot_rows < n_slots,
+                ));
+            }
+            for s in 0..n_slots {
+                if column == slot_sel_column_id(s, self.log_size, config.slot_log, n_slots) {
+                    return BaseField::from(u32::from(natural / slot_rows == s));
+                }
+            }
+        }
         if column == is_first_row_column_id() {
             return if self.row == 0 {
                 BaseField::from(1u32)
@@ -791,5 +829,164 @@ fn rejects_padding_role_flag_on_disabled_row() {
     assert!(
         !residuals.is_empty(),
         "AIR must reject a padding-role flag set on a disabled row",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Multi-slot (S8) linear-constraint negatives — tasks/sha-multimessage-design.md §5
+// ---------------------------------------------------------------------------
+
+/// The S8 test schedule: 3 uniform 256-row slots at log 10.
+/// slot 0 — 2-block message, legacy block-0 field exposure (revocation-like);
+/// slot 1 — 1-block digest-exposing message (attribute-like);
+/// slot 2 — 2-block digest-exposing message with a multi-block (block-1)
+///          field exposure, so the selector/counter tail exists.
+fn multi_fixture() -> (Vec<stwo_sha256::types::Sha256Witness>, MultiSlotConfig) {
+    let witnesses = vec![
+        compute_sha256_witness(&[0x11u8; 80]),
+        compute_sha256_witness(b"abc"),
+        compute_sha256_witness(&[0x42u8; 100]),
+    ];
+    let config = MultiSlotConfig::new(
+        8,
+        vec![
+            SlotSpec {
+                expose_digest: false,
+                field_exposure: FieldExposure::from_preimage_windows(&[(field_id::DOB, 0, 20)]),
+            },
+            SlotSpec {
+                expose_digest: true,
+                field_exposure: FieldExposure::empty(),
+            },
+            SlotSpec {
+                expose_digest: true,
+                field_exposure: FieldExposure::from_preimage_windows_multi(&[(9, 66, 4)]),
+            },
+        ],
+    );
+    (witnesses, config)
+}
+
+const MULTI_LOG: u32 = 10;
+
+fn collect_multi_constraint_residuals(
+    trace: &[Vec<BaseField>],
+    config: &MultiSlotConfig,
+) -> Vec<Residual> {
+    let eval = Sha256Eval {
+        log_size: MULTI_LOG,
+        relations: Sha256Relations::dummy(),
+        expose_digest: false,
+        field_exposure: FieldExposure::empty(),
+        multi: Some(MultiSlotEval {
+            config: config.clone(),
+            relations: SlotIoRelations::dummy_per_slot(config.n_slots()),
+        }),
+    };
+    let n_rows = 1usize << MULTI_LOG;
+    let mut all = Vec::new();
+    for row in 0..n_rows {
+        let collector = LinearConstraintCollector::new_multi(trace, MULTI_LOG, row, config);
+        let collector = eval.evaluate(collector);
+        all.extend(collector.non_zero);
+    }
+    all
+}
+
+fn multi_trace_and_config() -> (Vec<Vec<BaseField>>, MultiSlotConfig) {
+    let (witnesses, config) = multi_fixture();
+    let refs: Vec<&stwo_sha256::types::Sha256Witness> = witnesses.iter().collect();
+    let trace = generate_multi_trace(&refs, MULTI_LOG, &config);
+    (trace, config)
+}
+
+/// Honest merged trace: every linear identity of the multi-slot AIR is zero
+/// — including the per-slot IV anchors, the slot-gated field families, the
+/// per-slot decoy padding, and the slot-attribution rails.
+#[test]
+fn multi_slot_honest_trace_has_no_linear_residuals() {
+    let (trace, config) = multi_trace_and_config();
+    let residuals = collect_multi_constraint_residuals(&trace, &config);
+    assert!(
+        residuals.is_empty(),
+        "honest multi-slot trace produced residuals: {:?}",
+        &residuals[..residuals.len().min(8)],
+    );
+}
+
+/// T4 — per-slot IV reset: tampering slot 1's first-block `h_in` breaks the
+/// slot-start IV binding (`is_first_block` is preprocessed-pinned at every
+/// slot start, so the prover cannot dodge by clearing the flag).
+#[test]
+fn multi_slot_rejects_slot_iv_mutation() {
+    let (mut trace, config) = multi_trace_and_config();
+    let slot1_t0 = Layout::row_slot(config.slot_start_row(1), MULTI_LOG);
+    let (lo, _) = Layout::h_in_word(0);
+    trace[lo][slot1_t0] += BaseField::from(1u32);
+    let residuals = collect_multi_constraint_residuals(&trace, &config);
+    assert!(
+        !residuals.is_empty(),
+        "tampered slot-1 IV must produce a residual",
+    );
+}
+
+/// Anchor rail — a mid-slot `is_first_block = 1` (attempting to restart the
+/// chain and hash a forged message tail) violates the preprocessed
+/// `is_first_block ≡ slot_starts` pin.
+#[test]
+fn multi_slot_rejects_mid_slot_first_block_flag() {
+    let (mut trace, config) = multi_trace_and_config();
+    // Slot 0 block 1's t = 0 row is NOT a slot start.
+    let row = Layout::row_slot(config.slot_start_row(0) + 64, MULTI_LOG);
+    trace[Layout::COL_IS_FIRST_BLOCK][row] = BaseField::from(1u32);
+    let residuals = collect_multi_constraint_residuals(&trace, &config);
+    assert!(
+        !residuals.is_empty(),
+        "mid-slot is_first_block must produce a residual",
+    );
+}
+
+/// T2 — slot-attribution rail: firing slot 2's field selector on slot 0's
+/// block-1 `t = 15` row (where the slot-LOCAL block counter also equals the
+/// yield's target block, so every legacy selector constraint is satisfied)
+/// must be rejected by the NEW `selector · (1 − slot_sel)` rail — without it
+/// the prover would yield slot-0 bytes into slot 2's field relation.
+#[test]
+fn multi_slot_rejects_selector_fired_on_foreign_slot() {
+    let (mut trace, config) = multi_trace_and_config();
+    let exposure = &config.slots[2].field_exposure;
+    assert!(exposure.needs_block_witness());
+    assert_eq!(exposure.yields()[0].block_idx, 1);
+    let selector_col = Layout::TOTAL_COLS
+        + config.field_tail_base(2)
+        + exposure
+            .selector_column_slot(0)
+            .expect("multi-block exposure has selectors");
+    // Slot 0, local block 1, t = 15: counter b = 1 == target block 1.
+    let row = Layout::row_slot(config.slot_start_row(0) + 64 + 15, MULTI_LOG);
+    trace[selector_col][row] = BaseField::from(1u32);
+
+    // Control: the mutation satisfies boolean, t=15-liveness, and the
+    // counter match — remove the slot rail and nothing else would fire.
+    let residuals = collect_multi_constraint_residuals(&trace, &config);
+    assert!(
+        !residuals.is_empty(),
+        "foreign-slot selector must trip the slot-attribution rail",
+    );
+}
+
+/// Chain integrity inside a slot: tampering slot 2's continuation-block
+/// `h_in` breaks the §10.3 within-slot chain exactly as in the single
+/// instance.
+#[test]
+fn multi_slot_rejects_chain_mutation() {
+    let (mut trace, config) = multi_trace_and_config();
+    let row = Layout::row_slot(config.slot_start_row(2) + 64, MULTI_LOG);
+    let (lo, _) = Layout::h_in_word(3);
+    trace[lo][row] += BaseField::from(1u32);
+    let residuals = collect_multi_constraint_residuals(&trace, &config);
+    assert!(
+        !residuals.is_empty(),
+        "tampered slot-2 chain must produce a residual",
     );
 }

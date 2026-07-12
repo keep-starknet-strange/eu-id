@@ -668,6 +668,20 @@ fn generate_trace_with_fields_scalar_fallback_with_decoys(
     cols
 }
 
+/// [`generate_multi_trace_base_columns`] as `Vec<Vec<BaseField>>` (one
+/// inner `Vec` per column, storage order) — the shape the constraint-level
+/// tests consume.
+pub fn generate_multi_trace(
+    witnesses: &[&Sha256Witness],
+    log_size: u32,
+    config: &crate::slots::MultiSlotConfig,
+) -> Vec<Vec<BaseField>> {
+    generate_multi_trace_base_columns(witnesses, log_size, config)
+        .into_iter()
+        .map(BaseColumn::into_cpu_vec)
+        .collect()
+}
+
 /// Materialise the multi-slot merged trace: slot `s`'s message occupies the
 /// leading blocks of region `[s·slot_rows, (s+1)·slot_rows)`; all remaining
 /// rows (in-slot padding and the tail) are fresh one-block SHA decoys with
@@ -680,7 +694,7 @@ fn generate_trace_with_fields_scalar_fallback_with_decoys(
 /// THAT row's block words (the decomposition constraint is global); each
 /// counter carries the row's slot-local block index; selectors are one-hot
 /// only on their own slot's target rows.
-pub(crate) fn generate_multi_trace_base_columns(
+pub fn generate_multi_trace_base_columns(
     witnesses: &[&Sha256Witness],
     log_size: u32,
     config: &crate::slots::MultiSlotConfig,
