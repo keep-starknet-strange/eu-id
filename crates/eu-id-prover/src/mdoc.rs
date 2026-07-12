@@ -4911,13 +4911,42 @@ impl AirProver for MdocMsoPayloadBind {
 const MDOC_REVOCATION_RANGE_LOG_SIZE: u32 = LOG_N_LANES;
 const REVOCATION_U64_BYTES: usize = 8;
 const REVOCATION_RANGE_BYTE_COLS: usize = 5 * REVOCATION_U64_BYTES;
-const REVOCATION_RANGE_BIT_COLS: usize = REVOCATION_RANGE_BYTE_COLS * 8;
 const REVOCATION_RANGE_CARRY_COLS: usize = 2 * REVOCATION_U64_BYTES;
 const REVOCATION_RANGE_DIGEST_TAIL_COLS: usize = 32 - REVOCATION_U64_BYTES;
-const REVOCATION_RANGE_TRACE_COLS: usize = REVOCATION_RANGE_BYTE_COLS
-    + REVOCATION_RANGE_BIT_COLS
-    + REVOCATION_RANGE_CARRY_COLS
-    + REVOCATION_RANGE_DIGEST_TAIL_COLS;
+
+/// Byte-column indices that need IN-COMPONENT bit pinning (`byte < 256` via 8
+/// boolean bit columns + recomposition). A byte column is exempt when an
+/// external mechanism already pins it:
+///
+/// - `id` bytes (0..8): in Public-digest mode (S4) the eval pins them to the
+///   public `Sha256(MSO)` constants — constants are `< 256` by construction.
+///   In Relation mode the MSO SHA digest provider defers the byte range check
+///   to this consumer, so the bits stay.
+/// - `id_lo`/`id_hi` bytes (8..24): when the message field relation is wired,
+///   these columns are the values of this component's `(field_id, byte_idx,
+///   value)` LogUp uses, and the relation's sole producer (the revocation SHA
+///   module's field exposure) range-checks every exposed preimage byte to
+///   `[0, 256)` in-AIR — a value ≥ 256 here has no matching producer tuple and
+///   the global LogUp cannot balance. Without the message relation the bits
+///   stay.
+/// - slack bytes (24..40): witness-only, no external counterpart — always
+///   bit-pinned (unpinned slack bytes would void the borrow-chain range
+///   argument).
+fn revocation_range_bit_byte_indices(public_digest: bool, has_message: bool) -> Vec<usize> {
+    let mut indices = Vec::with_capacity(REVOCATION_RANGE_BYTE_COLS);
+    if !public_digest {
+        indices.extend(0..REVOCATION_U64_BYTES);
+    }
+    if !has_message {
+        indices.extend(REVOCATION_U64_BYTES..3 * REVOCATION_U64_BYTES);
+    }
+    indices.extend(3 * REVOCATION_U64_BYTES..REVOCATION_RANGE_BYTE_COLS);
+    indices
+}
+
+fn revocation_range_bit_cols(public_digest: bool, has_message: bool) -> usize {
+    revocation_range_bit_byte_indices(public_digest, has_message).len() * 8
+}
 
 type MdocRevocationRangeColumnEval = CircleEvaluation<SimdBackend, M31, BitReversedOrder>;
 type MdocRevocationRangeComponent = FrameworkComponent<MdocRevocationRangeEval>;
@@ -4946,14 +4975,20 @@ impl MsoDigestBinding {
     }
 }
 
-/// Trace column count per digest-binding mode: the digest TAIL columns exist
-/// only when the digest is bound through the relation.
-fn revocation_range_trace_cols(public_digest: bool) -> usize {
-    if public_digest {
-        REVOCATION_RANGE_TRACE_COLS - REVOCATION_RANGE_DIGEST_TAIL_COLS
+/// Trace column count per (digest-binding, message-relation) mode: the digest
+/// TAIL columns exist only when the digest is bound through the relation, and
+/// the bit columns exist only for externally-unpinned bytes (see
+/// [`revocation_range_bit_byte_indices`]).
+fn revocation_range_trace_cols(public_digest: bool, has_message: bool) -> usize {
+    let tail = if public_digest {
+        0
     } else {
-        REVOCATION_RANGE_TRACE_COLS
-    }
+        REVOCATION_RANGE_DIGEST_TAIL_COLS
+    };
+    REVOCATION_RANGE_BYTE_COLS
+        + revocation_range_bit_cols(public_digest, has_message)
+        + REVOCATION_RANGE_CARRY_COLS
+        + tail
 }
 
 struct MdocRevocationRangeBind {
@@ -5112,6 +5147,7 @@ fn comparison_carries(lhs: [u8; 8], rhs: [u8; 8], slack: [u8; 8]) -> [u8; 8] {
 fn revocation_range_base_trace(
     witness: &MdocRevocationRangeWitness,
     digest_tail: Option<&[u8; 32]>,
+    has_message: bool,
 ) -> Vec<MdocRevocationRangeColumnEval> {
     let id = witness.id.to_le_bytes();
     let id_lo = witness.id_lo.to_le_bytes();
@@ -5129,7 +5165,9 @@ fn revocation_range_base_trace(
     let lower_carries = comparison_carries(id_lo, id, lower_slack);
     let upper_carries = comparison_carries(id, id_hi, upper_slack);
 
-    let mut first_row = Vec::with_capacity(REVOCATION_RANGE_TRACE_COLS);
+    let public_digest = digest_tail.is_none();
+    let mut first_row =
+        Vec::with_capacity(revocation_range_trace_cols(public_digest, has_message));
     for byte in id
         .into_iter()
         .chain(id_lo)
@@ -5140,8 +5178,12 @@ fn revocation_range_base_trace(
         first_row.push(u32::from(byte));
     }
     let range_bytes = first_row[..REVOCATION_RANGE_BYTE_COLS].to_vec();
-    for byte in range_bytes {
-        first_row.extend(byte_bits(byte as u8).into_iter().map(u32::from));
+    for byte_idx in revocation_range_bit_byte_indices(public_digest, has_message) {
+        first_row.extend(
+            byte_bits(range_bytes[byte_idx] as u8)
+                .into_iter()
+                .map(u32::from),
+        );
     }
     first_row.extend(lower_carries.into_iter().map(u32::from));
     first_row.extend(upper_carries.into_iter().map(u32::from));
@@ -5154,7 +5196,7 @@ fn revocation_range_base_trace(
     }
     debug_assert_eq!(
         first_row.len(),
-        revocation_range_trace_cols(digest_tail.is_none())
+        revocation_range_trace_cols(public_digest, has_message)
     );
 
     first_row
@@ -5182,11 +5224,16 @@ fn revocation_range_interaction_trace(
         RangeDigestEval::Relation(relation) => Some(relation),
         RangeDigestEval::Public(_) => None,
     };
-    let base = revocation_range_base_trace(witness, relation.is_some().then_some(mso_digest));
+    let base = revocation_range_base_trace(
+        witness,
+        relation.is_some().then_some(mso_digest),
+        message_relation.is_some(),
+    );
     let active = revocation_range_active_column();
     let n_vec_rows = 1usize << (MDOC_REVOCATION_RANGE_LOG_SIZE - LOG_N_LANES);
-    let digest_tail_offset =
-        REVOCATION_RANGE_BYTE_COLS + REVOCATION_RANGE_BIT_COLS + REVOCATION_RANGE_CARRY_COLS;
+    let digest_tail_offset = REVOCATION_RANGE_BYTE_COLS
+        + revocation_range_bit_cols(relation.is_none(), message_relation.is_some())
+        + REVOCATION_RANGE_CARRY_COLS;
     // Q-015 blinder `+m/(z−combine(v))`, emitted LAST (paired with the lone
     // message site in the TS13 Relation branch, its own column otherwise).
     let blinder_num = PackedQM31::broadcast(blinder_m);
@@ -5324,24 +5371,31 @@ impl FrameworkEval for MdocRevocationRangeEval {
         eval.add_constraint(active.clone() * (active.clone() - one.clone()));
 
         let public_digest = matches!(self.digest_binding, RangeDigestEval::Public(_));
-        let values: Vec<E::F> = (0..revocation_range_trace_cols(public_digest))
+        let has_message = self.message_field_relation.is_some();
+        let values: Vec<E::F> = (0..revocation_range_trace_cols(public_digest, has_message))
             .map(|_| eval.next_trace_mask())
             .collect();
         for value in &values {
             eval.add_constraint((one.clone() - active.clone()) * value.clone());
         }
 
-        for byte_idx in 0..REVOCATION_RANGE_BYTE_COLS {
+        // Bit-pin exactly the externally-unpinned bytes (see
+        // `revocation_range_bit_byte_indices` for the per-byte exemptions).
+        for (slot, byte_idx) in revocation_range_bit_byte_indices(public_digest, has_message)
+            .into_iter()
+            .enumerate()
+        {
             let byte = values[byte_idx].clone();
-            let bits = &values[REVOCATION_RANGE_BYTE_COLS + byte_idx * 8
-                ..REVOCATION_RANGE_BYTE_COLS + (byte_idx + 1) * 8];
+            let bits = &values
+                [REVOCATION_RANGE_BYTE_COLS + slot * 8..REVOCATION_RANGE_BYTE_COLS + (slot + 1) * 8];
             for bit in bits {
                 eval.add_constraint(bit.clone() * (bit.clone() - one.clone()));
             }
             eval.add_constraint(active.clone() * (byte - byte_from_bits::<E>(bits)));
         }
 
-        let lower_carries_offset = REVOCATION_RANGE_BYTE_COLS + REVOCATION_RANGE_BIT_COLS;
+        let lower_carries_offset =
+            REVOCATION_RANGE_BYTE_COLS + revocation_range_bit_cols(public_digest, has_message);
         let upper_carries_offset = lower_carries_offset + REVOCATION_U64_BYTES;
         for carry in &values[lower_carries_offset..upper_carries_offset + REVOCATION_U64_BYTES] {
             eval.add_constraint(carry.clone() * (carry.clone() - one.clone()));
@@ -5485,7 +5539,10 @@ impl Air for MdocRevocationRangeBind {
         };
         TreeLayout {
             preprocessed: vec![MDOC_REVOCATION_RANGE_LOG_SIZE],
-            trace: vec![MDOC_REVOCATION_RANGE_LOG_SIZE; revocation_range_trace_cols(public)],
+            trace: vec![
+                MDOC_REVOCATION_RANGE_LOG_SIZE;
+                revocation_range_trace_cols(public, self.message_field_handle.is_some())
+            ],
             interaction: vec![MDOC_REVOCATION_RANGE_LOG_SIZE; interaction_cols],
         }
     }
@@ -5574,6 +5631,7 @@ impl AirProver for MdocRevocationRangeBind {
                 .as_ref()
                 .expect("mdoc revocation range witness is set"),
             digest_tail.as_ref(),
+            self.message_field_handle.is_some(),
         ));
     }
 

@@ -351,3 +351,83 @@ Gates (all green, 2026-07-12, post-S6b at 82958f31): mdoc_mldsa
 p256+ml-dsa 25, mdoc_mldsa quantum-safe-mdoc 19, credential_pipeline 3
 (+1 ignored), stwo-keccak 31, stwo-mldsa 74 (+2 ignored), stwo-sha256 145
 (+18 ignored), check-quantum-only-deps clean.
+
+## S7 (2026-07-12) — proof-size push: query shave + column small-fry
+
+pq_perf_probe, RAYON_NUM_THREADS=1, --release. NOTE: absolute prove_ms
+drifted +25% machine-wide during this session (A/B: the UNCHANGED S6b
+tree re-measured 10.2-10.4 s solo); per-slice prove deltas below are
+same-session A/B, proof bytes are deterministic modulo blinding (±2 KB).
+
+| slice | prove ms | verify ms | proof B | delta |
+|---|---|---|---|---|
+| S6b baseline (re-measured) | 7,592 | 18 | 1,392,493 | — |
+| S7a query shave (pow 25 / 26q) | 7,902 | 17 | 1,353,541 | −38.9 KB |
+| S7b prefix batch-all | ~same (A/B neutral) | 18 | 1,302,421 | −51.1 KB |
+| S7c range-bind bit trim | 7,957-9,061 (median ~8.0 s) | 17 | ~1,273,900 | −28.5 KB |
+| **S7 final** | **~8.0 s** | **17** | **~1,273,900** | **−118.6 KB total** |
+| targets | ≤8,500 ✓ | <100 ✓ | <1,000,000 | MISS by ~274 KB |
+
+**S7a — query shave (LANDED).** `mdoc_production_pcs_config`: pow_bits
+20→25, FriConfig (1,4,27,2)→(1,4,26,2); 26·4+25 = 129 ≥ 128-bit. −38.9 KB
+(queried 1,035,920→1,000,200) for +0.3 s of 2^25 blake2s grind.
+
+**S7b — prefix producer batch-all (LANDED).** `PublicPrefixEval` (66
+public bytes `tr‖00‖00` per hosted instance) was pair-batched: 33 frac
+cols = 132 M31 interaction cols at 16 rows, ×3 instances = 396 cols
+(census: the mystery `{4: 140}` interaction block per mldsa module).
+Every denominator is an Eval CONSTANT, so `finalize_logup_batched(66)`
+into ONE accumulator column keeps the batched constraint at degree ≤ 2
+under the log+1 bound — no engine risk. −128 M31 cols/instance.
+
+**S7c — MdocRevocationRangeBind bit-column trim (LANDED).** Was 376
+trace cols @ log 4 (census mod 14): 40 byte cols + 320 bit cols + 16
+carries. Bit-pinning is now emitted only for externally-unpinned bytes
+(`revocation_range_bit_byte_indices`): id bytes are constant-pinned in
+Public-digest mode (S4); id_lo/id_hi bytes are LogUp-consumed against
+the revocation SHA field exposure whose producer range-checks every
+exposed byte to [0,256) in-AIR (a ≥256 value has no producer tuple and
+the global sum cannot balance — fail-closed); slack bytes keep bits in
+all modes (no external counterpart; they carry the borrow-chain range
+argument). Quantum mode: 376→184 trace cols (−192); P-256 Relation+msg
+mode: 400→272 (−128). The `has_message` flag drives the bit layout and
+the consume emission inside the same eval, so they cannot desync.
+
+**S7-merge (three log-8 SHA consumers → one instance) — STOPPED by the
+400-line rule; arithmetic report.** The census puts the three quantum
+SHA consumers (revocation m4: 671 cols, attributes m6/m7: 851 + 816
+cols) at 2,338 committed cols ≈ 306 KB of proof for ≤768 rows of load;
+a log-10 merged instance would save ~2.0-2.2k cols ≈ −270-290 KB.
+Reading stwo-sha256 kills the "mostly mdoc-side" hope — the AIR is
+single-message by construction:
+- `is_first_block ≡ is_first_row` (constraints.rs:250, preprocessed
+  selector) — one IV reset per component; a merged instance needs a
+  slot-schedule preprocessed family (new ids + dedup namespace, since
+  the current is_first_row content is log-dependent but id-shared
+  across instances).
+- `is_last_block = enabler·r63·(1−enabler_next)` + single-rise
+  contiguity anchor `enabler_step` (gated on is_first_row) — per-slot
+  re-rise and per-slot last-block detection need new gates.
+- ONE digest handle (relation, final-block gate) and ONE field-exposure
+  relation — per-message digests to DISTINCT SharedDigestRelations and
+  multi-relation field yields are component API + interaction rewrites.
+- trace generation (SIMD + scalar paths + zk decoy padding) assumes one
+  contiguous block run; per-slot generation is a rewrite of both paths.
+Estimate: 600-1,100 lines in stwo-sha256 (witness/trace/constraints/
+interaction/air/preprocessed + Sha256Verifier mirror) + ~300 in mdoc.rs
+(both paths) + a wire-format break (module count changes). This is the
+only remaining item big enough to reach <1 MB: post-S7 floor arithmetic
+is queried ~921 KB + sampled ~231 KB + fri/decommit ~105 KB at 8.6k
+cols; −274 KB more needs the SHA merge (−~280 KB) or the S5 floor items
+(sha_tables limb redesign, coeffs 2/row repack).
+
+Remaining census small-fry (all < 30 KB each, skipped by the S6b rule):
+window_bind 136 inter cols (batch-4 ≈ −9 KB), keccak sponge pad_mask
+136-col preprocessed ×2 jobs (fold to 2 cols ≈ −17 KB, touches pad10*1
+constraints), bridges/sinks pairs (≈ −6 KB/instance).
+
+Gates (all green, 2026-07-12, post-S7): mdoc_mldsa p256+ml-dsa 25,
+mdoc_mldsa quantum-safe-mdoc 19, credential_pipeline 3 (+1 ignored),
+stwo-mldsa full suite, check-quantum-only-deps clean. (e2e_soundness is
+a p256-only test target — it never compiled under quantum-safe-mdoc and
+is not a quantum gate.)

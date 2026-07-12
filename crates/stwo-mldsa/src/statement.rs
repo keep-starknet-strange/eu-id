@@ -1062,10 +1062,11 @@ fn module_interaction_layout(ctx: &LayoutCtx) -> Vec<u32> {
     i
 }
 
-/// The prefix producer's interaction column count is `ceil(66/2)*deg` (the 66
-/// prefix bytes `tr ‖ 0x00 ‖ 0x00`).
+/// The prefix producer's interaction column count: ONE batched accumulator
+/// column for all 66 prefix bytes `tr ‖ 0x00 ‖ 0x00` (constant denominators —
+/// see `PublicPrefixEval::n_interaction_cols`).
 fn prefix_n_interaction(_message_len: usize) -> usize {
-    66usize.div_ceil(2) * stwo::core::fields::qm31::SECURE_EXTENSION_DEGREE
+    stwo::core::fields::qm31::SECURE_EXTENSION_DEGREE
 }
 
 fn layout_for(ctx: &LayoutCtx, input: &MlDsaVerifyInput) -> TreeLayout {

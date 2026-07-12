@@ -56,9 +56,15 @@ pub struct PublicPrefixEval {
 pub const LINK_LOG_SIZE: u32 = stwo::prover::backend::simd::m31::LOG_N_LANES;
 
 impl PublicPrefixEval {
-    /// Interaction columns: one paired QM31 fraction column per two bytes.
+    /// Interaction columns: ONE batched accumulator column for all bytes.
+    ///
+    /// Every denominator is an Eval CONSTANT (the yielded tuples are public
+    /// bytes at fixed positions), so batching the whole entry list into a
+    /// single `finalize_logup_batched(len)` column keeps the batched
+    /// constraint at degree ≤ 2 — numerator `enabler` (degree 1) times
+    /// degree-0 denominator products — within the `log + 1` bound.
     pub fn n_interaction_cols(&self) -> usize {
-        self.bytes.len().div_ceil(2) * SECURE_EXTENSION_DEGREE
+        SECURE_EXTENSION_DEGREE
     }
     /// Base trace: the lane-0 enabler column.
     pub fn gen_base(&self) -> Vec<ColEval> {
@@ -108,43 +114,43 @@ impl FrameworkEval for PublicPrefixEval {
                 ],
             ));
         }
-        eval.finalize_logup_in_pairs();
+        // Batch ALL entries into one accumulator column (see
+        // `n_interaction_cols` for the degree argument).
+        eval.finalize_logup_batched(self.bytes.len());
         eval
     }
 }
 
 pub type PublicPrefixComponent = FrameworkComponent<PublicPrefixEval>;
 
-/// Pair-batched lane-0 fraction column builder (`(is_yield, denom)` per entry).
+/// All-batched lane-0 fraction column builder (`(is_yield, denom)` per entry):
+/// folds the whole entry list into ONE column, exactly like
+/// `finalize_logup_batched(entries.len())` — start from the first fraction,
+/// then `num = d·num + n·den, den = den·d`.
 fn gen_lane0_fracs(entries: &[(bool, SecureField)]) -> (Vec<ColEval>, SecureField) {
     let zero = SecureField::from(m31(0));
     let one = SecureField::one();
     let mut gen = LogupTraceGenerator::new(LINK_LOG_SIZE);
-    let fracs: Vec<(PackedQM31, PackedQM31)> = entries
+    let fracs: Vec<(SecureField, SecureField)> = entries
         .iter()
-        .map(|&(pos, d)| {
-            let mut n = [zero; N_LANES];
-            let mut dl = [one; N_LANES];
-            n[0] = if pos { one } else { -one };
-            dl[0] = d;
-            (PackedQM31::from_array(n), PackedQM31::from_array(dl))
-        })
+        .map(|&(pos, d)| (if pos { one } else { -one }, d))
         .collect();
-    let mut i = 0;
-    while i + 2 <= fracs.len() {
-        let mut col = gen.new_col();
-        let (n0, d0) = fracs[i];
-        let (n1, d1) = fracs[i + 1];
-        col.write_frac(0, n0 * d1 + n1 * d0, d0 * d1);
-        col.finalize_col();
-        i += 2;
+    let (mut num, mut den) = fracs[0];
+    for &(n, d) in &fracs[1..] {
+        num = d * num + n * den;
+        den = den * d;
     }
-    if i < fracs.len() {
-        let mut col = gen.new_col();
-        let (n, d) = fracs[i];
-        col.write_frac(0, n, d);
-        col.finalize_col();
-    }
+    let mut n_lanes = [zero; N_LANES];
+    let mut d_lanes = [one; N_LANES];
+    n_lanes[0] = num;
+    d_lanes[0] = den;
+    let mut col = gen.new_col();
+    col.write_frac(
+        0,
+        PackedQM31::from_array(n_lanes),
+        PackedQM31::from_array(d_lanes),
+    );
+    col.finalize_col();
     gen.finalize_last()
 }
 
