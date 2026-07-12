@@ -11,11 +11,11 @@ use crate::mdoc::{
     MdocCircuitStatement, MdocRevocationPublicInputs,
 };
 
-// Regenerated 2026-07-08 with the coprocessor-revocation preprocessed root
-// below (the circuit tuple embeds the preprocessed_root, so this
-// SHA-256(cbor(tuple)) moved with it). Old value: aab012dad407305d...c14c25c.
+// Regenerated 2026-07-13 after adding the production FRI fold step to the
+// published circuit tuple. The old hash was
+// fbd197ba982de84cc4a4850632d400d1d1c8709b4f9c79df63fac13a76b9b7f9.
 pub const TS13_PUBLISHED_AGE_OVER_18_CIRCUIT_HASH: &str =
-    "fbd197ba982de84cc4a4850632d400d1d1c8709b4f9c79df63fac13a76b9b7f9";
+    "5445c650a6f57d6be268e1d1b1d98355dddb8188c8496c5e6cffe8da0d4f21e6";
 // Regenerated 2026-07-08 after routing the TS13 revocation ECDSA through the
 // P4b coprocessor: the in-STARK P-256 AIR instance (preprocessed namespace
 // "mdoc/ts13/revocation") left the tree-0 commitment, so the mdoc
@@ -33,6 +33,7 @@ pub const TS13_P4C_PER_OPENING_STATISTICAL_BITS: u32 = 64;
 pub const TS13_PCS_LOG_BLOWUP_FACTOR: u32 = 2;
 pub const TS13_PCS_QUERIES: u32 = 54;
 pub const TS13_PCS_POW_BITS: u32 = 20;
+pub const TS13_PCS_FOLD_STEP: u32 = 3;
 pub const TS13_STARK_SOUNDNESS_BITS: u32 =
     TS13_PCS_POW_BITS + TS13_PCS_LOG_BLOWUP_FACTOR * TS13_PCS_QUERIES;
 pub const TS13_P256_SOUNDNESS_BITS: u32 = 128;
@@ -61,6 +62,7 @@ pub struct Ts13CircuitTuple {
     pub pcs_log_blowup_factor: u32,
     pub pcs_queries: u32,
     pub pcs_pow_bits: u32,
+    pub pcs_fold_step: u32,
     pub fixed_table_fingerprints: Vec<Ts13FixedTableFingerprint>,
     pub preprocessed_root: [u8; 32],
     pub composed_soundness_bits: u32,
@@ -83,6 +85,7 @@ impl Ts13CircuitTuple {
             pcs_log_blowup_factor: TS13_PCS_LOG_BLOWUP_FACTOR,
             pcs_queries: TS13_PCS_QUERIES,
             pcs_pow_bits: TS13_PCS_POW_BITS,
+            pcs_fold_step: TS13_PCS_FOLD_STEP,
             fixed_table_fingerprints: ts13_published_fixed_table_fingerprints(),
             preprocessed_root: *TS13_PUBLISHED_AGE_OVER_18_PREPROCESSED_ROOT,
             composed_soundness_bits: ts13_published_soundness_table().composed_soundness_bits(),
@@ -123,6 +126,7 @@ impl Ts13CircuitTuple {
             ),
             ("pcs_queries".into(), Value::from(self.pcs_queries)),
             ("pcs_pow_bits".into(), Value::from(self.pcs_pow_bits)),
+            ("pcs_fold_step".into(), Value::from(self.pcs_fold_step)),
             (
                 "fixed_table_fingerprints".into(),
                 Value::Array(
@@ -685,6 +689,7 @@ mod tests {
         assert_eq!(tuple.pcs_log_blowup_factor, 2);
         assert_eq!(tuple.pcs_queries, 54);
         assert_eq!(tuple.pcs_pow_bits, 20);
+        assert_eq!(tuple.pcs_fold_step, 3);
         assert_eq!(soundness.composed_soundness_bits(), 128);
         assert!(soundness
             .components

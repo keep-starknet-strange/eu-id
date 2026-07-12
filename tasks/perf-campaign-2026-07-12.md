@@ -18,6 +18,7 @@ Rule: every WO lands with a measured ts13_full_probe number. No number, not done
 | worktree | Ligero full-domain sampler fix | 3,252 | 163 | 3,243,317 |
 | experiment | Ligero ℓ=512 (N=5) | 3,290 | 258 | 3,037,125 |
 | experiment | Ligero ℓ=1024 (N=1) | 4,108 | 654 | 3,002,885 |
+| worktree | STARK fold step 2→3 (N=5) | 3,088 | 162 | 3,228,709 |
 
 ## Work orders
 
@@ -48,9 +49,11 @@ Rule: every WO lands with a measured ts13_full_probe number. No number, not done
 - [x] Ligero Task 4 — restore Circle proximity sampling over the full codeword.
       The inherited RS-prefix exclusion invalidated the v4 full-domain error
       calculation; fixed before any larger-row profile sweep.
-- [ ] WO-D — PCS retune on shrunk circuit: sweep blowup 2/3 × queries/pow,
+- [x] WO-D — PCS retune on shrunk circuit: sweep blowup 2/3 × queries/pow,
       Ligero ℓ A/B. Ligero ℓ=512/1024 CLOSED NO-GO for production after
-      measurement; STARK schedule sweep remains.
+      measurement. STARK fold step 3 is the measured production Pareto point:
+      prove −164ms, verify −1ms, proof −14,608B versus the full-domain-sampler
+      N=5 baseline.
 - [ ] Final: suites + negatives green, pins repinned, docs + memory updated,
       single- and multi-thread numbers reported.
 
@@ -96,23 +99,23 @@ uniform by a full-rank evaluation-matrix argument given the `t` margin below.
 ### `t` sizing (dim R), from the ACTUAL production PcsConfig
 
 `mdoc_production_pcs_config()` (`crates/eu-id-prover/src/mdoc.rs:5646`):
-`FriConfig::new(log_last_layer_degree_bound=1, log_blowup=2, n_queries=54, fold_step=2)`.
+`FriConfig::new(log_last_layer_degree_bound=1, log_blowup=2, n_queries=54, fold_step=3)`.
 
 ```
 n_queries      = 54
-2^fold_step    = 2^2 = 4
+2^fold_step    = 2^3 = 8
 n_samples      = 2   (max OODS mask points on a masked column: the accumulator's [-1, 0];
                       multiplicity columns use [0] → 1)
 
 t ≥ 2 × (n_queries × 2^fold_step + n_queries + n_samples)
-  = 2 × (54 × 4       + 54        + 2)
-  = 2 × (216 + 54 + 2)
-  = 2 × 272
-  = 544
+  = 2 × (54 × 8       + 54        + 2)
+  = 2 × (432 + 54 + 2)
+  = 2 × 488
+  = 976
 ```
 
-`dim(R) = 2^LOG_TINY ≥ t = 544 ⇒ LOG_TINY ≥ 10`. Pick **`LOG_TINY = 12`** (4096),
-giving ~7.5× headroom over `t` and matching the feasibility study's "~11–12". Tiny/full
+`dim(R) = 2^LOG_TINY ≥ t = 976 ⇒ LOG_TINY ≥ 10`. Pick **`LOG_TINY = 12`** (4096),
+giving ~4.2× headroom over `t` and matching the feasibility study's "~11–12". Tiny/full
 ratio `4096 / 65536 = 6.25 %`, versus the current `+100 %` doubling.
 
 ### Soundness note — PENDING LUCAS CRYPTO REVIEW
@@ -144,8 +147,8 @@ violates; off-coset `R` only affects openings, never the constraint identity.
 (iii) **ZK simulatability with the `t` sizing.** The simulator samples `R` uniform of
 dim `t`. The verifier observes `p0` and `p1` only at the `n_queries` FRI query positions
 (× `2^fold_step` fold siblings) and the `n_samples` OODS points — at most
-`n_queries·2^fold_step + n_queries + n_samples = 272` linear functionals of `R` per column.
-With `t = 544 ≥ 2 × 272` and `R` uniform, the evaluation matrix of these functionals is
+`n_queries·2^fold_step + n_queries + n_samples = 488` linear functionals of `R` per column.
+With `t = 976 ≥ 2 × 488` and `R` uniform, the evaluation matrix of these functionals is
 full-rank w.h.p., so `mult − R` and `R` are jointly uniform and independent of `mult` at
 every opened location. The doubled-dummy scheme's ZK is thereby preserved.
 
@@ -328,6 +331,26 @@ doubling the production verify time and adding ~0.8s prove. Neither approaches
 the 700KB target because the unchanged STARK alone is ~2.46MB. Decision: keep
 ℓ=256 production and remove the experimental geometries/features; do not carry
 dormant profile complexity.
+
+## Production STARK fold-step 3
+
+The unchanged 128-bit production security budget (`pow=20`, `log_blowup=2`,
+`queries=54`) supports a FRI fold step of 3. Compared with fold step 2 after the
+full-domain Ligero sampler correction, the five-run single-thread result is:
+
+| metric | fold 2 | fold 3 | delta |
+|---|---:|---:|---:|
+| prove median | 3,252ms | 3,088ms | −164ms |
+| verify median | 163ms | 162ms | −1ms |
+| proof bytes | 3,243,317 | 3,228,709 | −14,608 |
+| FRI proof bytes | 71,956 | 59,668 | −12,288 |
+
+This is a production Pareto win, so `mdoc_production_pcs_config()` now uses
+`FriConfig::new(1, 2, 54, 3)`. The verifier pins the exact config. The published
+TS13 tuple now also includes `pcs_fold_step=3`; its canonical hash is repinned to
+`5445c650a6f57d6be268e1d1b1d98355dddb8188c8496c5e6cffe8da0d4f21e6`.
+The tuple/hash suite, exact full TS13 proof, stale fold-step-2 and pre-rebalance
+config rejection, and carried-instance tamper rejection all pass in release.
 
 ## WO-C1b redundancy argument
 

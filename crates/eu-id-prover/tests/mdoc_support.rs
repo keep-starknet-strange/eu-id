@@ -3037,15 +3037,13 @@ fn validity_anchor_offset_rejects_in_proof() {
     }
 }
 
-/// WO-P3 pow/query rebalance negative: an honest proof produced at the pinned
-/// production config (pow_bits 20, n_queries 54) verifies, but the same proof
-/// re-labeled with the OLD config (pow_bits 10, n_queries 59) is rejected by the
-/// verifier's `expected_pcs_config` equality gate *before* any STARK check. This
-/// keeps a low-grinding old-config proof from being inherited after the
-/// rebalance.
+/// Production-config pin negative: an honest proof produced at the pinned
+/// config verifies, but the same proof re-labeled with either the immediately
+/// previous fold-step-2 config or the pre-pow/query-rebalance config is rejected
+/// by the verifier's `expected_pcs_config` equality gate before any STARK check.
 #[test]
 #[ignore = "slow: full mdoc STARK prove/verify; run with --release --ignored"]
-fn rejects_old_pcs_config_after_pow_query_rebalance() {
+fn rejects_stale_production_pcs_configs() {
     use stwo::core::fri::FriConfig;
     use stwo::core::pcs::PcsConfig;
 
@@ -3066,28 +3064,27 @@ fn rejects_old_pcs_config_after_pow_query_rebalance() {
         "prover must emit the rebalanced production config",
     );
 
-    // The pre-rebalance config that a stale prover would have emitted.
-    let old_config = PcsConfig {
+    let previous_production_config = PcsConfig {
+        pow_bits: 20,
+        fri_config: FriConfig::new(1, 2, 54, 2),
+        lifting_log_size: None,
+    };
+    let pre_rebalance_config = PcsConfig {
         pow_bits: 10,
         fri_config: FriConfig::new(1, 2, 59, 2),
         lifting_log_size: None,
     };
-    assert_ne!(
-        old_config,
-        mdoc_production_pcs_config(),
-        "old config must differ from the rebalanced pin",
-    );
 
-    // Re-label the honest proof with the old (pre-rebalance) config and verify
-    // against the current production pin: the config equality gate must reject it
-    // before any STARK check.
-    proof.stark_proof.0.config = old_config;
-    let rejected =
-        verify_mdoc_circuit_with_pcs_config(&proof, &statement, mdoc_production_pcs_config());
-    assert!(
-        matches!(rejected, Err(eu_id_prover::Error::WeakConfig { .. })),
-        "an old-config proof must be rejected by the config pin, got {rejected:?}",
-    );
+    for stale_config in [previous_production_config, pre_rebalance_config] {
+        assert_ne!(stale_config, mdoc_production_pcs_config());
+        proof.stark_proof.0.config = stale_config;
+        let rejected =
+            verify_mdoc_circuit_with_pcs_config(&proof, &statement, mdoc_production_pcs_config());
+        assert!(
+            matches!(rejected, Err(eu_id_prover::Error::WeakConfig { .. })),
+            "a stale config must be rejected by the production pin, got {rejected:?}",
+        );
+    }
 }
 
 /// Class D for the shared SHA tables (Q-015 §4b / p4c): the SHA split-pack and

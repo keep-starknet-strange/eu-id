@@ -5646,12 +5646,13 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
 pub fn mdoc_production_pcs_config() -> PcsConfig {
     // WO-P3 pow/query rebalance: pow_bits 20 + n_queries 54 keeps 54·2 + 20 =
     // 128-bit security (log_blowup 2), trading ~5 FRI queries (≈135 KB of
-    // queried_values) for cheap grinding. The verifier pins this exact config
-    // (see verify_mdoc_circuit_with_pcs_config) so an old-config proof is
-    // rejected.
+    // queried_values) for cheap grinding. A fold step of 3 saves another ~15 KB
+    // and ~164 ms of median prove time on the full N=1 tuple. The verifier pins
+    // this exact config (see verify_mdoc_circuit_with_pcs_config) so an
+    // old-config proof is rejected.
     PcsConfig {
         pow_bits: 20,
-        fri_config: FriConfig::new(1, 2, 54, 2),
+        fri_config: FriConfig::new(1, 2, 54, 3),
         lifting_log_size: None,
     }
 }
