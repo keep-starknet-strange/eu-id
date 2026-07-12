@@ -1,6 +1,6 @@
 use crate::circle_fft::{
     circle_data_sum, circle_encode, circle_encode_row, circle_evaluate, circle_product_fft,
-    circle_product_ifft, circle_weight_coeffs, CircleColumnBasis, CircleGeom, CircleRsError,
+    circle_product_ifft, circle_weight_coeffs, CircleGeom, CircleRsError,
     CIRCLE_GEOM_L128, CIRCLE_GEOM_L256, CIRCLE_GEOM_L64,
 };
 use crate::merkle::{commit_columns, verify_column, ColumnOpening, MerkleCommitment, MerkleError};
@@ -8,7 +8,6 @@ use crate::rs::{rs_encode_padded, rs_evaluate, RsError};
 use crate::sumcheck::InputClaims;
 use crate::{CoprocessorChannel, Fp, Mle, MleError};
 use p256::elliptic_curve::rand_core::{OsRng, RngCore};
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
@@ -1076,24 +1075,27 @@ fn weight_evaluations(
         .collect()
 }
 
-/// Per-opened-column evaluator for the claim-batch verifier (WO-P7). For the
-/// circle code it precomputes one [`CircleColumnBasis`] per opened column
-/// (length `claim_degree_bound`), so evaluating the batch (claim_degree_bound
-/// coeffs) and every per-row weight interpolant (data_slots coeffs) at a column
-/// is a single dot product sharing that basis — instead of rebuilding the
-/// pi-tower per (row, column) call as the old `weight_evaluations`/
-/// `code_evaluate` circle branches did (~168 cols × ~219 rows × O(len·log)).
-/// For RS it holds the indices and defers to `rs_evaluate` (already cheap, no
-/// per-call redundancy).
+/// Per-opened-column evaluator for the claim-batch verifier. Both the batch
+/// coefficients and every per-row weight interpolant have to be evaluated at
+/// the same `t` opened columns.
+///
+/// WO-C2: for the circle code, one full-codeword circle FFT
+/// (`(n/2)·log₂n ≈ 24.6k mults at ℓ=256`) followed by gathering the opened
+/// positions is cheaper than `t` per-column dot products
+/// (`t · claim_degree_bound ≈ 176 · 256`), and the cost no longer scales with
+/// `t`. `circle_encode(coeffs)[index]` is byte-identical to the previous
+/// per-column basis dot (`encode_matches_direct_basis_evaluation` pins
+/// `codeword[index] == circle_evaluate(index)`), so soundness is unchanged.
+/// The dominant cost is the per-row weight FFT (`combined_rows` of them), which
+/// this replaces `combined_rows · t` per-column dots with. For RS it holds the
+/// indices and defers to `rs_evaluate` (already cheap, no per-call redundancy).
 enum ClaimBatchColumnEval {
     Rs {
         codeword_len: usize,
         indices: Vec<usize>,
     },
     Circle {
-        /// Full length-`claim_degree_bound` basis per opened column — shared
-        /// by the batch coefficients and every row's interpolated weights.
-        bases: Vec<CircleColumnBasis>,
+        indices: Vec<usize>,
         geom: CircleGeom,
     },
 }
@@ -1107,50 +1109,52 @@ impl ClaimBatchColumnEval {
             }),
             LigeroCode::Circle => {
                 let geom = params.circle_geom().expect("validated circle params");
-                let len = params.claim_degree_bound();
-                // WO-P7b Lever 2: the opened columns are independent; rayon over
-                // them keeps index order (collect preserves it) so results are
-                // deterministic. Covers the M⁻ᵀ fold precompute too.
-                let bases = indices
-                    .par_iter()
-                    .map(|&index| {
-                        CircleColumnBasis::new(geom, index, len).map_err(LigeroError::Circle)
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(Self::Circle { bases, geom })
+                Ok(Self::Circle {
+                    indices: indices.to_vec(),
+                    geom,
+                })
             }
         }
     }
 
-    /// Evaluates `message` (≤ claim_degree_bound coeffs) at every opened column,
-    /// one entry per opening (same order as `indices`). Used for the batch
-    /// coefficients.
-    fn eval_message(&self, message: &[Fp]) -> Result<Vec<Fp>, LigeroError> {
+    /// Evaluates a coefficient vector (`≤ degree_bound` coeffs) at every opened
+    /// column, one entry per opening (same order as `indices`).
+    fn eval_coeffs(&self, coeffs: &[Fp], degree_bound: usize) -> Result<Vec<Fp>, LigeroError> {
         match self {
             Self::Rs {
                 codeword_len,
                 indices,
             } => indices
                 .iter()
-                .map(|&index| rs_evaluate(message, *codeword_len, index).map_err(LigeroError::Rs))
+                .map(|&index| rs_evaluate(coeffs, *codeword_len, index).map_err(LigeroError::Rs))
                 .collect(),
-            Self::Circle { bases, .. } => {
-                Ok(bases.par_iter().map(|basis| basis.eval(message)).collect())
+            Self::Circle { indices, geom } => {
+                let codeword =
+                    circle_encode(*geom, coeffs, degree_bound).map_err(LigeroError::Circle)?;
+                Ok(indices.iter().map(|&index| codeword[index]).collect())
             }
         }
     }
 
+    /// Evaluates the batch coefficients (`claim_degree_bound` coeffs) at every
+    /// opened column. `degree_bound == message.len()` here (`circle_encode`
+    /// zero-pads to `codeword_len` regardless; the bound is only a validation
+    /// guard), so the batch is evaluated exactly at its own length.
+    fn eval_message(&self, message: &[Fp]) -> Result<Vec<Fp>, LigeroError> {
+        self.eval_coeffs(message, message.len())
+    }
+
     /// Evaluates a row's batched weights at every opened column. For RS the
     /// weights are themselves the codeword message; for the circle code the
-    /// weights interpolate to their `F_{data_slots}` coefficients in one
-    /// window IFFT (`O(d log d)` — the window is a twin-coset FFT domain) and
-    /// then dot against the shared per-column bases.
+    /// weights interpolate to their `F_{data_slots}` coefficients in one window
+    /// IFFT (`O(d log d)` — the window is a twin-coset FFT domain), then a
+    /// single full-codeword FFT evaluates them at every opening (WO-C2).
     fn eval_weights(&self, weights: &[Fp]) -> Result<Vec<Fp>, LigeroError> {
         match self {
             Self::Rs { .. } => self.eval_message(weights),
-            Self::Circle { bases, geom } => {
+            Self::Circle { geom, .. } => {
                 let coeffs = circle_weight_coeffs(*geom, weights).map_err(LigeroError::Circle)?;
-                Ok(bases.par_iter().map(|basis| basis.eval(&coeffs)).collect())
+                self.eval_coeffs(&coeffs, geom.data_slots)
             }
         }
     }

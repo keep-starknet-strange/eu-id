@@ -482,65 +482,6 @@ pub fn circle_evaluate(
     ))
 }
 
-/// The universal-basis value vector `[b_0(P), .., b_{len-1}(P)]` at one codeword
-/// column `P = domain[index]`, built by tensor doubling in O(len) mults (WO-P7).
-///
-/// `basis[j] = y^{j&1} * prod_k pi^k(x)^{bit(j, k+1)}`; starting from `[1, y]`,
-/// each pi level `l` extends the built prefix by multiplying its second half by
-/// `pi^l(x)`. This is the same tensor structure as [`evaluate_at`], materialized
-/// once so that every message evaluation at this column is a dot product
-/// ([`CircleColumnBasis::eval`]) sharing the vector — the verifier evaluates the
-/// batch (claim_degree_bound coeffs) and every per-row weight (data_slots coeffs)
-/// against it without recomputing the pi-tower per call.
-pub struct CircleColumnBasis {
-    basis: Vec<Fp>,
-}
-
-impl CircleColumnBasis {
-    /// Precomputes the length-`len` basis vector at `domain[index]`. `len` need
-    /// not be a power of two; the vector is truncated to exactly `len`.
-    pub fn new(geom: CircleGeom, index: usize, len: usize) -> Result<Self, CircleRsError> {
-        if index >= geom.codeword_len {
-            return Err(CircleRsError::IndexOutOfRange);
-        }
-        if len == 0 {
-            return Err(CircleRsError::EmptyMessage);
-        }
-        let point = codeword_tables(geom).domain[index];
-        // Round the working length up to a power of two so the doubling fills
-        // full halves; truncate to `len` at the end.
-        let cap = len.next_power_of_two();
-        let mut basis = Vec::with_capacity(cap);
-        basis.push(Fp::ONE);
-        if cap >= 2 {
-            basis.push(point.y);
-        }
-        // pi^0(x) = x, pi^{l}(x) = 2·pi^{l-1}(x)^2 - 1. Level `l` doubles the
-        // prefix of size 2^{l+1} into 2^{l+2}.
-        let mut pi = point.x;
-        let mut filled = 2usize;
-        while filled < cap {
-            for i in 0..filled {
-                basis.push(basis[i] * pi);
-            }
-            filled <<= 1;
-            pi = pi.square() + pi.square() - Fp::ONE;
-        }
-        basis.truncate(len);
-        Ok(Self { basis })
-    }
-
-    /// `sum_j coeffs[j] * basis[j]`. `coeffs.len()` must be ≤ the basis length.
-    pub fn eval(&self, coeffs: &[Fp]) -> Fp {
-        debug_assert!(coeffs.len() <= self.basis.len());
-        coeffs
-            .iter()
-            .zip(&self.basis)
-            .fold(Fp::ZERO, |acc, (&c, &b)| acc + c * b)
-    }
-
-}
-
 struct DataWindow {
     /// FFT tables of the window domain: the CANONICAL `data_slots`-point
     /// circle domain — disjoint from the message, codeword, and product
@@ -928,29 +869,6 @@ mod tests {
                 diff > floor,
                 "distance smoke: only {diff} differing positions"
             );
-        }
-    }
-
-    /// WO-P7 byte-identity: the precomputed per-column basis dot product must
-    /// equal the direct `circle_evaluate` for every message length the verifier
-    /// uses (data_slots weight coeffs, row_message_len, claim bound).
-    #[test]
-    fn column_basis_matches_circle_evaluate() {
-        let mut state = 71u64;
-        for geom in GEOMS {
-            let bound = geom.data_slots + geom.row_message_len + 2;
-            let message = rand_row(&mut state, bound);
-            for _ in 0..6 {
-                let index = (splitmix(&mut state) % geom.codeword_len as u64) as usize;
-                let basis = CircleColumnBasis::new(geom, index, bound).unwrap();
-                for len in [geom.data_slots, geom.row_message_len, bound] {
-                    assert_eq!(
-                        basis.eval(&message[..len]),
-                        circle_evaluate(geom, &message[..len], index).unwrap(),
-                        "basis dot mismatch at column {index}, len {len}"
-                    );
-                }
-            }
         }
     }
 
