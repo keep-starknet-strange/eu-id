@@ -1,4 +1,236 @@
-# Perf campaign 2026-07-12
+# Perf campaign — full mdoc + revocation (sha256+p256) — 2026-07-12
+
+Goal: prove <1s, verify <100ms, proof <700KB (full TS13 N=1 tuple).
+Baseline @ 730e9294 (1-thread, M4 Max, ts13_full_probe BENCH_ITERS=5):
+prove 2,853ms / verify 255ms / proof 4,517,637B.
+Rule: every WO lands with a measured ts13_full_probe number. No number, not done.
+
+## Status ledger
+
+| merge | WO | prove | verify | proof B |
+|---|---|---|---|---|
+| 730e9294 | baseline | 2,853 | 255 | 4,517,637 |
+| 4244afb9 | WO-A engine+batch4 | 3,189 | ~248 | 3,608,069 |
+| 589d1d05 | WO-C1b c6 deletion | 3,177 | 240 | 3,528,653 (STARK 2,454,341 / coproc 1,073,431) |
+| 1157d10e | WO-C2 FFT claim-batch verify | 3,148 | 190 | 3,528,173 |
+| 1157d10e | 2026-07-13 takeover re-probe | 3,393 | 198 | 3,527,981 |
+
+## Work orders
+
+- [x] WO-A — engine unlock + logup batch-4. MERGED 4244afb9. Proof −909KB
+      (queried −820KB, sampled −88KB); prove +336ms = uniform-K lifting tax
+      (composition_log_split 1→2), accepted — WO-B rides the same K=2.
+- [x] WO-C1 — E1c c6 repack — CLOSED INFEASIBLE (GKR: no advice wires;
+      best sound digit repack misses gate). Superseded by WO-C1b.
+- [x] WO-C1b — c6 family DELETED after redundancy proof. MERGED 589d1d05.
+      committed_values 31,121→27,920. See redundancy argument below.
+- [x] WO-B — split-mask virtual columns CLOSED UNSAFE AS DESIGNED. The verifier
+      opens both shares at OODS: `p0(z) = mult(z) - R(z)` and `p1(z) = R(z)`,
+      so it recovers the supposedly hidden value as `p0(z) + p1(z) = mult(z)`.
+      No implementation exists in the engine worktree. Preserve the current
+      Class-D dummy-row blinding unless a hiding commitment/protocol redesign is
+      separately reviewed.
+- [x] WO-C2 — claim-batch verify algorithmics. MERGED 1157d10e. Replaced the
+      per-opening dot products with one full-codeword circle FFT per row without
+      changing proof bytes or protocol semantics; current takeover re-probe is
+      198ms verify versus the campaign's original 255ms baseline.
+- [ ] WO-C4 — portable P-256 field backend. ISOLATED RED EXPERIMENT in
+      `.claude/worktrees/agent-a0185ac70915e9f79`: the edge differential test
+      currently fails on squaring, so none of its code is merged or accepted.
+- [ ] WO-C3 — c13 slope-inverse denominator elimination (only if budget
+      still short after C1b/C2).
+- [ ] WO-D — PCS retune on shrunk circuit: sweep blowup 2/3 × queries/pow,
+      Ligero ℓ A/B. Last, config-only.
+- [ ] Final: suites + negatives green, pins repinned, docs + memory updated,
+      single- and multi-thread numbers reported.
+
+## WO-B split-mask virtual columns (a.k.a. WO-D2R Option A)
+
+> **REJECTED 2026-07-13:** this section is retained as historical design
+> context only. It incorrectly claims that `(mult - R, R)` is jointly
+> independent of `mult`; the pair deterministically reveals `mult` by addition
+> at every common sampled point. The physical PCS openings expose both shares,
+> including at OODS, so the construction does not preserve Class-D zero
+> knowledge. Do not implement it without a hiding commitment or a protocol that
+> never reveals both share evaluations.
+
+Goal: delete the Class-D blind-doubling of the shared SHA-256 tables (`2^17 → 2^16`)
+and replace it with split-mask virtual columns, so every secret column commits at
+`2^16` plus a tiny `~2^12` mask column instead of a doubled `2^17` column.
+
+### Construction
+
+Today `crates/stwo-sha256/src/shared_tables.rs` (`blind_extend` :179, `emit_blind`
+via `producer_blind_frac_column`, `is_dummy` selector, `blind_log_size` = `LOG_SIZE_16 + 1`)
+doubles every real `2^16` producer multiplicity column and its LogUp accumulator to
+`2^17` by appending fresh random cells over an unreachable dummy-key upper half, with a
+`(1 − is_dummy)` gate zeroing the dummy numerators so they never touch the LogUp balance.
+That doubling is the ~4.4 M committed cells WO-B removes.
+
+Replacement, per secret column (the 12 producer multiplicity trace columns plus the
+7 paired LogUp-accumulator `SecureField` columns = 28 base columns of the shared tables):
+
+- commit `p0 = mult − R` as a normal `2^16` column,
+- commit `p1 = R` as a tiny column of `log_size = LOG_TINY` (see `t` below), where `R`
+  is a fresh per-proof random low-degree polynomial (`thread_rng`, matching the existing
+  `blind_extend` CSPRNG, never transcript-derived),
+- the constraint system reads the **virtual** column
+  `f = p0 + (v_n + 1)·p1 = mult + v_n·R`, where `v_n = coset_vanishing` of the
+  component's canonic `2^16` coset (`stwo/src/core/constraints.rs:12`).
+
+On the trace coset `v_n = 0`, so `f == mult`: every constraint, the LogUp balance, and
+every claimed sum are **bit-identical** to the unmasked circuit. Off-domain the opened
+LDE cells reveal only `mult(x) − R(x)` (from `p0`) and `R(y)` (from `p1`), which are
+uniform by a full-rank evaluation-matrix argument given the `t` margin below.
+
+### `t` sizing (dim R), from the ACTUAL production PcsConfig
+
+`mdoc_production_pcs_config()` (`crates/eu-id-prover/src/mdoc.rs:5646`):
+`FriConfig::new(log_last_layer_degree_bound=1, log_blowup=2, n_queries=54, fold_step=2)`.
+
+```
+n_queries      = 54
+2^fold_step    = 2^2 = 4
+n_samples      = 2   (max OODS mask points on a masked column: the accumulator's [-1, 0];
+                      multiplicity columns use [0] → 1)
+
+t ≥ 2 × (n_queries × 2^fold_step + n_queries + n_samples)
+  = 2 × (54 × 4       + 54        + 2)
+  = 2 × (216 + 54 + 2)
+  = 2 × 272
+  = 544
+```
+
+`dim(R) = 2^LOG_TINY ≥ t = 544 ⇒ LOG_TINY ≥ 10`. Pick **`LOG_TINY = 12`** (4096),
+giving ~7.5× headroom over `t` and matching the feasibility study's "~11–12". Tiny/full
+ratio `4096 / 65536 = 6.25 %`, versus the current `+100 %` doubling.
+
+### Soundness note — PENDING LUCAS CRYPTO REVIEW
+
+(i) **Committed columns within native FRI spaces.** `p0` is a genuine degree-`<2^16`
+circle column and `p1` a genuine degree-`<2^12` circle column; both are committed and
+FRI-folded in their own native spaces (the lifted-Merkle mixed-height commit path,
+`poseidon252_lifted.rs` / `pcs/utils.rs:207 prepare_query_positions_for_height`, already
+exercised by the mixed tiny/large parity test @ `116b03c0`). Nothing is committed outside
+a native low-degree space, so FRI soundness is unchanged. A `p1` that carries degree above
+`2^LOG_TINY` is rejected structurally by the lift bound (the tiny tree only has `2^LOG_TINY`
+leaves; a higher-degree poly cannot be consistently opened) — this is the engine negative
+(b) below.
+
+(ii) **OODS identity over the virtual `f`, degree budget ≤ log+2.** The verifier and
+prover both evaluate `f(z) = p0(z) + (v_N(z)+1)·p1(z)` at the OODS point (and at shifted
+mask points `z·g^{−k}` for offset `−k`, with `v_N` shifted identically). Because
+`f = mult + v_n·R` as a formal polynomial and `deg(v_n·R) = 2^16 + 2^12 < 2^{17}`, the
+worst-case constraint monomial in `f` rises by at most one binary order, so the affected
+components need `max_constraint_log_degree_bound = log_size + 2`. `composition_log_split`
+is already `2` on this circuit (WO-A), so the composition domain already accommodates
+degree `log+2` for free — but each split-mask component MUST assert
+`max_constraint_log_degree_bound == log_size + 2` (not `+1`), else the composition-domain
+doubling desyncs the shifted interaction mask and OODS fails `ConstraintsNotSatisfied`
+(see MEMORY: "M4 CRITICAL framework constraint"). A cheating prover cannot gain: on the
+trace coset `f == mult` regardless of `R`, so no `R` can satisfy a constraint that `mult`
+violates; off-coset `R` only affects openings, never the constraint identity.
+
+(iii) **ZK simulatability with the `t` sizing.** The simulator samples `R` uniform of
+dim `t`. The verifier observes `p0` and `p1` only at the `n_queries` FRI query positions
+(× `2^fold_step` fold siblings) and the `n_samples` OODS points — at most
+`n_queries·2^fold_step + n_queries + n_samples = 272` linear functionals of `R` per column.
+With `t = 544 ≥ 2 × 272` and `R` uniform, the evaluation matrix of these functionals is
+full-rank w.h.p., so `mult − R` and `R` are jointly uniform and independent of `mult` at
+every opened location. The doubled-dummy scheme's ZK is thereby preserved.
+
+### Engine work (in `/Users/lucas/stwo-split-mask`, `feat/split-mask-columns`)
+
+New `EvalAtRow` primitive (transparent virtual-column read):
+
+```rust
+/// Reads a split-masked base column committed as two physical trace columns:
+/// p0 at the component's full size and p1 at `tiny_log_size`. Returns the virtual
+/// value f = p0 + (v_n + 1)·p1 (== the unmasked value on the trace coset).
+fn next_masked_trace_mask(&mut self, tiny_log_size: u32) -> Self::F;
+/// Extension-field (SecureField) variant for the LogUp accumulator columns,
+/// consuming SECURE_EXTENSION_DEGREE p0 base columns then the same count of p1.
+fn next_masked_extension_mask<const N: usize>(&mut self, tiny_log_size: u32,
+    interaction: usize, offsets: [isize; N]) -> [Self::EF; N];
+```
+
+Per-evaluator implementation (fold injected where `v_n` is available to each):
+
+1. **`InfoEvaluator` (`info.rs`)** — record, per masked column, its `tiny_log_size` in a
+   new `TreeVec<Vec<u32>>` `column_log_sizes` (default = component `log_size`, override =
+   `tiny_log_size`). Drives the two `FrameworkComponent` size hooks below.
+2. **`FrameworkComponent` (`component.rs`)** — `trace_log_degree_bounds` (:211) returns the
+   per-column sizes recorded by Info instead of `vec![log_size; n]`; `mask_points` (:227)
+   uses each column's own coset step (offset-0 masks are size-independent; the
+   accumulator's `−1` uses the full-size step, applied to `p0`; `p1`'s `−1` uses the tiny
+   step); `evaluate_constraint_quotients_at_point` (:245) computes and passes
+   `v_N(z) = coset_vanishing(CanonicCoset::new(log_size).coset, z)` (component's own coset,
+   NOT `max_log_degree_bound`'s) to `PointEvaluator`.
+3. **`PointEvaluator` (`point.rs`)** — new field `v_n_at_point: SecureField` (+ shifted
+   values for used offsets); fold `p0(z·g^{−k}) + (v_N(z·g^{−k})+1)·p1(z·g^{−k})`.
+4. **`get_constraint_quotient_inputs` / domain evaluators
+   (`prover/component_prover.rs:82`, `simd_domain.rs`, `cpu_domain.rs`)** — precompute a
+   `(v_n + 1)` vector over the eval domain. `v_n` on the eval domain is exactly
+   `denom_inv.inverse()` elementwise (`denom_inv[i] = coset_vanishing(trace_domain.coset(),
+   eval_domain.at(i)).inverse()`, `component_prover.rs:108`), so `(v_n+1)` reuses the
+   existing per-`log_expand`-block structure. `p1`'s columns are extended to the eval
+   domain from their tiny `2^12` poly via `get_evaluation_on_domain` (already generic over
+   poly size). Fold multiplies `p1`'s extended row (indexed at the same shifted position as
+   its offset) by `(v_n+1)` before adding to `p0`.
+5. **`AssertEvaluator` / `relation_tracker`** — on the trace coset `v_n = 0`, fold is
+   `p0 + p1`; trivial.
+6. **Degree budget** — each split-mask `FrameworkEval::max_constraint_log_degree_bound`
+   returns `log_size + 2`; assert `composition_log_split >= ` the excess in the AIR builder.
+
+Engine negatives (in the stwo worktree):
+(a) tamper `p1` (or `p0`) at a query position ⇒ OODS `ConstraintsNotSatisfied`;
+(b) a `p1` declared `tiny_log_size` but carrying degree `> 2^tiny_log_size` ⇒ rejected by
+    the lift bound (tiny tree cannot open a higher-degree poly consistently).
+Model the whole primitive on the composition-split mid-basis fold
+`extract_composition_oods_eval` (`stwo/src/core/proof.rs:35`, commit `96a8c667`).
+
+De-risk milestone (toy_horner precedent): a minimal `FrameworkComponent` at `log_size 4`
+with one masked column (`p0` `2^4` + `p1` `2^2`) that proves + verifies + rejects (a)/(b),
+BEFORE touching the 16 k-line `stwo-sha256` shared-tables module.
+
+### EU-ID work (this worktree)
+
+1. `shared_tables.rs`: delete `blind_extend` / `emit_blind` / `is_dummy` / `DUMMY_KEY_BASE`
+   / `blind_log_size` sites (:179, :278, :479, :493, `producer_preprocessed_cols` +1,
+   `round/sigma/range_blind_rows`); producers + accumulators return to `2^16` with `(p0,p1)`
+   pairs for every secret column. Preprocessed table CONTENT is public → preprocessed drops
+   the `is_dummy` column and returns to `2^16`.
+2. Witness: sample `R` per proof (`thread_rng`), build `p0 = mult − R` / `p1 = R` columns.
+3. Update consumers of `blind_log_size` / dummy selectors across `multiplicities.rs`,
+   `trace.rs`, `interaction.rs`, `air.rs`, `field_exposure.rs`, and eu-id-prover glue.
+4. Repin preprocessed roots (layout changed): find pinned root constants /
+   `PreprocessedRootMismatch` sites in eu-id-prover, repin per `git log --grep=repin`.
+5. Port Class-D negatives: `class_d_sha_tables_dummy_region_is_doubled_and_randomised`
+   (`shared_tables_composition.rs:231`) → split-mask equivalent (p0/p1 present, R fresh
+   per proof, `f == mult` on trace coset); `class_d_sha_table_balance_tamper_rejected`
+   (:302) → tampered p0/p1 rejected.
+
+### Status / gates
+
+Closed before implementation. `/Users/lucas/stwo-split-mask` remains clean at
+`8c998390`; the only eu-id prep commit redirects local Cargo patch paths and is
+not merged. The privacy failure above is protocol-level, so evaluator tests or
+tamper negatives cannot make this construction acceptable.
+
+## 2026-07-13 takeover audit
+
+- Fresh command: `RAYON_NUM_THREADS=1 BENCH_ITERS=5 cargo run --release -p
+  eu-id-prover --example ts13_full_probe`.
+- Fresh result at `1157d10e`: prove median 3,393ms (runs 3,592 / 3,260 / 3,393 /
+  3,485 / 3,315), verify median 198ms, proof 3,527,981B.
+- Proof bytes: STARK 2,453,669B, coprocessor 1,073,431B, metadata 881B.
+  STARK queried values remain the dominant 2,031,952B; coprocessor proximity
+  openings are 704,712B + 265,416B.
+- Reproducibility blocker: the declared Stwo dependency is pinned to git rev
+  `8c998390`, but the workspace `[patch]` resolves it from absolute local paths
+  under `/Users/lucas/stwo`. Publish/verify that engine revision and remove the
+  absolute patch before treating a remote CI result as reproducible.
+
 
 ## WO-C1b redundancy argument
 
