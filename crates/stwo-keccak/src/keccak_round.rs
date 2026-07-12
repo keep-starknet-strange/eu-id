@@ -89,12 +89,18 @@ const N_COLUMNS: usize = 1
     + N_HI_WITNESS                 // spread-hi witnesses for all rotations
     + N_XOR3_THETA_APPLY           // theta-apply outputs (res_S)
     + N_ANDNOT_LOOKUPS             // chi andnot outputs
-    + N_XOR3_CHI_CLOSE;            // chi closing outputs (new state, incl. iota)
+    + N_XOR3_CHI_CLOSE; // chi closing outputs (new state, incl. iota)
 
 const N_TOTAL_LOOKUPS: usize =
     N_KECCAK_ROUND_LOOKUPS + N_XOR3_LOOKUPS + N_ANDNOT_LOOKUPS + N_SPLIT_LOOKUPS;
 
-const N_INTERACTION_COLUMNS: usize = SECURE_EXTENSION_DEGREE * N_TOTAL_LOOKUPS.div_ceil(2);
+/// Logup fractions batched per interaction column (`finalize_logup_batched`).
+/// Batch 4 needs constraint degree `1 + 4·1 = 5 ≤ D5`, available at
+/// `max_constraint_log_degree_bound = log + 2`.
+pub const LOGUP_BATCH: usize = 4;
+
+const N_INTERACTION_COLUMNS: usize =
+    SECURE_EXTENSION_DEGREE * N_TOTAL_LOOKUPS.div_ceil(LOGUP_BATCH);
 
 /// Number of base + interaction committed cells for one row (one packed
 /// permutation-round across `N_LANES` SIMD lanes).
@@ -152,7 +158,10 @@ impl Claim {
         SimdBackend: BackendForChannel<Blake2sMerkleChannel>,
     {
         let log_size = std::cmp::max(invocations.next_power_of_two().ilog2(), LOG_N_LANES);
-        input.resize(1 << (log_size - LOG_N_LANES), [PackedM31::zero(); N_BYTES_IN_STATE + 1]);
+        input.resize(
+            1 << (log_size - LOG_N_LANES),
+            [PackedM31::zero(); N_BYTES_IN_STATE + 1],
+        );
         let enabler_col = Enabler::new(invocations);
 
         let (mut trace, mut lookup_data) = unsafe {
@@ -170,7 +179,13 @@ impl Claim {
             .into_par_iter()
             .enumerate()
             .for_each(|(row_index, (mut row, input, mut lookup_data))| {
-                fill_row(row_index, &enabler_col, &input, &mut row[..], &mut lookup_data);
+                fill_row(
+                    row_index,
+                    &enabler_col,
+                    &input,
+                    &mut row[..],
+                    &mut lookup_data,
+                );
             });
 
         let claim = Self { log_size };
@@ -251,8 +266,11 @@ fn fill_row(
         *row[idx.col] = *x;
         idx.col += 1;
     }
-    let round_data: Vec<PackedM31> =
-        current_rc.iter().chain(input[..N_BYTES_IN_STATE].iter()).cloned().collect();
+    let round_data: Vec<PackedM31> = current_rc
+        .iter()
+        .chain(input[..N_BYTES_IN_STATE].iter())
+        .cloned()
+        .collect();
     *lookup_data.keccak_round[0] = round_data.try_into().unwrap();
 
     // Per-lane byte view of the incoming state.
@@ -260,9 +278,8 @@ fn fill_row(
         std::array::from_fn(|i| unspread_lane(input[lane * N_BYTES_IN_U64 + i]))
     });
     // Spread limb of the incoming state, for building xor3 keys as sums.
-    let S0_spread: [[PackedM31; N_BYTES_IN_U64]; N_LANES_KECCAK] = std::array::from_fn(|lane| {
-        std::array::from_fn(|i| input[lane * N_BYTES_IN_U64 + i])
-    });
+    let S0_spread: [[PackedM31; N_BYTES_IN_U64]; N_LANES_KECCAK] =
+        std::array::from_fn(|lane| std::array::from_fn(|i| input[lane * N_BYTES_IN_U64 + i]));
 
     // ── Theta: C[x] = xor of 5 column lanes via 2 chained xor3 ──
     let mut C_bytes: [ByteLane; SQRT_N_LANES] = std::array::from_fn(|_| Default::default());
@@ -273,14 +290,24 @@ fn fill_row(
             // t = s0 ^ s1 ^ s2
             let t = xor_bytes(&xor_bytes(&S[x][i], &S[x + 5][i]), &S[x + 10][i]);
             let t_spread = write_xor3(
-                &mut idx, row, lookup_data,
-                &S0_spread[x][i], &S0_spread[x + 5][i], &S0_spread[x + 10][i], &t,
+                &mut idx,
+                row,
+                lookup_data,
+                &S0_spread[x][i],
+                &S0_spread[x + 5][i],
+                &S0_spread[x + 10][i],
+                &t,
             );
             // C = t ^ s3 ^ s4
             let c = xor_bytes(&xor_bytes(&t, &S[x + 15][i]), &S[x + 20][i]);
             let c_spread = write_xor3(
-                &mut idx, row, lookup_data,
-                &t_spread, &S0_spread[x + 15][i], &S0_spread[x + 20][i], &c,
+                &mut idx,
+                row,
+                lookup_data,
+                &t_spread,
+                &S0_spread[x + 15][i],
+                &S0_spread[x + 20][i],
+                &c,
             );
             C_bytes[x][i] = c;
             C_spread[x][i] = c_spread;
@@ -293,7 +320,14 @@ fn fill_row(
         std::array::from_fn(|_| [PackedM31::zero(); N_BYTES_IN_U64]);
     for x in 0..SQRT_N_LANES {
         let xp1 = (x + 1) % SQRT_N_LANES;
-        let (rb, rs) = rotr_split(&C_bytes[xp1], &C_spread[xp1], 63, &mut idx, row, lookup_data);
+        let (rb, rs) = rotr_split(
+            &C_bytes[xp1],
+            &C_spread[xp1],
+            63,
+            &mut idx,
+            row,
+            lookup_data,
+        );
         Crot_bytes[x] = rb;
         Crot_spread[x] = rs;
     }
@@ -310,8 +344,13 @@ fn fill_row(
             for i in 0..N_BYTES_IN_U64 {
                 let v = xor_bytes(&xor_bytes(&S[id][i], &C_bytes[xm1][i]), &Crot_bytes[x][i]);
                 let vs = write_xor3(
-                    &mut idx, row, lookup_data,
-                    &S0_spread[id][i], &C_spread[xm1][i], &Crot_spread[x][i], &v,
+                    &mut idx,
+                    row,
+                    lookup_data,
+                    &S0_spread[id][i],
+                    &C_spread[xm1][i],
+                    &Crot_spread[x][i],
+                    &v,
                 );
                 S[id][i] = v;
                 S_spread[id][i] = vs;
@@ -328,8 +367,14 @@ fn fill_row(
             let off = RHO_OFFSETS[x][y];
             let rotr = if off == 0 { 0 } else { 64 - off };
             let dst = 5 * y + ((2 * x + 3 * y) % SQRT_N_LANES);
-            let (rb, rs) =
-                rotr_split(&S[x + 5 * y], &S_spread[x + 5 * y], rotr, &mut idx, row, lookup_data);
+            let (rb, rs) = rotr_split(
+                &S[x + 5 * y],
+                &S_spread[x + 5 * y],
+                rotr,
+                &mut idx,
+                row,
+                lookup_data,
+            );
             B_bytes[dst] = rb;
             B_spread[dst] = rs;
         }
@@ -349,8 +394,12 @@ fn fill_row(
                 // andnot = (!b1) & b2
                 let an = andnot_bytes(&B_bytes[b1_idx][i], &B_bytes[b2_idx][i]);
                 let an_spread = write_andnot(
-                    &mut idx, row, lookup_data,
-                    &B_spread[b1_idx][i], &B_spread[b2_idx][i], &an,
+                    &mut idx,
+                    row,
+                    lookup_data,
+                    &B_spread[b1_idx][i],
+                    &B_spread[b2_idx][i],
+                    &an,
                 );
                 // closing: out = a ^ andnot [ ^ rc on output lane 0 byte i ]
                 let mut out = xor_bytes(&B_bytes[a_idx][i], &an);
@@ -362,8 +411,13 @@ fn fill_row(
                     PackedM31::zero()
                 };
                 let out_spread = write_xor3(
-                    &mut idx, row, lookup_data,
-                    &B_spread[a_idx][i], &an_spread, &rc_spread, &out,
+                    &mut idx,
+                    row,
+                    lookup_data,
+                    &B_spread[a_idx][i],
+                    &an_spread,
+                    &rc_spread,
+                    &out,
                 );
                 S[out_idx][i] = out;
                 S_spread[out_idx][i] = out_spread;
@@ -495,7 +549,10 @@ impl FrameworkEval for Eval {
         self.claim.log_size
     }
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size() + 1
+        // Every logup numerator is degree ≤ 1 (±enabler or 1) and every tuple
+        // cell — hence every denominator — is degree ≤ 1, so batch-4 logup
+        // constraints are degree 1 + 4·1 = 5 ≤ D5, which log + 2 affords.
+        self.log_size() + 2
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         evaluate_round(&mut eval, &self.relations);
@@ -516,7 +573,11 @@ pub fn evaluate_round<E: EvalAtRow>(eval: &mut E, rel: &KeccakRelations) {
 
     // Incoming chain link (require).
     let round_data: Vec<E::F> = current_rc.iter().chain(state.iter()).cloned().collect();
-    eval.add_to_relation(RelationEntry::new(&rel.keccak_round, -enabler_ef.clone(), &round_data));
+    eval.add_to_relation(RelationEntry::new(
+        &rel.keccak_round,
+        -enabler_ef.clone(),
+        &round_data,
+    ));
 
     // Spread state limbs, lane-grouped.
     let S0: [[E::F; N_BYTES_IN_U64]; N_LANES_KECCAK] = std::array::from_fn(|lane| {
@@ -529,9 +590,23 @@ pub fn evaluate_round<E: EvalAtRow>(eval: &mut E, rel: &KeccakRelations) {
     for x in 0..SQRT_N_LANES {
         for i in 0..N_BYTES_IN_U64 {
             let t = eval.next_trace_mask();
-            xor3_lookup(eval, rel, &[S0[x][i].clone(), S0[x + 5][i].clone(), S0[x + 10][i].clone()], &t);
+            xor3_lookup(
+                eval,
+                rel,
+                &[
+                    S0[x][i].clone(),
+                    S0[x + 5][i].clone(),
+                    S0[x + 10][i].clone(),
+                ],
+                &t,
+            );
             let c = eval.next_trace_mask();
-            xor3_lookup(eval, rel, &[t.clone(), S0[x + 15][i].clone(), S0[x + 20][i].clone()], &c);
+            xor3_lookup(
+                eval,
+                rel,
+                &[t.clone(), S0[x + 15][i].clone(), S0[x + 20][i].clone()],
+                &c,
+            );
             C[x][i] = c;
         }
     }
@@ -550,7 +625,8 @@ pub fn evaluate_round<E: EvalAtRow>(eval: &mut E, rel: &KeccakRelations) {
             for i in 0..N_BYTES_IN_U64 {
                 let res = eval.next_trace_mask();
                 xor3_lookup(
-                    eval, rel,
+                    eval,
+                    rel,
                     &[S0[id][i].clone(), C[xm1][i].clone(), Crot[x][i].clone()],
                     &res,
                 );
@@ -604,17 +680,31 @@ pub fn evaluate_round<E: EvalAtRow>(eval: &mut E, rel: &KeccakRelations) {
     }
     eval.add_to_relation(RelationEntry::new(&rel.keccak_round, enabler_ef, &out));
 
-    eval.finalize_logup_in_pairs();
+    eval.finalize_logup_batched(LOGUP_BATCH);
 }
 
 fn xor3_lookup<E: EvalAtRow>(eval: &mut E, rel: &KeccakRelations, ins: &[E::F; 3], out: &E::F) {
     let key = ins[0].clone() + ins[1].clone() + ins[2].clone();
-    eval.add_to_relation(RelationEntry::new(&rel.xor3, E::EF::one(), &[key, out.clone()]));
+    eval.add_to_relation(RelationEntry::new(
+        &rel.xor3,
+        E::EF::one(),
+        &[key, out.clone()],
+    ));
 }
 
-fn andnot_lookup<E: EvalAtRow>(eval: &mut E, rel: &KeccakRelations, b1: &E::F, b2: &E::F, out: &E::F) {
+fn andnot_lookup<E: EvalAtRow>(
+    eval: &mut E,
+    rel: &KeccakRelations,
+    b1: &E::F,
+    b2: &E::F,
+    out: &E::F,
+) {
     let u = b1.clone() + b2.clone() + b2.clone();
-    eval.add_to_relation(RelationEntry::new(&rel.andnot, E::EF::one(), &[u, out.clone()]));
+    eval.add_to_relation(RelationEntry::new(
+        &rel.andnot,
+        E::EF::one(),
+        &[u, out.clone()],
+    ));
 }
 
 /// Rho rotation in the constraint domain on spread limbs; mirrors `rotr_split`.
@@ -626,8 +716,7 @@ fn rotr_constraint<E: EvalAtRow>(
 ) -> [E::F; N_BYTES_IN_U64] {
     let q = n / 8;
     let r = n % 8;
-    let rot: [E::F; N_BYTES_IN_U64] =
-        std::array::from_fn(|i| a[(i + q) % N_BYTES_IN_U64].clone());
+    let rot: [E::F; N_BYTES_IN_U64] = std::array::from_fn(|i| a[(i + q) % N_BYTES_IN_U64].clone());
     if r == 0 {
         return rot;
     }
@@ -644,9 +733,7 @@ fn rotr_constraint<E: EvalAtRow>(
             &[rot[i].clone(), hi[i].clone(), lo[i].clone()],
         ));
     }
-    std::array::from_fn(|i| {
-        hi[i].clone() + lo[(i + 1) % N_BYTES_IN_U64].clone() * four_pow_8mr
-    })
+    std::array::from_fn(|i| hi[i].clone() + lo[(i + 1) % N_BYTES_IN_U64].clone() * four_pow_8mr)
 }
 
 pub type Component = FrameworkComponent<Eval>;
@@ -664,7 +751,9 @@ impl InteractionClaim {
     }
 }
 
-/// Build the interaction trace, pairing lookups in `add_to_relation` order.
+/// Build the interaction trace, batching lookups in `add_to_relation` order
+/// in consecutive chunks of [`LOGUP_BATCH`] (matching `finalize_logup_batched`;
+/// the last chunk may be smaller).
 ///
 /// Emission order (must equal `evaluate_round`):
 ///   kr[0], [theta C: 2 xor3 per byte, 5·8], [C_rot split 0..40],
@@ -700,39 +789,48 @@ pub fn generate_interaction_trace(
         }
     };
 
-    fracs.push(link_fraction(&rel.keccak_round, &ld.keccak_round[0], &enabler, n_vec_rows, true));
+    fracs.push(link_fraction(
+        &rel.keccak_round,
+        &ld.keccak_round[0],
+        &enabler,
+        n_vec_rows,
+        true,
+    ));
     push_xor3(&mut fracs, 0, N_XOR3_C); // theta C-parity 0..80
     push_split(&mut fracs, 0, N_SPLIT_C_ROT); // C_rot 0..40
     push_xor3(&mut fracs, N_XOR3_C, N_XOR3_C + N_XOR3_THETA_APPLY); // theta-apply 80..280
     push_split(&mut fracs, N_SPLIT_C_ROT, N_SPLIT_LOOKUPS); // rho 40..216
-    // Chi: per byte, andnot then closing xor3, interleaved (matching evaluate).
+                                                            // Chi: per byte, andnot then closing xor3, interleaved (matching evaluate).
     let chi_close_lo = N_XOR3_C + N_XOR3_THETA_APPLY;
     for j in 0..N_ANDNOT_LOOKUPS {
         fracs.push(dense_fraction(&rel.andnot, &ld.andnot[j], n_vec_rows));
-        fracs.push(dense_fraction(&rel.xor3, &ld.xor3[chi_close_lo + j], n_vec_rows));
+        fracs.push(dense_fraction(
+            &rel.xor3,
+            &ld.xor3[chi_close_lo + j],
+            n_vec_rows,
+        ));
     }
-    fracs.push(link_fraction(&rel.keccak_round, &ld.keccak_round[1], &enabler, n_vec_rows, false));
+    fracs.push(link_fraction(
+        &rel.keccak_round,
+        &ld.keccak_round[1],
+        &enabler,
+        n_vec_rows,
+        false,
+    ));
 
     debug_assert_eq!(fracs.len(), N_TOTAL_LOOKUPS);
 
-    let mut i = 0;
-    while i + 2 <= fracs.len() {
+    // Fold each chunk exactly like `finalize_logup_batched`: start from the
+    // first fraction, then num = d·num + n·den, den = den·d.
+    for chunk in fracs.chunks(LOGUP_BATCH) {
         let mut col = gen.new_col();
-        let (n0, d0) = &fracs[i];
-        let (n1, d1) = &fracs[i + 1];
         for vr in 0..n_vec_rows {
-            let num = n0[vr] * d1[vr] + n1[vr] * d0[vr];
-            let den = d0[vr] * d1[vr];
+            let (mut num, mut den) = (chunk[0].0[vr], chunk[0].1[vr]);
+            for (n, d) in &chunk[1..] {
+                num = d[vr] * num + n[vr] * den;
+                den = den * d[vr];
+            }
             col.write_frac(vr, num, den);
-        }
-        col.finalize_col();
-        i += 2;
-    }
-    if i < fracs.len() {
-        let mut col = gen.new_col();
-        let (n, d) = &fracs[i];
-        for vr in 0..n_vec_rows {
-            col.write_frac(vr, n[vr], d[vr]);
         }
         col.finalize_col();
     }

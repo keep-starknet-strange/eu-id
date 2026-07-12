@@ -58,6 +58,17 @@ use crate::relations::Sha256Relations;
 use crate::trace::WORD_BIT_COLS;
 use crate::types::{BYTES_PER_WORD, LIMB_BITS, WORDS_PER_BLOCK};
 
+/// LogUp batch size of the main `Sha256Eval` consumer: 4 fractions fold into
+/// one `SecureField` interaction column (`finalize_logup_batched(4)`).
+///
+/// Degree budget: with every consumer denominator degree ≤ 1 and numerator
+/// degree ≤ 2, the batched LogUp constraint has degree
+/// `max(1 + Σ deg dᵢ, maxᵢ(deg nᵢ + Σ_{j≠i} deg dⱼ)) = max(1+4, 2+3) = 5`,
+/// covered by `max_constraint_log_degree_bound = log_size + 2` (D ≤ 5).
+/// The trace generator (`crate::interaction`) and the interaction-column
+/// sizing (`crate::air`) both read this constant so the three never drift.
+pub const LOGUP_BATCH: usize = 4;
+
 /// AIR evaluator over the rotated one-row-per-round layout.
 #[derive(Clone)]
 pub struct Sha256Eval {
@@ -97,13 +108,14 @@ impl FrameworkEval for Sha256Eval {
     }
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        // Constraints here are degree ≤ 3: a degree-2 boundary gate
+        // Plain constraints here are degree ≤ 3: a degree-2 boundary gate
         // (`enabler · is_round_k`, with the indicator preprocessed) times a
         // linear identity, or `enabler` times a degree-2 boundary-select
-        // expression. `log_size + 1` covers D ≤ 3 — the same budget the
-        // P256 components in the composed proof already use. The `+1` is
-        // the standard FRI headroom.
-        self.log_size + 1
+        // expression. The binding term is the batch-4 LogUp finalizer
+        // (`finalize_logup_batched(LOGUP_BATCH)`): four degree-1 denominators
+        // and degree-≤ 2 numerators fold to a degree-5 constraint (see
+        // [`LOGUP_BATCH`]), so the budget is `log_size + 2` (D ≤ 5).
+        self.log_size + 2
     }
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
@@ -1013,7 +1025,7 @@ impl FrameworkEval for Sha256Eval {
             }
         }
 
-        eval.finalize_logup_in_pairs();
+        eval.finalize_logup_batched(LOGUP_BATCH);
 
         eval
     }

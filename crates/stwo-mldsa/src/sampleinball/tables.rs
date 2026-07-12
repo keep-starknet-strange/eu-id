@@ -51,7 +51,9 @@ impl RcKind {
     }
 
     pub fn value_column_id(self) -> PreProcessedColumnId {
-        PreProcessedColumnId { id: format!("mldsa_sib_{}_value", self.name()) }
+        PreProcessedColumnId {
+            id: format!("mldsa_sib_{}_value", self.name()),
+        }
     }
 }
 
@@ -59,7 +61,9 @@ pub fn gen_table_preprocessed(kind: RcKind) -> ColEval {
     let log_size = kind.log_size();
     let rows = 1usize << log_size;
     let n = kind.n_values();
-    let values = (0..rows).map(|i| m31(if i < n { i as u32 } else { 0 })).collect();
+    let values = (0..rows)
+        .map(|i| m31(if i < n { i as u32 } else { 0 }))
+        .collect();
     col_eval(log_size, values)
 }
 
@@ -68,7 +72,9 @@ pub fn gen_table_multiplicities(kind: RcKind, uses: &[u32]) -> ColEval {
     let rows = 1usize << log_size;
     let n = kind.n_values();
     assert_eq!(uses.len(), n, "one multiplicity per table value");
-    let values = (0..rows).map(|i| m31(if i < n { uses[i] } else { 0 })).collect();
+    let values = (0..rows)
+        .map(|i| m31(if i < n { uses[i] } else { 0 }))
+        .collect();
     col_eval(log_size, values)
 }
 
@@ -127,7 +133,11 @@ pub struct RcUses {
 
 impl RcUses {
     pub fn new() -> Self {
-        Self { rc8: vec![0; 1 << 8], rc9: vec![0; 1 << 9], rc11: vec![0; 1 << 11] }
+        Self {
+            rc8: vec![0; 1 << 8],
+            rc9: vec![0; 1 << 9],
+            rc11: vec![0; 1 << 11],
+        }
     }
 
     pub fn for_kind(&self, kind: RcKind) -> &[u32] {

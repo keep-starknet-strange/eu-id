@@ -32,18 +32,18 @@ use crate::air_util::{padded_log_size, ColEval};
 use crate::binding::STREAM_ID_CTILDE_ABSORB;
 use crate::witness::MlDsaWitness;
 
-use crate::balancer::{
-    gen_balancer_interaction, gen_balancer_trace, BalancerEval, BalancerRelation,
-    BALANCER_INTERACTION_COLS,
-};
 use super::relations::DecompRelations;
 use super::tables::{
     gen_table_interaction, gen_table_multiplicities, gen_table_preprocessed, RcKind, RcTableEval,
     RC_TABLE_INTERACTION_COLS,
 };
 use super::{
-    decomp_preprocessed_ids, gen_decomp_base_trace, gen_decomp_interaction, gen_decomp_preprocessed,
-    DecompEval, N_BASE_COLS, N_INTERACTION_COLS, N_PAIRS,
+    decomp_preprocessed_ids, gen_decomp_base_trace, gen_decomp_interaction,
+    gen_decomp_preprocessed, DecompEval, N_BASE_COLS, N_INTERACTION_COLS, N_PAIRS,
+};
+use crate::balancer::{
+    gen_balancer_interaction, gen_balancer_trace, BalancerEval, BalancerRelation,
+    BALANCER_INTERACTION_COLS,
 };
 
 const N_RC: usize = 4;
@@ -110,7 +110,11 @@ impl Built {
     }
     fn as_prover(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
         let mut out: Vec<&dyn ComponentProver<SimdBackend>> = vec![&self.decomp];
-        out.extend(self.rc.iter().map(|c| c as &dyn ComponentProver<SimdBackend>));
+        out.extend(
+            self.rc
+                .iter()
+                .map(|c| c as &dyn ComponentProver<SimdBackend>),
+        );
         out.push(&self.wcell);
         out.push(&self.hashio);
         out
@@ -123,7 +127,10 @@ fn wcell_tuples(witness: &MlDsaWitness) -> Vec<Vec<u32>> {
     let mut out = Vec::with_capacity(crate::constants::K * crate::constants::N);
     for i in 0..crate::constants::K {
         for m in 0..crate::constants::N {
-            out.push(vec![(i * crate::constants::N + m) as u32, witness.rows[i].w[m]]);
+            out.push(vec![
+                (i * crate::constants::N + m) as u32,
+                witness.rows[i].w[m],
+            ]);
         }
     }
     out
@@ -168,14 +175,21 @@ fn build_components(
 ) -> Built {
     let decomp = FrameworkComponent::new(
         allocator,
-        DecompEval { log_size: decomp_log_size(), ct_stream: STREAM_ID_CTILDE_ABSORB, relations: relations.clone() },
+        DecompEval {
+            log_size: decomp_log_size(),
+            ct_stream: STREAM_ID_CTILDE_ABSORB,
+            relations: relations.clone(),
+        },
         decomp_claimed_sum,
     );
     let mut rc = Vec::with_capacity(N_RC);
     for (idx, kind) in RcKind::ALL.iter().enumerate() {
         rc.push(FrameworkComponent::new(
             allocator,
-            RcTableEval { kind: *kind, relation: rc_relation(relations, *kind).clone() },
+            RcTableEval {
+                kind: *kind,
+                relation: rc_relation(relations, *kind).clone(),
+            },
             rc_claimed_sums[idx],
         ));
     }
@@ -201,7 +215,12 @@ fn build_components(
         },
         hashio_claimed_sum,
     );
-    Built { decomp, rc, wcell, hashio }
+    Built {
+        decomp,
+        rc,
+        wcell,
+        hashio,
+    }
 }
 
 fn rc_relation(r: &DecompRelations, kind: RcKind) -> &super::relations::RcRelation {
@@ -283,7 +302,9 @@ impl Air for DecompProver {
 
 impl AirProver for DecompProver {
     fn max_log_size(&self) -> u32 {
-        decomp_log_size().max(RcKind::Rc13.log_size()).max(wcell_log_size())
+        decomp_log_size()
+            .max(RcKind::Rc13.log_size())
+            .max(wcell_log_size())
     }
     fn max_constraint_log_degree_bound(&self) -> u32 {
         // Every constraint is degree ≤ 2 (each component needs its_log_size + 1);
@@ -296,12 +317,21 @@ impl AirProver for DecompProver {
         tb.extend_evals(gen_all_preprocessed());
     }
     fn preprocessed_column_fingerprints(&mut self) -> Vec<PreprocessedColumnFingerprint> {
-        fingerprint_preprocessed_columns("mldsa_decomp", &all_preprocessed_ids(), &gen_all_preprocessed())
+        fingerprint_preprocessed_columns(
+            "mldsa_decomp",
+            &all_preprocessed_ids(),
+            &gen_all_preprocessed(),
+        )
     }
     fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
         let mut evals = gen_decomp_base_trace(&self.witness, decomp_log_size());
         // rc multiplicities from a dry-run interaction (relations not needed).
-        let dry = gen_decomp_interaction(&self.witness, decomp_log_size(), STREAM_ID_CTILDE_ABSORB, &DecompRelations::dummy());
+        let dry = gen_decomp_interaction(
+            &self.witness,
+            decomp_log_size(),
+            STREAM_ID_CTILDE_ABSORB,
+            &DecompRelations::dummy(),
+        );
         self.w1_encode_bytes = dry.w1_encode_bytes.clone();
         self.rc_mult = RcKind::ALL
             .iter()
@@ -309,18 +339,30 @@ impl AirProver for DecompProver {
             .collect();
         evals.extend(self.rc_mult.clone());
         // balancer base cols.
-        evals.extend(gen_balancer_trace(wcell_log_size(), &wcell_tuples(&self.witness)));
-        evals.extend(gen_balancer_trace(hashio_log_size(), &hashio_tuples(&self.w1_encode_bytes)));
+        evals.extend(gen_balancer_trace(
+            wcell_log_size(),
+            &wcell_tuples(&self.witness),
+        ));
+        evals.extend(gen_balancer_trace(
+            hashio_log_size(),
+            &hashio_tuples(&self.w1_encode_bytes),
+        ));
         tb.extend_evals(evals);
     }
     fn write_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
         let relations = self.relations.clone().expect("relations");
-        let interaction = gen_decomp_interaction(&self.witness, decomp_log_size(), STREAM_ID_CTILDE_ABSORB, &relations);
+        let interaction = gen_decomp_interaction(
+            &self.witness,
+            decomp_log_size(),
+            STREAM_ID_CTILDE_ABSORB,
+            &relations,
+        );
         let mut evals = interaction.trace;
         self.decomp_claimed_sum = interaction.claimed_sum;
 
         for (idx, kind) in RcKind::ALL.iter().enumerate() {
-            let (tr, sum) = gen_table_interaction(*kind, &self.rc_mult[idx], rc_relation(&relations, *kind));
+            let (tr, sum) =
+                gen_table_interaction(*kind, &self.rc_mult[idx], rc_relation(&relations, *kind));
             evals.extend(tr);
             self.rc_claimed_sums[idx] = sum;
         }

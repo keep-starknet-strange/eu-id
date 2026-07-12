@@ -42,7 +42,10 @@ fn prove_case(seed: u64, msg: &[u8]) -> CoeffsProof {
     prove_coeffs(witness, input, PcsConfig::default()).expect("prove")
 }
 
-fn witness_and_input(seed: u64, msg: &[u8]) -> (stwo_mldsa::witness::MlDsaWitness, MlDsaVerifyInput) {
+fn witness_and_input(
+    seed: u64,
+    msg: &[u8],
+) -> (stwo_mldsa::witness::MlDsaWitness, MlDsaVerifyInput) {
     let mut rng = StdRng::seed_from_u64(seed);
     let sk = oracle_keypair(&mut rng);
     let input = oracle_input(&sk, msg);
@@ -52,10 +55,7 @@ fn witness_and_input(seed: u64, msg: &[u8]) -> (stwo_mldsa::witness::MlDsaWitnes
 
 /// A witness mutation is REJECTED if proving fails, panics (e.g. an out-of-range
 /// digit overflowing a table index), or the resulting proof fails to verify.
-fn rejected(
-    witness: stwo_mldsa::witness::MlDsaWitness,
-    input: MlDsaVerifyInput,
-) -> bool {
+fn rejected(witness: stwo_mldsa::witness::MlDsaWitness, input: MlDsaVerifyInput) -> bool {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         match prove_coeffs(witness, input, PcsConfig::default()) {
             Ok(proof) => verify_coeffs(&proof).is_err(),
@@ -95,7 +95,10 @@ fn coeffs_proves_and_verifies_over_20_signatures() {
 fn negative_tampered_claimed_eval() {
     let mut proof = prove_case(2001, b"tamper-eval");
     proof.group_evals[17] += SecureField::from(stwo::core::fields::m31::M31::from_u32_unchecked(1));
-    assert!(verify_coeffs(&proof).is_err(), "tampered claimed eval must reject");
+    assert!(
+        verify_coeffs(&proof).is_err(),
+        "tampered claimed eval must reject"
+    );
 }
 
 /// N8: verify against the WRONG pk (ρ′) → native ExpandA(ρ′) ≠ ExpandA(ρ), fold nonzero.
@@ -112,7 +115,10 @@ fn negative_tampered_claimed_sum() {
     let mut proof = prove_case(2003, b"tamper-sum");
     proof.coeffs_claimed_sum +=
         SecureField::from(stwo::core::fields::m31::M31::from_u32_unchecked(1));
-    assert!(verify_coeffs(&proof).is_err(), "tampered claimed sum must reject");
+    assert!(
+        verify_coeffs(&proof).is_err(),
+        "tampered claimed sum must reject"
+    );
 }
 
 // --- Witness-level negatives (mutate the witness before proving) ---
@@ -141,7 +147,10 @@ fn negative_swap_digits_across_t() {
     let (mut w, input) = witness_and_input(3003, b"swap-digits");
     let row = &mut w.digits.z[0][50];
     row.swap(0, 2); // swap digit t=0 and t=2 (distinct weights B^0 vs B^2)
-    assert!(rejected(w, input), "swapping digits across t must be rejected");
+    assert!(
+        rejected(w, input),
+        "swapping digits across t must be rejected"
+    );
 }
 
 /// N4: out-of-range digit (+257, outside the balanced [−256,256) window) → the
@@ -170,7 +179,10 @@ fn negative_recomp_binding_mismatch() {
     // Bump the top z digit by 1 (changes Σ d_t·B^t but the norm/aux still target
     // the original cell) — the recomposition value the AIR commits diverges.
     w.digits.z[3][77][2] += 1;
-    assert!(rejected(w, input), "recomposition mismatch must be rejected");
+    assert!(
+        rejected(w, input),
+        "recomposition mismatch must be rejected"
+    );
 }
 
 /// N7: the exact z-norm gate accepts `|z| ≤ γ1−β−1 = 524_091` and rejects the
@@ -194,17 +206,21 @@ fn z_norm_gate_is_exact() {
     // A naive single 2^20 window (`z + 2^19 ∈ [0,2^20)`) over-accepts up to
     // 2^19−1 = 524_287 (196 past the bound); the exact two-sided gate does not.
     let naive_window = |z: i128| in_range(z + (1i128 << 19));
-    assert!(naive_window(bound + 100), "naive window over-accepts z = bound+100...");
-    assert!(!accepts(bound + 100), "...but the exact two-sided gate rejects it");
+    assert!(
+        naive_window(bound + 100),
+        "naive window over-accepts z = bound+100..."
+    );
+    assert!(
+        !accepts(bound + 100),
+        "...but the exact two-sided gate rejects it"
+    );
 }
 
 /// Measure committed cells (M31 units) and the native ExpandA+eval microbench.
 #[test]
 fn measure_cells_and_bench() {
-    use stwo_mldsa::coeffs::{
-        coeffs_preprocessed_ids, layout, N_BASE_COLS, N_INTERACTION_COLS,
-    };
     use stwo_mldsa::coeffs::tables::RcKind;
+    use stwo_mldsa::coeffs::{coeffs_preprocessed_ids, layout, N_BASE_COLS, N_INTERACTION_COLS};
 
     let log_size = stwo_mldsa::air_util::padded_log_size(layout::active_rows());
     let rows = 1usize << log_size;
@@ -220,12 +236,15 @@ fn measure_cells_and_bench() {
     let mut rc_cells = 0usize;
     for kind in RcKind::ALL {
         let tr = 1usize << kind.log_size();
-        rc_cells += (1 /*value*/ + 1 /*mult*/ + 4 /*interaction QM31*/) * tr;
+        rc_cells += (1 /*value*/ + 1 /*mult*/ + 4/*interaction QM31*/) * tr;
     }
 
     let total = coeffs_cells + rc_cells;
     eprintln!("== M4 mldsa_coeffs cell measurement (M31 units) ==");
-    eprintln!("log_size = {log_size} ({rows} rows, {active} active, {} groups)", layout::N_GROUPS);
+    eprintln!(
+        "log_size = {log_size} ({rows} rows, {active} active, {} groups)",
+        layout::N_GROUPS
+    );
     eprintln!("coeffs: pre={coeffs_pre} base={coeffs_base} inter={coeffs_inter} cols → {coeffs_cells} cells");
     eprintln!("rc tables (rc9/rc13/rc8/rc7/ternary): {rc_cells} cells");
     eprintln!("TOTAL committed cells = {total}");
@@ -258,6 +277,7 @@ fn negative_seeds_are_honest_without_mutation() {
         let (w, input) = witness_and_input(seed, msg);
         let proof = prove_coeffs(w, input, PcsConfig::default())
             .unwrap_or_else(|e| panic!("seed {seed}: honest prove failed: {e:?}"));
-        verify_coeffs(&proof).unwrap_or_else(|e| panic!("seed {seed}: honest verify failed: {e:?}"));
+        verify_coeffs(&proof)
+            .unwrap_or_else(|e| panic!("seed {seed}: honest verify failed: {e:?}"));
     }
 }

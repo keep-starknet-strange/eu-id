@@ -98,12 +98,21 @@ mod tests {
         let t = build_dense_table();
         assert_eq!(t.len(), 1 << LOG_SIZE_DENSE);
         // xor3: every valid triple hits a row whose xor column is the true xor.
-        for &(a, b, c) in &[(0u32, 0u32, 0u32), (0xAB, 0xCD, 0x37), (0xFF, 0xFF, 0xFF), (0x80, 0x01, 0x40)] {
+        for &(a, b, c) in &[
+            (0u32, 0u32, 0u32),
+            (0xAB, 0xCD, 0x37),
+            (0xFF, 0xFF, 0xFF),
+            (0x80, 0x01, 0x40),
+        ] {
             let key = (spread_u32(a) + spread_u32(b) + spread_u32(c)) as usize;
             assert!(key < t.len(), "key {key} in range (max {})", 3 * SPREAD_MAX);
             let [k, xor_out, _] = t[key];
             assert_eq!(k as usize, key);
-            assert_eq!(unspread_u32(xor_out), a ^ b ^ c, "xor3({a:#x},{b:#x},{c:#x})");
+            assert_eq!(
+                unspread_u32(xor_out),
+                a ^ b ^ c,
+                "xor3({a:#x},{b:#x},{c:#x})"
+            );
         }
         // andnot: key = spread(b')+2·spread(b'') → andnot column.
         for b1 in [0u32, 0x0F, 0xAA, 0xFF, 0x39] {
@@ -111,7 +120,11 @@ mod tests {
                 let u = (spread_u32(b1) + 2 * spread_u32(b2)) as usize;
                 let [k, _, andnot_out] = t[u];
                 assert_eq!(k as usize, u);
-                assert_eq!(unspread_u32(andnot_out), ((!b1) & b2) & 0xFF, "andnot({b1:#x},{b2:#x})");
+                assert_eq!(
+                    unspread_u32(andnot_out),
+                    ((!b1) & b2) & 0xFF,
+                    "andnot({b1:#x},{b2:#x})"
+                );
             }
         }
         // The maximum key is exactly 2^16-1 (3·0xFF spread), so the table is dense.
@@ -124,7 +137,11 @@ mod tests {
             let t = build_split_table(r);
             assert_eq!(t.len(), 1 << LOG_SIZE_SPLIT);
             for (byte, &[sb, shi, slo]) in t.iter().enumerate() {
-                assert_eq!(sb, spread_u32(byte as u32), "spread_byte column = spread(row index)");
+                assert_eq!(
+                    sb,
+                    spread_u32(byte as u32),
+                    "spread_byte column = spread(row index)"
+                );
                 // Spread is additive across the disjoint hi/lo bit ranges:
                 // spread_byte = spread_hi·4^r + spread_lo (hi occupies the high
                 // 8-r bits, lo the low r bits).

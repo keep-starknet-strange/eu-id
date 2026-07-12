@@ -76,6 +76,11 @@ fn acvp_ml_dsa_65_sigver_matches_reference() {
     }
 
     assert_eq!(total, valid + invalid);
-    assert!(valid > 0 && invalid > 0, "need both valid and invalid cases");
-    eprintln!("ACVP ML-DSA-65 sigVer: {total} cases ({valid} valid, {invalid} invalid) all matched");
+    assert!(
+        valid > 0 && invalid > 0,
+        "need both valid and invalid cases"
+    );
+    eprintln!(
+        "ACVP ML-DSA-65 sigVer: {total} cases ({valid} valid, {invalid} invalid) all matched"
+    );
 }

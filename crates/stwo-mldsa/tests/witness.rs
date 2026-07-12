@@ -200,17 +200,34 @@ fn witness_property_over_1000_signatures() {
     eprintln!("  max |digit e|       = {max_digit_e:>13}  (mag bound {BOUND_DIGIT_MAG})");
     eprintln!("  max |digit v|       = {max_digit_v:>13}  (mag bound {BOUND_DIGIT_MAG})");
     eprintln!("  max honest |carry|  = {max_carry:>13}  (rc bound {BOUND_CARRY} = 2^20)");
-    eprintln!("  max |partial|       = {max_partial:>13}  (worksheet §5 total {BOUND_PARTIAL} = 2^29.42)");
-    eprintln!("  max Σ hint bits     = {max_hint_total:>13}  (ω bound {})", stwo_mldsa::constants::OMEGA);
+    eprintln!(
+        "  max |partial|       = {max_partial:>13}  (worksheet §5 total {BOUND_PARTIAL} = 2^29.42)"
+    );
+    eprintln!(
+        "  max Σ hint bits     = {max_hint_total:>13}  (ω bound {})",
+        stwo_mldsa::constants::OMEGA
+    );
 
     // Gate: every observed value must be within the worksheet bound. Digits use
     // the inclusive §5 magnitude ceiling (the window `[−256,256)` admits −256,
     // whose magnitude is 256); the strict half-open *range* is enforced inside
     // the generator's `balanced_digits` (debug_assert, active in test builds).
-    assert!(max_digit_z <= BOUND_DIGIT_MAG, "z digit exceeded bound: {max_digit_z}");
-    assert!(max_digit_w <= BOUND_DIGIT_MAG, "w digit exceeded bound: {max_digit_w}");
-    assert!(max_digit_e <= BOUND_DIGIT_MAG, "e digit exceeded bound: {max_digit_e}");
-    assert!(max_digit_v <= BOUND_DIGIT_MAG, "v digit exceeded bound: {max_digit_v}");
+    assert!(
+        max_digit_z <= BOUND_DIGIT_MAG,
+        "z digit exceeded bound: {max_digit_z}"
+    );
+    assert!(
+        max_digit_w <= BOUND_DIGIT_MAG,
+        "w digit exceeded bound: {max_digit_w}"
+    );
+    assert!(
+        max_digit_e <= BOUND_DIGIT_MAG,
+        "e digit exceeded bound: {max_digit_e}"
+    );
+    assert!(
+        max_digit_v <= BOUND_DIGIT_MAG,
+        "v digit exceeded bound: {max_digit_v}"
+    );
     assert!(max_carry <= BOUND_CARRY, "carry exceeded 2^20: {max_carry}");
     assert!(
         max_partial <= BOUND_PARTIAL,

@@ -71,7 +71,8 @@ fn sib_seeds_honest_without_mutation() {
         let w = witness_for(seed, msg);
         let proof = prove_sib(w.clone(), PcsConfig::default())
             .unwrap_or_else(|e| panic!("seed {seed}: honest prove failed: {e:?}"));
-        verify_sib(&proof, &w).unwrap_or_else(|e| panic!("seed {seed}: honest verify failed: {e:?}"));
+        verify_sib(&proof, &w)
+            .unwrap_or_else(|e| panic!("seed {seed}: honest verify failed: {e:?}"));
     }
 }
 
@@ -111,7 +112,10 @@ fn negative_c_binding_tamper() {
     proof.ccell_claimed_sum += stwo::core::fields::qm31::SecureField::from(
         stwo::core::fields::m31::M31::from_u32_unchecked(1),
     );
-    assert!(verify_sib(&proof, &w).is_err(), "a broken c-binding balance must be rejected");
+    assert!(
+        verify_sib(&proof, &w).is_err(),
+        "a broken c-binding balance must be rejected"
+    );
 }
 
 /// Stream tamper: corrupt the emitted `hashio_claimed_sum` so the stream-consume
@@ -125,7 +129,10 @@ fn negative_stream_binding_tamper() {
     proof.hashio_claimed_sum += stwo::core::fields::qm31::SecureField::from(
         stwo::core::fields::m31::M31::from_u32_unchecked(1),
     );
-    assert!(verify_sib(&proof, &w).is_err(), "a broken stream-consume balance must be rejected");
+    assert!(
+        verify_sib(&proof, &w).is_err(),
+        "a broken stream-consume balance must be rejected"
+    );
 }
 
 /// c placed at a rejected index (τ+1 nonzeros): set one extra c to −1 → Σc² =
@@ -139,7 +146,10 @@ fn negative_c_one_extra_nonzero() {
             break;
         }
     }
-    assert!(rejected(w), "c with τ+1 nonzeros must be rejected by the Σc²=τ gate");
+    assert!(
+        rejected(w),
+        "c with τ+1 nonzeros must be rejected by the Σc²=τ gate"
+    );
 }
 
 /// PLACEMENT PERMUTATION (the swap-replay hole). Move a ±1 from a slot where
@@ -156,7 +166,9 @@ fn negative_placement_permuted() {
     let mut w = witness_for(8005, b"placement");
     // Find p<q with c[p] nonzero and c[q]==0, then SWAP (move the ±1 to q).
     let n = stwo_mldsa::constants::N;
-    let p = (0..n).find(|&m| w.digits.c[m] != 0).expect("a nonzero coeff");
+    let p = (0..n)
+        .find(|&m| w.digits.c[m] != 0)
+        .expect("a nonzero coeff");
     let q = (0..n).find(|&m| w.digits.c[m] == 0).expect("a zero coeff");
     assert_ne!(p, q);
     let moved = w.digits.c[p];
@@ -165,8 +177,15 @@ fn negative_placement_permuted() {
     // Σc² is unchanged (still exactly τ nonzeros): confirm the gate that catches
     // this is the Mem replay, not the accumulator.
     let sumsq: i128 = w.digits.c.iter().map(|&x| x * x).sum();
-    assert_eq!(sumsq as usize, stwo_mldsa::constants::TAU, "Σc² must stay τ");
-    assert!(rejected(w), "a placement permutation must be rejected by the Mem swap-replay gate");
+    assert_eq!(
+        sumsq as usize,
+        stwo_mldsa::constants::TAU,
+        "Σc² must stay τ"
+    );
+    assert!(
+        rejected(w),
+        "a placement permutation must be rejected by the Mem swap-replay gate"
+    );
 }
 
 /// THE REAL ATTACK on the closed gap: a FORGED core access list. Before the
@@ -210,17 +229,17 @@ fn negative_forged_access_list() {
 
     // Install the forgery and assert prove+verify REJECTS (Swap channel imbalance).
     let guard = install_forged_core(core);
-    let forged_rejected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        match prove_sib(w.clone(), PcsConfig::default()) {
-            Ok(proof) => verify_sib(&proof, &w).is_err(),
-            Err(_) => true,
-        }
-    }))
-    .unwrap_or(true);
+    let forged_rejected =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            match prove_sib(w.clone(), PcsConfig::default()) {
+                Ok(proof) => verify_sib(&proof, &w).is_err(),
+                Err(_) => true,
+            }
+        }))
+        .unwrap_or(true);
     drop(guard);
     assert!(
         forged_rejected,
         "a forged (FSM-mismatched) core access list must be rejected by the Swap channel"
     );
 }
-

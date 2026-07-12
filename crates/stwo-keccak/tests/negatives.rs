@@ -10,14 +10,24 @@
 use num_traits::Zero;
 use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::QM31;
+use stwo::core::fri::FriConfig;
 use stwo::core::pcs::PcsConfig;
 use stwo_constraint_framework::Relation;
 use stwo_keccak::tables::{build_conv_table, build_dense_table};
 use stwo_keccak::utils::{spread_u32, SPREAD_MAX};
 use stwo_keccak::{keccak_round, prove_shake256, relations::KeccakRelations, verify_shake256};
 
+/// Batch-4 logup constraints have log-degree excess 2, so proving needs
+/// `log_blowup >= 2` (production uses 3).
+fn pcs_config() -> PcsConfig {
+    PcsConfig {
+        fri_config: FriConfig::new(0, 2, 3, 1),
+        ..PcsConfig::default()
+    }
+}
+
 fn honest() -> stwo_keccak::KeccakProof {
-    prove_shake256(b"negative-test message", 1, PcsConfig::default()).expect("prove")
+    prove_shake256(b"negative-test message", 1, pcs_config()).expect("prove")
 }
 
 fn m1(v: u32) -> M31 {
@@ -40,12 +50,13 @@ fn non_spread_value_in_spread_column_rejected() {
     assert_eq!(tk, key);
     // A non-spread output: set a base-4 digit to 3 (illegal for a spread value).
     let bad_out = honest_out | 0b11; // slot 0 becomes 3, not 0/1
-    assert!(bad_out > SPREAD_MAX || (bad_out & 0b10) != 0, "bad_out is non-spread");
+    assert!(
+        bad_out > SPREAD_MAX || (bad_out & 0b10) != 0,
+        "bad_out is non-spread"
+    );
 
-    let honest: QM31 =
-        <_ as Relation<M31, QM31>>::combine(&rel.xor3, &[m1(key), m1(honest_out)]);
-    let tampered: QM31 =
-        <_ as Relation<M31, QM31>>::combine(&rel.xor3, &[m1(key), m1(bad_out)]);
+    let honest: QM31 = <_ as Relation<M31, QM31>>::combine(&rel.xor3, &[m1(key), m1(honest_out)]);
+    let tampered: QM31 = <_ as Relation<M31, QM31>>::combine(&rel.xor3, &[m1(key), m1(bad_out)]);
     assert_ne!(
         honest, tampered,
         "a non-spread output must not collide with the genuine dense-table row"
@@ -71,8 +82,7 @@ fn wrong_conv_at_hashio_boundary_rejected() {
     let wrong_spread = spread_u32(byte ^ 0x01);
     assert_ne!(true_spread, wrong_spread);
 
-    let honest: QM31 =
-        <_ as Relation<M31, QM31>>::combine(&rel.conv, &[m1(byte), m1(true_spread)]);
+    let honest: QM31 = <_ as Relation<M31, QM31>>::combine(&rel.conv, &[m1(byte), m1(true_spread)]);
     let tampered: QM31 =
         <_ as Relation<M31, QM31>>::combine(&rel.conv, &[m1(byte), m1(wrong_spread)]);
     assert_ne!(
@@ -146,8 +156,8 @@ fn flipped_state_between_rounds_breaks_chain() {
     // cannot balance. We check this at the relation level: corrupt one byte of a
     // round's output state and confirm the round's yield tuple no longer equals
     // the honest one (which the next link requires).
-    use stwo::prover::backend::simd::m31::PackedM31;
     use stwo::core::fields::m31::M31;
+    use stwo::prover::backend::simd::m31::PackedM31;
 
     let mut row = [PackedM31::zero(); 201];
     for (i, cell) in row.iter_mut().take(200).enumerate() {
@@ -197,7 +207,7 @@ fn wrong_padding_position_changes_output() {
     // We assert the sponge's committed output matches the reference exactly,
     // which is only possible with correct pad placement (the constraints reject
     // any other). A regression that mis-places padding would break this.
-    let proof = prove_shake256(b"pad check", 1, PcsConfig::default()).expect("prove");
+    let proof = prove_shake256(b"pad check", 1, pcs_config()).expect("prove");
     let mut h = Shake256::default();
     h.update(b"pad check");
     let mut r = h.finalize_xof();

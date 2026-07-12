@@ -98,8 +98,19 @@ pub struct Shape {
 }
 
 impl Shape {
-    pub fn new(message_len: usize, n_squeeze: usize, absorb_stream_id: u32, squeeze_stream_id: u32) -> Self {
-        Self::with_perm_id_base(message_len, n_squeeze, absorb_stream_id, squeeze_stream_id, 0)
+    pub fn new(
+        message_len: usize,
+        n_squeeze: usize,
+        absorb_stream_id: u32,
+        squeeze_stream_id: u32,
+    ) -> Self {
+        Self::with_perm_id_base(
+            message_len,
+            n_squeeze,
+            absorb_stream_id,
+            squeeze_stream_id,
+            0,
+        )
     }
 
     /// [`Shape::new`] with an explicit global `perm_id_base` (composition path).
@@ -280,10 +291,10 @@ where
     }
 
     let push_perm = |state: &mut [u8; N_BYTES_IN_STATE],
-                         perm_id: &mut usize,
-                         perm_inputs: &mut Vec<[PackedM31; N_BYTES_IN_STATE + 1]>,
-                         state_data: &mut Vec<Vec<[PackedM31; 2 + N_BYTES_IN_STATE]>>,
-                         post_states: &mut Vec<[u8; N_BYTES_IN_STATE]>| {
+                     perm_id: &mut usize,
+                     perm_inputs: &mut Vec<[PackedM31; N_BYTES_IN_STATE + 1]>,
+                     state_data: &mut Vec<Vec<[PackedM31; 2 + N_BYTES_IN_STATE]>>,
+                     post_states: &mut Vec<[u8; N_BYTES_IN_STATE]>| {
         let pre = *state;
         // request row for keccak (spread state).
         let mut prow = [PackedM31::zero(); N_BYTES_IN_STATE + 1];
@@ -326,14 +337,26 @@ where
             new_rates.push(new_rate);
             xor_data.push(uses);
         }
-        push_perm(&mut state, &mut perm_id, &mut perm_inputs, &mut state_data, &mut post_states);
+        push_perm(
+            &mut state,
+            &mut perm_id,
+            &mut perm_inputs,
+            &mut state_data,
+            &mut post_states,
+        );
     }
 
     // Squeeze.
     let mut output = Vec::with_capacity(shape.output_len());
     output.extend_from_slice(&state[..N_BYTES_IN_RATE]);
     for _ in 1..shape.n_squeeze {
-        push_perm(&mut state, &mut perm_id, &mut perm_inputs, &mut state_data, &mut post_states);
+        push_perm(
+            &mut state,
+            &mut perm_id,
+            &mut perm_inputs,
+            &mut state_data,
+            &mut post_states,
+        );
         output.extend_from_slice(&state[..N_BYTES_IN_RATE]);
     }
 
@@ -351,7 +374,11 @@ where
     io.push((false, absorb_uses)); // require (consume)
     let mut squeeze_uses = Vec::with_capacity(shape.output_len());
     for (pos, &b) in output.iter().enumerate() {
-        squeeze_uses.push([splat_u32(squeeze_stream_id), splat_u32(pos as u32), splat(b)]);
+        squeeze_uses.push([
+            splat_u32(squeeze_stream_id),
+            splat_u32(pos as u32),
+            splat(b),
+        ]);
     }
     io.push((true, squeeze_uses)); // yield
 
@@ -401,7 +428,8 @@ where
     let trace: Vec<_> = columns
         .into_iter()
         .map(|c| {
-            let col: stwo::prover::backend::simd::column::BaseColumn = c.to_array().into_iter().collect();
+            let col: stwo::prover::backend::simd::column::BaseColumn =
+                c.to_array().into_iter().collect();
             CircleEvaluation::new(domain, col)
         })
         .collect();
@@ -435,7 +463,11 @@ fn spread_byte(b: u8) -> PackedM31 {
 }
 
 /// State tuple with the 200 state limbs carried in spread form.
-fn state_tuple(perm_id: u32, dir: u32, state: &[u8; N_BYTES_IN_STATE]) -> [PackedM31; 2 + N_BYTES_IN_STATE] {
+fn state_tuple(
+    perm_id: u32,
+    dir: u32,
+    state: &[u8; N_BYTES_IN_STATE],
+) -> [PackedM31; 2 + N_BYTES_IN_STATE] {
     let mut out = [PackedM31::zero(); 2 + N_BYTES_IN_STATE];
     out[0] = splat_u32(perm_id);
     out[1] = splat_u32(dir);
@@ -561,7 +593,13 @@ impl FrameworkEval for Eval {
         // conv: bind every block byte to its spread limb (byte→spread boundary).
         for a in 0..shape.n_absorb {
             for j in 0..N_BYTES_IN_RATE {
-                conv_use(&mut eval, rel, &blocks[a][j], &blocks_spread[a][j], en.clone());
+                conv_use(
+                    &mut eval,
+                    rel,
+                    &blocks[a][j],
+                    &blocks_spread[a][j],
+                    en.clone(),
+                );
             }
         }
 
@@ -595,7 +633,11 @@ impl FrameworkEval for Eval {
             let post: [E::F; N_BYTES_IN_STATE] = std::array::from_fn(|_| eval.next_trace_mask());
             let mut out_tuple: Vec<E::F> = vec![perm_id, E::F::one()];
             out_tuple.extend(post.iter().cloned());
-            eval.add_to_relation(RelationEntry::new(&rel.keccak_state, -en.clone(), &out_tuple));
+            eval.add_to_relation(RelationEntry::new(
+                &rel.keccak_state,
+                -en.clone(),
+                &out_tuple,
+            ));
             *s = post;
         };
 
@@ -611,7 +653,14 @@ impl FrameworkEval for Eval {
                 let new_rate: [E::F; N_BYTES_IN_RATE] =
                     std::array::from_fn(|_| eval.next_trace_mask());
                 for j in 0..N_BYTES_IN_RATE {
-                    xor3_use(&mut eval, rel, &S[j], &blocks_spread[a][j], &new_rate[j], en.clone());
+                    xor3_use(
+                        &mut eval,
+                        rel,
+                        &S[j],
+                        &blocks_spread[a][j],
+                        &new_rate[j],
+                        en.clone(),
+                    );
                     S[j] = new_rate[j].clone();
                 }
             }
@@ -654,7 +703,14 @@ impl FrameworkEval for Eval {
 }
 
 /// xor3 use with third input 0: `key = a + b`, output `c` (rate absorb XOR).
-fn xor3_use<E: EvalAtRow>(eval: &mut E, rel: &KeccakRelations, a: &E::F, b: &E::F, c: &E::F, en: E::EF) {
+fn xor3_use<E: EvalAtRow>(
+    eval: &mut E,
+    rel: &KeccakRelations,
+    a: &E::F,
+    b: &E::F,
+    c: &E::F,
+    en: E::EF,
+) {
     eval.add_to_relation(RelationEntry::new(
         &rel.xor3,
         en,
@@ -663,7 +719,13 @@ fn xor3_use<E: EvalAtRow>(eval: &mut E, rel: &KeccakRelations, a: &E::F, b: &E::
 }
 
 /// conv use: bind `(byte, spread)` via the byte↔spread table.
-fn conv_use<E: EvalAtRow>(eval: &mut E, rel: &KeccakRelations, byte: &E::F, spread: &E::F, en: E::EF) {
+fn conv_use<E: EvalAtRow>(
+    eval: &mut E,
+    rel: &KeccakRelations,
+    byte: &E::F,
+    spread: &E::F,
+    en: E::EF,
+) {
     eval.add_to_relation(RelationEntry::new(
         &rel.conv,
         en,
@@ -854,7 +916,11 @@ pub mod io_provider {
                 ]
             })
             .collect();
-        Data { shape, absorb, squeeze }
+        Data {
+            shape,
+            absorb,
+            squeeze,
+        }
     }
 
     #[derive(Clone)]

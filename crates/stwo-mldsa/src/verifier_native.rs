@@ -23,7 +23,9 @@
 
 use stwo::core::fields::qm31::SecureField;
 
-use crate::coeffs::layout::{POLY_ID_CARRY0, POLY_ID_C, POLY_ID_E0, POLY_ID_V0, POLY_ID_W0, POLY_ID_Z0};
+use crate::coeffs::layout::{
+    POLY_ID_C, POLY_ID_CARRY0, POLY_ID_E0, POLY_ID_V0, POLY_ID_W0, POLY_ID_Z0,
+};
 use crate::constants::{D, K, L, N, Q};
 use crate::reference::ntt::ntt_inverse;
 use crate::types::MlDsaVerifyInput;
@@ -84,7 +86,11 @@ pub struct PublicEvals {
 
 /// Compute the public bivariate evals natively. `ExpandA(ρ) → Â_ij → NTT⁻¹ →
 /// integer polys` then bivariate-eval at `(r,s)`.
-pub fn compute_public_evals(input: &MlDsaVerifyInput, r: SecureField, s: SecureField) -> PublicEvals {
+pub fn compute_public_evals(
+    input: &MlDsaVerifyInput,
+    r: SecureField,
+    s: SecureField,
+) -> PublicEvals {
     let a_hat_matrix = crate::reference::expand_a::expand_a(&input.rho);
     let two_d = 1i128 << D;
 
@@ -112,7 +118,11 @@ pub fn compute_public_evals(input: &MlDsaVerifyInput, r: SecureField, s: SecureF
     }
     let _ = Q; // Q_DIGITS recompose to Q; asserted in witness tests.
 
-    PublicEvals { a_hat, t1_hat, q_hat }
+    PublicEvals {
+        a_hat,
+        t1_hat,
+        q_hat,
+    }
 }
 
 /// The claimed evaluations the verifier consumes, indexed by poly_id.

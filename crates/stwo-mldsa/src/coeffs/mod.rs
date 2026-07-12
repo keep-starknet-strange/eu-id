@@ -93,7 +93,9 @@ pub const N_BASE_COLS: usize = COL_CARRY_HI0 + CARRY_DIGITS; // 15
 
 // --- Preprocessed column names ------------------------------------------------
 fn pre_id(name: &str) -> PreProcessedColumnId {
-    PreProcessedColumnId { id: format!("mldsa_coeffs_{name}") }
+    PreProcessedColumnId {
+        id: format!("mldsa_coeffs_{name}"),
+    }
 }
 
 fn digit_mask_name(t: usize) -> String {
@@ -110,7 +112,14 @@ pub fn coeffs_preprocessed_ids() -> Vec<PreProcessedColumnId> {
     // selectors + keys the WCell / CCell binding yields need. `is_recomp` covers
     // BOTH z and w, so a dedicated `is_w` gate is required to yield only the w
     // cells; `w_bind_id = i·N + m` and `c_bind_id = m` are the consumer keys.
-    for name in ["is_digit", "is_carry", "is_recomp", "is_norm", "is_c", "is_w"] {
+    for name in [
+        "is_digit",
+        "is_carry",
+        "is_recomp",
+        "is_norm",
+        "is_c",
+        "is_w",
+    ] {
         ids.push(pre_id(name));
     }
     ids.push(pre_id("w_bind_id"));
@@ -139,8 +148,7 @@ pub const N_LOGUP_COLS: usize = N_LOGUP_ENTRIES.div_ceil(LOGUP_BATCH);
 const N_ACC_COORD_COLS: usize = SECURE_EXTENSION_DEGREE;
 /// Interaction base-column count: 4 accumulator coords + one batched logup
 /// column (`SECURE_EXTENSION_DEGREE` base cols) per fraction pair.
-pub const N_INTERACTION_COLS: usize =
-    N_ACC_COORD_COLS + SECURE_EXTENSION_DEGREE * N_LOGUP_COLS;
+pub const N_INTERACTION_COLS: usize = N_ACC_COORD_COLS + SECURE_EXTENSION_DEGREE * N_LOGUP_COLS;
 
 // =============================================================================
 // Row schedule helpers (shared by trace-gen and preprocessed-gen).
@@ -222,7 +230,9 @@ pub fn gen_coeffs_preprocessed(log_size: u32) -> Vec<ColEval> {
 
     let mut out = vec![start, end, poly_id];
     out.extend(live_mask);
-    out.extend([is_digit, is_carry, is_recomp, is_norm, is_c, is_w, w_bind_id, c_bind_id]);
+    out.extend([
+        is_digit, is_carry, is_recomp, is_norm, is_c, is_w, w_bind_id, c_bind_id,
+    ]);
     out.into_iter().map(|v| col_eval(log_size, v)).collect()
 }
 
@@ -422,7 +432,8 @@ impl FrameworkEval for CoeffsEval {
         let carry_offset = E::F::from(M31::from_u32_unchecked(CARRY_OFFSET as u32));
         for t in 0..CARRY_DIGITS {
             // lo is a degree-1 expression; membership in rc13 enforces lo∈[0,2^13).
-            let lo = digit[t].clone() + carry_offset.clone() - two_pow_13.clone() * carry_hi[t].clone();
+            let lo =
+                digit[t].clone() + carry_offset.clone() - two_pow_13.clone() * carry_hi[t].clone();
             eval.add_to_relation(RelationEntry::base(
                 &self.relations.rc13,
                 is_carry.clone(),
@@ -509,13 +520,21 @@ impl FrameworkEval for CoeffsEval {
         // i·N+m is the shared key. Each w-coefficient is yielded EXACTLY once
         // (one w row per (i,m)); decomp consumes it exactly once. Value degree 1.
         let wtuple = [w_bind_id.clone(), recomp_cell.clone()];
-        eval.add_to_relation(RelationEntry::base(&self.relations.wcell, -is_w.clone(), &wtuple));
+        eval.add_to_relation(RelationEntry::base(
+            &self.relations.wcell,
+            -is_w.clone(),
+            &wtuple,
+        ));
 
         // C10: CCell YIELD (−is_c) — the coeffs C-cell binding. digit[0] (= c,
         // encode_signed) with c_bind_id = m. Each challenge coefficient is
         // yielded once; sampleinball consumes it once. Value degree 1.
         let ctuple = [c_bind_id.clone(), digit[0].clone()];
-        eval.add_to_relation(RelationEntry::base(&self.relations.ccell, -is_c.clone(), &ctuple));
+        eval.add_to_relation(RelationEntry::base(
+            &self.relations.ccell,
+            -is_c.clone(),
+            &ctuple,
+        ));
 
         let _ = enabler; // enabler only gates via preprocessed masks (all active rows carry it); its boolean constraint is C0.
 
@@ -600,7 +619,11 @@ pub fn gen_coeffs_interaction(
     for row in 0..rows {
         let info = if row < active { Some(sched[row]) } else { None };
         let is_start = info.map(|i| i.in_group == 0).unwrap_or(false);
-        let prev = if is_start || row == 0 { zero } else { acc[row - 1] };
+        let prev = if is_start || row == 0 {
+            zero
+        } else {
+            acc[row - 1]
+        };
         let digit_row = match info {
             Some(info) => {
                 let digits = row_digits(witness, &info);
@@ -624,7 +647,12 @@ pub fn gen_coeffs_interaction(
 
     // 4 accumulator coordinate columns first.
     let mut trace: Vec<ColEval> = (0..N_ACC_COORD_COLS)
-        .map(|coord| col_eval(log_size, acc.iter().map(|v| v.to_m31_array()[coord]).collect()))
+        .map(|coord| {
+            col_eval(
+                log_size,
+                acc.iter().map(|v| v.to_m31_array()[coord]).collect(),
+            )
+        })
         .collect();
 
     // --- Logup entries (eval order matches evaluate()) ---
@@ -639,8 +667,8 @@ pub fn gen_coeffs_interaction(
 
     // helper closure to push one logup entry stream.
     let push_entry = |frac_of: &dyn Fn(usize) -> (SecureField, SecureField),
-                          entries: &mut Vec<(Vec<PackedQM31>, Vec<PackedQM31>)>,
-                          claimed: &mut SecureField| {
+                      entries: &mut Vec<(Vec<PackedQM31>, Vec<PackedQM31>)>,
+                      claimed: &mut SecureField| {
         let mut nums = Vec::with_capacity(vec_rows);
         let mut dens = Vec::with_capacity(vec_rows);
         for vr in 0..vec_rows {
@@ -675,7 +703,9 @@ pub fn gen_coeffs_interaction(
     for t in 0..MAX_DIGITS {
         push_entry(
             &|coset| match &coset_digits[coset] {
-                Some((digits, group, _)) if group.kind != Kind::Carry && t < group.kind.live_digits() => {
+                Some((digits, group, _))
+                    if group.kind != Kind::Carry && t < group.kind.live_digits() =>
+                {
                     let v = encode_signed(digits[t]) + m31(DIGIT_OFFSET);
                     (one, relations.rc9.combine(&[v]))
                 }
@@ -852,7 +882,12 @@ pub fn gen_coeffs_interaction(
     trace.extend(logup_trace);
     debug_assert_eq!(claimed_sum, claimed, "coeffs logup claimed sum mismatch");
 
-    CoeffsInteraction { trace, claimed_sum, group_evals, rc_uses }
+    CoeffsInteraction {
+        trace,
+        claimed_sum,
+        group_evals,
+        rc_uses,
+    }
 }
 
 fn seed_rc_uses(rc: &mut RcUses, info: &RowInfo, digits: &[i128; MAX_DIGITS]) {
@@ -892,4 +927,3 @@ fn seed_rc_uses(rc: &mut RcUses, info: &RowInfo, digits: &[i128; MAX_DIGITS]) {
         }
     }
 }
-

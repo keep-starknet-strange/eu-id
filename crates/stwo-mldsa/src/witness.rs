@@ -263,7 +263,8 @@ fn recompose(digits: &[i128]) -> i128 {
 pub fn generate_witness(input: &MlDsaVerifyInput) -> Result<MlDsaWitness, WitnessError> {
     let pk = input.encode_pk();
     let sig = input.encode_sig();
-    let trace = crate::verify_internals(&pk, &input.message, &sig).map_err(WitnessError::Reference)?;
+    let trace =
+        crate::verify_internals(&pk, &input.message, &sig).map_err(WitnessError::Reference)?;
     if !trace.accepted {
         return Err(WitnessError::NotAccepted(trace.reason));
     }
@@ -503,13 +504,13 @@ fn build_from_trace(
 /// out — worksheet §3.2 step 2, no explicit boundary constraint needed).
 #[allow(clippy::too_many_arguments)]
 fn compute_carries(
-    a_digits: &[Vec<[i128; T_A]>],        // a_digits[j][m]
-    z_digits: &[Vec<[i128; T_Z]>],        // z_digits[j][m]
-    c_digits: &[i128],                    // c_digits[m]  (single digit each)
-    t1_digits: &[[i128; T_T1]],           // t1_digits[m]
-    w_digits: &[[i128; T_W]],             // w_digits[m]
-    v_digits: &[[i128; T_V]],             // v_digits[m]  (m ∈ [0,254])
-    e_digits: &[[i128; T_E]],             // e_digits[m]
+    a_digits: &[Vec<[i128; T_A]>], // a_digits[j][m]
+    z_digits: &[Vec<[i128; T_Z]>], // z_digits[j][m]
+    c_digits: &[i128],             // c_digits[m]  (single digit each)
+    t1_digits: &[[i128; T_T1]],    // t1_digits[m]
+    w_digits: &[[i128; T_W]],      // w_digits[m]
+    v_digits: &[[i128; T_V]],      // v_digits[m]  (m ∈ [0,254])
+    e_digits: &[[i128; T_E]],      // e_digits[m]
     maxima: &mut ObservedMaxima,
 ) -> Vec<[i128; T_MAX + 1]> {
     // Residual table F[m][t], t ∈ [0, T_MAX+1] (the extra top row t=5 is the
@@ -522,12 +523,11 @@ fn compute_carries(
     let mut carry = vec![[0i128; T_MAX + 1]; U_LEN];
     for m in 0..U_LEN {
         let mut c_prev = 0i128; // C_{m,−1} = 0 (structural).
-        // Carry columns t ∈ [0, T_MAX]: solve E_{m,t}=0 for the carry-out.
+                                // Carry columns t ∈ [0, T_MAX]: solve E_{m,t}=0 for the carry-out.
         for t in 0..=T_MAX {
             // E_{m,t} = F_{m,t} − C_prev + B·C_out = 0  ⇒  C_out = (C_prev − F)/B.
             let partial = f[m][t] - c_prev;
-            maxima.max_partial_before_carry =
-                maxima.max_partial_before_carry.max(partial.abs());
+            maxima.max_partial_before_carry = maxima.max_partial_before_carry.max(partial.abs());
             assert!(
                 partial % B == 0,
                 "limb identity not B-divisible at m={m} t={t} (worksheet §3.3): F−C_prev={partial}"
@@ -547,7 +547,8 @@ fn compute_carries(
         let boundary = f[m][T_MAX + 1] - c_prev;
         maxima.max_partial_before_carry = maxima.max_partial_before_carry.max(boundary.abs());
         assert_eq!(
-            boundary, 0,
+            boundary,
+            0,
             "closing limb identity E_{{m,5}} != 0 at m={m} (worksheet §3.2 boundary): \
              F_{{m,5}}={} C_{{m,4}}={c_prev}",
             f[m][T_MAX + 1]
@@ -672,14 +673,32 @@ mod tests {
 
     #[test]
     fn q_digits_recompose_to_q() {
-        assert_eq!(recompose(&Q_DIGITS), Q as i128, "q̂ = (1,−16,32) must equal q");
+        assert_eq!(
+            recompose(&Q_DIGITS),
+            Q as i128,
+            "q̂ = (1,−16,32) must equal q"
+        );
     }
 
     #[test]
     fn balanced_digits_round_trip() {
-        for &x in &[0i128, 1, -1, 255, -256, 511, -512, 8_380_416, -8_380_416, 1 << 40] {
+        for &x in &[
+            0i128,
+            1,
+            -1,
+            255,
+            -256,
+            511,
+            -512,
+            8_380_416,
+            -8_380_416,
+            1 << 40,
+        ] {
             let d = balanced_digits::<6>(x);
-            assert!(d.iter().all(|&v| (-256..256).contains(&v)), "digit out of range for {x}");
+            assert!(
+                d.iter().all(|&v| (-256..256).contains(&v)),
+                "digit out of range for {x}"
+            );
             assert_eq!(recompose(&d), x, "recompose mismatch for {x}");
         }
     }

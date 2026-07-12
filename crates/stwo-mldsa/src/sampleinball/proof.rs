@@ -29,7 +29,7 @@ use crate::balancer::{
     gen_balancer_interaction, gen_balancer_trace, BalancerEval, BalancerRelation,
     BALANCER_INTERACTION_COLS,
 };
-use crate::binding::{STREAM_ID_SIB_SQUEEZE, CCELL_ARITY, HASH_IO_ARITY};
+use crate::binding::{CCELL_ARITY, HASH_IO_ARITY, STREAM_ID_SIB_SQUEEZE};
 use crate::constants::N;
 use crate::witness::MlDsaWitness;
 
@@ -127,7 +127,11 @@ impl Built {
     }
     fn as_prover(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
         let mut out: Vec<&dyn ComponentProver<SimdBackend>> = vec![&self.sib];
-        out.extend(self.rc.iter().map(|c| c as &dyn ComponentProver<SimdBackend>));
+        out.extend(
+            self.rc
+                .iter()
+                .map(|c| c as &dyn ComponentProver<SimdBackend>),
+        );
         out.push(&self.ccell);
         out.push(&self.hashio);
         out
@@ -183,14 +187,22 @@ fn build_components(
 ) -> Built {
     let sib = FrameworkComponent::new(
         allocator,
-        SibEval { log_size, ns: String::new(), sib_stream: STREAM_ID_SIB_SQUEEZE, relations: relations.clone() },
+        SibEval {
+            log_size,
+            ns: String::new(),
+            sib_stream: STREAM_ID_SIB_SQUEEZE,
+            relations: relations.clone(),
+        },
         sib_claimed_sum,
     );
     let mut rc = Vec::with_capacity(N_RC);
     for (idx, kind) in RcKind::ALL.iter().enumerate() {
         rc.push(FrameworkComponent::new(
             allocator,
-            RcTableEval { kind: *kind, relation: rc_relation(relations, *kind).clone() },
+            RcTableEval {
+                kind: *kind,
+                relation: rc_relation(relations, *kind).clone(),
+            },
             rc_claimed_sums[idx],
         ));
     }
@@ -216,7 +228,12 @@ fn build_components(
         },
         hashio_claimed_sum,
     );
-    Built { sib, rc, ccell, hashio }
+    Built {
+        sib,
+        rc,
+        ccell,
+        hashio,
+    }
 }
 
 fn module_trace_layout(log_size: u32, ccell_ls: u32, hashio_ls: u32) -> Vec<u32> {
@@ -259,7 +276,11 @@ impl Air for SibProver {
         TreeLayout {
             preprocessed: all_preprocessed_log_sizes(ls),
             trace: module_trace_layout(ls, ccell_log_size(), hashio_log_size(&self.witness)),
-            interaction: module_interaction_layout(ls, ccell_log_size(), hashio_log_size(&self.witness)),
+            interaction: module_interaction_layout(
+                ls,
+                ccell_log_size(),
+                hashio_log_size(&self.witness),
+            ),
         }
     }
     fn claimed_sums(&self) -> Vec<SecureField> {
@@ -292,13 +313,18 @@ impl Air for SibProver {
 
 impl AirProver for SibProver {
     fn max_log_size(&self) -> u32 {
-        sib_log_size(&self.witness).max(RcKind::Rc9.log_size()).max(ccell_log_size())
+        sib_log_size(&self.witness)
+            .max(RcKind::Rc9.log_size())
+            .max(ccell_log_size())
     }
     fn max_constraint_log_degree_bound(&self) -> u32 {
         self.max_log_size() + 1
     }
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
-        tb.extend_evals(gen_all_preprocessed(&self.witness, sib_log_size(&self.witness)));
+        tb.extend_evals(gen_all_preprocessed(
+            &self.witness,
+            sib_log_size(&self.witness),
+        ));
     }
     fn preprocessed_column_fingerprints(&mut self) -> Vec<PreprocessedColumnFingerprint> {
         let ls = sib_log_size(&self.witness);
@@ -311,14 +337,22 @@ impl AirProver for SibProver {
     fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
         let ls = sib_log_size(&self.witness);
         let mut evals = gen_sib_base_trace(&self.witness, ls);
-        let dry = gen_sib_interaction(&self.witness, ls, STREAM_ID_SIB_SQUEEZE, &SibRelations::dummy());
+        let dry = gen_sib_interaction(
+            &self.witness,
+            ls,
+            STREAM_ID_SIB_SQUEEZE,
+            &SibRelations::dummy(),
+        );
         self.stream_bytes = dry.stream_bytes.clone();
         self.rc_mult = RcKind::ALL
             .iter()
             .map(|kind| gen_table_multiplicities(*kind, dry.rc_uses.for_kind(*kind)))
             .collect();
         evals.extend(self.rc_mult.clone());
-        evals.extend(gen_balancer_trace(ccell_log_size(), &ccell_tuples(&self.witness)));
+        evals.extend(gen_balancer_trace(
+            ccell_log_size(),
+            &ccell_tuples(&self.witness),
+        ));
         evals.extend(gen_balancer_trace(
             hashio_log_size(&self.witness),
             &hashio_tuples(&self.stream_bytes),
@@ -333,7 +367,8 @@ impl AirProver for SibProver {
         self.sib_claimed_sum = interaction.claimed_sum;
 
         for (idx, kind) in RcKind::ALL.iter().enumerate() {
-            let (tr, sum) = gen_table_interaction(*kind, &self.rc_mult[idx], rc_relation(&relations, *kind));
+            let (tr, sum) =
+                gen_table_interaction(*kind, &self.rc_mult[idx], rc_relation(&relations, *kind));
             evals.extend(tr);
             self.rc_claimed_sums[idx] = sum;
         }
@@ -368,7 +403,11 @@ impl Air for SibVerifier {
     fn layout(&self) -> TreeLayout {
         TreeLayout {
             preprocessed: all_preprocessed_log_sizes(self.witness_log_size),
-            trace: module_trace_layout(self.witness_log_size, ccell_log_size(), self.hashio_log_size),
+            trace: module_trace_layout(
+                self.witness_log_size,
+                ccell_log_size(),
+                self.hashio_log_size,
+            ),
             interaction: module_interaction_layout(
                 self.witness_log_size,
                 ccell_log_size(),

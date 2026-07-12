@@ -27,9 +27,16 @@ fn dump(label: &str, layout: &TreeLayout) -> u64 {
             *by_log.entry(l).or_default() += 1;
         }
         let cells: u64 = cols.iter().map(|&l| 1u64 << l).sum();
-        println!("== {name}: {} cols, {:.2} M cells", cols.len(), cells as f64 / 1e6);
+        println!(
+            "== {name}: {} cols, {:.2} M cells",
+            cols.len(),
+            cells as f64 / 1e6
+        );
         for (l, n) in by_log {
-            println!("   log {l:>2}: {n:>5} cols  ({:.2} M cells)", (n as u64 * (1u64 << l)) as f64 / 1e6);
+            println!(
+                "   log {l:>2}: {n:>5} cols  ({:.2} M cells)",
+                (n as u64 * (1u64 << l)) as f64 / 1e6
+            );
         }
     }
     let total: u64 = [&layout.preprocessed, &layout.trace, &layout.interaction]
@@ -37,9 +44,11 @@ fn dump(label: &str, layout: &TreeLayout) -> u64 {
         .flat_map(|v| v.iter())
         .map(|&l| 1u64 << l)
         .sum();
-    let cols: usize =
-        layout.preprocessed.len() + layout.trace.len() + layout.interaction.len();
-    println!("== {label} TOTAL: {cols} cols, {:.2} M cells", total as f64 / 1e6);
+    let cols: usize = layout.preprocessed.len() + layout.trace.len() + layout.interaction.len();
+    println!(
+        "== {label} TOTAL: {cols} cols, {:.2} M cells",
+        total as f64 / 1e6
+    );
     total
 }
 

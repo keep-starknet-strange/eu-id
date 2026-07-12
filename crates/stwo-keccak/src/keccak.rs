@@ -317,7 +317,11 @@ fn row_fracs(rel: &KeccakRelations, r: usize, row: &RowLook) -> [(SecureField, S
     link[N_BYTES_IN_U64..].copy_from_slice(&row.state);
     let d_link: SecureField = rel.keccak_round.combine(&link);
 
-    let f_yield = if r < N_ROUNDS { (one, d_link) } else { (zero, one) };
+    let f_yield = if r < N_ROUNDS {
+        (one, d_link)
+    } else {
+        (zero, one)
+    };
     let f_require = if r > 0 { (-one, d_link) } else { (zero, one) };
 
     let state_tuple = |dir: u32| {

@@ -95,9 +95,15 @@ impl TableKind {
     /// Rows as `Vec<Vec<u32>>` (each inner vec of length `n_cols`).
     fn rows(&self) -> Vec<Vec<u32>> {
         match self {
-            TableKind::Dense => build_dense_table().into_iter().map(|r| r.to_vec()).collect(),
+            TableKind::Dense => build_dense_table()
+                .into_iter()
+                .map(|r| r.to_vec())
+                .collect(),
             TableKind::Conv => build_conv_table().into_iter().map(|r| r.to_vec()).collect(),
-            TableKind::Split(r) => build_split_table(*r).into_iter().map(|r| r.to_vec()).collect(),
+            TableKind::Split(r) => build_split_table(*r)
+                .into_iter()
+                .map(|r| r.to_vec())
+                .collect(),
         }
     }
 
@@ -105,7 +111,9 @@ impl TableKind {
     pub fn column_ids(&self) -> Vec<PreProcessedColumnId> {
         let t = self.tag();
         (0..self.n_cols())
-            .map(|c| PreProcessedColumnId { id: format!("{t}_{c}") })
+            .map(|c| PreProcessedColumnId {
+                id: format!("{t}_{c}"),
+            })
             .collect()
     }
 }
@@ -124,8 +132,8 @@ pub fn all_preprocessed_log_sizes() -> Vec<u32> {
 }
 
 /// Generate the preprocessed trace (`n_cols` columns per table).
-pub fn generate_preprocessed_trace() -> Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>
-{
+pub fn generate_preprocessed_trace(
+) -> Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>> {
     let mut evals = Vec::new();
     for kind in TableKind::ALL {
         let domain = CanonicCoset::new(kind.log_size()).circle_domain();
@@ -142,9 +150,8 @@ pub fn generate_preprocessed_trace() -> Vec<CircleEvaluation<SimdBackend, BaseFi
 
 /// Total preprocessed cell count across all nine tables (for the acceptance
 /// report): `2^16·3 (dense) + 2^8·2 (conv) + 7·2^8·3 (split)`.
-pub const PREPROCESSED_CELLS: usize = (1 << LOG_SIZE_DENSE) * 3
-    + (1 << LOG_SIZE_SPLIT) * 2
-    + 7 * (1 << LOG_SIZE_SPLIT) * 3;
+pub const PREPROCESSED_CELLS: usize =
+    (1 << LOG_SIZE_DENSE) * 3 + (1 << LOG_SIZE_SPLIT) * 2 + 7 * (1 << LOG_SIZE_SPLIT) * 3;
 
 /// Per-table multiplicity vectors. The Dense table has two (xor3, andnot); every
 /// other table has one. Indexed as `TableKind::ALL`, flattened by relation.
@@ -315,7 +322,8 @@ fn packed_row_denom(
 ) -> PackedQM31 {
     let base = vr * N_LANES;
     let n = kind.n_cols();
-    let pack = |c: usize| PackedM31::from_array(std::array::from_fn(|l| M31::from(rows[base + l][c])));
+    let pack =
+        |c: usize| PackedM31::from_array(std::array::from_fn(|l| M31::from(rows[base + l][c])));
     match kind {
         TableKind::Conv => rel.conv.combine(&[pack(0), pack(1)]),
         TableKind::Split(r) => {
@@ -396,5 +404,8 @@ pub type Component = FrameworkComponent<Eval>;
 
 /// The `claimed_sums` of the tables sum with the consumers to zero.
 pub fn total_claimed_sum(claim: &InteractionClaim) -> SecureField {
-    claim.claimed_sums.iter().fold(SecureField::zero(), |a, &s| a + s)
+    claim
+        .claimed_sums
+        .iter()
+        .fold(SecureField::zero(), |a, &s| a + s)
 }

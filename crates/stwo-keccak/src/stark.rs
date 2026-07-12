@@ -27,8 +27,8 @@ use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 
 use air_core::{
-    fingerprint_preprocessed_columns, Air, AirProver, CommitmentRoot, PreprocessedColumnFingerprint,
-    TreeLayout,
+    fingerprint_preprocessed_columns, Air, AirProver, CommitmentRoot,
+    PreprocessedColumnFingerprint, TreeLayout,
 };
 
 use crate::constants::N_BYTES_IN_STATE;
@@ -121,8 +121,9 @@ pub fn build_perm_witness(perm_inputs: &[[PackedM31; N_BYTES_IN_STATE + 1]]) -> 
         }
         for round in 0..crate::constants::N_ROUNDS {
             round_instances.push((state, round as u32));
-            let mut sp: [PackedM31; N_BYTES_IN_STATE] =
-                std::array::from_fn(|i| PackedM31::from(stwo::core::fields::m31::M31::from(state[i] as u32)));
+            let mut sp: [PackedM31; N_BYTES_IN_STATE] = std::array::from_fn(|i| {
+                PackedM31::from(stwo::core::fields::m31::M31::from(state[i] as u32))
+            });
             crate::utils::keccak_f1600_round(&mut sp, round);
             for i in 0..N_BYTES_IN_STATE {
                 state[i] = sp[i].to_array()[0].0 as u8;
@@ -251,13 +252,17 @@ impl InteractionClaims {
 
 impl KeccakProver {
     fn ic(&self) -> &InteractionClaims {
-        self.ic.as_ref().expect("interaction claims set during proving")
+        self.ic
+            .as_ref()
+            .expect("interaction claims set during proving")
     }
     fn relations(&self) -> &KeccakRelations {
         self.relations.as_ref().expect("relations drawn before use")
     }
     fn built(&self) -> &Components {
-        self.components.as_ref().expect("components built before use")
+        self.components
+            .as_ref()
+            .expect("components built before use")
     }
 }
 
@@ -266,16 +271,13 @@ impl KeccakVerifier {
         self.relations.as_ref().expect("relations drawn before use")
     }
     fn built(&self) -> &Components {
-        self.components.as_ref().expect("components built before use")
+        self.components
+            .as_ref()
+            .expect("components built before use")
     }
 }
 
-fn mix_public_common(
-    channel: &mut Blake2sChannel,
-    shape: &Shape,
-    message: &[u8],
-    output: &[u8],
-) {
+fn mix_public_common(channel: &mut Blake2sChannel, shape: &Shape, message: &[u8], output: &[u8]) {
     channel.mix_u64(shape.message_len as u64);
     channel.mix_u64(shape.n_squeeze as u64);
     channel.mix_u64(shape.absorb_stream_id as u64);
@@ -308,13 +310,24 @@ fn gen_preprocessed(n_perms: usize) -> Vec<TraceCol> {
 
 impl Air for KeccakProver {
     fn mix_public(&self, channel: &mut Blake2sChannel) {
-        mix_public_common(channel, &self.witness.shape, &self.witness.message, &self.witness.output);
+        mix_public_common(
+            channel,
+            &self.witness.shape,
+            &self.witness.message,
+            &self.witness.output,
+        );
     }
     fn draw_relations(&mut self, channel: &mut Blake2sChannel) {
         self.relations = Some(KeccakRelations::draw(channel));
     }
     fn layout(&self) -> TreeLayout {
-        layout_for(&self.witness.shape, &self.witness.keccak_claim, &self.witness.round_claim, &self.witness.message, &self.witness.output)
+        layout_for(
+            &self.witness.shape,
+            &self.witness.keccak_claim,
+            &self.witness.round_claim,
+            &self.witness.message,
+            &self.witness.output,
+        )
     }
     fn claimed_sums(&self) -> Vec<QM31> {
         self.ic().claimed_sums()
@@ -374,15 +387,19 @@ impl AirProver for KeccakProver {
         let rel = self.relations().clone();
         let mut evals = Vec::new();
 
-        let (sponge_ic, sponge_tr) = sponge::generate_interaction_trace(&rel, &self.witness.sponge_run.data);
+        let (sponge_ic, sponge_tr) =
+            sponge::generate_interaction_trace(&rel, &self.witness.sponge_run.data);
         evals.extend(sponge_tr);
         let (io_ic, io_tr) = io_provider::generate_interaction_trace(&rel, &self.witness.io_data);
         evals.extend(io_tr);
-        let (keccak_ic, keccak_tr) = keccak::generate_interaction_trace(&rel, &self.witness.keccak_data);
+        let (keccak_ic, keccak_tr) =
+            keccak::generate_interaction_trace(&rel, &self.witness.keccak_data);
         evals.extend(keccak_tr);
-        let (round_ic, round_tr) = keccak_round::generate_interaction_trace(&rel, &self.witness.round_data);
+        let (round_ic, round_tr) =
+            keccak_round::generate_interaction_trace(&rel, &self.witness.round_data);
         evals.extend(round_tr);
-        let (tables_ic, tables_tr) = tables_air::generate_interaction_trace(&rel, &self.witness.table_mult);
+        let (tables_ic, tables_tr) =
+            tables_air::generate_interaction_trace(&rel, &self.witness.table_mult);
         evals.extend(tables_tr);
 
         tb.extend_evals(evals);
@@ -407,9 +424,19 @@ impl Air for KeccakVerifier {
         self.relations = Some(KeccakRelations::draw(channel));
     }
     fn layout(&self) -> TreeLayout {
-        let keccak_claim = keccak::Claim { n_perms: self.shape.n_perms() };
-        let round_claim = keccak_round::Claim { log_size: round_log_size(&self.shape) };
-        layout_for(&self.shape, &keccak_claim, &round_claim, &self.message, &self.output)
+        let keccak_claim = keccak::Claim {
+            n_perms: self.shape.n_perms(),
+        };
+        let round_claim = keccak_round::Claim {
+            log_size: round_log_size(&self.shape),
+        };
+        layout_for(
+            &self.shape,
+            &keccak_claim,
+            &round_claim,
+            &self.message,
+            &self.output,
+        )
     }
     fn claimed_sums(&self) -> Vec<QM31> {
         self.ic.claimed_sums()
@@ -422,8 +449,12 @@ impl Air for KeccakVerifier {
             log_size: stwo::prover::backend::simd::m31::LOG_N_LANES,
             shape: self.shape,
         };
-        let keccak_claim = keccak::Claim { n_perms: self.shape.n_perms() };
-        let round_claim = keccak_round::Claim { log_size: round_log_size(&self.shape) };
+        let keccak_claim = keccak::Claim {
+            n_perms: self.shape.n_perms(),
+        };
+        let round_claim = keccak_round::Claim {
+            log_size: round_log_size(&self.shape),
+        };
         self.components = Some(Components::new(
             allocator,
             self.relations().clone(),
@@ -442,7 +473,10 @@ impl Air for KeccakVerifier {
 
 fn round_log_size(shape: &Shape) -> u32 {
     let n = shape.n_perms() * crate::constants::N_ROUNDS;
-    std::cmp::max((n as u32).next_power_of_two().ilog2(), stwo::prover::backend::simd::m31::LOG_N_LANES)
+    std::cmp::max(
+        (n as u32).next_power_of_two().ilog2(),
+        stwo::prover::backend::simd::m31::LOG_N_LANES,
+    )
 }
 
 fn layout_for(
@@ -517,7 +551,10 @@ impl Components {
     ) -> Self {
         let sponge = FrameworkComponent::new(
             allocator,
-            sponge::Eval { claim: sponge_claim.clone(), relations: relations.clone() },
+            sponge::Eval {
+                claim: sponge_claim.clone(),
+                relations: relations.clone(),
+            },
             ic.sponge.claimed_sum,
         );
         let io = FrameworkComponent::new(
@@ -533,12 +570,18 @@ impl Components {
         );
         let keccak = FrameworkComponent::new(
             allocator,
-            keccak::Eval { claim: *keccak_claim, relations: relations.clone() },
+            keccak::Eval {
+                claim: *keccak_claim,
+                relations: relations.clone(),
+            },
             ic.keccak.claimed_sum,
         );
         let round = FrameworkComponent::new(
             allocator,
-            keccak_round::Eval { claim: *round_claim, relations: relations.clone() },
+            keccak_round::Eval {
+                claim: *round_claim,
+                relations: relations.clone(),
+            },
             ic.round.claimed_sum,
         );
         let mut tables = Vec::with_capacity(TableKind::ALL.len());
@@ -553,7 +596,13 @@ impl Components {
                 ic.tables.claimed_sums[i],
             ));
         }
-        Self { sponge, io, keccak, round, tables }
+        Self {
+            sponge,
+            io,
+            keccak,
+            round,
+            tables,
+        }
     }
 
     fn as_components(&self) -> Vec<&dyn Component> {
@@ -564,7 +613,11 @@ impl Components {
     fn as_prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
         let mut out: Vec<&dyn ComponentProver<SimdBackend>> =
             vec![&self.sponge, &self.io, &self.keccak, &self.round];
-        out.extend(self.tables.iter().map(|c| c as &dyn ComponentProver<SimdBackend>));
+        out.extend(
+            self.tables
+                .iter()
+                .map(|c| c as &dyn ComponentProver<SimdBackend>),
+        );
         out
     }
 }
@@ -626,7 +679,10 @@ pub fn prove_shake256(
 /// [`verify_shake256`] recomputes it from the public message/shape and rejects
 /// fail-closed on mismatch, so a forged preprocessed tree never reaches the
 /// STARK verifier.
-pub fn shake256_expected_preprocessed_root(proof: &KeccakProof, config: PcsConfig) -> CommitmentRoot {
+pub fn shake256_expected_preprocessed_root(
+    proof: &KeccakProof,
+    config: PcsConfig,
+) -> CommitmentRoot {
     let witness = build_witness(&proof.message, proof.shape.n_squeeze);
     let mut prover = KeccakProver {
         witness,
@@ -648,7 +704,9 @@ pub fn verify_shake256(proof: &KeccakProof) -> Result<(), VerificationError> {
         tables: proof.tables_ic.clone(),
     };
     if ic.claimed_sums().iter().fold(QM31::zero(), |a, &s| a + s) != QM31::zero() {
-        return Err(VerificationError::InvalidStructure("keccak logup sum nonzero".into()));
+        return Err(VerificationError::InvalidStructure(
+            "keccak logup sum nonzero".into(),
+        ));
     }
 
     let mut verifier = KeccakVerifier {
@@ -671,7 +729,9 @@ pub fn verify_shake256(proof: &KeccakProof) -> Result<(), VerificationError> {
     .map_err(|error| match error {
         air_core::VerifyError::Stark(error) => error,
         air_core::VerifyError::PreprocessedRootMismatch { .. } => {
-            VerificationError::InvalidStructure("keccak preprocessed root mismatch (forged tree-0)".into())
+            VerificationError::InvalidStructure(
+                "keccak preprocessed root mismatch (forged tree-0)".into(),
+            )
         }
     })
 }

@@ -73,7 +73,11 @@ impl PublicPrefixEval {
             .iter()
             .enumerate()
             .map(|(i, &b)| {
-                let tuple = [m31(self.dst_stream), m31(self.dst_off + i as u32), m31(b as u32)];
+                let tuple = [
+                    m31(self.dst_stream),
+                    m31(self.dst_off + i as u32),
+                    m31(b as u32),
+                ];
                 (true, self.hash_io.combine(&tuple))
             })
             .collect();
@@ -216,7 +220,11 @@ impl PubMsgEval {
         }
     }
     pub fn preprocessed_ids(&self) -> Vec<PreProcessedColumnId> {
-        vec![self.pre_id("active"), self.pre_id("pos"), self.pre_id("byte")]
+        vec![
+            self.pre_id("active"),
+            self.pre_id("pos"),
+            self.pre_id("byte"),
+        ]
     }
     pub fn gen_preprocessed(&self) -> Vec<ColEval> {
         let rows = 1usize << self.log_size;
@@ -305,11 +313,17 @@ pub enum SrcRelation {
 /// two hosted ML-DSA instances disjoint so air-core tree-0 first-writer-wins
 /// dedup cannot alias one instance's shape-dependent columns to the other's.
 pub(crate) fn ns_prefix(ns: &str) -> String {
-    if ns.is_empty() { String::new() } else { format!("{ns}/") }
+    if ns.is_empty() {
+        String::new()
+    } else {
+        format!("{ns}/")
+    }
 }
 
 fn bridge_pre_id(ns: &str, tag: &str, name: &str) -> PreProcessedColumnId {
-    PreProcessedColumnId { id: format!("{}mldsa_bridge_{tag}_{name}", ns_prefix(ns)) }
+    PreProcessedColumnId {
+        id: format!("{}mldsa_bridge_{tag}_{name}", ns_prefix(ns)),
+    }
 }
 
 /// A HashIo bridge: for each of `len` rows, requires the source tuple (−) and
@@ -346,7 +360,10 @@ impl BridgeEval {
             active[i] = m31(1);
             idx[i] = m31(i as u32);
         }
-        vec![active, idx].into_iter().map(|v| col_eval(self.log_size, v)).collect()
+        vec![active, idx]
+            .into_iter()
+            .map(|v| col_eval(self.log_size, v))
+            .collect()
     }
     /// Base trace: enabler + the moved byte per row.
     pub fn gen_base(&self, bytes: &[u8]) -> Vec<ColEval> {
@@ -358,7 +375,10 @@ impl BridgeEval {
             enabler[i] = m31(1);
             byte[i] = m31(b as u32);
         }
-        vec![enabler, byte].into_iter().map(|v| col_eval(self.log_size, v)).collect()
+        vec![enabler, byte]
+            .into_iter()
+            .map(|v| col_eval(self.log_size, v))
+            .collect()
     }
     pub fn gen_interaction(&self, bytes: &[u8]) -> (Vec<ColEval>, SecureField) {
         // Two fractions per row: source require (−), dest yield (+).
@@ -392,35 +412,47 @@ impl BridgeEval {
         // producers yield (+) so the bridge requires (−); the stwo-sha256
         // field provider emits its FieldBytes tuples with (−) (see
         // `constraints.rs`' `-selector` yield), so the bridge requires (+).
-        push(&|coset| {
-            if coset < self.len {
-                let b = m31(bytes[coset] as u32);
-                let (sign, den) = match &self.src {
-                    SrcRelation::HashIo(r, s, off) => {
-                        (-one, r.combine(&[m31(*s), m31(off + coset as u32), b]))
-                    }
-                    SrcRelation::MsgLink(r, fid) => {
-                        (-one, r.combine(&[m31(*fid), m31(coset as u32), b]))
-                    }
-                    SrcRelation::FieldBytes(r, fid) => {
-                        (one, r.combine(&[m31(*fid), m31(coset as u32), b]))
-                    }
-                };
-                (sign, den)
-            } else {
-                (zero, one)
-            }
-        }, &mut entries, &mut claimed);
+        push(
+            &|coset| {
+                if coset < self.len {
+                    let b = m31(bytes[coset] as u32);
+                    let (sign, den) = match &self.src {
+                        SrcRelation::HashIo(r, s, off) => {
+                            (-one, r.combine(&[m31(*s), m31(off + coset as u32), b]))
+                        }
+                        SrcRelation::MsgLink(r, fid) => {
+                            (-one, r.combine(&[m31(*fid), m31(coset as u32), b]))
+                        }
+                        SrcRelation::FieldBytes(r, fid) => {
+                            (one, r.combine(&[m31(*fid), m31(coset as u32), b]))
+                        }
+                    };
+                    (sign, den)
+                } else {
+                    (zero, one)
+                }
+            },
+            &mut entries,
+            &mut claimed,
+        );
         // dest yield (+).
-        push(&|coset| {
-            if coset < self.len {
-                let b = m31(bytes[coset] as u32);
-                let den = self.hash_io.combine(&[m31(self.dst_stream), m31(self.dst_off + coset as u32), b]);
-                (one, den)
-            } else {
-                (zero, one)
-            }
-        }, &mut entries, &mut claimed);
+        push(
+            &|coset| {
+                if coset < self.len {
+                    let b = m31(bytes[coset] as u32);
+                    let den = self.hash_io.combine(&[
+                        m31(self.dst_stream),
+                        m31(self.dst_off + coset as u32),
+                        b,
+                    ]);
+                    (one, den)
+                } else {
+                    (zero, one)
+                }
+            },
+            &mut entries,
+            &mut claimed,
+        );
 
         let mut logup = LogupTraceGenerator::new(self.log_size);
         for chunk in entries.chunks(1) {
@@ -503,10 +535,14 @@ pub struct SqueezeSinkEval {
 
 impl SqueezeSinkEval {
     fn active_col(&self) -> PreProcessedColumnId {
-        PreProcessedColumnId { id: format!("{}mldsa_sink_{}_active", ns_prefix(&self.ns), self.tag) }
+        PreProcessedColumnId {
+            id: format!("{}mldsa_sink_{}_active", ns_prefix(&self.ns), self.tag),
+        }
     }
     fn pos_col(&self) -> PreProcessedColumnId {
-        PreProcessedColumnId { id: format!("{}mldsa_sink_{}_pos", ns_prefix(&self.ns), self.tag) }
+        PreProcessedColumnId {
+            id: format!("{}mldsa_sink_{}_pos", ns_prefix(&self.ns), self.tag),
+        }
     }
     pub fn preprocessed_ids(&self) -> Vec<PreProcessedColumnId> {
         vec![self.active_col(), self.pos_col()]
@@ -519,7 +555,10 @@ impl SqueezeSinkEval {
             active[i] = m31(1);
             pos[i] = m31(self.off + i as u32);
         }
-        vec![active, pos].into_iter().map(|v| col_eval(self.log_size, v)).collect()
+        vec![active, pos]
+            .into_iter()
+            .map(|v| col_eval(self.log_size, v))
+            .collect()
     }
     pub fn gen_base(&self, bytes: &[u8]) -> Vec<ColEval> {
         assert_eq!(bytes.len(), self.len, "sink byte count mismatch");
@@ -530,14 +569,23 @@ impl SqueezeSinkEval {
             enabler[i] = m31(1);
             byte[i] = m31(b as u32);
         }
-        vec![enabler, byte].into_iter().map(|v| col_eval(self.log_size, v)).collect()
+        vec![enabler, byte]
+            .into_iter()
+            .map(|v| col_eval(self.log_size, v))
+            .collect()
     }
     pub fn gen_interaction(&self, bytes: &[u8]) -> (Vec<ColEval>, SecureField) {
         gen_single_yield(
             self.log_size,
             &self.hash_io,
             self.len,
-            |i| [m31(self.stream), m31(self.off + i as u32), m31(bytes[i] as u32)],
+            |i| {
+                [
+                    m31(self.stream),
+                    m31(self.off + i as u32),
+                    m31(bytes[i] as u32),
+                ]
+            },
             false, // require (−)
         )
     }

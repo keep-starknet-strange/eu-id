@@ -58,7 +58,9 @@ use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{FrameworkComponent, Relation, TraceLocationAllocator};
 
 use air_core::relations::{FieldBytesRelation, SharedFieldRelation};
-use air_core::{fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint, TreeLayout};
+use air_core::{
+    fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint, TreeLayout,
+};
 
 use stwo_keccak::relations::{KeccakRelations, SharedKeccakRelations};
 use stwo_keccak::service::{KeccakServiceProver, KeccakServiceVerifier};
@@ -311,7 +313,17 @@ fn draw_relations_common(
     let decomp = DecompRelations::draw_with(channel, wcell, keccak.hash_io.clone());
     let sib = SibRelations::draw_with(channel, ccell, keccak.hash_io.clone());
 
-    Relations { rho_rlc, r, s, keccak, msglink, shared_field, coeffs, decomp, sib }
+    Relations {
+        rho_rlc,
+        r,
+        s,
+        keccak,
+        msglink,
+        shared_field,
+        coeffs,
+        decomp,
+        sib,
+    }
 }
 
 /// The verifier-native EvalAtRs USE sum: `+Σ_id 1/combine(poly_id, coords)`
@@ -321,7 +333,13 @@ fn native_use_sum(group_evals: &[SecureField], relations: &CoeffsRelations) -> S
     let mut sum = SecureField::zero();
     for (poly_id, eval) in group_evals.iter().enumerate() {
         let coords = eval.to_m31_array();
-        let tuple = [m31(poly_id as u32), coords[0], coords[1], coords[2], coords[3]];
+        let tuple = [
+            m31(poly_id as u32),
+            coords[0],
+            coords[1],
+            coords[2],
+            coords[3],
+        ];
         let denom: SecureField = relations.eval.combine(&tuple);
         sum += one / denom;
     }
@@ -488,11 +506,7 @@ fn msg_slot(
 }
 
 /// The three fixed bridges (order 10..12).
-fn bridge_evals(
-    ns: &str,
-    stream_base: u32,
-    hash_io: &HashIoRelation,
-) -> [BridgeEval; 3] {
+fn bridge_evals(ns: &str, stream_base: u32, hash_io: &HashIoRelation) -> [BridgeEval; 3] {
     let b = stream_base;
     // 10. µ→c̃ bridge: HashIo(MU_SQUEEZE, off 0) → CT_ABSORB@0, len 64.
     let mu_ct = BridgeEval {
@@ -614,8 +628,16 @@ fn all_preprocessed_ids(
     }
     // msg slot + 3 bridges + 3 sinks.
     ids.extend(
-        msg_slot(ns, &input.message, 0, public_message, &msglink, None, &hash_io)
-            .preprocessed_ids(),
+        msg_slot(
+            ns,
+            &input.message,
+            0,
+            public_message,
+            &msglink,
+            None,
+            &hash_io,
+        )
+        .preprocessed_ids(),
     );
     for b in bridge_evals(ns, 0, &hash_io) {
         ids.extend(b.preprocessed_ids());
@@ -649,7 +671,11 @@ fn all_preprocessed_log_sizes(
         sizes.push(kind.log_size());
     }
     // msg slot: the public producer has 3 preprocessed cols, the bridge 2.
-    let msg_pre_cols = if public_message { PUBMSG_PREPROCESSED_COLS } else { 2 };
+    let msg_pre_cols = if public_message {
+        PUBMSG_PREPROCESSED_COLS
+    } else {
+        2
+    };
     sizes.extend(vec![bridge_log_size(input.message.len()); msg_pre_cols]);
     for len in bridge_lens() {
         // each bridge contributes 2 preprocessed cols at its log_size.
@@ -711,8 +737,16 @@ fn gen_all_preprocessed(
         cols.push(sib_tables::gen_table_preprocessed(kind));
     }
     cols.extend(
-        msg_slot("", &input.message, 0, public_message, &msglink, None, &hash_io)
-            .gen_preprocessed(),
+        msg_slot(
+            "",
+            &input.message,
+            0,
+            public_message,
+            &msglink,
+            None,
+            &hash_io,
+        )
+        .gen_preprocessed(),
     );
     for b in bridge_evals("", 0, &hash_io) {
         cols.extend(b.gen_preprocessed());
@@ -784,18 +818,38 @@ impl Built {
     }
     fn ordered_prover(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
         let mut out: Vec<&dyn ComponentProver<SimdBackend>> = vec![&self.coeffs];
-        out.extend(self.coeffs_rc.iter().map(|c| c as &dyn ComponentProver<SimdBackend>));
+        out.extend(
+            self.coeffs_rc
+                .iter()
+                .map(|c| c as &dyn ComponentProver<SimdBackend>),
+        );
         out.push(&self.decomp);
-        out.extend(self.decomp_rc.iter().map(|c| c as &dyn ComponentProver<SimdBackend>));
+        out.extend(
+            self.decomp_rc
+                .iter()
+                .map(|c| c as &dyn ComponentProver<SimdBackend>),
+        );
         out.push(&self.sib);
-        out.extend(self.sib_rc.iter().map(|c| c as &dyn ComponentProver<SimdBackend>));
+        out.extend(
+            self.sib_rc
+                .iter()
+                .map(|c| c as &dyn ComponentProver<SimdBackend>),
+        );
         if let Some(m) = &self.msglink {
             out.push(m);
         }
         out.push(&self.prefix);
         out.push(self.msg.as_prover());
-        out.extend(self.bridges.iter().map(|c| c as &dyn ComponentProver<SimdBackend>));
-        out.extend(self.sinks.iter().map(|c| c as &dyn ComponentProver<SimdBackend>));
+        out.extend(
+            self.bridges
+                .iter()
+                .map(|c| c as &dyn ComponentProver<SimdBackend>),
+        );
+        out.extend(
+            self.sinks
+                .iter()
+                .map(|c| c as &dyn ComponentProver<SimdBackend>),
+        );
         out
     }
 }
@@ -843,9 +897,13 @@ impl Claims {
         let mut it = flat.iter().copied();
         let mut next = || it.next().expect("claimed sums length mismatch");
         let coeffs = next();
-        let coeffs_rc = (0..coeffs_tables::RcKind::ALL.len()).map(|_| next()).collect();
+        let coeffs_rc = (0..coeffs_tables::RcKind::ALL.len())
+            .map(|_| next())
+            .collect();
         let decomp = next();
-        let decomp_rc = (0..decomp_tables::RcKind::ALL.len()).map(|_| next()).collect();
+        let decomp_rc = (0..decomp_tables::RcKind::ALL.len())
+            .map(|_| next())
+            .collect();
         let sib = next();
         let sib_rc = (0..sib_tables::RcKind::ALL.len()).map(|_| next()).collect();
         let msglink = if hosted { SecureField::zero() } else { next() };
@@ -854,8 +912,18 @@ impl Claims {
         let sinks = (0..3).map(|_| next()).collect();
         let native_use = next();
         Self {
-            hosted, coeffs, coeffs_rc, decomp, decomp_rc, sib, sib_rc, msglink,
-            prefix, bridges, sinks, native_use,
+            hosted,
+            coeffs,
+            coeffs_rc,
+            decomp,
+            decomp_rc,
+            sib,
+            sib_rc,
+            msglink,
+            prefix,
+            bridges,
+            sinks,
+            native_use,
         }
     }
 }
@@ -919,7 +987,11 @@ fn module_trace_layout(ctx: &LayoutCtx) -> Vec<u32> {
     // 8. prefix.
     t.extend(vec![crate::sponge_link::LINK_LOG_SIZE; PREFIX_BASE_COLS]);
     // 9. msg slot (public producer: 1 enabler col; bridge: enabler + byte).
-    let msg_cols = if ctx.public_message { PUBMSG_BASE_COLS } else { BRIDGE_BASE_COLS };
+    let msg_cols = if ctx.public_message {
+        PUBMSG_BASE_COLS
+    } else {
+        BRIDGE_BASE_COLS
+    };
     t.extend(vec![bridge_log_size(ctx.message_len); msg_cols]);
     // 10-12. bridges ×3.
     for len in bridge_lens() {
@@ -960,12 +1032,22 @@ fn module_interaction_layout(ctx: &LayoutCtx) -> Vec<u32> {
     }
     // 7. msglink (standalone only).
     if !ctx.hosted {
-        i.extend(vec![msglink::MSGLINK_LOG_SIZE; msglink::n_interaction_cols(ctx.message_len)]);
+        i.extend(vec![
+            msglink::MSGLINK_LOG_SIZE;
+            msglink::n_interaction_cols(ctx.message_len)
+        ]);
     }
     // 8. prefix.
-    i.extend(vec![crate::sponge_link::LINK_LOG_SIZE; prefix_n_interaction(ctx.message_len)]);
+    i.extend(vec![
+        crate::sponge_link::LINK_LOG_SIZE;
+        prefix_n_interaction(ctx.message_len)
+    ]);
     // 9. msg slot (public producer: one yield; bridge: require + yield).
-    let msg_cols = if ctx.public_message { PUBMSG_INTERACTION_COLS } else { BRIDGE_INTERACTION_COLS };
+    let msg_cols = if ctx.public_message {
+        PUBMSG_INTERACTION_COLS
+    } else {
+        BRIDGE_INTERACTION_COLS
+    };
     i.extend(vec![bridge_log_size(ctx.message_len); msg_cols]);
     // 10-12. bridges ×3.
     for len in bridge_lens() {
@@ -1053,7 +1135,10 @@ fn build_components(
         .map(|(idx, kind)| {
             FrameworkComponent::new(
                 allocator,
-                coeffs_tables::RcTableEval { kind: *kind, relation: rel.coeffs.rc(*kind).clone() },
+                coeffs_tables::RcTableEval {
+                    kind: *kind,
+                    relation: rel.coeffs.rc(*kind).clone(),
+                },
                 claims.coeffs_rc[idx],
             )
         })
@@ -1113,7 +1198,10 @@ fn build_components(
     let msglink = (!claims.hosted).then(|| {
         FrameworkComponent::new(
             allocator,
-            MsgLinkEval { message: input.message.clone(), msglink: rel.msglink.clone() },
+            MsgLinkEval {
+                message: input.message.clone(),
+                msglink: rel.msglink.clone(),
+            },
             claims.msglink,
         )
     });
@@ -1148,7 +1236,13 @@ fn build_components(
         .map(|(idx, b)| FrameworkComponent::new(allocator, b, claims.bridges[idx + 1]))
         .collect();
     // 13-15. sinks ×3.
-    let sink_descs = sink_evals(ns, input.message.len(), ctx.sib_stream_len, stream_base, &rel.keccak.hash_io);
+    let sink_descs = sink_evals(
+        ns,
+        input.message.len(),
+        ctx.sib_stream_len,
+        stream_base,
+        &rel.keccak.hash_io,
+    );
     let sinks = sink_descs
         .into_iter()
         .enumerate()
@@ -1156,12 +1250,24 @@ fn build_components(
         .collect();
 
     Built {
-        coeffs, coeffs_rc, decomp, decomp_rc, sib, sib_rc, msglink,
-        prefix, msg, bridges, sinks,
+        coeffs,
+        coeffs_rc,
+        decomp,
+        decomp_rc,
+        sib,
+        sib_rc,
+        msglink,
+        prefix,
+        msg,
+        bridges,
+        sinks,
     }
 }
 
-fn decomp_rc_relation(r: &DecompRelations, kind: decomp_tables::RcKind) -> &crate::decomp::relations::RcRelation {
+fn decomp_rc_relation(
+    r: &DecompRelations,
+    kind: decomp_tables::RcKind,
+) -> &crate::decomp::relations::RcRelation {
     match kind {
         decomp_tables::RcKind::Rc4 => &r.rc4,
         decomp_tables::RcKind::Rc13 => &r.rc13,
@@ -1169,7 +1275,10 @@ fn decomp_rc_relation(r: &DecompRelations, kind: decomp_tables::RcKind) -> &crat
         decomp_tables::RcKind::Rc8 => &r.rc8,
     }
 }
-fn sib_rc_relation(r: &SibRelations, kind: sib_tables::RcKind) -> &crate::sampleinball::relations::RcRelation {
+fn sib_rc_relation(
+    r: &SibRelations,
+    kind: sib_tables::RcKind,
+) -> &crate::sampleinball::relations::RcRelation {
     match kind {
         sib_tables::RcKind::Rc8 => &r.rc8,
         sib_tables::RcKind::Rc9 => &r.rc9,
@@ -1251,8 +1360,17 @@ impl MlDsaProver {
         let hosted = shared_field.is_some() || public_message;
         let sib_stream_len = sampleinball::stream_len(&witness);
         let sib_squeezed_len = witness.sponge.sample_in_ball_squeezed.len();
-        let ctx = LayoutCtx::new(&input, sib_stream_len, sib_squeezed_len, hosted, public_message);
-        let claims = Claims { hosted, ..Claims::default() };
+        let ctx = LayoutCtx::new(
+            &input,
+            sib_stream_len,
+            sib_squeezed_len,
+            hosted,
+            public_message,
+        );
+        let claims = Claims {
+            hosted,
+            ..Claims::default()
+        };
 
         Self {
             witness,
@@ -1310,7 +1428,11 @@ impl MlDsaProver {
     /// The sponge job shapes + witness byte streams this instance contributes
     /// to the proof-wide keccak service, in job order (µ, c̃, SIB).
     pub fn keccak_jobs(&self) -> (Vec<Shape>, Vec<Vec<u8>>) {
-        let shapes = keccak_job_shapes(self.input.message.len(), self.sib_stream_len, self.stream_base);
+        let shapes = keccak_job_shapes(
+            self.input.message.len(),
+            self.sib_stream_len,
+            self.stream_base,
+        );
         let streams = vec![
             self.witness.sponge.mu_absorbed.clone(),
             self.witness.sponge.c_tilde_absorbed.clone(),
@@ -1362,9 +1484,9 @@ impl MlDsaProver {
 /// decomp w1Encode bytes. (The msg slot's payload is `input.message`.)
 fn bridge_bytes(outputs: &[Vec<u8>; 3], w1_bytes: &[u8]) -> [Vec<u8>; 3] {
     [
-        outputs[0][..64].to_vec(),      // mu→ct
-        w1_bytes.to_vec(),              // w1enc (768)
-        outputs[1][..48].to_vec(),      // ct→sib
+        outputs[0][..64].to_vec(), // mu→ct
+        w1_bytes.to_vec(),         // w1enc (768)
+        outputs[1][..48].to_vec(), // ct→sib
     ]
 }
 
@@ -1379,10 +1501,21 @@ fn sink_bytes(outputs: &[Vec<u8>; 3], sib_stream_len: usize) -> [Vec<u8>; 3] {
 
 impl Air for MlDsaProver {
     fn mix_public(&self, channel: &mut Blake2sChannel) {
-        mix_public(channel, &self.input, self.sib_stream_len, &self.namespace, self.private_message, self.stream_base);
+        mix_public(
+            channel,
+            &self.input,
+            self.sib_stream_len,
+            &self.namespace,
+            self.private_message,
+            self.stream_base,
+        );
     }
     fn draw_relations(&mut self, channel: &mut Blake2sChannel) {
-        self.relations = Some(draw_relations_common(channel, self.shared_field.as_ref(), &self.keccak_handle));
+        self.relations = Some(draw_relations_common(
+            channel,
+            self.shared_field.as_ref(),
+            &self.keccak_handle,
+        ));
     }
     fn layout(&self) -> TreeLayout {
         layout_for(&self.ctx, &self.input)
@@ -1395,11 +1528,24 @@ impl Air for MlDsaProver {
         channel.mix_felts(&self.claimed_sums());
     }
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
-        all_preprocessed_ids(&self.namespace, &self.input, self.sib_stream_len, self.ctx.public_message)
+        all_preprocessed_ids(
+            &self.namespace,
+            &self.input,
+            self.sib_stream_len,
+            self.ctx.public_message,
+        )
     }
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
         let rel = self.relations().clone();
-        self.built = Some(build_components(allocator, &self.namespace, self.stream_base, &self.ctx, &self.input, &rel, &self.claims));
+        self.built = Some(build_components(
+            allocator,
+            &self.namespace,
+            self.stream_base,
+            &self.ctx,
+            &self.input,
+            &rel,
+            &self.claims,
+        ));
     }
     fn components(&self) -> Vec<&dyn Component> {
         self.built.as_ref().expect("built").ordered()
@@ -1436,7 +1582,12 @@ impl AirProver for MlDsaProver {
         tb: &mut TreeBuilder<SimdBackend, air_core::Mc>,
         selected_ids: &[PreProcessedColumnId],
     ) {
-        let ids = all_preprocessed_ids(&self.namespace, &self.input, self.sib_stream_len, self.ctx.public_message);
+        let ids = all_preprocessed_ids(
+            &self.namespace,
+            &self.input,
+            self.sib_stream_len,
+            self.ctx.public_message,
+        );
         let cols = gen_all_preprocessed(
             &self.witness,
             &self.input,
@@ -1444,8 +1595,13 @@ impl AirProver for MlDsaProver {
             self.sib_squeezed_len,
             self.ctx.public_message,
         );
-        assert_eq!(ids.len(), cols.len(), "mldsa preprocessed ids/cols length mismatch");
-        let selected: std::collections::HashSet<&PreProcessedColumnId> = selected_ids.iter().collect();
+        assert_eq!(
+            ids.len(),
+            cols.len(),
+            "mldsa preprocessed ids/cols length mismatch"
+        );
+        let selected: std::collections::HashSet<&PreProcessedColumnId> =
+            selected_ids.iter().collect();
         let (picked_ids, picked_cols): (Vec<_>, Vec<_>) = ids
             .into_iter()
             .zip(cols)
@@ -1460,7 +1616,12 @@ impl AirProver for MlDsaProver {
     }
 
     fn preprocessed_column_fingerprints(&mut self) -> Vec<PreprocessedColumnFingerprint> {
-        let ids = all_preprocessed_ids(&self.namespace, &self.input, self.sib_stream_len, self.ctx.public_message);
+        let ids = all_preprocessed_ids(
+            &self.namespace,
+            &self.input,
+            self.sib_stream_len,
+            self.ctx.public_message,
+        );
         let cols = gen_all_preprocessed(
             &self.witness,
             &self.input,
@@ -1485,7 +1646,9 @@ impl AirProver for MlDsaProver {
         );
         self.coeffs_rc_mult = coeffs_tables::RcKind::ALL
             .iter()
-            .map(|kind| coeffs_tables::gen_table_multiplicities(*kind, coeffs_dry.rc_uses.for_kind(*kind)))
+            .map(|kind| {
+                coeffs_tables::gen_table_multiplicities(*kind, coeffs_dry.rc_uses.for_kind(*kind))
+            })
             .collect();
         evals.extend(self.coeffs_rc_mult.clone());
 
@@ -1501,7 +1664,9 @@ impl AirProver for MlDsaProver {
         self.decomp_w1_bytes = decomp_dry.w1_encode_bytes.clone();
         self.decomp_rc_mult = decomp_tables::RcKind::ALL
             .iter()
-            .map(|kind| decomp_tables::gen_table_multiplicities(*kind, decomp_dry.rc_uses.for_kind(*kind)))
+            .map(|kind| {
+                decomp_tables::gen_table_multiplicities(*kind, decomp_dry.rc_uses.for_kind(*kind))
+            })
             .collect();
         evals.extend(self.decomp_rc_mult.clone());
 
@@ -1516,7 +1681,9 @@ impl AirProver for MlDsaProver {
         );
         self.sib_rc_mult = sib_tables::RcKind::ALL
             .iter()
-            .map(|kind| sib_tables::gen_table_multiplicities(*kind, sib_dry.rc_uses.for_kind(*kind)))
+            .map(|kind| {
+                sib_tables::gen_table_multiplicities(*kind, sib_dry.rc_uses.for_kind(*kind))
+            })
             .collect();
         evals.extend(self.sib_rc_mult.clone());
 
@@ -1559,7 +1726,11 @@ impl AirProver for MlDsaProver {
             self.witness.sponge.mu_squeezed[..64],
             "µ squeeze prefix mismatch"
         );
-        assert_eq!(outputs[1][..48], self.input.c_tilde[..], "c̃ squeeze prefix mismatch");
+        assert_eq!(
+            outputs[1][..48],
+            self.input.c_tilde[..],
+            "c̃ squeeze prefix mismatch"
+        );
         assert_eq!(
             outputs[2][..self.sib_stream_len],
             self.witness.sponge.sample_in_ball_squeezed[..self.sib_stream_len],
@@ -1568,7 +1739,13 @@ impl AirProver for MlDsaProver {
 
         // 13-15. sinks base.
         let sbytes = sink_bytes(&outputs, self.sib_stream_len);
-        let sink_descs = sink_evals(&self.namespace, self.input.message.len(), self.sib_stream_len, self.stream_base, &dummy_hash_io);
+        let sink_descs = sink_evals(
+            &self.namespace,
+            self.input.message.len(),
+            self.sib_stream_len,
+            self.stream_base,
+            &dummy_hash_io,
+        );
         for (s, bytes) in sink_descs.iter().zip(sbytes.iter()) {
             evals.extend(s.gen_base(bytes));
         }
@@ -1581,7 +1758,8 @@ impl AirProver for MlDsaProver {
 
         // 1. coeffs interaction (stash group_evals + claimed).
         let cls = coeffs_log_size();
-        let coeffs_int = coeffs::gen_coeffs_interaction(&self.witness, cls, rel.r, rel.s, &rel.coeffs);
+        let coeffs_int =
+            coeffs::gen_coeffs_interaction(&self.witness, cls, rel.r, rel.s, &rel.coeffs);
         self.claims.coeffs = coeffs_int.claimed_sum;
         self.group_evals = coeffs_int.group_evals.clone();
         evals.extend(coeffs_int.trace);
@@ -1644,13 +1822,15 @@ impl AirProver for MlDsaProver {
         // 7. msglink (standalone only; hosted mode sources the msg bridge from
         // the host's shared relation and commits no msglink component).
         if !self.ctx.hosted {
-            let (msg_tr, msg_sum) = msglink::gen_msglink_interaction(&self.input.message, &rel.msglink);
+            let (msg_tr, msg_sum) =
+                msglink::gen_msglink_interaction(&self.input.message, &rel.msglink);
             self.claims.msglink = msg_sum;
             evals.extend(msg_tr);
         }
 
         // 8. prefix.
-        let (prefix_tr, prefix_sum) = prefix_eval(&self.input, self.stream_base, &rel.keccak.hash_io).gen_interaction();
+        let (prefix_tr, prefix_sum) =
+            prefix_eval(&self.input, self.stream_base, &rel.keccak.hash_io).gen_interaction();
         self.claims.prefix = prefix_sum;
         evals.extend(prefix_tr);
 
@@ -1680,7 +1860,13 @@ impl AirProver for MlDsaProver {
 
         // 13-15. sinks.
         let sbytes = sink_bytes(&outputs, self.sib_stream_len);
-        let sink_descs = sink_evals(&self.namespace, self.input.message.len(), self.sib_stream_len, self.stream_base, &rel.keccak.hash_io);
+        let sink_descs = sink_evals(
+            &self.namespace,
+            self.input.message.len(),
+            self.sib_stream_len,
+            self.stream_base,
+            &rel.keccak.hash_io,
+        );
         self.claims.sinks.clear();
         for (s, bytes) in sink_descs.iter().zip(sbytes.iter()) {
             let (tr, sum) = s.gen_interaction(bytes);
@@ -1768,7 +1954,13 @@ impl MlDsaVerifier {
         keccak_handle: SharedKeccakRelations,
     ) -> Self {
         let hosted = shared_field.is_some() || public_message;
-        let ctx = LayoutCtx::new(&input, sib_stream_len, sib_squeezed_len, hosted, public_message);
+        let ctx = LayoutCtx::new(
+            &input,
+            sib_stream_len,
+            sib_squeezed_len,
+            hosted,
+            public_message,
+        );
         let claims = Claims::from_flat(&claimed_sums, hosted);
         Self {
             input,
@@ -1852,14 +2044,27 @@ impl MlDsaVerifier {
 
 impl Air for MlDsaVerifier {
     fn mix_public(&self, channel: &mut Blake2sChannel) {
-        mix_public(channel, &self.input, self.sib_stream_len, &self.namespace, self.private_message, self.stream_base);
+        mix_public(
+            channel,
+            &self.input,
+            self.sib_stream_len,
+            &self.namespace,
+            self.private_message,
+            self.stream_base,
+        );
     }
     fn draw_relations(&mut self, channel: &mut Blake2sChannel) {
         let rel = draw_relations_common(channel, self.shared_field.as_ref(), &self.keccak_handle);
         // native_use + folded identity (mirror CoeffsVerifier).
         self.claims.native_use = native_use_sum(&self.group_evals, &rel.coeffs);
         let public = compute_public_evals(&self.input, rel.r, rel.s);
-        let fold = folded_check(&public, &ClaimedEvals(&self.group_evals), rel.rho_rlc, rel.r, rel.s);
+        let fold = folded_check(
+            &public,
+            &ClaimedEvals(&self.group_evals),
+            rel.rho_rlc,
+            rel.r,
+            rel.s,
+        );
         self.fold_ok = fold == SecureField::zero();
         self.relations = Some(rel);
     }
@@ -1874,11 +2079,24 @@ impl Air for MlDsaVerifier {
         channel.mix_felts(&self.claimed_sums());
     }
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
-        all_preprocessed_ids(&self.namespace, &self.input, self.sib_stream_len, self.ctx.public_message)
+        all_preprocessed_ids(
+            &self.namespace,
+            &self.input,
+            self.sib_stream_len,
+            self.ctx.public_message,
+        )
     }
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
         let rel = self.relations().clone();
-        self.built = Some(build_components(allocator, &self.namespace, self.stream_base, &self.ctx, &self.input, &rel, &self.claims));
+        self.built = Some(build_components(
+            allocator,
+            &self.namespace,
+            self.stream_base,
+            &self.ctx,
+            &self.input,
+            &rel,
+            &self.claims,
+        ));
     }
     fn components(&self) -> Vec<&dyn Component> {
         self.built.as_ref().expect("built").ordered()
@@ -1960,7 +2178,7 @@ pub fn hosted_claimed_sums_len() -> usize {
         + 1 + sib_tables::RcKind::ALL.len()       // sib + rc
         + 1                                       // prefix
         + 4 + 3                                   // bridges + sinks
-        + 1                                       // native_use
+        + 1 // native_use
 }
 
 /// Compute the expected tree-0 (preprocessed) commitment root for a standalone

@@ -74,7 +74,11 @@ impl ServiceClaims {
         v
     }
     fn from_flat(flat: &[SecureField]) -> Self {
-        assert_eq!(flat.len(), service_claimed_sums_len(), "service claimed sums length");
+        assert_eq!(
+            flat.len(),
+            service_claimed_sums_len(),
+            "service claimed sums length"
+        );
         Self {
             sponge: flat[0],
             keccak: flat[1],
@@ -100,7 +104,11 @@ impl Built {
     fn ordered_prover(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
         let mut out: Vec<&dyn ComponentProver<SimdBackend>> =
             vec![&self.sponge, &self.keccak, &self.round];
-        out.extend(self.tables.iter().map(|c| c as &dyn ComponentProver<SimdBackend>));
+        out.extend(
+            self.tables
+                .iter()
+                .map(|c| c as &dyn ComponentProver<SimdBackend>),
+        );
         out
     }
 }
@@ -113,7 +121,9 @@ fn preprocessed_ids(jobs: &JobList) -> Vec<PreProcessedColumnId> {
 }
 
 fn preprocessed_sizes(jobs: &JobList) -> Vec<u32> {
-    let keccak_claim = keccak::Claim { n_perms: jobs.n_perms_total() };
+    let keccak_claim = keccak::Claim {
+        n_perms: jobs.n_perms_total(),
+    };
     let mut sizes = vec![jobs.log_size(); sponge_v::N_SCHEDULE_COLS];
     sizes.extend(vec![keccak_claim.log_size(); keccak::N_SCHEDULE_COLS]);
     sizes.extend(tables_air::all_preprocessed_log_sizes());
@@ -131,7 +141,9 @@ fn layout_for(jobs: &JobList) -> TreeLayout {
     let ls = jobs.log_size();
     let n = jobs.n_perms_total();
     let keccak_claim = keccak::Claim { n_perms: n };
-    let round_claim = keccak_round::Claim { log_size: round_log_size(n) };
+    let round_claim = keccak_round::Claim {
+        log_size: round_log_size(n),
+    };
 
     let mut trace = vec![ls; sponge_v::N_BASE_COLS];
     trace.extend(keccak_claim.log_sizes()[1].clone());
@@ -167,7 +179,10 @@ fn build_components(
     let n = jobs.n_perms_total();
     let sponge = FrameworkComponent::new(
         allocator,
-        sponge_v::Eval { jobs: jobs.clone(), relations: relations.clone() },
+        sponge_v::Eval {
+            jobs: jobs.clone(),
+            relations: relations.clone(),
+        },
         claims.sponge,
     );
     let keccak = FrameworkComponent::new(
@@ -181,7 +196,9 @@ fn build_components(
     let round = FrameworkComponent::new(
         allocator,
         keccak_round::Eval {
-            claim: keccak_round::Claim { log_size: round_log_size(n) },
+            claim: keccak_round::Claim {
+                log_size: round_log_size(n),
+            },
             relations: relations.clone(),
         },
         claims.round,
@@ -201,7 +218,12 @@ fn build_components(
             )
         })
         .collect();
-    Built { sponge, keccak, round, tables }
+    Built {
+        sponge,
+        keccak,
+        round,
+        tables,
+    }
 }
 
 fn write_selected(
@@ -211,7 +233,11 @@ fn write_selected(
 ) {
     let ids = preprocessed_ids(jobs);
     let cols = gen_preprocessed(jobs);
-    assert_eq!(ids.len(), cols.len(), "service preprocessed ids/cols mismatch");
+    assert_eq!(
+        ids.len(),
+        cols.len(),
+        "service preprocessed ids/cols mismatch"
+    );
     let selected: std::collections::HashSet<&PreProcessedColumnId> = selected_ids.iter().collect();
     let (picked_ids, picked_cols): (Vec<_>, Vec<_>) = ids
         .into_iter()
@@ -245,18 +271,22 @@ impl KeccakServiceProver {
     /// `shapes[i]`'s `perm_id_base` is ignored — the service stamps the global
     /// perm-id plan cumulatively over the concatenated list. Stream ids must
     /// already be globally unique across instances (host responsibility).
-    pub fn new(
-        shapes: Vec<Shape>,
-        messages: Vec<Vec<u8>>,
-        handle: SharedKeccakRelations,
-    ) -> Self {
+    pub fn new(shapes: Vec<Shape>, messages: Vec<Vec<u8>>, handle: SharedKeccakRelations) -> Self {
         let jobs = JobList::new(shapes);
         // Duplicate stream ids across jobs would let two jobs' HashIo bytes
         // alias; fail closed at construction.
         let mut seen = std::collections::HashSet::new();
         for s in &jobs.jobs {
-            assert!(seen.insert(s.absorb_stream_id), "duplicate absorb stream id {}", s.absorb_stream_id);
-            assert!(seen.insert(s.squeeze_stream_id), "duplicate squeeze stream id {}", s.squeeze_stream_id);
+            assert!(
+                seen.insert(s.absorb_stream_id),
+                "duplicate absorb stream id {}",
+                s.absorb_stream_id
+            );
+            assert!(
+                seen.insert(s.squeeze_stream_id),
+                "duplicate squeeze stream id {}",
+                s.squeeze_stream_id
+            );
         }
         if std::env::var_os("KECCAK_PERMS_DUMP").is_some() {
             eprintln!(
@@ -372,7 +402,8 @@ impl AirProver for KeccakServiceProver {
         let mut evals = Vec::new();
         let (sponge_ic, sponge_tr) = sponge_v::generate_interaction_trace(&rel, &self.run);
         evals.extend(sponge_tr);
-        let (keccak_ic, keccak_tr) = keccak::generate_interaction_trace(&rel, &self.perm.keccak_data);
+        let (keccak_ic, keccak_tr) =
+            keccak::generate_interaction_trace(&rel, &self.perm.keccak_data);
         evals.extend(keccak_tr);
         let (round_ic, round_tr) =
             keccak_round::generate_interaction_trace(&rel, &self.perm.round_data);

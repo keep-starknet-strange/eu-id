@@ -12,6 +12,7 @@ use ml_dsa::{EncodedSignature, EncodedVerifyingKey, MlDsa65, SigningKey};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
+use stwo::core::fri::FriConfig;
 use stwo::core::pcs::PcsConfig;
 
 use stwo_mldsa::reference::encoding::{pk_decode, sig_decode};
@@ -19,6 +20,19 @@ use stwo_mldsa::reference::sponge::shake256;
 use stwo_mldsa::statement::{prove_mldsa, verify_mldsa, PermIdPlan};
 use stwo_mldsa::witness::{generate_witness, MlDsaWitness};
 use stwo_mldsa::MlDsaVerifyInput;
+
+/// The SHAKE consumers (keccak_round, sponge_v) declare constraint degree
+/// bound `log_size + 2` (LogUp batch 4), so constraint evaluation needs
+/// `log_blowup >= 2` to reuse committed evaluations (production runs blowup 3;
+/// `pcs_config()` has blowup 1, which would require stored
+/// polynomial coefficients).
+fn pcs_config() -> PcsConfig {
+    PcsConfig {
+        pow_bits: 10,
+        fri_config: FriConfig::new(0, 2, 3, 1),
+        lifting_log_size: None,
+    }
+}
 
 // =====================================================================
 // Helpers (model: tests/decomp.rs + tests/sampleinball.rs).
@@ -59,7 +73,7 @@ fn big_msg(tag: &str, len: usize) -> Vec<u8> {
 /// verify errs.
 fn rejected(witness: MlDsaWitness, input: MlDsaVerifyInput) -> bool {
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        match prove_mldsa(witness, input, PcsConfig::default()) {
+        match prove_mldsa(witness, input, pcs_config()) {
             Ok(proof) => verify_mldsa(&proof).is_err(),
             Err(_) => true,
         }
@@ -93,7 +107,7 @@ fn composed_proves_and_verifies_10_sigs() {
             "case {i}: native reference verify must accept"
         );
 
-        let proof = prove_mldsa(w, input, PcsConfig::default()).expect("prove");
+        let proof = prove_mldsa(w, input, pcs_config()).expect("prove");
         verify_mldsa(&proof).unwrap_or_else(|e| panic!("case {i}: verify failed: {e:?}"));
         ok += 1;
     }
@@ -109,7 +123,7 @@ fn composed_control_honest_proves() {
     for seed in [8001u64, 8002, 8003, 8004, 8006] {
         let msg = big_msg(&format!("control-{seed}"), 1024);
         let (w, input) = witness_and_input(seed, &msg);
-        let proof = prove_mldsa(w, input, PcsConfig::default()).expect("control prove");
+        let proof = prove_mldsa(w, input, pcs_config()).expect("control prove");
         verify_mldsa(&proof).expect("control verify");
     }
 }
@@ -126,7 +140,10 @@ fn composed_negative_a_mu_absorb_message_tamper() {
     let (mut w, input) = witness_and_input(8001, &msg);
     // Flip a byte of M inside the µ-absorb transcript (offset 66 = tr(64)+00+00).
     w.sponge.mu_absorbed[66 + 10] ^= 1;
-    assert!(rejected(w, input), "µ-absorb message tamper must be rejected");
+    assert!(
+        rejected(w, input),
+        "µ-absorb message tamper must be rejected"
+    );
 }
 
 /// b) chain-seam: flip a byte of the µ bytes entering the c̃ absorb.
@@ -153,14 +170,20 @@ fn composed_negative_d_placement_permuted() {
     let msg = big_msg("neg-d", 1024);
     let (mut w, input) = witness_and_input(8004, &msg);
     let n = stwo_mldsa::constants::N;
-    let p = (0..n).find(|&m| w.digits.c[m] != 0).expect("a nonzero coeff");
+    let p = (0..n)
+        .find(|&m| w.digits.c[m] != 0)
+        .expect("a nonzero coeff");
     let q = (0..n).find(|&m| w.digits.c[m] == 0).expect("a zero coeff");
     assert_ne!(p, q);
     let moved = w.digits.c[p];
     w.digits.c[p] = 0;
     w.digits.c[q] = moved;
     let sumsq: i128 = w.digits.c.iter().map(|&x| x * x).sum();
-    assert_eq!(sumsq as usize, stwo_mldsa::constants::TAU, "Σc² must stay τ");
+    assert_eq!(
+        sumsq as usize,
+        stwo_mldsa::constants::TAU,
+        "Σc² must stay τ"
+    );
     assert!(rejected(w, input), "placement permutation must be rejected");
 }
 
@@ -176,7 +199,11 @@ fn composed_negative_e_perm_id_namespacing() {
         let plan = PermIdPlan::new(n_mu, n_ct);
         assert_eq!(plan.mu_base, 0);
         assert_eq!(plan.c_tilde_base, n_mu, "c̃ base = running count after µ");
-        assert_eq!(plan.sib_base, n_mu + n_ct, "SIB base = running count after c̃");
+        assert_eq!(
+            plan.sib_base,
+            n_mu + n_ct,
+            "SIB base = running count after c̃"
+        );
         // Ranges [0,n_mu), [n_mu,n_mu+n_ct), [n_mu+n_ct, ..) never overlap: each
         // chain's ids live in [base, base+n_chain) and the next base IS the prior
         // running total, so overlap is arithmetically impossible.
@@ -207,7 +234,7 @@ fn composed_negative_f_wrong_pk_rho() {
 fn composed_preprocessed_root_pin_control() {
     let msg = big_msg("froot-control", 1024);
     let (w, input) = witness_and_input(8101, &msg);
-    let proof = prove_mldsa(w, input, PcsConfig::default()).expect("prove");
+    let proof = prove_mldsa(w, input, pcs_config()).expect("prove");
     verify_mldsa(&proof).expect("honest proof must verify under the root pin");
 }
 
@@ -220,7 +247,7 @@ fn composed_preprocessed_root_pin_control() {
 fn composed_preprocessed_root_pin_rejects_tampered_root() {
     let msg = big_msg("froot-neg", 1024);
     let (w, input) = witness_and_input(8102, &msg);
-    let mut proof = prove_mldsa(w, input, PcsConfig::default()).expect("prove");
+    let mut proof = prove_mldsa(w, input, pcs_config()).expect("prove");
     // Sanity: unmutated verifies (shares the seed with the mutation below).
     verify_mldsa(&proof).expect("control leg must verify before tamper");
     // Flip one byte of the committed preprocessed root.
@@ -248,7 +275,7 @@ fn composed_numbers() {
     // instrumenting through a prove + inspecting the proof's tree sizes is not
     // exposed, so we sum from the reconstructed layout below via a dry probe.
     let t0 = Instant::now();
-    let proof = prove_mldsa(w.clone(), input.clone(), PcsConfig::default()).expect("prove");
+    let proof = prove_mldsa(w.clone(), input.clone(), pcs_config()).expect("prove");
     let prove_ms = t0.elapsed().as_millis();
 
     let t1 = Instant::now();
@@ -275,7 +302,9 @@ fn composed_numbers() {
     let cells = total_committed_cells(&input, proof.sib_stream_len, proof.sib_squeezed_len);
 
     // Proof bytes = bincode(stark_proof) + the statement fields.
-    let stark_bytes = bincode::serialize(&proof.stark_proof).expect("bincode stark").len();
+    let stark_bytes = bincode::serialize(&proof.stark_proof)
+        .expect("bincode stark")
+        .len();
     let full_bytes = bincode::serialize(&proof).expect("bincode proof").len();
 
     println!("=== composed_numbers ===");

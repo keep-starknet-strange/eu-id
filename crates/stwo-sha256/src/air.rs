@@ -50,7 +50,7 @@ use crate::components::{
     RoundSplitPackEval, Sha256Relations, SigmaSplitPackEval, RANGE_TABLES, ROUND_SPLIT_TABLES,
     SIGMA_SPLIT_TABLES,
 };
-use crate::constraints::Sha256Eval;
+use crate::constraints::{Sha256Eval, LOGUP_BATCH};
 use crate::field_exposure::FieldExposure;
 #[cfg(feature = "gkr-spike")]
 use crate::gkr_lookups::mle_eval::{
@@ -466,6 +466,16 @@ impl AirProver for Sha256Prover<'_> {
     fn max_log_size(&self) -> u32 {
         let _ = self.group_width;
         LOG_SIZE_16.max(self.log_n_rows)
+    }
+
+    fn max_constraint_log_degree_bound(&self) -> u32 {
+        // The batch-4 LogUp finalizer gives the `Sha256Eval` consumer a
+        // degree-excess of 2 (`log_n_rows + 2`, D ≤ 5 — see
+        // `constraints::LOGUP_BATCH`), which raises the proof-wide
+        // `composition_log_split` to 2: the composition polynomial lives at
+        // `max_trace_log_size + 2`. Report `max_log_size() + 2` — not the
+        // default `+ 1` — so the orchestrator's twiddles cover it.
+        self.max_log_size() + 2
     }
 
     fn store_polynomial_coefficients(&self) -> bool {
@@ -1076,9 +1086,10 @@ fn base_trace_log_sizes(
 }
 
 /// log_sizes of every interaction-trace column in commit order. Each
-/// component's column count is `(n_lookups + 1) / 2`. We infer the count
-/// from the structural firing rule (matching the
-/// `interaction::sha256_interaction` derivation).
+/// component's column count is `ceil(n_lookups / batch)` — batch 4
+/// ([`LOGUP_BATCH`]) for the `Sha256Eval` consumer, pairs for the
+/// single-lookup producers. We infer the count from the structural firing
+/// rule (matching the `interaction::sha256_interaction` derivation).
 fn interaction_trace_log_sizes(
     log_n_rows: u32,
     group_width: u32,
@@ -1095,10 +1106,13 @@ fn interaction_trace_log_sizes(
     // Sha256Eval consumer: `sha_lookups_per_row(expose_digest, field_exposure)`
     // lookup sites per row (W=6 hybrid: 66, plus the digest yield when that provider
     // is on, plus the field provider's two `Range16` byte range-checks per
-    // exposed byte column and one yield per exposed window byte) → `ceil(n/2)`
-    // paired columns. Sized at log_n_rows. See `interaction::sha256_interaction`
+    // exposed byte column and one yield per exposed window byte) → `ceil(n/4)`
+    // batch-4 columns. Sized at log_n_rows. See `interaction::sha256_interaction`
     // for the per-row site breakdown.
-    let sha_cols = num_paired_cols(sha_lookups_per_row(expose_digest, field_exposure));
+    let sha_cols = num_batched_cols(
+        sha_lookups_per_row(expose_digest, field_exposure),
+        LOGUP_BATCH,
+    );
     out.extend(std::iter::repeat_n(log_n_rows, sha_cols * EXT));
     let _ = group_width;
     if !include_table_providers {
@@ -1106,17 +1120,23 @@ fn interaction_trace_log_sizes(
     }
     // 4 round split-pack: 1 lookup each.
     for _ in ROUND_SPLIT_TABLES {
-        out.extend(std::iter::repeat_n(LOG_SIZE_16, num_paired_cols(1) * EXT));
+        out.extend(std::iter::repeat_n(
+            LOG_SIZE_16,
+            num_batched_cols(1, 2) * EXT,
+        ));
     }
     // 4 σ split-pack: 1 lookup each.
     for _ in SIGMA_SPLIT_TABLES {
-        out.extend(std::iter::repeat_n(LOG_SIZE_16, num_paired_cols(1) * EXT));
+        out.extend(std::iter::repeat_n(
+            LOG_SIZE_16,
+            num_batched_cols(1, 2) * EXT,
+        ));
     }
     // 4 Range_k producers: 1 lookup each, at the kind's own log_size.
     for &kind in RANGE_TABLES {
         out.extend(std::iter::repeat_n(
             range_log_size(kind),
-            num_paired_cols(1) * EXT,
+            num_batched_cols(1, 2) * EXT,
         ));
     }
     out
@@ -1148,11 +1168,11 @@ fn generated_preprocessed_for_ids(
         .collect()
 }
 
-/// Number of interaction columns produced by `n_lookups` lookups under
-/// pair-batching: `ceil(n_lookups / 2)`.
+/// Number of interaction columns produced by `n_lookups` lookups batched
+/// `batch` fractions per column: `ceil(n_lookups / batch)`.
 #[inline]
-const fn num_paired_cols(n_lookups: usize) -> usize {
-    n_lookups.div_ceil(2)
+const fn num_batched_cols(n_lookups: usize, batch: usize) -> usize {
+    n_lookups.div_ceil(batch)
 }
 
 /// Aggregate of every `FrameworkComponent` in the proof, in commit order.

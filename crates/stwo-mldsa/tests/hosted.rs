@@ -18,6 +18,7 @@ use ml_dsa::{EncodedSignature, EncodedVerifyingKey, MlDsa65, SigningKey};
 use stwo::core::air::Component;
 use stwo::core::channel::Blake2sChannel;
 use stwo::core::fields::qm31::SecureField;
+use stwo::core::fri::FriConfig;
 use stwo::core::pcs::PcsConfig;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::{ComponentProver, TreeBuilder};
@@ -104,10 +105,29 @@ struct FieldProducer {
 
 impl FieldProducer {
     fn new(bytes: Vec<u8>, handle: SharedFieldRelation) -> Self {
-        Self { bytes, handle, field: None, claimed_sum: SecureField::zero(), component: None }
+        Self {
+            bytes,
+            handle,
+            field: None,
+            claimed_sum: SecureField::zero(),
+            component: None,
+        }
     }
     fn field(&self) -> FieldBytesRelation {
         self.field.clone().expect("relation drawn")
+    }
+}
+
+/// The SHAKE consumers (keccak_round, sponge_v) declare constraint degree
+/// bound `log_size + 2` (LogUp batch 4), so constraint evaluation needs
+/// `log_blowup >= 2` to reuse committed evaluations (production runs blowup 3;
+/// `PcsConfig::default()` has blowup 1, which would require stored
+/// polynomial coefficients).
+fn pcs_config() -> PcsConfig {
+    PcsConfig {
+        pow_bits: 10,
+        fri_config: FriConfig::new(0, 2, 3, 1),
+        lifting_log_size: None,
     }
 }
 
@@ -189,7 +209,10 @@ impl Air for FieldProducer {
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
         self.component = Some(FrameworkComponent::new(
             allocator,
-            FieldProducerEval { bytes: self.bytes.clone(), field: self.field() },
+            FieldProducerEval {
+                bytes: self.bytes.clone(),
+                field: self.field(),
+            },
             self.claimed_sum,
         ));
     }
@@ -211,7 +234,10 @@ impl AirProver for FieldProducer {
     }
     fn write_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
         let (trace, sum) = producer_interaction(&self.bytes, &self.field());
-        debug_assert_eq!(sum, self.claimed_sum, "producer sum drifted from draw_relations");
+        debug_assert_eq!(
+            sum, self.claimed_sum,
+            "producer sum drifted from draw_relations"
+        );
         tb.extend_evals(trace);
     }
     fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
@@ -257,11 +283,8 @@ fn prove_hosted(seed: u64, msg: &[u8], producer_bytes: Vec<u8>) -> MlDsaProof {
     let (job_shapes, job_streams) = mldsa.keccak_jobs();
     let mut service = KeccakServiceProver::new(job_shapes, job_streams, keccak_handle);
 
-    let stark_proof = air_core::prove(
-        &mut [&mut service, &mut producer, &mut mldsa],
-        PcsConfig::default(),
-    )
-    .expect("prove");
+    let stark_proof = air_core::prove(&mut [&mut service, &mut producer, &mut mldsa], pcs_config())
+        .expect("prove");
 
     MlDsaProof {
         input,
@@ -373,12 +396,14 @@ fn prove_two_hosted(
     let keccak_handle = SharedKeccakRelations::new();
     let mut producer_a = FieldProducer::new(msg_a.to_vec(), handle_a.clone());
     let mut producer_b = FieldProducer::new(msg_b.to_vec(), handle_b.clone());
-    let mut mldsa_a = MlDsaProver::hosted(witness_a, input_a.clone(), handle_a, keccak_handle.clone())
-        .with_instance_namespace(ns_a);
-    let mut mldsa_b = MlDsaProver::hosted(witness_b, input_b.clone(), handle_b, keccak_handle.clone())
-        .with_instance_namespace(ns_b)
-        .with_stream_base(STREAM_BASE_STRIDE)
-        .with_private_message();
+    let mut mldsa_a =
+        MlDsaProver::hosted(witness_a, input_a.clone(), handle_a, keccak_handle.clone())
+            .with_instance_namespace(ns_a);
+    let mut mldsa_b =
+        MlDsaProver::hosted(witness_b, input_b.clone(), handle_b, keccak_handle.clone())
+            .with_instance_namespace(ns_b)
+            .with_stream_base(STREAM_BASE_STRIDE)
+            .with_private_message();
 
     let (shapes_a, streams_a) = mldsa_a.keccak_jobs();
     let (shapes_b, streams_b) = mldsa_b.keccak_jobs();
@@ -389,8 +414,14 @@ fn prove_two_hosted(
     );
 
     let stark_proof = air_core::prove(
-        &mut [&mut service, &mut producer_a, &mut mldsa_a, &mut producer_b, &mut mldsa_b],
-        PcsConfig::default(),
+        &mut [
+            &mut service,
+            &mut producer_a,
+            &mut mldsa_a,
+            &mut producer_b,
+            &mut mldsa_b,
+        ],
+        pcs_config(),
     )
     .expect("two-instance prove");
 
@@ -460,7 +491,13 @@ fn verify_two_hosted(
     .with_stream_base(STREAM_BASE_STRIDE)
     .with_private_message();
     air_core::verify(
-        &mut [&mut service, &mut producer_a, &mut mldsa_a, &mut producer_b, &mut mldsa_b],
+        &mut [
+            &mut service,
+            &mut producer_a,
+            &mut mldsa_a,
+            &mut producer_b,
+            &mut mldsa_b,
+        ],
         stark_proof,
     )
 }

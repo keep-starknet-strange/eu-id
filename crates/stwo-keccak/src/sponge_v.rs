@@ -31,7 +31,8 @@
 //!
 //! Every schedule flag/constant is PREPROCESSED (trusted — pinned by the
 //! tree-0 root), so all plain constraints are degree ≤ 2 and every logup
-//! tuple cell is degree ≤ 1 at `max_constraint_log_degree_bound = log + 1`.
+//! tuple cell is degree ≤ 1; batch-4 logup constraints are degree 5 at
+//! `max_constraint_log_degree_bound = log + 2`.
 //!
 //! ## Relation signs (I-2: EXACTLY the horizontal sponge's)
 //!
@@ -72,8 +73,14 @@ pub const N_SCHEDULE_COLS: usize = 9 + 2 * RATE;
 /// state(4: IN×3 gated variants + OUT) + conv-squeeze(136) + io-squeeze(136).
 pub const N_LOGUP_ENTRIES: usize = 5 * RATE + 4;
 
-/// Interaction columns (pair-batched QM31 fractions, pre-expanded to M31).
-pub const N_INTERACTION_COLS: usize = SECURE_EXTENSION_DEGREE * N_LOGUP_ENTRIES.div_ceil(2);
+/// Logup fractions batched per interaction column (`finalize_logup_batched`).
+/// Batch 4 needs constraint degree `1 + 4·1 = 5 ≤ D5`, available at
+/// `max_constraint_log_degree_bound = log + 2`.
+pub const LOGUP_BATCH: usize = 4;
+
+/// Interaction columns (batch-4 QM31 fractions, pre-expanded to M31).
+pub const N_INTERACTION_COLS: usize =
+    SECURE_EXTENSION_DEGREE * N_LOGUP_ENTRIES.div_ceil(LOGUP_BATCH);
 
 // =============================================================================
 // Job list.
@@ -384,10 +391,7 @@ pub fn generate_jobs(jobs: &JobList, messages: &[Vec<u8>]) -> SpongeVRun {
                         let old = state[j];
                         let m = blocks[r][j];
                         let newv = old ^ m;
-                        uses.push([
-                            spread_splat(old) + spread_splat(m),
-                            spread_splat(newv),
-                        ]);
+                        uses.push([spread_splat(old) + spread_splat(m), spread_splat(newv)]);
                         row.new_rate[j] = newv;
                         state[j] = newv;
                     }
@@ -495,10 +499,12 @@ impl FrameworkEval for Eval {
         self.jobs.log_size()
     }
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        // Every plain constraint is degree ≤ 2 and every logup tuple cell is
-        // degree ≤ 1 (preprocessed-gated multiplicities), so the Pattern-B
-        // `[-1, 0]` masks require EXACTLY log + 1 (M4 framework trap).
-        self.log_size() + 1
+        // Every plain constraint is degree ≤ 2, every logup numerator is a
+        // degree ≤ 1 preprocessed gate, and every tuple cell — hence every
+        // denominator — is degree ≤ 1, so batch-4 logup constraints are
+        // degree 1 + 4·1 = 5 ≤ D5, which log + 2 affords (the M4 trap around
+        // the Pattern-B `[-1, 0]` masks is fixed in the pinned engine).
+        self.log_size() + 2
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         let rel = &self.relations;
@@ -568,10 +574,7 @@ impl FrameworkEval for Eval {
             eval.add_to_relation(RelationEntry::base(
                 &rel.xor3,
                 is_absorb.clone() - is_first.clone(),
-                &[
-                    post_prev(j) + block_spread[j].clone(),
-                    new_rate[j].clone(),
-                ],
+                &[post_prev(j) + block_spread[j].clone(), new_rate[j].clone()],
             ));
         }
         // 4. KeccakState: three gated IN variants (+) and the OUT require (−).
@@ -589,7 +592,11 @@ impl FrameworkEval for Eval {
         };
         // first perm of a job: rate = block0 spread, capacity = 0.
         let in_first = mk_state(&|j| block_spread[j].clone(), &|_| E::F::zero());
-        eval.add_to_relation(RelationEntry::base(&rel.keccak_state, is_first.clone(), &in_first));
+        eval.add_to_relation(RelationEntry::base(
+            &rel.keccak_state,
+            is_first.clone(),
+            &in_first,
+        ));
         // later absorb perms: rate = new_rate, capacity chains from prev post.
         let in_absorb = mk_state(&|j| new_rate[j].clone(), &post_prev);
         eval.add_to_relation(RelationEntry::base(
@@ -638,7 +645,7 @@ impl FrameworkEval for Eval {
             ));
         }
 
-        eval.finalize_logup_in_pairs();
+        eval.finalize_logup_batched(LOGUP_BATCH);
         eval
     }
 }
@@ -661,10 +668,14 @@ impl InteractionClaim {
 }
 
 /// The 684 per-row logup fractions in EXACTLY the AIR's emission order.
-/// Zero-multiplicity entries are `(0, 1)` — sound because the pair constraint
+/// Zero-multiplicity entries are `(0, 1)` — sound because the batch constraint
 /// evaluates the symbolic multiplicity (a preprocessed gate that IS zero
 /// there), so the committed accumulator step is 0 either way.
-fn row_fracs(rel: &KeccakRelations, sched: &RowSched, row: &RowData) -> Vec<(SecureField, SecureField)> {
+fn row_fracs(
+    rel: &KeccakRelations,
+    sched: &RowSched,
+    row: &RowData,
+) -> Vec<(SecureField, SecureField)> {
     let zero = SecureField::zero();
     let one = SecureField::one();
     let m = M31::from_u32_unchecked;
@@ -768,8 +779,9 @@ fn row_fracs(rel: &KeccakRelations, sched: &RowSched, row: &RowData) -> Vec<(Sec
     out
 }
 
-/// Build the interaction trace: pair-batched columns matching
-/// `finalize_logup_in_pairs` over the AIR's emission order.
+/// Build the interaction trace: batch-4 columns matching
+/// `finalize_logup_batched(LOGUP_BATCH)` over the AIR's emission order
+/// (consecutive chunks; the last chunk may be smaller).
 pub fn generate_interaction_trace(
     rel: &KeccakRelations,
     run: &SpongeVRun,
@@ -797,17 +809,25 @@ pub fn generate_interaction_trace(
     let row_lookup = circle_row_to_coset(log_size);
     let n_vec_rows = 1usize << (log_size - LOG_N_LANES);
     let mut gen = LogupTraceGenerator::new(log_size);
-    for k in 0..N_LOGUP_ENTRIES / 2 {
+    // Fold each chunk exactly like `finalize_logup_batched`: start from the
+    // first fraction, then num = d·num + n·den, den = den·d.
+    for k in 0..N_LOGUP_ENTRIES.div_ceil(LOGUP_BATCH) {
+        let lo = k * LOGUP_BATCH;
+        let hi = (lo + LOGUP_BATCH).min(N_LOGUP_ENTRIES);
         let mut col = gen.new_col();
         for vr in 0..n_vec_rows {
             let mut num = [zero; N_LANES];
             let mut den = [one; N_LANES];
             for lane in 0..N_LANES {
                 let coset = row_lookup[vr * N_LANES + lane];
-                let (n0, d0) = entry(coset, 2 * k);
-                let (n1, d1) = entry(coset, 2 * k + 1);
-                num[lane] = n0 * d1 + n1 * d0;
-                den[lane] = d0 * d1;
+                let (mut n_acc, mut d_acc) = entry(coset, lo);
+                for e in lo + 1..hi {
+                    let (n, d) = entry(coset, e);
+                    n_acc = d * n_acc + n * d_acc;
+                    d_acc = d_acc * d;
+                }
+                num[lane] = n_acc;
+                den[lane] = d_acc;
             }
             col.write_frac(vr, PackedQM31::from_array(num), PackedQM31::from_array(den));
         }

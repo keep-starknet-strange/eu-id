@@ -5,8 +5,18 @@
 
 use sha3::digest::{ExtendableOutput, Update, XofReader};
 use sha3::Shake256;
+use stwo::core::fri::FriConfig;
 use stwo::core::pcs::PcsConfig;
 use stwo_keccak::{prove_shake256, verify_shake256};
+
+/// Batch-4 logup constraints have log-degree excess 2, so proving needs
+/// `log_blowup >= 2` (production uses 3).
+fn pcs_config() -> PcsConfig {
+    PcsConfig {
+        fri_config: FriConfig::new(0, 2, 3, 1),
+        ..PcsConfig::default()
+    }
+}
 
 fn sha3_shake256(msg: &[u8], out_len: usize) -> Vec<u8> {
     let mut h = Shake256::default();
@@ -19,7 +29,7 @@ fn sha3_shake256(msg: &[u8], out_len: usize) -> Vec<u8> {
 
 /// Prove+verify `msg` with `n_squeeze` blocks and check the output vs sha3.
 fn check(msg: &[u8], n_squeeze: usize) {
-    let proof = prove_shake256(msg, n_squeeze, PcsConfig::default())
+    let proof = prove_shake256(msg, n_squeeze, pcs_config())
         .unwrap_or_else(|e| panic!("prove (len={}, sq={}): {e:?}", msg.len(), n_squeeze));
     let expected = sha3_shake256(msg, n_squeeze * 136);
     assert_eq!(
@@ -52,7 +62,9 @@ fn kat_block_boundary_136_bytes() {
 #[test]
 fn kat_multi_block_mu_shape() {
     // ~1.5 KB, the ML-DSA μ absorb shape (spans many rate blocks).
-    let msg: Vec<u8> = (0..1536u32).map(|i| (i.wrapping_mul(31) & 0xFF) as u8).collect();
+    let msg: Vec<u8> = (0..1536u32)
+        .map(|i| (i.wrapping_mul(31) & 0xFF) as u8)
+        .collect();
     check(&msg, 1);
 }
 

@@ -123,7 +123,10 @@ mod tests {
         // pkEncode: 32 (ρ) + k·(n·T1_BITS/8) = 32 + 6·320 = 1952.
         assert_eq!(PK_BYTES, 32 + K * (N * T1_BITS / 8));
         // sigEncode: 48 (c̃) + l·(n·Z_BITS/8) (z) + (ω + k) (h) = 48 + 5·640 + 61.
-        assert_eq!(SIG_BYTES, C_TILDE_BYTES + L * (N * Z_BITS / 8) + (OMEGA + K));
+        assert_eq!(
+            SIG_BYTES,
+            C_TILDE_BYTES + L * (N * Z_BITS / 8) + (OMEGA + K)
+        );
         // w1 range [0,15] ⇒ (q−1)/(2·γ2) = 16 values ⇒ 4 bits.
         assert_eq!((Q - 1) / (2 * GAMMA2), 16);
         assert_eq!(W1_BITS, 4);

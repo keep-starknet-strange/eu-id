@@ -249,3 +249,50 @@ block (−3.2M cells) — requires changing what is hashed, not the AIR.
   <1s single-thread needs SHA-table redesign + coeffs repack + engine
   batching, or multi-thread proving.
 - Verify: 20–29ms, comfortably under the 100ms bound at 36q/blowup-3.
+
+## S6 (2026-07-12) — LogUp batch-4 via engine unlock (LANDED)
+
+The S3b engine constraint is FIXED: stwo fork rev `8c998390` generalizes the
+composition split to `K = max(bound - log_size)` (was hardcoded 1), so
+FrameworkComponents may declare `bound = log_size + 2` (D≤5 ⇒ LogUp batch 4).
+Constraint evaluation reuses committed evals whenever `K ≤ log_blowup`
+(production blowup 3 ⇒ no stored coefficients needed). Degree accounting:
+stwo repo `.claude/skills/paper-implementation-divergence-log.md`
+DIVERGENCE-004. Engine repro/regression: `test_state_machine_raised_degree_bound_*`.
+
+Switched to batch 4 at `bound = log+2`: keccak_round (898 fracs, interaction
+cols 1796 → 900), sponge_v (684 fracs, 1368 → 684), Sha256Eval (66-67 fracs,
+33 → 17 secure cols). Producers left on pairs (1 frac each — no benefit);
+stwo-mldsa `coeffs` untouched at log+1 by design (Horner accumulator).
+Crate tests that prove at `PcsConfig::default()` (blowup 1) moved to a
+blowup-2 pcs_config() helper (stwo-keccak tests, stwo-mldsa composed/hosted) —
+weaker than production's blowup 3.
+
+pq_perf_probe, RAYON_NUM_THREADS=1, --release, n=4:
+
+| point | prove ms (median) | verify ms | proof B |
+|---|---|---|---|
+| S5c baseline | 4,911 (n=8) | 20–32 | ~2,201,000 |
+| S6 batch-4   | 5,378 (5,338–5,434) | 18 | 1,810,481 |
+| targets      | <1,000 | <100 ✓ | <1,000,000 |
+
+Proof −390 KB (−17.8%); sampled_values 255,080 B, queried_values 1,424,888 B.
+(Spec estimate was −460 KB assuming all interaction cols halve; consumers-only
+scope lands −390 KB. The ~1.75 MB acceptance point is missed by ~60 KB.)
+Phase split (AIR_CORE_PROVE_TIMING): tree2 1,611 → 1,337 ms (down as
+predicted), tree1 844 → 771 ms, tree0 705 → 665 ms, BUT
+stark-prove 1,314 → 2,026 ms: uniform-K lifting makes EVERY component
+(including the huge coeffs Horner) evaluate constraints on a 4× trace-size
+domain instead of 2×. Net prove +9.5% (4,911 → 5,378 ms).
+
+Follow-up levers (not done): (a) FFT-extend low-excess components' quotient
+columns (interpolate at n+1, evaluate at n+2) instead of re-evaluating
+constraints on the doubled domain — recovers most of the +712 ms stark cost,
+engine-side change; (b) batch-4 the remaining pair-batched consumers
+(mdoc SHA windows, bridges) for the residual ~-70 KB toward the -460 KB
+estimate; (c) the S5 floor items (SHA small-load AIR, coeffs repack).
+
+Gates (all green, 2026-07-12, post-S6): mdoc_mldsa p256+ml-dsa 25,
+mdoc_mldsa quantum-safe-mdoc 19 (--no-default-features), stwo-keccak 31,
+stwo-mldsa 74, stwo-sha256 145, credential_pipeline 3 (+1 ignored),
+check-quantum-only-deps clean.

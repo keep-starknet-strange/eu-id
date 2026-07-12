@@ -80,11 +80,7 @@ pub fn pk_encode(rho: &[u8; 32], t1: &[[u32; N]; K]) -> Vec<u8> {
 /// FIPS 204 Algorithm 26 `sigEncode`: inverse of [`sig_decode`]. `c̃ ‖ z ‖ h`,
 /// where `z` uses `BitPack(·, γ1−1, γ1)` (`raw = γ1 − coeff`) and `h` uses
 /// `HintBitPack` (Algorithm 20).
-pub fn sig_encode(
-    c_tilde: &[u8; C_TILDE_BYTES],
-    z: &[[i32; N]; L],
-    h: &[[u8; N]; K],
-) -> Vec<u8> {
+pub fn sig_encode(c_tilde: &[u8; C_TILDE_BYTES], z: &[[i32; N]; L], h: &[[u8; N]; K]) -> Vec<u8> {
     let mut out = Vec::with_capacity(SIG_BYTES);
     out.extend_from_slice(c_tilde);
 

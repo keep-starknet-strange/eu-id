@@ -68,7 +68,10 @@ fn col_eval(values: Vec<M31>) -> ColEval {
         );
         ordered[row] = v;
     }
-    CircleEvaluation::new(CanonicCoset::new(LOG_SIZE).circle_domain(), BaseColumn::from_iter(ordered))
+    CircleEvaluation::new(
+        CanonicCoset::new(LOG_SIZE).circle_domain(),
+        BaseColumn::from_iter(ordered),
+    )
 }
 
 /// Digit tables: `digits[poly][coeff][digit]`.
@@ -97,11 +100,16 @@ fn native_eval(poly: &[[M31; N_DIGITS]; N_COEFFS], r: SecureField, s: SecureFiel
 // ── preprocessed selectors ──
 
 fn pre_id(name: &str) -> PreProcessedColumnId {
-    PreProcessedColumnId { id: format!("toy_horner_{name}") }
+    PreProcessedColumnId {
+        id: format!("toy_horner_{name}"),
+    }
 }
 
 fn pre_ids() -> Vec<PreProcessedColumnId> {
-    ["start", "end", "poly_id"].into_iter().map(pre_id).collect()
+    ["start", "end", "poly_id"]
+        .into_iter()
+        .map(pre_id)
+        .collect()
 }
 
 fn gen_preprocessed() -> Vec<ColEval> {
@@ -161,7 +169,8 @@ impl FrameworkEval for ToyEval {
         // acc = (1 − start)·acc_prev·r + (d0 + d1·s). Degree 2 (r,s constants).
         let one = E::F::from(M31::one());
         let digit_row = E::EF::from(d0) + E::EF::from(self.s) * E::EF::from(d1);
-        let expected = E::EF::from(one - start.clone()) * acc_prev * E::EF::from(self.r) + digit_row;
+        let expected =
+            E::EF::from(one - start.clone()) * acc_prev * E::EF::from(self.r) + digit_row;
         eval.add_constraint(acc.clone() - expected);
 
         // YIELD the claimed eval at each group end (negative = supply). The
@@ -192,7 +201,11 @@ fn gen_interaction(
         // is exactly what the ungated constraint enforces. Coset row 0 is a group
         // head, so its `[-1]` wrap is killed by start = 1 regardless.
         let start = row < ACTIVE_ROWS && row % N_COEFFS == 0;
-        let prev = if start || row == 0 { SecureField::zero() } else { acc[row - 1] };
+        let prev = if start || row == 0 {
+            SecureField::zero()
+        } else {
+            acc[row - 1]
+        };
         let (active, digit_row) = if row < ACTIVE_ROWS {
             let (p, c) = (row / N_COEFFS, row % N_COEFFS);
             (
@@ -202,7 +215,11 @@ fn gen_interaction(
         } else {
             (false, SecureField::zero())
         };
-        acc[row] = if active { prev * r + digit_row } else { prev * r };
+        acc[row] = if active {
+            prev * r + digit_row
+        } else {
+            prev * r
+        };
     }
     let mut group_evals = Vec::new();
     for p in 0..N_POLYS {
@@ -218,7 +235,10 @@ fn gen_interaction(
     let vec_rows = 1usize << (LOG_SIZE - LOG_N_LANES);
     let mut row_lookup = vec![0usize; rows];
     for coset in 0..rows {
-        let dr = bit_reverse_index(coset_index_to_circle_domain_index(coset, LOG_SIZE), LOG_SIZE);
+        let dr = bit_reverse_index(
+            coset_index_to_circle_domain_index(coset, LOG_SIZE),
+            LOG_SIZE,
+        );
         row_lookup[dr] = coset;
     }
     use stwo::prover::backend::simd::m31::N_LANES;
@@ -363,7 +383,7 @@ impl AirProver for ToyModule {
             let coords = native_val.to_m31_array();
             let tuple = [m31(p as u32), coords[0], coords[1], coords[2], coords[3]];
             let denom: SecureField = eval_rel.combine(&tuple);
-                native += one / denom;
+            native += one / denom;
         }
         self.native_use_sum = Some(native);
     }
@@ -388,8 +408,8 @@ pub fn toy_verify(proof: &StarkProof<Blake2sMerkleHasher>) -> Result<(), Verific
     // drawing r,s. We stash them in a pre-pass mirroring the prover.
     // Simplest: run the same interaction-gen (verifier knows digits publicly).
     module.claimed_sum = Some(SecureField::zero()); // placeholder, filled below
-    // We reuse the Air trait's draw ordering by letting air_core::verify call
-    // draw_relations, but claimed_sums must be known before that. So precompute:
+                                                    // We reuse the Air trait's draw ordering by letting air_core::verify call
+                                                    // draw_relations, but claimed_sums must be known before that. So precompute:
     let mut channel = Blake2sChannel::default();
     proof.config.mix_into(&mut channel);
     // Mirror air_core::verify's pre-relation transcript is complex; instead the
@@ -450,7 +470,11 @@ fn toy_verify_inner(proof: &StarkProof<Blake2sMerkleHasher>) -> Result<(), Verif
         fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
             self.component = Some(FrameworkComponent::new(
                 allocator,
-                ToyEval { r: self.r, s: self.s, eval_rel: self.eval_rel.clone().unwrap() },
+                ToyEval {
+                    r: self.r,
+                    s: self.s,
+                    eval_rel: self.eval_rel.clone().unwrap(),
+                },
                 self.claimed_sum,
             ));
         }
@@ -503,7 +527,8 @@ mod tests {
                 self.s = channel.draw_secure_felt();
                 let eval_rel = EvalAtRs::draw(channel);
                 // Honest committed side.
-                let (_t, claimed_sum, _g) = gen_interaction(&toy_digits(), self.r, self.s, &eval_rel);
+                let (_t, claimed_sum, _g) =
+                    gen_interaction(&toy_digits(), self.r, self.s, &eval_rel);
                 self.claimed_sum = claimed_sum;
                 // FORGED native side: flip one digit.
                 let mut forged = toy_digits();
@@ -515,7 +540,7 @@ mod tests {
                     let coords = native_val.to_m31_array();
                     let tuple = [m31(p as u32), coords[0], coords[1], coords[2], coords[3]];
                     let denom: SecureField = eval_rel.combine(&tuple);
-                native += one / denom;
+                    native += one / denom;
                 }
                 self.native_use_sum = native;
                 self.eval_rel = Some(eval_rel);
@@ -536,7 +561,11 @@ mod tests {
             fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
                 self.component = Some(FrameworkComponent::new(
                     allocator,
-                    ToyEval { r: self.r, s: self.s, eval_rel: self.eval_rel.clone().unwrap() },
+                    ToyEval {
+                        r: self.r,
+                        s: self.s,
+                        eval_rel: self.eval_rel.clone().unwrap(),
+                    },
                     self.claimed_sum,
                 ));
             }

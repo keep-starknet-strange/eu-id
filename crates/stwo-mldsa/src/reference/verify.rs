@@ -75,11 +75,7 @@ pub struct VerifyTrace {
 
 /// Verify an ML-DSA-65 signature in pure mode with empty context (the mdoc
 /// path). Thin wrapper over [`verify_internals_with_context`].
-pub fn verify_internals(
-    pk: &[u8],
-    msg: &[u8],
-    sig: &[u8],
-) -> Result<VerifyTrace, MlDsaError> {
+pub fn verify_internals(pk: &[u8], msg: &[u8], sig: &[u8]) -> Result<VerifyTrace, MlDsaError> {
     verify_internals_with_context(pk, msg, &[], sig)
 }
 
@@ -106,8 +102,7 @@ pub fn verify_internals_with_context(
     // µ = H(tr ‖ 0x00 ‖ |ctx| ‖ ctx ‖ M, 512). The two leading bytes 0x00,|ctx|
     // are the pure-mode domain prefix — see the module docs.
     let ctx_len = [ctx.len() as u8];
-    let (mu_vec, mu_transcript) =
-        shake256(&[&tr, &[DOMAIN_SEP_PURE], &ctx_len, ctx, msg], HASH64);
+    let (mu_vec, mu_transcript) = shake256(&[&tr, &[DOMAIN_SEP_PURE], &ctx_len, ctx, msg], HASH64);
     let mut mu = [0u8; HASH64];
     mu.copy_from_slice(&mu_vec);
 
@@ -207,9 +202,7 @@ pub fn verify(pk: &[u8], msg: &[u8], sig: &[u8]) -> bool {
 /// that the honest signer's rejection sampling could have produced it.
 fn z_norm_in_bound(z: &[[i32; N]; L]) -> bool {
     let bound = (GAMMA1 - crate::constants::BETA) as i32;
-    z.iter()
-        .flatten()
-        .all(|&c| c.abs() < bound)
+    z.iter().flatten().all(|&c| c.abs() < bound)
 }
 
 /// Lift signed `{−1,0,1}`-style coefficients into `[0, q)`.

@@ -81,7 +81,8 @@ fn decomp_seeds_honest_without_mutation() {
         let (w, _) = witness_and_input(seed, msg);
         let proof = prove_decomp(w, PcsConfig::default())
             .unwrap_or_else(|e| panic!("seed {seed}: honest prove failed: {e:?}"));
-        verify_decomp(&proof).unwrap_or_else(|e| panic!("seed {seed}: honest verify failed: {e:?}"));
+        verify_decomp(&proof)
+            .unwrap_or_else(|e| panic!("seed {seed}: honest verify failed: {e:?}"));
     }
 }
 
@@ -96,7 +97,10 @@ fn decomp_seeds_honest_without_mutation() {
 fn negative_dropped_w1_digit() {
     let (mut w, _) = witness_and_input(6001, b"drop-digit");
     w.decomp.w1[0][4] = (w.decomp.w1[0][4] + 1) % 16;
-    assert!(rejected(w), "a changed w1' must break the w1Encode/UseHint balance");
+    assert!(
+        rejected(w),
+        "a changed w1' must break the w1Encode/UseHint balance"
+    );
 }
 
 /// Flip one hint bit: UseHint output diverges from w1' ⇒ the UseHint constraint
@@ -148,7 +152,10 @@ fn negative_hint_weight_over_omega() {
         }
     }
     assert!(cur >= target, "must reach ω+1 hints");
-    assert!(rejected(w), "Σh = ω+1 must be rejected by the accumulator gate");
+    assert!(
+        rejected(w),
+        "Σh = ω+1 must be rejected by the accumulator gate"
+    );
 }
 
 /// w0 out of centered range (§5 row I-3a): push one `w0` above γ2. The

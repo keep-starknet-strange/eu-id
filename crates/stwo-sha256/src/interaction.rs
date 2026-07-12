@@ -7,9 +7,11 @@
 //! `Sha256Digest` channel — the one provider-side term it contributes — which
 //! is why its claimed sum is non-zero on its own in that mode. Each is built by
 //! walking that component's fractions row-by-row through
-//! [`stwo_constraint_framework::LogupTraceGenerator`] — pairs of
-//! consecutive fractions share an interaction column (matching
-//! `eval.finalize_logup_in_pairs()`).
+//! [`stwo_constraint_framework::LogupTraceGenerator`] — consecutive
+//! fractions share an interaction column in batches matching the
+//! component's finalizer: [`crate::constraints::LOGUP_BATCH`] = 4 for the
+//! `Sha256Eval` consumer (`eval.finalize_logup_batched(4)`, D ≤ 5 budget),
+//! pairs for the producer components (`eval.finalize_logup_in_pairs()`).
 //!
 //! **Sum-to-zero invariant.** For a valid proof, the total of every
 //! component's `claimed_sum` must be zero — every consumer "use" cancels
@@ -45,6 +47,7 @@ use crate::components::{
     range_log_size, RangeKind, RANGE_TABLES, ROUND_SPLIT_TABLES, SIGMA_SPLIT_TABLES,
 };
 use crate::constants::DIGEST_BYTES;
+use crate::constraints::LOGUP_BATCH;
 use crate::field_exposure::{word_be_bytes, FieldExposure, BYTE_RANGE_CHECK_OFFSET};
 use crate::multiplicities::{
     range_k_multiplicities, round_split_pack_multiplicities, sigma_split_pack_multiplicities,
@@ -180,16 +183,25 @@ pub(crate) type Frac = (SecureField, SecureField);
 /// row-iterators. `lookups[k]` is the k-th lookup the component fires —
 /// a `Vec<Frac>` of length `2^log_size` giving the row-by-row fraction.
 ///
-/// Pairs of consecutive lookups share one interaction column, matching
-/// `finalize_logup_in_pairs`. Odd counts get a final single-lookup column.
+/// Consecutive lookups share one interaction column in chunks of `batch`,
+/// folded exactly like the framework's `finalize_logup_batched(batch)`:
+/// start from the chunk's first fraction, then fold each next `(n, d)` as
+/// `num = d·num + n·den; den = den·d`. A short tail chunk (including a
+/// singleton) folds the same way over fewer fractions. The chunking runs
+/// over the same emission order as the component's `add_to_relation`
+/// calls, so `batch` MUST equal the component's finalizer batch size
+/// ([`crate::constraints::LOGUP_BATCH`] for the consumer, 2 for the
+/// pair-finalized producers).
 pub(crate) fn build_interaction_columns(
     log_size: u32,
+    batch: usize,
     lookups: Vec<Vec<Frac>>,
 ) -> (
     ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     SecureField,
 ) {
     debug_assert!(log_size >= LOG_N_LANES, "log_size < LOG_N_LANES");
+    debug_assert!(batch > 0, "batch size must be positive");
     let n_rows = 1usize << log_size;
     for (i, l) in lookups.iter().enumerate() {
         debug_assert_eq!(
@@ -202,44 +214,22 @@ pub(crate) fn build_interaction_columns(
 
     let mut gen = LogupTraceGenerator::new(log_size);
 
-    // Walk lookups in chunks of 2 — each chunk shares one interaction
-    // column. An odd remainder (last lookup) gets its own column.
-    let mut i = 0;
-    while i + 2 <= lookups.len() {
-        let lo0 = &lookups[i];
-        let lo1 = &lookups[i + 1];
+    for chunk in lookups.chunks(batch) {
         let mut col = gen.new_col();
         for vec_row in 0..(n_rows / N_LANES) {
             let mut num_arr = [SecureField::zero(); N_LANES];
             let mut den_arr = [SecureField::one(); N_LANES];
             for lane in 0..N_LANES {
                 let row = vec_row * N_LANES + lane;
-                let (n0, d0) = lo0[row];
-                let (n1, d1) = lo1[row];
-                // n0/d0 + n1/d1 = (n0·d1 + n1·d0) / (d0·d1)
-                num_arr[lane] = n0 * d1 + n1 * d0;
-                den_arr[lane] = d0 * d1;
-            }
-            col.write_frac(
-                vec_row,
-                PackedSecureField::from_array(num_arr),
-                PackedSecureField::from_array(den_arr),
-            );
-        }
-        col.finalize_col();
-        i += 2;
-    }
-    if i < lookups.len() {
-        let single = &lookups[i];
-        let mut col = gen.new_col();
-        for vec_row in 0..(n_rows / N_LANES) {
-            let mut num_arr = [SecureField::zero(); N_LANES];
-            let mut den_arr = [SecureField::one(); N_LANES];
-            for lane in 0..N_LANES {
-                let row = vec_row * N_LANES + lane;
-                let (n, d) = single[row];
-                num_arr[lane] = n;
-                den_arr[lane] = d;
+                let (mut num, mut den) = chunk[0][row];
+                for lookup in &chunk[1..] {
+                    let (n, d) = lookup[row];
+                    // num/den + n/d = (d·num + n·den) / (den·d)
+                    num = d * num + n * den;
+                    den = den * d;
+                }
+                num_arr[lane] = num;
+                den_arr[lane] = den;
             }
             col.write_frac(
                 vec_row,
@@ -357,7 +347,9 @@ fn round_split_pack_interaction(
             producer_frac_column(&relations.split_pack.sigma1_hi, &mults, row_iter)
         }
     };
-    build_interaction_columns(log_size, vec![frac])
+    // Single fraction — one column regardless of batch; the producer
+    // component finalizes in pairs, so pass 2.
+    build_interaction_columns(log_size, 2, vec![frac])
 }
 
 /// Build the interaction trace for one `Range_k` producer.
@@ -388,7 +380,9 @@ fn range_k_interaction(
         RangeKind::Range5 => producer_frac_column(&relations.range.range_5, &mults, row_iter),
         RangeKind::Range16 => producer_frac_column(&relations.range.range_16, &mults, row_iter),
     };
-    build_interaction_columns(log_size, vec![frac])
+    // Single fraction — one column regardless of batch; the producer
+    // component finalizes in pairs, so pass 2.
+    build_interaction_columns(log_size, 2, vec![frac])
 }
 
 fn sigma_split_pack_interaction(
@@ -424,7 +418,9 @@ fn sigma_split_pack_interaction(
             producer_frac_column(&relations.split_pack.lower_sigma1_hi, &mults, row_iter)
         }
     };
-    build_interaction_columns(log_size, vec![frac])
+    // Single fraction — one column regardless of batch; the producer
+    // component finalizes in pairs, so pass 2.
+    build_interaction_columns(log_size, 2, vec![frac])
 }
 
 // ---------------------------------------------------------------------------
@@ -435,7 +431,8 @@ fn sigma_split_pack_interaction(
 ///
 /// Mirrors the *exact* `add_to_relation` order `Sha256Eval::evaluate`
 /// fires. Each lookup produces one fraction column at log_size = the
-/// trace's log_size. Pairs share an interaction column.
+/// trace's log_size. Chunks of [`LOGUP_BATCH`] = 4 consecutive lookups
+/// share an interaction column, matching `finalize_logup_batched(4)`.
 ///
 /// The cell values for each lookup come from the main trace at the row
 /// representing the block. Padding rows contribute `(0, 1)` (zero
@@ -492,7 +489,7 @@ fn sha256_interaction(
         }
     }
 
-    build_interaction_columns(log_size, all_lookups)
+    build_interaction_columns(log_size, LOGUP_BATCH, all_lookups)
 }
 
 /// Write every lookup site for one `(block, round t)` row at its trace

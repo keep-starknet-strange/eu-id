@@ -14,6 +14,7 @@ use stwo::core::air::Component;
 use stwo::core::channel::{Blake2sChannel, Channel};
 use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::{SecureField, SECURE_EXTENSION_DEGREE};
+use stwo::core::fri::FriConfig;
 use stwo::core::pcs::PcsConfig;
 use stwo::prover::backend::simd::m31::{LOG_N_LANES, N_LANES};
 use stwo::prover::backend::simd::qm31::PackedQM31;
@@ -93,7 +94,13 @@ struct IoCloser {
 
 impl IoCloser {
     fn new(entries: Vec<IoEntry>, handle: SharedKeccakRelations) -> Self {
-        Self { entries, handle, hash_io: None, claimed: SecureField::zero(), component: None }
+        Self {
+            entries,
+            handle,
+            hash_io: None,
+            claimed: SecureField::zero(),
+            component: None,
+        }
     }
     fn interaction(&self, hash_io: &HashIoRelation) -> (Vec<ColEval>, SecureField) {
         let zero = SecureField::zero();
@@ -103,7 +110,11 @@ impl IoCloser {
             .entries
             .iter()
             .map(|e| {
-                let tuple = [M31::from(e.stream), M31::from(e.pos), M31::from(e.byte as u32)];
+                let tuple = [
+                    M31::from(e.stream),
+                    M31::from(e.pos),
+                    M31::from(e.byte as u32),
+                ];
                 let d: SecureField = hash_io.combine(&tuple);
                 let mut n = [zero; N_LANES];
                 let mut dl = [one; N_LANES];
@@ -260,6 +271,15 @@ struct ProvedJobs {
     proof: stwo::core::proof::StarkProof<air_core::Hasher>,
 }
 
+/// Batch-4 logup constraints have log-degree excess 2, so proving needs
+/// `log_blowup >= 2` (production uses 3).
+fn pcs_config() -> PcsConfig {
+    PcsConfig {
+        fri_config: FriConfig::new(0, 2, 3, 1),
+        ..PcsConfig::default()
+    }
+}
+
 /// Prove `[service(jobs), io_closer]`, optionally tampering the sponge run
 /// (base + sponge interaction data) before any tree is committed.
 fn prove_jobs(
@@ -275,8 +295,7 @@ fn prove_jobs(
         t(service.run_mut());
     }
     let mut closer = IoCloser::new(closer_entries(&shapes, &messages, &outputs), handle);
-    let proof = air_core::prove(&mut [&mut service, &mut closer], PcsConfig::default())
-        .expect("prove");
+    let proof = air_core::prove(&mut [&mut service, &mut closer], pcs_config()).expect("prove");
     ProvedJobs {
         shapes,
         messages,
@@ -299,7 +318,11 @@ fn verify_jobs(p: &ProvedJobs, closer_msgs: &[Vec<u8>]) -> Result<(), air_core::
 }
 
 /// A tampered configuration is REJECTED if proving fails/panics or verify errs.
-fn rejected(messages: Vec<Vec<u8>>, n_squeezes: Vec<usize>, tamper: &dyn Fn(&mut SpongeVRun)) -> bool {
+fn rejected(
+    messages: Vec<Vec<u8>>,
+    n_squeezes: Vec<usize>,
+    tamper: &dyn Fn(&mut SpongeVRun),
+) -> bool {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let p = prove_jobs(messages.clone(), n_squeezes, Some(tamper));
         verify_jobs(&p, &messages).is_err()
@@ -315,7 +338,11 @@ fn rejected(messages: Vec<Vec<u8>>, n_squeezes: Vec<usize>, tamper: &dyn Fn(&mut
 fn single_job_proves_and_matches_sha3() {
     let msg = (0..300u32).map(|i| (i * 7 + 3) as u8).collect::<Vec<u8>>();
     let p = prove_jobs(vec![msg.clone()], vec![1], None);
-    assert_eq!(p.outputs[0], shake256_ref(&msg, 136), "rotated sponge output != sha3");
+    assert_eq!(
+        p.outputs[0],
+        shake256_ref(&msg, 136),
+        "rotated sponge output != sha3"
+    );
     verify_jobs(&p, &p.messages.clone()).expect("single-job verify");
 }
 
@@ -328,17 +355,26 @@ fn single_job_proves_and_matches_sha3() {
 fn multi_job_list_proves_with_isolated_boundaries() {
     let m135 = vec![0x11u8; 135];
     let m136 = vec![0x22u8; 136];
-    let m300 = (0..300u32).map(|i| (i as u8).wrapping_mul(31)).collect::<Vec<u8>>();
+    let m300 = (0..300u32)
+        .map(|i| (i as u8).wrapping_mul(31))
+        .collect::<Vec<u8>>();
     let m_dup = vec![0xAAu8; 200];
     let messages = vec![m135, m136, m300, m_dup.clone(), m_dup.clone()];
     let n_squeezes = vec![1usize, 1, 1, 2, 2];
     let p = prove_jobs(messages.clone(), n_squeezes.clone(), None);
     for ((msg, out), sq) in messages.iter().zip(&p.outputs).zip(&n_squeezes) {
-        assert_eq!(out, &shake256_ref(msg, 136 * sq), "job output != sha3 reference");
+        assert_eq!(
+            out,
+            &shake256_ref(msg, 136 * sq),
+            "job output != sha3 reference"
+        );
     }
     // Boundary isolation: the duplicate jobs (different position in the row
     // concatenation, different neighbors) produce identical outputs.
-    assert_eq!(p.outputs[3], p.outputs[4], "job outputs must not depend on neighbors");
+    assert_eq!(
+        p.outputs[3], p.outputs[4],
+        "job outputs must not depend on neighbors"
+    );
     verify_jobs(&p, &messages).expect("multi-job verify");
 }
 

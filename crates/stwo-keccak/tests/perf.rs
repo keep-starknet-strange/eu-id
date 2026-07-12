@@ -9,6 +9,7 @@
 
 use std::time::Instant;
 
+use stwo::core::fri::FriConfig;
 use stwo::core::pcs::PcsConfig;
 use stwo::prover::backend::simd::m31::N_LANES;
 use stwo_keccak::keccak;
@@ -17,6 +18,15 @@ use stwo_keccak::tables_air::PREPROCESSED_CELLS;
 use stwo_keccak::{prove_shake256, verify_shake256};
 
 const N_ROUNDS: usize = 24;
+
+/// Batch-4 logup constraints have log-degree excess 2, so proving needs
+/// `log_blowup >= 2` (production uses 3).
+fn pcs_config() -> PcsConfig {
+    PcsConfig {
+        fri_config: FriConfig::new(0, 2, 3, 1),
+        ..PcsConfig::default()
+    }
+}
 
 /// Committed M31 cells per permutation, **house counting method**: one
 /// permutation is proven as 24 `keccak_round` rows plus one `keccak` row.
@@ -44,7 +54,10 @@ fn report_cell_counts() {
         "committed cells per permutation (M31, cols×rows: {round}×{N_ROUNDS}+{keccak}) = {} (target <= 75000)",
         cells_per_perm()
     );
-    println!("  amortized over {N_LANES} SIMD lanes = {}", amortized_cells_per_perm());
+    println!(
+        "  amortized over {N_LANES} SIMD lanes = {}",
+        amortized_cells_per_perm()
+    );
     println!("preprocessed table cells (all 9 tables) = {PREPROCESSED_CELLS}");
     let lookups = 2 // keccak_round chain links
         + keccak_round::N_XOR3_LOOKUPS
@@ -68,15 +81,17 @@ fn prove_22_perm_chain() {
     // A message whose absorb+squeeze forces >= 22 permutations. Each 136-byte
     // absorb block is one permutation; ~21 blocks + squeeze gives >= 22.
     let msg_len = 136 * 21; // 21 absorb blocks
-    let msg: Vec<u8> = (0..msg_len as u32).map(|i| (i.wrapping_mul(97) & 0xFF) as u8).collect();
+    let msg: Vec<u8> = (0..msg_len as u32)
+        .map(|i| (i.wrapping_mul(97) & 0xFF) as u8)
+        .collect();
     let n_squeeze = 2;
 
     // Warm the twiddle cache / preprocessed tables with a tiny prove first so the
     // timed run measures steady-state proving, not one-off setup.
-    let _ = prove_shake256(b"warmup", 1, PcsConfig::default()).expect("warmup");
+    let _ = prove_shake256(b"warmup", 1, pcs_config()).expect("warmup");
 
     let start = Instant::now();
-    let proof = prove_shake256(&msg, n_squeeze, PcsConfig::default()).expect("prove");
+    let proof = prove_shake256(&msg, n_squeeze, pcs_config()).expect("prove");
     let elapsed = start.elapsed();
 
     let n_perms = proof.shape.n_perms();
@@ -95,10 +110,12 @@ fn prove_large_chain_amortized() {
     // A larger chain to observe the amortized ms/perm once the fixed 2^16 table
     // commitment + FRI cost is spread over many permutations (the ML-DSA regime).
     let msg_len = 136 * 200; // 200 absorb blocks
-    let msg: Vec<u8> = (0..msg_len as u32).map(|i| (i.wrapping_mul(97) & 0xFF) as u8).collect();
-    let _ = prove_shake256(b"warmup", 1, PcsConfig::default()).expect("warmup");
+    let msg: Vec<u8> = (0..msg_len as u32)
+        .map(|i| (i.wrapping_mul(97) & 0xFF) as u8)
+        .collect();
+    let _ = prove_shake256(b"warmup", 1, pcs_config()).expect("warmup");
     let start = Instant::now();
-    let proof = prove_shake256(&msg, 2, PcsConfig::default()).expect("prove");
+    let proof = prove_shake256(&msg, 2, pcs_config()).expect("prove");
     let elapsed = start.elapsed();
     let n_perms = proof.shape.n_perms();
     verify_shake256(&proof).expect("verify");
@@ -107,4 +124,3 @@ fn prove_large_chain_amortized() {
     println!("[large] prove time   = {ms:.1} ms");
     println!("[large] ms / perm    = {:.3}", ms / n_perms as f64);
 }
-

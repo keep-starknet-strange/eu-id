@@ -92,11 +92,11 @@ const COL_ACCEPT: usize = 3; // 1 iff this byte is accepted (byte ≤ i)
 const COL_REJECT: usize = 4; // 1 iff placement byte rejected (byte > i); degree-1 gate
 const COL_ACCEPT_HI: usize = 5; // 8-bit hi of (i − byte) ∈ [0,256) on accept rows
 const COL_REJECT_HI: usize = 6; // 8-bit hi of (byte − i − 1) ∈ [0,256) on reject rows
-// c stage columns:
+                                // c stage columns:
 const COL_C: usize = 7; // challenge coefficient value (signed)
 const COL_CSQ: usize = 8; // c² (witnessed so the accumulator constraint stays deg 1)
 const COL_CSQ_ACC: usize = 9; // running Σ c²
-// Offline-memory (swap replay) columns — active on the n_accesses access rows.
+                              // Offline-memory (swap replay) columns — active on the n_accesses access rows.
 const COL_U_ADDR: usize = 10; // unsorted access address
 const COL_U_VAL: usize = 11; // unsorted access value (enc_signed)
 const COL_U_TS: usize = 12; // unsorted access timestamp
@@ -111,9 +111,9 @@ const COL_S_DADDR_INV: usize = 20; // inverse gadget: daddr·inv == 1−same
 const COL_S_DTS: usize = 21; // (ts − prev_ts − 1) within a cell ∈ [0,2048) (rc11)
 const COL_S_SR_SAME: usize = 22; // same·s_read (witnessed to keep continuity deg 2)
 const COL_S_FOC: usize = 23; // first-of-cell = is_access·(1−same) (witnessed, deg 2 pin)
-// Sign-bit columns — the 8 bits of each sign row's byte (only on the 8 sign rows;
-// 0 elsewhere). These feed the SignBit channel that ties write-j values to the
-// FIPS sign bits (`c[j] = (−1)^bit`), closing part of the free-access-list hole.
+                             // Sign-bit columns — the 8 bits of each sign row's byte (only on the 8 sign rows;
+                             // 0 elsewhere). These feed the SignBit channel that ties write-j values to the
+                             // FIPS sign bits (`c[j] = (−1)^bit`), closing part of the free-access-list hole.
 const COL_SIGN_BIT0: usize = 24;
 /// Number of sign-bit columns (one per bit of a sign byte).
 pub const SIGN_BIT_COLS: usize = 8;
@@ -134,7 +134,9 @@ pub const N_ACCESSES: usize = N_CORE + N;
 /// (they encode the rejection-sampling schedule of one specific signature), so
 /// two hosted ML-DSA instances must not share them under tree-0 id dedup.
 pub(crate) fn pre_id_ns(ns: &str, name: &str) -> PreProcessedColumnId {
-    PreProcessedColumnId { id: format!("{}mldsa_sib_{name}", crate::sponge_link::ns_prefix(ns)) }
+    PreProcessedColumnId {
+        id: format!("{}mldsa_sib_{name}", crate::sponge_link::ns_prefix(ns)),
+    }
 }
 
 fn sign_mask_name(u: usize) -> String {
@@ -214,7 +216,11 @@ fn stream_rows(witness: &MlDsaWitness) -> Vec<StreamRow> {
         let b = stream[pos] as u32;
         if pos < SIGN_BYTES {
             // Sign-collection rows: i stays at N−τ, byte recorded, no accept.
-            out.push(StreamRow { byte: b, i, accept: false });
+            out.push(StreamRow {
+                byte: b,
+                i,
+                accept: false,
+            });
         } else {
             let accept = b <= i;
             out.push(StreamRow { byte: b, i, accept });
@@ -257,7 +263,12 @@ fn mem_accesses(witness: &MlDsaWitness) -> Vec<Access> {
 
     // INIT: write (k, 0) for k in 0..N.
     for k in 0..N {
-        out.push(Access { addr: k as u32, value: 0, ts, is_write: true });
+        out.push(Access {
+            addr: k as u32,
+            value: 0,
+            ts,
+            is_write: true,
+        });
         ts += 1;
     }
 
@@ -272,14 +283,29 @@ fn mem_accesses(witness: &MlDsaWitness) -> Vec<Access> {
             }
         };
         let old_j = c[j];
-        out.push(Access { addr: j as u32, value: old_j, ts, is_write: false });
+        out.push(Access {
+            addr: j as u32,
+            value: old_j,
+            ts,
+            is_write: false,
+        });
         ts += 1;
         c[i] = old_j;
-        out.push(Access { addr: i as u32, value: c[i], ts, is_write: true });
+        out.push(Access {
+            addr: i as u32,
+            value: c[i],
+            ts,
+            is_write: true,
+        });
         ts += 1;
         let s: i128 = if sign & 1 == 1 { -1 } else { 1 };
         c[j] = s;
-        out.push(Access { addr: j as u32, value: c[j], ts, is_write: true });
+        out.push(Access {
+            addr: j as u32,
+            value: c[j],
+            ts,
+            is_write: true,
+        });
         ts += 1;
         sign >>= 1;
     }
@@ -291,7 +317,12 @@ fn mem_accesses(witness: &MlDsaWitness) -> Vec<Access> {
     // disagree ⇒ the internal Mem balance breaks ⇒ verify rejects. (No assert
     // here so the Mem gate — not a witness-consistency panic — is what catches it.)
     for k in 0..N {
-        out.push(Access { addr: k as u32, value: c[k], ts, is_write: false });
+        out.push(Access {
+            addr: k as u32,
+            value: c[k],
+            ts,
+            is_write: false,
+        });
         ts += 1;
     }
 
@@ -347,7 +378,12 @@ pub fn honest_core_accesses(witness: &MlDsaWitness) -> Vec<(u32, i128, u32, bool
 pub fn install_forged_core(accesses: Vec<(u32, i128, u32, bool)>) -> ForgedCoreGuard {
     let forged: Vec<Access> = accesses
         .into_iter()
-        .map(|(addr, value, ts, is_write)| Access { addr, value, ts, is_write })
+        .map(|(addr, value, ts, is_write)| Access {
+            addr,
+            value,
+            ts,
+            is_write,
+        })
         .collect();
     FORGED_CORE.with(|f| *f.borrow_mut() = Some(forged));
     ForgedCoreGuard
@@ -360,7 +396,11 @@ fn mem_trace(witness: &MlDsaWitness) -> MemTrace {
     // against the committed `c` is untouched — the FSM↔memory channels must catch it.
     FORGED_CORE.with(|f| {
         if let Some(forged) = f.borrow().as_ref() {
-            assert_eq!(forged.len(), N_CORE, "forged core list must have N_CORE entries");
+            assert_eq!(
+                forged.len(),
+                N_CORE,
+                "forged core list must have N_CORE entries"
+            );
             unsorted[..N_CORE].clone_from_slice(forged);
         }
     });
@@ -397,8 +437,7 @@ pub fn gen_sib_preprocessed(witness: &MlDsaWitness, log_size: u32) -> Vec<ColEva
     let mut core_ts = vec![m31(0); rows];
     let mut init_addr = vec![m31(0); rows];
     let mut is_sign = vec![m31(0); rows];
-    let mut sign_mask: Vec<Vec<M31>> =
-        (0..SIGN_BIT_COLS).map(|_| vec![m31(0); rows]).collect();
+    let mut sign_mask: Vec<Vec<M31>> = (0..SIGN_BIT_COLS).map(|_| vec![m31(0); rows]).collect();
 
     for pos in 0..slen {
         is_stream[pos] = m31(1);
@@ -559,8 +598,11 @@ pub fn gen_sib_base_trace(witness: &MlDsaWitness, log_size: u32) -> Vec<ColEval>
         cols[COL_S_DADDR][row] = m31(daddr);
         // is-zero gadget: daddr·inv == 1 − same. When daddr==0 (same), inv=0;
         // else inv = daddr⁻¹ so the product is 1.
-        cols[COL_S_DADDR_INV][row] =
-            if daddr == 0 { m31(0) } else { m31(daddr).inverse() };
+        cols[COL_S_DADDR_INV][row] = if daddr == 0 {
+            m31(0)
+        } else {
+            m31(daddr).inverse()
+        };
         // Strict ts within a cell: dts = ts − prev_ts − 1 ≥ 0 (only when same).
         let dts = if same { a.ts - prev.unwrap().ts - 1 } else { 0 };
         cols[COL_S_DTS][row] = m31(dts);
@@ -607,8 +649,8 @@ pub const N_LOGUP_ENTRIES: usize = 12 + 4 + 2 + 9;
 pub const LOGUP_BATCH: usize = 1;
 pub const N_LOGUP_COLS: usize = N_LOGUP_ENTRIES.div_ceil(LOGUP_BATCH);
 const N_ACC_COORD_COLS: usize = SECURE_EXTENSION_DEGREE; // Σc² accumulator.
-// One QM31 passthrough column packing the sorted (addr, ts, val) into coords
-// 0/1/2, read at `[-1,0]` so the previous sorted row's access is available.
+                                                         // One QM31 passthrough column packing the sorted (addr, ts, val) into coords
+                                                         // 0/1/2, read at `[-1,0]` so the previous sorted row's access is available.
 const N_SORTED_PASS_COLS: usize = SECURE_EXTENSION_DEGREE;
 pub const N_INTERACTION_COLS: usize =
     N_ACC_COORD_COLS + N_SORTED_PASS_COLS + SECURE_EXTENSION_DEGREE * N_LOGUP_COLS;
@@ -674,8 +716,7 @@ impl FrameworkEval for SibEval {
         let s_sr_same = eval.next_trace_mask();
         let s_foc = eval.next_trace_mask();
         // Sign-bit base masks (COL_SIGN_BIT0..): bits of each sign-row byte.
-        let sign_bit: Vec<E::F> =
-            (0..SIGN_BIT_COLS).map(|_| eval.next_trace_mask()).collect();
+        let sign_bit: Vec<E::F> = (0..SIGN_BIT_COLS).map(|_| eval.next_trace_mask()).collect();
 
         // Σc² running accumulator across the c stage (interaction `[-1,0]`).
         let acc_coords: [[E::F; 2]; SECURE_EXTENSION_DEGREE] =
@@ -804,7 +845,7 @@ impl FrameworkEval for SibEval {
         // is gated off the very first sorted row (sorted_start) where there is no
         // predecessor. daddr = s_addr − prev_s_addr, non-negative and < N.
         let not_first = is_sorted.clone() - sorted_start.clone(); // 1 on sorted rows>0
-        // daddr definition (only meaningful on non-first sorted rows).
+                                                                  // daddr definition (only meaningful on non-first sorted rows).
         eval.add_constraint(
             not_first.clone() * (s_addr.clone() - prev_s_addr.clone() - s_daddr.clone()),
         );
@@ -813,7 +854,8 @@ impl FrameworkEval for SibEval {
         // daddr == 0 ⇒ same == 1: daddr·inv == 1 − same (gated to non-first rows;
         // the first row has same == 0 forced below).
         eval.add_constraint(
-            not_first.clone() * (s_daddr.clone() * s_daddr_inv.clone() - (one.clone() - s_same.clone())),
+            not_first.clone()
+                * (s_daddr.clone() * s_daddr_inv.clone() - (one.clone() - s_same.clone())),
         );
         // The FIRST sorted row (sorted_start) opens a new cell: same == 0.
         eval.add_constraint(sorted_start.clone() * s_same.clone());
@@ -854,12 +896,24 @@ impl FrameworkEval for SibEval {
         // requires (−). The three self-cancel iff unsorted and sorted are a
         // permutation ⇒ the committed `c` is the true SampleInBall output.
         let u_tuple = [u_addr.clone(), u_val.clone(), u_ts.clone()];
-        eval.add_to_relation(RelationEntry::base(&self.relations.mem, is_core.clone(), &u_tuple));
+        eval.add_to_relation(RelationEntry::base(
+            &self.relations.mem,
+            is_core.clone(),
+            &u_tuple,
+        ));
         // FINAL read: (addr=m=c_bind_id, value=COL_C=c, ts=ts_final), gated is_c.
         let final_tuple = [c_bind_id.clone(), c.clone(), ts_final.clone()];
-        eval.add_to_relation(RelationEntry::base(&self.relations.mem, is_c.clone(), &final_tuple));
+        eval.add_to_relation(RelationEntry::base(
+            &self.relations.mem,
+            is_c.clone(),
+            &final_tuple,
+        ));
         let s_tuple = [s_addr.clone(), s_val.clone(), s_ts.clone()];
-        eval.add_to_relation(RelationEntry::base(&self.relations.mem, -is_sorted.clone(), &s_tuple));
+        eval.add_to_relation(RelationEntry::base(
+            &self.relations.mem,
+            -is_sorted.clone(),
+            &s_tuple,
+        ));
 
         // =====================================================================
         // C9: FSM↔memory schedule pins. Without these the CORE access columns
@@ -961,10 +1015,18 @@ impl FrameworkEval for SibEval {
         let _ = (&sign_bit, &is_sign, &byte, &sign_mask, &byte_pos);
         for u in 0..SIGN_BIT_COLS {
             let sign_tuple = [E::F::from(m31(u as u32)), one.clone()];
-            eval.add_to_relation(RelationEntry::base(&self.relations.signbit, zg.clone(), &sign_tuple));
+            eval.add_to_relation(RelationEntry::base(
+                &self.relations.signbit,
+                zg.clone(),
+                &sign_tuple,
+            ));
         }
         let wrj_val_tuple = [step_no.clone(), u_val.clone()];
-        eval.add_to_relation(RelationEntry::base(&self.relations.signbit, zg.clone(), &wrj_val_tuple));
+        eval.add_to_relation(RelationEntry::base(
+            &self.relations.signbit,
+            zg.clone(),
+            &wrj_val_tuple,
+        ));
 
         let _ = enabler;
         eval.finalize_logup();
@@ -1016,7 +1078,12 @@ pub fn gen_sib_interaction(
     }
 
     let mut trace: Vec<ColEval> = (0..N_ACC_COORD_COLS)
-        .map(|coord| col_eval(log_size, acc.iter().map(|v| v.to_m31_array()[coord]).collect()))
+        .map(|coord| {
+            col_eval(
+                log_size,
+                acc.iter().map(|v| v.to_m31_array()[coord]).collect(),
+            )
+        })
         .collect();
 
     // Offline-memory: sorted view per coset row (row r ↦ sorted[r] for r<N_ACCESSES).
@@ -1033,7 +1100,10 @@ pub fn gen_sib_interaction(
         })
         .collect();
     for coord in 0..N_SORTED_PASS_COLS {
-        trace.push(col_eval(log_size, pass.iter().map(|v| v.to_m31_array()[coord]).collect()));
+        trace.push(col_eval(
+            log_size,
+            pass.iter().map(|v| v.to_m31_array()[coord]).collect(),
+        ));
     }
 
     let row_lookup = circle_row_to_coset(log_size);
@@ -1046,18 +1116,34 @@ pub fn gen_sib_interaction(
     // Per-row precompute.
     #[derive(Clone, Copy)]
     enum Row {
-        Stream { byte: u32, i: u32, accept: bool, reject: bool },
-        C { m: u32, c: i128 },
+        Stream {
+            byte: u32,
+            i: u32,
+            accept: bool,
+            reject: bool,
+        },
+        C {
+            m: u32,
+            c: i128,
+        },
     }
     let coset_row: Vec<Option<Row>> = (0..rows)
         .map(|coset| {
             if coset < slen {
                 let r = &srows[coset];
                 let reject = coset >= SIGN_BYTES && !r.accept;
-                Some(Row::Stream { byte: r.byte, i: r.i, accept: r.accept, reject })
+                Some(Row::Stream {
+                    byte: r.byte,
+                    i: r.i,
+                    accept: r.accept,
+                    reject,
+                })
             } else if coset < slen + N {
                 let m = coset - slen;
-                Some(Row::C { m: m as u32, c: witness.digits.c[m] })
+                Some(Row::C {
+                    m: m as u32,
+                    c: witness.digits.c[m],
+                })
             } else {
                 None
             }
@@ -1067,7 +1153,12 @@ pub fn gen_sib_interaction(
     // Seed bookkeeping.
     for coset in 0..rows {
         match coset_row[coset] {
-            Some(Row::Stream { byte, i, accept, reject }) => {
+            Some(Row::Stream {
+                byte,
+                i,
+                accept,
+                reject,
+            }) => {
                 stream_bytes[coset] = byte as u8;
                 if accept {
                     let am = (i - byte) as usize; // ∈ [0,256)
@@ -1126,104 +1217,176 @@ pub fn gen_sib_interaction(
 
     // AIR emission order (7): accept_lo(rc8), accept_hi(rc8), reject_lo(rc8),
     // reject_hi(rc8), hashio(−), ternary(rc9), ccell(+).
-    push(&|coset| match coset_row[coset] {
-        Some(Row::Stream { byte, i, accept, .. }) if accept => {
-            let lo = (i - byte) & 0xff;
-            (one, relations.rc8.combine(&[m31(lo)]))
-        }
-        _ => (zero, one),
-    }, &mut entries, &mut claimed);
-    push(&|coset| match coset_row[coset] {
-        Some(Row::Stream { byte, i, accept, .. }) if accept => {
-            let hi = (i - byte) >> 8;
-            (one, relations.rc8.combine(&[m31(hi)]))
-        }
-        _ => (zero, one),
-    }, &mut entries, &mut claimed);
-    push(&|coset| match coset_row[coset] {
-        Some(Row::Stream { byte, i, reject, .. }) if reject => {
-            let lo = (byte - i - 1) & 0xff;
-            (one, relations.rc8.combine(&[m31(lo)]))
-        }
-        _ => (zero, one),
-    }, &mut entries, &mut claimed);
-    push(&|coset| match coset_row[coset] {
-        Some(Row::Stream { byte, i, reject, .. }) if reject => {
-            let hi = (byte - i - 1) >> 8;
-            (one, relations.rc8.combine(&[m31(hi)]))
-        }
-        _ => (zero, one),
-    }, &mut entries, &mut claimed);
+    push(
+        &|coset| match coset_row[coset] {
+            Some(Row::Stream {
+                byte, i, accept, ..
+            }) if accept => {
+                let lo = (i - byte) & 0xff;
+                (one, relations.rc8.combine(&[m31(lo)]))
+            }
+            _ => (zero, one),
+        },
+        &mut entries,
+        &mut claimed,
+    );
+    push(
+        &|coset| match coset_row[coset] {
+            Some(Row::Stream {
+                byte, i, accept, ..
+            }) if accept => {
+                let hi = (i - byte) >> 8;
+                (one, relations.rc8.combine(&[m31(hi)]))
+            }
+            _ => (zero, one),
+        },
+        &mut entries,
+        &mut claimed,
+    );
+    push(
+        &|coset| match coset_row[coset] {
+            Some(Row::Stream {
+                byte, i, reject, ..
+            }) if reject => {
+                let lo = (byte - i - 1) & 0xff;
+                (one, relations.rc8.combine(&[m31(lo)]))
+            }
+            _ => (zero, one),
+        },
+        &mut entries,
+        &mut claimed,
+    );
+    push(
+        &|coset| match coset_row[coset] {
+            Some(Row::Stream {
+                byte, i, reject, ..
+            }) if reject => {
+                let hi = (byte - i - 1) >> 8;
+                (one, relations.rc8.combine(&[m31(hi)]))
+            }
+            _ => (zero, one),
+        },
+        &mut entries,
+        &mut claimed,
+    );
     // hashio consume (−)
-    push(&|coset| match coset_row[coset] {
-        Some(Row::Stream { byte, .. }) => {
-            let tuple = [m31(sib_stream), m31(coset as u32), m31(byte)];
-            (-one, relations.hash_io.combine(&tuple))
-        }
-        _ => (zero, one),
-    }, &mut entries, &mut claimed);
+    push(
+        &|coset| match coset_row[coset] {
+            Some(Row::Stream { byte, .. }) => {
+                let tuple = [m31(sib_stream), m31(coset as u32), m31(byte)];
+                (-one, relations.hash_io.combine(&tuple))
+            }
+            _ => (zero, one),
+        },
+        &mut entries,
+        &mut claimed,
+    );
     // ternary rc9
-    push(&|coset| match coset_row[coset] {
-        Some(Row::C { c, .. }) => {
-            let v = (c + 1) as u32;
-            (one, relations.rc9.combine(&[m31(v)]))
-        }
-        _ => (zero, one),
-    }, &mut entries, &mut claimed);
+    push(
+        &|coset| match coset_row[coset] {
+            Some(Row::C { c, .. }) => {
+                let v = (c + 1) as u32;
+                (one, relations.rc9.combine(&[m31(v)]))
+            }
+            _ => (zero, one),
+        },
+        &mut entries,
+        &mut claimed,
+    );
     // ccell use (+)
-    push(&|coset| match coset_row[coset] {
-        Some(Row::C { m, c }) => {
-            let tuple = [m31(m), enc_signed(c)];
-            (one, relations.ccell.combine(&tuple))
-        }
-        _ => (zero, one),
-    }, &mut entries, &mut claimed);
+    push(
+        &|coset| match coset_row[coset] {
+            Some(Row::C { m, c }) => {
+                let tuple = [m31(m), enc_signed(c)];
+                (one, relations.ccell.combine(&tuple))
+            }
+            _ => (zero, one),
+        },
+        &mut entries,
+        &mut claimed,
+    );
 
     // daddr (rc8) — sorted rows 1..N_ACCESSES (gate not_first).
-    push(&|coset| {
-        if coset >= 1 && coset < mem.sorted.len() {
-            let daddr = mem.sorted[coset].addr - mem.sorted[coset - 1].addr;
-            (one, relations.rc8.combine(&[m31(daddr)]))
-        } else {
-            (zero, one)
-        }
-    }, &mut entries, &mut claimed);
+    push(
+        &|coset| {
+            if coset >= 1 && coset < mem.sorted.len() {
+                let daddr = mem.sorted[coset].addr - mem.sorted[coset - 1].addr;
+                (one, relations.rc8.combine(&[m31(daddr)]))
+            } else {
+                (zero, one)
+            }
+        },
+        &mut entries,
+        &mut claimed,
+    );
     // dts (rc11) — sorted rows where addr repeats (gate same).
-    push(&|coset| {
-        if coset >= 1 && coset < mem.sorted.len() && mem.sorted[coset].addr == mem.sorted[coset - 1].addr {
-            let dts = mem.sorted[coset].ts - mem.sorted[coset - 1].ts - 1;
-            (one, relations.rc11.combine(&[m31(dts)]))
-        } else {
-            (zero, one)
-        }
-    }, &mut entries, &mut claimed);
+    push(
+        &|coset| {
+            if coset >= 1
+                && coset < mem.sorted.len()
+                && mem.sorted[coset].addr == mem.sorted[coset - 1].addr
+            {
+                let dts = mem.sorted[coset].ts - mem.sorted[coset - 1].ts - 1;
+                (one, relations.rc11.combine(&[m31(dts)]))
+            } else {
+                (zero, one)
+            }
+        },
+        &mut entries,
+        &mut claimed,
+    );
     // Mem unsorted CORE (+): rows 0..N_CORE.
-    push(&|coset| {
-        if coset < N_CORE {
-            let a = &mem.unsorted[coset];
-            (one, relations.mem.combine(&[m31(a.addr), enc_signed(a.value), m31(a.ts)]))
-        } else {
-            (zero, one)
-        }
-    }, &mut entries, &mut claimed);
+    push(
+        &|coset| {
+            if coset < N_CORE {
+                let a = &mem.unsorted[coset];
+                (
+                    one,
+                    relations
+                        .mem
+                        .combine(&[m31(a.addr), enc_signed(a.value), m31(a.ts)]),
+                )
+            } else {
+                (zero, one)
+            }
+        },
+        &mut entries,
+        &mut claimed,
+    );
     // Mem unsorted FINAL read (+): co-located on c-stage rows (addr=m, val=c,
     // ts=N_CORE+m). Reuses the committed COL_C value.
-    push(&|coset| match coset_row[coset] {
-        Some(Row::C { m, c }) => {
-            let ts = (N_CORE as u32) + m;
-            (one, relations.mem.combine(&[m31(m), enc_signed(c), m31(ts)]))
-        }
-        _ => (zero, one),
-    }, &mut entries, &mut claimed);
+    push(
+        &|coset| match coset_row[coset] {
+            Some(Row::C { m, c }) => {
+                let ts = (N_CORE as u32) + m;
+                (
+                    one,
+                    relations.mem.combine(&[m31(m), enc_signed(c), m31(ts)]),
+                )
+            }
+            _ => (zero, one),
+        },
+        &mut entries,
+        &mut claimed,
+    );
     // Mem sorted (−): rows 0..N_ACCESSES.
-    push(&|coset| {
-        if coset < mem.sorted.len() {
-            let a = &mem.sorted[coset];
-            (-one, relations.mem.combine(&[m31(a.addr), enc_signed(a.value), m31(a.ts)]))
-        } else {
-            (zero, one)
-        }
-    }, &mut entries, &mut claimed);
+    push(
+        &|coset| {
+            if coset < mem.sorted.len() {
+                let a = &mem.sorted[coset];
+                (
+                    -one,
+                    relations
+                        .mem
+                        .combine(&[m31(a.addr), enc_signed(a.value), m31(a.ts)]),
+                )
+            } else {
+                (zero, one)
+            }
+        },
+        &mut entries,
+        &mut claimed,
+    );
 
     // =====================================================================
     // FSM↔memory tie channels (must mirror the AIR C10 emission order EXACTLY):
@@ -1245,46 +1408,78 @@ pub fn gen_sib_interaction(
 
     // Swap accept-yield (×2): (idx−(N−τ), byte) on accept stream rows.
     for _ in 0..2 {
-        push(&|coset| match coset_row[coset] {
-            Some(Row::Stream { byte, i, accept, .. }) if accept => {
-                let key = m31(i) - n_minus_tau;
-                (one, relations.swap.combine(&[key, m31(byte)]))
-            }
-            _ => (zero, one),
-        }, &mut entries, &mut claimed);
+        push(
+            &|coset| match coset_row[coset] {
+                Some(Row::Stream {
+                    byte, i, accept, ..
+                }) if accept => {
+                    let key = m31(i) - n_minus_tau;
+                    (one, relations.swap.combine(&[key, m31(byte)]))
+                }
+                _ => (zero, one),
+            },
+            &mut entries,
+            &mut claimed,
+        );
     }
     // Swap read-consume (−): (step_no, u_addr) on read rows (role 0).
-    push(&|coset| match core_role(coset) {
-        Some((t, 0)) => {
-            let a = &mem.unsorted[coset];
-            (-one, relations.swap.combine(&[m31(t as u32), m31(a.addr)]))
-        }
-        _ => (zero, one),
-    }, &mut entries, &mut claimed);
+    push(
+        &|coset| match core_role(coset) {
+            Some((t, 0)) => {
+                let a = &mem.unsorted[coset];
+                (-one, relations.swap.combine(&[m31(t as u32), m31(a.addr)]))
+            }
+            _ => (zero, one),
+        },
+        &mut entries,
+        &mut claimed,
+    );
     // Swap write-j-consume (−): (step_no, u_addr) on write-j rows (role 2).
-    push(&|coset| match core_role(coset) {
-        Some((t, 2)) => {
-            let a = &mem.unsorted[coset];
-            (-one, relations.swap.combine(&[m31(t as u32), m31(a.addr)]))
-        }
-        _ => (zero, one),
-    }, &mut entries, &mut claimed);
+    push(
+        &|coset| match core_role(coset) {
+            Some((t, 2)) => {
+                let a = &mem.unsorted[coset];
+                (-one, relations.swap.combine(&[m31(t as u32), m31(a.addr)]))
+            }
+            _ => (zero, one),
+        },
+        &mut entries,
+        &mut claimed,
+    );
     // StepVal read-yield (+): (step_no, u_val) on read rows (role 0).
-    push(&|coset| match core_role(coset) {
-        Some((t, 0)) => {
-            let a = &mem.unsorted[coset];
-            (one, relations.stepval.combine(&[m31(t as u32), enc_signed(a.value)]))
-        }
-        _ => (zero, one),
-    }, &mut entries, &mut claimed);
+    push(
+        &|coset| match core_role(coset) {
+            Some((t, 0)) => {
+                let a = &mem.unsorted[coset];
+                (
+                    one,
+                    relations
+                        .stepval
+                        .combine(&[m31(t as u32), enc_signed(a.value)]),
+                )
+            }
+            _ => (zero, one),
+        },
+        &mut entries,
+        &mut claimed,
+    );
     // StepVal write-i-consume (−): (step_no, u_val) on write-i rows (role 1).
-    push(&|coset| match core_role(coset) {
-        Some((t, 1)) => {
-            let a = &mem.unsorted[coset];
-            (-one, relations.stepval.combine(&[m31(t as u32), enc_signed(a.value)]))
-        }
-        _ => (zero, one),
-    }, &mut entries, &mut claimed);
+    push(
+        &|coset| match core_role(coset) {
+            Some((t, 1)) => {
+                let a = &mem.unsorted[coset];
+                (
+                    -one,
+                    relations
+                        .stepval
+                        .combine(&[m31(t as u32), enc_signed(a.value)]),
+                )
+            }
+            _ => (zero, one),
+        },
+        &mut entries,
+        &mut claimed,
+    );
     // SignBit sign-yield (×8): (8·byte_pos+u, 1−2·bit) on sign rows, numerator =
     // mask_u (1 iff step 8b+u < τ).
     for _u in 0..SIGN_BIT_COLS {
@@ -1309,5 +1504,11 @@ pub fn gen_sib_interaction(
     trace.extend(logup_trace);
     debug_assert_eq!(claimed_sum, claimed, "sib logup claimed sum mismatch");
 
-    SibInteraction { trace, claimed_sum, rc_uses, stream_bytes, ccell_uses }
+    SibInteraction {
+        trace,
+        claimed_sum,
+        rc_uses,
+        stream_bytes,
+        ccell_uses,
+    }
 }

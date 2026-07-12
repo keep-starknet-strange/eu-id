@@ -31,8 +31,11 @@ use stwo::prover::{ComponentProver, ProvingError, TreeBuilder};
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{FrameworkComponent, Relation, TraceLocationAllocator};
 
-use air_core::{fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint, TreeLayout};
+use air_core::{
+    fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint, TreeLayout,
+};
 
+use crate::air_util::padded_log_size;
 use crate::air_util::{m31, ColEval};
 use crate::balancer::{
     balancer_base_cols, gen_balancer_interaction, gen_balancer_trace, BalancerEval,
@@ -46,10 +49,9 @@ use crate::coeffs::tables::{
     RC_TABLE_INTERACTION_COLS,
 };
 use crate::coeffs::{
-    coeffs_preprocessed_ids, gen_coeffs_base_trace, gen_coeffs_interaction, gen_coeffs_preprocessed,
-    CoeffsEval, N_BASE_COLS, N_INTERACTION_COLS,
+    coeffs_preprocessed_ids, gen_coeffs_base_trace, gen_coeffs_interaction,
+    gen_coeffs_preprocessed, CoeffsEval, N_BASE_COLS, N_INTERACTION_COLS,
 };
-use crate::air_util::padded_log_size;
 use crate::types::MlDsaVerifyInput;
 use crate::verifier_native::{compute_public_evals, folded_check, ClaimedEvals};
 use crate::witness::MlDsaWitness;
@@ -135,7 +137,10 @@ fn wcell_tuples(witness: &MlDsaWitness) -> Vec<Vec<u32>> {
         if g.kind == Kind::W {
             let i = (g.poly_id - crate::coeffs::layout::POLY_ID_W0) as usize;
             for m in 0..g.coeffs {
-                out.push(vec![(i * crate::constants::N + m) as u32, witness.rows[i].w[m]]);
+                out.push(vec![
+                    (i * crate::constants::N + m) as u32,
+                    witness.rows[i].w[m],
+                ]);
             }
         }
     }
@@ -178,7 +183,11 @@ impl Built {
     }
     fn as_prover(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
         let mut out: Vec<&dyn ComponentProver<SimdBackend>> = vec![&self.coeffs];
-        out.extend(self.rc.iter().map(|c| c as &dyn ComponentProver<SimdBackend>));
+        out.extend(
+            self.rc
+                .iter()
+                .map(|c| c as &dyn ComponentProver<SimdBackend>),
+        );
         out.push(&self.wcell);
         out.push(&self.ccell);
         out
@@ -220,7 +229,9 @@ struct CoeffsVerifier {
 }
 
 /// Draw `ρ_RLC, r, s` then the relations, in the fixed order both sides use.
-fn draw_challenges(channel: &mut Blake2sChannel) -> (SecureField, SecureField, SecureField, CoeffsRelations) {
+fn draw_challenges(
+    channel: &mut Blake2sChannel,
+) -> (SecureField, SecureField, SecureField, CoeffsRelations) {
     let rho_rlc = channel.draw_secure_felt();
     let r = channel.draw_secure_felt();
     let s = channel.draw_secure_felt();
@@ -234,7 +245,13 @@ fn native_use_sum(group_evals: &[SecureField], relations: &CoeffsRelations) -> S
     let mut sum = SecureField::zero();
     for (poly_id, eval) in group_evals.iter().enumerate() {
         let coords = eval.to_m31_array();
-        let tuple = [m31(poly_id as u32), coords[0], coords[1], coords[2], coords[3]];
+        let tuple = [
+            m31(poly_id as u32),
+            coords[0],
+            coords[1],
+            coords[2],
+            coords[3],
+        ];
         let denom: SecureField = relations.eval.combine(&tuple);
         sum += one / denom;
     }
@@ -255,14 +272,22 @@ fn build_components(
 ) -> Built {
     let coeffs = FrameworkComponent::new(
         allocator,
-        CoeffsEval { log_size, r, s, relations: relations.clone() },
+        CoeffsEval {
+            log_size,
+            r,
+            s,
+            relations: relations.clone(),
+        },
         coeffs_claimed_sum,
     );
     let mut rc = Vec::with_capacity(4);
     for (idx, kind) in RcKind::ALL.iter().enumerate() {
         rc.push(FrameworkComponent::new(
             allocator,
-            RcTableEval { kind: *kind, relation: relations.rc(*kind).clone() },
+            RcTableEval {
+                kind: *kind,
+                relation: relations.rc(*kind).clone(),
+            },
             rc_claimed_sums[idx],
         ));
     }
@@ -288,7 +313,12 @@ fn build_components(
         },
         ccell_claimed_sum,
     );
-    Built { coeffs, rc, wcell, ccell }
+    Built {
+        coeffs,
+        rc,
+        wcell,
+        ccell,
+    }
 }
 
 impl Air for CoeffsProver {
@@ -395,7 +425,11 @@ impl AirProver for CoeffsProver {
         tb.extend_evals(gen_all_preprocessed());
     }
     fn preprocessed_column_fingerprints(&mut self) -> Vec<PreprocessedColumnFingerprint> {
-        fingerprint_preprocessed_columns("mldsa_coeffs", &all_preprocessed_ids(), &gen_all_preprocessed())
+        fingerprint_preprocessed_columns(
+            "mldsa_coeffs",
+            &all_preprocessed_ids(),
+            &gen_all_preprocessed(),
+        )
     }
     fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
         let mut evals = gen_coeffs_base_trace(&self.witness, coeffs_log_size());
@@ -417,13 +451,20 @@ impl AirProver for CoeffsProver {
             .map(|kind| gen_table_multiplicities(*kind, dry.rc_uses.for_kind(*kind)))
             .collect();
         evals.extend(self.rc_mult.clone());
-        evals.extend(gen_balancer_trace(wcell_log_size(), &wcell_tuples(&self.witness)));
-        evals.extend(gen_balancer_trace(ccell_log_size(), &ccell_tuples(&self.witness)));
+        evals.extend(gen_balancer_trace(
+            wcell_log_size(),
+            &wcell_tuples(&self.witness),
+        ));
+        evals.extend(gen_balancer_trace(
+            ccell_log_size(),
+            &ccell_tuples(&self.witness),
+        ));
         tb.extend_evals(evals);
     }
     fn write_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
         let relations = self.relations.clone().expect("relations drawn");
-        let interaction = gen_coeffs_interaction(&self.witness, coeffs_log_size(), self.r, self.s, &relations);
+        let interaction =
+            gen_coeffs_interaction(&self.witness, coeffs_log_size(), self.r, self.s, &relations);
         let mut evals = interaction.trace;
         self.coeffs_claimed_sum = interaction.claimed_sum;
         self.group_evals = interaction.group_evals.clone();
@@ -470,7 +511,13 @@ impl Air for CoeffsVerifier {
         self.native_use_sum = native_use_sum(&self.group_evals, &relations);
         // The folded identity (‡) must hold on the claimed evals.
         let public = compute_public_evals(&self.input, r, s);
-        let fold = folded_check(&public, &ClaimedEvals(&self.group_evals), self.rho_rlc, r, s);
+        let fold = folded_check(
+            &public,
+            &ClaimedEvals(&self.group_evals),
+            self.rho_rlc,
+            r,
+            s,
+        );
         self.fold_ok = fold == SecureField::zero();
         self.relations = Some(relations);
     }

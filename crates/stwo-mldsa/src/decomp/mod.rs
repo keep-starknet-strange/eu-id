@@ -109,11 +109,12 @@ pub const N_LOGUP_ENTRIES: usize = 2 * 10 + 1 + 2;
 pub const LOGUP_BATCH: usize = 1;
 pub const N_LOGUP_COLS: usize = N_LOGUP_ENTRIES.div_ceil(LOGUP_BATCH);
 const N_ACC_COORD_COLS: usize = SECURE_EXTENSION_DEGREE; // hint_acc is a QM31 running sum
-pub const N_INTERACTION_COLS: usize =
-    N_ACC_COORD_COLS + SECURE_EXTENSION_DEGREE * N_LOGUP_COLS;
+pub const N_INTERACTION_COLS: usize = N_ACC_COORD_COLS + SECURE_EXTENSION_DEGREE * N_LOGUP_COLS;
 
 fn pre_id(name: &str) -> PreProcessedColumnId {
-    PreProcessedColumnId { id: format!("mldsa_decomp_{name}") }
+    PreProcessedColumnId {
+        id: format!("mldsa_decomp_{name}"),
+    }
 }
 
 /// Preprocessed column ids in commit order.
@@ -183,10 +184,10 @@ struct LaneVals {
     w1: i64,
     w0: i64,
     hint: i64,
-    wrap_k: i64,  // ∈ {0,1}: w1·α + w0 = w − wrap_k·q
-    s0: i64,      // [w0 > 0]
-    w1p: i64,     // UseHint output ∈ [0,16)
-    wrap16: i64,  // ∈ {−1,0,1}: w1p = w1 + h·(2s0−1) + 16·wrap16
+    wrap_k: i64, // ∈ {0,1}: w1·α + w0 = w − wrap_k·q
+    s0: i64,     // [w0 > 0]
+    w1p: i64,    // UseHint output ∈ [0,16)
+    wrap16: i64, // ∈ {−1,0,1}: w1p = w1 + h·(2s0−1) + 16·wrap16
 }
 
 fn lane_vals(witness: &MlDsaWitness, i: usize, m: usize) -> LaneVals {
@@ -207,7 +208,16 @@ fn lane_vals(witness: &MlDsaWitness, i: usize, m: usize) -> LaneVals {
     let wrap16 = (w1p - (w1 + delta)) / W1_MODULUS;
     debug_assert!((-1..=1).contains(&wrap16), "wrap16∈{{-1,0,1}} got {wrap16}");
     debug_assert_eq!(w1 + delta + W1_MODULUS * wrap16, w1p);
-    LaneVals { w, w1, w0, hint, wrap_k, s0, w1p, wrap16 }
+    LaneVals {
+        w,
+        w1,
+        w0,
+        hint,
+        wrap_k,
+        s0,
+        w1p,
+        wrap16,
+    }
 }
 
 // =============================================================================
@@ -513,7 +523,12 @@ pub fn gen_decomp_interaction(
     }
 
     let mut trace: Vec<ColEval> = (0..N_ACC_COORD_COLS)
-        .map(|coord| col_eval(log_size, acc.iter().map(|v| v.to_m31_array()[coord]).collect()))
+        .map(|coord| {
+            col_eval(
+                log_size,
+                acc.iter().map(|v| v.to_m31_array()[coord]).collect(),
+            )
+        })
         .collect();
 
     let row_lookup = circle_row_to_coset(log_size);
@@ -526,8 +541,9 @@ pub fn gen_decomp_interaction(
     let mut claimed = zero;
 
     // Precompute per-coset lane values.
-    let coset_rows: Vec<Option<(usize, usize)>> =
-        (0..rows).map(|c| if c < active { Some(sched[c]) } else { None }).collect();
+    let coset_rows: Vec<Option<(usize, usize)>> = (0..rows)
+        .map(|c| if c < active { Some(sched[c]) } else { None })
+        .collect();
 
     let push = |frac: &dyn Fn(usize) -> (SecureField, SecureField),
                 entries: &mut Vec<(Vec<PackedQM31>, Vec<PackedQM31>)>,
@@ -592,59 +608,93 @@ pub fn gen_decomp_interaction(
     // w16+1, w1', wcell. Mirror it EXACTLY (kind arg is documentation-only).
     for lane in 0..2 {
         for field in [
-            RcField::W1, RcField::ALo, RcField::BLo, RcField::AHi, RcField::BHi,
-            RcField::SignLo, RcField::SignHi, RcField::W16, RcField::W1P,
+            RcField::W1,
+            RcField::ALo,
+            RcField::BLo,
+            RcField::AHi,
+            RcField::BHi,
+            RcField::SignLo,
+            RcField::SignHi,
+            RcField::W16,
+            RcField::W1P,
         ] {
             push(
-                &|coset| lane_rc(coset, &coset_rows, witness, lane, RcKind::Rc4, field, relations, gamma2),
+                &|coset| {
+                    lane_rc(
+                        coset,
+                        &coset_rows,
+                        witness,
+                        lane,
+                        RcKind::Rc4,
+                        field,
+                        relations,
+                        gamma2,
+                    )
+                },
                 &mut entries,
                 &mut claimed,
             );
         }
         // wcell use
-        push(&|coset| match &coset_rows[coset] {
-            Some((i, p)) => {
-                let m = 2 * p + lane;
-                let v = lane_vals(witness, *i, m);
-                let tuple = [m31((i * N + m) as u32), m31(v.w as u32)];
-                (one, relations.wcell.combine(&tuple))
-            }
-            None => (zero, one),
-        }, &mut entries, &mut claimed);
+        push(
+            &|coset| match &coset_rows[coset] {
+                Some((i, p)) => {
+                    let m = 2 * p + lane;
+                    let v = lane_vals(witness, *i, m);
+                    let tuple = [m31((i * N + m) as u32), m31(v.w as u32)];
+                    (one, relations.wcell.combine(&tuple))
+                }
+                None => (zero, one),
+            },
+            &mut entries,
+            &mut claimed,
+        );
     }
     // byte yield (+) into HashIo.
-    push(&|coset| match &coset_rows[coset] {
-        Some((i, p)) => {
-            let mut byte = 0u32;
-            for lane in 0..2 {
-                let v = lane_vals(witness, *i, 2 * p + lane);
-                byte += (v.w1p as u32) << (4 * lane);
+    push(
+        &|coset| match &coset_rows[coset] {
+            Some((i, p)) => {
+                let mut byte = 0u32;
+                for lane in 0..2 {
+                    let v = lane_vals(witness, *i, 2 * p + lane);
+                    byte += (v.w1p as u32) << (4 * lane);
+                }
+                let tuple = [m31(ct_stream), m31(coset as u32), m31(byte)];
+                (one, relations.hash_io.combine(&tuple))
             }
-            let tuple = [m31(ct_stream), m31(coset as u32), m31(byte)];
-            (one, relations.hash_io.combine(&tuple))
-        }
-        None => (zero, one),
-    }, &mut entries, &mut claimed);
+            None => (zero, one),
+        },
+        &mut entries,
+        &mut claimed,
+    );
     // hint_acc final rc8: two SEPARATE uses (Σh, then ω−Σh), last active row only.
     // Each is its own fraction, matching the two `add_to_relation` calls in C10.
-    push(&|coset| {
-        if coset == active - 1 {
-            let sh = acc[coset].to_m31_array()[0].0;
-            let d: SecureField = relations.rc8.combine(&[m31(sh)]);
-            (one, d)
-        } else {
-            (zero, one)
-        }
-    }, &mut entries, &mut claimed);
-    push(&|coset| {
-        if coset == active - 1 {
-            let sh = acc[coset].to_m31_array()[0].0;
-            let d: SecureField = relations.rc8.combine(&[m31(OMEGA as u32 - sh)]);
-            (one, d)
-        } else {
-            (zero, one)
-        }
-    }, &mut entries, &mut claimed);
+    push(
+        &|coset| {
+            if coset == active - 1 {
+                let sh = acc[coset].to_m31_array()[0].0;
+                let d: SecureField = relations.rc8.combine(&[m31(sh)]);
+                (one, d)
+            } else {
+                (zero, one)
+            }
+        },
+        &mut entries,
+        &mut claimed,
+    );
+    push(
+        &|coset| {
+            if coset == active - 1 {
+                let sh = acc[coset].to_m31_array()[0].0;
+                let d: SecureField = relations.rc8.combine(&[m31(OMEGA as u32 - sh)]);
+                (one, d)
+            } else {
+                (zero, one)
+            }
+        },
+        &mut entries,
+        &mut claimed,
+    );
 
     let mut logup = LogupTraceGenerator::new(log_size);
     for chunk in entries.chunks(LOGUP_BATCH) {
@@ -662,12 +712,28 @@ pub fn gen_decomp_interaction(
     trace.extend(logup_trace);
     debug_assert_eq!(claimed_sum, claimed, "decomp logup claimed sum mismatch");
 
-    DecompInteraction { trace, claimed_sum, rc_uses, w1_encode_bytes, wcell_uses }
+    DecompInteraction {
+        trace,
+        claimed_sum,
+        rc_uses,
+        w1_encode_bytes,
+        wcell_uses,
+    }
 }
 
 /// Which range value a lane rc fraction targets.
 #[derive(Clone, Copy)]
-enum RcField { W1, W1P, W16, ALo, AHi, BLo, BHi, SignLo, SignHi }
+enum RcField {
+    W1,
+    W1P,
+    W16,
+    ALo,
+    AHi,
+    BLo,
+    BHi,
+    SignLo,
+    SignHi,
+}
 
 #[allow(clippy::too_many_arguments)]
 fn lane_rc(

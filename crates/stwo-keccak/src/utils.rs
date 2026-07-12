@@ -117,7 +117,11 @@ pub type ColEval = stwo::prover::poly::circle::CircleEvaluation<
 /// `[-1, 0]` masks expect (mirror of `stwo-mldsa`'s `air_util::col_eval`).
 pub fn col_eval(log_size: u32, values: Vec<M31>) -> ColEval {
     use stwo::core::utils::{bit_reverse_index, coset_index_to_circle_domain_index};
-    assert_eq!(values.len(), 1usize << log_size, "column length must be 2^log_size");
+    assert_eq!(
+        values.len(),
+        1usize << log_size,
+        "column length must be 2^log_size"
+    );
     let mut ordered = vec![M31::zero(); values.len()];
     for (coset_index, value) in values.into_iter().enumerate() {
         let row = bit_reverse_index(
@@ -139,8 +143,10 @@ pub fn circle_row_to_coset(log_size: u32) -> Vec<usize> {
     let rows = 1usize << log_size;
     let mut lookup = vec![0usize; rows];
     for coset in 0..rows {
-        let domain_row =
-            bit_reverse_index(coset_index_to_circle_domain_index(coset, log_size), log_size);
+        let domain_row = bit_reverse_index(
+            coset_index_to_circle_domain_index(coset, log_size),
+            log_size,
+        );
         lookup[domain_row] = coset;
     }
     lookup

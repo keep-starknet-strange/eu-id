@@ -75,18 +75,29 @@ pub struct Group {
 pub fn groups() -> Vec<Group> {
     let mut out = Vec::new();
     let mut poly_id = 0u32;
-    let push = |kind: Kind, count: usize, groups: usize, poly_id: &mut u32, out: &mut Vec<Group>| {
-        for _ in 0..groups {
-            out.push(Group { kind, poly_id: *poly_id, coeffs: count });
-            *poly_id += 1;
-        }
-    };
+    let push =
+        |kind: Kind, count: usize, groups: usize, poly_id: &mut u32, out: &mut Vec<Group>| {
+            for _ in 0..groups {
+                out.push(Group {
+                    kind,
+                    poly_id: *poly_id,
+                    coeffs: count,
+                });
+                *poly_id += 1;
+            }
+        };
     push(Kind::Z, N, L, &mut poly_id, &mut out);
     push(Kind::W, N, K, &mut poly_id, &mut out);
     push(Kind::E, N, K, &mut poly_id, &mut out);
     push(Kind::V, N - 1, K, &mut poly_id, &mut out);
     push(Kind::C, N, 1, &mut poly_id, &mut out);
-    push(Kind::Carry, crate::witness::U_LEN, K, &mut poly_id, &mut out);
+    push(
+        Kind::Carry,
+        crate::witness::U_LEN,
+        K,
+        &mut poly_id,
+        &mut out,
+    );
     out
 }
 
