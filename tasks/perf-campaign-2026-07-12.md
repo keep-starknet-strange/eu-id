@@ -14,6 +14,7 @@ Rule: every WO lands with a measured ts13_full_probe number. No number, not done
 | 589d1d05 | WO-C1b c6 deletion | 3,177 | 240 | 3,528,653 (STARK 2,454,341 / coproc 1,073,431) |
 | 1157d10e | WO-C2 FFT claim-batch verify | 3,148 | 190 | 3,528,173 |
 | 1157d10e | 2026-07-13 takeover re-probe | 3,393 | 198 | 3,527,981 |
+| worktree | WO-C3 delete redundant C13 | 3,315 | 166 | 3,241,093 |
 
 ## Work orders
 
@@ -37,8 +38,10 @@ Rule: every WO lands with a measured ts13_full_probe number. No number, not done
 - [ ] WO-C4 — portable P-256 field backend. ISOLATED RED EXPERIMENT in
       `.claude/worktrees/agent-a0185ac70915e9f79`: the edge differential test
       currently fails on squaring, so none of its code is merged or accepted.
-- [ ] WO-C3 — c13 slope-inverse denominator elimination (only if budget
-      still short after C1b/C2).
+- [x] WO-C3 — delete redundant c13 slope-inverse family. IMPLEMENTED AND
+      VERIFIED. Committed values 27,920→15,479; opened rows 112→63; proof
+      −286,888B; verify −32ms against the takeover re-probe. See equivalence
+      proof below.
 - [ ] WO-D — PCS retune on shrunk circuit: sweep blowup 2/3 × queries/pow,
       Ligero ℓ A/B. Last, config-only.
 - [ ] Final: suites + negatives green, pins repinned, docs + memory updated,
@@ -231,6 +234,51 @@ tamper negatives cannot make this construction acceptable.
   under `/Users/lucas/stwo`. Publish/verify that engine revision and remove the
   absolute patch before treating a remote CI result as reproducible.
 
+
+## WO-C3 C13 redundancy argument and result
+
+**Change:** removed the C13 slope-inverse circuit family, its 1,026 interior
+ladder inverse witness slots, and the final C11↔C13 consistency pair. The final
+add inverse remains in the native witness and is enforced directly by C11.
+
+**Why the accepted verifier relation is unchanged:** C13 committed 1,027
+independent pairs and checked `d_i * v_i - c² = 0`. Only the final pair was
+opened and cross-bound to C11; the other 1,026 pairs were never bound to C12's
+separately committed accumulator points. For any reduced witness satisfying
+C11, extend it to the old relation with `c = 1`, every interior pair `(1, 1)`,
+and the final pair `(b_x-a_x, denom_inv)`. C11 already enforces
+`(b_x-a_x) * denom_inv = 1`, so every old C13 equation and cross-check passes.
+Projection from an old satisfying witness to the reduced families is immediate.
+Thus the existential statement relation is equal in both directions; proof
+bytes and transcript layouts intentionally change.
+
+This dedup does **not** close the pre-existing critical ladder gap: C12 proves
+the accumulator points are on-curve, but no implemented family constrains their
+double/add transitions or binds the sequence to C3's u1/u2. The design document
+now states that boundary explicitly instead of claiming C13 supplied linkage.
+
+Measured at the 2026-07-13 takeover tree, single-thread, five iterations:
+
+| metric | before | after | delta |
+|---|---:|---:|---:|
+| prove median | 3,393ms | 3,315ms | −78ms |
+| verify median | 198ms | 166ms | −32ms |
+| proof bytes | 3,527,981 | 3,241,093 | −286,888 |
+| coprocessor bytes | 1,073,431 | 784,863 | −288,568 |
+| committed values | 27,920 | 15,479 | −12,441 |
+| encoded/opened rows | 112 | 63 | −49 |
+| ECDSA families per signature | 7 | 6 | −1 |
+
+Verification: release non-ignored coprocessor suite passed with the known G4
+inventory-file test skipped; all 23 ignored proof/forgery tests passed; focused
+C11 bad-inverse and zero-denominator negatives passed; bundle missing/extra
+entry checks fail closed; exact gate count is 3,239 quadratic terms. The full
+`ts13_evidence_pack_n1_measurements` proof passed (3,296ms prove / 169ms verify /
+3,146,277B in that fixture), and the fully-qualified
+`mdoc::coprocessor_tests::revocation_carried_instance_tampering_fails_closed`
+negative passed. Clippy is clean for changed targets after allowing the crate's
+documented pre-existing lint classes; unsuppressed `-D warnings` remains red on
+those pre-existing issues.
 
 ## WO-C1b redundancy argument
 

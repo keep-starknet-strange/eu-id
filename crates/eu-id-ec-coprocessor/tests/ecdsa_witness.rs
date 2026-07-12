@@ -224,41 +224,6 @@ fn ladder_accumulator_slots_end_at_scalar_mul_outputs() {
 }
 
 #[test]
-fn witness_populates_slope_inverse_slots() {
-    let input = signed_input();
-    let witness = generate_witness(&input).unwrap();
-    let slopes = &witness.values[layout_range(LayoutSlot::SlopeInverses)];
-
-    assert_eq!(slopes.len(), 1027);
-    assert!(
-        slopes.iter().all(|value| *value != Fp::ZERO),
-        "all C13 slope denominator inverses must be populated"
-    );
-}
-
-#[test]
-fn c13_denominator_slots_follow_q022_double_then_add_order() {
-    let witness = generate_witness(&valid_input()).unwrap();
-    let denoms = &witness.values[layout_range(LayoutSlot::U1GDenominatorInverses)];
-    let base = ProjectivePoint::GENERATOR;
-    let doubled = base.double();
-    let (base_x, base_y) = affine_coords(base);
-    let (doubled_x, _) = affine_coords(doubled);
-
-    assert_eq!(denoms.len(), 513);
-    assert_eq!(
-        denoms[0],
-        (base_y + base_y).inverse().unwrap(),
-        "slot 0 is the first doubling denominator inverse"
-    );
-    assert_eq!(
-        denoms[1],
-        (base_x - doubled_x).inverse().unwrap(),
-        "slot 1 is the first add-branch denominator inverse"
-    );
-}
-
-#[test]
 fn witness_checker_accepts_honest_witness_and_rejects_scalar_mutations() {
     let input = signed_input();
     let mut witness = generate_witness(&input).unwrap();
@@ -302,11 +267,11 @@ fn witness_checker_accepts_honest_witness_and_rejects_scalar_mutations() {
     );
 
     let mut witness = generate_witness(&input).unwrap();
-    witness.values[layout_range(LayoutSlot::SlopeInverses).start] =
-        witness.values[layout_range(LayoutSlot::SlopeInverses).start] + Fp::ONE;
+    witness.values[layout_range(LayoutSlot::FinalAddDenominatorInverse).start] =
+        witness.values[layout_range(LayoutSlot::FinalAddDenominatorInverse).start] + Fp::ONE;
     assert!(
         verify_witness(&input, &witness).is_err(),
-        "bad slope inverse must reject"
+        "bad final-add denominator inverse must reject"
     );
 }
 

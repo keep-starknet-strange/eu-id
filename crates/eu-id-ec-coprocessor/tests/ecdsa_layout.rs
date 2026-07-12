@@ -2,7 +2,7 @@ use eu_id_ec_coprocessor::ecdsa::{layout_range, LayoutSlot, LAYOUT_LEN};
 
 #[test]
 fn witness_layout_matches_g4_inventory() {
-    assert_eq!(LAYOUT_LEN, 2168);
+    assert_eq!(LAYOUT_LEN, 1142);
     assert_eq!(layout_range(LayoutSlot::InputLimbs), 0..100);
     assert_eq!(layout_range(LayoutSlot::ScalarInverses), 100..101);
     assert_eq!(layout_range(LayoutSlot::UScalars), 101..103);
@@ -10,15 +10,13 @@ fn witness_layout_matches_g4_inventory() {
     assert_eq!(layout_range(LayoutSlot::U1GAccumulators), 106..618);
     assert_eq!(layout_range(LayoutSlot::U2QAccumulators), 618..1130);
     assert_eq!(layout_range(LayoutSlot::CorrectedEndpoints), 1130..1134);
-    assert_eq!(layout_range(LayoutSlot::U1GDenominatorInverses), 1134..1647);
-    assert_eq!(layout_range(LayoutSlot::U2QDenominatorInverses), 1647..2160);
     assert_eq!(
         layout_range(LayoutSlot::FinalAddDenominatorInverse),
-        2160..2161
+        1134..1135
     );
-    assert_eq!(layout_range(LayoutSlot::FinalPoint), 2161..2163);
-    assert_eq!(layout_range(LayoutSlot::FinalReduction), 2163..2165);
-    assert_eq!(layout_range(LayoutSlot::InfinityFlags), 2165..2168);
+    assert_eq!(layout_range(LayoutSlot::FinalPoint), 1135..1137);
+    assert_eq!(layout_range(LayoutSlot::FinalReduction), 1137..1139);
+    assert_eq!(layout_range(LayoutSlot::InfinityFlags), 1139..1142);
 }
 
 #[test]
@@ -31,8 +29,6 @@ fn layout_ranges_are_contiguous() {
         LayoutSlot::U1GAccumulators,
         LayoutSlot::U2QAccumulators,
         LayoutSlot::CorrectedEndpoints,
-        LayoutSlot::U1GDenominatorInverses,
-        LayoutSlot::U2QDenominatorInverses,
         LayoutSlot::FinalAddDenominatorInverse,
         LayoutSlot::FinalPoint,
         LayoutSlot::FinalReduction,

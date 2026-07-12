@@ -1,13 +1,11 @@
 use ecdsa::signature::Signer;
 use eu_id_ec_coprocessor::ecdsa::{
-    build_c11_final_add_circuit, build_c12_on_curve_circuit, build_c13_slope_inverses_circuit,
-    build_c14_c15_final_check_circuit, build_c1_input_limbs_circuit, build_c2_canonicality_circuit,
-    build_c3_c5_scalar_setup_circuit, c11_final_add_input, c12_on_curve_input,
-    c12_witness_on_curve_input, c13_slope_inverses_input, c14_c15_final_check_input,
-    c1_input_limbs_input, c2_canonicality_input, c3_c5_scalar_setup_input,
-    generate_witness, implemented_circuit_family_labels,
-    implemented_circuit_gate_count, layout_range, prove_implemented_circuit_bundle,
-    prove_implemented_circuit_bundle_batch_with_projection,
+    build_c11_final_add_circuit, build_c12_on_curve_circuit, build_c14_c15_final_check_circuit,
+    build_c1_input_limbs_circuit, build_c2_canonicality_circuit, build_c3_c5_scalar_setup_circuit,
+    c11_final_add_input, c12_on_curve_input, c12_witness_on_curve_input, c14_c15_final_check_input,
+    c1_input_limbs_input, c2_canonicality_input, c3_c5_scalar_setup_input, generate_witness,
+    implemented_circuit_family_labels, implemented_circuit_gate_count, layout_range,
+    prove_implemented_circuit_bundle, prove_implemented_circuit_bundle_batch_with_projection,
     prove_implemented_circuit_bundle_profiled, prove_implemented_circuit_proofs,
     prove_mdoc_p4b_circuit_bundle, verify_implemented_circuit_bundle,
     verify_implemented_circuit_bundle_batch_with_projection, verify_implemented_circuit_proofs,
@@ -22,34 +20,11 @@ use eu_id_ec_coprocessor::sumcheck::{circuit_otp_pad_values, prove_circuit};
 use eu_id_ec_coprocessor::CoprocessorChannel;
 use eu_id_ec_coprocessor::Fp;
 use p256::ecdsa::{Signature, SigningKey};
-use p256::elliptic_curve::point::Double;
 use p256::elliptic_curve::sec1::ToEncodedPoint;
-use p256::{AffinePoint, ProjectivePoint};
+use p256::AffinePoint;
 use sha2::{Digest as _, Sha256};
 
 const TEST_SEED: [u8; 32] = [9u8; 32];
-
-fn scalar(value: u64) -> [u8; 32] {
-    let mut bytes = [0u8; 32];
-    bytes[24..32].copy_from_slice(&value.to_be_bytes());
-    bytes
-}
-
-fn valid_input() -> EcdsaInput {
-    let generator = AffinePoint::GENERATOR.to_encoded_point(false);
-    let mut qx = [0u8; 32];
-    let mut qy = [0u8; 32];
-    qx.copy_from_slice(generator.x().unwrap());
-    qy.copy_from_slice(generator.y().unwrap());
-
-    EcdsaInput {
-        z: scalar(42),
-        r: scalar(77),
-        s: scalar(1),
-        qx,
-        qy,
-    }
-}
 
 fn fp_from_coord(coord: &[u8]) -> Fp {
     let mut bytes = [0u8; 32];
@@ -306,6 +281,18 @@ fn c11_final_add_circuit_rejects_accumulator_and_final_point_mutations() {
         !circuit.is_satisfied(&layers).unwrap(),
         "bad witnessed final-add inverse must reject"
     );
+
+    let mut witness = generate_witness(&input).unwrap();
+    let corrected = layout_range(LayoutSlot::CorrectedEndpoints);
+    witness.values[corrected.start + 2] = witness.values[corrected.start];
+    witness.values[layout_range(LayoutSlot::FinalAddDenominatorInverse).start] = Fp::ZERO;
+    let layers = circuit
+        .evaluate_input(c11_final_add_input(&witness).unwrap())
+        .unwrap();
+    assert!(
+        !circuit.is_satisfied(&layers).unwrap(),
+        "zero final-add denominator must reject in C11 without C13"
+    );
 }
 
 #[test]
@@ -418,33 +405,6 @@ fn c12_witness_on_curve_circuit_rejects_mutated_corrected_endpoint() {
 }
 
 #[test]
-fn c13_slope_inverse_circuit_accepts_honest_witness() {
-    let input = signed_input();
-    let witness = generate_witness(&input).unwrap();
-    let circuit = build_c13_slope_inverses_circuit().unwrap();
-    let layers = circuit
-        .evaluate_input(c13_slope_inverses_input(&input, &witness).unwrap())
-        .unwrap();
-
-    assert!(circuit.is_satisfied(&layers).unwrap());
-}
-
-#[test]
-fn c13_slope_inverse_circuit_rejects_bad_inverse() {
-    let input = signed_input();
-    let mut witness = generate_witness(&input).unwrap();
-    witness.values[layout_range(LayoutSlot::SlopeInverses).start] =
-        witness.values[layout_range(LayoutSlot::SlopeInverses).start] + Fp::ONE;
-
-    let circuit = build_c13_slope_inverses_circuit().unwrap();
-    let layers = circuit
-        .evaluate_input(c13_slope_inverses_input(&input, &witness).unwrap())
-        .unwrap();
-
-    assert!(!circuit.is_satisfied(&layers).unwrap());
-}
-
-#[test]
 fn implemented_circuit_verifier_accepts_honest_witness() {
     let input = signed_input();
     let witness = generate_witness(&input).unwrap();
@@ -481,8 +441,8 @@ fn implemented_circuit_verifier_rejects_covered_mutations() {
     assert!(verify_implemented_circuits(&input, &witness).is_err());
 
     let mut witness = generate_witness(&input).unwrap();
-    witness.values[layout_range(LayoutSlot::SlopeInverses).start] =
-        witness.values[layout_range(LayoutSlot::SlopeInverses).start] + Fp::ONE;
+    witness.values[layout_range(LayoutSlot::FinalAddDenominatorInverse).start] =
+        witness.values[layout_range(LayoutSlot::FinalAddDenominatorInverse).start] + Fp::ONE;
     assert!(verify_implemented_circuits(&input, &witness).is_err());
 }
 
@@ -496,11 +456,23 @@ fn implemented_circuit_proofs_accept_honest_witness() {
         prove_implemented_circuit_proofs(&input, &witness, commitment_root, TEST_SEED).unwrap();
 
     let labels = implemented_circuit_family_labels().unwrap();
+    assert_eq!(
+        labels,
+        vec![
+            b"s4-ecdsa-c1-input-limbs".as_slice(),
+            b"s4-ecdsa-c2-canonicality".as_slice(),
+            b"s4-ecdsa-c3-c5-scalar-setup".as_slice(),
+            b"s4-ecdsa-c11-final-add".as_slice(),
+            b"s4-ecdsa-c12-final-on-curve".as_slice(),
+            b"s4-ecdsa-c14-c15-final-check".as_slice(),
+        ],
+        "C13 is intentionally absent: its unbound interior pairs constrained no shared witness, and its sole bound final pair duplicated C11"
+    );
     assert_eq!(proofs.proofs.len(), labels.len());
     let claims = verify_implemented_circuit_proofs(&proofs, commitment_root, TEST_SEED).unwrap();
     assert_eq!(claims.len(), labels.len());
     assert_eq!(labels[0], b"s4-ecdsa-c1-input-limbs");
-    assert_eq!(labels[6], b"s4-ecdsa-c14-c15-final-check");
+    assert_eq!(labels[5], b"s4-ecdsa-c14-c15-final-check");
 }
 
 #[test]
@@ -549,7 +521,7 @@ fn implemented_circuit_provers_reject_unsatisfied_witness_mutation() {
 fn implemented_circuit_provers_reject_native_witness_mismatch_even_if_covered_circuits_pass() {
     let input = signed_input();
     let mut witness = generate_witness(&input).unwrap();
-    mutate_interior_u1_accumulator_with_matching_slope_inverse(&mut witness);
+    mutate_interior_u1_accumulator(&mut witness);
 
     assert!(
         verify_witness(&input, &witness).is_err(),
@@ -697,7 +669,7 @@ fn implemented_circuit_bundle_rejects_spliced_c14_entry() {
     let alternate = alternate_signed_input();
     let alternate_witness = generate_witness(&alternate).unwrap();
 
-    bundle.entries[6] = c14_bundle_entry(&alternate, &alternate_witness);
+    bundle.entries[5] = c14_bundle_entry(&alternate, &alternate_witness);
 
     assert!(verify_implemented_circuit_bundle(&input, &bundle, TEST_SEED).is_err());
 }
@@ -759,26 +731,12 @@ fn implemented_circuit_bundle_rejects_spliced_c12_entry() {
 
 #[test]
 #[ignore = "full S4-lite bundle proves every implemented ECDSA circuit"]
-fn implemented_circuit_bundle_rejects_spliced_c13_entry() {
-    let input = signed_input();
-    let witness = generate_witness(&input).unwrap();
-    let mut bundle = prove_implemented_circuit_bundle(&input, &witness, TEST_SEED).unwrap();
-    let alternate = alternate_signed_input();
-    let alternate_witness = generate_witness(&alternate).unwrap();
-
-    bundle.entries[5] = c13_bundle_entry(&alternate, &alternate_witness);
-
-    assert!(verify_implemented_circuit_bundle(&input, &bundle, TEST_SEED).is_err());
-}
-
-#[test]
-#[ignore = "full S4-lite bundle proves every implemented ECDSA circuit"]
 fn implemented_circuit_bundle_rejects_legacy_entry_without_statement_absorb() {
     let input = signed_input();
     let witness = generate_witness(&input).unwrap();
     let mut bundle = prove_implemented_circuit_bundle(&input, &witness, TEST_SEED).unwrap();
 
-    bundle.entries[6] = c14_legacy_transcript_bundle_entry(&input, &witness);
+    bundle.entries[5] = c14_legacy_transcript_bundle_entry(&input, &witness);
 
     assert!(verify_implemented_circuit_bundle(&input, &bundle, TEST_SEED).is_err());
 }
@@ -791,7 +749,7 @@ fn implemented_circuit_bundle_accepts_honest_witness() {
     let (bundle, profile) =
         prove_implemented_circuit_bundle_profiled(&input, &witness, TEST_SEED).unwrap();
 
-    assert_eq!(bundle.entries.len(), 7);
+    assert_eq!(bundle.entries.len(), 6);
     assert_eq!(bundle.params, v4_circle_params());
     assert_eq!(bundle.proximity_openings.len(), bundle.params.openings);
     assert!(bundle
@@ -809,6 +767,14 @@ fn implemented_circuit_bundle_accepts_honest_witness() {
         bundle.params.claim_degree_bound()
     );
     verify_implemented_circuit_bundle(&input, &bundle, TEST_SEED).unwrap();
+
+    let mut missing_entry = bundle.clone();
+    missing_entry.entries.pop();
+    assert!(verify_implemented_circuit_bundle(&input, &missing_entry, TEST_SEED).is_err());
+
+    let mut extra_entry = bundle.clone();
+    extra_entry.entries.push(bundle.entries[0].clone());
+    assert!(verify_implemented_circuit_bundle(&input, &extra_entry, TEST_SEED).is_err());
 }
 
 #[test]
@@ -919,10 +885,14 @@ fn mdoc_p4b_bundle_accepts_honest_mac_tags_and_rejects_tag_tamper() {
 
     let mut tampered = bundle.clone();
     tampered.mac_tags[0][0] ^= 1;
-    assert!(
-        verify_mdoc_p4b_circuit_bundle(&issuer_public, &device_public, None, &tampered, TEST_SEED)
-            .is_err()
-    );
+    assert!(verify_mdoc_p4b_circuit_bundle(
+        &issuer_public,
+        &device_public,
+        None,
+        &tampered,
+        TEST_SEED
+    )
+    .is_err());
 
     let mut tampered_root_b = bundle.clone();
     tampered_root_b.root_b.as_mut().unwrap()[0] ^= 1;
@@ -1003,7 +973,7 @@ fn mdoc_p4b_bundle_rejects_spliced_mac_batch_entry() {
     )
     .unwrap();
 
-    assert_eq!(bundle.entries.len(), 15);
+    assert_eq!(bundle.entries.len(), 13);
     verify_mdoc_p4b_circuit_bundle(&issuer_public, &device_public, None, &bundle, TEST_SEED)
         .unwrap();
 
@@ -1044,7 +1014,7 @@ fn mdoc_p4b_bundle_with_revocation_set_verifies_and_fails_closed() {
     )
     .unwrap();
 
-    assert_eq!(bundle.entries.len(), 22, "three ECDSA sets plus MAC batch");
+    assert_eq!(bundle.entries.len(), 19, "three ECDSA sets plus MAC batch");
     verify_mdoc_p4b_circuit_bundle(
         &issuer_public,
         &device_public,
@@ -1086,7 +1056,7 @@ fn mdoc_p4b_bundle_with_revocation_set_verifies_and_fails_closed() {
         TEST_SEED,
     )
     .unwrap();
-    assert_eq!(two_set_bundle.entries.len(), 15);
+    assert_eq!(two_set_bundle.entries.len(), 13);
     assert!(
         verify_mdoc_p4b_circuit_bundle(
             &issuer_public,
@@ -1162,7 +1132,7 @@ fn c12_bundle_entry(
         .clone()
 }
 
-fn c13_bundle_entry(
+fn c14_bundle_entry(
     input: &EcdsaInput,
     witness: &eu_id_ec_coprocessor::ecdsa::Witness,
 ) -> ImplementedCircuitBundleEntry {
@@ -1172,34 +1142,14 @@ fn c13_bundle_entry(
         .clone()
 }
 
-fn c14_bundle_entry(
-    input: &EcdsaInput,
-    witness: &eu_id_ec_coprocessor::ecdsa::Witness,
-) -> ImplementedCircuitBundleEntry {
-    prove_implemented_circuit_bundle(input, witness, TEST_SEED)
-        .unwrap()
-        .entries[6]
-        .clone()
-}
-
-fn mutate_interior_u1_accumulator_with_matching_slope_inverse(
-    witness: &mut eu_id_ec_coprocessor::ecdsa::Witness,
-) {
+fn mutate_interior_u1_accumulator(witness: &mut eu_id_ec_coprocessor::ecdsa::Witness) {
     let generator = AffinePoint::GENERATOR.to_encoded_point(false);
     let gx = fp_from_coord(generator.x().unwrap());
     let gy = fp_from_coord(generator.y().unwrap());
-    let doubled = (ProjectivePoint::GENERATOR.double())
-        .to_affine()
-        .to_encoded_point(false);
-    let doubled_x = fp_from_coord(doubled.x().unwrap());
     let point_index = 20usize;
     let u1 = layout_range(LayoutSlot::U1GAccumulators);
     witness.values[u1.start + point_index * 2] = gx;
     witness.values[u1.start + point_index * 2 + 1] = gy;
-
-    let slopes = layout_range(LayoutSlot::SlopeInverses);
-    witness.values[slopes.start + 2 * (point_index + 1)] = (gy + gy).inverse().unwrap();
-    witness.values[slopes.start + 2 * (point_index + 1) + 1] = (gx - doubled_x).inverse().unwrap();
 }
 
 fn c14_legacy_transcript_bundle_entry(

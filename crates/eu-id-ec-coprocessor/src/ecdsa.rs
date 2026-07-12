@@ -24,7 +24,7 @@ use stwo_p256_utils::scalar_arithmetic::{
     ScalarArithmeticError, ScalarFieldMulTrace, U256Words, P256_ORDER,
 };
 
-pub const LAYOUT_LEN: usize = 2168;
+pub const LAYOUT_LEN: usize = 1142;
 pub const LIMB_BITS: usize = 13;
 pub const N_LIMBS: usize = 20;
 pub const C1_INPUT_LIMBS_INPUT_LOG_SIZE: usize = 7;
@@ -37,8 +37,6 @@ pub const C11_FINAL_ADD_INPUT_LOG_SIZE: usize = 4;
 pub const C11_FINAL_ADD_OUTPUT_LOG_SIZE: usize = 2;
 pub const C12_ON_CURVE_INPUT_LOG_SIZE: usize = 11;
 pub const C12_ON_CURVE_OUTPUT_LOG_SIZE: usize = 11;
-pub const C13_SLOPE_INVERSES_INPUT_LOG_SIZE: usize = 12;
-pub const C13_SLOPE_INVERSES_OUTPUT_LOG_SIZE: usize = 11;
 pub const C14_C15_INPUT_LOG_SIZE: usize = 3;
 pub const C14_C15_OUTPUT_LOG_SIZE: usize = 3;
 pub const MAC_HALF_GROUP_A_INPUT_LOG_SIZE: usize = 9;
@@ -74,7 +72,7 @@ pub const MAC_HALF_COMMITTED_PRIVATE_INPUTS: usize =
 pub const MDOC_P4B_MAC_HALF_COUNT: usize = 6;
 pub const MDOC_P4B_MAC_COMMITTED_PRIVATE_INPUTS: usize =
     MDOC_P4B_MAC_HALF_COUNT * MAC_HALF_COMMITTED_PRIVATE_INPUTS;
-pub const IMPLEMENTED_CIRCUIT_FAMILY_COUNT: usize = 7;
+pub const IMPLEMENTED_CIRCUIT_FAMILY_COUNT: usize = 6;
 
 const C1_CONST_ONE_INDEX: u32 = 0;
 const C1_VALUES_START_INDEX: u32 = 1;
@@ -97,7 +95,6 @@ const C3_U2_INDEX: u32 = 6;
 const C3_QINV_INDEX: u32 = 7;
 const C3_Q1_INDEX: u32 = 8;
 const C3_Q2_INDEX: u32 = 9;
-const C9_C10_ACCUMULATOR_POINTS_PER_SCALAR: usize = 256;
 const C11_CONST_ONE_INDEX: u32 = 0;
 const C11_AX_INDEX: u32 = 1;
 const C11_AY_INDEX: u32 = 2;
@@ -112,12 +109,6 @@ const C12_ACCUMULATOR_POINT_COUNT: usize = 512;
 const C12_CONST_ONE_INDEX: u32 = 0;
 const C12_POINTS_START_INDEX: u32 = 1;
 const C12_FINAL_POINT_INDEX: usize = C12_POINT_COUNT - 1;
-const C13_SLOPE_INVERSE_COUNT: usize = 1027;
-const C13_LADDER_DENOMINATOR_COUNT: usize = 513;
-const C13_FINAL_ADD_DENOM_INDEX: usize = 2 * C13_LADDER_DENOMINATOR_COUNT;
-const C13_CONST_ONE_INDEX: u32 = 0;
-const C13_DENOMS_START_INDEX: u32 = 1;
-const C13_INVS_START_INDEX: u32 = C13_DENOMS_START_INDEX + C13_SLOPE_INVERSE_COUNT as u32;
 const C14_CONST_ONE_INDEX: u32 = 0;
 const C14_RX_INDEX: u32 = 1;
 const C14_K_INDEX: u32 = 2;
@@ -147,10 +138,7 @@ pub enum LayoutSlot {
     U1GAccumulators,
     U2QAccumulators,
     CorrectedEndpoints,
-    U1GDenominatorInverses,
-    U2QDenominatorInverses,
     FinalAddDenominatorInverse,
-    SlopeInverses,
     FinalPoint,
     FinalReduction,
     InfinityFlags,
@@ -166,13 +154,10 @@ pub fn layout_range(slot: LayoutSlot) -> Range<usize> {
         LayoutSlot::U1GAccumulators => 106..618,
         LayoutSlot::U2QAccumulators => 618..1130,
         LayoutSlot::CorrectedEndpoints => 1130..1134,
-        LayoutSlot::U1GDenominatorInverses => 1134..1647,
-        LayoutSlot::U2QDenominatorInverses => 1647..2160,
-        LayoutSlot::FinalAddDenominatorInverse => 2160..2161,
-        LayoutSlot::SlopeInverses => 1134..2161,
-        LayoutSlot::FinalPoint => 2161..2163,
-        LayoutSlot::FinalReduction => 2163..2165,
-        LayoutSlot::InfinityFlags => 2165..2168,
+        LayoutSlot::FinalAddDenominatorInverse => 1134..1135,
+        LayoutSlot::FinalPoint => 1135..1137,
+        LayoutSlot::FinalReduction => 1137..1139,
+        LayoutSlot::InfinityFlags => 1139..1142,
         LayoutSlot::MacHalf => 0..0,
     }
 }
@@ -437,20 +422,6 @@ pub fn generate_witness(input: &EcdsaInput) -> Result<Witness, WitnessError> {
     write_projective_point(&mut values[corrected.clone()], 0, u1_point)?;
     write_projective_point(&mut values[corrected], 2, u2_point)?;
 
-    let u1_accumulators = values[layout_range(LayoutSlot::U1GAccumulators)].to_vec();
-    let u1_denoms = layout_range(LayoutSlot::U1GDenominatorInverses);
-    write_ladder_slope_inverses_from_accumulators(
-        &mut values[u1_denoms],
-        ProjectivePoint::GENERATOR,
-        &u1_accumulators,
-    )?;
-    let u2_accumulators = values[layout_range(LayoutSlot::U2QAccumulators)].to_vec();
-    let u2_denoms = layout_range(LayoutSlot::U2QDenominatorInverses);
-    write_ladder_slope_inverses_from_accumulators(
-        &mut values[u2_denoms],
-        ProjectivePoint::from(public_key),
-        &u2_accumulators,
-    )?;
     let final_add_inverse = layout_range(LayoutSlot::FinalAddDenominatorInverse);
     write_inverse(
         &mut values[final_add_inverse],
@@ -484,7 +455,7 @@ pub fn verify_witness(input: &EcdsaInput, witness: &Witness) -> Result<(), Witne
         LayoutSlot::U1GAccumulators,
         LayoutSlot::U2QAccumulators,
         LayoutSlot::CorrectedEndpoints,
-        LayoutSlot::SlopeInverses,
+        LayoutSlot::FinalAddDenominatorInverse,
         LayoutSlot::FinalPoint,
         LayoutSlot::FinalReduction,
         LayoutSlot::InfinityFlags,
@@ -1558,10 +1529,8 @@ pub fn verify_implemented_circuit_bundle_batch_with_projection_profiled(
     {
         let mut verified_claims = Vec::with_capacity(circuits.len());
         let mut add_inputs_from_c11 = None;
-        let mut denom_inv_from_c11 = None;
         let mut final_from_c11 = None;
         let mut c12_boundaries = None;
-        let mut c13_boundary_values = None;
         let mut rx_from_c14 = None;
         for (family_index, ((instance, layout), entry)) in circuits
             .iter()
@@ -1649,27 +1618,11 @@ pub fn verify_implemented_circuit_bundle_batch_with_projection_profiled(
                         layout,
                         C11_RY_INDEX as usize,
                     )?;
-                    let denom_inv = take_private_value(
-                        &mut linear_claims,
-                        bundle,
-                        &mut consistency_cursor,
-                        layout,
-                        C11_DENOM_INV_INDEX as usize,
-                    )?;
                     add_inputs_from_c11 = Some(((ax, ay), (bx, by)));
-                    denom_inv_from_c11 = Some(denom_inv);
                     final_from_c11 = Some((rx, ry));
                 }
                 b"s4-ecdsa-c12-final-on-curve" => {
                     c12_boundaries = Some(take_c12_boundary_values(
-                        &mut linear_claims,
-                        bundle,
-                        &mut consistency_cursor,
-                        layout,
-                    )?);
-                }
-                b"s4-ecdsa-c13-slope-inverses" => {
-                    c13_boundary_values = Some(take_c13_boundary_values(
                         &mut linear_claims,
                         bundle,
                         &mut consistency_cursor,
@@ -1695,12 +1648,6 @@ pub fn verify_implemented_circuit_bundle_batch_with_projection_profiled(
         verify_corrected_endpoint_cross_family(
             c12_boundaries.map(|boundaries| boundaries.corrected_endpoints),
             add_inputs_from_c11,
-        )?;
-        verify_c13_boundary_cross_family(
-            add_inputs_from_c11,
-            denom_inv_from_c11,
-            final_from_c11,
-            c13_boundary_values,
         )?;
         verify_final_point_cross_family(
             final_from_c11,
@@ -1764,36 +1711,9 @@ fn verify_corrected_endpoint_cross_family(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct C13BoundaryValues {
-    final_add_denominator: Fp,
-    final_add_inverse: Fp,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct C12BoundaryValues {
     corrected_endpoints: ((Fp, Fp), (Fp, Fp)),
     final_point: (Fp, Fp),
-}
-
-fn verify_c13_boundary_cross_family(
-    c11_add: Option<((Fp, Fp), (Fp, Fp))>,
-    c11_add_inverse: Option<Fp>,
-    c11_final: Option<(Fp, Fp)>,
-    c13: Option<C13BoundaryValues>,
-) -> Result<(), ImplementedCircuitProofError> {
-    let Some(c13) = c13 else {
-        return Err(ImplementedCircuitProofError::CrossFamilyBindingRejected);
-    };
-
-    let (Some(((ax, _), (bx, _))), Some(c11_add_inverse), Some(_)) =
-        (c11_add, c11_add_inverse, c11_final)
-    else {
-        return Err(ImplementedCircuitProofError::CrossFamilyBindingRejected);
-    };
-    if c13.final_add_denominator != bx - ax || c13.final_add_inverse != c11_add_inverse {
-        return Err(ImplementedCircuitProofError::CrossFamilyBindingRejected);
-    }
-    Ok(())
 }
 
 fn verify_final_point_cross_family(
@@ -1965,7 +1885,6 @@ pub fn implemented_circuit_gate_count() -> Result<usize, CircuitError> {
         build_c3_c5_scalar_setup_circuit()?,
         build_c11_final_add_circuit()?,
         build_c12_on_curve_circuit()?,
-        build_c13_slope_inverses_circuit()?,
         build_c14_c15_final_check_circuit()?,
     ]
     .iter()
@@ -2075,10 +1994,8 @@ struct MdocP4bClaimInventory {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct MdocP4bEcdsaConsistency {
     add_inputs_from_c11: Option<((Fp, Fp), (Fp, Fp))>,
-    denom_inv_from_c11: Option<Fp>,
     final_from_c11: Option<(Fp, Fp)>,
     c12_boundaries: Option<C12BoundaryValues>,
-    c13_boundary_values: Option<C13BoundaryValues>,
     rx_from_c14: Option<Fp>,
 }
 
@@ -2088,12 +2005,6 @@ impl MdocP4bEcdsaConsistency {
             self.c12_boundaries
                 .map(|boundaries| boundaries.corrected_endpoints),
             self.add_inputs_from_c11,
-        )?;
-        verify_c13_boundary_cross_family(
-            self.add_inputs_from_c11,
-            self.denom_inv_from_c11,
-            self.final_from_c11,
-            self.c13_boundary_values,
         )?;
         verify_final_point_cross_family(
             self.final_from_c11,
@@ -2672,7 +2583,6 @@ fn add_prover_family_fixed_claims(
                 C11_BY_INDEX,
                 C11_RX_INDEX,
                 C11_RY_INDEX,
-                C11_DENOM_INV_INDEX,
             ] {
                 add_private_value(claims, consistency_values, layout, index as usize, values)?;
             }
@@ -2687,22 +2597,6 @@ fn add_prover_family_fixed_claims(
                 add_private_value(claims, consistency_values, layout, x, values)?;
                 add_private_value(claims, consistency_values, layout, x + 1, values)?;
             }
-        }
-        b"s4-ecdsa-c13-slope-inverses" => {
-            add_private_value(
-                claims,
-                consistency_values,
-                layout,
-                C13_DENOMS_START_INDEX as usize + C13_FINAL_ADD_DENOM_INDEX,
-                values,
-            )?;
-            add_private_value(
-                claims,
-                consistency_values,
-                layout,
-                C13_INVS_START_INDEX as usize + C13_FINAL_ADD_DENOM_INDEX,
-                values,
-            )?;
         }
         b"s4-ecdsa-c14-c15-final-check" => {
             add_c14_public_claims(claims, projection, layout)?;
@@ -2956,30 +2850,6 @@ fn take_c12_boundary_values(
     })
 }
 
-fn take_c13_boundary_values(
-    claims: &mut Vec<LigeroLinearClaim>,
-    bundle: &ImplementedCircuitBundle,
-    cursor: &mut usize,
-    layout: &BundleCircuitLayout,
-) -> Result<C13BoundaryValues, ImplementedCircuitProofError> {
-    Ok(C13BoundaryValues {
-        final_add_denominator: take_private_value(
-            claims,
-            bundle,
-            cursor,
-            layout,
-            C13_DENOMS_START_INDEX as usize + C13_FINAL_ADD_DENOM_INDEX,
-        )?,
-        final_add_inverse: take_private_value(
-            claims,
-            bundle,
-            cursor,
-            layout,
-            C13_INVS_START_INDEX as usize + C13_FINAL_ADD_DENOM_INDEX,
-        )?,
-    })
-}
-
 fn mdoc_p4b_take_ecdsa_claims(
     claims: &mut Vec<LigeroLinearClaim>,
     bundle: &ImplementedCircuitBundle,
@@ -3004,18 +2874,11 @@ fn mdoc_p4b_take_ecdsa_claims(
             let by = take_private_value(claims, bundle, cursor, layout, C11_BY_INDEX as usize)?;
             let rx = take_private_value(claims, bundle, cursor, layout, C11_RX_INDEX as usize)?;
             let ry = take_private_value(claims, bundle, cursor, layout, C11_RY_INDEX as usize)?;
-            let denom_inv =
-                take_private_value(claims, bundle, cursor, layout, C11_DENOM_INV_INDEX as usize)?;
             state.add_inputs_from_c11 = Some(((ax, ay), (bx, by)));
-            state.denom_inv_from_c11 = Some(denom_inv);
             state.final_from_c11 = Some((rx, ry));
         }
         b"s4-ecdsa-c12-final-on-curve" => {
             state.c12_boundaries = Some(take_c12_boundary_values(claims, bundle, cursor, layout)?);
-        }
-        b"s4-ecdsa-c13-slope-inverses" => {
-            state.c13_boundary_values =
-                Some(take_c13_boundary_values(claims, bundle, cursor, layout)?);
         }
         b"s4-ecdsa-c14-c15-final-check" => {
             add_c14_public_claims(claims, projection, layout)?;
@@ -3152,12 +3015,13 @@ fn implemented_circuit_instances(
             circuit: build_c12_on_curve_circuit().expect("static C12 circuit is valid"),
             input: c12_witness_on_curve_input(witness)?,
         },
-        ProverCircuitInstance {
-            label: b"s4-ecdsa-c13-slope-inverses",
-            slot: LayoutSlot::SlopeInverses,
-            circuit: build_c13_slope_inverses_circuit().expect("static C13 circuit is valid"),
-            input: c13_slope_inverses_input(input, witness)?,
-        },
+        // C13 slope inverses removed (WO-C3): its 1,026 interior
+        // denominator/inverse pairs were committed independently and never
+        // cross-bound to the C12 accumulator points, so they admitted the
+        // trivial extension (1, 1). Its sole bound final pair duplicated
+        // C11's existing (bx - ax) * denom_inv = 1 equation. Projecting C13
+        // from an old proof, or extending a new proof with those values,
+        // preserves the accepted statement relation exactly.
         ProverCircuitInstance {
             label: b"s4-ecdsa-c14-c15-final-check",
             slot: LayoutSlot::FinalReduction,
@@ -3188,10 +3052,6 @@ fn implemented_circuit_verifier_instances() -> Result<Vec<VerifierCircuitInstanc
         VerifierCircuitInstance {
             label: b"s4-ecdsa-c12-final-on-curve",
             circuit: build_c12_on_curve_circuit()?,
-        },
-        VerifierCircuitInstance {
-            label: b"s4-ecdsa-c13-slope-inverses",
-            circuit: build_c13_slope_inverses_circuit()?,
         },
         VerifierCircuitInstance {
             label: b"s4-ecdsa-c14-c15-final-check",
@@ -4458,62 +4318,6 @@ fn write_c12_point(input: &mut [Fp], point_index: usize, x: Fp, y: Fp) {
     input[start + 2] = x.square();
 }
 
-pub fn build_c13_slope_inverses_circuit() -> Result<Circuit, CircuitError> {
-    let mut terms = Vec::with_capacity(2 * C13_SLOPE_INVERSE_COUNT);
-    for i in 0..C13_SLOPE_INVERSE_COUNT as u32 {
-        terms.push(QuadTerm {
-            out: i,
-            l: C13_DENOMS_START_INDEX + i,
-            r: C13_INVS_START_INDEX + i,
-            coeff: Fp::ONE,
-        });
-        terms.push(QuadTerm {
-            out: i,
-            l: C13_CONST_ONE_INDEX,
-            r: C13_CONST_ONE_INDEX,
-            coeff: -Fp::ONE,
-        });
-    }
-    Circuit::new(vec![Layer::new(
-        C13_SLOPE_INVERSES_OUTPUT_LOG_SIZE,
-        C13_SLOPE_INVERSES_INPUT_LOG_SIZE,
-        terms,
-    )?])
-}
-
-pub fn c13_slope_inverses_input(
-    input: &EcdsaInput,
-    witness: &Witness,
-) -> Result<Vec<Fp>, WitnessError> {
-    if witness.values.len() != LAYOUT_LEN {
-        return Err(WitnessError::LayoutMismatch);
-    }
-
-    let public_key = parse_public_key(input.qx, input.qy)?;
-    let mut denominators = Vec::with_capacity(C13_SLOPE_INVERSE_COUNT);
-    denominators.extend(ladder_denominators_from_witness(
-        ProjectivePoint::GENERATOR,
-        &witness.values[layout_range(LayoutSlot::U1GAccumulators)],
-    )?);
-    denominators.extend(ladder_denominators_from_witness(
-        ProjectivePoint::from(public_key),
-        &witness.values[layout_range(LayoutSlot::U2QAccumulators)],
-    )?);
-
-    let corrected = layout_range(LayoutSlot::CorrectedEndpoints);
-    denominators.push(witness.values[corrected.start + 2] - witness.values[corrected.start]);
-    debug_assert_eq!(denominators.len(), C13_SLOPE_INVERSE_COUNT);
-
-    let slopes = layout_range(LayoutSlot::SlopeInverses);
-    let mut circuit_input = vec![Fp::ZERO; 1usize << C13_SLOPE_INVERSES_INPUT_LOG_SIZE];
-    circuit_input[C13_CONST_ONE_INDEX as usize] = Fp::ONE;
-    for (i, denominator) in denominators.into_iter().enumerate() {
-        circuit_input[C13_DENOMS_START_INDEX as usize + i] = denominator;
-        circuit_input[C13_INVS_START_INDEX as usize + i] = witness.values[slopes.start + i];
-    }
-    Ok(circuit_input)
-}
-
 pub fn build_c14_c15_final_check_circuit() -> Result<Circuit, CircuitError> {
     let n = fp_from_words(&P256_ORDER);
     let terms = vec![
@@ -4751,47 +4555,6 @@ fn write_ladder_accumulators(
     Ok(acc)
 }
 
-fn write_ladder_slope_inverses_from_accumulators(
-    out: &mut [Fp],
-    base: ProjectivePoint,
-    accumulators: &[Fp],
-) -> Result<(), WitnessError> {
-    let denominators = ladder_denominators_from_witness(base, accumulators)?;
-    if out.len() != denominators.len() {
-        return Err(WitnessError::LayoutMismatch);
-    }
-    for (i, denominator) in denominators.into_iter().enumerate() {
-        write_inverse(out, i, denominator)?;
-    }
-    Ok(())
-}
-
-fn ladder_denominators_from_witness(
-    base: ProjectivePoint,
-    accumulators: &[Fp],
-) -> Result<Vec<Fp>, WitnessError> {
-    if accumulators.len() != 2 * C9_C10_ACCUMULATOR_POINTS_PER_SCALAR {
-        return Err(WitnessError::LayoutMismatch);
-    }
-    let (mut prev_x, mut prev_y) = projective_point_coords(base)?;
-    let (base_x, _) = projective_point_coords(base)?;
-    let mut denominators = Vec::with_capacity(C13_LADDER_DENOMINATOR_COUNT);
-    for pair in accumulators.chunks_exact(2) {
-        let next_x = pair[0];
-        let next_y = pair[1];
-        let double_denominator = prev_y + prev_y;
-        let doubled_x = affine_double_x(prev_x, prev_y)?;
-        denominators.push(double_denominator);
-        denominators.push(base_x - doubled_x);
-        prev_x = next_x;
-        prev_y = next_y;
-    }
-    let (d_x, _) = projective_point_coords(double_256(base))?;
-    denominators.push(d_x - prev_x);
-    debug_assert_eq!(denominators.len(), C13_LADDER_DENOMINATOR_COUNT);
-    Ok(denominators)
-}
-
 pub fn ecdsa_statement_transcript_segments(
     input: &EcdsaInput,
 ) -> Result<Vec<Vec<u8>>, WitnessError> {
@@ -4836,16 +4599,6 @@ fn double_256(mut point: ProjectivePoint) -> ProjectivePoint {
         point = point.double();
     }
     point
-}
-
-fn affine_double_x(x: Fp, y: Fp) -> Result<Fp, WitnessError> {
-    let denominator = y + y;
-    let denominator_inv = denominator
-        .inverse()
-        .ok_or(WitnessError::ExceptionalTrace)?;
-    let numerator = x.square() + x.square() + x.square() - Fp::from_u64(3);
-    let lambda = numerator * denominator_inv;
-    Ok(lambda.square() - x - x)
 }
 
 fn final_add_denominator(u1_g: ProjectivePoint, u2_q: ProjectivePoint) -> Result<Fp, WitnessError> {
