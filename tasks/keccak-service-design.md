@@ -431,3 +431,13 @@ mdoc_mldsa quantum-safe-mdoc 19, credential_pipeline 3 (+1 ignored),
 stwo-mldsa full suite, check-quantum-only-deps clean. (e2e_soundness is
 a p256-only test target — it never compiled under quantum-safe-mdoc and
 is not a quantum gate.)
+
+### Post-S7 FRI frontier (pq_perf_probe, RAYON_NUM_THREADS=1, same session)
+
+| schedule | prove ms | verify ms | proof B |
+|---|---|---|---|
+| (1, 4, 26, 2) pow 25 — production | 7,957-9,061 (median ~8.0 s) | 17 | ~1,273,900 |
+| (1, 3, 36, 2) pow 20 — buy-back   | 5,385 / 5,716 | 18 | ~1,629,900 |
+
+Buying prove back to ~5.4 s costs +356 KB of proof. Both rows share the
+post-S7 column count; flip whenever prove time outranks proof size.
