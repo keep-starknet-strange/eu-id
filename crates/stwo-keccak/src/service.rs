@@ -258,6 +258,14 @@ impl KeccakServiceProver {
             assert!(seen.insert(s.absorb_stream_id), "duplicate absorb stream id {}", s.absorb_stream_id);
             assert!(seen.insert(s.squeeze_stream_id), "duplicate squeeze stream id {}", s.squeeze_stream_id);
         }
+        if std::env::var_os("KECCAK_PERMS_DUMP").is_some() {
+            eprintln!(
+                "keccak-service n_jobs={} n_perms_total={} round_log_size={}",
+                jobs.jobs.len(),
+                jobs.n_perms_total(),
+                round_log_size(jobs.n_perms_total())
+            );
+        }
         let run = sponge_v::generate_jobs(&jobs, &messages);
         let mut perm = build_perm_witness(&run.perm_inputs);
         perm.table_mult.add_sponge(&run.xor, &run.conv);

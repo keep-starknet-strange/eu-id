@@ -170,3 +170,82 @@ S3 FRI EXPERIMENT (2026-07-10, log_blowup 3 + 36 queries = 128-bit,
 REVERTED): proof 9,733,783 B (−29%) but prove 31.8s (+51%: tree commits
 double with the extra LDE) and verify 139ms — breaches the <100ms verify
 bound. Production config stays (log_blowup 2, 54 queries, pow 20).
+[SUPERSEDED by S4: after the S4 producer removals the schedule flipped —
+fab03a14 landed log_blowup 3 / 36q / pow 20 as production; S5 baseline
+below is measured on it.]
+
+## S5 (2026-07-12) — right-sizing pass; measured table
+
+pq_perf_probe, RAYON_NUM_THREADS=1, --release, single prove+verify:
+
+| point | prove ms (median) | verify ms | proof B | cells |
+|---|---|---|---|---|
+| S5 baseline (fab03a14) | 5,031 (n=3) | 20 | 2,203,217 | 28.5M |
+| S5c SIB right-size     | 4,911 (n=8) | 20–32 | ~2,201,000 | 26.9M |
+| targets                | <1,000 | <100 ✓ | <1,000,000 | — |
+
+Run-to-run prove noise is ±3% (4,833–5,091 post-S5c); the deterministic
+S5c measure is the cell count (−1.6M, −5.7%). Gates (all green,
+2026-07-12): mdoc_mldsa p256+ml-dsa 25, mdoc_mldsa quantum-safe-mdoc 19,
+stwo-keccak 31, stwo-mldsa 74, credential_pipeline 3 (+1 ignored),
+check-quantum-only-deps clean.
+
+Phase split at baseline (AIR_CORE_PROVE_TIMING): tree0 705ms
+(write+commit), tree1 844ms, tree2 1,611ms, stark 1,314ms, witness-gen
+~0.5s outside air-core.
+
+**S5c — LANDED.** `sample_in_ball` squeezed a flat generous 8+8·N=2,056 B;
+the sib component is sized by that FULL squeeze length. On-demand
+block-wise squeeze (136 B) drops sib_log_size 12→10 per instance
+(−1.6M cells, −5.7%). prove −2.4%, proof flat. Keccak jobs were already
+sized by the consumed `sib_stream_len` — no sponge change.
+
+**S5b — PARKED (attribution measured).** m0 sha_tables = 88 cols /
+9.31M cells (35% of post-S5c cells): 42 preprocessed @ log 17 (4 round
+split-pack ×6 cols + 4 σ split-pack ×4 + Range_16 ×2, all Class-D doubled
+2^16→2^17) + 9 multiplicity @ 17 + 20 interaction @ 17. Attributable
+prove ≈ 1.4s of 5.0s (78% of tree0 = ~550ms; ~20% of tree1/tree2 =
+~470ms; ~33% cell share of stark = ~430ms). Cannot shrink without a
+consumer redesign: the split-pack key domain is the FULL 16-bit half —
+16-bit halves are baked into `partitions::s_mask` (masks over 32-bit
+words), the (lo,hi) limb trace layout, and every consumer constraint;
+the limb→packed-groups map is bit extraction (non-linear), so no
+in-constraint replacement. A 2^12–14 variant = multi-day stwo-sha256
+redesign (P-256 mode must keep the big tables regardless). In-place
+dedupe of the 8 identical key + 8 is_dummy preprocessed cols was
+arithmetic-rejected: −14×2^17 = −1.83M cells ≈ −200ms (4%), <5% bar.
+
+**S5a — PARKED (at arithmetic floor).** keccak_round lookups/row = 898:
+80 θ-parity (2 xor3/C-byte, ceil((5−1)/2) minimal) + 40 C-rot split +
+200 θ-apply + 176 ρ split + 200 andnot + 200 χ-close + 2 chain. Under
+base-4 spread (3-operand xor cap), 2^16 dense tables, deg ≤ 2, pairs-only
+batching: θ-apply/andnot/χ-close are each a forced non-linear op per
+state byte (3×200 floor). Rejected by arithmetic: (i) fusing χ-close's
+free 3rd slot (24/25 lanes) with next round's θ-apply — 4 xor operands
+overflow the base-4 digit (max 4 > 3); base-8 spread ⇒ 2^24 tables ≫
+savings; (ii) 2 rounds/row — same cells, doubles cols, worse proof;
+(iii) batch-4 logup would halve the 1,796 interaction cols but is the
+S3b engine dead end (bound == log_size+1). Rows: n_perms_total = 45
+(measured, KECCAK_PERMS_DUMP=1) → 45×24 = 1,080 rounds → log 11; log 10
+needs ≤ 42 perms (round) / ≤ 40 (wrapper). Load is protocol-pinned per
+instance: c̃ = 7 perms (FIPS 204 832-B absorb), µ = 7 (mdoc SigStructure
+~850 B), SIB = 1 (post-S5c). Shaving ≥ 5 perms would halve the m1 round
+block (−3.2M cells) — requires changing what is hashed, not the AIR.
+
+**Hard-floor arithmetic vs targets (post-S5c: 4,868ms / 2.20MB / ~20ms):**
+- Proof: queried_values = 11.66k cols × 36q × 4B ≈ 1.68MB + sampled
+  0.31MB + decommits/FRI 0.13MB. Interaction cols ≈ 6.4k of 11.7k; the
+  single biggest unlock is engine-side logup batching ≥ 4 (−3.2k cols ≈
+  −460KB). Next: merge the three log-8 SHA consumers m4/m6/m7 (~2.99k
+  cols total ≈ 430KB of proof for ≤ 768 rows of load) into one hosted
+  component (−~290KB), and/or blowup-4/27q (×0.75 queried). All three
+  together ≈ 0.9–1.0MB — batching alone does not reach <1MB.
+- Prove: 26.9M cells × blowup-8 LDE + merkle ≈ 2.9s commits + 1.3s stark
+  + 0.5s witness. Irreducible under current component designs: m0 9.3M
+  (SHA-table redesign), m1 6.4M round block (protocol-pinned 45 perms),
+  3× coeffs @ log 14 ≈ 7.1M (active 9,204 rows of 16,384 — off-limits
+  this stage; 2-coeff/row packing would fit log 13 and save ~2.4M cells).
+  Even deleting m0 entirely leaves ~17.6M cells ≈ ~3.2s single-thread.
+  <1s single-thread needs SHA-table redesign + coeffs repack + engine
+  batching, or multi-thread proving.
+- Verify: 20–29ms, comfortably under the 100ms bound at 36q/blowup-3.
