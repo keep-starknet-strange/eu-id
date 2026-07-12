@@ -1075,10 +1075,11 @@ fn base_trace_log_sizes(
     out
 }
 
-/// log_sizes of every interaction-trace column in commit order. Each
-/// component's column count is `(n_lookups + 1) / 2`. We infer the count
-/// from the structural firing rule (matching the
-/// `interaction::sha256_interaction` derivation).
+/// log_sizes of every interaction-trace column in commit order. The
+/// `Sha256Eval` consumer batches `SHA_CONSUMER_LOGUP_BATCH` fractions per
+/// column (`ceil(n_lookups / batch)`); the single-fraction producers keep
+/// pair batching (`num_paired_cols`). We infer the count from the structural
+/// firing rule (matching the `interaction::sha256_interaction` derivation).
 fn interaction_trace_log_sizes(
     log_n_rows: u32,
     group_width: u32,
@@ -1098,7 +1099,8 @@ fn interaction_trace_log_sizes(
     // exposed byte column and one yield per exposed window byte) → `ceil(n/2)`
     // paired columns. Sized at log_n_rows. See `interaction::sha256_interaction`
     // for the per-row site breakdown.
-    let sha_cols = num_paired_cols(sha_lookups_per_row(expose_digest, field_exposure));
+    let sha_cols = sha_lookups_per_row(expose_digest, field_exposure)
+        .div_ceil(crate::interaction::SHA_CONSUMER_LOGUP_BATCH);
     out.extend(std::iter::repeat_n(log_n_rows, sha_cols * EXT));
     let _ = group_width;
     if !include_table_providers {

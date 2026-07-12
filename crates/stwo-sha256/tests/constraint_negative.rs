@@ -242,12 +242,13 @@ impl EvalAtRow for LinearConstraintCollector<'_> {
         // to close L4 on the LogUp side too.
     }
 
-    /// `Sha256Eval::evaluate` ends with `finalize_logup_in_pairs()` so
+    /// `Sha256Eval::evaluate` ends with `finalize_logup_batched(..)` so
     /// that real prover/verifier evaluators batch the lookup fractions
     /// into interaction columns. This linear-only collector does **not**
     /// model the LogUp interaction trace, so the finalize step is a
     /// no-op here — the recorded `non_zero` residuals stay scoped to the
     /// linear identities `add_constraint` saw.
+    fn finalize_logup_batched(&mut self, _batch_size: usize) {}
     fn finalize_logup_in_pairs(&mut self) {}
 }
 
