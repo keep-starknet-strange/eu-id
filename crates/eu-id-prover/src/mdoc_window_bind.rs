@@ -158,7 +158,11 @@ impl MdocWindowBind {
             attribute_digest_handles.is_empty()
                 || attribute_field_handles.len() == attribute_digest_handles.len()
         );
-        assert_rows_match_handles(&rows, issuer_field_handle.is_some(), attribute_digest_handles.len());
+        assert_rows_match_handles(
+            &rows,
+            issuer_field_handle.is_some(),
+            attribute_digest_handles.len(),
+        );
         Self {
             rows,
             issuer_field_handle,
@@ -183,7 +187,11 @@ impl MdocWindowBind {
             attribute_digest_handles.is_empty()
                 || attribute_field_handles.len() == attribute_digest_handles.len()
         );
-        assert_rows_match_handles(&rows, issuer_field_handle.is_some(), attribute_digest_handles.len());
+        assert_rows_match_handles(
+            &rows,
+            issuer_field_handle.is_some(),
+            attribute_digest_handles.len(),
+        );
         Self {
             rows,
             issuer_field_handle,
@@ -203,7 +211,9 @@ impl MdocWindowBind {
     }
 
     fn issuer_field_relation(&self) -> Option<FieldBytesRelation> {
-        self.issuer_field_handle.as_ref().map(SharedFieldRelation::get)
+        self.issuer_field_handle
+            .as_ref()
+            .map(SharedFieldRelation::get)
     }
 
     fn attribute_field_relations(&self) -> Vec<FieldBytesRelation> {
@@ -223,8 +233,7 @@ impl MdocWindowBind {
     fn n_lookups(&self) -> usize {
         // 32 issuer-field (when the issuer source exists) + 32-per-attribute
         // field + per-digest-handle sites, plus the Q-015 blinder `+m` site.
-        32 * (usize::from(self.issuer_field_handle.is_some())
-            + self.attribute_field_handles.len())
+        32 * (usize::from(self.issuer_field_handle.is_some()) + self.attribute_field_handles.len())
             + self.attribute_digest_handles.len()
             + 1
     }
@@ -236,10 +245,16 @@ impl MdocWindowBind {
 fn assert_rows_match_handles(rows: &[MdocWindowBindRow], has_issuer: bool, n_digests: usize) {
     for row in rows {
         if matches!(row.source, MdocFieldSource::IssuerMso) {
-            assert!(has_issuer, "IssuerMso window row without an issuer field relation");
+            assert!(
+                has_issuer,
+                "IssuerMso window row without an issuer field relation"
+            );
         }
         if let MdocWindowTarget::Digest(index) = row.target {
-            assert!(index < n_digests, "digest window row without a digest relation");
+            assert!(
+                index < n_digests,
+                "digest window row without a digest relation"
+            );
         }
     }
 }

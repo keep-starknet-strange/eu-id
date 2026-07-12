@@ -610,9 +610,9 @@ fn vandermonde_has_full_row_rank(rows: usize, columns: usize) -> bool {
     }
 
     let mut matrix = vec![vec![0u64; columns]; rows];
-    for row in 0..rows {
-        for col in 0..columns {
-            matrix[row][col] = mod_pow((col + 1) as u64, row as u64);
+    for (row, values) in matrix.iter_mut().enumerate() {
+        for (col, value) in values.iter_mut().enumerate() {
+            *value = mod_pow((col + 1) as u64, row as u64);
         }
     }
     rank_mod_prime(matrix) == rows
@@ -632,16 +632,17 @@ fn rank_mod_prime(mut matrix: Vec<Vec<u64>>) -> usize {
         for value in &mut matrix[rank][column..] {
             *value = mod_mul(*value, inv);
         }
-        for row in 0..row_count {
+        let pivot_row = matrix[rank].clone();
+        for (row, values) in matrix.iter_mut().enumerate() {
             if row == rank {
                 continue;
             }
-            let factor = matrix[row][column];
+            let factor = values[column];
             if factor == 0 {
                 continue;
             }
-            for col in column..column_count {
-                matrix[row][col] = mod_sub(matrix[row][col], mod_mul(factor, matrix[rank][col]));
+            for (col, value) in values.iter_mut().enumerate().skip(column) {
+                *value = mod_sub(*value, mod_mul(factor, pivot_row[col]));
             }
         }
         rank += 1;

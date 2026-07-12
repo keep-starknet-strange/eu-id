@@ -220,7 +220,9 @@ pub fn slot_sel_column_id(
     slot_log: u32,
     n_slots: usize,
 ) -> PreProcessedColumnId {
-    id(&format!("slot_sel_{s}_{n_slots}x{slot_log}_log{log_n_rows}"))
+    id(&format!(
+        "slot_sel_{s}_{n_slots}x{slot_log}_log{log_n_rows}"
+    ))
 }
 
 /// Preprocessed IDs of a multi-slot shared-tables consumer, in commit

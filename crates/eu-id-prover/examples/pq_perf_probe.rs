@@ -29,7 +29,6 @@ fn main() {
 fn main() {
     use std::time::Instant;
 
-    use eu_id_prover::generator::Policy;
     use eu_id_prover::mdoc::{
         extract_pid_mdoc, mdoc_proof_byte_breakdown, openid4vp_session_transcript,
         prove_mdoc_circuit, verify_mdoc_circuit, MdocCircuitStatement, MdocPidRequest,
@@ -37,6 +36,7 @@ fn main() {
         MdocRevocationSignature,
     };
     use eu_id_prover::ts13::ts13_mso_derived_revocation_id;
+    use eu_id_prover::Policy;
 
     let policy = Policy {
         current_date: predicates::Date {

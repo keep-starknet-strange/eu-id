@@ -1,16 +1,18 @@
 [workspace]
 members = [
     "crates/air-core",
-    "crates/stwo-p256",
-    "crates/stwo-p256-utils",
     "crates/stwo-sha256",
     "crates/predicates",
-    "crates/eu-id-ec-coprocessor",
     "crates/eu-id-prover",
     "crates/eu-id-ffi",
     "crates/sdk",
     "crates/stwo-keccak",
     "crates/stwo-mldsa",
+]
+exclude = [
+    "crates/stwo-p256",
+    "crates/stwo-p256-utils",
+    "crates/eu-id-ec-coprocessor",
 ]
 resolver = "2"
 

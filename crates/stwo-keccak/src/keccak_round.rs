@@ -828,7 +828,7 @@ pub fn generate_interaction_trace(
             let (mut num, mut den) = (chunk[0].0[vr], chunk[0].1[vr]);
             for (n, d) in &chunk[1..] {
                 num = d[vr] * num + n[vr] * den;
-                den = den * d[vr];
+                den *= d[vr];
             }
             col.write_frac(vr, num, den);
         }

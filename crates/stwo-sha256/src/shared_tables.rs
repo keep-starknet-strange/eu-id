@@ -523,10 +523,10 @@ fn shared_table_trace(
 }
 
 /// Borrow the stored multiplicity vector for one producer.
-fn producer_multiplicities<'a>(
-    multiplicities: &'a ShaTableMultiplicities,
+fn producer_multiplicities(
+    multiplicities: &ShaTableMultiplicities,
     producer: SharedProducer,
-) -> &'a [u32] {
+) -> &[u32] {
     match producer {
         SharedProducer::RoundSplit(p, h) => {
             &multiplicities.round_split_pack[round_split_index(p, h)]

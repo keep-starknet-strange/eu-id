@@ -18,7 +18,6 @@
 //! stwo-mldsa constraint) — always pass `--test-threads=1`.
 #![cfg(feature = "ml-dsa")]
 
-use eu_id_prover::generator::Policy;
 use eu_id_prover::mdoc::{
     extract_pid_mdoc, openid4vp_session_transcript, ExtractedPidMdoc, MdocCircuitStatement,
     MdocError, MdocPidRequest, MdocRevocationKey, MdocRevocationPublicInputs,
@@ -28,6 +27,7 @@ use eu_id_prover::ts13::{
     ts13_mso_derived_revocation_id, Ts13RevocationError, Ts13RevocationStatement,
     Ts13RevocationWitness,
 };
+use eu_id_prover::Policy;
 
 #[path = "mldsa_fixture.rs"]
 mod mldsa_fixture;
@@ -539,22 +539,25 @@ mod hosted_mode {
             .expect_err("tampered revocation public key must reject");
     }
 
-    /// SHA↔SHAKE byte tamper: the SHA pass proves a preimage that differs in
-    /// one byte from the message the ML-DSA statement absorbs. The shared
-    /// field-relation LogUp must not balance → reject.
+    /// Direct-provider tamper: change one private bound byte without replacing
+    /// the revocation signature. The range AIR then provides a different raw
+    /// message than the hosted ML-DSA witness can authenticate, so proving or
+    /// verification must reject.
     #[test]
-    fn mldsa_mdoc_sha_shake_byte_tamper_rejects() {
-        let (mut extracted, statement) = full_pq_extracted_and_statement();
-        // Offset 2 lies inside the `"Signature1"` tstr — before the payload,
-        // outside every statement window, so ONLY the whole-message exposure
-        // (the SHA↔SHAKE link) sees the difference.
-        extracted.issuer_sig_structure[2] ^= 0x01;
+    fn mldsa_revocation_provider_message_tamper_rejects() {
+        let (extracted, statement) = full_pq_extracted_and_statement();
+        let (mut statement, _, _) = with_mldsa_revocation(statement, &extracted);
+        statement
+            .ts13_revocation_range
+            .as_mut()
+            .expect("revocation range")
+            .id_lo += 1;
 
         let rejected = match prove_mdoc_circuit(&extracted, &statement) {
             Err(_) => true,
             Ok(proof) => verify_mdoc_circuit(&proof, &statement).is_err(),
         };
-        assert!(rejected, "tampered SHA-side Sig_structure byte must reject");
+        assert!(rejected, "tampered direct-provider message must reject");
     }
 
     /// S4 statement-side message tamper: flip one PUBLIC issuer-message byte

@@ -595,3 +595,33 @@ column reduction — a structural project, not an S9 move. Baseline unchanged
 | (1, 3, 36, 2) pow 20 — buy-back (S8) | 5,755 | 17 | 1,419,536 |
 
 No code changed; existing gates remain as recorded post-S8.
+
+## Q1/Q2 (2026-07-13) — quantum branch split + direct revocation provider
+
+The dedicated `feat/quantum-safe` branch now defaults to the full ML-DSA product and removes the
+legacy identity/nonce/coprocessor API, SDK/FFI ABI, mobile surfaces, benches, and classical tests.
+P-256/ec-coprocessor crates are excluded from the workspace and the locked whole-workspace
+dependency gate is clean. The final internal `eu-id-prover` scheme-cfg collapse remains follow-up;
+the default product graph is already quantum-only.
+
+Revocation no longer enters the merged SHA consumer. `MdocRevocationRangeBind`, which already owns
+the constrained `id_lo`/`id_hi` witness and public epoch, now draws the shared field relation and
+provides `LE64(id_lo)||LE64(id_hi)||LE32(epoch)` directly under `HOSTED_MSG_FIELD_ID` with provider
+sign. All 16 private bound bytes regain local 8-bit decomposition, so removing SHA does not remove
+their range proof. The component is ordered before the hosted revocation ML-DSA instance on both
+prove and verify; a focused bound-byte/message mismatch negative and the full privacy/e2e rail pass.
+
+Shape/metric result (`AIR_CORE_SHAPE_DUMP=1`, release, `RAYON_NUM_THREADS=1`):
+
+| metric | S9 | Q2 | delta |
+|---|---:|---:|---:|
+| merged SHA columns | 1,199 @ log 10 | 1,098 @ log 9 | −101 |
+| total committed columns | 7,290 | 7,317 | +27 |
+| proof | 1,109,272 B | 1,113,700 B | +4,428 B |
+| prove | 8,232 ms | 8,192 ms | noise-flat |
+| verify | 14 ms | 16 ms | noise-flat |
+
+The +27-column total is exact: removing the revocation SHA slot saves 101 columns; restoring local
+bit pinning for 16 private bytes adds 128. This stage is retained because it deletes a legacy hash
+work class and makes Q3's input honestly attribute-only, but it is not claimed as a performance win.
+The next design must recover this ~4 KB regression while replacing the P-256-era fixed SHA tables.

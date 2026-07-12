@@ -374,7 +374,7 @@ pub fn prove(
     let timing = std::env::var_os("AIR_CORE_PROVE_TIMING").is_some();
     let t_start = std::time::Instant::now();
     let mut t_last = t_start;
-    let mut phase = |name: &str, t_last: &mut std::time::Instant| {
+    let phase = |name: &str, t_last: &mut std::time::Instant| {
         if timing {
             eprintln!("air-core prove phase {name}: {:?}", t_last.elapsed());
             *t_last = std::time::Instant::now();
@@ -838,8 +838,8 @@ mod tests {
         fn preprocessed_column_fingerprints(&mut self) -> Vec<PreprocessedColumnFingerprint> {
             fingerprint_preprocessed_columns(
                 self.module,
-                &[self.id.clone()],
-                &[self.column.clone()],
+                std::slice::from_ref(&self.id),
+                std::slice::from_ref(&self.column),
             )
         }
 

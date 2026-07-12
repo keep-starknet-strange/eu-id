@@ -2,20 +2,18 @@ name: CI
 
 # Continuous integration for the eu-id workspace.
 #
-# Build, test, and lint run on every pull request and on pushes to `main`, so
-# regressions in this multi-component cryptographic codebase are caught
-# immediately. Proof generation is slow, so the end-to-end proof test is kept
-# off the per-push path and runs on a daily schedule instead.
+# Build, test, lint, and dependency isolation run on every pull request and on
+# pushes to the quantum-safe branch. Proof generation is slow, so the
+# end-to-end proof test is kept off the per-push path and runs daily.
 #
 # The `lint` job runs `make check` — the exact target contributors run
 # locally — so local and CI lint results can never diverge (see the Makefile).
 
 on:
-  # `pull_request` covers all feature-branch work. `push` is scoped to `main`
-  # so CI re-validates the trunk after a merge without re-running every job a
-  # second time on branches that already have an open PR.
+  # `pull_request` covers all feature-branch work. Direct pushes are checked on
+  # both the classical trunk and this branch's quantum-safe integration ref.
   push:
-    branches: [main]
+    branches: [main, feat/quantum-safe]
   pull_request:
   schedule:
     # 06:00 UTC daily. Exercises the slow end-to-end proof test (the `e2e`
@@ -49,6 +47,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check out pinned Stwo engine patch
+        uses: actions/checkout@v4
+        with:
+          repository: 0xLucqs/stwo
+          ref: 8c9983908642f719032e7b7977f3c2081c84a2d9
+          path: .stwo-engine
+
+      - name: Materialize local Stwo patch path
+        run: |
+          sudo mkdir -p /Users/lucas
+          sudo ln -s "$GITHUB_WORKSPACE/.stwo-engine" /Users/lucas/stwo
+
       # Pinned nightly — must match the channel in rust-toolchain.toml.
       - name: Install pinned Rust nightly
         uses: dtolnay/rust-toolchain@master
@@ -79,6 +89,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check out pinned Stwo engine patch
+        uses: actions/checkout@v4
+        with:
+          repository: 0xLucqs/stwo
+          ref: 8c9983908642f719032e7b7977f3c2081c84a2d9
+          path: .stwo-engine
+
+      - name: Materialize local Stwo patch path
+        run: |
+          sudo mkdir -p /Users/lucas
+          sudo ln -s "$GITHUB_WORKSPACE/.stwo-engine" /Users/lucas/stwo
+
       # Pinned nightly — must match the channel in rust-toolchain.toml.
       - name: Install pinned Rust nightly
         uses: dtolnay/rust-toolchain@master
@@ -90,6 +112,9 @@ jobs:
         with:
           cache-on-failure: true
 
+      - name: Check quantum-only dependency tree
+        run: make check-quantum-only-deps
+
       - name: make build
         run: make build
 
@@ -100,22 +125,26 @@ jobs:
       - name: make test
         run: make test
 
-      # The coprocessor composition is feature-gated and default-off, so the
-      # workspace test target does not compile its transcript hooks or negatives.
-      - name: make test-ec-coprocessor
-        run: make test-ec-coprocessor
-
-  # Scheduled-only: the slow full-pipeline proof-generation tests. Runs the
-  # `#[ignore]`-marked tests in release mode (proving in debug is far too
-  # slow). This is the documented runner for the end-to-end soundness suite
-  # (`eu-id-prover/tests/e2e_soundness.rs`) and the composition/boundary tests
-  # — the happy-path bound proof plus one negative per mutation class.
+  # Scheduled-only: slow ignored tests plus one full quantum-safe mdoc probe.
+  # Release mode is mandatory because proving in debug is prohibitively slow.
   e2e:
     name: End-to-end proof generation
     if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Check out pinned Stwo engine patch
+        uses: actions/checkout@v4
+        with:
+          repository: 0xLucqs/stwo
+          ref: 8c9983908642f719032e7b7977f3c2081c84a2d9
+          path: .stwo-engine
+
+      - name: Materialize local Stwo patch path
+        run: |
+          sudo mkdir -p /Users/lucas
+          sudo ln -s "$GITHUB_WORKSPACE/.stwo-engine" /Users/lucas/stwo
 
       # Pinned nightly — must match the channel in rust-toolchain.toml.
       - name: Install pinned Rust nightly
@@ -129,13 +158,10 @@ jobs:
           cache-on-failure: true
 
       - name: Run end-to-end proof tests (release, ignored tests only)
-        run: cargo test --workspace --release -- --ignored
+        run: cargo test --locked --workspace --release -- --ignored
 
-      # Scheduled feature-on ignored tests include the fork/join digest guard;
-      # this keeps the coprocessor transcript bridge exercised even while the
-      # feature remains default-off.
-      - name: Run EC coprocessor ignored tests (release)
-        run: make test-ec-coprocessor-ignored
+      - name: Run full quantum-safe mdoc probe (release, single-thread)
+        run: make perf
 
       # Smoke-test the standalone-component example so it cannot silently
       # rot. The example documents itself as "the shortest path to running
@@ -144,4 +170,4 @@ jobs:
       # `make build`. Runs in the same scheduled job as the ignored tests
       # to share the warm cache.
       - name: Run prove_demo example (release)
-        run: cargo run --release -p stwo-sha256 --example prove_demo
+        run: cargo run --locked --release -p stwo-sha256 --example prove_demo

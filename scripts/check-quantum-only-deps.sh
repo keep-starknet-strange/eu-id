@@ -18,11 +18,15 @@ set -euo pipefail
 
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-PATTERN='p256|ecdsa|elliptic-curve|primeorder|sec1|rfc6979|stwo-p256|eu-id-ec-coprocessor'
-TREE_ARGS=(-p eu-id-prover --no-default-features --features quantum-safe-mdoc -e normal)
+PATTERN='p256|ecdsa|elliptic-curve|primeorder|sec1|rfc6979|stwo-p256|stwo-p256-utils|eu-id-ec-coprocessor'
+TREE_ARGS=(--locked --workspace -e normal)
 
 echo "==> cargo tree ${TREE_ARGS[*]} | grep -E \"$PATTERN\""
-matches=$(cargo tree "${TREE_ARGS[@]}" | grep -E "$PATTERN" | sed 's/[│├└─ ]*//' | sort -u || true)
+if ! dependency_tree=$(cargo tree "${TREE_ARGS[@]}"); then
+    echo "FAIL: unable to resolve the locked quantum workspace dependency tree"
+    exit 1
+fi
+matches=$(echo "$dependency_tree" | grep -E "$PATTERN" | sed 's/[│├└─ ]*//' | sort -u || true)
 
 if [[ -z "$matches" ]]; then
     echo "==> quantum-only dependency tree is clean"
@@ -38,10 +42,11 @@ if [[ -n "$non_rfc" ]]; then
     exit 1
 fi
 
-rfc_parents=$(cargo tree "${TREE_ARGS[@]}" -i rfc6979 | sed -n '2p')
-if [[ "$rfc_parents" != *"starknet-crypto"* ]]; then
+rfc_parents=$(cargo tree "${TREE_ARGS[@]}" -i rfc6979 --depth 1 --prefix none | tail -n +2)
+unexpected_rfc_parents=$(echo "$rfc_parents" | grep -v '^starknet-crypto ' || true)
+if [[ -z "$rfc_parents" || -n "$unexpected_rfc_parents" ]]; then
     echo "FAIL: rfc6979 is reachable outside the stwo engine's starknet-crypto:"
-    cargo tree "${TREE_ARGS[@]}" -i rfc6979 | head -5
+    cargo tree "${TREE_ARGS[@]}" -i rfc6979 --depth 1
     exit 1
 fi
 

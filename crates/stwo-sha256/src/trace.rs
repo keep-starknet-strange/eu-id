@@ -1343,10 +1343,11 @@ mod tests {
         let trace = generate_trace(&witness, log_size);
         let n_rows = 1usize << log_size;
 
-        let mut enabled = 0u32;
-        for slot in 0..n_rows {
-            enabled += trace[Layout::COL_ENABLER][slot].0;
-        }
+        let enabled: u32 = trace[Layout::COL_ENABLER]
+            .iter()
+            .take(n_rows)
+            .map(|value| value.0)
+            .sum();
         assert_eq!(enabled as usize, n_blocks * ROWS_PER_BLOCK);
 
         // is_first_block: only at (block 0, t = 0).
@@ -1408,9 +1409,14 @@ mod tests {
         assert_eq!(first[Layout::COL_IS_LAST_BLOCK][first_pad_slot].0, 0);
         assert_eq!(first[Layout::COL_ENABLER_STEP][first_pad_slot].0, 0);
 
-        for col in Layout::COL_PADDING_START..Layout::COL_PADDING_END {
+        for (col, column) in first
+            .iter()
+            .enumerate()
+            .take(Layout::COL_PADDING_END)
+            .skip(Layout::COL_PADDING_START)
+        {
             assert_eq!(
-                first[col][pad_t15_slot].0, 0,
+                column[pad_t15_slot].0, 0,
                 "disabled-row padding role col {col} must stay public-zero"
             );
         }

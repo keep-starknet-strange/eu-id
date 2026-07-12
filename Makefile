@@ -4,18 +4,11 @@
 # scripts/check.sh — the single definition of the lint gate, also run by the
 # pre-commit hook — so local and CI lint results never diverge.
 #
-# Some targets drive code that is scaffolded incrementally (the demo CLI in
-# bin/, the mobile harness in mobile/). Those targets detect whether the
-# backing directory exists: they run the real command once it does, and
-# otherwise print a short notice and exit 0. The run/prove/verify targets
-# assume the bin/ CLI is the `eu-id` package.
+# This branch's product path is quantum-only: ML-DSA issuer, device, and
+# revocation authentication. Classical P-256 demo and coprocessor targets live
+# on the classical branches.
 
-# Paths for the prove/verify demo targets — override on the command line,
-# e.g. `make prove CREDENTIAL=path/to/credential.cbor`.
-CREDENTIAL   ?= scripts/sample/credential.cbor
-ISSUER_KEY   ?= scripts/sample/issuer-key.pub
-PROOF        ?= proof.bin
-CURRENT_DATE ?= $(shell date +%Y-%m-%d)
+PROOF ?= proof.bin
 
 # Predicates CLI overrides
 DOB      ?=
@@ -28,7 +21,7 @@ NATIONALITY ?=
 ACCEPTABLE  ?=
 
 .DEFAULT_GOAL := help
-.PHONY: help dev build run test test-ec-coprocessor test-ec-coprocessor-ignored check fmt bench bench-predicates bench-identity bench-report bench-breakdown bench-mobile prove verify \
+.PHONY: help dev build test check check-quantum-only-deps fmt perf bench-predicates \
         prove-age verify-age \
         prove-nat verify-nat \
         profile-prove-age-rc profile-verify-age-rc \
@@ -41,23 +34,13 @@ help:
 	@echo ""
 	@echo "  make dev           watch sources and re-run cargo check (uses cargo-watch)"
 	@echo "  make build         compile the whole workspace"
-	@echo "  make run           run the demo prover CLI"
 	@echo "  make test          run the workspace test suite in release mode"
-	@echo "  make test-ec-coprocessor          run default coprocessor tests"
-	@echo "  make test-ec-coprocessor-ignored  run scheduled default coprocessor ignored tests"
 	@echo "  make check         clippy + rustfmt — identical to the CI lint step"
+	@echo "  make check-quantum-only-deps  reject classical crypto in the workspace tree"
 	@echo "  make fmt           apply rustfmt across the workspace"
-	@echo "  make bench             laptop criterion benchmark suite"
+	@echo "  make perf          run the full quantum-safe mdoc performance probe"
 	@echo "  make bench-predicates  run predicates benchmarks only"
-	@echo "  make bench-identity    criterion benchmark of the combined identity prover"
-	@echo "  make bench-report      combined-prover peak-memory + proof-size JSON report"
-	@echo "  make bench-breakdown   proof-size byte-breakdown baseline"
-	@echo "  make bench-mobile      mobile (iOS/Android) benchmark harness"
-	@echo "  make prove         prove age-over-18 from a sample credential"
-	@echo "  make verify        verify a generated proof"
 	@echo "  make clean         remove build artifacts"
-	@echo ""
-	@echo "  prove/verify accept overrides: CREDENTIAL= ISSUER_KEY= PROOF= CURRENT_DATE="
 	@echo ""
 	@echo "  make prove-age     run the age predicate prover  (DOB= required)"
 	@echo "  make verify-age    run the age predicate verifier"
@@ -92,66 +75,25 @@ dev:
 	fi
 
 build:
-	cargo build --all-targets
-
-run:
-	@if [ -d bin ]; then \
-		cargo run --release -p eu-id; \
-	else \
-		echo "run: demo CLI not implemented yet (bin/ not found)"; \
-	fi
+	cargo build --locked --workspace
 
 test:
-	cargo test --workspace --release
-
-test-ec-coprocessor:
-	cargo test -p eu-id-prover --features ec-coprocessor
-
-test-ec-coprocessor-ignored:
-	cargo test -p eu-id-prover --features ec-coprocessor --release -- --ignored
+	cargo test --locked --workspace --release
 
 check:
 	@bash scripts/check.sh
 
+check-quantum-only-deps:
+	@bash scripts/check-quantum-only-deps.sh
+
 fmt:
 	cargo fmt
 
-bench:
-	cargo bench
+perf:
+	RAYON_NUM_THREADS=1 cargo run --locked --release -p eu-id-prover --example pq_perf_probe
 
 bench-predicates:
-	cargo bench -p predicates
-
-bench-identity:
-	cargo bench -p eu-id-prover
-
-bench-report:
-	cargo run --release -p eu-id-prover --example bench_report -- target/bench-report.json
-
-bench-breakdown:
-	BENCH_BREAKDOWN=1 BENCH_LABEL=m4max cargo run --release -p eu-id-prover \
-		--example bench_report -- docs/benchmarks/proof-size-breakdown.json
-
-bench-mobile:
-	@if [ -d mobile ]; then \
-		$(MAKE) -C mobile bench; \
-	else \
-		echo "bench-mobile: mobile harness not implemented yet (mobile/ not found)"; \
-	fi
-
-prove:
-	@if [ -d bin ]; then \
-		cargo run --release -p eu-id -- prove --credential "$(CREDENTIAL)" --issuer-key "$(ISSUER_KEY)" --out "$(PROOF)"; \
-	else \
-		echo "prove: demo CLI not implemented yet (bin/ not found)"; \
-	fi
-
-verify:
-	@if [ -d bin ]; then \
-		cargo run --release -p eu-id -- verify --proof "$(PROOF)" --issuer-key "$(ISSUER_KEY)" --current-date "$(CURRENT_DATE)"; \
-	else \
-		echo "verify: demo CLI not implemented yet (bin/ not found)"; \
-	fi
+	cargo bench --locked -p predicates
 
 prove-age:
 ifndef DOB

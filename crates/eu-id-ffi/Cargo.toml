@@ -3,64 +3,32 @@ name = "eu-id-ffi"
 version.workspace = true
 edition.workspace = true
 
-# Thin C-ABI surface over the eu-id provers, built for the mobile benchmark
-# harness. One function per workload — the standalone SHA-256 and P-256 ECDSA
-# provers, plus the combined cross-bound identity proof — each measured inside
-# Rust and returned as a flat C struct. iOS links the `staticlib`; Android
-# (later) the `cdylib`.
+# Thin C-ABI surface for the quantum-safe mobile build. The current benchmark
+# entry point measures the standalone SHA-256 prover; the quantum-safe mdoc
+# feature stays enabled so product bindings cannot accidentally pull in the
+# classical dependency graph. iOS links the `staticlib`; Android (later) the
+# `cdylib`.
 [lib]
 name = "eu_id_ffi"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
-# Default mirrors eu-id-prover: the `ec-coprocessor` P-256 issuer path (implies
-# `p256`). Issuer-scheme selection forwards `p256` / `ml-dsa` to eu-id-prover.
-default = ["ec-coprocessor"]
-# Pass through to multi-threaded Stwo proving (rayon). Off by default. Reaches
-# the SHA module (in the standalone SHA bench and the SHA part of the combined
-# identity bench); the combined proof is P256-dominated and P256 has no rayon
-# path yet, so this barely moves the identity number — see `eu_id_bench_identity`.
-# (Note: stwo itself is already built with parallel because stwo-p256 requires
-# it — see the dependency note below.)
+# This branch is quantum-safe by construction; there is no classical fallback.
+default = ["quantum-safe-mdoc"]
+# Pass through to multi-threaded Stwo proving (rayon).
 parallel = ["stwo-sha256/parallel"]
-# Issuer signature-scheme passthroughs to eu-id-prover. `p256` owns the
-# classical benches (standalone P-256, identity, demo mdoc) and the direct
-# stwo-p256 dep; the quantum-safe alias leaves only the SHA bench plus the
-# ML-DSA prover paths in the build (G8: no classical public-key crypto).
-ec-coprocessor = ["p256", "eu-id-prover/ec-coprocessor"]
-p256 = ["dep:stwo-p256", "eu-id-prover/p256"]
-ml-dsa = ["eu-id-prover/ml-dsa"]
+ml-dsa = ["dep:eu-id-prover", "eu-id-prover/ml-dsa"]
 quantum-safe-mdoc = ["ml-dsa", "eu-id-prover/quantum-safe-mdoc"]
 
 [dependencies]
-# The combined, cross-bound identity prover (`prove_identity`/`verify_identity`)
-# the identity bench wraps, plus the standalone SHA-256 prover the SHA bench
-# wraps. eu-id-prover re-pulls stwo-sha256, but the SHA bench depends on it
-# directly too.
-eu-id-prover = { path = "../eu-id-prover", default-features = false }
+# Keep the quantum-safe prover graph available to future product bindings. The
+# standalone SHA benchmark depends on stwo-sha256 directly.
+eu-id-prover = { path = "../eu-id-prover", default-features = false, optional = true }
 stwo-sha256 = { path = "../stwo-sha256" }
-# P-256 ECDSA verification prover. NOTE: stwo-p256 hardwires stwo's
-# `parallel` feature, and Cargo unifies features across the build graph, so
-# pulling it in turns stwo's rayon paths on for the SHA-256 side too. That is
-# desirable on-device (faster), just not gated by the `parallel` feature below.
-stwo-p256 = { path = "../stwo-p256", optional = true }
-# Direct dep purely to name the concrete `Blake2sMerkleChannel` the p256
-# prove/verify entry points are generic over.
-stwo = { workspace = true }
 # Peak-footprint sampler. On Apple `physical_mem` resolves to mach
 # `phys_footprint` — the iOS jetsam metric — the same crate the laptop
 # harness used.
 memory-stats = "1.2"
-# Serialize the combined proof to report its size from `eu_id_bench_identity`.
-bincode = "1"
-
-# Test-only: produce a real P-256 signature to exercise the big-endian
-# (z, r, s, qx, qy) marshalling contract end-to-end. The host build does the
-# signing in Swift/CryptoKit, so these never enter the iOS staticlib.
-[dev-dependencies]
-p256 = { version = "0.13", features = ["ecdsa"] }
-ecdsa = { version = "0.16", features = ["signing", "verifying"] }
-sha2 = "0.10"
 
 [lints]
 workspace = true

@@ -85,7 +85,7 @@ func logBenchResult(
 
 // Headless auto-run for scripted / CI testing. Launch the app with `--autorun`
 // (e.g. `xcrun simctl launch <udid> co.starkware.euid.bench --autorun`) to run
-// every case from both primitives once on a background queue, logging each as an
+// every SHA-256 case once on a background queue, logging each as an
 // "EUIDBENCH RESULT ..." line. Bracketed by "EUIDBENCH AUTORUN start/done" so a
 // host capturing the device log knows when the sweep is complete.
 enum HeadlessRunner {
@@ -94,10 +94,7 @@ enum HeadlessRunner {
     static func runAllAndLog() {
         DispatchQueue.global(qos: .userInitiated).async {
             NSLog("EUIDBENCH AUTORUN start")
-            // Identity first — the combined proof is the headline workload.
-            for c in IdentityBench.cases { _ = c.body() }
             for c in Sha256Bench.cases { _ = c.body() }
-            for c in P256Bench.cases { _ = c.body() }
             NSLog("EUIDBENCH AUTORUN done")
             // Headless/CI mode: exit so `devicectl --console` (or simctl) returns
             // with the full log flushed. Only reached under `--autorun`.
@@ -107,8 +104,7 @@ enum HeadlessRunner {
 }
 
 // Reusable benchmark screen: a blurb, per-case run buttons + result rows, and a
-// "run all" button. The SHA-256 and P-256 tabs are each just a `BenchScreen`
-// with a different case list.
+// "run all" button.
 struct BenchScreen: View {
     let navigationTitle: String
     let blurb: String
@@ -209,30 +205,4 @@ struct BenchScreen: View {
             DispatchQueue.main.async { runningAll = false }
         }
     }
-}
-
-// Mutable reference cell used to carry a worker thread's result back to its
-// caller (the semaphore in `onLargeStack` orders the write before the read).
-private final class ResultBox<T> {
-    var value: T?
-}
-
-// Run `work` on a dedicated thread with a large stack and block until it
-// finishes. The combined STARK prover overflows the 512 KB default stack of a
-// `DispatchQueue` worker thread (an EXC_BAD_ACCESS stack-guard fault); a 32 MB
-// stack matches the headroom the laptop/main-thread prover has. The standalone
-// SHA-256 / P-256 provers fit the default stack, so only the identity bench
-// needs this. Call from a background queue (e.g. inside a `BenchCase.body`) so
-// the blocking wait does not stall the UI.
-func onLargeStack<T>(_ work: @escaping () -> T) -> T {
-    let box = ResultBox<T>()
-    let done = DispatchSemaphore(value: 0)
-    let thread = Thread {
-        box.value = work()
-        done.signal()
-    }
-    thread.stackSize = 32 * 1024 * 1024
-    thread.start()
-    done.wait()
-    return box.value!
 }

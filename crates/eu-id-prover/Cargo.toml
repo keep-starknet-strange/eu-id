@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-default = ["ec-coprocessor", "p256"]
+default = ["quantum-safe-mdoc"]
 # Forward Stwo's rayon paths to the SHA module. Cargo unifies the single `stwo`
 # dependency, so this also turns on the shared STARK prover's parallel paths for
 # the whole composition. Off by default: the honest baseline is single-threaded.
@@ -13,7 +13,6 @@ default = ["ec-coprocessor", "p256"]
 # pipeline — the laptop benchmark quantifies the delta.
 parallel = ["stwo-sha256/parallel"]
 gkr-spike = ["air-core/gkr-spike", "stwo-sha256/gkr-spike"]
-fri-sweep = ["stwo/tracing"]
 # `ec-coprocessor` is a P-256 issuer proving path, so it implies `p256`.
 ec-coprocessor = ["dep:eu-id-ec-coprocessor", "p256"]
 # Issuer signature schemes. Enabling a feature compiles in that issuer proving
@@ -88,34 +87,9 @@ tracing-subscriber = "0.3"
 # `Sig_structure`; `stwo-mldsa` (now a main dependency) natively verifies it.
 ml-dsa = "0.1.1"
 
-# The `eu-id` CLI drives the legacy P-256 identity pipeline, so it only
-# exists in builds that carry the classical stack.
-[[bin]]
-name = "eu-id"
-path = "src/bin/eu-id.rs"
-required-features = ["p256"]
-
-[[bench]]
-name = "identity_bench"
-harness = false
-
-[[bench]]
-name = "longfellow_equiv_bench"
-harness = false
-
-[[bench]]
-name = "mdoc_bench"
-harness = false
-
-[[example]]
-name = "fri_sweep"
-required-features = ["fri-sweep"]
-
-# Full-PQ mdoc perf probe (S3 campaign gate). Hosted build only:
-# --no-default-features --features "p256,ml-dsa".
+# Full-PQ mdoc performance probe.
 [[example]]
 name = "pq_perf_probe"
-required-features = ["ml-dsa"]
 
 [lints]
 workspace = true

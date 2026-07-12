@@ -761,15 +761,11 @@ dependencies = [
 name = "eu-id-ec-coprocessor"
 version = "0.1.0"
 dependencies = [
- "bincode",
  "blake2",
- "blake3",
- "ecdsa",
  "p256",
  "rand_chacha 0.3.1",
  "rayon",
  "serde",
- "sha2",
  "stwo-p256-utils",
 ]
 
@@ -777,14 +773,8 @@ dependencies = [
 name = "eu-id-ffi"
 version = "0.1.0"
 dependencies = [
- "bincode",
- "ecdsa",
  "eu-id-prover",
  "memory-stats",
- "p256",
- "sha2",
- "stwo",
- "stwo-p256",
  "stwo-sha256",
 ]
 
@@ -1913,16 +1903,6 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.2.17",
  "digest 0.10.7",
- "sha2-asm",
-]
-
-[[package]]
-name = "sha2-asm"
-version = "0.6.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b845214d6175804686b2bd482bcffe96651bb2d1200742b712003504a2dac1ab"
-dependencies = [
- "cc",
 ]
 
 [[package]]
@@ -2245,17 +2225,13 @@ name = "stwo-p256"
 version = "0.1.0"
 dependencies = [
  "air-core",
- "ecdsa",
- "hex",
  "itertools 0.12.1",
  "num-bigint",
  "num-integer",
  "num-traits",
- "p256",
  "rand 0.8.6",
  "rayon",
  "serde",
- "sha2",
  "stwo",
  "stwo-constraint-framework",
  "stwo-p256-utils",

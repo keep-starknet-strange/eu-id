@@ -414,7 +414,7 @@ fn blind_value_col(real: Vec<u32>, dummy: impl Fn(usize) -> u32) -> BaseColumn {
     let real_len = real.len();
     debug_assert!(real_len.is_power_of_two());
     real.into_iter()
-        .chain((0..real_len).map(|j| dummy(j)))
+        .chain((0..real_len).map(dummy))
         .map(BaseField::from)
         .collect()
 }

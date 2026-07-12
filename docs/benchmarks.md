@@ -274,23 +274,15 @@ pair-batching landed in commit `4dc2e56` ("Batch eligible LogUp columns in
 pairs"), which halves eligible interaction columns. The numbers above are the
 **post-batching** Phase-10 baseline; later tasks measure against them.
 
-## Reproduce the laptop numbers
+## Quantum-safe branch measurement
+
+The tables above are the historical classical-branch baseline. The
+quantum-safe branch's metric of record is the full mdoc probe:
 
 ```bash
-# Statistical timing (per-stage + full):
-cargo bench -p eu-id-prover
-
-# Memory + size + machine-readable JSON (single-threaded baseline):
-BENCH_LABEL=m4max-single cargo run --release -p eu-id-prover --example bench_report \
-    -- docs/benchmarks/laptop-m4max.json
-
-# Parallel delta:
-BENCH_LABEL=m4max-parallel cargo run --release -p eu-id-prover --example bench_report \
-    --features parallel -- docs/benchmarks/laptop-m4max-parallel.json
-
-# Proof-size byte-breakdown (Phase 10 baseline, §10.1):
-BENCH_BREAKDOWN=1 BENCH_LABEL=m4max cargo run --release -p eu-id-prover \
-    --example bench_report -- docs/benchmarks/proof-size-breakdown.json
+AIR_CORE_PROVE_TIMING=1 AIR_CORE_SHAPE_DUMP=1 RAYON_NUM_THREADS=1 \
+    cargo run --locked --release -p eu-id-prover --example pq_perf_probe
 ```
 
-`make bench` runs the criterion suite; `make bench-report` writes the JSON.
+`make perf` runs the same single-threaded probe without the optional timing and
+shape diagnostics.

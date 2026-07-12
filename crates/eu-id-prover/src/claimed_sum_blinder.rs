@@ -70,8 +70,8 @@ pub(crate) fn add_blinder_relation_entry<E: EvalAtRow>(
     m: QM31,
     negate: bool,
 ) {
-    let v_limbs = v.to_m31_array().map(|limb| E::F::from(limb));
-    let m_const = E::combine_ef(m.to_m31_array().map(|limb| E::F::from(limb)));
+    let v_limbs = v.to_m31_array().map(E::F::from);
+    let m_const = E::combine_ef(m.to_m31_array().map(E::F::from));
     let numerator = if negate { -m_const } else { m_const };
     eval.add_to_relation(RelationEntry::new(relation, numerator, &v_limbs));
 }

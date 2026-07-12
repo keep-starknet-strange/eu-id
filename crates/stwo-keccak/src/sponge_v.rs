@@ -824,7 +824,7 @@ pub fn generate_interaction_trace(
                 for e in lo + 1..hi {
                     let (n, d) = entry(coset, e);
                     n_acc = d * n_acc + n * d_acc;
-                    d_acc = d_acc * d;
+                    d_acc *= d;
                 }
                 num[lane] = n_acc;
                 den[lane] = d_acc;

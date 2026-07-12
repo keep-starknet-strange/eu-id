@@ -242,7 +242,7 @@ pub(crate) fn build_interaction_columns(
                     let (n, d) = lookup[row];
                     // num/den + n/d = (d·num + n·den) / (den·d)
                     num = d * num + n * den;
-                    den = den * d;
+                    den *= d;
                 }
                 num_arr[lane] = num;
                 den_arr[lane] = den;
@@ -1141,8 +1141,7 @@ pub fn generate_multi_consumer_interaction_trace(
                         let values: [BaseField; DIGEST_BYTES] =
                             std::array::from_fn(|i| BaseField::from(bytes[i]));
                         let denom = slot_relations[k].digest.digest.combine(&values);
-                        let num =
-                            -SecureField::from(BaseField::from(u32::from(is_last_block)));
+                        let num = -SecureField::from(BaseField::from(u32::from(is_last_block)));
                         all_lookups[cursor][slot] = (num, denom);
                     }
                     cursor += 1;

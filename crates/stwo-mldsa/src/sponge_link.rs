@@ -138,7 +138,7 @@ fn gen_lane0_fracs(entries: &[(bool, SecureField)]) -> (Vec<ColEval>, SecureFiel
     let (mut num, mut den) = fracs[0];
     for &(n, d) in &fracs[1..] {
         num = d * num + n * den;
-        den = den * d;
+        den *= d;
     }
     let mut n_lanes = [zero; N_LANES];
     let mut d_lanes = [one; N_LANES];

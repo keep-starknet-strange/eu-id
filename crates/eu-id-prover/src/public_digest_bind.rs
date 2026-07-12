@@ -407,11 +407,6 @@ mod tests {
 
     #[test]
     fn public_digest_bind_class_a_has_256_blind_rows_and_fresh_inactive_cells() {
-        assert!(
-            (1usize << PUBLIC_DIGEST_LOG_SIZE) - 1 >= 256,
-            "public digest Class A needs at least 256 blind rows"
-        );
-
         let first = trace_fingerprint(&public_digest_base_trace(&[0; 32]));
         let second = trace_fingerprint(&public_digest_base_trace(&[0; 32]));
         let zero = [M31::from_u32_unchecked(0); N_LANES];

@@ -7,22 +7,23 @@ Baseline: `ce26b934` (S9)
 
 - [x] Publish the clean S9 branch baseline to `origin/feat/quantum-safe`.
 - [x] Audit branch features, classical dependencies, SHA consumers, and campaign floors.
-- [ ] Remove P-256/ec-coprocessor crates from the quantum branch workspace and product manifests.
-- [ ] Make ML-DSA/quantum-safe the unconditional product build; remove obsolete product feature aliases.
-- [ ] Convert the performance probe and dependency gate to the branch's default quantum build.
-- [ ] Delete dormant P-256/ec-coprocessor product code and proof fields from `eu-id-prover`, `sdk`, and `eu-id-ffi`.
-- [ ] Run the focused quantum build/test/dependency gates.
+- [x] Remove P-256/ec-coprocessor crates from the quantum workspace and downstream product manifests.
+- [ ] Remove the final internal scheme aliases/cfg branches from `eu-id-prover` and delete the excluded
+      classical crate directories (the default product/dependency graph is already quantum-only).
+- [x] Convert the performance probe and dependency gate to the branch's default quantum build.
+- [x] Delete the legacy identity/nonce/coprocessor product API, SDK/FFI ABI, mobile UI, benches, and tests.
+- [x] Run the focused quantum build/test/dependency/lint gates.
 - [ ] Commit and push Q1.
 
 ## Milestone Q2 — remove the revocation SHA conveyor
 
-- [ ] Make `MdocRevocationRangeBind` provide `HOSTED_MSG_FIELD_ID` bytes directly from its private
+- [x] Make `MdocRevocationRangeBind` provide `HOSTED_MSG_FIELD_ID` bytes directly from its private
       `id_lo`/`id_hi` witness and public epoch.
-- [ ] Keep every private byte range-pinned in AIR after the SHA provider is removed.
-- [ ] Remove the revocation witness/slot/handles from the merged SHA prover and verifier.
-- [ ] Add focused claimed-sum/tamper coverage and retain the full revocation privacy/e2e rail.
-- [ ] Run focused tests, full quantum gates, shape dump, and single-thread A/B benchmark.
-- [ ] Document measured cells/columns/proof/prove/verify changes.
+- [x] Keep every private byte range-pinned in AIR after the SHA provider is removed.
+- [x] Remove the quantum revocation witness/slot/handles from the merged SHA prover and verifier.
+- [x] Add a direct-provider message-tamper negative and retain the full revocation privacy/e2e rail.
+- [x] Run focused tests, full quantum gates, shape dump, and single-thread benchmark.
+- [x] Document measured cells/columns/proof/prove/verify changes.
 - [ ] Commit and push Q2.
 
 ## Milestone Q3 — attribute-only small-load SHA
@@ -47,4 +48,16 @@ Baseline: `ce26b934` (S9)
 
 ## Review
 
-In progress.
+- Default workspace dependency tree is quantum-only; the only matched `rfc6979` is the allowed
+  Stwo `starknet-crypto` backend dependency.
+- Quantum product surface removed 17k+ lines of legacy identity/P-256/coprocessor code, tests,
+  benchmarks, ABI, and mobile UI.
+- Q2 shape: merged SHA is 1,098 columns at log 9 (was 1,199 at log 10); revocation range is
+  361 columns at log 4 because it now locally bit-pins the 16 private bound bytes.
+- Q2 total is 7,317 committed columns versus S9's 7,290: SHA saves 101 columns, local range
+  pinning adds 128, net +27. Measured proof 1,113,700 B (+4,428 B), prove 8,192 ms,
+  verify 16 ms. This is a deliberate architecture simplification/prerequisite for Q3, not a
+  performance win; Q3 must recover the small column regression along with the remaining target gap.
+- Remaining Q1 work is the internal `eu-id-prover` cfg/type collapse and physical deletion of the
+  three excluded classical crate directories. The shipped default product/API/build graph no longer
+  exposes them.

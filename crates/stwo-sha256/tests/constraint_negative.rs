@@ -191,7 +191,7 @@ impl EvalAtRow for LinearConstraintCollector<'_> {
             let n_slots = config.n_slots();
             if column == slot_starts_column_id(self.log_size, config.slot_log, n_slots) {
                 return BaseField::from(u32::from(
-                    natural % slot_rows == 0 && natural / slot_rows < n_slots,
+                    natural.is_multiple_of(slot_rows) && natural / slot_rows < n_slots,
                 ));
             }
             for s in 0..n_slots {

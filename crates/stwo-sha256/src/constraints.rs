@@ -994,9 +994,7 @@ impl FrameworkEval for Sha256Eval {
                     // boundary. Identical algebra to the single instance.
                     eval.add_constraint(is_first_block.clone() * b.clone());
                     eval.add_constraint(
-                        enabler.clone()
-                            * (E::F::one() - r0.clone())
-                            * (b.clone() - b_prev.clone()),
+                        enabler.clone() * (E::F::one() - r0.clone()) * (b.clone() - b_prev.clone()),
                     );
                     eval.add_constraint(chain_gate.clone() * (b.clone() - b_prev - E::F::one()));
                     Some(b)
@@ -1735,10 +1733,9 @@ mod tests {
         for b in 0..witness.blocks.len() {
             // IV binding / chain on the t = 0 row.
             let slot0 = Layout::round_row_slot(b, 0, log_size);
-            for j in 0..N_STATE_WORDS {
+            for (j, &iv) in IV.iter().enumerate().take(N_STATE_WORDS) {
                 let h_in = pair(&trace, Layout::h_in_word(j), slot0);
                 if b == 0 {
-                    let iv = IV[j];
                     assert_eq!(h_in.0 as u32, iv & 0xFFFF, "IV lo j={j}");
                     assert_eq!(h_in.1 as u32, iv >> 16, "IV hi j={j}");
                 } else {
@@ -1748,11 +1745,14 @@ mod tests {
                 }
             }
 
-            for t in 0..N_ROUNDS {
+            for (t, &round_constant) in K.iter().enumerate().take(N_ROUNDS) {
                 let slot = Layout::round_row_slot(b, t, log_size);
                 let d = state_word(&trace, log_size, b, t, 4, 0, a_new_c);
                 let h_state = state_word(&trace, log_size, b, t, 4, 4, e_new_c);
-                let k_t = (i64::from(K[t] & 0xFFFF), i64::from(K[t] >> 16));
+                let k_t = (
+                    i64::from(round_constant & 0xFFFF),
+                    i64::from(round_constant >> 16),
+                );
                 let w_t = pair(&trace, w_c, slot);
                 let sigma0 = pair(&trace, sigma0_c, slot);
                 let sigma1 = pair(&trace, sigma1_c, slot);
@@ -1962,7 +1962,7 @@ mod tests {
         res.push(is_length_only - (1 - is_marker) * is_length);
         res.push(is_marker_only - is_marker * (1 - is_length));
         // cumulative marker-word prefix
-        let mut cum = vec![0i64; WORDS_PER_BLOCK];
+        let mut cum = [0i64; WORDS_PER_BLOCK];
         for j in 1..WORDS_PER_BLOCK {
             cum[j] = cum[j - 1] + mword[j - 1];
         }
@@ -1971,9 +1971,9 @@ mod tests {
         // P.D byte assembly
         let mut sum_hi = 0i64;
         let mut sum_lo = 0i64;
-        for j in 0..WORDS_PER_BLOCK {
-            sum_hi += mword[j] * w(j).1;
-            sum_lo += mword[j] * w(j).0;
+        for (j, &marker_word) in mword.iter().enumerate().take(WORDS_PER_BLOCK) {
+            sum_hi += marker_word * w(j).1;
+            sum_lo += marker_word * w(j).0;
         }
         res.push(sum_hi - 256 * mbyte[0] - mbyte[1]);
         res.push(sum_lo - 256 * mbyte[2] - mbyte[3]);
@@ -1988,8 +1988,8 @@ mod tests {
             cum_b += bsel[k];
         }
         // P.G words after the marker are zero (length exception)
-        for j in 0..14 {
-            let gate = cum[j] + is_length_only;
+        for (j, &marker_prefix) in cum.iter().enumerate().take(14) {
+            let gate = marker_prefix + is_length_only;
             res.push(gate * w(j).0);
             res.push(gate * w(j).1);
         }

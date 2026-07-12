@@ -56,8 +56,8 @@ fn multi_slot_composition_round_trips() {
     let mut merged = Sha256MultiProver::new(refs, log_n_rows, config.clone(), shared.clone());
 
     let mut provers: [&mut dyn AirProver; 2] = [&mut sha_tables, &mut merged];
-    let proof = air_core::prove(&mut provers, PcsConfig::default())
-        .expect("multi-slot composition proves");
+    let proof =
+        air_core::prove(&mut provers, PcsConfig::default()).expect("multi-slot composition proves");
 
     let shared = SharedShaTableRelations::new();
     let mut table_verifier =
@@ -122,11 +122,7 @@ fn draw(n_slots: usize) -> Drawn {
     }
 }
 
-fn total(
-    drawn: &Drawn,
-    witnesses: &[Sha256Witness],
-    config: &MultiSlotConfig,
-) -> SecureField {
+fn total(drawn: &Drawn, witnesses: &[Sha256Witness], config: &MultiSlotConfig) -> SecureField {
     let refs: Vec<&Sha256Witness> = witnesses.iter().collect();
     let (_, claim) = generate_multi_consumer_interaction_trace(
         &drawn.relations,
@@ -142,7 +138,11 @@ fn total(
 /// total(exposures off). The 66 base table-use sites are identical in both,
 /// so the difference is exactly the digest yields + field yields + the
 /// field-byte Range16 uses.
-fn outstanding(drawn: &Drawn, witnesses: &[Sha256Witness], config: &MultiSlotConfig) -> SecureField {
+fn outstanding(
+    drawn: &Drawn,
+    witnesses: &[Sha256Witness],
+    config: &MultiSlotConfig,
+) -> SecureField {
     let plain = MultiSlotConfig::new(config.slot_log, plain_slots(config.n_slots()));
     total(drawn, witnesses, config) - total(drawn, witnesses, &plain)
 }
@@ -160,7 +160,11 @@ fn multi_slot_yields_balance_per_slot_and_reject_cross_slot_swap() {
     let (witnesses, config) = exposure_fixture();
     let drawn = draw(config.n_slots());
     let out = outstanding(&drawn, &witnesses, &config);
-    assert_ne!(out, SecureField::zero(), "exposures leave outstanding terms");
+    assert_ne!(
+        out,
+        SecureField::zero(),
+        "exposures leave outstanding terms"
+    );
 
     // Field-byte Range16 uses (2 per exposed byte column on the hot row,
     // positive) — cancel them with the matching negative terms.
@@ -200,8 +204,7 @@ fn multi_slot_yields_balance_per_slot_and_reject_cross_slot_swap() {
         for y in exposure.yields() {
             let block = &witnesses[s].blocks[y.block_idx];
             let limb = block.schedule[y.word_idx];
-            let byte =
-                stwo_sha256::field_exposure::word_be_bytes(limb.lo, limb.hi)[y.byte_in_word];
+            let byte = stwo_sha256::field_exposure::word_be_bytes(limb.lo, limb.hi)[y.byte_in_word];
             let denom = drawn.slot_relations[s].field.field.combine(&[
                 BaseField::from(y.field_id),
                 BaseField::from(y.byte_index),
@@ -214,7 +217,12 @@ fn multi_slot_yields_balance_per_slot_and_reject_cross_slot_swap() {
     let digest_require = |s: usize, rel_slot: usize| -> SecureField {
         let bytes = h_out_digest_bytes(&witnesses[s].blocks.last().unwrap().h_out);
         let values: Vec<BaseField> = bytes.iter().map(|&b| BaseField::from(b)).collect();
-        require(drawn.slot_relations[rel_slot].digest.digest.combine(&values))
+        require(
+            drawn.slot_relations[rel_slot]
+                .digest
+                .digest
+                .combine(&values),
+        )
     };
     let honest = out + cancel + digest_require(1, 1) + digest_require(2, 2);
     assert_eq!(

@@ -1457,10 +1457,7 @@ impl<'a> Sha256MultiProver<'a> {
     }
 }
 
-fn set_slot_handles(
-    handles: &[SlotHandles],
-    slot_relations: &[crate::relations::SlotIoRelations],
-) {
+fn set_slot_handles(handles: &[SlotHandles], slot_relations: &[crate::relations::SlotIoRelations]) {
     for (handle, relations) in handles.iter().zip(slot_relations) {
         if let Some(digest) = &handle.digest {
             digest.set(relations.digest.digest.clone());
@@ -1545,18 +1542,20 @@ impl AirProver for Sha256MultiProver<'_> {
     }
 
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>) {
-        let (evals, _ids, _log_sizes) = crate::preprocessed::generate_multi_consumer_preprocessed_trace(
-            self.log_n_rows,
-            &self.config,
-        );
+        let (evals, _ids, _log_sizes) =
+            crate::preprocessed::generate_multi_consumer_preprocessed_trace(
+                self.log_n_rows,
+                &self.config,
+            );
         tb.extend_evals(evals);
     }
 
     fn preprocessed_column_fingerprints(&mut self) -> Vec<PreprocessedColumnFingerprint> {
-        let (evals, ids, _log_sizes) = crate::preprocessed::generate_multi_consumer_preprocessed_trace(
-            self.log_n_rows,
-            &self.config,
-        );
+        let (evals, ids, _log_sizes) =
+            crate::preprocessed::generate_multi_consumer_preprocessed_trace(
+                self.log_n_rows,
+                &self.config,
+            );
         fingerprint_preprocessed_columns("stwo_sha256::Sha256MultiProver", &ids, &evals)
     }
 
@@ -1565,10 +1564,11 @@ impl AirProver for Sha256MultiProver<'_> {
         tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>,
         selected_ids: &[PreProcessedColumnId],
     ) {
-        let (evals, ids, _log_sizes) = crate::preprocessed::generate_multi_consumer_preprocessed_trace(
-            self.log_n_rows,
-            &self.config,
-        );
+        let (evals, ids, _log_sizes) =
+            crate::preprocessed::generate_multi_consumer_preprocessed_trace(
+                self.log_n_rows,
+                &self.config,
+            );
         if selected_ids == ids.as_slice() {
             tb.extend_evals(evals);
             return;
