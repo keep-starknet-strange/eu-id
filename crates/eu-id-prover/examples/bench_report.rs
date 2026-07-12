@@ -40,7 +40,7 @@
 //! A separate `BENCH_BREAKDOWN` mode decomposes the combined proof into its
 //! serialized `CommitmentSchemeProof` fields, attributes the width-linear streams
 //! (`queried_values` + OODS) to modules by committed-column count, and records the
-//! real over-the-wire (bzip2) transport size. It writes its own results file so
+//! real over-the-wire (zstd) transport size. It writes its own results file so
 //! the size baseline stays independent of the (run-to-run noisy) timing/memory
 //! stages above. Proof size is timing- and threading-independent, so it proves the
 //! pipeline once with no memory sampling.
@@ -56,8 +56,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
-
-use std::io::Write;
 
 use eu_id_prover::generator::PipelineWitness;
 use eu_id_prover::{
@@ -124,7 +122,7 @@ struct BreakdownReport {
 
 /// Per-field bincode byte sizes of the combined `stark_proof`'s inner
 /// `CommitmentSchemeProof`, the per-module attribution of the width-linear
-/// streams, and the real over-the-wire (bzip2) transport size. The
+/// streams, and the real over-the-wire (zstd) transport size. The
 /// size-reduction baseline — every later task is measured against this.
 #[derive(Serialize)]
 struct ByteBreakdown {
@@ -146,7 +144,7 @@ struct ByteBreakdown {
     /// The width-linear bytes living in the shared composition / quotient tree
     /// (tree 3+), not attributable to a single module.
     composition_width_bytes: u64,
-    /// bzip2-best of `proof_bincode_bytes` — the real Bluetooth payload (matches
+    /// zstd-12 of `proof_bincode_bytes` — the real Bluetooth payload (matches
     /// the SDK's `compress_stark_proof_for_ffi`).
     ffi_compressed_bytes: u64,
     /// `proof_bincode_bytes / ffi_compressed_bytes`.
@@ -463,12 +461,10 @@ fn bincode_len<T: serde::Serialize>(v: &T) -> u64 {
     bincode::serialized_size(v).expect("bincode serialized_size")
 }
 
-/// bzip2-best of `raw` — mirrors the SDK's `compress_stark_proof_for_ffi`, so the
+/// zstd-12 of `raw` — mirrors the SDK's `compress_stark_proof_for_ffi`, so the
 /// recorded over-the-wire size and ratio match the real Bluetooth payload.
-fn bzip2_best(raw: &[u8]) -> Vec<u8> {
-    let mut encoder = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::best());
-    encoder.write_all(raw).expect("bzip2 write");
-    encoder.finish().expect("bzip2 finish")
+fn zstd_wire(raw: &[u8]) -> Vec<u8> {
+    zstd::bulk::compress(raw, 12).expect("zstd compress")
 }
 
 /// A module's committed-column count in commitment tree `tree`
@@ -583,7 +579,7 @@ fn report_byte_breakdown() -> ByteBreakdown {
     let proof_bincode = bincode::serialize(&proof).expect("serialize proof");
     let proof_bincode_bytes = proof_bincode.len() as u64;
     let stark_proof_bincode_bytes = bincode_len(&proof.stark_proof);
-    let ffi_compressed_bytes = bzip2_best(&proof_bincode).len() as u64;
+    let ffi_compressed_bytes = zstd_wire(&proof_bincode).len() as u64;
     let compression_ratio = if ffi_compressed_bytes == 0 {
         0.0
     } else {
@@ -610,7 +606,7 @@ fn print_byte_breakdown(b: &ByteBreakdown) {
 
     println!("\n===== proof byte-breakdown (size baseline) =====");
     println!(
-        "whole Proof bincode: {:.1} KiB  |  over-the-wire (bzip2-best): {:.1} KiB  ({:.2}× ratio)",
+        "whole Proof bincode: {:.1} KiB  |  over-the-wire (zstd-12): {:.1} KiB  ({:.2}× ratio)",
         kib(b.proof_bincode_bytes),
         kib(b.ffi_compressed_bytes),
         b.compression_ratio,

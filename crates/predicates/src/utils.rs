@@ -64,8 +64,12 @@ pub(crate) fn field_const<E: EvalAtRow>(value: u32) -> E::F {
 /// M31's `[0, 2^31 − 1)` range, giving a uniform draw over the field.
 pub(crate) fn random_m31_cell() -> M31 {
     use rand::RngCore;
+    // thread_rng is a ChaCha12 CSPRNG seeded (and periodically reseeded) from
+    // the OS entropy source; it keeps the mask secret from the verifier while
+    // avoiding one getentropy syscall per drawn cell.
+    let mut rng = rand::thread_rng();
     loop {
-        let value = rand::rngs::OsRng.next_u32() & 0x7fff_ffff;
+        let value = rng.next_u32() & 0x7fff_ffff;
         if value < (1u32 << 31) - 1 {
             return M31::from_u32_unchecked(value);
         }

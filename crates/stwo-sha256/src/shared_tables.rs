@@ -177,7 +177,7 @@ impl ShaTableMultiplicities {
 /// `emit_blind` gates the numerator by `(1 − is_dummy)`, forcing it to `0` on
 /// every dummy row regardless of the random multiplicity committed there.
 fn blind_extend(real: Vec<u32>) -> Vec<u32> {
-    use rand::{rngs::OsRng, RngCore};
+    use rand::RngCore;
     let real_len = real.len();
     debug_assert!(
         real_len.is_power_of_two(),
@@ -185,7 +185,9 @@ fn blind_extend(real: Vec<u32>) -> Vec<u32> {
     );
     let mut out = real;
     out.reserve(real_len);
-    let mut rng = OsRng;
+    // OsRng-seeded ChaCha12 (thread_rng): one syscall per reseed instead of
+    // one per cell — this loop runs 2^16+ times per table.
+    let mut rng = rand::thread_rng();
     for _ in 0..real_len {
         // Full-field-width random mask cell (M31 reduces mod 2^31 − 1).
         out.push(rng.next_u32() % ((1u32 << 31) - 1));

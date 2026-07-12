@@ -55,9 +55,10 @@ const EXT: usize = SECURE_EXTENSION_DEGREE;
 /// Class-D blind multiplicities must stay secret from the verifier).
 /// Rejection-sampled like the per-module `random_m31` helpers elsewhere.
 fn random_m31() -> stwo::core::fields::m31::M31 {
-    use rand::{rngs::OsRng, RngCore};
+    use rand::RngCore;
+    let mut rng = rand::thread_rng();
     loop {
-        let candidate = OsRng.next_u32() & 0x7fff_ffff;
+        let candidate = rng.next_u32() & 0x7fff_ffff;
         if candidate != 0x7fff_ffff {
             return stwo::core::fields::m31::M31::from_u32_unchecked(candidate);
         }

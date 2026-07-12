@@ -22,6 +22,12 @@
 //! whole body runs inside `catch_unwind` and failure is surfaced via the
 //! `ok` field rather than a panic.
 
+
+// One allocator for every prover entry point on-device: mimalloc. System
+// malloc cost ~4% of single-core prove; the criterion benches already pin
+// mimalloc, so this keeps shipped and benched numbers on the same allocator.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;

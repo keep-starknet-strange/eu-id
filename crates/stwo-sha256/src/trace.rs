@@ -95,7 +95,7 @@ use crate::types::{
 };
 
 use crate::constants::WORD_BYTES as BYTES_PER_WORD;
-use rand::{rngs::OsRng, RngCore};
+use rand::RngCore;
 
 /// Words per 512-bit block: 16.
 pub const WORDS_PER_BLOCK: usize = 16;
@@ -669,11 +669,11 @@ fn generate_trace_with_fields_scalar_fallback_with_decoys(
 }
 
 fn decoy_witnesses_for_padding(n_real_rows: usize, n_rows: usize) -> Vec<Sha256Witness> {
-    decoy_witnesses_for_padding_with(n_real_rows, n_rows, &mut OsRng)
+    decoy_witnesses_for_padding_with(n_real_rows, n_rows, &mut rand::thread_rng())
 }
 
 /// Decoy-block generator with an injectable byte source. Production paths pass
-/// [`OsRng`] for fresh per-proof masking; the scalar/packed writer-equivalence
+/// the OsRng-seeded `thread_rng` for fresh per-proof masking; the scalar/packed writer-equivalence
 /// test passes a seeded RNG so both writers consume the *same* decoy witnesses
 /// (otherwise the boundary sigma-bit columns, which recompute from padding
 /// neighbours, would differ across two independent generations by design).

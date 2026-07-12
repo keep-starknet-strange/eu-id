@@ -20,7 +20,7 @@ use air_core::relations::{
 use air_core::{
     fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint, TreeLayout,
 };
-use p256::elliptic_curve::rand_core::{OsRng, RngCore};
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use stwo::core::air::Component;
 use stwo::core::channel::{Blake2sChannel, Channel};
@@ -700,8 +700,9 @@ impl AirProver for MdocWindowBind {
 }
 
 fn random_m31_cell() -> M31 {
+    let mut rng = rand::thread_rng();
     loop {
-        let value = OsRng.next_u32() & 0x7fff_ffff;
+        let value = rng.next_u32() & 0x7fff_ffff;
         if value < 2_147_483_647 {
             return M31::from_u32_unchecked(value);
         }

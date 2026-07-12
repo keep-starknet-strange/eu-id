@@ -28,9 +28,15 @@ identifier `id = LE64(SHA-256(MSO bytes)[0..8])`: the strict
 `id_lo < id < id_hi` range check, the id-to-MSO-SHA digest binding, the
 MSO-SHA-preimage-to-issuerAuth-payload linkage, and the revocation-authority
 P-256 sorted-pair signature over `SHA-256(LE64(id_lo) || LE64(id_hi) ||
-LE32(epoch))` are all part of the mdoc STARK when the TS13 revocation layout is
-enabled. The public statement carries only the revocation public key, epoch, and
-a range-layout flag; `id`, `id_lo`, and `id_hi` stay witness.
+LE32(epoch))` are all part of the mdoc proof when the TS13 revocation layout is
+enabled. Under the default `ec-coprocessor` feature the signature check rides
+the P4b coprocessor bundle as a third ECDSA instance set — the proof carries
+the instance (message hash, signature, key), the key is checked against the
+public revocation key, and the message hash is pinned to the in-STARK
+revocation-SHA digest via a `PublicDigestBind` module; the non-coprocessor
+build keeps the in-STARK P-256 AIR instance. The public statement carries only
+the revocation public key, epoch, and a range-layout flag; `id`, `id_lo`, and
+`id_hi` stay witness.
 
 Zero-knowledge privacy masking is implemented in the product mdoc proof path
 (P4c Classes A–E: perfectly masked blind-row cells, MAC/SHA decoys, 1-active-row

@@ -1,7 +1,7 @@
 use crate::circle_fft::{
     circle_data_sum, circle_encode, circle_encode_row, circle_evaluate, circle_product_fft,
     circle_product_ifft, circle_weight_coeffs, CircleColumnBasis, CircleGeom, CircleRsError,
-    CIRCLE_GEOM_L128, CIRCLE_GEOM_L64,
+    CIRCLE_GEOM_L128, CIRCLE_GEOM_L256, CIRCLE_GEOM_L64,
 };
 use crate::merkle::{commit_columns, verify_column, ColumnOpening, MerkleCommitment, MerkleError};
 use crate::rs::{rs_encode_padded, rs_evaluate, RsError};
@@ -106,7 +106,7 @@ impl LigeroParams {
         if self.code != LigeroCode::Circle {
             return None;
         }
-        [CIRCLE_GEOM_L64, CIRCLE_GEOM_L128]
+        [CIRCLE_GEOM_L64, CIRCLE_GEOM_L128, CIRCLE_GEOM_L256]
             .into_iter()
             .find(|geom| {
                 self.row_len == geom.data_slots
@@ -226,6 +226,26 @@ pub fn v3_circle_params() -> LigeroParams {
         codeword_len: CIRCLE_GEOM_L128.codeword_len,
         openings: 168,
         proximity_radius: 1726,
+        code: LigeroCode::Circle,
+    }
+}
+
+/// v4 ℓ=256 circle-FFT params: k = 512 (256 data + 256 value-pads per row),
+/// claim bound 256 + 512 + 2 = 770, e = 1662 (2e = 3324 < 4096 − 770 = 3326),
+/// openings 176. Same message/codeword/product domains as v3, so the
+/// claim-batch FFT sizes are unchanged; the row count (and with it the
+/// per-column openings that dominate proof size, plus the row-encode work)
+/// halves. Soundness ≈ 2^−132.9, dominated by the proximity term:
+/// (1 − 1662/4096)^176 = 2^−132.16; (2·512/4096)^176 = 2^−352;
+/// (771/4096)^176 = 2^−424.06; (4096+3)/2^256 = 2^−244. Pad budget
+/// 512 − 256 = 256 ≥ t = 176. (`v4_soundness_error_meets_target` pins it.)
+pub fn v4_circle_params() -> LigeroParams {
+    LigeroParams {
+        row_len: CIRCLE_GEOM_L256.data_slots,
+        degree_bound: CIRCLE_GEOM_L256.row_message_len,
+        codeword_len: CIRCLE_GEOM_L256.codeword_len,
+        openings: 176,
+        proximity_radius: 1662,
         code: LigeroCode::Circle,
     }
 }
@@ -1071,14 +1091,10 @@ enum ClaimBatchColumnEval {
         indices: Vec<usize>,
     },
     Circle {
-        /// Full length-`claim_degree_bound` basis per opened column — for the
-        /// batch coefficients.
+        /// Full length-`claim_degree_bound` basis per opened column — shared
+        /// by the batch coefficients and every row's interpolated weights.
         bases: Vec<CircleColumnBasis>,
-        /// The same bases folded through the weight-interpolation inverse
-        /// (length `data_slots`) — so a row's raw weights evaluate in ONE dot
-        /// product per column, skipping the per-row `data_slots × data_slots`
-        /// `circle_weight_coeffs` interpolation entirely (WO-P7).
-        weight_bases: Vec<CircleColumnBasis>,
+        geom: CircleGeom,
     },
 }
 
@@ -1101,14 +1117,7 @@ impl ClaimBatchColumnEval {
                         CircleColumnBasis::new(geom, index, len).map_err(LigeroError::Circle)
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                let weight_bases = bases
-                    .par_iter()
-                    .map(|basis| basis.fold_weight_inverse(geom))
-                    .collect();
-                Ok(Self::Circle {
-                    bases,
-                    weight_bases,
-                })
+                Ok(Self::Circle { bases, geom })
             }
         }
     }
@@ -1132,17 +1141,17 @@ impl ClaimBatchColumnEval {
     }
 
     /// Evaluates a row's batched weights at every opened column. For RS the
-    /// weights are themselves the codeword message; for the circle code they are
-    /// dotted directly against the folded weight bases — algebraically identical
-    /// to the old per-column `circle_evaluate(circle_weight_coeffs(w), index)`
-    /// but with the interpolation baked into the per-column precompute.
+    /// weights are themselves the codeword message; for the circle code the
+    /// weights interpolate to their `F_{data_slots}` coefficients in one
+    /// window IFFT (`O(d log d)` — the window is a twin-coset FFT domain) and
+    /// then dot against the shared per-column bases.
     fn eval_weights(&self, weights: &[Fp]) -> Result<Vec<Fp>, LigeroError> {
         match self {
             Self::Rs { .. } => self.eval_message(weights),
-            Self::Circle { weight_bases, .. } => Ok(weight_bases
-                .par_iter()
-                .map(|basis| basis.eval(weights))
-                .collect()),
+            Self::Circle { bases, geom } => {
+                let coeffs = circle_weight_coeffs(*geom, weights).map_err(LigeroError::Circle)?;
+                Ok(bases.par_iter().map(|basis| basis.eval(&coeffs)).collect())
+            }
         }
     }
 }
@@ -1497,6 +1506,32 @@ mod tests {
         assert!(
             weaker.soundness_error() > 2f64.powi(-132),
             "t = 167 should NOT reach 2^-132 (t = 168 is the exact minimum)"
+        );
+    }
+
+    /// v4 (ℓ=256) soundness pin: same target as v3, half the rows. The
+    /// dominant term is the proximity `(1 − e/n)^t = 2^-132.16`.
+    #[test]
+    fn v4_soundness_error_meets_target() {
+        let params = v4_circle_params();
+        assert!(params.validate().is_ok());
+        assert_eq!(params.openings, 176);
+        assert_eq!(params.proximity_radius, 1662);
+        assert_eq!(params.claim_degree_bound(), 770);
+        // Value-pad ZK budget: every opening consumes one per-row pad slot.
+        assert!(params.degree_bound - params.row_len >= params.openings);
+        let se = params.soundness_error();
+        assert!(
+            se <= 2f64.powi(-132),
+            "v4 soundness {se:e} (log2 {}) exceeds 2^-132",
+            se.log2()
+        );
+        // t = 175 misses the target: 176 is the exact minimum.
+        let mut weaker = params;
+        weaker.openings = 175;
+        assert!(
+            weaker.soundness_error() > 2f64.powi(-132),
+            "t = 175 should NOT reach 2^-132 (t = 176 is the exact minimum)"
         );
     }
 

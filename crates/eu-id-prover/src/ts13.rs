@@ -11,20 +11,21 @@ use crate::mdoc::{
     MdocCircuitStatement, MdocRevocationPublicInputs,
 };
 
-// Regenerated 2026-07-08 with the Class-D preprocessed root below (the circuit
-// tuple embeds the preprocessed_root, so this SHA-256(cbor(tuple)) moved with
-// it). Old value: ecd6e7cb2711f25f...b52a12b.
+// Regenerated 2026-07-08 with the coprocessor-revocation preprocessed root
+// below (the circuit tuple embeds the preprocessed_root, so this
+// SHA-256(cbor(tuple)) moved with it). Old value: aab012dad407305d...c14c25c.
 pub const TS13_PUBLISHED_AGE_OVER_18_CIRCUIT_HASH: &str =
-    "aab012dad407305d3d57d2a52357c9f734b2e31790f4248c1b1eb9a62c14c25c";
-// Regenerated 2026-07-08 after Class-D SHA-table blinding (p4c): the shared
-// SHA split-pack + range producers gained a Class-D `is_dummy` selector and a
-// doubled (blinded) domain, so the mdoc preprocessed tree — which contains the
-// SHA tables in the age_over_18 baseline circuit — moved. Value is the real
-// `commitments[0]` of the published N=1 revocation-enabled age_over_18 mdoc
-// proof (captured via ts13_evidence_pack_n1_measurements). Old value:
-// b8aaff9161a9d3d664228884...d7a58f. See tasks/p4c-leakage-table.md.
+    "fbd197ba982de84cc4a4850632d400d1d1c8709b4f9c79df63fac13a76b9b7f9";
+// Regenerated 2026-07-08 after routing the TS13 revocation ECDSA through the
+// P4b coprocessor: the in-STARK P-256 AIR instance (preprocessed namespace
+// "mdoc/ts13/revocation") left the tree-0 commitment, so the mdoc
+// preprocessed root moved. Value is the real `commitments[0]` of the
+// published N=1 revocation-enabled age_over_18 mdoc proof (captured via
+// ts13_evidence_pack_n1_measurements). Old value:
+// 3532fa24129acba9...8583169f (Class-D blinding repin, same day). See
+// tasks/p4c-leakage-table.md.
 pub const TS13_PUBLISHED_AGE_OVER_18_PREPROCESSED_ROOT: &[u8; 32] =
-    b"\x35\x32\xfa\x24\x12\x9a\xcb\xa9\xee\x65\x3e\xa1\x19\x79\xb6\xdc\x39\x18\x1b\x28\xf0\x22\x3e\x71\x0d\xed\x6d\x75\x85\x83\x16\x9f";
+    b"\xba\x94\x3f\x9d\xee\xd4\xcf\x5e\x0f\x19\xf1\xca\xfa\x3e\x40\x5f\xff\xe9\x21\x25\xda\xa8\xdf\x2d\x00\x01\x94\x7e\x55\xe8\xa8\xb7";
 pub const TS13_P4C_MIN_BLIND_ROWS: usize = 256;
 pub const TS13_P4C_MAX_OPENINGS: usize = 256;
 pub const TS13_P4C_MIN_DECOY_MESSAGE_BITS: usize = 512;
@@ -337,6 +338,13 @@ pub fn ts13_mdoc_zk_exposure_inventory() -> Vec<Ts13ZkExposure> {
             name: "revocation public key and epoch",
             classification: PublicByDesign,
             rationale: "caller-bound revocation statement",
+        },
+        Ts13ZkExposure {
+            name: "revocation ECDSA instance (pair message hash, signature)",
+            classification: PublicByDesign,
+            rationale: "proof-carried coprocessor instance; identical exposure to the \
+                        prior in-STARK claim's public inputs — the hash is dictionary- \
+                        matchable against a public sorted-pair list by design",
         },
         Ts13ZkExposure {
             name: "longfellow-libzk-v1 proof bytes",

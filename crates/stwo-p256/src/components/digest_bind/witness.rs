@@ -7,7 +7,7 @@
 //! eval emits them, paired into LogUp columns.
 
 use num_traits::{One, Zero};
-use rand::{rngs::OsRng, RngCore};
+use rand::RngCore;
 use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::SecureField;
 use stwo::core::poly::circle::CanonicCoset;
@@ -75,8 +75,9 @@ pub fn active_preprocessed_column(log_size: u32, active_rows: usize) -> ColumnEv
 }
 
 fn random_m31_cell() -> M31 {
+    let mut rng = rand::thread_rng();
     loop {
-        let value = OsRng.next_u32() & 0x7fff_ffff;
+        let value = rng.next_u32() & 0x7fff_ffff;
         if value < 2_147_483_647 {
             return M31::from_u32_unchecked(value);
         }

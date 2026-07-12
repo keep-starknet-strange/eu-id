@@ -14,7 +14,7 @@
 //!
 //! ## What the proof binds (§9.2)
 //! `prove_mdoc_pid` runs the product mdoc prover and returns an
-//! [`MdocProofEnvelope`]: the bzip2-compressed, bincode-serialized mdoc proof,
+//! [`MdocProofEnvelope`]: the zstd-compressed, bincode-serialized mdoc proof,
 //! the verifier-facing mdoc statement, and the canonical-CBOR bytes of the full
 //! [`ZkPublicStatement`]. The two layers bind complementary things:
 //!
@@ -35,11 +35,12 @@
 //! a dedicated large-stack thread the SDK owns; the apps call the UniFFI fn
 //! synchronously and do no thread handling of their own.
 
-use std::io::{Read, Write};
 
-use bzip2::read::BzDecoder;
-use bzip2::write::BzEncoder;
-use bzip2::Compression;
+
+// One allocator for every prover entry point on-device: mimalloc. See
+// eu-id-ffi — same rationale, this crate is its own cdylib link unit.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use ciborium::value::Value;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -670,7 +671,7 @@ fn encode_statement(s: &ZkPublicStatement) -> Vec<u8> {
 struct ProofEnvelope {
     /// Canonical CBOR of the full public statement (the envelope binding).
     statement_bytes: Vec<u8>,
-    /// bzip2-compressed bincode of the `eu_id_prover::Proof` (the STARK binding).
+    /// zstd-compressed bincode of the `eu_id_prover::Proof` (the STARK binding).
     stark_proof: Vec<u8>,
 }
 
@@ -738,25 +739,23 @@ fn map_prover_error(e: eu_id_prover::Error) -> ZkError {
     }
 }
 
+/// zstd level for the FFI transport envelope. Measured on the full TS13 N=1
+/// proof (4.66 MB): level 12 compresses to 3.95 MB in ~80 ms vs bzip2-9's
+/// 4.06 MB in ~390 ms, and decompresses ~8× faster — smaller wire payload AND
+/// less prover/verifier wall time. Level 19 saves only ~20 KB more for ~4× the
+/// compression time.
+const PROOF_ZSTD_LEVEL: i32 = 12;
+
 /// Compress the raw bincode STARK proof for the FFI transport envelope.
 fn compress_stark_proof_for_ffi(raw_bincode: &[u8]) -> Result<Vec<u8>, ZkError> {
-    let mut encoder = BzEncoder::new(Vec::new(), Compression::best());
-    encoder
-        .write_all(raw_bincode)
-        .map_err(|e| ZkError::Prove(format!("failed to compress proof: {e}")))?;
-    encoder
-        .finish()
-        .map_err(|e| ZkError::Prove(format!("failed to finish proof compression: {e}")))
+    zstd::bulk::compress(raw_bincode, PROOF_ZSTD_LEVEL)
+        .map_err(|e| ZkError::Prove(format!("failed to compress proof: {e}")))
 }
 
 /// Decompress the FFI transport proof payload back to raw bincode bytes.
 fn decompress_stark_proof_from_ffi(compressed: &[u8]) -> Result<Vec<u8>, ZkError> {
-    let mut decoder = BzDecoder::new(compressed);
-    let mut raw_bincode = Vec::new();
-    decoder
-        .read_to_end(&mut raw_bincode)
-        .map_err(|e| ZkError::Verify(format!("failed to decompress proof: {e}")))?;
-    Ok(raw_bincode)
+    zstd::stream::decode_all(compressed)
+        .map_err(|e| ZkError::Verify(format!("failed to decompress proof: {e}")))
 }
 
 /// Prove the public statement holds for the given witness.
@@ -1616,14 +1615,14 @@ mod tests {
     }
 
     #[test]
-    fn ffi_stark_proof_payload_is_bzip2_compressed() {
+    fn ffi_stark_proof_payload_is_zstd_compressed() {
         let raw_bincode = b"serialized stark proof bytes";
         let compressed = compress_stark_proof_for_ffi(raw_bincode).unwrap();
 
         assert!(
-            compressed.starts_with(b"BZh"),
-            "bzip2 payloads must carry the BZh stream header, got prefix {:?}",
-            &compressed[..compressed.len().min(3)]
+            compressed.starts_with(&[0x28, 0xB5, 0x2F, 0xFD]),
+            "zstd payloads must carry the zstd frame magic, got prefix {:?}",
+            &compressed[..compressed.len().min(4)]
         );
         assert_ne!(
             compressed, raw_bincode,
@@ -1670,7 +1669,7 @@ mod tests {
 
     #[test]
     fn verify_rejects_matching_statement_but_compressed_corrupt_stark_proof() {
-        // The FFI transport layer may be well-formed bzip2 while the decompressed
+        // The FFI transport layer may be well-formed zstd while the decompressed
         // bytes are not a valid STARK proof. That still rejects fail-closed.
         let s = sample_statement();
         let compressed_junk = compress_stark_proof_for_ffi(b"not a stark proof").unwrap();

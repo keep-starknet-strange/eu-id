@@ -773,7 +773,7 @@ fn write_round_row_lookups(
                 .collect();
 
             if field_exposure.needs_block_witness() {
-                for target_block in field_exposure.target_blocks() {
+                for &target_block in field_exposure.target_blocks() {
                     let selector =
                         SecureField::from(BaseField::from(u32::from(block_idx == target_block)));
                     for bytes in &word_bytes {

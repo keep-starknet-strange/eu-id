@@ -19,7 +19,7 @@ use ciborium::value::Value;
 use ecdsa::signature::{Signer, Verifier};
 use p256::ecdsa::{Signature as P256Signature, SigningKey, VerifyingKey};
 #[cfg(feature = "ec-coprocessor")]
-use p256::elliptic_curve::rand_core::{OsRng, RngCore};
+use rand::RngCore;
 use p256::pkcs8::DecodePublicKey;
 use p256::EncodedPoint;
 use predicates::nat::NationalityPredicate;
@@ -53,13 +53,17 @@ use stwo_constraint_framework::{
 use stwo_constraint_framework::{
     EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation, RelationEntry,
 };
+#[cfg(not(feature = "ec-coprocessor"))]
 use stwo_p256::components::digest_bind::module::{
     DigestBindInteractionClaim, DigestBindProver, DigestBindVerifier,
 };
+#[cfg(not(feature = "ec-coprocessor"))]
 use stwo_p256::components::digest_bind::SharedScalarZRelation;
+#[cfg(not(feature = "ec-coprocessor"))]
 use stwo_p256::public_inputs::PublicEcdsaInstance;
 use stwo_p256::types::{AffinePoint, EcdsaVerifyInput, Signature, U256};
 use stwo_p256::{proof::air::P256Prover, proof::P256ProofDraft};
+#[cfg(not(feature = "ec-coprocessor"))]
 use stwo_p256::{
     proof::air::P256Verifier,
     proof::{P256CurrentAirInteractionClaim, P256CurrentAirProofClaim},
@@ -604,6 +608,7 @@ pub fn demo_mdoc_module_shapes() -> Result<Vec<MdocModuleShape>, Error> {
     let coprocessor = MdocCoprocessorBindingProver::new(
         statement.issuer_input.clone(),
         statement.device_input.clone(),
+        None,
         mac_key_shares,
         mac_state,
     )?;
@@ -2987,10 +2992,23 @@ pub struct MdocCircuitProof {
     revocation_sha_interaction_claim: Option<Sha256InteractionClaim>,
     attribute_sha_log_n_rows: Vec<u32>,
     attribute_sha_interaction_claims: Vec<Sha256InteractionClaim>,
+    #[cfg(not(feature = "ec-coprocessor"))]
     revocation_p256_claim: Option<P256CurrentAirProofClaim>,
+    #[cfg(not(feature = "ec-coprocessor"))]
     revocation_p256_interaction_claim: Option<P256CurrentAirInteractionClaim>,
+    #[cfg(not(feature = "ec-coprocessor"))]
     revocation_bridge_log_size: Option<u32>,
+    #[cfg(not(feature = "ec-coprocessor"))]
     revocation_bridge_interaction_claim: Option<DigestBindInteractionClaim>,
+    /// TS13 revocation ECDSA instance proven by the P4b coprocessor. The
+    /// verifier's statement carries only a zero-signature placeholder, so the
+    /// instance rides here — the same exposure the in-STARK claim had. Its key
+    /// is checked against the public revocation key and its message hash is
+    /// pinned to the committed revocation-SHA digest.
+    #[cfg(feature = "ec-coprocessor")]
+    ts13_revocation_input: Option<EcdsaVerifyInput>,
+    #[cfg(feature = "ec-coprocessor")]
+    revocation_public_digest_bind_interaction_claim: Option<PublicDigestBindInteractionClaim>,
     #[cfg(not(feature = "ec-coprocessor"))]
     issuer_bridge_log_size: u32,
     #[cfg(not(feature = "ec-coprocessor"))]
@@ -3256,6 +3274,7 @@ fn expected_instance(input: &EcdsaVerifyInput) -> PublicEcdsaInstance<M31> {
     PublicEcdsaInstance::from_input(0, input)
 }
 
+#[cfg(not(feature = "ec-coprocessor"))]
 fn public_instance_key_matches(
     instance: &PublicEcdsaInstance<M31>,
     public_key: &AffinePoint,
@@ -4299,8 +4318,12 @@ impl AirProver for MdocRevocationRangeBind {
 struct MdocCoprocessorBindingProver {
     issuer_input: EcdsaVerifyInput,
     device_input: EcdsaVerifyInput,
+    /// TS13 revocation sorted-pair signature, proven as the bundle's third
+    /// ECDSA instance set when the statement enables revocation.
+    revocation_input: Option<EcdsaVerifyInput>,
     issuer_witness: eu_id_ec_coprocessor::ecdsa::Witness,
     device_witness: eu_id_ec_coprocessor::ecdsa::Witness,
+    revocation_witness: Option<eu_id_ec_coprocessor::ecdsa::Witness>,
     mac_key_shares: eu_id_ec_coprocessor::ecdsa::MdocP4bMacKeyShares,
     mac_state: MdocP4bMacSharedState,
     bundle: Option<eu_id_ec_coprocessor::ecdsa::ImplementedCircuitBundle>,
@@ -4311,7 +4334,7 @@ struct MdocCoprocessorBindingProver {
 fn random_mdoc_p4b_mac_key_shares() -> eu_id_ec_coprocessor::ecdsa::MdocP4bMacKeyShares {
     eu_id_ec_coprocessor::ecdsa::MdocP4bMacKeyShares(std::array::from_fn(|_| {
         let mut share = [0u8; 16];
-        OsRng.fill_bytes(&mut share);
+        rand::thread_rng().fill_bytes(&mut share);
         share
     }))
 }
@@ -4321,6 +4344,7 @@ impl MdocCoprocessorBindingProver {
     fn new(
         issuer_input: EcdsaVerifyInput,
         device_input: EcdsaVerifyInput,
+        revocation_input: Option<EcdsaVerifyInput>,
         mac_key_shares: eu_id_ec_coprocessor::ecdsa::MdocP4bMacKeyShares,
         mac_state: MdocP4bMacSharedState,
     ) -> Result<Self, Error> {
@@ -4328,11 +4352,26 @@ impl MdocCoprocessorBindingProver {
             .map_err(Error::CoprocessorWitness)?;
         let device_witness = crate::ec_coprocessor::generate_witness_from_stwo(&device_input)
             .map_err(Error::CoprocessorWitness)?;
+        // Generate AND check the revocation witness up front: a forged
+        // sorted-pair signature must surface as a prove-time `Err`, not as a
+        // panic when the bundle later re-runs `verify_witness`.
+        let revocation_witness = revocation_input
+            .as_ref()
+            .map(|input| {
+                let witness = crate::ec_coprocessor::generate_witness_from_stwo(input)
+                    .map_err(Error::CoprocessorWitness)?;
+                crate::ec_coprocessor::verify_witness_from_stwo(input, &witness)
+                    .map_err(Error::CoprocessorWitness)?;
+                Ok::<_, Error>(witness)
+            })
+            .transpose()?;
         Ok(Self {
             issuer_input,
             device_input,
+            revocation_input,
             issuer_witness,
             device_witness,
+            revocation_witness,
             mac_key_shares,
             mac_state,
             bundle: None,
@@ -4384,15 +4423,34 @@ impl AirProver for MdocCoprocessorBindingProver {
             crate::ec_coprocessor::issuer_key_projection_from_stwo(&self.issuer_input);
         let device_projection =
             crate::ec_coprocessor::message_hash_projection_from_stwo(&self.device_input);
-        crate::mix_coprocessor_tagged_projections(
-            channel,
-            &[
-                (b"issuer".as_slice(), &issuer_projection),
-                (b"device".as_slice(), &device_projection),
-            ],
-        )
-        .expect("mdoc coprocessor public projections mix");
+        // The revocation instance projects its full public input: message
+        // hash, signature, and key are all statement-recomputable at verify,
+        // and the message hash is additionally pinned to the revocation-SHA
+        // digest by `PublicDigestBind`.
+        let revocation_projection = self
+            .revocation_input
+            .as_ref()
+            .map(crate::ec_coprocessor::full_projection_from_stwo);
+        let mut tagged: Vec<(&[u8], &eu_id_ec_coprocessor::ecdsa::EcdsaPublicProjection)> = vec![
+            (b"issuer".as_slice(), &issuer_projection),
+            (b"device".as_slice(), &device_projection),
+        ];
+        if let Some(revocation_projection) = revocation_projection.as_ref() {
+            tagged.push((b"revocation".as_slice(), revocation_projection));
+        }
+        crate::mix_coprocessor_tagged_projections(channel, &tagged)
+            .expect("mdoc coprocessor public projections mix");
         let seed = crate::draw_coprocessor_seed(channel);
+        let revocation = match (self.revocation_input.as_ref(), revocation_projection.as_ref()) {
+            (Some(input), Some(projection)) => Some((
+                input,
+                projection,
+                self.revocation_witness
+                    .as_ref()
+                    .expect("revocation witness exists alongside the revocation input"),
+            )),
+            _ => None,
+        };
         let (bundle, profile) =
             crate::ec_coprocessor::prove_mdoc_p4b_circuit_bundle_from_stwo_profiled(
                 &self.issuer_input,
@@ -4401,6 +4459,7 @@ impl AirProver for MdocCoprocessorBindingProver {
                 &self.device_input,
                 &device_projection,
                 &self.device_witness,
+                revocation,
                 &self.mac_key_shares,
                 seed,
             )
@@ -4424,6 +4483,9 @@ impl AirProver for MdocCoprocessorBindingProver {
 struct MdocCoprocessorBindingVerifier {
     issuer_input: EcdsaVerifyInput,
     device_input: EcdsaVerifyInput,
+    /// Statement-recomputed TS13 revocation input; `Some` iff the statement
+    /// carries the revocation signature (layout-gated before verification).
+    revocation_input: Option<EcdsaVerifyInput>,
     bundle: eu_id_ec_coprocessor::ecdsa::ImplementedCircuitBundle,
     mac_state: MdocP4bMacSharedState,
     profile: Option<eu_id_ec_coprocessor::ecdsa::MdocP4bVerifyProfile>,
@@ -4464,18 +4526,24 @@ impl Air for MdocCoprocessorBindingVerifier {
             crate::ec_coprocessor::issuer_key_projection_from_stwo(&self.issuer_input);
         let device_projection =
             crate::ec_coprocessor::message_hash_projection_from_stwo(&self.device_input);
-        crate::mix_coprocessor_tagged_projections(
-            channel,
-            &[
-                (b"issuer".as_slice(), &issuer_projection),
-                (b"device".as_slice(), &device_projection),
-            ],
-        )
-        .map_err(VerificationError::InvalidStructure)?;
+        let revocation_projection = self
+            .revocation_input
+            .as_ref()
+            .map(crate::ec_coprocessor::full_projection_from_stwo);
+        let mut tagged: Vec<(&[u8], &eu_id_ec_coprocessor::ecdsa::EcdsaPublicProjection)> = vec![
+            (b"issuer".as_slice(), &issuer_projection),
+            (b"device".as_slice(), &device_projection),
+        ];
+        if let Some(revocation_projection) = revocation_projection.as_ref() {
+            tagged.push((b"revocation".as_slice(), revocation_projection));
+        }
+        crate::mix_coprocessor_tagged_projections(channel, &tagged)
+            .map_err(VerificationError::InvalidStructure)?;
         let seed = crate::draw_coprocessor_seed(channel);
         let profile = crate::ec_coprocessor::verify_mdoc_p4b_circuit_bundle_from_stwo_profiled(
             &issuer_projection,
             &device_projection,
+            revocation_projection.as_ref(),
             &self.bundle,
             seed,
         )
@@ -4522,6 +4590,7 @@ pub fn prove_mdoc_circuit_with_pcs_config(
     #[cfg(not(feature = "ec-coprocessor"))]
     let device_draft = single_p256_draft(statement.device_input.clone())?;
     let revocation_p256_input = ts13_revocation_p256_input(statement)?;
+    #[cfg(not(feature = "ec-coprocessor"))]
     let revocation_draft = revocation_p256_input
         .clone()
         .map(single_p256_draft)
@@ -4606,6 +4675,7 @@ pub fn prove_mdoc_circuit_with_pcs_config(
     let issuer_scalar_z = SharedScalarZRelation::new();
     #[cfg(not(feature = "ec-coprocessor"))]
     let device_scalar_z = SharedScalarZRelation::new();
+    #[cfg(not(feature = "ec-coprocessor"))]
     let revocation_scalar_z = statement
         .ts13_revocation_signature
         .as_ref()
@@ -4687,6 +4757,7 @@ pub fn prove_mdoc_circuit_with_pcs_config(
         }
         _ => None,
     };
+    #[cfg(not(feature = "ec-coprocessor"))]
     let mut revocation_p256 = revocation_draft
         .as_ref()
         .map(|draft| {
@@ -4739,7 +4810,9 @@ pub fn prove_mdoc_circuit_with_pcs_config(
         device_scalar_z,
         device_digest.clone(),
     );
+    #[cfg(not(feature = "ec-coprocessor"))]
     let mut revocation_bridge_log_size = None;
+    #[cfg(not(feature = "ec-coprocessor"))]
     let mut revocation_bridge = match (
         revocation_p256.as_ref(),
         revocation_scalar_z.clone(),
@@ -4761,6 +4834,16 @@ pub fn prove_mdoc_circuit_with_pcs_config(
     #[cfg(feature = "ec-coprocessor")]
     let mut device_public_digest_bind =
         PublicDigestBind::new(statement.device_input.message_hash.0, device_digest.clone());
+    // TS13 revocation under the coprocessor: the revocation ECDSA rides the
+    // P4b bundle as a third instance set, so the in-STARK P-256 AIR and its
+    // scalar-z bridge are gone. The signed message hash (recomputable by the
+    // verifier from the statement) is instead pinned to the committed
+    // revocation-SHA digest exactly like the device session digest above.
+    #[cfg(feature = "ec-coprocessor")]
+    let mut revocation_public_digest_bind = revocation_p256_input
+        .as_ref()
+        .zip(revocation_digest.clone())
+        .map(|(input, digest)| PublicDigestBind::new(input.message_hash.0, digest));
     let mut mdoc_window_bind = MdocWindowBind::new_for_attributes(
         mdoc_window_bind_rows_from(statement, Some(&extracted.issuer_sig_structure)),
         issuer_field.clone(),
@@ -4797,6 +4880,7 @@ pub fn prove_mdoc_circuit_with_pcs_config(
     let mut coprocessor = MdocCoprocessorBindingProver::new(
         statement.issuer_input.clone(),
         statement.device_input.clone(),
+        revocation_p256_input.clone(),
         mac_key_shares,
         mac_state,
     )?;
@@ -4878,6 +4962,7 @@ pub fn prove_mdoc_circuit_with_pcs_config(
             &mut device_sha,
             &mut device_public_digest_bind,
         ];
+        #[cfg(not(feature = "ec-coprocessor"))]
         if let Some(revocation_p256) = revocation_p256.as_mut() {
             modules.push(revocation_p256);
         }
@@ -4887,8 +4972,13 @@ pub fn prove_mdoc_circuit_with_pcs_config(
         if let Some(revocation_sha) = revocation_sha.as_mut() {
             modules.push(revocation_sha);
         }
+        #[cfg(not(feature = "ec-coprocessor"))]
         if let Some(revocation_bridge) = revocation_bridge.as_mut() {
             modules.push(revocation_bridge);
+        }
+        #[cfg(feature = "ec-coprocessor")]
+        if let Some(revocation_public_digest_bind) = revocation_public_digest_bind.as_mut() {
+            modules.push(revocation_public_digest_bind);
         }
         for sha in &mut attribute_sha {
             modules.push(sha);
@@ -4956,16 +5046,26 @@ pub fn prove_mdoc_circuit_with_pcs_config(
             .iter()
             .map(|sha| sha.interaction_claim().clone())
             .collect(),
+        #[cfg(not(feature = "ec-coprocessor"))]
         revocation_p256_claim: revocation_p256
             .as_ref()
             .map(|p256| p256.proof_claim().clone()),
+        #[cfg(not(feature = "ec-coprocessor"))]
         revocation_p256_interaction_claim: revocation_p256
             .as_ref()
             .map(|p256| p256.interaction_claim().clone()),
+        #[cfg(not(feature = "ec-coprocessor"))]
         revocation_bridge_log_size,
+        #[cfg(not(feature = "ec-coprocessor"))]
         revocation_bridge_interaction_claim: revocation_bridge
             .as_ref()
             .map(|bridge| bridge.interaction_claim().clone()),
+        #[cfg(feature = "ec-coprocessor")]
+        ts13_revocation_input: revocation_p256_input.clone(),
+        #[cfg(feature = "ec-coprocessor")]
+        revocation_public_digest_bind_interaction_claim: revocation_public_digest_bind
+            .as_ref()
+            .map(|bind| bind.interaction_claim().clone()),
         #[cfg(not(feature = "ec-coprocessor"))]
         issuer_bridge_log_size: issuer_bridge_log,
         #[cfg(not(feature = "ec-coprocessor"))]
@@ -5100,10 +5200,27 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
         || proof.ts13_revocation_range_interaction_claim.is_some() != has_revocation_range
         || proof.revocation_sha_log_n_rows.is_some() != has_revocation_signature
         || proof.revocation_sha_interaction_claim.is_some() != has_revocation_signature
-        || proof.revocation_p256_claim.is_some() != has_revocation_signature
+    {
+        return Err(Error::Verify(
+            "mdoc proof revocation layout mismatch".to_string(),
+        ));
+    }
+    #[cfg(not(feature = "ec-coprocessor"))]
+    if proof.revocation_p256_claim.is_some() != has_revocation_signature
         || proof.revocation_p256_interaction_claim.is_some() != has_revocation_signature
         || proof.revocation_bridge_log_size.is_some() != has_revocation_signature
         || proof.revocation_bridge_interaction_claim.is_some() != has_revocation_signature
+    {
+        return Err(Error::Verify(
+            "mdoc proof revocation layout mismatch".to_string(),
+        ));
+    }
+    #[cfg(feature = "ec-coprocessor")]
+    if proof.ts13_revocation_input.is_some() != has_revocation_signature
+        || proof
+            .revocation_public_digest_bind_interaction_claim
+            .is_some()
+            != has_revocation_signature
     {
         return Err(Error::Verify(
             "mdoc proof revocation layout mismatch".to_string(),
@@ -5133,6 +5250,7 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
     let issuer_scalar_z = SharedScalarZRelation::new();
     #[cfg(not(feature = "ec-coprocessor"))]
     let device_scalar_z = SharedScalarZRelation::new();
+    #[cfg(not(feature = "ec-coprocessor"))]
     let revocation_scalar_z = has_revocation_signature.then(SharedScalarZRelation::new);
 
     #[cfg(not(feature = "ec-coprocessor"))]
@@ -5148,6 +5266,7 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
     )
     .with_preprocessed_namespace("mdoc/device")
     .with_z_binding(device_scalar_z.clone());
+    #[cfg(not(feature = "ec-coprocessor"))]
     let mut revocation_p256 = match (
         proof.revocation_p256_claim.clone(),
         proof.revocation_p256_interaction_claim.clone(),
@@ -5175,6 +5294,22 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
         }
         _ => None,
     };
+    // Coprocessor mode: the revocation ECDSA is the bundle's third instance
+    // set. The proof-carried instance must use the public revocation key —
+    // the message hash it claims is pinned to the committed revocation-SHA
+    // digest by `PublicDigestBind` below, and the coprocessor proves the
+    // signature equation over the projected instance.
+    #[cfg(feature = "ec-coprocessor")]
+    if let Some(carried) = proof.ts13_revocation_input.as_ref() {
+        let revocation = statement.ts13_revocation.as_ref().ok_or_else(|| {
+            Error::Verify("revocation P-256 proof requires public revocation inputs".to_string())
+        })?;
+        if carried.public_key.x.0 != revocation.revocation_public_key.x.0
+            || carried.public_key.y.0 != revocation.revocation_public_key.y.0
+        {
+            return Err(Error::P256InstanceMismatch);
+        }
+    }
     if proof.stark_proof.config != expected_pcs_config {
         return Err(Error::WeakConfig {
             got: proof.stark_proof.config,
@@ -5283,6 +5418,7 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
         device_digest,
         proof.device_public_digest_bind_interaction_claim.clone(),
     );
+    #[cfg(not(feature = "ec-coprocessor"))]
     let mut revocation_bridge = match (
         proof.revocation_bridge_log_size,
         proof.revocation_bridge_interaction_claim.clone(),
@@ -5305,6 +5441,21 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
             revocation_scalar_z,
             revocation_digest,
         )),
+        _ => None,
+    };
+    #[cfg(feature = "ec-coprocessor")]
+    let mut revocation_public_digest_bind = match (
+        proof.ts13_revocation_input.as_ref(),
+        proof.revocation_public_digest_bind_interaction_claim.clone(),
+        revocation_digest,
+    ) {
+        (Some(carried), Some(interaction_claim), Some(revocation_digest)) => {
+            Some(PublicDigestBind::verifier(
+                carried.message_hash.0,
+                revocation_digest,
+                interaction_claim,
+            ))
+        }
         _ => None,
     };
     let mut mdoc_window_bind = MdocWindowBind::verifier_for_attributes(
@@ -5381,6 +5532,7 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
     let mut coprocessor = MdocCoprocessorBindingVerifier {
         issuer_input: statement.issuer_input.clone(),
         device_input: statement.device_input.clone(),
+        revocation_input: proof.ts13_revocation_input.clone(),
         bundle: proof
             .coprocessor_bundle
             .clone()
@@ -5427,6 +5579,7 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
         &mut device_sha,
         &mut device_public_digest_bind,
     ];
+    #[cfg(not(feature = "ec-coprocessor"))]
     if let Some(revocation_p256) = revocation_p256.as_mut() {
         modules.push(revocation_p256);
     }
@@ -5436,8 +5589,13 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
     if let Some(revocation_sha) = revocation_sha.as_mut() {
         modules.push(revocation_sha);
     }
+    #[cfg(not(feature = "ec-coprocessor"))]
     if let Some(revocation_bridge) = revocation_bridge.as_mut() {
         modules.push(revocation_bridge);
+    }
+    #[cfg(feature = "ec-coprocessor")]
+    if let Some(revocation_public_digest_bind) = revocation_public_digest_bind.as_mut() {
+        modules.push(revocation_public_digest_bind);
     }
     for sha in &mut attribute_sha {
         modules.push(sha);
@@ -6130,6 +6288,95 @@ mod coprocessor_tests {
             first_bundle.root_b, second_bundle.root_b,
             "same-witness mdoc proofs reused group-B Ligero root"
         );
+    }
+
+    /// TS13 revocation fixture: N=1 age_over_18 value equality with a
+    /// sorted-pair revocation witness, mirroring the evidence-pack tuple.
+    fn revocation_proof() -> (MdocCircuitProof, MdocCircuitStatement) {
+        use ecdsa::signature::hazmat::PrehashSigner;
+        use p256::ecdsa::SigningKey;
+
+        let mut value_bytes = Vec::new();
+        ciborium::ser::into_writer(&Value::Bool(true), &mut value_bytes)
+            .expect("age_over_18 value encodes");
+        let fixture = demo_mdoc_circuit_fixture_with_attributes(vec![MdocRequestedAttribute {
+            element_identifier: "age_over_18".to_string(),
+            mode: MdocDisclosureMode::ValueEquality(value_bytes),
+        }]);
+        let signing_key = SigningKey::from_bytes((&[41u8; 32]).into()).expect("revocation key");
+        let encoded = signing_key.verifying_key().to_encoded_point(false);
+        let x: [u8; 32] = encoded.x().expect("x")[..].try_into().expect("x len");
+        let y: [u8; 32] = encoded.y().expect("y")[..].try_into().expect("y len");
+        let epoch = 51;
+        let id = crate::ts13::ts13_mso_derived_revocation_id(&fixture.extracted.mso);
+        let (id_lo, id_hi) = (id - 1, id + 1);
+        let message_hash = crate::ts13::ts13_revocation_message_hash(id_lo, id_hi, epoch);
+        let pair_signature: p256::ecdsa::Signature = signing_key
+            .sign_prehash(&message_hash)
+            .expect("revocation prehash signs");
+        let r: [u8; 32] = pair_signature.r().to_bytes().into();
+        let s: [u8; 32] = pair_signature.s().to_bytes().into();
+        let statement = fixture
+            .statement
+            .clone()
+            .with_ts13_revocation(MdocRevocationPublicInputs {
+                revocation_public_key: AffinePoint {
+                    x: U256(x),
+                    y: U256(y),
+                },
+                epoch,
+            })
+            .with_ts13_revocation_range(MdocRevocationRangeWitness { id, id_lo, id_hi })
+            .with_ts13_revocation_signature(Signature {
+                r: U256(r),
+                s: U256(s),
+            });
+        let proof =
+            prove_mdoc_circuit(&fixture.extracted, &statement).expect("revocation mdoc proves");
+        verify_mdoc_circuit(&proof, &statement).expect("revocation mdoc verifies");
+        (proof, statement)
+    }
+
+    #[test]
+    #[ignore = "slow: proves the TS13 revocation tuple and tampers the carried ECDSA instance"]
+    fn revocation_carried_instance_tampering_fails_closed() {
+        let (proof, statement) = revocation_proof();
+
+        // Flipped message hash: the coprocessor projection and the committed
+        // revocation-SHA digest bind must both reject it.
+        let mut tampered = proof.clone();
+        let carried = tampered
+            .ts13_revocation_input
+            .as_mut()
+            .expect("revocation instance rides in the proof");
+        carried.message_hash.0[0] ^= 1;
+        assert_verify_rejects("tampered revocation message hash", &tampered, &statement);
+
+        // Flipped public key: must fail the statement key equality check.
+        let mut tampered = proof.clone();
+        let carried = tampered
+            .ts13_revocation_input
+            .as_mut()
+            .expect("revocation instance rides in the proof");
+        carried.public_key.x.0[0] ^= 1;
+        assert_verify_rejects("tampered revocation public key", &tampered, &statement);
+
+        // Flipped signature half: the bundle's projected instance no longer
+        // matches the committed rows.
+        let mut tampered = proof.clone();
+        let carried = tampered
+            .ts13_revocation_input
+            .as_mut()
+            .expect("revocation instance rides in the proof");
+        carried.signature.r.0[0] ^= 1;
+        assert_verify_rejects("tampered revocation signature", &tampered, &statement);
+
+        // Stripped instance: layout gate must reject a revocation statement
+        // whose proof carries no revocation instance.
+        let mut tampered = proof.clone();
+        tampered.ts13_revocation_input = None;
+        tampered.revocation_public_digest_bind_interaction_claim = None;
+        assert_verify_rejects("stripped revocation instance", &tampered, &statement);
     }
 }
 

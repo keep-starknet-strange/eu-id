@@ -28,6 +28,9 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 bindgen = ["uniffi/cli"]
 
 [dependencies]
+# Production allocator — see eu-id-ffi: keeps SDK numbers on the same
+# allocator the benches measure.
+mimalloc = { workspace = true }
 # The prover's relying-party types and entry points. The §9.1 contract mapping
 # constructs `Credential` / `Policy` / `PublicStatement` / `Date` / `IssuerKey` /
 # `AffinePoint` from the UniFFI types; Phase F wires the SDK product path
@@ -46,7 +49,7 @@ serde = { workspace = true }
 bincode = "1"
 # FFI transport compression: the SDK keeps its exported byte API stable while
 # compressing the inner bincode `Proof` payload carried in `ProofEnvelope`.
-bzip2 = "0.6"
+zstd = "0.13"
 sha2 = "0.10"
 
 [[bin]]

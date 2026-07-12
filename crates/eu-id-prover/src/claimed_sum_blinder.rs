@@ -22,7 +22,7 @@
 //! boundary constraint at OODS, so the pair is bound — there is no free
 //! claimed-sum term (the P4b blind_claim-hole lesson).
 
-use p256::elliptic_curve::rand_core::{OsRng, RngCore};
+use rand::RngCore;
 use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::{QM31, SECURE_EXTENSION_DEGREE};
 use stwo::prover::backend::simd::m31::PackedM31;
@@ -42,8 +42,9 @@ relation!(ClaimedSumBlinderRelation, SECURE_EXTENSION_DEGREE);
 /// blinder must stay secret from the verifier). Rejection-sampled like the
 /// per-module `random_m31_cell` helpers.
 fn random_m31() -> M31 {
+    let mut rng = rand::thread_rng();
     loop {
-        let candidate = OsRng.next_u32() & 0x7fff_ffff;
+        let candidate = rng.next_u32() & 0x7fff_ffff;
         if candidate != 0x7fff_ffff {
             return M31::from_u32_unchecked(candidate);
         }

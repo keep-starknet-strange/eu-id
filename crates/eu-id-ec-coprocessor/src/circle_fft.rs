@@ -29,9 +29,10 @@
 //!   ([`circle_weight_coeffs`], via a precomputed `data_slots`×`data_slots`
 //!   inverse).
 //!
-//! WO-P6: the whole module is parametrized by a [`CircleGeom`] so two aspect
+//! WO-P6: the whole module is parametrized by a [`CircleGeom`] so the aspect
 //! ratios coexist — ℓ=64 (v2: 64 data / 256 message / 2048 codeword / 512
-//! product) and ℓ=128 (v3: 128 / 512 / 4096 / 1024). Every `Tables`/
+//! product), ℓ=128 (v3: 128 / 512 / 4096 / 1024), and ℓ=256 (v4: 256 / 512 /
+//! 4096 / 1024). Every `Tables`/
 //! `DataWindow` is cached per geometry; the universal basis is shared.
 
 use std::collections::HashMap;
@@ -88,6 +89,19 @@ pub const CIRCLE_GEOM_L64: CircleGeom = CircleGeom {
 /// product domain 1024 (smallest pow2 > 642).
 pub const CIRCLE_GEOM_L128: CircleGeom = CircleGeom {
     data_slots: 128,
+    row_message_len: 512,
+    codeword_len: 4096,
+    product_domain_len: 1024,
+};
+
+/// ℓ=256 geometry (v4 params): same message/codeword/product domains as
+/// ℓ=128, twice the data slots per row. Rows halve, so the per-column
+/// openings (the dominant proof-size slice) halve; the claim bound moves to
+/// 256 + 512 + 2 = 770, still under the same 1024 product domain, so the
+/// claim-batch FFT sizes are unchanged. The per-row value-pad budget drops to
+/// 512 − 256 = 256, which still covers the opening count (t = 176).
+pub const CIRCLE_GEOM_L256: CircleGeom = CircleGeom {
+    data_slots: 256,
     row_message_len: 512,
     codeword_len: 4096,
     product_domain_len: 1024,
@@ -198,7 +212,6 @@ struct Tables {
 impl Tables {
     fn new(log_n: usize) -> Self {
         let n = 1usize << log_n;
-        let half = n / 2;
         let q = generator(log_n);
         let step = circle_double(q);
         let mut domain = Vec::with_capacity(n);
@@ -208,7 +221,19 @@ impl Tables {
             point = circle_add(point, step);
         }
         debug_assert_eq!(point, q, "domain must wrap after n steps");
+        Self::from_domain(log_n, domain)
+    }
 
+    /// Builds the twiddle tower for an explicit mirror-paired domain
+    /// (`domain[n-1-i] = -domain[i]`). The recursion only uses the point set
+    /// and the doubling map, so it serves both the canonical domains
+    /// (`Tables::new`) and twin-coset sub-domains such as the data window
+    /// (`weight_window`); the FFT/IFFT roundtrip tests pin correctness per
+    /// domain.
+    fn from_domain(log_n: usize, domain: Vec<CirclePoint>) -> Self {
+        let n = 1usize << log_n;
+        debug_assert_eq!(domain.len(), n);
+        let half = n / 2;
         let mut tw: Vec<Vec<Fp>> = Vec::with_capacity(log_n);
         tw.push(domain[..half].iter().map(|p| p.y).collect());
         let mut cur: Vec<Fp> = domain[..half].iter().map(|p| p.x).collect();
@@ -514,113 +539,71 @@ impl CircleColumnBasis {
             .fold(Fp::ZERO, |acc, (&c, &b)| acc + c * b)
     }
 
-    /// Folds this column's basis through the weight-interpolation inverse so a
-    /// raw weight vector evaluates in one dot product (WO-P7): for weights `w`,
-    /// `W_r(P) = basis · (M⁻¹ w) = (M⁻ᵀ basis) · w`. Returns
-    /// `folded[c] = Σ_j inv[j][c] · basis[j]` (length `data_slots`), so
-    /// [`CircleColumnBasis::eval`] of `folded` against raw weights equals
-    /// `circle_evaluate(circle_weight_coeffs(w), index)` — without the per-row
-    /// `data_slots × data_slots` interpolation. Precompute once per column.
-    pub fn fold_weight_inverse(&self, geom: CircleGeom) -> Self {
-        let window = data_window(geom);
-        let inv = &window.interpolation_inverse; // inv[j][c], j,c < data_slots
-        let folded = (0..geom.data_slots)
-            .map(|c| {
-                inv.iter()
-                    .zip(&self.basis)
-                    .fold(Fp::ZERO, |acc, (row, &b)| acc + row[c] * b)
-            })
-            .collect();
-        Self { basis: folded }
-    }
 }
 
 struct DataWindow {
-    start: usize,
-    /// Values at the window's `data_slots` points -> unique `F_{data_slots}`
-    /// interpolant, as a `data_slots`×`data_slots` matrix (row-major:
-    /// coeffs[j] = sum_c inv[j][c] * values[c]).
-    interpolation_inverse: Vec<Vec<Fp>>,
-}
-
-/// Inverts a square matrix over Fp by Gauss–Jordan; None if singular.
-fn invert_matrix(matrix: &[Vec<Fp>]) -> Option<Vec<Vec<Fp>>> {
-    let n = matrix.len();
-    let mut a: Vec<Vec<Fp>> = matrix.to_vec();
-    let mut inv: Vec<Vec<Fp>> = (0..n)
-        .map(|i| {
-            (0..n)
-                .map(|j| if i == j { Fp::ONE } else { Fp::ZERO })
-                .collect()
-        })
-        .collect();
-    for col in 0..n {
-        let pivot = (col..n).find(|&r| a[r][col] != Fp::ZERO)?;
-        a.swap(col, pivot);
-        inv.swap(col, pivot);
-        let scale = a[col][col].inverse()?;
-        for j in 0..n {
-            a[col][j] = a[col][j] * scale;
-            inv[col][j] = inv[col][j] * scale;
-        }
-        for row in 0..n {
-            if row == col || a[row][col] == Fp::ZERO {
-                continue;
-            }
-            let factor = a[row][col];
-            for j in 0..n {
-                a[row][j] = a[row][j] - factor * a[col][j];
-                inv[row][j] = inv[row][j] - factor * inv[col][j];
-            }
-        }
-    }
-    Some(inv)
+    /// FFT tables of the window domain: the CANONICAL `data_slots`-point
+    /// circle domain — disjoint from the message, codeword, and product
+    /// domains (distinct 2-Sylow orders), like those domains are from each
+    /// other. An [`ifft`] of the `data_slots` values yields the unique
+    /// `F_{data_slots}` interpolant in the domain-independent universal
+    /// basis in `O(d log d)` — this is what makes both the prover's per-row
+    /// weight interpolation and the verifier's cold path cheap.
+    tables: &'static Tables,
+    /// The window's vanishing polynomial `Z_W = π^(log d − 1)(x)` (the single
+    /// universal-basis element `b_{data_slots}`), evaluated on the message
+    /// domain. Row pads are committed as `Z_W · P` with `P` a uniform
+    /// `F_{k−d}` element, so a padded row still agrees with its data on every
+    /// window point (`Z_W` vanishes there) while the pad space keeps full
+    /// rank `k − d` (polynomial multiplication is injective) and every
+    /// codeword-domain evaluation stays masked (`Z_W ≠ 0` off the window by
+    /// the point-order argument; `zw_vanishes_on_window_only` pins both).
+    zw_on_message: Vec<Fp>,
 }
 
 fn build_data_window(geom: CircleGeom) -> DataWindow {
-    // Setup asserts (Q-025): message/codeword domains are disjoint because
-    // every codeword point has exact order 2·codeword_len and every message
-    // point exact order 2·row_message_len (odd multiples of exact-order
-    // generators, distinct orders); the generator order assertions live in
-    // `generator`. Domain-disjointness sanity check: the two log sizes differ,
-    // so the 2-Sylow orders differ and the sets cannot intersect.
+    // Setup asserts (Q-025): all four domains are pairwise disjoint because
+    // every point of a canonical domain has the exact order of its generator
+    // (odd multiples), and the four log sizes differ.
     assert_ne!(
         geom.message_log_n(),
         geom.codeword_log_n(),
         "message and codeword domains must have distinct orders (disjointness)"
     );
+    let d = geom.data_slots;
+    let window_log_n = d.trailing_zeros() as usize;
+    assert_ne!(
+        window_log_n,
+        geom.message_log_n(),
+        "window and message domains must have distinct orders (disjointness)"
+    );
+    assert_ne!(
+        window_log_n,
+        geom.codeword_log_n(),
+        "window and codeword domains must have distinct orders (disjointness)"
+    );
     assert!(
         geom.product_domain_len > geom.data_slots + geom.row_message_len + 1,
         "product domain must exceed the claim bound"
     );
-    let tables = message_tables(geom);
-    // Deterministically pick the first natural-order window of `data_slots`
-    // message-domain points on which F_{data_slots} interpolation is
-    // invertible (slides on singularity).
-    for start in 0..=(geom.row_message_len - geom.data_slots) {
-        let matrix: Vec<Vec<Fp>> = (0..geom.data_slots)
-            .map(|c| {
-                let point = tables.domain[start + c];
-                (0..geom.data_slots)
-                    .map(|j| {
-                        let mut unit = vec![Fp::ZERO; j + 1];
-                        unit[j] = Fp::ONE;
-                        evaluate_at(&unit, point)
-                    })
-                    .collect()
-            })
-            .collect();
-        if let Some(interpolation_inverse) = invert_matrix(&matrix) {
-            return DataWindow {
-                start,
-                interpolation_inverse,
-            };
-        }
+    let tables = tables_for(window_log_n);
+    // Z_W(x) = π^(log d − 1)(x): x(2^(log d − 1)·P) is the x-coordinate of an
+    // exact-order-4 point for every window point P (order 2d), i.e. 0.
+    let zw_on_message = message_tables(geom)
+        .domain
+        .iter()
+        .map(|point| {
+            let mut x = point.x;
+            for _ in 0..window_log_n.saturating_sub(1) {
+                x = x.square() + x.square() - Fp::ONE;
+            }
+            x
+        })
+        .collect();
+    DataWindow {
+        tables,
+        zw_on_message,
     }
-    panic!(
-        "no invertible {}-point data window in the message domain",
-        geom.data_slots
-    );
 }
 
 fn data_window(geom: CircleGeom) -> &'static DataWindow {
@@ -632,9 +615,12 @@ fn data_window(geom: CircleGeom) -> &'static DataWindow {
         .or_insert_with(|| Box::leak(Box::new(build_data_window(geom))))
 }
 
-/// Encodes one witness row: `data` (at most `data_slots` values) at the
-/// data-window slots, `pads` filling the other message slots. Returns the
-/// row's `row_message_len` coefficients and its codeword.
+/// Encodes one witness row: the unique `F_{data_slots}` interpolant through
+/// `(window point c, data[c])`, masked by `Z_W · P` with `P` a uniform
+/// `F_{k−d}` pad element (`k − d` draws — the per-row ZK pad budget). The row
+/// agrees with the data on every window point and every off-window
+/// evaluation is fully masked. Returns the row's `row_message_len`
+/// coefficients and its codeword.
 pub fn circle_encode_row(
     geom: CircleGeom,
     data: &[Fp],
@@ -644,17 +630,28 @@ pub fn circle_encode_row(
         return Err(CircleRsError::WrongMessageLength);
     }
     let window = data_window(geom);
-    let mut values = Vec::with_capacity(geom.row_message_len);
-    for slot in 0..geom.row_message_len {
-        if slot >= window.start && slot < window.start + geom.data_slots {
-            values.push(data.get(slot - window.start).copied().unwrap_or(Fp::ZERO));
-        } else {
-            values.push(pads());
-        }
+    let d = geom.data_slots;
+    let k = geom.row_message_len;
+    let mut coefficients = data.to_vec();
+    coefficients.resize(d, Fp::ZERO);
+    ifft(&mut coefficients, window.tables);
+    coefficients.resize(k, Fp::ZERO);
+    // Z_W·P via the message domain: P coefficients -> values, pointwise Z_W,
+    // back to coefficients (Z_W·P ∈ F_k exactly).
+    let mut masked_pads = Vec::with_capacity(k);
+    for _ in 0..(k - d) {
+        masked_pads.push(pads());
     }
-    ifft(&mut values, message_tables(geom));
-    let coefficients = values;
-    let codeword = circle_encode(geom, &coefficients, geom.row_message_len)?;
+    masked_pads.resize(k, Fp::ZERO);
+    fft(&mut masked_pads, message_tables(geom));
+    for (value, &zw) in masked_pads.iter_mut().zip(&window.zw_on_message) {
+        *value = *value * zw;
+    }
+    ifft(&mut masked_pads, message_tables(geom));
+    for (coefficient, pad) in coefficients.iter_mut().zip(&masked_pads) {
+        *coefficient = *coefficient + *pad;
+    }
+    let codeword = circle_encode(geom, &coefficients, k)?;
     Ok((coefficients, codeword))
 }
 
@@ -662,28 +659,25 @@ pub fn circle_encode_row(
 /// over the data points (Q-025 §3).
 pub fn circle_data_sum(geom: CircleGeom, message_prefix: &[Fp]) -> Fp {
     let window = data_window(geom);
-    let tables = message_tables(geom);
-    (0..geom.data_slots).fold(Fp::ZERO, |acc, c| {
-        acc + evaluate_at(message_prefix, tables.domain[window.start + c])
+    window.tables.domain.iter().fold(Fp::ZERO, |acc, &point| {
+        acc + evaluate_at(message_prefix, point)
     })
 }
 
 /// The unique `F_{data_slots}` interpolant through `(data point c, weights[c])`,
-/// as `data_slots` universal-basis coefficients (Q-025 §1/§2).
+/// as `data_slots` universal-basis coefficients (Q-025 §1/§2). The window is
+/// a twin-coset circle-FFT domain, so this is an `O(d log d)` IFFT — cheap
+/// enough to run per row on the prover and per weight vector on the verifier
+/// (the universal basis is domain-independent, so the recovered coefficients
+/// evaluate consistently on the codeword domain).
 pub fn circle_weight_coeffs(geom: CircleGeom, weights: &[Fp]) -> Result<Vec<Fp>, CircleRsError> {
     if weights.len() != geom.data_slots {
         return Err(CircleRsError::WrongMessageLength);
     }
     let window = data_window(geom);
-    Ok(window
-        .interpolation_inverse
-        .iter()
-        .map(|row| {
-            row.iter()
-                .zip(weights)
-                .fold(Fp::ZERO, |acc, (&m, &w)| acc + m * w)
-        })
-        .collect())
+    let mut values = weights.to_vec();
+    ifft(&mut values, &window.tables);
+    Ok(values)
 }
 
 #[cfg(test)]
@@ -710,7 +704,54 @@ mod tests {
         (0..len).map(|_| rand_fp(state)).collect()
     }
 
-    const GEOMS: [CircleGeom; 2] = [CIRCLE_GEOM_L64, CIRCLE_GEOM_L128];
+    const GEOMS: [CircleGeom; 3] = [CIRCLE_GEOM_L64, CIRCLE_GEOM_L128, CIRCLE_GEOM_L256];
+
+    /// Ground truth for the twin-coset window IFFT: take random
+    /// `F_{data_slots}` universal-basis coefficients, evaluate them directly
+    /// (`evaluate_at`, domain-independent) at every window point, and check
+    /// the window IFFT recovers exactly those coefficients. This pins both
+    /// the window's FFT-domain validity and the universal-basis consistency
+    /// that `circle_weight_coeffs` and the verifier's weight evaluation rely
+    /// on.
+    #[test]
+    fn window_ifft_matches_direct_evaluation() {
+        let mut state = 0xD1CEu64;
+        for geom in GEOMS {
+            let coeffs = rand_row(&mut state, geom.data_slots);
+            let window_points: Vec<CirclePoint> = data_window(geom).tables.domain.clone();
+            let values: Vec<Fp> = window_points
+                .iter()
+                .map(|&point| evaluate_at(&coeffs, point))
+                .collect();
+            let recovered = circle_weight_coeffs(geom, &values).expect("window interpolates");
+            assert_eq!(recovered, coeffs, "geom {geom:?}");
+        }
+    }
+
+    /// `Z_W = b_{data_slots}` vanishes on every window point (so masked rows
+    /// still interpolate their data there) and on NO codeword point (so every
+    /// opened column stays masked by the pads).
+    #[test]
+    fn zw_vanishes_on_window_only() {
+        for geom in GEOMS {
+            let mut zw = vec![Fp::ZERO; geom.data_slots + 1];
+            zw[geom.data_slots] = Fp::ONE;
+            for (c, &point) in data_window(geom).tables.domain.iter().enumerate() {
+                assert_eq!(
+                    evaluate_at(&zw, point),
+                    Fp::ZERO,
+                    "Z_W must vanish at window point {c} (geom {geom:?})"
+                );
+            }
+            for index in 0..geom.codeword_len {
+                assert_ne!(
+                    circle_evaluate(geom, &zw, index).expect("Z_W evaluates"),
+                    Fp::ZERO,
+                    "Z_W must not vanish at codeword column {index} (geom {geom:?})"
+                );
+            }
+        }
+    }
 
     #[test]
     fn fft_ifft_roundtrip_all_domains() {
@@ -776,10 +817,9 @@ mod tests {
 
             // Systematic: coefficients evaluate back to the data at the window.
             let window = data_window(geom);
-            let tables = message_tables(geom);
             for (c, &expected) in data.iter().enumerate() {
                 assert_eq!(
-                    evaluate_at(&coefficients, tables.domain[window.start + c]),
+                    evaluate_at(&coefficients, window.tables.domain[c]),
                     expected,
                     "data slot {c} not reproduced"
                 );
@@ -810,10 +850,9 @@ mod tests {
 
             // W interpolates the weights at the data points.
             let window = data_window(geom);
-            let tables = message_tables(geom);
             for (c, &expected) in weights.iter().enumerate() {
                 assert_eq!(
-                    evaluate_at(&w_coeffs, tables.domain[window.start + c]),
+                    evaluate_at(&w_coeffs, window.tables.domain[c]),
                     expected
                 );
             }

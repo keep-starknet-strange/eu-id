@@ -4,6 +4,10 @@
 //! gates that require a fixed small N and one machine-readable line item:
 //! prove median, verify median, proof bytes, and committed shape cells.
 
+// Match the production (SDK/FFI) allocator so probe numbers are honest.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 

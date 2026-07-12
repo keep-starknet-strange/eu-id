@@ -2,7 +2,7 @@ use core::ops::Range;
 use std::time::{Duration, Instant};
 
 use crate::ligero::{
-    commit_witness_profiled, v3_circle_params, verify_claim_batch, verify_openings,
+    commit_witness_profiled, v4_circle_params, verify_claim_batch, verify_openings,
     verify_split_claim_batch, verify_split_openings, LigeroClaimBatch, LigeroError,
     LigeroLinearClaim, LigeroParams, LigeroProximityClaim,
 };
@@ -35,8 +35,6 @@ pub const C3_C5_SCALAR_SETUP_INPUT_LOG_SIZE: usize = 4;
 pub const C3_C5_SCALAR_SETUP_OUTPUT_LOG_SIZE: usize = 2;
 pub const C6_SCALAR_BITS_INPUT_LOG_SIZE: usize = 10;
 pub const C6_SCALAR_BITS_OUTPUT_LOG_SIZE: usize = 10;
-pub const C9_C10_ACCUMULATOR_ON_CURVE_INPUT_LOG_SIZE: usize = 11;
-pub const C9_C10_ACCUMULATOR_ON_CURVE_OUTPUT_LOG_SIZE: usize = 10;
 pub const C11_FINAL_ADD_INPUT_LOG_SIZE: usize = 4;
 pub const C11_FINAL_ADD_OUTPUT_LOG_SIZE: usize = 2;
 pub const C12_ON_CURVE_INPUT_LOG_SIZE: usize = 11;
@@ -107,10 +105,7 @@ const C6_U2_INDEX: u32 = 2;
 const C6_BITS_START_INDEX: u32 = 3;
 const C6_U1_RECOMPOSE_OUTPUT: u32 = 512;
 const C6_U2_RECOMPOSE_OUTPUT: u32 = 513;
-const C9_C10_ACCUMULATOR_POINT_COUNT: usize = 512;
 const C9_C10_ACCUMULATOR_POINTS_PER_SCALAR: usize = 256;
-const C9_C10_CONST_ONE_INDEX: u32 = 0;
-const C9_C10_POINTS_START_INDEX: u32 = 1;
 const C11_CONST_ONE_INDEX: u32 = 0;
 const C11_AX_INDEX: u32 = 1;
 const C11_AY_INDEX: u32 = 2;
@@ -971,6 +966,7 @@ pub fn prove_mdoc_p4b_circuit_bundle(
     device_input: &EcdsaInput,
     device_projection: &EcdsaPublicProjection,
     device_witness: &Witness,
+    revocation: Option<(&EcdsaInput, &EcdsaPublicProjection, &Witness)>,
     mac_key_shares: &MdocP4bMacKeyShares,
     transcript_seed: TranscriptSeed,
 ) -> Result<ImplementedCircuitBundle, ImplementedCircuitProofError> {
@@ -981,6 +977,7 @@ pub fn prove_mdoc_p4b_circuit_bundle(
         device_input,
         device_projection,
         device_witness,
+        revocation,
         mac_key_shares,
         transcript_seed,
     )
@@ -994,6 +991,7 @@ pub fn prove_mdoc_p4b_circuit_bundle_profiled(
     device_input: &EcdsaInput,
     device_projection: &EcdsaPublicProjection,
     device_witness: &Witness,
+    revocation: Option<(&EcdsaInput, &EcdsaPublicProjection, &Witness)>,
     mac_key_shares: &MdocP4bMacKeyShares,
     transcript_seed: TranscriptSeed,
 ) -> Result<(ImplementedCircuitBundle, MdocP4bProveProfile), ImplementedCircuitProofError> {
@@ -1001,6 +999,10 @@ pub fn prove_mdoc_p4b_circuit_bundle_profiled(
     let start = Instant::now();
     verify_witness(issuer_input, issuer_witness).map_err(ImplementedCircuitProofError::Witness)?;
     verify_witness(device_input, device_witness).map_err(ImplementedCircuitProofError::Witness)?;
+    if let Some((revocation_input, _, revocation_witness)) = revocation {
+        verify_witness(revocation_input, revocation_witness)
+            .map_err(ImplementedCircuitProofError::Witness)?;
+    }
     profile.witness_check = start.elapsed();
 
     let start = Instant::now();
@@ -1014,6 +1016,13 @@ pub fn prove_mdoc_p4b_circuit_bundle_profiled(
         .map_err(ImplementedCircuitProofError::Witness)?
     {
         instances.push(MdocP4bProverInstance::ecdsa(1, instance));
+    }
+    if let Some((revocation_input, _, revocation_witness)) = revocation {
+        for instance in implemented_circuit_instances(revocation_input, revocation_witness)
+            .map_err(ImplementedCircuitProofError::Witness)?
+        {
+            instances.push(MdocP4bProverInstance::ecdsa(2, instance));
+        }
     }
     let mac_values = mdoc_p4b_mac_values(issuer_input, device_input);
     let mac_tags_placeholder = vec![[0u8; 16]; MDOC_P4B_MAC_HALF_COUNT];
@@ -1090,7 +1099,10 @@ pub fn prove_mdoc_p4b_circuit_bundle_profiled(
         .map_err(ImplementedCircuitProofError::Ligero)?;
     profile.ligero_openings = start.elapsed();
 
-    let projections = [*issuer_projection, *device_projection];
+    let mut projections = vec![*issuer_projection, *device_projection];
+    if let Some((_, revocation_projection, _)) = revocation {
+        projections.push(*revocation_projection);
+    }
     let mut entries = Vec::with_capacity(instances.len());
     let sumcheck_start = Instant::now();
     for instance in &instances {
@@ -1212,12 +1224,14 @@ pub fn verify_implemented_circuit_bundle_batch_with_projection(
 pub fn verify_mdoc_p4b_circuit_bundle(
     issuer_projection: &EcdsaPublicProjection,
     device_projection: &EcdsaPublicProjection,
+    revocation_projection: Option<&EcdsaPublicProjection>,
     bundle: &ImplementedCircuitBundle,
     transcript_seed: TranscriptSeed,
 ) -> Result<(), ImplementedCircuitProofError> {
     verify_mdoc_p4b_circuit_bundle_profiled(
         issuer_projection,
         device_projection,
+        revocation_projection,
         bundle,
         transcript_seed,
     )
@@ -1227,6 +1241,7 @@ pub fn verify_mdoc_p4b_circuit_bundle(
 pub fn verify_mdoc_p4b_circuit_bundle_profiled(
     issuer_projection: &EcdsaPublicProjection,
     device_projection: &EcdsaPublicProjection,
+    revocation_projection: Option<&EcdsaPublicProjection>,
     bundle: &ImplementedCircuitBundle,
     transcript_seed: TranscriptSeed,
 ) -> Result<MdocP4bVerifyProfile, ImplementedCircuitProofError> {
@@ -1243,8 +1258,15 @@ pub fn verify_mdoc_p4b_circuit_bundle_profiled(
         .ok_or(ImplementedCircuitProofError::ProximityOpeningRejected)?;
     let full_root = mdoc_p4b_full_root(bundle.root, root_b);
     let av = draw_mdoc_p4b_av(transcript_seed, bundle.root);
-    let projections = [*issuer_projection, *device_projection];
-    let circuits = mdoc_p4b_verifier_instances(&av, &bundle.mac_tags)?;
+    let mut projections = vec![*issuer_projection, *device_projection];
+    if let Some(revocation_projection) = revocation_projection {
+        projections.push(*revocation_projection);
+    }
+    // The instance set is fixed by the verifier's expectation: a bundle whose
+    // entry count does not match (revocation present vs absent) is rejected by
+    // the proof-count check below.
+    let circuits =
+        mdoc_p4b_verifier_instances(&av, &bundle.mac_tags, revocation_projection.is_some())?;
     if bundle.entries.len() != circuits.len() {
         return Err(ImplementedCircuitProofError::WrongProofCount {
             expected: circuits.len(),
@@ -1303,7 +1325,7 @@ pub fn verify_mdoc_p4b_circuit_bundle_profiled(
     let mut device_qx = None;
     let mut device_qy = None;
     let mut mac_halves = [None; MDOC_P4B_MAC_HALF_COUNT];
-    let mut signer_state = [MdocP4bEcdsaConsistency::default(); 2];
+    let mut signer_state = vec![MdocP4bEcdsaConsistency::default(); projections.len()];
 
     for ((instance, layout), entry) in circuits
         .iter()
@@ -1405,6 +1427,20 @@ pub fn verify_mdoc_p4b_circuit_bundle_profiled(
                         C2_QY_INDEX as usize,
                     )?);
                 }
+            }
+            MdocP4bCircuitRole::RevocationEcdsa => {
+                // Only reachable when the verifier expects a revocation set:
+                // `circuits` contains revocation instances iff
+                // `revocation_projection` is `Some`.
+                mdoc_p4b_take_ecdsa_claims(
+                    &mut linear_claims,
+                    bundle,
+                    &mut consistency_cursor,
+                    layout,
+                    revocation_projection.expect("revocation instances imply a projection"),
+                    &mut signer_state[2],
+                    instance.label,
+                )?;
             }
             MdocP4bCircuitRole::MacBatch => {
                 for (index, slot) in mac_halves.iter_mut().enumerate() {
@@ -1544,7 +1580,6 @@ pub fn verify_implemented_circuit_bundle_batch_with_projection_profiled(
         let mut verified_claims = Vec::with_capacity(circuits.len());
         let mut u_scalars_from_c3 = None;
         let mut u_scalars_from_c6 = None;
-        let mut accumulator_endpoints_from_c9_c10 = None;
         let mut add_inputs_from_c11 = None;
         let mut denom_inv_from_c11 = None;
         let mut final_from_c11 = None;
@@ -1627,14 +1662,6 @@ pub fn verify_implemented_circuit_bundle_batch_with_projection_profiled(
                             C6_U2_INDEX as usize,
                         )?,
                     ));
-                }
-                b"s4-ecdsa-c9-c10-accumulator-on-curve" => {
-                    accumulator_endpoints_from_c9_c10 = Some(take_c9_c10_accumulator_endpoints(
-                        &mut linear_claims,
-                        bundle,
-                        &mut consistency_cursor,
-                        layout,
-                    )?);
                 }
                 b"s4-ecdsa-c11-final-add" => {
                     let ax = take_private_value(
@@ -1723,10 +1750,6 @@ pub fn verify_implemented_circuit_bundle_batch_with_projection_profiled(
         }
         let start = Instant::now();
         verify_u_scalar_cross_family(u_scalars_from_c3, u_scalars_from_c6)?;
-        verify_accumulator_endpoint_cross_family(
-            accumulator_endpoints_from_c9_c10,
-            c12_boundaries.map(|boundaries| boundaries.raw_accumulators),
-        )?;
         verify_corrected_endpoint_cross_family(
             c12_boundaries.map(|boundaries| boundaries.corrected_endpoints),
             add_inputs_from_c11,
@@ -1798,19 +1821,6 @@ fn verify_u_scalar_cross_family(
     Ok(())
 }
 
-fn verify_accumulator_endpoint_cross_family(
-    c9_c10: Option<((Fp, Fp), (Fp, Fp))>,
-    c12: Option<((Fp, Fp), (Fp, Fp))>,
-) -> Result<(), ImplementedCircuitProofError> {
-    let (Some(c9_c10), Some(c12)) = (c9_c10, c12) else {
-        return Err(ImplementedCircuitProofError::CrossFamilyBindingRejected);
-    };
-    if c9_c10 != c12 {
-        return Err(ImplementedCircuitProofError::CrossFamilyBindingRejected);
-    }
-    Ok(())
-}
-
 fn verify_corrected_endpoint_cross_family(
     c12: Option<((Fp, Fp), (Fp, Fp))>,
     c11: Option<((Fp, Fp), (Fp, Fp))>,
@@ -1832,7 +1842,6 @@ struct C13BoundaryValues {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct C12BoundaryValues {
-    raw_accumulators: ((Fp, Fp), (Fp, Fp)),
     corrected_endpoints: ((Fp, Fp), (Fp, Fp)),
     final_point: (Fp, Fp),
 }
@@ -1971,7 +1980,7 @@ fn mdoc_p4b_instance_channel(
     root: [u8; 32],
     label: &[u8],
     role: MdocP4bCircuitRole,
-    projections: &[EcdsaPublicProjection; 2],
+    projections: &[EcdsaPublicProjection],
     av: &Gf128,
     mac_tags: &[Gf128],
 ) -> CoprocessorChannel {
@@ -1986,6 +1995,11 @@ fn mdoc_p4b_instance_channel(
             mix_bundle_signature_index(1, &mut channel);
             channel.mix_bytes(label);
             mix_ecdsa_public_projection(&projections[1], &mut channel);
+        }
+        MdocP4bCircuitRole::RevocationEcdsa => {
+            mix_bundle_signature_index(2, &mut channel);
+            channel.mix_bytes(label);
+            mix_ecdsa_public_projection(&projections[2], &mut channel);
         }
         MdocP4bCircuitRole::MacBatch => {
             channel.mix_bytes(b"s4-mdoc-p4b-mac-public");
@@ -2021,7 +2035,6 @@ pub fn implemented_circuit_gate_count() -> Result<usize, CircuitError> {
         build_c2_canonicality_circuit()?,
         build_c3_c5_scalar_setup_circuit()?,
         build_c6_scalar_bits_circuit()?,
-        build_c9_c10_accumulator_on_curve_circuit()?,
         build_c11_final_add_circuit()?,
         build_c12_on_curve_circuit()?,
         build_c13_slope_inverses_circuit()?,
@@ -2064,10 +2077,13 @@ fn circuit_gate_count(circuit: &Circuit) -> usize {
 }
 
 fn implemented_circuit_ligero_params(_input_len: usize) -> LigeroParams {
-    // WO-P6: circle-FFT code at ℓ=128 (k = 512, claim bound 642, e = 1726,
-    // t = 168, ≈2^-132.6). Halves the row count vs v2 (ℓ=64), shrinking the
-    // per-column openings that dominate proof size.
-    let params = v3_circle_params();
+    // v4: circle-FFT code at ℓ=256 (k = 512, claim bound 770, e = 1662,
+    // t = 176, ≈2^-132.2). Same FFT domains as v3 (ℓ=128) with twice the
+    // data slots per row: half the rows, so the per-column openings that
+    // dominate proof size AND the row-encode work both halve, at unchanged
+    // claim-batch cost per row-weight interpolation count (which doubles per
+    // row but halves in row count).
+    let params = v4_circle_params();
     debug_assert!(params.validate().is_ok());
     debug_assert!(params.soundness_error() <= 2f64.powi(-128));
     params
@@ -2089,6 +2105,7 @@ struct VerifierCircuitInstance {
 enum MdocP4bCircuitRole {
     IssuerEcdsa,
     DeviceEcdsa,
+    RevocationEcdsa,
     MacBatch,
 }
 
@@ -2103,10 +2120,11 @@ impl MdocP4bProverInstance {
     fn ecdsa(signature_index: usize, instance: ProverCircuitInstance) -> Self {
         Self {
             label: instance.label,
-            role: if signature_index == 0 {
-                MdocP4bCircuitRole::IssuerEcdsa
-            } else {
-                MdocP4bCircuitRole::DeviceEcdsa
+            role: match signature_index {
+                0 => MdocP4bCircuitRole::IssuerEcdsa,
+                1 => MdocP4bCircuitRole::DeviceEcdsa,
+                2 => MdocP4bCircuitRole::RevocationEcdsa,
+                _ => unreachable!("mdoc P4b bundle has at most three ECDSA instance sets"),
             },
             circuit: instance.circuit,
             input: instance.input,
@@ -2130,7 +2148,6 @@ struct MdocP4bClaimInventory {
 struct MdocP4bEcdsaConsistency {
     u_scalars_from_c3: Option<(Fp, Fp)>,
     u_scalars_from_c6: Option<(Fp, Fp)>,
-    accumulator_endpoints_from_c9_c10: Option<((Fp, Fp), (Fp, Fp))>,
     add_inputs_from_c11: Option<((Fp, Fp), (Fp, Fp))>,
     denom_inv_from_c11: Option<Fp>,
     final_from_c11: Option<(Fp, Fp)>,
@@ -2142,11 +2159,6 @@ struct MdocP4bEcdsaConsistency {
 impl MdocP4bEcdsaConsistency {
     fn verify(self) -> Result<(), ImplementedCircuitProofError> {
         verify_u_scalar_cross_family(self.u_scalars_from_c3, self.u_scalars_from_c6)?;
-        verify_accumulator_endpoint_cross_family(
-            self.accumulator_endpoints_from_c9_c10,
-            self.c12_boundaries
-                .map(|boundaries| boundaries.raw_accumulators),
-        )?;
         verify_corrected_endpoint_cross_family(
             self.c12_boundaries
                 .map(|boundaries| boundaries.corrected_endpoints),
@@ -2291,7 +2303,9 @@ fn mdoc_p4b_row_inventory(
 
     for (instance, layout) in instances.iter().zip(layouts) {
         match instance.role {
-            MdocP4bCircuitRole::IssuerEcdsa | MdocP4bCircuitRole::DeviceEcdsa => {
+            MdocP4bCircuitRole::IssuerEcdsa
+            | MdocP4bCircuitRole::DeviceEcdsa
+            | MdocP4bCircuitRole::RevocationEcdsa => {
                 ecdsa_input_values += layout.input_len;
                 ecdsa_input_rows +=
                     row_span_count(layout.input_offset, layout.input_len, params.row_len);
@@ -2359,6 +2373,7 @@ fn mdoc_p4b_role_name(role: MdocP4bCircuitRole) -> &'static str {
     match role {
         MdocP4bCircuitRole::IssuerEcdsa => "issuer_ecdsa",
         MdocP4bCircuitRole::DeviceEcdsa => "device_ecdsa",
+        MdocP4bCircuitRole::RevocationEcdsa => "revocation_ecdsa",
         MdocP4bCircuitRole::MacBatch => "mac_batch",
     }
 }
@@ -2370,6 +2385,7 @@ fn verifier_circuit_input_len(circuit: &Circuit) -> usize {
 fn mdoc_p4b_verifier_instances(
     av: &Gf128,
     mac_tags: &[Gf128],
+    include_revocation: bool,
 ) -> Result<Vec<MdocP4bVerifierInstance>, ImplementedCircuitProofError> {
     let mut instances = Vec::new();
     for instance in
@@ -2389,6 +2405,17 @@ fn mdoc_p4b_verifier_instances(
             role: MdocP4bCircuitRole::DeviceEcdsa,
             circuit: instance.circuit,
         });
+    }
+    if include_revocation {
+        for instance in implemented_circuit_verifier_instances()
+            .map_err(ImplementedCircuitProofError::Circuit)?
+        {
+            instances.push(MdocP4bVerifierInstance {
+                label: instance.label,
+                role: MdocP4bCircuitRole::RevocationEcdsa,
+                circuit: instance.circuit,
+            });
+        }
     }
     instances.push(MdocP4bVerifierInstance {
         label: MDOC_P4B_MAC_BATCH_LABEL,
@@ -2455,7 +2482,7 @@ fn mdoc_p4b_prover_claim_batch(
     instances: &[MdocP4bProverInstance],
     layouts: &[BundleCircuitLayout],
     entries: &[ImplementedCircuitBundleEntry],
-    projections: &[EcdsaPublicProjection; 2],
+    projections: &[EcdsaPublicProjection],
     committed_len_a: usize,
     group_b_values: &[Fp],
     transcript_root: [u8; 32],
@@ -2529,6 +2556,16 @@ fn mdoc_p4b_prover_claim_batch(
                         &instance.input,
                     )?;
                 }
+            }
+            MdocP4bCircuitRole::RevocationEcdsa => {
+                add_prover_family_fixed_claims(
+                    &mut claims,
+                    &mut consistency_values,
+                    &projections[2],
+                    instance.label,
+                    layout,
+                    &instance.input,
+                )?;
             }
             MdocP4bCircuitRole::MacBatch => {
                 for half in 0..MDOC_P4B_MAC_HALF_COUNT {
@@ -2732,16 +2769,6 @@ fn add_prover_family_fixed_claims(
                 values,
             )?;
         }
-        b"s4-ecdsa-c9-c10-accumulator-on-curve" => {
-            for point in [
-                C9_C10_ACCUMULATOR_POINTS_PER_SCALAR - 1,
-                C9_C10_ACCUMULATOR_POINT_COUNT - 1,
-            ] {
-                let x = C9_C10_POINTS_START_INDEX as usize + point * 3;
-                add_private_value(claims, consistency_values, layout, x, values)?;
-                add_private_value(claims, consistency_values, layout, x + 1, values)?;
-            }
-        }
         b"s4-ecdsa-c11-final-add" => {
             for index in [
                 C11_AX_INDEX,
@@ -2757,8 +2784,6 @@ fn add_prover_family_fixed_claims(
         }
         b"s4-ecdsa-c12-final-on-curve" => {
             for point in [
-                C9_C10_ACCUMULATOR_POINTS_PER_SCALAR - 1,
-                C9_C10_ACCUMULATOR_POINT_COUNT - 1,
                 C12_ACCUMULATOR_POINT_COUNT,
                 C12_ACCUMULATOR_POINT_COUNT + 1,
                 C12_FINAL_POINT_INDEX,
@@ -3014,25 +3039,6 @@ fn take_private_value(
     Ok(value)
 }
 
-fn take_c9_c10_accumulator_endpoints(
-    claims: &mut Vec<LigeroLinearClaim>,
-    bundle: &ImplementedCircuitBundle,
-    cursor: &mut usize,
-    layout: &BundleCircuitLayout,
-) -> Result<((Fp, Fp), (Fp, Fp)), ImplementedCircuitProofError> {
-    let mut read_point = |point: usize| {
-        let x = C9_C10_POINTS_START_INDEX as usize + point * 3;
-        Ok((
-            take_private_value(claims, bundle, cursor, layout, x)?,
-            take_private_value(claims, bundle, cursor, layout, x + 1)?,
-        ))
-    };
-    Ok((
-        read_point(C9_C10_ACCUMULATOR_POINTS_PER_SCALAR - 1)?,
-        read_point(C9_C10_ACCUMULATOR_POINT_COUNT - 1)?,
-    ))
-}
-
 fn take_c12_boundary_values(
     claims: &mut Vec<LigeroLinearClaim>,
     bundle: &ImplementedCircuitBundle,
@@ -3047,10 +3053,6 @@ fn take_c12_boundary_values(
         ))
     };
     Ok(C12BoundaryValues {
-        raw_accumulators: (
-            read_point(C9_C10_ACCUMULATOR_POINTS_PER_SCALAR - 1)?,
-            read_point(C9_C10_ACCUMULATOR_POINT_COUNT - 1)?,
-        ),
         corrected_endpoints: (
             read_point(C12_ACCUMULATOR_POINT_COUNT)?,
             read_point(C12_ACCUMULATOR_POINT_COUNT + 1)?,
@@ -3109,11 +3111,6 @@ fn mdoc_p4b_take_ecdsa_claims(
                 take_private_value(claims, bundle, cursor, layout, C6_U1_INDEX as usize)?,
                 take_private_value(claims, bundle, cursor, layout, C6_U2_INDEX as usize)?,
             ));
-        }
-        b"s4-ecdsa-c9-c10-accumulator-on-curve" => {
-            state.accumulator_endpoints_from_c9_c10 = Some(take_c9_c10_accumulator_endpoints(
-                claims, bundle, cursor, layout,
-            )?);
         }
         b"s4-ecdsa-c11-final-add" => {
             let ax = take_private_value(claims, bundle, cursor, layout, C11_AX_INDEX as usize)?;
@@ -3252,13 +3249,11 @@ fn implemented_circuit_instances(
             circuit: build_c6_scalar_bits_circuit().expect("static C6 circuit is valid"),
             input: c6_scalar_bits_input(witness)?,
         },
-        ProverCircuitInstance {
-            label: b"s4-ecdsa-c9-c10-accumulator-on-curve",
-            slot: LayoutSlot::U1GAccumulators,
-            circuit: build_c9_c10_accumulator_on_curve_circuit()
-                .expect("static C9/C10 circuit is valid"),
-            input: c9_c10_accumulator_on_curve_input(witness)?,
-        },
+        // C9/C10 accumulator on-curve checks ride the C12 family: its input
+        // committed the same 512 accumulator points a second time (plus the
+        // corrected endpoints and final point) and its circuit runs the same
+        // per-point curve equations, so a separate C9/C10 instance re-proved a
+        // strict subset over a duplicate committed region (WO-E1b dedup).
         ProverCircuitInstance {
             label: b"s4-ecdsa-c11-final-add",
             slot: LayoutSlot::FinalPoint,
@@ -3303,10 +3298,6 @@ fn implemented_circuit_verifier_instances() -> Result<Vec<VerifierCircuitInstanc
         VerifierCircuitInstance {
             label: b"s4-ecdsa-c6-scalar-bits",
             circuit: build_c6_scalar_bits_circuit()?,
-        },
-        VerifierCircuitInstance {
-            label: b"s4-ecdsa-c9-c10-accumulator-on-curve",
-            circuit: build_c9_c10_accumulator_on_curve_circuit()?,
         },
         VerifierCircuitInstance {
             label: b"s4-ecdsa-c11-final-add",
@@ -4413,84 +4404,6 @@ pub fn c6_scalar_bits_input(witness: &Witness) -> Result<Vec<Fp>, WitnessError> 
     let bits = layout_range(LayoutSlot::ScalarBits);
     input[C6_BITS_START_INDEX as usize..C6_BITS_START_INDEX as usize + 512]
         .copy_from_slice(&witness.values[bits]);
-    Ok(input)
-}
-
-pub fn build_c9_c10_accumulator_on_curve_circuit() -> Result<Circuit, CircuitError> {
-    let b = Fp::from_bytes_be(P256_B_BE).expect("P-256 b is canonical");
-    let mut terms = Vec::with_capacity(C9_C10_ACCUMULATOR_POINT_COUNT * 7);
-    for point in 0..C9_C10_ACCUMULATOR_POINT_COUNT as u32 {
-        let x = C9_C10_POINTS_START_INDEX + point * 3;
-        let y = x + 1;
-        let x2 = x + 2;
-        let out_x2 = point * 2;
-        let out_curve = out_x2 + 1;
-
-        terms.push(QuadTerm {
-            out: out_x2,
-            l: x2,
-            r: C9_C10_CONST_ONE_INDEX,
-            coeff: Fp::ONE,
-        });
-        terms.push(QuadTerm {
-            out: out_x2,
-            l: x,
-            r: x,
-            coeff: -Fp::ONE,
-        });
-        terms.push(QuadTerm {
-            out: out_curve,
-            l: y,
-            r: y,
-            coeff: Fp::ONE,
-        });
-        terms.push(QuadTerm {
-            out: out_curve,
-            l: x,
-            r: x2,
-            coeff: -Fp::ONE,
-        });
-        terms.push(QuadTerm {
-            out: out_curve,
-            l: x,
-            r: C9_C10_CONST_ONE_INDEX,
-            coeff: Fp::from_u64(3),
-        });
-        terms.push(QuadTerm {
-            out: out_curve,
-            l: C9_C10_CONST_ONE_INDEX,
-            r: C9_C10_CONST_ONE_INDEX,
-            coeff: -b,
-        });
-    }
-
-    Circuit::new(vec![Layer::new(
-        C9_C10_ACCUMULATOR_ON_CURVE_OUTPUT_LOG_SIZE,
-        C9_C10_ACCUMULATOR_ON_CURVE_INPUT_LOG_SIZE,
-        terms,
-    )?])
-}
-
-pub fn c9_c10_accumulator_on_curve_input(witness: &Witness) -> Result<Vec<Fp>, WitnessError> {
-    if witness.values.len() != LAYOUT_LEN {
-        return Err(WitnessError::LayoutMismatch);
-    }
-    let mut input = vec![Fp::ZERO; 1usize << C9_C10_ACCUMULATOR_ON_CURVE_INPUT_LOG_SIZE];
-    input[C9_C10_CONST_ONE_INDEX as usize] = Fp::ONE;
-
-    let mut cursor = C9_C10_POINTS_START_INDEX as usize;
-    for slot in [LayoutSlot::U1GAccumulators, LayoutSlot::U2QAccumulators] {
-        for point in witness.values[layout_range(slot)].chunks_exact(2) {
-            input[cursor] = point[0];
-            input[cursor + 1] = point[1];
-            input[cursor + 2] = point[0].square();
-            cursor += 3;
-        }
-    }
-    debug_assert_eq!(
-        cursor,
-        C9_C10_POINTS_START_INDEX as usize + C9_C10_ACCUMULATOR_POINT_COUNT * 3
-    );
     Ok(input)
 }
 

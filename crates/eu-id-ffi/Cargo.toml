@@ -22,6 +22,10 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 parallel = ["stwo-sha256/parallel"]
 
 [dependencies]
+# Production allocator: the provers churn short-lived trace buffers; system
+# malloc showed up at ~4% of single-core prove in profiles. Same allocator the
+# criterion benches pin, so bench and production numbers agree.
+mimalloc = { workspace = true }
 # The combined, cross-bound identity prover (`prove_identity`/`verify_identity`)
 # the identity bench wraps, plus the standalone SHA-256 prover the SHA bench
 # wraps. eu-id-prover re-pulls stwo-sha256, but the SHA bench depends on it

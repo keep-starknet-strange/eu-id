@@ -207,6 +207,7 @@ use predicates::{
 use stwo_p256::components::digest_bind::module::{
     DigestBindInteractionClaim, DigestBindProver, DigestBindVerifier,
 };
+#[cfg(any(test, not(feature = "ec-coprocessor")))]
 use stwo_p256::components::digest_bind::witness::DigestBindRow;
 #[cfg(not(feature = "ec-coprocessor"))]
 use stwo_p256::components::digest_bind::SharedScalarZRelation;
@@ -372,9 +373,11 @@ pub mod ec_coprocessor {
         device_input: &EcdsaVerifyInput,
         device_projection: &S4EcdsaPublicProjection,
         device_witness: &Witness,
+        revocation: Option<(&EcdsaVerifyInput, &S4EcdsaPublicProjection, &Witness)>,
         mac_key_shares: &eu_id_ec_coprocessor::ecdsa::MdocP4bMacKeyShares,
         transcript_seed: TranscriptSeed,
     ) -> Result<ImplementedCircuitBundle, ImplementedCircuitProofError> {
+        let revocation_input = revocation.map(|(input, _, _)| input_from_stwo(input));
         eu_id_ec_coprocessor::ecdsa::prove_mdoc_p4b_circuit_bundle(
             &input_from_stwo(issuer_input),
             issuer_projection,
@@ -382,6 +385,13 @@ pub mod ec_coprocessor {
             &input_from_stwo(device_input),
             device_projection,
             device_witness,
+            revocation.as_ref().map(|(_, projection, witness)| {
+                (
+                    revocation_input.as_ref().expect("set with revocation"),
+                    *projection,
+                    *witness,
+                )
+            }),
             mac_key_shares,
             transcript_seed,
         )
@@ -394,6 +404,7 @@ pub mod ec_coprocessor {
         device_input: &EcdsaVerifyInput,
         device_projection: &S4EcdsaPublicProjection,
         device_witness: &Witness,
+        revocation: Option<(&EcdsaVerifyInput, &S4EcdsaPublicProjection, &Witness)>,
         mac_key_shares: &eu_id_ec_coprocessor::ecdsa::MdocP4bMacKeyShares,
         transcript_seed: TranscriptSeed,
     ) -> Result<
@@ -403,6 +414,7 @@ pub mod ec_coprocessor {
         ),
         ImplementedCircuitProofError,
     > {
+        let revocation_input = revocation.map(|(input, _, _)| input_from_stwo(input));
         eu_id_ec_coprocessor::ecdsa::prove_mdoc_p4b_circuit_bundle_profiled(
             &input_from_stwo(issuer_input),
             issuer_projection,
@@ -410,6 +422,13 @@ pub mod ec_coprocessor {
             &input_from_stwo(device_input),
             device_projection,
             device_witness,
+            revocation.as_ref().map(|(_, projection, witness)| {
+                (
+                    revocation_input.as_ref().expect("set with revocation"),
+                    *projection,
+                    *witness,
+                )
+            }),
             mac_key_shares,
             transcript_seed,
         )
@@ -418,12 +437,14 @@ pub mod ec_coprocessor {
     pub fn verify_mdoc_p4b_circuit_bundle_from_stwo(
         issuer_projection: &S4EcdsaPublicProjection,
         device_projection: &S4EcdsaPublicProjection,
+        revocation_projection: Option<&S4EcdsaPublicProjection>,
         bundle: &ImplementedCircuitBundle,
         transcript_seed: TranscriptSeed,
     ) -> Result<(), ImplementedCircuitProofError> {
         eu_id_ec_coprocessor::ecdsa::verify_mdoc_p4b_circuit_bundle(
             issuer_projection,
             device_projection,
+            revocation_projection,
             bundle,
             transcript_seed,
         )
@@ -432,6 +453,7 @@ pub mod ec_coprocessor {
     pub fn verify_mdoc_p4b_circuit_bundle_from_stwo_profiled(
         issuer_projection: &S4EcdsaPublicProjection,
         device_projection: &S4EcdsaPublicProjection,
+        revocation_projection: Option<&S4EcdsaPublicProjection>,
         bundle: &ImplementedCircuitBundle,
         transcript_seed: TranscriptSeed,
     ) -> Result<eu_id_ec_coprocessor::ecdsa::MdocP4bVerifyProfile, ImplementedCircuitProofError>
@@ -439,6 +461,7 @@ pub mod ec_coprocessor {
         eu_id_ec_coprocessor::ecdsa::verify_mdoc_p4b_circuit_bundle_profiled(
             issuer_projection,
             device_projection,
+            revocation_projection,
             bundle,
             transcript_seed,
         )
@@ -715,6 +738,7 @@ impl PublicStatement {
 
 /// Bridge trace size: enough rows for one active row per ECDSA instance, with
 /// the Q-015 Class A minimum of 256 blind rows.
+#[cfg(any(test, not(feature = "ec-coprocessor")))]
 fn bridge_log_size(n_instances: usize) -> u32 {
     let needed = (n_instances.max(1) as u32)
         .next_power_of_two()
@@ -747,6 +771,7 @@ fn credential_exposure() -> FieldExposure {
 
 /// Per-instance `(sig_id, z)` rows the bridge binds, sourced from the proven
 /// public instances.
+#[cfg(any(test, not(feature = "ec-coprocessor")))]
 fn bridge_rows(instances: &[PublicEcdsaInstance<M31>]) -> Vec<DigestBindRow> {
     instances
         .iter()

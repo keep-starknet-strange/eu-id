@@ -39,6 +39,7 @@ blake2 = "0.10"
 # a trusted witness rather than a guess, and integration tests in `tests/`
 # (which see only the public surface) consume the fixtures.
 p256 = { version = "0.13", features = ["ecdsa"] }
+rand = "0.8"
 ecdsa = { version = "0.16", features = ["signing", "verifying"] }
 sha2 = "0.10"
 rayon = "1"
@@ -56,9 +57,9 @@ memory-stats = "1.2"
 serde_json = "1"
 mimalloc = { workspace = true }
 # Proof-size byte-breakdown (§10.1, `examples/bench_report`): mirror the SDK's
-# FFI transport compressor (`bzip2` best) so the recorded over-the-wire size and
-# compression ratio match the real Bluetooth payload (`crates/sdk` uses 0.6).
-bzip2 = "0.6"
+# FFI transport compressor (zstd level 12) so the recorded over-the-wire size
+# and compression ratio match the real Bluetooth payload.
+zstd = "0.13"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 

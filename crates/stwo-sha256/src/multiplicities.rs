@@ -406,11 +406,11 @@ pub fn range_k_multiplicities(
     // producer absorbs them.
     if matches!(kind, RangeKind::Range16) {
         if field_exposure.needs_block_witness() {
-            for block_idx in field_exposure.target_blocks() {
+            for &block_idx in field_exposure.target_blocks() {
                 let Some(block) = witness.blocks.get(block_idx) else {
                     continue;
                 };
-                for &word_idx in &field_exposure.decomposed_words() {
+                for &word_idx in field_exposure.decomposed_words() {
                     let limb = block.schedule[word_idx];
                     for b in word_be_bytes(limb.lo, limb.hi) {
                         bump(&mut mults, b);
@@ -420,7 +420,7 @@ pub fn range_k_multiplicities(
             }
         } else if !field_exposure.is_empty() {
             if let Some(block0) = witness.blocks.first() {
-                for &word_idx in &field_exposure.decomposed_words() {
+                for &word_idx in field_exposure.decomposed_words() {
                     let limb = block0.schedule[word_idx];
                     for b in word_be_bytes(limb.lo, limb.hi) {
                         bump(&mut mults, b);
@@ -568,7 +568,7 @@ mod tests {
 
         // Each first-block field byte `b` bumps row `b` and row `b + OFFSET`.
         let block0 = &w.blocks[0];
-        for &word_idx in &exposure.decomposed_words() {
+        for &word_idx in exposure.decomposed_words() {
             let limb = block0.schedule[word_idx];
             for b in word_be_bytes(limb.lo, limb.hi) {
                 assert!(
@@ -608,9 +608,9 @@ mod tests {
             "two Range16 lookups per exposed byte column for each target block selector",
         );
 
-        for block_idx in exposure.target_blocks() {
+        for &block_idx in exposure.target_blocks() {
             let block = &w.blocks[block_idx];
-            for &word_idx in &exposure.decomposed_words() {
+            for &word_idx in exposure.decomposed_words() {
                 let limb = block.schedule[word_idx];
                 for b in word_be_bytes(limb.lo, limb.hi) {
                     assert!(

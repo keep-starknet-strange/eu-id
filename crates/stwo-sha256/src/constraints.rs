@@ -966,7 +966,7 @@ impl FrameworkEval for Sha256Eval {
                 }
                 // Each byte range-checked once per distinct target block, gated
                 // by that block's representative selector.
-                for target_block in self.field_exposure.target_blocks() {
+                for &target_block in self.field_exposure.target_blocks() {
                     let selector = self
                         .field_exposure
                         .yields()
