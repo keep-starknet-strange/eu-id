@@ -196,6 +196,54 @@ pub fn is_first_row_column_id() -> PreProcessedColumnId {
     id("is_first_row")
 }
 
+/// Preprocessed-column ID of the multi-slot `slot_starts` selector — the
+/// multi-message replacement for [`is_first_row_column_id`]: `1` at the
+/// first row of every slot region, `0` elsewhere. The ID encodes the full
+/// schedule (`n_slots`, `slot_log`, `log_n_rows`) so two different
+/// schedules can never alias one committed column (I-5); the fingerprint
+/// guard and air-core's id-content invariant fail closed on drift.
+pub fn slot_starts_column_id(
+    log_n_rows: u32,
+    slot_log: u32,
+    n_slots: usize,
+) -> PreProcessedColumnId {
+    id(&format!("slot_starts_{n_slots}x{slot_log}_log{log_n_rows}"))
+}
+
+/// Preprocessed-column ID of the multi-slot region selector for slot `s`:
+/// `1` on every row of slot `s`'s region, `0` elsewhere (including the
+/// tail). Gates per-slot digest/field attribution; schedule-encoded like
+/// [`slot_starts_column_id`].
+pub fn slot_sel_column_id(
+    s: usize,
+    log_n_rows: u32,
+    slot_log: u32,
+    n_slots: usize,
+) -> PreProcessedColumnId {
+    id(&format!("slot_sel_{s}_{n_slots}x{slot_log}_log{log_n_rows}"))
+}
+
+/// Preprocessed IDs of a multi-slot shared-tables consumer, in commit
+/// order: `slot_starts`, the 9 round-cyclic columns, then one `slot_sel`
+/// per slot. Multi-slot consumers exist only in shared-tables mode, so
+/// there is no producer-table prefix. The plain round-cyclic IDs are
+/// log-content-dependent but id-shared — safe here because a composition
+/// mixing SHA consumers at different `log_n_rows` trips air-core's
+/// preprocessed id-content invariant (fail closed at prove time).
+pub fn multi_consumer_preprocessed_column_ids(
+    log_n_rows: u32,
+    slot_log: u32,
+    n_slots: usize,
+) -> Vec<PreProcessedColumnId> {
+    let mut out = Vec::with_capacity(10 + n_slots);
+    out.push(slot_starts_column_id(log_n_rows, slot_log, n_slots));
+    out.extend(round_cyclic_column_ids());
+    for s in 0..n_slots {
+        out.push(slot_sel_column_id(s, log_n_rows, slot_log, n_slots));
+    }
+    out
+}
+
 /// IDs of the 9 round-cyclic preprocessed columns of the rotated
 /// one-row-per-round layout, all at the main trace's `log_n_rows` and all
 /// functions of `t = natural_row mod 64` alone: `k_lo`/`k_hi` (the round

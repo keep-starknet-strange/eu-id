@@ -47,14 +47,17 @@ use stwo_constraint_framework::{
     EvalAtRow, FrameworkEval, Relation, RelationEntry, ORIGINAL_TRACE_IDX,
 };
 
-use crate::components::{is_first_row_column_id, round_cyclic_column_ids};
+use crate::components::{
+    is_first_row_column_id, round_cyclic_column_ids, slot_sel_column_id, slot_starts_column_id,
+};
 use crate::constants::{DIGEST_BYTES, IV, N_STATE_WORDS};
 use crate::field_exposure::FieldExposure;
 use crate::partitions::{
     round_groups_half_indices, RoundGroups, GROUPS_PER_ROUND_PARTITION, SIGMA0_GROUPS,
     SIGMA1_GROUPS,
 };
-use crate::relations::Sha256Relations;
+use crate::relations::{Sha256Relations, SlotIoRelations};
+use crate::slots::MultiSlotConfig;
 use crate::trace::WORD_BIT_COLS;
 use crate::types::{BYTES_PER_WORD, LIMB_BITS, WORDS_PER_BLOCK};
 
@@ -100,6 +103,25 @@ pub struct Sha256Eval {
     /// constraints exist iff the exposure is non-empty; the cross-module yield
     /// is what binds.
     pub field_exposure: FieldExposure,
+    /// Multi-message (slot-scheduled) mode — S8, see
+    /// `tasks/sha-multimessage-design.md`. `None` (every legacy constructor)
+    /// takes exactly the single-message code paths above. `Some` replaces
+    /// the `is_first_row` anchor with the preprocessed `slot_starts`
+    /// schedule, attributes the per-slot digest/field yields through the
+    /// preprocessed `slot_sel` region selectors, and requires
+    /// `expose_digest == false` and an empty `field_exposure` (the per-slot
+    /// specs carry the exposure surface instead).
+    pub multi: Option<MultiSlotEval>,
+}
+
+/// Slot schedule + per-slot cross-module relations for a multi-message
+/// `Sha256Eval`.
+#[derive(Clone)]
+pub struct MultiSlotEval {
+    pub config: MultiSlotConfig,
+    /// One (digest, field) relation pair per slot, in slot order — drawn by
+    /// `Sha256Relations::draw_multi_with_shared_tables`.
+    pub relations: Vec<SlotIoRelations>,
 }
 
 impl FrameworkEval for Sha256Eval {
@@ -134,9 +156,32 @@ impl FrameworkEval for Sha256Eval {
         let r15 = eval.get_preprocessed_column(cyclic[6].clone());
         let r63 = eval.get_preprocessed_column(cyclic[7].clone());
         let is_sched = eval.get_preprocessed_column(cyclic[8].clone());
-        // `is_first_row` pins exactly one anchor row (natural row 0 = block
-        // 0, round 0) for IV binding.
-        let is_first_row = eval.get_preprocessed_column(is_first_row_column_id());
+        // `is_first_row` pins the chain anchor rows for IV binding: natural
+        // row 0 in single-message mode, every slot region's first row in
+        // multi-slot mode (the preprocessed `slot_starts` schedule — the
+        // prover cannot move a slot boundary, I-5). `slot_sel[s]` is slot
+        // `s`'s preprocessed region selector, gating per-slot attribution.
+        let is_first_row = match &self.multi {
+            Some(multi) => eval.get_preprocessed_column(slot_starts_column_id(
+                self.log_size,
+                multi.config.slot_log,
+                multi.config.n_slots(),
+            )),
+            None => eval.get_preprocessed_column(is_first_row_column_id()),
+        };
+        let slot_sel: Vec<E::F> = match &self.multi {
+            Some(multi) => (0..multi.config.n_slots())
+                .map(|s| {
+                    eval.get_preprocessed_column(slot_sel_column_id(
+                        s,
+                        self.log_size,
+                        multi.config.slot_log,
+                        multi.config.n_slots(),
+                    ))
+                })
+                .collect(),
+            None => Vec::new(),
+        };
 
         // ---- header ----
         //
@@ -724,12 +769,36 @@ impl FrameworkEval for Sha256Eval {
                         - digest_bytes[4 * j + 3].clone()),
             );
         }
-        if self.expose_digest {
-            eval.add_to_relation(RelationEntry::base(
-                &self.relations.digest.digest,
-                -is_last_block.clone(),
-                &digest_bytes,
-            ));
+        match &self.multi {
+            Some(multi) => {
+                // Per-slot digest yields: `is_last_block` fires at most once
+                // per slot region (single enabler rise per region ⇒ single
+                // drop), and `slot_sel[s]` (preprocessed) attributes it to
+                // the slot's OWN digest relation. Numerator degree 2 — within
+                // the batch-4 LogUp budget. A slot whose run never drops
+                // in-region yields no digest and its consumer's require
+                // cannot balance (fail-closed).
+                debug_assert!(!self.expose_digest);
+                for (s, spec) in multi.config.slots.iter().enumerate() {
+                    if !spec.expose_digest {
+                        continue;
+                    }
+                    eval.add_to_relation(RelationEntry::base(
+                        &multi.relations[s].digest.digest,
+                        -(is_last_block.clone() * slot_sel[s].clone()),
+                        &digest_bytes,
+                    ));
+                }
+            }
+            None => {
+                if self.expose_digest {
+                    eval.add_to_relation(RelationEntry::base(
+                        &self.relations.digest.digest,
+                        -is_last_block.clone(),
+                        &digest_bytes,
+                    ));
+                }
+            }
         }
 
         // ---- §10.4 padding-role constraints (t = 15 rows) ----
@@ -893,7 +962,158 @@ impl FrameworkEval for Sha256Eval {
         // existing first-block flag. Multi-block exposure appends a witness
         // block counter plus one selector per yielded byte; preprocessing stays
         // independent of message length and offsets.
-        if !self.field_exposure.is_empty() {
+        if let Some(multi) = &self.multi {
+            // Multi-slot field providers: each slot's exposure keeps the
+            // single-instance tail layout at its own column offset (mask
+            // reads below happen in trace column order: per slot, bytes →
+            // counter → selectors). Two slot-attribution rails on top of
+            // the single-instance algebra:
+            //   - every multi-block selector is pinned to its slot's region
+            //     (`selector·(1−slot_sel[s]) = 0`) — the block counter is
+            //     slot-LOCAL (it resets at every preprocessed slot start),
+            //     so without the rail a counter match in a foreign slot
+            //     could yield foreign bytes;
+            //   - the legacy block-0 selector becomes
+            //     `is_first_block@−15 · slot_sel[s]` (each slot has its own
+            //     block 0).
+            debug_assert!(self.field_exposure.is_empty());
+            for (s, spec) in multi.config.slots.iter().enumerate() {
+                let exposure = &spec.field_exposure;
+                if exposure.is_empty() {
+                    continue;
+                }
+                let sel_slot = slot_sel[s].clone();
+                let field_bytes: Vec<E::F> = (0..exposure.n_byte_columns())
+                    .map(|_| eval.next_trace_mask())
+                    .collect();
+                let block_counter = if exposure.needs_block_witness() {
+                    let [b, b_prev] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1]);
+                    // Slot-local block index: 0 at every slot start (the
+                    // anchor constraint pins `is_first_block ≡ slot_starts`),
+                    // flat within a block, +1 at every real continuation
+                    // boundary. Identical algebra to the single instance.
+                    eval.add_constraint(is_first_block.clone() * b.clone());
+                    eval.add_constraint(
+                        enabler.clone()
+                            * (E::F::one() - r0.clone())
+                            * (b.clone() - b_prev.clone()),
+                    );
+                    eval.add_constraint(chain_gate.clone() * (b.clone() - b_prev - E::F::one()));
+                    Some(b)
+                } else {
+                    None
+                };
+                let selectors: Vec<E::F> = if exposure.needs_block_witness() {
+                    (0..exposure.n_yields())
+                        .map(|_| eval.next_trace_mask())
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                // Byte decomposition of the exposed words — fires on EVERY
+                // enabled t = 15 row (all slots): each row's cells decompose
+                // that row's own block words. Only slot-gated selectors feed
+                // yields/range-checks, so foreign-slot cells are inert.
+                for (word_slot, &word_idx) in exposure.decomposed_words().iter().enumerate() {
+                    let (w_lo_v, w_hi_v) = w_msg(word_idx).clone();
+                    let base = word_slot * BYTES_PER_WORD;
+                    eval.add_constraint(
+                        gate_r15.clone()
+                            * (w_hi_v
+                                - two_pow_8.clone() * field_bytes[base].clone()
+                                - field_bytes[base + 1].clone()),
+                    );
+                    eval.add_constraint(
+                        gate_r15.clone()
+                            * (w_lo_v
+                                - two_pow_8.clone() * field_bytes[base + 2].clone()
+                                - field_bytes[base + 3].clone()),
+                    );
+                }
+
+                let byte_range_offset =
+                    E::F::from(M31::from(crate::field_exposure::BYTE_RANGE_CHECK_OFFSET));
+                let legacy_slot_selector = is_first_block_m15.clone() * sel_slot.clone();
+                if !exposure.needs_block_witness() {
+                    // Legacy block-0 path, slot-gated: every byte
+                    // range-checked once on the slot's block-0 t = 15 row.
+                    for byte in &field_bytes {
+                        wire_range_check::<E>(
+                            &mut eval,
+                            legacy_slot_selector.clone(),
+                            byte.clone(),
+                            crate::components::RangeKind::Range16,
+                            &self.relations,
+                        );
+                        wire_range_check::<E>(
+                            &mut eval,
+                            legacy_slot_selector.clone(),
+                            byte.clone() + byte_range_offset.clone(),
+                            crate::components::RangeKind::Range16,
+                            &self.relations,
+                        );
+                    }
+                } else {
+                    let b = block_counter
+                        .as_ref()
+                        .expect("multi-block field exposure has a block counter");
+                    for (yield_idx, y) in exposure.yields().iter().enumerate() {
+                        let selector = selectors[yield_idx].clone();
+                        eval.add_constraint(selector.clone() * (selector.clone() - E::F::one()));
+                        eval.add_constraint(selector.clone() * (E::F::one() - r15.clone()));
+                        eval.add_constraint(
+                            selector.clone()
+                                * (b.clone() - E::F::from(M31::from(y.block_idx as u32))),
+                        );
+                        // Slot-attribution rail (NEW, soundness-critical).
+                        eval.add_constraint(selector.clone() * (E::F::one() - sel_slot.clone()));
+                    }
+                    for target_block in exposure.target_blocks() {
+                        let selector = exposure
+                            .yields()
+                            .iter()
+                            .position(|y| y.block_idx == *target_block)
+                            .map(|yield_idx| selectors[yield_idx].clone())
+                            .expect("target block has at least one selector");
+                        for byte in &field_bytes {
+                            wire_range_check::<E>(
+                                &mut eval,
+                                selector.clone(),
+                                byte.clone(),
+                                crate::components::RangeKind::Range16,
+                                &self.relations,
+                            );
+                            wire_range_check::<E>(
+                                &mut eval,
+                                selector.clone(),
+                                byte.clone() + byte_range_offset.clone(),
+                                crate::components::RangeKind::Range16,
+                                &self.relations,
+                            );
+                        }
+                    }
+                }
+
+                for (yield_idx, y) in exposure.yields().iter().enumerate() {
+                    let slot = exposure.yield_column_slot(y);
+                    let selector = if exposure.needs_block_witness() {
+                        selectors[yield_idx].clone()
+                    } else {
+                        legacy_slot_selector.clone()
+                    };
+                    let tuple = [
+                        E::F::from(M31::from(y.field_id)),
+                        E::F::from(M31::from(y.byte_index)),
+                        field_bytes[slot].clone(),
+                    ];
+                    eval.add_to_relation(RelationEntry::base(
+                        &multi.relations[s].field.field,
+                        -selector.clone(),
+                        &tuple,
+                    ));
+                }
+            }
+        } else if !self.field_exposure.is_empty() {
             let field_bytes: Vec<E::F> = (0..self.field_exposure.n_byte_columns())
                 .map(|_| eval.next_trace_mask())
                 .collect();

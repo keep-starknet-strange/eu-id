@@ -668,6 +668,191 @@ fn generate_trace_with_fields_scalar_fallback_with_decoys(
     cols
 }
 
+/// Materialise the multi-slot merged trace: slot `s`'s message occupies the
+/// leading blocks of region `[s·slot_rows, (s+1)·slot_rows)`; all remaining
+/// rows (in-slot padding and the tail) are fresh one-block SHA decoys with
+/// public flags zeroed — the single-instance zk padding semantics, applied
+/// per 64-row padding block.
+///
+/// Field tail: slot `s`'s self-contained tail (bytes → counter? →
+/// selectors?) starts at `Layout::TOTAL_COLS + config.field_tail_base(s)`.
+/// Every slot's byte columns are filled on every real `t = 15` row from
+/// THAT row's block words (the decomposition constraint is global); each
+/// counter carries the row's slot-local block index; selectors are one-hot
+/// only on their own slot's target rows.
+pub(crate) fn generate_multi_trace_base_columns(
+    witnesses: &[&Sha256Witness],
+    log_size: u32,
+    config: &crate::slots::MultiSlotConfig,
+) -> Vec<BaseColumn> {
+    use rayon::prelude::*;
+
+    let n_rows = 1usize << log_size;
+    let slot_rows = config.slot_rows();
+    let n_slots = config.n_slots();
+    assert_eq!(witnesses.len(), n_slots, "one witness per slot");
+    assert!(log_size >= LOG_N_LANES);
+    assert!(n_slots * slot_rows <= n_rows, "schedule exceeds the trace");
+    for (s, witness) in witnesses.iter().enumerate() {
+        assert!(
+            witness.blocks.len() * ROWS_PER_BLOCK < slot_rows,
+            "slot {s} message ({} blocks) does not leave in-slot padding \
+             (capacity {} blocks)",
+            witness.blocks.len(),
+            config.max_blocks_per_slot(),
+        );
+    }
+
+    let total_cols = Layout::TOTAL_COLS + config.n_field_columns();
+
+    // One fresh decoy witness per fully-padding 64-row block (in-slot pads +
+    // tail). Indexed by `row / ROWS_PER_BLOCK`.
+    let n_block_regions = n_rows / ROWS_PER_BLOCK;
+    let is_real_row = |row: usize| -> Option<(usize, usize)> {
+        let s = row / slot_rows;
+        if s >= n_slots {
+            return None;
+        }
+        let local = row % slot_rows;
+        (local < witnesses[s].blocks.len() * ROWS_PER_BLOCK).then_some((s, local))
+    };
+    let decoys: Vec<Option<Sha256Witness>> = {
+        let mut rng = OsRng;
+        (0..n_block_regions)
+            .map(|region| {
+                let row = region * ROWS_PER_BLOCK;
+                debug_assert_eq!(
+                    is_real_row(row).is_some(),
+                    is_real_row(row + ROWS_PER_BLOCK - 1).is_some(),
+                    "block regions are uniformly real or padding"
+                );
+                match is_real_row(row) {
+                    Some(_) => None,
+                    None => Some(random_one_block_decoy_witness(&mut rng)),
+                }
+            })
+            .collect()
+    };
+
+    let mut row_values = (0..n_rows)
+        .into_par_iter()
+        .map(|row_idx| {
+            let t = row_idx % ROWS_PER_BLOCK;
+            let mut values = vec![BaseField::from(0u32); total_cols];
+            match is_real_row(row_idx) {
+                Some((s, local)) => {
+                    let witness = witnesses[s];
+                    let block_idx = local / ROWS_PER_BLOCK;
+                    let last_block_idx = witness.blocks.len() - 1;
+                    write_round_row_values(
+                        &mut values,
+                        witness,
+                        block_idx,
+                        t,
+                        n_rows,
+                        block_idx == 0,
+                        block_idx == last_block_idx,
+                        &FieldExposure::empty(),
+                    );
+                    // enabler_step: 1 exactly at each slot start (its coset
+                    // predecessor is padding — in-slot padding of the
+                    // previous slot, or the wraparound tail for slot 0).
+                    if local == 0 {
+                        values[Layout::COL_ENABLER_STEP] = BaseField::from(1u32);
+                    }
+                    write_multi_field_tail_values(&mut values, config, s, witness, block_idx, t);
+                }
+                None => {
+                    let decoy = decoys[row_idx / ROWS_PER_BLOCK]
+                        .as_ref()
+                        .expect("padding region has a decoy witness");
+                    write_round_row_values(
+                        &mut values,
+                        decoy,
+                        0,
+                        t,
+                        n_rows,
+                        false,
+                        false,
+                        &FieldExposure::empty(),
+                    );
+                    values[Layout::COL_ENABLER] = BaseField::from(0u32);
+                    values[Layout::COL_IS_FIRST_BLOCK] = BaseField::from(0u32);
+                    values[Layout::COL_IS_LAST_BLOCK] = BaseField::from(0u32);
+                    values[Layout::COL_ENABLER_STEP] = BaseField::from(0u32);
+                    values[Layout::COL_PADDING_START..Layout::COL_PADDING_END]
+                        .fill(BaseField::from(0u32));
+                    // Field tail stays zero on padding rows (mirrors
+                    // `disabled_decoy_row_values`).
+                }
+            }
+            values
+        })
+        .collect::<Vec<_>>();
+    fill_schedule_sigma_bits_rows(&mut row_values);
+
+    let packed_rows = 1usize << (log_size - LOG_N_LANES);
+    (0..total_cols)
+        .into_par_iter()
+        .map(|column| {
+            let data = (0..packed_rows)
+                .map(|packed_row| {
+                    PackedM31::from_array(core::array::from_fn(|lane| {
+                        let storage_index = packed_row * N_LANES + lane;
+                        let circle_index = bit_reverse_index(storage_index, log_size);
+                        let coset_index =
+                            circle_domain_index_to_coset_index(circle_index, log_size);
+                        row_values[coset_index][column]
+                    }))
+                })
+                .collect();
+            BaseColumn::from_simd(data)
+        })
+        .collect()
+}
+
+/// Fill every slot's field-tail cells of one real row (slot `s`, slot-local
+/// block `block_idx`, round `t`).
+fn write_multi_field_tail_values(
+    row: &mut [BaseField],
+    config: &crate::slots::MultiSlotConfig,
+    s: usize,
+    witness: &Sha256Witness,
+    block_idx: usize,
+    t: usize,
+) {
+    let block = &witness.blocks[block_idx];
+    for (j, spec) in config.slots.iter().enumerate() {
+        let exposure = &spec.field_exposure;
+        if exposure.is_empty() {
+            continue;
+        }
+        let base = Layout::TOTAL_COLS + config.field_tail_base(j);
+        if t == 15 {
+            // Byte view of THIS row's block words, per exposure j's word map.
+            for (word_slot, &word_idx) in exposure.decomposed_words().iter().enumerate() {
+                let limb = block.schedule[word_idx];
+                let bytes = crate::field_exposure::word_be_bytes(limb.lo, limb.hi);
+                for (b, &byte) in bytes.iter().enumerate() {
+                    row[base + word_slot * BYTES_PER_WORD + b] = m31(byte);
+                }
+            }
+            if exposure.needs_block_witness() {
+                for (yield_idx, y) in exposure.yields().iter().enumerate() {
+                    let slot = exposure
+                        .selector_column_slot(yield_idx)
+                        .expect("multi-block exposure has selector columns");
+                    row[base + slot] =
+                        BaseField::from(u32::from(j == s && block_idx == y.block_idx));
+                }
+            }
+        }
+        if let Some(slot) = exposure.block_counter_column_slot() {
+            row[base + slot] = BaseField::from(block_idx as u32);
+        }
+    }
+}
+
 fn decoy_witnesses_for_padding(n_real_rows: usize, n_rows: usize) -> Vec<Sha256Witness> {
     decoy_witnesses_for_padding_with(n_real_rows, n_rows, &mut OsRng)
 }

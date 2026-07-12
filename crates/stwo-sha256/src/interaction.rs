@@ -105,6 +105,22 @@ pub fn sha_lookups_per_row(expose_digest: bool, field_exposure: &FieldExposure) 
     base + usize::from(expose_digest) + field_range_sites + field_exposure.n_yields()
 }
 
+/// Total lookup sites the multi-slot merged `Sha256Eval` fires per row:
+/// the 66 base sites, one digest yield site per digest-exposing slot, then
+/// each slot's field sites — in the emission order of the multi branch of
+/// `Sha256Eval::evaluate`. Read by both the interaction generator and the
+/// column sizing so the three never drift.
+#[inline]
+pub fn sha_multi_lookups_per_row(config: &crate::slots::MultiSlotConfig) -> usize {
+    SHA_LOOKUPS_PER_ROW_BASE
+        + config.n_digest_slots()
+        + config
+            .slots
+            .iter()
+            .map(|spec| field_exposure_sites(&spec.field_exposure))
+            .sum::<usize>()
+}
+
 // ---------------------------------------------------------------------------
 // Per-component claim
 // ---------------------------------------------------------------------------
@@ -760,74 +776,105 @@ fn write_round_row_lookups(
     // `block_idx == y.block_idx`).
     if !field_exposure.is_empty() {
         if t == 15 {
-            let word_bytes: Vec<[u32; crate::constants::WORD_BYTES]> = field_exposure
-                .decomposed_words()
-                .iter()
-                .map(|&w| {
-                    let limb = block.schedule[w];
-                    word_be_bytes(limb.lo, limb.hi)
-                })
-                .collect();
-
-            if field_exposure.needs_block_witness() {
-                for target_block in field_exposure.target_blocks() {
-                    let selector =
-                        SecureField::from(BaseField::from(u32::from(block_idx == *target_block)));
-                    for bytes in &word_bytes {
-                        for &b in bytes {
-                            all[*cursor][slot] =
-                                (selector, combine_range(relations, RangeKind::Range16, b));
-                            *cursor += 1;
-                            all[*cursor][slot] = (
-                                selector,
-                                combine_range(
-                                    relations,
-                                    RangeKind::Range16,
-                                    b + BYTE_RANGE_CHECK_OFFSET,
-                                ),
-                            );
-                            *cursor += 1;
-                        }
-                    }
-                }
-            } else {
-                let selector = SecureField::from(BaseField::from(u32::from(block_idx == 0)));
-                for bytes in &word_bytes {
-                    for &b in bytes {
-                        all[*cursor][slot] =
-                            (selector, combine_range(relations, RangeKind::Range16, b));
-                        *cursor += 1;
-                        all[*cursor][slot] = (
-                            selector,
-                            combine_range(
-                                relations,
-                                RangeKind::Range16,
-                                b + BYTE_RANGE_CHECK_OFFSET,
-                            ),
-                        );
-                        *cursor += 1;
-                    }
-                }
-            }
-            for y in field_exposure.yields() {
-                let selector =
-                    SecureField::from(BaseField::from(u32::from(block_idx == y.block_idx)));
-                let slot_idx = field_exposure.yield_column_slot(y);
-                let word_slot = slot_idx / crate::constants::WORD_BYTES;
-                let byte_in_word = slot_idx % crate::constants::WORD_BYTES;
-                let value = word_bytes[word_slot][byte_in_word];
-                let tuple = [
-                    BaseField::from(y.field_id),
-                    BaseField::from(y.byte_index),
-                    BaseField::from(value),
-                ];
-                let denom = relations.field.field.combine(&tuple);
-                all[*cursor][slot] = (-selector, denom);
-                *cursor += 1;
-            }
+            write_field_row_lookups(
+                all,
+                cursor,
+                slot,
+                block,
+                block_idx,
+                field_exposure,
+                &relations.field.field,
+                relations,
+                true,
+            );
         } else {
             *cursor += sha_lookups_per_row(false, field_exposure) - SHA_LOOKUPS_PER_ROW_BASE;
         }
+    }
+}
+
+/// Number of lookup sites one field exposure adds per row (range-checks +
+/// yields) — the field term of [`sha_lookups_per_row`], shared with the
+/// multi-slot sizing.
+pub(crate) fn field_exposure_sites(field_exposure: &FieldExposure) -> usize {
+    sha_lookups_per_row(false, field_exposure) - SHA_LOOKUPS_PER_ROW_BASE
+}
+
+/// Write one exposure's field sites (range-checks then yields, the
+/// `Sha256Eval` firing order) for a `t = 15` row of `block`, targeting
+/// `field_rel` for the yields. `hot` gates whether this row's block is
+/// eligible at all — the multi-slot writer passes `false` for rows of OTHER
+/// slots (the sites keep their neutral fill but the cursor still advances).
+#[allow(clippy::too_many_arguments)]
+fn write_field_row_lookups(
+    all: &mut [Vec<Frac>],
+    cursor: &mut usize,
+    slot: usize,
+    block: &crate::types::BlockWitness,
+    block_idx: usize,
+    field_exposure: &FieldExposure,
+    field_rel: &crate::relations::Sha256Field,
+    relations: &Sha256Relations,
+    hot: bool,
+) {
+    if !hot {
+        *cursor += field_exposure_sites(field_exposure);
+        return;
+    }
+    let word_bytes: Vec<[u32; crate::constants::WORD_BYTES]> = field_exposure
+        .decomposed_words()
+        .iter()
+        .map(|&w| {
+            let limb = block.schedule[w];
+            word_be_bytes(limb.lo, limb.hi)
+        })
+        .collect();
+
+    if field_exposure.needs_block_witness() {
+        for target_block in field_exposure.target_blocks() {
+            let selector =
+                SecureField::from(BaseField::from(u32::from(block_idx == *target_block)));
+            for bytes in &word_bytes {
+                for &b in bytes {
+                    all[*cursor][slot] =
+                        (selector, combine_range(relations, RangeKind::Range16, b));
+                    *cursor += 1;
+                    all[*cursor][slot] = (
+                        selector,
+                        combine_range(relations, RangeKind::Range16, b + BYTE_RANGE_CHECK_OFFSET),
+                    );
+                    *cursor += 1;
+                }
+            }
+        }
+    } else {
+        let selector = SecureField::from(BaseField::from(u32::from(block_idx == 0)));
+        for bytes in &word_bytes {
+            for &b in bytes {
+                all[*cursor][slot] = (selector, combine_range(relations, RangeKind::Range16, b));
+                *cursor += 1;
+                all[*cursor][slot] = (
+                    selector,
+                    combine_range(relations, RangeKind::Range16, b + BYTE_RANGE_CHECK_OFFSET),
+                );
+                *cursor += 1;
+            }
+        }
+    }
+    for y in field_exposure.yields() {
+        let selector = SecureField::from(BaseField::from(u32::from(block_idx == y.block_idx)));
+        let slot_idx = field_exposure.yield_column_slot(y);
+        let word_slot = slot_idx / crate::constants::WORD_BYTES;
+        let byte_in_word = slot_idx % crate::constants::WORD_BYTES;
+        let value = word_bytes[word_slot][byte_in_word];
+        let tuple = [
+            BaseField::from(y.field_id),
+            BaseField::from(y.byte_index),
+            BaseField::from(value),
+        ];
+        let denom = field_rel.combine(&tuple);
+        all[*cursor][slot] = (-selector, denom);
+        *cursor += 1;
     }
 }
 
@@ -1029,6 +1076,109 @@ pub fn generate_consumer_interaction_trace(
         field_exposure,
         false,
     )
+}
+
+/// Interaction trace of the multi-slot merged consumer (shared-tables mode:
+/// no producer components). Mirrors the multi branch of
+/// `Sha256Eval::evaluate` exactly: per row, the 66 base sites (via
+/// [`write_round_row_lookups`] with digest/field off), then one digest
+/// yield site per digest-exposing slot in slot order (live on the OWN
+/// slot's final-block t = 63 row), then each slot's field sites in slot
+/// order (live on the OWN slot's t = 15 rows only).
+pub fn generate_multi_consumer_interaction_trace(
+    relations: &Sha256Relations,
+    slot_relations: &[crate::relations::SlotIoRelations],
+    witnesses: &[&Sha256Witness],
+    log_size: u32,
+    config: &crate::slots::MultiSlotConfig,
+) -> (
+    Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
+    InteractionClaim,
+) {
+    assert_eq!(witnesses.len(), config.n_slots());
+    assert_eq!(slot_relations.len(), config.n_slots());
+    let n_rows = 1usize << log_size;
+    let slot_rows = config.slot_rows();
+    let lookups_per_row = sha_multi_lookups_per_row(config);
+    let empty_exposure = FieldExposure::empty();
+    let mut all_lookups: Vec<Vec<Frac>> = (0..lookups_per_row)
+        .map(|_| vec![(SecureField::zero(), SecureField::one()); n_rows])
+        .collect();
+
+    for (s, witness) in witnesses.iter().enumerate() {
+        assert!(
+            witness.blocks.len() * crate::trace::ROWS_PER_BLOCK < slot_rows,
+            "slot {s} must keep in-slot padding"
+        );
+        let last_block_idx = witness.blocks.len() - 1;
+        for (block_idx, block) in witness.blocks.iter().enumerate() {
+            let is_last_block = block_idx == last_block_idx;
+            for t in 0..crate::constants::N_ROUNDS {
+                let natural =
+                    config.slot_start_row(s) + block_idx * crate::trace::ROWS_PER_BLOCK + t;
+                let slot = Layout::row_slot(natural, log_size);
+                let mut cursor = 0usize;
+                write_round_row_lookups(
+                    &mut all_lookups,
+                    &mut cursor,
+                    slot,
+                    block,
+                    t,
+                    relations,
+                    false,
+                    false,
+                    &empty_exposure,
+                    block_idx,
+                );
+                debug_assert_eq!(cursor, SHA_LOOKUPS_PER_ROW_BASE);
+                // Per-slot digest sites, slot order.
+                for (k, spec) in config.slots.iter().enumerate() {
+                    if !spec.expose_digest {
+                        continue;
+                    }
+                    if k == s && t == crate::constants::N_ROUNDS - 1 {
+                        let bytes = h_out_digest_bytes(&block.h_out);
+                        let values: [BaseField; DIGEST_BYTES] =
+                            std::array::from_fn(|i| BaseField::from(bytes[i]));
+                        let denom = slot_relations[k].digest.digest.combine(&values);
+                        let num =
+                            -SecureField::from(BaseField::from(u32::from(is_last_block)));
+                        all_lookups[cursor][slot] = (num, denom);
+                    }
+                    cursor += 1;
+                }
+                // Per-slot field sites, slot order. Rows of other slots (and
+                // non-t=15 rows) keep the neutral fill; the cursor advances
+                // identically on every row.
+                for (k, spec) in config.slots.iter().enumerate() {
+                    if spec.field_exposure.is_empty() {
+                        continue;
+                    }
+                    write_field_row_lookups(
+                        &mut all_lookups,
+                        &mut cursor,
+                        slot,
+                        block,
+                        block_idx,
+                        &spec.field_exposure,
+                        &slot_relations[k].field.field,
+                        relations,
+                        k == s && t == 15,
+                    );
+                }
+                debug_assert_eq!(cursor, lookups_per_row, "multi row lookup miscount");
+            }
+        }
+    }
+
+    let (evals, claimed_sum) = build_interaction_columns(log_size, LOGUP_BATCH, all_lookups);
+    let claim = InteractionClaim {
+        sha256: ComponentClaim { claimed_sum },
+        round_split_pack: Vec::new(),
+        sigma_split_pack: Vec::new(),
+        range: Vec::new(),
+    };
+    (evals, claim)
 }
 
 fn generate_interaction_trace_inner(

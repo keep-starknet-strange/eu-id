@@ -285,31 +285,9 @@ fn generate_preprocessed_trace_uncached(group_width: u32, log_n_rows: u32) -> Pr
     // and scattering through `row_slot`. Order matches
     // `components::round_cyclic_column_ids`:
     // `k_lo, k_hi, is_round_0, _1, _2, _3, _15, _63, is_schedule`.
-    {
-        use crate::constants::{K, N_ROUNDS};
-        let domain = CanonicCoset::new(log_n_rows).circle_domain();
-        let n_rows = 1usize << log_n_rows;
-        let fns: [Box<dyn Fn(usize) -> u32>; 9] = [
-            Box::new(|t| K[t] & 0xFFFF),
-            Box::new(|t| K[t] >> 16),
-            Box::new(|t| u32::from(t == 0)),
-            Box::new(|t| u32::from(t == 1)),
-            Box::new(|t| u32::from(t == 2)),
-            Box::new(|t| u32::from(t == 3)),
-            Box::new(|t| u32::from(t == 15)),
-            Box::new(|t| u32::from(t == N_ROUNDS - 1)),
-            Box::new(|t| u32::from(t >= 16)),
-        ];
-        for f in fns {
-            let mut vals = vec![BaseField::from(0u32); n_rows];
-            for natural in 0..n_rows {
-                vals[Layout::row_slot(natural, log_n_rows)] =
-                    BaseField::from(f(natural % N_ROUNDS));
-            }
-            let col: BaseColumn = vals.into_iter().collect();
-            evals.push(CircleEvaluation::new(domain, col));
-            log_sizes.push(log_n_rows);
-        }
+    for col in round_cyclic_evals(log_n_rows) {
+        evals.push(col);
+        log_sizes.push(log_n_rows);
     }
 
     let ids = all_preprocessed_column_ids();
@@ -320,6 +298,105 @@ fn generate_preprocessed_trace_uncached(group_width: u32, log_n_rows: u32) -> Pr
     );
     debug_assert_eq!(log_sizes.len(), evals.len());
 
+    (evals, ids, log_sizes)
+}
+
+/// The 9 round-cyclic columns of the rotated layout at `log_n_rows`, in
+/// [`crate::components::round_cyclic_column_ids`] order. Each is a function
+/// of `t = natural_row mod 64` alone, scattered into storage order via
+/// [`Layout::row_slot`] — shared by the single-instance preprocessed trace
+/// and the multi-slot consumer trace.
+fn round_cyclic_evals(
+    log_n_rows: u32,
+) -> Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>> {
+    use crate::constants::{K, N_ROUNDS};
+    let domain = CanonicCoset::new(log_n_rows).circle_domain();
+    let n_rows = 1usize << log_n_rows;
+    let fns: [Box<dyn Fn(usize) -> u32>; 9] = [
+        Box::new(|t| K[t] & 0xFFFF),
+        Box::new(|t| K[t] >> 16),
+        Box::new(|t| u32::from(t == 0)),
+        Box::new(|t| u32::from(t == 1)),
+        Box::new(|t| u32::from(t == 2)),
+        Box::new(|t| u32::from(t == 3)),
+        Box::new(|t| u32::from(t == 15)),
+        Box::new(|t| u32::from(t == N_ROUNDS - 1)),
+        Box::new(|t| u32::from(t >= 16)),
+    ];
+    fns.into_iter()
+        .map(|f| {
+            let mut vals = vec![BaseField::from(0u32); n_rows];
+            for natural in 0..n_rows {
+                vals[Layout::row_slot(natural, log_n_rows)] =
+                    BaseField::from(f(natural % N_ROUNDS));
+            }
+            let col: BaseColumn = vals.into_iter().collect();
+            CircleEvaluation::new(domain, col)
+        })
+        .collect()
+}
+
+/// One selector column at `log_n_rows`: `1` exactly at the natural rows for
+/// which `hot` returns true, scattered into storage order.
+fn selector_eval(
+    log_n_rows: u32,
+    hot: impl Fn(usize) -> bool,
+) -> CircleEvaluation<SimdBackend, BaseField, BitReversedOrder> {
+    let domain = CanonicCoset::new(log_n_rows).circle_domain();
+    let n_rows = 1usize << log_n_rows;
+    let mut vals = vec![BaseField::from(0u32); n_rows];
+    for natural in 0..n_rows {
+        if hot(natural) {
+            vals[Layout::row_slot(natural, log_n_rows)] = BaseField::from(1u32);
+        }
+    }
+    let col: BaseColumn = vals.into_iter().collect();
+    CircleEvaluation::new(domain, col)
+}
+
+/// The multi-slot consumer's preprocessed trace, in
+/// [`crate::components::multi_consumer_preprocessed_column_ids`] order:
+/// `slot_starts` (1 at every slot region's first row), the 9 round-cyclic
+/// columns, then one `slot_sel` region selector per slot. All at
+/// `log_n_rows`.
+pub fn generate_multi_consumer_preprocessed_trace(
+    log_n_rows: u32,
+    config: &crate::slots::MultiSlotConfig,
+) -> PreprocessedTrace {
+    let slot_rows = config.slot_rows();
+    let n_slots = config.n_slots();
+    assert!(
+        n_slots * slot_rows <= (1usize << log_n_rows),
+        "multi-slot schedule does not fit the trace"
+    );
+
+    let mut evals = Vec::with_capacity(10 + n_slots);
+    let mut log_sizes = Vec::with_capacity(10 + n_slots);
+
+    evals.push(selector_eval(log_n_rows, |natural| {
+        natural % slot_rows == 0 && natural / slot_rows < n_slots
+    }));
+    log_sizes.push(log_n_rows);
+
+    for col in round_cyclic_evals(log_n_rows) {
+        evals.push(col);
+        log_sizes.push(log_n_rows);
+    }
+
+    for s in 0..n_slots {
+        evals.push(selector_eval(log_n_rows, |natural| {
+            natural / slot_rows == s
+        }));
+        log_sizes.push(log_n_rows);
+    }
+
+    let ids = crate::components::multi_consumer_preprocessed_column_ids(
+        log_n_rows,
+        config.slot_log,
+        n_slots,
+    );
+    debug_assert_eq!(ids.len(), evals.len());
+    debug_assert_eq!(log_sizes.len(), evals.len());
     (evals, ids, log_sizes)
 }
 

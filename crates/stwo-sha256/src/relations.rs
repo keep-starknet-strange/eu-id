@@ -547,6 +547,43 @@ impl Default for FieldRelation {
     }
 }
 
+/// Per-slot cross-module channels of a multi-slot consumer: each slot gets
+/// its OWN digest and field relation, drawn in slot order. Distinct
+/// per-slot relations make cross-slot digest/field substitution
+/// inexpressible at the relation level, and they map one-to-one onto the
+/// per-instance `SharedDigestRelation` / `SharedFieldRelation` handles the
+/// mdoc consumers already hold — merging the SHA instances changes nothing
+/// on the consumer side.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SlotIoRelations {
+    pub digest: DigestRelation,
+    pub field: FieldRelation,
+}
+
+impl SlotIoRelations {
+    /// Draw one (digest, field) pair per slot, in slot order. Both sides of
+    /// the transcript call this at the same point (after the shared-table
+    /// handshake), mirroring the single-instance draw order
+    /// (digest first, then field).
+    pub fn draw_per_slot(channel: &mut impl Channel, n_slots: usize) -> Vec<Self> {
+        (0..n_slots)
+            .map(|_| Self {
+                digest: DigestRelation::draw(channel),
+                field: FieldRelation::draw(channel),
+            })
+            .collect()
+    }
+
+    pub fn dummy_per_slot(n_slots: usize) -> Vec<Self> {
+        (0..n_slots)
+            .map(|_| Self {
+                digest: DigestRelation::dummy(),
+                field: FieldRelation::dummy(),
+            })
+            .collect()
+    }
+}
+
 /// All LogUp channels the SHA-256 AIR consumes today: the eight `Σ`/`σ`
 /// decode-table channels, the packed Maj/Ch pair, the chunk-wise `xor_8`
 /// channel, the eight split-and-pack channels, and the four range-check
@@ -624,6 +661,30 @@ impl Sha256Relations {
             digest: DigestRelation::draw(channel),
             field: FieldRelation::draw(channel),
         }
+    }
+
+    /// Multi-slot consumer draw: the fixed tables come from the shared
+    /// handles (as [`Self::draw_with_shared_tables`]); the single-instance
+    /// digest/field channels stay DUMMY (the multi eval never touches them)
+    /// and each slot draws its own (digest, field) pair instead, in slot
+    /// order.
+    pub fn draw_multi_with_shared_tables(
+        channel: &mut impl Channel,
+        shared: &SharedShaTableRelations,
+        n_slots: usize,
+    ) -> (Self, Vec<SlotIoRelations>) {
+        let base = Self {
+            sigma_decode: SigmaDecodeRelations::dummy(),
+            maj: MajRelation::dummy(),
+            ch: ChRelation::dummy(),
+            xor_8: Xor8Relation::dummy(),
+            split_pack: shared.split_pack.get(),
+            range: shared.range.get(),
+            digest: DigestRelation::dummy(),
+            field: FieldRelation::dummy(),
+        };
+        let slots = SlotIoRelations::draw_per_slot(channel, n_slots);
+        (base, slots)
     }
 
     /// Constant-channel set for tests. Mirrors [`SigmaDecodeRelations::dummy`]
