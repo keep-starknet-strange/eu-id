@@ -24,7 +24,7 @@ use stwo_p256_utils::scalar_arithmetic::{
     ScalarArithmeticError, ScalarFieldMulTrace, U256Words, P256_ORDER,
 };
 
-pub const LAYOUT_LEN: usize = 2680;
+pub const LAYOUT_LEN: usize = 2168;
 pub const LIMB_BITS: usize = 13;
 pub const N_LIMBS: usize = 20;
 pub const C1_INPUT_LIMBS_INPUT_LOG_SIZE: usize = 7;
@@ -33,8 +33,6 @@ pub const C2_CANONICALITY_INPUT_LOG_SIZE: usize = 3;
 pub const C2_CANONICALITY_OUTPUT_LOG_SIZE: usize = 2;
 pub const C3_C5_SCALAR_SETUP_INPUT_LOG_SIZE: usize = 4;
 pub const C3_C5_SCALAR_SETUP_OUTPUT_LOG_SIZE: usize = 2;
-pub const C6_SCALAR_BITS_INPUT_LOG_SIZE: usize = 10;
-pub const C6_SCALAR_BITS_OUTPUT_LOG_SIZE: usize = 10;
 pub const C11_FINAL_ADD_INPUT_LOG_SIZE: usize = 4;
 pub const C11_FINAL_ADD_OUTPUT_LOG_SIZE: usize = 2;
 pub const C12_ON_CURVE_INPUT_LOG_SIZE: usize = 11;
@@ -76,9 +74,8 @@ pub const MAC_HALF_COMMITTED_PRIVATE_INPUTS: usize =
 pub const MDOC_P4B_MAC_HALF_COUNT: usize = 6;
 pub const MDOC_P4B_MAC_COMMITTED_PRIVATE_INPUTS: usize =
     MDOC_P4B_MAC_HALF_COUNT * MAC_HALF_COMMITTED_PRIVATE_INPUTS;
-pub const IMPLEMENTED_CIRCUIT_FAMILY_COUNT: usize = 9;
+pub const IMPLEMENTED_CIRCUIT_FAMILY_COUNT: usize = 7;
 
-const C6_CONST_ONE_INDEX: u32 = 0;
 const C1_CONST_ONE_INDEX: u32 = 0;
 const C1_VALUES_START_INDEX: u32 = 1;
 const C1_LIMBS_START_INDEX: u32 = 6;
@@ -100,11 +97,6 @@ const C3_U2_INDEX: u32 = 6;
 const C3_QINV_INDEX: u32 = 7;
 const C3_Q1_INDEX: u32 = 8;
 const C3_Q2_INDEX: u32 = 9;
-const C6_U1_INDEX: u32 = 1;
-const C6_U2_INDEX: u32 = 2;
-const C6_BITS_START_INDEX: u32 = 3;
-const C6_U1_RECOMPOSE_OUTPUT: u32 = 512;
-const C6_U2_RECOMPOSE_OUTPUT: u32 = 513;
 const C9_C10_ACCUMULATOR_POINTS_PER_SCALAR: usize = 256;
 const C11_CONST_ONE_INDEX: u32 = 0;
 const C11_AX_INDEX: u32 = 1;
@@ -152,7 +144,6 @@ pub enum LayoutSlot {
     ScalarInverses,
     UScalars,
     ModNQuotients,
-    ScalarBits,
     U1GAccumulators,
     U2QAccumulators,
     CorrectedEndpoints,
@@ -172,17 +163,16 @@ pub fn layout_range(slot: LayoutSlot) -> Range<usize> {
         LayoutSlot::ScalarInverses => 100..101,
         LayoutSlot::UScalars => 101..103,
         LayoutSlot::ModNQuotients => 103..106,
-        LayoutSlot::ScalarBits => 106..618,
-        LayoutSlot::U1GAccumulators => 618..1130,
-        LayoutSlot::U2QAccumulators => 1130..1642,
-        LayoutSlot::CorrectedEndpoints => 1642..1646,
-        LayoutSlot::U1GDenominatorInverses => 1646..2159,
-        LayoutSlot::U2QDenominatorInverses => 2159..2672,
-        LayoutSlot::FinalAddDenominatorInverse => 2672..2673,
-        LayoutSlot::SlopeInverses => 1646..2673,
-        LayoutSlot::FinalPoint => 2673..2675,
-        LayoutSlot::FinalReduction => 2675..2677,
-        LayoutSlot::InfinityFlags => 2677..2680,
+        LayoutSlot::U1GAccumulators => 106..618,
+        LayoutSlot::U2QAccumulators => 618..1130,
+        LayoutSlot::CorrectedEndpoints => 1130..1134,
+        LayoutSlot::U1GDenominatorInverses => 1134..1647,
+        LayoutSlot::U2QDenominatorInverses => 1647..2160,
+        LayoutSlot::FinalAddDenominatorInverse => 2160..2161,
+        LayoutSlot::SlopeInverses => 1134..2161,
+        LayoutSlot::FinalPoint => 2161..2163,
+        LayoutSlot::FinalReduction => 2163..2165,
+        LayoutSlot::InfinityFlags => 2165..2168,
         LayoutSlot::MacHalf => 0..0,
     }
 }
@@ -431,16 +421,6 @@ pub fn generate_witness(input: &EcdsaInput) -> Result<Witness, WitnessError> {
     values[q_range.start + 1] = fp_from_words(&q1);
     values[q_range.start + 2] = fp_from_words(&q2);
 
-    let bits_range = layout_range(LayoutSlot::ScalarBits);
-    write_scalar_bits(
-        &mut values[bits_range.start..bits_range.start + 256],
-        &u1_words,
-    );
-    write_scalar_bits(
-        &mut values[bits_range.start + 256..bits_range.end],
-        &u2_words,
-    );
-
     let u1_raw = write_ladder_accumulators(
         &mut values,
         LayoutSlot::U1GAccumulators,
@@ -501,7 +481,6 @@ pub fn verify_witness(input: &EcdsaInput, witness: &Witness) -> Result<(), Witne
         LayoutSlot::ScalarInverses,
         LayoutSlot::UScalars,
         LayoutSlot::ModNQuotients,
-        LayoutSlot::ScalarBits,
         LayoutSlot::U1GAccumulators,
         LayoutSlot::U2QAccumulators,
         LayoutSlot::CorrectedEndpoints,
@@ -1578,8 +1557,6 @@ pub fn verify_implemented_circuit_bundle_batch_with_projection_profiled(
         projections.iter().zip(&signature_layouts).enumerate()
     {
         let mut verified_claims = Vec::with_capacity(circuits.len());
-        let mut u_scalars_from_c3 = None;
-        let mut u_scalars_from_c6 = None;
         let mut add_inputs_from_c11 = None;
         let mut denom_inv_from_c11 = None;
         let mut final_from_c11 = None;
@@ -1628,40 +1605,6 @@ pub fn verify_implemented_circuit_bundle_batch_with_projection_profiled(
                 }
                 b"s4-ecdsa-c3-c5-scalar-setup" => {
                     add_c3_public_claims(&mut linear_claims, projection, layout)?;
-                    u_scalars_from_c3 = Some((
-                        take_private_value(
-                            &mut linear_claims,
-                            bundle,
-                            &mut consistency_cursor,
-                            layout,
-                            C3_U1_INDEX as usize,
-                        )?,
-                        take_private_value(
-                            &mut linear_claims,
-                            bundle,
-                            &mut consistency_cursor,
-                            layout,
-                            C3_U2_INDEX as usize,
-                        )?,
-                    ));
-                }
-                b"s4-ecdsa-c6-scalar-bits" => {
-                    u_scalars_from_c6 = Some((
-                        take_private_value(
-                            &mut linear_claims,
-                            bundle,
-                            &mut consistency_cursor,
-                            layout,
-                            C6_U1_INDEX as usize,
-                        )?,
-                        take_private_value(
-                            &mut linear_claims,
-                            bundle,
-                            &mut consistency_cursor,
-                            layout,
-                            C6_U2_INDEX as usize,
-                        )?,
-                    ));
                 }
                 b"s4-ecdsa-c11-final-add" => {
                     let ax = take_private_value(
@@ -1749,7 +1692,6 @@ pub fn verify_implemented_circuit_bundle_batch_with_projection_profiled(
             verified_claims.push(claims);
         }
         let start = Instant::now();
-        verify_u_scalar_cross_family(u_scalars_from_c3, u_scalars_from_c6)?;
         verify_corrected_endpoint_cross_family(
             c12_boundaries.map(|boundaries| boundaries.corrected_endpoints),
             add_inputs_from_c11,
@@ -1806,19 +1748,6 @@ pub fn verify_implemented_circuit_bundle_profiled(
         .pop()
         .ok_or(ImplementedCircuitProofError::InputClaimOpeningRejected)?;
     Ok((claims, profile))
-}
-
-fn verify_u_scalar_cross_family(
-    c3: Option<(Fp, Fp)>,
-    c6: Option<(Fp, Fp)>,
-) -> Result<(), ImplementedCircuitProofError> {
-    let (Some(c3), Some(c6)) = (c3, c6) else {
-        return Err(ImplementedCircuitProofError::CrossFamilyBindingRejected);
-    };
-    if c3 != c6 {
-        return Err(ImplementedCircuitProofError::CrossFamilyBindingRejected);
-    }
-    Ok(())
 }
 
 fn verify_corrected_endpoint_cross_family(
@@ -2034,7 +1963,6 @@ pub fn implemented_circuit_gate_count() -> Result<usize, CircuitError> {
         build_c1_input_limbs_circuit()?,
         build_c2_canonicality_circuit()?,
         build_c3_c5_scalar_setup_circuit()?,
-        build_c6_scalar_bits_circuit()?,
         build_c11_final_add_circuit()?,
         build_c12_on_curve_circuit()?,
         build_c13_slope_inverses_circuit()?,
@@ -2146,8 +2074,6 @@ struct MdocP4bClaimInventory {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct MdocP4bEcdsaConsistency {
-    u_scalars_from_c3: Option<(Fp, Fp)>,
-    u_scalars_from_c6: Option<(Fp, Fp)>,
     add_inputs_from_c11: Option<((Fp, Fp), (Fp, Fp))>,
     denom_inv_from_c11: Option<Fp>,
     final_from_c11: Option<(Fp, Fp)>,
@@ -2158,7 +2084,6 @@ struct MdocP4bEcdsaConsistency {
 
 impl MdocP4bEcdsaConsistency {
     fn verify(self) -> Result<(), ImplementedCircuitProofError> {
-        verify_u_scalar_cross_family(self.u_scalars_from_c3, self.u_scalars_from_c6)?;
         verify_corrected_endpoint_cross_family(
             self.c12_boundaries
                 .map(|boundaries| boundaries.corrected_endpoints),
@@ -2738,36 +2663,6 @@ fn add_prover_family_fixed_claims(
         b"s4-ecdsa-c2-canonicality" => add_c2_public_claims(claims, projection, layout)?,
         b"s4-ecdsa-c3-c5-scalar-setup" => {
             add_c3_public_claims(claims, projection, layout)?;
-            add_private_value(
-                claims,
-                consistency_values,
-                layout,
-                C3_U1_INDEX as usize,
-                values,
-            )?;
-            add_private_value(
-                claims,
-                consistency_values,
-                layout,
-                C3_U2_INDEX as usize,
-                values,
-            )?;
-        }
-        b"s4-ecdsa-c6-scalar-bits" => {
-            add_private_value(
-                claims,
-                consistency_values,
-                layout,
-                C6_U1_INDEX as usize,
-                values,
-            )?;
-            add_private_value(
-                claims,
-                consistency_values,
-                layout,
-                C6_U2_INDEX as usize,
-                values,
-            )?;
         }
         b"s4-ecdsa-c11-final-add" => {
             for index in [
@@ -3101,16 +2996,6 @@ fn mdoc_p4b_take_ecdsa_claims(
         }
         b"s4-ecdsa-c3-c5-scalar-setup" => {
             add_c3_public_claims(claims, projection, layout)?;
-            state.u_scalars_from_c3 = Some((
-                take_private_value(claims, bundle, cursor, layout, C3_U1_INDEX as usize)?,
-                take_private_value(claims, bundle, cursor, layout, C3_U2_INDEX as usize)?,
-            ));
-        }
-        b"s4-ecdsa-c6-scalar-bits" => {
-            state.u_scalars_from_c6 = Some((
-                take_private_value(claims, bundle, cursor, layout, C6_U1_INDEX as usize)?,
-                take_private_value(claims, bundle, cursor, layout, C6_U2_INDEX as usize)?,
-            ));
         }
         b"s4-ecdsa-c11-final-add" => {
             let ax = take_private_value(claims, bundle, cursor, layout, C11_AX_INDEX as usize)?;
@@ -3243,12 +3128,13 @@ fn implemented_circuit_instances(
             circuit: build_c3_c5_scalar_setup_circuit().expect("static C3-C5 circuit is valid"),
             input: c3_c5_scalar_setup_input(input, witness)?,
         },
-        ProverCircuitInstance {
-            label: b"s4-ecdsa-c6-scalar-bits",
-            slot: LayoutSlot::ScalarBits,
-            circuit: build_c6_scalar_bits_circuit().expect("static C6 circuit is valid"),
-            input: c6_scalar_bits_input(witness)?,
-        },
+        // C6 scalar-bit decomposition removed (WO-C1b): its 512 committed bits
+        // fed no other claim family, and its only cross-family output — the
+        // u1/u2 equality against C3-C5 — was redundant. C3-C5 derives u1 = z·s⁻¹
+        // and u2 = r·s⁻¹ as base-field elements (from_bytes_be enforces the
+        // canonical < p range), a range fact at least as strong as C6's < 2^256
+        // recomposition, and the ladder consumes those native scalar words, not
+        // the bits. Deleting C6 leaves the accepted (z,r,s,Q) set unchanged.
         // C9/C10 accumulator on-curve checks ride the C12 family: its input
         // committed the same 512 accumulator points a second time (plus the
         // corrected endpoints and final point) and its circuit runs the same
@@ -3294,10 +3180,6 @@ fn implemented_circuit_verifier_instances() -> Result<Vec<VerifierCircuitInstanc
         VerifierCircuitInstance {
             label: b"s4-ecdsa-c3-c5-scalar-setup",
             circuit: build_c3_c5_scalar_setup_circuit()?,
-        },
-        VerifierCircuitInstance {
-            label: b"s4-ecdsa-c6-scalar-bits",
-            circuit: build_c6_scalar_bits_circuit()?,
         },
         VerifierCircuitInstance {
             label: b"s4-ecdsa-c11-final-add",
@@ -4333,80 +4215,6 @@ pub fn c3_c5_scalar_setup_input(
     Ok(circuit_input)
 }
 
-pub fn build_c6_scalar_bits_circuit() -> Result<Circuit, CircuitError> {
-    let mut terms = Vec::with_capacity(2 * 512 + 2 * 257);
-    for bit in 0..512u32 {
-        let bit_index = C6_BITS_START_INDEX + bit;
-        terms.push(QuadTerm {
-            out: bit,
-            l: bit_index,
-            r: bit_index,
-            coeff: Fp::ONE,
-        });
-        terms.push(QuadTerm {
-            out: bit,
-            l: bit_index,
-            r: C6_CONST_ONE_INDEX,
-            coeff: -Fp::ONE,
-        });
-    }
-
-    let mut powers = [Fp::ZERO; 256];
-    let mut power = Fp::ONE;
-    for slot in (0..256usize).rev() {
-        powers[slot] = power;
-        power = power + power;
-    }
-    for bit in 0..256u32 {
-        terms.push(QuadTerm {
-            out: C6_U1_RECOMPOSE_OUTPUT,
-            l: C6_BITS_START_INDEX + bit,
-            r: C6_CONST_ONE_INDEX,
-            coeff: powers[bit as usize],
-        });
-        terms.push(QuadTerm {
-            out: C6_U2_RECOMPOSE_OUTPUT,
-            l: C6_BITS_START_INDEX + 256 + bit,
-            r: C6_CONST_ONE_INDEX,
-            coeff: powers[bit as usize],
-        });
-    }
-    terms.push(QuadTerm {
-        out: C6_U1_RECOMPOSE_OUTPUT,
-        l: C6_U1_INDEX,
-        r: C6_CONST_ONE_INDEX,
-        coeff: -Fp::ONE,
-    });
-    terms.push(QuadTerm {
-        out: C6_U2_RECOMPOSE_OUTPUT,
-        l: C6_U2_INDEX,
-        r: C6_CONST_ONE_INDEX,
-        coeff: -Fp::ONE,
-    });
-
-    Circuit::new(vec![Layer::new(
-        C6_SCALAR_BITS_OUTPUT_LOG_SIZE,
-        C6_SCALAR_BITS_INPUT_LOG_SIZE,
-        terms,
-    )?])
-}
-
-pub fn c6_scalar_bits_input(witness: &Witness) -> Result<Vec<Fp>, WitnessError> {
-    if witness.values.len() != LAYOUT_LEN {
-        return Err(WitnessError::LayoutMismatch);
-    }
-    let mut input = vec![Fp::ZERO; 1usize << C6_SCALAR_BITS_INPUT_LOG_SIZE];
-    input[C6_CONST_ONE_INDEX as usize] = Fp::ONE;
-    let u_scalars = layout_range(LayoutSlot::UScalars);
-    input[C6_U1_INDEX as usize] = witness.values[u_scalars.start];
-    input[C6_U2_INDEX as usize] = witness.values[u_scalars.start + 1];
-
-    let bits = layout_range(LayoutSlot::ScalarBits);
-    input[C6_BITS_START_INDEX as usize..C6_BITS_START_INDEX as usize + 512]
-        .copy_from_slice(&witness.values[bits]);
-    Ok(input)
-}
-
 pub fn build_c11_final_add_circuit() -> Result<Circuit, CircuitError> {
     let terms = vec![
         QuadTerm {
@@ -5117,17 +4925,6 @@ fn sub_words(lhs: &U256Words, rhs: &U256Words) -> U256Words {
     }
     debug_assert_eq!(borrow, 0);
     out
-}
-
-fn write_scalar_bits(out: &mut [Fp], words: &U256Words) {
-    debug_assert_eq!(out.len(), 256);
-    for (slot, value) in out.iter_mut().enumerate() {
-        *value = if scalar_bit(words, 255 - slot) {
-            Fp::ONE
-        } else {
-            Fp::ZERO
-        };
-    }
 }
 
 fn require_equal_slot(
