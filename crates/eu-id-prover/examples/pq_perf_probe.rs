@@ -81,6 +81,7 @@ fn main() {
     let verify_ms = verify_start.elapsed().as_millis();
 
     let breakdown = mdoc_proof_byte_breakdown(&proof);
+    std::fs::write("/tmp/pq_proof.bin", bincode::serialize(&proof).unwrap()).unwrap();
     println!(
         "PQ_PERF_PROBE prove_ms={prove_ms} verify_ms={verify_ms} proof_bytes={}",
         breakdown.proof_bytes
