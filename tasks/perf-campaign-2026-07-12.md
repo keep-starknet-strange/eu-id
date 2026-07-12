@@ -46,6 +46,15 @@ Rule: every WO lands with a measured ts13_full_probe number. No number, not done
       VERIFIED. Committed values 27,920→15,479; opened rows 112→63; proof
       −286,888B; verify −32ms against the takeover re-probe. See equivalence
       proof below.
+- [x] P-256 ladder regression — executable proof now documents that replacing
+      both accumulator transcripts with repeated valid on-curve generator
+      points passes every implemented family and the proof verifier even though
+      the native witness checker rejects it.
+- [ ] P-256 relation repair — BLOCKED on a reviewed combined spec. There is no
+      transition gadget to reuse, and constraining transitions alone is
+      insufficient: C3's field equations also need a sound integer/limb proof
+      of the scalar reductions modulo n. Do not claim the current coprocessor is
+      a sound ECDSA verifier until both obligations land.
 - [x] Ligero Task 4 — restore Circle proximity sampling over the full codeword.
       The inherited RS-prefix exclusion invalidated the v4 full-domain error
       calculation; fixed before any larger-row profile sweep.
@@ -266,6 +275,15 @@ This dedup does **not** close the pre-existing critical ladder gap: C12 proves
 the accumulator points are on-curve, but no implemented family constrains their
 double/add transitions or binds the sequence to C3's u1/u2. The design document
 now states that boundary explicitly instead of claiming C13 supplied linkage.
+
+The gap now has an executable regression:
+`forged_ladder_accumulators_must_reject` replaces all C12 accumulator points
+with the valid P-256 generator. `verify_witness` rejects the transcript, but the
+six implemented circuit families, an unchecked proof, and the public verifier
+accept it. The test is ignored and asserts current-broken acceptance; it must be
+flipped to rejection when the combined scalar-reduction and ladder-transition
+spec is implemented. This demonstrates the missing relation without pretending
+an honest-signature input is itself a forged public signature.
 
 Measured at the 2026-07-13 takeover tree, single-thread, five iterations:
 

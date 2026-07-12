@@ -6,12 +6,12 @@ use eu_id_ec_coprocessor::ecdsa::{
     c1_input_limbs_input, c2_canonicality_input, c3_c5_scalar_setup_input, generate_witness,
     implemented_circuit_family_labels, implemented_circuit_gate_count, layout_range,
     prove_implemented_circuit_bundle, prove_implemented_circuit_bundle_batch_with_projection,
-    prove_implemented_circuit_bundle_profiled, prove_implemented_circuit_proofs,
-    prove_mdoc_p4b_circuit_bundle, verify_implemented_circuit_bundle,
-    verify_implemented_circuit_bundle_batch_with_projection, verify_implemented_circuit_proofs,
-    verify_implemented_circuits, verify_mdoc_p4b_circuit_bundle, verify_witness, EcdsaInput,
-    EcdsaPublicProjection, ImplementedCircuitBundleEntry, LayoutSlot, MdocP4bMacKeyShares,
-    WitnessError, MDOC_P4B_MAC_COMMITTED_PRIVATE_INPUTS,
+    prove_implemented_circuit_bundle_profiled, prove_implemented_circuit_bundle_unchecked_profiled,
+    prove_implemented_circuit_proofs, prove_mdoc_p4b_circuit_bundle,
+    verify_implemented_circuit_bundle, verify_implemented_circuit_bundle_batch_with_projection,
+    verify_implemented_circuit_proofs, verify_implemented_circuits, verify_mdoc_p4b_circuit_bundle,
+    verify_witness, EcdsaInput, EcdsaPublicProjection, ImplementedCircuitBundleEntry, LayoutSlot,
+    MdocP4bMacKeyShares, WitnessError, MDOC_P4B_MAC_COMMITTED_PRIVATE_INPUTS,
 };
 use eu_id_ec_coprocessor::ligero::{
     commit_witness, v2_ligero_params, v4_circle_params, LigeroCode, LigeroParams,
@@ -537,6 +537,39 @@ fn implemented_circuit_provers_reject_native_witness_mismatch_even_if_covered_ci
     assert!(
         prove_implemented_circuit_bundle(&input, &witness, TEST_SEED).is_err(),
         "BL2+BL3 bundle prover must reject witnesses that fail the native checker"
+    );
+}
+
+#[test]
+#[ignore = "documents ECDSA ladder hole; asserts current-broken behavior until the ladder is constrained"]
+fn forged_ladder_accumulators_must_reject() {
+    let input = signed_input();
+    let mut witness = generate_witness(&input).unwrap();
+    let generator = AffinePoint::GENERATOR.to_encoded_point(false);
+    let gx = fp_from_coord(generator.x().unwrap());
+    let gy = fp_from_coord(generator.y().unwrap());
+
+    for slot in [LayoutSlot::U1GAccumulators, LayoutSlot::U2QAccumulators] {
+        for point in witness.values[layout_range(slot)].chunks_exact_mut(2) {
+            point.copy_from_slice(&[gx, gy]);
+        }
+    }
+
+    assert!(
+        verify_witness(&input, &witness).is_err(),
+        "native witness checking must notice the forged ladder"
+    );
+    verify_implemented_circuits(&input, &witness).expect(
+        "the implemented relation only requires the forged accumulator points to be on-curve",
+    );
+
+    let (bundle, _) =
+        prove_implemented_circuit_bundle_unchecked_profiled(&input, &witness, TEST_SEED).unwrap();
+
+    // DOCUMENTS THE HOLE: flips to `is_err()` once ladder transitions and scalar binding land.
+    assert!(
+        verify_implemented_circuit_bundle(&input, &bundle, TEST_SEED).is_ok(),
+        "current verifier unexpectedly rejected its unconstrained on-curve ladder"
     );
 }
 
