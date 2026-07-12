@@ -97,13 +97,17 @@ impl FrameworkEval for Sha256Eval {
     }
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        // Constraints here are degree ≤ 3: a degree-2 boundary gate
-        // (`enabler · is_round_k`, with the indicator preprocessed) times a
-        // linear identity, or `enabler` times a degree-2 boundary-select
-        // expression. `log_size + 1` covers D ≤ 3 — the same budget the
-        // P256 components in the composed proof already use. The `+1` is
-        // the standard FRI headroom.
-        self.log_size + 1
+        // Base constraints here are degree ≤ 3 (a degree-2 boundary gate times
+        // a linear identity). The LogUp closes with
+        // `finalize_logup_batched(SHA_CONSUMER_LOGUP_BATCH)`: a batch-4
+        // interaction column carries a degree-≤5 constraint
+        // (`diff · ∏ dⱼ − Σ nᵢ∏_{j≠i} dⱼ`, the denominator product being
+        // degree 4 over the 4 SecureField masks). `log_size + 2` gives the
+        // composition domain for D ≤ 5; the unlocked engine derives the
+        // matching composition split (K = 2 ≤ log_blowup = 2, so no stored
+        // coefficients are needed). The producer components stay degree-≤3 at
+        // `log_size + 1` on pair batching.
+        self.log_size + 2
     }
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
@@ -1013,7 +1017,7 @@ impl FrameworkEval for Sha256Eval {
             }
         }
 
-        eval.finalize_logup_in_pairs();
+        eval.finalize_logup_batched(crate::interaction::SHA_CONSUMER_LOGUP_BATCH);
 
         eval
     }

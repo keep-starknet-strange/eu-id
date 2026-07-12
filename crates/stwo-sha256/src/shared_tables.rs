@@ -566,7 +566,7 @@ fn shared_table_interaction_trace(
         for &producer in chunk.iter() {
             fracs.push(producer_frac(relations, multiplicities, producer));
         }
-        let (trace, sum) = build_interaction_columns(log_size, fracs);
+        let (trace, sum) = build_interaction_columns(log_size, fracs, 2);
         combined.extend(trace);
         pair_claims.push(ComponentClaim { claimed_sum: sum });
     }
