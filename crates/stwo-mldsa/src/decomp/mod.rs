@@ -40,8 +40,9 @@
 //! | hint_acc transition (interaction `[-1,0]`) | linear | 1 |
 //! | w0 / w1 / w1' / byte / hint_acc rc uses | linear | 1 |
 //! | w-binding use / w1Encode yield | linear | 1 |
-//! The interaction-tree `[-1,0]` accumulator (hint_acc) REQUIRES bound =
-//! log_size + 1; every constraint is ≤ 2, so the bound holds exactly.
+//! Every base constraint is ≤ 2; the LogUp columns batch [`LOGUP_BATCH`] = 4
+//! fractions (degree-1 denominators ⇒ batched constraint degree 5), so the
+//! bound is log_size + 2 (D ≤ 5, engine composition split ≥ 2).
 
 #![allow(clippy::needless_range_loop)]
 
@@ -101,12 +102,12 @@ const COL_HINT_ACC: usize = COL_LANE1 + PER_LANE; // 21
 /// Total base columns.
 pub const N_BASE_COLS: usize = COL_HINT_ACC + 1; // 22
 
-/// Logup entries per row (one interaction column each, LOGUP_BATCH=1): 2 lanes ×
-/// (rc4 w1, rc13 a_lo, rc13 b_lo, rc7 a_hi, rc7 b_hi, rc13 sign_lo, rc7 sign_hi,
+/// Logup entries per row (batched [`LOGUP_BATCH`] per interaction column): 2 lanes
+/// × (rc4 w1, rc13 a_lo, rc13 b_lo, rc7 a_hi, rc7 b_hi, rc13 sign_lo, rc7 sign_hi,
 /// rc4 w16+1, rc4 w1', wcell use) plus 1 byte yield plus 2 hint_acc rc8 uses (Σh,
 /// ω−Σh; final row only) = 2·10 + 1 + 2 = 23.
 pub const N_LOGUP_ENTRIES: usize = 2 * 10 + 1 + 2;
-pub const LOGUP_BATCH: usize = 1;
+pub const LOGUP_BATCH: usize = 4;
 pub const N_LOGUP_COLS: usize = N_LOGUP_ENTRIES.div_ceil(LOGUP_BATCH);
 const N_ACC_COORD_COLS: usize = SECURE_EXTENSION_DEGREE; // hint_acc is a QM31 running sum
 pub const N_INTERACTION_COLS: usize = N_ACC_COORD_COLS + SECURE_EXTENSION_DEGREE * N_LOGUP_COLS;
@@ -287,9 +288,11 @@ impl FrameworkEval for DecompEval {
         self.log_size
     }
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        // Every constraint ≤ 2; the hint_acc `[-1,0]` interaction mask requires
-        // exactly +1 (M4 trap). Do not raise.
-        self.log_size + 1
+        // Every base constraint ≤ 2; LogUp batch 4 over degree-1 denominators
+        // gives constraint degree 5, covered by +2 (D ≤ 5). The hint_acc
+        // `[-1,0]` interaction mask is safe: the engine's uniform composition
+        // split already evaluates every component at log_size + split.
+        self.log_size + 2
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         let enabler_pre = eval.get_preprocessed_column(pre_id("enabler_pre"));
@@ -474,7 +477,7 @@ impl FrameworkEval for DecompEval {
         ));
 
         let _ = enabler;
-        eval.finalize_logup();
+        eval.finalize_logup_batched(LOGUP_BATCH);
         eval
     }
 }

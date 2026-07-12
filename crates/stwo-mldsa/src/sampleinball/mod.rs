@@ -646,7 +646,7 @@ pub struct SibEval {
 /// write-j-consume = 4; stepval read-yield, stepval write-i-consume = 2; signbit
 /// sign-yield ×8, signbit write-j-consume = 9. Total 12 + 4 + 2 + 9 = 27.
 pub const N_LOGUP_ENTRIES: usize = 12 + 4 + 2 + 9;
-pub const LOGUP_BATCH: usize = 1;
+pub const LOGUP_BATCH: usize = 4;
 pub const N_LOGUP_COLS: usize = N_LOGUP_ENTRIES.div_ceil(LOGUP_BATCH);
 const N_ACC_COORD_COLS: usize = SECURE_EXTENSION_DEGREE; // Σc² accumulator.
                                                          // One QM31 passthrough column packing the sorted (addr, ts, val) into coords
@@ -660,7 +660,9 @@ impl FrameworkEval for SibEval {
         self.log_size
     }
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 1
+        // Every base constraint ≤ 2; LogUp batch [`LOGUP_BATCH`] = 4 over
+        // degree-1 denominators gives constraint degree 5 (D ≤ 5 ⇒ +2).
+        self.log_size + 2
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         // Shadow the module-level `pre_id` with the instance-namespaced one so
@@ -1029,7 +1031,7 @@ impl FrameworkEval for SibEval {
         ));
 
         let _ = enabler;
-        eval.finalize_logup();
+        eval.finalize_logup_batched(LOGUP_BATCH);
         eval
     }
 }

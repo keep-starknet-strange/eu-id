@@ -10,6 +10,15 @@ use rand::{Rng, SeedableRng};
 
 use stwo::core::pcs::PcsConfig;
 
+/// Batch-4 logup constraints have log-degree excess 2, so proving needs
+/// `log_blowup >= 2` (production uses 3).
+fn pcs_config() -> PcsConfig {
+    PcsConfig {
+        fri_config: stwo::core::fri::FriConfig::new(0, 2, 3, 1),
+        ..PcsConfig::default()
+    }
+}
+
 use stwo_mldsa::reference::encoding::{pk_decode, sig_decode};
 use stwo_mldsa::reference::sponge::shake256;
 use stwo_mldsa::sampleinball::proof::{prove_sib, verify_sib};
@@ -39,7 +48,7 @@ fn witness_for(seed: u64, msg: &[u8]) -> MlDsaWitness {
 fn rejected(witness: MlDsaWitness) -> bool {
     let w2 = witness.clone();
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        match prove_sib(witness, PcsConfig::default()) {
+        match prove_sib(witness, pcs_config()) {
             Ok(proof) => verify_sib(&proof, &w2).is_err(),
             Err(_) => true,
         }
@@ -57,7 +66,7 @@ fn sib_proves_and_verifies_over_20_signatures() {
     for i in 0..20u64 {
         let msg = format!("mldsa-sib-case-{i}").into_bytes();
         let w = witness_for(7000 + i, &msg);
-        let proof = prove_sib(w.clone(), PcsConfig::default()).expect("prove");
+        let proof = prove_sib(w.clone(), pcs_config()).expect("prove");
         verify_sib(&proof, &w).unwrap_or_else(|e| panic!("case {i}: verify failed: {e:?}"));
         ok += 1;
     }
@@ -69,7 +78,7 @@ fn sib_proves_and_verifies_over_20_signatures() {
 fn sib_seeds_honest_without_mutation() {
     for (seed, msg) in [(8001u64, &b"tau"[..]), (8002, b"c-bind"), (8003, b"rej")] {
         let w = witness_for(seed, msg);
-        let proof = prove_sib(w.clone(), PcsConfig::default())
+        let proof = prove_sib(w.clone(), pcs_config())
             .unwrap_or_else(|e| panic!("seed {seed}: honest prove failed: {e:?}"));
         verify_sib(&proof, &w)
             .unwrap_or_else(|e| panic!("seed {seed}: honest verify failed: {e:?}"));
@@ -108,7 +117,7 @@ fn negative_c_extra_nonzeros() {
 #[test]
 fn negative_c_binding_tamper() {
     let w = witness_for(8002, b"c-bind");
-    let mut proof = prove_sib(w.clone(), PcsConfig::default()).expect("prove");
+    let mut proof = prove_sib(w.clone(), pcs_config()).expect("prove");
     proof.ccell_claimed_sum += stwo::core::fields::qm31::SecureField::from(
         stwo::core::fields::m31::M31::from_u32_unchecked(1),
     );
@@ -125,7 +134,7 @@ fn negative_c_binding_tamper() {
 #[test]
 fn negative_stream_binding_tamper() {
     let w = witness_for(8003, b"rej");
-    let mut proof = prove_sib(w.clone(), PcsConfig::default()).expect("prove");
+    let mut proof = prove_sib(w.clone(), pcs_config()).expect("prove");
     proof.hashio_claimed_sum += stwo::core::fields::qm31::SecureField::from(
         stwo::core::fields::m31::M31::from_u32_unchecked(1),
     );
@@ -224,14 +233,14 @@ fn negative_forged_access_list() {
     core[stwo_mldsa::constants::N].0 = k;
 
     // Sanity: the honest witness proves+verifies WITHOUT the forgery installed.
-    let honest = prove_sib(w.clone(), PcsConfig::default()).expect("honest prove");
+    let honest = prove_sib(w.clone(), pcs_config()).expect("honest prove");
     verify_sib(&honest, &w).expect("honest verify");
 
     // Install the forgery and assert prove+verify REJECTS (Swap channel imbalance).
     let guard = install_forged_core(core);
     let forged_rejected =
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            match prove_sib(w.clone(), PcsConfig::default()) {
+            match prove_sib(w.clone(), pcs_config()) {
                 Ok(proof) => verify_sib(&proof, &w).is_err(),
                 Err(_) => true,
             }

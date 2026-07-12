@@ -11,6 +11,15 @@ use rand::{Rng, SeedableRng};
 
 use stwo::core::pcs::PcsConfig;
 
+/// Batch-4 logup constraints have log-degree excess 2, so proving needs
+/// `log_blowup >= 2` (production uses 3).
+fn pcs_config() -> PcsConfig {
+    PcsConfig {
+        fri_config: stwo::core::fri::FriConfig::new(0, 2, 3, 1),
+        ..PcsConfig::default()
+    }
+}
+
 use stwo_mldsa::decomp::proof::{prove_decomp, verify_decomp};
 use stwo_mldsa::reference::encoding::{pk_decode, sig_decode};
 use stwo_mldsa::reference::sponge::shake256;
@@ -44,7 +53,7 @@ fn witness_and_input(seed: u64, msg: &[u8]) -> (MlDsaWitness, MlDsaVerifyInput) 
 /// A witness mutation is REJECTED if proving fails/panics or verify fails.
 fn rejected(witness: MlDsaWitness) -> bool {
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        match prove_decomp(witness, PcsConfig::default()) {
+        match prove_decomp(witness, pcs_config()) {
             Ok(proof) => verify_decomp(&proof).is_err(),
             Err(_) => true,
         }
@@ -62,7 +71,7 @@ fn decomp_proves_and_verifies_over_20_signatures() {
     for i in 0..20u64 {
         let msg = format!("mldsa-decomp-case-{i}").into_bytes();
         let (w, _) = witness_and_input(5000 + i, &msg);
-        let proof = prove_decomp(w, PcsConfig::default()).expect("prove");
+        let proof = prove_decomp(w, pcs_config()).expect("prove");
         verify_decomp(&proof).unwrap_or_else(|e| panic!("case {i}: verify failed: {e:?}"));
         ok += 1;
     }
@@ -79,7 +88,7 @@ fn decomp_seeds_honest_without_mutation() {
         (6005, b"w0-range"),
     ] {
         let (w, _) = witness_and_input(seed, msg);
-        let proof = prove_decomp(w, PcsConfig::default())
+        let proof = prove_decomp(w, pcs_config())
             .unwrap_or_else(|e| panic!("seed {seed}: honest prove failed: {e:?}"));
         verify_decomp(&proof)
             .unwrap_or_else(|e| panic!("seed {seed}: honest verify failed: {e:?}"));
