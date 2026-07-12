@@ -7749,7 +7749,7 @@ pub fn mdoc_production_pcs_config() -> PcsConfig {
     // rejected.
     PcsConfig {
         pow_bits: 20,
-        fri_config: FriConfig::new(1, 3, 36, 2),
+        fri_config: FriConfig::new(1, 4, 27, 2),
         lifting_log_size: None,
     }
 }
