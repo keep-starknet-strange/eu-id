@@ -61,6 +61,18 @@ higher-degree constraints via its lifting path (stored coefficients +
 specifically FrameworkComponent-based modules inside the shared
 composition raising their bound above `log+1`.
 
+## 2b. Working the fork locally
+
+Patch `/Users/lucas/stwo` directly. Its checkout is currently on
+`dev-copy` (tip `8c998390` — itself an eval-domain-under-composition
+fix: read it first, it is adjacent to F1 and may be halfway to the
+answer or the source of the invariant). eu-id pins `72b638e7`. Create
+the fix branch FROM THE PINNED REV (`git checkout -b fix/framework-bound-plus-k 72b638e7`)
+so the eu-id patch carries pinned+fix only — do not drag unrelated
+`dev-copy` deltas into the validation; if the fix genuinely depends on
+`dev-copy` commits, say so explicitly in the report and measure against
+both bases. Do not push or open PRs; leave the branch local.
+
 ## 3. Where to look
 
 - `crates/constraint-framework/src/prover/component_prover.rs` —
@@ -101,8 +113,18 @@ than no fix. Document the degree accounting in the PR.
 **D3 — downstream validation in eu-id** (worktree
 `/Users/lucas/eu-id/.claude/worktrees/mldsa-claude-perf`, branch
 `feat/mldsa-claude-perf`; do NOT touch `.claude/worktrees/mldsa`):
-1. Bump the four `0xLucqs/stwo` git pins in the workspace `Cargo.toml`
-   to the fixed rev.
+1. Consume the LOCAL patch, not a pin bump: add to the eu-id workspace
+   `Cargo.toml`
+   ```toml
+   [patch."https://github.com/0xLucqs/stwo.git"]
+   stwo = { path = "/Users/lucas/stwo/crates/stwo" }
+   stwo-constraint-framework = { path = "/Users/lucas/stwo/crates/constraint-framework" }
+   stwo-air-utils = { path = "/Users/lucas/stwo/crates/air-utils" }
+   stwo-air-utils-derive = { path = "/Users/lucas/stwo/crates/air-utils-derive" }
+   ```
+   (verify the four crate directory names against `/Users/lucas/stwo/crates/`
+   before writing). The git pin bump happens later, once the fix is
+   pushed — out of scope here.
 2. Regression first: FULL suite matrix unchanged at `log+1`
    (stwo-keccak, stwo-mldsa, `mdoc_mldsa` under
    `--no-default-features --features "p256,ml-dsa"` AND
