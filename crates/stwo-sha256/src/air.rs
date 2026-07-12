@@ -942,11 +942,10 @@ struct Stmt0 {
     /// hence the interaction-column layout); a mismatch reshapes the
     /// interaction tree and the verifier rejects.
     expose_digest: bool,
-    /// Credential-field exposure shape — `(byte columns, yields)`. Mixed for the
-    /// same reason as `expose_digest`: the column count sets the base-trace
-    /// width and the yield count sets the consumer's interaction-column count,
-    /// so a prover/verifier disagreement reshapes the trees and the verifier
-    /// rejects.
+    /// Credential-field exposure shape — `(auxiliary columns, yields)`. Mixed
+    /// for the same reason as `expose_digest`: the column count sets the
+    /// base-trace width and the yield count sets the consumer's interaction
+    /// width, so a prover/verifier disagreement reshapes the trees and rejects.
     n_field_columns: u32,
     n_field_yields: u32,
     /// Whether fixed SHA table providers are supplied by a sibling module.
@@ -1042,7 +1041,7 @@ fn build_base_trace(
         base_trace.push(mult_col_to_eval(&mults, LOG_SIZE_16));
     }
     for &kind in RANGE_TABLES {
-        let mults = range_k_multiplicities(witness, kind, field_exposure);
+        let mults = range_k_multiplicities(witness, kind);
         base_trace.push(mult_col_to_eval(&mults, range_log_size(kind)));
     }
 
@@ -1058,8 +1057,9 @@ fn base_trace_log_sizes(
     n_field_cols: usize,
     include_table_providers: bool,
 ) -> Vec<u32> {
-    // Base columns + the dynamic credential-field byte tail, all at the
-    // trace's `log_n_rows`. Empty exposure leaves this at `Layout::TOTAL_COLS`.
+    // Base columns + the dynamic multi-block field selector auxiliaries, all
+    // at the trace's `log_n_rows`. Empty and single-block exposures leave this
+    // at `Layout::TOTAL_COLS`.
     let mut out = vec![log_n_rows; Layout::total_cols_with_fields(n_field_cols)];
     let _ = group_width;
     if !include_table_providers {
@@ -1094,11 +1094,10 @@ fn interaction_trace_log_sizes(
     const EXT: usize = SECURE_EXTENSION_DEGREE;
 
     // Sha256Eval consumer: `sha_lookups_per_row(expose_digest, field_exposure)`
-    // lookup sites per row (W=6 hybrid: 66, plus the digest yield when that provider
-    // is on, plus the field provider's two `Range16` byte range-checks per
-    // exposed byte column and one yield per exposed window byte) → `ceil(n/2)`
-    // paired columns. Sized at log_n_rows. See `interaction::sha256_interaction`
-    // for the per-row site breakdown.
+    // lookup sites per row (W=6 hybrid: 66, plus the digest yield when that
+    // provider is on and one yield per exposed window byte) → batched
+    // columns. Field bytes are virtual W-bit expressions and add no range
+    // lookups. Sized at log_n_rows. See `interaction::sha256_interaction`.
     let sha_cols = sha_lookups_per_row(expose_digest, field_exposure)
         .div_ceil(crate::interaction::SHA_CONSUMER_LOGUP_BATCH);
     out.extend(std::iter::repeat_n(log_n_rows, sha_cols * EXT));

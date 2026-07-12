@@ -374,9 +374,9 @@ fn rejects_field_selector_on_wrong_block() {
     );
 
     let selector_slot = exposure
-        .selector_column_slot(0)
+        .selector_column_slot(1)
         .expect("nonzero-block exposure has selector columns");
-    let selector_col = Layout::field_byte_col(selector_slot);
+    let selector_col = Layout::field_aux_col(selector_slot);
     let wrong_slot = Layout::round_row_slot(0, 15, log_size);
     trace[selector_col][wrong_slot] = BaseField::from(1u32);
 
@@ -384,6 +384,63 @@ fn rejects_field_selector_on_wrong_block() {
     assert!(
         !residuals.is_empty(),
         "AIR must reject a field selector enabled on the wrong SHA block",
+    );
+}
+
+#[test]
+fn rejects_field_selector_on_padding_r15_row() {
+    let message = [0xABu8; 200];
+    let witness = compute_sha256_witness(&message);
+    let log_size = min_log_size(witness.blocks.len());
+    let exposure = FieldExposure::from_preimage_windows_multi(&[(field_id::NATIONALITY, 70, 2)]);
+    let mut trace = generate_trace_with_fields(&witness, log_size, &exposure);
+
+    assert!(
+        collect_constraint_residuals_with_fields(&trace, log_size, exposure.clone()).is_empty(),
+        "baseline should be clean before mutation",
+    );
+
+    let selector_slot = exposure
+        .selector_column_slot(1)
+        .expect("nonzero-block exposure has selector columns");
+    let selector_col = Layout::field_aux_col(selector_slot);
+    let first_padding_r15 = witness.blocks.len() * stwo_sha256::constants::N_ROUNDS + 15;
+    assert!(
+        first_padding_r15 < 1usize << log_size,
+        "test needs a padding r15 row"
+    );
+    let padding_slot = Layout::row_slot(first_padding_r15, log_size);
+    trace[selector_col][padding_slot] = BaseField::from(1u32);
+
+    let residuals = collect_constraint_residuals_with_fields(&trace, log_size, exposure);
+    assert!(
+        !residuals.is_empty(),
+        "AIR must reject a field selector enabled on a periodic padding r15 row",
+    );
+}
+
+#[test]
+fn rejects_virtual_field_byte_w_bit_tamper() {
+    let message: Vec<u8> = (0..150).map(|i| (i % 251) as u8).collect();
+    let witness = compute_sha256_witness(&message);
+    let log_size = min_log_size(witness.blocks.len());
+    // Offset 70 = block 1, W[1], big-endian byte 2 = W bits 8..15.
+    let exposure = FieldExposure::from_preimage_windows_multi(&[(field_id::NATIONALITY, 70, 1)]);
+    let mut trace = generate_trace_with_fields(&witness, log_size, &exposure);
+
+    assert!(
+        collect_constraint_residuals_with_fields(&trace, log_size, exposure.clone()).is_empty(),
+        "baseline should be clean before mutation",
+    );
+
+    let word_row = Layout::round_row_slot(1, 1, log_size);
+    let bit_col = Layout::w_bit(8);
+    trace[bit_col][word_row] = BaseField::from(1u32) - trace[bit_col][word_row];
+
+    let residuals = collect_constraint_residuals_with_fields(&trace, log_size, exposure);
+    assert!(
+        !residuals.is_empty(),
+        "AIR must reject tampering with a W bit that feeds a virtual field byte",
     );
 }
 
@@ -404,7 +461,7 @@ fn rejects_frozen_field_block_counter() {
     let counter_slot = exposure
         .block_counter_column_slot()
         .expect("nonzero-block exposure has a block counter");
-    let counter_col = Layout::field_byte_col(counter_slot);
+    let counter_col = Layout::field_aux_col(counter_slot);
     for t in 0..stwo_sha256::constants::N_ROUNDS {
         let slot = Layout::round_row_slot(1, t, log_size);
         trace[counter_col][slot] = BaseField::from(0u32);

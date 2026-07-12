@@ -156,7 +156,7 @@ impl ShaTableMultiplicities {
             range.push(blind_extend(sum_multiplicity_vectors(
                 consumers
                     .iter()
-                    .map(|(witness, exposure)| range_k_multiplicities(witness, kind, exposure)),
+                    .map(|(witness, _)| range_k_multiplicities(witness, kind)),
             )));
         }
 

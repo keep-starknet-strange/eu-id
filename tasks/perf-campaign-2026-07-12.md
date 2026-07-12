@@ -19,6 +19,7 @@ Rule: every WO lands with a measured ts13_full_probe number. No number, not done
 | experiment | Ligero ℓ=512 (N=5) | 3,290 | 258 | 3,037,125 |
 | experiment | Ligero ℓ=1024 (N=1) | 4,108 | 654 | 3,002,885 |
 | worktree | STARK fold step 2→3 (N=5) | 3,088 | 162 | 3,228,709 |
+| worktree | virtual SHA field bytes (clean N=1) | 2,666 | 154 | 2,393,589 |
 
 ## Work orders
 
@@ -58,6 +59,10 @@ Rule: every WO lands with a measured ts13_full_probe number. No number, not done
 - [x] Ligero Task 4 — restore Circle proximity sampling over the full codeword.
       The inherited RS-prefix exclusion invalidated the v4 full-domain error
       calculation; fixed before any larger-row profile sweep.
+- [x] Virtual SHA field bytes — derive exposed preimage bytes linearly from the
+      already boolean/recomposed W bit planes; delete duplicate byte columns,
+      byte Range16 lookups, and per-yield selectors. Clean N=1: proof
+      −834,944B and prove −630ms versus the same-worktree fold-3 baseline.
 - [x] WO-D — PCS retune on shrunk circuit: sweep blowup 2/3 × queries/pow,
       Ligero ℓ A/B. Ligero ℓ=512/1024 CLOSED NO-GO for production after
       measurement. STARK fold step 3 is the measured production Pareto point:
@@ -369,6 +374,43 @@ TS13 tuple now also includes `pcs_fold_step=3`; its canonical hash is repinned t
 `5445c650a6f57d6be268e1d1b1d98355dddb8188c8496c5e6cffe8da0d4f21e6`.
 The tuple/hash suite, exact full TS13 proof, stale fold-step-2 and pre-rebalance
 config rejection, and carried-instance tamper rejection all pass in release.
+
+## Virtual SHA field-byte extraction
+
+FieldExposure previously recommitted four byte columns per distinct exposed
+message word, range-checked every byte twice through Range16, and committed one
+selector per yielded byte. Those bytes were already present in the SHA trace as
+the 32 LSB-first W bit planes, each constrained boolean and recomposed to the
+message word. The new relation forms each big-endian byte as the corresponding
+linear eight-bit expression and removes the duplicate columns/lookups.
+
+Multi-block exposure retains only its constrained block counter and one selector
+per distinct target block. Selector liveness is now pinned to `gate_r15`, not the
+periodic `r15` column alone; an explicit negative proves a malicious selector on
+a disabled periodic-r15 padding row rejects. Empty field exposure retains its
+original three-mask W-bit shape and pays no extra OODS masks.
+
+Clean one-run comparison in the same worktree:
+
+| metric | fold-3 before | virtual bytes | delta |
+|---|---:|---:|---:|
+| prove | 3,296ms | 2,666ms | −630ms |
+| verify | 165ms | 154ms | −11ms |
+| proof | 3,228,533B | 2,393,589B | −834,944B |
+| STARK | 2,442,789B | 1,607,845B | −834,944B |
+| queried values | 2,031,952B | 1,253,328B | −778,624B |
+| sampled values | 255,672B | 198,872B | −56,800B |
+
+The revocation-off shape drops 11,935,776→11,254,304 committed cells
+(−681,472) and its proof drops 2,197,745→1,887,097B (−310,648). Repeated N=5
+wire measurements are stable around 2.39MB, but their timing samples were
+thermally throttled and are intentionally excluded. The SHA suite, 17 constraint
+negatives, release multi-block PCS proof, exact TS13 proof, shift/byte-order,
+wrong-block, padding-selector, counter, and W-bit tamper gates all pass.
+
+The preprocessed root is unchanged, but the circuit/mask layout is not. The
+published tuple therefore now pins `circuit_revision=2`; its canonical hash is
+`a43f41e4745a053aa519c6140193e4bfc3ba2894f97c1a9a6e2df9e9a3232591`.
 
 ## WO-C1b redundancy argument
 

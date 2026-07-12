@@ -46,7 +46,7 @@ use crate::components::{
     range_log_size, RangeKind, RANGE_TABLES, ROUND_SPLIT_TABLES, SIGMA_SPLIT_TABLES,
 };
 use crate::constants::DIGEST_BYTES;
-use crate::field_exposure::{word_be_bytes, FieldExposure, BYTE_RANGE_CHECK_OFFSET};
+use crate::field_exposure::{word_be_bytes, FieldExposure};
 use crate::multiplicities::{
     range_k_multiplicities, round_split_pack_multiplicities, sigma_split_pack_multiplicities,
 };
@@ -94,24 +94,14 @@ pub const SHA_CONSUMER_LOGUP_BATCH: usize = 4;
 
 /// Total lookup sites `Sha256Eval` fires per row. The digest provider adds
 /// exactly one width-32 yield site when `expose_digest` is set; the
-/// credential-field provider adds two `Range16` byte range-checks (the
-/// `[0, 256)` pin) per exposed byte column — once for block-0 legacy exposure,
-/// once per target block for multi-block exposure — plus one width-3 yield per
-/// exposed window byte (all firing on `t = 15` rows, selector-gated to each
-/// byte's target block). All are zero for the standalone AIR. Both the
-/// interaction generator here and `crate::air`'s interaction-column sizing
-/// read this so the two never drift.
+/// credential-field provider adds one width-3 yield per exposed window byte
+/// (all firing on `t = 15` rows, selector-gated to each byte's target block).
+/// The byte value is derived from existing W bit planes, so it adds no range
+/// lookups. Both the interaction generator here and `crate::air`'s
+/// interaction-column sizing read this so the two never drift.
 #[inline]
 pub fn sha_lookups_per_row(expose_digest: bool, field_exposure: &FieldExposure) -> usize {
-    let base = SHA_LOOKUPS_PER_ROW_BASE;
-    let field_range_sites = if field_exposure.is_empty() {
-        0
-    } else if field_exposure.needs_block_witness() {
-        2 * field_exposure.n_byte_columns() * field_exposure.target_blocks().len()
-    } else {
-        2 * field_exposure.n_byte_columns()
-    };
-    base + usize::from(expose_digest) + field_range_sites + field_exposure.n_yields()
+    SHA_LOOKUPS_PER_ROW_BASE + usize::from(expose_digest) + field_exposure.n_yields()
 }
 
 // ---------------------------------------------------------------------------
@@ -366,13 +356,12 @@ fn range_k_interaction(
     relations: &Sha256Relations,
     witness: &Sha256Witness,
     kind: RangeKind,
-    field_exposure: &FieldExposure,
 ) -> (
     ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     SecureField,
 ) {
     let log_size = range_log_size(kind);
-    let mults = range_k_multiplicities(witness, kind, field_exposure);
+    let mults = range_k_multiplicities(witness, kind);
     let n_rows = 1usize << log_size;
     let k = kind.bound() as usize;
     // Producer rows are `[0, 1, …, k-1, 0, 0, …]` — leading `k` real values
@@ -755,71 +744,17 @@ fn write_round_row_lookups(
         *cursor += 1;
     }
 
-    // ---- 7. Credential-field range-checks + yields (target block t = 15 rows) ----
+    // ---- 7. Credential-field yields (target block t = 15 rows) ----
     //
-    // Same order as the constraint side: 7a. two `Range16` per exposed byte
-    // column — once for block-0 legacy exposure, once per target block for
-    // multi-block exposure (each gated by `block_idx == target`) — then 7b. one
-    // width-3 yield per window byte (numerator `−selector`, selector =
-    // `block_idx == y.block_idx`).
+    // Same order as the constraint side: one width-3 yield per window byte
+    // (numerator `−selector`, selector = `block_idx == y.block_idx`).
     if !field_exposure.is_empty() {
         if t == 15 {
-            let word_bytes: Vec<[u32; crate::constants::WORD_BYTES]> = field_exposure
-                .decomposed_words()
-                .iter()
-                .map(|&w| {
-                    let limb = block.schedule[w];
-                    word_be_bytes(limb.lo, limb.hi)
-                })
-                .collect();
-
-            if field_exposure.needs_block_witness() {
-                for &target_block in field_exposure.target_blocks() {
-                    let selector =
-                        SecureField::from(BaseField::from(u32::from(block_idx == target_block)));
-                    for bytes in &word_bytes {
-                        for &b in bytes {
-                            all[*cursor][slot] =
-                                (selector, combine_range(relations, RangeKind::Range16, b));
-                            *cursor += 1;
-                            all[*cursor][slot] = (
-                                selector,
-                                combine_range(
-                                    relations,
-                                    RangeKind::Range16,
-                                    b + BYTE_RANGE_CHECK_OFFSET,
-                                ),
-                            );
-                            *cursor += 1;
-                        }
-                    }
-                }
-            } else {
-                let selector = SecureField::from(BaseField::from(u32::from(block_idx == 0)));
-                for bytes in &word_bytes {
-                    for &b in bytes {
-                        all[*cursor][slot] =
-                            (selector, combine_range(relations, RangeKind::Range16, b));
-                        *cursor += 1;
-                        all[*cursor][slot] = (
-                            selector,
-                            combine_range(
-                                relations,
-                                RangeKind::Range16,
-                                b + BYTE_RANGE_CHECK_OFFSET,
-                            ),
-                        );
-                        *cursor += 1;
-                    }
-                }
-            }
             for y in field_exposure.yields() {
                 let selector =
                     SecureField::from(BaseField::from(u32::from(block_idx == y.block_idx)));
-                let slot_idx = field_exposure.yield_column_slot(y);
-                let word_slot = slot_idx / crate::constants::WORD_BYTES;
-                let byte_in_word = slot_idx % crate::constants::WORD_BYTES;
-                let value = word_bytes[word_slot][byte_in_word];
+                let limb = block.schedule[y.word_idx];
+                let value = word_be_bytes(limb.lo, limb.hi)[y.byte_in_word];
                 let tuple = [
                     BaseField::from(y.field_id),
                     BaseField::from(y.byte_index),
@@ -1088,7 +1023,7 @@ fn generate_interaction_trace_inner(
     let mut range = Vec::with_capacity(4);
     if include_table_providers {
         for &kind in RANGE_TABLES {
-            let (t, s) = range_k_interaction(relations, witness, kind, field_exposure);
+            let (t, s) = range_k_interaction(relations, witness, kind);
             combined.extend(t);
             range.push(ComponentClaim { claimed_sum: s });
         }
@@ -1321,6 +1256,58 @@ mod tests {
             claim.total() + consumer,
             SecureField::zero(),
             "field provider must balance a consumer requiring every exposed byte",
+        );
+    }
+
+    /// A multi-block window is bound to its exact absolute byte offset and
+    /// big-endian word-byte order. Neither a one-byte shift nor reversing the
+    /// requested bytes can cancel the provider claim.
+    #[test]
+    fn field_provider_preserves_multi_block_shift_and_byte_order() {
+        let message: Vec<u8> = (0..150).map(|i| (i % 251) as u8).collect();
+        let witness = compute_sha256_witness(&message);
+        let log_size = min_log_size(witness.blocks.len());
+        let relations = Sha256Relations::draw(&mut Blake2sChannel::default());
+        let exposure = FieldExposure::from_preimage_windows_multi(&[(field_id::DOB, 62, 6)]);
+
+        let (_, claim) = generate_interaction_trace(
+            &relations,
+            &witness,
+            log_size,
+            MAX_ROUND_GROUP_BITS,
+            false,
+            &exposure,
+        );
+        let module_total = claim.total();
+        let tuples = |bytes: &[u8]| {
+            bytes
+                .iter()
+                .enumerate()
+                .map(|(i, &byte)| (field_id::DOB, i as u32, u32::from(byte)))
+                .collect::<Vec<_>>()
+        };
+
+        let exact = synthetic_field_consumer(&relations, &tuples(&message[62..68]));
+        assert_eq!(
+            module_total + exact,
+            SecureField::zero(),
+            "virtual field bytes must equal the exact cross-block message window",
+        );
+
+        let shifted = synthetic_field_consumer(&relations, &tuples(&message[61..67]));
+        assert_ne!(
+            module_total + shifted,
+            SecureField::zero(),
+            "a one-byte-shifted window must not balance",
+        );
+
+        let mut reversed = message[62..68].to_vec();
+        reversed.reverse();
+        let reversed = synthetic_field_consumer(&relations, &tuples(&reversed));
+        assert_ne!(
+            module_total + reversed,
+            SecureField::zero(),
+            "reversing big-endian field bytes must not balance",
         );
     }
 

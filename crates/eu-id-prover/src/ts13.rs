@@ -11,11 +11,11 @@ use crate::mdoc::{
     MdocCircuitStatement, MdocRevocationPublicInputs,
 };
 
-// Regenerated 2026-07-13 after adding the production FRI fold step to the
-// published circuit tuple. The old hash was
-// fbd197ba982de84cc4a4850632d400d1d1c8709b4f9c79df63fac13a76b9b7f9.
+// Regenerated 2026-07-13 for circuit revision 2, which derives SHA field
+// exposure bytes from the constrained W bit planes. The old hash was
+// 5445c650a6f57d6be268e1d1b1d98355dddb8188c8496c5e6cffe8da0d4f21e6.
 pub const TS13_PUBLISHED_AGE_OVER_18_CIRCUIT_HASH: &str =
-    "5445c650a6f57d6be268e1d1b1d98355dddb8188c8496c5e6cffe8da0d4f21e6";
+    "a43f41e4745a053aa519c6140193e4bfc3ba2894f97c1a9a6e2df9e9a3232591";
 // Regenerated 2026-07-08 after routing the TS13 revocation ECDSA through the
 // P4b coprocessor: the in-STARK P-256 AIR instance (preprocessed namespace
 // "mdoc/ts13/revocation") left the tree-0 commitment, so the mdoc
@@ -30,6 +30,7 @@ pub const TS13_P4C_MIN_BLIND_ROWS: usize = 256;
 pub const TS13_P4C_MAX_OPENINGS: usize = 256;
 pub const TS13_P4C_MIN_DECOY_MESSAGE_BITS: usize = 512;
 pub const TS13_P4C_PER_OPENING_STATISTICAL_BITS: u32 = 64;
+pub const TS13_CIRCUIT_REVISION: u32 = 2;
 pub const TS13_PCS_LOG_BLOWUP_FACTOR: u32 = 2;
 pub const TS13_PCS_QUERIES: u32 = 54;
 pub const TS13_PCS_POW_BITS: u32 = 20;
@@ -49,6 +50,7 @@ pub struct Ts13FixedTableFingerprint {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ts13CircuitTuple {
     pub system: &'static str,
+    pub circuit_revision: u32,
     pub credential_format: &'static str,
     pub doctype: &'static str,
     pub namespace: &'static str,
@@ -72,6 +74,7 @@ impl Ts13CircuitTuple {
     pub fn published_age_over_18() -> Self {
         Self {
             system: "stwo-euid-v1",
+            circuit_revision: TS13_CIRCUIT_REVISION,
             credential_format: "mso_mdoc_zk",
             doctype: "eu.europa.ec.eudi.pid.1",
             namespace: "eu.europa.ec.eudi.pid.1",
@@ -95,6 +98,10 @@ impl Ts13CircuitTuple {
     fn canonical_value(&self) -> Value {
         Value::Map(vec![
             ("system".into(), self.system.into()),
+            (
+                "circuit_revision".into(),
+                Value::from(self.circuit_revision),
+            ),
             ("credential_format".into(), self.credential_format.into()),
             ("doctype".into(), self.doctype.into()),
             ("namespace".into(), self.namespace.into()),
@@ -686,6 +693,7 @@ mod tests {
         let tuple = Ts13CircuitTuple::published_age_over_18();
         let soundness = ts13_published_soundness_table();
 
+        assert_eq!(tuple.circuit_revision, 2);
         assert_eq!(tuple.pcs_log_blowup_factor, 2);
         assert_eq!(tuple.pcs_queries, 54);
         assert_eq!(tuple.pcs_pow_bits, 20);

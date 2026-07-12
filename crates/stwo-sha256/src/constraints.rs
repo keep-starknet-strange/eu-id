@@ -58,6 +58,11 @@ use crate::relations::Sha256Relations;
 use crate::trace::WORD_BIT_COLS;
 use crate::types::{BYTES_PER_WORD, LIMB_BITS, WORDS_PER_BLOCK};
 
+enum WordBitMasks<F> {
+    Base([[F; 3]; WORD_BIT_COLS]),
+    Field([[F; 16]; WORD_BIT_COLS]),
+}
+
 /// AIR evaluator over the rotated one-row-per-round layout.
 #[derive(Clone)]
 pub struct Sha256Eval {
@@ -78,16 +83,14 @@ pub struct Sha256Eval {
     /// constraints are present and enforced regardless — only the
     /// cross-module *yield* is gated.
     pub expose_digest: bool,
-    /// Credential-field byte exposure. When non-empty, the AIR commits a
-    /// byte-decomposition of each covered message word as a dynamic column tail
-    /// (live on `t = 15` rows) and *yields* the configured byte windows on the
-    /// **first block** over the `Sha256Field` channel, so predicate consumers
-    /// can require the exact bytes of the field they bind. Empty for a
+    /// Credential-field byte exposure. The AIR derives configured bytes from
+    /// the existing boolean W bit planes and yields them on their target block
+    /// over the `Sha256Field` channel, so predicate consumers can require the
+    /// exact bytes of the field they bind. Multi-block exposure commits only a
+    /// block counter and one selector per target block. Empty for a
     /// standalone SHA proof and for the combined proof before the predicate
     /// consumers are wired (yields with no consumer would leave the module's
-    /// claimed sum non-zero). The byte columns and their decomposition
-    /// constraints exist iff the exposure is non-empty; the cross-module yield
-    /// is what binds.
+    /// claimed sum non-zero). The cross-module yield is what binds.
     pub field_exposure: FieldExposure,
 }
 
@@ -164,9 +167,35 @@ impl FrameworkEval for Sha256Eval {
             ],
         );
         let w: [(E::F, E::F); 17] = std::array::from_fn(|k| (w_lo[k].clone(), w_hi[k].clone()));
-        let w_bits_m: [[E::F; 3]; WORD_BIT_COLS] =
-            std::array::from_fn(|_| eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -2, -15]));
-        let w_bits: [E::F; WORD_BIT_COLS] = std::array::from_fn(|i| w_bits_m[i][0].clone());
+        // Consume each physical W-bit column exactly once. Empty exposures keep
+        // the legacy three-mask shape; field exposures request all W[0..15]
+        // offsets so t=15 can form arbitrary message bytes virtually.
+        let w_bits_m = if self.field_exposure.is_empty() {
+            WordBitMasks::Base(std::array::from_fn(|_| {
+                eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -2, -15])
+            }))
+        } else {
+            WordBitMasks::Field(std::array::from_fn(|_| {
+                eval.next_interaction_mask(
+                    ORIGINAL_TRACE_IDX,
+                    [
+                        0, -1, -2, -3, -4, -5, -6, -7, -8, -9, -10, -11, -12, -13, -14, -15,
+                    ],
+                )
+            }))
+        };
+        let w_bit_at = |bit: usize, offset: usize| -> E::F {
+            match &w_bits_m {
+                WordBitMasks::Field(field) => field[bit][offset].clone(),
+                WordBitMasks::Base(base) => match offset {
+                    0 => base[bit][0].clone(),
+                    2 => base[bit][1].clone(),
+                    15 => base[bit][2].clone(),
+                    _ => unreachable!("legacy constraints request W offsets 0, 2, or 15"),
+                },
+            }
+        };
+        let w_bits: [E::F; WORD_BIT_COLS] = std::array::from_fn(|i| w_bit_at(i, 0));
 
         // ---- round family: outputs, carries, Σ-decodes, packed groups ----
         //
@@ -338,8 +367,8 @@ impl FrameworkEval for Sha256Eval {
         // The lower-σ bit formulas are deliberately ungated so their degree-3
         // xor expressions are not multiplied by `gate_sched`; only the linear
         // recomposition into the live schedule limbs is gated.
-        let w_m15_bits: [E::F; WORD_BIT_COLS] = std::array::from_fn(|i| w_bits_m[i][2].clone());
-        let w_m2_bits: [E::F; WORD_BIT_COLS] = std::array::from_fn(|i| w_bits_m[i][1].clone());
+        let w_m15_bits: [E::F; WORD_BIT_COLS] = std::array::from_fn(|i| w_bit_at(i, 15));
+        let w_m2_bits: [E::F; WORD_BIT_COLS] = std::array::from_fn(|i| w_bit_at(i, 2));
         let lower_sigma0_bits = lower_sigma0_expr_bits::<E>(&w_m15_bits);
         let lower_sigma1_bits = lower_sigma1_expr_bits::<E>(&w_m2_bits);
         constrain_bits_equal::<E>(&mut eval, &sched_sigma0_bits, &lower_sigma0_bits);
@@ -880,15 +909,11 @@ impl FrameworkEval for Sha256Eval {
 
         // ---- field provider (target block t = 15 rows) ----
         //
-        // The exposed message words are read through the same `W` offsets
-        // the padding family uses. Legacy block-0 exposure is gated by the
+        // Each exposed byte is a linear expression over the existing boolean,
+        // recomposed W bit planes. Legacy block-0 exposure is gated by the
         // existing first-block flag. Multi-block exposure appends a witness
-        // block counter plus one selector per yielded byte; preprocessing stays
-        // independent of message length and offsets.
+        // block counter plus one selector per distinct target block.
         if !self.field_exposure.is_empty() {
-            let field_bytes: Vec<E::F> = (0..self.field_exposure.n_byte_columns())
-                .map(|_| eval.next_trace_mask())
-                .collect();
             // Block counter: read at [0, -1] to pin its step behaviour. It is a
             // base/witness column carrying `block_idx` on every row.
             let block_counter = if self.field_exposure.needs_block_witness() {
@@ -906,108 +931,55 @@ impl FrameworkEval for Sha256Eval {
             } else {
                 None
             };
-            // One selector per yielded byte (multi-block only), pinned below.
+            // One selector per distinct target block (multi-block only).
             let selectors: Vec<E::F> = if self.field_exposure.needs_block_witness() {
-                (0..self.field_exposure.n_yields())
+                (0..self.field_exposure.target_blocks().len())
                     .map(|_| eval.next_trace_mask())
                     .collect()
             } else {
                 Vec::new()
             };
-            for (word_slot, &word_idx) in self.field_exposure.decomposed_words().iter().enumerate()
-            {
-                let (w_lo_v, w_hi_v) = w_msg(word_idx).clone();
-                let base = word_slot * BYTES_PER_WORD;
-                eval.add_constraint(
-                    gate_r15.clone()
-                        * (w_hi_v
-                            - two_pow_8.clone() * field_bytes[base].clone()
-                            - field_bytes[base + 1].clone()),
-                );
-                eval.add_constraint(
-                    gate_r15.clone()
-                        * (w_lo_v
-                            - two_pow_8.clone() * field_bytes[base + 2].clone()
-                            - field_bytes[base + 3].clone()),
-                );
-            }
-
-            let byte_range_offset =
-                E::F::from(M31::from(crate::field_exposure::BYTE_RANGE_CHECK_OFFSET));
             let legacy_block0_selector = is_first_block_m15;
-            if !self.field_exposure.needs_block_witness() {
-                // Legacy block-0 path: every byte range-checked once, gated by
-                // the block-0 flag.
-                for b in &field_bytes {
-                    wire_range_check::<E>(
-                        &mut eval,
-                        legacy_block0_selector.clone(),
-                        b.clone(),
-                        crate::components::RangeKind::Range16,
-                        &self.relations,
-                    );
-                    wire_range_check::<E>(
-                        &mut eval,
-                        legacy_block0_selector.clone(),
-                        b.clone() + byte_range_offset.clone(),
-                        crate::components::RangeKind::Range16,
-                        &self.relations,
-                    );
-                }
-            } else {
+            if self.field_exposure.needs_block_witness() {
                 let b = block_counter
                     .as_ref()
                     .expect("multi-block field exposure has a block counter");
                 // Pin each selector: boolean, live only on `t = 15`, and hot
-                // only when the counter equals this yield's target block.
-                for (yield_idx, y) in self.field_exposure.yields().iter().enumerate() {
-                    let selector = selectors[yield_idx].clone();
+                // only when the counter equals its target block.
+                for (&target_block, selector) in
+                    self.field_exposure.target_blocks().iter().zip(&selectors)
+                {
                     eval.add_constraint(selector.clone() * (selector.clone() - E::F::one()));
-                    eval.add_constraint(selector.clone() * (E::F::one() - r15.clone()));
+                    eval.add_constraint(selector.clone() * (E::F::one() - gate_r15.clone()));
                     eval.add_constraint(
-                        selector.clone() * (b.clone() - E::F::from(M31::from(y.block_idx as u32))),
+                        selector.clone() * (b.clone() - E::F::from(M31::from(target_block as u32))),
                     );
-                }
-                // Each byte range-checked once per distinct target block, gated
-                // by that block's representative selector.
-                for &target_block in self.field_exposure.target_blocks() {
-                    let selector = self
-                        .field_exposure
-                        .yields()
-                        .iter()
-                        .position(|y| y.block_idx == target_block)
-                        .map(|yield_idx| selectors[yield_idx].clone())
-                        .expect("target block has at least one selector");
-                    for byte in &field_bytes {
-                        wire_range_check::<E>(
-                            &mut eval,
-                            selector.clone(),
-                            byte.clone(),
-                            crate::components::RangeKind::Range16,
-                            &self.relations,
-                        );
-                        wire_range_check::<E>(
-                            &mut eval,
-                            selector.clone(),
-                            byte.clone() + byte_range_offset.clone(),
-                            crate::components::RangeKind::Range16,
-                            &self.relations,
-                        );
-                    }
                 }
             }
 
-            for (yield_idx, y) in self.field_exposure.yields().iter().enumerate() {
-                let slot = self.field_exposure.yield_column_slot(y);
+            for y in self.field_exposure.yields() {
                 let selector = if self.field_exposure.needs_block_witness() {
-                    selectors[yield_idx].clone()
+                    selectors[self
+                        .field_exposure
+                        .target_blocks()
+                        .binary_search(&y.block_idx)
+                        .expect("yield target is in target_blocks")]
+                    .clone()
                 } else {
                     legacy_block0_selector.clone()
                 };
+                // W bits are LSB-first. Big-endian byte positions 0..3 map
+                // to bit ranges 24..31, 16..23, 8..15, and 0..7.
+                let first_bit = (BYTES_PER_WORD - 1 - y.byte_in_word) * 8;
+                let word_offset = 15 - y.word_idx;
+                let value = (0..8).fold(E::F::from(M31::from(0u32)), |acc, bit| {
+                    acc + w_bit_at(first_bit + bit, word_offset)
+                        * E::F::from(M31::from(1u32 << bit))
+                });
                 let tuple = [
                     E::F::from(M31::from(y.field_id)),
                     E::F::from(M31::from(y.byte_index)),
-                    field_bytes[slot].clone(),
+                    value,
                 ];
                 eval.add_to_relation(RelationEntry::base(
                     &self.relations.field.field,

@@ -45,8 +45,8 @@
 //!     `t = 0..16`, read via mask offsets `0..−15`.
 //! - `enabler_step` (1 col) — C1 contiguity anchor: `1` exactly at the first
 //!   real row (block 0, round 0) when the trace has padding.
-//! - the optional credential-field byte tail (dynamic, live on `t = 15`
-//!   rows; yields are gated to the configured target block in the AIR).
+//! - the optional credential-field selector tail (one block counter plus one
+//!   selector per target block; exposed bytes are virtual W-bit expressions).
 //!
 //! Per-round Maj/Ch block (`ROUND_MAJ_CH_COLS = 4 · 8 = 32`): packed-group
 //! values of each *fresh* operand in the partition-enumeration order
@@ -253,33 +253,22 @@ impl Layout {
     pub const COL_ENABLER_STEP: usize = Self::COL_PADDING_END;
 
     /// Number of **base** trace columns — the full width when no credential
-    /// field is exposed. The optional field-byte view is a dynamic tail
-    /// appended after this (see [`Self::COL_FIELD_BYTES_START`]).
+    /// field is exposed. The optional field-selector auxiliaries are a dynamic
+    /// tail appended after this (see [`Self::COL_FIELD_AUX_START`]).
     pub const TOTAL_COLS: usize = Self::COL_ENABLER_STEP + 1;
 
-    /// First column of the optional credential-field byte view.
+    /// First column of the optional credential-field selector auxiliaries.
     ///
-    /// The field columns are a **dynamic tail** appended after every base
-    /// column (including `enabler_step`), so enabling field exposure never
-    /// shifts a base offset. The first `WORD_BYTES ×` (distinct exposed message
-    /// words) columns are byte columns; multi-block exposure then appends a
-    /// block counter and one selector per yielded byte (block-0 legacy exposure
-    /// has neither) — see
-    /// [`crate::field_exposure::FieldExposure::n_columns`]. Each `(lo, hi)` limb
-    /// of an exposed word is tied to its two bytes by `limb = 256·b1 + b0` in
-    /// `crate::constraints::Sha256Eval` on the `t = 15` row (which reads the
-    /// exposed words' limbs via `W` mask offsets, the same offsets the
-    /// padding family uses); only the exposed window bytes are yielded across
-    /// the module boundary, gated to each byte's target block.
-    pub const COL_FIELD_BYTES_START: usize = Self::TOTAL_COLS;
+    /// Multi-block exposure appends a block counter and one selector per
+    /// distinct target block. Single-block exposure adds no columns. The field
+    /// bytes themselves are linear expressions over the existing W bit planes.
+    pub const COL_FIELD_AUX_START: usize = Self::TOTAL_COLS;
 
-    /// Column of field tail `slot` (`0`-based within the dynamic field tail:
-    /// byte columns packed by decomposed-word then big-endian byte position —
-    /// see [`crate::field_exposure::FieldExposure::yield_column_slot`] — then,
-    /// for multi-block exposure, the block counter and per-yield selectors).
+    /// Column of field auxiliary tail `slot` (`0` is the block counter,
+    /// followed by selectors in `FieldExposure::target_blocks()` order).
     #[inline]
-    pub const fn field_byte_col(slot: usize) -> usize {
-        Self::COL_FIELD_BYTES_START + slot
+    pub const fn field_aux_col(slot: usize) -> usize {
+        Self::COL_FIELD_AUX_START + slot
     }
 
     /// Total trace width when a field exposure adds `n_field_cols` dynamic
@@ -492,11 +481,10 @@ pub fn generate_trace(witness: &Sha256Witness, log_size: u32) -> Vec<Vec<BaseFie
 }
 
 /// Materialise the trace for a `Sha256Witness`, additionally committing the
-/// credential-field byte view on every block's `t = 15` row when
-/// `field_exposure` is non-empty.
+/// multi-block field selector auxiliaries when required.
 ///
-/// The field byte columns are appended after every base column; an empty
-/// exposure adds nothing and the result is identical to [`generate_trace`].
+/// Field bytes are virtual expressions over existing W bit columns. An empty
+/// or single-block exposure adds no trace columns.
 pub fn generate_trace_with_fields(
     witness: &Sha256Witness,
     log_size: u32,
@@ -726,7 +714,7 @@ fn disabled_decoy_row_values(
     values[Layout::COL_ENABLER_STEP] = BaseField::from(0u32);
     values[Layout::COL_PADDING_START..Layout::COL_PADDING_END].fill(BaseField::from(0u32));
     if field_exposure.n_columns() != 0 {
-        values[Layout::COL_FIELD_BYTES_START..].fill(BaseField::from(0u32));
+        values[Layout::COL_FIELD_AUX_START..].fill(BaseField::from(0u32));
     }
     values
 }
@@ -867,27 +855,18 @@ fn write_round_row_values(
         }
     }
 
-    // t = 15 family: padding-role witness + credential-field byte view.
-    // Both inspect message words, which are the `W` columns of rows
-    // `t = 0..16` — read in the AIR via mask offsets `0..−15` from here.
+    // t = 15 family: padding-role witness + credential-field selectors.
     if t == 15 {
         write_padding_row_values(row, &block.padding_row);
-        for (word_slot, &word_idx) in field_exposure.decomposed_words().iter().enumerate() {
-            let limb = block.schedule[word_idx];
-            let bytes = crate::field_exposure::word_be_bytes(limb.lo, limb.hi);
-            for (b, &byte) in bytes.iter().enumerate() {
-                row[Layout::field_byte_col(word_slot * BYTES_PER_WORD + b)] = m31(byte);
-            }
-        }
-        // Multi-block selectors: one-hot per yielded byte, live only on the
-        // `t = 15` row of that byte's target block.
+        // Multi-block selectors: one per distinct target block, live only on
+        // that block's t = 15 row.
         if field_exposure.needs_block_witness() {
-            for (yield_idx, y) in field_exposure.yields().iter().enumerate() {
+            for &target_block in field_exposure.target_blocks() {
                 let slot = field_exposure
-                    .selector_column_slot(yield_idx)
+                    .selector_column_slot(target_block)
                     .expect("multi-block exposure has selector columns");
-                row[Layout::field_byte_col(slot)] =
-                    BaseField::from(u32::from(block_idx == y.block_idx));
+                row[Layout::field_aux_col(slot)] =
+                    BaseField::from(u32::from(block_idx == target_block));
             }
         }
     }
@@ -895,7 +874,7 @@ fn write_round_row_values(
     // Multi-block block counter: `block_idx` on **every** row (the AIR pins it
     // to 0 on block 0, flat within a block, and +1 at each real boundary).
     if let Some(slot) = field_exposure.block_counter_column_slot() {
-        row[Layout::field_byte_col(slot)] = BaseField::from(block_idx as u32);
+        row[Layout::field_aux_col(slot)] = BaseField::from(block_idx as u32);
     }
 }
 
@@ -1391,7 +1370,7 @@ mod tests {
         use rand::{rngs::StdRng, SeedableRng};
         let witness = compute_sha256_witness(&[0x44; 180]);
         let log_size = min_log_size(witness.blocks.len());
-        let exposure = FieldExposure::from_preimage_windows(&[(7, 5, 4), (8, 9, 2)]);
+        let exposure = FieldExposure::from_preimage_windows_multi(&[(7, 5, 4), (8, 70, 2)]);
         // Both writers must consume the *same* decoy padding, else the boundary
         // sigma-bit columns (recomputed from padding neighbours) diverge by
         // design. Seed one decoy set and feed it to both.
@@ -1431,7 +1410,7 @@ mod tests {
             Layout::COL_ENABLER_STEP,
         ];
         public_pad_cols.extend(Layout::COL_PADDING_START..Layout::COL_PADDING_END);
-        public_pad_cols.extend(Layout::COL_FIELD_BYTES_START..total_cols);
+        public_pad_cols.extend(Layout::COL_FIELD_AUX_START..total_cols);
         for row_idx in real_rows..n_rows {
             let slot = Layout::row_slot(row_idx, log_size);
             for &col in &public_pad_cols {

@@ -499,29 +499,19 @@ pub const FIELD_REL_SIZE: usize = air_core::relations::FIELD_BYTES_ARITY;
 /// The cross-component credential-field channel (interface-contract item 3:
 /// `CRED_FIELD ↔ PREDICATE_INPUT`). The second cross-module channel the SHA-256
 /// AIR uses from the **provider** side: when a non-empty
-/// [`crate::field_exposure::FieldExposure`] is configured, on the **first block**
-/// it *yields* one `(field_id, byte_index, value)` tuple per exposed credential
-/// byte (`add_to_relation(&field, −is_first_block, &[field_id, byte_index,
-/// value])`), so a downstream predicate can *require* exactly the byte window of
-/// the field it binds. Like the digest yield, these terms have no
+/// [`crate::field_exposure::FieldExposure`] is configured, it *yields* one
+/// `(field_id, byte_index, value)` tuple per exposed credential byte, gated to
+/// that byte's target SHA block, so a downstream predicate can *require*
+/// exactly the byte window of the field it binds. Like the digest yield, these terms have no
 /// in-module consumer — they leave the SHA module's claimed sum non-zero until a
 /// predicate consumer cancels them — so they are gated behind the field-exposure
 /// spec (empty by default), keeping a standalone SHA proof self-balancing.
 ///
-/// **Representation bridge (interface-contract item 4).** The message words live
-/// in the trace as 16-bit `(lo, hi)` limbs; the field bytes are their big-endian
-/// decomposition (`limb = 256·b1 + b0`), the same byte bridge the digest uses.
-/// The byte values are tied to the (split-and-pack-pinned) message-word limbs by
-/// that decomposition. Unlike the digest — which exposes whole words, so a
-/// limb's two bytes are *both* yielded and the consumer's per-byte range-check
-/// pins the split — a field window can be **sub-word**: an edge byte shares a
-/// limb with a non-exposed neighbour, and a 16-bit limb's split `256·b_hi + b_lo`
-/// is unique only when *both* bytes are in `[0, 256)`. So the provider itself
-/// range-checks **every** exposed byte to `[0, 256)` (two `Range16` lookups per
-/// byte; see [`crate::field_exposure::BYTE_RANGE_CHECK_OFFSET`]). With both bytes
-/// of every touched limb pinned and the limb already in `[0, 2¹⁶)`, each yielded
-/// byte is exactly the signed preimage byte — the binding holds without trusting
-/// the consumer to range-check anything.
+/// **Representation bridge (interface-contract item 4).** Every message word
+/// already has 32 committed LSB-first bit planes. The AIR constrains each bit
+/// boolean and recomposes them to the 16-bit `(lo, hi)` schedule limbs. A field
+/// byte is the corresponding linear eight-bit big-endian projection, so it is
+/// automatically in `[0, 256)` and exactly equals the signed preimage byte.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FieldRelation {
     pub field: Sha256Field,
