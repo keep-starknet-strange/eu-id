@@ -495,3 +495,103 @@ credential_pipeline 3 (+1 ignored), mdoc_support 46, compose_p256_sha
 default suite green (3 of its `--ignored` WO-1.x diagnostics assert
 two-prove BYTE IDENTITY and fail by design since Q-015 random decoy
 padding — pre-existing, not S8), check-quantum-only-deps clean.
+
+## S9 (2026-07-12) — close the last ~110 KB: census, pricing, HONEST STOP
+
+Goal: proof < 1,000,000 B (from 1,109,272 B), verify < 100 ms, prove ≤ ~8.5 s
+min-of-3. **Result: NOT REACHED. No sanctioned move closes the gap inside the
+soundness + prove-budget rails.** Baseline held; nothing shipped.
+
+### Fresh census (AIR_CORE_SHAPE_DUMP, pq_perf_probe, RAYON_NUM_THREADS=1)
+
+Baseline proof 1,109,272 B = queried 810,360 (73%) + sampled 190,720 (17%) +
+fri 53,316 + decommit 51,240 + meta/commitments/pow 3,636. Prove 8,232 ms
+(min), verify 14 ms.
+
+The proof is **column-bound**: queried_values = n_queries(26) × committed
+M31 columns × 4 B; sampled_values ∝ columns. Decommit is per-tree Merkle
+paths (depth ∝ log_size), NOT per-column; fri is per-layer. So the only
+lever that moves the two dominant terms is **fewer committed columns** (or
+fewer queries). Established price (S8, −167 KB / −1,139 cols): **≈145 B per
+committed M31 column** (queried ≈110 B/col + sampled ≈35 B/col).
+
+Committed columns per module (all trees; total **7,290**):
+
+| module | cols | identity | status |
+|---|---|---|---|
+| 1 | **4,014** | mldsa keccak service (sponge_v + keccak + round + 9 tables) | protocol-pinned (45 SHAKE perms, hard floor); interaction already batch-4 on the two big components (sponge_v 684 + keccak_round 908 of 1,628) |
+| 4 | 1,199 | merged multi-slot SHA consumer (S8) | already `finalize_logup_batched(4)`; field/digest sites witness-carrying |
+| 5 | 436 | hosted ML-DSA (revocation) | contains coeffs component — **NEVER touch** |
+| 2, 3 | 432 ea | hosted ML-DSA (issuer / device) | contains coeffs component — **NEVER touch** |
+| 8 | 244 | digest/window bind (log 9) | functional |
+| 12 | 233 | predicate/range (log 4) | functional |
+| 9 | 119 | bind (mixed log) | functional |
+| 0 | 88 | shared SHA tables (log 17 preproc) | S5 limb-redesign target (≈−88 cols) |
+| 6, 7 | 37 ea | small binds (log 9) | functional |
+| 10 | 19 | small | functional |
+| 11 | 0 | (empty) | — |
+
+**To reach <1 MB: need −109,272 B ≈ −754 committed columns** at 145 B/col.
+
+### Every sanctioned S9 move, priced against the fresh census
+
+1. **8-bit range table for SHA field-byte range sites** — NOT AVAILABLE.
+   The SHA AIR has only Range2/4/5/16 (no `[0,2⁸)` provider);
+   `field_exposure.rs` pins each exposed byte with **two** Range16 lookups
+   (`b`, `b+OFFSET`). There is no existing 8-bit table to *reuse*, and a new
+   single-purpose table is forbidden (M-5) — it would add a preprocessed
+   column + multiplicity + interaction for the handful of exposed bytes, net
+   ≈ break-even. The keccak service's spread tables are a different relation
+   set in a different module; wiring the SHA consumer to draw a keccak table
+   is a cross-module soundness change for < 15 KB. **Rejected.**
+
+2. **Remaining pair-batched evals → batch-4** — LARGELY EXHAUSTED.
+   Census: the two large keccak-service interaction components (`sponge_v`
+   684 cols, `keccak_round` 908 cols) are ALREADY batch-4 (bound log+2). Only
+   `keccak` (permutation) + `tables_air` (9 tables) still finalize in pairs,
+   ≈ 36 interaction cols combined ⇒ batch-4 saves ≈ 18 cols ≈ **−2.6 KB**, and
+   requires bumping their bound log+1 → log+2 (more composition-domain prove
+   work). Marginal, adds risk for ~2 KB. **Rejected** (not worth the bound bump).
+
+3. **Query / pow micro-tuning** — OUT OF BUDGET (measured).
+   26→25 queries needs pow 25→28 to hold 25·4+28 = 128-bit. Measured
+   pow-28 single-thread: **prove 32,413 / 37,003 ms** (grind ≈ +24 s),
+   proof 1,076,444 B (−33 KB, still >1 MB). The blake2s grind at 2^28 is
+   ~24 s single-thread — catastrophically over the 8.5 s budget for a −33 KB
+   gain. **Rejected.** (Reaching −110 KB via queries needs 3 fewer queries ⇒
+   pow 37 ⇒ minutes of grind — infeasible.)
+
+4. **Misc small-fry** — sub-threshold. sha_tables limb redesign ≈ −88 cols ≈
+   **−12.8 KB** (non-trivial, touches protocol-pinned SHA table structure,
+   S5 hard-floor item); coeffs 2/row repack is forbidden AND net-neutral for
+   a column-bound proof (doubles per-row cols, halves rows). No dead/duplicate
+   columns found in the functional small modules.
+
+### Residual arithmetic (what remains, what each costs)
+
+Best-case sum of every *clean* item above: keccak pairs→4 (−18) + sha_tables
+limb redesign (−88) = **−106 cols ≈ −15.4 KB** → 1,093,900 B. Still **~94 KB
+(≈650 cols) over target.** The remaining 754 cols only exist in:
+(a) the keccak service (4,014 cols, 45 protocol-pinned SHAKE perms — hard
+floor, tasks §S5); (b) the hosted ML-DSA coeffs/verify modules (~1,300 cols —
+coeffs forbidden); (c) the merged SHA consumer (1,199 cols — already batch-4,
+sites witness-carrying). Cutting 754 cols from these requires a **structural**
+change (keccak sha_tables limb redesign to shrink the log-17 preprocessed +
+per-perm columns, or an engine-level column-packing of the coeffs component),
+each explicitly out of scope / forbidden for S9 small-fry.
+
+**Honest conclusion: <1 MB is not reachable with the S9 small-fry list.** The
+proof floor at the current architecture is ≈1.09 MB. Closing to <1 MB needs
+the S5 SHA-table limb redesign (est. −12–15 KB) *plus* a keccak per-perm
+column reduction — a structural project, not an S9 move. Baseline unchanged
+(1,109,272 B / 8,232 ms / 14 ms); production FRI (1,4,26,2)/pow25 retained.
+
+### FRI frontiers (pq_perf_probe, RAYON_NUM_THREADS=1, S9 session)
+
+| schedule | prove ms (min) | verify ms | proof B |
+|---|---|---|---|
+| (1, 4, 26, 2) pow 25 — production (retained) | 8,232 | 14 | 1,109,272 |
+| (1, 4, 25, 2) pow 28 — query shave (rejected) | 32,413 | 15 | 1,076,444 |
+| (1, 3, 36, 2) pow 20 — buy-back (S8) | 5,755 | 17 | 1,419,536 |
+
+No code changed; existing gates remain as recorded post-S8.
