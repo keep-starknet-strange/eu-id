@@ -196,6 +196,10 @@ pub struct MlDsaProof {
     /// The keccak service module's claimed sums (`[sponge_v, keccak, round,
     /// tables ×9]`) — the standalone proof composes `[service, mldsa]`.
     pub service_claimed_sums: Vec<SecureField>,
+    /// Per-module opaque post-interaction payloads (module order == prove
+    /// order): the service's round-GKR proof blob first, an empty entry for
+    /// the mldsa module. Gated fail-closed in `verify_mldsa`.
+    pub post_interaction_payloads: Vec<Vec<u8>>,
     pub stark_proof: StarkProof<Blake2sMerkleHasher>,
 }
 
@@ -2136,7 +2140,8 @@ pub fn prove_mldsa(
     let mut prover = MlDsaProver::new(witness, input.clone(), None, handle.clone());
     let (job_shapes, job_streams) = prover.keccak_jobs();
     let mut service = KeccakServiceProver::new(job_shapes, job_streams, handle);
-    let stark_proof = air_core::prove(&mut [&mut service, &mut prover], config)?;
+    let (stark_proof, post_interaction_payloads) =
+        air_core::prove_with_post_interaction(&mut [&mut service, &mut prover], config)?;
     Ok(MlDsaProof {
         input,
         group_evals: prover.group_evals,
@@ -2144,6 +2149,7 @@ pub fn prove_mldsa(
         sib_stream_len,
         sib_squeezed_len,
         service_claimed_sums: service.claimed_sums(),
+        post_interaction_payloads,
         stark_proof,
     })
 }
@@ -2230,6 +2236,18 @@ pub fn verify_mldsa(proof: &MlDsaProof) -> Result<(), VerificationError> {
             "ML-DSA statement: bad service claimed-sums length".to_string(),
         ));
     }
+    // Payload shape gate, fail-closed: exactly one entry per module
+    // ([service, mldsa]); only the service slot carries a (non-empty) GKR
+    // blob. The blob content itself is verified inside the service module's
+    // verify_post_interaction (decode + claim binding + sumcheck replay).
+    if proof.post_interaction_payloads.len() != 2
+        || proof.post_interaction_payloads[0].is_empty()
+        || !proof.post_interaction_payloads[1].is_empty()
+    {
+        return Err(VerificationError::InvalidStructure(
+            "ML-DSA statement: bad post-interaction payload shape".to_string(),
+        ));
+    }
     let mut service = KeccakServiceVerifier::new(
         job_shapes,
         proof.service_claimed_sums.clone(),
@@ -2255,10 +2273,11 @@ pub fn verify_mldsa(proof: &MlDsaProof) -> Result<(), VerificationError> {
                 "ML-DSA statement: could not derive expected preprocessed root".to_string(),
             )
         })?;
-    air_core::verify_with_expected_preprocessed_root(
+    air_core::verify_with_expected_preprocessed_root_and_payloads(
         &mut [&mut service, &mut verifier],
         &proof.stark_proof,
         Some(expected_root),
+        &proof.post_interaction_payloads,
     )
     .map_err(|error| match error {
         air_core::VerifyError::Stark(error) => error,

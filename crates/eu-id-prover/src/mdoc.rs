@@ -2215,6 +2215,10 @@ pub struct MdocCircuitProof {
     age_claimed_sums: Option<Vec<QM31>>,
     nat_public: Option<predicates::NatPublicInput>,
     nat_claimed_sums: Option<Vec<QM31>>,
+    /// Per-module opaque post-interaction payloads, in prove module order.
+    /// Only the keccak service slot is non-empty (its round-GKR proof blob);
+    /// the verifier gates this shape fail-closed before any transcript work.
+    pub post_interaction_payloads: Vec<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -2232,6 +2236,9 @@ pub struct MdocProofByteBreakdown {
     pub proof_bytes: usize,
     pub stark_proof_bytes: usize,
     pub non_stark_metadata_bytes: usize,
+    /// The serialized round-GKR post-interaction payload blob(s) — part of
+    /// `non_stark_metadata_bytes`, broken out for the wire accounting.
+    pub post_interaction_payload_bytes: usize,
     pub stark: MdocStarkProofByteBreakdown,
 }
 
@@ -2256,6 +2263,11 @@ pub fn mdoc_proof_byte_breakdown(proof: &MdocCircuitProof) -> MdocProofByteBreak
         proof_bytes,
         stark_proof_bytes,
         non_stark_metadata_bytes,
+        post_interaction_payload_bytes: proof
+            .post_interaction_payloads
+            .iter()
+            .map(Vec::len)
+            .sum(),
         stark: MdocStarkProofByteBreakdown {
             config: bincode_len(&stark.config),
             commitments: bincode_len(&stark.commitments),
@@ -3505,10 +3517,13 @@ fn prove_or_root_mdoc(
                     air_core::compute_preprocessed_root_uncached(modules.as_mut_slice(), config),
                 ));
             }
-            MdocProveMode::Prove => air_core::prove(modules.as_mut_slice(), config)
-                .map_err(|e| Error::Prove(format!("{e:?}")))?,
+            MdocProveMode::Prove => {
+                air_core::prove_with_post_interaction(modules.as_mut_slice(), config)
+                    .map_err(|e| Error::Prove(format!("{e:?}")))?
+            }
         }
     };
+    let (stark_proof, post_interaction_payloads) = stark_proof;
     Ok(MdocProveOutcome::Proof(Box::new(MdocCircuitProof {
         stark_proof,
         sha_tables_interaction_claim: sha_tables.interaction_claim().clone(),
@@ -3540,6 +3555,7 @@ fn prove_or_root_mdoc(
         age_claimed_sums: age.as_ref().map(|age| age.claimed_sums()),
         nat_public: nat.as_ref().map(|_| nat_public),
         nat_claimed_sums: nat.as_ref().map(|nat| nat.claimed_sums()),
+        post_interaction_payloads,
     })))
 }
 
@@ -3700,6 +3716,21 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
                 "mdoc proof keccak service claims do not match the statement".to_string(),
             ))
         }
+    }
+    // Post-interaction payload shape gate, fail-closed: exactly ONE non-empty
+    // payload (the keccak service's round-GKR blob) when the service is
+    // present, none otherwise. Slot position and content are then enforced by
+    // the service module itself (empty blob fails decode; a mispositioned
+    // blob desyncs the replay) and by air-core's per-module count check.
+    let n_nonempty_payloads = proof
+        .post_interaction_payloads
+        .iter()
+        .filter(|p| !p.is_empty())
+        .count();
+    if n_nonempty_payloads != usize::from(proof.keccak_service_claimed_sums.is_some()) {
+        return Err(Error::Verify(
+            "mdoc proof post-interaction payload shape mismatch".to_string(),
+        ));
     }
     let revocation_message_field = has_revocation_signature.then(SharedFieldRelation::new);
     let attribute_count = statement.attributes.len();
@@ -3987,10 +4018,11 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
         modules.push(revocation_public);
     }
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        air_core::verify_with_expected_preprocessed_root(
+        air_core::verify_with_expected_preprocessed_root_and_payloads(
             modules.as_mut_slice(),
             &proof.stark_proof,
             expected_preprocessed_root,
+            &proof.post_interaction_payloads,
         )
     })) {
         Ok(Ok(())) => Ok(MdocCircuitVerifyProfile {

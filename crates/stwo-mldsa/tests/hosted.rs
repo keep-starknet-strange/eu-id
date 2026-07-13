@@ -283,8 +283,11 @@ fn prove_hosted(seed: u64, msg: &[u8], producer_bytes: Vec<u8>) -> MlDsaProof {
     let (job_shapes, job_streams) = mldsa.keccak_jobs();
     let mut service = KeccakServiceProver::new(job_shapes, job_streams, keccak_handle);
 
-    let stark_proof = air_core::prove(&mut [&mut service, &mut producer, &mut mldsa], pcs_config())
-        .expect("prove");
+    let (stark_proof, post_interaction_payloads) = air_core::prove_with_post_interaction(
+        &mut [&mut service, &mut producer, &mut mldsa],
+        pcs_config(),
+    )
+    .expect("prove");
 
     MlDsaProof {
         input,
@@ -293,6 +296,7 @@ fn prove_hosted(seed: u64, msg: &[u8], producer_bytes: Vec<u8>) -> MlDsaProof {
         sib_stream_len: mldsa.sib_stream_len(),
         sib_squeezed_len: mldsa.sib_squeezed_len(),
         service_claimed_sums: service.claimed_sums(),
+        post_interaction_payloads,
         stark_proof,
     }
 }
@@ -322,10 +326,16 @@ fn verify_hosted(
         handle,
         keccak_handle,
     );
-    air_core::verify(
+    air_core::verify_with_expected_preprocessed_root_and_payloads(
         &mut [&mut service, &mut producer, &mut mldsa],
         &proof.stark_proof,
+        None,
+        &proof.post_interaction_payloads,
     )
+    .map_err(|e| match e {
+        air_core::VerifyError::Stark(e) => e,
+        air_core::VerifyError::PreprocessedRootMismatch { .. } => unreachable!("no root pinned"),
+    })
 }
 
 // =====================================================================
@@ -384,6 +394,7 @@ fn prove_two_hosted(
     InstanceClaims,
     InstanceClaims,
     Vec<SecureField>,
+    Vec<Vec<u8>>,
     stwo::core::proof::StarkProof<air_core::Hasher>,
 ) {
     let input_a = oracle_input(seed_a, msg_a);
@@ -413,7 +424,7 @@ fn prove_two_hosted(
         keccak_handle,
     );
 
-    let stark_proof = air_core::prove(
+    let (stark_proof, payloads) = air_core::prove_with_post_interaction(
         &mut [
             &mut service,
             &mut producer_a,
@@ -436,6 +447,7 @@ fn prove_two_hosted(
         claims(&mldsa_a, &input_a),
         claims(&mldsa_b, &input_b),
         service.claimed_sums(),
+        payloads,
         stark_proof,
     )
 }
@@ -452,6 +464,7 @@ fn verify_two_hosted(
     service_claimed_sums: Vec<SecureField>,
     producer_a_bytes: Vec<u8>,
     producer_b_bytes: Vec<u8>,
+    payloads: &[Vec<u8>],
     stark_proof: &stwo::core::proof::StarkProof<air_core::Hasher>,
 ) -> Result<(), stwo::core::verifier::VerificationError> {
     let handle_a = SharedFieldRelation::new();
@@ -490,7 +503,7 @@ fn verify_two_hosted(
     .with_instance_namespace(ns_b)
     .with_stream_base(STREAM_BASE_STRIDE)
     .with_private_message();
-    air_core::verify(
+    air_core::verify_with_expected_preprocessed_root_and_payloads(
         &mut [
             &mut service,
             &mut producer_a,
@@ -499,7 +512,13 @@ fn verify_two_hosted(
             &mut mldsa_b,
         ],
         stark_proof,
+        None,
+        payloads,
     )
+    .map_err(|e| match e {
+        air_core::VerifyError::Stark(e) => e,
+        air_core::VerifyError::PreprocessedRootMismatch { .. } => unreachable!("no root pinned"),
+    })
 }
 
 #[test]
@@ -508,8 +527,8 @@ fn two_namespaced_hosted_instances_prove_and_verify() {
     // columns are shape-dependent, so this exercises disjoint ids end to end.
     let msg_a = b"instance-a: the issuer-style public message".to_vec();
     let msg_b = b"instance-b-private".to_vec();
-    let (a, b, svc, proof) = prove_two_hosted(111, &msg_a, "test/a", 222, &msg_b, "test/b");
-    verify_two_hosted(&a, "test/a", &b, "test/b", svc, msg_a, msg_b, &proof)
+    let (a, b, svc, payloads, proof) = prove_two_hosted(111, &msg_a, "test/a", 222, &msg_b, "test/b");
+    verify_two_hosted(&a, "test/a", &b, "test/b", svc, msg_a, msg_b, &payloads, &proof)
         .expect("two-instance verify");
 }
 
@@ -519,7 +538,7 @@ fn two_hosted_instances_swapped_claims_reject() {
     // role separation must come from the namespaced transcript + inputs.
     let msg_a = b"same-length-message-aaaaaaaa".to_vec();
     let msg_b = b"same-length-message-bbbbbbbb".to_vec();
-    let (a, b, svc, proof) = prove_two_hosted(111, &msg_a, "test/a", 222, &msg_b, "test/b");
+    let (a, b, svc, payloads, proof) = prove_two_hosted(111, &msg_a, "test/a", 222, &msg_b, "test/b");
     // Present A's claim tree in B's slot and vice versa (inputs stay put).
     let swapped_a = InstanceClaims {
         input: a.input.clone(),
@@ -536,7 +555,7 @@ fn two_hosted_instances_swapped_claims_reject() {
         sib_squeezed_len: a.sib_squeezed_len,
     };
     assert!(
-        verify_two_hosted(&swapped_a, "test/a", &swapped_b, "test/b", svc, msg_a, msg_b, &proof)
+        verify_two_hosted(&swapped_a, "test/a", &swapped_b, "test/b", svc, msg_a, msg_b, &payloads, &proof)
             .is_err(),
         "cross-instance claim replay must reject"
     );
