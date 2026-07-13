@@ -289,6 +289,18 @@ fn prove_jobs(
     n_squeezes: Vec<usize>,
     tamper: Option<&dyn Fn(&mut SpongeVRun)>,
 ) -> ProvedJobs {
+    prove_jobs_full(messages, n_squeezes, tamper, None, pcs_config())
+}
+
+/// [`prove_jobs`] with a permutation-witness tamper hook (round base trace /
+/// round lookup data) and an explicit PCS config.
+fn prove_jobs_full(
+    messages: Vec<Vec<u8>>,
+    n_squeezes: Vec<usize>,
+    tamper: Option<&dyn Fn(&mut SpongeVRun)>,
+    perm_tamper: Option<&dyn Fn(&mut stwo_keccak::stark::PermWitness)>,
+    config: PcsConfig,
+) -> ProvedJobs {
     let shapes = shapes_for(&messages, &n_squeezes);
     let handle = SharedKeccakRelations::new();
     let mut service = KeccakServiceProver::new(shapes.clone(), messages.clone(), handle.clone());
@@ -296,9 +308,12 @@ fn prove_jobs(
     if let Some(t) = tamper {
         t(service.run_mut());
     }
+    if let Some(t) = perm_tamper {
+        t(service.perm_mut());
+    }
     let mut closer = IoCloser::new(closer_entries(&shapes, &messages, &outputs), handle);
     let (proof, payloads) =
-        air_core::prove_with_post_interaction(&mut [&mut service, &mut closer], pcs_config())
+        air_core::prove_with_post_interaction(&mut [&mut service, &mut closer], config)
             .expect("prove");
     ProvedJobs {
         shapes,
@@ -450,4 +465,162 @@ fn wrong_squeeze_byte_rejects() {
     let mut p = prove_jobs(vec![msg.clone()], vec![1], None);
     p.outputs[0][7] ^= 1; // the verify-side closer now requires a wrong byte
     assert!(verify_jobs(&p, &[msg]).is_err());
+}
+
+// =====================================================================
+// W3b adversarial matrix: the round LogUp→GKR offload.
+// =====================================================================
+
+/// Skip the prover-side coeff-poly-vs-oracle completeness self-check so the
+/// adversarial provers below can PRODUCE their desynced proofs; the verifier
+/// must then reject them on its own. Honest tests are unaffected (the check
+/// passes for them anyway).
+fn skip_prover_oracle_self_check() {
+    std::env::set_var("STWO_MLE_EVAL_SKIP_ORACLE_CONSISTENCY", "1");
+}
+
+/// A corrupted GKR payload blob must be rejected (decode failure or
+/// Fiat-Shamir replay desync — both fail closed).
+#[test]
+fn corrupted_gkr_payload_rejects() {
+    let msg = vec![0x21u8; 300];
+    let p = prove_jobs(vec![msg.clone()], vec![1], None);
+    assert!(!p.payloads[0].is_empty(), "service must emit a GKR blob");
+
+    // Flip a byte deep inside the sumcheck data.
+    let mut corrupted = p.payloads.clone();
+    let mid = corrupted[0].len() / 2;
+    corrupted[0][mid] ^= 0xff;
+    assert!(verify_jobs_with_payloads(&p, &p.messages, &corrupted).is_err());
+
+    // Truncated blob → decode failure → reject.
+    let mut truncated = p.payloads.clone();
+    truncated[0].truncate(4);
+    assert!(verify_jobs_with_payloads(&p, &p.messages, &truncated).is_err());
+}
+
+/// With NO payloads at all (the legacy call shape) the service's round LogUp
+/// is unproven — the verifier must fail closed, never accept.
+#[test]
+fn missing_gkr_payload_rejects() {
+    let msg = vec![0x22u8; 300];
+    let p = prove_jobs(vec![msg.clone()], vec![1], None);
+    assert!(verify_jobs_with_payloads(&p, &p.messages, &[]).is_err());
+}
+
+/// A structurally valid GKR proof from a DIFFERENT proof (same job shape, so
+/// nothing rejects on shape alone) must desync the shared-channel replay.
+#[test]
+fn gkr_claim_swapped_between_proofs_rejects() {
+    let msg_a = vec![0x31u8; 300];
+    let msg_b = vec![0x32u8; 300]; // same length → same GKR shape
+    let a = prove_jobs(vec![msg_a], vec![1], None);
+    let b = prove_jobs(vec![msg_b], vec![1], None);
+
+    assert!(verify_jobs_with_payloads(&a, &a.messages, &b.payloads).is_err());
+    assert!(verify_jobs_with_payloads(&b, &b.messages, &a.payloads).is_err());
+}
+
+/// Tampered round-link tuple (lookup data only; base trace honest): the GKR
+/// multiset — and therefore the round's claimed sum — no longer cancels the
+/// keccak component's honest link, so the verifier rejects.
+#[test]
+fn tampered_round_link_tuple_rejects() {
+    skip_prover_oracle_self_check();
+    let msg = vec![0x41u8; 300];
+    let p = prove_jobs_full(
+        vec![msg.clone()],
+        vec![1],
+        None,
+        Some(&|perm| {
+            use stwo::prover::backend::simd::m31::PackedM31;
+            let out_link = &mut perm.round_data.lookup_data.keccak_round[1][0];
+            out_link[10] += PackedM31::broadcast(M31::one());
+        }),
+        pcs_config(),
+    );
+    assert!(verify_jobs(&p, &[msg]).is_err());
+}
+
+/// The adversary forges the round claimed sum back to a value that cancels
+/// globally (compensating in the keccak slot): the balance gate passes, and
+/// it is the GKR output-claim binding that must reject.
+#[test]
+fn forged_round_claim_with_compensating_slot_rejects() {
+    let msg = vec![0x42u8; 300];
+    let mut p = prove_jobs(vec![msg.clone()], vec![1], None);
+    // claims = [sponge, keccak, round, tables×9]; shift mass between the
+    // keccak and round slots so the total still cancels.
+    p.service_claims[1] += SecureField::one();
+    p.service_claims[2] -= SecureField::one();
+    assert!(verify_jobs(&p, &[msg]).is_err());
+}
+
+/// Tampered committed base cell (round trace only; the GKR fraction multiset,
+/// claimed sums and tie-back trace all stay honest): every sum gate passes,
+/// and it is the MLE-eval tie-back — the oracle reconstruction from the
+/// committed base-column masks — that must reject at the OODS point. This is
+/// the offload's core soundness property.
+#[test]
+fn tampered_round_base_cell_rejects() {
+    skip_prover_oracle_self_check();
+    let msg = vec![0x43u8; 300];
+    let p = prove_jobs_full(
+        vec![msg.clone()],
+        vec![1],
+        None,
+        Some(&|perm| {
+            use stwo::prover::backend::Column;
+            // Column 20 = a spread state limb (cols: 1 enabler, 16 rc, 200
+            // state, ...). Row 0 is a real (non-padded) row.
+            let col = &mut perm.round_trace[20];
+            let v = col.values.at(0);
+            col.values.set(0, v + M31::one());
+        }),
+        pcs_config(),
+    );
+    assert!(verify_jobs(&p, &[msg]).is_err());
+}
+
+/// Row-swap inside one lookup slot: the per-slot multiset (hence EVERY
+/// claimed sum and the GKR output claim) is preserved, but the committed base
+/// columns no longer match the GKR input-layer MLEs row-wise — only the
+/// tie-back's eval-at-r_row binding can catch it.
+#[test]
+fn row_swapped_lookup_data_rejects() {
+    skip_prover_oracle_self_check();
+    let msg = vec![0x44u8; 300];
+    let p = prove_jobs_full(
+        vec![msg.clone()],
+        vec![1],
+        None,
+        Some(&|perm| {
+            // Swap two real SIMD lanes of one xor3 lookup (72 real rows =
+            // 4.5 packed rows, so vec_row 0 lanes 0/1 are both real).
+            use stwo::prover::backend::simd::m31::N_LANES;
+            for entry in 0..2 {
+                let col = &mut perm.round_data.lookup_data.xor3[5][0];
+                let mut lanes: [M31; N_LANES] = col[entry].to_array();
+                lanes.swap(0, 1);
+                col[entry] = stwo::prover::backend::simd::m31::PackedM31::from_array(lanes);
+            }
+        }),
+        pcs_config(),
+    );
+    assert!(verify_jobs(&p, &[msg]).is_err());
+}
+
+/// Positive regression: the offload under the PRODUCTION-shaped FRI config
+/// (log_blowup 4 > composition_log_split 2) — the SubDomain evaluation mode
+/// with a non-trivial log_expansion, which the tie-back's domain quotient
+/// must handle exactly like a FrameworkComponent (bit-reversed prefix reads).
+#[test]
+fn gkr_offload_proves_under_blowup_4_subdomain_mode() {
+    let msg = vec![0x51u8; 300];
+    let config = PcsConfig {
+        fri_config: FriConfig::new(1, 4, 3, 2),
+        ..PcsConfig::default()
+    };
+    let p = prove_jobs_full(vec![msg.clone()], vec![1], None, None, config);
+    verify_jobs(&p, &[msg]).expect("blowup-4 SubDomain verify");
 }

@@ -385,6 +385,16 @@ impl KeccakServiceProver {
         &mut self.run
     }
 
+    /// Test-only tamper hook: mutate the permutation witness (round base trace
+    /// or round lookup data) before proving. Lets the adversarial tests desync
+    /// the committed round base columns from the GKR fraction multiset (the
+    /// configuration the MLE-eval tie-back must reject) or tamper a chain-link
+    /// tuple against the honest keccak component.
+    #[doc(hidden)]
+    pub fn perm_mut(&mut self) -> &mut PermWitness {
+        &mut self.perm
+    }
+
     fn relations(&self) -> &KeccakRelations {
         self.relations.as_ref().expect("relations drawn")
     }
