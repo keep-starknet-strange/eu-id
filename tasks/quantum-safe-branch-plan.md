@@ -105,3 +105,117 @@ checkout comparison is possible; report min and median when thermal drift is vis
 `AIR_CORE_SHAPE_DUMP=1` for module columns/cells and `AIR_CORE_PROVE_TIMING=1` for phase timings.
 
 Every pushed checkpoint contains only one coherent milestone, its tests, and its task/design record.
+
+## 8. Q4 — proof/prove frontier: both slices priced, both STOP
+
+### 8.1 Measured baseline (this session)
+
+Release, `RAYON_NUM_THREADS=1`, FRI `(1,4,26,2)`/pow25, probe
+`crates/eu-id-prover/examples/pq_perf_probe.rs`:
+
+| metric | measured | target | gap |
+|---|---:|---:|---:|
+| prove  | 5,523 ms | < 1,000 ms | −4,523 ms |
+| verify | 15 ms | < 100 ms | MET |
+| proof  | 1,082,914 B | < 1,000,000 B | −82,914 B |
+
+`AIR_CORE_SHAPE_DUMP` module map: m0 SHA-glue; **m1 keccak service** (318 pre /
+2,068 trace / 1,628 interaction = 4,014 cols, 5.29 M cells); m2/m3/m6 ML-DSA
+instances (coeffs-dominated, ~2.5 M cells each); m4 merged SHA (951 cols).
+Marginal proof price ≈ 145 B / committed M31 column (queried_values dominate).
+
+### 8.2 Q4a — GKR offload of the keccak-service LogUp — **STOP (documented)**
+
+**Interior census (base interaction cols in m1, the offload candidates):**
+
+| component | fractions | interaction base cols | log | relations |
+|---|---:|---:|---:|---|
+| sponge_v     | `5·RATE+4 = 684` (÷batch 4 = 171) | **684** | 6  | produces cross-module `HashIo` |
+| keccak (perm)| 4 (÷2)                            | 8       | 11 | internal `KeccakState` |
+| keccak_round | `N_TOTAL_LOOKUPS ≈ 907` (÷4 = 227) | **908** | 11 | internal `KeccakState`/xor3/andnot/split |
+| tables ×9    | 9×4                               | 36      | 8/16 | table channels |
+
+**Column arithmetic (passes the >80 KB gate):** the tie-back is cheap in
+columns — `MleEvalProverComponent` commits ~2 secure helper cols (eq +
+prefix-sum accumulator) per evaluated MLE per domain (~16–30 base cols for a
+numerator+denominator pair at one log). Offloading `keccak_round` alone:
+`(908 − ~30) × 145 B ≈ +127 KB`, minus a few-KB `GkrBatchProof` blob → net
+**≈ +120 KB**, well over 80 KB and enough to clear the −83 KB proof gap by
+itself. (sponge_v adds another ~+99 KB but its `HashIo` production is the
+cross-module relation ⇒ larger soundness surface; prefer round-only.)
+
+**Why STOP — the integration cost is structural, not the column cost:**
+
+1. **No GKR transport in the proof wire.** `air_core::prove` returns
+   `StarkProof` only; `Air::verify_post_interaction(channel)` has no path to
+   *receive* a `GkrBatchProof`. Requires changing air-core's prove/verify
+   surface (or a module-emitted-blob mechanism), adding a field to
+   `MdocCircuitProof` (`crates/eu-id-prover/src/mdoc.rs:2200`), bincode
+   serialization, and threading through `prove/verify_mdoc_circuit`. The
+   air-core post-interaction hooks (`prove_post_interaction` /
+   `write_post_interaction` / `post_interaction_log_sizes` /
+   `verify_post_interaction`) exist but are empty stubs — they commit tie-back
+   *columns* (tree 3) and mix the transcript; they carry **no** GKR proof data.
+2. **The MLE-eval component is a fork example, not API.**
+   `/Users/lucas/stwo/crates/examples/src/xor/gkr_lookups/mle_eval.rs`
+   (`#![allow(dead_code)]`, `TODO(andrew): Remove in downstream PR`, 1,308
+   lines). Productionizing needs a bespoke `MleCoeffColumnOracle` computing the
+   `keccak_round` denominator (relation-combination of committed base columns)
+   at the GKR OOD point, wired through the post-interaction hooks. (Fork commit
+   `8c998390` fixed `MleEvalProverComponent` eval-domain under
+   `composition_log_split > 1` — the framework path is de-risked, the
+   productionization is not.)
+3. **Soundness rework.** The GKR output claim must bind the SAME drawn
+   `KeccakRelations` randomness (drawn pre-tree-1) and equal `round_claimed_sum`
+   so the global LogUp balance (service claimed sums + consumer claimed sums = 0)
+   is preserved with the round side proven by GKR instead of columns. Targeting
+   `keccak_round` keeps this internal (its relations are service-internal;
+   `HashIo` stays columnar), but the OOD/relation binding + adversarial rails
+   (tamper sponge byte → GKR imbalance; claim-swap negatives) are the real risk.
+
+**Verdict:** column-arithmetically worth it (net ≈ +120 KB, the one lever that
+reaches <1 MB), but a dedicated multi-checkpoint soundness-critical build — not
+a session checkpoint. **Recommended future WO scope:** `keccak_round`-only GKR
+offload (131 KB gross, service-internal soundness surface, clears <1 MB alone);
+land the wire-transport + productionized `MleEvalProverComponent` first behind
+adversarial negatives, then flip round to GKR.
+
+### 8.3 Q4b — coeffs 2-per-row repack — **STOP (net-neutral, twice-confirmed)**
+
+Coeffs component (`crates/stwo-mldsa/src/coeffs/`) per instance @ log 14:
+17 preprocessed + 15 base + 100 interaction = 132 cols; active 9,204 of 16,384
+rows (43.8 % padding); ≈ 2.16 M cells (of which interaction = 4 acc-coord +
+96 logup = 1.64 M, the dominant term). `N_LOGUP_ENTRIES = 24` fraction streams,
+`LOGUP_BATCH = 1`.
+
+**Committed cells = columns × 2^log_size.** Two lookup uses in the SAME row need
+DISTINCT fraction columns (a column carries one value per row), so packing 2
+coefficients per row doubles the kind-specific fraction streams (24 → ~48; only
+the group-end eval-yield stays ~1) and doubles the per-coeff base/preproc
+columns, while halving rows (log 14 → 13):
+
+- interaction: 192 base cols × 8,192 = 1.57 M = **identical** to 96 × 16,384;
+- net: cells **invariant** (a pure reshape); columns **increase** 132 → ~252.
+
+Effect on targets: **prove** ~ Σ cells ⇒ ~flat (a small `n·log n` edge from
+log 14→13 is offset by more columns' fixed commit overhead — nowhere near the
+projected −1…−1.5 s); **proof** gets **worse** (+~120 cols × 3 × 145 B ≈ +50 KB),
+moving *away* from <1 MB.
+
+This matches the codebase's own S9 record verbatim
+(`tasks/keccak-service-design.md` line 566): *"coeffs 2/row repack is forbidden
+AND net-neutral for a column-bound proof (doubles per-row cols, halves rows)."*
+
+The real coeffs waste is the **union-of-kinds gated fraction layout** (every row
+carries fraction slots for all six kinds even though a row is one kind), which
+needs per-kind component splitting or engine column-packing (design doc §S9
+flags the latter as out of scope) — NOT row-packing. The `+1` composition-bound
+Horner-mask hard constraint also forbids the naive 2-slot accumulator.
+
+**Verdict:** STOP — no measured win, worsens the proof-size target.
+
+### 8.4 Q4 outcome
+
+No slice landed a measured improvement; the three numbers are unchanged from the
+baseline above (single FRI frontier — no code change). The only lever that
+reaches <1 MB is the Q4a `keccak_round` GKR offload, scoped as a dedicated WO.

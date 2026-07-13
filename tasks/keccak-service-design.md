@@ -625,3 +625,31 @@ The +27-column total is exact: removing the revocation SHA slot saves 101 column
 bit pinning for 16 private bytes adds 128. This stage is retained because it deletes a legacy hash
 work class and makes Q3's input honestly attribute-only, but it is not claimed as a performance win.
 The next design must recover this ~4 KB regression while replacing the P-256-era fixed SHA tables.
+
+## S10. Q4 GKR-offload pricing (recorded — see quantum-safe-branch-plan.md §8.2)
+
+The one lever that reaches <1 MB: offload the `keccak_round` LogUp (908 base
+interaction cols @ log 11, the biggest single fraction set in the 1,628-col m1
+interaction tree) from committed tree-2 columns into a LogUp-GKR proof, keeping
+only the cheap MLE-eval tie-back columns committed.
+
+Column arithmetic PASSES the >80 KB gate: `(908 − ~30 tie-back) × 145 B` minus a
+few-KB `GkrBatchProof` blob ≈ **+120 KB net** — clears the −83 KB proof gap
+alone. `keccak_round`'s relations (`KeccakState`/xor3/andnot/split) are
+service-internal, so the cross-module `HashIo` balance stays columnar (tighter
+soundness surface than offloading sponge_v).
+
+STOP for now: integration is structural, not arithmetic — (1) no `GkrBatchProof`
+transport in the proof wire (`air_core::prove`→`StarkProof`;
+`verify_post_interaction(channel)` cannot receive it; needs an
+`MdocCircuitProof` field + serialization); (2) `MleEvalProverComponent` is a
+fork example (`crates/examples/src/xor/gkr_lookups/mle_eval.rs`, dead-code, 1,308
+lines) needing productionization + a bespoke `MleCoeffColumnOracle`; (3) the GKR
+output claim must bind the same drawn relations and equal `round_claimed_sum`.
+Dedicated multi-checkpoint WO, gated behind adversarial negatives.
+
+coeffs 2/row repack (§S9 line ~566) reconfirmed **net-neutral** by independent
+Q4 derivation: committed cells = columns × 2^log; same-row lookup uses need
+distinct fraction columns, so 2/row doubles fraction/base/preproc columns while
+halving rows ⇒ cells invariant, columns 132→~252/instance, proof WORSE (~+50 KB
+over 3 instances). No prove win beyond a small `n·log n` edge. Not pursued.
