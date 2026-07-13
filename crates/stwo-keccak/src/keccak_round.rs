@@ -887,3 +887,285 @@ fn link_fraction<R: Relation<PackedM31, PackedQM31>>(
 
 pub const N_COLUMNS_PUB: usize = N_COLUMNS;
 pub const N_INTERACTION_COLUMNS_PUB: usize = N_INTERACTION_COLUMNS;
+
+// ─────────────────────── W3a: GKR-offload oracle de-risk ────────────────────
+//
+// De-risk spike (the toy_horner pattern for keccak_round): does the batched
+// LogUp denominator/numerator multiset that `keccak_round` emits today
+// reconstruct, at the GKR OOD point, as a selector-weighted `Relation::combine`
+// of the *base-trace* column values? If yes, the `MleCoeffColumnOracle` for the
+// GKR tie-back is a low-degree combination of committed columns and the offload
+// is arithmetically sound. See `tasks/quantum-safe-branch-plan.md` §Q5.
+//
+// Layout: the whole per-row fraction multiset (all four families, in the exact
+// `generate_interaction_trace` emission order) is ONE flattened `LogUpGeneric`
+// GKR instance with the lookup-slot in the HIGH index bits and the trace row in
+// the LOW bits. The OOD point splits as `r = (r_slot ‖ r_row)`; the denominator
+// MLE decomposes as `Σ_slot eq(slot, r_slot) · den_slot_mle(r_row)`, and because
+// every `Relation::combine` is an AFFINE form `z − Σ αⱼ·tupleⱼ` (row-independent
+// coeffs), multilinear eval commutes with it:
+//   `den_slot_mle(r_row) == combine([tupleⱼ_mle(r_row)])`.
+// So the oracle only needs each base column's MLE at `r_row` — exactly what a
+// single W2 `MleEval` tie-back over the row-domain proves. No slot×row domain
+// blow-up, dissolving the obstruction §Q5 feared.
+#[cfg(test)]
+mod gkr_offload_spike {
+    use super::*;
+    use stwo::core::channel::Blake2sChannel;
+    use stwo::prover::lookups::gkr_prover::{prove_batch, Layer};
+    use stwo::prover::lookups::mle::Mle;
+    use stwo_constraint_framework::Relation;
+
+    use crate::relations::KECCAK_ROUND_ARITY;
+
+    type SF = SecureField;
+
+    /// Multilinear eval with `point[0]` the most-significant index bit — matches
+    /// stwo's `Mle::eval_at_point` / GKR OOD convention.
+    fn ml_eval(evals: &[SF], point: &[SF]) -> SF {
+        match point {
+            [] => evals[0],
+            [p0, rest @ ..] => {
+                let (lhs, rhs) = evals.split_at(evals.len() / 2);
+                let le = ml_eval(lhs, rest);
+                let re = ml_eval(rhs, rest);
+                *p0 * (re - le) + le
+            }
+        }
+    }
+
+    /// `eq(bits(index) MSB-first over `nbits`, point)`.
+    fn eq_index(index: usize, nbits: usize, point: &[SF]) -> SF {
+        let mut acc = SF::one();
+        for (i, pt) in point.iter().enumerate().take(nbits) {
+            let bit = (index >> (nbits - 1 - i)) & 1;
+            acc *= if bit == 1 { *pt } else { SF::one() - *pt };
+        }
+        acc
+    }
+
+    /// Which relation a slot's denominator combines through.
+    #[derive(Clone)]
+    enum Kind {
+        Kr,
+        Xor3,
+        Andnot,
+        Split(usize), // shift-1 index into rel.split
+    }
+
+    fn combine_slot(rel: &KeccakRelations, kind: &Kind, vals: &[SF]) -> SF {
+        match kind {
+            Kind::Kr => rel.keccak_round.combine(vals),
+            Kind::Xor3 => rel.xor3.combine(vals),
+            Kind::Andnot => rel.andnot.combine(vals),
+            Kind::Split(r) => rel.split[*r].combine(vals),
+        }
+    }
+
+    /// One lookup slot: per-row tuple-entry vectors + per-row numerator vector.
+    struct Slot {
+        kind: Kind,
+        tuples: Vec<Vec<SF>>,
+        num: Vec<SF>,
+    }
+
+    /// Extract tuple-entry `e` of a `[PackedM31; K]` lookup array as a per-row
+    /// `SecureField` vector (row = vec_row * N_LANES + lane).
+    fn entry_rows<const K: usize>(data: &[[PackedM31; K]], e: usize) -> Vec<SF> {
+        let mut out = Vec::with_capacity(data.len() * N_LANES);
+        for chunk in data {
+            for m in chunk[e].to_array() {
+                out.push(SF::from(m));
+            }
+        }
+        out
+    }
+
+    fn packed_rows(data: &[PackedM31]) -> Vec<SF> {
+        let mut out = Vec::with_capacity(data.len() * N_LANES);
+        for p in data {
+            for m in p.to_array() {
+                out.push(SF::from(m));
+            }
+        }
+        out
+    }
+
+    /// Build every slot in the exact `generate_interaction_trace` emission order.
+    fn build_slots(ld: &LookupData, enabler: &Enabler, n_vec_rows: usize) -> Vec<Slot> {
+        let enab: Vec<SF> = {
+            let packed: Vec<PackedM31> = (0..n_vec_rows).map(|vr| enabler.packed_at(vr)).collect();
+            packed_rows(&packed)
+        };
+        let neg_enab: Vec<SF> = enab.iter().map(|e| -*e).collect();
+        let pos_enab = enab.clone();
+        let ones = vec![SF::one(); enab.len()];
+
+        let mut slots: Vec<Slot> = Vec::with_capacity(N_TOTAL_LOOKUPS);
+
+        let xor3_slot = |j: usize| Slot {
+            kind: Kind::Xor3,
+            tuples: vec![entry_rows(&ld.xor3[j], 0), entry_rows(&ld.xor3[j], 1)],
+            num: ones.clone(),
+        };
+        let split_slot = |j: usize| {
+            let shift = ld.split[j][0][0].to_array()[0].0 as usize;
+            Slot {
+                kind: Kind::Split(shift - 1),
+                tuples: vec![
+                    entry_rows(&ld.split[j], 1),
+                    entry_rows(&ld.split[j], 2),
+                    entry_rows(&ld.split[j], 3),
+                ],
+                num: ones.clone(),
+            }
+        };
+
+        // kr[0] (negate=true → -enabler, matching generate_interaction_trace)
+        slots.push(Slot {
+            kind: Kind::Kr,
+            tuples: (0..KECCAK_ROUND_ARITY)
+                .map(|e| entry_rows(&ld.keccak_round[0], e))
+                .collect(),
+            num: neg_enab.clone(),
+        });
+        // theta C-parity xor3 0..80
+        for j in 0..N_XOR3_C {
+            slots.push(xor3_slot(j));
+        }
+        // C_rot split 0..40
+        for j in 0..N_SPLIT_C_ROT {
+            slots.push(split_slot(j));
+        }
+        // theta-apply xor3 80..280
+        for j in N_XOR3_C..N_XOR3_C + N_XOR3_THETA_APPLY {
+            slots.push(xor3_slot(j));
+        }
+        // rho split 40..216
+        for j in N_SPLIT_C_ROT..N_SPLIT_LOOKUPS {
+            slots.push(split_slot(j));
+        }
+        // chi: andnot then closing xor3, interleaved per byte
+        let chi_close_lo = N_XOR3_C + N_XOR3_THETA_APPLY;
+        for j in 0..N_ANDNOT_LOOKUPS {
+            slots.push(Slot {
+                kind: Kind::Andnot,
+                tuples: vec![entry_rows(&ld.andnot[j], 0), entry_rows(&ld.andnot[j], 1)],
+                num: ones.clone(),
+            });
+            slots.push(xor3_slot(chi_close_lo + j));
+        }
+        // kr[1] (negate=false → +enabler)
+        slots.push(Slot {
+            kind: Kind::Kr,
+            tuples: (0..KECCAK_ROUND_ARITY)
+                .map(|e| entry_rows(&ld.keccak_round[1], e))
+                .collect(),
+            num: pos_enab,
+        });
+
+        assert_eq!(slots.len(), N_TOTAL_LOOKUPS);
+        slots
+    }
+
+    #[test]
+    fn denominator_oracle_reconstructs_at_gkr_ood_point() {
+        // 1. Real keccak_round witness (all-zero spread state, round 0 — a valid
+        //    input; the multiset sum is well-defined for any input and GKR proves
+        //    that same sum, which is all the tie-back must preserve).
+        let invocations = 3usize;
+        let log_size = std::cmp::max(invocations.next_power_of_two().ilog2(), LOG_N_LANES);
+        let n_vec_rows = 1usize << (log_size - LOG_N_LANES);
+        let n_rows = 1usize << log_size;
+        let input = vec![[PackedM31::zero(); N_BYTES_IN_STATE + 1]; n_vec_rows];
+        let (claim, _trace, icd) = Claim::generate_trace(input, invocations);
+        assert_eq!(claim.log_size, log_size);
+
+        let mut ch = Blake2sChannel::default();
+        let rel = KeccakRelations::draw(&mut ch);
+
+        // Ground-truth columnar claimed sum (the value the offload must preserve).
+        let (columnar, _itr) = generate_interaction_trace(&rel, &icd);
+        let columnar_sum = columnar.claimed_sum;
+
+        // 2. Flatten the multiset into one LogUpGeneric instance (slot high bits).
+        let enabler = Enabler::new(icd.non_padded_length);
+        let slots = build_slots(&icd.lookup_data, &enabler, n_vec_rows);
+
+        let n_slots_pad = N_TOTAL_LOOKUPS.next_power_of_two();
+        let log_slots = n_slots_pad.ilog2() as usize;
+        let v = log_slots + log_size as usize;
+        let size = 1usize << v;
+
+        let mut den_flat = vec![SF::one(); size]; // padding fractions: 0 / 1
+        let mut num_flat = vec![SF::zero(); size];
+        for (s, slot) in slots.iter().enumerate() {
+            for row in 0..n_rows {
+                let tvals: Vec<SF> = slot.tuples.iter().map(|t| t[row]).collect();
+                let idx = s * n_rows + row;
+                den_flat[idx] = combine_slot(&rel, &slot.kind, &tvals);
+                num_flat[idx] = slot.num[row];
+            }
+        }
+
+        let num_mle = Mle::<SimdBackend, SF>::new(num_flat.iter().copied().collect());
+        let den_mle = Mle::<SimdBackend, SF>::new(den_flat.iter().copied().collect());
+        let layer = Layer::LogUpGeneric {
+            numerators: num_mle,
+            denominators: den_mle,
+        };
+
+        let mut gkr_ch = Blake2sChannel::default();
+        let (proof, artifact) = prove_batch(&mut gkr_ch, vec![layer]);
+
+        // 3. GKR-proven sum == columnar claimed sum (step 5).
+        let out = &proof.output_claims_by_instance[0];
+        let gkr_sum = out[0] / out[1];
+        assert_eq!(gkr_sum, columnar_sum, "GKR sum != columnar claimed sum");
+
+        // 4. Oracle reconstruction at the GKR OOD point (step 3).
+        let ood = &artifact.ood_point;
+        assert_eq!(ood.len(), v);
+        let r_slot = &ood[..log_slots];
+        let r_row = &ood[log_slots..];
+        let claims = &artifact.claims_to_verify_by_instance[0]; // [num, den]
+        let (num_claim, den_claim) = (claims[0], claims[1]);
+
+        let reconstruct = |slots: &[Slot]| -> (SF, SF) {
+            let mut num_recon = SF::zero();
+            let mut den_recon = SF::zero();
+            for s in 0..n_slots_pad {
+                let w = eq_index(s, log_slots, r_slot);
+                if s < slots.len() {
+                    let slot = &slots[s];
+                    let tuple_evals: Vec<SF> =
+                        slot.tuples.iter().map(|t| ml_eval(t, r_row)).collect();
+                    den_recon += w * combine_slot(&rel, &slot.kind, &tuple_evals);
+                    num_recon += w * ml_eval(&slot.num, r_row);
+                } else {
+                    den_recon += w * SF::one(); // padding den = 1, num = 0
+                }
+            }
+            (num_recon, den_recon)
+        };
+
+        let (num_recon, den_recon) = reconstruct(&slots);
+        assert_eq!(
+            den_recon, den_claim,
+            "denominator oracle reconstruction != GKR claim"
+        );
+        assert_eq!(
+            num_recon, num_claim,
+            "numerator oracle reconstruction != GKR claim"
+        );
+
+        // 5. Tamper negative (step 6): flip one base cell → reconstruction rejects.
+        let mut tampered = build_slots(&icd.lookup_data, &enabler, n_vec_rows);
+        tampered[1].tuples[1][0] += SF::one();
+        let (_, den_tampered) = reconstruct(&tampered);
+        assert_ne!(
+            den_tampered, den_claim,
+            "tampered base cell must break the reconstruction"
+        );
+    }
+}

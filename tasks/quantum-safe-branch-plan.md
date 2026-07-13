@@ -220,7 +220,7 @@ No slice landed a measured improvement; the three numbers are unchanged from the
 baseline above (single FRI frontier — no code change). The only lever that
 reaches <1 MB is the Q4a `keccak_round` GKR offload, scoped as a dedicated WO.
 
-## Q5 — keccak_round GKR offload: transport + component LANDED, offload STOPPED
+## Q5 — keccak_round GKR offload: W1 transport + W2 component + W3a oracle de-risk LANDED; W3b flip next
 
 WO goal (Q4a): offload `keccak_round`'s ~908 log-11 interaction columns into a
 LogUp-GKR proof to clear the −83 KB gap to <1 MB. This session delivered the two
@@ -307,3 +307,79 @@ checkpoints are exactly the transport + productionized-component prerequisites
 §8.2 flagged; the residual WO is the round-denominator oracle + AIR flip +
 claims/shape accounting + adversarial negatives + measurement, still a dedicated
 multi-checkpoint soundness-critical build.
+
+### W3a — oracle de-risk spike LANDED GREEN (obstruction DISSOLVED)
+
+The `MleCoeffColumnOracle` "hard, unbuilt piece" is now **de-risked with a
+passing spike**, and the feared arithmetic obstruction (STOP condition
+"the batched denominator is not expressible as a low-degree combination of
+committed columns at a point") **does not exist**.
+
+**Test:** `keccak_round::gkr_offload_spike::denominator_oracle_reconstructs_at_gkr_ood_point`
+(`crates/stwo-keccak/src/keccak_round.rs`, `#[cfg(test)]`). For a real
+`keccak_round` witness it (1) rebuilds the exact fraction multiset the
+component emits today, in `generate_interaction_trace` order (all four
+families: kr-link ±enabler / xor3 / per-shift split / andnot), (2) flattens it
+into ONE `Layer::LogUpGeneric` GKR instance and proves it with stwo's
+`prove_batch`, (3) reconstructs the numerator AND denominator MLE at the GKR
+OOD point purely from base-trace column values via `Relation::combine`, (4)
+asserts GKR sum == columnar `claimed_sum`, reconstruction == GKR claims, and a
+tampered base cell breaks the reconstruction. Full `stwo-keccak` suite green.
+
+**The dissolving insight — why there is no obstruction.** Lay the flattened
+multiset out with the **lookup-slot in the HIGH index bits and the trace row in
+the LOW bits**. The OOD point splits `r = (r_slot ‖ r_row)` and the denominator
+MLE decomposes canonically:
+
+```
+den_mle(r) = Σ_slot eq(slot, r_slot) · den_slot_mle(r_row)
+```
+
+Every `Relation::combine` is an **affine** form `z − Σⱼ αⱼ·tupleⱼ` with
+**row-independent** coefficients (keys are degree-1 sums of certified limbs,
+`lo = rot − hi·4^r`, `u = b1+2·b2` — all fixed-coeff affine maps of base
+columns). Multilinear eval is linear and `mle(all-ones) = 1`, so it **commutes**
+with the affine combine:
+
+```
+den_slot_mle(r_row) == combine([ tupleⱼ_mle(r_row) ]ⱼ)
+```
+
+Therefore the oracle only ever needs **each base column's MLE at the single
+row-point `r_row`** — the slot-selection collapses into verifier-computable
+`eq(slot, r_slot)` weights. The MleEval tie-back stays on the **row-domain**
+(`log_size` vars); there is **no `slot × row` domain blow-up** and no
+domain-mismatch between the flattened fraction column and the base columns.
+Numerators are the same shape: `1` for xor3/andnot/split, `±enabler_mle(r_row)`
+for the two kr-links (enabler = base column 0), `0` for slot-padding.
+
+**Sign gotcha (found + fixed):** kr[0] uses `link_fraction(negate=true)`
+(−enabler), kr[1] uses `negate=false` (+enabler) — not the intuitive order.
+
+**Concrete W3b recipe (now mechanical, design proven):**
+1. **Real oracle** = `MleCoeffColumnOracle` whose `evaluate_at_point(circle_pt,
+   mask)` reconstructs the δ-folded (numerator+denominator) coeff-column value
+   as `Σ_slot eq(slot,r_slot)·combine(base-col mask entries)` over the row
+   circle-domain — i.e. run `evaluate_round`'s tuple-building logic through a
+   `PointEvaluator` reading base-column masks, weighted by the `eq(slot,r_slot)`
+   constants precomputed from the GKR artifact. One `MleEval` component over
+   `log_size` vars ties it to the base-trace commitment (W2). Fold both GKR
+   claims into one MleEval via a random δ: check `δ·num_claim + den_claim ==
+   verifier_const(r_slot) + mle_c_claim`.
+2. **AIR flip:** `evaluate_round` drops `finalize_logup_batched`; its
+   `N_INTERACTION_COLUMNS` (≈908 log-11 cols) vanish from tree-2.
+3. **Transport:** GKR runs post-tree-1 (relations already drawn), proof travels
+   via the W1 `prove_with_post_interaction` payload; verifier feeds it to
+   `partially_verify_batch`, gets `(ood_point, claims)`, drives the MleEval
+   verifier. `r_row = ood_point[log_slots..]` is the shared MleEval point.
+4. **Claims/shape:** move the round's claimed sum from a columnar slot to the
+   GKR-backed slot in the service claimed-sums vector; update
+   `hosted_claimed_sums_len` + mdoc shape gates fail-closed.
+5. **Negatives:** tamper-round-link-tuple → reject; corrupted GKR payload →
+   reject (W1 pattern); claim-swap → reject; `composition_log_split = 2`
+   regression on the tie-back; existing service negatives stay green.
+
+**Status:** W3a green + committed. W3b (invasive AIR surgery + service wiring)
+NOT started — it is now engineering magnitude with the risk retired, but a
+half-applied flip leaves the service broken, so it is a clean next checkpoint
+rather than something to force in the same pass.
