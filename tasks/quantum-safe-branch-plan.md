@@ -220,7 +220,7 @@ No slice landed a measured improvement; the three numbers are unchanged from the
 baseline above (single FRI frontier — no code change). The only lever that
 reaches <1 MB is the Q4a `keccak_round` GKR offload, scoped as a dedicated WO.
 
-## Q5 — keccak_round GKR offload: W1 transport + W2 component + W3a oracle de-risk LANDED; W3b flip next
+## Q5 — keccak_round GKR offload: COMPLETE (W1+W2+W3a+W3b+W3c) — proof < 1 MB MET
 
 WO goal (Q4a): offload `keccak_round`'s ~908 log-11 interaction columns into a
 LogUp-GKR proof to clear the −83 KB gap to <1 MB. This session delivered the two
@@ -379,7 +379,101 @@ for the two kr-links (enabler = base column 0), `0` for slot-padding.
    reject (W1 pattern); claim-swap → reject; `composition_log_split = 2`
    regression on the tie-back; existing service negatives stay green.
 
-**Status:** W3a green + committed. W3b (invasive AIR surgery + service wiring)
-NOT started — it is now engineering magnitude with the risk retired, but a
-half-applied flip leaves the service broken, so it is a clean next checkpoint
-rather than something to force in the same pass.
+**Status:** superseded — W3b landed, see below.
+
+### W3b — the flip LANDED (committed, all gates green)
+
+The service's `keccak_round` emits **no interaction columns** (the ~900
+batch-4 LogUp columns are gone from tree-2). In their place:
+
+- `stwo-keccak/src/round_gkr.rs`: the fraction multiset (built once by
+  `keccak_round::build_fracs`, the same source as the old columnar trace) is
+  flattened slot-high/row-low into ONE `Layer::LogUpGeneric` instance and
+  proven with `prove_batch` on the shared channel post tree-2. The round's
+  claimed sum is computed directly from the fractions (batch-inverse) and
+  keeps its old slot in the global LogUp balance.
+- Tie-back: a post-GKR channel-drawn δ folds num+den into one coeff column
+  `c(row) = Σ_slot eq(slot,r_slot)·(δ·num_slot(row)+den_slot(row))`; a single
+  `MleEvalProverComponent`/`MleEvalVerifierComponent` (8 committed tree-3
+  columns at round log-size) proves `mle_c(r_row) = δ·num_claim + den_claim −
+  pad(r_slot)`. The `RoundCoeffOracle` reconstructs `c` at the OODS point
+  purely from the round's committed base-column masks by replaying
+  `collect_round_lookups` through a `PointEvaluator` (the W3a affine-commute
+  design, verbatim).
+- Verifier (fail-closed): payload decode, 1-instance/2-claims/variable-count
+  shape gates, `num_out == claimed_sum·den_out` output binding, sumcheck
+  replay via `partially_verify_batch`, δ redraw, tie-back component.
+- Transport: the W1 payload on both paths; `MlDsaProof` and
+  `MdocCircuitProof` carry `post_interaction_payloads` with fail-closed shape
+  gates (standalone: exactly `[blob, empty]`; mdoc: exactly one non-empty
+  payload iff the service is present).
+- Legacy columnar path retained ONLY for the standalone `stark.rs` SHAKE AIR
+  (`Eval::gkr_offload = false`); the service always offloads.
+
+**Fork fixes required (dev-copy `~/stwo`, 3 commits):** owned
+`MleCoeffColumnOracle` (+ blanket `&T` impl) so the oracle and component live
+in one struct; `MAX_N_INTERACTIONS` 4→5 (tree-3-hosted MleEval spans 4
+committed trees + its aux tree); **lifted-protocol at-point eval** — the
+MleEval components now map the OODS point by
+`repeated_double(max_log_degree_bound − log_size)` before all analytic evals
+(columns are SAMPLED at that mapped point; identity when max bound == log+1,
+which is why same-size unit tests never caught it); **SubDomain evaluation
+mode** in the domain quotient — with `log_blowup > composition_log_split` the
+committed evals live on the larger blowup domain and the quotient runs on
+`committed_domain.split(log_expansion).0` with aux columns evaluated on the
+full committed-size domain (blowup-4 production config; blowup-2 tests had
+masked this by coincidence of `blowup == split`). Prover-side
+oracle-vs-poly assert is env-skippable (`STWO_MLE_EVAL_SKIP_ORACLE_CONSISTENCY`)
+so adversarial tests can produce desynced proofs the verifier must reject.
+
+**Adversarial matrix (all green, `stwo-keccak/tests/service.rs`):** corrupted
++ truncated GKR payload → reject; missing payload → reject; blob swapped
+between two same-shape proofs → reject (FS replay desync); tampered
+round-link tuple → reject (global balance); forged round claimed sum with a
+compensating slot → reject (GKR output-claim binding); **tampered committed
+base cell → reject (tie-back oracle at OODS — the offload's core soundness
+property)**; sum-preserving row-swap inside one slot → reject (eval-at-r_row
+binding); positive regression at `log_blowup 4 > composition_log_split 2`
+(SubDomain mode, non-trivial expansion). Full gates: stwo-keccak 40/40,
+stwo-mldsa 74/74 (+1 ignored), mdoc_mldsa 18/18,
+`scripts/check-quantum-only-deps.sh` clean.
+
+### W3c — measured result (release, `RAYON_NUM_THREADS=1`, min-of-3)
+
+Production config FRI `(1,4,26,2)`/pow25, `pq_perf_probe`:
+
+| metric | W3b measured | pre-flip (§8.1) | Δ | target |
+|---|---:|---:|---:|---|
+| prove  | 5,664 ms | 5,523 ms | +141 ms (+2.6%) | < 1,000 ms (open) |
+| verify | 14 ms | 15 ms | −1 ms | MET |
+| proof  | **988,402 B** (min 987,074) | 1,082,914 B | **−94,512 B** | **< 1,000,000 B MET** |
+
+Wire breakdown (bytes): queried 689,184 / sampled 164,312 / decommit 59,856 /
+FRI 54,516 / **GKR blob 16,872** (inside 20,333 non-STARK metadata) /
+commitments 168 / pow 8. The priced ≈ −120 KB net win landed at ≈ −95 KB
+(tree-3 commitment + 8 columns + blob + one extra Merkle tree of query
+openings eat the difference).
+
+Census (`AIR_CORE_SHAPE_DUMP`): keccak service (m1) interaction tree
+1,628 → **728 cols** (5.29 M → 0.33 M interaction cells; −900 cols ==
+−1.84 M cells at round log 11), + 8 post-interaction (tree-3) cols
+(16 K cells). Proof-wide: 6,200 committed cols / 12.50 M cells (census
+trees) vs 7,100 / 14.35 M pre-flip.
+
+**Buy-back FRI frontier** (proof crossed < 1 MB → both points measured):
+FRI `(1,3,36,2)`/pow20 (129-bit): prove **3,434 ms** / verify 15 ms / proof
+**1,255,082 B**. The frontier is now (5,664 ms, 0.988 MB) @ blowup-4/pow25
+vs (3,434 ms, 1.255 MB) @ blowup-3/pow20; blowup-4 stays the shipped config
+(proof-size-first rule; < 1 MB gate MET).
+
+### Campaign scoreboard (vs the 2026-07-05 quantum-branch starting point)
+
+| metric | campaign start | Q5/W3b | total |
+|---|---:|---:|---:|
+| prove (1 thread) | 72.7 s | 5.664 s | **12.8×** |
+| verify | 372.7 ms | 14 ms | **26.6×, target MET** |
+| proof | 34.4 MB | 0.988 MB | **34.8×, < 1 MB MET** |
+
+Remaining open gate: prove < 1,000 ms (blowup-3 buy-back reaches 3.43 s;
+further prove work is a separate campaign — the keccak GKR prove itself adds
+only ~0.14 s at the current shape).
