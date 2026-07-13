@@ -500,6 +500,51 @@ struct DataWindow {
     /// codeword-domain evaluation stays masked (`Z_W ≠ 0` off the window by
     /// the point-order argument; `zw_vanishes_on_window_only` pins both).
     zw_on_message: Vec<Fp>,
+    /// Per-basis window sums `basis_sums[j] = Σ_{s ∈ window} b_j(s)` for
+    /// `j < product_domain_len` (WO-F). The claim-extraction functional
+    /// [`circle_data_sum`] is `Σ_s Σ_j c_j b_j(s)`; distributing the finite-field
+    /// sum gives `Σ_j c_j · basis_sums[j]`, a single dot product instead of one
+    /// full basis re-evaluation per window point. Exact field identity, so the
+    /// result is byte-identical to the per-point evaluation. Sized to the product
+    /// domain (≥ the claim bound, so it covers every batch polynomial); longer
+    /// inputs fall back to the per-point sum.
+    basis_sums: Vec<Fp>,
+}
+
+/// `basis_sums[j] = Σ_{s ∈ domain} b_j(s)` for `j < len`, built by accumulating
+/// each window point's universal-basis vector — the transpose of summing
+/// [`evaluate_at`] over the domain, so `Σ_j c_j·basis_sums[j]` equals
+/// `Σ_s evaluate_at(c, s)` exactly.
+fn build_basis_sums(domain: &[CirclePoint], len: usize) -> Vec<Fp> {
+    let mut sums = vec![Fp::ZERO; len];
+    if len == 0 {
+        return sums;
+    }
+    let pi_count = if len <= 2 {
+        0
+    } else {
+        usize::BITS as usize - (len - 1).leading_zeros() as usize - 1
+    };
+    for &point in domain {
+        let mut pis = Vec::with_capacity(pi_count);
+        if pi_count > 0 {
+            pis.push(point.x);
+            for _ in 1..pi_count {
+                let last = *pis.last().expect("non-empty");
+                pis.push(last.square() + last.square() - Fp::ONE);
+            }
+        }
+        for (j, sum) in sums.iter_mut().enumerate() {
+            let mut basis = if j & 1 == 1 { point.y } else { Fp::ONE };
+            for (k, &pi) in pis.iter().enumerate() {
+                if (j >> (k + 1)) & 1 == 1 {
+                    basis = basis * pi;
+                }
+            }
+            *sum = *sum + basis;
+        }
+    }
+    sums
 }
 
 fn build_data_window(geom: CircleGeom) -> DataWindow {
@@ -541,9 +586,11 @@ fn build_data_window(geom: CircleGeom) -> DataWindow {
             x
         })
         .collect();
+    let basis_sums = build_basis_sums(&tables.domain, geom.product_domain_len);
     DataWindow {
         tables,
         zw_on_message,
+        basis_sums,
     }
 }
 
@@ -598,11 +645,24 @@ pub fn circle_encode_row(
 
 /// The fixed claim-extraction functional: the sum of the function's values
 /// over the data points (Q-025 §3).
+///
+/// WO-F: `Σ_s Σ_j c_j b_j(s) = Σ_j c_j (Σ_s b_j(s))` — a dot product against the
+/// precomputed [`DataWindow::basis_sums`] instead of one full basis
+/// re-evaluation per window point (byte-identical, an exact finite-field
+/// identity). Inputs longer than the precomputed table fall back to the direct
+/// per-point sum.
 pub fn circle_data_sum(geom: CircleGeom, message_prefix: &[Fp]) -> Fp {
     let window = data_window(geom);
-    window.tables.domain.iter().fold(Fp::ZERO, |acc, &point| {
-        acc + evaluate_at(message_prefix, point)
-    })
+    if message_prefix.len() <= window.basis_sums.len() {
+        message_prefix
+            .iter()
+            .zip(&window.basis_sums)
+            .fold(Fp::ZERO, |acc, (&coeff, &sum)| acc + coeff * sum)
+    } else {
+        window.tables.domain.iter().fold(Fp::ZERO, |acc, &point| {
+            acc + evaluate_at(message_prefix, point)
+        })
+    }
 }
 
 /// The unique `F_{data_slots}` interpolant through `(data point c, weights[c])`,
@@ -868,6 +928,38 @@ mod tests {
             assert!(
                 diff > floor,
                 "distance smoke: only {diff} differing positions"
+            );
+        }
+    }
+
+    /// WO-F: the `basis_sums` dot product must be byte-identical to the direct
+    /// per-window-point evaluation, and the >len fallback must agree too.
+    #[test]
+    fn data_sum_fast_path_matches_direct_evaluation() {
+        let mut state = 0x5A5Au64;
+        for geom in GEOMS {
+            let direct = |coeffs: &[Fp]| {
+                data_window(geom)
+                    .tables
+                    .domain
+                    .iter()
+                    .fold(Fp::ZERO, |acc, &point| acc + evaluate_at(coeffs, point))
+            };
+            // Fast path: lengths from 0 up to the precomputed product domain.
+            for len in [0usize, 1, 2, 3, geom.data_slots, geom.product_domain_len] {
+                let coeffs = rand_row(&mut state, len);
+                assert_eq!(
+                    circle_data_sum(geom, &coeffs),
+                    direct(&coeffs),
+                    "fast-path len {len} geom {geom:?}"
+                );
+            }
+            // Fallback path: longer than basis_sums.
+            let long = rand_row(&mut state, geom.product_domain_len + 5);
+            assert_eq!(
+                circle_data_sum(geom, &long),
+                direct(&long),
+                "fallback geom {geom:?}"
             );
         }
     }
