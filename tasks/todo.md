@@ -35,8 +35,8 @@ Baseline: `ce26b934` (S9)
 - [x] Implement the minimum sound attribute-only SHA design without changing shared
       `air-core`, `stwo-keccak`, or `stwo-mldsa` unless the design proves it necessary.
 - [x] Differential-test digests against `sha2` across production and boundary message lengths.
-- [ ] Run adversarial constraint tests, full quantum gates, and same-session A/B benchmarks.
-- [ ] Commit and push Q3.
+- [x] Run adversarial constraint tests, full quantum gates, and same-session A/B benchmarks.
+- [x] Commit and push Q3 (`cc846a70` core; measured review follow-up).
 
 ## Campaign rails
 
@@ -85,3 +85,11 @@ Baseline: `ce26b934` (S9)
 - Q3 core verification: workspace all-target check, strict all-target clippy, formatting, and all
   148 active `stwo-sha256` tests pass (19 explicitly ignored). Differential vectors include the
   85-byte nationality and 92-byte birth-date production payload lengths plus SHA padding boundaries.
+- Q3 product verification: all 37 `eu-id-prover` tests pass in 274.28 s, plus all 15 SDK/FFI tests.
+  The shape dump confirms the merged SHA is exactly 951 columns at log 9: 12 preprocessed, 519
+  trace, and 420 interaction columns.
+- Same-session release A/B against parent `4c25c72d`: baseline proving was 2,418/2,487 ms with
+  1,109,850/1,114,218-byte proofs; Q3 was 1,789/1,811 ms with 1,084,882/1,083,810-byte proofs.
+  Two-run averages improve proving by 26.6% and proof size by 27,688 bytes (2.49%); verification
+  improves from 15 ms to 14 ms. The instrumented shape run independently measured 1,733/15 ms and
+  1,084,994 bytes.

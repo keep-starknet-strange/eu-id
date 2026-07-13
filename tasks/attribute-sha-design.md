@@ -75,6 +75,12 @@ Expected SHA footprint, excluding the selector saving, is 1,439,264 cells instea
 an 8,429,568-cell (85.4%) reduction. Selector sharing removes another 34,304 log-9 cells from the
 merged consumer.
 
+The post-change shape dump matches the model exactly: 12 preprocessed + 519 trace + 420 interaction
+= 951 merged SHA columns at log 9. Compared in the same session with parent `4c25c72d`, two warm
+release probes changed from 2,418/2,487 ms and 1,109,850/1,114,218 bytes to 1,789/1,811 ms and
+1,084,882/1,083,810 bytes. The two-run averages are 26.6% faster and 27,688 bytes (2.49%) smaller;
+verification changed from 15 ms to 14 ms.
+
 ## Verification matrix
 
 - Differential digests against `sha2` at production lengths and padding boundaries.
@@ -85,4 +91,3 @@ merged consumer.
 - Standalone and shared-table proof round trips, including multi-slot composition.
 - Workspace check, strict clippy, formatting, product test suites, AIR shape dump, and repeated
   single-thread release probes.
-
