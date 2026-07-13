@@ -21,7 +21,9 @@ dependencies = [
 name = "air-core"
 version = "0.1.0"
 dependencies = [
+ "bincode",
  "num-traits",
+ "serde",
  "stwo",
  "stwo-constraint-framework",
 ]

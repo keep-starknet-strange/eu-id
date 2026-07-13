@@ -23,6 +23,7 @@
 //! Switching the system to a different (e.g. Stwo-friendly) hash is a one-line
 //! change to these aliases.
 
+pub mod gkr;
 pub mod relations;
 
 use std::collections::{HashMap, HashSet};
@@ -269,6 +270,14 @@ pub trait Air {
     fn verify_post_interaction(&mut self, _channel: &mut Ch) -> Result<(), VerificationError> {
         Ok(())
     }
+
+    /// Hand this module the opaque post-interaction payload the prover emitted
+    /// for it (a serialized GKR proof, typically). Called by the orchestrator
+    /// once, before [`Air::verify_post_interaction`], only on the
+    /// payload-carrying verify path. Modules that offload a LogUp into GKR stash
+    /// the bytes here and deserialize them in `verify_post_interaction`; modules
+    /// without a payload ignore it.
+    fn load_post_interaction_payload(&mut self, _payload: &[u8]) {}
 }
 
 /// The prover-only extension: a module that holds a witness and can write its
@@ -347,6 +356,15 @@ pub trait AirProver: Air {
     /// Optional phase 3 — append post-interaction tie-back columns.
     fn write_post_interaction(&mut self, _tb: &mut TreeBuilder<SimdBackend, Mc>) {}
 
+    /// Hand the orchestrator this module's opaque post-interaction payload — the
+    /// serialized GKR proof produced during [`AirProver::prove_post_interaction`]
+    /// — to travel beside the [`StarkProof`]. Called once, after
+    /// `prove_post_interaction`. The default (no offload) returns an empty
+    /// payload, which the orchestrator treats as "no GKR proof for this module".
+    fn take_post_interaction_payload(&mut self) -> Vec<u8> {
+        Vec::new()
+    }
+
     /// Borrow the built prover-side components, in commit order. Call only
     /// after [`Air::build_components`].
     fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>>;
@@ -354,10 +372,31 @@ pub trait AirProver: Air {
 
 /// Drive every module through the four phases against one shared channel and one
 /// shared commitment scheme, producing a single STARK proof.
+///
+/// Convenience wrapper over [`prove_with_post_interaction`] for the common case
+/// of modules that emit no GKR payload. Panics (debug) if any module actually
+/// produced one — such a module must be proven via
+/// [`prove_with_post_interaction`] so its blob reaches the verifier.
 pub fn prove(
     modules: &mut [&mut dyn AirProver],
     config: PcsConfig,
 ) -> Result<StarkProof<Hasher>, ProvingError> {
+    let (proof, payloads) = prove_with_post_interaction(modules, config)?;
+    debug_assert!(
+        payloads.iter().all(Vec::is_empty),
+        "a module emitted a GKR post-interaction payload; use prove_with_post_interaction"
+    );
+    Ok(proof)
+}
+
+/// [`prove`], additionally returning each module's opaque post-interaction
+/// payload (a serialized GKR proof, or empty). The payloads are indexed by
+/// module position and must be handed back — in the same order — to
+/// [`verify_with_expected_preprocessed_root_and_payloads`].
+pub fn prove_with_post_interaction(
+    modules: &mut [&mut dyn AirProver],
+    config: PcsConfig,
+) -> Result<(StarkProof<Hasher>, Vec<Vec<u8>>), ProvingError> {
     // Size the twiddles to the largest constraint-evaluation domain any module
     // needs, plus the FRI blow-up — unless the config pins an explicit lifting
     // size. With the default (degree-2) bound this is `max_log_size + 1 +
@@ -472,6 +511,13 @@ pub fn prove(
     for m in modules.iter_mut() {
         m.prove_post_interaction(channel);
     }
+    // Collect the opaque per-module GKR payloads now that they have been
+    // produced and mixed into the channel. Order matches module order, so the
+    // verifier can redistribute them positionally.
+    let post_interaction_payloads: Vec<Vec<u8>> = modules
+        .iter_mut()
+        .map(|m| m.take_post_interaction_payload())
+        .collect();
     if modules
         .iter()
         .any(|m| !m.post_interaction_log_sizes().is_empty())
@@ -499,7 +545,7 @@ pub fn prove(
     if timing {
         eprintln!("air-core prove TOTAL: {:?}", t_start.elapsed());
     }
-    result
+    result.map(|proof| (proof, post_interaction_payloads))
 }
 
 /// Errors from [`verify_with_expected_preprocessed_root`].
@@ -687,6 +733,36 @@ pub fn verify_with_expected_preprocessed_root(
     proof: &StarkProof<Hasher>,
     expected_preprocessed_root: Option<CommitmentRoot>,
 ) -> Result<(), VerifyError> {
+    verify_with_expected_preprocessed_root_and_payloads(
+        modules,
+        proof,
+        expected_preprocessed_root,
+        &[],
+    )
+}
+
+/// [`verify_with_expected_preprocessed_root`], additionally threading the
+/// per-module post-interaction payloads produced by
+/// [`prove_with_post_interaction`]. Each non-empty payload is handed to its
+/// module (positional, same order as prove) via
+/// [`Air::load_post_interaction_payload`] before the module's
+/// [`Air::verify_post_interaction`] runs — that is where a GKR-offloading module
+/// replays its proof against the shared channel.
+///
+/// `post_interaction_payloads` is either empty (no module offloads anything) or
+/// exactly one entry per module. Any other length is rejected fail-closed.
+pub fn verify_with_expected_preprocessed_root_and_payloads(
+    modules: &mut [&mut dyn Air],
+    proof: &StarkProof<Hasher>,
+    expected_preprocessed_root: Option<CommitmentRoot>,
+    post_interaction_payloads: &[Vec<u8>],
+) -> Result<(), VerifyError> {
+    if !post_interaction_payloads.is_empty() && post_interaction_payloads.len() != modules.len() {
+        return Err(VerificationError::InvalidStructure(
+            "post-interaction payload count does not match module count".into(),
+        )
+        .into());
+    }
     if let Some(expected) = expected_preprocessed_root {
         let got = proof.commitments[0];
         if got != expected {
@@ -740,6 +816,13 @@ pub fn verify_with_expected_preprocessed_root(
         .collect();
     commitment_scheme.commit(proof.commitments[2], &interaction_sizes, channel);
 
+    // Hand each module its opaque payload (if any) before it replays its GKR
+    // proof against the shared channel in `verify_post_interaction`.
+    if !post_interaction_payloads.is_empty() {
+        for (m, payload) in modules.iter_mut().zip(post_interaction_payloads) {
+            m.load_post_interaction_payload(payload);
+        }
+    }
     for m in modules.iter_mut() {
         m.verify_post_interaction(channel)?;
     }
@@ -1156,5 +1239,275 @@ mod tests {
             }
             other => panic!("expected PreprocessedRootMismatch, got {other:?}"),
         }
+    }
+
+    // ------------------------------------------------------------------
+    // W1: end-to-end GKR transport through prove/verify with a toy module.
+    // ------------------------------------------------------------------
+
+    use num_traits::One;
+    use stwo::core::fields::qm31::SecureField;
+    use stwo::prover::backend::CpuBackend;
+    use stwo::prover::lookups::gkr_prover::{prove_batch, Layer};
+    use stwo::prover::lookups::gkr_verifier::{partially_verify_batch, Gate};
+    use stwo::prover::lookups::mle::Mle;
+
+    use crate::gkr::{decode_gkr_batch_proof, encode_gkr_batch_proof};
+
+    fn grand_product(values: &[SecureField]) -> SecureField {
+        values
+            .iter()
+            .copied()
+            .fold(SecureField::one(), |acc, v| acc * v)
+    }
+
+    /// Toy module that carries a trivial one-column STARK (so `air_core::prove`
+    /// has real components to open) and, on the side, a GKR grand-product proof
+    /// over a private input layer whose product equals a public `claim`.
+    ///
+    /// This is the W1 plumbing fixture: it exercises the opaque payload
+    /// transport and the post-tree-2 Fiat-Shamir binding, without the MLE-eval
+    /// tie-back (W2/W3) — so the verifier binds the GKR *output* claim to the
+    /// public value directly and trusts the input-layer eval claims.
+    struct GkrToyModule {
+        id: PreProcessedColumnId,
+        log_size: u32,
+        relation: Option<TableRelation>,
+        component: Option<FrameworkComponent<TableEval>>,
+        /// Prover-only witness: the GKR input layer.
+        values: Vec<SecureField>,
+        /// Public grand-product claim, mixed into the transcript by both sides.
+        claim: SecureField,
+        /// Prover: filled in `prove_post_interaction`. Verifier: loaded via
+        /// `load_post_interaction_payload`.
+        gkr_blob: Vec<u8>,
+    }
+
+    impl GkrToyModule {
+        fn prover(values: Vec<SecureField>) -> Self {
+            let claim = grand_product(&values);
+            Self::with_claim(values, claim)
+        }
+
+        /// A prover that announces a `claim` that need not match its values —
+        /// used to drive the wrong-claim negative.
+        fn with_claim(values: Vec<SecureField>, claim: SecureField) -> Self {
+            Self {
+                id: PreProcessedColumnId {
+                    id: "gkr_toy".to_string(),
+                },
+                log_size: 4,
+                relation: None,
+                component: None,
+                values,
+                claim,
+                gkr_blob: Vec::new(),
+            }
+        }
+
+        fn verifier(claim: SecureField) -> Self {
+            Self::with_claim(Vec::new(), claim)
+        }
+
+        fn column(&self) -> PreprocessedColumnEval {
+            CircleEvaluation::new(
+                CanonicCoset::new(self.log_size).circle_domain(),
+                BaseColumn::from_iter(
+                    (0..1u32 << self.log_size).map(M31::from_u32_unchecked),
+                ),
+            )
+        }
+    }
+
+    impl Air for GkrToyModule {
+        fn mix_public(&self, channel: &mut Ch) {
+            channel.mix_felts(&[self.claim]);
+        }
+
+        fn draw_relations(&mut self, channel: &mut Ch) {
+            self.relation = Some(TableRelation::draw(channel));
+        }
+
+        fn layout(&self) -> TreeLayout {
+            TreeLayout {
+                preprocessed: vec![self.log_size],
+                trace: vec![self.log_size],
+                interaction: vec![self.log_size; 4],
+            }
+        }
+
+        fn claimed_sums(&self) -> Vec<QM31> {
+            Vec::new()
+        }
+
+        fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
+            vec![self.id.clone()]
+        }
+
+        fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
+            self.component = Some(FrameworkComponent::new(
+                allocator,
+                TableEval {
+                    log_size: self.log_size,
+                    id: self.id.clone(),
+                    relation: self.relation.clone().expect("relation is drawn"),
+                },
+                QM31::zero(),
+            ));
+        }
+
+        fn components(&self) -> Vec<&dyn Component> {
+            vec![self.component.as_ref().expect("component is built")]
+        }
+
+        fn load_post_interaction_payload(&mut self, payload: &[u8]) {
+            self.gkr_blob = payload.to_vec();
+        }
+
+        fn verify_post_interaction(&mut self, channel: &mut Ch) -> Result<(), VerificationError> {
+            let proof = decode_gkr_batch_proof(&self.gkr_blob).map_err(|e| {
+                VerificationError::InvalidStructure(format!("GKR blob decode failed: {e}"))
+            })?;
+            // Bind the output claim to the public value BEFORE replaying, so a
+            // proof of a different product is rejected even if internally valid.
+            let output = proof
+                .output_claims_by_instance
+                .first()
+                .and_then(|c| c.first())
+                .copied()
+                .ok_or_else(|| {
+                    VerificationError::InvalidStructure("GKR proof has no output claim".into())
+                })?;
+            if output != self.claim {
+                return Err(VerificationError::InvalidStructure(
+                    "GKR output claim does not match public claim".into(),
+                ));
+            }
+            // Replay against the shared channel: this is the Fiat-Shamir binding
+            // to trees 1/2 and the drawn relations. A tampered blob desyncs here.
+            partially_verify_batch(vec![Gate::GrandProduct], &proof, channel).map_err(|e| {
+                VerificationError::InvalidStructure(format!("GKR verify failed: {e}"))
+            })?;
+            Ok(())
+        }
+    }
+
+    impl AirProver for GkrToyModule {
+        fn max_log_size(&self) -> u32 {
+            self.log_size
+        }
+
+        fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, Mc>) {
+            tb.extend_evals(vec![self.column()]);
+        }
+
+        fn preprocessed_column_fingerprints(&mut self) -> Vec<PreprocessedColumnFingerprint> {
+            fingerprint_preprocessed_columns(
+                "gkr_toy",
+                std::slice::from_ref(&self.id),
+                &[self.column()],
+            )
+        }
+
+        fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, Mc>) {
+            tb.extend_evals(vec![self.column()]);
+        }
+
+        fn write_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, Mc>) {
+            let relation = self.relation.clone().expect("relation is drawn");
+            let column = self.column();
+            let mut logup = LogupTraceGenerator::new(self.log_size);
+            logup.col_from_fn(|vec_row| {
+                (PackedQM31::zero(), relation.combine(&[column.data[vec_row]]))
+            });
+            let (trace, claimed_sum) = logup.finalize_last();
+            assert_eq!(claimed_sum, QM31::zero());
+            tb.extend_evals(trace);
+        }
+
+        fn prove_post_interaction(&mut self, channel: &mut Ch) {
+            let layer = Layer::GrandProduct(Mle::<CpuBackend, SecureField>::new(self.values.clone()));
+            let (proof, _artifact) = prove_batch(channel, vec![layer]);
+            self.gkr_blob = encode_gkr_batch_proof(&proof);
+        }
+
+        fn take_post_interaction_payload(&mut self) -> Vec<u8> {
+            std::mem::take(&mut self.gkr_blob)
+        }
+
+        fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
+            vec![self.component.as_ref().expect("component is built")]
+        }
+    }
+
+    #[test]
+    fn gkr_transport_round_trips_and_verifies() {
+        let values: Vec<SecureField> = (1u32..=16).map(SecureField::from).collect();
+        let mut prover = GkrToyModule::prover(values.clone());
+        let claim = prover.claim;
+
+        let (proof, payloads) =
+            prove_with_post_interaction(&mut [&mut prover], PcsConfig::default())
+                .expect("toy GKR proves");
+        assert_eq!(payloads.len(), 1);
+        assert!(!payloads[0].is_empty(), "GKR blob must travel in the payload");
+
+        let mut verifier = GkrToyModule::verifier(claim);
+        verify_with_expected_preprocessed_root_and_payloads(
+            &mut [&mut verifier],
+            &proof,
+            None,
+            &payloads,
+        )
+        .expect("toy GKR verifies against matching payload");
+    }
+
+    #[test]
+    fn gkr_transport_rejects_corrupted_blob() {
+        let values: Vec<SecureField> = (1u32..=16).map(SecureField::from).collect();
+        let mut prover = GkrToyModule::prover(values);
+        let claim = prover.claim;
+
+        let (proof, mut payloads) =
+            prove_with_post_interaction(&mut [&mut prover], PcsConfig::default())
+                .expect("toy GKR proves");
+        // Flip a byte deep inside the sumcheck data (past the length prefixes).
+        let mid = payloads[0].len() / 2;
+        payloads[0][mid] ^= 0xff;
+
+        let mut verifier = GkrToyModule::verifier(claim);
+        let result = verify_with_expected_preprocessed_root_and_payloads(
+            &mut [&mut verifier],
+            &proof,
+            None,
+            &payloads,
+        );
+        assert!(result.is_err(), "corrupted GKR blob must be rejected");
+    }
+
+    #[test]
+    fn gkr_transport_rejects_wrong_claim() {
+        // Both sides agree on the public claim `wrong_claim` (so the transcript
+        // stays in sync), but it does not equal the true grand product the GKR
+        // proof attests to. Only the output-claim binding in
+        // `verify_post_interaction` catches the mismatch — isolating it from
+        // any transcript divergence.
+        let values: Vec<SecureField> = (1u32..=16).map(SecureField::from).collect();
+        let true_product = grand_product(&values);
+        let wrong_claim = true_product + SecureField::one();
+        let mut prover = GkrToyModule::with_claim(values, wrong_claim);
+
+        let (proof, payloads) =
+            prove_with_post_interaction(&mut [&mut prover], PcsConfig::default())
+                .expect("toy GKR proves");
+
+        let mut verifier = GkrToyModule::verifier(wrong_claim);
+        let result = verify_with_expected_preprocessed_root_and_payloads(
+            &mut [&mut verifier],
+            &proof,
+            None,
+            &payloads,
+        );
+        assert!(result.is_err(), "GKR proof of a different product must be rejected");
     }
 }
