@@ -94,6 +94,14 @@ fn cached_twiddles(twiddle_log_size: u32) -> &'static TwiddleTree<SimdBackend> {
     twiddles
 }
 
+/// Process-cached FFT twiddles covering circle domains up to `2^log_size`.
+/// Exposed for modules that build post-interaction (tree-3) components which
+/// interpolate/evaluate polynomials outside the orchestrator's own tree, e.g.
+/// the keccak_round GKR tie-back's `MleEvalProverComponent`.
+pub fn twiddles(log_size: u32) -> &'static TwiddleTree<SimdBackend> {
+    cached_twiddles(log_size)
+}
+
 fn unique_preprocessed_ids(
     ids: impl IntoIterator<Item = PreProcessedColumnId>,
 ) -> Vec<PreProcessedColumnId> {

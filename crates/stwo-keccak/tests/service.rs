@@ -269,6 +269,8 @@ struct ProvedJobs {
     outputs: Vec<Vec<u8>>,
     service_claims: Vec<SecureField>,
     proof: stwo::core::proof::StarkProof<air_core::Hasher>,
+    /// Per-module opaque post-interaction payloads (the service's GKR blob).
+    payloads: Vec<Vec<u8>>,
 }
 
 /// Batch-4 logup constraints have log-degree excess 2, so proving needs
@@ -295,25 +297,37 @@ fn prove_jobs(
         t(service.run_mut());
     }
     let mut closer = IoCloser::new(closer_entries(&shapes, &messages, &outputs), handle);
-    let proof = air_core::prove(&mut [&mut service, &mut closer], pcs_config()).expect("prove");
+    let (proof, payloads) =
+        air_core::prove_with_post_interaction(&mut [&mut service, &mut closer], pcs_config())
+            .expect("prove");
     ProvedJobs {
         shapes,
         messages,
         outputs,
         service_claims: service.claimed_sums(),
         proof,
+        payloads,
     }
 }
 
 fn verify_jobs(p: &ProvedJobs, closer_msgs: &[Vec<u8>]) -> Result<(), air_core::VerifyError> {
+    verify_jobs_with_payloads(p, closer_msgs, &p.payloads)
+}
+
+fn verify_jobs_with_payloads(
+    p: &ProvedJobs,
+    closer_msgs: &[Vec<u8>],
+    payloads: &[Vec<u8>],
+) -> Result<(), air_core::VerifyError> {
     let handle = SharedKeccakRelations::new();
     let mut service =
         KeccakServiceVerifier::new(p.shapes.clone(), p.service_claims.clone(), handle.clone());
     let mut closer = IoCloser::new(closer_entries(&p.shapes, closer_msgs, &p.outputs), handle);
-    air_core::verify_with_expected_preprocessed_root(
+    air_core::verify_with_expected_preprocessed_root_and_payloads(
         &mut [&mut service, &mut closer],
         &p.proof,
         None,
+        payloads,
     )
 }
 
