@@ -67,6 +67,12 @@ Rule: every WO lands with a measured ts13_full_probe number. No number, not done
 - [x] Packed proof transport — CLOSED NO-GO. Packing 31-bit PCS field limbs
       saved 126,549B raw but only 17,803B after the SDK's existing zstd layer;
       a 488-line versioned codec plus seven integration edits was not justified.
+- [x] P-256 duplicate opening authentication — CLOSED NO-GO. A typed prototype
+      authenticated the 352 split Ligero paths once instead of twice, but the
+      eliminated pass measured only 1.744ms (N=7) and full TS13 stayed flat.
+- [x] SHA LogUp batch 6 — CLOSED INFEASIBLE under the production degree budget.
+      Its degree-7 identity leaves a degree-6N quotient and therefore needs a
+      `log_size + 3` composition split, beyond the blowup-2 PCS configuration.
 - [x] WO-D — PCS retune on shrunk circuit: sweep blowup 2/3 × queries/pow,
       Ligero ℓ A/B. Ligero ℓ=512/1024 CLOSED NO-GO for production after
       measurement. STARK fold step 3 is the measured production Pareto point:
@@ -435,6 +441,34 @@ payload reduction and does not materially approach 700KB. The experiment was
 removed without a commit. Do not revisit field-bit packing unless the product
 transport stops compressing or a substantially larger structural redundancy is
 identified.
+
+## Residual width and verifier experiments
+
+The current full TS13 STARK has 5,595 committed columns and 9,629 OODS
+samples. Its deterministic queried/OODS width is 1,452,200B:
+
+| tree | role | columns | queried B | OODS B |
+|---|---|---:|---:|---:|
+| 0 | preprocessed | 284 | 63,624 | 6,824 |
+| 1 | trace | 3,239 | 725,544 | 138,704 |
+| 2 | interaction | 1,800 | 403,208 | 44,744 |
+| 3 | MAC post-interaction | 256 | 57,352 | 8,200 |
+| 4 | composition | 16 | 3,592 | 392 |
+
+This is 90.4% of the representative 1,606,613B STARK. Every queried column is
+224B (`8 + 54×4`); eliminating every extra rotation sample would save at most
+64,544B. Composition width is only 3,984B. Small mask/composition edits cannot
+close the proof target; the remaining size lever is reducing committed consumer
+width, principally through a reviewed multi-message SHA design.
+
+A second verifier prototype removed duplicate Merkle authentication between
+the split-opening proximity and claim-batch checks. The typed authenticated
+handle and its corruption tests were correct, but directly hashing all 352 A/B
+paths measured only 1.744ms median over seven same-process runs. Full TS13 N=5
+was 157ms versus the prior 154ms posture, i.e. noise-flat. The prototype was
+removed. The material verifier opportunity is instead the 84 per-row Circle
+weight encodes in claim-batch verification; structured long MLE claims may
+reuse row/column factors without changing the proof format.
 
 ## WO-C1b redundancy argument
 
