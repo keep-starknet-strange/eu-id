@@ -3414,6 +3414,18 @@ fn mac_batch_product_reduce_layer(
         MDOC_P4B_MAC_HALF_COUNT
             * (GF128_BITS * 10 + MAC_HALF_PRODUCT_COEFFS * 3 + local_constraints),
     );
+    // WO-F: `monomial_reduction_bits(power)` depends only on `power`, yet the
+    // triple loop below queries it `MDOC_P4B_MAC_HALF_COUNT · GF128_BITS` times
+    // per power (~196k Vec allocations + linear scans, ~24 ms of setup).
+    // Precompute a per-power bitmask once (255 evaluations) and test membership
+    // with a shift — byte-identical `terms` in the same order.
+    let reduction_masks: Vec<u128> = (0..MAC_HALF_PRODUCT_COEFFS)
+        .map(|power| {
+            monomial_reduction_bits(power)
+                .into_iter()
+                .fold(0u128, |mask, bit| mask | (1u128 << bit))
+        })
+        .collect();
     for half in 0..MDOC_P4B_MAC_HALF_COUNT {
         add_linear(
             &mut terms,
@@ -3424,7 +3436,7 @@ fn mac_batch_product_reduce_layer(
         for bit in 0..GF128_BITS {
             let tag_pin = mac_batch_tree_local_start(half) + MAC_HALF_BOOL_CONSTRAINTS + bit;
             for power in 0..MAC_HALF_PRODUCT_COEFFS {
-                if monomial_reduction_bits(power).contains(&bit) {
+                if (reduction_masks[power] >> bit) & 1 == 1 {
                     add_linear(
                         &mut terms,
                         tag_pin,
