@@ -77,6 +77,7 @@ fn main() {
         .with_ts13_revocation_range(MdocRevocationRangeWitness { id, id_lo, id_hi })
         .with_ts13_revocation_signature(MdocRevocationSignature::MlDsa(sig));
 
+    let rayon_threads = rayon::current_num_threads();
     let prove_start = Instant::now();
     let proof = prove_mdoc_circuit(&extracted, &statement).expect("fully-PQ mdoc proves");
     let prove_ms = prove_start.elapsed().as_millis();
@@ -88,7 +89,7 @@ fn main() {
     let breakdown = mdoc_proof_byte_breakdown(&proof);
     std::fs::write("/tmp/pq_proof.bin", bincode::serialize(&proof).unwrap()).unwrap();
     println!(
-        "PQ_PERF_PROBE prove_ms={prove_ms} verify_ms={verify_ms} proof_bytes={}",
+        "PQ_PERF_PROBE rayon_threads={rayon_threads} prove_ms={prove_ms} verify_ms={verify_ms} proof_bytes={}",
         breakdown.proof_bytes
     );
     println!(

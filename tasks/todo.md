@@ -88,8 +88,10 @@ Baseline: `ce26b934` (S9)
 - Q3 product verification: all 37 `eu-id-prover` tests pass in 274.28 s, plus all 15 SDK/FFI tests.
   The shape dump confirms the merged SHA is exactly 951 columns at log 9: 12 preprocessed, 519
   trace, and 420 interaction columns.
-- Same-session release A/B against parent `4c25c72d`: baseline proving was 2,418/2,487 ms with
-  1,109,850/1,114,218-byte proofs; Q3 was 1,789/1,811 ms with 1,084,882/1,083,810-byte proofs.
-  Two-run averages improve proving by 26.6% and proof size by 27,688 bytes (2.49%); verification
-  improves from 15 ms to 14 ms. The instrumented shape run independently measured 1,733/15 ms and
-  1,084,994 bytes.
+- The initial same-session A/B accidentally omitted `RAYON_NUM_THREADS=1`; it therefore measured
+  default-Rayon multithreaded proving. Those samples were baseline 2,418/2,487 ms versus Q3
+  1,789/1,811 ms and must not be presented as the one-thread campaign metric.
+- Corrected five-run A/B with `RAYON_NUM_THREADS=1` against parent `4c25c72d`: baseline medians are
+  8,573 ms prove, 16 ms verify, and 1,113,514 bytes; Q3 medians are 6,995 ms, 15 ms, and 1,081,410
+  bytes. Median proving improves 18.4% and proof size improves 32,104 bytes (2.88%). The probe now
+  prints `rayon_threads` on every result line so thread-count drift is visible.
