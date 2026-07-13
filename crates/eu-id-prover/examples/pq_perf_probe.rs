@@ -44,6 +44,23 @@ fn main() {
     let request = MdocPidRequest::eudi_pid(session_transcript)
         .with_trusted_mldsa_issuer_public_keys(vec![fixture.issuer_pk.clone()]);
     let extracted = extract_pid_mdoc(&fixture.document, &request).expect("fully-PQ mdoc extracts");
+    let attribute_loads: Vec<_> = extracted
+        .extracted_attributes
+        .iter()
+        .map(|attribute| {
+            let message_bytes = attribute.item.len();
+            let padded_blocks = (message_bytes + 1 + 8).div_ceil(64);
+            (
+                attribute.request.element_identifier.as_str(),
+                message_bytes,
+                padded_blocks,
+            )
+        })
+        .collect();
+    println!(
+        "PQ_ATTRIBUTE_LOADS {}",
+        serde_json::to_string(&attribute_loads).expect("attribute loads serialize")
+    );
     let statement =
         MdocCircuitStatement::from_extracted(&extracted, policy).expect("statement builds");
 

@@ -1,6 +1,6 @@
 //! Preprocessed lookup-table content for the SHA-256 AIR.
 //!
-//! Implements §9 of `docs/research/sha256-air-design.md`. Six families of tables
+//! Implements §9 of `docs/research/sha256-air-design.md`. Three families of tables
 //! live here; all are deterministic functions of the FIPS spec and the
 //! validated bit-index partitions:
 //!
@@ -13,18 +13,13 @@
 //!    group widths ≤ 7, so `W = 7` is the smallest table without padding.
 //! 3. **Generic `xor_8` table** (1). `2¹⁶` rows; `(x, y) → x ⊕ y` for
 //!    8-bit `x`, `y`. Used to combine the two `O2` partials chunk-wise.
-//! 4. **Split-and-pack tables** (8: one per partition × lo/hi half).
-//!    Maps a 16-bit half-word to the packed-group values its bits land in.
 //!
 //! Every row that crosses into the trace is an `M31` value in `[0, 2¹⁶)`
 //! (limb-bounded) or `[0, 2^W)` (packed-bounded). Field range checks for
 //! free, per §11 lesson L1.
 
 use crate::native::{big_sigma0, big_sigma1, ch, lower_sigma0, lower_sigma1, maj};
-use crate::partitions::{
-    bits_to_mask, OutputClassification, RoundGroups, SigmaFn, SigmaParts, LOWER_SIGMA0_PARTS,
-    LOWER_SIGMA1_PARTS, SIGMA0_GROUPS, SIGMA1_GROUPS,
-};
+use crate::partitions::{bits_to_mask, OutputClassification, SigmaFn};
 use crate::types::{LIMB_BITS, LIMB_MAX};
 
 /// Number of rows in every `Σ`/`σ` decode table and in the `xor_8_8` table.
@@ -217,184 +212,6 @@ pub fn build_xor_8_table() -> Vec<Xor8Row> {
     rows
 }
 
-/// One row of a split-and-pack table.
-///
-/// Maps a 16-bit half-word (`key ∈ [0, 2¹⁶)`) to the packed group values it
-/// contributes to a given partition's half-side. For `Σ0` lo half against
-/// the a-side partition (`W = 6`), for example, the row carries the four
-/// lo-half sub-groups:
-///
-/// - the packed bits of `L0a` (`{0,1}`) and `L0b` (`{7,8,9,10,11}`) — in S,
-/// - the packed bits of `L1` (`{2,3,4,5,6}`) — in S',
-/// - the packed bits of `L2` (`{12,13,14,15}`) — in S'.
-///
-/// Plus the "spread" S/S' bits at their original lo-half positions, so the
-/// decode-table inputs can be assembled by linear combination across the
-/// lo and hi splits of the word.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SplitPackRow {
-    pub key: u32,
-    /// Packed value of each group whose bits intersect this half.
-    /// The witness emitter knows which `groups[]` slot corresponds to which
-    /// partition group.
-    pub groups: Vec<u32>,
-    /// The bits of this half that lie in `S`, kept at their original lo/hi
-    /// positions (i.e. `key & (S_mask & half_mask)` for the lo half, with
-    /// `>> 16` for the hi half — see `Half`).
-    pub spread_s: u32,
-    /// The bits of this half that lie in `S'`, kept at their original
-    /// positions.
-    pub spread_s_complement: u32,
-}
-
-/// Compute the bit-positions of one round-function group within a 16-bit
-/// half (lo or hi). Returns `None` if the group is in the *other* half.
-fn group_positions_in_half(group: &[u32], half: Half16) -> Option<Vec<u32>> {
-    let (lo_bound, hi_bound) = match half {
-        Half16::Lo => (0u32, 16u32),
-        Half16::Hi => (16u32, 32u32),
-    };
-    let in_half = group.iter().all(|&b| b >= lo_bound && b < hi_bound);
-    let other_half = group.iter().all(|&b| !(b >= lo_bound && b < hi_bound));
-    debug_assert!(
-        in_half || other_half,
-        "group {group:?} straddles lo/hi limb"
-    );
-    if in_half {
-        Some(group.iter().map(|&b| b - lo_bound).collect())
-    } else {
-        None
-    }
-}
-
-/// Lo vs. hi 16-bit half of a 32-bit word.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub enum Half16 {
-    Lo,
-    Hi,
-}
-
-/// Build the split-and-pack table for one half of one round-function
-/// partition. Each row's `groups` vector contains the packed values of the
-/// groups that intersect this half, in `s` order then `s_complement` order
-/// — equivalently, `groups_in_order()` filtered to this half preserving
-/// index order, matching [`crate::partitions::round_groups_half_indices`].
-/// Under the `W = 6` partition each half intersects exactly four of the
-/// eight groups, so every row exposes 4 packed values.
-pub fn build_round_split_pack_table(
-    groups: &RoundGroups,
-    s_mask: u32,
-    half: Half16,
-) -> Vec<SplitPackRow> {
-    let half_mask = match half {
-        Half16::Lo => 0x0000_FFFFu32,
-        Half16::Hi => 0xFFFF_0000u32,
-    };
-    let half_shift = match half {
-        Half16::Lo => 0,
-        Half16::Hi => 16,
-    };
-
-    let mut group_specs: Vec<Vec<u32>> = Vec::new();
-    for g in groups.s.iter().chain(groups.s_complement.iter()) {
-        if let Some(positions_in_half) = group_positions_in_half(g, half) {
-            if !positions_in_half.is_empty() {
-                group_specs.push(positions_in_half);
-            }
-        }
-    }
-
-    let mut rows = Vec::with_capacity(1 << 16);
-    for key in 0..(1u32 << 16) {
-        // `key` lives in the half's coordinate frame (0..2^16). To compute
-        // the "spread" we lift it to the full 32-bit position.
-        let lifted = key << half_shift;
-
-        let mut packed_groups = Vec::with_capacity(group_specs.len());
-        for positions in &group_specs {
-            let mut p = 0u32;
-            for (i, &pos) in positions.iter().enumerate() {
-                if (key >> pos) & 1 == 1 {
-                    p |= 1u32 << i;
-                }
-            }
-            packed_groups.push(p);
-        }
-
-        let spread_s = (lifted & s_mask) & half_mask;
-        let spread_s_complement = (lifted & !s_mask) & half_mask;
-        rows.push(SplitPackRow {
-            key,
-            groups: packed_groups,
-            spread_s,
-            spread_s_complement,
-        });
-    }
-    rows
-}
-
-/// Build the split-and-pack table for a `σ`-style partition (4 parts:
-/// `S∩lo`, `S∩hi`, `S'∩lo`, `S'∩hi`). For a given half, only two of the
-/// four parts intersect — `S∩half` and `S'∩half`.
-pub fn build_sigma_split_pack_table(parts: &SigmaParts, half: Half16) -> Vec<SplitPackRow> {
-    let half_mask = match half {
-        Half16::Lo => 0x0000_FFFFu32,
-        Half16::Hi => 0xFFFF_0000u32,
-    };
-    let half_shift = match half {
-        Half16::Lo => 0,
-        Half16::Hi => 16,
-    };
-
-    // Pick the parts that live in this half.
-    let s_part = match half {
-        Half16::Lo => parts.s_lo,
-        Half16::Hi => parts.s_hi,
-    };
-    let s_complement_part = match half {
-        Half16::Lo => parts.s_complement_lo,
-        Half16::Hi => parts.s_complement_hi,
-    };
-    let s_positions_in_half: Vec<u32> = s_part.iter().map(|&b| b - half_shift as u32).collect();
-    let s_complement_positions_in_half: Vec<u32> = s_complement_part
-        .iter()
-        .map(|&b| b - half_shift as u32)
-        .collect();
-
-    let s_full_mask = crate::partitions::bits_to_mask(s_part)
-        | crate::partitions::bits_to_mask(match half {
-            Half16::Lo => parts.s_hi,
-            Half16::Hi => parts.s_lo,
-        });
-
-    let mut rows = Vec::with_capacity(1 << 16);
-    for key in 0..(1u32 << 16) {
-        let lifted = key << half_shift;
-        let mut s_packed = 0u32;
-        for (i, &pos) in s_positions_in_half.iter().enumerate() {
-            if (key >> pos) & 1 == 1 {
-                s_packed |= 1u32 << i;
-            }
-        }
-        let mut s_complement_packed = 0u32;
-        for (i, &pos) in s_complement_positions_in_half.iter().enumerate() {
-            if (key >> pos) & 1 == 1 {
-                s_complement_packed |= 1u32 << i;
-            }
-        }
-
-        let spread_s = (lifted & s_full_mask) & half_mask;
-        let spread_s_complement = (lifted & !s_full_mask) & half_mask;
-        rows.push(SplitPackRow {
-            key,
-            groups: vec![s_packed, s_complement_packed],
-            spread_s,
-            spread_s_complement,
-        });
-    }
-    rows
-}
-
 /// Identifier of one preprocessed table. The AIR consumes each by tag; the
 /// integration layer (interface contract item 2) is where these names get
 /// agreed across streams. Kept generic here so the names can change without
@@ -404,48 +221,6 @@ pub enum TableId {
     Decode(SigmaFn, Half),
     MajCh(u32 /* group_width */),
     Xor8,
-    RoundSplitPack(RoundPartition, Half16),
-    SigmaSplitPack(LowerSigmaPartition, Half16),
-}
-
-/// Which round-function partition (`a`-side for `Σ0` + `Maj`, or `e`-side
-/// for `Σ1` + `Ch`).
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub enum RoundPartition {
-    Sigma0AndMaj,
-    Sigma1AndCh,
-}
-
-impl RoundPartition {
-    pub fn groups(self) -> &'static RoundGroups {
-        match self {
-            RoundPartition::Sigma0AndMaj => &SIGMA0_GROUPS,
-            RoundPartition::Sigma1AndCh => &SIGMA1_GROUPS,
-        }
-    }
-
-    pub fn s_mask(self) -> u32 {
-        match self {
-            RoundPartition::Sigma0AndMaj => crate::partitions::s_mask::SIGMA0,
-            RoundPartition::Sigma1AndCh => crate::partitions::s_mask::SIGMA1,
-        }
-    }
-}
-
-/// Which message-schedule `σ` partition (`σ0` or `σ1`).
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub enum LowerSigmaPartition {
-    LowerSigma0,
-    LowerSigma1,
-}
-
-impl LowerSigmaPartition {
-    pub fn parts(self) -> &'static SigmaParts {
-        match self {
-            LowerSigmaPartition::LowerSigma0 => &LOWER_SIGMA0_PARTS,
-            LowerSigmaPartition::LowerSigma1 => &LOWER_SIGMA1_PARTS,
-        }
-    }
 }
 
 /// Helper used by the round witness: given an output classification, return
@@ -583,51 +358,6 @@ mod tests {
             assert_eq!(o0_masks, bits_to_mask(&o0));
             assert_eq!(o1_masks, bits_to_mask(&o1));
             assert_eq!(o2_masks, bits_to_mask(&o2));
-        }
-    }
-
-    #[test]
-    fn round_split_pack_invariants() {
-        for partition in [RoundPartition::Sigma0AndMaj, RoundPartition::Sigma1AndCh] {
-            for half in [Half16::Lo, Half16::Hi] {
-                let rows =
-                    build_round_split_pack_table(partition.groups(), partition.s_mask(), half);
-                assert_eq!(rows.len(), 1 << 16);
-                for row in rows.iter().take(64) {
-                    // Each half intersects exactly 4 of the 8 W=6 groups.
-                    assert_eq!(row.groups.len(), 4);
-                    // spread_s ⊎ spread_s_complement = key in this half (lifted to 32-bit positions).
-                    let lifted = match half {
-                        Half16::Lo => row.key,
-                        Half16::Hi => row.key << 16,
-                    };
-                    assert_eq!(row.spread_s | row.spread_s_complement, lifted);
-                    assert_eq!(row.spread_s & row.spread_s_complement, 0);
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn sigma_split_pack_invariants() {
-        for partition in [
-            LowerSigmaPartition::LowerSigma0,
-            LowerSigmaPartition::LowerSigma1,
-        ] {
-            for half in [Half16::Lo, Half16::Hi] {
-                let rows = build_sigma_split_pack_table(partition.parts(), half);
-                assert_eq!(rows.len(), 1 << 16);
-                for row in rows.iter().take(64) {
-                    // Every row produces exactly two packed groups (S∩half + S'∩half).
-                    assert_eq!(row.groups.len(), 2);
-                    let lifted = match half {
-                        Half16::Lo => row.key,
-                        Half16::Hi => row.key << 16,
-                    };
-                    assert_eq!(row.spread_s | row.spread_s_complement, lifted);
-                    assert_eq!(row.spread_s & row.spread_s_complement, 0);
-                }
-            }
         }
     }
 

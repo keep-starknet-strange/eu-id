@@ -1,8 +1,7 @@
 //! LogUp interaction-trace generator for every SHA-256 component.
 //!
-//! The main `Sha256Eval` (consumer) and the 22 producer table components
-//! (8 σ/Σ decode + 1 packed Maj/Ch + 1 `xor_8` + 8 split-and-pack + 4
-//! `Range_k`) each emit their own interaction trace. When the digest provider
+//! The main `Sha256Eval` consumer and its range-table producers each emit an
+//! interaction trace. When the digest provider
 //! is exposed, `Sha256Eval` *also* yields the final-block digest on the
 //! `Sha256Digest` channel — the one provider-side term it contributes — which
 //! is why its claimed sum is non-zero on its own in that mode. Each is built by
@@ -43,24 +42,12 @@ use stwo::prover::poly::circle::CircleEvaluation;
 use stwo::prover::poly::BitReversedOrder;
 use stwo_constraint_framework::{LogupTraceGenerator, Relation};
 
-use crate::components::{
-    range_log_size, RangeKind, RANGE_TABLES, ROUND_SPLIT_TABLES, SIGMA_SPLIT_TABLES,
-};
+use crate::components::{range_log_size, RangeKind, RANGE_TABLES};
 use crate::constants::DIGEST_BYTES;
 use crate::constraints::LOGUP_BATCH;
 use crate::field_exposure::{word_be_bytes, FieldExposure, BYTE_RANGE_CHECK_OFFSET};
-use crate::multiplicities::{
-    range_k_multiplicities, round_split_pack_multiplicities, sigma_split_pack_multiplicities,
-};
-use crate::partitions::{
-    pack_round_groups, round_groups_half_indices, GROUPS_PER_ROUND_PARTITION, SIGMA0_GROUPS,
-    SIGMA1_GROUPS,
-};
+use crate::multiplicities::range_k_multiplicities;
 use crate::relations::Sha256Relations;
-use crate::tables::{
-    build_round_split_pack_table, build_sigma_split_pack_table, Half16, LowerSigmaPartition,
-    RoundPartition,
-};
 use crate::trace::{h_out_digest_bytes, Layout};
 use crate::types::Sha256Witness;
 
@@ -69,19 +56,15 @@ use crate::types::Sha256Witness;
 /// [`write_round_row_lookups`] and `crate::constraints::Sha256Eval::evaluate`:
 ///
 /// ```text
-///   8 (h_in aux split-pack, t = 0 rows)
-/// +  6 (schedule family: 2 σ-input splits = 4,
-///       Range_4 carry pair = 2; t ≥ 16 rows)
-/// + 20 (round family: round split-packs = 12 — the `a`/`e` operands each have two
-///       complementary-gated sites (t ≥ 1 vs t = 0) so tuples read
-///       committed cells — plus 4 carry pairs = 8; every row)
+///   2 (schedule `Range_4` carry pair; t ≥ 16 rows)
+/// +  8 (round carry range-checks; every row)
 /// + 16 (finalization carries, t = 63 rows)
 /// + 16 (terminal `Range_16`, t = 63 rows)
-/// = 66
+/// = 42
 /// ```
 ///
 /// A site that does not fire on a given row holds the neutral fraction `(0, 1)`.
-pub const SHA_LOOKUPS_PER_ROW_BASE: usize = 66;
+pub const SHA_LOOKUPS_PER_ROW_BASE: usize = 42;
 
 /// Total lookup sites `Sha256Eval` fires per row. The digest provider adds
 /// exactly one width-32 yield site when `expose_digest` is set; the
@@ -106,7 +89,7 @@ pub fn sha_lookups_per_row(expose_digest: bool, field_exposure: &FieldExposure) 
 }
 
 /// Total lookup sites the multi-slot merged `Sha256Eval` fires per row:
-/// the 66 base sites, one digest yield site per digest-exposing slot, then
+/// the 42 base sites, one digest yield site per digest-exposing slot, then
 /// each slot's field sites — in the emission order of the multi branch of
 /// `Sha256Eval::evaluate`. Read by both the interaction generator and the
 /// column sizing so the three never drift.
@@ -146,9 +129,7 @@ impl ComponentClaim {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InteractionClaim {
     pub sha256: ComponentClaim,
-    pub round_split_pack: Vec<ComponentClaim>, // 4
-    pub sigma_split_pack: Vec<ComponentClaim>, // 4
-    pub range: Vec<ComponentClaim>,            // 4: Range_2, Range_4, Range_5, Range_16
+    pub range: Vec<ComponentClaim>, // 4: Range_2, Range_4, Range_5, Range_16
 }
 
 impl InteractionClaim {
@@ -157,12 +138,6 @@ impl InteractionClaim {
     /// (currently none). Used as the soundness backbone.
     pub fn total(&self) -> SecureField {
         let mut s = self.sha256.claimed_sum;
-        for c in &self.round_split_pack {
-            s += c.claimed_sum;
-        }
-        for c in &self.sigma_split_pack {
-            s += c.claimed_sum;
-        }
         for c in &self.range {
             s += c.claimed_sum;
         }
@@ -174,12 +149,6 @@ impl InteractionClaim {
     /// agree.
     pub fn mix_into(&self, channel: &mut impl Channel) {
         self.sha256.mix_into(channel);
-        for c in &self.round_split_pack {
-            c.mix_into(channel);
-        }
-        for c in &self.sigma_split_pack {
-            c.mix_into(channel);
-        }
         for c in &self.range {
             c.mix_into(channel);
         }
@@ -322,52 +291,6 @@ where
 // Producer-side per-table interaction columns
 // ---------------------------------------------------------------------------
 
-fn round_split_pack_interaction(
-    relations: &Sha256Relations,
-    witness: &Sha256Witness,
-    p: RoundPartition,
-    h: Half16,
-) -> (
-    ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
-    SecureField,
-) {
-    let mults = round_split_pack_multiplicities(witness, p, h);
-    let groups = match p {
-        RoundPartition::Sigma0AndMaj => SIGMA0_GROUPS,
-        RoundPartition::Sigma1AndCh => SIGMA1_GROUPS,
-    };
-    let s_mask = p.s_mask();
-    let rows = build_round_split_pack_table(&groups, s_mask, h);
-    let log_size = crate::preprocessed::LOG_SIZE_16;
-    // 5-cell row: (key, g0, g1, g2, g3) — the four W=6 sub-groups in this half.
-    let row_iter = rows.iter().map(|r| {
-        [
-            BaseField::from(r.key),
-            BaseField::from(r.groups[0]),
-            BaseField::from(r.groups[1]),
-            BaseField::from(r.groups[2]),
-            BaseField::from(r.groups[3]),
-        ]
-    });
-    let frac = match (p, h) {
-        (RoundPartition::Sigma0AndMaj, Half16::Lo) => {
-            producer_frac_column(&relations.split_pack.sigma0_lo, &mults, row_iter)
-        }
-        (RoundPartition::Sigma0AndMaj, Half16::Hi) => {
-            producer_frac_column(&relations.split_pack.sigma0_hi, &mults, row_iter)
-        }
-        (RoundPartition::Sigma1AndCh, Half16::Lo) => {
-            producer_frac_column(&relations.split_pack.sigma1_lo, &mults, row_iter)
-        }
-        (RoundPartition::Sigma1AndCh, Half16::Hi) => {
-            producer_frac_column(&relations.split_pack.sigma1_hi, &mults, row_iter)
-        }
-    };
-    // Single fraction — one column regardless of batch; the producer
-    // component finalizes in pairs, so pass 2.
-    build_interaction_columns(log_size, 2, vec![frac])
-}
-
 /// Build the interaction trace for one `Range_k` producer.
 fn range_k_interaction(
     relations: &Sha256Relations,
@@ -395,44 +318,6 @@ fn range_k_interaction(
         RangeKind::Range4 => producer_frac_column(&relations.range.range_4, &mults, row_iter),
         RangeKind::Range5 => producer_frac_column(&relations.range.range_5, &mults, row_iter),
         RangeKind::Range16 => producer_frac_column(&relations.range.range_16, &mults, row_iter),
-    };
-    // Single fraction — one column regardless of batch; the producer
-    // component finalizes in pairs, so pass 2.
-    build_interaction_columns(log_size, 2, vec![frac])
-}
-
-fn sigma_split_pack_interaction(
-    relations: &Sha256Relations,
-    witness: &Sha256Witness,
-    p: LowerSigmaPartition,
-    h: Half16,
-) -> (
-    ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
-    SecureField,
-) {
-    let mults = sigma_split_pack_multiplicities(witness, p, h);
-    let rows = build_sigma_split_pack_table(p.parts(), h);
-    let log_size = crate::preprocessed::LOG_SIZE_16;
-    let row_iter = rows.iter().map(|r| {
-        [
-            BaseField::from(r.key),
-            BaseField::from(r.groups[0]),
-            BaseField::from(r.groups[1]),
-        ]
-    });
-    let frac = match (p, h) {
-        (LowerSigmaPartition::LowerSigma0, Half16::Lo) => {
-            producer_frac_column(&relations.split_pack.lower_sigma0_lo, &mults, row_iter)
-        }
-        (LowerSigmaPartition::LowerSigma0, Half16::Hi) => {
-            producer_frac_column(&relations.split_pack.lower_sigma0_hi, &mults, row_iter)
-        }
-        (LowerSigmaPartition::LowerSigma1, Half16::Lo) => {
-            producer_frac_column(&relations.split_pack.lower_sigma1_lo, &mults, row_iter)
-        }
-        (LowerSigmaPartition::LowerSigma1, Half16::Hi) => {
-            producer_frac_column(&relations.split_pack.lower_sigma1_hi, &mults, row_iter)
-        }
     };
     // Single fraction — one column regardless of batch; the producer
     // component finalizes in pairs, so pass 2.
@@ -526,75 +411,9 @@ fn write_round_row_lookups(
     field_exposure: &FieldExposure,
     block_idx: usize,
 ) {
-    // Per-partition lo/hi half projections (length 4 each, W=6) — the same
-    // `round_groups_half_indices` projection the constraint side keys on.
-    let (sigma0_lo_idx, sigma0_hi_idx) = round_groups_half_indices(&SIGMA0_GROUPS);
-    let (sigma1_lo_idx, sigma1_hi_idx) = round_groups_half_indices(&SIGMA1_GROUPS);
-
-    // ---- 1. h_in aux split-pack sites (4 operands × 2 halves = 8) ----
-    //
-    // Fire on t = 0 rows (multiplicity `enabler · is_round_0`). Order in
-    // Sha256Eval::evaluate: b_init, c_init, f_init, g_init.
-    if t == 0 {
-        for op_idx in 0..4 {
-            let (word, lo_rel_tag, hi_rel_tag) = match op_idx {
-                0 => (block.h_in[1].to_u32(), RelTag::Sigma0Lo, RelTag::Sigma0Hi),
-                1 => (block.h_in[2].to_u32(), RelTag::Sigma0Lo, RelTag::Sigma0Hi),
-                2 => (block.h_in[5].to_u32(), RelTag::Sigma1Lo, RelTag::Sigma1Hi),
-                3 => (block.h_in[6].to_u32(), RelTag::Sigma1Lo, RelTag::Sigma1Hi),
-                _ => unreachable!(),
-            };
-            let (lo_idx, hi_idx): (&[usize], &[usize]) = if op_idx < 2 {
-                (&sigma0_lo_idx, &sigma0_hi_idx)
-            } else {
-                (&sigma1_lo_idx, &sigma1_hi_idx)
-            };
-            write_round_split_pack_pair(
-                all,
-                cursor,
-                slot,
-                word,
-                relations,
-                lo_rel_tag,
-                hi_rel_tag,
-                match op_idx {
-                    0 => block.aux_split_pack.b_init.vals,
-                    1 => block.aux_split_pack.c_init.vals,
-                    2 => block.aux_split_pack.f_init.vals,
-                    3 => block.aux_split_pack.g_init.vals,
-                    _ => unreachable!(),
-                },
-                lo_idx,
-                hi_idx,
-            );
-        }
-    } else {
-        *cursor += 8;
-    }
-
-    // ---- 2. Schedule family (6 sites; t ≥ 16 rows) ----
+    // ---- 1. Schedule carry range-checks (2 sites; t ≥ 16 rows) ----
     if t >= 16 {
         let entry = &block.schedule_entries[t - 16];
-        write_sigma_input_split_lookups(
-            all,
-            cursor,
-            slot,
-            entry.w_t_minus_15.to_u32(),
-            &entry.lower_sigma0_input_split,
-            relations,
-            RelTag::LowerSigma0SplitLo,
-            RelTag::LowerSigma0SplitHi,
-        );
-        write_sigma_input_split_lookups(
-            all,
-            cursor,
-            slot,
-            entry.w_t_minus_2.to_u32(),
-            &entry.lower_sigma1_input_split,
-            relations,
-            RelTag::LowerSigma1SplitLo,
-            RelTag::LowerSigma1SplitHi,
-        );
         write_carry_range_pair(
             all,
             cursor,
@@ -604,108 +423,11 @@ fn write_round_row_lookups(
             entry.carries,
         );
     } else {
-        *cursor += 6;
+        *cursor += 2;
     }
 
-    // ---- 3. Round family (20 sites; every real row) ----
+    // ---- 2. Round carry range-checks (8 sites; every real row) ----
     let round = &block.rounds[t];
-
-    let a_grp = round.maj_ch.a_grp.vals;
-    let e_grp = round.maj_ch.e_grp.vals;
-
-    // Round split-packs (12 sites). The `a`/`e` operands have two
-    // complementary-gated sites each: the t ≥ 1 site keys the input word
-    // as the previous row's `a_new`/`e_new`, the t = 0 site keys it as
-    // `h_in[0]`/`h_in[4]` — value-wise both equal `state_in`. Exactly one
-    // of the pair fires per row.
-    let a_word = round.state_in[0].to_u32();
-    if t != 0 {
-        write_round_split_pack_pair(
-            all,
-            cursor,
-            slot,
-            a_word,
-            relations,
-            RelTag::Sigma0Lo,
-            RelTag::Sigma0Hi,
-            a_grp,
-            &sigma0_lo_idx,
-            &sigma0_hi_idx,
-        );
-        *cursor += 2; // skip the t = 0 twin
-    } else {
-        *cursor += 2; // skip the t ≥ 1 twin
-        write_round_split_pack_pair(
-            all,
-            cursor,
-            slot,
-            a_word,
-            relations,
-            RelTag::Sigma0Lo,
-            RelTag::Sigma0Hi,
-            a_grp,
-            &sigma0_lo_idx,
-            &sigma0_hi_idx,
-        );
-    }
-    let maj_word = round.maj.to_u32();
-    let maj_packed = pack_round_groups(maj_word, &SIGMA0_GROUPS);
-    write_round_split_pack_pair(
-        all,
-        cursor,
-        slot,
-        maj_word,
-        relations,
-        RelTag::Sigma0Lo,
-        RelTag::Sigma0Hi,
-        maj_packed,
-        &sigma0_lo_idx,
-        &sigma0_hi_idx,
-    );
-    let e_word = round.state_in[4].to_u32();
-    if t != 0 {
-        write_round_split_pack_pair(
-            all,
-            cursor,
-            slot,
-            e_word,
-            relations,
-            RelTag::Sigma1Lo,
-            RelTag::Sigma1Hi,
-            e_grp,
-            &sigma1_lo_idx,
-            &sigma1_hi_idx,
-        );
-        *cursor += 2;
-    } else {
-        *cursor += 2;
-        write_round_split_pack_pair(
-            all,
-            cursor,
-            slot,
-            e_word,
-            relations,
-            RelTag::Sigma1Lo,
-            RelTag::Sigma1Hi,
-            e_grp,
-            &sigma1_lo_idx,
-            &sigma1_hi_idx,
-        );
-    }
-    let ch_word = round.ch.to_u32();
-    let ch_packed = pack_round_groups(ch_word, &SIGMA1_GROUPS);
-    write_round_split_pack_pair(
-        all,
-        cursor,
-        slot,
-        ch_word,
-        relations,
-        RelTag::Sigma1Lo,
-        RelTag::Sigma1Hi,
-        ch_packed,
-        &sigma1_lo_idx,
-        &sigma1_hi_idx,
-    );
 
     // Carry range-checks for the four mod-2³² adds of this round.
     write_carry_range_pair(
@@ -741,7 +463,7 @@ fn write_round_row_lookups(
         round.a_new_carries,
     );
 
-    // ---- 4/5. Finalization carries + terminal `Range_16` (t = 63 rows) ----
+    // ---- 3/4. Finalization carries + terminal `Range_16` (t = 63 rows) ----
     if t == crate::constants::N_ROUNDS - 1 {
         for c in &block.finalization_carries {
             write_carry_range_pair(all, cursor, slot, relations, RangeKind::Range2, *c);
@@ -754,7 +476,7 @@ fn write_round_row_lookups(
         *cursor += 16 + 16;
     }
 
-    // ---- 6. Digest yield (provider side, final block's t = 63 row) ----
+    // ---- 5. Digest yield (provider side, final block's t = 63 row) ----
     if expose_digest {
         if t == crate::constants::N_ROUNDS - 1 {
             let bytes = h_out_digest_bytes(&block.h_out);
@@ -767,7 +489,7 @@ fn write_round_row_lookups(
         *cursor += 1;
     }
 
-    // ---- 7. Credential-field range-checks + yields (target block t = 15 rows) ----
+    // ---- 6. Credential-field range-checks + yields (target block t = 15 rows) ----
     //
     // Same order as the constraint side: 7a. two `Range16` per exposed byte
     // column — once for block-0 legacy exposure, once per target block for
@@ -878,32 +600,6 @@ fn write_field_row_lookups(
     }
 }
 
-/// Internal tag for which split-pack relation a write targets.
-#[derive(Copy, Clone)]
-enum RelTag {
-    Sigma0Lo,
-    Sigma0Hi,
-    Sigma1Lo,
-    Sigma1Hi,
-    LowerSigma0SplitLo,
-    LowerSigma0SplitHi,
-    LowerSigma1SplitLo,
-    LowerSigma1SplitHi,
-}
-
-fn combine_with_tag(relations: &Sha256Relations, tag: RelTag, values: &[BaseField]) -> SecureField {
-    match tag {
-        RelTag::Sigma0Lo => relations.split_pack.sigma0_lo.combine(values),
-        RelTag::Sigma0Hi => relations.split_pack.sigma0_hi.combine(values),
-        RelTag::Sigma1Lo => relations.split_pack.sigma1_lo.combine(values),
-        RelTag::Sigma1Hi => relations.split_pack.sigma1_hi.combine(values),
-        RelTag::LowerSigma0SplitLo => relations.split_pack.lower_sigma0_lo.combine(values),
-        RelTag::LowerSigma0SplitHi => relations.split_pack.lower_sigma0_hi.combine(values),
-        RelTag::LowerSigma1SplitLo => relations.split_pack.lower_sigma1_lo.combine(values),
-        RelTag::LowerSigma1SplitHi => relations.split_pack.lower_sigma1_hi.combine(values),
-    }
-}
-
 /// Combine a single-value lookup against the `Range_k` channel for `kind`.
 fn combine_range(relations: &Sha256Relations, kind: RangeKind, value: u32) -> SecureField {
     let v = [BaseField::from(value)];
@@ -942,87 +638,6 @@ fn write_carry_range_pair(
 ) {
     write_range_check(all, cursor, slot, relations, kind, carries.lo);
     write_range_check(all, cursor, slot, relations, kind, carries.hi);
-}
-
-#[allow(clippy::too_many_arguments)]
-fn write_sigma_input_split_lookups(
-    all: &mut [Vec<Frac>],
-    cursor: &mut usize,
-    slot: usize,
-    word: u32,
-    split: &crate::types::SigmaInputSplitPackWitness,
-    relations: &Sha256Relations,
-    lo_tag: RelTag,
-    hi_tag: RelTag,
-) {
-    let word_lo = word & 0xFFFF;
-    let word_hi = (word >> 16) & 0xFFFF;
-    let lo_vals = [
-        BaseField::from(word_lo),
-        BaseField::from(split.packed_s_lo),
-        BaseField::from(split.packed_s_complement_lo),
-    ];
-    all[*cursor][slot] = (
-        SecureField::one(),
-        combine_with_tag(relations, lo_tag, &lo_vals),
-    );
-    *cursor += 1;
-    let hi_vals = [
-        BaseField::from(word_hi),
-        BaseField::from(split.packed_s_hi),
-        BaseField::from(split.packed_s_complement_hi),
-    ];
-    all[*cursor][slot] = (
-        SecureField::one(),
-        combine_with_tag(relations, hi_tag, &hi_vals),
-    );
-    *cursor += 1;
-}
-
-#[allow(clippy::too_many_arguments)]
-fn write_round_split_pack_pair(
-    all: &mut [Vec<Frac>],
-    cursor: &mut usize,
-    slot: usize,
-    word: u32,
-    relations: &Sha256Relations,
-    lo_tag: RelTag,
-    hi_tag: RelTag,
-    grp: [u32; GROUPS_PER_ROUND_PARTITION],
-    lo_idx: &[usize],
-    hi_idx: &[usize],
-) {
-    // Mirror `constraints::wire_round_split_pack` exactly: the lo-half tuple
-    // is `(word.lo, grp[lo_idx[0..4]])`, the hi-half `(word.hi,
-    // grp[hi_idx[0..4]])`. Any divergence here breaks the LogUp balance.
-    debug_assert_eq!(lo_idx.len(), 4);
-    debug_assert_eq!(hi_idx.len(), 4);
-    let word_lo = word & 0xFFFF;
-    let word_hi = (word >> 16) & 0xFFFF;
-    let lo_vals = [
-        BaseField::from(word_lo),
-        BaseField::from(grp[lo_idx[0]]),
-        BaseField::from(grp[lo_idx[1]]),
-        BaseField::from(grp[lo_idx[2]]),
-        BaseField::from(grp[lo_idx[3]]),
-    ];
-    all[*cursor][slot] = (
-        SecureField::one(),
-        combine_with_tag(relations, lo_tag, &lo_vals),
-    );
-    *cursor += 1;
-    let hi_vals = [
-        BaseField::from(word_hi),
-        BaseField::from(grp[hi_idx[0]]),
-        BaseField::from(grp[hi_idx[1]]),
-        BaseField::from(grp[hi_idx[2]]),
-        BaseField::from(grp[hi_idx[3]]),
-    ];
-    all[*cursor][slot] = (
-        SecureField::one(),
-        combine_with_tag(relations, hi_tag, &hi_vals),
-    );
-    *cursor += 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -1173,8 +788,6 @@ pub fn generate_multi_consumer_interaction_trace(
     let (evals, claimed_sum) = build_interaction_columns(log_size, LOGUP_BATCH, all_lookups);
     let claim = InteractionClaim {
         sha256: ComponentClaim { claimed_sum },
-        round_split_pack: Vec::new(),
-        sigma_split_pack: Vec::new(),
         range: Vec::new(),
     };
     (evals, claim)
@@ -1184,7 +797,7 @@ fn generate_interaction_trace_inner(
     relations: &Sha256Relations,
     witness: &Sha256Witness,
     sha256_log_size: u32,
-    group_width: u32,
+    _group_width: u32,
     expose_digest: bool,
     field_exposure: &FieldExposure,
     include_table_providers: bool,
@@ -1210,25 +823,6 @@ fn generate_interaction_trace_inner(
         claimed_sum: sha_sum,
     };
 
-    let _ = group_width;
-    // 4 round-side split-pack.
-    let mut round_split_pack = Vec::with_capacity(4);
-    if include_table_providers {
-        for &(p, h) in ROUND_SPLIT_TABLES {
-            let (t, s) = round_split_pack_interaction(relations, witness, p, h);
-            combined.extend(t);
-            round_split_pack.push(ComponentClaim { claimed_sum: s });
-        }
-    }
-    // 4 σ-side split-pack.
-    let mut sigma_split_pack = Vec::with_capacity(4);
-    if include_table_providers {
-        for &(p, h) in SIGMA_SPLIT_TABLES {
-            let (t, s) = sigma_split_pack_interaction(relations, witness, p, h);
-            combined.extend(t);
-            sigma_split_pack.push(ComponentClaim { claimed_sum: s });
-        }
-    }
     // 4 range producers (Range_2, Range_4, Range_5, Range_16).
     let mut range = Vec::with_capacity(4);
     if include_table_providers {
@@ -1239,12 +833,7 @@ fn generate_interaction_trace_inner(
         }
     }
 
-    let claim = InteractionClaim {
-        sha256,
-        round_split_pack,
-        sigma_split_pack,
-        range,
-    };
+    let claim = InteractionClaim { sha256, range };
     (combined, claim)
 }
 

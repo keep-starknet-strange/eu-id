@@ -170,7 +170,7 @@ fn verify_rejects_logup_sum_mutation() {
 
     // Bump one of the producer-side claimed sums by 1. The total now
     // differs from zero by 1, so the soundness gate catches it.
-    proof.interaction_claim.round_split_pack[0].claimed_sum += SecureField::one();
+    proof.interaction_claim.range[0].claimed_sum += SecureField::one();
 
     match verify_sha256_proof(&proof) {
         Err(Sha256VerifyError::LogupSumNonZero) => {}

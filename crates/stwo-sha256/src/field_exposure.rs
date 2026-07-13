@@ -200,20 +200,34 @@ impl FieldExposure {
         self.needs_block_witness().then(|| self.n_byte_columns())
     }
 
-    /// Column slot of the selector for `yield_idx` within the dynamic field
-    /// tail, if the multi-block witness tail is enabled.
+    /// Column slot of the selector shared by every yield in `block_idx`, if
+    /// the multi-block witness tail is enabled.
+    pub fn selector_column_slot_for_block(&self, block_idx: usize) -> Option<usize> {
+        self.needs_block_witness().then(|| {
+            let block_slot = self
+                .target_blocks
+                .iter()
+                .position(|&target| target == block_idx)
+                .expect("selector block is present in target_blocks");
+            self.n_byte_columns() + 1 + block_slot
+        })
+    }
+
+    /// Column slot of the selector for `yield_idx`. Yields targeting the same
+    /// SHA block deliberately return the same slot.
     pub fn selector_column_slot(&self, yield_idx: usize) -> Option<usize> {
-        self.needs_block_witness()
-            .then(|| self.n_byte_columns() + 1 + yield_idx)
+        self.yields
+            .get(yield_idx)
+            .and_then(|yield_| self.selector_column_slot_for_block(yield_.block_idx))
     }
 
     /// Number of dynamic trace columns the exposure adds. Block-0 legacy
     /// exposure adds only byte columns; multi-block exposure adds byte columns,
-    /// one block counter, and one selector per yielded byte.
+    /// one block counter, and one selector per distinct target block.
     pub fn n_columns(&self) -> usize {
         self.n_byte_columns()
             + if self.needs_block_witness() {
-                1 + self.n_yields()
+                1 + self.target_blocks().len()
             } else {
                 0
             }
@@ -276,8 +290,8 @@ mod tests {
 
     /// The eu-id credential windows (`docs/credential-format.md`): DOB at
     /// offsets 5..9, nationality at 9..11. They resolve to message words
-    /// `W[1]`/`W[2]` of block 0 — exactly the words the σ-input split-and-pack
-    /// already 16-bit-pins.
+    /// `W[1]`/`W[2]` of block 0, whose limbs are pinned by the schedule-word
+    /// bit recomposition constraints.
     fn credential_exposure() -> FieldExposure {
         FieldExposure::from_preimage_windows(&[
             (field_id::DOB, 5, 4),
@@ -404,6 +418,11 @@ mod tests {
         assert!(e.needs_block_witness());
         assert_eq!(e.block_counter_column_slot(), Some(e.n_byte_columns()));
         assert_eq!(e.selector_column_slot(0), Some(e.n_byte_columns() + 1));
+        assert_eq!(
+            e.selector_column_slot(4),
+            e.selector_column_slot(5),
+            "same-block yields share one selector",
+        );
     }
 
     #[test]

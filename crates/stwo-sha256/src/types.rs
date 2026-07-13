@@ -143,162 +143,6 @@ pub struct PaddingWitness {
     pub bit_length: u64,
 }
 
-/// Packed-group decomposition of one 32-bit value under an 8-group
-/// round-function partition (`Σ0`/`Maj` a-side or `Σ1`/`Ch` e-side).
-///
-/// The Maj/Ch packed table at width `W ≥ MAX_ROUND_GROUP_BITS` is keyed on
-/// these packed values: bit `j` of `vals[i]` is the bit of the source word
-/// at the partition's `groups_in_order()[i][j]` position. Each value lies
-/// in `[0, 2^|group_i|) ⊆ [0, 2^W)`, range-checked implicitly by being a
-/// lookup-table input. Eight values per word per partition — four `S`-side
-/// groups followed by four `S'`-side groups (the `W = 6` layout subdivides
-/// the two 7-bit groups of each partition; design §9.2).
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub struct RoundPackedGroups {
-    /// 8 packed values in `partitions::RoundGroups::groups_in_order()` order.
-    pub vals: [u32; 8],
-}
-
-impl RoundPackedGroups {
-    /// Pack the 8 group values of `w` against the given partition. Mirrors
-    /// `partitions::pack_round_groups` but typed at the witness layer so
-    /// every consumer reads the same field order.
-    #[inline]
-    pub fn pack(w: u32, groups: &crate::partitions::RoundGroups) -> Self {
-        Self {
-            vals: crate::partitions::pack_round_groups(w, groups),
-        }
-    }
-}
-
-/// Per-round Maj/Ch packed-group witness — the inputs and outputs of the
-/// 8 Maj lookups and the 8 Ch lookups the AIR fires per round, after the
-/// §8.1 "split once, reuse" optimisation.
-///
-/// Only the **fresh** operands per round live here: the *new* a-side input
-/// `a` (= a-side split of either `h_in[0]` on round 0 or `a_new[t−1]`
-/// otherwise), the Maj output `maj_out`, the *new* e-side input `e`, and
-/// the Ch output `ch_out`. The Maj lookup's `b`/`c` operands and the Ch
-/// lookup's `f`/`g` operands are read from prior rounds' `a_grp`/`e_grp`
-/// columns via in-row aliasing (`b[t]=a[t−1]`, `c[t]=a[t−2]`,
-/// `f[t]=e[t−1]`, `g[t]=e[t−2]`) — the trace commits each value's split
-/// once and Section 8.1 of the validated design carries it forward.
-///
-/// For the first two rounds the chain reaches back past the start of the
-/// block; those slots are supplied by [`BlockAuxSplitPackWitness`] (the
-/// per-block split-and-pack of `h_in[1]`, `h_in[2]`, `h_in[5]`, `h_in[6]`).
-/// `a_grp[round 0]` *is* the split-and-pack of `h_in[0]` (since
-/// `a[0]=h_in[0]`), so `h_in[0]` does not get its own auxiliary commitment;
-/// the same holds for `e_grp[round 0]` against `h_in[4]`.
-///
-/// Each cell is pinned to the split-and-pack table row content by the
-/// corresponding lookup, which also implicitly range-checks the
-/// originating 16-bit limb to `[0, 2¹⁶)` (design §11 L1).
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub struct RoundMajChWitness {
-    /// a-side packed groups (`SIGMA0_GROUPS`) of the round's *new* `a`
-    /// input. Pinned to `a.(lo, hi)` by the Σ0/Maj split-and-pack lookup.
-    pub a_grp: RoundPackedGroups,
-    /// a-side packed groups of `Maj(a, b, c)` — the output the Maj lookup
-    /// emits per group position.
-    pub maj_grp: RoundPackedGroups,
-    /// e-side packed groups (`SIGMA1_GROUPS`) of the round's *new* `e`
-    /// input. Pinned to `e.(lo, hi)` by the Σ1/Ch split-and-pack lookup.
-    pub e_grp: RoundPackedGroups,
-    /// e-side packed groups of `Ch(e, f, g)`.
-    pub ch_grp: RoundPackedGroups,
-}
-
-/// Per-block auxiliary packed-group witness for the §8.1 reuse chain.
-///
-/// Holds the four split-and-pack outputs that the early rounds cannot
-/// alias from any prior round (the chain reaches past `t = 0`). Specifically:
-///
-///   - `b_init`  — a-side packed groups of `h_in[1]`. Used as `b[0]` and
-///     as `c[1]` via the alias `c[1] = b[0]`.
-///   - `c_init`  — a-side packed groups of `h_in[2]`. Used as `c[0]`.
-///   - `f_init`  — e-side packed groups of `h_in[5]`. Used as `f[0]` and
-///     as `g[1]` via the alias `g[1] = f[0]`.
-///   - `g_init`  — e-side packed groups of `h_in[6]`. Used as `g[0]`.
-///
-/// `h_in[0]` and `h_in[4]` do *not* need entries here: the per-round
-/// `a_grp[round 0]` / `e_grp[round 0]` are already the split-and-pack of
-/// those values (`a[0]=h_in[0]`, `e[0]=h_in[4]`). `h_in[3]` and `h_in[7]`
-/// never feed Σ/Maj/Ch directly — they enter only as plain mod-2³² adds
-/// — so they get no auxiliary split-and-pack either.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub struct BlockAuxSplitPackWitness {
-    pub b_init: RoundPackedGroups,
-    pub c_init: RoundPackedGroups,
-    pub f_init: RoundPackedGroups,
-    pub g_init: RoundPackedGroups,
-}
-
-/// Per-σ-application split-and-pack witness for the `σ0`/`σ1` input word.
-///
-/// The σ-decode table is keyed by `key_s` and `key_s_complement` — the
-/// 16-bit packings of the input word's bits at the partition's `S` (resp.
-/// `S'`) positions. With the §8.1 reuse path applied to the round
-/// partitions, the natural symmetry is to also pin the σ-decode keys via
-/// a split-and-pack lookup: one per half of the input word.
-///
-/// Each split-and-pack row exposes `(key=half_limb, packed_s, packed_s')`,
-/// implicitly range-checking the limb to `[0, 2¹⁶)`. The σ-decode
-/// `key_s`/`key_s_complement` then reassembles by linear combination:
-///   `key_s            = packed_s_lo + (1 << |S∩lo|) · packed_s_hi`
-///   `key_s_complement = packed_s_complement_lo
-///                       + (1 << |S'∩lo|) · packed_s_complement_hi`
-/// with the partition-specific coefficients living in
-/// [`crate::partitions::lower_sigma_key_hi_coeff_s`] (and the `_s_complement`
-/// twin).
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub struct SigmaInputSplitPackWitness {
-    /// Bits of the input word's lo half at the partition's `S∩lo`
-    /// positions, packed contiguously into the low `|S∩lo|` bits.
-    pub packed_s_lo: u32,
-    /// Bits of the input word's lo half at the partition's `S'∩lo`
-    /// positions, packed into the low `|S'∩lo|` bits.
-    pub packed_s_complement_lo: u32,
-    /// Bits of the input word's hi half at the partition's `S∩hi`
-    /// positions, packed into the low `|S∩hi|` bits.
-    pub packed_s_hi: u32,
-    /// Bits of the input word's hi half at the partition's `S'∩hi`
-    /// positions, packed into the low `|S'∩hi|` bits.
-    pub packed_s_complement_hi: u32,
-}
-
-impl SigmaInputSplitPackWitness {
-    /// Compute the split-and-pack outputs of `x` against the σ partition
-    /// defined by `parts`. Mirrors the body of `pack_half_key` but emits
-    /// the four per-half packed values that the AIR commits.
-    pub fn from_word(x: u32, parts: &crate::partitions::SigmaParts) -> Self {
-        let lo = x & 0xFFFF;
-        let hi = (x >> 16) & 0xFFFF;
-        let mut packed_s_lo = 0u32;
-        for (i, &pos) in parts.s_lo.iter().enumerate() {
-            packed_s_lo |= ((lo >> pos) & 1) << i;
-        }
-        let mut packed_s_complement_lo = 0u32;
-        for (i, &pos) in parts.s_complement_lo.iter().enumerate() {
-            packed_s_complement_lo |= ((lo >> pos) & 1) << i;
-        }
-        let mut packed_s_hi = 0u32;
-        for (i, &pos) in parts.s_hi.iter().enumerate() {
-            packed_s_hi |= ((hi >> (pos - 16)) & 1) << i;
-        }
-        let mut packed_s_complement_hi = 0u32;
-        for (i, &pos) in parts.s_complement_hi.iter().enumerate() {
-            packed_s_complement_hi |= ((hi >> (pos - 16)) & 1) << i;
-        }
-        Self {
-            packed_s_lo,
-            packed_s_complement_lo,
-            packed_s_hi,
-            packed_s_complement_hi,
-        }
-    }
-}
-
 /// One row of the per-round witness, holding every value the AIR refers to
 /// inside that round. Limb-level fields are `u32` because the trace converts
 /// them to M31 just before commitment — and so this struct is testable
@@ -340,9 +184,6 @@ pub struct RoundWitness {
     pub t2_carries: AddCarries,
     pub a_new_carries: AddCarries,
     pub e_new_carries: AddCarries,
-    /// Packed-group decomposition of every operand the per-round Maj/Ch
-    /// lookups consume. See [`RoundMajChWitness`].
-    pub maj_ch: RoundMajChWitness,
 }
 
 /// Carry chain of a single mod-2³² limb-add. `lo` carries from the low-limb
@@ -489,13 +330,6 @@ pub struct ScheduleEntryWitness {
     pub lower_sigma0_decode: SigmaDecodeWitness,
     /// Decoded intermediates of `σ1(W[t-2])`.
     pub lower_sigma1_decode: SigmaDecodeWitness,
-    /// Split-and-pack outputs of `W[t-15]` against the `σ0` partition —
-    /// the four per-half packed values the σ0 split-and-pack lookup
-    /// emits, and which the AIR linearly assembles into
-    /// `lower_sigma0_decode.key_s` / `.key_s_complement`.
-    pub lower_sigma0_input_split: SigmaInputSplitPackWitness,
-    /// Split-and-pack outputs of `W[t-2]` against the `σ1` partition.
-    pub lower_sigma1_input_split: SigmaInputSplitPackWitness,
     /// The four-word `+` carries.
     pub carries: AddCarries,
     pub w_t: WordLimbs,
@@ -689,10 +523,6 @@ pub struct BlockWitness {
     pub schedule_entries: Vec<ScheduleEntryWitness>,
     /// 64 rounds.
     pub rounds: Vec<RoundWitness>,
-    /// Per-block split-and-pack of the `b`/`c`/`f`/`g` initial values that
-    /// the §8.1 reuse chain cannot alias from any prior round. See
-    /// [`BlockAuxSplitPackWitness`].
-    pub aux_split_pack: BlockAuxSplitPackWitness,
     /// Finalization carries: 8 mod-2³² adds `H⁽ᵗ⁺¹⁾ⱼ = H⁽ᵗ⁾ⱼ + working[j]`.
     pub finalization_carries: [AddCarries; N_STATE_WORDS],
     /// Padding-role witness: which structural slot this block plays in the

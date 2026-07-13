@@ -127,11 +127,11 @@ mod tests {
         assert_eq!(config.n_digest_slots(), 2);
         // slot 0: 20 bytes → words 0..5 → 20 byte cols, block-0 legacy (no
         // counter/selectors). slot 1: multi-block (block 1) → 4 byte cols +
-        // counter + 4 selectors.
+        // counter + one shared block selector.
         assert_eq!(config.field_tail_base(0), 0);
         assert_eq!(config.field_tail_base(1), 20);
-        assert_eq!(config.field_tail_base(2), 20 + 4 + 1 + 4);
-        assert_eq!(config.n_field_columns(), 29);
+        assert_eq!(config.field_tail_base(2), 20 + 4 + 1 + 1);
+        assert_eq!(config.n_field_columns(), 26);
     }
 
     #[test]

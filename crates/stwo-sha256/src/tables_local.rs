@@ -3,10 +3,8 @@
 //! The eu-id pipeline plans a workspace-shared range-check / LogUp helper
 //! crate (owned by the ECDSA stream — `stwo-p256-utils` today, possibly
 //! generalised or promoted into a new `stwo-air-utils`). Until that crate
-//! ships, the SHA-256 AIR cannot wire its mod-2³² carry lookups (the
-//! σ/Σ decode, packed Maj/Ch, split-and-pack, and per-family carry range
-//! checks) without a parallel `tables_local` stub. This module **is** that
-//! stub.
+//! ships, the SHA-256 AIR cannot wire its mod-2³² carry lookups without a
+//! parallel `tables_local` stub. This module **is** that stub.
 //!
 //! ## Migration: one import swap
 //!
@@ -66,11 +64,8 @@
 //!   [`crate::headroom`]. Sizes are `RANGE_2 = 2`, `RANGE_4 = 4`,
 //!   `RANGE_5 = 5`.
 //! - [`range_16`] — the 16-bit limb range-check table. 2¹⁶ rows. Used for
-//!   `(lo, hi)` limbs that are *not* immediately consumed by a downstream
-//!   split-and-pack or σ/Σ decode lookup (the SHA-256-specific tables in
-//!   [`crate::tables`] pin most limbs implicitly; the explicit `Range16` is
-//!   needed for terminal limbs like the digest output, per design §10.2 /
-//!   §11 L1).
+//!   terminal `(lo, hi)` limbs such as the digest output, per design §10.2 /
+//!   §11 L1.
 //!
 //! ## What does **not** live here
 //!
@@ -85,8 +80,8 @@
 //!   downstream lookup-wiring work; until that wiring is in flight there
 //!   is nothing here to tag. Relation tags are component-owned, not
 //!   foundation-owned.
-//! - **The SHA-256-specific decode / packed-Maj-Ch / xor_8 / split-and-pack
-//!   tables.** Those are component-owned and live in [`crate::tables`].
+//! - **SHA-256-specific tables.** Those are component-owned and live in
+//!   [`crate::tables`].
 
 use crate::headroom::{RANGE_2, RANGE_4, RANGE_5};
 
@@ -129,11 +124,9 @@ pub fn range_5() -> Vec<u32> {
 /// Preprocessed `Range_16` row content: `[0, 1, …, 2¹⁶ − 1]`.
 ///
 /// Used to range-check **terminal** 16-bit limbs — limbs that are *not*
-/// immediately consumed by a downstream lookup that already pins them to
-/// `[0, 2¹⁶)`. Most working-state limbs are pinned implicitly via the
-/// split-and-pack / σ-decode tables in [`crate::tables`]; the explicit
-/// `Range_16` is needed for the digest output limbs and the small set of
-/// other limbs §10.2 of the validated design calls out.
+/// immediately pinned by the direct bit-recomposition constraints. The
+/// explicit `Range_16` is needed for the digest output limbs and the small
+/// set of other limbs §10.2 of the validated design calls out.
 pub fn range_16() -> Vec<u32> {
     (0..RANGE_16).collect()
 }

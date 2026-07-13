@@ -20,12 +20,9 @@
 //!   migration.
 //! - [`native`] — pure SHA-256 reference (padding, schedule, compression,
 //!   multi-block) tested against the `sha2` crate. The out-of-circuit oracle.
-//! - [`relations`] — LogUp relation tags: `Σ`/`σ` decode (8), packed Maj/Ch
-//!   (2), chunk-wise `xor_8` (1), split-and-pack (8), and `Range_k`
-//!   (`Range_2`/`Range_4`/`Range_5`/`Range_16`, 4) — bundled as
-//!   `Sha256Relations`.
-//! - [`tables`] — preprocessed lookup-table content: `Σ`/`σ` decode tables,
-//!   packed `Maj`/`Ch` table, `xor_8` table, split-and-pack tables.
+//! - [`relations`] — active range, digest, and field LogUp relation tags,
+//!   bundled as `Sha256Relations`.
+//! - [`tables`] — fixed-table helpers retained by the SHA component.
 //! - [`tables_local`] — local fallback for the workspace-shared range-check
 //!   tables (`Range_2`, `Range_4`, `Range_5`, `Range_16`). Shipped until the
 //!   ECDSA stream's `stwo-p256-utils` crate is on `main`; mirrors that

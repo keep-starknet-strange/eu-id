@@ -11,7 +11,7 @@
 //! column per relation it serves. It emits `add_to_relation(rel,
 //! −multiplicity_cell, &row_cells)`, then `finalize_logup_in_pairs()`.
 //!
-//! Wired components (23 total, one `Sha256Eval` consumer + 22 producers):
+//! Producer components:
 //!
 //! - [`SigmaDecodeEval`] × 8 — one per (function, side) of the σ/Σ decode
 //!   tables; each has 2¹⁶ rows × 5 preprocessed columns + 1 multiplicity.
@@ -20,11 +20,6 @@
 //!   for Maj, one for Ch).
 //! - [`Xor8Eval`] × 1 — the generic byte XOR table; 2¹⁶ rows × 3
 //!   preprocessed columns + 1 multiplicity.
-//! - [`RoundSplitPackEval`] × 4 — one per (partition, half) of the
-//!   round-side split-and-pack; 2¹⁶ rows × 4 preprocessed (key + 3
-//!   packed groups) + 1 multiplicity.
-//! - [`SigmaSplitPackEval`] × 4 — one per (σ-partition, half); 2¹⁶ rows
-//!   × 3 preprocessed (key + 2 packed) + 1 multiplicity.
 //! - [`RangeKEval`] × 4 — one per `Range_k` channel (`k ∈ {2, 4, 5, 16}`);
 //!   `k` rows × 1 preprocessed column (the value) + 1 multiplicity. Each
 //!   producer's `log_size = ceil(log2(k))`, padded with row-`0`
@@ -44,7 +39,7 @@ use stwo_constraint_framework::{
 };
 
 use crate::partitions::SigmaFn;
-use crate::tables::{Half, Half16, LowerSigmaPartition, RoundPartition};
+use crate::tables::Half;
 use crate::tables_local::RANGE_16;
 
 // Re-export shorthand so the `stark` module imports types from one place.
@@ -83,24 +78,6 @@ fn decode_tag(f: SigmaFn, half: Half) -> &'static str {
         (SigmaFn::LowerSigma0, Half::SComplement) => "lsigma0_sp",
         (SigmaFn::LowerSigma1, Half::S) => "lsigma1_s",
         (SigmaFn::LowerSigma1, Half::SComplement) => "lsigma1_sp",
-    }
-}
-
-fn round_split_tag(p: RoundPartition, h: Half16) -> &'static str {
-    match (p, h) {
-        (RoundPartition::Sigma0AndMaj, Half16::Lo) => "sp_sigma0_lo",
-        (RoundPartition::Sigma0AndMaj, Half16::Hi) => "sp_sigma0_hi",
-        (RoundPartition::Sigma1AndCh, Half16::Lo) => "sp_sigma1_lo",
-        (RoundPartition::Sigma1AndCh, Half16::Hi) => "sp_sigma1_hi",
-    }
-}
-
-fn sigma_split_tag(p: LowerSigmaPartition, h: Half16) -> &'static str {
-    match (p, h) {
-        (LowerSigmaPartition::LowerSigma0, Half16::Lo) => "sp_lsigma0_lo",
-        (LowerSigmaPartition::LowerSigma0, Half16::Hi) => "sp_lsigma0_hi",
-        (LowerSigmaPartition::LowerSigma1, Half16::Lo) => "sp_lsigma1_lo",
-        (LowerSigmaPartition::LowerSigma1, Half16::Hi) => "sp_lsigma1_hi",
     }
 }
 
@@ -298,59 +275,6 @@ pub fn maj_ch_column_ids() -> [PreProcessedColumnId; 5] {
 /// Order: `(x, y, z)`.
 pub fn xor_8_column_ids() -> [PreProcessedColumnId; 3] {
     [id("xor_8_x"), id("xor_8_y"), id("xor_8_z")]
-}
-
-/// IDs of the 5 preprocessed columns of one round-side split-and-pack
-/// table. Order: `(key, g0, g1, g2, g3)` matching
-/// `crate::relations::ROUND_SPLIT_PACK_REL_SIZE` (the four W=6 sub-groups
-/// in this half).
-pub fn round_split_pack_column_ids(p: RoundPartition, h: Half16) -> [PreProcessedColumnId; 5] {
-    let t = round_split_tag(p, h);
-    [
-        id(&format!("{t}_key")),
-        id(&format!("{t}_g0")),
-        id(&format!("{t}_g1")),
-        id(&format!("{t}_g2")),
-        id(&format!("{t}_g3")),
-    ]
-}
-
-pub fn shared_round_split_pack_column_ids(
-    p: RoundPartition,
-    h: Half16,
-) -> [PreProcessedColumnId; 5] {
-    let t = round_split_tag(p, h);
-    [
-        shared_id(&format!("{t}_key")),
-        shared_id(&format!("{t}_g0")),
-        shared_id(&format!("{t}_g1")),
-        shared_id(&format!("{t}_g2")),
-        shared_id(&format!("{t}_g3")),
-    ]
-}
-
-/// IDs of the 3 preprocessed columns of one σ-side split-and-pack table.
-/// Order: `(key, packed_s, packed_s_complement)` matching
-/// `crate::relations::SIGMA_SPLIT_PACK_REL_SIZE`.
-pub fn sigma_split_pack_column_ids(p: LowerSigmaPartition, h: Half16) -> [PreProcessedColumnId; 3] {
-    let t = sigma_split_tag(p, h);
-    [
-        id(&format!("{t}_key")),
-        id(&format!("{t}_s")),
-        id(&format!("{t}_sp")),
-    ]
-}
-
-pub fn shared_sigma_split_pack_column_ids(
-    p: LowerSigmaPartition,
-    h: Half16,
-) -> [PreProcessedColumnId; 3] {
-    let t = sigma_split_tag(p, h);
-    [
-        shared_id(&format!("{t}_key")),
-        shared_id(&format!("{t}_s")),
-        shared_id(&format!("{t}_sp")),
-    ]
 }
 
 // ---------------------------------------------------------------------------
@@ -599,141 +523,6 @@ impl FrameworkEval for Xor8Eval {
 pub type Xor8Component = FrameworkComponent<Xor8Eval>;
 
 // ---------------------------------------------------------------------------
-// Round-side split-and-pack component
-// ---------------------------------------------------------------------------
-
-/// Producer for one of the four round-side split-and-pack tables.
-#[derive(Clone)]
-pub struct RoundSplitPackEval {
-    pub log_size: u32,
-    pub partition: RoundPartition,
-    pub half: Half16,
-    pub relations: Sha256Relations,
-    pub shared_tables: bool,
-}
-
-impl FrameworkEval for RoundSplitPackEval {
-    fn log_size(&self) -> u32 {
-        self.log_size
-    }
-    fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 1
-    }
-    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let cols = if self.shared_tables {
-            shared_round_split_pack_column_ids(self.partition, self.half)
-        } else {
-            round_split_pack_column_ids(self.partition, self.half)
-        };
-        let key = eval.get_preprocessed_column(cols[0].clone());
-        let g0 = eval.get_preprocessed_column(cols[1].clone());
-        let g1 = eval.get_preprocessed_column(cols[2].clone());
-        let g2 = eval.get_preprocessed_column(cols[3].clone());
-        let g3 = eval.get_preprocessed_column(cols[4].clone());
-        let mult = eval.next_trace_mask();
-        let values = [key, g0, g1, g2, g3];
-        let neg = -mult;
-        use crate::relations::*;
-        match (self.partition, self.half) {
-            (RoundPartition::Sigma0AndMaj, Half16::Lo) => emit::<E, Sigma0SplitPackLo>(
-                &mut eval,
-                &self.relations.split_pack.sigma0_lo,
-                neg,
-                &values,
-            ),
-            (RoundPartition::Sigma0AndMaj, Half16::Hi) => emit::<E, Sigma0SplitPackHi>(
-                &mut eval,
-                &self.relations.split_pack.sigma0_hi,
-                neg,
-                &values,
-            ),
-            (RoundPartition::Sigma1AndCh, Half16::Lo) => emit::<E, Sigma1SplitPackLo>(
-                &mut eval,
-                &self.relations.split_pack.sigma1_lo,
-                neg,
-                &values,
-            ),
-            (RoundPartition::Sigma1AndCh, Half16::Hi) => emit::<E, Sigma1SplitPackHi>(
-                &mut eval,
-                &self.relations.split_pack.sigma1_hi,
-                neg,
-                &values,
-            ),
-        }
-        eval.finalize_logup_in_pairs();
-        eval
-    }
-}
-
-pub type RoundSplitPackComponent = FrameworkComponent<RoundSplitPackEval>;
-
-// ---------------------------------------------------------------------------
-// σ-side split-and-pack component
-// ---------------------------------------------------------------------------
-
-#[derive(Clone)]
-pub struct SigmaSplitPackEval {
-    pub log_size: u32,
-    pub partition: LowerSigmaPartition,
-    pub half: Half16,
-    pub relations: Sha256Relations,
-    pub shared_tables: bool,
-}
-
-impl FrameworkEval for SigmaSplitPackEval {
-    fn log_size(&self) -> u32 {
-        self.log_size
-    }
-    fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 1
-    }
-    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let cols = if self.shared_tables {
-            shared_sigma_split_pack_column_ids(self.partition, self.half)
-        } else {
-            sigma_split_pack_column_ids(self.partition, self.half)
-        };
-        let key = eval.get_preprocessed_column(cols[0].clone());
-        let packed_s = eval.get_preprocessed_column(cols[1].clone());
-        let packed_sp = eval.get_preprocessed_column(cols[2].clone());
-        let mult = eval.next_trace_mask();
-        let values = [key, packed_s, packed_sp];
-        let neg = -mult;
-        use crate::relations::*;
-        match (self.partition, self.half) {
-            (LowerSigmaPartition::LowerSigma0, Half16::Lo) => emit::<E, LowerSigma0SplitPackLo>(
-                &mut eval,
-                &self.relations.split_pack.lower_sigma0_lo,
-                neg,
-                &values,
-            ),
-            (LowerSigmaPartition::LowerSigma0, Half16::Hi) => emit::<E, LowerSigma0SplitPackHi>(
-                &mut eval,
-                &self.relations.split_pack.lower_sigma0_hi,
-                neg,
-                &values,
-            ),
-            (LowerSigmaPartition::LowerSigma1, Half16::Lo) => emit::<E, LowerSigma1SplitPackLo>(
-                &mut eval,
-                &self.relations.split_pack.lower_sigma1_lo,
-                neg,
-                &values,
-            ),
-            (LowerSigmaPartition::LowerSigma1, Half16::Hi) => emit::<E, LowerSigma1SplitPackHi>(
-                &mut eval,
-                &self.relations.split_pack.lower_sigma1_hi,
-                neg,
-                &values,
-            ),
-        }
-        eval.finalize_logup_in_pairs();
-        eval
-    }
-}
-
-pub type SigmaSplitPackComponent = FrameworkComponent<SigmaSplitPackEval>;
-
-// ---------------------------------------------------------------------------
 // Range_k component
 // ---------------------------------------------------------------------------
 
@@ -811,12 +600,9 @@ pub type RangeKComponent = FrameworkComponent<RangeKEval>;
 /// (`finalize_logup_in_pairs`), halving the committed interaction width for
 /// the paired half. The producer's preprocessed columns, multiplicity column,
 /// relation, and fraction are byte-for-byte identical to the standalone
-/// `RoundSplitPackEval` / `SigmaSplitPackEval` / `RangeKEval` forms — only the
-/// column packaging changes.
+/// `RangeKEval` form — only the column packaging changes.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum SharedProducer {
-    RoundSplit(RoundPartition, Half16),
-    SigmaSplit(LowerSigmaPartition, Half16),
     Range(RangeKind),
 }
 
@@ -824,9 +610,6 @@ impl SharedProducer {
     /// `log2` of this producer's *real* table row count (lower half).
     pub fn log_size(self) -> u32 {
         match self {
-            SharedProducer::RoundSplit(..) | SharedProducer::SigmaSplit(..) => {
-                crate::preprocessed::LOG_SIZE_16
-            }
             SharedProducer::Range(kind) => range_log_size(kind),
         }
     }
@@ -843,8 +626,6 @@ impl SharedProducer {
     /// Stable per-producer tag, matching its preprocessed-column family.
     pub fn tag(self) -> &'static str {
         match self {
-            SharedProducer::RoundSplit(p, h) => round_split_tag(p, h),
-            SharedProducer::SigmaSplit(p, h) => sigma_split_tag(p, h),
             SharedProducer::Range(kind) => kind.tag(),
         }
     }
@@ -856,102 +637,6 @@ impl SharedProducer {
     fn emit_entry<E: EvalAtRow>(self, eval: &mut E, relations: &Sha256Relations) {
         use crate::relations::*;
         match self {
-            SharedProducer::RoundSplit(p, h) => {
-                let cols = shared_round_split_pack_column_ids(p, h);
-                let key = eval.get_preprocessed_column(cols[0].clone());
-                let g0 = eval.get_preprocessed_column(cols[1].clone());
-                let g1 = eval.get_preprocessed_column(cols[2].clone());
-                let g2 = eval.get_preprocessed_column(cols[3].clone());
-                let g3 = eval.get_preprocessed_column(cols[4].clone());
-                let is_dummy = eval.get_preprocessed_column(shared_producer_dummy_column_id(self));
-                let mult = eval.next_trace_mask();
-                let values = [key, g0, g1, g2, g3];
-                match (p, h) {
-                    (RoundPartition::Sigma0AndMaj, Half16::Lo) => {
-                        emit_blind::<E, Sigma0SplitPackLo>(
-                            eval,
-                            &relations.split_pack.sigma0_lo,
-                            mult,
-                            is_dummy,
-                            &values,
-                        )
-                    }
-                    (RoundPartition::Sigma0AndMaj, Half16::Hi) => {
-                        emit_blind::<E, Sigma0SplitPackHi>(
-                            eval,
-                            &relations.split_pack.sigma0_hi,
-                            mult,
-                            is_dummy,
-                            &values,
-                        )
-                    }
-                    (RoundPartition::Sigma1AndCh, Half16::Lo) => {
-                        emit_blind::<E, Sigma1SplitPackLo>(
-                            eval,
-                            &relations.split_pack.sigma1_lo,
-                            mult,
-                            is_dummy,
-                            &values,
-                        )
-                    }
-                    (RoundPartition::Sigma1AndCh, Half16::Hi) => {
-                        emit_blind::<E, Sigma1SplitPackHi>(
-                            eval,
-                            &relations.split_pack.sigma1_hi,
-                            mult,
-                            is_dummy,
-                            &values,
-                        )
-                    }
-                }
-            }
-            SharedProducer::SigmaSplit(p, h) => {
-                let cols = shared_sigma_split_pack_column_ids(p, h);
-                let key = eval.get_preprocessed_column(cols[0].clone());
-                let packed_s = eval.get_preprocessed_column(cols[1].clone());
-                let packed_sp = eval.get_preprocessed_column(cols[2].clone());
-                let is_dummy = eval.get_preprocessed_column(shared_producer_dummy_column_id(self));
-                let mult = eval.next_trace_mask();
-                let values = [key, packed_s, packed_sp];
-                match (p, h) {
-                    (LowerSigmaPartition::LowerSigma0, Half16::Lo) => {
-                        emit_blind::<E, LowerSigma0SplitPackLo>(
-                            eval,
-                            &relations.split_pack.lower_sigma0_lo,
-                            mult,
-                            is_dummy,
-                            &values,
-                        )
-                    }
-                    (LowerSigmaPartition::LowerSigma0, Half16::Hi) => {
-                        emit_blind::<E, LowerSigma0SplitPackHi>(
-                            eval,
-                            &relations.split_pack.lower_sigma0_hi,
-                            mult,
-                            is_dummy,
-                            &values,
-                        )
-                    }
-                    (LowerSigmaPartition::LowerSigma1, Half16::Lo) => {
-                        emit_blind::<E, LowerSigma1SplitPackLo>(
-                            eval,
-                            &relations.split_pack.lower_sigma1_lo,
-                            mult,
-                            is_dummy,
-                            &values,
-                        )
-                    }
-                    (LowerSigmaPartition::LowerSigma1, Half16::Hi) => {
-                        emit_blind::<E, LowerSigma1SplitPackHi>(
-                            eval,
-                            &relations.split_pack.lower_sigma1_hi,
-                            mult,
-                            is_dummy,
-                            &values,
-                        )
-                    }
-                }
-            }
             SharedProducer::Range(kind) => {
                 let value = eval.get_preprocessed_column(shared_range_column_id(kind));
                 let is_dummy = eval.get_preprocessed_column(shared_producer_dummy_column_id(self));
@@ -1035,13 +720,6 @@ pub type SharedProducerPairComponent = FrameworkComponent<SharedProducerPairEval
 /// both sides in sync or the verifier will read the wrong column.
 pub fn all_preprocessed_column_ids() -> Vec<PreProcessedColumnId> {
     let mut out = Vec::new();
-    // 4 round-side split-pack tables, then 4 σ-side.
-    for (p, h) in ROUND_SPLIT_TABLES {
-        out.extend(round_split_pack_column_ids(*p, *h));
-    }
-    for (p, h) in SIGMA_SPLIT_TABLES {
-        out.extend(sigma_split_pack_column_ids(*p, *h));
-    }
     // 4 range tables, in `RANGE_TABLES` order.
     for &kind in RANGE_TABLES {
         out.push(range_column_id(kind));
@@ -1049,7 +727,7 @@ pub fn all_preprocessed_column_ids() -> Vec<PreProcessedColumnId> {
     // 1 `is_first_row` selector sized to the main `Sha256Eval` trace. Read
     // by the consumer eval via `get_preprocessed_column` (not by any
     // producer component), so it lives at the tail of the ID list and is
-    // not allocated to any of the 22 producer components.
+    // not allocated to a producer component.
     out.push(is_first_row_column_id());
     // 9 round-cyclic columns of the rotated layout (K limbs + round
     // indicators + schedule gate), also consumer-read via
@@ -1066,22 +744,12 @@ pub fn consumer_preprocessed_column_ids() -> Vec<PreProcessedColumnId> {
 }
 
 pub fn shared_table_preprocessed_column_ids() -> Vec<PreProcessedColumnId> {
-    // Class D: each producer contributes its value/group columns followed by
+    // Class D: each producer contributes its value column followed by
     // its `is_dummy` selector, in the exact order `SharedProducer::emit_entry`
     // reads them (value cols via `get_preprocessed_column`, then the dummy
     // selector). `crate::preprocessed::generate_shared_table_preprocessed_trace`
     // emits the matching `CircleEvaluation`s in this same per-producer order.
     let mut out = Vec::new();
-    for (p, h) in ROUND_SPLIT_TABLES {
-        let producer = SharedProducer::RoundSplit(*p, *h);
-        out.extend(shared_round_split_pack_column_ids(*p, *h));
-        out.push(shared_producer_dummy_column_id(producer));
-    }
-    for (p, h) in SIGMA_SPLIT_TABLES {
-        let producer = SharedProducer::SigmaSplit(*p, *h);
-        out.extend(shared_sigma_split_pack_column_ids(*p, *h));
-        out.push(shared_producer_dummy_column_id(producer));
-    }
     for &kind in RANGE_TABLES {
         let producer = SharedProducer::Range(kind);
         out.push(shared_range_column_id(kind));
@@ -1101,22 +769,6 @@ pub const DECODE_TABLES: &[(SigmaFn, Half)] = &[
     (SigmaFn::LowerSigma0, Half::SComplement),
     (SigmaFn::LowerSigma1, Half::S),
     (SigmaFn::LowerSigma1, Half::SComplement),
-];
-
-/// The 4 round-side split-pack tables.
-pub const ROUND_SPLIT_TABLES: &[(RoundPartition, Half16)] = &[
-    (RoundPartition::Sigma0AndMaj, Half16::Lo),
-    (RoundPartition::Sigma0AndMaj, Half16::Hi),
-    (RoundPartition::Sigma1AndCh, Half16::Lo),
-    (RoundPartition::Sigma1AndCh, Half16::Hi),
-];
-
-/// The 4 σ-side split-pack tables.
-pub const SIGMA_SPLIT_TABLES: &[(LowerSigmaPartition, Half16)] = &[
-    (LowerSigmaPartition::LowerSigma0, Half16::Lo),
-    (LowerSigmaPartition::LowerSigma0, Half16::Hi),
-    (LowerSigmaPartition::LowerSigma1, Half16::Lo),
-    (LowerSigmaPartition::LowerSigma1, Half16::Hi),
 ];
 
 /// The 4 range-check tables in canonical order. Shared across `components`,
@@ -1166,24 +818,6 @@ mod tests {
         assert_eq!(
             xor_8_column_ids(),
             [id("xor_8_x"), id("xor_8_y"), id("xor_8_z")],
-        );
-        assert_eq!(
-            round_split_pack_column_ids(RoundPartition::Sigma0AndMaj, Half16::Lo),
-            [
-                id("sp_sigma0_lo_key"),
-                id("sp_sigma0_lo_g0"),
-                id("sp_sigma0_lo_g1"),
-                id("sp_sigma0_lo_g2"),
-                id("sp_sigma0_lo_g3"),
-            ],
-        );
-        assert_eq!(
-            sigma_split_pack_column_ids(LowerSigmaPartition::LowerSigma0, Half16::Lo),
-            [
-                id("sp_lsigma0_lo_key"),
-                id("sp_lsigma0_lo_s"),
-                id("sp_lsigma0_lo_sp"),
-            ],
         );
     }
 }

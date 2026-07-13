@@ -47,8 +47,7 @@ use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 
 use crate::components::{
     all_preprocessed_column_ids, consumer_preprocessed_column_ids, range_log_size, RangeKEval,
-    RoundSplitPackEval, Sha256Relations, SigmaSplitPackEval, RANGE_TABLES, ROUND_SPLIT_TABLES,
-    SIGMA_SPLIT_TABLES,
+    Sha256Relations, RANGE_TABLES,
 };
 use crate::constraints::{Sha256Eval, LOGUP_BATCH};
 use crate::field_exposure::FieldExposure;
@@ -66,9 +65,7 @@ use crate::interaction::{
     generate_consumer_interaction_trace, generate_interaction_trace, sha_lookups_per_row,
     InteractionClaim,
 };
-use crate::multiplicities::{
-    range_k_multiplicities, round_split_pack_multiplicities, sigma_split_pack_multiplicities,
-};
+use crate::multiplicities::range_k_multiplicities;
 use crate::preprocessed::{generate_preprocessed_trace, preprocessed_log_sizes, LOG_SIZE_16};
 use crate::relations::SharedShaTableRelations;
 use crate::trace::Layout;
@@ -112,8 +109,6 @@ fn layout(
 pub fn flatten_claimed_sums(claim: &InteractionClaim) -> Vec<QM31> {
     let mut out = Vec::new();
     out.push(claim.sha256.claimed_sum);
-    out.extend(claim.round_split_pack.iter().map(|c| c.claimed_sum));
-    out.extend(claim.sigma_split_pack.iter().map(|c| c.claimed_sum));
     out.extend(claim.range.iter().map(|c| c.claimed_sum));
     out
 }
@@ -1045,14 +1040,6 @@ fn build_base_trace(
         return base_trace;
     }
     // Multiplicity columns — same order as `Sha256Components::component_provers`.
-    for &(p, h) in ROUND_SPLIT_TABLES {
-        let mults = round_split_pack_multiplicities(witness, p, h);
-        base_trace.push(mult_col_to_eval(&mults, LOG_SIZE_16));
-    }
-    for &(p, h) in SIGMA_SPLIT_TABLES {
-        let mults = sigma_split_pack_multiplicities(witness, p, h);
-        base_trace.push(mult_col_to_eval(&mults, LOG_SIZE_16));
-    }
     for &kind in RANGE_TABLES {
         let mults = range_k_multiplicities(witness, kind, field_exposure);
         base_trace.push(mult_col_to_eval(&mults, range_log_size(kind)));
@@ -1077,9 +1064,6 @@ fn base_trace_log_sizes(
     if !include_table_providers {
         return out;
     }
-    // 4 round + 4 σ split-pack mults.
-    out.extend(std::iter::repeat_n(LOG_SIZE_16, ROUND_SPLIT_TABLES.len()));
-    out.extend(std::iter::repeat_n(LOG_SIZE_16, SIGMA_SPLIT_TABLES.len()));
     // 4 range mults, each at its own `range_log_size(kind)`.
     for &kind in RANGE_TABLES {
         out.push(range_log_size(kind));
@@ -1119,20 +1103,6 @@ fn interaction_trace_log_sizes(
     let _ = group_width;
     if !include_table_providers {
         return out;
-    }
-    // 4 round split-pack: 1 lookup each.
-    for _ in ROUND_SPLIT_TABLES {
-        out.extend(std::iter::repeat_n(
-            LOG_SIZE_16,
-            num_batched_cols(1, 2) * EXT,
-        ));
-    }
-    // 4 σ split-pack: 1 lookup each.
-    for _ in SIGMA_SPLIT_TABLES {
-        out.extend(std::iter::repeat_n(
-            LOG_SIZE_16,
-            num_batched_cols(1, 2) * EXT,
-        ));
     }
     // 4 Range_k producers: 1 lookup each, at the kind's own log_size.
     for &kind in RANGE_TABLES {
@@ -1180,9 +1150,7 @@ const fn num_batched_cols(n_lookups: usize, batch: usize) -> usize {
 /// Aggregate of every `FrameworkComponent` in the proof, in commit order.
 struct Sha256Components {
     sha256: FrameworkComponent<Sha256Eval>,
-    round_split_pack: Vec<FrameworkComponent<RoundSplitPackEval>>, // 4
-    sigma_split_pack: Vec<FrameworkComponent<SigmaSplitPackEval>>, // 4
-    range: Vec<FrameworkComponent<RangeKEval>>,                    // 4
+    range: Vec<FrameworkComponent<RangeKEval>>, // 4
 }
 
 impl Sha256Components {
@@ -1215,38 +1183,6 @@ impl Sha256Components {
         );
 
         let _ = group_width;
-        let mut round_split_pack = Vec::with_capacity(4);
-        if include_table_providers {
-            for (i, &(p, h)) in ROUND_SPLIT_TABLES.iter().enumerate() {
-                round_split_pack.push(FrameworkComponent::new(
-                    allocator,
-                    RoundSplitPackEval {
-                        log_size: LOG_SIZE_16,
-                        partition: p,
-                        half: h,
-                        relations: relations.clone(),
-                        shared_tables: false,
-                    },
-                    claim.round_split_pack[i].claimed_sum,
-                ));
-            }
-        }
-        let mut sigma_split_pack = Vec::with_capacity(4);
-        if include_table_providers {
-            for (i, &(p, h)) in SIGMA_SPLIT_TABLES.iter().enumerate() {
-                sigma_split_pack.push(FrameworkComponent::new(
-                    allocator,
-                    SigmaSplitPackEval {
-                        log_size: LOG_SIZE_16,
-                        partition: p,
-                        half: h,
-                        relations: relations.clone(),
-                        shared_tables: false,
-                    },
-                    claim.sigma_split_pack[i].claimed_sum,
-                ));
-            }
-        }
         let mut range = Vec::with_capacity(4);
         if include_table_providers {
             for (i, &kind) in RANGE_TABLES.iter().enumerate() {
@@ -1263,12 +1199,7 @@ impl Sha256Components {
             }
         }
 
-        Self {
-            sha256,
-            round_split_pack,
-            sigma_split_pack,
-            range,
-        }
+        Self { sha256, range }
     }
 
     /// Borrow every component as `dyn Component`, in commit order — the
@@ -1276,8 +1207,6 @@ impl Sha256Components {
     fn components(&self) -> Vec<&dyn Component> {
         let mut out: Vec<&dyn Component> = Vec::new();
         out.push(&self.sha256);
-        out.extend(self.round_split_pack.iter().map(|c| c as &dyn Component));
-        out.extend(self.sigma_split_pack.iter().map(|c| c as &dyn Component));
         out.extend(self.range.iter().map(|c| c as &dyn Component));
         out
     }
@@ -1287,16 +1216,6 @@ impl Sha256Components {
     fn component_provers(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
         let mut out: Vec<&dyn ComponentProver<SimdBackend>> = Vec::new();
         out.push(&self.sha256);
-        out.extend(
-            self.round_split_pack
-                .iter()
-                .map(|c| c as &dyn ComponentProver<SimdBackend>),
-        );
-        out.extend(
-            self.sigma_split_pack
-                .iter()
-                .map(|c| c as &dyn ComponentProver<SimdBackend>),
-        );
         out.extend(
             self.range
                 .iter()

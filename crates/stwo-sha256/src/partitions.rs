@@ -386,15 +386,10 @@ impl RoundGroups {
 /// lo (`< 16`) and hi (`≥ 16`) 16-bit word half, returned as
 /// `(lo_indices, hi_indices)` in ascending index order.
 ///
-/// This is the projection the round-side split-and-pack lookup keys on: the
-/// lo-half table row carries the packed groups at `lo_indices`, the hi-half
-/// row those at `hi_indices`. The order matches
-/// [`crate::tables::build_round_split_pack_table`], which iterates
-/// `s.chain(s_complement)` filtered by half — i.e. `groups_in_order()`
-/// filtered by half, preserving index order. Under the `W = 6` partition
-/// each half holds exactly four sub-groups, so both vectors have length 4
-/// (matching `key + 4 groups = ROUND_SPLIT_PACK_REL_SIZE` cells). The split
-/// differs per partition: `Σ0` projects lo `[0,1,4,5]` / hi `[2,3,6,7]`;
+/// The order is `groups_in_order()` filtered by half, preserving index order.
+/// Under the `W = 6` partition each half holds exactly four sub-groups. The
+/// projection differs per partition: `Σ0` uses lo `[0,1,4,5]` / hi
+/// `[2,3,6,7]`;
 /// `Σ1` projects lo `[0,4,5,6]` / hi `[1,2,3,7]`.
 pub fn round_groups_half_indices(groups: &RoundGroups) -> (Vec<usize>, Vec<usize>) {
     let mut lo = Vec::new();
@@ -418,7 +413,7 @@ pub fn round_groups_half_indices(groups: &RoundGroups) -> (Vec<usize>, Vec<usize
 /// The packed-group representation is what the `Maj`/`Ch` lookup keys on —
 /// because `Maj` and `Ch` are bitwise, the same packed-table row pattern
 /// applies at every group position; the natural-position spread is what
-/// the split-and-pack lookup (3.9.5) reconstructs.
+/// the natural-position spread reconstructs.
 pub fn pack_round_groups(w: u32, groups: &RoundGroups) -> [u32; GROUPS_PER_ROUND_PARTITION] {
     let mut out = [0u32; GROUPS_PER_ROUND_PARTITION];
     for (i, g) in groups.groups_in_order().iter().enumerate() {
@@ -627,9 +622,7 @@ mod tests {
     /// lo/hi 16-bit word halves. Pin the exact projection for both
     /// partitions (it differs per partition) and cross-check that every
     /// listed index really points at a group living in that half. The
-    /// constraint side (`wire_round_split_pack`) and the prover side
-    /// (`write_round_split_pack_pair`) both key on this projection, so a
-    /// drift here breaks the LogUp balance.
+    /// This pins the partition's half-boundary invariant.
     #[test]
     fn round_groups_half_indices_match_sub_group_bit_lists() {
         let (lo0, hi0) = round_groups_half_indices(&SIGMA0_GROUPS);
@@ -740,8 +733,8 @@ mod tests {
     /// σ-partition equivalent: `(packed_s_lo + hi_coeff_s · packed_s_hi,
     /// packed_s_complement_lo + hi_coeff_s_complement · packed_s_complement_hi)`
     /// equals `pack_half_key(x, ±s_mask)`. The packed-{lo,hi} values come
-    /// from the σ split-and-pack lookups; this test pins the coefficients
-    /// to the value `pack_half_key` would produce.
+    /// from the per-half partitioning; this test pins the coefficients to
+    /// the value `pack_half_key` would produce.
     #[test]
     fn lower_sigma_key_coeffs_reassemble_pack_half_key() {
         use crate::tables::pack_half_key;

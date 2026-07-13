@@ -4,14 +4,14 @@
 //! (`crate::preprocessed`), base-trace commitment of the Sha256Eval trace
 //! plus the producer-side multiplicity columns, interaction trace per
 //! component (`crate::interaction`), and finally Stwo's `prove<SimdBackend>`
-//! over the 23 components in `crate::components` (1 consumer + 8 σ/Σ
-//! decode + 1 packed Maj/Ch + 1 `xor_8` + 8 split-and-pack + 4 `Range_k`).
+//! over the consumer and four `Range_k` producer components in
+//! `crate::components`.
 //!
 //! Component composition pattern matches `../sha256-air/src/lib.rs`
 //! (structural reference) and the Blake example in
 //! `stwo/examples/blake/air.rs`. Constraint-layer soundness covers
-//! every lookup the AIR consumes: Σ/σ decode, packed Maj/Ch, `xor_8`,
-//! split-and-pack, and the four `Range_k` carry / terminal-limb channels.
+//! every lookup the AIR consumes: the four `Range_k` carry / terminal-limb
+//! channels plus the optional digest and field relations.
 //!
 //! Order discipline: every `mix_into` on the channel **must** happen in
 //! the same order on the prover and verifier sides — drift silently

@@ -29,12 +29,12 @@ Baseline: `ce26b934` (S9)
 
 ## Milestone Q3 — attribute-only small-load SHA
 
-- [ ] Record the exact remaining attribute block/load distribution after Q2.
-- [ ] Specify the replacement AIR, including degree worksheet, lookup/range strategy, transcript
+- [x] Record the exact remaining attribute block/load distribution after Q2.
+- [x] Specify the replacement AIR, including degree worksheet, lookup/range strategy, transcript
       shape, adversarial cases, and old/new cell/column model.
-- [ ] Implement the minimum sound attribute-only SHA design without changing shared
+- [x] Implement the minimum sound attribute-only SHA design without changing shared
       `air-core`, `stwo-keccak`, or `stwo-mldsa` unless the design proves it necessary.
-- [ ] Differential-test digests against `sha2` across production and boundary message lengths.
+- [x] Differential-test digests against `sha2` across production and boundary message lengths.
 - [ ] Run adversarial constraint tests, full quantum gates, and same-session A/B benchmarks.
 - [ ] Commit and push Q3.
 
@@ -77,3 +77,11 @@ Baseline: `ce26b934` (S9)
   37 prover tests pass (393.84 s), plus 13 SDK and 2 FFI tests. The broader debug workspace test
   umbrella was interrupted after exceeding 20 minutes without emitting a result; the product-scoped
   acceptance rails above completed cleanly.
+- Q3 core replaces per-yield field selectors with one selector per target block and deletes the
+  redundant split-pack representation now superseded by the hybrid boolean-bit AIR: 56 consumer
+  trace columns, 24 consumer lookup sites, and eight 2^16-row table producers are gone. The merged
+  production SHA model falls from 1,098 to 951 columns at log 9; the table deletion saves 8,429,568
+  committed cells before the additional 34,304-cell selector saving.
+- Q3 core verification: workspace all-target check, strict all-target clippy, formatting, and all
+  148 active `stwo-sha256` tests pass (19 explicitly ignored). Differential vectors include the
+  85-byte nationality and 92-byte birth-date production payload lengths plus SHA padding boundaries.
