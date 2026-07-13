@@ -219,3 +219,91 @@ Horner-mask hard constraint also forbids the naive 2-slot accumulator.
 No slice landed a measured improvement; the three numbers are unchanged from the
 baseline above (single FRI frontier — no code change). The only lever that
 reaches <1 MB is the Q4a `keccak_round` GKR offload, scoped as a dedicated WO.
+
+## Q5 — keccak_round GKR offload: transport + component LANDED, offload STOPPED
+
+WO goal (Q4a): offload `keccak_round`'s ~908 log-11 interaction columns into a
+LogUp-GKR proof to clear the −83 KB gap to <1 MB. This session delivered the two
+foundational, independently-verified prerequisites the §8.2/§S10 STOP called out,
+then **stopped before the invasive AIR flip** — the remaining tie-back is a
+research-grade build, not a session checkpoint, and an honest stop beats a
+forced, soundness-critical integration.
+
+### Landed (green, committed)
+
+**W1 — GKR proof transport in the air-core wire** (`feat/quantum-safe`,
+air-core commit).
+- air-core carries an opaque per-module post-interaction payload beside the
+  `StarkProof`: `prove_with_post_interaction → (StarkProof, Vec<Vec<u8>>)` and
+  `verify_with_expected_preprocessed_root_and_payloads(..., &[Vec<u8>])`. The
+  existing `prove`/`verify`/`verify_with_expected_preprocessed_root` stay as
+  zero-churn wrappers, so the ~40 empty-payload call sites are untouched.
+- New `air_core::gkr`: lossless serde transport for stwo's `GkrBatchProof`
+  (encode/decode via its public accessors + `GkrMask::new` / `UnivariatePoly::new`
+  / `SumcheckProof.round_polys`).
+- Trait hooks `AirProver::take_post_interaction_payload` /
+  `Air::load_post_interaction_payload` (default no-op).
+- FS binding confirmed against the existing doc order: GKR runs inside
+  `prove_/verify_post_interaction` (post tree-2), so the proof is bound to
+  trees 1/2, the drawn relations, and the claimed sums; tie-back columns commit
+  after in tree 3.
+- Toy end-to-end test through `prove`/`verify` (GKR grand-product instance):
+  round-trips and verifies; **corrupted blob rejects**; **wrong claimed sum
+  rejects**. air-core 15/15 green; `cargo check --workspace` clean.
+
+**W2 — MLE-eval component productionized in the fork** (`~/stwo` dev-copy,
+local commit `6621507a`).
+- Promoted `xor::gkr_lookups::mle_eval` (dead-code example, 1,308 lines) into
+  `stwo-constraint-framework::mle_eval` (gated `prover` + `std`), retaining the
+  `8c998390` eval-domain fix (quotient evaluated on
+  `log_size + composition_log_split`).
+- Faithful move of `MleEvalProverComponent` / `MleEvalVerifierComponent`, the
+  `MleCoeffColumnOracle` trait, `MleEvalPoint`, the eq / prefix-sum /
+  carry-quotient constraint helpers and `build_trace`; local `IsFirst`;
+  `mle_eval_at_point` folded in as a `cfg(test)` oracle; `dead_code` allow
+  dropped. Example left intact.
+- Own 9 unit tests, including both end-to-end prover + verifier components
+  through a real commitment scheme. constraint-framework 22/22 green; default
+  (non-prover) build clean; the eu-id consumer (`stwo-keccak`) still builds
+  against the patched fork.
+
+### STOPPED — W3 (the offload itself)
+
+**No FS/soundness *structural* blocker exists.** Relations are drawn post-tree-1
+before GKR runs; the fraction multiset is exactly reproducible from committed
+base columns; the claimed sum is preserved. The blocker is engineering magnitude
+on a soundness-critical component:
+
+1. **Bespoke denominator oracle (the hard, unbuilt piece).** `keccak_round`'s
+   fractions are `N_TOTAL_LOOKUPS` per row across FOUR relation families —
+   `keccak_round` link, `xor3`, per-shift `split[1..8]`, `andnot` — batched by
+   `finalize_logup_batched(LOGUP_BATCH)` (`keccak_round.rs:763-886`). Each
+   denominator is `relation.combine(tuple)` = an affine form `z − Σαⱼ·tupleⱼ` in
+   base-column entries. The GKR tie-back needs an `MleCoeffColumnOracle` that
+   reconstructs this batched, selector-weighted denominator multiset as an MLE
+   over the committed base columns and evaluates it at the GKR OOD point — a
+   selector-MLE-weighted linear combination across all four families with
+   per-shift split relations. That is a dedicated build (mirroring the
+   `toy_horner` de-risk done for `mldsa_coeffs`), not a session checkpoint.
+2. **AIR surgery.** `evaluate_round` must drop `finalize_logup_batched` (its
+   LogUp is now GKR's); the round's LogUp enforcement is replaced by the W2
+   MLE-eval tie-back component committed in the post-interaction tree — an
+   invasive change to a soundness-critical `FrameworkEval`.
+3. **Claims + shape accounting.** The service's claimed-sums vector and the mdoc
+   `hosted_claimed_sums_len` shape gates must move the round's claimed sum from a
+   columnar to a GKR-backed slot and fail-closed on the new shape.
+4. **Adversarial rails + measurement — downstream of (1)-(3), not yet possible.**
+   tamper-round-link-tuple → reject; GKR-claim-swap → reject; a
+   `composition_log_split = 2` regression on the tie-back component; existing
+   service tamper negatives stay green; then the `pq_perf_probe` +
+   `AIR_CORE_SHAPE_DUMP` census with the GKR-blob-net wire-size breakdown.
+
+### Result vs gates
+
+proof `<1 MB` **NOT met** this session — nothing is removed from the wire yet
+(W3 did not land). No campaign scoreboard vs the 72.7 s / 372.7 ms / 34.4 MB
+baseline is written, because the offload did not land. The two landed
+checkpoints are exactly the transport + productionized-component prerequisites
+§8.2 flagged; the residual WO is the round-denominator oracle + AIR flip +
+claims/shape accounting + adversarial negatives + measurement, still a dedicated
+multi-checkpoint soundness-critical build.
