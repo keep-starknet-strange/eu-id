@@ -581,6 +581,7 @@ impl Components {
             keccak_round::Eval {
                 claim: *round_claim,
                 relations: relations.clone(),
+                gkr_offload: false,
             },
             ic.round.claimed_sum,
         );

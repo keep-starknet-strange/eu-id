@@ -200,6 +200,7 @@ fn build_components(
                 log_size: round_log_size(n),
             },
             relations: relations.clone(),
+            gkr_offload: false,
         },
         claims.round,
     );

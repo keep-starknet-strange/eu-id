@@ -91,7 +91,7 @@ const N_COLUMNS: usize = 1
     + N_ANDNOT_LOOKUPS             // chi andnot outputs
     + N_XOR3_CHI_CLOSE; // chi closing outputs (new state, incl. iota)
 
-const N_TOTAL_LOOKUPS: usize =
+pub const N_TOTAL_LOOKUPS: usize =
     N_KECCAK_ROUND_LOOKUPS + N_XOR3_LOOKUPS + N_ANDNOT_LOOKUPS + N_SPLIT_LOOKUPS;
 
 /// Logup fractions batched per interaction column (`finalize_logup_batched`).
@@ -538,10 +538,36 @@ fn rotr_split(
 
 // ─────────────────────────────── Constraints ───────────────────────────────
 
+/// Which relation family one collected round lookup belongs to.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RoundLookupKind {
+    /// `keccak_round` chain link.
+    Kr,
+    Xor3,
+    Andnot,
+    /// Sub-byte shift `r`; indexes `rel.split[r - 1]`.
+    Split(usize),
+}
+
+/// One collected round lookup: family + numerator + tuple, in the component's
+/// canonical emission order (== `generate_interaction_trace`).
+pub struct RoundLookup<E: EvalAtRow> {
+    pub kind: RoundLookupKind,
+    /// The logup numerator: `∓enabler` for the two chain links (kr[0] is the
+    /// NEGATED require, kr[1] the positive yield), `1` otherwise.
+    pub num: E::EF,
+    pub tuple: Vec<E::F>,
+}
+
 #[derive(Clone)]
 pub struct Eval {
     pub claim: Claim,
     pub relations: KeccakRelations,
+    /// `true` = the round's LogUp is offloaded to GKR: the component emits NO
+    /// interaction columns and only the enabler booleanity constraint; the
+    /// lookup multiset is proven by the host's GKR proof + MLE-eval tie-back
+    /// over the same base columns this eval masks.
+    pub gkr_offload: bool,
 }
 
 impl FrameworkEval for Eval {
@@ -549,20 +575,60 @@ impl FrameworkEval for Eval {
         self.claim.log_size
     }
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        // Every logup numerator is degree ≤ 1 (±enabler or 1) and every tuple
-        // cell — hence every denominator — is degree ≤ 1, so batch-4 logup
-        // constraints are degree 1 + 4·1 = 5 ≤ D5, which log + 2 affords.
-        self.log_size() + 2
+        if self.gkr_offload {
+            // Only the degree-2 enabler booleanity remains in-AIR.
+            self.log_size() + 1
+        } else {
+            // Every logup numerator is degree ≤ 1 (±enabler or 1) and every
+            // tuple cell — hence every denominator — is degree ≤ 1, so batch-4
+            // logup constraints are degree 1 + 4·1 = 5 ≤ D5 (log + 2).
+            self.log_size() + 2
+        }
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        evaluate_round(&mut eval, &self.relations);
+        if self.gkr_offload {
+            // Mask every base column (the tie-back oracle replays this walk at
+            // the OODS point) and keep the booleanity constraint; the lookups
+            // themselves are GKR's.
+            let _ = collect_round_lookups(&mut eval);
+        } else {
+            evaluate_round(&mut eval, &self.relations);
+        }
         eval
     }
 }
 
-/// The round constraint body, extracted so the negative-test collector can
-/// reuse it against a hand-built `EvalAtRow`.
+/// The legacy columnar round body: collect the lookups, emit them through the
+/// framework's LogUp, batch-finalize. Kept for the standalone `stark.rs` AIR
+/// and as the reference emission order for the GKR offload.
 pub fn evaluate_round<E: EvalAtRow>(eval: &mut E, rel: &KeccakRelations) {
+    for lk in collect_round_lookups(eval) {
+        match lk.kind {
+            RoundLookupKind::Kr => {
+                eval.add_to_relation(RelationEntry::new(&rel.keccak_round, lk.num, &lk.tuple))
+            }
+            RoundLookupKind::Xor3 => {
+                eval.add_to_relation(RelationEntry::new(&rel.xor3, lk.num, &lk.tuple))
+            }
+            RoundLookupKind::Andnot => {
+                eval.add_to_relation(RelationEntry::new(&rel.andnot, lk.num, &lk.tuple))
+            }
+            RoundLookupKind::Split(r) => {
+                eval.add_to_relation(RelationEntry::new(&rel.split[r - 1], lk.num, &lk.tuple))
+            }
+        }
+    }
+    eval.finalize_logup_batched(LOGUP_BATCH);
+}
+
+/// Walk the round's base-column masks, add the enabler booleanity constraint,
+/// and return every lookup (family, numerator, tuple) in emission order.
+///
+/// This is THE canonical order: `generate_interaction_trace`, the GKR leaf
+/// layout, and the tie-back oracle all mirror it slot for slot.
+pub fn collect_round_lookups<E: EvalAtRow>(eval: &mut E) -> Vec<RoundLookup<E>> {
+    let mut lookups: Vec<RoundLookup<E>> = Vec::with_capacity(N_TOTAL_LOOKUPS);
+
     let enabler = eval.next_trace_mask();
     eval.add_constraint(enabler.clone() * (E::F::one() - enabler.clone()));
     let enabler_ef = E::EF::from(enabler);
@@ -571,13 +637,13 @@ pub fn evaluate_round<E: EvalAtRow>(eval: &mut E, rel: &KeccakRelations) {
     let next_rc: [E::F; N_BYTES_IN_U64] = std::array::from_fn(|_| eval.next_trace_mask());
     let state: [E::F; N_BYTES_IN_STATE] = std::array::from_fn(|_| eval.next_trace_mask());
 
-    // Incoming chain link (require).
+    // Incoming chain link (require, NEGATED numerator).
     let round_data: Vec<E::F> = current_rc.iter().chain(state.iter()).cloned().collect();
-    eval.add_to_relation(RelationEntry::new(
-        &rel.keccak_round,
-        -enabler_ef.clone(),
-        &round_data,
-    ));
+    lookups.push(RoundLookup {
+        kind: RoundLookupKind::Kr,
+        num: -enabler_ef.clone(),
+        tuple: round_data,
+    });
 
     // Spread state limbs, lane-grouped.
     let S0: [[E::F; N_BYTES_IN_U64]; N_LANES_KECCAK] = std::array::from_fn(|lane| {
@@ -591,8 +657,7 @@ pub fn evaluate_round<E: EvalAtRow>(eval: &mut E, rel: &KeccakRelations) {
         for i in 0..N_BYTES_IN_U64 {
             let t = eval.next_trace_mask();
             xor3_lookup(
-                eval,
-                rel,
+                &mut lookups,
                 &[
                     S0[x][i].clone(),
                     S0[x + 5][i].clone(),
@@ -602,8 +667,7 @@ pub fn evaluate_round<E: EvalAtRow>(eval: &mut E, rel: &KeccakRelations) {
             );
             let c = eval.next_trace_mask();
             xor3_lookup(
-                eval,
-                rel,
+                &mut lookups,
                 &[t.clone(), S0[x + 15][i].clone(), S0[x + 20][i].clone()],
                 &c,
             );
@@ -612,8 +676,9 @@ pub fn evaluate_round<E: EvalAtRow>(eval: &mut E, rel: &KeccakRelations) {
     }
 
     // rotl(C[x+1],1) = rotr(C[x+1],63): r=7 splits.
-    let Crot: [[E::F; N_BYTES_IN_U64]; SQRT_N_LANES] =
-        std::array::from_fn(|x| rotr_constraint(eval, rel, &C[(x + 1) % SQRT_N_LANES], 63));
+    let Crot: [[E::F; N_BYTES_IN_U64]; SQRT_N_LANES] = std::array::from_fn(|x| {
+        rotr_constraint(eval, &mut lookups, &C[(x + 1) % SQRT_N_LANES], 63)
+    });
 
     // Theta-apply (fused): res_S = S ^ C[x-1] ^ Crot[x].
     let mut S: [[E::F; N_BYTES_IN_U64]; N_LANES_KECCAK] =
@@ -625,8 +690,7 @@ pub fn evaluate_round<E: EvalAtRow>(eval: &mut E, rel: &KeccakRelations) {
             for i in 0..N_BYTES_IN_U64 {
                 let res = eval.next_trace_mask();
                 xor3_lookup(
-                    eval,
-                    rel,
+                    &mut lookups,
                     &[S0[id][i].clone(), C[xm1][i].clone(), Crot[x][i].clone()],
                     &res,
                 );
@@ -643,7 +707,7 @@ pub fn evaluate_round<E: EvalAtRow>(eval: &mut E, rel: &KeccakRelations) {
             let off = RHO_OFFSETS[x][y];
             let rotr = if off == 0 { 0 } else { 64 - off };
             let dst = 5 * y + ((2 * x + 3 * y) % SQRT_N_LANES);
-            B[dst] = rotr_constraint(eval, rel, &S[x + 5 * y], rotr);
+            B[dst] = rotr_constraint(eval, &mut lookups, &S[x + 5 * y], rotr);
         }
     }
 
@@ -658,7 +722,7 @@ pub fn evaluate_round<E: EvalAtRow>(eval: &mut E, rel: &KeccakRelations) {
             let out_idx = x + 5 * y;
             for i in 0..N_BYTES_IN_U64 {
                 let an = eval.next_trace_mask();
-                andnot_lookup(eval, rel, &B[b1_idx][i], &B[b2_idx][i], &an);
+                andnot_lookup(&mut lookups, &B[b1_idx][i], &B[b2_idx][i], &an);
                 let out = eval.next_trace_mask();
                 // iota folds into output-lane-0's closing xor3: the rc columns
                 // carry spread(rc), so the third input is `current_rc[i]`.
@@ -667,50 +731,58 @@ pub fn evaluate_round<E: EvalAtRow>(eval: &mut E, rel: &KeccakRelations) {
                 } else {
                     E::F::zero()
                 };
-                xor3_lookup(eval, rel, &[B[a_idx][i].clone(), an.clone(), third], &out);
+                xor3_lookup(
+                    &mut lookups,
+                    &[B[a_idx][i].clone(), an.clone(), third],
+                    &out,
+                );
                 out_state[out_idx][i] = out;
             }
         }
     }
 
-    // Outgoing chain link (yield): spread state.
+    // Outgoing chain link (yield, POSITIVE numerator): spread state.
     let mut out: Vec<E::F> = next_rc.to_vec();
     for lane in &out_state {
         out.extend(lane.iter().cloned());
     }
-    eval.add_to_relation(RelationEntry::new(&rel.keccak_round, enabler_ef, &out));
+    lookups.push(RoundLookup {
+        kind: RoundLookupKind::Kr,
+        num: enabler_ef,
+        tuple: out,
+    });
 
-    eval.finalize_logup_batched(LOGUP_BATCH);
+    debug_assert_eq!(lookups.len(), N_TOTAL_LOOKUPS);
+    lookups
 }
 
-fn xor3_lookup<E: EvalAtRow>(eval: &mut E, rel: &KeccakRelations, ins: &[E::F; 3], out: &E::F) {
+fn xor3_lookup<E: EvalAtRow>(lookups: &mut Vec<RoundLookup<E>>, ins: &[E::F; 3], out: &E::F) {
     let key = ins[0].clone() + ins[1].clone() + ins[2].clone();
-    eval.add_to_relation(RelationEntry::new(
-        &rel.xor3,
-        E::EF::one(),
-        &[key, out.clone()],
-    ));
+    lookups.push(RoundLookup {
+        kind: RoundLookupKind::Xor3,
+        num: E::EF::one(),
+        tuple: vec![key, out.clone()],
+    });
 }
 
 fn andnot_lookup<E: EvalAtRow>(
-    eval: &mut E,
-    rel: &KeccakRelations,
+    lookups: &mut Vec<RoundLookup<E>>,
     b1: &E::F,
     b2: &E::F,
     out: &E::F,
 ) {
     let u = b1.clone() + b2.clone() + b2.clone();
-    eval.add_to_relation(RelationEntry::new(
-        &rel.andnot,
-        E::EF::one(),
-        &[u, out.clone()],
-    ));
+    lookups.push(RoundLookup {
+        kind: RoundLookupKind::Andnot,
+        num: E::EF::one(),
+        tuple: vec![u, out.clone()],
+    });
 }
 
 /// Rho rotation in the constraint domain on spread limbs; mirrors `rotr_split`.
 fn rotr_constraint<E: EvalAtRow>(
     eval: &mut E,
-    rel: &KeccakRelations,
+    lookups: &mut Vec<RoundLookup<E>>,
     a: &[E::F; N_BYTES_IN_U64],
     n: usize,
 ) -> [E::F; N_BYTES_IN_U64] {
@@ -727,11 +799,11 @@ fn rotr_constraint<E: EvalAtRow>(
     let lo: [E::F; N_BYTES_IN_U64] =
         std::array::from_fn(|i| rot[i].clone() - hi[i].clone() * four_pow_r);
     for i in 0..N_BYTES_IN_U64 {
-        eval.add_to_relation(RelationEntry::new(
-            &rel.split[r - 1],
-            E::EF::one(),
-            &[rot[i].clone(), hi[i].clone(), lo[i].clone()],
-        ));
+        lookups.push(RoundLookup {
+            kind: RoundLookupKind::Split(r),
+            num: E::EF::one(),
+            tuple: vec![rot[i].clone(), hi[i].clone(), lo[i].clone()],
+        });
     }
     std::array::from_fn(|i| hi[i].clone() + lo[(i + 1) % N_BYTES_IN_U64].clone() * four_pow_8mr)
 }
@@ -767,12 +839,48 @@ pub fn generate_interaction_trace(
     InteractionClaim,
     Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
 ) {
-    let log_size = std::cmp::max(
+    let log_size = data_log_size(data);
+    let mut gen = LogupTraceGenerator::new(log_size);
+    let n_vec_rows = 1usize << (log_size - LOG_N_LANES);
+    let fracs = build_fracs(rel, data);
+
+    // Fold each chunk exactly like `finalize_logup_batched`: start from the
+    // first fraction, then num = d·num + n·den, den = den·d.
+    for chunk in fracs.chunks(LOGUP_BATCH) {
+        let mut col = gen.new_col();
+        for vr in 0..n_vec_rows {
+            let (mut num, mut den) = (chunk[0].0[vr], chunk[0].1[vr]);
+            for (n, d) in &chunk[1..] {
+                num = d[vr] * num + n[vr] * den;
+                den *= d[vr];
+            }
+            col.write_frac(vr, num, den);
+        }
+        col.finalize_col();
+    }
+
+    let (trace, claimed_sum) = gen.finalize_last();
+    (InteractionClaim { claimed_sum }, trace)
+}
+
+/// The padded row log-size a witness proves at.
+pub fn data_log_size(data: &InteractionClaimData) -> u32 {
+    std::cmp::max(
         data.non_padded_length.next_power_of_two().ilog2(),
         LOG_N_LANES,
-    );
+    )
+}
+
+/// The per-lookup fraction columns `(num, den)` over the packed rows, one pair
+/// per lookup slot in canonical emission order (== `collect_round_lookups`).
+/// The single source for the columnar interaction trace, the GKR leaf layers,
+/// and the tie-back coeff column.
+pub fn build_fracs(
+    rel: &KeccakRelations,
+    data: &InteractionClaimData,
+) -> Vec<(Vec<PackedQM31>, Vec<PackedQM31>)> {
+    let log_size = data_log_size(data);
     let enabler = Enabler::new(data.non_padded_length);
-    let mut gen = LogupTraceGenerator::new(log_size);
     let n_vec_rows = 1usize << (log_size - LOG_N_LANES);
 
     let mut fracs: Vec<(Vec<PackedQM31>, Vec<PackedQM31>)> = Vec::with_capacity(N_TOTAL_LOOKUPS);
@@ -819,24 +927,7 @@ pub fn generate_interaction_trace(
     ));
 
     debug_assert_eq!(fracs.len(), N_TOTAL_LOOKUPS);
-
-    // Fold each chunk exactly like `finalize_logup_batched`: start from the
-    // first fraction, then num = d·num + n·den, den = den·d.
-    for chunk in fracs.chunks(LOGUP_BATCH) {
-        let mut col = gen.new_col();
-        for vr in 0..n_vec_rows {
-            let (mut num, mut den) = (chunk[0].0[vr], chunk[0].1[vr]);
-            for (n, d) in &chunk[1..] {
-                num = d[vr] * num + n[vr] * den;
-                den *= d[vr];
-            }
-            col.write_frac(vr, num, den);
-        }
-        col.finalize_col();
-    }
-
-    let (trace, claimed_sum) = gen.finalize_last();
-    (InteractionClaim { claimed_sum }, trace)
+    fracs
 }
 
 fn dense_fraction<R: Relation<PackedM31, PackedQM31>>(
