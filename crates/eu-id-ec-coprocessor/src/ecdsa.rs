@@ -4715,6 +4715,9 @@ mod tests {
     use crate::sumcheck::{
         prove_evaluated_circuit_sorted_sparse_profiled, verify_circuit_sorted_sparse_profiled,
     };
+    use p256::ecdsa::signature::Signer;
+    use p256::ecdsa::{Signature as P256Signature, SigningKey};
+    use sha2::Sha256;
 
     fn p4b_microbench_input(seed: u8) -> EcdsaInput {
         EcdsaInput {
@@ -4736,6 +4739,82 @@ mod tests {
             }
             share
         }))
+    }
+
+    fn signed_p4b_input(secret: u8, message: &[u8]) -> EcdsaInput {
+        let signing_key = SigningKey::from_bytes((&[secret; 32]).into()).unwrap();
+        let signature: P256Signature = signing_key.sign(message);
+        let public_key = signing_key.verifying_key().to_encoded_point(false);
+        let mut qx = [0u8; 32];
+        let mut qy = [0u8; 32];
+        qx.copy_from_slice(public_key.x().unwrap());
+        qy.copy_from_slice(public_key.y().unwrap());
+        EcdsaInput {
+            z: Sha256::digest(message).into(),
+            r: signature.r().to_bytes().into(),
+            s: signature.s().to_bytes().into(),
+            qx,
+            qy,
+        }
+    }
+
+    fn median_duration(values: &mut [Duration]) -> Duration {
+        values.sort_unstable();
+        values[values.len() / 2]
+    }
+
+    fn compare_dense_and_structured_claim_verification(
+        label: &str,
+        max_structured_calls: usize,
+        issuer_projection: &EcdsaPublicProjection,
+        device_projection: &EcdsaPublicProjection,
+        revocation_projection: Option<&EcdsaPublicProjection>,
+        bundle: &ImplementedCircuitBundle,
+    ) {
+        let mut dense_times = Vec::with_capacity(7);
+        let mut structured_times = Vec::with_capacity(7);
+        let mut dense_calls = 0usize;
+        let mut structured_calls = 0usize;
+        for iteration in 0..7 {
+            for structured in [iteration % 2 == 1, iteration % 2 == 0] {
+                crate::ligero::set_structured_claims_for_test(Some(structured));
+                crate::ligero::reset_circle_weight_encode_call_count();
+                let profile = verify_mdoc_p4b_circuit_bundle_profiled(
+                    issuer_projection,
+                    device_projection,
+                    revocation_projection,
+                    bundle,
+                    [9u8; 32],
+                )
+                .unwrap();
+                let calls = crate::ligero::circle_weight_encode_call_count();
+                if structured {
+                    structured_times.push(profile.claim_batch);
+                    structured_calls = calls;
+                } else {
+                    dense_times.push(profile.claim_batch);
+                    dense_calls = calls;
+                }
+            }
+        }
+        crate::ligero::set_structured_claims_for_test(None);
+        let dense = median_duration(&mut dense_times);
+        let structured = median_duration(&mut structured_times);
+        eprintln!(
+            "{label}_claim_batch_dense_ms={:.3} structured_ms={:.3} dense_weight_encodes={} structured_weight_encodes={}",
+            dense.as_secs_f64() * 1_000.0,
+            structured.as_secs_f64() * 1_000.0,
+            dense_calls,
+            structured_calls,
+        );
+        assert!(
+            structured_calls * 4 <= dense_calls * 3,
+            "structured evaluator must cut Circle row encodes by at least 25%"
+        );
+        assert!(
+            structured_calls <= max_structured_calls,
+            "{label} used {structured_calls} structured weight encodes; gate is {max_structured_calls}"
+        );
     }
 
     fn gf128_basis(bit: usize) -> Gf128 {
@@ -4775,6 +4854,63 @@ mod tests {
         assert!(
             rs_indices.iter().all(|&index| index >= rs.row_len),
             "RS proximity queries must remain disjoint from systematic openings"
+        );
+    }
+
+    #[test]
+    #[ignore = "release gate: real default and revocation P4b old/new verifier timing"]
+    fn mdoc_p4b_structured_claim_evaluator_matches_real_fixtures() {
+        let issuer = signed_p4b_input(7, b"structured claim issuer");
+        let device = signed_p4b_input(9, b"structured claim device");
+        let revocation = signed_p4b_input(11, b"structured claim revocation");
+        let issuer_projection = EcdsaPublicProjection::issuer_key_only(issuer.qx, issuer.qy);
+        let device_projection = EcdsaPublicProjection::message_hash_only(device.z);
+        let revocation_projection = EcdsaPublicProjection::full(&revocation);
+        let issuer_witness = generate_witness(&issuer).unwrap();
+        let device_witness = generate_witness(&device).unwrap();
+        let revocation_witness = generate_witness(&revocation).unwrap();
+        let key_shares = p4b_microbench_key_shares();
+
+        let default_bundle = prove_mdoc_p4b_circuit_bundle(
+            &issuer,
+            &issuer_projection,
+            &issuer_witness,
+            &device,
+            &device_projection,
+            &device_witness,
+            None,
+            &key_shares,
+            [9u8; 32],
+        )
+        .unwrap();
+        compare_dense_and_structured_claim_verification(
+            "mdoc_p4b_default",
+            40,
+            &issuer_projection,
+            &device_projection,
+            None,
+            &default_bundle,
+        );
+
+        let revocation_bundle = prove_mdoc_p4b_circuit_bundle(
+            &issuer,
+            &issuer_projection,
+            &issuer_witness,
+            &device,
+            &device_projection,
+            &device_witness,
+            Some((&revocation, &revocation_projection, &revocation_witness)),
+            &key_shares,
+            [9u8; 32],
+        )
+        .unwrap();
+        compare_dense_and_structured_claim_verification(
+            "mdoc_p4b_revocation",
+            50,
+            &issuer_projection,
+            &device_projection,
+            Some(&revocation_projection),
+            &revocation_bundle,
         );
     }
 

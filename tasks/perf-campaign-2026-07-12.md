@@ -21,6 +21,7 @@ Rule: every WO lands with a measured ts13_full_probe number. No number, not done
 | worktree | STARK fold step 2→3 (N=5) | 3,088 | 162 | 3,228,709 |
 | worktree | virtual SHA field bytes (clean N=1) | 2,666 | 154 | 2,393,589 |
 | experiment | packed M31 transport (N=1) | — | — | 2,267,040 raw / 2,044,623 zstd-12 |
+| worktree | structured P-256 claim contraction (N=5) | 2,600 | 126 | 2,392,485 |
 
 ## Work orders
 
@@ -70,6 +71,13 @@ Rule: every WO lands with a measured ts13_full_probe number. No number, not done
 - [x] P-256 duplicate opening authentication — CLOSED NO-GO. A typed prototype
       authenticated the 352 split Ligero paths once instead of twice, but the
       eliminated pass measured only 1.744ms (N=7) and full TS13 stayed flat.
+- [x] P-256 structured claim contraction — factor long MLE claim weights into
+      reusable row/column templates. Full TS13 verify 154→126ms; proof and
+      transcript are unchanged. This accelerates but does not repair the known
+      ladder/scalar relation gap.
+- [x] Natural SHA consumer sizing — CLOSED NO-GO. Public-length device and
+      revocation traces removed about 437K padded cells, but prove was flat
+      (2,650 vs 2,666ms) and the extra tree-0 columns added 4,192 proof bytes.
 - [x] SHA LogUp batch 6 — CLOSED INFEASIBLE under the production degree budget.
       Its degree-7 identity leaves a degree-6N quotient and therefore needs a
       `log_size + 3` composition split, beyond the blowup-2 PCS configuration.
@@ -469,6 +477,64 @@ was 157ms versus the prior 154ms posture, i.e. noise-flat. The prototype was
 removed. The material verifier opportunity is instead the 84 per-row Circle
 weight encodes in claim-batch verification; structured long MLE claims may
 reuse row/column factors without changing the proof format.
+
+## Structured P-256 claim contraction
+
+The split Ligero claim-batch verifier previously materialized one 256-value
+weight row and ran a 256-point window IFFT plus 4,096-point Circle FFT for every
+touched committed row. The full revocation tuple touches 93 rows. For a long
+MLE claim over `row_len = 2^r`, the equality tensor factors exactly as
+`eq(i) = eq_low(i mod row_len) · eq_high(i / row_len)`. An unaligned interval
+crosses at most two physical rows per logical block, so all blocks reuse two
+shifted low-bit templates; only a final partial block can add a third.
+
+Production now factors only non-fixed claims spanning at least four rows.
+Fixed and short claims remain on the old dense path. The verifier evaluates
+each reusable template once, contracts its per-row high-bit scales against the
+opened column, and adds the result to the residual-row contraction. This is a
+linearity rewrite only: the proof, transcript, Merkle authentication, batched
+claim polynomial, and final extraction identity are unchanged.
+
+Same-proof interleaved N=7 release results:
+
+| fixture | dense claim batch | structured | Circle weight encodes |
+|---|---:|---:|---:|
+| default mdoc | 74.336ms | 47.919ms | 84→35 |
+| revocation mdoc | 79.886ms | 52.505ms | 93→42 |
+
+The main-agent full TS13 N=5 probe measured 2,600ms prove / 126ms verify /
+2,392,485B, with stable prove runs 2,620 / 2,600 / 2,610 / 2,554 / 2,537.
+Against the clean virtual-byte posture this is a 28ms (18.2%) verify win; proof
+width is unchanged and byte variation is only random query-path deduplication.
+
+Verification includes an exact dense-vs-structured row-plan differential over
+shifts 0/1/127/255, lengths 128–8192 including non-powers of two and overlaps;
+real default/revocation dense-vs-structured acceptance; compensated-value,
+coefficient, blind-claim, and opening tamper rejection; the Ligero unit suite;
+and the existing full P4b negative. The crate library suite has 34 passing
+tests and one known unrelated failure because the WO-G4 inventory file is
+absent. Clippy reports no errors and only pre-existing warnings.
+
+This optimization preserves the currently implemented coprocessor relation.
+It does not make that relation a sound ECDSA verifier: the documented missing
+integer scalar-reduction and ladder-transition constraints remain release
+blockers.
+
+## Natural SHA sizing experiment
+
+Shared-table consumers can safely log-qualify only their ten height-dependent
+preprocessed IDs, allowing the public-length DeviceAuthentication and fixed
+20-byte revocation SHA messages to use natural row heights while issuer/MSO and
+witness-length-dependent attribute items retain the common height. The
+prototype passed mixed-height proof/verify and removed about 437K padded cells.
+
+The full release measurement was nevertheless 2,650ms prove and 2,397,781B,
+versus 2,666ms and 2,393,589B at the virtual-byte posture. The timing difference
+is noise and the 20 additional preprocessed columns increase deterministic
+queried/OODS width by 4,960B (net proof +4,192B in that sample). The ID
+qualification, root/hash repin, and mixed-height surface do not earn their cost.
+The experiment was fully removed; all SHA consumers continue using the common
+log height.
 
 ## WO-C1b redundancy argument
 

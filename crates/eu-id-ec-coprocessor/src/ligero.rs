@@ -672,6 +672,198 @@ pub fn verify_split_openings(
     Ok(true)
 }
 
+const STRUCTURED_CLAIM_MIN_ROWS: usize = 4;
+
+struct ClaimWeightTemplate {
+    values: Vec<Fp>,
+    row_scales: Vec<(usize, Fp)>,
+}
+
+struct ClaimWeightPlan {
+    residual_rows: Vec<(usize, Vec<Fp>)>,
+    templates: Vec<ClaimWeightTemplate>,
+}
+
+struct EvaluatedWeightTemplate {
+    values: Vec<Fp>,
+    row_scales: Vec<(usize, Fp)>,
+}
+
+struct EvaluatedClaimWeights {
+    residual_rows: Vec<(usize, Vec<Fp>)>,
+    templates: Vec<EvaluatedWeightTemplate>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static STRUCTURED_CLAIM_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    static CIRCLE_WEIGHT_ENCODE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn structured_claims_enabled() -> bool {
+    #[cfg(test)]
+    {
+        STRUCTURED_CLAIM_OVERRIDE.with(|value| value.get().unwrap_or(true))
+    }
+    #[cfg(not(test))]
+    {
+        true
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn set_structured_claims_for_test(enabled: Option<bool>) {
+    STRUCTURED_CLAIM_OVERRIDE.with(|value| value.set(enabled));
+}
+
+#[cfg(test)]
+pub(crate) fn reset_circle_weight_encode_call_count() {
+    CIRCLE_WEIGHT_ENCODE_CALLS.with(|calls| calls.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn circle_weight_encode_call_count() -> usize {
+    CIRCLE_WEIGHT_ENCODE_CALLS.with(std::cell::Cell::get)
+}
+
+fn add_claim_weight_template(
+    templates: &mut Vec<ClaimWeightTemplate>,
+    values: Vec<Fp>,
+    row: usize,
+    scale: Fp,
+) {
+    if scale == Fp::ZERO {
+        return;
+    }
+    let template = if let Some(index) = templates.iter().position(|entry| entry.values == values) {
+        &mut templates[index]
+    } else {
+        templates.push(ClaimWeightTemplate {
+            values,
+            row_scales: Vec::new(),
+        });
+        templates.last_mut().expect("just pushed a template")
+    };
+    if let Some((_, existing)) = template
+        .row_scales
+        .iter_mut()
+        .find(|(existing_row, _)| *existing_row == row)
+    {
+        *existing = *existing + scale;
+    } else {
+        template.row_scales.push((row, scale));
+    }
+}
+
+fn factor_claim_weights(
+    params: LigeroParams,
+    claim: &LigeroLinearClaim,
+    gamma: Fp,
+    templates: &mut Vec<ClaimWeightTemplate>,
+) {
+    // For row_len = 2^r, eq(point, i) factors into independent low-r-bit
+    // (column) and high-bit (row) tensors. An unaligned claim block crosses
+    // at most two physical rows, so each block is a scaled copy of one of two
+    // shifted column templates; only the final partial block can add a third.
+    let row_len = params.row_len;
+    let row_log = row_len.ilog2() as usize;
+    let low = eq_tensor(&claim.point[..row_log]);
+    let high = eq_tensor(&claim.point[row_log..]);
+    let base_row = claim.offset / row_len;
+    let shift = claim.offset % row_len;
+
+    for (block, high_weight) in high
+        .iter()
+        .copied()
+        .take(claim.len.div_ceil(row_len))
+        .enumerate()
+    {
+        let valid = row_len.min(claim.len - block * row_len);
+        let scale = gamma * high_weight;
+        let first_len = valid.min(row_len - shift);
+        if first_len > 0 {
+            let mut first = vec![Fp::ZERO; row_len];
+            first[shift..shift + first_len].copy_from_slice(&low[..first_len]);
+            add_claim_weight_template(templates, first, base_row + block, scale);
+        }
+        if valid > first_len {
+            let second_len = valid - first_len;
+            let mut second = vec![Fp::ZERO; row_len];
+            second[..second_len]
+                .copy_from_slice(&low[row_len - shift..row_len - shift + second_len]);
+            add_claim_weight_template(templates, second, base_row + block + 1, scale);
+        }
+    }
+}
+
+fn claim_weight_plan(
+    params: LigeroParams,
+    committed_rows: usize,
+    claims: &[LigeroLinearClaim],
+    gamma: &[Fp],
+    structured: bool,
+) -> Result<ClaimWeightPlan, LigeroError> {
+    let mut rows = vec![vec![Fp::ZERO; params.row_len]; committed_rows];
+    let mut templates = Vec::new();
+    for (claim, coeff) in claims.iter().zip(gamma.iter().copied()) {
+        validate_linear_claim(params, committed_rows, claim)?;
+        let row_span = ((claim.offset % params.row_len) + claim.len).div_ceil(params.row_len);
+        let fixed = claim
+            .point
+            .iter()
+            .all(|&value| value == Fp::ZERO || value == Fp::ONE);
+        let factor = structured
+            && params.code == LigeroCode::Circle
+            && params.row_len.is_power_of_two()
+            && row_span >= STRUCTURED_CLAIM_MIN_ROWS
+            && !fixed;
+        if factor {
+            factor_claim_weights(params, claim, coeff, &mut templates);
+            continue;
+        }
+
+        let eq = eq_tensor(&claim.point);
+        for (local, &weight) in eq.iter().enumerate().take(claim.len) {
+            let global = claim.offset + local;
+            let cell = &mut rows[global / params.row_len][global % params.row_len];
+            *cell = *cell + coeff * weight;
+        }
+    }
+    Ok(ClaimWeightPlan {
+        residual_rows: rows
+            .into_iter()
+            .enumerate()
+            .filter(|(_, weights)| weights.iter().any(|&weight| weight != Fp::ZERO))
+            .collect(),
+        templates,
+    })
+}
+
+fn evaluate_claim_weight_plan(
+    plan: ClaimWeightPlan,
+    column_eval: &ClaimBatchColumnEval,
+) -> Result<EvaluatedClaimWeights, LigeroError> {
+    let residual_rows = plan
+        .residual_rows
+        .into_iter()
+        .map(|(row, weights)| Ok((row, column_eval.eval_weights(&weights)?)))
+        .collect::<Result<Vec<_>, LigeroError>>()?;
+    let templates = plan
+        .templates
+        .into_iter()
+        .map(|template| {
+            Ok(EvaluatedWeightTemplate {
+                values: column_eval.eval_weights(&template.values)?,
+                row_scales: template.row_scales,
+            })
+        })
+        .collect::<Result<Vec<_>, LigeroError>>()?;
+    Ok(EvaluatedClaimWeights {
+        residual_rows,
+        templates,
+    })
+}
+
 pub fn verify_split_claim_batch(
     root_a: [u8; 32],
     root_b: [u8; 32],
@@ -710,7 +902,6 @@ pub fn verify_split_claim_batch(
     let rows_a = committed_len_a.div_ceil(params.row_len);
     let rows_b = committed_len_b.div_ceil(params.row_len);
     let combined_rows = rows_a + rows_b;
-    let batched_row_weights = batched_row_weights(params, combined_rows, claims, gamma)?;
     let opening_indices = openings_a
         .iter()
         .map(|opening| opening.index)
@@ -721,10 +912,16 @@ pub fn verify_split_claim_batch(
     // the basis per (row, column).
     let column_eval = ClaimBatchColumnEval::new(params, &opening_indices)?;
     let batch_at_openings = column_eval.eval_message(&batch.coefficients)?;
-    let row_weights_at_openings = batched_row_weights
-        .iter()
-        .map(|(row, weights)| Ok::<_, LigeroError>((*row, column_eval.eval_weights(weights)?)))
-        .collect::<Result<Vec<_>, _>>()?;
+    let weight_evaluations = evaluate_claim_weight_plan(
+        claim_weight_plan(
+            params,
+            combined_rows,
+            claims,
+            gamma,
+            structured_claims_enabled(),
+        )?,
+        &column_eval,
+    )?;
 
     for (opening_position, (opening_a, opening_b)) in openings_a.iter().zip(openings_b).enumerate()
     {
@@ -744,13 +941,27 @@ pub fn verify_split_claim_batch(
         }
         let blind_value = opening_a.column[rows_a + 1] + opening_b.column[rows_b + 1];
         let mut combined = blind_value;
-        for (row, weights_at_openings) in &row_weights_at_openings {
+        for (row, weights_at_openings) in &weight_evaluations.residual_rows {
             let value = if *row < rows_a {
                 opening_a.column[*row]
             } else {
                 opening_b.column[*row - rows_a]
             };
             combined = combined + weights_at_openings[opening_position] * value;
+        }
+        for template in &weight_evaluations.templates {
+            let opened = template
+                .row_scales
+                .iter()
+                .fold(Fp::ZERO, |acc, (row, scale)| {
+                    let value = if *row < rows_a {
+                        opening_a.column[*row]
+                    } else {
+                        opening_b.column[*row - rows_a]
+                    };
+                    acc + *scale * value
+                });
+            combined = combined + template.values[opening_position] * opened;
         }
         if batch_at_openings[opening_position] != combined {
             return Ok(false);
@@ -1153,6 +1364,8 @@ impl ClaimBatchColumnEval {
         match self {
             Self::Rs { .. } => self.eval_message(weights),
             Self::Circle { geom, .. } => {
+                #[cfg(test)]
+                CIRCLE_WEIGHT_ENCODE_CALLS.with(|calls| calls.set(calls.get() + 1));
                 let coeffs = circle_weight_coeffs(*geom, weights).map_err(LigeroError::Circle)?;
                 self.eval_coeffs(&coeffs, geom.data_slots)
             }
@@ -1283,6 +1496,61 @@ mod tests {
             }
             assert_eq!(weights, expected);
         }
+    }
+
+    #[test]
+    fn structured_claim_plan_matches_dense_for_shifts_lengths_and_overlaps() {
+        let params = v4_circle_params();
+        let committed_rows = 100;
+        let shapes = [
+            (0, 8192),
+            (1, 2048),
+            (255, 777),
+            (512 + 127, 512),
+            (3000, 511),
+            (4001, 257),
+            (5000 + 255, 256),
+            (6000 + 127, 255),
+            (7000, 128),
+        ];
+        let claims = shapes
+            .into_iter()
+            .enumerate()
+            .map(|(claim_index, (offset, len))| LigeroLinearClaim {
+                offset,
+                len,
+                point: (0..len.next_power_of_two().ilog2())
+                    .map(|bit| Fp::from_u64(3 + claim_index as u64 * 17 + bit as u64 * 5))
+                    .collect(),
+                value: Fp::ZERO,
+            })
+            .collect::<Vec<_>>();
+        let gamma = (0..claims.len())
+            .map(|index| Fp::from_u64(101 + index as u64 * 13))
+            .collect::<Vec<_>>();
+
+        let dense = batched_row_weights(params, committed_rows, &claims, &gamma).unwrap();
+        let plan = claim_weight_plan(params, committed_rows, &claims, &gamma, true).unwrap();
+        assert!(!plan.templates.is_empty(), "long claims must be factored");
+        let mut reconstructed = vec![vec![Fp::ZERO; params.row_len]; committed_rows];
+        for (row, weights) in plan.residual_rows {
+            for (out, weight) in reconstructed[row].iter_mut().zip(weights) {
+                *out = *out + weight;
+            }
+        }
+        for template in plan.templates {
+            for (row, scale) in template.row_scales {
+                for (out, weight) in reconstructed[row].iter_mut().zip(&template.values) {
+                    *out = *out + scale * *weight;
+                }
+            }
+        }
+        let reconstructed = reconstructed
+            .into_iter()
+            .enumerate()
+            .filter(|(_, weights)| weights.iter().any(|&weight| weight != Fp::ZERO))
+            .collect::<Vec<_>>();
+        assert_eq!(reconstructed, dense);
     }
 
     #[test]
@@ -1486,6 +1754,90 @@ mod tests {
     #[test]
     fn v3_circle_claim_batch_roundtrip_and_rejects_compensated_tamper() {
         circle_claim_batch_roundtrip_body(v3_circle_params());
+    }
+
+    #[test]
+    #[ignore = "release gate: structured split claim-batch tamper negatives"]
+    fn structured_split_claim_batch_rejects_required_tampers() {
+        let params = v4_circle_params();
+        let values_a = (0..1024)
+            .map(|value| Fp::from_u64(value + 1))
+            .collect::<Vec<_>>();
+        let values_b = (0..1024)
+            .map(|value| Fp::from_u64(value + 2049))
+            .collect::<Vec<_>>();
+        let commitment_a = commit_witness(&values_a, params).unwrap();
+        let commitment_b = commit_witness(&values_b, params).unwrap();
+        let mut claims = vec![
+            claim_for(
+                &values_a,
+                0,
+                (0..10).map(|bit| Fp::from_u64(3 + bit * 2)).collect(),
+            ),
+            claim_for(
+                &values_b,
+                0,
+                (0..10).map(|bit| Fp::from_u64(29 + bit * 2)).collect(),
+            ),
+        ];
+        claims[1].offset = commitment_a.witness_rows * params.row_len;
+        let gamma = [Fp::from_u64(53), Fp::from_u64(59)];
+        let batch = commitment_a
+            .split_claim_batch(&commitment_b, &claims, &gamma)
+            .unwrap();
+        let indices = (0..params.openings)
+            .map(|index| (index * 19 + 3) % params.codeword_len)
+            .collect::<Vec<_>>();
+        let openings_a = commitment_a.open_columns(&indices).unwrap();
+        let openings_b = commitment_b.open_columns(&indices).unwrap();
+        let verify = |batch: &LigeroClaimBatch,
+                      claims: &[LigeroLinearClaim],
+                      openings_a: &[ColumnOpening],
+                      openings_b: &[ColumnOpening]| {
+            verify_split_claim_batch(
+                commitment_a.root(),
+                commitment_b.root(),
+                params,
+                values_a.len(),
+                values_b.len(),
+                openings_a,
+                openings_b,
+                batch,
+                claims,
+                &gamma,
+            )
+            .unwrap()
+        };
+
+        assert!(verify(&batch, &claims, &openings_a, &openings_b));
+
+        let mut compensated_claims = claims.clone();
+        compensated_claims[0].value = compensated_claims[0].value + Fp::ONE;
+        let mut compensated_batch = batch.clone();
+        compensated_batch.blind_claim = Fp::ZERO - gamma[0];
+        assert!(!verify(
+            &compensated_batch,
+            &compensated_claims,
+            &openings_a,
+            &openings_b
+        ));
+
+        let mut coefficient_tamper = batch.clone();
+        coefficient_tamper.coefficients[0] = coefficient_tamper.coefficients[0] + Fp::ONE;
+        assert!(!verify(
+            &coefficient_tamper,
+            &claims,
+            &openings_a,
+            &openings_b
+        ));
+
+        let mut blind_tamper = batch.clone();
+        blind_tamper.blind_claim = Fp::ONE;
+        assert!(!verify(&blind_tamper, &claims, &openings_a, &openings_b));
+
+        let mut opening_tamper = openings_a.clone();
+        opening_tamper[0].column[0] = opening_tamper[0].column[0] + Fp::ONE;
+        assert!(!verify(&batch, &claims, &opening_tamper, &openings_b));
     }
 
     /// WO-P6: the ℓ=128 params must hit the 2^-132 soundness target. The
