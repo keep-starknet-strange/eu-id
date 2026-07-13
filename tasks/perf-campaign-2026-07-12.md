@@ -22,6 +22,7 @@ Rule: every WO lands with a measured ts13_full_probe number. No number, not done
 | worktree | virtual SHA field bytes (clean N=1) | 2,666 | 154 | 2,393,589 |
 | experiment | packed M31 transport (N=1) | — | — | 2,267,040 raw / 2,044,623 zstd-12 |
 | worktree | structured P-256 claim contraction (N=5) | 2,600 | 126 | 2,392,485 |
+| worktree | final default-thread desktop (N=5) | 961 | 124 | 2,390,293 |
 
 ## Work orders
 
@@ -78,6 +79,9 @@ Rule: every WO lands with a measured ts13_full_probe number. No number, not done
 - [x] Natural SHA consumer sizing — CLOSED NO-GO. Public-length device and
       revocation traces removed about 437K padded cells, but prove was flat
       (2,650 vs 2,666ms) and the extra tree-0 columns added 4,192 proof bytes.
+- [x] P-256 verifier template/pad reuse — CLOSED NO-GO. Sharing the six static
+      circuit topologies and cached OTP-pad vectors across roles saved only
+      0.301ms on the revocation verifier; the prototype was fully removed.
 - [x] SHA LogUp batch 6 — CLOSED INFEASIBLE under the production degree budget.
       Its degree-7 identity leaves a degree-6N quotient and therefore needs a
       `log_size + 3` composition split, beyond the blowup-2 PCS configuration.
@@ -86,8 +90,53 @@ Rule: every WO lands with a measured ts13_full_probe number. No number, not done
       measurement. STARK fold step 3 is the measured production Pareto point:
       prove −164ms, verify −1ms, proof −14,608B versus the full-domain-sampler
       N=5 baseline.
-- [ ] Final: suites + negatives green, pins repinned, docs + memory updated,
+- [x] Final: suites + negatives green, pins repinned, docs + memory updated,
       single- and multi-thread numbers reported.
+
+## Campaign closeout — 2026-07-13
+
+Final single-thread N=5 posture on this branch: **2,600ms prove / 126ms verify /
+2,392,485B proof**. Relative to the 2026-07-13 takeover re-probe this is
+−793ms prove (−23.4%), −72ms verify (−36.4%), and −1,135,496B proof (−32.2%).
+Relative to the campaign's original 730e9294 baseline it is −253ms prove,
+−129ms verify, and −2,125,152B proof.
+
+Final default-thread N=5 desktop posture: **961ms prove / 124ms verify /
+2,390,293B proof**, with prove runs 1,019 / 949 / 965 / 961 / 953ms. The normal
+parallel desktop path therefore meets the <1s prove target. Verification is
+essentially single-threaded and remains above its target.
+
+The single-thread stretch targets remain open by 1,600ms prove, 26ms verify,
+and 1,692,485B proof; on the default-thread desktop path, only verify and proof
+remain open. No remaining reviewed incremental change can close those gaps:
+
+- The STARK is ~1.607MB and the coprocessor bundle ~0.785MB. Queried/OODS
+  width alone is 1.452MB. Mask, composition, encoding, and transport changes
+  have measured ceilings far below the 1.69MB remaining proof gap.
+- Multi-message SHA is the only identified several-hundred-KB width lever, but
+  even its best-case ~0.5MB ceiling leaves the proof near 1.9MB and requires a
+  new message-boundary/tagged-relation design. It is not an incremental patch.
+- The remaining verifier time is dynamic MAC/circuit work plus the now-52.5ms
+  claim batch. Duplicate authentication and static-template/pad caching measure
+  only 1.744ms and 0.301ms respectively. Reaching <100ms requires a reviewed
+  dynamic-MAC/sumcheck specialization or a different coprocessor protocol.
+- More importantly, the current P-256 coprocessor relation still lacks sound
+  integer scalar reduction and scalar-ladder transition constraints. The
+  executable ignored regression demonstrates acceptance of forged ladder
+  accumulators. Performance work cannot turn this into a releasable ECDSA
+  verifier before that combined relation is specified and implemented.
+
+Final verification for the last code checkpoint: exact synthetic dense-vs-
+structured claim weights, real default/revocation old-vs-new verification,
+compensated-value/coefficient/blind/opening negatives, 12 Ligero unit tests,
+release TS13 N=5 proof/verify, cargo check for prover+coprocessor, clippy with
+zero errors, and diff hygiene all pass. The full coprocessor library reports
+34 pass / 1 fail / 3 ignored; the only failure is the pre-existing G4 inventory
+gate because `tasks/parity/s4/WO-G4-circuit-inventory.md` is absent.
+
+Reproducibility caveat remains: workspace Cargo patches resolve Stwo from
+absolute `/Users/lucas/stwo` paths. Publish/pin that engine revision and remove
+the absolute patch before treating remote CI reproduction as complete.
 
 ## WO-B split-mask virtual columns (a.k.a. WO-D2R Option A)
 
