@@ -103,15 +103,15 @@ pub fn build_perm_witness(perm_inputs: &[[PackedM31; N_BYTES_IN_STATE + 1]]) -> 
     let (keccak_claim, keccak_trace, keccak_data) = keccak::Claim::generate_trace(perm_inputs);
 
     // keccak_round rows: expand each permutation into 24 round rows
-    // `[state(200) | round_index]`.
+    // `[state(200) | round_index | perm_id]`.
     // Each keccak permutation is committed on lane 0 only (the sponge splats a
     // single logical instance; keccak's enabler is active on lane 0). So the
     // round component must supply exactly `n_perms * 24` round instances, one
-    // per (perm, round). We collect them as per-lane `(state, round_idx)` pairs
-    // and pack `N_LANES` distinct instances into each vec-row — the round
-    // trace's `fill_row` reads the round index per lane, so lanes may hold
-    // different rounds.
-    let mut round_instances: Vec<([u8; N_BYTES_IN_STATE], u32)> = Vec::new();
+    // per (perm, round). We collect them as per-lane
+    // `(state, round_idx, perm_id)` tuples and pack `N_LANES` distinct
+    // instances into each vec-row — the round trace's `fill_row` reads the
+    // identity per lane, so lanes may hold different permutations and rounds.
+    let mut round_instances: Vec<([u8; N_BYTES_IN_STATE], u32, u32)> = Vec::new();
     for prow in perm_inputs {
         // lane 0 holds the real perm input state, in spread form; unspread it to
         // bytes for the native per-round advance.
@@ -119,8 +119,9 @@ pub fn build_perm_witness(perm_inputs: &[[PackedM31; N_BYTES_IN_STATE + 1]]) -> 
         for i in 0..N_BYTES_IN_STATE {
             state[i] = crate::utils::unspread_u32(prow[i].to_array()[0].0) as u8;
         }
+        let perm_id = prow[N_BYTES_IN_STATE].to_array()[0].0;
         for round in 0..crate::constants::N_ROUNDS {
-            round_instances.push((state, round as u32));
+            round_instances.push((state, round as u32, perm_id));
             let mut sp: [PackedM31; N_BYTES_IN_STATE] = std::array::from_fn(|i| {
                 PackedM31::from(stwo::core::fields::m31::M31::from(state[i] as u32))
             });
@@ -178,35 +179,39 @@ fn build_witness(message: &[u8], n_squeeze: usize) -> KeccakWitness {
     }
 }
 
-/// Pack per-lane `(state, round_idx)` instances into `[state|round]` vec-rows,
-/// `N_LANES` distinct instances per row (padding the last row with zeros).
+/// Pack per-lane `(state, round_idx, perm_id)` instances into
+/// `[state|round|perm_id]` vec-rows, `N_LANES` distinct instances per row
+/// (padding the last row with zeros).
 fn pack_round_instances(
-    instances: &[([u8; N_BYTES_IN_STATE], u32)],
-) -> Vec<[PackedM31; N_BYTES_IN_STATE + 1]> {
+    instances: &[([u8; N_BYTES_IN_STATE], u32, u32)],
+) -> Vec<[PackedM31; N_BYTES_IN_STATE + 2]> {
     use stwo::core::fields::m31::M31;
     use stwo::prover::backend::simd::m31::N_LANES;
     let n_vec_rows = instances.len().div_ceil(N_LANES);
     let mut rows = Vec::with_capacity(n_vec_rows);
     for vr in 0..n_vec_rows {
-        let mut row = [PackedM31::zero(); N_BYTES_IN_STATE + 1];
+        let mut row = [PackedM31::zero(); N_BYTES_IN_STATE + 2];
         let mut state_lanes = [[M31::from(0u32); N_LANES]; N_BYTES_IN_STATE];
         let mut round_lanes = [M31::from(0u32); N_LANES];
+        let mut perm_id_lanes = [M31::from(0u32); N_LANES];
         for lane in 0..N_LANES {
             let idx = vr * N_LANES + lane;
             if idx >= instances.len() {
                 break;
             }
-            let (state, round) = &instances[idx];
+            let (state, round, perm_id) = &instances[idx];
             for i in 0..N_BYTES_IN_STATE {
                 // The round component consumes state limbs in *spread* form.
                 state_lanes[i][lane] = M31::from(crate::utils::spread_u32(state[i] as u32));
             }
             round_lanes[lane] = M31::from(*round);
+            perm_id_lanes[lane] = M31::from(*perm_id);
         }
         for i in 0..N_BYTES_IN_STATE {
             row[i] = PackedM31::from_array(state_lanes[i]);
         }
         row[N_BYTES_IN_STATE] = PackedM31::from_array(round_lanes);
+        row[N_BYTES_IN_STATE + 1] = PackedM31::from_array(perm_id_lanes);
         rows.push(row);
     }
     rows
@@ -362,6 +367,10 @@ impl AirProver for KeccakProver {
             .log_size
             .max(self.witness.keccak_claim.log_size())
             .max(tables_air::TableKind::Dense.log_size())
+    }
+    fn max_constraint_log_degree_bound(&self) -> u32 {
+        self.max_log_size()
+            .max(self.witness.round_claim.log_size + 2)
     }
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>) {
         tb.extend_evals(gen_preprocessed(self.witness.shape.n_perms()));
@@ -581,7 +590,6 @@ impl Components {
             keccak_round::Eval {
                 claim: *round_claim,
                 relations: relations.clone(),
-                gkr_offload: false,
             },
             ic.round.claimed_sum,
         );

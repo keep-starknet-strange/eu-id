@@ -16,7 +16,6 @@ pub mod constants;
 pub mod keccak;
 pub mod keccak_round;
 pub mod relations;
-pub mod round_gkr;
 pub mod service;
 pub mod sponge;
 pub mod sponge_v;

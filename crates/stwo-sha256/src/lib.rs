@@ -24,7 +24,7 @@
 //!   bundled as `Sha256Relations`.
 //! - [`tables`] — fixed-table helpers retained by the SHA component.
 //! - [`tables_local`] — local fallback for the workspace-shared range-check
-//!   tables (`Range_2`, `Range_4`, `Range_5`, `Range_16`). Shipped until the
+//!   tables (`Range_2`, `Range_4`, `Range_5`, `Range_8`). Shipped until the
 //!   ECDSA stream's `stwo-p256-utils` crate is on `main`; mirrors that
 //!   crate's API so migration is a one-import swap (see the module-level
 //!   docs for the upstream-context survey and API-shape rationale).

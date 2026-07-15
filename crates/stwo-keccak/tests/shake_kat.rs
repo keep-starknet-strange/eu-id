@@ -9,8 +9,7 @@ use stwo::core::fri::FriConfig;
 use stwo::core::pcs::PcsConfig;
 use stwo_keccak::{prove_shake256, verify_shake256};
 
-/// Batch-4 logup constraints have log-degree excess 2, so proving needs
-/// `log_blowup >= 2` (production uses 3).
+/// Batch-four round LogUp constraints use blowup two.
 fn pcs_config() -> PcsConfig {
     PcsConfig {
         fri_config: FriConfig::new(0, 2, 3, 1),

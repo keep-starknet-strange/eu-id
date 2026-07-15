@@ -73,8 +73,8 @@ dependencies { implementation("com.kss:eu-id-zk-sdk:0.1.0") }
 ```
 
 ```kotlin
-import com.kss.euid.zk.sdk.proveMdocPid
-import com.kss.euid.zk.sdk.verifyMdocPid
+import com.kss.euid.zk.sdk.proveIdentity
+import com.kss.euid.zk.sdk.verifyIdentity
 // ... ZkPublicStatement, ZkMdocWitness, ZkVerifyResult, PredicateMode, NatMode, ZkException
 ```
 

@@ -1,5 +1,5 @@
 //! Layout census for the S1 composition: the shared keccak SERVICE (hosting
-//! one instance's three sponge jobs) + ONE ML-DSA-65 statement instance.
+//! one instance's four sponge jobs) + ONE ML-DSA-65 statement instance.
 //! Column counts and cell totals per tree, grouped by log_size. Run:
 //! `cargo run -p stwo-mldsa --example layout_probe --release`
 
@@ -77,7 +77,7 @@ fn main() {
     let instance_cols =
         instance.preprocessed.len() + instance.trace.len() + instance.interaction.len();
 
-    // Service layout for this ONE instance's three sponge jobs (µ, c̃, SIB).
+    // Service layout for this ONE instance's four sponge jobs (pkHash, µ, c̃, SIB).
     let jobs = keccak_job_shapes(input.message.len(), sib_stream_len, 0);
     let service = KeccakServiceVerifier::new(
         jobs,

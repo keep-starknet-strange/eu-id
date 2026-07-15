@@ -19,10 +19,11 @@
 //! - `r == 24` — *yield* (+) `KeccakStateRelation(perm_id, OUT, state_24)`,
 //!   consumed by the sponge's require.
 //! - `r < 24`  — *yield* (+) round `r`'s input link
-//!   `KeccakRound(rc_r | state_r)`.
+//!   `KeccakRound(perm_id | r | rc_r | state_r)`.
 //! - `r > 0`   — *require* (−) round `r−1`'s output link
-//!   `KeccakRound(rc_r | state_r)` (the output link of round `r−1` carries
-//!   `IOTA_RC[r]`, exactly the same tuple as round `r`'s input link).
+//!   `KeccakRound(perm_id | r | rc_r | state_r)` (the output link of round
+//!   `r−1` carries index `r` and `IOTA_RC[r]`, exactly the same tuple as round
+//!   `r`'s input link).
 //!
 //! These cancel the `keccak_round` component, which requires its input link
 //! and yields its output link — the wrapper mediates every link, exactly as
@@ -51,8 +52,9 @@ use crate::utils::{circle_row_to_coset, col_eval, spread_u32, unspread_u32, ColE
 /// Rows per permutation: the input state plus one row per round output.
 pub const ROWS_PER_PERM: usize = N_ROUNDS + 1;
 
-/// Schedule (preprocessed) columns: `is_active | is_first | is_last | rc[8]`.
-pub const N_SCHEDULE_COLS: usize = 3 + N_BYTES_IN_U64;
+/// Schedule (preprocessed) columns:
+/// `is_active | is_first | is_last | round_idx | rc[8]`.
+pub const N_SCHEDULE_COLS: usize = 4 + N_BYTES_IN_U64;
 
 /// Trace columns: `perm_id | state[200]` (state in spread form).
 pub const N_COLUMNS: usize = 1 + N_BYTES_IN_STATE;
@@ -83,6 +85,7 @@ pub fn schedule_ids(n_perms: usize) -> Vec<PreProcessedColumnId> {
         schedule_id(n_perms, "is_active"),
         schedule_id(n_perms, "is_first"),
         schedule_id(n_perms, "is_last"),
+        schedule_id(n_perms, "round_idx"),
     ];
     for j in 0..N_BYTES_IN_U64 {
         ids.push(schedule_id(n_perms, &format!("rc_{j}")));
@@ -110,6 +113,7 @@ pub fn gen_schedule_preprocessed(n_perms: usize) -> Vec<ColEval> {
         scalar(&|_| 1),
         scalar(&|r| (r == 0) as u32),
         scalar(&|r| (r == N_ROUNDS) as u32),
+        scalar(&|r| r as u32),
     ];
     for j in 0..N_BYTES_IN_U64 {
         cols.push(scalar(&move |r| {
@@ -243,6 +247,7 @@ impl FrameworkEval for Eval {
         let is_active = eval.get_preprocessed_column(schedule_id(n, "is_active"));
         let is_first = eval.get_preprocessed_column(schedule_id(n, "is_first"));
         let is_last = eval.get_preprocessed_column(schedule_id(n, "is_last"));
+        let round_idx = eval.get_preprocessed_column(schedule_id(n, "round_idx"));
         let rc: Vec<E::F> = (0..N_BYTES_IN_U64)
             .map(|j| eval.get_preprocessed_column(schedule_id(n, &format!("rc_{j}"))))
             .collect();
@@ -252,10 +257,11 @@ impl FrameworkEval for Eval {
             .map(|_| eval.next_trace_mask())
             .collect();
 
-        // Round link tuple `(rc_r[8] | state_r)`: round r's input link AND
-        // round r−1's output link are the SAME tuple (the output link of round
-        // r−1 carries IOTA_RC[r]).
-        let mut link: Vec<E::F> = rc;
+        // Round link tuple `(perm_id | r | rc_r[8] | state_r)`: round r's
+        // input link AND round r−1's output link are the SAME tuple. Identity
+        // fields prevent multiset cancellation across permutations or rounds.
+        let mut link: Vec<E::F> = vec![perm_id.clone(), round_idx];
+        link.extend(rc);
         link.extend(state.iter().cloned());
         debug_assert_eq!(link.len(), KECCAK_ROUND_ARITY);
         // yield (+) round r's input link on r < 24.
@@ -311,10 +317,12 @@ fn row_fracs(rel: &KeccakRelations, r: usize, row: &RowLook) -> [(SecureField, S
     let one = SecureField::from(M31::from(1u32));
 
     let mut link = [M31::zero(); KECCAK_ROUND_ARITY];
+    link[0] = row.perm_id;
+    link[1] = M31::from(r as u32);
     for (j, b) in IOTA_RC[r].to_le_bytes().iter().enumerate() {
-        link[j] = M31::from(spread_u32(*b as u32));
+        link[2 + j] = M31::from(spread_u32(*b as u32));
     }
-    link[N_BYTES_IN_U64..].copy_from_slice(&row.state);
+    link[2 + N_BYTES_IN_U64..].copy_from_slice(&row.state);
     let d_link: SecureField = rel.keccak_round.combine(&link);
 
     let f_yield = if r < N_ROUNDS {

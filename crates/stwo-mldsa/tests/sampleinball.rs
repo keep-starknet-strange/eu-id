@@ -76,7 +76,14 @@ fn sib_proves_and_verifies_over_20_signatures() {
 /// Control: the negatives' seeds prove+verify cleanly without mutation.
 #[test]
 fn sib_seeds_honest_without_mutation() {
-    for (seed, msg) in [(8001u64, &b"tau"[..]), (8002, b"c-bind"), (8003, b"rej")] {
+    for (seed, msg) in [
+        (8001u64, &b"tau"[..]),
+        (8002, b"c-bind"),
+        (8003, b"rej"),
+        (8007, b"sign-decomposition"),
+        (8008, b"index-progression"),
+        (8009, b"sorted-classification"),
+    ] {
         let w = witness_for(seed, msg);
         let proof = prove_sib(w.clone(), pcs_config())
             .unwrap_or_else(|e| panic!("seed {seed}: honest prove failed: {e:?}"));
@@ -250,5 +257,77 @@ fn negative_forged_access_list() {
     assert!(
         forged_rejected,
         "a forged (FSM-mismatched) core access list must be rejected by the Swap channel"
+    );
+}
+
+/// The sign-bit columns must be the little-endian decomposition of the eight
+/// HashIo-bound sign bytes. Flip one decomposed bit while leaving the stream and
+/// memory replay honest: byte recomposition and SignBit balance must reject it.
+#[test]
+fn negative_wrong_sign_decomposition() {
+    use stwo_mldsa::sampleinball::install_forged_sign_bytes;
+
+    let w = witness_for(8007, b"sign-decomposition");
+    let mut sign_bytes: [u8; 8] = w.sponge.sample_in_ball_squeezed[..8]
+        .try_into()
+        .expect("eight sign bytes");
+    sign_bytes[0] ^= 1;
+
+    let guard = install_forged_sign_bytes(sign_bytes);
+    let forged_rejected = rejected(w);
+    drop(guard);
+    assert!(
+        forged_rejected,
+        "sign-bit columns inconsistent with the HashIo-bound byte must be rejected"
+    );
+}
+
+/// Every placement row must start at the preceding stream row's state-after
+/// value. Corrupt the final sign row's state while keeping every byte, accept
+/// bit, and lookup tuple otherwise self-consistent; the ordered FSM must reject.
+#[test]
+fn negative_wrong_index_progression() {
+    use stwo_mldsa::sampleinball::{honest_stream_rows, install_forged_stream_indices};
+
+    let w = witness_for(8008, b"index-progression");
+    let mut indices: Vec<u32> = honest_stream_rows(&w)
+        .into_iter()
+        .map(|(_, index, _)| index)
+        .collect();
+    indices[7] += 1;
+
+    let guard = install_forged_stream_indices(indices);
+    let forged_rejected = rejected(w);
+    drop(guard);
+    assert!(
+        forged_rejected,
+        "a discontinuous SampleInBall index history must be rejected"
+    );
+}
+
+/// The memory permutation tuple must bind read/write classification. Relabel a
+/// sorted read as a write without changing its address, value, or timestamp;
+/// this used to disable read continuity when `MemRelation` omitted `is_write`.
+#[test]
+fn negative_sorted_read_write_reclassification() {
+    use stwo_mldsa::sampleinball::{honest_sorted_accesses, install_forged_sorted_writes};
+
+    let w = witness_for(8009, b"sorted-classification");
+    let sorted = honest_sorted_accesses(&w);
+    let mut writes: Vec<bool> = sorted.iter().map(|access| access.3).collect();
+    let read = sorted
+        .iter()
+        .enumerate()
+        .find(|(row, access)| *row > 0 && !access.3 && access.0 == sorted[*row - 1].0)
+        .map(|(row, _)| row)
+        .expect("a non-initial sorted read");
+    writes[read] = true;
+
+    let guard = install_forged_sorted_writes(writes);
+    let forged_rejected = rejected(w);
+    drop(guard);
+    assert!(
+        forged_rejected,
+        "sorted read/write reclassification must break the Mem permutation"
     );
 }

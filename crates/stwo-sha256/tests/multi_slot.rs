@@ -135,9 +135,9 @@ fn total(drawn: &Drawn, witnesses: &[Sha256Witness], config: &MultiSlotConfig) -
 }
 
 /// The module's OUTSTANDING cross-module terms: total(with exposures) −
-/// total(exposures off). The 66 base table-use sites are identical in both,
+/// total(exposures off). The 58 base table-use sites are identical in both,
 /// so the difference is exactly the digest yields + field yields + the
-/// field-byte Range16 uses.
+/// field-byte Range8 uses.
 fn outstanding(
     drawn: &Drawn,
     witnesses: &[Sha256Witness],
@@ -152,7 +152,7 @@ fn require(denom: SecureField) -> SecureField {
     SecureField::one() / denom
 }
 
-/// Synthetic per-slot consumers + the verifier-side Range16 accounting
+/// Synthetic per-slot consumers + the verifier-side Range8 accounting
 /// cancel the outstanding terms EXACTLY — and only when each slot's digest
 /// is required over that slot's OWN relation (per-slot attribution).
 #[test]
@@ -166,7 +166,7 @@ fn multi_slot_yields_balance_per_slot_and_reject_cross_slot_swap() {
         "exposures leave outstanding terms"
     );
 
-    // Field-byte Range16 uses (2 per exposed byte column on the hot row,
+    // Field-byte Range8 uses (1 per exposed byte column on the hot row,
     // positive) — cancel them with the matching negative terms.
     let mut cancel = SecureField::zero();
     for (s, spec) in config.slots.iter().enumerate() {
@@ -185,17 +185,12 @@ fn multi_slot_yields_balance_per_slot_and_reject_cross_slot_swap() {
             for &word_idx in exposure.decomposed_words() {
                 let limb = block.schedule[word_idx];
                 for byte in stwo_sha256::field_exposure::word_be_bytes(limb.lo, limb.hi) {
-                    for value in [
-                        byte,
-                        byte + stwo_sha256::field_exposure::BYTE_RANGE_CHECK_OFFSET,
-                    ] {
-                        let denom = drawn
-                            .relations
-                            .range
-                            .range_16
-                            .combine(&[BaseField::from(value)]);
-                        cancel -= require(denom);
-                    }
+                    let denom = drawn
+                        .relations
+                        .range
+                        .range_8
+                        .combine(&[BaseField::from(byte)]);
+                    cancel -= require(denom);
                 }
             }
         }
@@ -269,17 +264,12 @@ fn multi_slot_rejects_mismatched_field_consumer() {
             for &word_idx in exposure.decomposed_words() {
                 let limb = block.schedule[word_idx];
                 for byte in stwo_sha256::field_exposure::word_be_bytes(limb.lo, limb.hi) {
-                    for value in [
-                        byte,
-                        byte + stwo_sha256::field_exposure::BYTE_RANGE_CHECK_OFFSET,
-                    ] {
-                        let denom = drawn
-                            .relations
-                            .range
-                            .range_16
-                            .combine(&[BaseField::from(value)]);
-                        cancel -= require(denom);
-                    }
+                    let denom = drawn
+                        .relations
+                        .range
+                        .range_8
+                        .combine(&[BaseField::from(byte)]);
+                    cancel -= require(denom);
                 }
             }
         }

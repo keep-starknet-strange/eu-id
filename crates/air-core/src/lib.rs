@@ -256,6 +256,22 @@ pub trait Air {
     /// single shared [`TraceLocationAllocator`] before building components.
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId>;
 
+    /// Canonical tree-0 columns in the same order as
+    /// [`Air::preprocessed_column_ids`]. Production verification uses these
+    /// verifier-side values to reconstruct commitment 0 instead of trusting a
+    /// caller-supplied root.
+    fn canonical_preprocessed_columns(
+        &mut self,
+    ) -> Result<Vec<PreprocessedColumnEval>, VerificationError> {
+        if self.preprocessed_column_ids().is_empty() {
+            Ok(Vec::new())
+        } else {
+            Err(VerificationError::InvalidStructure(
+                "module cannot reconstruct its preprocessed columns".into(),
+            ))
+        }
+    }
+
     /// Build this module's AIR components against the shared allocator and stash
     /// them. Called once, in module order, after relations are drawn and the
     /// allocator is seeded. A module owns its components and lends them out via
@@ -698,6 +714,51 @@ pub fn compute_preprocessed_root_uncached(
     }
     tb.commit(channel);
     commitment_scheme.roots()[0]
+}
+
+/// Reconstruct and commit tree 0 from verifier-side canonical module data.
+/// Columns are deduplicated with the exact first-writer-wins ordering used by
+/// [`prove`]. No witness values or prover-supplied root enter this path.
+pub fn compute_canonical_preprocessed_root(
+    modules: &mut [&mut dyn Air],
+    config: PcsConfig,
+) -> Result<CommitmentRoot, VerificationError> {
+    let max_preprocessed_log_size = modules
+        .iter()
+        .flat_map(|module| module.layout().preprocessed)
+        .max()
+        .unwrap_or(0);
+    let twiddles = cached_twiddles(max_preprocessed_log_size + config.fri_config.log_blowup_factor);
+    let channel = &mut Ch::default();
+    config.mix_into(channel);
+    let mut commitment_scheme = CommitmentSchemeProver::<SimdBackend, Mc>::new(config, twiddles);
+    let mut tree_builder = commitment_scheme.tree_builder();
+    let mut seen = HashSet::new();
+
+    for module in modules.iter_mut() {
+        let ids = module.preprocessed_column_ids();
+        let log_sizes = module.layout().preprocessed;
+        let columns = module.canonical_preprocessed_columns()?;
+        if ids.len() != columns.len() || ids.len() != log_sizes.len() {
+            return Err(VerificationError::InvalidStructure(
+                "canonical preprocessed ids, columns, and layout differ in length".into(),
+            ));
+        }
+        let mut selected = Vec::new();
+        for ((id, column), log_size) in ids.into_iter().zip(columns).zip(log_sizes) {
+            if column.domain.log_size() != log_size {
+                return Err(VerificationError::InvalidStructure(
+                    "canonical preprocessed column has the wrong log size".into(),
+                ));
+            }
+            if seen.insert(id) {
+                selected.push(column);
+            }
+        }
+        tree_builder.extend_evals(selected);
+    }
+    tree_builder.commit(channel);
+    Ok(commitment_scheme.roots()[0])
 }
 
 /// Re-derive the transcript for every module and verify the single STARK proof.
@@ -1320,9 +1381,7 @@ mod tests {
         fn column(&self) -> PreprocessedColumnEval {
             CircleEvaluation::new(
                 CanonicCoset::new(self.log_size).circle_domain(),
-                BaseColumn::from_iter(
-                    (0..1u32 << self.log_size).map(M31::from_u32_unchecked),
-                ),
+                BaseColumn::from_iter((0..1u32 << self.log_size).map(M31::from_u32_unchecked)),
             )
         }
     }
@@ -1426,7 +1485,10 @@ mod tests {
             let column = self.column();
             let mut logup = LogupTraceGenerator::new(self.log_size);
             logup.col_from_fn(|vec_row| {
-                (PackedQM31::zero(), relation.combine(&[column.data[vec_row]]))
+                (
+                    PackedQM31::zero(),
+                    relation.combine(&[column.data[vec_row]]),
+                )
             });
             let (trace, claimed_sum) = logup.finalize_last();
             assert_eq!(claimed_sum, QM31::zero());
@@ -1434,7 +1496,8 @@ mod tests {
         }
 
         fn prove_post_interaction(&mut self, channel: &mut Ch) {
-            let layer = Layer::GrandProduct(Mle::<CpuBackend, SecureField>::new(self.values.clone()));
+            let layer =
+                Layer::GrandProduct(Mle::<CpuBackend, SecureField>::new(self.values.clone()));
             let (proof, _artifact) = prove_batch(channel, vec![layer]);
             self.gkr_blob = encode_gkr_batch_proof(&proof);
         }
@@ -1458,7 +1521,10 @@ mod tests {
             prove_with_post_interaction(&mut [&mut prover], PcsConfig::default())
                 .expect("toy GKR proves");
         assert_eq!(payloads.len(), 1);
-        assert!(!payloads[0].is_empty(), "GKR blob must travel in the payload");
+        assert!(
+            !payloads[0].is_empty(),
+            "GKR blob must travel in the payload"
+        );
 
         let mut verifier = GkrToyModule::verifier(claim);
         verify_with_expected_preprocessed_root_and_payloads(
@@ -1516,6 +1582,9 @@ mod tests {
             None,
             &payloads,
         );
-        assert!(result.is_err(), "GKR proof of a different product must be rejected");
+        assert!(
+            result.is_err(),
+            "GKR proof of a different product must be rejected"
+        );
     }
 }

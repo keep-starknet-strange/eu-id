@@ -33,7 +33,8 @@ pub fn prove_mdoc(
     Ok((proof, statement))
 }
 
-/// Verify a product mdoc proof against its public statement.
+/// Verify a product mdoc proof against its public statement. Tree-0 is
+/// reconstructed canonically inside the verifier; no artifact root is trusted.
 pub fn verify_mdoc(proof: &MdocProof, statement: &MdocStatement) -> Result<(), Error> {
     mdoc::verify_mdoc_circuit(proof, statement)
 }

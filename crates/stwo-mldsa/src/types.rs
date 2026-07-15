@@ -36,6 +36,9 @@ pub type SignedPoly = [i32; N];
 /// A `t1` polynomial: coefficients in `[0, 2^10)`.
 pub type T1Poly = [u32; N];
 
+/// Exclusive upper bound for a canonically decoded ML-DSA `t1` coefficient.
+pub const T1_COEFFICIENT_BOUND: u32 = 1 << 10;
+
 /// A hint polynomial: one bit per coefficient (`{0, 1}`).
 pub type HintPoly = [u8; N];
 
@@ -76,6 +79,20 @@ pub struct MlDsaVerifyInput {
 }
 
 impl MlDsaVerifyInput {
+    /// Reject non-canonical decoded public keys before they reach transcript
+    /// mixing or verifier-native public-polynomial evaluation.
+    pub fn validate_public_key(&self) -> Result<(), &'static str> {
+        if self
+            .t1
+            .iter()
+            .flatten()
+            .any(|&coefficient| coefficient >= T1_COEFFICIENT_BOUND)
+        {
+            return Err("decoded ML-DSA t1 coefficient is not canonical");
+        }
+        Ok(())
+    }
+
     /// Build from the reference's decoded public-key and signature structs plus
     /// the message and `tr`. This is the natural constructor once you have run
     /// `pk_decode` / `sig_decode`.

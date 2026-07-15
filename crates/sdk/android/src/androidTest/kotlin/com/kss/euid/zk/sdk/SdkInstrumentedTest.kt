@@ -2,6 +2,7 @@ package com.kss.euid.zk.sdk
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -11,7 +12,7 @@ import org.junit.runner.RunWith
  * the test device's ABI. Run with `./gradlew connectedAndroidTest` (needs a
  * running emulator/device).
  *
- * Exercises the ML-DSA mdoc product contract exposed by verifyMdocPid.
+ * Exercises the ML-DSA mdoc product contract exposed by verifyIdentity.
  */
 @RunWith(AndroidJUnit4::class)
 class SdkInstrumentedTest {
@@ -30,9 +31,21 @@ class SdkInstrumentedTest {
         natMode = NatMode.ANY,
     )
 
+    private fun malformedWitness() = ZkMdocWitness(
+        document = byteArrayOf(),
+        trustedIssuerPublicKeys = emptyList(),
+    )
+
     @Test
-    fun verifyMdocPid_rejectsMalformedProof() {
-        val result = verifyMdocPid(sampleStatement(), "not an mdoc proof".toByteArray())
+    fun proveIdentity_rejectsMalformedMdoc() {
+        assertThrows(ZkException.Prove::class.java) {
+            proveIdentity(sampleStatement(), malformedWitness())
+        }
+    }
+
+    @Test
+    fun verifyIdentity_rejectsMalformedProof() {
+        val result = verifyIdentity(sampleStatement(), "not an mdoc proof".toByteArray())
         assertFalse(result.ok)
     }
 }

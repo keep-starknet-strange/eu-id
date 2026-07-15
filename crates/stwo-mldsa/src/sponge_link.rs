@@ -1,14 +1,14 @@
 //! Sponge-chain glue for the composed statement (M6): HashIo *bridges* and a
-//! public-prefix *producer* that stitch the three SHAKE-256 chains together.
+//! public-byte links that stitch the SHAKE-256 chains together.
 //!
-//! All three chains and every mldsa component draw the SAME
+//! All four chains and every mldsa component draw the SAME
 //! [`crate::binding::HashIoRelation`] (re-exported from stwo-keccak), so a byte
 //! yielded (+) on one stream and required (−) on another balances through the
 //! global LogUp. These small components move bytes between streams:
 //!
-//! - [`PublicPrefixProducer`] — yields fixed PUBLIC bytes (tr ‖ 0x00 ‖ 0x00) into
-//!   the µ-absorb stream. Byte values are preprocessed constants (public); no
-//!   consume side. Mirrors `stwo_keccak::sponge::io_provider`'s absorb-yield.
+//! - [`PublicPrefixEval`] — provides or requires fixed PUBLIC bytes on a HashIo
+//!   stream. It binds pkEncode into pkHash, pkHash's first 64 squeeze bytes to
+//!   `tr`, and `tr ‖ 0x00 ‖ 0x00` into µ-absorb.
 //! - [`Bridge`] — for each `i` requires `(src_stream, src_off+i, byte)` (−) and
 //!   yields `(dst_stream, dst_off+i, byte)` (+), where `byte` is ONE committed
 //!   trace cell used on BOTH sides (so the moved byte is provably identical; no
@@ -39,9 +39,10 @@ use crate::binding::{HashIoRelation, MsgLinkRelation};
 // Public-prefix producer: yields fixed PUBLIC bytes into a stream.
 // =============================================================================
 
-/// A component that yields a list of PUBLIC bytes into `dst_stream` at positions
-/// `dst_off + i`. The bytes are Eval CONSTANTS (both sides construct the Eval
-/// from public data — the `io_provider` pattern), so the yielded tuples are
+/// A component that provides (`yield_positive = true`) or requires
+/// (`yield_positive = false`) a list of PUBLIC bytes on `dst_stream` at
+/// positions `dst_off + i`. The bytes are Eval CONSTANTS (both sides construct
+/// the Eval from public data — the `io_provider` pattern), so the tuples are
 /// pinned to the public values with no committable cell to forge. Single packed
 /// row (`LOG_N_LANES`), lane-0 enabler.
 #[derive(Clone)]
@@ -49,6 +50,7 @@ pub struct PublicPrefixEval {
     pub dst_stream: u32,
     pub dst_off: u32,
     pub bytes: Vec<u8>,
+    pub yield_positive: bool,
     pub hash_io: HashIoRelation,
 }
 
@@ -84,7 +86,7 @@ impl PublicPrefixEval {
                     m31(self.dst_off + i as u32),
                     m31(b as u32),
                 ];
-                (true, self.hash_io.combine(&tuple))
+                (self.yield_positive, self.hash_io.combine(&tuple))
             })
             .collect();
         gen_lane0_fracs(&entries)
@@ -103,10 +105,11 @@ impl FrameworkEval for PublicPrefixEval {
         let one = E::F::from(M31::one());
         eval.add_constraint(enabler.clone() * (one - enabler.clone()));
         let en = E::EF::from(enabler);
+        let numerator = if self.yield_positive { en } else { -en };
         for (i, &b) in self.bytes.iter().enumerate() {
             eval.add_to_relation(RelationEntry::new(
                 &self.hash_io,
-                en.clone(),
+                numerator.clone(),
                 &[
                     E::F::from(m31(self.dst_stream)),
                     E::F::from(m31(self.dst_off + i as u32)),

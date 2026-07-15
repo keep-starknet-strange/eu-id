@@ -19,8 +19,8 @@ use eu_id_prover::mdoc::{
     MdocRevocationRangeWitness, MdocRevocationSignature,
 };
 use eu_id_prover::ts13::{
-    ts13_mso_derived_revocation_id, Ts13RevocationError, Ts13RevocationStatement,
-    Ts13RevocationWitness,
+    ts13_default_circuit_hash, ts13_mso_derived_revocation_id, Ts13MdocProofArtifact,
+    Ts13RevocationError, Ts13RevocationStatement, Ts13RevocationWitness,
 };
 use eu_id_prover::Policy;
 
@@ -240,12 +240,7 @@ fn ts13_mldsa_revocation_native_positive_and_negatives() {
 
 mod quantum_only {
     use super::*;
-    use eu_id_prover::mdoc::{
-        mdoc_expected_preprocessed_root, mdoc_production_pcs_config, mdoc_proof_byte_breakdown,
-        prove_mdoc_circuit, verify_mdoc_circuit,
-        verify_mdoc_circuit_with_pcs_config_and_preprocessed_root,
-    };
-    use eu_id_prover::Error;
+    use eu_id_prover::mdoc::{mdoc_proof_byte_breakdown, prove_mdoc_circuit, verify_mdoc_circuit};
     use std::time::Instant;
 
     /// A device-key ↔ MSO binding violation rejects at prove entry.
@@ -300,6 +295,38 @@ mod quantum_only {
         let restored: eu_id_prover::mdoc::MdocCircuitProof =
             bincode::deserialize(&proof_bytes).expect("proof deserializes");
         verify_mdoc_circuit(&restored, &statement).expect("round-tripped proof verifies");
+
+        // The TS13 artifact carries no tree-0 authority; verification derives
+        // the canonical commitment internally from the public statement.
+        let revocation_public = statement
+            .ts13_revocation
+            .as_ref()
+            .expect("statement carries revocation public inputs");
+        let revocation_range = statement
+            .ts13_revocation_range
+            .as_ref()
+            .expect("statement carries revocation range");
+        let artifact = Ts13MdocProofArtifact {
+            circuit_hash: ts13_default_circuit_hash(),
+            mdoc_proof: proof_bytes.clone(),
+            revocation_statement: Ts13RevocationStatement {
+                revocation_public_key: revocation_public.revocation_public_key.clone(),
+                epoch: revocation_public.epoch,
+            },
+            revocation_witness: Ts13RevocationWitness {
+                id: revocation_range.id,
+                id_lo: revocation_range.id_lo,
+                id_hi: revocation_range.id_hi,
+                epoch: revocation_public.epoch,
+                signature: statement
+                    .ts13_revocation_signature
+                    .clone()
+                    .expect("statement carries revocation signature"),
+            },
+        };
+        artifact
+            .verify_mdoc_and_revocation(&extracted, &statement)
+            .expect("TS13 artifact verifies with internal tree-0 reconstruction");
 
         // The VERIFIER-side statement does not need the real range values:
         // zeroed bounds verify identically (the range facts are proven
@@ -419,36 +446,38 @@ mod quantum_only {
             .expect_err("tampered statement issuer message must reject");
     }
 
-    /// The F-ROOT pin on the fully-PQ mdoc path: the verifier derives the
-    /// expected tree-0 (preprocessed) root independently and pins it; a
-    /// tampered pin is rejected with `PreprocessedRootMismatch` before the
-    /// STARK work (G7 companion).
+    /// The ordinary verifier reconstructs tree 0 itself. A forged proof root,
+    /// malformed SIB resource claim, or non-canonical decoded public key is
+    /// rejected without accepting any caller/artifact root as authority.
     #[test]
-    fn mldsa_mdoc_pins_the_preprocessed_root() {
+    fn mldsa_mdoc_reconstructs_tree0_and_gates_public_shape() {
         let (extracted, statement) = full_pq_extracted_and_statement();
-        let config = mdoc_production_pcs_config();
         let proof = prove_mdoc_circuit(&extracted, &statement).expect("fully-PQ mdoc proves");
 
-        let expected_root = mdoc_expected_preprocessed_root(&extracted, &statement, config)
-            .expect("expected preprocessed root computes");
-        verify_mdoc_circuit_with_pcs_config_and_preprocessed_root(
-            &proof,
-            &statement,
-            config,
-            expected_root,
-        )
-        .expect("honest proof verifies against the derived preprocessed root");
+        verify_mdoc_circuit(&proof, &statement).expect("honest proof verifies");
 
-        let mut wrong_root = expected_root;
-        wrong_root.0[0] ^= 1;
+        let mut forged_root = proof.clone();
+        forged_root.stark_proof.0.commitments[0].0[0] ^= 1;
+        verify_mdoc_circuit(&forged_root, &statement)
+            .expect_err("a forged tree-0 commitment must reject");
+
+        let mut malformed_sib = proof.clone();
+        malformed_sib
+            .mldsa
+            .as_mut()
+            .expect("issuer claims")
+            .sib_stream_len = stwo_mldsa::statement::MAX_SIB_STREAM_LEN + 1;
+        verify_mdoc_circuit(&malformed_sib, &statement)
+            .expect_err("an unbounded SIB claim must reject before allocation");
+
+        let mut noncanonical_t1 = statement.clone();
+        let eu_id_prover::mdoc::IssuerAuthInput::MlDsa(input) = &mut noncanonical_t1.issuer_input;
+        input.t1[0][0] = stwo_mldsa::types::T1_COEFFICIENT_BOUND;
+        verify_mdoc_circuit(&proof, &noncanonical_t1)
+            .expect_err("a non-canonical public t1 must reject at verify entry");
         assert!(
-            matches!(
-                verify_mdoc_circuit_with_pcs_config_and_preprocessed_root(
-                    &proof, &statement, config, wrong_root,
-                ),
-                Err(Error::PreprocessedRootMismatch { .. })
-            ),
-            "a mismatched preprocessed root must be rejected before the STARK check",
+            prove_mdoc_circuit(&extracted, &noncanonical_t1).is_err(),
+            "a non-canonical public t1 must reject at prove entry"
         );
     }
 
@@ -458,32 +487,18 @@ mod quantum_only {
     /// same padded shape key; each proof must verify under its OWN derived pin.
     #[test]
     fn mldsa_mdoc_pin_is_per_signature_not_cached() {
-        let config = mdoc_production_pcs_config();
         let (extracted_a, statement_a) = full_pq_extracted_and_statement_for(b"nonce-A");
         let (extracted_b, statement_b) = full_pq_extracted_and_statement_for(b"nonce-B");
 
         let proof_a = prove_mdoc_circuit(&extracted_a, &statement_a).expect("proof A proves");
         let proof_b = prove_mdoc_circuit(&extracted_b, &statement_b).expect("proof B proves");
 
-        let root_a = mdoc_expected_preprocessed_root(&extracted_a, &statement_a, config)
-            .expect("root A computes");
-        let root_b = mdoc_expected_preprocessed_root(&extracted_b, &statement_b, config)
-            .expect("root B computes");
-
-        verify_mdoc_circuit_with_pcs_config_and_preprocessed_root(
-            &proof_a,
-            &statement_a,
-            config,
-            root_a,
-        )
-        .expect("proof A verifies under its own pin");
-        verify_mdoc_circuit_with_pcs_config_and_preprocessed_root(
-            &proof_b,
-            &statement_b,
-            config,
-            root_b,
-        )
-        .expect("proof B verifies under its own pin");
+        assert_ne!(
+            proof_a.stark_proof.commitments[0], proof_b.stark_proof.commitments[0],
+            "statement-specific preprocessing should produce distinct roots"
+        );
+        verify_mdoc_circuit(&proof_a, &statement_a).expect("proof A verifies");
+        verify_mdoc_circuit(&proof_b, &statement_b).expect("proof B verifies");
     }
 
     /// CM-3 same-arm malformed claim tree: a fully-PQ proof produced for one

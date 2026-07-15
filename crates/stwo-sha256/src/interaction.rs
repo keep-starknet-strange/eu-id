@@ -45,7 +45,7 @@ use stwo_constraint_framework::{LogupTraceGenerator, Relation};
 use crate::components::{range_log_size, RangeKind, RANGE_TABLES};
 use crate::constants::DIGEST_BYTES;
 use crate::constraints::LOGUP_BATCH;
-use crate::field_exposure::{word_be_bytes, FieldExposure, BYTE_RANGE_CHECK_OFFSET};
+use crate::field_exposure::{word_be_bytes, FieldExposure};
 use crate::multiplicities::range_k_multiplicities;
 use crate::relations::Sha256Relations;
 use crate::trace::{h_out_digest_bytes, Layout};
@@ -59,16 +59,16 @@ use crate::types::Sha256Witness;
 ///   2 (schedule `Range_4` carry pair; t ≥ 16 rows)
 /// +  8 (round carry range-checks; every row)
 /// + 16 (finalization carries, t = 63 rows)
-/// + 16 (terminal `Range_16`, t = 63 rows)
-/// = 42
+/// + 32 (terminal `Range_8` digest bytes, t = 63 rows)
+/// = 58
 /// ```
 ///
 /// A site that does not fire on a given row holds the neutral fraction `(0, 1)`.
-pub const SHA_LOOKUPS_PER_ROW_BASE: usize = 42;
+pub const SHA_LOOKUPS_PER_ROW_BASE: usize = 58;
 
 /// Total lookup sites `Sha256Eval` fires per row. The digest provider adds
 /// exactly one width-32 yield site when `expose_digest` is set; the
-/// credential-field provider adds two `Range16` byte range-checks (the
+/// credential-field provider adds one `Range8` byte range-check (the
 /// `[0, 256)` pin) per exposed byte column — once for block-0 legacy exposure,
 /// once per target block for multi-block exposure — plus one width-3 yield per
 /// exposed window byte (all firing on `t = 15` rows, selector-gated to each
@@ -81,15 +81,15 @@ pub fn sha_lookups_per_row(expose_digest: bool, field_exposure: &FieldExposure) 
     let field_range_sites = if field_exposure.is_empty() {
         0
     } else if field_exposure.needs_block_witness() {
-        2 * field_exposure.n_byte_columns() * field_exposure.target_blocks().len()
+        field_exposure.n_byte_columns() * field_exposure.target_blocks().len()
     } else {
-        2 * field_exposure.n_byte_columns()
+        field_exposure.n_byte_columns()
     };
     base + usize::from(expose_digest) + field_range_sites + field_exposure.n_yields()
 }
 
 /// Total lookup sites the multi-slot merged `Sha256Eval` fires per row:
-/// the 42 base sites, one digest yield site per digest-exposing slot, then
+/// the 58 base sites, one digest yield site per digest-exposing slot, then
 /// each slot's field sites — in the emission order of the multi branch of
 /// `Sha256Eval::evaluate`. Read by both the interaction generator and the
 /// column sizing so the three never drift.
@@ -129,7 +129,7 @@ impl ComponentClaim {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InteractionClaim {
     pub sha256: ComponentClaim,
-    pub range: Vec<ComponentClaim>, // 4: Range_2, Range_4, Range_5, Range_16
+    pub range: Vec<ComponentClaim>, // 4: Range_2, Range_4, Range_5, Range_8
 }
 
 impl InteractionClaim {
@@ -317,7 +317,7 @@ fn range_k_interaction(
         RangeKind::Range2 => producer_frac_column(&relations.range.range_2, &mults, row_iter),
         RangeKind::Range4 => producer_frac_column(&relations.range.range_4, &mults, row_iter),
         RangeKind::Range5 => producer_frac_column(&relations.range.range_5, &mults, row_iter),
-        RangeKind::Range16 => producer_frac_column(&relations.range.range_16, &mults, row_iter),
+        RangeKind::Range8 => producer_frac_column(&relations.range.range_8, &mults, row_iter),
     };
     // Single fraction — one column regardless of batch; the producer
     // component finalizes in pairs, so pass 2.
@@ -463,17 +463,16 @@ fn write_round_row_lookups(
         round.a_new_carries,
     );
 
-    // ---- 3/4. Finalization carries + terminal `Range_16` (t = 63 rows) ----
+    // ---- 3/4. Finalization carries + terminal `Range_8` bytes (t = 63 rows) ----
     if t == crate::constants::N_ROUNDS - 1 {
         for c in &block.finalization_carries {
             write_carry_range_pair(all, cursor, slot, relations, RangeKind::Range2, *c);
         }
-        for h in &block.h_out {
-            write_range_check(all, cursor, slot, relations, RangeKind::Range16, h.lo);
-            write_range_check(all, cursor, slot, relations, RangeKind::Range16, h.hi);
+        for byte in h_out_digest_bytes(&block.h_out) {
+            write_range_check(all, cursor, slot, relations, RangeKind::Range8, byte);
         }
     } else {
-        *cursor += 16 + 16;
+        *cursor += 16 + DIGEST_BYTES;
     }
 
     // ---- 5. Digest yield (provider side, final block's t = 63 row) ----
@@ -491,7 +490,7 @@ fn write_round_row_lookups(
 
     // ---- 6. Credential-field range-checks + yields (target block t = 15 rows) ----
     //
-    // Same order as the constraint side: 7a. two `Range16` per exposed byte
+    // Same order as the constraint side: 7a. one `Range8` per exposed byte
     // column — once for block-0 legacy exposure, once per target block for
     // multi-block exposure (each gated by `block_idx == target`) — then 7b. one
     // width-3 yield per window byte (numerator `−selector`, selector =
@@ -558,13 +557,7 @@ fn write_field_row_lookups(
                 SecureField::from(BaseField::from(u32::from(block_idx == *target_block)));
             for bytes in &word_bytes {
                 for &b in bytes {
-                    all[*cursor][slot] =
-                        (selector, combine_range(relations, RangeKind::Range16, b));
-                    *cursor += 1;
-                    all[*cursor][slot] = (
-                        selector,
-                        combine_range(relations, RangeKind::Range16, b + BYTE_RANGE_CHECK_OFFSET),
-                    );
+                    all[*cursor][slot] = (selector, combine_range(relations, RangeKind::Range8, b));
                     *cursor += 1;
                 }
             }
@@ -573,12 +566,7 @@ fn write_field_row_lookups(
         let selector = SecureField::from(BaseField::from(u32::from(block_idx == 0)));
         for bytes in &word_bytes {
             for &b in bytes {
-                all[*cursor][slot] = (selector, combine_range(relations, RangeKind::Range16, b));
-                *cursor += 1;
-                all[*cursor][slot] = (
-                    selector,
-                    combine_range(relations, RangeKind::Range16, b + BYTE_RANGE_CHECK_OFFSET),
-                );
+                all[*cursor][slot] = (selector, combine_range(relations, RangeKind::Range8, b));
                 *cursor += 1;
             }
         }
@@ -607,7 +595,7 @@ fn combine_range(relations: &Sha256Relations, kind: RangeKind, value: u32) -> Se
         RangeKind::Range2 => relations.range.range_2.combine(&v),
         RangeKind::Range4 => relations.range.range_4.combine(&v),
         RangeKind::Range5 => relations.range.range_5.combine(&v),
-        RangeKind::Range16 => relations.range.range_16.combine(&v),
+        RangeKind::Range8 => relations.range.range_8.combine(&v),
     }
 }
 
@@ -695,7 +683,7 @@ pub fn generate_consumer_interaction_trace(
 
 /// Interaction trace of the multi-slot merged consumer (shared-tables mode:
 /// no producer components). Mirrors the multi branch of
-/// `Sha256Eval::evaluate` exactly: per row, the 66 base sites (via
+/// `Sha256Eval::evaluate` exactly: per row, the 58 base sites (via
 /// [`write_round_row_lookups`] with digest/field off), then one digest
 /// yield site per digest-exposing slot in slot order (live on the OWN
 /// slot's final-block t = 63 row), then each slot's field sites in slot
@@ -823,7 +811,7 @@ fn generate_interaction_trace_inner(
         claimed_sum: sha_sum,
     };
 
-    // 4 range producers (Range_2, Range_4, Range_5, Range_16).
+    // 4 range producers (Range_2, Range_4, Range_5, Range_8).
     let mut range = Vec::with_capacity(4);
     if include_table_providers {
         for &kind in RANGE_TABLES {
@@ -865,6 +853,61 @@ mod tests {
             claim.total(),
             SecureField::zero(),
             "standalone SHA module must self-balance when the digest is not exposed",
+        );
+    }
+
+    /// A malicious split can preserve `limb = 256·b_hi + b_lo` in M31 by
+    /// moving one radix unit between the two cells. The Range8 lookup must be
+    /// what rejects that otherwise constraint-preserving representation.
+    #[test]
+    fn range_8_rejects_recomposition_preserving_out_of_range_digest_byte() {
+        let witness = compute_sha256_witness(b"abc");
+        let relations = Sha256Relations::draw(&mut Blake2sChannel::default());
+        let (_, producer_sum) = range_k_interaction(
+            &relations,
+            &witness,
+            RangeKind::Range8,
+            &FieldExposure::empty(),
+        );
+        let bytes: Vec<BaseField> = witness
+            .blocks
+            .iter()
+            .flat_map(|block| h_out_digest_bytes(&block.h_out))
+            .map(BaseField::from)
+            .collect();
+        let reciprocal = |value: BaseField| -> SecureField {
+            let denominator: SecureField = relations.range.range_8.combine(&[value]);
+            assert_ne!(denominator, SecureField::zero());
+            SecureField::one() / denominator
+        };
+        let honest_consumer = bytes
+            .iter()
+            .copied()
+            .fold(SecureField::zero(), |sum, byte| sum + reciprocal(byte));
+        assert_eq!(producer_sum + honest_consumer, SecureField::zero());
+
+        let (byte_hi, byte_lo) = (bytes[0], bytes[1]);
+        let radix = BaseField::from(1u32 << 8);
+        let (forged_hi, forged_lo) = if byte_hi.0 < 255 {
+            (byte_hi + BaseField::from(1u32), byte_lo - radix)
+        } else {
+            (byte_hi - BaseField::from(1u32), byte_lo + radix)
+        };
+        assert_eq!(
+            radix * byte_hi + byte_lo,
+            radix * forged_hi + forged_lo,
+            "the forged split must preserve the limb recomposition",
+        );
+        assert!(forged_hi.0 < 256);
+        assert!(forged_lo.0 >= 256, "one forged cell must miss Range8");
+
+        let forged_consumer = honest_consumer - reciprocal(byte_hi) - reciprocal(byte_lo)
+            + reciprocal(forged_hi)
+            + reciprocal(forged_lo);
+        assert_ne!(
+            producer_sum + forged_consumer,
+            SecureField::zero(),
+            "an out-of-range byte split must not balance the Range8 provider",
         );
     }
 

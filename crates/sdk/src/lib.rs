@@ -1,7 +1,7 @@
 //! ML-DSA EU-ID ZK SDK, exposed to Kotlin and Swift through UniFFI.
 //!
-//! [`prove_mdoc_pid`] accepts a CBOR PID mdoc plus ML-DSA issuer trust pins and
-//! returns a compressed proof envelope. [`verify_mdoc_pid`] binds that envelope
+//! [`prove_identity`] accepts a CBOR PID mdoc plus ML-DSA issuer trust pins and
+//! returns a compressed proof envelope. [`verify_identity`] binds that envelope
 //! to the verifier's request and verifies the same mdoc proof.
 
 use std::io::{Read, Write};
@@ -113,7 +113,6 @@ pub struct Ts13PresentationRequest {
     pub doctype: String,
     pub namespace: String,
     pub circuit_hash: String,
-    pub preprocessed_root: Vec<u8>,
     pub num_attributes: u32,
     pub max_mdoc_bytes: u32,
     pub max_attribute_bytes: u32,
@@ -142,7 +141,6 @@ pub struct Ts13ZkDocument {
     pub doc_type: String,
     pub zk_system_id: String,
     pub circuit_hash: String,
-    pub preprocessed_root: Vec<u8>,
     pub request_binding_hash: String,
     pub disclosed_attributes: Vec<Ts13DisclosedAttribute>,
     pub proof: Vec<u8>,
@@ -227,10 +225,6 @@ fn ts13_request_binding_hash(request: &Ts13PresentationRequest) -> String {
         ("tuple".into(), ts13_tuple_value(request)),
         ("circuit_hash".into(), request.circuit_hash.as_str().into()),
         (
-            "preprocessed_root".into(),
-            Value::Bytes(request.preprocessed_root.clone()),
-        ),
-        (
             "current_date_epoch_day".into(),
             Value::from(request.current_date_epoch_day),
         ),
@@ -263,11 +257,6 @@ fn ts13_request_binding_hash(request: &Ts13PresentationRequest) -> String {
 #[uniffi::export]
 pub fn ts13_default_circuit_hash() -> String {
     eu_id_prover::ts13::ts13_default_circuit_hash()
-}
-
-#[uniffi::export]
-pub fn ts13_default_preprocessed_root() -> Vec<u8> {
-    eu_id_prover::ts13::ts13_default_preprocessed_root().to_vec()
 }
 
 fn ts13_tuple_is_supported(request: &Ts13PresentationRequest) -> bool {
@@ -316,11 +305,6 @@ pub fn ts13_validate_presentation_request(
             request.circuit_hash
         )));
     }
-    if request.preprocessed_root.len() != 32 {
-        return Err(ZkError::InvalidInput(
-            "preprocessed_root must be 32 bytes".to_string(),
-        ));
-    }
     if request.trusted_issuer_hashes.len() != request.potential_issuers as usize
         || request.trusted_issuer_hashes.iter().any(String::is_empty)
     {
@@ -347,7 +331,6 @@ pub fn ts13_build_zk_document(
         doc_type: request.doctype.clone(),
         zk_system_id: request.zk_system_id.clone(),
         circuit_hash: request.circuit_hash.clone(),
-        preprocessed_root: request.preprocessed_root.clone(),
         request_binding_hash: ts13_request_binding_hash(&request),
         disclosed_attributes,
         proof,
@@ -365,7 +348,6 @@ pub fn ts13_verify_zk_document(
     Ok(document.doc_type == request.doctype
         && document.zk_system_id == request.zk_system_id
         && document.circuit_hash == request.circuit_hash
-        && document.preprocessed_root == request.preprocessed_root
         && document.request_binding_hash == ts13_request_binding_hash(request))
 }
 
@@ -668,7 +650,7 @@ fn mdoc_disclosed_set_matches(
 }
 
 #[uniffi::export]
-pub fn prove_mdoc_pid(
+pub fn prove_identity(
     statement: ZkPublicStatement,
     witness: ZkMdocWitness,
 ) -> Result<Vec<u8>, ZkError> {
@@ -690,7 +672,7 @@ pub fn prove_mdoc_pid(
 }
 
 #[uniffi::export]
-pub fn verify_mdoc_pid(
+pub fn verify_identity(
     statement: ZkPublicStatement,
     proof: Vec<u8>,
 ) -> Result<ZkVerifyResult, ZkError> {
@@ -744,7 +726,6 @@ mod tests {
             doctype: TS13_PID_DOCTYPE.to_string(),
             namespace: TS13_PID_NAMESPACE.to_string(),
             circuit_hash: ts13_default_circuit_hash(),
-            preprocessed_root: ts13_default_preprocessed_root(),
             num_attributes: TS13_NUM_ATTRIBUTES,
             max_mdoc_bytes: TS13_MAX_MDOC_BYTES,
             max_attribute_bytes: TS13_MAX_ATTRIBUTE_BYTES,
@@ -836,9 +817,21 @@ mod tests {
     }
 
     #[test]
-    fn malformed_mdoc_proof_rejects() {
+    fn identity_public_api_rejects_malformed_mdoc() {
+        let witness = ZkMdocWitness {
+            document: Vec::new(),
+            trusted_issuer_public_keys: Vec::new(),
+        };
+        assert!(matches!(
+            prove_identity(sample_statement(), witness),
+            Err(ZkError::Prove(_))
+        ));
+    }
+
+    #[test]
+    fn identity_public_api_rejects_malformed_proof() {
         assert!(
-            !verify_mdoc_pid(sample_statement(), b"not a proof".to_vec())
+            !verify_identity(sample_statement(), b"not a proof".to_vec())
                 .unwrap()
                 .ok
         );

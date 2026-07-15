@@ -120,8 +120,11 @@ relation!(Split5, SPLIT_LOOKUP_ARITY);
 relation!(Split6, SPLIT_LOOKUP_ARITY);
 relation!(Split7, SPLIT_LOOKUP_ARITY);
 
-/// Arity of [`KeccakRound`]: 8 round-constant bytes then the 200 state bytes.
-pub const KECCAK_ROUND_ARITY: usize = N_BYTES_IN_U64 + N_BYTES_IN_STATE;
+/// Arity of [`KeccakRound`]: permutation id, round index, 8 round-constant
+/// bytes, then the 200 state bytes. The identity fields prevent LogUp's
+/// multiset semantics from swapping states across permutations or reordering
+/// rounds within one permutation.
+pub const KECCAK_ROUND_ARITY: usize = 2 + N_BYTES_IN_U64 + N_BYTES_IN_STATE;
 relation!(KeccakRound, KECCAK_ROUND_ARITY);
 
 /// Shared handle for the ONE drawn [`KeccakRelations`] of a composed proof.

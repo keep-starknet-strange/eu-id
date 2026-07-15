@@ -426,6 +426,13 @@ impl Air for MdocWindowBind {
         mdoc_window_bind_preprocessed_column_ids()
     }
 
+    fn canonical_preprocessed_columns(
+        &mut self,
+    ) -> Result<Vec<air_core::PreprocessedColumnEval>, stwo::core::verifier::VerificationError>
+    {
+        Ok(mdoc_window_bind_preprocessed_columns(&self.rows))
+    }
+
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
         let claim = self.interaction_claim().clone();
         let blinder_relation = self

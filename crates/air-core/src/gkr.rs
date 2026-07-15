@@ -53,12 +53,7 @@ pub fn encode_gkr_batch_proof(proof: &GkrBatchProof) -> Vec<u8> {
     let layer_masks = proof
         .layer_masks_by_instance
         .iter()
-        .map(|layers| {
-            layers
-                .iter()
-                .map(|mask| mask.columns().to_vec())
-                .collect()
-        })
+        .map(|layers| layers.iter().map(|mask| mask.columns().to_vec()).collect())
         .collect();
     let output_claims = proof.output_claims_by_instance.clone();
     let wire = GkrProofWire {

@@ -1,8 +1,8 @@
 //! M6 acceptance for the composed in-circuit ML-DSA-65 statement
 //! (`stwo_mldsa::statement`): ONE `air-core` proof stitching coeffs + decomp +
-//! sib + three SHAKE-256 sponge chains + msglink + bridges/sinks. Positive over
+//! sib + four SHAKE-256 sponge chains + msglink + bridges/sinks. Positive over
 //! 10 oracle signatures with ≥1 KiB messages, a control, the negative matrix
-//! a–f, and an (ignored) numbers probe.
+//! a–g, and an (ignored) numbers probe.
 //!
 //! Run single-threaded: `RAYON_NUM_THREADS=1 cargo test -p stwo-mldsa
 //! --test composed -- --test-threads=1`.
@@ -12,6 +12,8 @@ use ml_dsa::{EncodedSignature, EncodedVerifyingKey, MlDsa65, SigningKey};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
+use stwo::core::fields::m31::M31;
+use stwo::core::fields::qm31::SecureField;
 use stwo::core::fri::FriConfig;
 use stwo::core::pcs::PcsConfig;
 
@@ -21,11 +23,7 @@ use stwo_mldsa::statement::{prove_mldsa, verify_mldsa, PermIdPlan};
 use stwo_mldsa::witness::{generate_witness, MlDsaWitness};
 use stwo_mldsa::MlDsaVerifyInput;
 
-/// The SHAKE consumers (keccak_round, sponge_v) declare constraint degree
-/// bound `log_size + 2` (LogUp batch 4), so constraint evaluation needs
-/// `log_blowup >= 2` to reuse committed evaluations (production runs blowup 3;
-/// `pcs_config()` has blowup 1, which would require stored
-/// polynomial coefficients).
+/// The direct Keccak round AIR uses batch-four LogUp, so blowup two suffices.
 fn pcs_config() -> PcsConfig {
     PcsConfig {
         pow_bits: 10,
@@ -128,8 +126,20 @@ fn composed_control_honest_proves() {
     }
 }
 
+/// The public folded identity is an outer-STARK constraint, not a native
+/// verifier-side acceptance check. Mutating a transcript-bound group
+/// evaluation must therefore invalidate the STARK quotient.
+#[test]
+fn composed_public_fold_constraint_rejects_tampered_group_eval() {
+    let msg = big_msg("fold-constraint", 1024);
+    let (w, input) = witness_and_input(8010, &msg);
+    let mut proof = prove_mldsa(w, input, pcs_config()).expect("prove");
+    proof.group_evals[0] += SecureField::from(M31::from_u32_unchecked(1));
+    assert!(verify_mldsa(&proof).is_err());
+}
+
 // =====================================================================
-// Negatives a–f.
+// Negatives a–g.
 // =====================================================================
 
 /// a) tamper µ-absorb message byte (66+k) with `input.message` unchanged →
@@ -187,26 +197,31 @@ fn composed_negative_d_placement_permuted() {
     assert!(rejected(w, input), "placement permutation must be rejected");
 }
 
-/// e) perm-id namespacing: the three chains' perm bases are the running perm
+/// e) perm-id namespacing: the four chains' perm bases are the running perm
 ///    counts, so their id ranges are disjoint by construction — a cross-chain
 ///    KeccakState collision is STRUCTURALLY IMPOSSIBLE in this composition.
 #[test]
 fn composed_negative_e_perm_id_namespacing() {
-    // µ (66+|M|=1090 bytes ⇒ n_absorb=9, n_squeeze=1 ⇒ 9 perms),
+    // pkHash (1952 bytes ⇒ 15 perms), µ (66+|M|=1090 bytes ⇒ 9 perms),
     // c̃ (832 bytes ⇒ n_absorb=7, +1 ⇒ 7 perms). Any counts work; assert the
     // structural disjointness invariant.
-    for (n_mu, n_ct) in [(9usize, 7usize), (1, 1), (13, 5), (16, 16)] {
-        let plan = PermIdPlan::new(n_mu, n_ct);
-        assert_eq!(plan.mu_base, 0);
-        assert_eq!(plan.c_tilde_base, n_mu, "c̃ base = running count after µ");
+    for (n_pk, n_mu, n_ct) in [(15usize, 9usize, 7usize), (1, 1, 1), (15, 13, 5)] {
+        let plan = PermIdPlan::new(n_pk, n_mu, n_ct);
+        assert_eq!(plan.pk_base, 0);
+        assert_eq!(plan.mu_base, n_pk, "µ base = running count after pkHash");
+        assert_eq!(
+            plan.c_tilde_base,
+            n_pk + n_mu,
+            "c̃ base = running count after µ"
+        );
         assert_eq!(
             plan.sib_base,
-            n_mu + n_ct,
+            n_pk + n_mu + n_ct,
             "SIB base = running count after c̃"
         );
-        // Ranges [0,n_mu), [n_mu,n_mu+n_ct), [n_mu+n_ct, ..) never overlap: each
-        // chain's ids live in [base, base+n_chain) and the next base IS the prior
-        // running total, so overlap is arithmetically impossible.
+        // Each chain's ids live in [base, base+n_chain), and the next base is
+        // the prior running total, so overlap is arithmetically impossible.
+        assert!(plan.pk_base + n_pk <= plan.mu_base);
         assert!(plan.mu_base + n_mu <= plan.c_tilde_base);
         assert!(plan.c_tilde_base + n_ct <= plan.sib_base);
     }
@@ -220,6 +235,21 @@ fn composed_negative_f_wrong_pk_rho() {
     let (w, mut input) = witness_and_input(8006, &msg);
     input.rho[0] ^= 1;
     assert!(rejected(w, input), "wrong-pk ρ flip must fail the fold");
+}
+
+/// g) free-tr regression: keep the valid signature/witness and public key but
+/// flip the public `tr`. The pkHash job still squeezes H(pk), while the public
+/// tr checker requires the flipped byte on that same stream, so LogUp cannot
+/// balance. Transcript binding alone is not the mechanism under test here.
+#[test]
+fn composed_negative_g_wrong_public_tr() {
+    let msg = big_msg("neg-g", 1024);
+    let (w, mut input) = witness_and_input(8007, &msg);
+    input.tr[0] ^= 1;
+    assert!(
+        rejected(w, input),
+        "tr not equal to SHAKE256(pkEncode) must be rejected"
+    );
 }
 
 // =====================================================================
@@ -282,7 +312,7 @@ fn composed_numbers() {
     verify_mldsa(&proof).expect("verify");
     let verify_ms = t1.elapsed().as_millis();
 
-    // Perm count (µ + c̃ + SIB permutations).
+    // Perm count (pkHash + µ + c̃ + SIB permutations).
     let plan_perms = {
         // Reproduce the sponge shapes to count perms.
         let mu_absorb = w.sponge.mu_absorbed.len();
@@ -292,7 +322,8 @@ fn composed_numbers() {
         let n_absorb = |l: usize| (l + 1).div_ceil(136);
         let sib_stream = proof.sib_stream_len;
         let n_sq_sib = sib_stream.div_ceil(136).max(1);
-        (n_absorb(mu_absorb) + 1 - 1)
+        n_absorb(input.encode_pk().len())
+            + (n_absorb(mu_absorb) + 1 - 1)
             + (n_absorb(ct_absorb) + 1 - 1)
             + (n_absorb(sib_absorb) + n_sq_sib - 1)
     };

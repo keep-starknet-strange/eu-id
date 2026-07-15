@@ -1,48 +1,37 @@
 use ciborium::value::Value;
 use sha2::{Digest, Sha256};
-use stwo::core::vcs::blake2_hash::Blake2sHash;
 
 use crate::mdoc::{
-    verify_mdoc_circuit_with_preprocessed_root, ExtractedPidMdoc, MdocCircuitProof,
-    MdocCircuitStatement, MdocRevocationKey, MdocRevocationPublicInputs, MdocRevocationSignature,
+    verify_mdoc_circuit, ExtractedPidMdoc, MdocCircuitProof, MdocCircuitStatement,
+    MdocRevocationKey, MdocRevocationPublicInputs, MdocRevocationSignature,
+    MDOC_PRODUCTION_PCS_LOG_BLOWUP_FACTOR, MDOC_PRODUCTION_PCS_POW_BITS,
+    MDOC_PRODUCTION_PCS_QUERIES,
 };
 
-// Regenerated 2026-07-08 with the Class-D preprocessed root below (the circuit
-// tuple embeds the preprocessed_root, so this SHA-256(cbor(tuple)) moved with
-// it). Old value: ecd6e7cb2711f25f...b52a12b.
+// Regenerated whenever the canonical published tuple changes.
 pub const TS13_PUBLISHED_AGE_OVER_18_CIRCUIT_HASH: &str =
-    "aab012dad407305d3d57d2a52357c9f734b2e31790f4248c1b1eb9a62c14c25c";
-// Regenerated 2026-07-08 after Class-D SHA-table blinding (p4c): the shared
-// SHA split-pack + range producers gained a Class-D `is_dummy` selector and a
-// doubled (blinded) domain, so the mdoc preprocessed tree — which contains the
-// SHA tables in the age_over_18 baseline circuit — moved. Value is the real
-// `commitments[0]` of the published N=1 revocation-enabled age_over_18 mdoc
-// proof (captured via ts13_evidence_pack_n1_measurements). Old value:
-// b8aaff9161a9d3d664228884...d7a58f. See tasks/p4c-leakage-table.md.
-pub const TS13_PUBLISHED_AGE_OVER_18_PREPROCESSED_ROOT: &[u8; 32] =
-    b"\x35\x32\xfa\x24\x12\x9a\xcb\xa9\xee\x65\x3e\xa1\x19\x79\xb6\xdc\x39\x18\x1b\x28\xf0\x22\x3e\x71\x0d\xed\x6d\x75\x85\x83\x16\x9f";
+    "8cb1765c8704e97461ea2189ded19e2b24f2a6fb53bf9ffc9371d6ea75b5bb01";
 pub const TS13_P4C_MIN_BLIND_ROWS: usize = 256;
 pub const TS13_P4C_MAX_OPENINGS: usize = 256;
 pub const TS13_P4C_MIN_DECOY_MESSAGE_BITS: usize = 512;
 pub const TS13_P4C_PER_OPENING_STATISTICAL_BITS: u32 = 64;
-pub const TS13_PCS_LOG_BLOWUP_FACTOR: u32 = 2;
-pub const TS13_PCS_QUERIES: u32 = 54;
-pub const TS13_PCS_POW_BITS: u32 = 20;
-pub const TS13_STARK_SOUNDNESS_BITS: u32 =
-    TS13_PCS_POW_BITS + TS13_PCS_LOG_BLOWUP_FACTOR * TS13_PCS_QUERIES;
+pub const TS13_CONSTRAINT_SYSTEM: &str = "mldsa65-pure-stark-direct-v1";
+pub const TS13_PCS_LOG_BLOWUP_FACTOR: u32 = MDOC_PRODUCTION_PCS_LOG_BLOWUP_FACTOR;
+pub const TS13_PCS_QUERIES: u32 = MDOC_PRODUCTION_PCS_QUERIES as u32;
+pub const TS13_PCS_POW_BITS: u32 = MDOC_PRODUCTION_PCS_POW_BITS;
+/// Conservative current outer-STARK bound. The PCS query/PoW label is 129
+/// bits, but the single QM31 OODS check at degree/domain `2^16` is only about
+/// 108 bits and therefore dominates.
+pub const TS13_STARK_SOUNDNESS_BITS: u32 = 108;
 pub const TS13_ML_DSA_65_SOUNDNESS_BITS: u32 = 192;
-pub const TS13_SHA256_SOUNDNESS_BITS: u32 = 128;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Ts13FixedTableFingerprint {
-    pub name: &'static str,
-    pub digest: [u8; 32],
-    pub rationale: &'static str,
-}
+/// Generic quantum collision bound for the 256-bit hashes used as binding
+/// commitments. This is approximately 256/3 bits, rounded down.
+pub const TS13_SHA256_SOUNDNESS_BITS: u32 = 85;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ts13CircuitTuple {
     pub system: &'static str,
+    pub constraint_system: &'static str,
     pub credential_format: &'static str,
     pub doctype: &'static str,
     pub namespace: &'static str,
@@ -56,8 +45,6 @@ pub struct Ts13CircuitTuple {
     pub pcs_log_blowup_factor: u32,
     pub pcs_queries: u32,
     pub pcs_pow_bits: u32,
-    pub fixed_table_fingerprints: Vec<Ts13FixedTableFingerprint>,
-    pub preprocessed_root: [u8; 32],
     pub composed_soundness_bits: u32,
 }
 
@@ -65,6 +52,7 @@ impl Ts13CircuitTuple {
     pub fn published_age_over_18() -> Self {
         Self {
             system: "stwo-euid-v1",
+            constraint_system: TS13_CONSTRAINT_SYSTEM,
             credential_format: "mso_mdoc_zk",
             doctype: "eu.europa.ec.eudi.pid.1",
             namespace: "eu.europa.ec.eudi.pid.1",
@@ -78,8 +66,6 @@ impl Ts13CircuitTuple {
             pcs_log_blowup_factor: TS13_PCS_LOG_BLOWUP_FACTOR,
             pcs_queries: TS13_PCS_QUERIES,
             pcs_pow_bits: TS13_PCS_POW_BITS,
-            fixed_table_fingerprints: ts13_published_fixed_table_fingerprints(),
-            preprocessed_root: *TS13_PUBLISHED_AGE_OVER_18_PREPROCESSED_ROOT,
             composed_soundness_bits: ts13_published_soundness_table().composed_soundness_bits(),
         }
     }
@@ -87,6 +73,7 @@ impl Ts13CircuitTuple {
     fn canonical_value(&self) -> Value {
         Value::Map(vec![
             ("system".into(), self.system.into()),
+            ("constraint_system".into(), self.constraint_system.into()),
             ("credential_format".into(), self.credential_format.into()),
             ("doctype".into(), self.doctype.into()),
             ("namespace".into(), self.namespace.into()),
@@ -119,38 +106,11 @@ impl Ts13CircuitTuple {
             ("pcs_queries".into(), Value::from(self.pcs_queries)),
             ("pcs_pow_bits".into(), Value::from(self.pcs_pow_bits)),
             (
-                "fixed_table_fingerprints".into(),
-                Value::Array(
-                    self.fixed_table_fingerprints
-                        .iter()
-                        .map(|fingerprint| {
-                            Value::Map(vec![
-                                ("name".into(), fingerprint.name.into()),
-                                ("digest".into(), Value::Bytes(fingerprint.digest.to_vec())),
-                                ("rationale".into(), fingerprint.rationale.into()),
-                            ])
-                        })
-                        .collect(),
-                ),
-            ),
-            (
-                "preprocessed_root".into(),
-                Value::Bytes(self.preprocessed_root.to_vec()),
-            ),
-            (
                 "composed_soundness_bits".into(),
                 Value::from(self.composed_soundness_bits),
             ),
         ])
     }
-}
-
-pub fn ts13_published_fixed_table_fingerprints() -> Vec<Ts13FixedTableFingerprint> {
-    vec![Ts13FixedTableFingerprint {
-        name: "mdoc_preprocessed_tree",
-        digest: *TS13_PUBLISHED_AGE_OVER_18_PREPROCESSED_ROOT,
-        rationale: "tree-0 preprocessed commitment root for the published TS13 age_over_18 tuple",
-    }]
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -166,12 +126,23 @@ pub struct Ts13SoundnessTable {
 }
 
 impl Ts13SoundnessTable {
+    /// Conservative integer lower bound obtained by union-bounding all listed
+    /// failure events. This deliberately pays `ceil(log2(component_count))`
+    /// bits instead of treating the weakest individual component as a proof
+    /// of composed soundness.
     pub fn composed_soundness_bits(&self) -> u32 {
-        self.components
+        let weakest_component_bits = self
+            .components
             .iter()
             .map(|component| component.bits)
             .min()
-            .unwrap_or(0)
+            .unwrap_or(0);
+        let component_count = self.components.len();
+        if component_count == 0 {
+            return 0;
+        }
+        let union_bound_loss = usize::BITS - (component_count - 1).leading_zeros();
+        weakest_component_bits.saturating_sub(union_bound_loss)
     }
 }
 
@@ -181,7 +152,7 @@ pub fn ts13_published_soundness_table() -> Ts13SoundnessTable {
             Ts13SoundnessComponent {
                 name: "STARK/FRI",
                 bits: TS13_STARK_SOUNDNESS_BITS,
-                rationale: "mdoc production PCS: pow_bits + log_blowup_factor * n_queries",
+                rationale: "single-QM31 OODS bound at the maximum degree/domain",
             },
             Ts13SoundnessComponent {
                 name: "issuer ML-DSA-65",
@@ -199,9 +170,9 @@ pub fn ts13_published_soundness_table() -> Ts13SoundnessTable {
                 rationale: "FIPS 204 category-3 sorted-pair revocation authority signature",
             },
             Ts13SoundnessComponent {
-                name: "SHA-256 bindings",
+                name: "256-bit binding hashes",
                 bits: TS13_SHA256_SOUNDNESS_BITS,
-                rationale: "MSO-derived revocation id and item digest bindings",
+                rationale: "generic quantum collision bound for 256-bit binding hashes",
             },
         ],
     }
@@ -210,27 +181,18 @@ pub fn ts13_published_soundness_table() -> Ts13SoundnessTable {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ts13CircuitPin {
     circuit_hash: String,
-    preprocessed_root: [u8; 32],
 }
 
 impl Ts13CircuitPin {
-    pub fn for_tuple(tuple: &Ts13CircuitTuple, preprocessed_root: [u8; 32]) -> Self {
+    pub fn for_tuple(tuple: &Ts13CircuitTuple) -> Self {
         Self {
             circuit_hash: ts13_circuit_hash(tuple),
-            preprocessed_root,
         }
     }
 
-    pub fn verify(
-        &self,
-        tuple: &Ts13CircuitTuple,
-        preprocessed_root: [u8; 32],
-    ) -> Result<(), Ts13CircuitPinError> {
+    pub fn verify(&self, tuple: &Ts13CircuitTuple) -> Result<(), Ts13CircuitPinError> {
         if self.circuit_hash != ts13_circuit_hash(tuple) {
             return Err(Ts13CircuitPinError::CircuitHashMismatch);
-        }
-        if self.preprocessed_root != preprocessed_root {
-            return Err(Ts13CircuitPinError::PreprocessedRootMismatch);
         }
         Ok(())
     }
@@ -239,7 +201,6 @@ impl Ts13CircuitPin {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ts13CircuitPinError {
     CircuitHashMismatch,
-    PreprocessedRootMismatch,
 }
 
 pub fn ts13_circuit_hash(tuple: &Ts13CircuitTuple) -> String {
@@ -266,10 +227,6 @@ fn hex_sha256(bytes: &[u8]) -> String {
 
 pub fn ts13_default_circuit_hash() -> String {
     ts13_circuit_hash(&Ts13CircuitTuple::published_age_over_18())
-}
-
-pub fn ts13_default_preprocessed_root() -> [u8; 32] {
-    *TS13_PUBLISHED_AGE_OVER_18_PREPROCESSED_ROOT
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -411,7 +368,6 @@ pub enum Ts13RevocationError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ts13MdocProofArtifact {
     pub circuit_hash: String,
-    pub preprocessed_root: [u8; 32],
     pub mdoc_proof: Vec<u8>,
     pub revocation_statement: Ts13RevocationStatement,
     pub revocation_witness: Ts13RevocationWitness,
@@ -420,7 +376,6 @@ pub struct Ts13MdocProofArtifact {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ts13MdocProofArtifactError {
     CircuitHash,
-    PreprocessedRoot,
     EmptyProof,
     StatementRevocationMissing,
     StatementRevocationMismatch,
@@ -433,13 +388,9 @@ impl Ts13MdocProofArtifact {
     pub fn verify_revocation_binding(
         &self,
         extracted: &ExtractedPidMdoc,
-        expected_preprocessed_root: [u8; 32],
     ) -> Result<(), Ts13MdocProofArtifactError> {
         if self.circuit_hash != ts13_default_circuit_hash() {
             return Err(Ts13MdocProofArtifactError::CircuitHash);
-        }
-        if self.preprocessed_root != expected_preprocessed_root {
-            return Err(Ts13MdocProofArtifactError::PreprocessedRoot);
         }
         if self.mdoc_proof.is_empty() {
             return Err(Ts13MdocProofArtifactError::EmptyProof);
@@ -455,15 +406,10 @@ impl Ts13MdocProofArtifact {
         statement: &MdocCircuitStatement,
     ) -> Result<(), Ts13MdocProofArtifactError> {
         self.verify_statement_revocation_binding(statement)?;
-        self.verify_revocation_binding(extracted, self.preprocessed_root)?;
+        self.verify_revocation_binding(extracted)?;
         let proof: MdocCircuitProof = bincode::deserialize(&self.mdoc_proof)
             .map_err(|_| Ts13MdocProofArtifactError::ProofDecode)?;
-        verify_mdoc_circuit_with_preprocessed_root(
-            &proof,
-            statement,
-            Blake2sHash(self.preprocessed_root),
-        )
-        .map_err(|_| Ts13MdocProofArtifactError::MdocProof)
+        verify_mdoc_circuit(&proof, statement).map_err(|_| Ts13MdocProofArtifactError::MdocProof)
     }
 
     fn verify_statement_revocation_binding(
@@ -635,22 +581,11 @@ mod tests {
         let expected = Ts13CircuitTuple::published_age_over_18();
         let mut actual = expected.clone();
         actual.num_attributes += 1;
-        let pin = Ts13CircuitPin::for_tuple(&expected, [7u8; 32]);
+        let pin = Ts13CircuitPin::for_tuple(&expected);
 
         assert!(matches!(
-            pin.verify(&actual, [7u8; 32]),
+            pin.verify(&actual),
             Err(Ts13CircuitPinError::CircuitHashMismatch)
-        ));
-    }
-
-    #[test]
-    fn circuit_hash_rejects_stale_preprocessed_root() {
-        let tuple = Ts13CircuitTuple::published_age_over_18();
-        let pin = Ts13CircuitPin::for_tuple(&tuple, [7u8; 32]);
-
-        assert!(matches!(
-            pin.verify(&tuple, [8u8; 32]),
-            Err(Ts13CircuitPinError::PreprocessedRootMismatch)
         ));
     }
 
@@ -659,10 +594,11 @@ mod tests {
         let tuple = Ts13CircuitTuple::published_age_over_18();
         let soundness = ts13_published_soundness_table();
 
-        assert_eq!(tuple.pcs_log_blowup_factor, 2);
-        assert_eq!(tuple.pcs_queries, 54);
-        assert_eq!(tuple.pcs_pow_bits, 20);
-        assert_eq!(soundness.composed_soundness_bits(), 128);
+        assert_eq!(tuple.pcs_log_blowup_factor, 4);
+        assert_eq!(tuple.pcs_queries, 26);
+        assert_eq!(tuple.pcs_pow_bits, 25);
+        assert_eq!(tuple.constraint_system, TS13_CONSTRAINT_SYSTEM);
+        assert_eq!(soundness.composed_soundness_bits(), 82);
         assert!(soundness
             .components
             .iter()
@@ -671,35 +607,6 @@ mod tests {
             .components
             .iter()
             .any(|component| component.name == "revocation ML-DSA-65"));
-    }
-
-    #[test]
-    fn circuit_hash_tuple_includes_preprocessed_root() {
-        let tuple = Ts13CircuitTuple::published_age_over_18();
-
-        assert_eq!(
-            tuple.preprocessed_root,
-            *TS13_PUBLISHED_AGE_OVER_18_PREPROCESSED_ROOT
-        );
-        assert!(ts13_circuit_tuple_cbor(&tuple)
-            .windows(TS13_PUBLISHED_AGE_OVER_18_PREPROCESSED_ROOT.len())
-            .any(|window| window == TS13_PUBLISHED_AGE_OVER_18_PREPROCESSED_ROOT));
-    }
-
-    #[test]
-    fn circuit_hash_tuple_includes_fixed_table_fingerprints() {
-        let tuple = Ts13CircuitTuple::published_age_over_18();
-
-        assert!(
-            tuple
-                .fixed_table_fingerprints
-                .iter()
-                .any(|fingerprint| fingerprint.name == "mdoc_preprocessed_tree"),
-            "published tuple must name the fixed table/preprocessed tree fingerprint"
-        );
-        assert!(ts13_circuit_tuple_cbor(&tuple)
-            .windows(b"fixed_table_fingerprints".len())
-            .any(|window| window == b"fixed_table_fingerprints"));
     }
 
     #[test]

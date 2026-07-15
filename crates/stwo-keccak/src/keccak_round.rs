@@ -53,7 +53,7 @@ use stwo_constraint_framework::{
 use crate::constants::{
     N_BYTES_IN_STATE, N_BYTES_IN_U64, N_LANES_KECCAK, RHO_OFFSETS, SQRT_N_LANES,
 };
-use crate::relations::KeccakRelations;
+use crate::relations::{KeccakRelations, KECCAK_ROUND_ARITY};
 use crate::utils::{spread_u32, unspread_u32, Enabler};
 
 /// Round constants including the trailing dummy "next" value (index 24).
@@ -84,6 +84,7 @@ const N_HI_WITNESS: usize = N_SPLIT_LOOKUPS;
 
 const N_COLUMNS: usize = 1
     + 2 * N_BYTES_IN_U64            // current_rc + next_rc (byte constants)
+    + 2                              // perm_id + round_idx
     + N_BYTES_IN_STATE             // initial spread state
     + N_XOR3_C                     // theta C-parity intermediates (t + C)
     + N_HI_WITNESS                 // spread-hi witnesses for all rotations
@@ -94,9 +95,9 @@ const N_COLUMNS: usize = 1
 pub const N_TOTAL_LOOKUPS: usize =
     N_KECCAK_ROUND_LOOKUPS + N_XOR3_LOOKUPS + N_ANDNOT_LOOKUPS + N_SPLIT_LOOKUPS;
 
-/// Logup fractions batched per interaction column (`finalize_logup_batched`).
-/// Batch 4 needs constraint degree `1 + 4·1 = 5 ≤ D5`, available at
-/// `max_constraint_log_degree_bound = log + 2`.
+/// LogUp fractions batched per interaction column (`finalize_logup_batched`).
+/// Batch four keeps the round constraint degree at `1 + 4·1 = 5 ≤ D5`,
+/// available at `max_constraint_log_degree_bound = log + 2`.
 pub const LOGUP_BATCH: usize = 4;
 
 const N_INTERACTION_COLUMNS: usize =
@@ -121,7 +122,7 @@ pub struct InteractionClaimData {
 
 #[derive(Uninitialized, IterMut, ParIterMut)]
 pub struct LookupData {
-    pub keccak_round: [Vec<[PackedM31; N_BYTES_IN_STATE + N_BYTES_IN_U64]>; N_KECCAK_ROUND_LOOKUPS],
+    pub keccak_round: [Vec<[PackedM31; KECCAK_ROUND_ARITY]>; N_KECCAK_ROUND_LOOKUPS],
     /// `[key, out]` — key is the degree-1 sum, out the spread(xor) result.
     pub xor3: [Vec<[PackedM31; 2]>; N_XOR3_LOOKUPS],
     /// `[u, out]` — `u = spread(b')+2·spread(b'')`, out = spread(¬b'∧b'').
@@ -149,9 +150,10 @@ impl Claim {
         channel.mix_u64(self.log_size as u64);
     }
 
-    /// Build the round trace. Input rows are `[spread_state(200) | round_index]`.
+    /// Build the round trace. Input rows are
+    /// `[spread_state(200) | round_index | perm_id]`.
     pub fn generate_trace(
-        mut input: Vec<[PackedM31; N_BYTES_IN_STATE + 1]>,
+        mut input: Vec<[PackedM31; N_BYTES_IN_STATE + 2]>,
         invocations: usize,
     ) -> (Self, ComponentTrace<N_COLUMNS>, InteractionClaimData)
     where
@@ -160,7 +162,7 @@ impl Claim {
         let log_size = std::cmp::max(invocations.next_power_of_two().ilog2(), LOG_N_LANES);
         input.resize(
             1 << (log_size - LOG_N_LANES),
-            [PackedM31::zero(); N_BYTES_IN_STATE + 1],
+            [PackedM31::zero(); N_BYTES_IN_STATE + 2],
         );
         let enabler_col = Enabler::new(invocations);
 
@@ -228,7 +230,7 @@ fn andnot_bytes(b1: &[u32; N_LANES], b2: &[u32; N_LANES]) -> [u32; N_LANES] {
 fn fill_row(
     row_index: usize,
     enabler_col: &Enabler,
-    input: &[PackedM31; N_BYTES_IN_STATE + 1],
+    input: &[PackedM31; N_BYTES_IN_STATE + 2],
     row: &mut [&mut PackedM31],
     lookup_data: &mut LookupDataMutChunk<'_>,
 ) {
@@ -261,13 +263,24 @@ fn fill_row(
         idx.col += 1;
     }
 
+    // Identity carried by both round links. `round_idx + 1` is derived in the
+    // outgoing tuple, so a row cannot redirect its result to another round;
+    // `perm_id` is reused unchanged, so results cannot cross permutations.
+    let perm_id = input[N_BYTES_IN_STATE + 1];
+    *row[idx.col] = perm_id;
+    idx.col += 1;
+    let round_idx = input[N_BYTES_IN_STATE];
+    *row[idx.col] = round_idx;
+    idx.col += 1;
+
     // Initial spread state columns + the incoming chain link.
     for x in &input[..N_BYTES_IN_STATE] {
         *row[idx.col] = *x;
         idx.col += 1;
     }
-    let round_data: Vec<PackedM31> = current_rc
+    let round_data: Vec<PackedM31> = [perm_id, round_idx]
         .iter()
+        .chain(current_rc.iter())
         .chain(input[..N_BYTES_IN_STATE].iter())
         .cloned()
         .collect();
@@ -433,7 +446,12 @@ fn fill_row(
             out[base + i] = S_spread[lane][i];
         }
     }
-    let next_data: Vec<PackedM31> = next_rc.iter().chain(out.iter()).cloned().collect();
+    let next_data: Vec<PackedM31> = [perm_id, round_idx + PackedM31::one()]
+        .iter()
+        .chain(next_rc.iter())
+        .chain(out.iter())
+        .cloned()
+        .collect();
     *lookup_data.keccak_round[1] = next_data.try_into().unwrap();
 }
 
@@ -563,11 +581,6 @@ pub struct RoundLookup<E: EvalAtRow> {
 pub struct Eval {
     pub claim: Claim,
     pub relations: KeccakRelations,
-    /// `true` = the round's LogUp is offloaded to GKR: the component emits NO
-    /// interaction columns and only the enabler booleanity constraint; the
-    /// lookup multiset is proven by the host's GKR proof + MLE-eval tie-back
-    /// over the same base columns this eval masks.
-    pub gkr_offload: bool,
 }
 
 impl FrameworkEval for Eval {
@@ -575,32 +588,19 @@ impl FrameworkEval for Eval {
         self.claim.log_size
     }
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        if self.gkr_offload {
-            // Only the degree-2 enabler booleanity remains in-AIR.
-            self.log_size() + 1
-        } else {
-            // Every logup numerator is degree ≤ 1 (±enabler or 1) and every
-            // tuple cell — hence every denominator — is degree ≤ 1, so batch-4
-            // logup constraints are degree 1 + 4·1 = 5 ≤ D5 (log + 2).
-            self.log_size() + 2
-        }
+        // Every logup numerator is degree ≤ 1 (±enabler or 1) and every tuple
+        // cell — hence every denominator — is degree ≤ 1, so batch-four LogUp
+        // constraints are degree 1 + 4·1 = 5 ≤ D5 (log + 2).
+        self.log_size() + 2
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        if self.gkr_offload {
-            // Mask every base column (the tie-back oracle replays this walk at
-            // the OODS point) and keep the booleanity constraint; the lookups
-            // themselves are GKR's.
-            let _ = collect_round_lookups(&mut eval);
-        } else {
-            evaluate_round(&mut eval, &self.relations);
-        }
+        evaluate_round(&mut eval, &self.relations);
         eval
     }
 }
 
-/// The legacy columnar round body: collect the lookups, emit them through the
-/// framework's LogUp, batch-finalize. Kept for the standalone `stark.rs` AIR
-/// and as the reference emission order for the GKR offload.
+/// Collect the round lookups, emit them through the framework's LogUp, and
+/// batch-finalize them inside the outer STARK.
 pub fn evaluate_round<E: EvalAtRow>(eval: &mut E, rel: &KeccakRelations) {
     for lk in collect_round_lookups(eval) {
         match lk.kind {
@@ -635,10 +635,16 @@ pub fn collect_round_lookups<E: EvalAtRow>(eval: &mut E) -> Vec<RoundLookup<E>> 
 
     let current_rc: [E::F; N_BYTES_IN_U64] = std::array::from_fn(|_| eval.next_trace_mask());
     let next_rc: [E::F; N_BYTES_IN_U64] = std::array::from_fn(|_| eval.next_trace_mask());
+    let perm_id = eval.next_trace_mask();
+    let round_idx = eval.next_trace_mask();
     let state: [E::F; N_BYTES_IN_STATE] = std::array::from_fn(|_| eval.next_trace_mask());
 
     // Incoming chain link (require, NEGATED numerator).
-    let round_data: Vec<E::F> = current_rc.iter().chain(state.iter()).cloned().collect();
+    let round_data: Vec<E::F> = [perm_id.clone(), round_idx.clone()]
+        .into_iter()
+        .chain(current_rc.iter().cloned())
+        .chain(state.iter().cloned())
+        .collect();
     lookups.push(RoundLookup {
         kind: RoundLookupKind::Kr,
         num: -enabler_ef.clone(),
@@ -742,7 +748,8 @@ pub fn collect_round_lookups<E: EvalAtRow>(eval: &mut E) -> Vec<RoundLookup<E>> 
     }
 
     // Outgoing chain link (yield, POSITIVE numerator): spread state.
-    let mut out: Vec<E::F> = next_rc.to_vec();
+    let mut out: Vec<E::F> = vec![perm_id, round_idx + E::F::one()];
+    out.extend(next_rc);
     for lane in &out_state {
         out.extend(lane.iter().cloned());
     }
@@ -961,7 +968,7 @@ fn split_fraction(
 
 fn link_fraction<R: Relation<PackedM31, PackedQM31>>(
     rel: &R,
-    lookup: &[[PackedM31; N_BYTES_IN_STATE + N_BYTES_IN_U64]],
+    lookup: &[[PackedM31; KECCAK_ROUND_ARITY]],
     enabler: &Enabler,
     n_vec_rows: usize,
     negate: bool,
@@ -1168,7 +1175,7 @@ mod gkr_offload_spike {
         let log_size = std::cmp::max(invocations.next_power_of_two().ilog2(), LOG_N_LANES);
         let n_vec_rows = 1usize << (log_size - LOG_N_LANES);
         let n_rows = 1usize << log_size;
-        let input = vec![[PackedM31::zero(); N_BYTES_IN_STATE + 1]; n_vec_rows];
+        let input = vec![[PackedM31::zero(); N_BYTES_IN_STATE + 2]; n_vec_rows];
         let (claim, _trace, icd) = Claim::generate_trace(input, invocations);
         assert_eq!(claim.log_size, log_size);
 

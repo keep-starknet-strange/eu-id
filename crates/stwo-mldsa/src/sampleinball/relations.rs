@@ -8,12 +8,12 @@
 //! |----------|-------|-------|----------|----------|
 //! | `CCell` | 2 | `(c_bind_id, c)` | coeffs C rows (−1) | sampleinball final reads (+1) |
 //! | `HashIo`| 3 | `(stream_id, byte_pos, byte)` | sponge/M6 (+1) | FSM stream consume (−1) |
-//! | `Mem`   | 3 | `(addr, value, timestamp)` | writes (+) | reads (−) | offline memory |
+//! | `Mem`   | 4 | `(addr, value, timestamp, is_write)` | unsorted/final (+) | sorted (−) | offline memory |
 //! | `Swap`  | 2 | `(step, addr)` | accept rows ×2 (+) | read + write-j rows (−) | FSM↔mem addr tie |
 //! | `StepVal`| 2 | `(step, value)` | read rows (+) | write-i rows (−) | FSM↔mem value tie |
 //! | `SignBit`| 2 | `(bit_idx, ±1)` | sign rows per bit (+) | write-j rows (−) | FSM↔mem sign tie |
 //! | `Rc8`   | 1 | `v ∈ [0,2^8)` | rc8 table | index/byte bounds, sorted daddr |
-//! | `Rc9`   | 1 | `v ∈ [0,2^9)` | rc9 table | ternary `{0,1,2}` membership |
+//! | `Rc9`   | 1 | `v ∈ [0,2^9)` | rc9 table | coefficient `c+1` bound |
 //! | `Rc11`  | 1 | `v ∈ [0,2^11)` | rc11 table | offline-memory timestamp diff `dts` |
 //!
 //! ## Offline memory checking (the swap soundness core)
@@ -21,24 +21,28 @@
 //! SampleInBall mutates `c[0..N]` via τ steps `c[i_t] = c[j_t]; c[j_t] = s_t`
 //! with `i_t = N−τ+t`. We prove the committed final `c` equals applying these
 //! writes to a zero array using a read/write-set argument over the `Mem`
-//! channel keyed by `(addr, value, timestamp)`:
-//! - **init**: write every `(k, 0, ts=0)` (N writes, +).
-//! - **each step** reads `(j_t, old, ts_read)` (−) then writes `(i_t, old, ts_a)`
-//!   and `(j_t, s_t, ts_b)` (+); the read's value/ts must match the last prior
-//!   write to that address (enforced by the balance + a monotone timestamp).
-//! - **final**: read every `(k, c[k], ts_final)` (−) — these `c[k]` are exactly
-//!   the coeffs-bound values.
+//! channel keyed by `(addr, value, timestamp, is_write)`:
 //!
-//! The multiset of writes (last-writer-wins by timestamp) balances the reads iff
-//! the committed `c` is the true SampleInBall output (standard offline-memory
-//! soundness; timestamps drawn as an order challenge keep it collision-free).
+//! - **init**: write every zero cell once at canonical timestamps.
+//! - **each step**: read `j_t`, write the old value to `i_t`, then write the
+//!   sampled sign to `j_t`, all at canonical increasing timestamps.
+//! - **final**: read every coeffs-bound `(k, c[k])` at canonical timestamps.
+//!
+//! The unsorted execution and sorted view must be the same multiset, including
+//! access classification. The sorted view then enforces increasing timestamps,
+//! zero-valued initial writes, and every read equalling the preceding value.
+//!
+//! The canonical access multiset plus sorted last-write-wins continuity binds
+//! the committed `c` to the exact SampleInBall execution.
 
 use stwo_constraint_framework::relation;
 
 use crate::binding::{CCellRelation, HashIoRelation};
 
-/// `(addr, value, timestamp)` offline-memory channel.
-pub const MEM_ARITY: usize = 3;
+/// `(addr, value, timestamp, is_write)` offline-memory channel. The access
+/// classification is load-bearing: omitting it lets a malicious sorted view
+/// relabel every read as a write and bypass read-value continuity.
+pub const MEM_ARITY: usize = 4;
 relation!(MemRelation, MEM_ARITY);
 
 // Arity-1 range table relation (independent instances).

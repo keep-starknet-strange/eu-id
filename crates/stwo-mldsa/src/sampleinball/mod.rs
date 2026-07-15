@@ -15,9 +15,9 @@
 //!    accepted iff `byte ≤ i` (proven by `(i − byte) ∈ [0,256)`) or rejected iff
 //!    `byte > i` (proven by `(byte − i − 1) ∈ [0,256)`), advancing `i` on accept.
 //! 2. **c group** (`N` rows): the challenge coefficients, each ternary
-//!    (`c ∈ {−1,0,1}` via a `{0,1,2}` membership lookup on `c+1`), with a running
-//!    `Σ c²` accumulator gated to `τ` on the final c-row, and each `c[m]` bound
-//!    to the coeffs C-group cell via [`CCellRelation`]`(m, c)`.
+//!    (`c² = csq` and `c·csq = c`, hence `c ∈ {−1,0,1}`), with a running `Σ c²`
+//!    accumulator gated to `τ` on the final c-row, and each `c[m]` bound to the
+//!    coeffs C-group cell via [`CCellRelation`]`(m, c)`.
 //!
 //! ## Soundness scope (documented)
 //!
@@ -95,30 +95,29 @@ const COL_REJECT_HI: usize = 6; // 8-bit hi of (byte − i − 1) ∈ [0,256) on
                                 // c stage columns:
 const COL_C: usize = 7; // challenge coefficient value (signed)
 const COL_CSQ: usize = 8; // c² (witnessed so the accumulator constraint stays deg 1)
-const COL_CSQ_ACC: usize = 9; // running Σ c²
-                              // Offline-memory (swap replay) columns — active on the n_accesses access rows.
-const COL_U_ADDR: usize = 10; // unsorted access address
-const COL_U_VAL: usize = 11; // unsorted access value (enc_signed)
-const COL_U_TS: usize = 12; // unsorted access timestamp
-const COL_U_WRITE: usize = 13; // 1 iff unsorted access is a write
-const COL_S_ADDR: usize = 14; // sorted access address
-const COL_S_VAL: usize = 15; // sorted access value
-const COL_S_TS: usize = 16; // sorted access timestamp
-const COL_S_WRITE: usize = 17; // 1 iff sorted access is a write
-const COL_S_SAME: usize = 18; // 1 iff sorted addr == previous sorted addr (same cell)
-const COL_S_DADDR: usize = 19; // sorted addr − previous sorted addr ∈ [0,256) (rc8)
-const COL_S_DADDR_INV: usize = 20; // inverse gadget: daddr·inv == 1−same
-const COL_S_DTS: usize = 21; // (ts − prev_ts − 1) within a cell ∈ [0,2048) (rc11)
-const COL_S_SR_SAME: usize = 22; // same·s_read (witnessed to keep continuity deg 2)
-const COL_S_FOC: usize = 23; // first-of-cell = is_access·(1−same) (witnessed, deg 2 pin)
+                          // Offline-memory (swap replay) columns — active on the n_accesses access rows.
+const COL_U_ADDR: usize = 9; // unsorted access address
+const COL_U_VAL: usize = 10; // unsorted access value (enc_signed)
+const COL_U_TS: usize = 11; // unsorted access timestamp
+const COL_U_WRITE: usize = 12; // 1 iff unsorted access is a write
+const COL_S_ADDR: usize = 13; // sorted access address
+const COL_S_VAL: usize = 14; // sorted access value
+const COL_S_TS: usize = 15; // sorted access timestamp
+const COL_S_WRITE: usize = 16; // 1 iff sorted access is a write
+const COL_S_SAME: usize = 17; // 1 iff sorted addr == previous sorted addr (same cell)
+const COL_S_DADDR: usize = 18; // sorted addr − previous sorted addr ∈ [0,256) (rc8)
+const COL_S_DADDR_INV: usize = 19; // inverse gadget: daddr·inv == 1−same
+const COL_S_DTS: usize = 20; // (ts − prev_ts − 1) within a cell ∈ [0,2048) (rc11)
+const COL_S_SR_SAME: usize = 21; // same·s_read (witnessed to keep continuity deg 2)
+const COL_S_FOC: usize = 22; // first-of-cell = is_access·(1−same) (witnessed, deg 2 pin)
                              // Sign-bit columns — the 8 bits of each sign row's byte (only on the 8 sign rows;
                              // 0 elsewhere). These feed the SignBit channel that ties write-j values to the
                              // FIPS sign bits (`c[j] = (−1)^bit`), closing part of the free-access-list hole.
-const COL_SIGN_BIT0: usize = 24;
+const COL_SIGN_BIT0: usize = 23;
 /// Number of sign-bit columns (one per bit of a sign byte).
 pub const SIGN_BIT_COLS: usize = 8;
 /// Total base columns.
-pub const N_BASE_COLS: usize = COL_SIGN_BIT0 + SIGN_BIT_COLS; // 32
+pub const N_BASE_COLS: usize = COL_SIGN_BIT0 + SIGN_BIT_COLS; // 31
 
 /// Core (unsorted) offline-memory accesses laid out on their own rows: N init
 /// writes + 3 per step (read + 2 writes). The N FINAL reads are NOT counted here
@@ -130,9 +129,9 @@ pub const N_CORE: usize = N + 3 * TAU;
 /// trace row count and the sib log_size.
 pub const N_ACCESSES: usize = N_CORE + N;
 
-/// Namespaced preprocessed id: the SIB schedule columns are WITNESS-dependent
-/// (they encode the rejection-sampling schedule of one specific signature), so
-/// two hosted ML-DSA instances must not share them under tree-0 id dedup.
+/// Namespaced preprocessed id: the SIB schedule columns depend on the public
+/// consumed-stream length, so two hosted ML-DSA instances must not share them
+/// under tree-0 id dedup.
 pub(crate) fn pre_id_ns(ns: &str, name: &str) -> PreProcessedColumnId {
     PreProcessedColumnId {
         id: format!("{}mldsa_sib_{name}", crate::sponge_link::ns_prefix(ns)),
@@ -173,6 +172,7 @@ pub fn sib_preprocessed_ids_ns(ns: &str) -> Vec<PreProcessedColumnId> {
         pre_id("core_ts"),
         pre_id("init_addr"),
         pre_id("is_sign"),
+        pre_id("stream_last"),
     ];
     for u in 0..SIGN_BIT_COLS {
         ids.push(pre_id(&sign_mask_name(u)));
@@ -229,6 +229,18 @@ fn stream_rows(witness: &MlDsaWitness) -> Vec<StreamRow> {
             }
         }
     }
+    FORGED_STREAM_I.with(|forged| {
+        if let Some(indices) = forged.borrow().as_ref() {
+            assert_eq!(
+                indices.len(),
+                out.len(),
+                "forged stream-index list must match the consumed stream length"
+            );
+            for (row, &idx) in out.iter_mut().zip(indices) {
+                row.i = idx;
+            }
+        }
+    });
     out
 }
 
@@ -346,6 +358,15 @@ thread_local! {
     /// NOT what catches the forgery. Cleared automatically by `ForgedCoreGuard`.
     static FORGED_CORE: core::cell::RefCell<Option<Vec<Access>>> =
         const { core::cell::RefCell::new(None) };
+
+    /// Test-only attack hooks for exercising individual AIR constraints with a
+    /// fully self-consistent malicious trace generator.
+    static FORGED_STREAM_I: core::cell::RefCell<Option<Vec<u32>>> =
+        const { core::cell::RefCell::new(None) };
+    static FORGED_SIGN_BYTES: core::cell::RefCell<Option<[u8; SIGN_BYTES]>> =
+        const { core::cell::RefCell::new(None) };
+    static FORGED_SORTED_WRITES: core::cell::RefCell<Option<Vec<bool>>> =
+        const { core::cell::RefCell::new(None) };
 }
 
 /// Test-attack hook, DO NOT USE outside integration tests. Installs a forged CORE
@@ -389,6 +410,95 @@ pub fn install_forged_core(accesses: Vec<(u32, i128, u32, bool)>) -> ForgedCoreG
     ForgedCoreGuard
 }
 
+/// Test-attack hook: returns the honest consumed stream rows as
+/// `(byte, i_before, accept)` tuples.
+#[doc(hidden)]
+pub fn honest_stream_rows(witness: &MlDsaWitness) -> Vec<(u32, u32, bool)> {
+    let guard = FORGED_STREAM_I.with(|f| f.borrow_mut().take());
+    let rows = stream_rows(witness)
+        .into_iter()
+        .map(|row| (row.byte, row.i, row.accept))
+        .collect();
+    FORGED_STREAM_I.with(|f| *f.borrow_mut() = guard);
+    rows
+}
+
+/// Test-attack hook: overrides only `COL_I` on consumed stream rows. This lets
+/// regressions construct a history that balances every old lookup while
+/// violating only the ordered FIPS rejection-sampling transition.
+#[doc(hidden)]
+pub struct ForgedStreamIndicesGuard;
+
+impl Drop for ForgedStreamIndicesGuard {
+    fn drop(&mut self) {
+        FORGED_STREAM_I.with(|f| *f.borrow_mut() = None);
+    }
+}
+
+#[doc(hidden)]
+pub fn install_forged_stream_indices(indices: Vec<u32>) -> ForgedStreamIndicesGuard {
+    FORGED_STREAM_I.with(|f| *f.borrow_mut() = Some(indices));
+    ForgedStreamIndicesGuard
+}
+
+/// Test-attack hook: overrides the sign-bit witness columns while leaving the
+/// HashIo-bound stream bytes unchanged. Both byte recomposition and the SignBit
+/// balance independently bind these columns to the honest execution.
+#[doc(hidden)]
+pub struct ForgedSignBytesGuard;
+
+impl Drop for ForgedSignBytesGuard {
+    fn drop(&mut self) {
+        FORGED_SIGN_BYTES.with(|f| *f.borrow_mut() = None);
+    }
+}
+
+#[doc(hidden)]
+pub fn install_forged_sign_bytes(bytes: [u8; SIGN_BYTES]) -> ForgedSignBytesGuard {
+    FORGED_SIGN_BYTES.with(|f| *f.borrow_mut() = Some(bytes));
+    ForgedSignBytesGuard
+}
+
+fn trace_sign_byte(witness: &MlDsaWitness, pos: usize) -> u8 {
+    FORGED_SIGN_BYTES.with(|f| {
+        f.borrow()
+            .as_ref()
+            .map_or(witness.sponge.sample_in_ball_squeezed[pos], |bytes| {
+                bytes[pos]
+            })
+    })
+}
+
+/// Test-attack hook: returns the honest `(addr, value, ts, is_write)` sorted
+/// memory view before any forged sorted-classification override is installed.
+#[doc(hidden)]
+pub fn honest_sorted_accesses(witness: &MlDsaWitness) -> Vec<(u32, i128, u32, bool)> {
+    let mut sorted = mem_accesses(witness);
+    sorted.sort_by_key(|a| (a.addr, a.ts));
+    sorted
+        .into_iter()
+        .map(|a| (a.addr, a.value, a.ts, a.is_write))
+        .collect()
+}
+
+/// Test-attack hook: replaces the sorted view's read/write flags without
+/// changing `(addr, value, ts)`. This is exactly the forgery that passed when
+/// `MemRelation` omitted access classification.
+#[doc(hidden)]
+pub struct ForgedSortedWritesGuard;
+
+impl Drop for ForgedSortedWritesGuard {
+    fn drop(&mut self) {
+        FORGED_SORTED_WRITES.with(|f| *f.borrow_mut() = None);
+    }
+}
+
+#[doc(hidden)]
+pub fn install_forged_sorted_writes(writes: Vec<bool>) -> ForgedSortedWritesGuard {
+    FORGED_SORTED_WRITES.with(|f| *f.borrow_mut() = Some(writes));
+    ForgedSortedWritesGuard
+}
+
 fn mem_trace(witness: &MlDsaWitness) -> MemTrace {
     let mut unsorted = mem_accesses(witness);
     // Test-attack hook: swap the CORE accesses (rows 0..N_CORE) for a forged list,
@@ -402,10 +512,30 @@ fn mem_trace(witness: &MlDsaWitness) -> MemTrace {
                 "forged core list must have N_CORE entries"
             );
             unsorted[..N_CORE].clone_from_slice(forged);
+            // A malicious CORE is paired with the attacker's committed final
+            // `c`, not the honest replay's final values. This keeps the Mem
+            // permutation internally balanced so the dedicated FSM/sign
+            // constraints, rather than an unrelated generator inconsistency,
+            // are what reject exploit regressions.
+            for k in 0..N {
+                unsorted[N_CORE + k].value = witness.digits.c[k];
+            }
         }
     });
     let mut sorted = unsorted.clone();
     sorted.sort_by_key(|a| (a.addr, a.ts));
+    FORGED_SORTED_WRITES.with(|f| {
+        if let Some(writes) = f.borrow().as_ref() {
+            assert_eq!(
+                writes.len(),
+                sorted.len(),
+                "forged sorted-write list must match N_ACCESSES"
+            );
+            for (access, &is_write) in sorted.iter_mut().zip(writes) {
+                access.is_write = is_write;
+            }
+        }
+    });
     MemTrace { unsorted, sorted }
 }
 
@@ -414,8 +544,24 @@ fn mem_trace(witness: &MlDsaWitness) -> MemTrace {
 // =============================================================================
 
 pub fn gen_sib_preprocessed(witness: &MlDsaWitness, log_size: u32) -> Vec<ColEval> {
+    gen_sib_preprocessed_for_stream_len(stream_len(witness), log_size)
+}
+
+/// Reconstruct the canonical SampleInBall preprocessing from the public
+/// consumed-stream length. Verifiers use this instead of requiring a private
+/// [`MlDsaWitness`]; all schedule columns depend only on `stream_len` and the
+/// fixed FIPS parameters.
+pub fn gen_sib_preprocessed_for_stream_len(stream_len: usize, log_size: u32) -> Vec<ColEval> {
     let rows = 1usize << log_size;
-    let slen = stream_len(witness);
+    let slen = stream_len;
+    assert!(
+        slen >= SIGN_BYTES,
+        "SampleInBall stream is missing sign bytes"
+    );
+    assert!(
+        slen + N <= rows && N_ACCESSES <= rows,
+        "SampleInBall schedule does not fit its trace domain"
+    );
 
     let mut is_stream = vec![m31(0); rows];
     let mut is_placement = vec![m31(0); rows];
@@ -437,6 +583,7 @@ pub fn gen_sib_preprocessed(witness: &MlDsaWitness, log_size: u32) -> Vec<ColEva
     let mut core_ts = vec![m31(0); rows];
     let mut init_addr = vec![m31(0); rows];
     let mut is_sign = vec![m31(0); rows];
+    let mut stream_last = vec![m31(0); rows];
     let mut sign_mask: Vec<Vec<M31>> = (0..SIGN_BIT_COLS).map(|_| vec![m31(0); rows]).collect();
 
     for pos in 0..slen {
@@ -455,6 +602,7 @@ pub fn gen_sib_preprocessed(witness: &MlDsaWitness, log_size: u32) -> Vec<ColEva
         }
         byte_pos[pos] = m31(pos as u32);
     }
+    stream_last[slen - 1] = m31(1);
     for m in 0..N {
         let row = slen + m;
         is_c[row] = m31(1);
@@ -518,6 +666,7 @@ pub fn gen_sib_preprocessed(witness: &MlDsaWitness, log_size: u32) -> Vec<ColEva
         core_ts,
         init_addr,
         is_sign,
+        stream_last,
     ];
     out.extend(sign_mask);
     out.into_iter().map(|v| col_eval(log_size, v)).collect()
@@ -556,22 +705,20 @@ pub fn gen_sib_base_trace(witness: &MlDsaWitness, log_size: u32) -> Vec<ColEval>
         // Sign rows (first SIGN_BYTES): decompose the byte into its 8 bits so the
         // SignBit channel can tie write-j values to the FIPS sign bits.
         if pos < SIGN_BYTES {
+            let sign_byte = trace_sign_byte(witness, pos);
             for u in 0..SIGN_BIT_COLS {
-                cols[COL_SIGN_BIT0 + u][pos] = m31((r.byte >> u) & 1);
+                cols[COL_SIGN_BIT0 + u][pos] = m31(u32::from((sign_byte >> u) & 1));
             }
         }
     }
 
     // c stage.
-    let mut csq = 0i128;
     for m in 0..N {
         let row = slen + m;
         cols[COL_ENABLER][row] = m31(1);
         let c = witness.digits.c[m];
         cols[COL_C][row] = enc_signed(c);
         cols[COL_CSQ][row] = m31((c * c) as u32);
-        csq += c * c;
-        cols[COL_CSQ_ACC][row] = m31(csq as u32);
     }
 
     // Offline-memory trace.
@@ -640,7 +787,7 @@ pub struct SibEval {
 
 /// Logup entries (fixed per row, gates zero inactive stages), in AIR emission
 /// order: accept_lo (rc8), accept_hi (rc8), reject_lo (rc8), reject_hi (rc8),
-/// hashio consume, ternary (rc9), ccell use, daddr (rc8), dts (rc11),
+/// hashio consume, c+1 bound (rc9), ccell use, daddr (rc8), dts (rc11),
 /// mem_unsorted_core (+), mem_unsorted_final (+), mem_sorted (−) = 12; then the
 /// FSM↔memory tie channels: swap accept-yield ×2, swap read-consume, swap
 /// write-j-consume = 4; stepval read-yield, stepval write-i-consume = 2; signbit
@@ -649,8 +796,8 @@ pub const N_LOGUP_ENTRIES: usize = 12 + 4 + 2 + 9;
 pub const LOGUP_BATCH: usize = 4;
 pub const N_LOGUP_COLS: usize = N_LOGUP_ENTRIES.div_ceil(LOGUP_BATCH);
 const N_ACC_COORD_COLS: usize = SECURE_EXTENSION_DEGREE; // Σc² accumulator.
-                                                         // One QM31 passthrough column packing the sorted (addr, ts, val) into coords
-                                                         // 0/1/2, read at `[-1,0]` so the previous sorted row's access is available.
+                                                         // One QM31 passthrough column packing sorted (addr, ts, val) into coords
+                                                         // 0/1/2 and the SampleInBall state-after value into coord 3.
 const N_SORTED_PASS_COLS: usize = SECURE_EXTENSION_DEGREE;
 pub const N_INTERACTION_COLS: usize =
     N_ACC_COORD_COLS + N_SORTED_PASS_COLS + SECURE_EXTENSION_DEGREE * N_LOGUP_COLS;
@@ -688,6 +835,7 @@ impl FrameworkEval for SibEval {
         let core_ts = eval.get_preprocessed_column(pre_id("core_ts"));
         let init_addr = eval.get_preprocessed_column(pre_id("init_addr"));
         let is_sign = eval.get_preprocessed_column(pre_id("is_sign"));
+        let stream_last = eval.get_preprocessed_column(pre_id("stream_last"));
         let sign_mask: Vec<E::F> = (0..SIGN_BIT_COLS)
             .map(|u| eval.get_preprocessed_column(pre_id(&sign_mask_name(u))))
             .collect();
@@ -701,7 +849,6 @@ impl FrameworkEval for SibEval {
         let reject_hi = eval.next_trace_mask();
         let c = eval.next_trace_mask();
         let csq = eval.next_trace_mask();
-        let csq_acc = eval.next_trace_mask();
         // Offline-memory base masks (COL_U_* / COL_S_*), read in column order.
         let u_addr = eval.next_trace_mask();
         let u_val = eval.next_trace_mask();
@@ -726,21 +873,25 @@ impl FrameworkEval for SibEval {
         let csq_prev = E::combine_ef(acc_coords.each_ref().map(|p| p[0].clone()));
         let csq_cur = E::combine_ef(acc_coords.each_ref().map(|p| p[1].clone()));
 
-        // Sorted (addr, ts, val) passthrough (coords 0/1/2), read at `[-1,0]` to
-        // recover the PREVIOUS sorted row's access. Padding coord (3) unused.
+        // Packed passthrough, read at `[-1,0]`: coords 0/1/2 carry sorted
+        // `(addr, ts, val)` and coord 3 carries the FSM state after this byte.
         let pass_coords: [[E::F; 2]; SECURE_EXTENSION_DEGREE] =
             core::array::from_fn(|_| eval.next_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]));
         let prev_s_addr = pass_coords[0][0].clone();
         let prev_s_ts = pass_coords[1][0].clone();
         let prev_s_val = pass_coords[2][0].clone();
+        let prev_fsm_after = pass_coords[3][0].clone();
         // Pin the passthrough's CURRENT coords to the sorted base columns so the
         // interaction column faithfully carries (addr, ts, val).
         eval.add_constraint(pass_coords[0][1].clone() - s_addr.clone());
         eval.add_constraint(pass_coords[1][1].clone() - s_ts.clone());
         eval.add_constraint(pass_coords[2][1].clone() - s_val.clone());
+        eval.add_constraint(pass_coords[3][1].clone() - idx.clone() - accept.clone());
 
         let one = E::F::from(M31::one());
         let two_pow_8 = E::F::from(m31(1 << 8));
+        let n_minus_tau = E::F::from(m31((N - TAU) as u32));
+        let n = E::F::from(m31(N as u32));
 
         // C0: enabler boolean.
         eval.add_constraint(enabler.clone() * (one.clone() - enabler.clone()));
@@ -751,6 +902,14 @@ impl FrameworkEval for SibEval {
         // Every placement stream row is exactly accept XOR reject; sign-collection
         // rows (is_stream · (1−is_placement)) and non-stream rows have both = 0.
         eval.add_constraint(is_placement.clone() - (accept.clone() + reject.clone()));
+
+        // C1b: exact ordered FIPS 204 Alg 29 rejection FSM. Sign rows hold the
+        // initial state N−τ. Each placement row begins at the previous row's
+        // state-after value, so reject adds zero and accept adds exactly one.
+        // The final consumed byte must leave state N.
+        eval.add_constraint(is_sign.clone() * (idx.clone() - n_minus_tau.clone()));
+        eval.add_constraint(is_placement.clone() * (idx.clone() - prev_fsm_after));
+        eval.add_constraint(stream_last * (idx.clone() + accept.clone() - n));
 
         // C2: rejection-sampling margin (the security-critical tie of c's support
         // to the stream). Accept ⇒ (i − byte) ∈ [0,256): the byte was ≤ i.
@@ -790,18 +949,23 @@ impl FrameworkEval for SibEval {
             &io_tuple,
         ));
 
-        // C4: ternary c ∈ {−1,0,1} via `{0,1,2}` membership on (c+1), rc9 (⊇3).
+        // C4: bound c+1 to [0,512), then enforce ternary directly. The rc9
+        // lookup alone is only a range check; together with csq=c² below,
+        // c·csq=c is the degree-2 polynomial identity c³=c.
         let c_plus1 = c.clone() + one.clone();
         eval.add_to_relation(RelationEntry::base(
             &self.relations.rc9,
             is_c.clone(),
             core::slice::from_ref(&c_plus1),
         ));
+        eval.add_constraint(c.clone() * csq.clone() - c.clone());
 
         // C5a: witness csq = c² (degree-2 constraint, NOT involving the shifted
         // interaction mask — keeping the c² product off the accumulator constraint
-        // avoids the M4 `[-1,0]`-mask degree trap).
+        // avoids the M4 `[-1,0]`-mask degree trap). c is zero off the c stage, so
+        // the running sum below cannot be padded with unconstrained row values.
         eval.add_constraint(csq.clone() - c.clone() * c.clone());
+        eval.add_constraint((one.clone() - is_c.clone()) * c.clone());
         // C5b: Σc² accumulator. csq_cur = (1 − acc_start)·csq_prev + csq. `acc_start`
         // (coset row 0) zeroes the `[-1,0]` wraparound; stream rows carry csq=0 so
         // the sum stays 0 until the c stage, then accumulates c². Degree 1 in the
@@ -809,8 +973,11 @@ impl FrameworkEval for SibEval {
         let csq_prev_gated = E::EF::from(one.clone() - acc_start.clone()) * csq_prev;
         eval.add_constraint(csq_cur.clone() - (csq_prev_gated + E::EF::from(csq.clone())));
 
-        // C6: final c-row gate — Σc² == τ.
-        eval.add_constraint(c_last.clone() * (csq_acc.clone() - E::F::from(m31(TAU as u32))));
+        // C6: final c-row gate — the constrained running accumulator is Σc²=τ.
+        // This must use `csq_cur` directly; a separate base accumulator would be
+        // free witness unless explicitly tied to the interaction column.
+        let tau = E::EF::from(E::F::from(m31(TAU as u32)));
+        eval.add_constraint(E::EF::from(c_last.clone()) * (csq_cur.clone() - tau));
 
         // C7: c-binding — USE the coeffs C cell (c_bind_id = m, c).
         let ctuple = [c_bind_id.clone(), c.clone()];
@@ -897,20 +1064,25 @@ impl FrameworkEval for SibEval {
         // (so the array's final state IS the coeffs-bound `c`); the SORTED view
         // requires (−). The three self-cancel iff unsorted and sorted are a
         // permutation ⇒ the committed `c` is the true SampleInBall output.
-        let u_tuple = [u_addr.clone(), u_val.clone(), u_ts.clone()];
+        let u_tuple = [u_addr.clone(), u_val.clone(), u_ts.clone(), u_write.clone()];
         eval.add_to_relation(RelationEntry::base(
             &self.relations.mem,
             is_core.clone(),
             &u_tuple,
         ));
         // FINAL read: (addr=m=c_bind_id, value=COL_C=c, ts=ts_final), gated is_c.
-        let final_tuple = [c_bind_id.clone(), c.clone(), ts_final.clone()];
+        let final_tuple = [
+            c_bind_id.clone(),
+            c.clone(),
+            ts_final.clone(),
+            E::F::from(m31(0)),
+        ];
         eval.add_to_relation(RelationEntry::base(
             &self.relations.mem,
             is_c.clone(),
             &final_tuple,
         ));
-        let s_tuple = [s_addr.clone(), s_val.clone(), s_ts.clone()];
+        let s_tuple = [s_addr.clone(), s_val.clone(), s_ts.clone(), s_write.clone()];
         eval.add_to_relation(RelationEntry::base(
             &self.relations.mem,
             -is_sorted.clone(),
@@ -939,7 +1111,6 @@ impl FrameworkEval for SibEval {
         );
         eval.add_constraint(is_init.clone() * (u_addr.clone() - init_addr.clone()));
         eval.add_constraint(is_init.clone() * u_val.clone());
-        let n_minus_tau = E::F::from(m31((N - TAU) as u32));
         eval.add_constraint(
             is_wr_i_row.clone() * (u_addr.clone() - n_minus_tau.clone() - step_no.clone()),
         );
@@ -1013,20 +1184,31 @@ impl FrameworkEval for SibEval {
         // 8b+u < τ), the tuple (8b+u, 1−2·bit): FIPS `c[j] = −1 if bit else +1`,
         // and enc_signed(±1) in M31 is 1 or P−1 = 1−2·bit. Write-j rows consume
         // (step_no, u_val). Balance ⇒ each write-j value is the correct sign bit.
-        let zg = E::F::from(m31(0));
-        let _ = (&sign_bit, &is_sign, &byte, &sign_mask, &byte_pos);
+        let two = E::F::from(m31(2));
+        let eight = E::F::from(m31(SIGN_BIT_COLS as u32));
+        let mut sign_recomposition = E::F::from(m31(0));
+        let mut bit_weight = E::F::from(m31(1));
         for u in 0..SIGN_BIT_COLS {
-            let sign_tuple = [E::F::from(m31(u as u32)), one.clone()];
+            let bit = sign_bit[u].clone();
+            eval.add_constraint(bit.clone() * (one.clone() - bit.clone()));
+            sign_recomposition += bit_weight.clone() * bit.clone();
+            bit_weight += bit_weight.clone();
+
+            let sign_tuple = [
+                byte_pos.clone() * eight.clone() + E::F::from(m31(u as u32)),
+                one.clone() - two.clone() * bit,
+            ];
             eval.add_to_relation(RelationEntry::base(
                 &self.relations.signbit,
-                zg.clone(),
+                sign_mask[u].clone(),
                 &sign_tuple,
             ));
         }
+        eval.add_constraint(is_sign * (byte - sign_recomposition));
         let wrj_val_tuple = [step_no.clone(), u_val.clone()];
         eval.add_to_relation(RelationEntry::base(
             &self.relations.signbit,
-            zg.clone(),
+            -is_wr_j_row,
             &wrj_val_tuple,
         ));
 
@@ -1090,15 +1272,17 @@ pub fn gen_sib_interaction(
 
     // Offline-memory: sorted view per coset row (row r ↦ sorted[r] for r<N_ACCESSES).
     let mem = mem_trace(witness);
-    // Sorted (addr, ts, val) passthrough QM31 column (coords 0/1/2, 3 unused),
-    // read at `[-1,0]` in the AIR to recover the previous sorted row.
+    // Packed passthrough QM31 column: sorted (addr, ts, val) in coords 0/1/2,
+    // and the ordered SampleInBall state-after value in coord 3.
     let pass: Vec<SecureField> = (0..rows)
         .map(|row| {
-            if let Some(a) = mem.sorted.get(row) {
-                SecureField::from_m31_array([m31(a.addr), m31(a.ts), enc_signed(a.value), m31(0)])
-            } else {
-                zero
-            }
+            let (addr, ts, value) = mem.sorted.get(row).map_or((m31(0), m31(0), m31(0)), |a| {
+                (m31(a.addr), m31(a.ts), enc_signed(a.value))
+            });
+            let fsm_after = srows
+                .get(row)
+                .map_or(m31(0), |r| m31(r.i + u32::from(r.accept)));
+            SecureField::from_m31_array([addr, ts, value, fsm_after])
         })
         .collect();
     for coord in 0..N_SORTED_PASS_COLS {
@@ -1218,7 +1402,7 @@ pub fn gen_sib_interaction(
     };
 
     // AIR emission order (7): accept_lo(rc8), accept_hi(rc8), reject_lo(rc8),
-    // reject_hi(rc8), hashio(−), ternary(rc9), ccell(+).
+    // reject_hi(rc8), hashio(−), c+1 bound(rc9), ccell(+).
     push(
         &|coset| match coset_row[coset] {
             Some(Row::Stream {
@@ -1283,7 +1467,7 @@ pub fn gen_sib_interaction(
         &mut entries,
         &mut claimed,
     );
-    // ternary rc9
+    // c+1 range bound (ternary itself is enforced by c³=c in the AIR).
     push(
         &|coset| match coset_row[coset] {
             Some(Row::C { c, .. }) => {
@@ -1344,9 +1528,12 @@ pub fn gen_sib_interaction(
                 let a = &mem.unsorted[coset];
                 (
                     one,
-                    relations
-                        .mem
-                        .combine(&[m31(a.addr), enc_signed(a.value), m31(a.ts)]),
+                    relations.mem.combine(&[
+                        m31(a.addr),
+                        enc_signed(a.value),
+                        m31(a.ts),
+                        m31(u32::from(a.is_write)),
+                    ]),
                 )
             } else {
                 (zero, one)
@@ -1363,7 +1550,9 @@ pub fn gen_sib_interaction(
                 let ts = (N_CORE as u32) + m;
                 (
                     one,
-                    relations.mem.combine(&[m31(m), enc_signed(c), m31(ts)]),
+                    relations
+                        .mem
+                        .combine(&[m31(m), enc_signed(c), m31(ts), m31(0)]),
                 )
             }
             _ => (zero, one),
@@ -1378,9 +1567,12 @@ pub fn gen_sib_interaction(
                 let a = &mem.sorted[coset];
                 (
                     -one,
-                    relations
-                        .mem
-                        .combine(&[m31(a.addr), enc_signed(a.value), m31(a.ts)]),
+                    relations.mem.combine(&[
+                        m31(a.addr),
+                        enc_signed(a.value),
+                        m31(a.ts),
+                        m31(u32::from(a.is_write)),
+                    ]),
                 )
             } else {
                 (zero, one)
@@ -1484,11 +1676,45 @@ pub fn gen_sib_interaction(
     );
     // SignBit sign-yield (×8): (8·byte_pos+u, 1−2·bit) on sign rows, numerator =
     // mask_u (1 iff step 8b+u < τ).
-    for _u in 0..SIGN_BIT_COLS {
-        push(&|_coset| (zero, one), &mut entries, &mut claimed);
+    for u in 0..SIGN_BIT_COLS {
+        push(
+            &|coset| {
+                if coset < SIGN_BYTES {
+                    let step = SIGN_BIT_COLS * coset + u;
+                    if step < TAU {
+                        let bit = (trace_sign_byte(witness, coset) >> u) & 1;
+                        let value = if bit == 1 { -1 } else { 1 };
+                        return (
+                            one,
+                            relations
+                                .signbit
+                                .combine(&[m31(step as u32), enc_signed(value)]),
+                        );
+                    }
+                }
+                (zero, one)
+            },
+            &mut entries,
+            &mut claimed,
+        );
     }
-    // SignBit write-j-consume DISABLED.
-    push(&|_coset| (zero, one), &mut entries, &mut claimed);
+    // SignBit write-j-consume (−): (step_no, u_val) on write-j rows (role 2).
+    push(
+        &|coset| match core_role(coset) {
+            Some((t, 2)) => {
+                let a = &mem.unsorted[coset];
+                (
+                    -one,
+                    relations
+                        .signbit
+                        .combine(&[m31(t as u32), enc_signed(a.value)]),
+                )
+            }
+            _ => (zero, one),
+        },
+        &mut entries,
+        &mut claimed,
+    );
 
     let mut logup = LogupTraceGenerator::new(log_size);
     for chunk in entries.chunks(LOGUP_BATCH) {

@@ -33,7 +33,7 @@ use crate::interaction::{
 };
 use crate::multiplicities::{range_k_multiplicities, sum_multiplicity_vectors};
 use crate::preprocessed::{
-    generate_shared_table_preprocessed_trace, shared_table_preprocessed_log_sizes, LOG_SIZE_16,
+    generate_shared_table_preprocessed_trace, shared_table_preprocessed_log_sizes,
 };
 use crate::relations::{Sha256Relations, SharedShaTableRelations};
 use crate::types::Sha256Witness;
@@ -61,13 +61,13 @@ impl ShaTablesInteractionClaim {
 /// that must stay in lockstep: interaction-column generation
 /// (`shared_table_interaction_trace`), multiplicity-column order
 /// (`shared_table_trace`), interaction/trace log-size layout, and component
-/// registration (`ShaTablesComponents`). Range₁₆ is the lone log₂16 producer;
+/// registration (`ShaTablesComponents`). Range₈ is the lone log₂8 producer;
 /// the three small range tables form one pair + one single = 3 chunks. Under
 /// Class-D single-gated blinding each producer emits
 /// ONE fraction, so each chunk yields exactly one paired interaction column:
 /// 4 producers → 3 interaction columns.
 const PRODUCER_PAIRS: &[&[SharedProducer]] = &[
-    &[SharedProducer::Range(RangeKind::Range16)],
+    &[SharedProducer::Range(RangeKind::Range8)],
     &[
         SharedProducer::Range(RangeKind::Range2),
         SharedProducer::Range(RangeKind::Range4),
@@ -297,6 +297,13 @@ impl Air for ShaTablesProver {
         shared_table_preprocessed_column_ids()
     }
 
+    fn canonical_preprocessed_columns(
+        &mut self,
+    ) -> Result<Vec<air_core::PreprocessedColumnEval>, stwo::core::verifier::VerificationError>
+    {
+        Ok(generate_shared_table_preprocessed_trace().0)
+    }
+
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
         self.components = Some(ShaTablesComponents::new(
             allocator,
@@ -312,7 +319,11 @@ impl Air for ShaTablesProver {
 
 impl AirProver for ShaTablesProver {
     fn max_log_size(&self) -> u32 {
-        LOG_SIZE_16
+        RANGE_TABLES
+            .iter()
+            .map(|&kind| SharedProducer::Range(kind).blind_log_size())
+            .max()
+            .expect("shared SHA provider has range tables")
     }
 
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>) {
@@ -367,6 +378,13 @@ impl Air for ShaTablesVerifier {
         &self,
     ) -> Vec<stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId> {
         shared_table_preprocessed_column_ids()
+    }
+
+    fn canonical_preprocessed_columns(
+        &mut self,
+    ) -> Result<Vec<air_core::PreprocessedColumnEval>, stwo::core::verifier::VerificationError>
+    {
+        Ok(generate_shared_table_preprocessed_trace().0)
     }
 
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
@@ -509,8 +527,8 @@ fn producer_frac(
                 RangeKind::Range5 => {
                     producer_blind_frac_column(&relations.range.range_5, mults, real_len, row_iter)
                 }
-                RangeKind::Range16 => {
-                    producer_blind_frac_column(&relations.range.range_16, mults, real_len, row_iter)
+                RangeKind::Range8 => {
+                    producer_blind_frac_column(&relations.range.range_8, mults, real_len, row_iter)
                 }
             }
         }

@@ -14,12 +14,11 @@
 //! `o / 4`, big-endian byte `o % 4` (FIPS 180-4 §5.2.1) — recall a word's
 //! big-endian bytes are `[hi.b1, hi.b0, lo.b1, lo.b0]`.
 //!
-//! Each exposed byte is range-checked to `[0, 256)` inside the AIR (two `Range16`
-//! lookups, see [`BYTE_RANGE_CHECK_OFFSET`]), so every covered limb's two-byte
-//! split is unique and a yielded byte is provably the signed preimage byte. The
-//! digest provider can defer its byte range-check to the consumer because it
-//! exposes whole words; a field window can be **sub-word** (its edge byte shares
-//! a limb with a non-exposed neighbour), so this provider pins the bytes itself.
+//! Each exposed byte is range-checked to `[0, 256)` inside the AIR (one `Range8`
+//! lookup), so every covered limb's two-byte split is unique and a yielded byte
+//! is provably the signed preimage byte. The digest provider uses the same
+//! direct byte pin; it is essential here because a field window can be
+//! **sub-word** (its edge byte shares a limb with a non-exposed neighbour).
 //!
 //! This module is **format-agnostic**: it knows nothing about the eu-id
 //! credential. The caller supplies the byte windows (the credential layer keys
@@ -260,22 +259,6 @@ pub fn word_be_bytes(lo: u32, hi: u32) -> [u32; WORD_BYTES] {
     [hi.b1, hi.b0, lo.b1, lo.b0]
 }
 
-/// Offset for the two-lookup byte range-check that pins an exposed field byte to
-/// `[0, 256)`.
-///
-/// This AIR has no `[0, 2⁸)` range table — only the carry tables (`[0, 2)`,
-/// `[0, 4)`, `[0, 5)`) and the 16-bit `Range16` (`[0, 2¹⁶)`). A byte `b` is
-/// pinned to `[0, 256)` by **two** `Range16` lookups: on `b` and on `b +
-/// BYTE_RANGE_CHECK_OFFSET`. The first forces `b ∈ [0, 2¹⁶)`; the second forces
-/// `b ≤ 2¹⁶ − 1 − OFFSET = 255` (any `b ∈ [256, 2¹⁶)` makes `b + OFFSET ≥ 2¹⁶`,
-/// off-table — and since `b + OFFSET < p` there is no field wrap to rescue it).
-/// Together: `b ∈ [0, 256)`. Reuses the existing `Range16` producer — no new
-/// table, trace column, or component. Why it's needed: a 16-bit limb's split
-/// `256·b_hi + b_lo` is unique only when *both* bytes are in `[0, 256)`, so an
-/// edge byte of a sub-word window cannot be forged by absorbing slack into a
-/// non-exposed limb partner.
-pub const BYTE_RANGE_CHECK_OFFSET: u32 = (1 << 16) - (1 << 8);
-
 // A message word index is always within the 16 input words.
 const _: () = assert!(N_INPUT_WORDS == 16);
 // The trace generator writes field bytes with `types::BYTES_PER_WORD`; this
@@ -439,26 +422,15 @@ mod tests {
         );
     }
 
-    /// The two-`Range16` byte range-check: for every in-range byte both `b` and
-    /// `b + OFFSET` land inside the `[0, 2¹⁶)` table, and for every out-of-range
-    /// value `b + OFFSET` overflows the table (so the lookup cannot balance).
-    /// This is the algebra that makes each exposed byte provably a byte.
+    /// The byte table has exactly the intended `[0, 256)` domain.
     #[test]
-    fn byte_range_offset_pins_to_a_byte() {
-        const TABLE: u32 = 1 << 16;
-        assert_eq!(BYTE_RANGE_CHECK_OFFSET, TABLE - (1 << 8));
+    fn byte_range_table_pins_to_a_byte() {
+        const TABLE: u32 = 1 << 8;
         for b in [0u32, 1, 127, 200, 255] {
-            assert!(b < TABLE, "b={b} in the table");
-            assert!(
-                b + BYTE_RANGE_CHECK_OFFSET < TABLE,
-                "b={b}+OFFSET in the table"
-            );
+            assert!(b < TABLE, "in-range b={b} must fit the byte table");
         }
         for b in [256u32, 257, 1000, 0xFFFF] {
-            assert!(
-                b + BYTE_RANGE_CHECK_OFFSET >= TABLE,
-                "out-of-range b={b} must push b+OFFSET off the Range16 table",
-            );
+            assert!(b >= TABLE, "out-of-range b={b} must miss the byte table");
         }
     }
 }

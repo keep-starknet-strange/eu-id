@@ -1,7 +1,7 @@
 //! Range-check table providers for `sampleinball_fsm`: `Rc8` (2^8, index/byte
-//! margins + sorted `daddr`), `Rc9` (2^9, ternary `{0,1,2}` membership), and
-//! `Rc11` (2^11, offline-memory timestamp diff `dts` < N+3τ+N = 659). Same
-//! provider shape as `decomp::tables`.
+//! margins + sorted `daddr`), `Rc9` (2^9, coefficient `c+1` bound), and `Rc11`
+//! (2^11, offline-memory timestamp diff `dts` < N+3τ+N = 659). Same provider
+//! shape as `decomp::tables`.
 
 use stwo::core::fields::qm31::{SecureField, SECURE_EXTENSION_DEGREE};
 use stwo::prover::backend::simd::m31::LOG_N_LANES;

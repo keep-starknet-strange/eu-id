@@ -40,7 +40,7 @@ explicitly with `--ignored` (above) or via `make`.
 
 | Soundness obligation             | Status                                                                                                                                                                      |
 | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Every 16-bit limb in `[0, 2¹⁶)` | Enforced — round-side / σ-side split-and-pack lookups pin most limbs implicitly; terminal `h_out` limbs are pinned by an explicit `Range_16` lookup.                        |
+| Every 16-bit limb in `[0, 2¹⁶)` | Enforced — round-side / σ-side split-and-pack lookups pin most limbs implicitly; terminal `h_out` bytes are pinned by `Range_8`, then recomposed into limbs.             |
 | Every mod-2³² limb-add identity | Enforced — schedule recurrence, `T1`, `T2`/`e_new`/`a_new`, and the 8 finalization adds emit linear constraints **and** range-check their carries against `Range_{2,4,5}`. |
 | IV binding on the first block    | Enforced — `is_first_block · (h_in[j] − IV[j]) = 0`, both limbs, for `j ∈ 0..8`.                                                                                            |
 | Multi-block chain                | Enforced — `(enabler − is_first_block) · (h_in[j] − h_out_prev[j]) = 0` on every continuation row.                                                                          |

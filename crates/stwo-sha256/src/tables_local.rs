@@ -14,13 +14,13 @@
 //!
 //! ```ignore
 //! // before
-//! use crate::tables_local::{range_2, range_4, range_5, range_16};
+//! use crate::tables_local::{range_2, range_4, range_5, range_8};
 //! // after (shared crate landed)
-//! use stwo_air_utils::range_tables::{range_2, range_4, range_5, range_16};
+//! use stwo_air_utils::range_tables::{range_2, range_4, range_5, range_8};
 //! ```
 //!
 //! No call-site re-architecting; no parallel API pattern. The names
-//! `range_2/4/5/16` are deliberately the obvious thing the shared crate
+//! `range_2/4/5/8` are deliberately the obvious thing the shared crate
 //! will export — no `local_*` prefix, no namespace collision with the
 //! future import.
 //!
@@ -43,9 +43,8 @@
 //!
 //! ## API shape rationale
 //!
-//! - **`Vec<u32>` return, not `[u32; N]` or const-generic.** [`range_16`]
-//!   has 2¹⁶ rows; a const-sized array of that size doesn't fit naturally
-//!   alongside the small `range_2`/`4`/`5`. One uniform return type keeps
+//! - **`Vec<u32>` return, not `[u32; N]` or const-generic.** One uniform
+//!   return type keeps [`range_8`] aligned with the small `range_2`/`4`/`5` and
 //!   every call site committing the table the same way. The const-generic
 //!   shape (`RangeTable<const N: u32>`) was rejected because the size is
 //!   data, not a type parameter, and call sites are cleaner without
@@ -63,9 +62,8 @@
 //!   tables for the four mod-2³² limb-add families audited in
 //!   [`crate::headroom`]. Sizes are `RANGE_2 = 2`, `RANGE_4 = 4`,
 //!   `RANGE_5 = 5`.
-//! - [`range_16`] — the 16-bit limb range-check table. 2¹⁶ rows. Used for
-//!   terminal `(lo, hi)` limbs such as the digest output, per design §10.2 /
-//!   §11 L1.
+//! - [`range_8`] — the byte range-check table. 2⁸ rows. Used for terminal
+//!   digest bytes and exposed message bytes.
 //!
 //! ## What does **not** live here
 //!
@@ -75,7 +73,7 @@
 //!   here is either a thin batching-policy wrapper or no wrapper at all.
 //!   Either way, no local stub is needed — call sites use the trait
 //!   method.
-//! - **Relation-tag types** (`Range2Relation`, `Range16Relation`, …).
+//! - **Relation-tag types** (`Range2Relation`, `Range8Relation`, …).
 //!   These are emitted alongside `add_to_relation` wiring in the
 //!   downstream lookup-wiring work; until that wiring is in flight there
 //!   is nothing here to tag. Relation tags are component-owned, not
@@ -85,11 +83,11 @@
 
 use crate::headroom::{RANGE_2, RANGE_4, RANGE_5};
 
-/// Number of rows in the 16-bit limb range-check table: `2¹⁶ = 65 536`.
+/// Number of rows in the byte range-check table: `2⁸ = 256`.
 ///
 /// Exposed as a `pub const` so call sites can size preprocessed-column
-/// allocations without recomputing `1u32 << 16` everywhere.
-pub const RANGE_16: u32 = 1u32 << 16;
+/// allocations without recomputing `1u32 << 8` everywhere.
+pub const RANGE_8: u32 = 1u32 << 8;
 
 /// Preprocessed `Range_2` row content: `[0, 1]`.
 ///
@@ -121,14 +119,13 @@ pub fn range_5() -> Vec<u32> {
     (0..RANGE_5).collect()
 }
 
-/// Preprocessed `Range_16` row content: `[0, 1, …, 2¹⁶ − 1]`.
+/// Preprocessed `Range_8` row content: `[0, 1, …, 2⁸ − 1]`.
 ///
-/// Used to range-check **terminal** 16-bit limbs — limbs that are *not*
-/// immediately pinned by the direct bit-recomposition constraints. The
-/// explicit `Range_16` is needed for the digest output limbs and the small
-/// set of other limbs §10.2 of the validated design calls out.
-pub fn range_16() -> Vec<u32> {
-    (0..RANGE_16).collect()
+/// Used to range-check terminal digest bytes and exposed message bytes. Their
+/// existing `limb = 256·b_hi + b_lo` constraints then pin the corresponding
+/// 16-bit limbs without a 65,536-row table.
+pub fn range_8() -> Vec<u32> {
+    (0..RANGE_8).collect()
 }
 
 #[cfg(test)]
@@ -141,7 +138,7 @@ mod tests {
         assert_eq!(range_2().len() as u32, RANGE_2);
         assert_eq!(range_4().len() as u32, RANGE_4);
         assert_eq!(range_5().len() as u32, RANGE_5);
-        assert_eq!(range_16().len() as u32, RANGE_16);
+        assert_eq!(range_8().len() as u32, RANGE_8);
     }
 
     /// Row content is exactly `{0, 1, …, k − 1}` for every `Range_k`. The
@@ -159,13 +156,11 @@ mod tests {
         for (i, row) in range_5().iter().enumerate() {
             assert_eq!(*row as usize, i, "range_5: row {i} has value {row}");
         }
-        // Spot-check `range_16` at start, end, and a midpoint — full
-        // iteration is 65 536 rows but the property is the same.
-        let r16 = range_16();
-        assert_eq!(r16[0], 0);
-        assert_eq!(r16[42], 42);
-        assert_eq!(r16[(RANGE_16 as usize) / 2], RANGE_16 / 2);
-        assert_eq!(r16[(RANGE_16 as usize) - 1], RANGE_16 - 1);
+        let r8 = range_8();
+        assert_eq!(r8[0], 0);
+        assert_eq!(r8[42], 42);
+        assert_eq!(r8[(RANGE_8 as usize) / 2], RANGE_8 / 2);
+        assert_eq!(r8[(RANGE_8 as usize) - 1], RANGE_8 - 1);
     }
 
     /// Every audited carry bound from [`crate::headroom`] has a matching

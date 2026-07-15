@@ -950,6 +950,28 @@ fn check_mldsa_extracted_statement_coherence(
     Ok(())
 }
 
+fn validate_mldsa_public_keys(
+    statement: &MdocCircuitStatement,
+    phase: &'static str,
+) -> Result<(), Error> {
+    for (role, input) in [
+        ("issuer", statement.issuer_input.as_mldsa()),
+        ("device", statement.device_input.as_mldsa()),
+    ] {
+        if let Some(input) = input {
+            input.validate_public_key().map_err(|message| {
+                let detail = format!("mdoc {role} public key: {message}");
+                if phase == "prove" {
+                    Error::Prove(detail)
+                } else {
+                    Error::Verify(detail)
+                }
+            })?;
+        }
+    }
+    Ok(())
+}
+
 fn check_mldsa_device_key_binding(statement: &MdocCircuitStatement) -> Result<(), Error> {
     let (Some(issuer_input), Some(device_input)) = (
         statement.issuer_input.as_mldsa(),
@@ -2194,6 +2216,11 @@ impl MdocMlDsaClaims {
     fn has_expected_shape(&self) -> bool {
         self.group_evals.len() == stwo_mldsa::statement::n_group_evals()
             && self.claimed_sums.len() == stwo_mldsa::statement::hosted_claimed_sums_len()
+            && stwo_mldsa::statement::validate_sib_lengths(
+                self.sib_stream_len,
+                self.sib_squeezed_len,
+            )
+            .is_ok()
     }
 }
 
@@ -2215,9 +2242,8 @@ pub struct MdocCircuitProof {
     age_claimed_sums: Option<Vec<QM31>>,
     nat_public: Option<predicates::NatPublicInput>,
     nat_claimed_sums: Option<Vec<QM31>>,
-    /// Per-module opaque post-interaction payloads, in prove module order.
-    /// Only the keccak service slot is non-empty (its round-GKR proof blob);
-    /// the verifier gates this shape fail-closed before any transcript work.
+    /// Reserved for wire compatibility. Production uses direct outer-STARK
+    /// Keccak round constraints, so this must be empty.
     pub post_interaction_payloads: Vec<Vec<u8>>,
 }
 
@@ -2236,8 +2262,8 @@ pub struct MdocProofByteBreakdown {
     pub proof_bytes: usize,
     pub stark_proof_bytes: usize,
     pub non_stark_metadata_bytes: usize,
-    /// The serialized round-GKR post-interaction payload blob(s) — part of
-    /// `non_stark_metadata_bytes`, broken out for the wire accounting.
+    /// Reserved auxiliary payload bytes. Pure-STARK production proofs require
+    /// this to be zero.
     pub post_interaction_payload_bytes: usize,
     pub stark: MdocStarkProofByteBreakdown,
 }
@@ -2263,11 +2289,7 @@ pub fn mdoc_proof_byte_breakdown(proof: &MdocCircuitProof) -> MdocProofByteBreak
         proof_bytes,
         stark_proof_bytes,
         non_stark_metadata_bytes,
-        post_interaction_payload_bytes: proof
-            .post_interaction_payloads
-            .iter()
-            .map(Vec::len)
-            .sum(),
+        post_interaction_payload_bytes: proof.post_interaction_payloads.iter().map(Vec::len).sum(),
         stark: MdocStarkProofByteBreakdown {
             config: bincode_len(&stark.config),
             commitments: bincode_len(&stark.commitments),
@@ -2996,6 +3018,13 @@ impl Air for MdocRevocationRangeBind {
         vec![revocation_range_active_id()]
     }
 
+    fn canonical_preprocessed_columns(
+        &mut self,
+    ) -> Result<Vec<air_core::PreprocessedColumnEval>, stwo::core::verifier::VerificationError>
+    {
+        Ok(vec![revocation_range_active_column()])
+    }
+
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
         let claim = self.interaction_claim().clone();
         let blinder_relation = self
@@ -3131,69 +3160,20 @@ pub fn prove_mdoc_circuit(
     prove_mdoc_circuit_with_pcs_config(extracted, statement, mdoc_production_pcs_config())
 }
 
-/// What [`prove_or_root_mdoc`] should do once the module set is assembled: run
-/// the full STARK, or stop at the tree-0 (preprocessed) commit and return its
-/// root (the F-ROOT pin path).
-enum MdocProveMode {
-    Prove,
-    PreprocessedRoot,
-}
-
-/// The two possible outcomes of [`prove_or_root_mdoc`], one per [`MdocProveMode`].
-enum MdocProveOutcome {
-    Proof(Box<MdocCircuitProof>),
-    Root(air_core::CommitmentRoot),
-}
-
-/// Compute the expected tree-0 (preprocessed) commitment root for an mdoc
-/// statement, by assembling the exact same prover-side [`air_core::AirProver`]
-/// module set (in the exact commit order) [`prove_mdoc_circuit_with_pcs_config`]
-/// uses and running only the prover's tree-0 commit path
-/// ([`air_core::compute_preprocessed_root`]) — no STARK is proven. Pass the
-/// result to [`verify_mdoc_circuit_with_preprocessed_root`]; the root is
-/// recomputed from the public statement + witness, never taken from the proof.
-///
-/// # Soundness
-///
-/// This Blake2s Merkle root — not the prover-side 64-bit `DefaultHasher` column
-/// fingerprint — is the tree-0 soundness pin (F-ROOT class): it binds the
-/// contents, order, and sizes of every preprocessed range table, SHA/keccak
-/// schedule, and constant column at once. A proof carrying a forged
-/// preprocessed tree is rejected with [`Error::PreprocessedRootMismatch`]
-/// before any STARK work. Do not downgrade the pin to the fingerprint.
-pub fn mdoc_expected_preprocessed_root(
-    extracted: &ExtractedPidMdoc,
-    statement: &MdocCircuitStatement,
-    config: PcsConfig,
-) -> Result<air_core::CommitmentRoot, Error> {
-    match prove_or_root_mdoc(
-        extracted,
-        statement,
-        config,
-        MdocProveMode::PreprocessedRoot,
-    )? {
-        MdocProveOutcome::Root(root) => Ok(root),
-        MdocProveOutcome::Proof(_) => unreachable!("PreprocessedRoot mode never returns a proof"),
-    }
-}
-
 pub fn prove_mdoc_circuit_with_pcs_config(
     extracted: &ExtractedPidMdoc,
     statement: &MdocCircuitStatement,
     config: PcsConfig,
 ) -> Result<MdocCircuitProof, Error> {
-    match prove_or_root_mdoc(extracted, statement, config, MdocProveMode::Prove)? {
-        MdocProveOutcome::Proof(proof) => Ok(*proof),
-        MdocProveOutcome::Root(_) => unreachable!("Prove mode never returns a root"),
-    }
+    prove_mdoc_circuit_inner(extracted, statement, config)
 }
 
-fn prove_or_root_mdoc(
+fn prove_mdoc_circuit_inner(
     extracted: &ExtractedPidMdoc,
     statement: &MdocCircuitStatement,
     config: PcsConfig,
-    mode: MdocProveMode,
-) -> Result<MdocProveOutcome, Error> {
+) -> Result<MdocCircuitProof, Error> {
+    validate_mldsa_public_keys(statement, "prove")?;
     if statement.birth_date_value_offset != extracted.birth_date_value_offset
         || statement.nationality_value_offset != extracted.nationality_value_offset
     {
@@ -3500,31 +3480,10 @@ fn prove_or_root_mdoc(
         if let Some(revocation_public) = ts13_revocation_public.as_mut() {
             modules.push(revocation_public);
         }
-        // Root mode stops at the tree-0 commit — no STARK, no proof. This
-        // returns before the borrow of `modules` (and the components it holds)
-        // is used to read back interaction claims, so the two paths never
-        // conflict on those borrows.
-        match mode {
-            MdocProveMode::PreprocessedRoot => {
-                // UNCACHED: the ML-DSA `sampleinball` schedule preprocessed
-                // columns depend on the witness through `stream_len(witness)`
-                // (the SIB squeeze length), which varies per signature while the
-                // padded `sib_log_size` shape key stays fixed — so the per-shape
-                // cache would return the first signature's root for a second,
-                // distinct one (spurious PreprocessedRootMismatch). Same reason
-                // the standalone stwo-mldsa helper uses `_uncached`.
-                return Ok(MdocProveOutcome::Root(
-                    air_core::compute_preprocessed_root_uncached(modules.as_mut_slice(), config),
-                ));
-            }
-            MdocProveMode::Prove => {
-                air_core::prove_with_post_interaction(modules.as_mut_slice(), config)
-                    .map_err(|e| Error::Prove(format!("{e:?}")))?
-            }
-        }
+        air_core::prove(modules.as_mut_slice(), config)
+            .map_err(|e| Error::Prove(format!("{e:?}")))?
     };
-    let (stark_proof, post_interaction_payloads) = stark_proof;
-    Ok(MdocProveOutcome::Proof(Box::new(MdocCircuitProof {
+    Ok(MdocCircuitProof {
         stark_proof,
         sha_tables_interaction_claim: sha_tables.interaction_claim().clone(),
         mldsa: issuer_mldsa.as_ref().map(MdocMlDsaClaims::from_prover),
@@ -3555,8 +3514,8 @@ fn prove_or_root_mdoc(
         age_claimed_sums: age.as_ref().map(|age| age.claimed_sums()),
         nat_public: nat.as_ref().map(|_| nat_public),
         nat_claimed_sums: nat.as_ref().map(|nat| nat.claimed_sums()),
-        post_interaction_payloads,
-    })))
+        post_interaction_payloads: Vec::new(),
+    })
 }
 
 pub fn verify_mdoc_circuit(
@@ -3571,66 +3530,24 @@ pub fn verify_mdoc_circuit_with_pcs_config(
     statement: &MdocCircuitStatement,
     expected_pcs_config: PcsConfig,
 ) -> Result<(), Error> {
-    verify_mdoc_circuit_with_pcs_config_profiled(proof, statement, expected_pcs_config, None)
-        .map(|_| ())
-}
-
-/// [`verify_mdoc_circuit`], with the tree-0 (preprocessed) commitment root
-/// pinned — the F-ROOT fix. The caller supplies `expected_preprocessed_root`,
-/// computed once via [`mdoc_expected_preprocessed_root`], never taken from the
-/// proof. A proof carrying a forged preprocessed tree (SHA/keccak schedules,
-/// range tables, constants) is rejected with
-/// [`Error::PreprocessedRootMismatch`] before the STARK check. Mirrors
-/// `verify_identity_with_preprocessed_root`.
-pub fn verify_mdoc_circuit_with_preprocessed_root(
-    proof: &MdocCircuitProof,
-    statement: &MdocCircuitStatement,
-    expected_preprocessed_root: air_core::CommitmentRoot,
-) -> Result<(), Error> {
-    verify_mdoc_circuit_with_pcs_config_and_preprocessed_root(
-        proof,
-        statement,
-        mdoc_production_pcs_config(),
-        expected_preprocessed_root,
-    )
-}
-
-pub fn verify_mdoc_circuit_with_pcs_config_and_preprocessed_root(
-    proof: &MdocCircuitProof,
-    statement: &MdocCircuitStatement,
-    expected_pcs_config: PcsConfig,
-    expected_preprocessed_root: air_core::CommitmentRoot,
-) -> Result<(), Error> {
-    verify_mdoc_circuit_with_pcs_config_profiled_impl(
-        proof,
-        statement,
-        expected_pcs_config,
-        Some(expected_preprocessed_root),
-    )
-    .map(|_| ())
+    verify_mdoc_circuit_with_pcs_config_profiled(proof, statement, expected_pcs_config).map(|_| ())
 }
 
 pub fn verify_mdoc_circuit_with_pcs_config_profiled(
     proof: &MdocCircuitProof,
     statement: &MdocCircuitStatement,
     expected_pcs_config: PcsConfig,
-    expected_preprocessed_root: Option<air_core::CommitmentRoot>,
 ) -> Result<MdocCircuitVerifyProfile, Error> {
-    verify_mdoc_circuit_with_pcs_config_profiled_impl(
-        proof,
-        statement,
-        expected_pcs_config,
-        expected_preprocessed_root,
-    )
+    verify_mdoc_circuit_with_pcs_config_profiled_impl(proof, statement, expected_pcs_config)
 }
 
 fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
     proof: &MdocCircuitProof,
     statement: &MdocCircuitStatement,
     expected_pcs_config: PcsConfig,
-    expected_preprocessed_root: Option<air_core::CommitmentRoot>,
 ) -> Result<MdocCircuitVerifyProfile, Error> {
     let total_start = Instant::now();
+    validate_mldsa_public_keys(statement, "verify")?;
     check_mldsa_device_key_binding(statement)?;
     let mldsa_mso_facts = mldsa_public_mso_facts(statement)?;
     match &proof.mldsa {
@@ -3717,19 +3634,10 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
             ))
         }
     }
-    // Post-interaction payload shape gate, fail-closed: exactly ONE non-empty
-    // payload (the keccak service's round-GKR blob) when the service is
-    // present, none otherwise. Slot position and content are then enforced by
-    // the service module itself (empty blob fails decode; a mispositioned
-    // blob desyncs the replay) and by air-core's per-module count check.
-    let n_nonempty_payloads = proof
-        .post_interaction_payloads
-        .iter()
-        .filter(|p| !p.is_empty())
-        .count();
-    if n_nonempty_payloads != usize::from(proof.keccak_service_claimed_sums.is_some()) {
+    // No native auxiliary verifier is part of the production statement.
+    if !proof.post_interaction_payloads.is_empty() {
         return Err(Error::Verify(
-            "mdoc proof post-interaction payload shape mismatch".to_string(),
+            "mdoc proof contains an unexpected post-interaction payload".to_string(),
         ));
     }
     let revocation_message_field = has_revocation_signature.then(SharedFieldRelation::new);
@@ -4018,10 +3926,15 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
         modules.push(revocation_public);
     }
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let expected_preprocessed_root = air_core::compute_canonical_preprocessed_root(
+            modules.as_mut_slice(),
+            expected_pcs_config,
+        )
+        .map_err(air_core::VerifyError::Stark)?;
         air_core::verify_with_expected_preprocessed_root_and_payloads(
             modules.as_mut_slice(),
             &proof.stark_proof,
-            expected_preprocessed_root,
+            Some(expected_preprocessed_root),
             &proof.post_interaction_payloads,
         )
     })) {
@@ -4038,17 +3951,27 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
     }
 }
 
+pub const MDOC_PRODUCTION_PCS_LOG_BLOWUP_FACTOR: u32 = 4;
+pub const MDOC_PRODUCTION_PCS_QUERIES: usize = 26;
+pub const MDOC_PRODUCTION_PCS_POW_BITS: u32 = 25;
+
 pub fn mdoc_production_pcs_config() -> PcsConfig {
     // S6 bake-off picked log_blowup 4 over 3: −340 KB of queried_values for
     // +40% prove time (proof-size-first rule; verify unchanged). S7 query
-    // shave: pow_bits 25 + n_queries 26 keeps 26·4 + 25 = 129 ≥ 128-bit
-    // security and trades one query (−~38 KB) for a 2^25 blake2s grind
+    // shave: pow_bits 25 + n_queries 26 keeps the PCS query/PoW label at 129
+    // bits and trades one query (−~38 KB) for a 2^25 blake2s grind
     // (measured +~0.3 s single-thread prove). The verifier pins this exact
     // config (see verify_mdoc_circuit_with_pcs_config) so an old-config
-    // proof is rejected.
+    // proof is rejected. This label is not a whole-system soundness claim;
+    // TS13 accounts separately for OODS and binding-hash limits.
     PcsConfig {
-        pow_bits: 25,
-        fri_config: FriConfig::new(1, 4, 26, 2),
+        pow_bits: MDOC_PRODUCTION_PCS_POW_BITS,
+        fri_config: FriConfig::new(
+            1,
+            MDOC_PRODUCTION_PCS_LOG_BLOWUP_FACTOR,
+            MDOC_PRODUCTION_PCS_QUERIES,
+            2,
+        ),
         lifting_log_size: None,
     }
 }

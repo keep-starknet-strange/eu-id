@@ -5,8 +5,8 @@ edition.workspace = true
 
 # The EU-ID ZK SDK: the single source of truth for the prover/verifier data
 # contract. It owns the contract types, the deterministic-CBOR statement
-# encoding (`encode_statement`), and the product `prove_mdoc_pid` /
-# `verify_mdoc_pid` entry points.
+# encoding (`encode_statement`), and the product `prove_identity` /
+# `verify_identity` entry points.
 #
 # The mdoc PID bodies run the real STWO prover/verifier behind the UniFFI
 # surface. No Multipaz / verifier-core types leak in; callers pass the CBOR mdoc

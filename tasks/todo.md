@@ -43,7 +43,8 @@ Baseline: `ce26b934` (S9)
 - Do not edit the user's main checkout or classical branches.
 - Do not touch `stwo-mldsa::coeffs`; its Horner interaction requires `bound == log + 1`.
 - Preserve the local Stwo `8c998390` composition-split patch until an equivalent remote pin exists.
-- Keep security at least 128 bits; production is `(1,4,26,2)` with PoW 25 (129-bit estimate).
+- Preserve production `(1,4,26,2)` with PoW 25 (129-bit PCS label). Do not present that label as
+  whole-system 128-bit PQ soundness; the current conservative TS13 composed label is 82 bits.
 - Compare performance only in the same worktree, feature set, build mode, and session.
 - Push only coherent checkpoints whose focused gates pass.
 
@@ -95,3 +96,153 @@ Baseline: `ce26b934` (S9)
   8,573 ms prove, 16 ms verify, and 1,113,514 bytes; Q3 medians are 6,995 ms, 15 ms, and 1,081,410
   bytes. Median proving improves 18.4% and proof size improves 32,104 bytes (2.88%). The probe now
   prints `rayon_threads` on every result line so thread-count drift is visible.
+
+## Milestone Q7 — close the hard full-PQ prove gate
+
+Hard acceptance command: `RAYON_NUM_THREADS=1 cargo run --release -p eu-id-prover --example
+pq_perf_probe` using `mdoc_production_pcs_config()` and ML-DSA-65 for issuer, device, and revocation.
+
+- [ ] Prove in less than 1,000 ms.
+- [x] Verify in less than 100 ms; never regress.
+- [x] Proof below 1,000,000 bytes; never regress.
+- [x] Capture a fresh instrumented baseline before changing code.
+- [ ] Select an architecture-level optimization with enough measured leverage to close the gap;
+      do not substitute a sequence of small-fry changes whose priced total cannot reach the gate.
+- [ ] Implement the smallest sound version and add a focused adversarial regression.
+- [ ] Run focused suites, workspace checks, and the exact acceptance probe.
+- [ ] Iterate until all three gates pass in the same run.
+
+Fresh Q7 baseline (`73ac7d4e` plus task-document edits, 2026-07-15): prove 5,972 ms, verify 15 ms,
+proof 981,346 bytes. Prover phase census: tree0 commit 378 ms; tree1 write+commit 1,166 ms; tree2
+write+commit 1,601 ms; component build 322 ms; composition+FRI+open 2,287 ms. The existing coeffs
+range-relation unification is priced at only 0.5–0.8 s, so it is insufficient as the primary Q7
+lever. The next implementation must attack commitment/FRI cost or delete multiple ML-DSA-sized
+proof workloads while preserving the public verification contract.
+
+Retracted Q7 result (2026-07-15): the 297/299/303 ms measurements moved all ML-DSA verification
+outside the STARK and changed PoW25/query26 production PCS to PoW0/query32. Those runs violate the
+required trust boundary and fixed production configuration and are not acceptance evidence. The
+independent SHA `Range16` → `Range8` AIR optimization remains eligible only after the fully hosted
+composition and original PCS are restored and re-verified.
+
+## Milestone Q8 — full-PQ soundness repair before performance work
+
+- [x] Audit the production verifier, tree-0 trust anchor, all ML-DSA public inputs, hosted message
+      bridges, signature-witness contract, revocation privacy boundary, shared lookups, and PCS.
+- [x] Make the ordinary product verifier reconstruct the canonical tree-0 commitment internally;
+      remove external-root trust and every path that accepts the proof's own root as authority.
+- [x] Prove `tr = SHAKE256(pkEncode(rho, t1), 64)` inside the hosted STARK for issuer, device, and
+      revocation; do not replace this with native signature verification.
+- [x] Add focused adversarial regressions for unpinned tree 0, wrong `tr`, and Range8 byte forgeries.
+- [x] Run the affected release suites and the exact production probe with canonical tree 0.
+- [ ] Resume prove-time optimization only after every soundness gate passes.
+
+New P0s found during the completed full pass:
+
+- [x] Restore exact SampleInBall sign-bit binding to the first eight SHAKE bytes.
+- [x] Constrain the ordered FIPS rejection-sampling state (`i` start/hold/increment/final).
+- [x] Bind the read/write flag through the SampleInBall memory permutation.
+- [x] Add exploit-shaped sign, skip-valid-byte, reordered-accept, and sorted-write negative tests.
+- [x] Enforce canonical public `t1 < 2^10` and bounded/derived SIB shape claims.
+- [x] Replace unauthenticated per-proof root provisioning with canonical verifier reconstruction.
+- [x] Remove the Keccak GKR/native-verifier boundary and restore direct Keccak round LogUp constraints
+      in the outer STARK; require zero post-interaction payload bytes in production.
+- [x] Bind `perm_id` and canonical `round_idx → round_idx+1` in every Keccak round link, with
+      cross-permutation-swap and round-reordering negative tests.
+- [x] Move the ML-DSA folded-identity accept/reject condition from `verify_post_interaction` into an
+      outer-STARK component and add a mutated-group-evaluation negative test.
+- [ ] For the literal all-arithmetic-in-AIR target, prove `ExpandA(rho)` / public matrix evaluation
+      rather than treating it as deterministic verifier-side public preprocessing.
+
+Initial audit verdict (2026-07-15): the restored three-instance composition was not shippably sound.
+The normal `verify_mdoc_circuit` path passed no expected preprocessed root, so prover-selected tree-0
+content could replace the public ML-DSA message, schedules, selectors, and range tables. Issuer/device
+also accepted a free public `tr` instead of proving its FIPS public-key hash. Canonical tree-0
+reconstruction and in-proof public-key hashing now close those concrete failures. The folded identity
+is now an outer-STARK constraint, but its public `ExpandA(rho)` matrix values remain deterministic
+verifier-derived parameters rather than a traced computation. Signature fields are currently
+existential witness values: the proof establishes that a
+valid signature exists under each exact public key/message, not equality to serialized COSE signature
+bytes. Revocation bounds are also serializable in the current statement/artifact API, so privacy is
+not fail-closed at that boundary.
+
+The advertised `26 * 4 + 25 = 129` bits covers only Stwo's PCS query/PoW formula. The repository has
+no completed composed bound for FRI, OODS/polynomial identities, every LogUp relation, Fiat–Shamir,
+Merkle binding, and their union. TS13 now publishes the enforced `(4,26,25)` tuple and a conservative
+82-bit composed label rather than claiming the 129-bit PCS label is the whole proof. The proof uses
+Blake2s-256 for both transcript and Merkle commitments: its quantum preimage cost is about 2^128,
+but generic quantum collision cost is about 2^85. Therefore the current system must not be described
+as a demonstrated 128-bit post-quantum commitment-binding proof without a separately accepted hash
+security model or wider-hash migration.
+
+Q8 implementation result (2026-07-15): ordinary mdoc/TS13/SDK verification is fail-closed and
+reconstructs canonical tree 0 from the public statement and bounded proof shape. Each hosted ML-DSA
+instance adds a fourth Keccak job for `SHAKE256(pkEncode(rho,t1))` and LogUp-binds its first 64
+squeeze bytes to public `tr`. SampleInBall now binds its sign bits, ordered rejection-sampling state,
+and read/write classification. Release gates pass: 149 active `stwo-sha256` tests (19 ignored), 80
+active `stwo-mldsa` tests (1 ignored), all 34 `eu-id-prover` tests, and all 13 SDK library tests.
+
+Four final exact probes, each release with `RAYON_NUM_THREADS=1` and production `(4,26,25)`, measured
+5,230–8,907 ms prove, 283–291 ms verify, and 966,186–972,122 bytes. Only proof size passes. Canonical
+tree reconstruction is included in verification and exposes a real >100 ms regression; proving
+remains 5.2–8.9x over the hard gate.
+
+Canonical tree-0 follow-up (2026-07-15): production mdoc, SDK, and TS13 verification no longer
+accept or serialize an externally provisioned preprocessing root. The verifier rebuilds the exact
+tree from the public statement and bounded proof shape using the same module order and shared SIB
+preprocessing generator, then compares commitment 0 internally. The full revocation-enabled release
+e2e and adversarial root/SIB/t1 regressions pass. Exact single-thread production probing measured
+5,230–8,907 ms prove, 283–291 ms verify, and 966,186–972,122 bytes. Proof size passes, but canonical
+reconstruction regresses verification above the 100 ms rail and proving remains far above 1,000 ms;
+this is a soundness baseline, not acceptance completion. A fast follow-up must remove
+statement-dependent tree-0 content or add at least two independently challenged PCS-bound
+canonical-equality openings; one QM31 OODS equality has only about 108 bits at degree 2^16 and is not
+a 128-bit replacement.
+
+Pure-STARK correction (2026-07-15): production no longer serializes or verifies a Keccak GKR payload.
+All 898 round lookups per row are direct outer-AIR LogUps; the relation now includes permutation id and
+round index, and the ML-DSA folded identity is an AIR constraint. Batch-four LogUp accumulation keeps
+the fixed production PCS and prioritizes proving speed over wire size. Two exact
+`RAYON_NUM_THREADS=1` production probes measured 7,253–8,020 ms prove, 276–301 ms verify,
+1,061,322–1,064,314 bytes, and zero auxiliary payload bytes. All three performance rails still fail,
+but proving is roughly twice as fast as the batch-16 size-first baseline. `ExpandA(rho)` remains
+public verifier preprocessing, so the stronger literal requirement that every public derivation
+itself be traced is still open.
+
+Batch-two experiment (2026-07-15): lowering the same direct LogUp to batch two passed all 14 Keccak
+service adversarial tests but measured 18,125 ms prove, 683 ms verify, and 1,187,210 bytes. Doubling
+the interaction width overwhelmed the lower constraint degree, so the experiment was rejected and
+batch four restored as the fastest measured sound setting.
+
+## Remote plus soundness-only reconstruction
+
+- [x] Classify every remote-to-worktree change as soundness, required support, or performance-only.
+- [x] Reconstruct `origin/feat/quantum-safe` plus only the soundness closure in an isolated worktree.
+- [x] Run focused correctness gates and the exact single-thread production probe.
+- [x] Record the measured result and remove the isolated worktree.
+
+Review (2026-07-15): the exact isolated variant starts at remote `132ae612`, cherry-picks none of
+the nine local commits, retains the remote direct batch-four Keccak LogUp and Range16 SHA tables,
+and adds only canonical tree-0 reconstruction plus the ML-DSA/Keccak/SampleInBall/folded-identity
+repairs. It excludes the GKR/payload plumbing, the `2f5d4ec2` heap-allocating evaluator refactor,
+and the SHA Range16-to-Range8 optimization. The focused canonical tree-0/public-shape release
+regression passed. Two exact release probes with `RAYON_NUM_THREADS=1` and production `(4,26,25)`
+measured 6,618–7,360 ms prove, 415–421 ms verify, and 1,090,882–1,094,466 bytes.
+
+## App integration FFI parity
+
+- [x] Mirror the `feat/proof-reductions` production UniFFI entry-point names.
+- [x] Preserve the quantum-safe ML-DSA statement and trust-pin fields.
+- [x] Update Kotlin integration examples and boundary tests.
+- [x] Run SDK/FFI checks and review the complete checkpoint before commit and push.
+
+Review (2026-07-15): the production UniFFI surface now exports `prove_identity` and
+`verify_identity`, generating Kotlin `proveIdentity` and `verifyIdentity`, exactly as on
+`feat/proof-reductions`. The quantum-safe contract deliberately keeps
+`issuerPublicKeyHash` and `trustedIssuerPublicKeys`; it does not restore the legacy P-256 fields or
+the externally supplied tree-0 root. Host UniFFI generation confirmed those names and fields.
+Formatting, workspace clippy with warnings denied, all 14 SDK library tests, both FFI library tests,
+all 14 Keccak service tests, all 11 SampleInBall tests, and the focused canonical-tree mdoc release
+test pass. The final exact release probe with `RAYON_NUM_THREADS=1` measured 9,802 ms prove, 434 ms
+verify, 1,091,754 bytes, and zero post-interaction payload bytes. This is an app-integration and
+soundness checkpoint, not completion of the three performance rails.

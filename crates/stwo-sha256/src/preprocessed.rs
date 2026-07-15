@@ -26,7 +26,7 @@
 //! - 8 σ/Σ decode (`Σ0-S, Σ0-S', Σ1-S, Σ1-S', σ0-S, σ0-S', σ1-S, σ1-S'`)
 //! - 1 packed Maj/Ch
 //! - 1 xor_8
-//! - 4 range tables (`Range_2`, `Range_4`, `Range_5`, `Range_16`)
+//! - 4 range tables (`Range_2`, `Range_4`, `Range_5`, `Range_8`)
 //! - 1 `is_first_row` selector at the main `Sha256Eval` trace's `log_n_rows`
 //!   — value `1` at storage index `Layout::block_slot(0, log_n_rows) = 0`,
 //!   zero elsewhere. The AIR pins `is_first_block ≡ is_first_row`, which
@@ -49,7 +49,7 @@ use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use crate::components::{
     all_preprocessed_column_ids, range_log_size, shared_table_preprocessed_column_ids, RANGE_TABLES,
 };
-use crate::tables_local::{range_16, range_2, range_4, range_5};
+use crate::tables_local::{range_2, range_4, range_5, range_8};
 use crate::trace::Layout;
 
 /// `log2` of the row count for every 2¹⁶-row table.
@@ -172,7 +172,7 @@ fn generate_preprocessed_trace_uncached(group_width: u32, log_n_rows: u32) -> Pr
 
     let _ = group_width;
 
-    // ---- 4 range tables (Range_2, Range_4, Range_5, Range_16) ----
+    // ---- 4 range tables (Range_2, Range_4, Range_5, Range_8) ----
     //
     // Each `Range_k` has row content `[0, 1, …, k-1]`. Producers `< 2^4`
     // are padded with leading value `0` up to `2^LOG_N_LANES = 16` rows;
@@ -406,7 +406,7 @@ fn range_rows(kind: crate::components::RangeKind) -> Vec<u32> {
         RangeKind::Range2 => range_2(),
         RangeKind::Range4 => range_4(),
         RangeKind::Range5 => range_5(),
-        RangeKind::Range16 => range_16(),
+        RangeKind::Range8 => range_8(),
     }
 }
 
@@ -430,8 +430,8 @@ mod tests {
     }
 
     /// The first four columns are `Range_k`: three at `LOG_N_LANES = 4`
-    /// (for Range_2/4/5, padded to 16 rows) and one at log size 16
-    /// (Range_16). The trailing ten columns use the main trace log size.
+    /// (for Range_2/4/5, padded to 16 rows) and one at log size 8
+    /// (Range_8). The trailing ten columns use the main trace log size.
     #[test]
     fn log_sizes_lay_out_correctly() {
         let w = MAX_ROUND_GROUP_BITS;
@@ -443,7 +443,7 @@ mod tests {
             } else if i >= 4 {
                 log_n_rows
             } else {
-                16
+                range_log_size(crate::components::RangeKind::Range8)
             };
             assert_eq!(ls, expected, "column {i} log_size mismatch");
         }
@@ -574,20 +574,53 @@ mod tests {
         let check_value =
             |shared: &CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>,
              regular: &CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>| {
-                // Blinded column is exactly twice the regular height.
+                let real_len = regular.values.len();
                 assert_eq!(
                     shared.values.len(),
-                    2 * regular.values.len(),
+                    2 * real_len,
                     "blinded value column doubles the regular domain",
                 );
+                for i in 0..real_len {
+                    assert_eq!(shared.values.at(i), regular.values.at(i), "real row {i}");
+                    assert_eq!(
+                        shared.values.at(real_len + i),
+                        BaseField::from(DUMMY_KEY_BASE + i as u32),
+                        "dummy row {i}",
+                    );
+                }
             };
         for (ri, _) in RANGE_TABLES.iter().enumerate() {
             assert_eq!(shared_log_sizes[si], regular_log_sizes[ri] + 1);
             check_value(&shared_evals[si], &regular_evals[ri]);
+            let real_len = regular_evals[ri].values.len();
             si += 1;
-            // is_dummy selector.
+            for i in 0..real_len {
+                assert_eq!(shared_evals[si].values.at(i), BaseField::from(0u32));
+                assert_eq!(
+                    shared_evals[si].values.at(real_len + i),
+                    BaseField::from(1u32),
+                );
+            }
             si += 1;
         }
         assert_eq!(si, shared_evals.len());
+
+        // Range8 is exact (no real padding): rows 0..=255 are its byte keys;
+        // rows 256..=511 are the Class-D dummy half with unreachable keys.
+        let range8 = RANGE_TABLES
+            .iter()
+            .position(|&kind| kind == crate::components::RangeKind::Range8)
+            .expect("Range8 is registered");
+        let values = &shared_evals[2 * range8];
+        let is_dummy = &shared_evals[2 * range8 + 1];
+        for (row, value, dummy) in [
+            (0, 0, 0),
+            (255, 255, 0),
+            (256, DUMMY_KEY_BASE, 1),
+            (511, DUMMY_KEY_BASE + 255, 1),
+        ] {
+            assert_eq!(values.values.at(row), BaseField::from(value));
+            assert_eq!(is_dummy.values.at(row), BaseField::from(dummy));
+        }
     }
 }

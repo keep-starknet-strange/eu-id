@@ -19,11 +19,11 @@
 //!     fired chunk-wise to combine the two `O2` partials of every
 //!     σ-application.
 //!   - [`RangeRelations`] — the four width-1 range-check channels
-//!     `Range_2`/`Range_4`/`Range_5`/`Range_16`. `Range_k` pins a single
+//!     `Range_2`/`Range_4`/`Range_5`/`Range_8`. `Range_k` pins a single
 //!     base-field value into `[0, k)`. The mod-2³² limb-add carries are
 //!     range-checked through `Range_{2,4,5}` per the headroom audit
 //!     (`crate::headroom`); terminal 16-bit limbs (the final block's
-//!     `h_out`, per design §10.2) are range-checked through `Range_16`.
+//!     `h_out`, per design §10.2) are range-checked through `Range_8` bytes.
 //!     Row content for each `Range_k` is the table `crate::tables_local::range_k()`.
 //!
 //! Each `relation!(_, N)` declares a struct holding a `LookupElements<N>`
@@ -168,14 +168,13 @@ impl Xor8Relation {
 
 /// Row width of every `Range_k` channel: a single base-field value pinned
 /// to `[0, k)`. The lookup tuple passed to `add_to_relation` is a 1-cell
-/// slice — the carry limb (for mod-2³² adds) or the terminal 16-bit limb
-/// (for `Range_16` on `h_out`).
+/// slice — the carry limb (for mod-2³² adds) or a terminal byte.
 pub const RANGE_REL_SIZE: usize = 1;
 
 relation!(Range2Relation, RANGE_REL_SIZE);
 relation!(Range4Relation, RANGE_REL_SIZE);
 relation!(Range5Relation, RANGE_REL_SIZE);
-relation!(Range16Relation, RANGE_REL_SIZE);
+relation!(Range8Relation, RANGE_REL_SIZE);
 
 /// The four range-check channels grouped for `Sha256Eval`.
 ///
@@ -183,8 +182,7 @@ relation!(Range16Relation, RANGE_REL_SIZE);
 ///   pair of each mod-2³² limb-add (per the headroom audit's family
 ///   bound: `k=4` for the schedule recurrence, `k=5` for `T1`, `k=2`
 ///   everywhere else).
-/// - `range_16` pins terminal 16-bit limbs, most importantly the final
-///   block's `h_out` digest limbs.
+/// - `range_8` pins terminal digest bytes and exposed message bytes.
 ///
 /// Each channel produces one preprocessed-column row per value and has its
 /// own multiplicity column committed by the matching producer component.
@@ -193,7 +191,7 @@ pub struct RangeRelations {
     pub range_2: Range2Relation,
     pub range_4: Range4Relation,
     pub range_5: Range5Relation,
-    pub range_16: Range16Relation,
+    pub range_8: Range8Relation,
 }
 
 impl RangeRelations {
@@ -216,7 +214,7 @@ impl RangeRelations {
                 RangeKind::Range2 => out.range_2 = Range2Relation::draw(channel),
                 RangeKind::Range4 => out.range_4 = Range4Relation::draw(channel),
                 RangeKind::Range5 => out.range_5 = Range5Relation::draw(channel),
-                RangeKind::Range16 => out.range_16 = Range16Relation::draw(channel),
+                RangeKind::Range8 => out.range_8 = Range8Relation::draw(channel),
             }
         }
         out
@@ -227,7 +225,7 @@ impl RangeRelations {
             range_2: Range2Relation::dummy(),
             range_4: Range4Relation::dummy(),
             range_5: Range5Relation::dummy(),
-            range_16: Range16Relation::dummy(),
+            range_8: Range8Relation::dummy(),
         }
     }
 }
@@ -243,7 +241,7 @@ pub struct SharedRangeRelations {
     pub range_2: SharedRelation<Range2Relation>,
     pub range_4: SharedRelation<Range4Relation>,
     pub range_5: SharedRelation<Range5Relation>,
-    pub range_16: SharedRelation<Range16Relation>,
+    pub range_8: SharedRelation<Range8Relation>,
 }
 
 impl SharedRangeRelations {
@@ -255,7 +253,7 @@ impl SharedRangeRelations {
         self.range_2.set(relations.range_2.clone());
         self.range_4.set(relations.range_4.clone());
         self.range_5.set(relations.range_5.clone());
-        self.range_16.set(relations.range_16.clone());
+        self.range_8.set(relations.range_8.clone());
     }
 
     pub fn get(&self) -> RangeRelations {
@@ -263,7 +261,7 @@ impl SharedRangeRelations {
             range_2: self.range_2.get(),
             range_4: self.range_4.get(),
             range_5: self.range_5.get(),
-            range_16: self.range_16.get(),
+            range_8: self.range_8.get(),
         }
     }
 }
@@ -322,12 +320,9 @@ const _: () = assert!(DIGEST_REL_SIZE == air_core::relations::DIGEST_BYTES_ARITY
 /// two cannot be equated limb-for-limb, so the relation carries **bytes**:
 /// the SHA AIR decomposes each limb into two bytes (`limb = 256·b1 + b0`)
 /// and yields the 32 big-endian bytes. The byte values are tied to the
-/// (already `Range_16`-pinned) `h_out` limbs by that decomposition
-/// constraint; the **`[0, 256)` range-check of each byte is the consumer's
-/// responsibility** (P256 already witnesses and range-checks `z`'s byte
-/// decomposition). A consumer that requires out-of-range bytes cannot match
-/// the honest in-range bytes a correct prover yields, so the balance fails
-/// closed — see the relation's use in `crate::constraints::Sha256Eval`.
+/// `h_out` limbs by that decomposition constraint, and the provider pins every
+/// byte to `[0, 256)` through `Range_8`. Consumers therefore receive a
+/// canonical byte tuple without needing a second range check.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DigestRelation {
     pub digest: Sha256Digest,
@@ -380,14 +375,12 @@ pub const FIELD_REL_SIZE: usize = air_core::relations::FIELD_BYTES_ARITY;
 /// in the trace as 16-bit `(lo, hi)` limbs; the field bytes are their big-endian
 /// decomposition (`limb = 256·b1 + b0`), the same byte bridge the digest uses.
 /// The byte values are tied to the bit-decomposition-pinned message-word limbs by
-/// that decomposition. Unlike the digest — which exposes whole words, so a
-/// limb's two bytes are *both* yielded and the consumer's per-byte range-check
-/// pins the split — a field window can be **sub-word**: an edge byte shares a
+/// that decomposition. Like the digest, the provider range-checks every byte;
+/// this is especially important because a field window can be **sub-word**: an edge byte shares a
 /// limb with a non-exposed neighbour, and a 16-bit limb's split `256·b_hi + b_lo`
 /// is unique only when *both* bytes are in `[0, 256)`. So the provider itself
-/// range-checks **every** exposed byte to `[0, 256)` (two `Range16` lookups per
-/// byte; see [`crate::field_exposure::BYTE_RANGE_CHECK_OFFSET`]). With both bytes
-/// of every touched limb pinned and the limb already in `[0, 2¹⁶)`, each yielded
+/// range-checks **every** exposed byte to `[0, 256)` (one `Range8` lookup per
+/// byte). With both bytes of every touched limb pinned, each yielded
 /// byte is exactly the signed preimage byte — the binding holds without trusting
 /// the consumer to range-check anything.
 #[derive(Clone, Debug, PartialEq)]
@@ -634,7 +627,7 @@ mod tests {
             <Range2Relation as Relation<BaseField, SecureField>>::get_size(&r.range.range_2),
             <Range4Relation as Relation<BaseField, SecureField>>::get_size(&r.range.range_4),
             <Range5Relation as Relation<BaseField, SecureField>>::get_size(&r.range.range_5),
-            <Range16Relation as Relation<BaseField, SecureField>>::get_size(&r.range.range_16),
+            <Range8Relation as Relation<BaseField, SecureField>>::get_size(&r.range.range_8),
         ] {
             assert_eq!(size, RANGE_REL_SIZE);
         }

@@ -477,3 +477,118 @@ vs (3,434 ms, 1.255 MB) @ blowup-3/pow20; blowup-4 stays the shipped config
 Remaining open gate: prove < 1,000 ms (blowup-3 buy-back reaches 3.43 s;
 further prove work is a separate campaign — the keccak GKR prove itself adds
 only ~0.14 s at the current shape).
+
+## Q6 — prove-time campaign: all three slices priced, all STOP; target unreachable single-thread
+
+Fresh baseline (release, `RAYON_NUM_THREADS=1`, FRI `(1,4,26,2)`/pow25,
+`pq_perf_probe`, min-of-3 — thermally loaded machine, cooler runs ~5.2 s):
+
+| metric | measured | target | gap |
+|---|---:|---:|---:|
+| prove  | 5,417 ms | < 1,000 ms | −4,417 ms |
+| verify | 14 ms | < 100 ms | MET |
+| proof  | 989,474 B | < 1,000,000 B | MET |
+
+### Q6 phase census (`AIR_CORE_PROVE_TIMING`, one clean run, TOTAL 4.68 s)
+
+| phase | ms | note |
+|---|---:|---|
+| twiddles + tree0-write | 25 | |
+| tree0-commit | 338 | preprocessed LDE+Merkle |
+| tree1-write | 320 | witness gen |
+| **tree1-commit** | **748** | witness LDE+Merkle |
+| tree2-write | 417 | interaction gen |
+| **tree2-commit** | **1,040** | interaction LDE+Merkle — biggest single phase |
+| build-components | 292 | |
+| composition-generation | 597 | quotient eval (Slice A's only surface) |
+| composition-commit | 424 | K=2 ⇒ 4 parts LDE+Merkle |
+| **prove_values (oods+fri+open)** | **1,748** | FRI + query opening, blowup-4, 26 queries |
+
+Committed shape: 12.5 M cells / ~6,200 M31 cols. Interaction tree 6.28 M cells,
+of which coeffs (m2/m3/m6, 100 cols × 2^14 × 3) = 4.92 M = **78 %**. The commit
+phases (tree0/1/2 + composition ≈ 2.55 s) and prove_values (1.75 s) together are
+~4.3 s of the ~4.7 s total and scale with committed cells × blowup.
+
+### Slice A — per-component composition split: **STRUCTURALLY UNSOUND (measured, reverted)**
+
+Implemented the prover-only per-component excess in the dev-copy
+(`constraint-framework/.../prover/component_prover.rs` +
+`stwo/.../prover/air/accumulation.rs::finalize` seed). Each component evaluated
+its quotient on `2^(trace_log + own_excess)` instead of the uniform
+`2^(trace_log + K)` (K=2). **Measured: composition-generation 597 → 340 ms
+(−43 %)** — the eval-domain halving works mechanically — but `prove_values`
+ballooned to 5.0 s and prove aborted with `ConstraintsNotSatisfied` at the OODS
+consistency check.
+
+**Why structural (not a bug):** the accumulator's lift is an isogeny
+**pullback** `u_i ∘ π^Δ` (degree-*scaling*), not a degree-preserving embedding.
+The verifier (`components.rs::mask_points`/`evaluate_constraint_quotients_at_point`)
+lifts *every* component uniformly by its trace-size gap `max_trace − t_i` and
+divides by `vanish(max_trace)`; K only reconstructs `f` from `2^K` parts and is
+invisible per-component. The composition target is `max_trace + K`, so the lift
+amount `target − eval_index` is pinned to `max_trace − t_i`, which forces
+`eval_index = t_i + K` **uniformly**. Evaluating at `t_i + excess_i` over-lifts
+by `(K − excess_i)` extra doublings ⇒ a higher-degree `f` that mismatches the
+verifier (and the ballooned prove_values is FRI on the wrong-degree poly). This
+is exactly the "accumulator design makes per-component K unsound" branch.
+
+**Alternative (demote log+2 → log+1 to lower K itself):** K=2 is forced by four
+components declaring `log+2` — `stwo-keccak sponge_v`, `predicates range_check`,
+`stwo-mldsa sampleinball`, `stwo-sha256 air`. Lowering K to 1 would halve
+composition-commit + the composition share of generation/prove_values (~0.4–0.6 s),
+but requires restructuring genuine degree-3 constraints to degree-2 across four
+independent components — a large multi-component AIR redesign (the mirror of the
++0.8 s that landing uniform-K cost), not a session checkpoint. Priced, deferred.
+
+### Slice B — coeffs union-of-kinds fraction split: **≥5 % needs relation-unification WO; simple merge <5 % (STOP)**
+
+Design pass complete (see `tasks/coeffs-fraction-layout-design.md`). Coeffs emits
+24 batch-1 logup fractions/row (21 range-check + eval/WCell/CCell yields), 100
+interaction cols. **Batching is walled off**: batch-2 makes the logup constraint
+`col·d1·d2 = n1·d2 + n2·d1` degree-3 ⇒ bound `log+2` ⇒ breaks the Horner `[-1,0]`
+mask (why `LOGUP_BATCH=1`). So the only sound reduction under the engine's
+batch-1/degree-2 model is fewer fraction *streams*.
+
+- **Free sound merge (same relation, disjoint rows):** carry-lo and norm-lo both
+  use `rc13` on disjoint rows (carry vs z), so norm-lo `a_lo,b_lo` ride on 2 of
+  the 5 carry-lo streams. Saves **2 QM31 cols** ≈ 0.39 M cells ≈ **~1.5 %**.
+  Below the 5 % gate — **SKIP**.
+- **≥5 % path (relation unification):** replace the 5 independent range relations
+  (rc9/rc13/rc8/rc7/ternary) with ONE arity-2 `(value, bound_id)` relation +
+  combined preprocessed table. Then disjoint-kind streams share columns; max
+  concurrent range uses/row = 10 (z-digit: 6 rc9 + 4 norm; carry: 5+5), so 21
+  range streams → **10**. Total logup 24 → 13 cols. Saves **11 QM31 = 44 M31 ×
+  2^14 × 3 = 2.16 M cells** (interaction 6.28 M → 4.12 M, −34 %), price
+  **≈ −0.5 to −0.8 s** (hits tree2-write/commit + prove_values + composition-gen).
+  Matches the task's −2…−3 M / −0.6…−1.0 s estimate. **Soundness-critical**
+  (a value must never be checkable against the wrong `bound_id` — needs the
+  air-writer skill + a per-former-table "in-other-bound" negative each) ⇒ a
+  dedicated multi-checkpoint WO, not a session burst (cf. Q4a/Q5 GKR precedent).
+
+### Slice C — FRI frontier: **already rejected in Q5**
+
+blowup-3/pow20 reaches prove 3.43 s but proof **1.255 MB** — busts the
+never-regress-above-1 MB rail. No re-open.
+
+### Q6 residual arithmetic — why < 1,000 ms is unreachable single-thread
+
+The workload floor is fundamental: 12.5 M committed cells (keccak service 3.45 M
++ 3× ML-DSA 2.46 M each + glue) LDE'd and Merkle-committed at blowup-4, then
+FRI-opened. Commits + prove_values ≈ 4.3 s of the ~4.7 s and shrink only with
+(a) fewer cells or (b) lower blowup (rejected). The single sound cell lever
+(Slice B unification, −2.16 M cells ≈ −0.6 s) would leave prove ≈ 4.5 s. Slice A
+is unsound; K-demotion (~−0.5 s) is a 4-component redesign. Reaching < 1,000 ms
+from 5.2 s is a ~5× cut = removing ~80 % of the committed cells, i.e. the ML-DSA
+coeffs + keccak service themselves — not achievable by column-shaving.
+(Note: the pinned gate is `RAYON_NUM_THREADS=1`; with desktop threads this path
+runs ~8× faster and would clear 1 s, but the 1-thread gate stands.)
+
+### Q6 outcome
+
+No slice landed a sound measured improvement; the three numbers are unchanged
+from the baseline above (dev-copy + eu-id trees reverted to clean —
+`stwo@4f877db2`, `eu-id@73ac7d4e`, no net code change). Standing scoreboard vs
+campaign start (72.7 s / 372.7 ms / 34.4 MB) is unchanged from Q5: **12.8× /
+26.6× (MET) / 34.8× (MET)**; prove < 1 s remains open and is out of reach for
+single-thread column work — future levers are the two priced WOs (Slice B
+relation-unification −0.6 s; K-demotion −0.5 s) or multi-threading the gate.

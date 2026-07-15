@@ -27,11 +27,7 @@ use stwo::core::channel::Blake2sChannel;
 use stwo::core::fields::qm31::SecureField;
 use stwo::core::verifier::VerificationError;
 use stwo::prover::backend::simd::SimdBackend;
-use stwo::prover::lookups::mle::Mle;
 use stwo::prover::{ComponentProver, TreeBuilder};
-use stwo_constraint_framework::mle_eval::{
-    build_trace as build_tieback_trace, MleEvalProverComponent, MleEvalVerifierComponent,
-};
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 
@@ -42,14 +38,10 @@ use air_core::{
 use crate::keccak;
 use crate::keccak_round;
 use crate::relations::{KeccakRelations, SharedKeccakRelations};
-use crate::round_gkr::{self, RoundCoeffOracle, RoundGkrProver, RoundTieBack};
 use crate::sponge::Shape;
 use crate::sponge_v::{self, JobList, SpongeVRun};
 use crate::stark::{build_perm_witness, PermWitness};
 use crate::tables_air::{self, TableKind};
-
-/// The shared commitment-tree index of the post-interaction tie-back trace.
-const POST_INTERACTION_TREE: usize = 3;
 
 /// The exact `claimed_sums` length the service contributes:
 /// `[sponge_v, keccak, round, tables ×9]`.
@@ -97,29 +89,17 @@ impl ServiceClaims {
     }
 }
 
-/// The round GKR tie-back component — prover and verifier flavors of the
-/// `MleEval` component over the δ-folded coeff column.
-enum TieBack {
-    Prover(Box<MleEvalProverComponent<'static, RoundCoeffOracle>>),
-    Verifier(Box<MleEvalVerifierComponent<RoundCoeffOracle>>),
-}
-
 struct Built {
     sponge: sponge_v::Component,
     keccak: keccak::Component,
     round: keccak_round::Component,
     tables: Vec<tables_air::Component>,
-    tie_back: TieBack,
 }
 
 impl Built {
     fn ordered(&self) -> Vec<&dyn Component> {
         let mut out: Vec<&dyn Component> = vec![&self.sponge, &self.keccak, &self.round];
         out.extend(self.tables.iter().map(|c| c as &dyn Component));
-        out.push(match &self.tie_back {
-            TieBack::Prover(c) => c.as_ref() as &dyn Component,
-            TieBack::Verifier(c) => c.as_ref() as &dyn Component,
-        });
         out
     }
     fn ordered_prover(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
@@ -130,10 +110,6 @@ impl Built {
                 .iter()
                 .map(|c| c as &dyn ComponentProver<SimdBackend>),
         );
-        match &self.tie_back {
-            TieBack::Prover(c) => out.push(c.as_ref() as &dyn ComponentProver<SimdBackend>),
-            TieBack::Verifier(_) => unreachable!("prover components on a verifier-built service"),
-        }
         out
     }
 }
@@ -179,11 +155,9 @@ fn layout_for(jobs: &JobList) -> TreeLayout {
         }
     }
 
-    // The round's LogUp is GKR-offloaded: NO round interaction columns; its
-    // tie-back trace lives in the post-interaction tree instead.
-    let _ = &round_claim;
     let mut interaction = vec![ls; sponge_v::N_INTERACTION_COLS];
     interaction.extend(keccak_claim.log_sizes()[2].clone());
+    interaction.extend(round_claim.log_sizes()[2].clone());
     for kind in TableKind::ALL {
         for _ in 0..stwo::core::fields::qm31::SECURE_EXTENSION_DEGREE {
             interaction.push(kind.log_size());
@@ -197,21 +171,19 @@ fn layout_for(jobs: &JobList) -> TreeLayout {
     }
 }
 
-/// Build the four framework components (the tie-back component is added per
-/// side, prover vs verifier) and the tie-back oracle over the round
-/// component's freshly-allocated trace locations.
+/// Build the service's framework components. Keccak round lookups are ordinary
+/// outer-STARK interaction columns; production verification has no auxiliary
+/// native GKR proof boundary.
 fn build_base_components(
     allocator: &mut TraceLocationAllocator,
     jobs: &JobList,
     relations: &KeccakRelations,
     claims: &ServiceClaims,
-    tie_back: &RoundTieBack,
 ) -> (
     sponge_v::Component,
     keccak::Component,
     keccak_round::Component,
     Vec<tables_air::Component>,
-    RoundCoeffOracle,
 ) {
     let n = jobs.n_perms_total();
     let sponge = FrameworkComponent::new(
@@ -237,7 +209,6 @@ fn build_base_components(
                 log_size: round_log_size(n),
             },
             relations: relations.clone(),
-            gkr_offload: true,
         },
         claims.round,
     );
@@ -256,14 +227,7 @@ fn build_base_components(
             )
         })
         .collect();
-    let oracle = RoundCoeffOracle {
-        locations: round.trace_locations().to_vec(),
-        relations: relations.clone(),
-        log_size: round_log_size(n),
-        delta: tie_back.delta,
-        eq_ws: tie_back.eq_ws.clone(),
-    };
-    (sponge, keccak, round, tables, oracle)
+    (sponge, keccak, round, tables)
 }
 
 fn write_selected(
@@ -304,15 +268,6 @@ pub struct KeccakServiceProver {
     relations: Option<KeccakRelations>,
     claims: ServiceClaims,
     built: Option<Built>,
-    /// Round GKR offload state, staged phase by phase:
-    /// `write_interaction` → `round_gkr` (fractions + claimed sum);
-    /// `prove_post_interaction` → `gkr_blob` + `tie_back` + `coeff_mle`;
-    /// `write_post_interaction` commits the tie-back trace;
-    /// `build_components` consumes `coeff_mle` into the MleEval component.
-    round_gkr: Option<RoundGkrProver>,
-    tie_back: Option<RoundTieBack>,
-    gkr_blob: Vec<u8>,
-    coeff_mle: Option<Mle<SimdBackend, SecureField>>,
 }
 
 impl KeccakServiceProver {
@@ -356,10 +311,6 @@ impl KeccakServiceProver {
             relations: None,
             claims: ServiceClaims::default(),
             built: None,
-            round_gkr: None,
-            tie_back: None,
-            gkr_blob: Vec::new(),
-            coeff_mle: None,
         }
     }
 
@@ -418,37 +369,20 @@ impl Air for KeccakServiceProver {
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
         preprocessed_ids(&self.jobs)
     }
-    fn post_interaction_log_sizes(&self) -> Vec<u32> {
-        vec![
-            round_log_size(self.jobs.n_perms_total());
-            round_gkr::N_TIEBACK_COLUMNS
-        ]
+    fn canonical_preprocessed_columns(
+        &mut self,
+    ) -> Result<Vec<air_core::PreprocessedColumnEval>, VerificationError> {
+        Ok(gen_preprocessed(&self.jobs))
     }
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
         let rel = self.relations().clone();
-        let tie_back = self.tie_back.as_ref().expect("prove_post_interaction ran");
-        let (sponge, keccak, round, tables, oracle) =
-            build_base_components(allocator, &self.jobs, &rel, &self.claims, tie_back);
-        let mle = self.coeff_mle.take().expect("coeff column built");
-        // Twiddles must cover the quotient eval domain `log_size +
-        // composition_log_split` (≤ +2 here from the batch-4 logup components);
-        // +4 leaves headroom and the tree is process-cached.
-        let twiddles = air_core::twiddles(round_log_size(self.jobs.n_perms_total()) + 4);
-        let tie_back_component = MleEvalProverComponent::generate(
-            allocator,
-            oracle,
-            &tie_back.r_row,
-            mle,
-            tie_back.mle_claim,
-            twiddles,
-            POST_INTERACTION_TREE,
-        );
+        let (sponge, keccak, round, tables) =
+            build_base_components(allocator, &self.jobs, &rel, &self.claims);
         self.built = Some(Built {
             sponge,
             keccak,
             round,
             tables,
-            tie_back: TieBack::Prover(Box::new(tie_back_component)),
         });
     }
     fn components(&self) -> Vec<&dyn Component> {
@@ -464,6 +398,10 @@ impl AirProver for KeccakServiceProver {
             .max(keccak::Claim { n_perms: n }.log_size())
             .max(round_log_size(n))
             .max(TableKind::Dense.log_size())
+    }
+    fn max_constraint_log_degree_bound(&self) -> u32 {
+        self.max_log_size()
+            .max(round_log_size(self.jobs.n_perms_total()) + 2)
     }
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
         tb.extend_evals(gen_preprocessed(&self.jobs));
@@ -497,11 +435,9 @@ impl AirProver for KeccakServiceProver {
         let (keccak_ic, keccak_tr) =
             keccak::generate_interaction_trace(&rel, &self.perm.keccak_data);
         evals.extend(keccak_tr);
-        // The round emits NO interaction columns: its fraction multiset is
-        // GKR-proven post tree-2 and tied back in the post-interaction tree.
-        // Its claimed sum (the exact multiset sum) still occupies the same
-        // slot in the global LogUp balance.
-        let round_gkr = RoundGkrProver::new(&rel, &self.perm.round_data);
+        let (round_ic, round_tr) =
+            keccak_round::generate_interaction_trace(&rel, &self.perm.round_data);
+        evals.extend(round_tr);
         let (tables_ic, tables_tr) =
             tables_air::generate_interaction_trace(&rel, &self.perm.table_mult);
         evals.extend(tables_tr);
@@ -509,28 +445,9 @@ impl AirProver for KeccakServiceProver {
         self.claims = ServiceClaims {
             sponge: sponge_ic.claimed_sum,
             keccak: keccak_ic.claimed_sum,
-            round: round_gkr.claimed_sum(),
+            round: round_ic.claimed_sum,
             tables: tables_ic.claimed_sums,
         };
-        self.round_gkr = Some(round_gkr);
-    }
-    fn prove_post_interaction(&mut self, channel: &mut air_core::Ch) {
-        let (blob, tie_back, coeff_mle) = self
-            .round_gkr
-            .take()
-            .expect("write_interaction ran")
-            .prove(channel);
-        self.gkr_blob = blob;
-        self.tie_back = Some(tie_back);
-        self.coeff_mle = Some(coeff_mle);
-    }
-    fn take_post_interaction_payload(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.gkr_blob)
-    }
-    fn write_post_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
-        let tie_back = self.tie_back.as_ref().expect("prove_post_interaction ran");
-        let mle = self.coeff_mle.as_ref().expect("coeff column built");
-        tb.extend_evals(build_tieback_trace(mle, &tie_back.r_row, tie_back.mle_claim));
     }
     fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
         self.built.as_ref().expect("built").ordered_prover()
@@ -547,10 +464,6 @@ pub struct KeccakServiceVerifier {
     claims: ServiceClaims,
     relations: Option<KeccakRelations>,
     built: Option<Built>,
-    /// The prover's opaque GKR payload (round LogUp offload), handed over by
-    /// the orchestrator before `verify_post_interaction`. Empty ⇒ reject.
-    gkr_blob: Vec<u8>,
-    tie_back: Option<RoundTieBack>,
 }
 
 impl KeccakServiceVerifier {
@@ -567,8 +480,6 @@ impl KeccakServiceVerifier {
             claims: ServiceClaims::from_flat(&claimed_sums),
             relations: None,
             built: None,
-            gkr_blob: Vec::new(),
-            tie_back: None,
         }
     }
 
@@ -595,47 +506,20 @@ impl Air for KeccakServiceVerifier {
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
         preprocessed_ids(&self.jobs)
     }
-    fn post_interaction_log_sizes(&self) -> Vec<u32> {
-        vec![
-            round_log_size(self.jobs.n_perms_total());
-            round_gkr::N_TIEBACK_COLUMNS
-        ]
-    }
-    fn load_post_interaction_payload(&mut self, payload: &[u8]) {
-        self.gkr_blob = payload.to_vec();
-    }
-    fn verify_post_interaction(
+    fn canonical_preprocessed_columns(
         &mut self,
-        channel: &mut air_core::Ch,
-    ) -> Result<(), VerificationError> {
-        // Fail-closed: a missing payload is an empty blob, which fails decode.
-        let tie_back = round_gkr::verify_round_gkr(
-            &self.gkr_blob,
-            self.claims.round,
-            round_log_size(self.jobs.n_perms_total()),
-            channel,
-        )?;
-        self.tie_back = Some(tie_back);
-        Ok(())
+    ) -> Result<Vec<air_core::PreprocessedColumnEval>, VerificationError> {
+        Ok(gen_preprocessed(&self.jobs))
     }
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
         let rel = self.relations().clone();
-        let tie_back = self.tie_back.as_ref().expect("verify_post_interaction ran");
-        let (sponge, keccak, round, tables, oracle) =
-            build_base_components(allocator, &self.jobs, &rel, &self.claims, tie_back);
-        let tie_back_component = MleEvalVerifierComponent::new(
-            allocator,
-            oracle,
-            &tie_back.r_row,
-            tie_back.mle_claim,
-            POST_INTERACTION_TREE,
-        );
+        let (sponge, keccak, round, tables) =
+            build_base_components(allocator, &self.jobs, &rel, &self.claims);
         self.built = Some(Built {
             sponge,
             keccak,
             round,
             tables,
-            tie_back: TieBack::Verifier(Box::new(tie_back_component)),
         });
     }
     fn components(&self) -> Vec<&dyn Component> {

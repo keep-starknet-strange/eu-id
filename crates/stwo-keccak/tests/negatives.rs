@@ -17,8 +17,7 @@ use stwo_keccak::tables::{build_conv_table, build_dense_table};
 use stwo_keccak::utils::{spread_u32, SPREAD_MAX};
 use stwo_keccak::{keccak_round, prove_shake256, relations::KeccakRelations, verify_shake256};
 
-/// Batch-4 logup constraints have log-degree excess 2, so proving needs
-/// `log_blowup >= 2` (production uses 3).
+/// Batch-four round LogUp constraints use blowup two.
 fn pcs_config() -> PcsConfig {
     PcsConfig {
         fri_config: FriConfig::new(0, 2, 3, 1),
@@ -159,11 +158,12 @@ fn flipped_state_between_rounds_breaks_chain() {
     use stwo::core::fields::m31::M31;
     use stwo::prover::backend::simd::m31::PackedM31;
 
-    let mut row = [PackedM31::zero(); 201];
+    let mut row = [PackedM31::zero(); 202];
     for (i, cell) in row.iter_mut().take(200).enumerate() {
         *cell = PackedM31::from(M31::from(((i as u32) * 7 + 1) & 0xFF));
     }
     row[200] = PackedM31::from(M31::from(0u32));
+    row[201] = PackedM31::from(M31::from(7u32));
     let (_c, _t, data) = keccak_round::Claim::generate_trace(vec![row], 1);
     let honest_out = data.lookup_data.keccak_round[1][0];
 

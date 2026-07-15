@@ -15,7 +15,7 @@
 //! every 16-bit word limb. The mod-2³² limb-add carries are range-checked through
 //! `Range_{2,4,5}` lookups (one family per add per
 //! [`emit_mod_2_32_add_linear`] call) and the final-block `h_out` digest
-//! limbs through `Range_16` (per design §10.2 / §11 L1).
+//! bytes through `Range_8`; byte recomposition pins the terminal limbs.
 //!
 //! Beyond the compression-loop constraints, the §10.4 **padding-role**
 //! block — appended after `h_out` per [`crate::trace::PADDING_ROW_COLS`]
@@ -525,24 +525,6 @@ impl FrameworkEval for Sha256Eval {
             );
         }
 
-        // Terminal `Range_16` on the block's `h_out` limbs (t = 63 rows).
-        for h_out_word in h_out.iter().take(N_STATE_WORDS) {
-            wire_range_check::<E>(
-                &mut eval,
-                gate_r63.clone(),
-                h_out_word.0.clone(),
-                crate::components::RangeKind::Range16,
-                &self.relations,
-            );
-            wire_range_check::<E>(
-                &mut eval,
-                gate_r63.clone(),
-                h_out_word.1.clone(),
-                crate::components::RangeKind::Range16,
-                &self.relations,
-            );
-        }
-
         // §10.3 multi-block chain, on continuation blocks' t = 0 rows: this
         // block's `h_in` equals the previous block's `h_out` (offset −1 =
         // the predecessor's t = 63 row). The gate `enabler·is_round_0 −
@@ -571,9 +553,8 @@ impl FrameworkEval for Sha256Eval {
 
         // Digest byte view (t = 63 rows): per state word `j` the cells are
         // `[hi.b1, hi.b0, lo.b1, lo.b0]`; each limb recomposes as
-        // `limb = 256·b1 + b0`. Limbs are `Range_16`-pinned above; byte
-        // range checks are the consumer's responsibility (interface-contract
-        // item 4).
+        // `limb = 256·b1 + b0`. Every byte is `Range_8`-pinned here, so the
+        // recomposition also pins each limb to 16 bits without a 2¹⁶-row table.
         let digest_bytes: [E::F; DIGEST_BYTES] = std::array::from_fn(|_| eval.next_trace_mask());
         let two_pow_8 = E::F::from(M31::from(1u32 << 8));
         for (j, h_out_word) in h_out.iter().enumerate().take(N_STATE_WORDS) {
@@ -588,6 +569,15 @@ impl FrameworkEval for Sha256Eval {
                     * (h_out_word.0.clone()
                         - two_pow_8.clone() * digest_bytes[4 * j + 2].clone()
                         - digest_bytes[4 * j + 3].clone()),
+            );
+        }
+        for byte in &digest_bytes {
+            wire_range_check::<E>(
+                &mut eval,
+                gate_r63.clone(),
+                byte.clone(),
+                crate::components::RangeKind::Range8,
+                &self.relations,
             );
         }
         match &self.multi {
@@ -850,8 +840,6 @@ impl FrameworkEval for Sha256Eval {
                     );
                 }
 
-                let byte_range_offset =
-                    E::F::from(M31::from(crate::field_exposure::BYTE_RANGE_CHECK_OFFSET));
                 let legacy_slot_selector = is_first_block_m15.clone() * sel_slot.clone();
                 if !exposure.needs_block_witness() {
                     // Legacy block-0 path, slot-gated: every byte
@@ -861,14 +849,7 @@ impl FrameworkEval for Sha256Eval {
                             &mut eval,
                             legacy_slot_selector.clone(),
                             byte.clone(),
-                            crate::components::RangeKind::Range16,
-                            &self.relations,
-                        );
-                        wire_range_check::<E>(
-                            &mut eval,
-                            legacy_slot_selector.clone(),
-                            byte.clone() + byte_range_offset.clone(),
-                            crate::components::RangeKind::Range16,
+                            crate::components::RangeKind::Range8,
                             &self.relations,
                         );
                     }
@@ -895,14 +876,7 @@ impl FrameworkEval for Sha256Eval {
                                 &mut eval,
                                 selector.clone(),
                                 byte.clone(),
-                                crate::components::RangeKind::Range16,
-                                &self.relations,
-                            );
-                            wire_range_check::<E>(
-                                &mut eval,
-                                selector.clone(),
-                                byte.clone() + byte_range_offset.clone(),
-                                crate::components::RangeKind::Range16,
+                                crate::components::RangeKind::Range8,
                                 &self.relations,
                             );
                         }
@@ -980,8 +954,6 @@ impl FrameworkEval for Sha256Eval {
                 );
             }
 
-            let byte_range_offset =
-                E::F::from(M31::from(crate::field_exposure::BYTE_RANGE_CHECK_OFFSET));
             let legacy_block0_selector = is_first_block_m15;
             if !self.field_exposure.needs_block_witness() {
                 // Legacy block-0 path: every byte range-checked once, gated by
@@ -991,14 +963,7 @@ impl FrameworkEval for Sha256Eval {
                         &mut eval,
                         legacy_block0_selector.clone(),
                         b.clone(),
-                        crate::components::RangeKind::Range16,
-                        &self.relations,
-                    );
-                    wire_range_check::<E>(
-                        &mut eval,
-                        legacy_block0_selector.clone(),
-                        b.clone() + byte_range_offset.clone(),
-                        crate::components::RangeKind::Range16,
+                        crate::components::RangeKind::Range8,
                         &self.relations,
                     );
                 }
@@ -1027,14 +992,7 @@ impl FrameworkEval for Sha256Eval {
                             &mut eval,
                             selector.clone(),
                             byte.clone(),
-                            crate::components::RangeKind::Range16,
-                            &self.relations,
-                        );
-                        wire_range_check::<E>(
-                            &mut eval,
-                            selector.clone(),
-                            byte.clone() + byte_range_offset.clone(),
-                            crate::components::RangeKind::Range16,
+                            crate::components::RangeKind::Range8,
                             &self.relations,
                         );
                     }
@@ -1235,16 +1193,16 @@ fn emit_mod_2_32_add_linear<E: EvalAtRow>(
     // by `crate::headroom`. If a future edit grows or shrinks an add at
     // a call site without bumping the audit (and hence `RangeKind`), the
     // mismatch is caught here in debug builds rather than silently
-    // changing the carry range a downstream lookup pins. `Range_16` is a
-    // terminal-limb check, never an add-carry, so we reject it outright.
+    // changing the carry range a downstream lookup pins. `Range_8` is a
+    // byte check, never an add-carry, so we reject it outright.
     use crate::components::RangeKind;
     let expected_addends = match range_kind {
         RangeKind::Range2 => 2,
         RangeKind::Range4 => 4,
         RangeKind::Range5 => 5,
-        RangeKind::Range16 => panic!(
-            "Range16 is the terminal 16-bit limb check; do not use it for mod-2³² add carries"
-        ),
+        RangeKind::Range8 => {
+            panic!("Range8 is the terminal byte check; do not use it for mod-2³² add carries")
+        }
     };
     // Mn2: hard assert so release builds (round-trip prove/verify, the
     // end-to-end tests) also catch a mis-paired addend count vs.
@@ -1294,7 +1252,7 @@ fn emit_mod_2_32_add_linear<E: EvalAtRow>(
 /// Fire one `add_to_relation(rel, +enabler, &[value])` against the chosen
 /// `Range_k` channel. Used for both mod-2³² add carries
 /// (`Range_2`/`4`/`5`, via [`emit_mod_2_32_add_linear`]) and terminal
-/// `h_out` digest limbs (`Range_16`, fired directly from
+/// digest bytes (`Range_8`, fired directly from
 /// [`Sha256Eval::evaluate`]). Inlined helper so call sites stay short.
 fn wire_range_check<E: EvalAtRow>(
     eval: &mut E,
@@ -1321,8 +1279,8 @@ fn wire_range_check<E: EvalAtRow>(
             mult,
             &[value],
         )),
-        RangeKind::Range16 => eval.add_to_relation(RelationEntry::base(
-            &relations.range.range_16,
+        RangeKind::Range8 => eval.add_to_relation(RelationEntry::base(
+            &relations.range.range_8,
             mult,
             &[value],
         )),

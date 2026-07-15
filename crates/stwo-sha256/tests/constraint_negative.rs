@@ -270,7 +270,7 @@ impl EvalAtRow for LinearConstraintCollector<'_> {
         // is caught by exactly those identities.
         //
         // Carry range-check lookups (`Range_2`/`4`/`5` per family) and
-        // the terminal `Range_16` on `h_out` *are* wired in
+        // the terminal `Range_8` on `h_out` bytes *is* wired in
         // `crate::constraints` today, but their soundness lives in the
         // LogUp interaction layer this evaluator does not model. The
         // `prove_verify_round_trip` suite exercises that path end-to-end.
@@ -696,7 +696,7 @@ fn rejects_shifted_marker_byte_sel() {
 ///
 /// Pre-fix soundness gap (`docs/research/sha256-air-design.md` §11 L2): with
 /// `is_first_block = 0` on the real row, IV binding was vacuous. With the
-/// padding-row `h_out` cells unconstrained (Range_16/finalization both
+/// padding-row `h_out` cells unconstrained (Range_8/finalization both
 /// gated by `enabler`), the prover could inject any state `X` into block
 /// 0's `h_in` via the chain's `[0, -1]` mask wraparound — yielding a
 /// "digest" of `compression(X, W)` instead of `SHA-256(W) = compression(IV, W)`.

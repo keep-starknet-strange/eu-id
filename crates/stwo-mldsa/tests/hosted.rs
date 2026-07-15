@@ -118,11 +118,7 @@ impl FieldProducer {
     }
 }
 
-/// The SHAKE consumers (keccak_round, sponge_v) declare constraint degree
-/// bound `log_size + 2` (LogUp batch 4), so constraint evaluation needs
-/// `log_blowup >= 2` to reuse committed evaluations (production runs blowup 3;
-/// `PcsConfig::default()` has blowup 1, which would require stored
-/// polynomial coefficients).
+/// The direct Keccak round AIR uses batch-four LogUp, so blowup two suffices.
 fn pcs_config() -> PcsConfig {
     PcsConfig {
         pow_bits: 10,
@@ -283,11 +279,8 @@ fn prove_hosted(seed: u64, msg: &[u8], producer_bytes: Vec<u8>) -> MlDsaProof {
     let (job_shapes, job_streams) = mldsa.keccak_jobs();
     let mut service = KeccakServiceProver::new(job_shapes, job_streams, keccak_handle);
 
-    let (stark_proof, post_interaction_payloads) = air_core::prove_with_post_interaction(
-        &mut [&mut service, &mut producer, &mut mldsa],
-        pcs_config(),
-    )
-    .expect("prove");
+    let stark_proof = air_core::prove(&mut [&mut service, &mut producer, &mut mldsa], pcs_config())
+        .expect("prove");
 
     MlDsaProof {
         input,
@@ -296,7 +289,7 @@ fn prove_hosted(seed: u64, msg: &[u8], producer_bytes: Vec<u8>) -> MlDsaProof {
         sib_stream_len: mldsa.sib_stream_len(),
         sib_squeezed_len: mldsa.sib_squeezed_len(),
         service_claimed_sums: service.claimed_sums(),
-        post_interaction_payloads,
+        post_interaction_payloads: Vec::new(),
         stark_proof,
     }
 }
@@ -364,6 +357,17 @@ fn hosted_tampered_message_byte_rejects() {
     );
 }
 
+#[test]
+fn hosted_tampered_public_tr_rejects() {
+    let msg = b"hosted pkHash binds the public tr bytes".to_vec();
+    let mut proof = prove_hosted(4243, &msg, msg.clone());
+    proof.input.tr[0] ^= 1;
+    assert!(
+        verify_hosted(&proof, msg).is_err(),
+        "hosted verification must reject tr != SHAKE256(pkEncode)"
+    );
+}
+
 // =====================================================================
 // Multi-instance hosting (device + revocation prerequisite): two hosted
 // ML-DSA modules in ONE proof, disjoint instance namespaces, one of them
@@ -424,7 +428,7 @@ fn prove_two_hosted(
         keccak_handle,
     );
 
-    let (stark_proof, payloads) = air_core::prove_with_post_interaction(
+    let stark_proof = air_core::prove(
         &mut [
             &mut service,
             &mut producer_a,
@@ -447,7 +451,7 @@ fn prove_two_hosted(
         claims(&mldsa_a, &input_a),
         claims(&mldsa_b, &input_b),
         service.claimed_sums(),
-        payloads,
+        Vec::new(),
         stark_proof,
     )
 }
@@ -527,9 +531,12 @@ fn two_namespaced_hosted_instances_prove_and_verify() {
     // columns are shape-dependent, so this exercises disjoint ids end to end.
     let msg_a = b"instance-a: the issuer-style public message".to_vec();
     let msg_b = b"instance-b-private".to_vec();
-    let (a, b, svc, payloads, proof) = prove_two_hosted(111, &msg_a, "test/a", 222, &msg_b, "test/b");
-    verify_two_hosted(&a, "test/a", &b, "test/b", svc, msg_a, msg_b, &payloads, &proof)
-        .expect("two-instance verify");
+    let (a, b, svc, payloads, proof) =
+        prove_two_hosted(111, &msg_a, "test/a", 222, &msg_b, "test/b");
+    verify_two_hosted(
+        &a, "test/a", &b, "test/b", svc, msg_a, msg_b, &payloads, &proof,
+    )
+    .expect("two-instance verify");
 }
 
 #[test]
@@ -538,7 +545,8 @@ fn two_hosted_instances_swapped_claims_reject() {
     // role separation must come from the namespaced transcript + inputs.
     let msg_a = b"same-length-message-aaaaaaaa".to_vec();
     let msg_b = b"same-length-message-bbbbbbbb".to_vec();
-    let (a, b, svc, payloads, proof) = prove_two_hosted(111, &msg_a, "test/a", 222, &msg_b, "test/b");
+    let (a, b, svc, payloads, proof) =
+        prove_two_hosted(111, &msg_a, "test/a", 222, &msg_b, "test/b");
     // Present A's claim tree in B's slot and vice versa (inputs stay put).
     let swapped_a = InstanceClaims {
         input: a.input.clone(),
@@ -555,8 +563,10 @@ fn two_hosted_instances_swapped_claims_reject() {
         sib_squeezed_len: a.sib_squeezed_len,
     };
     assert!(
-        verify_two_hosted(&swapped_a, "test/a", &swapped_b, "test/b", svc, msg_a, msg_b, &payloads, &proof)
-            .is_err(),
+        verify_two_hosted(
+            &swapped_a, "test/a", &swapped_b, "test/b", svc, msg_a, msg_b, &payloads, &proof
+        )
+        .is_err(),
         "cross-instance claim replay must reject"
     );
 }

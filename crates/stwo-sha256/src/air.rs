@@ -31,7 +31,6 @@ use stwo::core::fields::qm31::{QM31, SECURE_EXTENSION_DEGREE};
 use stwo::core::pcs::{TreeSubspan, TreeVec};
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
-#[cfg(feature = "gkr-spike")]
 use stwo::core::verifier::VerificationError;
 use stwo::prover::backend::simd::column::BaseColumn;
 use stwo::prover::backend::simd::SimdBackend;
@@ -1090,8 +1089,8 @@ fn interaction_trace_log_sizes(
     const EXT: usize = SECURE_EXTENSION_DEGREE;
 
     // Sha256Eval consumer: `sha_lookups_per_row(expose_digest, field_exposure)`
-    // lookup sites per row (W=6 hybrid: 66, plus the digest yield when that provider
-    // is on, plus the field provider's two `Range16` byte range-checks per
+    // lookup sites per row (W=6 hybrid: 58, plus the digest yield when that provider
+    // is on, plus the field provider's one `Range8` byte range-check per
     // exposed byte column and one yield per exposed window byte) → `ceil(n/4)`
     // batch-4 columns. Sized at log_n_rows. See `interaction::sha256_interaction`
     // for the per-row site breakdown.
@@ -1423,6 +1422,18 @@ impl Air for Sha256MultiProver<'_> {
         )
     }
 
+    fn canonical_preprocessed_columns(
+        &mut self,
+    ) -> Result<Vec<air_core::PreprocessedColumnEval>, VerificationError> {
+        Ok(
+            crate::preprocessed::generate_multi_consumer_preprocessed_trace(
+                self.log_n_rows,
+                &self.config,
+            )
+            .0,
+        )
+    }
+
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
         let multi = self.multi_eval();
         self.components = Some(Sha256Components::new(
@@ -1652,6 +1663,18 @@ impl Air for Sha256MultiVerifier {
             self.log_n_rows,
             self.config.slot_log,
             self.config.n_slots(),
+        )
+    }
+
+    fn canonical_preprocessed_columns(
+        &mut self,
+    ) -> Result<Vec<air_core::PreprocessedColumnEval>, VerificationError> {
+        Ok(
+            crate::preprocessed::generate_multi_consumer_preprocessed_trace(
+                self.log_n_rows,
+                &self.config,
+            )
+            .0,
         )
     }
 
