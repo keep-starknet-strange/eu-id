@@ -246,3 +246,36 @@ all 14 Keccak service tests, all 11 SampleInBall tests, and the focused canonica
 test pass. The final exact release probe with `RAYON_NUM_THREADS=1` measured 9,802 ms prove, 434 ms
 verify, 1,091,754 bytes, and zero post-interaction payload bytes. This is an app-integration and
 soundness checkpoint, not completion of the three performance rails.
+
+## Milestone Q9 — prove `ExpandA(rho)` inside the STARK
+
+- [x] Trace the current verifier-derived matrix evaluations through the folded ML-DSA identity.
+- [x] Specify the minimum SHAKE128 `RejNTTPoly` AIR and its binding to public `rho` and matrix cells.
+- [x] Add an exploit-shaped regression that substitutes a self-consistent forged matrix.
+- [x] Implement the derivation by reusing the existing Keccak service and lookup machinery.
+- [x] Run focused ML-DSA/Keccak adversarial suites and workspace checks.
+- [x] Run the full issuer/device/revocation release proof with `RAYON_NUM_THREADS=1` and record the
+      resulting prove, verify, proof-size, and payload measurements.
+
+Scope: remove the remaining deterministic `ExpandA(rho)` verifier-preprocessing boundary. The
+existing ISO 18013-5 `deviceSignature` binding remains unchanged. This milestone does not change the
+fixed production PCS configuration or weaken any issuer/device/revocation ML-DSA constraint.
+
+Review (2026-07-15): `rho` now feeds 30 mixed-mode SHAKE128 service jobs; an ordered RejNTT AIR
+consumes every full squeeze block and yields exactly 256 accepted canonical NTT coefficients per
+matrix polynomial. A second component proves all eight inverse-NTT butterfly stages, exact modular
+multiplication with range-checked limbs/quotients/carries, final `256^-1` scaling, and the balanced
+base-512 bivariate evaluations used by the folded identity. The native verifier no longer derives or
+selects `A`; it only consumes the 30 lookup-bound evaluations. Candidate counts are bounded,
+transcript-mixed public schedule data, and tree 0 remains verifier-reconstructed.
+
+Adversarial regressions reject a post-proof matrix-evaluation change, a rejection-count change, a
+malformed count vector, and—critically—a malicious prover whose forged `A_hat` and inverse transform
+are internally self-consistent but disconnected from the SHAKE128/RejNTT cells. Release results:
+42/42 `stwo-keccak` tests; 86/86 active `stwo-mldsa` tests (1 ignored); the full three-role mdoc e2e;
+the hosted malformed-claim matrix; and clippy across all relevant targets with warnings denied.
+
+Two exact production probes after the repair, both `RAYON_NUM_THREADS=1`, release, `(4,26,25)`,
+measured 20,706–24,364 ms prove, 687–938 ms verify, 1,227,262–1,229,246 bytes, and zero auxiliary
+payload bytes. This closes the remaining all-arithmetic-in-STARK boundary but fails every performance
+rail. It is a soundness checkpoint, not hard-target completion.

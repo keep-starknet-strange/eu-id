@@ -33,3 +33,6 @@
   recomputed by the verifier can be a valid application trust boundary even when that derivation is
   not traced. State that boundary precisely and let the integration requirement decide whether it
   is acceptable; do not describe the whole flow as unusable merely because it is not self-contained.
+- When closing a public-derivation boundary, a post-proof claim mutation is not enough as the main
+  regression. Also give the prover a self-consistent forged derived witness and prove that the AIR
+  rejects its missing link to the canonical source transcript.

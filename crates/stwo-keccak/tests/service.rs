@@ -8,7 +8,7 @@
 
 use num_traits::{One, Zero};
 use sha3::digest::{ExtendableOutput, Update, XofReader};
-use sha3::Shake256;
+use sha3::{Shake128, Shake256};
 
 use stwo::core::air::Component;
 use stwo::core::channel::{Blake2sChannel, Channel};
@@ -31,7 +31,7 @@ use air_core::{Air, AirProver, PreprocessedColumnFingerprint, TreeLayout};
 use stwo_keccak::relations::{HashIoRelation, SharedKeccakRelations};
 use stwo_keccak::service::{KeccakServiceProver, KeccakServiceVerifier};
 use stwo_keccak::sponge::Shape;
-use stwo_keccak::sponge_v::SpongeVRun;
+use stwo_keccak::sponge_v::{JobList, SpongeVRun};
 use stwo_keccak::utils::{col_eval, ColEval};
 
 // =====================================================================
@@ -240,6 +240,15 @@ fn shake256_ref(message: &[u8], out_len: usize) -> Vec<u8> {
     out
 }
 
+fn shake128_ref(message: &[u8], out_len: usize) -> Vec<u8> {
+    let mut h = Shake128::default();
+    h.update(message);
+    let mut r = h.finalize_xof();
+    let mut out = vec![0u8; out_len];
+    r.read(&mut out);
+    out
+}
+
 fn closer_entries(shapes: &[Shape], messages: &[Vec<u8>], outputs: &[Vec<u8>]) -> Vec<IoEntry> {
     let mut entries = Vec::new();
     for ((shape, msg), out) in shapes.iter().zip(messages).zip(outputs) {
@@ -299,6 +308,16 @@ fn prove_jobs_full(
     config: PcsConfig,
 ) -> ProvedJobs {
     let shapes = shapes_for(&messages, &n_squeezes);
+    prove_shapes_full(shapes, messages, tamper, perm_tamper, config)
+}
+
+fn prove_shapes_full(
+    shapes: Vec<Shape>,
+    messages: Vec<Vec<u8>>,
+    tamper: Option<&dyn Fn(&mut SpongeVRun)>,
+    perm_tamper: Option<&dyn Fn(&mut stwo_keccak::stark::PermWitness)>,
+    config: PcsConfig,
+) -> ProvedJobs {
     let handle = SharedKeccakRelations::new();
     let mut service = KeccakServiceProver::new(shapes.clone(), messages.clone(), handle.clone());
     let outputs = service.job_outputs().to_vec();
@@ -377,6 +396,55 @@ fn single_job_proves_and_matches_sha3() {
         "rotated sponge output != sha3"
     );
     verify_jobs(&p, &p.messages.clone()).expect("single-job verify");
+}
+
+#[test]
+fn shake128_job_proves_and_matches_sha3() {
+    let msg = (0..400u32)
+        .map(|i| (i.wrapping_mul(19) + 7) as u8)
+        .collect::<Vec<u8>>();
+    let shapes = vec![Shape::shake128(msg.len(), 2, 10, 11)];
+    let p = prove_shapes_full(shapes, vec![msg.clone()], None, None, pcs_config());
+    assert_eq!(p.outputs[0], shake128_ref(&msg, 2 * 168));
+    verify_jobs(&p, &[msg]).expect("SHAKE-128 verify");
+}
+
+#[test]
+fn mixed_shake128_shake256_job_list_proves() {
+    let messages = vec![
+        vec![0x11; 135],
+        vec![0x22; 167],
+        (0..300u32).map(|i| (i * 31) as u8).collect(),
+        vec![0x44; 168],
+    ];
+    let shapes = vec![
+        Shape::new(messages[0].len(), 1, 10, 11),
+        Shape::shake128(messages[1].len(), 2, 12, 13),
+        Shape::new(messages[2].len(), 2, 14, 15),
+        Shape::shake128(messages[3].len(), 1, 16, 17),
+    ];
+    assert_ne!(
+        JobList::new([Shape::new(32, 1, 20, 21)]).shape_digest(),
+        JobList::new([Shape::shake128(32, 1, 20, 21)]).shape_digest(),
+        "job-list digest must bind the XOF mode and rate"
+    );
+    let p = prove_shapes_full(shapes, messages.clone(), None, None, pcs_config());
+    assert_eq!(p.outputs[0], shake256_ref(&messages[0], 136));
+    assert_eq!(p.outputs[1], shake128_ref(&messages[1], 2 * 168));
+    assert_eq!(p.outputs[2], shake256_ref(&messages[2], 2 * 136));
+    assert_eq!(p.outputs[3], shake128_ref(&messages[3], 168));
+    verify_jobs(&p, &messages).expect("mixed SHAKE service verify");
+}
+
+#[test]
+fn verifier_xof_mode_mismatch_rejects() {
+    let msg = vec![0x5a; 32];
+    let mut p = prove_jobs(vec![msg.clone()], vec![1], None);
+    p.shapes[0] = Shape::shake128(32, 1, 10, 11);
+    assert!(
+        verify_jobs(&p, &[msg]).is_err(),
+        "the public transcript and schedule root must bind the XOF mode"
+    );
 }
 
 /// Multi-job list covering the pad edge shapes: `L mod 136 = 135` (0x9F fused

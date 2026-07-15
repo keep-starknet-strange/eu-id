@@ -2,9 +2,10 @@
 //! native-side warning).
 //!
 //! The AIR (`coeffs`) yields each committed poly's `P̂(r,s)` into the
-//! `EvalAtRsRelation`. The verifier recomputes the PUBLIC side natively —
-//! `Â_ij`, `t̂1_i`, `q̂(s)` — from `ρ` and `t1` (public), then checks the folded
-//! identity, consuming the claimed `ẑ_j, ŵ_i, ê_i, v̂_i, ĉ, Ĉ_i` evaluations:
+//! `EvalAtRsRelation`. The public `Â_ij` values come from the constrained
+//! ExpandA + inverse-NTT path; only `t̂1_i` and `q̂(s)` are assembled directly
+//! from public inputs. The folded identity consumes the claimed
+//! `ẑ_j, ŵ_i, ê_i, v̂_i, ĉ, Ĉ_i` evaluations:
 //!
 //! ```text
 //!   Σ_i ρ_RLC^i·[ Σ_j Â_ij(r,s)·ẑ_j(r,s) − ĉ(r,s)·t̂1_i(r,s) − ŵ_i(r,s)
@@ -84,22 +85,22 @@ pub struct PublicEvals {
     pub q_hat: SecureField,
 }
 
-/// Compute the public bivariate evals natively. `ExpandA(ρ) → Â_ij → NTT⁻¹ →
-/// integer polys` then bivariate-eval at `(r,s)`.
-pub fn compute_public_evals(
+/// Assemble the public bivariate evals from matrix evaluations already bound
+/// by the ExpandA AIR. `a_evals` is row-major `(i, j)` and contains the
+/// balanced-integer `A_ij(r,s)` values after the constrained inverse NTT.
+pub fn compute_public_evals_from_a(
     input: &MlDsaVerifyInput,
+    a_evals: &[SecureField],
     r: SecureField,
     s: SecureField,
 ) -> PublicEvals {
-    let a_hat_matrix = crate::reference::expand_a::expand_a(&input.rho);
+    assert_eq!(a_evals.len(), K * L, "one matrix evaluation per (i,j)");
     let two_d = 1i128 << D;
 
     let mut a_hat = vec![vec![SecureField::default(); L]; K];
     for i in 0..K {
         for j in 0..L {
-            let poly = ntt_inverse(&a_hat_matrix.matrix[i][j]); // [u32; N] in [0,q)
-            let coeffs: Vec<i128> = poly.iter().map(|&c| c as i128).collect();
-            a_hat[i][j] = bivariate_eval(&coeffs, T_A, r, s);
+            a_hat[i][j] = a_evals[i * L + j];
         }
     }
 
@@ -123,6 +124,26 @@ pub fn compute_public_evals(
         t1_hat,
         q_hat,
     }
+}
+
+/// Legacy/reference constructor used by standalone differential tests. Product
+/// verification uses [`compute_public_evals_from_a`] so no native `ExpandA`
+/// result can select the matrix in the accepted STARK statement.
+pub fn compute_public_evals(
+    input: &MlDsaVerifyInput,
+    r: SecureField,
+    s: SecureField,
+) -> PublicEvals {
+    let a_hat_matrix = crate::reference::expand_a::expand_a(&input.rho);
+    let mut a_evals = Vec::with_capacity(K * L);
+    for i in 0..K {
+        for j in 0..L {
+            let poly = ntt_inverse(&a_hat_matrix.matrix[i][j]);
+            let coeffs: Vec<i128> = poly.iter().map(|&c| c as i128).collect();
+            a_evals.push(bivariate_eval(&coeffs, T_A, r, s));
+        }
+    }
+    compute_public_evals_from_a(input, &a_evals, r, s)
 }
 
 /// The claimed evaluations the verifier consumes, indexed by poly_id.

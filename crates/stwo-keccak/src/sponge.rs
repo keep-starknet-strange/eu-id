@@ -80,6 +80,29 @@ pub const fn n_absorb_blocks(l: usize) -> usize {
     (l + 1).div_ceil(N_BYTES_IN_RATE)
 }
 
+/// SHAKE variant and therefore sponge rate.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum XofMode {
+    Shake256,
+    Shake128,
+}
+
+impl XofMode {
+    pub const fn rate(self) -> usize {
+        match self {
+            Self::Shake256 => N_BYTES_IN_RATE,
+            Self::Shake128 => crate::constants::N_BYTES_IN_SHAKE128_RATE,
+        }
+    }
+
+    pub const fn transcript_tag(self) -> u64 {
+        match self {
+            Self::Shake256 => 256,
+            Self::Shake128 => 128,
+        }
+    }
+}
+
 /// Static shape of a sponge instance; drives the column layout.
 ///
 /// `perm_id_base` is the PUBLIC global permutation-id offset: this instance's
@@ -89,6 +112,7 @@ pub const fn n_absorb_blocks(l: usize) -> usize {
 /// data and the `Eval`'s KeccakState tuples honor it.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Shape {
+    pub xof_mode: XofMode,
     pub message_len: usize,
     pub n_absorb: usize,
     pub n_squeeze: usize,
@@ -104,7 +128,26 @@ impl Shape {
         absorb_stream_id: u32,
         squeeze_stream_id: u32,
     ) -> Self {
-        Self::with_perm_id_base(
+        Self::with_mode_and_perm_id_base(
+            XofMode::Shake256,
+            message_len,
+            n_squeeze,
+            absorb_stream_id,
+            squeeze_stream_id,
+            0,
+        )
+    }
+
+    /// A SHAKE-128 service shape. The horizontal standalone component remains
+    /// SHAKE-256-only; mixed modes are hosted by [`crate::service`].
+    pub fn shake128(
+        message_len: usize,
+        n_squeeze: usize,
+        absorb_stream_id: u32,
+        squeeze_stream_id: u32,
+    ) -> Self {
+        Self::with_mode_and_perm_id_base(
+            XofMode::Shake128,
             message_len,
             n_squeeze,
             absorb_stream_id,
@@ -121,10 +164,29 @@ impl Shape {
         squeeze_stream_id: u32,
         perm_id_base: usize,
     ) -> Self {
+        Self::with_mode_and_perm_id_base(
+            XofMode::Shake256,
+            message_len,
+            n_squeeze,
+            absorb_stream_id,
+            squeeze_stream_id,
+            perm_id_base,
+        )
+    }
+
+    fn with_mode_and_perm_id_base(
+        xof_mode: XofMode,
+        message_len: usize,
+        n_squeeze: usize,
+        absorb_stream_id: u32,
+        squeeze_stream_id: u32,
+        perm_id_base: usize,
+    ) -> Self {
         assert!(n_squeeze >= 1, "at least one squeeze block");
         Self {
+            xof_mode,
             message_len,
-            n_absorb: n_absorb_blocks(message_len),
+            n_absorb: (message_len + 1).div_ceil(xof_mode.rate()),
             n_squeeze,
             absorb_stream_id,
             squeeze_stream_id,
@@ -132,17 +194,32 @@ impl Shape {
         }
     }
 
+    pub(crate) fn with_rebased_perm_ids(self, perm_id_base: usize) -> Self {
+        Self::with_mode_and_perm_id_base(
+            self.xof_mode,
+            self.message_len,
+            self.n_squeeze,
+            self.absorb_stream_id,
+            self.squeeze_stream_id,
+            perm_id_base,
+        )
+    }
+
+    pub const fn rate(&self) -> usize {
+        self.xof_mode.rate()
+    }
+
     pub fn n_perms(&self) -> usize {
         n_perms(self.n_absorb, self.n_squeeze)
     }
 
     pub fn output_len(&self) -> usize {
-        self.n_squeeze * N_BYTES_IN_RATE
+        self.n_squeeze * self.rate()
     }
 
     /// `f = L mod 136`: the padding-start position in the final absorb block.
     fn pad_pos(&self) -> usize {
-        self.message_len % N_BYTES_IN_RATE
+        self.message_len % self.rate()
     }
 
     /// Columns (spread-form state; byte form only at the HashIo boundary):
@@ -220,6 +297,8 @@ impl Claim {
 
     pub fn mix_into(&self, channel: &mut impl Channel) {
         channel.mix_u64(self.log_size as u64);
+        channel.mix_u64(self.shape.xof_mode.transcript_tag());
+        channel.mix_u64(self.shape.rate() as u64);
         channel.mix_u64(self.shape.message_len as u64);
         channel.mix_u64(self.shape.n_squeeze as u64);
         channel.mix_u64(self.shape.absorb_stream_id as u64);

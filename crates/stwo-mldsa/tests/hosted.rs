@@ -285,6 +285,8 @@ fn prove_hosted(seed: u64, msg: &[u8], producer_bytes: Vec<u8>) -> MlDsaProof {
     MlDsaProof {
         input,
         group_evals: mldsa.group_evals().to_vec(),
+        a_evals: mldsa.a_evals().to_vec(),
+        expand_a_candidate_counts: mldsa.expand_a_candidate_counts().to_vec(),
         claimed_sums: mldsa.claimed_sums(),
         sib_stream_len: mldsa.sib_stream_len(),
         sib_squeezed_len: mldsa.sib_squeezed_len(),
@@ -306,13 +308,20 @@ fn verify_hosted(
     // bytes, so the same FieldProducer serves verification with no witness.
     let mut producer = FieldProducer::new(producer_bytes, handle.clone());
     let mut service = KeccakServiceVerifier::new(
-        keccak_job_shapes(proof.input.message.len(), proof.sib_stream_len, 0),
+        keccak_job_shapes(
+            proof.input.message.len(),
+            proof.sib_stream_len,
+            0,
+            &proof.expand_a_candidate_counts,
+        ),
         proof.service_claimed_sums.clone(),
         keccak_handle.clone(),
     );
     let mut mldsa = MlDsaVerifier::hosted(
         proof.input.clone(),
         proof.group_evals.clone(),
+        proof.a_evals.clone(),
+        proof.expand_a_candidate_counts.clone(),
         proof.claimed_sums.clone(),
         proof.sib_stream_len,
         proof.sib_squeezed_len,
@@ -378,6 +387,8 @@ fn hosted_tampered_public_tr_rejects() {
 struct InstanceClaims {
     input: MlDsaVerifyInput,
     group_evals: Vec<SecureField>,
+    a_evals: Vec<SecureField>,
+    expand_a_candidate_counts: Vec<u16>,
     claimed_sums: Vec<SecureField>,
     sib_stream_len: usize,
     sib_squeezed_len: usize,
@@ -443,6 +454,8 @@ fn prove_two_hosted(
     let claims = |m: &MlDsaProver, input: &MlDsaVerifyInput| InstanceClaims {
         input: input.clone(),
         group_evals: m.group_evals().to_vec(),
+        a_evals: m.a_evals().to_vec(),
+        expand_a_candidate_counts: m.expand_a_candidate_counts().to_vec(),
         claimed_sums: m.claimed_sums(),
         sib_stream_len: m.sib_stream_len(),
         sib_squeezed_len: m.sib_squeezed_len(),
@@ -477,8 +490,18 @@ fn verify_two_hosted(
     let mut producer_a = FieldProducer::new(producer_a_bytes, handle_a.clone());
     let mut producer_b = FieldProducer::new(producer_b_bytes, handle_b.clone());
     let job_shapes = [
-        keccak_job_shapes(a.input.message.len(), a.sib_stream_len, 0),
-        keccak_job_shapes(b.input.message.len(), b.sib_stream_len, STREAM_BASE_STRIDE),
+        keccak_job_shapes(
+            a.input.message.len(),
+            a.sib_stream_len,
+            0,
+            &a.expand_a_candidate_counts,
+        ),
+        keccak_job_shapes(
+            b.input.message.len(),
+            b.sib_stream_len,
+            STREAM_BASE_STRIDE,
+            &b.expand_a_candidate_counts,
+        ),
     ]
     .concat();
     let mut service =
@@ -486,6 +509,8 @@ fn verify_two_hosted(
     let mut mldsa_a = MlDsaVerifier::hosted(
         a.input.clone(),
         a.group_evals.clone(),
+        a.a_evals.clone(),
+        a.expand_a_candidate_counts.clone(),
         a.claimed_sums.clone(),
         a.sib_stream_len,
         a.sib_squeezed_len,
@@ -498,6 +523,8 @@ fn verify_two_hosted(
     let mut mldsa_b = MlDsaVerifier::hosted(
         zeroed_b,
         b.group_evals.clone(),
+        b.a_evals.clone(),
+        b.expand_a_candidate_counts.clone(),
         b.claimed_sums.clone(),
         b.sib_stream_len,
         b.sib_squeezed_len,
@@ -551,6 +578,8 @@ fn two_hosted_instances_swapped_claims_reject() {
     let swapped_a = InstanceClaims {
         input: a.input.clone(),
         group_evals: b.group_evals.clone(),
+        a_evals: b.a_evals.clone(),
+        expand_a_candidate_counts: b.expand_a_candidate_counts.clone(),
         claimed_sums: b.claimed_sums.clone(),
         sib_stream_len: b.sib_stream_len,
         sib_squeezed_len: b.sib_squeezed_len,
@@ -558,6 +587,8 @@ fn two_hosted_instances_swapped_claims_reject() {
     let swapped_b = InstanceClaims {
         input: b.input.clone(),
         group_evals: a.group_evals.clone(),
+        a_evals: a.a_evals.clone(),
+        expand_a_candidate_counts: a.expand_a_candidate_counts.clone(),
         claimed_sums: a.claimed_sums.clone(),
         sib_stream_len: a.sib_stream_len,
         sib_squeezed_len: a.sib_squeezed_len,

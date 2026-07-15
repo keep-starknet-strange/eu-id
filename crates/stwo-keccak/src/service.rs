@@ -3,7 +3,7 @@
 //! An air-core module pair ([`KeccakServiceProver`] impl `Air`+`AirProver`,
 //! [`KeccakServiceVerifier`] impl `Air`) that owns, exactly once per proof:
 //!
-//! 1. the rotated job-list sponge ([`crate::sponge_v`]) — every SHAKE-256
+//! 1. the rotated job-list sponge ([`crate::sponge_v`]) — every SHAKE-128/256
 //!    sponge job of every hosted instance, one row per permutation;
 //! 2. the `keccak` permutation component and the `keccak_round` component;
 //! 3. the nine spread lookup tables ([`crate::tables_air`]);
@@ -314,7 +314,7 @@ impl KeccakServiceProver {
         }
     }
 
-    /// The per-job full squeeze outputs (`136 · n_squeeze` bytes each).
+    /// The per-job full squeeze outputs (`shape.rate() · n_squeeze` each).
     pub fn job_outputs(&self) -> &[Vec<u8>] {
         &self.run.outputs
     }

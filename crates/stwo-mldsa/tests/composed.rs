@@ -138,6 +138,24 @@ fn composed_public_fold_constraint_rejects_tampered_group_eval() {
     assert!(verify_mldsa(&proof).is_err());
 }
 
+#[test]
+fn composed_expand_a_eval_binding_rejects_tamper() {
+    let msg = big_msg("expand-a-eval-binding", 1024);
+    let (w, input) = witness_and_input(8011, &msg);
+    let mut proof = prove_mldsa(w, input, pcs_config()).expect("prove");
+    proof.a_evals[0] += SecureField::from(M31::from_u32_unchecked(1));
+    assert!(verify_mldsa(&proof).is_err());
+}
+
+#[test]
+fn composed_expand_a_rejection_schedule_rejects_count_tamper() {
+    let msg = big_msg("expand-a-count-binding", 1024);
+    let (w, input) = witness_and_input(8012, &msg);
+    let mut proof = prove_mldsa(w, input, pcs_config()).expect("prove");
+    proof.expand_a_candidate_counts[0] += 1;
+    assert!(verify_mldsa(&proof).is_err());
+}
+
 // =====================================================================
 // Negatives a–g.
 // =====================================================================

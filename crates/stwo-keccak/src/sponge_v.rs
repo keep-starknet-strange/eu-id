@@ -1,5 +1,5 @@
 //! The rotated (vertical) sponge component: one trace row per Keccak-f[1600]
-//! PERMUTATION, constant width, for a whole JOB LIST of SHAKE-256 sponges
+//! PERMUTATION, constant width, for a whole JOB LIST of SHAKE-128/SHAKE-256 sponges
 //! (S1 of the PQ perf campaign — see `tasks/keccak-service-design.md`).
 //!
 //! The horizontal [`crate::sponge`] commits one column per absorb/state/squeeze
@@ -55,23 +55,28 @@ use stwo_constraint_framework::{
     ORIGINAL_TRACE_IDX,
 };
 
-use crate::constants::{DELIMITED_SUFFIX, FINAL_BIT, N_BYTES_IN_RATE, N_BYTES_IN_STATE};
+use crate::constants::{
+    DELIMITED_SUFFIX, FINAL_BIT, N_BYTES_IN_RATE, N_BYTES_IN_SHAKE128_RATE, N_BYTES_IN_STATE,
+};
 use crate::relations::{KeccakRelations, KECCAK_STATE_ARITY};
-use crate::sponge::Shape;
+use crate::sponge::{Shape, XofMode};
 use crate::utils::{circle_row_to_coset, col_eval, spread_u32, ColEval};
 
-const RATE: usize = N_BYTES_IN_RATE;
+/// Maximum supported rate: SHAKE-128's 168 bytes. SHAKE-256 rows gate off
+/// columns 136..168 through the preprocessed schedule.
+pub const MAX_RATE: usize = N_BYTES_IN_SHAKE128_RATE;
 
-/// Base (witness) columns: `block_byte[136] | block_spread[136] | new_rate[136]
-/// | post[200] | squeeze_byte[136]`.
-pub const N_BASE_COLS: usize = 3 * RATE + N_BYTES_IN_STATE + RATE;
+/// Base (witness) columns: `block_byte[MAX_RATE] | block_spread[MAX_RATE] |
+/// new_rate[MAX_RATE] | post[200] | squeeze_byte[MAX_RATE]`.
+pub const N_BASE_COLS: usize = 3 * MAX_RATE + N_BYTES_IN_STATE + MAX_RATE;
 
-/// Schedule (preprocessed) columns: 9 scalars + `pad_gate[136]` + `pad_val[136]`.
-pub const N_SCHEDULE_COLS: usize = 9 + 2 * RATE;
+/// Schedule (preprocessed) columns: 10 scalars + `rate_gate[MAX_RATE]` +
+/// `pad_gate[MAX_RATE]` + `pad_val[MAX_RATE]`.
+pub const N_SCHEDULE_COLS: usize = 10 + 3 * MAX_RATE;
 
-/// Logup entries per row: conv-block(136) + io-absorb(136) + xor3(136) +
-/// state(4: IN×3 gated variants + OUT) + conv-squeeze(136) + io-squeeze(136).
-pub const N_LOGUP_ENTRIES: usize = 5 * RATE + 4;
+/// Logup entries per row: five MAX_RATE byte families plus six state entries
+/// (mode-gated first/absorb inputs, squeeze input, and output).
+pub const N_LOGUP_ENTRIES: usize = 5 * MAX_RATE + 6;
 
 /// Logup fractions batched per interaction column (`finalize_logup_batched`).
 /// Batch 4 needs constraint degree `1 + 4·1 = 5 ≤ D5`, available at
@@ -101,13 +106,7 @@ impl JobList {
         let mut jobs = Vec::new();
         let mut base = 0usize;
         for shape in shapes {
-            let stamped = Shape::with_perm_id_base(
-                shape.message_len,
-                shape.n_squeeze,
-                shape.absorb_stream_id,
-                shape.squeeze_stream_id,
-                base,
-            );
+            let stamped = shape.with_rebased_perm_ids(base);
             base += stamped.n_perms();
             jobs.push(stamped);
         }
@@ -139,6 +138,8 @@ impl JobList {
         };
         mix(self.jobs.len() as u64);
         for s in &self.jobs {
+            mix(s.xof_mode.transcript_tag());
+            mix(s.rate() as u64);
             mix(s.message_len as u64);
             mix(s.n_squeeze as u64);
             mix(s.absorb_stream_id as u64);
@@ -153,6 +154,8 @@ impl JobList {
         channel.mix_u64(self.jobs.len() as u64);
         channel.mix_u64(self.log_size() as u64);
         for s in &self.jobs {
+            channel.mix_u64(s.xof_mode.transcript_tag());
+            channel.mix_u64(s.rate() as u64);
             channel.mix_u64(s.message_len as u64);
             channel.mix_u64(s.n_squeeze as u64);
             channel.mix_u64(s.absorb_stream_id as u64);
@@ -172,36 +175,41 @@ struct RowSched {
     first: bool,
     absorb: bool,
     squeeze_out: bool,
+    shake128: bool,
     perm_id: u32,
     absorb_stream: u32,
     squeeze_stream: u32,
     absorb_pos_base: u32,
     squeeze_pos_base: u32,
     /// `pad_gate[j] = 1` iff byte `j` of this row's block is a pad10*1 constant.
-    pad_gate: [u8; RATE],
+    rate_gate: [u8; MAX_RATE],
+    pad_gate: [u8; MAX_RATE],
     /// The pad constant at gated positions (0 elsewhere).
-    pad_val: [u8; RATE],
+    pad_val: [u8; MAX_RATE],
 }
 
 /// Build the per-row schedule for the whole job list (active rows only).
 fn build_schedule(jobs: &JobList) -> Vec<RowSched> {
     let mut rows = Vec::with_capacity(jobs.n_perms_total());
     for shape in &jobs.jobs {
-        let f = shape.message_len % RATE;
+        let rate = shape.rate();
+        let f = shape.message_len % rate;
         for r in 0..shape.n_perms() {
             let absorb = r < shape.n_absorb;
             let last_absorb = r + 1 == shape.n_absorb;
             let squeeze_out = r + 1 >= shape.n_absorb;
-            let mut pad_gate = [0u8; RATE];
-            let mut pad_val = [0u8; RATE];
+            let mut rate_gate = [0u8; MAX_RATE];
+            rate_gate[..rate].fill(1);
+            let mut pad_gate = [0u8; MAX_RATE];
+            let mut pad_val = [0u8; MAX_RATE];
             if absorb && last_absorb {
-                for j in f..RATE {
+                for j in f..rate {
                     pad_gate[j] = 1;
                     let mut v = 0u8;
                     if j == f {
                         v ^= DELIMITED_SUFFIX;
                     }
-                    if j == RATE - 1 {
+                    if j == rate - 1 {
                         v ^= FINAL_BIT;
                     }
                     pad_val[j] = v;
@@ -211,15 +219,17 @@ fn build_schedule(jobs: &JobList) -> Vec<RowSched> {
                 first: r == 0,
                 absorb,
                 squeeze_out,
+                shake128: shape.xof_mode == XofMode::Shake128,
                 perm_id: (shape.perm_id_base + r) as u32,
                 absorb_stream: shape.absorb_stream_id,
                 squeeze_stream: shape.squeeze_stream_id,
-                absorb_pos_base: (r * RATE) as u32,
+                absorb_pos_base: (r * rate) as u32,
                 squeeze_pos_base: if squeeze_out {
-                    ((r + 1 - shape.n_absorb) * RATE) as u32
+                    ((r + 1 - shape.n_absorb) * rate) as u32
                 } else {
                     0
                 },
+                rate_gate,
                 pad_gate,
                 pad_val,
             });
@@ -234,11 +244,12 @@ fn schedule_id(digest: &str, name: &str) -> PreProcessedColumnId {
     }
 }
 
-const SCALAR_SCHED_NAMES: [&str; 9] = [
+const SCALAR_SCHED_NAMES: [&str; 10] = [
     "is_active",
     "is_first",
     "is_absorb",
     "is_squeeze_out",
+    "is_shake128",
     "perm_id",
     "absorb_stream",
     "squeeze_stream",
@@ -253,10 +264,13 @@ pub fn schedule_ids(jobs: &JobList) -> Vec<PreProcessedColumnId> {
         .iter()
         .map(|n| schedule_id(&d, n))
         .collect();
-    for j in 0..RATE {
+    for j in 0..MAX_RATE {
+        ids.push(schedule_id(&d, &format!("rate_gate_{j}")));
+    }
+    for j in 0..MAX_RATE {
         ids.push(schedule_id(&d, &format!("pad_gate_{j}")));
     }
-    for j in 0..RATE {
+    for j in 0..MAX_RATE {
         ids.push(schedule_id(&d, &format!("pad_val_{j}")));
     }
     ids
@@ -282,16 +296,20 @@ pub fn gen_schedule_preprocessed(jobs: &JobList) -> Vec<ColEval> {
         scalar(&|s| s.first as u32),
         scalar(&|s| s.absorb as u32),
         scalar(&|s| s.squeeze_out as u32),
+        scalar(&|s| s.shake128 as u32),
         scalar(&|s| s.perm_id),
         scalar(&|s| s.absorb_stream),
         scalar(&|s| s.squeeze_stream),
         scalar(&|s| s.absorb_pos_base),
         scalar(&|s| s.squeeze_pos_base),
     ];
-    for j in 0..RATE {
+    for j in 0..MAX_RATE {
+        cols.push(scalar(&move |s| s.rate_gate[j] as u32));
+    }
+    for j in 0..MAX_RATE {
         cols.push(scalar(&move |s| s.pad_gate[j] as u32));
     }
-    for j in 0..RATE {
+    for j in 0..MAX_RATE {
         cols.push(scalar(&move |s| s.pad_val[j] as u32));
     }
     debug_assert_eq!(cols.len(), N_SCHEDULE_COLS);
@@ -306,21 +324,21 @@ pub fn gen_schedule_preprocessed(jobs: &JobList) -> Vec<ColEval> {
 /// not use stay 0 — the constraint side gates them out with zero multiplicity.
 #[derive(Clone)]
 pub struct RowData {
-    pub block_byte: [u8; RATE],
-    pub new_rate: [u8; RATE],
+    pub block_byte: [u8; MAX_RATE],
+    pub new_rate: [u8; MAX_RATE],
     pub prev_post: [u8; N_BYTES_IN_STATE],
     pub post: [u8; N_BYTES_IN_STATE],
-    pub squeeze_byte: [u8; RATE],
+    pub squeeze_byte: [u8; MAX_RATE],
 }
 
 impl Default for RowData {
     fn default() -> Self {
         Self {
-            block_byte: [0; RATE],
-            new_rate: [0; RATE],
+            block_byte: [0; MAX_RATE],
+            new_rate: [0; MAX_RATE],
             prev_post: [0; N_BYTES_IN_STATE],
             post: [0; N_BYTES_IN_STATE],
-            squeeze_byte: [0; RATE],
+            squeeze_byte: [0; MAX_RATE],
         }
     }
 }
@@ -337,7 +355,7 @@ pub struct SpongeVRun {
     pub xor: Vec<Vec<[PackedM31; 2]>>,
     /// conv uses (block bytes + squeeze bytes), same destination.
     pub conv: Vec<[PackedM31; 2]>,
-    /// Per-job full squeeze outputs (`136 · n_squeeze` bytes each).
+    /// Per-job full squeeze outputs (`shape.rate() · n_squeeze` bytes each).
     pub outputs: Vec<Vec<u8>>,
 }
 
@@ -359,15 +377,16 @@ pub fn generate_jobs(jobs: &JobList, messages: &[Vec<u8>]) -> SpongeVRun {
 
     for (shape, message) in jobs.jobs.iter().zip(messages) {
         assert_eq!(message.len(), shape.message_len, "message length mismatch");
-        let f = shape.message_len % RATE;
+        let rate = shape.rate();
+        let f = shape.message_len % rate;
 
         // Padded absorb blocks.
-        let mut blocks = vec![[0u8; RATE]; shape.n_absorb];
+        let mut blocks = vec![[0u8; MAX_RATE]; shape.n_absorb];
         for (i, &b) in message.iter().enumerate() {
-            blocks[i / RATE][i % RATE] = b;
+            blocks[i / rate][i % rate] = b;
         }
         blocks[shape.n_absorb - 1][f] ^= DELIMITED_SUFFIX;
-        blocks[shape.n_absorb - 1][RATE - 1] ^= FINAL_BIT;
+        blocks[shape.n_absorb - 1][rate - 1] ^= FINAL_BIT;
 
         let mut state = [0u8; N_BYTES_IN_STATE];
         let mut output = Vec::with_capacity(shape.output_len());
@@ -379,15 +398,15 @@ pub fn generate_jobs(jobs: &JobList, messages: &[Vec<u8>]) -> SpongeVRun {
             };
             if r < shape.n_absorb {
                 row.block_byte = blocks[r];
-                for j in 0..RATE {
+                for j in 0..rate {
                     conv.push([splat(blocks[r][j] as u32), spread_splat(blocks[r][j])]);
                 }
                 if r == 0 {
-                    state[..RATE].copy_from_slice(&blocks[0]);
+                    state[..rate].copy_from_slice(&blocks[0][..rate]);
                     // capacity stays 0.
                 } else {
-                    let mut uses = Vec::with_capacity(RATE);
-                    for j in 0..RATE {
+                    let mut uses = Vec::with_capacity(rate);
+                    for j in 0..rate {
                         let old = state[j];
                         let m = blocks[r][j];
                         let newv = old ^ m;
@@ -410,9 +429,9 @@ pub fn generate_jobs(jobs: &JobList, messages: &[Vec<u8>]) -> SpongeVRun {
             row.post = state;
 
             if r + 1 >= shape.n_absorb {
-                row.squeeze_byte.copy_from_slice(&state[..RATE]);
-                output.extend_from_slice(&state[..RATE]);
-                for j in 0..RATE {
+                row.squeeze_byte[..rate].copy_from_slice(&state[..rate]);
+                output.extend_from_slice(&state[..rate]);
+                for j in 0..rate {
                     conv.push([splat(state[j] as u32), spread_splat(state[j])]);
                 }
             }
@@ -432,7 +451,7 @@ pub fn generate_jobs(jobs: &JobList, messages: &[Vec<u8>]) -> SpongeVRun {
     }
 }
 
-/// Assemble the 744 base trace columns (commit order = the AIR's read order).
+/// Assemble the fixed-width base trace columns (commit order = AIR read order).
 pub fn generate_base_trace(run: &SpongeVRun) -> Vec<ColEval> {
     let log_size = run.jobs.log_size();
     let rows = 1usize << log_size;
@@ -440,26 +459,26 @@ pub fn generate_base_trace(run: &SpongeVRun) -> Vec<ColEval> {
     let mut cols: Vec<Vec<M31>> = vec![vec![M31::zero(); rows]; N_BASE_COLS];
     for (r, row) in run.rows.iter().enumerate() {
         let mut c = 0usize;
-        for j in 0..RATE {
+        for j in 0..MAX_RATE {
             cols[c + j][r] = m(row.block_byte[j] as u32);
         }
-        c += RATE;
-        for j in 0..RATE {
+        c += MAX_RATE;
+        for j in 0..MAX_RATE {
             cols[c + j][r] = m(spread_u32(row.block_byte[j] as u32));
         }
-        c += RATE;
-        for j in 0..RATE {
+        c += MAX_RATE;
+        for j in 0..MAX_RATE {
             cols[c + j][r] = m(spread_u32(row.new_rate[j] as u32));
         }
-        c += RATE;
+        c += MAX_RATE;
         for i in 0..N_BYTES_IN_STATE {
             cols[c + i][r] = m(spread_u32(row.post[i] as u32));
         }
         c += N_BYTES_IN_STATE;
-        for j in 0..RATE {
+        for j in 0..MAX_RATE {
             cols[c + j][r] = m(row.squeeze_byte[j] as u32);
         }
-        debug_assert_eq!(c + RATE, N_BASE_COLS);
+        debug_assert_eq!(c + MAX_RATE, N_BASE_COLS);
     }
     cols.into_iter().map(|c| col_eval(log_size, c)).collect()
 }
@@ -500,8 +519,8 @@ impl FrameworkEval for Eval {
     }
     fn max_constraint_log_degree_bound(&self) -> u32 {
         // Every plain constraint is degree ≤ 2, every logup numerator is a
-        // degree ≤ 1 preprocessed gate, and every tuple cell — hence every
-        // denominator — is degree ≤ 1, so batch-4 logup constraints are
+        // degree ≤ 2 product of preprocessed gates, and every tuple cell —
+        // hence every denominator — is degree ≤ 1, so batch-4 constraints are
         // degree 1 + 4·1 = 5 ≤ D5, which log + 2 affords (the M4 trap around
         // the Pattern-B `[-1, 0]` masks is fixed in the pinned engine).
         self.log_size() + 2
@@ -515,51 +534,55 @@ impl FrameworkEval for Eval {
         let is_first = eval.get_preprocessed_column(schedule_id(&d, "is_first"));
         let is_absorb = eval.get_preprocessed_column(schedule_id(&d, "is_absorb"));
         let is_squeeze_out = eval.get_preprocessed_column(schedule_id(&d, "is_squeeze_out"));
+        let is_shake128 = eval.get_preprocessed_column(schedule_id(&d, "is_shake128"));
         let perm_id = eval.get_preprocessed_column(schedule_id(&d, "perm_id"));
         let absorb_stream = eval.get_preprocessed_column(schedule_id(&d, "absorb_stream"));
         let squeeze_stream = eval.get_preprocessed_column(schedule_id(&d, "squeeze_stream"));
         let absorb_pos_base = eval.get_preprocessed_column(schedule_id(&d, "absorb_pos_base"));
         let squeeze_pos_base = eval.get_preprocessed_column(schedule_id(&d, "squeeze_pos_base"));
-        let pad_gate: Vec<E::F> = (0..RATE)
+        let rate_gate: Vec<E::F> = (0..MAX_RATE)
+            .map(|j| eval.get_preprocessed_column(schedule_id(&d, &format!("rate_gate_{j}"))))
+            .collect();
+        let pad_gate: Vec<E::F> = (0..MAX_RATE)
             .map(|j| eval.get_preprocessed_column(schedule_id(&d, &format!("pad_gate_{j}"))))
             .collect();
-        let pad_val: Vec<E::F> = (0..RATE)
+        let pad_val: Vec<E::F> = (0..MAX_RATE)
             .map(|j| eval.get_preprocessed_column(schedule_id(&d, &format!("pad_val_{j}"))))
             .collect();
 
         // Base columns (commit order).
-        let block_byte: Vec<E::F> = (0..RATE).map(|_| eval.next_trace_mask()).collect();
-        let block_spread: Vec<E::F> = (0..RATE).map(|_| eval.next_trace_mask()).collect();
-        let new_rate: Vec<E::F> = (0..RATE).map(|_| eval.next_trace_mask()).collect();
+        let block_byte: Vec<E::F> = (0..MAX_RATE).map(|_| eval.next_trace_mask()).collect();
+        let block_spread: Vec<E::F> = (0..MAX_RATE).map(|_| eval.next_trace_mask()).collect();
+        let new_rate: Vec<E::F> = (0..MAX_RATE).map(|_| eval.next_trace_mask()).collect();
         // post with the [-1, 0] chaining mask: [prev row's post, this row's post].
         let post_masks: Vec<[E::F; 2]> = (0..N_BYTES_IN_STATE)
             .map(|_| eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [-1, 0]))
             .collect();
         let post_prev = |i: usize| post_masks[i][0].clone();
         let post = |i: usize| post_masks[i][1].clone();
-        let squeeze_byte: Vec<E::F> = (0..RATE).map(|_| eval.next_trace_mask()).collect();
+        let squeeze_byte: Vec<E::F> = (0..MAX_RATE).map(|_| eval.next_trace_mask()).collect();
 
         // pad10*1: gated positions of an absorb row's block are pinned to the
         // preprocessed pad constant (degree 2; gate + value both preprocessed).
-        for j in 0..RATE {
+        for j in 0..MAX_RATE {
             eval.add_constraint(pad_gate[j].clone() * (block_byte[j].clone() - pad_val[j].clone()));
         }
 
         // 1. conv: bind every absorb-row block byte to its spread limb (+).
-        for j in 0..RATE {
+        for j in 0..MAX_RATE {
             eval.add_to_relation(RelationEntry::base(
                 &rel.conv,
-                is_absorb.clone(),
+                is_absorb.clone() * rate_gate[j].clone(),
                 &[block_byte[j].clone(), block_spread[j].clone()],
             ));
         }
         // 2. HashIo: consume the real message bytes (−). The message gate is
-        // `is_absorb − pad_gate[j]` (1 on message positions of absorb rows).
-        for j in 0..RATE {
+        // `is_absorb·rate_gate[j] − pad_gate[j]` (1 on message positions).
+        for j in 0..MAX_RATE {
             let jf = E::F::from(BaseField::from(j as u32));
             eval.add_to_relation(RelationEntry::base(
                 &rel.hash_io,
-                -(is_absorb.clone() - pad_gate[j].clone()),
+                -(is_absorb.clone() * rate_gate[j].clone() - pad_gate[j].clone()),
                 &[
                     absorb_stream.clone(),
                     absorb_pos_base.clone() + jf,
@@ -570,42 +593,68 @@ impl FrameworkEval for Eval {
         // 3. xor3: rate ^= block on non-first absorb rows (+). Key is the
         // degree-1 sum of the two committed spreads; output is the witnessed
         // new_rate spread (range- and correctness-bound by dense-table rows).
-        for j in 0..RATE {
+        for j in 0..MAX_RATE {
             eval.add_to_relation(RelationEntry::base(
                 &rel.xor3,
-                is_absorb.clone() - is_first.clone(),
+                (is_absorb.clone() - is_first.clone()) * rate_gate[j].clone(),
                 &[post_prev(j) + block_spread[j].clone(), new_rate[j].clone()],
             ));
         }
-        // 4. KeccakState: three gated IN variants (+) and the OUT require (−).
-        let mk_state = |rate: &dyn Fn(usize) -> E::F, cap: &dyn Fn(usize) -> E::F| {
-            let mut t: Vec<E::F> = Vec::with_capacity(KECCAK_STATE_ARITY);
-            t.push(perm_id.clone());
-            t.push(E::F::zero()); // direction::IN
-            for j in 0..RATE {
-                t.push(rate(j));
-            }
-            for i in RATE..N_BYTES_IN_STATE {
-                t.push(cap(i));
-            }
-            t
-        };
-        // first perm of a job: rate = block0 spread, capacity = 0.
-        let in_first = mk_state(&|j| block_spread[j].clone(), &|_| E::F::zero());
+        // 4. KeccakState: mode-gated 136/168-byte IN variants (+) and OUT (−).
+        // Keeping each variant's tuple linear avoids a conditional product in
+        // the relation denominator.
+        let mk_state =
+            |rate_len: usize, rate: &dyn Fn(usize) -> E::F, cap: &dyn Fn(usize) -> E::F| {
+                let mut t: Vec<E::F> = Vec::with_capacity(KECCAK_STATE_ARITY);
+                t.push(perm_id.clone());
+                t.push(E::F::zero()); // direction::IN
+                for j in 0..rate_len {
+                    t.push(rate(j));
+                }
+                for i in rate_len..N_BYTES_IN_STATE {
+                    t.push(cap(i));
+                }
+                t
+            };
+        let shake256 = is_active.clone() - is_shake128.clone();
+        // First perm of a job: rate = block0 spread, capacity = 0.
+        let in_first_256 = mk_state(N_BYTES_IN_RATE, &|j| block_spread[j].clone(), &|_| {
+            E::F::zero()
+        });
         eval.add_to_relation(RelationEntry::base(
             &rel.keccak_state,
-            is_first.clone(),
-            &in_first,
+            is_first.clone() * shake256.clone(),
+            &in_first_256,
         ));
-        // later absorb perms: rate = new_rate, capacity chains from prev post.
-        let in_absorb = mk_state(&|j| new_rate[j].clone(), &post_prev);
+        let in_first_128 = mk_state(
+            N_BYTES_IN_SHAKE128_RATE,
+            &|j| block_spread[j].clone(),
+            &|_| E::F::zero(),
+        );
         eval.add_to_relation(RelationEntry::base(
             &rel.keccak_state,
-            is_absorb.clone() - is_first.clone(),
-            &in_absorb,
+            is_first.clone() * is_shake128.clone(),
+            &in_first_128,
+        ));
+        // Later absorb perms: rate = new_rate, capacity chains from prev post.
+        let in_absorb_256 = mk_state(N_BYTES_IN_RATE, &|j| new_rate[j].clone(), &post_prev);
+        eval.add_to_relation(RelationEntry::base(
+            &rel.keccak_state,
+            (is_absorb.clone() - is_first.clone()) * shake256,
+            &in_absorb_256,
+        ));
+        let in_absorb_128 = mk_state(
+            N_BYTES_IN_SHAKE128_RATE,
+            &|j| new_rate[j].clone(),
+            &post_prev,
+        );
+        eval.add_to_relation(RelationEntry::base(
+            &rel.keccak_state,
+            (is_absorb.clone() - is_first.clone()) * is_shake128,
+            &in_absorb_128,
         ));
         // extra squeeze perms: the whole pre-state chains from prev post.
-        let in_squeeze = mk_state(&post_prev, &post_prev);
+        let in_squeeze = mk_state(MAX_RATE, &post_prev, &post_prev);
         eval.add_to_relation(RelationEntry::base(
             &rel.keccak_state,
             is_active.clone() - is_absorb.clone(),
@@ -624,19 +673,19 @@ impl FrameworkEval for Eval {
             &out_tuple,
         ));
         // 5. conv: bind squeeze bytes to this row's post rate spreads (+).
-        for j in 0..RATE {
+        for j in 0..MAX_RATE {
             eval.add_to_relation(RelationEntry::base(
                 &rel.conv,
-                is_squeeze_out.clone(),
+                is_squeeze_out.clone() * rate_gate[j].clone(),
                 &[squeeze_byte[j].clone(), post(j)],
             ));
         }
         // 6. HashIo: yield the squeeze bytes (+).
-        for j in 0..RATE {
+        for j in 0..MAX_RATE {
             let jf = E::F::from(BaseField::from(j as u32));
             eval.add_to_relation(RelationEntry::base(
                 &rel.hash_io,
-                is_squeeze_out.clone(),
+                is_squeeze_out.clone() * rate_gate[j].clone(),
                 &[
                     squeeze_stream.clone(),
                     squeeze_pos_base.clone() + jf,
@@ -667,7 +716,7 @@ impl InteractionClaim {
     }
 }
 
-/// The 684 per-row logup fractions in EXACTLY the AIR's emission order.
+/// The per-row logup fractions in EXACTLY the AIR's emission order.
 /// Zero-multiplicity entries are `(0, 1)` — sound because the batch constraint
 /// evaluates the symbolic multiplicity (a preprocessed gate that IS zero
 /// there), so the committed accumulator step is 0 either way.
@@ -682,9 +731,15 @@ fn row_fracs(
     let sp = |b: u8| m(spread_u32(b as u32));
     let mut out: Vec<(SecureField, SecureField)> = Vec::with_capacity(N_LOGUP_ENTRIES);
 
-    // 1. conv block (+is_absorb).
-    for j in 0..RATE {
-        if sched.absorb {
+    let rate = if sched.shake128 {
+        N_BYTES_IN_SHAKE128_RATE
+    } else {
+        N_BYTES_IN_RATE
+    };
+
+    // 1. conv block (+is_absorb·rate_gate).
+    for j in 0..MAX_RATE {
+        if sched.absorb && sched.rate_gate[j] != 0 {
             let den: SecureField = rel
                 .conv
                 .combine(&[m(row.block_byte[j] as u32), sp(row.block_byte[j])]);
@@ -693,9 +748,9 @@ fn row_fracs(
             out.push((zero, one));
         }
     }
-    // 2. io absorb consume (−(is_absorb − pad_gate)).
-    for j in 0..RATE {
-        if sched.absorb && sched.pad_gate[j] == 0 {
+    // 2. io absorb consume (−(is_absorb·rate_gate − pad_gate)).
+    for j in 0..MAX_RATE {
+        if sched.absorb && sched.rate_gate[j] != 0 && sched.pad_gate[j] == 0 {
             let den: SecureField = rel.hash_io.combine(&[
                 m(sched.absorb_stream),
                 m(sched.absorb_pos_base + j as u32),
@@ -706,9 +761,9 @@ fn row_fracs(
             out.push((zero, one));
         }
     }
-    // 3. xor3 (+(is_absorb − is_first)).
-    for j in 0..RATE {
-        if sched.absorb && !sched.first {
+    // 3. xor3 (+(is_absorb − is_first)·rate_gate).
+    for j in 0..MAX_RATE {
+        if sched.absorb && !sched.first && sched.rate_gate[j] != 0 {
             let key = sp(row.prev_post[j]) + sp(row.block_byte[j]);
             let den: SecureField = rel.xor3.combine(&[key, sp(row.new_rate[j])]);
             out.push((one, den));
@@ -716,44 +771,75 @@ fn row_fracs(
             out.push((zero, one));
         }
     }
-    // 4. state: IN_first, IN_absorb, IN_squeeze (+ gates), OUT (−1).
-    let state_tuple = |dir: u32, rate: &dyn Fn(usize) -> M31, cap: &dyn Fn(usize) -> M31| {
+    // 4. state: mode-gated IN_first/IN_absorb, IN_squeeze, OUT.
+    let state_tuple = |dir: u32,
+                       rate_len: usize,
+                       rate_values: &dyn Fn(usize) -> M31,
+                       cap: &dyn Fn(usize) -> M31| {
         let mut t = Vec::with_capacity(KECCAK_STATE_ARITY);
         t.push(m(sched.perm_id));
         t.push(m(dir));
-        for j in 0..RATE {
-            t.push(rate(j));
+        for j in 0..rate_len {
+            t.push(rate_values(j));
         }
-        for i in RATE..N_BYTES_IN_STATE {
+        for i in rate_len..N_BYTES_IN_STATE {
             t.push(cap(i));
         }
         t
     };
-    if sched.first {
-        let t = state_tuple(0, &|j| sp(row.block_byte[j]), &|_| M31::zero());
+    if sched.first && !sched.shake128 {
+        let t = state_tuple(0, N_BYTES_IN_RATE, &|j| sp(row.block_byte[j]), &|_| {
+            M31::zero()
+        });
         out.push((one, rel.keccak_state.combine(&t)));
     } else {
         out.push((zero, one));
     }
-    if sched.absorb && !sched.first {
-        let t = state_tuple(0, &|j| sp(row.new_rate[j]), &|i| sp(row.prev_post[i]));
+    if sched.first && sched.shake128 {
+        let t = state_tuple(
+            0,
+            N_BYTES_IN_SHAKE128_RATE,
+            &|j| sp(row.block_byte[j]),
+            &|_| M31::zero(),
+        );
+        out.push((one, rel.keccak_state.combine(&t)));
+    } else {
+        out.push((zero, one));
+    }
+    if sched.absorb && !sched.first && !sched.shake128 {
+        let t = state_tuple(0, N_BYTES_IN_RATE, &|j| sp(row.new_rate[j]), &|i| {
+            sp(row.prev_post[i])
+        });
+        out.push((one, rel.keccak_state.combine(&t)));
+    } else {
+        out.push((zero, one));
+    }
+    if sched.absorb && !sched.first && sched.shake128 {
+        let t = state_tuple(
+            0,
+            N_BYTES_IN_SHAKE128_RATE,
+            &|j| sp(row.new_rate[j]),
+            &|i| sp(row.prev_post[i]),
+        );
         out.push((one, rel.keccak_state.combine(&t)));
     } else {
         out.push((zero, one));
     }
     if !sched.absorb {
-        let t = state_tuple(0, &|j| sp(row.prev_post[j]), &|i| sp(row.prev_post[i]));
+        let t = state_tuple(0, MAX_RATE, &|j| sp(row.prev_post[j]), &|i| {
+            sp(row.prev_post[i])
+        });
         out.push((one, rel.keccak_state.combine(&t)));
     } else {
         out.push((zero, one));
     }
     {
-        let t = state_tuple(1, &|j| sp(row.post[j]), &|i| sp(row.post[i]));
+        let t = state_tuple(1, MAX_RATE, &|j| sp(row.post[j]), &|i| sp(row.post[i]));
         out.push((-one, rel.keccak_state.combine(&t)));
     }
     // 5. conv squeeze (+is_squeeze_out).
-    for j in 0..RATE {
-        if sched.squeeze_out {
+    for j in 0..MAX_RATE {
+        if sched.squeeze_out && j < rate {
             let den: SecureField = rel
                 .conv
                 .combine(&[m(row.squeeze_byte[j] as u32), sp(row.squeeze_byte[j])]);
@@ -763,8 +849,8 @@ fn row_fracs(
         }
     }
     // 6. io squeeze yield (+is_squeeze_out).
-    for j in 0..RATE {
-        if sched.squeeze_out {
+    for j in 0..MAX_RATE {
+        if sched.squeeze_out && j < rate {
             let den: SecureField = rel.hash_io.combine(&[
                 m(sched.squeeze_stream),
                 m(sched.squeeze_pos_base + j as u32),
@@ -790,7 +876,7 @@ pub fn generate_interaction_trace(
     let sched = build_schedule(&run.jobs);
     assert_eq!(sched.len(), run.rows.len(), "schedule/rows length mismatch");
 
-    // Per active coset row: the 684 (num, den) fractions.
+    // Per active coset row: all `(num, den)` fractions.
     let fracs: Vec<Vec<(SecureField, SecureField)>> = sched
         .iter()
         .zip(&run.rows)

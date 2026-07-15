@@ -78,7 +78,13 @@ fn main() {
         instance.preprocessed.len() + instance.trace.len() + instance.interaction.len();
 
     // Service layout for this ONE instance's four sponge jobs (pkHash, µ, c̃, SIB).
-    let jobs = keccak_job_shapes(input.message.len(), sib_stream_len, 0);
+    let expand_a = stwo_mldsa::expand_a::derive_expand_a_witness(input.rho).unwrap();
+    let jobs = keccak_job_shapes(
+        input.message.len(),
+        sib_stream_len,
+        0,
+        &expand_a.candidate_counts,
+    );
     let service = KeccakServiceVerifier::new(
         jobs,
         vec![SecureField::default(); service_claimed_sums_len()],

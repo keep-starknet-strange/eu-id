@@ -516,6 +516,36 @@ mod quantum_only {
         verify_mdoc_circuit(&proof_a, &statement_b)
             .expect_err("proof A must not verify against a different statement B");
 
+        let mut tampered_a_eval = proof_a.clone();
+        tampered_a_eval
+            .mldsa
+            .as_mut()
+            .expect("issuer claims")
+            .a_evals[0] += stwo::core::fields::qm31::SecureField::from(
+            stwo::core::fields::m31::M31::from_u32_unchecked(1),
+        );
+        verify_mdoc_circuit(&tampered_a_eval, &statement_a)
+            .expect_err("tampered ExpandA evaluation must reject");
+
+        let mut tampered_expand_schedule = proof_a.clone();
+        tampered_expand_schedule
+            .mldsa
+            .as_mut()
+            .expect("issuer claims")
+            .expand_a_candidate_counts[0] += 1;
+        verify_mdoc_circuit(&tampered_expand_schedule, &statement_a)
+            .expect_err("tampered ExpandA rejection schedule must reject");
+
+        let mut short_expand_schedule = proof_a.clone();
+        short_expand_schedule
+            .mldsa
+            .as_mut()
+            .expect("issuer claims")
+            .expand_a_candidate_counts
+            .pop();
+        verify_mdoc_circuit(&short_expand_schedule, &statement_a)
+            .expect_err("malformed ExpandA schedule shape must reject before construction");
+
         // S1 service claims, presence gate: an ML-DSA statement whose proof
         // carries NO service claim vector rejects at the shape gate.
         let mut missing_service = proof_a.clone();
