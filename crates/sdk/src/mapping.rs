@@ -1,78 +1,31 @@
-//! Legacy POC translation layer between the SDK's mdoc-shaped UniFFI contract
-//! types ([`ZkPublicStatement`], [`ZkWitness`]) and the prover's 11-byte
-//! relying-party types (`PublicStatement`, `Credential`, `Policy`).
+//! Translation from the SDK's [`ZkPublicStatement`] to the production mdoc
+//! prover's public [`Policy`].
 //!
-//! Everything here is deterministic and side-effect-free: it *constructs* the
-//! prover's legacy POC types but never proves or verifies. The product mdoc PID
-//! API bypasses this module and calls `eu_id_prover::prove_mdoc` /
-//! `eu_id_prover::verify_mdoc` with the full CBOR document. This legacy layer
-//! must still produce **byte-identical** policy inputs on the prove (wallet) and
-//! verify (verifier) sides:
-//! `verify_identity`'s caller-argument binding rejects any `Policy` drift. Both
-//! sides call the *same* [`to_policy`] / [`to_public_statement`] over the same
-//! request parameters, so that symmetry holds by construction — neither depends
-//! on the private held values.
+//! The mapping is deterministic and side-effect-free. Both proving and
+//! verification derive the same policy from the same public request, so neither
+//! depends on private mdoc values.
 //!
-//! ## Legacy POC decisions (ROADMAP_E2E §9 "two contracts")
-//! 1. **Issuer key.** The statement's `issuer_key_x/y` are **ignored**; the
-//!    proof binds the deterministic [`IssuerKey::demo`] (the POC re-signs the
-//!    11-byte credential). The product mdoc path binds the real issuer key.
-//! 2. **Attribute source.** The cleartext `birth_date` / `nationalities` the app
-//!    extracted are trusted as-is; the signature / MSO / item bytes in the
-//!    witness are unused on this legacy POC path.
-//! 3. **Predicate-mode neutralization.** `And` proves both predicates for real;
-//!    `Age` neutralizes nationality with the **universal accepted set** (every
-//!    assigned ISO code — trivially satisfiable *and* reconstructible by a
-//!    verifier that never learns the held code); `Nat` neutralizes age with
-//!    `min_age = 0` (cutoff = today, so any real DOB clears it); `Or` is
-//!    rejected.
+//! `And` proves both predicates; `Age` neutralizes nationality with the
+//! universal assigned-country set; `Nat` neutralizes age with `min_age = 0`;
+//! `Or` is rejected.
 
 use std::collections::HashSet;
 
-use eu_id_prover::{
-    all_nationality_codes, AffinePoint, Credential, Date, IssuerKey, Policy, PublicStatement,
-};
+use eu_id_prover::{all_nationality_codes, Date, Policy};
 
-use crate::{PredicateMode, ZkError, ZkPublicStatement, ZkWitness};
+use crate::{PredicateMode, ZkError, ZkPublicStatement};
 
 /// Build a [`ZkError::InvalidInput`] with an actionable message.
 fn invalid(msg: impl Into<String>) -> ZkError {
     ZkError::InvalidInput(msg.into())
 }
 
-/// The fixed POC issuer key the proof binds (decision 1). Deterministic, so the
-/// prove and verify sides recover the identical `Q`.
-pub(crate) fn issuer_key() -> AffinePoint {
-    IssuerKey::demo().public_key()
-}
-
-/// Map a [`ZkPublicStatement`] to the prover's [`PublicStatement`]: the demo
-/// issuer key, the policy derived from the request parameters, and the fixed demo
-/// holder nonce signature. Symmetric — the verifier rebuilds the identical
-/// statement from its own request.
-///
-/// The holder-presence nonce signature the STARK now folds in is a fixed demo
-/// device-key signature (decision 4); the mdoc `SessionTranscript` nonce carried
-/// in [`ZkPublicStatement`] stays envelope-bound (not STARK-bound). Binding a
-/// real device key is handled by the product mdoc path.
-pub(crate) fn to_public_statement(
-    statement: &ZkPublicStatement,
-) -> Result<PublicStatement, ZkError> {
-    Ok(PublicStatement::new(
-        issuer_key(),
-        to_policy(statement)?,
-        eu_id_prover::fixtures::demo_nonce_statement(),
-    ))
-}
-
 /// Map a [`ZkPublicStatement`] to the prover's [`Policy`] — reference date,
-/// minimum age, and accepted-nationality set — applying the predicate-mode
-/// neutralization (decision 3).
+/// minimum age, and accepted-nationality set.
 ///
 /// This consumes **only** the public request parameters (never the private held
 /// values), so the prove and verify sides produce the same `Policy`. That is
-/// exactly what lets `verify_identity`'s `AgePolicyMismatch` / `NatPolicyMismatch`
-/// gates pass for an honest proof.
+/// exactly what lets the production mdoc prover and verifier agree.
 pub(crate) fn to_policy(statement: &ZkPublicStatement) -> Result<Policy, ZkError> {
     let mode = statement.predicate_mode;
     if matches!(mode, PredicateMode::Or) {
@@ -138,57 +91,6 @@ fn accepted_alpha2_set(accepted_numeric: &[u32]) -> Result<Vec<[u8; 2]>, ZkError
         .collect()
 }
 
-/// Map a [`ZkWitness`] to the prover's private [`Credential`] (prove side only).
-/// The `policy` (built from the statement) supplies the accepted set the held
-/// code is selected against; `mode` says which predicates are actually active.
-///
-/// **Selective disclosure.** A neutralized predicate (decision 3) must not force
-/// the holder to disclose the irrelevant attribute. So when the *age* predicate
-/// is neutralized the holder may leave `birth_date` empty, and when the *nat*
-/// predicate is neutralized the holder may leave `nationalities` empty — in each
-/// case a value that trivially clears the neutralized leg is substituted. This
-/// only touches the private witness (verify rebuilds the statement, never the
-/// credential), so the prove/verify symmetry is unaffected. The substituted
-/// values satisfy the neutralized predicate by construction: `min_age = 0` makes
-/// the age cutoff today (and the bound is inclusive, so a DOB of today passes),
-/// and the universal accepted set contains every assigned code.
-pub(crate) fn to_credential(
-    witness: &ZkWitness,
-    policy: &Policy,
-    mode: PredicateMode,
-) -> Result<Credential, ZkError> {
-    // Age neutralized + no date supplied ⇒ default to today's date, which clears
-    // the `min_age = 0` cutoff (inclusive). A supplied date is still validated.
-    let (year, month, day) = if !mode.uses_age() && witness.birth_date.is_empty() {
-        let d = policy.current_date;
-        (d.year as u16, d.month as u8, d.day as u8)
-    } else {
-        parse_birth_date(&witness.birth_date)?
-    };
-
-    // Nat neutralized + no nationality supplied ⇒ default to any assigned code
-    // (the accepted set is universal, so it is a trivial member). A supplied set
-    // is still selected against the accepted set.
-    let nationality = if !mode.uses_nat() && witness.nationalities.is_empty() {
-        default_assigned_code()
-    } else {
-        select_nationality(&witness.nationalities, &policy.accepted_nationalities)?
-    };
-
-    Ok(Credential::new(year, month, day, nationality))
-}
-
-/// A deterministic assigned ISO-3166-1 numeric code, used to fill the credential
-/// when the nat predicate is neutralized and the holder discloses no
-/// nationality. Any assigned code is a member of the universal accepted set.
-fn default_assigned_code() -> u16 {
-    all_nationality_codes()
-        .first()
-        .copied()
-        .and_then(|c| u16::try_from(c).ok())
-        .unwrap_or(276) // Germany — always assigned
-}
-
 /// Reject an age threshold beyond the age predicate's supported span. Reuses the
 /// prover's own bound (currently 120 years) rather than hardcoding it.
 fn validate_min_age(current: Date, min_age: u32) -> Result<(), ZkError> {
@@ -228,74 +130,6 @@ fn validate_accepted_set(accepted: &[u32]) -> Result<(), ZkError> {
         }
     }
     Ok(())
-}
-
-/// Parse a strict `"YYYY-MM-DD"` (mdoc `full-date`) into `(year, month, day)`.
-///
-/// Only the structural shape and coarse field ranges are checked here; full
-/// calendar validity (real day-of-month, age within bounds) is enforced by the
-/// age predicate at prove time, so a structurally-valid but impossible date
-/// surfaces there as a failed prove rather than here.
-fn parse_birth_date(s: &str) -> Result<(u16, u8, u8), ZkError> {
-    let parts: Vec<&str> = s.split('-').collect();
-    if parts.len() != 3 || parts[0].len() != 4 || parts[1].len() != 2 || parts[2].len() != 2 {
-        return Err(invalid(format!(
-            "birth_date must be `YYYY-MM-DD`, got `{s}`"
-        )));
-    }
-    let year: u16 = parts[0]
-        .parse()
-        .map_err(|_| invalid(format!("invalid year in birth_date `{s}`")))?;
-    let month: u8 = parts[1]
-        .parse()
-        .map_err(|_| invalid(format!("invalid month in birth_date `{s}`")))?;
-    let day: u8 = parts[2]
-        .parse()
-        .map_err(|_| invalid(format!("invalid day in birth_date `{s}`")))?;
-    if !(1..=12).contains(&month) {
-        return Err(invalid(format!(
-            "birth_date month must be 1..=12, got {month}"
-        )));
-    }
-    if !(1..=31).contains(&day) {
-        return Err(invalid(format!("birth_date day must be 1..=31, got {day}")));
-    }
-    Ok((year, month, day))
-}
-
-/// Select the single nationality code embedded in the credential from the held
-/// set.
-///
-/// **Selection rule:** prefer a held code that is in the accepted set, so the
-/// credential-bound nat predicate finds a match and an honest proof succeeds;
-/// otherwise fall back to the first held code — a holder genuinely not in the
-/// accepted set then cannot prove membership (the proof fails at witness time,
-/// like an under-age request), which is the correct outcome, not an input
-/// error. For age-only mode the accepted set is universal, so the first held
-/// (assigned) code is chosen. The chosen code must be an assigned ISO numeric
-/// (else it is not in any membership table — surfaced as invalid input).
-fn select_nationality(held: &[u32], accepted: &[u32]) -> Result<u16, ZkError> {
-    if held.is_empty() {
-        return Err(invalid("witness carries no nationalities"));
-    }
-    let accepted_set: HashSet<u32> = accepted.iter().copied().collect();
-    let chosen = held
-        .iter()
-        .copied()
-        .find(|c| accepted_set.contains(c))
-        .unwrap_or(held[0]);
-
-    let assigned: HashSet<u32> = all_nationality_codes().into_iter().collect();
-    if !assigned.contains(&chosen) {
-        return Err(invalid(format!(
-            "{chosen} is not an assigned ISO-3166-1 numeric country code"
-        )));
-    }
-    u16::try_from(chosen).map_err(|_| {
-        invalid(format!(
-            "nationality code {chosen} exceeds the 16-bit credential field"
-        ))
-    })
 }
 
 /// Convert an epoch-day integer (days since 1970-01-01) to a [`Date`].
@@ -364,20 +198,6 @@ mod tests {
             // Germany, France (both assigned, distinct).
             accepted_numeric_countries: Some(vec![276, 250]),
             nat_mode: NatMode::Any,
-        }
-    }
-
-    fn witness() -> ZkWitness {
-        ZkWitness {
-            issuer_sig_r: vec![1; 32],
-            issuer_sig_s: vec![2; 32],
-            sig_structure: vec![3; 16],
-            mso: vec![4; 16],
-            birth_date_item: vec![5; 8],
-            nationality_item: vec![6; 8],
-            birth_date: "1990-07-15".to_string(),
-            nationalities: vec![276], // Germany
-            digest_ids: std::collections::HashMap::new(),
         }
     }
 
@@ -486,160 +306,7 @@ mod tests {
         assert_eq!(a.accepted_nationalities, all_nationality_codes());
     }
 
-    // ---- public statement -------------------------------------------------
-
-    #[test]
-    fn public_statement_uses_the_demo_issuer_key() {
-        let stmt = statement_with(PredicateMode::And);
-        let ps = to_public_statement(&stmt).unwrap();
-        // The statement's issuer_key_x/y (0x11.. / 0x22..) are ignored.
-        assert_eq!(ps.issuer_key.x, IssuerKey::demo().public_key().x);
-        assert_eq!(ps.issuer_key.y, IssuerKey::demo().public_key().y);
-        assert_ne!(ps.issuer_key.x.0.to_vec(), vec![0x11; 32]);
-    }
-
-    // ---- witness -> credential --------------------------------------------
-
-    #[test]
-    fn credential_parses_date_and_selects_accepted_code() {
-        let policy = to_policy(&statement_with(PredicateMode::And)).unwrap();
-        let cred = to_credential(&witness(), &policy, PredicateMode::And).unwrap();
-        assert_eq!(cred.birth_year, 1990);
-        assert_eq!(cred.birth_month, 7);
-        assert_eq!(cred.birth_day, 15);
-        assert_eq!(cred.nationality, 276);
-    }
-
-    #[test]
-    fn credential_prefers_a_held_code_in_the_accepted_set() {
-        // Holds France(250) and Germany(276); accepted set is {Germany, Italy}.
-        let mut stmt = statement_with(PredicateMode::Nat);
-        stmt.accepted_numeric_countries = Some(vec![276, 380]); // DE, IT
-        let policy = to_policy(&stmt).unwrap();
-
-        let mut w = witness();
-        w.nationalities = vec![250, 276]; // FR (not accepted), DE (accepted)
-        let cred = to_credential(&w, &policy, PredicateMode::Nat).unwrap();
-        assert_eq!(cred.nationality, 276, "must pick the accepted held code");
-    }
-
-    #[test]
-    fn credential_falls_back_to_first_held_when_none_accepted() {
-        // Held FR(250) only; accepted {DE, IT}. FR is a valid assigned code, so
-        // the credential carries it — the nat predicate will then (correctly)
-        // fail to prove membership at prove time.
-        let mut stmt = statement_with(PredicateMode::Nat);
-        stmt.accepted_numeric_countries = Some(vec![276, 380]);
-        let policy = to_policy(&stmt).unwrap();
-
-        let mut w = witness();
-        w.nationalities = vec![250];
-        let cred = to_credential(&w, &policy, PredicateMode::Nat).unwrap();
-        assert_eq!(cred.nationality, 250);
-    }
-
     // ---- input validation -------------------------------------------------
-
-    #[test]
-    fn rejects_a_bad_date_string() {
-        let policy = to_policy(&statement_with(PredicateMode::And)).unwrap();
-        for bad in [
-            "1990/07/15",
-            "90-07-15",
-            "1990-13-01",
-            "1990-07-32",
-            "garbage",
-        ] {
-            let mut w = witness();
-            w.birth_date = bad.to_string();
-            assert!(
-                matches!(
-                    to_credential(&w, &policy, PredicateMode::And),
-                    Err(ZkError::InvalidInput(_))
-                ),
-                "expected rejection for `{bad}`"
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_an_unassigned_held_code() {
-        let policy = to_policy(&statement_with(PredicateMode::And)).unwrap();
-        let mut w = witness();
-        w.nationalities = vec![1]; // not an assigned ISO numeric
-        assert!(matches!(
-            to_credential(&w, &policy, PredicateMode::And),
-            Err(ZkError::InvalidInput(_))
-        ));
-    }
-
-    #[test]
-    fn rejects_an_empty_held_set() {
-        let policy = to_policy(&statement_with(PredicateMode::And)).unwrap();
-        let mut w = witness();
-        w.nationalities = vec![];
-        assert!(matches!(
-            to_credential(&w, &policy, PredicateMode::And),
-            Err(ZkError::InvalidInput(_))
-        ));
-    }
-
-    // ---- selective disclosure: a neutralized predicate needs no witness -----
-
-    #[test]
-    fn age_only_allows_an_empty_nationality_set() {
-        // Verifier asks only for age ⇒ the holder discloses no nationality.
-        // The credential is filled with a default assigned code (trivially a
-        // member of the universal accepted set), so prove can proceed.
-        let policy = to_policy(&statement_with(PredicateMode::Age)).unwrap();
-        let mut w = witness();
-        w.nationalities = vec![];
-        let cred = to_credential(&w, &policy, PredicateMode::Age).unwrap();
-        let assigned: HashSet<u32> = all_nationality_codes().into_iter().collect();
-        assert!(assigned.contains(&u32::from(cred.nationality)));
-    }
-
-    #[test]
-    fn nat_only_allows_an_empty_birth_date() {
-        // Verifier asks only for nationality ⇒ the holder discloses no DOB.
-        // The credential is filled with today's date, which clears the
-        // neutralized `min_age = 0` cutoff (inclusive).
-        let stmt = statement_with(PredicateMode::Nat);
-        let policy = to_policy(&stmt).unwrap();
-        let mut w = witness();
-        w.birth_date = String::new();
-        let cred = to_credential(&w, &policy, PredicateMode::Nat).unwrap();
-        assert_eq!(
-            date(
-                u32::from(cred.birth_year),
-                u32::from(cred.birth_month),
-                u32::from(cred.birth_day)
-            ),
-            policy.current_date,
-            "default DOB must equal the policy reference date"
-        );
-    }
-
-    #[test]
-    fn and_mode_still_requires_both_witness_fields() {
-        // Neutralization is per-predicate: with both active, an absent field is
-        // still a hard error (no silent default).
-        let policy = to_policy(&statement_with(PredicateMode::And)).unwrap();
-
-        let mut w = witness();
-        w.nationalities = vec![];
-        assert!(matches!(
-            to_credential(&w, &policy, PredicateMode::And),
-            Err(ZkError::InvalidInput(_))
-        ));
-
-        let mut w = witness();
-        w.birth_date = String::new();
-        assert!(matches!(
-            to_credential(&w, &policy, PredicateMode::And),
-            Err(ZkError::InvalidInput(_))
-        ));
-    }
 
     #[test]
     fn rejects_a_too_small_accepted_set() {

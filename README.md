@@ -30,8 +30,9 @@ These compose into one `StarkProof` via the `air-core` orchestration layer,
 MSO digest membership, device-key origin, credential validity, and the
 age/nationality predicates are bound in the mdoc proof. The product Rust API is
 `eu_id_prover::{prove_mdoc, verify_mdoc}` and the SDK product API is
-`prove_mdoc_pid` / `verify_mdoc_pid`. The POC `prove_identity` /
-`verify_identity` API and `eu-id` CLI remain for parity benchmarks.
+`prove_identity` / `verify_identity`. The core prover's POC
+`eu_id_prover::{prove_identity, verify_identity}` API and `eu-id` CLI remain for
+parity benchmarks but are not exposed through the SDK.
 
 ## Workspace
 
@@ -49,7 +50,7 @@ age/nationality predicates are bound in the mdoc proof. The product Rust API is
   exposes product `prove_mdoc` / `verify_mdoc` APIs plus the legacy
   `prove_identity` / `verify_identity` POC benchmark path.
 - `crates/sdk` — UniFFI-facing SDK contract and product mdoc PID proof
-  envelope (`prove_mdoc_pid` / `verify_mdoc_pid`).
+  envelope (`prove_identity` / `verify_identity`).
 - `crates/eu-id-ffi` — C-ABI surface for the mobile benchmark harness (`mobile/`).
 
 ## Development
