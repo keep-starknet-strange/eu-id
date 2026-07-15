@@ -5,9 +5,8 @@ edition.workspace = true
 
 # The EU-ID ZK SDK: the single source of truth for the prover/verifier data
 # contract. It owns the contract types, the deterministic-CBOR statement
-# encoding (`encode_statement`), and the product `prove_mdoc_pid` /
-# `verify_mdoc_pid` entry points. The legacy `prove_identity` /
-# `verify_identity` entry points remain for the 11-byte POC path.
+# encoding (`encode_statement`), and the product `prove_identity` /
+# `verify_identity` entry points backed by the full mdoc prover.
 #
 # The mdoc PID bodies run the real STWO prover/verifier behind the UniFFI
 # surface. No Multipaz / verifier-core types leak in; callers pass the CBOR mdoc
@@ -48,7 +47,7 @@ celes = "2.8.2"
 serde = { workspace = true }
 bincode = "1"
 # FFI transport compression: the SDK keeps its exported byte API stable while
-# compressing the inner bincode `Proof` payload carried in `ProofEnvelope`.
+# compressing the inner bincode proof payload carried in `MdocProofEnvelope`.
 zstd = "0.13"
 sha2 = "0.10"
 
