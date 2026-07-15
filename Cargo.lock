@@ -1946,6 +1946,7 @@ dependencies = [
 [[package]]
 name = "stwo"
 version = "2.2.0"
+source = "git+https://github.com/0xLucqs/stwo.git?rev=8c9983908642f719032e7b7977f3c2081c84a2d9#8c9983908642f719032e7b7977f3c2081c84a2d9"
 dependencies = [
  "blake2",
  "blake3",
@@ -1974,6 +1975,7 @@ dependencies = [
 [[package]]
 name = "stwo-constraint-framework"
 version = "2.2.0"
+source = "git+https://github.com/0xLucqs/stwo.git?rev=8c9983908642f719032e7b7977f3c2081c84a2d9#8c9983908642f719032e7b7977f3c2081c84a2d9"
 dependencies = [
  "hashbrown 0.15.5",
  "itertools 0.12.1",
