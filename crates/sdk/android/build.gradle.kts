@@ -125,6 +125,7 @@ val cargoNdkBuild by tasks.registering(Exec::class) {
     inputs.dir(crateDir.resolve("src"))
     inputs.file(crateDir.resolve("Cargo.toml"))
     outputs.dir(jniLibsOut)
+    outputs.upToDateWhen { false }
 }
 
 // 2. Generate the UniFFI Kotlin bindings from a built .so (proc-macro metadata
@@ -146,6 +147,9 @@ val generateUniffiBindings by tasks.registering(Exec::class) {
         "--out-dir", bindingsOut.absolutePath,
     )
     inputs.file(uniffiConfig)
+    inputs.dir(crateDir.resolve("src"))
+    inputs.file(crateDir.resolve("Cargo.toml"))
+    inputs.file(builtLib)
     outputs.dir(bindingsOut)
 }
 
