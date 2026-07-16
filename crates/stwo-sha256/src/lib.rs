@@ -54,6 +54,10 @@ pub mod components;
 pub mod constants;
 pub mod constraints;
 pub mod field_exposure;
+#[cfg(feature = "gkr-spike")]
+pub mod gkr_lookups;
+#[cfg(feature = "gkr-spike")]
+pub mod gkr_spike;
 pub mod headroom;
 pub mod interaction;
 pub mod multiplicities;
@@ -61,6 +65,7 @@ pub mod native;
 pub mod partitions;
 pub mod preprocessed;
 pub mod relations;
+pub mod shared_tables;
 pub mod stark;
 pub mod tables;
 pub mod tables_local;

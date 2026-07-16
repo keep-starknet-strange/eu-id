@@ -4,7 +4,7 @@ use crate::constants::{P256_MODULUS, P256_ORDER};
 use crate::curve::{point_add, point_double, scalar_mul};
 use crate::fake_glv_chain::{FakeGlvChainCert, FakeGlvChainClaim};
 use crate::field_ops::{add_mod_witness, sub_mod_witness};
-use crate::prepared_table::PreparedAffinePoint;
+use crate::prepared_table::{PreparedAffinePoint, PreparedTableCert, PreparedTableClaim};
 use crate::public_inputs::{PublicEcdsaInputClaim, PublicEcdsaInstance};
 use crate::scalar::cert_bind::{
     CertScalarInputClaim, CertScalarInputRow, CERT_ID_U1_GENERATOR, CERT_ID_U2_PUBLIC_KEY,
@@ -24,6 +24,41 @@ impl FinalEcdsaCheckClaim {
         fake_glv_scalars: &FakeGlvScalarHintClaim,
         fake_glv_chain: &FakeGlvChainClaim,
     ) -> Result<Self, FinalEcdsaCheckError> {
+        Self::from_claims_inner(
+            public_inputs,
+            cert_inputs,
+            fake_glv_scalars,
+            fake_glv_chain,
+            None,
+            true,
+        )
+    }
+
+    pub(crate) fn from_claims_with_prepared_table_trusted(
+        public_inputs: &PublicEcdsaInputClaim,
+        cert_inputs: &CertScalarInputClaim,
+        fake_glv_scalars: &FakeGlvScalarHintClaim,
+        fake_glv_chain: &FakeGlvChainClaim,
+        prepared_table: &PreparedTableClaim,
+    ) -> Result<Self, FinalEcdsaCheckError> {
+        Self::from_claims_inner(
+            public_inputs,
+            cert_inputs,
+            fake_glv_scalars,
+            fake_glv_chain,
+            Some(prepared_table),
+            false,
+        )
+    }
+
+    fn from_claims_inner(
+        public_inputs: &PublicEcdsaInputClaim,
+        cert_inputs: &CertScalarInputClaim,
+        fake_glv_scalars: &FakeGlvScalarHintClaim,
+        fake_glv_chain: &FakeGlvChainClaim,
+        prepared_table: Option<&PreparedTableClaim>,
+        verify: bool,
+    ) -> Result<Self, FinalEcdsaCheckError> {
         let expected_cert_rows = public_inputs.instances.len() * 2;
         if cert_inputs.rows.len() != expected_cert_rows
             || fake_glv_scalars.rows.len() != expected_cert_rows
@@ -35,6 +70,14 @@ impl FinalEcdsaCheckClaim {
                 fake_glv: fake_glv_scalars.rows.len(),
                 chain: fake_glv_chain.certs.len(),
             });
+        }
+        if let Some(prepared_table) = prepared_table {
+            if prepared_table.certs.len() != expected_cert_rows {
+                return Err(FinalEcdsaCheckError::PreparedTableCountMismatch {
+                    public_inputs: public_inputs.instances.len(),
+                    tables: prepared_table.certs.len(),
+                });
+            }
         }
 
         let rows = public_inputs
@@ -51,11 +94,15 @@ impl FinalEcdsaCheckClaim {
                     &fake_glv_scalars.rows[cert_index + 1],
                     &fake_glv_chain.certs[cert_index],
                     &fake_glv_chain.certs[cert_index + 1],
+                    prepared_table.map(|table| &table.certs[cert_index]),
+                    prepared_table.map(|table| &table.certs[cert_index + 1]),
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
         let claim = Self { rows };
-        claim.verify()?;
+        if verify {
+            claim.verify()?;
+        }
         Ok(claim)
     }
 
@@ -86,6 +133,8 @@ impl FinalEcdsaCheckRow {
         fake_glv_u2: &FakeGlvScalarHintRow,
         chain_u1: &FakeGlvChainCert,
         chain_u2: &FakeGlvChainCert,
+        prepared_u1: Option<&PreparedTableCert>,
+        prepared_u2: Option<&PreparedTableCert>,
     ) -> Result<Self, FinalEcdsaCheckError> {
         require_cert(public.sig_id, CERT_ID_U1_GENERATOR, cert_u1)?;
         require_cert(public.sig_id, CERT_ID_U2_PUBLIC_KEY, cert_u2)?;
@@ -94,10 +143,8 @@ impl FinalEcdsaCheckRow {
         require_chain(cert_u1, chain_u1)?;
         require_chain(cert_u2, chain_u2)?;
 
-        let h1 = scalar_mul_point(cert_u1)?;
-        let h2 = scalar_mul_point(cert_u2)?;
-        require_chain_r3_matches_h("u1", &h1, fake_glv_u1, chain_u1)?;
-        require_chain_r3_matches_h("u2", &h2, fake_glv_u2, chain_u2)?;
+        let h1 = hint_point_from_cert_or_table(cert_u1, fake_glv_u1, chain_u1, prepared_u1, "u1")?;
+        let h2 = hint_point_from_cert_or_table(cert_u2, fake_glv_u2, chain_u2, prepared_u2, "u2")?;
 
         let r_point = add_optional_points(h1.to_option(), h2.to_option()).ok_or(
             FinalEcdsaCheckError::InfinityFinalR {
@@ -186,6 +233,10 @@ pub enum FinalEcdsaCheckError {
         actual: u32,
     },
     PreparedPoint(crate::prepared_table::PreparedTableError),
+    PreparedTableCountMismatch {
+        public_inputs: usize,
+        tables: usize,
+    },
     ChainR3Mismatch {
         source: &'static str,
         sig_id: u32,
@@ -273,6 +324,63 @@ fn scalar_mul_point(
         PreparedAffinePoint::infinity,
         PreparedAffinePoint::from_affine,
     ))
+}
+
+fn hint_point_from_cert_or_table(
+    cert: &CertScalarInputRow,
+    fake_glv: &FakeGlvScalarHintRow,
+    chain: &FakeGlvChainCert,
+    prepared: Option<&PreparedTableCert>,
+    source: &'static str,
+) -> Result<PreparedAffinePoint, FinalEcdsaCheckError> {
+    if let Some(prepared) = prepared {
+        require_prepared_table_cert(cert, prepared)?;
+        if chain.r3 != prepared.r3 {
+            return Err(FinalEcdsaCheckError::ChainR3Mismatch {
+                source,
+                sig_id: chain.sig_id.0,
+            });
+        }
+        return unsigned_hint_point(&prepared.r, fake_glv.hint.s2_sign_bit);
+    }
+
+    let h = scalar_mul_point(cert)?;
+    require_chain_r3_matches_h(source, &h, fake_glv, chain)?;
+    Ok(h)
+}
+
+fn require_prepared_table_cert(
+    cert: &CertScalarInputRow,
+    prepared: &PreparedTableCert,
+) -> Result<(), FinalEcdsaCheckError> {
+    if prepared.sig_id == cert.sig_id
+        && prepared.cert_id == cert.cert_id
+        && prepared.cert_active == cert.cert_active
+    {
+        Ok(())
+    } else {
+        Err(FinalEcdsaCheckError::IdMismatch {
+            source: "prepared_table",
+            sig_id: prepared.sig_id.0,
+            cert_id: prepared.cert_id.0,
+            expected_sig_id: cert.sig_id.0,
+            expected_cert_id: cert.cert_id.0,
+        })
+    }
+}
+
+fn unsigned_hint_point(
+    signed_h: &PreparedAffinePoint,
+    s2_sign_bit: M31,
+) -> Result<PreparedAffinePoint, FinalEcdsaCheckError> {
+    match s2_sign_bit.0 {
+        0 => Ok(signed_h.clone()),
+        1 => Ok(prepared(negate_optional(signed_h.to_option()))),
+        actual => Err(FinalEcdsaCheckError::NonBooleanFlag {
+            field: "s2_sign_bit",
+            actual,
+        }),
+    }
 }
 
 fn require_chain_r3_matches_h(

@@ -28,6 +28,18 @@ val workspaceRoot = file("$projectDir/../../..")
 val crateDir = file("$projectDir/..")
 val uniffiConfig = file("$projectDir/../uniffi.toml")
 
+// Single source of truth for the published version: the Cargo workspace. Crates
+// set `version.workspace = true`, so the literal lives in the root Cargo.toml
+// under [workspace.package] — the same value Rust sees as CARGO_PKG_VERSION.
+// Parse it here so the AAR version can never drift from the crate; bump it once
+// in the Cargo manifest.
+val cargoVersion: String = run {
+    val pkgSection = workspaceRoot.resolve("Cargo.toml").readText()
+        .substringAfter("[workspace.package]").substringBefore("\n[")
+    Regex("""(?m)^\s*version\s*=\s*"([^"]+)"""").find(pkgSection)?.groupValues?.get(1)
+        ?: error("Could not find [workspace.package].version in ${workspaceRoot.resolve("Cargo.toml")}")
+}
+
 // Generated outputs land in AGP's conventional source dirs (gitignored). AGP
 // packages src/main/jniLibs/<abi>/*.so and compiles src/main/kotlin by default.
 val jniLibsOut = file("$projectDir/src/main/jniLibs")
@@ -89,6 +101,21 @@ val cargoNdkBuild by tasks.registering(Exec::class) {
     workingDir = workspaceRoot
     environment("PATH", toolPath)
     environment("ANDROID_NDK_HOME", ndkHome)
+    // Opt-in via `-PemitBuildId=true` (see the `publish-android-symbols` make target):
+    // emit a GNU build-id note into each .so so Perfetto/heapprofd & simpleperf can
+    // match the stripped on-device lib to the local unstripped copy in jniLibs for
+    // offline symbolization (DWARF itself is already on via [profile.release] debug).
+    // Scoped per Android target through CARGO_TARGET_<triple>_RUSTFLAGS so the host
+    // build scripts / proc-macros — linked by Apple ld, which rejects --build-id —
+    // are left untouched. Set on the forked process here, so it reaches cargo
+    // regardless of the Gradle daemon's own environment.
+    val emitBuildId = (project.findProperty("emitBuildId") as String?)?.toBoolean() ?: false
+    if (emitBuildId) {
+        val buildIdFlag = "-C link-arg=-Wl,--build-id=sha1"
+        environment("CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS", buildIdFlag)
+        environment("CARGO_TARGET_X86_64_LINUX_ANDROID_RUSTFLAGS", buildIdFlag)
+    }
+    inputs.property("emitBuildId", emitBuildId)
     commandLine(
         cargoExe, "ndk",
         "-t", "arm64-v8a", "-t", "x86_64",
@@ -140,7 +167,7 @@ publishing {
         register<MavenPublication>("release") {
             groupId = "com.kss"
             artifactId = "eu-id-zk-sdk"
-            version = "0.1.0"
+            version = cargoVersion
             // `release` component isn't available until AGP configures it.
             afterEvaluate { from(components["release"]) }
         }

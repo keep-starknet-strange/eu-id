@@ -170,8 +170,7 @@ fn prepared_table_ec_row_constraints_pass_for_honest_trace() {
         .expect("valid ec trace");
     let claim = PreparedTableEcRowProofClaim::from_trace(&trace);
     let ids = claim.preprocessed_column_ids();
-    let preprocessed =
-        gen_prepared_table_ec_row_preprocessed_trace(claim.log_size, 0, &ids).unwrap();
+    let preprocessed = gen_prepared_table_ec_row_preprocessed_trace(claim.log_size, &ids).unwrap();
     let base = gen_prepared_table_ec_row_base_trace(&trace, claim.log_size).unwrap();
     let mut channel = Blake2sChannel::default();
     let relation = PreparedTableEcRowRelation::draw(&mut channel);
@@ -489,7 +488,7 @@ impl stwo_constraint_framework::EvalAtRow for RecordingSourceEvaluator<'_> {
 
     fn finalize_logup_in_pairs(&mut self) {}
 
-    fn finalize_logup_batched(&mut self, _batching: &Vec<usize>) {}
+    fn finalize_logup_batched(&mut self, _batch_size: usize) {}
 }
 
 /// Whether every polynomial constraint of `PreparedTableProjectiveSourceEval`
@@ -507,8 +506,7 @@ fn projective_source_constraints_hold(log_size: u32, base: &[Vec<M31>]) -> bool 
             log_size,
             relation: PreparedTableEcRowRelation::dummy(),
             mul_result: crate::projective_air::ProjectiveRcbMulResultRelation::dummy(),
-            gamma_digest: crate::components::gamma_digest::GammaDigestRelation::dummy(),
-            gamma_challenge: super::trace::prepared_dummy_gamma_challenge(),
+            header: crate::components::hinted_mul::EcOpHeaderRelation::dummy(),
         }
         .evaluate(recorder);
         if recorder.constraints.iter().any(|value| !value.is_zero()) {
@@ -559,9 +557,7 @@ fn prepared_table_projective_source_rejects_forged_op_outputs() {
     let ec_row_relation = PreparedTableEcRowRelation::draw(&mut channel);
     let mul_result_relation =
         crate::projective_air::ProjectiveRcbMulResultRelation::draw(&mut channel);
-    let gamma_digest_relation =
-        crate::components::gamma_digest::GammaDigestRelation::draw(&mut channel);
-    let gamma_challenge = super::trace::prepared_dummy_gamma_challenge();
+    let header_relation = crate::components::hinted_mul::EcOpHeaderRelation::draw(&mut channel);
     let consumer_mul_sum = |columns: &[Vec<M31>]| {
         let evals: Vec<_> = columns
             .iter()
@@ -573,8 +569,7 @@ fn prepared_table_projective_source_rejects_forged_op_outputs() {
             &evals,
             &ec_row_relation,
             &mul_result_relation,
-            &gamma_digest_relation,
-            &gamma_challenge,
+            &header_relation,
         )
         .mul_result_sum
     };

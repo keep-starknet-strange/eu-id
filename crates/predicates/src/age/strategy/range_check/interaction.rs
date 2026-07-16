@@ -1,9 +1,8 @@
 use crate::age::strategy::range_check::lookup_elements::LookupElements;
 use crate::age::strategy::range_check::preprocessed::Preprocessed;
-use crate::age::strategy::range_check::witness::{WitnessData, BIND_ACTIVE_COL};
+use crate::age::strategy::range_check::witness::WitnessData;
 use crate::types::Trace;
 use air_core::relations::{field_id, FieldBytesRelation};
-use num_traits::One;
 use stwo::core::channel::Channel;
 use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::QM31;
@@ -13,6 +12,64 @@ use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::TreeBuilder;
 use stwo_constraint_framework::{LogupTraceGenerator, Relation};
+
+type LogupEntry = (Vec<PackedQM31>, Vec<PackedQM31>);
+
+fn append_entry(
+    entries: &mut Vec<LogupEntry>,
+    n_packed: usize,
+    fraction: impl Fn(usize) -> (PackedQM31, PackedQM31),
+) {
+    let mut numerators = Vec::with_capacity(n_packed);
+    let mut denominators = Vec::with_capacity(n_packed);
+    for packed_row in 0..n_packed {
+        let (numerator, denominator) = fraction(packed_row);
+        numerators.push(numerator);
+        denominators.push(denominator);
+    }
+    entries.push((numerators, denominators));
+}
+
+fn write_paired_entries(logup: &mut LogupTraceGenerator, entries: &[LogupEntry]) {
+    for chunk in entries.chunks(2) {
+        logup.col_from_fn(|packed_row| {
+            let mut numerator = chunk[0].0[packed_row];
+            let mut denominator = chunk[0].1[packed_row];
+            if let Some((next_numerators, next_denominators)) = chunk.get(1) {
+                let n = next_numerators[packed_row];
+                let d = next_denominators[packed_row];
+                numerator = numerator * d + n * denominator;
+                denominator *= d;
+            }
+            (numerator, denominator)
+        });
+    }
+}
+
+/// Build a Class-D blinded delta-table interaction column mirroring
+/// [`crate::range_check::BlindEval`]'s SINGLE gated entry: numerator
+/// `-(1 − is_dummy)·mult` over one column (`finalize_logup`). `-mult` on real
+/// rows and `0` on dummy rows regardless of the random `m` committed there — the
+/// claimed sum is identical to the unblinded table's over the same real uses.
+fn blind_delta_interaction(
+    log_size: u32,
+    value_col: &crate::types::Column,
+    dummy_col: &crate::types::Column,
+    mult_col: &crate::types::Column,
+    relation: &crate::range_check::RangeCheckLookupElements,
+) -> (Trace, QM31) {
+    let one = PackedQM31::broadcast(QM31::from(1));
+    let mut logup_gen = LogupTraceGenerator::new(log_size);
+    logup_gen.col_from_fn(|vec_row| {
+        let value: PackedM31 = value_col.values.data[vec_row];
+        let dummy: PackedM31 = dummy_col.values.data[vec_row];
+        let mult: PackedM31 = mult_col.values.data[vec_row];
+        let denom: PackedQM31 = relation.combine(&[value]);
+        let numerator = -((one - PackedQM31::from(dummy)) * PackedQM31::from(mult));
+        (numerator, denom)
+    });
+    logup_gen.finalize_last()
+}
 
 pub struct InteractionTraces {
     pub age_interaction: Trace,
@@ -38,179 +95,137 @@ impl InteractionTraces {
     ) -> Self {
         let cal_log_size = preprocessed.cal_trace[0].domain.log_size();
         let valid_day_log_size = preprocessed.valid_day_trace[0].domain.log_size();
-        let year_delta_log_sz = preprocessed.year_delta_table[0].domain.log_size();
         let n_packed = 1 << (WitnessData::log_size() - LOG_N_LANES);
 
-        // Age component: 5 logup fractions (calendar, valid-day, day_delta, month_delta, year_delta)
-        let mut logup_gen = LogupTraceGenerator::new(WitnessData::log_size());
+        // Class-C: the age-component lookup uses fire only on the active row.
+        // Their numerator is the preprocessed `active` selector (1 on row 0, 0 on
+        // the blind rows), matching `E::EF::from(active)` in the eval.
+        let active = &preprocessed.active_trace[0];
 
-        let mut col_gen = logup_gen.new_col();
-        for packed_row in 0..n_packed {
-            col_gen.write_frac(
-                packed_row,
-                PackedQM31::one(),
+        // Age component: 5 logical logup fractions (calendar, valid-day,
+        // day_delta, month_delta, year_delta), plus optional DOB-byte binding
+        // requires. The AIR uses `finalize_logup_in_pairs`, so write the same
+        // ordered entry stream in consecutive pairs.
+        let mut age_entries = Vec::new();
+        append_entry(&mut age_entries, n_packed, |packed_row| {
+            (
+                PackedQM31::from(active.values.data[packed_row]),
                 lookup_elements.calendar.combine(&[
                     PackedM31::broadcast(M31::from_u32_unchecked(witness_data.table_index)),
                     PackedM31::broadcast(M31::from_u32_unchecked(witness_data.dob_max_days)),
                 ]),
-            );
-        }
-        col_gen.finalize_col();
-
-        let mut col_gen = logup_gen.new_col();
-        for packed_row in 0..n_packed {
-            col_gen.write_frac(
-                packed_row,
-                PackedQM31::one(),
+            )
+        });
+        append_entry(&mut age_entries, n_packed, |packed_row| {
+            (
+                PackedQM31::from(active.values.data[packed_row]),
                 lookup_elements.valid_day.combine(&[
                     PackedM31::broadcast(M31::from_u32_unchecked(witness_data.dob_max_days)),
                     PackedM31::broadcast(M31::from_u32_unchecked(witness_data.dob_day)),
                 ]),
-            );
-        }
-        col_gen.finalize_col();
-
-        let mut col_gen = logup_gen.new_col();
-        for packed_row in 0..n_packed {
-            col_gen.write_frac(
-                packed_row,
-                PackedQM31::one(),
+            )
+        });
+        append_entry(&mut age_entries, n_packed, |packed_row| {
+            (
+                PackedQM31::from(active.values.data[packed_row]),
                 lookup_elements.day_delta.combine(&[PackedM31::broadcast(
                     M31::from_u32_unchecked(witness_data.day_delta_val),
                 )]),
-            );
-        }
-        col_gen.finalize_col();
-
-        let mut col_gen = logup_gen.new_col();
-        for packed_row in 0..n_packed {
-            col_gen.write_frac(
-                packed_row,
-                PackedQM31::one(),
+            )
+        });
+        append_entry(&mut age_entries, n_packed, |packed_row| {
+            (
+                PackedQM31::from(active.values.data[packed_row]),
                 lookup_elements.month_delta.combine(&[PackedM31::broadcast(
                     M31::from_u32_unchecked(witness_data.month_delta_val),
                 )]),
-            );
-        }
-        col_gen.finalize_col();
-
-        let mut col_gen = logup_gen.new_col();
-        for packed_row in 0..n_packed {
-            col_gen.write_frac(
-                packed_row,
-                PackedQM31::one(),
+            )
+        });
+        append_entry(&mut age_entries, n_packed, |packed_row| {
+            (
+                PackedQM31::from(active.values.data[packed_row]),
                 lookup_elements.year_delta.combine(&[PackedM31::broadcast(
                     M31::from_u32_unchecked(witness_data.year_delta_val),
                 )]),
-            );
-        }
-        col_gen.finalize_col();
+            )
+        });
 
-        // The credential-field binding: require the four DOB bytes on the shared
-        // `Sha256Field` channel, one solo column per byte. The numerator is the
-        // `bind_active` selector (1 on a single row), so each byte is required
-        // exactly once — matching SHA's single `−is_first_block` yield. Appended
-        // after the statement's own five fractions so those columns are
-        // unchanged; the eval emits the same order before `finalize_logup`.
-        if let (Some(field), Some(bytes)) = (dob_field, witness_data.dob_bytes) {
-            let bind_active = &witness_data.witness_trace[BIND_ACTIVE_COL];
+        // The credential-field binding: require the packed DOB bytes or the ten
+        // text DOB bytes on the shared `Sha256Field` channel, one solo column per
+        // byte. The numerator is the preprocessed `active` selector (1 on a single
+        // row), so each byte is required exactly once — matching SHA's single
+        // `−is_first_block` yield. Appended after the statement's own five
+        // fractions so those columns are unchanged; the eval emits the same order
+        // before paired finalization.
+        if let (Some(field), Some(bytes)) = (dob_field, witness_data.dob_bytes.as_ref()) {
             for (byte_index, &value) in bytes.iter().enumerate() {
-                let mut col_gen = logup_gen.new_col();
-                for packed_row in 0..n_packed {
-                    col_gen.write_frac(
-                        packed_row,
-                        PackedQM31::from(bind_active.values.data[packed_row]),
+                append_entry(&mut age_entries, n_packed, |packed_row| {
+                    (
+                        PackedQM31::from(active.values.data[packed_row]),
                         field.combine(&[
                             PackedM31::broadcast(M31::from_u32_unchecked(field_id::DOB)),
                             PackedM31::broadcast(M31::from_u32_unchecked(byte_index as u32)),
                             PackedM31::broadcast(M31::from_u32_unchecked(value)),
                         ]),
-                    );
-                }
-                col_gen.finalize_col();
+                    )
+                });
             }
         }
 
+        let mut logup_gen = LogupTraceGenerator::new(WitnessData::log_size());
+        write_paired_entries(&mut logup_gen, &age_entries);
         let (age_interaction, age_claimed_sum) = logup_gen.finalize_last();
 
-        // Calendar table
+        // Calendar table (single-fraction `-mult`, not blinded).
         let mut logup_gen = LogupTraceGenerator::new(cal_log_size);
-        let mut col_gen = logup_gen.new_col();
-        for vec_row in 0..(1 << (cal_log_size - LOG_N_LANES)) {
+        logup_gen.col_from_fn(|vec_row| {
             let max_days_val: PackedM31 = preprocessed.cal_trace[0].values.data[vec_row];
             let index_val: PackedM31 = preprocessed.cal_trace[1].values.data[vec_row];
             let mult_val: PackedM31 = witness_data.cal_mult_trace[0].values.data[vec_row];
-            col_gen.write_frac(
-                vec_row,
+            (
                 PackedQM31::from(-mult_val),
                 lookup_elements.calendar.combine(&[index_val, max_days_val]),
-            );
-        }
-        col_gen.finalize_col();
+            )
+        });
         let (cal_interaction, cal_claimed_sum) = logup_gen.finalize_last();
 
-        // Valid-day table
+        // Valid-day table (single-fraction `-mult`, not blinded).
         let mut logup_gen = LogupTraceGenerator::new(valid_day_log_size);
-        let mut col_gen = logup_gen.new_col();
-        for vec_row in 0..(1 << (valid_day_log_size - LOG_N_LANES)) {
+        logup_gen.col_from_fn(|vec_row| {
             let max_days_val: PackedM31 = preprocessed.valid_day_trace[0].values.data[vec_row];
             let day_val: PackedM31 = preprocessed.valid_day_trace[1].values.data[vec_row];
             let mult_val: PackedM31 = witness_data.valid_day_mult_trace[0].values.data[vec_row];
-            col_gen.write_frac(
-                vec_row,
+            (
                 PackedQM31::from(-mult_val),
                 lookup_elements.valid_day.combine(&[max_days_val, day_val]),
-            );
-        }
-        col_gen.finalize_col();
+            )
+        });
         let (valid_day_interaction, valid_day_claimed_sum) = logup_gen.finalize_last();
 
-        // Day delta table
-        let day_delta_log_size = Preprocessed::day_range().log_size();
-        let mut logup_gen = LogupTraceGenerator::new(day_delta_log_size);
-        let mut col_gen = logup_gen.new_col();
-        for vec_row in 0..(1 << (day_delta_log_size - LOG_N_LANES)) {
-            let value: PackedM31 = preprocessed.day_delta_table[0].values.data[vec_row];
-            let mult: PackedM31 = witness_data.day_delta_mult_trace[0].values.data[vec_row];
-            col_gen.write_frac(
-                vec_row,
-                PackedQM31::from(-mult),
-                lookup_elements.day_delta.combine(&[value]),
-            );
-        }
-        col_gen.finalize_col();
-        let (day_delta_interaction, day_delta_claimed_sum) = logup_gen.finalize_last();
-
-        // Month delta table
-        let month_delta_log_size = Preprocessed::month_range().log_size();
-        let mut logup_gen = LogupTraceGenerator::new(month_delta_log_size);
-        let mut col_gen = logup_gen.new_col();
-        for vec_row in 0..(1 << (month_delta_log_size - LOG_N_LANES)) {
-            let value: PackedM31 = preprocessed.month_delta_table[0].values.data[vec_row];
-            let mult: PackedM31 = witness_data.month_delta_mult_trace[0].values.data[vec_row];
-            col_gen.write_frac(
-                vec_row,
-                PackedQM31::from(-mult),
-                lookup_elements.month_delta.combine(&[value]),
-            );
-        }
-        col_gen.finalize_col();
-        let (month_delta_interaction, month_delta_claimed_sum) = logup_gen.finalize_last();
-
-        // Year delta table
-        let mut logup_gen = LogupTraceGenerator::new(year_delta_log_sz);
-        let mut col_gen = logup_gen.new_col();
-        for vec_row in 0..(1 << (year_delta_log_sz - LOG_N_LANES)) {
-            let value: PackedM31 = preprocessed.year_delta_table[0].values.data[vec_row];
-            let mult: PackedM31 = witness_data.year_delta_mult_trace[0].values.data[vec_row];
-            col_gen.write_frac(
-                vec_row,
-                PackedQM31::from(-mult),
-                lookup_elements.year_delta.combine(&[value]),
-            );
-        }
-        col_gen.finalize_col();
-        let (year_delta_interaction, year_delta_claimed_sum) = logup_gen.finalize_last();
+        // Class-D blinded delta tables: two fractions per row (`-mult`,
+        // `+is_dummy·mult`) paired into one column. The blind (`log+1`) domain
+        // size is read straight off the committed value column.
+        let (day_delta_interaction, day_delta_claimed_sum) = blind_delta_interaction(
+            preprocessed.day_delta_table[0].domain.log_size(),
+            &preprocessed.day_delta_table[0],
+            &preprocessed.day_delta_table[1],
+            &witness_data.day_delta_mult_trace[0],
+            &lookup_elements.day_delta,
+        );
+        let (month_delta_interaction, month_delta_claimed_sum) = blind_delta_interaction(
+            preprocessed.month_delta_table[0].domain.log_size(),
+            &preprocessed.month_delta_table[0],
+            &preprocessed.month_delta_table[1],
+            &witness_data.month_delta_mult_trace[0],
+            &lookup_elements.month_delta,
+        );
+        let (year_delta_interaction, year_delta_claimed_sum) = blind_delta_interaction(
+            preprocessed.year_delta_table[0].domain.log_size(),
+            &preprocessed.year_delta_table[0],
+            &preprocessed.year_delta_table[1],
+            &witness_data.year_delta_mult_trace[0],
+            &lookup_elements.year_delta,
+        );
 
         Self {
             age_interaction,

@@ -507,9 +507,9 @@ impl FrameworkEval for FinalAddCheckEval {
         let mut out_values = Vec::with_capacity(FINAL_ADD_OUTPUT_RELATION_ARITY);
         out_values.push(columns.sig_id.clone());
         out_values.extend(columns.x3.limbs().iter().cloned());
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             &self.output_relation,
-            -E::EF::from(active.clone()),
+            -active.clone(),
             &out_values,
         ));
 
@@ -686,7 +686,7 @@ impl FrameworkEval for FinalAddCheckEval {
             &signed_carry_values,
         );
 
-        eval.finalize_logup();
+        eval.finalize_logup_in_pairs();
         eval
     }
 }
@@ -703,11 +703,7 @@ fn consume_hint<E: EvalAtRow>(
     values.push(sig_id.clone());
     values.push(E::F::from(M31::from_u32_unchecked(cert_id)));
     values.extend(point.relation_values());
-    eval.add_to_relation(RelationEntry::new(
-        relation,
-        E::EF::from(active.clone()),
-        &values,
-    ));
+    eval.add_to_relation(RelationEntry::base(relation, active.clone(), &values));
 }
 
 /// Consume a cert's proven `s2_sign_bit` (use, `+gate`). Bound to the
@@ -725,11 +721,7 @@ fn consume_sign<E: EvalAtRow>(
         E::F::from(M31::from_u32_unchecked(cert_id)),
         bit.clone(),
     ];
-    eval.add_to_relation(RelationEntry::new(
-        relation,
-        E::EF::from(gate.clone()),
-        &values,
-    ));
+    eval.add_to_relation(RelationEntry::base(relation, gate.clone(), &values));
 }
 
 /// `r2p_y + r2_y − q·p = 0` over 13-bit limbs with signed carries, final 0.
@@ -775,11 +767,7 @@ fn consume_mul<E: EvalAtRow>(
     values.push(E::F::from(M31::from_u32_unchecked(mul_index)));
     values.push(E::F::from(M31::from_u32_unchecked(role)));
     values.extend(limbs.iter().cloned());
-    eval.add_to_relation(RelationEntry::new(
-        relation,
-        E::EF::from(active.clone()),
-        &values,
-    ));
+    eval.add_to_relation(RelationEntry::base(relation, active.clone(), &values));
 }
 
 /// `value + lo - hi - q·p = 0` over 13-bit limbs with signed carries, final 0.

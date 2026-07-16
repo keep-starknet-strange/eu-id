@@ -28,11 +28,12 @@ NATIONALITY ?=
 ACCEPTABLE  ?=
 
 .DEFAULT_GOAL := help
-.PHONY: help dev build run test check fmt bench bench-predicates bench-identity bench-report bench-mobile prove verify \
+.PHONY: help dev build run test test-ec-coprocessor test-ec-coprocessor-ignored check fmt bench bench-predicates bench-identity bench-report bench-breakdown bench-mobile prove verify \
         prove-age verify-age \
         prove-nat verify-nat \
         profile-prove-age-rc profile-verify-age-rc \
         profile-prove-age-bd profile-verify-age-bd \
+        publish-android-local publish-android-symbols publish-jvm-local publish-local \
         clean
 
 help:
@@ -42,12 +43,15 @@ help:
 	@echo "  make build         compile the whole workspace"
 	@echo "  make run           run the demo prover CLI"
 	@echo "  make test          run the workspace test suite in release mode"
+	@echo "  make test-ec-coprocessor          run default coprocessor tests"
+	@echo "  make test-ec-coprocessor-ignored  run scheduled default coprocessor ignored tests"
 	@echo "  make check         clippy + rustfmt — identical to the CI lint step"
 	@echo "  make fmt           apply rustfmt across the workspace"
 	@echo "  make bench             laptop criterion benchmark suite"
 	@echo "  make bench-predicates  run predicates benchmarks only"
 	@echo "  make bench-identity    criterion benchmark of the combined identity prover"
 	@echo "  make bench-report      combined-prover peak-memory + proof-size JSON report"
+	@echo "  make bench-breakdown   proof-size byte-breakdown baseline"
 	@echo "  make bench-mobile      mobile (iOS/Android) benchmark harness"
 	@echo "  make prove         prove age-over-18 from a sample credential"
 	@echo "  make verify        verify a generated proof"
@@ -71,6 +75,12 @@ help:
 	@echo "  make profile-verify-age-rc   profile age verify (range check)"
 	@echo "  make profile-prove-age-bd    profile age prove (bit decomposition)"
 	@echo "  make profile-verify-age-bd   profile age verify (bit decomposition)"
+	@echo ""
+	@echo "  make publish-android-local   build + publish the SDK AAR to ~/.m2 (mavenLocal)"
+	@echo "  make publish-android-symbols build + publish the SDK AAR with a GNU build-id (DWARF"
+	@echo "                               already on) so heapprofd/simpleperf traces symbolize"
+	@echo "  make publish-jvm-local       build + publish the SDK JVM jar to ~/.m2 (mavenLocal)"
+	@echo "  make publish-local           publish both the AAR and the JVM jar to ~/.m2"
 
 dev:
 	@if command -v cargo-watch >/dev/null 2>&1; then \
@@ -94,6 +104,12 @@ run:
 test:
 	cargo test --workspace --release
 
+test-ec-coprocessor:
+	cargo test -p eu-id-prover --features ec-coprocessor
+
+test-ec-coprocessor-ignored:
+	cargo test -p eu-id-prover --features ec-coprocessor --release -- --ignored
+
 check:
 	@bash scripts/check.sh
 
@@ -111,6 +127,10 @@ bench-identity:
 
 bench-report:
 	cargo run --release -p eu-id-prover --example bench_report -- target/bench-report.json
+
+bench-breakdown:
+	BENCH_BREAKDOWN=1 BENCH_LABEL=m4max cargo run --release -p eu-id-prover \
+		--example bench_report -- docs/benchmarks/proof-size-breakdown.json
 
 bench-mobile:
 	@if [ -d mobile ]; then \
@@ -165,6 +185,27 @@ profile-prove-age-bd:
 
 profile-verify-age-bd:
 	cargo instruments -t Allocations --manifest-path crates/predicates/Cargo.toml --bin verify --release -- age --strategy bd --input target/instruments/age-bd.bin
+
+# Cross-compile + package the SDK and install it into the local Maven repo
+# (~/.m2). Each Gradle project owns its native build (cargo-ndk / cargo-zigbuild)
+# and UniFFI binding generation, and stamps the artifact with the workspace
+# version (parsed from [workspace.package] in Cargo.toml). Consumers depend on
+# the result via `mavenLocal()`.
+publish-android-local:
+	cd crates/sdk/android && ./gradlew publishToMavenLocal
+
+# Same as publish-android-local, but relinks each .so with a GNU build-id so the
+# stripped on-device lib can be matched to the unstripped copy in
+# crates/sdk/android/src/main/jniLibs for offline symbolization (Perfetto/heapprofd,
+# simpleperf). Toggling the flag changes the cargo build fingerprint, so this forces
+# a relink. DWARF is already produced by [profile.release] debug = true.
+publish-android-symbols:
+	cd crates/sdk/android && ./gradlew publishToMavenLocal -PemitBuildId=true
+
+publish-jvm-local:
+	cd crates/sdk/jvm && ./gradlew publishToMavenLocal
+
+publish-local: publish-android-local publish-jvm-local
 
 clean:
 	cargo clean

@@ -7,11 +7,22 @@ use stwo::core::channel::Channel;
 use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::QM31;
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
-use stwo::prover::backend::simd::m31::{PackedM31, LOG_N_LANES};
+use stwo::prover::backend::simd::m31::PackedM31;
 use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::TreeBuilder;
 use stwo_constraint_framework::{LogupTraceGenerator, Relation};
+
+fn write_pair(
+    logup: &mut LogupTraceGenerator,
+    first: (PackedQM31, PackedQM31),
+    second: (PackedQM31, PackedQM31),
+) {
+    let (n0, d0) = first;
+    let (n1, d1) = second;
+    // LOG_SIZE == LOG_N_LANES, so there is exactly 1 packed row.
+    logup.col_from_fn(|_| (n0 * d1 + n1 * d0, d0 * d1));
+}
 
 pub struct InteractionTraces {
     pub age_interaction: Trace,
@@ -35,62 +46,50 @@ impl InteractionTraces {
         // LOG_SIZE == LOG_N_LANES, so there is exactly 1 packed row.
         let mut logup_gen = LogupTraceGenerator::new(WitnessData::log_size());
 
-        let mut col_gen = logup_gen.new_col();
-        col_gen.write_frac(
-            0,
-            PackedQM31::one(),
-            lookup_elements.calendar.combine(&[
-                PackedM31::broadcast(M31::from_u32_unchecked(witness_data.table_index)),
-                PackedM31::broadcast(M31::from_u32_unchecked(witness_data.dob_max_days)),
-            ]),
+        write_pair(
+            &mut logup_gen,
+            (
+                PackedQM31::one(),
+                lookup_elements.calendar.combine(&[
+                    PackedM31::broadcast(M31::from_u32_unchecked(witness_data.table_index)),
+                    PackedM31::broadcast(M31::from_u32_unchecked(witness_data.dob_max_days)),
+                ]),
+            ),
+            (
+                PackedQM31::one(),
+                lookup_elements.valid_day.combine(&[
+                    PackedM31::broadcast(M31::from_u32_unchecked(witness_data.dob_max_days)),
+                    PackedM31::broadcast(M31::from_u32_unchecked(witness_data.dob_day)),
+                ]),
+            ),
         );
-        col_gen.finalize_col();
-
-        let mut col_gen = logup_gen.new_col();
-        col_gen.write_frac(
-            0,
-            PackedQM31::one(),
-            lookup_elements.valid_day.combine(&[
-                PackedM31::broadcast(M31::from_u32_unchecked(witness_data.dob_max_days)),
-                PackedM31::broadcast(M31::from_u32_unchecked(witness_data.dob_day)),
-            ]),
-        );
-        col_gen.finalize_col();
 
         let (age_interaction, age_claimed_sum) = logup_gen.finalize_last();
 
         // Calendar table
-        let cal_packed_rows = 1 << (cal_log_size - LOG_N_LANES);
         let mut logup_gen = LogupTraceGenerator::new(cal_log_size);
-        let mut col_gen = logup_gen.new_col();
-        for vec_row in 0..cal_packed_rows {
+        logup_gen.col_from_fn(|vec_row| {
             let max_days_val: PackedM31 = preprocessed.cal_trace[0].values.data[vec_row];
             let index_val: PackedM31 = preprocessed.cal_trace[1].values.data[vec_row];
             let mult_val: PackedM31 = witness_data.cal_mult_trace[0].values.data[vec_row];
-            col_gen.write_frac(
-                vec_row,
+            (
                 PackedQM31::from(-mult_val),
                 lookup_elements.calendar.combine(&[index_val, max_days_val]),
-            );
-        }
-        col_gen.finalize_col();
+            )
+        });
         let (cal_interaction, cal_claimed_sum) = logup_gen.finalize_last();
 
         // Valid-day table
-        let valid_day_packed_rows = 1 << (valid_day_log_size - LOG_N_LANES);
         let mut logup_gen = LogupTraceGenerator::new(valid_day_log_size);
-        let mut col_gen = logup_gen.new_col();
-        for vec_row in 0..valid_day_packed_rows {
+        logup_gen.col_from_fn(|vec_row| {
             let max_days_val: PackedM31 = preprocessed.valid_day_trace[0].values.data[vec_row];
             let day_val: PackedM31 = preprocessed.valid_day_trace[1].values.data[vec_row];
             let mult_val: PackedM31 = witness_data.valid_day_mult_trace[0].values.data[vec_row];
-            col_gen.write_frac(
-                vec_row,
+            (
                 PackedQM31::from(-mult_val),
                 lookup_elements.valid_day.combine(&[max_days_val, day_val]),
-            );
-        }
-        col_gen.finalize_col();
+            )
+        });
         let (valid_day_interaction, valid_day_claimed_sum) = logup_gen.finalize_last();
 
         Self {

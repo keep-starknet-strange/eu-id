@@ -73,7 +73,9 @@ use crate::scalar::canonical_lt::{add_canonical_lt_fixed_bound, CanonicalLtRelat
 use crate::final_check::FinalEcdsaCheckClaim;
 use crate::limbs::{P256BigInt, P256M31BigInt};
 use crate::public_inputs::{PublicEcdsaInputClaim, PublicEcdsaInstance};
-use crate::range_checks::{decode_signed_carry, encode_signed_carry, RangeCheckRelation};
+use crate::range_checks::{
+    decode_signed_carry, encode_signed_carry, write_batched_logup_columns, RangeCheckRelation,
+};
 use crate::scalar::scalar_mod_mul::columns::{m31_column_eval, padded_log_size, M31ColumnEval};
 use crate::scalar::setup_air::{
     add_digest_reduction, DigestReductionColumns, DigestReductionRelations,
@@ -287,9 +289,9 @@ impl FrameworkEval for FinalCheckAirEval {
         let mut values = Vec::with_capacity(ECDSA_RESULT_RELATION_ARITY);
         values.push(sig_id.clone());
         values.extend(r_check.limbs().iter().cloned());
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             &self.result_relation,
-            E::EF::from(active.clone()),
+            active.clone(),
             &values,
         ));
 
@@ -299,12 +301,12 @@ impl FrameworkEval for FinalCheckAirEval {
         let mut output_values = Vec::with_capacity(1 + N_LIMBS);
         output_values.push(sig_id);
         output_values.extend(r_x_limbs.iter().cloned());
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             &self.final_add_output,
-            E::EF::from(active),
+            active,
             &output_values,
         ));
-        eval.finalize_logup();
+        eval.finalize_logup_in_pairs();
         eval
     }
 }
@@ -440,8 +442,8 @@ pub(crate) fn gen_final_check_air_interaction_trace(
 ) -> (ColumnVec<M31ColumnEval>, FinalCheckAirInteractionClaim) {
     assert_eq!(base.len(), FINAL_CHECK_TRACE_COLUMNS);
     let log_size = base[0].domain.log_size();
-    let mut logup = LogupTraceGenerator::new(log_size);
     let active_col = 0;
+    let mut entries = Vec::new();
 
     // Order mirrors `FinalCheckAirEval::evaluate`: first
     // `add_digest_reduction` emits z + signed_carry per limb, then
@@ -452,15 +454,15 @@ pub(crate) fn gen_final_check_air_interaction_trace(
         } else {
             relations.range13
         };
-        append_range_column(
-            &mut logup,
+        append_range_entry(
+            &mut entries,
             base,
             active_col,
             z_relation,
             r_x_offset() + limb,
         );
-        append_range_column(
-            &mut logup,
+        append_range_entry(
+            &mut entries,
             base,
             active_col,
             relations.signed_carry,
@@ -468,15 +470,15 @@ pub(crate) fn gen_final_check_air_interaction_trace(
         );
     }
     for limb in 0..N_LIMBS {
-        append_range_column(
-            &mut logup,
+        append_range_entry(
+            &mut entries,
             base,
             active_col,
             relations.range13,
             r_check_offset() + limb,
         );
-        append_range_column(
-            &mut logup,
+        append_range_entry(
+            &mut entries,
             base,
             active_col,
             relations.range13,
@@ -490,15 +492,15 @@ pub(crate) fn gen_final_check_air_interaction_trace(
     // additionally Range9-checked above), which is redundant but keeps the
     // shared gadget intact.
     for limb in 0..N_LIMBS {
-        append_range_column(
-            &mut logup,
+        append_range_entry(
+            &mut entries,
             base,
             active_col,
             relations.range13,
             r_x_offset() + limb,
         );
-        append_range_column(
-            &mut logup,
+        append_range_entry(
+            &mut entries,
             base,
             active_col,
             relations.range13,
@@ -506,31 +508,21 @@ pub(crate) fn gen_final_check_air_interaction_trace(
         );
     }
     // Result relation: consumer emits (active / combine(result, values)).
-    let mut col = logup.new_col();
-    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
-        col.write_frac(
-            vec_row,
-            PackedQM31::from(base[active_col].data[vec_row]),
-            relations
-                .result
-                .combine(&result_packed_values_from_base(base, vec_row)),
-        );
-    }
-    col.finalize_col();
+    append_relation_entry(&mut entries, base, active_col, |vec_row| {
+        relations
+            .result
+            .combine(&result_packed_values_from_base(base, vec_row))
+    });
 
     // FinalAddOutput relation: consumer emits (active / combine(sig_id, r_x)).
-    let mut col = logup.new_col();
-    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
-        col.write_frac(
-            vec_row,
-            PackedQM31::from(base[active_col].data[vec_row]),
-            relations
-                .final_add_output
-                .combine(&final_add_output_packed_values_from_base(base, vec_row)),
-        );
-    }
-    col.finalize_col();
+    append_relation_entry(&mut entries, base, active_col, |vec_row| {
+        relations
+            .final_add_output
+            .combine(&final_add_output_packed_values_from_base(base, vec_row))
+    });
 
+    let mut logup = LogupTraceGenerator::new(log_size);
+    write_batched_logup_columns(&mut logup, &entries, 2);
     let (trace, claimed_sum) = logup.finalize_last();
 
     (trace, FinalCheckAirInteractionClaim { claimed_sum })
@@ -550,21 +542,33 @@ fn final_add_output_packed_values_from_base(
     })
 }
 
-fn append_range_column(
-    logup: &mut LogupTraceGenerator,
+type LogupEntry = (Vec<PackedQM31>, Vec<PackedQM31>);
+
+fn append_range_entry(
+    entries: &mut Vec<LogupEntry>,
     base: &[M31ColumnEval],
     active_col: usize,
     relation: &RangeCheckRelation,
     value_col: usize,
 ) {
+    append_relation_entry(entries, base, active_col, |vec_row| {
+        relation.combine(&[base[value_col].data[vec_row]])
+    });
+}
+
+fn append_relation_entry(
+    entries: &mut Vec<LogupEntry>,
+    base: &[M31ColumnEval],
+    active_col: usize,
+    denominator: impl Fn(usize) -> PackedQM31,
+) {
     let log_size = base[0].domain.log_size();
-    let mut col = logup.new_col();
-    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
-        let numerator = PackedQM31::from(base[active_col].data[vec_row]);
-        let denominator = relation.combine(&[base[value_col].data[vec_row]]);
-        col.write_frac(vec_row, numerator, denominator);
-    }
-    col.finalize_col();
+    let vec_rows = 1 << (log_size - LOG_N_LANES);
+    let numerators = (0..vec_rows)
+        .map(|vec_row| PackedQM31::from(base[active_col].data[vec_row]))
+        .collect();
+    let denominators = (0..vec_rows).map(denominator).collect();
+    entries.push((numerators, denominators));
 }
 
 /// Per-active-row range13 uses, matching the emission order in

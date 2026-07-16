@@ -7,32 +7,23 @@
 use serde::{Deserialize, Serialize};
 use stwo::core::{channel::Channel, fields::m31::M31, fields::qm31::SecureField, ColumnVec};
 use stwo::prover::backend::simd::{
-    m31::{PackedM31, LOG_N_LANES, N_LANES},
+    m31::{PackedM31, LOG_N_LANES},
     qm31::PackedQM31,
 };
 use stwo_constraint_framework::{LogupTraceGenerator, Relation};
 use stwo_p256_utils::constants::N_LIMBS;
 
-use crate::components::gamma_digest::{
-    gamma_collect_group_values, gamma_digest_of_values, gamma_digest_tuple, gamma_digest_yield_sum,
-    gamma_row_index_of, GammaChallenge, GammaDigestRelation, GammaTallInstance,
-    GammaTallInteractionClaim, GammaTallLayout, GAMMA_TAG_PREPARED_RANGE13,
-    GAMMA_TAG_PREPARED_SIGNED,
-};
 use crate::components::ComponentInteractionClaim;
 use crate::constants::{P256_3GX, P256_3GY};
 use crate::limbs::P256M31BigInt;
 use crate::projective_air::{
-    ProjectiveRcbMulResultRelation, PROJECTIVE_RCB_MUL_ROLE_LHS, PROJECTIVE_RCB_MUL_ROLE_RESULT,
-    PROJECTIVE_RCB_MUL_ROLE_RHS, PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS,
+    ProjectiveRcbMulResultRelation, PROJECTIVE_RCB_MUL_ROLE_LHS, PROJECTIVE_RCB_MUL_ROLE_RHS,
 };
-use crate::range_checks::RangeCheckInteractionClaim;
+use crate::range_checks::write_batched_logup_columns;
 use crate::types::U256;
 
 use crate::scalar::scalar_mod_mul::columns::M31ColumnEval;
 
-use super::super::ec_source::double_formula::DOUBLE_TOTAL_REDUCTIONS;
-use super::super::ec_source::mixed_add_formula::MIXED_ADD_TOTAL_REDUCTIONS;
 use super::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,14 +41,6 @@ impl PreparedTableEcRowInteractionClaim {
 pub struct PreparedTableProjectiveSourceInteractionClaim {
     pub provider: ComponentInteractionClaim,
     pub consumer: ComponentInteractionClaim,
-    /// γ-digest: the range13-kind tall expander (digest use + range uses).
-    pub gamma_range13: GammaTallInteractionClaim,
-    /// γ-digest: the signed-kind tall expander.
-    pub gamma_signed: GammaTallInteractionClaim,
-    /// C5-2: the self-contained Range13 PROVIDER (yield) sum.
-    pub range13: RangeCheckInteractionClaim,
-    /// C5-2: the self-contained signed-carry PROVIDER (yield) sum.
-    pub signed_carry: RangeCheckInteractionClaim,
 }
 
 impl PreparedTableProjectiveSourceInteractionClaim {
@@ -65,41 +48,23 @@ impl PreparedTableProjectiveSourceInteractionClaim {
         Self {
             provider: ComponentInteractionClaim::zero(),
             consumer: ComponentInteractionClaim::zero(),
-            gamma_range13: GammaTallInteractionClaim::zero(),
-            gamma_signed: GammaTallInteractionClaim::zero(),
-            range13: RangeCheckInteractionClaim {
-                claimed_sum: secure_zero(),
-            },
-            signed_carry: RangeCheckInteractionClaim {
-                claimed_sum: secure_zero(),
-            },
         }
     }
 
     /// `PreparedTableProjectiveSource` balance term: provider + EC-row consume.
     /// EXCLUDES the mul-result consume (balanced under `ProjectiveRcbMulResult`)
-    /// and the range13/signed-carry consume+provide (balanced under their own
-    /// `PreparedTableProjective{Range13,SignedCarry}` relations).
+    /// and the header yield (balanced under `EcOpHeader`).
     pub fn total(&self) -> SecureField {
         self.provider.claimed_sum + self.consumer.claimed_sum
     }
 
     pub(crate) fn component_claimed_sum(&self) -> SecureField {
-        self.provider.claimed_sum
-            + self.consumer.claimed_sum
-            + self.gamma_range13.claimed_sum
-            + self.gamma_signed.claimed_sum
-            + self.range13.claimed_sum
-            + self.signed_carry.claimed_sum
+        self.provider.claimed_sum + self.consumer.claimed_sum
     }
 
     pub fn mix_into(&self, channel: &mut impl Channel) {
         self.provider.mix_into(channel);
         self.consumer.mix_into(channel);
-        self.range13.mix_into(channel);
-        self.signed_carry.mix_into(channel);
-        self.gamma_range13.mix_into(channel);
-        self.gamma_signed.mix_into(channel);
     }
 }
 
@@ -112,14 +77,12 @@ pub(crate) fn gen_prepared_table_ec_row_interaction_trace(
     assert_eq!(base.len(), PREPARED_TABLE_EC_ROW_TRACE_COLUMNS);
     let log_size = base[0].domain.log_size();
     let mut logup = LogupTraceGenerator::new(log_size);
-    let mut col = logup.new_col();
-    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+    logup.col_from_fn(|vec_row| {
         let values = prepared_table_ec_row_packed_relation_values(base, vec_row);
         let numerator = -PackedQM31::from(base[0].data[vec_row]);
         let denominator: PackedQM31 = relation.combine(&values);
-        col.write_frac(vec_row, numerator, denominator);
-    }
-    col.finalize_col();
+        (numerator, denominator)
+    });
     let (trace, claimed_sum) = logup.finalize_last();
     (trace, PreparedTableEcRowInteractionClaim { claimed_sum })
 }
@@ -188,27 +151,23 @@ pub(crate) fn gen_prepared_table_ec_row_pinned_interaction_trace(
     assert_eq!(base.len(), PREPARED_TABLE_EC_ROW_TRACE_COLUMNS);
     let log_size = base[0].domain.log_size();
     let n_vec_rows = 1 << (log_size - LOG_N_LANES);
-    let mut logup = LogupTraceGenerator::new(log_size);
+    let mut entries = Vec::new();
 
-    // Column 0: the existing PreparedTableEcRowRelation yield (-active).
-    let mut col = logup.new_col();
-    for vec_row in 0..n_vec_rows {
+    // Entry 0: the existing PreparedTableEcRowRelation yield (-active).
+    append_packed_entry(&mut entries, n_vec_rows, |vec_row| {
         let values = prepared_table_ec_row_packed_relation_values(base, vec_row);
-        col.write_frac(
-            vec_row,
+        (
             -PackedQM31::from(base[0].data[vec_row]),
             relation.combine(&values),
-        );
-    }
-    col.finalize_col();
+        )
+    });
 
     let three_g_x = P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_3GX));
     let three_g_y = P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_3GY));
 
-    // Columns 1..=30: the pinning schedule, one fraction per entry.
+    // Entries 1..=30: the pinning schedule, one fraction per entry.
     for entry in PIN_SCHEDULE {
-        let mut col = logup.new_col();
-        for vec_row in 0..n_vec_rows {
+        append_packed_entry(&mut entries, n_vec_rows, |vec_row| {
             let sig = base[PREPARED_TABLE_EC_COL_SIG_ID].data[vec_row];
             let cert = base[PREPARED_TABLE_EC_COL_CERT_ID].data[vec_row];
             let active = base[0].data[vec_row];
@@ -242,17 +201,15 @@ pub(crate) fn gen_prepared_table_ec_row_pinned_interaction_trace(
                     canonical.combine(&tuple)
                 }
             };
-            col.write_frac(vec_row, numerator, denominator);
-        }
-        col.finalize_col();
+            (numerator, denominator)
+        });
     }
 
-    // Optional FinalCheckHint column: yield `R_i` (= `lhs`) gated `active *
+    // Optional FinalCheckHint entry: yield `R_i` (= `lhs`) gated `active *
     // DoubleR_flag`, multiplicity `-1`. Emitted iff a relation is supplied, in
     // lockstep with the AIR's `if let Some(final_check_hint)` emission.
     if let Some(final_check_hint) = final_check_hint {
-        let mut col = logup.new_col();
-        for vec_row in 0..n_vec_rows {
+        append_packed_entry(&mut entries, n_vec_rows, |vec_row| {
             let sig = base[PREPARED_TABLE_EC_COL_SIG_ID].data[vec_row];
             let cert = base[PREPARED_TABLE_EC_COL_CERT_ID].data[vec_row];
             let active = base[0].data[vec_row];
@@ -267,11 +224,12 @@ pub(crate) fn gen_prepared_table_ec_row_pinned_interaction_trace(
                 cert,
                 PREPARED_TABLE_EC_COL_LHS,
             ));
-            col.write_frac(vec_row, numerator, denominator);
-        }
-        col.finalize_col();
+            (numerator, denominator)
+        });
     }
 
+    let mut logup = LogupTraceGenerator::new(log_size);
+    write_batched_logup_columns(&mut logup, &entries, 2);
     let (trace, claimed_sum) = logup.finalize_last();
 
     let mut final_check_hint_claimed_sum = secure_zero();
@@ -302,6 +260,23 @@ pub(crate) fn gen_prepared_table_ec_row_pinned_interaction_trace(
             },
         },
     )
+}
+
+type LogupEntry = (Vec<PackedQM31>, Vec<PackedQM31>);
+
+fn append_packed_entry(
+    entries: &mut Vec<LogupEntry>,
+    vec_rows: usize,
+    fraction: impl Fn(usize) -> (PackedQM31, PackedQM31),
+) {
+    let mut numerators = Vec::with_capacity(vec_rows);
+    let mut denominators = Vec::with_capacity(vec_rows);
+    for vec_row in 0..vec_rows {
+        let (numerator, denominator) = fraction(vec_row);
+        numerators.push(numerator);
+        denominators.push(denominator);
+    }
+    entries.push((numerators, denominators));
 }
 
 #[cfg(test)]
@@ -530,129 +505,198 @@ fn prepared_table_ec_row_unpacked_relation_values(
     })
 }
 
-/// Canonical role order for the consumed mul-limb columns, matching
-/// `projective_rcb_op_mul_limbs` and `ConsumedMulLimbs`.
-const PROJECTIVE_RCB_MUL_RESULT_ROLES: [u32; 3] = [
-    PROJECTIVE_RCB_MUL_ROLE_LHS,
-    PROJECTIVE_RCB_MUL_ROLE_RHS,
-    PROJECTIVE_RCB_MUL_ROLE_RESULT,
+// Interaction trace for the prepared-table projective-source CONSUMER (Phase 3
+// narrow layout). Emits, in the exact order the eval does under one
+// `finalize_logup_batched`:
+//   0. the `PreparedTableEcRowRelation` consume (+active),
+//   1..=6. the 6 narrow `ProjectiveRcbMulResultRelation` consumes (+gate),
+//   7. the `EcOpHeaderRelation` yield (−gate),
+// where `gate = active − (1−op)·rhs.inf` (the group-existence gate, ≡ the old
+// `has_muls`).
+//
+// LogUp batch size: 1 fraction per interaction column. The op-mux consume
+// entries (M0.rhs at index 2, M1.rhs at index 4) have degree-2 tuple values;
+// pairing them with a neighbor pushes the logup constraint past degree 3,
+// which overflows the `log_size + 1` bound. `finalize_logup_batched` only
+// supports a uniform batch size, so everything goes solo.
+pub(crate) const PREPARED_CONSUMER_LOGUP_BATCH: usize = 1;
+
+/// Total LogUp entries the consumer eval emits (EC-row consume + 6 narrow mul
+/// consumes + the EC-op header yield), in emission order.
+pub(crate) fn prepared_consumer_logup_entries() -> usize {
+    1 + NARROW_MUL_CONSUME_SLOTS.len() + 1
+}
+
+/// Gen-side point column offsets for the narrow mul consumes.
+pub(crate) struct NarrowMulConsumeColumns {
+    pub source: usize,
+    pub op: usize,
+    pub lhs_x: usize,
+    pub lhs_y: usize,
+    pub rhs_x: usize,
+    pub rhs_y: usize,
+    pub rhs_inf: usize,
+    pub out_x: usize,
+    pub out_y: usize,
+}
+
+/// The 6 narrow consume slots in eval emission order:
+/// `(mul_index, role, own column, Some(mix column) for op-mux slots)`.
+pub(crate) const NARROW_MUL_CONSUME_SLOTS: [(u32, u32, NarrowSlotSide); 6] = [
+    (0, PROJECTIVE_RCB_MUL_ROLE_LHS, NarrowSlotSide::LhsX),
+    (0, PROJECTIVE_RCB_MUL_ROLE_RHS, NarrowSlotSide::MixX),
+    (1, PROJECTIVE_RCB_MUL_ROLE_LHS, NarrowSlotSide::LhsY),
+    (1, PROJECTIVE_RCB_MUL_ROLE_RHS, NarrowSlotSide::MixY),
+    (13, PROJECTIVE_RCB_MUL_ROLE_LHS, NarrowSlotSide::OutX),
+    (14, PROJECTIVE_RCB_MUL_ROLE_LHS, NarrowSlotSide::OutY),
 ];
 
-// C5 plumbing: interaction trace for the prepared-table projective-source
-// CONSUMER. Emits, in the order `PreparedTableProjectiveSourceEval::evaluate`
-// does under one `finalize_logup`: the `PreparedTableEcRowRelation` consume
-// (col 0, `+active`), then one `ProjectiveRcbMulResultRelation` consume column
-// per committed mul limb (canonical mul/role/limb order, `+active`). Returns
-// the columns, the EC-row consumer sum, and the mul-result consumer sum.
-//
-// LogUp batch size for the prepared-table projective-source consumer: 2
-// fractions per interaction column (degree <= 3 at the `log_size + 1` bound;
-// bounds past +1 empirically fail OODS in this stwo).
-pub(crate) const PREPARED_CONSUMER_LOGUP_BATCH: usize = 2;
-
-/// Total LogUp entries the consumer eval emits (EC-row consume + wide mul
-/// consumes + the two γ-digest yields), in emission order.
-pub(crate) fn prepared_consumer_logup_entries() -> usize {
-    1 + (PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS / (3 * N_LIMBS)) * 3 + 2
+#[derive(Clone, Copy)]
+pub(crate) enum NarrowSlotSide {
+    LhsX,
+    MixX,
+    LhsY,
+    MixY,
+    OutX,
+    OutY,
 }
 
-/// Consumer logup batching: pairs, except the operand-dedup slots whose
-/// consume values are degree-2 op-mixes (solo batches; see the fake-GLV twin).
-pub(crate) fn prepared_consumer_logup_batching() -> Vec<usize> {
-    let solo: Vec<usize> = (0..PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS / (3 * N_LIMBS))
-        .flat_map(|mul| (0..3usize).map(move |role| (mul, role)))
-        .filter(|&(mul, role)| crate::projective_air::consumed_mul_slot_degree2(mul, role))
-        .map(|(mul, role)| 1 + mul * 3 + role)
-        .collect();
-    crate::range_checks::batching_with_solo(
-        prepared_consumer_logup_entries(),
-        PREPARED_CONSUMER_LOGUP_BATCH,
-        &solo,
-    )
-}
-
-/// Gen-side layout for `consumed_mul_slot_packed_limbs` over the prepared
-/// consumer base trace (6 metadata columns — `table_index` follows `op`).
-fn prepared_consumed_mul_gen_layout() -> crate::projective_air::ConsumedMulGenLayout {
-    crate::projective_air::ConsumedMulGenLayout {
-        op_col: 4,
-        x1_col: 6,
-        y1_col: 6 + N_LIMBS,
-        x2_col: 6 + PREPARED_TABLE_EC_POINT_COLUMNS,
-        y2_col: 6 + PREPARED_TABLE_EC_POINT_COLUMNS + N_LIMBS,
-        output_x_col: 6 + 2 * PREPARED_TABLE_EC_POINT_COLUMNS,
-        output_y_col: 6 + 2 * PREPARED_TABLE_EC_POINT_COLUMNS + N_LIMBS,
-        z3_double_col: PREPARED_TABLE_PROJECTIVE_SOURCE_DOUBLE_FORMULA_OFFSET + 2 * N_LIMBS,
-        z3_mixed_col: PREPARED_TABLE_PROJECTIVE_SOURCE_MIXED_ADD_FORMULA_OFFSET + 2 * N_LIMBS,
-        mul_limb_offset: PREPARED_TABLE_PROJECTIVE_SOURCE_MUL_LIMB_OFFSET,
+impl NarrowSlotSide {
+    /// `(own column, Some(mix column))`: the slot value is `own` for plain
+    /// slots and `op·own + (1−op)·mix` for the op-mux slots.
+    fn columns(self, cols: &NarrowMulConsumeColumns) -> (usize, Option<usize>) {
+        match self {
+            NarrowSlotSide::LhsX => (cols.lhs_x, None),
+            NarrowSlotSide::MixX => (cols.lhs_x, Some(cols.rhs_x)),
+            NarrowSlotSide::LhsY => (cols.lhs_y, None),
+            NarrowSlotSide::MixY => (cols.lhs_y, Some(cols.rhs_y)),
+            NarrowSlotSide::OutX => (cols.out_x, None),
+            NarrowSlotSide::OutY => (cols.out_y, None),
+        }
     }
 }
 
-/// Range13 digest value order: the Double-formula list then the MixedAdd list.
-pub(crate) fn prepared_gamma_range13_columns() -> Vec<usize> {
-    let mut columns = prepared_double_formula_range13_use_columns();
-    columns.extend(prepared_mixed_add_formula_range13_use_columns());
-    columns
+/// Group-existence gate lanes: `active − (1−op)·rhs.inf` per packed row.
+pub(crate) fn narrow_mul_gate_lanes(
+    base: &[M31ColumnEval],
+    cols: &NarrowMulConsumeColumns,
+    vec_rows: usize,
+) -> Vec<PackedM31> {
+    let one = PackedM31::broadcast(M31::from_u32_unchecked(1));
+    (0..vec_rows)
+        .map(|vec_row| {
+            base[0].data[vec_row]
+                - (one - base[cols.op].data[vec_row]) * base[cols.rhs_inf].data[vec_row]
+        })
+        .collect()
 }
 
-/// Signed-carry digest value order: Double then MixedAdd reduction carries.
-pub(crate) fn prepared_gamma_signed_carry_columns() -> Vec<usize> {
-    let mut columns = prepared_double_formula_signed_carry_use_columns();
-    columns.extend(prepared_mixed_add_formula_signed_carry_use_columns());
-    columns
+/// Append the 6 narrow mul-result consume entries (numerator `+gate`) in eval
+/// emission order.
+pub(crate) fn push_narrow_mul_consume_entries(
+    entries: &mut Vec<(Vec<PackedQM31>, Vec<PackedQM31>)>,
+    base: &[M31ColumnEval],
+    cols: &NarrowMulConsumeColumns,
+    gate: &[PackedM31],
+    relation: &ProjectiveRcbMulResultRelation,
+    vec_rows: usize,
+) {
+    let one = PackedM31::broadcast(M31::from_u32_unchecked(1));
+    for (mul, role, side) in NARROW_MUL_CONSUME_SLOTS {
+        let (own_col, mix_col) = side.columns(cols);
+        entries.push((
+            gate.iter().map(|&lanes| PackedQM31::from(lanes)).collect(),
+            (0..vec_rows)
+                .map(|vec_row| {
+                    let op = base[cols.op].data[vec_row];
+                    let mut values = Vec::with_capacity(3 + N_LIMBS);
+                    values.push(base[cols.source].data[vec_row]);
+                    values.push(PackedM31::broadcast(M31::from_u32_unchecked(mul)));
+                    values.push(PackedM31::broadcast(M31::from_u32_unchecked(role)));
+                    for limb in 0..N_LIMBS {
+                        let own = base[own_col + limb].data[vec_row];
+                        values.push(match mix_col {
+                            Some(mix_col) => {
+                                op * own + (one - op) * base[mix_col + limb].data[vec_row]
+                            }
+                            None => own,
+                        });
+                    }
+                    relation.combine(&values)
+                })
+                .collect(),
+        ));
+    }
 }
 
-/// The two γ-digest tall layouts for `rows` scheduled prepared-table rows.
-pub fn prepared_gamma_layouts(rows: usize) -> [GammaTallLayout; 2] {
-    [
-        GammaTallLayout {
-            tag: GAMMA_TAG_PREPARED_RANGE13,
-            group_count: rows,
-            values_per_group: prepared_gamma_range13_columns().len(),
-        },
-        GammaTallLayout {
-            tag: GAMMA_TAG_PREPARED_SIGNED,
-            group_count: rows,
-            values_per_group: prepared_gamma_signed_carry_columns().len(),
-        },
-    ]
+/// Analytic narrow mul-result consume sum (`Σ gate/denom` over the 6 slots of
+/// every gated row). `gate` is boolean on honest traces, so rows are skipped
+/// when it is zero.
+pub(crate) fn narrow_mul_consume_sum(
+    base: &[M31ColumnEval],
+    cols: &NarrowMulConsumeColumns,
+    relation: &ProjectiveRcbMulResultRelation,
+) -> SecureField {
+    let log_size = base[0].domain.log_size();
+    let one = M31::from_u32_unchecked(1);
+    let mut denominators = Vec::new();
+    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+        for lane in 0..(1 << LOG_N_LANES) {
+            let cell = |col: usize| base[col].data[vec_row].to_array()[lane];
+            let op = cell(cols.op);
+            let gate = cell(0) - (one - op) * cell(cols.rhs_inf);
+            if gate == M31::from_u32_unchecked(0) {
+                continue;
+            }
+            for (mul, role, side) in NARROW_MUL_CONSUME_SLOTS {
+                let (own_col, mix_col) = side.columns(cols);
+                let mut values = Vec::with_capacity(3 + N_LIMBS);
+                values.push(cell(cols.source));
+                values.push(M31::from_u32_unchecked(mul));
+                values.push(M31::from_u32_unchecked(role));
+                for limb in 0..N_LIMBS {
+                    let own = cell(own_col + limb);
+                    values.push(match mix_col {
+                        Some(mix_col) => op * own + (one - op) * cell(mix_col + limb),
+                        None => own,
+                    });
+                }
+                denominators.push(relation.combine(&values));
+            }
+        }
+    }
+    crate::range_checks::batched_inverse_sum(&denominators)
 }
 
-/// Build the two γ-digest tall instances from the consumer base trace.
-pub(crate) fn prepared_gamma_instances(base: &[M31ColumnEval]) -> [GammaTallInstance; 2] {
-    let r13_columns = prepared_gamma_range13_columns();
-    let signed_columns = prepared_gamma_signed_carry_columns();
-    let r13_groups = gamma_collect_group_values(base, &r13_columns);
-    let signed_groups = gamma_collect_group_values(base, &signed_columns);
-    [
-        GammaTallInstance::new(
-            GAMMA_TAG_PREPARED_RANGE13,
-            r13_columns.len(),
-            M31::from_u32_unchecked(0),
-            r13_groups,
-        ),
-        GammaTallInstance::new(
-            GAMMA_TAG_PREPARED_SIGNED,
-            signed_columns.len(),
-            crate::range_checks::encode_signed_carry(0),
-            signed_groups,
-        ),
-    ]
+/// The prepared-table consumer's narrow-consume column layout (6 metadata
+/// columns — `table_index` follows `op`; points start at column 6).
+pub(crate) fn prepared_narrow_mul_columns() -> NarrowMulConsumeColumns {
+    NarrowMulConsumeColumns {
+        source: 1,
+        op: 4,
+        lhs_x: 6,
+        lhs_y: 6 + N_LIMBS,
+        rhs_x: 6 + PREPARED_TABLE_EC_POINT_COLUMNS,
+        rhs_y: 6 + PREPARED_TABLE_EC_POINT_COLUMNS + N_LIMBS,
+        rhs_inf: 6 + 2 * PREPARED_TABLE_EC_POINT_COLUMNS - 1,
+        out_x: 6 + 2 * PREPARED_TABLE_EC_POINT_COLUMNS,
+        out_y: 6 + 2 * PREPARED_TABLE_EC_POINT_COLUMNS + N_LIMBS,
+    }
 }
 
 pub(crate) fn gen_prepared_table_projective_source_consumer_interaction_trace(
     base: &[M31ColumnEval],
     ec_row_relation: &PreparedTableEcRowRelation,
     mul_result_relation: &ProjectiveRcbMulResultRelation,
-    gamma_digest_relation: &GammaDigestRelation,
-    gamma_challenge: &GammaChallenge,
+    header_relation: &crate::components::hinted_mul::EcOpHeaderRelation,
 ) -> PreparedTableProjectiveSourceConsumerInteraction {
     assert_eq!(base.len(), PREPARED_TABLE_PROJECTIVE_SOURCE_TRACE_COLUMNS);
     let log_size = base[0].domain.log_size();
     let vec_rows = 1usize << (log_size - LOG_N_LANES);
+    let cols = prepared_narrow_mul_columns();
+    let gate = narrow_mul_gate_lanes(base, &cols, vec_rows);
     // Collect every fraction in the consumer AIR's emission order, then write
-    // them `PREPARED_CONSUMER_LOGUP_BATCH` per interaction column to mirror
-    // the eval's `finalize_logup_batched(consecutive_batching(..))` layout.
+    // them with the eval's exact batching.
     let mut entries: Vec<(Vec<PackedQM31>, Vec<PackedQM31>)> = Vec::new();
     let active_numerators: Vec<PackedQM31> = (0..vec_rows)
         .map(|vec_row| PackedQM31::from(base[0].data[vec_row]))
@@ -660,7 +704,7 @@ pub(crate) fn gen_prepared_table_projective_source_consumer_interaction_trace(
 
     // Entry 0: the EC-row consume (+active).
     entries.push((
-        active_numerators.clone(),
+        active_numerators,
         (0..vec_rows)
             .map(|vec_row| {
                 let values = prepared_table_projective_source_packed_relation_values(base, vec_row);
@@ -669,90 +713,91 @@ pub(crate) fn gen_prepared_table_projective_source_consumer_interaction_trace(
             .collect(),
     ));
 
-    // Wide mul-result consumes (+has_muls), canonical order.
-    let has_muls_numerators: Vec<PackedQM31> = (0..vec_rows)
-        .map(|vec_row| {
-            PackedQM31::from(base[PREPARED_TABLE_PROJECTIVE_SOURCE_HAS_MULS_COL].data[vec_row])
-        })
-        .collect();
-    let layout = prepared_consumed_mul_gen_layout();
-    for mul_index in 0..(PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS / (3 * N_LIMBS)) {
-        for (role_index, &role) in PROJECTIVE_RCB_MUL_RESULT_ROLES.iter().enumerate() {
-            entries.push((
-                has_muls_numerators.clone(),
-                (0..vec_rows)
-                    .map(|vec_row| {
-                        let mut values = Vec::with_capacity(3 + N_LIMBS);
-                        values.push(base[1].data[vec_row]);
-                        values.push(PackedM31::broadcast(M31::from_u32_unchecked(
-                            mul_index as u32,
-                        )));
-                        values.push(PackedM31::broadcast(M31::from_u32_unchecked(role)));
-                        values.extend(crate::projective_air::consumed_mul_slot_packed_limbs(
-                            base, vec_row, &layout, mul_index, role_index,
-                        ));
-                        mul_result_relation.combine(&values)
-                    })
-                    .collect(),
-            ));
-        }
-    }
-    // γ-digest yields (−active), in eval order: range13 kind then signed
-    // kind, mirroring the eval's digest computation per row.
-    let instances = prepared_gamma_instances(base);
-    for instance in &instances {
-        let columns = match instance.layout.tag {
-            GAMMA_TAG_PREPARED_RANGE13 => prepared_gamma_range13_columns(),
-            _ => prepared_gamma_signed_carry_columns(),
-        };
-        let mut numerators = Vec::with_capacity(vec_rows);
-        let mut denominators = Vec::with_capacity(vec_rows);
-        for vec_row in 0..vec_rows {
-            let mut numerator = [secure_zero(); N_LANES];
-            let mut denominator = [SecureField::from(M31::from_u32_unchecked(1)); N_LANES];
-            for lane in 0..N_LANES {
-                let active = base[0].data[vec_row].to_array()[lane];
-                let row_index = gamma_row_index_of(vec_row, lane, log_size);
-                let values: Vec<M31> = columns
-                    .iter()
-                    .map(|&col| base[col].data[vec_row].to_array()[lane])
-                    .collect();
-                let digest = gamma_digest_of_values(gamma_challenge, instance.pad_value, &values);
-                let tuple = gamma_digest_tuple(
-                    instance.layout.tag,
-                    M31::from_u32_unchecked(row_index),
-                    digest,
-                );
-                numerator[lane] = -SecureField::from(active);
-                denominator[lane] = gamma_digest_relation.combine(&tuple);
-            }
-            numerators.push(PackedQM31::from_array(numerator));
-            denominators.push(PackedQM31::from_array(denominator));
-        }
-        entries.push((numerators, denominators));
-    }
+    // Entries 1..=6: the narrow mul-result consumes (+gate).
+    push_narrow_mul_consume_entries(
+        &mut entries,
+        base,
+        &cols,
+        &gate,
+        mul_result_relation,
+        vec_rows,
+    );
+
+    // Entry 7: EC-op header YIELD (−gate): tuple
+    // (source_index, op, output_inf, lhs_inf, rhs_inf).
+    let lhs_inf_col = 6 + PREPARED_TABLE_EC_POINT_COLUMNS - 1;
+    let rhs_inf_col = 6 + 2 * PREPARED_TABLE_EC_POINT_COLUMNS - 1;
+    let output_inf_col = 6 + 3 * PREPARED_TABLE_EC_POINT_COLUMNS - 1;
+    entries.push((
+        gate.iter().map(|&lanes| -PackedQM31::from(lanes)).collect(),
+        (0..vec_rows)
+            .map(|vec_row| {
+                header_relation.combine(&[
+                    base[1].data[vec_row],
+                    base[4].data[vec_row],
+                    base[output_inf_col].data[vec_row],
+                    base[lhs_inf_col].data[vec_row],
+                    base[rhs_inf_col].data[vec_row],
+                ])
+            })
+            .collect(),
+    ));
 
     assert_eq!(entries.len(), prepared_consumer_logup_entries());
     let mut logup = LogupTraceGenerator::new(log_size);
-    crate::range_checks::write_logup_columns_with_batching(
+    crate::range_checks::write_batched_logup_columns(
         &mut logup,
         &entries,
-        &prepared_consumer_logup_batching(),
+        PREPARED_CONSUMER_LOGUP_BATCH,
     );
     let (columns, _total) = logup.finalize_last();
 
-    let (ec_row_sum, mul_result_sum) =
-        prepared_table_projective_source_consumer_sums(base, ec_row_relation, mul_result_relation);
-    let gamma_yield_sum = instances
-        .iter()
-        .map(|instance| gamma_digest_yield_sum(instance, gamma_challenge, gamma_digest_relation))
-        .sum();
+    let ec_row_sum = prepared_table_projective_source_ec_row_sum(base, ec_row_relation);
+    let mul_result_sum = narrow_mul_consume_sum(base, &cols, mul_result_relation);
+    let header_yield_sum = prepared_table_projective_source_header_yield_sum(
+        base,
+        header_relation,
+        &cols,
+        lhs_inf_col,
+        output_inf_col,
+    );
     PreparedTableProjectiveSourceConsumerInteraction {
         columns,
         ec_row_sum,
         mul_result_sum,
-        gamma_yield_sum,
+        header_yield_sum,
     }
+}
+
+/// Analytic header-yield sum (−gate over rows with a silo group), matching the
+/// eval's header yield entry. `gate = active − (1−op)·rhs.inf`.
+fn prepared_table_projective_source_header_yield_sum(
+    base: &[M31ColumnEval],
+    header_relation: &crate::components::hinted_mul::EcOpHeaderRelation,
+    cols: &NarrowMulConsumeColumns,
+    lhs_inf_col: usize,
+    output_inf_col: usize,
+) -> SecureField {
+    let log_size = base[0].domain.log_size();
+    let one = M31::from_u32_unchecked(1);
+    let mut denominators = Vec::new();
+    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+        for lane in 0..(1 << LOG_N_LANES) {
+            let cell = |col: usize| base[col].data[vec_row].to_array()[lane];
+            let gate = cell(0) - (one - cell(cols.op)) * cell(cols.rhs_inf);
+            if gate == M31::from_u32_unchecked(0) {
+                continue;
+            }
+            denominators.push(header_relation.combine(&[
+                cell(cols.source),
+                cell(cols.op),
+                cell(output_inf_col),
+                cell(lhs_inf_col),
+                cell(cols.rhs_inf),
+            ]));
+        }
+    }
+    -crate::range_checks::batched_inverse_sum(&denominators)
 }
 
 /// Output of the prepared-table projective-source consumer interaction-trace
@@ -761,132 +806,18 @@ pub(crate) struct PreparedTableProjectiveSourceConsumerInteraction {
     pub columns: ColumnVec<M31ColumnEval>,
     pub ec_row_sum: SecureField,
     pub mul_result_sum: SecureField,
-    /// Σ of the two γ-digest yields (−active).
-    pub gamma_yield_sum: SecureField,
+    /// Σ of the EC-op header yields (−gate); balances against the silo's
+    /// header consume.
+    pub header_yield_sum: SecureField,
 }
 
-/// Base-trace column indices the Range13 USES read, in `bind_double_formula`
-/// emission order: lhs.x, lhs.y, output.x, output.y limbs, then x3, y3, z3.
-/// (The prepared-table source has 6 metadata columns — `table_index` follows
-/// `op` — so points start at column 6, one later than the fake-GLV source.)
-fn prepared_double_formula_range13_use_columns() -> Vec<usize> {
-    let lhs_x = 6; // after [active, source_index, sig_id, cert_id, op, table_index]
-    let lhs_y = lhs_x + N_LIMBS;
-    let output_x = 6 + 2 * PREPARED_TABLE_EC_POINT_COLUMNS;
-    let output_y = output_x + N_LIMBS;
-    let x3 = PREPARED_TABLE_PROJECTIVE_SOURCE_DOUBLE_FORMULA_OFFSET;
-    let mut cols = Vec::with_capacity(7 * N_LIMBS);
-    for start in [
-        lhs_x,
-        lhs_y,
-        output_x,
-        output_y,
-        x3,
-        x3 + N_LIMBS,
-        x3 + 2 * N_LIMBS,
-    ] {
-        for limb in 0..N_LIMBS {
-            cols.push(start + limb);
-        }
-    }
-    cols
-}
-
-/// Base-trace column indices the signed-carry USES read, in consumer-AIR
-/// emission order (reduction slot outer, carry limb inner). The Double-formula
-/// block layout is `x3,y3,z3` (3·N_LIMBS) then per reduction `(q, carries)`.
-fn prepared_double_formula_signed_carry_use_columns() -> Vec<usize> {
-    let block = PREPARED_TABLE_PROJECTIVE_SOURCE_DOUBLE_FORMULA_OFFSET;
-    let reductions_start = block + 3 * N_LIMBS;
-    let mut cols = Vec::with_capacity(DOUBLE_TOTAL_REDUCTIONS * N_LIMBS);
-    for slot in 0..DOUBLE_TOTAL_REDUCTIONS {
-        let q_col = reductions_start + slot * (1 + N_LIMBS);
-        for limb in 0..N_LIMBS {
-            cols.push(q_col + 1 + limb); // skip the quotient column
-        }
-    }
-    cols
-}
-
-/// Base-trace column indices the Range13 USES read for the MixedAdd formula, in
-/// `bind_mixed_add_formula` emission order: lhs.x, lhs.y, rhs.x, rhs.y,
-/// output.x, output.y limbs, then x3, y3, z3 working-value limbs.
-fn prepared_mixed_add_formula_range13_use_columns() -> Vec<usize> {
-    let lhs_x = 6; // after [active, source_index, sig_id, cert_id, op, table_index]
-    let lhs_y = lhs_x + N_LIMBS;
-    let rhs_x = 6 + PREPARED_TABLE_EC_POINT_COLUMNS;
-    let rhs_y = rhs_x + N_LIMBS;
-    let output_x = 6 + 2 * PREPARED_TABLE_EC_POINT_COLUMNS;
-    let output_y = output_x + N_LIMBS;
-    let x3 = PREPARED_TABLE_PROJECTIVE_SOURCE_MIXED_ADD_FORMULA_OFFSET;
-    let mut cols = Vec::with_capacity(9 * N_LIMBS);
-    for start in [
-        lhs_x,
-        lhs_y,
-        rhs_x,
-        rhs_y,
-        output_x,
-        output_y,
-        x3,
-        x3 + N_LIMBS,
-        x3 + 2 * N_LIMBS,
-    ] {
-        for limb in 0..N_LIMBS {
-            cols.push(start + limb);
-        }
-    }
-    cols
-}
-
-/// Base-trace column indices the signed-carry USES read for the MixedAdd
-/// formula, in consumer-AIR emission order (reduction slot outer, carry limb
-/// inner).
-fn prepared_mixed_add_formula_signed_carry_use_columns() -> Vec<usize> {
-    let block = PREPARED_TABLE_PROJECTIVE_SOURCE_MIXED_ADD_FORMULA_OFFSET;
-    let reductions_start = block + 3 * N_LIMBS;
-    let mut cols = Vec::with_capacity(MIXED_ADD_TOTAL_REDUCTIONS * N_LIMBS);
-    for slot in 0..MIXED_ADD_TOTAL_REDUCTIONS {
-        let q_col = reductions_start + slot * (1 + N_LIMBS);
-        for limb in 0..N_LIMBS {
-            cols.push(q_col + 1 + limb); // skip the quotient column
-        }
-    }
-    cols
-}
-
-/// Range13 USE values consumed by the γ-digest tall expander (per scheduled
-/// row: the digest-ordered list, lane-padded with zeros). The tall instance is
-/// the single source of truth for the provider multiplicity.
-pub(crate) fn prepared_table_projective_source_range13_uses_from_base(
-    base: &[M31ColumnEval],
-) -> Vec<M31> {
-    let [r13, _] = prepared_gamma_instances(base);
-    r13.all_scheduled_values()
-}
-
-/// signed-carry USE values (decoded `i64`) consumed by the γ-digest tall
-/// expander (lane-padded with `encode_signed_carry(0)`).
-pub(crate) fn prepared_table_projective_source_signed_carry_uses_from_base(
-    base: &[M31ColumnEval],
-) -> Vec<i64> {
-    let [_, signed] = prepared_gamma_instances(base);
-    signed
-        .all_scheduled_values()
-        .into_iter()
-        .map(crate::range_checks::decode_signed_carry)
-        .collect()
-}
-
-/// Analytic `(ec_row_consumer_sum, mul_result_consumer_sum)` over the consumer
-/// base trace's active rows, using unpacked `SecureField` combines.
-fn prepared_table_projective_source_consumer_sums(
+/// Analytic EC-row consume sum over the consumer base trace's active rows.
+fn prepared_table_projective_source_ec_row_sum(
     base: &[M31ColumnEval],
     ec_row_relation: &PreparedTableEcRowRelation,
-    mul_result_relation: &ProjectiveRcbMulResultRelation,
-) -> (SecureField, SecureField) {
+) -> SecureField {
     let log_size = base[0].domain.log_size();
     let mut ec_row_denominators = Vec::new();
-    let mut mul_result_denominators = Vec::new();
     for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
         for lane in 0..(1 << LOG_N_LANES) {
             let active = base[0].data[vec_row].to_array()[lane];
@@ -895,33 +826,9 @@ fn prepared_table_projective_source_consumer_sums(
                     prepared_table_projective_source_unpacked_relation_values(base, vec_row, lane);
                 ec_row_denominators.push(ec_row_relation.combine(&ec_values));
             }
-
-            let has_muls =
-                base[PREPARED_TABLE_PROJECTIVE_SOURCE_HAS_MULS_COL].data[vec_row].to_array()[lane];
-            if has_muls == M31::from_u32_unchecked(0) {
-                continue;
-            }
-            let source_index = base[1].data[vec_row].to_array()[lane];
-            let layout = prepared_consumed_mul_gen_layout();
-            for mul_index in 0..(PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS / (3 * N_LIMBS)) {
-                for (role_index, &role) in PROJECTIVE_RCB_MUL_RESULT_ROLES.iter().enumerate() {
-                    let limbs = crate::projective_air::consumed_mul_slot_packed_limbs(
-                        base, vec_row, &layout, mul_index, role_index,
-                    );
-                    let mut values = Vec::with_capacity(3 + N_LIMBS);
-                    values.push(source_index);
-                    values.push(M31::from_u32_unchecked(mul_index as u32));
-                    values.push(M31::from_u32_unchecked(role));
-                    values.extend(limbs.iter().map(|packed| packed.to_array()[lane]));
-                    mul_result_denominators.push(mul_result_relation.combine(&values));
-                }
-            }
         }
     }
-    (
-        crate::range_checks::batched_inverse_sum(&ec_row_denominators),
-        crate::range_checks::batched_inverse_sum(&mul_result_denominators),
-    )
+    crate::range_checks::batched_inverse_sum(&ec_row_denominators)
 }
 
 fn prepared_table_projective_source_unpacked_relation_values(

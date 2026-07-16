@@ -12,7 +12,8 @@
 ES256) to attest a holder's attributes. For the MVP it is a deliberately
 minimal, fixed byte-layout that **stands in for** an ISO/IEC 18013-5 mdoc — it
 is *not* a real mdoc. There is no in-circuit CBOR/COSE parsing; full mdoc
-support is the deferred credibility upgrade. Using
+support is the deferred credibility upgrade. This format is superseded for the
+mdoc path by the isolated profile in `docs/mdoc-credential-format.md`. Using
 a simplified credential first lets the cross-component binding be proven before
 taking on CBOR.
 

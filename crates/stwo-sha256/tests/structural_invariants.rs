@@ -13,30 +13,42 @@ use stwo_sha256::witness::{
     split_pack_multiplicities_for_block,
 };
 
+#[test]
+fn sha_air_uses_typed_relation_multiplicities() {
+    let sources = [
+        ("components.rs", include_str!("../src/components.rs")),
+        ("constraints.rs", include_str!("../src/constraints.rs")),
+    ];
+    let mut offenders = Vec::new();
+    for (file, source) in sources {
+        for (line_idx, line) in source.lines().enumerate() {
+            if line.contains("RelationEntry::new") {
+                offenders.push(format!("{file}:{}: {}", line_idx + 1, line.trim()));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "SHA relation entries should use unit/neg_unit/base constructors:\n{}",
+        offenders.join("\n")
+    );
+}
+
 /// Pin `Layout::TOTAL_COLS` to the claimed total so any future
 /// column-count drift fails closed against the test-plan value.
 ///
-/// 9 842 is the through-`h_out` total at `W = 6`: the round-side Maj/Ch and
-/// `H_IN_AUX` packed-group blocks each grew from 6 to 8 groups per
-/// operand (+8 cells/round × 64 rounds, +8 for the aux block), i.e.
-/// +520 over the `W = 7` baseline of 9 322. The digest provider then
-/// inserts `1` (`is_last_block` flag) + `DIGEST_BYTES = 32` (the big-endian
-/// byte view of `h_out`) after `h_out`; the §10.4 padding-role witness adds
-/// `PADDING_ROW_COLS = 33`; and the C1-fix aux column `enabler_step` adds 1
-/// more — final total 9 909.
+/// Hybrid one-row-per-round layout at `W = 6`: enabler (1) + `W` limbs (2) +
+/// W bits (32) + round family (232) + schedule family (78) +
+/// `is_first_block` (1) + `h_in` (16) + aux splits (32) + finalization
+/// carries (16) + `h_out` (16) + `is_last_block` (1) + digest bytes (32) +
+/// padding-role (33) + `enabler_step` (1) = 493.
 #[test]
-fn total_cols_equals_9909_at_w6() {
+fn total_cols_equals_493_at_w6_hybrid() {
     println!("Layout::TOTAL_COLS = {}", Layout::TOTAL_COLS);
-    assert_eq!(Layout::TOTAL_COLS, 9_909);
-    // The digest delta (1 + 32), the 33-cell padding delta, and the trailing
-    // `enabler_step` cell add up to the total over the 9 842-column W=6
-    // through-`h_out` baseline.
+    assert_eq!(Layout::TOTAL_COLS, 493);
     assert_eq!(PADDING_ROW_COLS, 33);
     assert_eq!(DIGEST_BYTES, 32);
-    assert_eq!(
-        Layout::TOTAL_COLS,
-        9_842 + 1 + DIGEST_BYTES + PADDING_ROW_COLS + 1
-    );
 }
 
 /// Print per-block lookup multiplicities for the `b"abc"` single-block

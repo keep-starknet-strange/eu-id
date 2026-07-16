@@ -12,7 +12,7 @@ use crate::scalar::scalar_mod_mul::layout::{
 };
 use crate::scalar::scalar_mod_mul::schedule::ScalarModMulFixedSchedule;
 use crate::scalar::scalar_mod_mul::{
-    SCALAR_MOD_MUL_SPLIT_CHUNK_DIGITS, SCALAR_MOD_MUL_SPLIT_CHUNK_TERMS,
+    ScalarModMulMergedRows, SCALAR_MOD_MUL_SPLIT_CHUNK_DIGITS, SCALAR_MOD_MUL_SPLIT_CHUNK_TERMS,
 };
 use crate::types::{field_modulus, AffinePoint, Signature, U256};
 use core::cmp::Ordering;
@@ -40,7 +40,10 @@ fn verify_self_bound<MC: MerkleChannel>(
     proof: P256CurrentAirProof<MC::H>,
 ) -> Result<(), P256ProofError> {
     let expected = proof.claim.public_inputs.instances.clone();
-    verify_current_air_monolithic::<MC>(proof, &expected)
+    // No preprocessed-root pin (`None`): these tests exercise deeper failure
+    // layers. The pin gate itself is covered by
+    // `current_p256_monolithic_verifier_pins_the_preprocessed_root`.
+    verify_current_air_monolithic::<MC>(proof, &expected, None)
 }
 
 fn stwo_p256_source_files() -> Vec<std::path::PathBuf> {
@@ -466,6 +469,213 @@ fn arbitrary_full_width_u_scalars_build_a_current_air_claim() {
         .expect("arbitrary full-width valid signature should build a proof draft");
 }
 
+#[test]
+fn fake_glv_hint_gen_serial_parallel_draft_equality() {
+    let input = valid_real_input_with_u_scalars(scalar_near_order(123), scalar_near_order(456));
+    assert!(
+        ecdsa_verify(&input),
+        "synthetic arbitrary-width input must be valid",
+    );
+
+    let serial_pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .expect("serial rayon pool builds");
+    let parallel_pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .expect("parallel rayon pool builds");
+
+    let serial = serial_pool.install(|| {
+        P256ProofDraft::from_inputs_with_arbitrary_fake_glv_hints(vec![input.clone()])
+            .expect("serial draft builds")
+    });
+    let parallel = parallel_pool.install(|| {
+        P256ProofDraft::from_inputs_with_arbitrary_fake_glv_hints(vec![input])
+            .expect("parallel draft builds")
+    });
+
+    assert_eq!(
+        format!("{:?}", serial.claim),
+        format!("{:?}", parallel.claim)
+    );
+}
+
+#[test]
+fn fake_glv_hint_gen_serial_parallel_two_signature_draft_equality() {
+    let inputs = vec![
+        valid_real_input_with_u_scalars(scalar_near_order(123), scalar_near_order(456)),
+        valid_real_input_with_u_scalars(scalar_near_order(789), scalar_near_order(1011)),
+    ];
+    for input in &inputs {
+        assert!(
+            ecdsa_verify(input),
+            "synthetic arbitrary-width input must be valid",
+        );
+    }
+
+    let serial_pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .expect("serial rayon pool builds");
+    let parallel_pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .expect("parallel rayon pool builds");
+
+    let serial = serial_pool.install(|| {
+        P256ProofDraft::from_inputs_with_arbitrary_fake_glv_hints(inputs.clone())
+            .expect("serial draft builds")
+    });
+    let parallel = parallel_pool.install(|| {
+        P256ProofDraft::from_inputs_with_arbitrary_fake_glv_hints(inputs)
+            .expect("parallel draft builds")
+    });
+
+    assert_eq!(
+        format!("{:?}", serial.claim),
+        format!("{:?}", parallel.claim)
+    );
+}
+
+fn checked_draft_from_inputs_with_arbitrary_fake_glv_hints(
+    inputs: Vec<EcdsaVerifyInput>,
+) -> Result<P256ProofDraft, P256ProofError> {
+    let public_inputs = PublicEcdsaInputClaim::from_inputs(&inputs);
+    let scalar_setup = ScalarSetupClaim::from_public_inputs(&public_inputs)?;
+    let cert_inputs = CertScalarInputClaim::from_scalar_setup(&scalar_setup)?;
+    let hints = cert_inputs
+        .rows
+        .iter()
+        .map(|row| FakeGlvScalarHint::decompose(&row.scalar))
+        .collect::<Result<Vec<_>, _>>()?;
+    let claim = checked_claim_from_inputs_with_hints(&inputs, hints)?;
+    P256ProofDraft::from_claim(inputs, claim)
+}
+
+fn checked_claim_from_inputs_with_hints(
+    inputs: &[EcdsaVerifyInput],
+    fake_glv_hints: Vec<FakeGlvScalarHint>,
+) -> Result<P256ProofClaim, P256ProofError> {
+    let public_inputs = PublicEcdsaInputClaim::from_inputs(inputs);
+    let public_key_check = PublicKeyOnCurveClaim::from_public_inputs(&public_inputs)?;
+    let scalar_setup = ScalarSetupClaim::from_public_inputs(&public_inputs)?;
+    let cert_inputs = CertScalarInputClaim::from_scalar_setup(&scalar_setup)?;
+    let fake_glv_scalars = FakeGlvScalarHintClaim::from_cert_inputs(&cert_inputs, fake_glv_hints)?;
+    let fake_glv_selectors = FakeGlvSelectorClaim::from_scalar_hints(&fake_glv_scalars)?;
+    let selector_requests = SelectorLookupRequests::from_selector_claim(&fake_glv_selectors)?;
+    let prepared_table =
+        PreparedTableClaim::from_claims(&cert_inputs, &fake_glv_scalars, &fake_glv_selectors)?;
+    let prepared_table_ec_trace = PreparedTableEcTraceClaim::from_claims(
+        &cert_inputs,
+        &fake_glv_scalars,
+        &fake_glv_selectors,
+        &prepared_table,
+    )?;
+    let fake_glv_chain = FakeGlvChainClaim::from_claims(
+        &cert_inputs,
+        &fake_glv_scalars,
+        &fake_glv_selectors,
+        &prepared_table,
+    )?;
+    let fake_glv_ec_trace = FakeGlvPrimitiveEcTraceClaim::from_chain(&fake_glv_chain)?;
+    let projective_ec_trace =
+        ProjectiveEcTraceClaim::from_native_traces(&prepared_table_ec_trace, &fake_glv_ec_trace)?;
+    let projective_rcb_air_trace =
+        ProjectiveRcbAirTraceClaim::from_projective_trace_lite(&projective_ec_trace)?;
+    let final_check = FinalEcdsaCheckClaim::from_claims(
+        &public_inputs,
+        &cert_inputs,
+        &fake_glv_scalars,
+        &fake_glv_chain,
+    )?;
+    let hinted_source_offset = projective_rcb_air_trace.rows.len() as u32;
+    let final_add =
+        final_add_claim_from_final_check(&final_check, &fake_glv_scalars, hinted_source_offset)?;
+    let mut hinted_mul_trace = HintedMulTraceClaim::from_projective_rcb(&projective_rcb_air_trace)?;
+    hinted_mul_trace.extend_from_projective_rcb(
+        &final_add.mul_trace,
+        final_add.hinted_source_offset,
+        false,
+    )?;
+    let public_key_curve_slice = public_key_slice_from_check(
+        &public_key_check,
+        hinted_source_offset + final_add.mul_trace.rows.len() as u32,
+    )?;
+    hinted_mul_trace.extend_from_projective_rcb(
+        &public_key_curve_slice.mul_trace,
+        public_key_curve_slice.hinted_source_offset,
+        false,
+    )?;
+    let prepared_use_counts = PreparedPointUseCountClaim::from_selector_claim(&fake_glv_selectors)?;
+    let prepared_trace = prepared_table.prepared_point_trace(&prepared_use_counts)?;
+
+    Ok(P256ProofClaim {
+        public_inputs,
+        public_key_check,
+        scalar_setup,
+        cert_inputs,
+        fake_glv_scalars,
+        fake_glv_selectors,
+        selector_requests,
+        prepared_table,
+        prepared_table_ec_trace,
+        fake_glv_chain,
+        fake_glv_ec_trace,
+        projective_ec_trace,
+        projective_rcb_air_trace,
+        hinted_mul_trace,
+        final_check,
+        final_add,
+        prepared_use_counts,
+        prepared_trace,
+    })
+}
+
+fn median_duration<F>(runs: usize, mut f: F) -> std::time::Duration
+where
+    F: FnMut(),
+{
+    let mut durations = Vec::with_capacity(runs);
+    for _ in 0..runs {
+        let start = std::time::Instant::now();
+        f();
+        durations.push(start.elapsed());
+    }
+    durations.sort();
+    durations[runs / 2]
+}
+
+#[test]
+#[ignore = "timing helper for WO-1.1; run explicitly with --ignored --nocapture"]
+fn hint_gen_timing() {
+    const RUNS: usize = 10;
+
+    let input = valid_real_input_with_u_scalars(scalar_near_order(123), scalar_near_order(456));
+    assert!(
+        ecdsa_verify(&input),
+        "synthetic arbitrary-width input must be valid",
+    );
+
+    let checked_median = median_duration(RUNS, || {
+        checked_draft_from_inputs_with_arbitrary_fake_glv_hints(vec![input.clone()])
+            .expect("checked timed draft builds");
+    });
+    let optimized_median = median_duration(RUNS, || {
+        P256ProofDraft::from_inputs_with_arbitrary_fake_glv_hints(vec![input.clone()])
+            .expect("timed draft builds");
+    });
+    let checked_ms = checked_median.as_secs_f64() * 1000.0;
+    let optimized_ms = optimized_median.as_secs_f64() * 1000.0;
+    println!(
+        "hint_gen_timing,runs={},checked_median_ms={:.3},optimized_median_ms={:.3},speedup={:.2}x",
+        RUNS,
+        checked_ms,
+        optimized_ms,
+        checked_ms / optimized_ms
+    );
+}
+
 /// End-to-end: prove + verify a real `p256`-crate signature through the
 /// monolithic current AIR via the production arbitrary-fake-GLV path.
 ///
@@ -697,9 +907,12 @@ fn current_p256_monolithic_verifier_rejects_mismatched_expected_instances() {
     let mut wrong_expected = monolithic.claim.public_inputs.instances.clone();
     let r = &mut wrong_expected[0].r;
     r.limbs_mut()[0] = M31::from_u32_unchecked(r.limbs()[0].0 ^ 1);
-    let err =
-        verify_current_air_monolithic::<Blake2sMerkleChannel>(monolithic.clone(), &wrong_expected)
-            .expect_err("proof of a different statement than the caller expected must reject");
+    let err = verify_current_air_monolithic::<Blake2sMerkleChannel>(
+        monolithic.clone(),
+        &wrong_expected,
+        None,
+    )
+    .expect_err("proof of a different statement than the caller expected must reject");
     assert!(
         matches!(err, P256ProofError::PublicInstanceMismatch),
         "expected PublicInstanceMismatch, got {err:?}"
@@ -707,8 +920,55 @@ fn current_p256_monolithic_verifier_rejects_mismatched_expected_instances() {
 
     // The same proof verifies when the caller passes the matching statement.
     let correct_expected = monolithic.claim.public_inputs.instances.clone();
-    verify_current_air_monolithic::<Blake2sMerkleChannel>(monolithic, &correct_expected)
+    verify_current_air_monolithic::<Blake2sMerkleChannel>(monolithic, &correct_expected, None)
         .expect("proof of exactly the caller's expected statement must verify");
+}
+
+/// The F-ROOT pin on the monolithic verifier: a caller-pinned tree-0
+/// (preprocessed) root must gate the proof BEFORE any transcript work. The
+/// honest proof verifies against the independently-derived root; a proof
+/// whose tree-0 root differs is rejected with `PreprocessedRootMismatch`.
+#[test]
+fn current_p256_monolithic_verifier_pins_the_preprocessed_root() {
+    let draft = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+        valid_real_input_with_small_u_scalars(7, 11),
+    ])
+    .expect("current pipeline builds");
+    let monolithic = draft
+        .prove_current_air_monolithic::<Blake2sMerkleChannel>()
+        .expect("current AIR monolithic proof proves");
+    let expected = monolithic.claim.public_inputs.instances.clone();
+
+    // The verifier's own derivation of the tree-0 root: rebuild the prover
+    // module from the draft (a relying party rebuilds it from its expected
+    // statement) and run exactly the prover's tree-0 commit path.
+    let expected_root = crate::proof::air::current_air_preprocessed_root(&draft)
+        .expect("expected preprocessed root computes");
+    assert_eq!(
+        expected_root, monolithic.stark_proof.commitments[0],
+        "the derived tree-0 root must match the honest prover's commitment"
+    );
+
+    verify_current_air_monolithic::<Blake2sMerkleChannel>(
+        monolithic.clone(),
+        &expected,
+        Some(expected_root),
+    )
+    .expect("honest proof verifies against the derived preprocessed root");
+
+    // A tampered tree-0 root must be rejected fail-closed, before the STARK.
+    let mut tampered = monolithic;
+    tampered.stark_proof.0.commitments[0].0[0] ^= 1;
+    let err = verify_current_air_monolithic::<Blake2sMerkleChannel>(
+        tampered,
+        &expected,
+        Some(expected_root),
+    )
+    .expect_err("a mismatched preprocessed root must reject");
+    assert!(
+        matches!(err, P256ProofError::PreprocessedRootMismatch { .. }),
+        "expected PreprocessedRootMismatch, got {err:?}"
+    );
 }
 
 /// The verifier must pin its PCS config: `stark_proof.config` is
@@ -986,11 +1246,12 @@ fn current_p256_proof_pipeline_rejects_public_key_off_curve_in_air() {
         .extend_from_projective_rcb(
             &proof.claim.final_add.mul_trace,
             proof.claim.final_add.hinted_source_offset,
+            false,
         )
         .expect("final-add muls re-extend");
     let pkc_slice = public_key_on_curve_slice_claim(&proof.claim).expect("2*G slice claim builds");
     hinted
-        .extend_from_projective_rcb(&pkc_slice.mul_trace, pkc_slice.hinted_source_offset)
+        .extend_from_projective_rcb(&pkc_slice.mul_trace, pkc_slice.hinted_source_offset, false)
         .expect("curve-check muls re-extend");
     proof.claim.hinted_mul_trace = hinted;
 
@@ -1367,6 +1628,13 @@ fn add_u256(a: &U256, b: &U256) -> U256 {
 fn monolithic_interaction_claim(
     draft: &P256ProofDraft,
 ) -> (P256CurrentAirInteractionClaim, P256CurrentAirRelations) {
+    monolithic_interaction_claim_with_base_mutation(draft, |_| {})
+}
+
+fn monolithic_interaction_claim_with_base_mutation(
+    draft: &P256ProofDraft,
+    mutate_base: impl FnOnce(&mut P256CurrentAirBaseTrace),
+) -> (P256CurrentAirInteractionClaim, P256CurrentAirRelations) {
     let proof_claim = P256CurrentAirProofClaim::from_claim(&draft.claim);
     let ids = proof_claim.preprocessed_column_ids();
     let max_bound = proof_claim.max_constraint_log_degree_bound(&ids);
@@ -1393,6 +1661,7 @@ fn monolithic_interaction_claim(
     let mut base = draft
         .gen_current_air_base_trace(&proof_claim)
         .expect("base trace");
+    mutate_base(&mut base);
     let base_columns = std::mem::take(&mut base.columns);
     let mut tree_builder = commitment_scheme.tree_builder();
     tree_builder.extend_evals(base_columns);
@@ -1496,6 +1765,16 @@ fn column_to_values(column: &crate::scalar::scalar_mod_mul::columns::M31ColumnEv
         out.extend_from_slice(&packed.to_array());
     }
     out
+}
+
+fn column_from_values_like(
+    column: &crate::scalar::scalar_mod_mul::columns::M31ColumnEval,
+    values: Vec<M31>,
+) -> crate::scalar::scalar_mod_mul::columns::M31ColumnEval {
+    stwo::prover::poly::circle::CircleEvaluation::new(
+        column.domain,
+        stwo::prover::backend::simd::column::BaseColumn::from_iter(values),
+    )
 }
 
 /// C5-2a-ii IN-AIR oracle: forging a Double-op `output_affine.x` limb on the
@@ -1737,6 +2016,74 @@ fn monolithic_rejects_mutated_public_r() {
     );
 }
 
+/// WO-2.5/WO-3.2 oracle: the monolith has one shared projective signed-carry
+/// provider for public-key-curve, final-add, and hinted formula consumers.
+/// Corrupting that shared multiplicity column must unbalance the aggregate
+/// LogUp sum.
+#[test]
+fn monolithic_rejects_corrupted_shared_projective_signed_carry_multiplicity() {
+    let draft = valid_draft_for_balance(7, 11);
+    monolithic_balance_outcome(&draft).expect("honest draft balances");
+
+    let (interaction_claim, relations) =
+        monolithic_interaction_claim_with_base_mutation(&draft, |base| {
+            let column = &base.projective_signed_carry_multiplicity;
+            let mut values = column_to_values(column);
+            let row = values
+                .iter()
+                .position(|&value| value != M31::from_u32_unchecked(0))
+                .expect("shared signed-carry provider has live multiplicity");
+            values[row] += M31::from_u32_unchecked(1);
+            base.projective_signed_carry_multiplicity = column_from_values_like(column, values);
+        });
+    let err = interaction_claim
+        .verify_balanced(&draft.claim.public_inputs.instances, &relations)
+        .expect_err("corrupted shared signed-carry multiplicity must reject");
+    assert!(
+        matches!(
+            err,
+            P256ProofError::RelationImbalance {
+                relation: "LookupSum"
+            }
+        ),
+        "expected LookupSum imbalance, got {err:?}"
+    );
+}
+
+/// WO-3.2 oracle: scalar-setup/final-check, scalar-mod-mul,
+/// public-key-curve, hinted-mul, and final-add all consume one shared range13
+/// provider. Corrupting that provider multiplicity must reject the whole
+/// monolithic proof.
+#[test]
+fn monolithic_rejects_corrupted_shared_range13_multiplicity() {
+    let draft = valid_draft_for_balance(7, 11);
+    monolithic_balance_outcome(&draft).expect("honest draft balances");
+
+    let (interaction_claim, relations) =
+        monolithic_interaction_claim_with_base_mutation(&draft, |base| {
+            let column = &base.range13_multiplicity;
+            let mut values = column_to_values(column);
+            let row = values
+                .iter()
+                .position(|&value| value != M31::from_u32_unchecked(0))
+                .expect("shared range13 provider has live multiplicity");
+            values[row] += M31::from_u32_unchecked(1);
+            base.range13_multiplicity = column_from_values_like(column, values);
+        });
+    let err = interaction_claim
+        .verify_balanced(&draft.claim.public_inputs.instances, &relations)
+        .expect_err("corrupted shared range13 multiplicity must reject");
+    assert!(
+        matches!(
+            err,
+            P256ProofError::RelationImbalance {
+                relation: "LookupSum"
+            }
+        ),
+        "expected LookupSum imbalance, got {err:?}"
+    );
+}
+
 #[test]
 #[ignore = "proves scalar setup mod-mul rows through PCS for degree/profile diagnostics"]
 fn scalar_setup_mod_mul_pcs_diagnostic() {
@@ -1746,8 +2093,8 @@ fn scalar_setup_mod_mul_pcs_diagnostic() {
     .expect("zero branch pipeline builds");
     let rows = scalar_setup_mod_mul_rows(&proof.claim).expect("scalar mod-mul rows generate");
 
-    for rows in &rows {
-        prove_scalar_mod_mul_rows_for_diagnostic(rows);
+    for instance in rows {
+        prove_scalar_mod_mul_rows_for_diagnostic(&ScalarModMulMergedRows::new(vec![instance]));
     }
 }
 
@@ -1772,8 +2119,8 @@ fn scalar_setup_mod_mul_ab_row_order_diagnostic() {
     .expect("zero branch pipeline builds");
     let rows = scalar_setup_mod_mul_rows(&proof.claim).expect("scalar mod-mul rows generate");
 
-    for rows in &rows {
-        assert_ab_schedule_base_row_order(rows);
+    for instance in rows {
+        assert_ab_schedule_base_row_order(&ScalarModMulMergedRows::new(vec![instance]));
     }
 }
 
@@ -1786,12 +2133,13 @@ fn scalar_setup_mod_mul_ab_decomposition_row_order_diagnostic() {
     .expect("zero branch pipeline builds");
     let rows = scalar_setup_mod_mul_rows(&proof.claim).expect("scalar mod-mul rows generate");
 
-    for rows in &rows {
-        assert_ab_decomposition_columns(rows);
+    for instance in rows {
+        assert_ab_decomposition_columns(&ScalarModMulMergedRows::new(vec![instance]));
     }
 }
 
-fn assert_ab_schedule_base_row_order(rows: &ScalarModMulTraceRows) {
+fn assert_ab_schedule_base_row_order(rows: &ScalarModMulMergedRows) {
+    let mul_id = rows.instances[0].mul_id;
     let traces = ScalarModMulFamilyTraces::from_rows(rows);
     let schedule = ScalarModMulFixedSchedule::from_rows(rows);
     let trace_evals = traces.to_circle_evaluations();
@@ -1818,22 +2166,21 @@ fn assert_ab_schedule_base_row_order(rows: &ScalarModMulTraceRows) {
     for (base_col, schedule_col, name) in comparisons {
         assert_eq!(
             traces.ab_chunks.columns[base_col], schedule.ab_chunks[schedule_col].values,
-            "logical AB {name} column mismatch for mul_id={} base_col={base_col} schedule_col={schedule_col}",
-            rows.mul_id,
+            "logical AB {name} column mismatch for mul_id={mul_id} base_col={base_col} schedule_col={schedule_col}",
         );
         assert_eq!(
             trace_evals.ab_chunks[base_col].values.to_cpu(),
             schedule_evals.ab_chunks[schedule_col].values.to_cpu(),
-            "storage-order AB {name} column mismatch for mul_id={} base_col={base_col} schedule_col={schedule_col}",
-            rows.mul_id,
+            "storage-order AB {name} column mismatch for mul_id={mul_id} base_col={base_col} schedule_col={schedule_col}",
         );
     }
 }
 
-fn assert_ab_decomposition_columns(rows: &ScalarModMulTraceRows) {
+fn assert_ab_decomposition_columns(rows: &ScalarModMulMergedRows) {
+    let mul_id = rows.instances[0].mul_id;
     let traces = ScalarModMulFamilyTraces::from_rows(rows);
     assert_ab_decomposition_column_set(
-        rows.mul_id,
+        mul_id,
         "logical",
         traces.ab_chunks.columns.iter().map(Vec::as_slice).collect(),
     );
@@ -1845,7 +2192,7 @@ fn assert_ab_decomposition_columns(rows: &ScalarModMulTraceRows) {
         .map(|column| column.values.to_cpu())
         .collect::<Vec<_>>();
     assert_ab_decomposition_column_set(
-        rows.mul_id,
+        mul_id,
         "storage",
         storage_columns.iter().map(Vec::as_slice).collect(),
     );
@@ -1874,8 +2221,9 @@ fn assert_ab_decomposition_column_set(mul_id: u32, order: &str, columns: Vec<&[M
     }
 }
 
-fn prove_scalar_mod_mul_rows_for_diagnostic(rows: &ScalarModMulTraceRows) {
-    eprintln!("prove scalar_mod_mul {} aggregate", rows.mul_id);
+fn prove_scalar_mod_mul_rows_for_diagnostic(rows: &ScalarModMulMergedRows) {
+    let mul_id = rows.instances[0].mul_id;
+    eprintln!("prove scalar_mod_mul {mul_id} aggregate");
     let lookup_claims = LookupProviderClaims::scalar_mod_mul();
     let claim = ScalarModMulClaim::from_rows(rows);
     let ids = scalar_mod_mul_preprocessed_column_ids(&claim, &lookup_claims);
@@ -1893,7 +2241,7 @@ fn prove_scalar_mod_mul_rows_for_diagnostic(rows: &ScalarModMulTraceRows) {
     let config = p256_stark_slice_low_ram_config(max_constraint_log_degree_bound);
     eprintln!(
         "scalar_mod_mul {} pcs max_bound={} blowup={} lifting={:?}",
-        rows.mul_id,
+        mul_id,
         max_constraint_log_degree_bound,
         config.fri_config.log_blowup_factor,
         config.lifting_log_size
@@ -1916,7 +2264,7 @@ fn prove_scalar_mod_mul_rows_for_diagnostic(rows: &ScalarModMulTraceRows) {
     tree_builder.commit(&mut channel);
 
     claim.mix_into(&mut channel);
-    let base = gen_scalar_mod_mul_base_trace(rows, &lookup_claims);
+    let base = crate::scalar::scalar_mod_mul::claim::gen_base_trace(rows, &lookup_claims);
     let mut tree_builder = commitment_scheme.tree_builder();
     tree_builder.extend_evals(base);
     tree_builder.commit(&mut channel);
@@ -1924,7 +2272,12 @@ fn prove_scalar_mod_mul_rows_for_diagnostic(rows: &ScalarModMulTraceRows) {
     let relations = ScalarModMulLookupRelations::draw(&mut channel);
     let claim = ScalarModMulClaim::from_rows(rows);
     let (interaction, interaction_claim) =
-        gen_scalar_mod_mul_interaction_trace(rows, &claim, &lookup_claims, &relations);
+        crate::scalar::scalar_mod_mul::claim::gen_interaction_trace(
+            rows,
+            &claim,
+            &lookup_claims,
+            &relations,
+        );
     interaction_claim.scalar_mod_mul.mix_into(&mut channel);
     interaction_claim.range13.mix_into(&mut channel);
     interaction_claim.signed_carry.mix_into(&mut channel);
@@ -2108,7 +2461,11 @@ fn scalar_mod_mul_max_constraint_log_degree_bound(components: &ScalarModMulCompo
         components
             .reduction_digits
             .max_constraint_log_degree_bound(),
-        components.range13.max_constraint_log_degree_bound(),
+        components
+            .range13
+            .as_ref()
+            .expect("standalone scalar-mod-mul has range13 provider")
+            .max_constraint_log_degree_bound(),
         components.signed_carry.max_constraint_log_degree_bound(),
     ]
     .into_iter()
@@ -2119,15 +2476,18 @@ fn scalar_mod_mul_max_constraint_log_degree_bound(components: &ScalarModMulCompo
 fn scalar_mod_mul_component_provers(
     components: &ScalarModMulComponents,
 ) -> Vec<&dyn ComponentProver<SimdBackend>> {
-    vec![
+    let mut provers: Vec<&dyn ComponentProver<SimdBackend>> = vec![
         &components.canonical as &dyn ComponentProver<SimdBackend>,
         &components.ab_chunks as &dyn ComponentProver<SimdBackend>,
         &components.qn_chunks as &dyn ComponentProver<SimdBackend>,
         &components.accumulators as &dyn ComponentProver<SimdBackend>,
         &components.reduction_digits as &dyn ComponentProver<SimdBackend>,
-        &components.range13 as &dyn ComponentProver<SimdBackend>,
-        &components.signed_carry as &dyn ComponentProver<SimdBackend>,
-    ]
+    ];
+    if let Some(range13) = &components.range13 {
+        provers.push(range13 as &dyn ComponentProver<SimdBackend>);
+    }
+    provers.push(&components.signed_carry as &dyn ComponentProver<SimdBackend>);
+    provers
 }
 
 fn assert_current_air_constraints(proof: &P256ProofDraft) {
@@ -2165,11 +2525,6 @@ fn assert_current_air_constraints(proof: &P256ProofDraft) {
 
     assert_component_named("scalar_setup.setup", &components.scalar_setup.setup, &trace);
     assert_component_named(
-        "scalar_setup.range13",
-        &components.scalar_setup.range13,
-        &trace,
-    );
-    assert_component_named(
         "scalar_setup.range9",
         &components.scalar_setup.range9,
         &trace,
@@ -2194,9 +2549,7 @@ fn assert_current_air_constraints(proof: &P256ProofDraft) {
         &components.fake_glv_selector_air.selector,
         &trace,
     );
-    for (index, scalar_mod_mul) in components.scalar_setup_mod_muls.iter().enumerate() {
-        assert_scalar_mod_mul_components_named(index, scalar_mod_mul, &trace);
-    }
+    assert_scalar_mod_mul_components_named(0, &components.scalar_mod_muls, &trace);
     assert_component_named(
         "prepared_table_projective_source.provider",
         &components.prepared_table_projective_source.provider,
@@ -2287,8 +2640,8 @@ fn assert_current_air_constraints(proof: &P256ProofDraft) {
         &components.final_check.check,
         &trace,
     );
+    assert_component_named("shared.range13", &components.range13, &trace);
     assert_component_named("hinted_mul.check", &components.hinted_mul.check, &trace);
-    assert_component_named("hinted_mul.range13", &components.hinted_mul.range13, &trace);
     assert_component_named(
         "hinted_mul.signed_h",
         &components.hinted_mul.signed_h,
@@ -2326,11 +2679,13 @@ fn assert_scalar_mod_mul_components_named(
         &components.reduction_digits,
         trace,
     );
-    assert_component_named(
-        &format!("scalar_setup_mod_mul_{index}.range13"),
-        &components.range13,
-        trace,
-    );
+    if let Some(range13) = &components.range13 {
+        assert_component_named(
+            &format!("scalar_setup_mod_mul_{index}.range13"),
+            range13,
+            trace,
+        );
+    }
     assert_component_named(
         &format!("scalar_setup_mod_mul_{index}.signed_carry"),
         &components.signed_carry,
@@ -2420,12 +2775,10 @@ fn current_p256_air_shape_diagnostic() {
         proof.claim.projective_rcb_air_trace.mul_row_count(),
     );
 
-    for (index, scalar_mod_mul) in components.scalar_setup_mod_muls.iter().enumerate() {
-        print_component_shape(
-            &format!("scalar_setup_mod_mul_{index}"),
-            scalar_mod_mul_component_bounds(scalar_mod_mul),
-        );
-    }
+    print_component_shape(
+        "scalar_mod_mul",
+        scalar_mod_mul_component_bounds(&components.scalar_mod_muls),
+    );
     print_component_shape(
         "prepared_table_projective_source",
         components
@@ -2483,8 +2836,8 @@ fn current_p256_air_shape_diagnostic() {
         stwo::core::air::Component::trace_log_degree_bounds(&components.hinted_mul.check),
     );
     print_component_shape(
-        "hinted_mul.range13",
-        stwo::core::air::Component::trace_log_degree_bounds(&components.hinted_mul.range13),
+        "shared.range13",
+        stwo::core::air::Component::trace_log_degree_bounds(&components.range13),
     );
     print_component_shape(
         "hinted_mul.signed_h",
@@ -2510,28 +2863,23 @@ fn current_p256_air_shape_diagnostic() {
         wrapper_bounds(components.fake_glv_selector_air.components()),
     );
     fn mod_mul_components(slice: &ScalarModMulComponents) -> Vec<&dyn stwo::core::air::Component> {
-        vec![
+        let mut components: Vec<&dyn stwo::core::air::Component> = vec![
             &slice.canonical,
             &slice.ab_chunks,
             &slice.qn_chunks,
             &slice.accumulators,
             &slice.reduction_digits,
-            &slice.range13,
-            &slice.signed_carry,
-        ]
+        ];
+        if let Some(range13) = &slice.range13 {
+            components.push(range13);
+        }
+        components.push(&slice.signed_carry);
+        components
     }
-    for (index, slice) in components.scalar_setup_mod_muls.iter().enumerate() {
-        print_component_shape(
-            &format!("scalar_setup_mod_mul_{index}"),
-            wrapper_bounds(mod_mul_components(slice)),
-        );
-    }
-    for (index, slice) in components.fake_glv_scalar_mod_muls.iter().enumerate() {
-        print_component_shape(
-            &format!("fake_glv_scalar_mod_mul_{index}"),
-            wrapper_bounds(mod_mul_components(slice)),
-        );
-    }
+    print_component_shape(
+        "scalar_mod_mul",
+        wrapper_bounds(mod_mul_components(&components.scalar_mod_muls)),
+    );
     print_component_shape(
         "prepared_point_range7",
         stwo::core::air::Component::trace_log_degree_bounds(&components.prepared_point_range7),
@@ -2568,18 +2916,18 @@ fn print_component_shape(name: &str, bounds: TreeVec<ColumnVec<u32>>) {
 }
 
 fn scalar_mod_mul_component_bounds(components: &ScalarModMulComponents) -> TreeVec<ColumnVec<u32>> {
-    TreeVec::concat_cols(
-        [
-            components.canonical.trace_log_degree_bounds(),
-            components.ab_chunks.trace_log_degree_bounds(),
-            components.qn_chunks.trace_log_degree_bounds(),
-            components.accumulators.trace_log_degree_bounds(),
-            components.reduction_digits.trace_log_degree_bounds(),
-            components.range13.trace_log_degree_bounds(),
-            components.signed_carry.trace_log_degree_bounds(),
-        ]
-        .into_iter(),
-    )
+    let mut bounds = vec![
+        components.canonical.trace_log_degree_bounds(),
+        components.ab_chunks.trace_log_degree_bounds(),
+        components.qn_chunks.trace_log_degree_bounds(),
+        components.accumulators.trace_log_degree_bounds(),
+        components.reduction_digits.trace_log_degree_bounds(),
+    ];
+    if let Some(range13) = &components.range13 {
+        bounds.push(range13.trace_log_degree_bounds());
+    }
+    bounds.push(components.signed_carry.trace_log_degree_bounds());
+    TreeVec::concat_cols(bounds.into_iter())
 }
 
 #[test]

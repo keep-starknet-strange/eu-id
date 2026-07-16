@@ -34,7 +34,6 @@ const SCALAR_MOD_MUL_ENABLE_REDUCTION_ARITHMETIC: bool = true;
 #[derive(Clone)]
 pub struct CanonicalScalarEval {
     pub log_size: u32,
-    pub mul_id: u32,
     pub external_limb_links: bool,
     pub relations: ScalarModMulComponentRelations,
 }
@@ -63,6 +62,7 @@ impl FrameworkEval for CanonicalScalarEval {
         let slack = P256BigInt::from_limbs(core::array::from_fn(|_| eval.next_trace_mask()));
         let carries: [E::F; stwo_p256_utils::constants::N_LIMBS] =
             core::array::from_fn(|_| eval.next_trace_mask());
+        let mul_id = eval.next_trace_mask();
 
         eval.add_constraint(active.clone() - fixed_active);
         eval.add_constraint(role.clone() - fixed_role);
@@ -81,15 +81,14 @@ impl FrameworkEval for CanonicalScalarEval {
             },
         );
 
-        let mul_id: E::F = constant(self.mul_id);
         let external_multiplicity =
             E::F::from(M31::from_u32_unchecked(self.external_limb_links as u32));
         let scalar_limb_multiplicity =
             multiplicity.clone() + active.clone() * external_multiplicity;
         for (limb_index, limb) in value.limbs().iter().enumerate() {
-            eval.add_to_relation(RelationEntry::new(
+            eval.add_to_relation(RelationEntry::base(
                 &self.relations.scalar_limb,
-                -E::EF::from(scalar_limb_multiplicity.clone()),
+                -scalar_limb_multiplicity.clone(),
                 &[
                     mul_id.clone(),
                     role.clone(),
@@ -99,7 +98,7 @@ impl FrameworkEval for CanonicalScalarEval {
             ));
         }
 
-        eval.finalize_logup();
+        eval.finalize_logup_in_pairs();
         eval
     }
 }
@@ -107,7 +106,6 @@ impl FrameworkEval for CanonicalScalarEval {
 #[derive(Clone)]
 pub struct AbProductChunkEval {
     pub log_size: u32,
-    pub mul_id: u32,
     pub relations: ScalarModMulComponentRelations,
 }
 
@@ -133,30 +131,17 @@ impl FrameworkEval for AbProductChunkEval {
             });
         let digits: [E::F; SCALAR_MOD_MUL_SPLIT_CHUNK_DIGITS] =
             core::array::from_fn(|_| eval.next_trace_mask());
+        let mul_id = eval.next_trace_mask();
 
         let mut product_sum = E::F::from(M31::from_u32_unchecked(0));
         for (term_index, (lhs, rhs, product)) in terms.iter().enumerate() {
             let term_active = meta.term_active[term_index].clone();
+            let unused_gate = one::<E>() - term_active.clone();
             if SCALAR_MOD_MUL_ENABLE_AB_TERM_PRODUCT_CONSTRAINTS {
                 eval.add_constraint(product.clone() - lhs.clone() * rhs.clone());
-                constrain_unused(
-                    &mut eval,
-                    meta.active.clone(),
-                    term_active.clone(),
-                    lhs.clone(),
-                );
-                constrain_unused(
-                    &mut eval,
-                    meta.active.clone(),
-                    term_active.clone(),
-                    rhs.clone(),
-                );
-                constrain_unused(
-                    &mut eval,
-                    meta.active.clone(),
-                    term_active.clone(),
-                    product.clone(),
-                );
+                constrain_unused_with_gate(&mut eval, unused_gate.clone(), lhs.clone());
+                constrain_unused_with_gate(&mut eval, unused_gate.clone(), rhs.clone());
+                constrain_unused_with_gate(&mut eval, unused_gate.clone(), product.clone());
             }
             product_sum += product.clone();
             if SCALAR_MOD_MUL_ENABLE_AB_SCALAR_LIMB_RELATIONS {
@@ -165,7 +150,7 @@ impl FrameworkEval for AbProductChunkEval {
                         &mut eval,
                         &self.relations.scalar_limb,
                         term_active.clone(),
-                        self.mul_id,
+                        mul_id.clone(),
                         ROLE_A,
                         meta.lhs_index[term_index].clone(),
                         lhs.clone(),
@@ -176,7 +161,7 @@ impl FrameworkEval for AbProductChunkEval {
                         &mut eval,
                         &self.relations.scalar_limb,
                         term_active,
-                        self.mul_id,
+                        mul_id.clone(),
                         ROLE_B,
                         meta.rhs_index[term_index].clone(),
                         rhs.clone(),
@@ -189,7 +174,7 @@ impl FrameworkEval for AbProductChunkEval {
             &mut eval,
             &self.relations,
             meta.active,
-            self.mul_id,
+            mul_id,
             SIDE_AB,
             meta.coeff,
             meta.chunk,
@@ -198,7 +183,7 @@ impl FrameworkEval for AbProductChunkEval {
             digits,
         );
         if SCALAR_MOD_MUL_ENABLE_AB_RELATIONS {
-            eval.finalize_logup();
+            eval.finalize_logup_in_pairs();
         }
         eval
     }
@@ -207,7 +192,6 @@ impl FrameworkEval for AbProductChunkEval {
 #[derive(Clone)]
 pub struct QnProductChunkEval {
     pub log_size: u32,
-    pub mul_id: u32,
     pub relations: ScalarModMulComponentRelations,
 }
 
@@ -226,49 +210,31 @@ impl FrameworkEval for QnProductChunkEval {
             core::array::from_fn(|_| (eval.next_trace_mask(), eval.next_trace_mask()));
         let digits: [E::F; SCALAR_MOD_MUL_SPLIT_CHUNK_DIGITS] =
             core::array::from_fn(|_| eval.next_trace_mask());
+        let mul_id = eval.next_trace_mask();
 
         let mut product_sum = E::F::from(M31::from_u32_unchecked(0));
         for (term_index, (quotient_limb, product)) in quotient_terms.iter().enumerate() {
             let term_active = meta.term_active[term_index].clone();
+            let unused_gate = one::<E>() - term_active.clone();
             let n_limb = eval.get_preprocessed_column(
                 ScalarModMulScheduleColumnIds::qn_modulus_limb(term_index),
             );
             if SCALAR_MOD_MUL_ENABLE_QN_ARITHMETIC {
                 eval.add_constraint(product.clone() - quotient_limb.clone() * n_limb);
-                constrain_unused(
-                    &mut eval,
-                    meta.active.clone(),
-                    term_active.clone(),
-                    quotient_limb.clone(),
-                );
-                constrain_unused(
-                    &mut eval,
-                    meta.active.clone(),
-                    term_active.clone(),
-                    product.clone(),
-                );
+                constrain_unused_with_gate(&mut eval, unused_gate.clone(), quotient_limb.clone());
+                constrain_unused_with_gate(&mut eval, unused_gate.clone(), product.clone());
             }
             product_sum += product.clone();
             if SCALAR_MOD_MUL_ENABLE_QN_ARITHMETIC {
-                constrain_unused(
-                    &mut eval,
-                    meta.active.clone(),
-                    term_active.clone(),
-                    quotient_limb.clone(),
-                );
-                constrain_unused(
-                    &mut eval,
-                    meta.active.clone(),
-                    term_active.clone(),
-                    product.clone(),
-                );
+                constrain_unused_with_gate(&mut eval, unused_gate.clone(), quotient_limb.clone());
+                constrain_unused_with_gate(&mut eval, unused_gate.clone(), product.clone());
             }
             if SCALAR_MOD_MUL_ENABLE_QN_RELATIONS {
                 consume_scalar_limb_dynamic(
                     &mut eval,
                     &self.relations.scalar_limb,
                     term_active,
-                    self.mul_id,
+                    mul_id.clone(),
                     ROLE_QUOTIENT,
                     meta.lhs_index[term_index].clone(),
                     quotient_limb.clone(),
@@ -280,7 +246,7 @@ impl FrameworkEval for QnProductChunkEval {
             &mut eval,
             &self.relations,
             meta.active,
-            self.mul_id,
+            mul_id,
             SIDE_QN,
             meta.coeff,
             meta.chunk,
@@ -289,7 +255,7 @@ impl FrameworkEval for QnProductChunkEval {
             digits,
         );
         if SCALAR_MOD_MUL_ENABLE_QN_RELATIONS {
-            eval.finalize_logup();
+            eval.finalize_logup_in_pairs();
         }
         eval
     }
@@ -298,7 +264,6 @@ impl FrameworkEval for QnProductChunkEval {
 #[derive(Clone)]
 pub struct ProductDigitAccumulatorEval {
     pub log_size: u32,
-    pub mul_id: u32,
     pub relations: ScalarModMulComponentRelations,
 }
 
@@ -320,6 +285,7 @@ impl FrameworkEval for ProductDigitAccumulatorEval {
         let terms: [E::F; PRODUCT_DIGIT_ACCUMULATOR_TERMS] =
             core::array::from_fn(|_| eval.next_trace_mask());
         let product_digit = eval.next_trace_mask();
+        let mul_id = eval.next_trace_mask();
 
         let mut acc = E::F::from(M31::from_u32_unchecked(0));
         for (term_index, term) in terms.iter().enumerate() {
@@ -343,8 +309,8 @@ impl FrameworkEval for ProductDigitAccumulatorEval {
                 add_product_chunk_digit_relation_dynamic(
                     &mut eval,
                     &self.relations.product_chunk_digit,
-                    E::EF::from(term_active),
-                    self.mul_id,
+                    term_active,
+                    mul_id.clone(),
                     side.clone(),
                     coeff,
                     chunk,
@@ -361,13 +327,13 @@ impl FrameworkEval for ProductDigitAccumulatorEval {
             add_product_digit_relation_dynamic(
                 &mut eval,
                 &self.relations.product_digit,
-                -E::EF::from(active),
-                self.mul_id,
+                -active,
+                mul_id,
                 side,
                 digit,
                 product_digit,
             );
-            eval.finalize_logup();
+            eval.finalize_logup_in_pairs();
         }
         eval
     }
@@ -376,7 +342,6 @@ impl FrameworkEval for ProductDigitAccumulatorEval {
 #[derive(Clone)]
 pub struct ScalarReductionDigitEval {
     pub log_size: u32,
-    pub mul_id: u32,
     pub relations: ScalarModMulComponentRelations,
 }
 
@@ -405,13 +370,14 @@ impl FrameworkEval for ScalarReductionDigitEval {
         let result_limb = eval.next_trace_mask();
         let prev_carry = eval.next_trace_mask();
         let carry = eval.next_trace_mask();
+        let mul_id = eval.next_trace_mask();
 
         if SCALAR_MOD_MUL_ENABLE_REDUCTION_RELATIONS {
             add_product_digit_relation_dynamic(
                 &mut eval,
                 &self.relations.product_digit,
-                E::EF::from(active.clone()),
-                self.mul_id,
+                active.clone(),
+                mul_id.clone(),
                 constant(SIDE_AB),
                 digit.clone(),
                 ab_digit.clone(),
@@ -419,17 +385,17 @@ impl FrameworkEval for ScalarReductionDigitEval {
             add_product_digit_relation_dynamic(
                 &mut eval,
                 &self.relations.product_digit,
-                E::EF::from(active.clone()),
-                self.mul_id,
+                active.clone(),
+                mul_id.clone(),
                 constant(SIDE_QN),
                 digit.clone(),
                 qn_digit.clone(),
             );
-            eval.add_to_relation(RelationEntry::new(
+            eval.add_to_relation(RelationEntry::base(
                 &self.relations.scalar_limb,
-                E::EF::from(has_result_limb.clone()),
+                has_result_limb.clone(),
                 &[
-                    constant(self.mul_id),
+                    mul_id.clone(),
                     constant(ROLE_RESULT),
                     digit.clone(),
                     result_limb.clone(),
@@ -448,8 +414,8 @@ impl FrameworkEval for ScalarReductionDigitEval {
             add_reduction_carry_relation_dynamic(
                 &mut eval,
                 &self.relations.reduction_carry,
-                E::EF::from(has_prev_carry),
-                self.mul_id,
+                has_prev_carry,
+                mul_id.clone(),
                 digit.clone() - one::<E>(),
                 prev_carry.clone(),
             );
@@ -475,12 +441,12 @@ impl FrameworkEval for ScalarReductionDigitEval {
             add_reduction_carry_relation_dynamic(
                 &mut eval,
                 &self.relations.reduction_carry,
-                -E::EF::from(has_next_carry),
-                self.mul_id,
+                -has_next_carry,
+                mul_id,
                 digit,
                 carry,
             );
-            eval.finalize_logup();
+            eval.finalize_logup_in_pairs();
         }
         eval
     }
@@ -573,7 +539,7 @@ fn finish_product_chunk_dynamic<E: EvalAtRow>(
     eval: &mut E,
     relations: &ScalarModMulComponentRelations,
     active: E::F,
-    mul_id: u32,
+    mul_id: E::F,
     side: u32,
     coeff: E::F,
     chunk: E::F,
@@ -628,8 +594,8 @@ fn finish_product_chunk_dynamic<E: EvalAtRow>(
             add_product_chunk_digit_relation_dynamic(
                 eval,
                 &relations.product_chunk_digit,
-                -E::EF::from(digit_active[offset].clone()),
-                mul_id,
+                -digit_active[offset].clone(),
+                mul_id.clone(),
                 constant(side),
                 coeff.clone(),
                 chunk.clone(),
@@ -642,62 +608,66 @@ fn finish_product_chunk_dynamic<E: EvalAtRow>(
 
 fn constrain_unused<E: EvalAtRow>(eval: &mut E, active: E::F, term_active: E::F, value: E::F) {
     let _ = active;
-    eval.add_constraint((one::<E>() - term_active) * value);
+    constrain_unused_with_gate(eval, one::<E>() - term_active, value);
+}
+
+fn constrain_unused_with_gate<E: EvalAtRow>(eval: &mut E, unused_gate: E::F, value: E::F) {
+    eval.add_constraint(unused_gate * value);
 }
 
 fn consume_scalar_limb_dynamic<E: EvalAtRow>(
     eval: &mut E,
     relation: &ScalarLimbRelation,
     gate: E::F,
-    mul_id: u32,
+    mul_id: E::F,
     role: u32,
     limb_index: E::F,
     limb_value: E::F,
 ) {
     let values: [E::F; SCALAR_LIMB_RELATION_ARITY] =
-        [constant(mul_id), constant(role), limb_index, limb_value];
-    eval.add_to_relation(RelationEntry::new(relation, E::EF::from(gate), &values));
+        [mul_id, constant(role), limb_index, limb_value];
+    eval.add_to_relation(RelationEntry::base(relation, gate, &values));
 }
 
 #[allow(clippy::too_many_arguments)]
 fn add_product_chunk_digit_relation_dynamic<E: EvalAtRow>(
     eval: &mut E,
     relation: &ScalarProductChunkDigitRelation,
-    numerator: E::EF,
-    mul_id: u32,
+    numerator: E::F,
+    mul_id: E::F,
     side: E::F,
     coeff: E::F,
     chunk: E::F,
     offset: E::F,
     value: E::F,
 ) {
-    let values = [constant(mul_id), side, coeff, chunk, offset, value];
-    eval.add_to_relation(RelationEntry::new(relation, numerator, &values));
+    let values = [mul_id, side, coeff, chunk, offset, value];
+    eval.add_to_relation(RelationEntry::base(relation, numerator, &values));
 }
 
 fn add_product_digit_relation_dynamic<E: EvalAtRow>(
     eval: &mut E,
     relation: &ScalarProductDigitRelation,
-    numerator: E::EF,
-    mul_id: u32,
+    numerator: E::F,
+    mul_id: E::F,
     side: E::F,
     digit: E::F,
     value: E::F,
 ) {
-    let values = [constant(mul_id), side, digit, value];
-    eval.add_to_relation(RelationEntry::new(relation, numerator, &values));
+    let values = [mul_id, side, digit, value];
+    eval.add_to_relation(RelationEntry::base(relation, numerator, &values));
 }
 
 fn add_reduction_carry_relation_dynamic<E: EvalAtRow>(
     eval: &mut E,
     relation: &ScalarReductionCarryRelation,
-    numerator: E::EF,
-    mul_id: u32,
+    numerator: E::F,
+    mul_id: E::F,
     digit: E::F,
     value: E::F,
 ) {
-    let values = [constant(mul_id), digit, value];
-    eval.add_to_relation(RelationEntry::new(relation, numerator, &values));
+    let values = [mul_id, digit, value];
+    eval.add_to_relation(RelationEntry::base(relation, numerator, &values));
 }
 
 fn constant<F: From<M31>>(value: u32) -> F {
@@ -735,7 +705,7 @@ mod tests {
         SCALAR_REDUCTION_DIGIT_TRACE_COLUMNS,
     };
     use super::super::schedule::{ScalarModMulFixedSchedule, ScalarModMulScheduleColumn};
-    use super::super::ScalarModMulTraceRows;
+    use super::super::{ScalarModMulMergedRows, ScalarModMulTraceRows};
     use super::*;
 
     fn relations() -> ScalarModMulComponentRelations {
@@ -758,7 +728,6 @@ mod tests {
             &mut allocator,
             CanonicalScalarEval {
                 log_size: padded_log_size(4),
-                mul_id: 0,
                 external_limb_links: false,
                 relations: rel.clone(),
             },
@@ -768,7 +737,6 @@ mod tests {
             &mut allocator,
             AbProductChunkEval {
                 log_size: 8,
-                mul_id: 0,
                 relations: rel.clone(),
             },
             SecureField::zero(),
@@ -777,7 +745,6 @@ mod tests {
             &mut allocator,
             QnProductChunkEval {
                 log_size: 8,
-                mul_id: 0,
                 relations: rel.clone(),
             },
             SecureField::zero(),
@@ -786,7 +753,6 @@ mod tests {
             &mut allocator,
             ProductDigitAccumulatorEval {
                 log_size: 7,
-                mul_id: 0,
                 relations: rel.clone(),
             },
             SecureField::zero(),
@@ -795,7 +761,6 @@ mod tests {
             &mut allocator,
             ScalarReductionDigitEval {
                 log_size: 6,
-                mul_id: 0,
                 relations: rel,
             },
             SecureField::zero(),
@@ -832,14 +797,12 @@ mod tests {
                 padded_log_size(4),
                 CanonicalScalarEval {
                     log_size: padded_log_size(4),
-                    mul_id: 0,
                     external_limb_links: false,
                     relations: rel.clone(),
                 }
                 .max_constraint_log_degree_bound(),
                 max_expression_degree(CanonicalScalarEval {
                     log_size: padded_log_size(4),
-                    mul_id: 0,
                     external_limb_links: false,
                     relations: rel.clone(),
                 }),
@@ -849,13 +812,11 @@ mod tests {
                 8,
                 AbProductChunkEval {
                     log_size: 8,
-                    mul_id: 0,
                     relations: rel.clone(),
                 }
                 .max_constraint_log_degree_bound(),
                 max_expression_degree(AbProductChunkEval {
                     log_size: 8,
-                    mul_id: 0,
                     relations: rel.clone(),
                 }),
             ),
@@ -864,13 +825,11 @@ mod tests {
                 8,
                 QnProductChunkEval {
                     log_size: 8,
-                    mul_id: 0,
                     relations: rel.clone(),
                 }
                 .max_constraint_log_degree_bound(),
                 max_expression_degree(QnProductChunkEval {
                     log_size: 8,
-                    mul_id: 0,
                     relations: rel.clone(),
                 }),
             ),
@@ -879,13 +838,11 @@ mod tests {
                 7,
                 ProductDigitAccumulatorEval {
                     log_size: 7,
-                    mul_id: 0,
                     relations: rel.clone(),
                 }
                 .max_constraint_log_degree_bound(),
                 max_expression_degree(ProductDigitAccumulatorEval {
                     log_size: 7,
-                    mul_id: 0,
                     relations: rel.clone(),
                 }),
             ),
@@ -894,22 +851,31 @@ mod tests {
                 6,
                 ScalarReductionDigitEval {
                     log_size: 6,
-                    mul_id: 0,
                     relations: rel,
                 }
                 .max_constraint_log_degree_bound(),
                 max_expression_degree(ScalarReductionDigitEval {
                     log_size: 6,
-                    mul_id: 0,
                     relations: relations(),
                 }),
             ),
         ];
 
         for (name, log_size, declared_bound, max_degree) in components {
+            // stwo's SubDomain composition evaluates the quotient on a domain
+            // of `2^declared` points; a degree-`d` constraint's quotient has
+            // degree `(d − 1) · 2^log_size`, so the bound must satisfy
+            // `declared ≥ log_size + ceil(log2(d − 1))` (min +1 for the FRI
+            // headroom). In particular `log_size + 1` covers d ≤ 3 — the
+            // pair-batched LogUp recurrence degree.
+            let required = log_size
+                + (max_degree.saturating_sub(1))
+                    .next_power_of_two()
+                    .trailing_zeros()
+                    .max(1);
             assert!(
-                declared_bound >= log_size + max_degree.next_power_of_two().trailing_zeros(),
-                "{name} declared bound does not cover expression degree"
+                declared_bound >= required,
+                "{name} declared bound {declared_bound} does not cover expression degree {max_degree} (requires {required})"
             );
         }
     }
@@ -1010,7 +976,6 @@ mod tests {
             };
             let recorder = AbProductChunkEval {
                 log_size,
-                mul_id: TEST_FORGERY_MUL_ID,
                 relations: relations(),
             }
             .evaluate(recorder);
@@ -1042,8 +1007,11 @@ mod tests {
             &stwo_p256_utils::scalar_arithmetic::P256_ORDER,
         )
         .expect("valid scalar mod-mul trace");
-        let rows =
-            ScalarModMulTraceRows::new(TEST_FORGERY_MUL_ID, &trace).expect("trace rows generate");
+        let rows = ScalarModMulMergedRows::new(vec![ScalarModMulTraceRows::new(
+            TEST_FORGERY_MUL_ID,
+            &trace,
+        )
+        .expect("trace rows generate")]);
         let honest = ScalarModMulFamilyTraces::from_rows(&rows);
         let schedule = ScalarModMulFixedSchedule::from_rows(&rows);
         for column in &schedule.ab_chunks {
@@ -1065,10 +1033,18 @@ mod tests {
 
         // Row 0 is the (coeff 0, chunk 0) chunk: product_sum = 7 · 11 = 77 with
         // digits [77, 0, 0], so digits[0] has room for the compensating -1.
-        let digit0_col = AB_PRODUCT_CHUNK_TRACE_COLUMNS - SCALAR_MOD_MUL_SPLIT_CHUNK_DIGITS;
-        let digit2_col = AB_PRODUCT_CHUNK_TRACE_COLUMNS - 1;
-        assert_eq!(rows.ab_chunks[0].digits[0], M31::from_u32_unchecked(77));
-        assert_eq!(rows.ab_chunks[0].digits[2], M31::from_u32_unchecked(0));
+        // The mul_id column is appended LAST, so the three digit columns are the
+        // three immediately before it.
+        let digit0_col = AB_PRODUCT_CHUNK_TRACE_COLUMNS - 1 - SCALAR_MOD_MUL_SPLIT_CHUNK_DIGITS;
+        let digit2_col = AB_PRODUCT_CHUNK_TRACE_COLUMNS - 2;
+        assert_eq!(
+            rows.instances[0].ab_chunks[0].digits[0],
+            M31::from_u32_unchecked(77)
+        );
+        assert_eq!(
+            rows.instances[0].ab_chunks[0].digits[2],
+            M31::from_u32_unchecked(0)
+        );
 
         let mut forged = honest.ab_chunks.columns.clone();
         forged[digit0_col][0] = M31::from_u32_unchecked(76);
@@ -1100,7 +1076,6 @@ mod tests {
             &mut allocator,
             CanonicalScalarEval {
                 log_size: padded_log_size(4),
-                mul_id: 0,
                 external_limb_links: false,
                 relations: rel.clone(),
             },
@@ -1110,7 +1085,6 @@ mod tests {
             &mut allocator,
             AbProductChunkEval {
                 log_size: 8,
-                mul_id: 0,
                 relations: rel,
             },
             SecureField::zero(),
@@ -1139,7 +1113,6 @@ mod tests {
         assert_eq!(
             CanonicalScalarEval {
                 log_size: padded_log_size(4),
-                mul_id: 0,
                 external_limb_links: false,
                 relations: rel.clone(),
             }
@@ -1149,7 +1122,6 @@ mod tests {
         assert_eq!(
             ProductDigitAccumulatorEval {
                 log_size: 7,
-                mul_id: 0,
                 relations: rel.clone(),
             }
             .max_constraint_log_degree_bound(),
@@ -1160,7 +1132,6 @@ mod tests {
         assert_eq!(
             ScalarReductionDigitEval {
                 log_size: 6,
-                mul_id: 0,
                 relations: rel,
             }
             .max_constraint_log_degree_bound(),

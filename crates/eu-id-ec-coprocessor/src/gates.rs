@@ -1,0 +1,157 @@
+use std::path::{Path, PathBuf};
+
+use crate::ecdsa::implemented_circuit_gate_count;
+use crate::ligero::{
+    v1_ligero_params, v2_ligero_params, v2_ligero_params_b, v4_circle_params, V2_ZK_OPENINGS,
+};
+
+const G1_FIELD_BENCH: &str = "WO-G1-field-bench.md";
+const G2_SUMCHECK_BENCH: &str = "WO-G2-sumcheck-bench.md";
+const G4_CIRCUIT_INVENTORY: &str = "WO-G4-circuit-inventory.md";
+
+const G1_MAX_INDEPENDENT_NS_PER_MULT: f64 = 25.0;
+const G2_MAX_MS_PER_35K_QUAD_EQUIV: f64 = 20.0;
+const G4_MAILBOX_GATE_COUNT: usize = 33_000;
+
+#[test]
+fn g1_field_bench_result_is_recorded_and_meets_gate() {
+    let Some(path) = task_file(G1_FIELD_BENCH) else {
+        eprintln!("skipping {G1_FIELD_BENCH}: S4 parity fixture not present");
+        return;
+    };
+    let result = result_block(&path);
+    let independent_ns = parse_number(&result, "independent_ns_per_mult");
+
+    assert!(
+        independent_ns <= G1_MAX_INDEPENDENT_NS_PER_MULT,
+        "G1 independent field multiplication is {independent_ns} ns/mult; gate is <= {G1_MAX_INDEPENDENT_NS_PER_MULT}"
+    );
+}
+
+#[test]
+fn g2_sumcheck_bench_result_is_recorded_and_meets_gate() {
+    let Some(path) = task_file(G2_SUMCHECK_BENCH) else {
+        eprintln!("skipping {G2_SUMCHECK_BENCH}: S4 parity fixture not present");
+        return;
+    };
+    let result = result_block(&path);
+    let ms = parse_number(&result, "ms_per_35k_quad_equiv");
+
+    assert!(
+        ms <= G2_MAX_MS_PER_35K_QUAD_EQUIV,
+        "G2 sumcheck is {ms} ms/35k-quad-equiv; gate is <= {G2_MAX_MS_PER_35K_QUAD_EQUIV}"
+    );
+}
+
+#[test]
+fn q007_ligero_v2_params_meet_zk_soundness_gate() {
+    let legacy = v1_ligero_params();
+    assert!(
+        legacy.validate().is_err(),
+        "legacy v1 tuple must fail k >= ell + t after P4a"
+    );
+
+    for (name, params) in [("A", v2_ligero_params()), ("B", v2_ligero_params_b())] {
+        assert_eq!(params.row_len, 64);
+        assert!(
+            V2_ZK_OPENINGS,
+            "P4a only claims witness-hiding openings; signature statement values remain public until P4b"
+        );
+        assert!(params.degree_bound >= params.row_len + params.openings);
+        params.validate().unwrap();
+        assert!(
+            params.soundness_error() <= 2f64.powi(-128),
+            "Q-007 option {name} soundness error {} exceeds 2^-128",
+            params.soundness_error()
+        );
+    }
+
+    let circle = v4_circle_params();
+    circle.validate().unwrap();
+    assert!(
+        circle.soundness_error() <= 2f64.powi(-132),
+        "production circle soundness error {} exceeds 2^-132",
+        circle.soundness_error()
+    );
+}
+
+#[test]
+fn g4_gate_count_is_recorded_and_below_mailbox_gate() {
+    let Some(path) = task_file(G4_CIRCUIT_INVENTORY) else {
+        eprintln!("skipping {G4_CIRCUIT_INVENTORY}: S4 parity fixture not present");
+        return;
+    };
+    let result = result_block(&path);
+    let recorded = parse_usize(&result, "measured_quad_count");
+    let measured = implemented_circuit_gate_count().expect("static ECDSA circuits build");
+
+    assert_eq!(
+        recorded, measured,
+        "G4 RESULT measured_quad_count must match the current builder"
+    );
+    assert!(
+        measured <= G4_MAILBOX_GATE_COUNT,
+        "G4 measured quad count {measured} exceeds mailbox threshold {G4_MAILBOX_GATE_COUNT}"
+    );
+}
+
+/// Locate a recorded S4 parity result file, if it is checked out. Returns
+/// `None` when the `tasks/parity/s4` fixtures are absent (e.g. in CI), so the
+/// gate tests skip rather than panic. Set `S4_TASKS_DIR` to point at them.
+fn task_file(name: &str) -> Option<PathBuf> {
+    if let Ok(root) = std::env::var("S4_TASKS_DIR") {
+        let candidate = PathBuf::from(root).join(name);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for ancestor in manifest_dir.ancestors() {
+        let candidate = ancestor.join("tasks/parity/s4").join(name);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
+fn result_block(path: &Path) -> String {
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+    let Some(start) = text.find("## RESULT") else {
+        panic!("{} is missing a ## RESULT block", path.display());
+    };
+    let rest = &text[start..];
+    let end = rest
+        .find("\n## ")
+        .map(|offset| offset + start)
+        .unwrap_or(text.len());
+    text[start..end].to_owned()
+}
+
+fn parse_number(block: &str, key: &str) -> f64 {
+    let raw = value_for_key(block, key);
+    raw.parse::<f64>()
+        .unwrap_or_else(|err| panic!("RESULT key {key} has non-numeric value {raw:?}: {err}"))
+}
+
+fn parse_usize(block: &str, key: &str) -> usize {
+    let raw = value_for_key(block, key);
+    raw.parse::<usize>()
+        .unwrap_or_else(|err| panic!("RESULT key {key} has non-integer value {raw:?}: {err}"))
+}
+
+fn value_for_key<'a>(block: &'a str, key: &str) -> &'a str {
+    let prefix = format!("{key}:");
+    block
+        .lines()
+        .find_map(|line| {
+            let line = line.trim().trim_start_matches('-').trim();
+            line.strip_prefix(&prefix)
+                .map(|value| value.trim().split_whitespace().next().unwrap_or(""))
+        })
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| panic!("RESULT block is missing key {key}"))
+}

@@ -58,6 +58,15 @@ fn draft(w: &PipelineWitness) -> &P256ProofDraft {
         .expect("benchmark fixtures are honest credentials with a valid P256 draft")
 }
 
+/// A self-consistent holder nonce draft: the demo device key signing the demo
+/// nonce. Built outside the measured window, like the credential draft.
+fn nonce_draft() -> P256ProofDraft {
+    P256ProofDraft::from_inputs_with_arbitrary_fake_glv_hints(vec![
+        eu_id_prover::fixtures::demo_nonce_statement().ecdsa_input(),
+    ])
+    .expect("demo nonce builds a proof draft")
+}
+
 // ---- P256 ECDSA (the cost driver) -----------------------------------------
 
 pub fn prove_p256(w: &PipelineWitness) -> P256Proof {
@@ -149,6 +158,7 @@ pub fn nat_proof_bytes(proof: &NatProof) -> usize {
 pub fn prove_pipeline(w: &PipelineWitness) -> Proof {
     prove_pipeline_inner(
         draft(w),
+        &nonce_draft(),
         &w.sha_witness,
         w.sha_log_n_rows,
         w.sha_group_width,
@@ -164,8 +174,17 @@ pub fn pipeline_instances(proof: &Proof) -> Instances {
     proof.p256_instances().to_vec()
 }
 
-pub fn verify_pipeline(proof: &Proof, instances: &[PublicEcdsaInstance<M31>]) {
-    verify_pipeline_inner(proof, instances).expect("pipeline verifies");
+/// The nonce module's proven instances — bound in full (`z` included).
+pub fn pipeline_nonce_instances(proof: &Proof) -> Instances {
+    proof.nonce_p256_instances().to_vec()
+}
+
+pub fn verify_pipeline(
+    proof: &Proof,
+    instances: &[PublicEcdsaInstance<M31>],
+    nonce_instances: &[PublicEcdsaInstance<M31>],
+) {
+    verify_pipeline_inner(proof, instances, nonce_instances).expect("pipeline verifies");
 }
 
 pub fn pipeline_proof_bytes(proof: &Proof) -> usize {
@@ -205,6 +224,7 @@ pub fn stages(w: &PipelineWitness) -> Vec<Stage<'_>> {
 
     let pipeline = prove_pipeline(w);
     let pipeline_inst = pipeline_instances(&pipeline);
+    let pipeline_nonce_inst = pipeline_nonce_instances(&pipeline);
     let pipeline_bytes = pipeline_proof_bytes(&pipeline);
 
     vec![
@@ -245,7 +265,9 @@ pub fn stages(w: &PipelineWitness) -> Vec<Stage<'_>> {
             prove: Box::new(move || {
                 black_box(prove_pipeline(w));
             }),
-            verify: Box::new(move || verify_pipeline(&pipeline, &pipeline_inst)),
+            verify: Box::new(move || {
+                verify_pipeline(&pipeline, &pipeline_inst, &pipeline_nonce_inst)
+            }),
             proof_bytes: pipeline_bytes,
         },
     ]

@@ -1,0 +1,78 @@
+{
+  "label": "m4max",
+  "fixture": "valid_over_18",
+  "byte_breakdown": {
+    "proof_bincode_bytes": 7300513,
+    "stark_proof_bincode_bytes": 7297997,
+    "fields": {
+      "config": 25,
+      "commitments": 136,
+      "sampled_values": 688880,
+      "decommitments": 92584,
+      "queried_values": 6357832,
+      "proof_of_work": 8,
+      "fri_proof": 158532
+    },
+    "tree_columns": [
+      311,
+      16976,
+      11088,
+      8
+    ],
+    "modules": [
+      {
+        "name": "p256",
+        "preprocessed_cols": 216,
+        "trace_cols": 6927,
+        "interaction_cols": 3320,
+        "total_cols": 10463,
+        "queried_bytes": 2343722,
+        "oods_bytes": 253443,
+        "width_bytes": 2597165
+      },
+      {
+        "name": "sha",
+        "preprocessed_cols": 85,
+        "trace_cols": 9940,
+        "interaction_cols": 7576,
+        "total_cols": 17601,
+        "queried_bytes": 3942635,
+        "oods_bytes": 427633,
+        "width_bytes": 4370268
+      },
+      {
+        "name": "bridge",
+        "preprocessed_cols": 2,
+        "trace_cols": 87,
+        "interaction_cols": 140,
+        "total_cols": 229,
+        "queried_bytes": 51296,
+        "oods_bytes": 5590,
+        "width_bytes": 56886
+      },
+      {
+        "name": "age",
+        "preprocessed_cols": 7,
+        "trace_cols": 17,
+        "interaction_cols": 40,
+        "total_cols": 64,
+        "queried_bytes": 14336,
+        "oods_bytes": 1562,
+        "width_bytes": 15898
+      },
+      {
+        "name": "nat",
+        "preprocessed_cols": 1,
+        "trace_cols": 5,
+        "interaction_cols": 12,
+        "total_cols": 18,
+        "queried_bytes": 4032,
+        "oods_bytes": 439,
+        "width_bytes": 4471
+      }
+    ],
+    "composition_width_bytes": 2024,
+    "ffi_compressed_bytes": 4554738,
+    "compression_ratio": 1.6028392851575657
+  }
+}

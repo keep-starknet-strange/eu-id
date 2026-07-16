@@ -7,6 +7,7 @@
 //! channel so the global balance cancels against the SHA provider's yield.
 
 use stwo::core::fields::m31::M31;
+use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{EvalAtRow, FrameworkComponent, FrameworkEval, RelationEntry};
 use stwo_p256_utils::constants::N_LIMBS;
 
@@ -14,7 +15,10 @@ use air_core::relations::DigestBytesRelation;
 
 use crate::range_checks::{add_range_check, RangeCheckRelation};
 
-use super::{limb_feeding_byte, ScalarZRelation, DIGEST_BYTES, N_CARRIES, SCALAR_Z_RELATION_ARITY};
+use super::{
+    limb_feeding_byte, ScalarZRelation, ACTIVE_PREPROCESSED_ID_PREFIX, DIGEST_BYTES, N_CARRIES,
+    SCALAR_Z_RELATION_ARITY,
+};
 
 /// The four LogUp channels the bridge consumes, plus the cross-module digest
 /// gate. The two range channels are balanced inside this bridge module (their
@@ -25,6 +29,7 @@ use super::{limb_feeding_byte, ScalarZRelation, DIGEST_BYTES, N_CARRIES, SCALAR_
 #[derive(Clone, Debug)]
 pub struct DigestBindEval {
     pub log_size: u32,
+    pub active_rows: usize,
     /// `[0, 256)` table — pins every digest byte.
     pub range8: RangeCheckRelation,
     /// `[0, 2^13)` table — pins every base-256 carry.
@@ -41,34 +46,34 @@ pub struct DigestBindEval {
     pub expose_digest: bool,
 }
 
+pub(super) fn active_col_id(log_size: u32, active_rows: usize) -> PreProcessedColumnId {
+    PreProcessedColumnId {
+        id: format!("{ACTIVE_PREPROCESSED_ID_PREFIX}_{log_size}_{active_rows}"),
+    }
+}
+
 impl FrameworkEval for DigestBindEval {
     fn log_size(&self) -> u32 {
         self.log_size
     }
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        // Every constraint is degree 2: the recomposition is `active · linear`,
-        // and `finalize_logup` (one fraction per column, no batching) keeps the
-        // LogUp constraint degree 2 (`diff · denominator − numerator`). Staying at
-        // degree 2 means the composition never needs the higher-degree "lifting"
-        // path, so the module proves under any blow-up factor.
+        // Recomposition is degree 2. Pair-batched LogUp columns multiply two
+        // linear denominators, so their constraints stay within the standard
+        // `log_size + 1` budget.
         self.log_size + 1
     }
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let one = E::F::from(M31::from_u32_unchecked(1));
         let zero = E::F::from(M31::from_u32_unchecked(0));
         let two_pow_8 = E::F::from(M31::from_u32_unchecked(1 << 8));
 
+        let active = eval.get_preprocessed_column(active_col_id(self.log_size, self.active_rows));
         // Columns, in committed order (see `super::COL_*`).
-        let active = eval.next_trace_mask();
         let sig_id = eval.next_trace_mask();
         let z: [E::F; N_LIMBS] = core::array::from_fn(|_| eval.next_trace_mask());
         let bytes: [E::F; DIGEST_BYTES] = core::array::from_fn(|_| eval.next_trace_mask());
         let carries: [E::F; N_CARRIES] = core::array::from_fn(|_| eval.next_trace_mask());
-
-        // `active` is boolean.
-        eval.add_constraint(active.clone() * (active.clone() - one));
 
         // Base-256 recomposition, one constraint per little-endian byte `k`:
         //   c[k] + limb_term_k − lb[k] − 256·c[k+1] = 0     (gated by `active`)
@@ -116,9 +121,9 @@ impl FrameworkEval for DigestBindEval {
         let mut scalar_z_values = Vec::with_capacity(SCALAR_Z_RELATION_ARITY);
         scalar_z_values.push(sig_id);
         scalar_z_values.extend(z.iter().cloned());
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             &self.scalar_z,
-            E::EF::from(active.clone()),
+            active.clone(),
             &scalar_z_values,
         ));
 
@@ -127,14 +132,10 @@ impl FrameworkEval for DigestBindEval {
         // relation. Cancels in the global balance iff the byte strings match,
         // i.e. iff z == SHA-256(C).
         if self.expose_digest {
-            eval.add_to_relation(RelationEntry::new(
-                &self.digest,
-                E::EF::from(active),
-                &bytes,
-            ));
+            eval.add_to_relation(RelationEntry::base(&self.digest, active, &bytes));
         }
 
-        eval.finalize_logup();
+        eval.finalize_logup_in_pairs();
         eval
     }
 }

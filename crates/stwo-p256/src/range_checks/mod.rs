@@ -27,10 +27,7 @@ pub mod trace;
 pub use component::{
     RangeCheckComponent, RangeCheckEval, SignedCarryRangeComponent, SignedCarryRangeEval,
 };
-pub use interaction::{
-    batching_with_solo, consecutive_batching, write_batched_logup_columns,
-    write_logup_columns_with_batching, RangeCheckInteractionClaim,
-};
+pub use interaction::{write_batched_logup_columns, RangeCheckInteractionClaim};
 pub use trace::{ColumnEval, RangeCheckClaim, SignedCarryRangeClaim};
 
 use stwo::core::fields::m31::M31;
@@ -62,6 +59,17 @@ relation!(RangeCheckRelation, 1);
 pub fn range_check_value_column_id(log_size: u32) -> PreProcessedColumnId {
     PreProcessedColumnId {
         id: format!("p256_range{log_size}_value"),
+    }
+}
+
+/// Preprocessed `is_dummy` selector for the Class-D blind region of a plain
+/// range table (Q-015 §4b / p4c-degree-inventory Class D). `1` over the upper
+/// half `[2^log_size, 2^(log_size+1))` (reserved dummy keys), `0` over the real
+/// `[0, 2^log_size)` region. Keyed by the *real* `log_size` so a Class-D table
+/// and any non-blinded table of the same width never alias.
+pub fn range_check_dummy_column_id(real_log_size: u32) -> PreProcessedColumnId {
+    PreProcessedColumnId {
+        id: format!("p256_range{real_log_size}_dummy"),
     }
 }
 
@@ -130,7 +138,7 @@ pub fn add_range_check<E: EvalAtRow>(
     gate: E::F,
     value: E::F,
 ) {
-    eval.add_to_relation(RelationEntry::new(relation, E::EF::from(gate), &[value]));
+    eval.add_to_relation(RelationEntry::base(relation, gate, &[value]));
 }
 
 #[cfg(test)]

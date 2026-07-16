@@ -106,10 +106,8 @@ pub fn scalar_z_provider_claimed_sum(
 // --- Trace column layout (committed in this order; read sequentially by the
 // eval, written in the same order by the trace generator) ---
 
-/// `active` selector (1 on a real signature row, 0 on padding).
-pub const COL_ACTIVE: usize = 0;
 /// Per-signature id, shared with the `(sig_id, z)` binding relation.
-pub const COL_SIG_ID: usize = 1;
+pub const COL_SIG_ID: usize = 0;
 /// First of the 20 `z` limbs (13-bit, little-endian).
 pub const COL_Z_START: usize = COL_SIG_ID + 1;
 /// First of the 32 big-endian digest bytes.
@@ -136,6 +134,11 @@ pub const N_CARRIES: usize = DIGEST_BYTES - 1;
 /// *consumes* it (+active), pinning the bridge's `z` limbs to the proven,
 /// public-input-bound `z`.
 pub const SCALAR_Z_RELATION_ARITY: usize = 1 + N_LIMBS;
+
+/// Preprocessed active selector id prefix for digest bridge rows. The concrete
+/// id includes log size and active row count because the column contents depend
+/// on both public shape parameters.
+pub const ACTIVE_PREPROCESSED_ID_PREFIX: &str = "digest_bind_active";
 
 /// For little-endian byte position `k` (`0` = least-significant byte of `z`),
 /// the limb index whose 13-bit window *starts* in that byte and the intra-byte

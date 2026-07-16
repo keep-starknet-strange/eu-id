@@ -4,10 +4,7 @@ use stwo::{
         utils::{bit_reverse_index, coset_index_to_circle_domain_index},
         ColumnVec,
     },
-    prover::backend::simd::{
-        m31::{LOG_N_LANES, N_LANES},
-        qm31::PackedQM31,
-    },
+    prover::backend::simd::{m31::N_LANES, qm31::PackedQM31},
 };
 use stwo_constraint_framework::{LogupTraceGenerator, Relation};
 use stwo_p256_utils::constants::N_LIMBS;
@@ -17,7 +14,7 @@ use super::accumulator::for_each_digit_contribution;
 use super::columns::M31ColumnEval;
 use super::ScalarModMulInteractionClaim;
 use super::{
-    product_chunk_pairs, ScalarModMulComponentRelations, ScalarModMulTraceRows,
+    product_chunk_pairs, ScalarModMulComponentRelations, ScalarModMulMergedRows,
     PRODUCT_DIGIT_ACCUMULATOR_TERMS, ROLE_A, ROLE_B, ROLE_QUOTIENT, ROLE_RESULT,
     SCALAR_MOD_MUL_ENABLE_AB_A_LIMB_RELATIONS, SCALAR_MOD_MUL_ENABLE_AB_B_LIMB_RELATIONS,
     SCALAR_MOD_MUL_ENABLE_AB_PRODUCT_CHUNK_DIGIT_RELATIONS,
@@ -37,54 +34,51 @@ pub struct ScalarModMulInteractionTraces {
 
 impl ScalarModMulInteractionTraces {
     pub fn from_rows(
-        rows: &ScalarModMulTraceRows,
+        rows: &ScalarModMulMergedRows,
         external_limb_links: bool,
         relations: &ScalarModMulComponentRelations,
     ) -> (Self, ScalarModMulInteractionClaim) {
+        // Padding tuples carry numerator 0, so their `mul_id` never affects the
+        // claimed sum; use 0 to mirror the merged base trace's zero padding.
         let (canonical_scalars, canonical_claim) = gen_family_interaction_trace(
-            super::columns::padded_log_size(rows.canonical_scalars.len()),
-            rows.canonical_scalars
-                .iter()
-                .map(|row| canonical_fractions(rows.mul_id, row, external_limb_links)),
-            canonical_padding_fractions(rows.mul_id),
+            super::columns::padded_log_size(rows.canonical_len()),
+            rows.canonical_scalars()
+                .map(|(mul_id, row)| canonical_fractions(mul_id, row, external_limb_links)),
+            canonical_padding_fractions(0),
             relations,
-            false,
+            true,
         );
         let (ab_chunks, ab_claim) = gen_family_interaction_trace(
-            super::columns::padded_log_size(rows.ab_chunks.len()),
-            rows.ab_chunks
-                .iter()
-                .map(|row| ab_chunk_fractions(rows.mul_id, row)),
-            product_chunk_padding_fractions(rows.mul_id, SIDE_AB),
+            super::columns::padded_log_size(rows.ab_chunks_len()),
+            rows.ab_chunks()
+                .map(|(mul_id, row)| ab_chunk_fractions(mul_id, row)),
+            product_chunk_padding_fractions(0, SIDE_AB),
             relations,
-            false,
+            true,
         );
         let (qn_chunks, qn_claim) = gen_family_interaction_trace(
-            super::columns::padded_log_size(rows.qn_chunks.len()),
-            rows.qn_chunks
-                .iter()
-                .map(|row| qn_chunk_fractions(rows.mul_id, row)),
-            qn_product_chunk_padding_fractions(rows.mul_id),
+            super::columns::padded_log_size(rows.qn_chunks_len()),
+            rows.qn_chunks()
+                .map(|(mul_id, row)| qn_chunk_fractions(mul_id, row)),
+            qn_product_chunk_padding_fractions(0),
             relations,
-            false,
+            true,
         );
         let (accumulators, accumulator_claim) = gen_family_interaction_trace(
-            super::columns::padded_log_size(rows.accumulators.len()),
-            rows.accumulators
-                .iter()
-                .map(|row| accumulator_fractions(rows.mul_id, row)),
-            accumulator_padding_fractions(rows.mul_id),
+            super::columns::padded_log_size(rows.accumulators_len()),
+            rows.accumulators()
+                .map(|(mul_id, row)| accumulator_fractions(mul_id, row)),
+            accumulator_padding_fractions(0),
             relations,
-            false,
+            true,
         );
         let (reduction_digits, reduction_claim) = gen_family_interaction_trace(
-            super::columns::padded_log_size(rows.reduction_digits.len()),
-            rows.reduction_digits
-                .iter()
-                .map(|row| reduction_fractions(rows.mul_id, row)),
-            reduction_padding_fractions(rows.mul_id),
+            super::columns::padded_log_size(rows.reduction_len()),
+            rows.reduction_digits()
+                .map(|(mul_id, row)| reduction_fractions(mul_id, row)),
+            reduction_padding_fractions(0),
             relations,
-            false,
+            true,
         );
 
         (
@@ -156,8 +150,7 @@ fn gen_family_interaction_trace(
 
     let mut logup = LogupTraceGenerator::new(log_size);
     for batch in 0..batch_count {
-        let mut col = logup.new_col();
-        for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+        logup.col_from_fn(|vec_row| {
             let mut numerators = [SecureField::from(M31::from_u32_unchecked(0)); N_LANES];
             let mut denominators = [SecureField::from(M31::from_u32_unchecked(1)); N_LANES];
             for lane in 0..N_LANES {
@@ -174,13 +167,11 @@ fn gen_family_interaction_trace(
                 numerators[lane] = numerator;
                 denominators[lane] = denominator;
             }
-            col.write_frac(
-                vec_row,
+            (
                 PackedQM31::from_array(numerators),
                 PackedQM31::from_array(denominators),
-            );
-        }
-        col.finalize_col();
+            )
+        });
     }
 
     logup.finalize_last()
@@ -655,10 +646,14 @@ mod tests {
         [value, 0, 0, 0]
     }
 
-    fn test_rows() -> ScalarModMulTraceRows {
+    fn single_test_rows() -> super::super::ScalarModMulTraceRows {
         let trace = ScalarFieldMulTrace::new("test_mul", &scalar(7), &scalar(11), &P256_ORDER)
             .expect("valid scalar mod-mul trace");
-        ScalarModMulTraceRows::new(3, &trace).expect("trace rows generate")
+        super::super::ScalarModMulTraceRows::new(3, &trace).expect("trace rows generate")
+    }
+
+    fn test_rows() -> ScalarModMulMergedRows {
+        ScalarModMulMergedRows::new(vec![single_test_rows()])
     }
 
     fn relations() -> ScalarModMulComponentRelations {
@@ -683,11 +678,13 @@ mod tests {
         assert_eq!(traces.accumulators[0].domain.size(), 128);
         assert_eq!(traces.reduction_digits[0].domain.size(), 64);
 
-        assert_eq!(traces.canonical_scalars.len(), 60 * 4);
-        assert_eq!(traces.ab_chunks.len(), 9 * 4);
-        assert_eq!(traces.qn_chunks.len(), 7 * 4);
-        assert_eq!(traces.accumulators.len(), 31 * 4);
-        assert_eq!(traces.reduction_digits.len(), 6 * 4);
+        // Pair-batched widths: `ceil(solo_entries / 2)` SecureField columns,
+        // each expanding to 4 base-field columns.
+        assert_eq!(traces.canonical_scalars.len(), 30 * 4);
+        assert_eq!(traces.ab_chunks.len(), 5 * 4);
+        assert_eq!(traces.qn_chunks.len(), 4 * 4);
+        assert_eq!(traces.accumulators.len(), 16 * 4);
+        assert_eq!(traces.reduction_digits.len(), 3 * 4);
 
         assert_ne!(
             claim.canonical_scalars,
@@ -701,8 +698,9 @@ mod tests {
         let (_, honest_claim) =
             ScalarModMulInteractionTraces::from_rows(&rows, false, &relations());
 
-        let mut mutated = rows.clone();
-        mutated.accumulators[0].terms[0] += M31::from_u32_unchecked(1);
+        let mut mutated_single = single_test_rows();
+        mutated_single.accumulators[0].terms[0] += M31::from_u32_unchecked(1);
+        let mutated = ScalarModMulMergedRows::new(vec![mutated_single]);
         let (_, mutated_claim) =
             ScalarModMulInteractionTraces::from_rows(&mutated, false, &relations());
 

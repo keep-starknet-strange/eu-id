@@ -9,11 +9,7 @@ use stwo::core::{
     ColumnVec,
 };
 use stwo::prover::{
-    backend::simd::{
-        m31::{PackedM31, LOG_N_LANES},
-        qm31::PackedQM31,
-        SimdBackend,
-    },
+    backend::simd::{m31::PackedM31, qm31::PackedQM31, SimdBackend},
     ComponentProver,
 };
 use stwo_constraint_framework::{
@@ -351,16 +347,13 @@ pub fn gen_public_ecdsa_input_consumer_interaction_trace(
     assert_eq!(base.len(), PUBLIC_ECDSA_INPUT_CONSUMER_TRACE_COLUMNS);
     let log_size = base[0].domain.log_size();
     let mut logup = LogupTraceGenerator::new(log_size);
-    let mut col = logup.new_col();
-    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+    logup.col_from_fn(|vec_row| {
         let values = public_ecdsa_packed_relation_values(base, vec_row);
-        col.write_frac(
-            vec_row,
+        (
             PackedQM31::from(base[0].data[vec_row]),
             relation.combine(&values),
-        );
-    }
-    col.finalize_col();
+        )
+    });
     let (trace, claimed_sum) = logup.finalize_last();
     (trace, PublicEcdsaInputInteractionClaim { claimed_sum })
 }
@@ -379,7 +372,7 @@ pub fn add_public_ecdsa_instance_provider<E: EvalAtRow>(
     gate: E::F,
     instance: &PublicEcdsaInstance<E::F>,
 ) {
-    add_public_ecdsa_instance_relation(eval, relation, -E::EF::from(gate), instance);
+    add_public_ecdsa_instance_relation(eval, relation, -gate, instance);
 }
 
 /// ECDSA VM side of the relation: `+sig_active * PublicEcdsaInstance(...)`.
@@ -389,17 +382,17 @@ pub fn add_public_ecdsa_instance_consumer<E: EvalAtRow>(
     gate: E::F,
     instance: &PublicEcdsaInstance<E::F>,
 ) {
-    add_public_ecdsa_instance_relation(eval, relation, E::EF::from(gate), instance);
+    add_public_ecdsa_instance_relation(eval, relation, gate, instance);
 }
 
 fn add_public_ecdsa_instance_relation<E: EvalAtRow>(
     eval: &mut E,
     relation: &PublicEcdsaInstanceRelation,
-    numerator: E::EF,
+    numerator: E::F,
     instance: &PublicEcdsaInstance<E::F>,
 ) {
     let values = instance.relation_values();
-    eval.add_to_relation(RelationEntry::new(relation, numerator, &values));
+    eval.add_to_relation(RelationEntry::base(relation, numerator, &values));
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

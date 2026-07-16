@@ -1,7 +1,7 @@
 [package]
 name = "stwo-sha256"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 
 [features]
 default = ["std"]
@@ -10,17 +10,21 @@ std = ["stwo/std", "stwo-constraint-framework/std"]
 # is single-threaded without it). Enables the M4 Max's many cores on the
 # laptop and the phone's performance cores on-device.
 parallel = ["stwo/parallel", "stwo-constraint-framework/parallel"]
+gkr-spike = []
 
 [dependencies]
 air-core = { path = "../air-core" }
 stwo = { workspace = true }
 stwo-constraint-framework = { workspace = true }
 num-traits = "0.2"
+rand = "0.8"
+rayon = "1"
 serde = { workspace = true }
 
 [dev-dependencies]
 sha2 = "0.10"
 hex = "0.4"
+bincode = "1"
 
 [lints]
 workspace = true

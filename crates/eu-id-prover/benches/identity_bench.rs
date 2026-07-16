@@ -18,7 +18,11 @@
 use std::time::Duration;
 
 use criterion::{criterion_group, criterion_main, Criterion};
-use eu_id_prover::fixtures;
+use eu_id_prover::generator::IssuerKey;
+use eu_id_prover::{fixtures, prove_identity};
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[path = "common/stages.rs"]
 mod stages;
@@ -26,36 +30,144 @@ mod stages;
 fn bench_identity(c: &mut Criterion) {
     // One honest over-18 credential drives every stage. Proving cost is
     // independent of the credential's values, so a single fixture is enough.
-    let witness = fixtures::valid_over_18().pipeline_witness();
-    let stages = stages::stages(&witness);
+    let fixture = fixtures::valid_over_18();
+    let witness = fixture.pipeline_witness();
 
-    for stage in &stages {
-        let mut group = c.benchmark_group(stage.name);
+    bench_stage(
+        c,
+        "sha",
+        || {
+            stages::prove_sha(&witness);
+        },
+        || {
+            let proof = stages::prove_sha(&witness);
+            let proof_bytes = stages::sha_proof_bytes(&proof);
+            (move || stages::verify_sha(&proof), proof_bytes)
+        },
+    );
 
-        // P256, SHA, and the full pipeline are sub-second to seconds-scale;
-        // cap the sample count (and shorten warm-up for the slowest) so the
-        // suite finishes in minutes rather than tens of minutes. The fast
-        // predicate stages keep criterion's defaults.
-        if matches!(stage.name, "p256" | "sha" | "pipeline") {
-            group.sample_size(10);
-            group.warm_up_time(Duration::from_millis(500));
-        }
+    bench_stage(
+        c,
+        "p256",
+        || {
+            stages::prove_p256(&witness);
+        },
+        || {
+            let proof = stages::prove_p256(&witness);
+            let instances = stages::p256_instances(&proof);
+            let proof_bytes = stages::p256_proof_bytes(&proof);
+            (move || stages::verify_p256(&proof, &instances), proof_bytes)
+        },
+    );
 
-        group.bench_function("prove", |b| b.iter(|| (stage.prove)()));
-        group.bench_function("verify", |b| b.iter(|| (stage.verify)()));
+    bench_stage(
+        c,
+        "age",
+        || {
+            stages::prove_age(&witness);
+        },
+        || {
+            let proof = stages::prove_age(&witness);
+            let proof_bytes = stages::age_proof_bytes(&proof);
+            (move || stages::verify_age(&proof), proof_bytes)
+        },
+    );
 
-        // Criterion does not report proof size; surface it here so a single run
-        // captures the full timing + size picture per stage.
-        println!(
-            "[{}] proof size: {} bytes ({:.1} KiB)",
-            stage.name,
-            stage.proof_bytes,
-            stage.proof_bytes as f64 / 1024.0,
-        );
+    bench_stage(
+        c,
+        "nat",
+        || {
+            stages::prove_nat(&witness);
+        },
+        || {
+            let proof = stages::prove_nat(&witness);
+            let proof_bytes = stages::nat_proof_bytes(&proof);
+            (move || stages::verify_nat(&proof), proof_bytes)
+        },
+    );
 
+    bench_stage(
+        c,
+        "pipeline",
+        || {
+            stages::prove_pipeline(&witness);
+        },
+        || {
+            let proof = stages::prove_pipeline(&witness);
+            let instances = stages::pipeline_instances(&proof);
+            let nonce_instances = stages::pipeline_nonce_instances(&proof);
+            let proof_bytes = stages::pipeline_proof_bytes(&proof);
+            (
+                move || stages::verify_pipeline(&proof, &instances, &nonce_instances),
+                proof_bytes,
+            )
+        },
+    );
+
+    if should_register("identity_e2e", "prove_identity") {
+        let mut group = c.benchmark_group("identity_e2e");
+        group.sample_size(10);
+        group.warm_up_time(Duration::from_millis(500));
+        let issuer = IssuerKey::demo();
+        group.bench_function("prove_identity", |b| {
+            b.iter(|| {
+                prove_identity(
+                    &fixture.signed.credential,
+                    &issuer,
+                    &fixture.policy,
+                    &fixtures::demo_nonce_statement(),
+                )
+                .expect("identity proof generates")
+            })
+        });
         group.finish();
     }
 }
 
 criterion_group!(benches, bench_identity);
 criterion_main!(benches);
+
+fn bench_stage<P, V, VF>(c: &mut Criterion, name: &'static str, prove: P, verify_factory: VF)
+where
+    P: Fn(),
+    V: Fn(),
+    VF: FnOnce() -> (V, usize),
+{
+    let prove_selected = should_register(name, "prove");
+    let verify_selected = should_register(name, "verify");
+    if !prove_selected && !verify_selected {
+        return;
+    }
+
+    let mut group = c.benchmark_group(name);
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(500));
+
+    if prove_selected {
+        group.bench_function("prove", |b| b.iter(&prove));
+    }
+
+    if verify_selected {
+        let (verify, proof_bytes) = verify_factory();
+        group.bench_function("verify", |b| b.iter(&verify));
+        println!(
+            "[{name}] proof size: {} bytes ({:.1} KiB)",
+            proof_bytes,
+            proof_bytes as f64 / 1024.0,
+        );
+    }
+
+    group.finish();
+}
+
+fn should_register(group: &str, bench: &str) -> bool {
+    let full_name = format!("{group}/{bench}");
+    let filters: Vec<String> = std::env::args()
+        .skip(1)
+        .filter(|arg| arg != "--bench" && !arg.starts_with('-'))
+        .collect();
+    filters.is_empty()
+        || filters
+            .iter()
+            .any(|filter| full_name.contains(filter) || filter.contains(&full_name))
+}

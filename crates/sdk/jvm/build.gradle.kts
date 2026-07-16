@@ -19,7 +19,6 @@ plugins {
 }
 
 group = "com.kss"
-version = "0.1.0"
 
 repositories { mavenCentral() }
 
@@ -29,6 +28,19 @@ repositories { mavenCentral() }
 val workspaceRoot = file("$projectDir/../../..")
 val crateDir = file("$projectDir/..")
 val uniffiConfig = file("$projectDir/../uniffi.toml")
+
+// Single source of truth for the published version: the Cargo workspace. Crates
+// set `version.workspace = true`, so the literal lives in the root Cargo.toml
+// under [workspace.package] — the same value Rust sees as CARGO_PKG_VERSION.
+// Parse it here so the jar version can never drift from the crate; bump it once
+// in the Cargo manifest.
+val cargoVersion: String = run {
+    val pkgSection = workspaceRoot.resolve("Cargo.toml").readText()
+        .substringAfter("[workspace.package]").substringBefore("\n[")
+    Regex("""(?m)^\s*version\s*=\s*"([^"]+)"""").find(pkgSection)?.groupValues?.get(1)
+        ?: error("Could not find [workspace.package].version in ${workspaceRoot.resolve("Cargo.toml")}")
+}
+version = cargoVersion
 
 val generatedKotlinDir = layout.buildDirectory.dir("generated/uniffi").get().asFile
 val nativeLibsDir = layout.buildDirectory.dir("nativeLibs").get().asFile
@@ -153,7 +165,7 @@ publishing {
         register<MavenPublication>("jvm") {
             groupId = "com.kss"
             artifactId = "eu-id-zk-sdk-jvm"
-            version = "0.1.0"
+            version = cargoVersion
             from(components["java"])
         }
     }

@@ -28,7 +28,6 @@
 
 use crate::components::{range_log_size, RangeKind};
 use crate::constants::{N_ROUNDS, N_STATE_WORDS};
-use crate::field_exposure::{word_be_bytes, FieldExposure, BYTE_RANGE_CHECK_OFFSET};
 use crate::partitions::{SigmaFn, GROUPS_PER_ROUND_PARTITION};
 use crate::tables::{pack_half_key, Half, Half16, LowerSigmaPartition, RoundPartition};
 use crate::types::Sha256Witness;
@@ -152,6 +151,22 @@ pub fn maj_ch_multiplicities(witness: &Sha256Witness, group_width: u32) -> MajCh
 pub struct MajChMultiplicities {
     pub maj: Vec<u32>,
     pub ch: Vec<u32>,
+}
+
+pub fn sum_multiplicity_vectors(vectors: impl IntoIterator<Item = Vec<u32>>) -> Vec<u32> {
+    let mut iter = vectors.into_iter();
+    let mut acc = iter.next().unwrap_or_default();
+    for v in iter {
+        assert_eq!(
+            acc.len(),
+            v.len(),
+            "cannot sum multiplicity vectors of different lengths"
+        );
+        for (a, b) in acc.iter_mut().zip(v) {
+            *a += b;
+        }
+    }
+    acc
 }
 
 /// Build the per-row multiplicity vector for the generic `xor_8` table.
@@ -327,16 +342,8 @@ pub fn sigma_split_pack_multiplicities(
 ///     limbs × 3 families × 64 rounds per block) plus per finalization
 ///     carry-limb pair (2 limbs × 8 words per block).
 ///   - One `Range_16` increment per terminal `h_out` limb (2 limbs × 8
-///     words per block), plus — when `field_exposure` is non-empty — two
-///     increments per exposed first-block field byte (the byte and the byte +
-///     [`BYTE_RANGE_CHECK_OFFSET`] of the `[0, 256)` range-check).
-///
-/// `field_exposure` affects only `Range16`; every other kind ignores it.
-pub fn range_k_multiplicities(
-    witness: &Sha256Witness,
-    kind: RangeKind,
-    field_exposure: &FieldExposure,
-) -> Vec<u32> {
+///     words per block).
+pub fn range_k_multiplicities(witness: &Sha256Witness, kind: RangeKind) -> Vec<u32> {
     let log_size = range_log_size(kind);
     let mut mults = vec![0u32; 1usize << log_size];
     let bump = |m: &mut [u32], value: u32| {
@@ -380,24 +387,6 @@ pub fn range_k_multiplicities(
         }
     }
 
-    // Field-byte range-checks: each exposed byte `b` is pinned to
-    // `[0, 256)` by two consumer-side `Range16` lookups (on `b` and on
-    // `b + BYTE_RANGE_CHECK_OFFSET`), fired on the first block only — matching
-    // the `is_first_block`-gated `wire_range_check` loop in
-    // `Sha256Eval::evaluate` and section 7a of `interaction::write_block_lookups`.
-    // Count them here so the `Range16` producer absorbs them.
-    if matches!(kind, RangeKind::Range16) {
-        if let Some(block0) = witness.blocks.first() {
-            for &word_idx in &field_exposure.decomposed_words() {
-                let limb = block0.schedule[word_idx];
-                for b in word_be_bytes(limb.lo, limb.hi) {
-                    bump(&mut mults, b);
-                    bump(&mut mults, b + BYTE_RANGE_CHECK_OFFSET);
-                }
-            }
-        }
-    }
-
     mults
 }
 
@@ -414,6 +403,7 @@ pub use crate::tables::{Half as DecodeHalf, Half16 as SplitHalf};
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::field_exposure::FieldExposure;
     use crate::witness::{
         compute_sha256_witness, decode_multiplicities_for_witness,
         maj_ch_xor_multiplicities_for_witness, split_pack_multiplicities_for_witness,
@@ -482,70 +472,29 @@ mod tests {
         let n_words = N_STATE_WORDS as u32;
 
         // Range_4: schedule-recurrence carries — 2 limbs × 48 entries.
-        let total = range_k_multiplicities(&w, RangeKind::Range4, &FieldExposure::empty())
+        let total = range_k_multiplicities(&w, RangeKind::Range4)
             .iter()
             .sum::<u32>();
         assert_eq!(total, 2 * n_entries);
 
         // Range_5: T1 carries — 2 limbs × 64 rounds.
-        let total = range_k_multiplicities(&w, RangeKind::Range5, &FieldExposure::empty())
+        let total = range_k_multiplicities(&w, RangeKind::Range5)
             .iter()
             .sum::<u32>();
         assert_eq!(total, 2 * n_rounds);
 
         // Range_2: T2 + e_new + a_new (3 × 64) round carries + 8
         // finalization carries, ×2 limbs each.
-        let total = range_k_multiplicities(&w, RangeKind::Range2, &FieldExposure::empty())
+        let total = range_k_multiplicities(&w, RangeKind::Range2)
             .iter()
             .sum::<u32>();
         assert_eq!(total, 2 * (3 * n_rounds + n_words));
 
         // Range_16: 2 limbs × 8 terminal h_out words.
-        let total = range_k_multiplicities(&w, RangeKind::Range16, &FieldExposure::empty())
+        let total = range_k_multiplicities(&w, RangeKind::Range16)
             .iter()
             .sum::<u32>();
         assert_eq!(total, 2 * n_words);
-    }
-
-    /// With a credential exposure, the `Range16` producer gains exactly two
-    /// increments per exposed first-block field byte — the `[0, 256)`
-    /// credential-field byte range-check (one on `b`, one on
-    /// `b + BYTE_RANGE_CHECK_OFFSET`).
-    /// This is the producer side of the byte range-check that closes the
-    /// sub-word forge; the consumer side lives in `constraints`/`interaction`.
-    #[test]
-    fn range_16_counts_field_byte_checks() {
-        use crate::components::RangeKind;
-        use air_core::relations::field_id;
-
-        // "EUID" | ver | 2007-03-15 | DE(276): DOB c[5..9], nationality c[9..11].
-        let credential: [u8; 11] = [b'E', b'U', b'I', b'D', 1, 0x07, 0xD7, 3, 15, 0x01, 0x14];
-        let w = compute_sha256_witness(&credential);
-        let exposure = FieldExposure::from_preimage_windows(&[
-            (field_id::DOB, 5, 4),
-            (field_id::NATIONALITY, 9, 2),
-        ]);
-
-        let empty = range_k_multiplicities(&w, RangeKind::Range16, &FieldExposure::empty());
-        let with = range_k_multiplicities(&w, RangeKind::Range16, &exposure);
-
-        // Two added lookups per exposed byte column.
-        let added = with.iter().sum::<u32>() - empty.iter().sum::<u32>();
-        assert_eq!(added, 2 * exposure.n_columns() as u32);
-
-        // Each first-block field byte `b` bumps row `b` and row `b + OFFSET`.
-        let block0 = &w.blocks[0];
-        for &word_idx in &exposure.decomposed_words() {
-            let limb = block0.schedule[word_idx];
-            for b in word_be_bytes(limb.lo, limb.hi) {
-                assert!(
-                    with[b as usize] > empty[b as usize],
-                    "row {b} must be bumped"
-                );
-                let hi = (b + BYTE_RANGE_CHECK_OFFSET) as usize;
-                assert!(with[hi] > empty[hi], "row b+OFFSET={hi} must be bumped");
-            }
-        }
     }
 
     /// Honest `Range_k` carry counts never fall outside `[0, k)` — the
@@ -564,7 +513,7 @@ mod tests {
             RangeKind::Range5,
             RangeKind::Range16,
         ] {
-            let mults = range_k_multiplicities(&w, kind, &FieldExposure::empty());
+            let mults = range_k_multiplicities(&w, kind);
             let k = kind.bound() as usize;
             // Any multiplicity past row k-1 means an out-of-range carry
             // got counted — the witness is malformed.
@@ -597,7 +546,7 @@ mod tests {
         use crate::components::RangeKind;
         let mut w = compute_sha256_witness(b"abc");
 
-        let baseline = range_k_multiplicities(&w, RangeKind::Range2, &FieldExposure::empty());
+        let baseline = range_k_multiplicities(&w, RangeKind::Range2);
         let k = RangeKind::Range2.bound() as usize;
 
         // Mirror the witness mutation that
@@ -612,7 +561,7 @@ mod tests {
         );
         last.finalization_carries[7].lo = 5;
 
-        let mutated = range_k_multiplicities(&w, RangeKind::Range2, &FieldExposure::empty());
+        let mutated = range_k_multiplicities(&w, RangeKind::Range2);
 
         // Bucket 5 is outside `[0, k = 2)`, so the producer Range_2 table
         // has no row for it. The mutation moves exactly one count from
@@ -693,5 +642,50 @@ mod tests {
             sigma_sum(LowerSigmaPartition::LowerSigma1, Half16::Hi),
             totals.lower_sigma1_hi
         );
+    }
+
+    #[test]
+    fn shared_table_multiplicities_sum_per_consumer_vectors() {
+        use crate::components::{RANGE_TABLES, ROUND_SPLIT_TABLES, SIGMA_SPLIT_TABLES};
+        let first = compute_sha256_witness(b"abc");
+        let second = compute_sha256_witness(&[0x42u8; 200]);
+        let consumers = [
+            (&first, FieldExposure::empty()),
+            (&second, FieldExposure::empty()),
+        ];
+
+        let shared = crate::shared_tables::ShaTableMultiplicities::from_consumers(&consumers);
+
+        // Class D: the stored vectors are blinded (2× length, random dummy upper
+        // half). Only the REAL lower half is the deterministic union sum; the
+        // upper half is fresh per-proof mask and is asserted equal to neither
+        // witness. We compare the lower half against the union sum here.
+        for (i, &(p, h)) in ROUND_SPLIT_TABLES.iter().enumerate() {
+            let expected: Vec<u32> = round_split_pack_multiplicities(&first, p, h)
+                .into_iter()
+                .zip(round_split_pack_multiplicities(&second, p, h))
+                .map(|(a, b)| a + b)
+                .collect();
+            assert_eq!(&shared.round_split_pack[i][..expected.len()], &expected[..]);
+            assert_eq!(shared.round_split_pack[i].len(), 2 * expected.len());
+        }
+        for (i, &(p, h)) in SIGMA_SPLIT_TABLES.iter().enumerate() {
+            let expected: Vec<u32> = sigma_split_pack_multiplicities(&first, p, h)
+                .into_iter()
+                .zip(sigma_split_pack_multiplicities(&second, p, h))
+                .map(|(a, b)| a + b)
+                .collect();
+            assert_eq!(&shared.sigma_split_pack[i][..expected.len()], &expected[..]);
+            assert_eq!(shared.sigma_split_pack[i].len(), 2 * expected.len());
+        }
+        for (i, &kind) in RANGE_TABLES.iter().enumerate() {
+            let expected: Vec<u32> = range_k_multiplicities(&first, kind)
+                .into_iter()
+                .zip(range_k_multiplicities(&second, kind))
+                .map(|(a, b)| a + b)
+                .collect();
+            assert_eq!(&shared.range[i][..expected.len()], &expected[..]);
+            assert_eq!(shared.range[i].len(), 2 * expected.len());
+        }
     }
 }

@@ -14,7 +14,9 @@ use crate::nat::table::NatTableComponent;
 use crate::nat::types::{PublicInput, Witness};
 use crate::nat::witness::WitnessData;
 use air_core::relations::{FieldBytesRelation, SharedFieldRelation};
-use air_core::{Air, AirProver, TreeLayout};
+use air_core::{
+    fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint, TreeLayout,
+};
 use stwo::core::air::Component;
 use stwo::core::channel::Blake2sChannel;
 use stwo::core::fields::qm31::QM31;
@@ -41,22 +43,30 @@ fn prover_component_refs(c: &NatComponents) -> Vec<&dyn ComponentProver<SimdBack
 /// input and whether the nationality binding is wired (`bind_nat`), never
 /// on the witness values. Binding adds three trace columns (the `bind_active`
 /// selector + the two nationality bytes) and two LogUp fractions (the
-/// nationality-byte requires) to the nationality component.
+/// nationality-byte requires) to the nationality component. The nationality
+/// component pairs consecutive LogUp fractions.
 fn layout(public: &PublicInput, bind_nat: bool) -> TreeLayout {
-    let table_log_size = public.log_size();
+    // Class-D: the accepted-set table commits over the blinded (`log+1`) domain.
+    let table_log_size = crate::nat::table::blind_log_size(public);
     let nat_log_size = WitnessData::log_size();
-    // The nationality component: 1 (+3 binding) trace columns and 1 (+2 binding)
-    // solo LogUp fractions, each fraction four M31 (`SECURE_EXTENSION_DEGREE`).
-    let nat_trace_cols = if bind_nat { 4 } else { 1 };
-    let nat_interaction_cols = if bind_nat { 12 } else { 4 };
+    // The nationality component: 1 (+2 binding) trace columns and 1 (+2 binding)
+    // logical LogUp fractions, paired into secure columns, each four M31
+    // (`SECURE_EXTENSION_DEGREE`). The single-row require selector is now the
+    // preprocessed `active` column, so binding adds two (not three) trace columns.
+    let nat_trace_cols = if bind_nat { 3 } else { 1 };
+    let logical_nat_lookups = if bind_nat { 3usize } else { 1 };
+    let nat_interaction_cols = logical_nat_lookups.div_ceil(2) * 4;
     TreeLayout {
-        // Tree 0: the acceptable-nationality table (1 column).
-        preprocessed: vec![table_log_size],
-        // Tree 1: nationality witness column(s) + table multiplicity column.
+        // Tree 0: the nat `active` selector (over `nat_log_size`) + the Class-D
+        // blinded accepted-set table's [value, is_dummy] pair.
+        preprocessed: vec![nat_log_size, table_log_size, table_log_size],
+        // Tree 1: nationality witness column(s) + table multiplicity column (over
+        // the blinded table domain).
         trace: std::iter::repeat_n(nat_log_size, nat_trace_cols)
             .chain([table_log_size])
             .collect(),
-        // Tree 2: nationality LogUp fractions + the table's one fraction.
+        // Tree 2: nationality LogUp fractions + the table's paired fraction (the
+        // two blinded fractions collapse into one secure column).
         interaction: std::iter::repeat_n(nat_log_size, nat_interaction_cols)
             .chain(std::iter::repeat_n(table_log_size, 4))
             .collect(),
@@ -160,11 +170,22 @@ impl Air for NatProver {
 
 impl AirProver for NatProver {
     fn max_log_size(&self) -> u32 {
-        WitnessData::log_size().max(self.public.log_size())
+        WitnessData::log_size().max(crate::nat::table::blind_log_size(&self.public))
     }
 
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>) {
         self.preprocessed.extend_evals(tb);
+    }
+
+    fn preprocessed_column_fingerprints(&mut self) -> Vec<PreprocessedColumnFingerprint> {
+        let mut columns = Vec::new();
+        columns.extend(self.preprocessed.active.clone());
+        columns.extend(self.preprocessed.acceptable.clone());
+        fingerprint_preprocessed_columns(
+            "predicates::NatProver",
+            &preprocessed_column_ids(&self.public),
+            &columns,
+        )
     }
 
     fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>) {

@@ -544,7 +544,7 @@ where
     secure_from_i64(numerator) / denominator
 }
 
-fn gen_provider_interaction_trace_3<R: Relation<PackedM31, PackedSecureField>>(
+fn gen_provider_interaction_trace_3<R: Relation<PackedM31, PackedSecureField> + Sync>(
     multiplicity: &SelectorColumnEval,
     values: &[SelectorColumnEval; 3],
     relation: &R,
@@ -555,22 +555,20 @@ fn gen_provider_interaction_trace_3<R: Relation<PackedM31, PackedSecureField>>(
     assert_provider_domains(multiplicity, values);
     let log_size = multiplicity.domain.log_size();
     let mut logup = LogupTraceGenerator::new(log_size);
-    let mut col = logup.new_col();
-    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+    logup.col_from_fn(|vec_row| {
         let denominator: PackedQM31 = relation.combine(&[
             values[0].data[vec_row],
             values[1].data[vec_row],
             values[2].data[vec_row],
         ]);
         let numerator = -PackedQM31::from(multiplicity.data[vec_row]);
-        col.write_frac(vec_row, numerator, denominator);
-    }
-    col.finalize_col();
+        (numerator, denominator)
+    });
     let (trace, claimed_sum) = logup.finalize_last();
     (trace, SelectorLookupInteractionClaim { claimed_sum })
 }
 
-fn gen_provider_interaction_trace_4<R: Relation<PackedM31, PackedSecureField>>(
+fn gen_provider_interaction_trace_4<R: Relation<PackedM31, PackedSecureField> + Sync>(
     multiplicity: &SelectorColumnEval,
     values: &[SelectorColumnEval; 4],
     relation: &R,
@@ -581,8 +579,7 @@ fn gen_provider_interaction_trace_4<R: Relation<PackedM31, PackedSecureField>>(
     assert_provider_domains(multiplicity, values);
     let log_size = multiplicity.domain.log_size();
     let mut logup = LogupTraceGenerator::new(log_size);
-    let mut col = logup.new_col();
-    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+    logup.col_from_fn(|vec_row| {
         let denominator: PackedQM31 = relation.combine(&[
             values[0].data[vec_row],
             values[1].data[vec_row],
@@ -590,9 +587,8 @@ fn gen_provider_interaction_trace_4<R: Relation<PackedM31, PackedSecureField>>(
             values[3].data[vec_row],
         ]);
         let numerator = -PackedQM31::from(multiplicity.data[vec_row]);
-        col.write_frac(vec_row, numerator, denominator);
-    }
-    col.finalize_col();
+        (numerator, denominator)
+    });
     let (trace, claimed_sum) = logup.finalize_last();
     (trace, SelectorLookupInteractionClaim { claimed_sum })
 }
@@ -616,7 +612,7 @@ pub fn add_selector4x4_consumer<E: EvalAtRow>(
     gate: E::F,
     entry: &[E::F; 3],
 ) {
-    eval.add_to_relation(RelationEntry::new(relation, E::EF::from(gate), entry));
+    eval.add_to_relation(RelationEntry::base(relation, gate, entry));
 }
 
 pub fn add_selector16_decode_consumer<E: EvalAtRow>(
@@ -625,7 +621,7 @@ pub fn add_selector16_decode_consumer<E: EvalAtRow>(
     gate: E::F,
     entry: &[E::F; 3],
 ) {
-    eval.add_to_relation(RelationEntry::new(relation, E::EF::from(gate), entry));
+    eval.add_to_relation(RelationEntry::base(relation, gate, entry));
 }
 
 pub fn add_final_selector_consumer<E: EvalAtRow>(
@@ -634,7 +630,7 @@ pub fn add_final_selector_consumer<E: EvalAtRow>(
     gate: E::F,
     entry: &[E::F; 4],
 ) {
-    eval.add_to_relation(RelationEntry::new(relation, E::EF::from(gate), entry));
+    eval.add_to_relation(RelationEntry::base(relation, gate, entry));
 }
 
 pub fn selector4x4_table() -> [Selector4x4Entry; 16] {

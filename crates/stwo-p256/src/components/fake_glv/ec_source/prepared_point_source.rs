@@ -22,7 +22,7 @@ use stwo_constraint_framework::{
 use stwo_p256_utils::constants::N_LIMBS;
 
 use crate::components::ComponentInteractionClaim;
-use crate::range_checks::{add_range_check, RangeCheckRelation};
+use crate::range_checks::{add_range_check, write_batched_logup_columns, RangeCheckRelation};
 use crate::scalar::fake_glv_chain::{FakeGlvChainClaim, FakeGlvChainError};
 use crate::scalar::prepared_point::{
     PreparedPointInstance, PreparedPointProvider, PreparedPointRelation, PreparedPointTraceClaim,
@@ -217,13 +217,13 @@ impl FrameworkEval for PreparedPointProviderEval {
         instance.add_constraints(&mut eval, &active, &one);
 
         let values = instance.relation_values();
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             &self.relation,
-            -E::EF::from(use_count.clone()),
+            -use_count.clone(),
             &values,
         ));
         add_range_check(&mut eval, &self.range7, active, use_count);
-        eval.finalize_logup();
+        eval.finalize_logup_in_pairs();
         eval
     }
 }
@@ -252,11 +252,7 @@ impl FrameworkEval for FakeGlvPreparedPointConsumerEval {
         instance.add_constraints(&mut eval, &active, &one);
 
         let values = instance.relation_values();
-        eval.add_to_relation(RelationEntry::new(
-            &self.relation,
-            E::EF::from(active),
-            &values,
-        ));
+        eval.add_to_relation(RelationEntry::base(&self.relation, active, &values));
         eval.finalize_logup();
         eval
     }
@@ -390,22 +386,24 @@ pub(crate) fn gen_prepared_point_provider_interaction_trace(
 ) -> (ColumnVec<M31ColumnEval>, SecureField, SecureField) {
     assert_eq!(base.len(), PREPARED_POINT_PROVIDER_TRACE_COLUMNS);
     let log_size = base[0].domain.log_size();
-    let mut logup = LogupTraceGenerator::new(log_size);
-    let mut col = logup.new_col();
-    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+    let vec_rows = 1 << (log_size - LOG_N_LANES);
+    let mut provider_numerators = Vec::with_capacity(vec_rows);
+    let mut provider_denominators = Vec::with_capacity(vec_rows);
+    let mut range_numerators = Vec::with_capacity(vec_rows);
+    let mut range_denominators = Vec::with_capacity(vec_rows);
+    for vec_row in 0..vec_rows {
         let values = prepared_point_provider_packed_relation_values(base, vec_row);
-        let numerator = -PackedQM31::from(base[1].data[vec_row]);
-        let denominator: PackedQM31 = relation.combine(&values);
-        col.write_frac(vec_row, numerator, denominator);
+        provider_numerators.push(-PackedQM31::from(base[1].data[vec_row]));
+        provider_denominators.push(relation.combine(&values));
+        range_numerators.push(PackedQM31::from(base[0].data[vec_row]));
+        range_denominators.push(range7.combine(&[base[1].data[vec_row]]));
     }
-    col.finalize_col();
-    let mut col = logup.new_col();
-    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
-        let active = PackedQM31::from(base[0].data[vec_row]);
-        let denominator: PackedQM31 = range7.combine(&[base[1].data[vec_row]]);
-        col.write_frac(vec_row, active, denominator);
-    }
-    col.finalize_col();
+    let entries = [
+        (provider_numerators, provider_denominators),
+        (range_numerators, range_denominators),
+    ];
+    let mut logup = LogupTraceGenerator::new(log_size);
+    write_batched_logup_columns(&mut logup, &entries, 2);
     let (trace, total_claimed_sum) = logup.finalize_last();
     let provider_claimed_sum: SecureField = storage_rows(base)
         .filter(|row| row[0] != M31::from_u32_unchecked(0))
@@ -426,14 +424,12 @@ pub(crate) fn gen_fake_glv_prepared_point_consumer_interaction_trace(
     assert_eq!(base.len(), FAKE_GLV_PREPARED_POINT_CONSUMER_TRACE_COLUMNS);
     let log_size = base[0].domain.log_size();
     let mut logup = LogupTraceGenerator::new(log_size);
-    let mut col = logup.new_col();
-    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+    logup.col_from_fn(|vec_row| {
         let values = prepared_point_consumer_packed_relation_values(base, vec_row);
         let numerator = PackedQM31::from(base[0].data[vec_row]);
         let denominator: PackedQM31 = relation.combine(&values);
-        col.write_frac(vec_row, numerator, denominator);
-    }
-    col.finalize_col();
+        (numerator, denominator)
+    });
     logup.finalize_last()
 }
 

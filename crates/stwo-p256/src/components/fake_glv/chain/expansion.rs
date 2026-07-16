@@ -21,6 +21,7 @@ use stwo_constraint_framework::{
     RelationEntry, TraceLocationAllocator,
 };
 
+use crate::range_checks::write_batched_logup_columns;
 use crate::scalar::fake_glv_chain::{
     FakeGlvChainClaim, FakeGlvChainError, FakeGlvChainRow, FakeGlvChainRowKind,
     FakeGlvPrimitiveEcOp, FakeGlvPrimitiveEcRow, FakeGlvPrimitiveEcTraceClaim,
@@ -266,9 +267,9 @@ impl FrameworkEval for FakeGlvChainExpansionEval {
             acc_after: &acc_after,
             doubled: &doubled,
         });
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             &self.relation,
-            -E::EF::from(active.clone()),
+            -active.clone(),
             &tuple0,
         ));
 
@@ -283,9 +284,9 @@ impl FrameworkEval for FakeGlvChainExpansionEval {
             &infinity_relation_values(),
             &quadrupled.relation_values(),
         );
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             &self.relation,
-            -E::EF::from(triple.clone()),
+            -triple.clone(),
             &tuple1,
         ));
 
@@ -300,11 +301,7 @@ impl FrameworkEval for FakeGlvChainExpansionEval {
             &operand.relation_values(),
             &acc_after.relation_values(),
         );
-        eval.add_to_relation(RelationEntry::new(
-            &self.relation,
-            -E::EF::from(triple),
-            &tuple2,
-        ));
+        eval.add_to_relation(RelationEntry::base(&self.relation, -triple, &tuple2));
         eval.finalize_logup();
         eval
     }
@@ -361,9 +358,9 @@ impl FrameworkEval for FakeGlvPrimitiveExpansionConsumerEval {
             &rhs.relation_values(),
             &output.relation_values(),
         );
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             &self.relation,
-            E::EF::from(active),
+            active,
             &relation_values,
         ));
         eval.finalize_logup();
@@ -491,26 +488,28 @@ pub(crate) fn gen_fake_glv_chain_expansion_interaction_trace(
 ) -> (ColumnVec<M31ColumnEval>, SecureField) {
     assert_eq!(base.len(), FAKE_GLV_CHAIN_EXPANSION_TRACE_COLUMNS);
     let log_size = base[0].domain.log_size();
-    let mut logup = LogupTraceGenerator::new(log_size);
+    let vec_rows = 1 << (log_size - LOG_N_LANES);
+    let mut entries = Vec::with_capacity(3);
     for slot in 0..3 {
-        let mut col = logup.new_col();
-        for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+        let mut entry_numerators = Vec::with_capacity(vec_rows);
+        let mut entry_denominators = Vec::with_capacity(vec_rows);
+        for vec_row in 0..vec_rows {
             let mut numerators = [secure_zero(); N_LANES];
             let mut denominators = [secure_one(); N_LANES];
             for lane in 0..N_LANES {
                 let numerator = chain_expansion_slot_numerator(base, vec_row, lane, slot);
                 let values = chain_expansion_slot_relation_values(base, vec_row, lane, slot);
+                let denominator: SecureField = relation.combine(&values);
                 numerators[lane] = numerator;
-                denominators[lane] = relation.combine(&values);
+                denominators[lane] = denominator;
             }
-            col.write_frac(
-                vec_row,
-                PackedQM31::from_array(numerators),
-                PackedQM31::from_array(denominators),
-            );
+            entry_numerators.push(PackedQM31::from_array(numerators));
+            entry_denominators.push(PackedQM31::from_array(denominators));
         }
-        col.finalize_col();
+        entries.push((entry_numerators, entry_denominators));
     }
+    let mut logup = LogupTraceGenerator::new(log_size);
+    write_batched_logup_columns(&mut logup, &entries, 1);
     logup.finalize_last()
 }
 
@@ -524,8 +523,7 @@ pub(crate) fn gen_fake_glv_primitive_expansion_consumer_interaction_trace(
     );
     let log_size = base[0].domain.log_size();
     let mut logup = LogupTraceGenerator::new(log_size);
-    let mut col = logup.new_col();
-    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+    logup.col_from_fn(|vec_row| {
         let mut numerators = [secure_zero(); N_LANES];
         let mut denominators = [secure_one(); N_LANES];
         for lane in 0..N_LANES {
@@ -534,13 +532,11 @@ pub(crate) fn gen_fake_glv_primitive_expansion_consumer_interaction_trace(
             numerators[lane] = SecureField::from(active);
             denominators[lane] = relation.combine(&values);
         }
-        col.write_frac(
-            vec_row,
+        (
             PackedQM31::from_array(numerators),
             PackedQM31::from_array(denominators),
-        );
-    }
-    col.finalize_col();
+        )
+    });
     logup.finalize_last()
 }
 

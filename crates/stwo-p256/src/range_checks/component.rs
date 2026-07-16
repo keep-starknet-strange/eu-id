@@ -5,8 +5,8 @@ use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{EvalAtRow, FrameworkComponent, FrameworkEval, RelationEntry};
 
 use super::{
-    range_check_value_column_id, signed_carry_active_column_id, signed_carry_value_column_id,
-    RangeCheckRelation,
+    range_check_dummy_column_id, range_check_value_column_id, signed_carry_active_column_id,
+    signed_carry_value_column_id, RangeCheckRelation,
 };
 
 /// Provider for the unary range table `0..2^log_size`.
@@ -39,17 +39,103 @@ impl FrameworkEval for RangeCheckEval {
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         let value = eval.get_preprocessed_column(range_check_value_column_id(self.log_size));
         let multiplicity = eval.next_trace_mask();
-        eval.add_to_relation(RelationEntry::new(
-            &self.relation,
-            -E::EF::from(multiplicity),
-            &[value],
-        ));
+        eval.add_to_relation(RelationEntry::base(&self.relation, -multiplicity, &[value]));
         eval.finalize_logup_in_pairs();
         eval
     }
 }
 
 pub type RangeCheckComponent = FrameworkComponent<RangeCheckEval>;
+
+/// Class-D multiplicity-blinded range-table provider (Q-015 §4b / p4c Class D).
+///
+/// Identical to [`RangeCheckEval`] but over a domain one log larger. The
+/// preprocessed `value` column is `[0, 1, …, 2^(real+1) − 1]` — the lower half
+/// is the real range `[0, 2^real)`, the upper half is the reserved dummy keys
+/// `[2^real, 2^(real+1))` no honest consumer can emit. The preprocessed
+/// `is_dummy` selector is `1` over the dummy region. The committed
+/// multiplicity column carries real counts on the lower half and fresh random
+/// blind cells on the upper half.
+///
+/// ## LogUp (balance preserved, blind cells free)
+///
+/// ONE gated entry per row against the relation: numerator
+/// `-(1 − is_dummy) · multiplicity` at the same `value`.
+///
+/// On a real row (`is_dummy = 0`) the numerator is `-multiplicity`, exactly as
+/// the unblinded table. On a dummy row (`is_dummy = 1`) the numerator is
+/// identically `0` for ANY `m`, so the random blind multiplicities never touch
+/// the global balance while staying in the committed multiplicity column as the
+/// mask. This replaces the earlier cancelling PAIR (`-mult` and `+is_dummy·mult`)
+/// with a single fraction at half the interaction/quotient cost.
+///
+/// ## Soundness (reservation argument)
+///
+/// Honest consumers only ever emit values proven `< 2^real` (that is the whole
+/// point of a `[0, 2^real)` range check), so no honest use can land on a dummy
+/// key. The dummy region therefore cannot service any consumer; it exists only
+/// to hold the mask. `is_dummy` is PREPROCESSED (trusted), so a malicious prover
+/// cannot un-gate a dummy row to provide a real key: the numerator is forced to
+/// `0` over the whole dummy region. The resulting balance is exactly the
+/// unblinded table's, and both key and gate come from committed/preprocessed
+/// data, so there is no free claimed-sum term (the P4b blind_claim-hole caution).
+///
+/// ## Degree
+///
+/// `(1 − is_dummy) · multiplicity` is preprocessed × trace = degree 2, within
+/// the `D ≤ 3` budget under `max_constraint_log_degree_bound = log_size + 1`.
+#[derive(Clone, Debug)]
+pub struct BlindRangeCheckEval {
+    pub relation: RangeCheckRelation,
+    /// The real table width; the committed domain is `real_log_size + 1`.
+    pub real_log_size: u32,
+    /// Preprocessed value-column id (namespaced tables pass their own).
+    pub value_id: PreProcessedColumnId,
+    /// Preprocessed is_dummy selector id (namespaced tables pass their own).
+    pub dummy_id: PreProcessedColumnId,
+}
+
+impl BlindRangeCheckEval {
+    /// Reference table using the generic `p256_range{real}_value` /
+    /// `p256_range{real}_dummy` preprocessed ids.
+    pub fn new(relation: RangeCheckRelation, real_log_size: u32) -> Self {
+        Self {
+            relation,
+            real_log_size,
+            value_id: range_check_value_column_id(real_log_size),
+            dummy_id: range_check_dummy_column_id(real_log_size),
+        }
+    }
+}
+
+impl FrameworkEval for BlindRangeCheckEval {
+    fn log_size(&self) -> u32 {
+        self.real_log_size + 1
+    }
+
+    fn max_constraint_log_degree_bound(&self) -> u32 {
+        self.real_log_size + 2
+    }
+
+    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+        let value = eval.get_preprocessed_column(self.value_id.clone());
+        let is_dummy = eval.get_preprocessed_column(self.dummy_id.clone());
+        let multiplicity = eval.next_trace_mask();
+        // Single gated yield: `-(1 − is_dummy)·multiplicity`. `-multiplicity` on
+        // real rows (is_dummy = 0), identically `0` on dummy rows (is_dummy = 1)
+        // for any committed `m`. Degree 2 (preprocessed × trace).
+        let one = E::F::from(M31::from_u32_unchecked(1));
+        eval.add_to_relation(RelationEntry::base(
+            &self.relation,
+            -((one - is_dummy) * multiplicity),
+            &[value],
+        ));
+        eval.finalize_logup();
+        eval
+    }
+}
+
+pub type BlindRangeCheckComponent = FrameworkComponent<BlindRangeCheckEval>;
 
 /// Provider for a centered signed-carry table padded to a power of two.
 ///
@@ -103,11 +189,7 @@ impl FrameworkEval for SignedCarryRangeEval {
 
         eval.add_constraint(active.clone() * (active.clone() - one.clone()));
         eval.add_constraint((one - active) * multiplicity.clone());
-        eval.add_to_relation(RelationEntry::new(
-            &self.relation,
-            -E::EF::from(multiplicity),
-            &[value],
-        ));
+        eval.add_to_relation(RelationEntry::base(&self.relation, -multiplicity, &[value]));
         eval.finalize_logup_in_pairs();
         eval
     }

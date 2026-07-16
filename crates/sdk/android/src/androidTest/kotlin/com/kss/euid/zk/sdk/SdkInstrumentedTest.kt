@@ -2,7 +2,7 @@ package com.kss.euid.zk.sdk
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertTrue
+import org.junit.Assert.assertThrows
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -12,8 +12,10 @@ import org.junit.runner.RunWith
  * the test device's ABI. Run with `./gradlew connectedAndroidTest` (needs a
  * running emulator/device).
  *
- * These assert the STUB contract: prove returns the canonical statement bytes,
- * and verify accepts iff the proof equals that encoding.
+ * These assert the production mdoc contract exposed by
+ * proveIdentity/verifyIdentity. The full honest round trip uses the Rust SDK's
+ * canonical mdoc fixture; Android keeps the small fail-closed boundary checks
+ * that require no test-only native API or bundled credential asset.
  */
 @RunWith(AndroidJUnit4::class)
 class SdkInstrumentedTest {
@@ -33,36 +35,21 @@ class SdkInstrumentedTest {
         natMode = NatMode.ANY,
     )
 
-    private fun sampleWitness() = ZkWitness(
-        issuerSigR = ByteArray(32) { 1 },
-        issuerSigS = ByteArray(32) { 2 },
-        sigStructure = ByteArray(16) { 3 },
-        mso = ByteArray(16) { 4 },
-        birthDateItem = ByteArray(8) { 5 },
-        nationalityItem = ByteArray(8) { 6 },
-        birthDate = "1990-01-01",
-        nationalities = listOf(300u),
-        digestIds = emptyMap(),
+    private fun malformedWitness() = ZkMdocWitness(
+        document = byteArrayOf(),
+        trustedIssuerCertificates = emptyList(),
     )
 
     @Test
-    fun proveThenVerify_roundTrips() {
-        val statement = sampleStatement()
-        val proof = proveIdentity(statement, sampleWitness())
-        assertTrue(verifyIdentity(statement, proof).ok)
+    fun proveIdentity_rejectsMalformedMdoc() {
+        assertThrows(ZkException.Prove::class.java) {
+            proveIdentity(sampleStatement(), malformedWitness())
+        }
     }
 
     @Test
-    fun verify_rejectsMismatchedProof() {
+    fun verifyIdentity_rejectsMalformedProof() {
         val result = verifyIdentity(sampleStatement(), "not the statement".toByteArray())
         assertFalse(result.ok)
-    }
-
-    @Test
-    fun verify_rejectsProofForADifferentStatement() {
-        val a = sampleStatement()
-        val b = sampleStatement().copy(ageThresholdYears = 21u)
-        val proofForA = proveIdentity(a, sampleWitness())
-        assertFalse(verifyIdentity(b, proofForA).ok)
     }
 }

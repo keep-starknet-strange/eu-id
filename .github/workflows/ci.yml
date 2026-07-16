@@ -76,6 +76,13 @@ jobs:
     name: Build & test
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
+    # Serialize rayon: the stwo prover has a known lost-wakeup deadlock under
+    # multi-threaded release test runs that intermittently stalls CI to the job
+    # timeout. Single-threading is the documented workaround; the heavy proving
+    # tests are `#[ignore]`d (scheduled `e2e` job), so the non-ignored suite here
+    # stays fast.
+    env:
+      RAYON_NUM_THREADS: 1
     steps:
       - uses: actions/checkout@v4
 
@@ -99,6 +106,11 @@ jobs:
       # `e2e` job rather than here.
       - name: make test
         run: make test
+
+      # The coprocessor composition is feature-gated and default-off, so the
+      # workspace test target does not compile its transcript hooks or negatives.
+      - name: make test-ec-coprocessor
+        run: make test-ec-coprocessor
 
   # Scheduled-only: the slow full-pipeline proof-generation tests. Runs the
   # `#[ignore]`-marked tests in release mode (proving in debug is far too
@@ -125,6 +137,12 @@ jobs:
 
       - name: Run end-to-end proof tests (release, ignored tests only)
         run: cargo test --workspace --release -- --ignored
+
+      # Scheduled feature-on ignored tests include the fork/join digest guard;
+      # this keeps the coprocessor transcript bridge exercised even while the
+      # feature remains default-off.
+      - name: Run EC coprocessor ignored tests (release)
+        run: make test-ec-coprocessor-ignored
 
       # Smoke-test the standalone-component example so it cannot silently
       # rot. The example documents itself as "the shortest path to running

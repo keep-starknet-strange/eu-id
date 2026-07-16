@@ -7,11 +7,7 @@ use stwo::core::{
     ColumnVec,
 };
 use stwo::prover::{
-    backend::simd::{
-        m31::{PackedM31, LOG_N_LANES},
-        qm31::PackedQM31,
-        SimdBackend,
-    },
+    backend::simd::{m31::PackedM31, qm31::PackedQM31, SimdBackend},
     ComponentProver,
 };
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
@@ -220,9 +216,9 @@ impl FrameworkEval for FakeGlvLsbCorrectionOperandProviderEval {
 
         eval.add_constraint(zero * instance.active.clone());
         instance.add_constraints(&mut eval, &one);
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             &self.relation,
-            -E::EF::from(instance.active.clone()),
+            -(instance.active.clone()),
             &instance.relation_values(),
         ));
         eval.finalize_logup();
@@ -250,9 +246,9 @@ impl FrameworkEval for FakeGlvLsbCorrectionOperandConsumerEval {
         let one = E::F::from(M31::from_u32_unchecked(1));
 
         instance.add_constraints(&mut eval, &one);
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             &self.relation,
-            E::EF::from(instance.active.clone()),
+            instance.active.clone(),
             &instance.relation_values(),
         ));
         eval.finalize_logup();
@@ -536,14 +532,12 @@ pub(crate) fn gen_lsb_correction_operand_interaction_trace(
     assert_eq!(base.len(), FAKE_GLV_LSB_CORRECTION_OPERAND_TRACE_COLUMNS);
     let log_size = base[0].domain.log_size();
     let mut logup = LogupTraceGenerator::new(log_size);
-    let mut col = logup.new_col();
-    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+    logup.col_from_fn(|vec_row| {
         let values = lsb_correction_operand_packed_relation_values(base, vec_row);
         let numerator = PackedQM31::from(base[0].data[vec_row]);
         let numerator = if provider { -numerator } else { numerator };
-        col.write_frac(vec_row, numerator, relation.combine(&values));
-    }
-    col.finalize_col();
+        (numerator, relation.combine(&values))
+    });
     logup.finalize_last()
 }
 

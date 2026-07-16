@@ -33,10 +33,10 @@ use crate::public_inputs::{
 use crate::public_key_curve_air::{PublicKeyPointRelation, PUBLIC_KEY_POINT_ARITY};
 use crate::range_checks::{
     add_range_check, decode_signed_carry, encode_signed_carry, range_check_value_column_id,
-    signed_carry_active_column_id, signed_carry_value_column_id, RangeCheckClaim,
-    RangeCheckComponent, RangeCheckEval, RangeCheckInteractionClaim, RangeCheckRelation,
-    SignedCarryRangeClaim, SignedCarryRangeComponent, SignedCarryRangeEval, RANGE13_BITS,
-    RANGE9_BITS,
+    signed_carry_active_column_id, signed_carry_value_column_id, write_batched_logup_columns,
+    RangeCheckClaim, RangeCheckComponent, RangeCheckEval, RangeCheckInteractionClaim,
+    RangeCheckRelation, SignedCarryRangeClaim, SignedCarryRangeComponent, SignedCarryRangeEval,
+    RANGE13_BITS, RANGE9_BITS,
 };
 use crate::scalar::scalar_mod_mul::columns::{m31_column_eval, padded_log_size, M31ColumnEval};
 use crate::scalar::scalar_mod_mul::relation::ScalarModMulLookupRelations;
@@ -194,6 +194,8 @@ pub const SCALAR_SETUP_TRACE_COLUMNS: usize = 1
     + N_LIMBS
     + 2 * N_LIMBS
     + 2;
+const SCALAR_SETUP_LOGUP_BATCH: usize = 2;
+const SCALAR_SETUP_LOGUP_ENTRIES: usize = 3 + 16 * N_LIMBS;
 const SCALAR_SETUP_SIGNED_CARRY_EQUATION: &str = "scalar_setup_digest";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -251,7 +253,7 @@ impl ScalarSetupAirInteractionClaim {
 
 pub struct ScalarSetupAirComponents {
     pub setup: ScalarSetupAirComponent,
-    pub range13: RangeCheckComponent,
+    pub range13: Option<RangeCheckComponent>,
     pub range9: RangeCheckComponent,
     pub signed_carry: SignedCarryRangeComponent,
 }
@@ -262,6 +264,25 @@ impl ScalarSetupAirComponents {
         claim: ScalarSetupAirProofClaim,
         interaction_claim: &ScalarSetupAirInteractionClaim,
         relations: &ScalarSetupAirRelations,
+    ) -> Self {
+        Self::new_inner(allocator, claim, interaction_claim, relations, true)
+    }
+
+    pub(crate) fn new_without_range13_provider(
+        allocator: &mut TraceLocationAllocator,
+        claim: ScalarSetupAirProofClaim,
+        interaction_claim: &ScalarSetupAirInteractionClaim,
+        relations: &ScalarSetupAirRelations,
+    ) -> Self {
+        Self::new_inner(allocator, claim, interaction_claim, relations, false)
+    }
+
+    fn new_inner(
+        allocator: &mut TraceLocationAllocator,
+        claim: ScalarSetupAirProofClaim,
+        interaction_claim: &ScalarSetupAirInteractionClaim,
+        relations: &ScalarSetupAirRelations,
+        include_range13_provider: bool,
     ) -> Self {
         let providers = scalar_setup_lookup_provider_claims();
         Self {
@@ -279,11 +300,13 @@ impl ScalarSetupAirComponents {
                 },
                 interaction_claim.claimed_sum,
             ),
-            range13: RangeCheckComponent::new(
-                allocator,
-                RangeCheckEval::new(relations.range13.clone(), RANGE13_BITS),
-                interaction_claim.range13_provider.claimed_sum,
-            ),
+            range13: include_range13_provider.then(|| {
+                RangeCheckComponent::new(
+                    allocator,
+                    RangeCheckEval::new(relations.range13.clone(), RANGE13_BITS),
+                    interaction_claim.range13_provider.claimed_sum,
+                )
+            }),
             range9: RangeCheckComponent::new(
                 allocator,
                 RangeCheckEval::new(relations.range9.clone(), RANGE9_BITS),
@@ -302,21 +325,23 @@ impl ScalarSetupAirComponents {
     }
 
     pub fn components(&self) -> Vec<&dyn Component> {
-        vec![
-            &self.setup as &dyn Component,
-            &self.range13 as &dyn Component,
-            &self.range9 as &dyn Component,
-            &self.signed_carry as &dyn Component,
-        ]
+        let mut components = vec![&self.setup as &dyn Component];
+        if let Some(range13) = &self.range13 {
+            components.push(range13 as &dyn Component);
+        }
+        components.push(&self.range9 as &dyn Component);
+        components.push(&self.signed_carry as &dyn Component);
+        components
     }
 
     pub fn component_provers(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
-        vec![
-            &self.setup as &dyn ComponentProver<SimdBackend>,
-            &self.range13 as &dyn ComponentProver<SimdBackend>,
-            &self.range9 as &dyn ComponentProver<SimdBackend>,
-            &self.signed_carry as &dyn ComponentProver<SimdBackend>,
-        ]
+        let mut components = vec![&self.setup as &dyn ComponentProver<SimdBackend>];
+        if let Some(range13) = &self.range13 {
+            components.push(range13 as &dyn ComponentProver<SimdBackend>);
+        }
+        components.push(&self.range9 as &dyn ComponentProver<SimdBackend>);
+        components.push(&self.signed_carry as &dyn ComponentProver<SimdBackend>);
+        components
     }
 
     pub fn trace_log_degree_bounds(&self) -> TreeVec<ColumnVec<u32>> {
@@ -436,9 +461,9 @@ impl FrameworkEval for ScalarSetupAirEval {
             pub_x: public.pub_x.clone(),
             pub_y: public.pub_y.clone(),
         };
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             &self.output_relation,
-            -E::EF::from(active.clone()),
+            -active.clone(),
             &output.relation_values(),
         ));
 
@@ -502,7 +527,7 @@ impl FrameworkEval for ScalarSetupAirEval {
             &q1,
             &q2,
         );
-        eval.finalize_logup();
+        eval.finalize_logup_in_pairs();
         eval
     }
 }
@@ -787,21 +812,17 @@ pub fn gen_scalar_setup_air_base_trace(
         .collect()
 }
 
-pub(crate) fn gen_scalar_setup_air_lookup_provider_base_trace(
+pub(crate) fn gen_scalar_setup_air_lookup_provider_base_trace_without_range13_provider(
     setup_base: &[M31ColumnEval],
-    extra_range13_uses: impl IntoIterator<Item = M31>,
     extra_range9_uses: impl IntoIterator<Item = M31>,
     extra_signed_carry_uses: impl IntoIterator<Item = i64>,
 ) -> ColumnVec<M31ColumnEval> {
     let providers = scalar_setup_lookup_provider_claims();
-    let mut range13_uses = scalar_setup_range13_uses_from_base(setup_base);
-    range13_uses.extend(extra_range13_uses);
     let mut range9_uses = scalar_setup_range9_uses_from_base(setup_base);
     range9_uses.extend(extra_range9_uses);
     let mut signed_carry_uses = scalar_setup_signed_carry_uses_from_base(setup_base);
     signed_carry_uses.extend(extra_signed_carry_uses);
     vec![
-        providers.range13.gen_multiplicity_trace(range13_uses),
         providers.range9.gen_multiplicity_trace(range9_uses),
         providers
             .signed_carry
@@ -809,10 +830,9 @@ pub(crate) fn gen_scalar_setup_air_lookup_provider_base_trace(
     ]
 }
 
-pub(crate) fn gen_scalar_setup_air_interaction_trace(
+pub(crate) fn gen_scalar_setup_air_interaction_trace_without_range13_provider(
     base: &[M31ColumnEval],
     relations: &ScalarSetupAirRelations,
-    extra_range13_uses: impl IntoIterator<Item = M31>,
     extra_range9_uses: impl IntoIterator<Item = M31>,
     extra_signed_carry_uses: impl IntoIterator<Item = i64>,
 ) -> (ColumnVec<M31ColumnEval>, ScalarSetupAirInteractionClaim) {
@@ -855,7 +875,7 @@ pub(crate) fn gen_scalar_setup_air_interaction_trace(
     offset += 1;
     debug_assert_eq!(offset, SCALAR_SETUP_TRACE_COLUMNS);
 
-    let mut logup = LogupTraceGenerator::new(log_size);
+    let mut entries = Vec::with_capacity(SCALAR_SETUP_LOGUP_ENTRIES);
     let mut public_sum = secure_zero();
     let mut _output_sum = secure_zero();
     let mut _point_sum = secure_zero();
@@ -864,7 +884,7 @@ pub(crate) fn gen_scalar_setup_air_interaction_trace(
     let mut _range9_sum = secure_zero();
     let mut _signed_carry_sum = secure_zero();
 
-    append_relation_column(&mut logup, base, active_col, |vec_row| {
+    append_relation_entry(&mut entries, base, active_col, |vec_row| {
         let values: [PackedM31; PUBLIC_ECDSA_INSTANCE_ARITY] =
             core::array::from_fn(|index| base[public_col + index].data[vec_row]);
         relations.public_inputs.combine(&values)
@@ -875,7 +895,7 @@ pub(crate) fn gen_scalar_setup_air_interaction_trace(
         relations.public_inputs.combine(&values)
     });
 
-    append_relation_column_with_sign(&mut logup, base, active_col, -1, |vec_row| {
+    append_relation_entry_with_sign(&mut entries, base, active_col, -1, |vec_row| {
         relations.output.combine(&scalar_setup_output_packed_values(
             base, vec_row, z_red_col, u1_col, u2_col,
         ))
@@ -888,7 +908,7 @@ pub(crate) fn gen_scalar_setup_air_interaction_trace(
 
     // Public-key binding tuple provider (yield, `-active`), emitted right after
     // the output provider to match `ScalarSetupAirEval::evaluate`.
-    append_relation_column_with_sign(&mut logup, base, active_col, -1, |vec_row| {
+    append_relation_entry_with_sign(&mut entries, base, active_col, -1, |vec_row| {
         relations
             .public_key_point
             .combine(&scalar_setup_point_packed_values(base, vec_row))
@@ -900,15 +920,15 @@ pub(crate) fn gen_scalar_setup_air_interaction_trace(
     });
 
     for limb in 0..N_LIMBS {
-        append_range_column(
-            &mut logup,
+        append_range_entry(
+            &mut entries,
             base,
             active_col,
             &relations.range13,
             public_r_col(limb),
         );
-        append_range_column(
-            &mut logup,
+        append_range_entry(
+            &mut entries,
             base,
             active_col,
             &relations.range13,
@@ -918,15 +938,15 @@ pub(crate) fn gen_scalar_setup_air_interaction_trace(
         _range13_sum += range_sum(base, active_col, &relations.range13, r_slack_col + limb);
     }
     for limb in 0..N_LIMBS {
-        append_range_column(
-            &mut logup,
+        append_range_entry(
+            &mut entries,
             base,
             active_col,
             &relations.range13,
             public_s_col(limb),
         );
-        append_range_column(
-            &mut logup,
+        append_range_entry(
+            &mut entries,
             base,
             active_col,
             &relations.range13,
@@ -941,14 +961,14 @@ pub(crate) fn gen_scalar_setup_air_interaction_trace(
         } else {
             &relations.range13
         };
-        append_range_column(&mut logup, base, active_col, relation, public_z_col(limb));
+        append_range_entry(&mut entries, base, active_col, relation, public_z_col(limb));
         if limb == N_LIMBS - 1 {
             _range9_sum += range_sum(base, active_col, relation, public_z_col(limb));
         } else {
             _range13_sum += range_sum(base, active_col, relation, public_z_col(limb));
         }
-        append_range_column(
-            &mut logup,
+        append_range_entry(
+            &mut entries,
             base,
             active_col,
             &relations.signed_carry,
@@ -962,15 +982,15 @@ pub(crate) fn gen_scalar_setup_air_interaction_trace(
         );
     }
     for limb in 0..N_LIMBS {
-        append_range_column(
-            &mut logup,
+        append_range_entry(
+            &mut entries,
             base,
             active_col,
             &relations.range13,
             z_red_col + limb,
         );
-        append_range_column(
-            &mut logup,
+        append_range_entry(
+            &mut entries,
             base,
             active_col,
             &relations.range13,
@@ -991,8 +1011,8 @@ pub(crate) fn gen_scalar_setup_air_interaction_trace(
                 (ROLE_QUOTIENT, q_col + limb),
                 (ROLE_RESULT, result_col + limb),
             ] {
-                append_scalar_limb_column(
-                    &mut logup,
+                append_scalar_limb_entry(
+                    &mut entries,
                     base,
                     active_col,
                     public_sig_id_col(),
@@ -1016,18 +1036,15 @@ pub(crate) fn gen_scalar_setup_air_interaction_trace(
         }
     }
 
+    assert_eq!(entries.len(), SCALAR_SETUP_LOGUP_ENTRIES);
+    let mut logup = LogupTraceGenerator::new(log_size);
+    write_batched_logup_columns(&mut logup, &entries, SCALAR_SETUP_LOGUP_BATCH);
     let (mut trace, claimed_sum) = logup.finalize_last();
 
     let providers = scalar_setup_lookup_provider_claims();
-    let range13_values = providers.range13.gen_preprocessed_column();
-    let mut range13_uses = scalar_setup_range13_uses_from_base(base);
-    range13_uses.extend(extra_range13_uses);
-    let range13_multiplicity = providers.range13.gen_multiplicity_trace(range13_uses);
-    let (range13_trace, range13_provider) = RangeCheckInteractionClaim::gen_interaction_trace(
-        &range13_multiplicity,
-        &range13_values,
-        &relations.range13,
-    );
+    let range13_provider = RangeCheckInteractionClaim {
+        claimed_sum: secure_zero(),
+    };
     let range9_values = providers.range9.gen_preprocessed_column();
     let mut range9_uses = scalar_setup_range9_uses_from_base(base);
     range9_uses.extend(extra_range9_uses);
@@ -1047,7 +1064,6 @@ pub(crate) fn gen_scalar_setup_air_interaction_trace(
         &relations.signed_carry,
     );
 
-    trace.extend(range13_trace);
     trace.extend(range9_trace);
     trace.extend(signed_trace);
 
@@ -1075,7 +1091,7 @@ fn add_public_key_point_provider<E: EvalAtRow>(
     values.push(public.sig_id.clone());
     values.extend(public.pub_x.limbs().iter().cloned());
     values.extend(public.pub_y.limbs().iter().cloned());
-    eval.add_to_relation(RelationEntry::new(relation, -E::EF::from(gate), &values));
+    eval.add_to_relation(RelationEntry::base(relation, -gate, &values));
 }
 
 fn read_public_instance<E: EvalAtRow>(eval: &mut E) -> PublicEcdsaInstance<E::F> {
@@ -1209,9 +1225,9 @@ fn add_scalar_limb_link<E: EvalAtRow>(
 ) {
     let two = E::F::from(M31::from_u32_unchecked(2));
     let mul_id = sig_id * two + E::F::from(M31::from_u32_unchecked(mul_offset));
-    eval.add_to_relation(RelationEntry::new(
+    eval.add_to_relation(RelationEntry::base(
         relation,
-        E::EF::from(gate),
+        gate,
         &[
             mul_id,
             E::F::from(M31::from_u32_unchecked(role)),
@@ -1221,47 +1237,51 @@ fn add_scalar_limb_link<E: EvalAtRow>(
     ));
 }
 
-fn append_relation_column(
-    logup: &mut LogupTraceGenerator,
+type LogupEntry = (Vec<PackedQM31>, Vec<PackedQM31>);
+
+fn append_relation_entry(
+    entries: &mut Vec<LogupEntry>,
     base: &[M31ColumnEval],
     active_col: usize,
     denominator: impl FnMut(usize) -> PackedQM31,
 ) {
-    append_relation_column_with_sign(logup, base, active_col, 1, denominator);
+    append_relation_entry_with_sign(entries, base, active_col, 1, denominator);
 }
 
-fn append_relation_column_with_sign(
-    logup: &mut LogupTraceGenerator,
+fn append_relation_entry_with_sign(
+    entries: &mut Vec<LogupEntry>,
     base: &[M31ColumnEval],
     active_col: usize,
     sign: i32,
     mut denominator: impl FnMut(usize) -> PackedQM31,
 ) {
     let log_size = base[0].domain.log_size();
-    let mut col = logup.new_col();
+    let mut numerators = Vec::with_capacity(1 << (log_size - LOG_N_LANES));
+    let mut denominators = Vec::with_capacity(1 << (log_size - LOG_N_LANES));
     for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
         let numerator = PackedQM31::from(base[active_col].data[vec_row]);
         let numerator = if sign < 0 { -numerator } else { numerator };
-        col.write_frac(vec_row, numerator, denominator(vec_row));
+        numerators.push(numerator);
+        denominators.push(denominator(vec_row));
     }
-    col.finalize_col();
+    entries.push((numerators, denominators));
 }
 
-fn append_range_column(
-    logup: &mut LogupTraceGenerator,
+fn append_range_entry(
+    entries: &mut Vec<LogupEntry>,
     base: &[M31ColumnEval],
     active_col: usize,
     relation: &RangeCheckRelation,
     value_col: usize,
 ) {
-    append_relation_column(logup, base, active_col, |vec_row| {
+    append_relation_entry(entries, base, active_col, |vec_row| {
         relation.combine(&[base[value_col].data[vec_row]])
     });
 }
 
 #[allow(clippy::too_many_arguments)]
-fn append_scalar_limb_column(
-    logup: &mut LogupTraceGenerator,
+fn append_scalar_limb_entry(
+    entries: &mut Vec<LogupEntry>,
     base: &[M31ColumnEval],
     active_col: usize,
     sig_id_col: usize,
@@ -1271,7 +1291,7 @@ fn append_scalar_limb_column(
     value_col: usize,
     relation: &ScalarLimbRelation,
 ) {
-    append_relation_column(logup, base, active_col, |vec_row| {
+    append_relation_entry(entries, base, active_col, |vec_row| {
         let mul_id = base[sig_id_col].data[vec_row] * PackedM31::from(M31::from_u32_unchecked(2))
             + PackedM31::from(M31::from_u32_unchecked(mul_offset));
         relation.combine(&[
@@ -1416,7 +1436,7 @@ fn scalar_limb_sum_for_column(
     })
 }
 
-fn scalar_setup_range13_uses_from_base(base: &[M31ColumnEval]) -> Vec<M31> {
+pub(crate) fn scalar_setup_range13_uses_from_base(base: &[M31ColumnEval]) -> Vec<M31> {
     let mut uses = Vec::new();
     for row in storage_rows(base).filter(|row| row[0] != M31::from_u32_unchecked(0)) {
         for limb in 0..N_LIMBS {

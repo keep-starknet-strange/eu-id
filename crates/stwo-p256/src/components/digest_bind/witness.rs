@@ -4,9 +4,10 @@
 //! carries[31])` (see [`super`] `COL_*`). The interaction trace replays the
 //! bridge's LogUp consumes — range8 bytes, range13 carries, the `(sig_id, z)`
 //! binding, then the optional cross-module digest — in the **same order** the
-//! eval's `finalize_logup` emits them, one fraction per column (degree 2).
+//! eval emits them, paired into LogUp columns.
 
 use num_traits::{One, Zero};
+use rand::RngCore;
 use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::SecureField;
 use stwo::core::poly::circle::CanonicCoset;
@@ -26,8 +27,8 @@ use crate::field::limbs::P256M31BigInt;
 use crate::range_checks::{write_batched_logup_columns, RangeCheckRelation};
 
 use super::{
-    z_digest_byte_witness, ScalarZRelation, COL_ACTIVE, COL_BYTES_START, COL_CARRIES_START,
-    COL_SIG_ID, COL_Z_START, DIGEST_BYTES, N_CARRIES, SCALAR_Z_RELATION_ARITY, TOTAL_COLS,
+    z_digest_byte_witness, ScalarZRelation, COL_BYTES_START, COL_CARRIES_START, COL_SIG_ID,
+    COL_Z_START, DIGEST_BYTES, N_CARRIES, SCALAR_Z_RELATION_ARITY, TOTAL_COLS,
 };
 
 /// One `(sig_id, z)` signature the bridge binds. `z` is the message hash in
@@ -60,8 +61,31 @@ fn column_eval(log_size: u32, coset_values: Vec<M31>) -> ColumnEval {
     )
 }
 
+pub fn active_preprocessed_column(log_size: u32, active_rows: usize) -> ColumnEval {
+    let n_rows = 1usize << log_size;
+    assert!(
+        active_rows <= n_rows,
+        "{active_rows} active rows exceed 2^{log_size} trace rows",
+    );
+    let mut values = vec![M31::zero(); n_rows];
+    for value in values.iter_mut().take(active_rows) {
+        *value = M31::one();
+    }
+    column_eval(log_size, values)
+}
+
+fn random_m31_cell() -> M31 {
+    let mut rng = rand::thread_rng();
+    loop {
+        let value = rng.next_u32() & 0x7fff_ffff;
+        if value < 2_147_483_647 {
+            return M31::from_u32_unchecked(value);
+        }
+    }
+}
+
 /// Build the bridge's base trace: one active row per signature, padding rows
-/// zeroed. Columns are returned in committed order ([`TOTAL_COLS`] of them).
+/// blinded. Columns are returned in committed order ([`TOTAL_COLS`] of them).
 pub fn gen_base_trace(rows: &[DigestBindRow], log_size: u32) -> Vec<ColumnEval> {
     let n_rows = 1usize << log_size;
     assert!(
@@ -70,9 +94,13 @@ pub fn gen_base_trace(rows: &[DigestBindRow], log_size: u32) -> Vec<ColumnEval> 
         rows.len(),
     );
     let mut cols = vec![vec![M31::zero(); n_rows]; TOTAL_COLS];
+    for col in &mut cols {
+        for value in col.iter_mut().skip(rows.len()) {
+            *value = random_m31_cell();
+        }
+    }
     for (row, sig) in rows.iter().enumerate() {
         let (bytes, carries) = z_digest_byte_witness(&sig.z);
-        cols[COL_ACTIVE][row] = M31::one();
         cols[COL_SIG_ID][row] = sig.sig_id;
         for (i, limb) in sig.z.limbs().iter().enumerate() {
             cols[COL_Z_START + i][row] = *limb;
@@ -114,17 +142,18 @@ pub struct DigestBindRelations<'a> {
 
 /// Build the bridge's LogUp interaction trace and its claimed sum. Lookups are
 /// emitted in the canonical order (range8 bytes, range13 carries, `(sig_id, z)`,
-/// then the optional digest), one fraction per column (batch 1), matching the
-/// eval's `finalize_logup`.
+/// then the optional digest), paired by consecutive entries to match the
+/// eval's `finalize_logup_in_pairs`.
 pub fn gen_interaction_trace(
+    active: &ColumnEval,
     base: &[ColumnEval],
     relations: &DigestBindRelations<'_>,
     expose_digest: bool,
 ) -> (Vec<ColumnEval>, SecureField) {
     assert_eq!(base.len(), TOTAL_COLS);
-    let log_size = base[COL_ACTIVE].domain.log_size();
+    let log_size = active.domain.log_size();
     let n_vec_rows = 1usize << (log_size - LOG_N_LANES);
-    let active = &base[COL_ACTIVE];
+    assert_eq!(base[0].domain.log_size(), log_size);
 
     let numerators: Vec<PackedQM31> = (0..n_vec_rows)
         .map(|r| PackedQM31::from(active.data[r]))
@@ -176,11 +205,8 @@ pub fn gen_interaction_trace(
         entries.push((numerators.clone(), denoms));
     }
 
-    // One fraction per column (batch 1), matching the eval's `finalize_logup`.
-    // Solo columns keep every LogUp constraint degree 2, so the module never
-    // needs the higher-degree lifting path.
     let mut logup = LogupTraceGenerator::new(log_size);
-    write_batched_logup_columns(&mut logup, &entries, 1);
+    write_batched_logup_columns(&mut logup, &entries, 2);
     let (trace, claimed_sum) = logup.finalize_last();
     (trace, claimed_sum)
 }
@@ -188,7 +214,7 @@ pub fn gen_interaction_trace(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::components::digest_bind::air::{DigestBindComponent, DigestBindEval};
+    use crate::components::digest_bind::air::{active_col_id, DigestBindComponent, DigestBindEval};
     use crate::debug::MockCommitmentScheme;
     use crate::range_checks::RangeCheckInteractionClaim;
     use crate::range_checks::{ColumnEval as RcColumnEval, RangeCheckClaim};
@@ -222,6 +248,27 @@ mod tests {
     /// cross-module digest. The total over consumer + providers is exactly zero,
     /// which is what the global LogUp identity checks in a real proof.
     #[test]
+    fn base_trace_inactive_rows_are_fresh_blind_cells() {
+        let rows = sample_rows();
+        let first = gen_base_trace(&rows, 9);
+        let second = gen_base_trace(&rows, 9);
+
+        let first_fingerprint = first
+            .iter()
+            .flat_map(|column| column.data.iter().map(|packed| packed.to_array()))
+            .collect_vec();
+        let second_fingerprint = second
+            .iter()
+            .flat_map(|column| column.data.iter().map(|packed| packed.to_array()))
+            .collect_vec();
+
+        assert_ne!(
+            first_fingerprint, second_fingerprint,
+            "digest bridge inactive trace cells must be fresh per trace"
+        );
+    }
+
+    #[test]
     fn bridge_balances_against_all_providers() {
         let log_size = LOG_N_LANES; // 16 rows: 1 active signature + padding.
         let rows = sample_rows();
@@ -234,6 +281,7 @@ mod tests {
         let scalar_z = ScalarZRelation::draw(&mut channel);
         let digest = DigestBytesRelation::draw(&mut channel);
 
+        let active = active_preprocessed_column(log_size, rows.len());
         let base = gen_base_trace(&rows, log_size);
         let relations = DigestBindRelations {
             range8: &range8,
@@ -241,7 +289,7 @@ mod tests {
             scalar_z: &scalar_z,
             digest: &digest,
         };
-        let (_trace, consumer_sum) = gen_interaction_trace(&base, &relations, true);
+        let (_trace, consumer_sum) = gen_interaction_trace(&active, &base, &relations, true);
         assert_ne!(
             consumer_sum,
             SecureField::zero(),
@@ -288,6 +336,7 @@ mod tests {
         let scalar_z = ScalarZRelation::draw(&mut channel);
         let digest = DigestBytesRelation::draw(&mut channel);
 
+        let active = active_preprocessed_column(log_size, rows.len());
         let base = gen_base_trace(&rows, log_size);
         let relations = DigestBindRelations {
             range8: &range8,
@@ -295,7 +344,7 @@ mod tests {
             scalar_z: &scalar_z,
             digest: &digest,
         };
-        let (_trace, consumer_sum) = gen_interaction_trace(&base, &relations, true);
+        let (_trace, consumer_sum) = gen_interaction_trace(&active, &base, &relations, true);
 
         let (byte_uses, carry_uses) = range_uses(&rows);
         let range8_provider = provider_sum(RANGE8_BITS, byte_uses, &range8);
@@ -340,6 +389,7 @@ mod tests {
         let scalar_z = ScalarZRelation::draw(&mut channel);
         let digest = DigestBytesRelation::draw(&mut channel);
 
+        let active = active_preprocessed_column(log_size, rows.len());
         let base = gen_base_trace(&rows, log_size);
         let relations = DigestBindRelations {
             range8: &range8,
@@ -347,13 +397,13 @@ mod tests {
             scalar_z: &scalar_z,
             digest: &digest,
         };
-        let (interaction, claimed_sum) = gen_interaction_trace(&base, &relations, true);
+        let (interaction, claimed_sum) = gen_interaction_trace(&active, &base, &relations, true);
 
-        // The bridge has no preprocessed columns of its own. Build the three
+        // Build the three
         // commitment trees the constraint evaluator expects.
         let mut commitment_scheme = MockCommitmentScheme::default();
         let mut tree_builder = commitment_scheme.tree_builder();
-        tree_builder.extend_evals(Vec::<ColumnEval>::new());
+        tree_builder.extend_evals(vec![active]);
         tree_builder.finalize_interaction();
         let mut tree_builder = commitment_scheme.tree_builder();
         tree_builder.extend_evals(base);
@@ -362,11 +412,16 @@ mod tests {
         tree_builder.extend_evals(interaction);
         tree_builder.finalize_interaction();
 
-        let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&[]);
+        let mut allocator =
+            TraceLocationAllocator::new_with_preprocessed_columns(&[active_col_id(
+                log_size,
+                rows.len(),
+            )]);
         let component = DigestBindComponent::new(
             &mut allocator,
             DigestBindEval {
                 log_size,
+                active_rows: rows.len(),
                 range8,
                 range13,
                 scalar_z,
