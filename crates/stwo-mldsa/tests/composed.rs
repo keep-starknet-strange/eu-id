@@ -156,6 +156,31 @@ fn composed_expand_a_rejection_schedule_rejects_count_tamper() {
     assert!(verify_mldsa(&proof).is_err());
 }
 
+fn expand_a_ntt_trace_rejects(attack: stwo_mldsa::expand_a::NttTraceAttack, seed: u64, tag: &str) {
+    let _attack = stwo_mldsa::expand_a::install_ntt_trace_attack(attack);
+    let message = big_msg(tag, 1024);
+    let (witness, input) = witness_and_input(seed, &message);
+    assert!(rejected(witness, input), "forged {tag} must be rejected");
+}
+
+#[test]
+fn composed_expand_a_ntt_quotient_rejects_tamper() {
+    expand_a_ntt_trace_rejects(
+        stwo_mldsa::expand_a::NttTraceAttack::Quotient,
+        8013,
+        "ntt quotient",
+    );
+}
+
+#[test]
+fn composed_expand_a_ntt_final_coefficient_rejects_tamper() {
+    expand_a_ntt_trace_rejects(
+        stwo_mldsa::expand_a::NttTraceAttack::FinalCoefficient,
+        8014,
+        "ntt final coefficient",
+    );
+}
+
 fn expand_a_range_boundary_rejects(kind: stwo_mldsa::coeffs::tables::RcKind, seed: u64, tag: &str) {
     let _attack = stwo_mldsa::expand_a::install_range_boundary_attack(kind);
     let message = big_msg(tag, 1024);

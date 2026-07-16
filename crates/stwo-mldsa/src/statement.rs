@@ -83,10 +83,12 @@ use crate::decomp::tables as decomp_tables;
 use crate::decomp::{self, DecompEval};
 
 use crate::expand_a::{
-    self, derive_expand_a_witness, gen_ntt_base_trace, gen_ntt_interaction,
+    self, derive_expand_a_witness, gen_ntt_base_traces, gen_ntt_interactions,
     gen_rejection_base_trace, gen_rejection_interaction, native_eval_use_sum, ExpandARelations,
-    ExpandAWitness, NttEval, RejectionEval, MATRIX_POLYS, NTT_BASE_COLS, NTT_INTERACTION_COLS,
-    REJECTION_BASE_COLS, REJECTION_INTERACTION_COLS, REQUIRED_STREAM_STRIDE,
+    ExpandAWitness, NttButterflyEval, NttScalingEval, RejectionEval, MATRIX_POLYS,
+    NTT_BUTTERFLY_BASE_COLS, NTT_BUTTERFLY_INTERACTION_COLS, NTT_BUTTERFLY_LOG_SIZE,
+    NTT_SCALING_BASE_COLS, NTT_SCALING_INTERACTION_COLS, NTT_SCALING_LOG_SIZE, REJECTION_BASE_COLS,
+    REJECTION_INTERACTION_COLS, REQUIRED_STREAM_STRIDE,
 };
 
 use crate::sampleinball::relations::SibRelations;
@@ -762,10 +764,7 @@ fn all_preprocessed_log_sizes(
         expand_a::rejection_log_size(expand_a_candidate_counts);
         expand_a::rejection_preprocessed_ids("").len()
     ]);
-    sizes.extend(vec![
-        expand_a::ntt_log_size();
-        expand_a::ntt_preprocessed_ids("").len()
-    ]);
+    sizes.extend(expand_a::ntt_preprocessed_log_sizes());
     let cls = coeffs_log_size();
     sizes.extend(vec![cls; coeffs::coeffs_preprocessed_ids().len()]);
     sizes.extend(vec![
@@ -930,7 +929,8 @@ impl FrameworkEval for PublicFoldEval {
 struct Built {
     public_fold: FrameworkComponent<PublicFoldEval>,
     expand_a_rejection: FrameworkComponent<RejectionEval>,
-    expand_a_ntt: FrameworkComponent<NttEval>,
+    expand_a_ntt_butterfly: FrameworkComponent<NttButterflyEval>,
+    expand_a_ntt_scaling: FrameworkComponent<NttScalingEval>,
     coeffs: FrameworkComponent<CoeffsEval>,
     coeffs_rc: Vec<FrameworkComponent<coeffs_tables::RangeTableEval>>,
     decomp: FrameworkComponent<DecompEval>,
@@ -951,12 +951,10 @@ struct Built {
 
 impl Built {
     fn ordered(&self) -> Vec<&dyn Component> {
-        let mut out: Vec<&dyn Component> = vec![
-            &self.public_fold,
-            &self.expand_a_rejection,
-            &self.expand_a_ntt,
-            &self.coeffs,
-        ];
+        let mut out: Vec<&dyn Component> = vec![&self.public_fold, &self.expand_a_rejection];
+        out.push(&self.expand_a_ntt_butterfly);
+        out.push(&self.expand_a_ntt_scaling);
+        out.push(&self.coeffs);
         out.extend(self.coeffs_rc.iter().map(|c| c as &dyn Component));
         out.push(&self.decomp);
         out.extend(self.decomp_rc.iter().map(|c| c as &dyn Component));
@@ -974,12 +972,11 @@ impl Built {
         out
     }
     fn ordered_prover(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
-        let mut out: Vec<&dyn ComponentProver<SimdBackend>> = vec![
-            &self.public_fold,
-            &self.expand_a_rejection,
-            &self.expand_a_ntt,
-            &self.coeffs,
-        ];
+        let mut out: Vec<&dyn ComponentProver<SimdBackend>> =
+            vec![&self.public_fold, &self.expand_a_rejection];
+        out.push(&self.expand_a_ntt_butterfly);
+        out.push(&self.expand_a_ntt_scaling);
+        out.push(&self.coeffs);
         out.extend(
             self.coeffs_rc
                 .iter()
@@ -1025,7 +1022,7 @@ struct Claims {
     /// Hosted mode drops the `msglink` claim from `ordered()` / `from_flat()`.
     hosted: bool,
     expand_a_rejection: SecureField,
-    expand_a_ntt: SecureField,
+    expand_a_ntt: Vec<SecureField>,
     coeffs: SecureField,
     coeffs_rc: Vec<SecureField>,
     decomp: SecureField,
@@ -1044,7 +1041,9 @@ struct Claims {
 
 impl Claims {
     fn ordered(&self) -> Vec<SecureField> {
-        let mut v = vec![self.expand_a_rejection, self.expand_a_ntt, self.coeffs];
+        let mut v = vec![self.expand_a_rejection];
+        v.extend(self.expand_a_ntt.iter().copied());
+        v.push(self.coeffs);
         v.extend(self.coeffs_rc.iter().copied());
         v.push(self.decomp);
         v.extend(self.decomp_rc.iter().copied());
@@ -1069,7 +1068,7 @@ impl Claims {
         let mut it = flat.iter().copied();
         let mut next = || it.next().expect("claimed sums length mismatch");
         let expand_a_rejection = next();
-        let expand_a_ntt = next();
+        let expand_a_ntt = (0..2).map(|_| next()).collect();
         let coeffs = next();
         let coeffs_rc = vec![next()];
         let decomp = next();
@@ -1156,7 +1155,8 @@ fn module_trace_layout(ctx: &LayoutCtx) -> Vec<u32> {
         );
         REJECTION_BASE_COLS
     ]);
-    t.extend(vec![expand_a::ntt_log_size(); NTT_BASE_COLS]);
+    t.extend(vec![NTT_BUTTERFLY_LOG_SIZE; NTT_BUTTERFLY_BASE_COLS]);
+    t.extend(vec![NTT_SCALING_LOG_SIZE; NTT_SCALING_BASE_COLS]);
     // 1. coeffs + 2. unified range table.
     t.extend(vec![coeffs_log_size(); coeffs::N_BASE_COLS]);
     t.push(coeffs_tables::range_table_log_size());
@@ -1208,7 +1208,8 @@ fn module_interaction_layout(ctx: &LayoutCtx) -> Vec<u32> {
         );
         REJECTION_INTERACTION_COLS
     ]);
-    i.extend(vec![expand_a::ntt_log_size(); NTT_INTERACTION_COLS]);
+    i.extend(vec![NTT_BUTTERFLY_LOG_SIZE; NTT_BUTTERFLY_INTERACTION_COLS]);
+    i.extend(vec![NTT_SCALING_LOG_SIZE; NTT_SCALING_INTERACTION_COLS]);
     // 1. coeffs + 2. unified range table.
     i.extend(vec![coeffs_log_size(); coeffs::N_INTERACTION_COLS]);
     i.extend(vec![
@@ -1348,15 +1349,22 @@ fn build_components(
         },
         claims.expand_a_rejection,
     );
-    let expand_a_ntt = FrameworkComponent::new(
+    assert_eq!(claims.expand_a_ntt.len(), 2);
+    let expand_a_ntt_butterfly = FrameworkComponent::new(
         allocator,
-        NttEval {
-            log_size: expand_a::ntt_log_size(),
+        NttButterflyEval {
+            relations: rel.expand_a.clone(),
+        },
+        claims.expand_a_ntt[0],
+    );
+    let expand_a_ntt_scaling = FrameworkComponent::new(
+        allocator,
+        NttScalingEval {
             r: rel.r,
             s: rel.s,
             relations: rel.expand_a.clone(),
         },
-        claims.expand_a_ntt,
+        claims.expand_a_ntt[1],
     );
     // 1. coeffs.
     let coeffs = FrameworkComponent::new(
@@ -1498,7 +1506,8 @@ fn build_components(
     Built {
         public_fold,
         expand_a_rejection,
-        expand_a_ntt,
+        expand_a_ntt_butterfly,
+        expand_a_ntt_scaling,
         coeffs,
         coeffs_rc,
         decomp,
@@ -1840,7 +1849,7 @@ impl AirProver for MlDsaProver {
         coeffs_log_size()
             .max(decomp_log_size())
             .max(sib_log_size(self.sib_squeezed_len))
-            .max(expand_a::ntt_log_size())
+            .max(NTT_BUTTERFLY_LOG_SIZE)
             .max(expand_a::rejection_log_size(
                 &self.expand_a_witness.candidate_counts,
             ))
@@ -1926,8 +1935,9 @@ impl AirProver for MlDsaProver {
         let (expand_rejection_trace, expand_rejection_uses) =
             gen_rejection_base_trace(&self.expand_a_witness);
         evals.extend(expand_rejection_trace);
-        let (expand_ntt_trace, expand_ntt_uses) = gen_ntt_base_trace(&self.expand_a_witness);
-        evals.extend(expand_ntt_trace);
+        let expand_ntt = gen_ntt_base_traces(&self.expand_a_witness);
+        evals.extend(expand_ntt.butterfly);
+        evals.extend(expand_ntt.scaling);
 
         // 1. coeffs base + 2. unified range multiplicity. ExpandA and coeffs
         // consume the same namespaced relation, so their counts add by kind.
@@ -1955,7 +1965,7 @@ impl AirProver for MlDsaProver {
             }
             for (dst, src) in range_uses[idx]
                 .iter_mut()
-                .zip(expand_ntt_uses.for_kind(*kind))
+                .zip(expand_ntt.rc_uses.for_kind(*kind))
             {
                 *dst += src;
             }
@@ -2084,10 +2094,14 @@ impl AirProver for MlDsaProver {
             gen_rejection_interaction(&self.expand_a_witness, self.stream_base, &rel.expand_a);
         self.claims.expand_a_rejection = expand_rejection.claimed_sum;
         evals.extend(expand_rejection.trace);
-        let expand_ntt = gen_ntt_interaction(&self.expand_a_witness, rel.r, rel.s, &rel.expand_a);
-        self.claims.expand_a_ntt = expand_ntt.claimed_sum;
+        let expand_ntt = gen_ntt_interactions(&self.expand_a_witness, rel.r, rel.s, &rel.expand_a);
+        self.claims.expand_a_ntt = vec![
+            expand_ntt.butterfly.claimed_sum,
+            expand_ntt.scaling.claimed_sum,
+        ];
         self.a_evals = expand_ntt.a_evals;
-        evals.extend(expand_ntt.trace);
+        evals.extend(expand_ntt.butterfly.trace);
+        evals.extend(expand_ntt.scaling.trace);
 
         // 1. coeffs interaction (stash group_evals + claimed).
         let cls = coeffs_log_size();
@@ -2545,7 +2559,7 @@ pub fn n_a_evals() -> usize {
 /// separately). Hosts gate the flat vector's length on this before
 /// construction — `Claims::from_flat` panics on a short vector.
 pub fn hosted_claimed_sums_len() -> usize {
-    2                                             // ExpandA rejection + inverse NTT
+    3                                             // ExpandA rejection + butterfly + scaling
         + 1 + coeffs_tables::RANGE_TABLE_COMPONENTS // coeffs + unified range table
         + 1 + decomp_tables::RcKind::ALL.len()    // decomp + rc
         + 1 + sib_tables::RcKind::ALL.len()       // sib + rc
