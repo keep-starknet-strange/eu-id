@@ -279,3 +279,51 @@ Two exact production probes after the repair, both `RAYON_NUM_THREADS=1`, releas
 measured 20,706–24,364 ms prove, 687–938 ms verify, 1,227,262–1,229,246 bytes, and zero auxiliary
 payload bytes. This closes the remaining all-arithmetic-in-STARK boundary but fails every performance
 rail. It is a soundness checkpoint, not hard-target completion.
+
+## WO-Q10.2 — verify tree-0 reconstruction repair
+
+- [x] Read the handoff, COMMON rules, WO-2 spec, mailbox protocol, and campaign lessons.
+- [x] Inspect the handed-off dirty diff and rebase `q10/wo2-verify-tree0` onto `8355fedc` with autostash.
+- [x] Map all canonical tree-0 reconstruction calls and classify static versus candidate-count-dependent columns.
+- [x] Capture the required release, one-thread before table: tree-0 reconstruction, Merkle verification,
+      OODS/composition, and lookup/claimed-sum checks per hosted role.
+- [x] Stop without a cache or commit restructuring per mailbox A-201: the cold LDE+Merkle cost is
+      architecturally unreachable within the verify-side-only footprint.
+- [x] Confirm the existing candidate-count, per-signature-root, forged-root, and statement-message negatives.
+- [x] Capture the final exact production probe: tree-0 total, overall verify, proof bytes, and prove time.
+- [x] Inspect the final documentation-only diff and commit locally without pushing.
+
+### Review
+
+Before attribution on `8355fedc`, release, production PCS, `RAYON_NUM_THREADS=1`:
+
+| Phase | Time |
+|---|---:|
+| Issuer canonical columns | 5.69 ms |
+| Device canonical columns | 5.78 ms |
+| Revocation canonical columns | 5.96 ms |
+| Shared Keccak-service canonical columns | 7.11 ms |
+| Tree-0 twiddles | 2.50 ms |
+| Tree-0 LDE + Merkle commit | 505.45 ms |
+| Aggregate canonical tree-0 reconstruction | 541.35 ms |
+| Verify setup + claimed sums | 8.11 ms |
+| Stwo Merkle/OODS/composition checks | 9.50 ms |
+| Residual STARK verify call | 17.61 ms |
+
+The three ML-DSA instances each regenerate 104–105 columns, but only 5.69–5.96 ms per role
+is attributable to canonical column generation. The 505.45 ms LDE+Merkle commit dominates.
+Of each issuer/device role's 105 columns (revocation: 104), 48 protocol-static columns are
+shared globally; the remaining 57 (revocation: 56) include namespaced ExpandA rejection,
+SampleInBall, message, bridge, and sink schedules. ExpandA rejection content follows the
+per-signature candidate-count vector, so a cold production verifier cannot amortize the root.
+Mailbox A-201 therefore re-scoped WO-2 to attribution only and forbade a warm-only cache.
+
+Final clean exact probe (`RAYON_NUM_THREADS=1 cargo run --release -p eu-id-prover --example
+pq_perf_probe`): 24,961 ms prove, 568 ms verify, 1,199,150-byte proof, zero auxiliary
+payload bytes. The expected prove rail misses; verify and proof-size also remain above the campaign
+rails on this standalone branch. Four focused release negatives passed with one Rayon thread:
+`mldsa_mdoc_reconstructs_tree0_and_gates_public_shape` (29.49 s),
+`mldsa_mdoc_statement_message_tamper_rejects` (18.98 s),
+`mldsa_mdoc_pin_is_per_signature_not_cached` (33.76 s), and
+`mldsa_malformed_claim_tree_rejects` (19.33 s, including candidate-count tamper rejection).
+All temporary mdoc/air-core timers were removed before the final diff.
