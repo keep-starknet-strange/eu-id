@@ -26,7 +26,12 @@ pub fn prove_mdoc(
     request: &MdocPidRequest,
     policy: Policy,
 ) -> Result<(MdocProof, MdocStatement), Error> {
-    let extracted = mdoc::extract_pid_mdoc(document, request).map_err(Error::Mdoc)?;
+    let mut extracted = mdoc::extract_pid_mdoc(document, request).map_err(Error::Mdoc)?;
+
+    // In case of multi-nationality users, before offloading to the circuit, the prover selects
+    // a nationality from the accepted set
+    mdoc::select_accepted_nationality(&mut extracted, &policy);
+
     let statement =
         mdoc::MdocCircuitStatement::from_extracted(&extracted, policy).map_err(Error::Mdoc)?;
     let proof = mdoc::prove_mdoc_circuit(&extracted, &statement)?;

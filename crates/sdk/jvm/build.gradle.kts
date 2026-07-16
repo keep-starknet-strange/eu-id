@@ -98,13 +98,23 @@ val HOST_ARCH: String =
     if (System.getProperty("os.arch").lowercase().let { it.contains("aarch64") || it.contains("arm64") }) "arm64"
     else "x86_64"
 
-val nativeTargets = listOf(
+val allNativeTargets = listOf(
     NativeTarget("aarch64-apple-darwin", "darwin-aarch64", "libeuid_zk_sdk.dylib"),
     NativeTarget("x86_64-apple-darwin", "darwin-x86-64", "libeuid_zk_sdk.dylib"),
     NativeTarget("x86_64-unknown-linux-gnu", "linux-x86-64", "libeuid_zk_sdk.so"),
     NativeTarget("aarch64-unknown-linux-gnu", "linux-aarch64", "libeuid_zk_sdk.so"),
     NativeTarget("x86_64-pc-windows-gnu", "win32-x86-64", "euid_zk_sdk.dll"),
 )
+
+// Opt-in (`-PhostOnlyNative`): build only the host desktop native, skipping the
+// Linux/Windows cross-builds. For local host unit testing where a full cross-platform
+// fat jar isn't needed (and the zig Windows cross-build may be unavailable). Default off
+// so published/CI jars stay cross-platform.
+val nativeTargets = if (providers.gradleProperty("hostOnlyNative").isPresent) {
+    allNativeTargets.filter { it.targetOs == HOST_OS && it.targetArch == HOST_ARCH }
+} else {
+    allNativeTargets
+}
 
 val buildNativeTasks = nativeTargets.map { t ->
     tasks.register<Exec>("buildNative_${t.jnaPrefix.replace('-', '_')}") {
@@ -121,6 +131,7 @@ val buildNativeTasks = nativeTargets.map { t ->
         val destDir = File(nativeLibsDir, t.jnaPrefix)
         outputs.file(File(destDir, t.libFile))
         doLast { copy { from(builtLib); into(destDir) } }
+        outputs.upToDateWhen { false }
     }
 }
 

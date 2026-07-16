@@ -298,6 +298,10 @@ pub struct ExtractedPidMdoc {
     pub nationality_binding: MdocNationalityBinding,
     pub birth_date_value_offset: usize,
     pub nationality_value_offset: usize,
+    /// All of the holder's parsed nationality entries (one for a scalar value, N for an array).
+    /// The `nationality_*` singles above hold the currently-bound entry (default: the first);
+    /// [`select_accepted_nationality`] repoints them at the entry that satisfies the accepted set.
+    pub nationality_candidates: Vec<ParsedNationalityValue>,
     pub signed_at: (u16, u8, u8),
     pub valid_from: (u16, u8, u8),
     pub valid_until: (u16, u8, u8),
@@ -545,7 +549,7 @@ pub fn extract_pid_mdoc(
     } else {
         ParsedBirthDateValue::default()
     };
-    let parsed_nat = if let Some(item) = &nationality_item {
+    let nationality_candidates = if let Some(item) = &nationality_item {
         validate_item_digest(
             &mso.value_digests,
             nationality_element.expect("Alpha2Set element is present"),
@@ -554,8 +558,13 @@ pub fn extract_pid_mdoc(
         )?;
         parse_nationality_value(item)?
     } else {
-        ParsedNationalityValue::default()
+        Vec::new()
     };
+    // Default to the first entry; the policy-aware pick happens later in `select_accepted_nationality`.
+    let parsed_nat = nationality_candidates
+        .first()
+        .cloned()
+        .unwrap_or_default();
 
     let device_signed = map_field(doc_map, "deviceSigned")?;
     let device_auth = map_field(device_signed, "deviceAuth")?;
@@ -598,6 +607,7 @@ pub fn extract_pid_mdoc(
         nationality_binding: parsed_nat.binding,
         birth_date_value_offset: parsed_birth.offset,
         nationality_value_offset: parsed_nat.offset,
+        nationality_candidates,
         signed_at: mso.signed_at,
         valid_from: mso.valid_from,
         valid_until: mso.valid_until,
@@ -648,8 +658,8 @@ impl Default for ParsedBirthDateValue {
     }
 }
 
-#[derive(Clone)]
-struct ParsedNationalityValue {
+#[derive(Clone, Debug)]
+pub struct ParsedNationalityValue {
     numeric: u32,
     bytes: [u8; 2],
     binding: MdocNationalityBinding,
@@ -742,8 +752,41 @@ fn parse_birth_date_text_value(
     })
 }
 
-fn parse_nationality_value(item: &ParsedItem) -> Result<ParsedNationalityValue, MdocError> {
-    match &item.value {
+fn parse_nationality_value(item: &ParsedItem) -> Result<Vec<ParsedNationalityValue>, MdocError> {
+    let values: Vec<&Value> = match &item.value {
+        Value::Array(entries) if !entries.is_empty() => entries.iter().collect(),
+        Value::Array(_) => return Err(MdocError::WrongType("nationality elementValue")),
+        other => vec![other],
+    };
+    values
+        .into_iter()
+        .map(|value| parse_one_nationality(item, value))
+        .collect()
+}
+
+fn select_nationality_index(candidates: &[ParsedNationalityValue], accepted: &[u32]) -> usize {
+    candidates
+        .iter()
+        .position(|c| accepted.contains(&c.numeric))
+        .unwrap_or(0)
+}
+
+pub fn select_accepted_nationality(extracted: &mut ExtractedPidMdoc, policy: &Policy) {
+    let index =
+        select_nationality_index(&extracted.nationality_candidates, &policy.accepted_nationalities);
+    if let Some(selected) = extracted.nationality_candidates.get(index).cloned() {
+        extracted.nationalities = vec![selected.numeric];
+        extracted.nationality_bytes = selected.bytes;
+        extracted.nationality_binding = selected.binding;
+        extracted.nationality_value_offset = selected.offset;
+    }
+}
+
+fn parse_one_nationality(
+    item: &ParsedItem,
+    value: &Value,
+) -> Result<ParsedNationalityValue, MdocError> {
+    match value {
         Value::Text(alpha2) => {
             let numeric = numeric_country(alpha2)?;
             let bytes = [(numeric >> 8) as u8, (numeric & 0xFF) as u8];
@@ -1394,13 +1437,11 @@ pub fn device_authentication_bytes(
     }
 
     let device_namespaces = encode_value(Value::Map(Vec::new()));
-    let device_namespaces_bytes =
-        encode_value(Value::Tag(24, Box::new(Value::Bytes(device_namespaces))));
     let device_authentication = encode_value(Value::Array(vec![
         "DeviceAuthentication".into(),
         session_transcript,
         doc_type.into(),
-        Value::Bytes(device_namespaces_bytes),
+        Value::Tag(24, Box::new(Value::Bytes(device_namespaces))),
     ]));
     Ok(encode_value(Value::Tag(
         24,
