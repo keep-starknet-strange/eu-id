@@ -7,11 +7,7 @@ use stwo::core::{
     ColumnVec,
 };
 use stwo::prover::{
-    backend::simd::{
-        m31::{PackedM31, LOG_N_LANES},
-        qm31::PackedQM31,
-        SimdBackend,
-    },
+    backend::simd::{m31::PackedM31, qm31::PackedQM31, SimdBackend},
     ComponentProver,
 };
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
@@ -213,9 +209,9 @@ impl FrameworkEval for DirectPreparedOperandProviderEval {
         eval.add_constraint((one.clone() - active.clone()) * use_count.clone());
         instance.add_constraints(&mut eval, &active, &one);
 
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             &self.relation,
-            -E::EF::from(use_count),
+            -use_count,
             &instance.relation_values(),
         ));
         eval.finalize_logup();
@@ -245,9 +241,9 @@ impl FrameworkEval for DirectPreparedOperandConsumerEval {
 
         eval.add_constraint(active.clone() * (active.clone() - one.clone()));
         instance.add_constraints(&mut eval, &active, &one);
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             &self.relation,
-            E::EF::from(active),
+            active,
             &instance.relation_values(),
         ));
         eval.finalize_logup();
@@ -471,16 +467,13 @@ pub(crate) fn gen_direct_operand_provider_interaction_trace(
     assert_eq!(base.len(), DIRECT_PREPARED_OPERAND_PROVIDER_TRACE_COLUMNS);
     let log_size = base[0].domain.log_size();
     let mut logup = LogupTraceGenerator::new(log_size);
-    let mut col = logup.new_col();
-    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+    logup.col_from_fn(|vec_row| {
         let values = direct_operand_provider_packed_relation_values(base, vec_row);
-        col.write_frac(
-            vec_row,
+        (
             -PackedQM31::from(base[1].data[vec_row]),
             relation.combine(&values),
-        );
-    }
-    col.finalize_col();
+        )
+    });
     logup.finalize_last()
 }
 
@@ -491,16 +484,13 @@ pub(crate) fn gen_direct_operand_consumer_interaction_trace(
     assert_eq!(base.len(), DIRECT_PREPARED_OPERAND_CONSUMER_TRACE_COLUMNS);
     let log_size = base[0].domain.log_size();
     let mut logup = LogupTraceGenerator::new(log_size);
-    let mut col = logup.new_col();
-    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+    logup.col_from_fn(|vec_row| {
         let values = direct_operand_consumer_packed_relation_values(base, vec_row);
-        col.write_frac(
-            vec_row,
+        (
             PackedQM31::from(base[0].data[vec_row]),
             relation.combine(&values),
-        );
-    }
-    col.finalize_col();
+        )
+    });
     logup.finalize_last()
 }
 

@@ -257,14 +257,14 @@ impl FrameworkEval for FakeGlvScalarAirEval {
         for value in cert.iter().cloned().chain(row.values()) {
             eval.add_constraint((one.clone() - active.clone()) * value);
         }
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             &self.cert_relation,
-            E::EF::from(active.clone()),
+            active.clone(),
             &cert,
         ));
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             &self.scalar_relation,
-            -E::EF::from(active.clone()),
+            -active.clone(),
             &scalar_relation_eval_values(&row),
         ));
         // Yield each active cert's PROVEN s2_sign_bit to the final-add sub-graph
@@ -272,9 +272,9 @@ impl FrameworkEval for FakeGlvScalarAirEval {
         // certs contribute (zero/inactive certs and padding yield nothing). MUST
         // mirror the interaction-trace column order (right after the scalar
         // provide, before the scalar-mod-mul limb links).
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             &self.sign_relation,
-            -E::EF::from(row.cert_active.clone()),
+            -(row.cert_active.clone()),
             &[
                 row.sig_id.clone(),
                 row.cert_id.clone(),
@@ -309,7 +309,7 @@ fn add_scalar_mod_mul_limb_links<E: EvalAtRow>(
     let base = E::F::from(M31::from_u32_unchecked(FAKE_GLV_SCALAR_MUL_ID_BASE));
     let two = E::F::from(M31::from_u32_unchecked(2));
     let mul_id = base + two * row.sig_id.clone() + row.cert_id.clone();
-    let numerator = E::EF::from(row.cert_active.clone());
+    let numerator = row.cert_active.clone();
     for limb in 0..N_LIMBS {
         emit_scalar_limb_link(
             eval,
@@ -363,13 +363,13 @@ fn add_scalar_mod_mul_limb_links<E: EvalAtRow>(
 fn emit_scalar_limb_link<E: EvalAtRow>(
     eval: &mut E,
     relation: &ScalarLimbRelation,
-    numerator: E::EF,
+    numerator: E::F,
     mul_id: E::F,
     role: u32,
     limb: usize,
     value: E::F,
 ) {
-    eval.add_to_relation(RelationEntry::new(
+    eval.add_to_relation(RelationEntry::base(
         relation,
         numerator,
         &[

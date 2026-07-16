@@ -59,11 +59,7 @@ use stwo::core::{
     utils::{bit_reverse_index, coset_index_to_circle_domain_index},
     ColumnVec,
 };
-use stwo::prover::backend::simd::{
-    m31::{LOG_N_LANES, N_LANES},
-    qm31::PackedQM31,
-    SimdBackend,
-};
+use stwo::prover::backend::simd::{m31::N_LANES, qm31::PackedQM31, SimdBackend};
 use stwo::prover::ComponentProver;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{
@@ -226,6 +222,10 @@ impl PublicKeyCurveSliceClaim {
             op: ProjectiveEcOp::Double,
             output_projective: ProjectivePoint::infinity(),
             muls,
+            // Header flags are never read for the public-key non-proj source range.
+            lhs_inf: false,
+            rhs_inf: false,
+            output_inf: false,
         };
         let mul_trace = ProjectiveRcbAirTraceClaim {
             rows: vec![air_row],
@@ -692,11 +692,7 @@ fn consume_mul_limbs<E: EvalAtRow>(
     values.push(E::F::from(M31::from_u32_unchecked(mul_index)));
     values.push(E::F::from(M31::from_u32_unchecked(role)));
     values.extend(limbs.iter().cloned());
-    eval.add_to_relation(RelationEntry::new(
-        relation,
-        E::EF::from(active.clone()),
-        &values,
-    ));
+    eval.add_to_relation(RelationEntry::base(relation, active.clone(), &values));
 }
 
 /// Consume `mul 3`'s lhs as the fixed constant `3` (limb 0 = 3, rest 0). This
@@ -715,11 +711,7 @@ fn consume_three_constant<E: EvalAtRow>(
         let value = if limb_index == 0 { 3 } else { 0 };
         values.push(E::F::from(M31::from_u32_unchecked(value)));
     }
-    eval.add_to_relation(RelationEntry::new(
-        relation,
-        E::EF::from(active.clone()),
-        &values,
-    ));
+    eval.add_to_relation(RelationEntry::base(relation, active.clone(), &values));
 }
 
 /// Consume the binding tuple `[sig_id, x.., y..]` (use, `+active`) on the
@@ -734,9 +726,9 @@ fn consume_public_key_point<E: EvalAtRow>(
     values.push(columns.sig_id.clone());
     values.extend(columns.x.limbs().iter().cloned());
     values.extend(columns.y.limbs().iter().cloned());
-    eval.add_to_relation(RelationEntry::new(
+    eval.add_to_relation(RelationEntry::base(
         relation,
-        E::EF::from(columns.active.clone()),
+        columns.active.clone(),
         &values,
     ));
 }
@@ -857,16 +849,18 @@ impl PublicKeyCurveSliceRelations {
     /// `scalar/setup_air.rs` provider so the binding tuple links the two
     /// components. Used by the monolithic proof.
     pub(crate) fn draw_with_point(
-        channel: &mut impl Channel,
+        _channel: &mut impl Channel,
         point: PublicKeyPointRelation,
         mul_result: ProjectiveRcbMulResultRelation,
+        range13: RangeCheckRelation,
+        signed_carry: RangeCheckRelation,
         gamma_digest: GammaDigestRelation,
         gamma_challenge: GammaChallenge,
     ) -> Self {
         Self {
             mul_result,
-            range13: RangeCheckRelation::draw(channel),
-            signed_carry: RangeCheckRelation::draw(channel),
+            range13,
+            signed_carry,
             point,
             gamma_digest,
             gamma_challenge,
@@ -878,13 +872,15 @@ impl PublicKeyCurveSliceRelations {
     pub(crate) fn dummy_with_point(
         point: PublicKeyPointRelation,
         mul_result: ProjectiveRcbMulResultRelation,
+        range13: RangeCheckRelation,
+        signed_carry: RangeCheckRelation,
         gamma_digest: GammaDigestRelation,
         gamma_challenge: GammaChallenge,
     ) -> Self {
         Self {
             mul_result,
-            range13: RangeCheckRelation::dummy(),
-            signed_carry: RangeCheckRelation::dummy(),
+            range13,
+            signed_carry,
             point,
             gamma_digest,
             gamma_challenge,
@@ -938,8 +934,8 @@ pub(crate) struct PublicKeyCurveSliceComponents {
     curve_check: PublicKeyCurveCheckComponent,
     gamma_range13: GammaTallComponent,
     gamma_signed: GammaTallComponent,
-    range13: RangeCheckComponent,
-    signed_carry: SignedCarryRangeComponent,
+    range13: Option<RangeCheckComponent>,
+    signed_carry: Option<SignedCarryRangeComponent>,
 }
 
 impl PublicKeyCurveSliceComponents {
@@ -949,6 +945,44 @@ impl PublicKeyCurveSliceComponents {
         interaction_claim: &PublicKeyCurveSliceInteractionClaim,
         relations: &PublicKeyCurveSliceRelations,
         bind_to_public: bool,
+    ) -> Self {
+        Self::new_with_signed_carry_provider(
+            allocator,
+            log_sizes,
+            interaction_claim,
+            relations,
+            bind_to_public,
+            true,
+            true,
+        )
+    }
+
+    pub(crate) fn new_without_range13_and_signed_carry_provider(
+        allocator: &mut TraceLocationAllocator,
+        log_sizes: PublicKeyCurveSliceLogSizes,
+        interaction_claim: &PublicKeyCurveSliceInteractionClaim,
+        relations: &PublicKeyCurveSliceRelations,
+        bind_to_public: bool,
+    ) -> Self {
+        Self::new_with_signed_carry_provider(
+            allocator,
+            log_sizes,
+            interaction_claim,
+            relations,
+            bind_to_public,
+            false,
+            false,
+        )
+    }
+
+    fn new_with_signed_carry_provider(
+        allocator: &mut TraceLocationAllocator,
+        log_sizes: PublicKeyCurveSliceLogSizes,
+        interaction_claim: &PublicKeyCurveSliceInteractionClaim,
+        relations: &PublicKeyCurveSliceRelations,
+        bind_to_public: bool,
+        include_range13_provider: bool,
+        include_signed_carry_provider: bool,
     ) -> Self {
         Self {
             curve_check: PublicKeyCurveCheckComponent::new(
@@ -984,41 +1018,55 @@ impl PublicKeyCurveSliceComponents {
                 },
                 interaction_claim.gamma_signed.claimed_sum,
             ),
-            range13: RangeCheckComponent::new(
-                allocator,
-                RangeCheckEval::new(relations.range13.clone(), RANGE13_BITS),
-                interaction_claim.range13.claimed_sum,
-            ),
-            signed_carry: SignedCarryRangeComponent::new(
-                allocator,
-                SignedCarryRangeEval::new(
-                    relations.signed_carry.clone(),
-                    projective_rcb_signed_carry_log_size(),
-                    PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
-                ),
-                interaction_claim.signed_carry.claimed_sum,
-            ),
+            range13: include_range13_provider.then(|| {
+                RangeCheckComponent::new(
+                    allocator,
+                    RangeCheckEval::new(relations.range13.clone(), RANGE13_BITS),
+                    interaction_claim.range13.claimed_sum,
+                )
+            }),
+            signed_carry: include_signed_carry_provider.then(|| {
+                SignedCarryRangeComponent::new(
+                    allocator,
+                    SignedCarryRangeEval::new(
+                        relations.signed_carry.clone(),
+                        projective_rcb_signed_carry_log_size(),
+                        PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
+                    ),
+                    interaction_claim.signed_carry.claimed_sum,
+                )
+            }),
         }
     }
 
     pub(crate) fn components(&self) -> Vec<&dyn Component> {
-        vec![
+        let mut components = vec![
             &self.curve_check as &dyn Component,
             &self.gamma_range13 as &dyn Component,
             &self.gamma_signed as &dyn Component,
-            &self.range13 as &dyn Component,
-            &self.signed_carry as &dyn Component,
-        ]
+        ];
+        if let Some(range13) = &self.range13 {
+            components.push(range13 as &dyn Component);
+        }
+        if let Some(signed_carry) = &self.signed_carry {
+            components.push(signed_carry as &dyn Component);
+        }
+        components
     }
 
     pub(crate) fn component_provers(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
-        vec![
+        let mut components = vec![
             &self.curve_check as &dyn ComponentProver<SimdBackend>,
             &self.gamma_range13 as &dyn ComponentProver<SimdBackend>,
             &self.gamma_signed as &dyn ComponentProver<SimdBackend>,
-            &self.range13 as &dyn ComponentProver<SimdBackend>,
-            &self.signed_carry as &dyn ComponentProver<SimdBackend>,
-        ]
+        ];
+        if let Some(range13) = &self.range13 {
+            components.push(range13 as &dyn ComponentProver<SimdBackend>);
+        }
+        if let Some(signed_carry) = &self.signed_carry {
+            components.push(signed_carry as &dyn ComponentProver<SimdBackend>);
+        }
+        components
     }
 
     #[cfg(test)]
@@ -1192,7 +1240,7 @@ pub(crate) fn pkc_gamma_instances(claim: &PublicKeyCurveSliceClaim) -> [GammaTal
     ]
 }
 
-fn slice_signed_carry_claim() -> SignedCarryRangeClaim {
+pub(crate) fn slice_signed_carry_claim() -> SignedCarryRangeClaim {
     SignedCarryRangeClaim::new(
         projective_rcb_signed_carry_log_size(),
         projective_rcb_signed_carry_bound(),
@@ -1200,8 +1248,31 @@ fn slice_signed_carry_claim() -> SignedCarryRangeClaim {
     )
 }
 
+#[cfg(test)]
 pub(crate) fn gen_slice_base_trace(
     claim: &PublicKeyCurveSliceClaim,
+) -> Result<Vec<M31ColumnEval>, PublicKeyCurveSliceError> {
+    gen_slice_base_trace_with_signed_carry_provider(claim, true)
+}
+
+pub(crate) fn gen_slice_base_trace_without_range13_and_signed_carry_provider(
+    claim: &PublicKeyCurveSliceClaim,
+) -> Result<Vec<M31ColumnEval>, PublicKeyCurveSliceError> {
+    gen_slice_base_trace_with_range_providers(claim, false, false)
+}
+
+#[cfg(test)]
+fn gen_slice_base_trace_with_signed_carry_provider(
+    claim: &PublicKeyCurveSliceClaim,
+    include_signed_carry_provider: bool,
+) -> Result<Vec<M31ColumnEval>, PublicKeyCurveSliceError> {
+    gen_slice_base_trace_with_range_providers(claim, true, include_signed_carry_provider)
+}
+
+fn gen_slice_base_trace_with_range_providers(
+    claim: &PublicKeyCurveSliceClaim,
+    include_range13_provider: bool,
+    include_signed_carry_provider: bool,
 ) -> Result<Vec<M31ColumnEval>, PublicKeyCurveSliceError> {
     let log_sizes = PublicKeyCurveSliceLogSizes::from_claim(claim);
     let mut trace = Vec::new();
@@ -1214,10 +1285,14 @@ pub(crate) fn gen_slice_base_trace(
     let [gamma_range13_instance, gamma_signed_instance] = pkc_gamma_instances(claim);
     trace.extend(gen_gamma_tall_base_trace(&gamma_range13_instance));
     trace.extend(gen_gamma_tall_base_trace(&gamma_signed_instance));
-    let range13 = RangeCheckClaim::new(RANGE13_BITS);
-    trace.push(range13.gen_multiplicity_trace(slice_range13_uses(claim)));
-    let signed_carry = slice_signed_carry_claim();
-    trace.push(signed_carry.gen_multiplicity_trace(slice_signed_carry_uses(claim)));
+    if include_range13_provider {
+        let range13 = RangeCheckClaim::new(RANGE13_BITS);
+        trace.push(range13.gen_multiplicity_trace(slice_range13_uses(claim)));
+    }
+    if include_signed_carry_provider {
+        let signed_carry = slice_signed_carry_claim();
+        trace.push(signed_carry.gen_multiplicity_trace(slice_signed_carry_uses(claim)));
+    }
 
     Ok(trace)
 }
@@ -1272,14 +1347,14 @@ fn write_limbs(columns: &mut [Vec<M31>], offset: &mut usize, value: &P256M31BigI
 /// Range13 uses across the slice: the γ-digest tall expander's grid (the
 /// curve-check witnessed limbs, lane-padded). The tall instance is the single
 /// source of truth, so the provider tally cannot drift from the consumption.
-fn slice_range13_uses(claim: &PublicKeyCurveSliceClaim) -> Vec<M31> {
+pub(crate) fn slice_range13_uses(claim: &PublicKeyCurveSliceClaim) -> Vec<M31> {
     let [r13, _] = pkc_gamma_instances(claim);
     r13.all_scheduled_values()
 }
 
 /// Signed-carry uses: the signed tall expander's grid (the curve-identity
 /// carries, lane-padded with `encode_signed_carry(0)`), decoded.
-fn slice_signed_carry_uses(claim: &PublicKeyCurveSliceClaim) -> Vec<i64> {
+pub(crate) fn slice_signed_carry_uses(claim: &PublicKeyCurveSliceClaim) -> Vec<i64> {
     let [_, signed] = pkc_gamma_instances(claim);
     signed
         .all_scheduled_values()
@@ -1288,10 +1363,45 @@ fn slice_signed_carry_uses(claim: &PublicKeyCurveSliceClaim) -> Vec<i64> {
         .collect()
 }
 
+#[cfg(test)]
 pub(crate) fn gen_slice_interaction_trace(
     claim: &PublicKeyCurveSliceClaim,
     relations: &PublicKeyCurveSliceRelations,
     bind_to_public: bool,
+) -> Result<(Vec<M31ColumnEval>, PublicKeyCurveSliceInteractionClaim), PublicKeyCurveSliceError> {
+    gen_slice_interaction_trace_with_signed_carry_provider(claim, relations, bind_to_public, true)
+}
+
+pub(crate) fn gen_slice_interaction_trace_without_range13_and_signed_carry_provider(
+    claim: &PublicKeyCurveSliceClaim,
+    relations: &PublicKeyCurveSliceRelations,
+    bind_to_public: bool,
+) -> Result<(Vec<M31ColumnEval>, PublicKeyCurveSliceInteractionClaim), PublicKeyCurveSliceError> {
+    gen_slice_interaction_trace_with_range_providers(claim, relations, bind_to_public, false, false)
+}
+
+#[cfg(test)]
+fn gen_slice_interaction_trace_with_signed_carry_provider(
+    claim: &PublicKeyCurveSliceClaim,
+    relations: &PublicKeyCurveSliceRelations,
+    bind_to_public: bool,
+    include_signed_carry_provider: bool,
+) -> Result<(Vec<M31ColumnEval>, PublicKeyCurveSliceInteractionClaim), PublicKeyCurveSliceError> {
+    gen_slice_interaction_trace_with_range_providers(
+        claim,
+        relations,
+        bind_to_public,
+        true,
+        include_signed_carry_provider,
+    )
+}
+
+fn gen_slice_interaction_trace_with_range_providers(
+    claim: &PublicKeyCurveSliceClaim,
+    relations: &PublicKeyCurveSliceRelations,
+    bind_to_public: bool,
+    include_range13_provider: bool,
+    include_signed_carry_provider: bool,
 ) -> Result<(Vec<M31ColumnEval>, PublicKeyCurveSliceInteractionClaim), PublicKeyCurveSliceError> {
     let log_sizes = PublicKeyCurveSliceLogSizes::from_claim(claim);
     let mut trace = Vec::new();
@@ -1323,26 +1433,43 @@ pub(crate) fn gen_slice_interaction_trace(
     trace.extend(gamma_signed_trace);
 
     // Local range providers.
-    let range13 = RangeCheckClaim::new(RANGE13_BITS);
-    let range13_values = range13.gen_preprocessed_column();
-    let range13_multiplicity = range13.gen_multiplicity_trace(slice_range13_uses(claim));
-    let (range13_trace, range13_claim) = RangeCheckInteractionClaim::gen_interaction_trace(
-        &range13_multiplicity,
-        &range13_values,
-        &relations.range13,
-    );
+    let (range13_trace, range13_claim) = if include_range13_provider {
+        let range13 = RangeCheckClaim::new(RANGE13_BITS);
+        let range13_values = range13.gen_preprocessed_column();
+        let range13_multiplicity = range13.gen_multiplicity_trace(slice_range13_uses(claim));
+        RangeCheckInteractionClaim::gen_interaction_trace(
+            &range13_multiplicity,
+            &range13_values,
+            &relations.range13,
+        )
+    } else {
+        (
+            Vec::new(),
+            RangeCheckInteractionClaim {
+                claimed_sum: secure_zero(),
+            },
+        )
+    };
     trace.extend(range13_trace);
 
-    let signed_carry = slice_signed_carry_claim();
-    let signed_carry_values = signed_carry.gen_value_column();
-    let signed_carry_multiplicity =
-        signed_carry.gen_multiplicity_trace(slice_signed_carry_uses(claim));
-    let (signed_carry_trace, signed_carry_claim) =
+    let (signed_carry_trace, signed_carry_claim) = if include_signed_carry_provider {
+        let signed_carry = slice_signed_carry_claim();
+        let signed_carry_values = signed_carry.gen_value_column();
+        let signed_carry_multiplicity =
+            signed_carry.gen_multiplicity_trace(slice_signed_carry_uses(claim));
         RangeCheckInteractionClaim::gen_interaction_trace(
             &signed_carry_multiplicity,
             &signed_carry_values,
             &relations.signed_carry,
-        );
+        )
+    } else {
+        (
+            Vec::new(),
+            RangeCheckInteractionClaim {
+                claimed_sum: secure_zero(),
+            },
+        )
+    };
     trace.extend(signed_carry_trace);
 
     Ok((
@@ -1382,8 +1509,7 @@ fn gen_curve_check_interaction_trace(
 
     let mut logup = LogupTraceGenerator::new(log_size);
     for column in (0..fraction_count).step_by(2) {
-        let mut col = logup.new_col();
-        for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+        logup.col_from_fn(|vec_row| {
             let mut numerators = [secure_zero(); N_LANES];
             let mut denominators = [secure_one(); N_LANES];
             for lane in 0..N_LANES {
@@ -1398,13 +1524,11 @@ fn gen_curve_check_interaction_trace(
                 numerators[lane] = numerator;
                 denominators[lane] = denominator;
             }
-            col.write_frac(
-                vec_row,
+            (
                 PackedQM31::from_array(numerators),
                 PackedQM31::from_array(denominators),
-            );
-        }
-        col.finalize_col();
+            )
+        });
     }
     let (trace, curve_sum) = logup.finalize_last();
     (trace, curve_sum, mul_result_sum, gamma_yield_sum)

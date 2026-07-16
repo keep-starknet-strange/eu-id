@@ -75,7 +75,7 @@ dependencies { implementation("com.kss:eu-id-zk-sdk:0.1.0") }
 ```kotlin
 import com.kss.euid.zk.sdk.proveIdentity
 import com.kss.euid.zk.sdk.verifyIdentity
-// ... ZkPublicStatement, ZkWitness, ZkVerifyResult, PredicateMode, NatMode, ZkException
+// ... ZkPublicStatement, ZkMdocWitness, ZkVerifyResult, PredicateMode, NatMode, ZkException
 ```
 
 JNA and the native libs arrive transitively inside the AAR.

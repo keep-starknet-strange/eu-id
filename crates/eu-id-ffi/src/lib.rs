@@ -8,8 +8,10 @@
 //! - [`eu_id_bench_sha256`] — the standalone SHA-256 STARK prover.
 //! - [`eu_id_bench_p256`] — the standalone P-256 ECDSA verification prover.
 //! - [`eu_id_bench_identity`] — the combined, cross-bound identity proof
-//!   (`eu_id_prover`: P256 ECDSA + SHA-256 + digest-bind bridge + age +
-//!   nationality).
+//!   (`eu_id_prover`: credential P256 ECDSA + nonce P256 ECDSA + SHA-256 +
+//!   digest-bind bridge + age + nationality).
+//! - [`eu_id_bench_mdoc`] — the isolated mdoc proof over the deterministic
+//!   EUID mdoc profile-v1 fixture.
 //!
 //! Memory is sampled as mach `phys_footprint` (the figure iOS jetsam
 //! actually enforces) by a background thread polling at a fixed cadence while
@@ -20,12 +22,19 @@
 //! whole body runs inside `catch_unwind` and failure is surfaced via the
 //! `ok` field rather than a panic.
 
+
+// One allocator for every prover entry point on-device: mimalloc. System
+// malloc cost ~4% of single-core prove; the criterion benches already pin
+// mimalloc, so this keeps shipped and benched numbers on the same allocator.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use eu_id_prover::mdoc::{demo_mdoc_circuit_fixture, prove_mdoc_circuit, verify_mdoc_circuit};
 use eu_id_prover::{
     prove_identity, verify_identity, Credential, Date, IssuerKey, Policy, PublicStatement,
 };
@@ -278,21 +287,33 @@ fn run_bench_p256(input: EcdsaVerifyInput, iters: u32) -> EuIdP256Bench {
                 input.clone()
             ]) {
                 Ok(d) => d,
-                Err(_) => return false,
+                Err(err) => {
+                    eprintln!("p256 draft error: {err:?}");
+                    return false;
+                }
             };
             let proof = match draft.prove_current_air_monolithic::<Blake2sMerkleChannel>() {
                 Ok(p) => p,
-                Err(_) => return false,
+                Err(err) => {
+                    eprintln!("p256 prove error: {err:?}");
+                    return false;
+                }
             };
             prove_samples.push(t0.elapsed().as_millis() as u64);
 
             // Bind verification to the statement the proof itself embeds — the
-            // same self-binding the crate's own end-to-end tests use.
+            // same self-binding the crate's own end-to-end tests use. No
+            // preprocessed-root pin (`None`) for the same reason: this is a
+            // self-proving benchmark, not a relying-party verifier. Production
+            // verifiers derive the root independently and pass `Some` (see
+            // `stwo_p256::proof::air::current_air_preprocessed_root`).
             let expected = proof.claim.public_inputs.instances.clone();
             let t1 = Instant::now();
-            let outcome = verify_current_air_monolithic::<Blake2sMerkleChannel>(proof, &expected);
+            let outcome =
+                verify_current_air_monolithic::<Blake2sMerkleChannel>(proof, &expected, None);
             verify_samples.push(t1.elapsed().as_millis() as u64);
-            if outcome.is_err() {
+            if let Err(err) = outcome {
+                eprintln!("p256 verify error: {err:?}");
                 verified = false;
             }
         }
@@ -438,6 +459,7 @@ pub unsafe extern "C" fn eu_id_bench_identity(
         },
         min_age_years: input.min_age_years,
         accepted_nationalities: accepted,
+        accepted_nationalities_alpha2: Vec::new(),
     };
     let iters = iters.max(1);
 
@@ -451,10 +473,14 @@ pub unsafe extern "C" fn eu_id_bench_identity(
 
 fn run_identity_bench(credential: &Credential, policy: &Policy, iters: u32) -> EuIdIdentityBench {
     let issuer = IssuerKey::demo();
+    // The holder-presence nonce signature: a fixed, self-consistent device-key
+    // signature over a demo nonce. Proving cost does not depend on the nonce
+    // bytes, so a fixture statement keeps the benchmark deterministic.
+    let nonce = eu_id_prover::fixtures::demo_nonce_statement();
     // The relying party's statement: the demo issuer's *public* key (the trusted
-    // anchor) + the policy, built independently of the proof — exactly what
-    // `verify_identity` checks against.
-    let statement = PublicStatement::new(issuer.public_key(), policy.clone());
+    // anchor) + the policy + the holder nonce signature, built independently of
+    // the proof — exactly what `verify_identity` checks against.
+    let statement = PublicStatement::new(issuer.public_key(), policy.clone(), nonce.clone());
 
     let ((mut prove_samples, mut verify_samples, last_proof, ok), peak) = with_peak_sampler(|| {
         let mut prove_samples = Vec::with_capacity(iters as usize);
@@ -464,7 +490,7 @@ fn run_identity_bench(credential: &Credential, policy: &Policy, iters: u32) -> E
 
         for _ in 0..iters {
             let t0 = Instant::now();
-            let proof = match prove_identity(credential, &issuer, policy) {
+            let proof = match prove_identity(credential, &issuer, policy, &nonce) {
                 Ok(p) => p,
                 // A false statement (e.g. under age) is rejected at witness
                 // generation — there is no proof to verify.
@@ -493,6 +519,70 @@ fn run_identity_bench(credential: &Credential, policy: &Policy, iters: u32) -> E
     // Serialized proof size, measured *after* the sampler stops so it cannot
     // inflate the peak. Best-effort: a serialize failure (shouldn't happen for a
     // valid proof) reports 0 without failing the run.
+    let proof_bytes = last_proof
+        .as_ref()
+        .and_then(|p| bincode::serialize(p).ok())
+        .map(|b| b.len() as u64)
+        .unwrap_or(0);
+
+    EuIdIdentityBench {
+        prove_ms: median(&mut prove_samples),
+        verify_ms: median(&mut verify_samples),
+        peak_bytes: peak,
+        proof_bytes,
+        ok: 1,
+    }
+}
+
+// ====================== Isolated mdoc proof ======================
+
+/// Prove → verify the deterministic EUID mdoc profile-v1 fixture `iters` times
+/// under the peak-memory sampler, returning the same timing/size shape as
+/// [`eu_id_bench_identity`].
+#[no_mangle]
+pub unsafe extern "C" fn eu_id_bench_mdoc(iters: u32) -> EuIdIdentityBench {
+    let iters = iters.max(1);
+    catch_unwind(AssertUnwindSafe(|| run_mdoc_bench(iters)))
+        .unwrap_or_else(|_| EuIdIdentityBench::failed())
+}
+
+fn run_mdoc_bench(iters: u32) -> EuIdIdentityBench {
+    let fixture = demo_mdoc_circuit_fixture();
+
+    let ((mut prove_samples, mut verify_samples, last_proof, ok), peak) = with_peak_sampler(|| {
+        let mut prove_samples = Vec::with_capacity(iters as usize);
+        let mut verify_samples = Vec::with_capacity(iters as usize);
+        let mut last_proof = None;
+        let mut ok = true;
+
+        for _ in 0..iters {
+            let t0 = Instant::now();
+            let proof = match prove_mdoc_circuit(&fixture.extracted, &fixture.statement) {
+                Ok(proof) => proof,
+                Err(err) => {
+                    eprintln!("mdoc prove error: {err:?}");
+                    ok = false;
+                    break;
+                }
+            };
+            prove_samples.push(t0.elapsed().as_millis() as u64);
+
+            let t1 = Instant::now();
+            if let Err(err) = verify_mdoc_circuit(&proof, &fixture.statement) {
+                eprintln!("mdoc verify error: {err:?}");
+                ok = false;
+                break;
+            }
+            verify_samples.push(t1.elapsed().as_millis() as u64);
+            last_proof = Some(proof);
+        }
+        (prove_samples, verify_samples, last_proof, ok)
+    });
+
+    if !ok {
+        return EuIdIdentityBench::failed();
+    }
+
     let proof_bytes = last_proof
         .as_ref()
         .and_then(|p| bincode::serialize(p).ok())

@@ -191,17 +191,17 @@ impl FrameworkEval for FakeGlvChainContinuityEval {
             &[row_index.clone() + one, sig_id.clone(), cert_id.clone()],
             &acc_after,
         );
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             &self.relation,
-            -E::EF::from(has_next),
+            -has_next,
             &provider_values,
         ));
 
         let consumer_values =
             fake_glv_chain_accumulator_relation_values(&[row_index, sig_id, cert_id], &acc_before);
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             &self.relation,
-            E::EF::from(has_prev),
+            has_prev,
             &consumer_values,
         ));
         eval.finalize_logup_in_pairs();

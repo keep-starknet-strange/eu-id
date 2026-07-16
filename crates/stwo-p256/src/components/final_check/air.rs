@@ -289,9 +289,9 @@ impl FrameworkEval for FinalCheckAirEval {
         let mut values = Vec::with_capacity(ECDSA_RESULT_RELATION_ARITY);
         values.push(sig_id.clone());
         values.extend(r_check.limbs().iter().cloned());
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             &self.result_relation,
-            E::EF::from(active.clone()),
+            active.clone(),
             &values,
         ));
 
@@ -301,9 +301,9 @@ impl FrameworkEval for FinalCheckAirEval {
         let mut output_values = Vec::with_capacity(1 + N_LIMBS);
         output_values.push(sig_id);
         output_values.extend(r_x_limbs.iter().cloned());
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             &self.final_add_output,
-            E::EF::from(active),
+            active,
             &output_values,
         ));
         eval.finalize_logup_in_pairs();

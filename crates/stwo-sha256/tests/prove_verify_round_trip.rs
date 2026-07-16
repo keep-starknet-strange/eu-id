@@ -170,7 +170,7 @@ fn verify_rejects_logup_sum_mutation() {
 
     // Bump one of the producer-side claimed sums by 1. The total now
     // differs from zero by 1, so the soundness gate catches it.
-    proof.interaction_claim.xor_8.claimed_sum += SecureField::one();
+    proof.interaction_claim.round_split_pack[0].claimed_sum += SecureField::one();
 
     match verify_sha256_proof(&proof) {
         Err(Sha256VerifyError::LogupSumNonZero) => {}
@@ -361,5 +361,51 @@ fn field_provider_proof_is_unbalanced_without_consumer() {
     assert!(
         air_core::verify(&mut [&mut verifier], &stark_proof).is_err(),
         "unbalanced field yields (no consumer) must fail verification",
+    );
+}
+
+/// Same end-to-end field-provider proof gate as
+/// [`field_provider_proof_is_unbalanced_without_consumer`], but with field
+/// windows in blocks 0, 1, and 2. This specifically exercises the dynamic
+/// target-block selector columns and the block counter in the AIR, not just the
+/// legacy block-0 path.
+#[ignore = "slow: produces a real proof first; same cost as prove_and_verify_multi_block"]
+#[test]
+fn multi_block_field_provider_proof_is_unbalanced_without_consumer() {
+    use air_core::relations::field_id;
+    use num_traits::Zero;
+    use stwo::core::fields::qm31::SecureField;
+    use stwo_sha256::air::{Sha256Prover, Sha256Verifier};
+    use stwo_sha256::constants::BLOCK_BYTES;
+    use stwo_sha256::field_exposure::FieldExposure;
+
+    let msg: Vec<u8> = (0..150).map(|i| (i % 251) as u8).collect();
+    let witness = compute_sha256_witness(&msg);
+    assert_eq!(witness.blocks.len(), 3, "test message must span 3 blocks");
+    let exposure = FieldExposure::from_preimage_windows_multi(&[
+        (field_id::DOB, 5, 4),
+        (field_id::NATIONALITY, BLOCK_BYTES + 8, 2),
+        (99, 2 * BLOCK_BYTES + 12, 3),
+    ]);
+    let config = config_for(witness.blocks.len());
+
+    let mut prover = Sha256Prover::new(&witness, config.log_n_rows, config.group_width)
+        .with_field_provider(exposure.clone());
+    let stark_proof = air_core::prove(&mut [&mut prover], config.pcs_config)
+        .expect("prove with multi-block field provider must succeed");
+    let interaction_claim = prover.interaction_claim().clone();
+
+    assert_ne!(
+        interaction_claim.total(),
+        SecureField::zero(),
+        "exposing multi-block field windows must leave outstanding provider terms",
+    );
+
+    let mut verifier =
+        Sha256Verifier::new(config.log_n_rows, config.group_width, interaction_claim)
+            .with_field_provider(exposure);
+    assert!(
+        air_core::verify(&mut [&mut verifier], &stark_proof).is_err(),
+        "unbalanced multi-block field yields (no consumer) must fail verification",
     );
 }

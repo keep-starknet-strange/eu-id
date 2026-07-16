@@ -1,6 +1,9 @@
 use crate::nat::eval::{NationalityComponent, NationalityEval};
 use crate::nat::lookup_elements::LookupElements;
-use crate::nat::table::{acceptable_col_id, NatTableComponent, NatTableEval};
+use crate::nat::preprocessed::active_col_id;
+use crate::nat::table::{
+    acceptable_col_id, acceptable_dummy_col_id, NatTableComponent, NatTableEval,
+};
 use crate::nat::types::PublicInput;
 use air_core::relations::FieldBytesRelation;
 use stwo::core::fields::qm31::QM31;
@@ -10,7 +13,13 @@ use stwo_constraint_framework::TraceLocationAllocator;
 /// Preprocessed column ids this predicate contributes, in commit order. The
 /// orchestrator concatenates these to seed the shared allocator.
 pub fn preprocessed_column_ids(public: &PublicInput) -> Vec<PreProcessedColumnId> {
-    vec![acceptable_col_id(&public.acceptable)]
+    vec![
+        // Nationality component's single-row `active` selector.
+        active_col_id(),
+        // Class-D blinded accepted-set table: value + is_dummy.
+        acceptable_col_id(public),
+        acceptable_dummy_col_id(public),
+    ]
 }
 
 pub fn components(

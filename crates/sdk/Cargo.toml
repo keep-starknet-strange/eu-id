@@ -5,36 +5,36 @@ edition.workspace = true
 
 # The EU-ID ZK SDK: the single source of truth for the prover/verifier data
 # contract. It owns the contract types, the deterministic-CBOR statement
-# encoding (`encode_statement` — folded into Fiat-Shamir, so byte drift fails
-# verification), and the `prove_identity`/`verify_identity` entry points.
+# encoding (`encode_statement`), and the product `prove_identity` /
+# `verify_identity` entry points backed by the full mdoc prover.
 #
-# Bodies are STUBBED for this iteration (dummy proof / `ok = true`); the real
-# STWO proving swaps in behind the same UniFFI surface with no app-side change.
-#
-# Boundary rule: this crate stays mdoc-agnostic — it takes already-extracted
-# raw bytes and returns proof/verdict. No Multipaz / verifier-core deps.
+# The mdoc PID bodies run the real STWO prover/verifier behind the UniFFI
+# surface. No Multipaz / verifier-core types leak in; callers pass the CBOR mdoc
+# bytes and verifier trust material directly.
 [lib]
 # Crate/lib identifier -> output filename `libeuid_zk_sdk.so` / `.dylib`. Rust
 # lib names can't contain hyphens, so this is the underscore form of euid-zk-sdk.
 name = "euid_zk_sdk"
-# cdylib -> the stub `.so`/`.dylib` loaded by the Kotlin bindings on Android.
+# cdylib -> the `.so`/`.dylib` loaded by the Kotlin bindings on Android.
 # staticlib -> iOS static link (deferred). rlib -> lets the bundled
 # `uniffi-bindgen` bin link against this crate.
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [features]
 # Pulls the binding generator (clap, cargo_metadata, …) into the build. Needed
-# ONLY for the `uniffi-bindgen` bin — kept off by default so the stub cdylib
-# doesn't link the whole generator toolchain into the `.so`.
+# ONLY for the `uniffi-bindgen` bin — kept off by default so the SDK cdylib
+# does not link the whole generator toolchain into the `.so`.
 bindgen = ["uniffi/cli"]
 
 [dependencies]
+# Production allocator — see eu-id-ffi: keeps SDK numbers on the same
+# allocator the benches measure.
+mimalloc = { workspace = true }
 # The prover's relying-party types and entry points. The §9.1 contract mapping
 # constructs `Credential` / `Policy` / `PublicStatement` / `Date` / `IssuerKey` /
-# `AffinePoint` from the UniFFI types; §9.2 wires the real `prove_identity` /
-# `verify_identity` in behind the stub surface, so this is now a proving
-# dependency (it drags the whole STWO stack into the cdylib — that footprint is
-# 9.3's concern).
+# `AffinePoint` from the UniFFI types; Phase F wires the SDK product path
+# through `prove_mdoc` / `verify_mdoc`, so this is now a proving dependency (it
+# drags the whole STWO stack into the cdylib — that footprint is 9.3's concern).
 eu-id-prover = { path = "../eu-id-prover" }
 uniffi = { version = "0.29" }
 thiserror = "2.0.18"
@@ -47,8 +47,9 @@ celes = "2.8.2"
 serde = { workspace = true }
 bincode = "1"
 # FFI transport compression: the SDK keeps its exported byte API stable while
-# compressing the inner bincode `Proof` payload carried in `ProofEnvelope`.
-bzip2 = "0.6"
+# compressing the inner bincode proof payload carried in `MdocProofEnvelope`.
+zstd = "0.13"
+sha2 = "0.10"
 
 [[bin]]
 # Bundled binding generator. Run as:

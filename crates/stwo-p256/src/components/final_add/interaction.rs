@@ -9,10 +9,7 @@ use stwo::core::{
     fields::{m31::M31, qm31::SecureField},
     utils::{bit_reverse_index, coset_index_to_circle_domain_index},
 };
-use stwo::prover::backend::simd::{
-    m31::{LOG_N_LANES, N_LANES},
-    qm31::PackedQM31,
-};
+use stwo::prover::backend::simd::{m31::N_LANES, qm31::PackedQM31};
 use stwo_constraint_framework::{LogupTraceGenerator, Relation};
 
 use crate::limbs::P256M31BigInt;
@@ -69,6 +66,39 @@ pub fn gen_final_add_interaction_trace(
     relations: &FinalAddRelations,
     log_sizes: FinalAddLogSizes,
 ) -> Result<(Vec<M31ColumnEval>, FinalAddInteractionClaim), FinalAddError> {
+    gen_final_add_interaction_trace_with_signed_carry_provider(claim, relations, log_sizes, true)
+}
+
+pub(crate) fn gen_final_add_interaction_trace_without_range13_and_signed_carry_provider(
+    claim: &FinalAddClaim,
+    relations: &FinalAddRelations,
+    log_sizes: FinalAddLogSizes,
+) -> Result<(Vec<M31ColumnEval>, FinalAddInteractionClaim), FinalAddError> {
+    gen_final_add_interaction_trace_with_range_providers(claim, relations, log_sizes, false, false)
+}
+
+fn gen_final_add_interaction_trace_with_signed_carry_provider(
+    claim: &FinalAddClaim,
+    relations: &FinalAddRelations,
+    log_sizes: FinalAddLogSizes,
+    include_signed_carry_provider: bool,
+) -> Result<(Vec<M31ColumnEval>, FinalAddInteractionClaim), FinalAddError> {
+    gen_final_add_interaction_trace_with_range_providers(
+        claim,
+        relations,
+        log_sizes,
+        true,
+        include_signed_carry_provider,
+    )
+}
+
+fn gen_final_add_interaction_trace_with_range_providers(
+    claim: &FinalAddClaim,
+    relations: &FinalAddRelations,
+    log_sizes: FinalAddLogSizes,
+    include_range13_provider: bool,
+    include_signed_carry_provider: bool,
+) -> Result<(Vec<M31ColumnEval>, FinalAddInteractionClaim), FinalAddError> {
     let mut columns = Vec::new();
 
     // Check family (consumers + output provider). The four muls are proven by
@@ -104,26 +134,43 @@ pub fn gen_final_add_interaction_trace(
     columns.extend(gamma_signed_trace);
 
     // Shared range providers.
-    let range13 = RangeCheckClaim::new(RANGE13_BITS);
-    let range13_values = range13.gen_preprocessed_column();
-    let range13_multiplicity = range13.gen_multiplicity_trace(final_add_range13_uses(claim));
-    let (range13_trace, range13_claim) = RangeCheckInteractionClaim::gen_interaction_trace(
-        &range13_multiplicity,
-        &range13_values,
-        &relations.range13,
-    );
+    let (range13_trace, range13_claim) = if include_range13_provider {
+        let range13 = RangeCheckClaim::new(RANGE13_BITS);
+        let range13_values = range13.gen_preprocessed_column();
+        let range13_multiplicity = range13.gen_multiplicity_trace(final_add_range13_uses(claim));
+        RangeCheckInteractionClaim::gen_interaction_trace(
+            &range13_multiplicity,
+            &range13_values,
+            &relations.range13,
+        )
+    } else {
+        (
+            Vec::new(),
+            RangeCheckInteractionClaim {
+                claimed_sum: secure_zero(),
+            },
+        )
+    };
     columns.extend(range13_trace);
 
-    let signed_carry = final_add_signed_carry_claim();
-    let signed_carry_values = signed_carry.gen_value_column();
-    let signed_carry_multiplicity =
-        signed_carry.gen_multiplicity_trace(final_add_signed_carry_uses(claim)?);
-    let (signed_carry_trace, signed_carry_claim) =
+    let (signed_carry_trace, signed_carry_claim) = if include_signed_carry_provider {
+        let signed_carry = final_add_signed_carry_claim();
+        let signed_carry_values = signed_carry.gen_value_column();
+        let signed_carry_multiplicity =
+            signed_carry.gen_multiplicity_trace(final_add_signed_carry_uses(claim)?);
         RangeCheckInteractionClaim::gen_interaction_trace(
             &signed_carry_multiplicity,
             &signed_carry_values,
             &relations.signed_carry,
-        );
+        )
+    } else {
+        (
+            Vec::new(),
+            RangeCheckInteractionClaim {
+                claimed_sum: secure_zero(),
+            },
+        )
+    };
     columns.extend(signed_carry_trace);
 
     Ok((
@@ -164,8 +211,7 @@ fn gen_check_interaction_trace(
 
     let mut logup = LogupTraceGenerator::new(log_size);
     for column in (0..fraction_count).step_by(2) {
-        let mut col = logup.new_col();
-        for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+        logup.col_from_fn(|vec_row| {
             let mut numerators = [secure_zero(); N_LANES];
             let mut denominators = [secure_one(); N_LANES];
             for lane in 0..N_LANES {
@@ -180,13 +226,11 @@ fn gen_check_interaction_trace(
                 numerators[lane] = numerator;
                 denominators[lane] = denominator;
             }
-            col.write_frac(
-                vec_row,
+            (
                 PackedQM31::from_array(numerators),
                 PackedQM31::from_array(denominators),
-            );
-        }
-        col.finalize_col();
+            )
+        });
     }
     let (trace, check_sum) = logup.finalize_last();
     (

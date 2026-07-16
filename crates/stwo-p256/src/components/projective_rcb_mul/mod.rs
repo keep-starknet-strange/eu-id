@@ -1,5 +1,3 @@
-use stwo::core::fields::m31::M31;
-use stwo_constraint_framework::EvalAtRow;
 use stwo_p256_utils::constants::N_LIMBS;
 use stwo_p256_utils::solinas::REDUCTION_MATRIX;
 
@@ -24,14 +22,6 @@ mod tests;
 // to keep the 2^18 table and `encode_signed_carry` stable).
 const PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS: usize = 8;
 const PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS: usize = 3;
-
-fn constant<F: From<M31>>(value: u32) -> F {
-    F::from(M31::from_u32_unchecked(value))
-}
-
-fn one<E: EvalAtRow>() -> E::F {
-    constant(1)
-}
 
 const fn folded_contribution_max_abs_digit_sum_const() -> i128 {
     let mut digit_index = 0usize;

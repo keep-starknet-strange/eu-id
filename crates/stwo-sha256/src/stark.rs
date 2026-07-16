@@ -26,6 +26,8 @@ use stwo::prover::backend::simd::m31::LOG_N_LANES;
 
 use crate::air::{Sha256Prover, Sha256Verifier};
 use crate::constants::DIGEST_BYTES;
+#[cfg(feature = "gkr-spike")]
+use crate::gkr_spike::Xor8GkrProofWire;
 use crate::interaction::InteractionClaim;
 use crate::types::{Digest, Sha256Witness};
 use crate::witness::compute_sha256_witness;
@@ -39,7 +41,7 @@ use crate::witness::compute_sha256_witness;
 #[derive(Clone, Debug)]
 pub struct ProverConfig {
     /// `log2` of the SHA-256 component's trace row count. Each row is one
-    /// padded block.
+    /// round of one padded block (64 rows per block).
     ///
     /// **Must satisfy `log_n_rows ≥ trace::min_log_size(witness.blocks.len())`**
     /// or [`prove_sha256`] returns [`Sha256ProveError::TraceTooSmall`]. The
@@ -60,9 +62,9 @@ pub struct ProverConfig {
     /// without re-generating the preprocessed tables — useful when
     /// batching variable-length messages into a single component.
     ///
-    /// **`Default` sets this to `LOG_N_LANES = 4`** — the SIMD floor,
-    /// fitting at most 16 padded blocks (~1 KiB of message). Larger
-    /// messages must override; see the recipe above.
+    /// **`Default` sets this to `min_log_size(1) = 7`** — one padded block
+    /// (64 rows) plus padding. Larger messages must override; see the
+    /// recipe above.
     pub log_n_rows: u32,
     /// Group width `W` for the packed `Maj`/`Ch` table. The default is
     /// `MAX_ROUND_GROUP_BITS = 6`: the round partitions subdivide their two
@@ -80,7 +82,7 @@ pub struct ProverConfig {
 impl Default for ProverConfig {
     fn default() -> Self {
         Self {
-            log_n_rows: LOG_N_LANES, // = 4
+            log_n_rows: crate::trace::min_log_size(1), // = 7: one block + padding
             group_width: crate::partitions::MAX_ROUND_GROUP_BITS,
             pcs_config: PcsConfig::default(),
         }
@@ -126,6 +128,9 @@ pub struct Sha256Proof {
     /// The underlying Stwo STARK proof (Merkle commitments, FRI proof,
     /// OODS values, PoW nonce).
     pub stark_proof: StarkProof<Blake2sMerkleHasher>,
+    /// Feature-gated side proof replacing the committed `xor_8` LogUp columns.
+    #[cfg(feature = "gkr-spike")]
+    pub xor_8_gkr_proof: Xor8GkrProofWire,
 }
 
 /// Errors that can be returned by [`prove_sha256`].
@@ -188,6 +193,10 @@ pub enum Sha256VerifyError {
     /// out-of-memory allocation on the verify path (the trace row count is
     /// `2^log_n_rows`).
     UnsupportedLogNRows { log_n_rows: u32, min: u32, max: u32 },
+    #[cfg(feature = "gkr-spike")]
+    Xor8GkrUnbalanced,
+    #[cfg(feature = "gkr-spike")]
+    Xor8GkrRejected(String),
 }
 
 impl core::fmt::Display for Sha256VerifyError {
@@ -214,6 +223,10 @@ impl core::fmt::Display for Sha256VerifyError {
                 f,
                 "proof.log_n_rows = {log_n_rows} outside supported range [{min}, {max}]"
             ),
+            #[cfg(feature = "gkr-spike")]
+            Self::Xor8GkrUnbalanced => write!(f, "xor_8 GKR output claims do not balance"),
+            #[cfg(feature = "gkr-spike")]
+            Self::Xor8GkrRejected(msg) => write!(f, "xor_8 GKR proof rejected: {msg}"),
         }
     }
 }
@@ -277,6 +290,8 @@ fn prove_sha256_inner(
     let mut prover = Sha256Prover::new(witness, log_n_rows, group_width);
     let stark_proof = air_core::prove(&mut [&mut prover], pcs_config)?;
     let interaction_claim = prover.interaction_claim().clone();
+    #[cfg(feature = "gkr-spike")]
+    let xor_8_gkr_proof = prover.xor_8_gkr_proof().clone();
 
     let digest = witness.digest_from_blocks();
     Ok(Sha256Proof {
@@ -287,6 +302,8 @@ fn prove_sha256_inner(
         interaction_claim,
         pcs_config,
         stark_proof,
+        #[cfg(feature = "gkr-spike")]
+        xor_8_gkr_proof,
     })
 }
 
@@ -354,6 +371,10 @@ pub fn verify_sha256_proof(proof: &Sha256Proof) -> Result<(), Sha256VerifyError>
         proof.group_width,
         proof.interaction_claim.clone(),
     );
+    #[cfg(feature = "gkr-spike")]
+    {
+        verifier = verifier.with_xor_8_gkr_proof(proof.xor_8_gkr_proof.clone());
+    }
     air_core::verify(&mut [&mut verifier], &proof.stark_proof)
         .map_err(|e: StwoVerificationError| Sha256VerifyError::StarkRejected(format!("{e:?}")))
 }

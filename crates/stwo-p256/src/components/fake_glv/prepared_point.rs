@@ -331,7 +331,7 @@ pub fn add_prepared_point_provider<E: EvalAtRow>(
     use_count: E::F,
     instance: &PreparedPointInstance<E::F>,
 ) {
-    add_prepared_point_relation(eval, relation, -E::EF::from(use_count), instance);
+    add_prepared_point_relation(eval, relation, -use_count, instance);
 }
 
 pub fn add_prepared_point_consumer<E: EvalAtRow>(
@@ -340,7 +340,7 @@ pub fn add_prepared_point_consumer<E: EvalAtRow>(
     gate: E::F,
     instance: &PreparedPointInstance<E::F>,
 ) {
-    add_prepared_point_relation(eval, relation, E::EF::from(gate), instance);
+    add_prepared_point_relation(eval, relation, gate, instance);
 }
 
 pub fn add_prepared_point_use_count_range_checks<E: EvalAtRow>(
@@ -359,11 +359,11 @@ pub fn add_prepared_point_use_count_range_checks<E: EvalAtRow>(
 fn add_prepared_point_relation<E: EvalAtRow>(
     eval: &mut E,
     relation: &PreparedPointRelation,
-    numerator: E::EF,
+    numerator: E::F,
     instance: &PreparedPointInstance<E::F>,
 ) {
     let values = instance.relation_values();
-    eval.add_to_relation(RelationEntry::new(relation, numerator, &values));
+    eval.add_to_relation(RelationEntry::base(relation, numerator, &values));
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

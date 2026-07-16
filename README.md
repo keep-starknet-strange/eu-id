@@ -13,8 +13,9 @@ decision for the Digital Identity Wallet.
 **This code is not audited and is not production-ready.** It is a research
 prototype. The first iteration produces **succinct** proofs (small, fast to
 verify) but not yet **zero-knowledge** proofs (witness masking is a deferred
-follow-on), and uses a **simplified signed credential** rather than a full ISO
-mdoc — both disclosed honestly.
+follow-on). The product proof path now targets constrained ISO/IEC 18013-5 PID
+mdocs; the older simplified 11-byte credential path remains in-tree only as a
+parity benchmark and regression baseline.
 
 The cryptographic components are built and individually sound:
 
@@ -25,13 +26,13 @@ The cryptographic components are built and individually sound:
 - **Predicates** — age-over-18 (two strategies) and nationality set-membership.
 
 These compose into one `StarkProof` via the `air-core` orchestration layer,
-**cross-bound** to a *single* credential: the combined proof attests that a
-signature verifies over the hash of the credential whose date of birth /
-nationality satisfy the predicates (the global LogUp balance cancels only when
-`z == SHA-256(C)` and the predicates' attributes are the credential's signed
-bytes). The relying-party API (`prove_identity` / `verify_identity`) and an
-`eu-id` prove/verify CLI are in place, with an end-to-end soundness suite
-(one negative per mutation class) guarding the composition.
+**cross-bound** to a *single* mdoc presentation: issuer auth, ISO device auth,
+MSO digest membership, device-key origin, credential validity, and the
+age/nationality predicates are bound in the mdoc proof. The product Rust API is
+`eu_id_prover::{prove_mdoc, verify_mdoc}` and the SDK product API is
+`prove_identity` / `verify_identity`. The core prover's POC
+`eu_id_prover::{prove_identity, verify_identity}` API and `eu-id` CLI remain for
+parity benchmarks but are not exposed through the SDK.
 
 ## Workspace
 
@@ -46,7 +47,10 @@ bytes). The relying-party API (`prove_identity` / `verify_identity`) and an
 - `crates/air-core` — composes `Air`/`AirProver` modules into one STARK proof
   under a single channel, commitment scheme, and global LogUp balance.
 - `crates/eu-id-prover` — the end-to-end combined prover built on `air-core`;
-  exposes `prove_identity` / `verify_identity` and the `eu-id` prove/verify CLI.
+  exposes product `prove_mdoc` / `verify_mdoc` APIs plus the legacy
+  `prove_identity` / `verify_identity` POC benchmark path.
+- `crates/sdk` — UniFFI-facing SDK contract and product mdoc PID proof
+  envelope (`prove_identity` / `verify_identity`).
 - `crates/eu-id-ffi` — C-ABI surface for the mobile benchmark harness (`mobile/`).
 
 ## Development

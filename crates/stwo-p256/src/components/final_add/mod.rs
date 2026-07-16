@@ -225,8 +225,8 @@ pub struct FinalAddComponents {
     check: FinalAddCheckComponent,
     gamma_range13: crate::components::gamma_digest::GammaTallComponent,
     gamma_signed: crate::components::gamma_digest::GammaTallComponent,
-    range13: RangeCheckComponent,
-    signed_carry: SignedCarryRangeComponent,
+    range13: Option<RangeCheckComponent>,
+    signed_carry: Option<SignedCarryRangeComponent>,
 }
 
 impl FinalAddComponents {
@@ -235,6 +235,40 @@ impl FinalAddComponents {
         log_sizes: FinalAddLogSizes,
         interaction_claim: &FinalAddInteractionClaim,
         relations: &FinalAddRelations,
+    ) -> Self {
+        Self::new_with_signed_carry_provider(
+            allocator,
+            log_sizes,
+            interaction_claim,
+            relations,
+            true,
+            true,
+        )
+    }
+
+    pub(crate) fn new_without_range13_and_signed_carry_provider(
+        allocator: &mut TraceLocationAllocator,
+        log_sizes: FinalAddLogSizes,
+        interaction_claim: &FinalAddInteractionClaim,
+        relations: &FinalAddRelations,
+    ) -> Self {
+        Self::new_with_signed_carry_provider(
+            allocator,
+            log_sizes,
+            interaction_claim,
+            relations,
+            false,
+            false,
+        )
+    }
+
+    fn new_with_signed_carry_provider(
+        allocator: &mut TraceLocationAllocator,
+        log_sizes: FinalAddLogSizes,
+        interaction_claim: &FinalAddInteractionClaim,
+        relations: &FinalAddRelations,
+        include_range13_provider: bool,
+        include_signed_carry_provider: bool,
     ) -> Self {
         Self {
             check: FinalAddCheckComponent::new(
@@ -271,41 +305,55 @@ impl FinalAddComponents {
                 },
                 interaction_claim.gamma_signed.claimed_sum,
             ),
-            range13: RangeCheckComponent::new(
-                allocator,
-                RangeCheckEval::new(relations.range13.clone(), RANGE13_BITS),
-                interaction_claim.range13.claimed_sum,
-            ),
-            signed_carry: SignedCarryRangeComponent::new(
-                allocator,
-                SignedCarryRangeEval::new(
-                    relations.signed_carry.clone(),
-                    projective_rcb_signed_carry_log_size(),
-                    PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
-                ),
-                interaction_claim.signed_carry.claimed_sum,
-            ),
+            range13: include_range13_provider.then(|| {
+                RangeCheckComponent::new(
+                    allocator,
+                    RangeCheckEval::new(relations.range13.clone(), RANGE13_BITS),
+                    interaction_claim.range13.claimed_sum,
+                )
+            }),
+            signed_carry: include_signed_carry_provider.then(|| {
+                SignedCarryRangeComponent::new(
+                    allocator,
+                    SignedCarryRangeEval::new(
+                        relations.signed_carry.clone(),
+                        projective_rcb_signed_carry_log_size(),
+                        PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
+                    ),
+                    interaction_claim.signed_carry.claimed_sum,
+                )
+            }),
         }
     }
 
     pub fn components(&self) -> Vec<&dyn Component> {
-        vec![
+        let mut components = vec![
             &self.check as &dyn Component,
             &self.gamma_range13 as &dyn Component,
             &self.gamma_signed as &dyn Component,
-            &self.range13 as &dyn Component,
-            &self.signed_carry as &dyn Component,
-        ]
+        ];
+        if let Some(range13) = &self.range13 {
+            components.push(range13 as &dyn Component);
+        }
+        if let Some(signed_carry) = &self.signed_carry {
+            components.push(signed_carry as &dyn Component);
+        }
+        components
     }
 
     pub fn component_provers(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
-        vec![
+        let mut components = vec![
             &self.check as &dyn ComponentProver<SimdBackend>,
             &self.gamma_range13 as &dyn ComponentProver<SimdBackend>,
             &self.gamma_signed as &dyn ComponentProver<SimdBackend>,
-            &self.range13 as &dyn ComponentProver<SimdBackend>,
-            &self.signed_carry as &dyn ComponentProver<SimdBackend>,
-        ]
+        ];
+        if let Some(range13) = &self.range13 {
+            components.push(range13 as &dyn ComponentProver<SimdBackend>);
+        }
+        if let Some(signed_carry) = &self.signed_carry {
+            components.push(signed_carry as &dyn ComponentProver<SimdBackend>);
+        }
+        components
     }
 
     pub fn trace_log_degree_bounds(&self) -> TreeVec<ColumnVec<u32>> {

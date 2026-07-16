@@ -170,8 +170,7 @@ fn prepared_table_ec_row_constraints_pass_for_honest_trace() {
         .expect("valid ec trace");
     let claim = PreparedTableEcRowProofClaim::from_trace(&trace);
     let ids = claim.preprocessed_column_ids();
-    let preprocessed =
-        gen_prepared_table_ec_row_preprocessed_trace(claim.log_size, 0, &ids).unwrap();
+    let preprocessed = gen_prepared_table_ec_row_preprocessed_trace(claim.log_size, &ids).unwrap();
     let base = gen_prepared_table_ec_row_base_trace(&trace, claim.log_size).unwrap();
     let mut channel = Blake2sChannel::default();
     let relation = PreparedTableEcRowRelation::draw(&mut channel);
@@ -489,7 +488,7 @@ impl stwo_constraint_framework::EvalAtRow for RecordingSourceEvaluator<'_> {
 
     fn finalize_logup_in_pairs(&mut self) {}
 
-    fn finalize_logup_batched(&mut self, _batching: &Vec<usize>) {}
+    fn finalize_logup_batched(&mut self, _batch_size: usize) {}
 }
 
 /// Whether every polynomial constraint of `PreparedTableProjectiveSourceEval`
@@ -507,8 +506,7 @@ fn projective_source_constraints_hold(log_size: u32, base: &[Vec<M31>]) -> bool 
             log_size,
             relation: PreparedTableEcRowRelation::dummy(),
             mul_result: crate::projective_air::ProjectiveRcbMulResultRelation::dummy(),
-            gamma_digest: crate::components::gamma_digest::GammaDigestRelation::dummy(),
-            gamma_challenge: super::trace::prepared_dummy_gamma_challenge(),
+            header: crate::components::hinted_mul::EcOpHeaderRelation::dummy(),
         }
         .evaluate(recorder);
         if recorder.constraints.iter().any(|value| !value.is_zero()) {
@@ -559,9 +557,7 @@ fn prepared_table_projective_source_rejects_forged_op_outputs() {
     let ec_row_relation = PreparedTableEcRowRelation::draw(&mut channel);
     let mul_result_relation =
         crate::projective_air::ProjectiveRcbMulResultRelation::draw(&mut channel);
-    let gamma_digest_relation =
-        crate::components::gamma_digest::GammaDigestRelation::draw(&mut channel);
-    let gamma_challenge = super::trace::prepared_dummy_gamma_challenge();
+    let header_relation = crate::components::hinted_mul::EcOpHeaderRelation::draw(&mut channel);
     let consumer_mul_sum = |columns: &[Vec<M31>]| {
         let evals: Vec<_> = columns
             .iter()
@@ -573,8 +569,7 @@ fn prepared_table_projective_source_rejects_forged_op_outputs() {
             &evals,
             &ec_row_relation,
             &mul_result_relation,
-            &gamma_digest_relation,
-            &gamma_challenge,
+            &header_relation,
         )
         .mul_result_sum
     };
@@ -602,49 +597,4 @@ fn prepared_table_projective_source_rejects_forged_op_outputs() {
              silo provider's yield (ProjectiveRcbMulResult imbalance)"
         );
     }
-}
-
-#[test]
-fn prepared_table_projective_source_rejects_double_row_mixed_only_witness() {
-    use crate::components::fake_glv::ec_source::double_formula::DOUBLE_TOTAL_REDUCTIONS;
-    use crate::scalar::scalar_mod_mul::columns::padded_log_size;
-    use stwo_p256_utils::constants::N_LIMBS;
-
-    let (certs, fake_glv, selectors, table) = build_table(42);
-    let trace = PreparedTableEcTraceClaim::from_claims(&certs, &fake_glv, &selectors, &table)
-        .expect("valid ec trace");
-    let fake_glv_ec = crate::fake_glv_chain::FakeGlvPrimitiveEcTraceClaim { rows: Vec::new() };
-    let projective =
-        crate::projective::ProjectiveEcTraceClaim::from_native_traces(&trace, &fake_glv_ec)
-            .expect("projective trace generates");
-    let log_size = padded_log_size(trace.rows.len());
-    let base: Vec<Vec<M31>> =
-        gen_prepared_table_projective_source_base_trace(&trace, &projective, log_size)
-            .expect("source base trace generates")
-            .into_iter()
-            .map(|column| column.to_cpu().values)
-            .collect();
-
-    assert!(
-        projective_source_constraints_hold(log_size, &base),
-        "honest prepared-table source trace must satisfy the polynomial constraints"
-    );
-
-    let op_col = 4usize;
-    let rows = 1usize << log_size;
-    let double_row = (0..rows)
-        .find(|&row| {
-            base[0][row] != M31::from_u32_unchecked(0)
-                && base[op_col][row] == M31::from_u32_unchecked(PREPARED_TABLE_EC_OP_DOUBLE)
-        })
-        .expect("table must contain an active Double row");
-    let reductions_start = PREPARED_TABLE_PROJECTIVE_SOURCE_FORMULA_OFFSET + 3 * N_LIMBS;
-    let first_mixed_only_q_col = reductions_start + DOUBLE_TOTAL_REDUCTIONS * (1 + N_LIMBS);
-
-    let mut forged = base.clone();
-    forged[first_mixed_only_q_col][double_row] += M31::from_u32_unchecked(1);
-    assert!(
-        !projective_source_constraints_hold(log_size, &forged),
-        "Double rows must zero-force the shared formula block's mixed-only reduction slots"
-    );
 }

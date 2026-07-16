@@ -1,7 +1,7 @@
 use stwo::core::fields::m31::M31;
 
 use crate::constants::P256_MODULUS;
-use crate::curve::{point_add, point_double, scalar_mul};
+use crate::curve::{point_add, point_double};
 use crate::field_ops::{add_mod_witness, sub_mod_witness};
 use crate::prepared_point::{PreparedPointInstance, TABLE16_INDEX};
 use crate::prepared_table::{PreparedAffinePoint, PreparedTableClaim};
@@ -24,6 +24,37 @@ impl FakeGlvChainClaim {
         selectors: &FakeGlvSelectorClaim,
         prepared_table: &PreparedTableClaim,
     ) -> Result<Self, FakeGlvChainError> {
+        Self::from_claims_inner(
+            cert_inputs,
+            fake_glv_scalars,
+            selectors,
+            prepared_table,
+            true,
+        )
+    }
+
+    pub(crate) fn from_claims_trusted(
+        cert_inputs: &CertScalarInputClaim,
+        fake_glv_scalars: &FakeGlvScalarHintClaim,
+        selectors: &FakeGlvSelectorClaim,
+        prepared_table: &PreparedTableClaim,
+    ) -> Result<Self, FakeGlvChainError> {
+        Self::from_claims_inner(
+            cert_inputs,
+            fake_glv_scalars,
+            selectors,
+            prepared_table,
+            false,
+        )
+    }
+
+    fn from_claims_inner(
+        cert_inputs: &CertScalarInputClaim,
+        fake_glv_scalars: &FakeGlvScalarHintClaim,
+        selectors: &FakeGlvSelectorClaim,
+        prepared_table: &PreparedTableClaim,
+        verify: bool,
+    ) -> Result<Self, FakeGlvChainError> {
         if cert_inputs.rows.len() != fake_glv_scalars.rows.len()
             || cert_inputs.rows.len() != selectors.rows.len()
             || cert_inputs.rows.len() != prepared_table.certs.len()
@@ -36,18 +67,23 @@ impl FakeGlvChainClaim {
             });
         }
 
-        let certs = cert_inputs
-            .rows
-            .iter()
-            .zip(&fake_glv_scalars.rows)
-            .zip(&selectors.rows)
-            .zip(&prepared_table.certs)
-            .map(|(((cert, fake_glv), selector), table)| {
-                FakeGlvChainCert::from_claims(cert, fake_glv, selector, table)
+        use rayon::prelude::*;
+        let certs = (0..cert_inputs.rows.len())
+            .into_par_iter()
+            .map(|index| {
+                FakeGlvChainCert::from_claims_inner(
+                    &cert_inputs.rows[index],
+                    &fake_glv_scalars.rows[index],
+                    &selectors.rows[index],
+                    &prepared_table.certs[index],
+                    verify,
+                )
             })
             .collect::<Result<Vec<_>, _>>()?;
         let claim = Self { certs };
-        claim.verify()?;
+        if verify {
+            claim.verify()?;
+        }
         Ok(claim)
     }
 
@@ -136,6 +172,19 @@ impl FakeGlvPrimitiveEcTraceClaim {
         let claim = Self { rows };
         claim.verify_against_chain(chain)?;
         Ok(claim)
+    }
+
+    pub(crate) fn from_chain_trusted(chain: &FakeGlvChainClaim) -> Result<Self, FakeGlvChainError> {
+        use rayon::prelude::*;
+        let rows = chain
+            .certs
+            .par_iter()
+            .map(|cert| cert.primitive_rows.clone())
+            .collect::<Vec<_>>()
+            .into_iter()
+            .flatten()
+            .collect();
+        Ok(Self { rows })
     }
 
     pub fn verify(&self) -> Result<(), FakeGlvChainError> {
@@ -253,14 +302,26 @@ pub struct FakeGlvChainCert {
     pub final_acc: PreparedAffinePoint,
     pub r3: PreparedAffinePoint,
     consumers: Vec<PreparedPointInstance<M31>>,
+    primitive_rows: Vec<FakeGlvPrimitiveEcRow>,
 }
 
 impl FakeGlvChainCert {
+    #[cfg(test)]
     fn from_claims(
         cert: &CertScalarInputRow,
         fake_glv: &FakeGlvScalarHintRow,
         selector: &FakeGlvSelectorRow,
         table: &crate::prepared_table::PreparedTableCert,
+    ) -> Result<Self, FakeGlvChainError> {
+        Self::from_claims_inner(cert, fake_glv, selector, table, true)
+    }
+
+    fn from_claims_inner(
+        cert: &CertScalarInputRow,
+        fake_glv: &FakeGlvScalarHintRow,
+        selector: &FakeGlvSelectorRow,
+        table: &crate::prepared_table::PreparedTableCert,
+        verify: bool,
     ) -> Result<Self, FakeGlvChainError> {
         require_same_id("fake_glv", cert, fake_glv.sig_id, fake_glv.cert_id)?;
         require_same_id("selector", cert, selector.sig_id, selector.cert_id)?;
@@ -283,6 +344,7 @@ impl FakeGlvChainCert {
                 final_acc: PreparedAffinePoint::infinity(),
                 r3: PreparedAffinePoint::infinity(),
                 consumers: Vec::new(),
+                primitive_rows: Vec::new(),
             });
         }
 
@@ -290,18 +352,11 @@ impl FakeGlvChainCert {
             x: cert.base_x.to_u256(),
             y: cert.base_y.to_u256(),
         });
-        let h = scalar_mul(
-            &cert.scalar.to_u256(),
-            &p.to_option().expect("base point finite"),
-        )
-        .ok_or(FakeGlvChainError::MissingHintPoint {
-            sig_id: cert.sig_id.0,
-            cert_id: cert.cert_id.0,
-        })?;
-        let r = PreparedAffinePoint::from_affine(signed_hint_point(&h, fake_glv.hint.s2_sign_bit)?);
+        let r = table.r.clone();
 
         let mut rows = Vec::new();
         let mut consumers = Vec::new();
+        let mut primitive_rows = Vec::new();
 
         let mut acc = table_point(table, selector.init_base_index.0)?;
         consumers.push(acc.instance(cert.sig_id, cert.cert_id, selector.init_base_index.0));
@@ -338,44 +393,43 @@ impl FakeGlvChainCert {
                 cert.cert_id,
                 decoded.base_index.0,
             ));
-            let next = chain_step(&acc, &operand);
-            rows.push(FakeGlvChainRow {
-                sig_id: cert.sig_id,
-                cert_id: cert.cert_id,
-                kind: FakeGlvChainRowKind::ChainStep(step as u32),
-                acc_before: acc,
+            let next = push_chain_step(
+                &mut rows,
+                &mut primitive_rows,
+                cert.sig_id,
+                cert.cert_id,
+                FakeGlvChainRowKind::ChainStep(step as u32),
+                acc,
                 operand,
-                acc_after: next.clone(),
-            });
+            );
             acc = next;
         }
 
         let table16 = table.table16.clone();
         consumers.push(table16.instance(cert.sig_id, cert.cert_id, TABLE16_INDEX));
-        let next = chain_step(&acc, &table16);
-        rows.push(FakeGlvChainRow {
-            sig_id: cert.sig_id,
-            cert_id: cert.cert_id,
-            kind: FakeGlvChainRowKind::Table16Step,
-            acc_before: acc,
-            operand: table16,
-            acc_after: next.clone(),
-        });
+        let next = push_chain_step(
+            &mut rows,
+            &mut primitive_rows,
+            cert.sig_id,
+            cert.cert_id,
+            FakeGlvChainRowKind::Table16Step,
+            acc,
+            table16,
+        );
         acc = next;
 
         let correction = lsb_correction(selector, &p, &r, table)?;
         if selector.s1_lsb.0 == 0 && selector.s2_lsb.0 == 0 {
             consumers.push(table.base[2].instance(cert.sig_id, cert.cert_id, 2));
         }
-        let final_acc = prepared(add_optional_points(acc.to_option(), correction.to_option()));
-        rows.push(FakeGlvChainRow {
-            sig_id: cert.sig_id,
-            cert_id: cert.cert_id,
-            kind: FakeGlvChainRowKind::LsbCorrection,
-            acc_before: acc,
-            operand: correction,
-            acc_after: final_acc.clone(),
-        });
+        let final_acc = push_lsb_correction(
+            &mut rows,
+            &mut primitive_rows,
+            cert.sig_id,
+            cert.cert_id,
+            acc,
+            correction,
+        );
 
         let cert = Self {
             sig_id: cert.sig_id,
@@ -385,8 +439,11 @@ impl FakeGlvChainCert {
             final_acc,
             r3: table.r3.clone(),
             consumers,
+            primitive_rows,
         };
-        cert.verify()?;
+        if verify {
+            cert.verify()?;
+        }
         Ok(cert)
     }
 
@@ -414,6 +471,7 @@ impl FakeGlvChainCert {
 
         let mut rows = Vec::new();
         let mut consumers = Vec::new();
+        let mut primitive_rows = Vec::new();
 
         let mut acc = table_point(table, selector.init_base_index.0)?;
         consumers.push(acc.instance(cert.sig_id, cert.cert_id, selector.init_base_index.0));
@@ -450,44 +508,43 @@ impl FakeGlvChainCert {
                 cert.cert_id,
                 decoded.base_index.0,
             ));
-            let next = chain_step(&acc, &operand);
-            rows.push(FakeGlvChainRow {
-                sig_id: cert.sig_id,
-                cert_id: cert.cert_id,
-                kind: FakeGlvChainRowKind::ChainStep(step as u32),
-                acc_before: acc,
+            let next = push_chain_step(
+                &mut rows,
+                &mut primitive_rows,
+                cert.sig_id,
+                cert.cert_id,
+                FakeGlvChainRowKind::ChainStep(step as u32),
+                acc,
                 operand,
-                acc_after: next.clone(),
-            });
+            );
             acc = next;
         }
 
         let table16 = table.table16.clone();
         consumers.push(table16.instance(cert.sig_id, cert.cert_id, TABLE16_INDEX));
-        let next = chain_step(&acc, &table16);
-        rows.push(FakeGlvChainRow {
-            sig_id: cert.sig_id,
-            cert_id: cert.cert_id,
-            kind: FakeGlvChainRowKind::Table16Step,
-            acc_before: acc,
-            operand: table16,
-            acc_after: next.clone(),
-        });
+        let next = push_chain_step(
+            &mut rows,
+            &mut primitive_rows,
+            cert.sig_id,
+            cert.cert_id,
+            FakeGlvChainRowKind::Table16Step,
+            acc,
+            table16,
+        );
         acc = next;
 
         let correction = lsb_correction(selector, &p, &r, table)?;
         if selector.s1_lsb.0 == 0 && selector.s2_lsb.0 == 0 {
             consumers.push(table.base[2].instance(cert.sig_id, cert.cert_id, 2));
         }
-        let final_acc = prepared(add_optional_points(acc.to_option(), correction.to_option()));
-        rows.push(FakeGlvChainRow {
-            sig_id: cert.sig_id,
-            cert_id: cert.cert_id,
-            kind: FakeGlvChainRowKind::LsbCorrection,
-            acc_before: acc,
-            operand: correction,
-            acc_after: final_acc.clone(),
-        });
+        let final_acc = push_lsb_correction(
+            &mut rows,
+            &mut primitive_rows,
+            cert.sig_id,
+            cert.cert_id,
+            acc,
+            correction,
+        );
 
         Ok(Self {
             sig_id: cert.sig_id,
@@ -497,6 +554,7 @@ impl FakeGlvChainCert {
             final_acc,
             r3: table.r3.clone(),
             consumers,
+            primitive_rows,
         })
     }
 
@@ -648,46 +706,130 @@ pub enum FakeGlvChainError {
 fn primitive_ec_rows_for_chain(
     chain: &FakeGlvChainClaim,
 ) -> Result<Vec<FakeGlvPrimitiveEcRow>, FakeGlvChainError> {
-    let mut rows = Vec::new();
-    for cert in &chain.certs {
-        for row in &cert.rows {
-            match row.kind {
-                FakeGlvChainRowKind::MsbInit => {}
-                FakeGlvChainRowKind::ChainStep(_) | FakeGlvChainRowKind::Table16Step => {
-                    let doubled = prepared(double_optional(row.acc_before.to_option()));
-                    rows.push(FakeGlvPrimitiveEcRow::double(
-                        row,
-                        row.acc_before.clone(),
-                        doubled.clone(),
-                    ));
-                    let quadrupled = prepared(double_optional(doubled.to_option()));
-                    rows.push(FakeGlvPrimitiveEcRow::double(
-                        row,
-                        doubled,
-                        quadrupled.clone(),
-                    ));
-                    rows.push(FakeGlvPrimitiveEcRow::add(
-                        row,
-                        quadrupled,
-                        row.operand.clone(),
-                        row.acc_after.clone(),
-                    ));
-                }
-                FakeGlvChainRowKind::LsbCorrection => {
-                    rows.push(FakeGlvPrimitiveEcRow::add(
-                        row,
-                        row.acc_before.clone(),
-                        row.operand.clone(),
-                        row.acc_after.clone(),
-                    ));
-                }
-            }
+    primitive_ec_rows_for_chain_inner(chain, true)
+}
+
+fn primitive_ec_rows_for_chain_inner(
+    chain: &FakeGlvChainClaim,
+    verify: bool,
+) -> Result<Vec<FakeGlvPrimitiveEcRow>, FakeGlvChainError> {
+    use rayon::prelude::*;
+    let rows_by_cert = chain
+        .certs
+        .par_iter()
+        .map(primitive_ec_rows_for_cert)
+        .collect::<Vec<_>>();
+    let rows = rows_by_cert.into_iter().flatten().collect::<Vec<_>>();
+    if verify {
+        for row in &rows {
+            row.verify()?;
         }
     }
-    for row in &rows {
-        row.verify()?;
-    }
     Ok(rows)
+}
+
+fn primitive_ec_rows_for_cert(cert: &FakeGlvChainCert) -> Vec<FakeGlvPrimitiveEcRow> {
+    let mut rows = Vec::new();
+    for row in &cert.rows {
+        rows.extend(primitive_ec_rows_for_chain_row(row));
+    }
+    rows
+}
+
+fn primitive_ec_rows_for_chain_row(row: &FakeGlvChainRow) -> Vec<FakeGlvPrimitiveEcRow> {
+    match row.kind {
+        FakeGlvChainRowKind::MsbInit => Vec::new(),
+        FakeGlvChainRowKind::ChainStep(_) | FakeGlvChainRowKind::Table16Step => {
+            let doubled = prepared(double_optional(row.acc_before.to_option()));
+            let quadrupled = prepared(double_optional(doubled.to_option()));
+            vec![
+                FakeGlvPrimitiveEcRow::double(row, row.acc_before.clone(), doubled.clone()),
+                FakeGlvPrimitiveEcRow::double(row, doubled, quadrupled.clone()),
+                FakeGlvPrimitiveEcRow::add(
+                    row,
+                    quadrupled,
+                    row.operand.clone(),
+                    row.acc_after.clone(),
+                ),
+            ]
+        }
+        FakeGlvChainRowKind::LsbCorrection => vec![FakeGlvPrimitiveEcRow::add(
+            row,
+            row.acc_before.clone(),
+            row.operand.clone(),
+            row.acc_after.clone(),
+        )],
+    }
+}
+
+fn push_chain_step(
+    rows: &mut Vec<FakeGlvChainRow>,
+    primitive_rows: &mut Vec<FakeGlvPrimitiveEcRow>,
+    sig_id: M31,
+    cert_id: M31,
+    kind: FakeGlvChainRowKind,
+    acc: PreparedAffinePoint,
+    operand: PreparedAffinePoint,
+) -> PreparedAffinePoint {
+    let doubled = prepared(double_optional(acc.to_option()));
+    let quadrupled = prepared(double_optional(doubled.to_option()));
+    let next = prepared(add_optional_points(
+        quadrupled.to_option(),
+        operand.to_option(),
+    ));
+    let row = FakeGlvChainRow {
+        sig_id,
+        cert_id,
+        kind,
+        acc_before: acc,
+        operand,
+        acc_after: next.clone(),
+    };
+    primitive_rows.push(FakeGlvPrimitiveEcRow::double(
+        &row,
+        row.acc_before.clone(),
+        doubled.clone(),
+    ));
+    primitive_rows.push(FakeGlvPrimitiveEcRow::double(
+        &row,
+        doubled,
+        quadrupled.clone(),
+    ));
+    primitive_rows.push(FakeGlvPrimitiveEcRow::add(
+        &row,
+        quadrupled,
+        row.operand.clone(),
+        row.acc_after.clone(),
+    ));
+    rows.push(row);
+    next
+}
+
+fn push_lsb_correction(
+    rows: &mut Vec<FakeGlvChainRow>,
+    primitive_rows: &mut Vec<FakeGlvPrimitiveEcRow>,
+    sig_id: M31,
+    cert_id: M31,
+    acc: PreparedAffinePoint,
+    correction: PreparedAffinePoint,
+) -> PreparedAffinePoint {
+    let final_acc = prepared(add_optional_points(acc.to_option(), correction.to_option()));
+    let row = FakeGlvChainRow {
+        sig_id,
+        cert_id,
+        kind: FakeGlvChainRowKind::LsbCorrection,
+        acc_before: acc,
+        operand: correction,
+        acc_after: final_acc.clone(),
+    };
+    primitive_rows.push(FakeGlvPrimitiveEcRow::add(
+        &row,
+        row.acc_before.clone(),
+        row.operand.clone(),
+        row.acc_after.clone(),
+    ));
+    rows.push(row);
+    final_acc
 }
 
 fn table_point(
@@ -770,17 +912,6 @@ fn require_same_id(
             other_sig_id: other_sig_id.0,
             other_cert_id: other_cert_id.0,
         })
-    }
-}
-
-fn signed_hint_point(h: &AffinePoint, s2_sign_bit: M31) -> Result<AffinePoint, FakeGlvChainError> {
-    match s2_sign_bit.0 {
-        0 => Ok(h.clone()),
-        1 => Ok(negate_point(h)),
-        actual => Err(FakeGlvChainError::NonBooleanFlag {
-            field: "s2_sign_bit",
-            actual,
-        }),
     }
 }
 

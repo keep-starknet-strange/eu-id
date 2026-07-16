@@ -217,9 +217,9 @@ impl FrameworkEval for PreparedPointProviderEval {
         instance.add_constraints(&mut eval, &active, &one);
 
         let values = instance.relation_values();
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             &self.relation,
-            -E::EF::from(use_count.clone()),
+            -use_count.clone(),
             &values,
         ));
         add_range_check(&mut eval, &self.range7, active, use_count);
@@ -252,11 +252,7 @@ impl FrameworkEval for FakeGlvPreparedPointConsumerEval {
         instance.add_constraints(&mut eval, &active, &one);
 
         let values = instance.relation_values();
-        eval.add_to_relation(RelationEntry::new(
-            &self.relation,
-            E::EF::from(active),
-            &values,
-        ));
+        eval.add_to_relation(RelationEntry::base(&self.relation, active, &values));
         eval.finalize_logup();
         eval
     }
@@ -428,14 +424,12 @@ pub(crate) fn gen_fake_glv_prepared_point_consumer_interaction_trace(
     assert_eq!(base.len(), FAKE_GLV_PREPARED_POINT_CONSUMER_TRACE_COLUMNS);
     let log_size = base[0].domain.log_size();
     let mut logup = LogupTraceGenerator::new(log_size);
-    let mut col = logup.new_col();
-    for vec_row in 0..(1 << (log_size - LOG_N_LANES)) {
+    logup.col_from_fn(|vec_row| {
         let values = prepared_point_consumer_packed_relation_values(base, vec_row);
         let numerator = PackedQM31::from(base[0].data[vec_row]);
         let denominator: PackedQM31 = relation.combine(&values);
-        col.write_frac(vec_row, numerator, denominator);
-    }
-    col.finalize_col();
+        (numerator, denominator)
+    });
     logup.finalize_last()
 }
 

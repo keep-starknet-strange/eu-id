@@ -17,7 +17,6 @@ use crate::projective::{
     ProjectiveEcError, ProjectiveEcOp, ProjectiveEcRow, ProjectiveEcTraceClaim, ProjectivePoint,
 };
 use crate::range_checks::SignedCarryRangeClaim;
-use crate::scalar::scalar_mod_mul::columns::M31ColumnEval;
 use crate::types::U256;
 
 /// Schedule-column id namespace for the canonical EC projective-RCB mul trace.
@@ -42,15 +41,32 @@ impl ProjectiveRcbAirTraceClaim {
     pub fn from_projective_trace_lite(
         trace: &ProjectiveEcTraceClaim,
     ) -> Result<Self, ProjectiveRcbAirError> {
+        Self::from_projective_trace_lite_inner(trace, true)
+    }
+
+    pub(crate) fn from_projective_trace_lite_trusted(
+        trace: &ProjectiveEcTraceClaim,
+    ) -> Result<Self, ProjectiveRcbAirError> {
+        Self::from_projective_trace_lite_inner(trace, false)
+    }
+
+    fn from_projective_trace_lite_inner(
+        trace: &ProjectiveEcTraceClaim,
+        verify: bool,
+    ) -> Result<Self, ProjectiveRcbAirError> {
         use rayon::prelude::*;
         let rows = trace
             .rows
             .par_iter()
             .enumerate()
-            .map(|(source_index, row)| ProjectiveRcbAirRow::from_projective_row(source_index, row))
+            .map(|(source_index, row)| {
+                ProjectiveRcbAirRow::from_projective_row_inner(source_index, row, verify)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let claim = Self { rows };
-        claim.verify_against_projective_trace(trace)?;
+        if verify {
+            claim.verify_against_projective_trace(trace)?;
+        }
         Ok(claim)
     }
 
@@ -89,150 +105,15 @@ pub struct ProjectiveRcbAirRow {
     pub op: ProjectiveEcOp,
     pub output_projective: ProjectivePoint,
     pub muls: Vec<ProjectiveRcbMulRow>,
-}
-
-/// Number of mul-result limb values one EC op contributes to a projective-source
-/// consumer (C5 plumbing): `PROJECTIVE_RCB_MAX_MUL_ROWS_PER_OP` muls ×
-/// `{LHS, RHS, RESULT}` × `N_LIMBS`. The consumer commits this many columns and
-/// CONSUMES them from the silo keyed `(source_index, mul_index, role,
-/// limb_index, limb)`.
-pub const PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS: usize =
-    PROJECTIVE_RCB_MAX_MUL_ROWS_PER_OP * 3 * N_LIMBS;
-
-/// Flatten an EC op's proven mul `lhs`/`rhs`/`result` limbs into the canonical
-/// consumer layout: for `mul_index` in `0..PROJECTIVE_RCB_MAX_MUL_ROWS_PER_OP`,
-/// then role in `[LHS, RHS, RESULT]`, then `limb_index` in `0..N_LIMBS`. This is
-/// the SINGLE source of truth for the silo→source mul-limb column order; the
-/// consumer AIR reads and keys columns in exactly this order.
-///
-/// Returns `(limbs, has_muls)`. `has_muls` is `true` iff the op emitted the full
-/// `PROJECTIVE_RCB_MAX_MUL_ROWS_PER_OP` muls — `Double` (always) and `MixedAdd`
-/// with a FINITE operand. A `MixedAdd` with an infinity operand is a no-op that
-/// emits ZERO muls (`rcb_mixed_add_with_mul_rows` early-returns); for it
-/// `has_muls = false` and `limbs` are all zero, so the consumer must gate its
-/// `ProjectiveRcbMulResultRelation` consumes by `has_muls` to match the silo
-/// (which provides nothing for a 0-mul op). This keeps the 3-way balance closed.
-pub(crate) fn projective_rcb_op_mul_limbs(
-    source_index: usize,
-    row: &ProjectiveEcRow,
-) -> Result<([M31; PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS], bool), ProjectiveRcbAirError> {
-    let air_row = ProjectiveRcbAirRow::from_projective_row(source_index, row)?;
-    let mut values = [M31::from_u32_unchecked(0); PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS];
-    if air_row.muls.is_empty() {
-        // Infinity-operand MixedAdd no-op: zero muls, zero limbs, not gated in.
-        return Ok((values, false));
-    }
-    debug_assert_eq!(air_row.muls.len(), PROJECTIVE_RCB_MAX_MUL_ROWS_PER_OP);
-    let mut column = 0;
-    for mul in &air_row.muls {
-        for limbs in [
-            mul.trace.lhs.limbs(),
-            mul.trace.rhs.limbs(),
-            mul.trace.result.limbs(),
-        ] {
-            for limb in limbs {
-                values[column] = *limb;
-                column += 1;
-            }
-        }
-    }
-    debug_assert_eq!(column, PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS);
-    Ok((values, true))
-}
-
-/// Project the canonical full limb array onto the KEPT consumed-mul slots
-/// (the committed block layout after operand dedup), in canonical order.
-pub(crate) fn projective_rcb_kept_mul_limbs(
-    full: &[M31; PROJECTIVE_RCB_OP_MUL_LIMB_COLUMNS],
-) -> Vec<M31> {
-    let mut kept = Vec::with_capacity(crate::projective_air::CONSUMED_MUL_KEPT_SLOTS * N_LIMBS);
-    for mul in 0..PROJECTIVE_RCB_MAX_MUL_ROWS_PER_OP {
-        for role in 0..3 {
-            if crate::projective_air::consumed_mul_slot_kept(mul, role) {
-                let start = (mul * 3 + role) * N_LIMBS;
-                kept.extend_from_slice(&full[start..start + N_LIMBS]);
-            }
-        }
-    }
-    kept
-}
-
-/// Gen-side column layout a projective-source consumer hands to
-/// [`consumed_mul_slot_packed_limbs`] so dropped-slot consume values can be
-/// computed from the SAME base columns the eval's expressions read.
-pub(crate) struct ConsumedMulGenLayout {
-    pub op_col: usize,
-    pub x1_col: usize,
-    pub y1_col: usize,
-    pub x2_col: usize,
-    pub y2_col: usize,
-    pub output_x_col: usize,
-    pub output_y_col: usize,
-    pub output_inf_col: usize,
-    pub x3_col: usize,
-    pub y3_col: usize,
-    pub z3_double_col: usize,
-    pub z3_mixed_col: Option<usize>,
-    /// First kept-limb column (right after the `has_muls` flag).
-    pub mul_limb_offset: usize,
-}
-
-/// The packed limb values of consumed-mul slot `(mul, role)` at `vec_row`:
-/// kept slots read their committed columns; dropped slots evaluate the
-/// operand-dedup expressions (mirroring `ConsumedMulLimbs::fill_dropped`).
-pub(crate) fn consumed_mul_slot_packed_limbs(
-    base: &[M31ColumnEval],
-    vec_row: usize,
-    layout: &ConsumedMulGenLayout,
-    mul: usize,
-    role: usize,
-) -> Vec<stwo::prover::backend::simd::m31::PackedM31> {
-    use stwo::prover::backend::simd::m31::PackedM31;
-    if let Some(offset) = crate::projective_air::consumed_mul_kept_column(mul, role) {
-        return (0..N_LIMBS)
-            .map(|limb| base[layout.mul_limb_offset + offset + limb].data[vec_row])
-            .collect();
-    }
-    let op = base[layout.op_col].data[vec_row];
-    let one_minus_op = PackedM31::broadcast(M31::from_u32_unchecked(1)) - op;
-    let out_finite = PackedM31::broadcast(M31::from_u32_unchecked(1))
-        - base[layout.output_inf_col].data[vec_row];
-    let column = |col: usize, limb: usize| base[col + limb].data[vec_row];
-    let one_limb =
-        |limb: usize| PackedM31::broadcast(M31::from_u32_unchecked(u32::from(limb == 0)));
-    let b = crate::limbs::P256M31BigInt::from_u256(&crate::types::U256::from_le_u64s(
-        &crate::constants::P256_B,
-    ));
-    let r2_offset =
-        crate::projective_air::consumed_mul_kept_column(2, 2).expect("R2 is a kept slot");
-    (0..N_LIMBS)
-        .map(|limb| match (mul, role) {
-            (0, 0) => column(layout.x1_col, limb),
-            (0, 1) => op * column(layout.x1_col, limb) + one_minus_op * column(layout.x2_col, limb),
-            (1, 0) => column(layout.y1_col, limb),
-            (1, 1) => op * column(layout.y1_col, limb) + one_minus_op * column(layout.y2_col, limb),
-            (3, 0) => op * column(layout.x1_col, limb) + one_minus_op * column(layout.y2_col, limb),
-            (3, 1) => op * column(layout.y1_col, limb) + one_minus_op * one_limb(limb),
-            (4, 0) => op * column(layout.x1_col, limb) + one_minus_op * column(layout.x2_col, limb),
-            (4, 1) => one_limb(limb),
-            (5, 0) => PackedM31::broadcast(b.limbs()[limb]),
-            (5, 1) => {
-                op * base[layout.mul_limb_offset + r2_offset + limb].data[vec_row]
-                    + one_minus_op * one_limb(limb)
-            }
-            (13, 0) => column(layout.output_x_col, limb),
-            (13, 1) | (14, 1) => match layout.z3_mixed_col {
-                Some(z3_mixed_col) => {
-                    column(layout.z3_double_col, limb) + column(z3_mixed_col, limb)
-                }
-                None => column(layout.z3_double_col, limb),
-            },
-            (14, 0) => column(layout.output_y_col, limb),
-            (13, 2) => out_finite * column(layout.x3_col, limb),
-            (14, 2) => out_finite * column(layout.y3_col, limb),
-            _ => unreachable!("dropped-slot table covers exactly the dedup slots"),
-        })
-        .collect()
+    /// Infinity flags of the source EC op's affine operands/output, copied from
+    /// the `ProjectiveEcRow`'s `PreparedAffinePoint`s (`inf.0 == 1`). Threaded
+    /// through the silo schedule for the `EcOpHeaderRelation` header tuple
+    /// `(source_index, op, output_inf, lhs_inf, rhs_inf)`. Only meaningful for
+    /// proj-scope rows; final_add / public_key_curve constructors fill `false`
+    /// (their flags are never read).
+    pub lhs_inf: bool,
+    pub rhs_inf: bool,
+    pub output_inf: bool,
 }
 
 impl ProjectiveRcbAirRow {
@@ -240,7 +121,17 @@ impl ProjectiveRcbAirRow {
         source_index: usize,
         row: &ProjectiveEcRow,
     ) -> Result<Self, ProjectiveRcbAirError> {
-        row.verify()?;
+        Self::from_projective_row_inner(source_index, row, true)
+    }
+
+    fn from_projective_row_inner(
+        source_index: usize,
+        row: &ProjectiveEcRow,
+        verify: bool,
+    ) -> Result<Self, ProjectiveRcbAirError> {
+        if verify {
+            row.verify()?;
+        }
         let lhs = ProjectivePoint::from_prepared(&row.lhs_affine);
         let mut muls = Vec::with_capacity(PROJECTIVE_RCB_MAX_MUL_ROWS_PER_OP);
         let output_projective = match row.op {
@@ -261,6 +152,9 @@ impl ProjectiveRcbAirRow {
             op: row.op,
             output_projective,
             muls,
+            lhs_inf: row.lhs_affine.inf.0 == 1,
+            rhs_inf: row.rhs_affine.inf.0 == 1,
+            output_inf: row.output_affine.inf.0 == 1,
         })
     }
 

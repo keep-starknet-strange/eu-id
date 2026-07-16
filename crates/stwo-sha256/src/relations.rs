@@ -44,7 +44,12 @@
 //! `add_to_relation` can collapse a `&[F]` slice of `N` cells into the
 //! extension-field key the LogUp interaction column reads.
 
+use air_core::relations::SharedRelation;
 use stwo::core::channel::Channel;
+#[cfg(feature = "gkr-spike")]
+use stwo::core::fields::m31::BaseField;
+#[cfg(feature = "gkr-spike")]
+use stwo::core::fields::qm31::SecureField;
 use stwo_constraint_framework::relation;
 
 /// Row width of each `Σ`/`σ` decode table: `(key, o_main_lo, o_main_hi,
@@ -136,6 +141,39 @@ pub const XOR_8_REL_SIZE: usize = 3;
 
 relation!(Xor8Relation, XOR_8_REL_SIZE);
 
+#[cfg(feature = "gkr-spike")]
+impl Xor8Relation {
+    /// Evaluate the fixed `(x, y, x ^ y)` table denominator MLE at `point`.
+    ///
+    /// The table row order is `index = y * 256 + x`; Stwo's MLE recursion
+    /// consumes the most significant index bit first, so point coordinates
+    /// `0..8` are `y[7..0]` and `8..16` are `x[7..0]`.
+    pub fn eval_fixed_table_denominator_mle(&self, point: &[SecureField]) -> SecureField {
+        assert_eq!(point.len(), XOR_8_REL_SIZE + 13);
+
+        let mut y = SecureField::from(BaseField::from(0));
+        for bit in 0..8 {
+            y += SecureField::from(BaseField::from(1u32 << bit)) * point[7 - bit];
+        }
+
+        let mut x = SecureField::from(BaseField::from(0));
+        for bit in 0..8 {
+            x += SecureField::from(BaseField::from(1u32 << bit)) * point[15 - bit];
+        }
+
+        let mut z = SecureField::from(BaseField::from(0));
+        for bit in 0..8 {
+            let xb = point[15 - bit];
+            let yb = point[7 - bit];
+            let xor_bit = xb + yb - SecureField::from(BaseField::from(2)) * xb * yb;
+            z += SecureField::from(BaseField::from(1u32 << bit)) * xor_bit;
+        }
+
+        self.0.alpha_powers[0] * x + self.0.alpha_powers[1] * y + self.0.alpha_powers[2] * z
+            - self.0.z
+    }
+}
+
 /// Row width of a **round-partition** split-and-pack table: `(key,
 /// packed_group_0, …, packed_group_3)`. Four packed groups because the
 /// `W = 6` `Σ0`/`Maj` and `Σ1`/`Ch` partitions each place exactly four of
@@ -215,6 +253,48 @@ impl Default for SplitPackRelations {
     }
 }
 
+#[derive(Clone, Default)]
+pub struct SharedSplitPackRelations {
+    pub sigma0_lo: SharedRelation<Sigma0SplitPackLo>,
+    pub sigma0_hi: SharedRelation<Sigma0SplitPackHi>,
+    pub sigma1_lo: SharedRelation<Sigma1SplitPackLo>,
+    pub sigma1_hi: SharedRelation<Sigma1SplitPackHi>,
+    pub lower_sigma0_lo: SharedRelation<LowerSigma0SplitPackLo>,
+    pub lower_sigma0_hi: SharedRelation<LowerSigma0SplitPackHi>,
+    pub lower_sigma1_lo: SharedRelation<LowerSigma1SplitPackLo>,
+    pub lower_sigma1_hi: SharedRelation<LowerSigma1SplitPackHi>,
+}
+
+impl SharedSplitPackRelations {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set(&self, relations: &SplitPackRelations) {
+        self.sigma0_lo.set(relations.sigma0_lo.clone());
+        self.sigma0_hi.set(relations.sigma0_hi.clone());
+        self.sigma1_lo.set(relations.sigma1_lo.clone());
+        self.sigma1_hi.set(relations.sigma1_hi.clone());
+        self.lower_sigma0_lo.set(relations.lower_sigma0_lo.clone());
+        self.lower_sigma0_hi.set(relations.lower_sigma0_hi.clone());
+        self.lower_sigma1_lo.set(relations.lower_sigma1_lo.clone());
+        self.lower_sigma1_hi.set(relations.lower_sigma1_hi.clone());
+    }
+
+    pub fn get(&self) -> SplitPackRelations {
+        SplitPackRelations {
+            sigma0_lo: self.sigma0_lo.get(),
+            sigma0_hi: self.sigma0_hi.get(),
+            sigma1_lo: self.sigma1_lo.get(),
+            sigma1_hi: self.sigma1_hi.get(),
+            lower_sigma0_lo: self.lower_sigma0_lo.get(),
+            lower_sigma0_hi: self.lower_sigma0_hi.get(),
+            lower_sigma1_lo: self.lower_sigma1_lo.get(),
+            lower_sigma1_hi: self.lower_sigma1_hi.get(),
+        }
+    }
+}
+
 /// Row width of every `Range_k` channel: a single base-field value pinned
 /// to `[0, k)`. The lookup tuple passed to `add_to_relation` is a 1-cell
 /// slice — the carry limb (for mod-2³² adds) or the terminal 16-bit limb
@@ -285,6 +365,53 @@ impl RangeRelations {
 impl Default for RangeRelations {
     fn default() -> Self {
         Self::dummy()
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct SharedRangeRelations {
+    pub range_2: SharedRelation<Range2Relation>,
+    pub range_4: SharedRelation<Range4Relation>,
+    pub range_5: SharedRelation<Range5Relation>,
+    pub range_16: SharedRelation<Range16Relation>,
+}
+
+impl SharedRangeRelations {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set(&self, relations: &RangeRelations) {
+        self.range_2.set(relations.range_2.clone());
+        self.range_4.set(relations.range_4.clone());
+        self.range_5.set(relations.range_5.clone());
+        self.range_16.set(relations.range_16.clone());
+    }
+
+    pub fn get(&self) -> RangeRelations {
+        RangeRelations {
+            range_2: self.range_2.get(),
+            range_4: self.range_4.get(),
+            range_5: self.range_5.get(),
+            range_16: self.range_16.get(),
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct SharedShaTableRelations {
+    pub split_pack: SharedSplitPackRelations,
+    pub range: SharedRangeRelations,
+}
+
+impl SharedShaTableRelations {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set(&self, split_pack: &SplitPackRelations, range: &RangeRelations) {
+        self.split_pack.set(split_pack);
+        self.range.set(range);
     }
 }
 
@@ -372,29 +499,19 @@ pub const FIELD_REL_SIZE: usize = air_core::relations::FIELD_BYTES_ARITY;
 /// The cross-component credential-field channel (interface-contract item 3:
 /// `CRED_FIELD ↔ PREDICATE_INPUT`). The second cross-module channel the SHA-256
 /// AIR uses from the **provider** side: when a non-empty
-/// [`crate::field_exposure::FieldExposure`] is configured, on the **first block**
-/// it *yields* one `(field_id, byte_index, value)` tuple per exposed credential
-/// byte (`add_to_relation(&field, −is_first_block, &[field_id, byte_index,
-/// value])`), so a downstream predicate can *require* exactly the byte window of
-/// the field it binds. Like the digest yield, these terms have no
+/// [`crate::field_exposure::FieldExposure`] is configured, it *yields* one
+/// `(field_id, byte_index, value)` tuple per exposed credential byte, gated to
+/// that byte's target SHA block, so a downstream predicate can *require*
+/// exactly the byte window of the field it binds. Like the digest yield, these terms have no
 /// in-module consumer — they leave the SHA module's claimed sum non-zero until a
 /// predicate consumer cancels them — so they are gated behind the field-exposure
 /// spec (empty by default), keeping a standalone SHA proof self-balancing.
 ///
-/// **Representation bridge (interface-contract item 4).** The message words live
-/// in the trace as 16-bit `(lo, hi)` limbs; the field bytes are their big-endian
-/// decomposition (`limb = 256·b1 + b0`), the same byte bridge the digest uses.
-/// The byte values are tied to the (split-and-pack-pinned) message-word limbs by
-/// that decomposition. Unlike the digest — which exposes whole words, so a
-/// limb's two bytes are *both* yielded and the consumer's per-byte range-check
-/// pins the split — a field window can be **sub-word**: an edge byte shares a
-/// limb with a non-exposed neighbour, and a 16-bit limb's split `256·b_hi + b_lo`
-/// is unique only when *both* bytes are in `[0, 256)`. So the provider itself
-/// range-checks **every** exposed byte to `[0, 256)` (two `Range16` lookups per
-/// byte; see [`crate::field_exposure::BYTE_RANGE_CHECK_OFFSET`]). With both bytes
-/// of every touched limb pinned and the limb already in `[0, 2¹⁶)`, each yielded
-/// byte is exactly the signed preimage byte — the binding holds without trusting
-/// the consumer to range-check anything.
+/// **Representation bridge (interface-contract item 4).** Every message word
+/// already has 32 committed LSB-first bit planes. The AIR constrains each bit
+/// boolean and recomposes them to the 16-bit `(lo, hi)` schedule limbs. A field
+/// byte is the corresponding linear eight-bit big-endian projection, so it is
+/// automatically in `[0, 256)` and exactly equals the signed preimage byte.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FieldRelation {
     pub field: Sha256Field,
@@ -466,6 +583,35 @@ impl Sha256Relations {
             digest: DigestRelation::draw(channel),
             // Drawn last (after the digest), same reasoning: additive, so the
             // field channel never perturbs an earlier channel's challenge.
+            field: FieldRelation::draw(channel),
+        }
+    }
+
+    pub fn draw_sha_tables_provider(channel: &mut impl Channel) -> Self {
+        Self {
+            sigma_decode: SigmaDecodeRelations::dummy(),
+            maj: MajRelation::dummy(),
+            ch: ChRelation::dummy(),
+            xor_8: Xor8Relation::dummy(),
+            split_pack: SplitPackRelations::draw(channel),
+            range: RangeRelations::draw(channel),
+            digest: DigestRelation::dummy(),
+            field: FieldRelation::dummy(),
+        }
+    }
+
+    pub fn draw_with_shared_tables(
+        channel: &mut impl Channel,
+        shared: &SharedShaTableRelations,
+    ) -> Self {
+        Self {
+            sigma_decode: SigmaDecodeRelations::dummy(),
+            maj: MajRelation::dummy(),
+            ch: ChRelation::dummy(),
+            xor_8: Xor8Relation::dummy(),
+            split_pack: shared.split_pack.get(),
+            range: shared.range.get(),
+            digest: DigestRelation::draw(channel),
             field: FieldRelation::draw(channel),
         }
     }

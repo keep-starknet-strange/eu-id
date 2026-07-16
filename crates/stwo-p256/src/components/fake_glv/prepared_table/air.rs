@@ -8,20 +8,12 @@ use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval, RelationEntry};
 use stwo_p256_utils::constants::{LIMB_BITS, N_LIMBS};
 
-use crate::components::gamma_digest::{
-    yield_gamma_digest, GammaChallenge, GammaDigestRelation, GAMMA_TAG_PREPARED_RANGE13,
-    GAMMA_TAG_PREPARED_SIGNED,
-};
 use crate::constants::{P256_3GX, P256_3GY, P256_MODULUS};
-use crate::limbs::{P256EvalBigInt, P256M31BigInt};
+use crate::limbs::P256M31BigInt;
 use crate::prepared_point::{PREPARED_BASE_COUNT, TABLE16_INDEX};
-use crate::projective_air::ConsumedMulLimbs;
+use crate::projective_air::{PROJECTIVE_RCB_MUL_ROLE_LHS, PROJECTIVE_RCB_MUL_ROLE_RHS};
 use crate::types::U256;
 
-use super::super::ec_source::double_formula::{
-    bind_double_formula, SharedFormulaColumns, DOUBLE_TOTAL_REDUCTIONS,
-};
-use super::super::ec_source::mixed_add_formula::bind_mixed_add_formula;
 use super::*;
 
 #[derive(Clone)]
@@ -38,6 +30,10 @@ impl FrameworkEval for PreparedTableEcRowEval {
     }
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
+        // Must stay at +1: the prove pipeline rejects a per-component bound of
+        // `log_size + 2` (OODS composition check fails even with degree-3
+        // constraints), so every constraint here is kept at degree <= 3 by
+        // solo LogUp batching (see PREPARED_CONSUMER_LOGUP_BATCH).
         self.log_size + 1
     }
 
@@ -133,9 +129,9 @@ impl FrameworkEval for PreparedTableEcRowEval {
             &rhs,
             &output,
         );
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             &self.relation,
-            -E::EF::from(active.clone()),
+            -active.clone(),
             &relation_values,
         ));
 
@@ -306,12 +302,12 @@ fn add_pinning_emissions<E: EvalAtRow>(
         };
         let numerator = signed_numerator::<E>(gate, entry.mult);
         match entry.relation {
-            PinRelation::CertBase => eval.add_to_relation(RelationEntry::new(
+            PinRelation::CertBase => eval.add_to_relation(RelationEntry::base(
                 &pinning.cert_base,
                 numerator,
                 &cert_base_relation_values::<E::F>(sig_id, cert_id, point),
             )),
-            PinRelation::Canonical(role) => eval.add_to_relation(RelationEntry::new(
+            PinRelation::Canonical(role) => eval.add_to_relation(RelationEntry::base(
                 &pinning.canonical,
                 numerator,
                 &canonical_relation_values::<E::F>(sig_id, cert_id, role, point),
@@ -326,9 +322,9 @@ fn add_pinning_emissions<E: EvalAtRow>(
     // the canonical-pinned `R_i`, so this forwards an already-bound value.
     if let Some(final_check_hint) = &pinning.final_check_hint {
         let gate = active.clone() * kind_flags[PREPARED_TABLE_EC_KIND_DOUBLE_R].clone();
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             final_check_hint,
-            -E::EF::from(gate),
+            -gate,
             &final_check_hint_relation_values::<E::F>(sig_id, cert_id, lhs),
         ));
     }
@@ -349,10 +345,10 @@ fn final_check_hint_relation_values<F: Clone + From<M31>>(
     })
 }
 
-/// `mult · gate` as an extension-field numerator (`mult` may be negative).
-fn signed_numerator<E: EvalAtRow>(gate: E::F, mult: i32) -> E::EF {
+/// `mult · gate` as a base-field numerator (`mult` may be negative).
+fn signed_numerator<E: EvalAtRow>(gate: E::F, mult: i32) -> E::F {
     let magnitude = E::F::from(M31::from_u32_unchecked(mult.unsigned_abs()));
-    let scaled = E::EF::from(gate * magnitude);
+    let scaled = gate * magnitude;
     if mult < 0 {
         -scaled
     } else {
@@ -364,15 +360,13 @@ fn signed_numerator<E: EvalAtRow>(gate: E::F, mult: i32) -> E::EF {
 pub struct PreparedTableProjectiveSourceEval {
     pub log_size: u32,
     pub relation: PreparedTableEcRowRelation,
-    /// The hinted provider's wide mul relation (operands/results consumed
-    /// per `(source, mul, role, limbs)` tuple).
+    /// The hinted provider's mul relation: 6 narrow per-group consumes
+    /// (M0/M1 lhs+rhs, M13/M14 lhs) bind the consumer's committed points to
+    /// the silo group's operand columns; all other operand/result binding
+    /// lives silo-side (hinted_mul formula_bind).
     pub mul_result: crate::projective_air::ProjectiveRcbMulResultRelation,
-    /// γ-digest reshape (docs/gamma-digest-design.md): the formula blocks'
-    /// range13 + signed-carry values are bound into two per-row digests
-    /// yielded on this relation; the tall expander components re-expand them
-    /// and emit the actual range uses against the sub-graph's providers.
-    pub gamma_digest: GammaDigestRelation,
-    pub gamma_challenge: GammaChallenge,
+    /// EC-op header link: PROVIDED (`−has_muls`) here, CONSUMED by the silo.
+    pub header: crate::components::hinted_mul::EcOpHeaderRelation,
 }
 
 impl FrameworkEval for PreparedTableProjectiveSourceEval {
@@ -394,13 +388,6 @@ impl FrameworkEval for PreparedTableProjectiveSourceEval {
         let lhs = PreparedTableEcEvalPoint::read(&mut eval);
         let rhs = PreparedTableEcEvalPoint::read(&mut eval);
         let output = PreparedTableEcEvalPoint::read(&mut eval);
-        // C5 plumbing: consumed silo mul limbs (read after the points, matching
-        // the base-trace layout).
-        let mut consumed_muls = ConsumedMulLimbs::<E>::read(&mut eval);
-        // C5-2: one shared formula block. Double rows use the first 13
-        // reduction slots; MixedAdd rows use all 18 slots plus the two
-        // witnessed gate columns.
-        let formula_columns = SharedFormulaColumns::<E>::read(&mut eval);
         let one = E::F::from(M31::from_u32_unchecked(1));
 
         eval.add_constraint(active.clone() * (active.clone() - one.clone()));
@@ -419,30 +406,12 @@ impl FrameworkEval for PreparedTableProjectiveSourceEval {
             eval.add_constraint((one.clone() - active.clone()) * value);
         }
 
-        // C5 plumbing: `has_muls` gate (1 for Double / finite-operand MixedAdd,
-        // 0 for an infinity-operand MixedAdd no-op). expected = 1 - (1 - op)·
-        // operand_inf, operand = `rhs`. Prepared-table ops all use finite base
-        // operands so this is 1 in practice, but the gate keeps the consumer
-        // robust and symmetric with the fake-GLV source.
-        let expected_has_muls = one.clone() - (one.clone() - op.clone()) * rhs.inf();
-        consumed_muls.constrain_has_muls(&mut eval, &active, &expected_has_muls);
-        // Operand dedup: install the dropped slots' consume expressions.
-        consumed_muls.fill_dropped(&crate::projective_air::ConsumedMulWiring {
-            op: op.clone(),
-            x1: lhs.x_bigint(),
-            y1: lhs.y_bigint(),
-            x2: rhs.x_bigint(),
-            y2: rhs.y_bigint(),
-            output_x: output.x_bigint(),
-            output_y: output.y_bigint(),
-            output_inf: output.inf(),
-            x3: formula_columns.x3.clone(),
-            y3: formula_columns.y3.clone(),
-            z3_double: formula_columns.z3.clone(),
-            z3_mixed: P256EvalBigInt::<E>::from_limbs(core::array::from_fn(|_| {
-                E::F::from(M31::from_u32_unchecked(0))
-            })),
-        });
+        // Group-existence gate (≡ the old committed `has_muls`): the silo emits
+        // a 15-mul group for Double (op == 1) and finite-operand MixedAdd, ZERO
+        // for an infinity-operand MixedAdd. `active − (1−op)·rhs.inf` equals
+        // `active·(1 − (1−op)·rhs.inf)` on every row because `op` and `rhs.inf`
+        // are zeroed on padding (constraints above). Degree 2.
+        let gate = active.clone() - (one.clone() - op.clone()) * rhs.inf();
 
         let relation_values = prepared_table_ec_row_relation_values(
             &[
@@ -456,135 +425,112 @@ impl FrameworkEval for PreparedTableProjectiveSourceEval {
             &rhs,
             &output,
         );
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             &self.relation,
-            E::EF::from(active.clone()),
+            active.clone(),
             &relation_values,
         ));
-        // CONSUME (use, `+has_muls`) the silo's proven mul limbs for this
-        // prepared-table op, keyed identically to the silo's provided yields.
-        consumed_muls.consume(&mut eval, &self.mul_result, &source_index);
-
-        // C5-2: constrain the Double-op coordinate formula. `double_active`
-        // (= active·op) is 1 only on active Double rows (op==1 == DOUBLE);
-        // MixedAdd (op==0) and padding (active==0) are unaffected.
-        let double_active = active.clone() * op.clone();
-        let muls_view = consumed_muls.view();
-        // The binders COLLECT their range13 values; together with the signed
-        // reduction carries they feed the two γ-digest yields below (fixed
-        // order: Double block then MixedAdd block).
-        let mut range13_values: Vec<E::F> = Vec::new();
-        let mut signed_carry_values: Vec<E::F> = Vec::new();
-        bind_double_formula(
+        // The 6 narrow mul-result consumes (`+gate`): pin the consumer's own
+        // committed point coordinates to the silo group's operand columns.
+        add_projective_source_narrow_mul_consumes(
             &mut eval,
-            &double_active,
-            &lhs.x_bigint(),
-            &lhs.y_bigint(),
-            &output.x_bigint(),
-            &output.y_bigint(),
-            &output.inf(),
-            &muls_view,
-            &formula_columns,
-            &mut range13_values,
+            &self.mul_result,
+            &source_index,
+            &op,
+            &gate,
+            &lhs,
+            &rhs,
+            &output,
         );
 
-        // C5-2: constrain the MixedAdd-op coordinate formula. `mixed_active`
-        // (= active·(1−op)) is 1 only on active MixedAdd rows; the formula is
-        // additionally gated by `has_muls` inside the binder (an
-        // infinity-operand MixedAdd is a 0-mul no-op constrained `output =
-        // lhs`).
-        let mixed_active = active.clone() * (one.clone() - op.clone());
-        bind_mixed_add_formula(
-            &mut eval,
-            &mixed_active,
-            &rhs.inf(),
-            &lhs.x_bigint(),
-            &lhs.y_bigint(),
-            &rhs.x_bigint(),
-            &rhs.y_bigint(),
-            &lhs.inf(),
-            &output.x_bigint(),
-            &output.y_bigint(),
-            &output.inf(),
-            &muls_view,
-            &formula_columns,
-            &mut range13_values,
-        );
-        range13_values.clear();
-        for limb in lhs
-            .x_bigint()
-            .limbs()
-            .iter()
-            .chain(lhs.y_bigint().limbs())
-            .chain(rhs.x_bigint().limbs())
-            .chain(rhs.y_bigint().limbs())
-            .chain(output.x_bigint().limbs())
-            .chain(output.y_bigint().limbs())
-            .chain(formula_columns.x3.limbs())
-            .chain(formula_columns.y3.limbs())
-            .chain(formula_columns.z3.limbs())
-        {
-            range13_values.push(limb.clone());
+        // Infinity-operand no-op: `lhs + ∞ = lhs` has no silo group, so pin the
+        // output to the accumulator directly. `noop = (1−op)·rhs.inf` equals
+        // `active·(1−op)·rhs.inf` on every row (padding zeroing above); the
+        // copies are degree 3.
+        let noop = (one.clone() - op.clone()) * rhs.inf();
+        let (lhs_x, lhs_y) = (lhs.x_bigint(), lhs.y_bigint());
+        let (out_x, out_y) = (output.x_bigint(), output.y_bigint());
+        for i in 0..N_LIMBS {
+            eval.add_constraint(
+                noop.clone() * (out_x.limbs()[i].clone() - lhs_x.limbs()[i].clone()),
+            );
+            eval.add_constraint(
+                noop.clone() * (out_y.limbs()[i].clone() - lhs_y.limbs()[i].clone()),
+            );
         }
-        for reduction in &formula_columns.reductions {
-            for carry in &reduction.carries {
-                signed_carry_values.push(carry.clone());
-            }
-        }
-        let no_muls = one.clone() - consumed_muls.has_muls.clone();
-        for value in formula_columns
-            .x3
-            .limbs()
-            .iter()
-            .chain(formula_columns.y3.limbs())
-            .chain(formula_columns.z3.limbs())
-        {
-            eval.add_constraint(no_muls.clone() * value.clone());
-        }
-        for reduction in &formula_columns.reductions {
-            eval.add_constraint(no_muls.clone() * reduction.q.clone());
-            for carry in &reduction.carries {
-                eval.add_constraint(no_muls.clone() * carry.clone());
-            }
-        }
-        let double_only = double_active.clone();
-        for reduction in &formula_columns.reductions[DOUBLE_TOTAL_REDUCTIONS..] {
-            eval.add_constraint(double_only.clone() * reduction.q.clone());
-            for carry in &reduction.carries {
-                eval.add_constraint(double_only.clone() * carry.clone());
-            }
-        }
-        eval.add_constraint(double_only.clone() * formula_columns.mixed_active_col.clone());
-        eval.add_constraint(double_only * formula_columns.formula_gate_col.clone());
-        // γ-digest yields (one per kind), keyed by the shared preprocessed
-        // row-index column; presence = `active` (the tall expanders'
-        // preprocessed schedule is the anchor).
-        let row_index = eval.get_preprocessed_column(prepared_table_ec_row_index_column_id());
-        yield_gamma_digest(
-            &mut eval,
-            &self.gamma_digest,
-            &self.gamma_challenge,
-            GAMMA_TAG_PREPARED_RANGE13,
-            row_index.clone(),
-            active.clone(),
-            M31::from_u32_unchecked(0),
-            &range13_values,
-        );
-        yield_gamma_digest(
-            &mut eval,
-            &self.gamma_digest,
-            &self.gamma_challenge,
-            GAMMA_TAG_PREPARED_SIGNED,
-            row_index,
-            active.clone(),
-            crate::range_checks::encode_signed_carry(0),
-            &signed_carry_values,
-        );
+        eval.add_constraint(noop.clone() * (output.inf() - lhs.inf()));
+
+        // EC-op header YIELD (−gate): tuple
+        // (source_index, op, output_inf, lhs_inf, rhs_inf), consumed 1:1 by the
+        // silo group header. Same tuple/order as the fake-GLV source.
+        eval.add_to_relation(RelationEntry::base(
+            &self.header,
+            -gate,
+            &[
+                source_index.clone(),
+                op.clone(),
+                output.inf(),
+                lhs.inf(),
+                rhs.inf(),
+            ],
+        ));
 
         eval.finalize_logup_batched(
-            &crate::components::fake_glv::prepared_table::interaction::prepared_consumer_logup_batching(),
+            crate::components::fake_glv::prepared_table::interaction::PREPARED_CONSUMER_LOGUP_BATCH,
         );
         eval
+    }
+}
+
+/// Emit the 6 narrow `ProjectiveRcbMulResultRelation` consumes shared by both
+/// projective-source consumers (prepared_table + fake_glv ec_source), in this
+/// fixed order: M0.lhs, M0.rhs, M1.lhs, M1.rhs, M13.lhs, M14.lhs. Tuples are
+/// built from the consumer's OWN committed point columns per the op kind:
+///   M0.lhs = lhs.x (both kinds)      M0.rhs = op·lhs.x + (1−op)·rhs.x
+///   M1.lhs = lhs.y                   M1.rhs = op·lhs.y + (1−op)·rhs.y
+///   M13.lhs = output.x               M14.lhs = output.y
+/// matching the silo's per-group operand layout (Double: M0 = x1·x1,
+/// MixedAdd: M0 = x1·x2, …; M13/M14 lhs = affine output coords). The numerator
+/// is the group-existence `gate`; the silo provides exactly these slots on proj
+/// rows (per-slot provide masks).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn add_projective_source_narrow_mul_consumes<E: EvalAtRow>(
+    eval: &mut E,
+    relation: &crate::projective_air::ProjectiveRcbMulResultRelation,
+    source_index: &E::F,
+    op: &E::F,
+    gate: &E::F,
+    lhs: &PreparedTableEcEvalPoint<E::F>,
+    rhs: &PreparedTableEcEvalPoint<E::F>,
+    output: &PreparedTableEcEvalPoint<E::F>,
+) {
+    let one = E::F::from(M31::from_u32_unchecked(1));
+    let mixed = one - op.clone();
+    let (lhs_x, lhs_y) = (lhs.x_bigint(), lhs.y_bigint());
+    let (rhs_x, rhs_y) = (rhs.x_bigint(), rhs.y_bigint());
+    let (out_x, out_y) = (output.x_bigint(), output.y_bigint());
+    let own = |a: &crate::limbs::P256BigInt<E::F>| -> Vec<E::F> { a.limbs().to_vec() };
+    let mix =
+        |a: &crate::limbs::P256BigInt<E::F>, b: &crate::limbs::P256BigInt<E::F>| -> Vec<E::F> {
+            (0..N_LIMBS)
+                .map(|i| op.clone() * a.limbs()[i].clone() + mixed.clone() * b.limbs()[i].clone())
+                .collect()
+        };
+    let slots: [(u32, u32, Vec<E::F>); 6] = [
+        (0, PROJECTIVE_RCB_MUL_ROLE_LHS, own(&lhs_x)),
+        (0, PROJECTIVE_RCB_MUL_ROLE_RHS, mix(&lhs_x, &rhs_x)),
+        (1, PROJECTIVE_RCB_MUL_ROLE_LHS, own(&lhs_y)),
+        (1, PROJECTIVE_RCB_MUL_ROLE_RHS, mix(&lhs_y, &rhs_y)),
+        (13, PROJECTIVE_RCB_MUL_ROLE_LHS, own(&out_x)),
+        (14, PROJECTIVE_RCB_MUL_ROLE_LHS, own(&out_y)),
+    ];
+    for (mul, role, limbs) in slots {
+        let mut values = Vec::with_capacity(3 + N_LIMBS);
+        values.push(source_index.clone());
+        values.push(E::F::from(M31::from_u32_unchecked(mul)));
+        values.push(E::F::from(M31::from_u32_unchecked(role)));
+        values.extend(limbs);
+        eval.add_to_relation(RelationEntry::base(relation, gate.clone(), &values));
     }
 }
 

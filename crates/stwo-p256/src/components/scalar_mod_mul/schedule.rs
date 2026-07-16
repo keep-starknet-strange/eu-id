@@ -6,7 +6,7 @@ use stwo_p256_utils::scalar_arithmetic::{words_to_limbs, P256_ORDER};
 use super::accumulator::for_each_digit_contribution;
 use super::columns::{log_size_from_padded_len, m31_column_eval, padded_log_size, M31ColumnEval};
 use super::{
-    product_chunk_pairs, ScalarModMulLimbRole, ScalarModMulTraceRows,
+    product_chunk_pairs, ScalarModMulLimbRole, ScalarModMulMergedRows,
     PRODUCT_DIGIT_ACCUMULATOR_TERMS, PRODUCT_SCALAR_LIMB_USE_COUNT,
     SCALAR_MOD_MUL_SPLIT_CHUNK_DIGITS, SCALAR_MOD_MUL_SPLIT_CHUNK_TERMS,
 };
@@ -154,21 +154,19 @@ pub struct ScalarModMulFixedScheduleEvals {
 }
 
 impl ScalarModMulFixedSchedule {
-    pub fn from_rows(rows: &ScalarModMulTraceRows) -> Self {
+    pub fn from_rows(rows: &ScalarModMulMergedRows) -> Self {
         debug_assert!(rows
-            .ab_chunks
-            .iter()
-            .all(|row| row.side == super::ProductSide::Ab));
+            .ab_chunks()
+            .all(|(_, row)| row.side == super::ProductSide::Ab));
         debug_assert!(rows
-            .qn_chunks
-            .iter()
-            .all(|row| row.side == super::ProductSide::Qn));
+            .qn_chunks()
+            .all(|(_, row)| row.side == super::ProductSide::Qn));
         Self {
             canonical: canonical_schedule(rows),
             ab_chunks: product_schedule(
                 ProductFamily::Ab,
-                rows.ab_chunks.len(),
-                rows.ab_chunks.iter().map(|row| (row.coeff, row.chunk)),
+                rows.ab_chunks_len(),
+                rows.ab_chunks().map(|(_, row)| (row.coeff, row.chunk)),
             ),
             qn_chunks: qn_product_schedule(rows),
             accumulators: accumulator_schedule(rows),
@@ -197,13 +195,13 @@ fn schedule_columns_to_evals(columns: &[ScalarModMulScheduleColumn]) -> Vec<M31C
         .collect()
 }
 
-fn canonical_schedule(rows: &ScalarModMulTraceRows) -> Vec<ScalarModMulScheduleColumn> {
-    let padded_rows = 1usize << padded_log_size(rows.canonical_scalars.len());
+fn canonical_schedule(rows: &ScalarModMulMergedRows) -> Vec<ScalarModMulScheduleColumn> {
+    let padded_rows = 1usize << padded_log_size(rows.canonical_len());
     let mut active = zeros(padded_rows);
     let mut role = zeros(padded_rows);
     let mut multiplicity = zeros(padded_rows);
 
-    for (row_index, row) in rows.canonical_scalars.iter().enumerate() {
+    for (row_index, (_, row)) in rows.canonical_scalars().enumerate() {
         active[row_index] = one();
         role[row_index] = m31(row.role.relation_role());
         multiplicity[row_index] = m31(canonical_limb_multiplicity(row.role));
@@ -283,17 +281,17 @@ fn product_schedule(
     columns
 }
 
-fn qn_product_schedule(rows: &ScalarModMulTraceRows) -> Vec<ScalarModMulScheduleColumn> {
+fn qn_product_schedule(rows: &ScalarModMulMergedRows) -> Vec<ScalarModMulScheduleColumn> {
     let mut columns = product_schedule(
         ProductFamily::Qn,
-        rows.qn_chunks.len(),
-        rows.qn_chunks.iter().map(|row| (row.coeff, row.chunk)),
+        rows.qn_chunks_len(),
+        rows.qn_chunks().map(|(_, row)| (row.coeff, row.chunk)),
     );
     let padded_rows = columns[0].values.len();
     let n_limbs = words_to_limbs(&P256_ORDER);
     let mut modulus_limb = term_columns(padded_rows);
 
-    for (row, chunk) in rows.qn_chunks.iter().enumerate() {
+    for (row, (_, chunk)) in rows.qn_chunks().enumerate() {
         let (pairs, term_count) = product_chunk_pairs(chunk.coeff, chunk.chunk);
         for (term, column) in modulus_limb.iter_mut().take(term_count).enumerate() {
             column[row] = m31(n_limbs[pairs[term].1]);
@@ -309,8 +307,8 @@ fn qn_product_schedule(rows: &ScalarModMulTraceRows) -> Vec<ScalarModMulSchedule
     columns
 }
 
-fn accumulator_schedule(rows: &ScalarModMulTraceRows) -> Vec<ScalarModMulScheduleColumn> {
-    let log_size = padded_log_size(rows.accumulators.len());
+fn accumulator_schedule(rows: &ScalarModMulMergedRows) -> Vec<ScalarModMulScheduleColumn> {
+    let log_size = padded_log_size(rows.accumulators_len());
     let padded_rows = 1usize << log_size;
     let mut active = zeros(padded_rows);
     let mut side = zeros(padded_rows);
@@ -320,7 +318,7 @@ fn accumulator_schedule(rows: &ScalarModMulTraceRows) -> Vec<ScalarModMulSchedul
     let mut chunk = accumulator_term_columns(padded_rows);
     let mut offset = accumulator_term_columns(padded_rows);
 
-    for (row_index, row) in rows.accumulators.iter().enumerate() {
+    for (row_index, (_, row)) in rows.accumulators().enumerate() {
         active[row_index] = one();
         side[row_index] = m31(row.side.relation_side());
         digit[row_index] = m31(row.digit_index as u32);
@@ -361,8 +359,8 @@ fn accumulator_schedule(rows: &ScalarModMulTraceRows) -> Vec<ScalarModMulSchedul
     columns
 }
 
-fn reduction_schedule(rows: &ScalarModMulTraceRows) -> Vec<ScalarModMulScheduleColumn> {
-    let log_size = padded_log_size(rows.reduction_digits.len());
+fn reduction_schedule(rows: &ScalarModMulMergedRows) -> Vec<ScalarModMulScheduleColumn> {
+    let log_size = padded_log_size(rows.reduction_len());
     let padded_rows = 1usize << log_size;
     let mut active = zeros(padded_rows);
     let mut digit = zeros(padded_rows);
@@ -370,7 +368,7 @@ fn reduction_schedule(rows: &ScalarModMulTraceRows) -> Vec<ScalarModMulScheduleC
     let mut has_prev_carry = zeros(padded_rows);
     let mut has_next_carry = zeros(padded_rows);
 
-    for (row_index, row) in rows.reduction_digits.iter().enumerate() {
+    for (row_index, (_, row)) in rows.reduction_digits().enumerate() {
         active[row_index] = one();
         digit[row_index] = m31(row.digit_index as u32);
         if row.digit_index < N_LIMBS {
@@ -449,17 +447,19 @@ fn m31(value: u32) -> M31 {
 mod tests {
     use stwo_p256_utils::scalar_arithmetic::{ScalarFieldMulTrace, P256_ORDER};
 
-    use super::super::{ROLE_A, ROLE_B, ROLE_QUOTIENT, ROLE_RESULT};
+    use super::super::{ScalarModMulTraceRows, ROLE_A, ROLE_B, ROLE_QUOTIENT, ROLE_RESULT};
     use super::*;
 
     fn scalar(value: u64) -> [u64; 4] {
         [value, 0, 0, 0]
     }
 
-    fn test_rows() -> ScalarModMulTraceRows {
+    fn test_rows() -> ScalarModMulMergedRows {
         let trace = ScalarFieldMulTrace::new("test_mul", &scalar(7), &scalar(11), &P256_ORDER)
             .expect("valid scalar mod-mul trace");
-        ScalarModMulTraceRows::new(3, &trace).expect("trace rows generate")
+        ScalarModMulMergedRows::new(vec![
+            ScalarModMulTraceRows::new(3, &trace).expect("trace rows generate")
+        ])
     }
 
     #[test]
@@ -486,9 +486,8 @@ mod tests {
 
         assert_eq!(first_modulus_column.values[0], m31(n_limbs[0]));
         let row_with_shifted_modulus = rows
-            .qn_chunks
-            .iter()
-            .position(|row| product_chunk_pairs(row.coeff, row.chunk).0[0].1 == 1)
+            .qn_chunks()
+            .position(|(_, row)| product_chunk_pairs(row.coeff, row.chunk).0[0].1 == 1)
             .expect("schedule eventually uses n limb 1");
         assert_eq!(
             first_modulus_column.values[row_with_shifted_modulus],

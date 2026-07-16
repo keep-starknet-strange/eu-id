@@ -209,39 +209,35 @@ impl FrameworkEval for CertScalarInputAirEval {
         constrain_cert_padding(&mut eval, active.clone(), &cert0);
         constrain_cert_padding(&mut eval, active.clone(), &cert1);
 
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             &self.scalar_setup_output,
-            E::EF::from(active.clone()),
+            active.clone(),
             &setup.relation_values(),
         ));
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             &self.cert_relation,
-            -E::EF::from(active.clone()),
+            -active.clone(),
             &cert0.relation_values(),
         ));
-        eval.add_to_relation(RelationEntry::new(
+        eval.add_to_relation(RelationEntry::base(
             &self.cert_relation,
-            -E::EF::from(active.clone()),
+            -active.clone(),
             &cert1.relation_values(),
         ));
 
         if let Some(cert_base_relation) = &self.cert_base_relation {
             // Yield the base point `-m(cert_id)·cert_active` times so the
             // prepared-table P-cell consumers (use +1) balance exactly.
-            eval.add_to_relation(RelationEntry::new(
+            eval.add_to_relation(RelationEntry::base(
                 cert_base_relation,
-                -E::EF::from(
-                    cert0.cert_active.clone()
-                        * E::F::from(M31::from_u32_unchecked(CERT0_PREPARED_P_CELL_COUNT)),
-                ),
+                -(cert0.cert_active.clone()
+                    * E::F::from(M31::from_u32_unchecked(CERT0_PREPARED_P_CELL_COUNT))),
                 &cert_base_relation_values_from_row(&cert0),
             ));
-            eval.add_to_relation(RelationEntry::new(
+            eval.add_to_relation(RelationEntry::base(
                 cert_base_relation,
-                -E::EF::from(
-                    cert1.cert_active.clone()
-                        * E::F::from(M31::from_u32_unchecked(CERT1_PREPARED_P_CELL_COUNT)),
-                ),
+                -(cert1.cert_active.clone()
+                    * E::F::from(M31::from_u32_unchecked(CERT1_PREPARED_P_CELL_COUNT))),
                 &cert_base_relation_values_from_row(&cert1),
             ));
         }

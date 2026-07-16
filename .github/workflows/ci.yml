@@ -100,6 +100,11 @@ jobs:
       - name: make test
         run: make test
 
+      # The coprocessor composition is feature-gated and default-off, so the
+      # workspace test target does not compile its transcript hooks or negatives.
+      - name: make test-ec-coprocessor
+        run: make test-ec-coprocessor
+
   # Scheduled-only: the slow full-pipeline proof-generation tests. Runs the
   # `#[ignore]`-marked tests in release mode (proving in debug is far too
   # slow). This is the documented runner for the end-to-end soundness suite
@@ -125,6 +130,12 @@ jobs:
 
       - name: Run end-to-end proof tests (release, ignored tests only)
         run: cargo test --workspace --release -- --ignored
+
+      # Scheduled feature-on ignored tests include the fork/join digest guard;
+      # this keeps the coprocessor transcript bridge exercised even while the
+      # feature remains default-off.
+      - name: Run EC coprocessor ignored tests (release)
+        run: make test-ec-coprocessor-ignored
 
       # Smoke-test the standalone-component example so it cannot silently
       # rot. The example documents itself as "the shortest path to running

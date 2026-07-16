@@ -18,7 +18,6 @@ use crate::prepared_point::{
     PREPARED_BASE_COUNT, TABLE16_INDEX,
 };
 use crate::projective::ProjectiveEcTraceClaim;
-use crate::projective_air::projective_rcb_op_mul_limbs;
 use crate::types::{AffinePoint, U256};
 
 use crate::scalar::cert_bind::{CertScalarInputClaim, CertScalarInputRow, CERT_ID_U1_GENERATOR};
@@ -27,7 +26,6 @@ use crate::scalar::fake_glv_selector::{FakeGlvSelectorClaim, FakeGlvSelectorRow}
 use crate::scalar::fake_glv_selector_lookup::Selector16DecodeEntry;
 use crate::scalar::scalar_mod_mul::columns::{m31_column_eval, padded_log_size, M31ColumnEval};
 
-use super::super::ec_source::{double_formula, mixed_add_formula};
 use super::*;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -51,12 +49,16 @@ impl PreparedTableClaim {
             });
         }
 
-        let certs = cert_inputs
-            .rows
-            .iter()
-            .zip(&fake_glv_scalars.rows)
-            .zip(&selectors.rows)
-            .map(|((cert, fake_glv), selector)| PreparedTableCert::new(cert, fake_glv, selector))
+        use rayon::prelude::*;
+        let certs = (0..cert_inputs.rows.len())
+            .into_par_iter()
+            .map(|index| {
+                PreparedTableCert::new(
+                    &cert_inputs.rows[index],
+                    &fake_glv_scalars.rows[index],
+                    &selectors.rows[index],
+                )
+            })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self { certs })
     }
@@ -126,6 +128,25 @@ impl PreparedTableEcTraceClaim {
         selectors: &FakeGlvSelectorClaim,
         table: &PreparedTableClaim,
     ) -> Result<Self, PreparedTableError> {
+        Self::from_claims_inner(cert_inputs, fake_glv_scalars, selectors, table, true)
+    }
+
+    pub(crate) fn from_claims_trusted(
+        cert_inputs: &CertScalarInputClaim,
+        fake_glv_scalars: &FakeGlvScalarHintClaim,
+        selectors: &FakeGlvSelectorClaim,
+        table: &PreparedTableClaim,
+    ) -> Result<Self, PreparedTableError> {
+        Self::from_claims_inner(cert_inputs, fake_glv_scalars, selectors, table, false)
+    }
+
+    fn from_claims_inner(
+        cert_inputs: &CertScalarInputClaim,
+        fake_glv_scalars: &FakeGlvScalarHintClaim,
+        selectors: &FakeGlvSelectorClaim,
+        table: &PreparedTableClaim,
+        verify: bool,
+    ) -> Result<Self, PreparedTableError> {
         if cert_inputs.rows.len() != fake_glv_scalars.rows.len()
             || cert_inputs.rows.len() != selectors.rows.len()
             || cert_inputs.rows.len() != table.certs.len()
@@ -138,20 +159,24 @@ impl PreparedTableEcTraceClaim {
             });
         }
 
-        let mut rows = Vec::new();
-        for (((cert, fake_glv), selector), table_cert) in cert_inputs
-            .rows
-            .iter()
-            .zip(&fake_glv_scalars.rows)
-            .zip(&selectors.rows)
-            .zip(&table.certs)
-        {
-            rows.extend(prepared_table_ec_rows_for_cert(
-                cert, fake_glv, selector, table_cert,
-            )?);
-        }
+        use rayon::prelude::*;
+        let rows_by_cert = (0..cert_inputs.rows.len())
+            .into_par_iter()
+            .map(|index| {
+                prepared_table_ec_rows_for_cert_inner(
+                    &cert_inputs.rows[index],
+                    &fake_glv_scalars.rows[index],
+                    &selectors.rows[index],
+                    &table.certs[index],
+                    verify,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let rows = rows_by_cert.into_iter().flatten().collect();
         let claim = Self { rows };
-        claim.verify()?;
+        if verify {
+            claim.verify()?;
+        }
         Ok(claim)
     }
 
@@ -315,14 +340,10 @@ impl PreparedTableProjectiveSourceProofClaim {
         let _ = PreparedTableProjectiveSourceComponents::new(
             &mut allocator,
             self.log_size,
-            self.rows,
             &PreparedTableProjectiveSourceInteractionClaim::zero(),
             &PreparedTableEcRowRelation::dummy(),
             &crate::projective_air::ProjectiveRcbMulComponentRelations::dummy(),
-            &crate::range_checks::RangeCheckRelation::dummy(),
-            &crate::range_checks::RangeCheckRelation::dummy(),
-            &crate::components::gamma_digest::GammaDigestRelation::dummy(),
-            &prepared_dummy_gamma_challenge(),
+            &crate::components::hinted_mul::EcOpHeaderRelation::dummy(),
         );
         allocator.preprocessed_columns().clone()
     }
@@ -332,14 +353,10 @@ impl PreparedTableProjectiveSourceProofClaim {
         let components = PreparedTableProjectiveSourceComponents::new(
             &mut allocator,
             self.log_size,
-            self.rows,
             &PreparedTableProjectiveSourceInteractionClaim::zero(),
             &PreparedTableEcRowRelation::dummy(),
             &crate::projective_air::ProjectiveRcbMulComponentRelations::dummy(),
-            &crate::range_checks::RangeCheckRelation::dummy(),
-            &crate::range_checks::RangeCheckRelation::dummy(),
-            &crate::components::gamma_digest::GammaDigestRelation::dummy(),
-            &prepared_dummy_gamma_challenge(),
+            &crate::components::hinted_mul::EcOpHeaderRelation::dummy(),
         );
         components.trace_log_degree_bounds()
     }
@@ -349,49 +366,19 @@ impl PreparedTableProjectiveSourceProofClaim {
         let components = PreparedTableProjectiveSourceComponents::new(
             &mut allocator,
             self.log_size,
-            self.rows,
             &PreparedTableProjectiveSourceInteractionClaim::zero(),
             &PreparedTableEcRowRelation::dummy(),
             &crate::projective_air::ProjectiveRcbMulComponentRelations::dummy(),
-            &crate::range_checks::RangeCheckRelation::dummy(),
-            &crate::range_checks::RangeCheckRelation::dummy(),
-            &crate::components::gamma_digest::GammaDigestRelation::dummy(),
-            &prepared_dummy_gamma_challenge(),
+            &crate::components::hinted_mul::EcOpHeaderRelation::dummy(),
         );
         components.max_constraint_log_degree_bound()
     }
 }
 
-/// Dummy γ challenge for preprocessed-id / degree-bound queries.
-pub(crate) fn prepared_dummy_gamma_challenge() -> crate::components::gamma_digest::GammaChallenge {
-    crate::components::gamma_digest::GammaChallenge::from_gamma(
-        stwo::core::fields::qm31::SecureField::from(M31::from_u32_unchecked(2)),
-        crate::components::gamma_digest::gamma_padded_values(
-            super::interaction::prepared_gamma_range13_columns().len(),
-        )
-        .max(crate::components::gamma_digest::gamma_padded_values(
-            super::interaction::prepared_gamma_signed_carry_columns().len(),
-        )),
-    )
-}
-
 pub(crate) fn gen_prepared_table_ec_row_preprocessed_trace(
     log_size: u32,
-    rows: u32,
     ids: &[PreProcessedColumnId],
 ) -> Result<ColumnVec<M31ColumnEval>, PreparedTableError> {
-    let gamma_layouts = super::interaction::prepared_gamma_layouts(rows as usize);
-    // C5-2 preprocessed columns the self-contained Range13 / signed-carry
-    // providers declare (shared by id with the silo's, deduplicated globally).
-    let range13_value_id =
-        crate::range_checks::range_check_value_column_id(crate::range_checks::RANGE13_BITS);
-    let signed_carry_value_id = crate::range_checks::signed_carry_value_column_id(
-        crate::projective_air::PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
-    );
-    let signed_carry_active_id = crate::range_checks::signed_carry_active_column_id(
-        crate::projective_air::PROJECTIVE_RCB_SIGNED_CARRY_EQUATION,
-    );
-    let signed_carry_claim = crate::projective_air::projective_rcb_signed_carry_claim();
     ids.iter()
         .map(|id| {
             if id == &prepared_table_ec_row_index_column_id() {
@@ -401,19 +388,6 @@ pub(crate) fn gen_prepared_table_ec_row_preprocessed_trace(
                         .map(|index| M31::from_u32_unchecked(index as u32))
                         .collect(),
                 ))
-            } else if id == &range13_value_id {
-                Ok(
-                    crate::range_checks::RangeCheckClaim::new(crate::range_checks::RANGE13_BITS)
-                        .gen_preprocessed_column(),
-                )
-            } else if id == &signed_carry_value_id {
-                Ok(signed_carry_claim.gen_value_column())
-            } else if id == &signed_carry_active_id {
-                Ok(signed_carry_claim.gen_active_column())
-            } else if let Some(column) = gamma_layouts.iter().find_map(|layout| {
-                crate::components::gamma_digest::gamma_tall_preprocessed_column(layout, id)
-            }) {
-                Ok(column)
             } else {
                 Err(PreparedTableError::PreprocessedColumnMissing)
             }
@@ -475,7 +449,7 @@ pub(crate) fn gen_prepared_table_projective_source_base_trace(
                 projective_row,
             )
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Vec<_>>();
     rows.resize(
         padded_rows,
         [M31::from_u32_unchecked(0); PREPARED_TABLE_PROJECTIVE_SOURCE_TRACE_COLUMNS],
@@ -579,7 +553,7 @@ fn prepared_table_projective_source_trace_values(
     source_index: usize,
     prepared_row: &PreparedTableEcRow,
     projective_row: &crate::projective::ProjectiveEcRow,
-) -> Result<[M31; PREPARED_TABLE_PROJECTIVE_SOURCE_TRACE_COLUMNS], PreparedTableError> {
+) -> [M31; PREPARED_TABLE_PROJECTIVE_SOURCE_TRACE_COLUMNS] {
     let mut values = [M31::from_u32_unchecked(0); PREPARED_TABLE_PROJECTIVE_SOURCE_TRACE_COLUMNS];
     let mut column = 0;
     values[column] = M31::from_u32_unchecked(1);
@@ -606,53 +580,8 @@ fn prepared_table_projective_source_trace_values(
         values[column] = value;
         column += 1;
     }
-    debug_assert_eq!(column, PREPARED_TABLE_PROJECTIVE_SOURCE_HAS_MULS_COL);
-    // C5 plumbing: the `has_muls` flag, then the silo's proven mul limbs for this
-    // prepared-table op in canonical order. (Prepared-table ops use finite base
-    // operands, so `has_muls` is 1, but the flag keeps the consumer robust.)
-    let (mul_limbs, has_muls) = projective_rcb_op_mul_limbs(source_index, projective_row)
-        .map_err(|_| PreparedTableError::ProjectiveSourceInvalid)?;
-    values[column] = M31::from_u32_unchecked(has_muls as u32);
-    column += 1;
-    // Operand dedup: only the KEPT slots are committed.
-    for value in crate::projective_air::projective_rcb_kept_mul_limbs(&mul_limbs) {
-        values[column] = value;
-        column += 1;
-    }
-    debug_assert_eq!(column, PREPARED_TABLE_PROJECTIVE_SOURCE_FORMULA_OFFSET);
-    // C5-2: one shared formula block. Double rows write the first 13 reduction
-    // slots and leave the mixed-only suffix/gates zero; finite MixedAdd rows
-    // write the full superset.
-    let is_mixed = projective_row.op == crate::projective::ProjectiveEcOp::MixedAdd;
-    if projective_row.op == crate::projective::ProjectiveEcOp::Double {
-        let witness = double_formula::solve_double_formula_witness(
-            &mul_limbs,
-            &projective_row.output_projective,
-        )
-        .ok_or(PreparedTableError::ProjectiveSourceInvalid)?;
-        for value in double_formula::double_formula_shared_trace_values(&witness) {
-            values[column] = value;
-            column += 1;
-        }
-    } else if is_mixed && has_muls {
-        let witness = mixed_add_formula::solve_mixed_add_formula_witness(
-            &mul_limbs,
-            &projective_row.output_projective,
-        )
-        .ok_or(PreparedTableError::ProjectiveSourceInvalid)?;
-        for value in mixed_add_formula::mixed_add_formula_trace_values(&witness) {
-            values[column] = value;
-            column += 1;
-        }
-    } else {
-        let gate_base = column + mixed_add_formula::MIXED_ADD_GATE_OFFSET_IN_BLOCK;
-        let gates = mixed_add_formula::mixed_add_gate_trace_values(is_mixed, false);
-        values[gate_base] = gates[0];
-        values[gate_base + 1] = gates[1];
-        column += mixed_add_formula::MIXED_ADD_FORMULA_COLUMNS;
-    }
     debug_assert_eq!(column, PREPARED_TABLE_PROJECTIVE_SOURCE_TRACE_COLUMNS);
-    Ok(values)
+    values
 }
 
 #[derive(Clone, Debug)]
@@ -787,6 +716,8 @@ pub struct PreparedTableCert {
     pub sig_id: M31,
     pub cert_id: M31,
     pub cert_active: M31,
+    pub p3: PreparedAffinePoint,
+    pub r: PreparedAffinePoint,
     pub base: [PreparedAffinePoint; PREPARED_BASE_COUNT],
     pub r3: PreparedAffinePoint,
     pub table16: PreparedAffinePoint,
@@ -806,6 +737,8 @@ impl PreparedTableCert {
                 sig_id: cert.sig_id,
                 cert_id: cert.cert_id,
                 cert_active: cert.cert_active,
+                p3: PreparedAffinePoint::infinity(),
+                r: PreparedAffinePoint::infinity(),
                 base: core::array::from_fn(|_| PreparedAffinePoint::infinity()),
                 r3: PreparedAffinePoint::infinity(),
                 table16: PreparedAffinePoint::infinity(),
@@ -822,20 +755,10 @@ impl PreparedTableCert {
                 cert_id: cert.cert_id.0,
             })?;
         let r = signed_hint_point(&h, fake_glv.hint.s2_sign_bit)?;
-        let p3 = scalar_mul(&U256::from_le_u64s(&[3, 0, 0, 0]), &p).ok_or(
-            PreparedTableError::MissingTriplePoint {
-                point: "P",
-                sig_id: cert.sig_id.0,
-                cert_id: cert.cert_id.0,
-            },
-        )?;
-        let r3 = scalar_mul(&U256::from_le_u64s(&[3, 0, 0, 0]), &r).ok_or(
-            PreparedTableError::MissingTriplePoint {
-                point: "R",
-                sig_id: cert.sig_id.0,
-                cert_id: cert.cert_id.0,
-            },
-        )?;
+        let p3 = triple_point(&p);
+        let r3 = triple_point(&r);
+        let p3_prepared = prepared(Some(p3.clone()));
+        let r_prepared = prepared(Some(r.clone()));
 
         let base = [
             prepared(add_optional_points(
@@ -873,6 +796,8 @@ impl PreparedTableCert {
             sig_id: cert.sig_id,
             cert_id: cert.cert_id,
             cert_active: cert.cert_active,
+            p3: p3_prepared,
+            r: r_prepared,
             base,
             r3: prepared(Some(r3)),
             table16,
@@ -898,20 +823,10 @@ impl PreparedTableCert {
             y: cert.base_y.to_u256(),
         };
         let r = r_override;
-        let p3 = scalar_mul(&U256::from_le_u64s(&[3, 0, 0, 0]), &p).ok_or(
-            PreparedTableError::MissingTriplePoint {
-                point: "P",
-                sig_id: cert.sig_id.0,
-                cert_id: cert.cert_id.0,
-            },
-        )?;
-        let r3 = scalar_mul(&U256::from_le_u64s(&[3, 0, 0, 0]), &r).ok_or(
-            PreparedTableError::MissingTriplePoint {
-                point: "R",
-                sig_id: cert.sig_id.0,
-                cert_id: cert.cert_id.0,
-            },
-        )?;
+        let p3 = triple_point(&p);
+        let r3 = triple_point(&r);
+        let p3_prepared = prepared(Some(p3.clone()));
+        let r_prepared = prepared(Some(r.clone()));
 
         let base = [
             prepared(add_optional_points(
@@ -949,6 +864,8 @@ impl PreparedTableCert {
             sig_id: cert.sig_id,
             cert_id: cert.cert_id,
             cert_active: cert.cert_active,
+            p3: p3_prepared,
+            r: r_prepared,
             base,
             r3: prepared(Some(r3)),
             table16,
@@ -965,6 +882,8 @@ impl PreparedTableCert {
         for point in &self.base {
             point.verify()?;
         }
+        self.p3.verify()?;
+        self.r.verify()?;
         self.r3.verify()?;
         self.table16.verify()?;
         Ok(())
@@ -1178,11 +1097,22 @@ fn require_unique_output(
     }
 }
 
+#[cfg(test)]
 fn prepared_table_ec_rows_for_cert(
     cert: &CertScalarInputRow,
     fake_glv: &FakeGlvScalarHintRow,
     selector: &FakeGlvSelectorRow,
     table: &PreparedTableCert,
+) -> Result<Vec<PreparedTableEcRow>, PreparedTableError> {
+    prepared_table_ec_rows_for_cert_inner(cert, fake_glv, selector, table, true)
+}
+
+fn prepared_table_ec_rows_for_cert_inner(
+    cert: &CertScalarInputRow,
+    fake_glv: &FakeGlvScalarHintRow,
+    selector: &FakeGlvSelectorRow,
+    table: &PreparedTableCert,
+    verify_outputs: bool,
 ) -> Result<Vec<PreparedTableEcRow>, PreparedTableError> {
     require_same_id("fake_glv", cert, fake_glv.sig_id, fake_glv.cert_id)?;
     require_same_id("selector", cert, selector.sig_id, selector.cert_id)?;
@@ -1205,27 +1135,11 @@ fn prepared_table_ec_rows_for_cert(
         x: cert.base_x.to_u256(),
         y: cert.base_y.to_u256(),
     });
-    let h = scalar_mul(
-        &cert.scalar.to_u256(),
-        &p.to_option().expect("base point finite"),
-    )
-    .ok_or(PreparedTableError::MissingHintPoint {
-        sig_id: cert.sig_id.0,
-        cert_id: cert.cert_id.0,
-    })?;
-    let r = PreparedAffinePoint::from_affine(signed_hint_point(&h, fake_glv.hint.s2_sign_bit)?);
+    let r = table.r.clone();
 
     let mut rows = Vec::new();
     let p3 = if cert.cert_id.0 == CERT_ID_U1_GENERATOR {
-        PreparedAffinePoint::from_affine(
-            scalar_mul(&U256::from_le_u64s(&[3, 0, 0, 0]), &p.to_option().unwrap()).ok_or(
-                PreparedTableError::MissingTriplePoint {
-                    point: "P",
-                    sig_id: cert.sig_id.0,
-                    cert_id: cert.cert_id.0,
-                },
-            )?,
-        )
+        table.p3.clone()
     } else {
         let p2 = prepared(double_optional(p.to_option()));
         rows.push(PreparedTableEcRow::double(
@@ -1285,8 +1199,9 @@ fn prepared_table_ec_rows_for_cert(
             rhs.clone(),
             output.clone(),
         ));
-        let expected = prepared(add_optional_points(lhs.to_option(), rhs.to_option()));
-        if output != expected {
+        if verify_outputs
+            && output != prepared(add_optional_points(lhs.to_option(), rhs.to_option()))
+        {
             return Err(PreparedTableError::PreparedTableOutputMismatch {
                 sig_id: sig_id.0,
                 cert_id: cert_id.0,
@@ -1309,11 +1224,13 @@ fn prepared_table_ec_rows_for_cert(
         table.r3.clone(),
         table.table16.clone(),
     ));
-    let expected_table16 = prepared(add_optional_points(
-        selected.to_option(),
-        table.r3.to_option(),
-    ));
-    if table.table16 != expected_table16 {
+    if verify_outputs
+        && table.table16
+            != prepared(add_optional_points(
+                selected.to_option(),
+                table.r3.to_option(),
+            ))
+    {
         return Err(PreparedTableError::PreparedTableOutputMismatch {
             sig_id: sig_id.0,
             cert_id: cert_id.0,
@@ -1347,15 +1264,7 @@ fn prepared_table_ec_rows_for_cert_with_r_override(
 
     let mut rows = Vec::new();
     let p3 = if cert.cert_id.0 == CERT_ID_U1_GENERATOR {
-        PreparedAffinePoint::from_affine(
-            scalar_mul(&U256::from_le_u64s(&[3, 0, 0, 0]), &p.to_option().unwrap()).ok_or(
-                PreparedTableError::MissingTriplePoint {
-                    point: "P",
-                    sig_id: cert.sig_id.0,
-                    cert_id: cert.cert_id.0,
-                },
-            )?,
-        )
+        table.p3.clone()
     } else {
         let p2 = prepared(double_optional(p.to_option()));
         rows.push(PreparedTableEcRow::double(
@@ -1603,6 +1512,11 @@ pub(crate) fn add_optional_points(
 
 fn double_optional(point: Option<AffinePoint>) -> Option<AffinePoint> {
     point.map(|point| point_double(&point).output)
+}
+
+fn triple_point(point: &AffinePoint) -> AffinePoint {
+    let doubled = point_double(point).output;
+    point_add(&doubled, point).output
 }
 
 fn negate_optional(point: Option<AffinePoint>) -> Option<AffinePoint> {
