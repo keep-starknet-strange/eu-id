@@ -272,6 +272,10 @@ pub struct ExtractedPidMdoc {
     pub nationality_binding: MdocNationalityBinding,
     pub birth_date_value_offset: usize,
     pub nationality_value_offset: usize,
+    /// All of the holder's parsed nationality entries (one for a scalar value, N for an array).
+    /// The `nationality_*` singles above hold the currently-bound entry (default: the first);
+    /// [`select_accepted_nationality`] repoints them at the entry that satisfies the accepted set.
+    pub nationality_candidates: Vec<ParsedNationalityValue>,
     pub signed_at: (u16, u8, u8),
     pub valid_from: (u16, u8, u8),
     pub valid_until: (u16, u8, u8),
@@ -802,7 +806,7 @@ pub fn extract_pid_mdoc(
     } else {
         ParsedBirthDateValue::default()
     };
-    let parsed_nat = if let Some(item) = &nationality_item {
+    let nationality_candidates = if let Some(item) = &nationality_item {
         validate_item_digest(
             &mso.value_digests,
             nationality_element.expect("Alpha2Set element is present"),
@@ -811,8 +815,13 @@ pub fn extract_pid_mdoc(
         )?;
         parse_nationality_value(item)?
     } else {
-        ParsedNationalityValue::default()
+        Vec::new()
     };
+    // Default to the first entry; the policy-aware pick happens later in `select_accepted_nationality`.
+    let parsed_nat = nationality_candidates
+        .first()
+        .cloned()
+        .unwrap_or_default();
 
     let device_signed = map_field(doc_map, "deviceSigned")?;
     let device_auth = map_field(device_signed, "deviceAuth")?;
@@ -871,6 +880,7 @@ pub fn extract_pid_mdoc(
         nationality_binding: parsed_nat.binding,
         birth_date_value_offset: parsed_birth.offset,
         nationality_value_offset: parsed_nat.offset,
+        nationality_candidates,
         signed_at: mso.signed_at,
         valid_from: mso.valid_from,
         valid_until: mso.valid_until,
@@ -925,8 +935,8 @@ impl Default for ParsedBirthDateValue {
     }
 }
 
-#[derive(Clone)]
-struct ParsedNationalityValue {
+#[derive(Clone, Debug)]
+pub struct ParsedNationalityValue {
     numeric: u32,
     bytes: [u8; 2],
     binding: MdocNationalityBinding,
@@ -1019,8 +1029,41 @@ fn parse_birth_date_text_value(
     })
 }
 
-fn parse_nationality_value(item: &ParsedItem) -> Result<ParsedNationalityValue, MdocError> {
-    match &item.value {
+fn parse_nationality_value(item: &ParsedItem) -> Result<Vec<ParsedNationalityValue>, MdocError> {
+    let values: Vec<&Value> = match &item.value {
+        Value::Array(entries) if !entries.is_empty() => entries.iter().collect(),
+        Value::Array(_) => return Err(MdocError::WrongType("nationality elementValue")),
+        other => vec![other],
+    };
+    values
+        .into_iter()
+        .map(|value| parse_one_nationality(item, value))
+        .collect()
+}
+
+fn select_nationality_index(candidates: &[ParsedNationalityValue], accepted: &[u32]) -> usize {
+    candidates
+        .iter()
+        .position(|c| accepted.contains(&c.numeric))
+        .unwrap_or(0)
+}
+
+pub fn select_accepted_nationality(extracted: &mut ExtractedPidMdoc, policy: &Policy) {
+    let index =
+        select_nationality_index(&extracted.nationality_candidates, &policy.accepted_nationalities);
+    if let Some(selected) = extracted.nationality_candidates.get(index).cloned() {
+        extracted.nationalities = vec![selected.numeric];
+        extracted.nationality_bytes = selected.bytes;
+        extracted.nationality_binding = selected.binding;
+        extracted.nationality_value_offset = selected.offset;
+    }
+}
+
+fn parse_one_nationality(
+    item: &ParsedItem,
+    value: &Value,
+) -> Result<ParsedNationalityValue, MdocError> {
+    match value {
         Value::Text(alpha2) => {
             let numeric = numeric_country(alpha2)?;
             let bytes = [(numeric >> 8) as u8, (numeric & 0xFF) as u8];
@@ -1635,13 +1678,11 @@ pub fn device_authentication_bytes(
     }
 
     let device_namespaces = encode_value(Value::Map(Vec::new()));
-    let device_namespaces_bytes =
-        encode_value(Value::Tag(24, Box::new(Value::Bytes(device_namespaces))));
     let device_authentication = encode_value(Value::Array(vec![
         "DeviceAuthentication".into(),
         session_transcript,
         doc_type.into(),
-        Value::Bytes(device_namespaces_bytes),
+        Value::Tag(24, Box::new(Value::Bytes(device_namespaces))),
     ]));
     Ok(encode_value(Value::Tag(
         24,
@@ -5668,6 +5709,62 @@ pub fn mdoc_longfellow_parity_pcs_config() -> PcsConfig {
 #[cfg(test)]
 mod mdoc_sha_table_tests {
     use super::*;
+
+    #[test]
+    fn nationality_array_parses_all_entries_policy_free() {
+        // Holder holds two nationalities as an array: TR (792) then DE (276).
+        let value = Value::Array(vec![
+            Value::Text("TR".to_string()),
+            Value::Text("DE".to_string()),
+        ]);
+        let item = ParsedItem {
+            digest_id: 0,
+            element: "nationality".to_string(),
+            bytes: encode_value(value.clone()), // preimage contains the "TR"/"DE" ASCII bytes
+            value,
+        };
+
+        // The parser is policy-free: it returns every entry, in order, and knows no accepted set.
+        let candidates = parse_nationality_value(&item).expect("parses all entries");
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].numeric, 792); // TR
+        assert_eq!(candidates[1].numeric, 276); // DE
+        assert_eq!(candidates[1].binding, MdocNationalityBinding::Alpha2(*b"DE"));
+
+        // A single (non-array) scalar value parses to exactly one candidate.
+        let scalar_value = Value::Text("DE".to_string());
+        let scalar = ParsedItem {
+            digest_id: 0,
+            element: "nationality".to_string(),
+            bytes: encode_value(scalar_value.clone()),
+            value: scalar_value,
+        };
+        assert_eq!(parse_nationality_value(&scalar).expect("scalar parses").len(), 1);
+    }
+
+    #[test]
+    fn nationality_selection_prefers_the_accepted_entry() {
+        let value = Value::Array(vec![
+            Value::Text("TR".to_string()),
+            Value::Text("DE".to_string()),
+        ]);
+        let item = ParsedItem {
+            digest_id: 0,
+            element: "nationality".to_string(),
+            bytes: encode_value(value.clone()),
+            value,
+        };
+        let candidates = parse_nationality_value(&item).expect("parses all entries");
+
+        // Accepted excludes the first entry -> select DE (index 1), no false negative.
+        assert_eq!(select_nationality_index(&candidates, &[276]), 1);
+        // No accepted set -> first entry.
+        assert_eq!(select_nationality_index(&candidates, &[]), 0);
+        // No entry accepted -> first entry (circuit then fails membership honestly).
+        assert_eq!(select_nationality_index(&candidates, &[999]), 0);
+        // Both accepted -> first qualifying entry in array order (TR).
+        assert_eq!(select_nationality_index(&candidates, &[792, 276]), 0);
+    }
 
     #[test]
     fn mdoc_module_shape_starts_with_shared_sha_tables() {
