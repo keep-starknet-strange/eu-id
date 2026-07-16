@@ -581,6 +581,11 @@ pub struct RoundLookup<E: EvalAtRow> {
 pub struct Eval {
     pub claim: Claim,
     pub relations: KeccakRelations,
+    /// `true` = the round's LogUp is offloaded to GKR: the component emits NO
+    /// interaction columns and only the enabler booleanity constraint; the
+    /// lookup multiset is proven by the host's GKR proof + MLE-eval tie-back
+    /// over the same base columns this eval masks.
+    pub gkr_offload: bool,
 }
 
 impl FrameworkEval for Eval {
@@ -588,19 +593,32 @@ impl FrameworkEval for Eval {
         self.claim.log_size
     }
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        // Every logup numerator is degree ≤ 1 (±enabler or 1) and every tuple
-        // cell — hence every denominator — is degree ≤ 1, so batch-four LogUp
-        // constraints are degree 1 + 4·1 = 5 ≤ D5 (log + 2).
-        self.log_size() + 2
+        if self.gkr_offload {
+            // Only the degree-2 enabler booleanity remains in-AIR.
+            self.log_size() + 1
+        } else {
+            // Every logup numerator is degree ≤ 1 (±enabler or 1) and every
+            // tuple cell — hence every denominator — is degree ≤ 1, so batch-4
+            // logup constraints are degree 1 + 4·1 = 5 ≤ D5 (log + 2).
+            self.log_size() + 2
+        }
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        evaluate_round(&mut eval, &self.relations);
+        if self.gkr_offload {
+            // Mask every base column (the tie-back oracle replays this walk at
+            // the OODS point) and keep the booleanity constraint; the lookups
+            // themselves are GKR's.
+            let _ = collect_round_lookups(&mut eval);
+        } else {
+            evaluate_round(&mut eval, &self.relations);
+        }
         eval
     }
 }
 
-/// Collect the round lookups, emit them through the framework's LogUp, and
-/// batch-finalize them inside the outer STARK.
+/// The legacy columnar round body: collect the lookups, emit them through the
+/// framework's LogUp, batch-finalize. Kept for the standalone `stark.rs` AIR
+/// and as the reference emission order for the GKR offload.
 pub fn evaluate_round<E: EvalAtRow>(eval: &mut E, rel: &KeccakRelations) {
     for lk in collect_round_lookups(eval) {
         match lk.kind {
