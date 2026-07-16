@@ -2504,7 +2504,8 @@ pub fn prove_mldsa(
     let mut prover = MlDsaProver::new(witness, input.clone(), None, handle.clone());
     let (job_shapes, job_streams) = prover.keccak_jobs();
     let mut service = KeccakServiceProver::new(job_shapes, job_streams, handle);
-    let stark_proof = air_core::prove(&mut [&mut service, &mut prover], config)?;
+    let (stark_proof, post_interaction_payloads) =
+        air_core::prove_with_post_interaction(&mut [&mut service, &mut prover], config)?;
     Ok(MlDsaProof {
         input,
         group_evals: prover.group_evals,
@@ -2514,7 +2515,7 @@ pub fn prove_mldsa(
         sib_stream_len,
         sib_squeezed_len,
         service_claimed_sums: service.claimed_sums(),
-        post_interaction_payloads: Vec::new(),
+        post_interaction_payloads,
         stark_proof,
     })
 }
@@ -2598,12 +2599,10 @@ pub fn verify_mldsa(proof: &MlDsaProof) -> Result<(), VerificationError> {
             "ML-DSA statement: bad service claimed-sums length".to_string(),
         ));
     }
-    // No native auxiliary verifier is part of the production statement.
-    if !proof.post_interaction_payloads.is_empty() {
-        return Err(VerificationError::InvalidStructure(
-            "ML-DSA statement: unexpected post-interaction payload".to_string(),
-        ));
-    }
+    // The keccak service's round LogUp is GKR-offloaded: the payload-aware
+    // verify entry distributes `post_interaction_payloads` to each module in
+    // prove order; the service's `verify_post_interaction` fails closed on a
+    // missing/corrupt blob (an empty blob fails GKR decode).
     let mut service = KeccakServiceVerifier::new(
         job_shapes,
         proof.service_claimed_sums.clone(),
@@ -2686,7 +2685,7 @@ mod soundness_tests {
             lifting_log_size: None,
         };
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            air_core::prove(&mut [&mut service, &mut prover], config)
+            air_core::prove_with_post_interaction(&mut [&mut service, &mut prover], config)
         }));
         assert!(
             !matches!(result, Ok(Ok(_))),

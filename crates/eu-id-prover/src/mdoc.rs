@@ -3489,7 +3489,7 @@ fn prove_mdoc_circuit_inner(
         )
     });
 
-    let stark_proof = {
+    let (stark_proof, post_interaction_payloads) = {
         // The keccak service draws shared relations before every hosted ML-DSA
         // consumer. The range AIR publishes the private revocation message
         // before the revocation verifier consumes it.
@@ -3528,7 +3528,7 @@ fn prove_mdoc_circuit_inner(
         if let Some(revocation_public) = ts13_revocation_public.as_mut() {
             modules.push(revocation_public);
         }
-        air_core::prove(modules.as_mut_slice(), config)
+        air_core::prove_with_post_interaction(modules.as_mut_slice(), config)
             .map_err(|e| Error::Prove(format!("{e:?}")))?
     };
     Ok(MdocCircuitProof {
@@ -3562,7 +3562,7 @@ fn prove_mdoc_circuit_inner(
         age_claimed_sums: age.as_ref().map(|age| age.claimed_sums()),
         nat_public: nat.as_ref().map(|_| nat_public),
         nat_claimed_sums: nat.as_ref().map(|nat| nat.claimed_sums()),
-        post_interaction_payloads: Vec::new(),
+        post_interaction_payloads,
     })
 }
 
@@ -3682,12 +3682,10 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
             ))
         }
     }
-    // No native auxiliary verifier is part of the production statement.
-    if !proof.post_interaction_payloads.is_empty() {
-        return Err(Error::Verify(
-            "mdoc proof contains an unexpected post-interaction payload".to_string(),
-        ));
-    }
+    // The keccak service's round LogUp is GKR-offloaded: its proof blob rides
+    // in `post_interaction_payloads`. The payload-aware verify entry hands each
+    // module its slot in prove order; the service `verify_post_interaction`
+    // fails closed on a missing/corrupt blob (an empty blob fails GKR decode).
     let revocation_message_field = has_revocation_signature.then(SharedFieldRelation::new);
     let attribute_count = statement.attributes.len();
     let attribute_digests: Vec<_> = (0..attribute_count)
