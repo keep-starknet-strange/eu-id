@@ -26,6 +26,7 @@ pub mod constants;
 pub mod decomp;
 pub mod expand_a;
 pub mod msglink;
+pub mod ntt_sumcheck_spike; // WO-Q10.3 de-risk spike; off-protocol harness.
 pub mod proof;
 pub mod reference;
 pub mod sampleinball;
