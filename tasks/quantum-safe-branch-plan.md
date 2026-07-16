@@ -222,8 +222,14 @@ reaches <1 MB is the Q4a `keccak_round` GKR offload, scoped as a dedicated WO.
 
 ## Q5 — keccak_round GKR offload: COMPLETE (W1+W2+W3a+W3b+W3c) — proof < 1 MB MET
 
+**Status chronology (clarified 2026-07-16):** the first W1/W2 checkpoint stopped before W3,
+which is what the historical `STOPPED` sections below describe. W3a/W3b/W3c subsequently landed
+in `ae890f0f..73ac7d4e` and met the proof rail; Q8 commit `f4ec6113` later reverted the offload;
+Q10 WO-1 has now restored it on the current sound branch. The historical stop was not the final
+Q5 outcome.
+
 WO goal (Q4a): offload `keccak_round`'s ~908 log-11 interaction columns into a
-LogUp-GKR proof to clear the −83 KB gap to <1 MB. This session delivered the two
+LogUp-GKR proof to clear the −83 KB gap to <1 MB. The initial checkpoint delivered the two
 foundational, independently-verified prerequisites the §8.2/§S10 STOP called out,
 then **stopped before the invasive AIR flip** — the remaining tie-back is a
 research-grade build, not a session checkpoint, and an honest stop beats a
@@ -267,7 +273,7 @@ local commit `6621507a`).
   (non-prover) build clean; the eu-id consumer (`stwo-keccak`) still builds
   against the patched fork.
 
-### STOPPED — W3 (the offload itself)
+### Historical checkpoint — STOPPED before W3 (the offload itself)
 
 **No FS/soundness *structural* blocker exists.** Relations are drawn post-tree-1
 before GKR runs; the fraction multiset is exactly reproducible from committed
@@ -298,7 +304,7 @@ on a soundness-critical component:
    service tamper negatives stay green; then the `pq_perf_probe` +
    `AIR_CORE_SHAPE_DUMP` census with the GKR-blob-net wire-size breakdown.
 
-### Result vs gates
+### Historical checkpoint result vs gates
 
 proof `<1 MB` **NOT met** this session — nothing is removed from the wire yet
 (W3 did not land). No campaign scoreboard vs the 72.7 s / 372.7 ms / 34.4 MB
