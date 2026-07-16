@@ -408,8 +408,8 @@ mod tests {
 
     #[test]
     fn public_digest_bind_class_a_has_256_blind_rows_and_fresh_inactive_cells() {
-        assert!(
-            (1usize << PUBLIC_DIGEST_LOG_SIZE) - 1 >= 256,
+        const _: () = assert!(
+            (1usize << PUBLIC_DIGEST_LOG_SIZE) > 256,
             "public digest Class A needs at least 256 blind rows"
         );
 

@@ -26,8 +26,6 @@ use stwo::prover::backend::simd::m31::LOG_N_LANES;
 
 use crate::air::{Sha256Prover, Sha256Verifier};
 use crate::constants::DIGEST_BYTES;
-#[cfg(feature = "gkr-spike")]
-use crate::gkr_spike::Xor8GkrProofWire;
 use crate::interaction::InteractionClaim;
 use crate::types::{Digest, Sha256Witness};
 use crate::witness::compute_sha256_witness;
@@ -128,9 +126,6 @@ pub struct Sha256Proof {
     /// The underlying Stwo STARK proof (Merkle commitments, FRI proof,
     /// OODS values, PoW nonce).
     pub stark_proof: StarkProof<Blake2sMerkleHasher>,
-    /// Feature-gated side proof replacing the committed `xor_8` LogUp columns.
-    #[cfg(feature = "gkr-spike")]
-    pub xor_8_gkr_proof: Xor8GkrProofWire,
 }
 
 /// Errors that can be returned by [`prove_sha256`].
@@ -193,10 +188,6 @@ pub enum Sha256VerifyError {
     /// out-of-memory allocation on the verify path (the trace row count is
     /// `2^log_n_rows`).
     UnsupportedLogNRows { log_n_rows: u32, min: u32, max: u32 },
-    #[cfg(feature = "gkr-spike")]
-    Xor8GkrUnbalanced,
-    #[cfg(feature = "gkr-spike")]
-    Xor8GkrRejected(String),
 }
 
 impl core::fmt::Display for Sha256VerifyError {
@@ -223,10 +214,6 @@ impl core::fmt::Display for Sha256VerifyError {
                 f,
                 "proof.log_n_rows = {log_n_rows} outside supported range [{min}, {max}]"
             ),
-            #[cfg(feature = "gkr-spike")]
-            Self::Xor8GkrUnbalanced => write!(f, "xor_8 GKR output claims do not balance"),
-            #[cfg(feature = "gkr-spike")]
-            Self::Xor8GkrRejected(msg) => write!(f, "xor_8 GKR proof rejected: {msg}"),
         }
     }
 }
@@ -290,9 +277,6 @@ fn prove_sha256_inner(
     let mut prover = Sha256Prover::new(witness, log_n_rows, group_width);
     let stark_proof = air_core::prove(&mut [&mut prover], pcs_config)?;
     let interaction_claim = prover.interaction_claim().clone();
-    #[cfg(feature = "gkr-spike")]
-    let xor_8_gkr_proof = prover.xor_8_gkr_proof().clone();
-
     let digest = witness.digest_from_blocks();
     Ok(Sha256Proof {
         digest: digest.0,
@@ -302,8 +286,6 @@ fn prove_sha256_inner(
         interaction_claim,
         pcs_config,
         stark_proof,
-        #[cfg(feature = "gkr-spike")]
-        xor_8_gkr_proof,
     })
 }
 
@@ -371,10 +353,6 @@ pub fn verify_sha256_proof(proof: &Sha256Proof) -> Result<(), Sha256VerifyError>
         proof.group_width,
         proof.interaction_claim.clone(),
     );
-    #[cfg(feature = "gkr-spike")]
-    {
-        verifier = verifier.with_xor_8_gkr_proof(proof.xor_8_gkr_proof.clone());
-    }
     air_core::verify(&mut [&mut verifier], &proof.stark_proof)
         .map_err(|e: StwoVerificationError| Sha256VerifyError::StarkRejected(format!("{e:?}")))
 }

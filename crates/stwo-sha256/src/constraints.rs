@@ -1706,7 +1706,7 @@ mod tests {
         res.push(is_length_only - (1 - is_marker) * is_length);
         res.push(is_marker_only - is_marker * (1 - is_length));
         // cumulative marker-word prefix
-        let mut cum = vec![0i64; WORDS_PER_BLOCK];
+        let mut cum = [0i64; WORDS_PER_BLOCK];
         for j in 1..WORDS_PER_BLOCK {
             cum[j] = cum[j - 1] + mword[j - 1];
         }

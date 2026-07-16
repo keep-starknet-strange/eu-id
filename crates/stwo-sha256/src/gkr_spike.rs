@@ -657,7 +657,6 @@ mod tests {
             .into_evals()
             .to_cpu()
             .into_iter()
-            .map(SecureField::from)
             .collect::<Vec<_>>();
 
         eval(&mle_evals, point)

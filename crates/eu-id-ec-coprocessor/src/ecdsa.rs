@@ -4938,10 +4938,12 @@ mod tests {
             MAC_HALF_PARITY_MAX_S - GF128_BITS,
             "Q024 q-bit layout depends on the exact pentanomial fanout bound"
         );
-        assert!(
-            (1usize << MAC_HALF_PARITY_Q_BITS) > MAC_HALF_PARITY_MAX_S / 2,
-            "q bits must cover every possible (W_k + V_k - tag_k) / 2"
-        );
+        const {
+            assert!(
+                (1usize << MAC_HALF_PARITY_Q_BITS) > MAC_HALF_PARITY_MAX_S / 2,
+                "q bits must cover every possible (W_k + V_k - tag_k) / 2"
+            );
+        }
     }
 
     #[test]

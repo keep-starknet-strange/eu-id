@@ -45,6 +45,13 @@ fn g2_sumcheck_bench_result_is_recorded_and_meets_gate() {
 
 #[test]
 fn q007_ligero_v2_params_meet_zk_soundness_gate() {
+    const {
+        assert!(
+            V2_ZK_OPENINGS,
+            "P4a only claims witness-hiding openings; signature statement values remain public until P4b"
+        );
+    }
+
     let legacy = v1_ligero_params();
     assert!(
         legacy.validate().is_err(),
@@ -53,10 +60,6 @@ fn q007_ligero_v2_params_meet_zk_soundness_gate() {
 
     for (name, params) in [("A", v2_ligero_params()), ("B", v2_ligero_params_b())] {
         assert_eq!(params.row_len, 64);
-        assert!(
-            V2_ZK_OPENINGS,
-            "P4a only claims witness-hiding openings; signature statement values remain public until P4b"
-        );
         assert!(params.degree_bound >= params.row_len + params.openings);
         params.validate().unwrap();
         assert!(
@@ -150,7 +153,7 @@ fn value_for_key<'a>(block: &'a str, key: &str) -> &'a str {
         .find_map(|line| {
             let line = line.trim().trim_start_matches('-').trim();
             line.strip_prefix(&prefix)
-                .map(|value| value.trim().split_whitespace().next().unwrap_or(""))
+                .map(|value| value.split_whitespace().next().unwrap_or(""))
         })
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| panic!("RESULT block is missing key {key}"))

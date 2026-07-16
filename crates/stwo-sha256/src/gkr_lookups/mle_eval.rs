@@ -136,7 +136,7 @@ impl<O: MleCoeffColumnOracle> MleEvalProverComponent<O> {
     }
 
     pub fn with_max_constraint_log_degree_bound(mut self, bound: u32) -> Self {
-        assert!(bound >= self.log_size() + 1);
+        assert!(bound > self.log_size());
         self.max_constraint_log_degree_bound = bound;
         self
     }
@@ -298,6 +298,7 @@ impl<O: MleCoeffColumnOracle> ComponentProver<SimdBackend> for MleEvalProverComp
                 eval_domain.log_size(),
                 self.log_size(),
                 SecureField::zero(),
+                0,
             );
             let [mle_coeffs_col_eval] = eval.next_extension_interaction_mask(aux_interaction, [0]);
             let [carry_quotients_col_eval] =
@@ -397,7 +398,7 @@ impl<O: MleCoeffColumnOracle> MleEvalVerifierComponent<O> {
     }
 
     pub fn with_max_constraint_log_degree_bound(mut self, bound: u32) -> Self {
-        assert!(bound >= self.log_size() + 1);
+        assert!(bound > self.log_size());
         self.max_constraint_log_degree_bound = bound;
         self
     }

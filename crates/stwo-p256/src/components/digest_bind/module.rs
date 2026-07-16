@@ -900,7 +900,7 @@ mod tests {
         );
 
         // Both proofs verify.
-        for (proof, claim) in [(&proof_a, &claim_a)] {
+        {
             let scalar_z_handle_v = SharedScalarZRelation::new();
             let digest_handle_v = SharedRelation::<DigestBytesRelation>::default();
             let mut provider_v = providers(
@@ -912,12 +912,12 @@ mod tests {
             let mut bridge_v = DigestBindVerifier::new(
                 log_size,
                 1,
-                claim.clone(),
+                claim_a.clone(),
                 scalar_z_handle_v,
                 digest_handle_v,
             );
             let mut modules: [&mut dyn Air; 2] = [&mut provider_v, &mut bridge_v];
-            air_core::verify(&mut modules, proof).expect("Class-D proof verifies");
+            air_core::verify(&mut modules, &proof_a).expect("Class-D proof verifies");
         }
         // proof_b verifies too (guards against a per-proof state leak).
         let scalar_z_handle_v = SharedScalarZRelation::new();

@@ -1384,7 +1384,7 @@ mod tests {
 
     #[test]
     fn mdoc_mac_binding_class_a_has_256_blind_rows_and_fresh_inactive_cells() {
-        assert!(
+        const _: () = assert!(
             (1usize << BINDING_LOG_SIZE) - 3 >= 256,
             "MAC binding Class A needs at least 256 blind rows"
         );
