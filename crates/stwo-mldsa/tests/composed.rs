@@ -156,6 +156,53 @@ fn composed_expand_a_rejection_schedule_rejects_count_tamper() {
     assert!(verify_mldsa(&proof).is_err());
 }
 
+fn expand_a_range_boundary_rejects(kind: stwo_mldsa::coeffs::tables::RcKind, seed: u64, tag: &str) {
+    let _attack = stwo_mldsa::expand_a::install_range_boundary_attack(kind);
+    let message = big_msg(tag, 1024);
+    let (witness, input) = witness_and_input(seed, &message);
+    assert!(
+        rejected(witness, input),
+        "{} first-excluded value must reject in ExpandA",
+        kind.name()
+    );
+}
+
+#[test]
+fn coeffs_split_expand_a_rc7_boundary_rejects() {
+    expand_a_range_boundary_rejects(
+        stwo_mldsa::coeffs::tables::RcKind::Rc7,
+        8020,
+        "split-expand-rc7",
+    );
+}
+
+#[test]
+fn coeffs_split_expand_a_rc8_boundary_rejects() {
+    expand_a_range_boundary_rejects(
+        stwo_mldsa::coeffs::tables::RcKind::Rc8,
+        8021,
+        "split-expand-rc8",
+    );
+}
+
+#[test]
+fn coeffs_split_expand_a_rc9_boundary_rejects() {
+    expand_a_range_boundary_rejects(
+        stwo_mldsa::coeffs::tables::RcKind::Rc9,
+        8022,
+        "split-expand-rc9",
+    );
+}
+
+#[test]
+fn coeffs_split_expand_a_rc13_boundary_rejects() {
+    expand_a_range_boundary_rejects(
+        stwo_mldsa::coeffs::tables::RcKind::Rc13,
+        8023,
+        "split-expand-rc13",
+    );
+}
+
 // =====================================================================
 // Negatives a–g.
 // =====================================================================
