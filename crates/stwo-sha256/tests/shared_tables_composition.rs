@@ -66,8 +66,8 @@ fn shared_sha_table_union_with_heterogeneous_messages_balances() {
 
     let mut provers: [&mut dyn AirProver; 5] =
         [&mut sha_tables, &mut sha0, &mut sha1, &mut sha2, &mut sha3];
-    let proof = air_core::prove(&mut provers, pcs_config())
-        .expect("shared SHA table composition proves");
+    let proof =
+        air_core::prove(&mut provers, pcs_config()).expect("shared SHA table composition proves");
 
     let shared = SharedShaTableRelations::new();
     let mut table_verifier =

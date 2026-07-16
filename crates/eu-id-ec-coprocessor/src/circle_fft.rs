@@ -852,10 +852,7 @@ mod tests {
             // W interpolates the weights at the data points.
             let window = data_window(geom);
             for (c, &expected) in weights.iter().enumerate() {
-                assert_eq!(
-                    evaluate_at(&w_coeffs, window.tables.domain[c]),
-                    expected
-                );
+                assert_eq!(evaluate_at(&w_coeffs, window.tables.domain[c]), expected);
             }
 
             // sum_{s in S_data} W(s)·R(s) == <weights, data> despite the pads:

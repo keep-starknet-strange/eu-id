@@ -18,12 +18,12 @@ use air_core::{
 use ciborium::value::Value;
 use ecdsa::signature::{Signer, Verifier};
 use p256::ecdsa::{Signature as P256Signature, SigningKey, VerifyingKey};
-#[cfg(feature = "ec-coprocessor")]
-use rand::RngCore;
 use p256::pkcs8::DecodePublicKey;
 use p256::EncodedPoint;
 use predicates::nat::NationalityPredicate;
 use predicates::{AgeRangeCheck, DateOfBirth, PredicateProver, PredicateVerifier};
+#[cfg(feature = "ec-coprocessor")]
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use stwo::core::fields::m31::M31;
@@ -4441,7 +4441,10 @@ impl AirProver for MdocCoprocessorBindingProver {
         crate::mix_coprocessor_tagged_projections(channel, &tagged)
             .expect("mdoc coprocessor public projections mix");
         let seed = crate::draw_coprocessor_seed(channel);
-        let revocation = match (self.revocation_input.as_ref(), revocation_projection.as_ref()) {
+        let revocation = match (
+            self.revocation_input.as_ref(),
+            revocation_projection.as_ref(),
+        ) {
             (Some(input), Some(projection)) => Some((
                 input,
                 projection,
@@ -5446,7 +5449,9 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
     #[cfg(feature = "ec-coprocessor")]
     let mut revocation_public_digest_bind = match (
         proof.ts13_revocation_input.as_ref(),
-        proof.revocation_public_digest_bind_interaction_claim.clone(),
+        proof
+            .revocation_public_digest_bind_interaction_claim
+            .clone(),
         revocation_digest,
     ) {
         (Some(carried), Some(interaction_claim), Some(revocation_digest)) => {

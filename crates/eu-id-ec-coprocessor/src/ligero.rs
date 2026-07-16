@@ -1,7 +1,7 @@
 use crate::circle_fft::{
     circle_data_sum, circle_encode, circle_encode_row, circle_evaluate, circle_product_fft,
-    circle_product_ifft, circle_weight_coeffs, CircleGeom, CircleRsError,
-    CIRCLE_GEOM_L128, CIRCLE_GEOM_L256, CIRCLE_GEOM_L64,
+    circle_product_ifft, circle_weight_coeffs, CircleGeom, CircleRsError, CIRCLE_GEOM_L128,
+    CIRCLE_GEOM_L256, CIRCLE_GEOM_L64,
 };
 use crate::merkle::{commit_columns, verify_column, ColumnOpening, MerkleCommitment, MerkleError};
 use crate::rs::{rs_encode_padded, rs_evaluate, RsError};
