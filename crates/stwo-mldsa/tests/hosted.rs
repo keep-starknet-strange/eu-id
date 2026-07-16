@@ -279,8 +279,11 @@ fn prove_hosted(seed: u64, msg: &[u8], producer_bytes: Vec<u8>) -> MlDsaProof {
     let (job_shapes, job_streams) = mldsa.keccak_jobs();
     let mut service = KeccakServiceProver::new(job_shapes, job_streams, keccak_handle);
 
-    let stark_proof = air_core::prove(&mut [&mut service, &mut producer, &mut mldsa], pcs_config())
-        .expect("prove");
+    let (stark_proof, post_interaction_payloads) = air_core::prove_with_post_interaction(
+        &mut [&mut service, &mut producer, &mut mldsa],
+        pcs_config(),
+    )
+    .expect("prove");
 
     MlDsaProof {
         input,
@@ -291,7 +294,7 @@ fn prove_hosted(seed: u64, msg: &[u8], producer_bytes: Vec<u8>) -> MlDsaProof {
         sib_stream_len: mldsa.sib_stream_len(),
         sib_squeezed_len: mldsa.sib_squeezed_len(),
         service_claimed_sums: service.claimed_sums(),
-        post_interaction_payloads: Vec::new(),
+        post_interaction_payloads,
         stark_proof,
     }
 }
@@ -349,6 +352,19 @@ fn hosted_proves_and_verifies() {
     let msg = b"m7-phase-a-hosted-swap: the message bytes come from the host".to_vec();
     let proof = prove_hosted(4242, &msg, msg.clone());
     verify_hosted(&proof, msg.clone()).expect("hosted verify");
+}
+
+#[test]
+fn hosted_missing_round_gkr_payload_rejects() {
+    let msg = b"hosted proof must carry the round GKR payload".to_vec();
+    let mut proof = prove_hosted(4242, &msg, msg.clone());
+    proof.post_interaction_payloads.clear();
+    let result =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| verify_hosted(&proof, msg)));
+    assert!(
+        matches!(result, Ok(Err(_))),
+        "missing hosted round-GKR payload must return an error, not panic"
+    );
 }
 
 #[test]
@@ -439,7 +455,7 @@ fn prove_two_hosted(
         keccak_handle,
     );
 
-    let stark_proof = air_core::prove(
+    let (stark_proof, post_interaction_payloads) = air_core::prove_with_post_interaction(
         &mut [
             &mut service,
             &mut producer_a,
@@ -464,7 +480,7 @@ fn prove_two_hosted(
         claims(&mldsa_a, &input_a),
         claims(&mldsa_b, &input_b),
         service.claimed_sums(),
-        Vec::new(),
+        post_interaction_payloads,
         stark_proof,
     )
 }
