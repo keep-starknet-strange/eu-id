@@ -231,8 +231,8 @@ pub struct MlDsaProof {
     /// The keccak service module's claimed sums (`[sponge_v, keccak, round,
     /// tables ×9]`) — the standalone proof composes `[service, mldsa]`.
     pub service_claimed_sums: Vec<SecureField>,
-    /// Reserved for wire compatibility. Production ML-DSA uses direct
-    /// outer-STARK Keccak round constraints, so this must be empty.
+    /// Opaque post-interaction payloads; production carries the Keccak
+    /// service's round-GKR proof in its module slot.
     pub post_interaction_payloads: Vec<Vec<u8>>,
     pub stark_proof: StarkProof<Blake2sMerkleHasher>,
 }

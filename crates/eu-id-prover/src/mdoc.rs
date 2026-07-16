@@ -2290,8 +2290,8 @@ pub struct MdocCircuitProof {
     age_claimed_sums: Option<Vec<QM31>>,
     nat_public: Option<predicates::NatPublicInput>,
     nat_claimed_sums: Option<Vec<QM31>>,
-    /// Reserved for wire compatibility. Production uses direct outer-STARK
-    /// Keccak round constraints, so this must be empty.
+    /// Opaque post-interaction payloads; production carries the Keccak
+    /// service's round-GKR proof in its module slot.
     pub post_interaction_payloads: Vec<Vec<u8>>,
 }
 
