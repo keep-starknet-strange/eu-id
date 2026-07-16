@@ -418,6 +418,11 @@ impl Air for KeccakServiceProver {
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
         preprocessed_ids(&self.jobs)
     }
+    fn canonical_preprocessed_columns(
+        &mut self,
+    ) -> Result<Vec<air_core::PreprocessedColumnEval>, VerificationError> {
+        Ok(gen_preprocessed(&self.jobs))
+    }
     fn post_interaction_log_sizes(&self) -> Vec<u32> {
         vec![
             round_log_size(self.jobs.n_perms_total());
@@ -594,6 +599,11 @@ impl Air for KeccakServiceVerifier {
     }
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
         preprocessed_ids(&self.jobs)
+    }
+    fn canonical_preprocessed_columns(
+        &mut self,
+    ) -> Result<Vec<air_core::PreprocessedColumnEval>, VerificationError> {
+        Ok(gen_preprocessed(&self.jobs))
     }
     fn post_interaction_log_sizes(&self) -> Vec<u32> {
         vec![
