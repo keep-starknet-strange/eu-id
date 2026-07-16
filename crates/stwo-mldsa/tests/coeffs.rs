@@ -162,6 +162,53 @@ fn negative_out_of_range_digit() {
     assert!(rejected(w, input), "out-of-range digit must be rejected");
 }
 
+fn coeffs_range_boundary_rejects(
+    kind: stwo_mldsa::coeffs::tables::RcKind,
+    seed: u64,
+    message: &[u8],
+) {
+    let _attack = stwo_mldsa::coeffs::install_range_boundary_attack(kind);
+    let (witness, input) = witness_and_input(seed, message);
+    assert!(
+        rejected(witness, input),
+        "{} first-excluded value must reject in coeffs",
+        kind.name()
+    );
+}
+
+#[test]
+fn coeffs_split_coeffs_rc9_boundary_rejects() {
+    coeffs_range_boundary_rejects(stwo_mldsa::coeffs::tables::RcKind::Rc9, 3010, b"split-rc9");
+}
+
+#[test]
+fn coeffs_split_coeffs_rc13_boundary_rejects() {
+    coeffs_range_boundary_rejects(
+        stwo_mldsa::coeffs::tables::RcKind::Rc13,
+        3011,
+        b"split-rc13",
+    );
+}
+
+#[test]
+fn coeffs_split_coeffs_rc8_boundary_rejects() {
+    coeffs_range_boundary_rejects(stwo_mldsa::coeffs::tables::RcKind::Rc8, 3012, b"split-rc8");
+}
+
+#[test]
+fn coeffs_split_coeffs_rc7_boundary_rejects() {
+    coeffs_range_boundary_rejects(stwo_mldsa::coeffs::tables::RcKind::Rc7, 3013, b"split-rc7");
+}
+
+#[test]
+fn coeffs_split_coeffs_ternary_boundary_rejects() {
+    coeffs_range_boundary_rejects(
+        stwo_mldsa::coeffs::tables::RcKind::Ternary,
+        3014,
+        b"split-ternary",
+    );
+}
+
 /// N5: tamper a carry cell → the (s−B)·Ĉ term in the fold changes ⇒ (‡) nonzero.
 #[test]
 fn negative_tampered_carry() {

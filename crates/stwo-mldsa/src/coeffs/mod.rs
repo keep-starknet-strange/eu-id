@@ -71,6 +71,50 @@ use layout::{groups, Group, Kind, CARRY_DIGITS, MAX_DIGITS};
 use relations::CoeffsRelations;
 use tables::RcKind;
 
+thread_local! {
+    static RANGE_BOUNDARY_ATTACK: core::cell::RefCell<Option<RcKind>> =
+        const { core::cell::RefCell::new(None) };
+}
+
+/// Test-only range-gate attack. Shared fraction streams cannot isolate one kind
+/// without multiplying a witness value by a selector (degree 3), so the hook
+/// replaces every stream occupied by `kind` with its first excluded value.
+/// This preserves every non-lookup constraint and exercises the real shared
+/// relation/table path at the exact `log_size + 1` degree bound.
+#[doc(hidden)]
+pub struct CoeffsRangeBoundaryGuard;
+
+impl Drop for CoeffsRangeBoundaryGuard {
+    fn drop(&mut self) {
+        RANGE_BOUNDARY_ATTACK.with(|attack| *attack.borrow_mut() = None);
+    }
+}
+
+#[doc(hidden)]
+pub fn install_range_boundary_attack(kind: RcKind) -> CoeffsRangeBoundaryGuard {
+    RANGE_BOUNDARY_ATTACK.with(|attack| *attack.borrow_mut() = Some(kind));
+    CoeffsRangeBoundaryGuard
+}
+
+fn attacked_stream_boundary(stream: usize) -> Option<u32> {
+    RANGE_BOUNDARY_ATTACK.with(|attack| {
+        attack.borrow().and_then(|kind| {
+            let occupied = match kind {
+                RcKind::Rc9 => stream <= 5,
+                RcKind::Rc13 => matches!(stream, 0..=4 | 6 | 8),
+                RcKind::Rc8 => matches!(stream, 5..=9),
+                RcKind::Rc7 => matches!(stream, 7 | 9),
+                RcKind::Ternary => stream == 7,
+            };
+            occupied.then_some(kind.n_values() as u32)
+        })
+    })
+}
+
+fn attacked_stream_value<E: EvalAtRow>(stream: usize, value: E::F) -> E::F {
+    attacked_stream_boundary(stream).map_or(value, |boundary| E::F::from(m31(boundary)))
+}
+
 // --- Norm bound (worksheet §3.4): γ1 − β − 1 = 524_091. -----------------------
 /// `γ1 − β − 1` for ML-DSA-65 (`γ1 = 2^19`, `β = τ·η = 49·4 = 196`).
 pub const Z_NORM_BOUND: i64 = 524_091;
@@ -127,16 +171,10 @@ pub fn coeffs_preprocessed_ids() -> Vec<PreProcessedColumnId> {
     ids
 }
 
-/// Logup fractions emitted per row (in AIR emission order): 6 digit rc9 + 5
-/// carry-lo + 5 carry-hi + 2 norm-lo + 2 norm-hi + 1 ternary + 1 eval yield + 1
-/// WCell yield + 1 CCell yield = 24. Each is gated to zero on rows where it
-/// doesn't apply.
-pub const N_LOGUP_ENTRIES: usize = MAX_DIGITS      // digit rc9 uses
-    + CARRY_DIGITS                                  // carry-lo rc13 uses
-    + CARRY_DIGITS                                  // carry-hi rc8 uses
-    + 2                                             // norm-lo rc13 uses (a,b)
-    + 2                                             // norm-hi rc7 uses (a,b)
-    + 1                                             // ternary use (c+1)
+/// Ten shared range streams plus the three distinct relation yields. Range
+/// kinds occupy disjoint row slots and are namespaced by fixed bound ids.
+pub const N_RANGE_STREAMS: usize = 10;
+pub const N_LOGUP_ENTRIES: usize = N_RANGE_STREAMS
     + 1                                             // eval yield
     + 1                                             // WCell yield (w cells)
     + 1; // CCell yield (c cells)
@@ -269,6 +307,11 @@ pub fn gen_coeffs_base_trace(witness: &MlDsaWitness, log_size: u32) -> Vec<ColEv
                     let shifted = digits[t] + CARRY_OFFSET as i128; // ∈ [0, 2^21)
                     cols[COL_CARRY_HI0 + t][row] = m31((shifted >> 13) as u32);
                 }
+            }
+            Kind::C => {
+                // Reuse the otherwise-idle norm-a auxiliary as the ternary
+                // range-stream value. The AIR binds it to c+1 on c rows.
+                cols[COL_NORM_A_HI][row] = encode_signed(digits[0] + 1);
             }
             _ => {}
         }
@@ -414,39 +457,18 @@ impl FrameworkEval for CoeffsEval {
             eval.add_constraint((one.clone() - live_mask[t].clone()) * digit[t].clone());
         }
 
-        // C2: digit range (dedicated 2^9 table, offset +2^8). Only digit-kind
-        // rows; each LIVE digit is consumed once. Carry rows use their own split.
-        let digit_offset = E::F::from(M31::from_u32_unchecked(DIGIT_OFFSET));
-        for t in 0..MAX_DIGITS {
-            let gate = is_digit.clone() * live_mask[t].clone();
-            let offset_digit = digit[t].clone() + digit_offset.clone();
-            eval.add_to_relation(RelationEntry::base(
-                &self.relations.rc9,
-                gate,
-                core::slice::from_ref(&offset_digit),
-            ));
+        // C2: auxiliary columns are zero outside the row kinds that use them.
+        // This lets the ten range denominators select values by addition instead
+        // of multiplying witness values by selectors (which would raise degree).
+        eval.add_constraint((one.clone() - is_recomp.clone()) * recomp_cell.clone());
+        eval.add_constraint((one.clone() - is_norm.clone() - is_c.clone()) * norm_a_hi.clone());
+        eval.add_constraint((one.clone() - is_norm.clone()) * norm_b_hi.clone());
+        for hi in &carry_hi {
+            eval.add_constraint((one.clone() - is_carry.clone()) * hi.clone());
         }
+        eval.add_constraint(is_c.clone() * (norm_a_hi.clone() - digit[0].clone() - one.clone()));
 
-        // C3: carry range |C| ≤ 2^20 via (C+2^20) = lo + 2^13·hi, lo∈rc13, hi∈rc8.
-        let two_pow_13 = E::F::from(M31::from_u32_unchecked(1 << 13));
-        let carry_offset = E::F::from(M31::from_u32_unchecked(CARRY_OFFSET as u32));
-        for t in 0..CARRY_DIGITS {
-            // lo is a degree-1 expression; membership in rc13 enforces lo∈[0,2^13).
-            let lo =
-                digit[t].clone() + carry_offset.clone() - two_pow_13.clone() * carry_hi[t].clone();
-            eval.add_to_relation(RelationEntry::base(
-                &self.relations.rc13,
-                is_carry.clone(),
-                core::slice::from_ref(&lo),
-            ));
-            eval.add_to_relation(RelationEntry::base(
-                &self.relations.rc8,
-                is_carry.clone(),
-                core::slice::from_ref(&carry_hi[t]),
-            ));
-        }
-
-        // C4: recomposition binding cell = Σ_t d_t·B^t (z,w rows, §3.4).
+        // C3: recomposition binding cell = Σ_t d_t·B^t (z,w rows, §3.4).
         let mut recomp_expr = E::F::from(M31::one()) * digit[0].clone();
         {
             let mut weight = b_ef;
@@ -457,48 +479,83 @@ impl FrameworkEval for CoeffsEval {
         }
         eval.add_constraint(is_recomp.clone() * (recomp_cell.clone() - recomp_expr));
 
-        // C5: exact z-norm |z| ≤ Z_NORM_BOUND (z rows). a=cell+bound, b=bound−cell,
-        // a,b ∈ [0,2^20) via 13+7 split; a+b=2·bound is automatic. rc's on a,b give
-        // a∈[0,2·bound] i.e. cell∈[−bound,bound] EXACTLY (review flag: NOT 2^20).
-        let bound = E::F::from(M31::from_u32_unchecked(Z_NORM_BOUND as u32));
-        let a = recomp_cell.clone() + bound.clone();
-        let b = bound.clone() - recomp_cell.clone();
-        let a_lo = a - two_pow_13.clone() * norm_a_hi.clone();
-        let b_lo = b - two_pow_13.clone() * norm_b_hi.clone();
+        // C4: ten shared range streams. Every bound id is a constant-weighted
+        // preprocessed selector; no witness column can choose a wider bound.
+        let digit_offset = E::F::from(M31::from_u32_unchecked(DIGIT_OFFSET));
+        let two_pow_13 = E::F::from(M31::from_u32_unchecked(1 << 13));
+        let carry_offset = E::F::from(M31::from_u32_unchecked(CARRY_OFFSET as u32));
+        let rc9_id = E::F::from(m31(RcKind::Rc9.bound_id()));
+        let rc13_id = E::F::from(m31(RcKind::Rc13.bound_id()));
+        let rc8_id = E::F::from(m31(RcKind::Rc8.bound_id()));
+        let rc7_id = E::F::from(m31(RcKind::Rc7.bound_id()));
+        let ternary_id = E::F::from(m31(RcKind::Ternary.bound_id()));
+
+        // Slots 0..4: digit rc9 or carry low rc13.
+        for t in 0..CARRY_DIGITS {
+            let gate = is_digit.clone() * live_mask[t].clone();
+            let value = digit[t].clone()
+                + is_digit.clone() * digit_offset.clone()
+                + is_carry.clone() * carry_offset.clone()
+                - two_pow_13.clone() * carry_hi[t].clone();
+            let value = attacked_stream_value::<E>(t, value);
+            let bound_id = is_digit.clone() * rc9_id.clone() + is_carry.clone() * rc13_id.clone();
+            eval.add_to_relation(RelationEntry::base(
+                &self.relations.range,
+                gate + is_carry.clone(),
+                &[value, bound_id],
+            ));
+        }
+        // Slot 5: sixth digit rc9 or first carry high rc8.
+        let gate = is_digit.clone() * live_mask[5].clone();
+        let value = digit[5].clone() + is_digit.clone() * digit_offset + carry_hi[0].clone();
+        let value = attacked_stream_value::<E>(5, value);
+        let bound_id = is_digit.clone() * rc9_id + is_carry.clone() * rc8_id.clone();
         eval.add_to_relation(RelationEntry::base(
-            &self.relations.rc13,
-            is_norm.clone(),
-            core::slice::from_ref(&a_lo),
-        ));
-        eval.add_to_relation(RelationEntry::base(
-            &self.relations.rc7,
-            is_norm.clone(),
-            core::slice::from_ref(&norm_a_hi),
-        ));
-        eval.add_to_relation(RelationEntry::base(
-            &self.relations.rc13,
-            is_norm.clone(),
-            core::slice::from_ref(&b_lo),
-        ));
-        eval.add_to_relation(RelationEntry::base(
-            &self.relations.rc7,
-            is_norm.clone(),
-            core::slice::from_ref(&norm_b_hi),
+            &self.relations.range,
+            gate + is_carry.clone(),
+            &[value, bound_id],
         ));
 
-        // C6: ternary c ∈ {−1,0,1} via a membership lookup of `c+1 ∈ {0,1,2}`
-        // (degree-1, c rows). The cubic poly `c(c−1)(c+1)` is degree 4 gated,
-        // which forces the composition bound to `+2` and breaks the interaction-
-        // tree Horner mask; the lookup keeps every constraint degree ≤ 2. c rows
-        // are padding-gated per S5 §4 (padding c-digit = 0 ⇒ c+1 = 1 ∈ table, but
-        // is_c = 0 there so no use is emitted).
-        let c_plus_one = digit[0].clone() + one.clone();
+        // Slots 6..9: remaining carry highs or z norm splits. Slot 7 also
+        // carries c+1 on c rows via the bound auxiliary above.
+        let bound = E::F::from(M31::from_u32_unchecked(Z_NORM_BOUND as u32));
+        let value = carry_hi[1].clone() + recomp_cell.clone() + is_norm.clone() * bound.clone()
+            - two_pow_13.clone() * norm_a_hi.clone();
+        let value = attacked_stream_value::<E>(6, value);
+        let bound_id = is_carry.clone() * rc8_id.clone() + is_norm.clone() * rc13_id.clone();
         eval.add_to_relation(RelationEntry::base(
-            &self.relations.ternary,
-            is_c.clone(),
-            core::slice::from_ref(&c_plus_one),
+            &self.relations.range,
+            is_carry.clone() + is_norm.clone(),
+            &[value, bound_id],
         ));
-        let _ = &is_c;
+
+        let value = attacked_stream_value::<E>(7, carry_hi[2].clone() + norm_a_hi.clone());
+        let bound_id = is_carry.clone() * rc8_id.clone()
+            + is_norm.clone() * rc7_id.clone()
+            + is_c.clone() * ternary_id;
+        eval.add_to_relation(RelationEntry::base(
+            &self.relations.range,
+            is_carry.clone() + is_norm.clone() + is_c.clone(),
+            &[value, bound_id],
+        ));
+
+        let value = carry_hi[3].clone() - recomp_cell.clone() + is_norm.clone() * bound
+            - two_pow_13 * norm_b_hi.clone();
+        let value = attacked_stream_value::<E>(8, value);
+        let bound_id = is_carry.clone() * rc8_id.clone() + is_norm.clone() * rc13_id;
+        eval.add_to_relation(RelationEntry::base(
+            &self.relations.range,
+            is_carry.clone() + is_norm.clone(),
+            &[value, bound_id],
+        ));
+
+        let value = attacked_stream_value::<E>(9, carry_hi[4].clone() + norm_b_hi.clone());
+        let bound_id = is_carry.clone() * rc8_id + is_norm.clone() * rc7_id;
+        eval.add_to_relation(RelationEntry::base(
+            &self.relations.range,
+            is_carry + is_norm,
+            &[value, bound_id],
+        ));
 
         // C7: bivariate Horner (interaction). digit_row(s) = Σ_t d_t·s^t.
         let mut digit_row = E::EF::from(digit[0].clone());
@@ -699,118 +756,53 @@ pub fn gen_coeffs_interaction(
         })
         .collect();
 
-    // C2 digit rc9 uses (6).
-    for t in 0..MAX_DIGITS {
+    // C4 ten shared range streams, matching the AIR slot assignment exactly.
+    for stream in 0..N_RANGE_STREAMS {
         push_entry(
-            &|coset| match &coset_digits[coset] {
-                Some((digits, group, _))
-                    if group.kind != Kind::Carry && t < group.kind.live_digits() =>
-                {
-                    let v = encode_signed(digits[t]) + m31(DIGIT_OFFSET);
-                    (one, relations.rc9.combine(&[v]))
+            &|coset| {
+                let selected = match &coset_digits[coset] {
+                    Some((digits, group, _)) if group.kind == Kind::Carry => {
+                        let t = stream % CARRY_DIGITS;
+                        let shifted = digits[t] + CARRY_OFFSET as i128;
+                        if stream < CARRY_DIGITS {
+                            Some((m31((shifted & ((1 << 13) - 1)) as u32), RcKind::Rc13))
+                        } else {
+                            Some((m31((shifted >> 13) as u32), RcKind::Rc8))
+                        }
+                    }
+                    Some((digits, group, _)) if stream < group.kind.live_digits() => Some((
+                        encode_signed(digits[stream]) + m31(DIGIT_OFFSET),
+                        RcKind::Rc9,
+                    )),
+                    Some((digits, group, _)) if group.kind == Kind::Z && stream >= 6 => {
+                        let cell = recompose(digits);
+                        let a = cell + Z_NORM_BOUND as i128;
+                        let b = Z_NORM_BOUND as i128 - cell;
+                        Some(match stream {
+                            6 => (m31((a & ((1 << 13) - 1)) as u32), RcKind::Rc13),
+                            7 => (m31((a >> 13) as u32), RcKind::Rc7),
+                            8 => (m31((b & ((1 << 13) - 1)) as u32), RcKind::Rc13),
+                            9 => (m31((b >> 13) as u32), RcKind::Rc7),
+                            _ => unreachable!(),
+                        })
+                    }
+                    Some((digits, group, _)) if group.kind == Kind::C && stream == 7 => {
+                        Some((encode_signed(digits[0]) + m31(1), RcKind::Ternary))
+                    }
+                    _ => None,
+                };
+                match selected {
+                    Some((value, kind)) => {
+                        let value = attacked_stream_boundary(stream).map_or(value, m31);
+                        (one, relations.range.combine(&[value, m31(kind.bound_id())]))
+                    }
+                    None => (zero, one),
                 }
-                _ => (zero, one),
             },
             &mut entries,
             &mut claimed,
         );
     }
-    // C3 carry-lo rc13 (5) + carry-hi rc8 (5), interleaved per t as in evaluate().
-    for t in 0..CARRY_DIGITS {
-        push_entry(
-            &|coset| match &coset_digits[coset] {
-                Some((digits, group, _)) if group.kind == Kind::Carry => {
-                    let shifted = digits[t] + CARRY_OFFSET as i128;
-                    let lo = (shifted & ((1 << 13) - 1)) as u32;
-                    (one, relations.rc13.combine(&[m31(lo)]))
-                }
-                _ => (zero, one),
-            },
-            &mut entries,
-            &mut claimed,
-        );
-        push_entry(
-            &|coset| match &coset_digits[coset] {
-                Some((digits, group, _)) if group.kind == Kind::Carry => {
-                    let shifted = digits[t] + CARRY_OFFSET as i128;
-                    let hi = (shifted >> 13) as u32;
-                    (one, relations.rc8.combine(&[m31(hi)]))
-                }
-                _ => (zero, one),
-            },
-            &mut entries,
-            &mut claimed,
-        );
-    }
-    // C5 norm: a_lo rc13, a_hi rc7, b_lo rc13, b_hi rc7.
-    // a_lo
-    push_entry(
-        &|coset| match &coset_digits[coset] {
-            Some((digits, group, _)) if group.kind == Kind::Z => {
-                let cell = recompose(digits);
-                let a = cell + Z_NORM_BOUND as i128;
-                let lo = (a & ((1 << 13) - 1)) as u32;
-                (one, relations.rc13.combine(&[m31(lo)]))
-            }
-            _ => (zero, one),
-        },
-        &mut entries,
-        &mut claimed,
-    );
-    // a_hi
-    push_entry(
-        &|coset| match &coset_digits[coset] {
-            Some((digits, group, _)) if group.kind == Kind::Z => {
-                let cell = recompose(digits);
-                let a = cell + Z_NORM_BOUND as i128;
-                let hi = (a >> 13) as u32;
-                (one, relations.rc7.combine(&[m31(hi)]))
-            }
-            _ => (zero, one),
-        },
-        &mut entries,
-        &mut claimed,
-    );
-    // b_lo
-    push_entry(
-        &|coset| match &coset_digits[coset] {
-            Some((digits, group, _)) if group.kind == Kind::Z => {
-                let cell = recompose(digits);
-                let b = Z_NORM_BOUND as i128 - cell;
-                let lo = (b & ((1 << 13) - 1)) as u32;
-                (one, relations.rc13.combine(&[m31(lo)]))
-            }
-            _ => (zero, one),
-        },
-        &mut entries,
-        &mut claimed,
-    );
-    // b_hi
-    push_entry(
-        &|coset| match &coset_digits[coset] {
-            Some((digits, group, _)) if group.kind == Kind::Z => {
-                let cell = recompose(digits);
-                let b = Z_NORM_BOUND as i128 - cell;
-                let hi = (b >> 13) as u32;
-                (one, relations.rc7.combine(&[m31(hi)]))
-            }
-            _ => (zero, one),
-        },
-        &mut entries,
-        &mut claimed,
-    );
-    // C6 ternary use: c+1 ∈ {0,1,2} on c rows.
-    push_entry(
-        &|coset| match &coset_digits[coset] {
-            Some((digits, group, _)) if group.kind == Kind::C => {
-                let v = (encode_signed(digits[0]) + m31(1)).0;
-                (one, relations.ternary.combine(&[m31(v)]))
-            }
-            _ => (zero, one),
-        },
-        &mut entries,
-        &mut claimed,
-    );
     // C8 eval YIELD at group-end (−1).
     push_entry(
         &|coset| match &coset_digits[coset] {

@@ -358,14 +358,8 @@ fn draw_relations_common(
     };
 
     let coeffs = CoeffsRelations::draw_with(channel, wcell.clone(), ccell.clone());
-    let expand_a = ExpandARelations::draw_with(
-        channel,
-        keccak.hash_io.clone(),
-        coeffs.rc9.clone(),
-        coeffs.rc13.clone(),
-        coeffs.rc8.clone(),
-        coeffs.rc7.clone(),
-    );
+    let expand_a =
+        ExpandARelations::draw_with(channel, keccak.hash_io.clone(), coeffs.range.clone());
     let decomp = DecompRelations::draw_with(channel, wcell, keccak.hash_io.clone());
     let sib = SibRelations::draw_with(channel, ccell, keccak.hash_io.clone());
 
@@ -721,11 +715,9 @@ fn all_preprocessed_ids(
     let msglink = MsgLinkRelation::dummy();
     let mut ids = Vec::new();
     ids.extend(expand_a::expand_a_preprocessed_ids(ns));
-    // coeffs (+ its rc kinds).
+    // coeffs + its unified range table.
     ids.extend(coeffs::coeffs_preprocessed_ids());
-    for kind in coeffs_tables::RcKind::ALL {
-        ids.push(kind.value_column_id());
-    }
+    ids.extend(coeffs_tables::range_table_preprocessed_ids());
     // decomp (+ its rc kinds).
     ids.extend(decomp::decomp_preprocessed_ids());
     for kind in decomp_tables::RcKind::ALL {
@@ -776,9 +768,10 @@ fn all_preprocessed_log_sizes(
     ]);
     let cls = coeffs_log_size();
     sizes.extend(vec![cls; coeffs::coeffs_preprocessed_ids().len()]);
-    for kind in coeffs_tables::RcKind::ALL {
-        sizes.push(kind.log_size());
-    }
+    sizes.extend(vec![
+        coeffs_tables::range_table_log_size();
+        coeffs_tables::range_table_preprocessed_ids().len()
+    ]);
     let dls = decomp_log_size();
     sizes.extend(vec![dls; decomp::decomp_preprocessed_ids().len()]);
     for kind in decomp_tables::RcKind::ALL {
@@ -847,9 +840,7 @@ fn gen_all_preprocessed(
     ));
     let cls = coeffs_log_size();
     cols.extend(coeffs::gen_coeffs_preprocessed(cls));
-    for kind in coeffs_tables::RcKind::ALL {
-        cols.push(coeffs_tables::gen_table_preprocessed(kind));
-    }
+    cols.extend(coeffs_tables::gen_range_table_preprocessed());
     let dls = decomp_log_size();
     cols.extend(decomp::gen_decomp_preprocessed(dls));
     for kind in decomp_tables::RcKind::ALL {
@@ -941,7 +932,7 @@ struct Built {
     expand_a_rejection: FrameworkComponent<RejectionEval>,
     expand_a_ntt: FrameworkComponent<NttEval>,
     coeffs: FrameworkComponent<CoeffsEval>,
-    coeffs_rc: Vec<FrameworkComponent<coeffs_tables::RcTableEval>>,
+    coeffs_rc: Vec<FrameworkComponent<coeffs_tables::RangeTableEval>>,
     decomp: FrameworkComponent<DecompEval>,
     decomp_rc: Vec<FrameworkComponent<decomp_tables::RcTableEval>>,
     sib: FrameworkComponent<SibEval>,
@@ -1080,9 +1071,7 @@ impl Claims {
         let expand_a_rejection = next();
         let expand_a_ntt = next();
         let coeffs = next();
-        let coeffs_rc = (0..coeffs_tables::RcKind::ALL.len())
-            .map(|_| next())
-            .collect();
+        let coeffs_rc = vec![next()];
         let decomp = next();
         let decomp_rc = (0..decomp_tables::RcKind::ALL.len())
             .map(|_| next())
@@ -1168,11 +1157,9 @@ fn module_trace_layout(ctx: &LayoutCtx) -> Vec<u32> {
         REJECTION_BASE_COLS
     ]);
     t.extend(vec![expand_a::ntt_log_size(); NTT_BASE_COLS]);
-    // 1. coeffs + 2. rc ×5.
+    // 1. coeffs + 2. unified range table.
     t.extend(vec![coeffs_log_size(); coeffs::N_BASE_COLS]);
-    for kind in coeffs_tables::RcKind::ALL {
-        t.push(kind.log_size());
-    }
+    t.push(coeffs_tables::range_table_log_size());
     // 3. decomp + 4. rc ×4.
     t.extend(vec![decomp_log_size(); decomp::N_BASE_COLS]);
     for kind in decomp_tables::RcKind::ALL {
@@ -1222,13 +1209,12 @@ fn module_interaction_layout(ctx: &LayoutCtx) -> Vec<u32> {
         REJECTION_INTERACTION_COLS
     ]);
     i.extend(vec![expand_a::ntt_log_size(); NTT_INTERACTION_COLS]);
-    // 1. coeffs + 2. rc ×5.
+    // 1. coeffs + 2. unified range table.
     i.extend(vec![coeffs_log_size(); coeffs::N_INTERACTION_COLS]);
-    for kind in coeffs_tables::RcKind::ALL {
-        for _ in 0..coeffs_tables::RC_TABLE_INTERACTION_COLS {
-            i.push(kind.log_size());
-        }
-    }
+    i.extend(vec![
+        coeffs_tables::range_table_log_size();
+        coeffs_tables::RANGE_TABLE_INTERACTION_COLS
+    ]);
     // 3. decomp + 4. rc ×4.
     i.extend(vec![decomp_log_size(); decomp::N_INTERACTION_COLS]);
     for kind in decomp_tables::RcKind::ALL {
@@ -1383,21 +1369,14 @@ fn build_components(
         },
         claims.coeffs,
     );
-    // 2. coeffs rc ×5.
-    let coeffs_rc = coeffs_tables::RcKind::ALL
-        .iter()
-        .enumerate()
-        .map(|(idx, kind)| {
-            FrameworkComponent::new(
-                allocator,
-                coeffs_tables::RcTableEval {
-                    kind: *kind,
-                    relation: rel.coeffs.rc(*kind).clone(),
-                },
-                claims.coeffs_rc[idx],
-            )
-        })
-        .collect();
+    // 2. unified coeffs + ExpandA range table.
+    let coeffs_rc = vec![FrameworkComponent::new(
+        allocator,
+        coeffs_tables::RangeTableEval {
+            relation: rel.coeffs.range.clone(),
+        },
+        claims.coeffs_rc[0],
+    )];
     // 3. decomp.
     let decomp = FrameworkComponent::new(
         allocator,
@@ -1865,7 +1844,7 @@ impl AirProver for MlDsaProver {
             .max(expand_a::rejection_log_size(
                 &self.expand_a_witness.candidate_counts,
             ))
-            .max(coeffs_tables::RcKind::Rc13.log_size())
+            .max(coeffs_tables::range_table_log_size())
     }
     fn max_constraint_log_degree_bound(&self) -> u32 {
         self.max_log_size() + 2
@@ -1950,7 +1929,8 @@ impl AirProver for MlDsaProver {
         let (expand_ntt_trace, expand_ntt_uses) = gen_ntt_base_trace(&self.expand_a_witness);
         evals.extend(expand_ntt_trace);
 
-        // 1. coeffs base + 2. rc mult (dry-run interaction for use counts).
+        // 1. coeffs base + 2. unified range multiplicity. ExpandA and coeffs
+        // consume the same namespaced relation, so their counts add by kind.
         let cls = coeffs_log_size();
         evals.extend(coeffs::gen_coeffs_base_trace(&self.witness, cls));
         let coeffs_dry = coeffs::gen_coeffs_interaction(
@@ -1960,21 +1940,33 @@ impl AirProver for MlDsaProver {
             SecureField::zero(),
             &CoeffsRelations::dummy(),
         );
-        self.coeffs_rc_mult = coeffs_tables::RcKind::ALL
-            .iter()
-            .map(|kind| {
-                let mut uses = coeffs_dry.rc_uses.for_kind(*kind).to_vec();
-                if *kind != coeffs_tables::RcKind::Ternary {
-                    for (dst, src) in uses.iter_mut().zip(expand_rejection_uses.for_kind(*kind)) {
-                        *dst += src;
-                    }
-                    for (dst, src) in uses.iter_mut().zip(expand_ntt_uses.for_kind(*kind)) {
-                        *dst += src;
-                    }
-                }
-                coeffs_tables::gen_table_multiplicities(*kind, &uses)
-            })
-            .collect();
+        let mut range_uses: [Vec<u32>; 5] = core::array::from_fn(|idx| {
+            coeffs_dry
+                .rc_uses
+                .for_kind(coeffs_tables::RcKind::ALL[idx])
+                .to_vec()
+        });
+        for (idx, kind) in coeffs_tables::RcKind::RANGE.iter().enumerate() {
+            for (dst, src) in range_uses[idx]
+                .iter_mut()
+                .zip(expand_rejection_uses.for_kind(*kind))
+            {
+                *dst += src;
+            }
+            for (dst, src) in range_uses[idx]
+                .iter_mut()
+                .zip(expand_ntt_uses.for_kind(*kind))
+            {
+                *dst += src;
+            }
+        }
+        self.coeffs_rc_mult = vec![coeffs_tables::gen_range_table_multiplicities([
+            &range_uses[0],
+            &range_uses[1],
+            &range_uses[2],
+            &range_uses[3],
+            &range_uses[4],
+        ])];
         evals.extend(self.coeffs_rc_mult.clone());
 
         // 3. decomp base + 4. rc mult (stash w1Encode bytes for the w1enc bridge).
@@ -2104,17 +2096,12 @@ impl AirProver for MlDsaProver {
         self.claims.coeffs = coeffs_int.claimed_sum;
         self.group_evals = coeffs_int.group_evals.clone();
         evals.extend(coeffs_int.trace);
-        // 2. coeffs rc ×5.
+        // 2. unified coeffs + ExpandA range table.
         self.claims.coeffs_rc.clear();
-        for (idx, kind) in coeffs_tables::RcKind::ALL.iter().enumerate() {
-            let (tr, sum) = coeffs_tables::gen_table_interaction(
-                *kind,
-                &self.coeffs_rc_mult[idx],
-                rel.coeffs.rc(*kind),
-            );
-            evals.extend(tr);
-            self.claims.coeffs_rc.push(sum);
-        }
+        let (tr, sum) =
+            coeffs_tables::gen_range_table_interaction(&self.coeffs_rc_mult[0], &rel.coeffs.range);
+        evals.extend(tr);
+        self.claims.coeffs_rc.push(sum);
 
         // 3. decomp interaction.
         let dls = decomp_log_size();
@@ -2559,7 +2546,7 @@ pub fn n_a_evals() -> usize {
 /// construction — `Claims::from_flat` panics on a short vector.
 pub fn hosted_claimed_sums_len() -> usize {
     2                                             // ExpandA rejection + inverse NTT
-        + 1 + coeffs_tables::RcKind::ALL.len()    // coeffs + rc
+        + 1 + coeffs_tables::RANGE_TABLE_COMPONENTS // coeffs + unified range table
         + 1 + decomp_tables::RcKind::ALL.len()    // decomp + rc
         + 1 + sib_tables::RcKind::ALL.len()       // sib + rc
         + 3                                       // pk + tr-check + µ prefix

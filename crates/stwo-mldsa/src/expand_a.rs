@@ -19,7 +19,7 @@ use stwo_constraint_framework::{
 };
 
 use crate::air_util::{circle_row_to_coset, col_eval, m31, ColEval};
-use crate::coeffs::relations::RcRelation;
+use crate::coeffs::relations::RangeRelation;
 use crate::coeffs::tables::RcKind;
 use crate::constants::{K, L, N, Q, ZETA};
 use crate::reference::ntt::ntt_inverse;
@@ -46,10 +46,7 @@ relation!(AEvalRelation, 5);
 #[derive(Clone)]
 pub struct ExpandARelations {
     pub hash_io: HashIoRelation,
-    pub rc9: RcRelation,
-    pub rc13: RcRelation,
-    pub rc8: RcRelation,
-    pub rc7: RcRelation,
+    pub range: RangeRelation,
     pub cell: NttCellRelation,
     pub eval: AEvalRelation,
 }
@@ -58,17 +55,11 @@ impl ExpandARelations {
     pub fn draw_with(
         channel: &mut impl stwo::core::channel::Channel,
         hash_io: HashIoRelation,
-        rc9: RcRelation,
-        rc13: RcRelation,
-        rc8: RcRelation,
-        rc7: RcRelation,
+        range: RangeRelation,
     ) -> Self {
         Self {
             hash_io,
-            rc9,
-            rc13,
-            rc8,
-            rc7,
+            range,
             cell: NttCellRelation::draw(channel),
             eval: AEvalRelation::draw(channel),
         }
@@ -77,10 +68,7 @@ impl ExpandARelations {
     pub fn dummy() -> Self {
         Self {
             hash_io: HashIoRelation::dummy(),
-            rc9: RcRelation::dummy(),
-            rc13: RcRelation::dummy(),
-            rc8: RcRelation::dummy(),
-            rc7: RcRelation::dummy(),
+            range: RangeRelation::dummy(),
             cell: NttCellRelation::dummy(),
             eval: AEvalRelation::dummy(),
         }
@@ -439,6 +427,53 @@ fn signed_m31(value: i64) -> M31 {
     m31(value.rem_euclid(P) as u32)
 }
 
+thread_local! {
+    static RANGE_BOUNDARY_ATTACK: core::cell::RefCell<Option<RcKind>> =
+        const { core::cell::RefCell::new(None) };
+}
+
+/// Test-only attack that substitutes the first excluded value at every ExpandA
+/// use of one fixed range kind. Both AIR and interaction generation take this
+/// path, so all arithmetic constraints remain honest and only the range lookup
+/// can reject.
+#[doc(hidden)]
+pub struct ExpandARangeBoundaryGuard;
+
+impl Drop for ExpandARangeBoundaryGuard {
+    fn drop(&mut self) {
+        RANGE_BOUNDARY_ATTACK.with(|attack| *attack.borrow_mut() = None);
+    }
+}
+
+#[doc(hidden)]
+pub fn install_range_boundary_attack(kind: RcKind) -> ExpandARangeBoundaryGuard {
+    RANGE_BOUNDARY_ATTACK.with(|attack| *attack.borrow_mut() = Some(kind));
+    ExpandARangeBoundaryGuard
+}
+
+fn attacked_range_value(kind: RcKind, value: u32) -> u32 {
+    RANGE_BOUNDARY_ATTACK.with(|attack| {
+        attack
+            .borrow()
+            .filter(|&attacked| attacked == kind)
+            .map_or(value, |_| kind.n_values() as u32)
+    })
+}
+
+fn range_tuple<E: EvalAtRow>(value: E::F, kind: RcKind) -> [E::F; 2] {
+    let value = RANGE_BOUNDARY_ATTACK.with(|attack| {
+        attack
+            .borrow()
+            .filter(|&attacked| attacked == kind)
+            .map_or(value, |_| E::F::from(m31(kind.n_values() as u32)))
+    });
+    [value, E::F::from(m31(kind.bound_id()))]
+}
+
+fn range_denominator(relation: &RangeRelation, value: u32, kind: RcKind) -> SecureField {
+    relation.combine(&[m31(attacked_range_value(kind, value)), m31(kind.bound_id())])
+}
+
 pub fn gen_rejection_base_trace(witness: &ExpandAWitness) -> (Vec<ColEval>, ExpandARcUses) {
     validate_candidate_counts(&witness.candidate_counts).expect("candidate count shape");
     let schedule = rejection_schedule(&witness.candidate_counts);
@@ -775,35 +810,35 @@ impl FrameworkEval for RejectionEval {
             ));
         }
         eval.add_to_relation(RelationEntry::base(
-            &self.relations.rc7,
+            &self.relations.range,
             sample.clone(),
-            core::slice::from_ref(&low7),
+            &range_tuple::<E>(low7.clone(), RcKind::Rc7),
         ));
         eval.add_to_relation(RelationEntry::base(
-            &self.relations.rc8,
+            &self.relations.range,
             accept.clone(),
-            core::slice::from_ref(&slack[0]),
+            &range_tuple::<E>(slack[0].clone(), RcKind::Rc8),
         ));
         eval.add_to_relation(RelationEntry::base(
-            &self.relations.rc8,
+            &self.relations.range,
             accept.clone(),
-            core::slice::from_ref(&slack[1]),
+            &range_tuple::<E>(slack[1].clone(), RcKind::Rc8),
         ));
         eval.add_to_relation(RelationEntry::base(
-            &self.relations.rc7,
+            &self.relations.range,
             accept.clone(),
-            core::slice::from_ref(&slack[2]),
+            &range_tuple::<E>(slack[2].clone(), RcKind::Rc7),
         ));
         eval.add_to_relation(RelationEntry::base(
-            &self.relations.rc13,
+            &self.relations.range,
             reject,
-            core::slice::from_ref(&reject_delta),
+            &range_tuple::<E>(reject_delta, RcKind::Rc13),
         ));
         let remaining = E::F::from(m31(255)) - index.clone() - accept.clone();
         eval.add_to_relation(RelationEntry::base(
-            &self.relations.rc8,
+            &self.relations.range,
             not_last,
-            core::slice::from_ref(&remaining),
+            &range_tuple::<E>(remaining, RcKind::Rc8),
         ));
         eval.add_to_relation(RelationEntry::base(
             &self.relations.cell,
@@ -1042,41 +1077,41 @@ impl FrameworkEval for NttEval {
         ] {
             for limb in 0..2 {
                 eval.add_to_relation(RelationEntry::base(
-                    &self.relations.rc8,
+                    &self.relations.range,
                     gate.clone(),
-                    core::slice::from_ref(&bytes[limb]),
+                    &range_tuple::<E>(bytes[limb].clone(), RcKind::Rc8),
                 ));
                 eval.add_to_relation(RelationEntry::base(
-                    &self.relations.rc8,
+                    &self.relations.range,
                     gate.clone(),
-                    core::slice::from_ref(&slack[limb]),
+                    &range_tuple::<E>(slack[limb].clone(), RcKind::Rc8),
                 ));
             }
             eval.add_to_relation(RelationEntry::base(
-                &self.relations.rc7,
+                &self.relations.range,
                 gate.clone(),
-                core::slice::from_ref(&bytes[2]),
+                &range_tuple::<E>(bytes[2].clone(), RcKind::Rc7),
             ));
             eval.add_to_relation(RelationEntry::base(
-                &self.relations.rc7,
+                &self.relations.range,
                 gate,
-                core::slice::from_ref(&slack[2]),
+                &range_tuple::<E>(slack[2].clone(), RcKind::Rc7),
             ));
         }
         for carry in &carries {
             let shifted = carry.clone() + E::F::from(m31(CARRY_OFFSET as u32));
             eval.add_to_relation(RelationEntry::base(
-                &self.relations.rc13,
+                &self.relations.range,
                 active.clone(),
-                core::slice::from_ref(&shifted),
+                &range_tuple::<E>(shifted, RcKind::Rc13),
             ));
         }
         for digit in &digits {
             let shifted = digit.clone() + E::F::from(m31(256));
             eval.add_to_relation(RelationEntry::base(
-                &self.relations.rc9,
+                &self.relations.range,
                 final_scale.clone(),
-                core::slice::from_ref(&shifted),
+                &range_tuple::<E>(shifted, RcKind::Rc9),
             ));
         }
         let acc_coords: Vec<E::F> = acc_masks.iter().map(|mask| mask[1].clone()).collect();
@@ -1259,14 +1294,23 @@ pub fn gen_rejection_interaction(
         if item.sample {
             let low7 = (bytes[2] & 0x7f) as u32;
             let value = bytes[0] as u32 | (bytes[1] as u32) << 8 | low7 << 16;
-            entries.push((one, relations.rc7.combine(&[m31(low7)])));
+            entries.push((one, range_denominator(&relations.range, low7, RcKind::Rc7)));
             push_use(&mut rc_uses.rc7, low7);
             let accept = value < Q;
             if accept {
                 let slack = split_u23(Q - 1 - value);
-                entries.push((one, relations.rc8.combine(&[m31(slack[0])])));
-                entries.push((one, relations.rc8.combine(&[m31(slack[1])])));
-                entries.push((one, relations.rc7.combine(&[m31(slack[2])])));
+                entries.push((
+                    one,
+                    range_denominator(&relations.range, slack[0], RcKind::Rc8),
+                ));
+                entries.push((
+                    one,
+                    range_denominator(&relations.range, slack[1], RcKind::Rc8),
+                ));
+                entries.push((
+                    one,
+                    range_denominator(&relations.range, slack[2], RcKind::Rc7),
+                ));
                 push_use(&mut rc_uses.rc8, slack[0]);
                 push_use(&mut rc_uses.rc8, slack[1]);
                 push_use(&mut rc_uses.rc7, slack[2]);
@@ -1277,14 +1321,20 @@ pub fn gen_rejection_interaction(
                 entries.push((zero, one));
             } else {
                 let delta = value - Q;
-                entries.push((one, relations.rc13.combine(&[m31(delta)])));
+                entries.push((
+                    one,
+                    range_denominator(&relations.range, delta, RcKind::Rc13),
+                ));
                 push_use(&mut rc_uses.rc13, delta);
             }
             if item.last {
                 entries.push((zero, one));
             } else {
                 let remaining = 255 - accepted_index[item.poly] - u32::from(accept);
-                entries.push((one, relations.rc8.combine(&[m31(remaining)])));
+                entries.push((
+                    one,
+                    range_denominator(&relations.range, remaining, RcKind::Rc8),
+                ));
                 push_use(&mut rc_uses.rc8, remaining);
             }
             if accept {
@@ -1339,17 +1389,23 @@ fn range_entries(
     for limb in 0..2 {
         entries.push((
             SecureField::one(),
-            relations.rc8.combine(&[m31(bytes[limb])]),
+            range_denominator(&relations.range, bytes[limb], RcKind::Rc8),
         ));
         entries.push((
             SecureField::one(),
-            relations.rc8.combine(&[m31(slack[limb])]),
+            range_denominator(&relations.range, slack[limb], RcKind::Rc8),
         ));
         push_use(&mut uses.rc8, bytes[limb]);
         push_use(&mut uses.rc8, slack[limb]);
     }
-    entries.push((SecureField::one(), relations.rc7.combine(&[m31(bytes[2])])));
-    entries.push((SecureField::one(), relations.rc7.combine(&[m31(slack[2])])));
+    entries.push((
+        SecureField::one(),
+        range_denominator(&relations.range, bytes[2], RcKind::Rc7),
+    ));
+    entries.push((
+        SecureField::one(),
+        range_denominator(&relations.range, slack[2], RcKind::Rc7),
+    ));
     push_use(&mut uses.rc7, bytes[2]);
     push_use(&mut uses.rc7, slack[2]);
 }
@@ -1474,7 +1530,10 @@ pub fn gen_ntt_interaction(
         range_entries(&mut entries, &mut rc_uses, relations, quotient, true);
         for carry in carries {
             let shifted = (carry + CARRY_OFFSET) as u32;
-            entries.push((one, relations.rc13.combine(&[m31(shifted)])));
+            entries.push((
+                one,
+                range_denominator(&relations.range, shifted, RcKind::Rc13),
+            ));
             push_use(&mut rc_uses.rc13, shifted);
         }
         if item.final_scale {
@@ -1490,7 +1549,10 @@ pub fn gen_ntt_interaction(
             acc[row] = running;
             for digit in digits {
                 let shifted = (digit + 256) as u32;
-                entries.push((one, relations.rc9.combine(&[m31(shifted)])));
+                entries.push((
+                    one,
+                    range_denominator(&relations.range, shifted, RcKind::Rc9),
+                ));
                 push_use(&mut rc_uses.rc9, shifted);
             }
             if item.eval_end {
