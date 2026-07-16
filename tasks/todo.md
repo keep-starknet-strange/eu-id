@@ -327,3 +327,59 @@ rails on this standalone branch. Four focused release negatives passed with one 
 `mldsa_mdoc_pin_is_per_signature_not_cached` (33.76 s), and
 `mldsa_malformed_claim_tree_rejects` (19.33 s, including candidate-count tamper rejection).
 All temporary mdoc/air-core timers were removed before the final diff.
+
+## Milestone Q10 — post-Q9 performance campaign
+
+- [x] Read the full Q10 handoff, COMMON rules, WO-1 through WO-5, mailbox protocol, and campaign lessons.
+- [x] Rebase every `q10/wo*` branch onto `8355fedc` without pushing.
+- [x] Complete and measure WO-1 (Keccak round-GKR offload), including the production-shaped
+      ExpandA tamper and hosted missing-payload negatives authorized by mailbox A-100.
+- [x] Complete and measure WO-2 as attribution-only per mailbox A-201; do not add a warm cache.
+- [x] Re-verify and measure the WO-3 inverse-NTT spike before using it as design evidence.
+- [x] Complete and measure WO-5 (coefficient range-relation split), including every required
+      first-excluded-value boundary negative.
+- [x] Integrate in the required WO-1 → WO-2 → WO-5 order and capture a clean exact frontier.
+- [x] Implement the revised WO-4a accepted by mailbox A-404/A-405: one stacked log-15 butterfly
+      component plus one log-13 scaling component, with no sumcheck payload or `air-core` change.
+- [x] Run the combined release suite, strict clippy, diff/footprint checks, independent protocol
+      review, and a final post-integration probe.
+- [x] Record the missed prove rail without chasing it; do not push without approval.
+
+### Q10 review
+
+All exact product probes below use release mode, production `(4,26,25)` PCS, and
+`RAYON_NUM_THREADS=1`.
+
+| Work item | Measured result |
+|---|---|
+| WO-1 | 16,966 ms prove, 543 ms verify, 1,112,374 B proof, 21,864 B payload; 14,614,528 committed cells removed versus `8355fedc` |
+| WO-2 | 541.35 ms canonical tree-0 reconstruction, including 505.45 ms LDE + Merkle; final standalone probe 24,961/568 ms and 1,199,150 B |
+| WO-3 | 212.92 ms best-of-five for 30 inverse-NTT polynomials; 3,584 B payload; 652,800 arithmetic-cell model; GO as design evidence only |
+| WO-5 | 20,198/520 ms and 1,171,638 B standalone; coefficient-provider model 5,024,448 → 2,949,120 cells (−2,075,328) |
+| Pre-WO-4 integrated frontier | 18,026/548 ms, 1,083,950 B proof, 21,864 B payload |
+| WO-4a | NTT model 6,029,312 → 2,940,928 cells (−3,088,384, −51.22%); 93.75% butterfly occupancy |
+
+Mailbox A-402 retracted the proposed committed-intermediate sumcheck design. A first pure-AIR
+eight-component split reached 2,908,160 NTT cells but enlarged the proof by about 216 KB, so A-404
+replaced it with the stacked two-component shape above. The accepted claim order is rejection →
+butterfly → scaling, and global `max_log_size` includes the new log-15 component.
+
+The A-405 exact three-run final samples were:
+
+| Run | Prove | Verify | Proof | Payload |
+|---:|---:|---:|---:|---:|
+| 1 | 17,180 ms | 437 ms | 1,097,142 B | 21,864 B |
+| 2 | 14,166 ms | 436 ms | 1,099,606 B | 21,864 B |
+| 3 | 14,473 ms | 436 ms | 1,096,390 B | 21,864 B |
+| **Median** | **14,473 ms** | **436 ms** | **1,097,142 B** | **21,864 B** |
+
+The official median improves the pre-WO-4 integrated frontier by 3,553 ms prove and 112 ms verify,
+while adding 13,192 proof bytes. It passes the WO-4a acceptance caps (≤15,026 ms prove and no more
+than 30 KB proof growth), but the campaign rails remain open: prove misses `<1,000 ms` by 13,473 ms,
+verify misses `<100 ms` by 336 ms, and proof misses `<1,000,000 B` by 97,142 B. A final clean-tree
+confirmation measured 14,215 ms prove, 453 ms verify, 1,096,774 B proof, and 21,864 B payload.
+
+Final verification: all 181 active tests across `stwo-keccak`, `stwo-mldsa`, and `eu-id-prover`
+passed in release mode (one documented composed benchmark ignored); strict all-target clippy passed
+with warnings denied. Independent review reproduced the WO-4a census and found no soundness,
+claim-layout, degree-bound, test-hook, or file-footprint issue. No branch was pushed.
