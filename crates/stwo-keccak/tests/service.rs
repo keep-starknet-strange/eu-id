@@ -278,6 +278,8 @@ struct ProvedJobs {
     outputs: Vec<Vec<u8>>,
     service_claims: Vec<SecureField>,
     proof: stwo::core::proof::StarkProof<air_core::Hasher>,
+    /// Per-module opaque post-interaction payloads (the service's round-GKR blob).
+    payloads: Vec<Vec<u8>>,
 }
 
 /// Batch-four round LogUp constraints have log-degree excess two.
@@ -328,25 +330,38 @@ fn prove_shapes_full(
         t(service.perm_mut());
     }
     let mut closer = IoCloser::new(closer_entries(&shapes, &messages, &outputs), handle);
-    let proof = air_core::prove(&mut [&mut service, &mut closer], config).expect("prove");
+    let (proof, payloads) =
+        air_core::prove_with_post_interaction(&mut [&mut service, &mut closer], config)
+            .expect("prove");
     ProvedJobs {
         shapes,
         messages,
         outputs,
         service_claims: service.claimed_sums(),
         proof,
+        payloads,
     }
 }
 
 fn verify_jobs(p: &ProvedJobs, closer_msgs: &[Vec<u8>]) -> Result<(), air_core::VerifyError> {
+    verify_jobs_with_payloads(p, closer_msgs, &p.payloads)
+}
+
+fn verify_jobs_with_payloads(
+    p: &ProvedJobs,
+    closer_msgs: &[Vec<u8>],
+    payloads: &[Vec<u8>],
+) -> Result<(), air_core::VerifyError> {
     let handle = SharedKeccakRelations::new();
     let mut service =
         KeccakServiceVerifier::new(p.shapes.clone(), p.service_claims.clone(), handle.clone());
     let mut closer = IoCloser::new(closer_entries(&p.shapes, closer_msgs, &p.outputs), handle);
-    Ok(air_core::verify(
+    air_core::verify_with_expected_preprocessed_root_and_payloads(
         &mut [&mut service, &mut closer],
         &p.proof,
-    )?)
+        None,
+        payloads,
+    )
 }
 
 /// A tampered configuration is REJECTED if proving fails/panics or verify errs.
@@ -540,8 +555,100 @@ fn wrong_squeeze_byte_rejects() {
 }
 
 // =====================================================================
-// Direct outer-STARK Keccak-round adversarial matrix.
+// W3b adversarial matrix: the round LogUp -> GKR offload.
 // =====================================================================
+
+/// Skip the prover-side coeff-poly-vs-oracle completeness self-check so the
+/// adversarial provers below can produce their desynchronized proofs; the
+/// verifier must then reject them independently.
+fn skip_prover_oracle_self_check() {
+    std::env::set_var("STWO_MLE_EVAL_SKIP_ORACLE_CONSISTENCY", "1");
+}
+
+/// A corrupted GKR payload blob must be rejected (decode failure or
+/// Fiat-Shamir replay desynchronization both fail closed).
+#[test]
+fn corrupted_gkr_payload_rejects() {
+    let msg = vec![0x21u8; 300];
+    let p = prove_jobs(vec![msg.clone()], vec![1], None);
+    assert!(!p.payloads[0].is_empty(), "service must emit a GKR blob");
+
+    let mut corrupted = p.payloads.clone();
+    let mid = corrupted[0].len() / 2;
+    corrupted[0][mid] ^= 0xff;
+    assert!(verify_jobs_with_payloads(&p, &p.messages, &corrupted).is_err());
+
+    let mut truncated = p.payloads.clone();
+    truncated[0].truncate(4);
+    assert!(verify_jobs_with_payloads(&p, &p.messages, &truncated).is_err());
+}
+
+/// With no payloads, the service's round LogUp is unproven and verification
+/// must fail closed.
+#[test]
+fn missing_gkr_payload_rejects() {
+    let msg = vec![0x22u8; 300];
+    let p = prove_jobs(vec![msg.clone()], vec![1], None);
+    assert!(verify_jobs_with_payloads(&p, &p.messages, &[]).is_err());
+}
+
+/// A structurally valid GKR proof from another proof with the same job shape
+/// must desynchronize the shared-channel replay.
+#[test]
+fn gkr_claim_swapped_between_proofs_rejects() {
+    let msg_a = vec![0x31u8; 300];
+    let msg_b = vec![0x32u8; 300];
+    let a = prove_jobs(vec![msg_a], vec![1], None);
+    let b = prove_jobs(vec![msg_b], vec![1], None);
+
+    assert!(verify_jobs_with_payloads(&a, &a.messages, &b.payloads).is_err());
+    assert!(verify_jobs_with_payloads(&b, &b.messages, &a.payloads).is_err());
+}
+
+/// ExpandA contributes thirty SHAKE-128 jobs to this same service. Tampering a
+/// committed round cell in that production-shaped workload must break the GKR
+/// tie-back rather than falling outside the offload.
+#[test]
+fn tampered_expand_a_round_base_cell_rejects() {
+    const EXPAND_A_POLYS: usize = 30;
+    const EXPAND_A_SQUEEZE_BLOCKS: usize = 8;
+    const STREAM_BASE: u32 = 1_000;
+
+    skip_prover_oracle_self_check();
+    let rho = [0x5au8; 32];
+    let messages = (0..EXPAND_A_POLYS)
+        .map(|poly| {
+            let row = poly / 5;
+            let col = poly % 5;
+            [rho.as_slice(), &[col as u8, row as u8]].concat()
+        })
+        .collect::<Vec<_>>();
+    let shapes = messages
+        .iter()
+        .enumerate()
+        .map(|(poly, msg)| {
+            Shape::shake128(
+                msg.len(),
+                EXPAND_A_SQUEEZE_BLOCKS,
+                STREAM_BASE + 2 * poly as u32,
+                STREAM_BASE + 2 * poly as u32 + 1,
+            )
+        })
+        .collect();
+    let p = prove_shapes_full(
+        shapes,
+        messages.clone(),
+        None,
+        Some(&|perm| {
+            use stwo::prover::backend::Column;
+            let col = &mut perm.round_trace[20];
+            let value = col.values.at(0);
+            col.values.set(0, value + M31::one());
+        }),
+        pcs_config(),
+    );
+    assert!(verify_jobs(&p, &messages).is_err());
+}
 
 /// LogUp is a multiset argument, so omitting `perm_id` from the round-link
 /// tuple would let an adversary route one permutation's round output into
@@ -581,17 +688,24 @@ fn reordered_round_outputs_reject() {
     }));
 }
 
-/// Tampered round-link tuple (interaction data only; base trace honest): the
-/// direct round interaction no longer cancels the keccak component's honest
-/// link, so the verifier rejects.
+/// Tampered round-link tuple (lookup data only; base trace honest): the GKR
+/// multiset no longer cancels the keccak component's honest link.
 #[test]
 fn tampered_round_link_tuple_rejects() {
+    skip_prover_oracle_self_check();
     let msg = vec![0x41u8; 300];
-    assert!(perm_rejected(vec![msg], vec![1], &|perm| {
-        use stwo::prover::backend::simd::m31::PackedM31;
-        let out_link = &mut perm.round_data.lookup_data.keccak_round[1][0];
-        out_link[10] += PackedM31::broadcast(M31::one());
-    }));
+    let p = prove_jobs_full(
+        vec![msg.clone()],
+        vec![1],
+        None,
+        Some(&|perm| {
+            use stwo::prover::backend::simd::m31::PackedM31;
+            let out_link = &mut perm.round_data.lookup_data.keccak_round[1][0];
+            out_link[10] += PackedM31::broadcast(M31::one());
+        }),
+        pcs_config(),
+    );
+    assert!(verify_jobs(&p, &[msg]).is_err());
 }
 
 /// The adversary shifts claimed-sum mass between the round and keccak slots.
@@ -608,43 +722,54 @@ fn forged_round_claim_with_compensating_slot_rejects() {
     assert!(verify_jobs(&p, &[msg]).is_err());
 }
 
-/// Tampered committed round base cell with an otherwise honest interaction
-/// trace must violate the direct AIR recurrence at the same row.
+/// Tampered committed base cell with honest GKR fractions and claimed sums
+/// must be rejected by the MLE-eval tie-back.
 #[test]
 fn tampered_round_base_cell_rejects() {
+    skip_prover_oracle_self_check();
     let msg = vec![0x43u8; 300];
-    assert!(perm_rejected(vec![msg], vec![1], &|perm| {
-        use stwo::prover::backend::Column;
-        // Column 20 = a spread state limb (cols: 1 enabler, 16 rc, 200
-        // state, ...). Row 0 is a real (non-padded) row.
-        let col = &mut perm.round_trace[20];
-        let v = col.values.at(0);
-        col.values.set(0, v + M31::one());
-    }));
+    let p = prove_jobs_full(
+        vec![msg.clone()],
+        vec![1],
+        None,
+        Some(&|perm| {
+            use stwo::prover::backend::Column;
+            let col = &mut perm.round_trace[20];
+            let value = col.values.at(0);
+            col.values.set(0, value + M31::one());
+        }),
+        pcs_config(),
+    );
+    assert!(verify_jobs(&p, &[msg]).is_err());
 }
 
-/// Row-swap inside one interaction lookup slot preserves its multiset, but the
-/// direct AIR binds every interaction recurrence to the same-row base tuple.
+/// A row swap inside one lookup slot preserves its multiset and claimed sum,
+/// but the committed base columns no longer match the GKR input MLE row-wise.
 #[test]
 fn row_swapped_lookup_data_rejects() {
+    skip_prover_oracle_self_check();
     let msg = vec![0x44u8; 300];
-    assert!(perm_rejected(vec![msg], vec![1], &|perm| {
-        // Swap two real SIMD lanes of one xor3 lookup (72 real rows =
-        // 4.5 packed rows, so vec_row 0 lanes 0/1 are both real).
-        use stwo::prover::backend::simd::m31::N_LANES;
-        for entry in 0..2 {
-            let col = &mut perm.round_data.lookup_data.xor3[5][0];
-            let mut lanes: [M31; N_LANES] = col[entry].to_array();
-            lanes.swap(0, 1);
-            col[entry] = stwo::prover::backend::simd::m31::PackedM31::from_array(lanes);
-        }
-    }));
+    let p = prove_jobs_full(
+        vec![msg.clone()],
+        vec![1],
+        None,
+        Some(&|perm| {
+            for entry in 0..2 {
+                let col = &mut perm.round_data.lookup_data.xor3[5][0];
+                let mut lanes: [M31; N_LANES] = col[entry].to_array();
+                lanes.swap(0, 1);
+                col[entry] = stwo::prover::backend::simd::m31::PackedM31::from_array(lanes);
+            }
+        }),
+        pcs_config(),
+    );
+    assert!(verify_jobs(&p, &[msg]).is_err());
 }
 
-/// Positive regression for direct round AIR under the production-shaped FRI
-/// config (`log_blowup=4`, exceeding the batch-four degree bound).
+/// Positive regression for the GKR tie-back under the production-shaped FRI
+/// config (`log_blowup=4`, exceeding the composition split).
 #[test]
-fn direct_round_air_proves_under_blowup_4_subdomain_mode() {
+fn gkr_offload_proves_under_blowup_4_subdomain_mode() {
     let msg = vec![0x51u8; 300];
     let config = PcsConfig {
         fri_config: FriConfig::new(1, 4, 3, 2),
