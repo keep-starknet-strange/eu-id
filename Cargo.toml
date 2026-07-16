@@ -24,10 +24,10 @@ lto = "fat"
 codegen-units = 1
 
 [workspace.dependencies]
-stwo = { git = "https://github.com/0xLucqs/stwo.git", rev = "8c9983908642f719032e7b7977f3c2081c84a2d9", features = ["prover"] }
-stwo-constraint-framework = { git = "https://github.com/0xLucqs/stwo.git", rev = "8c9983908642f719032e7b7977f3c2081c84a2d9", features = ["prover"] }
-stwo-air-utils = { git = "https://github.com/0xLucqs/stwo.git", rev = "8c9983908642f719032e7b7977f3c2081c84a2d9" }
-stwo-air-utils-derive = { git = "https://github.com/0xLucqs/stwo.git", rev = "8c9983908642f719032e7b7977f3c2081c84a2d9" }
+stwo = { git = "https://github.com/0xLucqs/stwo.git", rev = "4f877db2a7601efda8215267bd71d18958ad3fe3", features = ["prover"] }
+stwo-constraint-framework = { git = "https://github.com/0xLucqs/stwo.git", rev = "4f877db2a7601efda8215267bd71d18958ad3fe3", features = ["prover"] }
+stwo-air-utils = { git = "https://github.com/0xLucqs/stwo.git", rev = "4f877db2a7601efda8215267bd71d18958ad3fe3" }
+stwo-air-utils-derive = { git = "https://github.com/0xLucqs/stwo.git", rev = "4f877db2a7601efda8215267bd71d18958ad3fe3" }
 serde = { version = "1", features = ["derive"] }
 num-traits = "0.2"
 mimalloc = "0.1"
@@ -38,11 +38,3 @@ mimalloc = "0.1"
 # which escalates every lint below to a hard error in CI.
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
-
-# Local engine patch: composition_log_split fix (bound > log_size+1 support),
-# dev-copy @ 8c998390 in ~/stwo. Pin bump replaces this once pushed.
-[patch."https://github.com/0xLucqs/stwo.git"]
-stwo = { path = "/Users/lucas/stwo/crates/stwo" }
-stwo-constraint-framework = { path = "/Users/lucas/stwo/crates/constraint-framework" }
-stwo-air-utils = { path = "/Users/lucas/stwo/crates/air-utils" }
-stwo-air-utils-derive = { path = "/Users/lucas/stwo/crates/air-utils-derive" }
