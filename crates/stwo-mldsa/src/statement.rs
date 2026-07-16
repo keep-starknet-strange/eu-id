@@ -4,8 +4,8 @@
 //! [`MlDsaVerifier`] impl `Air`) proves the entire ML-DSA-65 verification via a
 //! single [`air_core::prove`] / [`air_core::verify`] call. It stitches together:
 //!
-//!   * `expand_a` — SHAKE128/RejNTT plus the exact inverse NTT, yielding the
-//!     30 matrix evaluations consumed by the folded identity.
+//!   * verifier-native `ExpandA(ρ)` — deterministic from the transcript-mixed
+//!     public key and consumed directly by the folded identity.
 //!   * `coeffs` — the tall bivariate-Horner integer-lift component (yields the
 //!     W-cell / C-cell bindings + constrained public fold).
 //!   * `decomp` — [DECOMP]+[HINT]; consumes W-cells, yields the 768 `w1Encode`
@@ -16,8 +16,7 @@
 //!     `pkEncode → tr`, move bytes between the remaining HashIo streams, and
 //!     close every squeeze balance.
 //!
-//! The four SHAKE-256 signature chains and 30 SHAKE128 ExpandA chains are jobs
-//! of the proof-wide
+//! The four SHAKE-256 signature chains are jobs of the proof-wide
 //! [`stwo_keccak::service::KeccakServiceProver`], which owns the rotated
 //! sponge + keccak + round + tables ONCE for all hosted instances and
 //! publishes the drawn [`KeccakRelations`] through a
@@ -29,8 +28,7 @@
 //!
 //! Any drift between `layout()`, `claimed_sums()`, `write_trace()`,
 //! `write_interaction()`, `build_components()`, `components()` breaks
-//! verification. Batched ExpandA/LogUp constraints use the module's
-//! `log_size + 2` degree bound.
+//! verification.
 
 use num_traits::Zero;
 use serde::{Deserialize, Serialize};
@@ -71,7 +69,7 @@ use crate::sponge_link::{
     SINK_BASE_COLS, SINK_INTERACTION_COLS,
 };
 use crate::types::MlDsaVerifyInput;
-use crate::verifier_native::{compute_public_evals_from_a, folded_check, ClaimedEvals};
+use crate::verifier_native::{compute_public_evals, folded_check, ClaimedEvals};
 use crate::witness::MlDsaWitness;
 
 use crate::coeffs::relations::CoeffsRelations;
@@ -81,15 +79,6 @@ use crate::coeffs::{self, CoeffsEval};
 use crate::decomp::relations::DecompRelations;
 use crate::decomp::tables as decomp_tables;
 use crate::decomp::{self, DecompEval};
-
-use crate::expand_a::{
-    self, derive_expand_a_witness, gen_ntt_base_traces, gen_ntt_interactions,
-    gen_rejection_base_trace, gen_rejection_interaction, native_eval_use_sum, ExpandARelations,
-    ExpandAWitness, NttButterflyEval, NttScalingEval, RejectionEval, MATRIX_POLYS,
-    NTT_BUTTERFLY_BASE_COLS, NTT_BUTTERFLY_INTERACTION_COLS, NTT_BUTTERFLY_LOG_SIZE,
-    NTT_SCALING_BASE_COLS, NTT_SCALING_INTERACTION_COLS, NTT_SCALING_LOG_SIZE, REJECTION_BASE_COLS,
-    REJECTION_INTERACTION_COLS, REQUIRED_STREAM_STRIDE,
-};
 
 use crate::sampleinball::relations::SibRelations;
 use crate::sampleinball::tables as sib_tables;
@@ -105,8 +94,8 @@ use crate::sampleinball::{self, SibEval};
 // constructor parameter (deterministic, mixed into the transcript). The
 // offsets keep the legacy single-instance values at `stream_base = 0`. The
 // decomp / sib offsets ([`STREAM_ID_CTILDE_ABSORB`] = 0,
-// [`STREAM_ID_SIB_SQUEEZE`] = 1) live in `binding.rs`; ExpandA uses offsets
-// 16..75. Bases therefore use a 128-wide namespace stride.
+// [`STREAM_ID_SIB_SQUEEZE`] = 1) live in `binding.rs`. Bases retain the
+// protocol's 128-wide namespace stride.
 
 /// µ-chain absorb stream offset (`tr ‖ 0x00 ‖ 0x00 ‖ M`).
 pub const MU_ABSORB: u32 = 10;
@@ -124,7 +113,7 @@ pub const PK_ABSORB: u32 = 8;
 pub const PK_SQUEEZE: u32 = 9;
 
 /// Minimum spacing between two instances' `stream_base` values.
-pub const STREAM_BASE_STRIDE: u32 = REQUIRED_STREAM_STRIDE;
+pub const STREAM_BASE_STRIDE: u32 = 128;
 
 /// SHAKE-256 rate in bytes (block length of a squeeze).
 const RATE: usize = 136;
@@ -210,16 +199,12 @@ impl PermIdPlan {
 /// The public statement + all prover claims of a composed ML-DSA-65 proof.
 ///
 /// The verifier reconstructs every component's shape from public inputs,
-/// bounded rejection counts, lengths, and claimed sums, with no witness.
+/// public lengths, and claimed sums, with no witness.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct MlDsaProof {
     pub input: MlDsaVerifyInput,
     /// The 30 claimed `P̂(r,s)` group evaluations (coeffs), in poly_id order.
     pub group_evals: Vec<SecureField>,
-    /// The 30 AIR-bound `A_ij(r,s)` evaluations, in row-major matrix order.
-    pub a_evals: Vec<SecureField>,
-    /// Exact public RejNTT candidate counts for the 30 SHAKE128 matrix jobs.
-    pub expand_a_candidate_counts: Vec<u16>,
     /// Every component's claimed sum, in commit order, then `native_use_sum` LAST.
     pub claimed_sums: Vec<SecureField>,
     /// The honest SIB squeeze stream length (public — sizes the SIB squeeze +
@@ -261,7 +246,7 @@ fn n_squeeze_sib(sib_stream_len: usize) -> usize {
 }
 
 /// The instance's four SHAKE256 signature-job shapes, stream ids offset by
-/// `stream_base`. ExpandA's SHAKE128 jobs are appended separately.
+/// `stream_base`.
 /// Perm-id bases stay 0 — the proof-wide [`stwo_keccak::sponge_v::JobList`]
 /// stamps the global plan over the concatenated job list.
 fn shapes(message_len: usize, sib_stream_len: usize, stream_base: u32) -> Shapes {
@@ -279,20 +264,14 @@ fn shapes(message_len: usize, sib_stream_len: usize, stream_base: u32) -> Shapes
 }
 
 /// PUBLIC: all sponge jobs contributed to the proof-wide service: pkHash, µ,
-/// c̃, SIB, then the 30 ExpandA SHAKE128 jobs.
+/// c̃, then SIB.
 pub fn keccak_job_shapes(
     message_len: usize,
     sib_stream_len: usize,
     stream_base: u32,
-    expand_a_candidate_counts: &[u16],
 ) -> Vec<Shape> {
     let sh = shapes(message_len, sib_stream_len, stream_base);
-    let mut jobs = vec![sh.pk, sh.mu, sh.ct, sh.sib];
-    jobs.extend(
-        expand_a::shake128_job_shapes(expand_a_candidate_counts, stream_base)
-            .expect("validated ExpandA candidate counts"),
-    );
-    jobs
+    vec![sh.pk, sh.mu, sh.ct, sh.sib]
 }
 
 // =============================================================================
@@ -327,7 +306,6 @@ struct Relations {
     /// (`None` in standalone mode, where the self-drawn `msglink` producer is used).
     shared_field: Option<FieldBytesRelation>,
     coeffs: CoeffsRelations,
-    expand_a: ExpandARelations,
     decomp: DecompRelations,
     sib: SibRelations,
 }
@@ -360,8 +338,6 @@ fn draw_relations_common(
     };
 
     let coeffs = CoeffsRelations::draw_with(channel, wcell.clone(), ccell.clone());
-    let expand_a =
-        ExpandARelations::draw_with(channel, keccak.hash_io.clone(), coeffs.range.clone());
     let decomp = DecompRelations::draw_with(channel, wcell, keccak.hash_io.clone());
     let sib = SibRelations::draw_with(channel, ccell, keccak.hash_io.clone());
 
@@ -373,7 +349,6 @@ fn draw_relations_common(
         msglink,
         shared_field,
         coeffs,
-        expand_a,
         decomp,
         sib,
     }
@@ -410,7 +385,6 @@ fn mix_public(
     namespace: &str,
     private_message: bool,
     stream_base: u32,
-    expand_a_candidate_counts: &[u16],
 ) {
     // Instance role/domain separation: two hosted instances with compatible
     // shapes must still produce disjoint transcripts, so a device claim tree
@@ -450,10 +424,6 @@ fn mix_public(
     // instance's bridges/sinks/decomp/sib use under the SHARED relation set.
     // (The sponge job shapes themselves are mixed ONCE by the keccak service.)
     channel.mix_u64(stream_base as u64);
-    channel.mix_u64(expand_a_candidate_counts.len() as u64);
-    for &count in expand_a_candidate_counts {
-        channel.mix_u64(count as u64);
-    }
     // NOTE: c̃ and µ stay PRIVATE — never mixed; they flow only through HashIo.
     // group_evals are mixed with the claimed sums (post base-commit).
 }
@@ -709,14 +679,10 @@ fn all_preprocessed_ids(
     input: &MlDsaVerifyInput,
     sib_stream_len: usize,
     public_message: bool,
-    expand_a_candidate_counts: &[u16],
 ) -> Vec<PreProcessedColumnId> {
-    expand_a::validate_candidate_counts(expand_a_candidate_counts)
-        .expect("validated ExpandA candidate counts");
     let hash_io = HashIoRelation::dummy();
     let msglink = MsgLinkRelation::dummy();
     let mut ids = Vec::new();
-    ids.extend(expand_a::expand_a_preprocessed_ids(ns));
     // coeffs + its unified range table.
     ids.extend(coeffs::coeffs_preprocessed_ids());
     ids.extend(coeffs_tables::range_table_preprocessed_ids());
@@ -757,14 +723,8 @@ fn all_preprocessed_log_sizes(
     sib_stream_len: usize,
     sib_squeezed_len: usize,
     public_message: bool,
-    expand_a_candidate_counts: &[u16],
 ) -> Vec<u32> {
     let mut sizes = Vec::new();
-    sizes.extend(vec![
-        expand_a::rejection_log_size(expand_a_candidate_counts);
-        expand_a::rejection_preprocessed_ids("").len()
-    ]);
-    sizes.extend(expand_a::ntt_preprocessed_log_sizes());
     let cls = coeffs_log_size();
     sizes.extend(vec![cls; coeffs::coeffs_preprocessed_ids().len()]);
     sizes.extend(vec![
@@ -828,15 +788,10 @@ fn gen_all_preprocessed(
     sib_stream_len: usize,
     sib_squeezed_len: usize,
     public_message: bool,
-    expand_a_candidate_counts: &[u16],
 ) -> Vec<ColEval> {
     let hash_io = HashIoRelation::dummy();
     let msglink = MsgLinkRelation::dummy();
     let mut cols = Vec::new();
-    cols.extend(expand_a::gen_expand_a_preprocessed(
-        "",
-        expand_a_candidate_counts,
-    ));
     let cls = coeffs_log_size();
     cols.extend(coeffs::gen_coeffs_preprocessed(cls));
     cols.extend(coeffs_tables::gen_range_table_preprocessed());
@@ -899,9 +854,9 @@ impl MsgSlotComponent {
     }
 }
 
-/// Enforces the ML-DSA folded identity as an outer-STARK constraint. Matrix
-/// terms are lookup-bound to the ExpandA AIR; `t1` and `q` are public
-/// constants. Every QM31 coordinate must vanish in the quotient polynomial.
+/// Enforces the ML-DSA folded identity as an outer-STARK constraint. Matrix,
+/// `t1`, and `q` terms are deterministic from transcript-mixed public inputs.
+/// Every QM31 coordinate must vanish in the quotient polynomial.
 #[derive(Clone)]
 struct PublicFoldEval {
     value: SecureField,
@@ -928,9 +883,6 @@ impl FrameworkEval for PublicFoldEval {
 
 struct Built {
     public_fold: FrameworkComponent<PublicFoldEval>,
-    expand_a_rejection: FrameworkComponent<RejectionEval>,
-    expand_a_ntt_butterfly: FrameworkComponent<NttButterflyEval>,
-    expand_a_ntt_scaling: FrameworkComponent<NttScalingEval>,
     coeffs: FrameworkComponent<CoeffsEval>,
     coeffs_rc: Vec<FrameworkComponent<coeffs_tables::RangeTableEval>>,
     decomp: FrameworkComponent<DecompEval>,
@@ -951,9 +903,7 @@ struct Built {
 
 impl Built {
     fn ordered(&self) -> Vec<&dyn Component> {
-        let mut out: Vec<&dyn Component> = vec![&self.public_fold, &self.expand_a_rejection];
-        out.push(&self.expand_a_ntt_butterfly);
-        out.push(&self.expand_a_ntt_scaling);
+        let mut out: Vec<&dyn Component> = vec![&self.public_fold];
         out.push(&self.coeffs);
         out.extend(self.coeffs_rc.iter().map(|c| c as &dyn Component));
         out.push(&self.decomp);
@@ -972,10 +922,7 @@ impl Built {
         out
     }
     fn ordered_prover(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
-        let mut out: Vec<&dyn ComponentProver<SimdBackend>> =
-            vec![&self.public_fold, &self.expand_a_rejection];
-        out.push(&self.expand_a_ntt_butterfly);
-        out.push(&self.expand_a_ntt_scaling);
+        let mut out: Vec<&dyn ComponentProver<SimdBackend>> = vec![&self.public_fold];
         out.push(&self.coeffs);
         out.extend(
             self.coeffs_rc
@@ -1021,8 +968,6 @@ impl Built {
 struct Claims {
     /// Hosted mode drops the `msglink` claim from `ordered()` / `from_flat()`.
     hosted: bool,
-    expand_a_rejection: SecureField,
-    expand_a_ntt: Vec<SecureField>,
     coeffs: SecureField,
     coeffs_rc: Vec<SecureField>,
     decomp: SecureField,
@@ -1036,14 +981,11 @@ struct Claims {
     bridges: Vec<SecureField>,
     sinks: Vec<SecureField>,
     native_use: SecureField,
-    expand_a_native_use: SecureField,
 }
 
 impl Claims {
     fn ordered(&self) -> Vec<SecureField> {
-        let mut v = vec![self.expand_a_rejection];
-        v.extend(self.expand_a_ntt.iter().copied());
-        v.push(self.coeffs);
+        let mut v = vec![self.coeffs];
         v.extend(self.coeffs_rc.iter().copied());
         v.push(self.decomp);
         v.extend(self.decomp_rc.iter().copied());
@@ -1057,7 +999,6 @@ impl Claims {
         v.push(self.prefix);
         v.extend(self.bridges.iter().copied());
         v.extend(self.sinks.iter().copied());
-        v.push(self.expand_a_native_use);
         v.push(self.native_use);
         v
     }
@@ -1067,8 +1008,6 @@ impl Claims {
     fn from_flat(flat: &[SecureField], hosted: bool) -> Self {
         let mut it = flat.iter().copied();
         let mut next = || it.next().expect("claimed sums length mismatch");
-        let expand_a_rejection = next();
-        let expand_a_ntt = (0..2).map(|_| next()).collect();
         let coeffs = next();
         let coeffs_rc = vec![next()];
         let decomp = next();
@@ -1083,12 +1022,9 @@ impl Claims {
         let prefix = next();
         let bridges = (0..4).map(|_| next()).collect();
         let sinks = (0..4).map(|_| next()).collect();
-        let expand_a_native_use = next();
         let native_use = next();
         Self {
             hosted,
-            expand_a_rejection,
-            expand_a_ntt,
             coeffs,
             coeffs_rc,
             decomp,
@@ -1102,7 +1038,6 @@ impl Claims {
             bridges,
             sinks,
             native_use,
-            expand_a_native_use,
         }
     }
 }
@@ -1121,7 +1056,6 @@ struct LayoutCtx {
     message_len: usize,
     sib_stream_len: usize,
     sib_squeezed_len: usize,
-    expand_a_candidate_counts: Vec<u16>,
 }
 
 impl LayoutCtx {
@@ -1131,17 +1065,13 @@ impl LayoutCtx {
         sib_squeezed_len: usize,
         hosted: bool,
         public_message: bool,
-        expand_a_candidate_counts: &[u16],
     ) -> Self {
-        expand_a::validate_candidate_counts(expand_a_candidate_counts)
-            .expect("validated ExpandA candidate counts");
         Self {
             hosted,
             public_message,
             message_len: input.message.len(),
             sib_stream_len,
             sib_squeezed_len,
-            expand_a_candidate_counts: expand_a_candidate_counts.to_vec(),
         }
     }
 }
@@ -1149,14 +1079,6 @@ impl LayoutCtx {
 fn module_trace_layout(ctx: &LayoutCtx) -> Vec<u32> {
     // Public folded-identity component marker (pinned to zero).
     let mut t = vec![LOG_N_LANES];
-    t.extend(vec![
-        expand_a::rejection_log_size(
-            &ctx.expand_a_candidate_counts
-        );
-        REJECTION_BASE_COLS
-    ]);
-    t.extend(vec![NTT_BUTTERFLY_LOG_SIZE; NTT_BUTTERFLY_BASE_COLS]);
-    t.extend(vec![NTT_SCALING_LOG_SIZE; NTT_SCALING_BASE_COLS]);
     // 1. coeffs + 2. unified range table.
     t.extend(vec![coeffs_log_size(); coeffs::N_BASE_COLS]);
     t.push(coeffs_tables::range_table_log_size());
@@ -1202,14 +1124,6 @@ fn module_trace_layout(ctx: &LayoutCtx) -> Vec<u32> {
 
 fn module_interaction_layout(ctx: &LayoutCtx) -> Vec<u32> {
     let mut i = Vec::new();
-    i.extend(vec![
-        expand_a::rejection_log_size(
-            &ctx.expand_a_candidate_counts
-        );
-        REJECTION_INTERACTION_COLS
-    ]);
-    i.extend(vec![NTT_BUTTERFLY_LOG_SIZE; NTT_BUTTERFLY_INTERACTION_COLS]);
-    i.extend(vec![NTT_SCALING_LOG_SIZE; NTT_SCALING_INTERACTION_COLS]);
     // 1. coeffs + 2. unified range table.
     i.extend(vec![coeffs_log_size(); coeffs::N_INTERACTION_COLS]);
     i.extend(vec![
@@ -1277,7 +1191,6 @@ fn layout_for(ctx: &LayoutCtx, input: &MlDsaVerifyInput) -> TreeLayout {
             ctx.sib_stream_len,
             ctx.sib_squeezed_len,
             ctx.public_message,
-            &ctx.expand_a_candidate_counts,
         ),
         trace: module_trace_layout(ctx),
         interaction: module_interaction_layout(ctx),
@@ -1319,11 +1232,10 @@ fn build_components(
     ctx: &LayoutCtx,
     input: &MlDsaVerifyInput,
     group_evals: &[SecureField],
-    a_evals: &[SecureField],
     rel: &Relations,
     claims: &Claims,
 ) -> Built {
-    let public_evals = compute_public_evals_from_a(input, a_evals, rel.r, rel.s);
+    let public_evals = compute_public_evals(input, rel.r, rel.s);
     let public_fold_value = folded_check(
         &public_evals,
         &ClaimedEvals(group_evals),
@@ -1338,34 +1250,6 @@ fn build_components(
         },
         SecureField::zero(),
     );
-    let expand_a_rejection = FrameworkComponent::new(
-        allocator,
-        RejectionEval {
-            ns: ns.to_string(),
-            log_size: expand_a::rejection_log_size(&ctx.expand_a_candidate_counts),
-            stream_base,
-            rho: input.rho,
-            relations: rel.expand_a.clone(),
-        },
-        claims.expand_a_rejection,
-    );
-    assert_eq!(claims.expand_a_ntt.len(), 2);
-    let expand_a_ntt_butterfly = FrameworkComponent::new(
-        allocator,
-        NttButterflyEval {
-            relations: rel.expand_a.clone(),
-        },
-        claims.expand_a_ntt[0],
-    );
-    let expand_a_ntt_scaling = FrameworkComponent::new(
-        allocator,
-        NttScalingEval {
-            r: rel.r,
-            s: rel.s,
-            relations: rel.expand_a.clone(),
-        },
-        claims.expand_a_ntt[1],
-    );
     // 1. coeffs.
     let coeffs = FrameworkComponent::new(
         allocator,
@@ -1377,7 +1261,7 @@ fn build_components(
         },
         claims.coeffs,
     );
-    // 2. unified coeffs + ExpandA range table.
+    // 2. unified coeffs range table.
     let coeffs_rc = vec![FrameworkComponent::new(
         allocator,
         coeffs_tables::RangeTableEval {
@@ -1505,9 +1389,6 @@ fn build_components(
 
     Built {
         public_fold,
-        expand_a_rejection,
-        expand_a_ntt_butterfly,
-        expand_a_ntt_scaling,
         coeffs,
         coeffs_rc,
         decomp,
@@ -1552,7 +1433,6 @@ fn sib_rc_relation(
 
 pub struct MlDsaProver {
     witness: MlDsaWitness,
-    expand_a_witness: ExpandAWitness,
     input: MlDsaVerifyInput,
     sib_stream_len: usize,
     sib_squeezed_len: usize,
@@ -1583,7 +1463,6 @@ pub struct MlDsaProver {
     // bridge byte payloads stashed for the interaction phase.
     decomp_w1_bytes: Vec<u8>,
     group_evals: Vec<SecureField>,
-    a_evals: Vec<SecureField>,
     claims: Claims,
     built: Option<Built>,
 }
@@ -1620,7 +1499,6 @@ impl MlDsaProver {
         keccak_handle: SharedKeccakRelations,
     ) -> Self {
         let hosted = shared_field.is_some() || public_message;
-        let expand_a_witness = derive_expand_a_witness(input.rho).expect("bounded ExpandA witness");
         let sib_stream_len = sampleinball::stream_len(&witness);
         let sib_squeezed_len = witness.sponge.sample_in_ball_squeezed.len();
         let ctx = LayoutCtx::new(
@@ -1629,7 +1507,6 @@ impl MlDsaProver {
             sib_squeezed_len,
             hosted,
             public_message,
-            &expand_a_witness.candidate_counts,
         );
         let claims = Claims {
             hosted,
@@ -1638,7 +1515,6 @@ impl MlDsaProver {
 
         Self {
             witness,
-            expand_a_witness,
             input,
             sib_stream_len,
             sib_squeezed_len,
@@ -1654,7 +1530,6 @@ impl MlDsaProver {
             sib_rc_mult: Vec::new(),
             decomp_w1_bytes: Vec::new(),
             group_evals: Vec::new(),
-            a_evals: Vec::new(),
             claims,
             built: None,
         }
@@ -1698,15 +1573,13 @@ impl MlDsaProver {
             self.input.message.len(),
             self.sib_stream_len,
             self.stream_base,
-            &self.expand_a_witness.candidate_counts,
         );
-        let mut streams = vec![
+        let streams = vec![
             self.input.encode_pk(),
             self.witness.sponge.mu_absorbed.clone(),
             self.witness.sponge.c_tilde_absorbed.clone(),
             self.witness.sponge.sample_in_ball_absorbed.clone(),
         ];
-        streams.extend(expand_a::shake128_absorb_streams(&self.input.rho));
         (shapes, streams)
     }
 
@@ -1729,12 +1602,6 @@ impl MlDsaProver {
     /// The 30 claimed `P̂(r,s)` group evaluations (available after proving).
     pub fn group_evals(&self) -> &[SecureField] {
         &self.group_evals
-    }
-    pub fn a_evals(&self) -> &[SecureField] {
-        &self.a_evals
-    }
-    pub fn expand_a_candidate_counts(&self) -> &[u16] {
-        &self.expand_a_witness.candidate_counts
     }
     /// The ordered claimed sums (WITHOUT the msglink slot in hosted mode).
     pub fn claimed_sums(&self) -> Vec<SecureField> {
@@ -1784,7 +1651,6 @@ impl Air for MlDsaProver {
             &self.namespace,
             self.private_message,
             self.stream_base,
-            &self.expand_a_witness.candidate_counts,
         );
     }
     fn draw_relations(&mut self, channel: &mut Blake2sChannel) {
@@ -1802,7 +1668,6 @@ impl Air for MlDsaProver {
     }
     fn mix_claimed_sums(&self, channel: &mut Blake2sChannel) {
         channel.mix_felts(&self.group_evals);
-        channel.mix_felts(&self.a_evals);
         channel.mix_felts(&self.claimed_sums());
     }
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
@@ -1811,7 +1676,6 @@ impl Air for MlDsaProver {
             &self.input,
             self.sib_stream_len,
             self.ctx.public_message,
-            &self.ctx.expand_a_candidate_counts,
         )
     }
     fn canonical_preprocessed_columns(
@@ -1822,7 +1686,6 @@ impl Air for MlDsaProver {
             self.sib_stream_len,
             self.ctx.sib_squeezed_len,
             self.ctx.public_message,
-            &self.ctx.expand_a_candidate_counts,
         ))
     }
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
@@ -1834,7 +1697,6 @@ impl Air for MlDsaProver {
             &self.ctx,
             &self.input,
             &self.group_evals,
-            &self.a_evals,
             &rel,
             &self.claims,
         ));
@@ -1849,10 +1711,6 @@ impl AirProver for MlDsaProver {
         coeffs_log_size()
             .max(decomp_log_size())
             .max(sib_log_size(self.sib_squeezed_len))
-            .max(NTT_BUTTERFLY_LOG_SIZE)
-            .max(expand_a::rejection_log_size(
-                &self.expand_a_witness.candidate_counts,
-            ))
             .max(coeffs_tables::range_table_log_size())
     }
     fn max_constraint_log_degree_bound(&self) -> u32 {
@@ -1864,7 +1722,6 @@ impl AirProver for MlDsaProver {
             self.sib_stream_len,
             self.sib_squeezed_len,
             self.ctx.public_message,
-            &self.ctx.expand_a_candidate_counts,
         ));
     }
     /// Partial preprocessed writes: with multiple hosted ML-DSA instances, the
@@ -1883,14 +1740,12 @@ impl AirProver for MlDsaProver {
             &self.input,
             self.sib_stream_len,
             self.ctx.public_message,
-            &self.ctx.expand_a_candidate_counts,
         );
         let cols = gen_all_preprocessed(
             &self.input,
             self.sib_stream_len,
             self.sib_squeezed_len,
             self.ctx.public_message,
-            &self.ctx.expand_a_candidate_counts,
         );
         assert_eq!(
             ids.len(),
@@ -1918,29 +1773,19 @@ impl AirProver for MlDsaProver {
             &self.input,
             self.sib_stream_len,
             self.ctx.public_message,
-            &self.ctx.expand_a_candidate_counts,
         );
         let cols = gen_all_preprocessed(
             &self.input,
             self.sib_stream_len,
             self.sib_squeezed_len,
             self.ctx.public_message,
-            &self.ctx.expand_a_candidate_counts,
         );
         fingerprint_preprocessed_columns("mldsa_statement", &ids, &cols)
     }
     fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
         let mut evals = vec![col_eval(LOG_N_LANES, vec![m31(0); 1usize << LOG_N_LANES])];
 
-        let (expand_rejection_trace, expand_rejection_uses) =
-            gen_rejection_base_trace(&self.expand_a_witness);
-        evals.extend(expand_rejection_trace);
-        let expand_ntt = gen_ntt_base_traces(&self.expand_a_witness);
-        evals.extend(expand_ntt.butterfly);
-        evals.extend(expand_ntt.scaling);
-
-        // 1. coeffs base + 2. unified range multiplicity. ExpandA and coeffs
-        // consume the same namespaced relation, so their counts add by kind.
+        // 1. coeffs base + 2. unified range multiplicity.
         let cls = coeffs_log_size();
         evals.extend(coeffs::gen_coeffs_base_trace(&self.witness, cls));
         let coeffs_dry = coeffs::gen_coeffs_interaction(
@@ -1950,26 +1795,12 @@ impl AirProver for MlDsaProver {
             SecureField::zero(),
             &CoeffsRelations::dummy(),
         );
-        let mut range_uses: [Vec<u32>; 5] = core::array::from_fn(|idx| {
+        let range_uses: [Vec<u32>; 5] = core::array::from_fn(|idx| {
             coeffs_dry
                 .rc_uses
                 .for_kind(coeffs_tables::RcKind::ALL[idx])
                 .to_vec()
         });
-        for (idx, kind) in coeffs_tables::RcKind::RANGE.iter().enumerate() {
-            for (dst, src) in range_uses[idx]
-                .iter_mut()
-                .zip(expand_rejection_uses.for_kind(*kind))
-            {
-                *dst += src;
-            }
-            for (dst, src) in range_uses[idx]
-                .iter_mut()
-                .zip(expand_ntt.rc_uses.for_kind(*kind))
-            {
-                *dst += src;
-            }
-        }
         self.coeffs_rc_mult = vec![coeffs_tables::gen_range_table_multiplicities([
             &range_uses[0],
             &range_uses[1],
@@ -2090,19 +1921,6 @@ impl AirProver for MlDsaProver {
         let rel = self.relations().clone();
         let mut evals = Vec::new();
 
-        let expand_rejection =
-            gen_rejection_interaction(&self.expand_a_witness, self.stream_base, &rel.expand_a);
-        self.claims.expand_a_rejection = expand_rejection.claimed_sum;
-        evals.extend(expand_rejection.trace);
-        let expand_ntt = gen_ntt_interactions(&self.expand_a_witness, rel.r, rel.s, &rel.expand_a);
-        self.claims.expand_a_ntt = vec![
-            expand_ntt.butterfly.claimed_sum,
-            expand_ntt.scaling.claimed_sum,
-        ];
-        self.a_evals = expand_ntt.a_evals;
-        evals.extend(expand_ntt.butterfly.trace);
-        evals.extend(expand_ntt.scaling.trace);
-
         // 1. coeffs interaction (stash group_evals + claimed).
         let cls = coeffs_log_size();
         let coeffs_int =
@@ -2110,7 +1928,7 @@ impl AirProver for MlDsaProver {
         self.claims.coeffs = coeffs_int.claimed_sum;
         self.group_evals = coeffs_int.group_evals.clone();
         evals.extend(coeffs_int.trace);
-        // 2. unified coeffs + ExpandA range table.
+        // 2. unified coeffs range table.
         self.claims.coeffs_rc.clear();
         let (tr, sum) =
             coeffs_tables::gen_range_table_interaction(&self.coeffs_rc_mult[0], &rel.coeffs.range);
@@ -2231,7 +2049,6 @@ impl AirProver for MlDsaProver {
         tb.extend_evals(evals);
 
         // native_use_sum (folded verifier term) appended LAST.
-        self.claims.expand_a_native_use = native_eval_use_sum(&self.a_evals, &rel.expand_a.eval);
         self.claims.native_use = native_use_sum(&self.group_evals, &rel.coeffs);
     }
     fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
@@ -2259,7 +2076,6 @@ pub struct MlDsaVerifier {
     /// Private-message mode (must match the prover's per role).
     private_message: bool,
     group_evals: Vec<SecureField>,
-    a_evals: Vec<SecureField>,
     claims: Claims,
     relations: Option<Relations>,
     built: Option<Built>,
@@ -2280,8 +2096,6 @@ impl MlDsaVerifier {
     pub fn new(
         input: MlDsaVerifyInput,
         group_evals: Vec<SecureField>,
-        a_evals: Vec<SecureField>,
-        expand_a_candidate_counts: Vec<u16>,
         claimed_sums: Vec<SecureField>,
         sib_stream_len: usize,
         sib_squeezed_len: usize,
@@ -2291,8 +2105,6 @@ impl MlDsaVerifier {
         Self::build(
             input,
             group_evals,
-            a_evals,
-            expand_a_candidate_counts,
             claimed_sums,
             sib_stream_len,
             sib_squeezed_len,
@@ -2306,8 +2118,6 @@ impl MlDsaVerifier {
     fn build(
         input: MlDsaVerifyInput,
         group_evals: Vec<SecureField>,
-        a_evals: Vec<SecureField>,
-        expand_a_candidate_counts: Vec<u16>,
         claimed_sums: Vec<SecureField>,
         sib_stream_len: usize,
         sib_squeezed_len: usize,
@@ -2322,7 +2132,6 @@ impl MlDsaVerifier {
             sib_squeezed_len,
             hosted,
             public_message,
-            &expand_a_candidate_counts,
         );
         let claims = Claims::from_flat(&claimed_sums, hosted);
         Self {
@@ -2335,7 +2144,6 @@ impl MlDsaVerifier {
             stream_base: 0,
             private_message: false,
             group_evals,
-            a_evals,
             claims,
             relations: None,
             built: None,
@@ -2347,8 +2155,6 @@ impl MlDsaVerifier {
     pub fn hosted(
         input: MlDsaVerifyInput,
         group_evals: Vec<SecureField>,
-        a_evals: Vec<SecureField>,
-        expand_a_candidate_counts: Vec<u16>,
         claimed_sums: Vec<SecureField>,
         sib_stream_len: usize,
         sib_squeezed_len: usize,
@@ -2358,8 +2164,6 @@ impl MlDsaVerifier {
         Self::new(
             input,
             group_evals,
-            a_evals,
-            expand_a_candidate_counts,
             claimed_sums,
             sib_stream_len,
             sib_squeezed_len,
@@ -2374,8 +2178,6 @@ impl MlDsaVerifier {
     pub fn hosted_public(
         input: MlDsaVerifyInput,
         group_evals: Vec<SecureField>,
-        a_evals: Vec<SecureField>,
-        expand_a_candidate_counts: Vec<u16>,
         claimed_sums: Vec<SecureField>,
         sib_stream_len: usize,
         sib_squeezed_len: usize,
@@ -2384,8 +2186,6 @@ impl MlDsaVerifier {
         Self::build(
             input,
             group_evals,
-            a_evals,
-            expand_a_candidate_counts,
             claimed_sums,
             sib_stream_len,
             sib_squeezed_len,
@@ -2423,13 +2223,10 @@ impl Air for MlDsaVerifier {
             &self.namespace,
             self.private_message,
             self.stream_base,
-            &self.ctx.expand_a_candidate_counts,
         );
     }
     fn draw_relations(&mut self, channel: &mut Blake2sChannel) {
         let rel = draw_relations_common(channel, self.shared_field.as_ref(), &self.keccak_handle);
-        // Public EvalAtRs lookup consumer (mirror of the prover).
-        self.claims.expand_a_native_use = native_eval_use_sum(&self.a_evals, &rel.expand_a.eval);
         self.claims.native_use = native_use_sum(&self.group_evals, &rel.coeffs);
         self.relations = Some(rel);
     }
@@ -2441,7 +2238,6 @@ impl Air for MlDsaVerifier {
     }
     fn mix_claimed_sums(&self, channel: &mut Blake2sChannel) {
         channel.mix_felts(&self.group_evals);
-        channel.mix_felts(&self.a_evals);
         channel.mix_felts(&self.claimed_sums());
     }
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
@@ -2450,7 +2246,6 @@ impl Air for MlDsaVerifier {
             &self.input,
             self.sib_stream_len,
             self.ctx.public_message,
-            &self.ctx.expand_a_candidate_counts,
         )
     }
     fn canonical_preprocessed_columns(
@@ -2461,7 +2256,6 @@ impl Air for MlDsaVerifier {
             self.sib_stream_len,
             self.ctx.sib_squeezed_len,
             self.ctx.public_message,
-            &self.ctx.expand_a_candidate_counts,
         ))
     }
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
@@ -2473,7 +2267,6 @@ impl Air for MlDsaVerifier {
             &self.ctx,
             &self.input,
             &self.group_evals,
-            &self.a_evals,
             &rel,
             &self.claims,
         ));
@@ -2510,8 +2303,6 @@ pub fn prove_mldsa(
     Ok(MlDsaProof {
         input,
         group_evals: prover.group_evals,
-        a_evals: prover.a_evals,
-        expand_a_candidate_counts: prover.expand_a_witness.candidate_counts.to_vec(),
         claimed_sums: prover.claims.ordered(),
         sib_stream_len,
         sib_squeezed_len,
@@ -2531,15 +2322,7 @@ pub fn debug_layout(
     sib_stream_len: usize,
     sib_squeezed_len: usize,
 ) -> TreeLayout {
-    let expand_a = derive_expand_a_witness(input.rho).expect("bounded ExpandA witness");
-    let ctx = LayoutCtx::new(
-        input,
-        sib_stream_len,
-        sib_squeezed_len,
-        false,
-        false,
-        &expand_a.candidate_counts,
-    );
+    let ctx = LayoutCtx::new(input, sib_stream_len, sib_squeezed_len, false, false);
     layout_for(&ctx, input)
 }
 
@@ -2549,23 +2332,18 @@ pub fn n_group_evals() -> usize {
     coeffs::layout::N_GROUPS
 }
 
-pub fn n_a_evals() -> usize {
-    MATRIX_POLYS
-}
-
 /// The exact `claimed_sums` length a HOSTED proof carries (msglink slot
 /// dropped; `native_use` appended last; the keccak side lives in the SERVICE
 /// module and contributes [`stwo_keccak::service::service_claimed_sums_len`]
 /// separately). Hosts gate the flat vector's length on this before
 /// construction — `Claims::from_flat` panics on a short vector.
 pub fn hosted_claimed_sums_len() -> usize {
-    3                                             // ExpandA rejection + butterfly + scaling
-        + 1 + coeffs_tables::RANGE_TABLE_COMPONENTS // coeffs + unified range table
+    1 + coeffs_tables::RANGE_TABLE_COMPONENTS    // coeffs + unified range table
         + 1 + decomp_tables::RcKind::ALL.len()    // decomp + rc
         + 1 + sib_tables::RcKind::ALL.len()       // sib + rc
         + 3                                       // pk + tr-check + µ prefix
         + 4 + 4                                   // bridges + sinks
-        + 2 // ExpandA native eval use + coeffs native use
+        + 1 // coeffs native use
 }
 
 pub fn verify_mldsa(proof: &MlDsaProof) -> Result<(), VerificationError> {
@@ -2575,13 +2353,7 @@ pub fn verify_mldsa(proof: &MlDsaProof) -> Result<(), VerificationError> {
     validate_sib_lengths(proof.sib_stream_len, proof.sib_squeezed_len).map_err(|message| {
         VerificationError::InvalidStructure(format!("ML-DSA statement: {message}"))
     })?;
-    expand_a::validate_candidate_counts(&proof.expand_a_candidate_counts).map_err(|_| {
-        VerificationError::InvalidStructure(
-            "ML-DSA statement: bad ExpandA candidate-count shape".to_string(),
-        )
-    })?;
     if proof.group_evals.len() != n_group_evals()
-        || proof.a_evals.len() != n_a_evals()
         || proof.claimed_sums.len() != hosted_claimed_sums_len() + 1
     {
         return Err(VerificationError::InvalidStructure(
@@ -2589,12 +2361,7 @@ pub fn verify_mldsa(proof: &MlDsaProof) -> Result<(), VerificationError> {
         ));
     }
     let handle = SharedKeccakRelations::new();
-    let job_shapes = keccak_job_shapes(
-        proof.input.message.len(),
-        proof.sib_stream_len,
-        0,
-        &proof.expand_a_candidate_counts,
-    );
+    let job_shapes = keccak_job_shapes(proof.input.message.len(), proof.sib_stream_len, 0);
     if proof.service_claimed_sums.len() != stwo_keccak::service::service_claimed_sums_len() {
         return Err(VerificationError::InvalidStructure(
             "ML-DSA statement: bad service claimed-sums length".to_string(),
@@ -2612,8 +2379,6 @@ pub fn verify_mldsa(proof: &MlDsaProof) -> Result<(), VerificationError> {
     let mut verifier = MlDsaVerifier::new(
         proof.input.clone(),
         proof.group_evals.clone(),
-        proof.a_evals.clone(),
-        proof.expand_a_candidate_counts.clone(),
         proof.claimed_sums.clone(),
         proof.sib_stream_len,
         proof.sib_squeezed_len,
@@ -2641,56 +2406,4 @@ pub fn verify_mldsa(proof: &MlDsaProof) -> Result<(), VerificationError> {
     // The public folded identity is enforced by `PublicFoldEval` in the outer
     // STARK component list.
     Ok(())
-}
-
-#[cfg(test)]
-mod soundness_tests {
-    use ml_dsa::signature::{Keypair, Signer};
-    use ml_dsa::{EncodedSignature, EncodedVerifyingKey, MlDsa65, SigningKey};
-    use stwo::core::fri::FriConfig;
-
-    use super::*;
-    use crate::reference::encoding::{pk_decode, sig_decode};
-    use crate::reference::ntt::ntt_inverse;
-    use crate::reference::sponge::shake256;
-    use crate::witness::generate_witness;
-
-    fn test_input() -> MlDsaVerifyInput {
-        let sk = SigningKey::<MlDsa65>::from_seed(&[71; 32].into());
-        let vk = sk.verifying_key();
-        let message = b"forged ExpandA matrix regression".to_vec();
-        let signature = sk.sign(&message);
-        let vk_bytes: EncodedVerifyingKey<MlDsa65> = vk.encode();
-        let signature_bytes: EncodedSignature<MlDsa65> = signature.encode();
-        let pk = pk_decode(vk_bytes.as_slice()).unwrap();
-        let signature = sig_decode(signature_bytes.as_slice()).unwrap();
-        let (tr, _) = shake256(&[vk_bytes.as_slice()], 64);
-        MlDsaVerifyInput::from_decoded(&pk, &signature, tr.try_into().unwrap(), message)
-    }
-
-    #[test]
-    fn self_consistent_forged_expand_a_matrix_cannot_prove() {
-        let input = test_input();
-        let witness = generate_witness(&input).unwrap();
-        let handle = SharedKeccakRelations::new();
-        let mut prover = MlDsaProver::new(witness, input, None, handle.clone());
-
-        prover.expand_a_witness.a_hat[0][0] ^= 1;
-        prover.expand_a_witness.a[0] = ntt_inverse(&prover.expand_a_witness.a_hat[0]);
-
-        let (job_shapes, job_streams) = prover.keccak_jobs();
-        let mut service = KeccakServiceProver::new(job_shapes, job_streams, handle);
-        let config = PcsConfig {
-            pow_bits: 10,
-            fri_config: FriConfig::new(0, 2, 3, 1),
-            lifting_log_size: None,
-        };
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            air_core::prove_with_post_interaction(&mut [&mut service, &mut prover], config)
-        }));
-        assert!(
-            !matches!(result, Ok(Ok(_))),
-            "a matrix disconnected from SHAKE128/RejNTT must not prove",
-        );
-    }
 }

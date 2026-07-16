@@ -2236,8 +2236,6 @@ fn policy_date_tuple(policy: &Policy) -> Result<(u16, u8, u8), MdocError> {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct MdocMlDsaClaims {
     pub group_evals: Vec<QM31>,
-    pub a_evals: Vec<QM31>,
-    pub expand_a_candidate_counts: Vec<u16>,
     pub claimed_sums: Vec<QM31>,
     pub sib_stream_len: usize,
     pub sib_squeezed_len: usize,
@@ -2247,8 +2245,6 @@ impl MdocMlDsaClaims {
     fn from_prover(prover: &MlDsaStatementProver) -> Self {
         Self {
             group_evals: prover.group_evals().to_vec(),
-            a_evals: prover.a_evals().to_vec(),
-            expand_a_candidate_counts: prover.expand_a_candidate_counts().to_vec(),
             claimed_sums: prover.claimed_sums(),
             sib_stream_len: prover.sib_stream_len(),
             sib_squeezed_len: prover.sib_squeezed_len(),
@@ -2260,9 +2256,6 @@ impl MdocMlDsaClaims {
     /// turning a malformed proof into a crash.
     fn has_expected_shape(&self) -> bool {
         self.group_evals.len() == stwo_mldsa::statement::n_group_evals()
-            && self.a_evals.len() == stwo_mldsa::statement::n_a_evals()
-            && stwo_mldsa::expand_a::validate_candidate_counts(&self.expand_a_candidate_counts)
-                .is_ok()
             && self.claimed_sums.len() == stwo_mldsa::statement::hosted_claimed_sums_len()
             && stwo_mldsa::statement::validate_sib_lengths(
                 self.sib_stream_len,
@@ -3715,8 +3708,6 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
             MlDsaStatementVerifier::hosted_public(
                 input.clone(),
                 claims.group_evals.clone(),
-                claims.a_evals.clone(),
-                claims.expand_a_candidate_counts.clone(),
                 claims.claimed_sums.clone(),
                 claims.sib_stream_len,
                 claims.sib_squeezed_len,
@@ -3734,8 +3725,6 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
             MlDsaStatementVerifier::hosted_public(
                 input.clone(),
                 claims.group_evals.clone(),
-                claims.a_evals.clone(),
-                claims.expand_a_candidate_counts.clone(),
                 claims.claimed_sums.clone(),
                 claims.sib_stream_len,
                 claims.sib_squeezed_len,
@@ -3757,8 +3746,6 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
                     MlDsaStatementVerifier::hosted(
                         *input,
                         claims.group_evals.clone(),
-                        claims.a_evals.clone(),
-                        claims.expand_a_candidate_counts.clone(),
                         claims.claimed_sums.clone(),
                         claims.sib_stream_len,
                         claims.sib_squeezed_len,
@@ -3789,7 +3776,6 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
                 input.message.len(),
                 claims.sib_stream_len,
                 MDOC_ISSUER_MLDSA_STREAM_BASE,
-                &claims.expand_a_candidate_counts,
             ));
         }
         if let Some(input) = statement.device_input.as_mldsa() {
@@ -3801,7 +3787,6 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
                 input.message.len(),
                 claims.sib_stream_len,
                 MDOC_DEVICE_MLDSA_STREAM_BASE,
-                &claims.expand_a_candidate_counts,
             ));
         }
         if let Some(claims) = proof.revocation_mldsa.as_ref() {
@@ -3809,7 +3794,6 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
                 TS13_REVOCATION_MESSAGE_LEN,
                 claims.sib_stream_len,
                 MDOC_REVOCATION_MLDSA_STREAM_BASE,
-                &claims.expand_a_candidate_counts,
             ));
         }
         KeccakServiceVerifier::new(shapes, sums.clone(), mldsa_keccak_handle.clone())

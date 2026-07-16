@@ -10,12 +10,12 @@ use crate::mdoc::{
 
 // Regenerated whenever the canonical published tuple changes.
 pub const TS13_PUBLISHED_AGE_OVER_18_CIRCUIT_HASH: &str =
-    "8cb1765c8704e97461ea2189ded19e2b24f2a6fb53bf9ffc9371d6ea75b5bb01";
+    "05505a1e08264a96a82848baffa8cca3a190c9540dd486834e13a590471b6438";
 pub const TS13_P4C_MIN_BLIND_ROWS: usize = 256;
 pub const TS13_P4C_MAX_OPENINGS: usize = 256;
 pub const TS13_P4C_MIN_DECOY_MESSAGE_BITS: usize = 512;
 pub const TS13_P4C_PER_OPENING_STATISTICAL_BITS: u32 = 64;
-pub const TS13_CONSTRAINT_SYSTEM: &str = "mldsa65-pure-stark-direct-v1";
+pub const TS13_CONSTRAINT_SYSTEM: &str = "mldsa65-pure-stark-direct-v2";
 pub const TS13_PCS_LOG_BLOWUP_FACTOR: u32 = MDOC_PRODUCTION_PCS_LOG_BLOWUP_FACTOR;
 pub const TS13_PCS_QUERIES: u32 = MDOC_PRODUCTION_PCS_QUERIES as u32;
 pub const TS13_PCS_POW_BITS: u32 = MDOC_PRODUCTION_PCS_POW_BITS;

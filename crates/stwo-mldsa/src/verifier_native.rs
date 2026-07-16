@@ -2,9 +2,8 @@
 //! native-side warning).
 //!
 //! The AIR (`coeffs`) yields each committed poly's `P̂(r,s)` into the
-//! `EvalAtRsRelation`. The public `Â_ij` values come from the constrained
-//! ExpandA + inverse-NTT path; only `t̂1_i` and `q̂(s)` are assembled directly
-//! from public inputs. The folded identity consumes the claimed
+//! `EvalAtRsRelation`. The verifier computes the public `Â_ij`, `t̂1_i`, and
+//! `q̂(s)` directly from the transcript-mixed public key. The folded identity consumes the claimed
 //! `ẑ_j, ŵ_i, ê_i, v̂_i, ĉ, Ĉ_i` evaluations:
 //!
 //! ```text
@@ -85,10 +84,9 @@ pub struct PublicEvals {
     pub q_hat: SecureField,
 }
 
-/// Assemble the public bivariate evals from matrix evaluations already bound
-/// by the ExpandA AIR. `a_evals` is row-major `(i, j)` and contains the
-/// balanced-integer `A_ij(r,s)` values after the constrained inverse NTT.
-pub fn compute_public_evals_from_a(
+/// Assemble the public bivariate evals from precomputed row-major matrix
+/// evaluations. Used by [`compute_public_evals`] after native ExpandA.
+fn compute_public_evals_from_a(
     input: &MlDsaVerifyInput,
     a_evals: &[SecureField],
     r: SecureField,
@@ -126,9 +124,8 @@ pub fn compute_public_evals_from_a(
     }
 }
 
-/// Legacy/reference constructor used by standalone differential tests. Product
-/// verification uses [`compute_public_evals_from_a`] so no native `ExpandA`
-/// result can select the matrix in the accepted STARK statement.
+/// Product constructor: deterministically derive `A` from transcript-mixed
+/// public `ρ`, invert the NTT, and evaluate the public matrix and t1 terms.
 pub fn compute_public_evals(
     input: &MlDsaVerifyInput,
     r: SecureField,

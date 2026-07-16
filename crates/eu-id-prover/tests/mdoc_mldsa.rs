@@ -340,6 +340,47 @@ mod quantum_only {
         verify_mdoc_circuit(&proof, &verifier_statement)
             .expect("verifier statement with zeroed range verifies");
 
+        // Q11: each hosted role binds verifier-native ExpandA(ρ) and t1 to
+        // the transcript-mixed public key. Statement-side mutations reject.
+        for tamper_t1 in [false, true] {
+            let mut tampered = statement.clone();
+            let eu_id_prover::mdoc::MdocAuthInput::MlDsa(input) = &mut tampered.issuer_input;
+            if tamper_t1 {
+                input.t1[0][0] ^= 1;
+            } else {
+                input.rho[0] ^= 1;
+            }
+            verify_mdoc_circuit(&proof, &tampered).expect_err("tampered issuer rho/t1 must reject");
+        }
+        for tamper_t1 in [false, true] {
+            let mut tampered = statement.clone();
+            let eu_id_prover::mdoc::MdocAuthInput::MlDsa(input) = &mut tampered.device_input;
+            if tamper_t1 {
+                input.t1[0][0] ^= 1;
+            } else {
+                input.rho[0] ^= 1;
+            }
+            verify_mdoc_circuit(&proof, &tampered).expect_err("tampered device rho/t1 must reject");
+        }
+        for tamper_t1 in [false, true] {
+            let mut tampered = statement.clone();
+            let MdocRevocationKey::MlDsa(pk) = &mut tampered
+                .ts13_revocation
+                .as_mut()
+                .expect("statement carries revocation inputs")
+                .revocation_public_key;
+            if tamper_t1 {
+                let decoded = stwo_mldsa::reference::encoding::pk_decode(pk).unwrap();
+                let mut t1 = decoded.t1;
+                t1[0][0] ^= 1;
+                *pk = stwo_mldsa::reference::encoding::pk_encode(&decoded.rho, &t1);
+            } else {
+                pk[0] ^= 1;
+            }
+            verify_mdoc_circuit(&proof, &tampered)
+                .expect_err("tampered revocation rho/t1 must reject");
+        }
+
         // G6 privacy: the raw id_lo/id_hi LE-byte patterns are absent from the
         // serialized proof AND the serialized verifier statement.
         let statement_bytes =
@@ -516,35 +557,26 @@ mod quantum_only {
         verify_mdoc_circuit(&proof_a, &statement_b)
             .expect_err("proof A must not verify against a different statement B");
 
-        let mut tampered_a_eval = proof_a.clone();
-        tampered_a_eval
+        let mut tampered_group_eval = proof_a.clone();
+        tampered_group_eval
             .mldsa
             .as_mut()
             .expect("issuer claims")
-            .a_evals[0] += stwo::core::fields::qm31::SecureField::from(
+            .group_evals[0] += stwo::core::fields::qm31::SecureField::from(
             stwo::core::fields::m31::M31::from_u32_unchecked(1),
         );
-        verify_mdoc_circuit(&tampered_a_eval, &statement_a)
-            .expect_err("tampered ExpandA evaluation must reject");
+        verify_mdoc_circuit(&tampered_group_eval, &statement_a)
+            .expect_err("tampered coefficient evaluation must reject");
 
-        let mut tampered_expand_schedule = proof_a.clone();
-        tampered_expand_schedule
+        let mut short_group_evals = proof_a.clone();
+        short_group_evals
             .mldsa
             .as_mut()
             .expect("issuer claims")
-            .expand_a_candidate_counts[0] += 1;
-        verify_mdoc_circuit(&tampered_expand_schedule, &statement_a)
-            .expect_err("tampered ExpandA rejection schedule must reject");
-
-        let mut short_expand_schedule = proof_a.clone();
-        short_expand_schedule
-            .mldsa
-            .as_mut()
-            .expect("issuer claims")
-            .expand_a_candidate_counts
+            .group_evals
             .pop();
-        verify_mdoc_circuit(&short_expand_schedule, &statement_a)
-            .expect_err("malformed ExpandA schedule shape must reject before construction");
+        verify_mdoc_circuit(&short_group_evals, &statement_a)
+            .expect_err("malformed coefficient-eval shape must reject before construction");
 
         // S1 service claims, presence gate: an ML-DSA statement whose proof
         // carries NO service claim vector rejects at the shape gate.

@@ -138,96 +138,6 @@ fn composed_public_fold_constraint_rejects_tampered_group_eval() {
     assert!(verify_mldsa(&proof).is_err());
 }
 
-#[test]
-fn composed_expand_a_eval_binding_rejects_tamper() {
-    let msg = big_msg("expand-a-eval-binding", 1024);
-    let (w, input) = witness_and_input(8011, &msg);
-    let mut proof = prove_mldsa(w, input, pcs_config()).expect("prove");
-    proof.a_evals[0] += SecureField::from(M31::from_u32_unchecked(1));
-    assert!(verify_mldsa(&proof).is_err());
-}
-
-#[test]
-fn composed_expand_a_rejection_schedule_rejects_count_tamper() {
-    let msg = big_msg("expand-a-count-binding", 1024);
-    let (w, input) = witness_and_input(8012, &msg);
-    let mut proof = prove_mldsa(w, input, pcs_config()).expect("prove");
-    proof.expand_a_candidate_counts[0] += 1;
-    assert!(verify_mldsa(&proof).is_err());
-}
-
-fn expand_a_ntt_trace_rejects(attack: stwo_mldsa::expand_a::NttTraceAttack, seed: u64, tag: &str) {
-    let _attack = stwo_mldsa::expand_a::install_ntt_trace_attack(attack);
-    let message = big_msg(tag, 1024);
-    let (witness, input) = witness_and_input(seed, &message);
-    assert!(rejected(witness, input), "forged {tag} must be rejected");
-}
-
-#[test]
-fn composed_expand_a_ntt_quotient_rejects_tamper() {
-    expand_a_ntt_trace_rejects(
-        stwo_mldsa::expand_a::NttTraceAttack::Quotient,
-        8013,
-        "ntt quotient",
-    );
-}
-
-#[test]
-fn composed_expand_a_ntt_final_coefficient_rejects_tamper() {
-    expand_a_ntt_trace_rejects(
-        stwo_mldsa::expand_a::NttTraceAttack::FinalCoefficient,
-        8014,
-        "ntt final coefficient",
-    );
-}
-
-fn expand_a_range_boundary_rejects(kind: stwo_mldsa::coeffs::tables::RcKind, seed: u64, tag: &str) {
-    let _attack = stwo_mldsa::expand_a::install_range_boundary_attack(kind);
-    let message = big_msg(tag, 1024);
-    let (witness, input) = witness_and_input(seed, &message);
-    assert!(
-        rejected(witness, input),
-        "{} first-excluded value must reject in ExpandA",
-        kind.name()
-    );
-}
-
-#[test]
-fn coeffs_split_expand_a_rc7_boundary_rejects() {
-    expand_a_range_boundary_rejects(
-        stwo_mldsa::coeffs::tables::RcKind::Rc7,
-        8020,
-        "split-expand-rc7",
-    );
-}
-
-#[test]
-fn coeffs_split_expand_a_rc8_boundary_rejects() {
-    expand_a_range_boundary_rejects(
-        stwo_mldsa::coeffs::tables::RcKind::Rc8,
-        8021,
-        "split-expand-rc8",
-    );
-}
-
-#[test]
-fn coeffs_split_expand_a_rc9_boundary_rejects() {
-    expand_a_range_boundary_rejects(
-        stwo_mldsa::coeffs::tables::RcKind::Rc9,
-        8022,
-        "split-expand-rc9",
-    );
-}
-
-#[test]
-fn coeffs_split_expand_a_rc13_boundary_rejects() {
-    expand_a_range_boundary_rejects(
-        stwo_mldsa::coeffs::tables::RcKind::Rc13,
-        8023,
-        "split-expand-rc13",
-    );
-}
-
 // =====================================================================
 // Negatives a–g.
 // =====================================================================
@@ -322,9 +232,27 @@ fn composed_negative_e_perm_id_namespacing() {
 #[test]
 fn composed_negative_f_wrong_pk_rho() {
     let msg = big_msg("neg-f", 1024);
-    let (w, mut input) = witness_and_input(8006, &msg);
-    input.rho[0] ^= 1;
-    assert!(rejected(w, input), "wrong-pk ρ flip must fail the fold");
+    let (w, input) = witness_and_input(8006, &msg);
+    let mut proof = prove_mldsa(w, input, pcs_config()).expect("prove");
+    proof.input.rho[0] ^= 1;
+    assert!(
+        verify_mldsa(&proof).is_err(),
+        "statement ρ tamper must reject"
+    );
+}
+
+/// The verifier recomputes the matrix and public t1 fold natively from the
+/// transcript-mixed public key. A statement-side t1 mutation must reject.
+#[test]
+fn composed_native_expand_a_rejects_tampered_t1() {
+    let msg = big_msg("native-expand-a-t1", 1024);
+    let (w, input) = witness_and_input(8008, &msg);
+    let mut proof = prove_mldsa(w, input, pcs_config()).expect("prove");
+    proof.input.t1[0][0] ^= 1;
+    assert!(
+        verify_mldsa(&proof).is_err(),
+        "statement t1 tamper must reject"
+    );
 }
 
 /// g) free-tr regression: keep the valid signature/witness and public key but

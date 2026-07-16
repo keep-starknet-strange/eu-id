@@ -1,4 +1,4 @@
-//! Range-check table providers for `mldsa_coeffs` and `expand_a`.
+//! Range-check table providers for `mldsa_coeffs`.
 //!
 //! The composed statement uses one table of `(value, bound_id)` tuples. The id
 //! is a fixed namespace, so a value present in a wider range cannot satisfy a

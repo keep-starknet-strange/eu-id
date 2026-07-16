@@ -3,7 +3,7 @@
 //! | relation | arity | tuple | providers | consumers |
 //! |----------|-------|-------|-----------|-----------|
 //! | `EvalAtRs`  | 5 | `(poly_id, e0,e1,e2,e3)` | coeffs group-end (yield `−end`) | verifier-native fold (use `+`) |
-//! | `Range`     | 2 | `(value, bound_id)` | combined range table (yield `−mult`) | coeffs and ExpandA range uses |
+//! | `Range`     | 2 | `(value, bound_id)` | combined range table (yield `−mult`) | coeffs range uses |
 //!
 //! Digit range (worksheet §3.1): a **dedicated 2^9 table** with offset `+2^8`
 //! (the ×16-scaled-rc13 shortcut is FORBIDDEN). Carry rc (§3.3): `|C| ≤ 2^20`
