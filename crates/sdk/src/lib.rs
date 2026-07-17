@@ -15,6 +15,7 @@ use sha2::{Digest, Sha256};
 
 uniffi::setup_scaffolding!();
 
+mod demo;
 mod mapping;
 
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]

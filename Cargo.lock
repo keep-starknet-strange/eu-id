@@ -1647,8 +1647,10 @@ dependencies = [
  "celes",
  "ciborium",
  "eu-id-prover",
+ "ml-dsa",
  "serde",
  "sha2",
+ "stwo-mldsa",
  "thiserror",
  "uniffi",
 ]

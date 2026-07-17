@@ -30,6 +30,10 @@ bindgen = ["uniffi/cli"]
 # The prover is ML-DSA-only by construction.
 eu-id-prover = { path = "../eu-id-prover" }
 uniffi = { version = "0.29" }
+# Demo-only issuance: the RustCrypto `ml-dsa` signer lets the deterministic demo
+# issuer re-sign a P-256 PID mdoc under ML-DSA-65 (see `demo` module). Same
+# version the eu-id-prover fixture uses.
+ml-dsa = "0.1.1"
 thiserror = "2.0.18"
 # Deterministic CBOR: we build an explicitly-ordered `ciborium::value::Value`
 # map, so the same bytes come out on prove and verify sides.
@@ -43,6 +47,11 @@ bincode = "1"
 # compressing the inner bincode mdoc proof payload.
 bzip2 = "0.6"
 sha2 = "0.10"
+
+[dev-dependencies]
+# The prover's own ML-DSA reference verifier — used only by the demo module's
+# tests to confirm the minted issuer / assembled device signatures verify.
+stwo-mldsa = { path = "../stwo-mldsa" }
 
 [[bin]]
 # Bundled binding generator. Run as:
