@@ -670,14 +670,19 @@ fn two_hosted_instances_swapped_claims_reject() {
     );
 }
 
-/// Two instances under the SAME namespace with different witnesses collide on
-/// the witness-dependent SIB schedule ids; the air-core preprocessed
-/// fingerprint invariant must catch this fail-closed at prove time. This is
-/// the regression documenting that the namespace is load-bearing.
+/// A-706: the old same-namespace collision negative guarded witness-dependent
+/// SIB schedules. Q13 made those schedules static, so identical-content
+/// preprocessed ids now deduplicate soundly and the pair proves and verifies.
+/// The generic differing-content panic remains covered directly by
+/// `air_core::tests::preprocessed_invariant_rejects_duplicate_id_with_different_content`.
 #[test]
-#[should_panic(expected = "has different content in modules")]
-fn two_instances_same_namespace_panics_on_preprocessed_collision() {
+fn two_instances_same_namespace_share_static_preprocessed() {
     let msg_a = b"same-length-message-aaaaaaaa".to_vec();
     let msg_b = b"same-length-message-bbbbbbbb".to_vec();
-    let _ = prove_two_hosted(111, &msg_a, "test/dup", 222, &msg_b, "test/dup");
+    let (a, b, svc, payloads, proof) =
+        prove_two_hosted(111, &msg_a, "test/dup", 222, &msg_b, "test/dup");
+    verify_two_hosted(
+        &a, "test/dup", &b, "test/dup", svc, msg_a, msg_b, &payloads, &proof,
+    )
+    .expect("same-namespace static preprocessing deduplicates");
 }
