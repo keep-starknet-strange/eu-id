@@ -417,9 +417,13 @@ impl AirProver for CoeffsProver {
             .max(ccell_log_size())
     }
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        // All constraints degree ≤ 2 ⇒ `log_size + 1`. The interaction-tree
-        // Horner `[-1,0]` mask REQUIRES exactly +1 (see CoeffsEval).
-        coeffs_log_size() + 1
+        coeffs_log_size() + 2
+    }
+    fn store_polynomial_coefficients(&self) -> bool {
+        // A-707: the standalone test profile's blowup is below the batch-4
+        // degree excess, so retain coefficients here; production blowup-4 does
+        // not need this memory tradeoff.
+        true
     }
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
         tb.extend_evals(gen_all_preprocessed());

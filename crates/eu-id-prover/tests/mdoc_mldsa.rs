@@ -470,6 +470,55 @@ mod quantum_only {
             .expect_err("tampered revocation public key must reject");
     }
 
+    #[test]
+    fn legacy_coeffs_interaction_arity_rejects_without_panicking() {
+        const LEGACY_COEFFS_INTERACTION_COLUMN_DELTA: usize = 3 * (56 - 20);
+
+        let (extracted, statement) = full_pq_extracted_and_statement();
+        let (statement, _, _) = with_mldsa_revocation(statement, &extracted);
+        let mut proof = prove_mdoc_circuit(&extracted, &statement).expect("fully-PQ mdoc proves");
+        let expected_interaction_columns = proof.stark_proof.0.sampled_values[2].len();
+        let legacy_interaction_columns =
+            expected_interaction_columns + LEGACY_COEFFS_INTERACTION_COLUMN_DELTA;
+
+        let sampled_filler = proof.stark_proof.0.sampled_values[2]
+            .last()
+            .expect("interaction tree has sampled columns")
+            .clone();
+        let queried_filler = proof.stark_proof.0.queried_values[2]
+            .last()
+            .expect("interaction tree has queried columns")
+            .clone();
+        proof.stark_proof.0.sampled_values[2].extend(std::iter::repeat_n(
+            sampled_filler,
+            LEGACY_COEFFS_INTERACTION_COLUMN_DELTA,
+        ));
+        proof.stark_proof.0.queried_values[2].extend(std::iter::repeat_n(
+            queried_filler,
+            LEGACY_COEFFS_INTERACTION_COLUMN_DELTA,
+        ));
+
+        // Keep the outer catch as an abort detector: without the air-core
+        // arity gate, the engine panic plus LogUp drop panic aborts here.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            verify_mdoc_circuit(&proof, &statement)
+        }));
+        match result {
+            Ok(Err(eu_id_prover::Error::Verify(message))) => {
+                assert!(message.contains("tree=interaction"), "{message}");
+                assert!(
+                    message.contains(&format!("expected={expected_interaction_columns}")),
+                    "{message}"
+                );
+                assert!(
+                    message.contains(&format!("got={legacy_interaction_columns}")),
+                    "{message}"
+                );
+            }
+            other => panic!("expected typed legacy-layout rejection, got {other:?}"),
+        }
+    }
+
     /// Direct-provider tamper: change one private bound byte without replacing
     /// the revocation signature. The range AIR then provides a different raw
     /// message than the hosted ML-DSA witness can authenticate, so proving or

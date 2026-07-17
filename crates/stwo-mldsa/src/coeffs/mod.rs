@@ -30,11 +30,12 @@
 //! `start, end, poly_id, live_mask[0..6], is_digit, is_carry, is_recomp,
 //!  is_norm, is_c` — all row-index-deterministic.
 //!
-//! ## Degree worksheet — EVERY constraint degree ≤ 2 ⇒ bound = log_size + 1.
-//! The interaction-tree Horner `[-1,0]` mask requires the bound to be EXACTLY
-//! `+1`; a degree-3+ constraint would force `+2` and break the OODS consistency
-//! check (see [`CoeffsEval::max_constraint_log_degree_bound`]). The ternary is a
-//! LOOKUP for this reason, not the cubic `c(c−1)(c+1)`.
+//! ## Degree worksheet — EVERY base constraint degree ≤ 2.
+//! Four-way LogUp batching reaches degree 5, so the unlocked bound is
+//! `log_size + 2`. The interaction-tree Horner `[-1,0]` mask remains safe under
+//! the engine's uniform composition split; this WO-Q14 migration follows the
+//! `decomp` precedent. The ternary remains a LOOKUP, not the cubic
+//! `c(c−1)(c+1)`.
 //! | site | degree |
 //! |------|--------|
 //! | enabler boolean `e(1−e)` | 2 |
@@ -178,9 +179,8 @@ pub const N_LOGUP_ENTRIES: usize = N_RANGE_STREAMS
     + 1                                             // eval yield
     + 1                                             // WCell yield (w cells)
     + 1; // CCell yield (c cells)
-/// One interaction column per fraction (`finalize_logup`, the air-writer safe
-/// default). Batching is a later perf lever, not needed for M4 correctness.
-pub const LOGUP_BATCH: usize = 1;
+/// Four fractions per interaction column, matching the `decomp` precedent.
+pub const LOGUP_BATCH: usize = 4;
 pub const N_LOGUP_COLS: usize = N_LOGUP_ENTRIES.div_ceil(LOGUP_BATCH);
 /// The 4 accumulator coordinate columns come first in the interaction tree.
 const N_ACC_COORD_COLS: usize = SECURE_EXTENSION_DEGREE;
@@ -408,12 +408,11 @@ impl FrameworkEval for CoeffsEval {
         self.log_size
     }
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        // Every constraint is degree ≤ 2 (the ternary is enforced by a lookup,
-        // not a cubic poly). The interaction-tree Horner `[-1,0]` mask REQUIRES
-        // this bound to be exactly `log_size + 1`: at `+2` the composition-domain
-        // doubling desynchronizes the shifted interaction mask and the OODS
-        // consistency check fails (verified against the toy spike). Do not raise.
-        self.log_size + 1
+        // Every base constraint is degree ≤ 2. Four-way LogUp over degree-1
+        // denominators reaches degree 5, covered by `log_size + 2`. The Horner
+        // `[-1,0]` mask is safe under the engine's uniform composition split,
+        // matching the `decomp` precedent.
+        self.log_size + 2
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         // --- Preprocessed selectors ---
@@ -595,7 +594,7 @@ impl FrameworkEval for CoeffsEval {
 
         let _ = enabler; // enabler only gates via preprocessed masks (all active rows carry it); its boolean constraint is C0.
 
-        eval.finalize_logup();
+        eval.finalize_logup_batched(LOGUP_BATCH);
         eval
     }
 }
@@ -855,7 +854,7 @@ pub fn gen_coeffs_interaction(
         &mut claimed,
     );
 
-    // Batch the fraction streams in pairs, mirroring finalize_logup_batched(2).
+    // Batch the fraction streams in evaluator order, matching `LOGUP_BATCH`.
     let mut logup = LogupTraceGenerator::new(log_size);
     for chunk in entries.chunks(LOGUP_BATCH) {
         logup.col_from_fn(|vr| {

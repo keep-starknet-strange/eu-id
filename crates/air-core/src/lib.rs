@@ -832,6 +832,7 @@ pub fn verify_with_expected_preprocessed_root_and_payloads(
         )
         .into());
     }
+    validate_proof_layout_arity(modules, proof)?;
     if let Some(expected) = expected_preprocessed_root {
         let got = proof.commitments[0];
         if got != expected {
@@ -919,6 +920,94 @@ pub fn verify_with_expected_preprocessed_root_and_payloads(
         commitment_scheme,
         proof.clone(),
     )?)
+}
+
+/// Reject malformed commitment-tree arities before entering Stwo verification.
+///
+/// Stwo's point evaluator assumes that the proof and verifier layouts agree;
+/// an arity mismatch can panic while a LogUp evaluator is live and trigger a
+/// second panic from its drop guard. Validate the cheap, public proof shape at
+/// the air-core boundary so malformed proofs return a typed error instead.
+fn validate_proof_layout_arity(
+    modules: &[&mut dyn Air],
+    proof: &StarkProof<Hasher>,
+) -> Result<(), VerificationError> {
+    let mut seen_preprocessed = HashSet::new();
+    let mut preprocessed = Vec::new();
+    for (module_index, module) in modules.iter().enumerate() {
+        let ids = module.preprocessed_column_ids();
+        let sizes = module.layout().preprocessed;
+        if ids.len() != sizes.len() {
+            return Err(VerificationError::InvalidStructure(format!(
+                "proof layout arity mismatch: module={module_index} tree=preprocessed field=declared_layout expected={} got={}",
+                ids.len(),
+                sizes.len()
+            )));
+        }
+        for (id, size) in ids.into_iter().zip(sizes) {
+            if seen_preprocessed.insert(id) {
+                preprocessed.push(size);
+            }
+        }
+    }
+    let trace = modules.iter().flat_map(|m| m.layout().trace).collect();
+    let interaction = modules
+        .iter()
+        .flat_map(|m| m.layout().interaction)
+        .collect();
+    let post_interaction = modules
+        .iter()
+        .flat_map(|m| m.post_interaction_log_sizes())
+        .collect::<Vec<_>>();
+
+    let mut module_trees = vec![
+        ("preprocessed", preprocessed),
+        ("trace", trace),
+        ("interaction", interaction),
+    ];
+    if !post_interaction.is_empty() {
+        module_trees.push(("post-interaction", post_interaction));
+    }
+
+    // Stwo appends one composition tree after the module-owned trees.
+    let expected_tree_count = module_trees.len() + 1;
+    for (field, got) in [
+        ("commitments", proof.commitments.len()),
+        ("sampled_values", proof.sampled_values.len()),
+        ("decommitments", proof.decommitments.len()),
+        ("queried_values", proof.queried_values.len()),
+    ] {
+        if got != expected_tree_count {
+            return Err(VerificationError::InvalidStructure(format!(
+                "proof layout arity mismatch: module=aggregate tree=all field={field} expected={expected_tree_count} got={got}"
+            )));
+        }
+    }
+
+    for (tree_index, (tree, expected_layout)) in module_trees.iter().enumerate() {
+        let expected = expected_layout.len();
+        for (field, got) in [
+            ("sampled_values", proof.sampled_values[tree_index].len()),
+            ("queried_values", proof.queried_values[tree_index].len()),
+        ] {
+            if got != expected {
+                return Err(VerificationError::InvalidStructure(format!(
+                    "proof layout arity mismatch: module=aggregate tree={tree} field={field} expected={expected} got={got}"
+                )));
+            }
+        }
+    }
+
+    let composition_index = module_trees.len();
+    let expected_composition = proof.sampled_values[composition_index].len();
+    let got_composition = proof.queried_values[composition_index].len();
+    if got_composition != expected_composition {
+        return Err(VerificationError::InvalidStructure(format!(
+            "proof layout arity mismatch: module=stwo tree=composition field=queried_values expected={expected_composition} got={got_composition}"
+        )));
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1241,6 +1330,55 @@ mod tests {
                 assert_eq!(expected, honest_root());
             }
             other => panic!("expected PreprocessedRootMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn proof_layout_arity_mismatch_is_a_typed_error() {
+        let (mut a, mut b) = honest_provers();
+        let mut proof = prove_tables(&mut a, &mut b);
+        proof.0.sampled_values[2]
+            .pop()
+            .expect("fixture has interaction columns");
+        proof.0.queried_values[2]
+            .pop()
+            .expect("fixture has interaction columns");
+
+        // Keep the outer catch as an abort detector: before the arity gate, a
+        // mismatched proof could panic while a LogUp drop guard was live.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            verify_tables_pinned(&proof, Some(honest_root()))
+        }));
+        match result {
+            Ok(Err(VerifyError::Stark(VerificationError::InvalidStructure(message)))) => {
+                assert!(message.contains("tree=interaction"), "{message}");
+                assert!(message.contains("expected=8"), "{message}");
+                assert!(message.contains("got=7"), "{message}");
+            }
+            other => panic!("expected typed interaction-arity error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn composition_layout_arity_mismatch_is_a_typed_error() {
+        let (mut a, mut b) = honest_provers();
+        let mut proof = prove_tables(&mut a, &mut b);
+        proof
+            .0
+            .queried_values
+            .last_mut()
+            .expect("fixture has a composition tree")
+            .pop()
+            .expect("composition tree has columns");
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            verify_tables_pinned(&proof, Some(honest_root()))
+        }));
+        match result {
+            Ok(Err(VerifyError::Stark(VerificationError::InvalidStructure(message)))) => {
+                assert!(message.contains("tree=composition"), "{message}");
+            }
+            other => panic!("expected typed composition-arity error, got {other:?}"),
         }
     }
 
