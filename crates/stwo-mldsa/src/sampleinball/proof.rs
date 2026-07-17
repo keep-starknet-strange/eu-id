@@ -40,7 +40,7 @@ use super::tables::{
 };
 use super::{
     gen_sib_base_trace, gen_sib_interaction, gen_sib_preprocessed, sib_preprocessed_ids, SibEval,
-    N_ACCESSES, N_BASE_COLS, N_INTERACTION_COLS,
+    MAX_SIB_SQUEEZE_BYTES, N_ACCESSES, N_BASE_COLS, N_INTERACTION_COLS,
 };
 
 const N_RC: usize = 3;
@@ -56,15 +56,15 @@ pub struct SibProof {
     pub stark_proof: StarkProof<Blake2sMerkleHasher>,
 }
 
-fn sib_log_size(witness: &MlDsaWitness) -> u32 {
+fn sib_log_size() -> u32 {
     // Cover the stream+c stages AND the offline-memory sorted view (N_ACCESSES).
-    padded_log_size((witness.sponge.sample_in_ball_squeezed.len() + N).max(N_ACCESSES))
+    padded_log_size((MAX_SIB_SQUEEZE_BYTES + N).max(N_ACCESSES))
 }
 fn ccell_log_size() -> u32 {
     padded_log_size(N)
 }
-fn hashio_log_size(witness: &MlDsaWitness) -> u32 {
-    padded_log_size(witness.sponge.sample_in_ball_squeezed.len())
+fn hashio_log_size() -> u32 {
+    padded_log_size(MAX_SIB_SQUEEZE_BYTES)
 }
 
 fn all_preprocessed_ids() -> Vec<PreProcessedColumnId> {
@@ -83,8 +83,8 @@ fn all_preprocessed_log_sizes(log_size: u32) -> Vec<u32> {
     sizes
 }
 
-fn gen_all_preprocessed(witness: &MlDsaWitness, log_size: u32) -> Vec<ColEval> {
-    let mut cols = gen_sib_preprocessed(witness, log_size);
+fn gen_all_preprocessed(log_size: u32) -> Vec<ColEval> {
+    let mut cols = gen_sib_preprocessed(log_size);
     for kind in RcKind::ALL {
         cols.push(gen_table_preprocessed(kind));
     }
@@ -166,10 +166,6 @@ struct SibVerifier {
     ccell_claimed_sum: SecureField,
     hashio_claimed_sum: SecureField,
     relations: Option<SibRelations>,
-    // The verifier reproduces preprocessed shapes from the same public stream
-    // length; here we store the witness-derived c/stream tuples via the proof.
-    ccell_tuples: Vec<Vec<u32>>,
-    hashio_tuples: Vec<Vec<u32>>,
     built: Option<Built>,
 }
 
@@ -272,15 +268,11 @@ impl Air for SibProver {
         self.relations = Some(SibRelations::draw(channel));
     }
     fn layout(&self) -> TreeLayout {
-        let ls = sib_log_size(&self.witness);
+        let ls = sib_log_size();
         TreeLayout {
             preprocessed: all_preprocessed_log_sizes(ls),
-            trace: module_trace_layout(ls, ccell_log_size(), hashio_log_size(&self.witness)),
-            interaction: module_interaction_layout(
-                ls,
-                ccell_log_size(),
-                hashio_log_size(&self.witness),
-            ),
+            trace: module_trace_layout(ls, ccell_log_size(), hashio_log_size()),
+            interaction: module_interaction_layout(ls, ccell_log_size(), hashio_log_size()),
         }
     }
     fn claimed_sums(&self) -> Vec<SecureField> {
@@ -296,9 +288,9 @@ impl Air for SibProver {
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
         self.built = Some(build_components(
             allocator,
-            sib_log_size(&self.witness),
+            sib_log_size(),
             ccell_log_size(),
-            hashio_log_size(&self.witness),
+            hashio_log_size(),
             self.relations.as_ref().expect("relations"),
             self.sib_claimed_sum,
             &self.rc_claimed_sums,
@@ -313,7 +305,7 @@ impl Air for SibProver {
 
 impl AirProver for SibProver {
     fn max_log_size(&self) -> u32 {
-        sib_log_size(&self.witness)
+        sib_log_size()
             .max(RcKind::Rc9.log_size())
             .max(ccell_log_size())
     }
@@ -321,21 +313,18 @@ impl AirProver for SibProver {
         self.max_log_size() + 1
     }
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
-        tb.extend_evals(gen_all_preprocessed(
-            &self.witness,
-            sib_log_size(&self.witness),
-        ));
+        tb.extend_evals(gen_all_preprocessed(sib_log_size()));
     }
     fn preprocessed_column_fingerprints(&mut self) -> Vec<PreprocessedColumnFingerprint> {
-        let ls = sib_log_size(&self.witness);
+        let ls = sib_log_size();
         fingerprint_preprocessed_columns(
             "mldsa_sib",
             &all_preprocessed_ids(),
-            &gen_all_preprocessed(&self.witness, ls),
+            &gen_all_preprocessed(ls),
         )
     }
     fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
-        let ls = sib_log_size(&self.witness);
+        let ls = sib_log_size();
         let mut evals = gen_sib_base_trace(&self.witness, ls);
         let dry = gen_sib_interaction(
             &self.witness,
@@ -354,13 +343,13 @@ impl AirProver for SibProver {
             &ccell_tuples(&self.witness),
         ));
         evals.extend(gen_balancer_trace(
-            hashio_log_size(&self.witness),
+            hashio_log_size(),
             &hashio_tuples(&self.stream_bytes),
         ));
         tb.extend_evals(evals);
     }
     fn write_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
-        let ls = sib_log_size(&self.witness);
+        let ls = sib_log_size();
         let relations = self.relations.clone().expect("relations");
         let interaction = gen_sib_interaction(&self.witness, ls, STREAM_ID_SIB_SQUEEZE, &relations);
         let mut evals = interaction.trace;
@@ -381,7 +370,7 @@ impl AirProver for SibProver {
         self.ccell_claimed_sum = csum;
         evals.extend(ctr);
         let (htr, hsum) = gen_balancer_interaction(
-            hashio_log_size(&self.witness),
+            hashio_log_size(),
             &hashio_tuples(&self.stream_bytes),
             &BalancerRelation::HashIo(relations.hash_io.clone()),
             true,
@@ -444,8 +433,9 @@ impl Air for SibVerifier {
 }
 
 pub fn prove_sib(witness: MlDsaWitness, config: PcsConfig) -> Result<SibProof, ProvingError> {
-    let log_size = sib_log_size(&witness);
-    let hio_ls = hashio_log_size(&witness);
+    super::validate_stream(&witness).map_err(|_| ProvingError::ConstraintsNotSatisfied)?;
+    let log_size = sib_log_size();
+    let hio_ls = hashio_log_size();
     let mut prover = SibProver {
         witness,
         relations: None,
@@ -470,7 +460,7 @@ pub fn prove_sib(witness: MlDsaWitness, config: PcsConfig) -> Result<SibProof, P
     })
 }
 
-pub fn verify_sib(proof: &SibProof, witness: &MlDsaWitness) -> Result<(), VerificationError> {
+pub fn verify_sib(proof: &SibProof, _witness: &MlDsaWitness) -> Result<(), VerificationError> {
     let mut verifier = SibVerifier {
         witness_log_size: proof.log_size,
         hashio_log_size: proof.hashio_log_size,
@@ -479,10 +469,7 @@ pub fn verify_sib(proof: &SibProof, witness: &MlDsaWitness) -> Result<(), Verifi
         ccell_claimed_sum: proof.ccell_claimed_sum,
         hashio_claimed_sum: proof.hashio_claimed_sum,
         relations: None,
-        ccell_tuples: ccell_tuples(witness),
-        hashio_tuples: hashio_tuples(&witness.sponge.sample_in_ball_squeezed),
         built: None,
     };
-    let _ = (&verifier.ccell_tuples, &verifier.hashio_tuples);
     air_core::verify(&mut [&mut verifier], &proof.stark_proof)
 }

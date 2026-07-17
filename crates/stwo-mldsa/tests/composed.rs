@@ -350,8 +350,9 @@ fn legacy_twelve_job_service_shape_rejects_via_root_mismatch_without_panic() {
     // A-702: root equality is direction-free, so new-proof/legacy-root exercises the old-proof/new-root gate.
     let msg = big_msg("legacy-12-job-root", 1024);
     let (witness, input) = witness_and_input(8103, &msg);
+    let legacy_sib_len = stwo_mldsa::sampleinball::stream_len(&witness);
     let proof = prove_mldsa(witness, input, pcs_config()).expect("prove new shape");
-    let legacy_shapes = legacy_twelve_job_shapes(&proof.input, proof.sib_stream_len);
+    let legacy_shapes = legacy_twelve_job_shapes(&proof.input, legacy_sib_len);
     assert_eq!(legacy_shapes.len(), 12);
 
     let legacy_root = {
@@ -365,8 +366,6 @@ fn legacy_twelve_job_service_shape_rejects_via_root_mismatch_without_panic() {
             proof.input.clone(),
             proof.group_evals.clone(),
             proof.claimed_sums.clone(),
-            proof.sib_stream_len,
-            proof.sib_squeezed_len,
             None,
             handle,
         );
@@ -388,8 +387,6 @@ fn legacy_twelve_job_service_shape_rejects_via_root_mismatch_without_panic() {
             proof.input.clone(),
             proof.group_evals.clone(),
             proof.claimed_sums.clone(),
-            proof.sib_stream_len,
-            proof.sib_squeezed_len,
             None,
             handle,
         );
@@ -438,8 +435,7 @@ fn composed_numbers() {
         let sib_absorb = w.sponge.sample_in_ball_absorbed.len();
         // n_absorb = ceil((L+1)/136); n_perms = n_absorb + n_squeeze - 1.
         let n_absorb = |l: usize| (l + 1).div_ceil(136);
-        let sib_stream = proof.sib_stream_len;
-        let n_sq_sib = sib_stream.div_ceil(136).max(1);
+        let n_sq_sib = stwo_mldsa::sampleinball::MAX_SIB_SQUEEZE_BLOCKS;
         (n_absorb(mu_absorb) + 1 - 1)
             + (n_absorb(ct_absorb) + 1 - 1)
             + (n_absorb(sib_absorb) + n_sq_sib - 1)
@@ -447,7 +443,7 @@ fn composed_numbers() {
 
     // Total cells from the serialized proof structure is not directly a cell
     // count; report the committed-column cell total via the layout probe.
-    let cells = total_committed_cells(&input, proof.sib_stream_len, proof.sib_squeezed_len);
+    let cells = total_committed_cells(&input);
 
     // Proof bytes = bincode(stark_proof) + the statement fields.
     let stark_bytes = bincode::serialize(&proof.stark_proof)
@@ -457,7 +453,10 @@ fn composed_numbers() {
 
     println!("=== composed_numbers ===");
     println!("message_len       : {}", msg.len());
-    println!("sib_stream_len    : {}", proof.sib_stream_len);
+    println!(
+        "sib_stream_bytes  : {}",
+        stwo_mldsa::sampleinball::MAX_SIB_SQUEEZE_BYTES
+    );
     println!("total M31 cells   : {cells}");
     println!("perm count        : {plan_perms}");
     println!("prove ms          : {prove_ms}");
@@ -468,12 +467,8 @@ fn composed_numbers() {
 
 /// Sum 2^log_size over every committed column (preprocessed + trace +
 /// interaction) via the public statement layout.
-fn total_committed_cells(
-    input: &MlDsaVerifyInput,
-    sib_stream_len: usize,
-    sib_squeezed_len: usize,
-) -> u64 {
-    let layout = stwo_mldsa::statement::debug_layout(input, sib_stream_len, sib_squeezed_len);
+fn total_committed_cells(input: &MlDsaVerifyInput) -> u64 {
+    let layout = stwo_mldsa::statement::debug_layout(input);
     layout
         .preprocessed
         .iter()

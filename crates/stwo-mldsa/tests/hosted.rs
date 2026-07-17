@@ -289,8 +289,6 @@ fn prove_hosted(seed: u64, msg: &[u8], producer_bytes: Vec<u8>) -> MlDsaProof {
         input,
         group_evals: mldsa.group_evals().to_vec(),
         claimed_sums: mldsa.claimed_sums(),
-        sib_stream_len: mldsa.sib_stream_len(),
-        sib_squeezed_len: mldsa.sib_squeezed_len(),
         service_claimed_sums: service.claimed_sums(),
         post_interaction_payloads,
         stark_proof,
@@ -309,7 +307,7 @@ fn verify_hosted(
     // bytes, so the same FieldProducer serves verification with no witness.
     let mut producer = FieldProducer::new(producer_bytes, handle.clone());
     let mut service = KeccakServiceVerifier::new(
-        keccak_job_shapes(proof.input.message.len(), proof.sib_stream_len, 0, false),
+        keccak_job_shapes(proof.input.message.len(), 0, false),
         proof.service_claimed_sums.clone(),
         keccak_handle.clone(),
     );
@@ -317,8 +315,6 @@ fn verify_hosted(
         proof.input.clone(),
         proof.group_evals.clone(),
         proof.claimed_sums.clone(),
-        proof.sib_stream_len,
-        proof.sib_squeezed_len,
         handle,
         keccak_handle,
     );
@@ -351,8 +347,6 @@ fn prove_hosted_public(seed: u64, msg: &[u8]) -> MlDsaProof {
         input: mldsa.input().clone(),
         group_evals: mldsa.group_evals().to_vec(),
         claimed_sums,
-        sib_stream_len: mldsa.sib_stream_len(),
-        sib_squeezed_len: mldsa.sib_squeezed_len(),
         service_claimed_sums: service.claimed_sums(),
         post_interaction_payloads,
         stark_proof,
@@ -362,7 +356,7 @@ fn prove_hosted_public(seed: u64, msg: &[u8]) -> MlDsaProof {
 fn verify_hosted_public(proof: &MlDsaProof) -> Result<(), stwo::core::verifier::VerificationError> {
     let keccak_handle = SharedKeccakRelations::new();
     let mut service = KeccakServiceVerifier::new(
-        keccak_job_shapes(proof.input.message.len(), proof.sib_stream_len, 0, true),
+        keccak_job_shapes(proof.input.message.len(), 0, true),
         proof.service_claimed_sums.clone(),
         keccak_handle.clone(),
     );
@@ -370,8 +364,6 @@ fn verify_hosted_public(proof: &MlDsaProof) -> Result<(), stwo::core::verifier::
         proof.input.clone(),
         proof.group_evals.clone(),
         proof.claimed_sums.clone(),
-        proof.sib_stream_len,
-        proof.sib_squeezed_len,
         keccak_handle,
     );
     air_core::verify_with_expected_preprocessed_root_and_payloads(
@@ -436,8 +428,6 @@ fn hosted_public_native_mu_mismatch_returns_error_not_panic() {
         input: mldsa.input().clone(),
         group_evals: mldsa.group_evals().to_vec(),
         claimed_sums: mldsa.claimed_sums(),
-        sib_stream_len: mldsa.sib_stream_len(),
-        sib_squeezed_len: mldsa.sib_squeezed_len(),
         service_claimed_sums: service.claimed_sums(),
         post_interaction_payloads,
         stark_proof,
@@ -500,8 +490,6 @@ struct InstanceClaims {
     input: MlDsaVerifyInput,
     group_evals: Vec<SecureField>,
     claimed_sums: Vec<SecureField>,
-    sib_stream_len: usize,
-    sib_squeezed_len: usize,
 }
 
 /// Prove `[keccak_service(jobs a+b), producer_a, mldsa_a(ns_a, base 0),
@@ -565,8 +553,6 @@ fn prove_two_hosted(
         input: input.clone(),
         group_evals: m.group_evals().to_vec(),
         claimed_sums: m.claimed_sums(),
-        sib_stream_len: m.sib_stream_len(),
-        sib_squeezed_len: m.sib_squeezed_len(),
     };
     (
         claims(&mldsa_a, &input_a),
@@ -598,13 +584,8 @@ fn verify_two_hosted(
     let mut producer_a = FieldProducer::new(producer_a_bytes, handle_a.clone());
     let mut producer_b = FieldProducer::new(producer_b_bytes, handle_b.clone());
     let job_shapes = [
-        keccak_job_shapes(a.input.message.len(), a.sib_stream_len, 0, false),
-        keccak_job_shapes(
-            b.input.message.len(),
-            b.sib_stream_len,
-            STREAM_BASE_STRIDE,
-            false,
-        ),
+        keccak_job_shapes(a.input.message.len(), 0, false),
+        keccak_job_shapes(b.input.message.len(), STREAM_BASE_STRIDE, false),
     ]
     .concat();
     let mut service =
@@ -613,8 +594,6 @@ fn verify_two_hosted(
         a.input.clone(),
         a.group_evals.clone(),
         a.claimed_sums.clone(),
-        a.sib_stream_len,
-        a.sib_squeezed_len,
         handle_a,
         keccak_handle.clone(),
     )
@@ -625,8 +604,6 @@ fn verify_two_hosted(
         zeroed_b,
         b.group_evals.clone(),
         b.claimed_sums.clone(),
-        b.sib_stream_len,
-        b.sib_squeezed_len,
         handle_b,
         keccak_handle,
     )
@@ -678,15 +655,11 @@ fn two_hosted_instances_swapped_claims_reject() {
         input: a.input.clone(),
         group_evals: b.group_evals.clone(),
         claimed_sums: b.claimed_sums.clone(),
-        sib_stream_len: b.sib_stream_len,
-        sib_squeezed_len: b.sib_squeezed_len,
     };
     let swapped_b = InstanceClaims {
         input: b.input.clone(),
         group_evals: a.group_evals.clone(),
         claimed_sums: a.claimed_sums.clone(),
-        sib_stream_len: a.sib_stream_len,
-        sib_squeezed_len: a.sib_squeezed_len,
     };
     assert!(
         verify_two_hosted(

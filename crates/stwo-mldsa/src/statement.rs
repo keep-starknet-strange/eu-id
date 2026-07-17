@@ -61,7 +61,7 @@ use crate::binding::{
     CCellRelation, HashIoRelation, MsgLinkRelation, WCellRelation, STREAM_ID_CTILDE_ABSORB,
     STREAM_ID_SIB_SQUEEZE,
 };
-use crate::constants::{K, N, TAU};
+use crate::constants::{K, N};
 use crate::msglink::{self, MsgLinkEval, MSG_FIELD_ID};
 use crate::sponge_link::{
     BridgeEval, PublicPrefixEval, SqueezeSinkEval, SrcRelation, BRIDGE_BASE_COLS,
@@ -111,33 +111,6 @@ pub const STREAM_BASE_STRIDE: u32 = 128;
 
 /// SHAKE-256 rate in bytes (block length of a squeeze).
 const RATE: usize = 136;
-
-/// Maximum number of SHAKE-256 blocks accepted for SampleInBall. Honest
-/// ML-DSA-65 signatures use a tiny prefix; this bound keeps all accepted
-/// claims inside the production log-10 SIB layout and prevents malformed
-/// proofs from selecting unbounded verifier allocations.
-pub const MAX_SIB_SQUEEZE_BLOCKS: usize = 5;
-/// Exclusive resource ceiling implied by [`MAX_SIB_SQUEEZE_BLOCKS`].
-pub const MAX_SIB_STREAM_LEN: usize = RATE * MAX_SIB_SQUEEZE_BLOCKS;
-
-/// Validate the proof-carried SampleInBall shape before it is used to build
-/// Keccak jobs, layouts, or columns.
-pub fn validate_sib_lengths(
-    sib_stream_len: usize,
-    sib_squeezed_len: usize,
-) -> Result<(), &'static str> {
-    let minimum_stream_len = sampleinball::SIGN_BYTES + TAU;
-    if !(minimum_stream_len..=MAX_SIB_STREAM_LEN).contains(&sib_stream_len) {
-        return Err("SampleInBall stream length is outside the production bound");
-    }
-    let expected_squeezed_len = RATE
-        .checked_mul(sib_stream_len.div_ceil(RATE))
-        .ok_or("SampleInBall squeeze length overflow")?;
-    if sib_squeezed_len != expected_squeezed_len {
-        return Err("SampleInBall squeeze length is not canonically derived");
-    }
-    Ok(())
-}
 
 /// The `field_id` the HOST yields the whole ML-DSA message (Sig_structure)
 /// window under, on the shared [`FieldBytesRelation`], in hosted mode. The mdoc
@@ -198,14 +171,6 @@ pub struct MlDsaProof {
     pub group_evals: Vec<SecureField>,
     /// Every component's claimed sum, in commit order, then `native_use_sum` LAST.
     pub claimed_sums: Vec<SecureField>,
-    /// The honest SIB squeeze stream length (public — sizes the SIB squeeze +
-    /// its sink; the verifier derives the SIB shape's `n_squeeze` from it).
-    pub sib_stream_len: usize,
-    /// The FULL native SIB squeeze length (`witness.sponge.sample_in_ball_squeezed.len()`
-    /// = `136 · n_squeeze_sib(sib_stream_len)`, block-aligned on-demand squeeze).
-    /// Public — sizes the sib component's log size.
-    /// Reveals nothing secret; it is a length, not a value.
-    pub sib_squeezed_len: usize,
     /// The keccak service module's claimed sums (`[sponge_v, keccak, round,
     /// tables ×9]`) — the standalone proof composes `[service, mldsa]`.
     pub service_claimed_sums: Vec<SecureField>,
@@ -224,28 +189,24 @@ pub struct MlDsaProof {
 /// * µ:  private-message mode only; absorbs `tr ‖ 0x00 ‖ 0x00 ‖ M`
 ///   (len `66 + |M|`), squeezes 1 block.
 /// * c̃:  absorbs `µ ‖ w1Encode(w1')` (len 832 = 64 + 768), squeezes 1 block.
-/// * SIB: absorbs `c̃` (48 bytes), squeezes `ceil(sib_stream_len / 136)` blocks.
+/// * SIB: absorbs `c̃` (48 bytes), squeezes the fixed five-block resource cap.
 struct Shapes {
     mu: Option<Shape>,
     ct: Shape,
     sib: Shape,
 }
 
-fn n_squeeze_sib(sib_stream_len: usize) -> usize {
-    sib_stream_len.div_ceil(RATE).max(1)
-}
-
 /// The instance's SHAKE256 signature-job shapes, stream ids offset by
 /// `stream_base`. `native_mu` omits the private µ job.
 /// Perm-id bases stay 0 — the proof-wide [`stwo_keccak::sponge_v::JobList`]
 /// stamps the global plan over the concatenated job list.
-fn shapes(message_len: usize, sib_stream_len: usize, stream_base: u32, native_mu: bool) -> Shapes {
+fn shapes(message_len: usize, stream_base: u32, native_mu: bool) -> Shapes {
     let b = stream_base;
     let mu = (!native_mu).then(|| Shape::new(66 + message_len, 1, b + MU_ABSORB, b + MU_SQUEEZE));
     let ct = Shape::new(64 + 768, 1, b + CT_ABSORB, b + CT_SQUEEZE);
     let sib = Shape::new(
         48,
-        n_squeeze_sib(sib_stream_len),
+        sampleinball::MAX_SIB_SQUEEZE_BLOCKS,
         b + SIB_ABSORB,
         b + STREAM_ID_SIB_SQUEEZE,
     );
@@ -255,13 +216,8 @@ fn shapes(message_len: usize, sib_stream_len: usize, stream_base: u32, native_mu
 /// PUBLIC: all sponge jobs contributed to the proof-wide service: optional
 /// private µ, then c̃ and SIB. `native_mu = true` is the hosted-public
 /// issuer/device shape; `false` is standalone/private revocation.
-pub fn keccak_job_shapes(
-    message_len: usize,
-    sib_stream_len: usize,
-    stream_base: u32,
-    native_mu: bool,
-) -> Vec<Shape> {
-    let sh = shapes(message_len, sib_stream_len, stream_base, native_mu);
+pub fn keccak_job_shapes(message_len: usize, stream_base: u32, native_mu: bool) -> Vec<Shape> {
+    let sh = shapes(message_len, stream_base, native_mu);
     sh.mu.into_iter().chain([sh.ct, sh.sib]).collect()
 }
 
@@ -275,10 +231,9 @@ fn coeffs_log_size() -> u32 {
 fn decomp_log_size() -> u32 {
     padded_log_size(decomp::N_PAIRS)
 }
-/// The sib component's log size (replicate `sampleinball/proof.rs::sib_log_size`).
-/// `sib_squeezed_len` is the FULL SIB squeeze length (`136·n_squeeze_sib`).
-fn sib_log_size(sib_squeezed_len: usize) -> u32 {
-    padded_log_size((sib_squeezed_len + N).max(sampleinball::N_ACCESSES))
+/// The fixed five-block SIB component log size.
+fn sib_log_size() -> u32 {
+    padded_log_size((sampleinball::MAX_SIB_SQUEEZE_BYTES + N).max(sampleinball::N_ACCESSES))
 }
 
 // =============================================================================
@@ -372,7 +327,6 @@ fn native_use_sum(group_evals: &[SecureField], relations: &CoeffsRelations) -> S
 fn mix_public(
     channel: &mut Blake2sChannel,
     input: &MlDsaVerifyInput,
-    sib_stream_len: usize,
     namespace: &str,
     private_message: bool,
     stream_base: u32,
@@ -409,8 +363,6 @@ fn mix_public(
             channel.mix_u64(*b as u64);
         }
     }
-    // public SIB stream length.
-    channel.mix_u64(sib_stream_len as u64);
     // The per-instance stream-id base: pins every HashIo stream id this
     // instance's bridges/sinks/decomp/sib use under the SHARED relation set.
     // (The sponge job shapes themselves are mixed ONCE by the keccak service.)
@@ -557,14 +509,13 @@ fn bridge_evals(
 fn sink_evals(
     ns: &str,
     message_len: usize,
-    sib_stream_len: usize,
     stream_base: u32,
     native_mu: bool,
     hash_io: &HashIoRelation,
 ) -> Vec<SqueezeSinkEval> {
     let b = stream_base;
-    let sh = shapes(message_len, sib_stream_len, b, native_mu);
-    let mut sinks = Vec::with_capacity(if native_mu { 2 } else { 3 });
+    let sh = shapes(message_len, b, native_mu);
+    let mut sinks = Vec::with_capacity(if native_mu { 1 } else { 2 });
     if let Some(mu) = sh.mu {
         let mu_len = RATE * mu.n_squeeze - 64;
         sinks.push(SqueezeSinkEval {
@@ -587,17 +538,7 @@ fn sink_evals(
         len: ct_len,
         hash_io: hash_io.clone(),
     };
-    let sib_len = RATE * sh.sib.n_squeeze - sib_stream_len;
-    let sib = SqueezeSinkEval {
-        tag: "sib",
-        ns: ns.to_string(),
-        log_size: bridge_log_size(sib_len),
-        stream: b + STREAM_ID_SIB_SQUEEZE,
-        off: sib_stream_len as u32,
-        len: sib_len,
-        hash_io: hash_io.clone(),
-    };
-    sinks.extend([ct, sib]);
+    sinks.push(ct);
     sinks
 }
 
@@ -616,7 +557,6 @@ fn sink_evals(
 fn all_preprocessed_ids(
     ns: &str,
     input: &MlDsaVerifyInput,
-    sib_stream_len: usize,
     public_message: bool,
 ) -> Vec<PreProcessedColumnId> {
     let hash_io = HashIoRelation::dummy();
@@ -645,25 +585,13 @@ fn all_preprocessed_ids(
     for b in bridge_evals(ns, 0, public_message, &hash_io) {
         ids.extend(b.preprocessed_ids());
     }
-    for s in sink_evals(
-        ns,
-        input.message.len(),
-        sib_stream_len,
-        0,
-        public_message,
-        &hash_io,
-    ) {
+    for s in sink_evals(ns, input.message.len(), 0, public_message, &hash_io) {
         ids.extend(s.preprocessed_ids());
     }
     ids
 }
 
-fn all_preprocessed_log_sizes(
-    input: &MlDsaVerifyInput,
-    sib_stream_len: usize,
-    sib_squeezed_len: usize,
-    public_message: bool,
-) -> Vec<u32> {
+fn all_preprocessed_log_sizes(input: &MlDsaVerifyInput, public_message: bool) -> Vec<u32> {
     let mut sizes = Vec::new();
     let cls = coeffs_log_size();
     sizes.extend(vec![cls; coeffs::coeffs_preprocessed_ids().len()]);
@@ -676,7 +604,7 @@ fn all_preprocessed_log_sizes(
     for kind in decomp_tables::RcKind::ALL {
         sizes.push(kind.log_size());
     }
-    let sls = sib_log_size(sib_squeezed_len);
+    let sls = sib_log_size();
     sizes.extend(vec![sls; sampleinball::sib_preprocessed_ids().len()]);
     for kind in sib_tables::RcKind::ALL {
         sizes.push(kind.log_size());
@@ -687,7 +615,7 @@ fn all_preprocessed_log_sizes(
     for len in bridge_lens(public_message) {
         sizes.extend(vec![bridge_log_size(len); 2]);
     }
-    for len in sink_lens(input.message.len(), sib_stream_len, public_message) {
+    for len in sink_lens(input.message.len(), public_message) {
         sizes.extend(vec![bridge_log_size(len); 2]);
     }
     sizes
@@ -700,15 +628,12 @@ fn bridge_lens(native_mu: bool) -> Vec<usize> {
         vec![64, 768, 48]
     }
 }
-fn sink_lens(message_len: usize, sib_stream_len: usize, native_mu: bool) -> Vec<usize> {
-    let sh = shapes(message_len, sib_stream_len, 0, native_mu);
+fn sink_lens(message_len: usize, native_mu: bool) -> Vec<usize> {
+    let sh = shapes(message_len, 0, native_mu);
     sh.mu
         .into_iter()
         .map(|mu| RATE * mu.n_squeeze - 64)
-        .chain([
-            RATE * sh.ct.n_squeeze - 48,
-            RATE * sh.sib.n_squeeze - sib_stream_len,
-        ])
+        .chain([RATE * sh.ct.n_squeeze - 48])
         .collect()
 }
 
@@ -716,14 +641,9 @@ fn sink_lens(message_len: usize, sib_stream_len: usize, native_mu: bool) -> Vec<
 /// relations are drawn, so bridge/sink descriptors use `dummy()` relations —
 /// their `gen_preprocessed()` reads only `tag` + public shape).
 ///
-/// The SIB schedule is reconstructed from its bounded public stream length;
-/// no signature witness enters tree 0.
-fn gen_all_preprocessed(
-    input: &MlDsaVerifyInput,
-    sib_stream_len: usize,
-    sib_squeezed_len: usize,
-    public_message: bool,
-) -> Vec<ColEval> {
+/// The SIB schedule is fixed at the five-block resource cap; no signature
+/// witness enters tree 0.
+fn gen_all_preprocessed(input: &MlDsaVerifyInput, public_message: bool) -> Vec<ColEval> {
     let hash_io = HashIoRelation::dummy();
     let msglink = MsgLinkRelation::dummy();
     let mut cols = Vec::new();
@@ -735,11 +655,8 @@ fn gen_all_preprocessed(
     for kind in decomp_tables::RcKind::ALL {
         cols.push(decomp_tables::gen_table_preprocessed(kind));
     }
-    let sls = sib_log_size(sib_squeezed_len);
-    cols.extend(sampleinball::gen_sib_preprocessed_for_stream_len(
-        sib_stream_len,
-        sls,
-    ));
+    let sls = sib_log_size();
+    cols.extend(sampleinball::gen_sib_preprocessed(sls));
     for kind in sib_tables::RcKind::ALL {
         cols.push(sib_tables::gen_table_preprocessed(kind));
     }
@@ -752,14 +669,7 @@ fn gen_all_preprocessed(
     for b in bridge_evals("", 0, public_message, &hash_io) {
         cols.extend(b.gen_preprocessed());
     }
-    for s in sink_evals(
-        "",
-        input.message.len(),
-        sib_stream_len,
-        0,
-        public_message,
-        &hash_io,
-    ) {
+    for s in sink_evals("", input.message.len(), 0, public_message, &hash_io) {
         cols.extend(s.gen_preprocessed());
     }
     cols
@@ -928,7 +838,7 @@ impl Claims {
         let msglink = if hosted { SecureField::zero() } else { next() };
         let prefix = next();
         let bridges = (0..if native_mu { 2 } else { 4 }).map(|_| next()).collect();
-        let sinks = (0..if native_mu { 2 } else { 3 }).map(|_| next()).collect();
+        let sinks = (0..if native_mu { 1 } else { 2 }).map(|_| next()).collect();
         let native_use = next();
         assert!(it.next().is_none(), "claimed sums length mismatch");
         Self {
@@ -952,32 +862,21 @@ impl Claims {
 // Trace / interaction layouts (positional, public-derivable).
 // =============================================================================
 
-/// Everything the layout builders need that is public-derivable from
-/// `(input, sib_stream_len, sib_squeezed_len)`.
+/// Everything the layout builders need that is public-derivable from `input`.
 struct LayoutCtx {
     hosted: bool,
     /// Hosted PUBLIC-message mode: µ is verifier-native and the µ sponge plus
     /// message bridge are omitted.
     public_message: bool,
     message_len: usize,
-    sib_stream_len: usize,
-    sib_squeezed_len: usize,
 }
 
 impl LayoutCtx {
-    fn new(
-        input: &MlDsaVerifyInput,
-        sib_stream_len: usize,
-        sib_squeezed_len: usize,
-        hosted: bool,
-        public_message: bool,
-    ) -> Self {
+    fn new(input: &MlDsaVerifyInput, hosted: bool, public_message: bool) -> Self {
         Self {
             hosted,
             public_message,
             message_len: input.message.len(),
-            sib_stream_len,
-            sib_squeezed_len,
         }
     }
 }
@@ -994,7 +893,7 @@ fn module_trace_layout(ctx: &LayoutCtx) -> Vec<u32> {
         t.push(kind.log_size());
     }
     // 5. sib + 6. rc ×3.
-    let sls = sib_log_size(ctx.sib_squeezed_len);
+    let sls = sib_log_size();
     t.extend(vec![sls; sampleinball::N_BASE_COLS]);
     for kind in sib_tables::RcKind::ALL {
         t.push(kind.log_size());
@@ -1013,7 +912,7 @@ fn module_trace_layout(ctx: &LayoutCtx) -> Vec<u32> {
         let ls = bridge_log_size(len);
         t.extend(vec![ls; BRIDGE_BASE_COLS]);
     }
-    for len in sink_lens(ctx.message_len, ctx.sib_stream_len, ctx.public_message) {
+    for len in sink_lens(ctx.message_len, ctx.public_message) {
         let ls = bridge_log_size(len);
         t.extend(vec![ls; SINK_BASE_COLS]);
     }
@@ -1036,7 +935,7 @@ fn module_interaction_layout(ctx: &LayoutCtx) -> Vec<u32> {
         }
     }
     // 5. sib + 6. rc ×3.
-    let sls = sib_log_size(ctx.sib_squeezed_len);
+    let sls = sib_log_size();
     i.extend(vec![sls; sampleinball::N_INTERACTION_COLS]);
     for kind in sib_tables::RcKind::ALL {
         for _ in 0..sib_tables::RC_TABLE_INTERACTION_COLS {
@@ -1065,7 +964,7 @@ fn module_interaction_layout(ctx: &LayoutCtx) -> Vec<u32> {
         let ls = bridge_log_size(len);
         i.extend(vec![ls; BRIDGE_INTERACTION_COLS]);
     }
-    for len in sink_lens(ctx.message_len, ctx.sib_stream_len, ctx.public_message) {
+    for len in sink_lens(ctx.message_len, ctx.public_message) {
         let ls = bridge_log_size(len);
         i.extend(vec![ls; SINK_INTERACTION_COLS]);
     }
@@ -1080,12 +979,7 @@ fn prefix_n_interaction() -> usize {
 
 fn layout_for(ctx: &LayoutCtx, input: &MlDsaVerifyInput) -> TreeLayout {
     TreeLayout {
-        preprocessed: all_preprocessed_log_sizes(
-            input,
-            ctx.sib_stream_len,
-            ctx.sib_squeezed_len,
-            ctx.public_message,
-        ),
+        preprocessed: all_preprocessed_log_sizes(input, ctx.public_message),
         trace: module_trace_layout(ctx),
         interaction: module_interaction_layout(ctx),
     }
@@ -1111,11 +1005,13 @@ struct SpongeOutputs {
 /// Full squeeze outputs for the in-service jobs. Public-message mode computes
 /// µ natively and therefore has no µ service output.
 fn sponge_outputs(witness: &MlDsaWitness, native_mu: bool) -> SpongeOutputs {
-    let n_sq_sib = n_squeeze_sib(sampleinball::stream_len(witness));
     SpongeOutputs {
         mu: (!native_mu).then(|| full_squeeze(&witness.sponge.mu_absorbed, 1)),
         ct: full_squeeze(&witness.sponge.c_tilde_absorbed, 1),
-        sib: full_squeeze(&witness.sponge.sample_in_ball_absorbed, n_sq_sib),
+        sib: full_squeeze(
+            &witness.sponge.sample_in_ball_absorbed,
+            sampleinball::MAX_SIB_SQUEEZE_BLOCKS,
+        ),
     }
 }
 
@@ -1197,7 +1093,7 @@ fn build_components(
     let sib = FrameworkComponent::new(
         allocator,
         SibEval {
-            log_size: sib_log_size(ctx.sib_squeezed_len),
+            log_size: sib_log_size(),
             ns: ns.to_string(),
             sib_stream: stream_base + STREAM_ID_SIB_SQUEEZE,
             relations: rel.sib.clone(),
@@ -1262,7 +1158,6 @@ fn build_components(
     let sink_descs = sink_evals(
         ns,
         input.message.len(),
-        ctx.sib_stream_len,
         stream_base,
         ctx.public_message,
         &rel.keccak.hash_io,
@@ -1318,8 +1213,6 @@ fn sib_rc_relation(
 pub struct MlDsaProver {
     witness: MlDsaWitness,
     input: MlDsaVerifyInput,
-    sib_stream_len: usize,
-    sib_squeezed_len: usize,
     ctx: LayoutCtx,
     /// Hosted mode: the host's shared message-source relation handle. `None` for
     /// standalone (the self-drawn `msglink` producer).
@@ -1328,8 +1221,8 @@ pub struct MlDsaProver {
     /// module must be composed before this one and draw into it).
     keccak_handle: SharedKeccakRelations,
     /// Instance namespace: role/domain tag mixed into the transcript and
-    /// prefixed onto every witness/shape-dependent preprocessed id (SIB
-    /// schedule, bridges, sinks). "" = legacy single-instance ids. REQUIRED
+    /// prefixed onto every instance-local preprocessed id (SIB schedule,
+    /// bridges, sinks). "" = legacy single-instance ids. REQUIRED
     /// (distinct per instance) when a proof hosts more than one ML-DSA module.
     namespace: String,
     /// Per-instance stream-id base (multiples of [`STREAM_BASE_STRIDE`]):
@@ -1384,15 +1277,7 @@ impl MlDsaProver {
     ) -> Self {
         input.tr = native_tr(&input);
         let hosted = shared_field.is_some() || public_message;
-        let sib_stream_len = sampleinball::stream_len(&witness);
-        let sib_squeezed_len = witness.sponge.sample_in_ball_squeezed.len();
-        let ctx = LayoutCtx::new(
-            &input,
-            sib_stream_len,
-            sib_squeezed_len,
-            hosted,
-            public_message,
-        );
+        let ctx = LayoutCtx::new(&input, hosted, public_message);
         let claims = Claims {
             hosted,
             ..Claims::default()
@@ -1401,8 +1286,6 @@ impl MlDsaProver {
         Self {
             witness,
             input,
-            sib_stream_len,
-            sib_squeezed_len,
             ctx,
             shared_field,
             keccak_handle,
@@ -1456,7 +1339,6 @@ impl MlDsaProver {
     pub fn keccak_jobs(&self) -> (Vec<Shape>, Vec<Vec<u8>>) {
         let shapes = keccak_job_shapes(
             self.input.message.len(),
-            self.sib_stream_len,
             self.stream_base,
             self.ctx.public_message,
         );
@@ -1495,14 +1377,6 @@ impl MlDsaProver {
     pub fn claimed_sums(&self) -> Vec<SecureField> {
         self.claims.ordered()
     }
-    /// The honest SIB squeeze stream length.
-    pub fn sib_stream_len(&self) -> usize {
-        self.sib_stream_len
-    }
-    /// The full native SIB squeeze length.
-    pub fn sib_squeezed_len(&self) -> usize {
-        self.sib_squeezed_len
-    }
     /// The public statement input.
     pub fn input(&self) -> &MlDsaVerifyInput {
         &self.input
@@ -1520,16 +1394,13 @@ fn bridge_bytes(outputs: &SpongeOutputs, w1_bytes: &[u8]) -> Vec<Vec<u8>> {
         .collect()
 }
 
-/// Byte payloads for the remaining sinks: optional µ, then c̃ and SIB.
-fn sink_bytes(outputs: &SpongeOutputs, sib_stream_len: usize) -> Vec<Vec<u8>> {
+/// Byte payloads for the remaining sinks: optional µ, then c̃.
+fn sink_bytes(outputs: &SpongeOutputs) -> Vec<Vec<u8>> {
     outputs
         .mu
         .iter()
         .map(|mu| mu[64..].to_vec())
-        .chain([
-            outputs.ct[48..].to_vec(),
-            outputs.sib[sib_stream_len..].to_vec(),
-        ])
+        .chain([outputs.ct[48..].to_vec()])
         .collect()
 }
 
@@ -1538,7 +1409,6 @@ impl Air for MlDsaProver {
         mix_public(
             channel,
             &self.input,
-            self.sib_stream_len,
             &self.namespace,
             self.private_message,
             self.stream_base,
@@ -1562,22 +1432,12 @@ impl Air for MlDsaProver {
         channel.mix_felts(&self.claimed_sums());
     }
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
-        all_preprocessed_ids(
-            &self.namespace,
-            &self.input,
-            self.sib_stream_len,
-            self.ctx.public_message,
-        )
+        all_preprocessed_ids(&self.namespace, &self.input, self.ctx.public_message)
     }
     fn canonical_preprocessed_columns(
         &mut self,
     ) -> Result<Vec<air_core::PreprocessedColumnEval>, VerificationError> {
-        Ok(gen_all_preprocessed(
-            &self.input,
-            self.sib_stream_len,
-            self.ctx.sib_squeezed_len,
-            self.ctx.public_message,
-        ))
+        Ok(gen_all_preprocessed(&self.input, self.ctx.public_message))
     }
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
         let rel = self.relations().clone();
@@ -1601,43 +1461,28 @@ impl AirProver for MlDsaProver {
     fn max_log_size(&self) -> u32 {
         coeffs_log_size()
             .max(decomp_log_size())
-            .max(sib_log_size(self.sib_squeezed_len))
+            .max(sib_log_size())
             .max(coeffs_tables::range_table_log_size())
     }
     fn max_constraint_log_degree_bound(&self) -> u32 {
         self.max_log_size() + 2
     }
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
-        tb.extend_evals(gen_all_preprocessed(
-            &self.input,
-            self.sib_stream_len,
-            self.sib_squeezed_len,
-            self.ctx.public_message,
-        ));
+        tb.extend_evals(gen_all_preprocessed(&self.input, self.ctx.public_message));
     }
     /// Partial preprocessed writes: with multiple hosted ML-DSA instances, the
-    /// fixed-content tables (coeffs/decomp layout, rc values, keccak tables)
+    /// fixed-content tables (coeffs/decomp/SIB layouts, rc values, keccak tables)
     /// keep global ids and tree-0 dedups them first-writer-wins, so a later
-    /// instance must write only its namespaced (witness/shape-dependent)
-    /// columns. `selected_ids` is this module's id list filtered to first-seen,
+    /// instance writes only its namespaced instance-local columns. `selected_ids`
+    /// is this module's id list filtered to first-seen,
     /// in commit order (air-core `select_first_preprocessed_ids`).
     fn write_selected_preprocessed(
         &mut self,
         tb: &mut TreeBuilder<SimdBackend, air_core::Mc>,
         selected_ids: &[PreProcessedColumnId],
     ) {
-        let ids = all_preprocessed_ids(
-            &self.namespace,
-            &self.input,
-            self.sib_stream_len,
-            self.ctx.public_message,
-        );
-        let cols = gen_all_preprocessed(
-            &self.input,
-            self.sib_stream_len,
-            self.sib_squeezed_len,
-            self.ctx.public_message,
-        );
+        let ids = all_preprocessed_ids(&self.namespace, &self.input, self.ctx.public_message);
+        let cols = gen_all_preprocessed(&self.input, self.ctx.public_message);
         assert_eq!(
             ids.len(),
             cols.len(),
@@ -1659,18 +1504,8 @@ impl AirProver for MlDsaProver {
     }
 
     fn preprocessed_column_fingerprints(&mut self) -> Vec<PreprocessedColumnFingerprint> {
-        let ids = all_preprocessed_ids(
-            &self.namespace,
-            &self.input,
-            self.sib_stream_len,
-            self.ctx.public_message,
-        );
-        let cols = gen_all_preprocessed(
-            &self.input,
-            self.sib_stream_len,
-            self.sib_squeezed_len,
-            self.ctx.public_message,
-        );
+        let ids = all_preprocessed_ids(&self.namespace, &self.input, self.ctx.public_message);
+        let cols = gen_all_preprocessed(&self.input, self.ctx.public_message);
         fingerprint_preprocessed_columns("mldsa_statement", &ids, &cols)
     }
     fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
@@ -1720,7 +1555,7 @@ impl AirProver for MlDsaProver {
         evals.extend(self.decomp_rc_mult.clone());
 
         // 5. sib base + 6. rc mult.
-        let sls = sib_log_size(self.sib_squeezed_len);
+        let sls = sib_log_size();
         evals.extend(sampleinball::gen_sib_base_trace(&self.witness, sls));
         let sib_dry = sampleinball::gen_sib_interaction(
             &self.witness,
@@ -1792,16 +1627,15 @@ impl AirProver for MlDsaProver {
             "c̃ squeeze prefix mismatch"
         );
         assert_eq!(
-            outputs.sib[..self.sib_stream_len],
-            self.witness.sponge.sample_in_ball_squeezed[..self.sib_stream_len],
-            "SIB squeeze prefix mismatch"
+            outputs.sib.len(),
+            sampleinball::MAX_SIB_SQUEEZE_BYTES,
+            "SIB squeeze must fill the fixed five-block resource cap"
         );
 
-        let sbytes = sink_bytes(&outputs, self.sib_stream_len);
+        let sbytes = sink_bytes(&outputs);
         let sink_descs = sink_evals(
             &self.namespace,
             self.input.message.len(),
-            self.sib_stream_len,
             self.stream_base,
             self.ctx.public_message,
             &dummy_hash_io,
@@ -1853,7 +1687,7 @@ impl AirProver for MlDsaProver {
         }
 
         // 5. sib interaction.
-        let sls = sib_log_size(self.sib_squeezed_len);
+        let sls = sib_log_size();
         let sib_int = sampleinball::gen_sib_interaction(
             &self.witness,
             sls,
@@ -1921,11 +1755,10 @@ impl AirProver for MlDsaProver {
             evals.extend(tr);
         }
 
-        let sbytes = sink_bytes(&outputs, self.sib_stream_len);
+        let sbytes = sink_bytes(&outputs);
         let sink_descs = sink_evals(
             &self.namespace,
             self.input.message.len(),
-            self.sib_stream_len,
             self.stream_base,
             self.ctx.public_message,
             &rel.keccak.hash_io,
@@ -1953,7 +1786,6 @@ impl AirProver for MlDsaProver {
 
 pub struct MlDsaVerifier {
     input: MlDsaVerifyInput,
-    sib_stream_len: usize,
     ctx: LayoutCtx,
     /// Hosted mode: the host's shared message-source relation handle.
     shared_field: Option<SharedFieldRelation>,
@@ -1980,16 +1812,13 @@ impl MlDsaVerifier {
     /// Reconstruct a verifier from the public proof data. `shared_field = None` →
     /// standalone; `Some(handle)` → hosted (drops the msglink claim slot, sources
     /// the msg bridge from the host's shared [`FieldBytesRelation`]). The
-    /// `group_evals` / `claimed_sums` / `sib_*_len` come from the host's proof
-    /// struct (the mldsa prover's getters). Composed AFTER the keccak service
+    /// `group_evals` / `claimed_sums` come from the host's proof struct.
+    /// Composed AFTER the keccak service
     /// module (and, hosted, after the host module that draws + sets `handle`).
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         input: MlDsaVerifyInput,
         group_evals: Vec<SecureField>,
         claimed_sums: Vec<SecureField>,
-        sib_stream_len: usize,
-        sib_squeezed_len: usize,
         shared_field: Option<SharedFieldRelation>,
         keccak_handle: SharedKeccakRelations,
     ) -> Self {
@@ -1997,38 +1826,26 @@ impl MlDsaVerifier {
             input,
             group_evals,
             claimed_sums,
-            sib_stream_len,
-            sib_squeezed_len,
             shared_field,
             false,
             keccak_handle,
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn build(
         mut input: MlDsaVerifyInput,
         group_evals: Vec<SecureField>,
         claimed_sums: Vec<SecureField>,
-        sib_stream_len: usize,
-        sib_squeezed_len: usize,
         shared_field: Option<SharedFieldRelation>,
         public_message: bool,
         keccak_handle: SharedKeccakRelations,
     ) -> Self {
         input.tr = native_tr(&input);
         let hosted = shared_field.is_some() || public_message;
-        let ctx = LayoutCtx::new(
-            &input,
-            sib_stream_len,
-            sib_squeezed_len,
-            hosted,
-            public_message,
-        );
+        let ctx = LayoutCtx::new(&input, hosted, public_message);
         let claims = Claims::from_flat(&claimed_sums, hosted, public_message);
         Self {
             input,
-            sib_stream_len,
             ctx,
             shared_field,
             keccak_handle,
@@ -2043,13 +1860,10 @@ impl MlDsaVerifier {
     }
 
     /// Hosted-mode constructor (`shared_field` provided by the host).
-    #[allow(clippy::too_many_arguments)]
     pub fn hosted(
         input: MlDsaVerifyInput,
         group_evals: Vec<SecureField>,
         claimed_sums: Vec<SecureField>,
-        sib_stream_len: usize,
-        sib_squeezed_len: usize,
         shared_field: SharedFieldRelation,
         keccak_handle: SharedKeccakRelations,
     ) -> Self {
@@ -2057,8 +1871,6 @@ impl MlDsaVerifier {
             input,
             group_evals,
             claimed_sums,
-            sib_stream_len,
-            sib_squeezed_len,
             Some(shared_field),
             keccak_handle,
         )
@@ -2066,25 +1878,13 @@ impl MlDsaVerifier {
 
     /// Hosted PUBLIC-message constructor (S4) — mirror of
     /// [`MlDsaProver::hosted_public`].
-    #[allow(clippy::too_many_arguments)]
     pub fn hosted_public(
         input: MlDsaVerifyInput,
         group_evals: Vec<SecureField>,
         claimed_sums: Vec<SecureField>,
-        sib_stream_len: usize,
-        sib_squeezed_len: usize,
         keccak_handle: SharedKeccakRelations,
     ) -> Self {
-        Self::build(
-            input,
-            group_evals,
-            claimed_sums,
-            sib_stream_len,
-            sib_squeezed_len,
-            None,
-            true,
-            keccak_handle,
-        )
+        Self::build(input, group_evals, claimed_sums, None, true, keccak_handle)
     }
 
     /// Set the instance namespace (must match the prover's per role).
@@ -2111,7 +1911,6 @@ impl Air for MlDsaVerifier {
         mix_public(
             channel,
             &self.input,
-            self.sib_stream_len,
             &self.namespace,
             self.private_message,
             self.stream_base,
@@ -2133,22 +1932,12 @@ impl Air for MlDsaVerifier {
         channel.mix_felts(&self.claimed_sums());
     }
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
-        all_preprocessed_ids(
-            &self.namespace,
-            &self.input,
-            self.sib_stream_len,
-            self.ctx.public_message,
-        )
+        all_preprocessed_ids(&self.namespace, &self.input, self.ctx.public_message)
     }
     fn canonical_preprocessed_columns(
         &mut self,
     ) -> Result<Vec<air_core::PreprocessedColumnEval>, VerificationError> {
-        Ok(gen_all_preprocessed(
-            &self.input,
-            self.sib_stream_len,
-            self.ctx.sib_squeezed_len,
-            self.ctx.public_message,
-        ))
+        Ok(gen_all_preprocessed(&self.input, self.ctx.public_message))
     }
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
         let rel = self.relations().clone();
@@ -2177,13 +1966,10 @@ pub fn prove_mldsa(
     input: MlDsaVerifyInput,
     config: PcsConfig,
 ) -> Result<MlDsaProof, ProvingError> {
-    let sib_stream_len = sampleinball::stream_len(&witness);
-    let sib_squeezed_len = witness.sponge.sample_in_ball_squeezed.len();
     input
         .validate_public_key()
         .map_err(|_| ProvingError::ConstraintsNotSatisfied)?;
-    validate_sib_lengths(sib_stream_len, sib_squeezed_len)
-        .map_err(|_| ProvingError::ConstraintsNotSatisfied)?;
+    sampleinball::validate_stream(&witness).map_err(|_| ProvingError::ConstraintsNotSatisfied)?;
     // The standalone path instantiates a PRIVATE keccak service for this one
     // instance's private µ, c̃, and SIB jobs; the composition is
     // `[service, mldsa]`.
@@ -2197,8 +1983,6 @@ pub fn prove_mldsa(
         input: prover.input.clone(),
         group_evals: prover.group_evals,
         claimed_sums: prover.claims.ordered(),
-        sib_stream_len,
-        sib_squeezed_len,
         service_claimed_sums: service.claimed_sums(),
         post_interaction_payloads,
         stark_proof,
@@ -2210,12 +1994,8 @@ pub fn prove_mldsa(
 /// for the given public parameters. Summing `2^log_size` over all three gives
 /// the total committed M31-cell count; interaction QM31 columns are
 /// pre-expanded to 4 M31 columns in the layout.
-pub fn debug_layout(
-    input: &MlDsaVerifyInput,
-    sib_stream_len: usize,
-    sib_squeezed_len: usize,
-) -> TreeLayout {
-    let ctx = LayoutCtx::new(input, sib_stream_len, sib_squeezed_len, false, false);
+pub fn debug_layout(input: &MlDsaVerifyInput) -> TreeLayout {
+    let ctx = LayoutCtx::new(input, false, false);
     layout_for(&ctx, input)
 }
 
@@ -2234,7 +2014,7 @@ fn claimed_sums_len(hosted: bool, native_mu: bool) -> usize {
         + usize::from(!hosted)
         + 1 // native tr/private prefix or native public µ prefix
         + if native_mu { 2 } else { 4 } // msg + fixed bridges
-        + if native_mu { 2 } else { 3 } // sinks
+        + if native_mu { 1 } else { 2 } // sinks
         + 1 // coeffs native use
 }
 
@@ -2252,9 +2032,6 @@ pub fn verify_mldsa(proof: &MlDsaProof) -> Result<(), VerificationError> {
     proof.input.validate_public_key().map_err(|message| {
         VerificationError::InvalidStructure(format!("ML-DSA statement: {message}"))
     })?;
-    validate_sib_lengths(proof.sib_stream_len, proof.sib_squeezed_len).map_err(|message| {
-        VerificationError::InvalidStructure(format!("ML-DSA statement: {message}"))
-    })?;
     if proof.group_evals.len() != n_group_evals()
         || proof.claimed_sums.len() != claimed_sums_len(false, false)
     {
@@ -2263,7 +2040,7 @@ pub fn verify_mldsa(proof: &MlDsaProof) -> Result<(), VerificationError> {
         ));
     }
     let handle = SharedKeccakRelations::new();
-    let job_shapes = keccak_job_shapes(proof.input.message.len(), proof.sib_stream_len, 0, false);
+    let job_shapes = keccak_job_shapes(proof.input.message.len(), 0, false);
     if proof.service_claimed_sums.len() != stwo_keccak::service::service_claimed_sums_len() {
         return Err(VerificationError::InvalidStructure(
             "ML-DSA statement: bad service claimed-sums length".to_string(),
@@ -2282,8 +2059,6 @@ pub fn verify_mldsa(proof: &MlDsaProof) -> Result<(), VerificationError> {
         proof.input.clone(),
         proof.group_evals.clone(),
         proof.claimed_sums.clone(),
-        proof.sib_stream_len,
-        proof.sib_squeezed_len,
         None,
         handle,
     );

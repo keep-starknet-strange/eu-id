@@ -305,6 +305,84 @@ fn negative_wrong_index_progression() {
     );
 }
 
+/// The active prefix cannot stop before the 49th accepted placement. Turning
+/// off its final active row leaves `i < 256`, violating the inactive-state pin.
+#[test]
+fn negative_active_prefix_stops_early() {
+    use stwo_mldsa::sampleinball::{honest_active_rows, install_forged_active};
+
+    let w = witness_for(8010, b"active-boundary");
+    let mut active = honest_active_rows(&w);
+    let padding_start = active
+        .iter()
+        .position(|&value| !value)
+        .expect("five-block stream has padding");
+    active[padding_start - 1] = false;
+
+    let guard = install_forged_active(active);
+    let forged_rejected = rejected(w);
+    drop(guard);
+    assert!(
+        forged_rejected,
+        "the active prefix must extend through the 49th accepted placement"
+    );
+}
+
+/// Once the FSM reaches `i = 256`, padding cannot reactivate consumption.
+/// Re-enabling the first padding row without another accept breaks the active
+/// placement partition; fabricating an extra accept would instead break the
+/// fixed 49-step Swap balance.
+#[test]
+fn negative_padding_reactivation() {
+    use stwo_mldsa::sampleinball::{honest_active_rows, install_forged_active};
+
+    let w = witness_for(8011, b"active-reactivation");
+    let mut active = honest_active_rows(&w);
+    let padding_start = active
+        .iter()
+        .position(|&value| !value)
+        .expect("five-block stream has padding");
+    active[padding_start] = true;
+
+    let guard = install_forged_active(active);
+    let forged_rejected = rejected(w);
+    drop(guard);
+    assert!(
+        forged_rejected,
+        "consumption must not reactivate after the 49th accept"
+    );
+}
+
+/// A mutation in the legacy witness's unconsumed on-demand tail does not move
+/// the FSM boundary: the static component and Keccak producer both derive and
+/// bind the canonical five-block stream from the SIB absorb input.
+#[test]
+fn carried_padding_byte_is_not_a_second_consumption() {
+    let mut w = witness_for(8012, b"padding-byte");
+    let padding_start = stwo_mldsa::sampleinball::validate_stream(&w).expect("valid stream");
+    assert!(padding_start < w.sponge.sample_in_ball_squeezed.len());
+    w.sponge.sample_in_ball_squeezed[padding_start] ^= 1;
+
+    let proof = prove_sib(w.clone(), pcs_config()).expect("padding is outside consumption");
+    verify_sib(&proof, &w).expect("carried padding cannot shift the constrained prefix");
+}
+
+/// The inherited five-block resource cap remains a typed error. Oversized
+/// witness input is rejected before any trace allocation or indexing.
+#[test]
+fn over_five_blocks_is_typed_error_not_panic() {
+    let mut w = witness_for(8013, b"resource-cap");
+    w.sponge
+        .sample_in_ball_squeezed
+        .resize(stwo_mldsa::sampleinball::MAX_SIB_SQUEEZE_BYTES + 1, 0);
+
+    let validation = std::panic::catch_unwind(|| stwo_mldsa::sampleinball::validate_stream(&w));
+    assert!(matches!(validation, Ok(Err(_))));
+    let proving =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| prove_sib(w, pcs_config())));
+    assert!(matches!(proving, Ok(Err(_))));
+}
+
 /// The memory permutation tuple must bind read/write classification. Relabel a
 /// sorted read as a write without changing its address, value, or timestamp;
 /// this used to disable read continuity when `MemRelation` omitted `is_write`.

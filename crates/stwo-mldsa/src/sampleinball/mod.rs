@@ -6,14 +6,16 @@
 //! `i ∈ [N−τ, N)` it rejection-samples `j ← byte` (reject while `byte > i`) and
 //! sets `c[i] = c[j]; c[j] = (−1)^{s&1}; s ≫= 1`.
 //!
-//! ## Layout — two stacked row groups, one committed AIR (log_size ~9)
+//! ## Layout — two stacked row groups, one committed AIR (log_size 10)
 //!
-//! 1. **stream group** (one row per squeezed byte the sampler CONSUMES): tracks
-//!    the FSM target index `i` and the accept/reject decision, consuming each byte
-//!    from `HashIoRelation(STREAM_ID_SIB_SQUEEZE, byte_pos, byte)`. The first 8
-//!    bytes are the sign source (no placement); each later placement byte is
-//!    accepted iff `byte ≤ i` (proven by `(i − byte) ∈ [0,256)`) or rejected iff
-//!    `byte > i` (proven by `(byte − i − 1) ∈ [0,256)`), advancing `i` on accept.
+//! 1. **stream group** (one row per byte in the five-block resource cap): binds
+//!    all 680 bytes from
+//!    `HashIoRelation(STREAM_ID_SIB_SQUEEZE, byte_pos, byte)`. An `active` base
+//!    bit selects the unique prefix through the 49th accepted placement. The
+//!    first 8 active bytes are the sign source; each later active byte is
+//!    accepted iff `byte ≤ i` (proven by `(i − byte) ∈ [0,256)`) or rejected
+//!    iff `byte > i` (proven by `(byte − i − 1) ∈ [0,256)`). Every inactive
+//!    padding row is constrained to `i = 256`, so consumption cannot stop early.
 //! 2. **c group** (`N` rows): the challenge coefficients, each ternary
 //!    (`c² = csq` and `c·csq = c`, hence `c ∈ {−1,0,1}`), with a running `Σ c²`
 //!    accumulator gated to `τ` on the final c-row, and each `c[m]` bound to the
@@ -79,12 +81,25 @@ use tables::RcUses;
 /// Sign bytes at the head of the squeeze stream.
 pub const SIGN_BYTES: usize = 8;
 
-// The stream stage is bounded by the honest CONSUMED squeeze length (τ placements
-// + rejections, < 256 in practice; see `stream_len`). The component is sized to
-// that length + the c stage (N = 256), padded to a power of two.
+/// SHAKE-256 rate in bytes.
+pub const SHAKE256_RATE: usize = 136;
+
+/// Existing production resource cap for SampleInBall's rejection stream.
+///
+/// One block overruns with probability about 2^-140.25; this five-block cap
+/// overruns with probability about 2^-1448.6. It is deliberately a RESOURCE
+/// CAP, not a semantic worst-case bound: FIPS 204 sampling is unbounded.
+pub const MAX_SIB_SQUEEZE_BLOCKS: usize = 5;
+
+/// Byte length of the fixed five-block SampleInBall squeeze stream.
+pub const MAX_SIB_SQUEEZE_BYTES: usize = SHAKE256_RATE * MAX_SIB_SQUEEZE_BLOCKS;
+
+// The stream stage always binds the fixed five-block resource cap. `active`
+// selects only the FIPS-consumed prefix; the c stage starts at the static row
+// MAX_SIB_SQUEEZE_BYTES.
 
 /// Base column indices.
-const COL_ENABLER: usize = 0;
+const COL_ACTIVE: usize = 0;
 // Stream stage columns:
 const COL_BYTE: usize = 1; // consumed squeeze byte
 const COL_I: usize = 2; // current target index i
@@ -129,9 +144,8 @@ pub const N_CORE: usize = N + 3 * TAU;
 /// trace row count and the sib log_size.
 pub const N_ACCESSES: usize = N_CORE + N;
 
-/// Namespaced preprocessed id: the SIB schedule columns depend on the public
-/// consumed-stream length, so two hosted ML-DSA instances must not share them
-/// under tree-0 id dedup.
+/// Namespaced preprocessed id for one hosted ML-DSA instance. The schedule
+/// content is static; namespacing preserves the composition's per-role order.
 pub(crate) fn pre_id_ns(ns: &str, name: &str) -> PreProcessedColumnId {
     PreProcessedColumnId {
         id: format!("{}mldsa_sib_{name}", crate::sponge_link::ns_prefix(ns)),
@@ -180,52 +194,95 @@ pub fn sib_preprocessed_ids_ns(ns: &str) -> Vec<PreProcessedColumnId> {
     ids
 }
 
-/// Honest stream length: the number of squeeze bytes the rejection sampler
-/// actually CONSUMES (8 sign bytes + placement bytes until τ accepts). The
-/// transcript squeezes whole rate blocks on demand, but only this prefix
-/// drives `c`.
-pub fn stream_len(witness: &MlDsaWitness) -> usize {
-    let stream = &witness.sponge.sample_in_ball_squeezed;
+fn accepted_prefix_len(stream: &[u8]) -> Result<usize, &'static str> {
+    if stream.len() > MAX_SIB_SQUEEZE_BYTES {
+        return Err("SampleInBall stream exceeds the five-block resource cap");
+    }
+    if stream.len() < SIGN_BYTES {
+        return Err("SampleInBall stream is missing sign bytes");
+    }
     let mut i = (N - TAU) as u32;
     let mut placed = 0usize;
     let mut pos = SIGN_BYTES;
     while placed < TAU {
-        let b = stream[pos] as u32;
+        let b = *stream
+            .get(pos)
+            .ok_or("SampleInBall stream ends before 49 accepted placements")?
+            as u32;
         pos += 1;
         if b <= i {
             i += 1;
             placed += 1;
         }
     }
-    pos
+    Ok(pos)
+}
+
+/// Validate the inherited on-demand witness stream without panicking.
+///
+/// The stream must end on the canonical SHAKE block containing the 49th
+/// accepted placement and must stay within the existing five-block cap.
+pub fn validate_stream(witness: &MlDsaWitness) -> Result<usize, &'static str> {
+    let stream = &witness.sponge.sample_in_ball_squeezed;
+    let consumed = accepted_prefix_len(stream)?;
+    let expected = SHAKE256_RATE * consumed.div_ceil(SHAKE256_RATE);
+    if stream.len() != expected {
+        return Err("SampleInBall squeeze length is not canonically derived");
+    }
+    Ok(consumed)
+}
+
+/// Honest consumed-prefix length. Production entry points call
+/// [`validate_stream`] first; this helper remains for diagnostics and tests.
+pub fn stream_len(witness: &MlDsaWitness) -> usize {
+    validate_stream(witness).expect("validated SampleInBall witness stream")
+}
+
+/// Deterministic five-block squeeze stream committed by the Keccak service and
+/// consumed in full by this component.
+pub(crate) fn fixed_squeeze_stream(witness: &MlDsaWitness) -> Vec<u8> {
+    crate::reference::sponge::shake256(
+        &[&witness.sponge.sample_in_ball_absorbed],
+        MAX_SIB_SQUEEZE_BYTES,
+    )
+    .0
 }
 
 /// Reconstruct the per-stream-row FSM state from the reference stream.
 struct StreamRow {
     byte: u32,
     i: u32,
+    active: bool,
     accept: bool,
 }
 
 fn stream_rows(witness: &MlDsaWitness) -> Vec<StreamRow> {
-    let stream = &witness.sponge.sample_in_ball_squeezed;
-    let slen = stream_len(witness);
-    let mut out = Vec::with_capacity(slen);
+    let stream = fixed_squeeze_stream(witness);
+    let mut out = Vec::with_capacity(MAX_SIB_SQUEEZE_BYTES);
     let mut i = (N - TAU) as u32;
-    for pos in 0..slen {
+    let mut placed = 0usize;
+    for pos in 0..MAX_SIB_SQUEEZE_BYTES {
         let b = stream[pos] as u32;
         if pos < SIGN_BYTES {
             // Sign-collection rows: i stays at N−τ, byte recorded, no accept.
             out.push(StreamRow {
                 byte: b,
                 i,
+                active: true,
                 accept: false,
             });
         } else {
-            let accept = b <= i;
-            out.push(StreamRow { byte: b, i, accept });
+            let active = placed < TAU;
+            let accept = active && b <= i;
+            out.push(StreamRow {
+                byte: b,
+                i,
+                active,
+                accept,
+            });
             if accept {
                 i += 1;
+                placed += 1;
             }
         }
     }
@@ -234,10 +291,22 @@ fn stream_rows(witness: &MlDsaWitness) -> Vec<StreamRow> {
             assert_eq!(
                 indices.len(),
                 out.len(),
-                "forged stream-index list must match the consumed stream length"
+                "forged stream-index list must match the fixed stream length"
             );
             for (row, &idx) in out.iter_mut().zip(indices) {
                 row.i = idx;
+            }
+        }
+    });
+    FORGED_ACTIVE.with(|forged| {
+        if let Some(active) = forged.borrow().as_ref() {
+            assert_eq!(
+                active.len(),
+                out.len(),
+                "forged active list must match the fixed stream length"
+            );
+            for (row, &value) in out.iter_mut().zip(active) {
+                row.active = value;
             }
         }
     });
@@ -264,7 +333,7 @@ struct Access {
 /// increasing across the returned list. The FINAL reads return `c_final[k]`,
 /// which must equal the committed `witness.digits.c` (the coeffs-bound value).
 fn mem_accesses(witness: &MlDsaWitness) -> Vec<Access> {
-    let stream = &witness.sponge.sample_in_ball_squeezed;
+    let stream = fixed_squeeze_stream(witness);
     let mut c = [0i128; N];
     let sign_bits = u64::from_le_bytes(stream[0..SIGN_BYTES].try_into().expect("8 bytes"));
     let mut sign = sign_bits;
@@ -363,6 +432,8 @@ thread_local! {
     /// fully self-consistent malicious trace generator.
     static FORGED_STREAM_I: core::cell::RefCell<Option<Vec<u32>>> =
         const { core::cell::RefCell::new(None) };
+    static FORGED_ACTIVE: core::cell::RefCell<Option<Vec<bool>>> =
+        const { core::cell::RefCell::new(None) };
     static FORGED_SIGN_BYTES: core::cell::RefCell<Option<[u8; SIGN_BYTES]>> =
         const { core::cell::RefCell::new(None) };
     static FORGED_SORTED_WRITES: core::cell::RefCell<Option<Vec<bool>>> =
@@ -441,6 +512,35 @@ pub fn install_forged_stream_indices(indices: Vec<u32>) -> ForgedStreamIndicesGu
     ForgedStreamIndicesGuard
 }
 
+/// Test-attack hook: returns the honest fixed-stream active-prefix bits.
+#[doc(hidden)]
+pub fn honest_active_rows(witness: &MlDsaWitness) -> Vec<bool> {
+    let guard = FORGED_ACTIVE.with(|f| f.borrow_mut().take());
+    let active = stream_rows(witness)
+        .into_iter()
+        .map(|row| row.active)
+        .collect();
+    FORGED_ACTIVE.with(|f| *f.borrow_mut() = guard);
+    active
+}
+
+/// Test-attack hook: overrides the fixed-stream active-prefix bits while
+/// leaving bytes, accept decisions, and index history unchanged.
+#[doc(hidden)]
+pub struct ForgedActiveGuard;
+
+impl Drop for ForgedActiveGuard {
+    fn drop(&mut self) {
+        FORGED_ACTIVE.with(|f| *f.borrow_mut() = None);
+    }
+}
+
+#[doc(hidden)]
+pub fn install_forged_active(active: Vec<bool>) -> ForgedActiveGuard {
+    FORGED_ACTIVE.with(|f| *f.borrow_mut() = Some(active));
+    ForgedActiveGuard
+}
+
 /// Test-attack hook: overrides the sign-bit witness columns while leaving the
 /// HashIo-bound stream bytes unchanged. Both byte recomposition and the SignBit
 /// balance independently bind these columns to the honest execution.
@@ -459,14 +559,8 @@ pub fn install_forged_sign_bytes(bytes: [u8; SIGN_BYTES]) -> ForgedSignBytesGuar
     ForgedSignBytesGuard
 }
 
-fn trace_sign_byte(witness: &MlDsaWitness, pos: usize) -> u8 {
-    FORGED_SIGN_BYTES.with(|f| {
-        f.borrow()
-            .as_ref()
-            .map_or(witness.sponge.sample_in_ball_squeezed[pos], |bytes| {
-                bytes[pos]
-            })
-    })
+fn trace_sign_byte(stream: &[u8], pos: usize) -> u8 {
+    FORGED_SIGN_BYTES.with(|f| f.borrow().as_ref().map_or(stream[pos], |bytes| bytes[pos]))
 }
 
 /// Test-attack hook: returns the honest `(addr, value, ts, is_write)` sorted
@@ -543,23 +637,11 @@ fn mem_trace(witness: &MlDsaWitness) -> MemTrace {
 // Preprocessed trace.
 // =============================================================================
 
-pub fn gen_sib_preprocessed(witness: &MlDsaWitness, log_size: u32) -> Vec<ColEval> {
-    gen_sib_preprocessed_for_stream_len(stream_len(witness), log_size)
-}
-
-/// Reconstruct the canonical SampleInBall preprocessing from the public
-/// consumed-stream length. Verifiers use this instead of requiring a private
-/// [`MlDsaWitness`]; all schedule columns depend only on `stream_len` and the
-/// fixed FIPS parameters.
-pub fn gen_sib_preprocessed_for_stream_len(stream_len: usize, log_size: u32) -> Vec<ColEval> {
+/// Reconstruct the canonical, signature-independent SampleInBall schedule.
+pub fn gen_sib_preprocessed(log_size: u32) -> Vec<ColEval> {
     let rows = 1usize << log_size;
-    let slen = stream_len;
     assert!(
-        slen >= SIGN_BYTES,
-        "SampleInBall stream is missing sign bytes"
-    );
-    assert!(
-        slen + N <= rows && N_ACCESSES <= rows,
+        MAX_SIB_SQUEEZE_BYTES + N <= rows,
         "SampleInBall schedule does not fit its trace domain"
     );
 
@@ -586,7 +668,7 @@ pub fn gen_sib_preprocessed_for_stream_len(stream_len: usize, log_size: u32) -> 
     let mut stream_last = vec![m31(0); rows];
     let mut sign_mask: Vec<Vec<M31>> = (0..SIGN_BIT_COLS).map(|_| vec![m31(0); rows]).collect();
 
-    for pos in 0..slen {
+    for pos in 0..MAX_SIB_SQUEEZE_BYTES {
         is_stream[pos] = m31(1);
         if pos >= SIGN_BYTES {
             is_placement[pos] = m31(1);
@@ -602,9 +684,9 @@ pub fn gen_sib_preprocessed_for_stream_len(stream_len: usize, log_size: u32) -> 
         }
         byte_pos[pos] = m31(pos as u32);
     }
-    stream_last[slen - 1] = m31(1);
+    stream_last[MAX_SIB_SQUEEZE_BYTES - 1] = m31(1);
     for m in 0..N {
-        let row = slen + m;
+        let row = MAX_SIB_SQUEEZE_BYTES + m;
         is_c[row] = m31(1);
         c_bind_id[row] = m31(m as u32);
         // FINAL-read timestamp for address m (co-located on the c-stage row).
@@ -612,7 +694,7 @@ pub fn gen_sib_preprocessed_for_stream_len(stream_len: usize, log_size: u32) -> 
     }
     acc_start[0] = m31(1); // coset row 0 zeroes the Σc² accumulator wraparound.
     if N > 0 {
-        c_last[slen + N - 1] = m31(1);
+        c_last[MAX_SIB_SQUEEZE_BYTES + N - 1] = m31(1);
     }
 
     // Unsorted CORE accesses occupy rows 0..N_CORE; the SORTED view occupies
@@ -678,18 +760,18 @@ pub fn gen_sib_preprocessed_for_stream_len(stream_len: usize, log_size: u32) -> 
 
 pub fn gen_sib_base_trace(witness: &MlDsaWitness, log_size: u32) -> Vec<ColEval> {
     let rows = 1usize << log_size;
-    let slen = stream_len(witness);
     let srows = stream_rows(witness);
+    let stream = fixed_squeeze_stream(witness);
     let mut cols: Vec<Vec<M31>> = (0..N_BASE_COLS).map(|_| vec![m31(0); rows]).collect();
 
     // Stream stage.
     for (pos, r) in srows.iter().enumerate() {
-        cols[COL_ENABLER][pos] = m31(1);
+        cols[COL_ACTIVE][pos] = m31(u32::from(r.active));
         cols[COL_BYTE][pos] = m31(r.byte);
         cols[COL_I][pos] = m31(r.i);
         cols[COL_ACCEPT][pos] = m31(u32::from(r.accept));
         let is_placement = pos >= SIGN_BYTES;
-        let reject = is_placement && !r.accept;
+        let reject = is_placement && r.active && !r.accept;
         cols[COL_REJECT][pos] = m31(u32::from(reject));
         // Accept rows: (i − byte) ∈ [0,256). Reject rows: (byte − i − 1) ∈ [0,256).
         // Each split lo + 256·hi; only the active branch's hi is filled.
@@ -705,7 +787,7 @@ pub fn gen_sib_base_trace(witness: &MlDsaWitness, log_size: u32) -> Vec<ColEval>
         // Sign rows (first SIGN_BYTES): decompose the byte into its 8 bits so the
         // SignBit channel can tie write-j values to the FIPS sign bits.
         if pos < SIGN_BYTES {
-            let sign_byte = trace_sign_byte(witness, pos);
+            let sign_byte = trace_sign_byte(&stream, pos);
             for u in 0..SIGN_BIT_COLS {
                 cols[COL_SIGN_BIT0 + u][pos] = m31(u32::from((sign_byte >> u) & 1));
             }
@@ -714,8 +796,7 @@ pub fn gen_sib_base_trace(witness: &MlDsaWitness, log_size: u32) -> Vec<ColEval>
 
     // c stage.
     for m in 0..N {
-        let row = slen + m;
-        cols[COL_ENABLER][row] = m31(1);
+        let row = MAX_SIB_SQUEEZE_BYTES + m;
         let c = witness.digits.c[m];
         cols[COL_C][row] = enc_signed(c);
         cols[COL_CSQ][row] = m31((c * c) as u32);
@@ -840,7 +921,7 @@ impl FrameworkEval for SibEval {
             .map(|u| eval.get_preprocessed_column(pre_id(&sign_mask_name(u))))
             .collect();
 
-        let enabler = eval.next_trace_mask();
+        let active = eval.next_trace_mask();
         let byte = eval.next_trace_mask();
         let idx = eval.next_trace_mask();
         let accept = eval.next_trace_mask();
@@ -893,20 +974,30 @@ impl FrameworkEval for SibEval {
         let n_minus_tau = E::F::from(m31((N - TAU) as u32));
         let n = E::F::from(m31(N as u32));
 
-        // C0: enabler boolean.
-        eval.add_constraint(enabler.clone() * (one.clone() - enabler.clone()));
+        // C0: `active` is a boolean confined to the fixed squeeze rows. All
+        // sign-source rows are active. Once inactive, a placement row is pinned
+        // to state N; the ordered transition plus the fixed 49-step Swap
+        // consumers prevents an early stop or a later reactivation.
+        eval.add_constraint(active.clone() * (one.clone() - active.clone()));
+        eval.add_constraint(active.clone() * (one.clone() - is_stream.clone()));
+        eval.add_constraint(is_sign.clone() * (one.clone() - active.clone()));
+        eval.add_constraint(
+            is_placement.clone() * (one.clone() - active.clone()) * (idx.clone() - n.clone()),
+        );
 
         // C1: accept / reject booleans, and their placement partition.
         eval.add_constraint(accept.clone() * (one.clone() - accept.clone()));
         eval.add_constraint(reject.clone() * (one.clone() - reject.clone()));
-        // Every placement stream row is exactly accept XOR reject; sign-collection
-        // rows (is_stream · (1−is_placement)) and non-stream rows have both = 0.
-        eval.add_constraint(is_placement.clone() - (accept.clone() + reject.clone()));
+        // Every active placement row is exactly accept XOR reject. Inactive
+        // padding and sign-source rows have both flags zero.
+        eval.add_constraint(
+            is_placement.clone() * active.clone() - (accept.clone() + reject.clone()),
+        );
 
         // C1b: exact ordered FIPS 204 Alg 29 rejection FSM. Sign rows hold the
-        // initial state N−τ. Each placement row begins at the previous row's
-        // state-after value, so reject adds zero and accept adds exactly one.
-        // The final consumed byte must leave state N.
+        // initial state N−τ. Every placement row, including fixed padding,
+        // begins at the previous row's state-after value. Inactive rows are
+        // pinned to N above and therefore hold N forever.
         eval.add_constraint(is_sign.clone() * (idx.clone() - n_minus_tau.clone()));
         eval.add_constraint(is_placement.clone() * (idx.clone() - prev_fsm_after));
         eval.add_constraint(stream_last * (idx.clone() + accept.clone() - n));
@@ -1212,7 +1303,6 @@ impl FrameworkEval for SibEval {
             &wrj_val_tuple,
         ));
 
-        let _ = enabler;
         eval.finalize_logup_batched(LOGUP_BATCH);
         eval
     }
@@ -1241,8 +1331,9 @@ pub fn gen_sib_interaction(
     relations: &SibRelations,
 ) -> SibInteraction {
     let rows = 1usize << log_size;
-    let slen = stream_len(witness);
+    let slen = MAX_SIB_SQUEEZE_BYTES;
     let srows = stream_rows(witness);
+    let stream = fixed_squeeze_stream(witness);
 
     let zero = SecureField::from(m31(0));
     let one = SecureField::one();
@@ -1317,7 +1408,7 @@ pub fn gen_sib_interaction(
         .map(|coset| {
             if coset < slen {
                 let r = &srows[coset];
-                let reject = coset >= SIGN_BYTES && !r.accept;
+                let reject = coset >= SIGN_BYTES && r.active && !r.accept;
                 Some(Row::Stream {
                     byte: r.byte,
                     i: r.i,
@@ -1682,7 +1773,7 @@ pub fn gen_sib_interaction(
                 if coset < SIGN_BYTES {
                     let step = SIGN_BIT_COLS * coset + u;
                     if step < TAU {
-                        let bit = (trace_sign_byte(witness, coset) >> u) & 1;
+                        let bit = (trace_sign_byte(&stream, coset) >> u) & 1;
                         let value = if bit == 1 { -1 } else { 1 };
                         return (
                             one,

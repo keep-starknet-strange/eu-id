@@ -12,7 +12,6 @@ use stwo_keccak::service::{service_claimed_sums_len, KeccakServiceVerifier};
 use stwo_mldsa::reference::encoding::{pk_decode, sig_decode};
 use stwo_mldsa::reference::sponge::shake256;
 use stwo_mldsa::statement::keccak_job_shapes;
-use stwo_mldsa::witness::generate_witness;
 use stwo_mldsa::MlDsaVerifyInput;
 
 fn dump(label: &str, layout: &TreeLayout) -> u64 {
@@ -66,19 +65,15 @@ fn main() {
     tr.copy_from_slice(&tr_vec);
     let input = MlDsaVerifyInput::from_decoded(&pk, &sp, tr, msg);
 
-    let witness = generate_witness(&input).unwrap();
-    let sib_stream_len = stwo_mldsa::sampleinball::stream_len(&witness);
-    let sib_squeezed_len = witness.sponge.sample_in_ball_squeezed.len();
-
     // Instance layout (S1: no sponges/keccak/round/tables — those live in the
     // service).
-    let instance = stwo_mldsa::statement::debug_layout(&input, sib_stream_len, sib_squeezed_len);
+    let instance = stwo_mldsa::statement::debug_layout(&input);
     let instance_cells = dump("mldsa instance", &instance);
     let instance_cols =
         instance.preprocessed.len() + instance.trace.len() + instance.interaction.len();
 
     // Standalone service layout: private µ, c̃, and SIB jobs.
-    let jobs = keccak_job_shapes(input.message.len(), sib_stream_len, 0, false);
+    let jobs = keccak_job_shapes(input.message.len(), 0, false);
     let service = KeccakServiceVerifier::new(
         jobs,
         vec![SecureField::default(); service_claimed_sums_len()],
