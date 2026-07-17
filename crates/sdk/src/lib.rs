@@ -494,13 +494,13 @@ struct MdocProofEnvelope {
     stark_proof: Vec<u8>,
 }
 
-const MDOC_ENVELOPE_FORMAT_V4: u16 = 4;
+const MDOC_ENVELOPE_FORMAT_V5: u16 = 5;
 
 fn decode_mdoc_proof_envelope(proof: &[u8]) -> Result<MdocProofEnvelope, ZkError> {
     let unsupported = || ZkError::Verify("unsupported envelope format".to_string());
     let mut cursor = Cursor::new(proof);
     let envelope_format: u16 = bincode::deserialize_from(&mut cursor).map_err(|_| unsupported())?;
-    if envelope_format != MDOC_ENVELOPE_FORMAT_V4 {
+    if envelope_format != MDOC_ENVELOPE_FORMAT_V5 {
         return Err(unsupported());
     }
     let envelope: MdocProofEnvelope = bincode::deserialize(proof)
@@ -680,7 +680,7 @@ pub fn prove_identity(
             .map_err(|error| ZkError::Prove(format!("failed to serialize mdoc proof: {error}")))
             .and_then(|bytes| compress_stark_proof_for_ffi(&bytes))?;
         bincode::serialize(&MdocProofEnvelope {
-            envelope_format: MDOC_ENVELOPE_FORMAT_V4,
+            envelope_format: MDOC_ENVELOPE_FORMAT_V5,
             statement_bytes: encode_statement(&statement),
             mdoc_statement,
             stark_proof,
@@ -722,8 +722,11 @@ mod tests {
         "05505a1e08264a96a82848baffa8cca3a190c9540dd486834e13a590471b6438";
     const PRE_Q13_TS13_CIRCUIT_HASH: &str =
         "7c50ed055da7745adce107a0e26a0f212ae187afc11805c23098b5a8b3b8735c";
+    const PRE_Q14_TS13_CIRCUIT_HASH: &str =
+        "0a16c986814462419b3f797e16d176450f8be46435d2b44a306a4862ea74d43c";
     const PRE_Q12_MDOC_ENVELOPE_FORMAT_V2: u16 = 2;
     const PRE_Q13_MDOC_ENVELOPE_FORMAT_V3: u16 = 3;
+    const PRE_Q14_MDOC_ENVELOPE_FORMAT_V4: u16 = 4;
 
     fn sample_statement() -> ZkPublicStatement {
         ZkPublicStatement {
@@ -826,6 +829,16 @@ mod tests {
     }
 
     #[test]
+    fn ts13_rejects_pre_q14_circuit_hash() {
+        let mut request = ts13_request();
+        request.circuit_hash = PRE_Q14_TS13_CIRCUIT_HASH.to_string();
+        assert!(matches!(
+            ts13_validate_presentation_request(&request),
+            Err(ZkError::InvalidInput(message)) if message.starts_with("unknown circuit_hash:")
+        ));
+    }
+
+    #[test]
     fn mdoc_request_forwards_mldsa_trust_pins() {
         let witness = ZkMdocWitness {
             document: vec![0xa0],
@@ -882,7 +895,7 @@ mod tests {
     fn pre_q11_envelope_without_discriminator_rejects_typed() {
         // The old envelope started with `statement_bytes: Vec<u8>`, whose
         // bincode length prefix is deliberately not the supported format.
-        let legacy = bincode::serialize(&(vec![0u8; 5], vec![0u8; 1], vec![0u8; 1])).unwrap();
+        let legacy = bincode::serialize(&(vec![0u8; 6], vec![0u8; 1], vec![0u8; 1])).unwrap();
         assert!(matches!(
             verify_identity(sample_statement(), legacy),
             Err(ZkError::Verify(message)) if message == "unsupported envelope format"
@@ -908,8 +921,17 @@ mod tests {
     }
 
     #[test]
-    fn v4_envelope_discriminator_reaches_body_decode() {
-        let incomplete = bincode::serialize(&MDOC_ENVELOPE_FORMAT_V4).unwrap();
+    fn pre_q14_v4_envelope_rejects_typed_before_body_decode() {
+        let legacy = bincode::serialize(&PRE_Q14_MDOC_ENVELOPE_FORMAT_V4).unwrap();
+        assert!(matches!(
+            verify_identity(sample_statement(), legacy),
+            Err(ZkError::Verify(message)) if message == "unsupported envelope format"
+        ));
+    }
+
+    #[test]
+    fn v5_envelope_discriminator_reaches_body_decode() {
+        let incomplete = bincode::serialize(&MDOC_ENVELOPE_FORMAT_V5).unwrap();
         assert!(matches!(
             verify_identity(sample_statement(), incomplete),
             Err(ZkError::Verify(message)) if message.starts_with("invalid proof envelope:")

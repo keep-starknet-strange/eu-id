@@ -246,6 +246,7 @@ mod quantum_only {
         verify_mdoc_circuit_with_pcs_config_profiled_fresh,
     };
     use std::time::Instant;
+    use stwo::core::fields::{m31::M31, qm31::QM31};
 
     fn sib_consumed_len(input: &stwo_mldsa::types::MlDsaVerifyInput) -> usize {
         let stream = stwo_mldsa::reference::sample_in_ball::sample_in_ball(&input.c_tilde)
@@ -303,6 +304,22 @@ mod quantum_only {
         let verify_start = Instant::now();
         verify_mdoc_circuit(&proof, &statement).expect("fully-PQ mdoc verifies");
         let verify_time = verify_start.elapsed();
+
+        // Q14 soundness spine: drift one hosted instance's coeffs/use-side
+        // accounting while leaving the single summed range-table claim intact.
+        // The proof-wide LogUp balance must reject the joint mismatch.
+        let mut range_use_tamper = proof.clone();
+        range_use_tamper
+            .mldsa
+            .as_mut()
+            .expect("issuer ML-DSA claims")
+            .claimed_sums[0] += QM31::from(M31::from_u32_unchecked(1));
+        let error = verify_mdoc_circuit(&range_use_tamper, &statement)
+            .expect_err("one-instance range-use accounting drift must reject");
+        assert!(
+            format!("{error:?}").contains("LogUp claimed sums do not cancel"),
+            "unexpected joint-balance rejection: {error:?}"
+        );
 
         let breakdown = mdoc_proof_byte_breakdown(&proof);
         println!(

@@ -46,6 +46,8 @@ use stwo_constraint_framework::{
 use stwo_constraint_framework::{
     EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation, RelationEntry,
 };
+use stwo_mldsa::coeffs::relations::SharedRangeRelation;
+use stwo_mldsa::coeffs::tables::SharedRangeTable;
 use stwo_mldsa::statement::HOSTED_MSG_FIELD_ID;
 use stwo_mldsa::statement::{
     keccak_job_shapes, MlDsaProver as MlDsaStatementProver, MlDsaVerifier as MlDsaStatementVerifier,
@@ -2272,6 +2274,7 @@ pub struct MdocCircuitProof {
     pub mldsa: Option<MdocMlDsaClaims>,
     pub device_mldsa: Option<MdocMlDsaClaims>,
     pub revocation_mldsa: Option<MdocMlDsaClaims>,
+    mldsa_range_table_claimed_sum: Option<QM31>,
     pub keccak_service_claimed_sums: Option<Vec<QM31>>,
     merged_sha_log_n_rows: Option<u32>,
     merged_sha_slot_log: Option<u32>,
@@ -3448,6 +3451,7 @@ fn prove_mdoc_circuit_inner(
     // The proof-wide keccak service's relations handle (S1): drawn ONCE by the
     // service module, consumed by every hosted ML-DSA instance.
     let mldsa_keccak_handle = SharedKeccakRelations::new();
+    let mldsa_range_handle = SharedRangeRelation::new();
     let revocation_message_field = statement
         .ts13_revocation_signature
         .as_ref()
@@ -3481,11 +3485,14 @@ fn prove_mdoc_circuit_inner(
                 .map_err(|error| Error::Prove(format!("mldsa witness: {error:?}")))?;
             stwo_mldsa::sampleinball::validate_stream(&witness)
                 .map_err(|error| Error::Prove(format!("mldsa SIB resource cap: {error}")))?;
-            Ok(
-                MlDsaStatementProver::hosted_public(witness, input, mldsa_keccak_handle.clone())
-                    .with_instance_namespace(MDOC_ISSUER_MLDSA_NAMESPACE)
-                    .with_stream_base(MDOC_ISSUER_MLDSA_STREAM_BASE),
+            Ok(MlDsaStatementProver::hosted_public(
+                witness,
+                input,
+                mldsa_range_handle.clone(),
+                mldsa_keccak_handle.clone(),
             )
+            .with_instance_namespace(MDOC_ISSUER_MLDSA_NAMESPACE)
+            .with_stream_base(MDOC_ISSUER_MLDSA_STREAM_BASE))
         })
         .transpose()?;
     // Hosted in-circuit ML-DSA device statement, public-message mode (S4).
@@ -3499,11 +3506,14 @@ fn prove_mdoc_circuit_inner(
                 .map_err(|error| Error::Prove(format!("mldsa device witness: {error:?}")))?;
             stwo_mldsa::sampleinball::validate_stream(&witness)
                 .map_err(|error| Error::Prove(format!("mldsa SIB resource cap: {error}")))?;
-            Ok(
-                MlDsaStatementProver::hosted_public(witness, input, mldsa_keccak_handle.clone())
-                    .with_instance_namespace(MDOC_DEVICE_MLDSA_NAMESPACE)
-                    .with_stream_base(MDOC_DEVICE_MLDSA_STREAM_BASE),
+            Ok(MlDsaStatementProver::hosted_public(
+                witness,
+                input,
+                mldsa_range_handle.clone(),
+                mldsa_keccak_handle.clone(),
             )
+            .with_instance_namespace(MDOC_DEVICE_MLDSA_NAMESPACE)
+            .with_stream_base(MDOC_DEVICE_MLDSA_STREAM_BASE))
         })
         .transpose()?;
     // Hosted in-circuit ML-DSA revocation statement, private-message mode: the
@@ -3525,6 +3535,7 @@ fn prove_mdoc_circuit_inner(
                 revocation_message_field
                     .clone()
                     .expect("revocation field relation exists with a revocation signature"),
+                mldsa_range_handle.clone(),
                 mldsa_keccak_handle.clone(),
             )
             .with_instance_namespace(MDOC_REVOCATION_MLDSA_NAMESPACE)
@@ -3532,6 +3543,13 @@ fn prove_mdoc_circuit_inner(
             .with_private_message())
         })
         .transpose()?;
+    let range_uses: Vec<_> = [&issuer_mldsa, &device_mldsa, &revocation_mldsa]
+        .into_iter()
+        .flatten()
+        .map(|prover| prover.range_uses().clone())
+        .collect();
+    let mut mldsa_range_table = (!range_uses.is_empty())
+        .then(|| SharedRangeTable::prover(&range_uses, mldsa_range_handle.clone()));
     // The ONE proof-wide keccak service (S1): built from the concatenated
     // sponge jobs of every present hosted ML-DSA instance, in fixed role order
     // (issuer, device, revocation) — the verifier rebuilds the same list from
@@ -3668,10 +3686,13 @@ fn prove_mdoc_circuit_inner(
     });
 
     let (stark_proof, post_interaction_payloads) = {
-        // The keccak service draws shared relations before every hosted ML-DSA
-        // consumer. The range AIR publishes the private revocation message
-        // before the revocation verifier consumes it.
+        // The range table and keccak service draw their shared relations before
+        // every hosted ML-DSA consumer. The revocation range AIR publishes the
+        // private revocation message before its verifier consumes it.
         let mut modules: Vec<&mut dyn AirProver> = vec![&mut sha_tables];
+        if let Some(range_table) = mldsa_range_table.as_mut() {
+            modules.push(range_table);
+        }
         if let Some(service) = mldsa_keccak_service.as_mut() {
             modules.push(service);
         }
@@ -3715,6 +3736,9 @@ fn prove_mdoc_circuit_inner(
         mldsa: issuer_mldsa.as_ref().map(MdocMlDsaClaims::from_prover),
         device_mldsa: device_mldsa.as_ref().map(MdocMlDsaClaims::from_prover),
         revocation_mldsa: revocation_mldsa.as_ref().map(MdocMlDsaClaims::from_prover),
+        mldsa_range_table_claimed_sum: mldsa_range_table
+            .as_ref()
+            .map(SharedRangeTable::claimed_sum),
         keccak_service_claimed_sums: mldsa_keccak_service
             .as_ref()
             .map(|service| service.claimed_sums()),
@@ -3880,6 +3904,17 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
             ))
         }
     }
+    let has_mldsa =
+        proof.mldsa.is_some() || proof.device_mldsa.is_some() || proof.revocation_mldsa.is_some();
+    match (&proof.mldsa_range_table_claimed_sum, has_mldsa) {
+        (Some(_), true) | (None, false) => {}
+        _ => {
+            return Err(Error::Verify(
+                "mdoc proof shared ML-DSA range-table claim does not match the statement"
+                    .to_string(),
+            ))
+        }
+    }
     match &proof.keccak_service_claimed_sums {
         Some(sums)
             if sums.len() == stwo_mldsa::stwo_keccak::service::service_claimed_sums_len() => {}
@@ -3900,6 +3935,7 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
         .collect();
     // The proof-wide keccak service's relations handle (mirror of the prover).
     let mldsa_keccak_handle = SharedKeccakRelations::new();
+    let mldsa_range_handle = SharedRangeRelation::new();
     let attribute_fields: Vec<_> = (0..attribute_count)
         .map(|_| SharedFieldRelation::new())
         .collect();
@@ -3930,6 +3966,7 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
                     input,
                     claims.group_evals.clone(),
                     claims.claimed_sums.clone(),
+                    mldsa_range_handle.clone(),
                     mldsa_keccak_handle.clone(),
                 )
                 .with_instance_namespace(MDOC_ISSUER_MLDSA_NAMESPACE)
@@ -3949,6 +3986,7 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
                     input,
                     claims.group_evals.clone(),
                     claims.claimed_sums.clone(),
+                    mldsa_range_handle.clone(),
                     mldsa_keccak_handle.clone(),
                 )
                 .with_instance_namespace(MDOC_DEVICE_MLDSA_NAMESPACE)
@@ -3972,6 +4010,7 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
                         revocation_message_field
                             .clone()
                             .expect("revocation field relation exists with a revocation signature"),
+                        mldsa_range_handle.clone(),
                         mldsa_keccak_handle.clone(),
                     )
                     .with_instance_namespace(MDOC_REVOCATION_MLDSA_NAMESPACE)
@@ -3982,6 +4021,9 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
         }
         None => None,
     };
+    let mut mldsa_range_table = proof
+        .mldsa_range_table_claimed_sum
+        .map(|claim| SharedRangeTable::verifier(claim, mldsa_range_handle.clone()));
     // The proof-wide keccak service verifier (S1): job shapes rebuilt from
     // PUBLIC data only, in the prover's fixed role order (issuer, device,
     // revocation) — message lengths from the statement (the revocation
@@ -4148,6 +4190,9 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
 
     // Mirror the prover's module order exactly (transcript identity).
     let mut modules: Vec<&mut dyn Air> = vec![&mut sha_tables];
+    if let Some(range_table) = mldsa_range_table.as_mut() {
+        modules.push(range_table);
+    }
     if let Some(service) = mldsa_keccak_service.as_mut() {
         modules.push(service);
     }

@@ -39,10 +39,12 @@ use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo_keccak::relations::SharedKeccakRelations;
 use stwo_keccak::service::{KeccakServiceProver, KeccakServiceVerifier};
 use stwo_mldsa::air_util::{col_eval, m31, ColEval};
+use stwo_mldsa::coeffs::relations::SharedRangeRelation;
+use stwo_mldsa::coeffs::tables::SharedRangeTable;
 use stwo_mldsa::reference::encoding::{pk_decode, sig_decode};
 use stwo_mldsa::reference::sponge::shake256;
 use stwo_mldsa::statement::{
-    hosted_public_claimed_sums_len, keccak_job_shapes, MlDsaProof, MlDsaProver, MlDsaVerifier,
+    hosted_public_claimed_sums_len, keccak_job_shapes, MlDsaProver, MlDsaVerifier,
     HOSTED_MSG_FIELD_ID, STREAM_BASE_STRIDE,
 };
 use stwo_mldsa::witness::generate_witness;
@@ -245,6 +247,17 @@ impl AirProver for FieldProducer {
 // Fixture (model: composed.rs).
 // =====================================================================
 
+#[derive(Clone)]
+struct HostedProof {
+    input: MlDsaVerifyInput,
+    group_evals: Vec<SecureField>,
+    claimed_sums: Vec<SecureField>,
+    range_table_claimed_sum: SecureField,
+    service_claimed_sums: Vec<SecureField>,
+    post_interaction_payloads: Vec<Vec<u8>>,
+    stark_proof: stwo::core::proof::StarkProof<air_core::Hasher>,
+}
+
 fn oracle_input(seed: u64, msg: &[u8]) -> MlDsaVerifyInput {
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
@@ -265,44 +278,55 @@ fn oracle_input(seed: u64, msg: &[u8]) -> MlDsaVerifyInput {
     MlDsaVerifyInput::from_decoded(&pk, &sp, tr, msg.to_vec())
 }
 
-/// Prove the hosted statement: `[keccak_service, field_producer(producer_bytes),
-/// hosted_mldsa]`. `producer_bytes` is what the HOST yields (honest = the
-/// message; tamper it to simulate a mismatched issuer preimage).
-fn prove_hosted(seed: u64, msg: &[u8], producer_bytes: Vec<u8>) -> MlDsaProof {
+/// Prove the hosted statement: `[range_table, keccak_service,
+/// field_producer(producer_bytes), hosted_mldsa]`. `producer_bytes` is what the
+/// HOST yields (honest = the message; tamper it to simulate a mismatched issuer
+/// preimage).
+fn prove_hosted(seed: u64, msg: &[u8], producer_bytes: Vec<u8>) -> HostedProof {
     let input = oracle_input(seed, msg);
     let witness = generate_witness(&input).expect("witness");
 
     let handle = SharedFieldRelation::new();
     let keccak_handle = SharedKeccakRelations::new();
+    let range_handle = SharedRangeRelation::new();
     let mut producer = FieldProducer::new(producer_bytes, handle.clone());
-    let mut mldsa = MlDsaProver::hosted(witness, input.clone(), handle, keccak_handle.clone());
+    let mut mldsa = MlDsaProver::hosted(
+        witness,
+        input.clone(),
+        handle,
+        range_handle.clone(),
+        keccak_handle.clone(),
+    );
+    let mut range_table = SharedRangeTable::prover(&[mldsa.range_uses().clone()], range_handle);
     let (job_shapes, job_streams) = mldsa.keccak_jobs();
     let mut service = KeccakServiceProver::new(job_shapes, job_streams, keccak_handle);
 
     let (stark_proof, post_interaction_payloads) = air_core::prove_with_post_interaction(
-        &mut [&mut service, &mut producer, &mut mldsa],
+        &mut [&mut range_table, &mut service, &mut producer, &mut mldsa],
         pcs_config(),
     )
     .expect("prove");
 
-    MlDsaProof {
+    HostedProof {
         input,
         group_evals: mldsa.group_evals().to_vec(),
         claimed_sums: mldsa.claimed_sums(),
+        range_table_claimed_sum: range_table.claimed_sum(),
         service_claimed_sums: service.claimed_sums(),
         post_interaction_payloads,
         stark_proof,
     }
 }
 
-/// Verify a hosted proof by reconstructing `[keccak_service, field_producer,
-/// hosted_mldsa]`.
+/// Verify a hosted proof by reconstructing `[range_table, keccak_service,
+/// field_producer, hosted_mldsa]`.
 fn verify_hosted(
-    proof: &MlDsaProof,
+    proof: &HostedProof,
     producer_bytes: Vec<u8>,
 ) -> Result<(), stwo::core::verifier::VerificationError> {
     let handle = SharedFieldRelation::new();
     let keccak_handle = SharedKeccakRelations::new();
+    let range_handle = SharedRangeRelation::new();
     // The producer recomputes its claimed sum in draw_relations from the public
     // bytes, so the same FieldProducer serves verification with no witness.
     let mut producer = FieldProducer::new(producer_bytes, handle.clone());
@@ -311,15 +335,18 @@ fn verify_hosted(
         proof.service_claimed_sums.clone(),
         keccak_handle.clone(),
     );
+    let mut range_table =
+        SharedRangeTable::verifier(proof.range_table_claimed_sum, range_handle.clone());
     let mut mldsa = MlDsaVerifier::hosted(
         proof.input.clone(),
         proof.group_evals.clone(),
         proof.claimed_sums.clone(),
         handle,
+        range_handle,
         keccak_handle,
     );
     air_core::verify_with_expected_preprocessed_root_and_payloads(
-        &mut [&mut service, &mut producer, &mut mldsa],
+        &mut [&mut range_table, &mut service, &mut producer, &mut mldsa],
         &proof.stark_proof,
         None,
         &proof.post_interaction_payloads,
@@ -330,44 +357,56 @@ fn verify_hosted(
     })
 }
 
-fn prove_hosted_public(seed: u64, msg: &[u8]) -> MlDsaProof {
+fn prove_hosted_public(seed: u64, msg: &[u8]) -> HostedProof {
     let input = oracle_input(seed, msg);
     let witness = generate_witness(&input).expect("witness");
     let keccak_handle = SharedKeccakRelations::new();
-    let mut mldsa = MlDsaProver::hosted_public(witness, input, keccak_handle.clone());
+    let range_handle = SharedRangeRelation::new();
+    let mut mldsa =
+        MlDsaProver::hosted_public(witness, input, range_handle.clone(), keccak_handle.clone());
+    let mut range_table = SharedRangeTable::prover(&[mldsa.range_uses().clone()], range_handle);
     let (job_shapes, job_streams) = mldsa.keccak_jobs();
     assert_eq!(job_shapes.len(), 2, "native-µ mode keeps only c̃ and SIB");
     let mut service = KeccakServiceProver::new(job_shapes, job_streams, keccak_handle);
-    let (stark_proof, post_interaction_payloads) =
-        air_core::prove_with_post_interaction(&mut [&mut service, &mut mldsa], pcs_config())
-            .expect("hosted-public prove");
+    let (stark_proof, post_interaction_payloads) = air_core::prove_with_post_interaction(
+        &mut [&mut range_table, &mut service, &mut mldsa],
+        pcs_config(),
+    )
+    .expect("hosted-public prove");
     let claimed_sums = mldsa.claimed_sums();
     assert_eq!(claimed_sums.len(), hosted_public_claimed_sums_len());
-    MlDsaProof {
+    HostedProof {
         input: mldsa.input().clone(),
         group_evals: mldsa.group_evals().to_vec(),
         claimed_sums,
+        range_table_claimed_sum: range_table.claimed_sum(),
         service_claimed_sums: service.claimed_sums(),
         post_interaction_payloads,
         stark_proof,
     }
 }
 
-fn verify_hosted_public(proof: &MlDsaProof) -> Result<(), stwo::core::verifier::VerificationError> {
+fn verify_hosted_public(
+    proof: &HostedProof,
+) -> Result<(), stwo::core::verifier::VerificationError> {
     let keccak_handle = SharedKeccakRelations::new();
+    let range_handle = SharedRangeRelation::new();
     let mut service = KeccakServiceVerifier::new(
         keccak_job_shapes(proof.input.message.len(), 0, true),
         proof.service_claimed_sums.clone(),
         keccak_handle.clone(),
     );
+    let mut range_table =
+        SharedRangeTable::verifier(proof.range_table_claimed_sum, range_handle.clone());
     let mut mldsa = MlDsaVerifier::hosted_public(
         proof.input.clone(),
         proof.group_evals.clone(),
         proof.claimed_sums.clone(),
+        range_handle,
         keccak_handle,
     );
     air_core::verify_with_expected_preprocessed_root_and_payloads(
-        &mut [&mut service, &mut mldsa],
+        &mut [&mut range_table, &mut service, &mut mldsa],
         &proof.stark_proof,
         None,
         &proof.post_interaction_payloads,
@@ -415,19 +454,26 @@ fn hosted_public_native_mu_mismatch_returns_error_not_panic() {
     input.message[0] ^= 1;
 
     let handle = SharedKeccakRelations::new();
-    let mut mldsa = MlDsaProver::hosted_public(witness, input, handle.clone());
+    let range_handle = SharedRangeRelation::new();
+    let mut mldsa =
+        MlDsaProver::hosted_public(witness, input, range_handle.clone(), handle.clone());
+    let mut range_table = SharedRangeTable::prover(&[mldsa.range_uses().clone()], range_handle);
     let (job_shapes, job_streams) = mldsa.keccak_jobs();
     let mut service = KeccakServiceProver::new(job_shapes, job_streams, handle);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        air_core::prove_with_post_interaction(&mut [&mut service, &mut mldsa], pcs_config())
+        air_core::prove_with_post_interaction(
+            &mut [&mut range_table, &mut service, &mut mldsa],
+            pcs_config(),
+        )
     }));
     let (stark_proof, post_interaction_payloads) = result
         .expect("native µ mismatch must not panic")
         .expect("prover may commit the inconsistent trace; verifier rejects it");
-    let proof = MlDsaProof {
+    let proof = HostedProof {
         input: mldsa.input().clone(),
         group_evals: mldsa.group_evals().to_vec(),
         claimed_sums: mldsa.claimed_sums(),
+        range_table_claimed_sum: range_table.claimed_sum(),
         service_claimed_sums: service.claimed_sums(),
         post_interaction_payloads,
         stark_proof,
@@ -492,10 +538,19 @@ struct InstanceClaims {
     claimed_sums: Vec<SecureField>,
 }
 
-/// Prove `[keccak_service(jobs a+b), producer_a, mldsa_a(ns_a, base 0),
-/// producer_b, mldsa_b(ns_b, base 16, private-msg)]`. The ONE service hosts
-/// both instances' sponge jobs; the stream bases keep their HashIo ids
-/// disjoint under the single shared relation set.
+struct TwoHostedProof {
+    a: InstanceClaims,
+    b: InstanceClaims,
+    service_claimed_sums: Vec<SecureField>,
+    range_table_claimed_sum: SecureField,
+    post_interaction_payloads: Vec<Vec<u8>>,
+    stark_proof: stwo::core::proof::StarkProof<air_core::Hasher>,
+}
+
+/// Prove `[range_table(uses a+b), keccak_service(jobs a+b), producer_a,
+/// mldsa_a(ns_a, base 0), producer_b, mldsa_b(ns_b, base 16, private-msg)]`.
+/// The ONE service and ONE range table host both instances; the stream bases
+/// keep their HashIo ids disjoint under the single shared relation set.
 fn prove_two_hosted(
     seed_a: u64,
     msg_a: &[u8],
@@ -503,13 +558,7 @@ fn prove_two_hosted(
     seed_b: u64,
     msg_b: &[u8],
     ns_b: &str,
-) -> (
-    InstanceClaims,
-    InstanceClaims,
-    Vec<SecureField>,
-    Vec<Vec<u8>>,
-    stwo::core::proof::StarkProof<air_core::Hasher>,
-) {
+) -> TwoHostedProof {
     let input_a = oracle_input(seed_a, msg_a);
     let input_b = oracle_input(seed_b, msg_b);
     let witness_a = generate_witness(&input_a).expect("witness a");
@@ -518,16 +567,31 @@ fn prove_two_hosted(
     let handle_a = SharedFieldRelation::new();
     let handle_b = SharedFieldRelation::new();
     let keccak_handle = SharedKeccakRelations::new();
+    let range_handle = SharedRangeRelation::new();
     let mut producer_a = FieldProducer::new(msg_a.to_vec(), handle_a.clone());
     let mut producer_b = FieldProducer::new(msg_b.to_vec(), handle_b.clone());
-    let mut mldsa_a =
-        MlDsaProver::hosted(witness_a, input_a.clone(), handle_a, keccak_handle.clone())
-            .with_instance_namespace(ns_a);
-    let mut mldsa_b =
-        MlDsaProver::hosted(witness_b, input_b.clone(), handle_b, keccak_handle.clone())
-            .with_instance_namespace(ns_b)
-            .with_stream_base(STREAM_BASE_STRIDE)
-            .with_private_message();
+    let mut mldsa_a = MlDsaProver::hosted(
+        witness_a,
+        input_a.clone(),
+        handle_a,
+        range_handle.clone(),
+        keccak_handle.clone(),
+    )
+    .with_instance_namespace(ns_a);
+    let mut mldsa_b = MlDsaProver::hosted(
+        witness_b,
+        input_b.clone(),
+        handle_b,
+        range_handle.clone(),
+        keccak_handle.clone(),
+    )
+    .with_instance_namespace(ns_b)
+    .with_stream_base(STREAM_BASE_STRIDE)
+    .with_private_message();
+    let mut range_table = SharedRangeTable::prover(
+        &[mldsa_a.range_uses().clone(), mldsa_b.range_uses().clone()],
+        range_handle,
+    );
 
     let (shapes_a, streams_a) = mldsa_a.keccak_jobs();
     let (shapes_b, streams_b) = mldsa_b.keccak_jobs();
@@ -539,6 +603,7 @@ fn prove_two_hosted(
 
     let (stark_proof, post_interaction_payloads) = air_core::prove_with_post_interaction(
         &mut [
+            &mut range_table,
             &mut service,
             &mut producer_a,
             &mut mldsa_a,
@@ -554,33 +619,32 @@ fn prove_two_hosted(
         group_evals: m.group_evals().to_vec(),
         claimed_sums: m.claimed_sums(),
     };
-    (
-        claims(&mldsa_a, &input_a),
-        claims(&mldsa_b, &input_b),
-        service.claimed_sums(),
+    TwoHostedProof {
+        a: claims(&mldsa_a, &input_a),
+        b: claims(&mldsa_b, &input_b),
+        service_claimed_sums: service.claimed_sums(),
+        range_table_claimed_sum: range_table.claimed_sum(),
         post_interaction_payloads,
         stark_proof,
-    )
+    }
 }
 
 /// Verify the two-instance composition. Instance B runs in private-message
 /// mode: its verifier-side input carries ZEROED message bytes (only the length
 /// is real) — the bytes reach the µ absorption exclusively through producer_b.
-#[allow(clippy::too_many_arguments)]
 fn verify_two_hosted(
     a: &InstanceClaims,
     ns_a: &str,
     b: &InstanceClaims,
     ns_b: &str,
-    service_claimed_sums: Vec<SecureField>,
+    proof: &TwoHostedProof,
     producer_a_bytes: Vec<u8>,
     producer_b_bytes: Vec<u8>,
-    payloads: &[Vec<u8>],
-    stark_proof: &stwo::core::proof::StarkProof<air_core::Hasher>,
 ) -> Result<(), stwo::core::verifier::VerificationError> {
     let handle_a = SharedFieldRelation::new();
     let handle_b = SharedFieldRelation::new();
     let keccak_handle = SharedKeccakRelations::new();
+    let range_handle = SharedRangeRelation::new();
     let mut producer_a = FieldProducer::new(producer_a_bytes, handle_a.clone());
     let mut producer_b = FieldProducer::new(producer_b_bytes, handle_b.clone());
     let job_shapes = [
@@ -588,13 +652,19 @@ fn verify_two_hosted(
         keccak_job_shapes(b.input.message.len(), STREAM_BASE_STRIDE, false),
     ]
     .concat();
-    let mut service =
-        KeccakServiceVerifier::new(job_shapes, service_claimed_sums, keccak_handle.clone());
+    let mut service = KeccakServiceVerifier::new(
+        job_shapes,
+        proof.service_claimed_sums.clone(),
+        keccak_handle.clone(),
+    );
+    let mut range_table =
+        SharedRangeTable::verifier(proof.range_table_claimed_sum, range_handle.clone());
     let mut mldsa_a = MlDsaVerifier::hosted(
         a.input.clone(),
         a.group_evals.clone(),
         a.claimed_sums.clone(),
         handle_a,
+        range_handle.clone(),
         keccak_handle.clone(),
     )
     .with_instance_namespace(ns_a);
@@ -605,6 +675,7 @@ fn verify_two_hosted(
         b.group_evals.clone(),
         b.claimed_sums.clone(),
         handle_b,
+        range_handle,
         keccak_handle,
     )
     .with_instance_namespace(ns_b)
@@ -612,15 +683,16 @@ fn verify_two_hosted(
     .with_private_message();
     air_core::verify_with_expected_preprocessed_root_and_payloads(
         &mut [
+            &mut range_table,
             &mut service,
             &mut producer_a,
             &mut mldsa_a,
             &mut producer_b,
             &mut mldsa_b,
         ],
-        stark_proof,
+        &proof.stark_proof,
         None,
-        payloads,
+        &proof.post_interaction_payloads,
     )
     .map_err(|e| match e {
         air_core::VerifyError::Stark(e) => e,
@@ -634,12 +706,9 @@ fn two_namespaced_hosted_instances_prove_and_verify() {
     // columns are shape-dependent, so this exercises disjoint ids end to end.
     let msg_a = b"instance-a: the issuer-style public message".to_vec();
     let msg_b = b"instance-b-private".to_vec();
-    let (a, b, svc, payloads, proof) =
-        prove_two_hosted(111, &msg_a, "test/a", 222, &msg_b, "test/b");
-    verify_two_hosted(
-        &a, "test/a", &b, "test/b", svc, msg_a, msg_b, &payloads, &proof,
-    )
-    .expect("two-instance verify");
+    let proof = prove_two_hosted(111, &msg_a, "test/a", 222, &msg_b, "test/b");
+    verify_two_hosted(&proof.a, "test/a", &proof.b, "test/b", &proof, msg_a, msg_b)
+        .expect("two-instance verify");
 }
 
 #[test]
@@ -648,24 +717,21 @@ fn two_hosted_instances_swapped_claims_reject() {
     // role separation must come from the namespaced transcript + inputs.
     let msg_a = b"same-length-message-aaaaaaaa".to_vec();
     let msg_b = b"same-length-message-bbbbbbbb".to_vec();
-    let (a, b, svc, payloads, proof) =
-        prove_two_hosted(111, &msg_a, "test/a", 222, &msg_b, "test/b");
+    let proof = prove_two_hosted(111, &msg_a, "test/a", 222, &msg_b, "test/b");
     // Present A's claim tree in B's slot and vice versa (inputs stay put).
     let swapped_a = InstanceClaims {
-        input: a.input.clone(),
-        group_evals: b.group_evals.clone(),
-        claimed_sums: b.claimed_sums.clone(),
+        input: proof.a.input.clone(),
+        group_evals: proof.b.group_evals.clone(),
+        claimed_sums: proof.b.claimed_sums.clone(),
     };
     let swapped_b = InstanceClaims {
-        input: b.input.clone(),
-        group_evals: a.group_evals.clone(),
-        claimed_sums: a.claimed_sums.clone(),
+        input: proof.b.input.clone(),
+        group_evals: proof.a.group_evals.clone(),
+        claimed_sums: proof.a.claimed_sums.clone(),
     };
     assert!(
-        verify_two_hosted(
-            &swapped_a, "test/a", &swapped_b, "test/b", svc, msg_a, msg_b, &payloads, &proof
-        )
-        .is_err(),
+        verify_two_hosted(&swapped_a, "test/a", &swapped_b, "test/b", &proof, msg_a, msg_b)
+            .is_err(),
         "cross-instance claim replay must reject"
     );
 }
@@ -679,10 +745,9 @@ fn two_hosted_instances_swapped_claims_reject() {
 fn two_instances_same_namespace_share_static_preprocessed() {
     let msg_a = b"same-length-message-aaaaaaaa".to_vec();
     let msg_b = b"same-length-message-bbbbbbbb".to_vec();
-    let (a, b, svc, payloads, proof) =
-        prove_two_hosted(111, &msg_a, "test/dup", 222, &msg_b, "test/dup");
+    let proof = prove_two_hosted(111, &msg_a, "test/dup", 222, &msg_b, "test/dup");
     verify_two_hosted(
-        &a, "test/dup", &b, "test/dup", svc, msg_a, msg_b, &payloads, &proof,
+        &proof.a, "test/dup", &proof.b, "test/dup", &proof, msg_a, msg_b,
     )
     .expect("same-namespace static preprocessing deduplicates");
 }

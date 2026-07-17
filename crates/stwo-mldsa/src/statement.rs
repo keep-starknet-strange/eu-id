@@ -71,9 +71,9 @@ use crate::types::MlDsaVerifyInput;
 use crate::verifier_native::{compute_public_evals, folded_check, ClaimedEvals};
 use crate::witness::MlDsaWitness;
 
-use crate::coeffs::relations::CoeffsRelations;
+use crate::coeffs::relations::{CoeffsRelations, SharedRangeRelation};
 use crate::coeffs::tables as coeffs_tables;
-use crate::coeffs::{self, CoeffsEval};
+use crate::coeffs::{self, CoeffsEval, RcUses};
 
 use crate::decomp::relations::DecompRelations;
 use crate::decomp::tables as decomp_tables;
@@ -265,6 +265,7 @@ struct Relations {
 fn draw_relations_common(
     channel: &mut Blake2sChannel,
     hosted_field: Option<&SharedFieldRelation>,
+    shared_range: Option<&SharedRangeRelation>,
     keccak_handle: &SharedKeccakRelations,
 ) -> Relations {
     let rho_rlc = channel.draw_secure_felt();
@@ -283,7 +284,12 @@ fn draw_relations_common(
         Some(handle) => (MsgLinkRelation::dummy(), Some(handle.get())),
     };
 
-    let coeffs = CoeffsRelations::draw_with(channel, wcell.clone(), ccell.clone());
+    let coeffs = match shared_range {
+        Some(handle) => {
+            CoeffsRelations::draw_with_range(channel, handle.get(), wcell.clone(), ccell.clone())
+        }
+        None => CoeffsRelations::draw_with(channel, wcell.clone(), ccell.clone()),
+    };
     let decomp = DecompRelations::draw_with(channel, wcell, keccak.hash_io.clone());
     let sib = SibRelations::draw_with(channel, ccell, keccak.hash_io.clone());
 
@@ -557,14 +563,18 @@ fn sink_evals(
 fn all_preprocessed_ids(
     ns: &str,
     input: &MlDsaVerifyInput,
+    hosted: bool,
     public_message: bool,
 ) -> Vec<PreProcessedColumnId> {
     let hash_io = HashIoRelation::dummy();
     let msglink = MsgLinkRelation::dummy();
     let mut ids = Vec::new();
-    // coeffs + its unified range table.
+    // coeffs + its unified range table (standalone only; hosted uses the
+    // proof-wide provider module).
     ids.extend(coeffs::coeffs_preprocessed_ids());
-    ids.extend(coeffs_tables::range_table_preprocessed_ids());
+    if !hosted {
+        ids.extend(coeffs_tables::range_table_preprocessed_ids());
+    }
     // decomp (+ its rc kinds).
     ids.extend(decomp::decomp_preprocessed_ids());
     for kind in decomp_tables::RcKind::ALL {
@@ -591,14 +601,20 @@ fn all_preprocessed_ids(
     ids
 }
 
-fn all_preprocessed_log_sizes(input: &MlDsaVerifyInput, public_message: bool) -> Vec<u32> {
+fn all_preprocessed_log_sizes(
+    input: &MlDsaVerifyInput,
+    hosted: bool,
+    public_message: bool,
+) -> Vec<u32> {
     let mut sizes = Vec::new();
     let cls = coeffs_log_size();
     sizes.extend(vec![cls; coeffs::coeffs_preprocessed_ids().len()]);
-    sizes.extend(vec![
-        coeffs_tables::range_table_log_size();
-        coeffs_tables::range_table_preprocessed_ids().len()
-    ]);
+    if !hosted {
+        sizes.extend(vec![
+            coeffs_tables::range_table_log_size();
+            coeffs_tables::range_table_preprocessed_ids().len()
+        ]);
+    }
     let dls = decomp_log_size();
     sizes.extend(vec![dls; decomp::decomp_preprocessed_ids().len()]);
     for kind in decomp_tables::RcKind::ALL {
@@ -643,13 +659,19 @@ fn sink_lens(message_len: usize, native_mu: bool) -> Vec<usize> {
 ///
 /// The SIB schedule is fixed at the five-block resource cap; no signature
 /// witness enters tree 0.
-fn gen_all_preprocessed(input: &MlDsaVerifyInput, public_message: bool) -> Vec<ColEval> {
+fn gen_all_preprocessed(
+    input: &MlDsaVerifyInput,
+    hosted: bool,
+    public_message: bool,
+) -> Vec<ColEval> {
     let hash_io = HashIoRelation::dummy();
     let msglink = MsgLinkRelation::dummy();
     let mut cols = Vec::new();
     let cls = coeffs_log_size();
     cols.extend(coeffs::gen_coeffs_preprocessed(cls));
-    cols.extend(coeffs_tables::gen_range_table_preprocessed());
+    if !hosted {
+        cols.extend(coeffs_tables::gen_range_table_preprocessed());
+    }
     let dls = decomp_log_size();
     cols.extend(decomp::gen_decomp_preprocessed(dls));
     for kind in decomp_tables::RcKind::ALL {
@@ -709,7 +731,9 @@ impl FrameworkEval for PublicFoldEval {
 struct Built {
     public_fold: FrameworkComponent<PublicFoldEval>,
     coeffs: FrameworkComponent<CoeffsEval>,
-    coeffs_rc: Vec<FrameworkComponent<coeffs_tables::RangeTableEval>>,
+    /// Standalone-only range provider; hosted instances consume the proof-wide
+    /// shared table instead.
+    coeffs_rc: Option<FrameworkComponent<coeffs_tables::RangeTableEval>>,
     decomp: FrameworkComponent<DecompEval>,
     decomp_rc: Vec<FrameworkComponent<decomp_tables::RcTableEval>>,
     sib: FrameworkComponent<SibEval>,
@@ -728,7 +752,9 @@ impl Built {
     fn ordered(&self) -> Vec<&dyn Component> {
         let mut out: Vec<&dyn Component> = vec![&self.public_fold];
         out.push(&self.coeffs);
-        out.extend(self.coeffs_rc.iter().map(|c| c as &dyn Component));
+        if let Some(component) = &self.coeffs_rc {
+            out.push(component);
+        }
         out.push(&self.decomp);
         out.extend(self.decomp_rc.iter().map(|c| c as &dyn Component));
         out.push(&self.sib);
@@ -747,11 +773,9 @@ impl Built {
     fn ordered_prover(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
         let mut out: Vec<&dyn ComponentProver<SimdBackend>> = vec![&self.public_fold];
         out.push(&self.coeffs);
-        out.extend(
-            self.coeffs_rc
-                .iter()
-                .map(|c| c as &dyn ComponentProver<SimdBackend>),
-        );
+        if let Some(component) = &self.coeffs_rc {
+            out.push(component);
+        }
         out.push(&self.decomp);
         out.extend(
             self.decomp_rc
@@ -828,7 +852,7 @@ impl Claims {
         let mut it = flat.iter().copied();
         let mut next = || it.next().expect("claimed sums length mismatch");
         let coeffs = next();
-        let coeffs_rc = vec![next()];
+        let coeffs_rc = if hosted { Vec::new() } else { vec![next()] };
         let decomp = next();
         let decomp_rc = (0..decomp_tables::RcKind::ALL.len())
             .map(|_| next())
@@ -884,9 +908,11 @@ impl LayoutCtx {
 fn module_trace_layout(ctx: &LayoutCtx) -> Vec<u32> {
     // Public folded-identity component marker (pinned to zero).
     let mut t = vec![LOG_N_LANES];
-    // 1. coeffs + 2. unified range table.
+    // 1. coeffs + 2. unified range table (standalone only).
     t.extend(vec![coeffs_log_size(); coeffs::N_BASE_COLS]);
-    t.push(coeffs_tables::range_table_log_size());
+    if !ctx.hosted {
+        t.push(coeffs_tables::range_table_log_size());
+    }
     // 3. decomp + 4. rc ×4.
     t.extend(vec![decomp_log_size(); decomp::N_BASE_COLS]);
     for kind in decomp_tables::RcKind::ALL {
@@ -921,12 +947,14 @@ fn module_trace_layout(ctx: &LayoutCtx) -> Vec<u32> {
 
 fn module_interaction_layout(ctx: &LayoutCtx) -> Vec<u32> {
     let mut i = Vec::new();
-    // 1. coeffs + 2. unified range table.
+    // 1. coeffs + 2. unified range table (standalone only).
     i.extend(vec![coeffs_log_size(); coeffs::N_INTERACTION_COLS]);
-    i.extend(vec![
-        coeffs_tables::range_table_log_size();
-        coeffs_tables::RANGE_TABLE_INTERACTION_COLS
-    ]);
+    if !ctx.hosted {
+        i.extend(vec![
+            coeffs_tables::range_table_log_size();
+            coeffs_tables::RANGE_TABLE_INTERACTION_COLS
+        ]);
+    }
     // 3. decomp + 4. rc ×4.
     i.extend(vec![decomp_log_size(); decomp::N_INTERACTION_COLS]);
     for kind in decomp_tables::RcKind::ALL {
@@ -979,7 +1007,7 @@ fn prefix_n_interaction() -> usize {
 
 fn layout_for(ctx: &LayoutCtx, input: &MlDsaVerifyInput) -> TreeLayout {
     TreeLayout {
-        preprocessed: all_preprocessed_log_sizes(input, ctx.public_message),
+        preprocessed: all_preprocessed_log_sizes(input, ctx.hosted, ctx.public_message),
         trace: module_trace_layout(ctx),
         interaction: module_interaction_layout(ctx),
     }
@@ -1056,14 +1084,16 @@ fn build_components(
         },
         claims.coeffs,
     );
-    // 2. unified coeffs range table.
-    let coeffs_rc = vec![FrameworkComponent::new(
-        allocator,
-        coeffs_tables::RangeTableEval {
-            relation: rel.coeffs.range.clone(),
-        },
-        claims.coeffs_rc[0],
-    )];
+    // 2. unified coeffs range table (standalone only).
+    let coeffs_rc = (!ctx.hosted).then(|| {
+        FrameworkComponent::new(
+            allocator,
+            coeffs_tables::RangeTableEval {
+                relation: rel.coeffs.range.clone(),
+            },
+            claims.coeffs_rc[0],
+        )
+    });
     // 3. decomp.
     let decomp = FrameworkComponent::new(
         allocator,
@@ -1220,6 +1250,9 @@ pub struct MlDsaProver {
     /// The keccak service's shared relations handle (REQUIRED — the service
     /// module must be composed before this one and draw into it).
     keccak_handle: SharedKeccakRelations,
+    /// Hosted mode: the proof-wide range relation published by the shared
+    /// table provider. Standalone mode draws and provides its own relation.
+    shared_range: Option<SharedRangeRelation>,
     /// Instance namespace: role/domain tag mixed into the transcript and
     /// prefixed onto every instance-local preprocessed id (SIB schedule,
     /// bridges, sinks). "" = legacy single-instance ids. REQUIRED
@@ -1235,6 +1268,7 @@ pub struct MlDsaProver {
     relations: Option<Relations>,
     // rc multiplicity columns stashed between write_trace and write_interaction.
     coeffs_rc_mult: Vec<ColEval>,
+    coeffs_rc_uses: RcUses,
     decomp_rc_mult: Vec<ColEval>,
     sib_rc_mult: Vec<ColEval>,
     // bridge byte payloads stashed for the interaction phase.
@@ -1249,23 +1283,19 @@ impl MlDsaProver {
         self.relations.as_ref().expect("relations drawn")
     }
 
-    /// Build a prover. `shared_field = None` → standalone (self-drawn `msglink`
-    /// producer, current commit order). `shared_field = Some(handle)` → hosted:
-    /// the `msglink` component is dropped and the msg bridge sources the message
-    /// bytes from the host's shared [`FieldBytesRelation`] under
-    /// [`HOSTED_MSG_FIELD_ID`]. `keccak_handle` is the proof-wide keccak
-    /// service's relations handle: the service module (built from this
-    /// instance's [`MlDsaProver::keccak_jobs`], among others) MUST be composed
-    /// BEFORE this module so its `draw_relations` populates the handle
-    /// (`air_core::prove` runs all modules' `draw_relations` in module order,
-    /// before any interaction phase).
+    /// Build a standalone prover. Hosted callers must use [`Self::hosted`] or
+    /// [`Self::hosted_public`] so the proof-wide range provider is wired too.
     pub fn new(
         witness: MlDsaWitness,
         input: MlDsaVerifyInput,
         shared_field: Option<SharedFieldRelation>,
         keccak_handle: SharedKeccakRelations,
     ) -> Self {
-        Self::build(witness, input, shared_field, false, keccak_handle)
+        assert!(
+            shared_field.is_none(),
+            "hosted ML-DSA requires a shared range provider; use MlDsaProver::hosted"
+        );
+        Self::build(witness, input, shared_field, false, None, keccak_handle)
     }
 
     fn build(
@@ -1273,11 +1303,20 @@ impl MlDsaProver {
         mut input: MlDsaVerifyInput,
         shared_field: Option<SharedFieldRelation>,
         public_message: bool,
+        shared_range: Option<SharedRangeRelation>,
         keccak_handle: SharedKeccakRelations,
     ) -> Self {
         input.tr = native_tr(&input);
         let hosted = shared_field.is_some() || public_message;
         let ctx = LayoutCtx::new(&input, hosted, public_message);
+        let coeffs_rc_uses = coeffs::gen_coeffs_interaction(
+            &witness,
+            coeffs_log_size(),
+            SecureField::zero(),
+            SecureField::zero(),
+            &CoeffsRelations::dummy(),
+        )
+        .rc_uses;
         let claims = Claims {
             hosted,
             ..Claims::default()
@@ -1289,11 +1328,13 @@ impl MlDsaProver {
             ctx,
             shared_field,
             keccak_handle,
+            shared_range,
             namespace: String::new(),
             stream_base: 0,
             private_message: false,
             relations: None,
             coeffs_rc_mult: Vec::new(),
+            coeffs_rc_uses,
             decomp_rc_mult: Vec::new(),
             sib_rc_mult: Vec::new(),
             decomp_w1_bytes: Vec::new(),
@@ -1308,9 +1349,17 @@ impl MlDsaProver {
         witness: MlDsaWitness,
         input: MlDsaVerifyInput,
         shared_field: SharedFieldRelation,
+        shared_range: SharedRangeRelation,
         keccak_handle: SharedKeccakRelations,
     ) -> Self {
-        Self::new(witness, input, Some(shared_field), keccak_handle)
+        Self::build(
+            witness,
+            input,
+            Some(shared_field),
+            false,
+            Some(shared_range),
+            keccak_handle,
+        )
     }
 
     /// Hosted PUBLIC-message constructor (S4): tr and µ are recomputed
@@ -1321,9 +1370,23 @@ impl MlDsaProver {
     pub fn hosted_public(
         witness: MlDsaWitness,
         input: MlDsaVerifyInput,
+        shared_range: SharedRangeRelation,
         keccak_handle: SharedKeccakRelations,
     ) -> Self {
-        Self::build(witness, input, None, true, keccak_handle)
+        Self::build(
+            witness,
+            input,
+            None,
+            true,
+            Some(shared_range),
+            keccak_handle,
+        )
+    }
+
+    /// Range-use multiplicities contributed by this instance to the shared
+    /// hosted table.
+    pub fn range_uses(&self) -> &RcUses {
+        &self.coeffs_rc_uses
     }
 
     /// Set the per-instance stream-id base (see the `stream_base` field).
@@ -1418,6 +1481,7 @@ impl Air for MlDsaProver {
         self.relations = Some(draw_relations_common(
             channel,
             self.shared_field.as_ref(),
+            self.shared_range.as_ref(),
             &self.keccak_handle,
         ));
     }
@@ -1432,12 +1496,21 @@ impl Air for MlDsaProver {
         channel.mix_felts(&self.claimed_sums());
     }
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
-        all_preprocessed_ids(&self.namespace, &self.input, self.ctx.public_message)
+        all_preprocessed_ids(
+            &self.namespace,
+            &self.input,
+            self.ctx.hosted,
+            self.ctx.public_message,
+        )
     }
     fn canonical_preprocessed_columns(
         &mut self,
     ) -> Result<Vec<air_core::PreprocessedColumnEval>, VerificationError> {
-        Ok(gen_all_preprocessed(&self.input, self.ctx.public_message))
+        Ok(gen_all_preprocessed(
+            &self.input,
+            self.ctx.hosted,
+            self.ctx.public_message,
+        ))
     }
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
         let rel = self.relations().clone();
@@ -1468,7 +1541,11 @@ impl AirProver for MlDsaProver {
         self.max_log_size() + 2
     }
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
-        tb.extend_evals(gen_all_preprocessed(&self.input, self.ctx.public_message));
+        tb.extend_evals(gen_all_preprocessed(
+            &self.input,
+            self.ctx.hosted,
+            self.ctx.public_message,
+        ));
     }
     /// Partial preprocessed writes: with multiple hosted ML-DSA instances, the
     /// fixed-content tables (coeffs/decomp/SIB layouts, rc values, keccak tables)
@@ -1481,8 +1558,13 @@ impl AirProver for MlDsaProver {
         tb: &mut TreeBuilder<SimdBackend, air_core::Mc>,
         selected_ids: &[PreProcessedColumnId],
     ) {
-        let ids = all_preprocessed_ids(&self.namespace, &self.input, self.ctx.public_message);
-        let cols = gen_all_preprocessed(&self.input, self.ctx.public_message);
+        let ids = all_preprocessed_ids(
+            &self.namespace,
+            &self.input,
+            self.ctx.hosted,
+            self.ctx.public_message,
+        );
+        let cols = gen_all_preprocessed(&self.input, self.ctx.hosted, self.ctx.public_message);
         assert_eq!(
             ids.len(),
             cols.len(),
@@ -1504,37 +1586,32 @@ impl AirProver for MlDsaProver {
     }
 
     fn preprocessed_column_fingerprints(&mut self) -> Vec<PreprocessedColumnFingerprint> {
-        let ids = all_preprocessed_ids(&self.namespace, &self.input, self.ctx.public_message);
-        let cols = gen_all_preprocessed(&self.input, self.ctx.public_message);
+        let ids = all_preprocessed_ids(
+            &self.namespace,
+            &self.input,
+            self.ctx.hosted,
+            self.ctx.public_message,
+        );
+        let cols = gen_all_preprocessed(&self.input, self.ctx.hosted, self.ctx.public_message);
         fingerprint_preprocessed_columns("mldsa_statement", &ids, &cols)
     }
     fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
         let mut evals = vec![col_eval(LOG_N_LANES, vec![m31(0); 1usize << LOG_N_LANES])];
 
-        // 1. coeffs base + 2. unified range multiplicity.
+        // 1. coeffs base + 2. unified range multiplicity (standalone only).
         let cls = coeffs_log_size();
         evals.extend(coeffs::gen_coeffs_base_trace(&self.witness, cls));
-        let coeffs_dry = coeffs::gen_coeffs_interaction(
-            &self.witness,
-            cls,
-            SecureField::zero(),
-            SecureField::zero(),
-            &CoeffsRelations::dummy(),
-        );
-        let range_uses: [Vec<u32>; 5] = core::array::from_fn(|idx| {
-            coeffs_dry
-                .rc_uses
-                .for_kind(coeffs_tables::RcKind::ALL[idx])
-                .to_vec()
-        });
-        self.coeffs_rc_mult = vec![coeffs_tables::gen_range_table_multiplicities([
-            &range_uses[0],
-            &range_uses[1],
-            &range_uses[2],
-            &range_uses[3],
-            &range_uses[4],
-        ])];
-        evals.extend(self.coeffs_rc_mult.clone());
+        self.coeffs_rc_mult.clear();
+        if !self.ctx.hosted {
+            self.coeffs_rc_mult = vec![coeffs_tables::gen_range_table_multiplicities([
+                self.coeffs_rc_uses.for_kind(coeffs_tables::RcKind::Rc9),
+                self.coeffs_rc_uses.for_kind(coeffs_tables::RcKind::Rc13),
+                self.coeffs_rc_uses.for_kind(coeffs_tables::RcKind::Rc8),
+                self.coeffs_rc_uses.for_kind(coeffs_tables::RcKind::Rc7),
+                self.coeffs_rc_uses.for_kind(coeffs_tables::RcKind::Ternary),
+            ])];
+            evals.extend(self.coeffs_rc_mult.clone());
+        }
 
         // 3. decomp base + 4. rc mult (stash w1Encode bytes for the w1enc bridge).
         let dls = decomp_log_size();
@@ -1657,12 +1734,16 @@ impl AirProver for MlDsaProver {
         self.claims.coeffs = coeffs_int.claimed_sum;
         self.group_evals = coeffs_int.group_evals.clone();
         evals.extend(coeffs_int.trace);
-        // 2. unified coeffs range table.
+        // 2. unified coeffs range table (standalone only).
         self.claims.coeffs_rc.clear();
-        let (tr, sum) =
-            coeffs_tables::gen_range_table_interaction(&self.coeffs_rc_mult[0], &rel.coeffs.range);
-        evals.extend(tr);
-        self.claims.coeffs_rc.push(sum);
+        if !self.ctx.hosted {
+            let (tr, sum) = coeffs_tables::gen_range_table_interaction(
+                &self.coeffs_rc_mult[0],
+                &rel.coeffs.range,
+            );
+            evals.extend(tr);
+            self.claims.coeffs_rc.push(sum);
+        }
 
         // 3. decomp interaction.
         let dls = decomp_log_size();
@@ -1792,6 +1873,8 @@ pub struct MlDsaVerifier {
     /// The keccak service's shared relations handle (must be populated by the
     /// service module, composed before this one).
     keccak_handle: SharedKeccakRelations,
+    /// Hosted mode: the proof-wide range relation handle.
+    shared_range: Option<SharedRangeRelation>,
     /// Instance namespace (must match the prover's per role).
     namespace: String,
     /// Per-instance stream-id base (must match the prover's per role).
@@ -1809,12 +1892,9 @@ impl MlDsaVerifier {
         self.relations.as_ref().expect("relations drawn")
     }
 
-    /// Reconstruct a verifier from the public proof data. `shared_field = None` →
-    /// standalone; `Some(handle)` → hosted (drops the msglink claim slot, sources
-    /// the msg bridge from the host's shared [`FieldBytesRelation`]). The
-    /// `group_evals` / `claimed_sums` come from the host's proof struct.
-    /// Composed AFTER the keccak service
-    /// module (and, hosted, after the host module that draws + sets `handle`).
+    /// Reconstruct a standalone verifier. Hosted callers must use
+    /// [`Self::hosted`] or [`Self::hosted_public`] so the proof-wide range
+    /// provider is wired too.
     pub fn new(
         input: MlDsaVerifyInput,
         group_evals: Vec<SecureField>,
@@ -1822,12 +1902,17 @@ impl MlDsaVerifier {
         shared_field: Option<SharedFieldRelation>,
         keccak_handle: SharedKeccakRelations,
     ) -> Self {
+        assert!(
+            shared_field.is_none(),
+            "hosted ML-DSA requires a shared range provider; use MlDsaVerifier::hosted"
+        );
         Self::build(
             input,
             group_evals,
             claimed_sums,
             shared_field,
             false,
+            None,
             keccak_handle,
         )
     }
@@ -1838,6 +1923,7 @@ impl MlDsaVerifier {
         claimed_sums: Vec<SecureField>,
         shared_field: Option<SharedFieldRelation>,
         public_message: bool,
+        shared_range: Option<SharedRangeRelation>,
         keccak_handle: SharedKeccakRelations,
     ) -> Self {
         input.tr = native_tr(&input);
@@ -1849,6 +1935,7 @@ impl MlDsaVerifier {
             ctx,
             shared_field,
             keccak_handle,
+            shared_range,
             namespace: String::new(),
             stream_base: 0,
             private_message: false,
@@ -1865,13 +1952,16 @@ impl MlDsaVerifier {
         group_evals: Vec<SecureField>,
         claimed_sums: Vec<SecureField>,
         shared_field: SharedFieldRelation,
+        shared_range: SharedRangeRelation,
         keccak_handle: SharedKeccakRelations,
     ) -> Self {
-        Self::new(
+        Self::build(
             input,
             group_evals,
             claimed_sums,
             Some(shared_field),
+            false,
+            Some(shared_range),
             keccak_handle,
         )
     }
@@ -1882,9 +1972,18 @@ impl MlDsaVerifier {
         input: MlDsaVerifyInput,
         group_evals: Vec<SecureField>,
         claimed_sums: Vec<SecureField>,
+        shared_range: SharedRangeRelation,
         keccak_handle: SharedKeccakRelations,
     ) -> Self {
-        Self::build(input, group_evals, claimed_sums, None, true, keccak_handle)
+        Self::build(
+            input,
+            group_evals,
+            claimed_sums,
+            None,
+            true,
+            Some(shared_range),
+            keccak_handle,
+        )
     }
 
     /// Set the instance namespace (must match the prover's per role).
@@ -1917,7 +2016,12 @@ impl Air for MlDsaVerifier {
         );
     }
     fn draw_relations(&mut self, channel: &mut Blake2sChannel) {
-        let rel = draw_relations_common(channel, self.shared_field.as_ref(), &self.keccak_handle);
+        let rel = draw_relations_common(
+            channel,
+            self.shared_field.as_ref(),
+            self.shared_range.as_ref(),
+            &self.keccak_handle,
+        );
         self.claims.native_use = native_use_sum(&self.group_evals, &rel.coeffs);
         self.relations = Some(rel);
     }
@@ -1932,12 +2036,21 @@ impl Air for MlDsaVerifier {
         channel.mix_felts(&self.claimed_sums());
     }
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
-        all_preprocessed_ids(&self.namespace, &self.input, self.ctx.public_message)
+        all_preprocessed_ids(
+            &self.namespace,
+            &self.input,
+            self.ctx.hosted,
+            self.ctx.public_message,
+        )
     }
     fn canonical_preprocessed_columns(
         &mut self,
     ) -> Result<Vec<air_core::PreprocessedColumnEval>, VerificationError> {
-        Ok(gen_all_preprocessed(&self.input, self.ctx.public_message))
+        Ok(gen_all_preprocessed(
+            &self.input,
+            self.ctx.hosted,
+            self.ctx.public_message,
+        ))
     }
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
         let rel = self.relations().clone();
@@ -2006,7 +2119,7 @@ pub fn n_group_evals() -> usize {
 }
 
 fn claimed_sums_len(hosted: bool, native_mu: bool) -> usize {
-    1 + coeffs_tables::RANGE_TABLE_COMPONENTS
+    1 + usize::from(!hosted) * coeffs_tables::RANGE_TABLE_COMPONENTS
         + 1
         + decomp_tables::RcKind::ALL.len()
         + 1
