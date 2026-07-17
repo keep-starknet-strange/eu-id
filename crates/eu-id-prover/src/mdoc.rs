@@ -6,7 +6,8 @@
 //! age/nationality predicates in one verifier-facing proof. The legacy nonce
 //! module is not part of this path; the device-auth signature binds freshness.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use air_core::relations::{
@@ -90,6 +91,10 @@ const MDOC_ATTRIBUTE_VALUE_HEAD_BASE: u32 = 32;
 const MDOC_ATTRIBUTE_ELEMENT_ANCHOR_BASE: u32 = 36;
 const MDOC_REVOCATION_MESSAGE_FIELD_ID: u32 = 41;
 const TS13_REVOCATION_MESSAGE_LEN: usize = 20;
+/// The verifier keeps only a small working set of canonical tree-0 roots.
+/// Entries are populated after a full successful proof verification, so an
+/// attacker cannot evict useful policy roots with malformed proofs.
+const MDOC_TREE0_ROOT_CACHE_CAPACITY: usize = 16;
 /// Per-role instance namespaces for hosted ML-DSA modules. Prover and verifier
 /// must agree; the namespace is mixed into the transcript (role/domain
 /// separation — a device claim tree cannot be replayed against the revocation
@@ -2236,8 +2241,6 @@ fn policy_date_tuple(policy: &Policy) -> Result<(u16, u8, u8), MdocError> {
 pub struct MdocMlDsaClaims {
     pub group_evals: Vec<QM31>,
     pub claimed_sums: Vec<QM31>,
-    pub sib_stream_len: usize,
-    pub sib_squeezed_len: usize,
 }
 
 impl MdocMlDsaClaims {
@@ -2245,8 +2248,6 @@ impl MdocMlDsaClaims {
         Self {
             group_evals: prover.group_evals().to_vec(),
             claimed_sums: prover.claimed_sums(),
-            sib_stream_len: prover.sib_stream_len(),
-            sib_squeezed_len: prover.sib_squeezed_len(),
         }
     }
 
@@ -2261,11 +2262,6 @@ impl MdocMlDsaClaims {
         };
         self.group_evals.len() == stwo_mldsa::statement::n_group_evals()
             && self.claimed_sums.len() == expected_claimed_sums
-            && stwo_mldsa::statement::validate_sib_lengths(
-                self.sib_stream_len,
-                self.sib_squeezed_len,
-            )
-            .is_ok()
     }
 }
 
@@ -2302,6 +2298,183 @@ pub struct MdocCircuitVerifyProfile {
     pub total: Duration,
     pub tree0_canonical_root: Duration,
     pub stark_verify: Duration,
+    pub tree0_cache_hit: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct MdocTree0AttributeKey {
+    mode: u8,
+    element_identifier: Vec<u8>,
+    element_identifier_offset: usize,
+    element_identifier_anchor_offset: usize,
+    element_identifier_anchor: Vec<u8>,
+    value_offset: Option<usize>,
+    value_len: Option<usize>,
+    value: Vec<u8>,
+    value_head: Vec<u8>,
+    predicate_value_offset: Option<usize>,
+    predicate_value_len: Option<usize>,
+}
+
+/// Exact verifier-known determinants of the canonical tree-0 construction.
+///
+/// The key contains: PCS blowup; merged-SHA slot/row logs; optional revocation
+/// module presence; ordered attribute count/modes, element windows/anchors,
+/// and equality constants; predicate window offsets/binding widths; and the
+/// normalized age/nationality public tables. Fixed protocol tables, role
+/// namespaces, and the now-constant five-block SIB rail need no key fields.
+///
+/// The merged-SHA layout fields originate in the proof, but are shape-gated
+/// before this key is built and were already used to reconstruct that verifier
+/// module before Q13. They do not authorize a root or widen verifier trust.
+/// Every stored value is a verifier-recomputed canonical root; an accidentally
+/// omitted determinant therefore causes a fail-closed wrong-root rejection
+/// (and is caught by the fresh-audit test), never acceptance of a proof root.
+/// Signature bytes, keys, messages, private revocation bounds, claimed sums,
+/// and commitments are deliberately absent: none determines preprocessing.
+#[derive(Clone, Debug, Serialize)]
+struct MdocTree0CacheKeyMaterial {
+    version: u8,
+    pcs_log_blowup_factor: u32,
+    merged_sha_slot_log: u32,
+    merged_sha_log_n_rows: u32,
+    has_revocation_range: bool,
+    has_revocation_signature: bool,
+    age_attribute_index: Option<usize>,
+    nationality_attribute_index: Option<usize>,
+    birth_date_binding: u8,
+    nationality_binding: u8,
+    attributes: Vec<MdocTree0AttributeKey>,
+    age_public: Option<predicates::PublicInput>,
+    nat_public: Option<predicates::NatPublicInput>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MdocTree0CacheKey {
+    digest: [u8; 32],
+    /// Retaining the bounded, non-secret material makes digest collisions a
+    /// cache miss rather than a soundness event.
+    material: Vec<u8>,
+}
+
+type MdocTree0Root = air_core::CommitmentRoot;
+type MdocTree0RootCache = VecDeque<(MdocTree0CacheKey, MdocTree0Root)>;
+
+static MDOC_TREE0_ROOT_CACHE: OnceLock<Mutex<MdocTree0RootCache>> = OnceLock::new();
+
+fn mdoc_tree0_cache_key(
+    proof: &MdocCircuitProof,
+    statement: &MdocCircuitStatement,
+    expected_pcs_config: PcsConfig,
+) -> Result<MdocTree0CacheKey, Error> {
+    let attributes = statement
+        .attributes
+        .iter()
+        .map(|attribute| {
+            let (mode, predicate_value_offset, predicate_value_len) = match &attribute.mode {
+                MdocDisclosureMode::ValueEquality(_) => (0, None, None),
+                MdocDisclosureMode::AgeOver => (
+                    1,
+                    Some(statement.birth_date_value_offset),
+                    Some(statement.birth_date_binding.as_bytes().len()),
+                ),
+                MdocDisclosureMode::Alpha2Set => (
+                    2,
+                    Some(statement.nationality_value_offset),
+                    Some(statement.nationality_binding.as_bytes().len()),
+                ),
+            };
+            MdocTree0AttributeKey {
+                mode,
+                element_identifier: attribute.element_identifier.as_bytes().to_vec(),
+                element_identifier_offset: attribute.element_identifier_offset,
+                element_identifier_anchor_offset: attribute.element_identifier_anchor_offset,
+                element_identifier_anchor: attribute.element_identifier_anchor.clone(),
+                value_offset: matches!(&attribute.mode, MdocDisclosureMode::ValueEquality(_))
+                    .then_some(attribute.value_offset),
+                value_len: matches!(&attribute.mode, MdocDisclosureMode::ValueEquality(_))
+                    .then_some(attribute.value.len()),
+                value: matches!(&attribute.mode, MdocDisclosureMode::ValueEquality(_))
+                    .then(|| attribute.value.clone())
+                    .unwrap_or_default(),
+                value_head: matches!(&attribute.mode, MdocDisclosureMode::ValueEquality(_))
+                    .then(|| attribute.value_head.clone())
+                    .unwrap_or_default(),
+                predicate_value_offset,
+                predicate_value_len,
+            }
+        })
+        .collect();
+    let material = MdocTree0CacheKeyMaterial {
+        version: 1,
+        pcs_log_blowup_factor: expected_pcs_config.fri_config.log_blowup_factor,
+        merged_sha_slot_log: proof
+            .merged_sha_slot_log
+            .expect("merged SHA slot log shape-gated before cache-key construction"),
+        merged_sha_log_n_rows: proof
+            .merged_sha_log_n_rows
+            .expect("merged SHA row log shape-gated before cache-key construction"),
+        has_revocation_range: statement.ts13_revocation_range.is_some(),
+        has_revocation_signature: statement.ts13_revocation_signature.is_some(),
+        age_attribute_index: statement.age_attribute_index,
+        nationality_attribute_index: statement.nationality_attribute_index,
+        birth_date_binding: match statement.birth_date_binding {
+            MdocBirthDateBinding::Packed(_) => 0,
+            MdocBirthDateBinding::Text(_) => 1,
+        },
+        nationality_binding: match statement.nationality_binding {
+            MdocNationalityBinding::Numeric(_) => 0,
+            MdocNationalityBinding::Alpha2(_) => 1,
+        },
+        attributes,
+        age_public: statement
+            .age_attribute_index
+            .map(|_| statement.policy.age_public_input()),
+        nat_public: statement
+            .nationality_attribute_index
+            .map(|_| nat_public_input_for(statement)),
+    };
+    let material = bincode::serialize(&material)
+        .map_err(|error| Error::Verify(format!("mdoc tree-0 cache key: {error}")))?;
+    Ok(MdocTree0CacheKey {
+        digest: Sha256::digest(&material).into(),
+        material,
+    })
+}
+
+fn mdoc_tree0_cached_root(key: &MdocTree0CacheKey) -> Result<Option<MdocTree0Root>, Error> {
+    let cache = MDOC_TREE0_ROOT_CACHE.get_or_init(|| Mutex::new(VecDeque::new()));
+    let mut entries = cache
+        .lock()
+        .map_err(|_| Error::Verify("mdoc tree-0 cache lock poisoned".to_string()))?;
+    let Some(index) = entries.iter().position(|(candidate, _)| {
+        candidate.digest == key.digest && candidate.material == key.material
+    }) else {
+        return Ok(None);
+    };
+    let entry = entries
+        .remove(index)
+        .expect("cache index came from the same deque");
+    let root = entry.1;
+    entries.push_back(entry);
+    Ok(Some(root))
+}
+
+fn mdoc_tree0_cache_insert(key: MdocTree0CacheKey, root: MdocTree0Root) -> Result<(), Error> {
+    let cache = MDOC_TREE0_ROOT_CACHE.get_or_init(|| Mutex::new(VecDeque::new()));
+    let mut entries = cache
+        .lock()
+        .map_err(|_| Error::Verify("mdoc tree-0 cache lock poisoned".to_string()))?;
+    if let Some(index) = entries.iter().position(|(candidate, _)| {
+        candidate.digest == key.digest && candidate.material == key.material
+    }) {
+        entries.remove(index);
+    }
+    if entries.len() == MDOC_TREE0_ROOT_CACHE_CAPACITY {
+        entries.pop_front();
+    }
+    entries.push_back((key, root));
+    Ok(())
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -3306,6 +3479,8 @@ fn prove_mdoc_circuit_inner(
             input.tr = stwo_mldsa::statement::native_tr(&input);
             let witness = stwo_mldsa::witness::generate_witness(&input)
                 .map_err(|error| Error::Prove(format!("mldsa witness: {error:?}")))?;
+            stwo_mldsa::sampleinball::validate_stream(&witness)
+                .map_err(|error| Error::Prove(format!("mldsa SIB resource cap: {error}")))?;
             Ok(
                 MlDsaStatementProver::hosted_public(witness, input, mldsa_keccak_handle.clone())
                     .with_instance_namespace(MDOC_ISSUER_MLDSA_NAMESPACE)
@@ -3322,6 +3497,8 @@ fn prove_mdoc_circuit_inner(
             input.tr = stwo_mldsa::statement::native_tr(&input);
             let witness = stwo_mldsa::witness::generate_witness(&input)
                 .map_err(|error| Error::Prove(format!("mldsa device witness: {error:?}")))?;
+            stwo_mldsa::sampleinball::validate_stream(&witness)
+                .map_err(|error| Error::Prove(format!("mldsa SIB resource cap: {error}")))?;
             Ok(
                 MlDsaStatementProver::hosted_public(witness, input, mldsa_keccak_handle.clone())
                     .with_instance_namespace(MDOC_DEVICE_MLDSA_NAMESPACE)
@@ -3340,6 +3517,8 @@ fn prove_mdoc_circuit_inner(
         .map(|input| -> Result<MlDsaStatementProver, Error> {
             let witness = stwo_mldsa::witness::generate_witness(&input)
                 .map_err(|error| Error::Prove(format!("mldsa revocation witness: {error:?}")))?;
+            stwo_mldsa::sampleinball::validate_stream(&witness)
+                .map_err(|error| Error::Prove(format!("mldsa SIB resource cap: {error}")))?;
             Ok(MlDsaStatementProver::hosted(
                 witness,
                 *input,
@@ -3585,13 +3764,42 @@ pub fn verify_mdoc_circuit_with_pcs_config_profiled(
     statement: &MdocCircuitStatement,
     expected_pcs_config: PcsConfig,
 ) -> Result<MdocCircuitVerifyProfile, Error> {
-    verify_mdoc_circuit_with_pcs_config_profiled_impl(proof, statement, expected_pcs_config)
+    verify_mdoc_circuit_with_pcs_config_profiled_impl(
+        proof,
+        statement,
+        expected_pcs_config,
+        MdocTree0RootMode::Memoized,
+    )
+}
+
+/// Recompute the canonical tree-0 root and compare it with any memoized value.
+/// This is a deliberately slower audit/test path; production verification uses
+/// [`verify_mdoc_circuit_with_pcs_config_profiled`].
+#[doc(hidden)]
+pub fn verify_mdoc_circuit_with_pcs_config_profiled_fresh(
+    proof: &MdocCircuitProof,
+    statement: &MdocCircuitStatement,
+    expected_pcs_config: PcsConfig,
+) -> Result<MdocCircuitVerifyProfile, Error> {
+    verify_mdoc_circuit_with_pcs_config_profiled_impl(
+        proof,
+        statement,
+        expected_pcs_config,
+        MdocTree0RootMode::FreshAudit,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum MdocTree0RootMode {
+    Memoized,
+    FreshAudit,
 }
 
 fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
     proof: &MdocCircuitProof,
     statement: &MdocCircuitStatement,
     expected_pcs_config: PcsConfig,
+    tree0_root_mode: MdocTree0RootMode,
 ) -> Result<MdocCircuitVerifyProfile, Error> {
     let total_start = Instant::now();
     validate_mldsa_public_keys(statement, "verify")?;
@@ -3702,6 +3910,10 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
             expected: expected_pcs_config,
         });
     }
+    let tree0_cache_key = mdoc_tree0_cache_key(proof, statement, expected_pcs_config)?;
+    let cached_preprocessed_root = mdoc_tree0_cached_root(&tree0_cache_key)?;
+    let tree0_cache_hit = matches!(tree0_root_mode, MdocTree0RootMode::Memoized)
+        && cached_preprocessed_root.is_some();
 
     let mut sha_tables = ShaTablesVerifier::new(
         proof.sha_tables_interaction_claim.clone(),
@@ -3718,8 +3930,6 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
                     input,
                     claims.group_evals.clone(),
                     claims.claimed_sums.clone(),
-                    claims.sib_stream_len,
-                    claims.sib_squeezed_len,
                     mldsa_keccak_handle.clone(),
                 )
                 .with_instance_namespace(MDOC_ISSUER_MLDSA_NAMESPACE)
@@ -3739,8 +3949,6 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
                     input,
                     claims.group_evals.clone(),
                     claims.claimed_sums.clone(),
-                    claims.sib_stream_len,
-                    claims.sib_squeezed_len,
                     mldsa_keccak_handle.clone(),
                 )
                 .with_instance_namespace(MDOC_DEVICE_MLDSA_NAMESPACE)
@@ -3761,8 +3969,6 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
                         *input,
                         claims.group_evals.clone(),
                         claims.claimed_sums.clone(),
-                        claims.sib_stream_len,
-                        claims.sib_squeezed_len,
                         revocation_message_field
                             .clone()
                             .expect("revocation field relation exists with a revocation signature"),
@@ -3780,35 +3986,27 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
     // PUBLIC data only, in the prover's fixed role order (issuer, device,
     // revocation) — message lengths from the statement (the revocation
     // message is the fixed 20-byte private-message window), sib stream
-    // lengths from the shape-gated per-role claim trees, stream bases from
-    // the role constants. Claimed sums come from the proof.
+    // stream bases from the role constants. SIB is the fixed five-block
+    // protocol resource cap for every role. Claimed sums come from the proof.
     let mut mldsa_keccak_service = proof.keccak_service_claimed_sums.as_ref().map(|sums| {
         let mut shapes = Vec::new();
         if let Some(input) = statement.issuer_input.as_mldsa() {
-            let claims = proof.mldsa.as_ref().expect("issuer claim tree gated above");
             shapes.extend(keccak_job_shapes(
                 input.message.len(),
-                claims.sib_stream_len,
                 MDOC_ISSUER_MLDSA_STREAM_BASE,
                 true,
             ));
         }
         if let Some(input) = statement.device_input.as_mldsa() {
-            let claims = proof
-                .device_mldsa
-                .as_ref()
-                .expect("device claim tree gated above");
             shapes.extend(keccak_job_shapes(
                 input.message.len(),
-                claims.sib_stream_len,
                 MDOC_DEVICE_MLDSA_STREAM_BASE,
                 true,
             ));
         }
-        if let Some(claims) = proof.revocation_mldsa.as_ref() {
+        if proof.revocation_mldsa.is_some() {
             shapes.extend(keccak_job_shapes(
                 TS13_REVOCATION_MESSAGE_LEN,
-                claims.sib_stream_len,
                 MDOC_REVOCATION_MLDSA_STREAM_BASE,
                 false,
             ));
@@ -3983,11 +4181,34 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
     }
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let tree0_start = Instant::now();
-        let expected_preprocessed_root = air_core::compute_canonical_preprocessed_root(
-            modules.as_mut_slice(),
-            expected_pcs_config,
-        )
-        .map_err(air_core::VerifyError::Stark)?;
+        let expected_preprocessed_root = match tree0_root_mode {
+            MdocTree0RootMode::Memoized => match cached_preprocessed_root.as_ref() {
+                Some(root) => *root,
+                None => air_core::compute_canonical_preprocessed_root(
+                    modules.as_mut_slice(),
+                    expected_pcs_config,
+                )
+                .map_err(air_core::VerifyError::Stark)?,
+            },
+            MdocTree0RootMode::FreshAudit => {
+                let fresh = air_core::compute_canonical_preprocessed_root(
+                    modules.as_mut_slice(),
+                    expected_pcs_config,
+                )
+                .map_err(air_core::VerifyError::Stark)?;
+                if cached_preprocessed_root
+                    .as_ref()
+                    .is_some_and(|cached| cached != &fresh)
+                {
+                    return Err(air_core::VerifyError::Stark(
+                        stwo::core::verifier::VerificationError::InvalidStructure(
+                            "mdoc tree-0 cache drift".to_string(),
+                        ),
+                    ));
+                }
+                fresh
+            }
+        };
         let tree0_canonical_root = tree0_start.elapsed();
         let stark_verify_start = Instant::now();
         air_core::verify_with_expected_preprocessed_root_and_payloads(
@@ -3996,13 +4217,25 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
             Some(expected_preprocessed_root),
             &proof.post_interaction_payloads,
         )?;
-        Ok((tree0_canonical_root, stark_verify_start.elapsed()))
-    })) {
-        Ok(Ok((tree0_canonical_root, stark_verify))) => Ok(MdocCircuitVerifyProfile {
-            total: total_start.elapsed(),
+        Ok((
             tree0_canonical_root,
-            stark_verify,
-        }),
+            stark_verify_start.elapsed(),
+            expected_preprocessed_root,
+        ))
+    })) {
+        Ok(Ok((tree0_canonical_root, stark_verify, expected_preprocessed_root))) => {
+            // Soundness/DoS boundary: a miss is memoized only after the whole
+            // proof has verified against the verifier-recomputed root.
+            if cached_preprocessed_root.is_none() {
+                mdoc_tree0_cache_insert(tree0_cache_key, expected_preprocessed_root)?;
+            }
+            Ok(MdocCircuitVerifyProfile {
+                total: total_start.elapsed(),
+                tree0_canonical_root,
+                stark_verify,
+                tree0_cache_hit,
+            })
+        }
         Ok(Err(air_core::VerifyError::PreprocessedRootMismatch { got, expected })) => {
             Err(Error::PreprocessedRootMismatch { got, expected })
         }

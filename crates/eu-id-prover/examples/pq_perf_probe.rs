@@ -1,8 +1,9 @@
 //! Full-PQ mdoc perf probe — the S3 campaign's executable perf gate.
 //!
 //! Builds the fully post-quantum credential (ML-DSA issuer + device + TS13
-//! revocation), extracts, proves ONCE, verifies ONCE, and prints one
-//! machine-readable line plus the serde_json proof byte breakdown.
+//! revocation), extracts, proves once, verifies cold and then warm under the
+//! same verifier policy, and prints one machine-readable line plus the
+//! serde_json proof byte breakdown.
 //!
 //! Run (the campaign's iron measurement):
 //! ```sh
@@ -82,20 +83,31 @@ fn main() {
     let proof = prove_mdoc_circuit(&extracted, &statement).expect("fully-PQ mdoc proves");
     let prove_ms = prove_start.elapsed().as_millis();
 
-    let verify_profile = verify_mdoc_circuit_with_pcs_config_profiled(
+    let cold_verify_profile = verify_mdoc_circuit_with_pcs_config_profiled(
         &proof,
         &statement,
         eu_id_prover::mdoc::mdoc_production_pcs_config(),
     )
-    .expect("fully-PQ mdoc verifies");
-    let verify_ms = verify_profile.total.as_millis();
-    let tree0_root_ms = verify_profile.tree0_canonical_root.as_millis();
-    let stark_verify_ms = verify_profile.stark_verify.as_millis();
+    .expect("fully-PQ mdoc verifies cold");
+    assert!(!cold_verify_profile.tree0_cache_hit, "first verify is cold");
+    let warm_verify_profile = verify_mdoc_circuit_with_pcs_config_profiled(
+        &proof,
+        &statement,
+        eu_id_prover::mdoc::mdoc_production_pcs_config(),
+    )
+    .expect("fully-PQ mdoc verifies warm");
+    assert!(warm_verify_profile.tree0_cache_hit, "second verify is warm");
 
     let breakdown = mdoc_proof_byte_breakdown(&proof);
     std::fs::write("/tmp/pq_proof.bin", bincode::serialize(&proof).unwrap()).unwrap();
     println!(
-        "PQ_PERF_PROBE rayon_threads={rayon_threads} prove_ms={prove_ms} verify_ms={verify_ms} tree0_root_ms={tree0_root_ms} stark_verify_ms={stark_verify_ms} proof_bytes={}",
+        "PQ_PERF_PROBE rayon_threads={rayon_threads} prove_ms={prove_ms} cold_verify_ms={} cold_tree0_root_ms={} cold_stark_verify_ms={} warm_verify_ms={} warm_tree0_root_ms={} warm_stark_verify_ms={} proof_bytes={}",
+        cold_verify_profile.total.as_millis(),
+        cold_verify_profile.tree0_canonical_root.as_millis(),
+        cold_verify_profile.stark_verify.as_millis(),
+        warm_verify_profile.total.as_millis(),
+        warm_verify_profile.tree0_canonical_root.as_millis(),
+        warm_verify_profile.stark_verify.as_millis(),
         breakdown.proof_bytes
     );
     println!(

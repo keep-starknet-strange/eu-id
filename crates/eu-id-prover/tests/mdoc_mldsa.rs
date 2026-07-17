@@ -240,8 +240,29 @@ fn ts13_mldsa_revocation_native_positive_and_negatives() {
 
 mod quantum_only {
     use super::*;
-    use eu_id_prover::mdoc::{mdoc_proof_byte_breakdown, prove_mdoc_circuit, verify_mdoc_circuit};
+    use eu_id_prover::mdoc::{
+        mdoc_production_pcs_config, mdoc_proof_byte_breakdown, prove_mdoc_circuit,
+        verify_mdoc_circuit, verify_mdoc_circuit_with_pcs_config_profiled,
+        verify_mdoc_circuit_with_pcs_config_profiled_fresh,
+    };
     use std::time::Instant;
+
+    fn sib_consumed_len(input: &stwo_mldsa::types::MlDsaVerifyInput) -> usize {
+        let stream = stwo_mldsa::reference::sample_in_ball::sample_in_ball(&input.c_tilde)
+            .transcript
+            .squeezed;
+        let mut position = 8;
+        for i in (stwo_mldsa::constants::N - stwo_mldsa::constants::TAU)..stwo_mldsa::constants::N {
+            loop {
+                let byte = stream[position];
+                position += 1;
+                if usize::from(byte) <= i {
+                    break;
+                }
+            }
+        }
+        position
+    }
 
     /// A device-key ↔ MSO binding violation rejects at prove entry.
     #[test]
@@ -493,29 +514,41 @@ mod quantum_only {
             .expect_err("tampered statement device M′ must reject");
     }
 
-    /// The ordinary verifier reconstructs tree 0 itself. A forged proof root,
-    /// malformed SIB resource claim, or non-canonical decoded public key is
-    /// rejected without accepting any caller/artifact root as authority.
+    /// A forged proof root is rejected before and after memoization. A failed
+    /// cold verification must not populate the cache, and a non-canonical
+    /// decoded public key is rejected without accepting any artifact root as
+    /// authority.
     #[test]
     fn mldsa_mdoc_reconstructs_tree0_and_gates_public_shape() {
-        let (extracted, statement) = full_pq_extracted_and_statement();
+        let (extracted, mut statement) = full_pq_extracted_and_statement();
+        // Give this test a unique valid policy key so its first lookup is cold
+        // regardless of the rest of this process-global-cache test binary.
+        statement.policy.accepted_nationalities_alpha2.push(*b"PL");
         let proof = prove_mdoc_circuit(&extracted, &statement).expect("fully-PQ mdoc proves");
-
-        verify_mdoc_circuit(&proof, &statement).expect("honest proof verifies");
 
         let mut forged_root = proof.clone();
         forged_root.stark_proof.0.commitments[0].0[0] ^= 1;
         verify_mdoc_circuit(&forged_root, &statement)
-            .expect_err("a forged tree-0 commitment must reject");
-
-        let mut malformed_sib = proof.clone();
-        malformed_sib
-            .mldsa
-            .as_mut()
-            .expect("issuer claims")
-            .sib_stream_len = stwo_mldsa::statement::MAX_SIB_STREAM_LEN + 1;
-        verify_mdoc_circuit(&malformed_sib, &statement)
-            .expect_err("an unbounded SIB claim must reject before allocation");
+            .expect_err("a forged tree-0 commitment must reject cold");
+        let cold = verify_mdoc_circuit_with_pcs_config_profiled(
+            &proof,
+            &statement,
+            mdoc_production_pcs_config(),
+        )
+        .expect("honest proof verifies after failed cold tamper");
+        assert!(
+            !cold.tree0_cache_hit,
+            "a failed verification must not populate the root cache"
+        );
+        verify_mdoc_circuit(&forged_root, &statement)
+            .expect_err("a forged tree-0 commitment must also reject warm");
+        let warm = verify_mdoc_circuit_with_pcs_config_profiled(
+            &proof,
+            &statement,
+            mdoc_production_pcs_config(),
+        )
+        .expect("honest proof verifies warm");
+        assert!(warm.tree0_cache_hit);
 
         let mut noncanonical_t1 = statement.clone();
         let eu_id_prover::mdoc::IssuerAuthInput::MlDsa(input) = &mut noncanonical_t1.issuer_input;
@@ -528,24 +561,99 @@ mod quantum_only {
         );
     }
 
-    /// Cache-collision regression (G7): two DISTINCT fully-PQ statements
-    /// (different session transcripts ⇒ different signatures ⇒ different SIB
-    /// squeeze lengths across BOTH the issuer and device instances) share the
-    /// same padded shape key; each proof must verify under its OWN derived pin.
+    /// Q13 regression: signature-dependent rejection history cannot affect
+    /// tree 0. Distinct real signatures with different SIB consumption share
+    /// one canonical root and warm cache entry; a changed RP policy gets a
+    /// distinct root/cache miss, and the fresh audit path agrees with cache.
     #[test]
-    fn mldsa_mdoc_pin_is_per_signature_not_cached() {
-        let (extracted_a, statement_a) = full_pq_extracted_and_statement_for(b"nonce-A");
-        let (extracted_b, statement_b) = full_pq_extracted_and_statement_for(b"nonce-B");
+    fn mldsa_mdoc_tree0_is_signature_independent_and_policy_cached() {
+        let (extracted_a, mut statement_a) = full_pq_extracted_and_statement_for(b"nonce-A");
+        let (extracted_b, mut statement_b) = full_pq_extracted_and_statement_for(b"nonce-B");
+        statement_a
+            .policy
+            .accepted_nationalities_alpha2
+            .push(*b"ES");
+        statement_b.policy = statement_a.policy.clone();
+
+        let consumed_a = [
+            sib_consumed_len(
+                statement_a
+                    .issuer_input
+                    .as_mldsa()
+                    .expect("issuer A is ML-DSA"),
+            ),
+            sib_consumed_len(
+                statement_a
+                    .device_input
+                    .as_mldsa()
+                    .expect("device A is ML-DSA"),
+            ),
+        ];
+        let consumed_b = [
+            sib_consumed_len(
+                statement_b
+                    .issuer_input
+                    .as_mldsa()
+                    .expect("issuer B is ML-DSA"),
+            ),
+            sib_consumed_len(
+                statement_b
+                    .device_input
+                    .as_mldsa()
+                    .expect("device B is ML-DSA"),
+            ),
+        ];
+        assert_ne!(
+            consumed_a, consumed_b,
+            "test vectors must exercise distinct rejection histories"
+        );
 
         let proof_a = prove_mdoc_circuit(&extracted_a, &statement_a).expect("proof A proves");
         let proof_b = prove_mdoc_circuit(&extracted_b, &statement_b).expect("proof B proves");
 
-        assert_ne!(
+        assert_eq!(
             proof_a.stark_proof.commitments[0], proof_b.stark_proof.commitments[0],
-            "statement-specific preprocessing should produce distinct roots"
+            "SIB rejection history must not affect canonical preprocessing"
         );
-        verify_mdoc_circuit(&proof_a, &statement_a).expect("proof A verifies");
-        verify_mdoc_circuit(&proof_b, &statement_b).expect("proof B verifies");
+        let cold = verify_mdoc_circuit_with_pcs_config_profiled(
+            &proof_a,
+            &statement_a,
+            mdoc_production_pcs_config(),
+        )
+        .expect("proof A verifies cold");
+        assert!(!cold.tree0_cache_hit);
+        let warm = verify_mdoc_circuit_with_pcs_config_profiled(
+            &proof_b,
+            &statement_b,
+            mdoc_production_pcs_config(),
+        )
+        .expect("proof B verifies through the same policy entry");
+        assert!(warm.tree0_cache_hit);
+        let fresh = verify_mdoc_circuit_with_pcs_config_profiled_fresh(
+            &proof_b,
+            &statement_b,
+            mdoc_production_pcs_config(),
+        )
+        .expect("fresh canonical root agrees with the memoized root");
+        assert!(!fresh.tree0_cache_hit);
+
+        let mut statement_c = statement_b.clone();
+        statement_c
+            .policy
+            .accepted_nationalities_alpha2
+            .push(*b"IT");
+        let proof_c = prove_mdoc_circuit(&extracted_b, &statement_c).expect("proof C proves");
+        assert_ne!(
+            proof_a.stark_proof.commitments[0], proof_c.stark_proof.commitments[0],
+            "a different RP policy must produce a different canonical root"
+        );
+        let other_policy = verify_mdoc_circuit_with_pcs_config_profiled(
+            &proof_c,
+            &statement_c,
+            mdoc_production_pcs_config(),
+        )
+        .expect("different policy verifies after its own recomputation");
+        assert!(!other_policy.tree0_cache_hit);
     }
 
     /// CM-3 same-arm malformed claim tree: a fully-PQ proof produced for one
