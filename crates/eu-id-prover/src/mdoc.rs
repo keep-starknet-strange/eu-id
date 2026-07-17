@@ -561,10 +561,7 @@ pub fn extract_pid_mdoc(
         Vec::new()
     };
     // Default to the first entry; the policy-aware pick happens later in `select_accepted_nationality`.
-    let parsed_nat = nationality_candidates
-        .first()
-        .cloned()
-        .unwrap_or_default();
+    let parsed_nat = nationality_candidates.first().cloned().unwrap_or_default();
 
     let device_signed = map_field(doc_map, "deviceSigned")?;
     let device_auth = map_field(device_signed, "deviceAuth")?;
@@ -772,8 +769,10 @@ fn select_nationality_index(candidates: &[ParsedNationalityValue], accepted: &[u
 }
 
 pub fn select_accepted_nationality(extracted: &mut ExtractedPidMdoc, policy: &Policy) {
-    let index =
-        select_nationality_index(&extracted.nationality_candidates, &policy.accepted_nationalities);
+    let index = select_nationality_index(
+        &extracted.nationality_candidates,
+        &policy.accepted_nationalities,
+    );
     if let Some(selected) = extracted.nationality_candidates.get(index).cloned() {
         extracted.nationalities = vec![selected.numeric];
         extracted.nationality_bytes = selected.bytes;
@@ -2254,9 +2253,14 @@ impl MdocMlDsaClaims {
     /// Shape-gate BEFORE `Claims::from_flat`: a short vector would panic
     /// inside claim-tree construction (outside the verify catch_unwind),
     /// turning a malformed proof into a crash.
-    fn has_expected_shape(&self) -> bool {
+    fn has_expected_shape(&self, public_message: bool) -> bool {
+        let expected_claimed_sums = if public_message {
+            stwo_mldsa::statement::hosted_public_claimed_sums_len()
+        } else {
+            stwo_mldsa::statement::hosted_claimed_sums_len()
+        };
         self.group_evals.len() == stwo_mldsa::statement::n_group_evals()
-            && self.claimed_sums.len() == stwo_mldsa::statement::hosted_claimed_sums_len()
+            && self.claimed_sums.len() == expected_claimed_sums
             && stwo_mldsa::statement::validate_sib_lengths(
                 self.sib_stream_len,
                 self.sib_squeezed_len,
@@ -2296,6 +2300,8 @@ pub struct MdocCircuitProveProfile {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct MdocCircuitVerifyProfile {
     pub total: Duration,
+    pub tree0_canonical_root: Duration,
+    pub stark_verify: Duration,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -3296,15 +3302,15 @@ fn prove_mdoc_circuit_inner(
         .issuer_input
         .as_mldsa()
         .map(|input| -> Result<MlDsaStatementProver, Error> {
-            let witness = stwo_mldsa::witness::generate_witness(input)
+            let mut input = input.clone();
+            input.tr = stwo_mldsa::statement::native_tr(&input);
+            let witness = stwo_mldsa::witness::generate_witness(&input)
                 .map_err(|error| Error::Prove(format!("mldsa witness: {error:?}")))?;
-            Ok(MlDsaStatementProver::hosted_public(
-                witness,
-                input.clone(),
-                mldsa_keccak_handle.clone(),
+            Ok(
+                MlDsaStatementProver::hosted_public(witness, input, mldsa_keccak_handle.clone())
+                    .with_instance_namespace(MDOC_ISSUER_MLDSA_NAMESPACE)
+                    .with_stream_base(MDOC_ISSUER_MLDSA_STREAM_BASE),
             )
-            .with_instance_namespace(MDOC_ISSUER_MLDSA_NAMESPACE)
-            .with_stream_base(MDOC_ISSUER_MLDSA_STREAM_BASE))
         })
         .transpose()?;
     // Hosted in-circuit ML-DSA device statement, public-message mode (S4).
@@ -3312,15 +3318,15 @@ fn prove_mdoc_circuit_inner(
         .device_input
         .as_mldsa()
         .map(|input| -> Result<MlDsaStatementProver, Error> {
-            let witness = stwo_mldsa::witness::generate_witness(input)
+            let mut input = input.clone();
+            input.tr = stwo_mldsa::statement::native_tr(&input);
+            let witness = stwo_mldsa::witness::generate_witness(&input)
                 .map_err(|error| Error::Prove(format!("mldsa device witness: {error:?}")))?;
-            Ok(MlDsaStatementProver::hosted_public(
-                witness,
-                input.clone(),
-                mldsa_keccak_handle.clone(),
+            Ok(
+                MlDsaStatementProver::hosted_public(witness, input, mldsa_keccak_handle.clone())
+                    .with_instance_namespace(MDOC_DEVICE_MLDSA_NAMESPACE)
+                    .with_stream_base(MDOC_DEVICE_MLDSA_STREAM_BASE),
             )
-            .with_instance_namespace(MDOC_DEVICE_MLDSA_NAMESPACE)
-            .with_stream_base(MDOC_DEVICE_MLDSA_STREAM_BASE))
         })
         .transpose()?;
     // Hosted in-circuit ML-DSA revocation statement, private-message mode: the
@@ -3592,7 +3598,7 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
     check_mldsa_device_key_binding(statement)?;
     let mldsa_mso_facts = mldsa_public_mso_facts(statement)?;
     match &proof.mldsa {
-        Some(claims) if claims.has_expected_shape() => {}
+        Some(claims) if claims.has_expected_shape(true) => {}
         _ => {
             return Err(Error::Verify(
                 "mdoc proof ML-DSA issuer claim tree has the wrong shape".to_string(),
@@ -3600,7 +3606,7 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
         }
     }
     match &proof.device_mldsa {
-        Some(claims) if claims.has_expected_shape() => {}
+        Some(claims) if claims.has_expected_shape(true) => {}
         _ => {
             return Err(Error::Verify(
                 "mdoc proof ML-DSA device claim tree has the wrong shape".to_string(),
@@ -3658,7 +3664,7 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
         }
     }
     match (&proof.revocation_mldsa, has_revocation_signature) {
-        (Some(claims), true) if claims.has_expected_shape() => {}
+        (Some(claims), true) if claims.has_expected_shape(false) => {}
         (None, false) => {}
         _ => {
             return Err(Error::Verify(
@@ -3704,35 +3710,43 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
     // Hosted ML-DSA verifier (M7): rebuilt from the statement's public input +
     // the proof's claim tree; composed AFTER `issuer_sha` (shared field draw).
     let mut issuer_mldsa = match (statement.issuer_input.as_mldsa(), &proof.mldsa) {
-        (Some(input), Some(claims)) => Some(
-            MlDsaStatementVerifier::hosted_public(
-                input.clone(),
-                claims.group_evals.clone(),
-                claims.claimed_sums.clone(),
-                claims.sib_stream_len,
-                claims.sib_squeezed_len,
-                mldsa_keccak_handle.clone(),
+        (Some(input), Some(claims)) => {
+            let mut input = input.clone();
+            input.tr = stwo_mldsa::statement::native_tr(&input);
+            Some(
+                MlDsaStatementVerifier::hosted_public(
+                    input,
+                    claims.group_evals.clone(),
+                    claims.claimed_sums.clone(),
+                    claims.sib_stream_len,
+                    claims.sib_squeezed_len,
+                    mldsa_keccak_handle.clone(),
+                )
+                .with_instance_namespace(MDOC_ISSUER_MLDSA_NAMESPACE)
+                .with_stream_base(MDOC_ISSUER_MLDSA_STREAM_BASE),
             )
-            .with_instance_namespace(MDOC_ISSUER_MLDSA_NAMESPACE)
-            .with_stream_base(MDOC_ISSUER_MLDSA_STREAM_BASE),
-        ),
+        }
         _ => None,
     };
     // Hosted ML-DSA device verifier, public-message mode (S4): rebuilt from
     // the statement's public input + the proof's claim tree.
     let mut device_mldsa = match (statement.device_input.as_mldsa(), &proof.device_mldsa) {
-        (Some(input), Some(claims)) => Some(
-            MlDsaStatementVerifier::hosted_public(
-                input.clone(),
-                claims.group_evals.clone(),
-                claims.claimed_sums.clone(),
-                claims.sib_stream_len,
-                claims.sib_squeezed_len,
-                mldsa_keccak_handle.clone(),
+        (Some(input), Some(claims)) => {
+            let mut input = input.clone();
+            input.tr = stwo_mldsa::statement::native_tr(&input);
+            Some(
+                MlDsaStatementVerifier::hosted_public(
+                    input,
+                    claims.group_evals.clone(),
+                    claims.claimed_sums.clone(),
+                    claims.sib_stream_len,
+                    claims.sib_squeezed_len,
+                    mldsa_keccak_handle.clone(),
+                )
+                .with_instance_namespace(MDOC_DEVICE_MLDSA_NAMESPACE)
+                .with_stream_base(MDOC_DEVICE_MLDSA_STREAM_BASE),
             )
-            .with_instance_namespace(MDOC_DEVICE_MLDSA_NAMESPACE)
-            .with_stream_base(MDOC_DEVICE_MLDSA_STREAM_BASE),
-        ),
+        }
         _ => None,
     };
     // Hosted ML-DSA revocation verifier, private-message mode: the input is
@@ -3776,6 +3790,7 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
                 input.message.len(),
                 claims.sib_stream_len,
                 MDOC_ISSUER_MLDSA_STREAM_BASE,
+                true,
             ));
         }
         if let Some(input) = statement.device_input.as_mldsa() {
@@ -3787,6 +3802,7 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
                 input.message.len(),
                 claims.sib_stream_len,
                 MDOC_DEVICE_MLDSA_STREAM_BASE,
+                true,
             ));
         }
         if let Some(claims) = proof.revocation_mldsa.as_ref() {
@@ -3794,6 +3810,7 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
                 TS13_REVOCATION_MESSAGE_LEN,
                 claims.sib_stream_len,
                 MDOC_REVOCATION_MLDSA_STREAM_BASE,
+                false,
             ));
         }
         KeccakServiceVerifier::new(shapes, sums.clone(), mldsa_keccak_handle.clone())
@@ -3965,20 +3982,26 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
         modules.push(revocation_public);
     }
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let tree0_start = Instant::now();
         let expected_preprocessed_root = air_core::compute_canonical_preprocessed_root(
             modules.as_mut_slice(),
             expected_pcs_config,
         )
         .map_err(air_core::VerifyError::Stark)?;
+        let tree0_canonical_root = tree0_start.elapsed();
+        let stark_verify_start = Instant::now();
         air_core::verify_with_expected_preprocessed_root_and_payloads(
             modules.as_mut_slice(),
             &proof.stark_proof,
             Some(expected_preprocessed_root),
             &proof.post_interaction_payloads,
-        )
+        )?;
+        Ok((tree0_canonical_root, stark_verify_start.elapsed()))
     })) {
-        Ok(Ok(())) => Ok(MdocCircuitVerifyProfile {
+        Ok(Ok((tree0_canonical_root, stark_verify))) => Ok(MdocCircuitVerifyProfile {
             total: total_start.elapsed(),
+            tree0_canonical_root,
+            stark_verify,
         }),
         Ok(Err(air_core::VerifyError::PreprocessedRootMismatch { got, expected })) => {
             Err(Error::PreprocessedRootMismatch { got, expected })

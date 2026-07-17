@@ -1,6 +1,6 @@
 //! Cross-component LogUp binding relations shared by `coeffs` (yield side),
 //! `decomp` / `sampleinball` (consume side), the `msglink` message-byte producer,
-//! and the three stwo-keccak sponge instances (M6 composed statement). Kept in
+//! and the remaining stwo-keccak sponge jobs (M6 composed statement). Kept in
 //! one place so the composed `MlDsaAir` and the standalone M5 tests wire the
 //! SAME relation instances.
 //!
@@ -33,8 +33,9 @@
 //!   the c̃-chain sponge consumes (−) at a `µ_len`-offset absorb position.
 //! - [`STREAM_ID_SIB_SQUEEZE`] — the SampleInBall-chain sponge yields (+) each
 //!   squeeze byte; the FSM consumes (−).
-//! - The message-rep (µ) / c̃-seam stream ids are declared in [`crate::statement`]
-//!   (composition-layer namespacing), disjoint from these two.
+//! - Private message-rep (µ) / c̃-seam stream ids are declared in
+//!   [`crate::statement`] (composition-layer namespacing), disjoint from these
+//!   two. Public messages use a verifier-native µ constant instead.
 //!
 //! ### `perm_id` namespacing (M3 carry-forward)
 //!

@@ -1,6 +1,6 @@
 //! M6 acceptance for the composed in-circuit ML-DSA-65 statement
 //! (`stwo_mldsa::statement`): ONE `air-core` proof stitching coeffs + decomp +
-//! sib + four SHAKE-256 sponge chains + msglink + bridges/sinks. Positive over
+//! sib + the remaining SHAKE-256 sponge chains + msglink + bridges/sinks. Positive over
 //! 10 oracle signatures with ≥1 KiB messages, a control, the negative matrix
 //! a–g, and an (ignored) numbers probe.
 //!
@@ -16,10 +16,16 @@ use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::SecureField;
 use stwo::core::fri::FriConfig;
 use stwo::core::pcs::PcsConfig;
+use stwo_keccak::relations::SharedKeccakRelations;
+use stwo_keccak::service::KeccakServiceVerifier;
+use stwo_keccak::sponge::Shape;
 
 use stwo_mldsa::reference::encoding::{pk_decode, sig_decode};
 use stwo_mldsa::reference::sponge::shake256;
-use stwo_mldsa::statement::{prove_mldsa, verify_mldsa, PermIdPlan};
+use stwo_mldsa::statement::{
+    native_public_mu, native_tr, prove_mldsa, verify_mldsa, MlDsaVerifier, PermIdPlan,
+    STREAM_BASE_STRIDE,
+};
 use stwo_mldsa::witness::{generate_witness, MlDsaWitness};
 use stwo_mldsa::MlDsaVerifyInput;
 
@@ -58,6 +64,39 @@ fn witness_and_input(seed: u64, msg: &[u8]) -> (MlDsaWitness, MlDsaVerifyInput) 
     let input = oracle_input(seed, msg);
     let witness = generate_witness(&input).expect("witness");
     (witness, input)
+}
+
+#[test]
+fn native_tr_and_role_mu_match_reference() {
+    for (role, seed, use_native_mu) in [
+        ("issuer", 6101, true),
+        ("device", 6102, true),
+        ("revocation", 6103, false),
+    ] {
+        let message = format!("{role} native hash equivalence").into_bytes();
+        let input = oracle_input(seed, &message);
+        assert_eq!(native_tr(&input), input.tr, "{role} tr mismatch");
+
+        let mut absorbed = Vec::with_capacity(66 + message.len());
+        absorbed.extend_from_slice(&input.tr);
+        absorbed.extend_from_slice(&[0x00, 0x00]);
+        absorbed.extend_from_slice(&message);
+        let (reference_mu, _) = shake256(&[&absorbed], 64);
+        if use_native_mu {
+            assert_eq!(
+                native_public_mu(&input).as_slice(),
+                reference_mu.as_slice(),
+                "{role} native µ mismatch"
+            );
+        } else {
+            let witness = generate_witness(&input).expect("revocation witness");
+            assert_eq!(
+                &witness.sponge.mu_squeezed[..64],
+                reference_mu.as_slice(),
+                "revocation private µ mismatch"
+            );
+        }
+    }
 }
 
 /// A ≥1 KiB message (padding a per-case tag out to 1024..2048 bytes).
@@ -197,31 +236,19 @@ fn composed_negative_d_placement_permuted() {
     assert!(rejected(w, input), "placement permutation must be rejected");
 }
 
-/// e) perm-id namespacing: the four chains' perm bases are the running perm
-///    counts, so their id ranges are disjoint by construction — a cross-chain
-///    KeccakState collision is STRUCTURALLY IMPOSSIBLE in this composition.
+/// e) perm-id namespacing: the remaining chains' perm bases are the running
+///    permutation counts. Public-message mode uses `n_mu = 0`.
 #[test]
 fn composed_negative_e_perm_id_namespacing() {
-    // pkHash (1952 bytes ⇒ 15 perms), µ (66+|M|=1090 bytes ⇒ 9 perms),
-    // c̃ (832 bytes ⇒ n_absorb=7, +1 ⇒ 7 perms). Any counts work; assert the
-    // structural disjointness invariant.
-    for (n_pk, n_mu, n_ct) in [(15usize, 9usize, 7usize), (1, 1, 1), (15, 13, 5)] {
-        let plan = PermIdPlan::new(n_pk, n_mu, n_ct);
-        assert_eq!(plan.pk_base, 0);
-        assert_eq!(plan.mu_base, n_pk, "µ base = running count after pkHash");
-        assert_eq!(
-            plan.c_tilde_base,
-            n_pk + n_mu,
-            "c̃ base = running count after µ"
-        );
+    for (n_mu, n_ct) in [(9usize, 7usize), (1, 1), (0, 5)] {
+        let plan = PermIdPlan::new(n_mu, n_ct);
+        assert_eq!(plan.mu_base, 0);
+        assert_eq!(plan.c_tilde_base, n_mu, "c̃ base = running count after µ");
         assert_eq!(
             plan.sib_base,
-            n_pk + n_mu + n_ct,
+            n_mu + n_ct,
             "SIB base = running count after c̃"
         );
-        // Each chain's ids live in [base, base+n_chain), and the next base is
-        // the prior running total, so overlap is arithmetically impossible.
-        assert!(plan.pk_base + n_pk <= plan.mu_base);
         assert!(plan.mu_base + n_mu <= plan.c_tilde_base);
         assert!(plan.c_tilde_base + n_ct <= plan.sib_base);
     }
@@ -255,19 +282,16 @@ fn composed_native_expand_a_rejects_tampered_t1() {
     );
 }
 
-/// g) free-tr regression: keep the valid signature/witness and public key but
-/// flip the public `tr`. The pkHash job still squeezes H(pk), while the public
-/// tr checker requires the flipped byte on that same stream, so LogUp cannot
-/// balance. Transcript binding alone is not the mechanism under test here.
+/// g) free-tr regression: a carried `input.tr` byte is compatibility data only.
+/// Both constructors overwrite it with SHAKE256(pkEncode) before mixing or use.
 #[test]
-fn composed_negative_g_wrong_public_tr() {
+fn composed_carried_tr_is_overwritten_before_use() {
     let msg = big_msg("neg-g", 1024);
     let (w, mut input) = witness_and_input(8007, &msg);
     input.tr[0] ^= 1;
-    assert!(
-        rejected(w, input),
-        "tr not equal to SHAKE256(pkEncode) must be rejected"
-    );
+    let proof = prove_mldsa(w, input, pcs_config()).expect("prove with ignored carried tr");
+    assert_eq!(proof.input.tr, native_tr(&proof.input));
+    verify_mldsa(&proof).expect("native tr must replace the carried value");
 }
 
 // =====================================================================
@@ -306,6 +330,82 @@ fn composed_preprocessed_root_pin_rejects_tampered_root() {
     );
 }
 
+fn legacy_twelve_job_shapes(input: &MlDsaVerifyInput, sib_stream_len: usize) -> Vec<Shape> {
+    let n_sib_squeezes = sib_stream_len.div_ceil(136).max(1);
+    [0, STREAM_BASE_STRIDE, 2 * STREAM_BASE_STRIDE]
+        .into_iter()
+        .flat_map(|base| {
+            [
+                Shape::new(input.encode_pk().len(), 1, base + 8, base + 9),
+                Shape::new(66 + input.message.len(), 1, base + 10, base + 11),
+                Shape::new(832, 1, base + 12, base + 13),
+                Shape::new(48, n_sib_squeezes, base + 14, base + 1),
+            ]
+        })
+        .collect()
+}
+
+#[test]
+fn legacy_twelve_job_service_shape_rejects_via_root_mismatch_without_panic() {
+    // A-702: root equality is direction-free, so new-proof/legacy-root exercises the old-proof/new-root gate.
+    let msg = big_msg("legacy-12-job-root", 1024);
+    let (witness, input) = witness_and_input(8103, &msg);
+    let proof = prove_mldsa(witness, input, pcs_config()).expect("prove new shape");
+    let legacy_shapes = legacy_twelve_job_shapes(&proof.input, proof.sib_stream_len);
+    assert_eq!(legacy_shapes.len(), 12);
+
+    let legacy_root = {
+        let handle = SharedKeccakRelations::new();
+        let mut service = KeccakServiceVerifier::new(
+            legacy_shapes.clone(),
+            proof.service_claimed_sums.clone(),
+            handle.clone(),
+        );
+        let mut verifier = MlDsaVerifier::new(
+            proof.input.clone(),
+            proof.group_evals.clone(),
+            proof.claimed_sums.clone(),
+            proof.sib_stream_len,
+            proof.sib_squeezed_len,
+            None,
+            handle,
+        );
+        air_core::compute_canonical_preprocessed_root(
+            &mut [&mut service, &mut verifier],
+            proof.stark_proof.config,
+        )
+        .expect("legacy canonical root")
+    };
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let handle = SharedKeccakRelations::new();
+        let mut service = KeccakServiceVerifier::new(
+            legacy_shapes,
+            proof.service_claimed_sums.clone(),
+            handle.clone(),
+        );
+        let mut verifier = MlDsaVerifier::new(
+            proof.input.clone(),
+            proof.group_evals.clone(),
+            proof.claimed_sums.clone(),
+            proof.sib_stream_len,
+            proof.sib_squeezed_len,
+            None,
+            handle,
+        );
+        air_core::verify_with_expected_preprocessed_root_and_payloads(
+            &mut [&mut service, &mut verifier],
+            &proof.stark_proof,
+            Some(legacy_root),
+            &proof.post_interaction_payloads,
+        )
+    }));
+    assert!(matches!(
+        result,
+        Ok(Err(air_core::VerifyError::PreprocessedRootMismatch { .. }))
+    ));
+}
+
 // =====================================================================
 // Numbers (ignored): cells, perms, prove/verify ms, proof bytes.
 // =====================================================================
@@ -330,7 +430,7 @@ fn composed_numbers() {
     verify_mldsa(&proof).expect("verify");
     let verify_ms = t1.elapsed().as_millis();
 
-    // Perm count (pkHash + µ + c̃ + SIB permutations).
+    // Perm count (private µ + c̃ + SIB permutations).
     let plan_perms = {
         // Reproduce the sponge shapes to count perms.
         let mu_absorb = w.sponge.mu_absorbed.len();
@@ -340,8 +440,7 @@ fn composed_numbers() {
         let n_absorb = |l: usize| (l + 1).div_ceil(136);
         let sib_stream = proof.sib_stream_len;
         let n_sq_sib = sib_stream.div_ceil(136).max(1);
-        n_absorb(input.encode_pk().len())
-            + (n_absorb(mu_absorb) + 1 - 1)
+        (n_absorb(mu_absorb) + 1 - 1)
             + (n_absorb(ct_absorb) + 1 - 1)
             + (n_absorb(sib_absorb) + n_sq_sib - 1)
     };

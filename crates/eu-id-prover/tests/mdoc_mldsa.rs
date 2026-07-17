@@ -14,8 +14,8 @@
 //! stwo-mldsa constraint) — always pass `--test-threads=1`.
 
 use eu_id_prover::mdoc::{
-    extract_pid_mdoc, openid4vp_session_transcript, ExtractedPidMdoc, MdocCircuitStatement,
-    MdocError, MdocPidRequest, MdocRevocationKey, MdocRevocationPublicInputs,
+    extract_pid_mdoc, openid4vp_session_transcript, ExtractedPidMdoc, MdocAuthInput,
+    MdocCircuitStatement, MdocError, MdocPidRequest, MdocRevocationKey, MdocRevocationPublicInputs,
     MdocRevocationRangeWitness, MdocRevocationSignature,
 };
 use eu_id_prover::ts13::{
@@ -470,21 +470,27 @@ mod quantum_only {
         assert!(rejected, "tampered direct-provider message must reject");
     }
 
-    /// S4 statement-side message tamper: flip one PUBLIC issuer-message byte
-    /// in the statement AFTER proving. The public-message producer's
-    /// preprocessed content (content-hash ids, root-pinned) and the FS-mixed
-    /// message diverge from the proof's transcript → verify must reject.
+    /// Q12 statement-side M′ tamper: flip one PUBLIC issuer/device message byte
+    /// after proving. Since pure-mode `M′ = 0x00 || 0x00 || M`, the
+    /// verifier-native µ and the FS-mixed message diverge from the proof.
     #[test]
-    fn mldsa_mdoc_statement_message_tamper_rejects() {
+    fn mldsa_mdoc_statement_message_tampers_reject() {
         let (extracted, statement) = full_pq_extracted_and_statement();
         let proof = prove_mdoc_circuit(&extracted, &statement).expect("honest prove");
-        let mut tampered = statement.clone();
-        use eu_id_prover::mdoc::IssuerAuthInput;
-        match &mut tampered.issuer_input {
-            IssuerAuthInput::MlDsa(input) => input.message[2] ^= 0x01,
+
+        let mut issuer_tampered = statement.clone();
+        match &mut issuer_tampered.issuer_input {
+            MdocAuthInput::MlDsa(input) => input.message[2] ^= 0x01,
         }
-        verify_mdoc_circuit(&proof, &tampered)
-            .expect_err("tampered statement issuer message must reject");
+        verify_mdoc_circuit(&proof, &issuer_tampered)
+            .expect_err("tampered statement issuer M′ must reject");
+
+        let mut device_tampered = statement;
+        match &mut device_tampered.device_input {
+            MdocAuthInput::MlDsa(input) => input.message[2] ^= 0x01,
+        }
+        verify_mdoc_circuit(&proof, &device_tampered)
+            .expect_err("tampered statement device M′ must reject");
     }
 
     /// The ordinary verifier reconstructs tree 0 itself. A forged proof root,

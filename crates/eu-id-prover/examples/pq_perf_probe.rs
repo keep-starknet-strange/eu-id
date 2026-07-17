@@ -19,8 +19,8 @@ fn main() {
 
     use eu_id_prover::mdoc::{
         extract_pid_mdoc, mdoc_proof_byte_breakdown, openid4vp_session_transcript,
-        prove_mdoc_circuit, verify_mdoc_circuit, MdocCircuitStatement, MdocPidRequest,
-        MdocRevocationKey, MdocRevocationPublicInputs, MdocRevocationRangeWitness,
+        prove_mdoc_circuit, verify_mdoc_circuit_with_pcs_config_profiled, MdocCircuitStatement,
+        MdocPidRequest, MdocRevocationKey, MdocRevocationPublicInputs, MdocRevocationRangeWitness,
         MdocRevocationSignature,
     };
     use eu_id_prover::ts13::ts13_mso_derived_revocation_id;
@@ -82,14 +82,20 @@ fn main() {
     let proof = prove_mdoc_circuit(&extracted, &statement).expect("fully-PQ mdoc proves");
     let prove_ms = prove_start.elapsed().as_millis();
 
-    let verify_start = Instant::now();
-    verify_mdoc_circuit(&proof, &statement).expect("fully-PQ mdoc verifies");
-    let verify_ms = verify_start.elapsed().as_millis();
+    let verify_profile = verify_mdoc_circuit_with_pcs_config_profiled(
+        &proof,
+        &statement,
+        eu_id_prover::mdoc::mdoc_production_pcs_config(),
+    )
+    .expect("fully-PQ mdoc verifies");
+    let verify_ms = verify_profile.total.as_millis();
+    let tree0_root_ms = verify_profile.tree0_canonical_root.as_millis();
+    let stark_verify_ms = verify_profile.stark_verify.as_millis();
 
     let breakdown = mdoc_proof_byte_breakdown(&proof);
     std::fs::write("/tmp/pq_proof.bin", bincode::serialize(&proof).unwrap()).unwrap();
     println!(
-        "PQ_PERF_PROBE rayon_threads={rayon_threads} prove_ms={prove_ms} verify_ms={verify_ms} proof_bytes={}",
+        "PQ_PERF_PROBE rayon_threads={rayon_threads} prove_ms={prove_ms} verify_ms={verify_ms} tree0_root_ms={tree0_root_ms} stark_verify_ms={stark_verify_ms} proof_bytes={}",
         breakdown.proof_bytes
     );
     println!(

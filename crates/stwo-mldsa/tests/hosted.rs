@@ -42,8 +42,8 @@ use stwo_mldsa::air_util::{col_eval, m31, ColEval};
 use stwo_mldsa::reference::encoding::{pk_decode, sig_decode};
 use stwo_mldsa::reference::sponge::shake256;
 use stwo_mldsa::statement::{
-    keccak_job_shapes, MlDsaProof, MlDsaProver, MlDsaVerifier, HOSTED_MSG_FIELD_ID,
-    STREAM_BASE_STRIDE,
+    hosted_public_claimed_sums_len, keccak_job_shapes, MlDsaProof, MlDsaProver, MlDsaVerifier,
+    HOSTED_MSG_FIELD_ID, STREAM_BASE_STRIDE,
 };
 use stwo_mldsa::witness::generate_witness;
 use stwo_mldsa::MlDsaVerifyInput;
@@ -309,7 +309,7 @@ fn verify_hosted(
     // bytes, so the same FieldProducer serves verification with no witness.
     let mut producer = FieldProducer::new(producer_bytes, handle.clone());
     let mut service = KeccakServiceVerifier::new(
-        keccak_job_shapes(proof.input.message.len(), proof.sib_stream_len, 0),
+        keccak_job_shapes(proof.input.message.len(), proof.sib_stream_len, 0, false),
         proof.service_claimed_sums.clone(),
         keccak_handle.clone(),
     );
@@ -334,6 +334,58 @@ fn verify_hosted(
     })
 }
 
+fn prove_hosted_public(seed: u64, msg: &[u8]) -> MlDsaProof {
+    let input = oracle_input(seed, msg);
+    let witness = generate_witness(&input).expect("witness");
+    let keccak_handle = SharedKeccakRelations::new();
+    let mut mldsa = MlDsaProver::hosted_public(witness, input, keccak_handle.clone());
+    let (job_shapes, job_streams) = mldsa.keccak_jobs();
+    assert_eq!(job_shapes.len(), 2, "native-µ mode keeps only c̃ and SIB");
+    let mut service = KeccakServiceProver::new(job_shapes, job_streams, keccak_handle);
+    let (stark_proof, post_interaction_payloads) =
+        air_core::prove_with_post_interaction(&mut [&mut service, &mut mldsa], pcs_config())
+            .expect("hosted-public prove");
+    let claimed_sums = mldsa.claimed_sums();
+    assert_eq!(claimed_sums.len(), hosted_public_claimed_sums_len());
+    MlDsaProof {
+        input: mldsa.input().clone(),
+        group_evals: mldsa.group_evals().to_vec(),
+        claimed_sums,
+        sib_stream_len: mldsa.sib_stream_len(),
+        sib_squeezed_len: mldsa.sib_squeezed_len(),
+        service_claimed_sums: service.claimed_sums(),
+        post_interaction_payloads,
+        stark_proof,
+    }
+}
+
+fn verify_hosted_public(proof: &MlDsaProof) -> Result<(), stwo::core::verifier::VerificationError> {
+    let keccak_handle = SharedKeccakRelations::new();
+    let mut service = KeccakServiceVerifier::new(
+        keccak_job_shapes(proof.input.message.len(), proof.sib_stream_len, 0, true),
+        proof.service_claimed_sums.clone(),
+        keccak_handle.clone(),
+    );
+    let mut mldsa = MlDsaVerifier::hosted_public(
+        proof.input.clone(),
+        proof.group_evals.clone(),
+        proof.claimed_sums.clone(),
+        proof.sib_stream_len,
+        proof.sib_squeezed_len,
+        keccak_handle,
+    );
+    air_core::verify_with_expected_preprocessed_root_and_payloads(
+        &mut [&mut service, &mut mldsa],
+        &proof.stark_proof,
+        None,
+        &proof.post_interaction_payloads,
+    )
+    .map_err(|error| match error {
+        air_core::VerifyError::Stark(error) => error,
+        air_core::VerifyError::PreprocessedRootMismatch { .. } => unreachable!("no root pinned"),
+    })
+}
+
 // =====================================================================
 // Tests.
 // =====================================================================
@@ -343,6 +395,54 @@ fn hosted_proves_and_verifies() {
     let msg = b"m7-phase-a-hosted-swap: the message bytes come from the host".to_vec();
     let proof = prove_hosted(4242, &msg, msg.clone());
     verify_hosted(&proof, msg.clone()).expect("hosted verify");
+}
+
+#[test]
+fn hosted_public_native_mu_proves_and_verifies() {
+    let msg = b"issuer/device public message uses verifier-native mu".to_vec();
+    let proof = prove_hosted_public(4244, &msg);
+    verify_hosted_public(&proof).expect("hosted-public verify");
+}
+
+#[test]
+fn hosted_public_message_tamper_rejects_native_mu_prefix() {
+    let msg = b"issuer/device public message native mu tamper".to_vec();
+    let mut proof = prove_hosted_public(4245, &msg);
+    proof.input.message[0] ^= 1;
+    assert!(
+        verify_hosted_public(&proof).is_err(),
+        "tampered public message must change verifier-native µ and reject"
+    );
+}
+
+#[test]
+fn hosted_public_native_mu_mismatch_returns_error_not_panic() {
+    let msg = b"native mu mismatch is an AIR rejection".to_vec();
+    let mut input = oracle_input(4247, &msg);
+    let witness = generate_witness(&input).expect("honest witness");
+    input.message[0] ^= 1;
+
+    let handle = SharedKeccakRelations::new();
+    let mut mldsa = MlDsaProver::hosted_public(witness, input, handle.clone());
+    let (job_shapes, job_streams) = mldsa.keccak_jobs();
+    let mut service = KeccakServiceProver::new(job_shapes, job_streams, handle);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        air_core::prove_with_post_interaction(&mut [&mut service, &mut mldsa], pcs_config())
+    }));
+    let (stark_proof, post_interaction_payloads) = result
+        .expect("native µ mismatch must not panic")
+        .expect("prover may commit the inconsistent trace; verifier rejects it");
+    let proof = MlDsaProof {
+        input: mldsa.input().clone(),
+        group_evals: mldsa.group_evals().to_vec(),
+        claimed_sums: mldsa.claimed_sums(),
+        sib_stream_len: mldsa.sib_stream_len(),
+        sib_squeezed_len: mldsa.sib_squeezed_len(),
+        service_claimed_sums: service.claimed_sums(),
+        post_interaction_payloads,
+        stark_proof,
+    };
+    assert!(verify_hosted_public(&proof).is_err());
 }
 
 #[test]
@@ -374,14 +474,19 @@ fn hosted_tampered_message_byte_rejects() {
 }
 
 #[test]
-fn hosted_tampered_public_tr_rejects() {
-    let msg = b"hosted pkHash binds the public tr bytes".to_vec();
+fn hosted_carried_tr_is_overwritten_before_use() {
+    let msg = b"hosted carried tr is compatibility data only".to_vec();
     let mut proof = prove_hosted(4243, &msg, msg.clone());
     proof.input.tr[0] ^= 1;
-    assert!(
-        verify_hosted(&proof, msg).is_err(),
-        "hosted verification must reject tr != SHAKE256(pkEncode)"
-    );
+    verify_hosted(&proof, msg).expect("carried tr must not influence verification");
+}
+
+#[test]
+fn hosted_public_key_tamper_recomputes_tr_and_rejects() {
+    let msg = b"hosted native tr remains bound to the public key".to_vec();
+    let mut proof = prove_hosted(4246, &msg, msg.clone());
+    proof.input.rho[0] ^= 1;
+    assert!(verify_hosted(&proof, msg).is_err());
 }
 
 // =====================================================================
@@ -493,8 +598,13 @@ fn verify_two_hosted(
     let mut producer_a = FieldProducer::new(producer_a_bytes, handle_a.clone());
     let mut producer_b = FieldProducer::new(producer_b_bytes, handle_b.clone());
     let job_shapes = [
-        keccak_job_shapes(a.input.message.len(), a.sib_stream_len, 0),
-        keccak_job_shapes(b.input.message.len(), b.sib_stream_len, STREAM_BASE_STRIDE),
+        keccak_job_shapes(a.input.message.len(), a.sib_stream_len, 0, false),
+        keccak_job_shapes(
+            b.input.message.len(),
+            b.sib_stream_len,
+            STREAM_BASE_STRIDE,
+            false,
+        ),
     ]
     .concat();
     let mut service =

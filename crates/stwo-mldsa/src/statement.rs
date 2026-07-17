@@ -12,11 +12,11 @@
 //!     bytes into the c̃-absorb stream.
 //!   * `sib`         — SampleInBall FSM; consumes C-cells + the SIB squeeze stream.
 //!   * `msglink`     — the public message-byte producer (M7 swap point).
-//!   * public-byte links / bridges / sinks ([`crate::sponge_link`]) that bind
-//!     `pkEncode → tr`, move bytes between the remaining HashIo streams, and
-//!     close every squeeze balance.
+//!   * public-byte links / bridges / sinks ([`crate::sponge_link`]) that feed
+//!     verifier-native `tr`/µ constants, move bytes between the remaining
+//!     HashIo streams, and close every squeeze balance.
 //!
-//! The four SHAKE-256 signature chains are jobs of the proof-wide
+//! The remaining SHAKE-256 signature chains are jobs of the proof-wide
 //! [`stwo_keccak::service::KeccakServiceProver`], which owns the rotated
 //! sponge + keccak + round + tables ONCE for all hosted instances and
 //! publishes the drawn [`KeccakRelations`] through a
@@ -61,12 +61,11 @@ use crate::binding::{
     CCellRelation, HashIoRelation, MsgLinkRelation, WCellRelation, STREAM_ID_CTILDE_ABSORB,
     STREAM_ID_SIB_SQUEEZE,
 };
-use crate::constants::{K, N, PK_BYTES, TAU};
+use crate::constants::{K, N, TAU};
 use crate::msglink::{self, MsgLinkEval, MSG_FIELD_ID};
 use crate::sponge_link::{
-    BridgeEval, PubMsgEval, PublicPrefixEval, SqueezeSinkEval, SrcRelation, BRIDGE_BASE_COLS,
-    BRIDGE_INTERACTION_COLS, PREFIX_BASE_COLS, PUBMSG_BASE_COLS, PUBMSG_INTERACTION_COLS,
-    SINK_BASE_COLS, SINK_INTERACTION_COLS,
+    BridgeEval, PublicPrefixEval, SqueezeSinkEval, SrcRelation, BRIDGE_BASE_COLS,
+    BRIDGE_INTERACTION_COLS, PREFIX_BASE_COLS, SINK_BASE_COLS, SINK_INTERACTION_COLS,
 };
 use crate::types::MlDsaVerifyInput;
 use crate::verifier_native::{compute_public_evals, folded_check, ClaimedEvals};
@@ -97,9 +96,9 @@ use crate::sampleinball::{self, SibEval};
 // [`STREAM_ID_SIB_SQUEEZE`] = 1) live in `binding.rs`. Bases retain the
 // protocol's 128-wide namespace stride.
 
-/// µ-chain absorb stream offset (`tr ‖ 0x00 ‖ 0x00 ‖ M`).
+/// Private µ-chain absorb stream offset (`tr ‖ 0x00 ‖ 0x00 ‖ M`).
 pub const MU_ABSORB: u32 = 10;
-/// µ-chain squeeze stream offset.
+/// Private µ-chain squeeze stream offset.
 pub const MU_SQUEEZE: u32 = 11;
 /// c̃-chain absorb stream offset (`µ ‖ w1Encode(w1')`).
 pub const CT_ABSORB: u32 = 12;
@@ -107,11 +106,6 @@ pub const CT_ABSORB: u32 = 12;
 pub const CT_SQUEEZE: u32 = 13;
 /// SIB-chain absorb stream offset (`c̃`).
 pub const SIB_ABSORB: u32 = 14;
-/// Public-key-hash absorb stream offset (`pkEncode`).
-pub const PK_ABSORB: u32 = 8;
-/// Public-key-hash squeeze stream offset (`tr ‖ unused tail`).
-pub const PK_SQUEEZE: u32 = 9;
-
 /// Minimum spacing between two instances' `stream_base` values.
 pub const STREAM_BASE_STRIDE: u32 = 128;
 
@@ -156,10 +150,10 @@ pub const HOSTED_MSG_FIELD_ID: u32 = 0;
 // Perm-id namespacing plan (extended from the M6 placeholder).
 // =============================================================================
 
-/// Disjoint `perm_id_base` assignment across the four SHAKE-256 sponge chains
-/// (M3 carry-forward): each chain's Keccak-f[1600] permutation ids are offset so
-/// the shared [`stwo_keccak::relations::KeccakStateRelation`] never crosses
-/// chains. The base of chain `n+1` is the running perm count after chain `n`.
+/// Disjoint `perm_id_base` assignment across the remaining SHAKE-256 sponge
+/// chains (M3 carry-forward): each chain's Keccak-f[1600] permutation ids are
+/// offset so the shared [`stwo_keccak::relations::KeccakStateRelation`] never
+/// crosses chains. Public-message instances omit the µ chain (`n_mu = 0`).
 ///
 /// Since S1 the assignment is executed by
 /// [`stwo_keccak::sponge_v::JobList::new`] over the proof-wide concatenated
@@ -167,7 +161,6 @@ pub const HOSTED_MSG_FIELD_ID: u32 = 0;
 /// reference for the disjointness argument).
 #[derive(Clone, Copy, Debug)]
 pub struct PermIdPlan {
-    pub pk_base: usize,
     pub mu_base: usize,
     pub c_tilde_base: usize,
     pub sib_base: usize,
@@ -176,19 +169,17 @@ pub struct PermIdPlan {
 impl PermIdPlan {
     /// Build the plan from each chain's permutation count, laid out contiguously
     /// and disjointly: µ occupies `[0, n_mu)`, c̃ `[n_mu, n_mu+n_ct)`, SIB the rest.
-    pub fn new(n_pk: usize, n_mu: usize, n_c_tilde: usize) -> Self {
+    pub fn new(n_mu: usize, n_c_tilde: usize) -> Self {
         Self {
-            pk_base: 0,
-            mu_base: n_pk,
-            c_tilde_base: n_pk + n_mu,
-            sib_base: n_pk + n_mu + n_c_tilde,
+            mu_base: 0,
+            c_tilde_base: n_mu,
+            sib_base: n_mu + n_c_tilde,
         }
     }
 
-    /// Build the plan directly from the four sponge shapes (the composition's
-    /// single source of truth for perm bases).
-    pub fn from_shapes(pk: &Shape, mu: &Shape, ct: &Shape) -> Self {
-        Self::new(pk.n_perms(), mu.n_perms(), ct.n_perms())
+    /// Build the plan directly from the optional private-µ and c̃ sponge shapes.
+    pub fn from_shapes(mu: Option<&Shape>, ct: &Shape) -> Self {
+        Self::new(mu.map_or(0, Shape::n_perms), ct.n_perms())
     }
 }
 
@@ -228,15 +219,14 @@ pub struct MlDsaProof {
 // Shared shape derivation (identical prover / verifier).
 // =============================================================================
 
-/// The four sponge shapes for a statement, derived from PUBLIC data only.
+/// The remaining sponge shapes for a statement, derived from PUBLIC data only.
 ///
-/// * pk: absorbs canonical `pkEncode(ρ, t1)` (1,952 bytes), squeezes 1 block.
-/// * µ:  absorbs `tr ‖ 0x00 ‖ 0x00 ‖ M` (len `66 + |M|`), squeezes 1 block.
+/// * µ:  private-message mode only; absorbs `tr ‖ 0x00 ‖ 0x00 ‖ M`
+///   (len `66 + |M|`), squeezes 1 block.
 /// * c̃:  absorbs `µ ‖ w1Encode(w1')` (len 832 = 64 + 768), squeezes 1 block.
 /// * SIB: absorbs `c̃` (48 bytes), squeezes `ceil(sib_stream_len / 136)` blocks.
 struct Shapes {
-    pk: Shape,
-    mu: Shape,
+    mu: Option<Shape>,
     ct: Shape,
     sib: Shape,
 }
@@ -245,14 +235,13 @@ fn n_squeeze_sib(sib_stream_len: usize) -> usize {
     sib_stream_len.div_ceil(RATE).max(1)
 }
 
-/// The instance's four SHAKE256 signature-job shapes, stream ids offset by
-/// `stream_base`.
+/// The instance's SHAKE256 signature-job shapes, stream ids offset by
+/// `stream_base`. `native_mu` omits the private µ job.
 /// Perm-id bases stay 0 — the proof-wide [`stwo_keccak::sponge_v::JobList`]
 /// stamps the global plan over the concatenated job list.
-fn shapes(message_len: usize, sib_stream_len: usize, stream_base: u32) -> Shapes {
+fn shapes(message_len: usize, sib_stream_len: usize, stream_base: u32, native_mu: bool) -> Shapes {
     let b = stream_base;
-    let pk = Shape::new(PK_BYTES, 1, b + PK_ABSORB, b + PK_SQUEEZE);
-    let mu = Shape::new(66 + message_len, 1, b + MU_ABSORB, b + MU_SQUEEZE);
+    let mu = (!native_mu).then(|| Shape::new(66 + message_len, 1, b + MU_ABSORB, b + MU_SQUEEZE));
     let ct = Shape::new(64 + 768, 1, b + CT_ABSORB, b + CT_SQUEEZE);
     let sib = Shape::new(
         48,
@@ -260,18 +249,20 @@ fn shapes(message_len: usize, sib_stream_len: usize, stream_base: u32) -> Shapes
         b + SIB_ABSORB,
         b + STREAM_ID_SIB_SQUEEZE,
     );
-    Shapes { pk, mu, ct, sib }
+    Shapes { mu, ct, sib }
 }
 
-/// PUBLIC: all sponge jobs contributed to the proof-wide service: pkHash, µ,
-/// c̃, then SIB.
+/// PUBLIC: all sponge jobs contributed to the proof-wide service: optional
+/// private µ, then c̃ and SIB. `native_mu = true` is the hosted-public
+/// issuer/device shape; `false` is standalone/private revocation.
 pub fn keccak_job_shapes(
     message_len: usize,
     sib_stream_len: usize,
     stream_base: u32,
+    native_mu: bool,
 ) -> Vec<Shape> {
-    let sh = shapes(message_len, sib_stream_len, stream_base);
-    vec![sh.pk, sh.mu, sh.ct, sh.sib]
+    let sh = shapes(message_len, sib_stream_len, stream_base, native_mu);
+    sh.mu.into_iter().chain([sh.ct, sh.sib]).collect()
 }
 
 // =============================================================================
@@ -436,50 +427,51 @@ fn bridge_log_size(len: usize) -> u32 {
     padded_log_size(len).max(LOG_N_LANES)
 }
 
-/// Public canonical `pkEncode(ρ,t1)` bytes into the pkHash absorb stream.
-fn pk_eval(
-    input: &MlDsaVerifyInput,
-    stream_base: u32,
-    hash_io: &HashIoRelation,
-) -> PublicPrefixEval {
-    PublicPrefixEval {
-        dst_stream: stream_base + PK_ABSORB,
-        dst_off: 0,
-        bytes: input.encode_pk(),
-        yield_positive: true,
-        hash_io: hash_io.clone(),
-    }
+/// Verifier-native `tr = SHAKE256(pkEncode(ρ,t1), 64)`.
+///
+/// This is the only source of `tr` used by the composed statement. Constructors
+/// overwrite the compatibility field `input.tr` with this value before mixing
+/// or building any component.
+pub fn native_tr(input: &MlDsaVerifyInput) -> [u8; 64] {
+    let bytes = full_squeeze(&input.encode_pk(), 1);
+    let mut tr = [0u8; 64];
+    tr.copy_from_slice(&bytes[..64]);
+    tr
 }
 
-/// Require the first 64 pkHash squeeze bytes to equal the public `input.tr`.
-/// Both the pkHash sponge and this checker use the same HashIo tuples, so a
-/// free or mismatched `tr` leaves the global LogUp sum unbalanced.
-fn tr_check_eval(
-    input: &MlDsaVerifyInput,
-    stream_base: u32,
-    hash_io: &HashIoRelation,
-) -> PublicPrefixEval {
-    PublicPrefixEval {
-        dst_stream: stream_base + PK_SQUEEZE,
-        dst_off: 0,
-        bytes: input.tr.to_vec(),
-        yield_positive: false,
-        hash_io: hash_io.clone(),
-    }
+/// Verifier-native public-message `µ = SHAKE256(tr ‖ 0x00 ‖ 0x00 ‖ M, 64)`.
+/// `tr` is recomputed from `pkEncode`; no carried `input.tr` byte is trusted.
+pub fn native_public_mu(input: &MlDsaVerifyInput) -> [u8; 64] {
+    let mut absorbed = Vec::with_capacity(66 + input.message.len());
+    absorbed.extend_from_slice(&native_tr(input));
+    absorbed.extend_from_slice(&[0x00, 0x00]);
+    absorbed.extend_from_slice(&input.message);
+    let bytes = full_squeeze(&absorbed, 1);
+    let mut mu = [0u8; 64];
+    mu.copy_from_slice(&bytes[..64]);
+    mu
 }
 
-/// The public-prefix producer: `tr ‖ 0x00 ‖ 0x00` (66 bytes) into µ-absorb@0.
+/// Public constants feeding the next in-circuit sponge:
+///
+/// - private-message mode: native `tr ‖ 0x00 ‖ 0x00` into µ-absorb;
+/// - public-message mode: native µ directly into c̃-absorb.
 fn prefix_eval(
     input: &MlDsaVerifyInput,
     stream_base: u32,
+    native_mu: bool,
     hash_io: &HashIoRelation,
 ) -> PublicPrefixEval {
-    let mut bytes = Vec::with_capacity(66);
-    bytes.extend_from_slice(&input.tr);
-    bytes.push(0x00);
-    bytes.push(0x00);
+    let (dst_stream, bytes) = if native_mu {
+        (stream_base + CT_ABSORB, native_public_mu(input).to_vec())
+    } else {
+        let mut bytes = Vec::with_capacity(66);
+        bytes.extend_from_slice(&input.tr);
+        bytes.extend_from_slice(&[0x00, 0x00]);
+        (stream_base + MU_ABSORB, bytes)
+    };
     PublicPrefixEval {
-        dst_stream: stream_base + MU_ABSORB,
+        dst_stream,
         dst_off: 0,
         bytes,
         yield_positive: true,
@@ -487,100 +479,55 @@ fn prefix_eval(
     }
 }
 
-/// The message slot at commit order 11: a msg BRIDGE (standalone / hosted
-/// private message — source MsgLink or the host's shared FieldBytesRelation),
-/// or the PUBLIC-message producer (S4: hosted public message — the bytes are
-/// preprocessed content, no source consumption, no byte conveyor upstream).
-enum MsgSlot {
-    Bridge(Box<BridgeEval>),
-    Public(PubMsgEval),
-}
-
-impl MsgSlot {
-    fn preprocessed_ids(&self) -> Vec<PreProcessedColumnId> {
-        match self {
-            MsgSlot::Bridge(b) => b.preprocessed_ids(),
-            MsgSlot::Public(p) => p.preprocessed_ids(),
-        }
-    }
-    fn gen_preprocessed(&self) -> Vec<ColEval> {
-        match self {
-            MsgSlot::Bridge(b) => b.gen_preprocessed(),
-            MsgSlot::Public(p) => p.gen_preprocessed(),
-        }
-    }
-    /// Base trace; `message` is the msg-bridge byte payload (unused by the
-    /// public producer, whose bytes are preprocessed).
-    fn gen_base(&self, message: &[u8]) -> Vec<ColEval> {
-        match self {
-            MsgSlot::Bridge(b) => b.gen_base(message),
-            MsgSlot::Public(p) => p.gen_base(),
-        }
-    }
-    fn gen_interaction(&self, message: &[u8]) -> (Vec<ColEval>, SecureField) {
-        match self {
-            MsgSlot::Bridge(b) => b.gen_interaction(message),
-            MsgSlot::Public(p) => p.gen_interaction(),
-        }
-    }
-}
-
-/// The commit-order-11 message slot descriptor. In public-message mode the
-/// producer carries the PUBLIC bytes; otherwise the msg bridge sources from
-/// the standalone MsgLink producer or the host's shared FieldBytesRelation.
-fn msg_slot(
+/// The private/standalone message bridge into µ-absorb@66. Public-message mode
+/// computes µ natively and omits this component entirely.
+fn msg_bridge_eval(
     ns: &str,
-    message: &[u8],
+    message_len: usize,
     stream_base: u32,
-    public_message: bool,
     msglink: &MsgLinkRelation,
     shared_field: Option<&FieldBytesRelation>,
     hash_io: &HashIoRelation,
-) -> MsgSlot {
+) -> BridgeEval {
     let b = stream_base;
-    if public_message {
-        return MsgSlot::Public(PubMsgEval {
-            ns: ns.to_string(),
-            log_size: bridge_log_size(message.len()),
-            dst_stream: b + MU_ABSORB,
-            dst_off: 66,
-            bytes: message.to_vec(),
-            hash_io: hash_io.clone(),
-        });
-    }
-    // msg bridge → MU_ABSORB@66, len |M|. Source is the standalone MsgLink
-    // producer, OR (hosted) the host's shared FieldBytesRelation.
     let msg_src = match shared_field {
         None => SrcRelation::MsgLink(msglink.clone(), MSG_FIELD_ID),
         Some(field) => SrcRelation::FieldBytes(field.clone(), HOSTED_MSG_FIELD_ID),
     };
-    MsgSlot::Bridge(Box::new(BridgeEval {
+    BridgeEval {
         tag: "msg",
         ns: ns.to_string(),
-        log_size: bridge_log_size(message.len()),
+        log_size: bridge_log_size(message_len),
         src: msg_src,
         dst_stream: b + MU_ABSORB,
         dst_off: 66,
-        len: message.len(),
+        len: message_len,
         hash_io: hash_io.clone(),
-    }))
+    }
 }
 
-/// The three fixed bridges (order 12..14).
-fn bridge_evals(ns: &str, stream_base: u32, hash_io: &HashIoRelation) -> [BridgeEval; 3] {
+/// The remaining fixed bridges. Private mode starts with µ→c̃; native-µ mode
+/// starts directly with w1Encode→c̃.
+fn bridge_evals(
+    ns: &str,
+    stream_base: u32,
+    native_mu: bool,
+    hash_io: &HashIoRelation,
+) -> Vec<BridgeEval> {
     let b = stream_base;
-    // 10. µ→c̃ bridge: HashIo(MU_SQUEEZE, off 0) → CT_ABSORB@0, len 64.
-    let mu_ct = BridgeEval {
-        tag: "mu_ct",
-        ns: ns.to_string(),
-        log_size: bridge_log_size(64),
-        src: SrcRelation::HashIo(hash_io.clone(), b + MU_SQUEEZE, 0),
-        dst_stream: b + CT_ABSORB,
-        dst_off: 0,
-        len: 64,
-        hash_io: hash_io.clone(),
-    };
-    // 11. w1Encode bridge: HashIo(ctilde_absorb, off 0) → CT_ABSORB@64, len 768.
+    let mut bridges = Vec::with_capacity(if native_mu { 2 } else { 3 });
+    if !native_mu {
+        bridges.push(BridgeEval {
+            tag: "mu_ct",
+            ns: ns.to_string(),
+            log_size: bridge_log_size(64),
+            src: SrcRelation::HashIo(hash_io.clone(), b + MU_SQUEEZE, 0),
+            dst_stream: b + CT_ABSORB,
+            dst_off: 0,
+            len: 64,
+            hash_io: hash_io.clone(),
+        });
+    }
     let w1enc = BridgeEval {
         tag: "w1enc",
         ns: ns.to_string(),
@@ -591,7 +538,6 @@ fn bridge_evals(ns: &str, stream_base: u32, hash_io: &HashIoRelation) -> [Bridge
         len: 768,
         hash_io: hash_io.clone(),
     };
-    // 12. c̃→SIB bridge: HashIo(CT_SQUEEZE, off 0) → SIB_ABSORB@0, len 48.
     let ct_sib = BridgeEval {
         tag: "ct_sib",
         ns: ns.to_string(),
@@ -602,42 +548,35 @@ fn bridge_evals(ns: &str, stream_base: u32, hash_io: &HashIoRelation) -> [Bridge
         len: 48,
         hash_io: hash_io.clone(),
     };
-    [mu_ct, w1enc, ct_sib]
+    bridges.extend([w1enc, ct_sib]);
+    bridges
 }
 
-/// The four squeeze sinks (order 15..18): consume the unused squeeze tails.
+/// Consume the remaining squeeze tails. Native-µ mode has only c̃ and SIB;
+/// private mode also has µ.
 fn sink_evals(
     ns: &str,
     message_len: usize,
     sib_stream_len: usize,
     stream_base: u32,
+    native_mu: bool,
     hash_io: &HashIoRelation,
-) -> [SqueezeSinkEval; 4] {
+) -> Vec<SqueezeSinkEval> {
     let b = stream_base;
-    let sh = shapes(message_len, sib_stream_len, b);
-    // 15. pkHash sink: PK_SQUEEZE, off 64, len 136·n_squeeze_pk − 64.
-    let pk_len = RATE * sh.pk.n_squeeze - 64;
-    let pk = SqueezeSinkEval {
-        tag: "pk",
-        ns: ns.to_string(),
-        log_size: bridge_log_size(pk_len),
-        stream: b + PK_SQUEEZE,
-        off: 64,
-        len: pk_len,
-        hash_io: hash_io.clone(),
-    };
-    // 16. µ sink: MU_SQUEEZE, off 64, len 136·n_squeeze_mu − 64.
-    let mu_len = RATE * sh.mu.n_squeeze - 64;
-    let mu = SqueezeSinkEval {
-        tag: "mu",
-        ns: ns.to_string(),
-        log_size: bridge_log_size(mu_len),
-        stream: b + MU_SQUEEZE,
-        off: 64,
-        len: mu_len,
-        hash_io: hash_io.clone(),
-    };
-    // 17. c̃ sink: CT_SQUEEZE, off 48, len 136·n_squeeze_ct − 48.
+    let sh = shapes(message_len, sib_stream_len, b, native_mu);
+    let mut sinks = Vec::with_capacity(if native_mu { 2 } else { 3 });
+    if let Some(mu) = sh.mu {
+        let mu_len = RATE * mu.n_squeeze - 64;
+        sinks.push(SqueezeSinkEval {
+            tag: "mu",
+            ns: ns.to_string(),
+            log_size: bridge_log_size(mu_len),
+            stream: b + MU_SQUEEZE,
+            off: 64,
+            len: mu_len,
+            hash_io: hash_io.clone(),
+        });
+    }
     let ct_len = RATE * sh.ct.n_squeeze - 48;
     let ct = SqueezeSinkEval {
         tag: "ct",
@@ -648,7 +587,6 @@ fn sink_evals(
         len: ct_len,
         hash_io: hash_io.clone(),
     };
-    // 18. SIB sink: SIB_SQUEEZE, off sib_stream_len, len 136·n_squeeze_sib − sib_stream_len.
     let sib_len = RATE * sh.sib.n_squeeze - sib_stream_len;
     let sib = SqueezeSinkEval {
         tag: "sib",
@@ -659,7 +597,8 @@ fn sink_evals(
         len: sib_len,
         hash_io: hash_io.clone(),
     };
-    [pk, mu, ct, sib]
+    sinks.extend([ct, sib]);
+    sinks
 }
 
 // =============================================================================
@@ -668,7 +607,7 @@ fn sink_evals(
 
 /// Preprocessed column ids in commit order. msglink + public links contribute NONE;
 /// the keccak side (sponges/keccak/round/tables) lives in the SERVICE module
-/// since S1 and contributes nothing here; bridges + sinks do.
+/// since S1 and contributes nothing here; private bridges + remaining sinks do.
 ///
 /// This is called BEFORE relations are drawn (air-core commits the preprocessed
 /// tree first), so the bridge/sink descriptors use `dummy()` relations — their
@@ -696,23 +635,24 @@ fn all_preprocessed_ids(
     for kind in sib_tables::RcKind::ALL {
         ids.push(kind.value_column_id());
     }
-    // msg slot + 3 bridges + 3 sinks.
-    ids.extend(
-        msg_slot(
-            ns,
-            &input.message,
-            0,
-            public_message,
-            &msglink,
-            None,
-            &hash_io,
-        )
-        .preprocessed_ids(),
-    );
-    for b in bridge_evals(ns, 0, &hash_io) {
+    // Private message bridge, remaining fixed bridges, and sinks.
+    if !public_message {
+        ids.extend(
+            msg_bridge_eval(ns, input.message.len(), 0, &msglink, None, &hash_io)
+                .preprocessed_ids(),
+        );
+    }
+    for b in bridge_evals(ns, 0, public_message, &hash_io) {
         ids.extend(b.preprocessed_ids());
     }
-    for s in sink_evals(ns, input.message.len(), sib_stream_len, 0, &hash_io) {
+    for s in sink_evals(
+        ns,
+        input.message.len(),
+        sib_stream_len,
+        0,
+        public_message,
+        &hash_io,
+    ) {
         ids.extend(s.preprocessed_ids());
     }
     ids
@@ -741,40 +681,35 @@ fn all_preprocessed_log_sizes(
     for kind in sib_tables::RcKind::ALL {
         sizes.push(kind.log_size());
     }
-    // msg slot: the public producer has 3 preprocessed cols, the bridge 2.
-    let msg_pre_cols = if public_message {
-        PUBMSG_PREPROCESSED_COLS
-    } else {
-        2
-    };
-    sizes.extend(vec![bridge_log_size(input.message.len()); msg_pre_cols]);
-    for len in bridge_lens() {
-        // each bridge contributes 2 preprocessed cols at its log_size.
-        sizes.push(bridge_log_size(len));
-        sizes.push(bridge_log_size(len));
+    if !public_message {
+        sizes.extend(vec![bridge_log_size(input.message.len()); 2]);
     }
-    for len in sink_lens(input.message.len(), sib_stream_len) {
-        sizes.push(bridge_log_size(len));
-        sizes.push(bridge_log_size(len));
+    for len in bridge_lens(public_message) {
+        sizes.extend(vec![bridge_log_size(len); 2]);
+    }
+    for len in sink_lens(input.message.len(), sib_stream_len, public_message) {
+        sizes.extend(vec![bridge_log_size(len); 2]);
     }
     sizes
 }
 
-/// Preprocessed column count of the public-message producer (`active`, `pos`,
-/// `byte`).
-const PUBMSG_PREPROCESSED_COLS: usize = 3;
-
-fn bridge_lens() -> [usize; 3] {
-    [64, 768, 48]
+fn bridge_lens(native_mu: bool) -> Vec<usize> {
+    if native_mu {
+        vec![768, 48]
+    } else {
+        vec![64, 768, 48]
+    }
 }
-fn sink_lens(message_len: usize, sib_stream_len: usize) -> [usize; 4] {
-    let sh = shapes(message_len, sib_stream_len, 0);
-    [
-        RATE * sh.pk.n_squeeze - 64,
-        RATE * sh.mu.n_squeeze - 64,
-        RATE * sh.ct.n_squeeze - 48,
-        RATE * sh.sib.n_squeeze - sib_stream_len,
-    ]
+fn sink_lens(message_len: usize, sib_stream_len: usize, native_mu: bool) -> Vec<usize> {
+    let sh = shapes(message_len, sib_stream_len, 0, native_mu);
+    sh.mu
+        .into_iter()
+        .map(|mu| RATE * mu.n_squeeze - 64)
+        .chain([
+            RATE * sh.ct.n_squeeze - 48,
+            RATE * sh.sib.n_squeeze - sib_stream_len,
+        ])
+        .collect()
 }
 
 /// Generate every preprocessed column in commit order (prover-only; runs BEFORE
@@ -808,22 +743,23 @@ fn gen_all_preprocessed(
     for kind in sib_tables::RcKind::ALL {
         cols.push(sib_tables::gen_table_preprocessed(kind));
     }
-    cols.extend(
-        msg_slot(
-            "",
-            &input.message,
-            0,
-            public_message,
-            &msglink,
-            None,
-            &hash_io,
-        )
-        .gen_preprocessed(),
-    );
-    for b in bridge_evals("", 0, &hash_io) {
+    if !public_message {
+        cols.extend(
+            msg_bridge_eval("", input.message.len(), 0, &msglink, None, &hash_io)
+                .gen_preprocessed(),
+        );
+    }
+    for b in bridge_evals("", 0, public_message, &hash_io) {
         cols.extend(b.gen_preprocessed());
     }
-    for s in sink_evals("", input.message.len(), sib_stream_len, 0, &hash_io) {
+    for s in sink_evals(
+        "",
+        input.message.len(),
+        sib_stream_len,
+        0,
+        public_message,
+        &hash_io,
+    ) {
         cols.extend(s.gen_preprocessed());
     }
     cols
@@ -832,27 +768,6 @@ fn gen_all_preprocessed(
 // =============================================================================
 // Prover / verifier state.
 // =============================================================================
-
-/// The built commit-order-11 message slot component (see [`MsgSlot`]).
-enum MsgSlotComponent {
-    Bridge(FrameworkComponent<BridgeEval>),
-    Public(FrameworkComponent<PubMsgEval>),
-}
-
-impl MsgSlotComponent {
-    fn as_component(&self) -> &dyn Component {
-        match self {
-            MsgSlotComponent::Bridge(c) => c,
-            MsgSlotComponent::Public(c) => c,
-        }
-    }
-    fn as_prover(&self) -> &dyn ComponentProver<SimdBackend> {
-        match self {
-            MsgSlotComponent::Bridge(c) => c,
-            MsgSlotComponent::Public(c) => c,
-        }
-    }
-}
 
 /// Enforces the ML-DSA folded identity as an outer-STARK constraint. Matrix,
 /// `t1`, and `q` terms are deterministic from transcript-mixed public inputs.
@@ -892,11 +807,9 @@ struct Built {
     /// Standalone msglink producer; `None` in hosted mode (dropped from the
     /// commit order — the msg bridge sources from the host's shared relation).
     msglink: Option<FrameworkComponent<MsgLinkEval>>,
-    pk: FrameworkComponent<PublicPrefixEval>,
-    tr_check: FrameworkComponent<PublicPrefixEval>,
     prefix: FrameworkComponent<PublicPrefixEval>,
-    /// Commit order 11: the msg bridge OR the public-message producer.
-    msg: MsgSlotComponent,
+    /// Private/standalone message bridge; native-µ public mode omits it.
+    msg: Option<FrameworkComponent<BridgeEval>>,
     bridges: Vec<FrameworkComponent<BridgeEval>>,
     sinks: Vec<FrameworkComponent<SqueezeSinkEval>>,
 }
@@ -913,10 +826,10 @@ impl Built {
         if let Some(m) = &self.msglink {
             out.push(m);
         }
-        out.push(&self.pk);
-        out.push(&self.tr_check);
         out.push(&self.prefix);
-        out.push(self.msg.as_component());
+        if let Some(msg) = &self.msg {
+            out.push(msg);
+        }
         out.extend(self.bridges.iter().map(|c| c as &dyn Component));
         out.extend(self.sinks.iter().map(|c| c as &dyn Component));
         out
@@ -944,10 +857,10 @@ impl Built {
         if let Some(m) = &self.msglink {
             out.push(m);
         }
-        out.push(&self.pk);
-        out.push(&self.tr_check);
         out.push(&self.prefix);
-        out.push(self.msg.as_prover());
+        if let Some(msg) = &self.msg {
+            out.push(msg);
+        }
         out.extend(
             self.bridges
                 .iter()
@@ -975,8 +888,6 @@ struct Claims {
     sib: SecureField,
     sib_rc: Vec<SecureField>,
     msglink: SecureField,
-    pk: SecureField,
-    tr_check: SecureField,
     prefix: SecureField,
     bridges: Vec<SecureField>,
     sinks: Vec<SecureField>,
@@ -994,8 +905,6 @@ impl Claims {
         if !self.hosted {
             v.push(self.msglink);
         }
-        v.push(self.pk);
-        v.push(self.tr_check);
         v.push(self.prefix);
         v.extend(self.bridges.iter().copied());
         v.extend(self.sinks.iter().copied());
@@ -1005,7 +914,7 @@ impl Claims {
 
     /// Reconstruct the bag from a flat vector (verifier side). Table counts are
     /// derived from the public component structure. `hosted` omits the msglink slot.
-    fn from_flat(flat: &[SecureField], hosted: bool) -> Self {
+    fn from_flat(flat: &[SecureField], hosted: bool, native_mu: bool) -> Self {
         let mut it = flat.iter().copied();
         let mut next = || it.next().expect("claimed sums length mismatch");
         let coeffs = next();
@@ -1017,12 +926,11 @@ impl Claims {
         let sib = next();
         let sib_rc = (0..sib_tables::RcKind::ALL.len()).map(|_| next()).collect();
         let msglink = if hosted { SecureField::zero() } else { next() };
-        let pk = next();
-        let tr_check = next();
         let prefix = next();
-        let bridges = (0..4).map(|_| next()).collect();
-        let sinks = (0..4).map(|_| next()).collect();
+        let bridges = (0..if native_mu { 2 } else { 4 }).map(|_| next()).collect();
+        let sinks = (0..if native_mu { 2 } else { 3 }).map(|_| next()).collect();
         let native_use = next();
+        assert!(it.next().is_none(), "claimed sums length mismatch");
         Self {
             hosted,
             coeffs,
@@ -1032,8 +940,6 @@ impl Claims {
             sib,
             sib_rc,
             msglink,
-            pk,
-            tr_check,
             prefix,
             bridges,
             sinks,
@@ -1050,8 +956,8 @@ impl Claims {
 /// `(input, sib_stream_len, sib_squeezed_len)`.
 struct LayoutCtx {
     hosted: bool,
-    /// Hosted PUBLIC-message mode: the msg-bridge slot is the public-message
-    /// producer (S4).
+    /// Hosted PUBLIC-message mode: µ is verifier-native and the µ sponge plus
+    /// message bridge are omitted.
     public_message: bool,
     message_len: usize,
     sib_stream_len: usize,
@@ -1097,25 +1003,17 @@ fn module_trace_layout(ctx: &LayoutCtx) -> Vec<u32> {
     if !ctx.hosted {
         t.extend(vec![msglink::MSGLINK_LOG_SIZE; msglink::N_BASE_COLS]);
     }
-    // 8-10. public pk producer, tr checker, and µ prefix.
-    t.extend(vec![
-        crate::sponge_link::LINK_LOG_SIZE;
-        3 * PREFIX_BASE_COLS
-    ]);
-    // 11. msg slot (public producer: 1 enabler col; bridge: enabler + byte).
-    let msg_cols = if ctx.public_message {
-        PUBMSG_BASE_COLS
-    } else {
-        BRIDGE_BASE_COLS
-    };
-    t.extend(vec![bridge_log_size(ctx.message_len); msg_cols]);
-    // 12-14. bridges ×3.
-    for len in bridge_lens() {
+    // Verifier-native prefix: private tr‖00‖00 or public µ.
+    t.extend(vec![crate::sponge_link::LINK_LOG_SIZE; PREFIX_BASE_COLS]);
+    // Private/standalone message bridge.
+    if !ctx.public_message {
+        t.extend(vec![bridge_log_size(ctx.message_len); BRIDGE_BASE_COLS]);
+    }
+    for len in bridge_lens(ctx.public_message) {
         let ls = bridge_log_size(len);
         t.extend(vec![ls; BRIDGE_BASE_COLS]);
     }
-    // 15-18. sinks ×4.
-    for len in sink_lens(ctx.message_len, ctx.sib_stream_len) {
+    for len in sink_lens(ctx.message_len, ctx.sib_stream_len, ctx.public_message) {
         let ls = bridge_log_size(len);
         t.extend(vec![ls; SINK_BASE_COLS]);
     }
@@ -1152,35 +1050,31 @@ fn module_interaction_layout(ctx: &LayoutCtx) -> Vec<u32> {
             msglink::n_interaction_cols(ctx.message_len)
         ]);
     }
-    // 8-10. public pk producer, tr checker, and µ prefix.
+    // Verifier-native prefix: private tr‖00‖00 or public µ.
     i.extend(vec![
         crate::sponge_link::LINK_LOG_SIZE;
-        3 * prefix_n_interaction(ctx.message_len)
+        prefix_n_interaction()
     ]);
-    // 11. msg slot (public producer: one yield; bridge: require + yield).
-    let msg_cols = if ctx.public_message {
-        PUBMSG_INTERACTION_COLS
-    } else {
-        BRIDGE_INTERACTION_COLS
-    };
-    i.extend(vec![bridge_log_size(ctx.message_len); msg_cols]);
-    // 12-14. bridges ×3.
-    for len in bridge_lens() {
+    if !ctx.public_message {
+        i.extend(vec![
+            bridge_log_size(ctx.message_len);
+            BRIDGE_INTERACTION_COLS
+        ]);
+    }
+    for len in bridge_lens(ctx.public_message) {
         let ls = bridge_log_size(len);
         i.extend(vec![ls; BRIDGE_INTERACTION_COLS]);
     }
-    // 15-18. sinks ×4.
-    for len in sink_lens(ctx.message_len, ctx.sib_stream_len) {
+    for len in sink_lens(ctx.message_len, ctx.sib_stream_len, ctx.public_message) {
         let ls = bridge_log_size(len);
         i.extend(vec![ls; SINK_INTERACTION_COLS]);
     }
     i
 }
 
-/// The prefix producer's interaction column count: ONE batched accumulator
-/// column for all 66 prefix bytes `tr ‖ 0x00 ‖ 0x00` (constant denominators —
-/// see `PublicPrefixEval::n_interaction_cols`).
-fn prefix_n_interaction(_message_len: usize) -> usize {
+/// The native-prefix producer's interaction column count: one batched
+/// accumulator for either 66 private-µ prefix bytes or 64 public µ bytes.
+fn prefix_n_interaction() -> usize {
     stwo::core::fields::qm31::SECURE_EXTENSION_DEGREE
 }
 
@@ -1208,16 +1102,21 @@ fn full_squeeze(absorbed: &[u8], n_squeeze: usize) -> Vec<u8> {
     crate::reference::sponge::shake256(&[absorbed], RATE * n_squeeze).0
 }
 
-/// The four jobs' full squeeze outputs (pkHash, µ, c̃, SIB order), from the
-/// public key and witness absorb transcripts.
-fn sponge_outputs(input: &MlDsaVerifyInput, witness: &MlDsaWitness) -> [Vec<u8>; 4] {
+struct SpongeOutputs {
+    mu: Option<Vec<u8>>,
+    ct: Vec<u8>,
+    sib: Vec<u8>,
+}
+
+/// Full squeeze outputs for the in-service jobs. Public-message mode computes
+/// µ natively and therefore has no µ service output.
+fn sponge_outputs(witness: &MlDsaWitness, native_mu: bool) -> SpongeOutputs {
     let n_sq_sib = n_squeeze_sib(sampleinball::stream_len(witness));
-    [
-        full_squeeze(&input.encode_pk(), 1),
-        full_squeeze(&witness.sponge.mu_absorbed, 1),
-        full_squeeze(&witness.sponge.c_tilde_absorbed, 1),
-        full_squeeze(&witness.sponge.sample_in_ball_absorbed, n_sq_sib),
-    ]
+    SpongeOutputs {
+        mu: (!native_mu).then(|| full_squeeze(&witness.sponge.mu_absorbed, 1)),
+        ct: full_squeeze(&witness.sponge.c_tilde_absorbed, 1),
+        sib: full_squeeze(&witness.sponge.sample_in_ball_absorbed, n_sq_sib),
+    }
 }
 
 // =============================================================================
@@ -1331,54 +1230,41 @@ fn build_components(
             claims.msglink,
         )
     });
-    // 8. public pk producer.
-    let pk = FrameworkComponent::new(
-        allocator,
-        pk_eval(input, stream_base, &rel.keccak.hash_io),
-        claims.pk,
-    );
-    // 9. public tr checker.
-    let tr_check = FrameworkComponent::new(
-        allocator,
-        tr_check_eval(input, stream_base, &rel.keccak.hash_io),
-        claims.tr_check,
-    );
-    // 10. µ prefix.
+    // Verifier-native private tr prefix or public µ prefix.
     let prefix = FrameworkComponent::new(
         allocator,
-        prefix_eval(input, stream_base, &rel.keccak.hash_io),
+        prefix_eval(input, stream_base, ctx.public_message, &rel.keccak.hash_io),
         claims.prefix,
     );
-    // 11. msg slot (claims slot bridges[0] — positional across modes).
-    let msg = match msg_slot(
-        ns,
-        &input.message,
-        stream_base,
-        ctx.public_message,
-        &rel.msglink,
-        rel.shared_field.as_ref(),
-        &rel.keccak.hash_io,
-    ) {
-        MsgSlot::Bridge(b) => {
-            MsgSlotComponent::Bridge(FrameworkComponent::new(allocator, *b, claims.bridges[0]))
-        }
-        MsgSlot::Public(p) => {
-            MsgSlotComponent::Public(FrameworkComponent::new(allocator, p, claims.bridges[0]))
-        }
-    };
-    // 12-14. bridges ×3 (claims slots bridges[1..=3]).
-    let bridge_descs = bridge_evals(ns, stream_base, &rel.keccak.hash_io);
+    let msg = (!ctx.public_message).then(|| {
+        FrameworkComponent::new(
+            allocator,
+            msg_bridge_eval(
+                ns,
+                input.message.len(),
+                stream_base,
+                &rel.msglink,
+                rel.shared_field.as_ref(),
+                &rel.keccak.hash_io,
+            ),
+            claims.bridges[0],
+        )
+    });
+    let bridge_claim_offset = usize::from(msg.is_some());
+    let bridge_descs = bridge_evals(ns, stream_base, ctx.public_message, &rel.keccak.hash_io);
     let bridges = bridge_descs
         .into_iter()
         .enumerate()
-        .map(|(idx, b)| FrameworkComponent::new(allocator, b, claims.bridges[idx + 1]))
+        .map(|(idx, b)| {
+            FrameworkComponent::new(allocator, b, claims.bridges[idx + bridge_claim_offset])
+        })
         .collect();
-    // 15-18. sinks ×4.
     let sink_descs = sink_evals(
         ns,
         input.message.len(),
         ctx.sib_stream_len,
         stream_base,
+        ctx.public_message,
         &rel.keccak.hash_io,
     );
     let sinks = sink_descs
@@ -1396,8 +1282,6 @@ fn build_components(
         sib,
         sib_rc,
         msglink,
-        pk,
-        tr_check,
         prefix,
         msg,
         bridges,
@@ -1493,11 +1377,12 @@ impl MlDsaProver {
 
     fn build(
         witness: MlDsaWitness,
-        input: MlDsaVerifyInput,
+        mut input: MlDsaVerifyInput,
         shared_field: Option<SharedFieldRelation>,
         public_message: bool,
         keccak_handle: SharedKeccakRelations,
     ) -> Self {
+        input.tr = native_tr(&input);
         let hosted = shared_field.is_some() || public_message;
         let sib_stream_len = sampleinball::stream_len(&witness);
         let sib_squeezed_len = witness.sponge.sample_in_ball_squeezed.len();
@@ -1545,10 +1430,10 @@ impl MlDsaProver {
         Self::new(witness, input, Some(shared_field), keccak_handle)
     }
 
-    /// Hosted PUBLIC-message constructor (S4): the message bytes are a PUBLIC
-    /// statement input, yielded into the µ-absorb stream by the in-module
-    /// public-message producer — NO shared field relation, NO upstream byte
-    /// conveyor (SHA) required. Must not be combined with
+    /// Hosted PUBLIC-message constructor (S4): tr and µ are recomputed
+    /// natively from the public key and message, and µ is constrained directly
+    /// as the c̃-absorb prefix. No shared field relation or upstream byte
+    /// conveyor is required. Must not be combined with
     /// [`Self::with_private_message`].
     pub fn hosted_public(
         witness: MlDsaWitness,
@@ -1567,19 +1452,22 @@ impl MlDsaProver {
     }
 
     /// The sponge job shapes + witness byte streams this instance contributes
-    /// to the proof-wide keccak service, in job order (pkHash, µ, c̃, SIB).
+    /// to the proof-wide service: optional private µ, then c̃ and SIB.
     pub fn keccak_jobs(&self) -> (Vec<Shape>, Vec<Vec<u8>>) {
         let shapes = keccak_job_shapes(
             self.input.message.len(),
             self.sib_stream_len,
             self.stream_base,
+            self.ctx.public_message,
         );
-        let streams = vec![
-            self.input.encode_pk(),
-            self.witness.sponge.mu_absorbed.clone(),
+        let mut streams = Vec::with_capacity(shapes.len());
+        if !self.ctx.public_message {
+            streams.push(self.witness.sponge.mu_absorbed.clone());
+        }
+        streams.extend([
             self.witness.sponge.c_tilde_absorbed.clone(),
             self.witness.sponge.sample_in_ball_absorbed.clone(),
-        ];
+        ]);
         (shapes, streams)
     }
 
@@ -1621,25 +1509,28 @@ impl MlDsaProver {
     }
 }
 
-/// The byte payloads the three fixed bridges move, in bridge order (mu→ct,
-/// w1enc, ct→sib). Requires the sponge outputs (for µ/c̃ squeeze bytes) and the
-/// decomp w1Encode bytes. (The msg slot's payload is `input.message`.)
-fn bridge_bytes(outputs: &[Vec<u8>; 4], w1_bytes: &[u8]) -> [Vec<u8>; 3] {
-    [
-        outputs[1][..64].to_vec(), // mu→ct
-        w1_bytes.to_vec(),         // w1enc (768)
-        outputs[2][..48].to_vec(), // ct→sib
-    ]
+/// Byte payloads for the fixed bridges. Private mode includes µ→c̃; both modes
+/// include w1Encode→c̃ and c̃→SIB.
+fn bridge_bytes(outputs: &SpongeOutputs, w1_bytes: &[u8]) -> Vec<Vec<u8>> {
+    outputs
+        .mu
+        .iter()
+        .map(|mu| mu[..64].to_vec())
+        .chain([w1_bytes.to_vec(), outputs.ct[..48].to_vec()])
+        .collect()
 }
 
-/// The byte payloads the four sinks consume, in sink order (pkHash, µ, c̃, SIB).
-fn sink_bytes(outputs: &[Vec<u8>; 4], sib_stream_len: usize) -> [Vec<u8>; 4] {
-    [
-        outputs[0][64..].to_vec(),
-        outputs[1][64..].to_vec(),
-        outputs[2][48..].to_vec(),
-        outputs[3][sib_stream_len..].to_vec(),
-    ]
+/// Byte payloads for the remaining sinks: optional µ, then c̃ and SIB.
+fn sink_bytes(outputs: &SpongeOutputs, sib_stream_len: usize) -> Vec<Vec<u8>> {
+    outputs
+        .mu
+        .iter()
+        .map(|mu| mu[64..].to_vec())
+        .chain([
+            outputs.ct[48..].to_vec(),
+            outputs.sib[sib_stream_len..].to_vec(),
+        ])
+        .collect()
 }
 
 impl Air for MlDsaProver {
@@ -1850,65 +1741,69 @@ impl AirProver for MlDsaProver {
             evals.extend(msglink::gen_msglink_base_trace());
         }
 
-        // 8-10. public pk producer, public tr checker, and µ prefix.
-        // Base traces run in Tree 1, BEFORE relations are drawn. These links /
-        // bridges / sinks do not depend on any relation, so descriptors are
-        // built with `dummy()` relations here.
+        // Verifier-native private tr prefix or public µ prefix. Base traces run
+        // before relations are drawn, so use dummy relation descriptors.
         let dummy_hash_io = HashIoRelation::dummy();
         let dummy_msglink = MsgLinkRelation::dummy();
-        evals.extend(pk_eval(&self.input, self.stream_base, &dummy_hash_io).gen_base());
-        evals.extend(tr_check_eval(&self.input, self.stream_base, &dummy_hash_io).gen_base());
-        evals.extend(prefix_eval(&self.input, self.stream_base, &dummy_hash_io).gen_base());
+        evals.extend(
+            prefix_eval(
+                &self.input,
+                self.stream_base,
+                self.ctx.public_message,
+                &dummy_hash_io,
+            )
+            .gen_base(),
+        );
 
-        // 11. msg slot base + 12-14. bridges base (the sponge outputs are
-        // recomputed natively — the sponges themselves are proven in the
-        // keccak SERVICE module).
-        let outputs = sponge_outputs(&self.input, &self.witness);
-        let slot = msg_slot(
+        let outputs = sponge_outputs(&self.witness, self.ctx.public_message);
+        if !self.ctx.public_message {
+            evals.extend(
+                msg_bridge_eval(
+                    &self.namespace,
+                    self.input.message.len(),
+                    self.stream_base,
+                    &dummy_msglink,
+                    None,
+                    &dummy_hash_io,
+                )
+                .gen_base(&self.input.message),
+            );
+        }
+        let bbytes = bridge_bytes(&outputs, &self.decomp_w1_bytes);
+        let bridge_descs = bridge_evals(
             &self.namespace,
-            &self.input.message,
             self.stream_base,
             self.ctx.public_message,
-            &dummy_msglink,
-            None,
             &dummy_hash_io,
         );
-        evals.extend(slot.gen_base(&self.input.message));
-        let bbytes = bridge_bytes(&outputs, &self.decomp_w1_bytes);
-        let bridge_descs = bridge_evals(&self.namespace, self.stream_base, &dummy_hash_io);
         for (b, bytes) in bridge_descs.iter().zip(bbytes.iter()) {
             evals.extend(b.gen_base(bytes));
         }
 
-        // PROVER SANITY: the sponge output prefixes match the witness transcript.
+        // Private µ remains an in-service witness and keeps its sanity check.
+        // Native/public µ deliberately has no prover-side equality assertion:
+        // disagreement is rejected by the c̃ absorb constraint, not a panic.
+        if let Some(mu) = &outputs.mu {
+            assert_eq!(mu[..64], self.witness.sponge.mu_squeezed[..64]);
+        }
         assert_eq!(
-            outputs[0][..64],
-            self.input.tr[..],
-            "pkHash squeeze prefix mismatch"
-        );
-        assert_eq!(
-            outputs[1][..64],
-            self.witness.sponge.mu_squeezed[..64],
-            "µ squeeze prefix mismatch"
-        );
-        assert_eq!(
-            outputs[2][..48],
+            outputs.ct[..48],
             self.input.c_tilde[..],
             "c̃ squeeze prefix mismatch"
         );
         assert_eq!(
-            outputs[3][..self.sib_stream_len],
+            outputs.sib[..self.sib_stream_len],
             self.witness.sponge.sample_in_ball_squeezed[..self.sib_stream_len],
             "SIB squeeze prefix mismatch"
         );
 
-        // 15-18. sinks base.
         let sbytes = sink_bytes(&outputs, self.sib_stream_len);
         let sink_descs = sink_evals(
             &self.namespace,
             self.input.message.len(),
             self.sib_stream_len,
             self.stream_base,
+            self.ctx.public_message,
             &dummy_hash_io,
         );
         for (s, bytes) in sink_descs.iter().zip(sbytes.iter()) {
@@ -1988,55 +1883,51 @@ impl AirProver for MlDsaProver {
             evals.extend(msg_tr);
         }
 
-        // 8. public pk producer.
-        let (pk_tr, pk_sum) =
-            pk_eval(&self.input, self.stream_base, &rel.keccak.hash_io).gen_interaction();
-        self.claims.pk = pk_sum;
-        evals.extend(pk_tr);
-
-        // 9. public tr checker.
-        let (tr_check_tr, tr_check_sum) =
-            tr_check_eval(&self.input, self.stream_base, &rel.keccak.hash_io).gen_interaction();
-        self.claims.tr_check = tr_check_sum;
-        evals.extend(tr_check_tr);
-
-        // 10. µ prefix.
-        let (prefix_tr, prefix_sum) =
-            prefix_eval(&self.input, self.stream_base, &rel.keccak.hash_io).gen_interaction();
+        let (prefix_tr, prefix_sum) = prefix_eval(
+            &self.input,
+            self.stream_base,
+            self.ctx.public_message,
+            &rel.keccak.hash_io,
+        )
+        .gen_interaction();
         self.claims.prefix = prefix_sum;
         evals.extend(prefix_tr);
 
-        // 11. msg slot + 12-14. bridges (claims.bridges[0] is the msg slot —
-        // positional across modes).
-        let outputs = sponge_outputs(&self.input, &self.witness);
+        let outputs = sponge_outputs(&self.witness, self.ctx.public_message);
         self.claims.bridges.clear();
-        let slot = msg_slot(
+        if !self.ctx.public_message {
+            let (msg_tr, msg_sum) = msg_bridge_eval(
+                &self.namespace,
+                self.input.message.len(),
+                self.stream_base,
+                &rel.msglink,
+                rel.shared_field.as_ref(),
+                &rel.keccak.hash_io,
+            )
+            .gen_interaction(&self.input.message);
+            self.claims.bridges.push(msg_sum);
+            evals.extend(msg_tr);
+        }
+        let bbytes = bridge_bytes(&outputs, &self.decomp_w1_bytes);
+        let bridge_descs = bridge_evals(
             &self.namespace,
-            &self.input.message,
             self.stream_base,
             self.ctx.public_message,
-            &rel.msglink,
-            rel.shared_field.as_ref(),
             &rel.keccak.hash_io,
         );
-        let (slot_tr, slot_sum) = slot.gen_interaction(&self.input.message);
-        self.claims.bridges.push(slot_sum);
-        evals.extend(slot_tr);
-        let bbytes = bridge_bytes(&outputs, &self.decomp_w1_bytes);
-        let bridge_descs = bridge_evals(&self.namespace, self.stream_base, &rel.keccak.hash_io);
         for (b, bytes) in bridge_descs.iter().zip(bbytes.iter()) {
             let (tr, sum) = b.gen_interaction(bytes);
             self.claims.bridges.push(sum);
             evals.extend(tr);
         }
 
-        // 15-18. sinks.
         let sbytes = sink_bytes(&outputs, self.sib_stream_len);
         let sink_descs = sink_evals(
             &self.namespace,
             self.input.message.len(),
             self.sib_stream_len,
             self.stream_base,
+            self.ctx.public_message,
             &rel.keccak.hash_io,
         );
         self.claims.sinks.clear();
@@ -2116,7 +2007,7 @@ impl MlDsaVerifier {
 
     #[allow(clippy::too_many_arguments)]
     fn build(
-        input: MlDsaVerifyInput,
+        mut input: MlDsaVerifyInput,
         group_evals: Vec<SecureField>,
         claimed_sums: Vec<SecureField>,
         sib_stream_len: usize,
@@ -2125,6 +2016,7 @@ impl MlDsaVerifier {
         public_message: bool,
         keccak_handle: SharedKeccakRelations,
     ) -> Self {
+        input.tr = native_tr(&input);
         let hosted = shared_field.is_some() || public_message;
         let ctx = LayoutCtx::new(
             &input,
@@ -2133,7 +2025,7 @@ impl MlDsaVerifier {
             hosted,
             public_message,
         );
-        let claims = Claims::from_flat(&claimed_sums, hosted);
+        let claims = Claims::from_flat(&claimed_sums, hosted, public_message);
         Self {
             input,
             sib_stream_len,
@@ -2293,7 +2185,8 @@ pub fn prove_mldsa(
     validate_sib_lengths(sib_stream_len, sib_squeezed_len)
         .map_err(|_| ProvingError::ConstraintsNotSatisfied)?;
     // The standalone path instantiates a PRIVATE keccak service for this one
-    // instance's four sponge jobs; the composition is `[service, mldsa]`.
+    // instance's private µ, c̃, and SIB jobs; the composition is
+    // `[service, mldsa]`.
     let handle = SharedKeccakRelations::new();
     let mut prover = MlDsaProver::new(witness, input.clone(), None, handle.clone());
     let (job_shapes, job_streams) = prover.keccak_jobs();
@@ -2301,7 +2194,7 @@ pub fn prove_mldsa(
     let (stark_proof, post_interaction_payloads) =
         air_core::prove_with_post_interaction(&mut [&mut service, &mut prover], config)?;
     Ok(MlDsaProof {
-        input,
+        input: prover.input.clone(),
         group_evals: prover.group_evals,
         claimed_sums: prover.claims.ordered(),
         sib_stream_len,
@@ -2332,18 +2225,27 @@ pub fn n_group_evals() -> usize {
     coeffs::layout::N_GROUPS
 }
 
-/// The exact `claimed_sums` length a HOSTED proof carries (msglink slot
-/// dropped; `native_use` appended last; the keccak side lives in the SERVICE
-/// module and contributes [`stwo_keccak::service::service_claimed_sums_len`]
-/// separately). Hosts gate the flat vector's length on this before
-/// construction — `Claims::from_flat` panics on a short vector.
-pub fn hosted_claimed_sums_len() -> usize {
-    1 + coeffs_tables::RANGE_TABLE_COMPONENTS    // coeffs + unified range table
-        + 1 + decomp_tables::RcKind::ALL.len()    // decomp + rc
-        + 1 + sib_tables::RcKind::ALL.len()       // sib + rc
-        + 3                                       // pk + tr-check + µ prefix
-        + 4 + 4                                   // bridges + sinks
+fn claimed_sums_len(hosted: bool, native_mu: bool) -> usize {
+    1 + coeffs_tables::RANGE_TABLE_COMPONENTS
+        + 1
+        + decomp_tables::RcKind::ALL.len()
+        + 1
+        + sib_tables::RcKind::ALL.len()
+        + usize::from(!hosted)
+        + 1 // native tr/private prefix or native public µ prefix
+        + if native_mu { 2 } else { 4 } // msg + fixed bridges
+        + if native_mu { 2 } else { 3 } // sinks
         + 1 // coeffs native use
+}
+
+/// Exact claimed-sum length for hosted private-message/revocation mode.
+pub fn hosted_claimed_sums_len() -> usize {
+    claimed_sums_len(true, false)
+}
+
+/// Exact claimed-sum length for hosted-public issuer/device native-µ mode.
+pub fn hosted_public_claimed_sums_len() -> usize {
+    claimed_sums_len(true, true)
 }
 
 pub fn verify_mldsa(proof: &MlDsaProof) -> Result<(), VerificationError> {
@@ -2354,14 +2256,14 @@ pub fn verify_mldsa(proof: &MlDsaProof) -> Result<(), VerificationError> {
         VerificationError::InvalidStructure(format!("ML-DSA statement: {message}"))
     })?;
     if proof.group_evals.len() != n_group_evals()
-        || proof.claimed_sums.len() != hosted_claimed_sums_len() + 1
+        || proof.claimed_sums.len() != claimed_sums_len(false, false)
     {
         return Err(VerificationError::InvalidStructure(
             "ML-DSA statement: bad claim shape".to_string(),
         ));
     }
     let handle = SharedKeccakRelations::new();
-    let job_shapes = keccak_job_shapes(proof.input.message.len(), proof.sib_stream_len, 0);
+    let job_shapes = keccak_job_shapes(proof.input.message.len(), proof.sib_stream_len, 0, false);
     if proof.service_claimed_sums.len() != stwo_keccak::service::service_claimed_sums_len() {
         return Err(VerificationError::InvalidStructure(
             "ML-DSA statement: bad service claimed-sums length".to_string(),
