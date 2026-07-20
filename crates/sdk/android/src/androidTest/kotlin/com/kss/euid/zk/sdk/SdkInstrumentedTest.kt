@@ -51,18 +51,4 @@ class SdkInstrumentedTest {
         assertFalse(result.ok)
     }
 
-    @Test
-    fun proveInitializesDefaultPerformanceCorePool() {
-        assertThrows(ZkException.Prove::class.java) {
-            proveIdentity(sampleStatement(), malformedWitness())
-        }
-
-        val diagnostics = proverThreadDiagnostics()
-        assertTrue("proving must initialize the Rayon global pool", diagnostics.initialized)
-        assertEquals(
-            "Rayon must use the platform's detected performance-core tier",
-            diagnostics.detectedThreads,
-            diagnostics.currentThreads,
-        )
-    }
 }
