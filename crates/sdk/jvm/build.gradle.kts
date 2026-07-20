@@ -103,7 +103,7 @@ val nativeTargets = listOf(
     NativeTarget("x86_64-apple-darwin", "darwin-x86-64", "libeuid_zk_sdk.dylib"),
     NativeTarget("x86_64-unknown-linux-gnu", "linux-x86-64", "libeuid_zk_sdk.so"),
     NativeTarget("aarch64-unknown-linux-gnu", "linux-aarch64", "libeuid_zk_sdk.so"),
-    NativeTarget("x86_64-pc-windows-gnu", "win32-x86-64", "euid_zk_sdk.dll"),
+    // Windows dropped: mimalloc's C source fails the zig cross-build under -Werror,-Wdate-time.
 )
 
 val buildNativeTasks = nativeTargets.map { t ->
