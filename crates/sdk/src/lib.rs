@@ -44,6 +44,8 @@ uniffi::setup_scaffolding!();
 // prover's public policy from the UniFFI statement. Wired into the production
 // prove/verify bodies below (§9.2).
 mod mapping;
+// Compile-parity stubs for the ML-DSA-only `demo_*` surface (see demo.rs).
+mod demo;
 
 /// Which predicate(s) the statement asserts.
 ///
