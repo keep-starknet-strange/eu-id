@@ -1,8 +1,10 @@
 package com.kss.euid.zk.sdk
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -47,5 +49,20 @@ class SdkInstrumentedTest {
     fun verifyIdentity_rejectsMalformedProof() {
         val result = verifyIdentity(sampleStatement(), "not an mdoc proof".toByteArray())
         assertFalse(result.ok)
+    }
+
+    @Test
+    fun proveInitializesDefaultPerformanceCorePool() {
+        assertThrows(ZkException.Prove::class.java) {
+            proveIdentity(sampleStatement(), malformedWitness())
+        }
+
+        val diagnostics = proverThreadDiagnostics()
+        assertTrue("proving must initialize the Rayon global pool", diagnostics.initialized)
+        assertEquals(
+            "Rayon must use the platform's detected performance-core tier",
+            diagnostics.detectedThreads,
+            diagnostics.currentThreads,
+        )
     }
 }

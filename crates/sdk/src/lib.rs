@@ -17,6 +17,7 @@ uniffi::setup_scaffolding!();
 
 mod demo;
 mod mapping;
+mod thread_pool;
 
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PredicateMode {
@@ -367,6 +368,37 @@ pub fn sdk_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+/// Sets the Rayon worker count used by proving and verification.
+///
+/// Returns `true` when accepted. The last accepted value wins until the first
+/// [`prove_identity`] or [`verify_identity`] call initializes the global pool;
+/// calls after that point, and a zero thread count, return `false`.
+#[uniffi::export]
+pub fn configure_prover_threads(threads: u32) -> bool {
+    thread_pool::configure(threads)
+}
+
+/// Thread counts exposed for Android instrumentation and integration checks.
+/// `current_threads` is zero until proving or verification initializes Rayon.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct ProverThreadDiagnostics {
+    pub initialized: bool,
+    pub current_threads: u32,
+    pub detected_threads: u32,
+}
+
+#[uniffi::export]
+pub fn prover_thread_diagnostics() -> ProverThreadDiagnostics {
+    let current = thread_pool::current_thread_count();
+    ProverThreadDiagnostics {
+        initialized: current.is_some(),
+        current_threads: current
+            .and_then(|count| u32::try_from(count).ok())
+            .unwrap_or_default(),
+        detected_threads: u32::try_from(thread_pool::detected_thread_count()).unwrap_or(u32::MAX),
+    }
+}
+
 #[uniffi::export]
 pub fn result_age_over(min_age: u32) -> String {
     format!("age_over_{min_age}")
@@ -686,6 +718,7 @@ pub fn prove_identity(
     statement: ZkPublicStatement,
     witness: ZkMdocWitness,
 ) -> Result<Vec<u8>, ZkError> {
+    thread_pool::initialize();
     on_large_stack(move || {
         let policy = mapping::to_policy(&statement)?;
         let request = mdoc_request(&statement, &witness);
@@ -709,6 +742,7 @@ pub fn verify_identity(
     statement: ZkPublicStatement,
     proof: Vec<u8>,
 ) -> Result<ZkVerifyResult, ZkError> {
+    thread_pool::initialize();
     on_large_stack(move || {
         let envelope = decode_mdoc_proof_envelope(&proof)?;
         if envelope.statement_bytes != encode_statement(&statement)

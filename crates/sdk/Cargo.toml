@@ -47,6 +47,10 @@ bincode = "1"
 # compressing the inner bincode mdoc proof payload.
 bzip2 = "0.6"
 sha2 = "0.10"
+rayon = "1"
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 # The prover's own ML-DSA reference verifier — used only by the demo module's

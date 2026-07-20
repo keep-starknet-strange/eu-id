@@ -23,6 +23,11 @@ directly:
 `preBuild` depends on both; writing into AGP's conventional source dirs means
 they're packaged into the AAR with no source-set DSL. Runs on Gradle 9.x.
 
+The first `proveIdentity` or `verifyIdentity` call sizes Rayon's global pool to
+the detected performance-core tier. An integrator can call
+`configureProverThreads(threads)` before that first proof operation; a `false`
+return means the value was zero or the pool was already initialized.
+
 ## Prerequisites
 
 - JDK 17+ and Android SDK (Android Studio supplies both).
