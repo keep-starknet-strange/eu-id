@@ -721,7 +721,7 @@ dependencies = [
  "ciborium",
  "ml-dsa",
  "predicates",
- "rand_core 0.6.4",
+ "rand 0.8.6",
  "rayon",
  "serde",
  "serde_json",
