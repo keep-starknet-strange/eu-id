@@ -20,6 +20,10 @@ inherits = "release"
 lto = "fat"
 codegen-units = 1
 
+[profile.release]
+lto = "fat"
+codegen-units = 1
+
 [workspace.dependencies]
 stwo = { git = "https://github.com/0xLucqs/stwo.git", rev = "4f877db2a7601efda8215267bd71d18958ad3fe3", features = ["prover"] }
 stwo-constraint-framework = { git = "https://github.com/0xLucqs/stwo.git", rev = "4f877db2a7601efda8215267bd71d18958ad3fe3", features = ["prover"] }
