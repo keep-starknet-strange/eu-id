@@ -1676,7 +1676,6 @@ dependencies = [
  "celes",
  "ciborium",
  "eu-id-prover",
- "libc",
  "ml-dsa",
  "rayon",
  "serde",
