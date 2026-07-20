@@ -549,8 +549,21 @@ fn decompress_stark_proof_from_ffi(compressed: &[u8]) -> Result<Vec<u8>, ZkError
     Ok(raw_bincode)
 }
 
-fn expected_mdoc_attributes() -> Vec<eu_id_prover::mdoc::MdocRequestedAttribute> {
+/// The product attribute set is bound to the statement's predicate mode: an
+/// age-only presentation must not require the credential to disclose (or even
+/// contain) the nationality element, and vice versa. Single-attribute requests
+/// are the established shape (the TS13 age-over profile proves one attribute).
+fn expected_mdoc_attributes(
+    mode: PredicateMode,
+) -> Vec<eu_id_prover::mdoc::MdocRequestedAttribute> {
     expected_mdoc_attributes_for_profile(MdocRequestProfile::ProductDefault)
+        .into_iter()
+        .filter(|attribute| match attribute.mode {
+            eu_id_prover::mdoc::MdocDisclosureMode::AgeOver => mode.uses_age(),
+            eu_id_prover::mdoc::MdocDisclosureMode::Alpha2Set => mode.uses_nat(),
+            _ => true,
+        })
+        .collect()
 }
 
 fn expected_mdoc_attributes_for_profile(
@@ -585,7 +598,7 @@ fn mdoc_request(
     eu_id_prover::MdocPidRequest {
         doctype: statement.doctype.clone(),
         namespace: statement.namespace.clone(),
-        attributes: expected_mdoc_attributes(),
+        attributes: expected_mdoc_attributes(statement.predicate_mode),
         birth_date_element: contract.element_birth_date,
         nationality_element: contract.element_nationality,
         session_transcript: statement.nonce.clone(),
@@ -631,6 +644,7 @@ fn mdoc_statement_matches_public_statement(
     }
 
     Ok(mdoc_disclosed_set_matches(
+        statement.predicate_mode,
         &mdoc_statement.attributes,
         mdoc_statement.age_attribute_index,
         mdoc_statement.nationality_attribute_index,
@@ -638,11 +652,12 @@ fn mdoc_statement_matches_public_statement(
 }
 
 fn mdoc_disclosed_set_matches(
+    mode: PredicateMode,
     attributes: &[eu_id_prover::mdoc::MdocStatementAttribute],
     age_attribute_index: Option<usize>,
     nationality_attribute_index: Option<usize>,
 ) -> bool {
-    let expected = expected_mdoc_attributes();
+    let expected = expected_mdoc_attributes(mode);
     if attributes.len() != expected.len()
         || attributes.iter().zip(&expected).any(|(got, want)| {
             got.element_identifier != want.element_identifier || got.mode != want.mode
@@ -863,12 +878,70 @@ mod tests {
                 eu_id_prover::mdoc::MdocDisclosureMode::Alpha2Set,
             ),
         ];
-        assert!(mdoc_disclosed_set_matches(&attributes, Some(0), Some(1)));
-        assert!(!mdoc_disclosed_set_matches(&attributes, None, Some(1)));
+        assert!(mdoc_disclosed_set_matches(
+            PredicateMode::And,
+            &attributes,
+            Some(0),
+            Some(1)
+        ));
+        assert!(!mdoc_disclosed_set_matches(
+            PredicateMode::And,
+            &attributes,
+            None,
+            Some(1)
+        ));
 
-        let mut substituted = attributes;
+        let mut substituted = attributes.clone();
         substituted[0].element_identifier = "issue_date".to_string();
-        assert!(!mdoc_disclosed_set_matches(&substituted, Some(0), Some(1)));
+        assert!(!mdoc_disclosed_set_matches(
+            PredicateMode::And,
+            &substituted,
+            Some(0),
+            Some(1)
+        ));
+
+        // Age-only: exactly the birth_date attribute, no nationality index.
+        let age_only = vec![statement_attribute(
+            "birth_date",
+            eu_id_prover::mdoc::MdocDisclosureMode::AgeOver,
+        )];
+        assert!(mdoc_disclosed_set_matches(
+            PredicateMode::Age,
+            &age_only,
+            Some(0),
+            None
+        ));
+        // Cross-mode confusion stays fail-closed: an age-only statement must
+        // not accept a two-attribute proof, nor an And statement a one-attribute
+        // proof.
+        assert!(!mdoc_disclosed_set_matches(
+            PredicateMode::Age,
+            &attributes,
+            Some(0),
+            Some(1)
+        ));
+        assert!(!mdoc_disclosed_set_matches(
+            PredicateMode::And,
+            &age_only,
+            Some(0),
+            None
+        ));
+    }
+
+    #[test]
+    fn expected_attributes_follow_predicate_mode() {
+        let modes = [
+            (PredicateMode::Age, vec!["birth_date"]),
+            (PredicateMode::Nat, vec!["nationality"]),
+            (PredicateMode::And, vec!["birth_date", "nationality"]),
+        ];
+        for (mode, expected) in modes {
+            let got: Vec<String> = expected_mdoc_attributes(mode)
+                .into_iter()
+                .map(|attribute| attribute.element_identifier)
+                .collect();
+            assert_eq!(got, expected, "mode {mode:?}");
+        }
     }
 
     #[test]

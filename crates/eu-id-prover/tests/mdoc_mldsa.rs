@@ -287,6 +287,37 @@ mod quantum_only {
         );
     }
 
+    /// Age-only presentation (the SDK's PredicateMode::Age): the request
+    /// carries ONLY the birth_date/AgeOver attribute and the policy has no
+    /// accepted nationalities. The credential still contains nationality —
+    /// it simply is not requested. Regression for the SDK bug where age-only
+    /// statements unconditionally demanded the nationality element
+    /// (ElementMissing on credentials/disclosures without it).
+    #[test]
+    fn age_only_mdoc_proves_and_verifies() {
+        let session_transcript = openid4vp_session_transcript(b"age-only-session");
+        let fixture =
+            mldsa_fixture::mldsa_full_pq_fixture_with_transcript(&session_transcript);
+        let mut request = MdocPidRequest::eudi_pid(session_transcript)
+            .with_trusted_mldsa_issuer_public_keys(vec![fixture.issuer_pk.clone()]);
+        request.attributes = vec![eu_id_prover::mdoc::MdocRequestedAttribute {
+            element_identifier: "birth_date".to_string(),
+            mode: eu_id_prover::mdoc::MdocDisclosureMode::AgeOver,
+        }];
+        let extracted =
+            extract_pid_mdoc(&fixture.document, &request).expect("age-only mdoc extracts");
+        let policy = Policy {
+            accepted_nationalities: Vec::new(),
+            accepted_nationalities_alpha2: Vec::new(),
+            ..demo_policy()
+        };
+        let statement = MdocCircuitStatement::from_extracted(&extracted, policy)
+            .expect("age-only statement builds");
+        let proof =
+            prove_mdoc_circuit(&extracted, &statement).expect("age-only mdoc proves");
+        verify_mdoc_circuit(&proof, &statement).expect("age-only mdoc verifies");
+    }
+
     /// G2 + G3 + G5 + G6 in one proving pass: the fully post-quantum e2e —
     /// ML-DSA issuer + device + revocation (three hosted instances) proves and
     /// verifies; the proof round-trips bincode; role-replayed claim trees
