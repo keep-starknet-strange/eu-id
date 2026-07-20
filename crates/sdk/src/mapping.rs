@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use eu_id_prover::{all_nationality_codes, Date, Policy};
 
-use crate::{IssuerKey, PredicateMode, ZkError, ZkPublicStatement};
+use crate::{PredicateMode, ZkError, ZkPublicStatement};
 
 fn invalid(msg: impl Into<String>) -> ZkError {
     ZkError::InvalidInput(msg.into())
@@ -132,7 +132,7 @@ fn epoch_day_to_date(epoch_day: i32) -> Result<Date, ZkError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::NatMode;
+    use crate::{IssuerKey, NatMode};
 
     fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
         let y = if m <= 2 { y - 1 } else { y };
