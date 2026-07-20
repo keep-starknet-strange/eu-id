@@ -748,15 +748,28 @@ fn decompress_stark_proof_from_ffi(compressed: &[u8]) -> Result<Vec<u8>, ZkError
         .map_err(|e| ZkError::Verify(format!("failed to decompress proof: {e}")))
 }
 
-/// The disclosed-attribute set the SDK's mdoc PID path always requests, in a
-/// fixed order: `birth_date` under `AgeOver` then `nationality` under
-/// `Alpha2Set`. Single source of truth shared by the prove side (to build the
-/// request) and the verify side (to pin the envelope statement's disclosed set),
-/// so the two cannot drift. Every supported predicate mode discloses both
-/// attributes — the mode only tunes the policy (neutralization), never which
-/// attributes are proven — so both legs are always present.
-fn expected_mdoc_attributes() -> Vec<eu_id_prover::mdoc::MdocRequestedAttribute> {
+/// The disclosed-attribute set the SDK's mdoc PID path requests, in a fixed
+/// order: `birth_date` under `AgeOver`, then `nationality` under `Alpha2Set`.
+/// Single source of truth shared by the prove side (to build the request) and
+/// the verify side (to pin the envelope statement's disclosed set), so the two
+/// cannot drift.
+///
+/// The set is bound to the statement's predicate mode: an age-only
+/// presentation must not require the credential to disclose (or even contain)
+/// the nationality element, and vice versa — a selectively-disclosed wallet
+/// document carries only the requested elements, so requesting the inactive
+/// leg fails extraction with `ElementMissing`.
+fn expected_mdoc_attributes(
+    mode: PredicateMode,
+) -> Vec<eu_id_prover::mdoc::MdocRequestedAttribute> {
     expected_mdoc_attributes_for_profile(MdocRequestProfile::ProductDefault)
+        .into_iter()
+        .filter(|attribute| match attribute.mode {
+            eu_id_prover::mdoc::MdocDisclosureMode::AgeOver => mode.uses_age(),
+            eu_id_prover::mdoc::MdocDisclosureMode::Alpha2Set => mode.uses_nat(),
+            _ => true,
+        })
+        .collect()
 }
 
 fn expected_mdoc_attributes_for_profile(
@@ -799,7 +812,7 @@ fn mdoc_request(
     Ok(eu_id_prover::MdocPidRequest {
         doctype: statement.doctype.clone(),
         namespace: statement.namespace.clone(),
-        attributes: expected_mdoc_attributes(),
+        attributes: expected_mdoc_attributes(statement.predicate_mode),
         birth_date_element: contract.element_birth_date,
         nationality_element: contract.element_nationality,
         session_transcript: statement.nonce.clone(),
@@ -862,7 +875,7 @@ fn mdoc_statement_matches_public_statement(
     //   - prove a predicate over the wrong signed element, e.g. `issue_date`
     //     instead of `birth_date` (C2).
     // Fail-closed on ANY divergence from the expected set.
-    let expected = expected_mdoc_attributes();
+    let expected = expected_mdoc_attributes(statement.predicate_mode);
     if mdoc_statement.attributes.len() != expected.len() {
         return Ok(false);
     }
@@ -871,8 +884,10 @@ fn mdoc_statement_matches_public_statement(
             return Ok(false);
         }
     }
-    // Both legs are always requested (see `expected_mdoc_attributes`), so both
-    // indices must be `Some` and point at the matching disclosed attribute.
+    // Each active leg's index must be `Some` and point at the matching
+    // disclosed attribute; an inactive leg's index must be `None` (the
+    // `position` over the mode-filtered expected set yields exactly that), so
+    // cross-mode confusion stays fail-closed in both directions.
     let expected_age_index = expected
         .iter()
         .position(|a| matches!(a.mode, eu_id_prover::mdoc::MdocDisclosureMode::AgeOver));
@@ -1185,6 +1200,22 @@ mod tests {
             .all(|attr| attr.element_identifier != "age_over_18"));
     }
 
+    #[test]
+    fn expected_attributes_follow_predicate_mode() {
+        let modes = [
+            (PredicateMode::Age, vec!["birth_date"]),
+            (PredicateMode::Nat, vec!["nationality"]),
+            (PredicateMode::And, vec!["birth_date", "nationality"]),
+        ];
+        for (mode, expected) in modes {
+            let got: Vec<String> = expected_mdoc_attributes(mode)
+                .into_iter()
+                .map(|attribute| attribute.element_identifier)
+                .collect();
+            assert_eq!(got, expected, "mode {mode:?}");
+        }
+    }
+
     fn sample_statement() -> ZkPublicStatement {
         ZkPublicStatement {
             spec_id: "stwo-euid-pid-v1".to_string(),
@@ -1489,6 +1520,34 @@ mod tests {
                 .expect("identity verification returns")
                 .ok,
             "canonical v2 fixture must verify through the SDK identity API"
+        );
+    }
+
+    #[test]
+    #[ignore = "runs the product mdoc STWO prover: single-predicate modes end-to-end"]
+    fn identity_public_api_round_trips_single_predicate_modes() {
+        // Regression for the swapped-looking ElementMissing failures: a
+        // nationality-only statement must not request (nor require) the
+        // birth_date element, and an age-only statement must not require
+        // nationality.
+        let (base, witness) = canonical_v2_mdoc_sdk_fixture();
+
+        let mut age_only = base.clone();
+        age_only.predicate_mode = PredicateMode::Age;
+        age_only.accepted_numeric_countries = None;
+        let proof = prove_identity(age_only.clone(), witness.clone()).expect("age-only proves");
+        assert!(
+            verify_identity(age_only, proof).expect("age-only verification returns").ok,
+            "age-only statement must verify through the SDK identity API"
+        );
+
+        let mut nat_only = base;
+        nat_only.predicate_mode = PredicateMode::Nat;
+        nat_only.age_threshold_years = None;
+        let proof = prove_identity(nat_only.clone(), witness).expect("nat-only proves");
+        assert!(
+            verify_identity(nat_only, proof).expect("nat-only verification returns").ok,
+            "nat-only statement must verify through the SDK identity API"
         );
     }
 
