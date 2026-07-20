@@ -17,6 +17,18 @@ use stwo_sha256::stark::{prove_sha256, ProverConfig};
 use stwo_sha256::trace::min_log_size;
 use stwo_sha256::witness::compute_sha256_witness;
 
+/// Blowup-2 PCS config. `PcsConfig::default()` is blowup-1; under the unlocked
+/// engine the `Sha256Eval` batch-4 LogUp raises the composition split to K=2,
+/// and K > log_blowup requires stored coefficients these SHA-only modules do
+/// not opt into. Blowup-2 keeps K ≤ log_blowup (SubDomain mode), matching
+/// production (log_blowup=2). See interaction::SHA_CONSUMER_LOGUP_BATCH.
+fn pcs_config() -> PcsConfig {
+    PcsConfig {
+        fri_config: stwo::core::fri::FriConfig::new(0, 2, 3, 1),
+        ..PcsConfig::default()
+    }
+}
+
 fn witnesses() -> Vec<stwo_sha256::types::Sha256Witness> {
     [b"" as &[u8], b"a", b"abc", &[0x42u8; 200]]
         .into_iter()
@@ -54,8 +66,8 @@ fn shared_sha_table_union_with_heterogeneous_messages_balances() {
 
     let mut provers: [&mut dyn AirProver; 5] =
         [&mut sha_tables, &mut sha0, &mut sha1, &mut sha2, &mut sha3];
-    let proof = air_core::prove(&mut provers, PcsConfig::default())
-        .expect("shared SHA table composition proves");
+    let proof =
+        air_core::prove(&mut provers, pcs_config()).expect("shared SHA table composition proves");
 
     let shared = SharedShaTableRelations::new();
     let mut table_verifier =
@@ -125,7 +137,7 @@ fn corrupt_shared_sha_table_provider_claim_rejects() {
 
     let mut provers: [&mut dyn AirProver; 5] =
         [&mut sha_tables, &mut sha0, &mut sha1, &mut sha2, &mut sha3];
-    let proof = air_core::prove(&mut provers, PcsConfig::default())
+    let proof = air_core::prove(&mut provers, pcs_config())
         .expect("honest shared SHA table composition proves");
 
     let mut corrupted_claim = sha_tables.interaction_claim().clone();
@@ -299,7 +311,7 @@ fn class_d_sha_table_balance_tamper_rejected() {
 
     let mut provers: [&mut dyn AirProver; 5] =
         [&mut sha_tables, &mut sha0, &mut sha1, &mut sha2, &mut sha3];
-    let proof = air_core::prove(&mut provers, PcsConfig::default())
+    let proof = air_core::prove(&mut provers, pcs_config())
         .expect("honest Class-D shared SHA table composition proves");
 
     // Tamper the LAST producer pair's published claimed sum — the range tables,

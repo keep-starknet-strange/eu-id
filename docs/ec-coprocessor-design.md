@@ -195,7 +195,9 @@ well-defined witness exists.
 - Verifier sends random γ ∈ Fp^(#witness rows).
 - Prover responds with the first k coordinates of `mask_row + Σ γᵢ·rowᵢ`
   (`ligero.rs:243-263`) — a claimed degree-<k polynomial.
-- Verifier samples t = `openings` column indices; for each opened column j it checks
+- Verifier samples t = `openings` distinct column indices. RS sampling excludes
+  its separately opened systematic prefix; Circle sampling covers the full
+  non-systematic codeword domain. For each opened column j it checks
   the Merkle path and that
   `mask[j] + Σ γᵢ·columnᵢ[j] == (claimed polynomial evaluated at j)`
   (`ligero.rs:644-684`).
@@ -372,74 +374,65 @@ negative re-run on the circle path.
 > and with u1 = z·s⁻¹ mod n, u2 = r·s⁻¹ mod n, the point R = u1·G + u2·Q satisfies
 > R ≠ ∞ and R.x ≡ r (mod n).
 
-This is standard ECDSA verification. Working over Fp makes all *curve* arithmetic
-native; the two non-native ingredients are mod-n arithmetic (handled with quotient
-hints) and division (handled with inverse hints).
+This is the intended standard ECDSA statement. The current implemented relation is
+not yet a complete proof of it: the scalar-multiplication accumulator points are
+checked on-curve but are not constrained to follow the double-and-add transitions or
+to use the C3-derived u1/u2 scalars. Section 10 records this critical gap explicitly.
 
 ### 6.1 Witness layout
 
-One 2680-element Fp vector (`ecdsa.rs:174-193`):
+One 1142-element native witness vector:
 
 | Slots | Content |
 |---|---|
 | 0–99 | 20×13-bit limbs of z, r, s, qx, qy |
 | 100–105 | s⁻¹ mod n; u1, u2; quotients q_inv, q1, q2 |
-| 106–617 | 512 scalar bits (u1 then u2, boolean-constrained) |
-| 618–1641 | 256 + 256 ladder accumulator points (x, y) for u1·G and u2·Q |
-| 1642–1645 | corrected ladder endpoints (inputs to the final add) |
-| 1646–2672 | 1027 slope-denominator inverses (512 + 512 ladder, 1 final add) |
-| 2673–2676 | R = (Rx, Ry); final reduction (k, r′) |
-| 2677–2679 | infinity flags (native-check only — see §10) |
+| 106–1129 | 256 + 256 ladder accumulator points (x, y) for u1·G and u2·Q |
+| 1130–1133 | corrected ladder endpoints (inputs to the final add) |
+| 1134 | final-add denominator inverse used by C11 |
+| 1135–1138 | R = (Rx, Ry); final reduction (k, r′) |
+| 1139–1141 | infinity flags (native-check only — see §10) |
 
-The whole vector is committed **once** under one Ligero commitment. Nine single-layer
-circuit families each run their own sumcheck against sub-ranges of it; because every
-family's claims are evaluated against the *same* commitment at fixed offsets, any
-value shared between families (u1, u2, accumulator points, R, …) is literally the same
-committed element — cross-family consistency needs no extra argument.
+The native witness is not committed at shared physical offsets. Each circuit family
+builds its own padded input vector, and those vectors are concatenated into one Ligero
+commitment. Values used by more than one family are equal only when the verifier adds
+an explicit fixed or cross-family linear claim. Prover-side input builders reading the
+same native witness slot do not create a verifier constraint by themselves.
 
 ### 6.2 Circuit families
 
 | Family | In/out log-size | Enforces |
 |---|---|---|
 | C1 input-limbs | 7 / 3 | value = Σ limbᵢ·2^(13i) for each of z, r, s, qx, qy |
-| C2 canonicality | 3 / 2 | r·r⁻¹ = 1, s·s⁻¹ = 1 (nonzero); qy² = qx³ + 3·qx + b (Q on curve) |
+| C2 canonicality | 3 / 2 | r·r⁻¹ = 1, s·s⁻¹ = 1 (nonzero); qy² = qx³ − 3·qx + b (Q on curve) |
 | C3–C5 scalar setup | 4 / 2 | s·s⁻¹ = 1 + q_inv·n; z·s⁻¹ = u1 + q1·n; r·s⁻¹ = u2 + q2·n |
-| C6 scalar bits | 10 / 10 | bitᵢ² = bitᵢ for all 512 bits; Σ bits·2^i recomposes u1, u2 |
-| C9–C10 ladder on-curve | 11 / 10 | y² = x³ + 3x + b for all 512 accumulator points |
 | C11 final add | 4 / 2 | affine addition of the two ladder endpoints via hinted slope: λ = (b_y−a_y)·inv, Rx = λ²−a_x−b_x, Ry = λ(a_x−Rx)−a_y |
 | C12 final on-curve | 11 / 11 | on-curve check for all 515 points incl. R |
-| C13 slope inverses | 12 / 11 | denomᵢ·invᵢ = 1 for all 1027 hinted inverses |
 | C14–C15 final check | 3 / 3 | k² = k; Rx = k·n + r′; r′ = r |
 
-Total ≈ 35k quadratic gates.
+Total: 3,239 quadratic terms. C6, C9/C10, and C13 were removed as redundant
+families; their removal preserved the already-implemented verifier relation but did
+not close the missing ladder-transition constraints.
 
 ### 6.3 Scalar multiplication
 
-Both u1·G and u2·Q use a 256-step MSB-first double-and-add ladder. The prover supplies
-every intermediate affine point as witness; the circuits then pin the trace:
-
-- each intermediate point is proven on-curve (C9/C10/C12);
-- each doubling/addition step's slope denominator (2y for doubling, Δx for addition)
-  has a proven inverse (C13), which both certifies the affine formula and certifies
-  **the denominator is nonzero** — excluding the exceptional cases (doubling a
-  2-torsion point, adding equal-x points) at every step;
-- the step formulas themselves (λ, x', y' relations) are quadratic gates over
-  consecutive accumulator slots;
-- the bits driving the conditional adds are the C6-boolean bits that provably
-  recompose u1 and u2, which are in turn pinned to (z, r, s) by C3.
+The honest witness generator computes a 256-step MSB-first double-and-add ladder for
+u1·G and u2·Q. In the proof, C12 establishes only that the 512 supplied accumulator
+points lie on P-256. There are currently no constraints for consecutive doubling/add
+steps and no equality binding those points to the C3 u1/u2 values. A malicious prover
+can therefore choose a different sequence of on-curve points. This is the critical
+soundness gap tracked in `tasks/soundness-fixes-scope.md`.
 
 ### 6.4 Nondeterministic hints and their pinning
 
-Every prover-supplied hint has an in-circuit constraint that makes it unique (or
-harmless):
+The currently constrained hints are:
 
 | Hint | Pinned by |
 |---|---|
 | s⁻¹ | s·s⁻¹ ≡ 1 (mod n form with quotient) — unique since s ≠ 0 |
 | u1, u2, q1, q2, q_inv | the three mod-n identities in C3 (see §6.6 on ranges) |
-| 512 scalar bits | booleanity + recomposition to u1, u2 |
-| ladder points | on-curve + step formulas + slope-inverse existence |
-| 1027 slope inverses | denom·inv = 1 (unique; also proves denom ≠ 0) |
+| ladder points | on-curve only; transitions and scalar binding remain open |
+| final-add inverse | C11 enforces (b_x−a_x)·inv = 1 |
 | R, k, r′ | C11 addition formula, C12 on-curve, C14: Rx = k·n + r′, k boolean, r′ = r |
 
 The mod-n reduction of R.x deserves a note: Rx ∈ Fp, and C14 asserts Rx = k·n + r′
@@ -598,13 +591,12 @@ The end-to-end argument, stated as a chain — each step conditions on the previ
 4. **Sumcheck.** Given correct input-layer MLE evaluations, a false "output layer is
    zero" claim survives layer-by-layer with probability ≤ Σᵢ (2·2dᵢ + O(1))/p
    ≈ 2^−240s — Schwartz–Zippel over degree-2 round polynomials plus the α-blend and
-   the two initial random points. So the committed witness **satisfies all nine
-   circuit families**.
-5. **Arithmetization.** A satisfying witness with the public inputs pinned by fixed
-   claims is, by §6's constraint inventory, a valid ECDSA verification trace:
-   Q on-curve, u1/u2 correctly derived, ladder correct at every step with all
-   exceptional cases excluded by the inverse hints, R correctly assembled, and
-   R.x ≡ r (mod n). (Residual caveats: §10.)
+   the two initial random points. So the committed inputs satisfy all six
+   implemented circuit families.
+5. **Arithmetization boundary.** Those six families do **not** imply a valid ECDSA
+   verification trace: the accumulator sequence is on-curve but lacks transition
+   and scalar-selection constraints. The proof is unsound for the intended ECDSA
+   statement until the critical §10.1 remediation lands.
 6. **Cross-proof binding.** The MAC (§7.3) forces the coprocessor's z_issuer and
    Q_device to equal the outer proof's committed values except with ≈ 2^−128;
    directly-projected public values are checked by equality.
@@ -616,16 +608,17 @@ Budget summary (per proved bundle, dominant terms):
 
 | Source | Error |
 |---|---|
-| Ligero (v2b / v2a) | 2^−128.6 / 2^−136.7 |
+| Ligero (production v4 Circle, full-domain sampling) | ≈ 2^−132.16 |
 | Merkle / channel collisions (BLAKE2s-256) | ≈ 2^−128 |
 | MAC binding (per proof, incl. grinding resistance) | ≈ 2^−128 |
 | GKR sumcheck (all layers, all families) | ≲ 2^−240 |
 | γ batching, α blends, sampling bias | ≲ 2^−250 |
-| **Total** | **≈ 2^−127 (union bound), i.e. ~128-bit soundness** |
+| **Total for the implemented algebraic relation** | **≈ 2^−127 (union bound)** |
 
 The 2026-07-05/06 backend audit (`tasks/audits/2026-07-05-backend-soundness.md`)
-reviewed the coprocessor, the γ-digest sharing, and this Ligero accounting at
-e9e3c007 and found no confirmed breaks; the "2^−132 exact" figure there corresponds
+reviewed the coprocessor, the γ-digest sharing, and the then-current Ligero accounting
+at e9e3c007. It predates the current ladder-family changes and is stale for claims
+about the intended ECDSA relation; the "2^−132 exact" figure there corresponds
 to the v2 parameter regime above. One day later the Q-025 design review found the
 C-p4b-blind-claim hole (§5.3) that the audit's negative tests had missed — they
 tampered claim values without compensating the blind scalar. The hole is fixed in
@@ -644,11 +637,18 @@ the fix changes proof bytes (fixture re-pin required), and the now-redundant
 `blind_claim` field is deleted only at the circle-FFT version bump (§5.6) — until
 then any new verifier path must remember to enforce the zero check.
 
-Honest inventory of what is *not* enforced in-circuit today. None is a confirmed
-break, but each is a place where soundness currently leans on something outside the
-proof.
+Honest inventory of what is *not* enforced in-circuit today. Item 1 is a confirmed
+critical break in the intended ECDSA relation; the later items are hardening gaps.
 
-1. **r, s < n is prover-side only.** The circuit binds r and s as Fp values
+1. **Scalar-multiplication transitions and scalar binding are absent (CRITICAL).**
+   C12 proves only that the 512 accumulator points are on-curve. The proof does not
+   constrain consecutive double/add transitions and does not bind the sequence to
+   C3's u1/u2. Native `verify_witness` recomputes the honest sequence before proving,
+   but an adversarial prover is not required to call it. The blocked remediation is
+   specified in `tasks/soundness-fixes-scope.md` and requires reviewed degree-2 EC
+   transition equations plus scalar-selection binding.
+
+2. **r, s < n is verifier-side parsing only.** The circuit binds r and s as Fp values
    (< p) via fixed claims from the public bytes; the verifier-side byte parsing is
    what rejects r, s ≥ n. Safe **as long as every verifier path parses the signature
    through `parse_nonzero_scalar` / `Scalar::from_repr` before building fixed
@@ -656,17 +656,15 @@ proof.
    Hardening: an in-circuit < n comparison, or an explicit verifier-side contract
    test.
 
-2. **Point-at-infinity handling is native-only.** `is_identity()` rejections for
+3. **Point-at-infinity handling is native-only.** `is_identity()` rejections for
    ladder intermediates and R, and the three `InfinityFlags` witness slots, are
-   checked by prover-side code, not constraints. Mitigating structure: every ladder
-   step's slope-denominator inverse (C13) already proves the affine formulas were
-   never degenerate, and C12 proves R on-curve with a definite (Rx, Ry) — an "R = ∞"
-   trace has no consistent affine representation that satisfies C11 + C12 + C13.
-   The flags themselves are dead weight in-circuit. Hardening: constrain the flags to
-   zero (3 gates) or delete the slots, and write down the no-affine-representation
-   argument as a test.
+   checked by prover-side code, not constraints. C11's final-add inverse excludes a
+   zero denominator for that one addition, and C12 gives R affine coordinates, but no
+   equivalent proof exists for interior ladder steps. The flags themselves are dead
+   weight in-circuit. Hardening: constrain the flags to zero or delete the slots as
+   part of the ladder remediation.
 
-3. **Limb ranges for MAC-bound (non-public-projected) values.** For fields bound via
+4. **Limb ranges for MAC-bound (non-public-projected) values.** For fields bound via
    fixed claims, non-canonical limbs are excluded by the verifier-computed claims
    (§6.5). For fields whose binding is the MAC path, the equality is at the level of
    the reconstructed 128-bit halves; the canonical-limb argument should be re-checked
@@ -674,7 +672,7 @@ proof.
    consumed input field is bound by *either* a fixed claim *or* a MAC half, with
    limbs canonical in both cases.
 
-4. **Sumcheck pads use a fixed public seed** (§4.3). Fine for soundness, contributes
+5. **Sumcheck pads use a fixed public seed** (§4.3). Fine for soundness, contributes
    nothing to ZK. Either document them as structural or upgrade to private-coin
    masks.
 

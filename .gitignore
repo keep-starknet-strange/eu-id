@@ -1,5 +1,9 @@
+# Local planning, experiments, and agent state.
+/tasks/
+/scratchpad/
+/.claude/
+
 /target
-/tasks
 .idea
 .DS_Store
 proof.bin

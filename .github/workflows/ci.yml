@@ -86,6 +86,13 @@ jobs:
     name: Build & test
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
+    # Serialize rayon: the stwo prover has a known lost-wakeup deadlock under
+    # multi-threaded release test runs that intermittently stalls CI to the job
+    # timeout. Single-threading is the documented workaround; the heavy proving
+    # tests are `#[ignore]`d (scheduled `e2e` job), so the non-ignored suite here
+    # stays fast.
+    env:
+      RAYON_NUM_THREADS: 1
     steps:
       - uses: actions/checkout@v4
 

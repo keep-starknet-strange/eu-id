@@ -15,6 +15,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 parallel = ["stwo-sha256/parallel", "eu-id-prover/parallel"]
 
 [dependencies]
+# malloc showed up at ~4% of single-core prove in profiles. Same allocator the
+# criterion benches pin, so bench and production numbers agree.
+mimalloc = { workspace = true }
 # Keep the quantum-safe prover graph available to future product bindings. The
 # standalone SHA benchmark depends on stwo-sha256 directly.
 eu-id-prover = { path = "../eu-id-prover" }
