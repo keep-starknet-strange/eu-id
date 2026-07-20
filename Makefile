@@ -139,10 +139,10 @@ publish-android-local:
 # Same as publish-android-local, but relinks each .so with a GNU build-id so the
 # stripped on-device lib can be matched to the unstripped copy in
 # crates/sdk/android/src/main/jniLibs for offline symbolization (Perfetto/heapprofd,
-# simpleperf). Toggling the flag changes the cargo build fingerprint, so this forces
-# a relink. DWARF is already produced by [profile.release] debug = true.
+# simpleperf). CARGO_PROFILE_RELEASE_DEBUG=true adds DWARF for this build only
+# (release is lean otherwise). Both toggles change the cargo fingerprint -> full rebuild.
 publish-android-symbols:
-	cd crates/sdk/android && ./gradlew publishToMavenLocal -PemitBuildId=true
+	cd crates/sdk/android && CARGO_PROFILE_RELEASE_DEBUG=true ./gradlew publishToMavenLocal -PemitBuildId=true
 
 publish-jvm-local:
 	cd crates/sdk/jvm && ./gradlew publishToMavenLocal
