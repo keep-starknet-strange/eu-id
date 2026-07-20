@@ -3,6 +3,35 @@
 Branch: `feat/quantum-safe`
 Baseline: `ce26b934` (S9)
 
+## Work order S1 — ML-DSA soundness remediation
+
+- [x] Establish `s1/soundness-remediation` at `feat/quantum-safe` `ae087857`.
+- [x] Repair the decomp final-row hint accumulator tie and replace the false-pass negative.
+- [x] Make public MSO and private IssuerSignedItem semantic bindings fail closed.
+- [x] Bind the SDK contract labels and provide a real TS13 proof/profile verifier.
+- [x] Keep revocation range witness state out of every serialized verifier envelope.
+- [x] Pin all standalone ML-DSA verifier policy/configuration inputs.
+- [x] Bound untrusted SDK envelope/decompression decoding.
+- [x] Batch the v6 TS13 compatibility update and legacy typed rejections.
+- [x] Run the release suites, privacy/negative matrix, and one-thread acceptance probe.
+
+### Review
+
+- The shared hint accumulator now ties its final base-cell value to the
+  interaction running sum before the RC8 bound is applied; the forged
+  accumulator-split regression is rejected during proving.
+- The verifier rederives canonical IssuerSignedItem `elementIdentifier` and
+  `elementValue` anchors, including canonical definite nationality-array member
+  stride. Product labels and scope are fail-closed, and standalone ML-DSA
+  verifiers pin both PCS policy and canonical tree-0 roots.
+- TS13 has a dedicated V1 proof envelope and real equality/revocation proving
+  entry point. The private revocation range is skipped in all serialized
+  verifier statements/artifacts; an end-to-end fully-PQ TS13 equality proof
+  verifies from the public-only envelope and rejects a changed epoch.
+- Verification completed with `RAYON_NUM_THREADS=1`: all `stwo-mldsa`, mdoc,
+  and SDK suites; strict clippy for the three changed crates; and the release
+  `pq_perf_probe`.
+
 ## Milestone Q1 — branch divergence
 
 - [x] Publish the clean S9 branch baseline to `origin/feat/quantum-safe`.

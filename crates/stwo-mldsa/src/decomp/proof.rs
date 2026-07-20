@@ -19,6 +19,8 @@ use stwo::core::pcs::PcsConfig;
 use stwo::core::proof::StarkProof;
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleHasher;
 use stwo::core::verifier::VerificationError;
+#[cfg(test)]
+use stwo::prover::backend::Column;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::{ComponentProver, ProvingError, TreeBuilder};
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
@@ -41,6 +43,8 @@ use super::{
     decomp_preprocessed_ids, gen_decomp_base_trace, gen_decomp_interaction,
     gen_decomp_preprocessed, DecompEval, N_BASE_COLS, N_INTERACTION_COLS, N_PAIRS,
 };
+#[cfg(test)]
+use super::{gen_decomp_interaction_with_checked_hint_total, COL_HINT_ACC};
 use crate::balancer::{
     gen_balancer_interaction, gen_balancer_trace, BalancerEval, BalancerRelation,
     BALANCER_INTERACTION_COLS,
@@ -146,6 +150,8 @@ fn hashio_tuples(bytes: &[u8]) -> Vec<Vec<u32>> {
 
 pub struct DecompProver {
     witness: MlDsaWitness,
+    #[cfg(test)]
+    checked_hint_total: Option<u32>,
     relations: Option<DecompRelations>,
     decomp_claimed_sum: SecureField,
     rc_claimed_sums: [SecureField; N_RC],
@@ -154,6 +160,27 @@ pub struct DecompProver {
     rc_mult: Vec<ColEval>,
     w1_encode_bytes: Vec<u8>,
     built: Option<Built>,
+}
+
+impl DecompProver {
+    fn gen_interaction(&self, relations: &DecompRelations) -> super::DecompInteraction {
+        #[cfg(test)]
+        if let Some(checked_hint_total) = self.checked_hint_total {
+            return gen_decomp_interaction_with_checked_hint_total(
+                &self.witness,
+                decomp_log_size(),
+                STREAM_ID_CTILDE_ABSORB,
+                relations,
+                checked_hint_total,
+            );
+        }
+        gen_decomp_interaction(
+            &self.witness,
+            decomp_log_size(),
+            STREAM_ID_CTILDE_ABSORB,
+            relations,
+        )
+    }
 }
 
 struct DecompVerifier {
@@ -325,13 +352,18 @@ impl AirProver for DecompProver {
     }
     fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
         let mut evals = gen_decomp_base_trace(&self.witness, decomp_log_size());
+        #[cfg(test)]
+        if let Some(checked_hint_total) = self.checked_hint_total {
+            let final_row = crate::air_util::circle_row_to_coset(decomp_log_size())
+                .iter()
+                .position(|&coset| coset == N_PAIRS - 1)
+                .expect("final decomp row");
+            evals[COL_HINT_ACC]
+                .values
+                .set(final_row, crate::air_util::m31(checked_hint_total));
+        }
         // rc multiplicities from a dry-run interaction (relations not needed).
-        let dry = gen_decomp_interaction(
-            &self.witness,
-            decomp_log_size(),
-            STREAM_ID_CTILDE_ABSORB,
-            &DecompRelations::dummy(),
-        );
+        let dry = self.gen_interaction(&DecompRelations::dummy());
         self.w1_encode_bytes = dry.w1_encode_bytes.clone();
         self.rc_mult = RcKind::ALL
             .iter()
@@ -351,12 +383,7 @@ impl AirProver for DecompProver {
     }
     fn write_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
         let relations = self.relations.clone().expect("relations");
-        let interaction = gen_decomp_interaction(
-            &self.witness,
-            decomp_log_size(),
-            STREAM_ID_CTILDE_ABSORB,
-            &relations,
-        );
+        let interaction = self.gen_interaction(&relations);
         let mut evals = interaction.trace;
         self.decomp_claimed_sum = interaction.claimed_sum;
 
@@ -431,6 +458,8 @@ impl Air for DecompVerifier {
 pub fn prove_decomp(witness: MlDsaWitness, config: PcsConfig) -> Result<DecompProof, ProvingError> {
     let mut prover = DecompProver {
         witness,
+        #[cfg(test)]
+        checked_hint_total: None,
         relations: None,
         decomp_claimed_sum: SecureField::zero(),
         rc_claimed_sums: [SecureField::zero(); N_RC],
@@ -450,7 +479,16 @@ pub fn prove_decomp(witness: MlDsaWitness, config: PcsConfig) -> Result<DecompPr
     })
 }
 
-pub fn verify_decomp(proof: &DecompProof) -> Result<(), VerificationError> {
+/// Verify a standalone decomp proof under the caller's exact PCS policy.
+pub fn verify_decomp(
+    proof: &DecompProof,
+    expected_config: PcsConfig,
+) -> Result<(), VerificationError> {
+    if proof.stark_proof.config != expected_config {
+        return Err(VerificationError::InvalidStructure(
+            "mldsa_decomp: unexpected PCS configuration".into(),
+        ));
+    }
     let mut verifier = DecompVerifier {
         decomp_claimed_sum: proof.decomp_claimed_sum,
         rc_claimed_sums: proof.rc_claimed_sums,
@@ -459,5 +497,119 @@ pub fn verify_decomp(proof: &DecompProof) -> Result<(), VerificationError> {
         relations: None,
         built: None,
     };
-    air_core::verify(&mut [&mut verifier], &proof.stark_proof)
+    let expected_root =
+        air_core::compute_canonical_preprocessed_root(&mut [&mut verifier], expected_config)?;
+    air_core::verify_with_expected_preprocessed_root(
+        &mut [&mut verifier],
+        &proof.stark_proof,
+        Some(expected_root),
+    )
+    .map_err(|error| match error {
+        air_core::VerifyError::Stark(error) => error,
+        air_core::VerifyError::PreprocessedRootMismatch { .. } => {
+            VerificationError::InvalidStructure(
+                "mldsa_decomp: preprocessed root mismatch (forged tree-0)".into(),
+            )
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use ml_dsa::signature::{Keypair, Signer};
+    use ml_dsa::{EncodedSignature, EncodedVerifyingKey, MlDsa65, SigningKey};
+
+    use super::*;
+    use crate::constants::{K, N, OMEGA};
+    use crate::reference::decompose::use_hint;
+    use crate::reference::encoding::{pk_decode, sig_decode};
+    use crate::reference::sponge::shake256;
+    use crate::witness::generate_witness;
+    use crate::MlDsaVerifyInput;
+
+    fn pcs_config() -> PcsConfig {
+        PcsConfig {
+            fri_config: stwo::core::fri::FriConfig::new(0, 2, 3, 1),
+            ..PcsConfig::default()
+        }
+    }
+
+    fn witness() -> MlDsaWitness {
+        let sk = SigningKey::<MlDsa65>::from_seed(&[0x42; 32].into());
+        let vk = sk.verifying_key();
+        let sig = sk.sign(b"mldsa-forged-hint-accumulator");
+        let vk_bytes: EncodedVerifyingKey<MlDsa65> = vk.encode();
+        let sig_bytes: EncodedSignature<MlDsa65> = sig.encode();
+        let pk = pk_decode(vk_bytes.as_slice()).expect("pk_decode");
+        let sig = sig_decode(sig_bytes.as_slice()).expect("sig_decode");
+        let (tr, _) = shake256(&[vk_bytes.as_slice()], 64);
+        let mut tr_array = [0u8; 64];
+        tr_array.copy_from_slice(&tr);
+        let input = MlDsaVerifyInput::from_decoded(
+            &pk,
+            &sig,
+            tr_array,
+            b"mldsa-forged-hint-accumulator".to_vec(),
+        );
+        generate_witness(&input).expect("honest witness")
+    }
+
+    fn prove_with_checked_hint_total(
+        witness: MlDsaWitness,
+        checked_hint_total: u32,
+    ) -> Result<DecompProof, ProvingError> {
+        let mut prover = DecompProver {
+            witness,
+            checked_hint_total: Some(checked_hint_total),
+            relations: None,
+            decomp_claimed_sum: SecureField::zero(),
+            rc_claimed_sums: [SecureField::zero(); N_RC],
+            wcell_claimed_sum: SecureField::zero(),
+            hashio_claimed_sum: SecureField::zero(),
+            rc_mult: Vec::new(),
+            w1_encode_bytes: Vec::new(),
+            built: None,
+        };
+        let stark_proof = air_core::prove(&mut [&mut prover], pcs_config())?;
+        Ok(DecompProof {
+            decomp_claimed_sum: prover.decomp_claimed_sum,
+            rc_claimed_sums: prover.rc_claimed_sums,
+            wcell_claimed_sum: prover.wcell_claimed_sum,
+            hashio_claimed_sum: prover.hashio_claimed_sum,
+            stark_proof,
+        })
+    }
+
+    #[test]
+    fn forged_hint_accumulator_split_is_rejected() {
+        let mut witness = witness();
+        let target = OMEGA + 1;
+        let mut total: usize = witness
+            .decomp
+            .hint
+            .iter()
+            .flatten()
+            .map(|&hint| hint as usize)
+            .sum();
+        'fill: for i in 0..K {
+            for m in 0..N {
+                if total == target {
+                    break 'fill;
+                }
+                if witness.decomp.hint[i][m] == 0 {
+                    witness.decomp.hint[i][m] = 1;
+                    witness.decomp.w1[i][m] = use_hint(1, witness.rows[i].w[m]) as u32;
+                    total += 1;
+                }
+            }
+        }
+        assert_eq!(total, target, "fixture must have exactly ω+1 hints");
+
+        assert!(matches!(
+            prove_with_checked_hint_total(witness, OMEGA as u32),
+            Err(ProvingError::ConstraintsNotSatisfied)
+        ),
+        "the final base hint accumulator must equal the true interaction sum"
+        );
+    }
 }

@@ -77,7 +77,7 @@ fn tdate(text: &str) -> Value {
     Value::Tag(0, Box::new(text.into()))
 }
 
-/// The issuer-signed pieces `build_pid_document` produces around a device arm.
+/// The issuer-signed pieces produced around a device-authentication arm.
 struct IssuerSignedDocument {
     document: Vec<u8>,
     issuer_pk: Vec<u8>,
@@ -85,26 +85,40 @@ struct IssuerSignedDocument {
     issuer_signature: Vec<u8>,
 }
 
-/// Assemble the PID mdoc document (namespace items, MSO, ML-DSA-65-signed
-/// `issuerAuth`) around the device COSE_Key and `deviceSignature` COSE_Sign1.
-fn build_pid_document(device_key: Value, device_cose_sign1: Value) -> IssuerSignedDocument {
+/// Assemble a PID mdoc with an exact caller-selected set of issuer-signed
+/// attributes. This keeps TS13's equality fixture independent from the
+/// product birth-date/nationality profile.
+fn build_pid_document_with_attributes(
+    device_key: Value,
+    device_cose_sign1: Value,
+    attributes: Vec<(u64, &str, Value, Vec<u8>)>,
+) -> IssuerSignedDocument {
     // Issuer ML-DSA-65 keypair (deterministic seed → reproducible fixture).
     let issuer_sk = SigningKey::<MlDsa65>::from_seed(&MLDSA_ISSUER_SEED.into());
     let issuer_vk = issuer_sk.verifying_key();
     let issuer_pk_bytes: EncodedVerifyingKey<MlDsa65> = issuer_vk.encode();
     let issuer_pk = issuer_pk_bytes.to_vec();
 
-    // Namespace items + value digests (same two attributes as the demo).
-    let birth_date_item = issuer_signed_item(
-        7,
-        "birth_date",
-        Value::Text("1990-07-15".to_string()),
-        vec![7; 16],
+    let attributes: Vec<(u64, Vec<u8>, [u8; 32])> = attributes
+        .into_iter()
+        .map(|(digest_id, element, value, random)| {
+            let item = issuer_signed_item(digest_id, element, value, random);
+            let digest = Sha256::digest(&item).into();
+            (digest_id, item, digest)
+        })
+        .collect();
+    assert!(
+        !attributes.is_empty(),
+        "fixture needs at least one attribute"
     );
-    let nationality_item =
-        issuer_signed_item(9, "nationality", Value::Text("DE".to_string()), vec![9; 16]);
-    let birth_digest: [u8; 32] = Sha256::digest(&birth_date_item).into();
-    let nat_digest: [u8; 32] = Sha256::digest(&nationality_item).into();
+    let value_digests = attributes
+        .iter()
+        .map(|(digest_id, _, digest)| (Value::from(*digest_id), Value::Bytes(digest.to_vec())))
+        .collect();
+    let namespace_items = attributes
+        .iter()
+        .map(|(_, item, _)| Value::Bytes(item.clone()))
+        .collect();
 
     let mso = encode_value(Value::Map(vec![
         ("version".into(), MDOC_PROFILE_VERSION.into()),
@@ -112,13 +126,7 @@ fn build_pid_document(device_key: Value, device_cose_sign1: Value) -> IssuerSign
         ("digestAlgorithm".into(), "SHA-256".into()),
         (
             "valueDigests".into(),
-            Value::Map(vec![(
-                PID_NAMESPACE.into(),
-                Value::Map(vec![
-                    (Value::from(7), Value::Bytes(birth_digest.to_vec())),
-                    (Value::from(9), Value::Bytes(nat_digest.to_vec())),
-                ]),
-            )]),
+            Value::Map(vec![(PID_NAMESPACE.into(), Value::Map(value_digests))]),
         ),
         (
             "deviceKeyInfo".into(),
@@ -155,13 +163,7 @@ fn build_pid_document(device_key: Value, device_cose_sign1: Value) -> IssuerSign
             Value::Map(vec![
                 (
                     "nameSpaces".into(),
-                    Value::Map(vec![(
-                        PID_NAMESPACE.into(),
-                        Value::Array(vec![
-                            Value::Bytes(birth_date_item),
-                            Value::Bytes(nationality_item),
-                        ]),
-                    )]),
+                    Value::Map(vec![(PID_NAMESPACE.into(), Value::Array(namespace_items))]),
                 ),
                 ("issuerAuth".into(), issuer_auth),
             ]),
@@ -222,6 +224,62 @@ pub fn mldsa_full_pq_fixture() -> MldsaFullPqFixture {
 /// COSE_Sign1 with protected header `A1 01 38 30` whose signature is pure
 /// ML-DSA-65 over the standard `Sig_structure` — mirroring the issuer arm.
 pub fn mldsa_full_pq_fixture_with_transcript(session_transcript: &[u8]) -> MldsaFullPqFixture {
+    mldsa_full_pq_fixture_with_transcript_and_nationality(
+        session_transcript,
+        Value::Text("DE".to_string()),
+    )
+}
+
+/// Fixture variant with a definite, canonical nationality array.  Its first
+/// member is intentionally not policy-accepted, exercising the selected-index
+/// stride rather than just a one-member array.
+pub fn mldsa_full_pq_fixture_with_nationality_array(
+    session_transcript: &[u8],
+) -> MldsaFullPqFixture {
+    mldsa_full_pq_fixture_with_transcript_and_nationality(
+        session_transcript,
+        Value::Array(vec![
+            Value::Text("FR".to_string()),
+            Value::Text("DE".to_string()),
+        ]),
+    )
+}
+
+/// A TS13-specific fully-PQ fixture with one equality-disclosed Boolean
+/// attribute. It intentionally does not include product-profile attributes.
+pub fn mldsa_full_pq_fixture_with_attribute(
+    session_transcript: &[u8],
+    element: &str,
+    value: Value,
+) -> MldsaFullPqFixture {
+    mldsa_full_pq_fixture_with_transcript_and_attributes(
+        session_transcript,
+        vec![(17, element, value, vec![17; 16])],
+    )
+}
+
+fn mldsa_full_pq_fixture_with_transcript_and_nationality(
+    session_transcript: &[u8],
+    nationality_value: Value,
+) -> MldsaFullPqFixture {
+    mldsa_full_pq_fixture_with_transcript_and_attributes(
+        session_transcript,
+        vec![
+            (
+                7,
+                "birth_date",
+                Value::Text("1990-07-15".to_string()),
+                vec![7; 16],
+            ),
+            (9, "nationality", nationality_value, vec![9; 16]),
+        ],
+    )
+}
+
+fn mldsa_full_pq_fixture_with_transcript_and_attributes(
+    session_transcript: &[u8],
+    attributes: Vec<(u64, &str, Value, Vec<u8>)>,
+) -> MldsaFullPqFixture {
     // Device ML-DSA-65 keypair (deterministic seed → reproducible fixture).
     let device_sk = SigningKey::<MlDsa65>::from_seed(&MLDSA_DEVICE_SEED.into());
     let device_pk_bytes: EncodedVerifyingKey<MlDsa65> = device_sk.verifying_key().encode();
@@ -243,7 +301,11 @@ pub fn mldsa_full_pq_fixture_with_transcript(session_transcript: &[u8]) -> Mldsa
         Value::Bytes(device_signature.clone()),
     ]);
 
-    let built = build_pid_document(mldsa_cose_key(&device_pk), device_cose_sign1);
+    let built = build_pid_document_with_attributes(
+        mldsa_cose_key(&device_pk),
+        device_cose_sign1,
+        attributes,
+    );
     let revocation_sk = SigningKey::<MlDsa65>::from_seed(&MLDSA_REVOCATION_SEED.into());
     let revocation_pk_bytes: EncodedVerifyingKey<MlDsa65> = revocation_sk.verifying_key().encode();
 

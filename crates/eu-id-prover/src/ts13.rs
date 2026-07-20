@@ -10,12 +10,12 @@ use crate::mdoc::{
 
 // Regenerated whenever the canonical published tuple changes.
 pub const TS13_PUBLISHED_AGE_OVER_18_CIRCUIT_HASH: &str =
-    "15c4fcff67a3ff3148f6c8ecf4a7eeaf12ffb6d16d90132004c554c8ca2580bb";
+    "d059a204b7f9df488a7c382768757a635d739da0718e4df153c41275fa85f879";
 pub const TS13_P4C_MIN_BLIND_ROWS: usize = 256;
 pub const TS13_P4C_MAX_OPENINGS: usize = 256;
 pub const TS13_P4C_MIN_DECOY_MESSAGE_BITS: usize = 512;
 pub const TS13_P4C_PER_OPENING_STATISTICAL_BITS: u32 = 64;
-pub const TS13_CONSTRAINT_SYSTEM: &str = "mldsa65-pure-stark-direct-v5";
+pub const TS13_CONSTRAINT_SYSTEM: &str = "mldsa65-pure-stark-direct-v6";
 pub const TS13_PCS_LOG_BLOWUP_FACTOR: u32 = MDOC_PRODUCTION_PCS_LOG_BLOWUP_FACTOR;
 pub const TS13_PCS_QUERIES: u32 = MDOC_PRODUCTION_PCS_QUERIES as u32;
 pub const TS13_PCS_POW_BITS: u32 = MDOC_PRODUCTION_PCS_POW_BITS;
@@ -370,7 +370,6 @@ pub struct Ts13MdocProofArtifact {
     pub circuit_hash: String,
     pub mdoc_proof: Vec<u8>,
     pub revocation_statement: Ts13RevocationStatement,
-    pub revocation_witness: Ts13RevocationWitness,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -381,32 +380,25 @@ pub enum Ts13MdocProofArtifactError {
     StatementRevocationMismatch,
     ProofDecode,
     MdocProof,
-    Revocation(Ts13RevocationError),
 }
 
 impl Ts13MdocProofArtifact {
-    pub fn verify_revocation_binding(
-        &self,
-        extracted: &ExtractedPidMdoc,
-    ) -> Result<(), Ts13MdocProofArtifactError> {
+    fn verify_artifact_shape(&self) -> Result<(), Ts13MdocProofArtifactError> {
         if self.circuit_hash != ts13_default_circuit_hash() {
             return Err(Ts13MdocProofArtifactError::CircuitHash);
         }
         if self.mdoc_proof.is_empty() {
             return Err(Ts13MdocProofArtifactError::EmptyProof);
         }
-        self.revocation_statement
-            .verify_witness(extracted, &self.revocation_witness)
-            .map_err(Ts13MdocProofArtifactError::Revocation)
+        Ok(())
     }
 
     pub fn verify_mdoc_and_revocation(
         &self,
-        extracted: &ExtractedPidMdoc,
         statement: &MdocCircuitStatement,
     ) -> Result<(), Ts13MdocProofArtifactError> {
+        self.verify_artifact_shape()?;
         self.verify_statement_revocation_binding(statement)?;
-        self.verify_revocation_binding(extracted)?;
         let proof: MdocCircuitProof = bincode::deserialize(&self.mdoc_proof)
             .map_err(|_| Ts13MdocProofArtifactError::ProofDecode)?;
         verify_mdoc_circuit(&proof, statement).map_err(|_| Ts13MdocProofArtifactError::MdocProof)

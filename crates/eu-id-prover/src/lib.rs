@@ -38,6 +38,31 @@ pub fn prove_mdoc(
     Ok((proof, statement))
 }
 
+/// Prove the TS13 profile with a private revocation range witness.  The range
+/// never leaves this proving call: `MdocCircuitStatement` skips it during
+/// serialization and the verifier reconstructs the active layout from the
+/// public revocation key/epoch and signature.
+pub fn prove_mdoc_with_ts13_revocation(
+    document: &[u8],
+    request: &MdocPidRequest,
+    policy: Policy,
+    revocation: mdoc::MdocRevocationPublicInputs,
+    id_lo: u64,
+    id_hi: u64,
+    signature: mdoc::MdocRevocationSignature,
+) -> Result<(MdocProof, MdocStatement), Error> {
+    let mut extracted = mdoc::extract_pid_mdoc(document, request).map_err(Error::Mdoc)?;
+    mdoc::select_accepted_nationality(&mut extracted, &policy);
+    let id = ts13::ts13_mso_derived_revocation_id(&extracted.mso);
+    let statement = mdoc::MdocCircuitStatement::from_extracted(&extracted, policy)
+        .map_err(Error::Mdoc)?
+        .with_ts13_revocation(revocation)
+        .with_ts13_revocation_range(mdoc::MdocRevocationRangeWitness { id, id_lo, id_hi })
+        .with_ts13_revocation_signature(signature);
+    let proof = mdoc::prove_mdoc_circuit(&extracted, &statement)?;
+    Ok((proof, statement))
+}
+
 /// Verify a product mdoc proof against its public statement. Tree-0 is
 /// reconstructed canonically inside the verifier; no artifact root is trusted.
 pub fn verify_mdoc(proof: &MdocProof, statement: &MdocStatement) -> Result<(), Error> {

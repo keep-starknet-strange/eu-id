@@ -105,7 +105,7 @@ fn validate_accepted_set(accepted: &[u32]) -> Result<(), ZkError> {
 }
 
 /// Convert days since 1970-01-01 to a proleptic-Gregorian date.
-fn epoch_day_to_date(epoch_day: i32) -> Result<Date, ZkError> {
+pub(crate) fn epoch_day_to_date(epoch_day: i32) -> Result<Date, ZkError> {
     let z = i64::from(epoch_day) + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let doe = z - era * 146_097;

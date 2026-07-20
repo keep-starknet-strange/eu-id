@@ -111,7 +111,7 @@ fn big_msg(tag: &str, len: usize) -> Vec<u8> {
 fn rejected(witness: MlDsaWitness, input: MlDsaVerifyInput) -> bool {
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         match prove_mldsa(witness, input, pcs_config()) {
-            Ok(proof) => verify_mldsa(&proof).is_err(),
+            Ok(proof) => verify_mldsa(&proof, pcs_config()).is_err(),
             Err(_) => true,
         }
     }));
@@ -145,7 +145,8 @@ fn composed_proves_and_verifies_10_sigs() {
         );
 
         let proof = prove_mldsa(w, input, pcs_config()).expect("prove");
-        verify_mldsa(&proof).unwrap_or_else(|e| panic!("case {i}: verify failed: {e:?}"));
+        verify_mldsa(&proof, pcs_config())
+            .unwrap_or_else(|e| panic!("case {i}: verify failed: {e:?}"));
         ok += 1;
     }
     assert_eq!(ok, 10);
@@ -161,7 +162,7 @@ fn composed_control_honest_proves() {
         let msg = big_msg(&format!("control-{seed}"), 1024);
         let (w, input) = witness_and_input(seed, &msg);
         let proof = prove_mldsa(w, input, pcs_config()).expect("control prove");
-        verify_mldsa(&proof).expect("control verify");
+        verify_mldsa(&proof, pcs_config()).expect("control verify");
     }
 }
 
@@ -174,7 +175,7 @@ fn composed_public_fold_constraint_rejects_tampered_group_eval() {
     let (w, input) = witness_and_input(8010, &msg);
     let mut proof = prove_mldsa(w, input, pcs_config()).expect("prove");
     proof.group_evals[0] += SecureField::from(M31::from_u32_unchecked(1));
-    assert!(verify_mldsa(&proof).is_err());
+    assert!(verify_mldsa(&proof, pcs_config()).is_err());
 }
 
 // =====================================================================
@@ -263,7 +264,7 @@ fn composed_negative_f_wrong_pk_rho() {
     let mut proof = prove_mldsa(w, input, pcs_config()).expect("prove");
     proof.input.rho[0] ^= 1;
     assert!(
-        verify_mldsa(&proof).is_err(),
+        verify_mldsa(&proof, pcs_config()).is_err(),
         "statement ρ tamper must reject"
     );
 }
@@ -277,7 +278,7 @@ fn composed_native_expand_a_rejects_tampered_t1() {
     let mut proof = prove_mldsa(w, input, pcs_config()).expect("prove");
     proof.input.t1[0][0] ^= 1;
     assert!(
-        verify_mldsa(&proof).is_err(),
+        verify_mldsa(&proof, pcs_config()).is_err(),
         "statement t1 tamper must reject"
     );
 }
@@ -291,7 +292,7 @@ fn composed_carried_tr_is_overwritten_before_use() {
     input.tr[0] ^= 1;
     let proof = prove_mldsa(w, input, pcs_config()).expect("prove with ignored carried tr");
     assert_eq!(proof.input.tr, native_tr(&proof.input));
-    verify_mldsa(&proof).expect("native tr must replace the carried value");
+    verify_mldsa(&proof, pcs_config()).expect("native tr must replace the carried value");
 }
 
 // =====================================================================
@@ -307,7 +308,51 @@ fn composed_preprocessed_root_pin_control() {
     let msg = big_msg("froot-control", 1024);
     let (w, input) = witness_and_input(8101, &msg);
     let proof = prove_mldsa(w, input, pcs_config()).expect("prove");
-    verify_mldsa(&proof).expect("honest proof must verify under the root pin");
+    verify_mldsa(&proof, pcs_config()).expect("honest proof must verify under the root pin");
+}
+
+#[test]
+fn composed_verifier_pins_expected_pcs_config() {
+    let msg = big_msg("pcs-config-pin", 1024);
+    let (w, input) = witness_and_input(8104, &msg);
+    let proof = prove_mldsa(w, input, pcs_config()).expect("prove");
+
+    verify_mldsa(&proof, pcs_config()).expect("matching PCS config must verify");
+
+    let mismatches = [
+        (
+            "pow bits",
+            PcsConfig {
+                pow_bits: 11,
+                ..pcs_config()
+            },
+        ),
+        (
+            "query count",
+            PcsConfig {
+                pow_bits: 10,
+                fri_config: FriConfig::new(0, 2, 4, 1),
+                lifting_log_size: None,
+            },
+        ),
+        (
+            "blowup factor",
+            PcsConfig {
+                pow_bits: 10,
+                fri_config: FriConfig::new(0, 3, 3, 1),
+                lifting_log_size: None,
+            },
+        ),
+    ];
+    for (field, expected_config) in mismatches {
+        let error = verify_mldsa(&proof, expected_config)
+            .expect_err(&format!("mismatched {field} must reject"));
+        assert!(
+            matches!(error, stwo::core::verifier::VerificationError::InvalidStructure(ref message)
+                if message.contains("unexpected PCS config")),
+            "unexpected {field} mismatch error: {error:?}"
+        );
+    }
 }
 
 /// Negative: tamper the proof's tree-0 (preprocessed) commitment root. The pin
@@ -321,11 +366,11 @@ fn composed_preprocessed_root_pin_rejects_tampered_root() {
     let (w, input) = witness_and_input(8102, &msg);
     let mut proof = prove_mldsa(w, input, pcs_config()).expect("prove");
     // Sanity: unmutated verifies (shares the seed with the mutation below).
-    verify_mldsa(&proof).expect("control leg must verify before tamper");
+    verify_mldsa(&proof, pcs_config()).expect("control leg must verify before tamper");
     // Flip one byte of the committed preprocessed root.
     proof.stark_proof.0.commitments[0].0[0] ^= 1;
     assert!(
-        verify_mldsa(&proof).is_err(),
+        verify_mldsa(&proof, pcs_config()).is_err(),
         "tampered preprocessed root must reject at the pin (not just constraints)"
     );
 }
@@ -424,7 +469,7 @@ fn composed_numbers() {
     let prove_ms = t0.elapsed().as_millis();
 
     let t1 = Instant::now();
-    verify_mldsa(&proof).expect("verify");
+    verify_mldsa(&proof, pcs_config()).expect("verify");
     let verify_ms = t1.elapsed().as_millis();
 
     // Perm count (private µ + c̃ + SIB permutations).

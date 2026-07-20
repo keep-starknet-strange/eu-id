@@ -602,7 +602,20 @@ pub fn prove_coeffs(
     })
 }
 
-pub fn verify_coeffs(proof: &CoeffsProof) -> Result<(), VerificationError> {
+/// Verify a standalone coeffs proof under the caller's exact PCS policy.
+///
+/// Standalone callers are responsible for choosing this policy; accepting the
+/// proof-carried configuration would let an untrusted proof lower its own
+/// verification security parameters.
+pub fn verify_coeffs(
+    proof: &CoeffsProof,
+    expected_config: PcsConfig,
+) -> Result<(), VerificationError> {
+    if proof.stark_proof.config != expected_config {
+        return Err(VerificationError::InvalidStructure(
+            "mldsa_coeffs: unexpected PCS configuration".into(),
+        ));
+    }
     let mut verifier = CoeffsVerifier {
         input: proof.input.clone(),
         group_evals: proof.group_evals.clone(),
@@ -621,7 +634,21 @@ pub fn verify_coeffs(proof: &CoeffsProof) -> Result<(), VerificationError> {
     // The air-core verify redraws challenges (in draw_relations) then checks the
     // global logup balance + the STARK proof. We additionally require the native
     // folded identity to vanish.
-    air_core::verify(&mut [&mut verifier], &proof.stark_proof)?;
+    let expected_root =
+        air_core::compute_canonical_preprocessed_root(&mut [&mut verifier], expected_config)?;
+    air_core::verify_with_expected_preprocessed_root(
+        &mut [&mut verifier],
+        &proof.stark_proof,
+        Some(expected_root),
+    )
+    .map_err(|error| match error {
+        air_core::VerifyError::Stark(error) => error,
+        air_core::VerifyError::PreprocessedRootMismatch { .. } => {
+            VerificationError::InvalidStructure(
+                "mldsa_coeffs: preprocessed root mismatch (forged tree-0)".into(),
+            )
+        }
+    })?;
     if !verifier.fold_ok {
         return Err(VerificationError::InvalidStructure(
             "mldsa_coeffs: folded identity (‡) is nonzero".into(),

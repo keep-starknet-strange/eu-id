@@ -38,6 +38,7 @@
 //! | s0 · w0 sign link (see C-DECOMP-S0) | `s0·(…)` | 2 |
 //! | UseHint `w1' − (w1 + h·(2s0−1) + 16·w16)` | `h·s0` deg 2 | 2 |
 //! | hint_acc transition (interaction `[-1,0]`) | linear | 1 |
+//! | final base/interaction hint_acc tie | `is_last·(hint_acc−acc_cur)` | 2 |
 //! | w0 / w1 / w1' / byte / hint_acc rc uses | linear | 1 |
 //! | w-binding use / w1Encode yield | linear | 1 |
 //! Every base constraint is ≤ 2; the LogUp columns batch [`LOGUP_BATCH`] = 4
@@ -447,6 +448,12 @@ impl FrameworkEval for DecompEval {
         let acc_prev_gated = E::EF::from(one.clone() - start.clone()) * acc_prev;
         eval.add_constraint(acc_cur.clone() - (acc_prev_gated + hint_sum));
 
+        // C10: the rc8 lookup reads the base-column copy, so bind that copy to
+        // the true interaction running sum on the only row where it is used.
+        eval.add_constraint(
+            E::EF::from(is_last.clone()) * (E::EF::from(hint_acc.clone()) - acc_cur.clone()),
+        );
+
         // C11: w1Encode byte emission — byte = w1'_lo + 16·w1'_hi, YIELD (+) into
         // HashIo(STREAM_ID_CTILDE_ABSORB, byte_pos, byte). Emitted BEFORE the
         // hint gate to match the interaction generator's fraction order.
@@ -459,7 +466,7 @@ impl FrameworkEval for DecompEval {
             &io_tuple,
         ));
 
-        // C10: final-row hint gate — the last active row's acc = Σ_i Σ_m h is
+        // C12: final-row hint gate — the last active row's acc = Σ_i Σ_m h is
         // range-checked two-sided into rc8: Σh ∈ [0,256) AND ω−Σh ∈ [0,256).
         // The second use forces Σh ≤ ω = 55 EXACTLY (Σh > ω ⇒ ω−Σh wraps out of
         // [0,256) ⇒ no rc8 row ⇒ imbalance). Gated by is_last (no use elsewhere).
@@ -505,6 +512,33 @@ pub fn gen_decomp_interaction(
     log_size: u32,
     ct_stream: u32,
     relations: &DecompRelations,
+) -> DecompInteraction {
+    gen_decomp_interaction_inner(witness, log_size, ct_stream, relations, None)
+}
+
+#[cfg(test)]
+fn gen_decomp_interaction_with_checked_hint_total(
+    witness: &MlDsaWitness,
+    log_size: u32,
+    ct_stream: u32,
+    relations: &DecompRelations,
+    checked_hint_total: u32,
+) -> DecompInteraction {
+    gen_decomp_interaction_inner(
+        witness,
+        log_size,
+        ct_stream,
+        relations,
+        Some(checked_hint_total),
+    )
+}
+
+fn gen_decomp_interaction_inner(
+    witness: &MlDsaWitness,
+    log_size: u32,
+    ct_stream: u32,
+    relations: &DecompRelations,
+    checked_hint_total: Option<u32>,
 ) -> DecompInteraction {
     let rows = 1usize << log_size;
     let sched = row_schedule();
@@ -596,8 +630,9 @@ pub fn gen_decomp_interaction(
     }
     // hint_acc final-row rc8 uses (Σh and ω−Σh).
     let total_h: u32 = acc[active - 1].to_m31_array()[0].0;
-    rc_uses.rc8[total_h as usize] += 1;
-    rc_uses.rc8[(OMEGA as u32 - total_h) as usize] += 1;
+    let checked_total_h = checked_hint_total.unwrap_or(total_h);
+    rc_uses.rc8[checked_total_h as usize] += 1;
+    rc_uses.rc8[(OMEGA as u32 - checked_total_h) as usize] += 1;
 
     // --- Build the logup fraction streams in AIR emission order ---
     // Per-lane: rc4(w1), rc13(a_lo), rc7(a_hi), rc13(b_lo), rc7(b_hi), rc4(w16+1),
@@ -675,8 +710,7 @@ pub fn gen_decomp_interaction(
     push(
         &|coset| {
             if coset == active - 1 {
-                let sh = acc[coset].to_m31_array()[0].0;
-                let d: SecureField = relations.rc8.combine(&[m31(sh)]);
+                let d: SecureField = relations.rc8.combine(&[m31(checked_total_h)]);
                 (one, d)
             } else {
                 (zero, one)
@@ -688,8 +722,9 @@ pub fn gen_decomp_interaction(
     push(
         &|coset| {
             if coset == active - 1 {
-                let sh = acc[coset].to_m31_array()[0].0;
-                let d: SecureField = relations.rc8.combine(&[m31(OMEGA as u32 - sh)]);
+                let d: SecureField = relations
+                    .rc8
+                    .combine(&[m31(OMEGA as u32 - checked_total_h)]);
                 (one, d)
             } else {
                 (zero, one)

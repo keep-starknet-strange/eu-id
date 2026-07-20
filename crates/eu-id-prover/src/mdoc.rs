@@ -7,6 +7,7 @@
 //! module is not part of this path; the device-auth signature binds freshness.
 
 use std::collections::{HashMap, VecDeque};
+use std::io::Cursor;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -92,7 +93,13 @@ const MDOC_ATTRIBUTE_VALUE_BASE: u32 = 20;
 const MDOC_ATTRIBUTE_VALUE_HEAD_BASE: u32 = 32;
 const MDOC_ATTRIBUTE_ELEMENT_ANCHOR_BASE: u32 = 36;
 const MDOC_REVOCATION_MESSAGE_FIELD_ID: u32 = 41;
+const MDOC_ATTRIBUTE_ELEMENT_VALUE_ANCHOR_BASE: u32 = 42;
+const MDOC_ATTRIBUTE_NATIONALITY_MEMBER_BASE: u32 = 46;
 const TS13_REVOCATION_MESSAGE_LEN: usize = 20;
+/// The largest canonical nationality array accepted by the circuit.  Each
+/// member occupies exactly three CBOR bytes (`0x62`/`0x42` plus two code
+/// bytes), so this fixed bound keeps the selected-member offset auditable.
+const MAX_NATIONALITY_MEMBERS: usize = 8;
 /// The verifier keeps only a small working set of canonical tree-0 roots.
 /// Entries are populated after a full successful proof verification, so an
 /// attacker cannot evict useful policy roots with malformed proofs.
@@ -305,6 +312,10 @@ pub struct ExtractedPidMdoc {
     pub nationality_binding: MdocNationalityBinding,
     pub birth_date_value_offset: usize,
     pub nationality_value_offset: usize,
+    /// Canonical nationality-array metadata. `None` is a scalar elementValue;
+    /// otherwise the selected member is at `nationality_array_index`.
+    pub nationality_array_len: Option<u8>,
+    pub nationality_array_index: Option<u8>,
     /// All of the holder's parsed nationality entries (one for a scalar value, N for an array).
     /// The `nationality_*` singles above hold the currently-bound entry (default: the first);
     /// [`select_accepted_nationality`] repoints them at the entry that satisfies the accepted set.
@@ -556,7 +567,7 @@ pub fn extract_pid_mdoc(
     } else {
         ParsedBirthDateValue::default()
     };
-    let nationality_candidates = if let Some(item) = &nationality_item {
+    let (nationality_candidates, nationality_array_len) = if let Some(item) = &nationality_item {
         validate_item_digest(
             &mso.value_digests,
             nationality_element.expect("Alpha2Set element is present"),
@@ -565,7 +576,7 @@ pub fn extract_pid_mdoc(
         )?;
         parse_nationality_value(item)?
     } else {
-        Vec::new()
+        (Vec::new(), None)
     };
     // Default to the first entry; the policy-aware pick happens later in `select_accepted_nationality`.
     let parsed_nat = nationality_candidates.first().cloned().unwrap_or_default();
@@ -611,6 +622,8 @@ pub fn extract_pid_mdoc(
         nationality_binding: parsed_nat.binding,
         birth_date_value_offset: parsed_birth.offset,
         nationality_value_offset: parsed_nat.offset,
+        nationality_array_len,
+        nationality_array_index: nationality_array_len.map(|_| 0),
         nationality_candidates,
         signed_at: mso.signed_at,
         valid_from: mso.valid_from,
@@ -756,16 +769,53 @@ fn parse_birth_date_text_value(
     })
 }
 
-fn parse_nationality_value(item: &ParsedItem) -> Result<Vec<ParsedNationalityValue>, MdocError> {
-    let values: Vec<&Value> = match &item.value {
-        Value::Array(entries) if !entries.is_empty() => entries.iter().collect(),
-        Value::Array(_) => return Err(MdocError::WrongType("nationality elementValue")),
-        other => vec![other],
+fn parse_nationality_value(
+    item: &ParsedItem,
+) -> Result<(Vec<ParsedNationalityValue>, Option<u8>), MdocError> {
+    let (values, array_len, array_start): (Vec<&Value>, Option<u8>, Option<usize>) = match &item
+        .value
+    {
+        Value::Array(entries) if (1..=MAX_NATIONALITY_MEMBERS).contains(&entries.len()) => {
+            // `item.value` is re-encoded below to locate it in the original
+            // IssuerSignedItemBytes. A non-canonical/indefinite array cannot
+            // have that exact definite head and is therefore rejected before
+            // it reaches the circuit.
+            let encoded = encode_value(item.value.clone());
+            let start =
+                find_subslice(&item.bytes, &encoded).ok_or(MdocError::UnsupportedCircuitValue(
+                    "nationality array must use a canonical definite head",
+                ))?;
+            (
+                entries.iter().collect(),
+                Some(entries.len() as u8),
+                Some(start),
+            )
+        }
+        Value::Array(_) => {
+            return Err(MdocError::UnsupportedCircuitValue(
+                "nationality array must contain 1..=8 members",
+            ))
+        }
+        other => (vec![other], None, None),
     };
-    values
+    let mut candidates: Vec<_> = values
         .into_iter()
         .map(|value| parse_one_nationality(item, value))
-        .collect()
+        .collect::<Result<_, _>>()?;
+    if let Some(start) = array_start {
+        for (index, candidate) in candidates.iter_mut().enumerate() {
+            let member_offset = start + 1 + 3 * index;
+            let expected = nationality_member_bytes(&candidate.binding);
+            ensure_value_window_with_message(
+                &item.bytes,
+                member_offset,
+                &expected,
+                "nationality array member encoding",
+            )?;
+            candidate.offset = member_offset + 1;
+        }
+    }
+    Ok((candidates, array_len))
 }
 
 fn select_nationality_index(candidates: &[ParsedNationalityValue], accepted: &[u32]) -> usize {
@@ -785,6 +835,7 @@ pub fn select_accepted_nationality(extracted: &mut ExtractedPidMdoc, policy: &Po
         extracted.nationality_bytes = selected.bytes;
         extracted.nationality_binding = selected.binding;
         extracted.nationality_value_offset = selected.offset;
+        extracted.nationality_array_index = extracted.nationality_array_len.map(|_| index as u8);
     }
 }
 
@@ -930,6 +981,8 @@ fn anchor_before_offset(
 
 fn attribute_exposure(statement: &MdocCircuitStatement, index: usize) -> FieldExposure {
     let attribute = &statement.attributes[index];
+    let element_identifier_anchor = element_identifier_anchor_bytes(&attribute.element_identifier)
+        .expect("statement elementIdentifier anchor is validated before field exposure");
     let mut windows = vec![(
         MdocStatementAttribute::element_field_id(index),
         attribute.element_identifier_offset,
@@ -938,7 +991,12 @@ fn attribute_exposure(statement: &MdocCircuitStatement, index: usize) -> FieldEx
     windows.push((
         MdocStatementAttribute::element_anchor_field_id(index),
         attribute.element_identifier_anchor_offset,
-        attribute.element_identifier_anchor.len(),
+        element_identifier_anchor.len(),
+    ));
+    windows.push((
+        MdocStatementAttribute::element_value_anchor_field_id(index),
+        attribute.element_value_anchor_offset,
+        attribute.element_value_anchor.len(),
     ));
     match &attribute.mode {
         MdocDisclosureMode::AgeOver => windows.push((
@@ -964,6 +1022,18 @@ fn attribute_exposure(statement: &MdocCircuitStatement, index: usize) -> FieldEx
             attribute.value_head.len(),
         ));
     }
+    if matches!(attribute.mode, MdocDisclosureMode::Alpha2Set)
+        && statement.nationality_array_len.is_some()
+    {
+        windows.push((
+            MdocStatementAttribute::nationality_member_field_id(index),
+            statement
+                .nationality_value_offset
+                .checked_sub(1)
+                .expect("validated nationality member head offset"),
+            3,
+        ));
+    }
     FieldExposure::from_preimage_windows_multi(&windows)
 }
 
@@ -982,6 +1052,11 @@ fn check_mldsa_extracted_statement_coherence(
     extracted: &ExtractedPidMdoc,
     statement: &MdocCircuitStatement,
 ) -> Result<(), Error> {
+    if extracted.doctype != statement.doctype || extracted.namespace != statement.namespace {
+        return Err(Error::Prove(
+            "mdoc extracted document scope does not match the statement".to_string(),
+        ));
+    }
     if let Some(input) = statement.issuer_input.as_mldsa() {
         if extracted.issuer_sig_structure != input.message {
             return Err(Error::Prove(
@@ -997,6 +1072,210 @@ fn check_mldsa_extracted_statement_coherence(
         }
     }
     Ok(())
+}
+
+fn validate_private_element_identifier_bindings(
+    statement: &MdocCircuitStatement,
+    phase: &'static str,
+) -> Result<(), Error> {
+    let fail = |context: &str| {
+        let detail = format!("mdoc private elementIdentifier binding: {context}");
+        if phase == "prove" {
+            Error::Prove(detail)
+        } else {
+            Error::Verify(detail)
+        }
+    };
+
+    for attribute in &statement.attributes {
+        let expected_anchor = element_identifier_anchor_bytes(&attribute.element_identifier)
+            .map_err(|_| fail("unsupported identifier encoding"))?;
+        if attribute.element_identifier_anchor != expected_anchor {
+            return Err(fail(
+                "anchor is not the canonical elementIdentifier key/value head",
+            ));
+        }
+        if attribute
+            .element_identifier_anchor_offset
+            .checked_add(expected_anchor.len())
+            != Some(attribute.element_identifier_offset)
+        {
+            return Err(fail("anchor is not adjacent to the identifier value"));
+        }
+
+        let value_head = cbor_value_head(&attribute.value)
+            .map_err(|_| fail("unsupported elementValue encoding"))?;
+        let expected_value_anchor = element_value_anchor_bytes(&attribute.value)
+            .map_err(|_| fail("unsupported elementValue anchor"))?;
+        if attribute.element_value_anchor != expected_value_anchor {
+            return Err(fail(
+                "anchor is not the canonical elementValue key/value head",
+            ));
+        }
+        if attribute
+            .element_value_anchor_offset
+            .checked_add(expected_value_anchor.len())
+            != attribute.value_offset.checked_add(value_head.len())
+        {
+            return Err(fail(
+                "elementValue anchor is not adjacent to the value body",
+            ));
+        }
+    }
+
+    match (
+        statement.nationality_attribute_index,
+        statement.nationality_array_len,
+        statement.nationality_array_index,
+    ) {
+        (None, None, None) => {}
+        (Some(index), Some(array_len), Some(member_index)) => {
+            let attribute = statement
+                .attributes
+                .get(index)
+                .ok_or_else(|| fail("nationality attribute index is out of range"))?;
+            if !matches!(attribute.mode, MdocDisclosureMode::Alpha2Set) {
+                return Err(fail(
+                    "nationality array points at a non-nationality attribute",
+                ));
+            }
+            let len = usize::from(array_len);
+            let selected = usize::from(member_index);
+            if !(1..=MAX_NATIONALITY_MEMBERS).contains(&len) || selected >= len {
+                return Err(fail(
+                    "nationality array length or selected index is out of bounds",
+                ));
+            }
+            let value = decode_value_exact(&attribute.value)
+                .map_err(|_| fail("nationality array is not exact canonical CBOR"))?;
+            let Value::Array(entries) = value else {
+                return Err(fail("nationality array metadata requires an array value"));
+            };
+            if entries.len() != len
+                || attribute.value.first() != Some(&(0x80 | array_len))
+                || encode_value(Value::Array(entries.clone())) != attribute.value
+            {
+                return Err(fail("nationality array head is not canonical and definite"));
+            }
+            let expected_member = nationality_member_bytes(&statement.nationality_binding);
+            if entries
+                .iter()
+                .any(|entry| encode_value(entry.clone()).len() != 3)
+                || encode_value(entries[selected].clone()) != expected_member
+            {
+                return Err(fail(
+                    "nationality array member is not a fixed-width alpha-2 value",
+                ));
+            }
+            let expected_offset = attribute
+                .value_offset
+                .checked_add(1 + 3 * selected + 1)
+                .ok_or_else(|| fail("nationality member offset overflow"))?;
+            if statement.nationality_value_offset != expected_offset {
+                return Err(fail(
+                    "nationality array member offset does not match its canonical index stride",
+                ));
+            }
+        }
+        (Some(index), None, None) => {
+            let attribute = statement
+                .attributes
+                .get(index)
+                .ok_or_else(|| fail("nationality attribute index is out of range"))?;
+            if !matches!(attribute.mode, MdocDisclosureMode::Alpha2Set)
+                || decode_value_exact(&attribute.value)
+                    .map_err(|_| fail("nationality scalar is not exact canonical CBOR"))
+                    .is_ok_and(|value| matches!(value, Value::Array(_)))
+            {
+                return Err(fail("nationality scalar shape is invalid"));
+            }
+            let head_len = cbor_value_head(&attribute.value)
+                .map_err(|_| fail("nationality scalar head is invalid"))?
+                .len();
+            if statement.nationality_value_offset
+                != attribute
+                    .value_offset
+                    .checked_add(head_len)
+                    .ok_or_else(|| fail("nationality scalar offset overflow"))?
+            {
+                return Err(fail(
+                    "nationality scalar value is not adjacent to elementValue",
+                ));
+            }
+            if attribute.value != nationality_member_bytes(&statement.nationality_binding) {
+                return Err(fail("nationality scalar is not the selected alpha-2 value"));
+            }
+        }
+        _ => return Err(fail("nationality array metadata is inconsistent")),
+    }
+
+    if let Some(index) = statement.age_attribute_index {
+        let attribute = statement
+            .attributes
+            .get(index)
+            .ok_or_else(|| fail("birth-date attribute index is out of range"))?;
+        if !matches!(attribute.mode, MdocDisclosureMode::AgeOver) {
+            return Err(fail("birth-date index points at a non-age attribute"));
+        }
+        let head_len = cbor_value_head(&attribute.value)
+            .map_err(|_| fail("birth-date elementValue head is invalid"))?
+            .len();
+        if statement.birth_date_value_offset
+            != attribute
+                .value_offset
+                .checked_add(head_len)
+                .ok_or_else(|| fail("birth-date value offset overflow"))?
+        {
+            return Err(fail("birth-date value is not adjacent to elementValue"));
+        }
+    }
+    Ok(())
+}
+
+fn nationality_member_bytes(binding: &MdocNationalityBinding) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(3);
+    bytes.push(match binding {
+        MdocNationalityBinding::Numeric(_) => 0x42,
+        MdocNationalityBinding::Alpha2(_) => 0x62,
+    });
+    bytes.extend_from_slice(binding.as_bytes());
+    bytes
+}
+
+/// The revocation range is a prover-only witness.  The verifier reconstructs
+/// the presence and layout of its AIR solely from the public key/epoch and the
+/// public signature.  Keeping this check central prevents a partially filled
+/// triple from silently becoming a proof without revocation.
+fn validate_ts13_revocation_shape(
+    statement: &MdocCircuitStatement,
+    require_private_range: bool,
+    phase: &'static str,
+) -> Result<bool, Error> {
+    let fail = |context: &str| {
+        let detail = format!("TS13 revocation inputs: {context}");
+        if phase == "prove" {
+            Error::Prove(detail)
+        } else {
+            Error::Verify(detail)
+        }
+    };
+
+    match (
+        statement.ts13_revocation.is_some(),
+        statement.ts13_revocation_range.is_some(),
+        statement.ts13_revocation_signature.is_some(),
+    ) {
+        (false, false, false) => Ok(false),
+        (true, true, true) => Ok(true),
+        // `ts13_revocation_range` is skipped during serialization.  A
+        // verifier consequently receives this exact public pair and must not
+        // treat the missing witness as a different circuit layout.
+        (true, false, true) if !require_private_range => Ok(true),
+        (true, false, true) => Err(fail("proving requires the private id range witness")),
+        _ => Err(fail(
+            "public inputs, private range witness, and signature must be all present or all absent",
+        )),
+    }
 }
 
 fn validate_mldsa_public_keys(
@@ -1070,8 +1349,9 @@ fn parse_mso_device_key(bytes: &[u8]) -> Result<Vec<u8>, MdocError> {
 /// BOTH prove and verify from the PUBLIC issuer `Sig_structure` before any
 /// STARK work.
 struct MdocMlDsaPublicMsoFacts {
-    /// Per-statement-attribute 32-byte `valueDigests` window (anchor-verified);
-    /// feeds the per-attribute `PublicDigestBind` components.
+    /// Per-statement-attribute 32-byte `valueDigests` entry, selected
+    /// semantically by namespace and digest ID; feeds the per-attribute
+    /// `PublicDigestBind` components.
     attribute_digests: Vec<[u8; 32]>,
     /// `Sha256` over the CBOR-navigated MSO payload; feeds the TS13
     /// revocation-range public digest binding.
@@ -1090,12 +1370,15 @@ struct MdocMlDsaPublicMsoFacts {
 /// forgery. Every fact below is therefore a fail-closed host-side check over
 /// those public bytes, run IDENTICALLY at prove and verify:
 ///
-/// * **attribute digests** — anchor content + anchor↔window adjacency checked,
-///   then the 32-byte digest read out; the value pins the in-circuit
+/// * **document scope** — the signed MSO `docType` must equal the statement
+///   `doctype`, and `valueDigests` is navigated through the statement
+///   `namespace`;
+/// * **attribute digests** — each digest is selected from that namespace by
+///   the statement attribute's `digestID`; the value pins the in-circuit
 ///   attribute-SHA digest through `PublicDigestBind` (replaces the window-bind
 ///   digest rows + issuer SHA conveyor);
-/// * **validity** — anchor content + adjacency checked, the `YYYY-MM-DD`
-///   windows parsed and compared against the policy date
+/// * **validity** — the semantic `validFrom` and `validUntil` tdates are parsed
+///   from `validityInfo` and compared against the policy date
 ///   (`validFrom <= current_date <= validUntil`, replaces `MdocValidityBind`);
 /// * **MSO digest** — the MSO is the CBOR-navigated `Sig_structure` payload
 ///   (no prover-supplied offsets), hashed natively (replaces `mso_sha` +
@@ -1106,96 +1389,38 @@ fn mldsa_public_mso_facts(
     let Some(issuer_input) = statement.issuer_input.as_mldsa() else {
         return Ok(None);
     };
-    let message = issuer_input.message.as_slice();
     let bind_err =
         |context: &str| Error::Prove(format!("mdoc ML-DSA public MSO binding: {context}"));
-    let window = |offset: usize, len: usize, context: &'static str| {
-        offset
-            .checked_add(len)
-            .and_then(|end| message.get(offset..end))
-            .ok_or_else(|| bind_err(context))
-    };
-    let anchored_window = |anchor_offset: usize,
-                           anchor: &[u8],
-                           window_offset: usize,
-                           window_len: usize,
-                           context: &'static str| {
-        if anchor.is_empty() {
-            return Err(bind_err(context));
-        }
-        if window(anchor_offset, anchor.len(), context)? != anchor {
-            return Err(bind_err(context));
-        }
-        if anchor_offset + anchor.len() != window_offset {
-            return Err(bind_err(context));
-        }
-        window(window_offset, window_len, context)
-    };
-
-    // Attribute `valueDigests` windows.
-    let mut attribute_digests = Vec::with_capacity(statement.attributes.len());
-    for attribute in &statement.attributes {
-        let digest: [u8; 32] = anchored_window(
-            attribute.mso_digest_anchor_offset,
-            &attribute.mso_digest_anchor,
-            attribute.mso_digest_offset,
-            32,
-            "attribute digest window",
-        )?
-        .try_into()
-        .expect("32-byte digest window");
-        attribute_digests.push(digest);
+    let payload = issuer_mso_payload(&issuer_input.message)
+        .map_err(|_| bind_err("strict Sig_structure payload decode"))?;
+    let mso = parse_mso(&payload, &statement.namespace)
+        .map_err(|_| bind_err("strict MobileSecurityObject parse"))?;
+    if !is_supported_mdoc_profile_version(&mso.version) {
+        return Err(bind_err("unsupported MSO version"));
+    }
+    if mso.doc_type != statement.doctype {
+        return Err(bind_err("signed docType does not match statement scope"));
     }
 
-    // Validity windows vs the policy date (mirror of `MdocValidityBind`).
+    // Attribute digests, selected semantically by digestID within the scoped
+    // namespace. The legacy offset/anchor fields remain serialized for
+    // compatibility but are deliberately not consulted here.
+    let mut attribute_digests = Vec::with_capacity(statement.attributes.len());
+    for attribute in &statement.attributes {
+        attribute_digests.push(
+            *mso.value_digests
+                .get(&attribute.digest_id)
+                .ok_or_else(|| bind_err("attribute digestID missing from scoped namespace"))?,
+        );
+    }
+
+    // Semantic validityInfo vs the policy date (mirror of `MdocValidityBind`).
     let policy_date = policy_date_tuple(&statement.policy).map_err(Error::Mdoc)?;
-    let parse_date = |bytes: &[u8]| -> Result<(u16, u8, u8), Error> {
-        if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
-            return Err(bind_err("validity date format"));
-        }
-        let digits = |range: std::ops::Range<usize>| -> Result<u32, Error> {
-            bytes[range].iter().try_fold(0u32, |acc, &b| {
-                if b.is_ascii_digit() {
-                    Ok(acc * 10 + u32::from(b - b'0'))
-                } else {
-                    Err(bind_err("validity date digit"))
-                }
-            })
-        };
-        Ok((
-            digits(0..4)? as u16,
-            digits(5..7)? as u8,
-            digits(8..10)? as u8,
-        ))
-    };
-    let valid_from = parse_date(anchored_window(
-        statement.mso_valid_from_anchor_offset,
-        &statement.mso_valid_from_anchor,
-        statement.mso_valid_from_date_offset,
-        10,
-        "validFrom window",
-    )?)?;
-    let valid_until = parse_date(anchored_window(
-        statement.mso_valid_until_anchor_offset,
-        &statement.mso_valid_until_anchor,
-        statement.mso_valid_until_date_offset,
-        10,
-        "validUntil window",
-    )?)?;
-    if valid_from > policy_date || policy_date > valid_until {
+    if mso.valid_from > policy_date || policy_date > mso.valid_until {
         return Err(bind_err("policy date outside the validity window"));
     }
 
-    // MSO digest from the CBOR-navigated payload (device-key D2 pattern).
-    let sig_structure = decode_value(message).map_err(|_| bind_err("Sig_structure decode"))?;
-    let Value::Array(items) = sig_structure else {
-        return Err(bind_err("Sig_structure shape"));
-    };
-    let payload = items
-        .get(3)
-        .and_then(|payload| payload.as_bytes())
-        .ok_or_else(|| bind_err("Sig_structure payload"))?;
-    let mso_digest: [u8; 32] = Sha256::digest(payload).into();
+    let mso_digest: [u8; 32] = Sha256::digest(&payload).into();
 
     Ok(Some(MdocMlDsaPublicMsoFacts {
         attribute_digests,
@@ -1266,7 +1491,13 @@ fn mdoc_window_bind_rows_from(
         rows.push(MdocWindowBindRow::constant(
             MdocStatementAttribute::element_anchor_field_id(index),
             index,
-            &attribute.element_identifier_anchor,
+            &element_identifier_anchor_bytes(&attribute.element_identifier)
+                .expect("statement elementIdentifier anchor is validated before row generation"),
+        ));
+        rows.push(MdocWindowBindRow::constant(
+            MdocStatementAttribute::element_value_anchor_field_id(index),
+            index,
+            &attribute.element_value_anchor,
         ));
         if let MdocDisclosureMode::ValueEquality(_) = &attribute.mode {
             rows.push(MdocWindowBindRow::constant(
@@ -1278,6 +1509,15 @@ fn mdoc_window_bind_rows_from(
                 MdocStatementAttribute::value_head_field_id(index),
                 index,
                 &attribute.value_head,
+            ));
+        }
+        if matches!(attribute.mode, MdocDisclosureMode::Alpha2Set)
+            && statement.nationality_array_len.is_some()
+        {
+            rows.push(MdocWindowBindRow::constant(
+                MdocStatementAttribute::nationality_member_field_id(index),
+                index,
+                &nationality_member_bytes(&statement.nationality_binding),
             ));
         }
     }
@@ -1297,6 +1537,31 @@ fn decode_value(bytes: &[u8]) -> Result<Value, MdocError> {
     ciborium::de::from_reader(bytes).map_err(|error| MdocError::Cbor(error.to_string()))
 }
 
+fn decode_value_exact(bytes: &[u8]) -> Result<Value, MdocError> {
+    let mut reader = Cursor::new(bytes);
+    let value = ciborium::de::from_reader(&mut reader)
+        .map_err(|error| MdocError::Cbor(error.to_string()))?;
+    if reader.position() != bytes.len() as u64 {
+        return Err(MdocError::Cbor("trailing CBOR data".to_string()));
+    }
+    Ok(value)
+}
+
+fn issuer_mso_payload(sig_structure: &[u8]) -> Result<Vec<u8>, MdocError> {
+    let value = decode_value_exact(sig_structure)?;
+    let items = expect_array(&value, "issuer Sig_structure")?;
+    if items.len() != 4
+        || expect_text(&items[0], "issuer Sig_structure.context")? != "Signature1"
+        || expect_bytes(&items[1], "issuer Sig_structure.protected")? != MLDSA_PROTECTED_HEADER
+        || !expect_bytes(&items[2], "issuer Sig_structure.external_aad")?.is_empty()
+    {
+        return Err(MdocError::InvalidCoseSign1(
+            "issuer Sig_structure must be canonical Signature1",
+        ));
+    }
+    Ok(expect_bytes(&items[3], "issuer Sig_structure.payload")?.to_vec())
+}
+
 fn encode_value(value: Value) -> Vec<u8> {
     let mut out = Vec::new();
     ciborium::ser::into_writer(&value, &mut out).expect("CBOR serialization into Vec");
@@ -1311,6 +1576,7 @@ fn cbor_value_head(value: &[u8]) -> Result<Vec<u8>, MdocError> {
     }
     match value[0] {
         0xF4 | 0xF5 => Ok(value[..1].to_vec()),
+        0x80..=0x97 => Ok(value[..1].to_vec()),
         0x60..=0x77 => Ok(value[..1].to_vec()),
         0x78 => {
             if value.len() < 2 {
@@ -1360,6 +1626,12 @@ fn cbor_text_value_head(text: &str) -> Result<Vec<u8>, MdocError> {
 fn element_identifier_anchor_bytes(element_identifier: &str) -> Result<Vec<u8>, MdocError> {
     let mut anchor = encode_value(Value::Text("elementIdentifier".to_string()));
     anchor.extend_from_slice(&cbor_text_value_head(element_identifier)?);
+    Ok(anchor)
+}
+
+fn element_value_anchor_bytes(value: &[u8]) -> Result<Vec<u8>, MdocError> {
+    let mut anchor = encode_value(Value::Text("elementValue".to_string()));
+    anchor.extend_from_slice(&cbor_value_head(value)?);
     Ok(anchor)
 }
 
@@ -1500,15 +1772,19 @@ pub fn device_authentication_sig_structure_hash(
 }
 
 fn parse_mso(bytes: &[u8], namespace: &str) -> Result<ParsedMso, MdocError> {
-    let value = decode_value(bytes)?;
+    let value = decode_value_exact(bytes)?;
     let value = match value {
         Value::Tag(CBOR_TAG_ENCODED_CBOR, inner) => {
             let mso_bytes = expect_bytes(&inner, "MobileSecurityObjectBytes")?;
-            decode_value(mso_bytes)?
+            decode_value_exact(mso_bytes)?
         }
         value => value,
     };
-    let mso = expect_map(&value, "MobileSecurityObject")?;
+    parse_mso_value(&value, namespace)
+}
+
+fn parse_mso_value(value: &Value, namespace: &str) -> Result<ParsedMso, MdocError> {
+    let mso = expect_map(value, "MobileSecurityObject")?;
     let version = text_field(mso, "version")?.to_string();
     let doc_type = text_field(mso, "docType")?.to_string();
     let digest_algorithm = text_field(mso, "digestAlgorithm")?;
@@ -1519,16 +1795,26 @@ fn parse_mso(bytes: &[u8], namespace: &str) -> Result<ParsedMso, MdocError> {
     }
 
     let value_digests = map_field(mso, "valueDigests")?;
-    let namespace_digests = value_digests
+    let namespace_key = Value::Text(namespace.to_string());
+    let mut namespace_matches = value_digests
         .iter()
-        .find_map(|(key, value)| (key == &Value::Text(namespace.to_string())).then_some(value))
+        .filter_map(|(key, value)| (key == &namespace_key).then_some(value));
+    let namespace_digests = namespace_matches
+        .next()
         .ok_or(MdocError::NamespaceMissing)?;
+    if namespace_matches.next().is_some() {
+        return Err(MdocError::UnsupportedCircuitValue(
+            "duplicate valueDigests namespace",
+        ));
+    }
     let namespace_digests = expect_map(namespace_digests, "valueDigests namespace")?;
     let mut digests = HashMap::new();
     for (key, value) in namespace_digests {
         let digest_id = expect_u32(key, "digestID")?;
         let digest = expect_digest(value, "elementDigest")?;
-        digests.insert(digest_id, digest);
+        if digests.insert(digest_id, digest).is_some() {
+            return Err(MdocError::UnsupportedCircuitValue("duplicate digestID"));
+        }
     }
 
     let device_key_info = map_field(mso, "deviceKeyInfo")?;
@@ -1790,12 +2076,19 @@ fn parse_akp_mldsa_cose_key(key: &[(Value, Value)]) -> Result<&[u8], MdocError> 
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MdocCircuitStatement {
+    /// Signed ISO document scope. In ML-DSA mode both values are checked by
+    /// semantic navigation of the public issuer `Sig_structure` payload.
+    pub doctype: String,
+    pub namespace: String,
     pub issuer_input: IssuerAuthInput,
     /// Device-auth input. Scheme uniformity with `issuer_input` (and, when
     /// present, the revocation key/signature) is enforced fail-closed at prove
     /// AND verify — a mixed statement never reaches STARK work.
     pub device_input: DeviceAuthInput,
     pub ts13_revocation: Option<MdocRevocationPublicInputs>,
+    /// Prover-only private witness.  It is deliberately absent from every
+    /// verifier envelope; deserialization supplies `None` for verification.
+    #[serde(skip, default)]
     pub ts13_revocation_range: Option<MdocRevocationRangeWitness>,
     pub ts13_revocation_signature: Option<MdocRevocationSignature>,
     pub attributes: Vec<MdocStatementAttribute>,
@@ -1805,14 +2098,19 @@ pub struct MdocCircuitStatement {
     pub nationality_binding: MdocNationalityBinding,
     pub birth_date_value_offset: usize,
     pub nationality_value_offset: usize,
+    /// Bound shape of a canonical `elementValue` nationality array. Both are
+    /// `None` for a scalar value. The selected entry is constrained at its
+    /// deterministic `1 + 3 * index + 1` offset from the array start.
+    pub nationality_array_len: Option<u8>,
+    pub nationality_array_index: Option<u8>,
     /// Offset of the `"birth_date"` `elementIdentifier` window in the birth_date
     /// item preimage (D1).
     pub birth_date_element_offset: usize,
     /// Offset of the `"nationality"` `elementIdentifier` window in the
     /// nationality item preimage (D1).
     pub nationality_element_offset: usize,
-    /// Offset of the birth_date `valueDigests` 32-byte window in the issuer
-    /// `Sig_structure` preimage (D2).
+    /// Legacy serialized MSO offset metadata. The ML-DSA verifier derives
+    /// digest and validity facts semantically and never trusts these fields.
     pub mso_birth_date_digest_offset: usize,
     pub mso_birth_date_digest_anchor_offset: usize,
     pub mso_birth_date_digest_anchor: Vec<u8>,
@@ -1906,6 +2204,11 @@ pub struct MdocStatementAttribute {
     pub element_identifier_offset: usize,
     pub element_identifier_anchor_offset: usize,
     pub element_identifier_anchor: Vec<u8>,
+    /// Canonical `"elementValue"` key followed by the CBOR head of this
+    /// attribute's value. This binds the predicate/disclosure bytes to the
+    /// semantic map field instead of an arbitrary matching byte run.
+    pub element_value_anchor_offset: usize,
+    pub element_value_anchor: Vec<u8>,
     pub value_offset: usize,
     pub value: Vec<u8>,
     pub value_head: Vec<u8>,
@@ -1930,6 +2233,14 @@ impl MdocStatementAttribute {
 
     fn element_anchor_field_id(index: usize) -> u32 {
         MDOC_ATTRIBUTE_ELEMENT_ANCHOR_BASE + index as u32
+    }
+
+    fn element_value_anchor_field_id(index: usize) -> u32 {
+        MDOC_ATTRIBUTE_ELEMENT_VALUE_ANCHOR_BASE + index as u32
+    }
+
+    fn nationality_member_field_id(index: usize) -> u32 {
+        MDOC_ATTRIBUTE_NATIONALITY_MEMBER_BASE + index as u32
     }
 }
 
@@ -1998,6 +2309,17 @@ impl MdocCircuitStatement {
                 &element_identifier_anchor,
                 "attribute elementIdentifier anchor offset",
             )?;
+            let value_head = cbor_value_head(&attribute.value)?;
+            let element_value_anchor = element_value_anchor_bytes(&attribute.value)?;
+            let value_body_offset = attribute.value_offset.checked_add(value_head.len()).ok_or(
+                MdocError::UnsupportedCircuitValue("attribute elementValue offset"),
+            )?;
+            let element_value_anchor_offset = anchor_before_offset(
+                &attribute.item,
+                value_body_offset,
+                &element_value_anchor,
+                "attribute elementValue anchor offset",
+            )?;
             ensure_value_window_with_message(
                 &attribute.item,
                 attribute.value_offset,
@@ -2016,6 +2338,8 @@ impl MdocCircuitStatement {
                 element_identifier_offset: attribute.element_identifier_offset,
                 element_identifier_anchor_offset,
                 element_identifier_anchor,
+                element_value_anchor_offset,
+                element_value_anchor,
                 value_offset: attribute.value_offset,
                 value: attribute.value.clone(),
                 value_head: if matches!(
@@ -2150,6 +2474,8 @@ impl MdocCircuitStatement {
             .ok_or(MdocError::UnsupportedCircuitValue("MSO payload offset"))?;
 
         Ok(Self {
+            doctype: extracted.doctype.clone(),
+            namespace: extracted.namespace.clone(),
             issuer_input: extracted.issuer_auth_input.clone(),
             device_input: extracted.device_auth_input.clone(),
             ts13_revocation: None,
@@ -2162,6 +2488,8 @@ impl MdocCircuitStatement {
             nationality_binding: extracted.nationality_binding,
             birth_date_value_offset: extracted.birth_date_value_offset,
             nationality_value_offset: extracted.nationality_value_offset,
+            nationality_array_len: extracted.nationality_array_len,
+            nationality_array_index: extracted.nationality_array_index,
             birth_date_element_offset,
             nationality_element_offset,
             mso_birth_date_digest_offset,
@@ -2311,6 +2639,8 @@ struct MdocTree0AttributeKey {
     element_identifier_offset: usize,
     element_identifier_anchor_offset: usize,
     element_identifier_anchor: Vec<u8>,
+    element_value_anchor_offset: usize,
+    element_value_anchor: Vec<u8>,
     value_offset: Option<usize>,
     value_len: Option<usize>,
     value: Vec<u8>,
@@ -2341,10 +2671,11 @@ struct MdocTree0CacheKeyMaterial {
     pcs_log_blowup_factor: u32,
     merged_sha_slot_log: u32,
     merged_sha_log_n_rows: u32,
-    has_revocation_range: bool,
-    has_revocation_signature: bool,
+    has_ts13_revocation: bool,
     age_attribute_index: Option<usize>,
     nationality_attribute_index: Option<usize>,
+    nationality_array_len: Option<u8>,
+    nationality_array_index: Option<u8>,
     birth_date_binding: u8,
     nationality_binding: u8,
     attributes: Vec<MdocTree0AttributeKey>,
@@ -2393,6 +2724,8 @@ fn mdoc_tree0_cache_key(
                 element_identifier_offset: attribute.element_identifier_offset,
                 element_identifier_anchor_offset: attribute.element_identifier_anchor_offset,
                 element_identifier_anchor: attribute.element_identifier_anchor.clone(),
+                element_value_anchor_offset: attribute.element_value_anchor_offset,
+                element_value_anchor: attribute.element_value_anchor.clone(),
                 value_offset: matches!(&attribute.mode, MdocDisclosureMode::ValueEquality(_))
                     .then_some(attribute.value_offset),
                 value_len: matches!(&attribute.mode, MdocDisclosureMode::ValueEquality(_))
@@ -2409,7 +2742,7 @@ fn mdoc_tree0_cache_key(
         })
         .collect();
     let material = MdocTree0CacheKeyMaterial {
-        version: 1,
+        version: 2,
         pcs_log_blowup_factor: expected_pcs_config.fri_config.log_blowup_factor,
         merged_sha_slot_log: proof
             .merged_sha_slot_log
@@ -2417,10 +2750,11 @@ fn mdoc_tree0_cache_key(
         merged_sha_log_n_rows: proof
             .merged_sha_log_n_rows
             .expect("merged SHA row log shape-gated before cache-key construction"),
-        has_revocation_range: statement.ts13_revocation_range.is_some(),
-        has_revocation_signature: statement.ts13_revocation_signature.is_some(),
+        has_ts13_revocation: validate_ts13_revocation_shape(statement, false, "verify")?,
         age_attribute_index: statement.age_attribute_index,
         nationality_attribute_index: statement.nationality_attribute_index,
+        nationality_array_len: statement.nationality_array_len,
+        nationality_array_index: statement.nationality_array_index,
         birth_date_binding: match statement.birth_date_binding {
             MdocBirthDateBinding::Packed(_) => 0,
             MdocBirthDateBinding::Text(_) => 1,
@@ -3397,6 +3731,8 @@ fn prove_mdoc_circuit_inner(
     config: PcsConfig,
 ) -> Result<MdocCircuitProof, Error> {
     validate_mldsa_public_keys(statement, "prove")?;
+    validate_private_element_identifier_bindings(statement, "prove")?;
+    let has_ts13_revocation = validate_ts13_revocation_shape(statement, true, "prove")?;
     if statement.birth_date_value_offset != extracted.birth_date_value_offset
         || statement.nationality_value_offset != extracted.nationality_value_offset
     {
@@ -3415,18 +3751,17 @@ fn prove_mdoc_circuit_inner(
     check_mldsa_extracted_statement_coherence(extracted, statement)?;
     // Issuer, device, and revocation messages are absorbed directly by hosted
     // ML-DSA modules. SHA-256 remains only for ISO mdoc attribute digests.
-    let revocation_message = match (
-        &statement.ts13_revocation_signature,
-        &statement.ts13_revocation,
-        &statement.ts13_revocation_range,
-    ) {
-        (Some(_), Some(revocation), Some(range)) => Some(ts13_revocation_message_bytes(
-            range.id_lo,
-            range.id_hi,
-            revocation.epoch,
-        )),
-        _ => None,
-    };
+    let revocation_message = has_ts13_revocation.then(|| {
+        let revocation = statement
+            .ts13_revocation
+            .as_ref()
+            .expect("revocation shape was validated");
+        let range = statement
+            .ts13_revocation_range
+            .as_ref()
+            .expect("proving revocation shape includes the private range");
+        ts13_revocation_message_bytes(range.id_lo, range.id_hi, revocation.epoch)
+    });
     let attribute_items: Vec<_> = extracted
         .extracted_attributes
         .iter()
@@ -3452,10 +3787,7 @@ fn prove_mdoc_circuit_inner(
     // service module, consumed by every hosted ML-DSA instance.
     let mldsa_keccak_handle = SharedKeccakRelations::new();
     let mldsa_range_handle = SharedRangeRelation::new();
-    let revocation_message_field = statement
-        .ts13_revocation_signature
-        .as_ref()
-        .map(|_| SharedFieldRelation::new());
+    let revocation_message_field = has_ts13_revocation.then(SharedFieldRelation::new);
     let attribute_fields: Vec<_> = (0..attribute_sha_params.len())
         .map(|_| SharedFieldRelation::new())
         .collect();
@@ -3657,11 +3989,19 @@ fn prove_mdoc_circuit_inner(
     } else {
         None
     };
-    let mut ts13_revocation_public = statement
-        .ts13_revocation
-        .clone()
-        .map(MdocRevocationPublicBind::new);
-    let mut ts13_revocation_range = statement.ts13_revocation_range.clone().map(|range| {
+    let mut ts13_revocation_public = has_ts13_revocation.then(|| {
+        MdocRevocationPublicBind::new(
+            statement
+                .ts13_revocation
+                .clone()
+                .expect("revocation shape was validated"),
+        )
+    });
+    let mut ts13_revocation_range = has_ts13_revocation.then(|| {
+        let range = statement
+            .ts13_revocation_range
+            .clone()
+            .expect("proving revocation shape includes the private range");
         let mso_digest_bytes: [u8; 32] = Sha256::digest(&extracted.mso).into();
         // S4 ML-DSA: the digest is PUBLIC (host-derived from the public
         // Sig_structure payload) — the in-circuit id bytes pin to it as
@@ -3676,11 +4016,13 @@ fn prove_mdoc_circuit_inner(
             range,
             mso_digest_bytes,
             digest_binding,
-            statement
-                .ts13_revocation
-                .as_ref()
-                .map(|revocation| revocation.epoch)
-                .filter(|_| statement.ts13_revocation_signature.is_some()),
+            Some(
+                statement
+                    .ts13_revocation
+                    .as_ref()
+                    .expect("revocation shape was validated")
+                    .epoch,
+            ),
             revocation_message_field.clone(),
         )
     });
@@ -3827,6 +4169,8 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
 ) -> Result<MdocCircuitVerifyProfile, Error> {
     let total_start = Instant::now();
     validate_mldsa_public_keys(statement, "verify")?;
+    validate_private_element_identifier_bindings(statement, "verify")?;
+    let has_ts13_revocation = validate_ts13_revocation_shape(statement, false, "verify")?;
     check_mldsa_device_key_binding(statement)?;
     let mldsa_mso_facts = mldsa_public_mso_facts(statement)?;
     match &proof.mldsa {
@@ -3860,9 +4204,7 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
         return Err(Error::NatPolicyMismatch);
     }
 
-    let has_revocation_range = statement.ts13_revocation_range.is_some();
-    let has_revocation_signature = statement.ts13_revocation_signature.is_some();
-    if proof.ts13_revocation_range_interaction_claim.is_some() != has_revocation_range {
+    if proof.ts13_revocation_range_interaction_claim.is_some() != has_ts13_revocation {
         return Err(Error::Verify(
             "mdoc proof revocation layout mismatch".to_string(),
         ));
@@ -3895,7 +4237,7 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
             ))
         }
     }
-    match (&proof.revocation_mldsa, has_revocation_signature) {
+    match (&proof.revocation_mldsa, has_ts13_revocation) {
         (Some(claims), true) if claims.has_expected_shape(false) => {}
         (None, false) => {}
         _ => {
@@ -3928,7 +4270,7 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
     // in `post_interaction_payloads`. The payload-aware verify entry hands each
     // module its slot in prove order; the service `verify_post_interaction`
     // fails closed on a missing/corrupt blob (an empty blob fails GKR decode).
-    let revocation_message_field = has_revocation_signature.then(SharedFieldRelation::new);
+    let revocation_message_field = has_ts13_revocation.then(SharedFieldRelation::new);
     let attribute_count = statement.attributes.len();
     let attribute_digests: Vec<_> = (0..attribute_count)
         .map(|_| SharedDigestRelation::new())
@@ -4160,11 +4502,15 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
     } else {
         None
     };
-    let mut ts13_revocation_public = statement
-        .ts13_revocation
-        .clone()
-        .map(MdocRevocationPublicBind::new);
-    let mut ts13_revocation_range = statement.ts13_revocation_range.as_ref().map(|_| {
+    let mut ts13_revocation_public = has_ts13_revocation.then(|| {
+        MdocRevocationPublicBind::new(
+            statement
+                .ts13_revocation
+                .clone()
+                .expect("revocation shape was validated"),
+        )
+    });
+    let mut ts13_revocation_range = has_ts13_revocation.then(|| {
         // S4 ML-DSA: the digest binding is the PUBLIC host-derived Sha256 of
         // the Sig_structure payload (mirror of the prover).
         let digest_binding = MsoDigestBinding::Public(
@@ -4175,11 +4521,13 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
         );
         MdocRevocationRangeBind::verifier(
             digest_binding,
-            statement
-                .ts13_revocation
-                .as_ref()
-                .map(|revocation| revocation.epoch)
-                .filter(|_| has_revocation_signature),
+            Some(
+                statement
+                    .ts13_revocation
+                    .as_ref()
+                    .expect("revocation shape was validated")
+                    .epoch,
+            ),
             revocation_message_field.clone(),
             proof
                 .ts13_revocation_range_interaction_claim
@@ -4327,9 +4675,15 @@ fn numeric_country(alpha2: &str) -> Result<u32, MdocError> {
 }
 
 fn value_field<'a>(map: &'a [(Value, Value)], field: &'static str) -> Result<&'a Value, MdocError> {
-    map.iter()
-        .find_map(|(key, value)| (key == &Value::Text(field.to_string())).then_some(value))
-        .ok_or(MdocError::MissingField(field))
+    let key = Value::Text(field.to_string());
+    let mut matches = map
+        .iter()
+        .filter_map(|(candidate, value)| (candidate == &key).then_some(value));
+    let value = matches.next().ok_or(MdocError::MissingField(field))?;
+    if matches.next().is_some() {
+        return Err(MdocError::UnsupportedCircuitValue("duplicate text map key"));
+    }
+    Ok(value)
 }
 
 fn map_field<'a>(
@@ -4348,15 +4702,18 @@ fn u32_field(map: &[(Value, Value)], field: &'static str) -> Result<u32, MdocErr
 }
 
 fn int_field(map: &[(Value, Value)], key: i128, field: &'static str) -> Result<i128, MdocError> {
-    let value = map
-        .iter()
-        .find_map(|(candidate, value)| {
-            value_i128(candidate)
-                .ok()
-                .filter(|candidate| *candidate == key)
-                .map(|_| value)
-        })
-        .ok_or(MdocError::MissingField(field))?;
+    let mut matches = map.iter().filter_map(|(candidate, value)| {
+        value_i128(candidate)
+            .ok()
+            .filter(|candidate| *candidate == key)
+            .map(|_| value)
+    });
+    let value = matches.next().ok_or(MdocError::MissingField(field))?;
+    if matches.next().is_some() {
+        return Err(MdocError::UnsupportedCircuitValue(
+            "duplicate integer map key",
+        ));
+    }
     value_i128(value)
 }
 
@@ -4365,15 +4722,18 @@ fn bytes_int_field<'a>(
     key: i128,
     field: &'static str,
 ) -> Result<&'a [u8], MdocError> {
-    let value = map
-        .iter()
-        .find_map(|(candidate, value)| {
-            value_i128(candidate)
-                .ok()
-                .filter(|candidate| *candidate == key)
-                .map(|_| value)
-        })
-        .ok_or(MdocError::MissingField(field))?;
+    let mut matches = map.iter().filter_map(|(candidate, value)| {
+        value_i128(candidate)
+            .ok()
+            .filter(|candidate| *candidate == key)
+            .map(|_| value)
+    });
+    let value = matches.next().ok_or(MdocError::MissingField(field))?;
+    if matches.next().is_some() {
+        return Err(MdocError::UnsupportedCircuitValue(
+            "duplicate integer map key",
+        ));
+    }
     expect_bytes(value, field)
 }
 

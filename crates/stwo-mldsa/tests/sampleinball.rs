@@ -49,7 +49,7 @@ fn rejected(witness: MlDsaWitness) -> bool {
     let w2 = witness.clone();
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         match prove_sib(witness, pcs_config()) {
-            Ok(proof) => verify_sib(&proof, &w2).is_err(),
+            Ok(proof) => verify_sib(&proof, &w2, pcs_config()).is_err(),
             Err(_) => true,
         }
     }));
@@ -67,10 +67,23 @@ fn sib_proves_and_verifies_over_20_signatures() {
         let msg = format!("mldsa-sib-case-{i}").into_bytes();
         let w = witness_for(7000 + i, &msg);
         let proof = prove_sib(w.clone(), pcs_config()).expect("prove");
-        verify_sib(&proof, &w).unwrap_or_else(|e| panic!("case {i}: verify failed: {e:?}"));
+        verify_sib(&proof, &w, pcs_config())
+            .unwrap_or_else(|e| panic!("case {i}: verify failed: {e:?}"));
         ok += 1;
     }
     assert_eq!(ok, 20);
+}
+
+#[test]
+fn sib_rejects_proof_under_different_pcs_policy() {
+    let w = witness_for(7999, b"pcs-policy");
+    let proof = prove_sib(w.clone(), pcs_config()).expect("prove");
+    let mut wrong = pcs_config();
+    wrong.pow_bits += 1;
+    assert!(
+        verify_sib(&proof, &w, wrong).is_err(),
+        "a proof must not select its own PCS policy"
+    );
 }
 
 /// Control: the negatives' seeds prove+verify cleanly without mutation.
@@ -87,7 +100,7 @@ fn sib_seeds_honest_without_mutation() {
         let w = witness_for(seed, msg);
         let proof = prove_sib(w.clone(), pcs_config())
             .unwrap_or_else(|e| panic!("seed {seed}: honest prove failed: {e:?}"));
-        verify_sib(&proof, &w)
+        verify_sib(&proof, &w, pcs_config())
             .unwrap_or_else(|e| panic!("seed {seed}: honest verify failed: {e:?}"));
     }
 }
@@ -129,7 +142,7 @@ fn negative_c_binding_tamper() {
         stwo::core::fields::m31::M31::from_u32_unchecked(1),
     );
     assert!(
-        verify_sib(&proof, &w).is_err(),
+        verify_sib(&proof, &w, pcs_config()).is_err(),
         "a broken c-binding balance must be rejected"
     );
 }
@@ -146,7 +159,7 @@ fn negative_stream_binding_tamper() {
         stwo::core::fields::m31::M31::from_u32_unchecked(1),
     );
     assert!(
-        verify_sib(&proof, &w).is_err(),
+        verify_sib(&proof, &w, pcs_config()).is_err(),
         "a broken stream-consume balance must be rejected"
     );
 }
@@ -241,14 +254,14 @@ fn negative_forged_access_list() {
 
     // Sanity: the honest witness proves+verifies WITHOUT the forgery installed.
     let honest = prove_sib(w.clone(), pcs_config()).expect("honest prove");
-    verify_sib(&honest, &w).expect("honest verify");
+    verify_sib(&honest, &w, pcs_config()).expect("honest verify");
 
     // Install the forgery and assert prove+verify REJECTS (Swap channel imbalance).
     let guard = install_forged_core(core);
     let forged_rejected =
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             match prove_sib(w.clone(), pcs_config()) {
-                Ok(proof) => verify_sib(&proof, &w).is_err(),
+                Ok(proof) => verify_sib(&proof, &w, pcs_config()).is_err(),
                 Err(_) => true,
             }
         }))
@@ -364,7 +377,8 @@ fn carried_padding_byte_is_not_a_second_consumption() {
     w.sponge.sample_in_ball_squeezed[padding_start] ^= 1;
 
     let proof = prove_sib(w.clone(), pcs_config()).expect("padding is outside consumption");
-    verify_sib(&proof, &w).expect("carried padding cannot shift the constrained prefix");
+    verify_sib(&proof, &w, pcs_config())
+        .expect("carried padding cannot shift the constrained prefix");
 }
 
 /// The inherited five-block resource cap remains a typed error. Oversized

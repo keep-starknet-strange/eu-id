@@ -53,6 +53,9 @@ sha2 = "0.10"
 # The prover's own ML-DSA reference verifier — used only by the demo module's
 # tests to confirm the minted issuer / assembled device signatures verify.
 stwo-mldsa = { path = "../stwo-mldsa" }
+# Deterministic fully-PQ issuer/device/revocation fixture for the TS13
+# end-to-end envelope regression.
+ml-dsa = "0.1.1"
 
 [[bin]]
 # Bundled binding generator. Run as:

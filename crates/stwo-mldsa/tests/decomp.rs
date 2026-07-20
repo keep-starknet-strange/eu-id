@@ -50,11 +50,12 @@ fn witness_and_input(seed: u64, msg: &[u8]) -> (MlDsaWitness, MlDsaVerifyInput) 
     (witness, input)
 }
 
-/// A witness mutation is REJECTED if proving fails/panics or verify fails.
-fn rejected(witness: MlDsaWitness) -> bool {
+/// Legacy witness-mutation oracle: proving failure, panic, or verification
+/// failure all count as rejection. Trace-level soundness tests must not use it.
+fn rejected_or_panicked(witness: MlDsaWitness) -> bool {
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         match prove_decomp(witness, pcs_config()) {
-            Ok(proof) => verify_decomp(&proof).is_err(),
+            Ok(proof) => verify_decomp(&proof, pcs_config()).is_err(),
             Err(_) => true,
         }
     }));
@@ -72,10 +73,23 @@ fn decomp_proves_and_verifies_over_20_signatures() {
         let msg = format!("mldsa-decomp-case-{i}").into_bytes();
         let (w, _) = witness_and_input(5000 + i, &msg);
         let proof = prove_decomp(w, pcs_config()).expect("prove");
-        verify_decomp(&proof).unwrap_or_else(|e| panic!("case {i}: verify failed: {e:?}"));
+        verify_decomp(&proof, pcs_config())
+            .unwrap_or_else(|e| panic!("case {i}: verify failed: {e:?}"));
         ok += 1;
     }
     assert_eq!(ok, 20);
+}
+
+#[test]
+fn decomp_rejects_proof_under_different_pcs_policy() {
+    let (w, _) = witness_and_input(5999, b"pcs-policy");
+    let proof = prove_decomp(w, pcs_config()).expect("prove");
+    let mut wrong = pcs_config();
+    wrong.pow_bits += 1;
+    assert!(
+        verify_decomp(&proof, wrong).is_err(),
+        "a proof must not select its own PCS policy"
+    );
 }
 
 /// Control: the negatives' seeds prove+verify cleanly without mutation.
@@ -90,7 +104,7 @@ fn decomp_seeds_honest_without_mutation() {
         let (w, _) = witness_and_input(seed, msg);
         let proof = prove_decomp(w, pcs_config())
             .unwrap_or_else(|e| panic!("seed {seed}: honest prove failed: {e:?}"));
-        verify_decomp(&proof)
+        verify_decomp(&proof, pcs_config())
             .unwrap_or_else(|e| panic!("seed {seed}: honest verify failed: {e:?}"));
     }
 }
@@ -107,7 +121,7 @@ fn negative_dropped_w1_digit() {
     let (mut w, _) = witness_and_input(6001, b"drop-digit");
     w.decomp.w1[0][4] = (w.decomp.w1[0][4] + 1) % 16;
     assert!(
-        rejected(w),
+        rejected_or_panicked(w),
         "a changed w1' must break the w1Encode/UseHint balance"
     );
 }
@@ -129,7 +143,10 @@ fn negative_flip_hint_bit() {
         }
     }
     w.decomp.hint[fi][fm] ^= 1;
-    assert!(rejected(w), "a flipped hint bit must be rejected");
+    assert!(
+        rejected_or_panicked(w),
+        "a flipped hint bit must be rejected"
+    );
 }
 
 /// w-binding tamper: change a w value so the decomp USE no longer matches the
@@ -138,32 +155,9 @@ fn negative_flip_hint_bit() {
 fn negative_w_binding_tamper() {
     let (mut w, _) = witness_and_input(6003, b"w-tamper");
     w.rows[1].w[10] = (w.rows[1].w[10] + 1) % stwo_mldsa::constants::Q;
-    assert!(rejected(w), "a tampered w must break the w-binding");
-}
-
-/// Σh = ω+1: force the hint weight over ω. We add hints until the total is 56.
-#[test]
-fn negative_hint_weight_over_omega() {
-    let (mut w, _) = witness_and_input(6004, b"omega");
-    let total: usize = w.decomp.hint.iter().flatten().map(|&h| h as usize).sum();
-    // Set additional hints (on zero-hint coefficients) to push total to ω+1.
-    let target = stwo_mldsa::constants::OMEGA + 1;
-    let mut cur = total;
-    'fill: for i in 0..stwo_mldsa::constants::K {
-        for m in 0..stwo_mldsa::constants::N {
-            if cur >= target {
-                break 'fill;
-            }
-            if w.decomp.hint[i][m] == 0 {
-                w.decomp.hint[i][m] = 1;
-                cur += 1;
-            }
-        }
-    }
-    assert!(cur >= target, "must reach ω+1 hints");
     assert!(
-        rejected(w),
-        "Σh = ω+1 must be rejected by the accumulator gate"
+        rejected_or_panicked(w),
+        "a tampered w must break the w-binding"
     );
 }
 
@@ -178,7 +172,7 @@ fn negative_w0_out_of_range() {
     // is out of range on the `b = γ2 − w0` side.
     w.decomp.w0[0][0] = stwo_mldsa::constants::GAMMA2 as i32 + 1;
     assert!(
-        rejected(w),
+        rejected_or_panicked(w),
         "w0 = γ2+1 must be rejected by the centered-range lookup"
     );
 }

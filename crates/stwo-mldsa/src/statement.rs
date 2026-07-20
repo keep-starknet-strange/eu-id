@@ -2141,7 +2141,15 @@ pub fn hosted_public_claimed_sums_len() -> usize {
     claimed_sums_len(true, true)
 }
 
-pub fn verify_mldsa(proof: &MlDsaProof) -> Result<(), VerificationError> {
+pub fn verify_mldsa(
+    proof: &MlDsaProof,
+    expected_config: PcsConfig,
+) -> Result<(), VerificationError> {
+    if proof.stark_proof.config != expected_config {
+        return Err(VerificationError::InvalidStructure(
+            "ML-DSA statement: unexpected PCS config".to_string(),
+        ));
+    }
     proof.input.validate_public_key().map_err(|message| {
         VerificationError::InvalidStructure(format!("ML-DSA statement: {message}"))
     })?;
@@ -2177,7 +2185,7 @@ pub fn verify_mldsa(proof: &MlDsaProof) -> Result<(), VerificationError> {
     );
     let expected_root = air_core::compute_canonical_preprocessed_root(
         &mut [&mut service, &mut verifier],
-        proof.stark_proof.config,
+        expected_config,
     )?;
     air_core::verify_with_expected_preprocessed_root_and_payloads(
         &mut [&mut service, &mut verifier],

@@ -14,9 +14,9 @@
 //! stwo-mldsa constraint) — always pass `--test-threads=1`.
 
 use eu_id_prover::mdoc::{
-    extract_pid_mdoc, openid4vp_session_transcript, ExtractedPidMdoc, MdocAuthInput,
-    MdocCircuitStatement, MdocError, MdocPidRequest, MdocRevocationKey, MdocRevocationPublicInputs,
-    MdocRevocationRangeWitness, MdocRevocationSignature,
+    extract_pid_mdoc, openid4vp_session_transcript, select_accepted_nationality, ExtractedPidMdoc,
+    MdocAuthInput, MdocCircuitStatement, MdocError, MdocPidRequest, MdocRevocationKey,
+    MdocRevocationPublicInputs, MdocRevocationRangeWitness, MdocRevocationSignature,
 };
 use eu_id_prover::ts13::{
     ts13_default_circuit_hash, ts13_mso_derived_revocation_id, Ts13MdocProofArtifact,
@@ -121,6 +121,61 @@ fn full_pq_mdoc_extracts_with_mldsa_issuer_and_device_arms() {
     assert_eq!(device.message, extracted.device_sig_structure);
     assert!(statement.issuer_input.is_mldsa());
     assert!(statement.device_input.is_mldsa());
+}
+
+#[test]
+fn nationality_array_selection_has_canonical_member_stride() {
+    let session_transcript = openid4vp_session_transcript(b"nationality-array-session");
+    let fixture = mldsa_fixture::mldsa_full_pq_fixture_with_nationality_array(&session_transcript);
+    let request = MdocPidRequest::eudi_pid(session_transcript)
+        .with_trusted_mldsa_issuer_public_keys(vec![fixture.issuer_pk]);
+    let mut extracted = extract_pid_mdoc(&fixture.document, &request).expect("array mdoc extracts");
+    assert_eq!(extracted.nationality_array_len, Some(2));
+    assert_eq!(extracted.nationality_array_index, Some(0));
+
+    let mut policy = demo_policy();
+    policy.accepted_nationalities = vec![276];
+    policy.accepted_nationalities_alpha2 = vec![*b"DE"];
+    select_accepted_nationality(&mut extracted, &policy);
+    assert_eq!(extracted.nationality_array_index, Some(1));
+    let statement =
+        MdocCircuitStatement::from_extracted(&extracted, policy).expect("array statement builds");
+    let index = statement
+        .nationality_attribute_index
+        .expect("nationality attribute exists");
+    let attribute = &statement.attributes[index];
+    assert_eq!(statement.nationality_array_len, Some(2));
+    assert_eq!(statement.nationality_array_index, Some(1));
+    assert_eq!(
+        statement.nationality_value_offset,
+        attribute.value_offset + 1 + 3 + 1,
+        "array member is bound by its canonical head plus fixed alpha-2 stride"
+    );
+}
+
+#[test]
+fn ts13_equality_fixture_extracts_only_the_boolean_claim() {
+    let session_transcript = openid4vp_session_transcript(b"ts13-equality-fixture");
+    let fixture = mldsa_fixture::mldsa_full_pq_fixture_with_attribute(
+        &session_transcript,
+        "age_over_18",
+        ciborium::value::Value::Bool(true),
+    );
+    let mut request = MdocPidRequest::eudi_pid(session_transcript);
+    request.attributes = vec![eu_id_prover::mdoc::MdocRequestedAttribute {
+        element_identifier: "age_over_18".to_string(),
+        mode: eu_id_prover::mdoc::MdocDisclosureMode::ValueEquality(vec![0xf5]),
+    }];
+    request.trusted_mldsa_issuer_public_keys = vec![fixture.issuer_pk];
+
+    let extracted =
+        extract_pid_mdoc(&fixture.document, &request).expect("TS13 equality fixture extracts");
+    assert_eq!(extracted.extracted_attributes.len(), 1);
+    assert_eq!(
+        extracted.extracted_attributes[0].request.element_identifier,
+        "age_over_18"
+    );
+    assert_eq!(extracted.extracted_attributes[0].value, [0xf5]);
 }
 
 /// D5: an ML-DSA issuer REQUIRES a non-empty pin list whose member is
@@ -287,6 +342,127 @@ mod quantum_only {
         );
     }
 
+    #[test]
+    fn mldsa_semantic_mso_and_identifier_tampers_reject_at_prove() {
+        let (extracted, statement) = full_pq_extracted_and_statement();
+
+        let mut wrong_doctype = statement.clone();
+        wrong_doctype.doctype.push_str(".other");
+        let error = match prove_mdoc_circuit(&extracted, &wrong_doctype) {
+            Err(error) => error,
+            Ok(_) => panic!("statement docType must match the signed MSO"),
+        };
+        assert!(
+            format!("{error:?}").contains("public MSO binding"),
+            "unexpected docType rejection: {error:?}"
+        );
+
+        let mut wrong_namespace = statement.clone();
+        wrong_namespace.namespace.push_str(".other");
+        let error = match prove_mdoc_circuit(&extracted, &wrong_namespace) {
+            Err(error) => error,
+            Ok(_) => panic!("digest lookup must stay in the statement namespace"),
+        };
+        assert!(
+            format!("{error:?}").contains("public MSO binding"),
+            "unexpected namespace rejection: {error:?}"
+        );
+
+        let mut missing_digest_id = statement.clone();
+        missing_digest_id.attributes[0].digest_id = u32::MAX;
+        let error = match prove_mdoc_circuit(&extracted, &missing_digest_id) {
+            Err(error) => error,
+            Ok(_) => panic!("digestID must resolve in the scoped valueDigests map"),
+        };
+        assert!(
+            format!("{error:?}").contains("digestID missing"),
+            "unexpected digestID rejection: {error:?}"
+        );
+
+        let mut noncanonical_anchor = statement.clone();
+        noncanonical_anchor.attributes[0].element_identifier_anchor[0] ^= 1;
+        let error = match prove_mdoc_circuit(&extracted, &noncanonical_anchor) {
+            Err(error) => error,
+            Ok(_) => panic!("statement-carried elementIdentifier anchor must be rederived"),
+        };
+        assert!(
+            format!("{error:?}").contains("private elementIdentifier binding"),
+            "unexpected canonical-anchor rejection: {error:?}"
+        );
+
+        let mut noncanonical_value_anchor = statement.clone();
+        noncanonical_value_anchor.attributes[0].element_value_anchor[0] ^= 1;
+        let error = match prove_mdoc_circuit(&extracted, &noncanonical_value_anchor) {
+            Err(error) => error,
+            Ok(_) => panic!("statement-carried elementValue anchor must be rederived"),
+        };
+        assert!(
+            format!("{error:?}").contains("private elementIdentifier binding"),
+            "unexpected elementValue anchor rejection: {error:?}"
+        );
+
+        let mut nonadjacent_value_anchor = statement.clone();
+        nonadjacent_value_anchor.attributes[0].element_value_anchor_offset += 1;
+        let error = match prove_mdoc_circuit(&extracted, &nonadjacent_value_anchor) {
+            Err(error) => error,
+            Ok(_) => panic!("elementValue anchor must end at its value body"),
+        };
+        assert!(
+            format!("{error:?}").contains("not adjacent"),
+            "unexpected elementValue anchor-adjacency rejection: {error:?}"
+        );
+
+        let mut nonadjacent_anchor = statement;
+        nonadjacent_anchor.attributes[0].element_identifier_anchor_offset += 1;
+        let error = match prove_mdoc_circuit(&extracted, &nonadjacent_anchor) {
+            Err(error) => error,
+            Ok(_) => panic!("elementIdentifier anchor must end at its value window"),
+        };
+        assert!(
+            format!("{error:?}").contains("not adjacent"),
+            "unexpected anchor-adjacency rejection: {error:?}"
+        );
+    }
+
+    #[test]
+    fn nationality_array_member_index_tamper_rejects_at_prove() {
+        let session_transcript = openid4vp_session_transcript(b"nationality-array-tamper");
+        let fixture =
+            mldsa_fixture::mldsa_full_pq_fixture_with_nationality_array(&session_transcript);
+        let request = MdocPidRequest::eudi_pid(session_transcript)
+            .with_trusted_mldsa_issuer_public_keys(vec![fixture.issuer_pk]);
+        let mut extracted =
+            extract_pid_mdoc(&fixture.document, &request).expect("array mdoc extracts");
+        let mut policy = demo_policy();
+        policy.accepted_nationalities = vec![276];
+        policy.accepted_nationalities_alpha2 = vec![*b"DE"];
+        select_accepted_nationality(&mut extracted, &policy);
+        let statement =
+            MdocCircuitStatement::from_extracted(&extracted, policy).expect("array statement");
+
+        let mut invalid_index = statement.clone();
+        invalid_index.nationality_array_index = Some(2);
+        let error = match prove_mdoc_circuit(&extracted, &invalid_index) {
+            Err(error) => error,
+            Ok(_) => panic!("array index outside the canonical array must reject"),
+        };
+        assert!(
+            format!("{error:?}").contains("private elementIdentifier binding"),
+            "unexpected nationality-array index rejection: {error:?}"
+        );
+
+        let mut wrong_stride = statement;
+        wrong_stride.nationality_value_offset += 1;
+        let error = match prove_mdoc_circuit(&extracted, &wrong_stride) {
+            Err(error) => error,
+            Ok(_) => panic!("array member offset outside its canonical stride must reject"),
+        };
+        assert!(
+            format!("{error:?}").contains("private elementIdentifier binding"),
+            "unexpected nationality-array stride rejection: {error:?}"
+        );
+    }
+
     /// Age-only presentation (the SDK's PredicateMode::Age): the request
     /// carries ONLY the birth_date/AgeOver attribute and the policy has no
     /// accepted nationalities. The credential still contains nationality —
@@ -296,8 +472,7 @@ mod quantum_only {
     #[test]
     fn age_only_mdoc_proves_and_verifies() {
         let session_transcript = openid4vp_session_transcript(b"age-only-session");
-        let fixture =
-            mldsa_fixture::mldsa_full_pq_fixture_with_transcript(&session_transcript);
+        let fixture = mldsa_fixture::mldsa_full_pq_fixture_with_transcript(&session_transcript);
         let mut request = MdocPidRequest::eudi_pid(session_transcript)
             .with_trusted_mldsa_issuer_public_keys(vec![fixture.issuer_pk.clone()]);
         request.attributes = vec![eu_id_prover::mdoc::MdocRequestedAttribute {
@@ -313,8 +488,7 @@ mod quantum_only {
         };
         let statement = MdocCircuitStatement::from_extracted(&extracted, policy)
             .expect("age-only statement builds");
-        let proof =
-            prove_mdoc_circuit(&extracted, &statement).expect("age-only mdoc proves");
+        let proof = prove_mdoc_circuit(&extracted, &statement).expect("age-only mdoc proves");
         verify_mdoc_circuit(&proof, &statement).expect("age-only mdoc verifies");
     }
 
@@ -371,10 +545,18 @@ mod quantum_only {
             .ts13_revocation
             .as_ref()
             .expect("statement carries revocation public inputs");
-        let revocation_range = statement
-            .ts13_revocation_range
-            .as_ref()
-            .expect("statement carries revocation range");
+        // The verifier envelope must not serialize the private range.  Its
+        // layout is reconstructed from the public revocation key/epoch and
+        // signature, while an attempted re-prove fails because no witness is
+        // available after the round trip.
+        let statement_bytes = bincode::serialize(&statement).expect("statement serializes");
+        let verifier_statement: MdocCircuitStatement =
+            bincode::deserialize(&statement_bytes).expect("statement deserializes");
+        assert!(verifier_statement.ts13_revocation_range.is_none());
+        verify_mdoc_circuit(&proof, &verifier_statement)
+            .expect("verifier statement without a private range verifies");
+        assert!(prove_mdoc_circuit(&extracted, &verifier_statement).is_err());
+
         let artifact = Ts13MdocProofArtifact {
             circuit_hash: ts13_default_circuit_hash(),
             mdoc_proof: proof_bytes.clone(),
@@ -382,32 +564,10 @@ mod quantum_only {
                 revocation_public_key: revocation_public.revocation_public_key.clone(),
                 epoch: revocation_public.epoch,
             },
-            revocation_witness: Ts13RevocationWitness {
-                id: revocation_range.id,
-                id_lo: revocation_range.id_lo,
-                id_hi: revocation_range.id_hi,
-                epoch: revocation_public.epoch,
-                signature: statement
-                    .ts13_revocation_signature
-                    .clone()
-                    .expect("statement carries revocation signature"),
-            },
         };
         artifact
-            .verify_mdoc_and_revocation(&extracted, &statement)
-            .expect("TS13 artifact verifies with internal tree-0 reconstruction");
-
-        // The VERIFIER-side statement does not need the real range values:
-        // zeroed bounds verify identically (the range facts are proven
-        // in-STARK; the verifier only keys off presence).
-        let mut verifier_statement = statement.clone();
-        verifier_statement.ts13_revocation_range = Some(MdocRevocationRangeWitness {
-            id: 0,
-            id_lo: 0,
-            id_hi: 0,
-        });
-        verify_mdoc_circuit(&proof, &verifier_statement)
-            .expect("verifier statement with zeroed range verifies");
+            .verify_mdoc_and_revocation(&verifier_statement)
+            .expect("TS13 artifact verifies with a public-only statement");
 
         // Q11: each hosted role binds verifier-native ExpandA(ρ) and t1 to
         // the transcript-mixed public key. Statement-side mutations reject.
@@ -452,8 +612,6 @@ mod quantum_only {
 
         // G6 privacy: the raw id_lo/id_hi LE-byte patterns are absent from the
         // serialized proof AND the serialized verifier statement.
-        let statement_bytes =
-            bincode::serialize(&verifier_statement).expect("statement serializes");
         for (name, pattern) in [
             ("id_lo", id_lo.to_le_bytes()),
             ("id_hi", id_hi.to_le_bytes()),
@@ -595,6 +753,48 @@ mod quantum_only {
     fn mldsa_mdoc_statement_message_tampers_reject() {
         let (extracted, statement) = full_pq_extracted_and_statement();
         let proof = prove_mdoc_circuit(&extracted, &statement).expect("honest prove");
+
+        // The legacy public-MSO byte offsets and anchors are compatibility
+        // metadata only. Verification derives all digest, scope, validity,
+        // and MSO-hash facts by semantic navigation of the signed payload.
+        let mut stale_public_offsets = statement.clone();
+        for attribute in &mut stale_public_offsets.attributes {
+            attribute.mso_digest_offset = usize::MAX;
+            attribute.mso_digest_anchor_offset = usize::MAX;
+            attribute.mso_digest_anchor.clear();
+        }
+        stale_public_offsets.mso_birth_date_digest_offset = usize::MAX;
+        stale_public_offsets.mso_birth_date_digest_anchor_offset = usize::MAX;
+        stale_public_offsets.mso_birth_date_digest_anchor.clear();
+        stale_public_offsets.mso_nationality_digest_offset = usize::MAX;
+        stale_public_offsets.mso_nationality_digest_anchor_offset = usize::MAX;
+        stale_public_offsets.mso_nationality_digest_anchor.clear();
+        stale_public_offsets.mso_valid_from_date_offset = usize::MAX;
+        stale_public_offsets.mso_valid_from_anchor_offset = usize::MAX;
+        stale_public_offsets.mso_valid_from_anchor.clear();
+        stale_public_offsets.mso_valid_until_date_offset = usize::MAX;
+        stale_public_offsets.mso_valid_until_anchor_offset = usize::MAX;
+        stale_public_offsets.mso_valid_until_anchor.clear();
+        stale_public_offsets.mso_payload_offset = usize::MAX;
+        stale_public_offsets.mso_payload_len = usize::MAX;
+        verify_mdoc_circuit(&proof, &stale_public_offsets)
+            .expect("legacy public-MSO offsets do not authorize verification");
+
+        let mut wrong_scope = statement.clone();
+        wrong_scope.doctype.push_str(".other");
+        verify_mdoc_circuit(&proof, &wrong_scope)
+            .expect_err("verify must reject a statement docType outside the signed MSO");
+
+        let mut noncanonical_anchor = statement.clone();
+        noncanonical_anchor.attributes[0]
+            .element_identifier_anchor
+            .pop();
+        let error = verify_mdoc_circuit(&proof, &noncanonical_anchor)
+            .expect_err("verify must rederive private elementIdentifier anchors");
+        assert!(
+            format!("{error:?}").contains("private elementIdentifier binding"),
+            "unexpected verify-side anchor rejection: {error:?}"
+        );
 
         let mut issuer_tampered = statement.clone();
         match &mut issuer_tampered.issuer_input {

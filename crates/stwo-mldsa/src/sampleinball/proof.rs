@@ -460,7 +460,25 @@ pub fn prove_sib(witness: MlDsaWitness, config: PcsConfig) -> Result<SibProof, P
     })
 }
 
-pub fn verify_sib(proof: &SibProof, _witness: &MlDsaWitness) -> Result<(), VerificationError> {
+/// Verify a standalone SampleInBall proof under the caller's exact PCS policy.
+pub fn verify_sib(
+    proof: &SibProof,
+    _witness: &MlDsaWitness,
+    expected_config: PcsConfig,
+) -> Result<(), VerificationError> {
+    if proof.stark_proof.config != expected_config {
+        return Err(VerificationError::InvalidStructure(
+            "mldsa_sib: unexpected PCS configuration".into(),
+        ));
+    }
+    if proof.log_size != sib_log_size()
+        || proof.ccell_log_size != ccell_log_size()
+        || proof.hashio_log_size != hashio_log_size()
+    {
+        return Err(VerificationError::InvalidStructure(
+            "mldsa_sib: unexpected standalone layout".into(),
+        ));
+    }
     let mut verifier = SibVerifier {
         witness_log_size: proof.log_size,
         hashio_log_size: proof.hashio_log_size,
@@ -471,5 +489,19 @@ pub fn verify_sib(proof: &SibProof, _witness: &MlDsaWitness) -> Result<(), Verif
         relations: None,
         built: None,
     };
-    air_core::verify(&mut [&mut verifier], &proof.stark_proof)
+    let expected_root =
+        air_core::compute_canonical_preprocessed_root(&mut [&mut verifier], expected_config)?;
+    air_core::verify_with_expected_preprocessed_root(
+        &mut [&mut verifier],
+        &proof.stark_proof,
+        Some(expected_root),
+    )
+    .map_err(|error| match error {
+        air_core::VerifyError::Stark(error) => error,
+        air_core::VerifyError::PreprocessedRootMismatch { .. } => {
+            VerificationError::InvalidStructure(
+                "mldsa_sib: preprocessed root mismatch (forged tree-0)".into(),
+            )
+        }
+    })
 }

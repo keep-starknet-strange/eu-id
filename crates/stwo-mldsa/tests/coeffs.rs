@@ -58,7 +58,7 @@ fn witness_and_input(
 fn rejected(witness: stwo_mldsa::witness::MlDsaWitness, input: MlDsaVerifyInput) -> bool {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         match prove_coeffs(witness, input, PcsConfig::default()) {
-            Ok(proof) => verify_coeffs(&proof).is_err(),
+            Ok(proof) => verify_coeffs(&proof, PcsConfig::default()).is_err(),
             Err(_) => true, // prover rejected (ConstraintsNotSatisfied / imbalance)
         }
     }));
@@ -76,11 +76,23 @@ fn coeffs_proves_and_verifies_over_20_signatures() {
     for i in 0..20u64 {
         let msg = format!("mldsa-coeffs-case-{i}").into_bytes();
         let proof = prove_case(1000 + i, &msg);
-        verify_coeffs(&proof).unwrap_or_else(|e| panic!("case {i}: verify failed: {e:?}"));
+        verify_coeffs(&proof, PcsConfig::default())
+            .unwrap_or_else(|e| panic!("case {i}: verify failed: {e:?}"));
         assert_eq!(proof.group_evals.len(), N_GROUPS);
         ok += 1;
     }
     assert_eq!(ok, 20);
+}
+
+#[test]
+fn coeffs_rejects_proof_under_different_pcs_policy() {
+    let proof = prove_case(1999, b"pcs-policy");
+    let mut wrong = PcsConfig::default();
+    wrong.pow_bits += 1;
+    assert!(
+        verify_coeffs(&proof, wrong).is_err(),
+        "a proof must not select its own PCS policy"
+    );
 }
 
 // =====================================================================
@@ -96,7 +108,7 @@ fn negative_tampered_claimed_eval() {
     let mut proof = prove_case(2001, b"tamper-eval");
     proof.group_evals[17] += SecureField::from(stwo::core::fields::m31::M31::from_u32_unchecked(1));
     assert!(
-        verify_coeffs(&proof).is_err(),
+        verify_coeffs(&proof, PcsConfig::default()).is_err(),
         "tampered claimed eval must reject"
     );
 }
@@ -106,7 +118,10 @@ fn negative_tampered_claimed_eval() {
 fn negative_wrong_pk_rho() {
     let mut proof = prove_case(2002, b"wrong-rho");
     proof.input.rho[0] ^= 1;
-    assert!(verify_coeffs(&proof).is_err(), "wrong ρ must reject");
+    assert!(
+        verify_coeffs(&proof, PcsConfig::default()).is_err(),
+        "wrong ρ must reject"
+    );
 }
 
 /// Corrupt a coeffs claimed sum → logup balance no longer cancels.
@@ -116,7 +131,7 @@ fn negative_tampered_claimed_sum() {
     proof.coeffs_claimed_sum +=
         SecureField::from(stwo::core::fields::m31::M31::from_u32_unchecked(1));
     assert!(
-        verify_coeffs(&proof).is_err(),
+        verify_coeffs(&proof, PcsConfig::default()).is_err(),
         "tampered claimed sum must reject"
     );
 }
@@ -324,7 +339,7 @@ fn negative_seeds_are_honest_without_mutation() {
         let (w, input) = witness_and_input(seed, msg);
         let proof = prove_coeffs(w, input, PcsConfig::default())
             .unwrap_or_else(|e| panic!("seed {seed}: honest prove failed: {e:?}"));
-        verify_coeffs(&proof)
+        verify_coeffs(&proof, PcsConfig::default())
             .unwrap_or_else(|e| panic!("seed {seed}: honest verify failed: {e:?}"));
     }
 }
