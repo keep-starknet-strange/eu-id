@@ -139,6 +139,18 @@ pub use predicates::all_nationality_codes;
 
 use serde::{Deserialize, Serialize};
 
+/// Which ZK identity system a prover build implements. Both variants exist on
+/// every branch so the type is shared-shape; each build hardwires [`ZK_SYSTEM_KIND`]
+/// to the one it actually links. The SDK forwards it as `zk_system()`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ZkSystemKind {
+    P256,
+    MlDsa,
+}
+
+/// This build proves/verifies P-256 (ECDSA) issuer & device signatures.
+pub const ZK_SYSTEM_KIND: ZkSystemKind = ZkSystemKind::P256;
+
 /// Build and prove the product mdoc circuit from the full document, verifier
 /// request, and public policy. Returns both the proof and verifier statement.
 pub fn prove_mdoc(
