@@ -1677,7 +1677,6 @@ dependencies = [
  "ciborium",
  "eu-id-prover",
  "ml-dsa",
- "rayon",
  "serde",
  "sha2",
  "stwo-mldsa",
