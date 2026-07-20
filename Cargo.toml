@@ -18,6 +18,8 @@ edition = "2021"
 
 [profile.release]
 debug = true
+lto = "fat"
+codegen-units = 1
 
 [profile.bench]
 inherits = "release"
