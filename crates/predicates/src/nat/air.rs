@@ -73,6 +73,12 @@ fn layout(public: &PublicInput, bind_nat: bool) -> TreeLayout {
     }
 }
 
+fn canonical_preprocessed(preprocessed: &Preprocessed) -> Vec<air_core::PreprocessedColumnEval> {
+    let mut columns = preprocessed.active.clone();
+    columns.extend(preprocessed.acceptable.clone());
+    columns
+}
+
 /// Prover-side module: built from the public input and the witness.
 pub struct NatProver {
     public: PublicInput,
@@ -150,6 +156,13 @@ impl Air for NatProver {
 
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
         preprocessed_column_ids(&self.public)
+    }
+
+    fn canonical_preprocessed_columns(
+        &mut self,
+    ) -> Result<Vec<air_core::PreprocessedColumnEval>, stwo::core::verifier::VerificationError>
+    {
+        Ok(canonical_preprocessed(&self.preprocessed))
     }
 
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
@@ -274,6 +287,13 @@ impl Air for NatVerifier {
 
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
         preprocessed_column_ids(&self.public)
+    }
+
+    fn canonical_preprocessed_columns(
+        &mut self,
+    ) -> Result<Vec<air_core::PreprocessedColumnEval>, stwo::core::verifier::VerificationError>
+    {
+        Ok(canonical_preprocessed(&Preprocessed::new(&self.public)))
     }
 
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {

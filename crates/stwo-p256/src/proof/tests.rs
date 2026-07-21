@@ -607,6 +607,18 @@ fn checked_claim_from_inputs_with_hints(
         public_key_curve_slice.hinted_source_offset,
         false,
     )?;
+    let hint_points_on_curve = hint_point_curve_slices_from_table(
+        &prepared_table,
+        public_key_curve_slice.hinted_source_offset
+            + public_key_curve_slice.mul_trace.rows.len() as u32,
+    )?;
+    for hint_point in &hint_points_on_curve {
+        hinted_mul_trace.extend_from_projective_rcb(
+            &hint_point.mul_trace,
+            hint_point.hinted_source_offset,
+            false,
+        )?;
+    }
     let prepared_use_counts = PreparedPointUseCountClaim::from_selector_claim(&fake_glv_selectors)?;
     let prepared_trace = prepared_table.prepared_point_trace(&prepared_use_counts)?;
 
@@ -625,6 +637,7 @@ fn checked_claim_from_inputs_with_hints(
         projective_ec_trace,
         projective_rcb_air_trace,
         hinted_mul_trace,
+        hint_points_on_curve,
         final_check,
         final_add,
         prepared_use_counts,
@@ -1147,6 +1160,22 @@ fn current_p256_monolithic_verifier_rejects_unbalanced_prepared_point_source_sum
             relation: "LookupSum"
         }
     ));
+}
+
+#[test]
+fn current_p256_monolithic_verifier_rejects_hint_curve_claim_count_mismatch() {
+    let draft = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+        valid_real_input_with_small_u_scalars(7, 11),
+    ])
+    .expect("current pipeline builds");
+    let mut monolithic = draft
+        .prove_current_air_monolithic::<Blake2sMerkleChannel>()
+        .expect("current AIR monolithic proof proves");
+    monolithic.interaction_claim.hint_points_on_curve.pop();
+
+    let err = verify_self_bound::<Blake2sMerkleChannel>(monolithic)
+        .expect_err("hint-curve claim count mismatch must reject without panicking");
+    assert!(matches!(err, P256ProofError::ProofLayer(_)));
 }
 
 #[test]

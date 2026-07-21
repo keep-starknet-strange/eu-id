@@ -126,11 +126,9 @@ fn proof_round_trips_through_bincode() {
         .expect("a deserialized proof verifies against its statement");
 }
 
-/// The F-ROOT pin end to end: the verifier derives the expected tree-0
-/// (preprocessed) root independently via `identity_expected_preprocessed_root`
-/// and pins it. The honest proof verifies against the derived root; any other
-/// pinned root is rejected with `PreprocessedRootMismatch` before the STARK
-/// check.
+/// The F-ROOT pin end to end: the default verifier reconstructs tree 0 from
+/// canonical verifier-side columns. The explicit-root API additionally checks
+/// a caller-derived root, and both paths reject tampering before the STARK.
 #[test]
 #[ignore = "slow: full identity STARK prove/verify plus a tree-0 rebuild; run with --release --ignored"]
 fn verify_identity_pins_the_preprocessed_root() {
@@ -142,6 +140,9 @@ fn verify_identity_pins_the_preprocessed_root() {
         &fixtures::demo_nonce_statement(),
     )
     .expect("honest credential proves");
+
+    verify_identity(&proof, &demo_statement(&fixture.policy))
+        .expect("the default verifier pins and accepts the canonical tree-0 root");
 
     // The verifier's own derivation of the tree-0 root — from trusted module
     // constructions, never from the proof.
@@ -171,18 +172,15 @@ fn verify_identity_pins_the_preprocessed_root() {
         "a mismatched preprocessed root must be rejected before the STARK check",
     );
 
-    // A proof whose tree-0 root is TAMPERED is rejected against the honest pin.
+    // A proof whose tree-0 root is TAMPERED is rejected by the default verifier;
+    // no caller-supplied root is needed to close F-ROOT.
     proof.stark_proof.0.commitments[0].0[0] ^= 1;
     assert!(
         matches!(
-            verify_identity_with_preprocessed_root(
-                &proof,
-                &demo_statement(&fixture.policy),
-                expected_root,
-            ),
+            verify_identity(&proof, &demo_statement(&fixture.policy)),
             Err(Error::PreprocessedRootMismatch { .. })
         ),
-        "a tampered tree-0 root must be rejected before the STARK check",
+        "the default verifier must reject a tampered tree-0 root before the STARK check",
     );
 }
 

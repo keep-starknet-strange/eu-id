@@ -35,12 +35,13 @@ relation!(
 // `FinalCheckHintRelation` forwards the in-AIR-pinned signed hint point `R_i`
 // (= `±h_i`, where the sign is the per-cert `s2_sign_bit` from the Garaga
 // decomposition: `R_i = -h_i` when the bit is 1, `R_i = +h_i` when it is 0 —
-// both occur for honest signatures) from the prepared table to the
-// FinalEcdsaCheck / FinalAdd components.
+// both occur for honest signatures) from the prepared table to final-add and
+// to the generic P-256 curve-membership slice for that same hint point.
 // Provider: `PreparedTableEcRowEval` yields `R_i` (= the `DoubleR` row's `lhs`,
-// which role-`R` pinning already binds to the canonical per-cert value) once per
-// active `DoubleR` row, gated `active * DoubleR_flag`, multiplicity `-1`.
-// Consumer: `FinalEcdsaCheck` uses `R_1` at `(sig, 0)` and `R_2` at `(sig, 1)`.
+// which role-`R` pinning already binds to the canonical per-cert value) twice
+// per active `DoubleR` row, gated `active * DoubleR_flag`, multiplicity `-2`.
+// Consumers: `FinalAddCheckEval` and `PublicKeyCurveCheckEval` each use the
+// identical `(sig_id, cert_id, R.x, R.y, inf=0)` tuple once.
 relation!(FinalCheckHintRelation, FINAL_CHECK_HINT_RELATION_ARITY);
 
 /// Relations the `PreparedTableEcRowEval` provider consumes/provides to pin the

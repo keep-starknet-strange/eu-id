@@ -407,6 +407,17 @@ impl Air for Sha256Prover<'_> {
         }
     }
 
+    fn canonical_preprocessed_columns(
+        &mut self,
+    ) -> Result<Vec<air_core::PreprocessedColumnEval>, stwo::core::verifier::VerificationError>
+    {
+        Ok(generated_preprocessed_for_ids(
+            self.group_width,
+            self.log_n_rows,
+            &self.preprocessed_column_ids(),
+        ))
+    }
+
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
         self.components = Some(Sha256Components::new(
             allocator,
@@ -833,6 +844,17 @@ impl Air for Sha256Verifier {
         } else {
             all_preprocessed_column_ids()
         }
+    }
+
+    fn canonical_preprocessed_columns(
+        &mut self,
+    ) -> Result<Vec<air_core::PreprocessedColumnEval>, stwo::core::verifier::VerificationError>
+    {
+        Ok(generated_preprocessed_for_ids(
+            self.group_width,
+            self.log_n_rows,
+            &self.preprocessed_column_ids(),
+        ))
     }
 
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {

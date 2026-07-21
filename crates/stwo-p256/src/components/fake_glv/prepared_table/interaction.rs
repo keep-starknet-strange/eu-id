@@ -137,7 +137,8 @@ impl PreparedTableEcRowPinnedInteractionClaim {
 /// `PreparedTableEcRowRelation` yield plus the 30 `PIN_SCHEDULE` fractions, in
 /// the exact order emitted by `PreparedTableEcRowEval::evaluate`. When
 /// `final_check_hint` is `Some`, one more fraction is appended (the `DoubleR`
-/// `R_i` yield) to mirror the AIR's FinalCheckHint emission.
+/// `R_i` yield with multiplicity `-2`) to mirror the AIR's FinalCheckHint
+/// emission for final-add and curve membership.
 pub(crate) fn gen_prepared_table_ec_row_pinned_interaction_trace(
     base: &[M31ColumnEval],
     relation: &PreparedTableEcRowRelation,
@@ -206,8 +207,9 @@ pub(crate) fn gen_prepared_table_ec_row_pinned_interaction_trace(
     }
 
     // Optional FinalCheckHint entry: yield `R_i` (= `lhs`) gated `active *
-    // DoubleR_flag`, multiplicity `-1`. Emitted iff a relation is supplied, in
-    // lockstep with the AIR's `if let Some(final_check_hint)` emission.
+    // DoubleR_flag`, multiplicity `-2` (final-add + curve membership). Emitted
+    // iff a relation is supplied, in lockstep with the AIR's
+    // `if let Some(final_check_hint)` emission.
     if let Some(final_check_hint) = final_check_hint {
         append_packed_entry(&mut entries, n_vec_rows, |vec_row| {
             let sig = base[PREPARED_TABLE_EC_COL_SIG_ID].data[vec_row];
@@ -216,7 +218,8 @@ pub(crate) fn gen_prepared_table_ec_row_pinned_interaction_trace(
             let double_r = base[PREPARED_TABLE_EC_COL_KIND_FLAGS + PREPARED_TABLE_EC_KIND_DOUBLE_R]
                 .data[vec_row];
             let gate = active * double_r;
-            let numerator = -PackedQM31::from(gate);
+            let numerator = -PackedQM31::from(gate)
+                * PackedQM31::broadcast(SecureField::from(M31::from_u32_unchecked(2)));
             let denominator = final_check_hint.combine(&final_check_hint_packed_tuple(
                 base,
                 vec_row,
@@ -246,7 +249,9 @@ pub(crate) fn gen_prepared_table_ec_row_pinned_interaction_trace(
                 let denom: SecureField = final_check_hint.combine(
                     &final_check_hint_unpacked_tuple(&row, sig, cert, PREPARED_TABLE_EC_COL_LHS),
                 );
-                final_check_hint_claimed_sum += -SecureField::from(active * double_r) / denom;
+                final_check_hint_claimed_sum += -SecureField::from(active * double_r)
+                    * SecureField::from(M31::from_u32_unchecked(2))
+                    / denom;
             }
         }
     }

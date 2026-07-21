@@ -16,9 +16,10 @@ use crate::sumcheck::{
 use crate::{Circuit, CircuitError, CoprocessorChannel, Fp, Layer, Mle, QuadTerm, TranscriptSeed};
 use blake2::{Blake2s256, Digest};
 use p256::elliptic_curve::ff::PrimeField;
-use p256::elliptic_curve::group::Group;
+use p256::elliptic_curve::group::{Curve, Group};
 use p256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
 use p256::{AffinePoint as P256AffinePoint, EncodedPoint, FieldBytes, ProjectivePoint, Scalar};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use stwo_p256_utils::scalar_arithmetic::{
     ScalarArithmeticError, ScalarFieldMulTrace, U256Words, P256_ORDER,
@@ -33,6 +34,8 @@ pub const C2_CANONICALITY_INPUT_LOG_SIZE: usize = 3;
 pub const C2_CANONICALITY_OUTPUT_LOG_SIZE: usize = 2;
 pub const C3_C5_SCALAR_SETUP_INPUT_LOG_SIZE: usize = 4;
 pub const C3_C5_SCALAR_SETUP_OUTPUT_LOG_SIZE: usize = 2;
+pub const C9_C10_LADDER_INPUT_LOG_SIZE: usize = 13;
+pub const C9_C10_LADDER_OUTPUT_LOG_SIZE: usize = 14;
 pub const C11_FINAL_ADD_INPUT_LOG_SIZE: usize = 4;
 pub const C11_FINAL_ADD_OUTPUT_LOG_SIZE: usize = 2;
 pub const C12_ON_CURVE_INPUT_LOG_SIZE: usize = 11;
@@ -72,7 +75,7 @@ pub const MAC_HALF_COMMITTED_PRIVATE_INPUTS: usize =
 pub const MDOC_P4B_MAC_HALF_COUNT: usize = 6;
 pub const MDOC_P4B_MAC_COMMITTED_PRIVATE_INPUTS: usize =
     MDOC_P4B_MAC_HALF_COUNT * MAC_HALF_COMMITTED_PRIVATE_INPUTS;
-pub const IMPLEMENTED_CIRCUIT_FAMILY_COUNT: usize = 6;
+pub const IMPLEMENTED_CIRCUIT_FAMILY_COUNT: usize = 7;
 
 const C1_CONST_ONE_INDEX: u32 = 0;
 const C1_VALUES_START_INDEX: u32 = 1;
@@ -95,6 +98,41 @@ const C3_U2_INDEX: u32 = 6;
 const C3_QINV_INDEX: u32 = 7;
 const C3_Q1_INDEX: u32 = 8;
 const C3_Q2_INDEX: u32 = 9;
+const C9_CONST_ONE_INDEX: usize = 0;
+const C9_U1_INDEX: usize = 1;
+const C9_U2_INDEX: usize = 2;
+const C9_QX_INDEX: usize = 3;
+const C9_QY_INDEX: usize = 4;
+const C9_GX_INDEX: usize = 5;
+const C9_GY_INDEX: usize = 6;
+const C9_SCALAR_BITS: usize = 256;
+const C9_LADDER_COUNT: usize = 2;
+const C9_BITS_START_INDEX: usize = 7;
+const C9_STARTED_START_INDEX: usize = C9_BITS_START_INDEX + C9_LADDER_COUNT * C9_SCALAR_BITS;
+const C9_STEPS_START_INDEX: usize = C9_STARTED_START_INDEX + C9_LADDER_COUNT * (C9_SCALAR_BITS + 1);
+const C9_STEP_WIDTH: usize = 11;
+const C9_CORRECTED_START_INDEX: usize =
+    C9_STEPS_START_INDEX + C9_LADDER_COUNT * C9_SCALAR_BITS * C9_STEP_WIDTH;
+const C9_STEP_NEXT_X: usize = 0;
+const C9_STEP_NEXT_Y: usize = 1;
+const C9_STEP_DOUBLE_X: usize = 2;
+const C9_STEP_DOUBLE_Y: usize = 3;
+const C9_STEP_DOUBLE_LAMBDA: usize = 4;
+const C9_STEP_DOUBLE_DENOM_INV: usize = 5;
+const C9_STEP_ADD_LAMBDA: usize = 6;
+const C9_STEP_ADD_DENOM_INV: usize = 7;
+const C9_STEP_ADD_DELTA_X: usize = 8;
+const C9_STEP_ADD_DELTA_Y: usize = 9;
+const C9_STEP_ACTIVE_BIT: usize = 10;
+const C9_CANONICAL_SLACK_START_INDEX: usize = C9_CORRECTED_START_INDEX + 4;
+const C9_CANONICAL_CARRY_START_INDEX: usize =
+    C9_CANONICAL_SLACK_START_INDEX + C9_LADDER_COUNT * C9_SCALAR_BITS;
+const P256_FIELD_MODULUS_MINUS_ONE: U256Words = [
+    0xffff_ffff_ffff_fffe,
+    0x0000_0000_ffff_ffff,
+    0x0000_0000_0000_0000,
+    0xffff_ffff_0000_0001,
+];
 const C11_CONST_ONE_INDEX: u32 = 0;
 const C11_AX_INDEX: u32 = 1;
 const C11_AY_INDEX: u32 = 2;
@@ -378,9 +416,6 @@ pub fn generate_witness(input: &EcdsaInput) -> Result<Witness, WitnessError> {
     let u2_words = u2_trace.mul.result_words();
     let q1 = u1_trace.mul.quotient_words();
     let q2 = u2_trace.mul.quotient_words();
-    let r_point = final_point(&public_key, &u1_words, &u2_words)?;
-    let (rx_words, reduction_flag) = reduce_field_x_to_scalar(words_from_be(r_point.0));
-
     let mut values = vec![Fp::ZERO; LAYOUT_LEN];
     let input_range = layout_range(LayoutSlot::InputLimbs);
     let input_limbs = &mut values[input_range];
@@ -406,18 +441,19 @@ pub fn generate_witness(input: &EcdsaInput) -> Result<Witness, WitnessError> {
     values[q_range.start + 1] = fp_from_words(&q1);
     values[q_range.start + 2] = fp_from_words(&q2);
 
-    let u1_raw = write_ladder_accumulators(
+    let u1_point = write_ladder_accumulators(
         &mut values,
         LayoutSlot::U1GAccumulators,
         ProjectivePoint::GENERATOR,
         &u1_words,
     )?;
     let u2_base = ProjectivePoint::from(public_key);
-    let u2_raw =
+    let u2_point =
         write_ladder_accumulators(&mut values, LayoutSlot::U2QAccumulators, u2_base, &u2_words)?;
 
-    let u1_point = u1_raw - double_256(ProjectivePoint::GENERATOR);
-    let u2_point = u2_raw - double_256(u2_base);
+    let r_point = projective_point_bytes(u1_point + u2_point)?;
+    let (rx_words, reduction_flag) = reduce_field_x_to_scalar(words_from_be(r_point.0));
+
     let corrected = layout_range(LayoutSlot::CorrectedEndpoints);
     write_projective_point(&mut values[corrected.clone()], 0, u1_point)?;
     write_projective_point(&mut values[corrected], 2, u2_point)?;
@@ -1053,48 +1089,53 @@ pub fn prove_mdoc_p4b_circuit_bundle_profiled(
     if let Some((_, revocation_projection, _)) = revocation {
         projections.push(*revocation_projection);
     }
-    let mut entries = Vec::with_capacity(instances.len());
     let sumcheck_start = Instant::now();
-    for instance in &instances {
-        let circuit = match instance.role {
-            MdocP4bCircuitRole::MacBatch => build_mac_batch_circuit(&av, &mac_tags)
-                .map_err(ImplementedCircuitProofError::Circuit)?,
-            _ => instance.circuit.clone(),
-        };
-        let input = match instance.role {
-            MdocP4bCircuitRole::MacBatch => {
-                mac_batch_input_with_av(mac_key_shares, &av, &mac_values, &mac_tags)
-                    .map_err(ImplementedCircuitProofError::Witness)?
+    let entry_results = instances
+        .par_iter()
+        .map(|instance| {
+            let circuit = match instance.role {
+                MdocP4bCircuitRole::MacBatch => build_mac_batch_circuit(&av, &mac_tags)
+                    .map_err(ImplementedCircuitProofError::Circuit)?,
+                _ => instance.circuit.clone(),
+            };
+            let input = match instance.role {
+                MdocP4bCircuitRole::MacBatch => {
+                    mac_batch_input_with_av(mac_key_shares, &av, &mac_values, &mac_tags)
+                        .map_err(ImplementedCircuitProofError::Witness)?
+                }
+                _ => instance.input.clone(),
+            };
+            let layers = circuit
+                .evaluate_input(input)
+                .map_err(ImplementedCircuitProofError::Circuit)?;
+            let mut channel = mdoc_p4b_instance_channel(
+                transcript_seed,
+                full_root,
+                instance.label,
+                instance.role,
+                &projections,
+                &av,
+                &mac_tags,
+            );
+            let instance_start = Instant::now();
+            let proof = match instance.role {
+                MdocP4bCircuitRole::MacBatch => prove_evaluated_circuit_sorted_sparse(
+                    &circuit,
+                    &layers,
+                    full_root,
+                    &mut channel,
+                ),
+                _ => prove_evaluated_circuit(&circuit, &layers, full_root, &mut channel),
             }
-            _ => instance.input.clone(),
-        };
-        let layers = circuit
-            .evaluate_input(input)
-            .map_err(ImplementedCircuitProofError::Circuit)?;
-        let mut channel = mdoc_p4b_instance_channel(
-            transcript_seed,
-            full_root,
-            instance.label,
-            instance.role,
-            &projections,
-            &av,
-            &mac_tags,
-        );
-        let instance_start = Instant::now();
-        let proof = match instance.role {
-            MdocP4bCircuitRole::MacBatch => {
-                prove_evaluated_circuit_sorted_sparse(&circuit, &layers, full_root, &mut channel)
-            }
-            _ => prove_evaluated_circuit(&circuit, &layers, full_root, &mut channel),
-        }
-        .map_err(ImplementedCircuitProofError::Sumcheck)?;
-        profile.sumcheck_by_instance.push(mdoc_p4b_instance_timing(
-            instance.role,
-            instance.label,
-            instance_start.elapsed(),
-        ));
-        entries.push(ImplementedCircuitBundleEntry { proof });
-    }
+            .map_err(ImplementedCircuitProofError::Sumcheck)?;
+            Ok((
+                ImplementedCircuitBundleEntry { proof },
+                mdoc_p4b_instance_timing(instance.role, instance.label, instance_start.elapsed()),
+            ))
+        })
+        .collect::<Result<Vec<_>, ImplementedCircuitProofError>>()?;
+    let (entries, sumcheck_by_instance): (Vec<_>, Vec<_>) = entry_results.into_iter().unzip();
+    profile.sumcheck_by_instance = sumcheck_by_instance;
     profile.sumcheck = sumcheck_start.elapsed();
 
     let claim_start = Instant::now();
@@ -1528,10 +1569,7 @@ pub fn verify_implemented_circuit_bundle_batch_with_projection_profiled(
         projections.iter().zip(&signature_layouts).enumerate()
     {
         let mut verified_claims = Vec::with_capacity(circuits.len());
-        let mut add_inputs_from_c11 = None;
-        let mut final_from_c11 = None;
-        let mut c12_boundaries = None;
-        let mut rx_from_c14 = None;
+        let mut state = MdocP4bEcdsaConsistency::default();
         for (family_index, ((instance, layout), entry)) in circuits
             .iter()
             .zip(layouts)
@@ -1571,9 +1609,50 @@ pub fn verify_implemented_circuit_bundle_batch_with_projection_profiled(
                 }
                 b"s4-ecdsa-c2-canonicality" => {
                     add_c2_public_claims(&mut linear_claims, projection, layout)?;
+                    state.public_key_from_c2 = Some((
+                        take_private_value(
+                            &mut linear_claims,
+                            bundle,
+                            &mut consistency_cursor,
+                            layout,
+                            C2_QX_INDEX as usize,
+                        )?,
+                        take_private_value(
+                            &mut linear_claims,
+                            bundle,
+                            &mut consistency_cursor,
+                            layout,
+                            C2_QY_INDEX as usize,
+                        )?,
+                    ));
                 }
                 b"s4-ecdsa-c3-c5-scalar-setup" => {
                     add_c3_public_claims(&mut linear_claims, projection, layout)?;
+                    state.scalars_from_c3 = Some((
+                        take_private_value(
+                            &mut linear_claims,
+                            bundle,
+                            &mut consistency_cursor,
+                            layout,
+                            C3_U1_INDEX as usize,
+                        )?,
+                        take_private_value(
+                            &mut linear_claims,
+                            bundle,
+                            &mut consistency_cursor,
+                            layout,
+                            C3_U2_INDEX as usize,
+                        )?,
+                    ));
+                }
+                b"s4-ecdsa-c9-c10-ladder" => {
+                    add_c9_fixed_claims(&mut linear_claims, layout);
+                    state.ladder = Some(take_c9_boundary_values(
+                        &mut linear_claims,
+                        bundle,
+                        &mut consistency_cursor,
+                        layout,
+                    )?);
                 }
                 b"s4-ecdsa-c11-final-add" => {
                     let ax = take_private_value(
@@ -1618,11 +1697,11 @@ pub fn verify_implemented_circuit_bundle_batch_with_projection_profiled(
                         layout,
                         C11_RY_INDEX as usize,
                     )?;
-                    add_inputs_from_c11 = Some(((ax, ay), (bx, by)));
-                    final_from_c11 = Some((rx, ry));
+                    state.add_inputs_from_c11 = Some(((ax, ay), (bx, by)));
+                    state.final_from_c11 = Some((rx, ry));
                 }
                 b"s4-ecdsa-c12-final-on-curve" => {
-                    c12_boundaries = Some(take_c12_boundary_values(
+                    state.c12_boundaries = Some(take_c12_boundary_values(
                         &mut linear_claims,
                         bundle,
                         &mut consistency_cursor,
@@ -1631,7 +1710,7 @@ pub fn verify_implemented_circuit_bundle_batch_with_projection_profiled(
                 }
                 b"s4-ecdsa-c14-c15-final-check" => {
                     add_c14_public_claims(&mut linear_claims, projection, layout)?;
-                    rx_from_c14 = Some(take_private_value(
+                    state.rx_from_c14 = Some(take_private_value(
                         &mut linear_claims,
                         bundle,
                         &mut consistency_cursor,
@@ -1645,15 +1724,7 @@ pub fn verify_implemented_circuit_bundle_batch_with_projection_profiled(
             verified_claims.push(claims);
         }
         let start = Instant::now();
-        verify_corrected_endpoint_cross_family(
-            c12_boundaries.map(|boundaries| boundaries.corrected_endpoints),
-            add_inputs_from_c11,
-        )?;
-        verify_final_point_cross_family(
-            final_from_c11,
-            c12_boundaries.map(|boundaries| boundaries.final_point),
-            rx_from_c14,
-        )?;
+        state.verify()?;
         profile.consistency += start.elapsed();
         all_claims.push(verified_claims);
     }
@@ -1884,6 +1955,7 @@ pub fn implemented_circuit_gate_count() -> Result<usize, CircuitError> {
         build_c1_input_limbs_circuit()?,
         build_c2_canonicality_circuit()?,
         build_c3_c5_scalar_setup_circuit()?,
+        build_c9_c10_ladder_circuit()?,
         build_c11_final_add_circuit()?,
         build_c12_on_curve_circuit()?,
         build_c14_c15_final_check_circuit()?,
@@ -1994,6 +2066,9 @@ struct MdocP4bClaimInventory {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct MdocP4bEcdsaConsistency {
+    public_key_from_c2: Option<(Fp, Fp)>,
+    scalars_from_c3: Option<(Fp, Fp)>,
+    ladder: Option<C9BoundaryValues>,
     add_inputs_from_c11: Option<((Fp, Fp), (Fp, Fp))>,
     final_from_c11: Option<(Fp, Fp)>,
     c12_boundaries: Option<C12BoundaryValues>,
@@ -2002,6 +2077,17 @@ struct MdocP4bEcdsaConsistency {
 
 impl MdocP4bEcdsaConsistency {
     fn verify(self) -> Result<(), ImplementedCircuitProofError> {
+        let (Some(public_key), Some(scalars), Some(ladder)) =
+            (self.public_key_from_c2, self.scalars_from_c3, self.ladder)
+        else {
+            return Err(ImplementedCircuitProofError::CrossFamilyBindingRejected);
+        };
+        if public_key != ladder.public_key || scalars != ladder.scalars {
+            return Err(ImplementedCircuitProofError::CrossFamilyBindingRejected);
+        }
+        if Some(ladder.corrected_endpoints) != self.add_inputs_from_c11 {
+            return Err(ImplementedCircuitProofError::CrossFamilyBindingRejected);
+        }
         verify_corrected_endpoint_cross_family(
             self.c12_boundaries
                 .map(|boundaries| boundaries.corrected_endpoints),
@@ -2014,6 +2100,13 @@ impl MdocP4bEcdsaConsistency {
         )?;
         Ok(())
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct C9BoundaryValues {
+    scalars: (Fp, Fp),
+    public_key: (Fp, Fp),
+    corrected_endpoints: ((Fp, Fp), (Fp, Fp)),
 }
 
 const MDOC_P4B_MAC_BATCH_LABEL: &[u8] = b"s4-mdoc-p4b-mac-batch";
@@ -2572,9 +2665,32 @@ fn add_prover_family_fixed_claims(
 ) -> Result<(), ImplementedCircuitProofError> {
     match label {
         b"s4-ecdsa-c1-input-limbs" => add_c1_public_claims(claims, projection, layout)?,
-        b"s4-ecdsa-c2-canonicality" => add_c2_public_claims(claims, projection, layout)?,
+        b"s4-ecdsa-c2-canonicality" => {
+            add_c2_public_claims(claims, projection, layout)?;
+            for index in [C2_QX_INDEX, C2_QY_INDEX] {
+                add_private_value(claims, consistency_values, layout, index as usize, values)?;
+            }
+        }
         b"s4-ecdsa-c3-c5-scalar-setup" => {
             add_c3_public_claims(claims, projection, layout)?;
+            for index in [C3_U1_INDEX, C3_U2_INDEX] {
+                add_private_value(claims, consistency_values, layout, index as usize, values)?;
+            }
+        }
+        b"s4-ecdsa-c9-c10-ladder" => {
+            add_c9_fixed_claims(claims, layout);
+            for index in [
+                C9_U1_INDEX,
+                C9_U2_INDEX,
+                C9_QX_INDEX,
+                C9_QY_INDEX,
+                c9_corrected_index(0, 0),
+                c9_corrected_index(0, 1),
+                c9_corrected_index(1, 0),
+                c9_corrected_index(1, 1),
+            ] {
+                add_private_value(claims, consistency_values, layout, index, values)?;
+            }
         }
         b"s4-ecdsa-c11-final-add" => {
             for index in [
@@ -2612,6 +2728,18 @@ fn add_prover_family_fixed_claims(
         _ => {}
     }
     Ok(())
+}
+
+fn add_c9_fixed_claims(claims: &mut Vec<LigeroLinearClaim>, layout: &BundleCircuitLayout) {
+    let (gx, gy) = projective_point_coords(ProjectivePoint::GENERATOR)
+        .expect("P-256 generator is a finite affine point");
+    for (index, value) in [
+        (C9_CONST_ONE_INDEX, Fp::ONE),
+        (C9_GX_INDEX, gx),
+        (C9_GY_INDEX, gy),
+    ] {
+        add_fixed_claim(claims, layout.input_offset, layout.input_len, index, value);
+    }
 }
 
 fn add_c1_public_claims(
@@ -2829,6 +2957,29 @@ fn take_private_value(
     Ok(value)
 }
 
+fn take_c9_boundary_values(
+    claims: &mut Vec<LigeroLinearClaim>,
+    bundle: &ImplementedCircuitBundle,
+    cursor: &mut usize,
+    layout: &BundleCircuitLayout,
+) -> Result<C9BoundaryValues, ImplementedCircuitProofError> {
+    let mut read = |index| take_private_value(claims, bundle, cursor, layout, index);
+    Ok(C9BoundaryValues {
+        scalars: (read(C9_U1_INDEX)?, read(C9_U2_INDEX)?),
+        public_key: (read(C9_QX_INDEX)?, read(C9_QY_INDEX)?),
+        corrected_endpoints: (
+            (
+                read(c9_corrected_index(0, 0))?,
+                read(c9_corrected_index(0, 1))?,
+            ),
+            (
+                read(c9_corrected_index(1, 0))?,
+                read(c9_corrected_index(1, 1))?,
+            ),
+        ),
+    })
+}
+
 fn take_c12_boundary_values(
     claims: &mut Vec<LigeroLinearClaim>,
     bundle: &ImplementedCircuitBundle,
@@ -2864,9 +3015,21 @@ fn mdoc_p4b_take_ecdsa_claims(
         b"s4-ecdsa-c1-input-limbs" => add_c1_public_claims(claims, projection, layout)?,
         b"s4-ecdsa-c2-canonicality" => {
             add_c2_public_claims(claims, projection, layout)?;
+            state.public_key_from_c2 = Some((
+                take_private_value(claims, bundle, cursor, layout, C2_QX_INDEX as usize)?,
+                take_private_value(claims, bundle, cursor, layout, C2_QY_INDEX as usize)?,
+            ));
         }
         b"s4-ecdsa-c3-c5-scalar-setup" => {
             add_c3_public_claims(claims, projection, layout)?;
+            state.scalars_from_c3 = Some((
+                take_private_value(claims, bundle, cursor, layout, C3_U1_INDEX as usize)?,
+                take_private_value(claims, bundle, cursor, layout, C3_U2_INDEX as usize)?,
+            ));
+        }
+        b"s4-ecdsa-c9-c10-ladder" => {
+            add_c9_fixed_claims(claims, layout);
+            state.ladder = Some(take_c9_boundary_values(claims, bundle, cursor, layout)?);
         }
         b"s4-ecdsa-c11-final-add" => {
             let ax = take_private_value(claims, bundle, cursor, layout, C11_AX_INDEX as usize)?;
@@ -2992,18 +3155,12 @@ fn implemented_circuit_instances(
             circuit: build_c3_c5_scalar_setup_circuit().expect("static C3-C5 circuit is valid"),
             input: c3_c5_scalar_setup_input(input, witness)?,
         },
-        // C6 scalar-bit decomposition removed (WO-C1b): its 512 committed bits
-        // fed no other claim family, and its only cross-family output — the
-        // u1/u2 equality against C3-C5 — was redundant. C3-C5 derives u1 = z·s⁻¹
-        // and u2 = r·s⁻¹ as base-field elements (from_bytes_be enforces the
-        // canonical < p range), a range fact at least as strong as C6's < 2^256
-        // recomposition, and the ladder consumes those native scalar words, not
-        // the bits. Deleting C6 leaves the accepted (z,r,s,Q) set unchanged.
-        // C9/C10 accumulator on-curve checks ride the C12 family: its input
-        // committed the same 512 accumulator points a second time (plus the
-        // corrected endpoints and final point) and its circuit runs the same
-        // per-point curve equations, so a separate C9/C10 instance re-proved a
-        // strict subset over a duplicate committed region (WO-E1b dedup).
+        ProverCircuitInstance {
+            label: b"s4-ecdsa-c9-c10-ladder",
+            slot: LayoutSlot::U1GAccumulators,
+            circuit: build_c9_c10_ladder_circuit().expect("static C9-C10 circuit is valid"),
+            input: c9_c10_ladder_input(input, witness)?,
+        },
         ProverCircuitInstance {
             label: b"s4-ecdsa-c11-final-add",
             slot: LayoutSlot::FinalPoint,
@@ -3045,6 +3202,10 @@ fn implemented_circuit_verifier_instances() -> Result<Vec<VerifierCircuitInstanc
         VerifierCircuitInstance {
             label: b"s4-ecdsa-c3-c5-scalar-setup",
             circuit: build_c3_c5_scalar_setup_circuit()?,
+        },
+        VerifierCircuitInstance {
+            label: b"s4-ecdsa-c9-c10-ladder",
+            circuit: build_c9_c10_ladder_circuit()?,
         },
         VerifierCircuitInstance {
             label: b"s4-ecdsa-c11-final-add",
@@ -4088,6 +4249,417 @@ pub fn c3_c5_scalar_setup_input(
     Ok(circuit_input)
 }
 
+fn c9_bit_index(ladder: usize, bit: usize) -> usize {
+    C9_BITS_START_INDEX + ladder * C9_SCALAR_BITS + bit
+}
+
+fn c9_started_index(ladder: usize, step: usize) -> usize {
+    C9_STARTED_START_INDEX + ladder * (C9_SCALAR_BITS + 1) + step
+}
+
+fn c9_step_index(ladder: usize, step: usize, wire: usize) -> usize {
+    C9_STEPS_START_INDEX + (ladder * C9_SCALAR_BITS + step) * C9_STEP_WIDTH + wire
+}
+
+fn c9_corrected_index(ladder: usize, coordinate: usize) -> usize {
+    C9_CORRECTED_START_INDEX + ladder * 2 + coordinate
+}
+
+fn c9_canonical_slack_index(ladder: usize, bit: usize) -> usize {
+    C9_CANONICAL_SLACK_START_INDEX + ladder * C9_SCALAR_BITS + bit
+}
+
+fn c9_canonical_carry_index(ladder: usize, bit: usize) -> usize {
+    C9_CANONICAL_CARRY_START_INDEX + ladder * (C9_SCALAR_BITS + 1) + bit
+}
+
+/// Constrains both ECDSA scalar-multiplication ladders. Each scalar is
+/// bit-decomposed and recomposed, every double/add transition is checked, the
+/// u2 ladder base is the same public key used by C2, and each final accumulator
+/// is the corrected endpoint consumed by C11.
+pub fn build_c9_c10_ladder_circuit() -> Result<Circuit, CircuitError> {
+    let mut terms = Vec::with_capacity(24_000);
+    let mut out = 0usize;
+
+    for ladder in 0..C9_LADDER_COUNT {
+        let u = if ladder == 0 {
+            C9_U1_INDEX
+        } else {
+            C9_U2_INDEX
+        };
+        let (base_x, base_y) = if ladder == 0 {
+            (C9_GX_INDEX, C9_GY_INDEX)
+        } else {
+            (C9_QX_INDEX, C9_QY_INDEX)
+        };
+
+        // u = sum(bit_i * 2^i), with every bit Boolean.
+        let recompose_out = out;
+        out += 1;
+        add_linear(&mut terms, recompose_out, u, Fp::ONE);
+        let mut power = Fp::ONE;
+        for bit in 0..C9_SCALAR_BITS {
+            let bit_wire = c9_bit_index(ladder, bit);
+            add_linear(&mut terms, recompose_out, bit_wire, -power);
+            add_bool_constraint(&mut terms, out, bit_wire);
+            out += 1;
+            power = power + power;
+        }
+
+        // Exact integer range proof: bits + slack = p - 1 with a Boolean
+        // carry chain and no final carry. This removes the alternate
+        // representation bits(u + p), which recomposes to the same Fp value.
+        for bit in 0..C9_SCALAR_BITS {
+            add_bool_constraint(&mut terms, out, c9_canonical_slack_index(ladder, bit));
+            out += 1;
+        }
+        for bit in 0..=C9_SCALAR_BITS {
+            add_bool_constraint(&mut terms, out, c9_canonical_carry_index(ladder, bit));
+            out += 1;
+        }
+        add_linear(
+            &mut terms,
+            out,
+            c9_canonical_carry_index(ladder, 0),
+            Fp::ONE,
+        );
+        out += 1;
+        add_linear(
+            &mut terms,
+            out,
+            c9_canonical_carry_index(ladder, C9_SCALAR_BITS),
+            Fp::ONE,
+        );
+        out += 1;
+        for bit in 0..C9_SCALAR_BITS {
+            add_linear(&mut terms, out, c9_bit_index(ladder, bit), Fp::ONE);
+            add_linear(
+                &mut terms,
+                out,
+                c9_canonical_slack_index(ladder, bit),
+                Fp::ONE,
+            );
+            add_linear(
+                &mut terms,
+                out,
+                c9_canonical_carry_index(ladder, bit),
+                Fp::ONE,
+            );
+            add_linear(
+                &mut terms,
+                out,
+                c9_canonical_carry_index(ladder, bit + 1),
+                -Fp::from_u64(2),
+            );
+            if scalar_bit(&P256_FIELD_MODULUS_MINUS_ONE, bit) {
+                add_constant(&mut terms, out, -Fp::ONE);
+            }
+            out += 1;
+        }
+
+        // `started` is the prefix-OR of the scalar bits. Before the first set
+        // bit the affine accumulator stays at the base, avoiding an unencoded
+        // point-at-infinity state. Non-zero u is required by the existing
+        // witness domain.
+        add_linear(&mut terms, out, c9_started_index(ladder, 0), Fp::ONE);
+        out += 1;
+        for step in 0..C9_SCALAR_BITS {
+            let bit = c9_bit_index(ladder, C9_SCALAR_BITS - 1 - step);
+            let started = c9_started_index(ladder, step);
+            let next_started = c9_started_index(ladder, step + 1);
+            add_linear(&mut terms, out, next_started, Fp::ONE);
+            add_linear(&mut terms, out, started, -Fp::ONE);
+            add_linear(&mut terms, out, bit, -Fp::ONE);
+            add_quadratic(&mut terms, out, started, bit, Fp::ONE);
+            out += 1;
+        }
+        add_linear(
+            &mut terms,
+            out,
+            c9_started_index(ladder, C9_SCALAR_BITS),
+            Fp::ONE,
+        );
+        add_constant(&mut terms, out, -Fp::ONE);
+        out += 1;
+
+        for step in 0..C9_SCALAR_BITS {
+            let bit = c9_bit_index(ladder, C9_SCALAR_BITS - 1 - step);
+            let started = c9_started_index(ladder, step);
+            let (current_x, current_y) = if step == 0 {
+                (base_x, base_y)
+            } else {
+                (
+                    c9_step_index(ladder, step - 1, C9_STEP_NEXT_X),
+                    c9_step_index(ladder, step - 1, C9_STEP_NEXT_Y),
+                )
+            };
+            let next_x = c9_step_index(ladder, step, C9_STEP_NEXT_X);
+            let next_y = c9_step_index(ladder, step, C9_STEP_NEXT_Y);
+            let double_x = c9_step_index(ladder, step, C9_STEP_DOUBLE_X);
+            let double_y = c9_step_index(ladder, step, C9_STEP_DOUBLE_Y);
+            let double_lambda = c9_step_index(ladder, step, C9_STEP_DOUBLE_LAMBDA);
+            let double_denom_inv = c9_step_index(ladder, step, C9_STEP_DOUBLE_DENOM_INV);
+            let add_lambda = c9_step_index(ladder, step, C9_STEP_ADD_LAMBDA);
+            let add_denom_inv = c9_step_index(ladder, step, C9_STEP_ADD_DENOM_INV);
+            let add_delta_x = c9_step_index(ladder, step, C9_STEP_ADD_DELTA_X);
+            let add_delta_y = c9_step_index(ladder, step, C9_STEP_ADD_DELTA_Y);
+            let active_bit = c9_step_index(ladder, step, C9_STEP_ACTIVE_BIT);
+
+            // Affine doubling on y^2 = x^3 - 3x + b.
+            add_quadratic(
+                &mut terms,
+                out,
+                current_y,
+                double_denom_inv,
+                Fp::from_u64(2),
+            );
+            add_constant(&mut terms, out, -Fp::ONE);
+            out += 1;
+            add_quadratic(&mut terms, out, double_lambda, current_y, Fp::from_u64(2));
+            add_quadratic(&mut terms, out, current_x, current_x, -Fp::from_u64(3));
+            add_constant(&mut terms, out, Fp::from_u64(3));
+            out += 1;
+            add_linear(&mut terms, out, double_x, Fp::ONE);
+            add_quadratic(&mut terms, out, double_lambda, double_lambda, -Fp::ONE);
+            add_linear(&mut terms, out, current_x, Fp::from_u64(2));
+            out += 1;
+            add_linear(&mut terms, out, double_y, Fp::ONE);
+            add_quadratic(&mut terms, out, double_lambda, current_x, -Fp::ONE);
+            add_quadratic(&mut terms, out, double_lambda, double_x, Fp::ONE);
+            add_linear(&mut terms, out, current_y, Fp::ONE);
+            out += 1;
+
+            // Conditional mixed-add. When the scalar bit is zero, the inverse
+            // and slope may be zero and the candidate delta is not selected.
+            add_quadratic(&mut terms, out, base_x, add_denom_inv, Fp::ONE);
+            add_quadratic(&mut terms, out, double_x, add_denom_inv, -Fp::ONE);
+            add_linear(&mut terms, out, bit, -Fp::ONE);
+            out += 1;
+            add_quadratic(&mut terms, out, add_lambda, base_x, Fp::ONE);
+            add_quadratic(&mut terms, out, add_lambda, double_x, -Fp::ONE);
+            add_quadratic(&mut terms, out, bit, base_y, -Fp::ONE);
+            add_quadratic(&mut terms, out, bit, double_y, Fp::ONE);
+            out += 1;
+            add_linear(&mut terms, out, add_delta_x, Fp::ONE);
+            add_quadratic(&mut terms, out, add_lambda, add_lambda, -Fp::ONE);
+            add_linear(&mut terms, out, double_x, Fp::from_u64(2));
+            add_linear(&mut terms, out, base_x, Fp::ONE);
+            out += 1;
+            add_linear(&mut terms, out, add_delta_y, Fp::ONE);
+            add_quadratic(&mut terms, out, add_lambda, add_delta_x, Fp::ONE);
+            add_linear(&mut terms, out, double_y, Fp::from_u64(2));
+            out += 1;
+
+            // `active_bit = started * bit`: the candidate add is selected only
+            // after the first set bit has initialized the affine accumulator.
+            add_linear(&mut terms, out, active_bit, Fp::ONE);
+            add_quadratic(&mut terms, out, started, bit, -Fp::ONE);
+            out += 1;
+
+            // Before the first set bit the accumulator remains `base`.
+            // Afterwards it is `double`, plus the constrained add delta iff
+            // `active_bit` is one. Expressing this directly saves one input
+            // wire per coordinate while preserving the exact transition.
+            add_linear(&mut terms, out, next_x, Fp::ONE);
+            add_linear(&mut terms, out, base_x, -Fp::ONE);
+            add_quadratic(&mut terms, out, started, double_x, -Fp::ONE);
+            add_quadratic(&mut terms, out, started, base_x, Fp::ONE);
+            add_quadratic(&mut terms, out, active_bit, add_delta_x, -Fp::ONE);
+            out += 1;
+            add_linear(&mut terms, out, next_y, Fp::ONE);
+            add_linear(&mut terms, out, base_y, -Fp::ONE);
+            add_quadratic(&mut terms, out, started, double_y, -Fp::ONE);
+            add_quadratic(&mut terms, out, started, base_y, Fp::ONE);
+            add_quadratic(&mut terms, out, active_bit, add_delta_y, -Fp::ONE);
+            out += 1;
+        }
+
+        for coordinate in 0..2 {
+            add_linear(
+                &mut terms,
+                out,
+                c9_step_index(
+                    ladder,
+                    C9_SCALAR_BITS - 1,
+                    if coordinate == 0 {
+                        C9_STEP_NEXT_X
+                    } else {
+                        C9_STEP_NEXT_Y
+                    },
+                ),
+                Fp::ONE,
+            );
+            add_linear(
+                &mut terms,
+                out,
+                c9_corrected_index(ladder, coordinate),
+                -Fp::ONE,
+            );
+            out += 1;
+        }
+    }
+
+    debug_assert!(out <= 1usize << C9_C10_LADDER_OUTPUT_LOG_SIZE);
+    Circuit::new(vec![Layer::new(
+        C9_C10_LADDER_OUTPUT_LOG_SIZE,
+        C9_C10_LADDER_INPUT_LOG_SIZE,
+        terms,
+    )?])
+}
+
+pub fn c9_c10_ladder_input(input: &EcdsaInput, witness: &Witness) -> Result<Vec<Fp>, WitnessError> {
+    if witness.values.len() != LAYOUT_LEN {
+        return Err(WitnessError::LayoutMismatch);
+    }
+    let mut circuit_input = vec![Fp::ZERO; 1usize << C9_C10_LADDER_INPUT_LOG_SIZE];
+    circuit_input[C9_CONST_ONE_INDEX] = Fp::ONE;
+    let us = layout_range(LayoutSlot::UScalars);
+    circuit_input[C9_U1_INDEX] = witness.values[us.start];
+    circuit_input[C9_U2_INDEX] = witness.values[us.start + 1];
+    circuit_input[C9_QX_INDEX] =
+        Fp::from_bytes_be(input.qx).ok_or(WitnessError::NonCanonicalCoordinate)?;
+    circuit_input[C9_QY_INDEX] =
+        Fp::from_bytes_be(input.qy).ok_or(WitnessError::NonCanonicalCoordinate)?;
+    let (gx, gy) = projective_point_coords(ProjectivePoint::GENERATOR)?;
+    circuit_input[C9_GX_INDEX] = gx;
+    circuit_input[C9_GY_INDEX] = gy;
+
+    let scalar_words = [
+        words_from_be(circuit_input[C9_U1_INDEX].to_bytes_be()),
+        words_from_be(circuit_input[C9_U2_INDEX].to_bytes_be()),
+    ];
+    let bases = [
+        (gx, gy),
+        (circuit_input[C9_QX_INDEX], circuit_input[C9_QY_INDEX]),
+    ];
+    let slots = [LayoutSlot::U1GAccumulators, LayoutSlot::U2QAccumulators];
+
+    for ladder in 0..C9_LADDER_COUNT {
+        for bit in 0..C9_SCALAR_BITS {
+            circuit_input[c9_bit_index(ladder, bit)] =
+                fp_bit(scalar_bit(&scalar_words[ladder], bit));
+        }
+
+        let canonical_slack = sub_words(&P256_FIELD_MODULUS_MINUS_ONE, &scalar_words[ladder]);
+        let mut carry = false;
+        circuit_input[c9_canonical_carry_index(ladder, 0)] = Fp::ZERO;
+        for bit in 0..C9_SCALAR_BITS {
+            let scalar_is_set = scalar_bit(&scalar_words[ladder], bit);
+            let slack_bit = scalar_bit(&canonical_slack, bit);
+            circuit_input[c9_canonical_slack_index(ladder, bit)] = fp_bit(slack_bit);
+            let sum = u8::from(scalar_is_set) + u8::from(slack_bit) + u8::from(carry);
+            debug_assert_eq!(
+                (sum & 1) != 0,
+                scalar_bit(&P256_FIELD_MODULUS_MINUS_ONE, bit),
+            );
+            carry = sum >= 2;
+            circuit_input[c9_canonical_carry_index(ladder, bit + 1)] = fp_bit(carry);
+        }
+        debug_assert!(!carry);
+
+        let mut started = false;
+        circuit_input[c9_started_index(ladder, 0)] = Fp::ZERO;
+        let accumulator_range = layout_range(slots[ladder]);
+        let (base_x, base_y) = bases[ladder];
+        let mut bits = Vec::with_capacity(C9_SCALAR_BITS);
+        let mut started_before = Vec::with_capacity(C9_SCALAR_BITS);
+        let mut current_points = Vec::with_capacity(C9_SCALAR_BITS);
+        for step in 0..C9_SCALAR_BITS {
+            let bit = scalar_bit(&scalar_words[ladder], C9_SCALAR_BITS - 1 - step);
+            let (current_x, current_y) = if step == 0 {
+                (base_x, base_y)
+            } else {
+                let offset = accumulator_range.start + (step - 1) * 2;
+                (witness.values[offset], witness.values[offset + 1])
+            };
+            let next_offset = accumulator_range.start + step * 2;
+            circuit_input[c9_step_index(ladder, step, C9_STEP_NEXT_X)] =
+                witness.values[next_offset];
+            circuit_input[c9_step_index(ladder, step, C9_STEP_NEXT_Y)] =
+                witness.values[next_offset + 1];
+
+            bits.push(bit);
+            started_before.push(started);
+            current_points.push((current_x, current_y));
+            started |= bit;
+            circuit_input[c9_started_index(ladder, step + 1)] = fp_bit(started);
+        }
+
+        let double_denominators = current_points
+            .iter()
+            .map(|(_, current_y)| *current_y + *current_y)
+            .collect::<Vec<_>>();
+        if double_denominators.iter().any(|value| *value == Fp::ZERO) {
+            return Err(WitnessError::ExceptionalTrace);
+        }
+        let double_denom_inverses = Fp::batch_inverse(&double_denominators);
+        let doubled_points = current_points
+            .iter()
+            .zip(&double_denom_inverses)
+            .map(|(&(current_x, current_y), &double_denom_inv)| {
+                let double_lambda =
+                    (Fp::from_u64(3) * current_x.square() - Fp::from_u64(3)) * double_denom_inv;
+                let double_x = double_lambda.square() - current_x - current_x;
+                let double_y = double_lambda * (current_x - double_x) - current_y;
+                (double_x, double_y, double_lambda)
+            })
+            .collect::<Vec<_>>();
+        let add_denominators = bits
+            .iter()
+            .zip(&doubled_points)
+            .map(
+                |(&bit, &(double_x, _, _))| {
+                    if bit {
+                        base_x - double_x
+                    } else {
+                        Fp::ZERO
+                    }
+                },
+            )
+            .collect::<Vec<_>>();
+        if bits
+            .iter()
+            .zip(&add_denominators)
+            .any(|(&bit, &denominator)| bit && denominator == Fp::ZERO)
+        {
+            return Err(WitnessError::ExceptionalTrace);
+        }
+        let add_denom_inverses = Fp::batch_inverse(&add_denominators);
+
+        for step in 0..C9_SCALAR_BITS {
+            let bit = bits[step];
+            let (double_x, double_y, double_lambda) = doubled_points[step];
+            let double_denom_inv = double_denom_inverses[step];
+            let (add_lambda, add_denom_inv) = if bit {
+                let inv = add_denom_inverses[step];
+                ((base_y - double_y) * inv, inv)
+            } else {
+                (Fp::ZERO, Fp::ZERO)
+            };
+            let add_delta_x = add_lambda.square() - double_x - double_x - base_x;
+            let add_delta_y = -add_lambda * add_delta_x - double_y - double_y;
+            for (wire, value) in [
+                (C9_STEP_DOUBLE_X, double_x),
+                (C9_STEP_DOUBLE_Y, double_y),
+                (C9_STEP_DOUBLE_LAMBDA, double_lambda),
+                (C9_STEP_DOUBLE_DENOM_INV, double_denom_inv),
+                (C9_STEP_ADD_LAMBDA, add_lambda),
+                (C9_STEP_ADD_DENOM_INV, add_denom_inv),
+                (C9_STEP_ADD_DELTA_X, add_delta_x),
+                (C9_STEP_ADD_DELTA_Y, add_delta_y),
+                (C9_STEP_ACTIVE_BIT, fp_bit(started_before[step] && bit)),
+            ] {
+                circuit_input[c9_step_index(ladder, step, wire)] = value;
+            }
+        }
+    }
+
+    let corrected = layout_range(LayoutSlot::CorrectedEndpoints);
+    circuit_input[C9_CORRECTED_START_INDEX..C9_CORRECTED_START_INDEX + 4]
+        .copy_from_slice(&witness.values[corrected]);
+    Ok(circuit_input)
+}
+
 pub fn build_c11_final_add_circuit() -> Result<Circuit, CircuitError> {
     let terms = vec![
         QuadTerm {
@@ -4510,28 +5082,11 @@ fn fp_from_words(words: &U256Words) -> Fp {
     Fp::from_bytes_be(be_from_words(words)).expect("scalar words are below the p256 field modulus")
 }
 
-fn scalar_from_words(words: &U256Words) -> Result<Scalar, WitnessError> {
-    parse_scalar(be_from_words(words))
-}
-
-fn final_point(
-    public_key: &P256AffinePoint,
-    u1: &U256Words,
-    u2: &U256Words,
-) -> Result<([u8; 32], [u8; 32]), WitnessError> {
-    let u1 = scalar_from_words(u1)?;
-    let u2 = scalar_from_words(u2)?;
-    let u1_g = ProjectivePoint::GENERATOR * u1;
-    let u2_q = ProjectivePoint::from(*public_key) * u2;
-    if bool::from(u1_g.is_identity()) || bool::from(u2_q.is_identity()) {
+fn projective_point_bytes(point: ProjectivePoint) -> Result<([u8; 32], [u8; 32]), WitnessError> {
+    if bool::from(point.is_identity()) {
         return Err(WitnessError::ExceptionalTrace);
     }
-
-    let r = u1_g + u2_q;
-    if bool::from(r.is_identity()) {
-        return Err(WitnessError::ExceptionalTrace);
-    }
-    let encoded = r.to_affine().to_encoded_point(false);
+    let encoded = point.to_affine().to_encoded_point(false);
     let mut x = [0u8; 32];
     let mut y = [0u8; 32];
     x.copy_from_slice(encoded.x().expect("affine point has x coordinate"));
@@ -4546,25 +5101,35 @@ fn write_ladder_accumulators(
     scalar_words: &U256Words,
 ) -> Result<ProjectivePoint, WitnessError> {
     let range = layout_range(slot);
-    let out = &mut values[range];
     let mut acc = base;
-    let mut output_index = 0usize;
+    let mut started = false;
+    let mut accumulators = [base; 256];
 
-    for bit in (0..256usize).rev() {
-        let doubled = acc.double();
-        let added = doubled + base;
-        acc = if scalar_bit(scalar_words, bit) {
-            added
-        } else {
-            doubled
-        };
+    for (index, bit) in (0..256usize).rev().enumerate() {
+        let bit = scalar_bit(scalar_words, bit);
+        if started {
+            let doubled = acc.double();
+            acc = if bit { doubled + base } else { doubled };
+        } else if bit {
+            // Start at the first set bit instead of the point at infinity. This
+            // makes the last committed accumulator exactly scalar * base, so
+            // the circuit can bind it directly to the corrected endpoint.
+            started = true;
+        }
         if bool::from(acc.is_identity()) {
             return Err(WitnessError::ExceptionalTrace);
         }
-        write_projective_point(out, output_index, acc)?;
-        output_index += 2;
+        accumulators[index] = acc;
     }
-    debug_assert_eq!(output_index, 512);
+    if !started {
+        return Err(WitnessError::ExceptionalTrace);
+    }
+    let mut normalized = [P256AffinePoint::default(); 256];
+    ProjectivePoint::batch_normalize(&accumulators, &mut normalized);
+    let out = &mut values[range];
+    for (index, point) in normalized.iter().enumerate() {
+        write_affine_point(out, index * 2, point)?;
+    }
     Ok(acc)
 }
 
@@ -4607,13 +5172,6 @@ pub fn ecdsa_public_projection_transcript_segments(
     segments
 }
 
-fn double_256(mut point: ProjectivePoint) -> ProjectivePoint {
-    for _ in 0..256 {
-        point = point.double();
-    }
-    point
-}
-
 fn final_add_denominator(u1_g: ProjectivePoint, u2_q: ProjectivePoint) -> Result<Fp, WitnessError> {
     let (ax, _) = projective_point_coords(u1_g)?;
     let (bx, _) = projective_point_coords(u2_q)?;
@@ -4648,11 +5206,19 @@ fn write_projective_point(
     if bool::from(point.is_identity()) {
         return Err(WitnessError::ExceptionalTrace);
     }
-    let encoded = point.to_affine().to_encoded_point(false);
+    write_affine_point(out, offset, &point.to_affine())
+}
+
+fn write_affine_point(
+    out: &mut [Fp],
+    offset: usize,
+    point: &P256AffinePoint,
+) -> Result<(), WitnessError> {
+    let encoded = point.to_encoded_point(false);
     let mut x = [0u8; 32];
     let mut y = [0u8; 32];
-    x.copy_from_slice(encoded.x().expect("affine point has x coordinate"));
-    y.copy_from_slice(encoded.y().expect("affine point has y coordinate"));
+    x.copy_from_slice(encoded.x().ok_or(WitnessError::ExceptionalTrace)?);
+    y.copy_from_slice(encoded.y().ok_or(WitnessError::ExceptionalTrace)?);
     out[offset] = Fp::from_bytes_be(x).expect("x is canonical");
     out[offset + 1] = Fp::from_bytes_be(y).expect("y is canonical");
     Ok(())
@@ -4768,6 +5334,73 @@ mod tests {
             qx,
             qy,
         }
+    }
+
+    #[test]
+    fn c9_c10_ladder_layout_fits_declared_input_domain() {
+        let last_input = c9_canonical_carry_index(C9_LADDER_COUNT - 1, C9_SCALAR_BITS);
+        assert!(last_input < 1usize << C9_C10_LADDER_INPUT_LOG_SIZE);
+    }
+
+    #[test]
+    fn c9_scalar_bits_reject_noncanonical_field_alias() {
+        // `p + 1` recomposes to the field element `1`, so recomposition alone
+        // cannot distinguish it from the canonical bits of one. Build the
+        // otherwise-consistent wrapping slack/carry witness: every per-bit
+        // addition equation holds, but the required zero final carry rejects
+        // this non-canonical 256-bit representative.
+        let mut alias = P256_FIELD_MODULUS_MINUS_ONE;
+        let mut addend = 2u64;
+        for word in &mut alias {
+            let (sum, overflow) = word.overflowing_add(addend);
+            *word = sum;
+            addend = u64::from(overflow);
+        }
+        assert_eq!(addend, 0);
+
+        let mut slack = [0u64; 4];
+        let mut borrow = 0u64;
+        for word in 0..4 {
+            let (first, first_borrow) =
+                P256_FIELD_MODULUS_MINUS_ONE[word].overflowing_sub(alias[word]);
+            let (value, second_borrow) = first.overflowing_sub(borrow);
+            slack[word] = value;
+            borrow = u64::from(first_borrow) + u64::from(second_borrow);
+        }
+        assert_eq!(borrow, 1, "the alias is larger than p - 1");
+        let mut input = vec![Fp::ZERO; 1usize << C9_C10_LADDER_INPUT_LOG_SIZE];
+        input[C9_CONST_ONE_INDEX] = Fp::ONE;
+        input[C9_U1_INDEX] = Fp::ONE;
+        let mut carry = false;
+        for bit in 0..C9_SCALAR_BITS {
+            let alias_bit = scalar_bit(&alias, bit);
+            let slack_bit = scalar_bit(&slack, bit);
+            input[c9_bit_index(0, bit)] = fp_bit(alias_bit);
+            input[c9_canonical_slack_index(0, bit)] = fp_bit(slack_bit);
+            input[c9_canonical_carry_index(0, bit)] = fp_bit(carry);
+            carry = u8::from(alias_bit) + u8::from(slack_bit) + u8::from(carry) >= 2;
+        }
+        input[c9_canonical_carry_index(0, C9_SCALAR_BITS)] = fp_bit(carry);
+        assert!(carry, "p + 1 plus its wrapping slack must overflow");
+
+        let circuit = build_c9_c10_ladder_circuit().expect("C9-C10 circuit builds");
+        let layers = circuit
+            .evaluate_input(input)
+            .expect("input has circuit width");
+        let final_carry_constraint = 1 + C9_SCALAR_BITS + C9_SCALAR_BITS + (C9_SCALAR_BITS + 1) + 1;
+        assert_eq!(
+            layers[0][0],
+            Fp::ZERO,
+            "field recomposition aliases p + 1 to 1"
+        );
+        assert_eq!(
+            layers[0][final_carry_constraint],
+            Fp::ONE,
+            "the canonical range proof must expose the overflow"
+        );
+        assert!(!circuit
+            .is_satisfied(&layers)
+            .expect("circuit shape is valid"));
     }
 
     fn median_duration(values: &mut [Duration]) -> Duration {

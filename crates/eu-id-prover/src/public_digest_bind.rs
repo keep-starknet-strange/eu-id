@@ -213,6 +213,13 @@ impl Air for PublicDigestBind {
         vec![public_digest_active_id()]
     }
 
+    fn canonical_preprocessed_columns(
+        &mut self,
+    ) -> Result<Vec<air_core::PreprocessedColumnEval>, stwo::core::verifier::VerificationError>
+    {
+        Ok(vec![public_digest_active_column()])
+    }
+
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
         self.component = Some(PublicDigestBindComponent::new(
             allocator,

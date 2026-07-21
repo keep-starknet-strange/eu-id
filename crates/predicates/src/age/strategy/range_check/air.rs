@@ -73,6 +73,17 @@ fn layout(public: &PublicInput, dob_binding_mode: Option<DobBindingMode>) -> Tre
     }
 }
 
+fn canonical_preprocessed(preprocessed: &Preprocessed) -> Vec<air_core::PreprocessedColumnEval> {
+    let mut columns = Vec::new();
+    columns.extend(preprocessed.active_trace.clone());
+    columns.extend(preprocessed.cal_trace.clone());
+    columns.extend(preprocessed.valid_day_trace.clone());
+    columns.extend(preprocessed.day_delta_table.clone());
+    columns.extend(preprocessed.month_delta_table.clone());
+    columns.extend(preprocessed.year_delta_table.clone());
+    columns
+}
+
 /// Bind the public statement and the three range-check table claims to the
 /// transcript. This is what makes age's range-check strategy differ from a
 /// plain predicate: it mixes the delta-table claims right after tree 0.
@@ -185,6 +196,13 @@ impl Air for RangeCheckProver {
 
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
         preprocessed_column_ids(&self.public.bounds)
+    }
+
+    fn canonical_preprocessed_columns(
+        &mut self,
+    ) -> Result<Vec<air_core::PreprocessedColumnEval>, stwo::core::verifier::VerificationError>
+    {
+        Ok(canonical_preprocessed(&self.preprocessed))
     }
 
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
@@ -333,6 +351,15 @@ impl Air for RangeCheckVerifier {
 
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
         preprocessed_column_ids(&self.public.bounds)
+    }
+
+    fn canonical_preprocessed_columns(
+        &mut self,
+    ) -> Result<Vec<air_core::PreprocessedColumnEval>, stwo::core::verifier::VerificationError>
+    {
+        Ok(canonical_preprocessed(&Preprocessed::new(
+            &self.public.bounds,
+        )))
     }
 
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {

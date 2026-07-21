@@ -247,6 +247,21 @@ pub trait Air {
     /// single shared [`TraceLocationAllocator`] before building components.
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId>;
 
+    /// Reconstruct this module's trusted tree-0 columns in the same order as
+    /// [`Air::preprocessed_column_ids`]. Production verification commits these
+    /// verifier-derived values and pins the proof to that root.
+    fn canonical_preprocessed_columns(
+        &mut self,
+    ) -> Result<Vec<PreprocessedColumnEval>, VerificationError> {
+        if self.preprocessed_column_ids().is_empty() {
+            Ok(Vec::new())
+        } else {
+            Err(VerificationError::InvalidStructure(
+                "module cannot reconstruct its preprocessed columns".into(),
+            ))
+        }
+    }
+
     /// Build this module's AIR components against the shared allocator and stash
     /// them. Called once, in module order, after relations are drawn and the
     /// allocator is seeded. A module owns its components and lends them out via
@@ -596,6 +611,51 @@ pub fn compute_preprocessed_root_uncached(
     }
     tb.commit(channel);
     commitment_scheme.roots()[0]
+}
+
+/// Reconstruct and commit tree 0 from verifier-side canonical module data.
+/// Columns use the same first-writer-wins deduplication order as [`prove`]; no
+/// witness value or prover-supplied commitment enters this computation.
+pub fn compute_canonical_preprocessed_root(
+    modules: &mut [&mut dyn Air],
+    config: PcsConfig,
+) -> Result<CommitmentRoot, VerificationError> {
+    let max_preprocessed_log_size = modules
+        .iter()
+        .flat_map(|module| module.layout().preprocessed)
+        .max()
+        .unwrap_or(0);
+    let twiddles = cached_twiddles(max_preprocessed_log_size + config.fri_config.log_blowup_factor);
+    let channel = &mut Ch::default();
+    config.mix_into(channel);
+    let mut commitment_scheme = CommitmentSchemeProver::<SimdBackend, Mc>::new(config, twiddles);
+    let mut tree_builder = commitment_scheme.tree_builder();
+    let mut seen = HashSet::new();
+
+    for module in modules.iter_mut() {
+        let ids = module.preprocessed_column_ids();
+        let log_sizes = module.layout().preprocessed;
+        let columns = module.canonical_preprocessed_columns()?;
+        if ids.len() != columns.len() || ids.len() != log_sizes.len() {
+            return Err(VerificationError::InvalidStructure(
+                "canonical preprocessed ids, columns, and layout differ in length".into(),
+            ));
+        }
+        let mut selected = Vec::new();
+        for ((id, column), log_size) in ids.into_iter().zip(columns).zip(log_sizes) {
+            if column.domain.log_size() != log_size {
+                return Err(VerificationError::InvalidStructure(
+                    "canonical preprocessed column has the wrong log size".into(),
+                ));
+            }
+            if seen.insert(id) {
+                selected.push(column);
+            }
+        }
+        tree_builder.extend_evals(selected);
+    }
+    tree_builder.commit(channel);
+    Ok(commitment_scheme.roots()[0])
 }
 
 /// Re-derive the transcript for every module and verify the single STARK proof.

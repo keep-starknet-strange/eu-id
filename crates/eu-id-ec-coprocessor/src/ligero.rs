@@ -8,6 +8,7 @@ use crate::rs::{rs_encode_padded, rs_evaluate, RsError};
 use crate::sumcheck::InputClaims;
 use crate::{CoprocessorChannel, Fp, Mle, MleError};
 use p256::elliptic_curve::rand_core::{OsRng, RngCore};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
@@ -266,36 +267,50 @@ pub fn commit_witness_profiled(
     }
 
     let row_encode_start = Instant::now();
-    let mut encoded_rows = Vec::new();
-    let mut coefficient_rows = Vec::new();
+    let mut encoded_rows;
+    let mut coefficient_rows;
     let mut pads = fresh_pad_channel();
     let claim_degree_bound = params.claim_degree_bound();
-    for chunk in witness.chunks(params.row_len) {
-        match params.code {
-            LigeroCode::Rs => {
-                let mut row = Vec::with_capacity(params.degree_bound);
-                row.extend_from_slice(chunk);
-                row.resize(params.row_len, Fp::ZERO);
-                // WO-P2: one bulk pad draw per row instead of a per-element loop.
-                row.extend(pads.draw_fps(params.degree_bound - params.row_len));
-                encoded_rows.push(
+    match params.code {
+        LigeroCode::Rs => {
+            let row_pads = witness
+                .chunks(params.row_len)
+                .map(|_| pads.draw_fps(params.degree_bound - params.row_len))
+                .collect::<Vec<_>>();
+            encoded_rows = witness
+                .par_chunks(params.row_len)
+                .zip(row_pads.into_par_iter())
+                .map(|(chunk, row_pads)| {
+                    let mut row = Vec::with_capacity(params.degree_bound);
+                    row.extend_from_slice(chunk);
+                    row.resize(params.row_len, Fp::ZERO);
+                    row.extend(row_pads);
                     rs_encode_padded(&row, params.degree_bound, params.codeword_len)
-                        .map_err(LigeroError::Rs)?,
-                );
-            }
-            LigeroCode::Circle => {
-                let geom = params.circle_geom().expect("validated circle params");
-                // WO-P2: draw the row's message pads in one batch, feed them to
-                // circle_encode_row in order.
-                let row_pads = pads.draw_fps(geom.row_message_len - geom.data_slots);
-                let mut row_pads = row_pads.into_iter();
-                let (coefficients, codeword) = circle_encode_row(geom, chunk, || {
-                    row_pads.next().expect("row pad budget exhausted")
+                        .map_err(LigeroError::Rs)
                 })
-                .map_err(LigeroError::Circle)?;
-                coefficient_rows.push(coefficients);
-                encoded_rows.push(codeword);
-            }
+                .collect::<Result<Vec<_>, _>>()?;
+            coefficient_rows = Vec::new();
+        }
+        LigeroCode::Circle => {
+            let geom = params.circle_geom().expect("validated circle params");
+            // Draw pads serially to preserve the channel order, then encode
+            // independent rows in parallel without changing their order.
+            let row_pads = witness
+                .chunks(params.row_len)
+                .map(|_| pads.draw_fps(geom.row_message_len - geom.data_slots))
+                .collect::<Vec<_>>();
+            let rows = witness
+                .par_chunks(params.row_len)
+                .zip(row_pads.into_par_iter())
+                .map(|(chunk, row_pads)| {
+                    let mut row_pads = row_pads.into_iter();
+                    circle_encode_row(geom, chunk, || {
+                        row_pads.next().expect("row pad budget exhausted")
+                    })
+                    .map_err(LigeroError::Circle)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            (coefficient_rows, encoded_rows) = rows.into_iter().unzip();
         }
     }
     let witness_rows = encoded_rows.len();
@@ -528,19 +543,30 @@ impl LigeroCommitment {
         let mut q_values = circle_product_fft(geom, &blind_coeffs).map_err(LigeroError::Circle)?;
 
         let combined_rows = self.witness_rows + other.map_or(0, |o| o.witness_rows);
-        for (row, weights) in batched_row_weights(self.params, combined_rows, claims, gamma)? {
-            let w_coeffs = circle_weight_coeffs(geom, &weights).map_err(LigeroError::Circle)?;
-            let w_values = circle_product_fft(geom, &w_coeffs).map_err(LigeroError::Circle)?;
-            let row_coeffs = if row < self.witness_rows {
-                &self.coefficient_rows[row]
-            } else {
-                &other
-                    .expect("row index beyond first group")
-                    .coefficient_rows[row - self.witness_rows]
-            };
-            let r_values = circle_product_fft(geom, row_coeffs).map_err(LigeroError::Circle)?;
-            for ((out, &w), &r) in q_values.iter_mut().zip(&w_values).zip(&r_values) {
-                *out = *out + w * r;
+        let row_weights = batched_row_weights(self.params, combined_rows, claims, gamma)?;
+        let row_products = row_weights
+            .par_iter()
+            .map(|(row, weights)| {
+                let w_coeffs = circle_weight_coeffs(geom, weights).map_err(LigeroError::Circle)?;
+                let w_values = circle_product_fft(geom, &w_coeffs).map_err(LigeroError::Circle)?;
+                let row_coeffs = if *row < self.witness_rows {
+                    &self.coefficient_rows[*row]
+                } else {
+                    &other
+                        .expect("row index beyond first group")
+                        .coefficient_rows[*row - self.witness_rows]
+                };
+                let r_values = circle_product_fft(geom, row_coeffs).map_err(LigeroError::Circle)?;
+                Ok(w_values
+                    .into_iter()
+                    .zip(r_values)
+                    .map(|(w, r)| w * r)
+                    .collect::<Vec<_>>())
+            })
+            .collect::<Result<Vec<_>, LigeroError>>()?;
+        for row_product in row_products {
+            for (out, product) in q_values.iter_mut().zip(row_product) {
+                *out = *out + product;
             }
         }
         let coefficients = circle_product_ifft(geom, q_values).map_err(LigeroError::Circle)?;

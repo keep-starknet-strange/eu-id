@@ -1,4 +1,5 @@
 use blake2::{Blake2s256, Digest};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::Fp;
@@ -39,15 +40,13 @@ pub fn commit_columns(rows: &[Vec<Fp>]) -> Result<MerkleCommitment, MerkleError>
         return Err(MerkleError::RaggedMatrix);
     }
 
-    let mut columns = vec![Vec::with_capacity(rows.len()); width];
-    for row in rows {
-        for (i, value) in row.iter().copied().enumerate() {
-            columns[i].push(value);
-        }
-    }
+    let columns = (0..width)
+        .into_par_iter()
+        .map(|column| rows.iter().map(|row| row[column]).collect::<Vec<_>>())
+        .collect::<Vec<_>>();
 
     let leaves = columns
-        .iter()
+        .par_iter()
         .enumerate()
         .map(|(index, column)| leaf_hash(index, column))
         .collect::<Vec<_>>();
@@ -110,11 +109,13 @@ pub fn verify_column(root: [u8; 32], opening: &ColumnOpening) -> Result<bool, Me
 fn build_levels(mut current: Vec<[u8; 32]>) -> Vec<Vec<[u8; 32]>> {
     let mut levels = vec![current.clone()];
     while current.len() > 1 {
-        let mut next = Vec::with_capacity(current.len().div_ceil(2));
-        for pair in current.chunks(2) {
-            let right = if pair.len() == 2 { pair[1] } else { pair[0] };
-            next.push(node_hash(pair[0], right));
-        }
+        let next = current
+            .par_chunks(2)
+            .map(|pair| {
+                let right = if pair.len() == 2 { pair[1] } else { pair[0] };
+                node_hash(pair[0], right)
+            })
+            .collect::<Vec<_>>();
         current = next;
         levels.push(current.clone());
     }

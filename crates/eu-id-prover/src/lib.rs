@@ -1760,24 +1760,19 @@ pub fn verify(
 /// are proven equal to the credential's. Then checks the shared STARK (the global
 /// LogUp balance). Returns `Ok(())` iff every check passes.
 ///
-/// The tree-0 (preprocessed) root is NOT pinned here — the F-ROOT legacy
-/// behavior. A single tier-1 profile constant is impossible today: the
-/// tree-0 shape follows the caller's policy and predicate mode (the SDK
-/// legitimately verifies age-only / nat-only / varying-policy proofs, each
-/// with its own root), and the verifier cannot rebuild the prover modules
-/// from the statement alone. Callers that know their full profile pin via
-/// [`verify_identity_with_preprocessed_root`] with a root from
-/// [`identity_expected_preprocessed_root`]; tier-1 default pinning lands
-/// once the deployment's message-size / policy envelope is normalized
-/// (tasks/froot-pinning-design.md, Tier 1).
+/// The verifier reconstructs every deterministic preprocessed column from the
+/// public statement and proof shape, commits them locally, and pins tree 0 to
+/// that canonical root before Fiat-Shamir or STARK verification. This supports
+/// varying policy/predicate shapes without trusting a root supplied by either
+/// the prover or the caller.
 pub fn verify_identity(proof: &Proof, statement: &PublicStatement) -> Result<(), Error> {
     verify_identity_impl(proof, statement, None)
 }
 
-/// [`verify_identity`], with the tree-0 (preprocessed) commitment root pinned —
-/// the F-ROOT fix. The caller supplies the expected root, computed once via
+/// [`verify_identity`], additionally requiring a caller-supplied tree-0 root to
+/// equal the verifier-derived canonical root. The caller can compute it via
 /// [`identity_expected_preprocessed_root`] (or a per-profile constant generated
-/// the same way) — never taken from the proof. A proof carrying a forged
+/// the same way). A proof carrying a forged
 /// preprocessed tree (range tables, schedules, constants) is rejected with
 /// [`Error::PreprocessedRootMismatch`] before the STARK check.
 ///
@@ -2043,10 +2038,21 @@ fn verify_stark_with_config(
         &mut nat,
         &mut coprocessor,
     ];
+    let canonical_root =
+        air_core::compute_canonical_preprocessed_root(&mut modules, expected_config)
+            .map_err(|error| Error::Verify(format!("{error:?}")))?;
+    if let Some(provided_root) = expected_preprocessed_root {
+        if provided_root != canonical_root {
+            return Err(Error::PreprocessedRootMismatch {
+                got: provided_root,
+                expected: canonical_root,
+            });
+        }
+    }
     air_core::verify_with_expected_preprocessed_root(
         &mut modules,
         &proof.stark_proof,
-        expected_preprocessed_root,
+        Some(canonical_root),
     )
     .map_err(|e| match e {
         air_core::VerifyError::PreprocessedRootMismatch { got, expected } => {

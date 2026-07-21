@@ -2446,22 +2446,6 @@ pub struct MdocCircuitStatement {
     pub nationality_binding: MdocNationalityBinding,
     pub birth_date_value_offset: usize,
     pub nationality_value_offset: usize,
-    /// Offset of the `"birth_date"` `elementIdentifier` window in the birth_date
-    /// item preimage (D1).
-    pub birth_date_element_offset: usize,
-    /// Offset of the `"nationality"` `elementIdentifier` window in the
-    /// nationality item preimage (D1).
-    pub nationality_element_offset: usize,
-    /// Offset of the birth_date `valueDigests` 32-byte window in the issuer
-    /// `Sig_structure` preimage (D2).
-    pub mso_birth_date_digest_offset: usize,
-    pub mso_birth_date_digest_anchor_offset: usize,
-    pub mso_birth_date_digest_anchor: Vec<u8>,
-    /// Offset of the nationality `valueDigests` 32-byte window in the issuer
-    /// `Sig_structure` preimage (D2).
-    pub mso_nationality_digest_offset: usize,
-    pub mso_nationality_digest_anchor_offset: usize,
-    pub mso_nationality_digest_anchor: Vec<u8>,
     /// Offset of the deviceKey x-coordinate 32-byte window in the issuer
     /// `Sig_structure` preimage (D3).
     pub mso_device_key_x_offset: usize,
@@ -2505,14 +2489,6 @@ pub struct MdocPublicStatement {
     pub nationality_binding: MdocNationalityBinding,
     pub birth_date_value_offset: usize,
     pub nationality_value_offset: usize,
-    pub birth_date_element_offset: usize,
-    pub nationality_element_offset: usize,
-    pub mso_birth_date_digest_offset: usize,
-    pub mso_birth_date_digest_anchor_offset: usize,
-    pub mso_birth_date_digest_anchor: Vec<u8>,
-    pub mso_nationality_digest_offset: usize,
-    pub mso_nationality_digest_anchor_offset: usize,
-    pub mso_nationality_digest_anchor: Vec<u8>,
     pub mso_device_key_x_offset: usize,
     pub mso_device_key_x_anchor_offset: usize,
     pub mso_device_key_x_anchor: Vec<u8>,
@@ -2547,14 +2523,6 @@ impl MdocPublicStatement {
             nationality_binding: statement.nationality_binding,
             birth_date_value_offset: statement.birth_date_value_offset,
             nationality_value_offset: statement.nationality_value_offset,
-            birth_date_element_offset: statement.birth_date_element_offset,
-            nationality_element_offset: statement.nationality_element_offset,
-            mso_birth_date_digest_offset: statement.mso_birth_date_digest_offset,
-            mso_birth_date_digest_anchor_offset: statement.mso_birth_date_digest_anchor_offset,
-            mso_birth_date_digest_anchor: statement.mso_birth_date_digest_anchor.clone(),
-            mso_nationality_digest_offset: statement.mso_nationality_digest_offset,
-            mso_nationality_digest_anchor_offset: statement.mso_nationality_digest_anchor_offset,
-            mso_nationality_digest_anchor: statement.mso_nationality_digest_anchor.clone(),
             mso_device_key_x_offset: statement.mso_device_key_x_offset,
             mso_device_key_x_anchor_offset: statement.mso_device_key_x_anchor_offset,
             mso_device_key_x_anchor: statement.mso_device_key_x_anchor.clone(),
@@ -2611,14 +2579,6 @@ impl MdocPublicStatement {
             nationality_binding: self.nationality_binding,
             birth_date_value_offset: self.birth_date_value_offset,
             nationality_value_offset: self.nationality_value_offset,
-            birth_date_element_offset: self.birth_date_element_offset,
-            nationality_element_offset: self.nationality_element_offset,
-            mso_birth_date_digest_offset: self.mso_birth_date_digest_offset,
-            mso_birth_date_digest_anchor_offset: self.mso_birth_date_digest_anchor_offset,
-            mso_birth_date_digest_anchor: self.mso_birth_date_digest_anchor.clone(),
-            mso_nationality_digest_offset: self.mso_nationality_digest_offset,
-            mso_nationality_digest_anchor_offset: self.mso_nationality_digest_anchor_offset,
-            mso_nationality_digest_anchor: self.mso_nationality_digest_anchor.clone(),
             mso_device_key_x_offset: self.mso_device_key_x_offset,
             mso_device_key_x_anchor_offset: self.mso_device_key_x_anchor_offset,
             mso_device_key_x_anchor: self.mso_device_key_x_anchor.clone(),
@@ -2821,38 +2781,6 @@ impl MdocCircuitStatement {
                 extracted.nationality_binding.as_bytes(),
             )?;
         }
-        let (
-            birth_date_element_offset,
-            mso_birth_date_digest_offset,
-            mso_birth_date_digest_anchor_offset,
-            mso_birth_date_digest_anchor,
-        ) = age_attribute_index
-            .map(|index| {
-                let attribute = &statement_attributes[index];
-                (
-                    attribute.element_identifier_offset,
-                    attribute.mso_digest_offset,
-                    attribute.mso_digest_anchor_offset,
-                    attribute.mso_digest_anchor.clone(),
-                )
-            })
-            .unwrap_or((0, 0, 0, Vec::new()));
-        let (
-            nationality_element_offset,
-            mso_nationality_digest_offset,
-            mso_nationality_digest_anchor_offset,
-            mso_nationality_digest_anchor,
-        ) = nationality_attribute_index
-            .map(|index| {
-                let attribute = &statement_attributes[index];
-                (
-                    attribute.element_identifier_offset,
-                    attribute.mso_digest_offset,
-                    attribute.mso_digest_anchor_offset,
-                    attribute.mso_digest_anchor.clone(),
-                )
-            })
-            .unwrap_or((0, 0, 0, Vec::new()));
         let mso_device_key_x_offset =
             find_subslice(&extracted.issuer_sig_structure, &extracted.device_key.x.0)
                 .ok_or(MdocError::UnsupportedCircuitValue("device key x offset"))?;
@@ -2943,14 +2871,6 @@ impl MdocCircuitStatement {
             nationality_binding: extracted.nationality_binding,
             birth_date_value_offset: extracted.birth_date_value_offset,
             nationality_value_offset: extracted.nationality_value_offset,
-            birth_date_element_offset,
-            nationality_element_offset,
-            mso_birth_date_digest_offset,
-            mso_birth_date_digest_anchor_offset,
-            mso_birth_date_digest_anchor,
-            mso_nationality_digest_offset,
-            mso_nationality_digest_anchor_offset,
-            mso_nationality_digest_anchor,
             mso_device_key_x_offset,
             mso_device_key_x_anchor_offset,
             mso_device_key_x_anchor,
@@ -3671,6 +3591,13 @@ impl Air for MdocMsoPayloadBind {
         mso_payload_preprocessed_column_ids()
     }
 
+    fn canonical_preprocessed_columns(
+        &mut self,
+    ) -> Result<Vec<air_core::PreprocessedColumnEval>, stwo::core::verifier::VerificationError>
+    {
+        Ok(mso_payload_preprocessed_columns(self.len))
+    }
+
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
         let claim = self.interaction_claim().clone();
         let blinder_relation = self
@@ -4236,6 +4163,13 @@ impl Air for MdocRevocationRangeBind {
 
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
         vec![revocation_range_active_id()]
+    }
+
+    fn canonical_preprocessed_columns(
+        &mut self,
+    ) -> Result<Vec<air_core::PreprocessedColumnEval>, stwo::core::verifier::VerificationError>
+    {
+        Ok(vec![revocation_range_active_column()])
     }
 
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
@@ -5674,10 +5608,22 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
     #[cfg(feature = "ec-coprocessor")]
     modules.push(&mut mdoc_mac);
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let canonical_root = air_core::compute_canonical_preprocessed_root(
+            modules.as_mut_slice(),
+            expected_pcs_config,
+        )?;
+        if let Some(provided_root) = expected_preprocessed_root {
+            if provided_root != canonical_root {
+                return Err(air_core::VerifyError::PreprocessedRootMismatch {
+                    got: provided_root,
+                    expected: canonical_root,
+                });
+            }
+        }
         air_core::verify_with_expected_preprocessed_root(
             modules.as_mut_slice(),
             &proof.stark_proof,
-            expected_preprocessed_root,
+            Some(canonical_root),
         )
     })) {
         Ok(Ok(())) => Ok(MdocCircuitVerifyProfile {
@@ -5891,26 +5837,16 @@ mod mdoc_sha_table_tests {
 
     #[test]
     #[ignore = "slow: proves product mdoc circuit profile"]
-    fn mdoc_preprocessed_root_tamper_rejects_before_stark() {
+    fn default_mdoc_verifier_rejects_preprocessed_root_tamper_before_stark() {
         let fixture = demo_mdoc_circuit_fixture();
         let mut proof =
             prove_mdoc_circuit(&fixture.extracted, &fixture.statement).expect("mdoc proves");
-        let expected_preprocessed_root = proof.stark_proof.commitments[0];
-        verify_mdoc_circuit_with_preprocessed_root(
-            &proof,
-            &fixture.statement,
-            expected_preprocessed_root,
-        )
-        .expect("mdoc verifies before tamper");
+        verify_mdoc_circuit(&proof, &fixture.statement).expect("mdoc verifies before tamper");
 
         proof.stark_proof.0.commitments[0].0[0] ^= 1;
 
         assert!(matches!(
-            verify_mdoc_circuit_with_preprocessed_root(
-                &proof,
-                &fixture.statement,
-                expected_preprocessed_root,
-            ),
+            verify_mdoc_circuit(&proof, &fixture.statement),
             Err(Error::PreprocessedRootMismatch { .. })
         ));
     }
@@ -5945,10 +5881,16 @@ mod mdoc_sha_table_tests {
         // offsets points each digest bind at the other's bytes, so the
         // window↔item-SHA LogUp no longer balances.
         let mut digest_offset_swap = fixture.statement.clone();
-        std::mem::swap(
-            &mut digest_offset_swap.mso_birth_date_digest_offset,
-            &mut digest_offset_swap.mso_nationality_digest_offset,
-        );
+        let age_index = digest_offset_swap
+            .age_attribute_index
+            .expect("fixture has age attribute");
+        let nationality_index = digest_offset_swap
+            .nationality_attribute_index
+            .expect("fixture has nationality attribute");
+        let age_digest_offset = digest_offset_swap.attributes[age_index].mso_digest_offset;
+        digest_offset_swap.attributes[age_index].mso_digest_offset =
+            digest_offset_swap.attributes[nationality_index].mso_digest_offset;
+        digest_offset_swap.attributes[nationality_index].mso_digest_offset = age_digest_offset;
         assert!(
             verify_mdoc_circuit(&proof, &digest_offset_swap).is_err(),
             "birth/nationality digest offset swap unexpectedly verified",
@@ -5995,7 +5937,8 @@ mod mdoc_sha_table_tests {
         // D1: birth_date elementIdentifier window (the exposed field bytes no
         // longer spell "birth_date" at the shifted offset).
         let mut d1 = fixture.statement.clone();
-        d1.birth_date_element_offset += 1;
+        let age_index = d1.age_attribute_index.expect("fixture has age attribute");
+        d1.attributes[age_index].element_identifier_offset += 1;
         assert!(
             verify_mdoc_circuit(&proof, &d1).is_err(),
             "D1 element-id offset tamper unexpectedly verified",
@@ -6003,10 +5946,23 @@ mod mdoc_sha_table_tests {
 
         // D2: birth_date valueDigests window in the issuer preimage.
         let mut d2 = fixture.statement.clone();
-        d2.mso_birth_date_digest_offset += 1;
+        let age_index = d2.age_attribute_index.expect("fixture has age attribute");
+        d2.attributes[age_index].mso_digest_offset += 1;
         assert!(
             verify_mdoc_circuit(&proof, &d2).is_err(),
             "D2 digest-window offset tamper unexpectedly verified",
+        );
+
+        // D2 anchor: the per-attribute CBOR key/id prefix is a separate live
+        // window and must not be movable independently of the digest bytes.
+        let mut d2_anchor = fixture.statement.clone();
+        let age_index = d2_anchor
+            .age_attribute_index
+            .expect("fixture has age attribute");
+        d2_anchor.attributes[age_index].mso_digest_anchor_offset += 1;
+        assert!(
+            verify_mdoc_circuit(&proof, &d2_anchor).is_err(),
+            "D2 digest-anchor offset tamper unexpectedly verified",
         );
 
         // D3: deviceKey x-coordinate window in the issuer preimage. Moving the

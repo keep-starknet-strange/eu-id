@@ -315,16 +315,14 @@ fn add_pinning_emissions<E: EvalAtRow>(
         }
     }
 
-    // FinalCheckHint: yield `R_i` (= `lhs`) once per active `DoubleR` row, gated
-    // `active * DoubleR_flag`, multiplicity `-1`. Always emitted (one fraction
-    // per row) so the AIR numerator and the interaction trace stay in lockstep;
-    // the numerator is zero on non-`DoubleR`/padding rows. The relation tuple is
-    // the canonical-pinned `R_i`, so this forwards an already-bound value.
+    // FinalCheckHint: yield the canonical `R_i` twice per active `DoubleR` row:
+    // once for final-add and once for the curve-membership slice. Both consumers
+    // use the identical tuple, so neither can substitute a different point.
     if let Some(final_check_hint) = &pinning.final_check_hint {
         let gate = active.clone() * kind_flags[PREPARED_TABLE_EC_KIND_DOUBLE_R].clone();
         eval.add_to_relation(RelationEntry::base(
             final_check_hint,
-            -gate,
+            -gate * E::F::from(M31::from_u32_unchecked(2)),
             &final_check_hint_relation_values::<E::F>(sig_id, cert_id, lhs),
         ));
     }

@@ -2,8 +2,9 @@ use ecdsa::signature::Signer;
 use eu_id_ec_coprocessor::ecdsa::{
     build_c11_final_add_circuit, build_c12_on_curve_circuit, build_c14_c15_final_check_circuit,
     build_c1_input_limbs_circuit, build_c2_canonicality_circuit, build_c3_c5_scalar_setup_circuit,
-    c11_final_add_input, c12_on_curve_input, c12_witness_on_curve_input, c14_c15_final_check_input,
-    c1_input_limbs_input, c2_canonicality_input, c3_c5_scalar_setup_input, generate_witness,
+    build_c9_c10_ladder_circuit, c11_final_add_input, c12_on_curve_input,
+    c12_witness_on_curve_input, c14_c15_final_check_input, c1_input_limbs_input,
+    c2_canonicality_input, c3_c5_scalar_setup_input, c9_c10_ladder_input, generate_witness,
     implemented_circuit_family_labels, implemented_circuit_gate_count, layout_range,
     prove_implemented_circuit_bundle, prove_implemented_circuit_bundle_batch_with_projection,
     prove_implemented_circuit_bundle_profiled, prove_implemented_circuit_bundle_unchecked_profiled,
@@ -245,6 +246,34 @@ fn c11_final_add_circuit_accepts_honest_witness() {
 }
 
 #[test]
+fn c9_c10_ladder_circuit_binds_every_transition_and_endpoint() {
+    let input = signed_input();
+    let circuit = build_c9_c10_ladder_circuit().unwrap();
+    let witness = generate_witness(&input).unwrap();
+    let layers = circuit
+        .evaluate_input(c9_c10_ladder_input(&input, &witness).unwrap())
+        .unwrap();
+    assert!(circuit.is_satisfied(&layers).unwrap());
+
+    let mut forged = witness.clone();
+    let generator = AffinePoint::GENERATOR.to_encoded_point(false);
+    let gx = fp_from_coord(generator.x().unwrap());
+    let gy = fp_from_coord(generator.y().unwrap());
+    for slot in [LayoutSlot::U1GAccumulators, LayoutSlot::U2QAccumulators] {
+        for point in forged.values[layout_range(slot)].chunks_exact_mut(2) {
+            point.copy_from_slice(&[gx, gy]);
+        }
+    }
+    let layers = circuit
+        .evaluate_input(c9_c10_ladder_input(&input, &forged).unwrap())
+        .unwrap();
+    assert!(
+        !circuit.is_satisfied(&layers).unwrap(),
+        "on-curve accumulator substitutions must fail the transition relation"
+    );
+}
+
+#[test]
 fn c11_final_add_circuit_rejects_accumulator_and_final_point_mutations() {
     let input = signed_input();
     let circuit = build_c11_final_add_circuit().unwrap();
@@ -462,6 +491,7 @@ fn implemented_circuit_proofs_accept_honest_witness() {
             b"s4-ecdsa-c1-input-limbs".as_slice(),
             b"s4-ecdsa-c2-canonicality".as_slice(),
             b"s4-ecdsa-c3-c5-scalar-setup".as_slice(),
+            b"s4-ecdsa-c9-c10-ladder".as_slice(),
             b"s4-ecdsa-c11-final-add".as_slice(),
             b"s4-ecdsa-c12-final-on-curve".as_slice(),
             b"s4-ecdsa-c14-c15-final-check".as_slice(),
@@ -472,7 +502,7 @@ fn implemented_circuit_proofs_accept_honest_witness() {
     let claims = verify_implemented_circuit_proofs(&proofs, commitment_root, TEST_SEED).unwrap();
     assert_eq!(claims.len(), labels.len());
     assert_eq!(labels[0], b"s4-ecdsa-c1-input-limbs");
-    assert_eq!(labels[5], b"s4-ecdsa-c14-c15-final-check");
+    assert_eq!(labels[6], b"s4-ecdsa-c14-c15-final-check");
 }
 
 #[test]
@@ -518,7 +548,7 @@ fn implemented_circuit_provers_reject_unsatisfied_witness_mutation() {
 }
 
 #[test]
-fn implemented_circuit_provers_reject_native_witness_mismatch_even_if_covered_circuits_pass() {
+fn implemented_circuits_reject_native_witness_ladder_mismatch() {
     let input = signed_input();
     let mut witness = generate_witness(&input).unwrap();
     mutate_interior_u1_accumulator(&mut witness);
@@ -527,8 +557,10 @@ fn implemented_circuit_provers_reject_native_witness_mismatch_even_if_covered_ci
         verify_witness(&input, &witness).is_err(),
         "native checker must reject the mutated accumulator transcript"
     );
-    verify_implemented_circuits(&input, &witness)
-        .expect("current implemented families do not yet cover C9 transition algebra");
+    assert!(
+        verify_implemented_circuits(&input, &witness).is_err(),
+        "C9-C10 must reject a mutated accumulator transition"
+    );
 
     assert!(
         prove_implemented_circuit_proofs(&input, &witness, [3u8; 32], TEST_SEED).is_err(),
@@ -541,7 +573,6 @@ fn implemented_circuit_provers_reject_native_witness_mismatch_even_if_covered_ci
 }
 
 #[test]
-#[ignore = "documents ECDSA ladder hole; asserts current-broken behavior until the ladder is constrained"]
 fn forged_ladder_accumulators_must_reject() {
     let input = signed_input();
     let mut witness = generate_witness(&input).unwrap();
@@ -559,17 +590,30 @@ fn forged_ladder_accumulators_must_reject() {
         verify_witness(&input, &witness).is_err(),
         "native witness checking must notice the forged ladder"
     );
-    verify_implemented_circuits(&input, &witness).expect(
-        "the implemented relation only requires the forged accumulator points to be on-curve",
+    assert!(
+        verify_implemented_circuits(&input, &witness).is_err(),
+        "the implemented relation must enforce every ladder transition",
     );
 
-    let (bundle, _) =
-        prove_implemented_circuit_bundle_unchecked_profiled(&input, &witness, TEST_SEED).unwrap();
-
-    // DOCUMENTS THE HOLE: flips to `is_err()` once ladder transitions and scalar binding land.
     assert!(
-        verify_implemented_circuit_bundle(&input, &bundle, TEST_SEED).is_ok(),
-        "current verifier unexpectedly rejected its unconstrained on-curve ladder"
+        prove_implemented_circuit_bundle_unchecked_profiled(&input, &witness, TEST_SEED).is_err(),
+        "even the native-check-bypassing prover must reject an unsatisfied ladder circuit"
+    );
+}
+
+#[test]
+fn invalid_external_ecdsa_input_bundle_must_reject() {
+    let mut input = signed_input();
+    input.z[0] ^= 1;
+    let witness = generate_witness(&input).expect("invalid signatures still have an EC trace");
+    assert!(
+        verify_witness(&input, &witness).is_err(),
+        "native ECDSA verification must reject the changed message hash"
+    );
+
+    assert!(
+        prove_implemented_circuit_bundle_unchecked_profiled(&input, &witness, TEST_SEED).is_err(),
+        "the proof relation must reject an invalid external ECDSA tuple"
     );
 }
 
@@ -702,7 +746,7 @@ fn implemented_circuit_bundle_rejects_spliced_c14_entry() {
     let alternate = alternate_signed_input();
     let alternate_witness = generate_witness(&alternate).unwrap();
 
-    bundle.entries[5] = c14_bundle_entry(&alternate, &alternate_witness);
+    bundle.entries[6] = c14_bundle_entry(&alternate, &alternate_witness);
 
     assert!(verify_implemented_circuit_bundle(&input, &bundle, TEST_SEED).is_err());
 }
@@ -736,6 +780,20 @@ fn implemented_circuit_bundle_rejects_spliced_c3_entry() {
 
 #[test]
 #[ignore = "full S4-lite bundle proves every implemented ECDSA circuit"]
+fn implemented_circuit_bundle_rejects_spliced_c9_entry() {
+    let input = signed_input();
+    let witness = generate_witness(&input).unwrap();
+    let mut bundle = prove_implemented_circuit_bundle(&input, &witness, TEST_SEED).unwrap();
+    let alternate = alternate_signed_input();
+    let alternate_witness = generate_witness(&alternate).unwrap();
+
+    bundle.entries[3] = c9_bundle_entry(&alternate, &alternate_witness);
+
+    assert!(verify_implemented_circuit_bundle(&input, &bundle, TEST_SEED).is_err());
+}
+
+#[test]
+#[ignore = "full S4-lite bundle proves every implemented ECDSA circuit"]
 fn implemented_circuit_bundle_rejects_spliced_c11_entry() {
     let input = signed_input();
     let witness = generate_witness(&input).unwrap();
@@ -743,7 +801,7 @@ fn implemented_circuit_bundle_rejects_spliced_c11_entry() {
     let alternate = alternate_signed_input();
     let alternate_witness = generate_witness(&alternate).unwrap();
 
-    bundle.entries[3] = c11_bundle_entry(&alternate_witness);
+    bundle.entries[4] = c11_bundle_entry(&alternate_witness);
 
     assert!(verify_implemented_circuit_bundle(&input, &bundle, TEST_SEED).is_err());
 }
@@ -757,7 +815,7 @@ fn implemented_circuit_bundle_rejects_spliced_c12_entry() {
     let alternate = alternate_signed_input();
     let alternate_witness = generate_witness(&alternate).unwrap();
 
-    bundle.entries[4] = c12_bundle_entry(&alternate_witness);
+    bundle.entries[5] = c12_bundle_entry(&alternate_witness);
 
     assert!(verify_implemented_circuit_bundle(&input, &bundle, TEST_SEED).is_err());
 }
@@ -769,7 +827,7 @@ fn implemented_circuit_bundle_rejects_legacy_entry_without_statement_absorb() {
     let witness = generate_witness(&input).unwrap();
     let mut bundle = prove_implemented_circuit_bundle(&input, &witness, TEST_SEED).unwrap();
 
-    bundle.entries[5] = c14_legacy_transcript_bundle_entry(&input, &witness);
+    bundle.entries[6] = c14_legacy_transcript_bundle_entry(&input, &witness);
 
     assert!(verify_implemented_circuit_bundle(&input, &bundle, TEST_SEED).is_err());
 }
@@ -782,7 +840,7 @@ fn implemented_circuit_bundle_accepts_honest_witness() {
     let (bundle, profile) =
         prove_implemented_circuit_bundle_profiled(&input, &witness, TEST_SEED).unwrap();
 
-    assert_eq!(bundle.entries.len(), 6);
+    assert_eq!(bundle.entries.len(), 7);
     assert_eq!(bundle.params, v4_circle_params());
     assert_eq!(bundle.proximity_openings.len(), bundle.params.openings);
     assert!(bundle
@@ -806,7 +864,7 @@ fn implemented_circuit_bundle_accepts_honest_witness() {
             .any(|opening| opening.index < bundle.params.row_len),
         "circle proximity sampling must cover its full non-systematic domain"
     );
-    assert!(profile.committed_values <= 10_000, "{profile:?}");
+    assert!(profile.committed_values <= 11_000, "{profile:?}");
     assert!(profile.ligero_rows <= 156, "{profile:?}");
     assert_eq!(
         bundle.proximity_claim.combined_row.len(),
@@ -1023,7 +1081,7 @@ fn mdoc_p4b_bundle_rejects_spliced_mac_batch_entry() {
     )
     .unwrap();
 
-    assert_eq!(bundle.entries.len(), 13);
+    assert_eq!(bundle.entries.len(), 15);
     verify_mdoc_p4b_circuit_bundle(&issuer_public, &device_public, None, &bundle, TEST_SEED)
         .unwrap();
 
@@ -1064,7 +1122,7 @@ fn mdoc_p4b_bundle_with_revocation_set_verifies_and_fails_closed() {
     )
     .unwrap();
 
-    assert_eq!(bundle.entries.len(), 19, "three ECDSA sets plus MAC batch");
+    assert_eq!(bundle.entries.len(), 22, "three ECDSA sets plus MAC batch");
     verify_mdoc_p4b_circuit_bundle(
         &issuer_public,
         &device_public,
@@ -1106,7 +1164,7 @@ fn mdoc_p4b_bundle_with_revocation_set_verifies_and_fails_closed() {
         TEST_SEED,
     )
     .unwrap();
-    assert_eq!(two_set_bundle.entries.len(), 13);
+    assert_eq!(two_set_bundle.entries.len(), 15);
     assert!(
         verify_mdoc_p4b_circuit_bundle(
             &issuer_public,
@@ -1162,17 +1220,17 @@ fn c3_bundle_entry(
         .clone()
 }
 
-fn c11_bundle_entry(
+fn c9_bundle_entry(
+    input: &EcdsaInput,
     witness: &eu_id_ec_coprocessor::ecdsa::Witness,
 ) -> ImplementedCircuitBundleEntry {
-    let input = alternate_signed_input();
-    prove_implemented_circuit_bundle(&input, witness, TEST_SEED)
+    prove_implemented_circuit_bundle(input, witness, TEST_SEED)
         .unwrap()
         .entries[3]
         .clone()
 }
 
-fn c12_bundle_entry(
+fn c11_bundle_entry(
     witness: &eu_id_ec_coprocessor::ecdsa::Witness,
 ) -> ImplementedCircuitBundleEntry {
     let input = alternate_signed_input();
@@ -1182,13 +1240,23 @@ fn c12_bundle_entry(
         .clone()
 }
 
+fn c12_bundle_entry(
+    witness: &eu_id_ec_coprocessor::ecdsa::Witness,
+) -> ImplementedCircuitBundleEntry {
+    let input = alternate_signed_input();
+    prove_implemented_circuit_bundle(&input, witness, TEST_SEED)
+        .unwrap()
+        .entries[5]
+        .clone()
+}
+
 fn c14_bundle_entry(
     input: &EcdsaInput,
     witness: &eu_id_ec_coprocessor::ecdsa::Witness,
 ) -> ImplementedCircuitBundleEntry {
     prove_implemented_circuit_bundle(input, witness, TEST_SEED)
         .unwrap()
-        .entries[5]
+        .entries[6]
         .clone()
 }
 

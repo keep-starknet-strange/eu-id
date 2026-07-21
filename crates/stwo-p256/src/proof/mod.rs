@@ -124,6 +124,7 @@ use crate::public_inputs::{
 use crate::public_key_check::{PublicKeyOnCurveClaim, PublicKeyOnCurveError};
 use crate::public_key_curve_air::{
     gen_slice_base_trace_without_range13_and_signed_carry_provider as gen_public_key_on_curve_base_trace_without_range13_and_signed_carry_provider,
+    gen_slice_interaction_trace_for_final_check_hint_without_range13_and_signed_carry_provider as gen_hint_point_on_curve_interaction_trace_without_range13_and_signed_carry_provider,
     gen_slice_interaction_trace_without_range13_and_signed_carry_provider as gen_public_key_on_curve_interaction_trace_without_range13_and_signed_carry_provider,
     gen_slice_preprocessed_trace as gen_public_key_on_curve_preprocessed_trace,
     slice_range13_uses as public_key_on_curve_range13_uses,
@@ -210,6 +211,9 @@ pub struct P256ProofClaim {
     pub projective_ec_trace: ProjectiveEcTraceClaim,
     pub projective_rcb_air_trace: ProjectiveRcbAirTraceClaim,
     pub hinted_mul_trace: HintedMulTraceClaim,
+    /// One in-AIR P-256 membership proof for each active signed fake-GLV hint
+    /// point `R`, bound to the prepared table's canonical `DoubleR` tuple.
+    pub hint_points_on_curve: Vec<PublicKeyCurveSliceClaim>,
     pub final_check: FinalEcdsaCheckClaim,
     /// In-AIR EC addition `S = R_1 + R_2` binding `r_x = x(S)`. Single signature.
     pub final_add: FinalAddClaim,
@@ -283,6 +287,18 @@ impl P256ProofClaim {
             public_key_curve_slice.hinted_source_offset,
             false,
         )?;
+        let hint_points_on_curve = hint_point_curve_slices_from_table(
+            &prepared_table,
+            public_key_curve_slice.hinted_source_offset
+                + public_key_curve_slice.mul_trace.rows.len() as u32,
+        )?;
+        for hint_point in &hint_points_on_curve {
+            hinted_mul_trace.extend_from_projective_rcb(
+                &hint_point.mul_trace,
+                hint_point.hinted_source_offset,
+                false,
+            )?;
+        }
         let prepared_use_counts =
             PreparedPointUseCountClaim::from_selector_claim(&fake_glv_selectors)?;
         let prepared_trace = prepared_table.prepared_point_trace(&prepared_use_counts)?;
@@ -302,6 +318,7 @@ impl P256ProofClaim {
             projective_ec_trace,
             projective_rcb_air_trace,
             hinted_mul_trace,
+            hint_points_on_curve,
             final_check,
             final_add,
             prepared_use_counts,
@@ -410,6 +427,20 @@ impl P256ProofClaim {
             public_key_curve_slice.hinted_source_offset,
             false,
         )?;
+        let mut hint_points_on_curve = base.hint_points_on_curve.clone();
+        if let Some(hint_point) = hint_points_on_curve.iter_mut().find(|claim| {
+            claim.sig_id == base.cert_inputs.rows[override_cert_index].sig_id
+                && claim.cert_id == base.cert_inputs.rows[override_cert_index].cert_id
+        }) {
+            hint_point.override_point_for_test(&r_override)?;
+        }
+        for hint_point in &hint_points_on_curve {
+            hinted_mul_trace.extend_from_projective_rcb(
+                &hint_point.mul_trace,
+                hint_point.hinted_source_offset,
+                false,
+            )?;
+        }
         let prepared_trace = prepared_table.prepared_point_trace(&base.prepared_use_counts)?;
 
         Ok(Self {
@@ -427,6 +458,7 @@ impl P256ProofClaim {
             projective_ec_trace,
             projective_rcb_air_trace,
             hinted_mul_trace,
+            hint_points_on_curve,
             final_check: base.final_check,
             final_add: base.final_add,
             prepared_use_counts: base.prepared_use_counts,
@@ -461,6 +493,9 @@ impl P256ProofClaim {
             .verify_against_projective_trace(&self.projective_ec_trace)?;
 
         self.hinted_mul_trace.verify()?;
+        for hint_point in &self.hint_points_on_curve {
+            hint_point.verify()?;
+        }
         self.final_check.verify()?;
         self.prepared_use_counts.verify()?;
         self.prepared_table
@@ -503,6 +538,7 @@ pub struct P256CurrentAirProofClaim {
     pub prepared_point_range7: RangeCheckClaim,
     pub final_check: FinalCheckAirProofClaim,
     pub public_key_on_curve: PublicKeyCurveSliceProofClaim,
+    pub hint_points_on_curve: Vec<PublicKeyCurveSliceProofClaim>,
     pub hinted_mul: HintedMulProofClaim,
     pub final_add: FinalAddProofClaim,
 }
@@ -561,6 +597,11 @@ impl P256CurrentAirProofClaim {
             public_key_on_curve: PublicKeyCurveSliceProofClaim::from_claim(
                 &public_key_on_curve_slice_claim(claim).expect("verified public key lies on curve"),
             ),
+            hint_points_on_curve: claim
+                .hint_points_on_curve
+                .iter()
+                .map(PublicKeyCurveSliceProofClaim::from_claim)
+                .collect(),
             hinted_mul: HintedMulProofClaim::from_trace(&claim.hinted_mul_trace),
             final_add: FinalAddProofClaim::from_claim(&claim.final_add),
         }
@@ -585,6 +626,10 @@ impl P256CurrentAirProofClaim {
         self.prepared_point_range7.mix_into(channel);
         self.final_check.mix_into(channel);
         self.public_key_on_curve.mix_into(channel);
+        channel.mix_u64(self.hint_points_on_curve.len() as u64);
+        for hint_point in &self.hint_points_on_curve {
+            hint_point.mix_into(channel);
+        }
         self.hinted_mul.mix_into(channel);
         self.final_add.mix_into(channel);
     }
@@ -648,6 +693,9 @@ impl P256CurrentAirProofClaim {
             &mut ids,
             self.public_key_on_curve.preprocessed_column_ids(),
         );
+        for hint_point in &self.hint_points_on_curve {
+            append_unique_preprocessed_ids(&mut ids, hint_point.preprocessed_column_ids());
+        }
         append_unique_preprocessed_ids(&mut ids, self.hinted_mul.preprocessed_column_ids());
         append_unique_preprocessed_ids(&mut ids, self.final_add.preprocessed_column_ids());
         ids
@@ -766,6 +814,7 @@ pub struct P256CurrentAirInteractionClaim {
     pub final_check: FinalCheckAirInteractionClaim,
     pub range13: RangeCheckInteractionClaim,
     pub public_key_on_curve: PublicKeyCurveSliceInteractionClaim,
+    pub hint_points_on_curve: Vec<PublicKeyCurveSliceInteractionClaim>,
     pub projective_signed_carry: RangeCheckInteractionClaim,
     pub hinted_mul: HintedMulProofInteractionClaim,
     pub final_add: FinalAddInteractionClaim,
@@ -798,6 +847,7 @@ impl P256CurrentAirInteractionClaim {
                 claimed_sum: zero(),
             },
             public_key_on_curve: PublicKeyCurveSliceInteractionClaim::zero_claim(),
+            hint_points_on_curve: Vec::new(),
             projective_signed_carry: RangeCheckInteractionClaim {
                 claimed_sum: zero(),
             },
@@ -806,8 +856,14 @@ impl P256CurrentAirInteractionClaim {
         }
     }
 
-    fn zero_for_claim(_claim: &P256CurrentAirProofClaim) -> Self {
-        Self::zero()
+    fn zero_for_claim(claim: &P256CurrentAirProofClaim) -> Self {
+        let mut zero = Self::zero();
+        zero.hint_points_on_curve = claim
+            .hint_points_on_curve
+            .iter()
+            .map(|_| PublicKeyCurveSliceInteractionClaim::zero_claim())
+            .collect();
+        zero
     }
 
     fn mix_into(&self, channel: &mut impl Channel) {
@@ -830,6 +886,10 @@ impl P256CurrentAirInteractionClaim {
         self.final_check.mix_into(channel);
         self.range13.mix_into(channel);
         self.public_key_on_curve.mix_into_monolithic(channel);
+        channel.mix_u64(self.hint_points_on_curve.len() as u64);
+        for hint_point in &self.hint_points_on_curve {
+            hint_point.mix_into_monolithic(channel);
+        }
         self.projective_signed_carry.mix_into(channel);
         self.hinted_mul.mix_into(channel);
         self.final_add.mix_into(channel);
@@ -861,6 +921,11 @@ impl P256CurrentAirInteractionClaim {
             + self.final_check.claimed_sum
             + self.range13.claimed_sum
             + self.public_key_on_curve.total()
+            + self
+                .hint_points_on_curve
+                .iter()
+                .map(PublicKeyCurveSliceInteractionClaim::total)
+                .sum::<SecureField>()
             + self.projective_signed_carry.claimed_sum
             + self.hinted_mul.total()
             + self.final_add.total()
@@ -1068,9 +1133,9 @@ struct P256CurrentAirRelations {
     prepared_point_source: PreparedPointRelation,
     range7: RangeCheckRelation,
     ecdsa_result: EcdsaResultRelation,
-    /// Forwards the pinned signed hint `R_i` from the prepared table to the
-    /// final-add sub-graph (provider: prepared-table `DoubleR` row; consumer:
-    /// `FinalAddCheckEval`).
+    /// Forwards the pinned signed hint `R_i` from the prepared table to both
+    /// final-add and its curve-membership slice. The provider yields the same
+    /// canonical tuple twice; each consumer uses it once.
     final_check_hint: FinalCheckHintRelation,
     /// Public-key sub-graph relations. Its `point` field is the shared
     /// `(sig_id, pub_x, pub_y)` binding relation, also held by
@@ -1140,6 +1205,7 @@ impl P256CurrentAirRelations {
             final_check_hint: FinalCheckHintRelation::dummy(),
             public_key_on_curve: PublicKeyCurveSliceRelations::dummy_with_point(
                 public_key_point,
+                FinalCheckHintRelation::dummy(),
                 ProjectiveRcbMulComponentRelations::dummy().mul_result,
                 range13.clone(),
                 projective_signed_carry.clone(),
@@ -1227,6 +1293,7 @@ impl P256CurrentAirRelations {
             public_key_on_curve: PublicKeyCurveSliceRelations::draw_with_point(
                 channel,
                 public_key_point,
+                final_check_hint.clone(),
                 projective_rcb_air_relations.mul_result.clone(),
                 range13.clone(),
                 projective_signed_carry.clone(),
@@ -1285,6 +1352,7 @@ struct P256CurrentAirComponents {
     final_check: FinalCheckAirComponents,
     range13: RangeCheckComponent,
     public_key_on_curve: PublicKeyCurveSliceComponents,
+    hint_points_on_curve: Vec<PublicKeyCurveSliceComponents>,
     projective_signed_carry: SignedCarryRangeComponent,
     hinted_mul: HintedMulSliceComponents,
     final_add: FinalAddComponents,
@@ -1318,6 +1386,11 @@ impl P256CurrentAirComponents {
         hinted_mul_preprocessed_namespace: Option<&str>,
     ) -> Self {
         let scalar_lookup_claims = LookupProviderClaims::scalar_mod_mul();
+        assert_eq!(
+            claim.hint_points_on_curve.len(),
+            interaction_claim.hint_points_on_curve.len(),
+            "hint-point curve proof/interaction claim count mismatch"
+        );
         Self {
             scalar_setup: ScalarSetupAirComponents::new_without_range13_provider(
                 allocator,
@@ -1460,6 +1533,19 @@ impl P256CurrentAirComponents {
                     &relations.public_key_on_curve,
                     true,
                 ),
+            hint_points_on_curve: claim
+                .hint_points_on_curve
+                .iter()
+                .zip(&interaction_claim.hint_points_on_curve)
+                .map(|(hint_point, interaction)| {
+                    PublicKeyCurveSliceComponents::new_for_final_check_hint_without_range13_and_signed_carry_provider(
+                        allocator,
+                        hint_point.log_sizes(),
+                        interaction,
+                        &relations.public_key_on_curve,
+                    )
+                })
+                .collect(),
             projective_signed_carry: SignedCarryRangeComponent::new(
                 allocator,
                 SignedCarryRangeEval::new(
@@ -1525,6 +1611,9 @@ impl P256CurrentAirComponents {
         components.extend(self.final_check.components());
         components.push(&self.range13 as &dyn Component);
         components.extend(self.public_key_on_curve.components());
+        for hint_point in &self.hint_points_on_curve {
+            components.extend(hint_point.components());
+        }
         components.push(&self.projective_signed_carry as &dyn Component);
         components.extend(self.hinted_mul.components());
         components.extend(self.final_add.components());
@@ -1560,6 +1649,9 @@ impl P256CurrentAirComponents {
         components.extend(self.final_check.component_provers());
         components.push(&self.range13 as &dyn ComponentProver<SimdBackend>);
         components.extend(self.public_key_on_curve.component_provers());
+        for hint_point in &self.hint_points_on_curve {
+            components.extend(hint_point.component_provers());
+        }
         components.push(&self.projective_signed_carry as &dyn ComponentProver<SimdBackend>);
         components.extend(self.hinted_mul.component_provers());
         components.extend(self.final_add.component_provers());
@@ -1858,6 +1950,12 @@ impl P256ProofDraft {
         let local_columns =
             gen_public_key_on_curve_preprocessed_trace(&public_key_slice_claim, &local_ids)?;
         append_unique_preprocessed_columns(&mut ids, &mut columns, local_ids, local_columns);
+        for hint_point in &self.claim.hint_points_on_curve {
+            let proof_claim = PublicKeyCurveSliceProofClaim::from_claim(hint_point);
+            let local_ids = proof_claim.preprocessed_column_ids();
+            let local_columns = gen_public_key_on_curve_preprocessed_trace(hint_point, &local_ids)?;
+            append_unique_preprocessed_columns(&mut ids, &mut columns, local_ids, local_columns);
+        }
 
         let local_ids = claim.hinted_mul.preprocessed_column_ids();
         let local_columns = gen_hinted_mul_slice_preprocessed_trace(&self.claim.hinted_mul_trace);
@@ -1900,6 +1998,12 @@ impl P256ProofDraft {
             gen_public_key_on_curve_base_trace_without_range13_and_signed_carry_provider(
                 &public_key_slice_claim,
             )?;
+        let hint_points_on_curve = self
+            .claim
+            .hint_points_on_curve
+            .iter()
+            .map(gen_public_key_on_curve_base_trace_without_range13_and_signed_carry_provider)
+            .collect::<Result<Vec<_>, _>>()?;
         let scalar_setup_lookup_providers =
             gen_scalar_setup_air_lookup_provider_base_trace_without_range13_provider(
                 &scalar_setup,
@@ -2024,6 +2128,9 @@ impl P256ProofDraft {
         ));
         range13_uses.extend(scalar_mod_mul_range13_uses(&scalar_mod_mul_rows));
         range13_uses.extend(public_key_on_curve_range13_uses(&public_key_slice_claim));
+        for hint_point in &self.claim.hint_points_on_curve {
+            range13_uses.extend(public_key_on_curve_range13_uses(hint_point));
+        }
         range13_uses.extend(hinted_mul_range13_uses(&self.claim.hinted_mul_trace));
         range13_uses.extend(final_add_range13_uses(&self.claim.final_add));
         let range13_multiplicity =
@@ -2032,6 +2139,9 @@ impl P256ProofDraft {
             .gen_multiplicity_trace(hinted_mul_signed_uses(&self.claim.hinted_mul_trace));
         let mut projective_signed_carry_uses =
             public_key_on_curve_signed_carry_uses(&public_key_slice_claim);
+        for hint_point in &self.claim.hint_points_on_curve {
+            projective_signed_carry_uses.extend(public_key_on_curve_signed_carry_uses(hint_point));
+        }
         projective_signed_carry_uses.extend(final_add_signed_carry_uses(&self.claim.final_add)?);
         projective_signed_carry_uses.extend(
             crate::components::hinted_mul::trace::hinted_mul_formula_signed_uses(
@@ -2072,6 +2182,9 @@ impl P256ProofDraft {
         columns.extend(final_check.clone());
         columns.push(range13_multiplicity.clone());
         columns.extend(public_key_on_curve.clone());
+        for hint_point in &hint_points_on_curve {
+            columns.extend(hint_point.clone());
+        }
         columns.push(projective_signed_carry_multiplicity.clone());
         columns.extend(hinted_mul_base.clone());
         columns.push(hinted_signed_h_multiplicity.clone());
@@ -2102,6 +2215,7 @@ impl P256ProofDraft {
             final_check,
             range13_multiplicity,
             public_key_slice_claim,
+            hint_point_slice_claims: self.claim.hint_points_on_curve.clone(),
             projective_signed_carry_multiplicity,
             hinted_mul_base,
             hinted_signed_h_multiplicity,
@@ -2271,6 +2385,17 @@ impl P256ProofDraft {
                 &relations.public_key_on_curve,
                 true,
             )?;
+        let mut hint_points_on_curve_interaction = Vec::new();
+        let mut hint_points_on_curve_claim = Vec::new();
+        for hint_point in &base.hint_point_slice_claims {
+            let (columns, interaction_claim) =
+                gen_hint_point_on_curve_interaction_trace_without_range13_and_signed_carry_provider(
+                    hint_point,
+                    &relations.public_key_on_curve,
+                )?;
+            hint_points_on_curve_interaction.extend(columns);
+            hint_points_on_curve_claim.push(interaction_claim);
+        }
         let (projective_signed_carry_interaction, projective_signed_carry_claim) =
             RangeCheckInteractionClaim::gen_interaction_trace(
                 &base.projective_signed_carry_multiplicity,
@@ -2328,6 +2453,7 @@ impl P256ProofDraft {
         columns.extend(final_check_interaction);
         columns.extend(range13_interaction);
         columns.extend(public_key_on_curve_interaction);
+        columns.extend(hint_points_on_curve_interaction);
         columns.extend(projective_signed_carry_interaction);
         columns.extend(hinted_interaction);
         columns.extend(hinted_signed_h_interaction);
@@ -2406,6 +2532,7 @@ impl P256ProofDraft {
                 final_check: final_check_claim,
                 range13: range13_claim,
                 public_key_on_curve: public_key_on_curve_claim,
+                hint_points_on_curve: hint_points_on_curve_claim,
                 projective_signed_carry: projective_signed_carry_claim,
                 hinted_mul: HintedMulProofInteractionClaim {
                     claimed_sum: hinted_claim.claimed_sum,
@@ -2488,6 +2615,7 @@ struct P256CurrentAirBaseTrace {
     final_check: ColumnVec<M31ColumnEval>,
     range13_multiplicity: M31ColumnEval,
     public_key_slice_claim: PublicKeyCurveSliceClaim,
+    hint_point_slice_claims: Vec<PublicKeyCurveSliceClaim>,
     projective_signed_carry_multiplicity: M31ColumnEval,
     hinted_mul_base: ColumnVec<M31ColumnEval>,
     hinted_signed_h_multiplicity: M31ColumnEval,
@@ -2600,6 +2728,30 @@ fn public_key_slice_from_check(
     };
     PublicKeyCurveSliceClaim::from_public_key_claim(&single, hinted_source_offset)
         .map_err(P256ProofError::from)
+}
+
+/// Build one generic curve-membership slice for every active signed fake-GLV
+/// hint point. Each slice is bound through `FinalCheckHintRelation` to the
+/// canonical prepared-table `R` used by the EC ladder and final-add.
+fn hint_point_curve_slices_from_table(
+    prepared_table: &PreparedTableClaim,
+    mut hinted_source_offset: u32,
+) -> Result<Vec<PublicKeyCurveSliceClaim>, P256ProofError> {
+    let mut claims = Vec::new();
+    for cert in &prepared_table.certs {
+        if cert.cert_active == M31::from_u32_unchecked(0) {
+            continue;
+        }
+        claims.push(PublicKeyCurveSliceClaim::from_hint_point(
+            cert.sig_id,
+            cert.cert_id,
+            &cert.r.x,
+            &cert.r.y,
+            hinted_source_offset,
+        )?);
+        hinted_source_offset += 1;
+    }
+    Ok(claims)
 }
 
 /// Build the final-add claim `S = R_1 + R_2` from the (single-signature)
@@ -2730,6 +2882,13 @@ where
         interaction_claim,
         stark_proof,
     } = proof;
+    if claim.hint_points_on_curve.len() != interaction_claim.hint_points_on_curve.len() {
+        return Err(P256ProofError::ProofLayer(format!(
+            "hint-point curve proof/interaction claim count mismatch: {} != {}",
+            claim.hint_points_on_curve.len(),
+            interaction_claim.hint_points_on_curve.len(),
+        )));
+    }
     // F-ROOT pin: compare the prover-supplied tree-0 root against the caller's
     // independently-derived expected root before ANY transcript work.
     if let Some(expected) = expected_preprocessed_root {
@@ -2943,7 +3102,7 @@ pub const P256_PROOF_COMPONENT_SLOTS: &[P256ProofComponentSlot] = &[
     P256ProofComponentSlot {
         name: "FinalEcdsaCheck",
         status: P256ProofComponentStatus::Implemented,
-        note: "r_x is now bound IN-AIR to x(u1·G + u2·Q). The prepared table forwards the canonically-pinned signed hint R_i (role-R) on FinalCheckHintRelation; the final-add sub-graph (final_add_air.rs) consumes R_1, R_2 and proves S = R_1 + R_2 in affine coordinates via the shared projective-RCB mod-p mul engine. The distinct-x branch uses (lambda·dx ≡ dy, lambda² ≡ x3 + x1 + x2, dx·dx_inv ≡ 1) and the finite-doubling branch (Task 6) uses (lambda·(2·y1) ≡ 3·x1² − 3, lambda² ≡ x3 + 2·x1); branch selectors gate the constraints so the active branch is exactly one of {distinct, double, r1_only, r2_only, inverse}, with `inverse_add` (R_final = ∞) rejected by `active · inverse_add = 0`. Since R_i = -h_i for active certs (s2_sign_bit conventions: bit=1 ⇒ s2_signed = -s2_abs), x(R_1 + R_2) = x(u1·G + u2·Q). x3 = S.x is forwarded on FinalAddOutputRelation and consumed by the final check as r_x; r_check = r_x mod n and EcdsaResultRelation then complete x(u1·G + u2·Q) mod n = r.",
+        note: "r_x is now bound IN-AIR to x(u1·G + u2·Q). The prepared table forwards the canonically-pinned signed hint R_i (role-R) twice on FinalCheckHintRelation: a generic curve slice proves that exact R_i satisfies the P-256 equation, and the final-add sub-graph (final_add_air.rs) consumes R_1, R_2 and proves S = R_1 + R_2 in affine coordinates via the shared projective-RCB mod-p mul engine. The distinct-x branch uses (lambda·dx ≡ dy, lambda² ≡ x3 + x1 + x2, dx·dx_inv ≡ 1) and the finite-doubling branch (Task 6) uses (lambda·(2·y1) ≡ 3·x1² − 3, lambda² ≡ x3 + 2·x1); branch selectors gate the constraints so the active branch is exactly one of {distinct, double, r1_only, r2_only, inverse}, with `inverse_add` (R_final = ∞) rejected by `active · inverse_add = 0`. Since R_i = -h_i for active certs (s2_sign_bit conventions: bit=1 ⇒ s2_signed = -s2_abs), x(R_1 + R_2) = x(u1·G + u2·Q). x3 = S.x is forwarded on FinalAddOutputRelation and consumed by the final check as r_x; r_check = r_x mod n and EcdsaResultRelation then complete x(u1·G + u2·Q) mod n = r.",
     },
     P256ProofComponentSlot {
         name: "StarkProveVerify",

@@ -364,6 +364,13 @@ impl Air for ShaTablesProver {
         shared_table_preprocessed_column_ids()
     }
 
+    fn canonical_preprocessed_columns(
+        &mut self,
+    ) -> Result<Vec<air_core::PreprocessedColumnEval>, stwo::core::verifier::VerificationError>
+    {
+        Ok(generate_shared_table_preprocessed_trace().0)
+    }
+
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
         self.components = Some(ShaTablesComponents::new(
             allocator,
@@ -434,6 +441,13 @@ impl Air for ShaTablesVerifier {
         &self,
     ) -> Vec<stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId> {
         shared_table_preprocessed_column_ids()
+    }
+
+    fn canonical_preprocessed_columns(
+        &mut self,
+    ) -> Result<Vec<air_core::PreprocessedColumnEval>, stwo::core::verifier::VerificationError>
+    {
+        Ok(generate_shared_table_preprocessed_trace().0)
     }
 
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {

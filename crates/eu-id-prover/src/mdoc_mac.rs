@@ -330,6 +330,12 @@ impl Air for MdocMacBind {
         ids
     }
 
+    fn canonical_preprocessed_columns(
+        &mut self,
+    ) -> Result<Vec<MacColumnEval>, stwo::core::verifier::VerificationError> {
+        Ok(preprocessed_trace())
+    }
+
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
         let av = self.av.unwrap_or([0; HALF_BYTES]);
         let tags = self.tags.unwrap_or([[0; HALF_BYTES]; MACS_PER_PROOF]);

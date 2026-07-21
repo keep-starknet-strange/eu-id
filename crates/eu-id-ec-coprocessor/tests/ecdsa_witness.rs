@@ -4,7 +4,6 @@ use eu_id_ec_coprocessor::ecdsa::{
 };
 use eu_id_ec_coprocessor::Fp;
 use p256::ecdsa::{Signature, SigningKey};
-use p256::elliptic_curve::point::Double;
 use p256::elliptic_curve::sec1::ToEncodedPoint;
 use p256::{AffinePoint, ProjectivePoint, Scalar};
 use sha2::{Digest as _, Sha256};
@@ -73,13 +72,6 @@ fn affine_coords(point: ProjectivePoint) -> (Fp, Fp) {
         fp_from_coord(encoded.x().unwrap()),
         fp_from_coord(encoded.y().unwrap()),
     )
-}
-
-fn double_256(mut point: ProjectivePoint) -> ProjectivePoint {
-    for _ in 0..256 {
-        point = point.double();
-    }
-    point
 }
 
 #[test]
@@ -189,13 +181,8 @@ fn ladder_accumulator_slots_end_at_scalar_mul_outputs() {
 
     let expected_u1 = ProjectivePoint::GENERATOR * Scalar::from(42u64);
     let expected_u2 = ProjectivePoint::GENERATOR * Scalar::from(77u64);
-    let d = double_256(ProjectivePoint::GENERATOR);
-    let expected_u1_raw = d + expected_u1;
-    let expected_u2_raw = d + expected_u2;
     let (expected_u1_x, expected_u1_y) = affine_coords(expected_u1);
     let (expected_u2_x, expected_u2_y) = affine_coords(expected_u2);
-    let (expected_u1_raw_x, expected_u1_raw_y) = affine_coords(expected_u1_raw);
-    let (expected_u2_raw_x, expected_u2_raw_y) = affine_coords(expected_u2_raw);
     let u1_acc = &first.values[layout_range(LayoutSlot::U1GAccumulators)];
     let u2_acc = &first.values[layout_range(LayoutSlot::U2QAccumulators)];
     let corrected = &first.values[layout_range(LayoutSlot::CorrectedEndpoints)];
@@ -208,15 +195,10 @@ fn ladder_accumulator_slots_end_at_scalar_mul_outputs() {
         u2_acc.iter().any(|value| *value != Fp::ZERO),
         "u2Q transcript is populated"
     );
-    assert_eq!(u1_acc[510], expected_u1_raw_x);
-    assert_eq!(u1_acc[511], expected_u1_raw_y);
-    assert_eq!(u2_acc[510], expected_u2_raw_x);
-    assert_eq!(u2_acc[511], expected_u2_raw_y);
-    assert_ne!(
-        (u1_acc[510], u1_acc[511]),
-        (expected_u1_x, expected_u1_y),
-        "raw accumulator keeps the blinded 2^256*B offset"
-    );
+    assert_eq!(u1_acc[510], expected_u1_x);
+    assert_eq!(u1_acc[511], expected_u1_y);
+    assert_eq!(u2_acc[510], expected_u2_x);
+    assert_eq!(u2_acc[511], expected_u2_y);
     assert_eq!(corrected[0], expected_u1_x, "S1.x corrected endpoint");
     assert_eq!(corrected[1], expected_u1_y, "S1.y corrected endpoint");
     assert_eq!(corrected[2], expected_u2_x, "S2.x corrected endpoint");

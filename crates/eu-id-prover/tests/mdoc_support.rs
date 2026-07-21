@@ -1960,14 +1960,20 @@ fn statement_carries_mso_binding_offsets() {
     let statement = MdocCircuitStatement::from_extracted(&extracted, policy_on(2026, 7, 3))
         .expect("statement builds");
 
+    let birth_date_attribute = &statement.attributes[statement
+        .age_attribute_index
+        .expect("statement has age attribute")];
     assert_eq!(
-        &extracted.birth_date_item
-            [statement.birth_date_element_offset..statement.birth_date_element_offset + 10],
+        &extracted.birth_date_item[birth_date_attribute.element_identifier_offset
+            ..birth_date_attribute.element_identifier_offset + 10],
         b"birth_date"
     );
+    let nationality_attribute = &statement.attributes[statement
+        .nationality_attribute_index
+        .expect("statement has nationality attribute")];
     assert_eq!(
-        &extracted.nationality_item
-            [statement.nationality_element_offset..statement.nationality_element_offset + 11],
+        &extracted.nationality_item[nationality_attribute.element_identifier_offset
+            ..nationality_attribute.element_identifier_offset + 11],
         b"nationality"
     );
     assert_eq!(
@@ -1991,19 +1997,19 @@ fn statement_carries_mso_binding_offsets() {
         b"2030-01-01"
     );
     assert_eq!(
-        &extracted.issuer_sig_structure[statement.mso_birth_date_digest_anchor_offset
-            ..statement.mso_birth_date_digest_anchor_offset
-                + statement.mso_birth_date_digest_anchor.len()],
-        statement.mso_birth_date_digest_anchor.as_slice()
+        &extracted.issuer_sig_structure[birth_date_attribute.mso_digest_anchor_offset
+            ..birth_date_attribute.mso_digest_anchor_offset
+                + birth_date_attribute.mso_digest_anchor.len()],
+        birth_date_attribute.mso_digest_anchor.as_slice()
     );
-    assert_eq!(statement.mso_birth_date_digest_anchor, vec![7, 0x58, 0x20]);
+    assert_eq!(birth_date_attribute.mso_digest_anchor, vec![7, 0x58, 0x20]);
     assert_eq!(
-        &extracted.issuer_sig_structure[statement.mso_nationality_digest_anchor_offset
-            ..statement.mso_nationality_digest_anchor_offset
-                + statement.mso_nationality_digest_anchor.len()],
-        statement.mso_nationality_digest_anchor.as_slice()
+        &extracted.issuer_sig_structure[nationality_attribute.mso_digest_anchor_offset
+            ..nationality_attribute.mso_digest_anchor_offset
+                + nationality_attribute.mso_digest_anchor.len()],
+        nationality_attribute.mso_digest_anchor.as_slice()
     );
-    assert_eq!(statement.mso_nationality_digest_anchor, vec![9, 0x58, 0x20]);
+    assert_eq!(nationality_attribute.mso_digest_anchor, vec![9, 0x58, 0x20]);
     assert_eq!(statement.mso_device_key_x_anchor, vec![0x21, 0x58, 0x20]);
     assert_eq!(statement.mso_device_key_y_anchor, vec![0x22, 0x58, 0x20]);
     assert_eq!(
@@ -2928,10 +2934,16 @@ fn digest_membership_offset_swap_rejects_in_proof() {
         extract_pid_mdoc(&fixture.doc, &request(session_transcript)).expect("mdoc extracts");
     let mut statement = MdocCircuitStatement::from_extracted(&extracted, policy_on(2026, 7, 3))
         .expect("statement builds");
-    std::mem::swap(
-        &mut statement.mso_birth_date_digest_offset,
-        &mut statement.mso_nationality_digest_offset,
-    );
+    let age_index = statement
+        .age_attribute_index
+        .expect("statement has age attribute");
+    let nationality_index = statement
+        .nationality_attribute_index
+        .expect("statement has nationality attribute");
+    let age_digest_offset = statement.attributes[age_index].mso_digest_offset;
+    statement.attributes[age_index].mso_digest_offset =
+        statement.attributes[nationality_index].mso_digest_offset;
+    statement.attributes[nationality_index].mso_digest_offset = age_digest_offset;
 
     match prove_mdoc_circuit(&extracted, &statement) {
         Err(eu_id_prover::Error::Prove(_)) => {}
@@ -2977,7 +2989,10 @@ fn digest_membership_anchor_offset_rejects_in_proof() {
         extract_pid_mdoc(&fixture.doc, &request(session_transcript)).expect("mdoc extracts");
     let mut statement = MdocCircuitStatement::from_extracted(&extracted, policy_on(2026, 7, 3))
         .expect("statement builds");
-    statement.mso_birth_date_digest_anchor_offset += 1;
+    let age_index = statement
+        .age_attribute_index
+        .expect("statement has age attribute");
+    statement.attributes[age_index].mso_digest_anchor_offset += 1;
 
     match prove_mdoc_circuit(&extracted, &statement) {
         Err(eu_id_prover::Error::Prove(_)) => {}
