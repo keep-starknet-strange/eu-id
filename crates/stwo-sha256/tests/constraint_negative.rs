@@ -849,3 +849,70 @@ fn rejects_padding_role_flag_on_disabled_row() {
         "AIR must reject a padding-role flag set on a disabled row",
     );
 }
+
+/// Split-pack removal — soundness pin (i): a keyed limb mutated off its
+/// committed bit-planes is rejected by the ungated `maj`/`ch`/`σ`
+/// recomposition constraint, NOT by any split-pack lookup (those are
+/// deleted). This proves the range/consistency check the removed lookup used
+/// to advertise now lives in the surviving bit recomposition.
+#[test]
+fn rejects_maj_limb_off_bit_recomposition() {
+    let witness = compute_sha256_witness(b"abc");
+    let log_size = min_log_size(witness.blocks.len());
+    let mut trace = generate_trace(&witness, log_size);
+    let slot = Layout::round_row_slot(0, 0, log_size);
+
+    assert!(
+        collect_constraint_residuals(&trace, log_size).is_empty(),
+        "baseline should be clean before mutation",
+    );
+
+    // `maj.lo` is round-family column 6. The AIR recomposes it ungated as
+    // `maj.lo == Σ maj_bits[i]·2^i` from the committed a/b/c bit-planes;
+    // flipping one bit of the limb (bits unchanged) breaks that identity.
+    let maj_lo = Layout::round_col()[6];
+    let original = trace[maj_lo][slot].0;
+    trace[maj_lo][slot] = BaseField::from(original ^ 0x0001u32);
+
+    let residuals = collect_constraint_residuals(&trace, log_size);
+    assert!(
+        !residuals.is_empty(),
+        "AIR must reject a maj limb disagreeing with its bit recomposition \
+         (range check lives in recomposition, not the deleted split-pack lookup)",
+    );
+}
+
+/// Split-pack removal — soundness pin (ii): a non-boolean value planted in a
+/// bit-plane cell on an inactive/padding row is rejected by the *ungated*
+/// `constrain_boolean_bits`. This is the work the split-pack lookup was
+/// (wrongly) credited with; deleting the lookup does not open the
+/// junk-in-inactive-rows attack because booleanity fires on every row.
+#[test]
+fn rejects_non_boolean_bit_on_padding_row() {
+    let witness = compute_sha256_witness(b"abc");
+    let log_size = min_log_size(witness.blocks.len());
+    let mut trace = generate_trace(&witness, log_size);
+
+    let real_rows = witness.blocks.len() * 64;
+    let padding_slot = Layout::row_slot(real_rows, log_size);
+    assert_eq!(
+        trace[Layout::COL_ENABLER][padding_slot].0,
+        0,
+        "must target a disabled (padding) row",
+    );
+
+    assert!(
+        collect_constraint_residuals(&trace, log_size).is_empty(),
+        "baseline should be clean before mutation",
+    );
+
+    // `a`-operand bit 0 on the disabled row → set to a non-boolean value.
+    let bit_col = Layout::round_operand_bit(0, 0);
+    trace[bit_col][padding_slot] = BaseField::from(2u32);
+
+    let residuals = collect_constraint_residuals(&trace, log_size);
+    assert!(
+        !residuals.is_empty(),
+        "ungated booleanity must reject a non-boolean bit-plane cell even on a padding row",
+    );
+}

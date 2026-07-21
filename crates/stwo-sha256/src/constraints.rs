@@ -43,17 +43,11 @@
 
 use num_traits::One;
 use stwo::core::fields::m31::M31;
-use stwo_constraint_framework::{
-    EvalAtRow, FrameworkEval, Relation, RelationEntry, ORIGINAL_TRACE_IDX,
-};
+use stwo_constraint_framework::{EvalAtRow, FrameworkEval, RelationEntry, ORIGINAL_TRACE_IDX};
 
 use crate::components::{is_first_row_column_id, round_cyclic_column_ids};
 use crate::constants::{DIGEST_BYTES, IV, N_STATE_WORDS};
 use crate::field_exposure::FieldExposure;
-use crate::partitions::{
-    round_groups_half_indices, RoundGroups, GROUPS_PER_ROUND_PARTITION, SIGMA0_GROUPS,
-    SIGMA1_GROUPS,
-};
 use crate::relations::Sha256Relations;
 use crate::trace::WORD_BIT_COLS;
 use crate::types::{BYTES_PER_WORD, LIMB_BITS, WORDS_PER_BLOCK};
@@ -235,18 +229,6 @@ impl FrameworkEval for Sha256Eval {
         let e_bits: [E::F; WORD_BIT_COLS] = std::array::from_fn(|i| e_bits_m[i][0].clone());
         let f_bits: [E::F; WORD_BIT_COLS] = std::array::from_fn(|i| f_bits_m[i][0].clone());
 
-        // Packed output groups retained only for the surviving round
-        // split-pack lookups. Their values are constrained below from
-        // virtual Maj/Ch bit expressions.
-        let maj_grp: [E::F; GROUPS_PER_ROUND_PARTITION] =
-            std::array::from_fn(|_| eval.next_trace_mask());
-        let ch_grp: [E::F; GROUPS_PER_ROUND_PARTITION] =
-            std::array::from_fn(|_| eval.next_trace_mask());
-        let a_grp: [E::F; GROUPS_PER_ROUND_PARTITION] =
-            pack_round_group_exprs::<E>(&a_bits, &SIGMA0_GROUPS);
-        let e_grp: [E::F; GROUPS_PER_ROUND_PARTITION] =
-            pack_round_group_exprs::<E>(&e_bits, &SIGMA1_GROUPS);
-
         // ---- schedule family (live t ≥ 16) ----
         let s0 = (eval.next_trace_mask(), eval.next_trace_mask());
         let s1 = (eval.next_trace_mask(), eval.next_trace_mask());
@@ -256,8 +238,6 @@ impl FrameworkEval for Sha256Eval {
             std::array::from_fn(|_| eval.next_trace_mask());
         let sched_sigma1_bits: [E::F; WORD_BIT_COLS] =
             std::array::from_fn(|_| eval.next_trace_mask());
-        let sched_sigma0_split = read_sigma_input_split::<E>(&mut eval);
-        let sched_sigma1_split = read_sigma_input_split::<E>(&mut eval);
 
         // ---- t = 0 family ----
         //
@@ -292,74 +272,14 @@ impl FrameworkEval for Sha256Eval {
             eval.add_constraint(is_first_block.clone() * (h_in_hi[j][0].clone() - iv_hi));
         }
 
-        // §8.1 reuse-chain initial splits (t = 0 row): b/c/f/g_init, each
-        // read at offsets [0, −1] (row t = 1 seeds its `c`/`g` duplicates
-        // from the previous row's aux cells).
-        let b_init: [[E::F; 2]; GROUPS_PER_ROUND_PARTITION] =
-            std::array::from_fn(|_| eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1]));
-        let c_init: [E::F; GROUPS_PER_ROUND_PARTITION] =
-            std::array::from_fn(|_| eval.next_trace_mask());
-        let f_init: [[E::F; 2]; GROUPS_PER_ROUND_PARTITION] =
-            std::array::from_fn(|_| eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1]));
-        let g_init: [E::F; GROUPS_PER_ROUND_PARTITION] =
-            std::array::from_fn(|_| eval.next_trace_mask());
-
-        let (sigma0_lo_idx, sigma0_hi_idx) = round_groups_half_indices(&SIGMA0_GROUPS);
-        let (sigma1_lo_idx, sigma1_hi_idx) = round_groups_half_indices(&SIGMA1_GROUPS);
-
-        // Aux split-and-pack lookups (8 sites), gated to t = 0 rows.
-        let b_init_now: [E::F; GROUPS_PER_ROUND_PARTITION] =
-            std::array::from_fn(|i| b_init[i][0].clone());
-        let f_init_now: [E::F; GROUPS_PER_ROUND_PARTITION] =
-            std::array::from_fn(|i| f_init[i][0].clone());
+        // Working-state words of `h_in` that recompose against committed
+        // boolean bit-planes on the t = 0 row (b/c/f/g operand range checks).
         let h_in_word =
             |j: usize| -> (E::F, E::F) { (h_in_lo[j][0].clone(), h_in_hi[j][0].clone()) };
-        let h_in_0 = h_in_word(0);
         let h_in_1 = h_in_word(1);
         let h_in_2 = h_in_word(2);
-        let h_in_4 = h_in_word(4);
         let h_in_5 = h_in_word(5);
         let h_in_6 = h_in_word(6);
-        wire_round_split_pack::<E>(
-            &mut eval,
-            gate_r0.clone(),
-            &h_in_1,
-            &b_init_now,
-            &sigma0_lo_idx,
-            &sigma0_hi_idx,
-            &self.relations.split_pack.sigma0_lo,
-            &self.relations.split_pack.sigma0_hi,
-        );
-        wire_round_split_pack::<E>(
-            &mut eval,
-            gate_r0.clone(),
-            &h_in_2,
-            &c_init,
-            &sigma0_lo_idx,
-            &sigma0_hi_idx,
-            &self.relations.split_pack.sigma0_lo,
-            &self.relations.split_pack.sigma0_hi,
-        );
-        wire_round_split_pack::<E>(
-            &mut eval,
-            gate_r0.clone(),
-            &h_in_5,
-            &f_init_now,
-            &sigma1_lo_idx,
-            &sigma1_hi_idx,
-            &self.relations.split_pack.sigma1_lo,
-            &self.relations.split_pack.sigma1_hi,
-        );
-        wire_round_split_pack::<E>(
-            &mut eval,
-            gate_r0.clone(),
-            &h_in_6,
-            &g_init,
-            &sigma1_lo_idx,
-            &sigma1_hi_idx,
-            &self.relations.split_pack.sigma1_lo,
-            &self.relations.split_pack.sigma1_hi,
-        );
 
         // ---- schedule constraints (gate: enabler · is_schedule) ----
         //
@@ -375,22 +295,6 @@ impl FrameworkEval for Sha256Eval {
         constrain_bits_equal::<E>(&mut eval, &sched_sigma1_bits, &lower_sigma1_bits);
         constrain_word_recomposition::<E>(&mut eval, gate_sched.clone(), &s0, &sched_sigma0_bits);
         constrain_word_recomposition::<E>(&mut eval, gate_sched.clone(), &s1, &sched_sigma1_bits);
-        wire_sigma_input_split::<E>(
-            &mut eval,
-            gate_sched.clone(),
-            &w[15],
-            &sched_sigma0_split,
-            &self.relations.split_pack.lower_sigma0_lo,
-            &self.relations.split_pack.lower_sigma0_hi,
-        );
-        wire_sigma_input_split::<E>(
-            &mut eval,
-            gate_sched.clone(),
-            &w[2],
-            &sched_sigma1_split,
-            &self.relations.split_pack.lower_sigma1_lo,
-            &self.relations.split_pack.lower_sigma1_hi,
-        );
         emit_mod_2_32_add_linear(
             &mut eval,
             gate_sched.clone(),
@@ -509,81 +413,6 @@ impl FrameworkEval for Sha256Eval {
         constrain_word_recomposition_ungated::<E>(&mut eval, &sigma1, &sigma1_bits);
         constrain_word_recomposition_ungated::<E>(&mut eval, &maj, &maj_bits);
         constrain_word_recomposition_ungated::<E>(&mut eval, &ch, &ch_bits);
-        let maj_grp_expr = pack_round_group_exprs::<E>(&maj_bits, &SIGMA0_GROUPS);
-        let ch_grp_expr = pack_round_group_exprs::<E>(&ch_bits, &SIGMA1_GROUPS);
-        for i in 0..GROUPS_PER_ROUND_PARTITION {
-            eval.add_constraint(maj_grp[i].clone() - maj_grp_expr[i].clone());
-            eval.add_constraint(ch_grp[i].clone() - ch_grp_expr[i].clone());
-        }
-
-        // Round-side split-and-pack lookups. `maj`/`ch` are fresh outputs
-        // committed on this row — a single enabler-gated lookup each. The
-        // `a`/`e` operand groups split against the *input* word, which is
-        // `a_new@−1` on t ≥ 1 rows and `h_in[0]`/`h_in[4]` on the t = 0
-        // row — two complementary-gated lookups per half so every tuple
-        // element stays a committed cell.
-        let a_prev = (a_new_lo[1].clone(), a_new_hi[1].clone());
-        let e_prev = (e_new_lo[1].clone(), e_new_hi[1].clone());
-        wire_round_split_pack::<E>(
-            &mut eval,
-            gate_not_r0.clone(),
-            &a_prev,
-            &a_grp,
-            &sigma0_lo_idx,
-            &sigma0_hi_idx,
-            &self.relations.split_pack.sigma0_lo,
-            &self.relations.split_pack.sigma0_hi,
-        );
-        wire_round_split_pack::<E>(
-            &mut eval,
-            gate_r0.clone(),
-            &h_in_0,
-            &a_grp,
-            &sigma0_lo_idx,
-            &sigma0_hi_idx,
-            &self.relations.split_pack.sigma0_lo,
-            &self.relations.split_pack.sigma0_hi,
-        );
-        wire_round_split_pack::<E>(
-            &mut eval,
-            enabler.clone(),
-            &maj,
-            &maj_grp,
-            &sigma0_lo_idx,
-            &sigma0_hi_idx,
-            &self.relations.split_pack.sigma0_lo,
-            &self.relations.split_pack.sigma0_hi,
-        );
-        wire_round_split_pack::<E>(
-            &mut eval,
-            gate_not_r0.clone(),
-            &e_prev,
-            &e_grp,
-            &sigma1_lo_idx,
-            &sigma1_hi_idx,
-            &self.relations.split_pack.sigma1_lo,
-            &self.relations.split_pack.sigma1_hi,
-        );
-        wire_round_split_pack::<E>(
-            &mut eval,
-            gate_r0.clone(),
-            &h_in_4,
-            &e_grp,
-            &sigma1_lo_idx,
-            &sigma1_hi_idx,
-            &self.relations.split_pack.sigma1_lo,
-            &self.relations.split_pack.sigma1_hi,
-        );
-        wire_round_split_pack::<E>(
-            &mut eval,
-            enabler.clone(),
-            &ch,
-            &ch_grp,
-            &sigma1_lo_idx,
-            &sigma1_hi_idx,
-            &self.relations.split_pack.sigma1_lo,
-            &self.relations.split_pack.sigma1_hi,
-        );
 
         // The four mod-2³² adds of the round. K[t] comes from the
         // preprocessed cyclic columns; `h`/`d` are boundary selects.
@@ -995,131 +824,6 @@ impl FrameworkEval for Sha256Eval {
     }
 }
 
-/// One σ-input's split-and-pack outputs, in the column order written by
-/// [`crate::trace::write_sigma_input_split_block`]:
-/// `(packed_s_lo, packed_s_complement_lo, packed_s_hi, packed_s_complement_hi)`.
-/// The two `_lo` cells feed the σ-partition lo-half split-and-pack lookup
-/// `(word.lo, packed_s_lo, packed_s_complement_lo)`; the two `_hi` cells feed
-/// the hi-half twin. Linear assembly of the four cells, weighted by
-/// `lower_sigma_key_hi_coeff_s` (and the `_s_complement` twin), equals the
-/// σ-decode block's `(key_s, key_s_complement)`.
-struct SigmaInputSplitMasks<F: Clone> {
-    packed_s_lo: F,
-    packed_s_complement_lo: F,
-    packed_s_hi: F,
-    packed_s_complement_hi: F,
-}
-
-/// Pull one σ-input split-and-pack block off the `EvalAtRow` mask iterator.
-fn read_sigma_input_split<E: EvalAtRow>(eval: &mut E) -> SigmaInputSplitMasks<E::F> {
-    SigmaInputSplitMasks {
-        packed_s_lo: eval.next_trace_mask(),
-        packed_s_complement_lo: eval.next_trace_mask(),
-        packed_s_hi: eval.next_trace_mask(),
-        packed_s_complement_hi: eval.next_trace_mask(),
-    }
-}
-
-/// Fire a pair of round-side split-and-pack lookups (lo half, hi half) on
-/// `word` against its partition's tables.
-///
-/// `grp` is the 8-element packed-group commitment in `groups_in_order`
-/// ordering (the four `S`-side groups then the four `S'`-side groups of the
-/// W=6 partition). `lo_idx` / `hi_idx` are the per-partition projections
-/// from [`crate::partitions::round_groups_half_indices`]: the positions
-/// within `grp` whose bits live in the lo / hi 16-bit half (length 4 each).
-/// The lo-half table row carries `grp[lo_idx[0..4]]`, the hi-half row
-/// `grp[hi_idx[0..4]]`, in that order — matching
-/// [`crate::tables::build_round_split_pack_table`] (which lists each half's
-/// groups in `groups_in_order` index order). Each lookup row matches the
-/// `(key, g0, g1, g2, g3)` shape of
-/// [`crate::relations::ROUND_SPLIT_PACK_REL_SIZE`].
-///
-/// Firing the lookup pins the four packed-group cells to the table row
-/// determined by `word.lo` (resp. `word.hi`) and implicitly range-checks
-/// the limb to `[0, 2¹⁶)` (design §11 L1).
-#[allow(clippy::too_many_arguments)]
-fn wire_round_split_pack<E: EvalAtRow>(
-    eval: &mut E,
-    enabler: E::F,
-    word: &(E::F, E::F),
-    grp: &[E::F; GROUPS_PER_ROUND_PARTITION],
-    lo_idx: &[usize],
-    hi_idx: &[usize],
-    rel_lo: &impl Relation<E::F, E::EF>,
-    rel_hi: &impl Relation<E::F, E::EF>,
-) {
-    // Each 16-bit half holds exactly 4 sub-groups under the W=6 partition,
-    // so the relation tuple is `key + 4` packed groups (= ROUND_SPLIT_PACK_REL_SIZE).
-    debug_assert_eq!(lo_idx.len(), 4);
-    debug_assert_eq!(hi_idx.len(), 4);
-    // Gate by `enabler` so padding rows (every cell zero, so denominator
-    // collapses to `-z` for every lookup) contribute a zero fraction
-    // instead of `+1/(-z)`. Without this, every padding row would emit
-    // 130-or-so consumer lookups all keyed on the all-zero row of the
-    // table — which the producer's multiplicity column doesn't account
-    // for, breaking the LogUp sum-to-zero balance.
-    let mult = enabler;
-    eval.add_to_relation(RelationEntry::base(
-        rel_lo,
-        mult.clone(),
-        &[
-            word.0.clone(),
-            grp[lo_idx[0]].clone(),
-            grp[lo_idx[1]].clone(),
-            grp[lo_idx[2]].clone(),
-            grp[lo_idx[3]].clone(),
-        ],
-    ));
-    eval.add_to_relation(RelationEntry::base(
-        rel_hi,
-        mult,
-        &[
-            word.1.clone(),
-            grp[hi_idx[0]].clone(),
-            grp[hi_idx[1]].clone(),
-            grp[hi_idx[2]].clone(),
-            grp[hi_idx[3]].clone(),
-        ],
-    ));
-}
-
-/// Fire a pair of σ-side split-and-pack lookups (lo half, hi half) on
-/// `word` against its `σ` partition's tables.
-///
-/// Each row matches `(key, packed_s, packed_s_complement)`, the width-3
-/// shape of [`crate::relations::SIGMA_SPLIT_PACK_REL_SIZE`]. The lookup
-/// pins the two packed values to the table row determined by the
-/// half-limb and implicitly range-checks the limb to `[0, 2¹⁶)`.
-fn wire_sigma_input_split<E: EvalAtRow>(
-    eval: &mut E,
-    enabler: E::F,
-    word: &(E::F, E::F),
-    split: &SigmaInputSplitMasks<E::F>,
-    rel_lo: &impl Relation<E::F, E::EF>,
-    rel_hi: &impl Relation<E::F, E::EF>,
-) {
-    let mult = enabler;
-    eval.add_to_relation(RelationEntry::base(
-        rel_lo,
-        mult.clone(),
-        &[
-            word.0.clone(),
-            split.packed_s_lo.clone(),
-            split.packed_s_complement_lo.clone(),
-        ],
-    ));
-    eval.add_to_relation(RelationEntry::base(
-        rel_hi,
-        mult,
-        &[
-            word.1.clone(),
-            split.packed_s_hi.clone(),
-            split.packed_s_complement_hi.clone(),
-        ],
-    ));
-}
-
 fn f_zero<E: EvalAtRow>() -> E::F {
     E::F::from(M31::from(0u32))
 }
@@ -1247,26 +951,6 @@ fn constrain_bits_equal<E: EvalAtRow>(
     for i in 0..WORD_BIT_COLS {
         eval.add_constraint(lhs[i].clone() - rhs[i].clone());
     }
-}
-
-fn pack_round_group_exprs<E: EvalAtRow>(
-    bits: &[E::F; WORD_BIT_COLS],
-    groups: &RoundGroups,
-) -> [E::F; GROUPS_PER_ROUND_PARTITION] {
-    let mut out: [E::F; GROUPS_PER_ROUND_PARTITION] = std::array::from_fn(|_| f_zero::<E>());
-    for (group_idx, group) in groups
-        .s
-        .iter()
-        .chain(groups.s_complement.iter())
-        .enumerate()
-    {
-        let mut acc = f_zero::<E>();
-        for (position, &bit_idx) in group.iter().enumerate() {
-            acc += f_const::<E>(1u32 << position) * bits[bit_idx as usize].clone();
-        }
-        out[group_idx] = acc;
-    }
-    out
 }
 
 /// Emit the two linear constraints of one limb-grouped mod-2³² add.

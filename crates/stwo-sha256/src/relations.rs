@@ -18,14 +18,6 @@
 //!   - [`Xor8Relation`] — the single 2¹⁶-row `(x, y, z = x ⊕ y)` table,
 //!     fired chunk-wise to combine the two `O2` partials of every
 //!     σ-application.
-//!   - [`SplitPackRelations`] — the eight split-and-pack tables (one per
-//!     partition × `{lo, hi}` half) that map a 16-bit half-word to its
-//!     packed-group decomposition. Round-side rows are width 5 (`key + 4
-//!     packed groups`, the four W=6 sub-groups in that half); σ-side rows
-//!     are width 3 (`key + packed_s + packed_s_complement`). Firing each
-//!     lookup implicitly range-checks
-//!     the input limb to `[0, 2¹⁶)` and supplies the packed values the
-//!     Maj/Ch and `Σ`/`σ` decode-key reconstruction read.
 //!   - [`RangeRelations`] — the four width-1 range-check channels
 //!     `Range_2`/`Range_4`/`Range_5`/`Range_16`. `Range_k` pins a single
 //!     base-field value into `[0, k)`. The mod-2³² limb-add carries are
@@ -174,127 +166,6 @@ impl Xor8Relation {
     }
 }
 
-/// Row width of a **round-partition** split-and-pack table: `(key,
-/// packed_group_0, …, packed_group_3)`. Four packed groups because the
-/// `W = 6` `Σ0`/`Maj` and `Σ1`/`Ch` partitions each place exactly four of
-/// their eight groups in each 16-bit half (see
-/// [`crate::partitions::SIGMA0_GROUPS`] / [`crate::partitions::SIGMA1_GROUPS`]
-/// and [`crate::partitions::round_groups_half_indices`]).
-/// `key` is the 16-bit half-word the partition's groups live in; matching
-/// this row pins the half-word to `[0, 2¹⁶)` implicitly (design §11 L1).
-pub const ROUND_SPLIT_PACK_REL_SIZE: usize = 5;
-
-relation!(Sigma0SplitPackLo, ROUND_SPLIT_PACK_REL_SIZE);
-relation!(Sigma0SplitPackHi, ROUND_SPLIT_PACK_REL_SIZE);
-relation!(Sigma1SplitPackLo, ROUND_SPLIT_PACK_REL_SIZE);
-relation!(Sigma1SplitPackHi, ROUND_SPLIT_PACK_REL_SIZE);
-
-/// Row width of a **σ-partition** split-and-pack table: `(key,
-/// packed_s, packed_s_complement)`. Each `σ` partition is just
-/// `{S∩lo / S∩hi / S'∩lo / S'∩hi}` (no `Maj`/`Ch` co-service), so per
-/// half the table emits one packed `S`-side value and one packed
-/// `S'`-side value. The two halves' packed `S` values combine linearly
-/// to the σ-decode-table key `key_s` (and analogously for `key_s'`).
-pub const SIGMA_SPLIT_PACK_REL_SIZE: usize = 3;
-
-relation!(LowerSigma0SplitPackLo, SIGMA_SPLIT_PACK_REL_SIZE);
-relation!(LowerSigma0SplitPackHi, SIGMA_SPLIT_PACK_REL_SIZE);
-relation!(LowerSigma1SplitPackLo, SIGMA_SPLIT_PACK_REL_SIZE);
-relation!(LowerSigma1SplitPackHi, SIGMA_SPLIT_PACK_REL_SIZE);
-
-/// All eight split-and-pack channels grouped for `Sha256Eval`. Round-side
-/// channels (Σ0/Maj a-side, Σ1/Ch e-side) feed both the packed Maj/Ch
-/// lookups and the `Σ` decode-key reconstruction. σ-side channels feed
-/// only the σ decode-key reconstruction (`σ` partitions do not co-serve
-/// Maj/Ch).
-#[derive(Clone, Debug, PartialEq)]
-pub struct SplitPackRelations {
-    pub sigma0_lo: Sigma0SplitPackLo,
-    pub sigma0_hi: Sigma0SplitPackHi,
-    pub sigma1_lo: Sigma1SplitPackLo,
-    pub sigma1_hi: Sigma1SplitPackHi,
-    pub lower_sigma0_lo: LowerSigma0SplitPackLo,
-    pub lower_sigma0_hi: LowerSigma0SplitPackHi,
-    pub lower_sigma1_lo: LowerSigma1SplitPackLo,
-    pub lower_sigma1_hi: LowerSigma1SplitPackHi,
-}
-
-impl SplitPackRelations {
-    pub fn draw(channel: &mut impl Channel) -> Self {
-        Self {
-            sigma0_lo: Sigma0SplitPackLo::draw(channel),
-            sigma0_hi: Sigma0SplitPackHi::draw(channel),
-            sigma1_lo: Sigma1SplitPackLo::draw(channel),
-            sigma1_hi: Sigma1SplitPackHi::draw(channel),
-            lower_sigma0_lo: LowerSigma0SplitPackLo::draw(channel),
-            lower_sigma0_hi: LowerSigma0SplitPackHi::draw(channel),
-            lower_sigma1_lo: LowerSigma1SplitPackLo::draw(channel),
-            lower_sigma1_hi: LowerSigma1SplitPackHi::draw(channel),
-        }
-    }
-
-    pub fn dummy() -> Self {
-        Self {
-            sigma0_lo: Sigma0SplitPackLo::dummy(),
-            sigma0_hi: Sigma0SplitPackHi::dummy(),
-            sigma1_lo: Sigma1SplitPackLo::dummy(),
-            sigma1_hi: Sigma1SplitPackHi::dummy(),
-            lower_sigma0_lo: LowerSigma0SplitPackLo::dummy(),
-            lower_sigma0_hi: LowerSigma0SplitPackHi::dummy(),
-            lower_sigma1_lo: LowerSigma1SplitPackLo::dummy(),
-            lower_sigma1_hi: LowerSigma1SplitPackHi::dummy(),
-        }
-    }
-}
-
-impl Default for SplitPackRelations {
-    fn default() -> Self {
-        Self::dummy()
-    }
-}
-
-#[derive(Clone, Default)]
-pub struct SharedSplitPackRelations {
-    pub sigma0_lo: SharedRelation<Sigma0SplitPackLo>,
-    pub sigma0_hi: SharedRelation<Sigma0SplitPackHi>,
-    pub sigma1_lo: SharedRelation<Sigma1SplitPackLo>,
-    pub sigma1_hi: SharedRelation<Sigma1SplitPackHi>,
-    pub lower_sigma0_lo: SharedRelation<LowerSigma0SplitPackLo>,
-    pub lower_sigma0_hi: SharedRelation<LowerSigma0SplitPackHi>,
-    pub lower_sigma1_lo: SharedRelation<LowerSigma1SplitPackLo>,
-    pub lower_sigma1_hi: SharedRelation<LowerSigma1SplitPackHi>,
-}
-
-impl SharedSplitPackRelations {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn set(&self, relations: &SplitPackRelations) {
-        self.sigma0_lo.set(relations.sigma0_lo.clone());
-        self.sigma0_hi.set(relations.sigma0_hi.clone());
-        self.sigma1_lo.set(relations.sigma1_lo.clone());
-        self.sigma1_hi.set(relations.sigma1_hi.clone());
-        self.lower_sigma0_lo.set(relations.lower_sigma0_lo.clone());
-        self.lower_sigma0_hi.set(relations.lower_sigma0_hi.clone());
-        self.lower_sigma1_lo.set(relations.lower_sigma1_lo.clone());
-        self.lower_sigma1_hi.set(relations.lower_sigma1_hi.clone());
-    }
-
-    pub fn get(&self) -> SplitPackRelations {
-        SplitPackRelations {
-            sigma0_lo: self.sigma0_lo.get(),
-            sigma0_hi: self.sigma0_hi.get(),
-            sigma1_lo: self.sigma1_lo.get(),
-            sigma1_hi: self.sigma1_hi.get(),
-            lower_sigma0_lo: self.lower_sigma0_lo.get(),
-            lower_sigma0_hi: self.lower_sigma0_hi.get(),
-            lower_sigma1_lo: self.lower_sigma1_lo.get(),
-            lower_sigma1_hi: self.lower_sigma1_hi.get(),
-        }
-    }
-}
-
 /// Row width of every `Range_k` channel: a single base-field value pinned
 /// to `[0, k)`. The lookup tuple passed to `add_to_relation` is a 1-cell
 /// slice — the carry limb (for mod-2³² adds) or the terminal 16-bit limb
@@ -400,7 +271,6 @@ impl SharedRangeRelations {
 
 #[derive(Clone, Default)]
 pub struct SharedShaTableRelations {
-    pub split_pack: SharedSplitPackRelations,
     pub range: SharedRangeRelations,
 }
 
@@ -409,8 +279,7 @@ impl SharedShaTableRelations {
         Self::default()
     }
 
-    pub fn set(&self, split_pack: &SplitPackRelations, range: &RangeRelations) {
-        self.split_pack.set(split_pack);
+    pub fn set(&self, range: &RangeRelations) {
         self.range.set(range);
     }
 }
@@ -548,7 +417,6 @@ pub struct Sha256Relations {
     pub maj: MajRelation,
     pub ch: ChRelation,
     pub xor_8: Xor8Relation,
-    pub split_pack: SplitPackRelations,
     pub range: RangeRelations,
     /// Cross-component digest channel — provider side. Always drawn so the
     /// relation bundle is uniform; only *used* when `Sha256Eval::expose_digest`
@@ -574,7 +442,6 @@ impl Sha256Relations {
             maj: MajRelation::draw(channel),
             ch: ChRelation::draw(channel),
             xor_8: Xor8Relation::draw(channel),
-            split_pack: SplitPackRelations::draw(channel),
             range: RangeRelations::draw(channel),
             // Drawn after every standalone channel so adding it leaves their
             // challenges unchanged (the draw order above is frozen — see the
@@ -593,7 +460,6 @@ impl Sha256Relations {
             maj: MajRelation::dummy(),
             ch: ChRelation::dummy(),
             xor_8: Xor8Relation::dummy(),
-            split_pack: SplitPackRelations::draw(channel),
             range: RangeRelations::draw(channel),
             digest: DigestRelation::dummy(),
             field: FieldRelation::dummy(),
@@ -609,7 +475,6 @@ impl Sha256Relations {
             maj: MajRelation::dummy(),
             ch: ChRelation::dummy(),
             xor_8: Xor8Relation::dummy(),
-            split_pack: shared.split_pack.get(),
             range: shared.range.get(),
             digest: DigestRelation::draw(channel),
             field: FieldRelation::draw(channel),
@@ -624,7 +489,6 @@ impl Sha256Relations {
             maj: MajRelation::dummy(),
             ch: ChRelation::dummy(),
             xor_8: Xor8Relation::dummy(),
-            split_pack: SplitPackRelations::dummy(),
             range: RangeRelations::dummy(),
             digest: DigestRelation::dummy(),
             field: FieldRelation::dummy(),
@@ -690,35 +554,6 @@ mod tests {
         assert_eq!(XOR_8_REL_SIZE, 3);
     }
 
-    /// The four round-side split-and-pack channels expose row width 5
-    /// (`key + 4` packed sub-groups at `W = 6`). Cross-checked through the
-    /// `Relation` trait so an off-by-one in the macro declaration would
-    /// fail closed.
-    #[test]
-    fn round_split_pack_relations_have_row_width_5() {
-        use stwo::core::fields::m31::BaseField;
-        use stwo::core::fields::qm31::SecureField;
-        use stwo_constraint_framework::Relation;
-        let r = Sha256Relations::dummy();
-        for size in [
-            <Sigma0SplitPackLo as Relation<BaseField, SecureField>>::get_size(
-                &r.split_pack.sigma0_lo,
-            ),
-            <Sigma0SplitPackHi as Relation<BaseField, SecureField>>::get_size(
-                &r.split_pack.sigma0_hi,
-            ),
-            <Sigma1SplitPackLo as Relation<BaseField, SecureField>>::get_size(
-                &r.split_pack.sigma1_lo,
-            ),
-            <Sigma1SplitPackHi as Relation<BaseField, SecureField>>::get_size(
-                &r.split_pack.sigma1_hi,
-            ),
-        ] {
-            assert_eq!(size, ROUND_SPLIT_PACK_REL_SIZE);
-        }
-        assert_eq!(ROUND_SPLIT_PACK_REL_SIZE, 5);
-    }
-
     /// Every `Range_k` channel exposes row width 1. The lookup tuple
     /// passed to `add_to_relation` is a single carry / terminal-limb cell.
     #[test]
@@ -770,31 +605,5 @@ mod tests {
             FIELD_REL_SIZE
         );
         assert_eq!(FIELD_REL_SIZE, 3);
-    }
-
-    /// The four σ-side split-and-pack channels expose row width 3.
-    #[test]
-    fn sigma_split_pack_relations_have_row_width_3() {
-        use stwo::core::fields::m31::BaseField;
-        use stwo::core::fields::qm31::SecureField;
-        use stwo_constraint_framework::Relation;
-        let r = Sha256Relations::dummy();
-        for size in [
-            <LowerSigma0SplitPackLo as Relation<BaseField, SecureField>>::get_size(
-                &r.split_pack.lower_sigma0_lo,
-            ),
-            <LowerSigma0SplitPackHi as Relation<BaseField, SecureField>>::get_size(
-                &r.split_pack.lower_sigma0_hi,
-            ),
-            <LowerSigma1SplitPackLo as Relation<BaseField, SecureField>>::get_size(
-                &r.split_pack.lower_sigma1_lo,
-            ),
-            <LowerSigma1SplitPackHi as Relation<BaseField, SecureField>>::get_size(
-                &r.split_pack.lower_sigma1_hi,
-            ),
-        ] {
-            assert_eq!(size, SIGMA_SPLIT_PACK_REL_SIZE);
-        }
-        assert_eq!(SIGMA_SPLIT_PACK_REL_SIZE, 3);
     }
 }

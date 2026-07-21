@@ -229,9 +229,7 @@ fn standalone_sha_proof_bytes_unchanged_by_shared_tables_feature() {
 ///   is the leak the blinding closes.
 #[test]
 fn class_d_sha_tables_dummy_region_is_doubled_and_randomised() {
-    use stwo_sha256::components::{
-        SharedProducer, RANGE_TABLES, ROUND_SPLIT_TABLES, SIGMA_SPLIT_TABLES,
-    };
+    use stwo_sha256::components::{SharedProducer, RANGE_TABLES};
 
     let witnesses = witnesses();
     let consumers: Vec<_> = witnesses
@@ -272,20 +270,6 @@ fn class_d_sha_tables_dummy_region_is_doubled_and_randomised() {
         );
     };
 
-    for (i, &(p, h)) in ROUND_SPLIT_TABLES.iter().enumerate() {
-        check(
-            SharedProducer::RoundSplit(p, h),
-            &a.round_split_pack[i],
-            &b.round_split_pack[i],
-        );
-    }
-    for (i, &(p, h)) in SIGMA_SPLIT_TABLES.iter().enumerate() {
-        check(
-            SharedProducer::SigmaSplit(p, h),
-            &a.sigma_split_pack[i],
-            &b.sigma_split_pack[i],
-        );
-    }
     for (i, &kind) in RANGE_TABLES.iter().enumerate() {
         check(SharedProducer::Range(kind), &a.range[i], &b.range[i]);
     }

@@ -25,24 +25,17 @@ use stwo_constraint_framework::TraceLocationAllocator;
 
 use crate::components::{
     shared_table_preprocessed_column_ids, RangeKind, SharedProducer, SharedProducerPairEval,
-    RANGE_TABLES, ROUND_SPLIT_TABLES, SIGMA_SPLIT_TABLES,
+    RANGE_TABLES,
 };
 use crate::field_exposure::FieldExposure;
 use crate::interaction::{
     build_interaction_columns, producer_blind_frac_column, ComponentClaim, Frac,
 };
-use crate::multiplicities::{
-    range_k_multiplicities, round_split_pack_multiplicities, sigma_split_pack_multiplicities,
-    sum_multiplicity_vectors,
-};
+use crate::multiplicities::{range_k_multiplicities, sum_multiplicity_vectors};
 use crate::preprocessed::{
     generate_shared_table_preprocessed_trace, shared_table_preprocessed_log_sizes, LOG_SIZE_16,
 };
 use crate::relations::{Sha256Relations, SharedShaTableRelations};
-use crate::tables::{
-    build_round_split_pack_table, build_sigma_split_pack_table, Half16, LowerSigmaPartition,
-    RoundPartition,
-};
 use crate::types::Sha256Witness;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -68,28 +61,11 @@ impl ShaTablesInteractionClaim {
 /// that must stay in lockstep: interaction-column generation
 /// (`shared_table_interaction_trace`), multiplicity-column order
 /// (`shared_table_trace`), interaction/trace log-size layout, and component
-/// registration (`ShaTablesComponents`). The 9 log₂16 producers pair into
-/// 4 pairs + 1 single (range₁₆); the 3 log₂4 range tables pair into 1 pair +
-/// 1 single = 7 chunks. Under Class-D single-gated blinding each producer emits
-/// ONE fraction, so each chunk yields exactly one paired interaction column:
-/// 12 producers → 7 interaction columns (was 12 under the cancelling-pair form).
+/// registration (`ShaTablesComponents`). The 4 range tables pair into 3 chunks
+/// (range₁₆ single, range₂+range₄ pair, range₅ single). Under Class-D
+/// single-gated blinding each producer emits ONE fraction, so each chunk yields
+/// exactly one paired interaction column: 4 producers → 3 interaction columns.
 const PRODUCER_PAIRS: &[&[SharedProducer]] = &[
-    &[
-        SharedProducer::RoundSplit(RoundPartition::Sigma0AndMaj, Half16::Lo),
-        SharedProducer::RoundSplit(RoundPartition::Sigma0AndMaj, Half16::Hi),
-    ],
-    &[
-        SharedProducer::RoundSplit(RoundPartition::Sigma1AndCh, Half16::Lo),
-        SharedProducer::RoundSplit(RoundPartition::Sigma1AndCh, Half16::Hi),
-    ],
-    &[
-        SharedProducer::SigmaSplit(LowerSigmaPartition::LowerSigma0, Half16::Lo),
-        SharedProducer::SigmaSplit(LowerSigmaPartition::LowerSigma0, Half16::Hi),
-    ],
-    &[
-        SharedProducer::SigmaSplit(LowerSigmaPartition::LowerSigma1, Half16::Lo),
-        SharedProducer::SigmaSplit(LowerSigmaPartition::LowerSigma1, Half16::Hi),
-    ],
     &[SharedProducer::Range(RangeKind::Range16)],
     &[
         SharedProducer::Range(RangeKind::Range2),
@@ -97,20 +73,6 @@ const PRODUCER_PAIRS: &[&[SharedProducer]] = &[
     ],
     &[SharedProducer::Range(RangeKind::Range5)],
 ];
-
-fn round_split_index(p: RoundPartition, h: Half16) -> usize {
-    ROUND_SPLIT_TABLES
-        .iter()
-        .position(|&(tp, th)| tp == p && th == h)
-        .expect("round split table is enumerated in ROUND_SPLIT_TABLES")
-}
-
-fn sigma_split_index(p: LowerSigmaPartition, h: Half16) -> usize {
-    SIGMA_SPLIT_TABLES
-        .iter()
-        .position(|&(tp, th)| tp == p && th == h)
-        .expect("sigma split table is enumerated in SIGMA_SPLIT_TABLES")
-}
 
 fn range_index(kind: RangeKind) -> usize {
     RANGE_TABLES
@@ -121,8 +83,6 @@ fn range_index(kind: RangeKind) -> usize {
 
 #[derive(Clone, Debug)]
 pub struct ShaTableMultiplicities {
-    pub round_split_pack: Vec<Vec<u32>>,
-    pub sigma_split_pack: Vec<Vec<u32>>,
     pub range: Vec<Vec<u32>>,
 }
 
@@ -133,24 +93,6 @@ impl ShaTableMultiplicities {
             "shared SHA table provider needs at least one consumer",
         );
 
-        let mut round_split_pack = Vec::with_capacity(ROUND_SPLIT_TABLES.len());
-        for &(p, h) in ROUND_SPLIT_TABLES {
-            round_split_pack.push(blind_extend(sum_multiplicity_vectors(
-                consumers
-                    .iter()
-                    .map(|(witness, _)| round_split_pack_multiplicities(witness, p, h)),
-            )));
-        }
-
-        let mut sigma_split_pack = Vec::with_capacity(SIGMA_SPLIT_TABLES.len());
-        for &(p, h) in SIGMA_SPLIT_TABLES {
-            sigma_split_pack.push(blind_extend(sum_multiplicity_vectors(
-                consumers
-                    .iter()
-                    .map(|(witness, _)| sigma_split_pack_multiplicities(witness, p, h)),
-            )));
-        }
-
         let mut range = Vec::with_capacity(RANGE_TABLES.len());
         for &kind in RANGE_TABLES {
             range.push(blind_extend(sum_multiplicity_vectors(
@@ -160,11 +102,7 @@ impl ShaTableMultiplicities {
             )));
         }
 
-        Self {
-            round_split_pack,
-            sigma_split_pack,
-            range,
-        }
+        Self { range }
     }
 }
 
@@ -214,8 +152,6 @@ pub struct ShaTableComponentShape {
 /// multiplicity trace column).
 fn producer_preprocessed_cols(producer: SharedProducer) -> usize {
     let value_cols = match producer {
-        SharedProducer::RoundSplit(..) => 5,
-        SharedProducer::SigmaSplit(..) => 3,
         SharedProducer::Range(..) => 1,
     };
     value_cols + 1 // + Class-D is_dummy selector
@@ -224,8 +160,6 @@ fn producer_preprocessed_cols(producer: SharedProducer) -> usize {
 /// Stable per-producer tag, matching its preprocessed-column family.
 fn producer_name(producer: SharedProducer) -> &'static str {
     match producer {
-        SharedProducer::RoundSplit(p, h) => round_split_component_name(p, h),
-        SharedProducer::SigmaSplit(p, h) => sigma_split_component_name(p, h),
         SharedProducer::Range(kind) => kind.tag(),
     }
 }
@@ -342,7 +276,7 @@ impl Air for ShaTablesProver {
 
     fn draw_relations(&mut self, channel: &mut Blake2sChannel) {
         let relations = Sha256Relations::draw_sha_tables_provider(channel);
-        self.shared.set(&relations.split_pack, &relations.range);
+        self.shared.set(&relations.range);
         self.relations = Some(relations);
     }
 
@@ -421,7 +355,7 @@ impl Air for ShaTablesVerifier {
 
     fn draw_relations(&mut self, channel: &mut Blake2sChannel) {
         let relations = Sha256Relations::draw_sha_tables_provider(channel);
-        self.shared.set(&relations.split_pack, &relations.range);
+        self.shared.set(&relations.range);
         self.relations = Some(relations);
     }
 
@@ -460,27 +394,6 @@ impl Air for ShaTablesVerifier {
 
     fn components(&self) -> Vec<&dyn Component> {
         self.built_components().components()
-    }
-}
-
-/// Stable per-component name for a round-side split-pack producer, matching
-/// its preprocessed-column tag family (`sp_sigma0_lo`, …).
-fn round_split_component_name(p: RoundPartition, h: Half16) -> &'static str {
-    match (p, h) {
-        (RoundPartition::Sigma0AndMaj, Half16::Lo) => "sp_sigma0_lo",
-        (RoundPartition::Sigma0AndMaj, Half16::Hi) => "sp_sigma0_hi",
-        (RoundPartition::Sigma1AndCh, Half16::Lo) => "sp_sigma1_lo",
-        (RoundPartition::Sigma1AndCh, Half16::Hi) => "sp_sigma1_hi",
-    }
-}
-
-/// Stable per-component name for a σ-side split-pack producer.
-fn sigma_split_component_name(p: LowerSigmaPartition, h: Half16) -> &'static str {
-    match (p, h) {
-        (LowerSigmaPartition::LowerSigma0, Half16::Lo) => "sp_lsigma0_lo",
-        (LowerSigmaPartition::LowerSigma0, Half16::Hi) => "sp_lsigma0_hi",
-        (LowerSigmaPartition::LowerSigma1, Half16::Lo) => "sp_lsigma1_lo",
-        (LowerSigmaPartition::LowerSigma1, Half16::Hi) => "sp_lsigma1_hi",
     }
 }
 
@@ -544,12 +457,6 @@ fn producer_multiplicities<'a>(
     producer: SharedProducer,
 ) -> &'a [u32] {
     match producer {
-        SharedProducer::RoundSplit(p, h) => {
-            &multiplicities.round_split_pack[round_split_index(p, h)]
-        }
-        SharedProducer::SigmaSplit(p, h) => {
-            &multiplicities.sigma_split_pack[sigma_split_index(p, h)]
-        }
         SharedProducer::Range(kind) => &multiplicities.range[range_index(kind)],
     }
 }
@@ -601,74 +508,6 @@ fn producer_frac(
 ) -> Vec<Frac> {
     let real_len = 1usize << producer.log_size();
     match producer {
-        SharedProducer::RoundSplit(p, h) => {
-            let i = round_split_index(p, h);
-            let mults = &multiplicities.round_split_pack[i];
-            let groups = match p {
-                RoundPartition::Sigma0AndMaj => crate::partitions::SIGMA0_GROUPS,
-                RoundPartition::Sigma1AndCh => crate::partitions::SIGMA1_GROUPS,
-            };
-            let rows = build_round_split_pack_table(&groups, p.s_mask(), h);
-            let row_iter = round_split_blind_rows(rows, real_len);
-            match (p, h) {
-                (RoundPartition::Sigma0AndMaj, Half16::Lo) => producer_blind_frac_column(
-                    &relations.split_pack.sigma0_lo,
-                    mults,
-                    real_len,
-                    row_iter,
-                ),
-                (RoundPartition::Sigma0AndMaj, Half16::Hi) => producer_blind_frac_column(
-                    &relations.split_pack.sigma0_hi,
-                    mults,
-                    real_len,
-                    row_iter,
-                ),
-                (RoundPartition::Sigma1AndCh, Half16::Lo) => producer_blind_frac_column(
-                    &relations.split_pack.sigma1_lo,
-                    mults,
-                    real_len,
-                    row_iter,
-                ),
-                (RoundPartition::Sigma1AndCh, Half16::Hi) => producer_blind_frac_column(
-                    &relations.split_pack.sigma1_hi,
-                    mults,
-                    real_len,
-                    row_iter,
-                ),
-            }
-        }
-        SharedProducer::SigmaSplit(p, h) => {
-            let i = sigma_split_index(p, h);
-            let mults = &multiplicities.sigma_split_pack[i];
-            let rows = build_sigma_split_pack_table(p.parts(), h);
-            let row_iter = sigma_split_blind_rows(rows, real_len);
-            match (p, h) {
-                (LowerSigmaPartition::LowerSigma0, Half16::Lo) => producer_blind_frac_column(
-                    &relations.split_pack.lower_sigma0_lo,
-                    mults,
-                    real_len,
-                    row_iter,
-                ),
-                (LowerSigmaPartition::LowerSigma0, Half16::Hi) => producer_blind_frac_column(
-                    &relations.split_pack.lower_sigma0_hi,
-                    mults,
-                    real_len,
-                    row_iter,
-                ),
-                (LowerSigmaPartition::LowerSigma1, Half16::Lo) => producer_blind_frac_column(
-                    &relations.split_pack.lower_sigma1_lo,
-                    mults,
-                    real_len,
-                    row_iter,
-                ),
-                (LowerSigmaPartition::LowerSigma1, Half16::Hi) => producer_blind_frac_column(
-                    &relations.split_pack.lower_sigma1_hi,
-                    mults,
-                    real_len,
-                    row_iter,
-                ),
-            }
-        }
         SharedProducer::Range(kind) => {
             let i = range_index(kind);
             let mults = &multiplicities.range[i];
@@ -698,56 +537,6 @@ fn producer_frac(
 /// twin additionally makes every dummy row net-zero regardless of its content,
 /// so a malicious prover cannot repurpose a dummy row to provide a real key.
 const DUMMY_KEY_BASE: u32 = 1 << 16;
-
-/// Blinded 5-cell round-split rows: real table rows, then dummy rows with
-/// unreachable key `2^16 + j` and zero groups.
-fn round_split_blind_rows(
-    rows: Vec<crate::tables::SplitPackRow>,
-    real_len: usize,
-) -> impl Iterator<Item = [BaseField; 5]> {
-    rows.into_iter()
-        .map(|r| {
-            [
-                BaseField::from(r.key),
-                BaseField::from(r.groups[0]),
-                BaseField::from(r.groups[1]),
-                BaseField::from(r.groups[2]),
-                BaseField::from(r.groups[3]),
-            ]
-        })
-        .chain((0..real_len).map(|j| {
-            [
-                BaseField::from(DUMMY_KEY_BASE + j as u32),
-                BaseField::from(0u32),
-                BaseField::from(0u32),
-                BaseField::from(0u32),
-                BaseField::from(0u32),
-            ]
-        }))
-}
-
-/// Blinded 3-cell σ-split rows: real table rows, then dummy rows with
-/// unreachable key `2^16 + j` and zero groups.
-fn sigma_split_blind_rows(
-    rows: Vec<crate::tables::SplitPackRow>,
-    real_len: usize,
-) -> impl Iterator<Item = [BaseField; 3]> {
-    rows.into_iter()
-        .map(|r| {
-            [
-                BaseField::from(r.key),
-                BaseField::from(r.groups[0]),
-                BaseField::from(r.groups[1]),
-            ]
-        })
-        .chain((0..real_len).map(|j| {
-            [
-                BaseField::from(DUMMY_KEY_BASE + j as u32),
-                BaseField::from(0u32),
-                BaseField::from(0u32),
-            ]
-        }))
-}
 
 /// Blinded 1-cell range rows: `[0, k)` real values then zero padding up to
 /// `real_len`, then dummy rows with unreachable value `2^16 + j`.

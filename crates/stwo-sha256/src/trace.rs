@@ -21,23 +21,21 @@
 //!   every constraint so padding rows are constraint-free.
 //! - `W` (2 cols, `(lo, hi)`) — the row's schedule word `W[t]`: a message
 //!   word for `t < 16`, the recurrence output for `t ≥ 16`.
-//! - the **round family** (`ROUND_COLS = 136` cols, live on every real row):
+//! - the **round family** ([`ROUND_COLS`] cols, live on every real row):
 //!   `σ0, σ1, ch, maj, t1, t2, a_new, e_new` (each `(lo, hi)` ⇒ 16 cells),
-//!   4 add carry pairs (⇒ 8 cells), the decoded intermediates of `Σ0(a)` and
-//!   `Σ1(e)` (2 × [`SIGMA_DECODE_COLS`]), then the Maj/Ch packed-group block
-//!   ([`ROUND_MAJ_CH_COLS`] — 8 operands `[a, maj, e, ch, b, c, f, g]`,
-//!   the last four being the §8.1 reuse duplicates).
-//! - the **schedule family** (`SCHEDULE_ENTRY_COLS = 62` cols, live only on
+//!   4 add carry pairs (⇒ 8 cells), then the committed operand bit-planes
+//!   `[a, b, c, e, f, g]` ([`ROUND_OPERAND_BIT_COLS`]). Σ0/Σ1/Maj/Ch are
+//!   evaluated directly from those boolean bit-planes; each operand limb is
+//!   range-checked by its recomposition against the bits.
+//! - the **schedule family** ([`SCHEDULE_ENTRY_COLS`] cols, live only on
 //!   rows with `t ≥ 16`, zero elsewhere): the `σ0`/`σ1` output limbs and add
-//!   carries (6), the decoded intermediates of `σ0(W[t−15])` and
-//!   `σ1(W[t−2])` (2 × [`SIGMA_DECODE_COLS`]), and the σ-input
-//!   split-and-pack outputs (2 × [`SIGMA_INPUT_SPLIT_COLS`]). Recurrence
-//!   inputs are *not* duplicated — they are the `W` columns of earlier rows,
-//!   read via mask offsets `−2, −7, −15, −16`.
+//!   carries (6), then the lower-σ output bit-planes
+//!   ([`SCHEDULE_SIGMA_OUTPUT_BIT_COLS`]). Recurrence inputs are *not*
+//!   duplicated — they are the `W` columns of earlier rows, read via mask
+//!   offsets `−2, −7, −15, −16`.
 //! - **block-boundary families**, each live on one designated round row of
 //!   its block and zero elsewhere:
-//!   - `t = 0`: `is_first_block` (1), `h_in` (16), `H_IN_AUX_GRP` (32 — the
-//!     §8.1 reuse chain's initial `b`/`c`/`f`/`g` splits).
+//!   - `t = 0`: `is_first_block` (1), `h_in` (16).
 //!   - `t = 63`: finalization carries (16), `h_out` (16), `is_last_block`
 //!     (1), digest byte view (32).
 //!   - `t = 15`: the §10.4 padding-role block ([`PADDING_ROW_COLS`] = 33);
@@ -47,29 +45,6 @@
 //!   real row (block 0, round 0) when the trace has padding.
 //! - the optional credential-field selector tail (one block counter plus one
 //!   selector per target block; exposed bytes are virtual W-bit expressions).
-//!
-//! Per-round Maj/Ch block (`ROUND_MAJ_CH_COLS = 4 · 8 = 32`): packed-group
-//! values of each *fresh* operand in the partition-enumeration order
-//! (`groups_in_order` — `S[0..4]` then `S'[0..4]`). Operand order is
-//! `a, maj_out` (a-side / `SIGMA0_GROUPS`) followed by `e, ch_out`
-//! (e-side / `SIGMA1_GROUPS`). `b`, `c`, `f`, `g` are not committed — the
-//! §8.1 reuse chain aliases them to the `a`/`e` group columns of rows
-//! `t−1`/`t−2` via mask offsets (and to the `t = 0` row's `H_IN_AUX_GRP`
-//! columns for `t ∈ {0, 1}`). Each cell is one packed group value in
-//! `[0, 2^|group|) ⊆ [0, 2^MAX_ROUND_GROUP_BITS)`.
-//!
-//! Per σ-application (`SIGMA_DECODE_COLS = 24`):
-//! `key_s, o_main_s.lo, o_main_s.hi, o2_partial_s.lo, o2_partial_s.hi,
-//!  key_s_complement, o_main_s_complement.lo, o_main_s_complement.hi,
-//!  o2_partial_s_complement.lo, o2_partial_s_complement.hi,
-//!  o2_combined.lo, o2_combined.hi,
-//!  o2_chunks_s (4 bytes),
-//!  o2_chunks_s_complement (4 bytes),
-//!  o2_chunks_combined (4 bytes)`.
-//! The two 5-tuples `[key, o_main_lo, o_main_hi, o2_partial_lo, o2_partial_hi]`
-//! at offsets 0 and 5 are the decode-table lookup keys for the S-side and
-//! S′-side respectively — sharing the read order with the lookup tuple
-//! keeps the AIR `add_to_relation` calls trivially aligned.
 //!
 //! Per-schedule-entry σ-input split block (`SIGMA_INPUT_SPLIT_COLS = 4`):
 //! `(packed_s_lo, packed_s_complement_lo, packed_s_hi, packed_s_complement_hi)`
@@ -88,11 +63,7 @@ use stwo::prover::backend::simd::m31::{PackedM31, LOG_N_LANES, N_LANES};
 use crate::constants::{DIGEST_BYTES, N_ROUNDS, N_STATE_WORDS};
 use crate::field_exposure::FieldExposure;
 use crate::native::{lower_sigma0, lower_sigma1};
-use crate::partitions::GROUPS_PER_ROUND_PARTITION;
-use crate::types::{
-    AddCarries, BlockAuxSplitPackWitness, PaddingRowWitness, RoundPackedGroups, Sha256Witness,
-    SigmaInputSplitPackWitness, WordLimbs,
-};
+use crate::types::{AddCarries, PaddingRowWitness, Sha256Witness, WordLimbs};
 
 use crate::constants::WORD_BYTES as BYTES_PER_WORD;
 use rand::RngCore;
@@ -110,38 +81,16 @@ pub const WORD_BIT_COLS: usize = 32;
 /// Operand order: `[a, b, c, e, f, g]`.
 pub const ROUND_BIT_OPERANDS: usize = 6;
 pub const ROUND_OPERAND_BIT_COLS: usize = ROUND_BIT_OPERANDS * WORD_BIT_COLS;
-/// Packed output groups retained for round split-pack lookups. The bits of
-/// `Maj` and `Ch` are virtual expressions; these committed packed groups keep
-/// the surviving split-pack lookup keys degree 1.
-pub const ROUND_OUTPUT_GROUP_OPERANDS: usize = 2;
-pub const ROUND_OUTPUT_GROUP_COLS: usize = ROUND_OUTPUT_GROUP_OPERANDS * GROUPS_PER_ROUND_PARTITION;
 /// Schedule lower-sigma output bits. The formulas are ungated; only their
 /// linear recomposition into `s0`/`s1` is gated on active schedule rows.
 pub const SCHEDULE_SIGMA_OUTPUT_BIT_COLS: usize = 2 * WORD_BIT_COLS;
-/// Columns per σ-input split-and-pack block: four packed values
-/// `(packed_s_lo, packed_s_complement_lo, packed_s_hi, packed_s_complement_hi)`.
-/// The AIR fires one σ split-and-pack lookup per half against the
-/// partition's table (rows `(key=word.lo|hi, packed_s, packed_s')`).
-pub const SIGMA_INPUT_SPLIT_COLS: usize = 4;
 /// Columns of the round family: 8 word-results × 2 limbs + 4 carry pairs
-/// × 2 ends = 24, then committed operand bits and packed Maj/Ch output
-/// groups for the surviving split-pack lookups.
-pub const ROUND_COLS: usize = 8 * 2 + 4 * 2 + ROUND_OPERAND_BIT_COLS + ROUND_OUTPUT_GROUP_COLS;
+/// × 2 ends = 24, then committed operand bits. Σ0/Σ1/Maj/Ch are computed
+/// directly from those boolean bit-planes (no packed-group columns).
+pub const ROUND_COLS: usize = 8 * 2 + 4 * 2 + ROUND_OPERAND_BIT_COLS;
 /// Columns of the schedule family (live for `t ≥ 16`):
-/// `σ0`, `σ1`, carries (= 6), lower-sigma output bits, then two σ-input
-/// split-and-pack blocks.
-pub const SCHEDULE_ENTRY_COLS: usize =
-    6 + SCHEDULE_SIGMA_OUTPUT_BIT_COLS + 2 * SIGMA_INPUT_SPLIT_COLS;
-/// Per-block auxiliary split-and-pack operands for the §8.1 reuse chain:
-/// `[b_init = h_in[1]_a-side, c_init = h_in[2]_a-side, f_init = h_in[5]_e-side,
-///   g_init = h_in[6]_e-side]`. `h_in[0]`/`h_in[4]` are covered by
-/// `a_grp[round 0]`/`e_grp[round 0]` (`a[0]=h_in[0]`, `e[0]=h_in[4]`);
-/// `h_in[3]`/`h_in[7]` never enter Σ/Maj/Ch directly.
-pub const H_IN_AUX_OPERANDS: usize = 4;
-/// Columns dedicated to the per-block auxiliary split-and-pack of the
-/// §8.1 reuse chain's initial values. `4 operands · 8 groups = 32` cells
-/// per block, live on the `t = 0` row.
-pub const H_IN_AUX_GRP_COLS: usize = H_IN_AUX_OPERANDS * GROUPS_PER_ROUND_PARTITION;
+/// `σ0`, `σ1`, carries (= 6), then lower-sigma output bits.
+pub const SCHEDULE_ENTRY_COLS: usize = 6 + SCHEDULE_SIGMA_OUTPUT_BIT_COLS;
 /// Number of schedule entries: `W[16..64]` ⇒ 48.
 pub const N_SCHEDULE_ENTRIES: usize = N_ROUNDS - 16;
 
@@ -193,10 +142,8 @@ impl Layout {
     pub const COL_IS_FIRST_BLOCK: usize = Self::COL_SCHED_ENTRY_END;
     pub const COL_H_IN_START: usize = Self::COL_IS_FIRST_BLOCK + 1;
     pub const COL_H_IN_END: usize = Self::COL_H_IN_START + 2 * N_STATE_WORDS;
-    pub const COL_H_IN_AUX_GRP_START: usize = Self::COL_H_IN_END;
-    pub const COL_H_IN_AUX_GRP_END: usize = Self::COL_H_IN_AUX_GRP_START + H_IN_AUX_GRP_COLS;
     /// `t = 63` family.
-    pub const COL_FINAL_CARRIES_START: usize = Self::COL_H_IN_AUX_GRP_END;
+    pub const COL_FINAL_CARRIES_START: usize = Self::COL_H_IN_END;
     pub const COL_FINAL_CARRIES_END: usize = Self::COL_FINAL_CARRIES_START + 2 * N_STATE_WORDS;
     pub const COL_H_OUT_START: usize = Self::COL_FINAL_CARRIES_END;
     pub const COL_H_OUT_END: usize = Self::COL_H_OUT_START + 2 * N_STATE_WORDS;
@@ -312,51 +259,11 @@ impl Layout {
         Self::COL_ROUND_START + 24 + operand_idx * WORD_BIT_COLS + bit
     }
 
-    /// Start column of the round family's packed output groups: `Maj`, `Ch`.
-    #[inline]
-    pub const fn round_output_group_base() -> usize {
-        Self::COL_ROUND_START + 24 + ROUND_OPERAND_BIT_COLS
-    }
-
-    /// Column of one packed output group. Output order is `[Maj, Ch]`.
-    #[inline]
-    pub const fn round_output_group(output_idx: usize, group_idx: usize) -> usize {
-        Self::round_output_group_base() + output_idx * GROUPS_PER_ROUND_PARTITION + group_idx
-    }
-
     /// Column of a lower-sigma output bit in the schedule family. `which` is
     /// `0` for `σ0(W[t-15])`, `1` for `σ1(W[t-2])`.
     #[inline]
     pub const fn schedule_sigma_bit(which: usize, bit: usize) -> usize {
         Self::COL_SCHED_ENTRY_START + 6 + which * WORD_BIT_COLS + bit
-    }
-
-    /// Column of one packed-group cell within the per-block auxiliary
-    /// split-and-pack region (`h_in[1]`/`h_in[2]`/`h_in[5]`/`h_in[6]`,
-    /// `t = 0` row).
-    ///
-    /// `aux_idx ∈ [0, H_IN_AUX_OPERANDS)` indexes the four auxiliary
-    /// operands in the fixed order `[b_init, c_init, f_init, g_init]`.
-    /// `group_idx ∈ [0, GROUPS_PER_ROUND_PARTITION)` indexes the groups
-    /// in the operand's partition (`SIGMA0_GROUPS` for the `b_init`/
-    /// `c_init` slots, `SIGMA1_GROUPS` for `f_init`/`g_init`).
-    #[inline]
-    pub const fn h_in_aux_grp(aux_idx: usize, group_idx: usize) -> usize {
-        Self::COL_H_IN_AUX_GRP_START + aux_idx * GROUPS_PER_ROUND_PARTITION + group_idx
-    }
-
-    /// Start column of the σ-input split-and-pack block of the schedule
-    /// family. `which` is `0` for the `σ0(W[t-15])` input and `1` for the
-    /// `σ1(W[t-2])` input — the order written by [`write_round_row`].
-    ///
-    /// The 4 cells starting here are
-    /// `(packed_s_lo, packed_s_complement_lo, packed_s_hi, packed_s_complement_hi)`.
-    #[inline]
-    pub const fn schedule_entry_input_split(which: usize) -> usize {
-        Self::COL_SCHED_ENTRY_START
-            + 6
-            + SCHEDULE_SIGMA_OUTPUT_BIT_COLS
-            + which * SIGMA_INPUT_SPLIT_COLS
     }
 
     /// The round family's leading columns, in order:
@@ -797,7 +704,6 @@ fn write_round_row_values(
         row[r[16 + 2 * i + 1]] = m31(c.hi);
     }
     write_round_operand_bits_row(row, round);
-    write_round_output_groups_row(row, round);
 
     // Schedule family (t ≥ 16).
     let sched_sigma0_word = lower_sigma0(schedule_word_at_offset(witness, natural_row, n_rows, 15));
@@ -813,19 +719,9 @@ fn write_round_row_values(
         row[s1_hi] = m31(entry.lower_sigma1.hi);
         row[c_lo] = m31(entry.carries.lo);
         row[c_hi] = m31(entry.carries.hi);
-        write_sigma_input_split_block_row(
-            row,
-            Layout::schedule_entry_input_split(0),
-            &entry.lower_sigma0_input_split,
-        );
-        write_sigma_input_split_block_row(
-            row,
-            Layout::schedule_entry_input_split(1),
-            &entry.lower_sigma1_input_split,
-        );
     }
 
-    // t = 0 family: block-input state + §8.1 initial splits.
+    // t = 0 family: block-input state.
     if t == 0 {
         row[Layout::COL_IS_FIRST_BLOCK] = BaseField::from(is_first_block as u32);
         for j in 0..N_STATE_WORDS {
@@ -833,7 +729,6 @@ fn write_round_row_values(
             row[lo] = m31(block.h_in[j].lo);
             row[hi] = m31(block.h_in[j].hi);
         }
-        write_h_in_aux_grp_row(row, &block.aux_split_pack);
     }
 
     // t = 63 family: finalization + digest view.
@@ -906,16 +801,6 @@ fn write_round_operand_bits_row(row: &mut [BaseField], round: &crate::types::Rou
     }
 }
 
-fn write_round_output_groups_row(row: &mut [BaseField], round: &crate::types::RoundWitness) {
-    let operands: [&RoundPackedGroups; ROUND_OUTPUT_GROUP_OPERANDS] =
-        [&round.maj_ch.maj_grp, &round.maj_ch.ch_grp];
-    for (operand_idx, operand) in operands.iter().enumerate() {
-        for (group_idx, &v) in operand.vals.iter().enumerate() {
-            row[Layout::round_output_group(operand_idx, group_idx)] = m31(v);
-        }
-    }
-}
-
 fn schedule_word_at_offset(
     witness: &Sha256Witness,
     natural_row: usize,
@@ -982,27 +867,6 @@ fn word_from_row_bits(row: &[BaseField]) -> u32 {
         word |= row[Layout::w_bit(bit)].0 << bit;
     }
     word
-}
-
-fn write_h_in_aux_grp_row(row: &mut [BaseField], aux: &BlockAuxSplitPackWitness) {
-    let operands: [&RoundPackedGroups; H_IN_AUX_OPERANDS] =
-        [&aux.b_init, &aux.c_init, &aux.f_init, &aux.g_init];
-    for (aux_idx, operand) in operands.iter().enumerate() {
-        for (group_idx, &v) in operand.vals.iter().enumerate() {
-            row[Layout::h_in_aux_grp(aux_idx, group_idx)] = m31(v);
-        }
-    }
-}
-
-fn write_sigma_input_split_block_row(
-    row: &mut [BaseField],
-    base: usize,
-    w: &SigmaInputSplitPackWitness,
-) {
-    row[base] = m31(w.packed_s_lo);
-    row[base + 1] = m31(w.packed_s_complement_lo);
-    row[base + 2] = m31(w.packed_s_hi);
-    row[base + 3] = m31(w.packed_s_complement_hi);
 }
 
 fn write_padding_row_values(row: &mut [BaseField], p: &PaddingRowWitness) {
@@ -1200,8 +1064,8 @@ mod tests {
             Layout::COL_W_HI,
             Layout::round_operand_bit(0, 0),
             Layout::round_operand_bit(3, 0),
-            Layout::round_output_group(0, 0),
-            Layout::round_output_group(1, 0),
+            Layout::round_operand_bit(1, 0),
+            Layout::round_operand_bit(4, 0),
         ];
         assert!(
             decoy_cols
@@ -1281,7 +1145,6 @@ mod tests {
             + SCHEDULE_ENTRY_COLS
             + 1 // is_first_block
             + 2 * N_STATE_WORDS // h_in
-            + H_IN_AUX_GRP_COLS
             + 2 * N_STATE_WORDS // final carries
             + 2 * N_STATE_WORDS // h_out
             + 1 // is_last_block
@@ -1289,9 +1152,9 @@ mod tests {
             + PADDING_ROW_COLS
             + 1; // enabler_step
         assert_eq!(Layout::TOTAL_COLS, expected);
-        assert_eq!(ROUND_COLS, 232);
-        assert_eq!(SCHEDULE_ENTRY_COLS, 78);
-        assert_eq!(Layout::TOTAL_COLS, 493);
+        assert_eq!(ROUND_COLS, 216);
+        assert_eq!(SCHEDULE_ENTRY_COLS, 70);
+        assert_eq!(Layout::TOTAL_COLS, 437);
     }
 
     /// Round family, schedule family, and boundary families round-trip a
@@ -1317,10 +1180,6 @@ mod tests {
                     trace[Layout::round_operand_bit(0, 0)][slot].0,
                     block.rounds[t].state_in[0].to_u32() & 1
                 );
-                assert_eq!(
-                    trace[Layout::round_output_group(0, 0)][slot].0,
-                    block.rounds[t].maj_ch.maj_grp.vals[0]
-                );
                 // Schedule family: σ0 output limb.
                 if t >= 16 {
                     let [s0_lo, ..] = Layout::schedule_entry();
@@ -1328,25 +1187,10 @@ mod tests {
                         trace[s0_lo][slot].0,
                         block.schedule_entries[t - 16].lower_sigma0.lo
                     );
-                    assert_eq!(
-                        trace[Layout::schedule_entry_input_split(1)][slot].0,
-                        block.schedule_entries[t - 16]
-                            .lower_sigma1_input_split
-                            .packed_s_lo
-                    );
                 } else {
                     // Schedule family is zero on t < 16 rows.
                     let [s0_lo, ..] = Layout::schedule_entry();
                     assert_eq!(trace[s0_lo][slot].0, 0);
-                }
-                // t = 0 family.
-                if t == 0 {
-                    assert_eq!(
-                        trace[Layout::h_in_aux_grp(0, 0)][slot].0,
-                        block.aux_split_pack.b_init.vals[0]
-                    );
-                } else {
-                    assert_eq!(trace[Layout::h_in_aux_grp(0, 0)][slot].0, 0);
                 }
                 // t = 15 family.
                 if t == 15 {
