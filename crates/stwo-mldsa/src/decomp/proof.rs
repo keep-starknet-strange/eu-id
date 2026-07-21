@@ -450,6 +450,14 @@ impl Air for DecompVerifier {
             self.hashio_claimed_sum,
         ));
     }
+    fn canonical_preprocessed_columns(
+        &mut self,
+    ) -> Result<Vec<air_core::PreprocessedColumnEval>, VerificationError> {
+        // Reconstruct tree-0 verifier-side for the pinned-root check in
+        // `verify_decomp`. Same columns the prover commits (`gen_all_preprocessed`),
+        // in `all_preprocessed_ids` order.
+        Ok(gen_all_preprocessed())
+    }
     fn components(&self) -> Vec<&dyn Component> {
         self.built.as_ref().expect("built").as_components()
     }

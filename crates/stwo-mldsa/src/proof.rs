@@ -560,6 +560,15 @@ impl Air for CoeffsVerifier {
             self.ccell_claimed_sum,
         ));
     }
+    fn canonical_preprocessed_columns(
+        &mut self,
+    ) -> Result<Vec<air_core::PreprocessedColumnEval>, VerificationError> {
+        // Reconstruct tree-0 verifier-side so the pinned-root check in
+        // `verify_coeffs` has canonical content to compare against. Same columns
+        // the prover commits (`gen_all_preprocessed`), in `all_preprocessed_ids`
+        // order — mirrors the MlDsaVerifier override in statement.rs.
+        Ok(gen_all_preprocessed())
+    }
     fn components(&self) -> Vec<&dyn Component> {
         self.built.as_ref().expect("built").as_components()
     }

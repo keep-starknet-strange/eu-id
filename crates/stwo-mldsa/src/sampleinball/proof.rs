@@ -427,6 +427,15 @@ impl Air for SibVerifier {
             self.hashio_claimed_sum,
         ));
     }
+    fn canonical_preprocessed_columns(
+        &mut self,
+    ) -> Result<Vec<air_core::PreprocessedColumnEval>, VerificationError> {
+        // Reconstruct tree-0 verifier-side for the pinned-root check in
+        // `verify_sib`. `witness_log_size` equals `sib_log_size()` on the honest
+        // path (rejected otherwise before we get here), so this matches the
+        // columns the prover committed, in `all_preprocessed_ids` order.
+        Ok(gen_all_preprocessed(self.witness_log_size))
+    }
     fn components(&self) -> Vec<&dyn Component> {
         self.built.as_ref().expect("built").as_components()
     }
