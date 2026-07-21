@@ -229,3 +229,166 @@ tree:
 
 Either branch clears the bar comfortably; killing the table via rung 1 is the
 lazier and larger outcome, so it is checked first.
+
+---
+
+## Split-pack replaceability verification (adversarial)
+
+Verified against `feat/sha-limb-redesign` @ `716aab9a`. Read-only; all claims
+cited to `crates/stwo-sha256/src/`. **Verdict: REPLACEABLE — stronger,
+DELETABLE with zero compensating constraints.** The §5 rung-1 hypothesis holds,
+and holds harder than §5 hedged: the packed-group machinery is already
+vestigial on this branch, so no new recomposition constraint is even needed —
+the constraints that make deletion sound (booleanity + limb recomposition)
+already exist in the AIR for an independent reason.
+
+### The one structural fact that decides it
+
+On this branch every SHA round/schedule function is computed **directly from
+committed 32-bit boolean bit-planes**, not from the packed groups:
+
+* `sigma0_bits = big_sigma0_expr_bits(a_bits)`, `sigma1_bits = big_sigma1_expr_bits(e_bits)`,
+  `maj_bits = maj_expr_bits(a_bits,b_bits,c_bits)`, `ch_bits = ch_expr_bits(e_bits,f_bits,g_bits)`
+  — `constraints.rs:504-507`; the `*_expr_bits` bodies are pure
+  index-permutation + XOR over the bits (`constraints.rs:1149-1207`).
+* those output bits are recomposed into the output limbs `sigma0/sigma1/maj/ch`
+  (`constraints.rs:508-511`), and the four mod-2³² adds of the round consume
+  **only limbs** (`emit_mod_2_32_add_linear`, `constraints.rs:591-636`).
+* the schedule σ is identical: `sched_sigma{0,1}_bits` are constrained equal to
+  `lower_sigma{0,1}_expr_bits(w_m15/w_m2 bits)` (`constraints.rs:372-375`) then
+  recomposed into `s0/s1` (`376-377`). `w[15]`/`w[2]` never reach the σ result
+  through the packed cells.
+
+The packed-group cells (`a_grp,e_grp,maj_grp,ch_grp`, `b_init,c_init,f_init,g_init`)
+and the σ-input split cells (`sched_sigma0_split,sched_sigma1_split`) are consumed
+**exclusively** by the split-pack lookups. Grep evidence: `a_grp`→531/541,
+`e_grp`→561/571, `maj_grp`→515(tie)/551, `ch_grp`→516(tie)/581,
+`sched_sigma*_split`→382/390 only; `b_init/f_init` are read `[0,-1]` but the `-1`
+element (`_init[i][1]`) is referenced nowhere — only `_init[i][0]` feeds the t=0
+lookup (`constraints.rs:311-314,327-357`). Nothing in the arithmetic touches them.
+
+Consequence: the split-pack lookup's *only* residual soundness role is the
+implicit **range check** it advertises ("implicitly range-checks the limb to
+[0,2¹⁶)", `constraints.rs:1039-1040,1093`). Every other purported role (packing,
+cross-representation binding) is dead weight.
+
+### Q1 — what each of the 8 lookups enforces today
+
+Tuple shapes: RoundSplit `(key, g0..g3)` = `ROUND_SPLIT_PACK_REL_SIZE`
+(`wire_round_split_pack`, `constraints.rs:1042-1085`); SigmaSplit
+`(key, packed_s, packed_s_complement)` = `SIGMA_SPLIT_PACK_REL_SIZE`
+(`wire_sigma_input_split`, `constraints.rs:1094-1121`). Key = the 16-bit limb
+half (`word.0`/`word.1`); outputs = packed-group / packed-`s` cells.
+
+| lookup (relation) | key limb, gate | output cells | (a) linear packing? | (b) key range from table only? | (c) cross-rep binding? |
+|---|---|---|---|---|---|
+| sigma0_lo/hi | `a_prev`=`a_new@-1` (`gate_not_r0`) / `h_in_0` (`gate_r0`) / `maj` (`enabler`) | `a_grp` / `maj_grp` | yes — `pack_round_group_exprs(a_bits)` (`245`), `maj_grp` tied to `pack(maj_bits)` (`515`) | **no** — key recomposed (see Q's below) | only for `maj_grp`, already duplicated by `515` |
+| sigma1_lo/hi | `e_prev`=`e_new@-1` / `h_in_4` / `ch` | `e_grp` / `ch_grp` | yes — `247`, `ch_grp` tied by `516` | **no** | only for `ch_grp`, duplicated by `516` |
+| sigma0_lo/hi (t=0 aux) | `h_in_1`,`h_in_2` (`gate_r0`) | `b_init_now`,`c_init` | packing **not** otherwise constrained | **no** | **yes — this lookup is `b/c_init`'s only tie to bits today** |
+| sigma1_lo/hi (t=0 aux) | `h_in_5`,`h_in_6` (`gate_r0`) | `f_init_now`,`g_init` | packing not otherwise constrained | **no** | **yes — only tie for `f/g_init`** |
+| lower_sigma0_lo/hi | `w[15]` (`gate_sched`) | `sched_sigma0_split` | packing not otherwise constrained | **no** | none — σ0 result already from bits |
+| lower_sigma1_lo/hi | `w[2]` (`gate_sched`) | `sched_sigma1_split` | packing not otherwise constrained | **no** | none — σ1 result already from bits |
+
+So of the four possible roles: (a) packing is either already an expression or a
+redundant tie; (b) **no key is range-bounded by table membership alone** — see
+Q1b; (c) the only genuine cross-rep binding is for `b/c/f/g_init`, and it binds
+committed group cells that feed nothing but the lookup itself; (d) no
+dummy/padding role beyond the standard `enabler`-gated multiplicity
+(`constraints.rs:1056-1062`).
+
+### Q1b — is any keyed limb bounded ONLY by table membership? No.
+
+`limb_sum` sums exactly `LIMB_BITS=16` boolean bits per limb
+(`constraints.rs:1209-1214`; `LIMB_BITS=16` `types.rs:14`, `WORD_BIT_COLS=32`
+`trace.rs:107`). `constrain_boolean_bits` is **ungated — every row**
+(`constraints.rs:1236-1240`, called `470-478`). So any limb constrained
+`limb == Σ_{i<16} bit_i·2^i` with boolean bits is forced into `[0,2¹⁶)`; that is
+the *same* free range check R1 credits to the table. Every split-pack key has
+such a recomposition:
+
+* `a_prev`/`h_in_0` ← `a_in` recomposed to `a_bits`, `constraints.rs:481`
+  (gated `enabler` ⊇ both `gate_not_r0` and `gate_r0` on real rows;
+  `a_in`=`h_in_0` at t=0, `=a_new@-1` at t≥1 via `boundary_select`).
+* `e_prev`/`h_in_4` ← `e_in`→`e_bits`, `constraints.rs:482`.
+* `h_in_1/2/5/6` ← `b/c/f/g_bits`, `constraints.rs:483-486` (gated `gate_r0`).
+* `maj`,`ch` ← recomposed ungated, `constraints.rs:510-511`.
+* `w[15]`,`w[2]` are cross-row reads of the single W-limb column, which is
+  recomposed on its home row via `w[0]`→`w_bits`, `constraints.rs:480` (gated
+  `enabler`; home rows t−15, t−2 are real in-block rows). There is no separate
+  `w[15]` column to forge — `w[k]` are offset reads of one column
+  (`constraints.rs:157-169`).
+
+No keyed limb lives only as a limb; none depends on the table for its range.
+
+### Q2 — booleanity on padding / message-schedule rows
+
+`constrain_boolean_bits` is ungated, so `w,a,b,c,e,f,g,sched_sigma0/1` bit
+columns are boolean on **every** row including padding and the message region
+(`constraints.rs:470-478`). Recomposition and the lookups are all `enabler`- (or
+finer-) gated, so padding rows (`enabler=0`) contribute nothing and cannot inject
+junk. The malicious-junk-in-inactive-rows attack is blocked by ungated
+booleanity, not by the lookup — deleting the lookup does not open it.
+
+### Q3 — the 4 range tables survive independently
+
+`Range2/4/5` bound the mod-2³² add carries (`emit_mod_2_32_add_linear` →
+`wire_range_check`, `constraints.rs:591-636,1366-1397`); `Range16` bounds the
+final-block **digest** limbs `h_out[j]` (`constraints.rs:683-696`), which have
+**no bit-plane** and so genuinely need it. None of these consume split-pack
+membership, and deleting split-pack shifts no burden onto them: the split-pack
+keys are bounded by recomposition, not by any range table. (The
+`shared_tables.rs:~696` "keys ≥ 2¹⁶ unreachable" note concerns the Range16
+producer's own domain and is orthogonal.) The four range producers stay exactly
+as they are.
+
+### Q4 — external consumers
+
+No consumer of the `SplitPack*` relations or the group/`packed_s` columns exists
+outside `stwo-sha256` (grep of `crates/eu-id-prover/src`, `crates/stwo-p256/src`
+for `SplitPack|split_pack|_grp|packed_s` → empty). The mdoc field-exposure path
+takes SHA state through **recomposed, boolean-constrained bits**, explicitly
+"so no [lookup needed]" (`field_exposure.rs:13`); exposed digest bytes are
+bounded by Range16, not split-pack. No γ-digest / window-bind relation
+transitively depends on split-pack for boundedness or well-formedness.
+
+### Q5 — VERDICT (a) REPLACEABLE / DELETABLE
+
+Delete the 8 split-pack producers, their 8 `SplitPack*` relations, and all
+consumer call sites (`wire_round_split_pack`, `wire_sigma_input_split`).
+**Compensating constraints needed: none** — booleanity (`470-478`) and limb
+recomposition (`480-486`,`510-511`) already cover every key's range, and the
+arithmetic never reads the groups. Additionally delete the now-dead committed
+columns and their generators: `maj_grp`,`ch_grp` (16 cols) and the two ties
+`constraints.rs:515-516`; `b_init,c_init,f_init,g_init` (32 cols);
+`sched_sigma0_split,sched_sigma1_split` (8 cols) — ≈ **56 base cols/row removed**
+across the 4 message components. `a_grp`/`e_grp` are expressions, not columns, so
+they vanish with the call sites. No bit column becomes free: `a,b,c,e,f,g,w`
+bits still feed Σ/σ/Maj/Ch and the reuse chain (`constraints.rs:492-502`).
+
+* **Degree:** deletion only removes constraints/relations; all survivors are the
+  existing ≤ deg-2 identities. No engine/PAIRS-ONLY concern.
+* **Cell delta vs the doc's w=8:** strictly better on every axis. w=8 keeps the
+  group machinery, re-keys the tables to 61k cells but **grows** message
+  interaction ×1.63 (+0.4–0.58 M). Deletion removes the ~8.4 M of split-pack
+  producer mass outright (leaving only the ~0.6–0.9 M of retained range
+  producers, Range16-dominated) **and shrinks** the messages (−56 cols/row,
+  interaction drops rather than grows). Net SHA subsystem lands at or below
+  w=8's ~1.865 M as a pure-deletion diff with no new tables to audit. If `h_out`
+  is later given a bit-plane + recomposition, Range16 too could go and the shared
+  table mass approaches zero — a follow-on, out of scope here.
+* **Invariants to pin as negatives before/after the diff:** (i) mutate a keyed
+  limb off its bit-recomposition (e.g. add 2¹⁶ to `maj`) ⇒ recomposition
+  (`510`) must reject — proves the range check truly lives in recomposition, not
+  the deleted lookup; (ii) write non-boolean junk into an inactive-row bit ⇒
+  ungated booleanity (`1238`) must reject; (iii) round-trip proof unchanged after
+  deletion (completeness).
+
+### Q6 — the doc's ×1.63 consumer census is correct; no consumer missed
+
+Enumerated consumers of split-pack: round family fires 4 ops × 2 halves = 8/row
+(`constraints.rs:527-586`, complementary `gate_r0`/`gate_not_r0` pairs count
+once), schedule family 2 × 2 = 4/row (`378-393`), plus 4 t=0-only aux sites × 2
+halves (`323-362`). Average `8 + (48/64)·4 = 11`/row, matching §0.4; w=8's
+11→22 doubling is arithmetically right. But it is moot: deletion removes these
+consumers rather than doubling them, so the ×1.63 interaction growth never
+occurs.
