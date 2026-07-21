@@ -1681,13 +1681,14 @@ pub fn device_authentication_bytes(
     }
 
     let device_namespaces = encode_value(Value::Map(Vec::new()));
-    let device_namespaces_bytes =
-        encode_value(Value::Tag(24, Box::new(Value::Bytes(device_namespaces))));
+    // DeviceNameSpacesBytes = #6.24(bstr .cbor DeviceNameSpaces) per ISO 18013-5 — a tag-24 bstr,
+    // NOT a plain bstr wrapping the tag-24 encoding (that extra wrapper made the reconstructed
+    // DeviceAuthentication differ from what the holder signed → deviceSignature failed to verify).
     let device_authentication = encode_value(Value::Array(vec![
         "DeviceAuthentication".into(),
         session_transcript,
         doc_type.into(),
-        Value::Bytes(device_namespaces_bytes),
+        Value::Tag(24, Box::new(Value::Bytes(device_namespaces))),
     ]));
     Ok(encode_value(Value::Tag(
         24,
