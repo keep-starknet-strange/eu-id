@@ -158,7 +158,9 @@ pub fn prove_mdoc(
     request: &MdocPidRequest,
     policy: Policy,
 ) -> Result<(MdocProof, MdocStatement), Error> {
-    let extracted = mdoc::extract_pid_mdoc(document, request).map_err(Error::Mdoc)?;
+    let mut extracted = mdoc::extract_pid_mdoc(document, request).map_err(Error::Mdoc)?;
+    // Multi-nationality holders disclose an array; pick the code satisfying the policy before proving.
+    mdoc::select_accepted_nationality(&mut extracted, &policy);
     let statement =
         mdoc::MdocCircuitStatement::from_extracted(&extracted, policy).map_err(Error::Mdoc)?;
     let proof = mdoc::prove_mdoc_circuit(&extracted, &statement)?;
