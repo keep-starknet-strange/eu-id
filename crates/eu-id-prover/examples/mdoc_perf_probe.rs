@@ -27,6 +27,12 @@ struct Report {
     proof_bytes: usize,
     prove_ms_median: u128,
     verify_ms_median: u128,
+    /// Wall-time of the last prove iteration (pairs with `stark_prove_profile`,
+    /// which is from that same iteration). `prove_ms_last - stark_prove_profile.total`
+    /// is the mdoc-level witness/statement/module prep time outside the STARK engine.
+    prove_ms_last: u128,
+    /// Per-stage STARK prove profile from the last prove iteration.
+    stark_prove_profile: air_core::StarkProveProfile,
     pcs_config: PcsConfig,
     shape_cells: u64,
     modules: Vec<ModuleShape>,
@@ -184,6 +190,8 @@ fn main() {
         proof = Some(next);
     }
     let proof = proof.expect("at least one proof iteration ran");
+    let prove_ms_last = prove_times.last().expect("at least one iteration").as_millis();
+    let stark_prove_profile = proof.stark_prove_profile().clone();
     #[cfg(feature = "ec-coprocessor")]
     let p4b_prove_profile = proof.p4b_prove_profile().map(P4bProveProfileReport::from);
     let proof_bytes = bincode::serialize(&proof)
@@ -286,6 +294,8 @@ fn main() {
         proof_bytes,
         prove_ms_median: median(&mut prove_times).as_millis(),
         verify_ms_median: median(&mut verify_times).as_millis(),
+        prove_ms_last,
+        stark_prove_profile,
         pcs_config: proof.stark_proof.config,
         shape_cells,
         modules,

@@ -28,6 +28,7 @@ pub mod relations;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher as _};
 use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 
 use num_traits::Zero;
 use stwo::core::air::Component;
@@ -326,6 +327,14 @@ pub trait AirProver: Air {
         false
     }
 
+    /// Human-readable module label for per-stage profiling. Defaults to the
+    /// concrete type name (the default body is monomorphized per implementor, so
+    /// `type_name::<Self>()` resolves to the real type through the vtable) — no
+    /// module needs to override it.
+    fn profile_name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
+
     /// Phase 0 — append preprocessed columns to the shared tree.
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, Mc>);
 
@@ -379,12 +388,75 @@ pub trait AirProver: Air {
     fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>>;
 }
 
+/// Per-module wall-time for one write phase (tree-1 trace or tree-2
+/// interaction), so trace-gen cost is attributable per module.
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct ModuleWriteTime {
+    /// Module position in the `prove` call's module slice.
+    pub index: usize,
+    /// Module type name (from [`AirProver::profile_name`]).
+    pub name: String,
+    /// Wall-time for this module's write in this phase, in milliseconds.
+    pub ms: f64,
+}
+
+/// Wall-time breakdown of one [`prove_profiled`] call, in milliseconds.
+/// `Instant`-only timestamps — near-zero overhead, always on. The stage fields
+/// (plus `post_interaction` and `build_components`) sum to `total`.
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct StarkProveProfile {
+    /// FRI twiddle setup (cached across calls — near-zero when warm).
+    pub twiddles: f64,
+    /// Tree-0 preprocessed write (all modules).
+    pub tree0_write: f64,
+    /// Tree-0 commit.
+    pub tree0_commit: f64,
+    /// Tree-1 trace write (all modules).
+    pub tree1_write: f64,
+    /// Tree-1 commit.
+    pub tree1_commit: f64,
+    /// Tree-2 interaction write (all modules).
+    pub tree2_write: f64,
+    /// Tree-2 commit.
+    pub tree2_commit: f64,
+    /// Relation draws (all modules).
+    pub draw_relations: f64,
+    /// Post-interaction transcript block (GKR lookup proofs, the coprocessor
+    /// p4b bundle prove, and any post-interaction tree commit).
+    pub post_interaction: f64,
+    /// Component assembly against the shared allocator.
+    pub build_components: f64,
+    /// The stwo engine `prove` call: composition + OODS + FRI + openings.
+    pub engine_prove: f64,
+    /// Total wall-time of the whole `prove_profiled` call.
+    pub total: f64,
+    /// Per-module tree-1 (trace) write times, in module order.
+    pub tree1_write_per_module: Vec<ModuleWriteTime>,
+    /// Per-module tree-2 (interaction) write times, in module order.
+    pub tree2_write_per_module: Vec<ModuleWriteTime>,
+}
+
+fn ms_since(start: Instant) -> f64 {
+    start.elapsed().as_secs_f64() * 1000.0
+}
+
 /// Drive every module through the four phases against one shared channel and one
 /// shared commitment scheme, producing a single STARK proof.
 pub fn prove(
     modules: &mut [&mut dyn AirProver],
     config: PcsConfig,
 ) -> Result<StarkProof<Hasher>, ProvingError> {
+    prove_profiled(modules, config).map(|(proof, _profile)| proof)
+}
+
+/// Same as [`prove`], but also returns a per-stage wall-time [`StarkProveProfile`].
+pub fn prove_profiled(
+    modules: &mut [&mut dyn AirProver],
+    config: PcsConfig,
+) -> Result<(StarkProof<Hasher>, StarkProveProfile), ProvingError> {
+    let total_start = Instant::now();
+    let mut profile = StarkProveProfile::default();
+
     // Size the twiddles to the largest constraint-evaluation domain any module
     // needs, plus the FRI blow-up — unless the config pins an explicit lifting
     // size. With the default (degree-2) bound this is `max_log_size + 1 +
@@ -398,7 +470,9 @@ pub fn prove(
         .lifting_log_size
         .unwrap_or(max_constraint_log_degree_bound + config.fri_config.log_blowup_factor);
 
+    let stage = Instant::now();
     let twiddles = cached_twiddles(twiddle_log_size);
+    profile.twiddles = ms_since(stage);
 
     let channel = &mut Ch::default();
     config.mix_into(channel);
@@ -418,42 +492,69 @@ pub fn prove(
         .collect();
     let (preprocessed_ids, selected_preprocessed_ids) =
         select_first_preprocessed_ids(&module_preprocessed_ids);
+    let stage = Instant::now();
     let mut tb = commitment_scheme.tree_builder();
     for (module, selected_ids) in modules.iter_mut().zip(&selected_preprocessed_ids) {
         module.write_selected_preprocessed(&mut tb, selected_ids);
     }
+    profile.tree0_write = ms_since(stage);
+    let stage = Instant::now();
     tb.commit(channel);
+    profile.tree0_commit = ms_since(stage);
 
     for m in modules.iter() {
         m.mix_public(channel);
     }
 
     // Tree 1: every module's witness + multiplicity columns.
+    let stage = Instant::now();
     let mut tb = commitment_scheme.tree_builder();
-    for m in modules.iter_mut() {
+    for (index, m) in modules.iter_mut().enumerate() {
+        let m_start = Instant::now();
         m.write_trace(&mut tb);
+        profile.tree1_write_per_module.push(ModuleWriteTime {
+            index,
+            name: m.profile_name().to_string(),
+            ms: ms_since(m_start),
+        });
     }
+    profile.tree1_write = ms_since(stage);
+    let stage = Instant::now();
     tb.commit(channel);
+    profile.tree1_commit = ms_since(stage);
 
+    let stage = Instant::now();
     for m in modules.iter_mut() {
         m.draw_relations(channel);
     }
+    profile.draw_relations = ms_since(stage);
 
     // Tree 2: every module's interaction columns. Claimed sums are mixed before
     // the commit, matching the standalone transcript order.
+    let stage = Instant::now();
     let mut tb = commitment_scheme.tree_builder();
-    for m in modules.iter_mut() {
+    for (index, m) in modules.iter_mut().enumerate() {
+        let m_start = Instant::now();
         m.write_interaction(&mut tb);
+        profile.tree2_write_per_module.push(ModuleWriteTime {
+            index,
+            name: m.profile_name().to_string(),
+            ms: ms_since(m_start),
+        });
     }
+    profile.tree2_write = ms_since(stage);
     for m in modules.iter() {
         m.mix_claimed_sums(channel);
     }
+    let stage = Instant::now();
     tb.commit(channel);
+    profile.tree2_commit = ms_since(stage);
 
     // Optional post-tree-2 transcript block. GKR lookup proofs live here:
     // their inputs are already committed (trees 1/2 plus relation draws), and
     // any MLE-eval tie-back columns are committed immediately after the GKR
     // proof messages so the verifier replays the same Fiat-Shamir order.
+    let stage = Instant::now();
     for m in modules.iter_mut() {
         m.prove_post_interaction(channel);
     }
@@ -467,18 +568,27 @@ pub fn prove(
         }
         tb.commit(channel);
     }
+    profile.post_interaction = ms_since(stage);
 
     // Build every module's components against one shared allocator seeded with
     // unique preprocessed column ids. Repeated deterministic tables resolve to
     // the first matching id here so the constraint framework's static allocator
     // stays well-defined for repeated modules.
+    let stage = Instant::now();
     let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&preprocessed_ids);
     for m in modules.iter_mut() {
         m.build_components(&mut allocator);
     }
     let component_refs: Vec<&dyn ComponentProver<SimdBackend>> =
         modules.iter().flat_map(|m| m.prover_components()).collect();
-    stark_prove::<SimdBackend, Mc>(&component_refs, channel, commitment_scheme)
+    profile.build_components = ms_since(stage);
+
+    let stage = Instant::now();
+    let proof = stark_prove::<SimdBackend, Mc>(&component_refs, channel, commitment_scheme)?;
+    profile.engine_prove = ms_since(stage);
+
+    profile.total = ms_since(total_start);
+    Ok((proof, profile))
 }
 
 /// Errors from [`verify_with_expected_preprocessed_root`].

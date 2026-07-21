@@ -2992,6 +2992,10 @@ pub struct MdocCircuitProof {
     age_claimed_sums: Option<Vec<QM31>>,
     nat_public: Option<predicates::NatPublicInput>,
     nat_claimed_sums: Option<Vec<QM31>>,
+    /// Per-stage prove wall-time. Not part of the proof data (0 bytes on the
+    /// wire); populated on the prover, `Default` after deserialization.
+    #[serde(skip)]
+    stark_prove_profile: air_core::StarkProveProfile,
     #[cfg(feature = "ec-coprocessor")]
     #[serde(skip)]
     p4b_prove_profile: Option<eu_id_ec_coprocessor::ecdsa::MdocP4bProveProfile>,
@@ -3015,6 +3019,11 @@ impl MdocCircuitProof {
     #[cfg(feature = "ec-coprocessor")]
     pub fn p4b_prove_profile(&self) -> Option<&eu_id_ec_coprocessor::ecdsa::MdocP4bProveProfile> {
         self.p4b_prove_profile.as_ref()
+    }
+
+    /// Per-stage STARK prove profile from the last `prove` call.
+    pub fn stark_prove_profile(&self) -> &air_core::StarkProveProfile {
+        &self.stark_prove_profile
     }
 }
 
@@ -4928,7 +4937,7 @@ pub fn prove_mdoc_circuit_with_pcs_config(
         )
     });
 
-    let stark_proof = {
+    let (stark_proof, stark_prove_profile) = {
         #[cfg(not(feature = "ec-coprocessor"))]
         let mut modules: Vec<&mut dyn AirProver> = vec![
             &mut sha_tables,
@@ -4988,7 +4997,7 @@ pub fn prove_mdoc_circuit_with_pcs_config(
         modules.push(&mut coprocessor);
         #[cfg(feature = "ec-coprocessor")]
         modules.push(&mut mdoc_mac);
-        air_core::prove(modules.as_mut_slice(), config)
+        air_core::prove_profiled(modules.as_mut_slice(), config)
             .map_err(|e| Error::Prove(format!("{e:?}")))?
     };
     #[cfg(feature = "ec-coprocessor")]
@@ -5075,6 +5084,7 @@ pub fn prove_mdoc_circuit_with_pcs_config(
         age_claimed_sums: age.as_ref().map(|age| age.claimed_sums()),
         nat_public: nat.as_ref().map(|_| nat_public),
         nat_claimed_sums: nat.as_ref().map(|nat| nat.claimed_sums()),
+        stark_prove_profile,
         #[cfg(feature = "ec-coprocessor")]
         p4b_prove_profile,
     })
