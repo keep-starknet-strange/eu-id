@@ -11,26 +11,30 @@ use crate::mdoc::{
     MdocCircuitStatement, MdocRevocationPublicInputs,
 };
 
-// Regenerated 2026-07-13 for circuit revision 2, which derives SHA field
-// exposure bytes from the constrained W bit planes. The old hash was
-// 5445c650a6f57d6be268e1d1b1d98355dddb8188c8496c5e6cffe8da0d4f21e6.
+// Regenerated 2026-07-21 for circuit revision 3: commit 85c71369 deleted the
+// vestigial SHA split-pack lookup tables (recomposition + ungated booleanity
+// already enforce them), changing the SHA-256 constraint set and the mdoc
+// preprocessed root, both of which fold into this tuple hash. Old hashes:
+// 5445c650a6f57d6b...0d4f21e6 (revision 1); a43f41e4745a053a...a3232591
+// (revision 2, SHA field exposure from constrained W bit planes 2026-07-13).
 pub const TS13_PUBLISHED_AGE_OVER_18_CIRCUIT_HASH: &str =
-    "a43f41e4745a053aa519c6140193e4bfc3ba2894f97c1a9a6e2df9e9a3232591";
-// Regenerated 2026-07-08 after routing the TS13 revocation ECDSA through the
-// P4b coprocessor: the in-STARK P-256 AIR instance (preprocessed namespace
-// "mdoc/ts13/revocation") left the tree-0 commitment, so the mdoc
-// preprocessed root moved. Value is the real `commitments[0]` of the
-// published N=1 revocation-enabled age_over_18 mdoc proof (captured via
-// ts13_evidence_pack_n1_measurements). Old value:
-// 3532fa24129acba9...8583169f (Class-D blinding repin, same day). See
+    "d09852c1343dcf595dadbe8f1003f16710dd732cba471e58dc8cc2e52b84fc96";
+// Regenerated 2026-07-21 after commit 85c71369 deleted the vestigial SHA
+// split-pack lookup tables (46 -> 14 preprocessed columns in stwo-sha256), so
+// the mdoc tree-0 preprocessed commitment moved. Value is the real
+// `commitments[0]` of the published N=1 revocation-enabled age_over_18 mdoc
+// proof (captured via ts13_evidence_pack_n1_measurements). Old values:
+// 3532fa24129acba9...8583169f (Class-D blinding repin 2026-07-08);
+// ba943f9deed4cf5e...55e8a8b7 (P4b coprocessor revocation reroute 2026-07-08);
+// split-pack deletion repin 2026-07-21, 85c71369. See
 // tasks/p4c-leakage-table.md.
 pub const TS13_PUBLISHED_AGE_OVER_18_PREPROCESSED_ROOT: &[u8; 32] =
-    b"\xba\x94\x3f\x9d\xee\xd4\xcf\x5e\x0f\x19\xf1\xca\xfa\x3e\x40\x5f\xff\xe9\x21\x25\xda\xa8\xdf\x2d\x00\x01\x94\x7e\x55\xe8\xa8\xb7";
+    b"\xbc\x8a\xd8\xa2\xf9\x44\x0f\x66\x02\xd4\xd3\xb0\x77\x72\xe8\xbc\x28\xd3\xb7\x85\x8c\xc8\x75\xba\x60\x37\x2d\xf8\x2a\x9b\xab\xcf";
 pub const TS13_P4C_MIN_BLIND_ROWS: usize = 256;
 pub const TS13_P4C_MAX_OPENINGS: usize = 256;
 pub const TS13_P4C_MIN_DECOY_MESSAGE_BITS: usize = 512;
 pub const TS13_P4C_PER_OPENING_STATISTICAL_BITS: u32 = 64;
-pub const TS13_CIRCUIT_REVISION: u32 = 2;
+pub const TS13_CIRCUIT_REVISION: u32 = 3;
 pub const TS13_PCS_LOG_BLOWUP_FACTOR: u32 = 2;
 pub const TS13_PCS_QUERIES: u32 = 54;
 pub const TS13_PCS_POW_BITS: u32 = 20;
@@ -693,7 +697,7 @@ mod tests {
         let tuple = Ts13CircuitTuple::published_age_over_18();
         let soundness = ts13_published_soundness_table();
 
-        assert_eq!(tuple.circuit_revision, 2);
+        assert_eq!(tuple.circuit_revision, 3);
         assert_eq!(tuple.pcs_log_blowup_factor, 2);
         assert_eq!(tuple.pcs_queries, 54);
         assert_eq!(tuple.pcs_pow_bits, 20);
