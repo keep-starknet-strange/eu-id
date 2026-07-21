@@ -723,7 +723,8 @@ fn map_prover_error(e: eu_id_prover::Error) -> ZkError {
         // Verifier-side rejections (only reachable from the verify path).
         P256InstanceMismatch | IssuerKeyMismatch | AgePolicyMismatch | NatPolicyMismatch
         | WeakConfig { .. } | CoprocessorMissing | CoprocessorInstanceCount { .. }
-        | CoprocessorProof(_) | Verify(_) | PreprocessedRootMismatch { .. } => {
+        | CoprocessorProof(_) | Verify(_) | PreprocessedRootMismatch { .. }
+        | ShapeTooLarge { .. } => {
             ZkError::Verify(format!("{e:?}"))
         }
     }

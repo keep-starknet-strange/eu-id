@@ -1419,16 +1419,21 @@ fn device_authentication_bytes_are_tag24_wrapped_and_embed_session_transcript_ar
     );
     assert_eq!(device_auth[2], Value::Text(DOCTYPE.to_string()));
 
-    let Value::Bytes(device_namespaces_bytes) = &device_auth[3] else {
-        panic!("DeviceNameSpacesBytes must be a bstr");
+    // DeviceNameSpacesBytes = #6.24(bstr .cbor DeviceNameSpaces) per 18013-5 §9.1.3.4
+    // — the tag-24 data item itself, not a bstr wrapping one.
+    let Value::Tag(24, device_namespaces_tagged) = &device_auth[3] else {
+        panic!("DeviceNameSpacesBytes must be a tag-24 data item");
+    };
+    let Value::Bytes(device_namespaces_bytes) = device_namespaces_tagged.as_ref() else {
+        panic!("DeviceNameSpacesBytes tag must wrap a bstr");
     };
     assert!(
         matches!(
             ciborium::de::from_reader::<Value, _>(&device_namespaces_bytes[..])
-                .expect("DeviceNameSpacesBytes decodes"),
-            Value::Tag(24, _)
+                .expect("DeviceNameSpaces decodes"),
+            Value::Map(_)
         ),
-        "DeviceNameSpacesBytes must carry tag-24 wrapped namespaces"
+        "DeviceNameSpacesBytes must embed the DeviceNameSpaces map"
     );
 
     let Value::Array(transcript_array) = &device_auth[1] else {
