@@ -414,7 +414,11 @@ fn decode_ts13_proof_envelope(proof: &[u8]) -> Result<Ts13ProofEnvelope, ZkError
             "TS13 proof envelope exceeds size limit".to_string(),
         ));
     }
+    // Peek only the leading `envelope_format` field: allow trailing bytes here
+    // (the rest of the envelope follows it). The full decode below still pins
+    // exact consumption via `reject_trailing_bytes`.
     let envelope_format: u16 = bounded_bincode_options(MAX_MDOC_ENVELOPE_BYTES)
+        .allow_trailing_bytes()
         .deserialize(proof)
         .map_err(|_| ZkError::Verify("unsupported TS13 envelope format".to_string()))?;
     if envelope_format != TS13_ENVELOPE_FORMAT_V1 {
@@ -783,7 +787,11 @@ fn decode_mdoc_proof_envelope(proof: &[u8]) -> Result<MdocProofEnvelope, ZkError
             "proof envelope exceeds size limit".to_string(),
         ));
     }
+    // Peek only the leading `envelope_format` field: allow trailing bytes here
+    // (the rest of the envelope follows it). The full decode below still pins
+    // exact consumption via `reject_trailing_bytes`.
     let envelope_format: u16 = bounded_bincode_options(MAX_MDOC_ENVELOPE_BYTES)
+        .allow_trailing_bytes()
         .deserialize(proof)
         .map_err(|_| unsupported())?;
     if envelope_format != MDOC_ENVELOPE_FORMAT_V6 {
@@ -1288,8 +1296,10 @@ mod tests {
     #[test]
     fn pre_q11_envelope_without_discriminator_rejects_typed() {
         // The old envelope started with `statement_bytes: Vec<u8>`, whose
-        // bincode length prefix is deliberately not the supported format.
-        let legacy = bincode::serialize(&(vec![0u8; 6], vec![0u8; 1], vec![0u8; 1])).unwrap();
+        // bincode length prefix is deliberately not the supported format
+        // (9 != MDOC_ENVELOPE_FORMAT_V6; a length equal to the current format
+        // would instead reject at body decode, which the v6 test covers).
+        let legacy = bincode::serialize(&(vec![0u8; 9], vec![0u8; 1], vec![0u8; 1])).unwrap();
         assert!(matches!(
             verify_identity(sample_statement(), legacy),
             Err(ZkError::Verify(message)) if message == "unsupported envelope format"
