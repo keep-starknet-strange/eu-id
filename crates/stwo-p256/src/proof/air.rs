@@ -597,6 +597,17 @@ impl Air for P256Verifier {
         self.ids.clone()
     }
 
+    // NOTE: `P256Verifier` deliberately does NOT override
+    // `Air::canonical_preprocessed_columns`. Its preprocessed tree includes the
+    // legacy hinted-mul scalar-multiplication schedule, which is
+    // witness-dependent and cannot be reconstructed from public data alone. The
+    // trait default therefore returns `Err`, so every production verify path
+    // that runs `air_core::compute_canonical_preprocessed_root` over a module set
+    // containing this module fails closed. This is by design: the classical
+    // (non-`ec-coprocessor`) build cannot be canonically verified — the
+    // `ec-coprocessor` build proves the ECDSA statement in-circuit instead of
+    // reconstructing this schedule. See the trait-default doc in `air-core`.
+
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
         self.components = Some(
             P256CurrentAirComponents::new_with_hinted_mul_preprocessed_namespace(

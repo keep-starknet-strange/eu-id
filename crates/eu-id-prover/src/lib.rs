@@ -713,6 +713,53 @@ pub enum Error {
         /// The root the verifier derived independently.
         expected: air_core::CommitmentRoot,
     },
+    /// A prover-carried trace/table shape field exceeds the accepted maximum.
+    /// Rejected fail-closed BEFORE the verifier reconstructs the canonical
+    /// preprocessed tree, so a malicious shape (e.g. `sha_log_n_rows = 30`)
+    /// cannot steer a multi-gigabyte allocation ahead of any other check.
+    ShapeTooLarge {
+        /// The prover-carried shape field that exceeded its cap.
+        field: &'static str,
+        /// The value the proof carried.
+        got: u32,
+        /// The maximum the verifier accepts (honest max + headroom).
+        max: u32,
+    },
+}
+
+/// Upper bound on a prover-carried SHA trace log-size the verifier accepts
+/// before reconstructing the canonical preprocessed tree. Honest proofs size
+/// this to the SHA message: [`stwo_sha256::trace::min_log_size`] grows ~log₂ of
+/// the byte length, reaching ~17 for a 64 KiB message — far larger than any real
+/// mdoc credential, MSO, or signed structure (all a few KB, ~log 11–15). The +3
+/// headroom (2²⁰ ≈ 1M rows) leaves generous slack while bounding the verifier's
+/// tree-0 rebuild to tens of MB; a malicious `sha_log_n_rows = 30` (gigabytes)
+/// is rejected first.
+const MAX_SHA_LOG_N_ROWS: u32 = 20;
+
+/// Upper bound on a prover-carried SHA group width. Production always uses
+/// [`generator::SHA_GROUP_WIDTH`] (6); the packed Maj/Ch preprocessed table is
+/// sized `3·W`, so an unbounded width inflates that table without limit. +2
+/// headroom over the fixed production width.
+const MAX_SHA_GROUP_WIDTH: u32 = generator::SHA_GROUP_WIDTH + 2;
+
+/// Upper bound on a prover-carried digest-bind bridge log-size. Honest bridges
+/// use [`bridge_log_size`] (min 9, +1 per doubling of instances); even thousands
+/// of instances stay well under the shared SHA ceiling.
+#[cfg(not(feature = "ec-coprocessor"))]
+const MAX_BRIDGE_LOG_SIZE: u32 = MAX_SHA_LOG_N_ROWS;
+
+/// Reject a prover-carried shape field that exceeds its cap, returning a typed
+/// [`Error::ShapeTooLarge`]. Called on every production verify path BEFORE
+/// [`air_core::compute_canonical_preprocessed_root`], because the preprocessed
+/// tree the verifier reconstructs there is sized by these fields — an unbounded
+/// value would let a malicious proof force a multi-gigabyte allocation before
+/// rejection.
+pub(crate) fn check_shape_cap(field: &'static str, got: u32, max: u32) -> Result<(), Error> {
+    if got > max {
+        return Err(Error::ShapeTooLarge { field, got, max });
+    }
+    Ok(())
 }
 
 /// The relying party's public statement — the only thing [`verify_identity`]
@@ -1919,6 +1966,22 @@ fn verify_stark_with_config(
     expected_config_override: Option<PcsConfig>,
     expected_preprocessed_root: Option<air_core::CommitmentRoot>,
 ) -> Result<(), Error> {
+    // Cap prover-steered shape BEFORE the canonical tree-0 rebuild: the
+    // preprocessed tree `compute_canonical_preprocessed_root` reconstructs is
+    // sized by these fields, so an unbounded value is a DoS vector.
+    check_shape_cap("sha_log_n_rows", proof.sha_log_n_rows, MAX_SHA_LOG_N_ROWS)?;
+    check_shape_cap(
+        "sha_group_width",
+        proof.sha_group_width,
+        MAX_SHA_GROUP_WIDTH,
+    )?;
+    #[cfg(not(feature = "ec-coprocessor"))]
+    check_shape_cap(
+        "bridge_log_size",
+        proof.bridge_log_size,
+        MAX_BRIDGE_LOG_SIZE,
+    )?;
+
     #[cfg(not(feature = "ec-coprocessor"))]
     let scalar_z_handle = SharedScalarZRelation::new();
     let digest_handle = SharedDigestRelation::new();
@@ -2352,5 +2415,64 @@ mod ec_coprocessor_tests {
             verify_identity(&proof, &statement),
             Err(Error::IssuerKeyMismatch) | Err(Error::P256InstanceMismatch)
         ));
+    }
+}
+
+#[cfg(test)]
+mod shape_cap_tests {
+    use super::{check_shape_cap, Error, MAX_SHA_GROUP_WIDTH, MAX_SHA_LOG_N_ROWS};
+
+    #[test]
+    fn shape_cap_accepts_values_at_the_boundary() {
+        check_shape_cap("sha_log_n_rows", MAX_SHA_LOG_N_ROWS, MAX_SHA_LOG_N_ROWS)
+            .expect("a value exactly at the cap is accepted");
+        check_shape_cap("sha_group_width", MAX_SHA_GROUP_WIDTH, MAX_SHA_GROUP_WIDTH)
+            .expect("a value exactly at the cap is accepted");
+    }
+
+    #[test]
+    fn shape_cap_rejects_oversized_sha_log_n_rows() {
+        // A malicious `sha_log_n_rows = 30` (gigabytes of tree-0) is rejected
+        // with the typed error, so the caller bails BEFORE any allocation.
+        let error = check_shape_cap("sha_log_n_rows", 30, MAX_SHA_LOG_N_ROWS)
+            .expect_err("30 far exceeds the cap");
+        match error {
+            Error::ShapeTooLarge { field, got, max } => {
+                assert_eq!(field, "sha_log_n_rows");
+                assert_eq!(got, 30);
+                assert_eq!(max, MAX_SHA_LOG_N_ROWS);
+            }
+            other => panic!("expected ShapeTooLarge, got {other:?}"),
+        }
+    }
+}
+
+/// Pins the classical (feature `ec-coprocessor` OFF) fail-closed behavior: the
+/// legacy P256 module's hinted-mul preprocessed schedule is witness-dependent
+/// and cannot be canonically reconstructed, so the verify entry returns the
+/// reconstruct error rather than panicking. Not run by the default `make check`
+/// CI (which builds with default features, ec-coprocessor ON); run with
+/// `cargo test -p eu-id-prover --no-default-features -- --ignored`.
+#[cfg(all(test, not(feature = "ec-coprocessor")))]
+mod classical_fail_closed_tests {
+    use crate::generator::IssuerKey;
+    use crate::{fixtures, prove_identity, verify_identity, Error, PublicStatement};
+
+    #[test]
+    #[ignore = "slow: builds a full classical P256 proof before the fail-closed verify"]
+    fn classical_verify_entry_fails_closed_not_panics() {
+        let fixture = fixtures::valid_over_18();
+        let issuer = IssuerKey::demo();
+        let nonce = fixtures::demo_nonce_statement();
+        let proof = prove_identity(&fixture.signed.credential, &issuer, &fixture.policy, &nonce)
+            .expect("classical credential proves");
+        let statement = PublicStatement::new(issuer.public_key(), fixture.policy.clone(), nonce);
+        match verify_identity(&proof, &statement) {
+            Err(Error::Verify(message)) => assert!(
+                message.contains("reconstruct"),
+                "expected a reconstruct error, got: {message}"
+            ),
+            other => panic!("expected a fail-closed reconstruct error, got: {other:?}"),
+        }
     }
 }

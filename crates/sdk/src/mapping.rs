@@ -188,7 +188,10 @@ mod tests {
             version: 1,
             doctype: "eu.europa.ec.eudi.pid.1".to_string(),
             namespace: "eu.europa.ec.eudi.pid.1".to_string(),
-            issuer_key: IssuerKey::P256 { x: vec![0x11; 32], y: vec![0x22; 32] },
+            issuer_key: IssuerKey::P256 {
+                x: vec![0x11; 32],
+                y: vec![0x22; 32],
+            },
             // 2020-01-01.
             today_epoch_day: days_from_civil(2020, 1, 1) as i32,
             nonce: vec![0xab, 0xcd],

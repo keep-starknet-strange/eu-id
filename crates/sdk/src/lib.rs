@@ -1222,7 +1222,10 @@ mod tests {
             version: 1,
             doctype: "eu.europa.ec.eudi.pid.1".to_string(),
             namespace: "eu.europa.ec.eudi.pid.1".to_string(),
-            issuer_key: IssuerKey::P256 { x: vec![0x11; 32], y: vec![0x22; 32] },
+            issuer_key: IssuerKey::P256 {
+                x: vec![0x11; 32],
+                y: vec![0x22; 32],
+            },
             today_epoch_day: 7305,
             nonce: vec![0xab, 0xcd, 0xef],
             predicate_mode: PredicateMode::And,
@@ -1537,7 +1540,9 @@ mod tests {
         age_only.accepted_numeric_countries = None;
         let proof = prove_identity(age_only.clone(), witness.clone()).expect("age-only proves");
         assert!(
-            verify_identity(age_only, proof).expect("age-only verification returns").ok,
+            verify_identity(age_only, proof)
+                .expect("age-only verification returns")
+                .ok,
             "age-only statement must verify through the SDK identity API"
         );
 
@@ -1546,7 +1551,9 @@ mod tests {
         nat_only.age_threshold_years = None;
         let proof = prove_identity(nat_only.clone(), witness).expect("nat-only proves");
         assert!(
-            verify_identity(nat_only, proof).expect("nat-only verification returns").ok,
+            verify_identity(nat_only, proof)
+                .expect("nat-only verification returns")
+                .ok,
             "nat-only statement must verify through the SDK identity API"
         );
     }

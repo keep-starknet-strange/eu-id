@@ -250,6 +250,18 @@ pub trait Air {
     /// Reconstruct this module's trusted tree-0 columns in the same order as
     /// [`Air::preprocessed_column_ids`]. Production verification commits these
     /// verifier-derived values and pins the proof to that root.
+    ///
+    /// The default is fail-closed: a module with **no** preprocessed columns
+    /// reconstructs the empty vector, but a module that *does* contribute
+    /// preprocessed columns and has not overridden this method cannot be
+    /// canonically verified — [`compute_canonical_preprocessed_root`] returns
+    /// `Err` for it. This is deliberate: the legacy classical P256 module
+    /// (`stwo-p256`, built when the `ec-coprocessor` feature is OFF) has a
+    /// witness-dependent hinted-mul schedule in its preprocessed columns, so its
+    /// tree-0 root cannot be reconstructed from public data alone. Every
+    /// production verify path therefore fails closed in a classical build; the
+    /// `ec-coprocessor` build reconstructs those columns in-circuit and overrides
+    /// this method where needed.
     fn canonical_preprocessed_columns(
         &mut self,
     ) -> Result<Vec<PreprocessedColumnEval>, VerificationError> {
@@ -613,6 +625,19 @@ pub fn compute_preprocessed_root_uncached(
     commitment_scheme.roots()[0]
 }
 
+/// Defense-in-depth ceiling on any single module's preprocessed column
+/// log-size, enforced by [`compute_canonical_preprocessed_root`] before it sizes
+/// the twiddle table. Production modules top out well below this — the SHA
+/// packed Maj/Ch table sits at `3·group_width = 18` for the production width 6,
+/// the 2¹⁶ range/split tables at 17 after Class-D doubling, and per-message SHA
+/// selectors at `sha_log_n_rows` (~15 for realistic credentials); the P256 and
+/// bind modules are smaller still. The caller-level shape caps in `eu-id-prover`
+/// keep these inputs far lower. This backstop rejects an oversized layout
+/// fail-closed BEFORE the `cached_twiddles` `Box::leak`, so a prover-steered
+/// shape cannot force a multi-gigabyte tree-0 rebuild. Headroom of ~7 log steps
+/// over the honest max (2²⁵ ≈ 33.5M rows) leaves ample slack.
+pub const MAX_CANONICAL_PREPROCESSED_LOG_SIZE: u32 = 25;
+
 /// Reconstruct and commit tree 0 from verifier-side canonical module data.
 /// Columns use the same first-writer-wins deduplication order as [`prove`]; no
 /// witness value or prover-supplied commitment enters this computation.
@@ -625,6 +650,16 @@ pub fn compute_canonical_preprocessed_root(
         .flat_map(|module| module.layout().preprocessed)
         .max()
         .unwrap_or(0);
+    // Fail-closed BEFORE allocating twiddles / LDE columns: `layout()` is a
+    // cheap `Vec<u32>`, but a prover-steered module log-size drives the twiddle
+    // table and every reconstructed column, so an unbounded value would OOM the
+    // verifier before any other check ran. See `MAX_CANONICAL_PREPROCESSED_LOG_SIZE`.
+    if max_preprocessed_log_size > MAX_CANONICAL_PREPROCESSED_LOG_SIZE {
+        return Err(VerificationError::InvalidStructure(format!(
+            "preprocessed log size {max_preprocessed_log_size} exceeds the canonical maximum \
+             {MAX_CANONICAL_PREPROCESSED_LOG_SIZE}"
+        )));
+    }
     let twiddles = cached_twiddles(max_preprocessed_log_size + config.fri_config.log_blowup_factor);
     let channel = &mut Ch::default();
     config.mix_into(channel);
@@ -888,6 +923,81 @@ mod tests {
         assert!(message.contains("shared"));
         assert!(message.contains("first"));
         assert!(message.contains("second"));
+    }
+
+    /// A module that only reports a preprocessed layout log-size — no columns are
+    /// ever allocated. Used to prove the shape cap fires *before*
+    /// [`compute_canonical_preprocessed_root`] tries to build a tree that large.
+    struct ShapeOnlyModule {
+        preprocessed_log_size: u32,
+    }
+
+    impl Air for ShapeOnlyModule {
+        fn mix_public(&self, _channel: &mut Ch) {}
+        fn draw_relations(&mut self, _channel: &mut Ch) {}
+        fn layout(&self) -> TreeLayout {
+            TreeLayout {
+                preprocessed: vec![self.preprocessed_log_size],
+                trace: Vec::new(),
+                interaction: Vec::new(),
+            }
+        }
+        fn claimed_sums(&self) -> Vec<QM31> {
+            Vec::new()
+        }
+        fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
+            vec![PreProcessedColumnId {
+                id: "shape_only".to_string(),
+            }]
+        }
+        fn build_components(&mut self, _allocator: &mut TraceLocationAllocator) {}
+        fn components(&self) -> Vec<&dyn Component> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn canonical_root_fails_closed_without_reconstruct_override() {
+        // A module that contributes preprocessed columns but does not override
+        // `canonical_preprocessed_columns` (the default) cannot be canonically
+        // verified — this is the exact fail-closed mechanism the classical P256
+        // module relies on. `compute_canonical_preprocessed_root` must return the
+        // reconstruct error, not panic.
+        let mut module = ShapeOnlyModule {
+            preprocessed_log_size: 4,
+        };
+        let error = compute_canonical_preprocessed_root(&mut [&mut module], PcsConfig::default())
+            .expect_err("a module without a reconstruct override must fail closed");
+        match error {
+            VerificationError::InvalidStructure(message) => {
+                assert!(
+                    message.contains("cannot reconstruct"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected InvalidStructure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn canonical_root_rejects_oversized_preprocessed_shape() {
+        // A shape one step past the cap must be rejected — and, critically,
+        // WITHOUT allocating a 2^oversize twiddle table (this test would OOM if
+        // the cap ran after `cached_twiddles`).
+        let mut module = ShapeOnlyModule {
+            preprocessed_log_size: MAX_CANONICAL_PREPROCESSED_LOG_SIZE + 1,
+        };
+        let error = compute_canonical_preprocessed_root(&mut [&mut module], PcsConfig::default())
+            .expect_err("an oversized preprocessed shape must be rejected");
+        match error {
+            VerificationError::InvalidStructure(message) => {
+                assert!(
+                    message.contains("exceeds the canonical maximum"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected InvalidStructure, got {other:?}"),
+        }
     }
 
     use stwo::prover::backend::simd::qm31::PackedQM31;

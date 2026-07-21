@@ -5222,6 +5222,50 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
             "mdoc proof carries an unsupported attribute count".to_string(),
         ));
     }
+
+    // Cap every prover-carried SHA trace log-size BEFORE the canonical tree-0
+    // rebuild: `compute_canonical_preprocessed_root` sizes the preprocessed tree
+    // (and its twiddles) by these fields, so an unbounded value is a DoS vector.
+    // The group width is fixed to `SHA_GROUP_WIDTH` here, so only the log-sizes
+    // are prover-steered.
+    for (field, log_n_rows) in
+        std::iter::once(("issuer_sha_log_n_rows", proof.issuer_sha_log_n_rows))
+            .chain(std::iter::once((
+                "device_sha_log_n_rows",
+                proof.device_sha_log_n_rows,
+            )))
+            .chain(proof.mso_sha_log_n_rows.map(|n| ("mso_sha_log_n_rows", n)))
+            .chain(
+                proof
+                    .revocation_sha_log_n_rows
+                    .map(|n| ("revocation_sha_log_n_rows", n)),
+            )
+            .chain(
+                proof
+                    .attribute_sha_log_n_rows
+                    .iter()
+                    .map(|&n| ("attribute_sha_log_n_rows", n)),
+            )
+    {
+        crate::check_shape_cap(field, log_n_rows, crate::MAX_SHA_LOG_N_ROWS)?;
+    }
+    // Classical build also carries prover-steered digest-bind bridge log-sizes,
+    // whose preprocessed selector lives at that log-size — same DoS surface.
+    #[cfg(not(feature = "ec-coprocessor"))]
+    for (field, log_size) in
+        std::iter::once(("issuer_bridge_log_size", proof.issuer_bridge_log_size))
+            .chain(std::iter::once((
+                "device_bridge_log_size",
+                proof.device_bridge_log_size,
+            )))
+            .chain(
+                proof
+                    .revocation_bridge_log_size
+                    .map(|n| ("revocation_bridge_log_size", n)),
+            )
+    {
+        crate::check_shape_cap(field, log_size, crate::MAX_BRIDGE_LOG_SIZE)?;
+    }
     let attribute_digests: Vec<_> = (0..attribute_count)
         .map(|_| SharedDigestRelation::new())
         .collect();
