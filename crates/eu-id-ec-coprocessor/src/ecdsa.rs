@@ -1318,32 +1318,45 @@ pub fn verify_mdoc_p4b_circuit_bundle_profiled(
     let mut mac_halves = [None; MDOC_P4B_MAC_HALF_COUNT];
     let mut signer_state = vec![MdocP4bEcdsaConsistency::default(); projections.len()];
 
-    for ((instance, layout), entry) in circuits
+    // Instances are order-independent: each derives its own Fiat-Shamir channel
+    // from `mdoc_p4b_instance_channel`, so the expensive sumcheck verification
+    // parallelizes exactly like the prove side. The claim extraction below
+    // (consistency_cursor / signer_state) stays sequential: it walks
+    // `bundle.consistency_claim_values` in a fixed order and must not race.
+    let verified_claims = circuits
+        .par_iter()
+        .zip(bundle.entries.par_iter())
+        .map(|(instance, entry)| {
+            let mut channel = mdoc_p4b_instance_channel(
+                transcript_seed,
+                full_root,
+                instance.label,
+                instance.role,
+                &projections,
+                &av,
+                &bundle.mac_tags,
+            );
+            let start = Instant::now();
+            let claims = match instance.role {
+                MdocP4bCircuitRole::MacBatch => verify_circuit_sorted_sparse(
+                    &instance.circuit,
+                    &entry.proof,
+                    full_root,
+                    &mut channel,
+                ),
+                _ => verify_circuit(&instance.circuit, &entry.proof, full_root, &mut channel),
+            }
+            .map_err(ImplementedCircuitProofError::Sumcheck)?;
+            Ok((claims, start.elapsed()))
+        })
+        .collect::<Result<Vec<_>, ImplementedCircuitProofError>>()?;
+
+    for (((instance, layout), entry), (claims, elapsed)) in circuits
         .iter()
         .zip(layouts.iter())
         .zip(bundle.entries.iter())
+        .zip(verified_claims)
     {
-        let mut channel = mdoc_p4b_instance_channel(
-            transcript_seed,
-            full_root,
-            instance.label,
-            instance.role,
-            &projections,
-            &av,
-            &bundle.mac_tags,
-        );
-        let start = Instant::now();
-        let claims = match instance.role {
-            MdocP4bCircuitRole::MacBatch => verify_circuit_sorted_sparse(
-                &instance.circuit,
-                &entry.proof,
-                full_root,
-                &mut channel,
-            ),
-            _ => verify_circuit(&instance.circuit, &entry.proof, full_root, &mut channel),
-        }
-        .map_err(ImplementedCircuitProofError::Sumcheck)?;
-        let elapsed = start.elapsed();
         profile.sumcheck += elapsed;
         profile.sumcheck_by_instance.push(mdoc_p4b_instance_timing(
             instance.role,
@@ -1562,6 +1575,32 @@ pub fn verify_implemented_circuit_bundle_batch_with_projection_profiled(
     }
     profile.ligero_proximity = start.elapsed();
 
+    // Every (signature, family) sumcheck derives an independent Fiat-Shamir
+    // channel (seed + signature index + label + projection), so the expensive
+    // verify_circuit work parallelizes like the prove side. The claim walk that
+    // follows stays sequential because it advances a shared consistency_cursor
+    // over bundle.consistency_claim_values in a fixed order.
+    let family_count = circuits.len();
+    let verified_flat = (0..bundle.entries.len())
+        .into_par_iter()
+        .map(|idx| {
+            let signature_index = idx / family_count;
+            let family_index = idx % family_count;
+            let projection = &projections[signature_index];
+            let instance = &circuits[family_index];
+            let entry = &bundle.entries[idx];
+            let mut channel =
+                CoprocessorChannel::from_seed(transcript_seed, COPROCESSOR_TRANSCRIPT_DOMAIN);
+            mix_bundle_signature_index(signature_index, &mut channel);
+            channel.mix_bytes(instance.label);
+            mix_ecdsa_public_projection(projection, &mut channel);
+            let start = Instant::now();
+            let claims = verify_circuit(&instance.circuit, &entry.proof, bundle.root, &mut channel)
+                .map_err(ImplementedCircuitProofError::Sumcheck)?;
+            Ok((claims, start.elapsed()))
+        })
+        .collect::<Result<Vec<_>, ImplementedCircuitProofError>>()?;
+
     let mut linear_claims = Vec::new();
     let mut consistency_cursor = 0usize;
     let mut all_claims = Vec::with_capacity(projections.len());
@@ -1579,17 +1618,10 @@ pub fn verify_implemented_circuit_bundle_batch_with_projection_profiled(
             )
             .enumerate()
         {
-            let mut channel =
-                CoprocessorChannel::from_seed(transcript_seed, COPROCESSOR_TRANSCRIPT_DOMAIN);
-            mix_bundle_signature_index(signature_index, &mut channel);
-            channel.mix_bytes(instance.label);
-            mix_ecdsa_public_projection(projection, &mut channel);
-            let start = Instant::now();
-            let claims = verify_circuit(&instance.circuit, &entry.proof, bundle.root, &mut channel)
-                .map_err(ImplementedCircuitProofError::Sumcheck)?;
-            let elapsed = start.elapsed();
-            profile.sumcheck += elapsed;
-            profile.sumcheck_by_family[family_index] += elapsed;
+            let (claims, elapsed) = &verified_flat[signature_index * family_count + family_index];
+            let claims = claims.clone();
+            profile.sumcheck += *elapsed;
+            profile.sumcheck_by_family[family_index] += *elapsed;
 
             let start = Instant::now();
             add_input_claims(&mut linear_claims, layout, &claims);

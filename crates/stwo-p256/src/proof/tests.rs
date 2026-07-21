@@ -1625,6 +1625,46 @@ fn wrong_r_air_constraints_oracle() {
     );
 }
 
+/// Off-curve `R'` for `cert_index`: the true `R`'s (on-curve) `x` with `y+1`,
+/// which cannot satisfy `y^2 = x^3 + a*x + b`.
+fn off_curve_r_for_cert(claim: &P256ProofClaim, cert_index: usize) -> AffinePoint {
+    let true_r = true_r_for_cert(claim, cert_index);
+    AffinePoint {
+        x: true_r.x,
+        y: add_u256(&true_r.y, &U256::from_le_u64s(&[1, 0, 0, 0])),
+    }
+}
+
+/// End-to-end negative for the fake-GLV hint-`R` curve-membership binding
+/// (the `FinalCheckHint` slice closed the "R never proven on-curve" hole).
+/// Injecting an OFF-curve `R'` — the true `R`'s (on-curve) `x` with `y+1` —
+/// through the wrong-R plumbing cannot assemble a consistent witness at all:
+/// the projective EC trace builder rejects the first doubling of the
+/// off-curve point (`AffineOutputMismatch`), so no accepting monolithic proof
+/// can exist for an off-curve R. (An ON-curve wrong-R does assemble and is
+/// instead caught later by chain continuity — see
+/// `wrong_r_monolithic_prove_outcome` / `wrong_r_air_constraints_oracle`.)
+#[test]
+fn off_curve_r_monolithic_pipeline_rejects() {
+    let inputs = vec![valid_real_input_with_small_u_scalars(7, 11)];
+    let base_claim = P256ProofClaim::from_inputs_with_trivial_fake_glv_hints(&inputs)
+        .expect("valid claim builds");
+    let r_off = off_curve_r_for_cert(&base_claim, 0);
+
+    let err = P256ProofClaim::from_inputs_with_wrong_r_for_cert(&inputs, 0, r_off)
+        .expect_err("off-curve R must not assemble an accepting witness");
+
+    assert!(
+        matches!(
+            err,
+            P256ProofError::ProjectiveEc(
+                crate::curve::projective::ProjectiveEcError::AffineOutputMismatch { .. }
+            )
+        ),
+        "expected off-curve R rejected by the projective EC affine-output check, got {err:?}"
+    );
+}
+
 fn negate_affine(p: &AffinePoint) -> AffinePoint {
     let m = U256::from_le_u64s(&P256_MODULUS);
     AffinePoint {
