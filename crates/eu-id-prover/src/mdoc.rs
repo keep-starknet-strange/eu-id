@@ -4639,19 +4639,19 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
     }
 }
 
-pub const MDOC_PRODUCTION_PCS_LOG_BLOWUP_FACTOR: u32 = 4;
-pub const MDOC_PRODUCTION_PCS_QUERIES: usize = 26;
-pub const MDOC_PRODUCTION_PCS_POW_BITS: u32 = 25;
+pub const MDOC_PRODUCTION_PCS_LOG_BLOWUP_FACTOR: u32 = 3;
+pub const MDOC_PRODUCTION_PCS_QUERIES: usize = 36;
+pub const MDOC_PRODUCTION_PCS_POW_BITS: u32 = 20;
 
 pub fn mdoc_production_pcs_config() -> PcsConfig {
-    // S6 bake-off picked log_blowup 4 over 3: −340 KB of queried_values for
-    // +40% prove time (proof-size-first rule; verify unchanged). S7 query
-    // shave: pow_bits 25 + n_queries 26 keeps the PCS query/PoW label at 129
-    // bits and trades one query (−~38 KB) for a 2^25 blake2s grind
-    // (measured +~0.3 s single-thread prove). The verifier pins this exact
-    // config (see verify_mdoc_circuit_with_pcs_config) so an old-config
-    // proof is rejected. This label is not a whole-system soundness claim;
-    // TS13 accounts separately for OODS and binding-hash limits.
+    // Blowup-3 prove-time flip 2026-07-21, rail relaxed to ~1.4MB per Lucas:
+    // FRI (1,3,36,2)/pow20 (the Q5 buy-back point) replaces blowup-4/26q/pow25.
+    // PCS query/PoW label: 36×3 + 20 = 128 bits (previous schedule 26×4 + 25 =
+    // 129); both exceed the 108-bit OODS bound that dominates TS13's STARK
+    // component, so composed soundness accounting is unchanged. The verifier
+    // pins this exact config (see verify_mdoc_circuit_with_pcs_config) so an
+    // old-config proof is rejected. This label is not a whole-system soundness
+    // claim; TS13 accounts separately for OODS and binding-hash limits.
     PcsConfig {
         pow_bits: MDOC_PRODUCTION_PCS_POW_BITS,
         fri_config: FriConfig::new(

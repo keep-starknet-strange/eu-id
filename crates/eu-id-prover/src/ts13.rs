@@ -9,8 +9,11 @@ use crate::mdoc::{
 };
 
 // Regenerated whenever the canonical published tuple changes.
+// Repinned: blowup-3 prove-time flip 2026-07-21 (PCS 4/26/25 → 3/36/20),
+// rail relaxed to ~1.4MB per Lucas. Previous:
+// d059a204b7f9df488a7c382768757a635d739da0718e4df153c41275fa85f879.
 pub const TS13_PUBLISHED_AGE_OVER_18_CIRCUIT_HASH: &str =
-    "d059a204b7f9df488a7c382768757a635d739da0718e4df153c41275fa85f879";
+    "74b70ce9bf2e5bb230df71cf8d2b513c887607030eb1eda91f6ca00d126215f4";
 pub const TS13_P4C_MIN_BLIND_ROWS: usize = 256;
 pub const TS13_P4C_MAX_OPENINGS: usize = 256;
 pub const TS13_P4C_MIN_DECOY_MESSAGE_BITS: usize = 512;
@@ -19,9 +22,10 @@ pub const TS13_CONSTRAINT_SYSTEM: &str = "mldsa65-pure-stark-direct-v6";
 pub const TS13_PCS_LOG_BLOWUP_FACTOR: u32 = MDOC_PRODUCTION_PCS_LOG_BLOWUP_FACTOR;
 pub const TS13_PCS_QUERIES: u32 = MDOC_PRODUCTION_PCS_QUERIES as u32;
 pub const TS13_PCS_POW_BITS: u32 = MDOC_PRODUCTION_PCS_POW_BITS;
-/// Conservative current outer-STARK bound. The PCS query/PoW label is 129
-/// bits, but the single QM31 OODS check at degree/domain `2^16` is only about
-/// 108 bits and therefore dominates.
+/// Conservative current outer-STARK bound. The PCS query/PoW label is 128
+/// bits (blowup-3 prove-time flip 2026-07-21: 36 queries × 3 + pow 20), but
+/// the single QM31 OODS check at degree/domain `2^16` is only about 108 bits
+/// and therefore dominates.
 pub const TS13_STARK_SOUNDNESS_BITS: u32 = 108;
 pub const TS13_ML_DSA_65_SOUNDNESS_BITS: u32 = 192;
 /// Generic quantum collision bound for the 256-bit hashes used as binding
@@ -586,9 +590,9 @@ mod tests {
         let tuple = Ts13CircuitTuple::published_age_over_18();
         let soundness = ts13_published_soundness_table();
 
-        assert_eq!(tuple.pcs_log_blowup_factor, 4);
-        assert_eq!(tuple.pcs_queries, 26);
-        assert_eq!(tuple.pcs_pow_bits, 25);
+        assert_eq!(tuple.pcs_log_blowup_factor, 3);
+        assert_eq!(tuple.pcs_queries, 36);
+        assert_eq!(tuple.pcs_pow_bits, 20);
         assert_eq!(tuple.constraint_system, TS13_CONSTRAINT_SYSTEM);
         assert_eq!(soundness.composed_soundness_bits(), 82);
         assert!(soundness
