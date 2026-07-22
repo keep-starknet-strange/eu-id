@@ -132,7 +132,7 @@ pub(crate) fn epoch_day_to_date(epoch_day: i32) -> Result<Date, ZkError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::NatMode;
+    use crate::{IssuerKey, NatMode};
 
     fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
         let y = if m <= 2 { y - 1 } else { y };
@@ -154,7 +154,7 @@ mod tests {
             version: 1,
             doctype: "eu.europa.ec.eudi.pid.1".to_string(),
             namespace: "eu.europa.ec.eudi.pid.1".to_string(),
-            issuer_public_key_hash: vec![0x11; 32],
+            issuer_key: IssuerKey::MlDsa { pk_hash: vec![0x11; 32] },
             today_epoch_day: days_from_civil(2020, 1, 1) as i32,
             nonce: vec![0xab, 0xcd],
             predicate_mode: mode,

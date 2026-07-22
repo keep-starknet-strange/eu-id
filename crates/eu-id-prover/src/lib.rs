@@ -19,6 +19,18 @@ pub use mdoc::{
 pub use policy::Policy;
 pub use predicates::{all_nationality_codes, Date};
 
+/// Which ZK identity system a prover build implements. Both variants exist on
+/// every branch so the type is shared-shape; each build hardwires [`ZK_SYSTEM_KIND`]
+/// to the one it actually links. The SDK forwards it as `zk_system()`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ZkSystemKind {
+    P256,
+    MlDsa,
+}
+
+/// This build proves/verifies ML-DSA-65 issuer & device signatures.
+pub const ZK_SYSTEM_KIND: ZkSystemKind = ZkSystemKind::MlDsa;
+
 /// Build and prove the product mdoc circuit from the document, verifier
 /// request, and public policy.
 pub fn prove_mdoc(

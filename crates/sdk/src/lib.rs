@@ -655,14 +655,40 @@ pub fn iso_alpha2_to_numeric(alpha2: String) -> Option<u32> {
         .map(|country| country.value as u32)
 }
 
+/// Which ZK identity system this SDK build implements. Mirrors the linked prover
+/// backend (see [`zk_system`]); lets callers pick the right [`IssuerKey`] /
+/// [`TrustedIssuers`] variant without a build flag of their own.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ZkSystemKind {
+    P256,
+    MlDsa,
+}
+
+/// Issuer trust anchor pinned in a [`ZkPublicStatement`]: P-256 carries the EC
+/// public-key coordinates; ML-DSA carries the SHA-256 of the issuer `pkEncode`.
+/// The type is identical on both branches; each build only accepts its own variant.
+#[derive(uniffi::Enum, Clone, Debug, PartialEq, Eq)]
+pub enum IssuerKey {
+    P256 { x: Vec<u8>, y: Vec<u8> },
+    MlDsa { pk_hash: Vec<u8> },
+}
+
+/// Trusted issuers accepted by the prover: P-256 accepts x5chain root
+/// certificates; ML-DSA (no PKI) pins raw `pkEncode` values.
+#[derive(uniffi::Enum, Clone, Debug)]
+pub enum TrustedIssuers {
+    Certificates(Vec<Vec<u8>>),
+    PublicKeys(Vec<Vec<u8>>),
+}
+
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 pub struct ZkPublicStatement {
     pub spec_id: String,
     pub version: u32,
     pub doctype: String,
     pub namespace: String,
-    /// SHA-256 of the trusted issuer's FIPS 204 `pkEncode` bytes.
-    pub issuer_public_key_hash: Vec<u8>,
+    /// Issuer trust anchor (P-256 coordinates or ML-DSA `pkEncode` hash).
+    pub issuer_key: IssuerKey,
     pub today_epoch_day: i32,
     pub nonce: Vec<u8>,
     pub predicate_mode: PredicateMode,
@@ -674,8 +700,8 @@ pub struct ZkPublicStatement {
 #[derive(uniffi::Record, Clone, Debug)]
 pub struct ZkMdocWitness {
     pub document: Vec<u8>,
-    /// Trusted ML-DSA-65 issuer `pkEncode` values.
-    pub trusted_issuer_public_keys: Vec<Vec<u8>>,
+    /// Trusted issuers (x5chain certs for P-256, pinned `pkEncode`s for ML-DSA).
+    pub trusted_issuers: TrustedIssuers,
 }
 
 #[derive(uniffi::Record, Clone, Debug)]
@@ -704,10 +730,21 @@ fn validate_product_statement_contract(statement: &ZkPublicStatement) -> Result<
             "unsupported product statement contract labels".to_string(),
         ));
     }
-    if statement.issuer_public_key_hash.len() != 32 {
-        return Err(ZkError::InvalidInput(
-            "issuer_public_key_hash must be 32 bytes".to_string(),
-        ));
+    match &statement.issuer_key {
+        IssuerKey::MlDsa { pk_hash } => {
+            if pk_hash.len() != 32 {
+                return Err(ZkError::InvalidInput(
+                    "ML-DSA issuer pk_hash must be 32 bytes".to_string(),
+                ));
+            }
+        }
+        IssuerKey::P256 { x, y } => {
+            if x.len() != 32 || y.len() != 32 {
+                return Err(ZkError::InvalidInput(
+                    "P-256 issuer key coordinates must be 32 bytes".to_string(),
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -720,13 +757,17 @@ fn encode_statement(statement: &ZkPublicStatement) -> Vec<u8> {
         ("namespace".into(), statement.namespace.as_str().into()),
         (
             "issuer_key".into(),
-            Value::Map(vec![
-                ("alg".into(), "ML-DSA-65".into()),
-                (
-                    "pk_hash".into(),
-                    Value::Bytes(statement.issuer_public_key_hash.clone()),
-                ),
-            ]),
+            match &statement.issuer_key {
+                IssuerKey::MlDsa { pk_hash } => Value::Map(vec![
+                    ("alg".into(), "ML-DSA-65".into()),
+                    ("pk_hash".into(), Value::Bytes(pk_hash.clone())),
+                ]),
+                IssuerKey::P256 { x, y } => Value::Map(vec![
+                    ("crv".into(), "P-256".into()),
+                    ("x".into(), Value::Bytes(x.clone())),
+                    ("y".into(), Value::Bytes(y.clone())),
+                ]),
+            },
         ),
         ("today".into(), Value::from(statement.today_epoch_day)),
         ("nonce".into(), Value::Bytes(statement.nonce.clone())),
@@ -912,19 +953,27 @@ fn expected_mdoc_attributes_for_profile(
 fn mdoc_request(
     statement: &ZkPublicStatement,
     witness: &ZkMdocWitness,
-) -> eu_id_prover::MdocPidRequest {
+) -> Result<eu_id_prover::MdocPidRequest, ZkError> {
+    let trusted_mldsa_issuer_public_keys = match &witness.trusted_issuers {
+        TrustedIssuers::PublicKeys(keys) => keys.clone(),
+        TrustedIssuers::Certificates(_) => {
+            return Err(ZkError::InvalidInput(
+                "this build proves ML-DSA; witness needs TrustedIssuers::PublicKeys".to_string(),
+            ))
+        }
+    };
     let contract = zk_contract_v1();
-    eu_id_prover::MdocPidRequest {
+    Ok(eu_id_prover::MdocPidRequest {
         doctype: statement.doctype.clone(),
         namespace: statement.namespace.clone(),
         attributes: expected_mdoc_attributes(statement.predicate_mode),
         birth_date_element: contract.element_birth_date,
         nationality_element: contract.element_nationality,
         session_transcript: statement.nonce.clone(),
-        trusted_mldsa_issuer_public_keys: witness.trusted_issuer_public_keys.clone(),
+        trusted_mldsa_issuer_public_keys,
         device_authentication_profile:
             eu_id_prover::mdoc::MdocDeviceAuthenticationProfile::Iso180135,
-    }
+    })
 }
 
 fn mdoc_statement_matches_public_statement(
@@ -939,13 +988,16 @@ fn mdoc_statement_matches_public_statement(
     if mdoc_statement.policy != mapping::to_policy(statement)? {
         return Ok(false);
     }
-    let expected_issuer_hash: [u8; 32] = statement
-        .issuer_public_key_hash
-        .as_slice()
-        .try_into()
-        .map_err(|_| {
-            ZkError::InvalidInput("issuer_public_key_hash must be 32 bytes".to_string())
-        })?;
+    let expected_issuer_hash: [u8; 32] = match &statement.issuer_key {
+        IssuerKey::MlDsa { pk_hash } => pk_hash.as_slice().try_into().map_err(|_| {
+            ZkError::InvalidInput("issuer_key ML-DSA pk_hash must be 32 bytes".to_string())
+        })?,
+        IssuerKey::P256 { .. } => {
+            return Err(ZkError::InvalidInput(
+                "this build verifies ML-DSA; statement needs IssuerKey::MlDsa".to_string(),
+            ))
+        }
+    };
     let Some(issuer_pk) = eu_id_prover::mdoc::mdoc_statement_issuer_mldsa_pk(mdoc_statement) else {
         return Ok(false);
     };
@@ -1013,7 +1065,7 @@ pub fn prove_identity(
     on_large_stack(move || {
         validate_product_statement_contract(&statement)?;
         let policy = mapping::to_policy(&statement)?;
-        let request = mdoc_request(&statement, &witness);
+        let request = mdoc_request(&statement, &witness)?;
         let (proof, mdoc_statement) = eu_id_prover::prove_mdoc(&witness.document, &request, policy)
             .map_err(map_prover_error)?;
         let stark_proof = bincode::serialize(&proof)
@@ -1055,6 +1107,18 @@ pub fn verify_identity(
     })
 }
 
+/// The ZK identity system this SDK build implements. Reflects the linked prover
+/// backend, so it can't disagree with what's compiled — callers use it to pick the
+/// P-256 vs ML-DSA path (which [`IssuerKey`] / [`TrustedIssuers`] variant to build)
+/// without a build flag of their own.
+#[uniffi::export]
+pub fn zk_system() -> ZkSystemKind {
+    match eu_id_prover::ZK_SYSTEM_KIND {
+        eu_id_prover::ZkSystemKind::P256 => ZkSystemKind::P256,
+        eu_id_prover::ZkSystemKind::MlDsa => ZkSystemKind::MlDsa,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1076,7 +1140,7 @@ mod tests {
             version: 1,
             doctype: TS13_PID_DOCTYPE.to_string(),
             namespace: TS13_PID_NAMESPACE.to_string(),
-            issuer_public_key_hash: vec![0x11; 32],
+            issuer_key: IssuerKey::MlDsa { pk_hash: vec![0x11; 32] },
             today_epoch_day: 20_637,
             nonce: vec![1, 2, 3, 4],
             predicate_mode: PredicateMode::And,
@@ -1184,15 +1248,13 @@ mod tests {
 
     #[test]
     fn mdoc_request_forwards_mldsa_trust_pins() {
+        let pins = vec![vec![9; ML_DSA_65_PUBLIC_KEY_BYTES]];
         let witness = ZkMdocWitness {
             document: vec![0xa0],
-            trusted_issuer_public_keys: vec![vec![9; ML_DSA_65_PUBLIC_KEY_BYTES]],
+            trusted_issuers: TrustedIssuers::PublicKeys(pins.clone()),
         };
-        let request = mdoc_request(&sample_statement(), &witness);
-        assert_eq!(
-            request.trusted_mldsa_issuer_public_keys,
-            witness.trusted_issuer_public_keys
-        );
+        let request = mdoc_request(&sample_statement(), &witness).unwrap();
+        assert_eq!(request.trusted_mldsa_issuer_public_keys, pins);
     }
 
     #[test]
@@ -1277,7 +1339,7 @@ mod tests {
     fn identity_public_api_rejects_malformed_mdoc() {
         let witness = ZkMdocWitness {
             document: Vec::new(),
-            trusted_issuer_public_keys: Vec::new(),
+            trusted_issuers: TrustedIssuers::PublicKeys(Vec::new()),
         };
         assert!(matches!(
             prove_identity(sample_statement(), witness),
