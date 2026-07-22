@@ -133,11 +133,7 @@ bench-breakdown:
 		--example bench_report -- docs/benchmarks/proof-size-breakdown.json
 
 bench-mobile:
-	@if [ -d mobile ]; then \
-		$(MAKE) -C mobile bench; \
-	else \
-		echo "bench-mobile: mobile harness not implemented yet (mobile/ not found)"; \
-	fi
+	$(MAKE) -C mobile bench-android-apk
 
 prove:
 	@if [ -d bin ]; then \
