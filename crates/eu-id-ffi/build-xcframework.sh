@@ -10,6 +10,9 @@ cd "$(dirname "$0")/../.."   # workspace root
 # Extra cargo args, e.g. EXTRA="--features parallel" for multi-threaded
 # proving on the phone's cores.
 EXTRA="${EXTRA:-}"
+# Match the iOS app's deployment target. Without this, Rust defaults to iOS 10
+# while current C dependencies are built against the selected Xcode SDK.
+export IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-17.0}"
 
 TARGETS=(aarch64-apple-ios aarch64-apple-ios-sim)
 for t in "${TARGETS[@]}"; do
