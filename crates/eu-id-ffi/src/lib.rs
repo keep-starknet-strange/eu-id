@@ -44,6 +44,9 @@ use stwo_sha256::stark::{native_digest, prove_sha256, verify_sha256_proof, Prove
 use stwo_sha256::trace::min_log_size;
 use stwo_sha256::witness::compute_sha256_witness;
 
+#[cfg(feature = "jni")]
+mod android_jni;
+
 // ============================ SHA-256 ============================
 
 /// Flat result returned by [`eu_id_bench_sha256`]. `#[repr(C)]` so the
@@ -538,6 +541,10 @@ fn run_identity_bench(credential: &Credential, policy: &Policy, iters: u32) -> E
 /// Prove → verify the deterministic EUID mdoc profile-v1 fixture `iters` times
 /// under the peak-memory sampler, returning the same timing/size shape as
 /// [`eu_id_bench_identity`].
+///
+/// # Safety
+/// This function dereferences no caller-owned memory; it remains `unsafe` only
+/// for consistency with the existing C benchmark ABI.
 #[no_mangle]
 pub unsafe extern "C" fn eu_id_bench_mdoc(iters: u32) -> EuIdIdentityBench {
     let iters = iters.max(1);

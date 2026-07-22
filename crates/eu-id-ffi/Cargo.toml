@@ -20,6 +20,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 # (Note: stwo itself is already built with parallel because stwo-p256 requires
 # it — see the dependency note below.)
 parallel = ["stwo-sha256/parallel"]
+jni = ["dep:jni"]
 
 [dependencies]
 # Production allocator: the provers churn short-lived trace buffers; system
@@ -46,6 +47,9 @@ stwo = { workspace = true }
 memory-stats = "1.2"
 # Serialize the combined proof to report its size from `eu_id_bench_identity`.
 bincode = "1"
+# Android benchmark entry points. Optional so the existing C/iOS surface and
+# host builds do not pull in JNI.
+jni = { version = "0.21", optional = true, default-features = false }
 
 # Test-only: produce a real P-256 signature to exercise the big-endian
 # (z, r, s, qx, qy) marshalling contract end-to-end. The host build does the
