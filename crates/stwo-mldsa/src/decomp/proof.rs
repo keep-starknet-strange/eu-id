@@ -19,9 +19,9 @@ use stwo::core::pcs::PcsConfig;
 use stwo::core::proof::StarkProof;
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleHasher;
 use stwo::core::verifier::VerificationError;
+use stwo::prover::backend::simd::SimdBackend;
 #[cfg(test)]
 use stwo::prover::backend::Column;
-use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::{ComponentProver, ProvingError, TreeBuilder};
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
@@ -40,11 +40,14 @@ use super::tables::{
     RC_TABLE_INTERACTION_COLS,
 };
 use super::{
-    decomp_preprocessed_ids, gen_decomp_base_trace, gen_decomp_interaction,
-    gen_decomp_preprocessed, DecompEval, N_BASE_COLS, N_INTERACTION_COLS, N_PAIRS,
+    decomp_preprocessed_ids, gen_decomp_base_trace, gen_decomp_interaction, gen_decomp_metadata,
+    gen_decomp_preprocessed, DecompEval, DecompMetadata, N_BASE_COLS, N_INTERACTION_COLS, N_PAIRS,
 };
 #[cfg(test)]
-use super::{gen_decomp_interaction_with_checked_hint_total, COL_HINT_ACC};
+use super::{
+    gen_decomp_interaction_with_checked_hint_total, gen_decomp_metadata_with_checked_hint_total,
+    COL_HINT_ACC,
+};
 use crate::balancer::{
     gen_balancer_interaction, gen_balancer_trace, BalancerEval, BalancerRelation,
     BALANCER_INTERACTION_COLS,
@@ -180,6 +183,14 @@ impl DecompProver {
             STREAM_ID_CTILDE_ABSORB,
             relations,
         )
+    }
+
+    fn gen_metadata(&self) -> DecompMetadata {
+        #[cfg(test)]
+        if let Some(checked_hint_total) = self.checked_hint_total {
+            return gen_decomp_metadata_with_checked_hint_total(&self.witness, checked_hint_total);
+        }
+        gen_decomp_metadata(&self.witness)
     }
 }
 
@@ -362,12 +373,11 @@ impl AirProver for DecompProver {
                 .values
                 .set(final_row, crate::air_util::m31(checked_hint_total));
         }
-        // rc multiplicities from a dry-run interaction (relations not needed).
-        let dry = self.gen_interaction(&DecompRelations::dummy());
-        self.w1_encode_bytes = dry.w1_encode_bytes.clone();
+        let metadata = self.gen_metadata();
+        self.w1_encode_bytes = metadata.w1_encode_bytes;
         self.rc_mult = RcKind::ALL
             .iter()
-            .map(|kind| gen_table_multiplicities(*kind, dry.rc_uses.for_kind(*kind)))
+            .map(|kind| gen_table_multiplicities(*kind, metadata.rc_uses.for_kind(*kind)))
             .collect();
         evals.extend(self.rc_mult.clone());
         // balancer base cols.
@@ -613,11 +623,32 @@ mod tests {
         }
         assert_eq!(total, target, "fixture must have exactly ω+1 hints");
 
-        assert!(matches!(
-            prove_with_checked_hint_total(witness, OMEGA as u32),
-            Err(ProvingError::ConstraintsNotSatisfied)
-        ),
-        "the final base hint accumulator must equal the true interaction sum"
+        let metadata = gen_decomp_metadata_with_checked_hint_total(&witness, OMEGA as u32);
+        let interaction = gen_decomp_interaction_with_checked_hint_total(
+            &witness,
+            decomp_log_size(),
+            STREAM_ID_CTILDE_ABSORB,
+            &DecompRelations::dummy(),
+            OMEGA as u32,
+        );
+        for kind in RcKind::ALL {
+            assert_eq!(
+                metadata.rc_uses.for_kind(kind),
+                interaction.rc_uses.for_kind(kind),
+                "checked hint metadata mismatch for {kind:?}"
+            );
+        }
+        assert_eq!(
+            metadata.w1_encode_bytes, interaction.w1_encode_bytes,
+            "checked hint metadata must preserve w1Encode bytes"
+        );
+
+        assert!(
+            matches!(
+                prove_with_checked_hint_total(witness, OMEGA as u32),
+                Err(ProvingError::ConstraintsNotSatisfied)
+            ),
+            "the final base hint accumulator must equal the true interaction sum"
         );
     }
 }

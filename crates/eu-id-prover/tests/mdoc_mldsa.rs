@@ -343,6 +343,71 @@ mod quantum_only {
     }
 
     #[test]
+    fn parallel_witness_errors_keep_role_priority() {
+        fn corrupt_commitment(input: &mut MdocAuthInput) {
+            let MdocAuthInput::MlDsa(input) = input;
+            input.c_tilde[0] ^= 1;
+        }
+
+        fn corrupt_revocation_commitment(statement: &mut MdocCircuitStatement) {
+            let Some(MdocRevocationSignature::MlDsa(signature)) =
+                statement.ts13_revocation_signature.as_mut()
+            else {
+                panic!("test statement carries an ML-DSA revocation signature");
+            };
+            signature[0] ^= 1;
+        }
+
+        let (extracted, statement) = full_pq_extracted_and_statement();
+        let (statement, _, _) = with_mldsa_revocation(statement, &extracted);
+
+        // All roles fail independently, but the public API retains the
+        // historical issuer-before-device-before-revocation error priority.
+        let mut all_extracted = extracted.clone();
+        let mut all_statement = statement.clone();
+        corrupt_commitment(&mut all_extracted.issuer_auth_input);
+        corrupt_commitment(&mut all_statement.issuer_input);
+        corrupt_commitment(&mut all_extracted.device_auth_input);
+        corrupt_commitment(&mut all_statement.device_input);
+        corrupt_revocation_commitment(&mut all_statement);
+        let error = match prove_mdoc_circuit(&all_extracted, &all_statement) {
+            Err(error) => error,
+            Ok(_) => panic!("corrupted issuer, device, and revocation witnesses must reject"),
+        };
+        assert!(
+            format!("{error:?}").contains("mldsa witness:"),
+            "issuer error must win: {error:?}"
+        );
+
+        // With the issuer honest, device still wins over revocation.
+        let mut device_extracted = extracted.clone();
+        let mut device_statement = statement.clone();
+        corrupt_commitment(&mut device_extracted.device_auth_input);
+        corrupt_commitment(&mut device_statement.device_input);
+        corrupt_revocation_commitment(&mut device_statement);
+        let error = match prove_mdoc_circuit(&device_extracted, &device_statement) {
+            Err(error) => error,
+            Ok(_) => panic!("corrupted device witness must reject"),
+        };
+        assert!(
+            format!("{error:?}").contains("mldsa device witness:"),
+            "device error must surface second: {error:?}"
+        );
+
+        // With issuer and device honest, the revocation error surfaces last.
+        let mut revocation_statement = statement;
+        corrupt_revocation_commitment(&mut revocation_statement);
+        let error = match prove_mdoc_circuit(&extracted, &revocation_statement) {
+            Err(error) => error,
+            Ok(_) => panic!("corrupted revocation witness must reject"),
+        };
+        assert!(
+            format!("{error:?}").contains("mldsa revocation witness:"),
+            "revocation error must surface third: {error:?}"
+        );
+    }
+
+    #[test]
     fn mldsa_semantic_mso_and_identifier_tampers_reject_at_prove() {
         let (extracted, statement) = full_pq_extracted_and_statement();
 
@@ -961,7 +1026,9 @@ mod quantum_only {
     #[test]
     fn mldsa_malformed_claim_tree_rejects() {
         let (extracted_a, statement_a) = full_pq_extracted_and_statement_for(b"claim-tree-A");
-        let (_extracted_b, statement_b) = full_pq_extracted_and_statement_for(b"claim-tree-B");
+        let (statement_a, _, _) = with_mldsa_revocation(statement_a, &extracted_a);
+        let (extracted_b, statement_b) = full_pq_extracted_and_statement_for(b"claim-tree-B");
+        let (statement_b, _, _) = with_mldsa_revocation(statement_b, &extracted_b);
 
         let proof_a = prove_mdoc_circuit(&extracted_a, &statement_a).expect("proof A proves");
         verify_mdoc_circuit(&proof_a, &statement_a).expect("control: A verifies under A");
@@ -988,6 +1055,75 @@ mod quantum_only {
             .pop();
         verify_mdoc_circuit(&short_group_evals, &statement_a)
             .expect_err("malformed coefficient-eval shape must reject before construction");
+
+        let mut short_issuer_claims = proof_a.clone();
+        short_issuer_claims
+            .mldsa
+            .as_mut()
+            .expect("issuer claims")
+            .claimed_sums
+            .pop();
+        verify_mdoc_circuit(&short_issuer_claims, &statement_a)
+            .expect_err("short issuer claimed-sum vector must reject before parsing");
+
+        let mut long_issuer_claims = proof_a.clone();
+        let extra = *long_issuer_claims
+            .mldsa
+            .as_ref()
+            .expect("issuer claims")
+            .claimed_sums
+            .last()
+            .expect("issuer claim");
+        long_issuer_claims
+            .mldsa
+            .as_mut()
+            .expect("issuer claims")
+            .claimed_sums
+            .push(extra);
+        verify_mdoc_circuit(&long_issuer_claims, &statement_a)
+            .expect_err("long issuer claimed-sum vector must reject before parsing");
+
+        let mut short_revocation_claims = proof_a.clone();
+        short_revocation_claims
+            .revocation_mldsa
+            .as_mut()
+            .expect("revocation claims")
+            .claimed_sums
+            .pop();
+        verify_mdoc_circuit(&short_revocation_claims, &statement_a)
+            .expect_err("short revocation claimed-sum vector must reject before parsing");
+
+        let mut long_revocation_claims = proof_a.clone();
+        let extra = *long_revocation_claims
+            .revocation_mldsa
+            .as_ref()
+            .expect("revocation claims")
+            .claimed_sums
+            .last()
+            .expect("revocation claim");
+        long_revocation_claims
+            .revocation_mldsa
+            .as_mut()
+            .expect("revocation claims")
+            .claimed_sums
+            .push(extra);
+        verify_mdoc_circuit(&long_revocation_claims, &statement_a)
+            .expect_err("long revocation claimed-sum vector must reject before parsing");
+
+        let mut missing_range_claim = proof_a.clone();
+        missing_range_claim.mldsa_range_table_claimed_sum = None;
+        verify_mdoc_circuit(&missing_range_claim, &statement_a)
+            .expect_err("missing proof-wide range claim must reject at the shape gate");
+
+        let mut tampered_range_claim = proof_a.clone();
+        *tampered_range_claim
+            .mldsa_range_table_claimed_sum
+            .as_mut()
+            .expect("proof-wide range claim") += stwo::core::fields::qm31::SecureField::from(
+            stwo::core::fields::m31::M31::from_u32_unchecked(1),
+        );
+        verify_mdoc_circuit(&tampered_range_claim, &statement_a)
+            .expect_err("tampered proof-wide range claim must reject");
 
         // S1 service claims, presence gate: an ML-DSA statement whose proof
         // carries NO service claim vector rejects at the shape gate.

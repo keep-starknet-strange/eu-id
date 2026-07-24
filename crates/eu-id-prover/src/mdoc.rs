@@ -2602,7 +2602,7 @@ pub struct MdocCircuitProof {
     pub mldsa: Option<MdocMlDsaClaims>,
     pub device_mldsa: Option<MdocMlDsaClaims>,
     pub revocation_mldsa: Option<MdocMlDsaClaims>,
-    mldsa_range_table_claimed_sum: Option<QM31>,
+    pub mldsa_range_table_claimed_sum: Option<QM31>,
     pub keccak_service_claimed_sums: Option<Vec<QM31>>,
     merged_sha_log_n_rows: Option<u32>,
     merged_sha_slot_log: Option<u32>,
@@ -3725,6 +3725,18 @@ pub fn prove_mdoc_circuit_with_pcs_config(
     prove_mdoc_circuit_inner(extracted, statement, config)
 }
 
+fn prepare_mldsa_role(
+    mut input: MlDsaVerifyInput,
+    witness_error_context: &'static str,
+) -> Result<(stwo_mldsa::witness::MlDsaWitness, MlDsaVerifyInput), Error> {
+    input.tr = stwo_mldsa::statement::native_tr(&input);
+    let witness = stwo_mldsa::witness::generate_witness(&input)
+        .map_err(|error| Error::Prove(format!("{witness_error_context}: {error:?}")))?;
+    stwo_mldsa::sampleinball::validate_stream(&witness)
+        .map_err(|error| Error::Prove(format!("mldsa SIB resource cap: {error}")))?;
+    Ok((witness, input))
+}
+
 fn prove_mdoc_circuit_inner(
     extracted: &ExtractedPidMdoc,
     statement: &MdocCircuitStatement,
@@ -3804,77 +3816,86 @@ fn prove_mdoc_circuit_inner(
     let sha_table_multiplicities = ShaTableMultiplicities::from_consumers(&sha_consumers);
     let mut sha_tables =
         ShaTablesProver::new(sha_table_multiplicities, sha_table_relations.clone());
+
+    // Witness preparation is pure and Send. Keep the non-Send shared relation
+    // handles and MlDsaProver construction on this thread, in fixed role order.
+    let issuer_input = statement.issuer_input.as_mldsa().cloned();
+    let device_input = statement.device_input.as_mldsa().cloned();
+    let revocation_input = revocation_message
+        .as_ref()
+        .map(|message| ts13_revocation_mldsa_input(statement, message.to_vec()))
+        .transpose();
+    let ((issuer_prepared, device_prepared), revocation_prepared) = rayon::join(
+        || {
+            rayon::join(
+                || {
+                    issuer_input
+                        .map(|input| prepare_mldsa_role(input, "mldsa witness"))
+                        .transpose()
+                },
+                || {
+                    device_input
+                        .map(|input| prepare_mldsa_role(input, "mldsa device witness"))
+                        .transpose()
+                },
+            )
+        },
+        || {
+            revocation_input.and_then(|input| {
+                input
+                    .flatten()
+                    .map(|input| prepare_mldsa_role(*input, "mldsa revocation witness"))
+                    .transpose()
+            })
+        },
+    );
+    // Preserve the original deterministic error priority even though all three
+    // independent preparations run to completion.
+    let issuer_prepared = issuer_prepared?;
+    let device_prepared = device_prepared?;
+    let revocation_prepared = revocation_prepared?;
+
     // Hosted in-circuit ML-DSA statement (M7/S4): the issuer Sig_structure is
     // PUBLIC, so the instance runs in public-message mode — its in-module
     // producer feeds the µ-absorption directly (no shared-field msg bridge).
-    let mut issuer_mldsa = statement
-        .issuer_input
-        .as_mldsa()
-        .map(|input| -> Result<MlDsaStatementProver, Error> {
-            let mut input = input.clone();
-            input.tr = stwo_mldsa::statement::native_tr(&input);
-            let witness = stwo_mldsa::witness::generate_witness(&input)
-                .map_err(|error| Error::Prove(format!("mldsa witness: {error:?}")))?;
-            stwo_mldsa::sampleinball::validate_stream(&witness)
-                .map_err(|error| Error::Prove(format!("mldsa SIB resource cap: {error}")))?;
-            Ok(MlDsaStatementProver::hosted_public(
-                witness,
-                input,
-                mldsa_range_handle.clone(),
-                mldsa_keccak_handle.clone(),
-            )
-            .with_instance_namespace(MDOC_ISSUER_MLDSA_NAMESPACE)
-            .with_stream_base(MDOC_ISSUER_MLDSA_STREAM_BASE))
-        })
-        .transpose()?;
+    let mut issuer_mldsa = issuer_prepared.map(|(witness, input)| {
+        MlDsaStatementProver::hosted_public(
+            witness,
+            input,
+            mldsa_range_handle.clone(),
+            mldsa_keccak_handle.clone(),
+        )
+        .with_instance_namespace(MDOC_ISSUER_MLDSA_NAMESPACE)
+        .with_stream_base(MDOC_ISSUER_MLDSA_STREAM_BASE)
+    });
     // Hosted in-circuit ML-DSA device statement, public-message mode (S4).
-    let mut device_mldsa = statement
-        .device_input
-        .as_mldsa()
-        .map(|input| -> Result<MlDsaStatementProver, Error> {
-            let mut input = input.clone();
-            input.tr = stwo_mldsa::statement::native_tr(&input);
-            let witness = stwo_mldsa::witness::generate_witness(&input)
-                .map_err(|error| Error::Prove(format!("mldsa device witness: {error:?}")))?;
-            stwo_mldsa::sampleinball::validate_stream(&witness)
-                .map_err(|error| Error::Prove(format!("mldsa SIB resource cap: {error}")))?;
-            Ok(MlDsaStatementProver::hosted_public(
-                witness,
-                input,
-                mldsa_range_handle.clone(),
-                mldsa_keccak_handle.clone(),
-            )
-            .with_instance_namespace(MDOC_DEVICE_MLDSA_NAMESPACE)
-            .with_stream_base(MDOC_DEVICE_MLDSA_STREAM_BASE))
-        })
-        .transpose()?;
+    let mut device_mldsa = device_prepared.map(|(witness, input)| {
+        MlDsaStatementProver::hosted_public(
+            witness,
+            input,
+            mldsa_range_handle.clone(),
+            mldsa_keccak_handle.clone(),
+        )
+        .with_instance_namespace(MDOC_DEVICE_MLDSA_NAMESPACE)
+        .with_stream_base(MDOC_DEVICE_MLDSA_STREAM_BASE)
+    });
     // Hosted in-circuit ML-DSA revocation statement, private-message mode: the
     // prover's input carries the REAL 20-byte message (from the private range
     // witness); only its LENGTH is mixed into the transcript.
-    let mut revocation_mldsa = revocation_message
-        .as_ref()
-        .map(|message| ts13_revocation_mldsa_input(statement, message.to_vec()))
-        .transpose()?
-        .flatten()
-        .map(|input| -> Result<MlDsaStatementProver, Error> {
-            let witness = stwo_mldsa::witness::generate_witness(&input)
-                .map_err(|error| Error::Prove(format!("mldsa revocation witness: {error:?}")))?;
-            stwo_mldsa::sampleinball::validate_stream(&witness)
-                .map_err(|error| Error::Prove(format!("mldsa SIB resource cap: {error}")))?;
-            Ok(MlDsaStatementProver::hosted(
-                witness,
-                *input,
-                revocation_message_field
-                    .clone()
-                    .expect("revocation field relation exists with a revocation signature"),
-                mldsa_range_handle.clone(),
-                mldsa_keccak_handle.clone(),
-            )
-            .with_instance_namespace(MDOC_REVOCATION_MLDSA_NAMESPACE)
-            .with_stream_base(MDOC_REVOCATION_MLDSA_STREAM_BASE)
-            .with_private_message())
-        })
-        .transpose()?;
+    let mut revocation_mldsa = revocation_prepared.map(|(witness, input)| {
+        MlDsaStatementProver::hosted(
+            witness,
+            input,
+            revocation_message_field
+                .clone()
+                .expect("revocation field relation exists with a revocation signature"),
+            mldsa_range_handle.clone(),
+            mldsa_keccak_handle.clone(),
+        )
+        .with_instance_namespace(MDOC_REVOCATION_MLDSA_NAMESPACE)
+        .with_stream_base(MDOC_REVOCATION_MLDSA_STREAM_BASE)
+        .with_private_message()
+    });
     let range_uses: Vec<_> = [&issuer_mldsa, &device_mldsa, &revocation_mldsa]
         .into_iter()
         .flatten()

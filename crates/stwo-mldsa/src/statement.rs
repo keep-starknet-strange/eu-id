@@ -1024,6 +1024,7 @@ fn full_squeeze(absorbed: &[u8], n_squeeze: usize) -> Vec<u8> {
     crate::reference::sponge::shake256(&[absorbed], RATE * n_squeeze).0
 }
 
+#[derive(Debug, PartialEq, Eq)]
 struct SpongeOutputs {
     mu: Option<Vec<u8>>,
     ct: Vec<u8>,
@@ -1273,6 +1274,7 @@ pub struct MlDsaProver {
     sib_rc_mult: Vec<ColEval>,
     // bridge byte payloads stashed for the interaction phase.
     decomp_w1_bytes: Vec<u8>,
+    sponge_outputs: SpongeOutputs,
     group_evals: Vec<SecureField>,
     claims: Claims,
     built: Option<Built>,
@@ -1309,14 +1311,8 @@ impl MlDsaProver {
         input.tr = native_tr(&input);
         let hosted = shared_field.is_some() || public_message;
         let ctx = LayoutCtx::new(&input, hosted, public_message);
-        let coeffs_rc_uses = coeffs::gen_coeffs_interaction(
-            &witness,
-            coeffs_log_size(),
-            SecureField::zero(),
-            SecureField::zero(),
-            &CoeffsRelations::dummy(),
-        )
-        .rc_uses;
+        let coeffs_rc_uses = coeffs::gen_coeffs_rc_uses(&witness);
+        let sponge_outputs = sponge_outputs(&witness, public_message);
         let claims = Claims {
             hosted,
             ..Claims::default()
@@ -1338,6 +1334,7 @@ impl MlDsaProver {
             decomp_rc_mult: Vec::new(),
             sib_rc_mult: Vec::new(),
             decomp_w1_bytes: Vec::new(),
+            sponge_outputs,
             group_evals: Vec::new(),
             claims,
             built: None,
@@ -1616,17 +1613,15 @@ impl AirProver for MlDsaProver {
         // 3. decomp base + 4. rc mult (stash w1Encode bytes for the w1enc bridge).
         let dls = decomp_log_size();
         evals.extend(decomp::gen_decomp_base_trace(&self.witness, dls));
-        let decomp_dry = decomp::gen_decomp_interaction(
-            &self.witness,
-            dls,
-            self.stream_base + STREAM_ID_CTILDE_ABSORB,
-            &DecompRelations::dummy(),
-        );
-        self.decomp_w1_bytes = decomp_dry.w1_encode_bytes.clone();
+        let decomp_metadata = decomp::gen_decomp_metadata(&self.witness);
+        self.decomp_w1_bytes = decomp_metadata.w1_encode_bytes;
         self.decomp_rc_mult = decomp_tables::RcKind::ALL
             .iter()
             .map(|kind| {
-                decomp_tables::gen_table_multiplicities(*kind, decomp_dry.rc_uses.for_kind(*kind))
+                decomp_tables::gen_table_multiplicities(
+                    *kind,
+                    decomp_metadata.rc_uses.for_kind(*kind),
+                )
             })
             .collect();
         evals.extend(self.decomp_rc_mult.clone());
@@ -1634,16 +1629,11 @@ impl AirProver for MlDsaProver {
         // 5. sib base + 6. rc mult.
         let sls = sib_log_size();
         evals.extend(sampleinball::gen_sib_base_trace(&self.witness, sls));
-        let sib_dry = sampleinball::gen_sib_interaction(
-            &self.witness,
-            sls,
-            self.stream_base + STREAM_ID_SIB_SQUEEZE,
-            &SibRelations::dummy(),
-        );
+        let sib_metadata = sampleinball::gen_sib_metadata(&self.witness);
         self.sib_rc_mult = sib_tables::RcKind::ALL
             .iter()
             .map(|kind| {
-                sib_tables::gen_table_multiplicities(*kind, sib_dry.rc_uses.for_kind(*kind))
+                sib_tables::gen_table_multiplicities(*kind, sib_metadata.rc_uses.for_kind(*kind))
             })
             .collect();
         evals.extend(self.sib_rc_mult.clone());
@@ -1667,7 +1657,7 @@ impl AirProver for MlDsaProver {
             .gen_base(),
         );
 
-        let outputs = sponge_outputs(&self.witness, self.ctx.public_message);
+        let outputs = &self.sponge_outputs;
         if !self.ctx.public_message {
             evals.extend(
                 msg_bridge_eval(
@@ -1681,7 +1671,7 @@ impl AirProver for MlDsaProver {
                 .gen_base(&self.input.message),
             );
         }
-        let bbytes = bridge_bytes(&outputs, &self.decomp_w1_bytes);
+        let bbytes = bridge_bytes(outputs, &self.decomp_w1_bytes);
         let bridge_descs = bridge_evals(
             &self.namespace,
             self.stream_base,
@@ -1709,7 +1699,7 @@ impl AirProver for MlDsaProver {
             "SIB squeeze must fill the fixed five-block resource cap"
         );
 
-        let sbytes = sink_bytes(&outputs);
+        let sbytes = sink_bytes(outputs);
         let sink_descs = sink_evals(
             &self.namespace,
             self.input.message.len(),
@@ -1808,7 +1798,7 @@ impl AirProver for MlDsaProver {
         self.claims.prefix = prefix_sum;
         evals.extend(prefix_tr);
 
-        let outputs = sponge_outputs(&self.witness, self.ctx.public_message);
+        let outputs = &self.sponge_outputs;
         self.claims.bridges.clear();
         if !self.ctx.public_message {
             let (msg_tr, msg_sum) = msg_bridge_eval(
@@ -1823,7 +1813,7 @@ impl AirProver for MlDsaProver {
             self.claims.bridges.push(msg_sum);
             evals.extend(msg_tr);
         }
-        let bbytes = bridge_bytes(&outputs, &self.decomp_w1_bytes);
+        let bbytes = bridge_bytes(outputs, &self.decomp_w1_bytes);
         let bridge_descs = bridge_evals(
             &self.namespace,
             self.stream_base,
@@ -1836,7 +1826,7 @@ impl AirProver for MlDsaProver {
             evals.extend(tr);
         }
 
-        let sbytes = sink_bytes(&outputs);
+        let sbytes = sink_bytes(outputs);
         let sink_descs = sink_evals(
             &self.namespace,
             self.input.message.len(),
@@ -2204,4 +2194,55 @@ pub fn verify_mldsa(
     // The public folded identity is enforced by `PublicFoldEval` in the outer
     // STARK component list.
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use ml_dsa::signature::{Keypair, Signer};
+    use ml_dsa::{EncodedSignature, EncodedVerifyingKey, MlDsa65, SigningKey};
+
+    use super::*;
+    use crate::reference::encoding::{pk_decode, sig_decode};
+    use crate::reference::sponge::shake256;
+    use crate::witness::generate_witness;
+
+    fn witness_and_input() -> (MlDsaWitness, MlDsaVerifyInput) {
+        let signing_key = SigningKey::<MlDsa65>::from_seed(&[0x53; 32].into());
+        let verifying_key = signing_key.verifying_key();
+        let message = b"cached-sponge-outputs".to_vec();
+        let signature = signing_key.sign(&message);
+        let pk: EncodedVerifyingKey<MlDsa65> = verifying_key.encode();
+        let signature: EncodedSignature<MlDsa65> = signature.encode();
+        let decoded_pk = pk_decode(pk.as_slice()).expect("pk_decode");
+        let decoded_signature = sig_decode(signature.as_slice()).expect("sig_decode");
+        let (tr, _) = shake256(&[pk.as_slice()], 64);
+        let mut tr_array = [0u8; 64];
+        tr_array.copy_from_slice(&tr);
+        let input =
+            MlDsaVerifyInput::from_decoded(&decoded_pk, &decoded_signature, tr_array, message);
+        let witness = generate_witness(&input).expect("witness");
+        (witness, input)
+    }
+
+    #[test]
+    fn prover_cache_equals_fresh_sponge_outputs_in_both_message_modes() {
+        let (witness, input) = witness_and_input();
+        let expected_private = sponge_outputs(&witness, false);
+        let private = MlDsaProver::new(
+            witness.clone(),
+            input.clone(),
+            None,
+            SharedKeccakRelations::new(),
+        );
+        assert_eq!(private.sponge_outputs, expected_private);
+
+        let expected_public = sponge_outputs(&witness, true);
+        let public = MlDsaProver::hosted_public(
+            witness,
+            input,
+            SharedRangeRelation::new(),
+            SharedKeccakRelations::new(),
+        );
+        assert_eq!(public.sponge_outputs, expected_public);
+    }
 }

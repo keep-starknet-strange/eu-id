@@ -871,11 +871,15 @@ pub fn generate_interaction_trace(
 
     // Fold each chunk exactly like `finalize_logup_batched`: start from the
     // first fraction, then num = d·num + n·den, den = den·d.
-    for chunk in fracs.chunks(LOGUP_BATCH) {
+    let n_slots = fracs.n_slots();
+    for first_slot in (0..n_slots).step_by(LOGUP_BATCH) {
+        let last_slot = (first_slot + LOGUP_BATCH).min(n_slots);
         let mut col = gen.new_col();
+        let (first_num, first_den) = fracs.slot(first_slot);
         for vr in 0..n_vec_rows {
-            let (mut num, mut den) = (chunk[0].0[vr], chunk[0].1[vr]);
-            for (n, d) in &chunk[1..] {
+            let (mut num, mut den) = (first_num[vr], first_den[vr]);
+            for slot in first_slot + 1..last_slot {
+                let (n, d) = fracs.slot(slot);
                 num = d[vr] * num + n[vr] * den;
                 den *= d[vr];
             }
@@ -896,39 +900,91 @@ pub fn data_log_size(data: &InteractionClaimData) -> u32 {
     )
 }
 
-/// The per-lookup fraction columns `(num, den)` over the packed rows, one pair
-/// per lookup slot in canonical emission order (== `collect_round_lookups`).
-/// The single source for the columnar interaction trace, the GKR leaf layers,
-/// and the tie-back coeff column.
-pub fn build_fracs(
-    rel: &KeccakRelations,
-    data: &InteractionClaimData,
-) -> Vec<(Vec<PackedQM31>, Vec<PackedQM31>)> {
+/// The per-lookup fraction columns over packed rows, flattened in canonical
+/// slot-major / packed-row-minor order.
+pub(crate) struct RoundFractions {
+    numerators: Vec<PackedQM31>,
+    denominators: Vec<PackedQM31>,
+    n_vec_rows: usize,
+}
+
+impl RoundFractions {
+    fn new(n_vec_rows: usize) -> Self {
+        let packed_len = N_TOTAL_LOOKUPS * n_vec_rows;
+        Self {
+            numerators: Vec::with_capacity(packed_len),
+            denominators: Vec::with_capacity(packed_len),
+            n_vec_rows,
+        }
+    }
+
+    fn push_slot(&mut self, entries: impl IntoIterator<Item = (PackedQM31, PackedQM31)>) {
+        let previous_len = self.numerators.len();
+        for (numerator, denominator) in entries {
+            self.numerators.push(numerator);
+            self.denominators.push(denominator);
+        }
+        debug_assert_eq!(
+            self.numerators.len() - previous_len,
+            self.n_vec_rows,
+            "round fraction slot must contain every packed row"
+        );
+    }
+
+    pub(crate) fn n_vec_rows(&self) -> usize {
+        self.n_vec_rows
+    }
+
+    pub(crate) fn n_slots(&self) -> usize {
+        debug_assert_eq!(self.numerators.len(), self.denominators.len());
+        debug_assert_eq!(self.numerators.len() % self.n_vec_rows, 0);
+        self.numerators.len() / self.n_vec_rows
+    }
+
+    pub(crate) fn numerators(&self) -> &[PackedQM31] {
+        &self.numerators
+    }
+
+    pub(crate) fn denominators(&self) -> &[PackedQM31] {
+        &self.denominators
+    }
+
+    pub(crate) fn slot(&self, slot: usize) -> (&[PackedQM31], &[PackedQM31]) {
+        let start = slot * self.n_vec_rows;
+        let end = start + self.n_vec_rows;
+        (&self.numerators[start..end], &self.denominators[start..end])
+    }
+}
+
+/// Build the single packed source for the columnar interaction trace, the GKR
+/// leaf layer, and the tie-back coefficient column. Slots are appended in the
+/// exact [`collect_round_lookups`] emission order.
+pub(crate) fn build_fracs(rel: &KeccakRelations, data: &InteractionClaimData) -> RoundFractions {
     let log_size = data_log_size(data);
     let enabler = Enabler::new(data.non_padded_length);
     let n_vec_rows = 1usize << (log_size - LOG_N_LANES);
 
-    let mut fracs: Vec<(Vec<PackedQM31>, Vec<PackedQM31>)> = Vec::with_capacity(N_TOTAL_LOOKUPS);
+    let mut fracs = RoundFractions::new(n_vec_rows);
     let ld = &data.lookup_data;
 
-    let push_xor3 = |fracs: &mut Vec<_>, lo: usize, hi: usize| {
+    let push_xor3 = |fracs: &mut RoundFractions, lo: usize, hi: usize| {
         for lk in &ld.xor3[lo..hi] {
-            fracs.push(dense_fraction(&rel.xor3, lk, n_vec_rows));
+            push_dense_fraction(fracs, &rel.xor3, lk);
         }
     };
-    let push_split = |fracs: &mut Vec<_>, lo: usize, hi: usize| {
+    let push_split = |fracs: &mut RoundFractions, lo: usize, hi: usize| {
         for lk in &ld.split[lo..hi] {
-            fracs.push(split_fraction(rel, lk, n_vec_rows));
+            push_split_fraction(fracs, rel, lk);
         }
     };
 
-    fracs.push(link_fraction(
+    push_link_fraction(
+        &mut fracs,
         &rel.keccak_round,
         &ld.keccak_round[0],
         &enabler,
-        n_vec_rows,
         true,
-    ));
+    );
     push_xor3(&mut fracs, 0, N_XOR3_C); // theta C-parity 0..80
     push_split(&mut fracs, 0, N_SPLIT_C_ROT); // C_rot 0..40
     push_xor3(&mut fracs, N_XOR3_C, N_XOR3_C + N_XOR3_THETA_APPLY); // theta-apply 80..280
@@ -936,69 +992,57 @@ pub fn build_fracs(
                                                             // Chi: per byte, andnot then closing xor3, interleaved (matching evaluate).
     let chi_close_lo = N_XOR3_C + N_XOR3_THETA_APPLY;
     for j in 0..N_ANDNOT_LOOKUPS {
-        fracs.push(dense_fraction(&rel.andnot, &ld.andnot[j], n_vec_rows));
-        fracs.push(dense_fraction(
-            &rel.xor3,
-            &ld.xor3[chi_close_lo + j],
-            n_vec_rows,
-        ));
+        push_dense_fraction(&mut fracs, &rel.andnot, &ld.andnot[j]);
+        push_dense_fraction(&mut fracs, &rel.xor3, &ld.xor3[chi_close_lo + j]);
     }
-    fracs.push(link_fraction(
+    push_link_fraction(
+        &mut fracs,
         &rel.keccak_round,
         &ld.keccak_round[1],
         &enabler,
-        n_vec_rows,
         false,
-    ));
+    );
 
-    debug_assert_eq!(fracs.len(), N_TOTAL_LOOKUPS);
+    debug_assert_eq!(fracs.n_slots(), N_TOTAL_LOOKUPS);
     fracs
 }
 
-fn dense_fraction<R: Relation<PackedM31, PackedQM31>>(
+fn push_dense_fraction<R: Relation<PackedM31, PackedQM31>>(
+    fracs: &mut RoundFractions,
     rel: &R,
     lookup: &[[PackedM31; 2]],
-    n_vec_rows: usize,
-) -> (Vec<PackedQM31>, Vec<PackedQM31>) {
-    let num = vec![PackedQM31::one(); n_vec_rows];
-    let mut den = vec![PackedQM31::one(); n_vec_rows];
-    for (vr, d) in den.iter_mut().enumerate() {
-        *d = rel.combine(&lookup[vr]);
-    }
-    (num, den)
+) {
+    fracs.push_slot(
+        lookup[..fracs.n_vec_rows()]
+            .iter()
+            .map(|tuple| (PackedQM31::one(), rel.combine(tuple))),
+    );
 }
 
-fn split_fraction(
+fn push_split_fraction(
+    fracs: &mut RoundFractions,
     rel: &KeccakRelations,
     lookup: &[[PackedM31; 4]],
-    n_vec_rows: usize,
-) -> (Vec<PackedQM31>, Vec<PackedQM31>) {
+) {
     let shift = lookup[0][0].to_array()[0].0 as usize;
     let split_rel = &rel.split[shift - 1];
-    let num = vec![PackedQM31::one(); n_vec_rows];
-    let mut den = vec![PackedQM31::one(); n_vec_rows];
-    for (vr, d) in den.iter_mut().enumerate() {
-        let tuple = [lookup[vr][1], lookup[vr][2], lookup[vr][3]];
-        *d = split_rel.combine(&tuple);
-    }
-    (num, den)
+    fracs.push_slot(lookup[..fracs.n_vec_rows()].iter().map(|row| {
+        let tuple = [row[1], row[2], row[3]];
+        (PackedQM31::one(), split_rel.combine(&tuple))
+    }));
 }
 
-fn link_fraction<R: Relation<PackedM31, PackedQM31>>(
+fn push_link_fraction<R: Relation<PackedM31, PackedQM31>>(
+    fracs: &mut RoundFractions,
     rel: &R,
     lookup: &[[PackedM31; KECCAK_ROUND_ARITY]],
     enabler: &Enabler,
-    n_vec_rows: usize,
     negate: bool,
-) -> (Vec<PackedQM31>, Vec<PackedQM31>) {
-    let mut num = vec![PackedQM31::one(); n_vec_rows];
-    let mut den = vec![PackedQM31::one(); n_vec_rows];
-    for vr in 0..n_vec_rows {
+) {
+    fracs.push_slot((0..fracs.n_vec_rows()).map(|vr| {
         let e = PackedQM31::from(enabler.packed_at(vr));
-        num[vr] = if negate { -e } else { e };
-        den[vr] = rel.combine(&lookup[vr]);
-    }
-    (num, den)
+        (if negate { -e } else { e }, rel.combine(&lookup[vr]))
+    }));
 }
 
 pub const N_COLUMNS_PUB: usize = N_COLUMNS;

@@ -507,6 +507,72 @@ pub struct DecompInteraction {
     pub wcell_uses: Vec<(u32, u32)>,
 }
 
+/// Witness-only outputs needed while writing base multiplicity and bridge
+/// columns. Computing these does not require Fiat–Shamir relations.
+pub struct DecompMetadata {
+    pub rc_uses: RcUses,
+    pub w1_encode_bytes: Vec<u8>,
+    checked_hint_total: u32,
+}
+
+pub fn gen_decomp_metadata(witness: &MlDsaWitness) -> DecompMetadata {
+    let sched = row_schedule();
+    gen_decomp_metadata_inner(witness, &sched, None)
+}
+
+#[cfg(test)]
+fn gen_decomp_metadata_with_checked_hint_total(
+    witness: &MlDsaWitness,
+    checked_hint_total: u32,
+) -> DecompMetadata {
+    let sched = row_schedule();
+    gen_decomp_metadata_inner(witness, &sched, Some(checked_hint_total))
+}
+
+fn gen_decomp_metadata_inner(
+    witness: &MlDsaWitness,
+    sched: &[(usize, usize)],
+    checked_hint_total: Option<u32>,
+) -> DecompMetadata {
+    let gamma2 = GAMMA2 as i64;
+    let mut rc_uses = RcUses::new();
+    let mut w1_encode_bytes = vec![0u8; sched.len()];
+    let mut total_h = 0u32;
+
+    for (row, &(i, p)) in sched.iter().enumerate() {
+        total_h += witness.decomp.hint[i][2 * p] as u32 + witness.decomp.hint[i][2 * p + 1] as u32;
+        let mut byte = 0u32;
+        for lane in 0..2 {
+            let m = 2 * p + lane;
+            let v = lane_vals(witness, i, m);
+            rc_uses.rc4[v.w1 as usize] += 1;
+            rc_uses.rc4[v.w1p as usize] += 1;
+            rc_uses.rc4[(v.wrap16 + 1) as usize] += 1;
+            let a = v.w0 + gamma2 - 1;
+            let b = gamma2 - v.w0;
+            let sign_val = if v.s0 == 1 { v.w0 - 1 } else { -v.w0 };
+            rc_uses.rc13[(a & ((1 << 13) - 1)) as usize] += 1;
+            rc_uses.rc13[(b & ((1 << 13) - 1)) as usize] += 1;
+            rc_uses.rc13[(sign_val & ((1 << 13) - 1)) as usize] += 1;
+            rc_uses.rc7[(a >> 13) as usize] += 1;
+            rc_uses.rc7[(b >> 13) as usize] += 1;
+            rc_uses.rc7[(sign_val >> 13) as usize] += 1;
+            byte += (v.w1p as u32) << (4 * lane);
+        }
+        w1_encode_bytes[row] = byte as u8;
+    }
+
+    let checked_hint_total = checked_hint_total.unwrap_or(total_h);
+    rc_uses.rc8[checked_hint_total as usize] += 1;
+    rc_uses.rc8[(OMEGA as u32 - checked_hint_total) as usize] += 1;
+
+    DecompMetadata {
+        rc_uses,
+        w1_encode_bytes,
+        checked_hint_total,
+    }
+}
+
 pub fn gen_decomp_interaction(
     witness: &MlDsaWitness,
     log_size: u32,
@@ -544,6 +610,8 @@ fn gen_decomp_interaction_inner(
     let sched = row_schedule();
     let active = sched.len();
     let gamma2 = GAMMA2 as i64;
+    let metadata = gen_decomp_metadata_inner(witness, &sched, checked_hint_total);
+    let checked_total_h = metadata.checked_hint_total;
 
     // hint accumulator (QM31 running sum over base-field h) in coset order.
     let zero = SecureField::from(m31(0));
@@ -571,9 +639,6 @@ fn gen_decomp_interaction_inner(
     let row_lookup = circle_row_to_coset(log_size);
     let vec_rows = 1usize << (log_size - stwo::prover::backend::simd::m31::LOG_N_LANES);
 
-    let mut rc_uses = RcUses::new();
-    let mut w1_encode_bytes = vec![0u8; active];
-    let mut wcell_uses = Vec::with_capacity(2 * active);
     let mut entries: Vec<(Vec<PackedQM31>, Vec<PackedQM31>)> = Vec::new();
     let mut claimed = zero;
 
@@ -602,37 +667,6 @@ fn gen_decomp_interaction_inner(
         }
         entries.push((nums, dens));
     };
-
-    // Seed rc/byte/wcell bookkeeping (single pass, coset order).
-    for coset in 0..rows {
-        if let Some((i, p)) = coset_rows[coset] {
-            let mut byte = 0u32;
-            for lane in 0..2 {
-                let m = 2 * p + lane;
-                let v = lane_vals(witness, i, m);
-                rc_uses.rc4[v.w1 as usize] += 1;
-                rc_uses.rc4[v.w1p as usize] += 1;
-                rc_uses.rc4[(v.wrap16 + 1) as usize] += 1;
-                let a = v.w0 + gamma2 - 1;
-                let b = gamma2 - v.w0;
-                let sign_val = if v.s0 == 1 { v.w0 - 1 } else { -v.w0 };
-                rc_uses.rc13[(a & ((1 << 13) - 1)) as usize] += 1;
-                rc_uses.rc13[(b & ((1 << 13) - 1)) as usize] += 1;
-                rc_uses.rc13[(sign_val & ((1 << 13) - 1)) as usize] += 1;
-                rc_uses.rc7[(a >> 13) as usize] += 1;
-                rc_uses.rc7[(b >> 13) as usize] += 1;
-                rc_uses.rc7[(sign_val >> 13) as usize] += 1;
-                wcell_uses.push(((i * N + m) as u32, v.w as u32));
-                byte += (v.w1p as u32) << (4 * lane);
-            }
-            w1_encode_bytes[coset] = byte as u8;
-        }
-    }
-    // hint_acc final-row rc8 uses (Σh and ω−Σh).
-    let total_h: u32 = acc[active - 1].to_m31_array()[0].0;
-    let checked_total_h = checked_hint_total.unwrap_or(total_h);
-    rc_uses.rc8[checked_total_h as usize] += 1;
-    rc_uses.rc8[(OMEGA as u32 - checked_total_h) as usize] += 1;
 
     // --- Build the logup fraction streams in AIR emission order ---
     // Per-lane: rc4(w1), rc13(a_lo), rc7(a_hi), rc13(b_lo), rc7(b_hi), rc4(w16+1),
@@ -750,6 +784,20 @@ fn gen_decomp_interaction_inner(
     trace.extend(logup_trace);
     debug_assert_eq!(claimed_sum, claimed, "decomp logup claimed sum mismatch");
 
+    let wcell_uses = sched
+        .iter()
+        .flat_map(|&(i, p)| {
+            (0..2).map(move |lane| {
+                let m = 2 * p + lane;
+                ((i * N + m) as u32, witness.rows[i].w[m])
+            })
+        })
+        .collect();
+    let DecompMetadata {
+        rc_uses,
+        w1_encode_bytes,
+        ..
+    } = metadata;
     DecompInteraction {
         trace,
         claimed_sum,

@@ -44,8 +44,8 @@ use stwo_mldsa::coeffs::tables::SharedRangeTable;
 use stwo_mldsa::reference::encoding::{pk_decode, sig_decode};
 use stwo_mldsa::reference::sponge::shake256;
 use stwo_mldsa::statement::{
-    hosted_public_claimed_sums_len, keccak_job_shapes, MlDsaProver, MlDsaVerifier,
-    HOSTED_MSG_FIELD_ID, STREAM_BASE_STRIDE,
+    hosted_claimed_sums_len, hosted_public_claimed_sums_len, keccak_job_shapes, MlDsaProver,
+    MlDsaVerifier, HOSTED_MSG_FIELD_ID, STREAM_BASE_STRIDE,
 };
 use stwo_mldsa::witness::generate_witness;
 use stwo_mldsa::MlDsaVerifyInput;
@@ -307,10 +307,12 @@ fn prove_hosted(seed: u64, msg: &[u8], producer_bytes: Vec<u8>) -> HostedProof {
     )
     .expect("prove");
 
+    let claimed_sums = mldsa.claimed_sums();
+    assert_eq!(claimed_sums.len(), hosted_claimed_sums_len());
     HostedProof {
         input,
         group_evals: mldsa.group_evals().to_vec(),
-        claimed_sums: mldsa.claimed_sums(),
+        claimed_sums,
         range_table_claimed_sum: range_table.claimed_sum(),
         service_claimed_sums: service.claimed_sums(),
         post_interaction_payloads,
@@ -433,6 +435,14 @@ fn hosted_public_native_mu_proves_and_verifies() {
     let msg = b"issuer/device public message uses verifier-native mu".to_vec();
     let proof = prove_hosted_public(4244, &msg);
     verify_hosted_public(&proof).expect("hosted-public verify");
+}
+
+#[test]
+fn hosted_tampered_shared_range_claim_rejects() {
+    let msg = b"proof-wide range claim is transcript-bound".to_vec();
+    let mut proof = prove_hosted_public(4252, &msg);
+    proof.range_table_claimed_sum += SecureField::from(m31(1));
+    assert!(verify_hosted_public(&proof).is_err());
 }
 
 #[test]

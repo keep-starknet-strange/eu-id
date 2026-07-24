@@ -1324,6 +1324,61 @@ pub struct SibInteraction {
     pub ccell_uses: Vec<(u32, u32)>,
 }
 
+/// Witness-only outputs needed for base multiplicity columns and standalone
+/// balancers. No Fiat–Shamir relation values are required.
+pub struct SibMetadata {
+    pub rc_uses: RcUses,
+    pub stream_bytes: Vec<u8>,
+}
+
+pub fn gen_sib_metadata(witness: &MlDsaWitness) -> SibMetadata {
+    let srows = stream_rows(witness);
+    let mem = mem_trace(witness);
+    gen_sib_metadata_from_parts(witness, &srows, &mem)
+}
+
+fn gen_sib_metadata_from_parts(
+    witness: &MlDsaWitness,
+    srows: &[StreamRow],
+    mem: &MemTrace,
+) -> SibMetadata {
+    let mut rc_uses = RcUses::new();
+    let mut stream_bytes = Vec::with_capacity(srows.len());
+    for (row, stream_row) in srows.iter().enumerate() {
+        let byte = stream_row.byte;
+        stream_bytes.push(byte as u8);
+        if stream_row.accept {
+            let margin = (stream_row.i - byte) as usize;
+            rc_uses.rc8[margin & 0xff] += 1;
+            rc_uses.rc8[margin >> 8] += 1;
+        } else if row >= SIGN_BYTES && stream_row.active {
+            let margin = (byte - stream_row.i - 1) as usize;
+            rc_uses.rc8[margin & 0xff] += 1;
+            rc_uses.rc8[margin >> 8] += 1;
+        }
+    }
+
+    for &c in &witness.digits.c {
+        rc_uses.rc9[(c + 1) as usize] += 1;
+    }
+
+    // Offline-memory range uses over the sorted view: daddr (rc8) on every
+    // non-first sorted row; dts (rc11) whenever the address repeats.
+    for pair in mem.sorted.windows(2) {
+        let previous = &pair[0];
+        let current = &pair[1];
+        rc_uses.rc8[(current.addr - previous.addr) as usize] += 1;
+        if current.addr == previous.addr {
+            rc_uses.rc11[(current.ts - previous.ts - 1) as usize] += 1;
+        }
+    }
+
+    SibMetadata {
+        rc_uses,
+        stream_bytes,
+    }
+}
+
 pub fn gen_sib_interaction(
     witness: &MlDsaWitness,
     log_size: u32,
@@ -1363,6 +1418,7 @@ pub fn gen_sib_interaction(
 
     // Offline-memory: sorted view per coset row (row r ↦ sorted[r] for r<N_ACCESSES).
     let mem = mem_trace(witness);
+    let metadata = gen_sib_metadata_from_parts(witness, &srows, &mem);
     // Packed passthrough QM31 column: sorted (addr, ts, val) in coords 0/1/2,
     // and the ordered SampleInBall state-after value in coord 3.
     let pass: Vec<SecureField> = (0..rows)
@@ -1385,10 +1441,6 @@ pub fn gen_sib_interaction(
 
     let row_lookup = circle_row_to_coset(log_size);
     let vec_rows = 1usize << (log_size - stwo::prover::backend::simd::m31::LOG_N_LANES);
-
-    let mut rc_uses = RcUses::new();
-    let mut stream_bytes = vec![0u8; slen];
-    let mut ccell_uses = Vec::with_capacity(N);
 
     // Per-row precompute.
     #[derive(Clone, Copy)]
@@ -1426,48 +1478,6 @@ pub fn gen_sib_interaction(
             }
         })
         .collect();
-
-    // Seed bookkeeping.
-    for coset in 0..rows {
-        match coset_row[coset] {
-            Some(Row::Stream {
-                byte,
-                i,
-                accept,
-                reject,
-            }) => {
-                stream_bytes[coset] = byte as u8;
-                if accept {
-                    let am = (i - byte) as usize; // ∈ [0,256)
-                    rc_uses.rc8[am & 0xff] += 1;
-                    rc_uses.rc8[am >> 8] += 1;
-                } else if reject {
-                    let rm = (byte - i - 1) as usize; // ∈ [0,256)
-                    rc_uses.rc8[rm & 0xff] += 1;
-                    rc_uses.rc8[rm >> 8] += 1;
-                }
-            }
-            Some(Row::C { m, c }) => {
-                let cp1 = (c + 1) as usize;
-                rc_uses.rc9[cp1] += 1;
-                ccell_uses.push((m, enc_signed(c).0));
-            }
-            None => {}
-        }
-    }
-
-    // Offline-memory range uses over the sorted view: daddr (rc8) on every
-    // non-first sorted row; dts (rc11) whenever same (a repeat cell).
-    for row in 1..mem.sorted.len() {
-        let a = &mem.sorted[row];
-        let p = &mem.sorted[row - 1];
-        let daddr = (a.addr - p.addr) as usize;
-        rc_uses.rc8[daddr] += 1;
-        if a.addr == p.addr {
-            let dts = (a.ts - p.ts - 1) as usize;
-            rc_uses.rc11[dts] += 1;
-        }
-    }
 
     let mut entries: Vec<(Vec<PackedQM31>, Vec<PackedQM31>)> = Vec::new();
     let mut claimed = zero;
@@ -1823,6 +1833,17 @@ pub fn gen_sib_interaction(
     trace.extend(logup_trace);
     debug_assert_eq!(claimed_sum, claimed, "sib logup claimed sum mismatch");
 
+    let ccell_uses = witness
+        .digits
+        .c
+        .iter()
+        .enumerate()
+        .map(|(m, &c)| (m as u32, enc_signed(c).0))
+        .collect();
+    let SibMetadata {
+        rc_uses,
+        stream_bytes,
+    } = metadata;
     SibInteraction {
         trace,
         claimed_sum,

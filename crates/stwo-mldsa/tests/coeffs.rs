@@ -247,6 +247,34 @@ fn negative_recomp_binding_mismatch() {
     );
 }
 
+/// A packed row's second z coefficient must participate in the same Horner
+/// evaluation as its first coefficient. Coefficient 76 is the second slot of
+/// the physical row `(77, 76)`; a live in-range mutation must not disappear.
+#[test]
+fn negative_packed_second_z_coefficient_is_bound() {
+    let (mut w, input) = witness_and_input(3007, b"packed-z-second");
+    let digit = &mut w.digits.z[2][76][1];
+    *digit += if *digit < 255 { 1 } else { -1 };
+    assert!(
+        rejected(w, input),
+        "packed second z coefficient must be bound into the group evaluation"
+    );
+}
+
+/// The second packed w coefficient keeps its original `w_bind_id = i·N+m` and
+/// recomposed value. The standalone WCell balancer consumes the unmodified
+/// coefficient, so changing only its second-slot digits must reject.
+#[test]
+fn negative_packed_second_wcell_is_bound() {
+    let (mut w, input) = witness_and_input(3008, b"packed-w-second");
+    let digit = &mut w.digits.w[1][30][0];
+    *digit += if *digit < 255 { 1 } else { -1 };
+    assert!(
+        rejected(w, input),
+        "packed second w coefficient must retain its WCell key/value binding"
+    );
+}
+
 /// N7: the exact z-norm gate accepts `|z| ≤ γ1−β−1 = 524_091` and rejects the
 /// boundary `|z| = γ1−β = 524_092` (the review flag — NOT a 2^20 window that
 /// over-accepts by ~195). Checked at constraint-arithmetic granularity: the AIR
@@ -275,6 +303,37 @@ fn z_norm_gate_is_exact() {
     assert!(
         !accepts(bound + 100),
         "...but the exact two-sided gate rejects it"
+    );
+}
+
+#[test]
+fn paired_zw_shape_is_log13_and_batch4_legal() {
+    use stwo_mldsa::coeffs::{
+        coeffs_preprocessed_ids, layout, LOGUP_BATCH, N_BASE_COLS, N_INTERACTION_COLS,
+        N_LOGUP_COLS, N_LOGUP_ENTRIES, N_RANGE_STREAMS,
+    };
+
+    let active = layout::active_rows();
+    let log_size = stwo_mldsa::air_util::padded_log_size(active);
+    let rows = 1usize << log_size;
+
+    assert_eq!(active, 7796);
+    assert_eq!(log_size, 13);
+    assert_eq!(rows, 8192);
+    assert_eq!(
+        N_BASE_COLS, 17,
+        "z/w reuse six digit columns; two dedicated norm highs prevent carry-stream aliasing"
+    );
+    assert_eq!(coeffs_preprocessed_ids().len(), 18);
+    assert_eq!(N_RANGE_STREAMS, 14);
+    assert_eq!(N_LOGUP_ENTRIES, 18);
+    assert_eq!(LOGUP_BATCH, 4);
+    assert_eq!(N_LOGUP_COLS, N_LOGUP_ENTRIES.div_ceil(LOGUP_BATCH));
+    assert_eq!(N_LOGUP_COLS, 5);
+    assert_eq!(N_INTERACTION_COLS, 24);
+    assert_eq!(
+        (coeffs_preprocessed_ids().len() + N_BASE_COLS + N_INTERACTION_COLS) * rows,
+        483_328
     );
 }
 
@@ -335,6 +394,8 @@ fn negative_seeds_are_honest_without_mutation() {
         (3002, b"swap-polys"),
         (3005, b"carry"),
         (3006, b"recomp"),
+        (3007, b"packed-z-second"),
+        (3008, b"packed-w-second"),
     ] {
         let (w, input) = witness_and_input(seed, msg);
         let proof = prove_coeffs(w, input, PcsConfig::default())

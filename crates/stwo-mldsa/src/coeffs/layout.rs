@@ -5,20 +5,21 @@
 //!
 //! ## Group order (fixed = `poly_id`)
 //!
-//! | kind    | groups | coeffs/group | live digits/coeff | poly_id     |
-//! |---------|--------|--------------|-------------------|-------------|
-//! | z_j     | L = 5  | N   = 256    | T_Z = 3           | 0 ..= 4     |
-//! | w_i     | K = 6  | N   = 256    | T_W = 3           | 5 ..= 10    |
-//! | e_i     | K = 6  | N   = 256    | T_E = 4           | 11 ..= 16   |
-//! | v_i     | K = 6  | N-1 = 255    | T_V = 6           | 17 ..= 22   |
-//! | c       | 1      | N   = 256    | 1                 | 23          |
-//! | Ĉ_i     | K = 6  | 511          | 5 (t ∈ [0,4])     | 24 ..= 29   |
+//! | kind    | groups | coeffs/group | coeffs/row | live digits/coeff | poly_id     |
+//! |---------|--------|--------------|------------|-------------------|-------------|
+//! | z_j     | L = 5  | N   = 256    | 2          | T_Z = 3           | 0 ..= 4     |
+//! | w_i     | K = 6  | N   = 256    | 2          | T_W = 3           | 5 ..= 10    |
+//! | e_i     | K = 6  | N   = 256    | 1          | T_E = 4           | 11 ..= 16   |
+//! | v_i     | K = 6  | N-1 = 255    | 1          | T_V = 6           | 17 ..= 22   |
+//! | c       | 1      | N   = 256    | 1          | 1                 | 23          |
+//! | Ĉ_i     | K = 6  | 511          | 1          | 5 (t ∈ [0,4])     | 24 ..= 29   |
 //!
-//! Every row carries up to `MAX_DIGITS = 6` digit cells (`T_V`). Unused tail
-//! cells are constrained to zero (preprocessed live-count mask). The per-row
-//! inner value is `digit_row(s) = Σ_t d_t · s^t` (s-powers are drawn constants,
-//! so this is degree 1 in the digit cells); the group accumulator is the outer
-//! Horner `acc' = (1 − start)·acc_prev·r + digit_row(s)` (worksheet §3.2).
+//! Every row carries exactly `MAX_DIGITS = 6` digit cells (`T_V`). A z/w row
+//! uses the first and second triplets for two consecutive high-to-low
+//! coefficients; all other kinds retain one coefficient per row and constrain
+//! their unused tail cells to zero. The paired Horner transition is
+//! `acc' = (1 − start)·acc_prev·r² + digit_hi(s)·r + digit_lo(s)`, which is the
+//! same polynomial evaluation as two ordinary Horner rows.
 
 use crate::constants::{K, L, N};
 use crate::witness::{T_E, T_MAX, T_V, T_W, T_Z};
@@ -43,6 +44,7 @@ pub enum Kind {
 }
 
 impl Kind {
+    /// Digits in one logical coefficient of this kind.
     pub const fn live_digits(self) -> usize {
         match self {
             Kind::Z => T_Z,
@@ -54,8 +56,22 @@ impl Kind {
         }
     }
 
-    /// z and w carry the §3.4 recomposition binding (`cell = Σ_t d_t·B^t`, cell
-    /// consumed by [NORM]/hash in M5). e, v, c, carries exist only as digits.
+    /// z/w have three digits each, so two coefficients exactly fill the six
+    /// already-committed digit columns. Wider kinds remain one coefficient/row.
+    pub const fn coefficients_per_row(self) -> usize {
+        match self {
+            Kind::Z | Kind::W => 2,
+            _ => 1,
+        }
+    }
+
+    /// Number of live digit cells in one physical row.
+    pub const fn row_live_digits(self) -> usize {
+        self.live_digits() * self.coefficients_per_row()
+    }
+
+    /// z and w are the paired/recomposed kinds. e, v, c, carries exist only as
+    /// individual digit rows.
     pub const fn has_recomp(self) -> bool {
         matches!(self, Kind::Z | Kind::W)
     }
@@ -66,8 +82,26 @@ impl Kind {
 pub struct Group {
     pub kind: Kind,
     pub poly_id: u32,
-    /// Coefficient rows in this group.
+    /// Logical coefficients in this polynomial.
     pub coeffs: usize,
+}
+
+impl Group {
+    /// Physical rows occupied by this group.
+    pub fn rows(self) -> usize {
+        self.coeffs.div_ceil(self.kind.coefficients_per_row())
+    }
+
+    /// Logical coefficient in packed slot `slot`, preserving the original
+    /// high-to-low Horner order. Returns `None` only for a partial final row.
+    pub fn coefficient_index(self, in_group: usize, slot: usize) -> Option<usize> {
+        let from_high = in_group * self.kind.coefficients_per_row() + slot;
+        if slot < self.kind.coefficients_per_row() && from_high < self.coeffs {
+            Some(self.coeffs - 1 - from_high)
+        } else {
+            None
+        }
+    }
 }
 
 /// The full ordered group schedule (30 groups). `poly_id` is the group's index
@@ -106,7 +140,7 @@ pub const N_GROUPS: usize = L + K + K + K + 1 + K;
 
 /// Total active (non-padding) rows across all groups.
 pub fn active_rows() -> usize {
-    groups().iter().map(|g| g.coeffs).sum()
+    groups().iter().map(|g| g.rows()).sum()
 }
 
 /// `poly_id` bases for the native fold to index claimed evals by kind.
@@ -140,8 +174,26 @@ mod tests {
 
     #[test]
     fn active_rows_count() {
-        // 5·256 + 6·256 + 6·256 + 6·255 + 256 + 6·511.
-        assert_eq!(active_rows(), 1280 + 1536 + 1536 + 1530 + 256 + 3066);
-        assert_eq!(active_rows(), 9204);
+        // z/w pair two three-digit coefficients in each six-digit row.
+        assert_eq!(active_rows(), 640 + 768 + 1536 + 1530 + 256 + 3066);
+        assert_eq!(active_rows(), 7796);
+    }
+
+    #[test]
+    fn paired_groups_preserve_high_to_low_coefficient_order() {
+        let g = groups();
+        for group in &g[..L + K] {
+            assert_eq!(group.kind.coefficients_per_row(), 2);
+            assert_eq!(group.kind.row_live_digits(), MAX_DIGITS);
+            assert_eq!(group.rows(), N / 2);
+            assert_eq!(group.coefficient_index(0, 0), Some(N - 1));
+            assert_eq!(group.coefficient_index(0, 1), Some(N - 2));
+            assert_eq!(group.coefficient_index(N / 2 - 1, 0), Some(1));
+            assert_eq!(group.coefficient_index(N / 2 - 1, 1), Some(0));
+        }
+        for group in &g[L + K..] {
+            assert_eq!(group.kind.coefficients_per_row(), 1);
+            assert_eq!(group.rows(), group.coeffs);
+        }
     }
 }

@@ -50,7 +50,7 @@ use crate::coeffs::tables::{
 };
 use crate::coeffs::{
     coeffs_preprocessed_ids, gen_coeffs_base_trace, gen_coeffs_interaction,
-    gen_coeffs_preprocessed, CoeffsEval, N_BASE_COLS, N_INTERACTION_COLS,
+    gen_coeffs_preprocessed, gen_coeffs_rc_uses, CoeffsEval, N_BASE_COLS, N_INTERACTION_COLS,
 };
 use crate::types::MlDsaVerifyInput;
 use crate::verifier_native::{compute_public_evals, folded_check, ClaimedEvals};
@@ -437,22 +437,11 @@ impl AirProver for CoeffsProver {
     }
     fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
         let mut evals = gen_coeffs_base_trace(&self.witness, coeffs_log_size());
-        // rc multiplicity columns are written now (they depend only on the
-        // witness's digit/carry usage, known before challenges). Stash them so
-        // the interaction phase can rebuild the same value column.
-        // We compute uses in the interaction phase; but multiplicities are a base
-        // column, so we must know them here. Recompute the rc_uses from a dry-run
-        // interaction (relations not needed for use-counts).
-        let dry = gen_coeffs_interaction(
-            &self.witness,
-            coeffs_log_size(),
-            SecureField::zero(),
-            SecureField::zero(),
-            &CoeffsRelations::dummy(),
-        );
+        // Multiplicity columns depend only on the witness, not on relations.
+        let rc_uses = gen_coeffs_rc_uses(&self.witness);
         self.rc_mult = RcKind::ALL
             .iter()
-            .map(|kind| gen_table_multiplicities(*kind, dry.rc_uses.for_kind(*kind)))
+            .map(|kind| gen_table_multiplicities(*kind, rc_uses.for_kind(*kind)))
             .collect();
         evals.extend(self.rc_mult.clone());
         evals.extend(gen_balancer_trace(

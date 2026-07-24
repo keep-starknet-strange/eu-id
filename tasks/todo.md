@@ -3,6 +3,94 @@
 Branch: `feat/quantum-safe`
 Baseline: `ce26b934` (S9)
 
+## Final Android 15–20% campaign (2026-07-24)
+
+- [x] Pack paired coefficient rows without aliasing the second coefficient's
+      norm-high limbs.
+- [x] Replace dry interaction traces with exact range/stream metadata
+      generation and cache shared sponge outputs.
+- [x] Prepare issuer, device, and revocation witnesses concurrently while
+      preserving deterministic role and transcript order.
+- [x] Validate the safe candidate in two counter-ordered, same-APK Firebase
+      matrices on A54, Pixel 8, and S24 Ultra using big cores only.
+- [x] Batch Round-GKR inversions globally and retain packed leaves only after
+      exact legacy/transcript equivalence, full release suites, host A/B, and a
+      separate two-matrix phone A/B all passed.
+
+### Review
+
+- The safe candidate improves full ML-DSA identity-plus-TS13-revocation proving
+  by 20.3% / 18.1% / 26.3% on A54 / Pixel 8 / S24 Ultra. All 48 proofs verify;
+  candidate cold/warm verification medians are 63–98 ms / 18–29 ms.
+- Packing the already-present Round-GKR leaves and globally batching its
+  inversions adds 1.5% / 5.1% / 16.8%, with median adjacent savings of
+  67.5 / 33 / 184.5 ms. This is not a GKR-versus-direct-LogUp comparison.
+  Its 48/48 proofs verify, worst warm verification is 32 ms, and proof size
+  plus peak memory remain within noise.
+- Full release verification passes for `stwo-keccak`, `stwo-mldsa`,
+  `eu-id-prover`, and `eu-id-ffi`, including composed adversarial cases and
+  the real ignored full-PQ FFI round trip. Production-feature Clippy,
+  touched-file formatting, Android unit/build/lint, APK signing, provenance,
+  big-core affinity, and both strict analyzers pass.
+- Reports:
+  `tasks/bench-results/euid-mldsa-safe-ab-20260724T015527Z/analysis.md` and
+  `tasks/bench-results/euid-mldsa-roundgkr-ab-20260724T021803Z/analysis.md`.
+
+## Final residual-cell sweep
+
+- [x] Flatten the shared Keccak sponge interaction fractions, use one packed
+      batch inversion, and prove byte-identical columns/claimed sum against the
+      legacy materializer.
+- [x] Discard the sponge change: 16×16 alternating host A/B measured only
+      0.46% paired gain and 2.5 ms median saving, below both 1% and 8 ms.
+- [x] Implement and test a seven-domain proof-wide range provider that removed
+      21 hosted components and 182,528 committed M31 cells; discard it after
+      the strict host retention gate failed.
+- [x] Add exact old/new multiplicity aggregation, first-excluded rc4/rc11
+      negatives, paired cross-bound aliases, missing/shared-claim, root, and
+      transcript regressions.
+- [x] Stage and validate the TS13 v8 repin plus tree-0 cache-key v3, then restore
+      v7/cache-key v2 when the candidate was rejected.
+- [x] Pass the full Keccak, ML-DSA, prover, FFI, touched-file formatting,
+      production Clippy, standalone identity, and exact host A/B gates.
+- [x] Stop before Android/Firebase: two 16×16 host ABBA blocks combined to only
+      0.764% paired geometric gain and 7 ms raw median saving, below the
+      required 1% / 8 ms gate.
+- [x] Reject static-selector pruning for this release: ML-DSA static columns
+      save 135,936 cells; adding generic Keccak schedule compaction raises the
+      ceiling to 168,064 (199,584 with optional trace enablers), but removes no
+      components and prices at only ~1–2% for substantially broader AIR and
+      TS13 churn.
+
+### Residual-sweep review
+
+- The range candidate passed 219 active core/prover release tests, 11 active
+  FFI tests, the ignored real full-PQ FFI round trip, warnings-denied Clippy,
+  and exact standalone preprocessed/layout comparison against the preserved
+  pre-change release library.
+- Its paired Rc4→Rc13 and Rc11→Rc13 attacks were constructed so erasing bound
+  tags would balance exactly; with the production tags retained both reject.
+  Attack state was snapshotted into immutable relation objects so Rayon workers,
+  interaction generation, and verifier reconstruction evaluated one identical
+  forged multiset.
+- Host block 1: baseline/candidate medians 590.5/582 ms, paired geometric gain
+  0.537%, median pair saving 8 ms. Block 2: 588/581 ms, 0.990%, 10 ms.
+  Combined: 588.5/581.5 ms, 0.764%, raw median saving 7 ms, 24 wins / 1 tie /
+  7 losses. The candidate therefore failed the predeclared host retention gate
+  and was reverted without an Android build.
+- The surgical rollback restored the five-domain coefficient table (tags 0–4,
+  padding 5, 9,091 active rows), local decomposition/SampleInBall providers,
+  hosted public/private claim lengths 15/18, tree-0 cache key v2, and TS13 v7
+  hash `375954cc8370dd241c5bc3ecce8da5c447edfe4c720e6dc786a7353ef0985919`.
+  Independent source review found no seven-domain routing, alias hook, attack,
+  v8 identity, or cache-v3 residue.
+- The restored frontier passed 209 active Keccak/ML-DSA/prover release tests
+  (one benchmark ignored), 11 active FFI tests, the ignored production-shaped
+  full-PQ FFI round trip, warnings-denied production Clippy, touched-file
+  rustfmt, and `git diff --check`. Its rebuilt `pq_perf_probe` is byte-for-byte
+  identical to the preserved pre-experiment Round-GKR binary:
+  `754cb2ae3c59dfa04a48a2481f1f61cf62a10f4ad6e553c79edde66ed8f55d10`.
+
 ## Work order S1 — ML-DSA soundness remediation
 
 - [x] Establish `s1/soundness-remediation` at `feat/quantum-safe` `ae087857`.
@@ -412,3 +500,89 @@ Final verification: all 181 active tests across `stwo-keccak`, `stwo-mldsa`, and
 passed in release mode (one documented composed benchmark ignored); strict all-target clippy passed
 with warnings denied. Independent review reproduced the WO-4a census and found no soundness,
 claim-layout, degree-bound, test-hook, or file-footprint issue. No branch was pushed.
+
+## Firebase Android full-PQ benchmark
+
+- [x] Confirm branch provenance, clean state, full-PQ fixture shape, and focused soundness gates.
+- [x] Add the smallest benchmark-only JNI surface for the canonical full-PQ mdoc circuit:
+      ML-DSA-65 issuer, device authentication, and revocation in one proof.
+- [x] Reuse the existing Android Game Loop harness and emit an unambiguous full-PQ result schema.
+- [x] Add focused tests for the benchmark fixture, failure handling, and result schema.
+- [x] Run formatting, focused host tests, full-PQ release proof/verify, and strict clippy.
+- [x] Build the release APK once, record its SHA-256 and embedded Git/Stwo provenance, and do not rebuild
+      between Firebase executions.
+- [x] Submit the exact APK to the established Firebase physical-device matrix and wait for all executions.
+- [x] Download raw Game Loop artifacts, validate every proof result, and synthesize the device comparison
+      under `tasks/bench-results/`.
+- [x] Record commands, artifact hashes, matrix IDs, measurements, caveats, and final review here.
+
+### Review
+
+- Exact target: `feat/quantum-safe` at `d5c4ac980e81991374ecf88fdb8b47ef91cdeef4`;
+  soundness hardening `e1896db1` is an ancestor and all four focused prior-failure/full-PQ
+  release gates passed.
+- Added one benchmark-only JNI entry point over the canonical full-PQ circuit. It proves
+  ML-DSA-65 issuer + device authentication, age/nationality, and ML-DSA-65 TS13 revocation;
+  verifies a public-only statement; forces a fresh tree-0 root before cached verification;
+  and reports timing, raw proof size, lightweight peak RSS, and the effective Rayon count.
+- Focused JNI/fixture tests passed (10 active, one slow ignored), the exact slow release FFI
+  round trip passed, strict focused Clippy passed, and the independent review's sampler,
+  public-statement, repeat-call, Game Loop failure, and labeling findings were fixed.
+- Final APK SHA-256:
+  `4a49ccf3638c4b13e4002e4ce555109fdbfa3c11ab25a3e59cc3dd0c2dd19473`;
+  it is v2-signed, arm64-only, contains the Game Loop contract, and exports the required JNI symbol.
+- Nine fresh physical-device processes passed with matching APK/Git/Stwo provenance and `ok=true`.
+  Median prove / cold verify / warm verify: S24 Ultra `2,452 / 150 / 16 ms`; Pixel 8
+  `3,084 / 282 / 23 ms`; A54 `4,591 / 261 / 32 ms`.
+- Median raw proof is approximately 1.26 MB and median peak RSS is 622–641 MiB. The `<1 s`
+  prove, `<100 ms` cold verify, and `<1,000,000 B` proof rails remain open; cached verify
+  passes `<100 ms` on every device.
+- Full report and all nine JSON artifacts:
+  `tasks/bench-results/firebase-full-pq-mldsa-d5c4ac98/analysis.md`.
+- Firebase matrices: `matrix-8nbff9k0kwrba`, `matrix-18br6gt5vorvd`,
+  `matrix-17exhnj0y24q7`, and `matrix-2t7ab423iqwta`.
+
+## Firebase Android full-PQ performance-core benchmark
+
+- [x] Detect the process-allowed Android CPU topology, exclude the lowest-capacity cluster,
+      and pin one dedicated Rayon worker to each remaining CPU.
+- [x] Record the selected/excluded CPU IDs, topology source, actual worker count, and a distinct
+      performance-core-only profile label in every result.
+- [x] Run focused tests, the exact release round trip, strict Clippy, and APK inspection.
+- [x] Run three fresh Firebase processes on A54, Pixel 8, and S24 Ultra.
+- [x] Compare medians against the one-thread APK and classify the result
+      correctly as an unpaired descriptive comparison.
+- [x] Record the APK hash, matrix IDs, raw artifacts, measurements, and review.
+
+### Review
+
+- Android selected topology with `cpu_capacity` on every run and pinned only
+  non-minimum-cluster CPUs: A54 `4-7` (4 workers), Pixel 8 `4-8` (5), and
+  S24 Ultra `2-7` (6). The affinity startup handshake makes failure
+  fail-closed rather than silently falling back to efficiency cores.
+- Final APK SHA-256:
+  `e6ffb2f6f3ebf11c448dcf6ef1294ca9c6d26d146e96ab3fa421da8509d763bb`.
+  It is v2-signed, arm64-only, and was not rebuilt between any Firebase run.
+- All nine fresh processes passed with stable device-specific CPU masks and
+  matching APK/Git/Stwo provenance. Median prove / cold verify / warm verify:
+  A54 `3,016 / 135 / 33 ms`; Pixel 8 `2,170 / 151 / 36 ms`; S24 Ultra
+  `1,907 / 104 / 22 ms`.
+- Versus the otherwise-equivalent one-thread campaign, the observed median
+  differences are 34.3% on A54, 29.6% on Pixel 8, and 22.2% on S24 Ultra;
+  median peak RSS differs by +9.8, +28.3, and +27.0 MiB respectively. These
+  are unpaired campaigns using different APKs and unidentified Firebase units,
+  so they do not establish a causal thread-policy speedup.
+- The full-PQ hard rails remain open: prove and proof size fail on all devices,
+  and cold verification medians remain just above 100 ms. Warm cached
+  verification passes 100 ms on every sample.
+- Independent read-only review found no release-blocking affinity,
+  fail-closed, schema, or artifact-consistency issue.
+- The 2026-07-23 double-check re-passed 108 active `stwo-mldsa` tests (one
+  ignored), 30 SDK tests, 11 active FFI tests (one ignored), the exact release
+  full-PQ FFI round trip, warnings-denied all-target/focused Clippy, and Android
+  release assemble/lint. It also retained exact copies of both measured APKs
+  and reconciled their packaged stripped native-library hashes.
+- Full report and all nine JSON artifacts:
+  `tasks/bench-results/firebase-full-pq-mldsa-bigcores-d5c4ac98/analysis.md`.
+- Firebase matrices: `matrix-3nz2f9fdjljw4`, `matrix-3a19u6n95ow70`,
+  `matrix-36djloxhx3pl9`, and `matrix-1bqd9g5yesl5k`.

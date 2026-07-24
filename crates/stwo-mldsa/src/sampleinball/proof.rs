@@ -39,8 +39,9 @@ use super::tables::{
     RC_TABLE_INTERACTION_COLS,
 };
 use super::{
-    gen_sib_base_trace, gen_sib_interaction, gen_sib_preprocessed, sib_preprocessed_ids, SibEval,
-    MAX_SIB_SQUEEZE_BYTES, N_ACCESSES, N_BASE_COLS, N_INTERACTION_COLS,
+    gen_sib_base_trace, gen_sib_interaction, gen_sib_metadata, gen_sib_preprocessed,
+    sib_preprocessed_ids, SibEval, MAX_SIB_SQUEEZE_BYTES, N_ACCESSES, N_BASE_COLS,
+    N_INTERACTION_COLS,
 };
 
 const N_RC: usize = 3;
@@ -326,16 +327,11 @@ impl AirProver for SibProver {
     fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
         let ls = sib_log_size();
         let mut evals = gen_sib_base_trace(&self.witness, ls);
-        let dry = gen_sib_interaction(
-            &self.witness,
-            ls,
-            STREAM_ID_SIB_SQUEEZE,
-            &SibRelations::dummy(),
-        );
-        self.stream_bytes = dry.stream_bytes.clone();
+        let metadata = gen_sib_metadata(&self.witness);
+        self.stream_bytes = metadata.stream_bytes;
         self.rc_mult = RcKind::ALL
             .iter()
-            .map(|kind| gen_table_multiplicities(*kind, dry.rc_uses.for_kind(*kind)))
+            .map(|kind| gen_table_multiplicities(*kind, metadata.rc_uses.for_kind(*kind)))
             .collect();
         evals.extend(self.rc_mult.clone());
         evals.extend(gen_balancer_trace(

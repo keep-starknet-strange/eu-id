@@ -2,10 +2,13 @@
 //! (worksheet `tasks/parity/S5a-integer-lift-worksheet.md`, option a′).
 //!
 //! Every witnessed / carry polynomial's balanced base-`B` (`B = 2^9`) digits are
-//! stacked into contiguous Horner groups ([`layout`]). Per row the component:
+//! stacked into contiguous Horner groups ([`layout`]). z/w pair two three-digit
+//! coefficients in the existing six digit columns; other kinds retain one
+//! coefficient per row. Per row the component:
 //!   * range-checks every digit cell (dedicated 2^9 table, offset `+2^8`);
 //!   * for carry rows, range-checks `|C| ≤ 2^20` via a `C+2^20` 13+8 split;
-//!   * binds `recomp_cell = Σ_t d_t·B^t` for z and w (§3.4);
+//!   * recomposes both packed z/w coefficients (the first through
+//!     `recomp_cell`, the second directly from its digit triplet);
 //!   * enforces the exact z-norm `|z| ≤ γ1−β−1 = 524_091` (two-sided offset, §3.4
 //!     review flag — NOT a 2^20 window);
 //!   * enforces the ternary `c ∈ {−1,0,1}` via a `{0,1,2}` membership lookup;
@@ -20,15 +23,18 @@
 //! | idx | column        | meaning |
 //! |-----|---------------|---------|
 //! | 0   | `enabler`     | 1 on active rows |
-//! | 1-6 | `digit[0..6]` | balanced digits (z/w/e/v/c) or carry cells `C_{m,0..4}` |
-//! | 7   | `recomp_cell` | `Σ_t d_t·B^t` (z,w); else 0 |
-//! | 8   | `norm_a_hi`   | 7-bit hi of `a = cell + 524_091` (z rows) |
-//! | 9   | `norm_b_hi`   | 7-bit hi of `b = 524_091 − cell` (z rows) |
+//! | 1-6 | `digit[0..6]` | two z/w triplets, one wider coefficient, or carry cells |
+//! | 7   | `recomp_cell` | first z/w coefficient `Σ_t d_t·B^t`; else 0 |
+//! | 8   | `norm_a_hi`   | first z coefficient: 7-bit hi of `cell + 524_091` |
+//! | 9   | `norm_b_hi`   | first z coefficient: 7-bit hi of `524_091 − cell` |
 //! |10-14| `carry_hi[0..5]` | 8-bit hi of `C_{m,t}+2^20` (carry rows) |
+//! |15   | `norm2_a_hi` | second z coefficient: 7-bit hi of `cell + 524_091` |
+//! |16   | `norm2_b_hi` | second z coefficient: 7-bit hi of `524_091 − cell` |
 //!
 //! ## Preprocessed columns
 //! `start, end, poly_id, live_mask[0..6], is_digit, is_carry, is_recomp,
-//!  is_norm, is_c` — all row-index-deterministic.
+//!  is_norm, is_c, is_w, paired_continue, w_bind_id, c_bind_id` — all
+//! row-index-deterministic.
 //!
 //! ## Degree worksheet — EVERY base constraint degree ≤ 2.
 //! Four-way LogUp batching reaches degree 5, so the unlocked bound is
@@ -102,9 +108,9 @@ fn attacked_stream_boundary(stream: usize) -> Option<u32> {
         attack.borrow().and_then(|kind| {
             let occupied = match kind {
                 RcKind::Rc9 => stream <= 5,
-                RcKind::Rc13 => matches!(stream, 0..=4 | 6 | 8),
-                RcKind::Rc8 => matches!(stream, 5..=9),
-                RcKind::Rc7 => matches!(stream, 7 | 9),
+                RcKind::Rc13 => matches!(stream, 0..=4 | 6 | 8 | 10 | 12),
+                RcKind::Rc8 => carry_high_index(stream).is_some(),
+                RcKind::Rc7 => matches!(stream, 7 | 9 | 11 | 13),
                 RcKind::Ternary => stream == 7,
             };
             occupied.then_some(kind.n_values() as u32)
@@ -133,8 +139,24 @@ const COL_RECOMP: usize = COL_DIGIT0 + MAX_DIGITS; // 7
 const COL_NORM_A_HI: usize = COL_RECOMP + 1; // 8
 const COL_NORM_B_HI: usize = COL_NORM_A_HI + 1; // 9
 const COL_CARRY_HI0: usize = COL_NORM_B_HI + 1; // 10
+const COL_NORM2_A_HI: usize = COL_CARRY_HI0 + CARRY_DIGITS; // 15
+const COL_NORM2_B_HI: usize = COL_NORM2_A_HI + 1; // 16
 /// Total base columns.
-pub const N_BASE_COLS: usize = COL_CARRY_HI0 + CARRY_DIGITS; // 15
+pub const N_BASE_COLS: usize = COL_NORM2_B_HI + 1; // 17
+
+/// Carry-high streams are interleaved with z norm streams. The permutation
+/// lets each carry-high lookup share a stream with a disjoint z norm lookup
+/// while keeping every relation key affine and batch-4 legal.
+const fn carry_high_index(stream: usize) -> Option<usize> {
+    match stream {
+        6 => Some(2),
+        7 => Some(3),
+        8 => Some(4),
+        11 => Some(0),
+        13 => Some(1),
+        _ => None,
+    }
+}
 
 // --- Preprocessed column names ------------------------------------------------
 fn pre_id(name: &str) -> PreProcessedColumnId {
@@ -154,9 +176,9 @@ pub fn coeffs_preprocessed_ids() -> Vec<PreProcessedColumnId> {
         ids.push(pre_id(&digit_mask_name(t)));
     }
     // `is_w` / `w_bind_id` / `c_bind_id` (M6): the row-index-deterministic
-    // selectors + keys the WCell / CCell binding yields need. `is_recomp` covers
-    // BOTH z and w, so a dedicated `is_w` gate is required to yield only the w
-    // cells; `w_bind_id = i·N + m` and `c_bind_id = m` are the consumer keys.
+    // selectors + keys the WCell / CCell binding yields need. On a paired w row,
+    // `w_bind_id` is the first key and the otherwise-idle `c_bind_id` column is
+    // the second key. On c rows `c_bind_id = m` exactly as before.
     for name in [
         "is_digit",
         "is_carry",
@@ -164,6 +186,7 @@ pub fn coeffs_preprocessed_ids() -> Vec<PreProcessedColumnId> {
         "is_norm",
         "is_c",
         "is_w",
+        "paired_continue",
     ] {
         ids.push(pre_id(name));
     }
@@ -172,12 +195,12 @@ pub fn coeffs_preprocessed_ids() -> Vec<PreProcessedColumnId> {
     ids
 }
 
-/// Ten shared range streams plus the three distinct relation yields. Range
+/// Fourteen shared range streams plus the four distinct relation yields. Range
 /// kinds occupy disjoint row slots and are namespaced by fixed bound ids.
-pub const N_RANGE_STREAMS: usize = 10;
+pub const N_RANGE_STREAMS: usize = 14;
 pub const N_LOGUP_ENTRIES: usize = N_RANGE_STREAMS
     + 1                                             // eval yield
-    + 1                                             // WCell yield (w cells)
+    + 2                                             // two WCell yields per paired w row
     + 1; // CCell yield (c cells)
 /// Four fractions per interaction column, matching the `decomp` precedent.
 pub const LOGUP_BATCH: usize = 4;
@@ -204,7 +227,7 @@ struct RowInfo {
 fn row_schedule() -> Vec<RowInfo> {
     let mut rows = Vec::new();
     for group in groups() {
-        for in_group in 0..group.coeffs {
+        for in_group in 0..group.rows() {
             rows.push(RowInfo { group, in_group });
         }
     }
@@ -229,15 +252,16 @@ pub fn gen_coeffs_preprocessed(log_size: u32) -> Vec<ColEval> {
     let mut is_norm = vec![m31(0); rows];
     let mut is_c = vec![m31(0); rows];
     let mut is_w = vec![m31(0); rows];
+    let mut paired_continue = vec![m31(0); rows];
     let mut w_bind_id = vec![m31(0); rows];
     let mut c_bind_id = vec![m31(0); rows];
 
     for (row, info) in sched.iter().enumerate() {
         let g = info.group;
         start[row] = m31(u32::from(info.in_group == 0));
-        end[row] = m31(u32::from(info.in_group == g.coeffs - 1));
+        end[row] = m31(u32::from(info.in_group == g.rows() - 1));
         poly_id[row] = m31(g.poly_id);
-        let live = g.kind.live_digits();
+        let live = g.kind.row_live_digits();
         for t in 0..MAX_DIGITS {
             live_mask[t][row] = m31(u32::from(t < live));
         }
@@ -247,29 +271,44 @@ pub fn gen_coeffs_preprocessed(log_size: u32) -> Vec<ColEval> {
         }
         if g.kind.has_recomp() {
             is_recomp[row] = m31(1);
+            paired_continue[row] = m31(u32::from(info.in_group != 0));
         }
         if g.kind == Kind::Z {
             is_norm[row] = m31(1);
         }
         if g.kind == Kind::C {
             is_c[row] = m31(1);
-            // c_bind_id = m, the coefficient index (high-to-low: m = coeffs−1−in_group).
-            let m = g.coeffs - 1 - info.in_group;
+            let m = g
+                .coefficient_index(info.in_group, 0)
+                .expect("c row has one coefficient");
             c_bind_id[row] = m31(m as u32);
         }
         if g.kind == Kind::W {
             is_w[row] = m31(1);
-            // w_bind_id = i·N + m, where i = poly_id − POLY_ID_W0.
             let i = (g.poly_id - layout::POLY_ID_W0) as usize;
-            let m = g.coeffs - 1 - info.in_group;
-            w_bind_id[row] = m31((i * crate::constants::N + m) as u32);
+            let first = g
+                .coefficient_index(info.in_group, 0)
+                .expect("paired w row has a first coefficient");
+            let second = g
+                .coefficient_index(info.in_group, 1)
+                .expect("paired w row has a second coefficient");
+            w_bind_id[row] = m31((i * crate::constants::N + first) as u32);
+            c_bind_id[row] = m31((i * crate::constants::N + second) as u32);
         }
     }
 
     let mut out = vec![start, end, poly_id];
     out.extend(live_mask);
     out.extend([
-        is_digit, is_carry, is_recomp, is_norm, is_c, is_w, w_bind_id, c_bind_id,
+        is_digit,
+        is_carry,
+        is_recomp,
+        is_norm,
+        is_c,
+        is_w,
+        paired_continue,
+        w_bind_id,
+        c_bind_id,
     ]);
     out.into_iter().map(|v| col_eval(log_size, v)).collect()
 }
@@ -292,14 +331,19 @@ pub fn gen_coeffs_base_trace(witness: &MlDsaWitness, log_size: u32) -> Vec<ColEv
         }
         match info.group.kind {
             Kind::Z | Kind::W => {
-                let cell = recompose(&digits);
-                cols[COL_RECOMP][row] = encode_signed(cell);
+                let [first, second] = paired_recompositions(&digits);
+                cols[COL_RECOMP][row] = encode_signed(first);
                 if info.group.kind == Kind::Z {
-                    // Two-sided norm: a = cell + bound, b = bound − cell.
-                    let a = cell + Z_NORM_BOUND as i128;
-                    let b = Z_NORM_BOUND as i128 - cell;
-                    cols[COL_NORM_A_HI][row] = m31((a >> 13) as u32);
-                    cols[COL_NORM_B_HI][row] = m31((b >> 13) as u32);
+                    // Both packed z coefficients receive the exact two-sided
+                    // norm decomposition.
+                    let first_a = first + Z_NORM_BOUND as i128;
+                    let first_b = Z_NORM_BOUND as i128 - first;
+                    let second_a = second + Z_NORM_BOUND as i128;
+                    let second_b = Z_NORM_BOUND as i128 - second;
+                    cols[COL_NORM_A_HI][row] = m31((first_a >> 13) as u32);
+                    cols[COL_NORM_B_HI][row] = m31((first_b >> 13) as u32);
+                    cols[COL_NORM2_A_HI][row] = m31((second_a >> 13) as u32);
+                    cols[COL_NORM2_B_HI][row] = m31((second_b >> 13) as u32);
                 }
             }
             Kind::Carry => {
@@ -324,37 +368,50 @@ pub fn gen_coeffs_base_trace(witness: &MlDsaWitness, log_size: u32) -> Vec<ColEv
 /// (unused tail = 0). For carries the "digits" are the 5 carry cells `C_{m,0..4}`.
 fn row_digits(witness: &MlDsaWitness, info: &RowInfo) -> [i128; MAX_DIGITS] {
     let g = info.group;
-    // Coefficients are laid out HIGH-to-LOW within a group: row `in_group = k`
-    // holds coefficient `m = coeffs − 1 − k`. The forward Horner
-    // `acc = acc·r + digit_row` over rows then yields the STANDARD bivariate eval
-    // `P̂(r,s) = Σ_m d_m(s)·r^m` (coeff m weight r^m). This is the multiplicative
-    // convention the fold `(‡)` needs: `Â(r,s)·ẑ(r,s) = û(r,s)`. A low-to-high
-    // layout would give `Σ_m d_m·r^(M−1−m)`, whose per-poly length factor `r^(M−1)`
-    // differs across polys of different degree and breaks the product identity.
-    let m = g.coeffs - 1 - info.in_group;
+    // Coefficients are laid out HIGH-to-LOW. z/w rows hold adjacent
+    // `(m, m−1)` coefficients and the `r²/r` transition below is exactly two
+    // ordinary Horner steps.
     let mut out = [0i128; MAX_DIGITS];
     match g.kind {
         Kind::Z => {
             let j = (g.poly_id - layout::POLY_ID_Z0) as usize;
-            out[..3].copy_from_slice(&witness.digits.z[j][m]);
+            let first = g
+                .coefficient_index(info.in_group, 0)
+                .expect("paired z row has a first coefficient");
+            let second = g
+                .coefficient_index(info.in_group, 1)
+                .expect("paired z row has a second coefficient");
+            out[..3].copy_from_slice(&witness.digits.z[j][first]);
+            out[3..].copy_from_slice(&witness.digits.z[j][second]);
         }
         Kind::W => {
             let i = (g.poly_id - layout::POLY_ID_W0) as usize;
-            out[..3].copy_from_slice(&witness.digits.w[i][m]);
+            let first = g
+                .coefficient_index(info.in_group, 0)
+                .expect("paired w row has a first coefficient");
+            let second = g
+                .coefficient_index(info.in_group, 1)
+                .expect("paired w row has a second coefficient");
+            out[..3].copy_from_slice(&witness.digits.w[i][first]);
+            out[3..].copy_from_slice(&witness.digits.w[i][second]);
         }
         Kind::E => {
             let i = (g.poly_id - layout::POLY_ID_E0) as usize;
+            let m = g.coefficient_index(info.in_group, 0).unwrap();
             out[..4].copy_from_slice(&witness.digits.e[i][m]);
         }
         Kind::V => {
             let i = (g.poly_id - layout::POLY_ID_V0) as usize;
+            let m = g.coefficient_index(info.in_group, 0).unwrap();
             out[..6].copy_from_slice(&witness.digits.v[i][m]);
         }
         Kind::C => {
+            let m = g.coefficient_index(info.in_group, 0).unwrap();
             out[0] = witness.digits.c[m];
         }
         Kind::Carry => {
             let i = (g.poly_id - layout::POLY_ID_CARRY0) as usize;
+            let m = g.coefficient_index(info.in_group, 0).unwrap();
             let carry = &witness.rows[i].carry[m]; // [i128; T_MAX+1]
             out[..CARRY_DIGITS].copy_from_slice(&carry[..CARRY_DIGITS]);
             let _ = T_MAX;
@@ -363,7 +420,7 @@ fn row_digits(witness: &MlDsaWitness, info: &RowInfo) -> [i128; MAX_DIGITS] {
     out
 }
 
-fn recompose(digits: &[i128; MAX_DIGITS]) -> i128 {
+fn recompose_digits(digits: &[i128]) -> i128 {
     let mut acc = 0i128;
     let mut weight = 1i128;
     for &d in digits {
@@ -371,6 +428,14 @@ fn recompose(digits: &[i128; MAX_DIGITS]) -> i128 {
         weight *= B;
     }
     acc
+}
+
+fn paired_recompositions(digits: &[i128; MAX_DIGITS]) -> [i128; 2] {
+    let split = Kind::Z.live_digits();
+    [
+        recompose_digits(&digits[..split]),
+        recompose_digits(&digits[split..]),
+    ]
 }
 
 /// Centered M31 encoding of a signed value known to satisfy `|v| < p/2`.
@@ -428,6 +493,7 @@ impl FrameworkEval for CoeffsEval {
         let is_norm = eval.get_preprocessed_column(pre_id("is_norm"));
         let is_c = eval.get_preprocessed_column(pre_id("is_c"));
         let is_w = eval.get_preprocessed_column(pre_id("is_w"));
+        let paired_continue = eval.get_preprocessed_column(pre_id("paired_continue"));
         let w_bind_id = eval.get_preprocessed_column(pre_id("w_bind_id"));
         let c_bind_id = eval.get_preprocessed_column(pre_id("c_bind_id"));
 
@@ -438,6 +504,8 @@ impl FrameworkEval for CoeffsEval {
         let norm_a_hi = eval.next_trace_mask();
         let norm_b_hi = eval.next_trace_mask();
         let carry_hi: Vec<E::F> = (0..CARRY_DIGITS).map(|_| eval.next_trace_mask()).collect();
+        let norm2_a_hi = eval.next_trace_mask();
+        let norm2_b_hi = eval.next_trace_mask();
 
         // --- Interaction accumulator (prev, current) ---
         let coords: [[E::F; 2]; SECURE_EXTENSION_DEGREE] =
@@ -457,7 +525,7 @@ impl FrameworkEval for CoeffsEval {
         }
 
         // C2: auxiliary columns are zero outside the row kinds that use them.
-        // This lets the ten range denominators select values by addition instead
+        // This lets the range denominators select values by addition instead
         // of multiplying witness values by selectors (which would raise degree).
         eval.add_constraint((one.clone() - is_recomp.clone()) * recomp_cell.clone());
         eval.add_constraint((one.clone() - is_norm.clone() - is_c.clone()) * norm_a_hi.clone());
@@ -465,20 +533,25 @@ impl FrameworkEval for CoeffsEval {
         for hi in &carry_hi {
             eval.add_constraint((one.clone() - is_carry.clone()) * hi.clone());
         }
+        eval.add_constraint((one.clone() - is_norm.clone()) * norm2_a_hi.clone());
+        eval.add_constraint((one.clone() - is_norm.clone()) * norm2_b_hi.clone());
         eval.add_constraint(is_c.clone() * (norm_a_hi.clone() - digit[0].clone() - one.clone()));
 
-        // C3: recomposition binding cell = Σ_t d_t·B^t (z,w rows, §3.4).
-        let mut recomp_expr = E::F::from(M31::one()) * digit[0].clone();
-        {
-            let mut weight = b_ef;
-            for d in digit.iter().skip(1) {
-                recomp_expr += E::F::from(weight) * d.clone();
-                weight *= b_ef;
-            }
+        // C3: first packed coefficient's recomposition cell. The second
+        // coefficient is recomposed directly from its triplet wherever it is
+        // consumed (norm and WCell), leaving no auxiliary value to bind.
+        let split = Kind::Z.live_digits();
+        let mut first_recomp_expr = E::F::from(M31::one()) * digit[0].clone();
+        let mut second_recomp_expr = E::F::from(M31::one()) * digit[split].clone();
+        let mut weight = b_ef;
+        for t in 1..split {
+            first_recomp_expr += E::F::from(weight) * digit[t].clone();
+            second_recomp_expr += E::F::from(weight) * digit[split + t].clone();
+            weight *= b_ef;
         }
-        eval.add_constraint(is_recomp.clone() * (recomp_cell.clone() - recomp_expr));
+        eval.add_constraint(is_recomp.clone() * (recomp_cell.clone() - first_recomp_expr.clone()));
 
-        // C4: ten shared range streams. Every bound id is a constant-weighted
+        // C4: fourteen shared range streams. Every bound id is a constant-weighted
         // preprocessed selector; no witness column can choose a wider bound.
         let digit_offset = E::F::from(M31::from_u32_unchecked(DIGIT_OFFSET));
         let two_pow_13 = E::F::from(M31::from_u32_unchecked(1 << 13));
@@ -504,21 +577,21 @@ impl FrameworkEval for CoeffsEval {
                 &[value, bound_id],
             ));
         }
-        // Slot 5: sixth digit rc9 or first carry high rc8.
+        // Slot 5: sixth digit rc9. Carry highs are interleaved below.
         let gate = is_digit.clone() * live_mask[5].clone();
-        let value = digit[5].clone() + is_digit.clone() * digit_offset + carry_hi[0].clone();
+        let value = digit[5].clone() + is_digit.clone() * digit_offset;
         let value = attacked_stream_value::<E>(5, value);
-        let bound_id = is_digit.clone() * rc9_id + is_carry.clone() * rc8_id.clone();
+        let bound_id = is_digit.clone() * rc9_id;
         eval.add_to_relation(RelationEntry::base(
             &self.relations.range,
-            gate + is_carry.clone(),
+            gate,
             &[value, bound_id],
         ));
 
-        // Slots 6..9: remaining carry highs or z norm splits. Slot 7 also
-        // carries c+1 on c rows via the bound auxiliary above.
+        // Slots 6..9: first z coefficient's exact norm, interleaved with carry
+        // highs 2..4. Slot 7 also carries c+1 on c rows.
         let bound = E::F::from(M31::from_u32_unchecked(Z_NORM_BOUND as u32));
-        let value = carry_hi[1].clone() + recomp_cell.clone() + is_norm.clone() * bound.clone()
+        let value = carry_hi[2].clone() + recomp_cell.clone() + is_norm.clone() * bound.clone()
             - two_pow_13.clone() * norm_a_hi.clone();
         let value = attacked_stream_value::<E>(6, value);
         let bound_id = is_carry.clone() * rc8_id.clone() + is_norm.clone() * rc13_id.clone();
@@ -528,7 +601,7 @@ impl FrameworkEval for CoeffsEval {
             &[value, bound_id],
         ));
 
-        let value = attacked_stream_value::<E>(7, carry_hi[2].clone() + norm_a_hi.clone());
+        let value = attacked_stream_value::<E>(7, carry_hi[3].clone() + norm_a_hi.clone());
         let bound_id = is_carry.clone() * rc8_id.clone()
             + is_norm.clone() * rc7_id.clone()
             + is_c.clone() * ternary_id;
@@ -538,31 +611,81 @@ impl FrameworkEval for CoeffsEval {
             &[value, bound_id],
         ));
 
-        let value = carry_hi[3].clone() - recomp_cell.clone() + is_norm.clone() * bound
-            - two_pow_13 * norm_b_hi.clone();
+        let value = carry_hi[4].clone() - recomp_cell.clone() + is_norm.clone() * bound.clone()
+            - two_pow_13.clone() * norm_b_hi.clone();
         let value = attacked_stream_value::<E>(8, value);
-        let bound_id = is_carry.clone() * rc8_id.clone() + is_norm.clone() * rc13_id;
+        let bound_id = is_carry.clone() * rc8_id.clone() + is_norm.clone() * rc13_id.clone();
         eval.add_to_relation(RelationEntry::base(
             &self.relations.range,
             is_carry.clone() + is_norm.clone(),
             &[value, bound_id],
         ));
 
-        let value = attacked_stream_value::<E>(9, carry_hi[4].clone() + norm_b_hi.clone());
-        let bound_id = is_carry.clone() * rc8_id + is_norm.clone() * rc7_id;
+        let value = attacked_stream_value::<E>(9, norm_b_hi.clone());
+        let bound_id = is_norm.clone() * rc7_id.clone();
         eval.add_to_relation(RelationEntry::base(
             &self.relations.range,
-            is_carry + is_norm,
+            is_norm.clone(),
             &[value, bound_id],
         ));
 
-        // C7: bivariate Horner (interaction). digit_row(s) = Σ_t d_t·s^t.
-        let mut digit_row = E::EF::from(digit[0].clone());
+        // Slots 10..13: second z coefficient's exact norm. Streams 11/13
+        // simultaneously range-check carry highs 0/1 on disjoint carry rows.
+        let value = second_recomp_expr.clone() + is_norm.clone() * bound.clone()
+            - two_pow_13.clone() * norm2_a_hi.clone();
+        let value = attacked_stream_value::<E>(10, value);
+        eval.add_to_relation(RelationEntry::base(
+            &self.relations.range,
+            is_norm.clone(),
+            &[value, is_norm.clone() * rc13_id.clone()],
+        ));
+
+        let value = attacked_stream_value::<E>(11, carry_hi[0].clone() + norm2_a_hi.clone());
+        let bound_id = is_carry.clone() * rc8_id.clone() + is_norm.clone() * rc7_id.clone();
+        eval.add_to_relation(RelationEntry::base(
+            &self.relations.range,
+            is_carry.clone() + is_norm.clone(),
+            &[value, bound_id],
+        ));
+
+        let value =
+            -second_recomp_expr.clone() + is_norm.clone() * bound - two_pow_13 * norm2_b_hi.clone();
+        let value = attacked_stream_value::<E>(12, value);
+        eval.add_to_relation(RelationEntry::base(
+            &self.relations.range,
+            is_norm.clone(),
+            &[value, is_norm.clone() * rc13_id],
+        ));
+
+        let value = attacked_stream_value::<E>(13, carry_hi[1].clone() + norm2_b_hi.clone());
+        let bound_id = is_carry.clone() * rc8_id + is_norm.clone() * rc7_id;
+        eval.add_to_relation(RelationEntry::base(
+            &self.relations.range,
+            is_carry.clone() + is_norm.clone(),
+            &[value, bound_id],
+        ));
+
+        // C7: bivariate Horner. z/w perform two ordinary Horner steps in one
+        // row; `paired_continue = is_recomp·(1−start)` is preprocessed so the
+        // transition remains degree 2.
+        let mut ordinary_digit_row = E::EF::from(digit[0].clone());
         for (t, d) in digit.iter().enumerate().skip(1) {
-            digit_row += self.s_power::<E>(t) * E::EF::from(d.clone());
+            ordinary_digit_row += self.s_power::<E>(t) * E::EF::from(d.clone());
         }
-        let expected =
-            E::EF::from(one - start.clone()) * acc_prev * E::EF::from(self.r) + digit_row;
+        let mut first_digit_row = E::EF::from(digit[0].clone());
+        let mut second_digit_row = E::EF::from(digit[split].clone());
+        for t in 1..split {
+            let s_power = self.s_power::<E>(t);
+            first_digit_row += s_power.clone() * E::EF::from(digit[t].clone());
+            second_digit_row += s_power * E::EF::from(digit[split + t].clone());
+        }
+        let r_ef = E::EF::from(self.r);
+        let paired_digit_row = first_digit_row * r_ef.clone() + second_digit_row;
+        let digit_row = ordinary_digit_row.clone()
+            + E::EF::from(is_recomp.clone()) * (paired_digit_row - ordinary_digit_row);
+        let expected = E::EF::from(one.clone() - start.clone()) * acc_prev.clone() * r_ef
+            + E::EF::from(paired_continue) * acc_prev * E::EF::from(self.r * self.r - self.r)
+            + digit_row;
         eval.add_constraint(acc.clone() - expected);
 
         // C8: EvalAtRs YIELD at group end (−end). Verifier-native fold uses (+).
@@ -571,11 +694,16 @@ impl FrameworkEval for CoeffsEval {
         tuple.extend(coords.iter().map(|p| p[1].clone()));
         eval.add_to_relation(RelationEntry::base(&self.relations.eval, -end, &tuple));
 
-        // C9: WCell YIELD (−is_w) — the coeffs W-cell binding. `recomp_cell`
-        // (= Σ_t d_t·B^t = w ∈ [0,q)) is the same value decomp uses; w_bind_id =
-        // i·N+m is the shared key. Each w-coefficient is yielded EXACTLY once
-        // (one w row per (i,m)); decomp consumes it exactly once. Value degree 1.
+        // C9: two WCell YIELDs (−is_w), one for each packed w coefficient.
+        // `c_bind_id` is otherwise idle on w rows and carries the second exact
+        // key. Both recompositions are affine in the digit cells.
         let wtuple = [w_bind_id.clone(), recomp_cell.clone()];
+        eval.add_to_relation(RelationEntry::base(
+            &self.relations.wcell,
+            -is_w.clone(),
+            &wtuple,
+        ));
+        let wtuple = [c_bind_id.clone(), second_recomp_expr];
         eval.add_to_relation(RelationEntry::base(
             &self.relations.wcell,
             -is_w.clone(),
@@ -649,6 +777,20 @@ impl RcUses {
     }
 }
 
+/// Count the coefficient component's five range-table multisets without
+/// constructing its challenge-dependent interaction trace.
+pub fn gen_coeffs_rc_uses(witness: &MlDsaWitness) -> RcUses {
+    let mut rc_uses = RcUses::new();
+    for group in groups() {
+        for in_group in 0..group.rows() {
+            let info = RowInfo { group, in_group };
+            let digits = row_digits(witness, &info);
+            seed_rc_uses(&mut rc_uses, &info, &digits);
+        }
+    }
+    rc_uses
+}
+
 pub fn gen_coeffs_interaction(
     witness: &MlDsaWitness,
     log_size: u32,
@@ -683,19 +825,35 @@ pub fn gen_coeffs_interaction(
         let digit_row = match info {
             Some(info) => {
                 let digits = row_digits(witness, &info);
-                let mut dr = zero;
-                for t in 0..MAX_DIGITS {
-                    dr += s_pow[t] * SecureField::from(encode_signed(digits[t]));
-                }
+                let dr = if info.group.kind.has_recomp() {
+                    let split = info.group.kind.live_digits();
+                    let mut first = zero;
+                    let mut second = zero;
+                    for t in 0..split {
+                        first += s_pow[t] * SecureField::from(encode_signed(digits[t]));
+                        second += s_pow[t] * SecureField::from(encode_signed(digits[split + t]));
+                    }
+                    first * r + second
+                } else {
+                    let mut ordinary = zero;
+                    for t in 0..MAX_DIGITS {
+                        ordinary += s_pow[t] * SecureField::from(encode_signed(digits[t]));
+                    }
+                    ordinary
+                };
                 // Seed rc multiplicities for this row.
                 seed_rc_uses(&mut rc_uses, &info, &digits);
                 dr
             }
             None => zero,
         };
-        acc[row] = prev * r + digit_row;
+        let step = match info {
+            Some(info) if info.group.kind.has_recomp() => r * r,
+            _ => r,
+        };
+        acc[row] = prev * step + digit_row;
         if let Some(info) = info {
-            if info.in_group == info.group.coeffs - 1 {
+            if info.in_group == info.group.rows() - 1 {
                 group_evals[info.group.poly_id as usize] = acc[row];
             }
         }
@@ -755,33 +913,43 @@ pub fn gen_coeffs_interaction(
         })
         .collect();
 
-    // C4 ten shared range streams, matching the AIR slot assignment exactly.
+    // C4 fourteen shared range streams, matching the AIR slot assignment.
     for stream in 0..N_RANGE_STREAMS {
         push_entry(
             &|coset| {
                 let selected = match &coset_digits[coset] {
-                    Some((digits, group, _)) if group.kind == Kind::Carry => {
-                        let t = stream % CARRY_DIGITS;
+                    Some((digits, group, _))
+                        if group.kind == Kind::Carry && stream < CARRY_DIGITS =>
+                    {
+                        let t = stream;
                         let shifted = digits[t] + CARRY_OFFSET as i128;
-                        if stream < CARRY_DIGITS {
-                            Some((m31((shifted & ((1 << 13) - 1)) as u32), RcKind::Rc13))
-                        } else {
-                            Some((m31((shifted >> 13) as u32), RcKind::Rc8))
-                        }
+                        Some((m31((shifted & ((1 << 13) - 1)) as u32), RcKind::Rc13))
                     }
-                    Some((digits, group, _)) if stream < group.kind.live_digits() => Some((
+                    Some((digits, group, _)) if group.kind == Kind::Carry => {
+                        carry_high_index(stream).map(|t| {
+                            let shifted = digits[t] + CARRY_OFFSET as i128;
+                            (m31((shifted >> 13) as u32), RcKind::Rc8)
+                        })
+                    }
+                    Some((digits, group, _)) if stream < group.kind.row_live_digits() => Some((
                         encode_signed(digits[stream]) + m31(DIGIT_OFFSET),
                         RcKind::Rc9,
                     )),
                     Some((digits, group, _)) if group.kind == Kind::Z && stream >= 6 => {
-                        let cell = recompose(digits);
-                        let a = cell + Z_NORM_BOUND as i128;
-                        let b = Z_NORM_BOUND as i128 - cell;
+                        let [first, second] = paired_recompositions(digits);
+                        let first_a = first + Z_NORM_BOUND as i128;
+                        let first_b = Z_NORM_BOUND as i128 - first;
+                        let second_a = second + Z_NORM_BOUND as i128;
+                        let second_b = Z_NORM_BOUND as i128 - second;
                         Some(match stream {
-                            6 => (m31((a & ((1 << 13) - 1)) as u32), RcKind::Rc13),
-                            7 => (m31((a >> 13) as u32), RcKind::Rc7),
-                            8 => (m31((b & ((1 << 13) - 1)) as u32), RcKind::Rc13),
-                            9 => (m31((b >> 13) as u32), RcKind::Rc7),
+                            6 => (m31((first_a & ((1 << 13) - 1)) as u32), RcKind::Rc13),
+                            7 => (m31((first_a >> 13) as u32), RcKind::Rc7),
+                            8 => (m31((first_b & ((1 << 13) - 1)) as u32), RcKind::Rc13),
+                            9 => (m31((first_b >> 13) as u32), RcKind::Rc7),
+                            10 => (m31((second_a & ((1 << 13) - 1)) as u32), RcKind::Rc13),
+                            11 => (m31((second_a >> 13) as u32), RcKind::Rc7),
+                            12 => (m31((second_b & ((1 << 13) - 1)) as u32), RcKind::Rc13),
+                            13 => (m31((second_b >> 13) as u32), RcKind::Rc7),
                             _ => unreachable!(),
                         })
                     }
@@ -805,7 +973,7 @@ pub fn gen_coeffs_interaction(
     // C8 eval YIELD at group-end (−1).
     push_entry(
         &|coset| match &coset_digits[coset] {
-            Some((_, group, in_group)) if *in_group == group.coeffs - 1 => {
+            Some((_, group, in_group)) if *in_group == group.rows() - 1 => {
                 let coords = acc[coset].to_m31_array();
                 let tuple = [
                     m31(group.poly_id),
@@ -821,29 +989,34 @@ pub fn gen_coeffs_interaction(
         &mut entries,
         &mut claimed,
     );
-    // C9 WCell YIELD (−1) — w rows only. Mirrors the evaluate() gate `-is_w`.
-    // Value = recompose(digits) = w ∈ [0,q); key = i·N+m.
-    push_entry(
-        &|coset| match &coset_digits[coset] {
-            Some((digits, group, in_group)) if group.kind == Kind::W => {
-                let i = (group.poly_id - layout::POLY_ID_W0) as usize;
-                let m = group.coeffs - 1 - in_group;
-                let w_bind_id = (i * crate::constants::N + m) as u32;
-                let w = encode_signed(recompose(digits));
-                let tuple = [m31(w_bind_id), w];
-                (-one, relations.wcell.combine(&tuple))
-            }
-            _ => (zero, one),
-        },
-        &mut entries,
-        &mut claimed,
-    );
+    // C9 two WCell YIELDs (−1), preserving each original `(i·N+m, w)` tuple.
+    for slot in 0..Kind::W.coefficients_per_row() {
+        push_entry(
+            &|coset| match &coset_digits[coset] {
+                Some((digits, group, in_group)) if group.kind == Kind::W => {
+                    let i = (group.poly_id - layout::POLY_ID_W0) as usize;
+                    let m = group
+                        .coefficient_index(*in_group, slot)
+                        .expect("paired w slot exists");
+                    let w_bind_id = (i * crate::constants::N + m) as u32;
+                    let w = encode_signed(paired_recompositions(digits)[slot]);
+                    let tuple = [m31(w_bind_id), w];
+                    (-one, relations.wcell.combine(&tuple))
+                }
+                _ => (zero, one),
+            },
+            &mut entries,
+            &mut claimed,
+        );
+    }
     // C10 CCell YIELD (−1) — c rows only. Mirrors `-is_c`. Value = digit[0]
     // (encode_signed c); key = m.
     push_entry(
         &|coset| match &coset_digits[coset] {
             Some((digits, group, in_group)) if group.kind == Kind::C => {
-                let m = group.coeffs - 1 - in_group;
+                let m = group
+                    .coefficient_index(*in_group, 0)
+                    .expect("c coefficient exists");
                 let c = encode_signed(digits[0]);
                 let tuple = [m31(m as u32), c];
                 (-one, relations.ccell.combine(&tuple))
@@ -853,6 +1026,8 @@ pub fn gen_coeffs_interaction(
         &mut entries,
         &mut claimed,
     );
+
+    debug_assert_eq!(entries.len(), N_LOGUP_ENTRIES);
 
     // Batch the fraction streams in evaluator order, matching `LOGUP_BATCH`.
     let mut logup = LogupTraceGenerator::new(log_size);
@@ -891,21 +1066,22 @@ fn seed_rc_uses(rc: &mut RcUses, info: &RowInfo, digits: &[i128; MAX_DIGITS]) {
             }
         }
         Kind::Z => {
-            let live = info.group.kind.live_digits();
+            let live = info.group.kind.row_live_digits();
             for t in 0..live {
                 let v = (encode_signed(digits[t]) + m31(DIGIT_OFFSET)).0 as usize;
                 rc.rc9[v] += 1;
             }
-            let cell = recompose(digits);
-            let a = cell + Z_NORM_BOUND as i128;
-            let b = Z_NORM_BOUND as i128 - cell;
-            rc.rc13[(a & ((1 << 13) - 1)) as usize] += 1;
-            rc.rc7[(a >> 13) as usize] += 1;
-            rc.rc13[(b & ((1 << 13) - 1)) as usize] += 1;
-            rc.rc7[(b >> 13) as usize] += 1;
+            for cell in paired_recompositions(digits) {
+                let a = cell + Z_NORM_BOUND as i128;
+                let b = Z_NORM_BOUND as i128 - cell;
+                rc.rc13[(a & ((1 << 13) - 1)) as usize] += 1;
+                rc.rc7[(a >> 13) as usize] += 1;
+                rc.rc13[(b & ((1 << 13) - 1)) as usize] += 1;
+                rc.rc7[(b >> 13) as usize] += 1;
+            }
         }
         _ => {
-            let live = info.group.kind.live_digits();
+            let live = info.group.kind.row_live_digits();
             for t in 0..live {
                 let v = (encode_signed(digits[t]) + m31(DIGIT_OFFSET)).0 as usize;
                 rc.rc9[v] += 1;
@@ -916,5 +1092,34 @@ fn seed_rc_uses(rc: &mut RcUses, info: &RowInfo, digits: &[i128; MAX_DIGITS]) {
                 rc.ternary[v] += 1;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod packed_tests {
+    use super::*;
+
+    #[test]
+    fn paired_recomposition_uses_independent_base_b_triplets() {
+        let digits = [1, 2, 3, 4, 5, 6];
+        assert_eq!(
+            paired_recompositions(&digits),
+            [1 + 2 * B + 3 * B * B, 4 + 5 * B + 6 * B * B,]
+        );
+    }
+
+    #[test]
+    fn carry_high_stream_permutation_covers_every_carry_digit_once() {
+        let mut seen: Vec<_> = (0..N_RANGE_STREAMS).filter_map(carry_high_index).collect();
+        seen.sort_unstable();
+        assert_eq!(seen, (0..CARRY_DIGITS).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn second_norm_highs_do_not_alias_carry_split_columns() {
+        let carry_end = COL_CARRY_HI0 + CARRY_DIGITS;
+        assert_eq!(COL_NORM2_A_HI, carry_end);
+        assert_eq!(COL_NORM2_B_HI, carry_end + 1);
+        assert_eq!(N_BASE_COLS, carry_end + 2);
     }
 }

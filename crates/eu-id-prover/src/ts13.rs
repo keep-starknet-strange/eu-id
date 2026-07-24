@@ -9,16 +9,16 @@ use crate::mdoc::{
 };
 
 // Regenerated whenever the canonical published tuple changes.
-// Repinned: blowup-3 prove-time flip 2026-07-21 (PCS 4/26/25 → 3/36/20),
-// rail relaxed to ~1.4MB per Lucas. Previous:
-// d059a204b7f9df488a7c382768757a635d739da0718e4df153c41275fa85f879.
+// Repinned: packed z/w coefficient AIR/tree shape 2026-07-24. Previous:
+// mldsa65-pure-stark-direct-v6 /
+// 74b70ce9bf2e5bb230df71cf8d2b513c887607030eb1eda91f6ca00d126215f4.
 pub const TS13_PUBLISHED_AGE_OVER_18_CIRCUIT_HASH: &str =
-    "74b70ce9bf2e5bb230df71cf8d2b513c887607030eb1eda91f6ca00d126215f4";
+    "375954cc8370dd241c5bc3ecce8da5c447edfe4c720e6dc786a7353ef0985919";
 pub const TS13_P4C_MIN_BLIND_ROWS: usize = 256;
 pub const TS13_P4C_MAX_OPENINGS: usize = 256;
 pub const TS13_P4C_MIN_DECOY_MESSAGE_BITS: usize = 512;
 pub const TS13_P4C_PER_OPENING_STATISTICAL_BITS: u32 = 64;
-pub const TS13_CONSTRAINT_SYSTEM: &str = "mldsa65-pure-stark-direct-v6";
+pub const TS13_CONSTRAINT_SYSTEM: &str = "mldsa65-pure-stark-direct-v7";
 pub const TS13_PCS_LOG_BLOWUP_FACTOR: u32 = MDOC_PRODUCTION_PCS_LOG_BLOWUP_FACTOR;
 pub const TS13_PCS_QUERIES: u32 = MDOC_PRODUCTION_PCS_QUERIES as u32;
 pub const TS13_PCS_POW_BITS: u32 = MDOC_PRODUCTION_PCS_POW_BITS;
@@ -562,6 +562,10 @@ fn mod_sub(lhs: u64, rhs: u64) -> u64 {
 mod tests {
     use super::*;
 
+    const PRE_PACKED_COEFFS_CONSTRAINT_SYSTEM: &str = "mldsa65-pure-stark-direct-v6";
+    const PRE_PACKED_COEFFS_CIRCUIT_HASH: &str =
+        "74b70ce9bf2e5bb230df71cf8d2b513c887607030eb1eda91f6ca00d126215f4";
+
     #[test]
     fn circuit_hash_golden_matches_canonical_serialization() {
         let tuple = Ts13CircuitTuple::published_age_over_18();
@@ -583,6 +587,33 @@ mod tests {
             pin.verify(&actual),
             Err(Ts13CircuitPinError::CircuitHashMismatch)
         ));
+    }
+
+    #[test]
+    fn packed_coeffs_repin_rejects_previous_identity() {
+        let current = Ts13CircuitTuple::published_age_over_18();
+        let mut previous = current.clone();
+        previous.constraint_system = PRE_PACKED_COEFFS_CONSTRAINT_SYSTEM;
+        assert_eq!(ts13_circuit_hash(&previous), PRE_PACKED_COEFFS_CIRCUIT_HASH);
+
+        let current_pin = Ts13CircuitPin::for_tuple(&current);
+        assert_eq!(
+            current_pin.verify(&previous),
+            Err(Ts13CircuitPinError::CircuitHashMismatch)
+        );
+
+        let previous_artifact = Ts13MdocProofArtifact {
+            circuit_hash: PRE_PACKED_COEFFS_CIRCUIT_HASH.to_string(),
+            mdoc_proof: vec![0],
+            revocation_statement: Ts13RevocationStatement {
+                revocation_public_key: MdocRevocationKey::MlDsa(Vec::new()),
+                epoch: 0,
+            },
+        };
+        assert_eq!(
+            previous_artifact.verify_artifact_shape(),
+            Err(Ts13MdocProofArtifactError::CircuitHash)
+        );
     }
 
     #[test]

@@ -44,6 +44,7 @@ use stwo::core::fields::FieldExpOps;
 use stwo::core::pcs::{TreeSubspan, TreeVec};
 use stwo::core::verifier::VerificationError;
 use stwo::core::ColumnVec;
+use stwo::prover::backend::simd::column::SecureColumn;
 use stwo::prover::backend::simd::m31::{LOG_N_LANES, N_LANES};
 use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo::prover::backend::simd::SimdBackend;
@@ -56,8 +57,8 @@ use stwo_constraint_framework::{PointEvaluator, Relation};
 use air_core::gkr::{decode_gkr_batch_proof, encode_gkr_batch_proof};
 
 use crate::keccak_round::{
-    build_fracs, collect_round_lookups, data_log_size, InteractionClaimData, RoundLookupKind,
-    N_TOTAL_LOOKUPS,
+    build_fracs, collect_round_lookups, data_log_size, InteractionClaimData, RoundFractions,
+    RoundLookupKind, N_TOTAL_LOOKUPS,
 };
 use crate::relations::KeccakRelations;
 
@@ -139,9 +140,59 @@ fn tieback_from_artifact(
 /// Prover state: the per-slot fraction columns (the single witness source for
 /// the claimed sum, the GKR leaves and the tie-back coeff column).
 pub struct RoundGkrProver {
-    fracs: Vec<(Vec<PackedQM31>, Vec<PackedQM31>)>,
+    fracs: RoundFractions,
     log_size: u32,
     claimed_sum: SecureField,
+}
+
+/// Sum every packed fraction in canonical slot/row order. One global batch
+/// lets Stwo split the inversion work across its fixed-size Rayon chunks.
+fn global_claimed_sum(fracs: &RoundFractions) -> SecureField {
+    let inverses = PackedQM31::batch_inverse(fracs.denominators());
+    let mut total = PackedQM31::zero();
+    for (numerator, denominator_inverse) in fracs.numerators().iter().zip(&inverses) {
+        total += *numerator * *denominator_inverse;
+    }
+    // Preserve the legacy lane-reduction order exactly.
+    total.to_array().iter().copied().sum()
+}
+
+/// Materialize the canonical slot-high/row-low GKR leaves without unpacking
+/// QM31 SIMD lanes. The trailing slots are the neutral fraction 0/1.
+fn gkr_input_layer(fracs: &RoundFractions, log_size: u32) -> Layer<SimdBackend> {
+    let n_rows = 1usize << log_size;
+    let n_vec_rows = 1usize << (log_size - LOG_N_LANES);
+    assert_eq!(
+        fracs.n_vec_rows(),
+        n_vec_rows,
+        "round fraction stride must match its trace log size"
+    );
+    assert_eq!(
+        fracs.n_slots(),
+        N_TOTAL_LOOKUPS,
+        "round GKR must contain every canonical lookup slot"
+    );
+
+    let packed_size = (1usize << LOG_SLOTS) * n_vec_rows;
+    let scalar_size = (1usize << LOG_SLOTS) * n_rows;
+    let mut numerators = Vec::with_capacity(packed_size);
+    numerators.extend_from_slice(fracs.numerators());
+    numerators.resize(packed_size, PackedQM31::zero());
+    let mut denominators = Vec::with_capacity(packed_size);
+    denominators.extend_from_slice(fracs.denominators());
+    denominators.resize(packed_size, PackedQM31::one());
+    debug_assert_eq!(packed_size * N_LANES, scalar_size);
+
+    Layer::LogUpGeneric {
+        numerators: Mle::<SimdBackend, SecureField>::new(SecureColumn {
+            data: numerators,
+            length: scalar_size,
+        }),
+        denominators: Mle::<SimdBackend, SecureField>::new(SecureColumn {
+            data: denominators,
+            length: scalar_size,
+        }),
+    }
 }
 
 impl RoundGkrProver {
@@ -149,14 +200,7 @@ impl RoundGkrProver {
     /// `claimed_sum` the offloaded interaction trace would have produced).
     pub fn new(rel: &KeccakRelations, data: &InteractionClaimData) -> Self {
         let fracs = build_fracs(rel, data);
-        let mut total = PackedQM31::zero();
-        for (num, den) in &fracs {
-            let inv = PackedQM31::batch_inverse(den);
-            for (n, d_inv) in num.iter().zip(&inv) {
-                total += *n * *d_inv;
-            }
-        }
-        let claimed_sum = total.to_array().iter().copied().sum();
+        let claimed_sum = global_claimed_sum(&fracs);
         Self {
             fracs,
             log_size: data_log_size(data),
@@ -177,26 +221,7 @@ impl RoundGkrProver {
     ) -> (Vec<u8>, RoundTieBack, Mle<SimdBackend, SecureField>) {
         let n_rows = 1usize << self.log_size;
         let n_vec_rows = 1usize << (self.log_size - LOG_N_LANES);
-        let size = (1usize << LOG_SLOTS) * n_rows;
-
-        // Padding slots hold the neutral fraction 0/1.
-        let mut num_flat = vec![SecureField::zero(); size];
-        let mut den_flat = vec![SecureField::one(); size];
-        for (s, (num, den)) in self.fracs.iter().enumerate() {
-            for vr in 0..n_vec_rows {
-                let na = num[vr].to_array();
-                let da = den[vr].to_array();
-                let base = s * n_rows + vr * N_LANES;
-                for l in 0..N_LANES {
-                    num_flat[base + l] = na[l];
-                    den_flat[base + l] = da[l];
-                }
-            }
-        }
-        let layer = Layer::LogUpGeneric {
-            numerators: Mle::<SimdBackend, SecureField>::new(num_flat.into_iter().collect()),
-            denominators: Mle::<SimdBackend, SecureField>::new(den_flat.into_iter().collect()),
-        };
+        let layer = gkr_input_layer(&self.fracs, self.log_size);
         let (proof, artifact) = prove_batch(channel, vec![layer]);
         debug_assert_eq!(
             proof.output_claims_by_instance[0][0],
@@ -210,20 +235,17 @@ impl RoundGkrProver {
         // c(row) = Σ_slot eq(slot, r_slot) · (δ·num_slot(row) + den_slot(row)).
         let packed_delta = PackedQM31::broadcast(delta);
         let mut coeff = vec![PackedQM31::zero(); n_vec_rows];
-        for (s, (num, den)) in self.fracs.iter().enumerate() {
+        for s in 0..self.fracs.n_slots() {
+            let (num, den) = self.fracs.slot(s);
             let w = PackedQM31::broadcast(tie_back.eq_ws[s]);
             for (vr, acc) in coeff.iter_mut().enumerate() {
                 *acc += w * (packed_delta * num[vr] + den[vr]);
             }
         }
-        let coeff_mle = Mle::<SimdBackend, SecureField>::new(
-            coeff
-                .iter()
-                .flat_map(|p| p.to_array())
-                .collect::<Vec<_>>()
-                .into_iter()
-                .collect(),
-        );
+        let coeff_mle = Mle::<SimdBackend, SecureField>::new(SecureColumn {
+            data: coeff,
+            length: n_rows,
+        });
         (encode_gkr_batch_proof(&proof), tie_back, coeff_mle)
     }
 }
@@ -255,7 +277,9 @@ pub fn verify_round_gkr(
     // The GKR-proven multiset sum must sit exactly where the columnar claimed
     // sum sat in the global LogUp balance.
     if *num_out != claimed_sum * *den_out {
-        return Err(bad("output claim does not match the round claimed sum".into()));
+        return Err(bad(
+            "output claim does not match the round claimed sum".into()
+        ));
     }
     let artifact = partially_verify_batch(vec![Gate::LogUp], &proof, channel)
         .map_err(|e| bad(format!("replay failed: {e}")))?;
@@ -308,5 +332,185 @@ impl MleCoeffColumnOracle for RoundCoeffOracle {
             out += self.eq_ws[s] * (self.delta * lk.num + den);
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use stwo::core::channel::Blake2sChannel;
+    use stwo::prover::backend::simd::m31::PackedM31;
+    use stwo::prover::backend::Column;
+
+    use super::*;
+    use crate::constants::N_BYTES_IN_STATE;
+    use crate::keccak_round::{generate_interaction_trace, Claim};
+
+    fn round_data(invocations: usize) -> InteractionClaimData {
+        let input = vec![[PackedM31::zero(); N_BYTES_IN_STATE + 2]];
+        let (_, _, data) = Claim::generate_trace(input, invocations);
+        data
+    }
+
+    /// The claimed-sum implementation before the packed/global-inversion
+    /// optimization: invert every slot separately, then accumulate slot/row.
+    fn legacy_claimed_sum(fracs: &RoundFractions) -> SecureField {
+        let mut total = PackedQM31::zero();
+        for slot in 0..fracs.n_slots() {
+            let (numerators, denominators) = fracs.slot(slot);
+            let inverses = PackedQM31::batch_inverse(denominators);
+            for (numerator, denominator_inverse) in numerators.iter().zip(&inverses) {
+                total += *numerator * *denominator_inverse;
+            }
+        }
+        total.to_array().iter().copied().sum()
+    }
+
+    /// The scalar unpack/repack path before the packed-leaf optimization.
+    fn legacy_gkr_input_layer(fracs: &RoundFractions, log_size: u32) -> Layer<SimdBackend> {
+        let n_rows = 1usize << log_size;
+        let n_vec_rows = 1usize << (log_size - LOG_N_LANES);
+        let scalar_size = (1usize << LOG_SLOTS) * n_rows;
+        let mut numerators = vec![SecureField::zero(); scalar_size];
+        let mut denominators = vec![SecureField::one(); scalar_size];
+
+        for slot in 0..fracs.n_slots() {
+            let (slot_numerators, slot_denominators) = fracs.slot(slot);
+            for vr in 0..n_vec_rows {
+                let packed_numerators = slot_numerators[vr].to_array();
+                let packed_denominators = slot_denominators[vr].to_array();
+                let base = slot * n_rows + vr * N_LANES;
+                for lane in 0..N_LANES {
+                    numerators[base + lane] = packed_numerators[lane];
+                    denominators[base + lane] = packed_denominators[lane];
+                }
+            }
+        }
+
+        Layer::LogUpGeneric {
+            numerators: Mle::<SimdBackend, SecureField>::new(numerators.into_iter().collect()),
+            denominators: Mle::<SimdBackend, SecureField>::new(denominators.into_iter().collect()),
+        }
+    }
+
+    fn layer_values(layer: Layer<SimdBackend>) -> (Vec<SecureField>, Vec<SecureField>) {
+        let Layer::LogUpGeneric {
+            numerators,
+            denominators,
+        } = layer
+        else {
+            panic!("round GKR input must be a generic LogUp layer");
+        };
+        (numerators.to_cpu(), denominators.to_cpu())
+    }
+
+    #[test]
+    fn packed_leaves_and_global_claimed_sum_match_legacy_exactly() {
+        let data = round_data(33);
+        let log_size = data_log_size(&data);
+        let mut relation_channel = Blake2sChannel::default();
+        let relations = KeccakRelations::draw(&mut relation_channel);
+        let fracs = build_fracs(&relations, &data);
+
+        let packed_values = layer_values(gkr_input_layer(&fracs, log_size));
+        let legacy_values = layer_values(legacy_gkr_input_layer(&fracs, log_size));
+        assert_eq!(
+            packed_values, legacy_values,
+            "packed leaves must preserve slot/row/lane order and 0/1 padding"
+        );
+
+        let packed_sum = global_claimed_sum(&fracs);
+        assert_eq!(
+            packed_sum,
+            legacy_claimed_sum(&fracs),
+            "one global inversion must preserve the legacy claimed sum"
+        );
+        let (columnar_claim, _) = generate_interaction_trace(&relations, &data);
+        assert_eq!(
+            packed_sum, columnar_claim.claimed_sum,
+            "GKR claimed sum must remain identical to the columnar LogUp"
+        );
+    }
+
+    #[test]
+    fn packed_and_legacy_layers_produce_identical_seeded_gkr_transcript() {
+        let data = round_data(33);
+        let log_size = data_log_size(&data);
+
+        // Drawing relations and mixing the claimed sum mirrors the production
+        // channel position immediately before the round GKR block.
+        let mut packed_channel = Blake2sChannel::default();
+        let relations = KeccakRelations::draw(&mut packed_channel);
+        let mut legacy_channel = Blake2sChannel::default();
+        let _ = KeccakRelations::draw(&mut legacy_channel);
+        let fracs = build_fracs(&relations, &data);
+        let sum = global_claimed_sum(&fracs);
+        packed_channel.mix_felts(&[sum]);
+        legacy_channel.mix_felts(&[sum]);
+
+        let (packed_proof, packed_artifact) =
+            prove_batch(&mut packed_channel, vec![gkr_input_layer(&fracs, log_size)]);
+        let (legacy_proof, legacy_artifact) = prove_batch(
+            &mut legacy_channel,
+            vec![legacy_gkr_input_layer(&fracs, log_size)],
+        );
+
+        assert_eq!(
+            encode_gkr_batch_proof(&packed_proof),
+            encode_gkr_batch_proof(&legacy_proof),
+            "packed leaves must produce a byte-identical GKR proof"
+        );
+        assert_eq!(packed_artifact.ood_point, legacy_artifact.ood_point);
+        assert_eq!(
+            packed_artifact.claims_to_verify_by_instance,
+            legacy_artifact.claims_to_verify_by_instance
+        );
+        assert_eq!(
+            packed_artifact.n_variables_by_instance,
+            legacy_artifact.n_variables_by_instance
+        );
+
+        let packed_delta = packed_channel.draw_secure_felt();
+        let legacy_delta = legacy_channel.draw_secure_felt();
+        assert_eq!(
+            packed_delta, legacy_delta,
+            "the post-GKR transcript challenge must remain identical"
+        );
+        let packed_tieback =
+            tieback_from_artifact(&packed_artifact, packed_delta, log_size).unwrap();
+        let legacy_tieback =
+            tieback_from_artifact(&legacy_artifact, legacy_delta, log_size).unwrap();
+        assert_eq!(packed_tieback.r_row, legacy_tieback.r_row);
+        assert_eq!(packed_tieback.delta, legacy_tieback.delta);
+        assert_eq!(packed_tieback.eq_ws, legacy_tieback.eq_ws);
+        assert_eq!(packed_tieback.mle_claim, legacy_tieback.mle_claim);
+    }
+
+    #[test]
+    fn production_log12_lengths_keep_slot_high_and_row_low() {
+        const PRODUCTION_LOG_SIZE: u32 = 12;
+        let n_rows = 1usize << PRODUCTION_LOG_SIZE;
+        let n_vec_rows = 1usize << (PRODUCTION_LOG_SIZE - LOG_N_LANES);
+        let active_packed_len = N_TOTAL_LOOKUPS * n_vec_rows;
+        let padded_packed_len = (1usize << LOG_SLOTS) * n_vec_rows;
+
+        assert_eq!(n_vec_rows, 256);
+        assert_eq!(active_packed_len, 229_888);
+        assert_eq!(padded_packed_len, 262_144);
+        assert_eq!(
+            (N_TOTAL_LOOKUPS - 1) * n_vec_rows + (n_vec_rows - 1),
+            active_packed_len - 1,
+            "slot 897 row 255 must be the final active packed leaf"
+        );
+        assert_eq!(
+            ((N_TOTAL_LOOKUPS - 1) * n_vec_rows + (n_vec_rows - 1)) * N_LANES + (N_LANES - 1),
+            N_TOTAL_LOOKUPS * n_rows - 1,
+            "the final SIMD lane must remain the final row of slot 897"
+        );
+        assert_eq!(
+            padded_packed_len * N_LANES,
+            1usize << (LOG_SLOTS + PRODUCTION_LOG_SIZE),
+            "SecureColumn length is scalar, not packed"
+        );
+        assert_eq!(n_vec_rows * N_LANES, n_rows);
     }
 }

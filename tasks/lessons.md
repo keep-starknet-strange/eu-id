@@ -1,5 +1,8 @@
 # Campaign lessons
 
+- Before calling a benchmark a full identity or revocation proof, trace its exact FFI entrypoint,
+  fixture constructor, and optional statement fields. Keep legacy `identity`, default mdoc, and
+  revocation-enabled mdoc labels separate; do not infer revocation from a benchmark name.
 - Performance reports must set and record `RAYON_NUM_THREADS` explicitly. A default Rayon run is
   multithreaded even when the product's `parallel` feature is not named directly, because dependency
   feature unification can enable Stwo's parallel paths. Every benchmark result line must expose the
@@ -36,3 +39,19 @@
 - When closing a public-derivation boundary, a post-proof claim mutation is not enough as the main
   regression. Also give the prover a self-consistent forged derived witness and prove that the AIR
   rejects its missing link to the canonical source transcript.
+- For heterogeneous mobile CPUs, thread count is not a sufficient benchmark policy. Pin the prover
+  pool to explicitly selected performance-core CPU IDs, exclude the lowest-capacity cluster, and
+  record selected/excluded IDs plus the topology source; use an unpinned all-core run only when the
+  user explicitly asks for it.
+- A late prover optimization is not covered by an earlier candidate's phone results. Give the final
+  shipped source its own same-APK, counter-ordered physical-phone A/B gate and keep it only when every
+  target clears a predeclared usefulness threshold without verifier, proof-size, memory, affinity,
+  provenance, or full-proof-success regression.
+- A cross-domain lookup negative must isolate the domain tag: move matching consumer and provider
+  multiplicities so the forged multiset would balance if tags were erased, then require rejection
+  with tags retained. Mutating only the consumer proves generic lookup imbalance, not tag separation.
+- Test attack state read by AIR evaluation cannot remain thread-local when quotient evaluation may
+  run on Rayon workers. Snapshot it once into immutable relation/eval state so shape inference,
+  interaction generation, prover workers, and verifier reconstruction all exercise the same attack.
+- A malformed optional-arm regression must first build a fixture that actually contains that arm.
+  Prove the three-role control fixture before shortening or extending revocation claim vectors.
