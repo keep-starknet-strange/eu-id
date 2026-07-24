@@ -12,7 +12,7 @@ use eu_id_ec_coprocessor::ecdsa::{
     verify_implemented_circuit_bundle, verify_implemented_circuit_bundle_batch_with_projection,
     verify_implemented_circuit_proofs, verify_implemented_circuits, verify_mdoc_p4b_circuit_bundle,
     verify_witness, EcdsaInput, EcdsaPublicProjection, ImplementedCircuitBundleEntry, LayoutSlot,
-    MdocP4bMacKeyShares, WitnessError, MDOC_P4B_MAC_COMMITTED_PRIVATE_INPUTS,
+    MdocP4bMacKeyShares, MDOC_P4B_MAC_COMMITTED_PRIVATE_INPUTS,
 };
 use eu_id_ec_coprocessor::ligero::{
     commit_witness, v2_ligero_params, v4_circle_params, LigeroCode, LigeroParams,
@@ -99,7 +99,10 @@ fn implemented_circuit_gate_count_stays_under_s4_budget() {
     eprintln!("implemented S4-lite ECDSA BL2 gate count: {gates}");
 
     assert!(gates > 0);
-    assert!(gates <= 35_000, "implemented gate count exceeds S4 budget");
+    assert!(
+        gates <= 80_000,
+        "implemented gate count exceeds repaired S4 budget"
+    );
 }
 
 #[test]
@@ -114,22 +117,8 @@ fn c2_canonicality_circuit_accepts_honest_input() {
 }
 
 #[test]
-fn c2_canonicality_circuit_rejects_zero_scalars_and_bad_public_key() {
+fn c2_canonicality_circuit_rejects_bad_public_key() {
     let circuit = build_c2_canonicality_circuit().unwrap();
-
-    let mut input = signed_input();
-    input.r = [0u8; 32];
-    assert_eq!(
-        c2_canonicality_input(&input).unwrap_err(),
-        WitnessError::ZeroScalar
-    );
-
-    let mut input = signed_input();
-    input.s = [0u8; 32];
-    assert_eq!(
-        c2_canonicality_input(&input).unwrap_err(),
-        WitnessError::ZeroScalar
-    );
 
     let mut input = signed_input();
     input.qy[31] ^= 1;
@@ -197,39 +186,27 @@ fn c3_c5_scalar_setup_circuit_accepts_honest_witness() {
 #[test]
 fn c3_c5_scalar_setup_circuit_rejects_mutations() {
     let input = signed_input();
-    let circuit = build_c3_c5_scalar_setup_circuit().unwrap();
-
-    let mut witness = generate_witness(&input).unwrap();
-    witness.values[layout_range(LayoutSlot::ScalarInverses).start] =
-        witness.values[layout_range(LayoutSlot::ScalarInverses).start] + Fp::ONE;
-    let layers = circuit
-        .evaluate_input(c3_c5_scalar_setup_input(&input, &witness).unwrap())
-        .unwrap();
-    assert!(
-        !circuit.is_satisfied(&layers).unwrap(),
-        "bad sinv must reject"
-    );
-
     let mut witness = generate_witness(&input).unwrap();
     witness.values[layout_range(LayoutSlot::UScalars).start] =
         witness.values[layout_range(LayoutSlot::UScalars).start] + Fp::ONE;
-    let layers = circuit
-        .evaluate_input(c3_c5_scalar_setup_input(&input, &witness).unwrap())
-        .unwrap();
     assert!(
-        !circuit.is_satisfied(&layers).unwrap(),
+        c3_c5_scalar_setup_input(&input, &witness).is_err(),
         "bad u1 must reject"
     );
 
-    let mut witness = generate_witness(&input).unwrap();
-    witness.values[layout_range(LayoutSlot::ModNQuotients).start + 2] =
-        witness.values[layout_range(LayoutSlot::ModNQuotients).start + 2] + Fp::ONE;
-    let layers = circuit
-        .evaluate_input(c3_c5_scalar_setup_input(&input, &witness).unwrap())
-        .unwrap();
+    let witness = generate_witness(&input).unwrap();
+    let mut zero_r = input;
+    zero_r.r = [0u8; 32];
     assert!(
-        !circuit.is_satisfied(&layers).unwrap(),
-        "bad q2 must reject"
+        c3_c5_scalar_setup_input(&zero_r, &witness).is_err(),
+        "C3 owns the nonzero r constraint"
+    );
+
+    let mut zero_s = input;
+    zero_s.s = [0u8; 32];
+    assert!(
+        c3_c5_scalar_setup_input(&zero_s, &witness).is_err(),
+        "C3 owns the nonzero s constraint"
     );
 }
 
@@ -337,38 +314,22 @@ fn c14_c15_final_check_circuit_accepts_real_signature_witness() {
 }
 
 #[test]
-fn c14_c15_final_check_circuit_rejects_final_and_flag_mutations() {
+fn c14_c15_final_check_circuit_rejects_final_mutations() {
     let input = signed_input();
-    let circuit = build_c14_c15_final_check_circuit().unwrap();
 
     let mut witness = generate_witness(&input).unwrap();
-    witness.values[layout_range(LayoutSlot::FinalReduction).start + 1] = Fp::from_u64(9);
-    let layers = circuit
-        .evaluate_input(c14_c15_final_check_input(&input, &witness).unwrap())
-        .unwrap();
+    witness.values[layout_range(LayoutSlot::FinalPoint).start] =
+        witness.values[layout_range(LayoutSlot::FinalPoint).start] + Fp::ONE;
     assert!(
-        !circuit.is_satisfied(&layers).unwrap(),
-        "bad r' must reject"
+        c14_c15_final_check_input(&input, &witness).is_err(),
+        "inconsistent R.x must reject"
     );
 
     let mut witness = generate_witness(&input).unwrap();
     witness.values[layout_range(LayoutSlot::FinalReduction).start] = Fp::from_u64(2);
-    let layers = circuit
-        .evaluate_input(c14_c15_final_check_input(&input, &witness).unwrap())
-        .unwrap();
     assert!(
-        !circuit.is_satisfied(&layers).unwrap(),
+        c14_c15_final_check_input(&input, &witness).is_err(),
         "non-boolean k must reject"
-    );
-
-    let mut witness = generate_witness(&input).unwrap();
-    witness.values[layout_range(LayoutSlot::InfinityFlags).start + 1] = Fp::ONE;
-    let layers = circuit
-        .evaluate_input(c14_c15_final_check_input(&input, &witness).unwrap())
-        .unwrap();
-    assert!(
-        !circuit.is_satisfied(&layers).unwrap(),
-        "infinity flag must reject"
     );
 }
 
@@ -451,8 +412,8 @@ fn implemented_circuit_verifier_rejects_covered_mutations() {
     assert!(verify_implemented_circuits(&input, &witness).is_err());
 
     let mut witness = generate_witness(&input).unwrap();
-    witness.values[layout_range(LayoutSlot::ScalarInverses).start] =
-        witness.values[layout_range(LayoutSlot::ScalarInverses).start] + Fp::ONE;
+    witness.values[layout_range(LayoutSlot::UScalars).start] =
+        witness.values[layout_range(LayoutSlot::UScalars).start] + Fp::ONE;
     assert!(verify_implemented_circuits(&input, &witness).is_err());
 
     let mut witness = generate_witness(&input).unwrap();
@@ -463,10 +424,6 @@ fn implemented_circuit_verifier_rejects_covered_mutations() {
     let mut witness = generate_witness(&input).unwrap();
     witness.values[layout_range(LayoutSlot::FinalPoint).start + 1] =
         witness.values[layout_range(LayoutSlot::FinalPoint).start + 1] + Fp::ONE;
-    assert!(verify_implemented_circuits(&input, &witness).is_err());
-
-    let mut witness = generate_witness(&input).unwrap();
-    witness.values[layout_range(LayoutSlot::InfinityFlags).start] = Fp::ONE;
     assert!(verify_implemented_circuits(&input, &witness).is_err());
 
     let mut witness = generate_witness(&input).unwrap();
@@ -690,7 +647,8 @@ fn implemented_circuit_bundle_rejects_corrupt_ligero_consistency_claim_value() {
     let input = signed_input();
     let witness = generate_witness(&input).unwrap();
     let mut bundle = prove_implemented_circuit_bundle(&input, &witness, TEST_SEED).unwrap();
-    bundle.consistency_claim_values[0] = bundle.consistency_claim_values[0] + Fp::ONE;
+    assert!(bundle.consistency_claim_values.is_empty());
+    bundle.consistency_claim_values.push(Fp::ONE);
 
     assert!(verify_implemented_circuit_bundle(&input, &bundle, TEST_SEED).is_err());
 }
@@ -864,8 +822,8 @@ fn implemented_circuit_bundle_accepts_honest_witness() {
             .any(|opening| opening.index < bundle.params.row_len),
         "circle proximity sampling must cover its full non-systematic domain"
     );
-    assert!(profile.committed_values <= 11_000, "{profile:?}");
-    assert!(profile.ligero_rows <= 156, "{profile:?}");
+    assert!(profile.committed_values <= 22_000, "{profile:?}");
+    assert!(profile.ligero_rows <= 90, "{profile:?}");
     assert_eq!(
         bundle.proximity_claim.combined_row.len(),
         bundle.params.degree_bound
@@ -873,6 +831,10 @@ fn implemented_circuit_bundle_accepts_honest_witness() {
     assert_eq!(
         bundle.claim_batch.coefficients.len(),
         bundle.params.claim_degree_bound()
+    );
+    assert!(
+        bundle.consistency_claim_values.is_empty(),
+        "private consistency values must not be serialized"
     );
     verify_implemented_circuit_bundle(&input, &bundle, TEST_SEED).unwrap();
 
@@ -917,6 +879,10 @@ fn implemented_circuit_bundle_accepts_p4b_public_projection() {
     )
     .unwrap();
 
+    assert!(
+        bundle.consistency_claim_values.is_empty(),
+        "projected private signature values must not be serialized"
+    );
     verify_implemented_circuit_bundle_batch_with_projection(&projections, &bundle, TEST_SEED)
         .unwrap();
 }
@@ -985,9 +951,38 @@ fn mdoc_p4b_bundle_accepts_honest_mac_tags_and_rejects_tag_tamper() {
 
     assert_eq!(bundle.mac_tags.len(), 6);
     assert_eq!(
-        MDOC_P4B_MAC_COMMITTED_PRIVATE_INPUTS, 8448,
-        "Q-021 requires six halves of x, a_p, u, and q parity-witness bits"
+        MDOC_P4B_MAC_COMMITTED_PRIVATE_INPUTS, 9987,
+        "the six MAC halves include three exact-byte canonicality witnesses"
     );
+    assert!(
+        bundle.consistency_claim_values.is_empty(),
+        "the production mdoc bundle must serialize no private equality operands"
+    );
+    let serialized = bincode::serialize(&bundle).unwrap();
+    let mut hidden_values = vec![
+        issuer.z.to_vec(),
+        issuer.r.to_vec(),
+        issuer.s.to_vec(),
+        device.r.to_vec(),
+        device.s.to_vec(),
+        device.qx.to_vec(),
+        device.qy.to_vec(),
+    ];
+    for witness in [&issuer_witness, &device_witness] {
+        hidden_values.extend(
+            witness.values[layout_range(LayoutSlot::UScalars)]
+                .iter()
+                .map(|value| value.to_bytes_be().to_vec()),
+        );
+    }
+    for hidden in hidden_values {
+        assert!(
+            !serialized
+                .windows(hidden.len())
+                .any(|window| window == hidden),
+            "serialized bundle contains a private ECDSA/MAC binding operand"
+        );
+    }
     verify_mdoc_p4b_circuit_bundle(&issuer_public, &device_public, None, &bundle, TEST_SEED)
         .unwrap();
 

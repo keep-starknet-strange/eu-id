@@ -27,7 +27,7 @@
 //! committed boolean bit-planes and recomposed against them), so the
 //! standalone preprocessed trace is:
 //!
-//! - 4 range tables (`Range_2`, `Range_4`, `Range_5`, `Range_16`)
+//! - 4 range tables (`Range_2`, `Range_4`, `Range_5`, `Range_8`)
 //! - 1 `is_first_row` selector at the main `Sha256Eval` trace's `log_n_rows`
 //!   — value `1` at storage index `Layout::block_slot(0, log_n_rows) = 0`,
 //!   zero elsewhere. The AIR pins `is_first_block ≡ is_first_row`, which
@@ -50,7 +50,7 @@ use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use crate::components::{
     all_preprocessed_column_ids, range_log_size, shared_table_preprocessed_column_ids, RANGE_TABLES,
 };
-use crate::tables_local::{range_16, range_2, range_4, range_5};
+use crate::tables_local::{range_2, range_4, range_5, range_8};
 use crate::trace::Layout;
 
 /// `log2` of the row count for every 2¹⁶-row table.
@@ -173,7 +173,7 @@ fn generate_preprocessed_trace_uncached(group_width: u32, log_n_rows: u32) -> Pr
 
     let _ = group_width;
 
-    // ---- 4 range tables (Range_2, Range_4, Range_5, Range_16) ----
+    // ---- 4 range tables (Range_2, Range_4, Range_5, Range_8) ----
     //
     // Each `Range_k` has row content `[0, 1, …, k-1]`. Producers `< 2^4`
     // are padded with leading value `0` up to `2^LOG_N_LANES = 16` rows;
@@ -330,7 +330,7 @@ fn range_rows(kind: crate::components::RangeKind) -> Vec<u32> {
         RangeKind::Range2 => range_2(),
         RangeKind::Range4 => range_4(),
         RangeKind::Range5 => range_5(),
-        RangeKind::Range16 => range_16(),
+        RangeKind::Range8 => range_8(),
     }
 }
 
@@ -354,8 +354,8 @@ mod tests {
     }
 
     /// Columns 0..4 are the 4 `Range_k` value columns in `RANGE_TABLES` order
-    /// — Range_2/4/5 at `LOG_N_LANES = 4` (padded to 16 rows) and Range_16 at
-    /// log_size 16 (2¹⁶ rows). Columns 4..14 are the `is_first_row` selector
+    /// — Range_2/4/5 at `LOG_N_LANES = 4` (padded to 16 rows) and Range_8 at
+    /// log_size 8 (2⁸ rows). Columns 4..14 are the `is_first_row` selector
     /// and 9 round-cyclic columns at the main trace's `log_n_rows`.
     #[test]
     fn log_sizes_lay_out_correctly() {
@@ -366,7 +366,7 @@ mod tests {
             let expected = if i < 3 {
                 LOG_N_LANES // Range_2/4/5
             } else if i == 3 {
-                16 // Range_16
+                8 // Range_8
             } else {
                 log_n_rows // is_first_row + 9 round-cyclic
             };

@@ -133,7 +133,7 @@ fn invalid_scalar_and_coordinate_inputs_are_rejected() {
 }
 
 #[test]
-fn scalar_setup_hints_fill_frozen_slots_deterministically() {
+fn scalar_setup_outputs_fill_frozen_slots_deterministically() {
     let first = generate_witness(&valid_input()).unwrap();
     let second = generate_witness(&valid_input()).unwrap();
     assert_eq!(
@@ -141,13 +141,9 @@ fn scalar_setup_hints_fill_frozen_slots_deterministically() {
         "same input must produce byte-identical witness"
     );
 
-    let sinv = &first.values[layout_range(LayoutSlot::ScalarInverses)];
     let us = &first.values[layout_range(LayoutSlot::UScalars)];
-    let qs = &first.values[layout_range(LayoutSlot::ModNQuotients)];
 
-    assert_eq!(sinv, &[Fp::ONE]);
     assert_eq!(us, &[Fp::from_u64(42), Fp::from_u64(77)]);
-    assert_eq!(qs, &[Fp::ZERO, Fp::ZERO, Fp::ZERO]);
 }
 
 #[test]
@@ -211,13 +207,6 @@ fn witness_checker_accepts_honest_witness_and_rejects_scalar_mutations() {
     let mut witness = generate_witness(&input).unwrap();
     verify_witness(&input, &witness).unwrap();
 
-    witness.values[layout_range(LayoutSlot::ScalarInverses).start] = Fp::from_u64(2);
-    assert!(
-        verify_witness(&input, &witness).is_err(),
-        "bad sinv must reject"
-    );
-
-    let mut witness = generate_witness(&input).unwrap();
     witness.values[layout_range(LayoutSlot::UScalars).start] = Fp::from_u64(43);
     assert!(
         verify_witness(&input, &witness).is_err(),
@@ -258,7 +247,7 @@ fn witness_checker_accepts_honest_witness_and_rejects_scalar_mutations() {
 }
 
 #[test]
-fn witness_checker_rejects_final_check_and_infinity_mutations() {
+fn witness_checker_rejects_final_check_mutations() {
     let input = signed_input();
     let mut witness = generate_witness(&input).unwrap();
 
@@ -273,13 +262,6 @@ fn witness_checker_rejects_final_check_and_infinity_mutations() {
     assert!(
         verify_witness(&input, &witness).is_err(),
         "bad r' must reject"
-    );
-
-    let mut witness = generate_witness(&input).unwrap();
-    witness.values[layout_range(LayoutSlot::InfinityFlags).start] = Fp::ONE;
-    assert!(
-        verify_witness(&input, &witness).is_err(),
-        "infinity flag must reject"
     );
 }
 

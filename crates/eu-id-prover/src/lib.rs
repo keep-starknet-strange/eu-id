@@ -314,6 +314,10 @@ pub mod ec_coprocessor {
         )
     }
 
+    /// Low-level sumcheck verification only.
+    ///
+    /// The returned input claims are unbound; production code must use the bundle
+    /// verifier so statement, projection, and cross-family bindings are enforced.
     pub fn verify_implemented_circuit_proofs_from_stwo(
         proofs: &ImplementedCircuitProofs,
         commitment_root: [u8; 32],
@@ -920,8 +924,8 @@ fn mix_coprocessor_tagged_statements(
     channel: &mut air_core::Ch,
     tagged_inputs: &[(&[u8], &stwo_p256::types::EcdsaVerifyInput)],
 ) -> Result<(), String> {
-    mix_channel_bytes(channel, b"eu-id-ec-coproc-v1");
-    mix_channel_bytes(channel, b"s4-ecdsa-circuit-shape-v1");
+    mix_channel_bytes(channel, b"eu-id-ec-coproc-v2");
+    mix_channel_bytes(channel, b"s4-ecdsa-circuit-shape-v2");
     let shapes = ec_coprocessor::implemented_circuit_transcript_shapes_from_stwo()
         .map_err(|err| format!("{err:?}"))?;
     channel.mix_u64(shapes.len() as u64);
@@ -952,8 +956,8 @@ fn mix_coprocessor_tagged_projections(
     channel: &mut air_core::Ch,
     tagged_projections: &[(&[u8], &eu_id_ec_coprocessor::ecdsa::EcdsaPublicProjection)],
 ) -> Result<(), String> {
-    mix_channel_bytes(channel, b"eu-id-ec-coproc-v1");
-    mix_channel_bytes(channel, b"s4-ecdsa-circuit-shape-v1");
+    mix_channel_bytes(channel, b"eu-id-ec-coproc-v2");
+    mix_channel_bytes(channel, b"s4-ecdsa-circuit-shape-v2");
     let shapes = ec_coprocessor::implemented_circuit_transcript_shapes_from_stwo()
         .map_err(|err| format!("{err:?}"))?;
     channel.mix_u64(shapes.len() as u64);
@@ -966,7 +970,7 @@ fn mix_coprocessor_tagged_projections(
         }
     }
 
-    mix_channel_bytes(channel, b"eu-id-ec-coproc-public-projections-v1");
+    mix_channel_bytes(channel, b"eu-id-ec-coproc-public-projections-v2");
     channel.mix_u64(tagged_projections.len() as u64);
     for (tag, projection) in tagged_projections {
         mix_channel_bytes(channel, tag);
@@ -2170,7 +2174,7 @@ mod ec_coprocessor_tests {
             claims.len(),
             implemented_circuit_family_labels_from_stwo().unwrap().len()
         );
-        assert!(implemented_circuit_gate_count_from_stwo().unwrap() <= 35_000);
+        assert!(implemented_circuit_gate_count_from_stwo().unwrap() <= 80_000);
     }
 
     #[test]

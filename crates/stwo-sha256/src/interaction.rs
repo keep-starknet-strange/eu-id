@@ -58,8 +58,8 @@ use crate::types::Sha256Witness;
 ///   2 (schedule family: Range_4 carry pair; t ≥ 16 rows)
 /// +  8 (round family: 4 carry pairs = 8; every row)
 /// + 16 (finalization carries, t = 63 rows)
-/// + 16 (terminal `Range_16`, t = 63 rows)
-/// = 42
+/// + 32 (terminal `Range_8` digest bytes, t = 63 rows)
+/// = 58
 /// ```
 ///
 /// Σ0/Σ1/Maj/Ch and the σ inputs are computed from committed boolean
@@ -67,7 +67,7 @@ use crate::types::Sha256Witness;
 /// only the mod-2³² add-carry and terminal-limb range checks remain.
 ///
 /// A site that does not fire on a given row holds the neutral fraction `(0, 1)`.
-pub const SHA_LOOKUPS_PER_ROW_BASE: usize = 42;
+pub const SHA_LOOKUPS_PER_ROW_BASE: usize = 58;
 
 /// LogUp batch size for the fat `Sha256Eval` consumer: how many per-row
 /// fractions share one interaction column. Batch-4 (vs the pair default)
@@ -117,7 +117,7 @@ impl ComponentClaim {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InteractionClaim {
     pub sha256: ComponentClaim,
-    pub range: Vec<ComponentClaim>, // 4: Range_2, Range_4, Range_5, Range_16
+    pub range: Vec<ComponentClaim>, // 4: Range_2, Range_4, Range_5, Range_8
 }
 
 impl InteractionClaim {
@@ -306,7 +306,7 @@ fn range_k_interaction(
         RangeKind::Range2 => producer_frac_column(&relations.range.range_2, &mults, row_iter),
         RangeKind::Range4 => producer_frac_column(&relations.range.range_4, &mults, row_iter),
         RangeKind::Range5 => producer_frac_column(&relations.range.range_5, &mults, row_iter),
-        RangeKind::Range16 => producer_frac_column(&relations.range.range_16, &mults, row_iter),
+        RangeKind::Range8 => producer_frac_column(&relations.range.range_8, &mults, row_iter),
     };
     build_interaction_columns(log_size, vec![frac], 2)
 }
@@ -448,17 +448,16 @@ fn write_round_row_lookups(
         round.a_new_carries,
     );
 
-    // ---- 4/5. Finalization carries + terminal `Range_16` (t = 63 rows) ----
+    // ---- 4/5. Finalization carries + terminal `Range_8` bytes (t = 63 rows) ----
     if t == crate::constants::N_ROUNDS - 1 {
         for c in &block.finalization_carries {
             write_carry_range_pair(all, cursor, slot, relations, RangeKind::Range2, *c);
         }
-        for h in &block.h_out {
-            write_range_check(all, cursor, slot, relations, RangeKind::Range16, h.lo);
-            write_range_check(all, cursor, slot, relations, RangeKind::Range16, h.hi);
+        for byte in h_out_digest_bytes(&block.h_out) {
+            write_range_check(all, cursor, slot, relations, RangeKind::Range8, byte);
         }
     } else {
-        *cursor += 16 + 16;
+        *cursor += 16 + DIGEST_BYTES;
     }
 
     // ---- 6. Digest yield (provider side, final block's t = 63 row) ----
@@ -507,7 +506,7 @@ fn combine_range(relations: &Sha256Relations, kind: RangeKind, value: u32) -> Se
         RangeKind::Range2 => relations.range.range_2.combine(&v),
         RangeKind::Range4 => relations.range.range_4.combine(&v),
         RangeKind::Range5 => relations.range.range_5.combine(&v),
-        RangeKind::Range16 => relations.range.range_16.combine(&v),
+        RangeKind::Range8 => relations.range.range_8.combine(&v),
     }
 }
 
@@ -540,7 +539,6 @@ fn write_carry_range_pair(
     write_range_check(all, cursor, slot, relations, kind, carries.hi);
 }
 
-#[allow(clippy::too_many_arguments)]
 // ---------------------------------------------------------------------------
 // Public: top-level interaction-trace generation
 // ---------------------------------------------------------------------------
@@ -550,6 +548,7 @@ fn write_carry_range_pair(
 /// Returns the per-component trees of `CircleEvaluation`s (flattened into
 /// one `Vec<Vec<…>>` in component order) plus the aggregate
 /// [`InteractionClaim`].
+#[allow(clippy::too_many_arguments)]
 pub fn generate_interaction_trace(
     relations: &Sha256Relations,
     witness: &Sha256Witness,
@@ -625,7 +624,7 @@ fn generate_interaction_trace_inner(
     };
 
     let _ = group_width;
-    // 4 range producers (Range_2, Range_4, Range_5, Range_16).
+    // 4 range producers (Range_2, Range_4, Range_5, Range_8).
     let mut range = Vec::with_capacity(4);
     if include_table_providers {
         for &kind in RANGE_TABLES {
@@ -667,6 +666,56 @@ mod tests {
             claim.total(),
             SecureField::zero(),
             "standalone SHA module must self-balance when the digest is not exposed",
+        );
+    }
+
+    /// A malicious split can preserve `limb = 256·b_hi + b_lo` in M31 by
+    /// moving one radix unit between the two cells. The Range8 lookup rejects
+    /// that otherwise constraint-preserving representation.
+    #[test]
+    fn range_8_rejects_recomposition_preserving_out_of_range_digest_byte() {
+        let witness = compute_sha256_witness(b"abc");
+        let relations = Sha256Relations::draw(&mut Blake2sChannel::default());
+        let (_, producer_sum) = range_k_interaction(&relations, &witness, RangeKind::Range8);
+        let bytes: Vec<BaseField> = witness
+            .blocks
+            .iter()
+            .flat_map(|block| h_out_digest_bytes(&block.h_out))
+            .map(BaseField::from)
+            .collect();
+        let reciprocal = |value: BaseField| -> SecureField {
+            let denominator: SecureField = relations.range.range_8.combine(&[value]);
+            assert_ne!(denominator, SecureField::zero());
+            SecureField::one() / denominator
+        };
+        let honest_consumer = bytes
+            .iter()
+            .copied()
+            .fold(SecureField::zero(), |sum, byte| sum + reciprocal(byte));
+        assert_eq!(producer_sum + honest_consumer, SecureField::zero());
+
+        let (byte_hi, byte_lo) = (bytes[0], bytes[1]);
+        let radix = BaseField::from(1u32 << 8);
+        let (forged_hi, forged_lo) = if byte_hi.0 < 255 {
+            (byte_hi + BaseField::from(1u32), byte_lo - radix)
+        } else {
+            (byte_hi - BaseField::from(1u32), byte_lo + radix)
+        };
+        assert_eq!(
+            radix * byte_hi + byte_lo,
+            radix * forged_hi + forged_lo,
+            "the forged split must preserve the limb recomposition",
+        );
+        assert!(forged_hi.0 < 256);
+        assert!(forged_lo.0 >= 256, "one forged cell must miss Range8");
+
+        let forged_consumer = honest_consumer - reciprocal(byte_hi) - reciprocal(byte_lo)
+            + reciprocal(forged_hi)
+            + reciprocal(forged_lo);
+        assert_ne!(
+            producer_sum + forged_consumer,
+            SecureField::zero(),
+            "an out-of-range byte split must not balance the Range8 provider",
         );
     }
 

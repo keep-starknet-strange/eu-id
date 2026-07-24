@@ -2,9 +2,10 @@ use core::ops::Range;
 use std::time::{Duration, Instant};
 
 use crate::ligero::{
-    commit_witness_profiled, v4_circle_params, verify_claim_batch, verify_openings,
-    verify_split_claim_batch, verify_split_openings, LigeroClaimBatch, LigeroCode, LigeroError,
-    LigeroLinearClaim, LigeroParams, LigeroProximityClaim,
+    commit_witness_profiled, v4_circle_params, verify_and_authenticate_split_openings,
+    verify_authenticated_split_claim_batch, verify_claim_batch, verify_openings, LigeroClaimBatch,
+    LigeroCode, LigeroError, LigeroLinearClaim, LigeroLinearTerm, LigeroParams,
+    LigeroProximityClaim,
 };
 use crate::mac::{bytes_to_bits, gf128_tag, Gf128, GF128_BITS};
 use crate::merkle::ColumnOpening;
@@ -22,26 +23,28 @@ use p256::{AffinePoint as P256AffinePoint, EncodedPoint, FieldBytes, ProjectiveP
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use stwo_p256_utils::scalar_arithmetic::{
-    ScalarArithmeticError, ScalarFieldMulTrace, U256Words, P256_ORDER,
+    limbs_to_words, words_to_limbs, BigIntLimbs, CanonicalLtTrace, DigestReductionTrace,
+    ScalarArithmeticError, ScalarFieldMulTrace, ScalarSetupTrace, U256Words, P256_ORDER,
+    PRODUCT_EQUATION_LIMBS,
 };
 
-pub const LAYOUT_LEN: usize = 1142;
+pub const LAYOUT_LEN: usize = 1135;
 pub const LIMB_BITS: usize = 13;
 pub const N_LIMBS: usize = 20;
 pub const C1_INPUT_LIMBS_INPUT_LOG_SIZE: usize = 7;
 pub const C1_INPUT_LIMBS_OUTPUT_LOG_SIZE: usize = 3;
-pub const C2_CANONICALITY_INPUT_LOG_SIZE: usize = 3;
-pub const C2_CANONICALITY_OUTPUT_LOG_SIZE: usize = 2;
-pub const C3_C5_SCALAR_SETUP_INPUT_LOG_SIZE: usize = 4;
-pub const C3_C5_SCALAR_SETUP_OUTPUT_LOG_SIZE: usize = 2;
+pub const C2_CANONICALITY_INPUT_LOG_SIZE: usize = 2;
+pub const C2_CANONICALITY_OUTPUT_LOG_SIZE: usize = 1;
+pub const C3_C5_SCALAR_SETUP_INPUT_LOG_SIZE: usize = 13;
+pub const C3_C5_SCALAR_SETUP_OUTPUT_LOG_SIZE: usize = 13;
 pub const C9_C10_LADDER_INPUT_LOG_SIZE: usize = 13;
 pub const C9_C10_LADDER_OUTPUT_LOG_SIZE: usize = 14;
 pub const C11_FINAL_ADD_INPUT_LOG_SIZE: usize = 4;
 pub const C11_FINAL_ADD_OUTPUT_LOG_SIZE: usize = 2;
 pub const C12_ON_CURVE_INPUT_LOG_SIZE: usize = 11;
 pub const C12_ON_CURVE_OUTPUT_LOG_SIZE: usize = 11;
-pub const C14_C15_INPUT_LOG_SIZE: usize = 3;
-pub const C14_C15_OUTPUT_LOG_SIZE: usize = 3;
+pub const C14_C15_INPUT_LOG_SIZE: usize = 11;
+pub const C14_C15_OUTPUT_LOG_SIZE: usize = 11;
 pub const MAC_HALF_GROUP_A_INPUT_LOG_SIZE: usize = 9;
 pub const MAC_HALF_GROUP_B_INPUT_LOG_SIZE: usize = 11;
 pub const MAC_HALF_INPUT_LOG_SIZE: usize = 11;
@@ -63,6 +66,17 @@ const MAC_HALF_GROUP_B_INPUT_START: usize = 1usize << MAC_HALF_GROUP_A_INPUT_LOG
 const MAC_BATCH_GROUP_B_INPUT_START: usize = 1usize << MAC_BATCH_GROUP_A_INPUT_LOG_SIZE;
 const MAC_BATCH_OUTPUT_STRIDE: usize = GF128_BITS + MAC_HALF_LOCAL_CONSTRAINTS;
 const MAC_BATCH_TREE_HALF_WIDTH: usize = mac_half_tree_width();
+const MAC_BATCH_CANONICAL_VALUE_COUNT: usize = MDOC_P4B_MAC_HALF_COUNT / 2;
+const MAC_BATCH_CANONICAL_BITS: usize = 2 * GF128_BITS;
+const MAC_BATCH_CANONICAL_CARRIES: usize = MAC_BATCH_CANONICAL_BITS + 1;
+const MAC_BATCH_CANONICAL_SLACK_BITS_START: usize =
+    MDOC_P4B_MAC_HALF_COUNT * MAC_BATCH_HALF_GROUP_A_INPUT_STRIDE;
+const MAC_BATCH_CANONICAL_CARRIES_START: usize = MAC_BATCH_CANONICAL_SLACK_BITS_START
+    + MAC_BATCH_CANONICAL_VALUE_COUNT * MAC_BATCH_CANONICAL_BITS;
+const MAC_BATCH_CANONICAL_CONSTRAINTS_PER_VALUE: usize =
+    MAC_BATCH_CANONICAL_BITS + MAC_BATCH_CANONICAL_CARRIES + 2 + MAC_BATCH_CANONICAL_BITS;
+const MAC_BATCH_CANONICAL_CONSTRAINTS: usize =
+    MAC_BATCH_CANONICAL_VALUE_COUNT * MAC_BATCH_CANONICAL_CONSTRAINTS_PER_VALUE;
 pub const MAC_HALF_CONST_ONE_INDEX: usize = 0;
 pub const MAC_HALF_X_BITS_START: usize = 1;
 pub const MAC_HALF_AP_BITS_START: usize = MAC_HALF_X_BITS_START + GF128_BITS;
@@ -73,31 +87,55 @@ pub const MAC_HALF_GROUP_B_USED_INPUTS: usize = GF128_BITS * MAC_HALF_PARITY_Q_B
 pub const MAC_HALF_COMMITTED_PRIVATE_INPUTS: usize =
     (MAC_HALF_GROUP_A_USED_INPUTS - 1) + MAC_HALF_GROUP_B_USED_INPUTS;
 pub const MDOC_P4B_MAC_HALF_COUNT: usize = 6;
-pub const MDOC_P4B_MAC_COMMITTED_PRIVATE_INPUTS: usize =
-    MDOC_P4B_MAC_HALF_COUNT * MAC_HALF_COMMITTED_PRIVATE_INPUTS;
+pub const MDOC_P4B_MAC_COMMITTED_PRIVATE_INPUTS: usize = MDOC_P4B_MAC_HALF_COUNT
+    * MAC_HALF_COMMITTED_PRIVATE_INPUTS
+    + MAC_BATCH_CANONICAL_VALUE_COUNT * (MAC_BATCH_CANONICAL_BITS + MAC_BATCH_CANONICAL_CARRIES);
 pub const IMPLEMENTED_CIRCUIT_FAMILY_COUNT: usize = 7;
 
 const C1_CONST_ONE_INDEX: u32 = 0;
 const C1_VALUES_START_INDEX: u32 = 1;
 const C1_LIMBS_START_INDEX: u32 = 6;
 const C2_CONST_ONE_INDEX: u32 = 0;
-const C2_R_INDEX: u32 = 1;
-const C2_S_INDEX: u32 = 2;
-const C2_R_INV_INDEX: u32 = 3;
-const C2_S_INV_INDEX: u32 = 4;
-const C2_QX_INDEX: u32 = 5;
-const C2_QY_INDEX: u32 = 6;
-const C2_QX2_INDEX: u32 = 7;
-const C3_CONST_ONE_INDEX: u32 = 0;
-const C3_Z_INDEX: u32 = 1;
-const C3_R_INDEX: u32 = 2;
-const C3_S_INDEX: u32 = 3;
-const C3_SINV_INDEX: u32 = 4;
-const C3_U1_INDEX: u32 = 5;
-const C3_U2_INDEX: u32 = 6;
-const C3_QINV_INDEX: u32 = 7;
-const C3_Q1_INDEX: u32 = 8;
-const C3_Q2_INDEX: u32 = 9;
+const C2_QX_INDEX: u32 = 1;
+const C2_QY_INDEX: u32 = 2;
+const C2_QX2_INDEX: u32 = 3;
+const C3_CONST_ONE_INDEX: usize = 0;
+const C3_Z_INDEX: usize = 1;
+const C3_R_INDEX: usize = 2;
+const C3_S_INDEX: usize = 3;
+const C3_U1_INDEX: usize = 4;
+const C3_U2_INDEX: usize = 5;
+const C3_R_NONZERO_INV_INDEX: usize = 6;
+const C3_S_NONZERO_INV_INDEX: usize = 7;
+const C3_Z_GE_N_INDEX: usize = 8;
+const C3_CANONICAL_SCALAR_COUNT: usize = 5;
+const C3_SCALAR_R: usize = 0;
+const C3_SCALAR_S: usize = 1;
+const C3_SCALAR_Z_RED: usize = 2;
+const C3_SCALAR_U1: usize = 3;
+const C3_SCALAR_U2: usize = 4;
+const C3_PRODUCT_COUNT: usize = 2;
+const PRODUCT_CARRY_BITS: usize = 19;
+const PRODUCT_CARRY_OFFSET: i64 = 1 << (PRODUCT_CARRY_BITS - 1);
+const PRODUCT_INTERNAL_CARRIES: usize = PRODUCT_EQUATION_LIMBS - 1;
+const C3_SCALAR_LIMBS_START: usize = 9;
+const C3_SCALAR_BITS_START: usize = C3_SCALAR_LIMBS_START + C3_CANONICAL_SCALAR_COUNT * N_LIMBS;
+const C3_SLACK_LIMBS_START: usize =
+    C3_SCALAR_BITS_START + C3_CANONICAL_SCALAR_COUNT * N_LIMBS * LIMB_BITS;
+const C3_SLACK_BITS_START: usize = C3_SLACK_LIMBS_START + C3_CANONICAL_SCALAR_COUNT * N_LIMBS;
+const C3_LT_CARRIES_START: usize =
+    C3_SLACK_BITS_START + C3_CANONICAL_SCALAR_COUNT * N_LIMBS * LIMB_BITS;
+const C3_Z_LIMBS_START: usize = C3_LT_CARRIES_START + C3_CANONICAL_SCALAR_COUNT * N_LIMBS;
+const C3_Z_BITS_START: usize = C3_Z_LIMBS_START + N_LIMBS;
+const C3_QUOTIENT_LIMBS_START: usize = C3_Z_BITS_START + N_LIMBS * LIMB_BITS;
+const C3_QUOTIENT_BITS_START: usize = C3_QUOTIENT_LIMBS_START + C3_PRODUCT_COUNT * N_LIMBS;
+const C3_PRODUCT_CARRY_BITS_START: usize =
+    C3_QUOTIENT_BITS_START + C3_PRODUCT_COUNT * N_LIMBS * LIMB_BITS;
+const C3_DIGEST_BORROWS_START: usize =
+    C3_PRODUCT_CARRY_BITS_START + C3_PRODUCT_COUNT * PRODUCT_INTERNAL_CARRIES * PRODUCT_CARRY_BITS;
+const C3_Z_SLACK_LIMBS_START: usize = C3_DIGEST_BORROWS_START + N_LIMBS - 1;
+const C3_Z_SLACK_BITS_START: usize = C3_Z_SLACK_LIMBS_START + N_LIMBS;
+const C3_Z_LT_CARRIES_START: usize = C3_Z_SLACK_BITS_START + N_LIMBS * LIMB_BITS;
 const C9_CONST_ONE_INDEX: usize = 0;
 const C9_U1_INDEX: usize = 1;
 const C9_U2_INDEX: usize = 2;
@@ -127,6 +165,18 @@ const C9_STEP_ACTIVE_BIT: usize = 10;
 const C9_CANONICAL_SLACK_START_INDEX: usize = C9_CORRECTED_START_INDEX + 4;
 const C9_CANONICAL_CARRY_START_INDEX: usize =
     C9_CANONICAL_SLACK_START_INDEX + C9_LADDER_COUNT * C9_SCALAR_BITS;
+const P256_ORDER_MINUS_ONE: U256Words = [
+    0xf3b9_cac2_fc63_2550,
+    0xbce6_faad_a717_9e84,
+    0xffff_ffff_ffff_ffff,
+    0xffff_ffff_0000_0000,
+];
+const P256_FIELD_MODULUS: U256Words = [
+    0xffff_ffff_ffff_ffff,
+    0x0000_0000_ffff_ffff,
+    0x0000_0000_0000_0000,
+    0xffff_ffff_0000_0001,
+];
 const P256_FIELD_MODULUS_MINUS_ONE: U256Words = [
     0xffff_ffff_ffff_fffe,
     0x0000_0000_ffff_ffff,
@@ -147,14 +197,23 @@ const C12_ACCUMULATOR_POINT_COUNT: usize = 512;
 const C12_CONST_ONE_INDEX: u32 = 0;
 const C12_POINTS_START_INDEX: u32 = 1;
 const C12_FINAL_POINT_INDEX: usize = C12_POINT_COUNT - 1;
-const C14_CONST_ONE_INDEX: u32 = 0;
-const C14_RX_INDEX: u32 = 1;
-const C14_K_INDEX: u32 = 2;
-const C14_R_PRIME_INDEX: u32 = 3;
-const C14_SIGNATURE_R_INDEX: u32 = 4;
-const C15_FLAGS_START_INDEX: u32 = 5;
-const IMPLEMENTED_BUNDLE_LIGERO_LABEL: &[u8] = b"s4-ecdsa-implemented-bundle";
-const COPROCESSOR_TRANSCRIPT_DOMAIN: &[u8] = b"eu-id-ec-coproc-v1";
+const C14_CONST_ONE_INDEX: usize = 0;
+const C14_RX_INDEX: usize = 1;
+const C14_SIGNATURE_R_INDEX: usize = 2;
+const C14_K_INDEX: usize = 3;
+const C14_R_LIMBS_START: usize = 4;
+const C14_R_BITS_START: usize = C14_R_LIMBS_START + N_LIMBS;
+const C14_R_SLACK_LIMBS_START: usize = C14_R_BITS_START + N_LIMBS * LIMB_BITS;
+const C14_R_SLACK_BITS_START: usize = C14_R_SLACK_LIMBS_START + N_LIMBS;
+const C14_R_LT_CARRIES_START: usize = C14_R_SLACK_BITS_START + N_LIMBS * LIMB_BITS;
+const C14_RX_LIMBS_START: usize = C14_R_LT_CARRIES_START + N_LIMBS;
+const C14_RX_BITS_START: usize = C14_RX_LIMBS_START + N_LIMBS;
+const C14_RX_SLACK_LIMBS_START: usize = C14_RX_BITS_START + N_LIMBS * LIMB_BITS;
+const C14_RX_SLACK_BITS_START: usize = C14_RX_SLACK_LIMBS_START + N_LIMBS;
+const C14_RX_LT_CARRIES_START: usize = C14_RX_SLACK_BITS_START + N_LIMBS * LIMB_BITS;
+const C14_REDUCTION_BORROWS_START: usize = C14_RX_LT_CARRIES_START + N_LIMBS;
+const IMPLEMENTED_BUNDLE_LIGERO_LABEL: &[u8] = b"s4-ecdsa-implemented-bundle-v2";
+const COPROCESSOR_TRANSCRIPT_DOMAIN: &[u8] = b"eu-id-ec-coproc-v2";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CircuitTranscriptShape {
@@ -170,32 +229,26 @@ const P256_B_BE: [u8; 32] = [
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LayoutSlot {
     InputLimbs,
-    ScalarInverses,
     UScalars,
-    ModNQuotients,
     U1GAccumulators,
     U2QAccumulators,
     CorrectedEndpoints,
     FinalAddDenominatorInverse,
     FinalPoint,
     FinalReduction,
-    InfinityFlags,
     MacHalf,
 }
 
 pub fn layout_range(slot: LayoutSlot) -> Range<usize> {
     match slot {
         LayoutSlot::InputLimbs => 0..100,
-        LayoutSlot::ScalarInverses => 100..101,
-        LayoutSlot::UScalars => 101..103,
-        LayoutSlot::ModNQuotients => 103..106,
-        LayoutSlot::U1GAccumulators => 106..618,
-        LayoutSlot::U2QAccumulators => 618..1130,
-        LayoutSlot::CorrectedEndpoints => 1130..1134,
-        LayoutSlot::FinalAddDenominatorInverse => 1134..1135,
-        LayoutSlot::FinalPoint => 1135..1137,
-        LayoutSlot::FinalReduction => 1137..1139,
-        LayoutSlot::InfinityFlags => 1139..1142,
+        LayoutSlot::UScalars => 100..102,
+        LayoutSlot::U1GAccumulators => 102..614,
+        LayoutSlot::U2QAccumulators => 614..1126,
+        LayoutSlot::CorrectedEndpoints => 1126..1130,
+        LayoutSlot::FinalAddDenominatorInverse => 1130..1131,
+        LayoutSlot::FinalPoint => 1131..1133,
+        LayoutSlot::FinalReduction => 1133..1135,
         LayoutSlot::MacHalf => 0..0,
     }
 }
@@ -386,7 +439,6 @@ pub enum ImplementedCircuitProofError {
 }
 
 pub fn generate_witness(input: &EcdsaInput) -> Result<Witness, WitnessError> {
-    let _z = parse_scalar(input.z)?;
     let _r = parse_nonzero_scalar(input.r)?;
     let s = parse_nonzero_scalar(input.s)?;
     let public_key = parse_public_key(input.qx, input.qy)?;
@@ -394,28 +446,15 @@ pub fn generate_witness(input: &EcdsaInput) -> Result<Witness, WitnessError> {
     let sinv_scalar = scalar_inverse(s)?;
     let z_words = words_from_be(input.z);
     let r_words = words_from_be(input.r);
-    let s_words = words_from_be(input.s);
     let sinv_words = words_from_be(sinv_scalar.to_repr().into());
-    let one_words = [1, 0, 0, 0];
-    let q_inv = ScalarFieldMulTrace::new_with_expected_result(
-        "s4_sinv",
-        &s_words,
-        &sinv_words,
-        &one_words,
-        &P256_ORDER,
-    )
-    .map_err(map_scalar_error)?
-    .mul
-    .quotient_words();
-
-    let u1_trace = ScalarFieldMulTrace::new("s4_u1", &z_words, &sinv_words, &P256_ORDER)
+    let z_reduction = DigestReductionTrace::new(&z_words, &P256_ORDER).map_err(map_scalar_error)?;
+    let z_red_words = limbs_to_words(&z_reduction.z_red);
+    let u1_trace = ScalarFieldMulTrace::new("s4_u1", &z_red_words, &sinv_words, &P256_ORDER)
         .map_err(map_scalar_error)?;
     let u2_trace = ScalarFieldMulTrace::new("s4_u2", &r_words, &sinv_words, &P256_ORDER)
         .map_err(map_scalar_error)?;
     let u1_words = u1_trace.mul.result_words();
     let u2_words = u2_trace.mul.result_words();
-    let q1 = u1_trace.mul.quotient_words();
-    let q2 = u2_trace.mul.quotient_words();
     let mut values = vec![Fp::ZERO; LAYOUT_LEN];
     let input_range = layout_range(LayoutSlot::InputLimbs);
     let input_limbs = &mut values[input_range];
@@ -430,16 +469,9 @@ pub fn generate_witness(input: &EcdsaInput) -> Result<Witness, WitnessError> {
         }
     }
 
-    values[layout_range(LayoutSlot::ScalarInverses).start] = fp_from_words(&sinv_words);
-
     let us_range = layout_range(LayoutSlot::UScalars);
     values[us_range.start] = fp_from_words(&u1_words);
     values[us_range.start + 1] = fp_from_words(&u2_words);
-
-    let q_range = layout_range(LayoutSlot::ModNQuotients);
-    values[q_range.start] = fp_from_words(&q_inv);
-    values[q_range.start + 1] = fp_from_words(&q1);
-    values[q_range.start + 2] = fp_from_words(&q2);
 
     let u1_point = write_ladder_accumulators(
         &mut values,
@@ -485,16 +517,13 @@ pub fn verify_witness(input: &EcdsaInput, witness: &Witness) -> Result<(), Witne
     let expected = generate_witness(input)?;
     for slot in [
         LayoutSlot::InputLimbs,
-        LayoutSlot::ScalarInverses,
         LayoutSlot::UScalars,
-        LayoutSlot::ModNQuotients,
         LayoutSlot::U1GAccumulators,
         LayoutSlot::U2QAccumulators,
         LayoutSlot::CorrectedEndpoints,
         LayoutSlot::FinalAddDenominatorInverse,
         LayoutSlot::FinalPoint,
         LayoutSlot::FinalReduction,
-        LayoutSlot::InfinityFlags,
     ] {
         require_equal_slot(slot, &expected, witness)?;
     }
@@ -544,6 +573,12 @@ pub fn prove_implemented_circuit_proofs(
     Ok(ImplementedCircuitProofs { proofs })
 }
 
+/// Verifies only the per-family sumchecks and returns their unbound input claims.
+///
+/// This low-level API does **not** bind a caller statement, projected inputs, or
+/// copies shared between circuit families. Production callers must use
+/// [`verify_implemented_circuit_bundle`] (or its batch/projected variants), which
+/// authenticates these claims against Ligero and adds all fixed and affine bindings.
 pub fn verify_implemented_circuit_proofs(
     proofs: &ImplementedCircuitProofs,
     commitment_root: [u8; 32],
@@ -1148,7 +1183,6 @@ pub fn prove_mdoc_p4b_circuit_bundle_profiled(
         &entries,
         &projections,
         committed_values.len(),
-        &committed_values_b,
         full_root,
         transcript_seed,
     )?;
@@ -1238,6 +1272,9 @@ pub fn verify_mdoc_p4b_circuit_bundle_profiled(
 ) -> Result<MdocP4bVerifyProfile, ImplementedCircuitProofError> {
     let mut profile = MdocP4bVerifyProfile::default();
     let setup_start = Instant::now();
+    if !bundle.consistency_claim_values.is_empty() {
+        return Err(ImplementedCircuitProofError::CrossFamilyBindingRejected);
+    }
     if bundle.mac_tags.len() != MDOC_P4B_MAC_HALF_COUNT {
         return Err(ImplementedCircuitProofError::WrongProofCount {
             expected: MDOC_P4B_MAC_HALF_COUNT,
@@ -1293,7 +1330,7 @@ pub fn verify_mdoc_p4b_circuit_bundle_profiled(
         &bundle.proximity_openings_b,
         transcript_seed,
     )?;
-    let proximity_match = verify_split_openings(
+    let authenticated_openings = verify_and_authenticate_split_openings(
         bundle.root,
         root_b,
         bundle.params,
@@ -1304,25 +1341,16 @@ pub fn verify_mdoc_p4b_circuit_bundle_profiled(
         &bundle.proximity_claim,
         &proximity_gamma,
     )
-    .map_err(ImplementedCircuitProofError::Ligero)?;
-    if !proximity_match {
-        return Err(ImplementedCircuitProofError::ProximityOpeningRejected);
-    }
+    .map_err(ImplementedCircuitProofError::Ligero)?
+    .ok_or(ImplementedCircuitProofError::ProximityOpeningRejected)?;
     profile.ligero_proximity = start.elapsed();
 
     let mut linear_claims = Vec::new();
-    let mut consistency_cursor = 0usize;
-    let mut issuer_z = None;
-    let mut device_qx = None;
-    let mut device_qy = None;
-    let mut mac_halves = [None; MDOC_P4B_MAC_HALF_COUNT];
-    let mut signer_state = vec![MdocP4bEcdsaConsistency::default(); projections.len()];
 
     // Instances are order-independent: each derives its own Fiat-Shamir channel
     // from `mdoc_p4b_instance_channel`, so the expensive sumcheck verification
-    // parallelizes exactly like the prove side. The claim extraction below
-    // (consistency_cursor / signer_state) stays sequential: it walks
-    // `bundle.consistency_claim_values` in a fixed order and must not race.
+    // parallelizes exactly like the prove side. Deterministic affine binding
+    // claims are reconstructed below without opening their private operands.
     let verified_claims = circuits
         .par_iter()
         .zip(bundle.entries.par_iter())
@@ -1365,10 +1393,8 @@ pub fn verify_mdoc_p4b_circuit_bundle_profiled(
         ));
         let start = Instant::now();
         match instance.role {
-            MdocP4bCircuitRole::MacBatch => take_mac_split_input_claims(
+            MdocP4bCircuitRole::MacBatch => add_mac_split_input_claims(
                 &mut linear_claims,
-                bundle,
-                &mut consistency_cursor,
                 layout,
                 ligero_row_count(committed_len, bundle.params.row_len) * bundle.params.row_len,
                 &claims,
@@ -1386,90 +1412,47 @@ pub fn verify_mdoc_p4b_circuit_bundle_profiled(
         let start = Instant::now();
         match instance.role {
             MdocP4bCircuitRole::IssuerEcdsa => {
-                mdoc_p4b_take_ecdsa_claims(
+                add_family_fixed_claims(
                     &mut linear_claims,
-                    bundle,
-                    &mut consistency_cursor,
-                    layout,
                     issuer_projection,
-                    &mut signer_state[0],
                     instance.label,
+                    layout,
                 )?;
-                if instance.label == b"s4-ecdsa-c3-c5-scalar-setup" {
-                    issuer_z = Some(take_private_value(
-                        &mut linear_claims,
-                        bundle,
-                        &mut consistency_cursor,
-                        layout,
-                        C3_Z_INDEX as usize,
-                    )?);
-                }
             }
             MdocP4bCircuitRole::DeviceEcdsa => {
-                mdoc_p4b_take_ecdsa_claims(
+                add_family_fixed_claims(
                     &mut linear_claims,
-                    bundle,
-                    &mut consistency_cursor,
-                    layout,
                     device_projection,
-                    &mut signer_state[1],
                     instance.label,
+                    layout,
                 )?;
-                if instance.label == b"s4-ecdsa-c2-canonicality" {
-                    device_qx = Some(take_private_value(
-                        &mut linear_claims,
-                        bundle,
-                        &mut consistency_cursor,
-                        layout,
-                        C2_QX_INDEX as usize,
-                    )?);
-                    device_qy = Some(take_private_value(
-                        &mut linear_claims,
-                        bundle,
-                        &mut consistency_cursor,
-                        layout,
-                        C2_QY_INDEX as usize,
-                    )?);
-                }
             }
             MdocP4bCircuitRole::RevocationEcdsa => {
                 // Only reachable when the verifier expects a revocation set:
                 // `circuits` contains revocation instances iff
                 // `revocation_projection` is `Some`.
-                mdoc_p4b_take_ecdsa_claims(
+                add_family_fixed_claims(
                     &mut linear_claims,
-                    bundle,
-                    &mut consistency_cursor,
-                    layout,
                     revocation_projection.expect("revocation instances imply a projection"),
-                    &mut signer_state[2],
                     instance.label,
+                    layout,
                 )?;
             }
             MdocP4bCircuitRole::MacBatch => {
-                for (index, slot) in mac_halves.iter_mut().enumerate() {
+                for index in 0..MDOC_P4B_MAC_HALF_COUNT {
                     add_mac_half_public_const_claim(&mut linear_claims, layout, index);
-                    *slot = Some(take_mac_half_x_recompose_claim(
-                        &mut linear_claims,
-                        bundle,
-                        &mut consistency_cursor,
-                        layout,
-                        index,
-                    )?);
                 }
             }
         }
         profile.consistency += start.elapsed();
     }
-    if consistency_cursor != bundle.consistency_claim_values.len() {
-        return Err(ImplementedCircuitProofError::InputClaimOpeningRejected);
-    }
 
     let start = Instant::now();
-    for state in signer_state {
-        state.verify()?;
-    }
-    verify_mdoc_p4b_native_mac_consistency(issuer_z, device_qx, device_qy, mac_halves)?;
+    let identities = circuits
+        .iter()
+        .map(|instance| (instance.role, instance.label))
+        .collect::<Vec<_>>();
+    add_mdoc_p4b_consistency_claims(&mut linear_claims, &identities, &layouts)?;
     profile.consistency += start.elapsed();
 
     let start = Instant::now();
@@ -1479,14 +1462,8 @@ pub fn verify_mdoc_p4b_circuit_bundle_profiled(
         linear_claims.len(),
         transcript_seed,
     );
-    if !verify_split_claim_batch(
-        bundle.root,
-        root_b,
-        bundle.params,
-        committed_len,
-        committed_len_b,
-        &bundle.proximity_openings,
-        &bundle.proximity_openings_b,
+    if !verify_authenticated_split_claim_batch(
+        authenticated_openings,
         &bundle.claim_batch,
         &linear_claims,
         &claim_gamma,
@@ -1525,6 +1502,9 @@ pub fn verify_implemented_circuit_bundle_batch_with_projection_profiled(
 {
     let mut profile = ImplementedCircuitVerifyProfile::default();
     let setup_start = Instant::now();
+    if !bundle.consistency_claim_values.is_empty() {
+        return Err(ImplementedCircuitProofError::CrossFamilyBindingRejected);
+    }
     let circuits =
         implemented_circuit_verifier_instances().map_err(ImplementedCircuitProofError::Circuit)?;
     let expected_entries = projections.len() * circuits.len();
@@ -1577,9 +1557,7 @@ pub fn verify_implemented_circuit_bundle_batch_with_projection_profiled(
 
     // Every (signature, family) sumcheck derives an independent Fiat-Shamir
     // channel (seed + signature index + label + projection), so the expensive
-    // verify_circuit work parallelizes like the prove side. The claim walk that
-    // follows stays sequential because it advances a shared consistency_cursor
-    // over bundle.consistency_claim_values in a fixed order.
+    // verify_circuit work parallelizes like the prove side.
     let family_count = circuits.len();
     let verified_flat = (0..bundle.entries.len())
         .into_par_iter()
@@ -1602,13 +1580,11 @@ pub fn verify_implemented_circuit_bundle_batch_with_projection_profiled(
         .collect::<Result<Vec<_>, ImplementedCircuitProofError>>()?;
 
     let mut linear_claims = Vec::new();
-    let mut consistency_cursor = 0usize;
     let mut all_claims = Vec::with_capacity(projections.len());
     for (signature_index, (projection, layouts)) in
         projections.iter().zip(&signature_layouts).enumerate()
     {
         let mut verified_claims = Vec::with_capacity(circuits.len());
-        let mut state = MdocP4bEcdsaConsistency::default();
         for (family_index, ((instance, layout), entry)) in circuits
             .iter()
             .zip(layouts)
@@ -1635,133 +1611,14 @@ pub fn verify_implemented_circuit_bundle_batch_with_projection_profiled(
             profile.input_claims += start.elapsed();
 
             let start = Instant::now();
-            match instance.label {
-                b"s4-ecdsa-c1-input-limbs" => {
-                    add_c1_public_claims(&mut linear_claims, projection, layout)?
-                }
-                b"s4-ecdsa-c2-canonicality" => {
-                    add_c2_public_claims(&mut linear_claims, projection, layout)?;
-                    state.public_key_from_c2 = Some((
-                        take_private_value(
-                            &mut linear_claims,
-                            bundle,
-                            &mut consistency_cursor,
-                            layout,
-                            C2_QX_INDEX as usize,
-                        )?,
-                        take_private_value(
-                            &mut linear_claims,
-                            bundle,
-                            &mut consistency_cursor,
-                            layout,
-                            C2_QY_INDEX as usize,
-                        )?,
-                    ));
-                }
-                b"s4-ecdsa-c3-c5-scalar-setup" => {
-                    add_c3_public_claims(&mut linear_claims, projection, layout)?;
-                    state.scalars_from_c3 = Some((
-                        take_private_value(
-                            &mut linear_claims,
-                            bundle,
-                            &mut consistency_cursor,
-                            layout,
-                            C3_U1_INDEX as usize,
-                        )?,
-                        take_private_value(
-                            &mut linear_claims,
-                            bundle,
-                            &mut consistency_cursor,
-                            layout,
-                            C3_U2_INDEX as usize,
-                        )?,
-                    ));
-                }
-                b"s4-ecdsa-c9-c10-ladder" => {
-                    add_c9_fixed_claims(&mut linear_claims, layout);
-                    state.ladder = Some(take_c9_boundary_values(
-                        &mut linear_claims,
-                        bundle,
-                        &mut consistency_cursor,
-                        layout,
-                    )?);
-                }
-                b"s4-ecdsa-c11-final-add" => {
-                    let ax = take_private_value(
-                        &mut linear_claims,
-                        bundle,
-                        &mut consistency_cursor,
-                        layout,
-                        C11_AX_INDEX as usize,
-                    )?;
-                    let ay = take_private_value(
-                        &mut linear_claims,
-                        bundle,
-                        &mut consistency_cursor,
-                        layout,
-                        C11_AY_INDEX as usize,
-                    )?;
-                    let bx = take_private_value(
-                        &mut linear_claims,
-                        bundle,
-                        &mut consistency_cursor,
-                        layout,
-                        C11_BX_INDEX as usize,
-                    )?;
-                    let by = take_private_value(
-                        &mut linear_claims,
-                        bundle,
-                        &mut consistency_cursor,
-                        layout,
-                        C11_BY_INDEX as usize,
-                    )?;
-                    let rx = take_private_value(
-                        &mut linear_claims,
-                        bundle,
-                        &mut consistency_cursor,
-                        layout,
-                        C11_RX_INDEX as usize,
-                    )?;
-                    let ry = take_private_value(
-                        &mut linear_claims,
-                        bundle,
-                        &mut consistency_cursor,
-                        layout,
-                        C11_RY_INDEX as usize,
-                    )?;
-                    state.add_inputs_from_c11 = Some(((ax, ay), (bx, by)));
-                    state.final_from_c11 = Some((rx, ry));
-                }
-                b"s4-ecdsa-c12-final-on-curve" => {
-                    state.c12_boundaries = Some(take_c12_boundary_values(
-                        &mut linear_claims,
-                        bundle,
-                        &mut consistency_cursor,
-                        layout,
-                    )?);
-                }
-                b"s4-ecdsa-c14-c15-final-check" => {
-                    add_c14_public_claims(&mut linear_claims, projection, layout)?;
-                    state.rx_from_c14 = Some(take_private_value(
-                        &mut linear_claims,
-                        bundle,
-                        &mut consistency_cursor,
-                        layout,
-                        C14_RX_INDEX as usize,
-                    )?);
-                }
-                _ => {}
-            }
+            add_family_fixed_claims(&mut linear_claims, projection, instance.label, layout)?;
             profile.consistency += start.elapsed();
             verified_claims.push(claims);
         }
         let start = Instant::now();
-        state.verify()?;
+        add_ecdsa_consistency_claims(&mut linear_claims, layouts)?;
         profile.consistency += start.elapsed();
         all_claims.push(verified_claims);
-    }
-    if consistency_cursor != bundle.consistency_claim_values.len() {
-        return Err(ImplementedCircuitProofError::InputClaimOpeningRejected);
     }
     let start = Instant::now();
     let claim_gamma = ligero_claim_gamma(
@@ -1798,39 +1655,6 @@ pub fn verify_implemented_circuit_bundle_profiled(
         .pop()
         .ok_or(ImplementedCircuitProofError::InputClaimOpeningRejected)?;
     Ok((claims, profile))
-}
-
-fn verify_corrected_endpoint_cross_family(
-    c12: Option<((Fp, Fp), (Fp, Fp))>,
-    c11: Option<((Fp, Fp), (Fp, Fp))>,
-) -> Result<(), ImplementedCircuitProofError> {
-    let (Some(c12), Some(c11)) = (c12, c11) else {
-        return Err(ImplementedCircuitProofError::CrossFamilyBindingRejected);
-    };
-    if c12 != c11 {
-        return Err(ImplementedCircuitProofError::CrossFamilyBindingRejected);
-    }
-    Ok(())
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct C12BoundaryValues {
-    corrected_endpoints: ((Fp, Fp), (Fp, Fp)),
-    final_point: (Fp, Fp),
-}
-
-fn verify_final_point_cross_family(
-    c11: Option<(Fp, Fp)>,
-    c12: Option<(Fp, Fp)>,
-    c14_rx: Option<Fp>,
-) -> Result<(), ImplementedCircuitProofError> {
-    let (Some(c11), Some(c12), Some(c14_rx)) = (c11, c12, c14_rx) else {
-        return Err(ImplementedCircuitProofError::CrossFamilyBindingRejected);
-    };
-    if c11 != c12 || c11.0 != c14_rx {
-        return Err(ImplementedCircuitProofError::CrossFamilyBindingRejected);
-    }
-    Ok(())
 }
 
 fn ligero_row_count(values: usize, row_len: usize) -> usize {
@@ -2096,51 +1920,6 @@ struct MdocP4bClaimInventory {
     linear_claim_touched_rows: usize,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct MdocP4bEcdsaConsistency {
-    public_key_from_c2: Option<(Fp, Fp)>,
-    scalars_from_c3: Option<(Fp, Fp)>,
-    ladder: Option<C9BoundaryValues>,
-    add_inputs_from_c11: Option<((Fp, Fp), (Fp, Fp))>,
-    final_from_c11: Option<(Fp, Fp)>,
-    c12_boundaries: Option<C12BoundaryValues>,
-    rx_from_c14: Option<Fp>,
-}
-
-impl MdocP4bEcdsaConsistency {
-    fn verify(self) -> Result<(), ImplementedCircuitProofError> {
-        let (Some(public_key), Some(scalars), Some(ladder)) =
-            (self.public_key_from_c2, self.scalars_from_c3, self.ladder)
-        else {
-            return Err(ImplementedCircuitProofError::CrossFamilyBindingRejected);
-        };
-        if public_key != ladder.public_key || scalars != ladder.scalars {
-            return Err(ImplementedCircuitProofError::CrossFamilyBindingRejected);
-        }
-        if Some(ladder.corrected_endpoints) != self.add_inputs_from_c11 {
-            return Err(ImplementedCircuitProofError::CrossFamilyBindingRejected);
-        }
-        verify_corrected_endpoint_cross_family(
-            self.c12_boundaries
-                .map(|boundaries| boundaries.corrected_endpoints),
-            self.add_inputs_from_c11,
-        )?;
-        verify_final_point_cross_family(
-            self.final_from_c11,
-            self.c12_boundaries.map(|boundaries| boundaries.final_point),
-            self.rx_from_c14,
-        )?;
-        Ok(())
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct C9BoundaryValues {
-    scalars: (Fp, Fp),
-    public_key: (Fp, Fp),
-    corrected_endpoints: ((Fp, Fp), (Fp, Fp)),
-}
-
 const MDOC_P4B_MAC_BATCH_LABEL: &[u8] = b"s4-mdoc-p4b-mac-batch";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2310,9 +2089,11 @@ fn row_span_count(offset: usize, len: usize, row_len: usize) -> usize {
 fn linear_claim_touched_rows(claims: &[LigeroLinearClaim], row_len: usize) -> usize {
     let mut rows = Vec::new();
     for claim in claims {
-        let start = claim.offset / row_len;
-        let end = (claim.offset + claim.len).div_ceil(row_len);
-        rows.extend(start..end);
+        for term in &claim.terms {
+            let start = term.offset / row_len;
+            let end = (term.offset + term.len).div_ceil(row_len);
+            rows.extend(start..end);
+        }
     }
     rows.sort_unstable();
     rows.dedup();
@@ -2397,7 +2178,6 @@ fn prover_claim_batch(
     transcript_seed: TranscriptSeed,
 ) -> Result<(LigeroClaimBatch, Vec<Fp>), ImplementedCircuitProofError> {
     let mut claims = Vec::new();
-    let mut consistency_values = Vec::new();
     let circuits_per_signature = all_instances.first().map(|v| v.len()).unwrap_or(0);
     for (signature_index, ((projection, instances), layouts)) in projections
         .iter()
@@ -2415,15 +2195,9 @@ fn prover_claim_batch(
                 commitment.root(),
                 transcript_seed,
             )?;
-            add_prover_family_fixed_claims(
-                &mut claims,
-                &mut consistency_values,
-                projection,
-                instance.label,
-                layout,
-                &instance.input,
-            )?;
+            add_family_fixed_claims(&mut claims, projection, instance.label, layout)?;
         }
+        add_ecdsa_consistency_claims(&mut claims, layouts)?;
     }
     let gamma = ligero_claim_gamma(
         IMPLEMENTED_BUNDLE_LIGERO_LABEL,
@@ -2434,7 +2208,7 @@ fn prover_claim_batch(
     let batch = commitment
         .claim_batch(&claims, &gamma)
         .map_err(ImplementedCircuitProofError::Ligero)?;
-    Ok((batch, consistency_values))
+    Ok((batch, Vec::new()))
 }
 
 fn mdoc_p4b_prover_claim_batch(
@@ -2446,22 +2220,17 @@ fn mdoc_p4b_prover_claim_batch(
     entries: &[ImplementedCircuitBundleEntry],
     projections: &[EcdsaPublicProjection],
     committed_len_a: usize,
-    group_b_values: &[Fp],
     transcript_root: [u8; 32],
     transcript_seed: TranscriptSeed,
 ) -> Result<(LigeroClaimBatch, Vec<Fp>, MdocP4bClaimInventory), ImplementedCircuitProofError> {
     let mut claims = Vec::new();
-    let mut consistency_values = Vec::new();
     let group_b_offset = ligero_row_count(committed_len_a, params.row_len) * params.row_len;
     for ((instance, layout), entry) in instances.iter().zip(layouts).zip(entries) {
         match instance.role {
             MdocP4bCircuitRole::MacBatch => add_mac_split_input_claims(
                 &mut claims,
-                &mut consistency_values,
                 layout,
                 group_b_offset,
-                &instance.input,
-                group_b_values,
                 &entry.proof.input_claims,
             )?,
             _ => add_input_claims(&mut claims, layout, &entry.proof.input_claims),
@@ -2475,74 +2244,26 @@ fn mdoc_p4b_prover_claim_batch(
         )?;
         match instance.role {
             MdocP4bCircuitRole::IssuerEcdsa => {
-                add_prover_family_fixed_claims(
-                    &mut claims,
-                    &mut consistency_values,
-                    &projections[0],
-                    instance.label,
-                    layout,
-                    &instance.input,
-                )?;
-                if instance.label == b"s4-ecdsa-c3-c5-scalar-setup" {
-                    add_private_value(
-                        &mut claims,
-                        &mut consistency_values,
-                        layout,
-                        C3_Z_INDEX as usize,
-                        &instance.input,
-                    )?;
-                }
+                add_family_fixed_claims(&mut claims, &projections[0], instance.label, layout)?;
             }
             MdocP4bCircuitRole::DeviceEcdsa => {
-                add_prover_family_fixed_claims(
-                    &mut claims,
-                    &mut consistency_values,
-                    &projections[1],
-                    instance.label,
-                    layout,
-                    &instance.input,
-                )?;
-                if instance.label == b"s4-ecdsa-c2-canonicality" {
-                    add_private_value(
-                        &mut claims,
-                        &mut consistency_values,
-                        layout,
-                        C2_QX_INDEX as usize,
-                        &instance.input,
-                    )?;
-                    add_private_value(
-                        &mut claims,
-                        &mut consistency_values,
-                        layout,
-                        C2_QY_INDEX as usize,
-                        &instance.input,
-                    )?;
-                }
+                add_family_fixed_claims(&mut claims, &projections[1], instance.label, layout)?;
             }
             MdocP4bCircuitRole::RevocationEcdsa => {
-                add_prover_family_fixed_claims(
-                    &mut claims,
-                    &mut consistency_values,
-                    &projections[2],
-                    instance.label,
-                    layout,
-                    &instance.input,
-                )?;
+                add_family_fixed_claims(&mut claims, &projections[2], instance.label, layout)?;
             }
             MdocP4bCircuitRole::MacBatch => {
                 for half in 0..MDOC_P4B_MAC_HALF_COUNT {
                     add_mac_half_public_const_claim(&mut claims, layout, half);
-                    add_mac_half_x_recompose_claim(
-                        &mut claims,
-                        &mut consistency_values,
-                        layout,
-                        &instance.input,
-                        half,
-                    )?;
                 }
             }
         }
     }
+    let identities = instances
+        .iter()
+        .map(|instance| (instance.role, instance.label))
+        .collect::<Vec<_>>();
+    add_mdoc_p4b_consistency_claims(&mut claims, &identities, layouts)?;
     let gamma = ligero_claim_gamma(
         IMPLEMENTED_BUNDLE_LIGERO_LABEL,
         transcript_root,
@@ -2556,7 +2277,7 @@ fn mdoc_p4b_prover_claim_batch(
         linear_claims: claims.len(),
         linear_claim_touched_rows: linear_claim_touched_rows(&claims, params.row_len),
     };
-    Ok((batch, consistency_values, inventory))
+    Ok((batch, Vec::new(), inventory))
 }
 
 fn add_input_claims(
@@ -2565,63 +2286,17 @@ fn add_input_claims(
     input_claims: &InputClaims,
 ) {
     for (point, value) in input_claims.points.iter().cloned().zip(input_claims.values) {
-        claims.push(LigeroLinearClaim {
-            offset: layout.input_offset,
-            len: layout.input_len,
+        claims.push(LigeroLinearClaim::mle(
+            layout.input_offset,
+            layout.input_len,
             point,
             value,
-        });
+        ));
     }
 }
 
 fn add_mac_split_input_claims(
     claims: &mut Vec<LigeroLinearClaim>,
-    consistency_values: &mut Vec<Fp>,
-    layout_a: &BundleCircuitLayout,
-    group_b_offset: usize,
-    values_a: &[Fp],
-    values_b: &[Fp],
-    input_claims: &InputClaims,
-) -> Result<(), ImplementedCircuitProofError> {
-    let mle_a = Mle::new(values_a.to_vec());
-    let mle_b = Mle::new(values_b.to_vec());
-    for (point, value) in input_claims.points.iter().zip(input_claims.values) {
-        if point.len() != MAC_BATCH_INPUT_LOG_SIZE {
-            return Err(ImplementedCircuitProofError::InputClaimOpeningRejected);
-        }
-        let split = point[MAC_BATCH_GROUP_A_INPUT_LOG_SIZE];
-        let subpoint = point[..MAC_BATCH_GROUP_A_INPUT_LOG_SIZE].to_vec();
-        let value_a = mle_a
-            .eval_at(&subpoint)
-            .map_err(|_| ImplementedCircuitProofError::InputClaimOpeningRejected)?;
-        let value_b = mle_b
-            .eval_at(&subpoint)
-            .map_err(|_| ImplementedCircuitProofError::InputClaimOpeningRejected)?;
-        if (Fp::ONE - split) * value_a + split * value_b != value {
-            return Err(ImplementedCircuitProofError::InputClaimOpeningRejected);
-        }
-        consistency_values.push(value_a);
-        consistency_values.push(value_b);
-        claims.push(LigeroLinearClaim {
-            offset: layout_a.input_offset,
-            len: layout_a.input_len,
-            point: subpoint.clone(),
-            value: value_a,
-        });
-        claims.push(LigeroLinearClaim {
-            offset: group_b_offset,
-            len: values_b.len(),
-            point: subpoint,
-            value: value_b,
-        });
-    }
-    Ok(())
-}
-
-fn take_mac_split_input_claims(
-    claims: &mut Vec<LigeroLinearClaim>,
-    bundle: &ImplementedCircuitBundle,
-    cursor: &mut usize,
     layout_a: &BundleCircuitLayout,
     group_b_offset: usize,
     input_claims: &InputClaims,
@@ -2630,35 +2305,25 @@ fn take_mac_split_input_claims(
         if point.len() != MAC_BATCH_INPUT_LOG_SIZE {
             return Err(ImplementedCircuitProofError::InputClaimOpeningRejected);
         }
-        let value_a = bundle
-            .consistency_claim_values
-            .get(*cursor)
-            .copied()
-            .ok_or(ImplementedCircuitProofError::InputClaimOpeningRejected)?;
-        *cursor += 1;
-        let value_b = bundle
-            .consistency_claim_values
-            .get(*cursor)
-            .copied()
-            .ok_or(ImplementedCircuitProofError::InputClaimOpeningRejected)?;
-        *cursor += 1;
         let split = point[MAC_BATCH_GROUP_A_INPUT_LOG_SIZE];
-        if (Fp::ONE - split) * value_a + split * value_b != value {
-            return Err(ImplementedCircuitProofError::InputClaimOpeningRejected);
-        }
         let subpoint = point[..MAC_BATCH_GROUP_A_INPUT_LOG_SIZE].to_vec();
-        claims.push(LigeroLinearClaim {
-            offset: layout_a.input_offset,
-            len: layout_a.input_len,
-            point: subpoint.clone(),
-            value: value_a,
-        });
-        claims.push(LigeroLinearClaim {
-            offset: group_b_offset,
-            len: 1usize << MAC_BATCH_GROUP_B_INPUT_LOG_SIZE,
-            point: subpoint,
-            value: value_b,
-        });
+        claims.push(LigeroLinearClaim::affine(
+            vec![
+                LigeroLinearTerm {
+                    offset: layout_a.input_offset,
+                    len: layout_a.input_len,
+                    point: subpoint.clone(),
+                    coefficient: Fp::ONE - split,
+                },
+                LigeroLinearTerm {
+                    offset: group_b_offset,
+                    len: 1usize << MAC_BATCH_GROUP_B_INPUT_LOG_SIZE,
+                    point: subpoint,
+                    coefficient: split,
+                },
+            ],
+            value,
+        ));
     }
     Ok(())
 }
@@ -2678,85 +2343,27 @@ fn add_pad_claims(
     let value = Mle::new(pads.to_vec())
         .eval_at(&point)
         .map_err(|err| ImplementedCircuitProofError::Ligero(LigeroError::Mle(err)))?;
-    claims.push(LigeroLinearClaim {
-        offset: layout.pad_offset,
-        len: layout.pad_len,
+    claims.push(LigeroLinearClaim::mle(
+        layout.pad_offset,
+        layout.pad_len,
         point,
         value,
-    });
+    ));
     Ok(())
 }
 
-fn add_prover_family_fixed_claims(
+fn add_family_fixed_claims(
     claims: &mut Vec<LigeroLinearClaim>,
-    consistency_values: &mut Vec<Fp>,
     projection: &EcdsaPublicProjection,
     label: &[u8],
     layout: &BundleCircuitLayout,
-    values: &[Fp],
 ) -> Result<(), ImplementedCircuitProofError> {
     match label {
         b"s4-ecdsa-c1-input-limbs" => add_c1_public_claims(claims, projection, layout)?,
-        b"s4-ecdsa-c2-canonicality" => {
-            add_c2_public_claims(claims, projection, layout)?;
-            for index in [C2_QX_INDEX, C2_QY_INDEX] {
-                add_private_value(claims, consistency_values, layout, index as usize, values)?;
-            }
-        }
-        b"s4-ecdsa-c3-c5-scalar-setup" => {
-            add_c3_public_claims(claims, projection, layout)?;
-            for index in [C3_U1_INDEX, C3_U2_INDEX] {
-                add_private_value(claims, consistency_values, layout, index as usize, values)?;
-            }
-        }
-        b"s4-ecdsa-c9-c10-ladder" => {
-            add_c9_fixed_claims(claims, layout);
-            for index in [
-                C9_U1_INDEX,
-                C9_U2_INDEX,
-                C9_QX_INDEX,
-                C9_QY_INDEX,
-                c9_corrected_index(0, 0),
-                c9_corrected_index(0, 1),
-                c9_corrected_index(1, 0),
-                c9_corrected_index(1, 1),
-            ] {
-                add_private_value(claims, consistency_values, layout, index, values)?;
-            }
-        }
-        b"s4-ecdsa-c11-final-add" => {
-            for index in [
-                C11_AX_INDEX,
-                C11_AY_INDEX,
-                C11_BX_INDEX,
-                C11_BY_INDEX,
-                C11_RX_INDEX,
-                C11_RY_INDEX,
-            ] {
-                add_private_value(claims, consistency_values, layout, index as usize, values)?;
-            }
-        }
-        b"s4-ecdsa-c12-final-on-curve" => {
-            for point in [
-                C12_ACCUMULATOR_POINT_COUNT,
-                C12_ACCUMULATOR_POINT_COUNT + 1,
-                C12_FINAL_POINT_INDEX,
-            ] {
-                let x = C12_POINTS_START_INDEX as usize + point * 3;
-                add_private_value(claims, consistency_values, layout, x, values)?;
-                add_private_value(claims, consistency_values, layout, x + 1, values)?;
-            }
-        }
-        b"s4-ecdsa-c14-c15-final-check" => {
-            add_c14_public_claims(claims, projection, layout)?;
-            add_private_value(
-                claims,
-                consistency_values,
-                layout,
-                C14_RX_INDEX as usize,
-                values,
-            )?;
-        }
+        b"s4-ecdsa-c2-canonicality" => add_c2_public_claims(claims, projection, layout)?,
+        b"s4-ecdsa-c3-c5-scalar-setup" => add_c3_public_claims(claims, projection, layout)?,
+        b"s4-ecdsa-c9-c10-ladder" => add_c9_fixed_claims(claims, layout),
+        b"s4-ecdsa-c14-c15-final-check" => add_c14_public_claims(claims, projection, layout)?,
         _ => {}
     }
     Ok(())
@@ -2765,11 +2372,7 @@ fn add_prover_family_fixed_claims(
 fn add_c9_fixed_claims(claims: &mut Vec<LigeroLinearClaim>, layout: &BundleCircuitLayout) {
     let (gx, gy) = projective_point_coords(ProjectivePoint::GENERATOR)
         .expect("P-256 generator is a finite affine point");
-    for (index, value) in [
-        (C9_CONST_ONE_INDEX, Fp::ONE),
-        (C9_GX_INDEX, gx),
-        (C9_GY_INDEX, gy),
-    ] {
+    for (index, value) in [(C9_GX_INDEX, gx), (C9_GY_INDEX, gy)] {
         add_fixed_claim(claims, layout.input_offset, layout.input_len, index, value);
     }
 }
@@ -2809,8 +2412,6 @@ fn add_c2_public_claims(
     layout: &BundleCircuitLayout,
 ) -> Result<(), ImplementedCircuitProofError> {
     for (index, bytes) in [
-        (C2_R_INDEX as usize, projection.r),
-        (C2_S_INDEX as usize, projection.s),
         (C2_QX_INDEX as usize, projection.qx),
         (C2_QY_INDEX as usize, projection.qy),
     ]
@@ -2830,9 +2431,9 @@ fn add_c3_public_claims(
     layout: &BundleCircuitLayout,
 ) -> Result<(), ImplementedCircuitProofError> {
     for (index, bytes) in [
-        (C3_Z_INDEX as usize, projection.z),
-        (C3_R_INDEX as usize, projection.r),
-        (C3_S_INDEX as usize, projection.s),
+        (C3_Z_INDEX, projection.z),
+        (C3_R_INDEX, projection.r),
+        (C3_S_INDEX, projection.s),
     ]
     .into_iter()
     .filter_map(|(index, bytes)| bytes.map(|bytes| (index, bytes)))
@@ -2856,27 +2457,11 @@ fn add_c14_public_claims(
             claims,
             layout.input_offset,
             layout.input_len,
-            C14_SIGNATURE_R_INDEX as usize,
+            C14_SIGNATURE_R_INDEX,
             signature_r,
         );
     }
     Ok(())
-}
-
-fn add_private_value(
-    claims: &mut Vec<LigeroLinearClaim>,
-    consistency_values: &mut Vec<Fp>,
-    layout: &BundleCircuitLayout,
-    index: usize,
-    values: &[Fp],
-) -> Result<Fp, ImplementedCircuitProofError> {
-    let value = values
-        .get(index)
-        .copied()
-        .ok_or(ImplementedCircuitProofError::InputClaimOpeningRejected)?;
-    consistency_values.push(value);
-    add_fixed_claim(claims, layout.input_offset, layout.input_len, index, value);
-    Ok(value)
 }
 
 fn add_mac_half_public_const_claim(
@@ -2894,65 +2479,79 @@ fn add_mac_half_public_const_claim(
     );
 }
 
-fn add_mac_half_x_recompose_claim(
+fn add_ecdsa_consistency_claims(
     claims: &mut Vec<LigeroLinearClaim>,
-    consistency_values: &mut Vec<Fp>,
-    layout: &BundleCircuitLayout,
-    values: &[Fp],
-    half: usize,
-) -> Result<Fp, ImplementedCircuitProofError> {
-    let offset = mac_batch_half_group_a_input_offset(half);
-    let value = mac_half_x_recomposed_value(values, offset)?;
-    let (point, scale) = mac_half_x_recompose_claim_point();
-    consistency_values.push(value);
-    claims.push(LigeroLinearClaim {
-        offset: layout.input_offset + offset + MAC_HALF_X_BITS_START,
-        len: GF128_BITS,
-        point,
-        value: value * scale,
-    });
-    Ok(value)
-}
-
-fn take_mac_half_x_recompose_claim(
-    claims: &mut Vec<LigeroLinearClaim>,
-    bundle: &ImplementedCircuitBundle,
-    cursor: &mut usize,
-    layout: &BundleCircuitLayout,
-    half: usize,
-) -> Result<Fp, ImplementedCircuitProofError> {
-    let value = bundle
-        .consistency_claim_values
-        .get(*cursor)
-        .copied()
-        .ok_or(ImplementedCircuitProofError::InputClaimOpeningRejected)?;
-    *cursor += 1;
-    let (point, scale) = mac_half_x_recompose_claim_point();
-    let offset = mac_batch_half_group_a_input_offset(half);
-    claims.push(LigeroLinearClaim {
-        offset: layout.input_offset + offset + MAC_HALF_X_BITS_START,
-        len: GF128_BITS,
-        point,
-        value: value * scale,
-    });
-    Ok(value)
-}
-
-fn mac_half_x_recomposed_value(
-    values: &[Fp],
-    offset: usize,
-) -> Result<Fp, ImplementedCircuitProofError> {
-    let mut out = Fp::ZERO;
-    let mut power = Fp::ONE;
-    for bit in 0..GF128_BITS {
-        let value = values
-            .get(offset + MAC_HALF_X_BITS_START + bit)
-            .copied()
-            .ok_or(ImplementedCircuitProofError::InputClaimOpeningRejected)?;
-        out = out + power * value;
-        power = power + power;
+    layouts: &[BundleCircuitLayout],
+) -> Result<(), ImplementedCircuitProofError> {
+    if layouts.len() != IMPLEMENTED_CIRCUIT_FAMILY_COUNT {
+        return Err(ImplementedCircuitProofError::CrossFamilyBindingRejected);
     }
-    Ok(out)
+    let [c1, c2, c3, c9, c11, c12, c14] = layouts else {
+        unreachable!("length checked");
+    };
+    let c1_value = |offset| C1_VALUES_START_INDEX as usize + offset;
+    let c12_point =
+        |point: usize, coordinate: usize| C12_POINTS_START_INDEX as usize + point * 3 + coordinate;
+
+    for layout in layouts {
+        add_fixed_claim(claims, layout.input_offset, layout.input_len, 0, Fp::ONE);
+    }
+    for (left_layout, left, right_layout, right) in [
+        (c1, c1_value(0), c3, C3_Z_INDEX),
+        (c1, c1_value(1), c3, C3_R_INDEX),
+        (c3, C3_R_INDEX, c14, C14_SIGNATURE_R_INDEX),
+        (c1, c1_value(2), c3, C3_S_INDEX),
+        (c1, c1_value(3), c2, C2_QX_INDEX as usize),
+        (c2, C2_QX_INDEX as usize, c9, C9_QX_INDEX),
+        (c1, c1_value(4), c2, C2_QY_INDEX as usize),
+        (c2, C2_QY_INDEX as usize, c9, C9_QY_INDEX),
+        (c3, C3_U1_INDEX, c9, C9_U1_INDEX),
+        (c3, C3_U2_INDEX, c9, C9_U2_INDEX),
+        (c9, c9_corrected_index(0, 0), c11, C11_AX_INDEX as usize),
+        (c9, c9_corrected_index(0, 1), c11, C11_AY_INDEX as usize),
+        (c9, c9_corrected_index(1, 0), c11, C11_BX_INDEX as usize),
+        (c9, c9_corrected_index(1, 1), c11, C11_BY_INDEX as usize),
+        (
+            c11,
+            C11_AX_INDEX as usize,
+            c12,
+            c12_point(C12_ACCUMULATOR_POINT_COUNT, 0),
+        ),
+        (
+            c11,
+            C11_AY_INDEX as usize,
+            c12,
+            c12_point(C12_ACCUMULATOR_POINT_COUNT, 1),
+        ),
+        (
+            c11,
+            C11_BX_INDEX as usize,
+            c12,
+            c12_point(C12_ACCUMULATOR_POINT_COUNT + 1, 0),
+        ),
+        (
+            c11,
+            C11_BY_INDEX as usize,
+            c12,
+            c12_point(C12_ACCUMULATOR_POINT_COUNT + 1, 1),
+        ),
+        (
+            c11,
+            C11_RX_INDEX as usize,
+            c12,
+            c12_point(C12_FINAL_POINT_INDEX, 0),
+        ),
+        (
+            c11,
+            C11_RY_INDEX as usize,
+            c12,
+            c12_point(C12_FINAL_POINT_INDEX, 1),
+        ),
+        (c11, C11_RX_INDEX as usize, c14, C14_RX_INDEX),
+    ] {
+        add_equality_claim(claims, left_layout, left, right_layout, right);
+    }
+    Ok(())
 }
 
 fn mac_half_x_recompose_claim_point() -> (Vec<Fp>, Fp) {
@@ -2972,148 +2571,101 @@ fn mac_half_x_recompose_claim_point() -> (Vec<Fp>, Fp) {
     (point, scale)
 }
 
-fn take_private_value(
+fn add_mdoc_p4b_consistency_claims(
     claims: &mut Vec<LigeroLinearClaim>,
-    bundle: &ImplementedCircuitBundle,
-    cursor: &mut usize,
-    layout: &BundleCircuitLayout,
-    index: usize,
-) -> Result<Fp, ImplementedCircuitProofError> {
-    let value = bundle
-        .consistency_claim_values
-        .get(*cursor)
-        .copied()
-        .ok_or(ImplementedCircuitProofError::InputClaimOpeningRejected)?;
-    *cursor += 1;
-    add_fixed_claim(claims, layout.input_offset, layout.input_len, index, value);
-    Ok(value)
-}
-
-fn take_c9_boundary_values(
-    claims: &mut Vec<LigeroLinearClaim>,
-    bundle: &ImplementedCircuitBundle,
-    cursor: &mut usize,
-    layout: &BundleCircuitLayout,
-) -> Result<C9BoundaryValues, ImplementedCircuitProofError> {
-    let mut read = |index| take_private_value(claims, bundle, cursor, layout, index);
-    Ok(C9BoundaryValues {
-        scalars: (read(C9_U1_INDEX)?, read(C9_U2_INDEX)?),
-        public_key: (read(C9_QX_INDEX)?, read(C9_QY_INDEX)?),
-        corrected_endpoints: (
-            (
-                read(c9_corrected_index(0, 0))?,
-                read(c9_corrected_index(0, 1))?,
-            ),
-            (
-                read(c9_corrected_index(1, 0))?,
-                read(c9_corrected_index(1, 1))?,
-            ),
-        ),
-    })
-}
-
-fn take_c12_boundary_values(
-    claims: &mut Vec<LigeroLinearClaim>,
-    bundle: &ImplementedCircuitBundle,
-    cursor: &mut usize,
-    layout: &BundleCircuitLayout,
-) -> Result<C12BoundaryValues, ImplementedCircuitProofError> {
-    let mut read_point = |point: usize| {
-        let x = C12_POINTS_START_INDEX as usize + point * 3;
-        Ok((
-            take_private_value(claims, bundle, cursor, layout, x)?,
-            take_private_value(claims, bundle, cursor, layout, x + 1)?,
-        ))
-    };
-    Ok(C12BoundaryValues {
-        corrected_endpoints: (
-            read_point(C12_ACCUMULATOR_POINT_COUNT)?,
-            read_point(C12_ACCUMULATOR_POINT_COUNT + 1)?,
-        ),
-        final_point: read_point(C12_FINAL_POINT_INDEX)?,
-    })
-}
-
-fn mdoc_p4b_take_ecdsa_claims(
-    claims: &mut Vec<LigeroLinearClaim>,
-    bundle: &ImplementedCircuitBundle,
-    cursor: &mut usize,
-    layout: &BundleCircuitLayout,
-    projection: &EcdsaPublicProjection,
-    state: &mut MdocP4bEcdsaConsistency,
-    label: &[u8],
+    identities: &[(MdocP4bCircuitRole, &'static [u8])],
+    layouts: &[BundleCircuitLayout],
 ) -> Result<(), ImplementedCircuitProofError> {
-    match label {
-        b"s4-ecdsa-c1-input-limbs" => add_c1_public_claims(claims, projection, layout)?,
-        b"s4-ecdsa-c2-canonicality" => {
-            add_c2_public_claims(claims, projection, layout)?;
-            state.public_key_from_c2 = Some((
-                take_private_value(claims, bundle, cursor, layout, C2_QX_INDEX as usize)?,
-                take_private_value(claims, bundle, cursor, layout, C2_QY_INDEX as usize)?,
-            ));
-        }
-        b"s4-ecdsa-c3-c5-scalar-setup" => {
-            add_c3_public_claims(claims, projection, layout)?;
-            state.scalars_from_c3 = Some((
-                take_private_value(claims, bundle, cursor, layout, C3_U1_INDEX as usize)?,
-                take_private_value(claims, bundle, cursor, layout, C3_U2_INDEX as usize)?,
-            ));
-        }
-        b"s4-ecdsa-c9-c10-ladder" => {
-            add_c9_fixed_claims(claims, layout);
-            state.ladder = Some(take_c9_boundary_values(claims, bundle, cursor, layout)?);
-        }
-        b"s4-ecdsa-c11-final-add" => {
-            let ax = take_private_value(claims, bundle, cursor, layout, C11_AX_INDEX as usize)?;
-            let ay = take_private_value(claims, bundle, cursor, layout, C11_AY_INDEX as usize)?;
-            let bx = take_private_value(claims, bundle, cursor, layout, C11_BX_INDEX as usize)?;
-            let by = take_private_value(claims, bundle, cursor, layout, C11_BY_INDEX as usize)?;
-            let rx = take_private_value(claims, bundle, cursor, layout, C11_RX_INDEX as usize)?;
-            let ry = take_private_value(claims, bundle, cursor, layout, C11_RY_INDEX as usize)?;
-            state.add_inputs_from_c11 = Some(((ax, ay), (bx, by)));
-            state.final_from_c11 = Some((rx, ry));
-        }
-        b"s4-ecdsa-c12-final-on-curve" => {
-            state.c12_boundaries = Some(take_c12_boundary_values(claims, bundle, cursor, layout)?);
-        }
-        b"s4-ecdsa-c14-c15-final-check" => {
-            add_c14_public_claims(claims, projection, layout)?;
-            state.rx_from_c14 = Some(take_private_value(
-                claims,
-                bundle,
-                cursor,
-                layout,
-                C14_RX_INDEX as usize,
-            )?);
-        }
-        _ => {}
+    if identities.len() != layouts.len() {
+        return Err(ImplementedCircuitProofError::CrossFamilyBindingRejected);
     }
+    for role in [
+        MdocP4bCircuitRole::IssuerEcdsa,
+        MdocP4bCircuitRole::DeviceEcdsa,
+        MdocP4bCircuitRole::RevocationEcdsa,
+    ] {
+        let role_layouts = identities
+            .iter()
+            .zip(layouts)
+            .filter_map(|((instance_role, _), layout)| (*instance_role == role).then_some(*layout))
+            .collect::<Vec<_>>();
+        if !role_layouts.is_empty() {
+            add_ecdsa_consistency_claims(claims, &role_layouts)?;
+        }
+    }
+
+    let find = |role: MdocP4bCircuitRole, label: &'static [u8]| {
+        identities
+            .iter()
+            .zip(layouts)
+            .find_map(|(&(instance_role, instance_label), layout)| {
+                (instance_role == role && instance_label == label).then_some(layout)
+            })
+            .ok_or(ImplementedCircuitProofError::CrossFamilyBindingRejected)
+    };
+    let issuer_c3 = find(
+        MdocP4bCircuitRole::IssuerEcdsa,
+        b"s4-ecdsa-c3-c5-scalar-setup",
+    )?;
+    let device_c2 = find(MdocP4bCircuitRole::DeviceEcdsa, b"s4-ecdsa-c2-canonicality")?;
+    let mac = find(MdocP4bCircuitRole::MacBatch, MDOC_P4B_MAC_BATCH_LABEL)?;
+    add_mac_field_binding(claims, issuer_c3, C3_Z_INDEX, mac, 0, 1);
+    add_mac_field_binding(claims, device_c2, C2_QX_INDEX as usize, mac, 2, 3);
+    add_mac_field_binding(claims, device_c2, C2_QY_INDEX as usize, mac, 4, 5);
     Ok(())
 }
 
-fn verify_mdoc_p4b_native_mac_consistency(
-    issuer_z: Option<Fp>,
-    device_qx: Option<Fp>,
-    device_qy: Option<Fp>,
-    mac_halves: [Option<Fp>; MDOC_P4B_MAC_HALF_COUNT],
-) -> Result<(), ImplementedCircuitProofError> {
-    let read = |index: usize| {
-        mac_halves[index].ok_or(ImplementedCircuitProofError::CrossFamilyBindingRejected)
+fn add_mac_field_binding(
+    claims: &mut Vec<LigeroLinearClaim>,
+    field_layout: &BundleCircuitLayout,
+    field_index: usize,
+    mac_layout: &BundleCircuitLayout,
+    low_half: usize,
+    high_half: usize,
+) {
+    let (point, scale) = mac_half_x_recompose_claim_point();
+    let half_term = |half, coefficient| {
+        let offset = mac_batch_half_group_a_input_offset(half);
+        LigeroLinearTerm {
+            offset: mac_layout.input_offset + offset + MAC_HALF_X_BITS_START,
+            len: GF128_BITS,
+            point: point.clone(),
+            coefficient,
+        }
     };
-    let issuer_z = issuer_z.ok_or(ImplementedCircuitProofError::CrossFamilyBindingRejected)?;
-    let device_qx = device_qx.ok_or(ImplementedCircuitProofError::CrossFamilyBindingRejected)?;
-    let device_qy = device_qy.ok_or(ImplementedCircuitProofError::CrossFamilyBindingRejected)?;
+    claims.push(LigeroLinearClaim::affine(
+        vec![
+            fixed_term(field_layout, field_index, scale),
+            half_term(low_half, -Fp::ONE),
+            half_term(high_half, -two_pow_128()),
+        ],
+        Fp::ZERO,
+    ));
+}
 
-    if read(0)? + two_pow_128() * read(1)? != issuer_z {
-        return Err(ImplementedCircuitProofError::CrossFamilyBindingRejected);
+fn add_equality_claim(
+    claims: &mut Vec<LigeroLinearClaim>,
+    left_layout: &BundleCircuitLayout,
+    left_index: usize,
+    right_layout: &BundleCircuitLayout,
+    right_index: usize,
+) {
+    claims.push(LigeroLinearClaim::affine(
+        vec![
+            fixed_term(left_layout, left_index, Fp::ONE),
+            fixed_term(right_layout, right_index, -Fp::ONE),
+        ],
+        Fp::ZERO,
+    ));
+}
+
+fn fixed_term(layout: &BundleCircuitLayout, index: usize, coefficient: Fp) -> LigeroLinearTerm {
+    LigeroLinearTerm {
+        offset: layout.input_offset,
+        len: layout.input_len,
+        point: fixed_point(layout.input_len, index),
+        coefficient,
     }
-    if read(2)? + two_pow_128() * read(3)? != device_qx {
-        return Err(ImplementedCircuitProofError::CrossFamilyBindingRejected);
-    }
-    if read(4)? + two_pow_128() * read(5)? != device_qy {
-        return Err(ImplementedCircuitProofError::CrossFamilyBindingRejected);
-    }
-    Ok(())
 }
 
 fn add_fixed_claim(
@@ -3123,12 +2675,12 @@ fn add_fixed_claim(
     index: usize,
     value: Fp,
 ) {
-    claims.push(LigeroLinearClaim {
+    claims.push(LigeroLinearClaim::mle(
         offset,
         len,
-        point: fixed_point(len, index),
+        fixed_point(len, index),
         value,
-    });
+    ));
 }
 
 fn fixed_point(len: usize, index: usize) -> Vec<Fp> {
@@ -3183,7 +2735,7 @@ fn implemented_circuit_instances(
         },
         ProverCircuitInstance {
             label: b"s4-ecdsa-c3-c5-scalar-setup",
-            slot: LayoutSlot::ScalarInverses,
+            slot: LayoutSlot::UScalars,
             circuit: build_c3_c5_scalar_setup_circuit().expect("static C3-C5 circuit is valid"),
             input: c3_c5_scalar_setup_input(input, witness)?,
         },
@@ -3357,7 +2909,53 @@ fn mac_batch_group_a_input(
         let half_input = mac_half_group_a_input(&mac_key_shares.0[half], &mac_values[half])?;
         input[offset..offset + half_input.len()].copy_from_slice(&half_input);
     }
+    write_mac_batch_canonicality(&mut input, mac_values)?;
     Ok(input)
+}
+
+fn write_mac_batch_canonicality(
+    input: &mut [Fp],
+    mac_values: &[Gf128; MDOC_P4B_MAC_HALF_COUNT],
+) -> Result<(), WitnessError> {
+    for value in 0..MAC_BATCH_CANONICAL_VALUE_COUNT {
+        let words = gf128_pair_words(&mac_values[2 * value], &mac_values[2 * value + 1]);
+        if cmp_words(&words, &P256_FIELD_MODULUS).is_ge() {
+            return Err(WitnessError::NonCanonicalCoordinate);
+        }
+        let slack = sub_words(&P256_FIELD_MODULUS_MINUS_ONE, &words);
+        let mut carry = false;
+        input[mac_batch_canonical_carry_index(value, 0)] = Fp::ZERO;
+        for bit in 0..MAC_BATCH_CANONICAL_BITS {
+            let value_bit = scalar_bit(&words, bit);
+            let slack_bit = scalar_bit(&slack, bit);
+            debug_assert_eq!(
+                input[mac_batch_canonical_value_bit_index(value, bit)],
+                fp_bit(value_bit)
+            );
+            input[mac_batch_canonical_slack_bit_index(value, bit)] = fp_bit(slack_bit);
+            let sum = u8::from(value_bit) + u8::from(slack_bit) + u8::from(carry);
+            debug_assert_eq!(
+                (sum & 1) != 0,
+                scalar_bit(&P256_FIELD_MODULUS_MINUS_ONE, bit)
+            );
+            carry = sum >= 2;
+            input[mac_batch_canonical_carry_index(value, bit + 1)] = fp_bit(carry);
+        }
+        debug_assert!(!carry);
+    }
+    Ok(())
+}
+
+fn gf128_pair_words(lo: &Gf128, hi: &Gf128) -> U256Words {
+    let mut words = [0u64; 4];
+    for (half_index, half) in [lo, hi].into_iter().enumerate() {
+        for word_index in 0..2 {
+            let start = word_index * 8;
+            words[half_index * 2 + word_index] =
+                u64::from_le_bytes(half[start..start + 8].try_into().expect("8-byte word"));
+        }
+    }
+    words
 }
 
 fn mac_batch_group_b_input(
@@ -3548,6 +3146,69 @@ fn mac_batch_input_layer(av_bits: &[bool; GF128_BITS]) -> Result<Layer, CircuitE
             mac_batch_tree_local_start(half) + MAC_HALF_BOOL_CONSTRAINTS
         );
     }
+    let mut canonical = 0usize;
+    for value in 0..MAC_BATCH_CANONICAL_VALUE_COUNT {
+        for bit in 0..MAC_BATCH_CANONICAL_BITS {
+            add_bool_constraint(
+                &mut terms,
+                mac_batch_tree_canonical_start() + canonical,
+                mac_batch_canonical_slack_bit_index(value, bit),
+            );
+            canonical += 1;
+        }
+        for bit in 0..MAC_BATCH_CANONICAL_CARRIES {
+            add_bool_constraint(
+                &mut terms,
+                mac_batch_tree_canonical_start() + canonical,
+                mac_batch_canonical_carry_index(value, bit),
+            );
+            canonical += 1;
+        }
+        for bit in [0, MAC_BATCH_CANONICAL_BITS] {
+            add_linear(
+                &mut terms,
+                mac_batch_tree_canonical_start() + canonical,
+                mac_batch_canonical_carry_index(value, bit),
+                Fp::ONE,
+            );
+            canonical += 1;
+        }
+        for bit in 0..MAC_BATCH_CANONICAL_BITS {
+            let out = mac_batch_tree_canonical_start() + canonical;
+            add_linear(
+                &mut terms,
+                out,
+                mac_batch_canonical_value_bit_index(value, bit),
+                Fp::ONE,
+            );
+            add_linear(
+                &mut terms,
+                out,
+                mac_batch_canonical_slack_bit_index(value, bit),
+                Fp::ONE,
+            );
+            add_linear(
+                &mut terms,
+                out,
+                mac_batch_canonical_carry_index(value, bit),
+                Fp::ONE,
+            );
+            add_linear(
+                &mut terms,
+                out,
+                mac_batch_canonical_carry_index(value, bit + 1),
+                -Fp::from_u64(2),
+            );
+            if scalar_bit(&P256_FIELD_MODULUS_MINUS_ONE, bit) {
+                add_constant(&mut terms, out, -Fp::ONE);
+            }
+            canonical += 1;
+        }
+    }
+    debug_assert_eq!(canonical, MAC_BATCH_CANONICAL_CONSTRAINTS);
+    debug_assert!(
+        mac_batch_tree_canonical_start() + canonical <= 1usize << MAC_BATCH_TREE_LOG_SIZE
+    );
 
     Layer::new(MAC_BATCH_TREE_LOG_SIZE, MAC_BATCH_INPUT_LOG_SIZE, terms)
 }
@@ -3663,6 +3324,14 @@ fn mac_batch_product_reduce_layer(
             );
         }
     }
+    for index in 0..MAC_BATCH_CANONICAL_CONSTRAINTS {
+        add_linear(
+            &mut terms,
+            mac_batch_tree_canonical_start() + index,
+            mac_batch_tree_canonical_start() + index,
+            Fp::ONE,
+        );
+    }
 
     Layer::new(MAC_BATCH_TREE_LOG_SIZE, MAC_BATCH_TREE_LOG_SIZE, terms)
 }
@@ -3741,6 +3410,14 @@ fn mac_batch_reduce_tree_layer(
             );
         }
     }
+    for index in 0..MAC_BATCH_CANONICAL_CONSTRAINTS {
+        add_linear(
+            &mut terms,
+            mac_batch_tree_canonical_start() + index,
+            mac_batch_tree_canonical_start() + index,
+            Fp::ONE,
+        );
+    }
 
     Layer::new(MAC_BATCH_TREE_LOG_SIZE, MAC_BATCH_TREE_LOG_SIZE, terms)
 }
@@ -3772,6 +3449,18 @@ fn mac_batch_final_layer(local_constraints: usize) -> Result<Layer, CircuitError
             );
         }
     }
+    for index in 0..MAC_BATCH_CANONICAL_CONSTRAINTS {
+        add_linear(
+            &mut terms,
+            mac_batch_output_canonical_start() + index,
+            mac_batch_tree_canonical_start() + index,
+            Fp::ONE,
+        );
+    }
+    debug_assert!(
+        mac_batch_output_canonical_start() + MAC_BATCH_CANONICAL_CONSTRAINTS
+            <= 1usize << MAC_BATCH_INPUT_LOG_SIZE
+    );
 
     Layer::new(MAC_BATCH_INPUT_LOG_SIZE, MAC_BATCH_TREE_LOG_SIZE, terms)
 }
@@ -3851,9 +3540,36 @@ fn mac_batch_half_group_b_full_input_offset(half: usize) -> usize {
     MAC_BATCH_GROUP_B_INPUT_START + mac_batch_half_group_b_input_offset(half)
 }
 
+fn mac_batch_canonical_slack_bit_index(value: usize, bit: usize) -> usize {
+    debug_assert!(value < MAC_BATCH_CANONICAL_VALUE_COUNT);
+    debug_assert!(bit < MAC_BATCH_CANONICAL_BITS);
+    MAC_BATCH_CANONICAL_SLACK_BITS_START + value * MAC_BATCH_CANONICAL_BITS + bit
+}
+
+fn mac_batch_canonical_carry_index(value: usize, bit: usize) -> usize {
+    debug_assert!(value < MAC_BATCH_CANONICAL_VALUE_COUNT);
+    debug_assert!(bit < MAC_BATCH_CANONICAL_CARRIES);
+    MAC_BATCH_CANONICAL_CARRIES_START + value * MAC_BATCH_CANONICAL_CARRIES + bit
+}
+
+fn mac_batch_canonical_value_bit_index(value: usize, bit: usize) -> usize {
+    debug_assert!(value < MAC_BATCH_CANONICAL_VALUE_COUNT);
+    debug_assert!(bit < MAC_BATCH_CANONICAL_BITS);
+    let half = 2 * value + bit / GF128_BITS;
+    mac_batch_half_group_a_input_offset(half) + MAC_HALF_X_BITS_START + bit % GF128_BITS
+}
+
 fn mac_batch_tree_half_start(half: usize) -> usize {
     debug_assert!(half < MDOC_P4B_MAC_HALF_COUNT);
     half * MAC_BATCH_TREE_HALF_WIDTH
+}
+
+fn mac_batch_tree_canonical_start() -> usize {
+    MDOC_P4B_MAC_HALF_COUNT * MAC_BATCH_TREE_HALF_WIDTH
+}
+
+fn mac_batch_output_canonical_start() -> usize {
+    MDOC_P4B_MAC_HALF_COUNT * MAC_BATCH_OUTPUT_STRIDE
 }
 
 fn mac_batch_tree_const_index(half: usize) -> usize {
@@ -4099,60 +3815,36 @@ pub fn build_c2_canonicality_circuit() -> Result<Circuit, CircuitError> {
     let terms = vec![
         QuadTerm {
             out: 0,
-            l: C2_R_INDEX,
-            r: C2_R_INV_INDEX,
-            coeff: Fp::ONE,
-        },
-        QuadTerm {
-            out: 0,
-            l: C2_CONST_ONE_INDEX,
-            r: C2_CONST_ONE_INDEX,
-            coeff: -Fp::ONE,
-        },
-        QuadTerm {
-            out: 1,
-            l: C2_S_INDEX,
-            r: C2_S_INV_INDEX,
-            coeff: Fp::ONE,
-        },
-        QuadTerm {
-            out: 1,
-            l: C2_CONST_ONE_INDEX,
-            r: C2_CONST_ONE_INDEX,
-            coeff: -Fp::ONE,
-        },
-        QuadTerm {
-            out: 2,
             l: C2_QX2_INDEX,
             r: C2_CONST_ONE_INDEX,
             coeff: Fp::ONE,
         },
         QuadTerm {
-            out: 2,
+            out: 0,
             l: C2_QX_INDEX,
             r: C2_QX_INDEX,
             coeff: -Fp::ONE,
         },
         QuadTerm {
-            out: 3,
+            out: 1,
             l: C2_QY_INDEX,
             r: C2_QY_INDEX,
             coeff: Fp::ONE,
         },
         QuadTerm {
-            out: 3,
+            out: 1,
             l: C2_QX_INDEX,
             r: C2_QX2_INDEX,
             coeff: -Fp::ONE,
         },
         QuadTerm {
-            out: 3,
+            out: 1,
             l: C2_QX_INDEX,
             r: C2_CONST_ONE_INDEX,
             coeff: Fp::from_u64(3),
         },
         QuadTerm {
-            out: 3,
+            out: 1,
             l: C2_CONST_ONE_INDEX,
             r: C2_CONST_ONE_INDEX,
             coeff: -b,
@@ -4166,20 +3858,11 @@ pub fn build_c2_canonicality_circuit() -> Result<Circuit, CircuitError> {
 }
 
 pub fn c2_canonicality_input(input: &EcdsaInput) -> Result<Vec<Fp>, WitnessError> {
-    parse_nonzero_scalar(input.r)?;
-    parse_nonzero_scalar(input.s)?;
-
-    let r = Fp::from_bytes_be(input.r).ok_or(WitnessError::NonCanonicalScalar)?;
-    let s = Fp::from_bytes_be(input.s).ok_or(WitnessError::NonCanonicalScalar)?;
     let qx = parse_coordinate(input.qx)?;
     let qy = parse_coordinate(input.qy)?;
 
     let mut circuit_input = vec![Fp::ZERO; 1usize << C2_CANONICALITY_INPUT_LOG_SIZE];
     circuit_input[C2_CONST_ONE_INDEX as usize] = Fp::ONE;
-    circuit_input[C2_R_INDEX as usize] = r;
-    circuit_input[C2_S_INDEX as usize] = s;
-    circuit_input[C2_R_INV_INDEX as usize] = r.inverse().ok_or(WitnessError::ZeroScalar)?;
-    circuit_input[C2_S_INV_INDEX as usize] = s.inverse().ok_or(WitnessError::ZeroScalar)?;
     circuit_input[C2_QX_INDEX as usize] = qx;
     circuit_input[C2_QY_INDEX as usize] = qy;
     circuit_input[C2_QX2_INDEX as usize] = qx.square();
@@ -4187,63 +3870,164 @@ pub fn c2_canonicality_input(input: &EcdsaInput) -> Result<Vec<Fp>, WitnessError
 }
 
 pub fn build_c3_c5_scalar_setup_circuit() -> Result<Circuit, CircuitError> {
-    let n = fp_from_words(&P256_ORDER);
-    let terms = vec![
-        QuadTerm {
-            out: 0,
-            l: C3_S_INDEX,
-            r: C3_SINV_INDEX,
-            coeff: Fp::ONE,
-        },
-        QuadTerm {
-            out: 0,
-            l: C3_QINV_INDEX,
-            r: C3_CONST_ONE_INDEX,
-            coeff: -n,
-        },
-        QuadTerm {
-            out: 0,
-            l: C3_CONST_ONE_INDEX,
-            r: C3_CONST_ONE_INDEX,
-            coeff: -Fp::ONE,
-        },
-        QuadTerm {
-            out: 1,
-            l: C3_Z_INDEX,
-            r: C3_SINV_INDEX,
-            coeff: Fp::ONE,
-        },
-        QuadTerm {
-            out: 1,
-            l: C3_Q1_INDEX,
-            r: C3_CONST_ONE_INDEX,
-            coeff: -n,
-        },
-        QuadTerm {
-            out: 1,
-            l: C3_U1_INDEX,
-            r: C3_CONST_ONE_INDEX,
-            coeff: -Fp::ONE,
-        },
-        QuadTerm {
-            out: 2,
-            l: C3_R_INDEX,
-            r: C3_SINV_INDEX,
-            coeff: Fp::ONE,
-        },
-        QuadTerm {
-            out: 2,
-            l: C3_Q2_INDEX,
-            r: C3_CONST_ONE_INDEX,
-            coeff: -n,
-        },
-        QuadTerm {
-            out: 2,
-            l: C3_U2_INDEX,
-            r: C3_CONST_ONE_INDEX,
-            coeff: -Fp::ONE,
-        },
-    ];
+    let mut terms = Vec::with_capacity(24_000);
+    let mut out = 0usize;
+    let order_limbs = words_to_limbs(&P256_ORDER);
+
+    for scalar in 0..C3_CANONICAL_SCALAR_COUNT {
+        let field_index = match scalar {
+            C3_SCALAR_R => Some(C3_R_INDEX),
+            C3_SCALAR_S => Some(C3_S_INDEX),
+            C3_SCALAR_Z_RED => None,
+            C3_SCALAR_U1 => Some(C3_U1_INDEX),
+            C3_SCALAR_U2 => Some(C3_U2_INDEX),
+            _ => unreachable!("fixed C3 scalar inventory"),
+        };
+        if let Some(field_index) = field_index {
+            add_limb_recomposition_constraint(&mut terms, &mut out, field_index, |limb| {
+                c3_scalar_limb_index(scalar, limb)
+            });
+        }
+        add_canonical_lt_constraints(
+            &mut terms,
+            &mut out,
+            |limb| c3_scalar_limb_index(scalar, limb),
+            |limb| c3_scalar_bit_index(scalar, limb, 0),
+            |limb| c3_slack_limb_index(scalar, limb),
+            |limb| c3_slack_bit_index(scalar, limb, 0),
+            |limb| c3_lt_carry_index(scalar, limb),
+            &order_limbs,
+            LIMB_BITS,
+        );
+    }
+
+    add_limb_recomposition_constraint(&mut terms, &mut out, C3_Z_INDEX, |limb| {
+        C3_Z_LIMBS_START + limb
+    });
+    for limb in 0..N_LIMBS {
+        add_limb_range_constraints(
+            &mut terms,
+            &mut out,
+            C3_Z_LIMBS_START + limb,
+            C3_Z_BITS_START + limb * LIMB_BITS,
+            if limb + 1 == N_LIMBS { 9 } else { LIMB_BITS },
+        );
+    }
+    let field_limbs = words_to_limbs(&P256_FIELD_MODULUS);
+    add_canonical_lt_constraints(
+        &mut terms,
+        &mut out,
+        |limb| C3_Z_LIMBS_START + limb,
+        |limb| C3_Z_BITS_START + limb * LIMB_BITS,
+        |limb| C3_Z_SLACK_LIMBS_START + limb,
+        |limb| C3_Z_SLACK_BITS_START + limb * LIMB_BITS,
+        |limb| C3_Z_LT_CARRIES_START + limb,
+        &field_limbs,
+        9,
+    );
+
+    for product in 0..C3_PRODUCT_COUNT {
+        for limb in 0..N_LIMBS {
+            add_limb_range_constraints(
+                &mut terms,
+                &mut out,
+                c3_quotient_limb_index(product, limb),
+                c3_quotient_bit_index(product, limb, 0),
+                if limb + 1 == N_LIMBS { 9 } else { LIMB_BITS },
+            );
+        }
+        for carry in 0..PRODUCT_INTERNAL_CARRIES {
+            for bit in 0..PRODUCT_CARRY_BITS {
+                add_bool_constraint(
+                    &mut terms,
+                    out,
+                    c3_product_carry_bit_index(product, carry, bit),
+                );
+                out += 1;
+            }
+        }
+    }
+
+    add_product_limb_constraints(
+        &mut terms,
+        &mut out,
+        C3_SCALAR_S,
+        C3_SCALAR_U1,
+        C3_SCALAR_Z_RED,
+        0,
+        &order_limbs,
+    );
+    add_product_limb_constraints(
+        &mut terms,
+        &mut out,
+        C3_SCALAR_S,
+        C3_SCALAR_U2,
+        C3_SCALAR_R,
+        1,
+        &order_limbs,
+    );
+
+    add_bool_constraint(&mut terms, out, C3_Z_GE_N_INDEX);
+    out += 1;
+    for borrow in 0..N_LIMBS - 1 {
+        add_bool_constraint(&mut terms, out, C3_DIGEST_BORROWS_START + borrow);
+        out += 1;
+    }
+    for limb in 0..N_LIMBS {
+        add_linear(&mut terms, out, C3_Z_LIMBS_START + limb, Fp::ONE);
+        add_linear(
+            &mut terms,
+            out,
+            c3_scalar_limb_index(C3_SCALAR_Z_RED, limb),
+            -Fp::ONE,
+        );
+        add_quadratic(
+            &mut terms,
+            out,
+            C3_Z_GE_N_INDEX,
+            C3_CONST_ONE_INDEX,
+            -Fp::from_u64(order_limbs[limb] as u64),
+        );
+        if limb > 0 {
+            add_linear(
+                &mut terms,
+                out,
+                C3_DIGEST_BORROWS_START + limb - 1,
+                -Fp::ONE,
+            );
+        }
+        if limb + 1 < N_LIMBS {
+            add_linear(
+                &mut terms,
+                out,
+                C3_DIGEST_BORROWS_START + limb,
+                Fp::from_u64(1u64 << LIMB_BITS),
+            );
+        }
+        out += 1;
+    }
+
+    for (scalar, inverse) in [
+        (C3_SCALAR_R, C3_R_NONZERO_INV_INDEX),
+        (C3_SCALAR_S, C3_S_NONZERO_INV_INDEX),
+    ] {
+        for limb in 0..N_LIMBS {
+            add_quadratic(
+                &mut terms,
+                out,
+                c3_scalar_limb_index(scalar, limb),
+                inverse,
+                Fp::ONE,
+            );
+        }
+        add_constant(&mut terms, out, -Fp::ONE);
+        out += 1;
+    }
+
+    const {
+        assert!(C3_Z_LT_CARRIES_START + N_LIMBS <= 1usize << C3_C5_SCALAR_SETUP_INPUT_LOG_SIZE);
+    }
+    debug_assert!(out <= 1usize << C3_C5_SCALAR_SETUP_OUTPUT_LOG_SIZE);
     Circuit::new(vec![Layer::new(
         C3_C5_SCALAR_SETUP_OUTPUT_LOG_SIZE,
         C3_C5_SCALAR_SETUP_INPUT_LOG_SIZE,
@@ -4258,27 +4042,327 @@ pub fn c3_c5_scalar_setup_input(
     if witness.values.len() != LAYOUT_LEN {
         return Err(WitnessError::LayoutMismatch);
     }
+    let z_words = words_from_be(input.z);
+    let z_field = Fp::from_bytes_be(input.z).ok_or(WitnessError::NonCanonicalScalar)?;
+    let z_lt_p =
+        CanonicalLtTrace::new("z", &z_words, "p", &P256_FIELD_MODULUS).map_err(map_scalar_error)?;
+    c3_c5_scalar_setup_input_with_z_trace(input, witness, z_field, &z_lt_p)
+}
+
+fn c3_c5_scalar_setup_input_with_z_trace(
+    input: &EcdsaInput,
+    witness: &Witness,
+    z_field: Fp,
+    z_lt_p: &CanonicalLtTrace,
+) -> Result<Vec<Fp>, WitnessError> {
     let mut circuit_input = vec![Fp::ZERO; 1usize << C3_C5_SCALAR_SETUP_INPUT_LOG_SIZE];
-    circuit_input[C3_CONST_ONE_INDEX as usize] = Fp::ONE;
-    circuit_input[C3_Z_INDEX as usize] =
-        Fp::from_bytes_be(input.z).ok_or(WitnessError::NonCanonicalScalar)?;
-    circuit_input[C3_R_INDEX as usize] =
+    circuit_input[C3_CONST_ONE_INDEX] = Fp::ONE;
+    circuit_input[C3_Z_INDEX] = z_field;
+    circuit_input[C3_R_INDEX] =
         Fp::from_bytes_be(input.r).ok_or(WitnessError::NonCanonicalScalar)?;
-    circuit_input[C3_S_INDEX as usize] =
+    circuit_input[C3_S_INDEX] =
         Fp::from_bytes_be(input.s).ok_or(WitnessError::NonCanonicalScalar)?;
-
-    let sinv = layout_range(LayoutSlot::ScalarInverses);
-    circuit_input[C3_SINV_INDEX as usize] = witness.values[sinv.start];
-
     let us = layout_range(LayoutSlot::UScalars);
-    circuit_input[C3_U1_INDEX as usize] = witness.values[us.start];
-    circuit_input[C3_U2_INDEX as usize] = witness.values[us.start + 1];
+    circuit_input[C3_U1_INDEX] = witness.values[us.start];
+    circuit_input[C3_U2_INDEX] = witness.values[us.start + 1];
 
-    let quotients = layout_range(LayoutSlot::ModNQuotients);
-    circuit_input[C3_QINV_INDEX as usize] = witness.values[quotients.start];
-    circuit_input[C3_Q1_INDEX as usize] = witness.values[quotients.start + 1];
-    circuit_input[C3_Q2_INDEX as usize] = witness.values[quotients.start + 2];
+    let trace = ScalarSetupTrace::new_with_u1_u2(
+        &words_from_be(input.z),
+        &words_from_be(input.r),
+        &words_from_be(input.s),
+        &words_from_be(circuit_input[C3_U1_INDEX].to_bytes_be()),
+        &words_from_be(circuit_input[C3_U2_INDEX].to_bytes_be()),
+    )
+    .map_err(map_scalar_error)?;
+    let canonical = [
+        &trace.r_lt_n,
+        &trace.s_lt_n,
+        &trace.z_reduction.z_red_lt_n,
+        &trace.s_u1_eq.b_lt_modulus,
+        &trace.s_u2_eq.b_lt_modulus,
+    ];
+    for (scalar, range) in canonical.into_iter().enumerate() {
+        for limb in 0..N_LIMBS {
+            write_limb_and_bits(
+                &mut circuit_input,
+                c3_scalar_limb_index(scalar, limb),
+                c3_scalar_bit_index(scalar, limb, 0),
+                range.value[limb],
+            );
+            write_limb_and_bits(
+                &mut circuit_input,
+                c3_slack_limb_index(scalar, limb),
+                c3_slack_bit_index(scalar, limb, 0),
+                range.slack[limb],
+            );
+            circuit_input[c3_lt_carry_index(scalar, limb)] = fp_bit(range.carries[limb] != 0);
+            debug_assert!(matches!(range.carries[limb], 0 | 1));
+        }
+    }
+
+    for limb in 0..N_LIMBS {
+        write_limb_and_bits(
+            &mut circuit_input,
+            C3_Z_LIMBS_START + limb,
+            C3_Z_BITS_START + limb * LIMB_BITS,
+            trace.z[limb],
+        );
+        write_limb_and_bits(
+            &mut circuit_input,
+            C3_Z_SLACK_LIMBS_START + limb,
+            C3_Z_SLACK_BITS_START + limb * LIMB_BITS,
+            z_lt_p.slack[limb],
+        );
+        debug_assert!(matches!(z_lt_p.carries[limb], 0 | 1));
+        circuit_input[C3_Z_LT_CARRIES_START + limb] = Fp::from_u64(z_lt_p.carries[limb] as u64);
+    }
+    let products = [&trace.s_u1_eq, &trace.s_u2_eq];
+    for (product, trace) in products.into_iter().enumerate() {
+        for limb in 0..N_LIMBS {
+            write_limb_and_bits(
+                &mut circuit_input,
+                c3_quotient_limb_index(product, limb),
+                c3_quotient_bit_index(product, limb, 0),
+                trace.mul.quotient[limb],
+            );
+        }
+        for carry in 0..PRODUCT_INTERNAL_CARRIES {
+            write_signed_carry_bits(
+                &mut circuit_input,
+                c3_product_carry_bit_index(product, carry, 0),
+                trace.mul.carries[carry],
+            );
+        }
+        debug_assert_eq!(trace.mul.carries[PRODUCT_EQUATION_LIMBS - 1], 0);
+    }
+
+    circuit_input[C3_Z_GE_N_INDEX] = Fp::from_u64(trace.z_reduction.z_ge_n as u64);
+    for borrow in 0..N_LIMBS - 1 {
+        let value = -trace.z_reduction.carries[borrow];
+        debug_assert!(matches!(value, 0 | 1));
+        circuit_input[C3_DIGEST_BORROWS_START + borrow] = Fp::from_u64(value as u64);
+    }
+    debug_assert_eq!(trace.z_reduction.carries[N_LIMBS - 1], 0);
+
+    for (scalar, inverse) in [
+        (C3_SCALAR_R, C3_R_NONZERO_INV_INDEX),
+        (C3_SCALAR_S, C3_S_NONZERO_INV_INDEX),
+    ] {
+        let sum = (0..N_LIMBS).fold(Fp::ZERO, |acc, limb| {
+            acc + circuit_input[c3_scalar_limb_index(scalar, limb)]
+        });
+        circuit_input[inverse] = sum.inverse().ok_or(WitnessError::ZeroScalar)?;
+    }
     Ok(circuit_input)
+}
+
+fn c3_scalar_limb_index(scalar: usize, limb: usize) -> usize {
+    C3_SCALAR_LIMBS_START + scalar * N_LIMBS + limb
+}
+
+fn c3_scalar_bit_index(scalar: usize, limb: usize, bit: usize) -> usize {
+    C3_SCALAR_BITS_START + (scalar * N_LIMBS + limb) * LIMB_BITS + bit
+}
+
+fn c3_slack_limb_index(scalar: usize, limb: usize) -> usize {
+    C3_SLACK_LIMBS_START + scalar * N_LIMBS + limb
+}
+
+fn c3_slack_bit_index(scalar: usize, limb: usize, bit: usize) -> usize {
+    C3_SLACK_BITS_START + (scalar * N_LIMBS + limb) * LIMB_BITS + bit
+}
+
+fn c3_lt_carry_index(scalar: usize, limb: usize) -> usize {
+    C3_LT_CARRIES_START + scalar * N_LIMBS + limb
+}
+
+fn c3_quotient_limb_index(product: usize, limb: usize) -> usize {
+    C3_QUOTIENT_LIMBS_START + product * N_LIMBS + limb
+}
+
+fn c3_quotient_bit_index(product: usize, limb: usize, bit: usize) -> usize {
+    C3_QUOTIENT_BITS_START + (product * N_LIMBS + limb) * LIMB_BITS + bit
+}
+
+fn c3_product_carry_bit_index(product: usize, carry: usize, bit: usize) -> usize {
+    C3_PRODUCT_CARRY_BITS_START
+        + (product * PRODUCT_INTERNAL_CARRIES + carry) * PRODUCT_CARRY_BITS
+        + bit
+}
+
+fn add_limb_recomposition_constraint(
+    terms: &mut Vec<QuadTerm>,
+    out: &mut usize,
+    field_index: usize,
+    limb_index: impl Fn(usize) -> usize,
+) {
+    add_linear(terms, *out, field_index, Fp::ONE);
+    let mut power = Fp::ONE;
+    for limb in 0..N_LIMBS {
+        add_linear(terms, *out, limb_index(limb), -power);
+        for _ in 0..LIMB_BITS {
+            power = power + power;
+        }
+    }
+    *out += 1;
+}
+
+fn add_limb_range_constraints(
+    terms: &mut Vec<QuadTerm>,
+    out: &mut usize,
+    limb_index: usize,
+    bits_start: usize,
+    used_bits: usize,
+) {
+    add_linear(terms, *out, limb_index, Fp::ONE);
+    let mut power = Fp::ONE;
+    for bit in 0..LIMB_BITS {
+        add_linear(terms, *out, bits_start + bit, -power);
+        power = power + power;
+    }
+    *out += 1;
+    for bit in 0..LIMB_BITS {
+        if bit < used_bits {
+            add_bool_constraint(terms, *out, bits_start + bit);
+        } else {
+            add_linear(terms, *out, bits_start + bit, Fp::ONE);
+        }
+        *out += 1;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add_canonical_lt_constraints(
+    terms: &mut Vec<QuadTerm>,
+    out: &mut usize,
+    value_limb: impl Fn(usize) -> usize,
+    value_bits: impl Fn(usize) -> usize,
+    slack_limb: impl Fn(usize) -> usize,
+    slack_bits: impl Fn(usize) -> usize,
+    carry: impl Fn(usize) -> usize,
+    bound: &BigIntLimbs,
+    top_bits: usize,
+) {
+    for limb in 0..N_LIMBS {
+        let used_bits = if limb + 1 == N_LIMBS {
+            top_bits
+        } else {
+            LIMB_BITS
+        };
+        add_limb_range_constraints(terms, out, value_limb(limb), value_bits(limb), used_bits);
+        add_limb_range_constraints(terms, out, slack_limb(limb), slack_bits(limb), used_bits);
+        add_bool_constraint(terms, *out, carry(limb));
+        *out += 1;
+    }
+    add_linear(terms, *out, carry(N_LIMBS - 1), Fp::ONE);
+    *out += 1;
+    for limb in 0..N_LIMBS {
+        add_linear(terms, *out, value_limb(limb), Fp::ONE);
+        add_linear(terms, *out, slack_limb(limb), Fp::ONE);
+        if limb == 0 {
+            add_constant(terms, *out, Fp::ONE);
+        } else {
+            add_linear(terms, *out, carry(limb - 1), Fp::ONE);
+        }
+        add_constant(terms, *out, -Fp::from_u64(bound[limb] as u64));
+        add_linear(terms, *out, carry(limb), -Fp::from_u64(1u64 << LIMB_BITS));
+        *out += 1;
+    }
+}
+
+fn add_product_limb_constraints(
+    terms: &mut Vec<QuadTerm>,
+    out: &mut usize,
+    a: usize,
+    b: usize,
+    result: usize,
+    product: usize,
+    modulus: &BigIntLimbs,
+) {
+    for digit in 0..PRODUCT_EQUATION_LIMBS {
+        for a_limb in 0..N_LIMBS {
+            let Some(b_limb) = digit.checked_sub(a_limb) else {
+                continue;
+            };
+            if b_limb < N_LIMBS {
+                add_quadratic(
+                    terms,
+                    *out,
+                    c3_scalar_limb_index(a, a_limb),
+                    c3_scalar_limb_index(b, b_limb),
+                    Fp::ONE,
+                );
+            }
+        }
+        for quotient_limb in 0..N_LIMBS {
+            let Some(modulus_limb) = digit.checked_sub(quotient_limb) else {
+                continue;
+            };
+            if modulus_limb < N_LIMBS {
+                add_linear(
+                    terms,
+                    *out,
+                    c3_quotient_limb_index(product, quotient_limb),
+                    -Fp::from_u64(modulus[modulus_limb] as u64),
+                );
+            }
+        }
+        if digit < N_LIMBS {
+            add_linear(terms, *out, c3_scalar_limb_index(result, digit), -Fp::ONE);
+        }
+        if digit > 0 {
+            add_signed_carry(terms, *out, product, digit - 1, Fp::ONE);
+        }
+        if digit + 1 < PRODUCT_EQUATION_LIMBS {
+            add_signed_carry(
+                terms,
+                *out,
+                product,
+                digit,
+                -Fp::from_u64(1u64 << LIMB_BITS),
+            );
+        }
+        *out += 1;
+    }
+}
+
+fn add_signed_carry(
+    terms: &mut Vec<QuadTerm>,
+    out: usize,
+    product: usize,
+    carry: usize,
+    coefficient: Fp,
+) {
+    let mut power = Fp::ONE;
+    for bit in 0..PRODUCT_CARRY_BITS {
+        add_linear(
+            terms,
+            out,
+            c3_product_carry_bit_index(product, carry, bit),
+            coefficient * power,
+        );
+        power = power + power;
+    }
+    add_constant(
+        terms,
+        out,
+        -coefficient * Fp::from_u64(PRODUCT_CARRY_OFFSET as u64),
+    );
+}
+
+fn write_limb_and_bits(input: &mut [Fp], limb_index: usize, bits_start: usize, value: u32) {
+    input[limb_index] = Fp::from_u64(value as u64);
+    for bit in 0..LIMB_BITS {
+        input[bits_start + bit] = Fp::from_u64(((value >> bit) & 1) as u64);
+    }
+}
+
+fn write_signed_carry_bits(input: &mut [Fp], bits_start: usize, carry: i64) {
+    let encoded = carry + PRODUCT_CARRY_OFFSET;
+    debug_assert!((0..(1i64 << PRODUCT_CARRY_BITS)).contains(&encoded));
+    for bit in 0..PRODUCT_CARRY_BITS {
+        input[bits_start + bit] = Fp::from_u64(((encoded >> bit) & 1) as u64);
+    }
 }
 
 fn c9_bit_index(ladder: usize, bit: usize) -> usize {
@@ -4338,9 +4422,10 @@ pub fn build_c9_c10_ladder_circuit() -> Result<Circuit, CircuitError> {
             power = power + power;
         }
 
-        // Exact integer range proof: bits + slack = p - 1 with a Boolean
+        // Exact integer range proof: bits + slack = n - 1 with a Boolean
         // carry chain and no final carry. This removes the alternate
-        // representation bits(u + p), which recomposes to the same Fp value.
+        // representation bits(u + p) and rejects scalars outside the group
+        // order even though they are valid base-field elements.
         for bit in 0..C9_SCALAR_BITS {
             add_bool_constraint(&mut terms, out, c9_canonical_slack_index(ladder, bit));
             out += 1;
@@ -4383,7 +4468,7 @@ pub fn build_c9_c10_ladder_circuit() -> Result<Circuit, CircuitError> {
                 c9_canonical_carry_index(ladder, bit + 1),
                 -Fp::from_u64(2),
             );
-            if scalar_bit(&P256_FIELD_MODULUS_MINUS_ONE, bit) {
+            if scalar_bit(&P256_ORDER_MINUS_ONE, bit) {
                 add_constant(&mut terms, out, -Fp::ONE);
             }
             out += 1;
@@ -4567,12 +4652,15 @@ pub fn c9_c10_ladder_input(input: &EcdsaInput, witness: &Witness) -> Result<Vec<
     let slots = [LayoutSlot::U1GAccumulators, LayoutSlot::U2QAccumulators];
 
     for ladder in 0..C9_LADDER_COUNT {
+        if cmp_words(&scalar_words[ladder], &P256_ORDER).is_ge() {
+            return Err(WitnessError::NonCanonicalScalar);
+        }
         for bit in 0..C9_SCALAR_BITS {
             circuit_input[c9_bit_index(ladder, bit)] =
                 fp_bit(scalar_bit(&scalar_words[ladder], bit));
         }
 
-        let canonical_slack = sub_words(&P256_FIELD_MODULUS_MINUS_ONE, &scalar_words[ladder]);
+        let canonical_slack = sub_words(&P256_ORDER_MINUS_ONE, &scalar_words[ladder]);
         let mut carry = false;
         circuit_input[c9_canonical_carry_index(ladder, 0)] = Fp::ZERO;
         for bit in 0..C9_SCALAR_BITS {
@@ -4580,10 +4668,7 @@ pub fn c9_c10_ladder_input(input: &EcdsaInput, witness: &Witness) -> Result<Vec<
             let slack_bit = scalar_bit(&canonical_slack, bit);
             circuit_input[c9_canonical_slack_index(ladder, bit)] = fp_bit(slack_bit);
             let sum = u8::from(scalar_is_set) + u8::from(slack_bit) + u8::from(carry);
-            debug_assert_eq!(
-                (sum & 1) != 0,
-                scalar_bit(&P256_FIELD_MODULUS_MINUS_ONE, bit),
-            );
+            debug_assert_eq!((sum & 1) != 0, scalar_bit(&P256_ORDER_MINUS_ONE, bit),);
             carry = sum >= 2;
             circuit_input[c9_canonical_carry_index(ladder, bit + 1)] = fp_bit(carry);
         }
@@ -4621,7 +4706,7 @@ pub fn c9_c10_ladder_input(input: &EcdsaInput, witness: &Witness) -> Result<Vec<
             .iter()
             .map(|(_, current_y)| *current_y + *current_y)
             .collect::<Vec<_>>();
-        if double_denominators.iter().any(|value| *value == Fp::ZERO) {
+        if double_denominators.contains(&Fp::ZERO) {
             return Err(WitnessError::ExceptionalTrace);
         }
         let double_denom_inverses = Fp::batch_inverse(&double_denominators);
@@ -4936,70 +5021,79 @@ fn write_c12_point(input: &mut [Fp], point_index: usize, x: Fp, y: Fp) {
 }
 
 pub fn build_c14_c15_final_check_circuit() -> Result<Circuit, CircuitError> {
-    let n = fp_from_words(&P256_ORDER);
-    let terms = vec![
-        QuadTerm {
-            out: 0,
-            l: C14_K_INDEX,
-            r: C14_K_INDEX,
-            coeff: Fp::ONE,
-        },
-        QuadTerm {
-            out: 0,
-            l: C14_K_INDEX,
-            r: C14_CONST_ONE_INDEX,
-            coeff: -Fp::ONE,
-        },
-        QuadTerm {
-            out: 1,
-            l: C14_RX_INDEX,
-            r: C14_CONST_ONE_INDEX,
-            coeff: Fp::ONE,
-        },
-        QuadTerm {
-            out: 1,
-            l: C14_K_INDEX,
-            r: C14_CONST_ONE_INDEX,
-            coeff: -n,
-        },
-        QuadTerm {
-            out: 1,
-            l: C14_R_PRIME_INDEX,
-            r: C14_CONST_ONE_INDEX,
-            coeff: -Fp::ONE,
-        },
-        QuadTerm {
-            out: 2,
-            l: C14_R_PRIME_INDEX,
-            r: C14_CONST_ONE_INDEX,
-            coeff: Fp::ONE,
-        },
-        QuadTerm {
-            out: 2,
-            l: C14_SIGNATURE_R_INDEX,
-            r: C14_CONST_ONE_INDEX,
-            coeff: -Fp::ONE,
-        },
-        QuadTerm {
-            out: 3,
-            l: C15_FLAGS_START_INDEX,
-            r: C14_CONST_ONE_INDEX,
-            coeff: Fp::ONE,
-        },
-        QuadTerm {
-            out: 4,
-            l: C15_FLAGS_START_INDEX + 1,
-            r: C14_CONST_ONE_INDEX,
-            coeff: Fp::ONE,
-        },
-        QuadTerm {
-            out: 5,
-            l: C15_FLAGS_START_INDEX + 2,
-            r: C14_CONST_ONE_INDEX,
-            coeff: Fp::ONE,
-        },
-    ];
+    let mut terms = Vec::with_capacity(8_000);
+    let mut out = 0usize;
+    let order_limbs = words_to_limbs(&P256_ORDER);
+    let field_limbs = words_to_limbs(&P256_FIELD_MODULUS);
 
+    add_limb_recomposition_constraint(&mut terms, &mut out, C14_SIGNATURE_R_INDEX, |limb| {
+        C14_R_LIMBS_START + limb
+    });
+    add_canonical_lt_constraints(
+        &mut terms,
+        &mut out,
+        |limb| C14_R_LIMBS_START + limb,
+        |limb| C14_R_BITS_START + limb * LIMB_BITS,
+        |limb| C14_R_SLACK_LIMBS_START + limb,
+        |limb| C14_R_SLACK_BITS_START + limb * LIMB_BITS,
+        |limb| C14_R_LT_CARRIES_START + limb,
+        &order_limbs,
+        LIMB_BITS,
+    );
+
+    add_limb_recomposition_constraint(&mut terms, &mut out, C14_RX_INDEX, |limb| {
+        C14_RX_LIMBS_START + limb
+    });
+    add_canonical_lt_constraints(
+        &mut terms,
+        &mut out,
+        |limb| C14_RX_LIMBS_START + limb,
+        |limb| C14_RX_BITS_START + limb * LIMB_BITS,
+        |limb| C14_RX_SLACK_LIMBS_START + limb,
+        |limb| C14_RX_SLACK_BITS_START + limb * LIMB_BITS,
+        |limb| C14_RX_LT_CARRIES_START + limb,
+        &field_limbs,
+        LIMB_BITS,
+    );
+
+    add_bool_constraint(&mut terms, out, C14_K_INDEX);
+    out += 1;
+    for borrow in 0..N_LIMBS - 1 {
+        add_bool_constraint(&mut terms, out, C14_REDUCTION_BORROWS_START + borrow);
+        out += 1;
+    }
+    for limb in 0..N_LIMBS {
+        add_linear(&mut terms, out, C14_RX_LIMBS_START + limb, Fp::ONE);
+        add_linear(&mut terms, out, C14_R_LIMBS_START + limb, -Fp::ONE);
+        add_linear(
+            &mut terms,
+            out,
+            C14_K_INDEX,
+            -Fp::from_u64(order_limbs[limb] as u64),
+        );
+        if limb > 0 {
+            add_linear(
+                &mut terms,
+                out,
+                C14_REDUCTION_BORROWS_START + limb - 1,
+                -Fp::ONE,
+            );
+        }
+        if limb + 1 < N_LIMBS {
+            add_linear(
+                &mut terms,
+                out,
+                C14_REDUCTION_BORROWS_START + limb,
+                Fp::from_u64(1u64 << LIMB_BITS),
+            );
+        }
+        out += 1;
+    }
+
+    const {
+        assert!(C14_REDUCTION_BORROWS_START + N_LIMBS - 1 <= 1usize << C14_C15_INPUT_LOG_SIZE);
+    }
+    debug_assert!(out <= 1usize << C14_C15_OUTPUT_LOG_SIZE);
     Circuit::new(vec![Layer::new(
         C14_C15_OUTPUT_LOG_SIZE,
         C14_C15_INPUT_LOG_SIZE,
@@ -5015,20 +5109,94 @@ pub fn c14_c15_final_check_input(
         return Err(WitnessError::LayoutMismatch);
     }
     let mut circuit_input = vec![Fp::ZERO; 1usize << C14_C15_INPUT_LOG_SIZE];
-    circuit_input[C14_CONST_ONE_INDEX as usize] = Fp::ONE;
+    circuit_input[C14_CONST_ONE_INDEX] = Fp::ONE;
 
     let final_point = layout_range(LayoutSlot::FinalPoint);
-    circuit_input[C14_RX_INDEX as usize] = witness.values[final_point.start];
-
-    let final_reduction = layout_range(LayoutSlot::FinalReduction);
-    circuit_input[C14_K_INDEX as usize] = witness.values[final_reduction.start];
-    circuit_input[C14_R_PRIME_INDEX as usize] = witness.values[final_reduction.start + 1];
-    circuit_input[C14_SIGNATURE_R_INDEX as usize] =
+    circuit_input[C14_RX_INDEX] = witness.values[final_point.start];
+    circuit_input[C14_SIGNATURE_R_INDEX] =
         Fp::from_bytes_be(input.r).ok_or(WitnessError::NonCanonicalScalar)?;
 
-    let flags = layout_range(LayoutSlot::InfinityFlags);
-    circuit_input[C15_FLAGS_START_INDEX as usize..C15_FLAGS_START_INDEX as usize + 3]
-        .copy_from_slice(&witness.values[flags]);
+    let final_reduction = layout_range(LayoutSlot::FinalReduction);
+    circuit_input[C14_K_INDEX] = witness.values[final_reduction.start];
+    let reduction_flag = if circuit_input[C14_K_INDEX] == Fp::ZERO {
+        0u32
+    } else if circuit_input[C14_K_INDEX] == Fp::ONE {
+        1u32
+    } else {
+        return Err(WitnessError::ConstraintViolation {
+            slot: LayoutSlot::FinalReduction,
+        });
+    };
+
+    let r_words = words_from_be(input.r);
+    let rx_words = words_from_be(circuit_input[C14_RX_INDEX].to_bytes_be());
+    let r_lt_n =
+        CanonicalLtTrace::new("r", &r_words, "n", &P256_ORDER).map_err(map_scalar_error)?;
+    let rx_lt_p = CanonicalLtTrace::new("rx", &rx_words, "p", &P256_FIELD_MODULUS)
+        .map_err(map_scalar_error)?;
+    for (range, limbs_start, bits_start, slack_start, slack_bits_start, carries_start) in [
+        (
+            &r_lt_n,
+            C14_R_LIMBS_START,
+            C14_R_BITS_START,
+            C14_R_SLACK_LIMBS_START,
+            C14_R_SLACK_BITS_START,
+            C14_R_LT_CARRIES_START,
+        ),
+        (
+            &rx_lt_p,
+            C14_RX_LIMBS_START,
+            C14_RX_BITS_START,
+            C14_RX_SLACK_LIMBS_START,
+            C14_RX_SLACK_BITS_START,
+            C14_RX_LT_CARRIES_START,
+        ),
+    ] {
+        for limb in 0..N_LIMBS {
+            write_limb_and_bits(
+                &mut circuit_input,
+                limbs_start + limb,
+                bits_start + limb * LIMB_BITS,
+                range.value[limb],
+            );
+            write_limb_and_bits(
+                &mut circuit_input,
+                slack_start + limb,
+                slack_bits_start + limb * LIMB_BITS,
+                range.slack[limb],
+            );
+            debug_assert!(matches!(range.carries[limb], 0 | 1));
+            circuit_input[carries_start + limb] = Fp::from_u64(range.carries[limb] as u64);
+        }
+    }
+
+    let order_limbs = words_to_limbs(&P256_ORDER);
+    let mut borrow = 0i64;
+    for limb in 0..N_LIMBS {
+        let total = i64::from(rx_lt_p.value[limb])
+            - i64::from(r_lt_n.value[limb])
+            - i64::from(reduction_flag) * i64::from(order_limbs[limb])
+            - borrow;
+        if total % (1i64 << LIMB_BITS) != 0 {
+            return Err(WitnessError::ConstraintViolation {
+                slot: LayoutSlot::FinalReduction,
+            });
+        }
+        borrow = -total / (1i64 << LIMB_BITS);
+        if !matches!(borrow, 0 | 1) {
+            return Err(WitnessError::ConstraintViolation {
+                slot: LayoutSlot::FinalReduction,
+            });
+        }
+        if limb + 1 < N_LIMBS {
+            circuit_input[C14_REDUCTION_BORROWS_START + limb] = Fp::from_u64(borrow as u64);
+        }
+    }
+    if borrow != 0 {
+        return Err(WitnessError::ConstraintViolation {
+            slot: LayoutSlot::FinalReduction,
+        });
+    }
     Ok(circuit_input)
 }
 
@@ -5185,7 +5353,7 @@ pub fn ecdsa_public_projection_transcript_segments(
     projection: &EcdsaPublicProjection,
 ) -> Vec<Vec<u8>> {
     let mut segments = Vec::with_capacity(7);
-    segments.push(b"s4-ecdsa-public-projection-v1".to_vec());
+    segments.push(b"s4-ecdsa-public-projection-v2".to_vec());
     for value in [
         projection.z,
         projection.r,
@@ -5375,34 +5543,73 @@ mod tests {
     }
 
     #[test]
-    fn c9_scalar_bits_reject_noncanonical_field_alias() {
-        // `p + 1` recomposes to the field element `1`, so recomposition alone
-        // cannot distinguish it from the canonical bits of one. Build the
+    fn mac_batch_rejects_base_field_alias_bits() {
+        let key_shares = p4b_microbench_key_shares();
+        let av = [0x5au8; 16];
+        let zero_values = [[0u8; 16]; MDOC_P4B_MAC_HALF_COUNT];
+        let mut alias_values = zero_values;
+        let alias = gf128_halves_from_be32(be_from_words(&P256_FIELD_MODULUS));
+        alias_values[4] = alias[0];
+        alias_values[5] = alias[1];
+        assert_eq!(
+            recompose_gf128_halves(&alias[0], &alias[1]),
+            Fp::ZERO,
+            "p aliases zero in the base field"
+        );
+        assert!(
+            mac_batch_group_a_input(&key_shares, &alias_values).is_err(),
+            "the honest input builder must reject the non-canonical bytes"
+        );
+
+        let mut group_a =
+            mac_batch_group_a_input(&key_shares, &zero_values).expect("zero values are canonical");
+        for half in 4..6 {
+            let offset = mac_batch_half_group_a_input_offset(half);
+            let alias_half =
+                mac_half_group_a_input(&key_shares.0[half], &alias_values[half]).unwrap();
+            group_a[offset..offset + alias_half.len()].copy_from_slice(&alias_half);
+        }
+        let tags: [Gf128; MDOC_P4B_MAC_HALF_COUNT] =
+            std::array::from_fn(|half| gf128_tag(&key_shares.0[half], &av, &alias_values[half]));
+        let group_b = mac_batch_group_b_input(&key_shares, &av, &alias_values, &tags).unwrap();
+        let mut input = vec![Fp::ZERO; 1usize << MAC_BATCH_INPUT_LOG_SIZE];
+        input[..group_a.len()].copy_from_slice(&group_a);
+        input[MAC_BATCH_GROUP_B_INPUT_START..MAC_BATCH_GROUP_B_INPUT_START + group_b.len()]
+            .copy_from_slice(&group_b);
+
+        let circuit = build_mac_batch_circuit(&av, &tags).expect("MAC batch circuit builds");
+        let layers = circuit
+            .evaluate_input(input)
+            .expect("input has circuit width");
+        assert!(
+            !circuit
+                .is_satisfied(&layers)
+                .expect("circuit shape is valid"),
+            "the in-circuit p-bound must reject bits that only match modulo p"
+        );
+    }
+
+    #[test]
+    fn c9_scalar_bits_reject_group_order() {
+        // `n` is a valid P-256 base-field element but is not a canonical
+        // scalar. Build the
         // otherwise-consistent wrapping slack/carry witness: every per-bit
         // addition equation holds, but the required zero final carry rejects
         // this non-canonical 256-bit representative.
-        let mut alias = P256_FIELD_MODULUS_MINUS_ONE;
-        let mut addend = 2u64;
-        for word in &mut alias {
-            let (sum, overflow) = word.overflowing_add(addend);
-            *word = sum;
-            addend = u64::from(overflow);
-        }
-        assert_eq!(addend, 0);
+        let alias = P256_ORDER;
 
         let mut slack = [0u64; 4];
         let mut borrow = 0u64;
         for word in 0..4 {
-            let (first, first_borrow) =
-                P256_FIELD_MODULUS_MINUS_ONE[word].overflowing_sub(alias[word]);
+            let (first, first_borrow) = P256_ORDER_MINUS_ONE[word].overflowing_sub(alias[word]);
             let (value, second_borrow) = first.overflowing_sub(borrow);
             slack[word] = value;
             borrow = u64::from(first_borrow) + u64::from(second_borrow);
         }
-        assert_eq!(borrow, 1, "the alias is larger than p - 1");
+        assert_eq!(borrow, 1, "n is larger than the canonical bound n - 1");
         let mut input = vec![Fp::ZERO; 1usize << C9_C10_LADDER_INPUT_LOG_SIZE];
         input[C9_CONST_ONE_INDEX] = Fp::ONE;
-        input[C9_U1_INDEX] = Fp::ONE;
+        input[C9_U1_INDEX] = fp_from_words(&alias);
         let mut carry = false;
         for bit in 0..C9_SCALAR_BITS {
             let alias_bit = scalar_bit(&alias, bit);
@@ -5413,7 +5620,7 @@ mod tests {
             carry = u8::from(alias_bit) + u8::from(slack_bit) + u8::from(carry) >= 2;
         }
         input[c9_canonical_carry_index(0, C9_SCALAR_BITS)] = fp_bit(carry);
-        assert!(carry, "p + 1 plus its wrapping slack must overflow");
+        assert!(carry, "n plus its wrapping slack must overflow");
 
         let circuit = build_c9_c10_ladder_circuit().expect("C9-C10 circuit builds");
         let layers = circuit
@@ -5423,7 +5630,7 @@ mod tests {
         assert_eq!(
             layers[0][0],
             Fp::ZERO,
-            "field recomposition aliases p + 1 to 1"
+            "field recomposition accepts n as a base-field element"
         );
         assert_eq!(
             layers[0][final_carry_constraint],
@@ -5433,6 +5640,264 @@ mod tests {
         assert!(!circuit
             .is_satisfied(&layers)
             .expect("circuit shape is valid"));
+    }
+
+    #[test]
+    fn c3_integer_trace_accepts_digest_reduction_and_rejects_trace_mutations() {
+        let mut input = signed_p4b_input(7, b"c3 integer trace");
+        let mut digest = P256_ORDER;
+        digest[0] += 1;
+        input.z = be_from_words(&digest);
+        let witness = generate_witness(&input).expect("z = n + 1 has a valid scalar setup");
+        let circuit = build_c3_c5_scalar_setup_circuit().expect("C3 circuit builds");
+        let honest = c3_c5_scalar_setup_input(&input, &witness).expect("C3 input builds");
+        let honest_layers = circuit
+            .evaluate_input(honest.clone())
+            .expect("input has circuit width");
+        assert!(
+            circuit
+                .is_satisfied(&honest_layers)
+                .expect("circuit shape is valid"),
+            "the digest must be reduced modulo n before computing u1"
+        );
+
+        let mut bad_quotient = honest.clone();
+        bad_quotient[c3_quotient_limb_index(0, 0)] =
+            bad_quotient[c3_quotient_limb_index(0, 0)] + Fp::ONE;
+        let layers = circuit
+            .evaluate_input(bad_quotient)
+            .expect("input has circuit width");
+        assert!(
+            !circuit
+                .is_satisfied(&layers)
+                .expect("circuit shape is valid"),
+            "changing the integer quotient must break the product trace"
+        );
+
+        let mut bad_carry = honest;
+        let carry_bit = c3_product_carry_bit_index(0, 0, 0);
+        bad_carry[carry_bit] = Fp::ONE - bad_carry[carry_bit];
+        let layers = circuit
+            .evaluate_input(bad_carry)
+            .expect("input has circuit width");
+        assert!(
+            !circuit
+                .is_satisfied(&layers)
+                .expect("circuit shape is valid"),
+            "changing a signed product carry must break the integer equation"
+        );
+    }
+
+    #[test]
+    fn c3_rejects_digest_limb_alias_modulo_base_field() {
+        let circuit = build_c3_c5_scalar_setup_circuit().expect("C3 circuit builds");
+
+        let mut alias_words = P256_FIELD_MODULUS;
+        alias_words[0] = 0;
+        alias_words[1] += 1;
+        let alias_limbs = words_to_limbs(&alias_words);
+        let mut recomposed = Fp::ZERO;
+        let mut power = Fp::ONE;
+        for limb in alias_limbs {
+            recomposed = recomposed + Fp::from_u64(limb as u64) * power;
+            for _ in 0..LIMB_BITS {
+                power = power + power;
+            }
+        }
+        assert_eq!(recomposed, Fp::ONE, "p + 1 aliases one in Fp");
+        assert!(
+            CanonicalLtTrace::new("z", &alias_words, "p", &P256_FIELD_MODULUS).is_err(),
+            "the canonical integer representation must exclude p + 1"
+        );
+        let mut alias_input = signed_p4b_input(9, b"c3 digest alias");
+        alias_input.z = be_from_words(&alias_words);
+        let alias_witness =
+            generate_witness(&alias_input).expect("p + 1 has a complete scalar trace");
+        let invalid_z_lt_p = CanonicalLtTrace {
+            value_name: "z",
+            bound_name: "p",
+            value: alias_limbs,
+            bound: words_to_limbs(&P256_FIELD_MODULUS),
+            slack: Default::default(),
+            carries: Default::default(),
+        };
+        let forged = c3_c5_scalar_setup_input_with_z_trace(
+            &alias_input,
+            &alias_witness,
+            Fp::ONE,
+            &invalid_z_lt_p,
+        )
+        .expect("all non-canonicality trace components are valid");
+        let layers = circuit
+            .evaluate_input(forged)
+            .expect("input has circuit width");
+        const CANONICAL_LT_CONSTRAINTS: usize = N_LIMBS * (2 * (LIMB_BITS + 1) + 1) + 1 + N_LIMBS;
+        const C3_Z_LT_OUTPUT_START: usize = 4
+            + C3_CANONICAL_SCALAR_COUNT * CANONICAL_LT_CONSTRAINTS
+            + 1
+            + N_LIMBS * (LIMB_BITS + 1);
+        const C3_Z_LT_OUTPUT_END: usize = C3_Z_LT_OUTPUT_START + CANONICAL_LT_CONSTRAINTS;
+        let violations = layers[0]
+            .iter()
+            .enumerate()
+            .filter_map(|(index, value)| (*value != Fp::ZERO).then_some(index))
+            .collect::<Vec<_>>();
+        assert!(
+            !violations.is_empty()
+                && violations
+                    .iter()
+                    .all(|index| (C3_Z_LT_OUTPUT_START..C3_Z_LT_OUTPUT_END).contains(index)),
+            "only the z < p constraint block may reject the otherwise-valid adversarial trace: \
+             {violations:?}"
+        );
+        assert!(
+            !circuit
+                .is_satisfied(&layers)
+                .expect("circuit shape is valid"),
+            "C3 must reject a digest representation that matches only modulo p"
+        );
+    }
+
+    #[test]
+    fn c14_integer_reduction_rejects_base_field_wrap() {
+        // The old Fp equation accepted 0 = (p - n) + n. Build that exact
+        // field-level forgery with canonical range witnesses and require the
+        // integer limb equations to reject it.
+        let rx_words = [0u64; 4];
+        let r_words = sub_words(&P256_FIELD_MODULUS, &P256_ORDER);
+        assert_eq!(
+            fp_from_words(&r_words) + fp_from_words(&P256_ORDER),
+            Fp::ZERO,
+            "the former single-field equation is vacuous on this input"
+        );
+        let r_lt_n = CanonicalLtTrace::new("r", &r_words, "n", &P256_ORDER).expect("p - n < n");
+        let rx_lt_p = CanonicalLtTrace::new("rx", &rx_words, "p", &P256_FIELD_MODULUS)
+            .expect("zero is a canonical coordinate");
+        let mut input = vec![Fp::ZERO; 1usize << C14_C15_INPUT_LOG_SIZE];
+        input[C14_CONST_ONE_INDEX] = Fp::ONE;
+        input[C14_SIGNATURE_R_INDEX] = fp_from_words(&r_words);
+        input[C14_RX_INDEX] = Fp::ZERO;
+        input[C14_K_INDEX] = Fp::ONE;
+        for (range, limbs_start, bits_start, slack_start, slack_bits_start, carries_start) in [
+            (
+                &r_lt_n,
+                C14_R_LIMBS_START,
+                C14_R_BITS_START,
+                C14_R_SLACK_LIMBS_START,
+                C14_R_SLACK_BITS_START,
+                C14_R_LT_CARRIES_START,
+            ),
+            (
+                &rx_lt_p,
+                C14_RX_LIMBS_START,
+                C14_RX_BITS_START,
+                C14_RX_SLACK_LIMBS_START,
+                C14_RX_SLACK_BITS_START,
+                C14_RX_LT_CARRIES_START,
+            ),
+        ] {
+            for limb in 0..N_LIMBS {
+                write_limb_and_bits(
+                    &mut input,
+                    limbs_start + limb,
+                    bits_start + limb * LIMB_BITS,
+                    range.value[limb],
+                );
+                write_limb_and_bits(
+                    &mut input,
+                    slack_start + limb,
+                    slack_bits_start + limb * LIMB_BITS,
+                    range.slack[limb],
+                );
+                input[carries_start + limb] = Fp::from_u64(range.carries[limb] as u64);
+            }
+        }
+        let order_limbs = words_to_limbs(&P256_ORDER);
+        let mut borrow = 0i64;
+        for limb in 0..N_LIMBS - 1 {
+            let total = -i64::from(r_lt_n.value[limb]) - i64::from(order_limbs[limb]) - borrow;
+            borrow = i64::from(total < 0);
+            input[C14_REDUCTION_BORROWS_START + limb] = Fp::from_u64(borrow as u64);
+        }
+
+        let circuit = build_c14_c15_final_check_circuit().expect("C14 circuit builds");
+        let layers = circuit
+            .evaluate_input(input)
+            .expect("input has circuit width");
+        assert!(
+            !circuit
+                .is_satisfied(&layers)
+                .expect("circuit shape is valid"),
+            "the final integer limb equation must reject reduction modulo p"
+        );
+    }
+
+    #[test]
+    fn ecdsa_affine_claims_bind_private_family_copies_without_claim_values() {
+        let input_lens = [
+            1usize << C1_INPUT_LIMBS_INPUT_LOG_SIZE,
+            1usize << C2_CANONICALITY_INPUT_LOG_SIZE,
+            1usize << C3_C5_SCALAR_SETUP_INPUT_LOG_SIZE,
+            1usize << C9_C10_LADDER_INPUT_LOG_SIZE,
+            1usize << C11_FINAL_ADD_INPUT_LOG_SIZE,
+            1usize << C12_ON_CURVE_INPUT_LOG_SIZE,
+            1usize << C14_C15_INPUT_LOG_SIZE,
+        ];
+        let mut offset = 0usize;
+        let layouts = input_lens
+            .map(|input_len| {
+                let layout = BundleCircuitLayout {
+                    input_offset: offset,
+                    input_len,
+                    pad_offset: offset + input_len,
+                    pad_len: 0,
+                };
+                offset += input_len;
+                layout
+            })
+            .to_vec();
+        let mut claims = Vec::new();
+        add_ecdsa_consistency_claims(&mut claims, &layouts).expect("fixed family layout");
+        assert_eq!(claims.len(), 28);
+        assert!(
+            claims[..7].iter().all(|claim| claim.value == Fp::ONE)
+                && claims[7..].iter().all(|claim| claim.value == Fp::ZERO),
+            "only public constant-one claims may have nonzero values"
+        );
+
+        let evaluate = |claim: &LigeroLinearClaim, values: &[Fp]| {
+            claim.terms.iter().fold(Fp::ZERO, |sum, term| {
+                let mle = Mle::new(values[term.offset..term.offset + term.len].to_vec());
+                sum + term.coefficient * mle.eval_at(&term.point).expect("valid fixed point")
+            })
+        };
+        let mut values = vec![Fp::from_u64(7); offset];
+        for layout in &layouts {
+            values[layout.input_offset] = Fp::ONE;
+        }
+        assert!(claims
+            .iter()
+            .all(|claim| evaluate(claim, &values) == claim.value));
+
+        values[layouts[2].input_offset] = Fp::ZERO;
+        assert_eq!(
+            claims
+                .iter()
+                .filter(|claim| evaluate(claim, &values) != claim.value)
+                .count(),
+            1,
+            "C3's constant-one wire must be verifier-fixed"
+        );
+        values[layouts[2].input_offset] = Fp::ONE;
+        values[layouts[6].input_offset + C14_SIGNATURE_R_INDEX] = Fp::from_u64(8);
+        assert_eq!(
+            claims
+                .iter()
+                .filter(|claim| evaluate(claim, &values) != claim.value)
+                .count(),
+            1,
+            "changing only C14.r must violate its equality with C3.r"
+        );
     }
 
     fn median_duration(values: &mut [Duration]) -> Duration {

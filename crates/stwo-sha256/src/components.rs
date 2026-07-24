@@ -21,10 +21,11 @@
 //!   for Maj, one for Ch).
 //! - [`Xor8Eval`] × 1 — the generic byte XOR table; 2¹⁶ rows × 3
 //!   preprocessed columns + 1 multiplicity.
-//! - [`RangeKEval`] × 4 — one per `Range_k` channel (`k ∈ {2, 4, 5, 16}`);
-//!   `k` rows × 1 preprocessed column (the value) + 1 multiplicity. Each
-//!   producer's `log_size = ceil(log2(k))`, padded with row-`0`
-//!   repetition for `k ∉ {1, 2, 4, 16}`; see [`range_log_size`] and
+//! - [`RangeKEval`] × 4 — one per `RangeKind::{Range2, Range4, Range5,
+//!   Range8}` channel. The first three bound carries to 2, 4, or 5 values;
+//!   `Range8` bounds terminal digest bytes to 256 values. Each table has one
+//!   preprocessed value column plus one multiplicity column; small tables are
+//!   padded to the backend's minimum SIMD domain. See [`range_log_size`] and
 //!   [`crate::preprocessed`].
 //!
 //! Every preprocessed-column ID is namespaced under the `"sha256_"` prefix
@@ -41,7 +42,7 @@ use stwo_constraint_framework::{
 
 use crate::partitions::SigmaFn;
 use crate::tables::Half;
-use crate::tables_local::RANGE_16;
+use crate::tables_local::RANGE_8;
 
 // Re-export shorthand so the `stark` module imports types from one place.
 pub use crate::relations::Sha256Relations;
@@ -85,14 +86,13 @@ fn decode_tag(f: SigmaFn, half: Half) -> &'static str {
 /// Which `Range_k` table a producer or consumer fires against. The lookup
 /// pins one value into `[0, k)`.
 ///
-/// **N1 — `Range16` is reserved for terminal-limb checks.**
+/// **N1 — `Range8` is reserved for terminal-byte checks.**
 /// `Range2`/`Range4`/`Range5` size mod-2³² add-carry checks (per the
 /// `crate::headroom` audit, the carry of a `k`-addend add lives in
-/// `[0, k)`). `Range16`, by contrast, is the 2¹⁶-row table used only for
-/// terminal 16-bit limb checks — the final block's `h_out` digest limbs
-/// today (`crate::constraints::Sha256Eval::evaluate`). Passing `Range16`
+/// `[0, k)`). `Range8`, by contrast, is the 2⁸-row table used only for
+/// terminal digest-byte checks. Passing `Range8`
 /// to `crate::constraints::emit_mod_2_32_add_linear` is rejected by an
-/// explicit `panic!` because no mod-2³² add carry needs a 16-bit range.
+/// explicit `panic!` because no mod-2³² add carry uses the byte range.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum RangeKind {
     /// Carries from 2-addend mod-2³² adds (`T2`, `e_new`, `a_new`, finalization).
@@ -101,11 +101,11 @@ pub enum RangeKind {
     Range4,
     /// Carries from the 5-addend `T1` round add.
     Range5,
-    /// Terminal 16-bit limbs (notably the final block's `h_out` digest).
+    /// Terminal digest bytes.
     /// **Not** used for mod-2³² add carries — those land in
     /// `Range2`/`Range4`/`Range5` per the headroom audit. See the enum
     /// doc-comment for the rationale.
-    Range16,
+    Range8,
 }
 
 impl RangeKind {
@@ -116,7 +116,7 @@ impl RangeKind {
             RangeKind::Range2 => crate::headroom::RANGE_2,
             RangeKind::Range4 => crate::headroom::RANGE_4,
             RangeKind::Range5 => crate::headroom::RANGE_5,
-            RangeKind::Range16 => RANGE_16,
+            RangeKind::Range8 => RANGE_8,
         }
     }
 
@@ -127,7 +127,7 @@ impl RangeKind {
             RangeKind::Range2 => "range_2",
             RangeKind::Range4 => "range_4",
             RangeKind::Range5 => "range_5",
-            RangeKind::Range16 => "range_16",
+            RangeKind::Range8 => "range_8",
         }
     }
 }
@@ -477,7 +477,7 @@ pub type Xor8Component = FrameworkComponent<Xor8Eval>;
 // Range_k component
 // ---------------------------------------------------------------------------
 
-/// Producer for one `Range_k` lookup table (`k ∈ {2, 4, 5, 16}`).
+/// Producer for one `RangeKind::{Range2, Range4, Range5, Range8}` lookup table.
 ///
 /// Reads one preprocessed value column (the row content
 /// `crate::tables_local::range_k()`, padded with value `0` up to
@@ -488,11 +488,11 @@ pub type Xor8Component = FrameworkComponent<Xor8Eval>;
 /// **Soundness role.** Together with the consumer-side
 /// `add_to_relation(rel, +1, &[carry])` calls inside
 /// `crate::constraints::emit_mod_2_32_add_linear` and the terminal
-/// `Range_16` lookups on every real-block `h_out` limb (inlined in
+/// `Range_8` lookups on every real-block `h_out` byte (inlined in
 /// `Sha256Eval::evaluate` via `wire_range_check`), this component
-/// completes the LogUp loop that pins each carry into `[0, k)` and the
-/// digest limbs into `[0, 2¹⁶)` — closing the soundness gap the headroom
-/// audit (`crate::headroom`) reduces to.
+/// completes the LogUp loop that pins each carry to its audited range and
+/// each digest byte into `[0, 2⁸)`. The AIR recomposes every byte pair into
+/// its corresponding 16-bit `h_out` limb.
 #[derive(Clone)]
 pub struct RangeKEval {
     pub log_size: u32,
@@ -529,8 +529,8 @@ impl FrameworkEval for RangeKEval {
             RangeKind::Range5 => {
                 emit::<E, Range5Relation>(&mut eval, &self.relations.range.range_5, neg, &values)
             }
-            RangeKind::Range16 => {
-                emit::<E, Range16Relation>(&mut eval, &self.relations.range.range_16, neg, &values)
+            RangeKind::Range8 => {
+                emit::<E, Range8Relation>(&mut eval, &self.relations.range.range_8, neg, &values)
             }
         }
 
@@ -615,9 +615,9 @@ impl SharedProducer {
                         is_dummy,
                         &values,
                     ),
-                    RangeKind::Range16 => emit_blind::<E, Range16Relation>(
+                    RangeKind::Range8 => emit_blind::<E, Range8Relation>(
                         eval,
-                        &relations.range.range_16,
+                        &relations.range.range_8,
                         mult,
                         is_dummy,
                         &values,
@@ -729,7 +729,7 @@ pub const RANGE_TABLES: &[RangeKind] = &[
     RangeKind::Range2,
     RangeKind::Range4,
     RangeKind::Range5,
-    RangeKind::Range16,
+    RangeKind::Range8,
 ];
 
 #[cfg(test)]

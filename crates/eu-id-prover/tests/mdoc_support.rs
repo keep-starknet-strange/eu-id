@@ -3125,8 +3125,8 @@ fn mdoc_zk_class_d_sha_tables_dummy_region() {
     use stwo_sha256::witness::compute_sha256_witness;
 
     // (1) Shape check: the shared SHA-table producers commit blinded domains.
-    // The blinded log size is `LOG_SIZE_16 + 1 = 17` for every producer (all
-    // real tables are padded to 2^16). Build the shared prover from a couple of
+    // The terminal-byte table is `Range8` and the carry tables use the SIMD
+    // floor. Build the shared prover from a couple of
     // heterogeneous witnesses — the shapes are witness-independent.
     let w0 = compute_sha256_witness(b"abc");
     let w1 = compute_sha256_witness(&[0x42u8; 200]);
@@ -3140,14 +3140,14 @@ fn mdoc_zk_class_d_sha_tables_dummy_region() {
     );
     let shapes = sha_tables.component_shapes();
     assert!(!shapes.is_empty(), "shared SHA tables must expose shapes");
-    // The split-pack producers commit at LOG_SIZE_16 (real) → 17 (blinded); the
-    // small range tables (Range2/4/5) are padded to 2^LOG_N_LANES = 2^4 (real) →
-    // 5 (blinded); Range16 is 2^16 → 17. Under Class D every committed domain is
+    // The small range tables (Range2/4/5) are padded to
+    // 2^LOG_N_LANES = 2^4 (real) → 5 (blinded); Range8 is 2^8 → 9. Under
+    // Class D every committed domain is
     // exactly one log above its real width, so every shape's log_size is the
-    // blinded size {5, 17}. Assert each is blinded (never a bare real size).
+    // blinded size {5, 9}. Assert each is blinded (never a bare real size).
     for shape in &shapes {
         assert!(
-            shape.log_size == 5 || shape.log_size == 17,
+            shape.log_size == 5 || shape.log_size == 9,
             "shared SHA-table component {} log_size {} is not a Class-D blinded (real+1) size",
             shape.name,
             shape.log_size,

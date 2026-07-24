@@ -4,6 +4,9 @@
         android:allowBackup="false"
         android:label="EU-ID Bench"
         android:supportsRtl="true">
+        <meta-data
+            android:name="com.google.test.loops"
+            android:value="8" />
         <activity
             android:name=".MainActivity"
             android:exported="true">

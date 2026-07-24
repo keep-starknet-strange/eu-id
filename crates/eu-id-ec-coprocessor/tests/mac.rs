@@ -2,7 +2,6 @@ use eu_id_ec_coprocessor::ecdsa::{
     build_mac_half_circuit, gf128_halves_from_be32, mac_half_input_with_av, recompose_gf128_halves,
     MAC_HALF_COMMITTED_PRIVATE_INPUTS, MAC_HALF_INPUT_LOG_SIZE, MAC_HALF_PARITY_Q_BITS,
     MAC_HALF_Q_BITS_START, MAC_HALF_X_BITS_START, MDOC_P4B_MAC_COMMITTED_PRIVATE_INPUTS,
-    MDOC_P4B_MAC_HALF_COUNT,
 };
 use eu_id_ec_coprocessor::mac::{bytes_to_bits, gf128_mul, gf128_tag, xor_128, Gf128};
 use eu_id_ec_coprocessor::{CoprocessorChannel, Fp};
@@ -134,9 +133,8 @@ fn mac_half_circuit_accepts_reference_tag_and_recomposition() {
         "each half commits x bits, a_p bits, and post-a_v Q quotient bits"
     );
     assert_eq!(
-        MDOC_P4B_MAC_COMMITTED_PRIVATE_INPUTS,
-        MDOC_P4B_MAC_HALF_COUNT * 1408,
-        "Q-024 MAC family commits x/a_p once plus post-a_v Q quotient bits"
+        MDOC_P4B_MAC_COMMITTED_PRIVATE_INPUTS, 9_987,
+        "MAC inputs include exact-byte canonicality witnesses for the three 256-bit values"
     );
     assert_eq!(
         input.len(),

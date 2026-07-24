@@ -11,30 +11,30 @@ use crate::mdoc::{
     MdocCircuitStatement, MdocRevocationPublicInputs,
 };
 
-// Regenerated 2026-07-21 for circuit revision 3: commit 85c71369 deleted the
-// vestigial SHA split-pack lookup tables (recomposition + ungated booleanity
-// already enforce them), changing the SHA-256 constraint set and the mdoc
-// preprocessed root, both of which fold into this tuple hash. Old hashes:
+// Regenerated 2026-07-24 for circuit revision 4: terminal SHA digest limbs now
+// recompose from Range8-pinned bytes instead of using a 2^16-row Range16
+// table, changing the SHA-256 constraint set and mdoc preprocessed root.
+// Old hashes:
 // 5445c650a6f57d6b...0d4f21e6 (revision 1); a43f41e4745a053a...a3232591
-// (revision 2, SHA field exposure from constrained W bit planes 2026-07-13).
+// (revision 2, SHA field exposure from constrained W bit planes 2026-07-13);
+// d09852c1343dcf59...2b84fc96 (revision 3, split-pack deletion 2026-07-21).
 pub const TS13_PUBLISHED_AGE_OVER_18_CIRCUIT_HASH: &str =
-    "d09852c1343dcf595dadbe8f1003f16710dd732cba471e58dc8cc2e52b84fc96";
-// Regenerated 2026-07-21 after commit 85c71369 deleted the vestigial SHA
-// split-pack lookup tables (46 -> 14 preprocessed columns in stwo-sha256), so
-// the mdoc tree-0 preprocessed commitment moved. Value is the real
+    "b1f58a97cbcffc1b4172733c9d89c138b6291bdc59415afe3883307104252bf3";
+// Regenerated 2026-07-24 after replacing terminal Range16 limb checks with
+// Range8 byte checks. Value is the real
 // `commitments[0]` of the published N=1 revocation-enabled age_over_18 mdoc
 // proof (captured via ts13_evidence_pack_n1_measurements). Old values:
 // 3532fa24129acba9...8583169f (Class-D blinding repin 2026-07-08);
 // ba943f9deed4cf5e...55e8a8b7 (P4b coprocessor revocation reroute 2026-07-08);
-// split-pack deletion repin 2026-07-21, 85c71369. See
+// bc8ad8a2f9440f66...2a9babcf (split-pack deletion 2026-07-21). See
 // tasks/p4c-leakage-table.md.
 pub const TS13_PUBLISHED_AGE_OVER_18_PREPROCESSED_ROOT: &[u8; 32] =
-    b"\xbc\x8a\xd8\xa2\xf9\x44\x0f\x66\x02\xd4\xd3\xb0\x77\x72\xe8\xbc\x28\xd3\xb7\x85\x8c\xc8\x75\xba\x60\x37\x2d\xf8\x2a\x9b\xab\xcf";
+    b"\xea\x57\x54\xa0\x8f\xdd\x9c\xa9\xfc\x1a\xbb\x41\x4d\x7f\x8f\x3c\xe5\x4c\x5f\xc8\x6f\x10\x29\x77\x5c\xdd\x69\x4b\x6b\x7d\x3c\x7c";
 pub const TS13_P4C_MIN_BLIND_ROWS: usize = 256;
 pub const TS13_P4C_MAX_OPENINGS: usize = 256;
 pub const TS13_P4C_MIN_DECOY_MESSAGE_BITS: usize = 512;
 pub const TS13_P4C_PER_OPENING_STATISTICAL_BITS: u32 = 64;
-pub const TS13_CIRCUIT_REVISION: u32 = 3;
+pub const TS13_CIRCUIT_REVISION: u32 = 4;
 pub const TS13_PCS_LOG_BLOWUP_FACTOR: u32 = 2;
 pub const TS13_PCS_QUERIES: u32 = 54;
 pub const TS13_PCS_POW_BITS: u32 = 20;
@@ -697,7 +697,7 @@ mod tests {
         let tuple = Ts13CircuitTuple::published_age_over_18();
         let soundness = ts13_published_soundness_table();
 
-        assert_eq!(tuple.circuit_revision, 3);
+        assert_eq!(tuple.circuit_revision, 4);
         assert_eq!(tuple.pcs_log_blowup_factor, 2);
         assert_eq!(tuple.pcs_queries, 54);
         assert_eq!(tuple.pcs_pow_bits, 20);

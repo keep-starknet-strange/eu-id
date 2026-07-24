@@ -217,7 +217,7 @@ fn rejects_out_of_range_carry_witness_mutation() {
 }
 
 /// Carry-out-of-range soundness coverage for the four new `Range_k`
-/// channels (`Range_2`/`Range_4`/`Range_5`/`Range_16`). Each is verified
+/// channels (`Range_2`/`Range_4`/`Range_5`/`Range_8`). Each is verified
 /// the same way as the `xor_8` channel in [`verify_rejects_logup_sum_mutation`]:
 /// bumping any one producer's claimed sum makes the per-component sums no
 /// longer total zero, so the `LogupSumNonZero` gate rejects.
@@ -245,7 +245,7 @@ fn verify_rejects_range_k_claimed_sum_mutations() {
     verify_sha256_proof(&proof).expect("baseline proof must verify");
 
     // For each of the four `Range_k` producers (index 0..4 corresponds
-    // to `RANGE_TABLES` order: Range_2, Range_4, Range_5, Range_16),
+    // to `RANGE_TABLES` order: Range_2, Range_4, Range_5, Range_8),
     // bump that producer's claimed sum and assert the soundness gate
     // rejects. Iterating in-place catches a regression on any one
     // channel.

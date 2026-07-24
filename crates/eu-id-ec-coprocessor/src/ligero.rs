@@ -65,11 +65,35 @@ pub struct LigeroProximityClaim {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct LigeroLinearClaim {
+pub struct LigeroLinearTerm {
     pub offset: usize,
     pub len: usize,
     pub point: Vec<Fp>,
+    pub coefficient: Fp,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LigeroLinearClaim {
+    pub terms: Vec<LigeroLinearTerm>,
     pub value: Fp,
+}
+
+impl LigeroLinearClaim {
+    pub fn mle(offset: usize, len: usize, point: Vec<Fp>, value: Fp) -> Self {
+        Self::affine(
+            vec![LigeroLinearTerm {
+                offset,
+                len,
+                point,
+                coefficient: Fp::ONE,
+            }],
+            value,
+        )
+    }
+
+    pub fn affine(terms: Vec<LigeroLinearTerm>, value: Fp) -> Self {
+        Self { terms, value }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -698,6 +722,47 @@ pub fn verify_split_openings(
     Ok(true)
 }
 
+pub(crate) struct AuthenticatedSplitOpenings<'a> {
+    params: LigeroParams,
+    committed_len_a: usize,
+    committed_len_b: usize,
+    openings_a: &'a [ColumnOpening],
+    openings_b: &'a [ColumnOpening],
+}
+
+pub(crate) fn verify_and_authenticate_split_openings<'a>(
+    root_a: [u8; 32],
+    root_b: [u8; 32],
+    params: LigeroParams,
+    committed_len_a: usize,
+    committed_len_b: usize,
+    openings_a: &'a [ColumnOpening],
+    openings_b: &'a [ColumnOpening],
+    claim: &LigeroProximityClaim,
+    gamma: &[Fp],
+) -> Result<Option<AuthenticatedSplitOpenings<'a>>, LigeroError> {
+    if !verify_split_openings(
+        root_a,
+        root_b,
+        params,
+        committed_len_a,
+        committed_len_b,
+        openings_a,
+        openings_b,
+        claim,
+        gamma,
+    )? {
+        return Ok(None);
+    }
+    Ok(Some(AuthenticatedSplitOpenings {
+        params,
+        committed_len_a,
+        committed_len_b,
+        openings_a,
+        openings_b,
+    }))
+}
+
 const STRUCTURED_CLAIM_MIN_ROWS: usize = 4;
 
 struct ClaimWeightTemplate {
@@ -781,43 +846,43 @@ fn add_claim_weight_template(
     }
 }
 
-fn factor_claim_weights(
+fn factor_claim_term_weights(
     params: LigeroParams,
-    claim: &LigeroLinearClaim,
-    gamma: Fp,
+    term: &LigeroLinearTerm,
+    scale: Fp,
     templates: &mut Vec<ClaimWeightTemplate>,
 ) {
     // For row_len = 2^r, eq(point, i) factors into independent low-r-bit
-    // (column) and high-bit (row) tensors. An unaligned claim block crosses
+    // (column) and high-bit (row) tensors. An unaligned term block crosses
     // at most two physical rows, so each block is a scaled copy of one of two
     // shifted column templates; only the final partial block can add a third.
     let row_len = params.row_len;
     let row_log = row_len.ilog2() as usize;
-    let low = eq_tensor(&claim.point[..row_log]);
-    let high = eq_tensor(&claim.point[row_log..]);
-    let base_row = claim.offset / row_len;
-    let shift = claim.offset % row_len;
+    let low = eq_tensor(&term.point[..row_log]);
+    let high = eq_tensor(&term.point[row_log..]);
+    let base_row = term.offset / row_len;
+    let shift = term.offset % row_len;
 
     for (block, high_weight) in high
         .iter()
         .copied()
-        .take(claim.len.div_ceil(row_len))
+        .take(term.len.div_ceil(row_len))
         .enumerate()
     {
-        let valid = row_len.min(claim.len - block * row_len);
-        let scale = gamma * high_weight;
+        let valid = row_len.min(term.len - block * row_len);
+        let block_scale = scale * high_weight;
         let first_len = valid.min(row_len - shift);
         if first_len > 0 {
             let mut first = vec![Fp::ZERO; row_len];
             first[shift..shift + first_len].copy_from_slice(&low[..first_len]);
-            add_claim_weight_template(templates, first, base_row + block, scale);
+            add_claim_weight_template(templates, first, base_row + block, block_scale);
         }
         if valid > first_len {
             let second_len = valid - first_len;
             let mut second = vec![Fp::ZERO; row_len];
             second[..second_len]
                 .copy_from_slice(&low[row_len - shift..row_len - shift + second_len]);
-            add_claim_weight_template(templates, second, base_row + block + 1, scale);
+            add_claim_weight_template(templates, second, base_row + block + 1, block_scale);
         }
     }
 }
@@ -833,26 +898,29 @@ fn claim_weight_plan(
     let mut templates = Vec::new();
     for (claim, coeff) in claims.iter().zip(gamma.iter().copied()) {
         validate_linear_claim(params, committed_rows, claim)?;
-        let row_span = ((claim.offset % params.row_len) + claim.len).div_ceil(params.row_len);
-        let fixed = claim
-            .point
-            .iter()
-            .all(|&value| value == Fp::ZERO || value == Fp::ONE);
-        let factor = structured
-            && params.code == LigeroCode::Circle
-            && params.row_len.is_power_of_two()
-            && row_span >= STRUCTURED_CLAIM_MIN_ROWS
-            && !fixed;
-        if factor {
-            factor_claim_weights(params, claim, coeff, &mut templates);
-            continue;
-        }
+        for term in &claim.terms {
+            let scale = coeff * term.coefficient;
+            let row_span = ((term.offset % params.row_len) + term.len).div_ceil(params.row_len);
+            let fixed = term
+                .point
+                .iter()
+                .all(|&value| value == Fp::ZERO || value == Fp::ONE);
+            let factor = structured
+                && params.code == LigeroCode::Circle
+                && params.row_len.is_power_of_two()
+                && row_span >= STRUCTURED_CLAIM_MIN_ROWS
+                && !fixed;
+            if factor {
+                factor_claim_term_weights(params, term, scale, &mut templates);
+                continue;
+            }
 
-        let eq = eq_tensor(&claim.point);
-        for (local, &weight) in eq.iter().enumerate().take(claim.len) {
-            let global = claim.offset + local;
-            let cell = &mut rows[global / params.row_len][global % params.row_len];
-            *cell = *cell + coeff * weight;
+            let eq = eq_tensor(&term.point);
+            for (local, &weight) in eq.iter().enumerate().take(term.len) {
+                let global = term.offset + local;
+                let cell = &mut rows[global / params.row_len][global % params.row_len];
+                *cell = *cell + scale * weight;
+            }
         }
     }
     Ok(ClaimWeightPlan {
@@ -866,6 +934,37 @@ fn claim_weight_plan(
 }
 
 fn evaluate_claim_weight_plan(
+    plan: ClaimWeightPlan,
+    column_eval: &ClaimBatchColumnEval,
+) -> Result<EvaluatedClaimWeights, LigeroError> {
+    #[cfg(test)]
+    if matches!(column_eval, ClaimBatchColumnEval::Circle { .. }) {
+        let evaluations = plan.residual_rows.len() + plan.templates.len();
+        CIRCLE_WEIGHT_ENCODE_CALLS.with(|calls| calls.set(calls.get() + evaluations));
+    }
+    let residual_rows = plan
+        .residual_rows
+        .into_par_iter()
+        .map(|(row, weights)| Ok((row, column_eval.eval_weights(&weights)?)))
+        .collect::<Result<Vec<_>, LigeroError>>()?;
+    let templates = plan
+        .templates
+        .into_par_iter()
+        .map(|template| {
+            Ok(EvaluatedWeightTemplate {
+                values: column_eval.eval_weights(&template.values)?,
+                row_scales: template.row_scales,
+            })
+        })
+        .collect::<Result<Vec<_>, LigeroError>>()?;
+    Ok(EvaluatedClaimWeights {
+        residual_rows,
+        templates,
+    })
+}
+
+#[cfg(test)]
+fn evaluate_claim_weight_plan_serial(
     plan: ClaimWeightPlan,
     column_eval: &ClaimBatchColumnEval,
 ) -> Result<EvaluatedClaimWeights, LigeroError> {
@@ -893,6 +992,56 @@ fn evaluate_claim_weight_plan(
 pub fn verify_split_claim_batch(
     root_a: [u8; 32],
     root_b: [u8; 32],
+    params: LigeroParams,
+    committed_len_a: usize,
+    committed_len_b: usize,
+    openings_a: &[ColumnOpening],
+    openings_b: &[ColumnOpening],
+    batch: &LigeroClaimBatch,
+    claims: &[LigeroLinearClaim],
+    gamma: &[Fp],
+) -> Result<bool, LigeroError> {
+    verify_split_claim_batch_inner(
+        SplitOpeningAuthentication::Verify { root_a, root_b },
+        params,
+        committed_len_a,
+        committed_len_b,
+        openings_a,
+        openings_b,
+        batch,
+        claims,
+        gamma,
+    )
+}
+
+pub(crate) fn verify_authenticated_split_claim_batch(
+    authenticated: AuthenticatedSplitOpenings<'_>,
+    batch: &LigeroClaimBatch,
+    claims: &[LigeroLinearClaim],
+    gamma: &[Fp],
+) -> Result<bool, LigeroError> {
+    verify_split_claim_batch_inner(
+        SplitOpeningAuthentication::AlreadyVerified,
+        authenticated.params,
+        authenticated.committed_len_a,
+        authenticated.committed_len_b,
+        authenticated.openings_a,
+        authenticated.openings_b,
+        batch,
+        claims,
+        gamma,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum SplitOpeningAuthentication {
+    Verify { root_a: [u8; 32], root_b: [u8; 32] },
+    AlreadyVerified,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_split_claim_batch_inner(
+    authentication: SplitOpeningAuthentication,
     params: LigeroParams,
     committed_len_a: usize,
     committed_len_b: usize,
@@ -960,10 +1109,12 @@ pub fn verify_split_claim_batch(
         if opening_a.column.len() != rows_a + 2 || opening_b.column.len() != rows_b + 2 {
             return Err(LigeroError::WrongGammaLength);
         }
-        if !verify_column(root_a, opening_a).map_err(LigeroError::Merkle)?
-            || !verify_column(root_b, opening_b).map_err(LigeroError::Merkle)?
-        {
-            return Ok(false);
+        if let SplitOpeningAuthentication::Verify { root_a, root_b } = authentication {
+            if !verify_column(root_a, opening_a).map_err(LigeroError::Merkle)?
+                || !verify_column(root_b, opening_b).map_err(LigeroError::Merkle)?
+            {
+                return Ok(false);
+            }
         }
         let blind_value = opening_a.column[rows_a + 1] + opening_b.column[rows_b + 1];
         let mut combined = blind_value;
@@ -1226,15 +1377,24 @@ fn validate_linear_claim(
     committed_rows: usize,
     claim: &LigeroLinearClaim,
 ) -> Result<(), LigeroError> {
-    if claim.len == 0 {
+    if claim.terms.is_empty() {
         return Err(LigeroError::WrongPointLength);
     }
-    let expected_point_len = claim.len.next_power_of_two().ilog2() as usize;
-    if claim.point.len() != expected_point_len {
-        return Err(LigeroError::WrongPointLength);
-    }
-    if claim.offset + claim.len > committed_rows * params.row_len {
-        return Err(LigeroError::WrongPointLength);
+    for term in &claim.terms {
+        if term.len == 0 {
+            return Err(LigeroError::WrongPointLength);
+        }
+        let expected_point_len = term.len.next_power_of_two().ilog2() as usize;
+        if term.point.len() != expected_point_len {
+            return Err(LigeroError::WrongPointLength);
+        }
+        if term
+            .offset
+            .checked_add(term.len)
+            .is_none_or(|end| end > committed_rows * params.row_len)
+        {
+            return Err(LigeroError::WrongPointLength);
+        }
     }
     Ok(())
 }
@@ -1265,16 +1425,17 @@ fn batched_row_weights(
     let mut rows = vec![vec![Fp::ZERO; params.row_len]; committed_rows];
     for (claim, coeff) in claims.iter().zip(gamma.iter().copied()) {
         validate_linear_claim(params, committed_rows, claim)?;
-        // WO-P1: expand the eq bit-product into a dense 2^m tensor once per
-        // claim by doubling (O(2^m) instead of m mults per cell), then scatter
-        // coeff·eq[local] into the row/column windows. Cells with
-        // local >= len keep weight 0 (never touched), matching the old
-        // per-cell bit-product that returned 0 outside [offset, offset + len).
-        let eq = eq_tensor(&claim.point);
-        for local in 0..claim.len {
-            let global = claim.offset + local;
-            let cell = &mut rows[global / params.row_len][global % params.row_len];
-            *cell = *cell + coeff * eq[local];
+        // WO-P1: expand each term's eq bit-product into a dense 2^m tensor
+        // once by doubling (O(2^m) instead of m mults per cell), then scatter
+        // gamma·term_coefficient·eq[local] into the row/column windows.
+        for term in &claim.terms {
+            let scale = coeff * term.coefficient;
+            let eq = eq_tensor(&term.point);
+            for local in 0..term.len {
+                let global = term.offset + local;
+                let cell = &mut rows[global / params.row_len][global % params.row_len];
+                *cell = *cell + scale * eq[local];
+            }
         }
     }
 
@@ -1390,8 +1551,6 @@ impl ClaimBatchColumnEval {
         match self {
             Self::Rs { .. } => self.eval_message(weights),
             Self::Circle { geom, .. } => {
-                #[cfg(test)]
-                CIRCLE_WEIGHT_ENCODE_CALLS.with(|calls| calls.set(calls.get() + 1));
                 let coeffs = circle_weight_coeffs(*geom, weights).map_err(LigeroError::Circle)?;
                 self.eval_coeffs(&coeffs, geom.data_slots)
             }
@@ -1414,17 +1573,23 @@ fn claim_extraction_sum(params: LigeroParams, coefficients: &[Fp]) -> Fp {
     }
 }
 
-/// Per-cell eq bit-product, kept as the independent test reference that
+/// Per-cell affine weight, kept as the independent test reference that
 /// `batched_row_weights_match_separate_claim_weights` cross-checks the tensor
 /// scatter against (WO-P1: the production path uses [`eq_tensor`]).
 #[cfg(test)]
 fn linear_claim_weight(claim: &LigeroLinearClaim, global_index: usize) -> Fp {
-    if global_index < claim.offset || global_index >= claim.offset + claim.len {
+    claim.terms.iter().fold(Fp::ZERO, |acc, term| {
+        acc + term.coefficient * linear_term_weight(term, global_index)
+    })
+}
+
+#[cfg(test)]
+fn linear_term_weight(term: &LigeroLinearTerm, global_index: usize) -> Fp {
+    if global_index < term.offset || global_index >= term.offset + term.len {
         return Fp::ZERO;
     }
-    let local = global_index - claim.offset;
-    claim
-        .point
+    let local = global_index - term.offset;
+    term.point
         .iter()
         .enumerate()
         .fold(Fp::ONE, |acc, (bit, &challenge)| {
@@ -1438,7 +1603,7 @@ fn linear_claim_weight(claim: &LigeroLinearClaim, global_index: usize) -> Fp {
 
 /// The dense eq-tensor of `point`: `eq[i] = Π_b (i_b ? point[b] : 1 − point[b])`
 /// over bits `b` of `i`, built by doubling in O(2^m). `eq[local]` equals the
-/// per-cell `linear_claim_weight` bit-product for `local < 2^m`.
+/// per-cell `linear_term_weight` bit-product for `local < 2^m`.
 fn eq_tensor(point: &[Fp]) -> Vec<Fp> {
     let mut eq = vec![Fp::ONE; 1usize << point.len()];
     let mut half = 1usize;
@@ -1481,11 +1646,15 @@ mod tests {
         let value = Mle::new(values[offset..offset + len].to_vec())
             .eval_at(&point)
             .unwrap();
-        LigeroLinearClaim {
+        LigeroLinearClaim::mle(offset, len, point, value)
+    }
+
+    fn cell_term(offset: usize, coefficient: Fp) -> LigeroLinearTerm {
+        LigeroLinearTerm {
             offset,
-            len,
-            point,
-            value,
+            len: 1,
+            point: Vec::new(),
+            coefficient,
         }
     }
 
@@ -1493,18 +1662,13 @@ mod tests {
     fn batched_row_weights_match_separate_claim_weights() {
         let params = small_params();
         let claims = vec![
-            LigeroLinearClaim {
-                offset: 0,
-                len: 8,
-                point: vec![Fp::from_u64(3), Fp::from_u64(5), Fp::from_u64(7)],
-                value: Fp::ZERO,
-            },
-            LigeroLinearClaim {
-                offset: 4,
-                len: 4,
-                point: vec![Fp::from_u64(11), Fp::from_u64(13)],
-                value: Fp::ZERO,
-            },
+            LigeroLinearClaim::mle(
+                0,
+                8,
+                vec![Fp::from_u64(3), Fp::from_u64(5), Fp::from_u64(7)],
+                Fp::ZERO,
+            ),
+            LigeroLinearClaim::mle(4, 4, vec![Fp::from_u64(11), Fp::from_u64(13)], Fp::ZERO),
         ];
         let gamma = [Fp::from_u64(17), Fp::from_u64(19)];
 
@@ -1528,7 +1692,7 @@ mod tests {
     fn structured_claim_plan_matches_dense_for_shifts_lengths_and_overlaps() {
         let params = v4_circle_params();
         let committed_rows = 100;
-        let shapes = [
+        let shapes: [(usize, usize); 9] = [
             (0, 8192),
             (1, 2048),
             (255, 777),
@@ -1539,18 +1703,33 @@ mod tests {
             (6000 + 127, 255),
             (7000, 128),
         ];
-        let claims = shapes
+        let mut claims = shapes
             .into_iter()
             .enumerate()
-            .map(|(claim_index, (offset, len))| LigeroLinearClaim {
-                offset,
-                len,
-                point: (0..len.next_power_of_two().ilog2())
+            .map(|(claim_index, (offset, len))| {
+                let point = (0..len.next_power_of_two().ilog2())
                     .map(|bit| Fp::from_u64(3 + claim_index as u64 * 17 + bit as u64 * 5))
-                    .collect(),
-                value: Fp::ZERO,
+                    .collect();
+                LigeroLinearClaim::mle(offset, len, point, Fp::ZERO)
             })
             .collect::<Vec<_>>();
+        claims.push(LigeroLinearClaim::affine(
+            vec![
+                LigeroLinearTerm {
+                    offset: 8_000,
+                    len: 8_192,
+                    point: (0..13).map(|bit| Fp::from_u64(71 + bit * 3)).collect(),
+                    coefficient: Fp::from_u64(3),
+                },
+                LigeroLinearTerm {
+                    offset: 20_000,
+                    len: 2_048,
+                    point: (0..11).map(|bit| Fp::from_u64(113 + bit * 5)).collect(),
+                    coefficient: -Fp::from_u64(5),
+                },
+            ],
+            Fp::ZERO,
+        ));
         let gamma = (0..claims.len())
             .map(|index| Fp::from_u64(101 + index as u64 * 13))
             .collect::<Vec<_>>();
@@ -1577,6 +1756,52 @@ mod tests {
             .filter(|(_, weights)| weights.iter().any(|&weight| weight != Fp::ZERO))
             .collect::<Vec<_>>();
         assert_eq!(reconstructed, dense);
+    }
+
+    #[test]
+    fn parallel_claim_weight_evaluation_matches_serial_order_and_values() {
+        let params = v4_circle_params();
+        let committed_rows = 8;
+        let claims = vec![
+            LigeroLinearClaim::mle(
+                0,
+                1024,
+                (0..10).map(|bit| Fp::from_u64(3 + bit * 5)).collect(),
+                Fp::ZERO,
+            ),
+            LigeroLinearClaim::mle(
+                1024,
+                256,
+                (0..8).map(|bit| Fp::from_u64(71 + bit * 7)).collect(),
+                Fp::ZERO,
+            ),
+        ];
+        let gamma = [Fp::from_u64(131), Fp::from_u64(137)];
+        let indices = (0..params.openings)
+            .map(|index| (index * 19 + 3) % params.codeword_len)
+            .collect::<Vec<_>>();
+        let column_eval = ClaimBatchColumnEval::new(params, &indices).unwrap();
+        let serial = evaluate_claim_weight_plan_serial(
+            claim_weight_plan(params, committed_rows, &claims, &gamma, true).unwrap(),
+            &column_eval,
+        )
+        .unwrap();
+        let parallel = evaluate_claim_weight_plan(
+            claim_weight_plan(params, committed_rows, &claims, &gamma, true).unwrap(),
+            &column_eval,
+        )
+        .unwrap();
+
+        assert!(
+            !serial.residual_rows.is_empty() && !serial.templates.is_empty(),
+            "fixture must exercise both ordered collections"
+        );
+        assert_eq!(parallel.residual_rows, serial.residual_rows);
+        assert_eq!(parallel.templates.len(), serial.templates.len());
+        for (parallel, serial) in parallel.templates.iter().zip(&serial.templates) {
+            assert_eq!(parallel.values, serial.values);
+            assert_eq!(parallel.row_scales, serial.row_scales);
+        }
     }
 
     #[test]
@@ -1607,6 +1832,244 @@ mod tests {
         )
         .unwrap());
         assert_eq!(rs_encode_padded_call_count(), 0);
+    }
+
+    #[test]
+    fn affine_claim_accepts_equal_private_cells_and_rejects_different_cells() {
+        let params = small_params();
+        let claim = LigeroLinearClaim::affine(
+            vec![cell_term(1, Fp::ONE), cell_term(9, -Fp::ONE)],
+            Fp::ZERO,
+        );
+        let gamma = [Fp::from_u64(13)];
+        let indices = [8, 13, 21];
+
+        let mut equal_values = (0..12)
+            .map(|value| Fp::from_u64(value + 1))
+            .collect::<Vec<_>>();
+        equal_values[9] = equal_values[1];
+        let equal_commitment = commit_witness(&equal_values, params).unwrap();
+        let equal_batch = equal_commitment
+            .claim_batch(std::slice::from_ref(&claim), &gamma)
+            .unwrap();
+        let equal_openings = equal_commitment.open_columns(&indices).unwrap();
+        assert!(verify_claim_batch(
+            equal_commitment.root(),
+            params,
+            equal_values.len(),
+            &equal_openings,
+            &equal_batch,
+            std::slice::from_ref(&claim),
+            &gamma,
+        )
+        .unwrap());
+
+        let mut different_values = equal_values;
+        different_values[9] = different_values[9] + Fp::ONE;
+        let different_commitment = commit_witness(&different_values, params).unwrap();
+        let different_batch = different_commitment
+            .claim_batch(std::slice::from_ref(&claim), &gamma)
+            .unwrap();
+        let different_openings = different_commitment.open_columns(&indices).unwrap();
+        assert!(!verify_claim_batch(
+            different_commitment.root(),
+            params,
+            different_values.len(),
+            &different_openings,
+            &different_batch,
+            std::slice::from_ref(&claim),
+            &gamma,
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn split_affine_claim_binds_private_cells_across_roots() {
+        let params = small_params();
+        let values_a = (0..12)
+            .map(|value| Fp::from_u64(value + 1))
+            .collect::<Vec<_>>();
+        let mut values_b = (0..12)
+            .map(|value| Fp::from_u64(value + 101))
+            .collect::<Vec<_>>();
+        values_b[2] = values_a[7];
+        let commitment_a = commit_witness(&values_a, params).unwrap();
+        let commitment_b = commit_witness(&values_b, params).unwrap();
+        let b_offset = commitment_a.witness_rows * params.row_len + 2;
+        let claim = LigeroLinearClaim::affine(
+            vec![cell_term(7, Fp::ONE), cell_term(b_offset, -Fp::ONE)],
+            Fp::ZERO,
+        );
+        let gamma = [Fp::from_u64(17)];
+        let batch = commitment_a
+            .split_claim_batch(&commitment_b, std::slice::from_ref(&claim), &gamma)
+            .unwrap();
+        let indices = [8, 13, 21];
+        let openings_a = commitment_a.open_columns(&indices).unwrap();
+        let openings_b = commitment_b.open_columns(&indices).unwrap();
+        assert!(verify_split_claim_batch(
+            commitment_a.root(),
+            commitment_b.root(),
+            params,
+            values_a.len(),
+            values_b.len(),
+            &openings_a,
+            &openings_b,
+            &batch,
+            std::slice::from_ref(&claim),
+            &gamma,
+        )
+        .unwrap());
+
+        values_b[2] = values_b[2] + Fp::ONE;
+        let different_b = commit_witness(&values_b, params).unwrap();
+        let different_batch = commitment_a
+            .split_claim_batch(&different_b, std::slice::from_ref(&claim), &gamma)
+            .unwrap();
+        let different_openings_b = different_b.open_columns(&indices).unwrap();
+        assert!(!verify_split_claim_batch(
+            commitment_a.root(),
+            different_b.root(),
+            params,
+            values_a.len(),
+            values_b.len(),
+            &openings_a,
+            &different_openings_b,
+            &different_batch,
+            std::slice::from_ref(&claim),
+            &gamma,
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn authenticated_split_claim_path_matches_public_and_rejects_tamper() {
+        let params = small_params();
+        let values_a = (0..12)
+            .map(|value| Fp::from_u64(value + 1))
+            .collect::<Vec<_>>();
+        let mut values_b = (0..12)
+            .map(|value| Fp::from_u64(value + 101))
+            .collect::<Vec<_>>();
+        values_b[2] = values_a[7];
+        let commitment_a = commit_witness(&values_a, params).unwrap();
+        let commitment_b = commit_witness(&values_b, params).unwrap();
+        let b_offset = commitment_a.witness_rows * params.row_len + 2;
+        let claim = LigeroLinearClaim::affine(
+            vec![cell_term(7, Fp::ONE), cell_term(b_offset, -Fp::ONE)],
+            Fp::ZERO,
+        );
+        let claims = [claim];
+        let gamma = [Fp::from_u64(17)];
+        let batch = commitment_a
+            .split_claim_batch(&commitment_b, &claims, &gamma)
+            .unwrap();
+        let proximity_gamma = (0..commitment_a.witness_rows + commitment_b.witness_rows)
+            .map(|index| Fp::from_u64(31 + index as u64))
+            .collect::<Vec<_>>();
+        let proximity_claim = commitment_a
+            .split_proximity_claim(&commitment_b, &proximity_gamma)
+            .unwrap();
+        let indices = [8, 13, 21];
+        let openings_a = commitment_a.open_columns(&indices).unwrap();
+        let openings_b = commitment_b.open_columns(&indices).unwrap();
+
+        let public = verify_split_claim_batch(
+            commitment_a.root(),
+            commitment_b.root(),
+            params,
+            values_a.len(),
+            values_b.len(),
+            &openings_a,
+            &openings_b,
+            &batch,
+            &claims,
+            &gamma,
+        )
+        .unwrap();
+        let authenticated = verify_and_authenticate_split_openings(
+            commitment_a.root(),
+            commitment_b.root(),
+            params,
+            values_a.len(),
+            values_b.len(),
+            &openings_a,
+            &openings_b,
+            &proximity_claim,
+            &proximity_gamma,
+        )
+        .unwrap()
+        .expect("honest split openings authenticate");
+        let reused =
+            verify_authenticated_split_claim_batch(authenticated, &batch, &claims, &gamma).unwrap();
+        assert_eq!(reused, public);
+        assert!(reused);
+
+        let mut tampered_batch = batch.clone();
+        tampered_batch.coefficients[0] = tampered_batch.coefficients[0] + Fp::ONE;
+        let public_tamper = verify_split_claim_batch(
+            commitment_a.root(),
+            commitment_b.root(),
+            params,
+            values_a.len(),
+            values_b.len(),
+            &openings_a,
+            &openings_b,
+            &tampered_batch,
+            &claims,
+            &gamma,
+        )
+        .unwrap();
+        let authenticated = verify_and_authenticate_split_openings(
+            commitment_a.root(),
+            commitment_b.root(),
+            params,
+            values_a.len(),
+            values_b.len(),
+            &openings_a,
+            &openings_b,
+            &proximity_claim,
+            &proximity_gamma,
+        )
+        .unwrap()
+        .expect("batch tamper does not alter opening authentication");
+        let reused_tamper =
+            verify_authenticated_split_claim_batch(authenticated, &tampered_batch, &claims, &gamma)
+                .unwrap();
+        assert_eq!(reused_tamper, public_tamper);
+        assert!(!reused_tamper);
+
+        let mut tampered_openings_a = openings_a.clone();
+        tampered_openings_a[0].column[0] = tampered_openings_a[0].column[0] + Fp::ONE;
+        assert!(verify_and_authenticate_split_openings(
+            commitment_a.root(),
+            commitment_b.root(),
+            params,
+            values_a.len(),
+            values_b.len(),
+            &tampered_openings_a,
+            &openings_b,
+            &proximity_claim,
+            &proximity_gamma,
+        )
+        .unwrap()
+        .is_none());
+
+        let mut wrong_root_b = commitment_b.root();
+        wrong_root_b[0] ^= 1;
+        assert!(verify_and_authenticate_split_openings(
+            commitment_a.root(),
+            wrong_root_b,
+            params,
+            values_a.len(),
+            values_b.len(),
+            &openings_a,
+            &openings_b,
+            &proximity_claim,
+            &proximity_gamma,
+        )
+        .unwrap()
+        .is_none());
     }
 
     #[test]
@@ -1806,7 +2269,7 @@ mod tests {
                 (0..10).map(|bit| Fp::from_u64(29 + bit * 2)).collect(),
             ),
         ];
-        claims[1].offset = commitment_a.witness_rows * params.row_len;
+        claims[1].terms[0].offset = commitment_a.witness_rows * params.row_len;
         let gamma = [Fp::from_u64(53), Fp::from_u64(59)];
         let batch = commitment_a
             .split_claim_batch(&commitment_b, &claims, &gamma)
@@ -2061,12 +2524,12 @@ mod tests {
             // Second claim indexes into the b-commitment's rows (combined
             // layout). value is irrelevant to the batch (weights depend only on
             // offset/len/point), so build it directly.
-            LigeroLinearClaim {
-                offset: a.witness_rows * params.row_len + 64,
-                len: 4,
-                point: vec![Fp::from_u64(7), Fp::from_u64(11)],
-                value: Fp::ZERO,
-            },
+            LigeroLinearClaim::mle(
+                a.witness_rows * params.row_len + 64,
+                4,
+                vec![Fp::from_u64(7), Fp::from_u64(11)],
+                Fp::ZERO,
+            ),
         ];
         let split_gamma = [Fp::from_u64(29), Fp::from_u64(31)];
         let split = a

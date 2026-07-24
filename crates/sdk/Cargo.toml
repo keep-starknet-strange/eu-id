@@ -25,6 +25,8 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 # ONLY for the `uniffi-bindgen` bin — kept off by default so the SDK cdylib
 # does not link the whole generator toolchain into the `.so`.
 bindgen = ["uniffi/cli"]
+# Benchmark-only Android JNI adapter around the exact UniFFI identity API.
+bench-jni = ["dep:jni", "dep:libc", "dep:memory-stats", "dep:rayon"]
 
 [dependencies]
 # Production allocator — see eu-id-ffi: keeps SDK numbers on the same
@@ -50,6 +52,10 @@ bincode = "1"
 # compressing the inner bincode proof payload carried in `MdocProofEnvelope`.
 zstd = "0.13"
 sha2 = "0.10"
+jni = { version = "0.21", optional = true, default-features = false }
+libc = { version = "0.2", optional = true }
+memory-stats = { version = "1.2", optional = true, features = ["always_use_statm"] }
+rayon = { version = "1", optional = true }
 
 [[bin]]
 # Bundled binding generator. Run as:

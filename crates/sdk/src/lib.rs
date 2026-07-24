@@ -40,6 +40,9 @@ use sha2::{Digest, Sha256};
 
 uniffi::setup_scaffolding!();
 
+#[cfg(feature = "bench-jni")]
+mod android_bench_jni;
+
 // The pure contract↔prover translation layer (§9.1): `to_policy` builds the
 // prover's public policy from the UniFFI statement. Wired into the production
 // prove/verify bodies below (§9.2).

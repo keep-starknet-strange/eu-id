@@ -22,14 +22,27 @@ class MainActivity : Activity() {
         setContentView(buildContentView())
 
         if (intent.action == ACTION_TEST_LOOP) {
-            startBenchmark(intent.data, finishAfterRun = true)
+            val scenario = intent.getIntExtra(EXTRA_SCENARIO, FIRST_GAME_LOOP_SCENARIO)
+            startBenchmark(
+                intent.data,
+                finishAfterRun = true,
+                allPerformanceCores = true,
+                scenario = scenario,
+            )
         }
     }
 
     private fun buildContentView(): LinearLayout {
         runButton = Button(this).apply {
-            text = "Run benchmark suite"
-            setOnClickListener { startBenchmark(outputUri = null, finishAfterRun = false) }
+            text = "Run SDK proveIdentity benchmark"
+            setOnClickListener {
+                startBenchmark(
+                    outputUri = null,
+                    finishAfterRun = false,
+                    allPerformanceCores = BuildConfig.P256_BIG_CORES,
+                    scenario = 0,
+                )
+            }
         }
         output = TextView(this).apply {
             text = "Ready"
@@ -59,31 +72,43 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun startBenchmark(outputUri: Uri?, finishAfterRun: Boolean) {
+    private fun startBenchmark(
+        outputUri: Uri?,
+        finishAfterRun: Boolean,
+        allPerformanceCores: Boolean,
+        scenario: Int,
+    ) {
         runButton.isEnabled = false
-        output.text = "Running identity cold sample…"
-        val pinning = intent.getStringExtra(EXTRA_PINNING)
+        output.text = "Running SDK proveIdentity…"
 
         Thread(
             null,
             {
-                val json = runCatching { BenchRunner.runSuite(applicationContext, pinning) }
+                val json = runCatching {
+                    BenchRunner.runSuite(applicationContext, allPerformanceCores, scenario)
+                }
                     .getOrElse { error ->
-                        Log.e(TAG, "Benchmark suite failed", error)
-                        JSONObject().put("error", error.message ?: error.javaClass.simpleName).toString()
+                        Log.e(TAG, "proveIdentity benchmark failed", error)
+                        JSONObject()
+                            .put("ok", false)
+                            .put("error", error.message ?: error.javaClass.simpleName)
+                            .toString()
                     }
 
-                if (outputUri != null) {
-                    runCatching { writeResult(outputUri, json) }
-                        .onFailure { Log.e(TAG, "Could not write Game Loop result", it) }
-                } else if (finishAfterRun) {
-                    Log.e(TAG, "Game Loop launch did not provide an output URI")
+                if (finishAfterRun) {
+                    val requiredOutput = checkNotNull(outputUri) {
+                        "Game Loop launch did not provide an output URI"
+                    }
+                    writeResult(requiredOutput, json)
                 }
 
                 runOnUiThread {
                     output.text = json
                     runButton.isEnabled = true
-                    if (finishAfterRun) finish()
+                    if (finishAfterRun) {
+                        finish()
+                        Runtime.getRuntime().exit(0)
+                    }
                 }
             },
             WORKER_NAME,
@@ -100,7 +125,8 @@ class MainActivity : Activity() {
     private companion object {
         const val TAG = "EuIdBench"
         const val ACTION_TEST_LOOP = "com.google.intent.action.TEST_LOOP"
-        const val EXTRA_PINNING = "pinning"
+        const val EXTRA_SCENARIO = "scenario"
+        const val FIRST_GAME_LOOP_SCENARIO = 1
         const val WORKER_NAME = "eu-id-bench"
         const val WORKER_STACK_BYTES = 32L * 1024 * 1024
     }

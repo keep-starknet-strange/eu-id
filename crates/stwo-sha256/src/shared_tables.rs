@@ -33,7 +33,7 @@ use crate::interaction::{
 };
 use crate::multiplicities::{range_k_multiplicities, sum_multiplicity_vectors};
 use crate::preprocessed::{
-    generate_shared_table_preprocessed_trace, shared_table_preprocessed_log_sizes, LOG_SIZE_16,
+    generate_shared_table_preprocessed_trace, shared_table_preprocessed_log_sizes,
 };
 use crate::relations::{Sha256Relations, SharedShaTableRelations};
 use crate::types::Sha256Witness;
@@ -62,11 +62,11 @@ impl ShaTablesInteractionClaim {
 /// (`shared_table_interaction_trace`), multiplicity-column order
 /// (`shared_table_trace`), interaction/trace log-size layout, and component
 /// registration (`ShaTablesComponents`). The 4 range tables pair into 3 chunks
-/// (range₁₆ single, range₂+range₄ pair, range₅ single). Under Class-D
+/// (range₈ single, range₂+range₄ pair, range₅ single). Under Class-D
 /// single-gated blinding each producer emits ONE fraction, so each chunk yields
 /// exactly one paired interaction column: 4 producers → 3 interaction columns.
 const PRODUCER_PAIRS: &[&[SharedProducer]] = &[
-    &[SharedProducer::Range(RangeKind::Range16)],
+    &[SharedProducer::Range(RangeKind::Range8)],
     &[
         SharedProducer::Range(RangeKind::Range2),
         SharedProducer::Range(RangeKind::Range4),
@@ -320,7 +320,11 @@ impl Air for ShaTablesProver {
 
 impl AirProver for ShaTablesProver {
     fn max_log_size(&self) -> u32 {
-        LOG_SIZE_16
+        RANGE_TABLES
+            .iter()
+            .map(|&kind| SharedProducer::Range(kind).blind_log_size())
+            .max()
+            .expect("shared SHA provider has range tables")
     }
 
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>) {
@@ -523,8 +527,8 @@ fn producer_frac(
                 RangeKind::Range5 => {
                     producer_blind_frac_column(&relations.range.range_5, mults, real_len, row_iter)
                 }
-                RangeKind::Range16 => {
-                    producer_blind_frac_column(&relations.range.range_16, mults, real_len, row_iter)
+                RangeKind::Range8 => {
+                    producer_blind_frac_column(&relations.range.range_8, mults, real_len, row_iter)
                 }
             }
         }

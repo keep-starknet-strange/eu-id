@@ -19,11 +19,11 @@
 //!     fired chunk-wise to combine the two `O2` partials of every
 //!     σ-application.
 //!   - [`RangeRelations`] — the four width-1 range-check channels
-//!     `Range_2`/`Range_4`/`Range_5`/`Range_16`. `Range_k` pins a single
-//!     base-field value into `[0, k)`. The mod-2³² limb-add carries are
+//!     `Range_2`/`Range_4`/`Range_5`/`Range_8`. The mod-2³² limb-add carries are
 //!     range-checked through `Range_{2,4,5}` per the headroom audit
-//!     (`crate::headroom`); terminal 16-bit limbs (the final block's
-//!     `h_out`, per design §10.2) are range-checked through `Range_16`.
+//!     (`crate::headroom`); terminal digest bytes are checked through
+//!     `Range_8` and recomposed into the final block's 16-bit `h_out` limbs
+//!     (per design §10.2).
 //!     Row content for each `Range_k` is the table `crate::tables_local::range_k()`.
 //!
 //! Each `relation!(_, N)` declares a struct holding a `LookupElements<N>`
@@ -168,14 +168,14 @@ impl Xor8Relation {
 
 /// Row width of every `Range_k` channel: a single base-field value pinned
 /// to `[0, k)`. The lookup tuple passed to `add_to_relation` is a 1-cell
-/// slice — the carry limb (for mod-2³² adds) or the terminal 16-bit limb
-/// (for `Range_16` on `h_out`).
+/// slice — the carry limb (for mod-2³² adds) or a terminal digest byte
+/// (for `Range_8` on `h_out`).
 pub const RANGE_REL_SIZE: usize = 1;
 
 relation!(Range2Relation, RANGE_REL_SIZE);
 relation!(Range4Relation, RANGE_REL_SIZE);
 relation!(Range5Relation, RANGE_REL_SIZE);
-relation!(Range16Relation, RANGE_REL_SIZE);
+relation!(Range8Relation, RANGE_REL_SIZE);
 
 /// The four range-check channels grouped for `Sha256Eval`.
 ///
@@ -183,9 +183,8 @@ relation!(Range16Relation, RANGE_REL_SIZE);
 ///   pair of each mod-2³² limb-add (per the headroom audit's family
 ///   bound: `k=4` for the schedule recurrence, `k=5` for `T1`, `k=2`
 ///   everywhere else).
-/// - `range_16` pins terminal 16-bit limbs that are not transitively
-///   pinned by a downstream split-and-pack / σ-decode lookup — most
-///   importantly the final block's `h_out` digest limbs.
+/// - `range_8` pins every terminal digest byte. Recomposition from two
+///   checked bytes pins each final `h_out` limb to 16 bits.
 ///
 /// Each channel produces one preprocessed-column row per value and has its
 /// own multiplicity column committed by the matching producer component.
@@ -194,7 +193,7 @@ pub struct RangeRelations {
     pub range_2: Range2Relation,
     pub range_4: Range4Relation,
     pub range_5: Range5Relation,
-    pub range_16: Range16Relation,
+    pub range_8: Range8Relation,
 }
 
 impl RangeRelations {
@@ -217,7 +216,7 @@ impl RangeRelations {
                 RangeKind::Range2 => out.range_2 = Range2Relation::draw(channel),
                 RangeKind::Range4 => out.range_4 = Range4Relation::draw(channel),
                 RangeKind::Range5 => out.range_5 = Range5Relation::draw(channel),
-                RangeKind::Range16 => out.range_16 = Range16Relation::draw(channel),
+                RangeKind::Range8 => out.range_8 = Range8Relation::draw(channel),
             }
         }
         out
@@ -228,7 +227,7 @@ impl RangeRelations {
             range_2: Range2Relation::dummy(),
             range_4: Range4Relation::dummy(),
             range_5: Range5Relation::dummy(),
-            range_16: Range16Relation::dummy(),
+            range_8: Range8Relation::dummy(),
         }
     }
 }
@@ -244,7 +243,7 @@ pub struct SharedRangeRelations {
     pub range_2: SharedRelation<Range2Relation>,
     pub range_4: SharedRelation<Range4Relation>,
     pub range_5: SharedRelation<Range5Relation>,
-    pub range_16: SharedRelation<Range16Relation>,
+    pub range_8: SharedRelation<Range8Relation>,
 }
 
 impl SharedRangeRelations {
@@ -256,7 +255,7 @@ impl SharedRangeRelations {
         self.range_2.set(relations.range_2.clone());
         self.range_4.set(relations.range_4.clone());
         self.range_5.set(relations.range_5.clone());
-        self.range_16.set(relations.range_16.clone());
+        self.range_8.set(relations.range_8.clone());
     }
 
     pub fn get(&self) -> RangeRelations {
@@ -264,7 +263,7 @@ impl SharedRangeRelations {
             range_2: self.range_2.get(),
             range_4: self.range_4.get(),
             range_5: self.range_5.get(),
-            range_16: self.range_16.get(),
+            range_8: self.range_8.get(),
         }
     }
 }
@@ -323,12 +322,9 @@ const _: () = assert!(DIGEST_REL_SIZE == air_core::relations::DIGEST_BYTES_ARITY
 /// two cannot be equated limb-for-limb, so the relation carries **bytes**:
 /// the SHA AIR decomposes each limb into two bytes (`limb = 256·b1 + b0`)
 /// and yields the 32 big-endian bytes. The byte values are tied to the
-/// (already `Range_16`-pinned) `h_out` limbs by that decomposition
-/// constraint; the **`[0, 256)` range-check of each byte is the consumer's
-/// responsibility** (P256 already witnesses and range-checks `z`'s byte
-/// decomposition). A consumer that requires out-of-range bytes cannot match
-/// the honest in-range bytes a correct prover yields, so the balance fails
-/// closed — see the relation's use in `crate::constraints::Sha256Eval`.
+/// `h_out` limbs by that decomposition constraint; SHA range-checks every
+/// byte through `Range_8`, so both the yielded byte representation and the
+/// recomposed 16-bit limbs are canonical before crossing the module boundary.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DigestRelation {
     pub digest: Sha256Digest,
@@ -566,7 +562,7 @@ mod tests {
             <Range2Relation as Relation<BaseField, SecureField>>::get_size(&r.range.range_2),
             <Range4Relation as Relation<BaseField, SecureField>>::get_size(&r.range.range_4),
             <Range5Relation as Relation<BaseField, SecureField>>::get_size(&r.range.range_5),
-            <Range16Relation as Relation<BaseField, SecureField>>::get_size(&r.range.range_16),
+            <Range8Relation as Relation<BaseField, SecureField>>::get_size(&r.range.range_8),
         ] {
             assert_eq!(size, RANGE_REL_SIZE);
         }

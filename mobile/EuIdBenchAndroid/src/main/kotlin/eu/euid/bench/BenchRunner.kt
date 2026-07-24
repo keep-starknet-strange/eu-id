@@ -2,48 +2,73 @@ package eu.euid.bench
 
 import android.content.Context
 import android.os.Build
+import android.os.PowerManager
+import android.provider.Settings
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.InputStream
 import java.security.MessageDigest
+import java.util.zip.ZipFile
 
-object BenchRunner {
-    const val ITERATIONS = 5
-    const val PINNING_UNPINNED = "unpinned"
-    const val PINNING_A55 = "a55"
-    const val PINNING_A77 = "a77"
+internal enum class P256Variant(
+    val resultName: String,
+    val libraryName: String,
+) {
+    RANGE16_BASELINE("A_range16_baseline", "euid_zk_sdk_p256_range16"),
+    RANGE8_CANDIDATE("B_range8_candidate", "euid_zk_sdk_p256_range8");
 
-    private val validPinning = setOf(PINNING_UNPINNED, PINNING_A55, PINNING_A77)
+    val fileName: String
+        get() = "lib$libraryName.so"
+}
 
-    init {
-        System.loadLibrary("eu_id_ffi")
+private const val MANUAL_SCENARIO = 0
+private val GAME_LOOP_VARIANTS = listOf(
+    P256Variant.RANGE8_CANDIDATE,
+    P256Variant.RANGE16_BASELINE,
+    P256Variant.RANGE16_BASELINE,
+    P256Variant.RANGE8_CANDIDATE,
+    P256Variant.RANGE16_BASELINE,
+    P256Variant.RANGE8_CANDIDATE,
+    P256Variant.RANGE8_CANDIDATE,
+    P256Variant.RANGE16_BASELINE,
+)
+
+internal fun p256VariantForScenario(scenario: Int): P256Variant =
+    if (scenario == MANUAL_SCENARIO) {
+        P256Variant.RANGE16_BASELINE
+    } else {
+        requireNotNull(GAME_LOOP_VARIANTS.getOrNull(scenario - 1)) {
+            "P-256 Game Loop scenario must be in 1..${GAME_LOOP_VARIANTS.size}, got $scenario"
+        }
     }
 
-    @JvmStatic
-    external fun identity(iters: Int): String
+internal fun requireAllBigForGameLoop(scenario: Int, allPerformanceCores: Boolean) {
+    require(scenario == MANUAL_SCENARIO || allPerformanceCores) {
+        "P-256 Game Loop scenarios must use all detected performance cores"
+    }
+}
 
+object BenchRunner {
     @JvmStatic
-    external fun mdoc(iters: Int): String
+    external fun identity(allPerformanceCores: Boolean): String
 
-    @JvmStatic
-    external fun p256(iters: Int): String
-
-    @JvmStatic
-    external fun sha256(iters: Int): String
-
-    fun runSuite(context: Context, requestedPinning: String?): String {
-        val pinning = requestedPinning?.takeIf(validPinning::contains) ?: PINNING_UNPINNED
+    fun runSuite(context: Context, allPerformanceCores: Boolean, scenario: Int): String {
+        requireAllBigForGameLoop(scenario, allPerformanceCores)
+        val variant = p256VariantForScenario(scenario)
+        System.loadLibrary(variant.libraryName)
         val thermalBefore = thermalTemperatures()
-        val cold = JSONObject(identity(1))
-
-        val benches = JSONObject()
-            .put("identity", JSONObject(identity(ITERATIONS)))
-            .put("mdoc", JSONObject(mdoc(ITERATIONS)))
-            .put("p256", JSONObject(p256(ITERATIONS)))
-            .put("sha256", JSONObject(sha256(ITERATIONS)))
+        val thermalStatusBefore = thermalStatus(context)
+        val benchmark = JSONObject(identity(allPerformanceCores))
+        val thermalAfter = thermalTemperatures()
+        val thermalStatusAfter = thermalStatus(context)
 
         val meta = JSONObject()
             .put("model", Build.MODEL)
+            .put("build_fingerprint", Build.FINGERPRINT)
+            .put("kernel", System.getProperty("os.version", ""))
+            .put("unit_id_sha256", unitIdSha256(context))
+            .put("scenario", scenario)
             .put("soc_features", cpuFeatures())
             .put("cores", Runtime.getRuntime().availableProcessors())
             .put("api", Build.VERSION.SDK_INT)
@@ -51,14 +76,33 @@ object BenchRunner {
             .put("git", BuildConfig.BENCH_GIT)
             .put("stwo_rev", BuildConfig.STWO_REV)
             .put("apk_sha256", apkSha256(context))
+            .put("variant", variant.resultName)
+            .put("selected_so", variant.fileName)
+            .put("selected_so_sha256", selectedSoSha256(context, variant.fileName))
             .put("thermal_before_c", thermalBefore)
-            .put("thermal_after_c", thermalTemperatures())
-            .put("pinning", pinning)
+            .put("thermal_after_c", thermalAfter)
+            .put("thermal_status_before", thermalStatusBefore)
+            .put("thermal_status_after", thermalStatusAfter)
+
+        val profile = JSONObject()
+            .put("api_entrypoint", "proveIdentity")
+            .put("proof_scope", "full_mdoc_identity_issuer_es256_device_es256_age_nationality")
+            .put("revocation", false)
+            .put("fresh_process_proofs", 1)
+            .put(
+                "thread_policy",
+                if (allPerformanceCores) {
+                    "all_detected_performance_cores"
+                } else {
+                    "single_highest_capacity_performance_core"
+                },
+            )
 
         return JSONObject()
             .put("meta", meta)
-            .put("identity_cold_ms", cold.getLong("prove_ms"))
-            .put("benches", benches)
+            .put("profile", profile)
+            .put("benchmark", benchmark)
+            .put("ok", benchmark.optBoolean("ok", false))
             .toString()
     }
 
@@ -82,18 +126,45 @@ object BenchRunner {
         return values
     }
 
-    private fun apkSha256(context: Context): String {
-        val digest = MessageDigest.getInstance("SHA-256")
-        File(context.applicationInfo.sourceDir).inputStream().buffered().use { input ->
-            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-            while (true) {
-                val read = input.read(buffer)
-                if (read < 0) break
-                digest.update(buffer, 0, read)
+    private fun apkSha256(context: Context): String =
+        File(context.applicationInfo.sourceDir).inputStream().buffered().use(::sha256)
+
+    private fun selectedSoSha256(context: Context, fileName: String): String =
+        ZipFile(context.applicationInfo.sourceDir).use { apk ->
+            val entryName = "lib/arm64-v8a/$fileName"
+            val entry = requireNotNull(apk.getEntry(entryName)) {
+                "Selected native library is missing from APK: $entryName"
             }
+            apk.getInputStream(entry).buffered().use(::sha256)
+        }
+
+    private fun sha256(input: InputStream): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+        while (true) {
+            val read = input.read(buffer)
+            if (read < 0) break
+            digest.update(buffer, 0, read)
         }
         return digest.digest().joinToString("") {
             (it.toInt() and 0xff).toString(16).padStart(2, '0')
         }
     }
+
+    private fun unitIdSha256(context: Context): String {
+        val unitId = Settings.Secure.getString(
+            context.contentResolver,
+            Settings.Secure.ANDROID_ID,
+        ).orEmpty()
+        return MessageDigest.getInstance("SHA-256")
+            .digest(unitId.toByteArray(Charsets.UTF_8))
+            .joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }
+    }
+
+    private fun thermalStatus(context: Context): Int =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            context.getSystemService(PowerManager::class.java).currentThermalStatus
+        } else {
+            -1
+        }
 }

@@ -47,6 +47,49 @@ fn prove_pipeline(pw: &PipelineWitness) -> Result<Proof, Error> {
     )
 }
 
+fn assert_equivalent_randomized_proofs(first: &Proof, second: &Proof, context: &str) {
+    const MAX_RANDOMIZED_PROOF_SIZE_DELTA_PERCENT: usize = 1;
+
+    let expected = first.p256_instances().to_vec();
+    let expected_nonce = first.nonce_p256_instances().to_vec();
+    assert_eq!(
+        second.p256_instances(),
+        expected,
+        "{context}: credential statements differ"
+    );
+    assert_eq!(
+        second.nonce_p256_instances(),
+        expected_nonce,
+        "{context}: nonce statements differ"
+    );
+
+    let first_len = bincode::serialize(first)
+        .expect("first proof serializes")
+        .len();
+    let second_len = bincode::serialize(second)
+        .expect("second proof serializes")
+        .len();
+    assert_eq!(
+        first.stark_proof.0.config, second.stark_proof.0.config,
+        "{context}: PCS config differs"
+    );
+    assert_eq!(
+        first.stark_proof.0.commitments.len(),
+        second.stark_proof.0.commitments.len(),
+        "{context}: commitment-tree count differs"
+    );
+    let max_len = first_len.max(second_len);
+    let allowed_delta = max_len * MAX_RANDOMIZED_PROOF_SIZE_DELTA_PERCENT / 100;
+    assert!(
+        first_len.abs_diff(second_len) <= allowed_delta,
+        "{context}: randomized proof-size delta exceeds {MAX_RANDOMIZED_PROOF_SIZE_DELTA_PERCENT}% \
+         ({first_len} vs {second_len})"
+    );
+
+    verify(first, &expected, &expected_nonce).expect("first randomized proof verifies");
+    verify(second, &expected, &expected_nonce).expect("second randomized proof verifies");
+}
+
 #[test]
 #[ignore = "WO-1.6 diagnostic: proves the same witness twice and prints cache warm-up timing"]
 fn wo_1_6_repeated_prove_timing() {
@@ -61,9 +104,7 @@ fn wo_1_6_repeated_prove_timing() {
     let second = prove_pipeline(&pw).expect("second proof generates");
     let second_ms = second_start.elapsed().as_secs_f64() * 1000.0;
 
-    let first_bytes = bincode::serialize(&first).expect("first proof serializes");
-    let second_bytes = bincode::serialize(&second).expect("second proof serializes");
-    assert_eq!(first_bytes, second_bytes, "cached proof bytes must match");
+    assert_equivalent_randomized_proofs(&first, &second, "cached prove");
 
     eprintln!(
         "WO-1.6 repeated prove timing: first_ms={first_ms:.3} second_ms={second_ms:.3} delta_ms={:.3}",
@@ -72,22 +113,20 @@ fn wo_1_6_repeated_prove_timing() {
 }
 
 #[test]
-#[ignore = "WO-1.6 diagnostic: proves twice to assert cache byte identity"]
-fn wo_1_6_repeated_prove_bytes_identical() {
+#[ignore = "WO-1.6 diagnostic: proves twice to assert randomized proof equivalence"]
+fn wo_1_6_repeated_proofs_verify_equivalently() {
     let pw = fixtures::valid_over_18().pipeline_witness();
     assert!(pw.check_consistency().all_ok());
 
     let first = prove_pipeline(&pw).expect("first proof generates");
     let second = prove_pipeline(&pw).expect("second proof generates");
 
-    let first_bytes = bincode::serialize(&first).expect("first proof serializes");
-    let second_bytes = bincode::serialize(&second).expect("second proof serializes");
-    assert_eq!(first_bytes, second_bytes, "cached proof bytes must match");
+    assert_equivalent_randomized_proofs(&first, &second, "repeated prove");
 }
 
 #[test]
-#[ignore = "WO-1.2 diagnostic: proves serial task path and default fan-out path to assert byte identity"]
-fn wo_1_2_trace_fanout_proof_bytes_identical() {
+#[ignore = "WO-1.2 diagnostic: proves serial and fan-out paths to assert randomized proof equivalence"]
+fn wo_1_2_trace_fanout_proofs_verify_equivalently() {
     let pw = fixtures::valid_over_18().pipeline_witness();
     assert!(pw.check_consistency().all_ok());
 
@@ -97,12 +136,7 @@ fn wo_1_2_trace_fanout_proof_bytes_identical() {
 
     let parallel = prove_pipeline(&pw).expect("default fan-out proof generates");
 
-    let serial_bytes = bincode::serialize(&serial).expect("serial proof serializes");
-    let parallel_bytes = bincode::serialize(&parallel).expect("parallel proof serializes");
-    assert_eq!(
-        serial_bytes, parallel_bytes,
-        "trace fan-out must preserve proof bytes"
-    );
+    assert_equivalent_randomized_proofs(&serial, &parallel, "trace fan-out");
 }
 
 /// The honest end-to-end witness: a signed credential whose holder is over 18 and

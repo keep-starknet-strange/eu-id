@@ -179,7 +179,7 @@ pub fn xor_8_multiplicities(witness: &Sha256Witness) -> Vec<u32> {
 /// lookups on carry values `c ∈ [0, k)` increment the row indexed by `c`.
 ///
 /// Firing rule (mirrors `crate::constraints::emit_mod_2_32_add_linear` and
-/// the terminal `Range_16` wiring in `Sha256Eval::evaluate`):
+/// the terminal `Range_8` wiring in `Sha256Eval::evaluate`):
 ///   - One `Range_4` increment per schedule-recurrence carry-limb pair (2
 ///     limbs × 48 entries per block).
 ///   - One `Range_5` increment per `T1` carry-limb pair (2 limbs × 64
@@ -187,7 +187,7 @@ pub fn xor_8_multiplicities(witness: &Sha256Witness) -> Vec<u32> {
 ///   - One `Range_2` increment per `T2`/`e_new`/`a_new` carry-limb pair (2
 ///     limbs × 3 families × 64 rounds per block) plus per finalization
 ///     carry-limb pair (2 limbs × 8 words per block).
-///   - One `Range_16` increment per terminal `h_out` limb (2 limbs × 8
+///   - One `Range_8` increment per terminal `h_out` byte (4 bytes × 8
 ///     words per block).
 pub fn range_k_multiplicities(witness: &Sha256Witness, kind: RangeKind) -> Vec<u32> {
     let log_size = range_log_size(kind);
@@ -224,10 +224,9 @@ pub fn range_k_multiplicities(witness: &Sha256Witness, kind: RangeKind) -> Vec<u
                     bump(&mut mults, c.hi);
                 }
             }
-            RangeKind::Range16 => {
-                for j in 0..N_STATE_WORDS {
-                    bump(&mut mults, block.h_out[j].lo);
-                    bump(&mut mults, block.h_out[j].hi);
+            RangeKind::Range8 => {
+                for byte in crate::trace::h_out_digest_bytes(&block.h_out) {
+                    bump(&mut mults, byte);
                 }
             }
         }
@@ -327,11 +326,11 @@ mod tests {
             .sum::<u32>();
         assert_eq!(total, 2 * (3 * n_rounds + n_words));
 
-        // Range_16: 2 limbs × 8 terminal h_out words.
-        let total = range_k_multiplicities(&w, RangeKind::Range16)
+        // Range_8: 4 bytes × 8 terminal h_out words.
+        let total = range_k_multiplicities(&w, RangeKind::Range8)
             .iter()
             .sum::<u32>();
-        assert_eq!(total, 2 * n_words);
+        assert_eq!(total, 4 * n_words);
     }
 
     /// Honest `Range_k` carry counts never fall outside `[0, k)` — the
@@ -348,7 +347,7 @@ mod tests {
             RangeKind::Range2,
             RangeKind::Range4,
             RangeKind::Range5,
-            RangeKind::Range16,
+            RangeKind::Range8,
         ] {
             let mults = range_k_multiplicities(&w, kind);
             let k = kind.bound() as usize;
